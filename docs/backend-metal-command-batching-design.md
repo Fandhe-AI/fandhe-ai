@@ -965,6 +965,7 @@ Linux 実行環境（本エージェント実行環境）には Apple Silicon �
 | (a) encode-only 化＋バッチ readback 遅延 | 複数 `gemm_resident_lhs` の `download` を 1 回にまとめる | L1+L2 双方 | 部分的（N 回→1 回の synchronize） | 不要 | `backward_impl` が upstream を都度消費する現構造（`backward.rs:180`）と衝突するため中〜大規模な再構成が必要。単独では非現実的（`Gradients` を host 専用のまま維持する限り、次ノードの VJP が即座に値を要求するため「遅延」できる余地がない） | 変更なし | 実現には (b) との併用または backward_impl のアーキテクチャ変更が前提。単独案としては非推奨 |
 | (b) 常駐チェーン化（`linear_backward_device` 相当） | `linear_forward_device`（`docs/perf/linear-forward-device-gpu.md`）と同型の encode-only・`DeviceBuffer` 入出力版 backward 入口を新設し、層間の upstream を device 常駐のまま渡す | L2→L1 のみ（ReLU マスクを device 側で行う新規カーネルが前提） | 大（L2/L1 間の 1 回の同期境界を除去） | 要（device 側 ReLU backward マスクカーネル） | `tensor-core::BackendOps` へのメソッド追加・`grad.rs`／`ResidentResolver` トレイトの拡張・CUDA 側は対象外のまま `Unsupported` フォールバック | REQ-2 統一複合判定（`dispatch_strided_bias_act_prepared` 系と同じく bit 一致ではない） | 新規カーネル実装が必要なため #1563 の範囲を超える可能性が高く、新規イシュー起票を検討 |
 | (c) #1219 の opt-in スキップ（L1 の d_input を丸ごと省略） | `requires_grad` 前方伝播（設計確定・未実装）で L1 の `input`（学習対象外の葉 `x`）への d_input 伝播自体をスキップする | L1 のみ | L1 分の 1 回の同期を完全排除（GEMM・転置・H2D も含めゼロに） | 不要 | `docs/autodiff-nograd-leaf-dinput-skip-decision.md` の実装イシュー起票（未着手）に依存 | 変更なし（既定経路は無変更） | 独立した親イシュー系列（#1219 起票草案）に依存。本イシューでは実装せず「最有力候補」として明記するに留める |
+| (a′) 層内合流（encode 順序入れ替え。#1563 で採用） | 各層内の encode-only な d_weight（`fill_resident_weight_grad`）を、同期点を持つ d_input（`gemm_resident_lhs`）より**前**へ移す。両者は独立計算のため bit 同一 | L1+L2 双方の d_weight 分の open バッチ肩代わりを解消 | 中（bias `upload_into` の防御的 synchronize が no-op 化。command_buffer/wait が 9/9→8/8） | 不要 | `crates/autodiff/src/grad.rs` の `Op::LinearResident` 分岐内の呼び出し順のみ（新規 API 不要・ゼロカーネル） | 変更なし（bit 同一が構造的に成立） | d_input 自身の同期境界 2 件（L1・L2 各層の `gemm_resident_lhs` 内 `synchronize`）は未回収のまま残る（回収は部分的。(a)/(b)/(c) が対象とする範囲とは独立） |
 | (d) 現状維持 | 何もしない | — | 0 | — | — | — | 比較のベースライン |
 
 **所見**（採否そのものはユーザー承認・別 issue 判断に委ねる。本節は
@@ -996,6 +997,115 @@ env_info（内部ホスト名は含めない）: 未実測
 ```
 
 実測は `docs/perf/logs/metal-dinput-sync-1562/`（生ログ・env_info）へ
+記録する。
+
+### 7.4 #1563: 層内合流の実装・回収しない結論の確定
+
+親イシュー #1557 → #1561 → #1562（測定・完了）の最後の子イシュー。
+§7.3.3 の比較表 (a)〜(d) に加え、比較表になかった**ゼロカーネル・
+bit 同一・小変更の回収余地**（(a′) 層内合流）を実装し、d_input 自身の
+同期境界の回収可否について結論を確定する。
+
+#### 7.4.1 採用した変更（案 (a′)）
+
+`crates/autodiff/src/grad.rs` の `Op::LinearResident` 分岐で、VJP の
+呼び出し順を「d_input（`gemm_resident_lhs`。同期点を持つ）→ d_weight
+（`fill_resident_weight_grad`。encode-only）」から「**d_weight（encode-
+only）→ d_input（同期点を持つ）**」へ入れ替えた。
+
+- **bit 同一の根拠**: d_input（`W @ g^T`）と d_weight（`x^T @ g`）は
+  互いに独立な計算であり、どちらを先に GPU コマンドバッファへ encode
+  しても出力は変わらない（構造的に保証される順序無依存性。`contributions`
+  の並び・`!filled_resident` フォールバック・bias 分岐の順序は不変の
+  まま維持した）。
+- **効果**: 各層の d_weight の GPU コマンドが、同じ層の d_input の
+  同期点へ「合流」するようになる。従来は各層の d_weight が同期しない
+  まま open バッチとして残り、L1（最終層）の d_weight だけが
+  `DeviceParamStore::step` の bias `upload_into` の防御的 `synchronize()`
+  に肩代わりされて完了していた（§7.2「#1555 追記」・冒頭 doc comment）。
+  変更後は backward 終了時点で open バッチが残らないため、この
+  `upload_into` の `synchronize()` は `committed` が空で
+  `waitUntilCompleted` を 1 回も呼ばない no-op になる
+  （`crates/backend-metal/src/context.rs::synchronize_observed` の
+  契約）。
+- **カウンタ事前登録 delta**: steady-state 1 step で encode ±0・
+  command_buffer −1・wait −1（#1555 時点の 11/9/9 → 11/8/8）。backward
+  窓限定テスト（`mnist_scale_train_reuse_metal_backward_dinput_phase`）
+  は #1562 時点の仮説 5/4/3 → 5/3/3 へ更新（コード変更に伴う机上トレース
+  の詳細は `crates/facade/tests/mnist_scale_train_reuse_bench.rs` の
+  同テスト doc comment 参照）。
+
+#### 7.4.2 d_input 自身の同期境界は回収しない（結論）
+
+§7.3.3 の (a)〜(c) の判定をそのまま採用し、d_input 自身の 2 件の同期
+境界（L1・L2 各層の `gemm_resident_lhs` 内 `synchronize`）は本イシュー
+では回収しない:
+
+- **(a) encode-only 化＋バッチ readback 遅延**: `Tape::backward_impl`
+  が host `Tensor<f32>` 専用の `Vec<Option<Tensor<f32>>>` で勾配を保持
+  し、逆順走査の各ステップで次ノードの VJP が upstream の値を即座に
+  要求する構造（`crates/autodiff/src/backward.rs`）のため、単独では
+  非現実的（§7.3.3 表のまま）。
+- **(b) 常駐チェーン化（`linear_backward_device` 相当）**: L2→L1 間の
+  ReLU epilogue マスクを device 側で計算する新規カーネルが前提となり、
+  #1563 の枠（`grad.rs` の呼び出し順入れ替えのみ）を超える。新規カーネル
+  実装を伴う変更単位のため、実装するなら独立イシューとして切り出す
+  べきと判断した（本イシューでは実装しない）。
+- **(c) #1219 の opt-in スキップ（L1 の d_input を丸ごと省略）**:
+  §7.3.1 で確認したとおり L1 の d_input（モデル入力 `x` への勾配）は
+  現状どこからも読まれない 100% 無駄な計算であり、最有力の回収候補
+  である。ただし `docs/autodiff-nograd-leaf-dinput-skip-decision.md`
+  §9 の実装イシュー起票は「ユーザー承認後に限る」とされており、
+  `.claude/rules/out-of-scope-tracking.md` の規約に従い本イシュー内では
+  起票しない（§7.4.4「引き継ぎ」参照）。
+
+#### 7.4.3 #1564・#1566・#1582・#1577 との関係（同期の二重主張をしない）
+
+- **#1564**（bias 勾配の `upload_into` 防御的同期）: 本イシュー (a′) の
+  適用により、steady state では `upload_into` の `synchronize()` が
+  `committed` 空の no-op になる。これは #1564 が対象とする「待ち」その
+  ものであり、#1564 側の設計文書追補（§10.2-5「#1563 が同期を削ると
+  前提が変わりうる」）で既に予告されていた事象が実際に発生する。#1564
+  の実装判断（実装するか・どう変えるか）は #1564 側の担当範囲のまま
+  とし、本イシューでは直接コメントしない（out-of-scope-tracking.md に
+  よりユーザー承認事項）。
+- **#1566**（案 A′: bias 勾配 resident 化）: #1566 の価値（host
+  書き込み自体の排除）は本変更と独立に成立する。ただし #1566 が
+  #1555 時点のカウンタ（11/9/9）を基準に見積もっていた予測は、本
+  イシューにより基準が 11/8/8 へ変わるため再導出が必要になる。#1566
+  と本ブランチが並行実装される場合は、マージ前に rebase してカウンタ
+  期待値を再導出する必要がある。
+- **#1582**（MseLoss backward の encode-only 化）・**#1577**（ReLU
+  マスクの stride 対応）: いずれも既存 issue で追跡済みの別領域の同期
+  境界であり、本イシューはそれらの待ちの解消を主張しない
+  （`crates/backend-metal/src/mse.rs`・`elementwise_mul_mask` は本
+  イシューで変更していない）。
+
+#### 7.4.4 引き継ぎ
+
+- (c) #1219 の実装イシュー起票（`docs/autodiff-nograd-leaf-dinput-skip-
+  decision.md` §9 の草案）はユーザー承認後に行う
+- (b) `linear_backward_device`（device 側 ReLU backward マスク＋常駐
+  チェーン）の新規イシュー化はユーザー承認後に検討する
+
+#### 7.4.5 実測記入欄（Mac セッション）
+
+```
+bit 同一（metal_reuse_step_grad_bit_dump. main vs branch）: 未実測
+#[ignore] 群非後退: 未実測
+カウンタ（mnist_scale_train_reuse_metal_batch_counters）:
+  before（#1555 時点。再現確認）: encode= command_buffer= wait=
+  after（#1563）: encode= command_buffer= wait=
+カウンタ（mnist_scale_train_reuse_metal_backward_dinput_phase。record-only）:
+  before（#1562 時点。再現確認）: encode= command_buffer= wait=
+  after（#1563）: encode= command_buffer= wait=
+A/B（scripts/bench/framework-compare/run_ab_dinput_sync_metal.sh。5 round・record_only）:
+  size=64 reuse step_total 中央値比 after/before= checksum一致=
+  fresh（対照・非判定）: 中央値比=
+env_info（内部ホスト名は含めない）: 未実測
+```
+
+実測は `docs/perf/logs/metal-dinput-sync-1563/`（生ログ・env_info）へ
 記録する。
 
 ## 8. 実装記録（#1099。§4.2・§4.4・§4.5・§3.4・§3.5 の追記）
