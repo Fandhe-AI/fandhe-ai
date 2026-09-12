@@ -92,8 +92,25 @@ pub(crate) fn vjp(
         Op::Add(a, b) => {
             let a_shape = &nodes[a.0].shape;
             let b_shape = &nodes[b.0].shape;
-            let da = reduce_to_shape(upstream, a_shape);
-            let db = reduce_to_shape(upstream, b_shape);
+            // イシュー #1566・PR #1659→#1665→#1666 取り込み後の追加
+            // ユーザー承認（2026-09-12）: `Op::Add` の broadcast 縮約
+            // のうち bias パターン（`upstream: [m, n]` → `[n]`／
+            // `[1, n]` の行方向縮約。`reduce_bias_grad` の shape 構造
+            // 判定と同一条件）に限り `reduce_bias_grad`（f64 相当の
+            // アキュムレータ。`Op::LinearAct`／`Op::LinearResident` の
+            // bias フォールバックと共通）へ委譲する。`LinearVars::
+            // forward`（`nn/linear.rs`。`matmul → add` の非融合合成。
+            // `nn::Linear` の既定 forward 経路）の bias 勾配はこの
+            // `Op::Add` の VJP を経由するため、これまで `LinearAct`／
+            // `LinearResident`（同一の bias 縮約が f64 相当）と
+            // 数値方式が食い違っていた（`[1e8, 1.0, -1e8]` で結果が
+            // 変わる）。条件を満たさない broadcast 形状（bias パターン
+            // 以外の一般的な `Op::Add` 縮約）は `reduce_bias_grad` が
+            // 内部で `reduce_to_shape`（`f32` 逐次和・任意 rank・任意軸
+            // 対応）へそのまま委譲するため挙動を変えない（`reduce_bias_
+            // grad` doc 参照）。
+            let da = reduce_bias_grad(upstream, a_shape);
+            let db = reduce_bias_grad(upstream, b_shape);
             vec![(a, da), (b, db)]
         }
         Op::Mul(a, b) => {
@@ -659,6 +676,23 @@ fn reduce_to_shape(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
 /// （fresh〈`LinearAct`〉と reuse〈`LinearResident` フォールバック〉が
 /// 同じ形状パターンで異なる数値を返さないようにする）。
 ///
+/// **`Op::Add` への横展開（2026-09-12 ユーザー承認・PR #1659→#1665→
+/// #1666 取り込み後の追加是正）**: `nn::Linear` の既定 forward 経路
+/// （`LinearVars::forward`。`matmul → add` の非融合合成。`nn/linear.rs`
+/// doc「bias 加算は `Var::add` の broadcast に委ねる」参照）は `Op::Add`
+/// の VJP を経由するため、`Op::Add(a, b)` 側でも本関数へ委譲する
+/// （`da`／`db` 双方。`Op::Add` は可換なので bias がどちらの引数に来ても
+/// 対称に扱える）。これにより、同じ `Linear` 層が `LinearVars::forward`
+/// （fresh・非融合）と `forward_with_activation`（`Op::LinearAct`。
+/// epilogue 融合）・`DeviceParamStore::linear_forward_with_activation`
+/// （`Op::LinearResident`。reuse）のいずれで forward されても bias
+/// 勾配の数値方式が揃う。`Op::Add` は bias 以外の一般的な broadcast
+/// （bias パターンに一致しない任意 shape の加算）にも使われる汎用 Op
+/// のため、下記の shape 構造判定を満たさない呼び出しは本関数の内部で
+/// 既存の `reduce_to_shape` へそのまま委譲され挙動を変えない（bias
+/// パターンに限定した横展開であり、汎用 `Op::Add`・`reduce_to_shape`
+/// 本体自体は不変）。
+///
 /// 適用条件は `g` が rank-2 `[m, n]` かつ `target_shape` が「軸 0
 /// （行／batch 軸）方向の縮約」を表す形状（末尾次元が `n` と一致し、
 /// それより前の全次元が `1`。典型例: `[n]`・`[1, n]`。`nn::Linear` の
@@ -675,9 +709,12 @@ fn reduce_to_shape(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
 /// しまうため、旧実装は shape 構造を見ずに誤って f64 経路へ分岐して
 /// いた）。`nn::Linear`〈`from_parameters` が bias を `[out_features]`
 /// 厳密一致にしか構築しない〉経由では軸 1 縮約の broadcast bias は
-/// 到達せず、`pub(crate) fn linear_act` を直接呼ぶ経路限定（`var.rs`
-/// doc「`linear_act` は `[n]` と厳密一致しない broadcast 可能な bias
-/// も受理する」参照）。適用条件を満たさない場合は既存の
+/// 到達しない（`pub(crate) fn linear_act` を直接呼ぶ経路・`Op::Add`
+/// 経由で `Var::add` に非 bias 形状の broadcast を直接渡す経路限定。
+/// `var.rs` doc「`linear_act` は `[n]` と厳密一致しない broadcast
+/// 可能な bias も受理する」参照）。`Op::Add` への横展開後もこの shape
+/// 構造判定自体は不変であり、`[2, 1]` のような軸 1 縮約は `Op::Add`
+/// 経由でも同様に誤適用を回避する。適用条件を満たさない場合は既存の
 /// `reduce_to_shape`（`f32` 逐次和・任意 rank・任意軸対応）のまま
 /// 維持し挙動を変えない（安全側）。
 fn reduce_bias_grad(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {

@@ -1754,3 +1754,58 @@ subnormal（非正規化数）域まで `ax` が落ち込む極端なケース�
 regression には当たらない）。実機（Apple Silicon）での MSL カーネル
 本体の実行確認は Mac セッションへ申し送る（`gemm_fp32_strict_into_
 parity.rs` の NT/TN テスト・NN フォールバックテストの非後退確認を含む）。
+
+### 10.12 #1666 取り込み後の codex-review 追加指摘の是正（2026-09-12・`Op::Add` への横展開）
+
+§10.9 は `Op::LinearResident` のフォールバック・`Op::LinearAct` の bias
+縮約を `reduce_bias_grad`（f64 相当）へ統一したが、`nn::Linear` の
+**既定 forward 経路**（`LinearVars::forward`。`matmul → add` の非融合
+合成。`nn/linear.rs` doc「bias 加算は `Var::add` の broadcast に委ねる」
+参照）は `Op::Add` の VJP を経由するため対象外のままだった。この結果、
+同一の `Linear` 層でも forward 方式（`LinearVars::forward` か
+`forward_with_activation`〈`Op::LinearAct`〉か、resident 経由か）に
+よって bias 勾配の数値方式（`f32` 逐次和 vs `f64` 相当）が食い違う
+不整合が残っており、`[1e8, 1.0, -1e8]` のような相殺入力で結果が変わる
+ことが codex-review から追加指摘された。契約自体（f64 相当への統一・
+REQ-2 統一複合判定）は不変で、適用範囲を横展開する。
+
+**2026-09-12 ユーザー承認**: `Op::Add` VJP の broadcast 縮約のうち
+**bias パターン**（`upstream: [m, n]` → `[n]`／`[1, n]` の行方向縮約。
+既存 `reduce_bias_grad` の shape 構造判定と同一条件）に限り、共通の
+`f64` ヘルパ（`reduce_bias_grad`）へ委譲する。それ以外の `Op::Add`
+（bias パターンに一致しない一般的な broadcast）・汎用 `reduce_to_shape`
+本体は不変。
+
+**実装内容**: `crates/autodiff/src/grad.rs` の `Op::Add(a, b)` 分岐で、
+`da`／`db` の計算を `reduce_to_shape(upstream, ...)` から
+`reduce_bias_grad(upstream, ...)` へ変更した（`Op::Add` は可換なので
+`a`／`b` どちらが bias でも対称に扱える。bias パターンに一致しない
+呼び出しは `reduce_bias_grad` の内部で既存の `reduce_to_shape` へ
+そのまま委譲されるため挙動を変えない）。
+
+**新規回帰テスト**（`crates/autodiff/src/nn/linear.rs` の `LinearVars`
+テストモジュール。ホスト同士の比較のため bit 完全一致で書ける）:
+
+- `linear_vars_forward_bias_grad_preserves_cancelling_contribution`:
+  `x` を全 `0` に固定して `pred = 0 + bias`（`Op::Add` の broadcast の
+  みで決まる）とし、重み付き和 `L = sum(pred ⊙ s)`（`s = [1e8, 1.0,
+  -1e8]`）の `dL/dbias` が `f32` 逐次和なら失われる寄与（真値 `1.0`）を
+  保持することを確認する（`LinearVars::forward` 経由の直接的な相殺
+  入力回帰テスト）。
+- `add_path_bias_grad_matches_linear_act_bias_grad_bit_exact`:
+  同一の `x`／`weight`／`bias`／`target` に対し `LinearVars::forward`
+  （`Op::Add` 経由）と `forward_with_activation`（`Op::LinearAct` 経由。
+  `Activation::None`）の bias 勾配が bit 完全一致することを確認する
+  （fresh〈非融合〉と fused の数値方式統一。resident 側の一致は
+  `crates/facade/tests/device_param_store_grad_readout.rs::param_grads_
+  to_host_matches_host_only_path_two_layer` が既存でカバーする——この
+  横展開により同テストの bias slot も理論上は bit 完全一致に戻る
+  はずだが、判定を `assert_parity` から `assert_eq!` へ戻す変更は
+  本イシューのスコープ外として見送り、既存の REQ-2 判定のまま維持する
+  ——安全側かつユーザー指示に含まれないコード変更を避けるため）。
+
+いずれも Linux 実行で green（`cargo test -p fandhe-ai-autodiff --lib
+nn::linear::`）。`.claude/rules/coding-rust.md`・`docs/perf/train-
+resident-grad-device-update.md` の bias 追記も本節の内容へ整合させた。
+実機（Apple Silicon・CUDA）での forward/backward 経路混在時の非後退
+確認は Mac／GB10 実機セッションへ申し送る。

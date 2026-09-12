@@ -398,4 +398,121 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AutodiffError::Shape(_)));
     }
+
+    // イシュー #1566・PR #1659→#1665→#1666 取り込み後の追加ユーザー
+    // 承認（2026-09-12）: `LinearVars::forward`（`matmul → add` の
+    // 非融合合成。本テストモジュールの対象）の bias 勾配も
+    // `crate::grad::reduce_bias_grad`（f64 相当）へ統一されたことの
+    // 回帰テスト（`crate::grad::vjp` の `Op::Add` 分岐）。
+
+    /// `[1e8, 1.0, -1e8]` のような相殺入力で、`f32` 逐次和（旧
+    /// `reduce_to_shape`）なら失われる寄与（真値 `1.0`）が
+    /// `LinearVars::forward` 経由の bias 勾配でも保持されることを
+    /// 確認する（`eval::reduce_bias_grad_rows_tests::preserves_
+    /// cancelling_contribution_via_f64_accumulator` の
+    /// `LinearVars::forward` 版）。`weight` は `x` を素通りさせない
+    /// 値（`x` 自体を全 0 にして matmul の寄与をゼロにし、bias の
+    /// broadcast 加算だけで `pred` を決める）ため、`d_pred`（本テストの
+    /// 重み付き和の重み `s` そのもの）が bias の縮約対象 `g` に一致する。
+    #[test]
+    fn linear_vars_forward_bias_grad_preserves_cancelling_contribution() {
+        let tape = Tape::new();
+        // x: [3, 1] 全 0（matmul 結果を 0 に固定し、pred = 0 + bias の
+        // broadcast のみで決まるようにする）。weight: [1, 1] は任意
+        // （x が 0 のため forward 結果に影響しない）。
+        let x = tape.var(&Tensor::new(vec![0.0f32; 3], &[3, 1]).unwrap());
+        let weight = tape.var(&Tensor::new(vec![5.0f32], &[1, 1]).unwrap());
+        let bias = tape.var(&Tensor::new(vec![0.0f32], &[1]).unwrap());
+        let linear_vars = LinearVars {
+            weight,
+            bias: Some(bias),
+        };
+
+        let pred = linear_vars.forward(&x).unwrap();
+        // L = sum(pred ⊙ s)（`s = [1e8, 1.0, -1e8]`）とすると
+        // dL/dpred = s（`grad.rs` 冒頭 doc の「固定の重みテンソルによる
+        // スカラー射影」と同じ手法）。bias の VJP（`Op::Add`）は
+        // `reduce_bias_grad(s, [1])` = `s` の列ごとの和（列は 1 本の
+        // ため単純合計）となり、真値は `1e8 + 1.0 + (-1e8) = 1.0`。
+        let s = tape.var(&Tensor::new(vec![1.0e8f32, 1.0, -1.0e8], &[3, 1]).unwrap());
+        let loss = pred.mul(&s).unwrap().sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let bias_grad = grads
+            .get(&bias)
+            .unwrap()
+            .expect("bias は backward で到達するはず");
+
+        assert_eq!(bias_grad.shape(), &[1]);
+        assert_eq!(
+            bias_grad.get(&[0]).unwrap(),
+            1.0f32,
+            "LinearVars::forward（Op::Add 経由）の bias 勾配は f64 相当の \
+             アキュムレータ（reduce_bias_grad）を使うため、f32 逐次和なら \
+             失われる寄与（1e8 + 1.0 + (-1e8) = 1.0）を保持するはず"
+        );
+    }
+
+    /// `LinearVars::forward`（`Op::Add` 経由）と `LinearVars::
+    /// forward_with_activation`（`Op::LinearAct` 経由。epilogue 融合）の
+    /// bias 勾配が bit 完全一致することを確認する（fresh〈非融合〉／
+    /// fused の数値方式統一。resident〈`Op::LinearResident`〉側は
+    /// `crates/facade/tests/device_param_store_grad_readout.rs::
+    /// param_grads_to_host_matches_host_only_path_two_layer` が
+    /// カバーする——host 側はいずれも同一の `reduce_bias_grad` を
+    /// 経由するため、入力が同一なら bit 完全一致する）。
+    #[test]
+    fn add_path_bias_grad_matches_linear_act_bias_grad_bit_exact() {
+        let x_data = Tensor::new(vec![1.0, 2.0, -3.0, 4.0, 0.5, -0.5], &[3, 2]).unwrap();
+        let w_data = Tensor::new(vec![1.0, 0.5, -0.5, 1.0], &[2, 2]).unwrap();
+        let bias_data = Tensor::new(vec![0.1, -0.2], &[2]).unwrap();
+        let target_data = Tensor::new(vec![0.0, 1.0, -1.0, 0.5, 0.2, -0.3], &[3, 2]).unwrap();
+
+        // `Op::Add` 経由（`LinearVars::forward` と同型の非融合合成）。
+        let add_tape = Tape::new();
+        let x1 = add_tape.var(&x_data);
+        let w1 = add_tape.var(&w_data);
+        let b1 = add_tape.var(&bias_data);
+        let t1 = add_tape.var(&target_data);
+        let linear_vars1 = LinearVars {
+            weight: w1,
+            bias: Some(b1),
+        };
+        let pred1 = linear_vars1.forward(&x1).unwrap();
+        let loss1 = pred1.mse_loss(&t1).unwrap();
+        let grads1 = add_tape.backward(&loss1).unwrap();
+        let bias_grad_add = grads1
+            .get(&b1)
+            .unwrap()
+            .expect("bias は backward で到達するはず")
+            .clone();
+
+        // `Op::LinearAct` 経由（`forward_with_activation`。epilogue 融合。
+        // `Activation::None` のため数式上は `Op::Add` 経由と同一）。
+        let act_tape = Tape::new();
+        let x2 = act_tape.var(&x_data);
+        let w2 = act_tape.var(&w_data);
+        let b2 = act_tape.var(&bias_data);
+        let t2 = act_tape.var(&target_data);
+        let linear_vars2 = LinearVars {
+            weight: w2,
+            bias: Some(b2),
+        };
+        let pred2 = linear_vars2
+            .forward_with_activation(&x2, Activation::None)
+            .unwrap();
+        let loss2 = pred2.mse_loss(&t2).unwrap();
+        let grads2 = act_tape.backward(&loss2).unwrap();
+        let bias_grad_act = grads2
+            .get(&b2)
+            .unwrap()
+            .expect("bias は backward で到達するはず")
+            .clone();
+
+        assert_eq!(
+            bias_grad_add.contiguous().as_slice().unwrap(),
+            bias_grad_act.contiguous().as_slice().unwrap(),
+            "Op::Add 経由（LinearVars::forward 相当）と Op::LinearAct 経由の bias 勾配は \
+             いずれもホスト reduce_bias_grad を経由するため bit 完全一致するはず"
+        );
+    }
 }

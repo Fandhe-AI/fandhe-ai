@@ -380,7 +380,17 @@ resident 非対応バックエンド（CPU／CUDA。常時該当）のフォー�
 食い違う不整合が残っていたため、`crates/autodiff/src/grad.rs` のフォールバック
 （`Op::LinearResident`）・`Op::LinearAct` の bias 縮約も同一の `f64` ヘルパ
 （`grad::reduce_bias_grad`。`eval::reduce_bias_grad_rows` への委譲）へ統一した
-（汎用 `reduce_to_shape`・`Op::Add` 等 bias 以外の呼び出しは不変）。
+（汎用 `reduce_to_shape` 本体は不変）。**さらに追補（2026-09-12 ユーザー承認・
+PR #1659→#1665→#1666 取り込み後の追加是正）**: `nn::Linear` の既定 forward 経路
+（`LinearVars::forward`。`matmul → add` の非融合合成）は `Op::Add` の VJP を
+経由するため、`LinearAct`／`LinearResident` フォールバックと同じ bias パターン
+（`[m, n]` → `[n]`／`[1, n]` の行方向縮約。既存 `reduce_bias_grad` の shape
+構造判定と同一条件）に限り `Op::Add` の VJP（`da`／`db` 双方）も
+`reduce_bias_grad` へ委譲するよう統一した。これにより `LinearVars::forward`
+（fresh・非融合）・`Op::LinearAct`（epilogue 融合）・`Op::LinearResident`
+（reuse）のいずれで forward しても同一 `Linear` 層の bias 勾配の数値方式が
+揃う。`Op::Add` の bias パターン以外の broadcast・`reduce_to_shape` 自体は
+不変（`crates/autodiff/src/grad.rs::reduce_bias_grad` doc 参照）。
 
 **bias 部分の恒久的な同期削減効果**: `docs/backend-metal-command-batching-design.md`
 §4.2 と本 §5.5 が記録した「bias 分の `upload_into` が書き込み前に 1 回だけ
