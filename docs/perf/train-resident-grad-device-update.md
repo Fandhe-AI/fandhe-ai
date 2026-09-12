@@ -231,8 +231,9 @@ bias `upload_into` の synchronize へ移動）。これは **同期点の移動
 - ~~CUDA 実機での `gemm_fp32_strict_into`／`upload_into` 実装・実測（#1212 から継続・
   既定 `Unsupported`・フォールバック）~~ → #1559 で実装完了（§6 参照）。実機実測は #1560 へ
   引き継ぎ
-- bias 勾配自体のデバイス常駐化（デバイス側列縮約カーネル必要。現状は bias は常にホスト経由
-  で `upload_into`）
+- bias 勾配自体のデバイス常駐化は Metal で #1566 により実装済み（下記 §9）。CUDA は
+  引き続き既定 `Unsupported`（`gemm_fp32_strict_into_with_bias_reduce_tracked` の
+  既定実装が weight のみへ委譲し bias は無視する）のままスコープ外
 - `d_input` GEMM の同期境界解消（従来どおり `gemm_resident_lhs()` → `download` 経路。本イシュー〈#1555〉のスコープ外。**イシュー #1563 で更新**: 層内合流〈encode-only の d_weight を d_input の同期点より前へ移す〉のみ実施し、d_input 自身の同期境界 2 件は回収しないと結論した。L1 の d_input を丸ごと省略する #1219 の opt-in スキップ、または L2→L1 間を常駐チェーン化する新規カーネル案は、いずれもユーザー承認後の別イシューへ引き継ぐ〈`docs/backend-metal-command-batching-design.md` §7.4〉）
 
 ## 6. #1559 CUDA 実装
@@ -325,3 +326,117 @@ design.md` §7.4 を正とし本節では重複記載しない）の前後比較
 実測は `docs/perf/logs/metal-dinput-sync-1563/`（生ログ・env_info）へ
 記録し、実測完了後に本節を実測値で更新すること（事前登録規則の事後
 緩和は行わない）。
+
+**#1566（§9）取り込み時の追記**: 上表のカウンタ期待値（11/9/9 →
+11/8/8・5/4/3 → 5/3/3）は #1563 単独の期待値。§9 の bias 勾配デバイス
+常駐化（#1566）を組み合わせた結果、L1・L2 とも bias 縮約が weight と
+同一の encode-only ディスパッチへ折り込まれ、従来 bias 用に発生して
+いた `MemoryOps::upload_into`（計 2 回）呼び出し自体がなくなるが、
+これらの呼び出しは #1563 適用後の時点で既に完全な no-op（`committed`
+が空で cb/wait への寄与ゼロ）だったため、**#1566 適用後もカウンタは
+11/8/8（および 5/3/3）から変化しない**という机上結論になった（根拠は
+`crates/facade/tests/mnist_scale_train_reuse_bench.rs` 冒頭 doc comment
+「#1566 追記（是正版）」・`docs/backend-metal-command-batching-
+design.md` §10.7〜§10.9 を参照）。round1（#1566 実装時点）の同ファイル
+doc comment は「L1 は NN・分類不能」という根拠のない推測を含んでいた
+が、本追記の導出時に誤りと判明し是正済み（実際は L1・L2 とも同一の
+NT パターンで分類される）。上表・アサーション値ともに実機実測は
+未実施のまま Mac 実機セッションへ引き継ぐ。
+
+## 9. bias 勾配のデバイス常駐化（イシュー #1566）
+
+#1565（`docs/backend-metal-command-batching-design.md` §10）が比較・採用した
+**案 A′**（既存 `gemm_fp32_strict_into` と同一のアップロード・failure-token 登録から
+d_weight・d_bias を同時に encode-only で書き込む拡張）を実装した。
+
+- `tensor-core::BackendOps::gemm_fp32_strict_into_with_bias_reduce_tracked`（非破壊
+  拡張。既定は bias を無視して既存 `_tracked` へ委譲。CPU・CUDA は無変更）。
+- `backend-metal::gemm::MetalGemm::encode_weight_and_bias_grad_with_offsets`（NT/TN
+  encode-only。d_weight と**同一 `ctx.encode` 呼び出し**で bias 縮約カーネル
+  `gemm_bias_grad_reduce_f32` を追加ディスパッチする。`encode_calls` は増えない）。
+- `backend-metal::ops::MetalBackendOps` の同トレイトメソッドオーバーライド（NN/TT・
+  分類不能形状はホスト経由〈`layout::reduce_bias_grad_rows_host` → `upload_into`〉で
+  常に成功する既存パターンを踏襲）。
+- `autodiff::tape::ResidentResolver::fill_resident_weight_grad` のシグネチャ拡張
+  （`bias: Option<ResidentBiasTarget>`・戻り値 `ResidentFillOutcome`）・
+  `device_store.rs`／`grad.rs` の結線。weight tying 時は bias 自身の slot について
+  独立に tie 判定・累積を行う（詳細は `docs/backend-metal-command-batching-design.md`
+  §10.7「実装中に発見した正当性の落とし穴」）。
+
+数値契約: 当初は `reduce_to_shape`（`f32` 逐次和）と bit 完全一致させる設計とし、
+`.claude/rules/coding-rust.md` の勾配長軸縮約 `f64` アキュムレータ方針との不整合を
+未解決のまま引き継いでいた（同上 §10.7）。この着手条件（数値方式の整合または
+ユーザー承認済み例外）は、PR #1659 の codex-review 指摘を受けた **2026-09-12
+ユーザー承認「選択肢 A: 規約どおり `f64` 相当へ統一する」により充足**した
+（同上 §10.8）。ホスト経路（`eval::reduce_bias_grad_rows`・`layout::
+reduce_bias_grad_rows_host`）は `f64` アキュムレータへ、GPU カーネル
+（`gemm_bias_grad_reduce_f32`。Metal は `double` 非対応）は Neumaier 改良版
+Kahan 補償和へ統一した。`m == 1`／`rows == 1` の直接コピー特殊扱いは不変。
+`reduce_to_shape` 自体（本イシューが触れない他の呼び出し箇所）の `f32` 逐次和は
+引き続き未整理のまま残る（同上 §10.8）。**追補（PR #1659 codex-review 追加
+指摘・同上 §10.9）**: `backend-metal` 側の統一だけでは `Op::LinearResident` が
+resident 非対応バックエンド（CPU／CUDA。常時該当）のフォールバック時に依然
+`reduce_to_shape`（`f32`）を使い、Metal resident 成功時（`f64` 相当）と数値方式が
+食い違う不整合が残っていたため、`crates/autodiff/src/grad.rs` のフォールバック
+（`Op::LinearResident`）・`Op::LinearAct` の bias 縮約も同一の `f64` ヘルパ
+（`grad::reduce_bias_grad`。`eval::reduce_bias_grad_rows` への委譲）へ統一した
+（汎用 `reduce_to_shape` 本体は不変）。**さらに追補（2026-09-12 ユーザー承認・
+PR #1659→#1665→#1666 取り込み後の追加是正）**: `nn::Linear` の既定 forward 経路
+（`LinearVars::forward`。`matmul → add` の非融合合成）は `Op::Add` の VJP を
+経由するため、`LinearAct`／`LinearResident` フォールバックと同じ bias パターン
+（`[m, n]` → `[n]`／`[1, n]` の行方向縮約。既存 `reduce_bias_grad` の shape
+構造判定と同一条件）に限り `Op::Add` の VJP（`da`／`db` 双方）も
+`reduce_bias_grad` へ委譲するよう統一した。これにより `LinearVars::forward`
+（fresh・非融合）・`Op::LinearAct`（epilogue 融合）・`Op::LinearResident`
+（reuse）のいずれで forward しても同一 `Linear` 層の bias 勾配の数値方式が
+揃う。`Op::Add` の bias パターン以外の broadcast・`reduce_to_shape` 自体は
+不変（`crates/autodiff/src/grad.rs::reduce_bias_grad` doc 参照）。
+
+**bias 部分の恒久的な同期削減効果**: `docs/backend-metal-command-batching-design.md`
+§4.2 と本 §5.5 が記録した「bias 分の `upload_into` が書き込み前に 1 回だけ
+`synchronize()` する」という残存同期点は、bias が NT/TN（d_weight と同じ判定）と
+なる層では完全に解消される——同一 `ctx.encode` 呼び出しへ折り込まれるため
+`upload_into` 自体を呼ばない。NN/TT・分類不能形状の層では従来どおり `upload_into`
+を要するため、モデル構成によっては残存同期点が残る（例: `Linear(1, n)` の
+1 層目は引き続き NN 扱い）。実測（実機カウンタ・A/B）は本 Linux セッションでは
+実施できないため未記入（`docs/backend-metal-command-batching-design.md` §10.7
+「Mac 実機セッションへの申し送り」参照）。
+
+**#1566 の A/B・checksum 比較の注意（f64 統一後。§10.8 追記に伴う補足）**:
+bias 勾配は before（main の `reduce_to_shape` f32 逐次和）と after（本イシューの
+f64 相当アキュムレータ）が bit 一致しない。これは事前登録規則の事後緩和ではなく、
+2026-09-12 のユーザー承認 A に伴う数値契約の明示的な変更である。このため
+Mac 実機セッションでの A/B・checksum 比較は、**bias 勾配については REQ-2
+統一複合判定**（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で行う。
+**weight 勾配・loss は従来どおり bit 同一契約**（`reduce_to_shape` 自体は
+不変・`gemm_fp32_strict_into` の weight 書き込みも不変のため）——ただし
+この契約は「同一パラメータに対する単発の backward」に限る。多 step の
+train reuse A/B では、ある step の bias 勾配が REQ-2 範囲内で before/after
+乖離すると、`step()`（SGD 更新）がその bias を使ってパラメータを更新する
+ため、**以降の step の forward/backward 全体（loss・weight 勾配・weight
+そのものを含む）へ乖離が伝播しうる**（`docs/backend-metal-command-batching-
+design.md` §10.9 の `metal_reuse_step_grad_bit_dump` 訂正・
+`crates/facade/tests/device_param_store_grad_readout.rs::param_grads_to_
+host_matches_host_only_path_two_layer` の Linux 回帰で確認）。このため
+train reuse A/B・`metal_reuse_step_grad_bit_dump` の Mac 実機比較は、bias を
+含む step 以降は **loss・weight 勾配・パラメータも含め REQ-2 統一複合判定**
+で行う（step 0 の bias 縮約自体のみが直接の変更対象であり、その後の伝播は
+間接的な帰結）。
+
+**追補（2026-09-12・最終形。判定契約の緩和を撤回）**: PR #1659 は当初、Metal
+bias 縮約カーネル（`gemm_bias_grad_reduce_f32`）が f32 のみの補償和で
+ホスト `f64` 逐次和と一致しない相殺列を、判定契約側（Tier A 理論上界／
+Tier B 条件付き REQ-2 判定。契約 PR #1666）で吸収しようとしたが、codex-review
+で収束せず撤回した。最終形はカーネル側を **IEEE 754 binary64 逐次加算の 64bit
+整数ソフトウェアエミュレーション**へ置き換え、ホスト参照実装
+（`eval::reduce_bias_grad_rows`）と **bit 完全一致**させる方式（`crates/
+backend-metal/src/soft_f64.rs` が逐語モデル）。bias 勾配も weight 勾配と同じ
+bit 一致契約となる。ただし bit 一致の対象は **変更後の Metal カーネル対
+変更後のホスト `f64` 参照実装**（現行実装同士の比較）に限る。上記本文の
+before（main の f32 逐次和）／after（f64 逐次和）の A/B・checksum 比較は、
+変更前後で数値方式自体が異なるため（例: `[1e8, 1, -1e8]` の和は before が
+`0`・after が `1`）Metal を binary64 エミュレーションへ置換しても一致せず、
+引き続き上記本文どおり **REQ-2 統一複合判定**（伝播を含む多 step 比較も
+同様）で行う。tolerance・REQ-2 の適用範囲は不変。経緯・検証方法は
+`docs/backend-metal-command-batching-design.md` §10.14 を参照。カーネル置換後
+の reuse `step_total` 再計測は未実施（並走ビルド中はベンチを行わない規約）。

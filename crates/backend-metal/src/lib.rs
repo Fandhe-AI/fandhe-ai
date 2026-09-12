@@ -438,6 +438,7 @@ pub mod mse;
 #[cfg(target_os = "macos")]
 pub mod ops;
 pub mod pad;
+pub mod soft_f64;
 // `crate::buffer::MetalBuffer::alloc_zeroed_pooled`／`alloc_uninit_pooled`
 // からのみ到達する `pub(crate)` 面（イシュー #1021）。`tensor-core` の
 // どの公開 trait にも属さない低水準アロケータ実装のため非公開のまま。

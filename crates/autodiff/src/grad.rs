@@ -33,7 +33,9 @@ use fandhe_ai_tensor_core::{Activation, BackendError, BackendOps, Tensor, row_no
 
 use crate::error::AutodiffError;
 use crate::eval::{self, build_tensor, dense_vec};
-use crate::tape::{NodeId, Op, ResidentResolver, TapeId, TapeNode, materialize_fallible};
+use crate::tape::{
+    NodeId, Op, ResidentBiasTarget, ResidentResolver, TapeId, TapeNode, materialize_fallible,
+};
 use crate::var::Reduction;
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
@@ -90,8 +92,25 @@ pub(crate) fn vjp(
         Op::Add(a, b) => {
             let a_shape = &nodes[a.0].shape;
             let b_shape = &nodes[b.0].shape;
-            let da = reduce_to_shape(upstream, a_shape);
-            let db = reduce_to_shape(upstream, b_shape);
+            // イシュー #1566・PR #1659→#1665→#1666 取り込み後の追加
+            // ユーザー承認（2026-09-12）: `Op::Add` の broadcast 縮約
+            // のうち bias パターン（`upstream: [m, n]` → `[n]`／
+            // `[1, n]` の行方向縮約。`reduce_bias_grad` の shape 構造
+            // 判定と同一条件）に限り `reduce_bias_grad`（f64 相当の
+            // アキュムレータ。`Op::LinearAct`／`Op::LinearResident` の
+            // bias フォールバックと共通）へ委譲する。`LinearVars::
+            // forward`（`nn/linear.rs`。`matmul → add` の非融合合成。
+            // `nn::Linear` の既定 forward 経路）の bias 勾配はこの
+            // `Op::Add` の VJP を経由するため、これまで `LinearAct`／
+            // `LinearResident`（同一の bias 縮約が f64 相当）と
+            // 数値方式が食い違っていた（`[1e8, 1.0, -1e8]` で結果が
+            // 変わる）。条件を満たさない broadcast 形状（bias パターン
+            // 以外の一般的な `Op::Add` 縮約）は `reduce_bias_grad` が
+            // 内部で `reduce_to_shape`（`f32` 逐次和・任意 rank・任意軸
+            // 対応）へそのまま委譲するため挙動を変えない（`reduce_bias_
+            // grad` doc 参照）。
+            let da = reduce_bias_grad(upstream, a_shape);
+            let db = reduce_bias_grad(upstream, b_shape);
             vec![(a, da), (b, db)]
         }
         Op::Mul(a, b) => {
@@ -363,8 +382,58 @@ pub(crate) fn vjp(
             // §7.4）。CPU／CUDA は本経路に同期境界を持たないため本質
             // 的な影響はない（CUDA の `gemm_fp32_strict_into` NT/TN は
             // 内部 `stream.synchronize()` を持つが性能中立）。
-            let filled_resident = resident.fill_resident_weight_grad(
-                ops, store_id, slot, tape_id, tape_epoch, weight, &x_t, g,
+            //
+            // イシュー #1566: bias の `Op::ResidentLeaf` 解決を
+            // `fill_resident_weight_grad` 呼び出しより前に行う（bias も
+            // 同時に resident staging へ書き込めるか試みるため。
+            // `docs/backend-metal-command-batching-design.md` §10
+            // 「案 A′」）。bias が `Some` でも `Op::ResidentLeaf` でない
+            // ／`store_id` が weight と異なる場合は `bias_target` を
+            // `None` のままにし、bias は常にホスト `reduce_bias_grad`
+            // フォールバックへ回す（`fill_resident_weight_grad` は
+            // weight のみを試み `bias_filled: false` を返す）。
+            // `nodes.get(...)` は `weight` と同じ理由（範囲外添字 panic
+            // 防止・fail-closed）で経由する。
+            let bias_node = match bias {
+                Some(bias_id) => Some(nodes.get(bias_id.0).ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "grad::vjp: Op::LinearResident.bias node_id is out of range for this \
+                         tape (contract violation: leaf registered on a different Tape?)"
+                            .to_string(),
+                    )
+                })?),
+                None => None,
+            };
+            let bias_target = match (bias, bias_node) {
+                (Some(bias_id), Some(node)) => match &node.op {
+                    Op::ResidentLeaf {
+                        store_id: bias_store_id,
+                        slot: bias_slot,
+                    } if *bias_store_id == store_id => Some(ResidentBiasTarget {
+                        slot: *bias_slot,
+                        node_id: bias_id,
+                        shape: node.shape.clone(),
+                    }),
+                    // 別 store の葉、または `Op::ResidentLeaf` 以外
+                    // （理論上到達しないはず——`DeviceParamStore::
+                    // linear_forward` は bias も `ResidentLeaf` としてのみ
+                    // 受け付ける——だが fail-closed に「resident 化を
+                    // 試みない」側へ倒す。誤った勾配を書き込むより安全）。
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            let outcome = resident.fill_resident_weight_grad(
+                ops,
+                store_id,
+                slot,
+                tape_id,
+                tape_epoch,
+                weight,
+                &x_t,
+                g,
+                bias_target,
             )?;
 
             // d_input^T = W @ g^T（`W: [k,n]`・`g: [m,n]` → `g^T: [n,m]`
@@ -382,25 +451,26 @@ pub(crate) fn vjp(
             let d_input = transpose2d(&tmp);
 
             let mut contributions = vec![(input, d_input)];
-            if !filled_resident {
+            if !outcome.weight_filled {
                 let d_weight = ops
                     .gemm_fp32_strict(&x_t, g)
                     .map_err(AutodiffError::Backend)?;
                 contributions.push((weight, d_weight));
             }
-            if let Some(bias_id) = bias {
-                // bias の勾配は `Op::Add` の VJP と同じ縮約
-                // （`reduce_to_shape`。行方向ブロードキャストの逆演算）。
-                // `weight` と同じ理由で `nodes.get(...)` を経由し、
-                // 範囲外添字 panic を防ぐ（fail-closed）。
-                let bias_node = nodes.get(bias_id.0).ok_or_else(|| {
-                    AutodiffError::InvalidArgument(
-                        "grad::vjp: Op::LinearResident.bias node_id is out of range for this \
-                         tape (contract violation: leaf registered on a different Tape?)"
-                            .to_string(),
-                    )
-                })?;
-                let d_bias = reduce_to_shape(g, &bias_node.shape);
+            if let (Some(bias_id), Some(bias_node)) = (bias, bias_node)
+                && !outcome.bias_filled
+            {
+                // bias の勾配は `Op::Add` の VJP と同じ縮約の基本形
+                // （行方向ブロードキャストの逆演算）だが、`reduce_bias_
+                // grad`（f64 アキュムレータ経由。上記 doc 参照）へ委譲
+                // する——resident 経由で書き込めた場合（`outcome.
+                // bias_filled`）はここへ来ない（weight と対称の
+                // 「resident 成功時は無駄な計算をスキップする」最適化。
+                // `fill_resident_weight_grad` doc 参照）が、resident
+                // 非対応バックエンドのフォールバックがここに来るため、
+                // resident 経路（f64 逐次和）と数値方式を揃える
+                // 必要がある（イシュー #1566・PR #1659 codex-review P1）。
+                let d_bias = reduce_bias_grad(g, &bias_node.shape);
                 contributions.push((bias_id, d_bias));
             }
             contributions
@@ -442,7 +512,11 @@ pub(crate) fn vjp(
             let mut contributions = vec![(input, d_input), (weight, d_weight)];
             if let Some(bias_id) = bias {
                 let bias_shape = &nodes[bias_id.0].shape;
-                let d_bias = reduce_to_shape(g, bias_shape);
+                // `Op::LinearResident` の resident フォールバック（上記
+                // `reduce_bias_grad` doc 参照）と数値方式を揃える
+                // （fresh〈本 Op〉/reuse 間の一致。イシュー #1566・PR
+                // #1659 codex-review P1）。
+                let d_bias = reduce_bias_grad(g, bias_shape);
                 contributions.push((bias_id, d_bias));
             }
             contributions
@@ -816,6 +890,83 @@ fn reduce_to_shape(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
         }
     }
     build_tensor(data, target_shape)
+}
+
+/// bias 勾配専用の縮約ディスパッチ（イシュー #1566・PR #1659 codex-review
+/// P1 是正・2026-09-12 ユーザー承認 A の横展開）。
+///
+/// `Op::LinearResident` は resident 経由の成功時（`outcome.bias_filled`）
+/// `eval::reduce_bias_grad_rows`（`f64` アキュムレータ。ホスト経路）・
+/// GPU カーネル `gemm_bias_grad_reduce_f32`（binary64 加算の 64bit 整数
+/// エミュレーション。ホストと bit 一致）のいずれか
+/// で bias を計算する（`docs/backend-metal-command-batching-design.md`
+/// §10.8）。`outcome.bias_filled == false`（CPU／CUDA 等 resident 非対応
+/// バックエンド、または weight tying で bias 自身が非 resident 扱いに
+/// なった場合のフォールバック）だけが `g` を単純な `f32` 逐次和
+/// （`reduce_to_shape`）で縮約していたため、**同一の `Op::LinearResident`
+/// が実行環境（バックエンド／resident 対応可否）によって異なる縮約方式
+/// を使う**という不整合があった（`[1e8, 1.0, -1e8]` のような相殺入力で
+/// Metal resident 経路と CPU／CUDA フォールバックが食い違う。codex-review
+/// 指摘）。
+///
+/// `Op::LinearAct`（`Op::LinearResident` の resident 化を伴わない同型の
+/// bias 縮約）にも同じ理由で適用し、両 Op 間の縮約方式を揃える
+/// （fresh〈`LinearAct`〉と reuse〈`LinearResident` フォールバック〉が
+/// 同じ形状パターンで異なる数値を返さないようにする）。
+///
+/// **`Op::Add` への横展開（2026-09-12 ユーザー承認・PR #1659→#1665→
+/// #1666 取り込み後の追加是正）**: `nn::Linear` の既定 forward 経路
+/// （`LinearVars::forward`。`matmul → add` の非融合合成。`nn/linear.rs`
+/// doc「bias 加算は `Var::add` の broadcast に委ねる」参照）は `Op::Add`
+/// の VJP を経由するため、`Op::Add(a, b)` 側でも本関数へ委譲する
+/// （`da`／`db` 双方。`Op::Add` は可換なので bias がどちらの引数に来ても
+/// 対称に扱える）。これにより、同じ `Linear` 層が `LinearVars::forward`
+/// （fresh・非融合）と `forward_with_activation`（`Op::LinearAct`。
+/// epilogue 融合）・`DeviceParamStore::linear_forward_with_activation`
+/// （`Op::LinearResident`。reuse）のいずれで forward されても bias
+/// 勾配の数値方式が揃う。`Op::Add` は bias 以外の一般的な broadcast
+/// （bias パターンに一致しない任意 shape の加算）にも使われる汎用 Op
+/// のため、下記の shape 構造判定を満たさない呼び出しは本関数の内部で
+/// 既存の `reduce_to_shape` へそのまま委譲され挙動を変えない（bias
+/// パターンに限定した横展開であり、汎用 `Op::Add`・`reduce_to_shape`
+/// 本体自体は不変）。
+///
+/// 適用条件は `g` が rank-2 `[m, n]` かつ `target_shape` が「軸 0
+/// （行／batch 軸）方向の縮約」を表す形状（末尾次元が `n` と一致し、
+/// それより前の全次元が `1`。典型例: `[n]`・`[1, n]`。`nn::Linear` の
+/// bias `[out_features]` を含む）の場合に限る。`eval::reduce_bias_grad_
+/// rows` は「rank-2 入力を行 `0..m` で縮約し列ごとの和を返す」という
+/// 固定の契約（`gemm_bias_grad_reduce_f32` の `MatrixLayout` と同型）
+/// のため、**軸 1（列）方向を縮約する broadcast 形状（例: `g: [2, 2]`
+/// に対する `target_shape: [2, 1]`。各行の bias が列方向へ複製される
+/// パターン）には適用できない**——列ごとの和という異なる縮約軸の結果を
+/// 返してしまい、値そのものが誤りになる（PR #1659 codex-review P2
+/// 是正。回帰テスト `reduce_bias_grad_does_not_misapply_row_reduction_
+/// to_column_broadcast_bias` 参照）。この判定は総要素数の一致だけでは
+/// 検出できない（`[2, 1]` も総要素数 `2` で `g` の列数 `2` と一致して
+/// しまうため、旧実装は shape 構造を見ずに誤って f64 経路へ分岐して
+/// いた）。`nn::Linear`〈`from_parameters` が bias を `[out_features]`
+/// 厳密一致にしか構築しない〉経由では軸 1 縮約の broadcast bias は
+/// 到達しない（`pub(crate) fn linear_act` を直接呼ぶ経路・`Op::Add`
+/// 経由で `Var::add` に非 bias 形状の broadcast を直接渡す経路限定。
+/// `var.rs` doc「`linear_act` は `[n]` と厳密一致しない broadcast
+/// 可能な bias も受理する」参照）。`Op::Add` への横展開後もこの shape
+/// 構造判定自体は不変であり、`[2, 1]` のような軸 1 縮約は `Op::Add`
+/// 経由でも同様に誤適用を回避する。適用条件を満たさない場合は既存の
+/// `reduce_to_shape`（`f32` 逐次和・任意 rank・任意軸対応）のまま
+/// 維持し挙動を変えない（安全側）。
+fn reduce_bias_grad(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
+    let g_shape = g.shape();
+    let is_row_axis_reduction = g_shape.len() == 2
+        && target_shape.last() == Some(&g_shape[1])
+        && target_shape[..target_shape.len().saturating_sub(1)]
+            .iter()
+            .all(|&d| d == 1);
+    if is_row_axis_reduction {
+        let data = eval::reduce_bias_grad_rows(g);
+        return build_tensor(data, target_shape);
+    }
+    reduce_to_shape(g, target_shape)
 }
 
 /// 同 shape の 2 テンソルに対する要素ごとの条件付き選択
@@ -2277,6 +2428,69 @@ release ビルドでも検知できるよう `assert!` を使う）"
         let num_db = numeric_grad_unary(&b, &s, |x| eval::add(&a, x));
 
         assert_grad_close("reduce_to_shape(middle axis) dB", &db, &num_db);
+    }
+
+    // --- reduce_bias_grad（イシュー #1566・PR #1659 codex-review P2 是正） ---
+
+    /// `reduce_bias_grad` が「軸 0（行）方向の bias 縮約」用の f64 経路
+    /// （`eval::reduce_bias_grad_rows`）を、**軸 1（列）方向の
+    /// broadcast bias**（`target_shape` の末尾次元が `g` の列数と
+    /// 一致しない形状。例: `g: [2, 2]` に対する `target_shape: [2, 1]`）
+    /// へ誤って適用しないことを確認する回帰テスト（codex-review 指摘。
+    /// `[2, 1]` は総要素数が `2` で `g` の列数 `2` と偶然一致するため、
+    /// 総要素数のみで判定する実装だと誤って行縮約の f64 経路へ分岐し
+    /// てしまっていた）。
+    #[test]
+    fn reduce_bias_grad_does_not_misapply_row_reduction_to_column_broadcast_bias() {
+        // g = [[1, 2], [3, 4]]（行優先）。target_shape = [2, 1] は
+        // 各行の bias 値が 2 列へ複製される broadcast（軸 1 縮約）。
+        // 正しい勾配は行ごとの和: row0 = 1+2=3・row1 = 3+4=7。
+        // 行縮約（列ごとの和 col0=1+3=4・col1=2+4=6）を誤って適用すると
+        // 全く異なる値になる。
+        let g = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+
+        let got = reduce_bias_grad(&g, &[2, 1]);
+        let expected = reduce_to_shape(&g, &[2, 1]);
+
+        assert_eq!(got.shape(), &[2, 1]);
+        assert_eq!(
+            got.contiguous().as_slice().unwrap(),
+            expected.contiguous().as_slice().unwrap(),
+            "reduce_bias_grad は軸 1 縮約（[2, 1]）には reduce_to_shape をそのまま使う              はず（f64 行縮約経路を誤適用してはいけない）"
+        );
+        assert_eq!(
+            got.contiguous().as_slice().unwrap(),
+            &[3.0f32, 7.0],
+            "軸 1 縮約の正しい値（行ごとの和）と一致するはず"
+        );
+    }
+
+    /// 対照: 軸 0（行）方向の標準的な bias 縮約（`target_shape` の末尾
+    /// 次元が `g` の列数と一致し、それより前の次元がすべて `1`）は
+    /// 引き続き `eval::reduce_bias_grad_rows`（f64 経路）へ委譲される
+    /// ことを、`[n]`・`[1, n]` の両形状で確認する（値は
+    /// `reduce_to_shape`〈こちらは `f32` 逐次和〉と一致する範囲——
+    /// 相殺による桁落ちがない入力なので両経路の値自体は一致するが、
+    /// 経路選択の正しさを shape 網羅で確認する意図）。
+    #[test]
+    fn reduce_bias_grad_applies_row_reduction_for_rank1_and_leading_one_targets() {
+        let g = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+
+        let got_rank1 = reduce_bias_grad(&g, &[2]);
+        assert_eq!(got_rank1.shape(), &[2]);
+        assert_eq!(
+            got_rank1.contiguous().as_slice().unwrap(),
+            &[4.0f32, 6.0],
+            "target_shape=[2] は列ごとの和（col0=1+3=4・col1=2+4=6）のはず"
+        );
+
+        let got_leading_one = reduce_bias_grad(&g, &[1, 2]);
+        assert_eq!(got_leading_one.shape(), &[1, 2]);
+        assert_eq!(
+            got_leading_one.contiguous().as_slice().unwrap(),
+            &[4.0f32, 6.0],
+            "target_shape=[1, 2] も同じ列ごとの和になるはず（先頭次元 1 個の reshape）"
+        );
     }
 
     // --- vjp() ディスパッチの疎通確認（#18 との継ぎ目契約） ---

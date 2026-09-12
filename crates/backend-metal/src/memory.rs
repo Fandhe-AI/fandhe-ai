@@ -437,6 +437,15 @@ impl MemoryOps for MetalMemory {
     /// `upload_into` 呼び出し時点）に 1 回だけ発生し、それ以降の
     /// `SgdStepDeviceTracked` 等は改めて同期しない（`ops.rs::
     /// MetalBackendOps::gemm_fp32_strict_into` doc「同期の回収」参照）。
+    ///
+    /// **イシュー #1566 追記**: NT/TN 判定される bias（weight と同じ
+    /// `layout::classify_2d` 条件を満たす層）は `ops::MetalBackendOps::
+    /// gemm_fp32_strict_into_with_bias_reduce_tracked` が d_weight と
+    /// 同一 `ctx.encode` 呼び出し内で encode-only に書き込むため、
+    /// この `upload_into` 経由の bias 書き込み自体を経由しなくなった。
+    /// 本メソッドは NN/TT・分類不能形状の bias（引き続きホスト経由）・
+    /// CUDA（既定 `Unsupported` のまま）・その他 resident 非対応の
+    /// 勾配に対して呼ばれ続ける。
     fn upload_into(
         &self,
         tensor: &Tensor<f32>,

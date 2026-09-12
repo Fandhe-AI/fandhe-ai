@@ -1428,3 +1428,482 @@ failure-token 登録から d_weight・d_bias を同時に encode-only で書き�
   決めたうえで着手する（`.claude/rules/out-of-scope-tracking.md` に
   従い別 Issue で追跡）。「bit 同一」を無条件の受け入れ基準として
   固定しない。
+
+### 10.7 #1566 実装記録（Linux セッション。実機実測は Mac セッションへ引き継ぐ）
+
+**§10.2-1 の判断（(a) か (b) か）**: 自動運転（ユーザー承認を得られない
+セッション）のため安全側に倒し **(a)（`f64` アキュムレータ化による
+新しい数値挙動の導入）は選ばない**。新設した GPU カーネル
+（`gemm_bias_grad_reduce_f32`）・ホストフォールバック（`layout::
+reduce_bias_grad_rows_host`）はいずれも `reduce_to_shape` の現行
+アルゴリズム（行 0..M 昇順・`f32` 逐次 `+=`・初期値 `0.0f`）をそのまま
+複製し bit 完全一致を狙う設計とした。(b)（例外の明示）についても、
+本セッションはユーザー承認を経て一次規約（`.claude/rules/coding-
+rust.md`）を書き換える権限がないため見送り、**未解決事項として引き継ぐ**
+（一次規約は無変更のまま）。`reduce_to_shape` 全体（本イシューが触れない
+`Op::Add`／`Op::Mul` の VJP・`Op::LinearAct` の bias 等、他の呼び出し
+箇所）の `f64` アキュムレータ化可否も同様に未解決のまま。
+
+**実装した内容**:
+
+- `tensor-core::BackendOps::gemm_fp32_strict_into_with_bias_reduce_
+  tracked`（非破壊拡張。既定は `bias` を無視して既存
+  `gemm_fp32_strict_into_tracked` へ委譲し `Ok(false)`。CPU・CUDA は
+  オーバーライドなし＝挙動変更ゼロ）。
+- `backend-metal::gemm::MetalGemm::encode_weight_and_bias_grad_with_
+  offsets`（NT/TN encode-only 経路。d_weight のディスパッチと同一
+  `ctx.encode` 呼び出し内で `encode_dispatch_bias_grad_reduce`
+  〈新設〉を追加ディスパッチする。`encode_calls` は増えない設計）・
+  新規カーネル `gemm_bias_grad_reduce_f32`（`shaders/gemm.metal`）。
+- `backend-metal::ops::MetalBackendOps::gemm_fp32_strict_into_with_
+  bias_reduce_tracked`（トレイトオーバーライド。NN/TT・分類不能形状は
+  ホスト経由〈`gemm_fp32_strict` → `upload_into` に続けて bias も
+  `layout::reduce_bias_grad_rows_host` → `upload_into`〉で常に成功する
+  ——既存 `gemm_fp32_strict_into_impl` と同じ「`Unsupported` を返さない
+  理由」を踏襲）。
+- `autodiff::tape::ResidentResolver::fill_resident_weight_grad` の
+  シグネチャ拡張（`bias: Option<ResidentBiasTarget>` 追加・戻り値を
+  `ResidentFillOutcome { weight_filled, bias_filled }` へ変更。
+  `pub(crate)` トレイトのため呼び出し元・実装を同一 PR 内で揃えて
+  更新）。
+- `autodiff::optim::device_store::DeviceParamStore::
+  fill_resident_weight_grad`: fresh 経路は上記の結合 API を 1 回だけ
+  呼ぶ（weight・bias 同時）。weight tying（同一 backward 内で同一
+  weight slot への 2 回目以降の寄与）分岐では、**bias 自身の slot に
+  ついても独立に tie 判定・累積を行う**（`fill_bias_slot_via_host_
+  reduce` 新設。理由は下記「発見した正当性の落とし穴」参照）。
+- `autodiff::grad::vjp`（`Op::LinearResident` 分岐）: bias の
+  `Op::ResidentLeaf` 解決を `fill_resident_weight_grad` 呼び出しより
+  前へ移動し、`outcome.bias_filled` に応じて `reduce_to_shape` の
+  ホスト計算をスキップする（weight の既存最適化と対称）。
+
+**実装中に発見した正当性の落とし穴（当初計画からの設計変更）**: 当初の
+計画は「weight tying が起きた場合、2 回目以降の呼び出しでは bias の
+resident 化を試みず常に `bias_filled: false` を返す」という単純化を
+想定していたが、これは以下の理由で誤りだと判明した——weight が tie
+する（同一 `Op::LinearResident` weight leaf を複数回参照する）モデルは
+通常 bias の `Var` も同時に再利用するため、1 回目（fresh）で bias が
+resident 充填され `staging.filled[bias_slot]` に記録された後、2 回目
+（weight tie）で `bias_filled: false` を返すと、grad.rs は 2 回目の
+寄与だけを通常の `Gradients` へ push するが、`resident_filled_slots`
+（`step()` 側の判定）は 1 回目の resident 充填を「新鮮」と判定して
+デバイス側の値のみを信頼し、2 回目の寄与が silently に失われる
+（`device_store.rs::resident_filled_slots` doc 参照）。この落とし穴は
+`resident_bias_shared_grad_accumulates_matches_host_only_grad_path`
+（新規テスト。修正前のコードで実際に FAIL することを確認済み——
+`fill_bias_slot_via_host_reduce` を呼ばないよう一時的に patch した
+状態で実行し、host-only 経路と食い違う〈`[0.9, 0.6]` vs `[0.15,
+-0.15]`〉ことを実測確認した）で検出・修正した。
+
+**Linux セッションでの検証**: `cargo test --workspace`（Linux で
+実行可能な全クレート）全 green。`cargo check`／`cargo clippy -D
+warnings` を `--target aarch64-apple-darwin`（`cfg(target_os =
+"macos")` 限定コードの型検査。MSL 自体はコンパイルできない）で実行し
+`fandhe-ai-backend-metal`（lib・`--tests`・対象テストファイル単体）が
+いずれも警告ゼロで通ることを確認した。
+
+**Mac 実機セッションへの申し送り（本セッションでは実施不可）**:
+
+- `cargo test -p fandhe-ai-backend-metal --release --test gemm_fp32_
+  strict_into_parity -- --ignored --nocapture`（新規 4 テスト・既存
+  テストの非後退確認）。
+- `crates/facade/tests/mnist_scale_train_reuse_bench.rs::mnist_scale_
+  train_reuse_metal_batch_counters` の実測・アサーション値
+  （現在の `11/9/9`）の更新（本ファイル §10.6 の想定どおり）。
+- `metal_reuse_step_grad_bit_dump`（main/branch 比較。weight・bias
+  とも bit 完全一致を確認）・`device_param_store_backend_parity`
+  （Metal）の非後退確認。
+- train reuse A/B（5 run 中央値・record_only・事前登録 `step_total ≤
+  1.00`・checksum 一致・`--phases` の `device_update` 内訳）。
+- `docs/perf/train-resident-grad-device-update.md` §8 として上記実測
+  結果を追記する（本ドキュメントは実装記録のみで実測値は含まない）。
+
+### 10.8 #1659 追記（2026-09-12 ユーザー承認 A・codex-review P1 是正）
+
+§10.7 は自動運転セッションの判断として「(a)（`f64` アキュムレータ化）
+は選ばない」を記録したが、PR #1659 の codex-review 指摘（新設した bias
+勾配縮約が補償なしの `f32` 逐次和のままで `.claude/rules/coding-rust.md`
+の勾配長軸縮約 `f64` アキュムレータ規約に反し、`[1e8, 1.0, -1e8]` の
+ような相殺入力で寄与が失われる）を受け、ユーザーが **2026-09-12 に
+選択肢 A「規約どおり `f64` 相当へ統一する」を承認した**。これにより
+§10.2-1・§10.6・§10.7 が「未解決事項」として引き継いだ論点は解消済み。
+
+**実装した数値方式**（`.claude/rules/coding-rust.md` の勾配長軸縮約
+節と同型の使い分け）:
+
+- ホスト経路（`crates/autodiff/src/eval.rs::reduce_bias_grad_rows`・
+  `crates/backend-metal/src/layout.rs::reduce_bias_grad_rows_host`）:
+  各列を `f64` アキュムレータへ蓄積し、最後に 1 回だけ `f32` へ
+  downcast する。
+- GPU カーネル（`shaders/gemm.metal::gemm_bias_grad_reduce_f32`。
+  Metal は `double` 型非対応）: Neumaier 改良版 Kahan 補償和
+  （`gemm_splitk_reduce` と同型。非有限入力では補正を適用しない）。
+  **この実装形は §10.10 で scale 方式併用へ精密化済み**（当初版は
+  有限入力の中間 overflow を防げないという codex-review 追加指摘を
+  受けた是正。契約自体〈f64 相当への統一・REQ-2 判定〉は不変）。
+- `m == 1`／`rows == 1` の直接コピー特殊扱い（符号付きゼロ保持。PR
+  #1659 codex-review P2 是正）は不変（コピーのみで蓄積を経由しない
+  ため f64/Neumaier 化の対象外）。
+
+この結果、ホスト（`f64`）と GPU カーネル（Neumaier `f32`）は蓄積方式
+が異なるため bit 完全一致しない。`crates/backend-metal/tests/gemm_
+fp32_strict_into_parity.rs` の NT/TN テスト（GPU カーネル経路）は bias
+部分の判定を `assert_bits_eq` から `fandhe_ai_backend_cpu::
+assert_parity`（REQ-2 統一複合判定。相対誤差 1e-3 未満 または 絶対
+誤差 1e-5 未満）へ切り替えた。NN/TT フォールバックテスト（ホスト
+`reduce_bias_grad_rows_host` のみで完結）・weight 部分の判定は
+bit 完全一致契約のまま不変。
+
+`autodiff::grad::reduce_to_shape`（汎用縮約パス。weight 勾配・他の
+呼び出し箇所）自体は本イシューでは変更しない（§10.2-1 が指摘した
+`reduce_to_shape` 自体の `f32` 逐次和は既存の未整理点のまま残る）。
+
+**Mac 実機セッションへの申し送りの更新**: §10.7 末尾の TODO リストの
+うち bias に関する bit 完全一致確認は REQ-2 複合判定確認へ読み替える。
+
+**訂正（PR #1659 codex-review 追加指摘）**: 上記初版は
+`metal_reuse_step_grad_bit_dump` を「weight 勾配限定〈#1555 の受け入れ
+確認〉のため対象外・変更不要」としていたが、これは誤りだった。同
+テストは `Tape::param_grads_to_host`（統合版。weight・bias 双方を含む）
+の戻り値を 10 step 分ダンプし main/branch の bit 表現を突合する
+（`metal_reuse_step_grad_bit_dump.rs` doc「本テストが検証したいのは
+`param_grads_to_host`（統合版）の戻り値が変更前後で bit 同一という
+事実」参照）。本 PR の bias 数値方式変更（f32 逐次和 → f64 相当）に
+より、bias を含む step の `grad[p][j]` は main（f32）と branch（f64
+相当）で **bit 同一にならない**。さらに `step_device_param_store` が
+この bias 勾配で SGD 更新した param を次 step の forward 入力にする
+ため、この乖離は **step 0 以降のすべての step**（`grad`・`param`・
+`loss`）へ伝播する（`param_grads_to_host_matches_host_only_path_two_
+layer`〈`crates/facade/tests/device_param_store_grad_readout.rs`〉の
+Linux 回帰で同型の乖離を確認済み。m ≥ 2 の bias 行で 1 ulp 差が生じ、
+SGD 更新後のパラメータ・以降の forward/backward 全体に伝播する）。
+このため Mac 実機セッションでの `metal_reuse_step_grad_bit_dump` の
+main/branch 比較は、**bit 完全一致ではなく REQ-2 統一複合判定**（各
+step の `grad`／`param`／`loss` 値を許容誤差内で突合）で行う。weight
+のみの `resident_grads_to_host`（strict 版。本テストの比較対象外）は
+影響を受けない。
+
+### 10.9 #1659 codex-review 追加指摘の是正（2026-09-12・同一ユーザー承認 A の横展開）
+
+§10.8 は `backend-metal` の bias 縮約（GPU カーネル・ホスト参照実装）
+のみを f64 相当へ統一したが、`crates/autodiff/src/grad.rs` の
+`Op::LinearResident`（resident 非対応バックエンドのフォールバック。
+CPU／CUDA が常時到達）・`Op::LinearAct` の bias 縮約は `reduce_to_shape`
+（汎用 `f32` 逐次和）のままだった。同一の `Op::LinearResident` が
+実行環境（Metal resident 成功時は f64 相当／CPU・CUDA・Metal 非対応
+形状のフォールバック時は f32）によって異なる縮約方式を使うという
+不整合が残っており、`[1e8, 1.0, -1e8]` のような相殺入力で Metal
+resident 経路とホストフォールバックが食い違うことが codex-review で
+追加指摘された。
+
+**是正内容**:
+
+- `crates/autodiff/src/grad.rs` に `reduce_bias_grad(g, target_shape)`
+  を新設: `g` が rank-2 かつ `target_shape` の総要素数が `g` の列数と
+  一致する（典型的な bias `[n]` 縮約。`nn::Linear` の bias を含む）
+  場合は `eval::reduce_bias_grad_rows`（f64 アキュムレータ）を使い、
+  それ以外の broadcast 形状（`linear_act` が許容する `[1, n]` 等。
+  `pub(crate)` 経由でのみ到達し `nn::Linear` からは到達しない）は
+  既存の `reduce_to_shape`（f32 逐次和・任意 rank 対応）のまま維持する
+  （安全側。汎用 `reduce_to_shape` 関数自体・`Op::Add`／`Op::Mul` 等
+  bias 以外の呼び出しは変更しない）。
+- `Op::LinearResident` のフォールバック（`!outcome.bias_filled`）・
+  `Op::LinearAct` の bias 縮約の 2 箇所を `reduce_bias_grad` へ統一。
+- `tensor-core::BackendOps::gemm_fp32_strict_into_with_bias_reduce_
+  tracked` の doc（「走査順は行 `0..m` 昇順・初期値 `0.0f32`・単純な
+  `+=`」という記述）を実装（ホスト `f64`・Metal Neumaier・REQ-2 複合
+  判定）に合わせて修正。
+
+**新たに顕在化した既存テストの前提崩れ（是正）**: `crates/facade/
+tests/device_param_store_grad_readout.rs::param_grads_to_host_matches_
+host_only_path_two_layer` が bias slot（出力層）で bit 不一致になった。
+原因は `SequentialVars::forward`（host_model 側。`bound.forward`）が
+次層が `ReLU` の場合のみ `Op::LinearAct` へ融合し、出力層（次層なし）
+は非融合の `LinearVars::forward`（`Var::add` = `Op::Add`。汎用
+`reduce_to_shape` のまま——ユーザー承認 A の対象外）を使う一方、
+`forward_resident`（device_model 側）は常に `linear_forward_with_
+activation`（`Op::LinearResident`。`act: None` でも同一 Op）を使う
+という**既存の非対称**（今回のスコープ外）が、bias 縮約の数値方式
+統一によって初めて可視化されたため。`Op::Add` の `reduce_to_shape` は
+汎用パスのため変更対象外（コーディネータ指示）であり、代わりに当該
+テストの判定を修正した: weight slot（rank-2）は bit 完全一致の
+`assert_eq!` のまま、bias slot（rank-1）は `fandhe_ai_backend_cpu::
+assert_parity`（REQ-2 統一複合判定）へ切り替えた。同型の理由で
+`crates/autodiff/src/optim/device_store.rs` の
+`param_grads_to_host_matches_host_only_path_bit_exact`（`MockDeviceOps`
+経由）のコメントも「`m == 1`（本テストの入力）に限り bit 完全一致が
+成立する」旨へ訂正した（同テスト自体は `x` が単一行のため実害なし）。
+
+**§10.8 の訂正**: `metal_reuse_step_grad_bit_dump` を bias 変更の影響
+対象外としていたのは誤りだった。§10.8 末尾に訂正を追記済み
+（本節参照）。
+
+### 10.10 #1659 codex-review 追加指摘の是正（2026-09-12・Metal 実装形の精密化）
+
+§10.8・§10.9 が適用した Metal GPU カーネル側の実装形（単純な Neumaier
+改良版 Kahan 補償和のみ。`isfinite(t)` で非有限を検知したら補正を
+止める版）は、**有限入力の中間 overflow** を防げないと codex-review
+から追加指摘された。契約自体（`.claude/rules/coding-rust.md` の
+「勾配の長軸縮約は `f64` アキュムレータで統一する」・両実装間の一致は
+REQ-2 統一複合判定）は不変で、Metal 側の実装形のみを精密化する。
+
+**問題の再現**: 列 `[f32::MAX, f32::MAX, -f32::MAX, -f32::MAX]`（真値
+は `0`）を単純な Neumaier 補償和で逐次加算すると、1 項目・2 項目の
+加算時点で `f32::MAX + f32::MAX` が `+inf` へ overflow する。以降
+`isfinite(t)` が常に偽になり補正が効かない単純加算（`+inf` のまま）へ
+縮退するため、カーネルは `+inf` を返す。一方ホスト `f64` アキュムレータ
+（`reduce_bias_grad_rows`）は `f64` の表現範囲内に収まるため正しく
+`0` を返す。`+inf` 対 `0` は REQ-2 統一複合判定でも不一致になり、
+codex ジョブが `block-priorities: P0,P1` で fail する状態が続いた。
+
+**是正内容**: `crates/backend-metal/src/shaders/gemm.metal` に
+`rmsnorm.metal::rmsnorm_ssq_add`（LAPACK SLASSQ 系 scale/ssq 方式）の
+**線形和版**（二乗和ではなく符号付き単純和が対象）である
+`bias_scale_sum_add` を新設し、`gemm_bias_grad_reduce_f32`（`m >= 2`
+経路）の蓄積方式をこれへ差し替えた。各項を列内の最大絶対値
+`scale` で正規化してから `[-1, 1]` の範囲で Neumaier 補償和
+（`bias_kahan_add`。`rmsnorm.metal::rmsnorm_kahan_add` と同一ロジックの
+自己完結複製——各 `.metal` ファイルは独立した `MTLLibrary` としてコン
+パイルされるため直接呼べない）へ蓄積するため、部分和が行数 `m` で
+有界になり中間 overflow が構造的に起きない。最終読み出しは
+`scale * (acc + comp)` の 1 式のみで、`scale == 0`（全ゼロ列）→ `0`・
+`scale == +inf`（符号付き無限大が確定）→ `±inf`／`NaN`・通常の有限列
+→ 正しい和、のいずれも追加分岐なしに成立する（`gemm.metal` の
+`bias_scale_sum_add` doc 参照）。`NaN`・符号付き `±inf`（`inf + -inf
+== NaN`・同符号は `inf + inf == inf`）の伝播も明示的に扱い、ホスト
+`f64` の逐次加算と同じ意味論に揃える。REQ-8 の手動境界チェック
+（`if (gid >= p.n) { return; }`）は変更しない。`m == 1` の直接コピー
+特殊扱い・resident/host の bias 比較（`assert_parity`。REQ-2 統一
+複合判定）は不変。
+
+数値契約自体（f64 相当への統一・Metal は Neumaier＋scale 方式・両者の
+一致は REQ-2 判定）は変わらないため、`.claude/rules/coding-rust.md`
+には実装形の精密化を追記するに留め、契約の記述は変更しない。
+
+### 10.11 #1665 取り込み後の codex-review 追加指摘の是正（2026-09-12・scale を 2 のべき乗へ限定）
+
+§10.10 が適用した scale 方式（列内の最大絶対値そのものを `scale` に
+採用する版）は、**相殺入力での丸め誤差**を防げないと codex-review から
+追加指摘された。`x / scale`・`acc *= ratio` の `scale`／`ratio` が
+一般の実数（2 のべき乗とは限らない）であるため、これらの除算・乗算が
+丸めを伴い、真値がちょうど相殺してゼロになる入力でも誤差が残る。契約
+自体（f64 相当への統一・両実装間の一致は REQ-2 統一複合判定）は不変で、
+Metal 側の実装形のみをさらに精密化する。
+
+**問題の再現**: 列 `[1e8, -100000008.0, 8.0]`（真値は `0`）を旧 scale
+方式で処理すると、1 項目 `x1=1e8` の時点で `scale=1e8` が確定し
+`x1/scale=1.0`（exact）だが、2 項目 `x2=-100000008.0` は
+`ax=100000008.0 > scale(1e8)` のため `scale` を `100000008.0` へ
+更新する際の `ratio = 1e8 / 100000008.0` が `f32` で丸められる。この
+丸め誤差が既存の `acc`（`1.0`）へそのまま乗算で伝播し、最終結果は
+真値 `0` に対し `f32` で約 `2.04` という REQ-2（相対誤差 1e-3 未満
+または 絶対誤差 1e-5 未満）に違反する誤差になる。
+
+**是正内容**: `scale` を「列内で見た最大絶対値以下の最大の 2 のべき
+乗」に限定する `bias_pow2_floor(ax)` を新設し、`bias_scale_sum_add` の
+再スケール分岐（`ax > scale` の場合）を `scale = ax` から
+`scale = bias_pow2_floor(ax)` へ変更した。`bias_pow2_floor` は `ax` の
+IEEE754 ビットパターンから仮数部（下位 23 bit）をゼロクリアするだけ
+（乗除算・超越関数を経由しない）で「`ax` 以下の最大の 2 のべき乗」を
+exact に求める。2 のべき乗による除算（`x / scale`）は仮数部を変えず
+指数部をずらすだけのため常に exact、2 のべき乗同士の比
+（`old_scale / new_scale`）も常に 2 のべき乗になるため exact——両方の
+丸め源が構造的に消える。
+
+**`ceil` ではなく `floor` を採用する理由**: コーディネータの当初提案は
+`scale = exp2(ceil(log2(ax)))`（`ax` 以上の最小の 2 のべき乗）だったが、
+`ax` が `f32::MAX` 付近の場合これは `f32` で表現できない
+（`f32::MAX` 自身の指数は 127 だが `ceil` 版は指数 128 を要求し、
+`f32` の最大指数 127 を超えて `+inf` へ overflow する）。`floor`
+（`ax` 以下の最大の 2 のべき乗）は `ax` 自身の指数をそのまま使うため
+overflow せず、かつ exactness の要件（除算・比が exact になること）は
+`floor` でも `ceil` と同様に満たされる（2 のべき乗であることが本質で
+あり、`ax` 以上か以下かは無関係）ため、`floor` へ変更した（元の
+提案からの逸脱。理由は本節に明記）。
+
+subnormal（非正規化数）域まで `ax` が落ち込む極端なケースは
+`bias_pow2_floor` が `0.0f` を返しうるため本方式の対象外とする
+（REQ-2 の適用外。実務上の bias 勾配の値域では到達しない）。
+
+**検証**: Linux で実行可能な Rust ホスト参照モデル
+（`crates/backend-metal/tests/gemm_bias_scale_sum_host_model.rs`。
+`gemm.metal` の `bias_scale_sum_add`／`bias_pow2_floor`／
+`bias_kahan_add` を逐語移植）を新設し、以下を確認した:
+
+- `preserves_cancelling_contribution_with_rounding_prone_values`:
+  `[1e8, -100000008.0, 8.0]` → 真値 `0` と REQ-2 複合判定で一致
+  （codex-review 指摘の直接再現・是正確認）。
+- `avoids_intermediate_overflow_for_finite_max_magnitude_inputs`:
+  `[f32::MAX, f32::MAX, -f32::MAX, -f32::MAX]` → 有限値・真値 `0` と
+  REQ-2 複合判定で一致（§10.10 の中間 overflow 回避が本是正でも
+  維持されていることの確認）。
+- `preserves_non_cancelling_residual_contribution`:
+  `[1e8, 1.0, -1e8]` → 真値 `1.0` と REQ-2 複合判定で一致。
+- `matches_f64_reference_sum_for_mixed_magnitude_random_sequence`:
+  桁の異なる値（`1e-3`〜`1e8` のスケールを乱数選択）が混在する 200
+  要素の決定的乱数列で `f64` 逐次和（真値の近似参照）と REQ-2 複合
+  判定で一致。
+- `pow2_floor_is_exact_and_never_overflows_for_finite_input`:
+  `bias_pow2_floor` 単体の性質（2 のべき乗の不動点・`f32::MAX` でも
+  有限値を返す）を確認。
+
+5 件すべて Linux 実行で green（`cargo test -p fandhe-ai-backend-metal
+--test gemm_bias_scale_sum_host_model`）。gemm.metal のコメント・本節
+を上記へ整合させ、`.claude/rules/coding-rust.md` の実装形記述も
+「Neumaier + 2 のべき乗 scale」へ更新した（契約自体は不変のため
+regression には当たらない）。実機（Apple Silicon）での MSL カーネル
+本体の実行確認は Mac セッションへ申し送る（`gemm_fp32_strict_into_
+parity.rs` の NT/TN テスト・NN フォールバックテストの非後退確認を含む）。
+
+### 10.12 #1666 取り込み後の codex-review 追加指摘の是正（2026-09-12・`Op::Add` への横展開）
+
+§10.9 は `Op::LinearResident` のフォールバック・`Op::LinearAct` の bias
+縮約を `reduce_bias_grad`（f64 相当）へ統一したが、`nn::Linear` の
+**既定 forward 経路**（`LinearVars::forward`。`matmul → add` の非融合
+合成。`nn/linear.rs` doc「bias 加算は `Var::add` の broadcast に委ねる」
+参照）は `Op::Add` の VJP を経由するため対象外のままだった。この結果、
+同一の `Linear` 層でも forward 方式（`LinearVars::forward` か
+`forward_with_activation`〈`Op::LinearAct`〉か、resident 経由か）に
+よって bias 勾配の数値方式（`f32` 逐次和 vs `f64` 相当）が食い違う
+不整合が残っており、`[1e8, 1.0, -1e8]` のような相殺入力で結果が変わる
+ことが codex-review から追加指摘された。契約自体（f64 相当への統一・
+REQ-2 統一複合判定）は不変で、適用範囲を横展開する。
+
+**2026-09-12 ユーザー承認**: `Op::Add` VJP の broadcast 縮約のうち
+**bias パターン**（`upstream: [m, n]` → `[n]`／`[1, n]` の行方向縮約。
+既存 `reduce_bias_grad` の shape 構造判定と同一条件）に限り、共通の
+`f64` ヘルパ（`reduce_bias_grad`）へ委譲する。それ以外の `Op::Add`
+（bias パターンに一致しない一般的な broadcast）・汎用 `reduce_to_shape`
+本体は不変。
+
+**実装内容**: `crates/autodiff/src/grad.rs` の `Op::Add(a, b)` 分岐で、
+`da`／`db` の計算を `reduce_to_shape(upstream, ...)` から
+`reduce_bias_grad(upstream, ...)` へ変更した（`Op::Add` は可換なので
+`a`／`b` どちらが bias でも対称に扱える。bias パターンに一致しない
+呼び出しは `reduce_bias_grad` の内部で既存の `reduce_to_shape` へ
+そのまま委譲されるため挙動を変えない）。
+
+**新規回帰テスト**（`crates/autodiff/src/nn/linear.rs` の `LinearVars`
+テストモジュール。ホスト同士の比較のため bit 完全一致で書ける）:
+
+- `linear_vars_forward_bias_grad_preserves_cancelling_contribution`:
+  `x` を全 `0` に固定して `pred = 0 + bias`（`Op::Add` の broadcast の
+  みで決まる）とし、重み付き和 `L = sum(pred ⊙ s)`（`s = [1e8, 1.0,
+  -1e8]`）の `dL/dbias` が `f32` 逐次和なら失われる寄与（真値 `1.0`）を
+  保持することを確認する（`LinearVars::forward` 経由の直接的な相殺
+  入力回帰テスト）。
+- `add_path_bias_grad_matches_linear_act_bias_grad_bit_exact`:
+  同一の `x`／`weight`／`bias`／`target` に対し `LinearVars::forward`
+  （`Op::Add` 経由）と `forward_with_activation`（`Op::LinearAct` 経由。
+  `Activation::None`）の bias 勾配が bit 完全一致することを確認する
+  （fresh〈非融合〉と fused の数値方式統一。resident 側の一致は
+  `crates/facade/tests/device_param_store_grad_readout.rs::param_grads_
+  to_host_matches_host_only_path_two_layer` が既存でカバーする——この
+  横展開により同テストの bias slot も理論上は bit 完全一致に戻る
+  はずだが、判定を `assert_parity` から `assert_eq!` へ戻す変更は
+  本イシューのスコープ外として見送り、既存の REQ-2 判定のまま維持する
+  ——安全側かつユーザー指示に含まれないコード変更を避けるため）。
+
+いずれも Linux 実行で green（`cargo test -p fandhe-ai-autodiff --lib
+nn::linear::`）。`.claude/rules/coding-rust.md`・`docs/perf/train-
+resident-grad-device-update.md` の bias 追記も本節の内容へ整合させた。
+実機（Apple Silicon・CUDA）での forward/backward 経路混在時の非後退
+確認は Mac／GB10 実機セッションへ申し送る。
+
+### 10.13 #1666 codex-review 指摘を受けた判定契約の 2 層構造化（2026-09-12。§10.14 で置換済み・経緯のみ）
+
+§10.8〜§10.12 が繰り返し使ってきた「REQ-2 統一複合判定」（bias 勾配の
+Metal カーネル・ホスト `f64` 参照実装間の一致判定）は、契約 PR #1666
+（bias 縮約判定方式そのものを扱う別 PR）への codex-review 指摘
+（P1「除外範囲を事前判定できる検証可能な契約にせよ」・追加 P1「`O(n·ε²)`
+が計算不能」・P2「`f64` 逐次和と厳密和の混同」）を受け、以後 **2 層
+構造**へ改める（初版は `O` 記法・「真値」表現を含んでいたため本節で
+明示式・用語へ確定させた）:
+
+- **参照値**: `S_ref` は入力列 `xs` をホスト `f64` で **index 順に
+  逐次加算**した和（`reduce_bias_grad_rows_host`／`eval::reduce_bias_
+  grad_rows` と同じ縮約順序。「厳密和」「真値」という語は使わない
+  ——`S_ref` はあくまで参照実装が計算する具体的な値）。`y_ref` は
+  `S_ref` を 1 回 downcast した `f32`。
+- **Tier A（全入力に常に適用）**: Metal bias 勾配 `y_metal` と `y_ref`
+  の差が、明示式の理論上界
+  `|y_metal − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|`
+  （`ε32 = 2^-24`・`n` は縮約要素数〈行数 `m`〉・有効範囲
+  `n < 2^24`。`O` 記法は使わない）を満たす。`Σ|x_i|` はホスト `f64`
+  で index 順に累積する。導出・Rust ホストモデルでの実測
+  （`crates/backend-metal/tests/gemm_bias_scale_sum_host_model.rs::
+  {tier_a_holds_for_cancelling_extreme_magnitude_sequence,
+  tier_a_holds_for_existing_rounding_prone_and_overflow_cases,
+  tier_a_holds_for_high_kappa_random_columns,
+  tier_b_predicate_selects_expected_cases_and_matches_assert_parity}`）
+  は同ファイルのコメントを正とする（観測最大比 ≈ 3×10⁻⁸ で加法定数
+  `3` に対し十分な安全マージンを確認済み）。
+- **Tier B（REQ-2 複合判定）**: `(3 + n·ε32)·ε32·Σ|x_i| ≤
+  max(1e-3·|S_ref|, 1e-5)` が入力から事前に成立する列（条件数
+  `κ = Σ|x_i| / |S_ref|` の上限と等価）にのみ、従来どおりの相対誤差
+  1e-3 未満 または 絶対誤差 1e-5 未満（`assert_parity`）を適用する。
+  不成立列（例: `[2^48, 2^24, 1, -2^48, -2^24]`。`κ` が極端に高い）は
+  Tier A のみで検証する。逆に、条件数の低い列（例: `[3.0, 4.0,
+  -2.0]`）は Tier B が成立し `assert_parity` を実際に適用できる
+  （両者の機械検査は `tier_b_predicate_selects_expected_cases_and_
+  matches_assert_parity` 参照）。
+
+**§10.8〜§10.12 の「REQ-2 統一複合判定」という表現は、この 2 層構造の
+うち Tier B を指すものとして読み替える**（過去の記述自体は変更せず、
+本節を追記することで用語を整合させる）。契約の正本・詳細な導出・
+実測記録は `docs/metal-grad-reduction-parity-judgment-decision.md`
+（予定。契約 PR #1666 側）に置き、本 doc では重複記載しない。
+
+本節自体はドキュメント整合のみでコード変更を伴わない
+（`crates/backend-metal/src/shaders/gemm.metal::bias_scale_sum_add`・
+`bias_pow2_floor`・`bias_kahan_add` は §10.11 の実装のまま不変）。
+
+### 10.14 判定契約の緩和を撤回し Metal カーネルを binary64 加算のソフトウェアエミュレーションへ置換（2026-09-12。最終形）
+
+§10.10〜§10.13 は「Metal は `double` 非対応」を前提に f32 のみの補償和
+（Neumaier + 2 のべき乗 scale）で「`f64` 相当」を狙い、ホスト `f64` 逐次和と
+一致しない相殺列（`[2^48, 2^24, 1, -2^48, -2^24]` 等）を判定契約側
+（Tier A 理論上界／Tier B 条件付き REQ-2 判定・`n < 2^24` 上限・非有限値
+クラス一致）で吸収しようとしていたが、契約 PR #1666 への codex-review は
+「補償項自身の丸めで寄与が失われる」「subnormal で scale がゼロになる」
+「REQ-2 の適用範囲を承認なしに狭める」等の P1 を繰り返し指摘し、判定契約の
+緩和では収束しなかった。本節で方針を転換し、**契約は緩めず実装側を
+ホストと同一の演算列にする**:
+
+- `gemm.metal::gemm_bias_grad_reduce_f32` の `m >= 2` 経路を、**IEEE 754
+  binary64 の逐次加算（最近接偶数丸め）を 64bit 整数（`ulong`／`long`）
+  演算で忠実に再現する**ソフトウェアエミュレーション（`bias_f64_widen`／
+  `bias_f64_add`／`bias_f64_narrow`／`bias_clz64`）へ置き換えた。演算列は
+  ホスト参照実装（`eval::reduce_bias_grad_rows`／`layout::
+  reduce_bias_grad_rows_host`。`acc: f64 = 0.0` から index 順に加算し最後に
+  1 回 `as f32`）と同一であり、**結果は bit 完全一致**する（NaN のみ payload
+  がハードウェア依存のため quiet NaN へ正規化し、クラス一致で比較する）
+- ホスト側の逐語モデル `crates/backend-metal/src/soft_f64.rs`
+  （`widen_f32_bits`／`add_f64_bits`／`narrow_f64_bits`／`sequential_sum_f32`）
+  を新設し、Rust の `f64` 実演算と `to_bits` で一致することを Linux 実行
+  可能なユニットテストで検証する（ランダム 400 万組・指数差 0〜70 の総当たり
+  ・全 f32 subnormal・f32 指数境界〈overflow／subnormal／underflow〉・
+  codex-review の名指しケース）。`bias_scale_sum_add`／`bias_pow2_floor`／
+  `bias_kahan_add` と旧ホストモデル `tests/gemm_bias_scale_sum_host_model.rs`
+  は撤去
+- 実機テスト `tests/gemm_bias_grad_reduce_bit_match.rs`（`#[ignore]`）で
+  GPU カーネル・ホスト参照実装・逐語モデルの 3 者 bit 一致を名指しケース
+  （相殺・中間 overflow・subnormal・非有限値・符号付きゼロ）込みで確認し、
+  `tests/gemm_fp32_strict_into_parity.rs` の bias 比較を `assert_parity`
+  から `assert_bits_eq` へ、`crates/facade/tests/device_param_store_grad_
+  readout.rs` の bias slot を `assert_parity` から bit 比較へそれぞれ戻した
+  （M4 Max 実機で全 pass・2026-09-12）
+- これにより §10.13 の Tier A/B・`n < 2^24` の `InvalidArgument` 要件・
+  非有限値クラス一致規則はいずれも不要になり、**bias 勾配は weight 勾配と
+  同じ bit 完全一致契約**へ揃う。tolerance 定数（`RELATIVE_TOLERANCE`／
+  `ABSOLUTE_RESCUE_THRESHOLD`）・`docs/spec/`・REQ-2 の適用範囲はいずれも
+  不変であり、契約 PR #1666（Tier A/B の明文化）はマージ不要（superseded）
+- 64bit 整数はループ添字用途で既に他シェーダ（`mse.metal`・`rmsnorm.metal`
+  ・`softmax.metal`）が使用しており、M4 Max（Apple9 ファミリ）で実行時
+  コンパイル可能なことを確認済み。64 以上のシフトは MSL・Rust とも未定義
+  動作／panic のため、桁合わせ・subnormal 化の経路は分岐で除外してから
+  shift する。1 出力列あたり `m` 回の整数演算（各数十命令）であり、
+  GEMM 本体に対して無視できる規模だが、reuse `step_total` の再計測は
+  本節時点では未実施（並走ビルド中はベンチを行わない規約のため。必要なら
+  `docs/perf/train-resident-grad-device-update.md` §9 の手順で再計測する）
+
