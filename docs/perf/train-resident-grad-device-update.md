@@ -227,7 +227,7 @@ bias `upload_into` の synchronize へ移動）。これは **同期点の移動
 - ~~CUDA 実機での `gemm_fp32_strict_into`／`upload_into` 実装・実測（#1212 から継続・
   既定 `Unsupported`・フォールバック）~~ → #1559 で実装完了（§6 参照）。実機実測は #1560 へ
   引き継ぎ
-- bias 勾配自体のデバイス常駐化は Metal で #1566 により実装済み（下記 §7）。CUDA は
+- bias 勾配自体のデバイス常駐化は Metal で #1566 により実装済み（下記 §8）。CUDA は
   引き続き既定 `Unsupported`（`gemm_fp32_strict_into_with_bias_reduce_tracked` の
   既定実装が weight のみへ委譲し bias は無視する）のままスコープ外
 - `d_input` GEMM の同期境界解消（従来どおり `gemm()` → `download` 経路。スコープ外）
