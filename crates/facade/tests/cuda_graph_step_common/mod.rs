@@ -122,34 +122,38 @@ pub type TrainOnCudaResult = (
 /// `Tape::param_grads_to_host`〈統合版。resident 未充填 slot は
 /// `grads.get(...)` へフォールバック〉）を追加した。
 ///
-/// **CUDA では統合版 `param_grads_to_host` を使う理由**: CUDA は
-/// `gemm_fp32_strict_into` 未実装のため `Op::LinearResident` の重み
-/// 勾配は resident staging（`GradStaging`）へ書き込まれず、backward が
-/// ホスト経路（`fill_resident_weight_grad` が `Ok(false)` を返し
-/// `ops.gemm_fp32_strict` へ委譲。`fandhe_ai_autodiff::grad::vjp` の
-/// `Op::LinearResident` 分岐コメント参照）で `Gradients` へ寄与を
-/// 書き込む。strict 版 `resident_grads_to_host` を CUDA で呼ぶと
-/// `resident_grad_capability` が `Some(false)` のため必ず
-/// `BackendError::Unsupported` を返す（`crates/facade/tests/
+/// **CUDA では統合版 `param_grads_to_host` を使う理由**: **イシュー
+/// #1559 で CUDA が `gemm_fp32_strict_into` を実装した**ことにより
+/// `resident_grad_capability` は CUDA でも `Some(true)` へ確定し
+/// （`crates/backend-cuda/src/ops.rs::CudaBackendOps::
+/// gemm_fp32_strict_into` doc 参照）、`Op::LinearResident` の重み勾配は
+/// NT/TN 形状であれば resident staging（`GradStaging`）へデバイス側で
+/// 直接書き込まれるようになった（それ以外の形状はホスト経路
+/// `ops.gemm_fp32_strict` へフォールバック）。strict 版
+/// `resident_grads_to_host` は CUDA でも weight slot を `Some`・bias
+/// slot を `None` で返すようになった（`crates/facade/tests/
 /// device_param_store_backend_parity.rs::assert_grad_readout_contract`
-/// が別途検証）。統合版 `param_grads_to_host` は全 slot がこの
-/// `grads.get(...)` フォールバック経路を通ることで `Ok` を返す。
+/// が別途検証。CPU・Metal〈#1555〉と同じ扱い）。統合版
+/// `param_grads_to_host` は resident 未充填 slot（bias 等）を
+/// `grads.get(...)` フォールバックで補うため、resident 充填の有無に
+/// 関わらずいずれのバックエンドでも全 slot を `Ok` で返す。
 ///
 /// **呼び出し窓**: `backward_device_param_store`（backward 実行）の
 /// 直後・`step_device_param_store`（`pending` を消費する SGD 更新）の
 /// 前に限る（`DeviceParamStore::param_grads_to_host` doc の「呼び出し
 /// 窓」契約）。この窓を外すと `BackendError::InvalidArgument` を返す。
 ///
-/// **CUDA での本比較が検証する内容**: CUDA は resident 経路
-/// （`GradStaging` へのデバイス直接書き込み）に到達しないため、本比較
-/// は「backward が計算した重み勾配そのもの（ホスト経路で `Gradients`
-/// へ書き込まれた値）が capture 経路・非 capture 経路で bit 同一」で
-/// あることの直接検証であり、`GradStaging` の D2H 検証ではない（CPU
-/// のみ resident 経路が成立する。`docs/device-resident-update-design.md`
-/// 追補 #1479 参照）。既存の `dinput`（d(loss)/d(x)）比較が「backward
-/// の入力側端点」を見るのに対し、本比較は「backward のパラメータ側
-/// 端点（SGD 更新の入力そのもの）」を見る点で相補的である。上記の
-/// per-step パラメータ比較（更新後の重み）と合わせて、SGD 更新の
+/// **CUDA での本比較が検証する内容**: 統合版 `param_grads_to_host` は
+/// resident 経路（`GradStaging` へのデバイス直接書き込み。イシュー
+/// #1559 以降 NT/TN 形状で到達）・ホスト経路（それ以外の形状。
+/// `Gradients` への寄与書き込み）のいずれで充填された勾配であっても
+/// 同一 API で読み出すため、本比較は経路の別を問わず「backward が計算
+/// した重み勾配そのものが capture 経路・非 capture 経路で bit 同一」
+/// であることの直接検証である（`docs/device-resident-update-design.md`
+/// 追補 #1479・#1559 参照）。既存の `dinput`（d(loss)/d(x)）比較が
+/// 「backward の入力側端点」を見るのに対し、本比較は「backward の
+/// パラメータ側端点（SGD 更新の入力そのもの）」を見る点で相補的である。
+/// 上記の per-step パラメータ比較（更新後の重み）と合わせて、SGD 更新の
 /// 入力・出力の両端が capture 経路・非 capture 経路で bit 同一である
 /// ことを揃って検証する。
 pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> TrainOnCudaResult {
@@ -202,10 +206,13 @@ pub fn train_on_cuda(ordinal: usize, steps: usize, lr: f32) -> TrainOnCudaResult
         // （`pending` を消費する SGD 更新）の前という呼び出し窓内で
         // 各 step の重み勾配を読み出す（`train_on_cuda` doc コメント
         // 「重み自体の勾配を per-step で比較対象へ加える」参照）。
-        // strict 版 `resident_grads_to_host` は CUDA で必ず
-        // `Unsupported` を返す設計（`gemm_fp32_strict_into` 未実装）
-        // のため、統合版 `param_grads_to_host`（resident 未充填 slot は
-        // `grads.get(...)` フォールバック）を使う。
+        // イシュー #1559 で CUDA も `gemm_fp32_strict_into` を実装した
+        // ため strict 版 `resident_grads_to_host` は weight slot を
+        // `Some` で返しうるが、本比較は resident 充填の有無に依存せず
+        // 全 slot を均一に扱いたいため、統合版 `param_grads_to_host`
+        // （resident 未充填 slot は `grads.get(...)` フォールバック）を
+        // 引き続き使う。
+
         let step_grads = tape
             .param_grads_to_host(&store, &grads)
             .expect("param_grads_to_host: backward 直後・step 前の呼び出し窓内で呼んでいるはず");
