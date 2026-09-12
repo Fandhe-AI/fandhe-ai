@@ -26,11 +26,16 @@
 //! `fandhe_ai::compat::Sequential` へ移設）がこれを介して `Linear`・
 //! 活性化関数を均一に扱えるようにした。共通 `Optimizer` trait の定義は
 //! 本イシューでは
-//! 行わない（`optim` 配下が揃った時点で確定する）。
+//! 行わない（`optim` 配下が揃った時点で確定する）。イシュー #1596 で
+//! [`RmsNorm`]／[`LayerNorm`]（`norm` モジュール）を追加し、既存の RMSNorm 行
+//! カーネル（`backend-cpu`／`backend-cuda`／`backend-metal` の
+//! `rmsnorm.rs`）を `BackendOps::rmsnorm` 経由で・LayerNorm を新設
+//! カーネル経由でそれぞれ接続した（`docs/norm-ops-design.md`）。
 
 mod init;
 mod linear;
 mod module;
+mod norm;
 mod rnn;
 
 pub mod activation;
@@ -39,6 +44,9 @@ pub mod optim;
 
 pub use linear::{Linear, LinearVars};
 pub use module::Module;
+pub use norm::{
+    LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, RMS_NORM_DEFAULT_EPS, RmsNorm, RmsNormVars,
+};
 pub use rnn::{
     Gru, GruCell, GruCellVars, Lstm, LstmCell, LstmCellVars, LstmSeqOutput, Rnn, RnnCell,
     RnnCellVars, RnnSeqOutput,

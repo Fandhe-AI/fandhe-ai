@@ -60,6 +60,10 @@ pub enum RmsNormError {
     InvalidShape { detail: String },
     /// `w` が指定されているが `w.len() != hidden`。
     WeightLenMismatch { hidden: usize, w_len: usize },
+    /// `eps` が有限でないか負（`backend-cuda::rmsnorm::
+    /// validate_rmsnorm_launch`／`row_kernel::validate_row_kernel_launch`
+    /// と同型の検証。CPU 側は本 PR まで欠落していた〈codex-review 指摘〉）。
+    InvalidEps { eps: f32 },
 }
 
 impl std::fmt::Display for RmsNormError {
@@ -70,6 +74,9 @@ impl std::fmt::Display for RmsNormError {
                 f,
                 "rmsnorm weight length mismatch: hidden={hidden}, w.len()={w_len}"
             ),
+            RmsNormError::InvalidEps { eps } => {
+                write!(f, "rmsnorm eps must be finite and non-negative: eps={eps}")
+            }
         }
     }
 }
@@ -77,14 +84,19 @@ impl std::fmt::Display for RmsNormError {
 impl std::error::Error for RmsNormError {}
 
 /// 起動前 fail-closed 検証（`backend-cuda::rmsnorm::validate_rmsnorm_launch`
-/// と同型。OWASP A03・`.claude/rules/security.md`）: `rows * hidden ==
-/// x.len()`（checked 乗算）・`w.len() == hidden`（`w` 指定時のみ）。
+/// と同型。OWASP A03・`.claude/rules/security.md`）: `eps` が有限かつ
+/// 非負（`is_finite() && eps >= 0.0`）・`rows * hidden == x.len()`
+/// （checked 乗算）・`w.len() == hidden`（`w` 指定時のみ）。
 fn validate_rmsnorm_launch(
     rows: usize,
     hidden: usize,
     x_len: usize,
     w_len: Option<usize>,
+    eps: f32,
 ) -> Result<(), RmsNormError> {
+    if !eps.is_finite() || eps < 0.0 {
+        return Err(RmsNormError::InvalidEps { eps });
+    }
     let numel = rows
         .checked_mul(hidden)
         .ok_or_else(|| RmsNormError::InvalidShape {
@@ -139,7 +151,7 @@ pub(crate) fn run_rmsnorm_f32_raw(
     rows: usize,
     hidden: usize,
 ) -> Result<Vec<f32>, RmsNormError> {
-    validate_rmsnorm_launch(rows, hidden, x.len(), w.map(|s| s.len()))?;
+    validate_rmsnorm_launch(rows, hidden, x.len(), w.map(|s| s.len()), eps)?;
 
     if rows == 0 || hidden == 0 {
         return Ok(Vec::new());
@@ -359,20 +371,50 @@ mod tests {
 
     #[test]
     fn validate_rmsnorm_launch_accepts_matching_dims() {
-        assert!(validate_rmsnorm_launch(3, 8, 24, Some(8)).is_ok());
-        assert!(validate_rmsnorm_launch(3, 8, 24, None).is_ok());
+        assert!(validate_rmsnorm_launch(3, 8, 24, Some(8), 1e-5).is_ok());
+        assert!(validate_rmsnorm_launch(3, 8, 24, None, 1e-5).is_ok());
     }
 
     #[test]
     fn validate_rmsnorm_launch_rejects_x_len_mismatch() {
-        let err = validate_rmsnorm_launch(3, 8, 23, None).unwrap_err();
+        let err = validate_rmsnorm_launch(3, 8, 23, None, 1e-5).unwrap_err();
         assert!(matches!(err, RmsNormError::InvalidShape { .. }));
     }
 
     #[test]
     fn validate_rmsnorm_launch_rejects_w_len_mismatch() {
-        let err = validate_rmsnorm_launch(3, 8, 24, Some(7)).unwrap_err();
+        let err = validate_rmsnorm_launch(3, 8, 24, Some(7), 1e-5).unwrap_err();
         assert!(matches!(err, RmsNormError::WeightLenMismatch { .. }));
+    }
+
+    #[test]
+    fn validate_rmsnorm_launch_rejects_negative_eps() {
+        let err = validate_rmsnorm_launch(3, 8, 24, None, -1.0).unwrap_err();
+        assert!(matches!(err, RmsNormError::InvalidEps { .. }));
+    }
+
+    #[test]
+    fn validate_rmsnorm_launch_rejects_non_finite_eps() {
+        for eps in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let err = validate_rmsnorm_launch(3, 8, 24, None, eps).unwrap_err();
+            assert!(matches!(err, RmsNormError::InvalidEps { .. }));
+        }
+    }
+
+    #[test]
+    fn validate_rmsnorm_launch_accepts_zero_eps() {
+        assert!(validate_rmsnorm_launch(3, 8, 24, None, 0.0).is_ok());
+    }
+
+    /// CUDA／Metal は不正な `eps` を拒否するが、CPU は本 PR まで受理し
+    /// `NaN` 出力を生んでいた（codex-review 指摘）。
+    #[test]
+    fn run_rmsnorm_f32_rejects_invalid_eps() {
+        let x = vec![1.0f32, 2.0, 3.0, 4.0];
+        let err = run_rmsnorm_f32(&x, None, -1.0, 1, 4).unwrap_err();
+        assert!(matches!(err, RmsNormError::InvalidEps { .. }));
+        let err = run_rmsnorm_f32(&x, None, f32::NAN, 1, 4).unwrap_err();
+        assert!(matches!(err, RmsNormError::InvalidEps { .. }));
     }
 
     #[test]

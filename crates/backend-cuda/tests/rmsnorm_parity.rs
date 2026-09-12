@@ -254,3 +254,78 @@ fn rmsnorm_matches_backend_cpu_directly() {
         &cpu_out,
     );
 }
+
+// --- BackendOps::rmsnorm 独立エントリ（イシュー #1596。`run_fused` の
+//     RMSNorm 一致経路〈上記〉とは別の独立 API）---
+
+/// 環境適応スモーク（属性なし。通常 CI で実行）。CUDA 非搭載環境では
+/// `BackendError::CudaUnavailable` を確認して panic しないことのみ
+/// 検証する（`rmsnorm_run_fused_matches_cpu_composed_env_adaptive` と
+/// 同じ分岐パターン）。
+#[test]
+fn backend_ops_rmsnorm_smoke_env_adaptive() {
+    use fandhe_ai_tensor_core::device::BackendError;
+    use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+    let rows = 3usize;
+    let hidden = 8usize;
+    let x_data = Xorshift64Star::new(4101).fill_vec(rows * hidden);
+    let x = Tensor::new(x_data.clone(), &[rows, hidden]).expect("valid tensor");
+
+    let cuda = fandhe_ai_backend_cuda::CudaBackendOps::new(0);
+    match cuda.rmsnorm(&x, None, 1e-5) {
+        Ok(via_ops) => {
+            let expected = cpu_rmsnorm_reference(&x_data, None, 1e-5, rows, hidden);
+            assert_eq!(via_ops.shape(), &[rows, hidden]);
+            fandhe_ai_backend_cpu::parity::assert_parity(
+                "BackendOps::rmsnorm vs cpu naive reference",
+                via_ops.as_slice().expect("contiguous"),
+                &expected,
+            );
+        }
+        Err(BackendError::CudaUnavailable(msg)) => {
+            assert!(!msg.is_empty(), "error detail message must not be empty");
+        }
+        Err(other) => panic!("unexpected error variant for CudaBackendOps::rmsnorm: {other}"),
+    }
+}
+
+/// `CudaBackendOps::rmsnorm` を `fandhe_ai_backend_cpu::CpuBackendOps::
+/// rmsnorm` と実機で直接 `assert_parity` 突合する（形状網羅）。実機
+/// 必須（`#[ignore]`）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn backend_ops_rmsnorm_matches_cpu_backend_ops_across_shapes() {
+    use fandhe_ai_backend_cpu::CpuBackendOps;
+    use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+    common::parity_baseline::assert_tolerance_constants_pinned();
+
+    let cuda = fandhe_ai_backend_cuda::CudaBackendOps::new(0);
+    let cpu = CpuBackendOps::new();
+
+    let rows_cases: &[usize] = &[1, 3, 17];
+    let hidden_cases: &[usize] = &[1, 31, 32, 33, 1024, 4097];
+    let mut seed = 5100u64;
+    for &rows in rows_cases {
+        for &hidden in hidden_cases {
+            seed += 1;
+            let x_data = Xorshift64Star::new(seed).fill_vec(rows * hidden);
+            let x = Tensor::new(x_data, &[rows, hidden]).expect("valid tensor");
+
+            let gpu_out = cuda
+                .rmsnorm(&x, None, 1e-5)
+                .expect("BackendOps::rmsnorm must succeed on CUDA-equipped test runner");
+            let cpu_out = cpu
+                .rmsnorm(&x, None, 1e-5)
+                .expect("BackendOps::rmsnorm must succeed on CPU");
+
+            assert_eq!(gpu_out.shape(), &[rows, hidden]);
+            fandhe_ai_backend_cpu::parity::assert_parity(
+                &format!("BackendOps::rmsnorm cpu-cuda direct parity rows={rows} hidden={hidden}"),
+                gpu_out.as_slice().expect("contiguous"),
+                cpu_out.as_slice().expect("contiguous"),
+            );
+        }
+    }
+}

@@ -19,12 +19,13 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan, GemmChecksum,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    require_same_shape, row_softmax_layout,
+    require_same_shape, row_norm_layout, row_softmax_layout,
 };
 
 use crate::gemm_blis::{
     gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt, gemm_blis_parallel_tn,
 };
+use crate::layer_norm;
 use crate::linalg::{self, LinalgError};
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
@@ -1208,6 +1209,76 @@ impl BackendOps for CpuBackendOps {
         let mut dpred = vec![0.0f32; pred_slice.len()];
         mse::mse_loss_backward_f32(pred_slice, target_slice, scale, &mut dpred)?;
         Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::rmsnorm`] の CPU 実装
+    /// （イシュー #1596）。既存の [`Self::run_fused`] 経由（`match_
+    /// rmsnorm_plan` の canonical プラン一致限定・`mean` 化なし・`eps`
+    /// なし・`weight` なし）とは別の独立エントリで、`row_norm_layout`
+    /// で `(rows, hidden)` を導出してから [`rmsnorm::run_rmsnorm_f32`]
+    /// （`mean` 化・`eps`・任意 `weight` を含む標準 RMSNorm）を直接
+    /// 呼ぶ。
+    fn rmsnorm(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let x_owned = x.contiguous();
+        let x_slice = x_owned
+            .as_slice()
+            .ok_or_else(|| gemm_contiguity_fail_safe("rmsnorm: input not contiguous"))?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(
+                w.as_slice()
+                    .ok_or_else(|| gemm_contiguity_fail_safe("rmsnorm: weight not contiguous"))?,
+            ),
+            None => None,
+        };
+        let out = rmsnorm::run_rmsnorm_f32(x_slice, w_slice, eps, rows, hidden)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::layer_norm`] の CPU 実装
+    /// （イシュー #1596）。[`Self::rmsnorm`] と同じ `row_norm_layout`
+    /// 導出だが、`run_fused`（canonical 融合プラン一致経路）への
+    /// LayerNorm 一致経路は追加しない——LayerNorm は本エントリ経由でのみ
+    /// 到達する（`docs/norm-ops-design.md`）。新設カーネル
+    /// [`layer_norm::run_layer_norm_f32`] を直接呼ぶ。
+    fn layer_norm(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let x_owned = x.contiguous();
+        let x_slice = x_owned
+            .as_slice()
+            .ok_or_else(|| gemm_contiguity_fail_safe("layer_norm: input not contiguous"))?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice =
+            match &w_owned {
+                Some(w) => Some(w.as_slice().ok_or_else(|| {
+                    gemm_contiguity_fail_safe("layer_norm: weight not contiguous")
+                })?),
+                None => None,
+            };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_slice = match &b_owned {
+            Some(b) => Some(
+                b.as_slice()
+                    .ok_or_else(|| gemm_contiguity_fail_safe("layer_norm: bias not contiguous"))?,
+            ),
+            None => None,
+        };
+        let out = layer_norm::run_layer_norm_f32(x_slice, w_slice, b_slice, eps, rows, hidden)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::lstm_pointwise`] の CPU 実装
