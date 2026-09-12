@@ -104,15 +104,14 @@
   2026-09-01。GB10 実機実測・Metal 実機実測: `docs/perf/cuda-parity-baseline.md`
   §9.8〜§9.10）。**勾配の長軸縮約の Metal 実装形**は正規化統計とは別に規定する。
   MSL は `double` 非対応のため、IEEE 754 binary64 逐次加算の 64bit 整数ソフト
-  ウェアエミュレーション（`bias_f64_widen`／`bias_f64_add`／`bias_f64_narrow`。
-  ホスト側逐語モデル `crates/backend-metal/src/soft_f64.rs`）として実装し、
-  ホスト `f64` 逐次和（index 順）を 1 回 `f32` へ downcast した値と**bit 完全
-  一致**する（NaN のみ quiet NaN へ正規化しクラス一致で比較。tolerance・
-  baseline・REQ-2 判定は不変）。f32 のみの補償和による近似契約（Tier A/B 等の
-  事前判定可能な誤差上界方式）は検討の末、bit 一致するカーネル実装への置換
-  により不要となった（イシュー #1566・PR #1659。経緯・確定契約の正本は
-  `docs/backend-metal-command-batching-design.md` §10.10〜§10.14・
-  `docs/metal-grad-reduction-parity-judgment-decision.md`）
+  ウェアエミュレーションとして実装し、ホスト `f64` 逐次和（index 順）を 1 回
+  `f32` へ downcast した値と**bit 完全一致**する（NaN のみ quiet NaN へ正規化
+  しクラス一致で比較。tolerance・baseline・REQ-2 判定は不変）。f32 のみの
+  補償和による近似契約（Tier A/B 等の事前判定可能な誤差上界方式）は、bit
+  一致するカーネル実装の採用により不要となる見込みである。**実装は PR #1659
+  （イシュー #1566）で導入（未マージ時点では本契約のみが確定済みで、実装は
+  未導入）**。契約・経緯の正本は `docs/metal-grad-reduction-parity-judgment-
+  decision.md`（実装記録節は PR #1659 マージ後に追記）
 - **TF32/f16 Tensor Core 経路の parity テスト判定方式（P1。テストの弱体化禁止の
   例外を明記する規約。正本仕様 `docs/spec/04-requirements.md` REQ-2「2026-09-02
   追記・Tensor Core 経路の受け入れ判定方式」〈fandhe-ai-spec PR #63〉が正式な
