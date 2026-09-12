@@ -20,6 +20,10 @@
   終了コード 2（入力不能）を返す。
 - 終了コード: 全セル非後退なら 0、後退または判定不能ありなら 3、入力自体
   が不能なら 2。
+- `--require-checksum-exact`（既定 off・イシュー #1560）: 未指定時は
+  `checksum_composite_match` のみで判定する既存契約を維持し、指定時は
+  `checksum_exact_match` が False のセルも非後退から除外し終了コードへ
+  反映する。
 """
 
 import importlib.util
@@ -276,6 +280,101 @@ class MainTest(unittest.TestCase):
                 code = compare_gemm_ab.main(["prog", before_path, after_path])
             self.assertEqual(code, 0)
             self.assertEqual(out.getvalue().count("非後退"), 8)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_require_checksum_exact_flag_off_by_default_composite_only(self):
+        # 既定（フラグ未指定）では checksum_composite_match のみで判定し、
+        # checksum_exact_match が False でも threshold 内なら非後退のまま
+        # 終了コード 0（後方互換。イシュー #1560 codex-review [P1] 指摘）。
+        before, after = _all_cells_rows(0.002, 0.0019)
+        for r in after:
+            if r["size"] == 4096 and r["mode"] == "reuse":
+                # 複合判定は通るが完全一致ではない値へ変える。
+                r["checksum"] = before[0]["checksum"] * (1 + 1e-9)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(["prog", before_path, after_path])
+            self.assertEqual(code, 0)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_require_checksum_exact_flag_on_rejects_non_exact_match(self):
+        # `--require-checksum-exact` 指定時は checksum_composite_match が
+        # 通っていても checksum_exact_match が False なら終了コード 3
+        # （非後退相当としない。イシュー #1560 codex-review [P1] 指摘）。
+        before, after = _all_cells_rows(0.002, 0.0019)
+        for r in after:
+            if r["size"] == 4096 and r["mode"] == "reuse":
+                r["checksum"] = before[0]["checksum"] * (1 + 1e-9)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--require-checksum-exact", before_path, after_path]
+                )
+            self.assertEqual(code, 3)
+            self.assertIn("checksum_exact_match=False", err.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_require_checksum_exact_flag_on_markdown_matches_exit_code(self):
+        # イシュー #1560 codex-review [P2] 指摘: `--require-checksum-exact`
+        # 指定時、終了コードは checksum_exact_match=False を後退相当として
+        # 反映するが、render_markdown にはこの条件が渡らずレポート側は
+        # 「非後退」のままで結論が食い違っていた。render_markdown へ
+        # `require_checksum_exact` を渡すことで、Markdown 表の「判定」列も
+        # 終了コードと同じ結論（後退相当）を示すことを確認する。
+        before, after = _all_cells_rows(0.002, 0.0019)
+        for r in after:
+            if r["size"] == 4096 and r["mode"] == "reuse":
+                r["checksum"] = before[0]["checksum"] * (1 + 1e-9)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--require-checksum-exact", before_path, after_path]
+                )
+            self.assertEqual(code, 3)
+            report = out.getvalue()
+            # 対象セル（4096/reuse）の行に「後退相当」を含み、単純な
+            # 「非後退」表記のまま残っていないことを確認する。
+            lines = [ln for ln in report.splitlines() if ln.startswith("| 4096/reuse")]
+            self.assertEqual(len(lines), 1)
+            self.assertIn("後退相当", lines[0])
+            self.assertIn("--require-checksum-exact", lines[0])
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_require_checksum_exact_flag_on_all_exact_still_exit_zero(self):
+        # 全セル checksum 完全一致なら `--require-checksum-exact` 指定でも
+        # 従来どおり終了コード 0（フラグが誤って非後退セルまで巻き込まない
+        # ことの確認）。
+        before, after = _all_cells_rows(0.002, 0.0019)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--require-checksum-exact", before_path, after_path]
+                )
+            self.assertEqual(code, 0)
         finally:
             os.unlink(before_path)
             os.unlink(after_path)
