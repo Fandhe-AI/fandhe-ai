@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # DGX: framework-compare（ピン 0.8.0）と backend-cuda 診断テストの事前ビルド（ベンチと分離）
 set -u
+# pipefail: `| tail` で pip／cargo の失敗が隠れないようにする（PR #1654 レビュー後に追加。
+# 記録済み実行時は `set -u` のみだったが、結果ログで成功を確認済み。README「レビュー後の修正」節）
+set -o pipefail
 export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 cd "${HOME}/work/rust-ai-library-run"
 echo "start $(date -u +%FT%TZ)"

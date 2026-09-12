@@ -108,8 +108,12 @@ M4 Max は 4 スレッド上限が 12 より 1.3〜1.5 倍速いが、GB10 は�
 - **train phases（µs）**: cpu fresh step 854／backward 533・reuse
   999／606・device_update 121。metal fresh 1717／868（forward 771）・
   reuse 1169／459（forward_resident 559）。CPU reuse 逆転（GB10 でも
-  0.892 → 1.175 ms）は backward の gemm 呼び出し 4 回（fresh 2 回）と
-  上記マスク・device_update で説明できる。
+  0.892 → 1.175 ms）は上記マスク（非連続 view 走査）と device_update で
+  説明する。診断行の `gemm_calls`（fresh 2・reuse 4）は計装単位の差であり
+  GEMM 呼び出し回数の増加ではない: fresh は `matmul_vjp` 全体を 1 回と
+  数える（内部で d_input・d_weight の GEMM を 2 回呼ぶ）のに対し、reuse は
+  `Op::LinearResident` の個々の GEMM 相当処理を数えるため、実際の GEMM
+  回数は両モードとも同じ 4 回である。
 
 ## 5. Metal readout legacy の局所化（#1520 の続き）
 

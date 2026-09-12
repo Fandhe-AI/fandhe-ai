@@ -716,7 +716,7 @@ diff --git a/crates/autodiff/src/optim/device_store.rs b/crates/autodiff/src/opt
 index a5d1f5ac..356d6bd3 100644
 --- a/crates/autodiff/src/optim/device_store.rs
 +++ b/crates/autodiff/src/optim/device_store.rs
-@@ -4224,4 +4224,70 @@ mod tests {
+@@ -4224,4 +4224,68 @@ mod tests {
              let _ = ops.run_fused(&plan, &[&a]);
          }
      }
@@ -774,17 +774,15 @@ index a5d1f5ac..356d6bd3 100644
 +        let y2 = store.linear_forward(&tape, &y1, &leaves[2], None).unwrap();
 +        let loss = y2.mse_loss(&target).unwrap();
 +
-+        // SAFETY ではなく単なる注記: `std::env::set_var` は Rust 2024 で
-+        // unsafe だが、本テストはプロセス内で他スレッドと環境変数を
-+        // 共有しない前提の一時診断（並行実行との競合を避けるため
-+        // `--test-threads=1` での実行を前提とする。恒久実装ではない）。
-+        unsafe {
-+            std::env::set_var("FANDHE_DIAG_MASK_CONTIGUITY", "1");
-+        }
++        // 環境変数 `FANDHE_DIAG_MASK_CONTIGUITY=1` はテスト内で変更せず
++        // プロセス起動時にシェル側で設定する（例:
++        // `FANDHE_DIAG_MASK_CONTIGUITY=1 cargo test -p fandhe-ai-autodiff
++        //  --release diag_two_layer_resident_relu_backward_upstream_contiguity -- --nocapture`）。
++        // `std::env::set_var`／`remove_var` は Rust 2024 で unsafe であり、
++        // rayon 等のワーカースレッドが環境を参照しないことを保証できない
++        // ため、テスト内での変更は行わない（未設定時は診断行を出力せず
++        // 通常経路を通るだけで、テスト自体は pass する）。
 +        let _grads = store.backward(&tape, &loss).unwrap();
-+        unsafe {
-+            std::env::remove_var("FANDHE_DIAG_MASK_CONTIGUITY");
-+        }
 +    }
  }
 diff --git a/crates/backend-cpu/src/mse.rs b/crates/backend-cpu/src/mse.rs

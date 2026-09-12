@@ -86,3 +86,21 @@ scratchpad 絶対パス 1 箇所のみ `<masked-scratchpad-path>` へ置換済�
 | `results-m4max-0.8.0.jsonl`・`skipped-m4max-0.8.0.log` | Apple M4 Max | crates.io ピン `fandhe-ai =0.8.0`（`run_all_m4max.sh` 相当。`GEMM_GATE_PATCH_FACADE_PATH` 未指定・ビルドログに `Compiling fandhe-ai v0.8.0`〈registry〉を確認） | 共有（load average 11.25 → 5.09） | 2026-09-12 午前 | 同日の敗因分析スコアボード（本記録の Mac 系列〈HEAD path patch〉とは別系列） |
 
 本記録 §4（backward 内訳）・§5（readout）の Mac 系列は上記とは異なり origin/main HEAD `097bff19` の path patch＋診断計装ビルドであり、その生データは本ディレクトリの `mac/` と `mac-head-097bff19-path-patch.jsonl` にある。
+
+## レビュー後の修正（PR #1654 codex-review 対応・実測後の変更）
+
+以下は実測完了後にレビュー指摘で修正した箇所であり、記録済みログ・JSONL は修正前の
+スクリプト／パッチで取得したもの（再計測はしていない）。
+
+- `diag-instrumentation.patch`: `mask_contiguity_diag` テスト内の `std::env::set_var`／
+  `remove_var`（`// SAFETY:` なしの `unsafe`）を除去し、環境変数はシェル側で
+  プロセス起動時に設定する形へ変更（P0）。マスク走査のマイクロ計測結果
+  （`docs/perf/lowlayer-diagnosis-2026-09-12.md` §4）は環境変数の設定経路に依存しない。
+- `scripts/dgx-venv.sh`・`scripts/dgx-prebuild.sh`: `set -o pipefail` を追加（P2）。記録済み
+  実行では `| tail` により pip／cargo の失敗が `||` フォールバック・`rc=` 表示へ伝わらない
+  構造だったが、`dgx/dgx-py.log` の `"version": "2.14.0+cu130"`（PyTorch cu130 wheel の
+  導入成功）・`dgx/run_all_cuda.log`／`dgx/dgx-run.log`（事前ビルド成果物での実行成功）で
+  当該実行の成功自体は確認できる。
+- `docs/perf/lowlayer-diagnosis-2026-09-12.md` §4: 診断行 `gemm_calls`（fresh 2・reuse 4）を
+  GEMM 呼び出し回数の増加と解釈していた記述を訂正（計装単位の差。P2）。
+
