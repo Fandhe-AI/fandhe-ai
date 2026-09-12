@@ -21,8 +21,17 @@
 //! スレッド数に依らず bit 決定的。`reduction.rs` モジュール doc 参照）で
 //! 並列化したのちチャンク番号順に逐次結合する。
 //!
-//! backward は要素独立（アキュムレータなし）のため
-//! `elementwise` モジュールと同じ `par_iter_mut` 並列化でよい。
+//! backward は要素独立（アキュムレータなし）の map 演算であり、
+//! `elementwise` モジュールと同じ理由で `par_iter_mut` 並列化が数値へ
+//! 影響しない（結合則の影響を受ける加算・乗算の跨りがないため）。
+//! ただし framework-compare の `train`（`BATCH=64 × D_OUT=10 = 640`
+//! 要素。`scripts/bench/framework-compare/bench-fandhe/src/main.rs`）
+//! 規模では rayon の fork-join 固定費が支配的になることを低レイヤー
+//! 診断（`docs/perf/lowlayer-diagnosis-2026-09-12.md` §4・§7「A-11」・
+//! イシュー #1574）が実測しており、[`elementwise::PARALLEL_THRESHOLD`]
+//! と同型の要素数しきい値フォールバックを [`MSE_BACKWARD_PARALLEL_MIN_ELEMS`]
+//! として導入する（イシュー #1578。実測記録・事前登録規則は
+//! `docs/perf/cpu-mse-backward-sequential-threshold.md`）。
 
 use fandhe_ai_tensor_core::{BackendError, ShapeError};
 use rayon::prelude::*;
@@ -31,6 +40,32 @@ use rayon::prelude::*;
 /// （由来は同モジュール参照。forward の 2 乗和も同じ決定性契約に従う
 /// ため、別の値を使う理由がない）。
 const CHUNK: usize = 4096;
+
+/// [`mse_loss_backward_f32`] が逐次ループへフォールバックする要素数の
+/// しきい値（この値**未満**は逐次）。`crate::elementwise::PARALLEL_THRESHOLD`
+/// と同じ「rayon fork-join 固定費 対 実作業」のトレードオフだが、MSE
+/// backward 特有の実測（イシュー #1578・`docs/perf/
+/// cpu-mse-backward-sequential-threshold.md` の Phase 0）で個別に決定
+/// した値のため別定数として持つ（elementwise 側の値と揃うとは限らない）。
+///
+/// 出荷時の既定は Phase 0／Phase 1 の実測判定（ADOPT／REJECT）に従う。
+/// REJECT の場合は `0`（常に並列＝変更前と bit 同一の挙動）とし、
+/// 機構自体は残す（`ops.rs::GEMM_OUTPUT_PARALLEL_ZERO_MIN_ELEMS` を
+/// `usize::MAX` で無効化する慣行〈#1299/#1482〉の逆向き）。
+///
+/// Phase 0 実測（M4 Max・GB10（DGX Spark）各 5 プロセス起動。
+/// `docs/perf/cpu-mse-backward-sequential-threshold.md` §5）では、
+/// スイープ上限 `1 << 18`（262144 要素）までの全サイズ・全 run で
+/// 逐次が並列を一貫して上回った（`r(n) = seq/par` が一度も 1.00 を
+/// 超えなかった）ため、事前登録規則の「見つからなければ `1 << 18`」を
+/// 適用し候補 `T = 1 << 18` を得た。しかし Phase 1（framework-compare
+/// train A/B・事前登録規則）では GB10 の reuse セルが `ratio = 1.0167`
+/// （> 1.00）となり **REJECT** と確定した（M4 Max は `ratio = 0.9163`
+/// で非後退・両機体とも checksum 完全一致）。事前登録規則は事後緩和
+/// しない契約のため、GB10 の後退 1 件で全体を REJECT とし、既定値は
+/// `0`（常に並列＝変更前と bit 同一の挙動）へ確定する（機構自体は
+/// 残す。詳細・原因分析は同 doc §6・§7）。
+pub(crate) const MSE_BACKWARD_PARALLEL_MIN_ELEMS: usize = 0;
 
 /// 2 つの長さの一致を検証する（`backend-cuda::mse::
 /// validate_mse_binary_len` と同じ構成）。
@@ -110,19 +145,60 @@ pub(crate) fn mse_sum_sq_f32(pred: &[f32], target: &[f32]) -> Result<f32, Backen
 /// `BackendError::ShapeMismatch` として返し、release ビルドでも消えない
 /// panic を境界外へ漏らさない。rayon `zip` の黙示切り詰めも同時に防ぐ）
 /// で検出する。
+///
+/// 本番経路は [`MSE_BACKWARD_PARALLEL_MIN_ELEMS`] を既定しきい値として
+/// 使う薄いラッパー（[`mse_loss_backward_f32`]）。計測・テストからは
+/// [`mse_loss_backward_f32_with_threshold`] を直接呼び、しきい値を差し
+/// 替えて逐次／並列の両腕を比較できるようにする。
 pub(crate) fn mse_loss_backward_f32(
     pred: &[f32],
     target: &[f32],
     scale: f32,
     dpred: &mut [f32],
 ) -> Result<(), BackendError> {
+    mse_loss_backward_f32_with_threshold(
+        pred,
+        target,
+        scale,
+        dpred,
+        MSE_BACKWARD_PARALLEL_MIN_ELEMS,
+    )
+}
+
+/// [`mse_loss_backward_f32`] の本体。`min_elems` を明示的に受け取り、
+/// `pred.len() < min_elems` なら逐次ループへフォールバックする
+/// （rayon の fork-join 固定費が実作業を上回る小規模入力向け。
+/// イシュー #1578）。
+///
+/// # bit 同一契約
+///
+/// 逐次分岐は並列分岐と**同一の式**（`scale * (p - t)`）を使う。両分岐
+/// とも要素独立（アキュムレータなし）の map 演算のため丸めの発生源が
+/// 存在せず、構成上 bit 同一になる（`.claude/rules/coding-rust.md` の
+/// FMA 契約は積和演算〈GEMM〉限定で本関数の elementwise 差分には
+/// 適用外。`elementwise.rs` モジュール doc と同じ判断）。
+/// `#[cfg(test)]` の `mse_loss_backward_threshold_bit_exact` で
+/// forced-seq／forced-par／素朴ループの 3 者一致を検証する。
+pub(crate) fn mse_loss_backward_f32_with_threshold(
+    pred: &[f32],
+    target: &[f32],
+    scale: f32,
+    dpred: &mut [f32],
+    min_elems: usize,
+) -> Result<(), BackendError> {
     validate_mse_len(pred.len(), target.len())?;
     validate_mse_len(pred.len(), dpred.len())?;
-    dpred
-        .par_iter_mut()
-        .zip(pred.par_iter())
-        .zip(target.par_iter())
-        .for_each(|((o, &p), &t)| *o = scale * (p - t));
+    if pred.len() < min_elems {
+        for ((o, &p), &t) in dpred.iter_mut().zip(pred.iter()).zip(target.iter()) {
+            *o = scale * (p - t);
+        }
+    } else {
+        dpred
+            .par_iter_mut()
+            .zip(pred.par_iter())
+            .zip(target.par_iter())
+            .for_each(|((o, &p), &t)| *o = scale * (p - t));
+    }
     Ok(())
 }
 
@@ -184,5 +260,151 @@ mod tests {
         let mut dpred = vec![0.0; 2];
         let err = mse_loss_backward_f32(&pred, &target, 1.0, &mut dpred).unwrap_err();
         assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    #[test]
+    fn mse_loss_backward_with_threshold_length_mismatch_both_arms() {
+        // 長さ不一致検証は逐次・並列いずれの分岐に入る前でも行われる
+        // ことを固定する（forced-seq / forced-par 双方）。
+        let pred = vec![1.0, 2.0];
+        let target = vec![0.0];
+        let mut dpred = vec![0.0; 2];
+        for min_elems in [0usize, usize::MAX] {
+            let err =
+                mse_loss_backward_f32_with_threshold(&pred, &target, 1.0, &mut dpred, min_elems)
+                    .unwrap_err();
+            assert!(
+                matches!(err, BackendError::ShapeMismatch(_)),
+                "min_elems={min_elems}"
+            );
+        }
+    }
+
+    /// 素朴な逐次リファレンス実装（rayon 非使用）。forced-seq / forced-par
+    /// と bit 単位で突き合わせる正の根拠とする。
+    fn naive_backward(pred: &[f32], target: &[f32], scale: f32) -> Vec<f32> {
+        pred.iter()
+            .zip(target.iter())
+            .map(|(&p, &t)| scale * (p - t))
+            .collect()
+    }
+
+    #[test]
+    fn mse_loss_backward_threshold_bit_exact() {
+        // forced-seq（min_elems = usize::MAX）・forced-par（min_elems = 0）・
+        // 素朴ループの 3 者が bit 単位で完全一致することを、NaN・-0.0・
+        // subnormal・±inf・scale 負値/0 を含む入力で検証する（イシュー
+        // #1578 の bit 同一契約）。
+        let sizes = [0usize, 1, 2, 639, 640, 641, 32767, 32768, 32769];
+        for &n in &sizes {
+            let pred: Vec<f32> = (0..n)
+                .map(|i| match i % 7 {
+                    0 => f32::NAN,
+                    1 => -0.0,
+                    2 => f32::MIN_POSITIVE * 0.5, // subnormal
+                    3 => f32::INFINITY,
+                    4 => f32::NEG_INFINITY,
+                    _ => (i as f32) * 0.0001 - 3.0,
+                })
+                .collect();
+            let target: Vec<f32> = (0..n).map(|i| (i as f32) * 0.0002 - 1.5).collect();
+
+            for &scale in &[1.0f32, -2.5, 0.0] {
+                let mut seq = vec![0.0f32; n];
+                let mut par = vec![0.0f32; n];
+                mse_loss_backward_f32_with_threshold(&pred, &target, scale, &mut seq, usize::MAX)
+                    .unwrap();
+                mse_loss_backward_f32_with_threshold(&pred, &target, scale, &mut par, 0).unwrap();
+                let naive = naive_backward(&pred, &target, scale);
+
+                for i in 0..n {
+                    assert_eq!(
+                        seq[i].to_bits(),
+                        par[i].to_bits(),
+                        "n={n} scale={scale} i={i} seq vs par mismatch (NaN 込みのため to_bits 比較)"
+                    );
+                    assert_eq!(
+                        seq[i].to_bits(),
+                        naive[i].to_bits(),
+                        "n={n} scale={scale} i={i} seq vs naive mismatch"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mse_loss_backward_default_threshold_is_expected() {
+        // 既定ラッパー（mse_loss_backward_f32）が MSE_BACKWARD_PARALLEL_MIN_ELEMS
+        // を使う `_with_threshold` 呼び出しと bit 一致することを固定し、
+        // ラッパー結線のドリフトを検出する。
+        let n = 4096;
+        let pred: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001).collect();
+        let target: Vec<f32> = (0..n).map(|i| (i as f32) * 0.0005).collect();
+        let mut via_wrapper = vec![0.0f32; n];
+        let mut via_explicit = vec![0.0f32; n];
+        mse_loss_backward_f32(&pred, &target, 3.0, &mut via_wrapper).unwrap();
+        mse_loss_backward_f32_with_threshold(
+            &pred,
+            &target,
+            3.0,
+            &mut via_explicit,
+            MSE_BACKWARD_PARALLEL_MIN_ELEMS,
+        )
+        .unwrap();
+        for i in 0..n {
+            assert_eq!(via_wrapper[i].to_bits(), via_explicit[i].to_bits(), "i={i}");
+        }
+    }
+
+    /// Phase 0 マイクロベンチ（イシュー #1578・事前登録規則。
+    /// `docs/perf/cpu-mse-backward-sequential-threshold.md` §5 参照）。
+    /// forced-seq / forced-par の中央値（ns）をサイズごとに出力する。
+    /// 実機（CI 非対象）での手動計測用のため `#[ignore]`。
+    #[test]
+    #[ignore]
+    fn mse_backward_threshold_sweep() {
+        use std::time::Instant;
+
+        const SIZES: &[usize] = &[640, 2560, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
+        const WARMUP: usize = 50;
+        const ITERS: usize = 1000;
+
+        eprintln!("threads={}", rayon::current_num_threads());
+
+        for &n in SIZES {
+            let pred: Vec<f32> = (0..n).map(|i| (i as f32) * 0.0001).collect();
+            let target: Vec<f32> = (0..n).map(|i| (i as f32) * 0.00005).collect();
+            let mut dpred = vec![0.0f32; n];
+
+            for (arm, min_elems) in [("seq", usize::MAX), ("par", 0usize)] {
+                for _ in 0..WARMUP {
+                    mse_loss_backward_f32_with_threshold(
+                        &pred, &target, 1.0, &mut dpred, min_elems,
+                    )
+                    .unwrap();
+                }
+                let mut samples = Vec::with_capacity(ITERS);
+                let first_start = Instant::now();
+                mse_loss_backward_f32_with_threshold(&pred, &target, 1.0, &mut dpred, min_elems)
+                    .unwrap();
+                let first_call_ns = first_start.elapsed().as_nanos();
+                for _ in 0..ITERS {
+                    let start = Instant::now();
+                    mse_loss_backward_f32_with_threshold(
+                        &pred, &target, 1.0, &mut dpred, min_elems,
+                    )
+                    .unwrap();
+                    samples.push(start.elapsed().as_nanos());
+                }
+                samples.sort_unstable();
+                let median_ns = samples[samples.len() / 2];
+                let checksum: u64 = dpred.iter().map(|v| v.to_bits() as u64).sum();
+                eprintln!(
+                    "n={n} arm={arm} median_ns={median_ns} first_call_ns={first_call_ns} threads={} checksum={checksum:#x}",
+                    rayon::current_num_threads()
+                );
+            }
+        }
     }
 }

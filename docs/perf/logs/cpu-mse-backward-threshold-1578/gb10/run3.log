@@ -1,0 +1,19 @@
+threads=20
+n=640 arm=seq median_ns=48 first_call_ns=64 threads=20 checksum=0x9671507bbc
+n=640 arm=par median_ns=36064 first_call_ns=28128 threads=20 checksum=0x9671507bbc
+n=2560 arm=seq median_ns=128 first_call_ns=144 threads=20 checksum=0x26472d59819
+n=2560 arm=par median_ns=43088 first_call_ns=43632 threads=20 checksum=0x26472d59819
+n=4096 arm=seq median_ns=192 first_call_ns=208 threads=20 checksum=0x3d9710ad5e6
+n=4096 arm=par median_ns=45440 first_call_ns=41744 threads=20 checksum=0x3d9710ad5e6
+n=8192 arm=seq median_ns=368 first_call_ns=400 threads=20 checksum=0x7c31c838bd3
+n=8192 arm=par median_ns=51024 first_call_ns=49392 threads=20 checksum=0x7c31c838bd3
+n=16384 arm=seq median_ns=928 first_call_ns=1056 threads=20 checksum=0xfa673b4f7b0
+n=16384 arm=par median_ns=56992 first_call_ns=54176 threads=20 checksum=0xfa673b4f7b0
+n=32768 arm=seq median_ns=1904 first_call_ns=2064 threads=20 checksum=0x1f8d2257cf6a
+n=32768 arm=par median_ns=63281 first_call_ns=246721 threads=20 checksum=0x1f8d2257cf6a
+n=65536 arm=seq median_ns=12576 first_call_ns=12864 threads=20 checksum=0x3f9a7fdd7eda
+n=65536 arm=par median_ns=69904 first_call_ns=78768 threads=20 checksum=0x3f9a7fdd7eda
+n=131072 arm=seq median_ns=8432 first_call_ns=9008 threads=20 checksum=0x80353b28ddc3
+n=131072 arm=par median_ns=78417 first_call_ns=91072 threads=20 checksum=0x80353b28ddc3
+n=262144 arm=seq median_ns=42416 first_call_ns=42608 threads=20 checksum=0x1026ab1ff9b94
+n=262144 arm=par median_ns=90704 first_call_ns=95376 threads=20 checksum=0x1026ab1ff9b94
