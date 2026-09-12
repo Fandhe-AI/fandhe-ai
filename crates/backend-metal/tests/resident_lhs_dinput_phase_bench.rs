@@ -178,6 +178,15 @@ fn run_case(label: &str, p: usize, q: usize, r: usize, seed_a: u64, seed_b: u64)
     let mut sync_secs = Vec::with_capacity(TRIALS);
     let mut readback_secs = Vec::with_capacity(TRIALS);
     let mut transpose_secs = Vec::with_capacity(TRIALS);
+    // 各試行の encode+sync+readback 合算値（イシュー #1562 codex-review
+    // 是正）。区間ごとの中央値の和 `q_encode.median + q_sync.median +
+    // q_readback.median` は、各区間の最遅試行が揃って同一試行で起きるとは
+    // 限らないため、5 試行の合計時間の中央値と一般に一致しない
+    // （区間中央値の和は試行合計の中央値の上界にも下界にもならない）。
+    // ここでは試行ごとに 3 区間を合算した配列を作り、その配列へ
+    // `median_q1_q3` を適用することで「5 試行の合計時間の中央値」を
+    // 直接求める。
+    let mut trial_total_secs = Vec::with_capacity(TRIALS);
     #[cfg(feature = "internal-diagnostics")]
     let mut kernel_gpu_secs: Vec<f64> = Vec::with_capacity(TRIALS);
 
@@ -211,7 +220,17 @@ fn run_case(label: &str, p: usize, q: usize, r: usize, seed_a: u64, seed_b: u64)
 
         let t_readback = Instant::now();
         let raw = c_buf.read_to_vec();
-        readback_secs.push(t_readback.elapsed().as_secs_f64());
+        let readback_elapsed = t_readback.elapsed().as_secs_f64();
+        readback_secs.push(readback_elapsed);
+
+        // この試行の encode+sync+readback 合算（試行内で対応する 3 区間の
+        // 実測値のみを足し合わせる。区間別配列の中央値同士を足す旧実装は
+        // 試行間の対応関係を失っていた）。
+        trial_total_secs.push(
+            *encode_secs.last().expect("この試行の encode_secs")
+                + *sync_secs.last().expect("この試行の sync_secs")
+                + readback_elapsed,
+        );
 
         // production の `d_input = transpose2d(tmp)`（`grad.rs`）と同じ
         // `Tensor::transpose`（zero-copy stride view。`storage` を
@@ -259,8 +278,13 @@ fn run_case(label: &str, p: usize, q: usize, r: usize, seed_a: u64, seed_b: u64)
     let q_transpose = median_q1_q3(&transpose_secs).expect("transpose_secs の分位点計算に失敗した");
     let q_encode_only =
         median_q1_q3(&encode_only_secs).expect("encode_only_secs の分位点計算に失敗した");
+    // 区間別中央値の和ではなく、試行ごとの合算値配列に `median_q1_q3` を
+    // 適用した「5 試行の合計時間の中央値」（イシュー #1562 codex-review
+    // 是正）。
+    let q_trial_total =
+        median_q1_q3(&trial_total_secs).expect("trial_total_secs の分位点計算に失敗した");
 
-    let variant_a_total_median = q_encode.median + q_sync.median + q_readback.median;
+    let variant_a_total_median = q_trial_total.median;
     let recoverable_upper_bound = variant_a_total_median - q_encode_only.median;
 
     println!(

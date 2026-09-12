@@ -52,9 +52,12 @@ sh orchestrate.sh --dry-run
    ビルドは GEMM 自体の絶対値が意味を持たないほど遅くなる）
 2. `backward_phase.log` から `encode_deltas`／`command_buffer_deltas`／
    `wait_deltas`（5 trial 分）と `backward-only median/q1/q3` を抽出し、
-   §7.3.1 の事前登録仮説（`encode_delta=4`・`command_buffer_delta=
-   wait_delta=2`）と一致するか確認する。不一致の場合は乖離をそのまま
-   記録し（record only のため隠さない）、原因調査を新規イシューへ引き継ぐ
+   `docs/backend-metal-command-batching-design.md` §7.3.2 の訂正仮説
+   （`encode_delta=5`・`command_buffer_delta=4`・`wait_delta=3`。当初仮説
+   `encode_delta=4`・`command_buffer_delta=wait_delta=2` は `Op::MseLoss`
+   の VJP 自身の `dispatch_sync` を見落としていたため #1562 codex-review
+   で訂正済み）と一致するか確認する。不一致の場合は乖離をそのまま記録し
+   （record only のため隠さない）、原因調査を新規イシューへ引き継ぐ
 3. `resident_lhs_phase.log`／`resident_lhs_phase_gpu_timestamps.log` から
    L1・L2 それぞれの `variant_a` 4 区間・`variant_b` encode_only・
    `recoverable_upper_bound` を抽出し §7.3.4 の表へ転記する
