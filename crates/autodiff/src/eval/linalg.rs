@@ -304,25 +304,30 @@ pub(crate) fn det(a: &Tensor<f32>) -> Tensor<f32> {
     build_tensor(vec![value as f32], &[])
 }
 
-/// `A^{-T} b`（ベクトル）。`Op::Solve` の VJP（`dB = A^{-T} g`）が使う。
-/// forward の `lu_decompose(a)` を再利用せず、`aᵀ` を明示的に分解する
-/// （転置行列の LU を都度計算するのは非効率だが、分解サイズが小さい
-/// 前提のため単純さを優先する。設計文書 §3.4「Solve」）。
-pub(crate) fn solve_transposed(
-    a: &Tensor<f32>,
-    b: &Tensor<f32>,
-) -> Result<Tensor<f32>, AutodiffError> {
+/// `A^{-T} b`（`f64` の [`Mat`] のまま返す）。`Op::Solve` の VJP
+/// （`dB = A^{-T} g`）専用の内部実装。forward の `lu_decompose(a)` を
+/// 再利用せず、`aᵀ` を明示的に分解する（転置行列の LU を都度計算する
+/// のは非効率だが、分解サイズが小さい前提のため単純さを優先する。
+/// 設計文書 §3.4「Solve」）。
+///
+/// [`solve_vjp`] は戻り値を `f32` へ downcast せず `dA = -dB Xᵀ` の
+/// 計算にそのまま使い、両方の勾配を計算し終えてから 1 回だけ
+/// downcast する（`det_vjp`／`fro` ノルム VJP と同じ内部精度契約
+/// 〈`.claude/rules/coding-rust.md`〉。codex-review 指摘: `dB` を
+/// 先に `f32` へ downcast すると、極端なスケール〈`A=[[1e-20]]`・
+/// `B=[[1e-30]]`・`upstream=1e20`〉で `dB≈1e40` が `f32::INFINITY` に
+/// 丸められ、本来有限の `dA≈-1e30` も `-Inf` へ伝播してしまう）。
+fn solve_transposed_mat(a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Mat, AutodiffError> {
     let a_mat = Mat::from_tensor(a);
     let a_t = a_mat.transpose();
     let b_mat = Mat::from_tensor(b);
     let n = a_t.rows;
     if n == 0 {
-        return Ok(build_tensor(Vec::new(), &[0, b_mat.cols]));
+        return Ok(Mat::zeros(0, b_mat.cols));
     }
     let lu = lu_decompose(&a_t)
         .ok_or_else(|| invalid("eval::linalg::solve_transposed: 係数行列が特異"))?;
-    let x = lu_solve_mat(&lu, &b_mat);
-    Ok(x.to_tensor())
+    Ok(lu_solve_mat(&lu, &b_mat))
 }
 
 // =====================================================================
@@ -496,6 +501,18 @@ fn normalize_max_abs_sign(v: &mut [f64]) {
     }
 }
 
+/// 片側 Jacobi SVD（[`jacobi_svd_tall`]）の列直交収束判定に使う相対
+/// しきい値。[`svd`] の数値 rank 判定（丸め残差由来の微小特異値を
+/// 厳密ゼロへ丸める `rank_tol`）もこの値の平方根を共有する——
+/// Jacobi は `gamma.abs() <= JACOBI_EPS * sqrt(alpha*beta)` で収束を
+/// 打ち切るため、収束後に残る非直交性・特異値誤差は理論上
+/// `O(sqrt(JACOBI_EPS))` スケールになりうる（本来 0 の特異値が
+/// `JACOBI_EPS` そのものの桁では丸められず残ってしまう。
+/// codex-review 指摘: `A=[[1,0.3],[2,0.6],[5,1.5]]` のような
+/// 丸め残差由来の rank 落ちで、この定数を共有しない独立の機械
+/// epsilon ベースしきい値では検出できなかった）。
+const JACOBI_EPS: f64 = 1e-14;
+
 /// `m >= n` の片側 Jacobi SVD（列直交化による古典的手法）。
 /// `A` の列を回転で逐次直交化し、収束後の列ノルムが特異値になる。
 /// 反復上限は 60 スイープ（実用上ほぼ全ての小〜中規模行列で収束する）。
@@ -504,7 +521,6 @@ fn jacobi_svd_tall(a: &Mat) -> Result<(Mat, Vec<f64>, Mat), AutodiffError> {
     let mut u = a.clone();
     let mut v = Mat::identity(n);
     const MAX_SWEEPS: usize = 60;
-    const EPS: f64 = 1e-14;
 
     for _sweep in 0..MAX_SWEEPS {
         let mut converged = true;
@@ -520,12 +536,12 @@ fn jacobi_svd_tall(a: &Mat) -> Result<(Mat, Vec<f64>, Mat), AutodiffError> {
                 // で行う（絶対下限 `.max(EPS)` を持たない）。`alpha` また
                 // は `beta` が 0（零列）のとき `gamma` も必ず 0 になる
                 // （零ベクトルとの内積）ため `0.0 <= 0.0` で安全に収束
-                // 判定できる。絶対下限があると `EPS*EPS = 1e-28` という
+                // 判定できる。絶対下限があると `JACOBI_EPS*JACOBI_EPS = 1e-28` という
                 // 入力スケール非依存の閾値が生じ、列ノルムが
                 // 約 1e-15 スケールの小さい入力で非直交な列を誤って
                 // 収束扱いし、誤った特異値・特異ベクトルを返していた
                 // （codex-review 指摘）。
-                if gamma.abs() <= EPS * (alpha * beta).sqrt() {
+                if gamma.abs() <= JACOBI_EPS * (alpha * beta).sqrt() {
                     continue;
                 }
                 converged = false;
@@ -613,9 +629,14 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
 
     // 降順ソート（同値は安定ソート＝元の添字順を保つ。`sort_by` は
     // 安定ソート）。`sigmas` は列ノルム（`v*v` の和の `sqrt`）のため
-    // 理論上 NaN にはならないが（非有限入力は `jacobi_svd_tall` の
-    // 収束判定〈`gamma.abs() <= EPS * ...`〉が常に偽になり 60 スイープ
-    // 非収束の `Err` で弾かれる）、`partial_cmp(...).unwrap()`
+    // 理論上 NaN にはならないことが多いが（`k >= 2` では非有限入力が
+    // `jacobi_svd_tall` の収束判定〈`gamma.abs() <= JACOBI_EPS * ...`〉
+    // を常に偽にし 60 スイープ非収束の `Err` で弾かれる）、`k == 1`
+    // （`min(m,n) == 1`）では列ペア走査（`q in (p+1)..n`）自体が
+    // 一度も実行されないため非有限入力を拒否できず NaN が
+    // 素通りしうる（`docs/autodiff-linalg-design.md` の「非有限入力
+    // は演算ごとに異なり一様ではない」記述どおり。codex-review
+    // 指摘）。いずれの場合も `partial_cmp(...).unwrap()`
     // （unwrap 禁止。`.claude/rules/security.md`「本番経路の panic
     // 禁止」）を避け `total_cmp`（IEEE 754-2008 totalOrder。NaN も
     // 全順序に含め panic しない）で防御的に比較する（codex-review
@@ -630,6 +651,21 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
         s_sorted[new_idx] = sigmas[old_idx];
         v_sorted.set_col(new_idx, &v_full.col(old_idx));
         u_sorted.set_col(new_idx, &u_full.col(old_idx));
+    }
+
+    // 数値的な rank 判定のための相対しきい値: 最大特異値 ×
+    // `max(m,n)` × `sqrt(JACOBI_EPS)`。`jacobi_svd_tall` の収束打ち切り
+    // （`JACOBI_EPS` 相対判定）により残る非直交性が `O(sqrt(JACOBI_EPS))`
+    // スケールになりうるため機械 epsilon では小さすぎる。
+    // `crates/backend-cpu/src/linalg.rs::svd` と同型の対応（codex-review
+    // 指摘。丸め残差由来の微小非ゼロ特異値が「実測ノルムで単位長化」
+    // 経路へ進み直交契約を満たせなくなるのを防ぐ。固定絶対閾値は
+    // 使わない理由も同ファイルの対応コメントを参照）。
+    let rank_tol = s_sorted[0] * (m.max(n) as f64) * JACOBI_EPS.sqrt();
+    for sigma in s_sorted.iter_mut() {
+        if *sigma <= rank_tol {
+            *sigma = 0.0;
+        }
     }
 
     // 各 `V` 列の符号を「最大絶対値成分（同値は最小添字）が正」に
@@ -667,19 +703,26 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
             }
         }
 
-        // `U = A V / σ` で再導出する（`jacobi_svd_tall` が返す `U` 列を
-        // そのまま使うと `σ` 未除算のためノルムが `σ` 倍になっている。
-        // `col(j)` の符号正規化後の `V` 列を使って改めて計算する）。
+        // `U` 列を自身の実測ノルムで単位長へ正規化する。以前は
+        // `U = A V / σ` で再導出していたが、`m >= n` 分岐の `U`
+        // （`jacobi_svd_tall` の作業行列列。列ノルム = σ）と
+        // `m < n` 分岐の `U`（`jacobi_svd_tall` の回転行列 `v` 由来。
+        // 既に単位長）とで意味が異なるにも関わらず両分岐へ同一の
+        // 行列積 `A V` を適用していたため、rank 落ち・悪条件の
+        // `A` では桁落ちが増幅され再構成した列が非直交になっていた
+        // （例 `A=[[1,3],[2,6],[5,15]]` のような rank-1 行列。
+        // codex-review 指摘）。列は `jacobi_svd_tall` の回転／作業行列
+        // 演算のみで既に（ほぼ）直交に保たれているため、追加の行列積
+        // を経由せず自身のノルムで割るだけで両分岐とも安定して単位長
+        // 化できる（`m >= n` 分岐は実測ノルムが `σ` に一致し従来と
+        // 同じ結果、`m < n` 分岐は実測ノルムが既に 1 のため実質 no-op）。
         if sigma > 0.0 {
-            let v_col = v_sorted.col(j);
-            let v_col_mat = Mat {
-                data: v_col,
-                rows: v_sorted.rows,
-                cols: 1,
-            };
-            let av = mat.matmul(&v_col_mat);
-            for r in 0..u_sorted.rows {
-                u_sorted.set(r, j, av.get(r, 0) / sigma);
+            let col_norm: f64 = u_sorted.col(j).iter().map(|v| v * v).sum::<f64>().sqrt();
+            if col_norm > 0.0 {
+                for r in 0..u_sorted.rows {
+                    let v = u_sorted.get(r, j);
+                    u_sorted.set(r, j, v / col_norm);
+                }
             }
         }
     }
@@ -880,21 +923,23 @@ pub(crate) fn inv_vjp(x: &Tensor<f32>, g: &Tensor<f32>) -> Tensor<f32> {
 }
 
 /// `Op::Solve` の VJP: `dB = A^{-T} g`、`dA = -dB Xᵀ`（`X` = forward
-/// 記録値の解）。
+/// 記録値の解）。`dB` を `f32` へ downcast する前の `f64` 中間値
+/// （[`solve_transposed_mat`]）を `dA` の計算にも使い、両方の勾配を
+/// 計算し終えてから 1 回だけ `f32` へ downcast する（codex-review
+/// 指摘の是正。理由は [`solve_transposed_mat`] のコメント参照）。
 pub(crate) fn solve_vjp(
     a: &Tensor<f32>,
     x: &Tensor<f32>,
     g: &Tensor<f32>,
 ) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
-    let db = solve_transposed(a, g)?;
-    let db_mat = Mat::from_tensor(&db);
+    let db_mat = solve_transposed_mat(a, g)?;
     let x_mat = Mat::from_tensor(x);
     let xt = x_mat.transpose();
     let mut da = db_mat.matmul(&xt);
     for v in da.data.iter_mut() {
         *v = -*v;
     }
-    Ok((da.to_tensor(), db))
+    Ok((da.to_tensor(), db_mat.to_tensor()))
 }
 
 /// `Op::Det` の VJP: `dA = g · det(A) · A^{-T}`。`det(A) == 0`（特異）の
@@ -1679,6 +1724,30 @@ mod tests {
         let num_db = numeric_grad(&b, |bp| scalar_dot(&solve(&a, bp).unwrap(), &s));
         assert_grad_close("solve dA", &da, &num_da);
         assert_grad_close("solve dB", &db, &num_db);
+    }
+
+    /// `dB` を早期に `f32` へ downcast すると overflow して有限な `dA`
+    /// まで `-Inf` になっていた不具合の回帰（codex-review 指摘）。
+    /// `A=[[1e-20]]`・`X=solve(A,B)`・`upstream=1e20` では
+    /// `dB = A^{-T} g ≈ 1e40`（`f32::INFINITY`）だが、`dA = -dB Xᵀ` は
+    /// `X ≈ 1e-10` オーダーのため有限（`≈ -1e30`）であるべき。
+    #[test]
+    fn solve_vjp_da_stays_finite_when_db_overflows_f32() {
+        let a = build_tensor(vec![1e-20], &[1, 1]);
+        let b = build_tensor(vec![1e-30], &[1, 1]);
+        let x = solve(&a, &b).unwrap();
+        let g = build_tensor(vec![1e20], &[1, 1]);
+        let (da, db) = solve_vjp(&a, &x, &g).unwrap();
+        let db_val = dense_vec(&db)[0];
+        assert!(
+            db_val.is_infinite(),
+            "この極端なスケールでは dB 自体は f32 表現域を超えるはず: {db_val}"
+        );
+        let da_val = dense_vec(&da)[0];
+        assert!(
+            da_val.is_finite(),
+            "dB の overflow が dA まで伝播してはいけない: da={da_val}"
+        );
     }
 
     #[test]

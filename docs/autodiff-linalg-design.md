@@ -105,8 +105,11 @@ single_input`／`svd_multi_output_gradient_accumulates_to_single_input` で検�
   一様ではない（codex-review 指摘・2026-09-12 是正。当初の「LU／Cholesky／QR／SVD いず
   れも自然に検出し拒否する」という記述は不正確だった）: **Cholesky** は対角チェック
   （非有限または非正）で `InvalidArgument` を返す。**SVD** は `jacobi_svd_tall` の収束
-  判定（`gamma.abs() <= EPS * ...`）が非有限入力で常に偽となり 60 スイープ非収束の
-  `InvalidArgument` として拒否される。一方 **LU 分解ベース（`inv`／`solve`／`det`）**
+  判定（`gamma.abs() <= JACOBI_EPS * ...`）が非有限入力で常に偽となり 60 スイープ
+  非収束の `InvalidArgument` として拒否される——ただし `min(m,n) == 1` の場合は
+  列ペア走査（`q in (p+1)..n`）自体が一度も実行されないため、この判定を経由せず
+  `converged` が初期値 `true` のまま成功してしまい、非有限入力を拒否しない
+  （codex-review 指摘・2026-09-12 追補）。一方 **LU 分解ベース（`inv`／`solve`／`det`）**
   はピボット判定が `pivot == 0.0` の厳密等値比較のみのため、`inf`／`NaN` はこの判定を
   素通りし「分解成功」として扱われ、後続の前進・後退代入で `inf`／`NaN`／`0.0`（例:
   `1/inf = 0.0`）を含む値が **エラーにならず** 返る（例: `inv([[inf]])` は

@@ -160,6 +160,13 @@ impl Mat {
     /// 小〜中規模〉が対象のため、`BackendOps::gemm` の並列 SIMD 実装を
     /// ここで再利用しない——本モジュールは `tensor-core` の `Tensor<f32>`
     /// 境界の外で完結する `f64` 内部計算という設計上の理由がある）。
+    /// 本番経路（`qr`／`svd` 等）は `U = A V / σ` 型の行列積再導出を
+    /// 廃し自身のノルムで正規化する方式へ切り替えたため（codex-review
+    /// 指摘。rank 落ち行列での桁落ち増幅を回避）、現在はテスト
+    /// （`QR = Q R`／`SVD = U Σ Vᵀ` の再構成検証）専用。`#[cfg(test)]`
+    /// を付けず本番ビルドの dead_code 警告を許容するより、実際の
+    /// 利用範囲を型で明示する。
+    #[cfg(test)]
     fn matmul(&self, other: &Mat) -> Mat {
         debug_assert_eq!(self.cols, other.rows);
         let mut out = Mat::zeros(self.rows, other.cols);
@@ -514,6 +521,18 @@ fn normalize_max_abs_sign(v: &mut [f64]) {
     }
 }
 
+/// 片側 Jacobi SVD（[`jacobi_svd_tall`]）の列直交収束判定に使う相対
+/// しきい値。[`svd`] の数値 rank 判定（丸め残差由来の微小特異値を
+/// 厳密ゼロへ丸める `rank_tol`）もこの値の平方根を共有する——
+/// Jacobi は `gamma.abs() <= JACOBI_EPS * sqrt(alpha*beta)` で収束を
+/// 打ち切るため、収束後に残る非直交性・特異値誤差は理論上
+/// `O(sqrt(JACOBI_EPS))` スケールになりうる（本来 0 の特異値が
+/// `JACOBI_EPS` そのものの桁では丸められず残ってしまう。
+/// codex-review 指摘: `A=[[1,0.3],[2,0.6],[5,1.5]]` のような
+/// 丸め残差由来の rank 落ちで、この定数を共有しない独立の機械
+/// epsilon ベースしきい値では検出できなかった）。
+const JACOBI_EPS: f64 = 1e-14;
+
 /// `m >= n` の片側 Jacobi SVD（列直交化による古典的手法）。
 /// `A` の列を回転で逐次直交化し、収束後の列ノルムが特異値になる。
 /// 反復上限は 60 スイープ（実用上ほぼ全ての小〜中規模行列で収束する）。
@@ -522,7 +541,6 @@ fn jacobi_svd_tall(a: &Mat) -> Result<(Mat, Vec<f64>, Mat), LinalgError> {
     let mut u = a.clone();
     let mut v = Mat::identity(n);
     const MAX_SWEEPS: usize = 60;
-    const EPS: f64 = 1e-14;
 
     for _sweep in 0..MAX_SWEEPS {
         let mut converged = true;
@@ -538,12 +556,12 @@ fn jacobi_svd_tall(a: &Mat) -> Result<(Mat, Vec<f64>, Mat), LinalgError> {
                 // で行う（絶対下限 `.max(EPS)` を持たない）。`alpha` また
                 // は `beta` が 0（零列）のとき `gamma` も必ず 0 になる
                 // （零ベクトルとの内積）ため `0.0 <= 0.0` で安全に収束
-                // 判定できる。絶対下限があると `EPS*EPS = 1e-28` という
+                // 判定できる。絶対下限があると `JACOBI_EPS*JACOBI_EPS = 1e-28` という
                 // 入力スケール非依存の閾値が生じ、列ノルムが
                 // 約 1e-15 スケールの小さい入力で非直交な列を誤って
                 // 収束扱いし、誤った特異値・特異ベクトルを返していた
                 // （codex-review 指摘）。
-                if gamma.abs() <= EPS * (alpha * beta).sqrt() {
+                if gamma.abs() <= JACOBI_EPS * (alpha * beta).sqrt() {
                     continue;
                 }
                 converged = false;
@@ -631,9 +649,14 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
 
     // 降順ソート（同値は安定ソート＝元の添字順を保つ。`sort_by` は
     // 安定ソート）。`sigmas` は列ノルム（`v*v` の和の `sqrt`）のため
-    // 理論上 NaN にはならないが（非有限入力は `jacobi_svd_tall` の
-    // 収束判定〈`gamma.abs() <= EPS * ...`〉が常に偽になり 60 スイープ
-    // 非収束の `Err` で弾かれる）、`partial_cmp(...).unwrap()`
+    // 理論上 NaN にはならないことが多いが（`k >= 2` では非有限入力が
+    // `jacobi_svd_tall` の収束判定〈`gamma.abs() <= JACOBI_EPS * ...`〉
+    // を常に偽にし 60 スイープ非収束の `Err` で弾かれる）、`k == 1`
+    // （`min(m,n) == 1`）では列ペア走査（`q in (p+1)..n`）自体が
+    // 一度も実行されないため非有限入力を拒否できず NaN が
+    // 素通りしうる（`docs/autodiff-linalg-design.md` の「非有限入力
+    // は演算ごとに異なり一様ではない」記述どおり。codex-review
+    // 指摘）。いずれの場合も `partial_cmp(...).unwrap()`
     // （unwrap 禁止。`.claude/rules/security.md`「本番経路の panic
     // 禁止」）を避け `total_cmp`（IEEE 754-2008 totalOrder。NaN も
     // 全順序に含め panic しない）で防御的に比較する（codex-review
@@ -648,6 +671,32 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
         s_sorted[new_idx] = sigmas[old_idx];
         v_sorted.set_col(new_idx, &v_full.col(old_idx));
         u_sorted.set_col(new_idx, &u_full.col(old_idx));
+    }
+
+    // 数値的な rank 判定のための相対しきい値: 最大特異値 ×
+    // `max(m,n)` × `sqrt(JACOBI_EPS)`。これ以下の特異値は「数値的に
+    // ゼロ」として扱い厳密ゼロへ丸める。`jacobi_svd_tall` は
+    // `gamma.abs() <= JACOBI_EPS * sqrt(alpha*beta)` で収束を打ち切る
+    // ため、真に rank 落ちの列でも残留する列内積の桁は
+    // `O(sqrt(JACOBI_EPS))` スケールになりうる（機械 epsilon
+    // `f64::EPSILON`〈約 2.2e-16〉ではこの残差を捉えられない。例えば
+    // `A=[[1,0.3],[2,0.6],[5,1.5]]`〈完全に比例＝rank-1 だが float
+    // 演算では第二特異値が厳密には 0 にならない〉で実測すると残留
+    // 第二特異値は最大特異値比 約 4e-9 に達した）。このしきい値
+    // 以下を rank 落ち側（下記 Gram–Schmidt 補完経路）へ回さないと、
+    // 対応する `U`/`V` 列が「実測ノルムで単位長化」する経路（後述）
+    // へ進んでしまい、ほぼ並行なベクトルを正規化するだけになって
+    // `SvdFactors` の列直交契約を満たせない（codex-review 指摘）。
+    // 固定絶対閾値（`1e-12` 等）は使わない——`A=[[-1e-13]]` のような
+    // 意図的に非ゼロな微小特異値（1 要素・`k=1` では `s_sorted[0]`
+    // 自身が基準になるためこの相対しきい値でも保持される）を誤って
+    // ゼロ扱いしないため（PR #1668 是正の再掲。σ<=1e-12 固定閾値は
+    // 別の codex-review 指摘で既に撤去済み）。
+    let rank_tol = s_sorted[0] * (m.max(n) as f64) * JACOBI_EPS.sqrt();
+    for sigma in s_sorted.iter_mut() {
+        if *sigma <= rank_tol {
+            *sigma = 0.0;
+        }
     }
 
     // 各 `V` 列の符号を「最大絶対値成分（同値は最小添字）が正」に
@@ -684,19 +733,26 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
             }
         }
 
-        // `U = A V / σ` で再導出する（`jacobi_svd_tall` が返す `U` 列を
-        // そのまま使うと `σ` 未除算のためノルムが `σ` 倍になっている。
-        // `col(j)` の符号正規化後の `V` 列を使って改めて計算する）。
+        // `U` 列を自身の実測ノルムで単位長へ正規化する。以前は
+        // `U = A V / σ` で再導出していたが、`m >= n` 分岐の `U`
+        // （`jacobi_svd_tall` の作業行列列。列ノルム = σ）と
+        // `m < n` 分岐の `U`（`jacobi_svd_tall` の回転行列 `v` 由来。
+        // 既に単位長）とで意味が異なるにも関わらず両分岐へ同一の
+        // 行列積 `A V` を適用していたため、rank 落ち・悪条件の
+        // `A` では桁落ちが増幅され再構成した列が非直交になっていた
+        // （例 `A=[[1,3],[2,6],[5,15]]` のような rank-1 行列。
+        // codex-review 指摘）。列は `jacobi_svd_tall` の回転／作業行列
+        // 演算のみで既に（ほぼ）直交に保たれているため、追加の行列積
+        // を経由せず自身のノルムで割るだけで両分岐とも安定して単位長
+        // 化できる（`m >= n` 分岐は実測ノルムが `σ` に一致し従来と
+        // 同じ結果、`m < n` 分岐は実測ノルムが既に 1 のため実質 no-op）。
         if sigma > 0.0 {
-            let v_col = v_sorted.col(j);
-            let v_col_mat = Mat {
-                data: v_col,
-                rows: v_sorted.rows,
-                cols: 1,
-            };
-            let av = mat.matmul(&v_col_mat);
-            for r in 0..u_sorted.rows {
-                u_sorted.set(r, j, av.get(r, 0) / sigma);
+            let col_norm: f64 = u_sorted.col(j).iter().map(|v| v * v).sum::<f64>().sqrt();
+            if col_norm > 0.0 {
+                for r in 0..u_sorted.rows {
+                    let v = u_sorted.get(r, j);
+                    u_sorted.set(r, j, v / col_norm);
+                }
             }
         }
     }
@@ -1102,5 +1158,69 @@ mod tests {
             &build_tensor(vec![1.0], &[]).unwrap(),
             1e-5,
         );
+    }
+
+    /// rank-1（縦長・丸め残差により厳密ゼロにならない第二特異値を持つ）
+    /// 行列で `U` の全列が直交すること（列内積が 0 に近いこと）を確認
+    /// する（codex-review 指摘の回帰）。列は正確な比例関係
+    /// （`col1 = 0.3 * col0`）だが float 演算では第二特異値が厳密には
+    /// 0 にならず 1e-15 スケール程度の丸め残差として残る——修正前は
+    /// この残差を「非ゼロ」と扱い `U = A V / σ` を行列積で再導出して
+    /// いたため桁落ちが増幅され、第二列のノルムが約 6.78（本来 0 に
+    /// 近い値）になる等 `SvdFactors` の列直交契約（設計文書 §3.5）を
+    /// 満たさなかった。相対数値 rank しきい値
+    /// （`s_sorted[0] * max(m,n) * f64::EPSILON`）でこの残差を厳密ゼロへ
+    /// 丸め、Gram–Schmidt 直交補完経路へ回すことで解消する。
+    /// `min(m,n) == 1` では Jacobi の列ペア走査自体が実行されないため
+    /// 非有限入力を拒否できない（`docs/autodiff-linalg-design.md` の
+    /// 「非有限入力は演算ごとに異なり一様ではない」記述の裏付け。
+    /// codex-review 指摘。挙動を仕様として固定する回帰テスト——将来
+    /// 誤って「常に拒否される」よう変更された場合にこのテストが
+    /// 失敗して気づけるようにする）。
+    #[test]
+    fn svd_min_dim_one_does_not_reject_non_finite_input() {
+        let a = build_tensor(vec![f32::NAN], &[1, 1]).unwrap();
+        let result = svd(&a);
+        assert!(
+            result.is_ok(),
+            "min(m,n)==1 は非有限入力を拒否しない設計のはずが Err になった: {result:?}"
+        );
+    }
+
+    #[test]
+    fn svd_rank_deficient_tall_matrix_u_columns_are_orthonormal() {
+        let a = build_tensor(vec![1.0, 0.3, 2.0, 0.6, 5.0, 1.5], &[3, 2]).unwrap();
+        let (u, s, vh) = svd(&a).unwrap();
+        assert_eq!(u.shape(), &[3, 2]);
+        let s_data = dense_vec(&s);
+        assert!(s_data[0] > 0.0, "第一特異値が非ゼロであるべき: {s_data:?}");
+        assert_eq!(
+            s_data[1], 0.0,
+            "丸め残差由来の第二特異値は相対しきい値で厳密ゼロへ丸められるべき: {s_data:?}"
+        );
+        let u_mat = Mat::from_tensor(&u);
+        for j in 0..2 {
+            let col = u_mat.col(j);
+            let norm: f64 = col.iter().map(|v| v * v).sum::<f64>().sqrt();
+            assert!(
+                (norm - 1.0).abs() < 1e-4,
+                "U 列 {j} が単位ノルムでない: norm={norm}"
+            );
+        }
+        let col0 = u_mat.col(0);
+        let col1 = u_mat.col(1);
+        let dot: f64 = col0.iter().zip(col1.iter()).map(|(a, b)| a * b).sum();
+        assert!(dot.abs() < 1e-6, "U の列が直交していない: dot={dot}");
+        // 再構成 `U Σ Vᵀ ≈ A` も維持されることを確認する（第二特異値は
+        // 0 のため第二列の寄与は消える）。
+        let mut sigma = Mat::zeros(2, 2);
+        sigma.set(0, 0, f64::from(s_data[0]));
+        sigma.set(1, 1, f64::from(s_data[1]));
+        let reconstructed = u_mat
+            .matmul(&sigma)
+            .matmul(&Mat::from_tensor(&vh))
+            .to_tensor()
+            .unwrap();
+        approx_eq(&reconstructed, &a, 1e-3);
     }
 }

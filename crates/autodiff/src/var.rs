@@ -889,7 +889,9 @@ impl<'t> Var<'t> {
 
     /// Cholesky 分解（`A: [n,n]`〈対称正定値。下三角のみ読む〉→
     /// `L: [n,n]`〈下三角、`A = L Lᵀ`〉）。イシュー #1621。非正定値は
-    /// `AutodiffError::InvalidArgument`。
+    /// `AutodiffError::Backend(BackendError::InvalidArgument(_))`
+    /// （CPU 本番経路・フォールバックとも `unify_fallback_error` で
+    /// 同一 variant に統一済み。codex-review 指摘の是正）。
     pub fn cholesky(&self) -> Result<Var<'t>, AutodiffError> {
         let shape = self.shape();
         require_square(&shape, "Var::cholesky")?;
@@ -966,7 +968,9 @@ impl<'t> Var<'t> {
     /// reduced SVD（`A: [m,n]` → [`SvdVars`]。`k = min(m,n)`）。
     /// イシュー #1621。`qr` と同じ多出力設計（`Op::SvdU`／
     /// `Op::SvdS`／`Op::SvdVh`）。反復が収束しない場合は
-    /// `AutodiffError::InvalidArgument`。
+    /// `AutodiffError::Backend(BackendError::InvalidArgument(_))`
+    /// （CPU 本番経路・フォールバックとも `unify_fallback_error` で
+    /// 同一 variant に統一済み。codex-review 指摘の是正）。
     pub fn svd(&self) -> Result<SvdVars<'t>, AutodiffError> {
         let shape = self.shape();
         if shape.len() != 2 {
