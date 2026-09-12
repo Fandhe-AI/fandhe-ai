@@ -25,11 +25,11 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
+use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, DType, FusionPlan, MseReduction, SegmentKey, SegmentResource,
-    SegmentRun, ShapeError, Tensor, require_same_shape,
+    Activation, BackendOps, DType, DispatchFailureCell, FusionPlan, MseReduction, SegmentKey,
+    SegmentResource, SegmentRun, ShapeError, Tensor, require_same_shape,
 };
 
 use crate::context_cache;
@@ -254,6 +254,182 @@ impl CudaBackendOps {
             || gemm.run_tiled_f32(a_slice, b_slice, m, n, k),
         )
     }
+
+    /// [`BackendOps::gemm_fp32_strict_into`]／[`BackendOps::
+    /// gemm_fp32_strict_into_tracked`] 共通の検証・ディスパッチ本体
+    /// （イシュー #1559。`backend-metal::ops::
+    /// MetalBackendOps::gemm_fp32_strict_into_impl` と同型の二重化回避
+    /// パターンだが、CUDA には Metal のような共有コマンドバッファ
+    /// バッチング問題がないため `token` 引数は持たない——
+    /// [`BackendOps::gemm_fp32_strict_into_tracked`] のトレイト側 doc
+    /// 「CUDA は既定のままでよい」参照。実際に `_tracked` 側の
+    /// オーバーライドは本メソッドへ委譲するだけの薄い明示委譲であり、
+    /// `context_cache` のポイズン検査（`begin_driver_call`／
+    /// `observe_cuda_result`）は本メソッド自身が呼び出しごとに同期的に
+    /// 完結させる）。
+    ///
+    /// NT/TN 以外（NN・TT・分類不能形状・退化形状・転置カーネル使用
+    /// 不能環境）は `Unsupported` を返さず、ホスト経路
+    /// `gemm_fp32_strict`（trait 契約上 `Self::gemm_fp32_strict_impl` と
+    /// bit 同一）の戻り値を `CudaMemory::upload_into` で `out` へ
+    /// 書き込むフォールバックにする（`backend-metal` の同名フォール
+    /// バックと同じ理由——`DeviceParamStore::fill_resident_weight_grad`
+    /// は最初の `Unsupported` でストア全体の `resident_grad_capability`
+    /// を `Some(false)` にキャッシュするため、形状単位で `Unsupported`
+    /// を返すと同一 backward 内で先に成功済みの resident slot が読めなく
+    /// なる〈`MissingGradient`〉）。
+    fn gemm_fp32_strict_into_impl(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+    ) -> Result<(), BackendError> {
+        if out.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0], a.shape()[1]);
+        let n = b.shape()[1];
+        let _ = out_shape; // shape 検証のみに使用（`gemm_fp32_strict_into` の CPU/Metal 実装と同型）
+
+        // REQ-8「カーネル側の手動境界チェックを省略しない」・OWASP A03:
+        // `out_offset + m*n` を `checked_mul`/`checked_add` で検査し、
+        // `out.numel()` を超える書き込みを driver 呼び出し（NT/TN 判定・
+        // カーネル起動）より前に拒否する。
+        let mn = m.checked_mul(n).ok_or_else(|| {
+            BackendError::InvalidArgument("gemm_fp32_strict_into: m * n overflowed usize".into())
+        })?;
+        let end = out_offset.checked_add(mn).ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "gemm_fp32_strict_into: out_offset + m * n overflowed usize".into(),
+            )
+        })?;
+        if end > out.numel() {
+            return Err(BackendError::InvalidArgument(format!(
+                "gemm_fp32_strict_into: write range [{out_offset}, {end}) exceeds out buffer \
+                 length {}",
+                out.numel()
+            )));
+        }
+
+        // 退化形状ガード（`m == 0 || n == 0 || k == 0`）は分類（NT/TN
+        // 判定）を行わず直接フォールバックへ進む。理由: `dense_
+        // transposed_view(t)` は `t` 自身の shape が 0 次元を含む場合
+        // `None` を返す実装のため、`m == 0` のとき
+        // `dense_transposed_view(a)` が `None` になる一方で
+        // `dense_transposed_view(b)`（`b` は shape `[k, n]` で `k`／`n`
+        // が非ゼロなら非退化）が `Some` を返しうる——`(None, Some(bt))`
+        // という NT パターンに誤って一致しうる。`run_tiled_f32_nt`／
+        // `_tn`（ホスト戻り値経路）はこの経路を「新規 alloc_uninit +
+        // readback」で正しく処理する明示的な早期 return を持つが、本
+        // メソッドの device-resident 直書き込み経路
+        // （`launch_tiled_f32_*_into`）にゼロ埋め手段を用意していない
+        // ため、この分類ミスマッチをここで先に断つ（フォールバックの
+        // `gemm_fp32_strict` 自身が `run_tiled_f32_nt`／`_tn`／
+        // `run_tiled_f32` いずれの経路でも `m==0||n==0`／`k==0` を
+        // 正しく処理する）。
+        if m != 0 && n != 0 && k != 0 {
+            let gemm = self.with_driver_call(
+                &[],
+                |e| BackendError::CudaUnavailable(e.to_string()),
+                || {
+                    let device = self.device_handle_raw()?;
+                    context_cache::cached_gemm(&device)
+                },
+            )?;
+
+            if gemm.transpose_smem_f32_available() {
+                let (m32, n32, k32) = (m as u32, n as u32, k as u32);
+                match (dense_transposed_view(a), dense_transposed_view(b)) {
+                    (Some(at), None) if crate::transpose::transpose_rows_fit_grid_y_limit(k32) => {
+                        if !b.is_contiguous() {
+                            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+                        }
+                        let b_owned = b.contiguous();
+                        let b_slice = b_owned.as_slice().ok_or_else(|| {
+                            BackendError::KernelLaunchFailed(
+                                "gemm_fp32_strict_into: rhs not contiguous".into(),
+                            )
+                        })?;
+                        let out_gen = out.generation();
+                        let out_handle = out
+                            .downcast_handle_mut::<CudaBufferHandle>()
+                            .ok_or(BackendError::DeviceMismatch)?;
+                        let storage = out_handle.storage.as_mut().ok_or_else(|| {
+                            BackendError::DeviceAllocationFailed(
+                                "gemm_fp32_strict_into: out buffer has numel > 0 but no device \
+                                 allocation"
+                                    .into(),
+                            )
+                        })?;
+                        return self.with_sync_point_call(
+                            &[out_gen],
+                            "gemm_fp32_strict_into",
+                            |e| BackendError::KernelLaunchFailed(e.to_string()),
+                            || {
+                                let mut c_arg = storage.view_mut(out_offset..end);
+                                gemm.launch_tiled_f32_tn_into(
+                                    at, b_slice, &mut c_arg, m32, n32, k32,
+                                )
+                            },
+                        );
+                    }
+                    (None, Some(bt)) if crate::transpose::transpose_rows_fit_grid_y_limit(n32) => {
+                        if !a.is_contiguous() {
+                            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+                        }
+                        let a_owned = a.contiguous();
+                        let a_slice = a_owned.as_slice().ok_or_else(|| {
+                            BackendError::KernelLaunchFailed(
+                                "gemm_fp32_strict_into: lhs not contiguous".into(),
+                            )
+                        })?;
+                        let out_gen = out.generation();
+                        let out_handle = out
+                            .downcast_handle_mut::<CudaBufferHandle>()
+                            .ok_or(BackendError::DeviceMismatch)?;
+                        let storage = out_handle.storage.as_mut().ok_or_else(|| {
+                            BackendError::DeviceAllocationFailed(
+                                "gemm_fp32_strict_into: out buffer has numel > 0 but no device \
+                                 allocation"
+                                    .into(),
+                            )
+                        })?;
+                        return self.with_sync_point_call(
+                            &[out_gen],
+                            "gemm_fp32_strict_into",
+                            |e| BackendError::KernelLaunchFailed(e.to_string()),
+                            || {
+                                let mut c_arg = storage.view_mut(out_offset..end);
+                                gemm.launch_tiled_f32_nt_into(
+                                    a_slice, bt, &mut c_arg, m32, n32, k32,
+                                )
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // フォールバック（NN・TT・分類不能形状・退化形状・転置カーネル
+        // 使用不能環境）: `Unsupported` を返さず常に正しい結果を書き込む
+        // （`gemm_fp32_strict`〈内部で自身の poison/世代検査・NT/TN 判定・
+        // repack 計上を完結する〉→ `CudaMemory::upload_into`〈H2D。
+        // `gemm_resident_lhs` のフォールバックと同型で新規 `DeviceBuffer`
+        // を escape させない〉）。
+        let result = self.gemm_fp32_strict(a, b)?;
+        let device = self.with_driver_call(
+            &[out.generation()],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        let mem = CudaMemory::new(&device);
+        mem.upload_into(&result, out, out_offset)
+    }
+
     /// 指定した `ordinal` に対応する `CudaBackendOps` を構築する。
     /// 構築自体は driver 初期化を行わないため常に成功する（実際の
     /// driver 呼び出しは各メソッドが `Self::device_handle`（`context_cache`
@@ -383,6 +559,27 @@ impl CudaBackendOps {
         f: impl FnOnce() -> Result<T, CudaError>,
     ) -> Result<T, BackendError> {
         let token = context_cache::begin_driver_call(self.ordinal, resource_generations)?;
+        context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
+    }
+
+    /// [`Self::with_driver_call`] と同じだが、CUDA Graph capture 中
+    /// （イシュー #1349・`docs/backend-cuda-graph-step-capture-design.md`
+    /// §4.2）は driver に触れる前に拒否する（`context_cache::
+    /// begin_sync_point_call`。`memory.rs::CudaMemory::
+    /// with_sync_point_call` と同型で、`CudaBackendOps` 側にも同じ排他が
+    /// 要る呼び出し向けに複製する）。イシュー #1559 の
+    /// `gemm_fp32_strict_into` NT/TN 経路（関数内で明示 `stream.
+    /// synchronize()` を行うホストブロック型の同期点。`docs/
+    /// backend-cuda-async-execution-design.md` §15）が使う。`what` は
+    /// 診断メッセージ用の呼び出し名。
+    fn with_sync_point_call<T>(
+        &self,
+        resource_generations: &[u64],
+        what: &'static str,
+        map: impl FnOnce(CudaError) -> BackendError,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, BackendError> {
+        let token = context_cache::begin_sync_point_call(self.ordinal, resource_generations, what)?;
         context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
     }
 
@@ -1136,6 +1333,63 @@ impl BackendOps for CudaBackendOps {
         b: &Tensor<f32>,
     ) -> Result<Tensor<f32>, BackendError> {
         self.gemm_fp32_strict_impl(a, b)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_fp32_strict_into`] の
+    /// CUDA オーバーライド（イシュー #1559・親 #1557〜#1558）。
+    /// `DeviceParamStore::fill_resident_weight_grad`（`Op::LinearResident`
+    /// の d_weight）が、結果をホストへ戻さず（D2H）呼び出し元の
+    /// `DeviceBuffer<f32>` へ直接書き込む（`gemm_fp32_strict_into_impl`
+    /// の doc コメント参照。NT/TN 経路は #1214 で追加済みの GPU 側 smem
+    /// 転置カーネルを再利用し、旧経路〈`gemm_fp32_strict` の D2H →
+    /// `DeviceParamStore::step` 内 `upload_into` の H2D〉の往復を解消
+    /// する）。実体は `gemm_fp32_strict_into_impl`。
+    ///
+    /// **`resident_grad_capability` との関係**: `backend-metal::ops::
+    /// MetalBackendOps::gemm_fp32_strict_into` の doc と同じ理由により、
+    /// 本メソッドは NN・TT・分類不能形状・退化形状を含め
+    /// `DeviceMismatch`／`InvalidArgument` 以外では失敗しないため、
+    /// `resident_grad_capability` は CUDA でも常に `Some(true)`
+    /// （または致命的なデバイスエラー）へ確定する。
+    fn gemm_fp32_strict_into(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+    ) -> Result<(), BackendError> {
+        self.gemm_fp32_strict_into_impl(a, b, out, out_offset)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_fp32_strict_into_tracked`]
+    /// の CUDA オーバーライド（イシュー #1559）。
+    ///
+    /// **`token` を無視して既定実装と機能的に同一な明示委譲を置く理由**:
+    /// トレイト側 doc は「Metal のみ…オーバーライドし…CUDA を名指し
+    /// していない＝CPU と同じ扱いが想定されている」と記す。CUDA は
+    /// Metal のような「複数スレッドが共有 `MetalContext`／コマンド
+    /// バッファをバッチングし、他スレッドの `synchronize()` が自スレッド
+    /// の dispatch 登録前にバッチを drain してしまう」問題を持たない
+    /// （`context_cache` の poison／世代検査は `begin_driver_call`／
+    /// `observe_cuda_result` により各呼び出しごとに同期的に完結し、かつ
+    /// `gemm_fp32_strict_into_impl` の NT/TN 経路は設計判断 A
+    /// 〈`gemm.rs::CudaGemm::launch_tiled_f32_nt_into` ドキュメンテー
+    /// ションコメント参照〉により関数内で `stream.synchronize()` を行う
+    /// ため、失敗はこの呼び出しの戻り値へ即座に伝播する）。本メソッドは
+    /// デフォルト実装（`self.gemm_fp32_strict_into(a, b, out,
+    /// out_offset)` へ委譲するだけ）と機能的に同一の明示オーバーライド
+    /// であり、トレイト側 doc の「CUDA は既定 `Unsupported` のまま」と
+    /// いう更新漏れの記述（本イシューで doc 側も更新済み）を実体面でも
+    /// 解消する。
+    fn gemm_fp32_strict_into_tracked(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.gemm_fp32_strict_into(a, b, out, out_offset)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
@@ -3165,6 +3419,177 @@ mod tests {
         assert!(
             matches!(result, Err(BackendError::DeviceMismatch)),
             "別 ordinal の w は DeviceMismatch で拒否されるはず: {result:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // `CudaBackendOps::gemm_fp32_strict_into`／`_tracked`（イシュー
+    // #1559）の CI 実行可能な回帰テスト（実機不要）。境界検査
+    // （`DeviceMismatch`／`InvalidArgument`）はいずれも driver 呼び出し
+    // より前の host-only チェックのため、`EmptyHandle`（`CudaBufferHandle`
+    // ではないダミーハンドル）を渡した `out` でも検証できる
+    // （`gemm_resident_rhs` 等の同種テストと同じ手法）。
+    // ---------------------------------------------------------------
+
+    /// `out.device()` が `self.ordinal` と一致しない場合、shape・offset
+    /// 検証やカーネル起動を一切行わず `DeviceMismatch` を返すはず
+    /// （driver に一切触れない host-only チェック。`gemm_fp32_strict_into_impl`
+    /// 実装順序の先頭。`EmptyHandle` を渡しても downcast まで到達しない
+    /// ため安全に検証できる）。
+    #[test]
+    fn gemm_fp32_strict_into_rejects_wrong_device_out() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let other_ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+
+        let a = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let mut out =
+            DeviceBuffer::new(Device::Cuda(other_ordinal), vec![4], Box::new(EmptyHandle));
+
+        let result = cuda.gemm_fp32_strict_into(&a, &b, &mut out, 0);
+        assert!(
+            matches!(result, Err(BackendError::DeviceMismatch)),
+            "別 ordinal の out は DeviceMismatch で拒否されるはず: {result:?}"
+        );
+    }
+
+    /// `out_offset + m*n` が `out.numel()` を超える場合、driver に触れず
+    /// `InvalidArgument` を返すはず（REQ-8・OWASP A03。カーネル起動より
+    /// 前の境界検査）。
+    #[test]
+    fn gemm_fp32_strict_into_rejects_out_of_range_offset() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+
+        let a = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        // m*n == 4 だが `out` は 3 要素分しか確保しないため
+        // `out_offset(0) + 4 > 3` で拒否されるはず。
+        let mut out = DeviceBuffer::new(Device::Cuda(ordinal), vec![3], Box::new(EmptyHandle));
+
+        let result = cuda.gemm_fp32_strict_into(&a, &b, &mut out, 0);
+        assert!(
+            matches!(result, Err(BackendError::InvalidArgument(_))),
+            "out_offset + m*n が out.numel() を超える場合は InvalidArgument で             拒否されるはず: {result:?}"
+        );
+    }
+
+    /// `out_offset` が `usize::MAX` 等で `checked_add` オーバーフローする
+    /// 場合も、driver に触れず `InvalidArgument` を返すはず。
+    #[test]
+    fn gemm_fp32_strict_into_rejects_offset_overflow() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+
+        let a = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let mut out = DeviceBuffer::new(Device::Cuda(ordinal), vec![4], Box::new(EmptyHandle));
+
+        let result = cuda.gemm_fp32_strict_into(&a, &b, &mut out, usize::MAX);
+        assert!(
+            matches!(result, Err(BackendError::InvalidArgument(_))),
+            "out_offset + m*n が usize でオーバーフローする場合は InvalidArgument で             拒否されるはず: {result:?}"
+        );
+    }
+
+    /// poison 済み ordinal では、退化形状（`m == 0`）によりフォールバック
+    /// （`self.gemm_fp32_strict(a, b)`）へ直行する経路でも
+    /// `DeviceContextPoisoned` で拒否されるはず（`gemm_resident_lhs_
+    /// rejects_on_poisoned_ordinal_before_device_handle_is_attempted` と
+    /// 同じ手法。`gemm_fp32_strict` 自身の poison 検査を経由することを
+    /// 示す）。`out` は `EmptyHandle` のまま（フォールバックの
+    /// `gemm_fp32_strict` 呼び出しで拒否されるため downcast まで到達
+    /// しない）。
+    #[test]
+    fn gemm_fp32_strict_into_rejects_on_poisoned_ordinal_via_degenerate_shape_fallback() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        // m == 0 の退化形状。`a`：[0, 2]、`b`：[2, 2] → out shape [0, 2]。
+        let a = Tensor::new(Vec::new(), &[0, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let mut out = DeviceBuffer::new(Device::Cuda(ordinal), vec![0], Box::new(EmptyHandle));
+
+        let result = cuda.gemm_fp32_strict_into(&a, &b, &mut out, 0);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では gemm_fp32_strict_into は退化形状フォールバック             経由でも拒否されるはず: {result:?}"
+        );
+    }
+
+    /// [`CudaBackendOps::gemm_fp32_strict_into_tracked`] は `token` を
+    /// 無視して [`CudaBackendOps::gemm_fp32_strict_into`] と同一の結果を
+    /// 返すはず（`sgd_step_device_tracked_default_delegates_to_
+    /// sgd_step_device`〈tensor-core〉と同型の委譲検証。エラーが決定的な
+    /// poison 済み ordinal・退化形状の組み合わせで両呼び出しを比較する）。
+    #[test]
+    fn gemm_fp32_strict_into_tracked_delegates_to_gemm_fp32_strict_into() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = Tensor::new(Vec::new(), &[0, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+
+        let mut out_direct =
+            DeviceBuffer::new(Device::Cuda(ordinal), vec![0], Box::new(EmptyHandle));
+        let result_direct = cuda.gemm_fp32_strict_into(&a, &b, &mut out_direct, 0);
+
+        let mut out_tracked =
+            DeviceBuffer::new(Device::Cuda(ordinal), vec![0], Box::new(EmptyHandle));
+        let token = DispatchFailureCell::new();
+        let result_tracked =
+            cuda.gemm_fp32_strict_into_tracked(&a, &b, &mut out_tracked, 0, &token);
+
+        assert!(
+            matches!(result_direct, Err(BackendError::DeviceContextPoisoned(_))),
+            "前提: gemm_fp32_strict_into 自体が poison で拒否されること: {result_direct:?}"
+        );
+        assert_eq!(
+            format!("{result_direct:?}"),
+            format!("{result_tracked:?}"),
+            "gemm_fp32_strict_into_tracked は token を無視して gemm_fp32_strict_into と             同一の結果を返すはず"
+        );
+    }
+
+    /// [`CudaBackendOps::with_sync_point_call`]（イシュー #1559。
+    /// `gemm_fp32_strict_into` NT/TN 経路が使う capture 対応の同期点
+    /// ガード）が、CUDA Graph capture 中は driver に一切触れず
+    /// `Unsupported` で拒否することを確認する（`context_cache::
+    /// begin_sync_point_call_rejects_before_touching_driver_while_capturing`
+    /// と同じ検証を `CudaBackendOps` 側の薄いラッパー経由で行う。GPU 不要
+    /// ——`begin_capture_session` 自体は純粋な状態機械操作で driver を
+    /// 呼ばない）。
+    #[test]
+    fn with_sync_point_call_rejects_before_touching_driver_while_capturing() {
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let _guard = context_cache::begin_capture_session(ordinal).expect(
+            "begin_capture_session は driver に触れない純粋な状態機械操作のため \
+             GPU 非依存で成功するはず",
+        );
+
+        let result: Result<(), BackendError> = cuda.with_sync_point_call(
+            &[],
+            "gemm_fp32_strict_into",
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || Ok(()),
+        );
+        assert!(
+            matches!(&result, Err(BackendError::Unsupported(msg)) if msg.contains("gemm_fp32_strict_into")),
+            "capture 中の with_sync_point_call は Unsupported で拒否されるはず: {result:?}"
         );
     }
 }

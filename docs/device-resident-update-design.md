@@ -1886,14 +1886,25 @@ resident 経由で充填された slot は `Gradients` に寄与を持たない�
 
 ### 3. バックエンド別の状態
 
-CPU（`backend-cpu`）のみ `gemm_fp32_strict_into`／`upload_into` を
-実装した（`gemm_blis_parallel` は C へ**累積**するカーネルのため、
+CPU（`backend-cpu`）は `gemm_fp32_strict_into`／`upload_into` を実装
+済み（`gemm_blis_parallel` は C へ**累積**するカーネルのため、
 `gemm_fp32_strict_into` は書き込み対象範囲を明示的に `fill(0.0)` して
-から呼ぶことで「上書き」契約を満たす）。CUDA は既定 `Unsupported` のまま。
-Metal は #1555 で実装済み（NT/TN は staging へ encode-only 直接書き込み・それ以外の形状は `gemm_fp32_strict` → `upload_into` フォールバックで、形状を理由に `Unsupported` を返さない。`docs/perf/train-resident-grad-device-update.md` §5 を参照）。
-CUDA は `fill_resident_weight_grad` が `Ok(false)` を返して既存経路へ
-フォールバックするため挙動・性能とも本イシュー着手前と不変。実測記録・
-Go/No-Go 判断は `docs/perf/train-resident-grad-device-update.md` を参照。
+から呼ぶことで「上書き」契約を満たす）。Metal は #1555 で実装済み
+（NT/TN は staging へ encode-only 直接書き込み・それ以外の形状は
+`gemm_fp32_strict` → `upload_into` フォールバックで、形状を理由に
+`Unsupported` を返さない。`docs/perf/train-resident-grad-device-update.md`
+§5 を参照）。CUDA は #1559 で実装済み（同じく NT/TN は #1214 の GPU 側
+smem 転置カーネル再利用・それ以外は `gemm_fp32_strict` →
+`upload_into` フォールバック。`docs/perf/
+train-resident-grad-device-update.md` §6 を参照）。`fill_resident_weight_grad`
+は `dyn BackendOps` 経由の汎用ディスパッチのため、CUDA バックエンドの
+`gemm_fp32_strict_into` 実装追加だけで本経路への結線が自動的に完成する
+（autodiff 側の追加変更は不要）。3 バックエンドとも実装済みとなった
+ため、以前あった「バックエンドが対応しない場合のみホスト経路
+フォールバック」という分岐は現状では probe 失敗（`MemoryOps` 非対応
+環境等）以外では通常到達しない。実測記録・Go/No-Go 判断は `docs/perf/
+train-resident-grad-device-update.md` を参照（CUDA の実機実測は #1560
+へ引き継ぎ）。
 
 ## 追補: #1479 — resident `GradStaging` の重み勾配をホストへ読み出す公開 API
 
