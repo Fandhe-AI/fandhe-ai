@@ -1436,16 +1436,55 @@ mod tests {
 
     #[test]
     fn mask_stride_narrow_offset_view() {
-        // `narrow` 後の view（offset != 0）。
-        let base = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[4, 2]);
+        // `narrow` 後の view（offset != 0・かつ真に非連続）。列方向
+        // （dim 1）の `narrow` は、行方向（dim 0）の `narrow` と異なり
+        // 元の行幅（stride 4）が残ったまま shape が縮む（`[3,4]` の
+        // 列 1..3 を切り出すと shape `[3,2]`・strides `[4,1]` となり、
+        // 新 shape の標準行優先 stride `[2,1]` とは一致しない）ため
+        // `as_slice()` が `None` を返す（`Tensor::is_contiguous` 契約）。
+        // 行方向の `narrow` は新 shape でも標準行優先 stride のまま
+        // 残り `as_slice()` が成功してしまう（`Contig` 分類）ため、
+        // 本テストの意図（`View` 分類・rank-2 `Contig`×`View` 専用
+        // 経路のオフセット付きケース）を検証するには列方向でなければ
+        // ならない（advisor 指摘。行方向版は誤って `Contig`×`Contig`
+        // 高速経路しか検証していなかった）。
+        let base = t(
+            &[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+            &[3, 4],
+        );
         let g = base
-            .narrow(0, 1, 2)
+            .narrow(1, 1, 2)
             .expect("narrow: 事前に範囲内であることを確認済み");
-        let mask_src = t(&[-1.0, 1.0, 0.0, -2.0], &[2, 2]);
+        debug_assert!(
+            g.as_slice().is_none(),
+            "narrow(dim=1) は非連続 view のはず（本テストが検証したい前提）"
+        );
+        let mask_src = t(&[-1.0, 1.0, 0.0, -2.0, 3.0, -3.0], &[3, 2]);
 
         let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
         let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
-        assert_bits_eq("narrow view", &actual, &expected);
+        assert_bits_eq("narrow(dim=1) view", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_both_operands_transposed_rank2() {
+        // `g`・`mask_src` の両方が非連続 view（`View`×`View`）の
+        // rank-2 ケース。rank-2 専用経路のうち「片方 `Contig`・片方
+        // `View`」の 2 分岐（advisor 指摘で追加）のどちらにも該当
+        // しないため、`try_elementwise_mul_mask_strided` 内の
+        // 一般化した `read(idx, flat)` 経由の rank-2 経路（`MaskReadOperand::
+        // read` の `View` アーム）を確実に踏む。
+        let tmp_g = t(&[1.0, -2.0, 3.0, -4.0, 5.0, -6.0], &[2, 3]);
+        let g = transpose2d(&tmp_g); // shape [3, 2]、非連続 view
+        let tmp_mask = t(&[1.0, -1.0, 0.0, 2.0, -2.0, 0.5], &[2, 3]);
+        let mask_src = transpose2d(&tmp_mask); // shape [3, 2]、非連続 view
+        debug_assert!(g.as_slice().is_none() && mask_src.as_slice().is_none());
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("View×View rank-2", &actual, &expected);
     }
 
     #[test]
@@ -1523,8 +1562,11 @@ mod tests {
     /// `docs/perf/lowlayer-diagnosis-2026-09-12.md` §4 の
     /// `diag_elementwise_mask_bench` と同構成。64×256 の連続入力 と
     /// `[256,64]→transpose2d` の非連続転置 view を 1000 回反復した
-    /// 中央値を比較する。stderr 出力のみで assert は行わない
-    /// （実測記録は `docs/perf/train-reuse-relu-mask-stride.md`）。
+    /// 中央値を、新実装（`elementwise_mul_mask`）・旧参照実装
+    /// （`elementwise_mul_mask_reference`。`dense_vec` zip 経路）の
+    /// 双方・連続／非連続の計 4 系列で比較する。stderr 出力のみで
+    /// assert は行わない（実測記録は `docs/perf/
+    /// train-reuse-relu-mask-stride.md`）。
     /// 実行例:
     /// `cargo test -p fandhe-ai-autodiff --release -- --ignored
     /// --nocapture mask_stride_microbench`
