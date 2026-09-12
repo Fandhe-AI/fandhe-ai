@@ -1904,7 +1904,8 @@ train-resident-grad-device-update.md` §6 を参照）。`fill_resident_weight_g
 フォールバック」という分岐は現状では probe 失敗（`MemoryOps` 非対応
 環境等）以外では通常到達しない。実測記録・Go/No-Go 判断は `docs/perf/
 train-resident-grad-device-update.md` を参照（CUDA の実機実測は #1560
-へ引き継ぎ）。
+で bit 同一検証・A/B のスキャフォールドを整備済み・GB10 実機実測は
+本 PR 時点では未実施のまま同ドキュメント §7 へ記入欄を残す）。
 
 ## 追補: #1479 — resident `GradStaging` の重み勾配をホストへ読み出す公開 API
 

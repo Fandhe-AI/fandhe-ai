@@ -960,6 +960,31 @@ CUDA Graph で capture・再利用する経路（`fandhe_ai::set_cuda_graph_step
   完全一致）・launch カウンタの 5 run 内一致を集計する。実測記録・既定化可否の判定は
   `docs/perf/train-step-phase-breakdown.md` §16 を参照
 
+### CUDA resident weight 勾配経路 before/after A/B（イシュー #1560）
+
+#1559（`BackendOps::gemm_fp32_strict_into`／`_tracked` の CUDA オーバーライド。
+`DeviceParamStore::step` 内 weight 勾配 `upload_into` を排除しデバイス上で直接
+`GradStaging` へ書き込む）の bit 同一検証・性能 A/B。`run_ab_graph_cuda.sh`／
+`run_ab_managed_cuda.sh` の「同一バイナリのフラグ切替」方式とは異なり、
+**before（#1559 マージ直前の main）／after（実装コミット）2 本の独立ツリーを
+それぞれ path patch でビルドして比較する**（Metal 版 #1555
+`docs/perf/logs/train-resident-grad-metal-1555/ab/run_ab_1555.sh` と同型）。
+
+- **`run_ab_resident_grad_cuda.sh <label>`**: `AB_BEFORE_FACADE_PATH`／
+  `AB_AFTER_FACADE_PATH`（いずれも絶対パス必須・`Cargo.toml` の
+  `name = "fandhe-ai"` 検証込み）が指す 2 つの `crates/facade` をそれぞれ
+  path patch でビルドし、`--task train --device cuda --mode {fresh,reuse}`
+  を 5 round・run 単位で起動順を反転しながら交互実行する。`Cargo.lock` は
+  `bench_fandhe_lock_restore.sh` の共有ヘルパーで退避・EXIT trap 復元する
+  （deps-policy.md 第 9 区分。`[patch]` は CLI 引数のみで与え workspace の
+  `Cargo.toml`／`Cargo.lock` へはコミットしない）
+- 判定は `compare_gemm_ab.py --device cuda --task train --threshold 1.00
+  --per-run --phases` を末尾で自動実行し `compare-train-<label>.md` を出力する
+- 実測記録・事前登録判定規則・GB10 実機での実行手順は
+  `docs/perf/logs/train-resident-grad-cuda-1560/README.md`・
+  `docs/perf/train-resident-grad-device-update.md` §7 を参照（本 PR 時点では
+  実機到達手段がなく未実測のままスキャフォールドのみ）
+
 ### `--metal-split-k <on|off>`（イシュー #1545。Metal GEMM split-K opt-in 経路の runtime トグル A/B）
 
 Metal GEMM split-K opt-in 経路（`crates/backend-metal`。イシュー #1516 で
