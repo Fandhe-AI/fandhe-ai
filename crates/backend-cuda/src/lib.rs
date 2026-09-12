@@ -372,6 +372,7 @@ mod init_cost_diag_tests;
 // クレートルートの兄弟モジュールとして配置する。
 mod kernels;
 mod kernels_elementwise;
+mod kernels_layer_norm;
 mod kernels_mma;
 mod kernels_mma_tf32;
 mod kernels_mma_tf32x3;
@@ -395,6 +396,7 @@ mod readout_regression_diag_tests_1436;
 // （`memory.rs`／`gemm.rs`／`ops.rs` のみが参照。opt-in トグルのみ
 // `pub use` 経由で crate 外部へ公開）。
 mod host_staging;
+mod layer_norm;
 pub mod memory;
 mod module_cache;
 mod mse;
@@ -565,6 +567,7 @@ pub use host_staging::HostStagingStats;
 // re-export と同一ゲート・同一理由。
 #[cfg(feature = "internal-diagnostics")]
 pub use host_staging::HostStagingKind;
+pub use layer_norm::CudaLayerNorm;
 // H2D pinned staging の opt-in スイッチ（イシュー #1585。`crate::
 // placement::{set_managed_placement_enabled, managed_placement_enabled}`
 // と同型のプロセスワイド `AtomicBool` トグル）。`internal-diagnostics`

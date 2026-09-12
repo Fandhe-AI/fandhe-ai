@@ -449,6 +449,28 @@ Softmax`／`LogSoftmax`＋VJP・`autodiff::var::Var::softmax`／`log_softmax`・
 非最終軸 GPU 対応は out-of-scope として記録し、起票はユーザー承認後に限る
 （`.claude/rules/out-of-scope-tracking.md`）。
 
+### 追補（イシュー #1596）
+
+§2.7 の表（`nn.LayerNorm`／RMSNorm の行）は本ドキュメント作成時点（対象 HEAD
+`097bff19`）のスナップショットとして不変のまま残す。イシュー #1596 で以下を実装し、
+上記ギャップを解消した（設計・実機実測状況の詳細は `docs/norm-ops-design.md` を正とする）:
+
+- `fandhe_ai_tensor_core::BackendOps::rmsnorm`／`layer_norm` を新設（既定 `Unsupported`）。
+  `rmsnorm` は既存の RMSNorm 行カーネル（`backend-{cpu,cuda,metal}::rmsnorm`）を
+  `run_fused`（canonical 融合プラン限定経路）とは別の独立エントリとして接続した。
+  `layer_norm` は 3 バックエンドとも新設カーネルで実装した
+- `fandhe_ai_autodiff::Var::rms_norm`／`layer_norm`・`nn::RmsNorm`／`LayerNorm`
+  （`RmsNormVars`／`LayerNormVars` 込み）を追加し、`Module` trait を実装した
+- VJP（`grad.rs::rmsnorm_vjp_rows`／`layer_norm_vjp_rows`）をホスト側に実装し、
+  数値微分・解析的性質（`Σ_row dx = 0` 等）で検証した
+- facade（`crates/facade/src/`）への新規 `pub use`／`pub fn` 追加は**行っていない**。
+  既存の `Var` 再エクスポート経由でユーザーへ到達する（#1594 softmax と同型の方針）
+- 対象外: GPU backward カーネルの結線（VJP はホスト側実装のまま）・CUDA 既存
+  RMSNorm backward カーネル（`rmsnorm_bwd_*`）への接続・多次元 `normalized_shape`・
+  `Sequential::add_rms_norm`／`add_layer_norm`（#1618 のスコープ）・CPU 側 NEON
+  ベクトル化・CUDA 実機実測（本エージェント実行環境に CUDA 実機への到達手段がない
+  ため未実施のまま記入欄を残す）
+
 ## 追補（イシュー #1597）
 
 §2.3「形状操作」表（上記）は取り込み元スナップショットのギャップ記述の

@@ -29,7 +29,9 @@
 //! `NaiveOps`／`TestOps`（compat・テスト経路）に限り引き続き使われる
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
-use fandhe_ai_tensor_core::{Activation, BackendError, BackendOps, ShapeError, Tensor};
+use fandhe_ai_tensor_core::{
+    Activation, BackendError, BackendOps, ShapeError, Tensor, row_norm_layout,
+};
 
 use crate::error::AutodiffError;
 use crate::eval::{self, build_tensor, dense_vec};
@@ -682,6 +684,78 @@ pub(crate) fn vjp(
             });
             vec![(input, da)]
         }
+        Op::RmsNorm { input, weight, eps } => {
+            // forward（`Var::rms_norm`）記録値 `out_value` からは `weight`
+            // に 0 要素があると `x`（正規化前入力）を逆算できないため、
+            // `input`（と `weight` があれば `weight`）を実体化し直して
+            // 行内統計（`rstd`）を再計算する（`eval::row_rms_stats` と
+            // 同じ縮約精度契約。`.claude/rules/coding-rust.md`）。
+            let x_val = materialize_fallible(nodes, ops, input)?.clone();
+            let w_val = match weight {
+                Some(w) => Some(materialize_fallible(nodes, ops, w)?.clone()),
+                None => None,
+            };
+            let x_shape = x_val.shape().to_vec();
+            let (rows, hidden) = row_norm_layout(&x_shape).unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "grad::vjp: Op::RmsNorm の row_norm_layout が forward 側の契約に反して失敗した"
+                );
+                (0, 0)
+            });
+            let x_slice = dense_vec(&x_val);
+            let w_slice = w_val.as_ref().map(dense_vec);
+            let dy_slice = dense_vec(upstream);
+            let (dx, dw) =
+                rmsnorm_vjp_rows(&x_slice, w_slice.as_deref(), eps, rows, hidden, &dy_slice);
+            let mut contributions = vec![(input, build_tensor(dx, &x_shape))];
+            if let (Some(w), Some(dw)) = (weight, dw) {
+                contributions.push((w, build_tensor(dw, &[hidden])));
+            }
+            contributions
+        }
+        Op::LayerNorm {
+            input,
+            weight,
+            bias,
+            eps,
+        } => {
+            // `Op::RmsNorm` と同じ理由で `input`／`weight` を実体化し直し
+            // `mean`／`rstd` を再計算する（`eval::row_ln_stats`）。
+            let x_val = materialize_fallible(nodes, ops, input)?.clone();
+            let w_val = match weight {
+                Some(w) => Some(materialize_fallible(nodes, ops, w)?.clone()),
+                None => None,
+            };
+            let x_shape = x_val.shape().to_vec();
+            let (rows, hidden) = row_norm_layout(&x_shape).unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "grad::vjp: Op::LayerNorm の row_norm_layout が forward 側の契約に反して失敗した"
+                );
+                (0, 0)
+            });
+            let x_slice = dense_vec(&x_val);
+            let w_slice = w_val.as_ref().map(dense_vec);
+            let dy_slice = dense_vec(upstream);
+            let (dx, dw, db) = layer_norm_vjp_rows(
+                &x_slice,
+                w_slice.as_deref(),
+                bias.is_some(),
+                eps,
+                rows,
+                hidden,
+                &dy_slice,
+            );
+            let mut contributions = vec![(input, build_tensor(dx, &x_shape))];
+            if let (Some(w), Some(dw)) = (weight, dw) {
+                contributions.push((w, build_tensor(dw, &[hidden])));
+            }
+            if let (Some(b), Some(db)) = (bias, db) {
+                contributions.push((b, build_tensor(db, &[hidden])));
+            }
+            contributions
+        }
         // RNN（tanh 版）セル 1 step（イシュー #1647・設計 `docs/autodiff-
         // rnn-cell-tape-design.md` 決定 1・5）。`out_value` は forward
         // 記録済みの `h_t`（= `tanh(pre)`）。`Op::Tanh` と同じ
@@ -976,6 +1050,152 @@ pub(crate) fn vjp(
         }
     };
     Ok(contributions)
+}
+
+/// `Op::RmsNorm` の VJP 本体（イシュー #1596）:
+/// `x̂ = x·r`（`r` = `rstd`）・`dx̂ = dy·w`（`w` なしは `dy`）・
+/// `dx = r·(dx̂ − x̂·mean(dx̂·x̂))`・`dw = Σ_rows dy·x̂`。
+///
+/// 行内（`hidden` 軸）の `mean(dx̂·x̂)` は `softmax_vjp_along`
+/// （`crates/autodiff/tests` 側の先例。要素積を `f32` で確定してから
+/// `f64` へ昇格して蓄積し、`rstd` との最終乗算・`dy` からの減算は
+/// `f64` のまま保持して 1 回だけ `f32` へ downcast する）と同じ overflow
+/// 回避方針を踏襲する。`dw` の行方向（`rows` 軸）蓄積は
+/// `.claude/rules/coding-rust.md`「勾配の長軸縮約の要素積は `f32` で
+/// 確定してから `f64` へ昇格して蓄積する」契約に厳密に従う（コメント
+/// が挙げる代表例そのもの）。`rows == 0 || hidden == 0` は
+/// [`eval::rmsnorm_rows`] と同じ早期 return で空／ゼロ出力を返す。
+fn rmsnorm_vjp_rows(
+    x: &[f32],
+    w: Option<&[f32]>,
+    eps: f32,
+    rows: usize,
+    hidden: usize,
+    dy: &[f32],
+) -> (Vec<f32>, Option<Vec<f32>>) {
+    let mut dx = vec![0.0f32; x.len()];
+    let mut dw_acc: Option<Vec<f64>> = w.map(|_| vec![0.0f64; hidden]);
+    if rows == 0 || hidden == 0 {
+        let dw = dw_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+        return (dx, dw);
+    }
+    let inv_n = 1.0f64 / hidden as f64;
+    for r in 0..rows {
+        let row = &x[r * hidden..(r + 1) * hidden];
+        let dy_row = &dy[r * hidden..(r + 1) * hidden];
+        let rstd = eval::row_rms_stats(row, eps, inv_n);
+        let dxhat_at = |i: usize| -> f32 {
+            match w {
+                Some(w) => dy_row[i] * w[i],
+                None => dy_row[i],
+            }
+        };
+        let mut dot_acc = 0.0f64;
+        for (i, &xv) in row.iter().enumerate() {
+            let xhat = xv * rstd;
+            let term = dxhat_at(i) * xhat;
+            dot_acc += term as f64;
+        }
+        let mean_dot = dot_acc * inv_n;
+        let dx_row = &mut dx[r * hidden..(r + 1) * hidden];
+        for (i, (&xv, dxv)) in row.iter().zip(dx_row.iter_mut()).enumerate() {
+            let xhat = xv * rstd;
+            let dxhat = dxhat_at(i);
+            let d = (rstd as f64) * (dxhat as f64 - (xhat as f64) * mean_dot);
+            *dxv = d as f32;
+        }
+        if let Some(dw_acc) = dw_acc.as_mut() {
+            for (i, (&xv, &dyv)) in row.iter().zip(dy_row.iter()).enumerate() {
+                let xhat = xv * rstd;
+                let term = dyv * xhat;
+                dw_acc[i] += term as f64;
+            }
+        }
+    }
+    let dw = dw_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+    (dx, dw)
+}
+
+/// `Op::LayerNorm` の VJP 本体（イシュー #1596）:
+/// `x̂ = (x−μ)·r`・`dx̂ = dy·w`・`dx = r·(dx̂ − mean(dx̂) − x̂·mean(dx̂·x̂))`・
+/// `dw = Σ_rows dy·x̂`・`db = Σ_rows dy`。[`rmsnorm_vjp_rows`] と同じ
+/// f64 縮約方針（行内 `mean(dx̂)`／`mean(dx̂·x̂)` は要素を `f32` で確定
+/// してから `f64` 蓄積・`dw`／`db` の行方向蓄積も同型）。`has_bias` は
+/// forward で `bias` が `Some` だったか（`weight` の有無とは独立）を
+/// 表し、`db` を計算するかどうかを決める。
+fn layer_norm_vjp_rows(
+    x: &[f32],
+    w: Option<&[f32]>,
+    has_bias: bool,
+    eps: f32,
+    rows: usize,
+    hidden: usize,
+    dy: &[f32],
+) -> (Vec<f32>, Option<Vec<f32>>, Option<Vec<f32>>) {
+    let mut dx = vec![0.0f32; x.len()];
+    let mut dw_acc: Option<Vec<f64>> = w.map(|_| vec![0.0f64; hidden]);
+    let mut db_acc: Option<Vec<f64>> = if has_bias {
+        Some(vec![0.0f64; hidden])
+    } else {
+        None
+    };
+    if rows == 0 || hidden == 0 {
+        let dw = dw_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+        let db = db_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+        return (dx, dw, db);
+    }
+    let n = hidden as f64;
+    for r in 0..rows {
+        let row = &x[r * hidden..(r + 1) * hidden];
+        let dy_row = &dy[r * hidden..(r + 1) * hidden];
+        let (mean, rstd) = eval::row_ln_stats(row, eps, hidden);
+        // `mean`／`rstd` を `f64` のまま偏差計算に使い、`x̂` を確定する
+        // 直前の 1 回だけ `f32` へ downcast する（forward `eval::
+        // layer_norm_rows` と同じ理由。codex-review 指摘: `mean` の
+        // 早期丸めは forward・backward 双方の `x̂` を歪める）。
+        let xhat_at = |i: usize| -> f32 { ((row[i] as f64 - mean) * rstd) as f32 };
+        let dxhat_at = |i: usize| -> f32 {
+            match w {
+                Some(w) => dy_row[i] * w[i],
+                None => dy_row[i],
+            }
+        };
+        let mut sum_dxhat = 0.0f64;
+        let mut dot_acc = 0.0f64;
+        for i in 0..row.len() {
+            let xhat = xhat_at(i);
+            let dxhat = dxhat_at(i);
+            sum_dxhat += dxhat as f64;
+            let term = dxhat * xhat;
+            dot_acc += term as f64;
+        }
+        // `mean` と同じ理由（`row_ln_stats` doc 参照）で、事前丸めした
+        // 逆数との積ではなく `hidden` による直接除算で求める。
+        let mean_dxhat = sum_dxhat / n;
+        let mean_dot = dot_acc / n;
+        let dx_row = &mut dx[r * hidden..(r + 1) * hidden];
+        for (i, dxv) in dx_row.iter_mut().enumerate() {
+            let xhat = xhat_at(i);
+            let dxhat = dxhat_at(i);
+            let d = rstd * (dxhat as f64 - mean_dxhat - (xhat as f64) * mean_dot);
+            *dxv = d as f32;
+        }
+        if let Some(dw_acc) = dw_acc.as_mut() {
+            for (i, &dyv) in dy_row.iter().enumerate() {
+                let xhat = xhat_at(i);
+                let term = dyv * xhat;
+                dw_acc[i] += term as f64;
+            }
+        }
+        if let Some(db_acc) = db_acc.as_mut() {
+            for (acc, &dyv) in db_acc.iter_mut().zip(dy_row.iter()) {
+                *acc += dyv as f64;
+            }
+        }
+    }
+    let dw = dw_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+    let db = db_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+    (dx, dw, db)
 }
 
 /// [`Op::Permute`] の VJP（`vjp` 内）が使う逆置換の算出（イシュー
@@ -3208,6 +3428,183 @@ release ビルドでも検知できるよう `assert!` を使う）"
         assert_eq!(grads[0].0, NodeId(0));
         let expected = cross_entropy_loss_vjp(&logits, &targets, 1, Reduction::Mean, &g);
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    // --- RmsNorm / LayerNorm（イシュー #1596） ---
+
+    #[test]
+    fn rmsnorm_grad_matches_numeric_no_weight() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+        let eps = 1e-5f32;
+        let (rows, hidden) = row_norm_layout(&[2, 3]).unwrap();
+
+        let x_slice = dense_vec(&x);
+        let s_slice = dense_vec(&s);
+        let (da, dw) = rmsnorm_vjp_rows(&x_slice, None, eps, rows, hidden, &s_slice);
+        assert!(dw.is_none());
+        let da = build_tensor(da, &[2, 3]);
+
+        let num_da =
+            numeric_grad_unary(&x, &s, |xt| eval::rmsnorm_rows(xt, None, eps, rows, hidden));
+        assert_grad_close("rmsnorm dx (no weight)", &da, &num_da);
+    }
+
+    #[test]
+    fn rmsnorm_grad_matches_numeric_with_weight() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let w = t(&[2.0, -1.0, 0.5], &[3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+        let eps = 1e-5f32;
+        let (rows, hidden) = row_norm_layout(&[2, 3]).unwrap();
+
+        let x_slice = dense_vec(&x);
+        let w_slice = dense_vec(&w);
+        let s_slice = dense_vec(&s);
+        let (da, dw) = rmsnorm_vjp_rows(&x_slice, Some(&w_slice), eps, rows, hidden, &s_slice);
+        let da = build_tensor(da, &[2, 3]);
+        let dw = build_tensor(dw.expect("weight present"), &[3]);
+
+        let num_da = numeric_grad_unary(&x, &s, |xt| {
+            eval::rmsnorm_rows(xt, Some(&w_slice), eps, rows, hidden)
+        });
+        assert_grad_close("rmsnorm dx (weighted)", &da, &num_da);
+
+        let num_dw = numeric_grad_unary(&w, &s, |wt| {
+            eval::rmsnorm_rows(&x, Some(&dense_vec(wt)), eps, rows, hidden)
+        });
+        assert_grad_close("rmsnorm dw", &dw, &num_dw);
+    }
+
+    #[test]
+    fn layer_norm_grad_matches_numeric_no_affine() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+        let eps = 1e-5f32;
+        let (rows, hidden) = row_norm_layout(&[2, 3]).unwrap();
+
+        let x_slice = dense_vec(&x);
+        let s_slice = dense_vec(&s);
+        let (da, dw, db) = layer_norm_vjp_rows(&x_slice, None, false, eps, rows, hidden, &s_slice);
+        assert!(dw.is_none());
+        assert!(db.is_none());
+        let da = build_tensor(da, &[2, 3]);
+
+        let num_da = numeric_grad_unary(&x, &s, |xt| {
+            eval::layer_norm_rows(xt, None, None, eps, rows, hidden)
+        });
+        assert_grad_close("layer_norm dx (no affine)", &da, &num_da);
+    }
+
+    #[test]
+    fn layer_norm_grad_matches_numeric_with_weight_and_bias() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let w = t(&[2.0, -1.0, 0.5], &[3]);
+        let b = t(&[0.1, -0.2, 0.3], &[3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+        let eps = 1e-5f32;
+        let (rows, hidden) = row_norm_layout(&[2, 3]).unwrap();
+
+        let x_slice = dense_vec(&x);
+        let w_slice = dense_vec(&w);
+        let s_slice = dense_vec(&s);
+        let (da, dw, db) =
+            layer_norm_vjp_rows(&x_slice, Some(&w_slice), true, eps, rows, hidden, &s_slice);
+        let da = build_tensor(da, &[2, 3]);
+        let dw = build_tensor(dw.expect("weight present"), &[3]);
+        let db = build_tensor(db.expect("bias present"), &[3]);
+
+        let num_da = numeric_grad_unary(&x, &s, |xt| {
+            eval::layer_norm_rows(xt, Some(&w_slice), Some(&dense_vec(&b)), eps, rows, hidden)
+        });
+        assert_grad_close("layer_norm dx (affine)", &da, &num_da);
+
+        let num_dw = numeric_grad_unary(&w, &s, |wt| {
+            eval::layer_norm_rows(
+                &x,
+                Some(&dense_vec(wt)),
+                Some(&dense_vec(&b)),
+                eps,
+                rows,
+                hidden,
+            )
+        });
+        assert_grad_close("layer_norm dw", &dw, &num_dw);
+
+        let num_db = numeric_grad_unary(&b, &s, |bt| {
+            eval::layer_norm_rows(&x, Some(&w_slice), Some(&dense_vec(bt)), eps, rows, hidden)
+        });
+        assert_grad_close("layer_norm db", &db, &num_db);
+    }
+
+    #[test]
+    fn vjp_dispatch_rms_norm_returns_input_and_weight() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[1, 4]);
+        let w = t(&[1.0, 1.0, 1.0, 1.0], &[4]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[1, 4]);
+        let eps = 1e-5f32;
+        let out_value = eval::rmsnorm_rows(&x, Some(&dense_vec(&w)), eps, 1, 4);
+        let nodes = vec![leaf_node(x.clone()), leaf_node(w.clone())];
+        let op = Op::RmsNorm {
+            input: NodeId(0),
+            weight: Some(NodeId(1)),
+            eps,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+    }
+
+    #[test]
+    fn vjp_dispatch_layer_norm_returns_input_weight_bias() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[1, 4]);
+        let w = t(&[1.0, 1.0, 1.0, 1.0], &[4]);
+        let b = t(&[0.0, 0.0, 0.0, 0.0], &[4]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[1, 4]);
+        let eps = 1e-5f32;
+        let out_value =
+            eval::layer_norm_rows(&x, Some(&dense_vec(&w)), Some(&dense_vec(&b)), eps, 1, 4);
+        let nodes = vec![
+            leaf_node(x.clone()),
+            leaf_node(w.clone()),
+            leaf_node(b.clone()),
+        ];
+        let op = Op::LayerNorm {
+            input: NodeId(0),
+            weight: Some(NodeId(1)),
+            bias: Some(NodeId(2)),
+            eps,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 3);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        assert_eq!(grads[2].0, NodeId(2));
     }
 
     // --- Softmax / LogSoftmax（イシュー #1594） ---

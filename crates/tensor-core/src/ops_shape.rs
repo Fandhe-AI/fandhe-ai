@@ -130,6 +130,40 @@ pub fn reduce_out_shape(shape: &[usize], dim: Option<usize>) -> Result<Vec<usize
     }
 }
 
+/// LayerNorm／RMSNorm（イシュー #1596。`BackendOps::layer_norm`／
+/// `rmsnorm` の共通入口）が起動前に `(rows, hidden)` を導出するための
+/// shape 検査。CPU／CUDA／Metal の各 `BackendOps` 実装が本関数の結果を
+/// 再導出せず共有する単一情報源とする。`row_softmax_layout`
+/// （イシュー #1594）とは独立した関数とする——softmax は任意軸・非最終軸を
+/// `Ok(None)` で区別する契約だが、LayerNorm／RMSNorm は最終軸限定
+/// （PyTorch `nn.LayerNorm`／`nn.RMSNorm` の `normalized_shape` は
+/// 常に末尾次元群。多次元 `normalized_shape` は本イシューのスコープ外
+/// のため、`hidden` は最終軸 1 個に限定する）であり、非最終軸という
+/// 概念自体を持たないため `Option` を返す必要がない。
+///
+/// - `shape` が rank 0（スカラー）の場合 `ShapeError::RankMismatch`
+///   （`expected: 1`）を返す（最終軸自体が存在しないため）。
+/// - `hidden = shape[rank-1]`（最終軸のサイズ）、`rows` は残りの
+///   先頭次元群の積（`shape[..rank-1]` の要素数積）とする。
+///   `checked_numel`（`Tensor::new` 等が使う単一情報源と同じ検査）で
+///   `usize` 範囲の乗算オーバーフローを検出し
+///   `ShapeError::ElementCountOverflow` を返す。`rows` を
+///   `numel / hidden` の除算ではなく先頭次元群の積として直接計算する
+///   ことで、`hidden == 0` のゼロ除算を経由しない（`row_softmax_layout`
+///   の `checked_div` 吸収より単純）。
+pub fn row_norm_layout(shape: &[usize]) -> Result<(usize, usize), ShapeError> {
+    let rank = shape.len();
+    if rank == 0 {
+        return Err(ShapeError::RankMismatch {
+            expected: 1,
+            actual: 0,
+        });
+    }
+    let hidden = shape[rank - 1];
+    let rows = checked_numel(&shape[..rank - 1])?;
+    Ok((rows, hidden))
+}
+
 /// softmax／log_softmax（イシュー #1594。`BackendOps::softmax`／
 /// `log_softmax` の共通入口）が起動前に `(rows, cols)` を導出するための
 /// shape 検査。CPU／CUDA／Metal の各 `BackendOps` 実装が本関数の結果を
@@ -383,6 +417,59 @@ mod tests {
         for err in errs {
             let _ = format!("{err}");
         }
+    }
+
+    // --- row_norm_layout ---
+
+    #[test]
+    fn row_norm_layout_rank1() {
+        let out = row_norm_layout(&[8]).unwrap();
+        assert_eq!(out, (1, 8));
+    }
+
+    #[test]
+    fn row_norm_layout_2d() {
+        let out = row_norm_layout(&[3, 8]).unwrap();
+        assert_eq!(out, (3, 8));
+    }
+
+    #[test]
+    fn row_norm_layout_3d() {
+        let out = row_norm_layout(&[2, 3, 8]).unwrap();
+        assert_eq!(out, (6, 8));
+    }
+
+    #[test]
+    fn row_norm_layout_rank0_is_rank_mismatch() {
+        let err = row_norm_layout(&[]).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 1,
+                actual: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn row_norm_layout_zero_hidden_yields_rows_from_leading_dims() {
+        // hidden == 0 でも rows は先頭次元群の積として直接計算するため
+        // ゼロ除算を経由しない（`row_softmax_layout` の `checked_div`
+        // 吸収と異なるアプローチ）。
+        let out = row_norm_layout(&[3, 0]).unwrap();
+        assert_eq!(out, (3, 0));
+    }
+
+    #[test]
+    fn row_norm_layout_zero_leading_dim() {
+        let out = row_norm_layout(&[0, 4]).unwrap();
+        assert_eq!(out, (0, 4));
+    }
+
+    #[test]
+    fn row_norm_layout_element_count_overflow_is_typed_error() {
+        let err = row_norm_layout(&[usize::MAX, 2, 2]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 
     // --- row_softmax_layout ---

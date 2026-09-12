@@ -1348,6 +1348,66 @@ pub trait BackendOps {
         ))
     }
 
+    /// 行方向 RMSNorm（`x · rsqrt(mean(x²) + eps) · w`。`w` が `None` の
+    /// 場合は乗算をスキップ。イシュー #1596）の独立エントリ。既存の
+    /// [`Self::run_fused`] 経由（`match_rmsnorm_plan` の canonical プラン
+    /// 一致限定・`mean` 化なし・`eps` なし・`weight` なし）とは別に、
+    /// `fandhe_ai_autodiff::var::Var::rms_norm` が直接呼べる入口を
+    /// 提供する（`docs/compat-feature-gap.md` §2.7）。
+    ///
+    /// **契約**: 正規化軸は常に最終軸（[`crate::ops_shape::
+    /// row_norm_layout`] が `(rows, hidden)` を導出する）。`weight` を
+    /// 渡す場合は shape `[hidden]` を要求する（呼び出し元
+    /// `Var::rms_norm` が事前検査する）。戻り値の shape は入力 `x` と
+    /// 恒等（正規化は形状を変えない）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、`Var::
+    /// rms_norm` は `Unsupported` のときのみホスト参照実装
+    /// （`eval::rmsnorm_rows`）へフォールバックする（それ以外のエラーは
+    /// 伝播する。判定迂回経路を作らない。`.claude/rules/security.md`
+    /// A08）。CPU／CUDA／Metal はいずれもこのデフォルトを既存の
+    /// RMSNorm 行カーネル（`run_fused` の RMSNorm 一致経路が使うものと
+    /// 同一のカーネル実体）でオーバーライドする。
+    fn rmsnorm(
+        &self,
+        _x: &Tensor<f32>,
+        _weight: Option<&Tensor<f32>>,
+        _eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "rmsnorm: default fail-safe (no fused RMSNorm kernel available)".into(),
+        ))
+    }
+
+    /// 行方向 LayerNorm（`(x − mean(x)) · rsqrt(var(x) + eps) · w + b`。
+    /// `w`／`b` はそれぞれ `None` の場合は対応する演算をスキップ。
+    /// 分散は biased（÷N）。イシュー #1596）の独立エントリ。[`Self::
+    /// rmsnorm`] と同じ最終軸限定契約・非破壊拡張・フォールバック規律
+    /// に従う（`Var::layer_norm` は `Unsupported` のときのみ
+    /// `eval::layer_norm_rows` へフォールバックする）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::rmsnorm`] と同じ非破壊拡張・fail-safe。CPU／CUDA／Metal
+    /// はいずれも本イシューで新設する専用カーネルでこのデフォルトを
+    /// オーバーライドする（既存の融合 `run_fused` canonical プランには
+    /// LayerNorm 一致経路を追加しない。LayerNorm は本エントリ経由でのみ
+    /// 到達する）。
+    fn layer_norm(
+        &self,
+        _x: &Tensor<f32>,
+        _weight: Option<&Tensor<f32>>,
+        _bias: Option<&Tensor<f32>>,
+        _eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "layer_norm: default fail-safe (no fused LayerNorm kernel available)".into(),
+        ))
+    }
+
     /// LSTM セルの pointwise 段（イシュー #1647・設計 `docs/autodiff-
     /// rnn-cell-tape-design.md` 決定 1・決定 1b・決定 5）。融合 GEMM
     /// `pre = x·W_ih + b_ih + h_prev·W_hh + b_hh`（`[B,4H]`。列ブロック
@@ -2113,6 +2173,31 @@ mod tests {
         let b = Tensor::new(vec![1.0, 2.0], &[2, 1]).unwrap();
 
         let result = ops.gemm_checksum(&a, &b, ChecksumReadout::ChecksumOnly);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::rmsnorm`] の既定実装が fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する（イシュー
+    /// #1596。`mse_loss_default_is_unsupported` と同型）。
+    #[test]
+    fn rmsnorm_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[1, 3]).unwrap();
+
+        let result = ops.rmsnorm(&x, None, 1e-6);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::layer_norm`] の既定実装が fail-safe を返すことを
+    /// 確認する（イシュー #1596）。
+    #[test]
+    fn layer_norm_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[1, 3]).unwrap();
+
+        let result = ops.layer_norm(&x, None, None, 1e-5);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
