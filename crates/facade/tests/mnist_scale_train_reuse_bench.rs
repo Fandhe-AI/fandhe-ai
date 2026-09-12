@@ -446,3 +446,139 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
          （command_buffer_delta と同じ理由）"
     );
 }
+
+/// `backward_device_param_store` 区間**限定**でカウンタ差分・壁時間を
+/// 計測する診断テスト（イシュー #1562。`docs/backend-metal-command-
+/// batching-design.md` §7.3）。既存
+/// [`mnist_scale_train_reuse_metal_batch_counters`] は 1 step 全体
+/// （forward + backward + SGD update）のカウンタ差分（11/9/9）を見るが、
+/// 本テストは `d_input`（`Op::LinearResident` の VJP のうち resident 化
+/// されていない側。§7.2「#1555」追記・冒頭 doc comment 参照）が
+/// backward フェーズ単独にどれだけの同期境界・壁時間を占めるかを
+/// 切り分けるために `tape.backward_device_param_store` の呼び出し前後
+/// **だけ**でカウンタ・`Instant` 計測を取る。
+///
+/// # 事前登録仮説
+///
+/// backward 区間（L1・L2 の `d_weight`〈encode-only・#1555〉+ `d_input`
+/// 〈`gemm_resident_lhs` 経由・個別 `download` あり〉の計 4 GPU
+/// dispatch）は:
+///
+/// - `encode_delta = 4`（d_input 2 回 + d_weight 2 回）
+/// - `command_buffer_delta = wait_delta = 2`（d_input 2 回それぞれの
+///   `gemm_resident_lhs` 内 `mem.download` が同期点になる。d_weight は
+///   encode-only のため寄与しない）
+///
+/// 仮説と不一致の場合は assert では止めず（本イシューは記録専用・
+/// non-gating。受け入れ条件「コード変更は無しでもよい」の測定タスク）
+/// 乖離をログへ残す。`step_device_param_store`（SGD update）分の
+/// カウンタ・時間はこの計測窓の外（bias の `upload_into` 同期はここに
+/// 含まれない。冒頭 doc comment 「#1564 のスコープ」参照）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn mnist_scale_train_reuse_metal_backward_dinput_phase() {
+    let _guard = serialize_diagnostic_counter_tests();
+    let device = Device::Metal;
+    let model = build_model();
+    let (x_data, y_data) = mlp_data();
+
+    let init_tape = fandhe_ai::tape_for(device).unwrap();
+    let mut store = model.init_device_param_store(&init_tape).unwrap();
+    let _ = init_tape.sync_device_param_store_to_host(&store).unwrap();
+    drop(init_tape);
+
+    let config = FacadeSgdConfig::new(LR);
+
+    // 1 step 分（forward → backward〈計測対象〉→ SGD update）を実行し、
+    // backward 区間限定の壁時間（秒）・カウンタ差分（encode/cb/wait）を
+    // 返す。forward・update 自体は計測窓の外（`Instant` 計測は
+    // backward_device_param_store 呼び出しの前後のみ）。
+    let mut run_step_measure_backward =
+        |store: &mut fandhe_ai::DeviceParamStore| -> (f64, u64, u64, u64) {
+            let tape = fandhe_ai::tape_for(device).unwrap();
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+            let pred = model.forward_resident(&tape, &x, store).unwrap();
+            let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+            let last_loss = loss
+                .to_tensor()
+                .get(&[])
+                .expect("loss は shape [] スカラー");
+            assert!(
+                last_loss.is_finite(),
+                "MEASURE_ERROR: step loss not finite: {last_loss}"
+            );
+
+            let before = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
+                .expect("singleton MetalContext は実機で必ず取得できるはず");
+            let t0 = Instant::now();
+            let grads = tape.backward_device_param_store(&loss, store).unwrap();
+            let backward_secs = t0.elapsed().as_secs_f64();
+            let after = fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot()
+                .expect("singleton MetalContext は実機で必ず取得できるはず");
+
+            tape.step_device_param_store(store, &grads, &config)
+                .unwrap();
+
+            (
+                backward_secs,
+                after.encode_calls - before.encode_calls,
+                after.command_buffers - before.command_buffers,
+                after.wait_until_completed - before.wait_until_completed,
+            )
+        };
+
+    // steady-state 到達（`mnist_scale_train_reuse_metal_batch_counters`
+    // と同じ考え方。プールのフリーリスト充足前は確保パスが混じり
+    // カウンタ・時間が安定しない）。
+    const WARMUP: usize = TRAIN_WARMUP;
+    for _ in 0..WARMUP {
+        run_step_measure_backward(&mut store);
+    }
+
+    let mut backward_secs = Vec::with_capacity(TRIALS);
+    let mut encode_deltas = Vec::with_capacity(TRIALS);
+    let mut command_buffer_deltas = Vec::with_capacity(TRIALS);
+    let mut wait_deltas = Vec::with_capacity(TRIALS);
+    for _ in 0..TRIALS {
+        let (secs, encode_delta, command_buffer_delta, wait_delta) =
+            run_step_measure_backward(&mut store);
+        backward_secs.push(secs);
+        encode_deltas.push(encode_delta);
+        command_buffer_deltas.push(command_buffer_delta);
+        wait_deltas.push(wait_delta);
+    }
+
+    let q = median_q1_q3(&backward_secs).expect("backward_secs の分位点計算に失敗した");
+
+    println!(
+        "[mnist_scale_train_reuse_metal_backward_dinput_phase] backward-only \
+         median={:.6}ms q1={:.6}ms q3={:.6}ms (n={TRIALS}) \
+         encode_deltas={encode_deltas:?} command_buffer_deltas={command_buffer_deltas:?} \
+         wait_deltas={wait_deltas:?} — 事前登録仮説: encode_delta=4（d_input 2 回 \
+         + d_weight 2 回）・command_buffer_delta=wait_delta=2（d_input 2 回の \
+         gemm_resident_lhs 由来の download。d_weight は #1555 で encode-only 化済み \
+         のため寄与しない）。record only, non-gating（`docs/backend-metal-command-\
+         batching-design.md` §7.3）",
+        q.median * 1e3,
+        q.q1 * 1e3,
+        q.q3 * 1e3,
+    );
+
+    for (i, ((&encode_delta, &command_buffer_delta), &wait_delta)) in encode_deltas
+        .iter()
+        .zip(command_buffer_deltas.iter())
+        .zip(wait_deltas.iter())
+        .enumerate()
+    {
+        if encode_delta != 4 || command_buffer_delta != 2 || wait_delta != 2 {
+            println!(
+                "[mnist_scale_train_reuse_metal_backward_dinput_phase] trial {i}: \
+                 事前登録仮説から乖離（encode_delta={encode_delta} \
+                 command_buffer_delta={command_buffer_delta} wait_delta={wait_delta}）。\
+                 §7.3 記入時に原因を確認すること（record only のため assert では \
+                 止めない）"
+            );
+        }
+    }
+}
