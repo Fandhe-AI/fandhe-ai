@@ -494,7 +494,7 @@ fn mnist_scale_train_reuse_metal_backward_dinput_phase() {
     // 返す。forward・update 自体は計測窓の外（`Instant` 計測は
     // backward_device_param_store 呼び出しの前後のみ）。
     let mut run_step_measure_backward =
-        |store: &mut fandhe_ai::DeviceParamStore| -> (f64, u64, u64, u64) {
+        |store: &mut fandhe_ai::DeviceParamStore| -> (f64, usize, usize, usize) {
             let tape = fandhe_ai::tape_for(device).unwrap();
             let x = tape.var(&x_data);
             let y = tape.var(&y_data);

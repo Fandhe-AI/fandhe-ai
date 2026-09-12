@@ -2,7 +2,8 @@
 //! `d_input` を求める際に呼ぶ `MetalBackendOps::gemm_resident_lhs`
 //! （`crates/backend-metal/src/ops.rs`）の GPU dispatch 部分
 //! （`MetalGemm::dispatch_strided_bias_act_prepared` = encode +
-//! `ctx.synchronize()`〈同期・GPU 完了待ち〉+ `read_to_vec`〈readback〉）
+//! `ctx.synchronize()`〈同期・GPU 完了待ち〉のみ。readback〈`read_to_vec`
+//! 等〉は含まず、呼び出し元〈`gemm_resident_lhs`〉が同期後に別途行う）
 //! を隔離環境で phase 分解する診断ベンチ（親イシュー #1557・子イシュー
 //! #1561 の最初の子イシュー #1562）。
 //!
