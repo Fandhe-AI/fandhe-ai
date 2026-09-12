@@ -224,8 +224,80 @@ bias `upload_into` の synchronize へ移動）。これは **同期点の移動
 
 ### 5.6 スコープ外
 
-- CUDA 実機での `gemm_fp32_strict_into`／`upload_into` 実装・実測（#1212 から継続・
-  既定 `Unsupported`・フォールバック）
+- ~~CUDA 実機での `gemm_fp32_strict_into`／`upload_into` 実装・実測（#1212 から継続・
+  既定 `Unsupported`・フォールバック）~~ → #1559 で実装完了（§6 参照）。実機実測は #1560 へ
+  引き継ぎ
 - bias 勾配自体のデバイス常駐化（デバイス側列縮約カーネル必要。現状は bias は常にホスト経由
   で `upload_into`）
 - `d_input` GEMM の同期境界解消（従来どおり `gemm()` → `download` 経路。スコープ外）
+
+## 6. #1559 CUDA 実装
+
+`BackendOps::gemm_fp32_strict_into`／`_tracked` の CUDA オーバーライド
+（`crates/backend-cuda/src/ops.rs::CudaBackendOps::gemm_fp32_strict_into_impl`）を実装した。
+#1214 で追加済みの CUDA NT/TN 転置入口（GPU 側 smem 転置カーネル `transpose_smem_f32` →
+既存 NN GEMM カーネル方式）を、出力を新規 alloc + readback ではなく呼び出し元の
+`DeviceBuffer<f32>` の指定オフセットへ直接書き込む形（`gemm::CudaGemm::
+launch_tiled_f32_nt_into`／`_tn_into`。`CudaArgMut::View`／`UnifiedView` 新設）に拡張して
+再利用した。NT/TN 以外（NN・TT・分類不能形状・退化形状・転置カーネル使用不能環境）は
+`Unsupported` を返さず `gemm_fp32_strict` → `CudaMemory::upload_into` のフォールバックへ
+倒す（Metal 版 #1555 と同じ理由。`resident_grad_capability` が `Some(false)` へ倒れて以降の
+resident 読み出しが壊れるのを防ぐ）。
+
+NT/TN 経路は `transpose_to_pooled` が返す中間バッファ（`PooledCudaHandle<f32>`）を
+関数内で `stream.synchronize()` してから drop する設計（`launch_tiled_f32_resident_nt`
+のように戻り値として呼び出し元へ返し「次の同期点まで保持する」契約が取れないため。
+`gemm.rs::CudaGemm::launch_tiled_f32_nt_into` ドキュメンテーションコメント「設計判断 A」
+参照）。旧経路（`readback` の D2H → `DeviceParamStore::step` 内 `upload_into` の H2D。
+m*n 要素データ転送 2 回 + sync 2 回）と比較し、新経路はデータ転送ゼロで sync 1 回のみに
+削減される設計だが、**実測値は本イシュー（#1559）のスコープ外**（本エージェント実行環境に
+CUDA 実機がないため）で、GB10 実機での bit 同一検証・性能 A/B は #1560 へ引き継ぐ。
+
+GPU 非依存単体テスト（`crates/backend-cuda/src/ops.rs`）・GB10 実機 `#[ignore]` テスト
+（`crates/backend-cuda/tests/gemm_fp32_strict_into_parity.rs`。実機未実行のまま記入欄を
+残す）を追加した。
+
+## 7. #1560 GB10 実機実測（スキャフォールドのみ・本 PR 時点では未実測）
+
+#1559 の bit 同一検証・性能 A/B をイシュー #1560 で引き継いだ。本 PR の実行環境
+（Linux・QEMU VM）には DGX Spark GB10 実機への到達手段がないため、**実測値は
+含まれていない**。実行スクリプト・事前登録判定規則・記入欄は
+`docs/perf/logs/train-resident-grad-cuda-1560/`（`README.md` に手順を集約）・
+`scripts/bench/framework-compare/run_ab_resident_grad_cuda.sh` として整備済みで、
+GB10 実機を持つセッションへ実測を申し送る。
+
+### 7.1 比較対象 2 腕（事前登録）
+
+- **before 腕**: `d77f8bde`（#1569 マージ直前の main。`gemm_fp32_strict_into` の CUDA
+  実装なし＝既定 `Unsupported` フォールバック経由）
+- **after 腕**: #1560 のブランチ（`origin/main` `e41db903` + テスト／スクリプト／docs
+  のみ。`crates/*/src` は `e41db903` と同一）
+
+### 7.2 事前登録判定規則
+
+- **Tier 1（必須）**: `size=64 / reuse` セルの `step_total` 5 run 中央値比
+  after/before ≤ 1.00、かつ checksum 完全一致
+- **対照（非判定）**: `fresh` セル（resident 経路非到達）
+- **診断（非判定）**: `--phases` の `backward`／`device_update`／`step_total` 内訳
+- **bit 同一（R2）**: `cuda_graph_step_bit_identity::eager_baseline` を before/after
+  両ツリーで実行し `^(step\[|final\.param\[)` 行を diff（期待 4782 行・差分 0）
+- **副次観測**: after 腕で `--graph on` を 1 回起動し `graph_captured`／
+  `graph_replayed`／`graph_sgd_kernel_launches` を記録（`#1569` により CUDA reuse が
+  NT/TN 層で `any_resident == true` になるため、`DeviceParamStore::step` の CUDA
+  Graph capture 分岐〈`!any_resident` 限定〉が非到達になる可能性がある。判定には
+  用いない）
+
+詳細は `docs/perf/logs/train-resident-grad-cuda-1560/README.md` を参照。
+
+### 7.3 実測結果（記入欄）
+
+| 項目 | 結果 |
+|---|---|
+| bit 同一（R2） | 未実測 |
+| `#[ignore]` 非後退（R1） | 未実測 |
+| A/B reuse `step_total` 判定 | 未実測 |
+| fresh 対照セル | 未実測 |
+| フェーズ分解診断 | 未実測 |
+| CUDA Graph capture 副次観測 | 未実測 |
+
+実測完了後、本節を実測値で更新すること（事前登録規則の事後緩和は行わない）。
