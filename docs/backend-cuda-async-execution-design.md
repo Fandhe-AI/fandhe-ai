@@ -265,7 +265,7 @@
 以下はユーザー承認なしに起票しない（`.claude/rules/out-of-scope-tracking.md`）。
 
 - pinned host memory の H2D 側既定化（#1585 は opt-in 実装のみ・既定 OFF のまま出荷。#1478 の `HOST_STAGING_KIND`〈D2H 側〉と同型の承認・security-auditor 到達手続きを要する）
-- pinned H2D staging の TF32／f16 Tensor Core 経路・elementwise／rmsnorm／softmax／transpose／mse への拡張（#1585 は f32 の `MemoryOps::upload`／`upload_into`・fresh／resident GEMM 経路限定）
+- pinned H2D staging の f16 Tensor Core 経路（`gemm_mma.rs` の `run_f16` 系・`run_f16_kernel`）・elementwise／rmsnorm／softmax／transpose／mse への拡張（#1585 は f32 の `MemoryOps::upload`／`upload_into`・fresh／resident GEMM 経路限定。TF32 Tensor Core 経路〈`run_wmma_tf32` 系〉は f32 系カーネルのため既に対象内。`docs/perf/cuda-h2d-pinned-staging.md` §2 参照）
 - CUDA Graph の forward／backward・step 全体への拡張（イシュー #1349 は update 区間のみの部分採用。§10・`docs/backend-cuda-graph-step-capture-design.md` §3.2 参照）・`cuGraphExecUpdate_v2` による exec update（`unsafe` 導入を要するためユーザー承認事項）
 - ホスト `Tensor` API の `DeviceBuffer` 版への拡張（#1022 と重なる可能性がある）
 - `invalidate`（§5 item 4）の根本的な回復手段の強化: 本設計の `invalidate` は同一 ordinal の primary context を再 retain する前提（c 参照）であり、sticky error が実際に primary context を汚染した場合はプロセス内で解消する手段を持たない（`Poisoned { unrecoverable: true }` へ確定しプロセス再起動を要求する契約に留める）。`cuDevicePrimaryCtxReset` 等による同一プロセス内での primary context の完全破棄・再生成を伴う根本的な回復は本設計のスコープ外とし、採否の判断は #1013（実装）のタイミングへ委ねる

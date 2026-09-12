@@ -556,10 +556,15 @@ pub fn cuda_managed_memory_enabled() -> bool {
 ///
 /// **本イシュー時点のスコープ**（`docs/perf/cuda-h2d-pinned-staging.md`
 /// 参照）: f32 経路（`MemoryOps::upload`／`upload_into`・fresh／resident
-/// GEMM の各 `run_*`／`launch_*` 系）のみ対応。TF32／f16 Tensor Core
-/// 経路（`run_wmma_*`／`run_f16_kernel`）・elementwise／rmsnorm／
-/// softmax／transpose／mse は本イシューでは pinned 化していない
-/// （既定どおり pageable のまま変更なし）。
+/// GEMM の各 `run_*`／`launch_*` 系）のみ対応。TF32 Tensor Core 経路
+/// （`run_wmma_tf32` が到達する `run_wmma_f32_kernel`／
+/// `run_wmma_tf32_opt_kernel`／`run_wmma_tf32_staged_kernel`）は入力が
+/// `&[f32]` のため `upload_h2d_new` を経由し、有効化時は pinned staging
+/// の対象に含まれる。**対象外のまま**なのは f16 Tensor Core 経路
+/// （`gemm_mma.rs` の `run_f16` 系・`gemm.rs::run_f16_kernel`。f16 データ
+/// は `upload_h2d_new` の型〈`&[f32]`〉と一致しないため構造的に非到達）・
+/// elementwise／rmsnorm／softmax／transpose／mse のみ（既定どおり
+/// pageable のまま変更なし）。
 ///
 /// 数値契約: pinned バッファへ同期コピーしてから DMA を発行するだけで
 /// 転送対象の内容自体は変わらないため、出力は経路に依らず bit 同一

@@ -55,13 +55,19 @@ D2H 側（`MemoryOps::with_host_view`。イシュー #1336・#1478）には形�
   - `crates/backend-cuda/src/gemm.rs::CudaGemm`: `upload_h2d_new`（薄い委譲。
     `pub(crate)`）を新設し、本番 f32 経路の `clone_htod` 呼び出し
     （`run_f32_kernel`／`run_tiled_bias_act_f32`／`run_tiled_f32_nt`／`_tn`／
-    `run_tiled_f32_resident_lhs_nt` 系／`upload_f32` 等）を置換。
+    `run_tiled_f32_resident_lhs_nt` 系／`upload_f32` 等）を置換。**TF32
+    Tensor Core 経路**（`run_wmma_tf32` が到達する `run_wmma_f32_kernel`／
+    `run_wmma_tf32_opt_kernel`／`run_wmma_tf32_staged_kernel`）も入力が
+    `&[f32]` のため同じ `upload_h2d_new` を経由し、有効化時は pinned
+    staging の対象に含まれる（f32 系カーネルという構造上の帰結であり、
+    個別に選別結線したものではない）。
   - `crates/backend-cuda/src/ops.rs`: `gemm_resident_lhs` の NT 転置分岐
     （`gemm.upload_h2d_new(bt)`）。
-  - **対象外**（変更なし・従来どおり `stream.clone_htod` 直呼び）: TF32／f16
-    Tensor Core 経路（`run_wmma_*`／`run_f16_kernel`。f16 データは
-    `upload_h2d_new` の型（`&[f32]`）と一致しないため構造的に非到達）・
-    elementwise／rmsnorm／softmax／transpose／mse。
+  - **対象外**（変更なし・従来どおり `stream.clone_htod` 直呼び）: f16
+    Tensor Core 経路（`crates/backend-cuda/src/gemm_mma.rs` の `run_f16`
+    系・`gemm.rs::run_f16_kernel`。f16 データは `upload_h2d_new` の型
+    （`&[f32]`）と一致しないため構造的に非到達）・elementwise／rmsnorm／
+    softmax／transpose／mse。
 - I3（ホスト側一時バッファの解放）の再確認は
   `docs/backend-cuda-async-execution-design.md` §3 に追補済み。
 
@@ -129,13 +135,17 @@ D2H 側（`MemoryOps::with_host_view`。イシュー #1336・#1478）には形�
 - 実機（DGX Spark GB10）でのゲート A／Layer A／Layer B 実測（§3・§4）。
 - pinned H2D staging の既定化（`HOST_STAGING_KIND`〈#1478〉と同型のユーザー
   承認・security-auditor 到達が前提）。
-- TF32／f16 Tensor Core 経路・elementwise／rmsnorm／softmax／transpose／mse
-  への拡張。
+- f16 Tensor Core 経路（`gemm_mma.rs` の `run_f16` 系・`run_f16_kernel`。
+  TF32 Tensor Core 経路〈`run_wmma_tf32`〉は f32 系カーネルのため §2 の
+  とおり既に対象内）・elementwise／rmsnorm／softmax／transpose／mse への
+  拡張。
 - キャッシュのプロセス／ordinal 共有化（`CudaMemory`／`CudaGemm` それぞれが
   インスタンス単位でキャッシュを持つため、プロセス全体の pinned 常駐量は
   理論上 `cap_bytes` の複数倍になりうる）。
-- 実機 `#[ignore]` テストの新規追加（`tests/h2d_pinned_staging_real_device.rs`
-  等）・Layer B マイクロベンチハーネス・framework-compare `--pinned-h2d` の
-  実装は、実機到達可能なセッションでの計測と合わせて行う（本 PR では機構本体
-  （`host_staging.rs`／`memory.rs`／`gemm.rs`／`ops.rs`／facade）と GPU 非依存
-  テストのみを実装し、実機依存の追加ハーネスは実測セッションへ引き継ぐ）。
+- 実機 `#[ignore]` テスト自体は `tests/pinned_h2d_real_device.rs`（PR #1678
+  の codex-review 指摘対応で追加。`PinnedHostSlice` を実際に経由する
+  `upload_new`／`upload_into` の連続 upload・部分更新・解放後の再確保を
+  bit 単位で検証）まで実装済みだが、本 PR 実行環境に DGX Spark GB10 実機
+  への到達手段がなく実行自体は未実施のまま §4 の記入欄を残す。Layer B
+  マイクロベンチハーネス・framework-compare `--pinned-h2d` の実装は未着手
+  のままで、実機到達可能なセッションでの計測と合わせて行う。
