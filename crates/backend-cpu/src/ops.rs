@@ -16,9 +16,10 @@ use std::sync::OnceLock;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, ChecksumReadout, DType, FusionPlan, GemmChecksum, GruBackwardOutput,
-    GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, SgdStepConfig,
-    ShapeError, SvdFactors, Tensor, require_same_shape, row_softmax_layout,
+    Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan, GemmChecksum,
+    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
+    QrFactors, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
+    require_same_shape, row_softmax_layout,
 };
 
 use crate::gemm_blis::{
@@ -1007,6 +1008,111 @@ impl BackendOps for CpuBackendOps {
         }
 
         shared_cpu_memory().wrap_vec(out, vec![m, n])
+    }
+
+    /// `a op b`（`op` は [`BinaryElementwiseOp`]）を [`DeviceBuffer`]
+    /// 常駐のまま計算する（イシュー #1584）。CPU は「デバイス」が
+    /// ホストメモリそのものであるため、H2D／D2H に相当する転送は元々
+    /// 発生しない（`linear_forward_device` と同じ位置付け）。`a`・`b`
+    /// は shape 完全一致限定（ブロードキャスト非対応。`tensor-core::
+    /// BackendOps::binary_elementwise_device` の契約）で、対応する
+    /// ホスト版（`Self::add`／`Self::mul`）と同一のスライス関数
+    /// （`elementwise::add_slice`／`mul_slice`）を使うため bit 同一。
+    fn binary_elementwise_device(
+        &self,
+        op: BinaryElementwiseOp,
+        a: &DeviceBuffer<f32>,
+        b: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Cpu || b.device() != Device::Cpu {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if a.shape() != b.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a.shape().to_vec(),
+                rhs: b.shape().to_vec(),
+            }));
+        }
+        let shape = a.shape().to_vec();
+        let numel = a.numel();
+
+        let a_handle = a
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let b_handle = b
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        if a_handle.data.len() != numel || b_handle.data.len() != numel {
+            // `linear_forward_device` の同種防御と同じ理由
+            // （`DeviceBuffer::new` 経由で構築される限り到達しないはず
+            // だが、shape とハンドル実体のずれを本番経路で `unwrap`/
+            // `expect` に頼らず検出する。REQ-8・OWASP A03）。
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected: numel,
+                    actual: a_handle.data.len().max(b_handle.data.len()),
+                },
+            ));
+        }
+
+        let mut out = vec![0.0f32; numel];
+        match op {
+            BinaryElementwiseOp::Add => {
+                elementwise::add_slice(&a_handle.data, &b_handle.data, &mut out)
+            }
+            BinaryElementwiseOp::Mul => {
+                elementwise::mul_slice(&a_handle.data, &b_handle.data, &mut out)
+            }
+            // `BinaryElementwiseOp` は `#[non_exhaustive]`。未知 variant
+            // は `linear_forward_device` の未知 `Activation` 拒否と同じ
+            // 方針で明示的に拒否する（黙って恒等的な値を返さない）。
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "binary_elementwise_device: unsupported op {op:?}"
+                )));
+            }
+        }
+
+        shared_cpu_memory().wrap_vec(out, shape)
+    }
+
+    /// [`Self::binary_elementwise_device`] の単項版（イシュー #1584）。
+    fn unary_elementwise_device(
+        &self,
+        op: UnaryElementwiseOp,
+        a: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Cpu {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let shape = a.shape().to_vec();
+        let numel = a.numel();
+
+        let a_handle = a
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        if a_handle.data.len() != numel {
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected: numel,
+                    actual: a_handle.data.len(),
+                },
+            ));
+        }
+
+        let mut out = vec![0.0f32; numel];
+        match op {
+            UnaryElementwiseOp::Relu => elementwise::relu_slice(&a_handle.data, &mut out),
+            UnaryElementwiseOp::Exp => elementwise::exp_slice(&a_handle.data, &mut out),
+            UnaryElementwiseOp::Tanh => elementwise::tanh_slice(&a_handle.data, &mut out),
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "unary_elementwise_device: unsupported op {op:?}"
+                )));
+            }
+        }
+
+        shared_cpu_memory().wrap_vec(out, shape)
     }
 
     fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -2020,5 +2126,160 @@ mod linalg_shape_validation_tests {
             ops.linalg_matrix_norm(&a, MatrixNormOrd::Fro),
             Err(BackendError::ShapeMismatch(_))
         ));
+    }
+}
+
+/// [`CpuBackendOps::binary_elementwise_device`]／
+/// [`CpuBackendOps::unary_elementwise_device`]（イシュー #1584）の回帰
+/// テスト。ホスト版（`Self::add`／`mul`／`relu`／`exp`／`tanh`）と bit
+/// 同一であること・空 shape・shape 不一致・device 不一致の fail-closed
+/// を確認する。
+#[cfg(test)]
+mod device_resident_elementwise_tests {
+    use super::*;
+
+    fn bits(t: &Tensor<f32>) -> Vec<u32> {
+        t.as_slice()
+            .expect("test tensor must be contiguous")
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
+    }
+
+    fn bits_buf(ops: &CpuBackendOps, buf: &DeviceBuffer<f32>) -> Vec<u32> {
+        let t = ops.download(buf).unwrap();
+        bits(&t)
+    }
+
+    #[test]
+    fn binary_elementwise_device_add_matches_host_add_bit_exact() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, -2.5, 3.25, f32::MIN_POSITIVE], &[4]).unwrap();
+        let b = Tensor::new(vec![0.5f32, 1.5, -3.25, 2.0], &[4]).unwrap();
+
+        let a_buf = ops.upload(&a).unwrap();
+        let b_buf = ops.upload(&b).unwrap();
+        let out_buf = ops
+            .binary_elementwise_device(BinaryElementwiseOp::Add, &a_buf, &b_buf)
+            .unwrap();
+
+        let host_out = ops.add(&a, &b).unwrap();
+        assert_eq!(bits_buf(&ops, &out_buf), bits(&host_out));
+    }
+
+    #[test]
+    fn binary_elementwise_device_mul_matches_host_mul_bit_exact() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, -2.5, 3.25, 2.0], &[2, 2]).unwrap();
+        let b = Tensor::new(vec![0.5f32, 1.5, -3.25, 4.0], &[2, 2]).unwrap();
+
+        let a_buf = ops.upload(&a).unwrap();
+        let b_buf = ops.upload(&b).unwrap();
+        let out_buf = ops
+            .binary_elementwise_device(BinaryElementwiseOp::Mul, &a_buf, &b_buf)
+            .unwrap();
+
+        let host_out = ops.mul(&a, &b).unwrap();
+        assert_eq!(bits_buf(&ops, &out_buf), bits(&host_out));
+    }
+
+    #[test]
+    fn unary_elementwise_device_relu_matches_host_relu_bit_exact() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![-1.0f32, 0.0, 2.5, -3.25, f32::NAN], &[5]).unwrap();
+
+        let a_buf = ops.upload(&a).unwrap();
+        let out_buf = ops
+            .unary_elementwise_device(UnaryElementwiseOp::Relu, &a_buf)
+            .unwrap();
+
+        let host_out = ops.relu(&a).unwrap();
+        assert_eq!(bits_buf(&ops, &out_buf), bits(&host_out));
+    }
+
+    #[test]
+    fn unary_elementwise_device_exp_matches_host_exp_bit_exact() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![-1.0f32, 0.0, 2.5, -3.25], &[4]).unwrap();
+
+        let a_buf = ops.upload(&a).unwrap();
+        let out_buf = ops
+            .unary_elementwise_device(UnaryElementwiseOp::Exp, &a_buf)
+            .unwrap();
+
+        let host_out = ops.exp(&a).unwrap();
+        assert_eq!(bits_buf(&ops, &out_buf), bits(&host_out));
+    }
+
+    #[test]
+    fn unary_elementwise_device_tanh_matches_host_tanh_bit_exact() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![-1.0f32, 0.0, 2.5, -3.25], &[4]).unwrap();
+
+        let a_buf = ops.upload(&a).unwrap();
+        let out_buf = ops
+            .unary_elementwise_device(UnaryElementwiseOp::Tanh, &a_buf)
+            .unwrap();
+
+        let host_out = ops.tanh(&a).unwrap();
+        assert_eq!(bits_buf(&ops, &out_buf), bits(&host_out));
+    }
+
+    #[test]
+    fn binary_elementwise_device_handles_empty_numel() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(Vec::<f32>::new(), &[0]).unwrap();
+        let b = Tensor::new(Vec::<f32>::new(), &[0]).unwrap();
+        let a_buf = ops.upload(&a).unwrap();
+        let b_buf = ops.upload(&b).unwrap();
+
+        let out_buf = ops
+            .binary_elementwise_device(BinaryElementwiseOp::Add, &a_buf, &b_buf)
+            .unwrap();
+        assert_eq!(out_buf.shape(), &[0]);
+        assert_eq!(out_buf.numel(), 0);
+    }
+
+    #[test]
+    fn binary_elementwise_device_rejects_shape_mismatch() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 2.0], &[2]).unwrap();
+        let b = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        let a_buf = ops.upload(&a).unwrap();
+        let b_buf = ops.upload(&b).unwrap();
+
+        let result = ops.binary_elementwise_device(BinaryElementwiseOp::Add, &a_buf, &b_buf);
+        assert!(matches!(result, Err(BackendError::ShapeMismatch(_))));
+    }
+
+    #[test]
+    fn binary_elementwise_device_rejects_device_mismatch() {
+        // `Device::Cuda(0)` を名乗る CPU 由来ではないバッファを渡すと
+        // `downcast_handle` 前の device 検査で拒否される（`CudaBufferHandle`
+        // を構築せずとも `DeviceBuffer::device()` の値だけで判定される
+        // ため、CPU クレート内で到達可能な検査）。
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 2.0], &[2]).unwrap();
+        let a_buf = ops.upload(&a).unwrap();
+        let mismatched = DeviceBuffer::new(Device::Cuda(0), vec![2], Box::new(NotCpuHandle));
+
+        let result = ops.binary_elementwise_device(BinaryElementwiseOp::Add, &a_buf, &mismatched);
+        assert!(matches!(result, Err(BackendError::DeviceMismatch)));
+    }
+
+    /// [`binary_elementwise_device_rejects_device_mismatch`] 専用のダミー
+    /// ハンドル（`CpuBufferHandle` 以外の任意型であればよい。値自体は
+    /// 使われない）。
+    #[derive(Debug)]
+    struct NotCpuHandle;
+
+    impl fandhe_ai_tensor_core::buffer::BufferHandle for NotCpuHandle {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
     }
 }

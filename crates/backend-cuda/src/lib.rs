@@ -395,6 +395,11 @@ pub mod memory;
 mod module_cache;
 mod mse;
 mod rnn_cell;
+// イシュー #1584: 汎用 reduction（`sum`／`max`）起動 API・カーネル
+// ソース。`mse.rs`／`kernels_mse.rs` と同じ 2 ファイル構成
+// （起動 API／NVRTC カーネル文字列の責務分離）。
+mod kernels_reduce;
+mod reduce;
 // イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線
 // （`gemm.rs::CudaGemm::new`）を実機で検証する `#[ignore]` テスト。
 // `context_cache`（非公開 `mod`）へ到達する必要があるため
@@ -433,6 +438,10 @@ pub use gemm::CudaGemm;
 pub use gemm::TiledF32Kernel;
 pub use mse::CudaMse;
 pub use rnn_cell::CudaRnnCell;
+// イシュー #1584: 汎用 reduction（`sum`／`max`）の実機 `#[ignore]`
+// テスト（`tests/reduce_parity.rs`）が crate 外から `CudaReduce` を
+// 直接構築するために公開する（`CudaMse` と同じ理由）。
+pub use reduce::CudaReduce;
 // `TiledPipelineFunction`／`CudaGemm::compile_tiled_pipeline_variant`／
 // `CudaGemm::launch_tiled_pipeline_f32` はベンチ専用の常駐 API（イシュー
 // #1033）。**本番既定経路（`CudaGemm::new`）は #1137 で `run_tiled_f32`

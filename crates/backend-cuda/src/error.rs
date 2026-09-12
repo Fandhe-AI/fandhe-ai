@@ -71,6 +71,16 @@ pub enum CudaError {
     /// 分離し、`Display` メッセージも専用文言にする。
     InvalidElementwiseShape { detail: String },
 
+    /// `elementwise.rs::function_for_binary`／`function_for_unary` が
+    /// `BinaryElementwiseOp`／`UnaryElementwiseOp`（いずれも
+    /// `#[non_exhaustive]`）の未知 variant を受け取った場合に返す
+    /// （イシュー #1584。advisor 指摘: 未知 variant を `_ =>` で
+    /// `Add`／`Relu` へフォールバックする実装は、将来 variant が
+    /// 追加された際に「別の演算を代わりに計算して黙って成功する」
+    /// fail-open になる。`Activation` 系〈`gemm_bias_act` 等〉が未知
+    /// variant を明示的に拒否する既存方針と揃える）。
+    UnsupportedElementwiseOp { detail: String },
+
     /// 転置カーネル起動 API（`transpose.rs::CudaTranspose`）のホスト側形状
     /// 検証が拒否した入力。
     ///
@@ -85,6 +95,23 @@ pub enum CudaError {
     /// 承知のうえで、あくまで転置 API（`transpose.rs`）の検証であることを
     /// 優先し本 variant に統一する。
     InvalidTransposeShape { detail: String },
+
+    /// reduction 起動 API（`reduce.rs::CudaReduce`）のホスト側形状・
+    /// 範囲検証（`outer`/`axis_len`/`inner`/`numel`/`num_partials` の
+    /// `i32::MAX` 上限・`checked_mul` オーバーフロー）が拒否した入力
+    /// （イシュー #1584）。`InvalidShape`（GEMM）・`InvalidElementwiseShape`
+    /// （elementwise／bias）・`InvalidTransposeShape`（転置）と同じ理由で
+    /// 独立 variant に分離し `Display` メッセージの誤表示を避ける。
+    InvalidReduceShape { detail: String },
+
+    /// reduction（`reduce.rs::CudaReduce`）の縮約対象要素数が 0
+    /// （イシュー #1584）。`max` は単位元を持たないため、`backend-cpu::
+    /// reduction::ReduceError::EmptyReduction` と同一の意味論・
+    /// `Display` 文言（`ops.rs` が `BackendError::KernelLaunchFailed`
+    /// へ写像する際に CPU 側と同一の `"empty reduction for op \"{op}\""`
+    /// 文字列を再現する）で表す。`op` は失敗した演算名（現状 `"max"` の
+    /// み。`sum` は単位元 `0.0` を持つため到達しない）。
+    EmptyReduction { op: &'static str },
 
     /// f16 WMMA GEMM（`gemm_wmma.rs::CudaWmmaGemm`）が、Tensor Core（WMMA）
     /// の要件を満たさないデバイス上で要求された。
@@ -406,8 +433,17 @@ impl fmt::Display for CudaError {
             CudaError::InvalidElementwiseShape { detail } => {
                 write!(f, "invalid elementwise/bias shape: {detail}")
             }
+            CudaError::UnsupportedElementwiseOp { detail } => {
+                write!(f, "unsupported elementwise op: {detail}")
+            }
             CudaError::InvalidTransposeShape { detail } => {
                 write!(f, "invalid transpose shape: {detail}")
+            }
+            CudaError::InvalidReduceShape { detail } => {
+                write!(f, "invalid reduce shape: {detail}")
+            }
+            CudaError::EmptyReduction { op } => {
+                write!(f, "cannot compute {op} of an empty reduction")
             }
             CudaError::TensorCoreUnsupported { detail } => {
                 write!(f, "tensor core (WMMA) unsupported on this device: {detail}")
