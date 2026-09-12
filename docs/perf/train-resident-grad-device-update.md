@@ -224,12 +224,39 @@ bias `upload_into` の synchronize へ移動）。これは **同期点の移動
 
 ### 5.6 スコープ外
 
-- CUDA 実機での `gemm_fp32_strict_into`／`upload_into` 実装・実測（#1212 から継続・
-  既定 `Unsupported`・フォールバック）
+- ~~CUDA 実機での `gemm_fp32_strict_into`／`upload_into` 実装・実測（#1212 から継続・
+  既定 `Unsupported`・フォールバック）~~ → #1559 で実装完了（§6 参照）。実機実測は #1560 へ
+  引き継ぎ
 - bias 勾配自体のデバイス常駐化は Metal で #1566 により実装済み（下記 §7）。CUDA は
   引き続き既定 `Unsupported`（`gemm_fp32_strict_into_with_bias_reduce_tracked` の
   既定実装が weight のみへ委譲し bias は無視する）のままスコープ外
 - `d_input` GEMM の同期境界解消（従来どおり `gemm()` → `download` 経路。スコープ外）
+
+## 6. #1559 CUDA 実装
+
+`BackendOps::gemm_fp32_strict_into`／`_tracked` の CUDA オーバーライド
+（`crates/backend-cuda/src/ops.rs::CudaBackendOps::gemm_fp32_strict_into_impl`）を実装した。
+#1214 で追加済みの CUDA NT/TN 転置入口（GPU 側 smem 転置カーネル `transpose_smem_f32` →
+既存 NN GEMM カーネル方式）を、出力を新規 alloc + readback ではなく呼び出し元の
+`DeviceBuffer<f32>` の指定オフセットへ直接書き込む形（`gemm::CudaGemm::
+launch_tiled_f32_nt_into`／`_tn_into`。`CudaArgMut::View`／`UnifiedView` 新設）に拡張して
+再利用した。NT/TN 以外（NN・TT・分類不能形状・退化形状・転置カーネル使用不能環境）は
+`Unsupported` を返さず `gemm_fp32_strict` → `CudaMemory::upload_into` のフォールバックへ
+倒す（Metal 版 #1555 と同じ理由。`resident_grad_capability` が `Some(false)` へ倒れて以降の
+resident 読み出しが壊れるのを防ぐ）。
+
+NT/TN 経路は `transpose_to_pooled` が返す中間バッファ（`PooledCudaHandle<f32>`）を
+関数内で `stream.synchronize()` してから drop する設計（`launch_tiled_f32_resident_nt`
+のように戻り値として呼び出し元へ返し「次の同期点まで保持する」契約が取れないため。
+`gemm.rs::CudaGemm::launch_tiled_f32_nt_into` ドキュメンテーションコメント「設計判断 A」
+参照）。旧経路（`readback` の D2H → `DeviceParamStore::step` 内 `upload_into` の H2D。
+m*n 要素データ転送 2 回 + sync 2 回）と比較し、新経路はデータ転送ゼロで sync 1 回のみに
+削減される設計だが、**実測値は本イシュー（#1559）のスコープ外**（本エージェント実行環境に
+CUDA 実機がないため）で、GB10 実機での bit 同一検証・性能 A/B は #1560 へ引き継ぐ。
+
+GPU 非依存単体テスト（`crates/backend-cuda/src/ops.rs`）・GB10 実機 `#[ignore]` テスト
+（`crates/backend-cuda/tests/gemm_fp32_strict_into_parity.rs`。実機未実行のまま記入欄を
+残す）を追加した。
 
 ## 7. bias 勾配のデバイス常駐化（イシュー #1566）
 

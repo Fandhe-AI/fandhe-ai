@@ -4829,6 +4829,161 @@ impl CudaGemm {
         self.transpose_smem_f32.is_some()
     }
 
+    /// [`Self::run_tiled_f32_nt`] の device-resident 直書き込み版
+    /// （イシュー #1559）: 結果をホストへ戻さず、呼び出し元が渡す
+    /// `c_dev`（`fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>` の
+    /// 指定オフセット部分ビュー。`ops.rs::CudaBackendOps::
+    /// gemm_fp32_strict_into_impl` が `CudaStorage::view_mut` 経由で
+    /// 構築する）へ直接書き込む。`ops.rs::CudaBackendOps::
+    /// gemm_fp32_strict_impl`（ホスト戻り値経路）とは異なり、`a`／`bt`
+    /// は常に「呼び出しごとに新規 `clone_htod` した全体バッファ」で
+    /// あるため（`DeviceParamStore` 常駐の a 側連結バッファを直接渡す
+    /// 呼び出し元は本イシュー時点で存在しない）、`select_tiled_f32_kernel`
+    /// の `a_offset` 引数には常に `0` を渡す
+    /// （`launch_tiled_f32_resident_nt`〈非 0 `a_offset` をとりうる〉との
+    /// 違い）。
+    ///
+    /// # 設計判断 A（`transpose_to_pooled` 中間バッファの寿命・同期方針）
+    ///
+    /// `transpose_to_pooled` が返す `PooledCudaHandle<f32>`（`b_std`）は
+    /// `Drop` 時に**即座に**プールへ返却される（`pool.rs::
+    /// PooledCudaHandle::Drop` はストリーム順序保証を持たない、純粋な
+    /// Rust 側の可変長プール操作）。`launch_tiled_f32_resident_nt` は
+    /// 戻り値として `b_std` を呼び出し元へ返し「次の同期点まで保持する」
+    /// 契約でこの問題を回避しているが、本メソッドの戻り値は
+    /// `Result<(), CudaError>` のみで自然な「次の同期点」を持たない。
+    /// そのため本メソッド内で GEMM 起動直後に `self.stream.synchronize()`
+    /// を呼んでから `b_std` を drop させる（関数末尾のスコープ終了で
+    /// 自然に drop）。呼び出しごとに 1 回の同期を追加するコストは、
+    /// 旧経路（`readback`〈D2H・sync〉+ ホスト `Vec`/`Tensor` 構築 +
+    /// `upload_into`〈H2D・sync〉＝ m*n 要素データ転送 2 回 + sync 2 回）
+    /// と比較し、データ転送ゼロで sync 1 回のみになるため net win が
+    /// 高いと判断する（実測は #1560 へ引き継ぐ）。ストリーム順序保証
+    /// （`cuMemFreeAsync` 相当）に依存して本 `synchronize()` を省略する
+    /// 最適化は要レビュー承認の将来課題としてスコープ外のままとする。
+    ///
+    /// # 設計判断 B（出力オフセットのアラインメント）
+    ///
+    /// `kernels_tiled_pipeline.rs`（64×64／128×64／Stream-K 全バリアント）・
+    /// `kernels.rs`（classic tiled_f32）いずれも C のエピローグストアは
+    /// `c[(size_t)r * n + cc] = acc[i][j]` 形式のスカラー書き込みであり
+    /// `float4` 等のベクトル化ストアではない（grep で確認済み）。
+    /// したがって `c_dev`（`out_offset` 分ずらした部分ビュー）に対する
+    /// 16 バイト整列制約は存在せず、`a_offset` 用の cp.async 整列ゲート
+    /// （`select_tiled_f32_kernel` の第 1 引数）とは無関係。追加の
+    /// フェイルクローズゲートは不要。
+    pub(crate) fn launch_tiled_f32_nt_into(
+        &self,
+        a: &[f32],
+        bt: &[f32],
+        c_dev: &mut CudaArgMut<'_>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(a.len(), bt.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        validate_output_len(c_dev.len(), m, n)?;
+
+        if m == 0 || n == 0 {
+            // 呼び出し元（`ops.rs::gemm_fp32_strict_into_impl`）は
+            // `m == 0 || n == 0` を退化形状ガードで本メソッド呼び出しより
+            // 前にフォールバックへ振り分ける契約のため、ここへは到達
+            // しないはず（`run_tiled_f32_nt` の同名早期 return と同じ
+            // 理由の防御的分岐）。`c_dev` は呼び出し元がゼロ埋め済みの
+            // 前提のため no-op で返す。
+            return Ok(());
+        }
+        if k == 0 {
+            // `k == 0` は数学的に結果が全 0（`run_tiled_f32_nt` と同じ
+            // 契約）。`c_dev` はゼロ埋めではなく上書き契約
+            // （トレイト側 doc「`out[...]` を上書きする（累積ではない）」）
+            // のため、GPU 起動（GEMM カーネル）せず
+            // `CudaArgMut::zero_fill`（`cudarc::CudaStream::memset_zeros`
+            // への委譲。ドキュメンテーションコメント参照）で明示的に
+            // ゼロを書き込む。
+            c_dev.zero_fill(&self.stream)?;
+            self.stream.synchronize()?;
+            return Ok(());
+        }
+
+        let a_dev = self.stream.clone_htod(a)?;
+        let bt_dev = self.stream.clone_htod(bt)?;
+        let b_std = self.transpose_to_pooled(&bt_dev, n, k)?;
+
+        let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: `run_tiled_f32_nt` と同一の根拠。`a_dev`（m*k 要素）・
+        // `b_std`（k*n 要素。転置カーネルの出力として上記で構築済み）・
+        // `c_dev`（`validate_output_len` で m*n 要素と確認済み）は
+        // ホスト側検証（`validate_gemm_dims`・`validate_tiled_k_bound`）
+        // 済みの m/n/k と 1:1 対応し、GEMM カーネル内の手動境界チェック
+        // （REQ-8）と合わせて OOB を防ぐ。
+        let b_std_view = b_std.as_view();
+        unsafe {
+            let mut builder = self.stream.launch_builder(func);
+            builder.arg(&a_dev).arg(&b_std_view);
+            c_dev.push(&mut builder);
+            builder.arg(&m_i).arg(&n_i).arg(&k_i).launch(cfg)?;
+        }
+        // 設計判断 A: `b_std` がまだ GPU 上で読まれている間にプールへ
+        // 返却・別処理に再利用される race を防ぐため、drop（関数末尾の
+        // スコープ終了）より前に完了を待つ。
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    /// [`Self::launch_tiled_f32_nt_into`] の TN 版（イシュー #1559）:
+    /// [`Self::run_tiled_f32_tn`] と対称の「A が転置格納」パターンを
+    /// device-resident 直書き込みにする。設計判断 A・B は
+    /// [`Self::launch_tiled_f32_nt_into`] のドキュメンテーションコメント
+    /// と同一。
+    pub(crate) fn launch_tiled_f32_tn_into(
+        &self,
+        at: &[f32],
+        b: &[f32],
+        c_dev: &mut CudaArgMut<'_>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(at.len(), b.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        validate_output_len(c_dev.len(), m, n)?;
+
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+        if k == 0 {
+            // `launch_tiled_f32_nt_into` の同名分岐と同一の根拠。
+            c_dev.zero_fill(&self.stream)?;
+            self.stream.synchronize()?;
+            return Ok(());
+        }
+
+        let at_dev = self.stream.clone_htod(at)?;
+        let b_dev = self.stream.clone_htod(b)?;
+        let a_std = self.transpose_to_pooled(&at_dev, k, m)?;
+
+        let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: `run_tiled_f32_tn` と同一の根拠。`a_std`（m*k 要素。
+        // 転置カーネルの出力として上記で構築済み）・`b_dev`（k*n 要素）・
+        // `c_dev`（`validate_output_len` で m*n 要素と確認済み）はホスト
+        // 側検証済みの m/n/k と 1:1 対応する。
+        let a_std_view = a_std.as_view();
+        unsafe {
+            let mut builder = self.stream.launch_builder(func);
+            builder.arg(&a_std_view).arg(&b_dev);
+            c_dev.push(&mut builder);
+            builder.arg(&m_i).arg(&n_i).arg(&k_i).launch(cfg)?;
+        }
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     /// f16 カーネル共通の起動手続き。[`Self::run_f32_kernel`] と同一構造
     /// （naive/tiled 双方の `run_*_f16` から呼ばれる）。
     #[allow(clippy::too_many_arguments)]

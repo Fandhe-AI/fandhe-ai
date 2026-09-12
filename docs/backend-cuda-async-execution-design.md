@@ -97,10 +97,11 @@
 | `sgd_step_device` | 同期なし | 現状 `synchronize()` あり（`sgd.rs:174`） | **除去**（最優先） | 2.2・D2H を伴わない唯一の常駐経路 |
 | `MemoryOps::upload` | 同期なし | 変更なし | 変更なし | ペイジャブル H2D の復帰＝ステージング完了であり完了待ちではない |
 | `MemoryOps::with_host_view`（イシュー #1336） | ホストブロック（契約上の同期点。`download` と同一） | N/A（#1336 で新設） | `Device` 配置: `host_staging` の再利用ホストバッファへ `memcpy_dtoh` → `synchronize` の順。`Managed` 配置: `stream.synchronize()` → `UnifiedSlice::as_slice()`（`host_view_managed`。コピーなし） | `crates/tensor-core/src/buffer.rs`「`with_host_view` の同期契約」・`docs/perf/cuda-host-view-staging-readout.md` |
+| `BackendOps::gemm_fp32_strict_into`／`_tracked` の NT/TN 経路（イシュー #1559） | ホストブロック（非同期投入契約の例外。デバイス⇔デバイス完結でホスト転送なし） | N/A（#1559 で新設） | `gemm::CudaGemm::launch_tiled_f32_nt_into`／`_tn_into` 内で GEMM 起動直後に `stream.synchronize()` | §15。`transpose_to_pooled` の中間バッファ（`PooledCudaHandle`）がストリーム順序保証なしで即座にプール返却されるため、次の同期点を持たない本メソッドは関数内で明示同期する |
 
 同期点を増やしてよい条件は、診断・ベンチ・エラー検出目的の任意同期に限り、`internal-diagnostics` 相当のモジュールまたはテストコード内のみで許容する（本番経路の演算ラッパーには追加しない）。
 
-**追補（イシュー #1349）**: CUDA Graph capture opt-in ON かつ現在のスレッドが capture 中（`context_cache::is_capturing_on_current_thread`）の場合、上表の同期点 API（`download`／`upload`／`alloc_zeroed`／`upload_into`・`release_cached_device_memory`）は driver に触れる前に `BackendError::Unsupported` で拒否する（`context_cache::begin_sync_point_call`）。capture 対象は update 区間のみのため、通常の学習ループはこれらの同期点を capture 中に呼ばない契約（`docs/backend-cuda-graph-step-capture-design.md` §4.2）。
+**追補（イシュー #1349）**: CUDA Graph capture opt-in ON かつ現在のスレッドが capture 中（`context_cache::is_capturing_on_current_thread`）の場合、上表の同期点 API（`download`／`upload`／`alloc_zeroed`／`upload_into`・`release_cached_device_memory`・`gemm_fp32_strict_into`／`_tracked` の NT/TN 経路〈#1559。§15〉）は driver に触れる前に `BackendError::Unsupported` で拒否する（`context_cache::begin_sync_point_call`。#1559 は `ops.rs::CudaBackendOps::with_sync_point_call` という薄いラッパー経由で同じ関数へ委譲する）。capture 対象は update 区間のみのため、通常の学習ループはこれらの同期点を capture 中に呼ばない契約（`docs/backend-cuda-graph-step-capture-design.md` §4.2）。
 
 ## 5. エラー伝播（design decision 3）
 
@@ -527,3 +528,62 @@ opt-in）固有の 2 行を追加した。詳細な設計判断・採用しな�
   本イシューが新たに導入するものではない）。
 - 本イシュー時点で CUDA 実機（DGX Spark GB10）実測は未実施
   （`docs/backend-cuda-managed-placement-decision.md`「実機実測」節参照）。
+
+## 15. 実装記録（#1559・`gemm_fp32_strict_into` NT/TN 経路の明示 `synchronize` 例外）
+
+イシュー #1559（`BackendOps::gemm_fp32_strict_into`／`_tracked` の CUDA
+実装。詳細は `docs/perf/train-resident-grad-device-update.md` §6・
+`docs/device-resident-update-design.md` §3「バックエンド別の状態」）の
+`gemm::CudaGemm::launch_tiled_f32_nt_into`／`_tn_into`（#1214 の NT/TN
+転置カーネルを、出力を新規 alloc + readback ではなく呼び出し元
+`DeviceBuffer<f32>` の指定オフセットへ直接書き込む形に拡張したもの）は、
+本設計文書が定める「非同期投入契約（§3。カーネル起動は完了を待たず、
+完了保証は呼び出し元の次の同期点へ委ねる）」の**例外**として、関数内で
+明示的に `stream.synchronize()` を呼んでから返る。
+
+**例外にした理由**: `transpose_to_pooled` が返す中間バッファ
+（`PooledCudaHandle<f32>`）は `Drop` 時に即座にプールへ返却される
+（ストリーム順序保証を持たない、純粋な Rust 側の可変長プール操作。
+`docs/backend-cuda-pool-allocator-decision.md` 参照）。既存の
+`launch_tiled_f32_resident_nt`（§4 表・#1214）はこの中間バッファを
+戻り値として呼び出し元へ返し「次の同期点（`readback` 等）まで保持する」
+契約でこの問題を回避しているが、`gemm_fp32_strict_into` の戻り値は
+`Result<(), BackendError>` のみで、呼び出し元へ中間バッファの寿命管理を
+委ねる自然な「次の同期点」を持たない。そのため本関数内で GEMM 起動
+直後に `stream.synchronize()` を行ってから中間バッファを drop させる
+（関数末尾のスコープ終了で自然に drop）。
+
+**§9 の driver 呼び出し境界との関係**: 本メソッド（`ops.rs::
+CudaBackendOps::gemm_fp32_strict_into_impl`）の NT/TN 分岐は、
+`with_driver_call` ではなく新設した `ops.rs::CudaBackendOps::
+with_sync_point_call`（`memory.rs::CudaMemory::with_sync_point_call`
+と同型。`context_cache::begin_sync_point_call` へ委譲する薄いラッパー）
+のクロージャ内で `launch_tiled_f32_nt_into`／`_tn_into`（内部で
+`synchronize()` を含む）を呼ぶ。理由は上表（§4）に追加した行と同じで、
+本メソッドはホストブロック型の同期点であり、上表の他の同期点 API
+（`download`／`upload`／`upload_into` 等）と同じく CUDA Graph capture 中は
+driver に触れる前に `BackendError::Unsupported` で拒否する契約（§4
+追補・イシュー #1349）に揃える。capture 中でなければ
+`begin_sync_point_call` は `begin_driver_call` へそのまま委譲するため
+（`context_cache::begin_sync_point_call` doc 参照）、通常経路（capture
+OFF）での poison／世代検査・`observe_cuda_result` によるエラー観測は
+`with_driver_call` を使った場合と完全に同一で、挙動の変化はない
+（capture 中に呼ばれた場合のみ新たに `Unsupported` を返すようになる）。
+
+**`gemm_fp32_strict_into_tracked` が Metal 型の追加登録を持たない理由**:
+`BackendOps::gemm_fp32_strict_into_tracked` のトレイト側 doc は「Metal
+のみ、複数スレッドが共有 `MetalContext`／コマンドバッファをバッチングし
+他スレッドの `synchronize()` が自スレッドの dispatch 登録前にバッチを
+drain してしまう問題への対策としてオーバーライドする」と定める。CUDA
+は `context_cache` の poison／世代検査が各呼び出しごとに同期的に完結し、
+かつ本メソッド自体が上記のとおり内部で `synchronize()` を行うため、
+Metal と同型の「encode と登録の間に別スレッドの synchronize が割り込む
+競合」は発生しない。CUDA の `_tracked` オーバーライドは `token` を無視
+した明示委譲（トレイト既定と機能的に同一）に留める。
+
+**コスト比較（実測は #1560 へ引き継ぎ）**: 旧経路（`gemm_fp32_strict`
+の D2H `readback` → `DeviceParamStore::step` 内 `upload_into` の H2D）は
+m*n 要素データ転送 2 回 + sync 2 回を要したが、新経路はデータ転送ゼロ
+（デバイス上のバッファ間で完結）で sync 1 回のみに削減される設計。
+本イシュー時点では本エージェント実行環境に CUDA 実機がないため定量的な
+性能実測は行わない。

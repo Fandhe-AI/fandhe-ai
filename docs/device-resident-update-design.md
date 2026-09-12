@@ -1886,14 +1886,25 @@ resident 経由で充填された slot は `Gradients` に寄与を持たない�
 
 ### 3. バックエンド別の状態
 
-CPU（`backend-cpu`）のみ `gemm_fp32_strict_into`／`upload_into` を
-実装した（`gemm_blis_parallel` は C へ**累積**するカーネルのため、
+CPU（`backend-cpu`）は `gemm_fp32_strict_into`／`upload_into` を実装
+済み（`gemm_blis_parallel` は C へ**累積**するカーネルのため、
 `gemm_fp32_strict_into` は書き込み対象範囲を明示的に `fill(0.0)` して
-から呼ぶことで「上書き」契約を満たす）。CUDA は既定 `Unsupported` のまま。
-Metal は #1555 で実装済み（NT/TN は staging へ encode-only 直接書き込み・それ以外の形状は `gemm_fp32_strict` → `upload_into` フォールバックで、形状を理由に `Unsupported` を返さない。`docs/perf/train-resident-grad-device-update.md` §5 を参照）。
-CUDA は `fill_resident_weight_grad` が `Ok(false)` を返して既存経路へ
-フォールバックするため挙動・性能とも本イシュー着手前と不変。実測記録・
-Go/No-Go 判断は `docs/perf/train-resident-grad-device-update.md` を参照。
+から呼ぶことで「上書き」契約を満たす）。Metal は #1555 で実装済み
+（NT/TN は staging へ encode-only 直接書き込み・それ以外の形状は
+`gemm_fp32_strict` → `upload_into` フォールバックで、形状を理由に
+`Unsupported` を返さない。`docs/perf/train-resident-grad-device-update.md`
+§5 を参照）。CUDA は #1559 で実装済み（同じく NT/TN は #1214 の GPU 側
+smem 転置カーネル再利用・それ以外は `gemm_fp32_strict` →
+`upload_into` フォールバック。`docs/perf/
+train-resident-grad-device-update.md` §6 を参照）。`fill_resident_weight_grad`
+は `dyn BackendOps` 経由の汎用ディスパッチのため、CUDA バックエンドの
+`gemm_fp32_strict_into` 実装追加だけで本経路への結線が自動的に完成する
+（autodiff 側の追加変更は不要）。3 バックエンドとも実装済みとなった
+ため、以前あった「バックエンドが対応しない場合のみホスト経路
+フォールバック」という分岐は現状では probe 失敗（`MemoryOps` 非対応
+環境等）以外では通常到達しない。実測記録・Go/No-Go 判断は `docs/perf/
+train-resident-grad-device-update.md` を参照（CUDA の実機実測は #1560
+へ引き継ぎ）。
 
 ## 追補: #1479 — resident `GradStaging` の重み勾配をホストへ読み出す公開 API
 
@@ -1910,22 +1921,32 @@ Go/No-Go 判断は `docs/perf/train-resident-grad-device-update.md` を参照。
 - **`resident_grads_to_host`（strict 版）**: `GradStaging` に今回の
   backward で新鮮に充填済みの slot のみ `Some(Tensor<f32>)` を返し、
   未充填 slot（bias 等）は `None`。resident 未対応バックエンド
-  （`resident_grad_capability == Some(false)`。現状 CUDA／Metal）では
-  `BackendError::Unsupported` を返す（panic なし）
+  （`resident_grad_capability == Some(false)`）では `BackendError::
+  Unsupported` を返す（panic なし）。**本追補時点（#1479）では CUDA／
+  Metal がこれに該当していたが、Metal は #1555・CUDA は #1559 で
+  `gemm_fp32_strict_into` を実装したため、現状は 3 バックエンドとも
+  `resident_grad_capability == Some(true)` へ確定し、この分岐は probe
+  失敗等の例外経路以外では通常到達しない（§3 参照）**
 - **`param_grads_to_host`（unified 版）**: strict 版と同じ内部経路
   （`resident_filled_slots`／`download_staging_slots`。§2.1 の由来
   検証ヘルパを `step()` と共有）を使いつつ、未充填 slot は `grads.
   get(...)`（`step()` の非 resident フォールバックと同一経路）から
   取得し、全パラメータの勾配を 3 バックエンド共通の読み出し窓として
-  返す。CUDA／Metal では常に unified 版のみが `Ok` を返す
-  （resident 未充填のため全 slot が `grads` フォールバックを通る）
+  返す。本追補時点（#1479）では CUDA／Metal が resident 未実装だった
+  ため常に unified 版のみが `Ok` を返していたが、現状（#1555／#1559
+  以降）は strict 版も weight slot を `Some` で返す（bias slot は
+  引き続き `None`。§3 参照）
 
-**strict／unified を分けた理由**: CUDA／Metal は `gemm_fp32_strict_into`
-未実装のため resident 経由の重み勾配は常に `Gradients` 側（`Op::
-LinearResident` の VJP がホスト経路で書き込んだ寄与）に載る。strict 版
-（`GradStaging` 限定）を CUDA／Metal で呼ぶと必ず `Unsupported` になり、
-#1480 が要求する「3 バックエンド横断で各 step の重み勾配を読む」こと
-ができない。unified 版が両者を吸収する。
+**strict／unified を分けた理由（本追補時点）**: 本追補（#1479）時点で
+CUDA／Metal は `gemm_fp32_strict_into` 未実装のため resident 経由の
+重み勾配は常に `Gradients` 側（`Op::LinearResident` の VJP がホスト
+経路で書き込んだ寄与）に載っていた。strict 版（`GradStaging` 限定）を
+CUDA／Metal で呼ぶと必ず `Unsupported` になり、#1480 が要求する「3
+バックエンド横断で各 step の重み勾配を読む」ことができなかったため、
+unified 版で両者を吸収する設計とした（この設計自体は #1555／#1559 で
+CUDA／Metal が resident 対応した後も不変。strict 版が到達不能でなく
+なっただけで、unified 版の役割——resident 未充填 slot を `grads`
+フォールバックで補う——は変わらない）。
 
 **契約**: いずれも `&self`・読み出し専用（`pending`／`backward_serial`／
 `grad_staging` を変更しない。呼び出し後も `step()` が通常どおり成功
