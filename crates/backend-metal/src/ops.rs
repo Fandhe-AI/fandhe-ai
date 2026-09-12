@@ -991,7 +991,7 @@ impl BackendOps for MetalBackendOps {
             // 経由する必要はない。値は `classify_2d(b.shape(),
             // b.contiguous().strides())` が返すものと同一）。
             let contiguous_layout = MatrixLayout {
-                rows: m,
+                rows: k,
                 cols: n,
                 ld: n,
                 transposed: false,
