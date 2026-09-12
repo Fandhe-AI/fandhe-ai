@@ -76,3 +76,13 @@ scratchpad 絶対パス 1 箇所のみ `<masked-scratchpad-path>` へ置換済�
 実測数値・表・結論の正は `docs/perf/lowlayer-diagnosis-2026-09-12.md`
 （本ディレクトリのログから転記・出典欄で本ディレクトリのファイルを参照）。
 本 README はファイル構成の説明のみで数値は含めない。
+
+## framework-compare 生データ（`scripts/bench/framework-compare/results/raw/`）の出自
+
+| ファイル | 機体 | ビルド | 負荷 | 実施 | 用途 |
+|---|---|---|---|---|---|
+| `results-dgx-0.8.0.jsonl`・`skipped-dgx-0.8.0.log` | DGX Spark GB10 | crates.io ピン `fandhe-ai =0.8.0`（`run_all_cuda.sh`。path patch なし） | 専有（load ≈ 0.05） | 2026-09-12 | 本記録 §2 |
+| `results-dgx-py-0.8.0.jsonl` | DGX Spark GB10 | `bench_py.py`（torch 2.14.0+cu130・tensorflow 2.21 CPU・scipy） | 専有 | 2026-09-12 | 本記録 §2（Python 参照） |
+| `results-m4max-0.8.0.jsonl`・`skipped-m4max-0.8.0.log` | Apple M4 Max | crates.io ピン `fandhe-ai =0.8.0`（`run_all_m4max.sh` 相当。`GEMM_GATE_PATCH_FACADE_PATH` 未指定・ビルドログに `Compiling fandhe-ai v0.8.0`〈registry〉を確認） | 共有（load average 11.25 → 5.09） | 2026-09-12 午前 | 同日の敗因分析スコアボード（本記録の Mac 系列〈HEAD path patch〉とは別系列） |
+
+本記録 §4（backward 内訳）・§5（readout）の Mac 系列は上記とは異なり origin/main HEAD `097bff19` の path patch＋診断計装ビルドであり、その生データは本ディレクトリの `mac/` と `mac-head-097bff19-path-patch.jsonl` にある。
