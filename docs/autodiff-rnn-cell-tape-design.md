@@ -77,6 +77,16 @@
 
 **付随事項（#1647 への引き渡し）**: セル variant は入力 `NodeId` を約 7 個（LSTM）持つ。§3 契約 7 のとおり汎用 `Op::inputs()` は存在しないため、入力を列挙する全 `match`（`Tape::effective_subtree_size`〈`tape.rs:872`〉・`build_lazy_plan`〈`tape.rs:943`〉・`grad::vjp`・`Op::is_lazy_elementwise`／`is_view` の否定分岐〈新 variant はいずれも `false` を返す＝eager・非 view〉）へ新 variant を追加する必要がある。
 
+### 決定 1b 追記: `LstmHidden` が出力ゲートの入力 `NodeId` を取得する方法（Cursor Bugbot・codex-review 指摘。PR #1662）
+
+**問題**: 決定 1b の採用案は「`LstmHidden` の VJP が `gate_o` 寄与を `x`／`h_prev`／`W`／`b` へ返す」と記すが、`Op::LstmHidden { cell: NodeId(c_t), gate_o }` は入力 `NodeId` を `cell` の 1 個しか保持しない。`gate_o`（o ゲート値）は非追跡 `Tensor<f32>` payload であり、o ゲートの逆伝播（`d(pre_o) = dh_t ⊙ tanh(c_t) ⊙ σ'(pre_o)` から `x`／`h_prev`／`w_ih`／`w_hh`／`b_ih`／`b_hh` への GEMM VJP）に必要な `x`・`h_prev`・重み・bias の `NodeId` がどこにも保持されておらず、このままでは実装不能である（Cursor Bugbot 指摘・High severity: 出力ゲート勾配が欠落し LSTM の BPTT が壊れる。codex-review 指摘: NodeId 取得方法が設計文書に未記載）。
+
+**採用案**: `LstmHidden` に新規フィールドを追加せず、**`cell`（`NodeId(c_t)`）が指す先のノードが必ず `Op::LstmCell` である**という決定 1b の push 順序契約（cell → hidden。逆走査では hidden → cell の順で処理される）を利用する。`LstmHidden` の VJP 実装は `nodes[cell.0].op`（§2 事実のとおり `grad::vjp` は `nodes: &[TapeNode]` 全体を受け取るため、自ノードの直接入力でない `NodeId` の先もこの経路で到達できる）を参照し、そこに保持された `Op::LstmCell { x, h_prev, w_ih, w_hh, b_ih, b_hh, .. }` の各 `NodeId` を読み出す。読み出した `x`／`h_prev`／`w_ih`／`w_hh`／`b_ih`／`b_hh` へ、o ゲート由来の勾配（決定 5 の列ブロック配置に従い `w_ih`／`w_hh`／`b_ih`／`b_hh` の o 列ブロックのみ）を `accumulate()`（`backward.rs` の fan-in 蓄積。§2 事実）で足し込む。この参照は `cell` ノードが `Op::LstmCell` 以外であることを想定しない不変条件に依存するため、実装は `match` の `_` 分岐で型付きエラー（fail-closed。`unwrap`／`expect` は使わない。決定 11 (g) の方針と整合）を返し、パニックしない。
+
+この設計により `Op::LstmHidden` の payload・フィールド構成は決定 1b の採用案（`cell`・`gate_o` のみ）から変更しない。§3 契約 2 の「自ノードの入力 `NodeId` を `materialize_fallible` で再取得できる」という既存契約を、`cell` を経由した間接参照（`cell` の入力 `NodeId` 群）へ 1 段拡張する形であり、新たな契約違反は生じない。
+
+**#1647 への追加の引き継ぎ**: 上記の `nodes[cell.0].op` 参照は決定 11 (b) の数値微分突合が通れば正しさが構造的に担保されるが、参照ロジック自体が実際に機能していることを検証するため、`cell` 経由の `NodeId` 参照を意図的に無効化・破損させると数値微分突合が失敗することを確認する構造テスト（決定 11 (h) の GRU `q_t` 検証と同型）を受入基準へ追加する（決定 11 に項目 (j) として追記）。
+
 ### 決定 1c: GRU 専用ペイロードへの再帰側アフィン値 `q` の追加（GEMM 再計算不要契約の維持）
 
 **問題（codex-review 指摘。PR #1662）**: 決定 5 の GRU 式 `n_t = tanh(W_in x + b_in + r_t ⊙ (h_{t-1}·W_hn + b_hn))` において、`q_t := h_{t-1}·W_hn + b_hn`（再帰側アフィン値）は `pre_n_t := W_in x + b_in + r_t ⊙ q_t` の `r_t` に対する偏微分そのもの（`∂pre_n_t/∂r_t = q_t`）である。決定 1 の payload 保存方式は「ゲート値を保存して GEMM 再計算を避ける」ことを前提とするが、`r_t`・`z_t`・`n_t` の 3 値のみでは `q_t` を復元できない（`n_t` から逆算するには `tanh⁻¹` と `r_t` による除算が必要で、`r_t` が 0 に近い場合に非可逆・数値不安定になり、そもそも tanh 逆関数を経由する復元は本設計が避けたい追加計算そのもの）。`q_t` を保持しない場合、`∂n_t/∂r_t` の算出には backward 内で `h_{t-1}·W_hn + b_hn` の GEMM を再計算する必要が生じ、**決定 1 の「payload 保存方式は GEMM 再計算が不要」という前提が GRU に限り崩れる**。
@@ -173,6 +183,7 @@ PyTorch 準拠で固定する:
 - (g) 未知 `Op` variant への fail-closed（型付きエラー。本番経路で `unwrap`／`expect` を使わない）
 - (h) GRU の `r_t` に対する勾配が payload 保存済み `q_t`（決定 1c）から算出され、backward 内で `h_{t-1}·W_hn+b_hn` の GEMM 再計算を伴わないこと（数値微分突合〈項目 (b)〉が通れば正しさは担保されるため、本項目は「`q_t` を意図的に欠落・破損させると (b) の数値微分突合が失敗する」ことを確認するテストとして実装し、payload 保存方式が実際に機能していることを構造的に検証する）
 - (i) Sequence レベル API（`Rnn`／`Lstm`／`Gru`）が `Module` trait を実装しつつ `forward(tape, input: &Var)` は型付きエラーを返し、`x: &Tensor<f32>` を受ける専用メソッド `forward_seq` が学習経路であること（決定 4a 項目 3）の型検査。セル単位の per-step 交互適用（決定 4a (i)）は勾配連続であることを数値微分突合で確認する。Sequence レベル API 同士のスタック（決定 4a (ii)）は v1 スコープ外のため受入基準に含めない
+- (j) `LstmHidden` の VJP が `cell` ノード（`Op::LstmCell`）参照経由で `x`／`h_prev`／`w_ih`／`w_hh`／`b_ih`／`b_hh` の `NodeId` を取得し、o ゲート勾配を正しく `accumulate` すること（決定 1b 追記）。項目 (b)（数値微分突合）が通れば正しさは担保されるため、本項目は「`cell` ノード参照を意図的に無効化・破損させると (b) の数値微分突合が失敗する」ことを確認する構造テストとして実装する（項目 (h) と同型）
 
 付随更新: `docs/public-api-design.md` §3.2 への追記、`Op` doc の「`Var` とほぼ 1:1」注記の更新、`docs/compat-feature-gap.md` §2.7 行の更新、`docs/kernel-fusion.md`（融合境界。専用セル Op は非 elementwise につき融合対象外である旨）への注記。
 
