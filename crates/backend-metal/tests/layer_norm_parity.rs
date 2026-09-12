@@ -44,14 +44,14 @@ fn f64_layer_norm_reference(
         let rstd = 1.0f64 / (var + eps as f64).sqrt();
         let out_row = &mut out[r * hidden..(r + 1) * hidden];
         for i in 0..hidden {
-            let mut xhat = ((row[i] as f64 - mean) * rstd) as f32;
-            if let Some(w) = w {
-                xhat *= w[i];
-            }
-            if let Some(b) = b {
-                xhat += b[i];
-            }
-            out_row[i] = xhat;
+            let xhat = ((row[i] as f64 - mean) * rstd) as f32;
+            // affine（`xhat*w+b`）は本体実装（MSL カーネルの `fma()`）と
+            // 同じく `f32::mul_add` で明示的に融合する（`.claude/rules/
+            // coding-rust.md` の数値契約統一。codex-review 指摘: weight・
+            // bias を別々に丸めると両方指定時に相殺する入力で差が増幅される）。
+            let wv = w.map_or(1.0f32, |w| w[i]);
+            let bv = b.map_or(0.0f32, |b| b[i]);
+            out_row[i] = xhat.mul_add(wv, bv);
         }
     }
     out

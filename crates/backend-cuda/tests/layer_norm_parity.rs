@@ -25,8 +25,15 @@ use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaLayerNorm};
 
 mod common;
 
-/// テスト専用 CPU 参照実装（`f32::mul_add` を使用し、GPU 側 `fma` と
-/// 丸め方針を揃える。`.claude/rules/coding-rust.md`）。
+/// テスト専用 CPU 参照実装。正規化統計（平均・分散）は GPU 側カーネル
+/// （`kernels_layer_norm.rs` の `double` アキュムレータ・`fma`）と揃え
+/// `f64` で計算し（`.claude/rules/coding-rust.md` の数値契約統一。
+/// codex-review 指摘: `f32` のまま平均を求めると `[16777216.0,
+/// 16777218.0]` のような `f32` 仮数精度限界〈`2^24`〉付近の入力で丸め
+/// 誤差が生じ、期待値が本来の値からずれる）、正規化値 `xhat` を確定する
+/// 直前の 1 回だけ `f32` へ丸める。affine（`xhat*w+b`）は GPU 側 `fmaf`・
+/// CPU/Metal 参照実装と同じく `f32::mul_add` で明示的に融合する
+/// （weight・bias が相殺する入力で中間丸めにより差が増幅されるのを防ぐ）。
 /// `out = (x-mean(x))*rsqrt(var(x)+eps)*w+b`（`w`／`b` が `None` の場合は
 /// それぞれの演算をスキップ）。分散は biased ÷N。
 fn cpu_layer_norm_reference(
@@ -41,31 +48,26 @@ fn cpu_layer_norm_reference(
     if hidden == 0 {
         return out;
     }
-    let inv_n = 1.0f32 / hidden as f32;
     for r in 0..rows {
         let row = &x[r * hidden..(r + 1) * hidden];
-        let mut sum = 0.0f32;
+        let mut sum = 0.0f64;
         for &v in row {
-            sum += v;
+            sum += v as f64;
         }
-        let mean = sum * inv_n;
-        let mut sq_acc = 0.0f32;
+        let mean = sum / hidden as f64;
+        let mut sq_acc = 0.0f64;
         for &v in row {
-            let d = v - mean;
+            let d = v as f64 - mean;
             sq_acc = d.mul_add(d, sq_acc);
         }
-        let var = sq_acc * inv_n;
-        let rstd = 1.0f32 / (var + eps).sqrt();
+        let var = sq_acc / hidden as f64;
+        let rstd = 1.0f64 / (var + eps as f64).sqrt();
         let out_row = &mut out[r * hidden..(r + 1) * hidden];
         for i in 0..hidden {
-            let mut xhat = (row[i] - mean) * rstd;
-            if let Some(w) = w {
-                xhat *= w[i];
-            }
-            if let Some(b) = b {
-                xhat += b[i];
-            }
-            out_row[i] = xhat;
+            let xhat = ((row[i] as f64 - mean) * rstd) as f32;
+            let wv = w.map_or(1.0f32, |w| w[i]);
+            let bv = b.map_or(0.0f32, |b| b[i]);
+            out_row[i] = xhat.mul_add(wv, bv);
         }
     }
     out
