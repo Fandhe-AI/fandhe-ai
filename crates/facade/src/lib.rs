@@ -119,11 +119,25 @@ pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
 // 維持する（`tests/api_surface.rs` が `pub use` を行単位で走査するため。
 // 上記コメント「1 文 1 行を維持する」参照）。
 pub use fandhe_ai_autodiff::VarHostView;
+// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）の多出力
+// 戻り値型（`Var::qr`／`Var::svd`）は 1 文 1 行で再エクスポートする
+// （上記コメント「1 文 1 行を維持する」と同じ理由）。
+pub use fandhe_ai_autodiff::QrVars;
+pub use fandhe_ai_autodiff::SvdVars;
 pub use fandhe_ai_tensor_core::{BackendError, Device, PoolStats, Tensor};
 // `ChecksumReadout`／`GemmChecksum`（イシュー #1339・`Var::matmul_checksum`
 // の戻り値・引数型）も 1 文 1 行で再エクスポートする（上記コメント
 // 「1 文 1 行を維持する」と同じ理由）。
 pub use fandhe_ai_tensor_core::{ChecksumReadout, GemmChecksum};
+// 線形代数（イシュー #1621）の値型（`BackendOps::linalg_qr`／
+// `linalg_svd`／`linalg_matrix_norm` の入出力）も 1 文 1 行で
+// 再エクスポートする（`QrFactors`／`SvdFactors`／`MatrixNormOrd` は
+// `Var::qr`／`svd`／`matrix_norm` の呼び出し側からは直接見えないが、
+// バックエンド実装を跨いで自作するテスト・診断コードのために公開する。
+// 上記コメント「1 文 1 行を維持する」と同じ理由）。
+pub use fandhe_ai_tensor_core::MatrixNormOrd;
+pub use fandhe_ai_tensor_core::QrFactors;
+pub use fandhe_ai_tensor_core::SvdFactors;
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の
 /// newtype ラッパー（codex-review PR #424 P1 是正）。

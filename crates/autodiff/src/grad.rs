@@ -757,6 +757,72 @@ pub(crate) fn vjp(
             }
             contributions
         }
+        // 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`
+        // §3.4）。三角解法・特異値スケーリングを要する VJP 本体は
+        // `eval::linalg`（`f64` 内部計算。数式の実体を二重管理しない）
+        // に集約し、ここでは各 Op の入出力（forward 記録値・upstream・
+        // 兄弟ノードの forward 値）を渡すだけに徹する。
+        Op::Inv { input } => {
+            // `out_value`（forward が返す `f32` 記録値の `A^{-1}`）は
+            // 再利用せず、`input` から改めて `f64` で計算する
+            // （`eval::linalg::inv_vjp` doc 参照。codex-review 指摘）。
+            let a_val = materialize_fallible(nodes, ops, input)?;
+            let da = eval::linalg::inv_vjp(a_val, upstream)?;
+            vec![(input, da)]
+        }
+        Op::Solve { a, b } => {
+            // `out_value`（forward の解 `X` の `f32` 記録値）は再利用
+            // せず、`a`／`b` から改めて `f64` で計算する
+            // （`eval::linalg::solve_vjp` doc 参照。codex-review 指摘）。
+            let a_val = materialize_fallible(nodes, ops, a)?;
+            let b_val = materialize_fallible(nodes, ops, b)?;
+            let (da, db) = eval::linalg::solve_vjp(a_val, b_val, upstream)?;
+            vec![(a, da), (b, db)]
+        }
+        Op::Det { input } => {
+            let a_val = materialize_fallible(nodes, ops, input)?;
+            let g_scalar = dense_vec(upstream).first().copied().unwrap_or(0.0);
+            let da = eval::linalg::det_vjp(a_val, g_scalar)?;
+            vec![(input, da)]
+        }
+        Op::Cholesky { input } => {
+            let da = eval::linalg::cholesky_vjp(out_value, upstream)?;
+            vec![(input, da)]
+        }
+        // reduced QR の多出力ノード（イシュー #1621・`tape::Op::QrQ`
+        // doc「多出力の扱い」）。`QrQ` は `dQ = upstream`・`dR = 0`、
+        // `QrR` はその逆として部分寄与を計算し、`Tape::backward` が
+        // `input` ノードへ合算する。
+        Op::QrQ { input, r } => {
+            let dr_zero = build_tensor(vec![0.0; r.numel()], r.shape());
+            let da = eval::linalg::qr_vjp(out_value, &r, upstream, &dr_zero)?;
+            vec![(input, da)]
+        }
+        Op::QrR { input, q } => {
+            let dq_zero = build_tensor(vec![0.0; q.numel()], q.shape());
+            let da = eval::linalg::qr_vjp(&q, out_value, &dq_zero, upstream)?;
+            vec![(input, da)]
+        }
+        // reduced SVD の多出力ノード（`tape::Op::SvdU` doc）。3 ノード
+        // それぞれが自身のコタンジェントのみ非ゼロとして部分寄与を返す。
+        Op::SvdU { input, s, vh } => {
+            let da = eval::linalg::svd_vjp(out_value, &s, &vh, Some(upstream), None, None)?;
+            vec![(input, da)]
+        }
+        Op::SvdS { input, u, vh } => {
+            let da = eval::linalg::svd_vjp(&u, out_value, &vh, None, Some(upstream), None)?;
+            vec![(input, da)]
+        }
+        Op::SvdVh { input, u, s } => {
+            let da = eval::linalg::svd_vjp(&u, &s, out_value, None, None, Some(upstream))?;
+            vec![(input, da)]
+        }
+        Op::MatrixNorm { input, ord } => {
+            let a_val = materialize_fallible(nodes, ops, input)?;
+            let g_scalar = dense_vec(upstream).first().copied().unwrap_or(0.0);
+            let da = eval::linalg::matrix_norm_vjp(a_val, ord, g_scalar)?;
+            vec![(input, da)]
+        }
     };
     Ok(contributions)
 }

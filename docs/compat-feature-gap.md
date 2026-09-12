@@ -2,7 +2,16 @@
 > 含む）。出典: 低レイヤー診断 artifact
 > （https://claude.ai/code/artifact/4e107064-a190-4861-897d-3dce44d05428）
 > §2「ギャップ根拠」節。イシューツリー起票（`p1-docs`）に伴い本ドキュメントへ
-> 取り込む。内容は取り込み元から変更していない。
+> 取り込む。内容は取り込み元から変更していない（下記「#1621 追記」節を除く）。
+>
+> **#1621 追記（線形代数）**: 本調査時点で §2.6「線形代数」に inv／solve／
+> det／qr／cholesky／svd／matrix_norm の行は存在しなかった（`matmul`／`bmm`／
+> `einsum`／`transpose` の 4 行のみ）。イシュー #1621 でこれらを実装した
+> （`Var::inv`／`solve`／`det`／`cholesky`／`qr`／`svd`／`matrix_norm`。
+> `docs/autodiff-linalg-design.md` 参照）。§0「Var の演算メソッドは 15 個の
+> み」・§1.5 の一覧・§1.7 の `BackendOps` 演算 API 一覧・§2.6 の表へ、
+> 実装結果を反映する追記を各該当箇所に加える（取り込み元の記述自体は残し、
+> 追記であることを明示する）。
 
 # fandhe-ai 公開面（facade）と PyTorch/TensorFlow の機能ギャップ表
 
@@ -23,6 +32,9 @@ fandhe-ai の公開面は現時点で **MLP（全結合＋3 活性化＋MSE/Cros
   `cross_entropy_loss`・`relu`・`exp`・`tanh`・`sigmoid`・`reshape`・`transpose`。
   減算（`sub`）・除算（`div`）・べき乗（`pow`）・平方根（`sqrt`）・対数（`log`）・
   比較演算・`softmax`（Var メソッドとしては存在しない）は **一切ない**。
+  **#1621 追記**: 上記 15 個に加え、線形代数 7 個（`inv`・`solve`・`det`・
+  `cholesky`・`qr`・`svd`・`matrix_norm`）を実装した（§1.5・§1.7・§2.6 参照）。
+  減算・除算・べき乗等の欠落は本追記の対象外のまま不変。
 - `nn::Module` 実装は `Linear`・`Relu`・`Sigmoid`・`Tanh` の **4 種のみ**
   （`crates/autodiff/src/nn/module.rs:105,171,193,212`）。Conv・BatchNorm・LayerNorm・
   RMSNorm・Dropout・Embedding・Attention・RNN/LSTM/GRU・Pooling は **一切ない**。
@@ -105,10 +117,15 @@ jagged 2-D 入力は事前検証で拒否。`crates/facade/src/compat/array.rs:9
 | `cross_entropy_loss` | 508 | log-softmax 安定化込みの融合オペ |
 | `relu`/`exp`/`tanh`/`sigmoid` | 556,568,580,600 | elementwise unary |
 | `reshape`/`transpose` | 623,672 | view 系（#1080 で再計算方式・中間バッファなし） |
+| `inv`/`solve`/`det`/`cholesky` | - | **#1621 追記**。線形代数（rank-2 限定）。CPU 実装先行・GPU は `Unsupported` フォールバック |
+| `qr`/`svd` | - | **#1621 追記**。多出力（`QrVars`/`SvdVars`。テープは 1 ノード 1 出力のため出力ごとに別ノード） |
+| `matrix_norm` | - | **#1621 追記**。`MatrixNormOrd`（`Fro`/`One`/`Inf`/`Nuc`/`Spectral`）指定 |
 
 `Op` enum（`crates/autodiff/src/tape.rs:87-`）はこの Var メソッド集合と 1:1 対応する
 （`Leaf`・`MatMul`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`・`Sigmoid`・`Sum`・`Max`・`MseLoss`・
-`CrossEntropyLoss`・`ResidentLeaf`・`LinearResident`・`LinearAct`・`Reshape`・`Transpose`）。
+`CrossEntropyLoss`・`ResidentLeaf`・`LinearResident`・`LinearAct`・`Reshape`・`Transpose`・
+`Inv`・`Solve`・`Det`・`Cholesky`・`QrQ`・`QrR`・`SvdU`・`SvdS`・`SvdVh`・`MatrixNorm`
+〈**#1621 追記**〉）。
 
 ### 1.6 `Tensor<T>`（`crates/tensor-core/src/tensor.rs`）の shape 操作
 
@@ -123,7 +140,9 @@ jagged 2-D 入力は事前検証で拒否。`crates/facade/src/compat/array.rs:9
 `gemm_bias_act`（Linear+活性化 epilogue 融合）・`gemm_resident_rhs`/`_act`・`gemm_resident_lhs`・
 `linear_forward_device`・`run_fused`（elementwise 融合実行）・`sgd_step_device`/`_tracked`・
 `captured_segment_key`/`run_captured_sgd_step_segment`（CUDA Graph）・`gemm_checksum`・
-`release_cached_device_memory`/`device_memory_pool_stats`。**`sub`/`div`/`pow`/`sqrt`/`log`/
+`release_cached_device_memory`/`device_memory_pool_stats`・`linalg_inv`/`_solve`/`_det`/
+`_cholesky`/`_qr`/`_svd`/`_matrix_norm`（**#1621 追記**。CPU 実装済み・CUDA／Metal は既定
+`Unsupported` を明示オーバーライド）。**`sub`/`div`/`pow`/`sqrt`/`log`/
 `sigmoid`（`BackendOps` に独立メソッドなし。`Op::Sigmoid` は `eval::sigmoid`〈`crates/autodiff/src/eval.rs:355-356`。数値安定形のホスト scalar 参照実装〉で計算し、GPU バックエンド選択時も `BackendOps` を経由しない）/`softmax`/`layer_norm`/
 `conv`/`batch_norm`/`embedding`/`gather`/`scatter` はいずれも `BackendOps` に存在しない**。
 
@@ -224,6 +243,14 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `bmm`（バッチ行列積） | `tf.linalg.matmul`（バッチ次元対応） | **なし（確定）**。`crates/tensor-core/src/ops_shape.rs:43-` `matmul_out_shape` が `lhs.len() != 2`/`rhs.len() != 2` を `ShapeError::RankMismatch` で拒否し、`Var::matmul`（`var.rs:195-208`）はこれを経由するため rank 2 のみ受理する | バッチ次元対応の GEMM 拡張（3 バックエンドのループ or バッチ化カーネル） | L |
 | `einsum` | `tf.einsum` | なし | 汎用縮約記法の解釈器＋既存 GEMM/縮約への分解実装 | XL |
 | `transpose`（線形代数用） | 同左 | あり（2.3 節参照） | - | - |
+| `torch.linalg.inv` | `tf.linalg.inv` | **あり（#1621）**。`Var::inv`（rank-2 正方限定。CPU 実装・GPU は `Unsupported`） | - | - |
+| `torch.linalg.solve` | `tf.linalg.solve` | **あり（#1621）**。`Var::solve` | - | - |
+| `torch.linalg.det` | `tf.linalg.det` | **あり（#1621）**。`Var::det`（特異行列は `0.0`。エラーにしない） | - | - |
+| `torch.linalg.cholesky` | `tf.linalg.cholesky` | **あり（#1621）**。`Var::cholesky`（下三角のみ・`upper=True` 相当は対象外） | - | - |
+| `torch.linalg.qr` | `tf.linalg.qr` | **あり（#1621）**。`Var::qr`（reduced QR のみ・`m<n` backward は対象外） | - | - |
+| `torch.linalg.svd` | `tf.linalg.svd` | **あり（#1621）**。`Var::svd`（reduced SVD のみ・相異なる特異値前提の backward） | - | - |
+| `torch.linalg.matrix_norm` | `tf.norm` | **あり（#1621）**。`Var::matrix_norm`（`MatrixNormOrd`: Fro/One/Inf/Nuc/Spectral） | - | - |
+| `torch.linalg.eigh`/`lstsq`/`pinv`/`matrix_rank`/`slogdet` | 相当 API | なし（#1621 スコープ外） | 各分解アルゴリズムの追加実装 | M〜L |
 
 ### 2.7 NN 層
 

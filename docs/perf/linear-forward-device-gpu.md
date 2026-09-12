@@ -183,3 +183,9 @@ Phase 2 の実施自体は妥当（backend 実装は完了・Metal 実測は明�
 `predict_resident` reuse モードを追加。本イシューに依存）または
 新規イシューでの実施を推奨する。CUDA 実機実測が得られ次第、本文書
 §4 に追記し、Phase 2 着手の最終判断材料とすること。
+
+**#1579 で Phase 2 の設計を CUDA／Metal 共通の方式として確定した**
+（`docs/inference-chain-single-sync-design.md`。設計のみ・コード変更
+なし）。CUDA 実機実測（`linear_forward_device_real_device.rs`）は
+本文書 §4 の記入欄のまま未完了で、#1581 のゲートとして引き渡す。
+実装自体は #1580（Metal）／#1581（CUDA）へ引き渡す。

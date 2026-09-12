@@ -131,8 +131,8 @@ pub mod typed;
 
 pub use backend_ops::{
     Activation, BackendOps, ChecksumReadout, GemmChecksum, GruBackwardOutput, GruPointwiseOutput,
-    LstmPointwiseOutput, MseReduction, SegmentKey, SegmentResource, SegmentRun, SgdStepConfig,
-    ops_for,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, SegmentKey, SegmentResource,
+    SegmentRun, SgdStepConfig, SvdFactors, ops_for,
 };
 pub use broadcast::broadcast_shape;
 pub use buffer::{BufferHandle, DeviceBuffer, DeviceBufferView, MemoryOps};

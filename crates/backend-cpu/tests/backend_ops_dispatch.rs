@@ -240,3 +240,90 @@ fn cpu_elementwise_and_reduction_are_fully_implemented() {
     assert!(cpu.sum(&a, None).is_ok());
     assert!(cpu.max(&a, None).is_ok());
 }
+
+/// 線形代数（イシュー #1621）は CUDA／Metal とも GPU カーネル未実装の
+/// ため、実機の有無に関わらず常に `BackendError::Unsupported` を返し
+/// panic しないことを確認する（`Self::sum`／`Self::max`〈汎用
+/// reduction〉と同じ「明示オーバーライドで未実装を宣言する」契約。
+/// `device_handle()` を経由しないため `CudaUnavailable`／Metal 側の
+/// デバイス初期化失敗には分岐しない）。
+#[test]
+fn cuda_linalg_ops_return_unsupported_not_panic() {
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![4.0, 1.0, 2.0, 3.0], &[2, 2]).expect("valid tensor");
+    let b = Tensor::new(vec![1.0, 2.0], &[2, 1]).expect("valid tensor");
+
+    assert!(matches!(
+        cuda.linalg_inv(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.linalg_solve(&a, &b),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.linalg_det(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.linalg_cholesky(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.linalg_qr(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.linalg_svd(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.linalg_matrix_norm(&a, fandhe_ai_tensor_core::MatrixNormOrd::Fro),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
+/// [`cuda_linalg_ops_return_unsupported_not_panic`] の Metal 版
+/// （`cfg(target_os = "macos")` 限定。`deps-policy.md` の Metal 分離
+/// 方針と同じ）。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_linalg_ops_return_unsupported_not_panic() {
+    // `linalg_*` は `device_handle()`（`MetalContext` 初期化）を経由
+    // しないため（本ファイル冒頭の設計方針コメント参照）、デバイス
+    // 有無に関わらず構築できる `MetalBackendOps::new()` をそのまま使う
+    // （`same_code_dispatches_gemm_to_metal_backend_or_returns_typed_error`
+    // と異なり `MetalContext::new()` の成否分岐は不要）。
+    let metal = MetalBackendOps::new();
+    let a = Tensor::new(vec![4.0, 1.0, 2.0, 3.0], &[2, 2]).expect("valid tensor");
+    let b = Tensor::new(vec![1.0, 2.0], &[2, 1]).expect("valid tensor");
+
+    assert!(matches!(
+        metal.linalg_inv(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_solve(&a, &b),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_det(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_cholesky(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_qr(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_svd(&a),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.linalg_matrix_norm(&a, fandhe_ai_tensor_core::MatrixNormOrd::Fro),
+        Err(BackendError::Unsupported(_))
+    ));
+}
