@@ -197,7 +197,7 @@ impl Tape {
                 // §3.1 点 4）を成立させるため、`continue` より前に
                 // 呼ぶ（下の通常経路と同じ呼び出しを重複させず一本化
                 // する）。
-                self.release_checkpoints_ending_at(id);
+                self.release_checkpoints_ending_at(id)?;
                 continue;
             };
             // 本反復専用の借用（ブロック末で drop）。ノード自身の
@@ -247,7 +247,7 @@ impl Tape {
             // panic にならない。`id` がいずれかの登録済み区間の `lo`
             // と一致する場合のみ実際の解放が起きる（該当なしなら
             // no-op）。
-            self.release_checkpoints_ending_at(id);
+            self.release_checkpoints_ending_at(id)?;
         }
 
         Ok(Gradients {
