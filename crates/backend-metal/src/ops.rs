@@ -95,23 +95,6 @@ std::thread_local! {
 /// 戻り値の [`MatrixLayout`] は `dispatch_strided_bias_act_prepared` へ
 /// そのまま渡す（フォールバック時は `contiguous()` 後の実際の行優先
 /// 形状に対応する NN レイアウトを返す）。
-/// RNN／LSTM／GRU セル演算（イシュー #1647）の入口検査: `shape` が
-/// rank-2 であることを検証する（`backend-cpu::ops::require_rank2`・
-/// `backend-cuda::ops::require_rank2_cell` と同型。平坦化後の要素数
-/// 一致だけでは異形状の取り違えを検出できないため、
-/// `lstm_pointwise`／`lstm_hidden_backward`／`lstm_cell_backward`／
-/// `gru_pointwise`／`gru_backward` の各エントリで使う。codex-review
-/// P2 指摘）。
-fn require_rank2_cell(shape: &[usize]) -> Result<(), BackendError> {
-    if shape.len() != 2 {
-        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
-            expected: 2,
-            actual: shape.len(),
-        }));
-    }
-    Ok(())
-}
-
 fn upload_operand_for_resident_gemm(
     mem: &MetalMemory,
     tensor: &Tensor<f32>,
@@ -140,6 +123,44 @@ fn upload_operand_for_resident_gemm(
         transposed: false,
     };
     Ok((dev_buf, layout))
+}
+
+/// RNN／LSTM／GRU セル演算（イシュー #1647）の入口検査: `shape` が
+/// rank-2 であることを検証する（`backend-cpu::ops::require_rank2`・
+/// `backend-cuda::ops::require_rank2_cell` と同型。平坦化後の要素数
+/// 一致だけでは異形状の取り違えを検出できないため、
+/// `lstm_pointwise`／`lstm_hidden_backward`／`lstm_cell_backward`／
+/// `gru_pointwise`／`gru_backward` の各エントリで使う。codex-review
+/// P2 指摘）。
+fn require_rank2_cell(shape: &[usize]) -> Result<(), BackendError> {
+    if shape.len() != 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    Ok(())
+}
+
+/// RNN／LSTM／GRU 系エントリが形状比較の前に必要とする `gates * hidden`
+/// （ゲート幅）を `checked_mul` で検証する（`backend-cpu::ops::
+/// checked_gate_width`／`backend-cuda::ops::checked_gate_width` と
+/// 同型）。
+///
+/// 本番経路 panic 禁止（AGENTS.md）: `4 * hidden`／`3 * hidden` を
+/// 未検証のまま `require_same_shape` の期待値へ埋め込むと、`hidden`
+/// が `usize::MAX` 近傍（要素数 0 の空テンソルは `shape[1]` を自由に
+/// 取れる）のとき乗算が overflow して期待幅が小さい値へ周回し、
+/// 本来 shape mismatch で拒否すべき不正な入力を誤って受理してしまう
+/// （受理後は下層カーネルが `hidden` を使った添字アクセスで範囲外
+/// 参照する）。イシュー #1647 codex-review P1 指摘。
+fn checked_gate_width(gates: usize, hidden: usize) -> Result<usize, BackendError> {
+    gates.checked_mul(hidden).ok_or(BackendError::ShapeMismatch(
+        ShapeError::ElementCountMismatch {
+            expected: usize::MAX,
+            actual: 0,
+        },
+    ))
 }
 
 /// Metal バックエンドの `BackendOps` 実装。`Device::Metal` は ordinal を
@@ -1829,7 +1850,8 @@ impl BackendOps for MetalBackendOps {
         require_rank2_cell(c_prev.shape())?;
         let hidden = c_prev.shape()[1];
         let b_dim = c_prev.shape()[0];
-        require_same_shape(pre.shape(), &[b_dim, 4 * hidden])
+        let gate_width = checked_gate_width(4, hidden)?;
+        require_same_shape(pre.shape(), &[b_dim, gate_width])
             .map_err(BackendError::ShapeMismatch)?;
         let pre_owned = pre.contiguous();
         let c_prev_owned = c_prev.contiguous();
@@ -1847,7 +1869,7 @@ impl BackendOps for MetalBackendOps {
             .run_lstm_pointwise_f32(&ctx, pre_slice, c_prev_slice, hidden)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Ok(LstmPointwiseOutput {
-            gates: Tensor::new(gates, &[b_dim, 4 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            gates: Tensor::new(gates, &[b_dim, gate_width]).map_err(BackendError::ShapeMismatch)?,
             c: Tensor::new(c, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
             h: Tensor::new(h, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
         })
@@ -1902,7 +1924,8 @@ impl BackendOps for MetalBackendOps {
         require_rank2_cell(c_prev.shape())?;
         let hidden = c_prev.shape()[1];
         let b_dim = c_prev.shape()[0];
-        require_same_shape(gates_ifg.shape(), &[b_dim, 3 * hidden])
+        let gate_width = checked_gate_width(3, hidden)?;
+        require_same_shape(gates_ifg.shape(), &[b_dim, gate_width])
             .map_err(BackendError::ShapeMismatch)?;
         require_same_shape(dc.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
         let gates_owned = gates_ifg.contiguous();
@@ -1925,7 +1948,7 @@ impl BackendOps for MetalBackendOps {
             .run_lstm_cell_backward_f32(&ctx, gates_slice, c_prev_slice, dc_slice, hidden)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Ok((
-            Tensor::new(d_pre_ifg, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(d_pre_ifg, &[b_dim, gate_width]).map_err(BackendError::ShapeMismatch)?,
             Tensor::new(dc_prev, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
         ))
     }
@@ -1941,9 +1964,10 @@ impl BackendOps for MetalBackendOps {
         require_rank2_cell(h_prev.shape())?;
         let hidden = h_prev.shape()[1];
         let b_dim = h_prev.shape()[0];
-        require_same_shape(pre_i.shape(), &[b_dim, 3 * hidden])
+        let gate_width = checked_gate_width(3, hidden)?;
+        require_same_shape(pre_i.shape(), &[b_dim, gate_width])
             .map_err(BackendError::ShapeMismatch)?;
-        require_same_shape(pre_h.shape(), &[b_dim, 3 * hidden])
+        require_same_shape(pre_h.shape(), &[b_dim, gate_width])
             .map_err(BackendError::ShapeMismatch)?;
         let pre_i_owned = pre_i.contiguous();
         let pre_h_owned = pre_h.contiguous();
@@ -1965,7 +1989,7 @@ impl BackendOps for MetalBackendOps {
             .run_gru_pointwise_f32(&ctx, pre_i_slice, pre_h_slice, h_prev_slice, hidden)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Ok(GruPointwiseOutput {
-            gates: Tensor::new(gates, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            gates: Tensor::new(gates, &[b_dim, gate_width]).map_err(BackendError::ShapeMismatch)?,
             q: Tensor::new(q, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
             h: Tensor::new(h, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
         })
@@ -1983,7 +2007,8 @@ impl BackendOps for MetalBackendOps {
         require_rank2_cell(h_prev.shape())?;
         let hidden = h_prev.shape()[1];
         let b_dim = h_prev.shape()[0];
-        require_same_shape(gates_rzn.shape(), &[b_dim, 3 * hidden])
+        let gate_width = checked_gate_width(3, hidden)?;
+        require_same_shape(gates_rzn.shape(), &[b_dim, gate_width])
             .map_err(BackendError::ShapeMismatch)?;
         require_same_shape(q.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
         require_same_shape(dh.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
@@ -2011,8 +2036,8 @@ impl BackendOps for MetalBackendOps {
             .run_gru_backward_f32(&ctx, gates_slice, q_slice, h_prev_slice, dh_slice, hidden)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Ok((
-            Tensor::new(d_pre_i, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
-            Tensor::new(d_pre_h, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(d_pre_i, &[b_dim, gate_width]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(d_pre_h, &[b_dim, gate_width]).map_err(BackendError::ShapeMismatch)?,
             Tensor::new(dh_prev_direct, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
         ))
     }

@@ -276,6 +276,12 @@ pub enum MatrixNormOrd {
     Spectral,
 }
 
+/// [`BackendOps::gru_backward`] の戻り値型エイリアス（イシュー #1647）。
+/// `(d_pre_i, d_pre_h, dh_prev_direct)`（順に `[B, 3H]`・`[B, 3H]`・
+/// `[B, H]`）。`clippy::type_complexity` 回避のための命名（doc は
+/// `gru_backward` 側に集約する）。
+pub type GruBackwardOutput = (Tensor<f32>, Tensor<f32>, Tensor<f32>);
+
 /// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
 /// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
 ///
@@ -287,12 +293,6 @@ pub enum MatrixNormOrd {
 /// 公開 API はすべて safe。`unsafe` は各バックエンド実装内部の FFI 境界
 /// （`cudarc`・`objc2` 系呼び出し）に閉じ込める
 /// （`.claude/rules/coding-rust.md`）。
-/// [`BackendOps::gru_backward`] の戻り値型エイリアス（イシュー #1647）。
-/// `(d_pre_i, d_pre_h, dh_prev_direct)`（順に `[B, 3H]`・`[B, 3H]`・
-/// `[B, H]`）。`clippy::type_complexity` 回避のための命名（doc は
-/// `gru_backward` 側に集約する）。
-pub type GruBackwardOutput = (Tensor<f32>, Tensor<f32>, Tensor<f32>);
-
 pub trait BackendOps {
     /// このインスタンスが対応する [`Device`]（呼び出し元がログ・
     /// エラーメッセージで識別するために使う）。

@@ -974,6 +974,97 @@ fn rnn_forward_seq_weight_gradient_is_sum_of_t_contributions() {
     );
 }
 
+/// `Rnn::forward_seq` が返す `RnnSeqOutput::params`（この呼び出しが
+/// 実際に使ったテープ登録済みパラメータ）を使って
+/// `Gradients::get(&out.params.weight_ih)` 等から直接勾配を取得できる
+/// ことを検証する（イシュー #1647 codex-review P1 指摘: `forward_seq`
+/// が内部で `bind` した `Var` を返さないと、呼び出し元はこの計算で
+/// 使われた重み・bias の勾配を取得する手段がなく学習経路として機能
+/// しなかった）。数値は上の
+/// `rnn_forward_seq_weight_gradient_is_sum_of_t_contributions` と同じ
+/// フィクスチャ・同じ手組みループ参照実装（`rnn_manual_unrolled_loss`）
+/// で突合する。
+#[test]
+fn rnn_forward_seq_exposes_params_for_gradient_retrieval() {
+    let (_, _, w_ih_t, w_hh_t, b_ih_t, b_hh_t) = rnn_fixture_data();
+    let t_len = 3usize;
+    let x_t = seq_input(t_len);
+
+    let cell = RnnCell::from_parameters(
+        w_ih_t.clone(),
+        w_hh_t.clone(),
+        Some(b_ih_t.clone()),
+        Some(b_hh_t.clone()),
+    )
+    .unwrap();
+    let rnn = Rnn::from_cell(cell);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let out = rnn.forward_seq(&tape, &x_t, None).unwrap();
+    // `rnn_manual_unrolled_loss` は各 step の `h` を loss へ加算する
+    // （`h_n` のみではなく全 step 分の寄与を突合するため。上の
+    // `rnn_forward_seq_weight_gradient_is_sum_of_t_contributions` と
+    // 同じ loss 構成に揃える）。
+    let mut loss = out.outputs[0].sum(None).unwrap();
+    for h in &out.outputs[1..] {
+        loss = loss.add(&h.sum(None).unwrap()).unwrap();
+    }
+    let grads = tape.backward(&loss).unwrap();
+
+    // `out.params` は `forward_seq` 内部で実際に計算グラフへ登録された
+    // `Var` そのもの（別途 `cell.bind(tape)` した無関係な葉ではない）
+    // なので `Gradients::get` が `Some` を返す。
+    let dw_ih = grads
+        .get(&out.params.weight_ih)
+        .unwrap()
+        .expect("forward_seq が使った weight_ih の勾配が取得できるはず")
+        .clone();
+    let dw_hh = grads
+        .get(&out.params.weight_hh)
+        .unwrap()
+        .expect("forward_seq が使った weight_hh の勾配が取得できるはず")
+        .clone();
+    let db_ih = grads
+        .get(out.params.bias_ih.as_ref().expect("bias=true で構築した"))
+        .unwrap()
+        .expect("forward_seq が使った bias_ih の勾配が取得できるはず")
+        .clone();
+    let db_hh = grads
+        .get(out.params.bias_hh.as_ref().expect("bias=true で構築した"))
+        .unwrap()
+        .expect("forward_seq が使った bias_hh の勾配が取得できるはず")
+        .clone();
+
+    assert_grad_close(
+        "rnn forward_seq params dw_ih",
+        &dw_ih,
+        &numeric_grad(&w_ih_t, |v| {
+            rnn_manual_unrolled_loss(&x_t, &v, &w_hh_t, &b_ih_t, &b_hh_t, t_len)
+        }),
+    );
+    assert_grad_close(
+        "rnn forward_seq params dw_hh",
+        &dw_hh,
+        &numeric_grad(&w_hh_t, |v| {
+            rnn_manual_unrolled_loss(&x_t, &w_ih_t, &v, &b_ih_t, &b_hh_t, t_len)
+        }),
+    );
+    assert_grad_close(
+        "rnn forward_seq params db_ih",
+        &db_ih,
+        &numeric_grad(&b_ih_t, |v| {
+            rnn_manual_unrolled_loss(&x_t, &w_ih_t, &w_hh_t, &v, &b_hh_t, t_len)
+        }),
+    );
+    assert_grad_close(
+        "rnn forward_seq params db_hh",
+        &db_hh,
+        &numeric_grad(&b_hh_t, |v| {
+            rnn_manual_unrolled_loss(&x_t, &w_ih_t, &w_hh_t, &b_ih_t, &v, t_len)
+        }),
+    );
+}
+
 // =====================================================================
 // LSTM／GRU の複数ステップ（T>1）BPTT 勾配検証（イシュー #1647
 // codex-review P2 指摘: 上の RNN テストのみが T>1 の重み勾配を数値
@@ -1043,6 +1134,57 @@ fn lstm_manual_unrolled_loss(
             .add(&c.sum(None).unwrap())
             .unwrap();
     }
+    scalar(&loss_sum.to_tensor())
+}
+
+/// [`lstm_manual_unrolled_loss`] の「最終 step の `h_n`／`c_n` のみを
+/// loss へ加算する」版（各 step 毎の中間和は取らない）。
+/// [`lstm_forward_seq_exposes_params_for_gradient_retrieval`] が
+/// `LstmSeqOutput::h_n`／`c_n`（`forward_seq` は per-step の `c` を
+/// 返さないため `outputs` から中間 `c` を再構成できない）のみを使って
+/// loss を組み立てるのに合わせた参照実装。
+#[allow(clippy::too_many_arguments)]
+fn lstm_manual_unrolled_final_loss(
+    x: &Tensor<f32>,
+    w_ih: &Tensor<f32>,
+    w_hh: &Tensor<f32>,
+    b_ih: &Tensor<f32>,
+    b_hh: &Tensor<f32>,
+    h0: &Tensor<f32>,
+    c0: &Tensor<f32>,
+    t_len: usize,
+) -> f32 {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let wih = tape.var(w_ih);
+    let whh = tape.var(w_hh);
+    let bih = tape.var(b_ih);
+    let bhh = tape.var(b_hh);
+    let mut h = tape.var(h0);
+    let mut c = tape.var(c0);
+    for step in 0..t_len {
+        let x_t_data = x
+            .narrow(0, step, 1)
+            .unwrap()
+            .contiguous()
+            .reshape(&[B, D])
+            .unwrap();
+        let x_t = tape.var(&x_t_data);
+        let (h_t, c_t) = x_t
+            .lstm_cell(
+                &h,
+                &c,
+                GateParams {
+                    w_ih: &wih,
+                    w_hh: &whh,
+                    b_ih: Some(&bih),
+                    b_hh: Some(&bhh),
+                },
+            )
+            .unwrap();
+        h = h_t;
+        c = c_t;
+    }
+    let loss_sum = h.sum(None).unwrap().add(&c.sum(None).unwrap()).unwrap();
     scalar(&loss_sum.to_tensor())
 }
 
@@ -1122,6 +1264,54 @@ fn lstm_forward_seq_multi_step_gradient_matches_numeric_diff() {
         &dc0,
         &numeric_grad(&c_prev, |v| {
             lstm_manual_unrolled_loss(&x_t, &w_ih_t, &w_hh_t, &b_ih_t, &b_hh_t, &h_prev, &v, t_len)
+        }),
+    );
+}
+
+/// `Lstm::forward_seq` が返す `LstmSeqOutput::params`（イシュー #1647
+/// codex-review P1 指摘。[`rnn_forward_seq_exposes_params_for_gradient_retrieval`]
+/// の LSTM 版）から `Gradients::get` で直接勾配を取得できることを検証
+/// する。
+#[test]
+fn lstm_forward_seq_exposes_params_for_gradient_retrieval() {
+    let (_, h_prev, c_prev, w_ih_t, w_hh_t, b_ih_t, b_hh_t) = lstm_fixture_data();
+    let t_len = 3usize;
+    let x_t = lstm_seq_input(t_len);
+
+    let cell = LstmCell::from_parameters(
+        w_ih_t.clone(),
+        w_hh_t.clone(),
+        Some(b_ih_t.clone()),
+        Some(b_hh_t.clone()),
+    )
+    .unwrap();
+    let lstm = Lstm::from_cell(cell);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let h0 = tape.var(&h_prev);
+    let c0 = tape.var(&c_prev);
+    let out = lstm.forward_seq(&tape, &x_t, Some(&h0), Some(&c0)).unwrap();
+    let loss = out
+        .h_n
+        .sum(None)
+        .unwrap()
+        .add(&out.c_n.sum(None).unwrap())
+        .unwrap();
+    let grads = tape.backward(&loss).unwrap();
+
+    let dw_ih = grads
+        .get(&out.params.weight_ih)
+        .unwrap()
+        .expect("forward_seq が使った weight_ih の勾配が取得できるはず")
+        .clone();
+
+    assert_grad_close(
+        "lstm forward_seq params dw_ih",
+        &dw_ih,
+        &numeric_grad(&w_ih_t, |v| {
+            lstm_manual_unrolled_final_loss(
+                &x_t, &v, &w_hh_t, &b_ih_t, &b_hh_t, &h_prev, &c_prev, t_len,
+            )
         }),
     );
 }
@@ -1226,6 +1416,52 @@ fn gru_forward_seq_multi_step_gradient_matches_numeric_diff() {
         &dh0,
         &numeric_grad(&h_prev, |v| {
             gru_manual_unrolled_loss(&x_t, &w_ih_t, &w_hh_t, &b_ih_t, &b_hh_t, &v, t_len)
+        }),
+    );
+}
+
+/// `Gru::forward_seq` が返す `RnnSeqOutput::params`（イシュー #1647
+/// codex-review P1 指摘。[`rnn_forward_seq_exposes_params_for_gradient_retrieval`]
+/// の GRU 版）から `Gradients::get` で直接勾配を取得できることを検証
+/// する。
+#[test]
+fn gru_forward_seq_exposes_params_for_gradient_retrieval() {
+    let (_, h_prev, w_ih_t, w_hh_t, b_ih_t, b_hh_t) = gru_fixture_data();
+    let t_len = 3usize;
+    let x_t = seq_input(t_len);
+
+    let cell = GruCell::from_parameters(
+        w_ih_t.clone(),
+        w_hh_t.clone(),
+        Some(b_ih_t.clone()),
+        Some(b_hh_t.clone()),
+    )
+    .unwrap();
+    let gru = Gru::from_cell(cell);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let h0 = tape.var(&h_prev);
+    let out = gru.forward_seq(&tape, &x_t, Some(&h0)).unwrap();
+    // `gru_manual_unrolled_loss` は各 step の `h` を loss へ加算する
+    // ため、突合対象の loss も同じ構成に揃える（`h_n` のみではなく
+    // 全 step 分の寄与を含める）。
+    let mut loss = out.outputs[0].sum(None).unwrap();
+    for h in &out.outputs[1..] {
+        loss = loss.add(&h.sum(None).unwrap()).unwrap();
+    }
+    let grads = tape.backward(&loss).unwrap();
+
+    let dw_ih = grads
+        .get(&out.params.weight_ih)
+        .unwrap()
+        .expect("forward_seq が使った weight_ih の勾配が取得できるはず")
+        .clone();
+
+    assert_grad_close(
+        "gru forward_seq params dw_ih",
+        &dw_ih,
+        &numeric_grad(&w_ih_t, |v| {
+            gru_manual_unrolled_loss(&x_t, &v, &w_hh_t, &b_ih_t, &b_hh_t, &h_prev, t_len)
         }),
     );
 }
@@ -1462,6 +1698,33 @@ fn rnn_cell_rejects_cross_tape_operands() {
 fn lstm_cell_new_rejects_zero_dims() {
     assert!(LstmCell::new(0, HID, true, 1).is_err());
     assert!(LstmCell::new(D, 0, true, 1).is_err());
+}
+
+/// イシュー #1647 codex-review P1 指摘の再現テスト: `hidden`（ここでは
+/// `weight_hh.shape()[0]`）が `usize::MAX` 近傍かつ対応する軸の要素数が
+/// 0（`weight_hh.shape() = [1usize << 62, 0]` は要素数 0 のまま合法な
+/// 空テンソル）のとき、`gates * hidden`（`4 * (1usize << 62) == 2^64`）
+/// が未検証のまま乗算されると `usize` 上で `0` へ wrap し、
+/// `weight_ih.shape()[1] == 0`（同じく空テンソル）と一致してしまい
+/// 本来 shape mismatch で拒否すべき不正な `LstmCell` を誤って受理して
+/// しまう。`checked_gate_width`（`checked_mul` ベース）へ是正した後は
+/// overflow を検出して `Err` を返すことを確認する。
+#[test]
+fn lstm_cell_from_parameters_rejects_overflowing_gate_width_instead_of_wrapping() {
+    let huge_hidden: usize = 1usize << 62;
+    // `4 * huge_hidden == 2^64` は `usize`（64bit）上で `0` へ wrap する。
+    assert_eq!(4usize.wrapping_mul(huge_hidden), 0);
+
+    let d = 3usize;
+    let weight_ih = t(Vec::new(), &[d, 0]);
+    let weight_hh = t(Vec::new(), &[huge_hidden, 0]);
+    let err = LstmCell::from_parameters(weight_ih, weight_hh, None, None).unwrap_err();
+    // wrap 後の値（0）と偶然一致して受理される（`Ok`）のではなく、
+    // overflow 自体を検出したエラーで拒否されること。
+    assert!(
+        matches!(err, AutodiffError::InvalidArgument(_)),
+        "overflow を checked_mul で検出した InvalidArgument を期待したが {err:?} だった"
+    );
 }
 
 #[test]

@@ -917,17 +917,18 @@ impl<'t> Var<'t> {
         let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
         let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
         require_same_shape(&out_ih, &out_hh)?;
-        if out_ih[1] != 4 * hidden {
+        let gate_width_4h = checked_gate_width(4, hidden)?;
+        if out_ih[1] != gate_width_4h {
             return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
                 lhs: out_ih,
-                rhs: vec![h_shape[0], 4 * hidden],
+                rhs: vec![h_shape[0], gate_width_4h],
             }));
         }
         if let Some(b) = p.b_ih {
-            require_same_shape(&b.shape(), &[4 * hidden])?;
+            require_same_shape(&b.shape(), &[gate_width_4h])?;
         }
         if let Some(b) = p.b_hh {
-            require_same_shape(&b.shape(), &[4 * hidden])?;
+            require_same_shape(&b.shape(), &[gate_width_4h])?;
         }
 
         let (x_val, h_prev_val, c_prev_val, w_ih_val, w_hh_val, b_ih_val, b_hh_val) = {
@@ -965,10 +966,17 @@ impl<'t> Var<'t> {
         // として保持する（`Op` payload はホスト常駐の独立 `Tensor`
         // でなければならない。view のまま埋め込むと backward 時に
         // `resolve_view` が想定しない経路になる）。
-        let gates_ifg = out.gates.narrow(1, 0, 3 * hidden).map(|t| t.contiguous())?;
+        // `gate_width_4h` が overflow せず検証済み（上記）のため、
+        // その内訳である `3 * hidden` も overflow しない
+        // （`3 * hidden < 4 * hidden <= usize::MAX`）。
+        let gate_width_3h = checked_gate_width(3, hidden)?;
+        let gates_ifg = out
+            .gates
+            .narrow(1, 0, gate_width_3h)
+            .map(|t| t.contiguous())?;
         let gate_o = out
             .gates
-            .narrow(1, 3 * hidden, hidden)
+            .narrow(1, gate_width_3h, hidden)
             .map(|t| t.contiguous())?;
 
         let cell_id = self.tape.push_eager(
@@ -1029,17 +1037,18 @@ impl<'t> Var<'t> {
         let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
         let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
         require_same_shape(&out_ih, &out_hh)?;
-        if out_ih[1] != 3 * hidden {
+        let gate_width_3h = checked_gate_width(3, hidden)?;
+        if out_ih[1] != gate_width_3h {
             return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
                 lhs: out_ih,
-                rhs: vec![h_shape[0], 3 * hidden],
+                rhs: vec![h_shape[0], gate_width_3h],
             }));
         }
         if let Some(b) = p.b_ih {
-            require_same_shape(&b.shape(), &[3 * hidden])?;
+            require_same_shape(&b.shape(), &[gate_width_3h])?;
         }
         if let Some(b) = p.b_hh {
-            require_same_shape(&b.shape(), &[3 * hidden])?;
+            require_same_shape(&b.shape(), &[gate_width_3h])?;
         }
 
         let (x_val, h_prev_val, w_ih_val, w_hh_val, b_ih_val, b_hh_val) = {
@@ -1397,6 +1406,25 @@ fn require_positive_dims(d: usize, hidden: usize, op_name: &str) -> Result<(), A
         )));
     }
     Ok(())
+}
+
+/// `gates * hidden`（ゲート幅）を `checked_mul` で検証する
+/// （`nn::rnn::checked_gate_width` と同型）。
+///
+/// 本番経路 panic 禁止（AGENTS.md）: `lstm_cell`／`gru_cell` は
+/// `h_prev.shape()[1]` から `hidden` を導出するが、`h_prev` が要素数
+/// 0 の空 `Var`（例: `h_shape = [0, 1usize << 62]`）であれば
+/// `require_positive_dims` の `hidden == 0` 検査を通過したまま
+/// `hidden` が `usize::MAX` 近傍になりうる。`4 * hidden`／`3 * hidden`
+/// を未検証のまま比較・`narrow` 幅へ使うと overflow により期待幅が
+/// 周回し、不正な形状を誤って受理してしまう（イシュー #1647
+/// codex-review P1 指摘）。
+fn checked_gate_width(gates: usize, hidden: usize) -> Result<usize, AutodiffError> {
+    gates.checked_mul(hidden).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "gates (={gates}) * hidden (={hidden}) overflowed usize"
+        ))
+    })
 }
 
 /// `Option<&Var>` を `Option<Tensor<f32>>` へ実体化する共通ヘルパー

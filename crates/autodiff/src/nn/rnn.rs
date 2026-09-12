@@ -111,6 +111,25 @@ fn build_gate_params(
     Ok((weight_ih, weight_hh, bias_ih, bias_hh))
 }
 
+/// `gates * hidden`（ゲート幅）を `checked_mul` で検証する共通実装。
+///
+/// 本番経路 panic 禁止（AGENTS.md）: `validate_gate_params`／
+/// `validate_cell_host_shapes` はいずれも入力由来の `hidden`（実体の
+/// ある `Tensor` の shape 次元だが、対をなす軸の要素数が 0 の空
+/// テンソルであれば任意の大きさを取りうる。例:
+/// `weight_hh.shape() = [1usize << 62, 0]` は要素数 0 のまま合法）を
+/// 使って `gates * hidden` を計算する。未検証のまま乗算すると
+/// overflow して期待幅が小さい値へ周回し、本来 shape mismatch で
+/// 拒否すべき不正な `LstmCell`／`GruCell` パラメータを誤って受理して
+/// しまう（イシュー #1647 codex-review P1 指摘）。
+fn checked_gate_width(gates: usize, hidden: usize) -> Result<usize, AutodiffError> {
+    gates.checked_mul(hidden).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "gates (={gates}) * hidden (={hidden}) overflowed usize"
+        ))
+    })
+}
+
 /// `from_parameters`（外部由来パラメータの入口。REQ-7 系 safetensors
 /// ロード等を見据える）が計算前に行う shape 検証の共通実装（A03。
 /// `nn::Linear::from_parameters` と同じ「壊れた shape を計算前に拒否
@@ -145,7 +164,7 @@ fn validate_gate_params(
     }
     let gh_ih = weight_ih.shape()[1];
     let gh_hh = weight_hh.shape()[1];
-    let expected_gh = gates * hidden;
+    let expected_gh = checked_gate_width(gates, hidden)?;
     if gh_ih != expected_gh || gh_hh != expected_gh {
         return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
             lhs: vec![d, gh_ih],
@@ -282,7 +301,7 @@ fn validate_cell_host_shapes(
         AutodiffError::InvalidArgument(format!("{op_name}: h_prev * w_hh が不整合"))
     })?;
     require_same_shape(&out_ih, &out_hh)?;
-    let expected_width = gates * hidden;
+    let expected_width = checked_gate_width(gates, hidden)?;
     if out_ih[1] != expected_width {
         return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
             lhs: out_ih,
@@ -458,14 +477,28 @@ impl<'t> RnnCellVars<'t> {
     }
 }
 
-/// [`Rnn::forward_seq`] の戻り値。`outputs` は各 step の隠れ状態
-/// （`[B,H]`。決定 4「`Var::stack`〈#1598〉未実装のため per-step の
-/// `Vec` で返す」）、`h_n` は最終 step の隠れ状態（`outputs` の最後の
-/// 要素と同一）。
+/// [`Rnn::forward_seq`]／[`Gru::forward_seq`] の戻り値。`outputs` は
+/// 各 step の隠れ状態（`[B,H]`。決定 4「`Var::stack`〈#1598〉未実装の
+/// ため per-step の `Vec` で返す」）、`h_n` は最終 step の隠れ状態
+/// （`outputs` の最後の要素と同一）。
+///
+/// `params` は `forward_seq` が内部で `cell.bind(tape)` した、この
+/// 呼び出しで実際に使われたテープ登録済みパラメータ（[`RnnCellVars`]
+/// または [`GruCellVars`]。型パラメータ `P` で両セルに共用する）。
+/// `forward_seq` がこれを返さず内部変数に閉じ込めていると、呼び出し
+/// 元は `Gradients::get(&Var)` の引数となる `Var` を得る手段がなく
+/// この計算で使われた重み・bias の勾配を取得できない（`forward_seq`
+/// 呼び出しの前後に別途 `cell.bind(tape)` しても、それは別ノードとして
+/// 登録される新しい葉であり `forward_seq` 内部の計算とは無関係な
+/// ため `Gradients::get` は必ず `None` を返す）。これでは系列 API が
+/// 学習経路として使い物にならない（イシュー #1647 codex-review P1
+/// 指摘）。呼び出し元は `out.params.weight_ih` 等を
+/// `grads.get(&out.params.weight_ih)` へ渡してパラメータ更新に使う。
 #[derive(Debug)]
-pub struct RnnSeqOutput<'t> {
+pub struct RnnSeqOutput<'t, P> {
     pub outputs: Vec<Var<'t>>,
     pub h_n: Var<'t>,
+    pub params: P,
 }
 
 /// RNN（tanh 版）の時系列 Sequence レベル API（決定 2「展開
@@ -504,7 +537,7 @@ impl Rnn {
         tape: &'t Tape,
         x: &Tensor<f32>,
         h0: Option<&Var<'t>>,
-    ) -> Result<RnnSeqOutput<'t>, AutodiffError> {
+    ) -> Result<RnnSeqOutput<'t, RnnCellVars<'t>>, AutodiffError> {
         let (t_len, b_dim, d_dim) = validate_seq_input(x, "Rnn::forward_seq")?;
         let hidden = self.cell.hidden_size();
         let vars = self.cell.bind(tape);
@@ -520,7 +553,11 @@ impl Rnn {
             h = vars.forward(&x_t, &h)?;
             outputs.push(h);
         }
-        Ok(RnnSeqOutput { outputs, h_n: h })
+        Ok(RnnSeqOutput {
+            outputs,
+            h_n: h,
+            params: vars,
+        })
     }
 }
 
@@ -709,12 +746,16 @@ impl<'t> LstmCellVars<'t> {
 }
 
 /// [`Lstm::forward_seq`] の戻り値（決定 1b: LSTM は再帰出力 `h_t`／
-/// `c_t` の 2 系統を持つため `RnnSeqOutput` とは別型）。
+/// `c_t` の 2 系統を持つため `RnnSeqOutput` とは別型）。`params` は
+/// この呼び出しが内部で `cell.bind(tape)` した、実際に使われた
+/// テープ登録済みパラメータ（[`RnnSeqOutput`] の doc comment 参照。
+/// イシュー #1647 codex-review P1 指摘）。
 #[derive(Debug)]
 pub struct LstmSeqOutput<'t> {
     pub outputs: Vec<Var<'t>>,
     pub h_n: Var<'t>,
     pub c_n: Var<'t>,
+    pub params: LstmCellVars<'t>,
 }
 
 /// LSTM の時系列 Sequence レベル API。
@@ -776,6 +817,7 @@ impl Lstm {
             outputs,
             h_n: h,
             c_n: c,
+            params: vars,
         })
     }
 }
@@ -983,7 +1025,7 @@ impl Gru {
         tape: &'t Tape,
         x: &Tensor<f32>,
         h0: Option<&Var<'t>>,
-    ) -> Result<RnnSeqOutput<'t>, AutodiffError> {
+    ) -> Result<RnnSeqOutput<'t, GruCellVars<'t>>, AutodiffError> {
         let (t_len, b_dim, d_dim) = validate_seq_input(x, "Gru::forward_seq")?;
         let hidden = self.cell.hidden_size();
         let vars = self.cell.bind(tape);
@@ -999,7 +1041,11 @@ impl Gru {
             h = vars.forward(&x_t, &h)?;
             outputs.push(h);
         }
-        Ok(RnnSeqOutput { outputs, h_n: h })
+        Ok(RnnSeqOutput {
+            outputs,
+            h_n: h,
+            params: vars,
+        })
     }
 }
 
