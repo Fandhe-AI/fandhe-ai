@@ -1,0 +1,6 @@
+機体: DGX Spark GB10（sm_121・CUDA 13.0・Linux 6.17.0-1031-nvidia aarch64）
+GPU: NVIDIA GB10（driver 580.173.02）
+デバイス: cuda（ordinal 0）
+計測方式: record_only（専有ゲートなし）
+uptime（計測直前）: load average 1.53 0.86 0.32（他ノードより低負荷。GPU utilization.gpu 0%）
+内部ホスト名: マスク済み（含めない）
