@@ -3645,4 +3645,247 @@ release ビルドでも検知できるよう `assert!` を使う）"
     // 既に green であることを既存テスト実行で確認済み（`vjp` 経由の
     // 統合経路のカバレッジは既存テストが担う。本節は `vjp_elementwise_
     // *_via` 単体のカバレッジを補う）。
+
+    /// codex-review P2 指摘の是正（PRRT_kwDOTuUCJc6hxBOl。設計 `docs/
+    /// autodiff-rnn-cell-tape-design.md` 決定 11(h)）: `Op::GruCell` の
+    /// `q`（決定 1c: `pre_h` の n 列ブロック。GEMM 再計算を避けるため
+    /// backward で `∂n/∂r` の復元に直接使う payload）を意図的に
+    /// 破損させると、backward の結果が変化することを確認する構造
+    /// テスト。`eval::gru_backward` の式（`dr = d_pre_n * q_val` →
+    /// `d_pre_r`。本ファイル冒頭の doc 参照）により、`q` は r ゲート
+    /// 列ブロックの勾配にのみ影響するため、`col_start=0` の全幅 embed
+    /// を経由する `w_ih`（`affine_vjp` の `d_weight` 戻り値。r 列
+    /// ブロックを含む全幅）が `q` の値に応じて変化するはずである。
+    /// 変化しなければ `q` が実際には使われていない（GEMM 再計算に
+    /// フォールバックしている、または死んでいる）ことを意味する。
+    #[test]
+    fn vjp_gru_cell_backward_is_sensitive_to_stored_q_payload() {
+        // D=2, hidden=1, B=1（`total_cols = gates(=3) * hidden = 3`）。
+        let x = t(&[1.0, -0.5], &[1, 2]);
+        let h_prev = t(&[0.3], &[1, 1]);
+        let w_ih = t(&[0.1, 0.2, -0.1, 0.05, 0.3, -0.2], &[2, 3]);
+        let w_hh = t(&[0.2, -0.1, 0.05], &[1, 3]);
+        // gates_rzn（活性化後の r,z,n。値域は sigmoid/tanh 範囲内）。
+        let gates_rzn = t(&[0.6, 0.4, 0.2], &[1, 3]);
+        let dh = t(&[1.0], &[1, 1]);
+        // Op::GruCell 分岐は `out_value` を参照しない（本ファイル上部の
+        // `Op::GruCell` 分岐実装参照）ためプレースホルダで足りる。
+        let out_value = t(&[0.0], &[1, 1]);
+
+        let nodes = vec![
+            leaf_node(x),
+            leaf_node(h_prev),
+            leaf_node(w_ih),
+            leaf_node(w_hh),
+        ];
+
+        let q_correct = t(&[0.5], &[1, 1]);
+        let q_corrupted = t(&[9.0], &[1, 1]);
+
+        let op_correct = Op::GruCell {
+            x: NodeId(0),
+            h_prev: NodeId(1),
+            w_ih: NodeId(2),
+            w_hh: NodeId(3),
+            b_ih: None,
+            b_hh: None,
+            gates_rzn: gates_rzn.clone(),
+            q: q_correct,
+        };
+        let op_corrupted = Op::GruCell {
+            x: NodeId(0),
+            h_prev: NodeId(1),
+            w_ih: NodeId(2),
+            w_hh: NodeId(3),
+            b_ih: None,
+            b_hh: None,
+            gates_rzn,
+            q: q_corrupted,
+        };
+
+        let grads_correct = vjp(
+            &op_correct,
+            &out_value,
+            &dh,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+        let grads_corrupted = vjp(
+            &op_corrupted,
+            &out_value,
+            &dh,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        let dw_ih_correct = grads_correct
+            .iter()
+            .find(|(id, _)| *id == NodeId(2))
+            .map(|(_, g)| dense_vec(g))
+            .expect("w_ih への寄与が存在するはず");
+        let dw_ih_corrupted = grads_corrupted
+            .iter()
+            .find(|(id, _)| *id == NodeId(2))
+            .map(|(_, g)| dense_vec(g))
+            .expect("w_ih への寄与が存在するはず");
+
+        assert_ne!(
+            dw_ih_correct, dw_ih_corrupted,
+            "q を破損させても w_ih 勾配が変化しない: q payload が backward で実際に \
+             使われていない（GEMM 再計算・死んだ payload 等の）疑いがある"
+        );
+    }
+
+    /// codex-review P2 指摘の是正（PRRT_kwDOTuUCJc6hxBOl。設計 `docs/
+    /// autodiff-rnn-cell-tape-design.md` 決定 11(j)）: `Op::LstmHidden`
+    /// の VJP が `cell`（`NodeId`）経由で `nodes[cell.0].op` を参照し、
+    /// そこに保持された `Op::LstmCell.w_ih`／`w_hh` の**実データ**を
+    /// 読んでいることを確認する構造テスト。`cell` が指す先の
+    /// `Op::LstmCell` ノードの `w_ih`／`w_hh` leaf データだけを差し替え
+    /// (`x`／`h_prev`／`gates_ifg`／`gate_o` 等は完全に同一のまま)、
+    /// `affine_vjp` が返す `dx`（`w_ih_val` に依存）・`dh_prev`
+    /// （`w_hh_val` に依存）が変化することを確認する。変化しなければ
+    /// `cell` 参照が実際には読まれていない（固定値・別経路へのフォール
+    /// バック等）ことを意味する。
+    #[test]
+    fn vjp_lstm_hidden_reads_referenced_cell_node_weight_data() {
+        let x = t(&[1.0, -0.5], &[1, 2]);
+        let h_prev = t(&[0.3, -0.2], &[1, 2]);
+        let c_prev = t(&[0.1, 0.4], &[1, 2]);
+        let w_ih_a = t(
+            &[
+                0.1, 0.2, -0.1, 0.05, 0.3, -0.2, 0.15, -0.05, 0.2, -0.3, 0.1, 0.25, 0.05, -0.1,
+                0.2, -0.15,
+            ],
+            &[2, 8],
+        );
+        let w_hh_a = t(
+            &[
+                0.2, -0.1, 0.05, 0.1, -0.2, 0.3, 0.1, 0.05, -0.1, 0.2, 0.15, -0.05, 0.1, 0.2,
+                -0.05, 0.15,
+            ],
+            &[2, 8],
+        );
+        // w_ih_b／w_hh_b は w_ih_a／w_hh_a と全要素 +1.0 だけ異なる
+        // （shape 同一・データのみ破損させた「別の」重み）。
+        let w_ih_b = t(
+            &dense_vec(&w_ih_a)
+                .iter()
+                .map(|v| v + 1.0)
+                .collect::<Vec<_>>(),
+            &[2, 8],
+        );
+        let w_hh_b = t(
+            &dense_vec(&w_hh_a)
+                .iter()
+                .map(|v| v + 1.0)
+                .collect::<Vec<_>>(),
+            &[2, 8],
+        );
+        let gates_ifg = t(&[0.6, 0.4, 0.3, 0.7, -0.2, 0.5], &[1, 6]);
+        let gate_o = t(&[0.55, 0.45], &[1, 2]);
+        let c_t = t(&[0.2, -0.1], &[1, 2]);
+        let h_t = t(&[0.1, 0.05], &[1, 2]);
+        let dh = t(&[1.0, -1.0], &[1, 2]);
+
+        let build_nodes = |w_ih: Tensor<f32>, w_hh: Tensor<f32>| {
+            let cell_op = Op::LstmCell {
+                x: NodeId(0),
+                h_prev: NodeId(1),
+                c_prev: NodeId(2),
+                w_ih: NodeId(3),
+                w_hh: NodeId(4),
+                b_ih: None,
+                b_hh: None,
+                gates_ifg: gates_ifg.clone(),
+            };
+            // `Op::LstmCell` ノードは常に実体化済み（`tape.rs::Op::
+            // LstmCell` doc の push_eager 契約）のため、テスト用にも
+            // `OnceCell::from` で事前に値を設定する。
+            let cell_node = TapeNode {
+                op: cell_op,
+                shape: c_t.shape().to_vec(),
+                value: std::cell::OnceCell::from(c_t.clone()),
+                lazy_chain_size: 0,
+            };
+            vec![
+                leaf_node(x.clone()),
+                leaf_node(h_prev.clone()),
+                leaf_node(c_prev.clone()),
+                leaf_node(w_ih),
+                leaf_node(w_hh),
+                cell_node,
+            ]
+        };
+
+        let nodes_a = build_nodes(w_ih_a, w_hh_a);
+        let nodes_b = build_nodes(w_ih_b, w_hh_b);
+        let op_hidden = Op::LstmHidden {
+            cell: NodeId(5),
+            gate_o,
+        };
+
+        let grads_a = vjp(
+            &op_hidden,
+            &h_t,
+            &dh,
+            &nodes_a,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+        let grads_b = vjp(
+            &op_hidden,
+            &h_t,
+            &dh,
+            &nodes_b,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        let dx_a = grads_a
+            .iter()
+            .find(|(id, _)| *id == NodeId(0))
+            .map(|(_, g)| dense_vec(g))
+            .expect("x への寄与が存在するはず");
+        let dx_b = grads_b
+            .iter()
+            .find(|(id, _)| *id == NodeId(0))
+            .map(|(_, g)| dense_vec(g))
+            .expect("x への寄与が存在するはず");
+        let dh_prev_a = grads_a
+            .iter()
+            .find(|(id, _)| *id == NodeId(1))
+            .map(|(_, g)| dense_vec(g))
+            .expect("h_prev への寄与が存在するはず");
+        let dh_prev_b = grads_b
+            .iter()
+            .find(|(id, _)| *id == NodeId(1))
+            .map(|(_, g)| dense_vec(g))
+            .expect("h_prev への寄与が存在するはず");
+
+        assert_ne!(
+            dx_a, dx_b,
+            "cell 参照先の w_ih データを差し替えても dx が変化しない: LstmHidden の \
+             VJP が cell 経由の w_ih を実際に読んでいない疑いがある"
+        );
+        assert_ne!(
+            dh_prev_a, dh_prev_b,
+            "cell 参照先の w_hh データを差し替えても dh_prev が変化しない: LstmHidden \
+             の VJP が cell 経由の w_hh を実際に読んでいない疑いがある"
+        );
+    }
 }

@@ -31,6 +31,46 @@ const TAU: f32 = 1e-4;
 const REL_TOL: f32 = 1e-2;
 const ABS_TOL: f32 = 1e-3;
 
+// codex-review P1 指摘の是正（PRRT_kwDOTuUCJc6hydZW）: 専用 Op（決定 1
+// 候補 B）と合成参照実装（決定 1 候補 A）の forward 比較は数値微分の
+// 丸め誤差を許容する必要がないため、`assert_grad_close`（数値微分
+// 突合専用。上記 `H`/`TAU`/`REL_TOL`/`ABS_TOL`）を流用せず、設計 doc
+// 決定 11(a) が要求するバックエンド間数値一致と同じ複合判定（相対誤差
+// 1e-3 未満 または 絶対誤差 1e-5 未満。`.claude/rules/coding-rust.md`）
+// を適用する専用ヘルパーを分離する。
+const FORWARD_REL_TOL: f32 = 1e-3;
+const FORWARD_ABS_TOL: f32 = 1e-5;
+
+fn assert_forward_close(label: &str, dedicated: &Tensor<f32>, composite: &Tensor<f32>) {
+    assert_eq!(
+        dedicated.shape(),
+        composite.shape(),
+        "{label}: shape が一致しない"
+    );
+    let shape = dedicated.shape().to_vec();
+    let numel: usize = shape.iter().product();
+    let mut index = vec![0usize; shape.len()];
+    for flat in 0..numel {
+        let dv = dedicated.get(&index).unwrap_or(0.0);
+        let cv = composite.get(&index).unwrap_or(0.0);
+        let diff = (dv - cv).abs();
+        // 分母 0 除算を避ける下限（数値微分突合の `TAU` とは独立の値。
+        // diff も 0 のため rel は 0 になり判定へ影響しない）。
+        let rel = diff / dv.abs().max(cv.abs()).max(f32::MIN_POSITIVE);
+        assert!(
+            rel < FORWARD_REL_TOL || diff < FORWARD_ABS_TOL,
+            "{label}[flat={flat} idx={index:?}]: dedicated={dv} composite={cv} diff={diff} rel={rel}"
+        );
+        for axis in (0..shape.len()).rev() {
+            index[axis] += 1;
+            if index[axis] < shape[axis] {
+                break;
+            }
+            index[axis] = 0;
+        }
+    }
+}
+
 fn assert_grad_close(label: &str, analytic: &Tensor<f32>, numeric: &Tensor<f32>) {
     assert_eq!(
         analytic.shape(),
@@ -177,7 +217,7 @@ fn rnn_cell_dedicated_op_matches_composite_reference_forward() {
         .unwrap();
     let composite = rnn_composite_forward(&x, &h_prev, &w_ih, &w_hh, &b_ih, &b_hh);
 
-    assert_grad_close(
+    assert_forward_close(
         "rnn forward dedicated vs composite",
         &dedicated.to_tensor(),
         &composite.to_tensor(),
@@ -461,12 +501,12 @@ fn lstm_cell_dedicated_op_matches_composite_reference_forward() {
         &b_hh_gates,
     );
 
-    assert_grad_close(
+    assert_forward_close(
         "lstm h dedicated vs composite",
         &h_ded.to_tensor(),
         &h_comp.to_tensor(),
     );
-    assert_grad_close(
+    assert_forward_close(
         "lstm c dedicated vs composite",
         &c_ded.to_tensor(),
         &c_comp.to_tensor(),
@@ -715,7 +755,7 @@ fn gru_cell_dedicated_op_matches_composite_reference_forward() {
         &b_hh_gates,
     );
 
-    assert_grad_close(
+    assert_forward_close(
         "gru forward dedicated vs composite",
         &dedicated.to_tensor(),
         &composite.to_tensor(),
@@ -1789,5 +1829,48 @@ fn forward_seq_and_forward_host_reject_unreservable_sequence_length_instead_of_p
     let err = gru
         .forward_host(common::naive_ops().as_ref(), &huge_t_zero_batch)
         .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// codex-review P1 指摘の回帰テスト（PRRT_kwDOTuUCJc6hydZU）:
+/// `checked_mul`（`build_gate_params`／`checked_gate_width`）は `usize`
+/// の乗算オーバーフローのみを検出し、要素数自体が `usize` に収まりつつ
+/// 総バイト数が `isize::MAX` を超える場合までは防げない。
+/// `RnnCell::new(1usize << 61, 1, false, 0)` は `gates=1`・
+/// `hidden_size=1` のため `gh=1`・`w_ih_len=1usize<<61` となり、すべて
+/// の `checked_mul` を通過するが、`Vec<f32>` として確保すると
+/// `(1usize << 61) * size_of::<f32>() == 1usize << 63` バイトとなり
+/// `isize::MAX`（`2^63 - 1`）を超える。`try_uniform_init` へ是正する前は
+/// `uniform_init` 内部の `collect()` が capacity overflow で panic して
+/// いた（本番経路 panic 禁止。`.claude/rules/coding-rust.md`）。是正後は
+/// panic せず `AutodiffError::InvalidArgument` を返すことを、
+/// `RnnCell`／`LstmCell`／`GruCell` の共通ヘルパー
+/// （`build_gate_params`）経由で確認する。
+#[test]
+fn rnn_lstm_gru_new_reject_unallocatable_init_capacity_instead_of_panicking() {
+    let huge_input: usize = 1usize << 61;
+
+    let err = RnnCell::new(huge_input, 1, false, 0).unwrap_err();
+    assert!(
+        matches!(err, AutodiffError::InvalidArgument(_)),
+        "RnnCell::new: 確保不能な初期化容量を InvalidArgument で拒否することを期待したが {err:?} だった"
+    );
+
+    let err = LstmCell::new(huge_input, 1, false, 0).unwrap_err();
+    assert!(
+        matches!(err, AutodiffError::InvalidArgument(_)),
+        "LstmCell::new: 確保不能な初期化容量を InvalidArgument で拒否することを期待したが {err:?} だった"
+    );
+
+    let err = GruCell::new(huge_input, 1, false, 0).unwrap_err();
+    assert!(
+        matches!(err, AutodiffError::InvalidArgument(_)),
+        "GruCell::new: 確保不能な初期化容量を InvalidArgument で拒否することを期待したが {err:?} だった"
+    );
+
+    // bias=true 経路（bias_ih／bias_hh の確保）も同型ヘルパーを通るが、
+    // bias 側の長さは `gh`（ここでは `gates`）のみで小さいため、この
+    // ケースでは weight_ih／weight_hh 側の確保失敗が先に検出される。
+    let err = RnnCell::new(huge_input, 1, true, 0).unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }

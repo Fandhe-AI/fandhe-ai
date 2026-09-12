@@ -297,10 +297,19 @@ h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
   完了（`REL_TOL=1e-2`・`ABS_TOL=1e-3`。`tests/backward.rs` の既存
   許容誤差を再利用し緩和なし）。GRU の `q_t`（決定 1c）・LSTM の
   `cell` ノード参照（決定 1b 追記）はいずれもこの数値微分突合が
-  通ることで正しさが構造的に担保される（受入基準 (h)・(j) は本イシュー
-  では独立の破損注入テストとしては実装せず、数値微分突合による間接
-  検証に留めた。破損注入による構造テストの追加は将来の拡張候補として
-  記録するに留める）。
+  通ることで正しさが構造的に担保される。**受入基準 (h)・(j) は
+  codex-review 指摘（PRRT_kwDOTuUCJc6hxBOl）を受け実施済み**:
+  `crates/autodiff/src/grad.rs::tests::
+  vjp_gru_cell_backward_is_sensitive_to_stored_q_payload`（`Op::
+  GruCell.q` を破損させると r ゲート列ブロックへ伝播する `w_ih`
+  勾配が変化することを確認）・`vjp_lstm_hidden_reads_referenced_
+  cell_node_weight_data`（`Op::LstmHidden.cell` が指す `Op::
+  LstmCell` ノードの `w_ih`／`w_hh` データを差し替えると `dx`／
+  `dh_prev` が変化することを確認）として、`grad::vjp` を直接呼ぶ
+  crate 内部単体テスト（`tests/nn_rnn.rs` は crate 外の統合テスト
+  であり `Tape`／`Op` 等の内部型に到達できないため、既存の
+  `vjp_dispatch_*` テスト群と同じ手法で `grad.rs` 自身の
+  `#[cfg(test)]` モジュールに実装）で構造的に検証済み。
 - **BPTT（受入基準 (c)）**: T=1／T=3 の `forward_seq` 完走・
   `h_n` と最終 step 出力の bit-exact 一致・重み勾配が T 個の寄与和
   になっていること（手組み展開ループの数値微分との突合）を確認した。

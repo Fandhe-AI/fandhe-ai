@@ -75,6 +75,32 @@ pub(crate) fn uniform_init(len: usize, bound: f32, seed: u64) -> Vec<f32> {
     (0..len).map(|_| rng.next_f32() * bound).collect()
 }
 
+/// `uniform_init` のフォールブル版。`(0..len).collect()` は `Vec<f32>`
+/// の確保が総バイト数 `isize::MAX` を超えると capacity overflow で
+/// panic する。`nn::rnn::build_gate_params` は `checked_mul` で
+/// `usize` の乗算オーバーフローのみを検証済みの `len`（例:
+/// `RnnCell::new(1usize << 61, 1, false, 0)` は `gh=1`・
+/// `w_ih_len=1usize<<61` のようにすべての `checked_mul` を通過しつつ
+/// `f32` 4 バイト換算で `isize::MAX` を超えうる）を渡しうるため、
+/// `collect()` の代わりに `try_reserve_exact` で確保可否を先に検証し、
+/// 確保不能時は panic させず `Err` を返す（本番経路 panic 禁止。
+/// `.claude/rules/coding-rust.md`。イシュー #1647 codex-review P1
+/// 指摘）。呼び出し元（`nn::rnn::build_gate_params`）が
+/// `AutodiffError::InvalidArgument` へ変換する。
+pub(crate) fn try_uniform_init(
+    len: usize,
+    bound: f32,
+    seed: u64,
+) -> Result<Vec<f32>, std::collections::TryReserveError> {
+    let mut rng = Xorshift64Star::new(seed);
+    let mut values = Vec::new();
+    values.try_reserve_exact(len)?;
+    for _ in 0..len {
+        values.push(rng.next_f32() * bound);
+    }
+    Ok(values)
+}
+
 /// `Linear::new` の呼び出しシード 1 個から weight・bias 用の独立した
 /// シードを導出する（SplitMix64 の finalizer 相当のビットミキシング。
 /// 参照実装: <https://prng.di.unimi.it/splitmix64.c> のアルゴリズムを

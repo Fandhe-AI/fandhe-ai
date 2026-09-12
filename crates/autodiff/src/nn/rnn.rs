@@ -30,7 +30,7 @@ use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor, matmul_out_shape, re
 use crate::error::AutodiffError;
 use crate::nn::init::{
     BIAS_HH_SEED_SALT, BIAS_SEED_SALT, WEIGHT_HH_SEED_SALT, WEIGHT_SEED_SALT, derive_seed,
-    uniform_init,
+    try_uniform_init,
 };
 use crate::nn::module::Module;
 use crate::tape::Tape;
@@ -93,22 +93,52 @@ fn build_gate_params(
     })?;
 
     let w_ih_seed = derive_seed(seed, WEIGHT_SEED_SALT);
-    let weight_ih = Tensor::new(uniform_init(w_ih_len, bound, w_ih_seed), &[input_size, gh])?;
+    let weight_ih = Tensor::new(
+        checked_uniform_init(w_ih_len, bound, w_ih_seed, "weight_ih")?,
+        &[input_size, gh],
+    )?;
     let w_hh_seed = derive_seed(seed, WEIGHT_HH_SEED_SALT);
-    let weight_hh = Tensor::new(uniform_init(w_hh_len, bound, w_hh_seed), &[hidden_size, gh])?;
+    let weight_hh = Tensor::new(
+        checked_uniform_init(w_hh_len, bound, w_hh_seed, "weight_hh")?,
+        &[hidden_size, gh],
+    )?;
 
     let (bias_ih, bias_hh) = if bias {
         let b_ih_seed = derive_seed(seed, BIAS_SEED_SALT);
         let b_hh_seed = derive_seed(seed, BIAS_HH_SEED_SALT);
         (
-            Some(Tensor::new(uniform_init(gh, bound, b_ih_seed), &[gh])?),
-            Some(Tensor::new(uniform_init(gh, bound, b_hh_seed), &[gh])?),
+            Some(Tensor::new(
+                checked_uniform_init(gh, bound, b_ih_seed, "bias_ih")?,
+                &[gh],
+            )?),
+            Some(Tensor::new(
+                checked_uniform_init(gh, bound, b_hh_seed, "bias_hh")?,
+                &[gh],
+            )?),
         )
     } else {
         (None, None)
     };
 
     Ok((weight_ih, weight_hh, bias_ih, bias_hh))
+}
+
+/// `try_uniform_init` の `Err`（`TryReserveError`）を
+/// [`AutodiffError::InvalidArgument`] へ変換する `build_gate_params`
+/// 共通ヘルパー。`field_name` はエラーメッセージにどのパラメータ
+/// （`weight_ih`／`weight_hh`／`bias_ih`／`bias_hh`）の確保に失敗したか
+/// を残すためのラベル（イシュー #1647 codex-review P1 指摘）。
+fn checked_uniform_init(
+    len: usize,
+    bound: f32,
+    seed: u64,
+    field_name: &str,
+) -> Result<Vec<f32>, AutodiffError> {
+    try_uniform_init(len, bound, seed).map_err(|err| {
+        AutodiffError::InvalidArgument(format!(
+            "{field_name}: len={len} 要素分のバッファを確保できません: {err}"
+        ))
+    })
 }
 
 /// `gates * hidden`（ゲート幅）を `checked_mul` で検証する共通実装。
