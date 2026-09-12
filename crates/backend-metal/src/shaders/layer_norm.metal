@@ -7,11 +7,18 @@
 // 二パス `Sigma(x-mean)^2/N` で計算する。`docs/norm-ops-design.md`）。
 //
 // FMA 契約: 正規化統計の縮約（平均・分散）自体は下記の縮約精度契約が
-// 優先し `fma()` を使わない単純な加減算のみだが、**affine（`x̂·w+b`）は
-// CUDA カーネル（`fmaf`）・CPU/ホスト参照実装（`f32::mul_add`）と揃える
-// ため `fma()` で明示的に融合する**（`.claude/rules/coding-rust.md` の
-// FMA 契約統一。codex-review 指摘）。コンパイルオプションは
-// `pipeline::compile_options()` を適用する。
+// 優先し `fma()` を使わない単純な加減算のみだが、affine（`x̂·w+b`）は
+// 最終段を `fma()` で明示的に融合する（`.claude/rules/coding-rust.md`
+// の FMA 契約統一。codex-review 指摘）。**PR #1671 スレッド 2 件目の
+// 是正（パス 4 コメント参照）により、`weight` を正規化係数の除算より
+// 先に乗じる分解（`fma(dev*wv/scale, norm, bv)`）へ変更済み**——`eps`
+// が `x` を極端に上回る行で中間値が subnormal に潰れ Apple GPU が
+// flush-to-zero する問題への対応。CUDA カーネル（`fmaf`）・CPU/ホスト
+// 参照実装（`xhat.mul_add(w,b)`）とは融合の分解点が異なるため bit
+// 一致は保証しない（LayerNorm の CPU-Metal 数値一致は REQ-2 統一複合
+// 判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉であり bit-exact
+// 契約ではない）。コンパイルオプションは `pipeline::compile_options()`
+// を適用する。
 //
 // 縮約精度契約（正規化統計の f64 アキュムレータ統一。イシュー #1102・
 // #1596）: `.claude/rules/coding-rust.md`「正規化統計の二乗和」節が定める
@@ -431,11 +438,12 @@ kernel void layer_norm_f32(
         // （冒頭コメント「最終正規化係数は 1 つの逆数として合成しない」）。
         float norm = 1.0f / sqrt((ssq + ssq_c) * inv_n);
 
-        // パス 4: 書き出し（device メモリを再読）。affine は CUDA
-        // カーネルの既定 FMA contraction・CPU/ホスト参照実装の
-        // `f32::mul_add` と揃えるため `fma()` で明示的に融合する
-        // （`.claude/rules/coding-rust.md` の FMA 契約統一。codex-review
-        // 指摘）。
+        // パス 4: 書き出し（device メモリを再読）。affine の最終段
+        // （正規化係数の乗算 + bias 加算）を `fma()` で明示的に融合
+        // する（`.claude/rules/coding-rust.md` の FMA 契約統一。
+        // codex-review 指摘）。`weight` の乗算をこの融合より前段
+        // （`scale` 除算前）に置く理由は下記ループ内コメント参照
+        // （冒頭コメント「FMA 契約」参照）。
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
             float ratio = x[row_base + idx] / row_scale;
             float dev = (ratio - mean_hi) - mean_lo;
@@ -468,25 +476,37 @@ kernel void layer_norm_f32(
             // （これは数学的に正しい中間値であり計算順序の誤りではない
             // ——真の `xhat` 自体が subnormal 級）。GPU が subnormal
             // 中間値を flush-to-zero する場合、`weight` が桁を戻す
-            // 大きな値（例 `1e38`）であっても `xhat*weight` を
-            // 「先に `xhat` を subnormal として確定させてから乗じる」
-            // 順序では `xhat` 自体が 0 へ潰れて情報が失われる。`weight`
-            // を `dev` に先に乗じてから `scale` で割ることで
-            // （`pre = dev*wv` は通常範囲に収まる——本例では
-            // `pre≈1.37e29`）、最終除算 `pre/scale` も通常範囲
-            // （本例で `≈0.0707`）に収まり subnormal を経由しない。
-            // `has_weight==0`（`wv=1.0`）の場合は `pre=dev` で従来と
-            // 同値になり、通常ケースの挙動は不変。
+            // 大きな値（例 `1e38`）であっても「先に `xhat`（重み適用前）
+            // を subnormal として確定させてから乗じる」順序では `xhat`
+            // 自体が 0 へ潰れて情報が失われる。`weight` を `dev` に
+            // 先に乗じてから `scale` で割ることで（`pre = dev*wv` は
+            // 通常範囲に収まる——本例では `pre≈1.37e29`）、最終除算
+            // `pre/scale` も通常範囲（本例で `≈0.0707`）に収まり
+            // subnormal を経由しない。`has_weight==0`（`wv=1.0`）の
+            // 場合は `pre=dev` で従来と同値になり、通常ケースの挙動は
+            // 不変。
+            //
+            // `weight` を先に乗じる都合上、正規化係数 `norm` の乗算と
+            // `bias` の加算を `fma(pre/scale, norm, bv)` として融合する
+            // （`xhat·w+b` を単一の `fma` にしていた是正前とは異なる
+            // 分解だが、最終段を 1 回の融合演算にする「affine は
+            // `fma()` で明示的に融合する」契約〈冒頭コメント「FMA
+            // 契約」・`.claude/rules/coding-rust.md`〉は維持する。
+            // CPU/CUDA 参照実装〈`xhat.mul_add(w,b)`〉とは分解が異なる
+            // ため bit 一致は保証しないが、LayerNorm の CPU-Metal 数値
+            // 一致は REQ-2 統一複合判定〈相対誤差 1e-3 未満 または
+            // 絶対誤差 1e-5 未満〉であり bit-exact 契約ではない）。
+            //
             // FTZ 対策のゼロ返却（既存分岐）は `scale` 自体が `eps`
             // 由来の極小疑似要素の flush-to-zero で厳密 0 になりうる
             // ケース向けであり、`pre/scale` の**除算を実行せず**
-            // 直接 `0.0f` を返す短絡評価を維持する（`pre = 0.0f*wv =
-            // 0.0f` としてから割ると `scale` が flush 済みで `0.0f`
-            // の場合 `0.0f/0.0f = NaN` になってしまい、この分岐が
-            // 意味を失う）。
+            // `bv` を直接返す短絡評価を維持する（除算してから `fma` に
+            // 渡すと `scale` が flush 済みで `0.0f` の場合
+            // `fma(0.0f/0.0f, norm, bv) = fma(NaN, norm, bv) = NaN` に
+            // なってしまい、この分岐が意味を失う）。
             float pre = dev * wv;
-            float xhat = (eps > 0.0f && dev == 0.0f) ? 0.0f : (pre / scale) * norm;
-            out[row_base + idx] = xhat + bv;
+            out[row_base + idx] =
+                (eps > 0.0f && dev == 0.0f) ? bv : fma(pre / scale, norm, bv);
         }
     }
 }

@@ -170,3 +170,40 @@ fn kernel_declares_four_buffer_arguments_in_expected_order() {
         "buffer(3) が out であることが見つかりません"
     );
 }
+
+/// `row_scale` の eps 対応拡張（PR #1671 スレッド 2 件目の是正）が
+/// `ldexp` による最小限の右シフト（`LN_EPS_ELEM_SAFE_SHIFT`）を経由する
+/// ことをロックする（`sqrt(eps)` の 2 の冪をそのまま採用する「正準」な
+/// 実装への逆戻りを検出する。正準な実装は `x` の比が subnormal に潰れ
+/// Apple GPU 実機で flush-to-zero される回帰を再導入する。冒頭コメント
+/// 「`row_scale` の eps 対応拡張・weight 先乗算」参照）。
+#[test]
+fn eps_row_scale_extension_uses_minimal_ldexp_shift() {
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("constant int LN_EPS_ELEM_SAFE_SHIFT ="),
+        "LN_EPS_ELEM_SAFE_SHIFT 定数が見つかりません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains(
+            "ldexp(ln_pow2_scale_from_maxabs(eps_pseudo_elem_scale), -LN_EPS_ELEM_SAFE_SHIFT)"
+        ),
+        "eps 側スケールが ldexp による最小限の右シフトを経由していません"
+    );
+}
+
+/// パス 4 が `weight` を正規化係数の除算より先に乗じる分解
+/// （`pre = dev * wv` を `scale` 除算の前段に置く）を維持することを
+/// ロックする（PR #1671 スレッド 2 件目の是正。`eps` が `x` を極端に
+/// 上回る行で中間値が subnormal に潰れる回帰を検出する。冒頭コメント
+/// 「`row_scale` の eps 対応拡張・weight 先乗算」参照）。
+#[test]
+fn pass4_applies_weight_before_scale_division() {
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("float pre = dev * wv;"),
+        "weight を scale 除算より先に乗じる分解（pre = dev * wv）が見つかりません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("fma(pre / scale, norm, bv)"),
+        "affine 最終段の fma 融合（fma(pre / scale, norm, bv)）が見つかりません"
+    );
+}

@@ -52,6 +52,15 @@ OWASP A03・`.claude/rules/security.md`）。
   経由しない）
 - `rows == 0`: 空出力を返す
 - rank 0: `row_norm_layout` が `ShapeError::RankMismatch` で拒否する
+- **`hidden` 上限（Metal LayerNorm 限定。PR #1671 codex-review 指摘）**:
+  `hidden > 2^24`（`(float)hidden` が丸め無しで表現できる上限）は
+  `layer_norm.rs::validate_hidden_exact_f32` が起動前に fail-closed で
+  拒否する。Metal カーネルは平均計算で `hidden` を `(float)hidden` へ
+  直接変換し厳密除算するため、この上限を超えると最近接偶数丸めにより
+  真の除数とのずれが `mean_lo` へ残存し出力へ伝播しうる（対応する実装
+  〈整数の正確な値を保持した除算〉は行わず、この軸長を明示的に拒否
+  する方針。`shaders/layer_norm.metal` 冒頭コメント参照）。CPU／CUDA
+  は `f64`／`double` アキュムレータのためこの制約を持たない。
 
 ## 4. VJP（数式）
 
