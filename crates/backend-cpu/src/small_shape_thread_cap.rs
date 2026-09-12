@@ -269,7 +269,7 @@ pub struct SmallShapeCapReport {
     /// `small_shape_cap_report` を呼ぶだけで 6 スレッドの専用プールが
     /// 生成・永続化されてしまうと、環境情報の採取自体が計測対象の
     /// スレッド構成を変えてしまう。専用プールは実際に cap が発火した
-    /// 呼び出し（[`run_capped`]）でのみ生成する設計を維持するため、
+    /// 呼び出し（`run_capped`）でのみ生成する設計を維持するため、
     /// ここでは `POOL.get()` で既存状態のみを読む）。
     pub pool_active: bool,
 }
@@ -277,7 +277,7 @@ pub struct SmallShapeCapReport {
 /// [`SmallShapeCapReport`] を構築する（本番 GEMM 経路からは呼ばれず、
 /// 診断・ベンチ・env_info 記録専用）。
 ///
-/// `pool_active` は [`POOL`] を初期化しない（`pool()` を呼ばない）。
+/// `pool_active` は `POOL` を初期化しない（`pool()` を呼ばない）。
 /// 呼び出しても専用プールを新規生成しないため、機構無効時・
 /// 非対象プラットフォームで診断のためだけにスレッドが立つことはない。
 pub fn small_shape_cap_report() -> SmallShapeCapReport {
