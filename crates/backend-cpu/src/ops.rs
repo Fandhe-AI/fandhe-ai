@@ -1216,27 +1216,46 @@ impl BackendOps for CpuBackendOps {
     /// `BackendError::InvalidArgument` へ変換する（`linalg_error_to_
     /// backend_error` 参照）。
     fn linalg_inv(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        require_square_2d(a.shape(), "linalg_inv")?;
         linalg::inv(a).map_err(linalg_error_to_backend_error)
     }
 
     fn linalg_solve(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        let n = require_square_2d(a.shape(), "linalg_solve")?;
+        let b_shape = b.shape();
+        if b_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: b_shape.len(),
+            }));
+        }
+        if b_shape[0] != n {
+            return Err(BackendError::InvalidArgument(format!(
+                "linalg_solve: a の行数 {n} と b の行数 {} が一致しない",
+                b_shape[0]
+            )));
+        }
         linalg::solve(a, b).map_err(linalg_error_to_backend_error)
     }
 
     fn linalg_det(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        Ok(linalg::det(a))
+        require_square_2d(a.shape(), "linalg_det")?;
+        linalg::det(a).map_err(linalg_error_to_backend_error)
     }
 
     fn linalg_cholesky(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        require_square_2d(a.shape(), "linalg_cholesky")?;
         linalg::cholesky(a).map_err(linalg_error_to_backend_error)
     }
 
     fn linalg_qr(&self, a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
-        let (q, r) = linalg::qr(a);
+        require_rank2(a.shape())?;
+        let (q, r) = linalg::qr(a).map_err(linalg_error_to_backend_error)?;
         Ok(QrFactors { q, r })
     }
 
     fn linalg_svd(&self, a: &Tensor<f32>) -> Result<SvdFactors, BackendError> {
+        require_rank2(a.shape())?;
         let (u, s, vh) = linalg::svd(a).map_err(linalg_error_to_backend_error)?;
         Ok(SvdFactors { u, s, vh })
     }
@@ -1246,8 +1265,44 @@ impl BackendOps for CpuBackendOps {
         a: &Tensor<f32>,
         ord: MatrixNormOrd,
     ) -> Result<Tensor<f32>, BackendError> {
+        require_rank2(a.shape())?;
         linalg::matrix_norm(a, ord).map_err(linalg_error_to_backend_error)
     }
+}
+
+/// `linalg_*` の公開エントリ（`BackendOps` トレイトメソッド。呼び出し元は
+/// `Var::inv` 等の shape 検査済み経路とは限らない——`CpuBackendOps` は
+/// `BackendOps` トレイトオブジェクトとして直接呼び出しうる公開 API の
+/// ため、rank-1 テンソル等の不正形状が `linalg.rs` 内部の `debug_assert`
+/// （呼び出し元検査済みの内部契約）まで素通りして panic するのを防ぐ
+/// 境界検査を担う（codex-review 指摘。`.claude/rules/security.md`
+/// 「本番経路の panic 禁止」）。`fandhe_ai_autodiff::var::require_square`
+/// と同じ判定規律: rank ≠ 2 は `ShapeMismatch(RankMismatch)`（構造的
+/// 形状エラー）、非正方は `InvalidArgument`（`ShapeMismatch` の
+/// `lhs`/`rhs` は「2 つの shape の不一致」を表す variant のため、単一
+/// shape の正方性検査には意味的に合わない）で通知する。成功時は
+/// 行数（= 列数）を返す。`op_name` はエラーメッセージに埋め込む呼び出し
+/// 元の演算名。
+fn require_square_2d(shape: &[usize], op_name: &str) -> Result<usize, BackendError> {
+    let n = require_rank2(shape)?;
+    if shape[0] != shape[1] {
+        return Err(BackendError::InvalidArgument(format!(
+            "{op_name}: 正方行列（[n,n]）が必要（形状 {shape:?}）"
+        )));
+    }
+    Ok(n)
+}
+
+/// rank-2（`[m,n]`）検査のみ（正方性は要求しない。`qr`／`svd`／
+/// `matrix_norm` 用）。上記 [`require_square_2d`] のドキュメント参照。
+fn require_rank2(shape: &[usize]) -> Result<usize, BackendError> {
+    if shape.len() != 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    Ok(shape[0])
 }
 
 impl CpuBackendOps {
@@ -1696,5 +1751,100 @@ mod gemm_checksum_tests {
             .map(|&x| x as f64)
             .sum();
         assert_eq!(result.checksum, expected);
+    }
+}
+
+/// `BackendOps::linalg_*`（`CpuBackendOps` の公開エントリ）の shape
+/// 検査（codex-review 指摘。P1 #1 の修正回帰）。`Var::inv` 等の
+/// shape 検査済み経路を経由しない直接呼び出しでも、rank-1 テンソル等の
+/// 不正形状が `linalg.rs` 内部の `debug_assert`（呼び出し元検査済みの
+/// 内部契約）まで素通りして panic しないことを確認する。
+#[cfg(test)]
+mod linalg_shape_validation_tests {
+    use super::*;
+
+    #[test]
+    fn linalg_inv_rank1_is_shape_mismatch_not_panic() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        let result = ops.linalg_inv(&a);
+        assert!(matches!(result, Err(BackendError::ShapeMismatch(_))));
+    }
+
+    #[test]
+    fn linalg_inv_non_square_is_invalid_argument_not_panic() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let result = ops.linalg_inv(&a);
+        assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn linalg_solve_row_count_mismatch_is_invalid_argument_not_panic() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+        // b の行数（3）が a の行数（2）と一致しない。
+        let b = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3, 1]).unwrap();
+        let result = ops.linalg_solve(&a, &b);
+        assert!(matches!(result, Err(BackendError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn linalg_solve_b_rank_mismatch_is_shape_mismatch_not_panic() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+        let b = Tensor::new(vec![1.0f32, 2.0], &[2]).unwrap();
+        let result = ops.linalg_solve(&a, &b);
+        assert!(matches!(result, Err(BackendError::ShapeMismatch(_))));
+    }
+
+    #[test]
+    fn linalg_det_rank1_is_shape_mismatch_not_panic() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        assert!(matches!(
+            ops.linalg_det(&a),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn linalg_cholesky_rank1_is_shape_mismatch_not_panic() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        assert!(matches!(
+            ops.linalg_cholesky(&a),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn linalg_qr_rank1_is_shape_mismatch_not_panic() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        assert!(matches!(
+            ops.linalg_qr(&a),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn linalg_svd_rank1_is_shape_mismatch_not_panic() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        assert!(matches!(
+            ops.linalg_svd(&a),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn linalg_matrix_norm_rank1_is_shape_mismatch_not_panic() {
+        let ops = CpuBackendOps::new();
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        assert!(matches!(
+            ops.linalg_matrix_norm(&a, MatrixNormOrd::Fro),
+            Err(BackendError::ShapeMismatch(_))
+        ));
     }
 }

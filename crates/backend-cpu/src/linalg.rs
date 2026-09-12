@@ -70,15 +70,16 @@ fn dense_vec(tensor: &Tensor<f32>) -> Vec<f32> {
 
 /// `Vec<f32>` + shape からテンソルを構築する（`autodiff::eval::
 /// build_tensor` と同じ役割）。呼び出し元は shape とデータ長を事前に
-/// 一致させる契約（本モジュール内部のみで完結する構築のため、この
-/// 契約が破れることはない）。
-fn build_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
-    Tensor::new(data, shape).unwrap_or_else(|_| {
-        debug_assert!(
-            false,
-            "linalg::build_tensor: shape とデータ長の不一致（内部契約違反）"
-        );
-        Tensor::new(Vec::new(), &[0]).expect("empty tensor is always valid")
+/// 一致させる契約（本モジュール内部のみで完結する構築のため、通常この
+/// 契約が破れることはない）が、万一の内部契約違反を `.expect()`／
+/// 黙殺（別 shape の空テンソルへの差し替え）で握りつぶさず
+/// `LinalgError` として呼び出し元へ伝播する（codex-review 指摘。
+/// `.claude/rules/security.md`「本番経路の unwrap／expect 禁止」）。
+fn build_tensor(data: Vec<f32>, shape: &[usize]) -> Result<Tensor<f32>, LinalgError> {
+    Tensor::new(data, shape).map_err(|e| {
+        invalid(format!(
+            "linalg::build_tensor: shape とデータ長の不一致（内部契約違反）: {e}"
+        ))
     })
 }
 /// `f64` 版の稠密行列（行優先）。分解アルゴリズムは全てこの内部表現を
@@ -120,7 +121,7 @@ impl Mat {
         Mat { data, rows, cols }
     }
 
-    fn to_tensor(&self) -> Tensor<f32> {
+    fn to_tensor(&self) -> Result<Tensor<f32>, LinalgError> {
         let data: Vec<f32> = self.data.iter().map(|&v| v as f32).collect();
         build_tensor(data, &[self.rows, self.cols])
     }
@@ -298,13 +299,13 @@ pub(crate) fn inv(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
     let mat = Mat::from_tensor(a);
     let n = mat.rows;
     if n == 0 {
-        return Ok(build_tensor(Vec::new(), &[0, 0]));
+        return build_tensor(Vec::new(), &[0, 0]);
     }
     let lu =
         lu_decompose(&mat).ok_or_else(|| invalid("linalg::inv: 行列が特異（ピボットが厳密 0）"))?;
     let identity = Mat::identity(n);
     let x = lu_solve_mat(&lu, &identity);
-    Ok(x.to_tensor())
+    x.to_tensor()
 }
 
 /// `A X = B` を解く。
@@ -313,18 +314,18 @@ pub(crate) fn solve(a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, Lin
     let b_mat = Mat::from_tensor(b);
     let n = a_mat.rows;
     if n == 0 {
-        return Ok(build_tensor(Vec::new(), &[0, b_mat.cols]));
+        return build_tensor(Vec::new(), &[0, b_mat.cols]);
     }
     let lu = lu_decompose(&a_mat)
         .ok_or_else(|| invalid("linalg::solve: 係数行列が特異（ピボットが厳密 0）"))?;
     let x = lu_solve_mat(&lu, &b_mat);
-    Ok(x.to_tensor())
+    x.to_tensor()
 }
 
 /// `det(A)`（LU 対角積 × 置換符号）。空行列は空積 `1.0`。特異行列は
 /// `0.0`（エラーにしない。設計文書 §3.5・PyTorch `torch.linalg.det`
 /// 挙動）。
-pub(crate) fn det(a: &Tensor<f32>) -> Tensor<f32> {
+pub(crate) fn det(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
     let mat = Mat::from_tensor(a);
     let n = mat.rows;
     if n == 0 {
@@ -371,7 +372,7 @@ pub(crate) fn cholesky(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
             }
         }
     }
-    Ok(l.to_tensor())
+    l.to_tensor()
 }
 
 // =====================================================================
@@ -380,15 +381,15 @@ pub(crate) fn cholesky(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
 
 /// reduced QR（`A: [m,n]` → `Q: [m,k]`・`R: [k,n]`、`k = min(m,n)`）。
 /// `R` の対角は非負に正規化する（設計文書 §3.5「符号・ゲージ規約」）。
-pub(crate) fn qr(a: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
+pub(crate) fn qr(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), LinalgError> {
     let mat = Mat::from_tensor(a);
     let (m, n) = (mat.rows, mat.cols);
     let k = m.min(n);
     if m == 0 || n == 0 {
-        return (
-            build_tensor(Vec::new(), &[m, k]),
-            build_tensor(Vec::new(), &[k, n]),
-        );
+        return Ok((
+            build_tensor(Vec::new(), &[m, k])?,
+            build_tensor(Vec::new(), &[k, n])?,
+        ));
     }
 
     // Householder 反射を `r`（作業用に `A` を上書き）へ逐次適用しつつ、
@@ -484,7 +485,7 @@ pub(crate) fn qr(a: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
         }
     }
 
-    (q_reduced.to_tensor(), r_reduced.to_tensor())
+    Ok((q_reduced.to_tensor()?, r_reduced.to_tensor()?))
 }
 
 // =====================================================================
@@ -563,9 +564,9 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
     let k = m.min(n);
     if k == 0 {
         return Ok((
-            build_tensor(Vec::new(), &[m, k]),
-            build_tensor(Vec::new(), &[k]),
-            build_tensor(Vec::new(), &[k, n]),
+            build_tensor(Vec::new(), &[m, k])?,
+            build_tensor(Vec::new(), &[k])?,
+            build_tensor(Vec::new(), &[k, n])?,
         ));
     }
 
@@ -598,9 +599,16 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
     }
 
     // 降順ソート（同値は安定ソート＝元の添字順を保つ。`sort_by` は
-    // 安定ソート）。
+    // 安定ソート）。`sigmas` は列ノルム（`v*v` の和の `sqrt`）のため
+    // 理論上 NaN にはならないが（非有限入力は `jacobi_svd_tall` の
+    // 収束判定〈`gamma.abs() <= EPS * ...`〉が常に偽になり 60 スイープ
+    // 非収束の `Err` で弾かれる）、`partial_cmp(...).unwrap()`
+    // （unwrap 禁止。`.claude/rules/security.md`「本番経路の panic
+    // 禁止」）を避け `total_cmp`（IEEE 754-2008 totalOrder。NaN も
+    // 全順序に含め panic しない）で防御的に比較する（codex-review
+    // 指摘）。
     let mut order: Vec<usize> = (0..k).collect();
-    order.sort_by(|&i, &j| sigmas[j].partial_cmp(&sigmas[i]).unwrap());
+    order.sort_by(|&i, &j| sigmas[j].total_cmp(&sigmas[i]));
 
     let mut s_sorted = vec![0.0; k];
     let mut v_sorted = Mat::zeros(v_full.rows, k);
@@ -613,8 +621,18 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
 
     // 各 `V` 列の符号を「最大絶対値成分（同値は最小添字）が正」に
     // 正規化し、`U` の対応列も同じ符号反転で追従させる（`U Σ Vᵀ = A`
-    // を保つ）。`σ ≈ 0` の列（rank 落ち）は `U` 列が数値誤差でほぼ
-    // ゼロベクトルになりうるため、正規化して直交補完する。
+    // を保つ）。`σ ≈ 0` の列（rank 落ち）は「`jacobi_svd_tall` の作業
+    // 行列（回転ではなく明示的に回転される側）に対応する列」が数値
+    // 誤差でほぼゼロベクトルになりうる——`m >= n` 分岐では `U`
+    // （`jacobi_svd_tall` の `u`）、`m < n` 分岐では `V`
+    // （`jacobi_svd_tall` の `u` を入れ替えたもの。上の分岐コメント
+    // 参照）がこれに当たり、対する `V`／`U`（`jacobi_svd_tall` の
+    // 回転行列 `v`）は σ に関わらず厳密直交のまま。下記 2 つの
+    // Gram–Schmidt 補完ループ（`U` 側・`V` 側）で両方を独立に
+    // 直交補完し、どちらの分岐でも公開 `SvdFactors` の列直交契約
+    // （設計文書 §3.5）を保証する（`A=[[0,0]]` のような横長・全ゼロ
+    // 特異値ケースで `Vh` の行が非単位ノルムのまま残っていた
+    // codex-review 指摘の修正）。
     for (j, &sigma) in s_sorted.iter().enumerate() {
         let col = v_sorted.col(j);
         let mut max_abs = 0.0;
@@ -689,10 +707,47 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
         }
     }
 
+    // `σ ≈ 0` の列に対応する `V` 列も、同じ手続きで直交補完する（上の
+    // コメント参照。`m < n` 分岐では `V` がゼロになりうる側のため
+    // ここが本質的な修正、`m >= n` 分岐では `V` は既に厳密直交のため
+    // no-op に近い——ただし σ=0 の項は `U Σ Vᵀ = A` の再構成に寄与
+    // しないため、この補完で上書きしても結果は変わらない）。
+    for (j, &sigma) in s_sorted.iter().enumerate() {
+        if sigma > 1e-12 {
+            continue;
+        }
+        let v_rows = v_sorted.rows;
+        let mut candidate = vec![0.0; v_rows];
+        let mut chosen = false;
+        for basis_idx in 0..v_rows {
+            let mut w = vec![0.0; v_rows];
+            w[basis_idx] = 1.0;
+            for prev in 0..j {
+                let prev_col = v_sorted.col(prev);
+                let dot: f64 = w.iter().zip(prev_col.iter()).map(|(a, b)| a * b).sum();
+                for (idx, wv) in w.iter_mut().enumerate() {
+                    *wv -= dot * prev_col[idx];
+                }
+            }
+            let norm: f64 = w.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if norm > 1e-9 {
+                for wv in w.iter_mut() {
+                    *wv /= norm;
+                }
+                candidate = w;
+                chosen = true;
+                break;
+            }
+        }
+        if chosen {
+            v_sorted.set_col(j, &candidate);
+        }
+    }
+
     Ok((
-        u_sorted.to_tensor(),
-        build_tensor(s_sorted.iter().map(|&v| v as f32).collect(), &[k]),
-        v_sorted.transpose().to_tensor(),
+        u_sorted.to_tensor()?,
+        build_tensor(s_sorted.iter().map(|&v| v as f32).collect(), &[k])?,
+        v_sorted.transpose().to_tensor()?,
     ))
 }
 
@@ -702,7 +757,7 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
 
 /// `MatrixNormOrd::Fro`／`One`／`Inf` の 3 種（`Nuc`／`Spectral` は
 /// `svd` を要するため `var.rs` 側で分岐する）。
-pub(crate) fn matrix_norm_fro(a: &Tensor<f32>) -> Tensor<f32> {
+pub(crate) fn matrix_norm_fro(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
     let sum_sq: f64 = dense_vec(a)
         .iter()
         .map(|&v| f64::from(v) * f64::from(v))
@@ -710,7 +765,7 @@ pub(crate) fn matrix_norm_fro(a: &Tensor<f32>) -> Tensor<f32> {
     build_tensor(vec![sum_sq.sqrt() as f32], &[])
 }
 
-pub(crate) fn matrix_norm_one(a: &Tensor<f32>) -> Tensor<f32> {
+pub(crate) fn matrix_norm_one(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
     let mat = Mat::from_tensor(a);
     let mut max_sum = 0.0f64;
     for c in 0..mat.cols {
@@ -722,7 +777,7 @@ pub(crate) fn matrix_norm_one(a: &Tensor<f32>) -> Tensor<f32> {
     build_tensor(vec![max_sum as f32], &[])
 }
 
-pub(crate) fn matrix_norm_inf(a: &Tensor<f32>) -> Tensor<f32> {
+pub(crate) fn matrix_norm_inf(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
     let mat = Mat::from_tensor(a);
     let mut max_sum = 0.0f64;
     for r in 0..mat.rows {
@@ -744,18 +799,18 @@ pub(crate) fn matrix_norm_inf(a: &Tensor<f32>) -> Tensor<f32> {
 /// `grad.rs` 分岐と同方針。未知 variant は fail-closed に拒否する）。
 pub(crate) fn matrix_norm(a: &Tensor<f32>, ord: MatrixNormOrd) -> Result<Tensor<f32>, LinalgError> {
     match ord {
-        MatrixNormOrd::Fro => Ok(matrix_norm_fro(a)),
-        MatrixNormOrd::One => Ok(matrix_norm_one(a)),
-        MatrixNormOrd::Inf => Ok(matrix_norm_inf(a)),
+        MatrixNormOrd::Fro => matrix_norm_fro(a),
+        MatrixNormOrd::One => matrix_norm_one(a),
+        MatrixNormOrd::Inf => matrix_norm_inf(a),
         MatrixNormOrd::Nuc => {
             let (_, s, _) = svd(a)?;
             let sum: f64 = dense_vec(&s).iter().map(|&v| f64::from(v)).sum();
-            Ok(build_tensor(vec![sum as f32], &[]))
+            build_tensor(vec![sum as f32], &[])
         }
         MatrixNormOrd::Spectral => {
             let (_, s, _) = svd(a)?;
             let max = dense_vec(&s).first().copied().unwrap_or(0.0);
-            Ok(build_tensor(vec![max], &[]))
+            build_tensor(vec![max], &[])
         }
         _ => Err(invalid(format!(
             "linalg::matrix_norm: 未知の MatrixNormOrd variant（{ord:?}）"
@@ -784,74 +839,87 @@ mod tests {
 
     #[test]
     fn inv_2x2_matches_known_solution() {
-        let a = build_tensor(vec![4.0, 7.0, 2.0, 6.0], &[2, 2]);
+        let a = build_tensor(vec![4.0, 7.0, 2.0, 6.0], &[2, 2]).unwrap();
         let inv_a = inv(&a).unwrap();
-        let expected = build_tensor(vec![0.6, -0.7, -0.2, 0.4], &[2, 2]);
+        let expected = build_tensor(vec![0.6, -0.7, -0.2, 0.4], &[2, 2]).unwrap();
         approx_eq(&inv_a, &expected, 1e-5);
     }
 
     #[test]
     fn inv_singular_is_invalid_argument() {
-        let a = build_tensor(vec![1.0, 2.0, 2.0, 4.0], &[2, 2]);
+        let a = build_tensor(vec![1.0, 2.0, 2.0, 4.0], &[2, 2]).unwrap();
         assert!(matches!(inv(&a), Err(LinalgError::InvalidArgument(_))));
     }
 
     #[test]
     fn inv_empty_matrix_returns_empty() {
-        let a = build_tensor(Vec::new(), &[0, 0]);
+        let a = build_tensor(Vec::new(), &[0, 0]).unwrap();
         let result = inv(&a).unwrap();
         assert_eq!(result.shape(), &[0, 0]);
     }
 
     #[test]
     fn solve_matches_known_solution() {
-        let a = build_tensor(vec![3.0, 1.0, 1.0, 2.0], &[2, 2]);
-        let b = build_tensor(vec![9.0, 8.0], &[2, 1]);
+        let a = build_tensor(vec![3.0, 1.0, 1.0, 2.0], &[2, 2]).unwrap();
+        let b = build_tensor(vec![9.0, 8.0], &[2, 1]).unwrap();
         let x = solve(&a, &b).unwrap();
-        approx_eq(&x, &build_tensor(vec![2.0, 3.0], &[2, 1]), 1e-4);
+        approx_eq(&x, &build_tensor(vec![2.0, 3.0], &[2, 1]).unwrap(), 1e-4);
     }
 
     #[test]
     fn det_known_value_and_singular_is_zero() {
-        let a = build_tensor(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
-        approx_eq(&det(&a), &build_tensor(vec![-2.0], &[]), 1e-5);
-        let s = build_tensor(vec![1.0, 2.0, 2.0, 4.0], &[2, 2]);
-        approx_eq(&det(&s), &build_tensor(vec![0.0], &[]), 1e-6);
+        let a = build_tensor(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        approx_eq(
+            &det(&a).unwrap(),
+            &build_tensor(vec![-2.0], &[]).unwrap(),
+            1e-5,
+        );
+        let s = build_tensor(vec![1.0, 2.0, 2.0, 4.0], &[2, 2]).unwrap();
+        approx_eq(
+            &det(&s).unwrap(),
+            &build_tensor(vec![0.0], &[]).unwrap(),
+            1e-6,
+        );
     }
 
     #[test]
     fn det_empty_matrix_is_one() {
-        let a = build_tensor(Vec::new(), &[0, 0]);
-        approx_eq(&det(&a), &build_tensor(vec![1.0], &[]), 1e-6);
+        let a = build_tensor(Vec::new(), &[0, 0]).unwrap();
+        approx_eq(
+            &det(&a).unwrap(),
+            &build_tensor(vec![1.0], &[]).unwrap(),
+            1e-6,
+        );
     }
 
     #[test]
     fn cholesky_reconstructs_spd_matrix() {
         // A = [[4,2],[2,3]] は対称正定値。
-        let a = build_tensor(vec![4.0, 2.0, 2.0, 3.0], &[2, 2]);
+        let a = build_tensor(vec![4.0, 2.0, 2.0, 3.0], &[2, 2]).unwrap();
         let l = cholesky(&a).unwrap();
         approx_eq(
             &l,
-            &build_tensor(vec![2.0, 0.0, 1.0, 2f32.sqrt()], &[2, 2]),
+            &build_tensor(vec![2.0, 0.0, 1.0, 2f32.sqrt()], &[2, 2]).unwrap(),
             1e-4,
         );
     }
 
     #[test]
     fn cholesky_non_positive_definite_is_invalid() {
-        let a = build_tensor(vec![1.0, 2.0, 2.0, 1.0], &[2, 2]);
+        let a = build_tensor(vec![1.0, 2.0, 2.0, 1.0], &[2, 2]).unwrap();
         assert!(matches!(cholesky(&a), Err(LinalgError::InvalidArgument(_))));
     }
 
     #[test]
     fn qr_reconstructs_input_and_is_orthonormal() {
-        let a = build_tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]);
-        let (q, r) = qr(&a);
+        let a = build_tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]).unwrap();
+        let (q, r) = qr(&a).unwrap();
         assert_eq!(q.shape(), &[3, 2]);
         assert_eq!(r.shape(), &[2, 2]);
         let reconstructed = Mat::from_tensor(&q)
             .matmul(&Mat::from_tensor(&r))
-            .to_tensor();
+            .to_tensor()
+            .unwrap();
         approx_eq(&reconstructed, &a, 1e-4);
     }
 
@@ -862,17 +930,21 @@ mod tests {
         for i in 0..3 {
             a_data[i * 3 + i] = s[i];
         }
-        let a = build_tensor(a_data, &[3, 3]);
+        let a = build_tensor(a_data, &[3, 3]).unwrap();
         let (u, s_out, vh) = svd(&a).unwrap();
         assert_eq!(u.shape(), &[3, 3]);
         assert_eq!(s_out.shape(), &[3]);
         assert_eq!(vh.shape(), &[3, 3]);
-        approx_eq(&s_out, &build_tensor(vec![3.0, 2.0, 1.0], &[3]), 1e-4);
+        approx_eq(
+            &s_out,
+            &build_tensor(vec![3.0, 2.0, 1.0], &[3]).unwrap(),
+            1e-4,
+        );
     }
 
     #[test]
     fn svd_wide_matrix_reconstructs_input() {
-        let a = build_tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let a = build_tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
         let (u, s, vh) = svd(&a).unwrap();
         let s_data = dense_vec(&s);
         let u_data = dense_vec(&u);
@@ -882,20 +954,33 @@ mod tests {
                 u_scaled[r * 2 + c] = u_data[r * 2 + c] * s_data[c];
             }
         }
-        let reconstructed = Mat::from_tensor(&build_tensor(u_scaled, &[2, 2]))
+        let reconstructed = Mat::from_tensor(&build_tensor(u_scaled, &[2, 2]).unwrap())
             .matmul(&Mat::from_tensor(&vh))
-            .to_tensor();
+            .to_tensor()
+            .unwrap();
         approx_eq(&reconstructed, &a, 1e-3);
     }
 
     #[test]
     fn matrix_norm_known_values() {
-        let a = build_tensor(vec![3.0, 4.0], &[1, 2]);
-        approx_eq(&matrix_norm_fro(&a), &build_tensor(vec![5.0], &[]), 1e-5);
+        let a = build_tensor(vec![3.0, 4.0], &[1, 2]).unwrap();
+        approx_eq(
+            &matrix_norm_fro(&a).unwrap(),
+            &build_tensor(vec![5.0], &[]).unwrap(),
+            1e-5,
+        );
 
-        let b = build_tensor(vec![2.0, -1.0, -6.0, 3.0], &[2, 2]);
-        approx_eq(&matrix_norm_one(&b), &build_tensor(vec![8.0], &[]), 1e-5);
-        approx_eq(&matrix_norm_inf(&b), &build_tensor(vec![9.0], &[]), 1e-5);
+        let b = build_tensor(vec![2.0, -1.0, -6.0, 3.0], &[2, 2]).unwrap();
+        approx_eq(
+            &matrix_norm_one(&b).unwrap(),
+            &build_tensor(vec![8.0], &[]).unwrap(),
+            1e-5,
+        );
+        approx_eq(
+            &matrix_norm_inf(&b).unwrap(),
+            &build_tensor(vec![9.0], &[]).unwrap(),
+            1e-5,
+        );
     }
 
     /// 同一入力を 2 回計算しても bit 決定的（run-to-run 一致）である
@@ -903,11 +988,42 @@ mod tests {
     /// bit 決定的」・PoC-v2-2 のビット一致決定性方針）。
     #[test]
     fn svd_is_bit_deterministic_across_repeated_calls() {
-        let a = build_tensor(vec![3.0, 0.3, 0.1, 0.2, 2.0, 0.2, 0.1, 0.15, 1.0], &[3, 3]);
+        let a = build_tensor(vec![3.0, 0.3, 0.1, 0.2, 2.0, 0.2, 0.1, 0.15, 1.0], &[3, 3]).unwrap();
         let (u1, s1, vh1) = svd(&a).unwrap();
         let (u2, s2, vh2) = svd(&a).unwrap();
         assert_eq!(dense_vec(&u1), dense_vec(&u2));
         assert_eq!(dense_vec(&s1), dense_vec(&s2));
         assert_eq!(dense_vec(&vh1), dense_vec(&vh2));
+    }
+
+    /// 横長・全ゼロ特異値ケース（`A=[[0,0]]`）で `Vh` の行が単位ノルムに
+    /// 直交補完されることを確認する（codex-review 指摘。P1 #5 の修正
+    /// 回帰）。修正前は `V=[[0,0]]` のまま残り `Vh・Vhᵀ ≈ I` を満たさな
+    /// かった。
+    #[test]
+    fn svd_wide_all_zero_gauge_v_is_orthonormal() {
+        let a = build_tensor(vec![0.0, 0.0], &[1, 2]).unwrap();
+        let (u, s, vh) = svd(&a).unwrap();
+        assert_eq!(u.shape(), &[1, 1]);
+        assert_eq!(s.shape(), &[1]);
+        assert_eq!(vh.shape(), &[1, 2]);
+        approx_eq(&s, &build_tensor(vec![0.0], &[1]).unwrap(), 1e-6);
+        // `U` は常に単位ノルム（`m>=n` 側なので元々成立）。
+        let u_data = dense_vec(&u);
+        let u_norm: f32 = u_data.iter().map(|v| v * v).sum::<f32>().sqrt();
+        approx_eq(
+            &build_tensor(vec![u_norm], &[]).unwrap(),
+            &build_tensor(vec![1.0], &[]).unwrap(),
+            1e-5,
+        );
+        // 修正対象: `Vh` の行が単位ノルムであること（修正前は
+        // `[0.0, 0.0]` のまま残り 0 になっていた）。
+        let vh_data = dense_vec(&vh);
+        let vh_norm: f32 = vh_data.iter().map(|v| v * v).sum::<f32>().sqrt();
+        approx_eq(
+            &build_tensor(vec![vh_norm], &[]).unwrap(),
+            &build_tensor(vec![1.0], &[]).unwrap(),
+            1e-5,
+        );
     }
 }

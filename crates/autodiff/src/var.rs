@@ -909,8 +909,8 @@ impl<'t> Var<'t> {
     /// イシュー #1621。
     ///
     /// **多出力の扱い**（`docs/autodiff-linalg-design.md` §3.3）: テープは
-    /// 1 ノード 1 出力のため `Q`／`R` を別ノード（[`Op::QrQ`]／
-    /// [`Op::QrR`]）として積む。各ノードは兄弟ノードの forward 値を
+    /// 1 ノード 1 出力のため `Q`／`R` を別ノード（`Op::QrQ`／
+    /// `Op::QrR`）として積む。各ノードは兄弟ノードの forward 値を
     /// payload として保持し、VJP（`grad.rs`）はコタンジェントに線形な
     /// ことを利用して各出力ノードの部分寄与を返す
     /// （`Tape::backward` が入力ノードへ合算する）。
@@ -958,8 +958,8 @@ impl<'t> Var<'t> {
     }
 
     /// reduced SVD（`A: [m,n]` → [`SvdVars`]。`k = min(m,n)`）。
-    /// イシュー #1621。`qr` と同じ多出力設計（[`Op::SvdU`]／
-    /// [`Op::SvdS`]／[`Op::SvdVh`]）。反復が収束しない場合は
+    /// イシュー #1621。`qr` と同じ多出力設計（`Op::SvdU`／
+    /// `Op::SvdS`／`Op::SvdVh`）。反復が収束しない場合は
     /// `AutodiffError::InvalidArgument`。
     pub fn svd(&self) -> Result<SvdVars<'t>, AutodiffError> {
         let shape = self.shape();

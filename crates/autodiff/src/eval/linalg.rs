@@ -581,9 +581,16 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
     }
 
     // 降順ソート（同値は安定ソート＝元の添字順を保つ。`sort_by` は
-    // 安定ソート）。
+    // 安定ソート）。`sigmas` は列ノルム（`v*v` の和の `sqrt`）のため
+    // 理論上 NaN にはならないが（非有限入力は `jacobi_svd_tall` の
+    // 収束判定〈`gamma.abs() <= EPS * ...`〉が常に偽になり 60 スイープ
+    // 非収束の `Err` で弾かれる）、`partial_cmp(...).unwrap()`
+    // （unwrap 禁止。`.claude/rules/security.md`「本番経路の panic
+    // 禁止」）を避け `total_cmp`（IEEE 754-2008 totalOrder。NaN も
+    // 全順序に含め panic しない）で防御的に比較する（codex-review
+    // 指摘。`crates/backend-cpu/src/linalg.rs::svd` と同型の対応）。
     let mut order: Vec<usize> = (0..k).collect();
-    order.sort_by(|&i, &j| sigmas[j].partial_cmp(&sigmas[i]).unwrap());
+    order.sort_by(|&i, &j| sigmas[j].total_cmp(&sigmas[i]));
 
     let mut s_sorted = vec![0.0; k];
     let mut v_sorted = Mat::zeros(v_full.rows, k);
@@ -596,8 +603,19 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
 
     // 各 `V` 列の符号を「最大絶対値成分（同値は最小添字）が正」に
     // 正規化し、`U` の対応列も同じ符号反転で追従させる（`U Σ Vᵀ = A`
-    // を保つ）。`σ ≈ 0` の列（rank 落ち）は `U` 列が数値誤差でほぼ
-    // ゼロベクトルになりうるため、正規化して直交補完する。
+    // を保つ）。`σ ≈ 0` の列（rank 落ち）は「`jacobi_svd_tall` の作業
+    // 行列（回転ではなく明示的に回転される側）に対応する列」が数値
+    // 誤差でほぼゼロベクトルになりうる——`m >= n` 分岐では `U`
+    // （`jacobi_svd_tall` の `u`）、`m < n` 分岐では `V`
+    // （`jacobi_svd_tall` の `u` を入れ替えたもの。上の分岐コメント
+    // 参照）がこれに当たり、対する `V`／`U`（`jacobi_svd_tall` の
+    // 回転行列 `v`）は σ に関わらず厳密直交のまま。下記 2 つの
+    // Gram–Schmidt 補完ループ（`U` 側・`V` 側）で両方を独立に
+    // 直交補完し、どちらの分岐でも公開 `SvdFactors` の列直交契約
+    // （設計文書 §3.5）を保証する（`A=[[0,0]]` のような横長・全ゼロ
+    // 特異値ケースで `Vh` の行が非単位ノルムのまま残っていた
+    // codex-review 指摘の修正。`crates/backend-cpu/src/linalg.rs::svd`
+    // と同型の対応）。
     for (j, &sigma) in s_sorted.iter().enumerate() {
         let col = v_sorted.col(j);
         let mut max_abs = 0.0;
@@ -669,6 +687,43 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
         }
         if chosen {
             u_sorted.set_col(j, &candidate);
+        }
+    }
+
+    // `σ ≈ 0` の列に対応する `V` 列も、同じ手続きで直交補完する（上の
+    // コメント参照。`m < n` 分岐では `V` がゼロになりうる側のため
+    // ここが本質的な修正、`m >= n` 分岐では `V` は既に厳密直交のため
+    // no-op に近い——ただし σ=0 の項は `U Σ Vᵀ = A` の再構成に寄与
+    // しないため、この補完で上書きしても結果は変わらない）。
+    for (j, &sigma) in s_sorted.iter().enumerate() {
+        if sigma > 1e-12 {
+            continue;
+        }
+        let v_rows = v_sorted.rows;
+        let mut candidate = vec![0.0; v_rows];
+        let mut chosen = false;
+        for basis_idx in 0..v_rows {
+            let mut w = vec![0.0; v_rows];
+            w[basis_idx] = 1.0;
+            for prev in 0..j {
+                let prev_col = v_sorted.col(prev);
+                let dot: f64 = w.iter().zip(prev_col.iter()).map(|(a, b)| a * b).sum();
+                for (idx, wv) in w.iter_mut().enumerate() {
+                    *wv -= dot * prev_col[idx];
+                }
+            }
+            let norm: f64 = w.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if norm > 1e-9 {
+                for wv in w.iter_mut() {
+                    *wv /= norm;
+                }
+                candidate = w;
+                chosen = true;
+                break;
+            }
+        }
+        if chosen {
+            v_sorted.set_col(j, &candidate);
         }
     }
 
@@ -1042,6 +1097,18 @@ pub(crate) fn matrix_norm_vjp(
     g_scalar: f32,
 ) -> Result<Tensor<f32>, AutodiffError> {
     let mat = Mat::from_tensor(a);
+    if mat.rows == 0 || mat.cols == 0 {
+        // forward（`matrix_norm`）は空行列を受理し `0`（One/Inf/Spectral）
+        // または `0`（Fro・Nuc も同様）を返す（`docs/autodiff-linalg-
+        // design.md` §3.5「空行列」）。backward はこれに整合させ、
+        // 要素を持たない入力形状の勾配（総和は自明に空）をそのまま
+        // 返す——`One`／`Inf` の `best_col`／`best_row` 初期値 `0` や
+        // `Spectral` の `svd` が返す `k=0` 特異ベクトルへの
+        // `mat.get(r, 0)`／`get(0, c)` が、空バッファ（`data.len() ==
+        // 0`）を踏み抜いて panic するのを避ける（codex-review 指摘。
+        // `.claude/rules/security.md`「本番経路の panic 禁止」）。
+        return Ok(Mat::zeros(mat.rows, mat.cols).to_tensor());
+    }
     match ord {
         MatrixNormOrd::Fro => {
             let norm = f64::from(dense_vec(out_value).first().copied().unwrap_or(0.0));

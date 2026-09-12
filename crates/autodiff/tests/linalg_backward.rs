@@ -287,3 +287,37 @@ fn empty_matrix_contracts() {
     let det_a = a.det().unwrap();
     assert!((scalar(&det_a.to_tensor()) - 1.0).abs() < 1e-6);
 }
+
+/// 空行列（`[2,0]`／`[0,2]`）の `matrix_norm` backward が
+/// `One`／`Inf`／`Spectral`／`Nuc` いずれでも panic しないことを確認
+/// する（codex-review 指摘。P1 #4 の修正回帰。`eval::linalg::
+/// matrix_norm_vjp` の `best_col`／`best_row` 初期値 `0` や `svd` の
+/// `k=0` 特異ベクトルへの添字アクセスが空バッファを踏み抜いて panic
+/// していた）。forward は `0` を返す契約（設計文書 §3.5）。
+#[test]
+fn empty_matrix_norm_backward_does_not_panic() {
+    for shape in [[2usize, 0usize], [0, 2]] {
+        for ord in [
+            MatrixNormOrd::Fro,
+            MatrixNormOrd::One,
+            MatrixNormOrd::Inf,
+            MatrixNormOrd::Nuc,
+            MatrixNormOrd::Spectral,
+        ] {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let a = tape.var(&t(Vec::new(), &shape));
+            let norm = a.matrix_norm(ord).unwrap();
+            assert!(
+                (scalar(&norm.to_tensor())).abs() < 1e-6,
+                "shape={shape:?} ord={ord:?}: forward は 0 のはず"
+            );
+            let grads = tape.backward(&norm).unwrap_or_else(|e| {
+                panic!("shape={shape:?} ord={ord:?}: backward が panic せず Err を返した: {e:?}")
+            });
+            let grad = grads.get(&a).unwrap();
+            if let Some(g) = grad {
+                assert_eq!(g.shape(), &shape[..]);
+            }
+        }
+    }
+}
