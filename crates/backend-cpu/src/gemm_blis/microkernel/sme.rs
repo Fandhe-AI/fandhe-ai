@@ -2,10 +2,11 @@
 //! （MR=16×NR=16、`fmopa` 非拡張 FP32 外積・ZA0 単一タイル。イシュー #1587）。
 //!
 //! **モジュールは `cfg(target_arch = "aarch64")` のみでコンパイルする**
-//! （[`super::avx2`] と同じ理由: モジュール単位で追加条件を課すと、
+//! （`super::avx2`〈x86_64 限定のためコードスパン表記〉と同じ理由: モジュール単位で追加条件を課すと、
 //! テスト限定の実行時検出ガード付き直接検証が行えなくなるため）。実際に
-//! SME 命令を発行する [`compute`] は「呼び出し元が実行 CPU の SME 対応
-//! （[`super::SmeKernel::try_new`] 経由の実行時検出）を保証する」契約の
+//! SME 命令を発行する `compute`（非公開関数のためコードスパン表記）は
+//! 「呼び出し元が実行 CPU の SME 対応（`super::SmeKernel::try_new`。
+//! `pub(crate)` のためコードスパン表記）経由の実行時検出）を保証する」契約の
 //! `unsafe fn` とし、コンパイル時 `target_feature` によるゲートは行わない
 //! （SME はコンパイラ intrinsics ではなく生アセンブリで発行するため、
 //! `#[target_feature(enable = "sme")]` は不要かつ rustc stable では
@@ -15,7 +16,8 @@
 //!
 //! SVL=512 bit（f32 ベクトルレジスタ 1 本 = 16 要素）環境では ZA0〜ZA3 の
 //! 4 タイルを使う MR=32×NR=32 案（2×2 外積ブロック）も可能だが、本実装は
-//! [`super::super::MAX_TILE`]（256 要素。全 ISA 共通の端タイル用スタック
+//! `super::super::MAX_TILE`（非公開定数のためコードスパン表記。256 要素。
+//! 全 ISA 共通の端タイル用スタック
 //! バッファ長）を変更せず既存 ISA（GB10 の NEON 経路等）へ副作用を
 //! 与えないことを優先し、ZA0 単一タイル（MR*NR=16*16=256=MAX_TILE で
 //! ちょうど収まる）の MR=16×NR=16 を採用する（計画リスク §10「フォール
@@ -26,7 +28,8 @@
 //!
 //! `fmopa za0.s, p0/m, p0/m, zn.s, zm.s` は Arm ARM（DDI0616）により
 //! 「非拡張 FP32 外積: 各要素 `za[i][j] = fma(zn[i], zm[j], za[i][j])`
-//! （単一丸めの fused multiply-add）」と定義される。[`compute`] は
+//! （単一丸めの fused multiply-add）」と定義される。`compute`（非公開
+//! 関数のためコードスパン表記）は
 //! ループ前に **C の現在値を ZA0 へプリロード**し、`p` を昇順に走査して
 //! `kc_len` 回 `fmopa` を発行した後に ZA0 を C へストアし直す（zero-init
 //! して最後に加算する方式は丸めが 1 回増え不一致になるため採らない）。
@@ -50,7 +53,8 @@
 //!
 //! 本モジュールの関数はいずれも「実行 CPU が SME・非拡張 FP32 外積
 //! （`SME_F32F32`）に対応し、かつ SVL=64 バイト（512 bit）である」ことを
-//! 呼び出し元契約とする（[`super::SmeKernel::try_new`]。
+//! 呼び出し元契約とする（`super::SmeKernel::try_new`（`pub(crate)`
+//! のためコードスパン表記）。
 //! `crate::sme_detect::sme_report()` が fail-closed に判定する）。
 
 use std::arch::asm;
@@ -191,17 +195,19 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
     }
 }
 
-/// [`super::TileBoundsError`] 検査つきの `ldc` 契約版（[`compute`] へ
-/// 委譲）。[`super::neon::kernel_with_ldc`] と同型の入口だが、SME は
-/// 実行時検出済みトークン（[`super::SmeKernel`]）経由でのみ安全に呼べる
-/// ため `unsafe fn` とする（[`super::avx2::kernel_unchecked_with_ldc`]
-/// と同型）。
+/// [`super::TileBoundsError`] 検査つきの `ldc` 契約版（`compute`〈非公開
+/// 関数のためコードスパン表記〉へ委譲）。[`super::neon::kernel_with_ldc`]
+/// と同型の入口だが、SME は実行時検出済みトークン（[`super::SmeKernel`]）
+/// 経由でのみ安全に呼べるため `unsafe fn` とする（`super::avx2::kernel_unchecked_with_ldc`。
+/// x86_64 限定のためコードスパン表記）と同型）。
 ///
 /// # Safety
 ///
 /// 呼び出し元は実行 CPU が SME・非拡張 FP32 外積（`SME_F32F32`）に対応し
-/// SVL=[`SVL_BYTES`] であることを保証しなければならない
-/// （[`super::SmeKernel::try_new`] 経由の実行時検出済み呼び出しがこれを
+/// SVL=`crate::sme_detect::REQUIRED_SVL_BYTES`（非公開定数のため
+/// コードスパン表記。64 バイト）であることを保証しなければならない
+/// （`super::SmeKernel::try_new`〈`pub(crate)` のためコードスパン表記〉
+/// 経由の実行時検出済み呼び出しがこれを
 /// 満たす）。
 pub unsafe fn kernel_unchecked_with_ldc(
     ap: &[f32],
@@ -219,7 +225,8 @@ pub unsafe fn kernel_unchecked_with_ldc(
 }
 
 /// 従来シグネチャ後方互換ラッパー（`ldc = NR` 固定・密パッキング契約。
-/// [`super::avx2::kernel_unchecked`] と同型）。
+/// `super::avx2::kernel_unchecked`（x86_64 限定のためコードスパン表記）
+/// と同型）。
 ///
 /// # Safety
 ///
@@ -246,10 +253,13 @@ mod tests {
     use crate::gemm_blis::microkernel::{Microkernel, SmeKernel};
 
     /// 有限値・非正規化数入力を含むスカラー参照（p 昇順 `f32::mul_add`
-    /// 連鎖）との bit 完全一致を検証する。`SmeKernel::try_new()` が
-    /// `None`（実行環境が SME 非対応）の場合は実行をスキップする
-    /// （`#[ignore]` ではなく実行時スキップ。CI・非対応実機で常に green
-    /// のまま、対応実機でのみ実質的な検証を行う）。
+    /// 連鎖）との bit 完全一致を検証する下請け関数。以下の各テストは
+    /// SME 実機（例: Apple M4）依存のため `#[ignore]` で分離する
+    /// （`.claude/rules/coding-rust.md`「実機依存テストは `#[ignore]`
+    /// で分離」。codex-review P1 指摘 `PRRT_kwDOTuUCJc6h0P7c` 対応）。
+    /// `#[ignore]` 実行時点でも `SmeKernel::try_new()` が `None`（実行
+    /// 環境が SME 非対応）を返す場合は実行時スキップする（非対応実機
+    /// での `--ignored` 実行を green に保つための二重の安全策）。
     fn scalar_reference(
         ap: &[f32],
         bp: &[f32],
@@ -283,6 +293,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "実機（SME 対応 aarch64。例: Apple M4）限定の検証専用（イシュー #1587。\
+                cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_kernel --nocapture）"]
     fn sme_kernel_matches_scalar_reference_finite_values() {
         let Some(kernel) = SmeKernel::try_new() else {
             eprintln!("SME 非対応環境のためスキップ");
@@ -307,6 +319,8 @@ mod tests {
     /// 端タイル相当（`ldc > NR`）での bit 完全一致（[`kernel_unchecked_with_ldc`]
     /// 経由）。
     #[test]
+    #[ignore = "実機（SME 対応 aarch64。例: Apple M4）限定の検証専用（イシュー #1587。\
+                cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_kernel --nocapture）"]
     fn sme_kernel_with_ldc_matches_scalar_reference_strided() {
         let Some(kernel) = SmeKernel::try_new() else {
             eprintln!("SME 非対応環境のためスキップ");
@@ -335,6 +349,8 @@ mod tests {
 
     /// run-to-run bit 同一性（同一入力を 2 回実行して比較。R3(a)）。
     #[test]
+    #[ignore = "実機（SME 対応 aarch64。例: Apple M4）限定の検証専用（イシュー #1587。\
+                cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_kernel --nocapture）"]
     fn sme_kernel_is_deterministic_across_runs() {
         let Some(kernel) = SmeKernel::try_new() else {
             eprintln!("SME 非対応環境のためスキップ");
@@ -356,6 +372,8 @@ mod tests {
     /// 非正規化数（約 1e-40）入力での scalar 参照との bit 完全一致
     /// （R3(b)。ストリーミングモードでの FPCR/FZ 差の検出を狙う）。
     #[test]
+    #[ignore = "実機（SME 対応 aarch64。例: Apple M4）限定の検証専用（イシュー #1587。\
+                cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_kernel --nocapture）"]
     fn sme_kernel_matches_scalar_reference_denormal_values() {
         let Some(kernel) = SmeKernel::try_new() else {
             eprintln!("SME 非対応環境のためスキップ");
@@ -392,6 +410,8 @@ mod tests {
     /// 側が FTZ でこの結果を 0 へ潰さず scalar 参照と bit 完全一致する
     /// ことを確認する（R3(b) が本来意図した FZ 判別）。
     #[test]
+    #[ignore = "実機（SME 対応 aarch64。例: Apple M4）限定の検証専用（イシュー #1587。\
+                cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_kernel --nocapture）"]
     fn sme_kernel_matches_scalar_reference_denormal_result_from_normal_operands() {
         let Some(kernel) = SmeKernel::try_new() else {
             eprintln!("SME 非対応環境のためスキップ");
@@ -435,6 +455,8 @@ mod tests {
     /// NaN 混入入力で panic しないことのみを確認する（bit 一致は
     /// 主張しない。モジュール冒頭ドキュメント参照）。
     #[test]
+    #[ignore = "実機（SME 対応 aarch64。例: Apple M4）限定の検証専用（イシュー #1587。\
+                cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_kernel --nocapture）"]
     fn sme_kernel_nan_input_does_not_panic() {
         let Some(kernel) = SmeKernel::try_new() else {
             eprintln!("SME 非対応環境のためスキップ");

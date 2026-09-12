@@ -1,13 +1,20 @@
 //! Arm SME（Scalable Matrix Extension）の実行時検出（イシュー #1587）。
 //!
-//! [`gemm_blis::microkernel::SmeKernel::try_new`] から呼ばれ、「実行 CPU が
-//! SME の非拡張 FP32 外積命令（`fmopa`）を安全に実行できるか」を判定する。
-//! `std::arch::is_aarch64_feature_detected!("sme")` は本リポジトリの
-//! rustc（stable 1.96 系）では `stdarch_aarch64_feature_detection` が
-//! unstable のため使用できない（E0658。計画セッションで実測確認済み）ため、
-//! OS 側の機能フラグを直接読む fail-closed 方式を採る（[`Avx2Kernel::try_new`]
-//! 等と同じ「検出済みの場合のみ構築可能なトークン」パターンをここでも踏襲
-//! する。`gemm_blis::microkernel` モジュール冒頭ドキュメント参照）。
+//! `crate::gemm_blis::microkernel::SmeKernel::try_new` から呼ばれ、「実行
+//! CPU が SME の非拡張 FP32 外積命令（`fmopa`）を安全に実行できるか」を
+//! 判定する。`std::arch::is_aarch64_feature_detected!("sme")` は本
+//! リポジトリの rustc（stable 1.96 系）では
+//! `stdarch_aarch64_feature_detection` が unstable のため使用できない
+//! （E0658。計画セッションで実測確認済み）ため、OS 側の機能フラグを
+//! 直接読む fail-closed 方式を採る（`crate::gemm_blis::microkernel::Avx2Kernel::try_new`
+//! 等と同じ「検出済みの場合のみ構築可能なトークン」パターンをここでも
+//! 踏襲する。`gemm_blis::microkernel` モジュール冒頭ドキュメント参照。
+//! 本モジュールは全 arch でコンパイルされる一方 `SmeKernel`（aarch64
+//! 限定）・`Avx2Kernel`（x86_64 限定）はどちらも一部 arch にしか存在
+//! しないため、intra-doc link（`[`...`]`）ではなくコードスパンで表記し
+//! `cargo doc --target x86_64-unknown-linux-gnu` 等クロス arch のビルドで
+//! `rustdoc::broken_intra_doc_links`（`-D warnings` により CI で
+//! `error` 化）を起こさないようにする）。
 //!
 //! ## fail-closed 方針（OWASP A03・`.claude/rules/security.md`）
 //!
@@ -24,6 +31,28 @@
 //!   カーネル `gemm_blis::microkernel::sme` が前提とするベクトル長）を
 //!   確認する。OS フラグ判定を経ずに `rdsvl` を実行すると非対応 CPU で
 //!   SIGILL になりうるため、必ず OS 判定の後にのみ実行する。
+//!
+//! ## SVL はスレッドごとに異なりうる（キャッシュ方針。codex-review P0
+//! ## 指摘 `PRRT_kwDOTuUCJc6h0P7Y` 対応）
+//!
+//! Arm SME の SVL（Streaming Vector Length）は Linux では `prctl`
+//! （`PR_SME_SET_VL`）でスレッドごとに変更可能な**プロセス全体で不変とは
+//! 限らない**値である。これに対し「OS が SME・`SME_F32F32` 命令に対応
+//! するか」という OS フラグ自体は CPU モデルに紐づく静的性質であり
+//! プロセス内で不変（[`crate::gemm_blis::microkernel::Isa::detect`] が
+//! `is_x86_feature_detected!` の結果を `OnceLock` でキャッシュするのと
+//! 同じ前提が成り立つ）。このため本モジュールは両者を分けてキャッシュする:
+//! OS フラグは [`OnceLock`] でプロセス全体キャッシュし、SVL は
+//! [`sme_report`] を呼ぶたびに `rdsvl` で毎回読み直す（1 命令のみで
+//! ファイル I/O・子プロセス起動を伴わないため、キャッシュしなくても
+//! 無視できるコスト。`gemm_blis::microkernel::SmeKernel::run`／
+//! `run_with_ldc` が **実際に `fmopa` を発行するスレッド上で** 本関数を
+//! 呼び直すことで、SVL が異なる Rayon worker スレッドでも正しい判定が
+//! 得られる契約とする）。以前は `SmeReport` 全体を `OnceLock` で
+//! プロセス全体キャッシュしていたが、これだと「検出を行ったスレッドの
+//! SVL」が別スレッドへ誤って使い回され、SVL が異なるスレッドで固定
+//! 16 要素境界を前提にした `fmopa`／`ldr`／`str` の幅が食い違い範囲外
+//! アクセスになりうる不健全な設計だった（本節で是正）。
 
 use std::sync::OnceLock;
 
@@ -37,8 +66,9 @@ pub struct SmeReport {
     /// `rdsvl` で読み取った SVL（バイト単位）。`os_flag` が `false` の
     /// 場合は `rdsvl` 自体を実行しないため常に `None`。
     pub svl_bytes: Option<usize>,
-    /// 本番マイクロカーネル（[`crate::gemm_blis::microkernel::SmeKernel`]）
-    /// を構築可能かどうか（`os_flag && svl_bytes == Some(64)`）。
+    /// 本番マイクロカーネル（`crate::gemm_blis::microkernel::SmeKernel`。
+    /// aarch64 限定のためコードスパン表記とする）を構築可能かどうか
+    /// （`os_flag && svl_bytes == Some(64)`）。
     pub kernel_enabled: bool,
 }
 
@@ -98,6 +128,15 @@ fn os_flag() -> bool {
     }
 }
 
+/// [`os_flag`] のプロセス全体キャッシュ（CPU モデルに紐づく静的性質の
+/// ため、[`crate::gemm_blis::microkernel::Isa::detect`] と同じ理由で
+/// プロセス全体キャッシュしてよい。モジュール冒頭「SVL はスレッドごとに
+/// 異なりうる」節参照。SVL 自体はここではキャッシュしない）。
+fn cached_os_flag() -> bool {
+    static OS_FLAG: OnceLock<bool> = OnceLock::new();
+    *OS_FLAG.get_or_init(os_flag)
+}
+
 /// SVL（Streaming Vector Length。バイト単位）を読み取る。呼び出し元
 /// （[`decide`]）が [`os_flag`] を確認した後にのみ呼ぶ契約（非対応 CPU
 /// では SIGILL になりうる）。
@@ -145,30 +184,37 @@ fn decide(os_flag: bool, svl_bytes: Option<usize>) -> SmeReport {
     }
 }
 
-/// プロセス内で 1 回だけ検出を行い、以降は結果をキャッシュする
-/// （[`Isa::detect`] と同じ `OnceLock` パターン）。
+/// OS フラグはプロセス全体キャッシュ（`cached_os_flag`。非公開関数の
+/// ためコードスパン表記とする）を使うが、
+/// **SVL は呼び出しのたびに `rdsvl` で読み直す**（モジュール冒頭「SVL
+/// はスレッドごとに異なりうる」節参照。`rdsvl` はメモリアクセスを
+/// 伴わない読み取り専用の 1 命令のためキャッシュ不要）。
+///
+/// `crate::gemm_blis::microkernel::SmeKernel::run`／`run_with_ldc`（いずれも
+/// aarch64 限定のためコードスパン表記とする）は **実際に `fmopa` を
+/// 発行する直前に呼び出しスレッド自身で本関数を呼び直す**契約とする。
+/// これにより `SmeKernel::try_new()` を呼んだスレッドと実際にカーネルを
+/// 実行するスレッド（Rayon worker 等）の SVL が異なっていても、実行
+/// スレッド自身の SVL で判定される。
 pub fn sme_report() -> SmeReport {
-    static REPORT: OnceLock<SmeReport> = OnceLock::new();
-    *REPORT.get_or_init(|| {
-        let flag = os_flag();
-        if !flag {
-            return decide(false, None);
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            // SAFETY: `flag` が `true`（OS が SME 対応を報告済み）の場合に
-            // 限り `rdsvl_bytes` を呼ぶ（本関数ドキュメント・
-            // `rdsvl_bytes` の Safety 契約参照）。
-            let svl = unsafe { rdsvl_bytes() };
-            decide(true, Some(svl))
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            // os_flag() は aarch64 以外では常に false を返すためここへは
-            // 到達しないが、cfg 分岐の網羅性のため明示する。
-            decide(false, None)
-        }
-    })
+    let flag = cached_os_flag();
+    if !flag {
+        return decide(false, None);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: `flag` が `true`（OS が SME 対応を報告済み）の場合に
+        // 限り `rdsvl_bytes` を呼ぶ（本関数ドキュメント・
+        // `rdsvl_bytes` の Safety 契約参照）。
+        let svl = unsafe { rdsvl_bytes() };
+        decide(true, Some(svl))
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // os_flag() は aarch64 以外では常に false を返すためここへは
+        // 到達しないが、cfg 分岐の網羅性のため明示する。
+        decide(false, None)
+    }
 }
 
 #[cfg(test)]

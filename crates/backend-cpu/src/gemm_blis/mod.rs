@@ -4958,6 +4958,10 @@ mod tests {
     /// bit 完全一致を検証する）。
     #[cfg(target_arch = "aarch64")]
     #[test]
+    #[ignore = "実機（SME 対応 aarch64。例: Apple M4）限定の検証専用（イシュー #1587。 \
+                cargo test -p fandhe-ai-backend-cpu --lib -- --ignored \
+                gemm_blis_parallel_variant_sme_matches_naive_bit_exact_when_available \
+                --nocapture）"]
     fn gemm_blis_parallel_variant_sme_matches_naive_bit_exact_when_available() {
         if microkernel::SmeKernel::try_new().is_none() {
             eprintln!("SME 非対応環境のためスキップ");
@@ -6516,6 +6520,7 @@ mod tests {
     /// ローテーション）で比較する。SME 非対応環境（GB10 等）では実行時
     /// スキップする。出力形式は既存 A/B と揃え（`variant=… size=…
     /// median_gflops=…`）、集計スクリプトを共用できるようにする。
+    #[cfg(target_arch = "aarch64")]
     #[test]
     #[ignore = "実機（M4 Max。SME 対応環境限定）での A/B 計測専用（#1587。 \
                 cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \

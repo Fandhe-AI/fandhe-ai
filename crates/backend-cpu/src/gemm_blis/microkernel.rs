@@ -713,16 +713,33 @@ impl Microkernel for NeonBLaneqVecKernel {
 }
 
 /// aarch64 SME（Scalable Matrix Extension）`fmopa` トークン（イシュー
-/// #1587）。`SmeKernel::try_new` 経由でのみ構築でき、これが「実行 CPU が
-/// SME・非拡張 FP32 外積（`SME_F32F32`）に対応し SVL=512 bit である」
-/// ことを保証する（[`Avx2Kernel`] と同型の「検出済みトークンのみ構築
-/// 可能」パターン。[`Microkernel::run`]／[`Microkernel::run_with_ldc`]
-/// 内部の `unsafe { sme::kernel_unchecked… }` 呼び出しの SAFETY 根拠）。
+/// #1587）。`SmeKernel::try_new` 経由でのみ構築でき、これが「**構築した
+/// スレッド**の実行 CPU が SME・非拡張 FP32 外積（`SME_F32F32`）に対応し
+/// SVL=512 bit である」ことを保証する（`Avx2Kernel`〈x86_64 限定のため
+/// コードスパン表記〉と同型の「検出済みトークンのみ構築可能」パターン）。
+///
+/// ## SVL はスレッドごとに異なりうる（codex-review P0 指摘
+/// `PRRT_kwDOTuUCJc6h0P7Y` 対応）
+///
+/// Arm SME の SVL は Linux では `prctl(PR_SME_SET_VL)` でスレッドごとに
+/// 変更可能であり、`Avx2Kernel`／`Avx512Kernel` の CPUID ベース検出
+/// （プロセス内で不変）とは異なりプロセス全体で不変とは限らない。本
+/// トークンは `Copy` のため構築したスレッドとは別のスレッド（Rayon
+/// worker 等）へそのまま渡されうるが、[`Microkernel::run`]／
+/// [`Microkernel::run_with_ldc`] は **実際に `fmopa` を発行するスレッド
+/// 自身で [`crate::sme_detect::sme_report`] を呼び直し、SVL がその
+/// スレッド上でも要求値と一致することを確認してから**
+/// `unsafe { sme::kernel_unchecked… }` を呼ぶ。一致しない場合は
+/// `panic!` で停止する（本カーネルは MR=16×NR=16 固定でパックされた
+/// 入力を前提とし、MR=8×NR=12 の [`NeonKernel`] 等へ実行時に安全に
+/// 差し替えることはできない〈パック済みバッファの形状が食い違う〉ため、
+/// 差し替えフォールバックではなく `unsafe` 呼び出し自体を行わない
+/// fail-closed を採る。`.claude/rules/security.md` の fail-closed 方針）。
 #[cfg(target_arch = "aarch64")]
 #[derive(Clone, Copy)]
 pub struct SmeKernel {
-    /// 外部からの直接構築を禁止する非公開フィールド（[`Avx2Kernel`] と
-    /// 同じ封止パターン）。
+    /// 外部からの直接構築を禁止する非公開フィールド（`Avx2Kernel`〈x86_64
+    /// 限定のためコードスパン表記〉と同じ封止パターン）。
     _private: (),
 }
 
@@ -731,13 +748,35 @@ impl SmeKernel {
     /// 実行 CPU が SME・非拡張 FP32 外積（`SME_F32F32`）に対応し
     /// SVL=512 bit（64 バイト）の場合のみ `Some` を返す
     /// （[`crate::sme_detect::sme_report`] が fail-closed に判定する。
-    /// モジュール doc「検出との関係」節参照）。
+    /// モジュール doc「検出との関係」節参照）。**この判定は呼び出した
+    /// スレッド上でのみ有効**（構造体 doc「SVL はスレッドごとに異なり
+    /// うる」節参照）であり、`run`／`run_with_ldc` は実行スレッド自身で
+    /// 再確認する。
     pub(crate) fn try_new() -> Option<Self> {
         if crate::sme_detect::sme_report().kernel_enabled {
             Some(Self { _private: () })
         } else {
             None
         }
+    }
+
+    /// `run`／`run_with_ldc` が `unsafe` 呼び出し直前に共通で行う
+    /// **実行スレッド自身の** SVL 再確認（構造体 doc 参照）。
+    /// `sme_detect::sme_report()` の SVL 読み取り部分はキャッシュせず
+    /// 毎回 `rdsvl`（メモリアクセスを伴わない読み取り専用の 1 命令）を
+    /// 発行するため、呼び出しのたびに再検証しても計測に有意な影響を
+    /// 与えない（`sme_detect` モジュール doc 参照）。
+    fn assert_current_thread_capable(&self) {
+        let report = crate::sme_detect::sme_report();
+        assert!(
+            report.kernel_enabled,
+            "SmeKernel::run(_with_ldc) が SME 非対応スレッド上で呼ばれた \
+             （os_flag={}・svl_bytes={:?}）。SVL は Linux では \
+             prctl(PR_SME_SET_VL) によりスレッドごとに異なりうるため、\
+             `SmeKernel` を構築したスレッドと実行スレッドが異なる場合に \
+             発生しうる（イシュー #1587・SmeKernel doc 参照）",
+            report.os_flag, report.svl_bytes,
+        );
     }
 }
 
@@ -750,9 +789,14 @@ impl Microkernel for SmeKernel {
         // [`ScalarKernel::run`] のドキュメント参照（`Result` を `panic!`
         // へ変換する経路を持たず [`sme::kernel_unchecked`] へ直接委譲する）。
         //
-        // SAFETY: Self は try_new() 経由でのみ構築可能であり、構築時点で
-        // `crate::sme_detect::sme_report().kernel_enabled` を確認済み
-        // （`sme::kernel_unchecked` の `# Safety` 契約を満たす）。
+        // SAFETY: `assert_current_thread_capable` が **この呼び出しを
+        // 実行しているスレッド自身**で SME 対応・SVL=64 バイトを確認済み
+        // （`SmeKernel` 構造体 doc「SVL はスレッドごとに異なりうる」節。
+        // `Self` が try_new() 経由でのみ構築可能という事実だけでは、
+        // 構築スレッドと実行スレッドが異なりうる Rayon worker 分配の
+        // もとでは不十分なため、ここで実行スレッド自身の確認を必須とする）。
+        // `sme::kernel_unchecked` の `# Safety` 契約を満たす。
+        self.assert_current_thread_capable();
         unsafe { sme::kernel_unchecked(ap, bp, c_tile, kc_len) }
     }
 
@@ -764,9 +808,10 @@ impl Microkernel for SmeKernel {
         ldc: usize,
         kc_len: usize,
     ) -> Result<(), TileBoundsError> {
-        // SAFETY: Self は try_new() 経由でのみ構築可能であり、構築時点で
-        // `crate::sme_detect::sme_report().kernel_enabled` を確認済み
-        // （`sme::kernel_unchecked_with_ldc` の `# Safety` 契約を満たす）。
+        // SAFETY: `run` と同じ理由で `assert_current_thread_capable` を
+        // 実行スレッド自身で必ず呼ぶ（`sme::kernel_unchecked_with_ldc` の
+        // `# Safety` 契約を満たす）。
+        self.assert_current_thread_capable();
         unsafe { sme::kernel_unchecked_with_ldc(ap, bp, c, ldc, kc_len) }
     }
 }
