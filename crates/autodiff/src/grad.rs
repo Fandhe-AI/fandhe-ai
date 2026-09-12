@@ -349,7 +349,7 @@ pub(crate) fn vjp(
             // `docs/backend-metal-command-batching-design.md` §10
             // 「案 A′」）。bias が `Some` でも `Op::ResidentLeaf` でない
             // ／`store_id` が weight と異なる場合は `bias_target` を
-            // `None` のままにし、bias は常にホスト `reduce_to_shape`
+            // `None` のままにし、bias は常にホスト `reduce_bias_grad`
             // フォールバックへ回す（`fill_resident_weight_grad` は
             // weight のみを試み `bias_filled: false` を返す）。
             // `nodes.get(...)` は `weight` と同じ理由（範囲外添字 panic
