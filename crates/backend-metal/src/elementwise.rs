@@ -214,26 +214,31 @@ impl MetalElementwise {
     /// （[`Self::dispatch_binary_resident`] 専用の内部選択。ホスト版
     /// `run_add_f32`／`run_mul_f32` と同一カーネルを再利用するため bit
     /// 同一契約が成立する）。
-    fn pipeline_for_binary(&self, op: BinaryElementwiseOp) -> &MtlPipeline {
+    ///
+    /// `BinaryElementwiseOp` は `#[non_exhaustive]`。未知 variant を
+    /// `_ =>` で `add_f32` へフォールバックすると、将来 variant が
+    /// 追加された際に「別の演算を代わりに計算して黙って成功する」
+    /// fail-open になる（advisor 指摘。イシュー #1584。CUDA 側
+    /// `elementwise.rs::function_for_binary` と同じ是正）。
+    fn pipeline_for_binary(&self, op: BinaryElementwiseOp) -> Result<&MtlPipeline, MetalError> {
         match op {
-            BinaryElementwiseOp::Add => &self.add_f32,
-            BinaryElementwiseOp::Mul => &self.mul_f32,
-            // `BinaryElementwiseOp` は `#[non_exhaustive]`。呼び出し元
-            // （`ops.rs::MetalBackendOps::binary_elementwise_device`）は
-            // 既知 variant のみを渡す契約とし、未知 variant は `ops.rs`
-            // 側で `Unsupported` として明示拒否する（CUDA 側
-            // `elementwise.rs::function_for_binary` と同じ設計）。
-            _ => &self.add_f32,
+            BinaryElementwiseOp::Add => Ok(&self.add_f32),
+            BinaryElementwiseOp::Mul => Ok(&self.mul_f32),
+            _ => Err(MetalError::UnsupportedElementwiseOp {
+                detail: format!("unknown BinaryElementwiseOp variant: {op:?}"),
+            }),
         }
     }
 
     /// [`Self::pipeline_for_binary`] の単項版。
-    fn pipeline_for_unary(&self, op: UnaryElementwiseOp) -> &MtlPipeline {
+    fn pipeline_for_unary(&self, op: UnaryElementwiseOp) -> Result<&MtlPipeline, MetalError> {
         match op {
-            UnaryElementwiseOp::Relu => &self.relu_f32,
-            UnaryElementwiseOp::Exp => &self.exp_f32,
-            UnaryElementwiseOp::Tanh => &self.tanh_f32,
-            _ => &self.relu_f32,
+            UnaryElementwiseOp::Relu => Ok(&self.relu_f32),
+            UnaryElementwiseOp::Exp => Ok(&self.exp_f32),
+            UnaryElementwiseOp::Tanh => Ok(&self.tanh_f32),
+            _ => Err(MetalError::UnsupportedElementwiseOp {
+                detail: format!("unknown UnaryElementwiseOp variant: {op:?}"),
+            }),
         }
     }
 
@@ -259,10 +264,25 @@ impl MetalElementwise {
         numel: usize,
     ) -> Result<(), MetalError> {
         validate_elementwise_len(numel)?;
+        // `a`／`b`／`out` の長さが `numel` と 1:1 対応することを明示検証
+        // する（advisor 指摘: CUDA 版 `launch_binary_resident` と同じ
+        // 是正。是正前は `numel` の u32 上限のみ検証しており、呼び出し元
+        // が渡す `MetalBuffer` の実長との整合は未検証だった）。
+        if a.len() != numel || b.len() != numel || out.len() != numel {
+            return Err(MetalError::InvalidElementwiseShape {
+                detail: format!(
+                    "elementwise buffer length must equal numel: a_len={}, b_len={}, \
+                     out_len={}, numel={numel}",
+                    a.len(),
+                    b.len(),
+                    out.len()
+                ),
+            });
+        }
         if numel == 0 {
             return Ok(());
         }
-        let pipeline = self.pipeline_for_binary(op);
+        let pipeline = self.pipeline_for_binary(op)?;
         ctx.dispatch_sync(|encoder| {
             encode_binary_dispatch(encoder, pipeline, a, b, out, numel as u32);
         })
@@ -278,10 +298,20 @@ impl MetalElementwise {
         numel: usize,
     ) -> Result<(), MetalError> {
         validate_elementwise_len(numel)?;
+        // `dispatch_binary_resident` と同じ是正（advisor 指摘）。
+        if a.len() != numel || out.len() != numel {
+            return Err(MetalError::InvalidElementwiseShape {
+                detail: format!(
+                    "elementwise buffer length must equal numel: a_len={}, out_len={}, numel={numel}",
+                    a.len(),
+                    out.len()
+                ),
+            });
+        }
         if numel == 0 {
             return Ok(());
         }
-        let pipeline = self.pipeline_for_unary(op);
+        let pipeline = self.pipeline_for_unary(op)?;
         ctx.dispatch_sync(|encoder| {
             encode_unary_dispatch(encoder, pipeline, a, out, numel as u32);
         })

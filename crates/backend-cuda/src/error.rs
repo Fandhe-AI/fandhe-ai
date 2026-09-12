@@ -71,6 +71,16 @@ pub enum CudaError {
     /// 分離し、`Display` メッセージも専用文言にする。
     InvalidElementwiseShape { detail: String },
 
+    /// `elementwise.rs::function_for_binary`／`function_for_unary` が
+    /// `BinaryElementwiseOp`／`UnaryElementwiseOp`（いずれも
+    /// `#[non_exhaustive]`）の未知 variant を受け取った場合に返す
+    /// （イシュー #1584。advisor 指摘: 未知 variant を `_ =>` で
+    /// `Add`／`Relu` へフォールバックする実装は、将来 variant が
+    /// 追加された際に「別の演算を代わりに計算して黙って成功する」
+    /// fail-open になる。`Activation` 系〈`gemm_bias_act` 等〉が未知
+    /// variant を明示的に拒否する既存方針と揃える）。
+    UnsupportedElementwiseOp { detail: String },
+
     /// 転置カーネル起動 API（`transpose.rs::CudaTranspose`）のホスト側形状
     /// 検証が拒否した入力。
     ///
@@ -422,6 +432,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::InvalidElementwiseShape { detail } => {
                 write!(f, "invalid elementwise/bias shape: {detail}")
+            }
+            CudaError::UnsupportedElementwiseOp { detail } => {
+                write!(f, "unsupported elementwise op: {detail}")
             }
             CudaError::InvalidTransposeShape { detail } => {
                 write!(f, "invalid transpose shape: {detail}")

@@ -127,6 +127,15 @@ pub enum MetalError {
     /// `CudaError::InvalidElementwiseShape` と同じ役割）。`detail` に
     /// 具体的な不整合内容（長さ不一致等）を保持する。
     InvalidElementwiseShape { detail: String },
+    /// `crate::elementwise::pipeline_for_binary`／`pipeline_for_unary` が
+    /// `BinaryElementwiseOp`／`UnaryElementwiseOp`（いずれも
+    /// `#[non_exhaustive]`）の未知 variant を受け取った場合に返す
+    /// （イシュー #1584。advisor 指摘: 未知 variant を `_ =>` で
+    /// `add_f32`／`relu_f32` へフォールバックする実装は、将来 variant が
+    /// 追加された際に「別の演算を代わりに計算して黙って成功する」
+    /// fail-open になる。CUDA 側 `CudaError::UnsupportedElementwiseOp` と
+    /// 同じ役割）。
+    UnsupportedElementwiseOp { detail: String },
     /// `crate::context_cache`（プロセス内コンテキスト／カーネルスイート
     /// キャッシュ。イシュー #930。非公開モジュールのためリンクではなく
     /// コードスパン表記とする）の `Mutex` が poison していた。CUDA 側
@@ -246,6 +255,9 @@ impl fmt::Display for MetalError {
             }
             MetalError::InvalidElementwiseShape { detail } => {
                 write!(f, "invalid elementwise/gemm_bias_act shape: {detail}")
+            }
+            MetalError::UnsupportedElementwiseOp { detail } => {
+                write!(f, "unsupported elementwise op: {detail}")
             }
             MetalError::ContextCacheUnavailable { detail } => {
                 write!(f, "Metal context/kernel-suite cache unavailable: {detail}")

@@ -150,12 +150,17 @@ fn empty_reduction_semantics_match_cpu_on_real_device() {
         Err(BackendError::KernelLaunchFailed(msg)) if msg.contains("empty reduction for op \"max\"")
     ));
 
-    // outer*inner == 0（出力自体が空）は vacuous に成功する。
+    // outer*inner == 0（出力自体が空）は vacuous に成功する。shape
+    // [0, 5]・axis=1 は outer=0（shape[..1]）・axis_len=5・inner=1 で
+    // total_out=outer*inner=0（出力 shape は [0]）。axis=0 だと
+    // outer=1・axis_len=0・inner=5 で total_out=5 となり出力が非空の
+    // ため上記の「軸指定」ケースと同一になってしまう（vacuous ではない。
+    // advisor 指摘により是正）。
     let vacuous = tensor(Vec::new(), &[0, 5]);
-    let sum_vacuous = cuda_ops.sum(&vacuous, Some(0)).unwrap();
-    assert_eq!(sum_vacuous.shape(), &[5]);
-    let max_vacuous = cuda_ops.max(&vacuous, Some(0)).unwrap();
-    assert_eq!(max_vacuous.shape(), &[5]);
+    let sum_vacuous = cuda_ops.sum(&vacuous, Some(1)).unwrap();
+    assert_eq!(sum_vacuous.shape(), &[0]);
+    let max_vacuous = cuda_ops.max(&vacuous, Some(1)).unwrap();
+    assert_eq!(max_vacuous.shape(), &[0]);
 }
 
 /// (d) NaN／±inf 入力の意味論が CPU（`f32::max` の NaN 非伝播）と一致
