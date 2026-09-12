@@ -299,9 +299,14 @@ fn lu_solve_mat(lu: &LuDecomp, b: &Mat) -> Mat {
     x
 }
 
-/// `A^{-1}`（`A X = I` を解く）。VJP（`grad.rs::Op::Inv`）が
-/// `out_value`（= `A^{-1}`）を再利用できるよう、forward 値と同じ関数を
-/// 使う。
+/// `A^{-1}`（`A X = I` を解く）。VJP は本クレートに実装がなく
+/// `crates/autodiff::eval::linalg::inv_vjp` が担う（`Op::Inv` の逆伝播は
+/// バックエンドに依らずホスト参照実装へ集約する設計。`docs/
+/// autodiff-linalg-design.md` §3.6）。`inv_vjp` は forward が返す
+/// `out_value`（`f32` 丸め済み記録値）を再利用せず `a` から改めて
+/// `f64` で計算し直す（codex-review 指摘・2026-09-13 是正。以前の
+/// 本コメントは「VJP が out_value を再利用する」という逆の記述
+/// だった）。
 pub(crate) fn inv(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
     let mat = Mat::from_tensor(a);
     let n = mat.rows;

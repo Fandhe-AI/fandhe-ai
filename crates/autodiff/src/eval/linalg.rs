@@ -252,9 +252,10 @@ fn lu_solve_mat(lu: &LuDecomp, b: &Mat) -> Mat {
     x
 }
 
-/// `A^{-1}`（`A X = I` を解く）。VJP（`grad.rs::Op::Inv`）が
-/// `out_value`（= `A^{-1}`）を再利用できるよう、forward 値と同じ関数を
-/// 使う。
+/// `A^{-1}`（`A X = I` を解く）。VJP（[`inv_vjp`]）は forward が返す
+/// `out_value`（`f32` 丸め済み記録値）を再利用せず、`a` から改めて
+/// `f64` で計算し直す（[`inv_vjp`] doc 参照。codex-review 指摘・
+/// 2026-09-13 是正。以前の本コメントは逆の記述だった）。
 pub(crate) fn inv(a: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
     let mat = Mat::from_tensor(a);
     let n = mat.rows;
