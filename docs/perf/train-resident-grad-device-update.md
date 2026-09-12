@@ -431,7 +431,12 @@ Tier B 条件付き REQ-2 判定。契約 PR #1666）で吸収しようとした
 整数ソフトウェアエミュレーション**へ置き換え、ホスト参照実装
 （`eval::reduce_bias_grad_rows`）と **bit 完全一致**させる方式（`crates/
 backend-metal/src/soft_f64.rs` が逐語モデル）。bias 勾配も weight 勾配と同じ
-bit 一致契約となり、上記本文中の「REQ-2 統一複合判定」は bit 一致へ読み替える
-（tolerance・REQ-2 の適用範囲は不変）。経緯・検証方法は
+bit 一致契約となる。ただし bit 一致の対象は **変更後の Metal カーネル対
+変更後のホスト `f64` 参照実装**（現行実装同士の比較）に限る。上記本文の
+before（main の f32 逐次和）／after（f64 逐次和）の A/B・checksum 比較は、
+変更前後で数値方式自体が異なるため（例: `[1e8, 1, -1e8]` の和は before が
+`0`・after が `1`）Metal を binary64 エミュレーションへ置換しても一致せず、
+引き続き上記本文どおり **REQ-2 統一複合判定**（伝播を含む多 step 比較も
+同様）で行う。tolerance・REQ-2 の適用範囲は不変。経緯・検証方法は
 `docs/backend-metal-command-batching-design.md` §10.14 を参照。カーネル置換後
 の reuse `step_total` 再計測は未実施（並走ビルド中はベンチを行わない規約）。
