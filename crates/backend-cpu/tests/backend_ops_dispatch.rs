@@ -175,21 +175,23 @@ fn same_code_dispatches_gemm_to_metal_backend_or_returns_typed_error() {
     }
 }
 
-/// 全 8 演算のうち GEMM 以外（elementwise・reduction）は CUDA/Metal 未
-/// 実装のため `BackendError::Unsupported` を返すことを確認する
-/// （fail-safe 実装の受け皿。CPU は全演算とも実装済みのため
-/// `Unsupported` を返さない）。
+/// 全 8 演算（elementwise・reduction）は CUDA カーネル実装済み（イシュー
+/// #599・#1584）のため、CUDA 非搭載環境（本 CI 環境）でも panic せず
+/// 型付きエラー（`CudaUnavailable`）へ環境適応することを確認する
+/// （fail-safe の受け皿。CPU は全演算とも実装済みのため `Unsupported`／
+/// `CudaUnavailable` いずれも返さない）。
 #[test]
 fn cuda_elementwise_and_reduction_return_unsupported_not_panic() {
     // イシュー #599: elementwise（add/mul/relu/exp/tanh）は CUDA カーネル
-    // 実装済みのため `Unsupported` を返さなくなった。CUDA 非搭載環境
-    // （本 CI 環境）では `device_handle()` が driver 初期化時点で
+    // 実装済みのため `Unsupported` を返さなくなった。イシュー #1584:
+    // 汎用 reduction（sum/max。`reduce::CudaReduce`）も実装済みのため
+    // 同様に `Unsupported` を返さなくなった。CUDA 非搭載環境（本 CI
+    // 環境）では `device_handle()` が driver 初期化時点で
     // `BackendError::CudaUnavailable` を返す（`backend-cuda/src/ops.rs`
     // 参照）ため、ここでは「panic しない」ことと「`Unsupported` ではなく
     // `CudaUnavailable` へ変換される」ことを検証する（環境適応。実機での
     // 実カーネル一致検証は `backend-cuda/tests/backend_ops_real_device.rs`
-    // の `#[ignore]` テストが引き継ぐ）。reduction（sum/max）は本イシュー
-    // 時点でも未実装のため引き続き `Unsupported` を検証する。
+    // ／`reduce_parity.rs` の `#[ignore]` テストが引き継ぐ）。
     let cuda = CudaBackendOps::new(0);
     let a = Tensor::new(vec![1.0, -2.0, 3.0, -4.0], &[2, 2]).expect("valid tensor");
     let b = a.clone();
@@ -199,15 +201,8 @@ fn cuda_elementwise_and_reduction_return_unsupported_not_panic() {
     assert_cuda_elementwise_env_adaptive(cuda.relu(&a), "relu");
     assert_cuda_elementwise_env_adaptive(cuda.exp(&a), "exp");
     assert_cuda_elementwise_env_adaptive(cuda.tanh(&a), "tanh");
-
-    assert!(matches!(
-        cuda.sum(&a, None),
-        Err(BackendError::Unsupported(_))
-    ));
-    assert!(matches!(
-        cuda.max(&a, None),
-        Err(BackendError::Unsupported(_))
-    ));
+    assert_cuda_elementwise_env_adaptive(cuda.sum(&a, None), "sum");
+    assert_cuda_elementwise_env_adaptive(cuda.max(&a, None), "max");
 }
 
 /// `cuda_elementwise_and_reduction_return_unsupported_not_panic` の
