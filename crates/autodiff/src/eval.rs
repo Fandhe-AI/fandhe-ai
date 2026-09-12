@@ -478,6 +478,16 @@ pub(crate) fn mse_loss(
 /// `pub(crate)`: `grad.rs` が VJP 計算で再利用する。
 pub(crate) fn softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
     let shape = input.shape().to_vec();
+    // 要素数ゼロ（shape のいずれかの次元が 0）のとき、`shape[..axis]`／
+    // `shape[axis+1..]` の部分積は数学的には無関係な次元（例:
+    // `usize::MAX`）を含みうり、`checked_numel`（`Tensor::new` 側）が
+    // 通した shape でも部分積単体では usize オーバーフローしうる
+    // （全体積は途中の 0 で吸収されるが部分積はそれを経由しない）。
+    // 本番経路 panic 禁止規約（`.claude/rules/coding-rust.md`）に従い、
+    // outer/axis_len/inner を計算する前に空出力へ早期 return する。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
     let outer: usize = shape[..axis].iter().product();
     let axis_len = shape[axis];
     let inner: usize = shape[axis + 1..].iter().product();
@@ -500,6 +510,54 @@ pub(crate) fn softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
             for a in 0..axis_len {
                 let idx = (o * axis_len + a) * inner + i;
                 out[idx] /= sum_exp;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `axis` に沿った数値安定形 log_softmax（`x − m − ln(Σexp(x−m))`）。
+/// `softmax_along`（直上）と同じ「シフト → exp → 縮約」走査構造を共有
+/// するが、`ln(softmax_along(...))` へ委譲しない（`BackendOps::
+/// log_softmax` doc「`ln(softmax(x))` にしない理由」参照: softmax が
+/// アンダーフローで `0.0` になった要素の `ln(0.0) = -inf` を経由すると
+/// 数値精度を落とすため、解析形で直接計算する）。`pub(crate)`:
+/// `grad.rs` が VJP で・`var.rs` がホストフォールバックで再利用する。
+pub(crate) fn log_softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    // `softmax_along` 直上と同じ早期 return（部分積オーバーフロー回避）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let data = dense_vec(input);
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut m = f32::NEG_INFINITY;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                m = nan_propagating_max(m, data[idx]);
+            }
+            let mut sum_exp = 0f32;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                sum_exp += (data[idx] - m).exp();
+            }
+            // `m + ln(sum_exp)` を先に加算してから `data[idx]` から引くと、
+            // `m` が大きい（かつ `data[idx]` と近い）場合に `m` 自身の丸め
+            // 精度で `ln(sum_exp)` の寄与が失われる（例: 全要素 1e8 のとき
+            // `m + ln(sum_exp)` は `1e8` に丸まり `ln(2)` 分が消え、
+            // `log_softmax` が `0.0`〈期待値 `-ln(2)`〉になる）。
+            // `data[idx] - m` は Sterbenz の補題により丸め誤差なしで計算
+            // できるため、先にこちらを計算してから `ln(sum_exp)` を引く
+            // 順序（`(x - m) - ln(sum_exp)`）で丸め落ちを避ける。
+            let ln_sum_exp = sum_exp.ln();
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                out[idx] = (data[idx] - m) - ln_sum_exp;
             }
         }
     }
@@ -626,5 +684,66 @@ mod dense_vec_ref_tests {
             "非 contiguous な入力は Cow::Owned（dense_vec フォールバック）を返す契約"
         );
         assert_eq!(&*owned, &dense_vec(&transposed)[..]);
+    }
+}
+
+#[cfg(test)]
+mod log_softmax_along_precision_tests {
+    use super::*;
+
+    // codex-review 指摘（PR #1664）の回帰検証: `m + ln(sum_exp)` を
+    // 先に加算してから `x` から引く実装では、`m` が大きい共通オフセット
+    // を持つ入力で丸め落ちが発生し、`log_softmax([1e8, 1e8])` が
+    // 期待値 `[-ln(2), -ln(2)]` ではなく `[0.0, 0.0]` になっていた
+    // （`m + ln(2)` が `f32` の丸め精度で `m` そのものに丸まるため）。
+    // `(x - m) - ln(sum_exp)` の順で計算することで `x - m` を Sterbenz
+    // の補題により誤差なく求め、丸め落ちを避ける。
+    #[test]
+    fn large_common_offset_does_not_round_away_ln_sum_exp() {
+        let input = Tensor::<f32>::new(vec![1e8, 1e8], &[1, 2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let out = log_softmax_along(&input, 1);
+        let expected = -(2.0f32).ln();
+        for c in 0..2 {
+            let v = out.get(&[0, c]).unwrap();
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "log_softmax([1e8,1e8])[{c}] = {v}（期待値 {expected} 近傍）"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod softmax_empty_tensor_overflow_tests {
+    use super::*;
+
+    // codex-review 指摘（PR #1664）の回帰検証: `Tensor::new(vec![],
+    // &[0, 0, usize::MAX, 2])` は `checked_numel` が要素数積を `0`
+    // （先頭の `0` が後続の積を吸収する）と評価するため構築できるが、
+    // `log_softmax_along(input, 1)` の `inner = shape[2..].iter()
+    // .product()`（`= usize::MAX * 2`）はこの吸収を経由しない部分積
+    // のため、overflow チェック有効時に本番経路の外で panic していた。
+    // `softmax_along`／`log_softmax_along` 冒頭の早期 return
+    // （`shape` がいずれかの次元 `0` を含めば空出力を返す）で、
+    // 部分積を計算する前に安全側へ倒れることを確認する。
+    #[test]
+    fn log_softmax_along_empty_tensor_with_overflow_prone_inner_does_not_panic() {
+        let shape = [0usize, 0, usize::MAX, 2];
+        let input = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let out = log_softmax_along(&input, 1);
+        assert_eq!(out.shape(), &shape);
+        assert_eq!(out.numel(), 0);
+    }
+
+    #[test]
+    fn softmax_along_empty_tensor_with_overflow_prone_inner_does_not_panic() {
+        let shape = [0usize, 0, usize::MAX, 2];
+        let input = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let out = softmax_along(&input, 1);
+        assert_eq!(out.shape(), &shape);
+        assert_eq!(out.numel(), 0);
     }
 }

@@ -154,6 +154,7 @@ pub use fusion::{
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
+    row_softmax_layout,
 };
 pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
 // `pool_core::SizeClassPoolConfig` は `pool::PoolConfig`（crates.io 0.4.0

@@ -35,7 +35,7 @@ use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, DispatchFailureCell, FusionPlan, MseReduction, ShapeError, Tensor,
-    require_same_shape,
+    require_same_shape, row_softmax_layout,
 };
 
 use crate::context::MetalContext;
@@ -1536,6 +1536,37 @@ impl BackendOps for MetalBackendOps {
             .run_mse_backward_f32(&ctx, pred_slice, target_slice, scale)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::softmax`] の Metal 実装
+    /// （イシュー #1594）。[`row_softmax_layout`] が非最終軸を `Ok(None)`
+    /// として区別する契約に従い、その場合はデフォルトの
+    /// `Unsupported`（`Var::softmax` がホスト参照実装へフォールバック
+    /// する合図）と同じ挙動を返す。最終軸の場合は `run_fused_softmax`
+    /// （下記。`run_fused` の softmax 一致経路）と同じ
+    /// `context_cache::cached_softmax` キャッシュ・`MetalSoftmax::
+    /// run_softmax_f32` を直接呼ぶ（融合プランを経由しない独立入口）。
+    fn softmax(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        let Some((rows, cols)) =
+            row_softmax_layout(x.shape(), dim).map_err(BackendError::ShapeMismatch)?
+        else {
+            return Err(BackendError::Unsupported(
+                "softmax: Metal 行カーネルは最終軸限定（非最終軸はホスト参照実装へ委ねる）".into(),
+            ));
+        };
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("softmax: input not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let softmax = context_cache::cached_softmax(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = softmax
+            .run_softmax_f32(&ctx, x_slice, rows, cols)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::run_fused`] のデフォルト実装
