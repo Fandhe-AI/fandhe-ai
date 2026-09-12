@@ -91,7 +91,7 @@ RNN／LSTM は本問題を生じない: RNN は `tanh` の引数がそのまま�
 
 **候補 B（単一 Sequence Op）**: `Op::RnnSequence` 1 ノードが内部で forward 全 step を実行し、VJP 内で逆順ループする。テープ長は O(1) になるが、VJP が巨大化し「1 ノード＝1 VJP 寄与」という既存モデルに対する特殊化が必要（融合境界・`materialize_fallible` 層とも整合を取り直す必要がある）。
 
-**採用案**: **候補 A（unrolled）を v1 とする**。テープ成長 O(T)・保存活性化（ゲート payload 込み）メモリ O(T·B·G·H) を明記する。以下は v1 スコープ外とし §5 に記録する: truncated BPTT、`pack_padded_sequence` 相当の可変長系列、双方向（bidirectional）、層をまたいで勾配が連続する多層スタック（**codex-review 指摘〈PR #1662〉を受け訂正**: 単層セルを Module 側で逐次適用すること自体は可能だが、決定 4a のとおり候補 A の `Tensor` レベル入力スライスでは前段層への逆伝播が切れるため「自然に表現できる」は不正確。詳細は決定 4a）。
+**採用案**: **候補 A（unrolled）を v1 とする**。テープ成長 O(T)・保存活性化（ゲート payload 込み）メモリ O(T·B·G·H) を明記する。以下は v1 スコープ外とし §5 に記録する: truncated BPTT、`pack_padded_sequence` 相当の可変長系列、双方向（bidirectional）、**Sequence レベル API 自体**のスタック（**codex-review 指摘〈PR #1662〉を受け決定 4a で切り分け**: セル単位の per-step 交互適用〈決定 4a (i)〉は勾配連続のまま v1 で成立するが、Sequence レベル API 同士のスタック〈決定 4a (ii)〉は候補 A の `Tensor` レベル入力スライスにより前段層への逆伝播が切れるため v1 スコープ外。詳細は決定 4a）。
 
 ### 決定 3: `Tape::reset` との相互作用（reuse 学習ループ）
 
@@ -108,13 +108,19 @@ RNN／LSTM は本問題を生じない: RNN は `tanh` の引数がそのまま�
 
 ### 決定 4a: 多層スタック時の勾配連続性（`Module` trait との整合。codex-review 指摘・PR #1662）
 
-**問題**: `Module` trait（§2 事実）は `forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError>` であり、`input` は既に tape 上のノードを指す `Var`（前段の学習可能層の出力でありうる）。一方、決定 4 採用案（候補 A）は「時系列方向のスライスは呼び出し側責務として `[T,B,D]` の生 `Tensor` を `Tensor::narrow` でスライスしてから `Tape::var`（葉）として登録する」設計である。この経路は、**もし Sequence レベル API（`Rnn`／`Lstm`／`Gru`）が標準 `Module` trait を実装し `input: &Var` を受け取ってしまうと、その `Var` を `.value()`／`to_tensor()` で `Tensor` へ detach してからスライス・葉再登録することを意味し、`input` を生成した前段層（別の RNN 層・埋め込み層等）へ向かう逆伝播経路をサイレントに断ち切る**（§3 契約 2「独立ノードとして登録されなかった中間値は追跡されない」の系）。これにより決定 2 が当初記していた「多層は Module 側で単層セルを逐次適用するだけで自然に表現できる」は不正確であり、決定 2 の記述を訂正した。
+**問題**: 決定 2 が当初記していた「多層は Module 側で単層セルを逐次適用するだけで自然に表現できる」は曖昧であり、2 通りの読み方で結論が異なる。
+
+- **(i) セル単位の per-step 交互適用**（例: 各 step で `h1_t = cell1(x_t, h1_{t-1})` → `h2_t = cell2(&h1_t, h2_{t-1})` と 2 層を交互に進める）: 決定 4 の事実のとおりセル API は `x_t: &Var` を受け取るため、`h1_t` は detach されない tape 上の `Var` のまま `cell2` へ渡る。`Var::narrow` は不要で、**勾配は層をまたいで連続する（v1 で成立する）**。
+- **(ii) Sequence レベル API のスタック**（層 1 の全 step 分の隠れ状態 `[T,B,H]` を一度組み立ててから層 2 の Sequence 入力とする構成）: `Module` trait（§2 事実）は `forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError>` を要求するが、決定 4 採用案（候補 A）は Sequence レベルで「時系列方向のスライスは呼び出し側責務として `[T,B,D]` の生 `Tensor` を `Tensor::narrow` でスライスしてから `Tape::var`（葉）として登録する」設計であり、`[T,B,H]` を一度 `Var` として組み立てる（`stack`〈#1598〉を要する）にせよ、Sequence レベル API 自体が標準 `Module` trait を実装し `input: &Var` を受け取ってしまうと、その `Var` を `.value()`／`to_tensor()` で `Tensor` へ detach してからスライス・葉再登録することになり、**層 1 へ向かう逆伝播経路をサイレントに断ち切る**（§3 契約 2「独立ノードとして登録されなかった中間値は追跡されない」の系）。
+
+決定 2 の記述は (i) を指すなら正確、(ii)（Sequence レベルのスタック）を指すなら不正確であるため、以下のとおり切り分けて訂正する。
 
 **採用案**:
 
-1. v1 の Sequence レベル API（`Rnn`／`Lstm`／`Gru`）は標準 `Module` trait（`&Var` 入力）を実装せず、`x: &Tensor<f32>` を直接受け取る専用シグネチャ（例: `forward_seq(&self, tape: &Tape, x: &Tensor<f32>, h0: Option<&Var>) -> Result<Var, AutodiffError>`）とする。これにより「入力は detach 済みの生データである」ことを型シグネチャ上で明示し、`Var` を渡せてしまうことによるサイレントな勾配欠落を型レベルで防ぐ。
-2. 層をまたいで勾配が連続する多層スタック（前段 RNN 層のパラメータも学習対象に含む深い RNN）は v1 スコープ外とする。`Var::narrow`（#1599。候補 B）により各 step のスライスを勾配追跡可能な経路（`push_view` 相当）で行える設計に置き換わるまで実装しない。
-3. §5 のスコープ外一覧を本決定に合わせて修正する。
+1. **(i) セル単位の交互適用は v1 で成立する**（勾配連続。追加設計不要）。決定 2 の記述はこの意味で維持する。
+2. **(ii) Sequence レベル API 自体のスタック**（層 1 の Sequence 出力をそのまま層 2 の Sequence 入力とする構成）は v1 スコープ外とする。`Var::narrow`（#1599。決定 4 候補 B）により各 step のスライスを勾配追跡可能な経路（`push_view` 相当）で行える設計に置き換わるまで実装しない。
+3. Sequence レベル API（`Rnn`／`Lstm`／`Gru`）は標準 `Module` trait を**実装する**（決定 9 の `forward_host` はデフォルト実装が trait メソッドであり `impl Module` を前提とするため、trait を実装しないという選択肢は決定 9 と矛盾する）。ただし `forward(tape, input: &Var)` は `input` を `Tensor` へ detach する経路を**取らない**: 候補 A（`Tensor` レベルスライス）を要求する Sequence 入力用には、`Var` を受ける `forward` ではなく `x: &Tensor<f32>` を直接受け取る専用メソッド `forward_seq(&self, tape: &Tape, x: &Tensor<f32>, h0: Option<&Var>) -> Result<Var, AutodiffError>` を追加する。`forward(tape, input: &Var)` 自体は `AutodiffError`（型付きエラー。決定 11 (g) の fail-closed 方針と整合）を返し、`forward_seq` の利用を促す（(ii) のサイレントな detach を防ぐ）。`forward_host`（決定 9）は既存の tape 不要・ホスト常駐 `Tensor` 経路のまま変更しない。
+4. §5 のスコープ外一覧を本決定に合わせて修正する（対象は (ii) Sequence レベルのスタックのみ。(i) セル単位の交互適用は対象外＝v1 で可能）。
 
 ### 決定 5: ゲート配置・式・重み形状（parity の参照定義）
 
@@ -144,7 +150,7 @@ PyTorch 準拠で固定する:
 
 ### 決定 9: 推論経路
 
-- `nn::{Rnn, Lstm, Gru}` は `Module::forward_host`（tape 不要）を実装し `predict` 経路に乗せる
+- `nn::{Rnn, Lstm, Gru}` は `Module::forward_host`（tape 不要）を実装し `predict` 経路に乗せる。決定 4a 項目 3 のとおり `Module` trait 自体は実装するため、`forward_host` のデフォルト実装（trait メソッド）をオーバーライドすることに矛盾はない
 - `predict_resident`／`linear_forward_device` との連携は v1 対象外（決定 7 のスコープと整合）
 
 ### 決定 10: 公開面（承認事項として分離）
@@ -166,7 +172,7 @@ PyTorch 準拠で固定する:
 - (f) `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - (g) 未知 `Op` variant への fail-closed（型付きエラー。本番経路で `unwrap`／`expect` を使わない）
 - (h) GRU の `r_t` に対する勾配が payload 保存済み `q_t`（決定 1c）から算出され、backward 内で `h_{t-1}·W_hn+b_hn` の GEMM 再計算を伴わないこと（数値微分突合〈項目 (b)〉が通れば正しさは担保されるため、本項目は「`q_t` を意図的に欠落・破損させると (b) の数値微分突合が失敗する」ことを確認するテストとして実装し、payload 保存方式が実際に機能していることを構造的に検証する）
-- (i) Sequence レベル API（`Rnn`／`Lstm`／`Gru`）が標準 `Module` trait を実装せず `x: &Tensor<f32>` 専用シグネチャであること（決定 4a）の型検査。多層スタック（層をまたぐ勾配連続）は決定 4a により v1 スコープ外のため受入基準に含めない
+- (i) Sequence レベル API（`Rnn`／`Lstm`／`Gru`）が `Module` trait を実装しつつ `forward(tape, input: &Var)` は型付きエラーを返し、`x: &Tensor<f32>` を受ける専用メソッド `forward_seq` が学習経路であること（決定 4a 項目 3）の型検査。セル単位の per-step 交互適用（決定 4a (i)）は勾配連続であることを数値微分突合で確認する。Sequence レベル API 同士のスタック（決定 4a (ii)）は v1 スコープ外のため受入基準に含めない
 
 付随更新: `docs/public-api-design.md` §3.2 への追記、`Op` doc の「`Var` とほぼ 1:1」注記の更新、`docs/compat-feature-gap.md` §2.7 行の更新、`docs/kernel-fusion.md`（融合境界。専用セル Op は非 elementwise につき融合対象外である旨）への注記。
 
@@ -207,7 +213,7 @@ h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
 - truncated BPTT
 - `pack_padded_sequence` 相当の可変長系列サポート
 - 双方向（bidirectional）RNN／LSTM／GRU
-- 層をまたいで勾配が連続する多層スタックの専用 API（決定 4a: 候補 A の `Tensor` レベル入力スライスでは前段層への逆伝播が切れるため `Var::narrow`〈#1599〉による候補 B 化が前提。単層セルを Module 側で逐次適用すること自体〈層間の勾配非連続を許容する場合〉は可能）
+- Sequence レベル API 自体のスタック（決定 4a (ii): 候補 A の `Tensor` レベル入力スライスでは前段層への逆伝播が切れるため `Var::narrow`〈#1599〉による候補 B 化が前提。セル単位の per-step 交互適用〈決定 4a (i)〉は勾配連続のまま v1 で成立するためスコープ外ではない）
 - reuse（デバイス常駐）経路（決定 7）
 - `predict_resident`／`linear_forward_device` 連携（決定 9）
 - facade 公開面（`fandhe_ai`／`compat`）への統合（決定 10。§6 の承認事項）
@@ -217,7 +223,7 @@ h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
 ## 6. 承認事項（#1647 着手前の前提）
 
 1. **facade 公開面の拡張は実装不可**（決定 10）: `docs/compat-api-scope.md` §5 の範囲拡張手続きのうち、実装リポ側の §1／§2／§5 更新（#1591）が完了し、かつユーザー承認記録が残るまで、`fandhe_ai` 再エクスポートおよび `compat::Sequential::add_lstm` 等は実装しない。正本 spec 側（Fandhe-AI/fandhe-ai-spec#66）は既にマージ済みだが、これは §5 の手続き (1) のみを満たすものであり、実装リポ側の記録更新は別途必要
-2. **依存追加の起票案（起票自体は本文書の管轄外）**: #1619 の宣言依存に `#1599`（`Var::narrow`。決定 1b・決定 4 候補 B・決定 4a〈層をまたぐ勾配連続の前提〉）を追加することを提案する。本エージェントは自動運転・承認不可の制約により Issue 起票・コメント投稿を行わない。ユーザー承認後に `out-of-scope-tracking.md` の手続きで起票することを推奨する
+2. **依存追加の起票案（起票自体は本文書の管轄外）**: #1619 の宣言依存に `#1599`（`Var::narrow`。決定 1b・決定 4 候補 B・決定 4a (ii)〈Sequence レベル API 自体のスタックの前提〉）を追加することを提案する。本エージェントは自動運転・承認不可の制約により Issue 起票・コメント投稿を行わない。ユーザー承認後に `out-of-scope-tracking.md` の手続きで起票することを推奨する
 3. **reuse 経路の累積契約の新設提案（決定 7）**: RNN 重み共有時の staging 累積（β=1 相当）契約を `docs/device-resident-update-design.md` へ追補する別イシューを提案する。本エージェントは起票を行わない
 4. 上記 1〜3 のいずれも、#1647（3 バックエンド実装）が着手する前に解消しておくべき前提として記録するに留め、本イシュー自体はここまでで完了とする
 
