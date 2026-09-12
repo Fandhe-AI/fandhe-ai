@@ -101,11 +101,11 @@ fn run_case(
         }
         if i == WARMUP + ITERS - 1 {
             // 最終反復の leaf 0 の勾配を記録（bit 一致確認用）。
-            if let Some(leaf0) = tape.leaf(0) {
-                if let Ok(Some(g)) = grads.get(&leaf0) {
-                    last_grad_fold = Some(fold_bits(g));
-                    last_grad_head = g.host_slice().iter().take(8).copied().collect();
-                }
+            if let Some(leaf0) = tape.leaf(0)
+                && let Ok(Some(g)) = grads.get(&leaf0)
+            {
+                last_grad_fold = Some(fold_bits(g));
+                last_grad_head = g.host_slice().iter().take(8).copied().collect();
             }
         }
     }

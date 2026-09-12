@@ -3257,7 +3257,13 @@ release ビルドでも検知できるよう `assert!` を使う）"
     /// 変更すること）。
     #[test]
     fn elementwise_vjp_via_backend_ops_gate_matches_documented_default() {
-        assert!(!ELEMENTWISE_VJP_VIA_BACKEND_OPS);
+        // `ELEMENTWISE_VJP_VIA_BACKEND_OPS` はビルド時定数のため、素の
+        // `assert!` へ渡すと clippy::assertions_on_constants
+        // （`-D warnings` 下でエラー）に抵触する。`const { }` ブロックへ
+        // 包んでコンパイル時評価であることを明示し、ドリフト検出の意図
+        // （ゲート既定値と doc の verdict の一致を機械的に固定する）を
+        // 保ったまま clippy を通す。
+        const { assert!(!ELEMENTWISE_VJP_VIA_BACKEND_OPS) };
     }
 
     // `Op::Mul`／`Op::Exp`／`Op::Tanh`／`Op::Sigmoid` の既存 grad-check
