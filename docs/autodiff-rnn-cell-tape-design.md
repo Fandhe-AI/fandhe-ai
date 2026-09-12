@@ -7,7 +7,7 @@
 ## 1. 背景
 
 - 機能ギャップ表 `docs/compat-feature-gap.md` §2.7 の RNN/LSTM/GRU 行は「なし・難度 XL」で、必要物として (a) ゲート演算（sigmoid／tanh は既存）、(b) 時系列ループを既存の動的テープへどう積むかの設計、(c) 3 バックエンド実装、が挙げられている
-- spec 側は 2026-09-12 に REQ-9 を改定し（`docs/spec/04-requirements.md` REQ-9・Fandhe-AI/fandhe-ai-spec#66〈PR #69〉）、RNN／LSTM／GRU を **Tier 2**（長尾。PyTorch／TensorFlow 機能網羅の第 2 段階）に明記した。実装リポ側の `docs/compat-api-scope.md` §1／§2／§5 更新は別イシュー #1591 の管轄で、本イシュー時点では **OPEN**
+- spec 側は 2026-09-12 に REQ-9 を改定し（`docs/spec/04-requirements.md` REQ-9・Fandhe-AI/fandhe-ai-spec#66〈PR #69〉）、RNN／LSTM／GRU を **Tier 2**（長尾。PyTorch／TensorFlow 機能網羅の第 2 段階）に明記した。実装リポ側の `docs/compat-api-scope.md` §1／§2／§5 更新は別イシュー #1591 の管轄で、本設計文書（#1646）記述時点では OPEN だったが、#1647（本実装）時点では **CLOSED（PR #1661）**。ただし §6「承認事項」項目 1 が定める facade 公開面拡張の実装可否判定（正本 spec 側の REQ-9 改定＋実装リポ側の §1／§2／§5 更新＋ユーザー承認の 3 条件）のうち、ユーザー承認は本実装（#1647）時点でも未取得のため、facade 公開面拡張は引き続き実装不可のまま（決定 10・§8「実装記録」参照）
 - 目的: (a)(b) の設計を確定し、判断根拠とともに doc として記録する。tolerance／baseline（数値一致の許容誤差・非後退ベースライン）の変更は対象外
 
 ## 2. 現状のコード事実（`origin/main` `50120e4c`）
@@ -166,7 +166,7 @@ PyTorch 準拠で固定する:
 ### 決定 10: 公開面（承認事項として分離）
 
 - 内部クレート `fandhe_ai_autodiff::nn::{RnnCell, LstmCell, GruCell, Rnn, Lstm, Gru}`（本文書の設計対象）と、facade 公開面（`fandhe_ai` 再エクスポート・`compat::Sequential::add_lstm` 等）は分ける
-- facade 公開面拡張は `docs/compat-api-scope.md` §5 の手続き（正本 spec 側の REQ-9 改定〈完了済み: Tier 2 明記〉＋実装リポ側 `docs/compat-api-scope.md` §1／§2／§5 の更新〈#1591。**OPEN**〉＋ユーザー承認）が完了するまで**実装不可**とする
+- facade 公開面拡張は `docs/compat-api-scope.md` §5 の手続き（正本 spec 側の REQ-9 改定〈完了済み: Tier 2 明記〉＋実装リポ側 `docs/compat-api-scope.md` §1／§2／§5 の更新〈#1591。**CLOSED（PR #1661）**〉＋ユーザー承認〈#1647 時点でも未取得〉）が完了するまで**実装不可**とする
 - `compat::Sequential` への統合（2 次元入力前提の平坦鎖からの拡張）は #1618（`add_*` 拡張）の管轄で扱うことを推奨する
 - 実装は `crates/facade/tests/api_surface.rs` の機械検査（`BackendOps`／生 `Tape` を再エクスポート・直接引数化しない）を通過する構成であることを条件とする
 
@@ -249,3 +249,69 @@ h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
 - `crates/tensor-core/src/ops_shape.rs`・`crates/tensor-core/src/tensor.rs`・`crates/tensor-core/src/backend_ops.rs`
 - `crates/facade/src/compat/sequential.rs`・`crates/facade/tests/api_surface.rs`
 - `.claude/rules/coding-rust.md`
+
+## 8. 実装記録（#1647）
+
+- **`BackendOps` の粒度の精緻化**: 決定 1 の記述は「forward は
+  `BackendOps::{rnn,lstm,gru}_cell`」としていたが、実装では RNN
+  （tanh 版）は専用カーネルを追加せず既存の `gemm_bias_act`／`add`／
+  `tanh` の合成で forward を閉じた（GEMM＋bias 融合カーネルは 3
+  バックエンドとも既に実装済みのため新規カーネル不要）。LSTM／GRU も
+  GEMM 部分は既存 `gemm_bias_act` に委ね、専用カーネルはゲート
+  pointwise 演算（`lstm_pointwise`／`lstm_hidden_backward`／
+  `lstm_cell_backward`／`gru_pointwise`／`gru_backward`。いずれも
+  `tensor-core::BackendOps` の非破壊拡張メソッド）に限定した。この
+  精緻化により、CPU／CUDA／Metal 側の新規実装はゲート pointwise 演算
+  （バッチ行ごとに独立な要素演算。CUDA／Metal は `numel = B*H` の
+  1 スレッド = 1 要素）に閉じ、既存の融合 GEMM カーネル資産（決定 5
+  「融合 GEMM 1 本＋列ブロック分割」の性能特性）をそのまま再利用できる。
+- **`Vec<Var<'t>>` 返却（決定 4・#1598 依存）**: `forward_seq`（tape
+  経路）は設計どおり `Var::stack`（#1598・未実装）を待たず
+  `Vec<Var<'t>>`（per-step 出力）を返す。`forward_host`（tape 不要
+  経路）は本イシュー内で `Tensor` を直接連結する専用ヘルパー
+  （`nn::rnn::stack_host_tensors`）を実装し `[T,B,H]` を返す非対称性
+  を解消した（tape 経路は #1598 完了後の拡張として据え置き）。
+- **facade 未拡張**: 設計文書 §6 承認事項のとおり、`crates/facade` は
+  本イシューで変更していない。`docs/compat-api-scope.md` §1.3 が
+  Tier 2 対象範囲として RNN／LSTM／GRU を既に列挙済み（#1591 完了・
+  PR #1661）であるため受入条件「facade 公開面に追加する場合は
+  `docs/compat-api-scope.md` を更新」自体は N/A（同ファイルは変更
+  していない）。ユーザー承認（決定 10 の 3 条件目）が本実装時点でも
+  未取得のため、`fandhe_ai` 再エクスポート・`compat::Sequential::
+  add_lstm` 等は依然として実装不可のまま。
+- **実機実測**: Metal（Apple Silicon・本セッション実行機）は
+  `cargo test -p fandhe-ai-backend-metal --release --test
+  rnn_cell_parity -- --ignored --nocapture` で実機実測を完了し、
+  4 形状（`B∈{1,3,64,257}`×`H∈{1,7,64,300}`）× LSTM
+  pointwise／hidden_backward／cell_backward・GRU pointwise／backward
+  の全項目で CPU-Metal 統一複合判定（相対誤差 1e-3 未満 または
+  絶対誤差 1e-5 未満）に合格した。CUDA（DGX Spark GB10）は本セッション
+  の実行環境に実機到達手段がないため未実測のまま
+  `crates/backend-cuda/tests/rnn_cell_parity.rs` の `#[ignore]`
+  形状網羅テストとして記入欄を残す（環境適応スモーク
+  `rnn_cell_parity_smoke_env_adaptive` は `DriverUnavailable` を検出
+  し早期 return することを本セッションで確認済み）。
+- **数値微分突合（受入基準 (b)）**: `crates/autodiff/tests/nn_rnn.rs`
+  が RNN／LSTM／GRU 全セルの全入力（`x`・`h_prev`・LSTM は `c_prev`
+  も・`W_ih`・`W_hh`・`b_ih`・`b_hh`）について中央差分との突合を
+  完了（`REL_TOL=1e-2`・`ABS_TOL=1e-3`。`tests/backward.rs` の既存
+  許容誤差を再利用し緩和なし）。GRU の `q_t`（決定 1c）・LSTM の
+  `cell` ノード参照（決定 1b 追記）はいずれもこの数値微分突合が
+  通ることで正しさが構造的に担保される。**受入基準 (h)・(j) は
+  codex-review 指摘（PRRT_kwDOTuUCJc6hxBOl）を受け実施済み**:
+  `crates/autodiff/src/grad.rs::tests::
+  vjp_gru_cell_backward_is_sensitive_to_stored_q_payload`（`Op::
+  GruCell.q` を破損させると r ゲート列ブロックへ伝播する `w_ih`
+  勾配が変化することを確認）・`vjp_lstm_hidden_reads_referenced_
+  cell_node_weight_data`（`Op::LstmHidden.cell` が指す `Op::
+  LstmCell` ノードの `w_ih`／`w_hh` データを差し替えると `dx`／
+  `dh_prev` が変化することを確認）として、`grad::vjp` を直接呼ぶ
+  crate 内部単体テスト（`tests/nn_rnn.rs` は crate 外の統合テスト
+  であり `Tape`／`Op` 等の内部型に到達できないため、既存の
+  `vjp_dispatch_*` テスト群と同じ手法で `grad.rs` 自身の
+  `#[cfg(test)]` モジュールに実装）で構造的に検証済み。
+- **BPTT（受入基準 (c)）**: T=1／T=3 の `forward_seq` 完走・
+  `h_n` と最終 step 出力の bit-exact 一致・重み勾配が T 個の寄与和
+  になっていること（手組み展開ループの数値微分との突合）を確認した。
+- **多層スタック（決定 4a (i)）**: 2 層のセル単位交互適用で層 1 の
+  重みへ勾配が連続することを数値微分で確認した。

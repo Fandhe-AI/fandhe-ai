@@ -178,6 +178,18 @@ pub(crate) fn cached_mse(ctx: &Arc<MetalContext>) -> Result<Arc<crate::mse::Meta
     get_or_build(cache, on_poison, || crate::mse::MetalMse::new(ctx))
 }
 
+/// [`crate::rnn_cell::MetalRnnCell`] スイートをプロセス内キャッシュから
+/// 取得する（イシュー #1647）。`ops::MetalBackendOps::{lstm_pointwise,
+/// lstm_hidden_backward, lstm_cell_backward, gru_pointwise, gru_backward}`
+/// の唯一の呼び出し先。
+pub(crate) fn cached_rnn_cell(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::rnn_cell::MetalRnnCell>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::rnn_cell::MetalRnnCell>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::rnn_cell::MetalRnnCell::new(ctx))
+}
+
 /// device 単位のプロセスワイド singleton [`MetalAllocator`]（イシュー
 /// #1021・設計文書 §3.1「プールは device 単位のプロセスワイド singleton
 /// とする」・§3.5）をプロセス内キャッシュから取得する。
