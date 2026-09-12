@@ -573,7 +573,7 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
     for j in 0..k {
         let col = v_full.col(j);
         let norm: f64 = col.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if norm > 1e-12 {
+        if norm > 0.0 {
             for r in 0..v_full.rows {
                 v_full.set(r, j, v_full.get(r, j) / norm);
             }
@@ -639,7 +639,7 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
         // `U = A V / σ` で再導出する（`jacobi_svd_tall` が返す `U` 列を
         // そのまま使うと `σ` 未除算のためノルムが `σ` 倍になっている。
         // `col(j)` の符号正規化後の `V` 列を使って改めて計算する）。
-        if sigma > 1e-12 {
+        if sigma > 0.0 {
             let v_col = v_sorted.col(j);
             let v_col_mat = Mat {
                 data: v_col,
@@ -657,7 +657,7 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
     // 修正 Gram–Schmidt で直交補完する（決定的な標準基底ベクトルから
     // 出発し、常に同じ結果を再現する）。
     for (j, &sigma) in s_sorted.iter().enumerate() {
-        if sigma > 1e-12 {
+        if sigma > 0.0 {
             continue;
         }
         let m_rows = u_sorted.rows;
@@ -696,7 +696,7 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, AutodiffError> {
     // no-op に近い——ただし σ=0 の項は `U Σ Vᵀ = A` の再構成に寄与
     // しないため、この補完で上書きしても結果は変わらない）。
     for (j, &sigma) in s_sorted.iter().enumerate() {
-        if sigma > 1e-12 {
+        if sigma > 0.0 {
             continue;
         }
         let v_rows = v_sorted.rows;
@@ -1382,6 +1382,31 @@ mod tests {
         };
         let reconstructed = mat_matmul(&u_s, &vh);
         approx_eq(&reconstructed, &a, 1e-3);
+    }
+
+    /// `σ` が固定閾値 `1e-12` 未満でも非ゼロならゼロ特異値として扱わず、
+    /// 独立基底で上書きしないことを確認する（codex-review 指摘。修正前は
+    /// `A=[[-1e-13]]` で `U`/`Vh` の符号・再構成が誤っていた——σ<=1e-12
+    /// の非ゼロ特異値が固定絶対閾値でゼロ扱いされ Gram–Schmidt 補完の
+    /// 独立基底へ置き換わり `U Σ Vᵀ = A` を満たさなくなる不具合。設計
+    /// §3.5「σ==0 の列のみ補完」契約に合わせ、判定を厳密ゼロ比較へ変更
+    /// した回帰）。
+    #[test]
+    fn svd_tiny_nonzero_singular_value_reconstructs_input() {
+        let a = build_tensor(vec![-1e-13], &[1, 1]);
+        let (u, s, vh) = svd(&a).unwrap();
+        let s_data = dense_vec(&s);
+        assert!(
+            s_data[0] > 0.0,
+            "非ゼロ特異値がゼロ扱いされている: {}",
+            s_data[0]
+        );
+        let u_s = {
+            let out = vec![dense_vec(&u)[0] * s_data[0]];
+            build_tensor(out, &[1, 1])
+        };
+        let reconstructed = mat_matmul(&u_s, &vh);
+        approx_eq(&reconstructed, &a, 1e-18);
     }
 
     #[test]

@@ -101,9 +101,20 @@ single_input`／`svd_multi_output_gradient_accumulates_to_single_input` で検�
 - **エラー分類**: 特異／非正定値／非収束は `BackendError::InvalidArgument`（既存
   variant）。`Unsupported` は「バックエンドが未実装」の意味に限定し、`Var` 側のフォール
   バック条件から `InvalidArgument` を除外する
-- 非有限入力（NaN／inf）は事前検査で拒否しない（現状の CPU 実装は LU／Cholesky／QR／
-  SVD いずれも計算過程で非有限を自然に検出し `InvalidArgument`（Cholesky の対角チェッ
-  ク）または非収束（SVD）として拒否する設計。明示的な事前 NaN スキャンは追加していない）
+- 非有限入力（NaN／inf）は事前検査で拒否しない。実際に拒否できるかは演算ごとに異なり
+  一様ではない（codex-review 指摘・2026-09-12 是正。当初の「LU／Cholesky／QR／SVD いず
+  れも自然に検出し拒否する」という記述は不正確だった）: **Cholesky** は対角チェック
+  （非有限または非正）で `InvalidArgument` を返す。**SVD** は `jacobi_svd_tall` の収束
+  判定（`gamma.abs() <= EPS * ...`）が非有限入力で常に偽となり 60 スイープ非収束の
+  `InvalidArgument` として拒否される。一方 **LU 分解ベース（`inv`／`solve`／`det`）**
+  はピボット判定が `pivot == 0.0` の厳密等値比較のみのため、`inf`／`NaN` はこの判定を
+  素通りし「分解成功」として扱われ、後続の前進・後退代入で `inf`／`NaN`／`0.0`（例:
+  `1/inf = 0.0`）を含む値が **エラーにならず** 返る（例: `inv([[inf]])` は
+  `Err` にならず `[[0.0]]` を返す）。**QR** はそもそも `Result` を返さない設計
+  （`fn qr(...) -> (Tensor<f32>, Tensor<f32>)`）のため非有限入力を拒否する経路自体が
+  存在せず、非有限値が計算結果へそのまま伝播しうる。明示的な事前 NaN／inf スキャンは
+  いずれの演算にも追加していない（拒否経路の統一・追加は数値契約の変更にあたり別
+  Issue でユーザー承認を得て検討する）
 - **空行列（`n=0`）の挙動**: `det([0,0]) = 1.0`（空積）。`inv`／`cholesky`／`qr`／`svd`
   は対応 shape の空テンソルを返す。`solve` は `[0,k]`。`matrix_norm` は未検証（スコープ
   外。空行列は主要ユースケースでないため）
