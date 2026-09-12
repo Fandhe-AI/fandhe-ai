@@ -29,7 +29,7 @@
 //! `NaiveOps`／`TestOps`（compat・テスト経路）に限り引き続き使われる
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
-use fandhe_ai_tensor_core::{Activation, BackendError, BackendOps, Tensor};
+use fandhe_ai_tensor_core::{Activation, BackendError, BackendOps, ShapeError, Tensor};
 
 use crate::error::AutodiffError;
 use crate::eval::{self, build_tensor, dense_vec};
@@ -37,6 +37,126 @@ use crate::tape::{
     NodeId, Op, ResidentBiasTarget, ResidentResolver, TapeId, TapeNode, materialize_fallible,
 };
 use crate::var::Reduction;
+
+/// elementwise VJP（`Op::Mul`／`Op::Exp`／`Op::Tanh`／`Op::Sigmoid` の
+/// 乗算、`backward.rs::accumulate` の fan-out 勾配合算）を
+/// `BackendOps`（forward と同じ CPU 並列／CUDA／Metal カーネル）経由で
+/// 計算するか、ホスト逐次参照実装（`eval::mul`／`eval::add`）のまま
+/// にするかを切り替えるゲート（イシュー #1583）。#1211 が GEMM 系 VJP
+/// （`matmul_vjp`）へ適用した「backward を forward と同じ実装で計算
+/// する」方針の elementwise 版。
+///
+/// いずれも単一 IEEE 演算（乗算／加算 1 回）のみで縮約を含まないため、
+/// `ops.mul`／`ops.add` と `eval::mul`／`eval::add` は run-to-run・
+/// バックエンド間を問わず bit 同一（`.claude/rules/coding-rust.md`
+/// 「バックエンド間数値一致は複合判定」が対象とする縮約系演算には
+/// 該当しない）。**対象外**（本ゲートの影響を受けない・ホスト経路の
+/// まま不変）: `Op::Relu`／`LinearAct`／`LinearResident` のマスク演算
+/// （[`elementwise_mul_mask`]。#1577 の stride 対応 host 経路。
+/// `BackendOps` にマスク演算面がなく追加は公開 trait 拡張のため別途
+/// ユーザー承認事項）、`Op::Add` の broadcast 縮約（[`reduce_bias_grad`]
+/// ／[`reduce_to_shape`]。f64 アキュムレータ統一・Metal 側
+/// `BackendOps::sum` 未実装のため対象外）。
+///
+/// 実測・出荷判断の経緯は `docs/perf/elementwise-vjp-backend-ops.md`
+/// を参照（事前登録規則はイシュー #1583 のコメントに固定済み）。
+pub(crate) const ELEMENTWISE_VJP_VIA_BACKEND_OPS: bool = false;
+
+/// [`ELEMENTWISE_VJP_VIA_BACKEND_OPS`] に従い `g ⊙ rhs`（elementwise
+/// 積。broadcast 前提だが本関数の呼び出し元はいずれも同 shape で渡す）
+/// を `ops.mul` または `eval::mul` で計算する。
+///
+/// フォールバックは [`BackendError::Unsupported`] の場合のみ
+/// `eval::mul` へ切り替える（バックエンドがそもそも当該演算を持たない
+/// 場合の救済。`matmul_vjp` と異なり無条件フォールバックを許すのは、
+/// elementwise 積が単一 IEEE 演算で forward／backward・バックエンド間
+/// を問わず bit 同一であり、フォールバックしても「backward だけ別の
+/// 数値経路になる」ことがないため）。他のエラー（デバイス割当失敗等）
+/// は `AutodiffError::Backend` として fail-closed に伝播する
+/// （`.claude/rules/security.md` A08）。戻り値の shape が
+/// `broadcast_shape(g, rhs)` と一致しない場合も fail-closed で
+/// エラーにする（バックエンド実装のバグを静かに呑み込まない）。
+fn vjp_elementwise_mul(
+    ops: &dyn BackendOps,
+    g: &Tensor<f32>,
+    rhs: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    vjp_elementwise_mul_via(ops, g, rhs, ELEMENTWISE_VJP_VIA_BACKEND_OPS)
+}
+
+/// [`vjp_elementwise_mul`] の実体。ゲート値を引数として受け取ることで
+/// ビルド時定数 [`ELEMENTWISE_VJP_VIA_BACKEND_OPS`] の値に関わらず
+/// 両分岐を単体テストできるようにする（イシュー #1583）。
+fn vjp_elementwise_mul_via(
+    ops: &dyn BackendOps,
+    g: &Tensor<f32>,
+    rhs: &Tensor<f32>,
+    via_backend_ops: bool,
+) -> Result<Tensor<f32>, AutodiffError> {
+    if !via_backend_ops {
+        return Ok(eval::mul(g, rhs));
+    }
+    match ops.mul(g, rhs) {
+        Ok(out) => {
+            let expected = fandhe_ai_tensor_core::broadcast_shape(g.shape(), rhs.shape())
+                .map_err(|err| AutodiffError::Backend(BackendError::ShapeMismatch(err)))?;
+            if out.shape() != expected.as_slice() {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: out.shape().to_vec(),
+                        rhs: expected,
+                    },
+                )));
+            }
+            Ok(out)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::mul(g, rhs)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`ELEMENTWISE_VJP_VIA_BACKEND_OPS`] に従い `a + b`（同 shape 前提の
+/// elementwise 和。`backward.rs::accumulate` の fan-out 勾配合算専用）
+/// を `ops.add` または `eval::add` で計算する。エラー処理・フォール
+/// バック方針は [`vjp_elementwise_mul`] と同一。`pub(crate)`:
+/// `backward.rs::accumulate` から呼ばれる。
+pub(crate) fn vjp_elementwise_add(
+    ops: &dyn BackendOps,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    vjp_elementwise_add_via(ops, a, b, ELEMENTWISE_VJP_VIA_BACKEND_OPS)
+}
+
+/// [`vjp_elementwise_add`] の実体。[`vjp_elementwise_mul_via`] と同じ
+/// 理由でゲート値を引数化する（イシュー #1583）。
+fn vjp_elementwise_add_via(
+    ops: &dyn BackendOps,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    via_backend_ops: bool,
+) -> Result<Tensor<f32>, AutodiffError> {
+    if !via_backend_ops {
+        return Ok(eval::add(a, b));
+    }
+    match ops.add(a, b) {
+        Ok(out) => {
+            let expected = fandhe_ai_tensor_core::broadcast_shape(a.shape(), b.shape())
+                .map_err(|err| AutodiffError::Backend(BackendError::ShapeMismatch(err)))?;
+            if out.shape() != expected.as_slice() {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: out.shape().to_vec(),
+                        rhs: expected,
+                    },
+                )));
+            }
+            Ok(out)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::add(a, b)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
 /// `nodes` から、各入力 `NodeId` への勾配寄与を返す。`out_value` は
@@ -116,8 +236,8 @@ pub(crate) fn vjp(
         Op::Mul(a, b) => {
             let a_val = materialize_fallible(nodes, ops, a)?;
             let b_val = materialize_fallible(nodes, ops, b)?;
-            let da = reduce_to_shape(&eval::mul(upstream, b_val), a_val.shape());
-            let db = reduce_to_shape(&eval::mul(upstream, a_val), b_val.shape());
+            let da = reduce_to_shape(&vjp_elementwise_mul(ops, upstream, b_val)?, a_val.shape());
+            let db = reduce_to_shape(&vjp_elementwise_mul(ops, upstream, a_val)?, b_val.shape());
             vec![(a, da), (b, db)]
         }
         Op::Relu(a) => {
@@ -133,13 +253,13 @@ pub(crate) fn vjp(
         Op::Exp(a) => {
             // d/dx exp(x) = exp(x)。forward 記録値 `out_value` を
             // 再利用し `exp` を再計算しない。
-            let da = eval::mul(upstream, out_value);
+            let da = vjp_elementwise_mul(ops, upstream, out_value)?;
             vec![(a, da)]
         }
         Op::Tanh(a) => {
             // d/dx tanh(x) = 1 - tanh(x)^2。同じく `out_value` を再利用。
             let factor = tanh_grad_factor(out_value);
-            let da = eval::mul(upstream, &factor);
+            let da = vjp_elementwise_mul(ops, upstream, &factor)?;
             vec![(a, da)]
         }
         Op::Sigmoid(a) => {
@@ -147,7 +267,7 @@ pub(crate) fn vjp(
             // `Exp`/`Tanh` と同じく forward 記録値 `out_value`
             // （= sigmoid(x)）を再利用し再計算しない（TASK-9.1b・#92）。
             let factor = sigmoid_grad_factor(out_value);
-            let da = eval::mul(upstream, &factor);
+            let da = vjp_elementwise_mul(ops, upstream, &factor)?;
             vec![(a, da)]
         }
         Op::Softmax { input, dim } => {
@@ -2915,4 +3035,235 @@ release ビルドでも検知できるよう `assert!` を使う）"
         assert_eq!(dx.shape(), &shape);
         assert_eq!(dx.numel(), 0);
     }
+
+    // --- イシュー #1583: elementwise VJP の BackendOps 経由化 ---
+    //
+    // `vjp_elementwise_mul`／`vjp_elementwise_add` はビルド時定数
+    // `ELEMENTWISE_VJP_VIA_BACKEND_OPS` の値でゲートされるため、
+    // `_via` バリアントへ両方の値を明示的に渡して両分岐を検証する
+    // （`ELEMENTWISE_VJP_VIA_BACKEND_OPS` 自体の現在値に関わらず
+    // テストが両分岐をカバーする）。
+
+    /// `ops.mul`／`ops.add` を任意のエラーで応答させ、フォールバック・
+    /// エラー伝播の分岐をテストするためだけの `BackendOps` モック。
+    /// `mul`/`add` 以外は到達しないため `unreachable!` で明示的に失敗
+    /// させる（静かな 0 埋め等の判定迂回を作らない。security.md A08）。
+    struct MockOps {
+        mul_result: Option<Result<Tensor<f32>, BackendError>>,
+        add_result: Option<Result<Tensor<f32>, BackendError>>,
+    }
+
+    impl BackendOps for MockOps {
+        fn device(&self) -> fandhe_ai_tensor_core::Device {
+            fandhe_ai_tensor_core::Device::Cpu
+        }
+        fn gemm(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("MockOps::gemm はイシュー #1583 テストでは使わない")
+        }
+        fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            match &self.add_result {
+                Some(Ok(t)) => Ok(t.clone()),
+                Some(Err(e)) => Err(clone_backend_error(e)),
+                None => Ok(crate::eval::add(a, b)),
+            }
+        }
+        fn mul(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            match &self.mul_result {
+                Some(Ok(t)) => Ok(t.clone()),
+                Some(Err(e)) => Err(clone_backend_error(e)),
+                None => Ok(crate::eval::mul(a, b)),
+            }
+        }
+        fn relu(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("MockOps::relu はイシュー #1583 テストでは使わない")
+        }
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("MockOps::exp はイシュー #1583 テストでは使わない")
+        }
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("MockOps::tanh はイシュー #1583 テストでは使わない")
+        }
+        fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("MockOps::sum はイシュー #1583 テストでは使わない")
+        }
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("MockOps::max はイシュー #1583 テストでは使わない")
+        }
+    }
+
+    /// `BackendError` は `Clone` を持たないため、テスト用に必要な
+    /// variant のみ手動で複製する（`Unsupported`／`ShapeMismatch`）。
+    fn clone_backend_error(e: &BackendError) -> BackendError {
+        match e {
+            BackendError::Unsupported(msg) => BackendError::Unsupported(msg.clone()),
+            BackendError::ShapeMismatch(err) => BackendError::ShapeMismatch(err.clone()),
+            other => panic!("clone_backend_error: 未対応の variant {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vjp_elementwise_mul_via_false_uses_eval_reference() {
+        let g = t(&[1.0, 2.0, 3.0, -4.0], &[2, 2]);
+        let rhs = t(&[5.0, -6.0, 0.5, 2.0], &[2, 2]);
+        let got = vjp_elementwise_mul_via(&test_ops(), &g, &rhs, false).unwrap();
+        let expected = eval::mul(&g, &rhs);
+        assert_eq!(dense_vec(&got), dense_vec(&expected));
+    }
+
+    /// ゲート `true`・`TestOps`（`ops.mul` が `eval::mul` へ委譲する
+    /// 参照実装）経由でも `eval::mul` 直呼びと bit 完全一致する
+    /// （NaN／-0.0 を含む。単一 IEEE 演算のため）。
+    #[test]
+    fn vjp_elementwise_mul_via_true_matches_eval_bit_exact() {
+        let g = t(&[f32::NAN, -0.0, 1.0, 2.0], &[2, 2]);
+        let rhs = t(&[3.0, 4.0, -0.0, f32::NAN], &[2, 2]);
+        let got = vjp_elementwise_mul_via(&test_ops(), &g, &rhs, true).unwrap();
+        let expected = eval::mul(&g, &rhs);
+        for (a, b) in dense_vec(&got).iter().zip(dense_vec(&expected).iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    /// ブロードキャストを伴う `g ⊙ rhs` も `eval::mul` と一致する
+    /// （`Op::Mul` の呼び出しパターン: `upstream` は forward 出力
+    /// shape、`rhs` は入力側 shape で異なりうる）。
+    #[test]
+    fn vjp_elementwise_mul_via_true_handles_broadcast() {
+        let g = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let rhs = t(&[10.0, 20.0, 30.0], &[3]);
+        let got = vjp_elementwise_mul_via(&test_ops(), &g, &rhs, true).unwrap();
+        let expected = eval::mul(&g, &rhs);
+        assert_eq!(got.shape(), expected.shape());
+        assert_eq!(dense_vec(&got), dense_vec(&expected));
+    }
+
+    /// `ops.mul` が `BackendError::Unsupported` を返した場合のみ
+    /// `eval::mul` へフォールバックすることを確認する（vjp_elementwise_
+    /// mul_via doc 参照）。
+    #[test]
+    fn vjp_elementwise_mul_via_true_falls_back_to_eval_on_unsupported() {
+        let g = t(&[1.0, 2.0], &[2]);
+        let rhs = t(&[3.0, 4.0], &[2]);
+        let mock = MockOps {
+            mul_result: Some(Err(BackendError::Unsupported("test".to_string()))),
+            add_result: None,
+        };
+        let got = vjp_elementwise_mul_via(&mock, &g, &rhs, true).unwrap();
+        let expected = eval::mul(&g, &rhs);
+        assert_eq!(dense_vec(&got), dense_vec(&expected));
+    }
+
+    /// `Unsupported` 以外のエラー（例: デバイス割当失敗を模した
+    /// `ShapeMismatch`）は暗黙にフォールバックせず
+    /// `AutodiffError::Backend` として伝播する（fail-closed。
+    /// security.md A08）。
+    #[test]
+    fn vjp_elementwise_mul_via_true_propagates_non_unsupported_error() {
+        let g = t(&[1.0, 2.0], &[2]);
+        let rhs = t(&[3.0, 4.0], &[2]);
+        let mock = MockOps {
+            mul_result: Some(Err(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: vec![2],
+                    rhs: vec![3],
+                },
+            ))),
+            add_result: None,
+        };
+        let err = vjp_elementwise_mul_via(&mock, &g, &rhs, true).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    /// バックエンド実装が誤った shape のテンソルを返した場合、
+    /// 静かに受け入れず fail-closed でエラーにする
+    /// （`vjp_elementwise_mul_via` doc 参照）。
+    #[test]
+    fn vjp_elementwise_mul_via_true_rejects_wrong_output_shape() {
+        let g = t(&[1.0, 2.0], &[2]);
+        let rhs = t(&[3.0, 4.0], &[2]);
+        let wrong_shape = t(&[1.0, 2.0, 3.0], &[3]);
+        let mock = MockOps {
+            mul_result: Some(Ok(wrong_shape)),
+            add_result: None,
+        };
+        let err = vjp_elementwise_mul_via(&mock, &g, &rhs, true).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn vjp_elementwise_add_via_false_uses_eval_reference() {
+        let a = t(&[1.0, 2.0, 3.0, -4.0], &[2, 2]);
+        let b = t(&[5.0, -6.0, 0.5, 2.0], &[2, 2]);
+        let got = vjp_elementwise_add_via(&test_ops(), &a, &b, false).unwrap();
+        let expected = eval::add(&a, &b);
+        assert_eq!(dense_vec(&got), dense_vec(&expected));
+    }
+
+    /// `backward.rs::accumulate` の fan-out 合算（同 shape の 2 項和）を
+    /// 模した bit 完全一致確認（NaN／-0.0 込み）。
+    #[test]
+    fn vjp_elementwise_add_via_true_matches_eval_bit_exact() {
+        let a = t(&[f32::NAN, -0.0, 1.0, 2.0], &[2, 2]);
+        let b = t(&[3.0, 4.0, -0.0, f32::NAN], &[2, 2]);
+        let got = vjp_elementwise_add_via(&test_ops(), &a, &b, true).unwrap();
+        let expected = eval::add(&a, &b);
+        for (x, y) in dense_vec(&got).iter().zip(dense_vec(&expected).iter()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    #[test]
+    fn vjp_elementwise_add_via_true_falls_back_to_eval_on_unsupported() {
+        let a = t(&[1.0, 2.0], &[2]);
+        let b = t(&[3.0, 4.0], &[2]);
+        let mock = MockOps {
+            mul_result: None,
+            add_result: Some(Err(BackendError::Unsupported("test".to_string()))),
+        };
+        let got = vjp_elementwise_add_via(&mock, &a, &b, true).unwrap();
+        let expected = eval::add(&a, &b);
+        assert_eq!(dense_vec(&got), dense_vec(&expected));
+    }
+
+    #[test]
+    fn vjp_elementwise_add_via_true_propagates_non_unsupported_error() {
+        let a = t(&[1.0, 2.0], &[2]);
+        let b = t(&[3.0, 4.0], &[2]);
+        let mock = MockOps {
+            mul_result: None,
+            add_result: Some(Err(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: vec![2],
+                    rhs: vec![3],
+                },
+            ))),
+        };
+        let err = vjp_elementwise_add_via(&mock, &a, &b, true).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    /// `ELEMENTWISE_VJP_VIA_BACKEND_OPS` の現在の出荷値（ドリフト検出。
+    /// `docs/perf/elementwise-vjp-backend-ops.md` の verdict と一致する
+    /// ことを確認する。値を変える場合は同 doc の verdict 更新とセットで
+    /// 変更すること）。
+    #[test]
+    fn elementwise_vjp_via_backend_ops_gate_matches_documented_default() {
+        assert!(!ELEMENTWISE_VJP_VIA_BACKEND_OPS);
+    }
+
+    // `Op::Mul`／`Op::Exp`／`Op::Tanh`／`Op::Sigmoid` の既存 grad-check
+    // テスト群（本ファイル冒頭。数値微分との突合）はゲート値に関わらず
+    // 現行ビルド設定（`ELEMENTWISE_VJP_VIA_BACKEND_OPS`）の下で実行され、
+    // 既に green であることを既存テスト実行で確認済み（`vjp` 経由の
+    // 統合経路のカバレッジは既存テストが担う。本節は `vjp_elementwise_
+    // *_via` 単体のカバレッジを補う）。
 }

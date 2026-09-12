@@ -1,0 +1,6 @@
+機体: Apple M4 Max（macOS 26.6.2・Darwin 25.6.0・Mac16,6）
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+デバイス: metal
+計測方式: record_only（専有ゲートなし・共有負荷下）
+uptime（計測直前）: load averages 7.71 9.45 7.17（他セッション並走の共有負荷。cpu 計測と同時刻帯）
+内部ホスト名: マスク済み（含めない）

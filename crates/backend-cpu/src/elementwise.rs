@@ -372,15 +372,76 @@ fn increment_index(index: &mut [usize], shape: &[usize]) {
     }
 }
 
+/// [`binary_elementwise`] general path 用の 1 オペランド読み出し抽象
+/// （イシュー #1583）。`autodiff::grad::MaskReadOperand`（#1577）と同型の
+/// 設計で、`Tensor::get`（rank・範囲検査つきの要素ごとアクセス）を経由せず
+/// 借用スライスへ直接インデックスする。`binary_elementwise` は呼び出し前に
+/// 両オペランドを `broadcast_to(&out_shape)` 済みのため、ここでの `View`
+/// stride は broadcast 拡張軸の stride 0 も含みうる。
+enum ElementwiseReadOperand<'a> {
+    Contig(&'a [f32]),
+    View {
+        span: &'a [f32],
+        strides: Vec<usize>,
+    },
+}
+
+impl<'a> ElementwiseReadOperand<'a> {
+    /// `as_slice()`（真に contiguous）を最優先、次に `as_view_slice()`
+    /// （非負 stride の view。broadcast 拡張軸の stride 0 を含む）を試す。
+    /// いずれも失敗する場合（負 stride 等。現行公開 API の
+    /// `transpose`/`narrow`/`broadcast_to` はいずれも負 stride を生成
+    /// しないため到達しないが、将来拡張への fail-safe）は `None` を返し、
+    /// 呼び出し元 [`binary_elementwise`] は `Tensor::get` 経由の既存経路
+    /// へ経路全体を丸ごとフォールバックする（部分的に混在させない。
+    /// `.claude/rules/security.md` A08 が禁じる判定迂回ではない）。
+    fn classify(t: &'a Tensor<f32>) -> Option<Self> {
+        if let Some(s) = t.as_slice() {
+            return Some(Self::Contig(s));
+        }
+        let span = t.as_view_slice()?;
+        let strides: Vec<usize> = t
+            .strides()
+            .iter()
+            .map(|&s| usize::try_from(s).ok())
+            .collect::<Option<_>>()?;
+        Some(Self::View { span, strides })
+    }
+
+    /// `Contig` は `flat`（行優先の平坦 index）、`View` は `idx` と
+    /// strides の内積で計算したオフセットで読む。`as_view_slice()` が
+    /// 保証する `span`（`Tensor::as_view_slice` doc の
+    /// `span = 1 + Σ (shape_i − 1)·stride_i`）により、`classify` 呼び出し
+    /// 元が渡す `out_shape` 範囲内の `idx` では常に `Some` を返す
+    /// （`MaskReadOperand::read` と同じ安全性の根拠）。
+    #[inline]
+    fn read(&self, idx: &[usize], flat: usize) -> Option<f32> {
+        match self {
+            Self::Contig(s) => s.get(flat).copied(),
+            Self::View { span, strides } => {
+                let mut off = 0usize;
+                for (&i, &st) in idx.iter().zip(strides.iter()) {
+                    off = off.checked_add(i.checked_mul(st)?)?;
+                }
+                span.get(off).copied()
+            }
+        }
+    }
+}
+
 /// 二項 elementwise 演算の Tensor 入口共通処理。
 ///
 /// `elementwise_out_shape`（`tensor-core::broadcast_shape` 委譲）で出力
 /// shape を確定し、`Tensor::broadcast_to` で両オペランドを共通 shape の
 /// view（拡張軸は stride 0 の zero-copy read）に揃える。両 view が
 /// contiguous な場合（ブロードキャスト・view を伴わない同一 shape 入力）は
-/// `slice_kernel` へ直行し、そうでない場合は `Tensor::get` による strided
-/// 反復で読む（`contiguous()` による事前実体化はメモリ倍増を招くため
-/// 行わない。計画の設計方針）。
+/// `slice_kernel` へ直行する。そうでない場合、両オペランドとも
+/// [`ElementwiseReadOperand::classify`] が成功すれば stride 読み（`Tensor::
+/// get` の rank・範囲検査を経由しない借用ベース読み。イシュー #1583。
+/// `autodiff::grad::MaskReadOperand`〈#1577〉と同型）へ、失敗する場合の
+/// み `Tensor::get` による strided 反復（変更前の経路）へフォールバックする
+/// （`contiguous()` による事前実体化はメモリ倍増を招くため行わない。
+/// 計画の設計方針）。
 fn binary_elementwise(
     a: &Tensor<f32>,
     b: &Tensor<f32>,
@@ -399,11 +460,36 @@ fn binary_elementwise(
         return Tensor::new(out, &out_shape);
     }
 
-    // general path: ブロードキャスト拡張軸・非 contiguous view を含む。
-    // 出力 shape 上を行優先で走査しつつ `Tensor::get` で strided に読む。
     let numel = out_shape.iter().product::<usize>();
-    let mut out = Vec::with_capacity(numel);
     let mut index = vec![0usize; out_shape.len()];
+
+    if let (Some(a_op), Some(b_op)) = (
+        ElementwiseReadOperand::classify(&ba),
+        ElementwiseReadOperand::classify(&bb),
+    ) {
+        // stride 読み経路: ブロードキャスト拡張軸・非 contiguous view を
+        // 含むが、両オペランドとも非負 stride（イシュー #1583）。
+        let mut out = Vec::with_capacity(numel);
+        for flat in 0..numel {
+            let x = a_op.read(&index, flat);
+            let y = b_op.read(&index, flat);
+            debug_assert!(
+                x.is_some() && y.is_some(),
+                "binary_elementwise: as_view_slice の span 保証が破れ、境界外アクセスを検知した                  (index {index:?})"
+            );
+            out.push(scalar_kernel(
+                x.unwrap_or_else(Element::zero),
+                y.unwrap_or_else(Element::zero),
+            ));
+            increment_index(&mut index, &out_shape);
+        }
+        return Tensor::new(out, &out_shape);
+    }
+
+    // フォールバック経路: `Tensor::get` による strided 反復（変更前の
+    // 経路と同一。`ElementwiseReadOperand::classify` が失敗した場合
+    // （現行公開 API では到達しない）のみここに来る）。
+    let mut out = Vec::with_capacity(numel);
     for _ in 0..numel {
         let x = ba.get(&index);
         let y = bb.get(&index);
