@@ -223,6 +223,59 @@ pub struct GemmChecksum {
     pub output: Option<Tensor<f32>>,
 }
 
+/// [`BackendOps::linalg_qr`] の戻り値（イシュー #1621。`docs/
+/// autodiff-linalg-design.md`）。`torch.linalg.qr(mode="reduced")` と
+/// 同じ reduced QR（`A: [m,n]` → `q: [m,k]`・`r: [k,n]`、`k = min(m,n)`）。
+/// `r` の対角は非負に正規化する（`fandhe_ai_autodiff::eval::linalg`
+/// と本クレートの実装が同一符号規約を採る契約。設計文書 §3.5「符号・
+/// ゲージ規約」）。フィールドは `pub`（`MseReduction`／`Activation` の
+/// ような `#[non_exhaustive]` enum ではなく、バックエンド実装が値を
+/// 直接構築する struct のため。`GemmChecksum` と同方針）。
+#[derive(Debug, Clone)]
+pub struct QrFactors {
+    /// `[m, k]`（`k = min(m, n)`）。列直交（`QᵀQ ≈ I_k`）。
+    pub q: Tensor<f32>,
+    /// `[k, n]`（`k = min(m, n)`）。上三角・対角非負。
+    pub r: Tensor<f32>,
+}
+
+/// [`BackendOps::linalg_svd`] の戻り値（イシュー #1621）。
+/// `torch.linalg.svd(A, full_matrices=False)` と同じ reduced SVD
+/// （`A: [m,n]` → `u: [m,k]`・`s: [k]`・`vh: [k,n]`、`k = min(m,n)`）。
+/// `s` は降順（同値は安定ソート）に正規化する契約（設計文書 §3.5）。
+#[derive(Debug, Clone)]
+pub struct SvdFactors {
+    /// `[m, k]`（`k = min(m, n)`）。列直交。
+    pub u: Tensor<f32>,
+    /// `[k]`。特異値（降順・非負）。
+    pub s: Tensor<f32>,
+    /// `[k, n]`（`k = min(m, n)`）。行直交（`V^T`）。
+    pub vh: Tensor<f32>,
+}
+
+/// [`BackendOps::linalg_matrix_norm`] が計算する行列ノルムの種類
+/// （イシュー #1621。`torch.linalg.matrix_norm` の `ord` 引数のうち
+/// facade が対応する 5 種）。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`Activation`／`MseReduction`
+/// と同方針）。将来 `ord=p`（任意次数）・`dim` 指定版を追加しうる
+/// （設計文書「スコープ外」節）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatrixNormOrd {
+    /// Frobenius ノルム（`√Σ a_ij²`）。
+    Fro,
+    /// 最大絶対列和（`max_j Σ_i |a_ij|`）。
+    One,
+    /// 最大絶対行和（`max_i Σ_j |a_ij|`）。
+    Inf,
+    /// 核ノルム（特異値の総和）。
+    Nuc,
+    /// スペクトルノルム（最大特異値）。
+    Spectral,
+}
+
 /// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
 /// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
 ///
@@ -1182,6 +1235,105 @@ pub trait BackendOps {
             "gemm_checksum: default fail-safe (no device-side reduction kernel available)".into(),
         ))
     }
+
+    /// `A^{-1}`（`A: [n,n]`）。イシュー #1621・`docs/autodiff-linalg-design.md`。
+    ///
+    /// # デフォルト実装
+    /// `gemm_checksum` と同じ非破壊拡張パターン。既定は
+    /// [`BackendError::Unsupported`]（GPU バックエンドは本イシュー時点で
+    /// 未実装。`fandhe_ai_autodiff::var::Var::inv` がこの `Unsupported`
+    /// のみをホスト参照実装 `eval::linalg::inv` へフォールバックし、
+    /// それ以外のエラー〈特異行列の `InvalidArgument` 等〉は伝播する）。
+    /// `A` が特異（ピボットが厳密 0）の場合は `BackendError::
+    /// InvalidArgument` を返す契約とする。
+    fn linalg_inv(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_inv: default fail-safe (no device-side linear-algebra kernel available)".into(),
+        ))
+    }
+
+    /// `A X = B` を解く（`A: [n,n]`・`B: [n,k]` → `X: [n,k]`）。
+    /// イシュー #1621。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    /// `A` が特異の場合は [`BackendError::InvalidArgument`]。
+    fn linalg_solve(
+        &self,
+        _a: &Tensor<f32>,
+        _b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_solve: default fail-safe (no device-side linear-algebra kernel available)"
+                .into(),
+        ))
+    }
+
+    /// `det(A)`（`A: [n,n]` → スカラー `[]`）。イシュー #1621。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    /// 特異行列は `0.0` を返す（`torch.linalg.det` と同じくエラーに
+    /// しない。設計文書 §3.5「エラー分類」）。
+    fn linalg_det(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_det: default fail-safe (no device-side linear-algebra kernel available)".into(),
+        ))
+    }
+
+    /// Cholesky 分解（`A: [n,n]`〈対称正定値。下三角のみ読む〉→
+    /// `L: [n,n]`〈下三角、`A = L Lᵀ`〉）。イシュー #1621。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    /// 非正定値（対角が非有限または非正）の場合は
+    /// [`BackendError::InvalidArgument`]。
+    fn linalg_cholesky(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_cholesky: default fail-safe (no device-side linear-algebra kernel available)"
+                .into(),
+        ))
+    }
+
+    /// reduced QR 分解（`A: [m,n]` → [`QrFactors`]）。イシュー #1621。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    fn linalg_qr(&self, _a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_qr: default fail-safe (no device-side linear-algebra kernel available)".into(),
+        ))
+    }
+
+    /// reduced SVD（`A: [m,n]` → [`SvdFactors`]）。イシュー #1621。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    /// 反復が収束しない場合は [`BackendError::InvalidArgument`]。
+    fn linalg_svd(&self, _a: &Tensor<f32>) -> Result<SvdFactors, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_svd: default fail-safe (no device-side linear-algebra kernel available)".into(),
+        ))
+    }
+
+    /// 行列ノルム（`A: [m,n]`・`ord` → スカラー `[]`）。イシュー #1621。
+    /// `ord` が [`MatrixNormOrd::Nuc`]／[`MatrixNormOrd::Spectral`] の
+    /// 場合、実装内部で特異値分解を用いてよい（`Var` 側で `svd` ノードを
+    /// 別途合成しない。設計文書 §3.2）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    fn linalg_matrix_norm(
+        &self,
+        _a: &Tensor<f32>,
+        _ord: MatrixNormOrd,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "linalg_matrix_norm: default fail-safe (no device-side linear-algebra kernel \
+             available)"
+                .into(),
+        ))
+    }
 }
 
 /// 複数の `&dyn BackendOps` を横断して `device` に一致する実装を選択する。
@@ -1654,5 +1806,45 @@ mod tests {
         let result = ops.gemm_checksum(&a, &b, ChecksumReadout::ChecksumOnly);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::linalg_*`]（7 メソッド）の既定実装がいずれも
+    /// fail-safe（[`BackendError::Unsupported`]）を返すことを確認する
+    /// （イシュー #1621。`gemm_checksum_default_is_unsupported` と同型の
+    /// 回帰ガード）。
+    #[test]
+    fn linalg_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = Tensor::new(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+        let b = Tensor::new(vec![1.0, 2.0], &[2, 1]).unwrap();
+
+        assert!(matches!(
+            ops.linalg_inv(&a),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.linalg_solve(&a, &b),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.linalg_det(&a),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.linalg_cholesky(&a),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.linalg_qr(&a),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.linalg_svd(&a),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.linalg_matrix_norm(&a, MatrixNormOrd::Fro),
+            Err(BackendError::Unsupported(_))
+        ));
     }
 }
