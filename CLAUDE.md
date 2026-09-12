@@ -107,7 +107,7 @@ fandhe-ai/
     ├── kernel-fusion.md     # TASK-12.2b カーネル融合の適用範囲・限界（複合WLで融合を性能目標の前提にしない。#168）
     ├── license-matrix.md    # 許容依存 8 区分のライセンス可否表（TASK-1.3）
     ├── matmul-vjp-zero-copy-decision.md # matmul VJP の転置ゼロコピー化（`eval::matmul` の stride 対応）・CPU BLIS／CUDA／Metal gemm 結線を別イシューへ引き継ぐスコープ判断・実測記入欄（#1043 ツリー・#1046）
-    ├── metal-grad-reduction-parity-judgment-decision.md # 勾配の長軸縮約（dw 行方向蓄積・bias 勾配の行方向縮約）の Metal 実装形の決定記録。当初は f32 のみの Neumaier 補償和 + 2 の冪 scale で「`f64` 相当」を狙い、事前判定可能な Tier A/B 2 層契約（PR #1666 codex-review 複数回の P1／P2 指摘を経て改訂）を検討したが、binary64 逐次加算の 64bit 整数ソフトウェアエミュレーションでホスト `f64` 逐次和と bit 完全一致させる方式へ転換し不採用（検討経緯のみ本文に残す）。**契約確定・実装は PR #1659（イシュー #1566）で導入予定・未マージ**（base 時点では `soft_f64.rs` 等は未存在。実装記録節はマージ後に追記）
+    ├── metal-grad-reduction-parity-judgment-decision.md # 勾配の長軸縮約（dw 行方向蓄積・bias 勾配の行方向縮約）の Metal 実装形の決定記録。当初は f32 のみの Neumaier 補償和 + 2 の冪 scale で「`f64` 相当」を狙い、事前判定可能な Tier A/B 2 層契約（PR #1666 codex-review 複数回の P1／P2 指摘を経て改訂）を検討したが、binary64 逐次加算の 64bit 整数ソフトウェアエミュレーションでホスト `f64` 逐次和と bit 完全一致させる方式へ転換し不採用（検討経緯のみ本文に残す）。**契約確定・実装済み（PR #1659〈イシュー #1566〉2026-09-12 マージ。§6 に実装記録〈ファイル・関数名・M4 Max 実機 bit 一致テスト pass〉を追記済み）**
     ├── oss-comparison-harness-decision.md # OSS 直接比較ハーネス（matrixmultiply・gemm crate・MLX・PyTorch）の恒久化・本体 workspace 外配置の設計判断・matrixmultiply/gemm の許容依存第 9 区分〈ベンチ比較対象〉としての条件付きユーザー承認記録（#755）
     ├── perf/                # 性能実測・下限確定の記録群（`performance-floor-decision.md` ほか。GEMM 最適化ツリー #479 の実測記録を含む）
     │   ├── performance-floor-decision.md # REQ-8 段階的下限の確定判断・追補記録（#158・#386・#393・#577）
