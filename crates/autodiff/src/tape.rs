@@ -313,6 +313,35 @@ pub(crate) enum Op {
         input: NodeId,
         ord: fandhe_ai_tensor_core::MatrixNormOrd,
     },
+    /// `Var::permute` が記録する view ノード（イシュー #1597。`Reshape`/
+    /// `Transpose` と同じ「forward のたびにバッファ確保しない」骨格を
+    /// 任意軸並べ替えへ一般化する。`docs/autodiff-view-recompute-
+    /// decision.md` §5 が予告した拡張）。`perm[k]` は出力軸 `k` が
+    /// 指す入力軸（`Tensor::permute`／ONNX `Transpose` と同じ規約。
+    /// `Var::permute` doc 参照）。`perm` は forward 時点（`Var::permute`）
+    /// で長さ・範囲・重複を検査済み。
+    ///
+    /// `Reshape`／`Transpose` と同じく**ホスト値を持たない**・
+    /// **融合境界**（同上）。VJP（`grad.rs`）は逆置換
+    /// （`inverse_permutation`）で `upstream.permute(&inv)` を適用し
+    /// zero-copy に閉じる。2 軸のみの `perm`（例 `[1, 0]`）は
+    /// `Tensor::transpose(0, 1)` と同一 strides を生成するため、CPU／
+    /// Metal の NT/TN 転置入口（#1213／#1215）の高速経路検出（strides
+    /// 判定）は `permute` 経由でも従来どおり到達する。
+    Permute { input: NodeId, perm: Vec<usize> },
+    /// `Var::broadcast_to`（`Var::expand` はこれへ委譲）が記録する
+    /// view ノード（イシュー #1597）。出力 shape は `Reshape` と同じく
+    /// `TapeNode.shape` に構造的に保持するため payload には持たない。
+    ///
+    /// `Reshape`／`Transpose`／`Permute` と同じく**ホスト値を持たない**・
+    /// **融合境界**（同上）。stride 0 の view（`Tensor::broadcast_to`）
+    /// のため forward は zero-copy。VJP（`grad.rs`）は `Op::Add`／
+    /// `Op::Mul` の暗黙ブロードキャストと同じ縮約（`reduce_to_shape`）
+    /// で upstream を入力 shape へ縮約するため、`Reshape`／`Transpose`／
+    /// `Permute` の VJP（zero-copy）とは異なり勾配バッファを新規確保
+    /// する（`tests/view_zero_alloc.rs` は forward のみを zero-alloc
+    /// 対象とする）。
+    BroadcastTo { input: NodeId },
     /// 行方向 softmax（イシュー #1594）。`BackendOps` に対応メソッドが
     /// あり（`softmax`。既存の `run_fused` canonical プラン一致経路とは
     /// 別の独立エントリ）非融合対象ではないが、`Add`/`Mul`/`Relu`/
@@ -521,14 +550,18 @@ impl Op {
         )
     }
 
-    /// view 系ノード（`reshape`/`transpose`。イシュー #1047）かどうか。
-    /// `push_view` で登録時は `TapeNode::value` を空のまま保つノード
-    /// 種別を指し、`materialize_fallible`／`materialize_non_fallible`
-    /// はこの判定で `resolve_view`（下記）への分岐を選ぶ（初回実体化後は
-    /// 同メソッドが `resolve_view` の結果を `value` へキャッシュする。
-    /// `Op::Reshape` doc 参照）。
+    /// view 系ノード（`reshape`/`transpose`/`permute`/`broadcast_to`。
+    /// イシュー #1047・#1597）かどうか。`push_view` で登録時は
+    /// `TapeNode::value` を空のまま保つノード種別を指し、
+    /// `materialize_fallible`／`materialize_non_fallible` はこの判定で
+    /// `resolve_view`（下記）への分岐を選ぶ（初回実体化後は同メソッドが
+    /// `resolve_view` の結果を `value` へキャッシュする。`Op::Reshape`
+    /// doc 参照）。
     pub(crate) fn is_view(&self) -> bool {
-        matches!(self, Op::Reshape { .. } | Op::Transpose { .. })
+        matches!(
+            self,
+            Op::Reshape { .. } | Op::Transpose { .. } | Op::Permute { .. } | Op::BroadcastTo { .. }
+        )
     }
 }
 
@@ -1297,6 +1330,26 @@ fn resolve_view(nodes: &[TapeNode], id: NodeId) -> Tensor<f32> {
                 debug_assert!(
                     false,
                     "resolve_view: Op::Transpose の再導出が失敗した（forward 側の契約違反）"
+                );
+                safe_zeros(&node.shape)
+            })
+        }
+        Op::Permute { input, perm } => {
+            let base = resolve_view(nodes, *input);
+            base.permute(perm).unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "resolve_view: Op::Permute の再導出が失敗した（forward 側の契約違反）"
+                );
+                safe_zeros(&node.shape)
+            })
+        }
+        Op::BroadcastTo { input } => {
+            let base = resolve_view(nodes, *input);
+            base.broadcast_to(&node.shape).unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "resolve_view: Op::BroadcastTo の再導出が失敗した（forward 側の契約違反）"
                 );
                 safe_zeros(&node.shape)
             })

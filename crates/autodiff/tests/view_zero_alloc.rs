@@ -125,6 +125,70 @@ fn check_reshape_forward_is_near_zero_alloc() {
     );
 }
 
+/// 2b. `Var::permute` の forward が同様に無視できる量しか確保しない
+///     ことを検証する（`tape::Op::Permute`。イシュー #1597）。
+fn check_permute_forward_is_near_zero_alloc() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let leaf = make_leaf();
+    let x = tape.var(&leaf);
+
+    let (p, peak) = measure(|| {
+        let p = x
+            .permute(&[1, 0])
+            .expect("permute([1,0]) は常に成功する（rank 2）");
+        std::hint::black_box(&p);
+        p
+    });
+    std::hint::black_box(&p);
+
+    let peak =
+        peak.expect("GLOBAL_ALLOCATOR がテストバイナリの #[global_allocator] のため Some のはず");
+    let threshold = buffer_bytes() / THRESHOLD_DIVISOR;
+    println!(
+        "check_permute_forward_is_near_zero_alloc: peak={peak} bytes, threshold={threshold} bytes, buffer={} bytes",
+        buffer_bytes()
+    );
+    assert!(
+        peak < threshold,
+        "permute forward の純増分ピーク（{peak} バイト）が閾値（{threshold} バイト。\
+         入力バッファ {} バイトの 1/{THRESHOLD_DIVISOR}）を超えた——zero-copy 契約が破れている疑い",
+        buffer_bytes()
+    );
+}
+
+/// 2c. `Var::broadcast_to` の forward（stride 0 view）が同様に無視できる
+///     量しか確保しないことを検証する（`tape::Op::BroadcastTo`。
+///     イシュー #1597。VJP 側は縮約バッファを確保するため対象外——
+///     本ファイル冒頭 doc 参照）。
+fn check_broadcast_to_forward_is_near_zero_alloc() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let leaf = make_leaf();
+    let x = tape.var(&leaf);
+
+    let (b, peak) = measure(|| {
+        let b = x
+            .broadcast_to(&[2, N, N])
+            .expect("先頭軸新設の broadcast_to は常に成功する");
+        std::hint::black_box(&b);
+        b
+    });
+    std::hint::black_box(&b);
+
+    let peak =
+        peak.expect("GLOBAL_ALLOCATOR がテストバイナリの #[global_allocator] のため Some のはず");
+    let threshold = buffer_bytes() / THRESHOLD_DIVISOR;
+    println!(
+        "check_broadcast_to_forward_is_near_zero_alloc: peak={peak} bytes, threshold={threshold} bytes, buffer={} bytes",
+        buffer_bytes()
+    );
+    assert!(
+        peak < threshold,
+        "broadcast_to forward の純増分ピーク（{peak} バイト）が閾値（{threshold} バイト。\
+         入力バッファ {} バイトの 1/{THRESHOLD_DIVISOR}）を超えた——zero-copy 契約が破れている疑い",
+        buffer_bytes()
+    );
+}
+
 /// 3. view の連鎖を挟んだ `Tape::backward` が、連鎖長に比例した追加
 ///    バッファ確保を発生させないことを検証する（`tape::resolve_view`
 ///    が各ノードで `Arc` 共有のみを行い、実データコピーを重ねない
@@ -189,6 +253,8 @@ fn check_backward_through_view_chain_is_bounded_alloc() {
 fn main() {
     check_transpose_forward_is_near_zero_alloc();
     check_reshape_forward_is_near_zero_alloc();
+    check_permute_forward_is_near_zero_alloc();
+    check_broadcast_to_forward_is_near_zero_alloc();
     check_backward_through_view_chain_is_bounded_alloc();
     println!("view_zero_alloc: all checks passed");
 }

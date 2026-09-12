@@ -748,8 +748,47 @@ pub(crate) fn vjp(
             let da = eval::linalg::matrix_norm_vjp(a_val, ord, g_scalar)?;
             vec![(input, da)]
         }
+        // `Var::permute` が記録する view ノード（イシュー #1597）。
+        // 逆写像は逆置換（`inverse_permutation`）で `upstream` を
+        // permute するだけで閉じる（zero-copy。`tape::Op::Permute`
+        // doc 参照）。
+        Op::Permute { input, perm } => {
+            let inv = inverse_permutation(&perm);
+            let da = upstream.permute(&inv).unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "grad::vjp: Op::Permute の逆伝播で permute が失敗した（forward 側の契約違反）"
+                );
+                upstream.clone()
+            });
+            vec![(input, da)]
+        }
+        // `Var::broadcast_to`（`Var::expand` はこれへ委譲）が記録する
+        // view ノード（イシュー #1597）。`upstream` は out_shape
+        // （ブロードキャスト後）を持つため、`Op::Add`/`Op::Mul` の
+        // 暗黙ブロードキャストと同じ縮約（`reduce_to_shape`）で入力
+        // shape へ縮約する（`tape::Op::BroadcastTo` doc 参照）。
+        Op::BroadcastTo { input } => {
+            let input_shape = &nodes[input.0].shape;
+            let da = reduce_to_shape(upstream, input_shape);
+            vec![(input, da)]
+        }
     };
     Ok(contributions)
+}
+
+/// [`Op::Permute`] の VJP（`vjp` 内）が使う逆置換の算出（イシュー
+/// #1597）。`perm[k] = p` は「出力軸 `k` が入力軸 `p` を指す」ことを
+/// 表すため、逆写像 `inv` は `inv[p] = k` を満たす（`perm ∘ inv ==
+/// identity`）。`Var::permute`（`var.rs`）が push 前に `perm` を
+/// `0..rank` の順列として検査済み（長さ一致・範囲内・重複なし）のため、
+/// 本関数は常に `perm` と同じ長さの妥当な順列を返す（infallible）。
+fn inverse_permutation(perm: &[usize]) -> Vec<usize> {
+    let mut inv = vec![0usize; perm.len()];
+    for (k, &p) in perm.iter().enumerate() {
+        inv[p] = k;
+    }
+    inv
 }
 
 /// 2 次元 `matmul` の転置。shape 検査は forward（`Var::matmul` →
@@ -3338,4 +3377,145 @@ release ビルドでも検知できるよう `assert!` を使う）"
     // 既に green であることを既存テスト実行で確認済み（`vjp` 経由の
     // 統合経路のカバレッジは既存テストが担う。本節は `vjp_elementwise_
     // *_via` 単体のカバレッジを補う）。
+    // --- Permute / BroadcastTo（イシュー #1597） ---
+
+    #[test]
+    fn inverse_permutation_roundtrip() {
+        for perm in [
+            vec![0usize, 1, 2],
+            vec![2, 0, 1],
+            vec![1, 0],
+            vec![0],
+            vec![3, 1, 0, 2],
+        ] {
+            let inv = inverse_permutation(&perm);
+            for (k, &p) in perm.iter().enumerate() {
+                assert_eq!(inv[p], k, "perm={perm:?} inv={inv:?} で往復しない");
+            }
+        }
+    }
+
+    #[test]
+    fn permute_grad_matches_numeric() {
+        let x = t(
+            &[
+                1.0, -2.0, 3.0, 0.5, -1.0, 2.0, 0.25, -0.75, 1.5, -0.5, 2.5, -1.25,
+            ],
+            &[2, 3, 2],
+        );
+        let perm = [2usize, 0, 1];
+        let out_value = x.permute(&perm).unwrap();
+        let s = t(
+            &[
+                1.0, -0.5, 0.3, 2.0, -1.0, 0.5, -0.2, 1.2, 0.7, -0.3, 1.1, -0.9,
+            ],
+            out_value.shape(),
+        );
+
+        let g = s.clone();
+        let inv = inverse_permutation(&perm);
+        let da = g.permute(&inv).unwrap();
+
+        let num_da = numeric_grad_unary(&x, &s, |v| v.permute(&perm).unwrap());
+        assert_grad_close("permute dx", &da, &num_da);
+    }
+
+    #[test]
+    fn broadcast_to_grad_matches_numeric_new_leading_axis() {
+        // (a) 先頭軸新設: [3] → [2,3]
+        let x = t(&[1.0, -2.0, 0.5], &[3]);
+        let out_shape = [2usize, 3];
+        let out_value = x.broadcast_to(&out_shape).unwrap();
+        let s = t(&[1.0, -0.5, 0.3, 2.0, -1.0, 0.5], &out_shape);
+
+        let da = reduce_to_shape(&s, x.shape());
+        let num_da = numeric_grad_unary(&x, &s, |v| v.broadcast_to(&out_shape).unwrap());
+        assert_grad_close("broadcast_to (new leading axis) dx", &da, &num_da);
+
+        // out_value は forward zero-copy の確認（値そのものの検証は
+        // shape 一致で足りる。broadcast_to の値契約自体は tensor-core
+        // 側で検証済み）。
+        assert_eq!(out_value.shape(), &out_shape);
+    }
+
+    #[test]
+    fn broadcast_to_grad_matches_numeric_size_one_axis() {
+        // (b) size-1 軸拡張: [2,1] → [2,3]
+        let x = t(&[1.0, -2.0], &[2, 1]);
+        let out_shape = [2usize, 3];
+        let s = t(&[1.0, -0.5, 0.3, 2.0, -1.0, 0.5], &out_shape);
+
+        let da = reduce_to_shape(&s, x.shape());
+        let num_da = numeric_grad_unary(&x, &s, |v| v.broadcast_to(&out_shape).unwrap());
+        assert_grad_close("broadcast_to (size-1 axis) dx", &da, &num_da);
+    }
+
+    #[test]
+    fn broadcast_to_grad_matches_numeric_scalar() {
+        // (c) rank 0 スカラー → [2,2]
+        let x = t(&[2.0], &[]);
+        let out_shape = [2usize, 2];
+        let s = t(&[1.0, -0.5, 0.3, 2.0], &out_shape);
+
+        let da = reduce_to_shape(&s, x.shape());
+        let num_da = numeric_grad_unary(&x, &s, |v| v.broadcast_to(&out_shape).unwrap());
+        assert_grad_close("broadcast_to (scalar) dx", &da, &num_da);
+    }
+
+    #[test]
+    fn vjp_dispatch_permute_returns_single_input() {
+        let a = t(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let perm = vec![1usize, 0];
+        let out_value = a.permute(&perm).unwrap();
+        let g = t(&[1.0, -1.0, 2.0, 0.5, -0.5, 1.5], out_value.shape());
+        let nodes = vec![leaf_node(a)];
+        let op = Op::Permute {
+            input: NodeId(0),
+            perm: perm.clone(),
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = g.permute(&inverse_permutation(&perm)).unwrap();
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    #[test]
+    fn vjp_dispatch_broadcast_to_returns_single_input() {
+        let a = t(&[1.0, -2.0, 0.5], &[3]);
+        let out_shape = [2usize, 3];
+        let out_value = a.broadcast_to(&out_shape).unwrap();
+        let g = t(&[1.0, -1.0, 2.0, 0.5, -0.5, 1.5], &out_shape);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::BroadcastTo { input: NodeId(0) };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = reduce_to_shape(&g, &[3]);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
 }

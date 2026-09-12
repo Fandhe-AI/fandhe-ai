@@ -118,6 +118,16 @@
 //! これは `docs/kernel-fusion.md` が既に確定させた「transpose を挟む
 //! 連鎖は融合しない」方針と整合する。
 
+//! #1597 で同じ `push_view`／`resolve_view` 骨格を任意軸並べ替え・
+//! ブロードキャストへ一般化した `Var::permute`（`tape::Op::Permute`。
+//! zero-copy）・`Var::broadcast_to`／`expand`（`tape::Op::BroadcastTo`。
+//! forward は stride 0 view で zero-copy だが VJP は `Op::Add`/`Op::Mul`
+//! の暗黙ブロードキャストと同じ `reduce_to_shape` 縮約を使うため勾配
+//! バッファを確保する）を追加した。`Var::squeeze`／`unsqueeze`／
+//! `flatten` は新規 `Op` を持たず `Var::reshape` へ委譲する（案 A
+//! 制約を継承。`docs/autodiff-view-recompute-decision.md` §5 が予告
+//! した拡張）。
+
 mod backward;
 pub mod compat;
 mod default_ops;
