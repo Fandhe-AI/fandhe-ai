@@ -1457,9 +1457,11 @@ mod tests {
         let g = base
             .narrow(1, 1, 2)
             .expect("narrow: 事前に範囲内であることを確認済み");
-        debug_assert!(
+        assert!(
             g.as_slice().is_none(),
-            "narrow(dim=1) は非連続 view のはず（本テストが検証したい前提）"
+            "narrow(dim=1) は非連続 view のはず（本テストが検証したい前提。\
+release ビルドの `cargo test --release` でも前提崩れを検知できるよう \
+`debug_assert!` ではなく `assert!` を使う）"
         );
         let mask_src = t(&[-1.0, 1.0, 0.0, -2.0, 3.0, -3.0], &[3, 2]);
 
@@ -1480,7 +1482,11 @@ mod tests {
         let g = transpose2d(&tmp_g); // shape [3, 2]、非連続 view
         let tmp_mask = t(&[1.0, -1.0, 0.0, 2.0, -2.0, 0.5], &[2, 3]);
         let mask_src = transpose2d(&tmp_mask); // shape [3, 2]、非連続 view
-        debug_assert!(g.as_slice().is_none() && mask_src.as_slice().is_none());
+        assert!(
+            g.as_slice().is_none() && mask_src.as_slice().is_none(),
+            "両オペランドとも非連続 view のはず（本テストが検証したい前提。\
+release ビルドでも検知できるよう `assert!` を使う）"
+        );
 
         let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
         let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
