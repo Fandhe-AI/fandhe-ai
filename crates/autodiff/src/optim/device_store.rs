@@ -3546,9 +3546,18 @@ mod tests {
             b_grad_host.contiguous().as_slice().unwrap(),
             // イシュー #1566: `MockDeviceOps` が bias 縮約にも対応した
             // ため、本テストの bias は実際には resident 経由（staging）
-            // で充填される（`grads` フォールバックではない）。値の
-            // 一致自体は `reduce_bias_grad_rows` が `reduce_to_shape`
-            // と bit 完全一致するため変わらない。
+            // で充填される（`grads` フォールバックではない）。本テストの
+            // `x` は単一行（`[1, 2]`）のため `reduce_bias_grad_rows` は
+            // 加算を経由せず直接コピーする特殊扱い（`m == 1`）が働き、
+            // `reduce_to_shape`（こちらも `m == 1` は縮約をスキップし
+            // コピーのみ）と値が一致する。2026-09-12 ユーザー承認 A
+            // （PR #1659）により `reduce_bias_grad_rows` は `m >= 2` で
+            // `f64` アキュムレータへ切り替わっており、一般には
+            // `reduce_to_shape`（`f32` 逐次和）と bit 完全一致しない
+            // （`crates/autodiff/src/grad.rs::reduce_bias_grad` doc・
+            // `crates/facade/tests/device_param_store_grad_readout.rs::
+            // param_grads_to_host_matches_host_only_path_two_layer` の
+            // `m >= 2` 回帰参照）。
             "param_grads_to_host の bias 勾配（resident 経由）が host-only 経路と食い違う"
         );
     }

@@ -623,9 +623,10 @@ pub trait BackendOps {
     /// 計算するが、加えて `b`（`Op::LinearResident` の VJP では
     /// `d_weight = x_t @ g` の `g` そのもの）の**行方向の和**（bias 勾配。
     /// `autodiff::grad::reduce_to_shape` の rank-2→rank-1 特殊ケースと
-    /// 同一アルゴリズム）を計算できる場合は `out` の別範囲へ同時に
-    /// 書き込むための非破壊拡張（イシュー #1566・`docs/backend-metal-
-    /// command-batching-design.md` §10）。
+    /// 同型の縮約〈shape の対応は同一だが蓄積方式は下記「# 引数」参照〉）
+    /// を計算できる場合は `out` の別範囲へ同時に書き込むための非破壊
+    /// 拡張（イシュー #1566・`docs/backend-metal-command-batching-
+    /// design.md` §10）。
     ///
     /// `docs/perf/train-resident-grad-device-update.md`（#1212）で
     /// `d_weight` を resident staging へ直接書き込む経路が確立した後も、
@@ -643,11 +644,18 @@ pub trait BackendOps {
     ///
     /// `bias` が `Some((bias_offset, n))` の場合、`out[bias_offset ..
     /// bias_offset + n]` へ `b` の行方向和（`b: [m, n]` の各列 `j` に
-    /// ついて `sum_{i=0}^{m-1} b[i, j]`。走査順は行 `0..m` 昇順・初期値
-    /// `0.0f32`・単純な `+=`）を書き込む。`bias_offset + n` は
-    /// [`Self::gemm_fp32_strict_into`] の `out_offset + m*n` と同じ
-    /// 検査規約（`checked_add`・範囲外は [`BackendError::
-    /// InvalidArgument`]。REQ-8・OWASP A03）を適用する。
+    /// ついて `sum_{i=0}^{m-1} b[i, j]`。走査順は行 `0..m` 昇順）を書き
+    /// 込む。蓄積方式は `.claude/rules/coding-rust.md` の勾配長軸縮約
+    /// `f64` アキュムレータ方針（2026-09-12 ユーザー承認 A）に従い、
+    /// 実装はホスト `f64` アキュムレータまたは Metal Neumaier 改良版
+    /// Kahan 補償和のいずれかを用いる（実装依存。`fandhe_ai_backend_
+    /// metal::shaders::gemm_bias_grad_reduce_f32`・`fandhe_ai_backend_
+    /// metal::layout::reduce_bias_grad_rows_host` 参照）。このため
+    /// 実装間・ホスト参照実装との一致は bit 完全一致ではなく REQ-2
+    /// 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で
+    /// 判定する。`bias_offset + n` は [`Self::gemm_fp32_strict_into`]
+    /// の `out_offset + m*n` と同じ検査規約（`checked_add`・範囲外は
+    /// [`BackendError::InvalidArgument`]。REQ-8・OWASP A03）を適用する。
     ///
     /// # 戻り値
     ///

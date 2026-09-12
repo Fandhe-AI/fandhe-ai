@@ -332,7 +332,14 @@ reduce_bias_grad_rows_host`）は `f64` アキュムレータへ、GPU カーネ
 （`gemm_bias_grad_reduce_f32`。Metal は `double` 非対応）は Neumaier 改良版
 Kahan 補償和へ統一した。`m == 1`／`rows == 1` の直接コピー特殊扱いは不変。
 `reduce_to_shape` 自体（本イシューが触れない他の呼び出し箇所）の `f32` 逐次和は
-引き続き未整理のまま残る（同上 §10.8）。
+引き続き未整理のまま残る（同上 §10.8）。**追補（PR #1659 codex-review 追加
+指摘・同上 §10.9）**: `backend-metal` 側の統一だけでは `Op::LinearResident` が
+resident 非対応バックエンド（CPU／CUDA。常時該当）のフォールバック時に依然
+`reduce_to_shape`（`f32`）を使い、Metal resident 成功時（`f64` 相当）と数値方式が
+食い違う不整合が残っていたため、`crates/autodiff/src/grad.rs` のフォールバック
+（`Op::LinearResident`）・`Op::LinearAct` の bias 縮約も同一の `f64` ヘルパ
+（`grad::reduce_bias_grad`。`eval::reduce_bias_grad_rows` への委譲）へ統一した
+（汎用 `reduce_to_shape`・`Op::Add` 等 bias 以外の呼び出しは不変）。
 
 **bias 部分の恒久的な同期削減効果**: `docs/backend-metal-command-batching-design.md`
 §4.2 と本 §5.5 が記録した「bias 分の `upload_into` が書き込み前に 1 回だけ
@@ -351,4 +358,16 @@ f64 相当アキュムレータ）が bit 一致しない。これは事前登�
 Mac 実機セッションでの A/B・checksum 比較は、**bias 勾配については REQ-2
 統一複合判定**（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で行う。
 **weight 勾配・loss は従来どおり bit 同一契約**（`reduce_to_shape` 自体は
-不変・`gemm_fp32_strict_into` の weight 書き込みも不変のため）。
+不変・`gemm_fp32_strict_into` の weight 書き込みも不変のため）——ただし
+この契約は「同一パラメータに対する単発の backward」に限る。多 step の
+train reuse A/B では、ある step の bias 勾配が REQ-2 範囲内で before/after
+乖離すると、`step()`（SGD 更新）がその bias を使ってパラメータを更新する
+ため、**以降の step の forward/backward 全体（loss・weight 勾配・weight
+そのものを含む）へ乖離が伝播しうる**（`docs/backend-metal-command-batching-
+design.md` §10.9 の `metal_reuse_step_grad_bit_dump` 訂正・
+`crates/facade/tests/device_param_store_grad_readout.rs::param_grads_to_
+host_matches_host_only_path_two_layer` の Linux 回帰で確認）。このため
+train reuse A/B・`metal_reuse_step_grad_bit_dump` の Mac 実機比較は、bias を
+含む step 以降は **loss・weight 勾配・パラメータも含め REQ-2 統一複合判定**
+で行う（step 0 の bias 縮約自体のみが直接の変更対象であり、その後の伝播は
+間接的な帰結）。

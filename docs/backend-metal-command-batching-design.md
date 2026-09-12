@@ -1446,6 +1446,81 @@ bit 完全一致契約のまま不変。
 `reduce_to_shape` 自体の `f32` 逐次和は既存の未整理点のまま残る）。
 
 **Mac 実機セッションへの申し送りの更新**: §10.7 末尾の TODO リストの
-うち bias に関する bit 完全一致確認は REQ-2 複合判定確認へ読み替える
-（`metal_reuse_step_grad_bit_dump` は weight 勾配限定〈#1555 の受け入れ
-確認〉のため対象外・変更不要）。
+うち bias に関する bit 完全一致確認は REQ-2 複合判定確認へ読み替える。
+
+**訂正（PR #1659 codex-review 追加指摘）**: 上記初版は
+`metal_reuse_step_grad_bit_dump` を「weight 勾配限定〈#1555 の受け入れ
+確認〉のため対象外・変更不要」としていたが、これは誤りだった。同
+テストは `Tape::param_grads_to_host`（統合版。weight・bias 双方を含む）
+の戻り値を 10 step 分ダンプし main/branch の bit 表現を突合する
+（`metal_reuse_step_grad_bit_dump.rs` doc「本テストが検証したいのは
+`param_grads_to_host`（統合版）の戻り値が変更前後で bit 同一という
+事実」参照）。本 PR の bias 数値方式変更（f32 逐次和 → f64 相当）に
+より、bias を含む step の `grad[p][j]` は main（f32）と branch（f64
+相当）で **bit 同一にならない**。さらに `step_device_param_store` が
+この bias 勾配で SGD 更新した param を次 step の forward 入力にする
+ため、この乖離は **step 0 以降のすべての step**（`grad`・`param`・
+`loss`）へ伝播する（`param_grads_to_host_matches_host_only_path_two_
+layer`〈`crates/facade/tests/device_param_store_grad_readout.rs`〉の
+Linux 回帰で同型の乖離を確認済み。m ≥ 2 の bias 行で 1 ulp 差が生じ、
+SGD 更新後のパラメータ・以降の forward/backward 全体に伝播する）。
+このため Mac 実機セッションでの `metal_reuse_step_grad_bit_dump` の
+main/branch 比較は、**bit 完全一致ではなく REQ-2 統一複合判定**（各
+step の `grad`／`param`／`loss` 値を許容誤差内で突合）で行う。weight
+のみの `resident_grads_to_host`（strict 版。本テストの比較対象外）は
+影響を受けない。
+
+### 10.9 #1659 codex-review 追加指摘の是正（2026-09-12・同一ユーザー承認 A の横展開）
+
+§10.8 は `backend-metal` の bias 縮約（GPU カーネル・ホスト参照実装）
+のみを f64 相当へ統一したが、`crates/autodiff/src/grad.rs` の
+`Op::LinearResident`（resident 非対応バックエンドのフォールバック。
+CPU／CUDA が常時到達）・`Op::LinearAct` の bias 縮約は `reduce_to_shape`
+（汎用 `f32` 逐次和）のままだった。同一の `Op::LinearResident` が
+実行環境（Metal resident 成功時は f64 相当／CPU・CUDA・Metal 非対応
+形状のフォールバック時は f32）によって異なる縮約方式を使うという
+不整合が残っており、`[1e8, 1.0, -1e8]` のような相殺入力で Metal
+resident 経路とホストフォールバックが食い違うことが codex-review で
+追加指摘された。
+
+**是正内容**:
+
+- `crates/autodiff/src/grad.rs` に `reduce_bias_grad(g, target_shape)`
+  を新設: `g` が rank-2 かつ `target_shape` の総要素数が `g` の列数と
+  一致する（典型的な bias `[n]` 縮約。`nn::Linear` の bias を含む）
+  場合は `eval::reduce_bias_grad_rows`（f64 アキュムレータ）を使い、
+  それ以外の broadcast 形状（`linear_act` が許容する `[1, n]` 等。
+  `pub(crate)` 経由でのみ到達し `nn::Linear` からは到達しない）は
+  既存の `reduce_to_shape`（f32 逐次和・任意 rank 対応）のまま維持する
+  （安全側。汎用 `reduce_to_shape` 関数自体・`Op::Add`／`Op::Mul` 等
+  bias 以外の呼び出しは変更しない）。
+- `Op::LinearResident` のフォールバック（`!outcome.bias_filled`）・
+  `Op::LinearAct` の bias 縮約の 2 箇所を `reduce_bias_grad` へ統一。
+- `tensor-core::BackendOps::gemm_fp32_strict_into_with_bias_reduce_
+  tracked` の doc（「走査順は行 `0..m` 昇順・初期値 `0.0f32`・単純な
+  `+=`」という記述）を実装（ホスト `f64`・Metal Neumaier・REQ-2 複合
+  判定）に合わせて修正。
+
+**新たに顕在化した既存テストの前提崩れ（是正）**: `crates/facade/
+tests/device_param_store_grad_readout.rs::param_grads_to_host_matches_
+host_only_path_two_layer` が bias slot（出力層）で bit 不一致になった。
+原因は `SequentialVars::forward`（host_model 側。`bound.forward`）が
+次層が `ReLU` の場合のみ `Op::LinearAct` へ融合し、出力層（次層なし）
+は非融合の `LinearVars::forward`（`Var::add` = `Op::Add`。汎用
+`reduce_to_shape` のまま——ユーザー承認 A の対象外）を使う一方、
+`forward_resident`（device_model 側）は常に `linear_forward_with_
+activation`（`Op::LinearResident`。`act: None` でも同一 Op）を使う
+という**既存の非対称**（今回のスコープ外）が、bias 縮約の数値方式
+統一によって初めて可視化されたため。`Op::Add` の `reduce_to_shape` は
+汎用パスのため変更対象外（コーディネータ指示）であり、代わりに当該
+テストの判定を修正した: weight slot（rank-2）は bit 完全一致の
+`assert_eq!` のまま、bias slot（rank-1）は `fandhe_ai_backend_cpu::
+assert_parity`（REQ-2 統一複合判定）へ切り替えた。同型の理由で
+`crates/autodiff/src/optim/device_store.rs` の
+`param_grads_to_host_matches_host_only_path_bit_exact`（`MockDeviceOps`
+経由）のコメントも「`m == 1`（本テストの入力）に限り bit 完全一致が
+成立する」旨へ訂正した（同テスト自体は `x` が単一行のため実害なし）。
+
+**§10.8 の訂正**: `metal_reuse_step_grad_bit_dump` を bias 変更の影響
+対象外としていたのは誤りだった。§10.8 末尾に訂正を追記済み
+（本節参照）。
