@@ -1,0 +1,20 @@
+機体: Apple M4 Max（macOS 26.6.2・arm64・64 GiB〈`sysctl -n hw.memsize` =
+68719476736 バイト実測〉。内部ホスト名は含めない）
+計測日: 2026-09-12
+負荷条件: record_only（専有ゲートなし・共有負荷下。各 run 前後の load average は
+round{1,2}/uptime-{cpu,metal}.log を参照。round1 は load average 概ね 3.1〜4.7・
+round2 は 4.4〜11.3〈他セッション並走による一時的な高負荷を含む〉）
+ビルド: `cargo build --release -p bench-fandhe --config
+patch.crates-io.fandhe-ai.path="<facade>"`（before/after 両腕とも同一コマンド）
+before facade: `git archive origin/main` で取り出した非 git ツリー（<worktree 外
+scratchpad>/before-tree/crates/facade。git worktree は追加していない）
+after facade: 本ブランチ worktree の crates/facade
+scripts/bench/framework-compare の Cargo.lock は退避・EXIT trap で復元済み（コミット
+していない）
+
+round1: `elementwise_mul_mask` の初版実装（`MaskReadOperand` に `Contig` 分岐が
+なく、全読み出しが `View` 相当の checked オフセット計算を経由していた版）。
+advisor レビューで「連続経路が旧実装より遅くなっている」指摘を受け round2 へ修正。
+round2: `Contig`／`View`（`usize` プレーン演算）／`Owned` の 3 分岐・全 contig
+高速経路・Contig×View 混在の rank-2 専用経路を追加した修正版（コミット対象の
+最終実装）。

@@ -157,7 +157,7 @@ iter_total 2.470 → 2.677 ms。後退は GPU 待ち＋ダウンロードを含�
 | 草案 | 改訂後 | 根拠 | 区分 | issue |
 |------|--------|------|------|-------|
 | A-1 形状別スレッド上限 | A-1a M4: 小形状スレッド上限／A-1b GB10: 大コア親和性 | §3 | 中立・自機判定 | 1575／1576 |
-| A-2 CPU reuse 逆転の調査 | A-2 マスクの stride 対応（bit 同一）＋backward gemm 回数の整理 | §4 | 中立 | 1577 |
+| A-2 CPU reuse 逆転の調査 | A-2 マスクの stride 対応（bit 同一）＋backward gemm 回数の整理 | §4 | 中立 | 1577（実装・実測は `docs/perf/train-reuse-relu-mask-stride.md`） |
 | A-3 Metal 推論 1 コマンドバッファ化 | A-3 GPU 推論チェーンの単一同期化（CUDA／Metal 共通）＋MSE backward encode-only | §2・§4 | 中立（failure_token） | 1579／1580／1581／1582 |
 | A-4 thread_elements | 不変 | — | REQ-2 判定 | 1586 |
 | A-5 SME | 不変（Mac 限定の答え） | §2 | 承認要（`unsafe asm!`） | 1587 |

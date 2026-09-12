@@ -104,6 +104,9 @@ pub(crate) fn vjp(
         Op::Relu(a) => {
             // 劣勾配は x = 0 で 0 とする（PoC-v2-2 準拠）。NaN 入力は
             // マスク不成立（`v > 0.0` が false）となり勾配 0 を返す。
+            // `upstream`（reuse backward の下流層からは非連続転置 view
+            // でありうる）・`a_val` とも `elementwise_mul_mask` が
+            // stride 対応で読む（イシュー #1577）。
             let a_val = materialize_fallible(nodes, ops, a)?;
             let da = elementwise_mul_mask(upstream, a_val, |v| v > 0.0);
             vec![(a, da)]
@@ -256,7 +259,10 @@ pub(crate) fn vjp(
             // ここから直接マスクを復元でき、前活性化の再計算・追加ノード
             // を必要としない）を先に適用し、以降は「非融合の
             // `Op::LinearResident`（`act: None`）の VJP と同じ勾配 `g`」
-            // として扱う。
+            // として扱う。`upstream` はこの層が最終出力層でない限り
+            // 下流の `Op::LinearResident` d_input が返す非連続転置 view
+            // でありうるが、`elementwise_mul_mask` が stride 対応で
+            // 読むためコピーは発生しない（イシュー #1577）。
             let masked_upstream;
             let g: &Tensor<f32> = match act {
                 Activation::None => upstream,
@@ -392,7 +398,9 @@ pub(crate) fn vjp(
             let x_val = materialize_fallible(nodes, ops, input)?;
 
             // epilogue activation のマスク段（`Op::LinearResident` と同じ
-            // `out_value > 0` 規約。イシュー #1044）。
+            // `out_value > 0` 規約。イシュー #1044）。`upstream` が
+            // 非連続転置 view の場合の扱いは `Op::LinearResident` 分岐
+            // の同型コメント（イシュー #1577）を参照。
             let masked_upstream;
             let g: &Tensor<f32> = match act {
                 Activation::None => upstream,
@@ -584,12 +592,44 @@ fn reduce_to_shape(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
 /// 同 shape の 2 テンソルに対する要素ごとの条件付き選択
 /// （`g` をそのまま通すか 0 にするかを `mask_src` の値で決める）。
 /// `Relu` の VJP（`g ⊙ 1[x > 0]`）専用の最小実装。
+///
+/// **イシュー #1577**: reuse 学習（`DeviceParamStore` 経由・
+/// `Op::LinearResident`）の backward では、下流層の VJP が返す
+/// `d_input = transpose2d(&tmp)`（本ファイル内 `Op::LinearResident`
+/// 分岐）が stride `[1, m]` のゼロコピー転置 view であり、単一寄与
+/// なら `backward.rs::accumulate` がコピーせずそのまま上流層の
+/// `upstream` になる。旧実装は `dense_vec`（`eval::dense_vec` →
+/// `Tensor::contiguous()`）が非連続入力を要素ごと `get(&index)`
+/// （rank 検査・軸ごとの範囲検査を伴う）で走査するため、連続入力比で
+/// 大幅に劣化していた（実測は `docs/perf/
+/// lowlayer-diagnosis-2026-09-12.md` §4・`docs/perf/
+/// train-reuse-relu-mask-stride.md`）。
+///
+/// 本実装は `g`・`mask_src`（`Op::LinearAct`／`Op::LinearResident` では
+/// `out_value` が `materialize_fallible` 経由で view になりうる）の
+/// 双方を独立に [`Tensor::as_view_slice`]（全 strides が非負な限り
+/// `contiguous()` を経由せず storage を借用で読む。`as_slice` が成功
+/// するケース〈真に contiguous〉も同じ formula で正しく読める＝分岐を
+/// 増やさず包含する）で読み、`get()` の rank・範囲検査コストを避けて
+/// 出力を 1 パスで構築する。`as_view_slice` が `None`（負 stride 等。
+/// 現行公開 API の `transpose`/`narrow`/`broadcast_to` はいずれも負
+/// stride を生成しないため到達しないが将来拡張への fail-safe）の
+/// 場合や shape 不一致・オフセット計算のオーバーフロー等、想定外の
+/// 状態を検知した場合は、静かに 0 で埋めたり判定を迂回したりせず、
+/// `dense_vec` を使う既存の走査へ**経路全体を丸ごと**フォールバック
+/// する（数値的に同一のコピー経路であり、`.claude/rules/security.md`
+/// A08 が禁じる判定迂回ではない）。出力は要素ごとの選択（算術なし）
+/// のため走査順に依存せず bit 同一（run-to-run・変更前後とも）を
+/// 維持する。
 fn elementwise_mul_mask(
     g: &Tensor<f32>,
     mask_src: &Tensor<f32>,
     keep: impl Fn(f32) -> bool,
 ) -> Tensor<f32> {
     let shape = g.shape().to_vec();
+    if let Some(out) = try_elementwise_mul_mask_strided(g, mask_src, &shape, &keep) {
+        return build_tensor(out, &shape);
+    }
     let g_data = dense_vec(g);
     let mask_data = dense_vec(mask_src);
     let out: Vec<f32> = g_data
@@ -598,6 +638,219 @@ fn elementwise_mul_mask(
         .map(|(&gv, &mv)| if keep(mv) { gv } else { 0.0 })
         .collect();
     build_tensor(out, &shape)
+}
+
+/// [`elementwise_mul_mask`] の stride 対応主経路。読み出しに失敗しうる
+/// 要因（shape 不一致・オフセット計算オーバーフロー）を検出した場合は
+/// `None` を返し、呼び出し元が `dense_vec` 経路へ丸ごとフォールバック
+/// する（部分的に誤った値を返さない）。
+fn try_elementwise_mul_mask_strided(
+    g: &Tensor<f32>,
+    mask_src: &Tensor<f32>,
+    shape: &[usize],
+    keep: &impl Fn(f32) -> bool,
+) -> Option<Vec<f32>> {
+    if mask_src.shape() != shape {
+        // 既存実装（`dense_vec` の zip）は shape 不一致時に短い方へ
+        // 暗黙に切り詰めていた。多次元 index による読み出しはこの
+        // 前提を要求するため、不一致時は無条件でフォールバックし
+        // 既存の暗黙切り詰め挙動をそのまま保つ。
+        return None;
+    }
+    let numel: usize = shape.iter().product();
+    let g_op = MaskReadOperand::classify(g);
+    let mask_op = MaskReadOperand::classify(mask_src);
+
+    // fresh 経路（`Op::Relu`／`Op::LinearAct` の `upstream` が
+    // `matmul_vjp` の連続な GEMM 出力である通常ケース）を含む、
+    // 両オペランドとも連続な最頻ケースの高速経路。`read(idx, flat)`
+    // 経由の enum ディスパッチ・オフセット計算を経由せず、借用スライス
+    // 2 本の `zip`／`map`／`collect` に落とすことでコンパイラの自動
+    // ベクトル化を妨げない（`MaskReadOperand::read` 経由の一般化した
+    // 経路は非連続 view 専用に限定する）。
+    if let (MaskReadOperand::Contig(g_s), MaskReadOperand::Contig(m_s)) = (&g_op, &mask_op) {
+        return Some(
+            g_s.iter()
+                .zip(m_s.iter())
+                .map(|(&gv, &mv)| if keep(mv) { gv } else { 0.0 })
+                .collect(),
+        );
+    }
+
+    if shape.len() == 2 {
+        let (rows, cols) = (shape[0], shape[1]);
+        // reuse backward の実際のホットパス（下流層 d_input が
+        // `transpose2d` のゼロコピー view・上流層 `out_value` は連続な
+        // forward 記録値、またはその逆）を狙い撃ちした専用経路。片方が
+        // `Contig`（行優先の連続スライスを直接インデックス）・片方が
+        // `View`（行ごとの基準オフセット `i * s0` を 1 回だけ計算し、
+        // 列方向は `+ j * s1` の加算のみ）に限定して読み出すことで、
+        // 一般化した `MaskReadOperand::read` 経由（列ごとに strides を
+        // ゼロから内積するオーバーヘッド）より高速化する（実測は
+        // `docs/perf/train-reuse-relu-mask-stride.md` §5）。
+        if let (
+            MaskReadOperand::Contig(g_s),
+            MaskReadOperand::View {
+                span: m_span,
+                strides: m_strides,
+            },
+        ) = (&g_op, &mask_op)
+        {
+            let (ms0, ms1) = (m_strides[0], m_strides[1]);
+            let mut out = Vec::with_capacity(numel);
+            for i in 0..rows {
+                let row_start = i * cols;
+                let g_row = g_s.get(row_start..row_start + cols)?;
+                let m_base = i * ms0;
+                for (j, &gv) in g_row.iter().enumerate() {
+                    let mv = *m_span.get(m_base + j * ms1)?;
+                    out.push(if keep(mv) { gv } else { 0.0 });
+                }
+            }
+            return Some(out);
+        }
+        if let (
+            MaskReadOperand::View {
+                span: g_span,
+                strides: g_strides,
+            },
+            MaskReadOperand::Contig(m_s),
+        ) = (&g_op, &mask_op)
+        {
+            let (gs0, gs1) = (g_strides[0], g_strides[1]);
+            let mut out = Vec::with_capacity(numel);
+            for i in 0..rows {
+                let row_start = i * cols;
+                let m_row = m_s.get(row_start..row_start + cols)?;
+                let g_base = i * gs0;
+                for (j, &mv) in m_row.iter().enumerate() {
+                    let gv = *g_span.get(g_base + j * gs1)?;
+                    out.push(if keep(mv) { gv } else { 0.0 });
+                }
+            }
+            return Some(out);
+        }
+    }
+
+    let mut out = Vec::with_capacity(numel);
+
+    if shape.len() == 2 {
+        // 上記 2 分岐（片方 `Contig`・片方 `View`）に該当しない rank-2
+        // （両方 `View`／`Owned` を含むケース）向けの一般経路。固定長
+        // 2 要素の index 配列のみでスタック上で完結し、一般 N-d 経路の
+        // `Vec<usize>` 繰り上げより軽い。
+        let (rows, cols) = (shape[0], shape[1]);
+        for i in 0..rows {
+            for j in 0..cols {
+                let idx = [i, j];
+                let flat = i * cols + j;
+                let gv = g_op.read(&idx, flat)?;
+                let mv = mask_op.read(&idx, flat)?;
+                out.push(if keep(mv) { gv } else { 0.0 });
+            }
+        }
+        return Some(out);
+    }
+
+    // 一般 N-d: index ベクタを行優先（最終軸が最速）で繰り上げる。
+    let mut idx = vec![0usize; shape.len()];
+    for flat in 0..numel {
+        let gv = g_op.read(&idx, flat)?;
+        let mv = mask_op.read(&idx, flat)?;
+        out.push(if keep(mv) { gv } else { 0.0 });
+        for axis in (0..shape.len()).rev() {
+            idx[axis] += 1;
+            if idx[axis] < shape[axis] {
+                break;
+            }
+            idx[axis] = 0;
+        }
+    }
+    Some(out)
+}
+
+/// [`elementwise_mul_mask`] が読む 1 オペランド分の抽象。
+///
+/// `as_slice()`（真に contiguous）が成功すれば `Contig` として最優先で
+/// 扱う（`try_elementwise_mul_mask_strided` の全 contig 高速経路・
+/// rank-2／一般 N-d 経路いずれからも `flat` 添字で直接読める）。次に
+/// `as_view_slice()`（`transpose`/`narrow`/`broadcast_to` の非負
+/// stride view を含む）が成功すれば `View` として **`usize` へ変換
+/// 済みの** strides 付きで借用を保持する。いずれも失敗した場合のみ
+/// `dense_vec`（コピー）を保持する `Owned` へフォールバックする。
+///
+/// `View` のオフセット計算（[`Self::read`]）は要素ごとに `checked_mul`/
+/// `checked_add`/`isize`↔`usize` 変換を経由せず、プレーンな `usize`
+/// 乗算・加算のみを行う。安全性の根拠: `as_view_slice()` が `Some` を
+/// 返した時点で全 strides が非負であることが確定しており（`classify`
+/// で 1 回だけ `usize` へ変換）、かつ同メソッドは
+/// `span = 1 + Σ (shape_i − 1)·stride_i` を `checked_add`/`checked_mul`
+/// で検証済みである。したがって shape 範囲内の任意の `idx` に対し
+/// `Σ idx_i·stride_i < span == span.len()` が保証され、本メソッド内で
+/// 改めて overflow を心配する必要はない（対象テンソルの要素数は
+/// 学習用途の実用範囲で `usize::MAX` に遠く及ばない）。境界外
+/// アクセスの検出自体は最終的な `span.get(off)` の 1 回の `Option`
+/// 判定に集約し、そこで `None` になった場合のみ
+/// `try_elementwise_mul_mask_strided` 全体が `dense_vec` 経路へ
+/// フォールバックする（`.claude/rules/coding-rust.md` の `unwrap`／
+/// `expect` 非使用方針を保ちつつ、要素ごとの checked 演算チェーンに
+/// よる速度低下〈初版実装で実測。`docs/perf/
+/// train-reuse-relu-mask-stride.md` §5 参照〉を避ける）。
+enum MaskReadOperand<'a> {
+    Contig(&'a [f32]),
+    View {
+        span: &'a [f32],
+        strides: Vec<usize>,
+    },
+    Owned(Vec<f32>),
+}
+
+impl<'a> MaskReadOperand<'a> {
+    fn classify(t: &'a Tensor<f32>) -> Self {
+        if let Some(s) = t.as_slice() {
+            return MaskReadOperand::Contig(s);
+        }
+        if let Some(span) = t.as_view_slice() {
+            // `as_view_slice()` が `Some` を返した時点で strides は
+            // 全て非負が保証されるため、この `usize::try_from` は
+            // 通常失敗しない。万一の不整合（`Tensor` 側の契約違反）
+            // に備え、フォールバック先である `Owned` へ迂回する。
+            let strides: Option<Vec<usize>> = t
+                .strides()
+                .iter()
+                .map(|&s| usize::try_from(s).ok())
+                .collect();
+            if let Some(strides) = strides {
+                return MaskReadOperand::View { span, strides };
+            }
+        }
+        MaskReadOperand::Owned(dense_vec(t))
+    }
+
+    /// `Contig`／`Owned` の場合は `flat`（行優先の平坦 index。
+    /// `as_slice()`／`dense_vec` の走査順と一致）で、`View` の場合は
+    /// `idx`（strides との内積でオフセットを計算。プレーン `usize`
+    /// 演算のみ・型定義側 doc 参照）で読む。境界外アクセスを検知
+    /// した場合（`View` の `span.get` が `None` を返す場合。通常到達
+    /// しない防御的経路）は `None` を返し、呼び出し元の
+    /// `try_elementwise_mul_mask_strided` 全体を `dense_vec` 経路へ
+    /// フォールバックさせる。両オペランドとも `Contig` の最頻ケースは
+    /// この汎用経路を経由せず、呼び出し元の専用高速経路で処理する
+    /// （enum ディスパッチのオーバーヘッドを避けるため）。
+    #[inline]
+    fn read(&self, idx: &[usize], flat: usize) -> Option<f32> {
+        match self {
+            MaskReadOperand::Contig(s) => s.get(flat).copied(),
+            MaskReadOperand::View { span, strides } => {
+                let mut off = 0usize;
+                for (&i, &s) in idx.iter().zip(strides.iter()) {
+                    off += i * s;
+                }
+                span.get(off).copied()
+            }
+            MaskReadOperand::Owned(v) => v.get(flat).copied(),
+        }
+    }
 }
 
 /// `Tanh` の VJP 係数 `1 - tanh(x)^2` を forward 記録値 `out_value`
@@ -1112,6 +1365,279 @@ mod tests {
         let g = t(&[3.0], &[1]);
         let da = elementwise_mul_mask(&g, &a, |v| v > 0.0);
         assert_eq!(dense_vec(&da), vec![0.0]);
+    }
+
+    // --- イシュー #1577: elementwise_mul_mask の stride 対応 ---
+    //
+    // 新実装（`try_elementwise_mul_mask_strided` を経由する
+    // `elementwise_mul_mask`）と、旧実装をそのまま残した参照実装
+    // （`dense_vec` を zip するだけの経路）の出力を `to_bits()` で
+    // 完全一致比較する。数値的に同一の値を出す契約（bit 同一）を
+    // 直接検証する。
+
+    /// `dense_vec` 経由の参照実装（旧 `elementwise_mul_mask` そのもの）。
+    /// 新実装との bit 同一性を突き合わせる基準として使う。
+    fn elementwise_mul_mask_reference(
+        g: &Tensor<f32>,
+        mask_src: &Tensor<f32>,
+        keep: impl Fn(f32) -> bool,
+    ) -> Tensor<f32> {
+        let shape = g.shape().to_vec();
+        let g_data = dense_vec(g);
+        let mask_data = dense_vec(mask_src);
+        let out: Vec<f32> = g_data
+            .iter()
+            .zip(mask_data.iter())
+            .map(|(&gv, &mv)| if keep(mv) { gv } else { 0.0 })
+            .collect();
+        build_tensor(out, &shape)
+    }
+
+    fn assert_bits_eq(label: &str, actual: &Tensor<f32>, expected: &Tensor<f32>) {
+        let a = dense_vec(actual);
+        let e = dense_vec(expected);
+        assert_eq!(a.len(), e.len(), "{label}: 要素数不一致");
+        for (i, (&av, &ev)) in a.iter().zip(e.iter()).enumerate() {
+            assert_eq!(
+                av.to_bits(),
+                ev.to_bits(),
+                "{label}[{i}]: actual={av:?}（bits={:#x}） expected={ev:?}（bits={:#x}）",
+                av.to_bits(),
+                ev.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn mask_stride_transpose_view_matches_reference() {
+        // reuse backward が生む `d_input = transpose2d(&tmp)` を再現
+        // （`tmp: [k, m]` 連続 → 転置後 `[m, k]`・strides `[1, k]`）。
+        let tmp = t(&[1.0, -2.0, 3.0, -4.0, 5.0, -6.0], &[2, 3]);
+        let g = transpose2d(&tmp); // shape [3, 2]、strides [1, 3]
+        let mask_src = t(&[1.0, -1.0, 0.0, 2.0, -2.0, 0.5], &[3, 2]);
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("transpose view (g 側)", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_mask_src_side_non_contiguous() {
+        // `mask_src` 側だけが非連続（`out_value` が view の場合の
+        // 想定。`g` は連続）。
+        let g = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]);
+        let mask_tmp = t(&[1.0, -1.0, 0.0, 2.0, -2.0, 0.5], &[2, 3]);
+        let mask_src = transpose2d(&mask_tmp); // shape [3, 2]
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("transpose view (mask_src 側)", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_narrow_offset_view() {
+        // `narrow` 後の view（offset != 0・かつ真に非連続）。列方向
+        // （dim 1）の `narrow` は、行方向（dim 0）の `narrow` と異なり
+        // 元の行幅（stride 4）が残ったまま shape が縮む（`[3,4]` の
+        // 列 1..3 を切り出すと shape `[3,2]`・strides `[4,1]` となり、
+        // 新 shape の標準行優先 stride `[2,1]` とは一致しない）ため
+        // `as_slice()` が `None` を返す（`Tensor::is_contiguous` 契約）。
+        // 行方向の `narrow` は新 shape でも標準行優先 stride のまま
+        // 残り `as_slice()` が成功してしまう（`Contig` 分類）ため、
+        // 本テストの意図（`View` 分類・rank-2 `Contig`×`View` 専用
+        // 経路のオフセット付きケース）を検証するには列方向でなければ
+        // ならない（advisor 指摘。行方向版は誤って `Contig`×`Contig`
+        // 高速経路しか検証していなかった）。
+        let base = t(
+            &[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+            &[3, 4],
+        );
+        let g = base
+            .narrow(1, 1, 2)
+            .expect("narrow: 事前に範囲内であることを確認済み");
+        assert!(
+            g.as_slice().is_none(),
+            "narrow(dim=1) は非連続 view のはず（本テストが検証したい前提。\
+release ビルドの `cargo test --release` でも前提崩れを検知できるよう \
+`debug_assert!` ではなく `assert!` を使う）"
+        );
+        let mask_src = t(&[-1.0, 1.0, 0.0, -2.0, 3.0, -3.0], &[3, 2]);
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("narrow(dim=1) view", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_both_operands_transposed_rank2() {
+        // `g`・`mask_src` の両方が非連続 view（`View`×`View`）の
+        // rank-2 ケース。rank-2 専用経路のうち「片方 `Contig`・片方
+        // `View`」の 2 分岐（advisor 指摘で追加）のどちらにも該当
+        // しないため、`try_elementwise_mul_mask_strided` 内の
+        // 一般化した `read(idx, flat)` 経由の rank-2 経路（`MaskReadOperand::
+        // read` の `View` アーム）を確実に踏む。
+        let tmp_g = t(&[1.0, -2.0, 3.0, -4.0, 5.0, -6.0], &[2, 3]);
+        let g = transpose2d(&tmp_g); // shape [3, 2]、非連続 view
+        let tmp_mask = t(&[1.0, -1.0, 0.0, 2.0, -2.0, 0.5], &[2, 3]);
+        let mask_src = transpose2d(&tmp_mask); // shape [3, 2]、非連続 view
+        assert!(
+            g.as_slice().is_none() && mask_src.as_slice().is_none(),
+            "両オペランドとも非連続 view のはず（本テストが検証したい前提。\
+release ビルドでも検知できるよう `assert!` を使う）"
+        );
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("View×View rank-2", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_broadcast_zero_stride_view() {
+        // `broadcast_to` が生む stride 0 の軸を含む view。
+        let row = t(&[1.0, -1.0, 2.0], &[1, 3]);
+        let g = row
+            .broadcast_to(&[2, 3])
+            .expect("broadcast_to: shape 互換性は事前に確認済み");
+        let mask_src = t(&[1.0, -1.0, 1.0, -1.0, 1.0, -1.0], &[2, 3]);
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("broadcast (stride 0) view", &actual, &expected);
+    }
+
+    #[test]
+    fn mask_stride_rank1_and_rank3() {
+        // rank-1（transpose2d 適用対象外だが narrow で非連続を作る）。
+        let base1 = t(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5]);
+        let g1 = base1
+            .narrow(0, 1, 3)
+            .expect("narrow: 事前に範囲内であることを確認済み");
+        let mask1 = t(&[-1.0, 1.0, -1.0], &[3]);
+        let actual1 = elementwise_mul_mask(&g1, &mask1, |v| v > 0.0);
+        let expected1 = elementwise_mul_mask_reference(&g1, &mask1, |v| v > 0.0);
+        assert_bits_eq("rank-1 narrow", &actual1, &expected1);
+
+        // rank-3: 2x2x3 を transpose(0, 2) で非連続にする。
+        let base3 = t(
+            &[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+            &[2, 2, 3],
+        );
+        let g3 = base3
+            .transpose(0, 2)
+            .expect("transpose: rank-3 は 0,2 とも範囲内");
+        let mask3 = t(
+            &[
+                1.0, -1.0, 0.0, 2.0, -2.0, 0.5, -0.5, 1.5, -1.5, 3.0, -3.0, 0.25,
+            ],
+            &[3, 2, 2],
+        );
+        let actual3 = elementwise_mul_mask(&g3, &mask3, |v| v > 0.0);
+        let expected3 = elementwise_mul_mask_reference(&g3, &mask3, |v| v > 0.0);
+        assert_bits_eq("rank-3 transpose", &actual3, &expected3);
+    }
+
+    #[test]
+    fn mask_stride_empty_tensor() {
+        let g = t(&[], &[0, 3]);
+        let mask_src = t(&[], &[0, 3]);
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        assert_eq!(dense_vec(&actual), Vec::<f32>::new());
+    }
+
+    #[test]
+    fn mask_stride_nan_and_signed_zero_and_subnormal() {
+        // NaN（マスク不成立で 0 を返す規約）・-0.0・subnormal を含む
+        // 転置 view で bit 同一性を確認する。
+        let tmp = t(
+            &[f32::NAN, -0.0, f32::MIN_POSITIVE / 2.0, 1.0, -1.0, 0.0],
+            &[2, 3],
+        );
+        let g = transpose2d(&tmp); // shape [3, 2]
+        let mask_src = t(&[1.0, f32::NAN, -0.0, 1.0, 0.0, -1.0], &[3, 2]);
+
+        let actual = elementwise_mul_mask(&g, &mask_src, |v| v > 0.0);
+        let expected = elementwise_mul_mask_reference(&g, &mask_src, |v| v > 0.0);
+        assert_bits_eq("NaN / -0.0 / subnormal", &actual, &expected);
+    }
+
+    /// マイクロベンチ（`#[ignore]`。手動実行専用。
+    /// `docs/perf/lowlayer-diagnosis-2026-09-12.md` §4 の
+    /// `diag_elementwise_mask_bench` と同構成。64×256 の連続入力 と
+    /// `[256,64]→transpose2d` の非連続転置 view を 1000 回反復した
+    /// 中央値を、新実装（`elementwise_mul_mask`）・旧参照実装
+    /// （`elementwise_mul_mask_reference`。`dense_vec` zip 経路）の
+    /// 双方・連続／非連続の計 4 系列で比較する。stderr 出力のみで
+    /// assert は行わない（実測記録は `docs/perf/
+    /// train-reuse-relu-mask-stride.md`）。
+    /// 実行例:
+    /// `cargo test -p fandhe-ai-autodiff --release -- --ignored
+    /// --nocapture mask_stride_microbench`
+    #[test]
+    #[ignore = "手動実行専用のマイクロベンチ（stderr 出力のみ）"]
+    fn mask_stride_microbench() {
+        use std::time::Instant;
+
+        const ROWS: usize = 64;
+        const COLS: usize = 256;
+        const ITERS: usize = 1000;
+
+        let contiguous_data: Vec<f32> = (0..ROWS * COLS).map(|i| ((i % 7) as f32) - 3.0).collect();
+        let contiguous = t(&contiguous_data, &[ROWS, COLS]);
+        let mask_contig = t(&contiguous_data, &[ROWS, COLS]);
+
+        let transposed_src_data: Vec<f32> =
+            (0..COLS * ROWS).map(|i| ((i % 7) as f32) - 3.0).collect();
+        let transposed_src = t(&transposed_src_data, &[COLS, ROWS]);
+        let non_contig = transpose2d(&transposed_src); // shape [ROWS, COLS]
+        let mask_non_contig = t(&contiguous_data, &[ROWS, COLS]);
+
+        let mut contig_times = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let start = Instant::now();
+            let out = elementwise_mul_mask(&contiguous, &mask_contig, |v| v > 0.0);
+            std::hint::black_box(&out);
+            contig_times.push(start.elapsed());
+        }
+        let mut non_contig_times = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let start = Instant::now();
+            let out = elementwise_mul_mask(&non_contig, &mask_non_contig, |v| v > 0.0);
+            std::hint::black_box(&out);
+            non_contig_times.push(start.elapsed());
+        }
+        // 旧実装（`dense_vec` zip 経路）との対照。新実装の連続経路が
+        // 旧実装の連続経路を大きく下回っていないか（退行していないか）
+        // を直接確認するための参考値。
+        let mut reference_contig_times = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let start = Instant::now();
+            let out = elementwise_mul_mask_reference(&contiguous, &mask_contig, |v| v > 0.0);
+            std::hint::black_box(&out);
+            reference_contig_times.push(start.elapsed());
+        }
+        let mut reference_non_contig_times = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let start = Instant::now();
+            let out = elementwise_mul_mask_reference(&non_contig, &mask_non_contig, |v| v > 0.0);
+            std::hint::black_box(&out);
+            reference_non_contig_times.push(start.elapsed());
+        }
+
+        contig_times.sort();
+        non_contig_times.sort();
+        reference_contig_times.sort();
+        reference_non_contig_times.sort();
+        eprintln!(
+            "mask_stride_microbench: contiguous median={:?} non_contiguous(transpose view) median={:?} reference_contiguous(dense_vec zip) median={:?} reference_non_contiguous(dense_vec zip) median={:?}",
+            contig_times[ITERS / 2],
+            non_contig_times[ITERS / 2],
+            reference_contig_times[ITERS / 2],
+            reference_non_contig_times[ITERS / 2]
+        );
     }
 
     // --- Exp ---
