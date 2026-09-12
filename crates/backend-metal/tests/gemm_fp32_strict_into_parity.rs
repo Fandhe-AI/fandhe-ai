@@ -424,7 +424,8 @@ fn gemm_fp32_strict_into_with_bias_reduce_tracked_matches_reference_for_nt_tn() 
             ld: d_out,
             transposed: false,
         };
-        let expected_bias = reduce_bias_grad_rows_host(g_slice, &g_layout);
+        let expected_bias =
+            reduce_bias_grad_rows_host(g_slice, &g_layout).expect("valid layout/data in test");
 
         let weight_mn = d_in * d_out;
         let bias_offset = weight_mn + 2; // gap を空け範囲混同がないことも確認する
@@ -510,7 +511,8 @@ fn gemm_fp32_strict_into_with_bias_reduce_tracked_matches_reference_for_nn_fallb
         ld: 4,
         transposed: false,
     };
-    let expected_bias = reduce_bias_grad_rows_host(b_slice, &b_layout);
+    let expected_bias =
+        reduce_bias_grad_rows_host(b_slice, &b_layout).expect("valid layout/data in test");
 
     let weight_mn = 2 * 4;
     let bias_offset = weight_mn;
