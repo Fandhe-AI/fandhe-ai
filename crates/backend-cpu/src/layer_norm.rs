@@ -13,7 +13,7 @@
 //!
 //! 平均・分散とも要素を `f64` へ昇格し、**GPU（CUDA
 //! `kernels_layer_norm.rs`／Metal `layer_norm.metal`）の warp／
-//! simdgroup butterfly 縮約と同一の加算順序**（[`warp_reduce_f64`]。
+//! simdgroup butterfly 縮約と同一の加算順序**（`warp_reduce_f64`。
 //! 32 レーンのストライドアクセス + offset 16→8→4→2→1 の木構造縮約）
 //! で蓄積する（単純な先頭からの逐次和ではない。PR #1671 codex-review
 //! P1 是正・イシュー #1596）。分散は「二パス」（`Σ(x−μ)²/N`。
@@ -237,7 +237,7 @@ fn warp_reduce_f64(hidden: usize, mut contribute: impl FnMut(usize, f64) -> f64)
 /// 1 行分の LayerNorm を計算する（スカラーのみ。冒頭コメント参照）。
 ///
 /// 平均・分散とも GPU の warp/simdgroup butterfly 縮約と同一順序
-/// （[`warp_reduce_f64`] 参照）で `f64` 蓄積する。**`mean`／`rstd` は
+/// （`warp_reduce_f64` 参照）で `f64` 蓄積する。**`mean`／`rstd` は
 /// いずれも `f64` のまま `x̂ = (x − mean) · rstd` の偏差計算まで
 /// 保持し**、`x̂` を出力へ書き込む直前の 1 回だけ `f32` へ downcast
 /// する（codex-review 指摘: `mean` を偏差計算前に `f32` へ丸めると
