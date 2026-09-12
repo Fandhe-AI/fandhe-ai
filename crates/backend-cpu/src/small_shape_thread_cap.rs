@@ -72,18 +72,31 @@ use std::sync::OnceLock;
 /// ら `true`・REJECT なら `false` へ 1 行差し戻すだけで済む。
 pub(crate) const SMALL_SHAPE_CAP_ENABLED: bool = false;
 
-/// 専用プールのスレッド数（Phase 0 スイープで確定。初期値は診断で観測
-/// された `RAYON_NUM_THREADS=4` を踏襲する）。
-pub(crate) const SMALL_SHAPE_CAP_THREADS: usize = 4;
+/// 専用プールのスレッド数（Phase 0 スイープで確定。M4 Max 実機・
+/// `examples/small_shape_cap_sweep.rs` の学習 5 形状 5 回中央値実測
+/// （`docs/perf/logs/cpu-gemm-small-shape-thread-cap-1575/`）で、
+/// `dedicated:{2,4,6,8}` のうち学習 5 形状すべてで off 比 `ratio<=1.00`
+/// を満たしたのは `dedicated:6` のみ（`dedicated:2`／`4` は
+/// `train_64x256x784_nn` で `ratio>1.00`・`dedicated:8` は同形状で
+/// `ratio=1.0272` により不成立）。事前登録規則の選択規則（成立候補中
+/// 幾何平均 ratio 最小）は唯一の成立候補のため自動的に確定した
+/// （幾何平均 ratio ≈0.62。`docs/perf/cpu-gemm-small-shape-thread-cap.md`
+/// §Phase 0 参照）。
+pub(crate) const SMALL_SHAPE_CAP_THREADS: usize = 6;
 
-/// cap 対象とする仕事量（`m * n.max(NR_CLAMP相当の下限) * k`）の上限
-/// （未満なら cap 対象）。初期値は学習 5 形状の最大仕事量
-/// （64×256×784 = 12,845,056）を含み、正方 512³（134,217,728）を含まない
-/// `1 << 25`（33,554,432）とする。Phase 0 スイープで確定する
-/// （複数の 2 のべき乗が「学習形状を含み・後退開始形状を含まない」を
-/// 満たす場合は最小のもの＝最も保守的なものを採用する。イシュー #1575
-/// 事前登録規則の tie-break）。
-pub(crate) const SMALL_SHAPE_CAP_MAX_WORK: usize = 1 << 25;
+/// cap 対象とする仕事量（`m * n.max(N_CLAMP) * k`）の上限（未満なら cap
+/// 対象）。Phase 0 実測（[`SMALL_SHAPE_CAP_THREADS`] ドキュメント参照）で、
+/// `dedicated:6` は学習 5 形状（最大仕事量 64×256×784=12,845,056）・
+/// 交差確認用正方 128（2,097,152）・256（16,777,216）で `ratio<=1.00`
+/// だったが、正方 512（134,217,728）で `ratio=1.0980` と後退へ転じた。
+/// 事前登録規則の tie-break（学習最大仕事量を含み・後退開始仕事量を
+/// 含まない 2 のべき乗のうち最小＝最も保守的なもの）に従い、
+/// 12,845,056 を含み 134,217,728 を含まない最小の 2 のべき乗
+/// `1 << 24`（16,777,216）を採用する（`1 << 25` も条件を満たすが
+/// tie-break により不採用。正方 256〈16,777,216〉はこの境界値と
+/// ちょうど等しいため cap 対象外＝グローバルプールのまま。ratio は
+/// 元々改善方向だったため保守的に倒しても後退はしない）。
+pub(crate) const SMALL_SHAPE_CAP_MAX_WORK: usize = 1 << 24;
 
 /// 仕事量下限クランプ（[`crate::gemm_blis::NR_CLAMP`] と同じ理由。細長
 /// 形状〈例 m=512, n=1, k=512〉の実効仕事量を過小評価しないための下限。
@@ -249,22 +262,22 @@ mod tests {
 
     #[test]
     fn should_cap_below_threshold() {
-        // 学習形状 64x256x784 = 12,845,056 < 1<<25 (33,554,432)。
+        // 学習形状 64x256x784 = 12,845,056 < 1<<24 (16,777,216)。
         assert!(should_cap(64, 256, 784));
     }
 
     #[test]
     fn should_cap_above_threshold() {
-        // 512^3 = 134,217,728 >= 1<<25。
+        // 512^3 = 134,217,728 >= 1<<24。
         assert!(!should_cap(512, 512, 512));
     }
 
     #[test]
     fn should_cap_n_clamp_applies() {
         // n=1 は N_CLAMP=8 にクランプされる: m*8*k で判定。
-        // 4096*8*4096 = 134,217,728 >= 1<<25 → cap しない。
+        // 4096*8*4096 = 134,217,728 >= 1<<24 → cap しない。
         assert!(!should_cap(4096, 1, 4096));
-        // 64*8*64 = 32,768 < 1<<25 → cap する。
+        // 64*8*64 = 32,768 < 1<<24 → cap する。
         assert!(should_cap(64, 1, 64));
     }
 
