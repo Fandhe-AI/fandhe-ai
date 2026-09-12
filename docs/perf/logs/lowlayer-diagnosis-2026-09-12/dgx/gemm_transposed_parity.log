@@ -1,0 +1,12 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/gemm_transposed_parity.rs (target/release/deps/gemm_transposed_parity-133367d2b1a5dc48)
+
+running 5 tests
+test gemm_narrow_then_transpose_general_stride_falls_back_but_still_correct_on_real_device ... ok
+test gemm_nt_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ok
+test gemm_resident_lhs_nt_transposed_view_matches_contiguous_on_real_device ... ok
+test gemm_tn_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ok
+test gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+

@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/async_ordering_real_device.rs (target/release/deps/async_ordering_real_device-ae8125d4056ed12d)
+
+running 3 tests
+test forward_backward_update_chain_matches_cpu_reference_without_explicit_sync ... ok
+test many_chained_sgd_steps_then_immediate_download_matches_cpu_reference ... ok
+test probe_has_async_alloc_on_real_device ... [T4 probe] CudaContext::has_async_alloc() = true (ordinal=0)
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+

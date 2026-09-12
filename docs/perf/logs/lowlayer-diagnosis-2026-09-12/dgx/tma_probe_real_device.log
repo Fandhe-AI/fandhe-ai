@@ -1,0 +1,21 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/tma_probe_real_device.rs (target/release/deps/tma_probe_real_device-367b695ccec3673b)
+
+running 3 tests
+test tma_execution_probe ... tma_compile_probe variant=cluster arch=compute_121 result=success (selected for execution probe)
+tma_execution_probe variant=cluster arch=compute_121 result=success tile=16x16 global=64x64 bitwise_match=true
+ok
+test tma_execution_probe_cta ... tma_compile_probe variant=cta arch=compute_121 result=success (selected for execution probe)
+tma_execution_probe_cta variant=cta arch=compute_121 result=success tile=16x16 global=64x64 bitwise_match=true
+ok
+test tma_nvrtc_compile_probe ... environment: name="NVIDIA GB10" compute_capability=(12, 1) arch="compute_121"
+tma_compile_probe variant=cluster arch=compute_121 result=success
+tma_compile_probe variant=cluster arch=compute_121a result=success
+tma_compile_probe variant=cluster arch=compute_121f result=success
+tma_compile_probe variant=cta arch=compute_121 result=success
+tma_compile_probe variant=cta arch=compute_121a result=success
+tma_compile_probe variant=cta arch=compute_121f result=success
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.99s
+
