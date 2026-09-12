@@ -1,0 +1,9 @@
+# env_info.txt テンプレート（記入例）。実測時は orchestrate.sh が
+# env_info.txt を自動生成するため、このファイル自体は参考用の記入例
+# （内部ホスト名は含めない方針の例示）。
+Darwin 24.x.x arm64
+ProductName:            macOS
+ProductVersion:         15.x
+rustc 1.8x.0 (xxxxxxxxx 2026-xx-xx)
+machdep.cpu.brand_string: Apple M4 Max
+<git rev-parse HEAD の出力（before 腕・after 腕それぞれ）>

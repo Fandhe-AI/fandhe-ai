@@ -1518,6 +1518,17 @@ impl BackendOps for MetalBackendOps {
     /// gemm_resident_rhs`] と同じ [`crate::gemm::MetalGemm::
     /// dispatch_bias_act_prepared`] を呼ぶ（`has_bias=0`・`act=0` で
     /// 純粋な `w @ b` になる）。
+    ///
+    /// **同期の合流点（イシュー #1563）**: 本メソッド末尾の `mem.download`
+    /// は内部で `MetalContext::synchronize` を呼ぶ（`download` doc
+    /// 参照）。呼び出し元 `crates/autodiff/src/grad.rs` の
+    /// `Op::LinearResident` VJP は、この呼び出しより**前**に同じ層の
+    /// d_weight（`DeviceParamStore::fill_resident_weight_grad` 経由の
+    /// encode-only dispatch。個別に同期しない）を積むよう順序付けられて
+    /// いる（両者は独立計算のため出力は bit 同一）。このため本メソッドの
+    /// `synchronize` は d_input 自身だけでなく、直前に積まれた同じ層の
+    /// d_weight の GPU コマンドも一緒に完了させる合流点として働く
+    /// （`docs/backend-metal-command-batching-design.md` §7.4）。
     fn gemm_resident_lhs(
         &self,
         w: DeviceBufferView<'_>,

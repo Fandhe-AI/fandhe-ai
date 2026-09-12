@@ -237,7 +237,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `nn.Dropout` | `layers.Dropout` | **なし** | RNG 契約設計＋マスク適用 Op（train/eval モード分岐）＋VJP | M |
 | `nn.Embedding` | `layers.Embedding` | **なし** | gather 系 Op が前提（2.2 節）＋embedding テーブル管理 | L |
 | `nn.MultiheadAttention` | `layers.MultiHeadAttention` | **なし** | softmax・batched matmul・(optional) causal mask・reshape/transpose の組合せ実装。前提演算が軒並み未実装 | XL |
-| RNN/LSTM/GRU | `layers.SimpleRNN`/`LSTM`/`GRU` | **なし** | ゲート演算（sigmoid/tanh は既存）＋時系列ループの tape 構築設計＋3 バックエンド | XL |
+| RNN/LSTM/GRU | `layers.SimpleRNN`/`LSTM`/`GRU` | **なし** | ゲート演算（sigmoid/tanh は既存）＋時系列ループの tape 構築設計＋3 バックエンド。設計: `docs/autodiff-rnn-cell-tape-design.md`（#1646） | XL |
 | Pooling（Max/AvgPool） | `layers.MaxPooling2D` 等 | **なし** | Conv 同様の空間走査カーネル＋VJP（max は argmax 経路の逆伝播） | L |
 
 ### 2.8 損失
