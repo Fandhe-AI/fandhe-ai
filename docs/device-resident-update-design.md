@@ -1921,22 +1921,32 @@ train-resident-grad-device-update.md` を参照（CUDA の実機実測は #1560
 - **`resident_grads_to_host`（strict 版）**: `GradStaging` に今回の
   backward で新鮮に充填済みの slot のみ `Some(Tensor<f32>)` を返し、
   未充填 slot（bias 等）は `None`。resident 未対応バックエンド
-  （`resident_grad_capability == Some(false)`。現状 CUDA／Metal）では
-  `BackendError::Unsupported` を返す（panic なし）
+  （`resident_grad_capability == Some(false)`）では `BackendError::
+  Unsupported` を返す（panic なし）。**本追補時点（#1479）では CUDA／
+  Metal がこれに該当していたが、Metal は #1555・CUDA は #1559 で
+  `gemm_fp32_strict_into` を実装したため、現状は 3 バックエンドとも
+  `resident_grad_capability == Some(true)` へ確定し、この分岐は probe
+  失敗等の例外経路以外では通常到達しない（§3 参照）**
 - **`param_grads_to_host`（unified 版）**: strict 版と同じ内部経路
   （`resident_filled_slots`／`download_staging_slots`。§2.1 の由来
   検証ヘルパを `step()` と共有）を使いつつ、未充填 slot は `grads.
   get(...)`（`step()` の非 resident フォールバックと同一経路）から
   取得し、全パラメータの勾配を 3 バックエンド共通の読み出し窓として
-  返す。CUDA／Metal では常に unified 版のみが `Ok` を返す
-  （resident 未充填のため全 slot が `grads` フォールバックを通る）
+  返す。本追補時点（#1479）では CUDA／Metal が resident 未実装だった
+  ため常に unified 版のみが `Ok` を返していたが、現状（#1555／#1559
+  以降）は strict 版も weight slot を `Some` で返す（bias slot は
+  引き続き `None`。§3 参照）
 
-**strict／unified を分けた理由**: CUDA／Metal は `gemm_fp32_strict_into`
-未実装のため resident 経由の重み勾配は常に `Gradients` 側（`Op::
-LinearResident` の VJP がホスト経路で書き込んだ寄与）に載る。strict 版
-（`GradStaging` 限定）を CUDA／Metal で呼ぶと必ず `Unsupported` になり、
-#1480 が要求する「3 バックエンド横断で各 step の重み勾配を読む」こと
-ができない。unified 版が両者を吸収する。
+**strict／unified を分けた理由（本追補時点）**: 本追補（#1479）時点で
+CUDA／Metal は `gemm_fp32_strict_into` 未実装のため resident 経由の
+重み勾配は常に `Gradients` 側（`Op::LinearResident` の VJP がホスト
+経路で書き込んだ寄与）に載っていた。strict 版（`GradStaging` 限定）を
+CUDA／Metal で呼ぶと必ず `Unsupported` になり、#1480 が要求する「3
+バックエンド横断で各 step の重み勾配を読む」ことができなかったため、
+unified 版で両者を吸収する設計とした（この設計自体は #1555／#1559 で
+CUDA／Metal が resident 対応した後も不変。strict 版が到達不能でなく
+なっただけで、unified 版の役割——resident 未充填 slot を `grads`
+フォールバックで補う——は変わらない）。
 
 **契約**: いずれも `&self`・読み出し専用（`pending`／`backward_serial`／
 `grad_staging` を変更しない。呼び出し後も `step()` が通常どおり成功

@@ -321,15 +321,15 @@ impl CudaBackendOps {
         // `dense_transposed_view(a)` が `None` になる一方で
         // `dense_transposed_view(b)`（`b` は shape `[k, n]` で `k`／`n`
         // が非ゼロなら非退化）が `Some` を返しうる——`(None, Some(bt))`
-        // という NT パターンに誤って一致しうる。`run_tiled_f32_nt`／
-        // `_tn`（ホスト戻り値経路）はこの経路を「新規 alloc_uninit +
-        // readback」で正しく処理する明示的な早期 return を持つが、本
-        // メソッドの device-resident 直書き込み経路
-        // （`launch_tiled_f32_*_into`）にゼロ埋め手段を用意していない
-        // ため、この分類ミスマッチをここで先に断つ（フォールバックの
-        // `gemm_fp32_strict` 自身が `run_tiled_f32_nt`／`_tn`／
-        // `run_tiled_f32` いずれの経路でも `m==0||n==0`／`k==0` を
-        // 正しく処理する）。
+        // という NT パターンに誤って一致しうる（`n == 0` も対称的に
+        // TN パターンへの誤一致を起こしうる）。`k == 0` 自体は
+        // `launch_tiled_f32_nt_into`／`_tn_into` 側に `zero_fill`
+        // （`CudaArgMut::zero_fill`）による正しい処理があるが、`m == 0`
+        // ／`n == 0` にはこの誤分類を吸収する手段がないため、3 条件を
+        // まとめて一律フォールバックへ回し個別のゼロ埋め分岐を持たない
+        // ようにする（フォールバックの `gemm_fp32_strict` 自身が
+        // `run_tiled_f32_nt`／`_tn`／`run_tiled_f32` いずれの経路でも
+        // `m==0||n==0`／`k==0` を正しく処理する）。
         if m != 0 && n != 0 && k != 0 {
             let gemm = self.with_driver_call(
                 &[],
