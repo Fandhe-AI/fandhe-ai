@@ -377,6 +377,7 @@ mod kernels_mma_tf32;
 mod kernels_mma_tf32x3;
 mod kernels_mse;
 mod kernels_rmsnorm;
+mod kernels_rnn_cell;
 mod kernels_sgd;
 mod kernels_softmax;
 mod kernels_tiled_pipeline;
@@ -393,6 +394,7 @@ mod host_staging;
 pub mod memory;
 mod module_cache;
 mod mse;
+mod rnn_cell;
 // イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線
 // （`gemm.rs::CudaGemm::new`）を実機で検証する `#[ignore]` テスト。
 // `context_cache`（非公開 `mod`）へ到達する必要があるため
@@ -430,6 +432,7 @@ pub use gemm::CudaGemm;
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::TiledF32Kernel;
 pub use mse::CudaMse;
+pub use rnn_cell::CudaRnnCell;
 // `TiledPipelineFunction`／`CudaGemm::compile_tiled_pipeline_variant`／
 // `CudaGemm::launch_tiled_pipeline_f32` はベンチ専用の常駐 API（イシュー
 // #1033）。**本番既定経路（`CudaGemm::new`）は #1137 で `run_tiled_f32`

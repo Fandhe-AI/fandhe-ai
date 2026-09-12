@@ -154,6 +154,7 @@ mod ops;
 pub mod parity;
 pub mod reduction;
 pub mod rmsnorm;
+mod rnn_cell;
 pub mod softmax;
 mod thread_limit;
 

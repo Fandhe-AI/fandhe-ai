@@ -260,6 +260,73 @@ pub(crate) enum Op {
         dim0: usize,
         dim1: usize,
     },
+    /// RNN（tanh 版）セル 1 step（イシュー #1647・設計 `docs/autodiff-
+    /// rnn-cell-tape-design.md` 決定 1・5）。`h_t = tanh(x·W_ih + b_ih +
+    /// h_{t-1}·W_hh + b_hh)`。RNN は LSTM／GRU と異なりゲート同士の要素
+    /// 積を経由しないため、専用ペイロード（ゲート値の保存）を必要と
+    /// せず forward 記録値 `out_value`（= `h_t`）のみで VJP が閉じる
+    /// （`Op::Tanh` と同型の `tanh_grad_factor` 再利用）。
+    ///
+    /// **常に実体化済み**（`push_eager`）: 非 elementwise（GEMM を含む）
+    /// のため融合対象外（`Op::is_lazy_elementwise` 参照）。
+    RnnCell {
+        x: NodeId,
+        h_prev: NodeId,
+        w_ih: NodeId,
+        w_hh: NodeId,
+        b_ih: Option<NodeId>,
+        b_hh: Option<NodeId>,
+    },
+    /// LSTM セルの `c_t` ノード（決定 1b。値は `c_t`）。`gates_ifg`
+    /// （活性化後の `i,f,g`。`[B, 3H]`）を非追跡 `Tensor<f32>` payload
+    /// として保持する（`CrossEntropyLoss` の `targets` と同型の非追跡
+    /// payload パターン）。
+    ///
+    /// **push 順序契約（決定 1b）**: 本 variant は必ず対応する
+    /// [`Op::LstmHidden`]（`cell` フィールドがこのノードの `NodeId` を
+    /// 指す）の**直前**に push される。backward の逆走査は
+    /// `LstmHidden` を先に処理し、その VJP が `nodes[cell.0].op` を
+    /// 参照して `x`／`h_prev`／`w_ih`／`w_hh`／`b_ih`／`b_hh` を読む
+    /// （決定 1b 追記。`grad.rs::vjp` の `Op::LstmHidden` 分岐参照）。
+    ///
+    /// **常に実体化済み**（`push_eager`）: 非 elementwise（GEMM を
+    /// 含む）のため融合対象外。
+    LstmCell {
+        x: NodeId,
+        h_prev: NodeId,
+        c_prev: NodeId,
+        w_ih: NodeId,
+        w_hh: NodeId,
+        b_ih: Option<NodeId>,
+        b_hh: Option<NodeId>,
+        gates_ifg: Tensor<f32>,
+    },
+    /// LSTM セルの `h_t` ノード（決定 1b。値は `h_t`）。`cell` は直前に
+    /// push した [`Op::LstmCell`] の `NodeId`（`c_t` を指す。push 順序
+    /// 契約は `Op::LstmCell` doc 参照）。`gate_o`（活性化後の o ゲート
+    /// 値。`[B, H]`）を非追跡 payload として保持する。
+    ///
+    /// **常に実体化済み**（`push_eager`）: 非 elementwise（pointwise
+    /// カーネル `BackendOps::lstm_hidden_backward` 相当。融合対象外）。
+    LstmHidden { cell: NodeId, gate_o: Tensor<f32> },
+    /// GRU セル 1 step（決定 1c・5。`reset_after=True` 規約。値は
+    /// `h_t`）。`gates_rzn`（活性化後の `r,z,n`。`[B, 3H]`）・`q`
+    /// （決定 1c: `pre_h` の n 列ブロック。GEMM 再計算を避けるため
+    /// backward で `∂n/∂r` の復元に必要な再帰側アフィン値をそのまま
+    /// 保持する）を非追跡 payload として保持する。
+    ///
+    /// **常に実体化済み**（`push_eager`）: 非 elementwise（GEMM を
+    /// 含む）のため融合対象外。
+    GruCell {
+        x: NodeId,
+        h_prev: NodeId,
+        w_ih: NodeId,
+        w_hh: NodeId,
+        b_ih: Option<NodeId>,
+        b_hh: Option<NodeId>,
+        gates_rzn: Tensor<f32>,
+        q: Tensor<f32>,
+    },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の

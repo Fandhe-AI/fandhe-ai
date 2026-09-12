@@ -28,8 +28,9 @@ use std::sync::Arc;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, DType, DispatchFailureCell, FusionPlan, MseReduction, SegmentKey,
-    SegmentResource, SegmentRun, ShapeError, Tensor, require_same_shape,
+    Activation, BackendOps, DType, DispatchFailureCell, FusionPlan, GruBackwardOutput,
+    GruPointwiseOutput, LstmPointwiseOutput, MseReduction, SegmentKey, SegmentResource, SegmentRun,
+    ShapeError, Tensor, require_same_shape,
 };
 
 use crate::context_cache;
@@ -2334,6 +2335,218 @@ impl BackendOps for CudaBackendOps {
             || mse.run_mse_backward_f32(pred_slice, target_slice, scale),
         )?;
         Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::lstm_pointwise`] の CUDA
+    /// 実装（イシュー #1647）。`hidden` は `c_prev` の列数から導出する。
+    fn lstm_pointwise(
+        &self,
+        pre: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+    ) -> Result<LstmPointwiseOutput, BackendError> {
+        let hidden = c_prev.shape().get(1).copied().unwrap_or(0);
+        let b_dim = c_prev.shape().first().copied().unwrap_or(0);
+        let pre_owned = pre.contiguous();
+        let c_prev_owned = c_prev.contiguous();
+        let pre_slice = pre_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_pointwise: pre not contiguous".into())
+        })?;
+        let c_prev_slice = c_prev_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_pointwise: c_prev not contiguous".into())
+        })?;
+
+        let rnn = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_rnn_cell(&device)
+            },
+        )?;
+        let (gates, c, h) = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || rnn.run_lstm_pointwise_f32(pre_slice, c_prev_slice, hidden),
+        )?;
+        Ok(LstmPointwiseOutput {
+            gates: Tensor::new(gates, &[b_dim, 4 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            c: Tensor::new(c, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+            h: Tensor::new(h, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::lstm_hidden_backward`] の
+    /// CUDA 実装（イシュー #1647）。
+    fn lstm_hidden_backward(
+        &self,
+        c: &Tensor<f32>,
+        gate_o: &Tensor<f32>,
+        dh: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        let shape = c.shape().to_vec();
+        let c_owned = c.contiguous();
+        let gate_o_owned = gate_o.contiguous();
+        let dh_owned = dh.contiguous();
+        let c_slice = c_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_hidden_backward: c not contiguous".into())
+        })?;
+        let gate_o_slice = gate_o_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_hidden_backward: gate_o not contiguous".into())
+        })?;
+        let dh_slice = dh_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_hidden_backward: dh not contiguous".into())
+        })?;
+
+        let rnn = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_rnn_cell(&device)
+            },
+        )?;
+        let (d_pre_o, dc) = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || rnn.run_lstm_hidden_backward_f32(c_slice, gate_o_slice, dh_slice),
+        )?;
+        Ok((
+            Tensor::new(d_pre_o, &shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(dc, &shape).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::lstm_cell_backward`] の CUDA
+    /// 実装（イシュー #1647）。`hidden` は `c_prev` の列数から導出する。
+    fn lstm_cell_backward(
+        &self,
+        gates_ifg: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+        dc: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        let hidden = c_prev.shape().get(1).copied().unwrap_or(0);
+        let b_dim = c_prev.shape().first().copied().unwrap_or(0);
+        let gates_owned = gates_ifg.contiguous();
+        let c_prev_owned = c_prev.contiguous();
+        let dc_owned = dc.contiguous();
+        let gates_slice = gates_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_cell_backward: gates_ifg not contiguous".into())
+        })?;
+        let c_prev_slice = c_prev_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_cell_backward: c_prev not contiguous".into())
+        })?;
+        let dc_slice = dc_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_cell_backward: dc not contiguous".into())
+        })?;
+
+        let rnn = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_rnn_cell(&device)
+            },
+        )?;
+        let (d_pre_ifg, dc_prev) = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || rnn.run_lstm_cell_backward_f32(gates_slice, c_prev_slice, dc_slice, hidden),
+        )?;
+        Ok((
+            Tensor::new(d_pre_ifg, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(dc_prev, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gru_pointwise`] の CUDA 実装
+    /// （イシュー #1647）。`hidden` は `h_prev` の列数から導出する。
+    fn gru_pointwise(
+        &self,
+        pre_i: &Tensor<f32>,
+        pre_h: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+    ) -> Result<GruPointwiseOutput, BackendError> {
+        let hidden = h_prev.shape().get(1).copied().unwrap_or(0);
+        let b_dim = h_prev.shape().first().copied().unwrap_or(0);
+        let pre_i_owned = pre_i.contiguous();
+        let pre_h_owned = pre_h.contiguous();
+        let h_prev_owned = h_prev.contiguous();
+        let pre_i_slice = pre_i_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_pointwise: pre_i not contiguous".into())
+        })?;
+        let pre_h_slice = pre_h_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_pointwise: pre_h not contiguous".into())
+        })?;
+        let h_prev_slice = h_prev_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_pointwise: h_prev not contiguous".into())
+        })?;
+
+        let rnn = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_rnn_cell(&device)
+            },
+        )?;
+        let (gates, q, h) = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || rnn.run_gru_pointwise_f32(pre_i_slice, pre_h_slice, h_prev_slice, hidden),
+        )?;
+        Ok(GruPointwiseOutput {
+            gates: Tensor::new(gates, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            q: Tensor::new(q, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+            h: Tensor::new(h, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gru_backward`] の CUDA 実装
+    /// （イシュー #1647）。`hidden` は `h_prev` の列数から導出する。
+    fn gru_backward(
+        &self,
+        gates_rzn: &Tensor<f32>,
+        q: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+        dh: &Tensor<f32>,
+    ) -> Result<GruBackwardOutput, BackendError> {
+        let hidden = h_prev.shape().get(1).copied().unwrap_or(0);
+        let b_dim = h_prev.shape().first().copied().unwrap_or(0);
+        let gates_owned = gates_rzn.contiguous();
+        let q_owned = q.contiguous();
+        let h_prev_owned = h_prev.contiguous();
+        let dh_owned = dh.contiguous();
+        let gates_slice = gates_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_backward: gates_rzn not contiguous".into())
+        })?;
+        let q_slice = q_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_backward: q not contiguous".into())
+        })?;
+        let h_prev_slice = h_prev_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_backward: h_prev not contiguous".into())
+        })?;
+        let dh_slice = dh_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_backward: dh not contiguous".into())
+        })?;
+
+        let rnn = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_rnn_cell(&device)
+            },
+        )?;
+        let (d_pre_i, d_pre_h, dh_prev_direct) = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || rnn.run_gru_backward_f32(gates_slice, q_slice, h_prev_slice, dh_slice, hidden),
+        )?;
+        Ok((
+            Tensor::new(d_pre_i, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(d_pre_h, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(dh_prev_direct, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        ))
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::release_cached_device_memory`] の CUDA 実装

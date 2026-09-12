@@ -86,6 +86,13 @@ pub(crate) fn uniform_init(len: usize, bound: f32, seed: u64) -> Vec<f32> {
 /// 独立した状態から系列が始まる。
 pub(crate) const WEIGHT_SEED_SALT: u64 = 0;
 pub(crate) const BIAS_SEED_SALT: u64 = 1;
+/// `nn::rnn`（イシュー #1647）の `weight_hh` 導出用ソルト。`Linear` の
+/// `WEIGHT_SEED_SALT`／`BIAS_SEED_SALT`（0・1）と衝突しない値を割り当て、
+/// RNN／LSTM／GRU セルが `weight_ih`／`weight_hh`／`bias_ih`／`bias_hh`
+/// の 4 系統を同一呼び出しシードから独立に導出できるようにする。
+pub(crate) const WEIGHT_HH_SEED_SALT: u64 = 2;
+/// `nn::rnn` の `bias_hh` 導出用ソルト（上記参照）。
+pub(crate) const BIAS_HH_SEED_SALT: u64 = 3;
 
 pub(crate) fn derive_seed(seed: u64, salt: u64) -> u64 {
     let mut z = seed.wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15));

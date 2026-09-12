@@ -63,7 +63,7 @@ fandhe-ai/
 │   └── settings.json        # SessionStart / PostToolUse hooks
 └── docs/
     ├── autodiff-nograd-leaf-dinput-skip-decision.md # 非学習葉（活性化入力 x 等）への d_input 伝播スキップの設計判断（`requires_grad` 前方伝播案の採用・`Gradients::get` 契約整理・多層依存整理・起票草案。#1151 起票案 I・#1219）
-    ├── autodiff-rnn-cell-tape-design.md # RNN／LSTM／GRU のセル演算（専用 Op・payload 保持ゲート値）・LSTM 2 出力（h_t／c_t）の 2 ノード表現・時系列ループ（unrolled）の tape 設計判断（設計のみ・実装は #1647 へ引き継ぎ。facade 公開面拡張は `docs/compat-api-scope.md` §5 手続き〈#1591〉完了まで実装不可。#1646）
+    ├── autodiff-rnn-cell-tape-design.md # RNN／LSTM／GRU のセル演算（専用 Op・payload 保持ゲート値）・LSTM 2 出力（h_t／c_t）の 2 ノード表現・時系列ループ（unrolled）の tape 設計判断（#1646）。**#1647 で内部クレート `fandhe_ai_autodiff::nn::rnn` として実装済み**（3 バックエンド〈CPU・CUDA・Metal〉数値一致・数値微分突合・BPTT・多層スタック検証済み。Metal は実機実測完了・CUDA は本エージェント実行環境に実機なしのため未実測明記。§8「実装記録」参照）。facade 公開面拡張は `docs/compat-api-scope.md` §5 手続き〈#1591。CLOSED〉のうちユーザー承認が未取得のため引き続き実装不可
     ├── autodiff-view-recompute-decision.md # view 系ノード（reshape / transpose）の再計算方式化の設計（push_view／resolve_view による中間バッファ非確保・融合境界化・実測記録。#1043 ツリー・#1047）
     ├── backend-abstraction-amd-readiness-decision.md # 将来の AMD（ROCm/HIP）追加に備えた抽象境界の設計記録（warp 幅の実行時パラメータ化・シャッフルのマスク差異吸収・起動種別〈通常／persistent／cooperative〉の区別・stream 優先 API。32 固定箇所の棚卸し。コード変更なし。#1340）
     ├── backend-cuda-async-execution-design.md # CUDA 非同期実行モデルの同期契約（ストリーム順序・エラー伝播・D2H 境界・poison/invalidate 状態機械。#1011 ツリー・#1012。§12d で #1349 の CUDA Graph step capture opt-in 実装記録を追記・§14 で managed 配置〈#1352〉の同期契約差分を追記）

@@ -31,6 +31,7 @@
 mod init;
 mod linear;
 mod module;
+mod rnn;
 
 pub mod activation;
 pub mod loss;
@@ -38,3 +39,7 @@ pub mod optim;
 
 pub use linear::{Linear, LinearVars};
 pub use module::Module;
+pub use rnn::{
+    Gru, GruCell, GruCellVars, Lstm, LstmCell, LstmCellVars, LstmSeqOutput, Rnn, RnnCell,
+    RnnCellVars, RnnSeqOutput,
+};

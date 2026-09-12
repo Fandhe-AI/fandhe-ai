@@ -443,8 +443,308 @@ pub(crate) fn vjp(
             });
             vec![(input, da)]
         }
+        // RNN（tanh 版）セル 1 step（イシュー #1647・設計 `docs/autodiff-
+        // rnn-cell-tape-design.md` 決定 1・5）。`out_value` は forward
+        // 記録済みの `h_t`（= `tanh(pre)`）。`Op::Tanh` と同じ
+        // `tanh_grad_factor` を再利用したのち、`gate_affine_vjp` の
+        // 単方向版 `affine_vjp` を `x`/`w_ih` 側・`h_prev`/`w_hh` 側の
+        // 2 回に分けて呼ぶ（RNN は列ブロック分割を持たないため
+        // `col_start = 0`・`total_cols = H`）。
+        Op::RnnCell {
+            x,
+            h_prev,
+            w_ih,
+            w_hh,
+            b_ih,
+            b_hh,
+        } => {
+            let x_val = materialize_fallible(nodes, ops, x)?;
+            let h_prev_val = materialize_fallible(nodes, ops, h_prev)?;
+            let w_ih_val = materialize_fallible(nodes, ops, w_ih)?;
+            let w_hh_val = materialize_fallible(nodes, ops, w_hh)?;
+            let total_cols = w_ih_val.shape().get(1).copied().unwrap_or(0);
+            let factor = tanh_grad_factor(out_value);
+            let d_pre = eval::mul(upstream, &factor);
+            let (dx, dw_ih, db_ih) = affine_vjp(ops, x_val, w_ih_val, &d_pre, 0, total_cols)?;
+            let (dh_prev, dw_hh, db_hh) =
+                affine_vjp(ops, h_prev_val, w_hh_val, &d_pre, 0, total_cols)?;
+            let mut contributions = vec![(x, dx), (h_prev, dh_prev), (w_ih, dw_ih), (w_hh, dw_hh)];
+            if let Some(b_ih_id) = b_ih {
+                contributions.push((b_ih_id, db_ih));
+            }
+            if let Some(b_hh_id) = b_hh {
+                contributions.push((b_hh_id, db_hh));
+            }
+            contributions
+        }
+        // LSTM セルの `c_t` ノード（決定 1b）。`upstream` は
+        // `backward_impl` の fan-in 蓄積により、`Op::LstmHidden` からの
+        // `dc_from_h` 寄与と（多 step の場合）次 step の `Op::LstmCell`
+        // からの `dc_prev` 寄与が既に合算された `dc` である。
+        Op::LstmCell {
+            x,
+            h_prev,
+            c_prev,
+            w_ih,
+            w_hh,
+            b_ih,
+            b_hh,
+            gates_ifg,
+        } => {
+            let x_val = materialize_fallible(nodes, ops, x)?;
+            let h_prev_val = materialize_fallible(nodes, ops, h_prev)?;
+            let c_prev_val = materialize_fallible(nodes, ops, c_prev)?;
+            let w_ih_val = materialize_fallible(nodes, ops, w_ih)?;
+            let w_hh_val = materialize_fallible(nodes, ops, w_hh)?;
+            let total_cols = w_ih_val.shape().get(1).copied().unwrap_or(0);
+            let (d_pre_ifg, dc_prev) =
+                match ops.lstm_cell_backward(&gates_ifg, c_prev_val, upstream) {
+                    Ok(v) => v,
+                    Err(BackendError::Unsupported(_)) => {
+                        eval::lstm_cell_backward(&gates_ifg, c_prev_val, upstream)
+                    }
+                    Err(other) => return Err(AutodiffError::Backend(other)),
+                };
+            let (dx, dw_ih, db_ih) = affine_vjp(ops, x_val, w_ih_val, &d_pre_ifg, 0, total_cols)?;
+            let (dh_prev, dw_hh, db_hh) =
+                affine_vjp(ops, h_prev_val, w_hh_val, &d_pre_ifg, 0, total_cols)?;
+            let mut contributions = vec![
+                (x, dx),
+                (h_prev, dh_prev),
+                (c_prev, dc_prev),
+                (w_ih, dw_ih),
+                (w_hh, dw_hh),
+            ];
+            if let Some(b_ih_id) = b_ih {
+                contributions.push((b_ih_id, db_ih));
+            }
+            if let Some(b_hh_id) = b_hh {
+                contributions.push((b_hh_id, db_hh));
+            }
+            contributions
+        }
+        // LSTM セルの `h_t` ノード（決定 1b・決定 1b 追記）。`cell` が
+        // 指す先が必ず `Op::LstmCell` である push 順序契約（`tape::
+        // Op::LstmCell` doc）を利用し、`nodes[cell.0].op` から
+        // `x`/`h_prev`/`w_ih`/`w_hh`/`b_ih`/`b_hh` の `NodeId` を読み出す
+        // （決定 1b 追記。`cell` 以外を指すことは想定しないため `_` 分岐
+        // では型付きエラーで fail-closed に拒否し、パニックしない）。
+        Op::LstmHidden { cell, gate_o } => {
+            let c_val = materialize_fallible(nodes, ops, cell)?;
+            let (d_pre_o, dc) = match ops.lstm_hidden_backward(c_val, &gate_o, upstream) {
+                Ok(v) => v,
+                Err(BackendError::Unsupported(_)) => {
+                    eval::lstm_hidden_backward(c_val, &gate_o, upstream)
+                }
+                Err(other) => return Err(AutodiffError::Backend(other)),
+            };
+            let cell_node = nodes.get(cell.0).ok_or_else(|| {
+                AutodiffError::InvalidArgument(
+                    "grad::vjp: Op::LstmHidden.cell node_id is out of range for this tape \
+                     (contract violation)"
+                        .to_string(),
+                )
+            })?;
+            let (x, h_prev, w_ih, w_hh, b_ih, b_hh) = match &cell_node.op {
+                Op::LstmCell {
+                    x,
+                    h_prev,
+                    w_ih,
+                    w_hh,
+                    b_ih,
+                    b_hh,
+                    ..
+                } => (*x, *h_prev, *w_ih, *w_hh, *b_ih, *b_hh),
+                _ => {
+                    return Err(AutodiffError::InvalidArgument(
+                        "grad::vjp: Op::LstmHidden.cell does not point to an Op::LstmCell node \
+                         (contract violation: push order invariant broken)"
+                            .to_string(),
+                    ));
+                }
+            };
+            let x_val = materialize_fallible(nodes, ops, x)?;
+            let h_prev_val = materialize_fallible(nodes, ops, h_prev)?;
+            let w_ih_val = materialize_fallible(nodes, ops, w_ih)?;
+            let w_hh_val = materialize_fallible(nodes, ops, w_hh)?;
+            let total_cols = w_ih_val.shape().get(1).copied().unwrap_or(0);
+            let hidden = d_pre_o.shape().get(1).copied().unwrap_or(0);
+            let col_start = total_cols.saturating_sub(hidden);
+            let (dx, dw_ih, db_ih) =
+                affine_vjp(ops, x_val, w_ih_val, &d_pre_o, col_start, total_cols)?;
+            let (dh_prev, dw_hh, db_hh) =
+                affine_vjp(ops, h_prev_val, w_hh_val, &d_pre_o, col_start, total_cols)?;
+            let mut contributions = vec![
+                (cell, dc),
+                (x, dx),
+                (h_prev, dh_prev),
+                (w_ih, dw_ih),
+                (w_hh, dw_hh),
+            ];
+            if let Some(b_ih_id) = b_ih {
+                contributions.push((b_ih_id, db_ih));
+            }
+            if let Some(b_hh_id) = b_hh {
+                contributions.push((b_hh_id, db_hh));
+            }
+            contributions
+        }
+        // GRU セル 1 step（決定 1c・5。`reset_after=True` 規約）。`pre_i`
+        // 側（`x`/`w_ih`）と `pre_h` 側（`h_prev`/`w_hh`）は独立した
+        // GEMM のため、`d_pre_i`/`d_pre_h` をそれぞれ `affine_vjp` へ
+        // 個別に渡す（RNN／LSTM の「1 個の d_pre を共有」とは異なる）。
+        // `h_prev` への寄与は `dh_prev_direct`（`z` 経由の直接項）と
+        // `d_pre_h` の affine 逆伝播の 2 系統あり、`backward.rs::
+        // accumulate` が同一 `NodeId` への複数寄与を合算する契約
+        // （本 `Vec` 内に 2 エントリを push するだけでよい）。
+        Op::GruCell {
+            x,
+            h_prev,
+            w_ih,
+            w_hh,
+            b_ih,
+            b_hh,
+            gates_rzn,
+            q,
+        } => {
+            let x_val = materialize_fallible(nodes, ops, x)?;
+            let h_prev_val = materialize_fallible(nodes, ops, h_prev)?;
+            let w_ih_val = materialize_fallible(nodes, ops, w_ih)?;
+            let w_hh_val = materialize_fallible(nodes, ops, w_hh)?;
+            let total_cols = w_ih_val.shape().get(1).copied().unwrap_or(0);
+            let (d_pre_i, d_pre_h, dh_prev_direct) =
+                match ops.gru_backward(&gates_rzn, &q, h_prev_val, upstream) {
+                    Ok(v) => v,
+                    Err(BackendError::Unsupported(_)) => {
+                        eval::gru_backward(&gates_rzn, &q, h_prev_val, upstream)
+                    }
+                    Err(other) => return Err(AutodiffError::Backend(other)),
+                };
+            let (dx, dw_ih, db_ih) = affine_vjp(ops, x_val, w_ih_val, &d_pre_i, 0, total_cols)?;
+            let (dh_prev_affine, dw_hh, db_hh) =
+                affine_vjp(ops, h_prev_val, w_hh_val, &d_pre_h, 0, total_cols)?;
+            let mut contributions = vec![
+                (x, dx),
+                (w_ih, dw_ih),
+                (w_hh, dw_hh),
+                (h_prev, dh_prev_direct),
+                (h_prev, dh_prev_affine),
+            ];
+            if let Some(b_ih_id) = b_ih {
+                contributions.push((b_ih_id, db_ih));
+            }
+            if let Some(b_hh_id) = b_hh {
+                contributions.push((b_hh_id, db_hh));
+            }
+            contributions
+        }
     };
     Ok(contributions)
+}
+
+/// ゲート演算（RNN／LSTM／GRU セル）の GEMM 部分の VJP 共通ヘルパー
+/// （イシュー #1647・設計 `docs/autodiff-rnn-cell-tape-design.md` 決定
+/// 5 の列ブロック配置に対応）。`d_pre_blk`（あるゲートブロックの
+/// pre-activation 勾配。`[B, w]`）と、その GEMM の片側オペランド
+/// （`input_val: [B, D]`・`weight_val: [D, total_cols]`）から、
+/// `d_input = d_pre_blk · (weight[:, blk])ᵀ`（`[B, D]`）・
+/// `d_weight`（`weight` と同じ `[D, total_cols]`。ブロック外はゼロ埋め）・
+/// `d_bias`（`[total_cols]`。同じくブロック外はゼロ埋め）を計算する。
+///
+/// 全幅（`col_start == 0 && d_pre_blk` の列数 `== total_cols`）の場合は
+/// `narrow`／embed を経由せず `weight_val`／結果をそのまま使う（RNN・
+/// LSTM の `LstmCell` 分岐が該当。GRU・`LstmHidden` は常に部分幅）。
+///
+/// [`matmul_vjp`] と同じ `BackendOps::gemm_fp32_strict`（`eval::matmul`
+/// へのフォールバックなし。A08）を経由する。
+///
+/// 戻り値 `(d_input, d_weight, d_bias)`。`clippy::type_complexity` 回避
+/// のため [`AffineVjpOutput`] という名前を与える。
+type AffineVjpOutput = (Tensor<f32>, Tensor<f32>, Tensor<f32>);
+
+fn affine_vjp(
+    ops: &dyn BackendOps,
+    input_val: &Tensor<f32>,
+    weight_val: &Tensor<f32>,
+    d_pre_blk: &Tensor<f32>,
+    col_start: usize,
+    total_cols: usize,
+) -> Result<AffineVjpOutput, AutodiffError> {
+    let block_width = d_pre_blk.shape().get(1).copied().unwrap_or(0);
+    let in_dim = weight_val.shape().first().copied().unwrap_or(0);
+    let full_width = col_start == 0 && block_width == total_cols;
+
+    let weight_blk_owned;
+    let weight_blk: &Tensor<f32> = if full_width {
+        weight_val
+    } else {
+        weight_blk_owned = weight_val
+            .narrow(1, col_start, block_width)
+            .map(|t| t.contiguous())
+            .unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "affine_vjp: narrow(1, col_start, block_width) が失敗した（呼び出し元の \
+                     列ブロック整合違反）"
+                );
+                weight_val.contiguous()
+            });
+        &weight_blk_owned
+    };
+    let weight_blk_t = transpose2d(weight_blk);
+    let d_input = ops
+        .gemm_fp32_strict(d_pre_blk, &weight_blk_t)
+        .map_err(AutodiffError::Backend)?;
+
+    let input_t = transpose2d(input_val);
+    let d_weight_blk = ops
+        .gemm_fp32_strict(&input_t, d_pre_blk)
+        .map_err(AutodiffError::Backend)?;
+    let d_weight_full = if full_width {
+        d_weight_blk
+    } else {
+        embed_columns_2d(&d_weight_blk, in_dim, total_cols, col_start)
+    };
+
+    let d_bias_blk = reduce_to_shape(d_pre_blk, &[block_width]);
+    let d_bias_full = if full_width {
+        d_bias_blk
+    } else {
+        embed_columns_1d(&d_bias_blk, total_cols, col_start)
+    };
+
+    Ok((d_input, d_weight_full, d_bias_full))
+}
+
+/// `partial: [rows, block_width]` を `[rows, total_cols]` の零行列の
+/// `[col_start, col_start+block_width)` 列範囲へ埋め込む（[`affine_vjp`]
+/// の重み勾配の列ブロック配置を復元するためのホスト側 scatter）。
+fn embed_columns_2d(
+    partial: &Tensor<f32>,
+    rows: usize,
+    total_cols: usize,
+    col_start: usize,
+) -> Tensor<f32> {
+    let block_width = partial.shape().get(1).copied().unwrap_or(0);
+    let partial_data = dense_vec(partial);
+    let mut out = vec![0f32; rows * total_cols];
+    for r in 0..rows {
+        for c in 0..block_width {
+            out[r * total_cols + col_start + c] = partial_data[r * block_width + c];
+        }
+    }
+    build_tensor(out, &[rows, total_cols])
+}
+
+/// `partial: [block_width]` を `[total_cols]` の零ベクトルの
+/// `[col_start, col_start+block_width)` 範囲へ埋め込む（[`affine_vjp`]
+/// の bias 勾配の列ブロック配置を復元するためのホスト側 scatter）。
+fn embed_columns_1d(partial: &Tensor<f32>, total_cols: usize, col_start: usize) -> Tensor<f32> {
+    let block_width = partial.shape().first().copied().unwrap_or(0);
+    let partial_data = dense_vec(partial);
+    let mut out = vec![0f32; total_cols];
+    out[col_start..col_start + block_width].copy_from_slice(&partial_data);
+    build_tensor(out, &[total_cols])
 }
 
 /// 2 次元 `matmul` の転置。shape 検査は forward（`Var::matmul` →

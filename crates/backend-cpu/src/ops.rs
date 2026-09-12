@@ -16,8 +16,9 @@ use std::sync::OnceLock;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, ChecksumReadout, DType, FusionPlan, GemmChecksum, MseReduction,
-    SgdStepConfig, ShapeError, Tensor, require_same_shape,
+    Activation, BackendOps, ChecksumReadout, DType, FusionPlan, GemmChecksum, GruBackwardOutput,
+    GruPointwiseOutput, LstmPointwiseOutput, MseReduction, SgdStepConfig, ShapeError, Tensor,
+    require_same_shape,
 };
 
 use crate::gemm_blis::{
@@ -26,7 +27,7 @@ use crate::gemm_blis::{
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::softmax::{self, match_softmax_plan};
-use crate::{elementwise, fused_elementwise, mse, reduction};
+use crate::{elementwise, fused_elementwise, mse, reduction, rnn_cell};
 
 /// `CpuBackendOps` が `MemoryOps` を実装するための、プロセスワイドに共有
 /// する単一 `CpuMemory`（イシュー #935・`docs/device-resident-update-design.md`
@@ -1100,6 +1101,130 @@ impl BackendOps for CpuBackendOps {
         let mut dpred = vec![0.0f32; pred_slice.len()];
         mse::mse_loss_backward_f32(pred_slice, target_slice, scale, &mut dpred)?;
         Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::lstm_pointwise`] の CPU 実装
+    /// （イシュー #1647）。`hidden` は `c_prev` の列数から導出する。
+    fn lstm_pointwise(
+        &self,
+        pre: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+    ) -> Result<LstmPointwiseOutput, BackendError> {
+        let hidden = c_prev.shape().get(1).copied().unwrap_or(0);
+        let b_dim = c_prev.shape().first().copied().unwrap_or(0);
+        let pre_c = pre.contiguous();
+        let c_prev_c = c_prev.contiguous();
+        let pre_slice = pre_c.as_slice().unwrap_or(&[]);
+        let c_prev_slice = c_prev_c.as_slice().unwrap_or(&[]);
+        let (gates, c, h) = rnn_cell::lstm_pointwise(pre_slice, c_prev_slice, hidden)?;
+        Ok(LstmPointwiseOutput {
+            gates: Tensor::new(gates, &[b_dim, 4 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            c: Tensor::new(c, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+            h: Tensor::new(h, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::lstm_hidden_backward`] の
+    /// CPU 実装（イシュー #1647）。
+    fn lstm_hidden_backward(
+        &self,
+        c: &Tensor<f32>,
+        gate_o: &Tensor<f32>,
+        dh: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        let shape = c.shape().to_vec();
+        let c_c = c.contiguous();
+        let gate_o_c = gate_o.contiguous();
+        let dh_c = dh.contiguous();
+        let (d_pre_o, dc) = rnn_cell::lstm_hidden_backward(
+            c_c.as_slice().unwrap_or(&[]),
+            gate_o_c.as_slice().unwrap_or(&[]),
+            dh_c.as_slice().unwrap_or(&[]),
+        )?;
+        Ok((
+            Tensor::new(d_pre_o, &shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(dc, &shape).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::lstm_cell_backward`] の CPU
+    /// 実装（イシュー #1647）。`hidden` は `c_prev` の列数から導出する。
+    fn lstm_cell_backward(
+        &self,
+        gates_ifg: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+        dc: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        let hidden = c_prev.shape().get(1).copied().unwrap_or(0);
+        let b_dim = c_prev.shape().first().copied().unwrap_or(0);
+        let gates_c = gates_ifg.contiguous();
+        let c_prev_c = c_prev.contiguous();
+        let dc_c = dc.contiguous();
+        let (d_pre_ifg, dc_prev) = rnn_cell::lstm_cell_backward(
+            gates_c.as_slice().unwrap_or(&[]),
+            c_prev_c.as_slice().unwrap_or(&[]),
+            dc_c.as_slice().unwrap_or(&[]),
+            hidden,
+        )?;
+        Ok((
+            Tensor::new(d_pre_ifg, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(dc_prev, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gru_pointwise`] の CPU 実装
+    /// （イシュー #1647）。`hidden` は `h_prev` の列数から導出する。
+    fn gru_pointwise(
+        &self,
+        pre_i: &Tensor<f32>,
+        pre_h: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+    ) -> Result<GruPointwiseOutput, BackendError> {
+        let hidden = h_prev.shape().get(1).copied().unwrap_or(0);
+        let b_dim = h_prev.shape().first().copied().unwrap_or(0);
+        let pre_i_c = pre_i.contiguous();
+        let pre_h_c = pre_h.contiguous();
+        let h_prev_c = h_prev.contiguous();
+        let (gates, q, h) = rnn_cell::gru_pointwise(
+            pre_i_c.as_slice().unwrap_or(&[]),
+            pre_h_c.as_slice().unwrap_or(&[]),
+            h_prev_c.as_slice().unwrap_or(&[]),
+            hidden,
+        )?;
+        Ok(GruPointwiseOutput {
+            gates: Tensor::new(gates, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            q: Tensor::new(q, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+            h: Tensor::new(h, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gru_backward`] の CPU 実装
+    /// （イシュー #1647）。`hidden` は `h_prev` の列数から導出する。
+    fn gru_backward(
+        &self,
+        gates_rzn: &Tensor<f32>,
+        q: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+        dh: &Tensor<f32>,
+    ) -> Result<GruBackwardOutput, BackendError> {
+        let hidden = h_prev.shape().get(1).copied().unwrap_or(0);
+        let b_dim = h_prev.shape().first().copied().unwrap_or(0);
+        let gates_c = gates_rzn.contiguous();
+        let q_c = q.contiguous();
+        let h_prev_c = h_prev.contiguous();
+        let dh_c = dh.contiguous();
+        let (d_pre_i, d_pre_h, dh_prev_direct) = rnn_cell::gru_backward(
+            gates_c.as_slice().unwrap_or(&[]),
+            q_c.as_slice().unwrap_or(&[]),
+            h_prev_c.as_slice().unwrap_or(&[]),
+            dh_c.as_slice().unwrap_or(&[]),
+            hidden,
+        )?;
+        Ok((
+            Tensor::new(d_pre_i, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(d_pre_h, &[b_dim, 3 * hidden]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(dh_prev_direct, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        ))
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::run_fused`] のデフォルト実装（`Unsupported`

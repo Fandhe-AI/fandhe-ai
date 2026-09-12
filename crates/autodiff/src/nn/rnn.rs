@@ -1,0 +1,914 @@
+//! RNN／LSTM／GRU セル・Sequence レベル API（イシュー #1647・設計
+//! `docs/autodiff-rnn-cell-tape-design.md` 決定 3・4・4a・6・9）。
+//!
+//! `nn::Linear`（`nn/linear.rs`）と同じ「パラメータ本体（`RnnCell`／
+//! `LstmCell`／`GruCell`）とテープ上の `Var` を保持する `*CellVars`」の
+//! 分離方針を踏襲する。Sequence レベル（`Rnn`／`Lstm`／`Gru`）は 1 個の
+//! セルを T step 分共有して適用する薄いラッパーで、`bind` を 1 回だけ
+//! 呼び重みを T step 間で共有することで BPTT を成立させる（決定 2・
+//! `backward.rs::accumulate` の fan-in 蓄積に委ねる）。
+//!
+//! **`Module` trait との関係（決定 4a・9）**: `Rnn`／`Lstm`／`Gru` は
+//! `Module` trait を実装するが、`forward(tape, input: &Var)` は常に
+//! [`AutodiffError::InvalidArgument`] を返す。理由: `Module::forward`
+//! は `input` を `Var` で受け取るため、時系列方向のスライス（決定 4
+//! 候補 A: `Tensor` レベルで `Tensor::narrow` する）を行うには `input`
+//! を `.value()`／`to_tensor()` で `Tensor` へ detach する経路しかなく、
+//! それは前段層への逆伝播をサイレントに断ち切ってしまう（決定 4a (ii)
+//! の問題）。学習経路は `x: &Tensor<f32>` を直接受け取る専用メソッド
+//! [`Rnn::forward_seq`] 等を使う。`Module::forward_host`（tape 不要・
+//! `predict` 経路）は本来の意味で実装する。
+//!
+//! **`[T,B,H]` 出力の非対称性（決定 4・#1598 依存）**: `forward_seq`
+//! （tape 経路）は `Var::stack`（#1598・未実装）が無いため出力を
+//! `Vec<Var<'t>>`（per-step。各 `[B,H]`）で返す。`forward_host`（tape
+//! 不要）はテープを介さないため、本モジュール内で `Tensor` を直接
+//! 連結し `[T,B,H]` を返せる（`stack_host_tensors`）。
+
+use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor};
+
+use crate::error::AutodiffError;
+use crate::nn::init::{
+    BIAS_HH_SEED_SALT, BIAS_SEED_SALT, WEIGHT_HH_SEED_SALT, WEIGHT_SEED_SALT, derive_seed,
+    uniform_init,
+};
+use crate::nn::module::Module;
+use crate::tape::Tape;
+use crate::var::{CellWeights, GateParams, Var};
+
+/// `build_gate_params` の戻り値 `(weight_ih, weight_hh, bias_ih,
+/// bias_hh)`。`clippy::type_complexity` 回避のための命名。
+type GateParamTensors = (
+    Tensor<f32>,
+    Tensor<f32>,
+    Option<Tensor<f32>>,
+    Option<Tensor<f32>>,
+);
+
+/// `input_size`（`D`）・`hidden_size`（`H`）・`gates`（ゲート数。RNN=1・
+/// GRU=3・LSTM=4）から `weight_ih: [D, G*H]`・`weight_hh: [H, G*H]`・
+/// `bias_ih`／`bias_hh`（`Some` なら各 `[G*H]`）を構築する共通ヘルパー
+/// （`RnnCell`／`LstmCell`／`GruCell::new` が共有する）。
+///
+/// 初期化範囲は PyTorch `nn.RNN`／`nn.LSTM`／`nn.GRU` の既定
+/// （`U(-1/√H, 1/√H)`。`Linear` の `1/√in_features` とは異なり
+/// `hidden_size` 基準）に整合させる（設計 doc 決定 5・9）。4 系統の
+/// シード導出は `nn/init.rs` の 4 ソルト（`WEIGHT_SEED_SALT`・
+/// `WEIGHT_HH_SEED_SALT`・`BIAS_SEED_SALT`・`BIAS_HH_SEED_SALT`）で
+/// 互いに独立させる。
+fn build_gate_params(
+    input_size: usize,
+    hidden_size: usize,
+    gates: usize,
+    bias: bool,
+    seed: u64,
+) -> Result<GateParamTensors, AutodiffError> {
+    if input_size == 0 || hidden_size == 0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "input_size (D={input_size}) and hidden_size (H={hidden_size}) must both be > 0 \
+             (1/sqrt(hidden_size) would be non-finite when H=0)"
+        )));
+    }
+    let bound = 1.0 / (hidden_size as f32).sqrt();
+    let gh = gates * hidden_size;
+
+    let w_ih_seed = derive_seed(seed, WEIGHT_SEED_SALT);
+    let weight_ih = Tensor::new(
+        uniform_init(input_size * gh, bound, w_ih_seed),
+        &[input_size, gh],
+    )?;
+    let w_hh_seed = derive_seed(seed, WEIGHT_HH_SEED_SALT);
+    let weight_hh = Tensor::new(
+        uniform_init(hidden_size * gh, bound, w_hh_seed),
+        &[hidden_size, gh],
+    )?;
+
+    let (bias_ih, bias_hh) = if bias {
+        let b_ih_seed = derive_seed(seed, BIAS_SEED_SALT);
+        let b_hh_seed = derive_seed(seed, BIAS_HH_SEED_SALT);
+        (
+            Some(Tensor::new(uniform_init(gh, bound, b_ih_seed), &[gh])?),
+            Some(Tensor::new(uniform_init(gh, bound, b_hh_seed), &[gh])?),
+        )
+    } else {
+        (None, None)
+    };
+
+    Ok((weight_ih, weight_hh, bias_ih, bias_hh))
+}
+
+/// `from_parameters`（外部由来パラメータの入口。REQ-7 系 safetensors
+/// ロード等を見据える）が計算前に行う shape 検証の共通実装（A03。
+/// `nn::Linear::from_parameters` と同じ「壊れた shape を計算前に拒否
+/// する」方針）。`gates` はゲート数（RNN=1・GRU=3・LSTM=4）。
+fn validate_gate_params(
+    weight_ih: &Tensor<f32>,
+    weight_hh: &Tensor<f32>,
+    bias_ih: Option<&Tensor<f32>>,
+    bias_hh: Option<&Tensor<f32>>,
+    gates: usize,
+) -> Result<(), AutodiffError> {
+    if weight_ih.rank() != 2 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: weight_ih.rank(),
+        }));
+    }
+    if weight_hh.rank() != 2 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: weight_hh.rank(),
+        }));
+    }
+    let d = weight_ih.shape()[0];
+    let hidden = weight_hh.shape()[0];
+    if d == 0 || hidden == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "weight_ih.shape()[0] (input_size) and weight_hh.shape()[0] (hidden_size) must both \
+             be > 0"
+                .to_string(),
+        ));
+    }
+    let gh_ih = weight_ih.shape()[1];
+    let gh_hh = weight_hh.shape()[1];
+    let expected_gh = gates * hidden;
+    if gh_ih != expected_gh || gh_hh != expected_gh {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: vec![d, gh_ih],
+            rhs: vec![hidden, gh_hh],
+        }));
+    }
+    if bias_ih.is_some() != bias_hh.is_some() {
+        return Err(AutodiffError::InvalidArgument(
+            "bias_ih and bias_hh must both be Some or both None".to_string(),
+        ));
+    }
+    for b in [bias_ih, bias_hh].into_iter().flatten() {
+        if b.shape() != [expected_gh] {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: b.shape().to_vec(),
+                rhs: vec![expected_gh],
+            }));
+        }
+    }
+    Ok(())
+}
+
+/// `nn::rnn` 内の Sequence レベル `forward_host`（tape 不要経路）が
+/// `[T,B,H]` を組み立てるための水平連結（`Var::stack`〈#1598〉が tape
+/// 経路にまだ無いため、`Tensor` を直接扱えるこの経路限定で用意する）。
+/// 各要素は `[B, H]`（`stack` 対象の shape が全て一致することを前提に
+/// 呼び出し元が保証する）。
+fn stack_host_tensors(steps: &[Tensor<f32>], b_dim: usize, hidden: usize) -> Tensor<f32> {
+    let mut data = Vec::with_capacity(steps.len() * b_dim * hidden);
+    for step in steps {
+        let c = step.contiguous();
+        data.extend_from_slice(c.as_slice().unwrap_or(&[]));
+    }
+    // `steps` は本モジュール内部でのみ組み立てられる（各 `[B,H]` の
+    // 演算結果）ため要素数は必ず一致し、`Tensor::new` は失敗しえない。
+    // それでも本番経路 panic 禁止方針（`.claude/rules/coding-rust.md`）
+    // のため `unwrap_or_else` で安全側フォールバック（全ゼロ）に吸収する。
+    Tensor::new(data, &[steps.len(), b_dim, hidden]).unwrap_or_else(|_| {
+        debug_assert!(
+            false,
+            "stack_host_tensors: 内部構築した shape が不整合だった（契約違反）"
+        );
+        Tensor::zeros(&[steps.len(), b_dim, hidden]).unwrap_or_else(|_| {
+            Tensor::new(
+                vec![0.0; steps.len() * b_dim * hidden],
+                &[steps.len(), b_dim, hidden],
+            )
+            .expect("stack_host_tensors: zero-fill fallback は shape 構築が必ず成功する")
+        })
+    })
+}
+
+/// `x: [T,B,D]` から step `t` の `[B,D]` をゼロコピー優先で切り出す
+/// （`Tensor::narrow` の view を `contiguous()` してから `reshape`。
+/// 非 contiguous な `x` を渡された場合も `contiguous()` が実体化して
+/// 吸収するため、呼び出し元は `x` の contiguity を意識しなくてよい）。
+fn slice_timestep(
+    x: &Tensor<f32>,
+    t: usize,
+    b_dim: usize,
+    d_dim: usize,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let sliced = x.narrow(0, t, 1)?.contiguous();
+    Ok(sliced.reshape(&[b_dim, d_dim])?)
+}
+
+/// `x: [T,B,D]` の rank・`T>0` 検査（`Rnn`／`Lstm`／`Gru` の
+/// `forward_seq`／`forward_host` 共通の入口検査）。
+fn validate_seq_input(
+    x: &Tensor<f32>,
+    op_name: &str,
+) -> Result<(usize, usize, usize), AutodiffError> {
+    let shape = x.shape();
+    if shape.len() != 3 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{op_name}: x must be rank-3 [T, B, D] (got rank {})",
+            shape.len()
+        )));
+    }
+    let (t_len, b_dim, d_dim) = (shape[0], shape[1], shape[2]);
+    if t_len == 0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{op_name}: T (sequence length) must be > 0"
+        )));
+    }
+    Ok((t_len, b_dim, d_dim))
+}
+
+/// `Module::forward` を明示的に無効化するための共通エラー（決定 4a
+/// 項目 3）。
+fn forward_not_supported(type_name: &str, seq_method: &str) -> AutodiffError {
+    AutodiffError::InvalidArgument(format!(
+        "{type_name}::forward: Module::forward (Var-based) is not supported for sequence \
+         layers because it would silently detach the input from the tape; use \
+         {type_name}::{seq_method} (tape) or Module::forward_host (tape-free) instead"
+    ))
+}
+
+// =====================================================================
+// RNN（tanh 版）
+// =====================================================================
+
+/// RNN（tanh 版。PyTorch `nn.RNNCell` 相当）セル 1 step のパラメータ
+/// 本体。`weight_ih: [D, H]`・`weight_hh: [H, H]`・`bias_ih`／
+/// `bias_hh`: 各 `[H]`（`Some` の場合。両方 `Some` か両方 `None`）。
+#[derive(Debug)]
+pub struct RnnCell {
+    weight_ih: Tensor<f32>,
+    weight_hh: Tensor<f32>,
+    bias_ih: Option<Tensor<f32>>,
+    bias_hh: Option<Tensor<f32>>,
+}
+
+impl RnnCell {
+    /// 決定的シードで PyTorch `nn.RNNCell` 既定と同じ `U(-1/√H, 1/√H)`
+    /// 初期化を行う。`input_size == 0`／`hidden_size == 0` は
+    /// [`AutodiffError::InvalidArgument`]（zero-K ガード）。
+    pub fn new(
+        input_size: usize,
+        hidden_size: usize,
+        bias: bool,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let (weight_ih, weight_hh, bias_ih, bias_hh) =
+            build_gate_params(input_size, hidden_size, 1, bias, seed)?;
+        Ok(Self {
+            weight_ih,
+            weight_hh,
+            bias_ih,
+            bias_hh,
+        })
+    }
+
+    /// 明示的な重み・bias から構築する（A03: 計算前に shape を検証する）。
+    pub fn from_parameters(
+        weight_ih: Tensor<f32>,
+        weight_hh: Tensor<f32>,
+        bias_ih: Option<Tensor<f32>>,
+        bias_hh: Option<Tensor<f32>>,
+    ) -> Result<Self, AutodiffError> {
+        validate_gate_params(
+            &weight_ih,
+            &weight_hh,
+            bias_ih.as_ref(),
+            bias_hh.as_ref(),
+            1,
+        )?;
+        Ok(Self {
+            weight_ih,
+            weight_hh,
+            bias_ih,
+            bias_hh,
+        })
+    }
+
+    pub fn input_size(&self) -> usize {
+        self.weight_ih.shape()[0]
+    }
+
+    pub fn hidden_size(&self) -> usize {
+        self.weight_hh.shape()[0]
+    }
+
+    pub fn weight_ih(&self) -> &Tensor<f32> {
+        &self.weight_ih
+    }
+
+    pub fn weight_hh(&self) -> &Tensor<f32> {
+        &self.weight_hh
+    }
+
+    pub fn bias_ih(&self) -> Option<&Tensor<f32>> {
+        self.bias_ih.as_ref()
+    }
+
+    pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
+        self.bias_hh.as_ref()
+    }
+
+    /// このステップの `tape` へ重み・bias を葉ノードとして登録する
+    /// （`Linear::bind` と同じ per-step 再登録契約。決定 3）。
+    pub fn bind<'t>(&self, tape: &'t Tape) -> RnnCellVars<'t> {
+        RnnCellVars {
+            weight_ih: tape.var(&self.weight_ih),
+            weight_hh: tape.var(&self.weight_hh),
+            bias_ih: self.bias_ih.as_ref().map(|b| tape.var(b)),
+            bias_hh: self.bias_hh.as_ref().map(|b| tape.var(b)),
+        }
+    }
+
+    /// tape 不要（ホスト常駐 `Tensor`）の forward 値計算。`var.rs` の
+    /// 共有関数 `crate::var::rnn_cell_forward_value` へ委譲するため、
+    /// `Var::rnn_cell`（tape 経路）と bit-exact に一致する（決定 9）。
+    pub fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        x: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::var::rnn_cell_forward_value(
+            ops,
+            x,
+            h_prev,
+            &CellWeights {
+                w_ih: &self.weight_ih,
+                w_hh: &self.weight_hh,
+                b_ih: self.bias_ih.as_ref(),
+                b_hh: self.bias_hh.as_ref(),
+            },
+        )
+    }
+}
+
+/// [`RnnCell::bind`] が返す、1 ステップ分のテープに登録済みパラメータ。
+#[derive(Debug)]
+pub struct RnnCellVars<'t> {
+    pub weight_ih: Var<'t>,
+    pub weight_hh: Var<'t>,
+    pub bias_ih: Option<Var<'t>>,
+    pub bias_hh: Option<Var<'t>>,
+}
+
+impl<'t> RnnCellVars<'t> {
+    /// `h_t = tanh(x·W_ih + b_ih + h_prev·W_hh + b_hh)`
+    /// （[`Var::rnn_cell`] へ委譲）。
+    pub fn forward(&self, x: &Var<'t>, h_prev: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        x.rnn_cell(
+            h_prev,
+            GateParams {
+                w_ih: &self.weight_ih,
+                w_hh: &self.weight_hh,
+                b_ih: self.bias_ih.as_ref(),
+                b_hh: self.bias_hh.as_ref(),
+            },
+        )
+    }
+}
+
+/// [`Rnn::forward_seq`] の戻り値。`outputs` は各 step の隠れ状態
+/// （`[B,H]`。決定 4「`Var::stack`〈#1598〉未実装のため per-step の
+/// `Vec` で返す」）、`h_n` は最終 step の隠れ状態（`outputs` の最後の
+/// 要素と同一）。
+#[derive(Debug)]
+pub struct RnnSeqOutput<'t> {
+    pub outputs: Vec<Var<'t>>,
+    pub h_n: Var<'t>,
+}
+
+/// RNN（tanh 版）の時系列 Sequence レベル API（決定 2「展開
+/// unrolled」）。1 個の [`RnnCell`] を T step 分共有して適用する。
+#[derive(Debug)]
+pub struct Rnn {
+    cell: RnnCell,
+}
+
+impl Rnn {
+    pub fn new(
+        input_size: usize,
+        hidden_size: usize,
+        bias: bool,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        Ok(Self {
+            cell: RnnCell::new(input_size, hidden_size, bias, seed)?,
+        })
+    }
+
+    pub fn from_cell(cell: RnnCell) -> Self {
+        Self { cell }
+    }
+
+    pub fn cell(&self) -> &RnnCell {
+        &self.cell
+    }
+
+    /// 学習経路（tape 経路。決定 2・3・4）。`x: [T,B,D]` を `Tensor`
+    /// レベルでスライスし、`bind` を **1 回**呼んで重みを T step 間で
+    /// 共有する（BPTT は `backward.rs::accumulate` の fan-in 蓄積に
+    /// 委ねる）。`h0` 省略時はゼロ（`[B,H]`）を葉登録する（決定 6）。
+    pub fn forward_seq<'t>(
+        &self,
+        tape: &'t Tape,
+        x: &Tensor<f32>,
+        h0: Option<&Var<'t>>,
+    ) -> Result<RnnSeqOutput<'t>, AutodiffError> {
+        let (t_len, b_dim, d_dim) = validate_seq_input(x, "Rnn::forward_seq")?;
+        let hidden = self.cell.hidden_size();
+        let vars = self.cell.bind(tape);
+
+        let mut h = match h0 {
+            Some(v) => *v,
+            None => tape.var(&Tensor::zeros(&[b_dim, hidden])?),
+        };
+        let mut outputs = Vec::with_capacity(t_len);
+        for t in 0..t_len {
+            let x_t_tensor = slice_timestep(x, t, b_dim, d_dim)?;
+            let x_t = tape.var(&x_t_tensor);
+            h = vars.forward(&x_t, &h)?;
+            outputs.push(h);
+        }
+        Ok(RnnSeqOutput { outputs, h_n: h })
+    }
+}
+
+impl Module for Rnn {
+    fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Err(forward_not_supported("Rnn", "forward_seq"))
+    }
+
+    /// 推論経路（tape 不要。決定 9）。`x: [T,B,D]` → `[T,B,H]`。
+    /// [`RnnCell::forward_host`] を T step 分逐次呼び、`h0` はゼロ固定
+    /// （`forward_seq` の `h0` 引数は tape 経路限定。決定 6 のスコープは
+    /// 学習経路のみで、推論経路のゼロ初期化は `Module::forward_host`
+    /// の既存契約〈引数を追加しない〉と整合させる）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let (t_len, b_dim, d_dim) = validate_seq_input(input, "Rnn::forward_host")?;
+        let hidden = self.cell.hidden_size();
+        let mut h = Tensor::zeros(&[b_dim, hidden])?;
+        let mut outputs = Vec::with_capacity(t_len);
+        for t in 0..t_len {
+            let x_t = slice_timestep(input, t, b_dim, d_dim)?;
+            h = self.cell.forward_host(ops, &x_t, &h)?;
+            outputs.push(h.clone());
+        }
+        Ok(stack_host_tensors(&outputs, b_dim, hidden))
+    }
+}
+
+// =====================================================================
+// LSTM
+// =====================================================================
+
+/// LSTM セル 1 step のパラメータ本体（決定 5・12。ゲート順 `i,f,g,o`）。
+/// `weight_ih: [D, 4H]`・`weight_hh: [H, 4H]`・`bias_ih`／`bias_hh`:
+/// 各 `[4H]`。
+#[derive(Debug)]
+pub struct LstmCell {
+    weight_ih: Tensor<f32>,
+    weight_hh: Tensor<f32>,
+    bias_ih: Option<Tensor<f32>>,
+    bias_hh: Option<Tensor<f32>>,
+}
+
+impl LstmCell {
+    pub fn new(
+        input_size: usize,
+        hidden_size: usize,
+        bias: bool,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let (weight_ih, weight_hh, bias_ih, bias_hh) =
+            build_gate_params(input_size, hidden_size, 4, bias, seed)?;
+        Ok(Self {
+            weight_ih,
+            weight_hh,
+            bias_ih,
+            bias_hh,
+        })
+    }
+
+    pub fn from_parameters(
+        weight_ih: Tensor<f32>,
+        weight_hh: Tensor<f32>,
+        bias_ih: Option<Tensor<f32>>,
+        bias_hh: Option<Tensor<f32>>,
+    ) -> Result<Self, AutodiffError> {
+        validate_gate_params(
+            &weight_ih,
+            &weight_hh,
+            bias_ih.as_ref(),
+            bias_hh.as_ref(),
+            4,
+        )?;
+        Ok(Self {
+            weight_ih,
+            weight_hh,
+            bias_ih,
+            bias_hh,
+        })
+    }
+
+    pub fn input_size(&self) -> usize {
+        self.weight_ih.shape()[0]
+    }
+
+    pub fn hidden_size(&self) -> usize {
+        self.weight_hh.shape()[0]
+    }
+
+    pub fn weight_ih(&self) -> &Tensor<f32> {
+        &self.weight_ih
+    }
+
+    pub fn weight_hh(&self) -> &Tensor<f32> {
+        &self.weight_hh
+    }
+
+    pub fn bias_ih(&self) -> Option<&Tensor<f32>> {
+        self.bias_ih.as_ref()
+    }
+
+    pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
+        self.bias_hh.as_ref()
+    }
+
+    pub fn bind<'t>(&self, tape: &'t Tape) -> LstmCellVars<'t> {
+        LstmCellVars {
+            weight_ih: tape.var(&self.weight_ih),
+            weight_hh: tape.var(&self.weight_hh),
+            bias_ih: self.bias_ih.as_ref().map(|b| tape.var(b)),
+            bias_hh: self.bias_hh.as_ref().map(|b| tape.var(b)),
+        }
+    }
+
+    /// tape 不要の forward 値計算。`var.rs` の共有関数
+    /// `crate::var::lstm_cell_forward_values` へ委譲する（決定 9）。
+    /// 戻り値 `(h_t, c_t)`。
+    pub fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        x: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
+        let out = crate::var::lstm_cell_forward_values(
+            ops,
+            x,
+            h_prev,
+            c_prev,
+            &CellWeights {
+                w_ih: &self.weight_ih,
+                w_hh: &self.weight_hh,
+                b_ih: self.bias_ih.as_ref(),
+                b_hh: self.bias_hh.as_ref(),
+            },
+        )?;
+        Ok((out.h, out.c))
+    }
+}
+
+#[derive(Debug)]
+pub struct LstmCellVars<'t> {
+    pub weight_ih: Var<'t>,
+    pub weight_hh: Var<'t>,
+    pub bias_ih: Option<Var<'t>>,
+    pub bias_hh: Option<Var<'t>>,
+}
+
+impl<'t> LstmCellVars<'t> {
+    /// [`Var::lstm_cell`] へ委譲する。戻り値 `(h_t, c_t)`。
+    pub fn forward(
+        &self,
+        x: &Var<'t>,
+        h_prev: &Var<'t>,
+        c_prev: &Var<'t>,
+    ) -> Result<(Var<'t>, Var<'t>), AutodiffError> {
+        x.lstm_cell(
+            h_prev,
+            c_prev,
+            GateParams {
+                w_ih: &self.weight_ih,
+                w_hh: &self.weight_hh,
+                b_ih: self.bias_ih.as_ref(),
+                b_hh: self.bias_hh.as_ref(),
+            },
+        )
+    }
+}
+
+/// [`Lstm::forward_seq`] の戻り値（決定 1b: LSTM は再帰出力 `h_t`／
+/// `c_t` の 2 系統を持つため `RnnSeqOutput` とは別型）。
+#[derive(Debug)]
+pub struct LstmSeqOutput<'t> {
+    pub outputs: Vec<Var<'t>>,
+    pub h_n: Var<'t>,
+    pub c_n: Var<'t>,
+}
+
+/// LSTM の時系列 Sequence レベル API。
+#[derive(Debug)]
+pub struct Lstm {
+    cell: LstmCell,
+}
+
+impl Lstm {
+    pub fn new(
+        input_size: usize,
+        hidden_size: usize,
+        bias: bool,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        Ok(Self {
+            cell: LstmCell::new(input_size, hidden_size, bias, seed)?,
+        })
+    }
+
+    pub fn from_cell(cell: LstmCell) -> Self {
+        Self { cell }
+    }
+
+    pub fn cell(&self) -> &LstmCell {
+        &self.cell
+    }
+
+    /// 学習経路。`h0`／`c0` 省略時はいずれもゼロを葉登録する（決定 6）。
+    pub fn forward_seq<'t>(
+        &self,
+        tape: &'t Tape,
+        x: &Tensor<f32>,
+        h0: Option<&Var<'t>>,
+        c0: Option<&Var<'t>>,
+    ) -> Result<LstmSeqOutput<'t>, AutodiffError> {
+        let (t_len, b_dim, d_dim) = validate_seq_input(x, "Lstm::forward_seq")?;
+        let hidden = self.cell.hidden_size();
+        let vars = self.cell.bind(tape);
+
+        let mut h = match h0 {
+            Some(v) => *v,
+            None => tape.var(&Tensor::zeros(&[b_dim, hidden])?),
+        };
+        let mut c = match c0 {
+            Some(v) => *v,
+            None => tape.var(&Tensor::zeros(&[b_dim, hidden])?),
+        };
+        let mut outputs = Vec::with_capacity(t_len);
+        for t in 0..t_len {
+            let x_t_tensor = slice_timestep(x, t, b_dim, d_dim)?;
+            let x_t = tape.var(&x_t_tensor);
+            let (h_t, c_t) = vars.forward(&x_t, &h, &c)?;
+            h = h_t;
+            c = c_t;
+            outputs.push(h);
+        }
+        Ok(LstmSeqOutput {
+            outputs,
+            h_n: h,
+            c_n: c,
+        })
+    }
+}
+
+impl Module for Lstm {
+    fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Err(forward_not_supported("Lstm", "forward_seq"))
+    }
+
+    /// `x: [T,B,D]` → `[T,B,H]`（最終隠れ状態列。`c_n` は tape 不要
+    /// 経路では返さない——決定 9 は推論経路の対象を隠れ状態出力のみと
+    /// する）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let (t_len, b_dim, d_dim) = validate_seq_input(input, "Lstm::forward_host")?;
+        let hidden = self.cell.hidden_size();
+        let mut h = Tensor::zeros(&[b_dim, hidden])?;
+        let mut c = Tensor::zeros(&[b_dim, hidden])?;
+        let mut outputs = Vec::with_capacity(t_len);
+        for t in 0..t_len {
+            let x_t = slice_timestep(input, t, b_dim, d_dim)?;
+            let (h_t, c_t) = self.cell.forward_host(ops, &x_t, &h, &c)?;
+            h = h_t;
+            c = c_t;
+            outputs.push(h.clone());
+        }
+        Ok(stack_host_tensors(&outputs, b_dim, hidden))
+    }
+}
+
+// =====================================================================
+// GRU
+// =====================================================================
+
+/// GRU セル 1 step のパラメータ本体（決定 5・12。`reset_after=True`
+/// 規約・ゲート順 `r,z,n`）。`weight_ih: [D, 3H]`・`weight_hh: [H, 3H]`・
+/// `bias_ih`／`bias_hh`: 各 `[3H]`。
+#[derive(Debug)]
+pub struct GruCell {
+    weight_ih: Tensor<f32>,
+    weight_hh: Tensor<f32>,
+    bias_ih: Option<Tensor<f32>>,
+    bias_hh: Option<Tensor<f32>>,
+}
+
+impl GruCell {
+    pub fn new(
+        input_size: usize,
+        hidden_size: usize,
+        bias: bool,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let (weight_ih, weight_hh, bias_ih, bias_hh) =
+            build_gate_params(input_size, hidden_size, 3, bias, seed)?;
+        Ok(Self {
+            weight_ih,
+            weight_hh,
+            bias_ih,
+            bias_hh,
+        })
+    }
+
+    pub fn from_parameters(
+        weight_ih: Tensor<f32>,
+        weight_hh: Tensor<f32>,
+        bias_ih: Option<Tensor<f32>>,
+        bias_hh: Option<Tensor<f32>>,
+    ) -> Result<Self, AutodiffError> {
+        validate_gate_params(
+            &weight_ih,
+            &weight_hh,
+            bias_ih.as_ref(),
+            bias_hh.as_ref(),
+            3,
+        )?;
+        Ok(Self {
+            weight_ih,
+            weight_hh,
+            bias_ih,
+            bias_hh,
+        })
+    }
+
+    pub fn input_size(&self) -> usize {
+        self.weight_ih.shape()[0]
+    }
+
+    pub fn hidden_size(&self) -> usize {
+        self.weight_hh.shape()[0]
+    }
+
+    pub fn weight_ih(&self) -> &Tensor<f32> {
+        &self.weight_ih
+    }
+
+    pub fn weight_hh(&self) -> &Tensor<f32> {
+        &self.weight_hh
+    }
+
+    pub fn bias_ih(&self) -> Option<&Tensor<f32>> {
+        self.bias_ih.as_ref()
+    }
+
+    pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
+        self.bias_hh.as_ref()
+    }
+
+    pub fn bind<'t>(&self, tape: &'t Tape) -> GruCellVars<'t> {
+        GruCellVars {
+            weight_ih: tape.var(&self.weight_ih),
+            weight_hh: tape.var(&self.weight_hh),
+            bias_ih: self.bias_ih.as_ref().map(|b| tape.var(b)),
+            bias_hh: self.bias_hh.as_ref().map(|b| tape.var(b)),
+        }
+    }
+
+    /// tape 不要の forward 値計算。`var.rs` の共有関数
+    /// `crate::var::gru_cell_forward_values` へ委譲する（決定 9）。
+    pub fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        x: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let out = crate::var::gru_cell_forward_values(
+            ops,
+            x,
+            h_prev,
+            &CellWeights {
+                w_ih: &self.weight_ih,
+                w_hh: &self.weight_hh,
+                b_ih: self.bias_ih.as_ref(),
+                b_hh: self.bias_hh.as_ref(),
+            },
+        )?;
+        Ok(out.h)
+    }
+}
+
+#[derive(Debug)]
+pub struct GruCellVars<'t> {
+    pub weight_ih: Var<'t>,
+    pub weight_hh: Var<'t>,
+    pub bias_ih: Option<Var<'t>>,
+    pub bias_hh: Option<Var<'t>>,
+}
+
+impl<'t> GruCellVars<'t> {
+    /// [`Var::gru_cell`] へ委譲する。
+    pub fn forward(&self, x: &Var<'t>, h_prev: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        x.gru_cell(
+            h_prev,
+            GateParams {
+                w_ih: &self.weight_ih,
+                w_hh: &self.weight_hh,
+                b_ih: self.bias_ih.as_ref(),
+                b_hh: self.bias_hh.as_ref(),
+            },
+        )
+    }
+}
+
+/// GRU の時系列 Sequence レベル API。
+#[derive(Debug)]
+pub struct Gru {
+    cell: GruCell,
+}
+
+impl Gru {
+    pub fn new(
+        input_size: usize,
+        hidden_size: usize,
+        bias: bool,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        Ok(Self {
+            cell: GruCell::new(input_size, hidden_size, bias, seed)?,
+        })
+    }
+
+    pub fn from_cell(cell: GruCell) -> Self {
+        Self { cell }
+    }
+
+    pub fn cell(&self) -> &GruCell {
+        &self.cell
+    }
+
+    /// 学習経路。`h0` 省略時はゼロを葉登録する（決定 6）。
+    pub fn forward_seq<'t>(
+        &self,
+        tape: &'t Tape,
+        x: &Tensor<f32>,
+        h0: Option<&Var<'t>>,
+    ) -> Result<RnnSeqOutput<'t>, AutodiffError> {
+        let (t_len, b_dim, d_dim) = validate_seq_input(x, "Gru::forward_seq")?;
+        let hidden = self.cell.hidden_size();
+        let vars = self.cell.bind(tape);
+
+        let mut h = match h0 {
+            Some(v) => *v,
+            None => tape.var(&Tensor::zeros(&[b_dim, hidden])?),
+        };
+        let mut outputs = Vec::with_capacity(t_len);
+        for t in 0..t_len {
+            let x_t_tensor = slice_timestep(x, t, b_dim, d_dim)?;
+            let x_t = tape.var(&x_t_tensor);
+            h = vars.forward(&x_t, &h)?;
+            outputs.push(h);
+        }
+        Ok(RnnSeqOutput { outputs, h_n: h })
+    }
+}
+
+impl Module for Gru {
+    fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Err(forward_not_supported("Gru", "forward_seq"))
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let (t_len, b_dim, d_dim) = validate_seq_input(input, "Gru::forward_host")?;
+        let hidden = self.cell.hidden_size();
+        let mut h = Tensor::zeros(&[b_dim, hidden])?;
+        let mut outputs = Vec::with_capacity(t_len);
+        for t in 0..t_len {
+            let x_t = slice_timestep(input, t, b_dim, d_dim)?;
+            h = self.cell.forward_host(ops, &x_t, &h)?;
+            outputs.push(h.clone());
+        }
+        Ok(stack_host_tensors(&outputs, b_dim, hidden))
+    }
+}

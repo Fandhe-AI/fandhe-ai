@@ -234,6 +234,12 @@ pub struct GemmChecksum {
 /// 公開 API はすべて safe。`unsafe` は各バックエンド実装内部の FFI 境界
 /// （`cudarc`・`objc2` 系呼び出し）に閉じ込める
 /// （`.claude/rules/coding-rust.md`）。
+/// [`BackendOps::gru_backward`] の戻り値型エイリアス（イシュー #1647）。
+/// `(d_pre_i, d_pre_h, dh_prev_direct)`（順に `[B, 3H]`・`[B, 3H]`・
+/// `[B, H]`）。`clippy::type_complexity` 回避のための命名（doc は
+/// `gru_backward` 側に集約する）。
+pub type GruBackwardOutput = (Tensor<f32>, Tensor<f32>, Tensor<f32>);
+
 pub trait BackendOps {
     /// このインスタンスが対応する [`Device`]（呼び出し元がログ・
     /// エラーメッセージで識別するために使う）。
@@ -1046,6 +1052,175 @@ pub trait BackendOps {
             "gemm_checksum: default fail-safe (no device-side reduction kernel available)".into(),
         ))
     }
+
+    /// LSTM セルの pointwise 段（イシュー #1647・設計 `docs/autodiff-
+    /// rnn-cell-tape-design.md` 決定 1・決定 1b・決定 5）。融合 GEMM
+    /// `pre = x·W_ih + b_ih + h_prev·W_hh + b_hh`（`[B,4H]`。列ブロック
+    /// 順 `i,f,g,o`）を受け取り、4 ゲートの活性化・セル状態更新・隠れ
+    /// 状態を 1 呼び出しで計算する。
+    ///
+    /// `pre` は `[B, 4H]`（`H` は `c_prev` の列数から導出）、`c_prev` は
+    /// `[B, H]`。戻り値 `gates` は活性化後の `i,f,g,o`（`[B, 4H]`。
+    /// `Op::LstmCell`／`Op::LstmHidden` の VJP が backward で読む
+    /// payload そのもの）、`c` は新セル状態 `[B, H]`、`h` は新隠れ状態
+    /// `[B, H]`。
+    ///
+    /// `c = f·c_prev + i·g`（FMA 契約統一・`.claude/rules/coding-rust.md`）、
+    /// `h = o·tanh(c)`。
+    ///
+    /// `fandhe_ai_autodiff::var::Var::lstm_cell` から呼ばれ、
+    /// [`BackendError::Unsupported`] のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::lstm_pointwise`）へフォールバックする
+    /// （A08。判定迂回経路を作らない）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::gemm_bias_act`] と同じ非破壊拡張パターン。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe。CPU／CUDA／Metal
+    /// の各実装がこのデフォルトをオーバーライドする。
+    fn lstm_pointwise(
+        &self,
+        _pre: &Tensor<f32>,
+        _c_prev: &Tensor<f32>,
+    ) -> Result<LstmPointwiseOutput, BackendError> {
+        Err(BackendError::Unsupported(
+            "lstm_pointwise: default fail-safe (no fused LSTM pointwise kernel available)".into(),
+        ))
+    }
+
+    /// `Op::LstmHidden` の VJP 補助（決定 1b・決定 1b 追記）。`c`
+    /// （現在のセル状態）・`gate_o`（forward 記録済みの o ゲート値）・
+    /// `dh`（上流勾配）から、o ゲートの pre-activation 勾配
+    /// `d_pre_o = dh·tanh(c)·o·(1−o)` と、`cell`（`Op::LstmCell`）へ
+    /// 伝播するセル状態勾配 `dc = dh·o·(1−tanh(c)²)` を計算する。
+    ///
+    /// `c`／`gate_o`／`dh` はいずれも `[B, H]`。戻り値 `(d_pre_o, dc)`
+    /// も `[B, H]`。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::lstm_pointwise`] と同じ fail-safe パターン。
+    fn lstm_hidden_backward(
+        &self,
+        _c: &Tensor<f32>,
+        _gate_o: &Tensor<f32>,
+        _dh: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "lstm_hidden_backward: default fail-safe (no fused LSTM hidden backward kernel              available)"
+                .into(),
+        ))
+    }
+
+    /// `Op::LstmCell` の VJP 補助（決定 1b）。forward 記録済みの
+    /// `gates_ifg`（`i,f,g` の活性化後値。`[B, 3H]`）・`c_prev`
+    /// （`[B, H]`）・上流のセル状態勾配 `dc`（`[B, H]`。`Op::LstmHidden`
+    /// からの寄与と次 step の `dc_prev` の fan-in 合算済み）から、
+    /// `i,f,g` 3 ゲートの pre-activation 勾配 `d_pre_ifg`（`[B, 3H]`）と
+    /// 前セル状態への勾配 `dc_prev = dc·f`（`[B, H]`）を計算する。
+    ///
+    /// `d_pre_i = dc·g·i·(1−i)`、`d_pre_f = dc·c_prev·f·(1−f)`、
+    /// `d_pre_g = dc·i·(1−g²)`。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::lstm_pointwise`] と同じ fail-safe パターン。
+    fn lstm_cell_backward(
+        &self,
+        _gates_ifg: &Tensor<f32>,
+        _c_prev: &Tensor<f32>,
+        _dc: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "lstm_cell_backward: default fail-safe (no fused LSTM cell backward kernel              available)"
+                .into(),
+        ))
+    }
+
+    /// GRU セルの pointwise 段（決定 1c・決定 5。`reset_after=True`
+    /// 規約）。`pre_i = x·W_ih + b_ih`・`pre_h = h_prev·W_hh + b_hh`
+    /// （いずれも `[B, 3H]`。列ブロック順 `r,z,n`）と前隠れ状態
+    /// `h_prev`（`[B, H]`）を受け取り、`r,z` ゲート・`n`（新候補）・
+    /// 新隠れ状態を計算する。
+    ///
+    /// `r = σ(pre_i_r + pre_h_r)`、`z = σ(pre_i_z + pre_h_z)`、
+    /// `q = pre_h_n`（decision 1c: GEMM 再計算を避けるため payload に
+    /// 保持する再帰側アフィン値）、`n = tanh(r·q + pre_i_n)`、
+    /// `h = z·h_prev + (1−z)·n`。
+    ///
+    /// 戻り値 `gates` は活性化後の `r,z,n`（`[B, 3H]`）、`q` は再帰側
+    /// アフィン値（`[B, H]`。決定 1c）、`h` は新隠れ状態（`[B, H]`）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::lstm_pointwise`] と同じ fail-safe パターン。
+    fn gru_pointwise(
+        &self,
+        _pre_i: &Tensor<f32>,
+        _pre_h: &Tensor<f32>,
+        _h_prev: &Tensor<f32>,
+    ) -> Result<GruPointwiseOutput, BackendError> {
+        Err(BackendError::Unsupported(
+            "gru_pointwise: default fail-safe (no fused GRU pointwise kernel available)".into(),
+        ))
+    }
+
+    /// `Op::GruCell` の VJP 補助。forward 記録済みの `gates_rzn`
+    /// （`[B, 3H]`）・`q`（決定 1c の再帰側アフィン値。`[B, H]`）・
+    /// `h_prev`（`[B, H]`）・上流勾配 `dh`（`[B, H]`）から、`W_ih` 側
+    /// pre-activation 勾配 `d_pre_i`（`[B, 3H]`）・`W_hh` 側
+    /// pre-activation 勾配 `d_pre_h`（`[B, 3H]`）・`h_prev` への直接
+    /// 勾配 `dh_prev_direct = dh·z`（`[B, H]`）を計算する。
+    ///
+    /// `dn = dh·(1−z)`、`dz = dh·(h_prev−n)`、`d_pre_n = dn·(1−n²)`、
+    /// `dr = d_pre_n·q`、`d_pre_r = dr·r·(1−r)`、
+    /// `d_pre_z = dz·z·(1−z)`。`d_pre_i = [d_pre_r, d_pre_z, d_pre_n]`、
+    /// `d_pre_h = [d_pre_r, d_pre_z, d_pre_n·r]`（`n` の `q` に対する
+    /// 偏微分が `r` であるため、`W_hh` 側の n 列ブロックのみ追加で `r`
+    /// を乗じる）。呼び出し元（`grad::vjp`）は `d_pre_h` を用いて
+    /// `dh_prev = dh_prev_direct + d_pre_h·W_hhᵀ` を合成する。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::lstm_pointwise`] と同じ fail-safe パターン。
+    fn gru_backward(
+        &self,
+        _gates_rzn: &Tensor<f32>,
+        _q: &Tensor<f32>,
+        _h_prev: &Tensor<f32>,
+        _dh: &Tensor<f32>,
+    ) -> Result<GruBackwardOutput, BackendError> {
+        Err(BackendError::Unsupported(
+            "gru_backward: default fail-safe (no fused GRU backward kernel available)".into(),
+        ))
+    }
+}
+
+/// [`BackendOps::lstm_pointwise`] の戻り値（イシュー #1647）。
+///
+/// `gates` は活性化後の `i,f,g,o`（`[B, 4H]`。`Op::LstmCell`／
+/// `Op::LstmHidden` の VJP が backward で参照する payload そのもの）、
+/// `c` は新セル状態、`h` は新隠れ状態（いずれも `[B, H]`）。他クレート
+/// （`backend-cpu`／`backend-cuda`／`backend-metal`）が構築するため
+/// `#[non_exhaustive]` は付けない（フィールド追加は破壊的変更として
+/// 扱う）。
+#[derive(Debug, Clone)]
+pub struct LstmPointwiseOutput {
+    pub gates: Tensor<f32>,
+    pub c: Tensor<f32>,
+    pub h: Tensor<f32>,
+}
+
+/// [`BackendOps::gru_pointwise`] の戻り値（イシュー #1647）。
+///
+/// `gates` は活性化後の `r,z,n`（`[B, 3H]`）、`q` は決定 1c の再帰側
+/// アフィン値（`[B, H]`。GEMM 再計算なしで `∂n/∂r` を復元するための
+/// payload）、`h` は新隠れ状態（`[B, H]`）。
+#[derive(Debug, Clone)]
+pub struct GruPointwiseOutput {
+    pub gates: Tensor<f32>,
+    pub q: Tensor<f32>,
+    pub h: Tensor<f32>,
 }
 
 /// 複数の `&dyn BackendOps` を横断して `device` に一致する実装を選択する。
@@ -1493,5 +1668,41 @@ mod tests {
         let result = ops.gemm_checksum(&a, &b, ChecksumReadout::ChecksumOnly);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// RNN／LSTM／GRU セル演算（イシュー #1647）の 5 メソッドすべてが
+    /// 既定実装で `BackendError::Unsupported` を返すことを確認する
+    /// （`gemm_checksum_default_is_unsupported` と同型のガード。
+    /// `fandhe_ai_autodiff::var::{rnn_cell,lstm_cell,gru_cell}` はこの
+    /// 契約に依存してホスト参照実装〈`eval.rs`〉へフォールバックする）。
+    #[test]
+    fn rnn_cell_ops_default_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let b = 2usize;
+        let hidden = 3usize;
+        let pre4h = Tensor::new(vec![0.0f32; b * 4 * hidden], &[b, 4 * hidden]).unwrap();
+        let pre3h = Tensor::new(vec![0.0f32; b * 3 * hidden], &[b, 3 * hidden]).unwrap();
+        let bh = Tensor::new(vec![0.0f32; b * hidden], &[b, hidden]).unwrap();
+
+        assert!(matches!(
+            ops.lstm_pointwise(&pre4h, &bh),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.lstm_hidden_backward(&bh, &bh, &bh),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.lstm_cell_backward(&pre3h, &bh, &bh),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.gru_pointwise(&pre3h, &pre3h, &bh),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.gru_backward(&pre3h, &bh, &bh, &bh),
+            Err(BackendError::Unsupported(_))
+        ));
     }
 }

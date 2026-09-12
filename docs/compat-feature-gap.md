@@ -237,7 +237,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `nn.Dropout` | `layers.Dropout` | **なし** | RNG 契約設計＋マスク適用 Op（train/eval モード分岐）＋VJP | M |
 | `nn.Embedding` | `layers.Embedding` | **なし** | gather 系 Op が前提（2.2 節）＋embedding テーブル管理 | L |
 | `nn.MultiheadAttention` | `layers.MultiHeadAttention` | **なし** | softmax・batched matmul・(optional) causal mask・reshape/transpose の組合せ実装。前提演算が軒並み未実装 | XL |
-| RNN/LSTM/GRU | `layers.SimpleRNN`/`LSTM`/`GRU` | **なし** | ゲート演算（sigmoid/tanh は既存）＋時系列ループの tape 構築設計＋3 バックエンド。設計: `docs/autodiff-rnn-cell-tape-design.md`（#1646） | XL |
+| RNN/LSTM/GRU | `layers.SimpleRNN`/`LSTM`/`GRU` | 内部クレート `fandhe_ai_autodiff::nn::rnn`（`RnnCell`/`LstmCell`/`GruCell`・`Rnn`/`Lstm`/`Gru`）に実装済み（3 バックエンド〈CPU・CUDA・Metal〉数値一致。Metal は実機実測完了・CUDA は本エージェント実行環境に実機なしのため未実測明記）。**facade（`fandhe_ai`）未公開**（`docs/compat-api-scope.md` §5 の範囲拡張手続きのうちユーザー承認が未取得のため。決定 10）。`forward_seq`（tape 経路）の出力は `Var::stack`〈#1598〉未実装のため `[T,B,H]` ではなく `Vec<Var>`（per-step）。設計: `docs/autodiff-rnn-cell-tape-design.md`（#1646）・実装記録: 同文書 §8（#1647） | XL（設計・内部実装は完了。facade 公開のみ残作業） |
 | Pooling（Max/AvgPool） | `layers.MaxPooling2D` 等 | **なし** | Conv 同様の空間走査カーネル＋VJP（max は argmax 経路の逆伝播） | L |
 
 ### 2.8 損失

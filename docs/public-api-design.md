@@ -465,6 +465,20 @@ autodiff-view-recompute-decision.md` を参照）。非 contiguous な
 `reshape` は案 A（エラー。`tensor-core::Tensor::reshape` と同じ方針）を
 踏襲する。
 
+**イシュー #1647 追加**: `rnn_cell`／`lstm_cell`／`gru_cell`（RNN・
+LSTM・GRU の 1 step セル演算。設計 `docs/autodiff-rnn-cell-tape-
+design.md`）を内部クレート `fandhe_ai_autodiff::var::Var` の演算として
+追加した。専用 `Op` variant（`RnnCell`／`LstmCell`／`LstmHidden`／
+`GruCell`）で表現し、GEMM 部分は既存の `matmul`／`gemm_bias_act` を
+再利用、ゲート pointwise 演算のみ新設の `BackendOps` メソッド
+（`lstm_pointwise`／`lstm_hidden_backward`／`lstm_cell_backward`／
+`gru_pointwise`／`gru_backward`。§4.2 参照）で計算する。融合対象外
+（非 elementwise。`Op::is_lazy_elementwise` 参照）。`fandhe_ai_autodiff::
+nn::rnn`（`RnnCell`／`LstmCell`／`GruCell`・Sequence レベル `Rnn`／
+`Lstm`／`Gru`）が `nn::Linear` と同型の構成でこれらを組み上げる。
+`facade`（公開 API 面）への昇格は本イシューのスコープ外
+（`docs/compat-api-scope.md` §5 の範囲拡張手続き・決定 10）。
+
 ## 4. backend 入口公開 API
 
 ### 4.1 デバイス選択
