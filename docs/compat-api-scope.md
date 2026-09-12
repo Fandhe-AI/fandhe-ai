@@ -240,7 +240,7 @@ Phase 3（親 #1573）の各 issue へ対応付ける。
 | einsum | #1620 |
 | 線形代数（inv／solve／det／qr／cholesky／svd） | #1621（実装済み。`Var::inv`／`solve`／`det`／`cholesky`／`qr`／`svd`／`matrix_norm`。rank-2 限定・CPU 実装先行・GPU は `Unsupported` フォールバック。`docs/autodiff-linalg-design.md`） |
 | 高階微分 | #1622（設計記録。`docs/autodiff-higher-order-grad-decision.md`） |
-| custom autograd Function | #1623（設計記録） |
+| custom autograd Function | #1623（設計記録。`docs/autodiff-custom-function-decision.md`） |
 | activation checkpointing | #1624 |
 | AMP | #1625 |
 | f64／f16／bf16 演算 | #1626 |
