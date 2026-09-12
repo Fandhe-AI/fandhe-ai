@@ -377,6 +377,7 @@ mod kernels_mma_tf32;
 mod kernels_mma_tf32x3;
 mod kernels_mse;
 mod kernels_rmsnorm;
+mod kernels_rnn_cell;
 mod kernels_sgd;
 mod kernels_softmax;
 mod kernels_tiled_pipeline;
@@ -397,6 +398,7 @@ mod host_staging;
 pub mod memory;
 mod module_cache;
 mod mse;
+mod rnn_cell;
 // イシュー #1584: 汎用 reduction（`sum`／`max`）起動 API・カーネル
 // ソース。`mse.rs`／`kernels_mse.rs` と同じ 2 ファイル構成
 // （起動 API／NVRTC カーネル文字列の責務分離）。
@@ -439,6 +441,7 @@ pub use gemm::CudaGemm;
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::TiledF32Kernel;
 pub use mse::CudaMse;
+pub use rnn_cell::CudaRnnCell;
 // イシュー #1584: 汎用 reduction（`sum`／`max`）の実機 `#[ignore]`
 // テスト（`tests/reduce_parity.rs`）が crate 外から `CudaReduce` を
 // 直接構築するために公開する（`CudaMse` と同じ理由）。
