@@ -1,0 +1,7 @@
+machine: DGX Spark GB10 (Grace CPU, CUDA 13.0 node)
+arch: aarch64
+cores(logical): 20 (rayon::current_num_threads()=20)
+rustc: 1.97.0 (matches rust-toolchain.toml pin)
+load average at Phase0 run1: 1.66, 0.39, 0.12 (idle)
+load average at Phase1 (see uptime-1578-cpu-1578.log): 0.85, 0.53, 0.23 (idle)
+note: 内部ホスト名は記録しない

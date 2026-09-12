@@ -1,0 +1,7 @@
+machine: Apple M4 Max (MacBook Pro, macOS)
+arch: arm64
+cores(logical): 16 (rayon::current_num_threads()=16)
+rustc: (workspace rust-toolchain.toml: stable)
+load average at Phase0 run1: 25.11 11.80 8.52 (shared load — 複数の並列セッションが同時稼働)
+load average at Phase1 run1: 6.02 10.10 8.73 (uptime-1578-cpu-1578.log 参照)
+note: 内部ホスト名は記録しない

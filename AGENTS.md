@@ -109,9 +109,8 @@
   しクラス一致で比較。tolerance・baseline・REQ-2 判定は不変）。f32 のみの
   補償和による近似契約（Tier A/B 等の事前判定可能な誤差上界方式）は、bit
   一致するカーネル実装の採用により不要となる見込みである。**実装は PR #1659
-  （イシュー #1566）で導入（未マージ時点では本契約のみが確定済みで、実装は
-  未導入）**。契約・経緯の正本は `docs/metal-grad-reduction-parity-judgment-
-  decision.md`（実装記録節は PR #1659 マージ後に追記）。契約の片側変更（一部
+  （イシュー #1566。2026-09-12 マージ）で導入済み**。契約・経緯・実装記録の正本は
+  `docs/metal-grad-reduction-parity-judgment-decision.md`（§6 実装記録）。契約の片側変更（一部
   バックエンドのみ精度を上げる等）は P1
 - **TF32/f16 Tensor Core 経路の parity テスト判定方式（P1。テストの弱体化禁止の
   例外を明記する規約。正本仕様 `docs/spec/04-requirements.md` REQ-2「2026-09-02
