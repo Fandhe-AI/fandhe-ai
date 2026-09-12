@@ -145,49 +145,65 @@ run_rmsnorm_f32_inner` の 1 要素ダミーはこの指摘の対象外〈スコ
 する）・reduction は 5 段 butterfly（`simd_shuffle_xor` 幅 16/8/4/2/1）と、
 `rmsnorm.metal` の構造イディオムを踏襲する。
 
-MSL は `double` 型を持たないため、分散の二乗和は `rmsnorm.metal` と同じ
-**Neumaier 改良版 Kahan 補償和 + scale/ssq 方式**（LAPACK SLASSQ 系の
-overflow-safe な二乗和アルゴリズム）を「`f64` アキュムレータ相当」の実装形
-として適用する。`rmsnorm.metal` とのアルゴリズム上の重複は意図的: Metal
-ソースは `newLibraryWithSource` で個別ファイル単位にコンパイルされ翻訳単位
-を共有できないため、`ln_` 接頭辞を付けた独立関数として `layer_norm.metal`
-内に複製する。
+MSL は `double` 型を持たないため、`mean`／`var`／`rstd` は「**64bit 整数
+（`ulong`／`long`）による IEEE 754 binary64 のソフトウェアエミュレーション
+（soft-f64）**」で計算する（`gemm.metal::bias_f64_*`〈イシュー #1566・
+PR #1659〉と同じ手法を本ファイル独自に拡張。`ln_` 接頭辞を付けた独立関数
+群として `layer_norm.metal` 内に実装する。Metal ソースは
+`newLibraryWithSource` で個別ファイル単位にコンパイルされ翻訳単位を
+共有できないため、`rmsnorm.metal` とは独立した複製になる）。
 
-**平均の実装形は当初「素の Neumaier 補償和で十分」としていたが、
-codex-review 指摘（PR #1671）を受け見直した**。Welford オンライン平均
-（一時的な中間案。`meanA + delta*(countB/countAB)` の butterfly merge）は
-各更新値が入力値域に収まるため overflow-safe だが、毎ステップ `f32` へ
-丸められるため `[16777216, 16777218]`（真の平均 `16777217` が `f32` で
-表現不能）で丸め誤差が生じ、CPU/CUDA（`f64` のまま偏差計算まで保持）と
-符号が食い違う結果を生んだ。さらに `meanB - meanA` 自体、入力
-`[2^38, -2^38]` のような遠い有限値の差が `f32` の表現範囲
-（`|x| <= f32::MAX ≈ 3.4e38`）を超え `±inf` へ overflow する問題もあった。
+**当初は `rmsnorm.metal` と同じ Neumaier 改良版 Kahan 補償和 + scale/ssq
+方式（LAPACK SLASSQ 系の overflow-safe な二乗和アルゴリズム）を「`f64`
+アキュムレータ相当」の実装形として採用し、平均側は「行内 2 の冪
+スケーリング（`row_scale`）+ 2 段補償和 + doubled-float」という設計を
+経たが、いずれも次の 2 系統の反例で数値契約を満たせないことが codex-review
+指摘（PR #1671）で判明し、最終的に本節冒頭の soft-f64 方式へ全面再設計した
+（経緯の詳細・反例の具体的な入力値は `layer_norm.metal` 冒頭コメントを
+正本とする）**:
 
-採用した設計（**行内 2 の冪スケーリング + 2 段補償和**）は、行の
-`maxabs = max(|x_i|)` から「`maxabs` 以下の最大の 2 の冪」`row_scale` を
-ビット直接構成し（`as_type<uint>`／`as_type<float>` で指数フィールドを
-直接読み書き。`crate::soft_f64` と同じ bit 演算方針）、以降すべての縮約を
-`x_i/row_scale`（2 の冪除算は丸め無しの厳密演算）という**比スケール領域**
-（`|x_i/row_scale| < 2`）で行う。比スケール領域では総和が `O(hidden)` に
-収まり overflow の心配がないため、Neumaier 改良版 Kahan 補償和だけで
-`f64` 相当の精度が得られる。平均は比スケール総和を `inv_n` 倍してさらに
-doubled-float（FMA によるロスレス乗算誤差抽出。Dekker の手法）へ拡張した
-`(mean_hi, mean_lo)` として保持し、偏差計算まで `f32` 単一値へ丸めない。
-分散側の scale/ssq には比スケール偏差 `dev = (x_i/row_scale - mean_hi) -
-mean_lo` を渡し、`eps` は比スケール等価量 `eps_elem =
-sqrt(eps)*sqrt(n)/row_scale` として既存の疑似要素トリックへ折り込む。
-最終正規化係数は単独の逆数として合成せず、要素ごとに `xhat = (dev/scale)
-* norm` の順で計算する（退化ケース——行の全要素が同一の巨大値の場合など
-——で `1/(scale*sqrt(...))` を単独形成すると overflow しうるため）。
-詳細な数式・overflow 回避の根拠は `layer_norm.metal` 冒頭コメントを正本
-とする。
+1. **行スケール除算での微小値消失**: 同じ行に「巨大な値」と「小さいが
+   非ゼロな寄与を持つ値」が混在する場合、小さい要素の比 `x_i/row_scale`
+   が `f32` の正規化下限を割り込む subnormal になり、Apple GPU 実機の
+   flush-to-zero（FTZ）で消える
+2. **正規化係数の丸め誤差が affine の相殺で増幅される**: scale/ssq 状態を
+   単一 `f32` へ丸めてから `sqrt`／逆数を取る 1 行があり、`weight` が
+   極端に大きく `bias` がほぼ相殺する行でこの 1 ULP 未満の差が
+   `weight` 倍に増幅され CPU（`f64` で保持）との差が数値契約を超えた
 
-`rmsnorm.metal` と異なり常に「4 パス」（device メモリ再読・threadgroup
-memory 不使用。`maxabs` → 平均 → 分散 → 書き出し）とし、
-`rmsnorm_f32_onepass` に相当する threadgroup memory キャッシュ経路は
-持たない（LayerNorm は平均・分散の 2 回の縮約に加え行スケール導出が
-必要で RMSNorm より構造が複雑になるため）。ベクトル化ロード（`float4`）
-も本イシューでは適用しない。
+両方とも根本原因は「`f32` の限られた指数範囲・仮数精度に収まるよう値を
+リスケールする」という当初のアプローチ自体にあり、soft-f64 化（`f64` は
+`f32` の全域を正規化数として表現できる指数範囲を持つためリスケール自体が
+不要になる）で構造的に解消した。
+
+**平均・分散を「正しく丸めた除算」で求める理由（PR #1671 codex-review・
+Cursor Bugbot 指摘・イシュー #1596 の追加是正）**: soft-f64 化した直後は
+`mean`／`var` を `sum * ln_f64_recip_newton(hidden)`（Newton-Raphson 法に
+よる近似逆数との積）で求めていたが、これは一様行（例
+`x=[1e30f32;49]`。`weight`／`bias` なし）のような「割り切れる」ケースで
+Newton 近似特有の 1 ULP 誤差が悪化し、本来 0 になるべき偏差
+`x - mean` が約 `-1.407e14` という巨大な非ゼロ値になる反例が実測で
+判明した。`mul_f64_bits` と対になる**正しく丸めた除算**
+（`ln_f64_div`／ホスト側逐語モデル `soft_f64::div_f64_bits`。仮数を
+`[2^52,2^53)` へ正規化し `numerator = ma << 55` を筆算除算〈2 進
+shift-subtract〉で `mb` 除算してから 1 回だけ最近接偶数丸めする）へ
+置き換えることで、この反例は解消する（`div_f64_bits` はホスト側の
+ランダム・境界値・全指数組合せ網羅テストでネイティブ `f64` 除算と
+bit 完全一致することを検証済み）。
+
+平均・分散とも `mean = ln_f64_div(lane_sum, hidden_f64)`／
+`var = ln_f64_div(lane_sq, hidden_f64)` として確定し、偏差計算まで
+`f32` 単一値へ丸めない。`rstd = ln_f64_rsqrt_newton(var + eps)`
+（Newton-Raphson 法。除算命令を使わず `mul`／`add` のみで構成し 4 回の
+反復で `f64` の 52bit 精度へ収束）は引き続き近似で構わない（`rsqrt` は
+「割り切れる」という特別な反例パターンを持たないため）。詳細な数式は
+`layer_norm.metal` 冒頭コメントを正本とする。
+
+`rmsnorm.metal` と異なり常に「3 パス」（device メモリ再読・threadgroup
+memory 不使用。平均 → 分散 → 書き出し。行スケール導出〈`maxabs`〉の
+パスは soft-f64 化により不要になったため持たない）とし、
+`rmsnorm_f32_onepass` に相当する threadgroup memory キャッシュ経路も
+持たない。ベクトル化ロード（`float4`）も本イシューでは適用しない。
 
 `w`／`b` が `None` の場合のダミーバッファは `hidden` 要素のゼロ初期化
 バッファを渡す（CUDA と異なり、Metal コンパイラが `(has_weight != 0) ?

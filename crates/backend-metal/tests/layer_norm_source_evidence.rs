@@ -87,7 +87,7 @@ fn mean_and_variance_reductions_shuffle_both_halves_of_soft_f64_accumulator() {
 /// への逆戻りを検出する。`layer_norm.metal` 冒頭コメント「数値方式」
 /// 参照）。
 #[test]
-fn mean_and_variance_passes_use_soft_f64_widen_add_and_recip() {
+fn mean_and_variance_passes_use_soft_f64_widen_add_and_div() {
     assert!(
         LAYER_NORM_METAL_SOURCE
             .contains("ulong xv = ln_f64_widen(as_type<uint>(x[row_base + idx]));"),
@@ -98,16 +98,27 @@ fn mean_and_variance_passes_use_soft_f64_widen_add_and_recip() {
         "平均パスが ln_f64_add で soft-f64 総和を蓄積していません"
     );
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("ulong hidden_recip = ln_f64_recip_newton(hidden_f64);"),
-        "hidden の soft-f64 逆数（ln_f64_recip_newton）が見つかりません"
+        LAYER_NORM_METAL_SOURCE
+            .contains("ulong hidden_f64 = ln_f64_widen(as_type<uint>((float)hidden));"),
+        "hidden の soft-f64 表現（ln_f64_widen）が見つかりません"
+    );
+    // PR #1671 codex-review・Cursor Bugbot 指摘への是正（イシュー
+    // #1596）: `mean`／`var` は Newton 近似逆数との積
+    // （`ln_f64_mul(sum, ln_f64_recip_newton(hidden))`）ではなく、
+    // 正しく丸めた除算（`ln_f64_div`）で確定する。一様行等の割り切れる
+    // ケースで Newton 近似特有の 1 ULP 誤差が悪化するのを防ぐため。
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("ulong mean = ln_f64_div(lane_sum, hidden_f64);"),
+        "平均が soft-f64 正しく丸めた除算（ln_f64_div(lane_sum, hidden_f64)）で確定していません"
     );
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("ulong mean = ln_f64_mul(lane_sum, hidden_recip);"),
-        "平均が soft-f64 積（lane_sum * hidden_recip）で確定していません"
+        LAYER_NORM_METAL_SOURCE.contains("ulong var = ln_f64_div(lane_sq, hidden_f64);"),
+        "分散が soft-f64 正しく丸めた除算（ln_f64_div(lane_sq, hidden_f64)）で確定していません"
     );
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("ulong var = ln_f64_mul(lane_sq, hidden_recip);"),
-        "分散が soft-f64 積（lane_sq * hidden_recip）で確定していません"
+        !LAYER_NORM_METAL_SOURCE.contains("ulong hidden_recip = ln_f64_recip_newton"),
+        "mean/var の計算経路に Newton 近似逆数との積（hidden_recip）が\
+         残存しています（1 ULP 誤差が悪化するケースがあるため使わない）"
     );
     assert!(
         LAYER_NORM_METAL_SOURCE.contains("ulong rstd = ln_f64_rsqrt_newton(var_plus_eps);"),
@@ -244,6 +255,7 @@ fn all_soft_f64_primitives_are_defined() {
         "inline ulong ln_f64_sub(ulong a, ulong b)",
         "inline uint ln_f64_narrow(ulong bits)",
         "inline ulong ln_f64_mul(ulong a, ulong b)",
+        "inline ulong ln_f64_div(ulong a, ulong b)",
         "inline ulong ln_f64_recip_newton(ulong x)",
         "inline ulong ln_f64_rsqrt_newton(ulong x)",
     ] {

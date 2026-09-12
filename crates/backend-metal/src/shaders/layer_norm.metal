@@ -82,12 +82,16 @@
 //
 // **ホスト側の逐語モデル**: `crates/backend-metal/src/soft_f64.rs` の
 // `widen_f32_bits`／`neg_f64_bits`／`sub_f64_bits`／`add_f64_bits`／
-// `mul_f64_bits`／`narrow_f64_bits`／`recip_newton_f64_bits`／
-// `rsqrt_newton_f64_bits` が本ファイルの `ln_f64_*` 系関数と 1 対 1 に
-// 対応し、`f64` 実演算に対する bit 完全一致（`widen`／`add`／`mul`／
-// `narrow`）または収束精度（`recip`／`rsqrt`）をユニットテスト
-// （Linux 実行可能）で網羅検証する。本ファイルを変更した場合は同
-// モジュールも追従させること。
+// `mul_f64_bits`／`div_f64_bits`／`narrow_f64_bits`／
+// `recip_newton_f64_bits`／`rsqrt_newton_f64_bits` が本ファイルの
+// `ln_f64_*` 系関数と 1 対 1 に対応し、`f64` 実演算に対する bit 完全
+// 一致（`widen`／`add`／`mul`／`div`／`narrow`）または収束精度
+// （`recip`／`rsqrt`）をユニットテスト（Linux 実行可能）で網羅検証
+// する。本ファイルを変更した場合は同モジュールも追従させること。
+// `mean`／`var` は `div_f64_bits`／`ln_f64_div`（正しく丸めた除算）で
+// 求める（codex-review 指摘の再設計。PR #1671・イシュー #1596。
+// Newton 近似逆数との積 `sum * recip(hidden)` は一様行等の割り切れる
+// ケースで 1 ULP 誤差が悪化するため用いない）。
 //
 // **縮約精度契約との関係**（`.claude/rules/coding-rust.md`「正規化統計の
 // 二乗和」節）: 同節は Metal の `f64` 相当実装形として Neumaier 補償和 +
@@ -535,6 +539,132 @@ inline ulong ln_f64_mul(ulong a, ulong b) {
     }
 }
 
+// `(hi,lo)`（128bit・呼び出し前提: 商が 64bit に収まる）を 64bit の
+// 非ゼロ除数 `d` で割る筆算除算（2 進 shift-subtract 方式。
+// `soft_f64::div64_wide` の逐語移植）。剰余 `rem` は各ステップで `d`
+// 未満に保たれるため `d` が 64bit に収まる限り overflow しない。
+// [`ln_f64_div`] 専用ヘルパー。
+inline void ln_f64_div64_wide(ulong hi, ulong lo, ulong d, thread ulong &quotient_out, thread ulong &remainder_out) {
+    ulong rem = 0ul;
+    ulong q = 0ul;
+    for (int i = 127; i >= 0; i--) {
+        ulong bit = (i >= 64) ? ((hi >> (uint)(i - 64)) & 1ul) : ((lo >> (uint)i) & 1ul);
+        rem = (rem << 1) | bit;
+        if (rem >= d) {
+            rem -= d;
+            q = (q << 1) | 1ul;
+        } else {
+            q = q << 1;
+        }
+    }
+    quotient_out = q;
+    remainder_out = rem;
+}
+
+// `f64 / f64`（最近接偶数丸め）の bit 表現版（NaN は quiet NaN へ
+// 正規化）。`soft_f64::div_f64_bits` の逐語移植——`mean`／`var` を
+// `sum * recip(hidden)`（Newton 近似逆数との積）ではなく本関数の
+// **正しく丸めた除算**で求めることで、一様行（例 `x=[1e30f32;49]`）
+// のような「割り切れる」ケースで Newton 近似特有の 1 ULP 誤差が
+// 悪化するのを防ぐ（PR #1671 codex-review・Cursor Bugbot 指摘。
+// イシュー #1596）。アルゴリズムのコメントは `soft_f64::div_f64_bits`
+// を参照（本関数は逐語移植のため二重に説明しない）。
+inline ulong ln_f64_div(ulong a, ulong b) {
+    ulong sa = a & LN_F64_SIGN;
+    ulong sb = b & LN_F64_SIGN;
+    ulong sign = sa ^ sb;
+    ulong ea = (a >> 52) & LN_F64_EXP_MASK;
+    ulong eb = (b >> 52) & LN_F64_EXP_MASK;
+    ulong fa = a & LN_F64_FRAC_MASK;
+    ulong fb = b & LN_F64_FRAC_MASK;
+
+    bool a_nan = (ea == LN_F64_EXP_MASK) && (fa != 0ul);
+    bool b_nan = (eb == LN_F64_EXP_MASK) && (fb != 0ul);
+    if (a_nan || b_nan) {
+        return LN_F64_QNAN;
+    }
+    bool a_inf = (ea == LN_F64_EXP_MASK);
+    bool b_inf = (eb == LN_F64_EXP_MASK);
+    bool a_zero = (ea == 0ul) && (fa == 0ul);
+    bool b_zero = (eb == 0ul) && (fb == 0ul);
+    if ((a_inf && b_inf) || (a_zero && b_zero)) {
+        return LN_F64_QNAN;
+    }
+    if (a_inf) {
+        return sign | LN_F64_INF;
+    }
+    if (b_inf) {
+        return sign;
+    }
+    if (b_zero) {
+        return sign | LN_F64_INF;
+    }
+    if (a_zero) {
+        return sign;
+    }
+
+    LnNormMantissa na = ln_f64_normalize_mantissa(ea, fa);
+    LnNormMantissa nb = ln_f64_normalize_mantissa(eb, fb);
+    // `S = 55`: `ma/mb ∈ (0.5,2)` のため商は `[2^54,2^56)` に収まり、
+    // 53bit 仮数 + 2bit（guard/round）の精度が確保できる最小の追加
+    // シフト量（`soft_f64::div_f64_bits` と同じ定数）。
+    const uint S = 55u;
+    LnU128 num = ln_f64_mul64_wide(na.m, 1ul << S);
+    ulong raw_q;
+    ulong rem;
+    ln_f64_div64_wide(num.hi, num.lo, nb.m, raw_q, rem);
+    ulong q = raw_q | (ulong)(rem != 0ul ? 1ul : 0ul);
+    // `q` は非ゼロ（呼び出し前提より `na.m`／`nb.m` はいずれも非ゼロ）。
+    uint leadpos = 63u - ln_f64_clz64(q);
+    long exp_u = na.exp_u - nb.exp_u + ((long)leadpos - (long)S);
+    long shift_normal = (long)leadpos - 52l; // 2 か 3（`leadpos` が 54 か 55）。
+
+    long biased_before_round = exp_u + 1023l;
+    long final_shift_l;
+    bool is_subnormal_target;
+    if (biased_before_round >= 1l) {
+        final_shift_l = shift_normal;
+        is_subnormal_target = false;
+    } else {
+        final_shift_l = shift_normal + (1l - biased_before_round);
+        is_subnormal_target = true;
+    }
+
+    if (final_shift_l < 0l || final_shift_l >= 64l) {
+        // 到達性: 本カーネルの実用値域（`f32` 由来の `sum`／`hidden`）
+        // では発生しない極端な underflow。安全側として `±0` へ丸める。
+        return sign;
+    }
+    uint final_shift = (uint)final_shift_l;
+    ulong m = (final_shift == 0u) ? q : (q >> final_shift);
+    ulong low_mask = (final_shift >= 64u) ? ~0ul : ((1ul << final_shift) - 1ul);
+    ulong rem_low = (final_shift == 0u) ? 0ul : (q & low_mask);
+    // `half`（MSL の予約型 `half` と衝突するため `half_bit` と命名）。
+    ulong half_bit = (final_shift == 0u) ? 0ul : (1ul << (final_shift - 1u));
+    bool round_up = (rem_low > half_bit) || (rem_low == half_bit && (m & 1ul) == 1ul);
+    if (round_up) {
+        m += 1ul;
+    }
+
+    if (!is_subnormal_target) {
+        long exp_final = exp_u;
+        if (m >= (1ul << 53)) {
+            m >>= 1;
+            exp_final += 1l;
+        }
+        long biased_final = exp_final + 1023l;
+        if (biased_final >= (long)LN_F64_EXP_MASK) {
+            return sign | LN_F64_INF;
+        }
+        return sign | (((ulong)biased_final) << 52) | (m & LN_F64_FRAC_MASK);
+    } else {
+        if (m >= (1ul << 52)) {
+            return sign | (1ul << 52);
+        }
+        return sign | m;
+    }
+}
+
 // `x`（正規化数・subnormal 双方に対応。特殊値は呼び出し側で除外済みの
 // 前提）を `2^k` 倍する（指数フィールドを直接加算するだけの厳密演算。
 // Newton 反復の「種」専用——範囲を超える場合は `±inf`／`±0` へ丸め
@@ -587,7 +717,14 @@ inline LnReducedSeed ln_f64_extract_reduced_and_exp(ulong x_bits, bool want_sqrt
 
 // `f64` の逆数 `1/x` を Newton-Raphson（`y_{n+1} = y_n*(2 - x*y_n)`）で
 // 求める（`x` は本カーネルの用途上〈`hidden` 由来〉常に有限・正の値。
-// `soft_f64::recip_newton_f64_bits` の逐語移植）。
+// `soft_f64::recip_newton_f64_bits` の逐語移植）。**`mean`／`var` の
+// 計算では現在使わない**（PR #1671 是正: Newton 近似逆数との積は
+// 一様行で 1 ULP 誤差が悪化するため `ln_f64_div`〈正しく丸めた除算〉へ
+// 置き換えた。イシュー #1596）。ホスト側 `recip_newton_f64_bits` と
+// 1 対 1 対応する soft-f64 プリミティブとして、収束精度の回帰テスト
+// （`soft_f64::tests::recip_newton_converges_for_hidden_range`）と
+// ともに残置する（他ファイルの未使用だが残置されている診断・将来用
+// 関数群と同じ方針。`context.rs::BatchGpuTimestamps` 等）。
 inline ulong ln_f64_recip_newton(ulong x) {
     LnReducedSeed seed = ln_f64_extract_reduced_and_exp(x, false);
     float seed_reduced = 1.0f / as_type<float>(seed.reduced_bits);
@@ -654,16 +791,16 @@ kernel void layer_norm_f32(
     uint lane [[thread_index_in_simdgroup]])
 {
     // `inv_n`（ホストから渡される事前丸め済み `1/hidden`）は使わない
-    // （`hidden` 自体を soft-f64 の `recip_newton` へ渡し、二重丸めを
-    // 避ける。バッファレイアウト互換のため引数自体は残す）。
+    // （`hidden` 自体を分母として soft-f64 の正しく丸めた除算
+    // （`ln_f64_div`）へ渡し、二重丸め・Newton 近似逆数特有の
+    // 1 ULP 誤差を避ける。バッファレイアウト互換のため引数自体は残す）。
     (void)inv_n;
 
     for (uint row = tg_id; row < rows; row += grid_size) {
         ulong row_base = (ulong)row * (ulong)hidden;
 
-        // `hidden` の f64 逆数（行内で不変のため 1 回だけ計算する）。
+        // `hidden` の f64 表現（行内で不変のため 1 回だけ widen する）。
         ulong hidden_f64 = ln_f64_widen(as_type<uint>((float)hidden));
-        ulong hidden_recip = ln_f64_recip_newton(hidden_f64);
 
         // パス 1: 平均（soft-f64 総和。冒頭コメント「総和の順序」参照）。
         ulong lane_sum = 0ul; // +0.0（f64）。
@@ -677,7 +814,7 @@ kernel void layer_norm_f32(
             ulong other_sum = (other_hi << 32) | other_lo;
             lane_sum = ln_f64_add(lane_sum, other_sum);
         }
-        ulong mean = ln_f64_mul(lane_sum, hidden_recip);
+        ulong mean = ln_f64_div(lane_sum, hidden_f64);
 
         // パス 2: 分散（二パス。`(x-mean)^2` を soft-f64 で蓄積する）。
         ulong lane_sq = 0ul;
@@ -693,7 +830,7 @@ kernel void layer_norm_f32(
             ulong other_sq = (other_hi << 32) | other_lo;
             lane_sq = ln_f64_add(lane_sq, other_sq);
         }
-        ulong var = ln_f64_mul(lane_sq, hidden_recip);
+        ulong var = ln_f64_div(lane_sq, hidden_f64);
         ulong eps_f64 = ln_f64_widen(as_type<uint>(eps));
         ulong var_plus_eps = ln_f64_add(var, eps_f64);
         ulong rstd = ln_f64_rsqrt_newton(var_plus_eps);

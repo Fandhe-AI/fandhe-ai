@@ -452,6 +452,30 @@ fn layer_norm_uniform_row_non_power_of_two_hidden_matches_zero_deviation() {
             &expected,
         );
     }
+
+    // codex-review・Cursor Bugbot 指摘の完全再現ケース（`mean` を
+    // Newton 近似逆数との積〈`sum * recip(hidden)`〉で求めていた旧実装
+    // では `hidden=49` の一様行で `x - mean` に約 -1.407e14 という巨大な
+    // 残差が生じ `weight`／`bias` なしの出力が約 -1 になっていた。
+    // `ln_f64_div`〈正しく丸めた除算〉への置き換え後は `x == mean` と
+    // なり偏差は厳密に 0 になるはず）。
+    let hidden = 49usize;
+    let x = vec![1e30f32; hidden];
+    let out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, None, None, 1e-5, 1, hidden)
+        .expect("run_layer_norm_f32 must succeed");
+    for (i, &v) in out.iter().enumerate() {
+        assert_eq!(
+            v, 0.0f32,
+            "hidden=49 x=[1e30;49] の一様行は偏差 0 のはず（index={i}, got={v}）"
+        );
+    }
+    let expected = f64_layer_norm_reference(&x, None, None, 1e-5, 1, hidden);
+    assert_parity(
+        "layer_norm uniform_row hidden=49 x=1e30 repro",
+        &out,
+        &expected,
+    );
 }
 
 /// codex-review 指摘の再現ケース（P1・#1671 スレッド 2 件目）: `eps=0`
