@@ -63,8 +63,13 @@ fn run_shape(arm_label: &str, label: &str, m: usize, n: usize, k: usize, dedicat
     let mut c = vec![0.0f32; m * n];
 
     let config = MeasurementConfig::default();
-    let mut last_checksum = 0u64;
 
+    // `bench_run` のクロージャは GEMM 本体（`gemm_blis_parallel`）のみを計時
+    // 対象とする。checksum（f64 逐次和）の計算をクロージャ内に含めると、
+    // 全 run の計時に checksum 計算コストが混入し、幾何平均によるスレッド数
+    // 選択（Phase 0 事前登録規則）の根拠が歪む（codex-review 指摘。イシュー
+    // #1575）。checksum は bit 完全一致検証専用の診断値であり性能計測対象で
+    // はないため、`bench_run` 完了後に最終状態の `c` から 1 回だけ計算する。
     let measurement = match dedicated {
         Some(threads) => {
             let pool = rayon::ThreadPoolBuilder::new()
@@ -76,18 +81,18 @@ fn run_shape(arm_label: &str, label: &str, m: usize, n: usize, k: usize, dedicat
                     gemm_blis_parallel(&a, &b, &mut c, m, n, k)
                         .expect("gemm_blis_parallel (dedicated pool)");
                 });
-                last_checksum = checksum_bits(&c);
             })
         }
         None => bench_run(&config, || {
             gemm_blis_parallel(&a, &b, &mut c, m, n, k).expect("gemm_blis_parallel (global pool)");
-            last_checksum = checksum_bits(&c);
         }),
     }
     .expect("MeasurementConfig::default は下限を満たすため失敗しない");
 
+    let checksum = checksum_bits(&c);
+
     println!(
-        "arm={arm_label} shape={label} m={m} n={n} k={k} median_secs={:.9} checksum=0x{last_checksum:016x}",
+        "arm={arm_label} shape={label} m={m} n={n} k={k} median_secs={:.9} checksum=0x{checksum:016x}",
         measurement.median_secs
     );
 }

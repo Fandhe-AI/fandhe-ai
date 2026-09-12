@@ -119,6 +119,13 @@ const N_CLAMP: usize = 8;
 
 /// M4 Max 実機（`machdep.cpu.brand_string`）の allowlist。他の Apple
 /// Silicon 世代への拡張は個別実機実測が前提（本イシューのスコープ外）。
+///
+/// 呼び出し元（[`eligible_from_probe`]）は macOS 専用 [`detect_eligible`]
+/// からのみ実行時に到達するため、非 macOS ビルドでは `#[cfg(test)]` の
+/// 単体テスト経由でしか参照されない。実際の到達範囲に合わせて
+/// `cfg(any(target_os = "macos", test))` で明示し、非 macOS 非テスト
+/// ビルド（Linux CI 等）での `dead_code` 誤検出を避ける。
+#[cfg(any(target_os = "macos", test))]
 const ELIGIBLE_BRANDS: &[&str] = &["Apple M4 Max"];
 
 /// `m * n.max(N_CLAMP) * k < SMALL_SHAPE_CAP_MAX_WORK` を判定する純関数。
@@ -130,7 +137,10 @@ pub(crate) fn should_cap(m: usize, n: usize, k: usize) -> bool {
 
 /// P/E 非対称構成かつ brand が allowlist に完全一致するかを判定する
 /// 純関数（プラットフォーム I/O を持たない。実際の sysctl 読み取りは
-/// [`detect_eligible`] が行う）。
+/// [`detect_eligible`] が行う）。[`ELIGIBLE_BRANDS`] と同じ理由で
+/// `cfg(any(target_os = "macos", test))` を付ける（非 macOS 非テスト
+/// ビルドでは到達不能なため）。
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn eligible_from_probe(
     perflevel0: Option<usize>,
     total: Option<usize>,
@@ -249,9 +259,9 @@ pub struct SmallShapeCapReport {
     pub eligible: bool,
     /// `RAYON_NUM_THREADS` が有効な正整数として設定されているか。
     pub env_override: bool,
-    /// 専用プールのスレッド数（[`SMALL_SHAPE_CAP_THREADS`]）。
+    /// 専用プールのスレッド数（`SMALL_SHAPE_CAP_THREADS`）。
     pub cap_threads: usize,
-    /// cap 対象の仕事量上限（[`SMALL_SHAPE_CAP_MAX_WORK`]）。
+    /// cap 対象の仕事量上限（`SMALL_SHAPE_CAP_MAX_WORK`）。
     pub max_work: usize,
     /// 専用プールが実際に生成できているか（`pool()` が `Some` を返すか）。
     pub pool_active: bool,

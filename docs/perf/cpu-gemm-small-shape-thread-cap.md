@@ -67,6 +67,17 @@ cpu-gemm-small-shape-thread-cap-1575/`）。
 **checksum**: 全腕・全形状で `f64` 逐次和のビット表現が完全一致
 （`aggregate_phase0.md` 冒頭。bit 完全一致契約を計測レベルでも確認）。
 
+**計測範囲についての注記（PR #1663 codex-review 指摘を受け追記）**:
+上記の Phase 0 計測時点の `examples/small_shape_cap_sweep.rs` は
+`bench_run` の計時クロージャ内で checksum（f64 逐次和）計算まで実行して
+おり、`median_secs` は GEMM 本体単体ではなく checksum 込みの値だった
+（本 PR で計測対象を GEMM 本体のみへ限定する是正を実施済み。同一形状・
+同一出力サイズの checksum コストは比較対象の腕（`global`／
+`dedicated:N`）間でほぼ一定と見込まれるため、上記の `ratio` に基づく
+選択規則（`dedicated:6` 確定・`SMALL_SHAPE_CAP_MAX_WORK` 境界確定）への
+影響は限定的と考えられるが、Phase 0 の生ログ自体は是正前バイナリでの
+計測であり再計測は行っていない）。
+
 **選択規則適用**: 学習 5 形状すべてで off 比 `ratio<=1.00` を満たしたのは
 `dedicated:6` のみ（`dedicated:2`／`4` は `train_64x256x784_nn` で
 `ratio>1.00`〈1.52／1.056〉・`dedicated:8` は同形状で `ratio=1.0272` に
