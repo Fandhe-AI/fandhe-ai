@@ -237,7 +237,9 @@ forward-device-gpu.md`）。以下は引き続きスコープ外とし、
   `Sequential::predict_resident` の内部差し替え）への結線（#1216
   実装計画 Step 9「Phase 2」。判断は `docs/perf/linear-forward-
   device-gpu.md` §5 を参照。#1217 では facade Phase 2 を明示的にスコープ外
-  としたため、なお未着手のまま引き続き後続 Issue へ引き継ぐ）
+  としたため、なお未着手のまま引き続き後続 Issue へ引き継ぐ）。設計は
+  #1579（`docs/inference-chain-single-sync-design.md`）で CUDA／Metal
+  共通の方式として確定済み・実装は #1580（Metal）／#1581（CUDA）へ引き渡す
 - `Sigmoid`/`Tanh` を含む層構成のデバイス常駐対応（段階 B は現状
   `Activation::{None,Relu}` のみ対応。`gemm_resident_rhs` と同じ制約）
 - ~~framework-compare の推論プロトコルへの reuse モード追加~~ →
