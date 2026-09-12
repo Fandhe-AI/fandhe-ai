@@ -1513,7 +1513,7 @@ impl BackendOps for MetalBackendOps {
         Ok(c_dev_buf)
     }
 
-    /// `a op b`（`op` は [`BinaryElementwiseOp`]）を [`MetalBuffer`]
+    /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `MetalBuffer`
     /// 常駐のまま計算する（イシュー #1584）。`elementwise::
     /// MetalElementwise::dispatch_binary_resident` へ委譲する（同メソッド
     /// doc「同期契約」参照: `MetalContext::dispatch_sync` を使うため

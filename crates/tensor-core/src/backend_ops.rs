@@ -1170,6 +1170,21 @@ pub trait BackendOps {
     /// ホスト版（`BackendOps::add`／`mul`）と同一カーネルにより bit 同一
     /// となる契約。
     ///
+    /// # 同期契約はバックエンドごとに異なる（イシュー #1675 codex-review
+    /// 指摘）
+    ///
+    /// 上記「ストリーム／コマンドバッファへ積むだけで待たない」は
+    /// `backend-cuda`（ストリーム順序実行。`docs/backend-cuda-async-
+    /// execution-design.md`）の同期契約であり、**全バックエンド共通の
+    /// トレイト契約ではない**。`backend-metal` の実装（`elementwise::
+    /// MetalElementwise::dispatch_binary_resident`）は `MetalContext::
+    /// dispatch_sync` 経由のため、呼び出しごとに 1 回 `waitUntilCompleted`
+    /// する（`docs/backend-metal-command-batching-design.md`。呼び出し元
+    /// が複数演算を連鎖させても同期点は 1 回に集約されない）。「同期点を
+    /// 呼び出し元の `download` へ集約する」設計を前提にする呼び出し側は
+    /// バックエンドごとの実装 doc（各 `fn binary_elementwise_device`／
+    /// `unary_elementwise_device` オーバーライド）を確認すること。
+    ///
     /// # デフォルト実装
     ///
     /// `linear_forward_device` と同じ非破壊拡張パターン（`BackendOps`

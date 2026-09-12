@@ -161,9 +161,13 @@ extern "C" __global__ void reduce_sum_all_finalize_f32(
 /// （`idx = o * inner + i`）が縮約軸を `0..axis_len` の昇順で `double`
 /// アキュムレータで逐次累積し、書き出し時のみ `(float)` へ downcast
 /// する。`outer`／`axis_len`／`inner` の積は呼び出し元（`reduce.rs`）が
-/// `i32::MAX` 範囲内であることを検証済み。添字計算は `long long` で
-/// 行い overflow を避ける（`outer*inner` が `i32` 範囲を超えない一方、
-/// 中間の `o * axis_len * inner` は超えうるため）。
+/// `i32::MAX` 範囲内（`axis_len == i32::MAX` も許容）であることを検証
+/// 済み。添字計算は `long long` で行い overflow を避ける
+/// （`outer*inner` が `i32` 範囲を超えない一方、中間の
+/// `o * axis_len * inner` は超えうるため）。**縮約ループの添字 `a` 自体
+/// も `long long`**（`axis_len == i32::MAX` のとき `int` のままだと
+/// `a += 1` が範囲上端で符号付き overflow を起こすため。イシュー #1675
+/// codex-review 指摘）。
 pub const REDUCE_SUM_AXIS_F32: &str = r#"
 extern "C" __global__ void reduce_sum_axis_f32(
     const float* __restrict__ in,
@@ -178,8 +182,8 @@ extern "C" __global__ void reduce_sum_axis_f32(
         long long o = idx / inner;
         long long i = idx % inner;
         double acc = 0.0;
-        for (int a = 0; a < axis_len; a++) {
-            long long src = (o * (long long)axis_len + (long long)a) * (long long)inner + i;
+        for (long long a = 0; a < axis_len; a++) {
+            long long src = (o * (long long)axis_len + a) * (long long)inner + i;
             acc += (double)in[src];
         }
         out[idx] = (float)acc;
@@ -192,7 +196,10 @@ extern "C" __global__ void reduce_sum_axis_f32(
 /// して `double` で部分和を求めたのち warp 内 butterfly で結合する。
 /// `rows`（`outer`）が `gridDim.x` を超える場合は persistent row loop で
 /// ブロックを使い回す（起動ブロック数は `reduce.rs` が
-/// `min(rows, REDUCE_MAX_BLOCKS)` で決定）。
+/// `min(rows, REDUCE_MAX_BLOCKS)` で決定）。stride 分割ループの添字
+/// `c` は `long long`（`cols == i32::MAX` 付近で `int` のままだと
+/// `c += 32` が符号付き overflow を起こすため。イシュー #1675
+/// codex-review 指摘）。
 pub const REDUCE_SUM_LASTAXIS_F32: &str = r#"
 extern "C" __global__ void reduce_sum_lastaxis_f32(
     const float* __restrict__ in,
@@ -204,8 +211,8 @@ extern "C" __global__ void reduce_sum_lastaxis_f32(
     long long row_stride = (long long)gridDim.x;
     for (long long row = (long long)blockIdx.x; row < rows; row += row_stride) {
         double acc = 0.0;
-        for (int c = lane; c < cols; c += 32) {
-            long long src = row * (long long)cols + (long long)c;
+        for (long long c = lane; c < cols; c += 32) {
+            long long src = row * (long long)cols + c;
             acc += (double)in[src];
         }
         #pragma unroll
@@ -300,7 +307,8 @@ extern "C" __global__ void reduce_max_all_finalize_f32(
 "#;
 
 /// max 単一軸縮約（汎用版。`inner != 1`）。`REDUCE_SUM_AXIS_F32` と同一
-/// 構造だが `float`／`fmaxf` で累積する（丸めなし）。呼び出し元は
+/// 構造（縮約ループの添字 `a` が `long long` である点を含む）だが
+/// `float`／`fmaxf` で累積する（丸めなし）。呼び出し元は
 /// `axis_len == 0` の起動を行わない契約（空縮約は host 側で拒否済み。
 /// `reduce.rs` 参照）。
 pub const REDUCE_MAX_AXIS_F32: &str = r#"
@@ -317,8 +325,8 @@ extern "C" __global__ void reduce_max_axis_f32(
         long long o = idx / inner;
         long long i = idx % inner;
         float acc = -INFINITY;
-        for (int a = 0; a < axis_len; a++) {
-            long long src = (o * (long long)axis_len + (long long)a) * (long long)inner + i;
+        for (long long a = 0; a < axis_len; a++) {
+            long long src = (o * (long long)axis_len + a) * (long long)inner + i;
             acc = fmaxf(acc, in[src]);
         }
         out[idx] = acc;
@@ -327,8 +335,8 @@ extern "C" __global__ void reduce_max_axis_f32(
 "#;
 
 /// max 単一軸縮約（`inner == 1`。最終軸縮約の coalesced 版）。
-/// `REDUCE_SUM_LASTAXIS_F32` と同一構造だが `float`／`fmaxf` で累積
-/// する。
+/// `REDUCE_SUM_LASTAXIS_F32` と同一構造（stride 分割ループの添字 `c`
+/// が `long long` である点を含む）だが `float`／`fmaxf` で累積する。
 pub const REDUCE_MAX_LASTAXIS_F32: &str = r#"
 extern "C" __global__ void reduce_max_lastaxis_f32(
     const float* __restrict__ in,
@@ -340,8 +348,8 @@ extern "C" __global__ void reduce_max_lastaxis_f32(
     long long row_stride = (long long)gridDim.x;
     for (long long row = (long long)blockIdx.x; row < rows; row += row_stride) {
         float acc = -INFINITY;
-        for (int c = lane; c < cols; c += 32) {
-            long long src = row * (long long)cols + (long long)c;
+        for (long long c = lane; c < cols; c += 32) {
+            long long src = row * (long long)cols + c;
             acc = fmaxf(acc, in[src]);
         }
         #pragma unroll

@@ -27,6 +27,18 @@
 //!   本モジュールはこの保証を用いてチャンク部分和をチャンク番号順に逐次結合し、
 //!   PoC-v2-5 の「逐次固定順序で bit 一致」前提を踏襲する。
 //!
+//! ## `sum`/`mean` の `f64` アキュムレータ契約（イシュー #1675）
+//!
+//! `sum`（`sum_slice`／`axis_reduce_sum`）は `.claude/rules/
+//! coding-rust.md`「正規化統計・勾配の長軸縮約は `f64` アキュムレータで
+//! 統一する」契約に合わせ、`f64` で累積し**最後に 1 回だけ** `f32` へ
+//! downcast する（`backend-cuda::kernels_reduce` の sum カーネル
+//! （`REDUCE_SUM_ALL_PARTIAL_F32` 等）と同じ精度契約。`mean` は `sum` の
+//! 結果を除算するため同じ契約を継承する）。チャンク分割・出力要素の並列化
+//! 軸・累積順序自体は変更しない（本節冒頭の決定性契約はそのまま維持）。
+//! `max`（`max_slice`／`axis_reduce` 経由）は丸めを伴わない厳密選択の
+//! ため `f32` のまま（対象外）。
+//!
 //! ## 小サイズ直列フォールバック（未導入・イシュー #811・#1027・codex-review
 //! 指摘への対応）
 //!
@@ -148,12 +160,23 @@ fn gather_elements(a: &Tensor<f32>) -> Vec<f32> {
 /// 本番結線しない（モジュール doc「小サイズ直列フォールバック」参照）。
 /// 常に rayon 経由（`ThreadPoolBuilder::num_threads(1)` 下でも `par_chunks`
 /// の順序保持契約により逐次実行と bit 完全一致する）で計算する。
+///
+/// アキュムレータは `f64`（チャンク内・チャンク間結合とも）で、**最後に
+/// 1 回だけ** `f32` へ downcast する（`.claude/rules/coding-rust.md`
+/// 「正規化統計・勾配の長軸縮約は `f64` アキュムレータで統一する」契約。
+/// `backend-cuda::kernels_reduce`（`REDUCE_SUM_ALL_PARTIAL_F32`／
+/// `REDUCE_SUM_ALL_FINALIZE_F32`。イシュー #1584）と同じ精度契約を CPU
+/// 参照実装にも揃える。チャンク分割・結合順序自体は変更しない — 変更は
+/// 各要素の畳み込み精度のみであり、REQ-2 の許容誤差（統一複合判定）を
+/// 緩和するものではない。イシュー #1675 codex-review 指摘）。
 fn sum_slice(data: &[f32]) -> f32 {
-    data.par_chunks(CHUNK)
-        .map(|chunk| chunk.iter().copied().fold(0.0f32, |acc, v| acc + v))
-        .collect::<Vec<f32>>()
+    let total: f64 = data
+        .par_chunks(CHUNK)
+        .map(|chunk| chunk.iter().fold(0.0f64, |acc, &v| acc + v as f64))
+        .collect::<Vec<f64>>()
         .into_iter()
-        .fold(0.0f32, |acc, v| acc + v)
+        .fold(0.0f64, |acc, v| acc + v);
+    total as f32
 }
 
 /// `data` を [`CHUNK`] 単位に分割し、決定性契約（モジュール doc 参照）に
@@ -242,6 +265,48 @@ where
     (0..total_out).into_par_iter().map(compute).collect()
 }
 
+/// [`axis_reduce`] の `sum` 専用版。走査構造は完全に同一（並列化軸・
+/// 縮約順序とも）だが、アキュムレータを `f64` にし出力要素ごとに
+/// **最後に 1 回だけ** `f32` へ downcast する（[`sum_slice`] と同じ
+/// `.claude/rules/coding-rust.md` 契約。`mean` の軸指定経路も本関数の
+/// 結果を除算するため同じ精度契約を継承する）。`max`（[`axis_reduce`]
+/// 経由。丸めなしの厳密選択）は本関数の対象外（イシュー #1675
+/// codex-review 指摘）。
+fn axis_reduce_sum(a: &Tensor<f32>, axis: usize) -> Vec<f32> {
+    let shape = a.shape();
+    let outer_dims = &shape[..axis];
+    let inner_dims = &shape[axis + 1..];
+    let axis_len = shape[axis];
+    let outer: usize = outer_dims.iter().product();
+    let inner: usize = inner_dims.iter().product();
+    let total_out = outer * inner;
+
+    // `axis_reduce` と同じ契約（クロージャは `flat in 0..total_out` の
+    // みで呼ばれ、`inner` によるゼロ除算は発生しない）。
+    let compute = |flat: usize| -> f32 {
+        let (o, i) = (flat / inner, flat % inner);
+        let outer_idx = unravel(o, outer_dims);
+        let inner_idx = unravel(i, inner_dims);
+        let mut full_idx = Vec::with_capacity(shape.len());
+        full_idx.extend_from_slice(&outer_idx);
+        full_idx.push(0);
+        full_idx.extend_from_slice(&inner_idx);
+        let mut acc = 0.0f64;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let value = a.get(&full_idx);
+            debug_assert!(
+                value.is_some(),
+                "axis_reduce_sum: 走査ロジックのバグにより index {full_idx:?} が範囲外になった"
+            );
+            acc += value.unwrap_or(0.0) as f64;
+        }
+        acc as f32
+    };
+
+    (0..total_out).into_par_iter().map(compute).collect()
+}
+
 /// 軸指定・全縮約いずれにも対応する `sum`。
 ///
 /// `dim=None` は rank 0（スカラー）テンソルを返す。空テンソルの `sum` は
@@ -268,7 +333,7 @@ pub fn sum(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, ReduceErr
             outer
                 .checked_mul(inner)
                 .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
-            axis_reduce(a, axis, 0.0, |acc, v| acc + v)
+            axis_reduce_sum(a, axis)
         }
     };
     Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
@@ -338,7 +403,7 @@ pub fn mean(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, ReduceEr
             if axis_len == 0 && total_out > 0 {
                 return Err(ReduceError::EmptyReduction { op: "mean" });
             }
-            let sums = axis_reduce(a, axis, 0.0, |acc, v| acc + v);
+            let sums = axis_reduce_sum(a, axis);
             let divisor = axis_len as f32;
             let data: Vec<f32> = sums.into_iter().map(|s| s / divisor).collect();
             Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
@@ -492,10 +557,13 @@ mod tests {
         // 加算は結合則を満たさないため、単純な左から右への fold ではなく
         // 本実装と同一の「CHUNK 単位でチャンク内を逐次累積 → チャンク結果を
         // 番号順に逐次結合」という累積順序を naive 側でも再現する。
-        let naive = data
+        // `sum_slice` は `f64` アキュムレータ契約（イシュー #1675 是正）の
+        // ため naive 側も `f64` で累積し最後に 1 回だけ `f32` へ downcast
+        // する。
+        let naive: f32 = data
             .chunks(CHUNK)
-            .map(|chunk| chunk.iter().fold(0.0f32, |acc, &v| acc + v))
-            .fold(0.0f32, |acc, v| acc + v);
+            .map(|chunk| chunk.iter().fold(0.0f64, |acc, &v| acc + v as f64))
+            .fold(0.0f64, |acc, v| acc + v) as f32;
         assert_eq!(a.get(&[]).unwrap().to_bits(), naive.to_bits());
     }
 
@@ -620,12 +688,12 @@ mod tests {
             // 未導入。モジュール doc「小サイズ直列フォールバック」参照）で
             // CHUNK 単位の逐次 fold をチャンク番号順に結合する構造のため、
             // `chunk_boundary_deterministic_sum` と同じ naive 実装
-            // （本実装と同一の累積順序）との bit 一致で当該構造の正しさも
-            // 確認する。
-            let naive = data
+            // （本実装と同一の累積順序。`f64` アキュムレータ契約）との bit
+            // 一致で当該構造の正しさも確認する。
+            let naive: f32 = data
                 .chunks(CHUNK)
-                .map(|chunk| chunk.iter().fold(0.0f32, |acc, &v| acc + v))
-                .fold(0.0f32, |acc, v| acc + v);
+                .map(|chunk| chunk.iter().fold(0.0f64, |acc, &v| acc + v as f64))
+                .fold(0.0f64, |acc, v| acc + v) as f32;
             assert_eq!(sum_a.get(&[]).unwrap().to_bits(), naive.to_bits());
         }
     }
