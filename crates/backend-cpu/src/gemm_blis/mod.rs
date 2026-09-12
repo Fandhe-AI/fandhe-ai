@@ -5036,6 +5036,7 @@ mod tests {
     /// 検証する（値のドリフト検出）。
     #[cfg(target_arch = "aarch64")]
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn sme_production_enabled_is_false_pending_measurement() {
         assert!(
             !SME_PRODUCTION_ENABLED,
