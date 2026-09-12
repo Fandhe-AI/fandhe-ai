@@ -75,7 +75,7 @@
 
 - **I1（ストリーム順序）**: 同一 ordinal 上のすべての演算は投入順に実行される。依存関係を満たすためだけの明示同期は不要
 - **I2（同期点での完了保証）**: ホストがデバイス結果を読む API（§4）の復帰時点で、その API 呼び出しに先行して投入された全作業が完了している
-- **I3（ホスト側一時バッファの解放）**: ホスト側入力 (`Vec` 等) は `clone_htod` 復帰後に解放してよい（ペイジャブル H2D は driver 側でステージングされる。pinned メモリを導入する場合はこの前提を再確認する必要がある。§10）
+- **I3（ホスト側一時バッファの解放）**: ホスト側入力 (`Vec` 等) は `clone_htod` 復帰後に解放してよい（ペイジャブル H2D は driver 側でステージングされる。pinned メモリを導入する場合はこの前提を再確認する必要がある。§10）。**再確認（イシュー #1585）**: H2D pinned staging（`crate::host_staging::upload_new`／`upload_into`。opt-in・既定 OFF）は、呼び出し元の `&[f32]` を pinned ステージングバッファへ**同期コピー**してから、そのステージング型（`PinnedHostSlice`）自身を `clone_htod`／`memcpy_htod` へ渡す。呼び出し元入力の解放可能時点は同期コピー完了後（＝呼び出し元関数の復帰後）であり I3 は不変。ステージングバッファ自身の生存は `PinnedHostSlice` の event 追跡（次回 `as_mut_slice()` が前回発行分の完了を待つ・`Drop` も同様）で担保するため、pinned staging の導入によって I3 の契約や本節冒頭の「ペイジャブル H2D は driver 側でステージングされる」という前提説明は変更しない（フラグ OFF 時は本節の記述どおり従来経路のまま）
 - **I4（デバイス一時バッファの解放）**: `CudaSlice::drop` はイベント待ち + `cuMemFreeAsync` により、明示同期なしで use-after-free を起こさない。ただし `has_async_alloc` が偽の環境では Drop がホスト同期にフォールバックする。**ローカル RTX 3060（driver 595.71.05・CC 8.6）実機で `CudaContext::has_async_alloc()` は `true`（イシュー #1014・`crates/backend-cuda/tests/async_ordering_real_device.rs::probe_has_async_alloc_on_real_device` の実測。2026-08-30）。GB10 実機は依然未実測のまま**であり、GB10 実測は後続の実機セッションへ引き継ぐ
 - **I5（数値意味論の不変）**: カーネル側の手動境界チェック（`.claude/rules/coding-rust.md`）・FMA 契約・バックエンド間数値一致の複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は非同期化によって変化しない
 
@@ -96,6 +96,7 @@
 | `launch`（カーネル起動） | 同期なし（起動時エラーのみ同期的） | 変更なし | 変更なし | 2.4 |
 | `sgd_step_device` | 同期なし | 現状 `synchronize()` あり（`sgd.rs:174`） | **除去**（最優先） | 2.2・D2H を伴わない唯一の常駐経路 |
 | `MemoryOps::upload` | 同期なし | 変更なし | 変更なし | ペイジャブル H2D の復帰＝ステージング完了であり完了待ちではない |
+| `MemoryOps::upload`／`upload_into`（`crate::host_staging` pinned staging opt-in。イシュー #1585） | 同期なし（追加あり: ホスト側のステージングバッファへの `copy_from_slice` は同期的だが、これは呼び出しスレッド内のホスト側コピーでありデバイス側同期点ではない） | N/A（#1585 で新設） | フラグ OFF: 変更なし。ON: `HostStaging::as_mut_slice()`（`PinnedHostSlice` 側は内部 `event.synchronize()` で前回発行分の完了を待つ）→ `copy_from_slice` → `clone_htod`／`memcpy_htod`（`PinnedHostSlice` 自身を渡し event 追跡を維持） | `crate::host_staging` モジュール「H2D 用ステージング」節。I3 再確認は上記参照 |
 | `MemoryOps::with_host_view`（イシュー #1336） | ホストブロック（契約上の同期点。`download` と同一） | N/A（#1336 で新設） | `Device` 配置: `host_staging` の再利用ホストバッファへ `memcpy_dtoh` → `synchronize` の順。`Managed` 配置: `stream.synchronize()` → `UnifiedSlice::as_slice()`（`host_view_managed`。コピーなし） | `crates/tensor-core/src/buffer.rs`「`with_host_view` の同期契約」・`docs/perf/cuda-host-view-staging-readout.md` |
 | `BackendOps::gemm_fp32_strict_into`／`_tracked` の NT/TN 経路（イシュー #1559） | ホストブロック（非同期投入契約の例外。デバイス⇔デバイス完結でホスト転送なし） | N/A（#1559 で新設） | `gemm::CudaGemm::launch_tiled_f32_nt_into`／`_tn_into` 内で GEMM 起動直後に `stream.synchronize()` | §15。`transpose_to_pooled` の中間バッファ（`PooledCudaHandle`）がストリーム順序保証なしで即座にプール返却されるため、次の同期点を持たない本メソッドは関数内で明示同期する |
 
@@ -256,14 +257,15 @@
 |---|---|---|
 | 多ストリーム化 + イベント DAG | 不採用 | 現行 API はホスト `Tensor` 中心であり並列度を活かせない。順序契約が複雑化し I1〜I5 の検証コストが増す |
 | CUDA Graph | **部分採用（イシュー #1349）** | 学習 step の update 区間（`sgd_step_device_tracked`）のみを opt-in・既定 OFF で capture・再利用する。forward／backward・step 全体の capture は既存データパス（ホスト境界・pageable H2D）が前提を満たさないため対象外のまま。詳細は `docs/backend-cuda-graph-step-capture-design.md` |
-| pinned host memory | 保留 | 別イシューで扱う。導入時は I3・`download` の同期契約（2.4）を再確認する必要がある |
+| pinned host memory（H2D 側） | **opt-in 実装済み（イシュー #1585・既定 OFF）** | `crate::host_staging::{set_pinned_h2d_enabled, pinned_h2d_enabled}`（facade `set_cuda_pinned_h2d_enabled`）。I3 再確認は上記・§4 参照。実測・既定化可否は `docs/perf/cuda-h2d-pinned-staging.md` |
 | `CudaContext::set_blocking_synchronize` | 不採用 | ホスト側のスピン待ちに切り替える効果がベンチ条件と無関係であり、影響が不明である |
 
 ## 11. スコープ外・後続イシュー候補
 
 以下はユーザー承認なしに起票しない（`.claude/rules/out-of-scope-tracking.md`）。
 
-- pinned host memory の導入
+- pinned host memory の H2D 側既定化（#1585 は opt-in 実装のみ・既定 OFF のまま出荷。#1478 の `HOST_STAGING_KIND`〈D2H 側〉と同型の承認・security-auditor 到達手続きを要する）
+- pinned H2D staging の f16 Tensor Core 経路（`gemm_mma.rs` の `run_f16` 系・`run_f16_kernel`）・elementwise／rmsnorm／softmax／transpose／mse への拡張（#1585 は f32 の `MemoryOps::upload`／`upload_into`・fresh／resident GEMM 経路限定。TF32 Tensor Core 経路〈`run_wmma_tf32` 系〉は f32 系カーネルのため既に対象内。`docs/perf/cuda-h2d-pinned-staging.md` §2 参照）
 - CUDA Graph の forward／backward・step 全体への拡張（イシュー #1349 は update 区間のみの部分採用。§10・`docs/backend-cuda-graph-step-capture-design.md` §3.2 参照）・`cuGraphExecUpdate_v2` による exec update（`unsafe` 導入を要するためユーザー承認事項）
 - ホスト `Tensor` API の `DeviceBuffer` 版への拡張（#1022 と重なる可能性がある）
 - `invalidate`（§5 item 4）の根本的な回復手段の強化: 本設計の `invalidate` は同一 ordinal の primary context を再 retain する前提（c 参照）であり、sticky error が実際に primary context を汚染した場合はプロセス内で解消する手段を持たない（`Poisoned { unrecoverable: true }` へ確定しプロセス再起動を要求する契約に留める）。`cuDevicePrimaryCtxReset` 等による同一プロセス内での primary context の完全破棄・再生成を伴う根本的な回復は本設計のスコープ外とし、採否の判断は #1013（実装）のタイミングへ委ねる

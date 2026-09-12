@@ -539,6 +539,48 @@ pub fn cuda_managed_memory_enabled() -> bool {
     fandhe_ai_backend_cuda::placement::managed_placement_enabled()
 }
 
+/// CUDA H2D（ホスト→デバイス転送）を、pageable ホストメモリからの直接
+/// 転送ではなく pinned（page-locked）ステージングバッファ経由で発行する
+/// opt-in スイッチ（イシュー #1585。低レイヤー診断
+/// `docs/perf/lowlayer-diagnosis-2026-09-12.md` §7 表 B-3 行で起票された
+/// 候補）。
+///
+/// `fandhe_ai_backend_cuda::{set_pinned_h2d_enabled}` への薄い委譲
+/// （[`set_cuda_managed_memory_enabled`] と同型の composition root。
+/// `docs/compat-api-scope.md` §0 の確定公開面）。**既定は無効**（pageable
+/// ホストメモリからの `clone_htod`／`memcpy_htod` 直接発行。導入前と
+/// 経路・出力は bit 同一）。有効化すると以降の全スレッド・全
+/// `CudaMemory`／`CudaGemm` インスタンスの H2D 発行（`upload`／
+/// `upload_into`・`Var::matmul` 等が最終的に到達する各 GEMM `run_*`
+/// 系）がプロセスワイドに pinned staging 経由へ切り替わる。
+///
+/// **本イシュー時点のスコープ**（`docs/perf/cuda-h2d-pinned-staging.md`
+/// 参照）: f32 経路（`MemoryOps::upload`／`upload_into`・fresh／resident
+/// GEMM の各 `run_*`／`launch_*` 系）のみ対応。TF32 Tensor Core 経路
+/// （`run_wmma_tf32` が到達する `run_wmma_f32_kernel`／
+/// `run_wmma_tf32_opt_kernel`／`run_wmma_tf32_staged_kernel`）は入力が
+/// `&[f32]` のため `upload_h2d_new` を経由し、有効化時は pinned staging
+/// の対象に含まれる。**対象外のまま**なのは f16 Tensor Core 経路
+/// （`gemm_mma.rs` の `run_f16` 系・`gemm.rs::run_f16_kernel`。f16 データ
+/// は `upload_h2d_new` の型〈`&[f32]`〉と一致しないため構造的に非到達）・
+/// elementwise／rmsnorm／softmax／transpose／mse のみ（既定どおり
+/// pageable のまま変更なし）。
+///
+/// 数値契約: pinned バッファへ同期コピーしてから DMA を発行するだけで
+/// 転送対象の内容自体は変わらないため、出力は経路に依らず bit 同一
+/// （`fandhe_ai_backend_cuda::host_staging` モジュール「H2D 用
+/// ステージング」節）。既定（無効）時の経路・出力は本イシュー導入前と
+/// 完全に不変。
+pub fn set_cuda_pinned_h2d_enabled(enabled: bool) {
+    fandhe_ai_backend_cuda::set_pinned_h2d_enabled(enabled);
+}
+
+/// [`set_cuda_pinned_h2d_enabled`] で設定した現在の opt-in 状態を返す
+/// （既定 `false`）。
+pub fn cuda_pinned_h2d_enabled() -> bool {
+    fandhe_ai_backend_cuda::pinned_h2d_enabled()
+}
+
 /// Metal GEMM（`fandhe_ai::tape().var(a).matmul(b)` 等が最終的に到達する
 /// `MetalBackendOps::gemm`）の split-K 2 パス経路（イシュー #1516 で
 /// 本番結線・#1544 で既定有効化）を実行時に無効化する opt-out スイッチ

@@ -50,7 +50,7 @@ use crate::device::CudaDevice;
 use crate::error::CudaError;
 #[cfg(feature = "internal-diagnostics")]
 use crate::host_staging::HostStagingStats;
-use crate::host_staging::{self, HostStaging, HostStagingCache};
+use crate::host_staging::{self, H2dStagingCache, HostStaging, HostStagingCache};
 use crate::placement;
 use fandhe_ai_tensor_core::Tensor;
 use fandhe_ai_tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
@@ -515,6 +515,13 @@ pub struct CudaMemory {
     /// `Clone` を持たないため素の `Mutex<HostStagingCache>` フィールドは
     /// `derive(Clone)` を壊す）。
     host_staging: Arc<Mutex<HostStagingCache>>,
+    /// H2D pinned staging（イシュー #1585。`crate::host_staging` モジュール
+    /// 「H2D 用ステージング」節）の opt-in キャッシュ。`upload_inner`／
+    /// `upload_into` の `Device` 分岐が使う。`host_staging`（D2H 側）と
+    /// 同じ `Arc<Mutex<_>>` 共有契約（`Clone` は同一キャッシュ系列への
+    /// 参照複製）。フラグ OFF（既定）時は本フィールドを一切参照しない
+    /// （`host_staging::upload_new`／`upload_into` 冒頭の早期分岐）。
+    h2d_staging: Arc<Mutex<H2dStagingCache>>,
 }
 
 impl CudaMemory {
@@ -536,6 +543,7 @@ impl CudaMemory {
             host_staging: Arc::new(Mutex::new(HostStagingCache::new(
                 host_staging::HOST_STAGING_KIND,
             ))),
+            h2d_staging: Arc::new(Mutex::new(H2dStagingCache::new())),
         }
     }
 
@@ -568,6 +576,7 @@ impl CudaMemory {
             tracker: Arc::new(AllocationTracker::new()),
             managed_supported: device.managed_memory_supported(),
             host_staging: Arc::new(Mutex::new(HostStagingCache::new(kind))),
+            h2d_staging: Arc::new(Mutex::new(H2dStagingCache::new())),
         }
     }
 }
@@ -1040,7 +1049,18 @@ impl CudaMemory {
             unified.as_mut_slice()?.copy_from_slice(data);
             CudaStorage::Managed(unified)
         } else {
-            CudaStorage::Device(self.stream.clone_htod(data)?)
+            // イシュー #1585: H2D pinned staging（opt-in・既定 OFF）。
+            // `host_staging::upload_new` はフラグ OFF・`data` が空の
+            // 場合は `self.stream.clone_htod(data)` をそのまま呼ぶため、
+            // 導入前と経路・出力は bit 同一（`host_staging` モジュール
+            // 「H2D 用ステージング」節参照）。
+            CudaStorage::Device(host_staging::upload_new(
+                &self.stream,
+                &self.h2d_staging,
+                self.stream.context(),
+                generation,
+                data,
+            )?)
         };
         let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
         let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
@@ -1220,6 +1240,29 @@ impl CudaMemory {
         }
     }
 
+    /// `h2d_staging`（イシュー #1585・H2D pinned staging。opt-in・既定
+    /// OFF）の全エントリを破棄し、解放したバイト数を返す
+    /// （[`Self::release_host_staging`] の H2D 版・同一契約）。フラグ
+    /// OFF でも呼び出し自体は安全（`h2d_staging` が空のまま `0` を
+    /// 返す）。
+    pub fn release_h2d_staging(&self) -> u64 {
+        match self.h2d_staging.lock() {
+            Ok(mut guard) => guard.release_all(),
+            Err(poisoned) => poisoned.into_inner().release_all(),
+        }
+    }
+
+    /// `h2d_staging` の統計スナップショット（実機診断用。
+    /// [`Self::host_staging_stats`] の H2D 版・同一 `internal-
+    /// diagnostics` feature ゲート）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn h2d_staging_stats(&self) -> HostStagingStats {
+        match self.h2d_staging.lock() {
+            Ok(guard) => guard.stats(),
+            Err(poisoned) => poisoned.into_inner().stats(),
+        }
+    }
+
     /// **`internal-diagnostics` feature（既定 off）限定の診断専用入口**。
     /// イシュー #1336 codex-review 指摘の経緯: 当時の本番既定
     /// `host_staging::HOST_STAGING_KIND` は `Pageable` に固定されて
@@ -1373,7 +1416,16 @@ impl MemoryOps for CudaMemory {
             match storage {
                 CudaStorage::Device(slice) => {
                     let mut view = slice.slice_mut(dst_offset..end);
-                    self.stream.memcpy_htod(data, &mut view)?;
+                    // イシュー #1585: `upload_inner` と同じ pinned
+                    // staging 経路（opt-in・既定 OFF）。
+                    host_staging::upload_into(
+                        &self.stream,
+                        &self.h2d_staging,
+                        self.stream.context(),
+                        generation,
+                        data,
+                        &mut view,
+                    )?;
                 }
                 CudaStorage::Managed(unified) => {
                     // managed 配置はホストから直接書き込めるため

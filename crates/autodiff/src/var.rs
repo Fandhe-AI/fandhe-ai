@@ -820,6 +820,61 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// 任意軸並べ替え（view 系ノード。イシュー #1597）。`transpose` の
+    /// 2 軸限定を補う N 階一般対応版（`Tensor::permute`／ONNX
+    /// `Transpose` と同じ規約: `perm[k]` は出力軸 `k` が指す入力軸）。
+    /// 常に zero-copy（strides の並べ替えのみ）。
+    ///
+    /// 検査順序: ①`perm` の長さが rank と一致（不一致は
+    /// `ShapeError::RankMismatch`）→ ②各軸が範囲内（`AxisOutOfRange`）
+    /// かつ重複なし（`DuplicateAxis`）→ ③層 1 で入力を実体化してから
+    /// `Tape::push_view`（`transpose` と同じ理由で、実体化前検査は
+    /// shape 情報のみで足りるため軸検査の後に行う）。
+    ///
+    /// `perm` が 2 軸のみを入れ替える順列（例 `[1, 0]`）の場合、出力
+    /// strides は `Var::transpose(0, 1)` と同一になるため、CPU／Metal
+    /// の NT/TN 転置入口（#1213／#1215）の高速経路は本メソッド経由でも
+    /// 従来どおり到達する（strides 判定のため）。
+    pub fn permute(&self, perm: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let rank = in_shape.len();
+        if perm.len() != rank {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: rank,
+                actual: perm.len(),
+            }));
+        }
+        let mut seen = vec![false; rank];
+        for &axis in perm {
+            if axis >= rank {
+                return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                    axis,
+                    rank,
+                }));
+            }
+            if seen[axis] {
+                return Err(AutodiffError::Shape(ShapeError::DuplicateAxis { axis }));
+            }
+            seen[axis] = true;
+        }
+        let out_shape: Vec<usize> = perm.iter().map(|&p| in_shape[p]).collect();
+
+        // `Tape::push_view` の呼び出し契約（`input` は push 前に実体化
+        // 済み）を満たす（`transpose` と同じ規律）。
+        {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?;
+        }
+        let id = self.tape.push_view(
+            Op::Permute {
+                input: self.id,
+                perm: perm.to_vec(),
+            },
+            out_shape,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// RNN（tanh 版）セル 1 step（イシュー #1647・設計 `docs/autodiff-
     /// rnn-cell-tape-design.md` 決定 1・4・5）。
     /// `h_t = tanh(x·W_ih + b_ih + h_{t-1}·W_hh + b_hh)`。
@@ -906,6 +961,186 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// `shape` へブロードキャストする view 系ノード（イシュー #1597）。
+    /// `Tensor::broadcast_to`（NumPy `broadcast_to` 相当）と同じ規約:
+    /// 拡張軸（元の軸長 1 が `shape` 側で 1 より大きい値に広がる軸）は
+    /// stride 0 の view になり zero-copy。同一 shape への broadcast は
+    /// 恒等 view として許容する。
+    ///
+    /// 検査順序: ①要素数オーバーフロー検査（`reshape` と同じ自前
+    /// `checked_mul` 実装。`tensor-core` は `checked_numel` を非公開に
+    /// しているため）→ ②`shape.len() < rank` または各軸が
+    /// `src == dst || src == 1` を満たさない場合は
+    /// `ShapeError::BroadcastIncompatible` → ③層 1 で入力を実体化して
+    /// から `Tape::push_view`。
+    ///
+    /// VJP（`grad.rs`）は `Op::Add`／`Op::Mul` の暗黙ブロードキャストと
+    /// 同じ `reduce_to_shape` 縮約を使うため、勾配バッファの確保を
+    /// 伴う（`reshape`／`transpose`／`permute` の VJP は zero-copy だが
+    /// 本メソッドの VJP は異なる。`tape::Op::BroadcastTo` doc 参照）。
+    pub fn broadcast_to(&self, shape: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        // `checked_numel` 相当のオーバーフロー検査（`reshape` と同じ
+        // 自前実装。REQ-8 趣旨の境界検査 A03 対策）。
+        let out_numel = shape.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d));
+        if out_numel.is_none() {
+            return Err(AutodiffError::Shape(ShapeError::ElementCountOverflow));
+        }
+        if shape.len() < in_shape.len() {
+            return Err(AutodiffError::Shape(ShapeError::BroadcastIncompatible {
+                lhs: in_shape,
+                rhs: shape.to_vec(),
+            }));
+        }
+        let offset_axes = shape.len() - in_shape.len();
+        for (&src, &dst) in in_shape.iter().zip(&shape[offset_axes..]) {
+            if src != dst && src != 1 {
+                return Err(AutodiffError::Shape(ShapeError::BroadcastIncompatible {
+                    lhs: in_shape,
+                    rhs: shape.to_vec(),
+                }));
+            }
+        }
+
+        // `Tape::push_view` の呼び出し契約（`input` は push 前に実体化
+        // 済み）を満たす。
+        {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?;
+        }
+        let id = self
+            .tape
+            .push_view(Op::BroadcastTo { input: self.id }, shape.to_vec());
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// [`Var::broadcast_to`] の PyTorch 名別名（`Tensor.expand`。イシュー
+    /// #1597）。負値（-1 で当該軸を維持する PyTorch の記法）は
+    /// `shape: &[usize]` の型上表現できないため非対応——呼び出し側は
+    /// 維持したい軸の実サイズを明示的に渡すこと。
+    pub fn expand(&self, shape: &[usize]) -> Result<Var<'t>, AutodiffError> {
+        self.broadcast_to(shape)
+    }
+
+    /// 長さ 1 の軸を除去する view 系ノード（`Var::reshape` への委譲。
+    /// イシュー #1597）。
+    ///
+    /// - `dim: None` — 長さ 1 の軸をすべて除去する（NumPy／PyTorch
+    ///   `squeeze()` と同じ）。
+    /// - `dim: Some(d)` — 軸 `d` が rank 範囲外なら
+    ///   `ShapeError::AxisOutOfRange`。`d` が範囲内だが `shape[d] != 1`
+    ///   の場合は **PyTorch 準拠の no-op**（shape を変えず `reshape` を
+    ///   記録する。numpy／TensorFlow はここをエラーにするが、適合する
+    ///   `ShapeError` variant が存在せず、crates.io 公開クレート
+    ///   `tensor-core` の公開 enum への variant 追加は semver 可視の
+    ///   変更になるため、本イシューでは PyTorch 方式を採用する）。
+    ///
+    /// 非 contiguous な入力（例: `permute`／`transpose`／`broadcast_to`
+    /// の直後）に対する制約は `reshape` と同じ（`ShapeError::
+    /// NonContiguousReshape`）。
+    pub fn squeeze(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let rank = in_shape.len();
+        let out_shape: Vec<usize> = match dim {
+            None => in_shape.into_iter().filter(|&d| d != 1).collect(),
+            Some(d) => {
+                if d >= rank {
+                    return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                        axis: d,
+                        rank,
+                    }));
+                }
+                if in_shape[d] != 1 {
+                    // PyTorch 準拠 no-op（上記 doc 参照）。
+                    in_shape
+                } else {
+                    let mut out = in_shape;
+                    out.remove(d);
+                    out
+                }
+            }
+        };
+        self.reshape(&out_shape)
+    }
+
+    /// 長さ 1 の軸を挿入する view 系ノード（`Var::reshape` への委譲。
+    /// イシュー #1597）。`dim` は挿入後の rank（`rank + 1`）に対する
+    /// 軸位置として扱うため有効範囲は `0..=rank`（PyTorch
+    /// `unsqueeze` と同じ: 末尾への挿入 `dim == rank` を許容する）。
+    /// 範囲外は `ShapeError::AxisOutOfRange { axis: dim, rank: rank + 1
+    /// }`。
+    ///
+    /// 非 contiguous な入力に対する制約は `reshape` と同じ。
+    pub fn unsqueeze(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let rank = in_shape.len();
+        if dim > rank {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: dim,
+                rank: rank + 1,
+            }));
+        }
+        let mut out_shape = in_shape;
+        out_shape.insert(dim, 1);
+        self.reshape(&out_shape)
+    }
+
+    /// `[start_dim, end_dim]`（両端含む）の連続する軸を 1 軸へ潰す
+    /// view 系ノード（`Var::reshape` への委譲。イシュー #1597）。
+    /// PyTorch `torch.flatten(start_dim, end_dim)` と同じ規約。
+    ///
+    /// `end_dim >= rank` または `start_dim > end_dim` は
+    /// `ShapeError::AxisOutOfRange`（後者は `axis: start_dim` として
+    /// 報告する）。rank 0（スカラー）は `(start_dim, end_dim) ==
+    /// (0, 0)` のみ許容し `[1]` を返す（PyTorch と同じ）。潰す軸区間
+    /// の部分積自体は `usize::MAX` を含むゼロ長軸混在形状で
+    /// オーバーフローしうるため `checked_mul` で検査し、オーバー
+    /// フロー時は `ShapeError::ElementCountOverflow` を返す（総要素数
+    /// が `reshape` 側で検査済みでも部分積は別途検査が要る）。
+    ///
+    /// 非 contiguous な入力に対する制約は `reshape` と同じ。
+    pub fn flatten(&self, start_dim: usize, end_dim: usize) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let rank = in_shape.len();
+        if rank == 0 {
+            if start_dim == 0 && end_dim == 0 {
+                return self.reshape(&[1]);
+            }
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: end_dim,
+                rank,
+            }));
+        }
+        if end_dim >= rank {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: end_dim,
+                rank,
+            }));
+        }
+        if start_dim > end_dim {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: start_dim,
+                rank,
+            }));
+        }
+        // 潰す軸区間の部分積は `checked_mul` で計算する（`reshape`／
+        // `broadcast_to` と同じ自前実装。ゼロ長軸を含む形状〈例:
+        // shape=[0, usize::MAX, 2]〉でも debug panic・release ラップを
+        // 起こさないための境界検査。REQ-8 趣旨の境界検査 A03 対策）。
+        let flattened = match in_shape[start_dim..=end_dim]
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        {
+            Some(n) => n,
+            None => {
+                return Err(AutodiffError::Shape(ShapeError::ElementCountOverflow));
+            }
+        };
+        let mut out_shape: Vec<usize> = in_shape[..start_dim].to_vec();
+        out_shape.push(flattened);
+        out_shape.extend_from_slice(&in_shape[end_dim + 1..]);
+        self.reshape(&out_shape)
+    }
     /// LSTM セル 1 step（イシュー #1647・設計 `docs/autodiff-rnn-cell-
     /// tape-design.md` 決定 1・1b・1c・4・5・12）。ゲート順は `i,f,g,o`
     /// （`p.w_ih`／`p.w_hh` は `[D, 4H]`／`[H, 4H]`、bias は `[4H]`）。

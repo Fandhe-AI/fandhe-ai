@@ -420,3 +420,213 @@ fn view_node_fan_out_accumulates_gradient() {
     assert_eq!(dx.get(&[2]).unwrap(), 6.0);
     assert_eq!(dx.get(&[3]).unwrap(), 1.0);
 }
+
+// --- permute / broadcast_to / expand / squeeze / unsqueeze / flatten
+// （イシュー #1597） ---
+
+/// `Tensor<f32>` を行優先で読み出す（`broadcast_to` の stride 0 view は
+/// `as_slice()` が `None` を返すため、`Var::to_tensor()` の値比較に
+/// `get`／`contiguous()` 経由の本ヘルパーを使う。`tape_recording.rs`
+/// の同名ヘルパーと同型）。
+fn dense_vec(tensor: &Tensor<f32>) -> Vec<f32> {
+    let c = tensor.contiguous();
+    c.as_slice()
+        .expect("contiguous() 後は as_slice が必ず Some を返す")
+        .to_vec()
+}
+
+/// 19. `permute` 単体の backward: loss = sum(permute(x, perm))。sum は
+///     形状・順序に依存しないため dx は全要素 1（x の元 shape）。
+#[test]
+fn permute_backward_matches_expected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+    let p = x.permute(&[1, 0]).unwrap();
+    let loss = p.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[2, 3]);
+    for i in 0..2 {
+        for j in 0..3 {
+            assert_eq!(dx.get(&[i, j]).unwrap(), 1.0);
+        }
+    }
+}
+
+/// 20. `broadcast_to` 単体の backward: loss = sum(broadcast_to(x, s))。
+///     dx は各出力要素が入力のどの要素に対応するかの複製回数（解析値）
+///     になる（`x: [1,3] → [2,3]` は 2 回複製されるため dx = [2,2,2]）。
+#[test]
+fn broadcast_to_backward_matches_expected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
+    let b = x.broadcast_to(&[2, 3]).unwrap();
+    let loss = b.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[1, 3]);
+    for j in 0..3 {
+        assert_eq!(dx.get(&[0, j]).unwrap(), 2.0);
+    }
+}
+
+/// 21. `squeeze → unsqueeze → flatten` の連鎖（すべて `reshape` への
+///     委譲）の backward。sum の入力なので勾配は全要素 1（元 shape）。
+#[test]
+fn squeeze_unsqueeze_flatten_backward_matches_expected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 1, 3]));
+
+    let sq = x.squeeze(Some(1)).unwrap(); // [2,3]
+    let u = sq.unsqueeze(0).unwrap(); // [1,2,3]
+    let f = u.flatten(1, 2).unwrap(); // [1,6]
+    let loss = f.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[2, 1, 3]);
+    for i in 0..2 {
+        for k in 0..3 {
+            assert_eq!(dx.get(&[i, 0, k]).unwrap(), 1.0);
+        }
+    }
+}
+
+/// 22. bit 同一 parity: `broadcast_to` を明示してから `add` した結果
+///     （forward・`dx`／`dy`）が、`add` の暗黙ブロードキャストのみで
+///     計算した結果と bit 同一であることを検証する（`Op::BroadcastTo`
+///     の VJP と `Op::Add` の暗黙ブロードキャスト VJP が同じ
+///     `reduce_bias_grad` を使うため。イシュー #1597 の parity 要件・
+///     codex-review P1 是正で `reduce_to_shape` から切替済み）。
+#[test]
+fn broadcast_to_then_add_matches_implicit_broadcast_add_bit_exact() {
+    let x_data = vec![1.0f32, -2.0, 3.0];
+    let y_data = vec![10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0];
+
+    // 経路 A: broadcast_to を明示してから add。
+    let tape_a = Tape::new_with_ops(common::naive_ops());
+    let x_a = tape_a.var(&t(x_data.clone(), &[3]));
+    let y_a = tape_a.var(&t(y_data.clone(), &[2, 3]));
+    let bx_a = x_a.broadcast_to(&[2, 3]).unwrap();
+    let z_a = bx_a.add(&y_a).unwrap();
+    let loss_a = z_a.sum(None).unwrap();
+    let forward_a = dense_vec(&z_a.to_tensor());
+    let grads_a = tape_a.backward(&loss_a).unwrap();
+    let dx_a = dense_vec(grads_a.get(&x_a).unwrap().unwrap());
+    let dy_a = dense_vec(grads_a.get(&y_a).unwrap().unwrap());
+
+    // 経路 B: add の暗黙ブロードキャストのみ。
+    let tape_b = Tape::new_with_ops(common::naive_ops());
+    let x_b = tape_b.var(&t(x_data, &[3]));
+    let y_b = tape_b.var(&t(y_data, &[2, 3]));
+    let z_b = x_b.add(&y_b).unwrap();
+    let loss_b = z_b.sum(None).unwrap();
+    let forward_b = dense_vec(&z_b.to_tensor());
+    let grads_b = tape_b.backward(&loss_b).unwrap();
+    let dx_b = dense_vec(grads_b.get(&x_b).unwrap().unwrap());
+    let dy_b = dense_vec(grads_b.get(&y_b).unwrap().unwrap());
+
+    assert_eq!(forward_a, forward_b, "forward 値が bit 同一でない");
+    assert_eq!(dx_a, dx_b, "dx が bit 同一でない");
+    assert_eq!(dy_a, dy_b, "dy が bit 同一でない");
+}
+
+/// 22b. `Op::BroadcastTo` の VJP が `Op::Add` の暗黙ブロードキャスト
+///      縮約（`reduce_bias_grad`。行方向縮約パターンは `f64`
+///      アキュムレータ〈`eval::reduce_bias_grad_rows`〉経由）と同じ
+///      数値契約であることを、相殺を含む上流勾配（行順
+///      `[1e8, 1, -1e8]`）で検証する（codex-review P1 是正の回帰:
+///      旧実装は `reduce_to_shape`〈`f32` 逐次和〉のみを使い、
+///      `1e8 + 1` が `f32` 丸めで `1e8` へ吸収されたあと `-1e8` すると
+///      `0.0` になってしまっていたが、`f64` 経由では `1.0` が正しい
+///      解析値）。`loss = sum(broadcast_to(x, [3,1]) * c)` は
+///      `dx = sum(c)`（`c` は broadcast_to の上流勾配そのものに一致
+///      させるための定数）となり、`Op::Add` の行方向縮約と同一の
+///      shape 構造（`g: [3,1]`・`target: [1]`）を `Op::BroadcastTo`
+///      単体の VJP 経路で踏む。
+#[test]
+fn broadcast_to_backward_row_reduction_uses_f64_accumulator_on_cancelling_values() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0], &[1]));
+    let c = tape.var(&t(vec![1.0e8, 1.0, -1.0e8], &[3, 1]));
+    let bx = x.broadcast_to(&[3, 1]).unwrap();
+    let z = bx.mul(&c).unwrap();
+    let loss = z.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[1]);
+    assert_eq!(
+        dx.get(&[0]).unwrap(),
+        1.0,
+        "f64 アキュムレータ経由の解析値（1e8 + 1 - 1e8 = 1.0）と一致しない \
+         （f32 逐次和のままだと 1e8 + 1 が丸めで 1e8 に吸収され 0.0 になる）"
+    );
+}
+
+/// 23. bit 同一 parity: `x.permute(&[1,0])?.matmul(&w)` と
+///     `x.transpose(0,1)?.matmul(&w)` の forward・`dx` が bit 同一で
+///     あることを検証する（2 軸 swap の `perm` は `transpose` と同一
+///     strides を生成するため。イシュー #1597 の parity 要件）。
+#[test]
+fn permute_then_matmul_matches_transpose_then_matmul_bit_exact() {
+    let x_data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]; // [2,3]
+    let w_data = vec![1.0f32, -1.0, 0.5, 2.0]; // [2,2]
+
+    let tape_a = Tape::new_with_ops(common::naive_ops());
+    let x_a = tape_a.var(&t(x_data.clone(), &[2, 3]));
+    let w_a = tape_a.var(&t(w_data.clone(), &[2, 2]));
+    let p_a = x_a.permute(&[1, 0]).unwrap(); // [3,2]
+    let y_a = p_a.matmul(&w_a).unwrap();
+    let loss_a = y_a.sum(None).unwrap();
+    let forward_a = dense_vec(&y_a.to_tensor());
+    let grads_a = tape_a.backward(&loss_a).unwrap();
+    let dx_a = dense_vec(grads_a.get(&x_a).unwrap().unwrap());
+
+    let tape_b = Tape::new_with_ops(common::naive_ops());
+    let x_b = tape_b.var(&t(x_data, &[2, 3]));
+    let w_b = tape_b.var(&t(w_data, &[2, 2]));
+    let tr_b = x_b.transpose(0, 1).unwrap(); // [3,2]
+    let y_b = tr_b.matmul(&w_b).unwrap();
+    let loss_b = y_b.sum(None).unwrap();
+    let forward_b = dense_vec(&y_b.to_tensor());
+    let grads_b = tape_b.backward(&loss_b).unwrap();
+    let dx_b = dense_vec(grads_b.get(&x_b).unwrap().unwrap());
+
+    assert_eq!(forward_a, forward_b, "forward 値が bit 同一でない");
+    assert_eq!(dx_a, dx_b, "dx が bit 同一でない");
+}
+
+/// 24. 異常系: `permute`（perm 長不一致・範囲外・重複軸）・
+///     `broadcast_to`（縮小方向・非互換 shape）・`unsqueeze`（rank+1
+///     超過）・`flatten`（`start_dim > end_dim`）が
+///     `AutodiffError::Shape(..)` を返すことを検証する（`var.rs` 側の
+///     検査順序の end-to-end 確認）。
+#[test]
+fn shape_op_error_paths_return_shape_error() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    assert!(matches!(
+        x.permute(&[0]).unwrap_err(),
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::RankMismatch { .. })
+    ));
+    assert!(matches!(
+        x.permute(&[0, 0]).unwrap_err(),
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::DuplicateAxis { .. })
+    ));
+    assert!(matches!(
+        x.broadcast_to(&[3]).unwrap_err(),
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::BroadcastIncompatible { .. })
+    ));
+    assert!(matches!(
+        x.unsqueeze(3).unwrap_err(),
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+    assert!(matches!(
+        x.flatten(1, 0).unwrap_err(),
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+}
