@@ -522,15 +522,10 @@ fn normalize_max_abs_sign(v: &mut [f64]) {
 }
 
 /// 片側 Jacobi SVD（[`jacobi_svd_tall`]）の列直交収束判定に使う相対
-/// しきい値。[`svd`] の数値 rank 判定（丸め残差由来の微小特異値を
-/// 厳密ゼロへ丸める `rank_tol`）もこの値の平方根を共有する——
-/// Jacobi は `gamma.abs() <= JACOBI_EPS * sqrt(alpha*beta)` で収束を
-/// 打ち切るため、収束後に残る非直交性・特異値誤差は理論上
-/// `O(sqrt(JACOBI_EPS))` スケールになりうる（本来 0 の特異値が
-/// `JACOBI_EPS` そのものの桁では丸められず残ってしまう。
-/// codex-review 指摘: `A=[[1,0.3],[2,0.6],[5,1.5]]` のような
-/// 丸め残差由来の rank 落ちで、この定数を共有しない独立の機械
-/// epsilon ベースしきい値では検出できなかった）。
+/// しきい値。`gamma.abs() <= JACOBI_EPS * sqrt(alpha*beta)` を満たす
+/// 列ペアは既に十分直交とみなし回転をスキップする（絶対下限を持た
+/// ない理由は [`jacobi_svd_tall`] 内のコメント参照。旧ローカル定数
+/// をモジュール定数へ昇格し、収束判定という単一の意味に統一）。
 const JACOBI_EPS: f64 = 1e-14;
 
 /// `m >= n` の片側 Jacobi SVD（列直交化による古典的手法）。
@@ -671,32 +666,6 @@ pub(crate) fn svd(a: &Tensor<f32>) -> Result<SvdOutput, LinalgError> {
         s_sorted[new_idx] = sigmas[old_idx];
         v_sorted.set_col(new_idx, &v_full.col(old_idx));
         u_sorted.set_col(new_idx, &u_full.col(old_idx));
-    }
-
-    // 数値的な rank 判定のための相対しきい値: 最大特異値 ×
-    // `max(m,n)` × `sqrt(JACOBI_EPS)`。これ以下の特異値は「数値的に
-    // ゼロ」として扱い厳密ゼロへ丸める。`jacobi_svd_tall` は
-    // `gamma.abs() <= JACOBI_EPS * sqrt(alpha*beta)` で収束を打ち切る
-    // ため、真に rank 落ちの列でも残留する列内積の桁は
-    // `O(sqrt(JACOBI_EPS))` スケールになりうる（機械 epsilon
-    // `f64::EPSILON`〈約 2.2e-16〉ではこの残差を捉えられない。例えば
-    // `A=[[1,0.3],[2,0.6],[5,1.5]]`〈完全に比例＝rank-1 だが float
-    // 演算では第二特異値が厳密には 0 にならない〉で実測すると残留
-    // 第二特異値は最大特異値比 約 4e-9 に達した）。このしきい値
-    // 以下を rank 落ち側（下記 Gram–Schmidt 補完経路）へ回さないと、
-    // 対応する `U`/`V` 列が「実測ノルムで単位長化」する経路（後述）
-    // へ進んでしまい、ほぼ並行なベクトルを正規化するだけになって
-    // `SvdFactors` の列直交契約を満たせない（codex-review 指摘）。
-    // 固定絶対閾値（`1e-12` 等）は使わない——`A=[[-1e-13]]` のような
-    // 意図的に非ゼロな微小特異値（1 要素・`k=1` では `s_sorted[0]`
-    // 自身が基準になるためこの相対しきい値でも保持される）を誤って
-    // ゼロ扱いしないため（PR #1668 是正の再掲。σ<=1e-12 固定閾値は
-    // 別の codex-review 指摘で既に撤去済み）。
-    let rank_tol = s_sorted[0] * (m.max(n) as f64) * JACOBI_EPS.sqrt();
-    for sigma in s_sorted.iter_mut() {
-        if *sigma <= rank_tol {
-            *sigma = 0.0;
-        }
     }
 
     // 各 `V` 列の符号を「最大絶対値成分（同値は最小添字）が正」に
@@ -1160,17 +1129,6 @@ mod tests {
         );
     }
 
-    /// rank-1（縦長・丸め残差により厳密ゼロにならない第二特異値を持つ）
-    /// 行列で `U` の全列が直交すること（列内積が 0 に近いこと）を確認
-    /// する（codex-review 指摘の回帰）。列は正確な比例関係
-    /// （`col1 = 0.3 * col0`）だが float 演算では第二特異値が厳密には
-    /// 0 にならず 1e-15 スケール程度の丸め残差として残る——修正前は
-    /// この残差を「非ゼロ」と扱い `U = A V / σ` を行列積で再導出して
-    /// いたため桁落ちが増幅され、第二列のノルムが約 6.78（本来 0 に
-    /// 近い値）になる等 `SvdFactors` の列直交契約（設計文書 §3.5）を
-    /// 満たさなかった。相対数値 rank しきい値
-    /// （`s_sorted[0] * max(m,n) * f64::EPSILON`）でこの残差を厳密ゼロへ
-    /// 丸め、Gram–Schmidt 直交補完経路へ回すことで解消する。
     /// `min(m,n) == 1` では Jacobi の列ペア走査自体が実行されないため
     /// 非有限入力を拒否できない（`docs/autodiff-linalg-design.md` の
     /// 「非有限入力は演算ごとに異なり一様ではない」記述の裏付け。
@@ -1187,17 +1145,24 @@ mod tests {
         );
     }
 
+    /// rank-1（縦長・列が正確に比例）行列で `U` の全列が直交すること
+    /// （単位ノルム・列内積が 0 に近いこと）を確認する（codex-review
+    /// 指摘の回帰）。修正前は `U = A V / σ` を行列積で再導出しており、
+    /// Jacobi の丸め残差により厳密には非ゼロな第二特異値に対しこの
+    /// 再導出が桁落ちを増幅し、第二列のノルムが約 6.78（本来 0 に
+    /// 近い値）になる等 `SvdFactors` の列直交契約（設計文書 §3.5）を
+    /// 満たさなかった。修正後は `U` 列を自身の実測ノルムで単位長へ
+    /// 正規化する（行列積を経由しない）ため、σ が厳密ゼロになるか
+    /// 丸め残差として残るかに関わらず列直交性が成立する——σ2 の値
+    /// 自体は主張しない（片側 Jacobi は収束時に列内積を極小化する
+    /// ため、正規化後の直交性はいずれの場合も成り立つ）。
     #[test]
     fn svd_rank_deficient_tall_matrix_u_columns_are_orthonormal() {
-        let a = build_tensor(vec![1.0, 0.3, 2.0, 0.6, 5.0, 1.5], &[3, 2]).unwrap();
+        let a = build_tensor(vec![1.0, 3.0, 2.0, 6.0, 5.0, 15.0], &[3, 2]).unwrap();
         let (u, s, vh) = svd(&a).unwrap();
         assert_eq!(u.shape(), &[3, 2]);
         let s_data = dense_vec(&s);
         assert!(s_data[0] > 0.0, "第一特異値が非ゼロであるべき: {s_data:?}");
-        assert_eq!(
-            s_data[1], 0.0,
-            "丸め残差由来の第二特異値は相対しきい値で厳密ゼロへ丸められるべき: {s_data:?}"
-        );
         let u_mat = Mat::from_tensor(&u);
         for j in 0..2 {
             let col = u_mat.col(j);
@@ -1211,8 +1176,51 @@ mod tests {
         let col1 = u_mat.col(1);
         let dot: f64 = col0.iter().zip(col1.iter()).map(|(a, b)| a * b).sum();
         assert!(dot.abs() < 1e-6, "U の列が直交していない: dot={dot}");
-        // 再構成 `U Σ Vᵀ ≈ A` も維持されることを確認する（第二特異値は
-        // 0 のため第二列の寄与は消える）。
+        // 再構成 `U Σ Vᵀ ≈ A` も維持されることを確認する。
+        let mut sigma = Mat::zeros(2, 2);
+        sigma.set(0, 0, f64::from(s_data[0]));
+        sigma.set(1, 1, f64::from(s_data[1]));
+        let reconstructed = u_mat
+            .matmul(&sigma)
+            .matmul(&Mat::from_tensor(&vh))
+            .to_tensor()
+            .unwrap();
+        approx_eq(&reconstructed, &a, 1e-3);
+    }
+
+    /// 上記と同型だが、列が「正確な比例関係だが float 演算では第二
+    /// 特異値が厳密に 0 にならない」ケース（`col1 = 0.3f32 * col0` は
+    /// 成分ごとに丸め誤差を持ち、`1.5f32 != 5.0f32 * 0.3f32` である
+    /// ため σ2 は数値的に非ゼロになりうる）。この場合でも `U` の列
+    /// 直交性は成立し、かつ σ2 自体は非ゼロ（≈ 0 へ強制的に丸めて
+    /// いない）ことを確認する——固定・相対いずれのしきい値でも
+    /// 非ゼロな小さい特異値を誤ってゼロ化しない契約（Ypd/SCp 系の
+    /// codex-review 指摘）の回帰。
+    #[test]
+    fn svd_near_rank_deficient_tall_matrix_does_not_zero_out_nonzero_sigma() {
+        let a = build_tensor(vec![1.0, 0.3, 2.0, 0.6, 5.0, 1.5], &[3, 2]).unwrap();
+        let (u, s, vh) = svd(&a).unwrap();
+        let s_data = dense_vec(&s);
+        assert!(s_data[0] > 0.0, "第一特異値が非ゼロであるべき: {s_data:?}");
+        assert!(
+            s_data[1] > 0.0,
+            "float 丸め由来の非ゼロ第二特異値をゼロ化してはいけない: {s_data:?}"
+        );
+        let u_mat = Mat::from_tensor(&u);
+        let col0 = u_mat.col(0);
+        let col1 = u_mat.col(1);
+        let norm0: f64 = col0.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let norm1: f64 = col1.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!(
+            (norm0 - 1.0).abs() < 1e-4,
+            "U 列 0 が単位ノルムでない: norm={norm0}"
+        );
+        assert!(
+            (norm1 - 1.0).abs() < 1e-4,
+            "U 列 1 が単位ノルムでない: norm={norm1}"
+        );
+        let dot: f64 = col0.iter().zip(col1.iter()).map(|(a, b)| a * b).sum();
+        assert!(dot.abs() < 1e-6, "U の列が直交していない: dot={dot}");
         let mut sigma = Mat::zeros(2, 2);
         sigma.set(0, 0, f64::from(s_data[0]));
         sigma.set(1, 1, f64::from(s_data[1]));
