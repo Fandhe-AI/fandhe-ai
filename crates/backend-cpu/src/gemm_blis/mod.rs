@@ -579,37 +579,48 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
     // 場合は #1313 以前と同一の静的行パネル分割（`par_chunks_mut`）へ
     // 戻る（`RowPanel` 参照実装と bit 完全一致・`num_threads`／
     // `panel_rows` の算出も従来どおり `else` 節内でのみ行う）。
-    if TWO_D_DYNAMIC_PRODUCTION_ENABLED {
-        dispatch_two_d_dynamic(
-            a,
-            b,
-            c,
-            n,
-            k,
-            0..m,
-            blocks,
-            transpose,
-            TWO_D_JOBS_PER_WORKER,
-        )
-    } else {
-        // 行パネル分割数を rayon の既定スレッド数ではなく実効スレッド数
-        // （`crate::thread_limit::effective_num_threads`）から算出する
-        // （イシュー #1363。macOS `hw.perflevel0.logicalcpu`／Linux sysfs
-        // `cpu_capacity` による大コア数判定で `RAYON_NUM_THREADS` 未指定時の
-        // 既定並列度を大コア数へ限定し、判定不能時は従来どおり
-        // `rayon::current_num_threads()` へフォールバックする。異種コア
-        // 構成での非単調性仮説の検証が目的で、性能上の採否は #1364 が
-        // 判断する。詳細は `docs/perf/cpu-gemm-default-thread-limit.md`）。
-        let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
-        let panel_rows = m.div_ceil(num_threads).max(1);
-        c.par_chunks_mut(panel_rows * n)
-            .enumerate()
-            .try_for_each(|(panel_idx, c_chunk)| {
-                let row_start = panel_idx * panel_rows;
-                let row_end = (row_start + c_chunk.len() / n).min(m);
-                dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks, transpose)
-            })
-    }
+    // GB10 小形状 GEMM 大コア affinity ルーティング（イシュー #1576）:
+    // `m*n*k` が小さい形状のみ GEMM 専用の大コア pin 済み rayon
+    // ThreadPool 上で以下を実行する（既定 OFF・判定不能・大形状は
+    // `f()` を直接呼ぶだけで下記ロジックは一切変更されない。
+    // `crate::gb10_affinity` モジュール doc「適用範囲」節参照）。
+    crate::gb10_affinity::with_gb10_affinity_if_applicable(m, n, k, || {
+        if TWO_D_DYNAMIC_PRODUCTION_ENABLED {
+            dispatch_two_d_dynamic(
+                a,
+                b,
+                c,
+                n,
+                k,
+                0..m,
+                blocks,
+                transpose,
+                TWO_D_JOBS_PER_WORKER,
+            )
+        } else {
+            // 行パネル分割数を rayon の既定スレッド数ではなく実効スレッド数
+            // （`crate::thread_limit::effective_num_threads`）から算出する
+            // （イシュー #1363。macOS `hw.perflevel0.logicalcpu`／Linux sysfs
+            // `cpu_capacity` による大コア数判定で `RAYON_NUM_THREADS` 未指定時の
+            // 既定並列度を大コア数へ限定し、判定不能時は従来どおり
+            // `rayon::current_num_threads()` へフォールバックする。異種コア
+            // 構成での非単調性仮説の検証が目的で、性能上の採否は #1364 が
+            // 判断する。詳細は `docs/perf/cpu-gemm-default-thread-limit.md`）。
+            // GB10 affinity プール内で実行される場合も同じ関数呼び出しで
+            // `rayon::current_num_threads()` が専用プールのスレッド数を
+            // 正しく返すため、本ロジックは無改変で動作する（#1576）。
+            let num_threads =
+                crate::thread_limit::effective_num_threads(rayon::current_num_threads());
+            let panel_rows = m.div_ceil(num_threads).max(1);
+            c.par_chunks_mut(panel_rows * n)
+                .enumerate()
+                .try_for_each(|(panel_idx, c_chunk)| {
+                    let row_start = panel_idx * panel_rows;
+                    let row_end = (row_start + c_chunk.len() / n).min(m);
+                    dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks, transpose)
+                })
+        }
+    })
 }
 
 /// `gemm_blis_parallel_with_transpose` を `Nt`（B オペランドが転置
@@ -749,50 +760,57 @@ pub fn gemm_blis_bias_act_parallel(
     // 起きない。設計 `docs/cpu-gemm-2d-dynamic-partition-design.md`
     // §12「job ごとに K 全域完了後 1 回」の「または join 後に全体へ 1 回」
     // 案を採用）。
-    if TWO_D_DYNAMIC_PRODUCTION_ENABLED {
-        dispatch_two_d_dynamic(
-            a,
-            b,
-            c,
-            n,
-            k,
-            0..m,
-            blocks,
-            GemmTranspose::Nn,
-            TWO_D_JOBS_PER_WORKER,
-        )?;
-        apply_epilogue(c, n, bias, act)
-    } else {
-        // 行パネル分割数の実効スレッド数への差し替えは
-        // `gemm_blis_parallel_with_transpose` と同じ理由（イシュー
-        // #1363。同関数の実装コメント参照）。
-        let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
-        let panel_rows = m.div_ceil(num_threads).max(1);
-        // GEMM 本体は `gemm_blis_parallel_with_transpose` と同じ理由で
-        // B パネル共有経路（`dispatch_shared_b`）を採用せず、従来どおり
-        // 行パネルごとに `dispatch_region` を独立呼び出しする
-        // （#1313 以前と同一の分岐。`par_chunks_mut(panel_rows * n)` で
-        // epilogue も行パネル並列に適用することで、T=1
-        // （`panel_rows == m` で単一チャンク）では従来と同一の 1 パスに
-        // なる）。
-        c.par_chunks_mut(panel_rows * n)
-            .enumerate()
-            .try_for_each(|(panel_idx, c_chunk)| {
-                let row_start = panel_idx * panel_rows;
-                let row_end = (row_start + c_chunk.len() / n).min(m);
-                dispatch_region(
-                    a,
-                    b,
-                    c_chunk,
-                    n,
-                    k,
-                    row_start..row_end,
-                    blocks,
-                    GemmTranspose::Nn,
-                )?;
-                apply_epilogue(c_chunk, n, bias, act)
-            })
-    }
+    // GB10 小形状 GEMM 大コア affinity ルーティング（イシュー #1576。
+    // `gemm_blis_parallel_with_transpose` と同じ理由・同じヘルパ。
+    // `crate::gb10_affinity` モジュール doc「適用範囲」節参照）。
+    crate::gb10_affinity::with_gb10_affinity_if_applicable(m, n, k, || {
+        if TWO_D_DYNAMIC_PRODUCTION_ENABLED {
+            dispatch_two_d_dynamic(
+                a,
+                b,
+                c,
+                n,
+                k,
+                0..m,
+                blocks,
+                GemmTranspose::Nn,
+                TWO_D_JOBS_PER_WORKER,
+            )?;
+            apply_epilogue(c, n, bias, act)
+        } else {
+            // 行パネル分割数の実効スレッド数への差し替えは
+            // `gemm_blis_parallel_with_transpose` と同じ理由（イシュー
+            // #1363。同関数の実装コメント参照）。GB10 affinity プール内
+            // で実行される場合の挙動も同関数と同じ（#1576）。
+            let num_threads =
+                crate::thread_limit::effective_num_threads(rayon::current_num_threads());
+            let panel_rows = m.div_ceil(num_threads).max(1);
+            // GEMM 本体は `gemm_blis_parallel_with_transpose` と同じ理由で
+            // B パネル共有経路（`dispatch_shared_b`）を採用せず、従来どおり
+            // 行パネルごとに `dispatch_region` を独立呼び出しする
+            // （#1313 以前と同一の分岐。`par_chunks_mut(panel_rows * n)` で
+            // epilogue も行パネル並列に適用することで、T=1
+            // （`panel_rows == m` で単一チャンク）では従来と同一の 1 パスに
+            // なる）。
+            c.par_chunks_mut(panel_rows * n)
+                .enumerate()
+                .try_for_each(|(panel_idx, c_chunk)| {
+                    let row_start = panel_idx * panel_rows;
+                    let row_end = (row_start + c_chunk.len() / n).min(m);
+                    dispatch_region(
+                        a,
+                        b,
+                        c_chunk,
+                        n,
+                        k,
+                        row_start..row_end,
+                        blocks,
+                        GemmTranspose::Nn,
+                    )?;
+                    apply_epilogue(c_chunk, n, bias, act)
+                })
+        }
+    })
 }
 
 /// [`gemm_blis_parallel`] の**テスト専用**ワークロード閾値直列

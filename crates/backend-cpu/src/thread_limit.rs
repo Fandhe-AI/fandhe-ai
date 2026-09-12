@@ -90,6 +90,16 @@ use std::sync::OnceLock;
 /// `docs/perf/cpu-gemm-default-thread-limit.md` §6・
 /// `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §13 を参照
 /// （`docs/perf/logs/cpu-gemm-thread-limit-1364/`）。
+///
+/// **本モジュールとの違い（重要。イシュー #1576）**: 本モジュールは
+/// スレッド**数**を大コア数へ制限するだけで OS レベルの thread
+/// affinity は一切設定しない。GB10 実機実測（上記コメント）はこの
+/// 「数を絞るだけ」の設計自体が非効率（実質シングルスレッド化）を
+/// 招いたことを示している。実際に OS レベルで大コアへ pin する
+/// 別系統の機構は [`crate::gb10_affinity`]（#1576。既定 OFF・本
+/// モジュールとは独立の const ゲート・独立の専用スレッドプール）が
+/// 担う。両モジュールが同時に活性化することはない
+/// （[`crate::gb10_affinity::GB10_AFFINITY_ENABLED`] も既定 `false`）。
 pub(crate) const BIG_CORE_LIMIT_ENABLED: bool = false;
 
 /// 診断・#1364 の env_info 記録用に判定結果を可視化する構造体
@@ -189,7 +199,11 @@ fn resolve(current: usize, detected: Option<usize>, env_override: bool, enabled:
 /// （正の `usize` として parse できる場合のみ「明示設定あり」とみなす。
 /// 空文字列・`0`・負数・非数値は rayon 側でも無視されるため、本関数でも
 /// 同様に「未設定扱い」として `None` を返す）。
-fn parse_env_num_threads(raw: Option<&str>) -> Option<usize> {
+///
+/// `pub(crate)`: [`crate::gb10_affinity`]（#1576）も同じ
+/// `RAYON_NUM_THREADS` 明示設定検出を必要とするため、rayon 自身の
+/// 解釈・本モジュールの判定と齟齬を生まないよう単一実装を共有する。
+pub(crate) fn parse_env_num_threads(raw: Option<&str>) -> Option<usize> {
     let raw = raw?.trim();
     let value: usize = raw.parse().ok()?;
     if value == 0 { None } else { Some(value) }
