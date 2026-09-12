@@ -111,7 +111,8 @@
   一致するカーネル実装の採用により不要となる見込みである。**実装は PR #1659
   （イシュー #1566）で導入（未マージ時点では本契約のみが確定済みで、実装は
   未導入）**。契約・経緯の正本は `docs/metal-grad-reduction-parity-judgment-
-  decision.md`（実装記録節は PR #1659 マージ後に追記）
+  decision.md`（実装記録節は PR #1659 マージ後に追記）。契約の片側変更（一部
+  バックエンドのみ精度を上げる等）は P1
 - **TF32/f16 Tensor Core 経路の parity テスト判定方式（P1。テストの弱体化禁止の
   例外を明記する規約。正本仕様 `docs/spec/04-requirements.md` REQ-2「2026-09-02
   追記・Tensor Core 経路の受け入れ判定方式」〈fandhe-ai-spec PR #63〉が正式な
