@@ -92,10 +92,12 @@ pub trait TypedOps<T: Scalar> {
     fn relu(&self, a: &Tensor<T>) -> Result<Tensor<T>, BackendError>;
     fn exp(&self, a: &Tensor<T>) -> Result<Tensor<T>, BackendError>;
     fn tanh(&self, a: &Tensor<T>) -> Result<Tensor<T>, BackendError>;
-    fn sum(&self, a: &Tensor<T>) -> Result<Tensor<T>, BackendError>;
-    fn max(&self, a: &Tensor<T>) -> Result<Tensor<T>, BackendError>;
+    fn sum(&self, a: &Tensor<T>, dim: Option<usize>) -> Result<Tensor<T>, BackendError>;
+    fn max(&self, a: &Tensor<T>, dim: Option<usize>) -> Result<Tensor<T>, BackendError>;
 }
 ```
+
+`sum`／`max` は既存 `BackendOps::sum`／`max`（`crates/tensor-core/src/backend_ops.rs:805-806`）と同じ `dim: Option<usize>`（`None` は全要素縮約・`Some(d)` は軸 `d` に沿った縮約）を保持する。dtype 多重化はこの引数を変更する理由にならないため、`TypedOps<T>` でも軸指定を落とさない。
 
 `BackendOps` への非破壊追加:
 
@@ -132,7 +134,7 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 ## 6. 数値契約（tolerance／baseline 不変）
 
 - **累算契約**: f16／bf16 は入力を f32 へ昇格し `f32::mul_add` で累算、最後に 1 回だけ元の dtype へ丸める（GPU の「f16 入力・f32 累算」Tensor Core と同型）。f64 は `f64::mul_add` を使う。matmul 系 FMA 契約（`.claude/rules/coding-rust.md`「バックエンド構成」節）と整合し、これを変更しない。正規化統計・長軸縮約の `f64`／soft-f64 アキュムレータ契約（同ルール文書の別節）も本段階の最小演算集合（§4.2）には含まれないため不変のまま
-- **判定方法**: f16／bf16 出力は f32 へ昇格し、同じく昇格入力で計算した f32 参照値と既存 `compare`／`assert_parity`（`crates/backend-cpu/src/parity.rs:148,239`）で判定する。f64 出力は f64 のまま同一の定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）で判定するヘルパー追加は実装側（#1649）の作業とし、定数自体は共有し変更しない。CUDA f16 GEMM の既知不合格形状は spec REQ-2（2026-09-02／2026-09-12 追記）の実測 baseline 非後退方式の既存範囲で扱い、**本設計は新規 baseline を追加しない**（追加には実機実測値と人間承認が必要）
+- **判定方法**: f16／bf16 出力は、参照値側も出力 dtype と同じ丸め（f32 参照計算 → f16／bf16 へ最近接丸め → f32 へ再昇格）を経てから f32 昇格後の実測出力と既存 `compare`／`assert_parity`（`crates/backend-cpu/src/parity.rs:148,239`）で判定する。参照値を丸め前の f32 のまま比較する方式は採らない: 例えば `1 + 2^-8` の bf16 最近接偶数丸め結果は丸め前 f32 参照値に対し相対誤差 約 0.003891・絶対誤差 約 0.003906（複合判定の両閾値 `RELATIVE_TOLERANCE`＝1e-3・`ABSOLUTE_RESCUE_THRESHOLD`＝1e-5 をいずれも超過）となり、丸め自体が正しい bf16 実装ですら不合格になりうる（tolerance 定数の緩和ではなく、比較対象を出力 dtype の表現可能値に揃える判定契約の整備で解消する）。dtype ごとの丸め関数（`half::f16::from_f32`／`half::bf16::from_f32`）は `half =2.7.1` に既存でありこの目的のためだけの新規実装は不要。f64 出力は f64 のまま同一の定数（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）で判定するヘルパー追加は実装側（#1649）の作業とし、定数自体は共有し変更しない。CUDA f16 GEMM の既知不合格形状は spec REQ-2（2026-09-02／2026-09-12 追記）の実測 baseline 非後退方式の既存範囲で扱い、**本設計は新規 baseline を追加しない**（追加には実機実測値と人間承認が必要）
 - **bit 同一契約**: f32 経路（既存メソッド・`TypedOps<f32>` を追加する場合はその委譲実装）は before/after で bit 同一であることを実装側の受け入れ条件とする
 
 ## 7. 承認事項（実装着手の前提。本文書は承認記録ではない）
