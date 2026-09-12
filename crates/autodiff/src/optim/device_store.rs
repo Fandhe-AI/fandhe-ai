@@ -204,6 +204,21 @@ struct GradStaging {
     /// しようとしている登録と同一か」（同一性検査。codex-review 指摘・
     /// イシュー #1212 追加是正）を、それぞれ検証する。
     filled: Vec<Option<ResidentFill>>,
+    /// `layout` と同じ添字（`slot`。実際には bias slot のみが使う）。
+    /// この backward 走査（`backward_serial`）中に、当該 slot の勾配が
+    /// **一度でも**通常の `Gradients` 経由（host route）へ回ったことを
+    /// 記録する（codex-review 指摘 P1・イシュー #1566: `(w1,b1)→(w1,b2)
+    /// →(w2,b2)` のように同一 bias を異なる weight 間で共有すると、
+    /// 2 番目の呼び出し〈weight tie・bias 未充填〉は host route を選ぶが
+    /// 3 番目の呼び出し〈別 weight の fresh・bias 未充填〉は同じ bias
+    /// slot を「初回」と誤認して resident 側へ上書きし、2 番目の host
+    /// 側寄与が `step()` から見えなくなる）。一度 `Some(backward_serial)`
+    /// が記録された slot は、同じ `backward_serial` の間は
+    /// `filled`〈resident 側〉が空でも二度と resident 書き込み対象に
+    /// 含めない（`fill_resident_weight_grad` の tie・fresh 両分岐が
+    /// 参照する）——host 側（`Gradients`）に一本化し、既存の
+    /// 複数寄与累積ロジック（`backward::accumulate`）へ委ねる。
+    bias_host_routed: Vec<Option<u64>>,
 }
 
 /// [`GradStaging::filled`] の 1 slot 分の記録（イシュー #1212 codex-
@@ -741,6 +756,7 @@ impl ResidentResolver for DeviceParamStore {
                     *staging_ref = Some(GradStaging {
                         buf,
                         filled: vec![None; param_count],
+                        bias_host_routed: vec![None; param_count],
                     });
                 }
                 Err(BackendError::Unsupported(_)) => {
@@ -887,6 +903,16 @@ impl ResidentResolver for DeviceParamStore {
                         current_serial,
                         g,
                     )?;
+                } else {
+                    // codex-review 指摘 P1 是正（イシュー #1566）:
+                    // ここで bias 寄与はホスト `Gradients` 経由へ回る
+                    // （`outcome.bias_filled` は初期値 `false` のまま）。
+                    // 同じ backward 走査中に別の（fresh 経路の）呼び出しが
+                    // 同じ bias slot をまだ未充填と見て resident 側へ
+                    // 上書きし、この寄与を消してしまわないよう
+                    // `bias_host_routed` へ記録する（`GradStaging::
+                    // bias_host_routed` doc 参照）。
+                    staging.bias_host_routed[b.slot] = Some(current_serial);
                 }
             }
             return Ok(outcome);
@@ -923,8 +949,23 @@ impl ResidentResolver for DeviceParamStore {
                 .filter(|r| r.backward_serial == current_serial)
                 .is_some()
         });
+        // codex-review 指摘 P1 是正（イシュー #1566）: bias slot が
+        // この backward 走査中に既に host route（`Gradients` 経由）へ
+        // 回ったことがあるなら（`GradStaging::bias_host_routed` doc
+        // 参照）、`filled` 側がまだ空でも「初回」と誤認して resident
+        // 側へ上書きしない。`(w1,b1)→(w1,b2)→(w2,b2)` のような
+        // weight 非 tie・bias tie のケースで、2 番目の呼び出し
+        // （weight tie 分岐）が host route を選んだ後、3 番目の呼び出し
+        // （別 weight の fresh 分岐）が bias を「未充填」と見て融合
+        // ディスパッチへ含めてしまうと、2 番目の寄与が `step()` から
+        // 見えなくなる（fail-closed。`.claude/rules/security.md` A08）。
+        let bias_host_routed_now = bias
+            .as_ref()
+            .is_some_and(|b| staging.bias_host_routed[b.slot] == Some(current_serial));
         let bias_reduce_arg = match (&bias, bias_offset) {
-            (Some(_), Some(off)) if !bias_slot_prefilled => Some((off, expected_bias_shape[0])),
+            (Some(_), Some(off)) if !bias_slot_prefilled && !bias_host_routed_now => {
+                Some((off, expected_bias_shape[0]))
+            }
             _ => None,
         };
         match ops.gemm_fp32_strict_into_with_bias_reduce_tracked(
@@ -972,6 +1013,18 @@ impl ResidentResolver for DeviceParamStore {
                         current_serial,
                         g,
                     )?;
+                } else if let Some(b) = &bias {
+                    // bias 寄与はホスト `Gradients` 経由へ回る
+                    // （`bias_written == false` かつ `bias_slot_prefilled
+                    // == false`。バックエンドが bias 縮約に非対応、または
+                    // 上記 `bias_host_routed_now` によりこの走査で今回
+                    // 意図的にディスパッチから除外したケース）。
+                    // `bias_host_routed` へ記録し、以後同じ backward
+                    // 走査内の別呼び出しがこの bias slot を「未充填」と
+                    // 誤認して resident 側へ上書きしないようにする
+                    // （`GradStaging::bias_host_routed` doc・上記
+                    // `bias_host_routed_now` コメント参照）。
+                    staging.bias_host_routed[b.slot] = Some(current_serial);
                 }
                 Ok(outcome)
             }
@@ -1927,6 +1980,7 @@ impl DeviceParamStore {
                             *staging_ref = Some(GradStaging {
                                 buf,
                                 filled: vec![None; vars.len()],
+                                bias_host_routed: vec![None; vars.len()],
                             });
                         }
                         // codex-review P1 指摘対応（PR #1390 是正）:
@@ -4025,6 +4079,134 @@ mod tests {
             "異なる 2 つの weight が同一 bias を共有する場合、resident 経由の bias 累積は \
              host-only の `Gradients::accumulate` と一致するはず。bias slot の既充填検査が \
              なければ後から処理された weight 側の寄与だけが残り、この比較は不一致になる"
+        );
+    }
+
+    /// codex-review 指摘 P1（PR #1659）の直接再現: `(w1,b1)→(w1,b2)→
+    /// (w2,b2)` の順で `Op::LinearResident` を backward 処理すると
+    /// （weight は非 tie・bias のみ tie というケース）、2 番目の呼び出し
+    /// （weight1 の tie 分岐・bias2 未充填）は bias2 の寄与をホスト
+    /// `Gradients` へ返すが、3 番目の呼び出し（weight2 の fresh 分岐・
+    /// bias2 未充填）が同じ bias2 slot を「初回」と誤認して融合
+    /// ディスパッチで resident 側へ上書きすると、2 番目の寄与が
+    /// `step()` から見えなくなる（`GradStaging::bias_host_routed`
+    /// doc 参照）。
+    ///
+    /// backward はテープの逆順（最後に forward したノードから）走査
+    /// されるため、forward 順を C（w2,b2）→ B（w1,b2）→ A（w1,b1）に
+    /// することで、backward 処理順を A（w1,b1）→ B（w1,b2）→
+    /// C（w2,b2）にしている。
+    #[test]
+    fn resident_bias_tie_across_non_tied_weights_does_not_drop_middle_contribution() {
+        let w1_init = tensor(vec![1.0, 0.5, -0.5, 1.0], &[2, 2]);
+        let w2_init = tensor(vec![2.0, -1.0, 0.5, 3.0], &[2, 2]);
+        let b1_init = tensor(vec![0.5, -0.5], &[2]);
+        let b2_init = tensor(vec![-1.0, 2.0], &[2]);
+        let x_a = tensor(vec![2.0, 3.0], &[1, 2]);
+        let x_b = tensor(vec![1.0, -2.0], &[1, 2]);
+        let x_c = tensor(vec![-1.0, 4.0], &[1, 2]);
+        let target_a = tensor(vec![10.0, 10.0], &[1, 2]);
+        let target_b = tensor(vec![-4.0, 7.0], &[1, 2]);
+        let target_c = tensor(vec![3.0, -6.0], &[1, 2]);
+
+        let resident_ops = MockDeviceOps::resident_capable();
+        let resident_tape =
+            Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let mut store =
+            DeviceParamStore::new(&resident_tape, &[&w1_init, &w2_init, &b1_init, &b2_init])
+                .unwrap();
+        let leaves = store.register_resident_params(&resident_tape).unwrap();
+        let x_c_var = resident_tape.var(&x_c);
+        let x_b_var = resident_tape.var(&x_b);
+        let x_a_var = resident_tape.var(&x_a);
+        // forward 順: C → B → A（backward は逆順で A → B → C）。
+        let pred_c = store
+            .linear_forward(&resident_tape, &x_c_var, &leaves[1], Some(&leaves[3]))
+            .unwrap();
+        let pred_b = store
+            .linear_forward(&resident_tape, &x_b_var, &leaves[0], Some(&leaves[3]))
+            .unwrap();
+        let pred_a = store
+            .linear_forward(&resident_tape, &x_a_var, &leaves[0], Some(&leaves[2]))
+            .unwrap();
+        let target_c_var = resident_tape.var(&target_c);
+        let target_b_var = resident_tape.var(&target_b);
+        let target_a_var = resident_tape.var(&target_a);
+        let loss_c = pred_c.mse_loss(&target_c_var).unwrap();
+        let loss_b = pred_b.mse_loss(&target_b_var).unwrap();
+        let loss_a = pred_a.mse_loss(&target_a_var).unwrap();
+        let loss = loss_a.add(&loss_b).unwrap().add(&loss_c).unwrap();
+        let grads = store.backward(&resident_tape, &loss).unwrap();
+        store
+            .step(&resident_tape, &grads, &SgdConfig::new(0.1))
+            .unwrap();
+        let resident_params = store.sync_to_host(&resident_tape).unwrap();
+        let resident_w1 = resident_params[0].clone();
+        let resident_w2 = resident_params[1].clone();
+        let resident_b1 = resident_params[2].clone();
+        let resident_b2 = resident_params[3].clone();
+
+        let host_tape = simple_tape(None);
+        let w1 = host_tape.var(&w1_init);
+        let w2 = host_tape.var(&w2_init);
+        let b1 = host_tape.var(&b1_init);
+        let b2 = host_tape.var(&b2_init);
+        let x_c_var = host_tape.var(&x_c);
+        let x_b_var = host_tape.var(&x_b);
+        let x_a_var = host_tape.var(&x_a);
+        let pred_c = x_c_var.matmul(&w2).unwrap().add(&b2).unwrap();
+        let pred_b = x_b_var.matmul(&w1).unwrap().add(&b2).unwrap();
+        let pred_a = x_a_var.matmul(&w1).unwrap().add(&b1).unwrap();
+        let target_c_var = host_tape.var(&target_c);
+        let target_b_var = host_tape.var(&target_b);
+        let target_a_var = host_tape.var(&target_a);
+        let loss_c = pred_c.mse_loss(&target_c_var).unwrap();
+        let loss_b = pred_b.mse_loss(&target_b_var).unwrap();
+        let loss_a = pred_a.mse_loss(&target_a_var).unwrap();
+        let loss = loss_a.add(&loss_b).unwrap().add(&loss_c).unwrap();
+        let grads = host_tape.backward(&loss).unwrap();
+        let w1_grad = grads.get(&w1).unwrap().unwrap().clone();
+        let w2_grad = grads.get(&w2).unwrap().unwrap().clone();
+        let b1_grad = grads.get(&b1).unwrap().unwrap().clone();
+        let b2_grad = grads.get(&b2).unwrap().unwrap().clone();
+        let mut sgd = crate::optim::sgd::Sgd::new(SgdConfig::new(0.1)).unwrap();
+        let host_updated = sgd
+            .step(
+                &[&w1_init, &w2_init, &b1_init, &b2_init],
+                &[&w1_grad, &w2_grad, &b1_grad, &b2_grad],
+            )
+            .unwrap();
+        let host_w1 = host_updated[0].clone();
+        let host_w2 = host_updated[1].clone();
+        let host_b1 = host_updated[2].clone();
+        let host_b2 = host_updated[3].clone();
+
+        assert_ne!(
+            host_b2.get(&[0]).unwrap(),
+            b2_init.get(&[0]).unwrap(),
+            "退化した比較（更新前のまま）になっていないことを確認する"
+        );
+        assert_eq!(
+            host_w1.contiguous().as_slice().unwrap(),
+            resident_w1.contiguous().as_slice().unwrap(),
+            "w1 は自身が寄与する slot でのみ更新されるはず"
+        );
+        assert_eq!(
+            host_w2.contiguous().as_slice().unwrap(),
+            resident_w2.contiguous().as_slice().unwrap(),
+            "w2 は自身が寄与する slot でのみ更新されるはず"
+        );
+        assert_eq!(
+            host_b1.contiguous().as_slice().unwrap(),
+            resident_b1.contiguous().as_slice().unwrap(),
+            "b1 は A のみが使うため常に一致するはず"
+        );
+        assert_eq!(
+            host_b2.contiguous().as_slice().unwrap(),
+            resident_b2.contiguous().as_slice().unwrap(),
+            "b2 は B（weight tie・bias 未充填でホスト route）と C（別 weight の fresh・bias \
+             未充填で融合 dispatch）の両方から寄与を受ける。`bias_host_routed` による \
+             追跡がなければ B の寄与が C の resident 上書きで失われ、この比較は不一致になる"
         );
     }
 
