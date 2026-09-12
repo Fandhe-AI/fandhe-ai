@@ -274,6 +274,54 @@ fn layer_norm_constant_large_row_does_not_overflow() {
     assert_parity("layer_norm constant_large_row", &out, &expected);
 }
 
+/// codex-review 指摘の再現ケース（P1・PR #1671）: 通常分岐（subnormal
+/// domain に入らないケース）で `weight` を `xhat`（正規化値）より先に
+/// 乗じると、CPU/CUDA/ホスト参照実装の `fma(xhat, weight, bias)`
+/// （`xhat*weight` を無限精度で計算してから 1 回だけ丸めて `bias` を
+/// 加える）と丸め経路が食い違い、`bias` が `xhat*weight` とほぼ相殺
+/// する値の行で誤差が大きく増幅される。`x=[-3,-1,1,3], eps=0,
+/// weight=[1e10;4], bias≈-xhat*weight`（`x=1` 要素で `xhat=rstd=
+/// 1/sqrt(5)`・`bias=-4472135680`）という相殺の効く入力で、`weight`・
+/// `bias` を 1 回の融合演算（`fma(xhat, weight, bias)`）として結合
+/// することを確認する（是正前は Metal が約 `251.7` を返し、正しい値
+/// 約 `221.5` から大きく外れていた）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_weight_bias_cancellation_precision() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    let x = vec![-3.0f32, -1.0, 1.0, 3.0];
+    let w = vec![1e10f32; 4];
+    let b = vec![-4472135680.0f32; 4];
+
+    let out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, Some(&w), Some(&b), 0.0, 1, 4)
+        .expect("run_layer_norm_f32 must succeed");
+    for &v in &out {
+        assert!(v.is_finite(), "expected finite layer_norm output, got {v}");
+    }
+    // 期待値: CPU 参照実装（`crates/backend-cpu/src/layer_norm.rs::
+    // layer_norm_row`）と同じ「`xhat` を `f32` へ丸めてから
+    // `xhat.mul_add(weight, bias)` を 1 回の融合演算として計算する」
+    // 経路を本テスト内で再現する（既存 `f64_layer_norm_reference` は
+    // `xhat *= w; xhat += b`〈非融合の逐次演算〉のため、この極端な
+    // 相殺ケースでは CPU の `mul_add` 契約と異なる丸め経路になり参照
+    // 値として使えない）。`mean=0.0`・`var=5.0`（`eps=0.0`）は本ケースの
+    // 入力から厳密に導出できる値。
+    let rstd = 1.0f64 / 5.0f64.sqrt();
+    let expected: Vec<f32> = x
+        .iter()
+        .zip(w.iter())
+        .zip(b.iter())
+        .map(|((&xv, &wv), &bv)| {
+            let xhat = (xv as f64 * rstd) as f32;
+            xhat.mul_add(wv, bv)
+        })
+        .collect();
+    assert_parity("layer_norm weight_bias_cancellation", &out, &expected);
+}
+
 /// NaN 伝播（行内に NaN が 1 つでもあれば行全体が NaN。`rmsnorm_parity.rs`
 /// と同じ意味論契約）。
 #[test]
@@ -429,6 +477,31 @@ fn layer_norm_zero_eps_degenerate_row_propagates_nan() {
     assert!(
         out.iter().all(|v| v.is_nan()),
         "expected NaN propagation for eps=0 degenerate uniform row, got {out:?}"
+    );
+}
+
+/// codex-review 指摘の再現ケース（P1・#1671 スレッド）: `eps > 0` かつ
+/// 真の分散も 0 の退化ケース（行の全要素が同一値。例 `x=[1,1]`）で
+/// `weight` が非有限（`NaN`／`inf`）の場合、CPU/CUDA・ホスト参照実装は
+/// `xhat=0` を `weight` と `mul_add` するため `0*NaN=NaN`・`0*inf=NaN`
+/// が affine 出力へ伝播する。`eps>0 && dev==0.0` の短絡経路（FTZ 対策の
+/// ゼロ返却）が `weight` の有限性を無視して常に `bias` を返すと、この
+/// NaN 伝播契約が Metal だけ壊れる（是正前は `[0, 0]` を返していた）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_nonfinite_weight_propagates_nan_in_degenerate_row() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    let x = vec![1.0f32, 1.0];
+    let w = vec![f32::NAN, f32::INFINITY];
+    let b = vec![0.0f32, 0.0];
+    let out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, Some(&w), Some(&b), 1e-5, 1, 2)
+        .expect("run_layer_norm_f32 must succeed");
+    assert!(
+        out.iter().all(|v| v.is_nan()),
+        "expected NaN propagation for non-finite weight in degenerate row, got {out:?}"
     );
 }
 

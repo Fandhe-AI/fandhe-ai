@@ -796,11 +796,11 @@ fn layer_norm_vjp_rows(
         let db = db_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
         return (dx, dw, db);
     }
-    let inv_n = 1.0f64 / hidden as f64;
+    let n = hidden as f64;
     for r in 0..rows {
         let row = &x[r * hidden..(r + 1) * hidden];
         let dy_row = &dy[r * hidden..(r + 1) * hidden];
-        let (mean, rstd) = eval::row_ln_stats(row, eps, inv_n);
+        let (mean, rstd) = eval::row_ln_stats(row, eps, hidden);
         // `mean`／`rstd` を `f64` のまま偏差計算に使い、`x̂` を確定する
         // 直前の 1 回だけ `f32` へ downcast する（forward `eval::
         // layer_norm_rows` と同じ理由。codex-review 指摘: `mean` の
@@ -821,8 +821,10 @@ fn layer_norm_vjp_rows(
             let term = dxhat * xhat;
             dot_acc += term as f64;
         }
-        let mean_dxhat = sum_dxhat * inv_n;
-        let mean_dot = dot_acc * inv_n;
+        // `mean` と同じ理由（`row_ln_stats` doc 参照）で、事前丸めした
+        // 逆数との積ではなく `hidden` による直接除算で求める。
+        let mean_dxhat = sum_dxhat / n;
+        let mean_dot = dot_acc / n;
         let dx_row = &mut dx[r * hidden..(r + 1) * hidden];
         for (i, dxv) in dx_row.iter_mut().enumerate() {
             let xhat = xhat_at(i);

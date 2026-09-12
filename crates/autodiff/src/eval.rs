@@ -560,7 +560,15 @@ pub(crate) fn row_rms_stats(x_row: &[f32], eps: f32, inv_n: f64) -> f32 {
 /// （二乗前に `f64` へ昇格。ここでは `(x − mean)` の偏差を昇格してから
 /// 二乗する）だが、LayerNorm は「二乗和」ではなく「二パス分散」
 /// （`Σ(x−μ)²`。`E[x²]−μ²` は使わない。実装計画 §3-3）のため専用
-/// 関数とする。`hidden >= 1` を前提とする（`inv_n = 1/hidden`）。
+/// 関数とする。`hidden >= 1` を前提とする。
+///
+/// **`mean`／`var` は `sum`／`sq_acc` を `hidden` で直接除算して求める
+/// （事前丸めした逆数 `1/hidden` との積ではない。codex-review 指摘:
+/// `x=[1e30f32;49]` のような一様行で `sum * (1/hidden)` は 2 回の
+/// 丸め〈逆数の丸め・乗算の丸め〉が複合し、本来 0 であるべき偏差
+/// `x−mean` が巨大な非ゼロ値になり出力を歪める。IEEE 754 の
+/// 除算は単一の正しく丸められた演算のため、`sum` が `hidden` 個の
+/// 同一値の和である場合に丸め誤差を持ち込まない）。
 ///
 /// **`rstd` も `f64` のまま返す**（`row_rms_stats` は `f32` downcast
 /// 済みだが、LayerNorm は呼び出し元が `(x − mean)` を `f64` のまま
@@ -569,18 +577,19 @@ pub(crate) fn row_rms_stats(x_row: &[f32], eps: f32, inv_n: f64) -> f32 {
 /// `f32` 仮数精度限界〈`2^24` 付近〉に達する入力で `mean` の
 /// 早期丸めが出力を大きく歪める）。呼び出し元は `x̂` を書き出す
 /// 直前の 1 回だけ `f32` へ downcast する。
-pub(crate) fn row_ln_stats(x_row: &[f32], eps: f32, inv_n: f64) -> (f64, f64) {
+pub(crate) fn row_ln_stats(x_row: &[f32], eps: f32, hidden: usize) -> (f64, f64) {
+    let n = hidden as f64;
     let mut sum = 0.0f64;
     for &v in x_row {
         sum += v as f64;
     }
-    let mean = sum * inv_n;
+    let mean = sum / n;
     let mut sq_acc = 0.0f64;
     for &v in x_row {
         let d = v as f64 - mean;
         sq_acc = d.mul_add(d, sq_acc);
     }
-    let var = sq_acc * inv_n;
+    let var = sq_acc / n;
     let rstd = 1.0f64 / (var + eps as f64).sqrt();
     (mean, rstd)
 }
@@ -648,12 +657,11 @@ pub(crate) fn layer_norm_rows(
         return build_tensor(Vec::new(), &shape);
     }
     let data = dense_vec(x);
-    let inv_n = 1.0f64 / hidden as f64;
     let mut out = vec![0.0f32; data.len()];
     for r in 0..rows {
         let row = &data[r * hidden..(r + 1) * hidden];
         let out_row = &mut out[r * hidden..(r + 1) * hidden];
-        let (mean, rstd) = row_ln_stats(row, eps, inv_n);
+        let (mean, rstd) = row_ln_stats(row, eps, hidden);
         // `mean`／`rstd` を `f64` のまま偏差計算まで保持し、`x̂` を書き出す
         // 直前の 1 回だけ `f32` へ downcast する（codex-review 指摘。
         // [`row_ln_stats`] doc 参照）。affine は CUDA カーネルの既定 FMA

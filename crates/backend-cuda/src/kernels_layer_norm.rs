@@ -49,8 +49,9 @@
 /// 未参照——ただし呼び出し元は必ず `hidden` 要素のダミーバッファを渡す。
 /// Metal 側 `rmsnorm.rs` と同じ理由でコンパイラの条件式最適化に対する
 /// fail-closed な境界確保）・`b`（同様）・`out`・`rows`・`hidden`・
-/// `eps`・`has_weight`・`has_bias`（`inv_n = 1/hidden` はカーネル内で
-/// `double` のまま導出する。冒頭コメント「縮約精度契約」参照）。
+/// `eps`・`has_weight`・`has_bias`（`mean`／`var` はカーネル内で
+/// `hidden` による直接除算（`double`）で導出する。冒頭コメント
+/// 「縮約精度契約」参照）。
 pub const LAYER_NORM_F32: &str = r#"
 extern "C" __global__ void layer_norm_f32(
     const float* __restrict__ x,
@@ -72,10 +73,15 @@ extern "C" __global__ void layer_norm_f32(
     const float* x_row = x + row_base;
     float* out_row = out + row_base;
 
-    // `inv_n = 1/hidden` をカーネル内で double のまま導出する（ホストで
-    // `f32` 計算してから渡すと、丸め誤差が `double` へ昇格後も残存し
-    // `mean`／`var` の精度を損なう。codex-review 指摘）。
-    double inv_n = 1.0 / (double)hidden;
+    // `mean`／`var` は `hidden` による直接除算で求める（事前丸めした
+    // 逆数 `1/hidden` との積ではない。codex-review 指摘:
+    // `x=[1e30f;49]` のような一様行で `sum * (1.0/hidden)` は 2 回の
+    // 丸め〈逆数の丸め・乗算の丸め〉が複合し、本来 0 であるべき偏差
+    // `x-mean` が巨大な非ゼロ値になり出力を歪める。IEEE 754 の除算は
+    // 単一の正しく丸められた演算のため、`sum` が `hidden` 個の同一値の
+    // 和である場合に丸め誤差を持ち込まない。CPU 側 `eval::
+    // row_ln_stats`／`backend-cpu::layer_norm::layer_norm_row` と同じ
+    // 契約）。
 
     // パス 1: 平均（double アキュムレータ）。
     double sum = 0.0;
@@ -86,7 +92,7 @@ extern "C" __global__ void layer_norm_f32(
     for (int offset = 16; offset > 0; offset >>= 1) {
         sum += __shfl_xor_sync(0xffffffffu, sum, offset);
     }
-    double mean = sum * inv_n;
+    double mean = sum / (double)hidden;
 
     // パス 2: 分散（二パス。`(x-mean)^2` を double で蓄積）。
     double sq_acc = 0.0;
@@ -98,7 +104,7 @@ extern "C" __global__ void layer_norm_f32(
     for (int offset = 16; offset > 0; offset >>= 1) {
         sq_acc += __shfl_xor_sync(0xffffffffu, sq_acc, offset);
     }
-    double var = sq_acc * inv_n;
+    double var = sq_acc / (double)hidden;
     double rstd = 1.0 / sqrt(var + (double)eps);
 
     // パス 3: 書き出し（device メモリを再読）。`mean`／`rstd` を double の

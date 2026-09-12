@@ -147,17 +147,16 @@ pub fn run_layer_norm_f32(
 
     let mut out = vec![0.0f32; x.len()];
     let numel = rows * hidden;
-    let inv_n = 1.0f64 / hidden as f64;
 
     if numel >= PARALLEL_THRESHOLD && rows >= 2 {
         out.par_chunks_mut(hidden)
             .zip(x.par_chunks(hidden))
             .for_each(|(out_row, in_row)| {
-                layer_norm_row(in_row, w, b, eps, inv_n, out_row);
+                layer_norm_row(in_row, w, b, eps, hidden, out_row);
             });
     } else {
         for (out_row, in_row) in out.chunks_mut(hidden).zip(x.chunks(hidden)) {
-            layer_norm_row(in_row, w, b, eps, inv_n, out_row);
+            layer_norm_row(in_row, w, b, eps, hidden, out_row);
         }
     }
 
@@ -174,7 +173,11 @@ pub fn run_layer_norm_f32(
 /// `mean` の丸め誤差がそのまま `x̂` へ伝播し、`x` の値域が `f32` の
 /// 仮数精度限界〈例: 2^24 付近〉に達する入力で顕著な誤差を生む。
 /// `rmsnorm_row_scalar` の `rstd` 単体丸めとは異なり、LayerNorm は
-/// `mean` 減算があるため両方を高精度に保つ必要がある）。
+/// `mean` 減算があるため両方を高精度に保つ必要がある）。`mean`／`var`
+/// は事前丸めした逆数 `1/hidden` との積ではなく `hidden` による直接
+/// 除算で求める（codex-review 指摘: `x=[1e30f32;49]` のような一様行で
+/// `sum * (1/hidden)` は 2 回の丸めが複合し、本来 0 の偏差が巨大な
+/// 非ゼロ値になる。`eval::row_ln_stats` と同じ契約）。
 ///
 /// affine（`x̂·w+b`）は CUDA カーネル（`kernels_layer_norm.rs`。
 /// `xhat * wv + bv` が nvcc の既定 FMA contraction で `fmaf` 相当に
@@ -186,20 +189,21 @@ fn layer_norm_row(
     w: Option<&[f32]>,
     b: Option<&[f32]>,
     eps: f32,
-    inv_n: f64,
+    hidden: usize,
     out_row: &mut [f32],
 ) {
+    let n = hidden as f64;
     let mut sum = 0.0f64;
     for &v in row {
         sum += v as f64;
     }
-    let mean = sum * inv_n;
+    let mean = sum / n;
     let mut sq_acc = 0.0f64;
     for &v in row {
         let d = v as f64 - mean;
         sq_acc = d.mul_add(d, sq_acc);
     }
-    let var = sq_acc * inv_n;
+    let var = sq_acc / n;
     let rstd = 1.0f64 / (var + eps as f64).sqrt();
 
     match (w, b) {
