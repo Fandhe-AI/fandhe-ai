@@ -209,13 +209,19 @@ fn eps_is_widened_directly_to_soft_f64() {
 
 /// パス 3（書き出し）の affine（`x̂·w+b`）が、GPU の subnormal
 /// flush-to-zero 対策として `xhat`／`weight`／`bias` すべてを soft-f64 へ
-/// widen し直し `mul`＋`add` で計算してから 1 回だけ `f32` へ narrow する
-/// ことをロックする（PR #1671 codex-review 反例〈`xhat` 自体が `f32`
-/// subnormal になる行で平坦な `float` の `fma()` が GPU 実機の入力側
-/// flush-to-zero に晒される〉の回帰防止。`layer_norm.metal` パス 3
-/// コメント「affine も soft-f64 で計算する理由」参照）。
+/// widen し直し、積は `ln_f64_mul`（厳密・丸め無し）・和は
+/// **round-to-odd 丸め加算 `ln_f64_add_ro`**（通常の最近接偶数丸め
+/// `ln_f64_add` ではない）で計算してから 1 回だけ `f32` へ narrow する
+/// ことをロックする。回帰防止対象は 2 系統: PR #1671 codex-review 反例
+/// その 1〈`xhat` 自体が `f32` subnormal になる行で平坦な `float` の
+/// `fma()` が GPU 実機の入力側 flush-to-zero に晒される〉、および反例
+/// その 2〈積と加数の指数が大きく乖離する行で通常の最近接偶数丸め
+/// `ln_f64_add` を使うと `f64`→`f32` の二重丸めがハードウェア FMA
+/// 〈`f32::mul_add`〉と食い違う〉。`layer_norm.metal` 冒頭コメント
+/// 「FMA 契約」・パス 3 コメント「affine を round-to-odd で計算する
+/// 理由」参照。
 #[test]
-fn pass3_computes_affine_entirely_in_soft_f64_to_avoid_gpu_subnormal_flush() {
+fn pass3_computes_affine_via_round_to_odd_soft_f64_fma() {
     assert!(
         LAYER_NORM_METAL_SOURCE.contains("uint xhat_bits = ln_f64_narrow(xhat64);"),
         "xhat が soft-f64 から f32 へ narrow されていません"
@@ -230,10 +236,16 @@ fn pass3_computes_affine_entirely_in_soft_f64_to_avoid_gpu_subnormal_flush() {
     );
     assert!(
         LAYER_NORM_METAL_SOURCE.contains(
-            "ulong affine64 = ln_f64_add(ln_f64_mul(ln_f64_widen(xhat_bits), wv64), bv64);"
+            "ulong affine64 = ln_f64_add_ro(ln_f64_mul(ln_f64_widen(xhat_bits), wv64), bv64);"
         ),
-        "affine が soft-f64 の mul+add で計算されていません（平坦な float fma への \
-         逆戻りは GPU 実機の subnormal flush-to-zero を再導入する）"
+        "affine が round-to-odd 丸め加算 ln_f64_add_ro の mul+add で計算されて \
+         いません（平坦な float fma への逆戻りは GPU 実機の subnormal \
+         flush-to-zero を再導入し、通常の ln_f64_add への逆戻りは二重丸めで \
+         ハードウェア FMA と食い違う）"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("inline ulong ln_f64_add_ro(ulong a, ulong b)"),
+        "round-to-odd 丸め加算 ln_f64_add_ro の定義が見つかりません"
     );
     assert!(
         !LAYER_NORM_METAL_SOURCE.contains("out[row_base + idx] = fma(xhat, wv, bv);"),
@@ -242,16 +254,31 @@ fn pass3_computes_affine_entirely_in_soft_f64_to_avoid_gpu_subnormal_flush() {
     );
 }
 
-/// soft-f64 の主要プリミティブ（`widen`／`add`／`mul`／`narrow`／
-/// `recip_newton`／`rsqrt_newton`）がすべて定義されていることをロック
-/// する（`crates/backend-metal/src/soft_f64.rs` のホスト側逐語モデルと
-/// 1 対 1 対応する契約。いずれかが欠落すると `layer_norm.metal` 冒頭
-/// コメント「ホスト側の逐語モデル」の前提が崩れる）。
+/// `ln_f64_add_ro` が `ln_f64_add` の丸め規則のみを差し替えた
+/// round-to-odd 版であること（`m |= 1` によるビット単位の丸めであり、
+/// 通常の最近接偶数丸め判定〈`r > 4 || (r == 4 && ...)`〉を使わない
+/// こと）をロックする回帰防止テスト。
+#[test]
+fn ln_f64_add_ro_uses_round_to_odd_not_round_to_nearest_even() {
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("if (r != 0ul) {\n        m |= 1ul;\n    }"),
+        "ln_f64_add_ro が round-to-odd（r != 0 で最下位 bit を強制的に 1）を \
+         使っていません"
+    );
+}
+
+/// soft-f64 の主要プリミティブ（`widen`／`add`／`add_ro`／`mul`／
+/// `narrow`／`recip_newton`／`rsqrt_newton`）がすべて定義されている
+/// ことをロックする（`crates/backend-metal/src/soft_f64.rs` のホスト側
+/// 逐語モデルと 1 対 1 対応する契約。いずれかが欠落すると
+/// `layer_norm.metal` 冒頭コメント「ホスト側の逐語モデル」の前提が
+/// 崩れる）。
 #[test]
 fn all_soft_f64_primitives_are_defined() {
     for needle in [
         "inline ulong ln_f64_widen(uint bits)",
         "inline ulong ln_f64_add(ulong a, ulong b)",
+        "inline ulong ln_f64_add_ro(ulong a, ulong b)",
         "inline ulong ln_f64_sub(ulong a, ulong b)",
         "inline uint ln_f64_narrow(ulong bits)",
         "inline ulong ln_f64_mul(ulong a, ulong b)",

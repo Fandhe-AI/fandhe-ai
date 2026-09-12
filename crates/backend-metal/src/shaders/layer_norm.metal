@@ -6,20 +6,43 @@
 // 加算をそれぞれスキップ）。分散は biased（÷N。`E[x^2]-mean^2` ではなく
 // 二パス `Sigma(x-mean)^2/N` で計算する。`docs/norm-ops-design.md`）。
 //
-// FMA 契約: `affine`（`x̂·w+b`）は「積＋和を融合し 1 回だけ丸める」
-// （`.claude/rules/coding-rust.md` の FMA 契約統一）という意味論を
-// soft-f64（`ln_f64_mul` の積は常に `f64` の 53bit 仮数に厳密に収まる
-// ため丸め無し・続く `ln_f64_add` が実質的な丸め）で実現する（下記
-// パス 3 コメント「affine も soft-f64 で計算する理由」参照。GPU の
-// subnormal flush-to-zero 対策で平坦な `float` の `fma()` 命令を経由
-// しない）。CPU 参照実装（`crates/backend-cpu/src/layer_norm.rs::
-// layer_norm_row`）は `xhat.mul_add(wv, bv)`（ハードウェア FMA）、CUDA
-// （`kernels_layer_norm.rs`）は nvcc の既定 FMA contraction 経由で
-// 同じ「1 回だけ丸める」意味論を実現しており、丸め「経路」の意図は
-// 3 バックエンドで揃う。`xhat` 自体は本ファイルの soft-f64（下記）
-// 経由で導出するため CPU/CUDA と bit 一致はしない（REQ-2 統一複合
-// 判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉の範囲で
-// 一致させる。bit-exact 契約ではない）。
+// FMA 契約: `affine`（`x̂·w+b`）は CPU 参照実装（`crates/backend-cpu/src/
+// layer_norm.rs::layer_norm_row` の `xhat.mul_add(wv, bv)`）・CUDA
+// （`kernels_layer_norm.rs` の nvcc 既定 FMA contraction）と同じ
+// **「`f32` の `xhat`・`weight`・`bias` に対する単一丸めの FMA」**
+// （`.claude/rules/coding-rust.md` の FMA 契約統一）を実現する。
+//
+// **平坦な `float` の `fma()` 命令は使わない**（GPU 実機が入力側の
+// subnormal を flush-to-zero しうるため。下記パス 3 コメント「affine
+// を round-to-odd で計算する理由」参照）。かといって「soft-f64（`f64`
+// 53bit 仮数）へ widen して `mul`＋`add` してから `narrow` で `f32` へ
+// 戻す」素朴な二段階丸めも**単一丸めの FMA と一致しない**（PR #1671
+// codex-review 指摘・イシュー #1596: `xhat=31/16`・
+// `weight=f32::from_bits(0x7f042108)`・`bias=-1` のような、積の指数と
+// 加数の指数が大きく乖離する入力で、`f64` への丸め〈1 回目〉が
+// `f32` の桁の決定に必要な情報を握り潰し、続く `narrow`〈2 回目〉が
+// 単一丸めの結果〈本例では有限の `f32::MAX`〉と異なる値〈`+inf`〉を
+// 返す「二重丸め」が発生する）。
+//
+// **本ファイルの affine 実装（round-to-odd 経由）**: `ln_f64_mul` で
+// 積を厳密に求めた（`f32` 同士の積は仮数 48bit 以内に収まり `f64` の
+// 53bit 仮数へ丸め無しで厳密表現できる）後、通常の最近接偶数丸め加算
+// `ln_f64_add` の代わりに **round-to-odd 丸め加算 `ln_f64_add_ro`**
+// （下記定義。`crates/backend-metal/src/soft_f64.rs::
+// add_f64_bits_round_to_odd` の逐語移植）で `bias` を加え、最後に
+// 通常の `ln_f64_narrow`（最近接偶数丸め）で 1 回だけ `f32` へ丸める。
+// Boldo–Melquiond（2008）の round-to-odd 二重丸め定理（中間精度 `p2` が
+// 目的精度 `p1` に対し `p2 >= p1+2` を満たせば
+// `RN_p1(RO_p2(x)) == RN_p1(x)`。ここでは `p2=53`〈`f64`〉・`p1=24`
+// 〈`f32`〉で `53 >= 26` を満たす）により、この 2 段階（`ln_f64_add_ro`
+// → `ln_f64_narrow`）は厳密値 `xhat*w+b` を `f32` へ直接単一丸めした
+// 結果と一致する（`ln_f64_add_ro` の doc comment に数学的根拠を記載。
+// `crates/backend-metal/src/soft_f64.rs::fma_f32_bits` がホスト側
+// 逐語モデルで、上記反例を含むランダム 200 万組・`f32::mul_add` との
+// bit 完全一致をユニットテストで検証する）。`xhat` 自体は本ファイルの
+// soft-f64（下記）経由で導出するため CPU/CUDA と bit 一致はしない
+// （REQ-2 統一複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉
+// の範囲で一致させる。bit-exact 契約ではない）。
 //
 // **数値方式（soft-f64 経由の全面再設計。PR #1671 codex-review 指摘への
 // 是正・イシュー #1596）**: 当初実装（行の 2 の冪スケール `row_scale`
@@ -82,8 +105,9 @@
 //
 // **ホスト側の逐語モデル**: `crates/backend-metal/src/soft_f64.rs` の
 // `widen_f32_bits`／`neg_f64_bits`／`sub_f64_bits`／`add_f64_bits`／
-// `mul_f64_bits`／`div_f64_bits`／`narrow_f64_bits`／
-// `recip_newton_f64_bits`／`rsqrt_newton_f64_bits` が本ファイルの
+// `add_f64_bits_round_to_odd`／`mul_f64_bits`／`div_f64_bits`／
+// `narrow_f64_bits`／`recip_newton_f64_bits`／`rsqrt_newton_f64_bits`
+// （加えて affine 全体のホスト側逐語モデルは `fma_f32_bits`）が本ファイルの
 // `ln_f64_*` 系関数と 1 対 1 に対応し、`f64` 実演算に対する bit 完全
 // 一致（`widen`／`add`／`mul`／`div`／`narrow`）または収束精度
 // （`recip`／`rsqrt`）をユニットテスト（Linux 実行可能）で網羅検証
@@ -294,6 +318,109 @@ inline ulong ln_f64_add(ulong a, ulong b) {
     if (m >= (1ul << 53)) {
         m >>= 1;
         e += 1ul;
+    }
+    ulong exp_field = (m >= (1ul << 52)) ? e : 0ul;
+    if (exp_field >= LN_F64_EXP_MASK) {
+        return sa | LN_F64_INF;
+    }
+    return sa | (exp_field << 52) | (m & LN_F64_FRAC_MASK);
+}
+
+// `f64 + f64` を **round-to-odd**（RO）で丸めた版（PR #1671 codex-review
+// 指摘・イシュー #1596 是正: affine `x̂·w+b` の二重丸め回避。冒頭コメント
+// 「FMA 契約」参照）。[`ln_f64_add`] とは丸め規則のみが異なる姉妹関数
+// （逐語複製。共通化すると分岐が増え可読性が落ちるため意図的に複製する。
+// `soft_f64::add_f64_bits_round_to_odd` の逐語移植——数学的根拠
+// 〈Boldo–Melquiond の round-to-odd 二重丸め定理〉は同関数の doc comment
+// を正としここでは繰り返さない）。
+//
+// [`ln_f64_add`] との差分は最終段のみ: 「ガード 3bit `r` から `r>4` は
+// 切り上げ・`r==4` は偶数丸め」ではなく「`r != 0`（丸め落ちする情報が
+// 何かあれば）なら結果の最下位 bit を強制的に 1 にする」。round-to-odd
+// は算術的な繰り上がり（`m += 1`）を一切行わない（ビット単位の OR のみ）
+// ため、[`ln_f64_add`] が丸め後に持つ「`m` が `2^53` へ繰り上がる場合の
+// 指数調整」分岐は発生しえず、本関数には存在しない。
+inline ulong ln_f64_add_ro(ulong a, ulong b) {
+    ulong sa = a & LN_F64_SIGN;
+    ulong sb = b & LN_F64_SIGN;
+    ulong ea = (a >> 52) & LN_F64_EXP_MASK;
+    ulong eb = (b >> 52) & LN_F64_EXP_MASK;
+    ulong fa = a & LN_F64_FRAC_MASK;
+    ulong fb = b & LN_F64_FRAC_MASK;
+
+    if (ea == LN_F64_EXP_MASK || eb == LN_F64_EXP_MASK) {
+        bool a_nan = (ea == LN_F64_EXP_MASK) && (fa != 0ul);
+        bool b_nan = (eb == LN_F64_EXP_MASK) && (fb != 0ul);
+        if (a_nan || b_nan) {
+            return LN_F64_QNAN;
+        }
+        if (ea == LN_F64_EXP_MASK && eb == LN_F64_EXP_MASK) {
+            return (sa == sb) ? a : LN_F64_QNAN;
+        }
+        return (ea == LN_F64_EXP_MASK) ? a : b;
+    }
+    bool a_zero = (ea == 0ul) && (fa == 0ul);
+    bool b_zero = (eb == 0ul) && (fb == 0ul);
+    if (a_zero && b_zero) {
+        return sa & sb;
+    }
+    if (a_zero) {
+        return b;
+    }
+    if (b_zero) {
+        return a;
+    }
+
+    ulong ma = (ea == 0ul) ? fa : (fa | (1ul << 52));
+    ulong ea_eff = (ea == 0ul) ? 1ul : ea;
+    ulong mb = (eb == 0ul) ? fb : (fb | (1ul << 52));
+    ulong eb_eff = (eb == 0ul) ? 1ul : eb;
+    if (ea_eff < eb_eff || (ea_eff == eb_eff && ma < mb)) {
+        ulong t;
+        t = ma; ma = mb; mb = t;
+        t = ea_eff; ea_eff = eb_eff; eb_eff = t;
+        t = sa; sa = sb; sb = t;
+    }
+    ma <<= 3;
+    mb <<= 3;
+    ulong d = ea_eff - eb_eff;
+    if (d >= 64ul) {
+        mb = (mb != 0ul) ? 1ul : 0ul;
+    } else if (d > 0ul) {
+        ulong lost = mb & ((1ul << d) - 1ul);
+        mb = (mb >> d) | ((lost != 0ul) ? 1ul : 0ul);
+    }
+
+    ulong e = ea_eff;
+    ulong m;
+    if (sa == sb) {
+        m = ma + mb;
+        if (m >= (1ul << 56)) {
+            ulong lost = m & 1ul;
+            m = (m >> 1) | lost;
+            e += 1ul;
+        }
+    } else {
+        m = ma - mb;
+        if (m == 0ul) {
+            return 0ul;
+        }
+        ulong sh = (ulong)ln_f64_clz64(m);
+        sh = (sh >= 8ul) ? (sh - 8ul) : 0ul;
+        if (sh > e - 1ul) {
+            sh = e - 1ul;
+        }
+        m <<= sh;
+        e -= sh;
+    }
+
+    // round-to-odd: 丸め落ちする 3 bit（ガード/丸め/sticky）のいずれかが
+    // 立っていれば、結果の最下位 bit を強制的に 1 にする（算術繰り上がり
+    // は行わないため `m` が `2^53` へ達することはない）。
+    ulong r = m & 7ul;
+    m >>= 3;
+    if (r != 0ul) {
+        m |= 1ul;
     }
     ulong exp_field = (m >= (1ul << 52)) ? e : 0ul;
     if (exp_field >= LN_F64_EXP_MASK) {
@@ -839,29 +966,60 @@ kernel void layer_norm_f32(
         // 確定した後 1 回だけ `f32` へ丸める（`ln_f64_narrow`。CPU 参照
         // 実装 `((x-mean)*rstd) as f32` と同じ丸め位置）。
         //
-        // **affine も soft-f64 で計算する理由（GPU の subnormal
-        // flush-to-zero 対策。codex-review 指摘・PR #1671 スレッド 1
-        // 件目の反例で実機実測により発覚）**: `xhat`（`f32` へ丸めた
-        // 直後の値）自体が `f32` の subnormal になりうる（`dev`・
-        // `rstd` の値域次第。例 `x=[1e38,-1e38,1e-4,-1e-4]` の小さい
-        // 要素）。この `xhat` を平坦な `float` の `fma(xhat, wv, bv)`
-        // へそのまま渡すと、Apple GPU 実機がハードウェア命令の
-        // **入力側**で subnormal をゼロへ flush しうることを実機実測
-        // で確認した（`layer_norm_tiny_x_huge_eps_stays_finite_and_
-        // nonzero` の反例で出力が `[0.0, 0.0]` になる形で顕在化）。
-        // 対策として、`xhat`・`wv`・`bv` を soft-f64 へ widen し直し
-        // `mul`＋`add`（ともに subnormal を経由しても flush されない
-        // 64bit 整数演算のみで構成）で affine を計算してから 1 回だけ
-        // `f32` へ narrow する。`f32` の積は常に `f64` の 53bit 仮数に
-        // 厳密に収まる（48bit 以内）ため `mul` 自体は丸め無しの厳密演算
-        // となり、後続の `add`＋`narrow`（2 段階の丸め）が単一の正しく
-        // 丸められた `f32` 直接丸めと異なる結果になるのは「二重丸め」が
-        // 生じる極めて稀な境界一致ケースに限られる（`f64` の 53bit と
-        // `f32` の 24bit の差が約 29bit あり、REQ-2 統一複合判定の許容
-        // 誤差を大幅に下回る）。CPU 参照実装のハードウェア `fma`
-        // （`f32::mul_add`。x86/ARM CPU は subnormal 入力を flush しない）
-        // と数学的に同値の結果を、GPU の flush-to-zero に依存せず
-        // 再現する。
+        // **affine を round-to-odd で計算する理由**: affine
+        // （`x̂·w+b`）は CPU/CUDA と同じ「`f32` の `xhat`・`weight`・
+        // `bias` に対する単一丸めの FMA」でなければならない
+        // （冒頭コメント「FMA 契約」参照）が、これを満たす経路には
+        // 2 つの罠がある。
+        //
+        // 罠 1（平坦な `float` の `fma()` を使わない理由。GPU の
+        // subnormal flush-to-zero 対策。codex-review 指摘・PR #1671
+        // スレッド 1 件目の反例で実機実測により発覚）: `xhat`
+        // （`f32` へ丸めた直後の値）自体が `f32` の subnormal に
+        // なりうる（`dev`・`rstd` の値域次第。例
+        // `x=[1e38,-1e38,1e-4,-1e-4]` の小さい要素）。この `xhat` を
+        // 平坦な `float` の `fma(xhat, wv, bv)` へそのまま渡すと、
+        // Apple GPU 実機がハードウェア命令の**入力側**で subnormal を
+        // ゼロへ flush しうることを実機実測で確認した
+        // （`layer_norm_tiny_x_huge_eps_stays_finite_and_nonzero` の
+        // 反例で出力が `[0.0, 0.0]` になる形で顕在化）。
+        //
+        // 罠 2（soft-f64 の素朴な二段階丸め——`mul`＋`ln_f64_add`（最近接
+        // 偶数丸め）で `f64` へ丸めてから `ln_f64_narrow` で `f32` へ
+        // 丸める——では単一丸めの FMA と一致しない。codex-review 指摘・
+        // PR #1671 スレッド 2 件目の反例。イシュー #1596）: 罠 1 対策
+        // として `xhat`・`wv`・`bv` を soft-f64 へ widen し直し `mul`＋
+        // `add` で affine を計算する方針自体は正しいが、当初の実装は
+        // `add` に通常の最近接偶数丸め `ln_f64_add` を使っていた。
+        // `xhat=31/16`・`weight=f32::from_bits(0x7f042108)`・
+        // `bias=-1` のように積と加数の指数が大きく乖離する入力では、
+        // `ln_f64_add` の `f64`（53bit）への丸めが `f32`（24bit）の
+        // 桁の決定に必要な情報を握り潰し、続く `ln_f64_narrow` が
+        // ハードウェア FMA（`f32::mul_add`。本例では有限の
+        // `f32::MAX`）と異なる値（`+inf`）を返す「二重丸め」が
+        // 発生する（REQ-2 統一複合判定の許容誤差を大幅に超える差であり
+        // 「稀だが誤差の範囲内」とは言えない）。
+        //
+        // 対策（両方の罠を同時に回避）: `xhat`・`wv`・`bv` を soft-f64
+        // へ widen し直し（subnormal を経由しても flush されない 64bit
+        // 整数演算のみで構成——罠 1 の対策は不変）、積は `ln_f64_mul`
+        // （`f32` 同士の積は仮数 48bit 以内に収まり `f64` の 53bit 仮数へ
+        // 丸め無しで厳密表現できるため、この段は丸め無しの厳密演算）、
+        // 和は通常の `ln_f64_add` ではなく**round-to-odd 丸め加算
+        // `ln_f64_add_ro`**（上記定義。`crates/backend-metal/src/soft_f64.rs::
+        // add_f64_bits_round_to_odd` の逐語移植）を使い、最後に通常の
+        // `ln_f64_narrow`（最近接偶数丸め）で 1 回だけ `f32` へ丸める。
+        // Boldo–Melquiond（2008）の round-to-odd 二重丸め定理（中間精度
+        // `p2` が目的精度 `p1` に対し `p2 >= p1+2` を満たせば
+        // `RN_p1(RO_p2(x)) == RN_p1(x)`。ここでは `p2=53`〈`f64`〉・
+        // `p1=24`〈`f32`〉で `53 >= 26` を満たす）により、この経路は
+        // 厳密値 `xhat*w+b` を `f32` へ直接単一丸めした結果——すなわち
+        // CPU 参照実装のハードウェア `fma`（`f32::mul_add`。x86/ARM
+        // CPU は subnormal 入力を flush しない）と数学的に同値の
+        // 結果——と一致する（`ln_f64_add_ro` の doc comment に数学的
+        // 根拠を記載。`crates/backend-metal/src/soft_f64.rs::fma_f32_bits` がホスト側逐語
+        // モデルで、上記反例を含むランダム 200 万組・`f32::mul_add`
+        // との bit 完全一致をユニットテストで検証する）。
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
             ulong xv = ln_f64_widen(as_type<uint>(x[row_base + idx]));
             ulong dev = ln_f64_sub(xv, mean);
@@ -872,7 +1030,7 @@ kernel void layer_norm_f32(
             float bv = (has_bias != 0) ? b[idx] : 0.0f;
             ulong wv64 = ln_f64_widen(as_type<uint>(wv));
             ulong bv64 = ln_f64_widen(as_type<uint>(bv));
-            ulong affine64 = ln_f64_add(ln_f64_mul(ln_f64_widen(xhat_bits), wv64), bv64);
+            ulong affine64 = ln_f64_add_ro(ln_f64_mul(ln_f64_widen(xhat_bits), wv64), bv64);
             out[row_base + idx] = as_type<float>(ln_f64_narrow(affine64));
         }
     }

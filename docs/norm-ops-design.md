@@ -215,6 +215,39 @@ bit 完全一致することを検証済み）。
 「割り切れる」という特別な反例パターンを持たないため）。詳細な数式は
 `layer_norm.metal` 冒頭コメントを正本とする。
 
+**affine（`x̂·w+b`）を round-to-odd で計算する理由（PR #1671
+codex-review 2 回目の P1 指摘・イシュー #1596 の追加是正）**: affine は
+CPU 参照実装（`f32::mul_add`）・CUDA（nvcc 既定 FMA contraction）と同じ
+「`f32` の `xhat`・`weight`・`bias` に対する単一丸めの FMA」でなければ
+ならない（`.claude/rules/coding-rust.md` の FMA 契約統一）。この契約を
+満たす経路には 2 つの罠がある: (1) 平坦な `float` の `fma()` は GPU
+実機が入力側の subnormal を flush-to-zero しうるため使えない（1 回目の
+codex-review 指摘で発覚済み）、(2) 罠 1 対策として `xhat`・`weight`・
+`bias` を soft-f64 へ widen し `mul`＋`add`（最近接偶数丸め）してから
+`f32` へ narrow する素朴な二段階丸めは、積と加数の指数が大きく乖離する
+入力（`xhat=31/16`・`weight=f32::from_bits(0x7f042108)`・`bias=-1`）で
+単一丸めの FMA と食い違う（`f64` への丸めが `f32` の桁決定に必要な
+情報を握り潰し、続く narrow がハードウェア FMA〈本例では有限の
+`f32::MAX`〉と異なる値〈`+inf`〉を返す「二重丸め」が発生する）。
+
+対策として、和の丸めを通常の最近接偶数丸め（`ln_f64_add`）から
+**round-to-odd 丸め加算**（`ln_f64_add_ro`。`crates/backend-metal/src/
+soft_f64.rs::add_f64_bits_round_to_odd` が逐語モデル）へ差し替えた。
+Boldo–Melquiond（2008）の round-to-odd 二重丸め定理（中間精度 `p2` が
+目的精度 `p1` に対し `p2 >= p1+2` を満たせば `RN_p1(RO_p2(x)) ==
+RN_p1(x)`。ここでは `p2=53`〈`f64`〉・`p1=24`〈`f32`〉で `53 >= 26` を
+満たす）により、「`ln_f64_mul`（積・仮数 48bit 以内に収まるため丸め
+無しで厳密）→ `ln_f64_add_ro`（round-to-odd）→ `ln_f64_narrow`（最近接
+偶数丸め）」という 2 段階丸めは、厳密値 `xhat*w+b` を `f32` へ直接単一
+丸めした結果と一致する。`crates/backend-metal/src/soft_f64.rs::
+fma_f32_bits` がホスト側逐語モデルで、上記反例を含むランダム 200 万組・
+`f32::mul_add` との bit 完全一致をユニットテストで検証する。実機
+（Apple M4 Max）テストは `crates/backend-metal/tests/
+layer_norm_parity.rs::layer_norm_affine_overflow_boundary_matches_
+hardware_fma_not_double_rounding` を参照（上記反例を含む行で Metal 出力
+が `f32::MAX` と bit 完全一致し、CPU 参照実装とも bit 完全一致すること
+を確認済み）。
+
 `rmsnorm.metal` と異なり常に「3 パス」（device メモリ再読・threadgroup
 memory 不使用。平均 → 分散 → 書き出し。行スケール導出〈`maxabs`〉の
 パスは soft-f64 化により不要になったため持たない）とし、

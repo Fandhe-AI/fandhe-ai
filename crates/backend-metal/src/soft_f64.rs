@@ -205,6 +205,146 @@ pub fn add_f64_bits(a: u64, b: u64) -> u64 {
     sa | (exp_field << 52) | (m & F64_FRAC_MASK)
 }
 
+/// `f64 + f64` を**round-to-odd**（RO）で丸めた bit 表現版（PR #1671
+/// codex-review 指摘・イシュー #1596 是正: LayerNorm affine `x̂·w+b` の
+/// 二重丸め回避）。[`add_f64_bits`] とは丸め規則のみが異なる姉妹関数
+/// （逐語複製。共通化すると分岐が増え可読性が落ちるため意図的に複製する。
+/// `.claude/rules/code-comment-style.md`）。
+///
+/// # なぜ round-to-odd で二重丸めを避けられるか
+///
+/// LayerNorm の affine は「`xhat`（`f32`）・`weight`（`f32`）の積 `p = xhat*w`
+/// を `f64` へ厳密表現（`p` は仮数 48bit 以内に収まるため [`mul_f64_bits`]
+/// は無丸めで厳密値を返す）した後、`bias`（`f32`）を加えて 1 回だけ `f32`
+/// へ丸める」という**単一丸めの FMA**（CPU 参照実装 `f32::mul_add`・CUDA
+/// の `fmaf` 相当）を再現する必要がある。素朴に「`add_f64_bits` で `f64`
+/// （53bit）へ丸めてから [`narrow_f64_bits`] で `f32`（24bit）へ丸める」
+/// と**二重丸め**になり、`f32` の正しい単一丸め結果と食い違う実例が
+/// 存在する（`xhat=31/16`・`weight=f32::from_bits(0x7f042108)`・
+/// `bias=-1` で、真の和は `f32::MAX` と `+inf` の閾値からちょうど整数 `1`
+/// だけ下にある 128bit 精度が必要な整数値になり、`f64` への丸めが先に
+/// この差を吸収してしまうため `f32::mul_add` は `f32::MAX` を返す一方
+/// 素朴な二段階丸めは `+inf` を返す。PR #1671 codex-review 実測）。
+///
+/// Boldo–Melquiond（2008）の round-to-odd 二重丸め定理: 中間精度 `p2` が
+/// 目的精度 `p1` に対し `p2 >= p1 + 2` を満たせば、`RN_p1(RO_p2(x)) ==
+/// RN_p1(x)`（すべての実数 `x` に対し）。本ケースは `p2=53`（`f64`）・
+/// `p1=24`（`f32`。隠れ 1 込み）で `53 >= 24+2=26` を満たす。round-to-odd
+/// は「丸め後の値が厳密値と異なるなら、結果の最下位 bit を強制的に 1
+/// （奇数）にする」丸め（通常の最近接偶数丸めとは丸め先の bit パターンが
+/// 異なるだけで、桁合わせ・ガード/sticky bit の抽出手順は
+/// [`add_f64_bits`] と同一）。これにより「`f32` の丸め判定に影響しうる
+/// 情報（厳密値からの正確な距離の符号）」が `f64` の丸めで握り潰されず
+/// 保存され、続く [`narrow_f64_bits`]（通常の最近接偶数丸め）が厳密値
+/// から直接 `f32` へ丸めた場合と同じ結果を返す。
+///
+/// # 丸め手順の差分（[`add_f64_bits`] 比）
+///
+/// 桁合わせ・仮数の加減算・正規化まで完全に同一（本関数はそれらを逐語
+/// 複製する）。最終段のみ、「ガード 3bit `r` から `r>4` は切り上げ・
+/// `r==4` は偶数丸め」ではなく「`r != 0`（丸め落ちする情報が何かあれば）
+/// なら結果の最下位 bit を強制的に 1 にする」へ差し替える。round-to-odd
+/// は算術的な繰り上がり（`m += 1`）を一切行わない（ビット単位の OR の
+/// み）ため、[`add_f64_bits`] が丸め後に持つ「`m` が `2^53` へ繰り上がる
+/// 場合の指数調整」分岐は発生しえず、本関数には存在しない。
+pub fn add_f64_bits_round_to_odd(a: u64, b: u64) -> u64 {
+    let sa = a & F64_SIGN;
+    let sb = b & F64_SIGN;
+    let ea = (a >> 52) & F64_EXP_MASK;
+    let eb = (b >> 52) & F64_EXP_MASK;
+    let fa = a & F64_FRAC_MASK;
+    let fb = b & F64_FRAC_MASK;
+
+    // NaN／inf（[`add_f64_bits`] と同一）。
+    if ea == F64_EXP_MASK || eb == F64_EXP_MASK {
+        let a_nan = ea == F64_EXP_MASK && fa != 0;
+        let b_nan = eb == F64_EXP_MASK && fb != 0;
+        if a_nan || b_nan {
+            return F64_QNAN;
+        }
+        if ea == F64_EXP_MASK && eb == F64_EXP_MASK {
+            return if sa == sb { a } else { F64_QNAN };
+        }
+        return if ea == F64_EXP_MASK { a } else { b };
+    }
+    // ゼロ（同一）。
+    let a_zero = ea == 0 && fa == 0;
+    let b_zero = eb == 0 && fb == 0;
+    if a_zero && b_zero {
+        return sa & sb;
+    }
+    if a_zero {
+        return b;
+    }
+    if b_zero {
+        return a;
+    }
+
+    let (mut ma, ea_eff) = if ea == 0 {
+        (fa, 1u64)
+    } else {
+        (fa | (1u64 << 52), ea)
+    };
+    let (mut mb, eb_eff) = if eb == 0 {
+        (fb, 1u64)
+    } else {
+        (fb | (1u64 << 52), eb)
+    };
+    let (mut sa, mut sb) = (sa, sb);
+    let (mut ea_eff, mut eb_eff) = (ea_eff, eb_eff);
+    if (ea_eff, ma) < (eb_eff, mb) {
+        core::mem::swap(&mut ma, &mut mb);
+        core::mem::swap(&mut ea_eff, &mut eb_eff);
+        core::mem::swap(&mut sa, &mut sb);
+    }
+    ma <<= 3;
+    mb <<= 3;
+    let d = ea_eff - eb_eff;
+    if d >= 64 {
+        mb = u64::from(mb != 0);
+    } else if d > 0 {
+        let lost = mb & ((1u64 << d) - 1);
+        mb = (mb >> d) | u64::from(lost != 0);
+    }
+
+    let mut e = ea_eff;
+    let mut m;
+    if sa == sb {
+        m = ma + mb;
+        if m >= (1u64 << 56) {
+            let lost = m & 1;
+            m = (m >> 1) | lost;
+            e += 1;
+        }
+    } else {
+        m = ma - mb;
+        if m == 0 {
+            return 0;
+        }
+        let mut sh = clz64(m) as u64;
+        sh = sh.saturating_sub(8);
+        if sh > e - 1 {
+            sh = e - 1;
+        }
+        m <<= sh;
+        e -= sh;
+    }
+
+    // round-to-odd: 丸め落ちする 3 bit（ガード/丸め/sticky）のいずれかが
+    // 立っていれば、結果の最下位 bit を強制的に 1 にする（算術繰り上がり
+    // は行わないため `m` が `2^53` へ達することはない）。
+    let r = m & 7;
+    m >>= 3;
+    if r != 0 {
+        m |= 1;
+    }
+    let exp_field = if m >= (1u64 << 52) { e } else { 0 };
+    if exp_field >= F64_EXP_MASK {
+        return sa | F64_INF;
+    }
+    sa | (exp_field << 52) | (m & F64_FRAC_MASK)
+}
+
 /// `f64 as f32`（最近接偶数丸め・overflow は `±inf`・underflow は f32
 /// subnormal／`±0`）の bit 表現版（NaN は quiet NaN へ正規化）。
 pub fn narrow_f64_bits(bits: u64) -> u32 {
@@ -788,6 +928,28 @@ pub fn sequential_sum_f32_bits<I: IntoIterator<Item = u32>>(xs: I) -> u32 {
 /// [`sequential_sum_f32_bits`] の `f32` 引数版。
 pub fn sequential_sum_f32(xs: &[f32]) -> f32 {
     f32::from_bits(sequential_sum_f32_bits(xs.iter().map(|x| x.to_bits())))
+}
+
+/// `a*b+c`（`f32`）を**単一丸めの FMA**（`f32::mul_add`・CUDA `fmaf` 相当）
+/// として計算する `layer_norm.metal` パス 3（affine）のホスト側逐語モデル
+/// （PR #1671 codex-review 指摘・イシュー #1596）。`ln_f64_widen`・
+/// `ln_f64_mul`・`ln_f64_add_ro`・`ln_f64_narrow`（本モジュールの
+/// [`widen_f32_bits`]・[`mul_f64_bits`]・[`add_f64_bits_round_to_odd`]・
+/// [`narrow_f64_bits`]）と 1 対 1 対応する。
+///
+/// GPU ハードウェアの平坦な `float` 版 `fma()` を使わない理由（subnormal
+/// 入力の flush-to-zero）は `shaders/layer_norm.metal` 冒頭コメント「FMA
+/// 契約」を参照。[`add_f64_bits_round_to_odd`] の doc comment に二重丸め
+/// 回避の数学的根拠（round-to-odd 二重丸め定理）を記載する。
+pub fn fma_f32_bits(a_bits: u32, b_bits: u32, c_bits: u32) -> u32 {
+    let product = mul_f64_bits(widen_f32_bits(a_bits), widen_f32_bits(b_bits));
+    let sum = add_f64_bits_round_to_odd(product, widen_f32_bits(c_bits));
+    narrow_f64_bits(sum)
+}
+
+/// [`fma_f32_bits`] の `f32` 引数版。
+pub fn fma_f32(a: f32, b: f32, c: f32) -> f32 {
+    f32::from_bits(fma_f32_bits(a.to_bits(), b.to_bits(), c.to_bits()))
 }
 
 /// NaN をクラス一致・それ以外を bit 一致で比較する（NaN payload は
@@ -1391,6 +1553,74 @@ mod tests {
             assert!(
                 rel_err < 1e-14,
                 "v={v:e} got={got:e} expected={expected:e} rel_err={rel_err:e}"
+            );
+        }
+    }
+
+    /// PR #1671 codex-review 指摘の反例（イシュー #1596）: `xhat=31/16`・
+    /// `weight=f32::from_bits(0x7f042108)`・`bias=-1` で、素朴な「`f64`
+    /// へ丸めてから `f32` へ narrow する」二段階丸めは `+inf` を返すが、
+    /// ハードウェア FMA（`f32::mul_add`）は `f32::MAX`（有限）を返す。
+    /// [`fma_f32_bits`]（round-to-odd 経由の単一丸め）が `f32::mul_add`
+    /// と bit 完全一致することを確認する（本関数が本 PR の是正そのもの
+    /// を検証する回帰テスト）。
+    #[test]
+    fn fma_matches_hardware_mul_add_for_codex_review_overflow_boundary_case() {
+        let xhat = 31.0f32 / 16.0;
+        let w = f32::from_bits(0x7f042108);
+        let b = -1.0f32;
+
+        let expected = xhat.mul_add(w, b);
+        assert_eq!(
+            expected.to_bits(),
+            f32::MAX.to_bits(),
+            "反例の前提（ハードウェア fma が f32::MAX を返す）が崩れている: {expected:e}"
+        );
+
+        let got_bits = fma_f32_bits(xhat.to_bits(), w.to_bits(), b.to_bits());
+        assert_eq!(
+            got_bits,
+            expected.to_bits(),
+            "fma_f32_bits が f32::mul_add と bit 不一致: got={:e} expected={:e}",
+            f32::from_bits(got_bits),
+            expected
+        );
+
+        // 素朴な二段階丸め（`add_f64_bits` で `f64` へ丸めてから
+        // `narrow_f64_bits` で `f32` へ丸める）が実際に `+inf` へ壊れる
+        // ことも合わせて確認し、round-to-odd（`add_f64_bits_round_to_odd`）
+        // が必須である根拠を残す（このテストが green のまま
+        // `add_f64_bits_round_to_odd` を `add_f64_bits` へ差し戻すと
+        // この assert が fail するため回帰を検知できる）。
+        let product = mul_f64_bits(widen_f32_bits(xhat.to_bits()), widen_f32_bits(w.to_bits()));
+        let naive_two_step = narrow_f64_bits(add_f64_bits(product, widen_f32_bits(b.to_bits())));
+        assert!(
+            f32::from_bits(naive_two_step).is_infinite(),
+            "二段階丸めが有限値を返すようになった場合、この反例は本テストの \
+             回帰検知として機能しなくなっている（前提の再確認が必要）: {:e}",
+            f32::from_bits(naive_two_step)
+        );
+    }
+
+    /// [`fma_f32_bits`] がランダムな `f32` 3 つ組（`NaN`／`inf`／subnormal
+    /// を含む）に対し、ハードウェア `f32::mul_add`（本ホスト参照実装が
+    /// `f32::mul_add` を使う唯一の理由はテスト時の比較対象としてであり、
+    /// 本番の Metal 側ではこの関数〈のホスト逐語モデル〉を使う。
+    /// `.claude/rules/coding-rust.md` の FMA 契約）と bit 完全一致
+    /// （NaN はクラス一致）することを網羅的に検証する。
+    #[test]
+    fn fma_matches_hardware_mul_add_for_random_triples() {
+        let mut rng = Rng(0x1357_9BDF_2468_ACE0);
+        for i in 0..2_000_000u32 {
+            let a = f32::from_bits(rng.f32_bits());
+            let b = f32::from_bits(rng.f32_bits());
+            let c = f32::from_bits(rng.f32_bits());
+            let expected = a.mul_add(b, c);
+            let got = fma_f32(a, b, c);
+            assert_f32_eq(
+                got.to_bits(),
+                expected,
+                &format!("fma #{i} a={a:e} b={b:e} c={c:e}"),
             );
         }
     }

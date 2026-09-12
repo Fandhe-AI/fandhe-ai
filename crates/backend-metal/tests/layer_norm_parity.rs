@@ -593,6 +593,73 @@ fn layer_norm_tiny_x_huge_eps_stays_finite_and_nonzero() {
     assert_parity("layer_norm tiny_x_huge_eps", &out, &expected);
 }
 
+/// codex-review 指摘の再現ケース（P1・PR #1671 2 回目のラウンド。
+/// イシュー #1596）: `xhat=31/16`・`weight=f32::from_bits(0x7f042108)`・
+/// `bias=-1` のように、affine（`x̂·w+b`）の積と加数の指数が大きく
+/// 乖離する入力では、素朴な「`f64` へ丸めてから `f32` へ narrow する」
+/// 二段階丸めがハードウェア FMA（`f32::mul_add`）と異なる値（`+inf`
+/// 対 有限の `f32::MAX`）を返す（`shaders/layer_norm.metal` 冒頭
+/// コメント「FMA 契約」・パス 3 コメント「affine を round-to-odd で
+/// 計算する理由」参照）。本テストは Metal 出力が「有限であること」・
+/// 「`f32::MAX` と bit 完全一致すること」・「CPU 参照実装
+/// （`fandhe_ai_backend_cpu::run_layer_norm_f32`）の出力と bit 完全
+/// 一致すること」の 3 点を確認する（round-to-odd による単一丸め FMA
+/// 経由でのみ成立する。通常の最近接偶数丸め `ln_f64_add` への回帰は
+/// `out[0]` が `+inf` になることで検知できる）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_affine_overflow_boundary_matches_hardware_fma_not_double_rounding() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    // 平均 0・分散 256（rstd = 1/16）となるよう構成した 16 要素の行
+    // （codex-review 指摘の再現データそのもの）。`xhat[0] = 31/16` が
+    // 丸め無しで厳密に成立する。
+    let x: Vec<f32> = vec![
+        31.0, -31.0, 31.0, -31.0, 11.0, -11.0, 2.0, -2.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    ];
+    let hidden = x.len();
+    let mut w = vec![1.0f32; hidden];
+    w[0] = f32::from_bits(0x7f042108);
+    let mut b = vec![0.0f32; hidden];
+    b[0] = -1.0;
+    let eps = 0.0f32;
+
+    let gpu_out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, Some(&w), Some(&b), eps, 1, hidden)
+        .expect("MetalLayerNorm::run_layer_norm_f32 must succeed on Metal-equipped test runner");
+    let cpu_out = fandhe_ai_backend_cpu::run_layer_norm_f32(&x, Some(&w), Some(&b), eps, 1, hidden)
+        .expect("run_layer_norm_f32 (CPU) must succeed");
+
+    assert!(
+        gpu_out[0].is_finite(),
+        "expected out[0] to be finite (f32::MAX), got {:?} (bits={:#010x})",
+        gpu_out[0],
+        gpu_out[0].to_bits()
+    );
+    assert_eq!(
+        gpu_out[0].to_bits(),
+        f32::MAX.to_bits(),
+        "out[0] は f32::MAX と bit 完全一致するはず（ハードウェア FMA \
+         f32::mul_add の結果）。素朴な二段階丸めへ回帰すると +inf になる: \
+         got={:?}",
+        gpu_out[0]
+    );
+    assert_eq!(
+        gpu_out[0].to_bits(),
+        cpu_out[0].to_bits(),
+        "Metal 出力と CPU 参照実装（run_layer_norm_f32）の out[0] が bit \
+         不一致: metal={:?} cpu={:?}",
+        gpu_out[0],
+        cpu_out[0]
+    );
+
+    // 残りの要素（`weight=1.0`・`bias=0.0` の通常経路）も REQ-2 統一
+    // 複合判定で突き合わせ、境界ケース以外への影響がないことを確認する。
+    let expected = f64_layer_norm_reference(&x, Some(&w), Some(&b), eps, 1, hidden);
+    assert_parity("layer_norm affine_overflow_boundary", &gpu_out, &expected);
+}
+
 /// codex-review 指摘の再現ケース（P1・#1671 スレッド 1 件目）: `hidden`
 /// が `2^24`（`(float)hidden` が丸め無しで表現できる上限）を超える
 /// 軸長は、平均計算の `(float)hidden` 直接変換が最近接偶数丸めで真の
