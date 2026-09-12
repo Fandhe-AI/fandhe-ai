@@ -1874,3 +1874,60 @@ fn rnn_lstm_gru_new_reject_unallocatable_init_capacity_instead_of_panicking() {
     let err = RnnCell::new(huge_input, 1, true, 0).unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }
+
+/// codex-review P1 指摘の回帰テスト（PRRT_kwDOTuUCJc6hyyyK）:
+/// `validate_seq_input` は従来 `[T,B,D]` の rank と `T>0` のみを検査し、
+/// `D`（入力幅）を検証していなかった。`h0`（`Rnn`／`Gru`）・`h0`／`c0`
+/// （`Lstm`）省略時、`forward_seq`／`forward_host` は初期状態として
+/// `Tensor::zeros(&[b_dim, hidden])` を確保するが、この確保は `D` の
+/// 検証より前に走る。`Tensor::new` は shape の要素数積とデータ長の一致
+/// のみを検査するため、`B` だけを極端に大きくし `D=0` にすれば要素数 0
+/// のまま「合法」な `x`（例 `[1, 1usize << 61, 0]`）を構築できてしまい、
+/// `D` 不一致（`self.cell.input_size() != 0`）が本来 shape mismatch で
+/// 拒否すべきところ、それより先に `b_dim * hidden` 要素分の
+/// `vec![0.0; b_dim * hidden]` を確保しようとして capacity overflow で
+/// panic する（本番経路 panic 禁止。`.claude/rules/coding-rust.md`）。
+/// `validate_seq_input` に `expected_input_size` 検証を追加し、初期状態
+/// の確保より前に `D` を検査することで、`Rnn`／`Lstm`／`Gru` の
+/// `forward_seq`／`forward_host` 全 6 経路が panic せず
+/// `AutodiffError::Shape` を返すことを確認する。
+#[test]
+fn forward_seq_and_forward_host_reject_input_width_mismatch_before_zero_state_alloc() {
+    // B だけが極端に大きく D=0 のため要素数 0 のまま合法に構築できる
+    // shape（`input_size=1` で構築したセルとは D が食い違う）。
+    const HUGE_B: usize = 1usize << 61;
+    let d_mismatched_huge_batch = t(Vec::new(), &[1, HUGE_B, 0]);
+
+    let rnn = Rnn::new(1, 1, false, 0).unwrap();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let err = rnn
+        .forward_seq(&tape, &d_mismatched_huge_batch, None)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+    let err = rnn
+        .forward_host(common::naive_ops().as_ref(), &d_mismatched_huge_batch)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+
+    let lstm = Lstm::new(1, 1, false, 0).unwrap();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let err = lstm
+        .forward_seq(&tape, &d_mismatched_huge_batch, None, None)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+    let err = lstm
+        .forward_host(common::naive_ops().as_ref(), &d_mismatched_huge_batch)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+
+    let gru = Gru::new(1, 1, false, 0).unwrap();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let err = gru
+        .forward_seq(&tape, &d_mismatched_huge_batch, None)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+    let err = gru
+        .forward_host(common::naive_ops().as_ref(), &d_mismatched_huge_batch)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+}

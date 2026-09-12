@@ -256,10 +256,25 @@ fn slice_timestep(
     Ok(sliced.reshape(&[b_dim, d_dim])?)
 }
 
-/// `x: [T,B,D]` の rank・`T>0` 検査（`Rnn`／`Lstm`／`Gru` の
-/// `forward_seq`／`forward_host` 共通の入口検査）。
+/// `x: [T,B,D]` の rank・`T>0`・`D`（入力幅）検査（`Rnn`／`Lstm`／`Gru`
+/// の `forward_seq`／`forward_host` 共通の入口検査）。`expected_input_size`
+/// は呼び出し元セルの `input_size()`（`RnnCell`／`LstmCell`／`GruCell`
+/// が構築時に固定した `D`）。
+///
+/// 本番経路 panic 禁止（AGENTS.md・`.claude/rules/coding-rust.md`）:
+/// 呼び出し元（`forward_seq`／`forward_host`）は本関数の直後、初期状態
+/// を省略した場合に `Tensor::zeros(&[b_dim, hidden])` で `[B,H]` の
+/// ゼロテンソルを確保する。`D` を検証しないまま先にこの確保へ進むと、
+/// `B`（バッチ数）だけが極端に大きく `D=0` で要素数 0 の一見「合法」な
+/// `x`（`Tensor::new` は shape 積とデータ長の一致のみ検査するため通る）
+/// を渡された場合、`D` 不一致自体は後段の matmul で検出されるはずが、
+/// それより前に `B*H` 要素分の `vec![0.0; B*H]` を確保しようとして
+/// capacity overflow で panic する（イシュー #1647 codex-review P1
+/// 指摘）。`D` を確保前に検証することで、この経路を型付きエラーへ
+/// 変換する。
 fn validate_seq_input(
     x: &Tensor<f32>,
+    expected_input_size: usize,
     op_name: &str,
 ) -> Result<(usize, usize, usize), AutodiffError> {
     let shape = x.shape();
@@ -274,6 +289,12 @@ fn validate_seq_input(
         return Err(AutodiffError::InvalidArgument(format!(
             "{op_name}: T (sequence length) must be > 0"
         )));
+    }
+    if d_dim != expected_input_size {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: vec![t_len, b_dim, d_dim],
+            rhs: vec![t_len, b_dim, expected_input_size],
+        }));
     }
     Ok((t_len, b_dim, d_dim))
 }
@@ -411,7 +432,15 @@ impl RnnCell {
         })
     }
 
-    /// 明示的な重み・bias から構築する（A03: 計算前に shape を検証する）。
+    /// 外部由来（safetensors ロード等。REQ-7）の重み・bias から構築する
+    /// （A03: 計算前に shape を検証する。`nn::Linear::from_parameters`
+    /// と同じ方針）。
+    ///
+    /// 形状制約（`validate_gate_params` が検査）: `weight_ih: [D, H]`・
+    /// `weight_hh: [H, H]`（ともに rank-2・`D`／`H` は共に `> 0`）。
+    /// `bias_ih`／`bias_hh` は両方 `Some`（各 `[H]`）か両方 `None`（片方
+    /// のみ `Some` は [`AutodiffError::InvalidArgument`]）。shape 不一致
+    /// は [`AutodiffError::Shape`] を返す。
     pub fn from_parameters(
         weight_ih: Tensor<f32>,
         weight_hh: Tensor<f32>,
@@ -433,32 +462,48 @@ impl RnnCell {
         })
     }
 
+    /// 入力幅 `D`（`weight_ih.shape()[0]`）。
     pub fn input_size(&self) -> usize {
         self.weight_ih.shape()[0]
     }
 
+    /// 隠れ状態幅 `H`（`weight_hh.shape()[0]`）。
     pub fn hidden_size(&self) -> usize {
         self.weight_hh.shape()[0]
     }
 
+    /// 入力→隠れ状態の重み（`[D, H]`）。
     pub fn weight_ih(&self) -> &Tensor<f32> {
         &self.weight_ih
     }
 
+    /// 隠れ状態→隠れ状態の重み（`[H, H]`）。
     pub fn weight_hh(&self) -> &Tensor<f32> {
         &self.weight_hh
     }
 
+    /// `weight_ih` に対応する bias（`[H]`。`new`／`from_parameters` の
+    /// `bias` 引数が `false` の場合は `None`）。
     pub fn bias_ih(&self) -> Option<&Tensor<f32>> {
         self.bias_ih.as_ref()
     }
 
+    /// `weight_hh` に対応する bias（`[H]`。`bias_ih` と常に同時に
+    /// `Some`／`None`）。
     pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
         self.bias_hh.as_ref()
     }
 
     /// このステップの `tape` へ重み・bias を葉ノードとして登録する
     /// （`Linear::bind` と同じ per-step 再登録契約。決定 3）。
+    ///
+    /// テープ登録契約: 呼び出しの都度、`weight_ih`／`weight_hh`／
+    /// `bias_ih`／`bias_hh` それぞれについて `tape.var(..)` を新規に
+    /// 呼ぶため、`bind` を呼ぶたびに独立した葉ノードが登録される
+    /// （`self` 自体の状態は変更しない）。`Rnn::forward_seq` は T step
+    /// 間で `bind` を **1 回だけ**呼び、返された [`RnnCellVars`] を
+    /// 使い回すことで重みを共有する（複数回 `bind` すると T step が
+    /// 別々の葉として登録され `Gradients::get` の勾配和が分裂する）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> RnnCellVars<'t> {
         RnnCellVars {
             weight_ih: tape.var(&self.weight_ih),
@@ -558,6 +603,10 @@ pub struct Rnn {
 }
 
 impl Rnn {
+    /// [`RnnCell::new`] を内部で呼び、決定的シード初期化されたセルを
+    /// T step 分共有する `Rnn` を構築する。エラー条件は `RnnCell::new`
+    /// と同じ（`input_size == 0`／`hidden_size == 0` は
+    /// [`AutodiffError::InvalidArgument`]）。
     pub fn new(
         input_size: usize,
         hidden_size: usize,
@@ -569,10 +618,13 @@ impl Rnn {
         })
     }
 
+    /// 既存の [`RnnCell`]（`RnnCell::from_parameters` 等で構築した
+    /// 外部由来パラメータを含む）を包んで `Rnn` にする。
     pub fn from_cell(cell: RnnCell) -> Self {
         Self { cell }
     }
 
+    /// 内部で共有している [`RnnCell`] への参照。
     pub fn cell(&self) -> &RnnCell {
         &self.cell
     }
@@ -587,7 +639,8 @@ impl Rnn {
         x: &Tensor<f32>,
         h0: Option<&Var<'t>>,
     ) -> Result<RnnSeqOutput<'t, RnnCellVars<'t>>, AutodiffError> {
-        let (t_len, b_dim, d_dim) = validate_seq_input(x, "Rnn::forward_seq")?;
+        let (t_len, b_dim, d_dim) =
+            validate_seq_input(x, self.cell.input_size(), "Rnn::forward_seq")?;
         let hidden = self.cell.hidden_size();
         let vars = self.cell.bind(tape);
 
@@ -625,7 +678,8 @@ impl Module for Rnn {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        let (t_len, b_dim, d_dim) = validate_seq_input(input, "Rnn::forward_host")?;
+        let (t_len, b_dim, d_dim) =
+            validate_seq_input(input, self.cell.input_size(), "Rnn::forward_host")?;
         let hidden = self.cell.hidden_size();
         let mut h = Tensor::zeros(&[b_dim, hidden])?;
         let mut outputs = reserve_outputs(t_len, "Rnn::forward_host")?;
@@ -654,6 +708,10 @@ pub struct LstmCell {
 }
 
 impl LstmCell {
+    /// 決定的シードで PyTorch `nn.LSTMCell` 既定と同じ `U(-1/√H, 1/√H)`
+    /// 初期化を行う（ゲート順 `i,f,g,o`。決定 5・12）。
+    /// `input_size == 0`／`hidden_size == 0` は
+    /// [`AutodiffError::InvalidArgument`]（zero-K ガード）。
     pub fn new(
         input_size: usize,
         hidden_size: usize,
@@ -670,6 +728,15 @@ impl LstmCell {
         })
     }
 
+    /// 外部由来（safetensors ロード等。REQ-7）の重み・bias から構築する
+    /// （A03: 計算前に shape を検証する）。
+    ///
+    /// 形状制約（`validate_gate_params` が検査）: `weight_ih: [D, 4H]`・
+    /// `weight_hh: [H, 4H]`（ともに rank-2・`D`／`H` は共に `> 0`。4 は
+    /// ゲート数 `i,f,g,o`）。`bias_ih`／`bias_hh` は両方 `Some`（各
+    /// `[4H]`）か両方 `None`。片方のみ `Some` は
+    /// [`AutodiffError::InvalidArgument`]、shape 不一致は
+    /// [`AutodiffError::Shape`]。
     pub fn from_parameters(
         weight_ih: Tensor<f32>,
         weight_hh: Tensor<f32>,
@@ -691,30 +758,49 @@ impl LstmCell {
         })
     }
 
+    /// 入力幅 `D`（`weight_ih.shape()[0]`）。
     pub fn input_size(&self) -> usize {
         self.weight_ih.shape()[0]
     }
 
+    /// 隠れ状態幅 `H`（`weight_hh.shape()[0]`。`c`（セル状態）も同じ
+    /// `H` を共有する）。
     pub fn hidden_size(&self) -> usize {
         self.weight_hh.shape()[0]
     }
 
+    /// 入力→ゲートの重み（`[D, 4H]`。ゲート順 `i,f,g,o`）。
     pub fn weight_ih(&self) -> &Tensor<f32> {
         &self.weight_ih
     }
 
+    /// 隠れ状態→ゲートの重み（`[H, 4H]`。ゲート順 `i,f,g,o`）。
     pub fn weight_hh(&self) -> &Tensor<f32> {
         &self.weight_hh
     }
 
+    /// `weight_ih` に対応する bias（`[4H]`。`new`／`from_parameters` の
+    /// `bias` 引数が `false` の場合は `None`）。
     pub fn bias_ih(&self) -> Option<&Tensor<f32>> {
         self.bias_ih.as_ref()
     }
 
+    /// `weight_hh` に対応する bias（`[4H]`。`bias_ih` と常に同時に
+    /// `Some`／`None`）。
     pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
         self.bias_hh.as_ref()
     }
 
+    /// このステップの `tape` へ重み・bias を葉ノードとして登録する
+    /// （`RnnCell::bind` と同じ per-step 再登録契約。決定 3）。
+    ///
+    /// テープ登録契約: 呼び出しの都度、`weight_ih`／`weight_hh`／
+    /// `bias_ih`／`bias_hh` それぞれについて `tape.var(..)` を新規に
+    /// 呼ぶため、`bind` を呼ぶたびに独立した葉ノードが登録される。
+    /// `Lstm::forward_seq` は T step 間で `bind` を **1 回だけ**呼び、
+    /// 返された [`LstmCellVars`] を使い回すことで重みを共有する
+    /// （複数回 `bind` すると T step が別々の葉として登録され
+    /// `Gradients::get` の勾配和が分裂する）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> LstmCellVars<'t> {
         LstmCellVars {
             weight_ih: tape.var(&self.weight_ih),
@@ -765,6 +851,7 @@ impl LstmCell {
     }
 }
 
+/// [`LstmCell::bind`] が返す、1 ステップ分のテープに登録済みパラメータ。
 #[derive(Debug)]
 pub struct LstmCellVars<'t> {
     pub weight_ih: Var<'t>,
@@ -814,6 +901,10 @@ pub struct Lstm {
 }
 
 impl Lstm {
+    /// [`LstmCell::new`] を内部で呼び、決定的シード初期化されたセルを
+    /// T step 分共有する `Lstm` を構築する。エラー条件は `LstmCell::new`
+    /// と同じ（`input_size == 0`／`hidden_size == 0` は
+    /// [`AutodiffError::InvalidArgument`]）。
     pub fn new(
         input_size: usize,
         hidden_size: usize,
@@ -825,10 +916,13 @@ impl Lstm {
         })
     }
 
+    /// 既存の [`LstmCell`]（`LstmCell::from_parameters` 等で構築した
+    /// 外部由来パラメータを含む）を包んで `Lstm` にする。
     pub fn from_cell(cell: LstmCell) -> Self {
         Self { cell }
     }
 
+    /// 内部で共有している [`LstmCell`] への参照。
     pub fn cell(&self) -> &LstmCell {
         &self.cell
     }
@@ -841,7 +935,8 @@ impl Lstm {
         h0: Option<&Var<'t>>,
         c0: Option<&Var<'t>>,
     ) -> Result<LstmSeqOutput<'t>, AutodiffError> {
-        let (t_len, b_dim, d_dim) = validate_seq_input(x, "Lstm::forward_seq")?;
+        let (t_len, b_dim, d_dim) =
+            validate_seq_input(x, self.cell.input_size(), "Lstm::forward_seq")?;
         let hidden = self.cell.hidden_size();
         let vars = self.cell.bind(tape);
 
@@ -884,7 +979,8 @@ impl Module for Lstm {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        let (t_len, b_dim, d_dim) = validate_seq_input(input, "Lstm::forward_host")?;
+        let (t_len, b_dim, d_dim) =
+            validate_seq_input(input, self.cell.input_size(), "Lstm::forward_host")?;
         let hidden = self.cell.hidden_size();
         let mut h = Tensor::zeros(&[b_dim, hidden])?;
         let mut c = Tensor::zeros(&[b_dim, hidden])?;
@@ -916,6 +1012,10 @@ pub struct GruCell {
 }
 
 impl GruCell {
+    /// 決定的シードで PyTorch `nn.GRUCell` 既定と同じ `U(-1/√H, 1/√H)`
+    /// 初期化を行う（`reset_after=True` 規約・ゲート順 `r,z,n`。決定
+    /// 5・12）。`input_size == 0`／`hidden_size == 0` は
+    /// [`AutodiffError::InvalidArgument`]（zero-K ガード）。
     pub fn new(
         input_size: usize,
         hidden_size: usize,
@@ -932,6 +1032,15 @@ impl GruCell {
         })
     }
 
+    /// 外部由来（safetensors ロード等。REQ-7）の重み・bias から構築する
+    /// （A03: 計算前に shape を検証する）。
+    ///
+    /// 形状制約（`validate_gate_params` が検査）: `weight_ih: [D, 3H]`・
+    /// `weight_hh: [H, 3H]`（ともに rank-2・`D`／`H` は共に `> 0`。3 は
+    /// `reset_after=True` 規約のゲート数 `r,z,n`）。`bias_ih`／
+    /// `bias_hh` は両方 `Some`（各 `[3H]`）か両方 `None`。片方のみ
+    /// `Some` は [`AutodiffError::InvalidArgument`]、shape 不一致は
+    /// [`AutodiffError::Shape`]。
     pub fn from_parameters(
         weight_ih: Tensor<f32>,
         weight_hh: Tensor<f32>,
@@ -953,30 +1062,51 @@ impl GruCell {
         })
     }
 
+    /// 入力幅 `D`（`weight_ih.shape()[0]`）。
     pub fn input_size(&self) -> usize {
         self.weight_ih.shape()[0]
     }
 
+    /// 隠れ状態幅 `H`（`weight_hh.shape()[0]`）。
     pub fn hidden_size(&self) -> usize {
         self.weight_hh.shape()[0]
     }
 
+    /// 入力→ゲートの重み（`[D, 3H]`。`reset_after=True` 規約のゲート順
+    /// `r,z,n`）。
     pub fn weight_ih(&self) -> &Tensor<f32> {
         &self.weight_ih
     }
 
+    /// 隠れ状態→ゲートの重み（`[H, 3H]`。ゲート順 `r,z,n`）。
     pub fn weight_hh(&self) -> &Tensor<f32> {
         &self.weight_hh
     }
 
+    /// `weight_ih` に対応する bias（`[3H]`。`new`／`from_parameters` の
+    /// `bias` 引数が `false` の場合は `None`）。
     pub fn bias_ih(&self) -> Option<&Tensor<f32>> {
         self.bias_ih.as_ref()
     }
 
+    /// `weight_hh` に対応する bias（`[3H]`。`reset_after=True` 規約では
+    /// `n` ゲートの `weight_hh` 側 bias が `weight_ih` 側と独立に効く
+    /// ため、`RnnCell`／`LstmCell` と異なり常に両方保持する意味がある。
+    /// `bias_ih` と常に同時に `Some`／`None`）。
     pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
         self.bias_hh.as_ref()
     }
 
+    /// このステップの `tape` へ重み・bias を葉ノードとして登録する
+    /// （`RnnCell::bind` と同じ per-step 再登録契約。決定 3）。
+    ///
+    /// テープ登録契約: 呼び出しの都度、`weight_ih`／`weight_hh`／
+    /// `bias_ih`／`bias_hh` それぞれについて `tape.var(..)` を新規に
+    /// 呼ぶため、`bind` を呼ぶたびに独立した葉ノードが登録される。
+    /// `Gru::forward_seq` は T step 間で `bind` を **1 回だけ**呼び、
+    /// 返された [`GruCellVars`] を使い回すことで重みを共有する
+    /// （複数回 `bind` すると T step が別々の葉として登録され
+    /// `Gradients::get` の勾配和が分裂する）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> GruCellVars<'t> {
         GruCellVars {
             weight_ih: tape.var(&self.weight_ih),
@@ -1019,6 +1149,7 @@ impl GruCell {
     }
 }
 
+/// [`GruCell::bind`] が返す、1 ステップ分のテープに登録済みパラメータ。
 #[derive(Debug)]
 pub struct GruCellVars<'t> {
     pub weight_ih: Var<'t>,
@@ -1049,6 +1180,10 @@ pub struct Gru {
 }
 
 impl Gru {
+    /// [`GruCell::new`] を内部で呼び、決定的シード初期化されたセルを
+    /// T step 分共有する `Gru` を構築する。エラー条件は `GruCell::new`
+    /// と同じ（`input_size == 0`／`hidden_size == 0` は
+    /// [`AutodiffError::InvalidArgument`]）。
     pub fn new(
         input_size: usize,
         hidden_size: usize,
@@ -1060,10 +1195,13 @@ impl Gru {
         })
     }
 
+    /// 既存の [`GruCell`]（`GruCell::from_parameters` 等で構築した
+    /// 外部由来パラメータを含む）を包んで `Gru` にする。
     pub fn from_cell(cell: GruCell) -> Self {
         Self { cell }
     }
 
+    /// 内部で共有している [`GruCell`] への参照。
     pub fn cell(&self) -> &GruCell {
         &self.cell
     }
@@ -1075,7 +1213,8 @@ impl Gru {
         x: &Tensor<f32>,
         h0: Option<&Var<'t>>,
     ) -> Result<RnnSeqOutput<'t, GruCellVars<'t>>, AutodiffError> {
-        let (t_len, b_dim, d_dim) = validate_seq_input(x, "Gru::forward_seq")?;
+        let (t_len, b_dim, d_dim) =
+            validate_seq_input(x, self.cell.input_size(), "Gru::forward_seq")?;
         let hidden = self.cell.hidden_size();
         let vars = self.cell.bind(tape);
 
@@ -1108,7 +1247,8 @@ impl Module for Gru {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        let (t_len, b_dim, d_dim) = validate_seq_input(input, "Gru::forward_host")?;
+        let (t_len, b_dim, d_dim) =
+            validate_seq_input(input, self.cell.input_size(), "Gru::forward_host")?;
         let hidden = self.cell.hidden_size();
         let mut h = Tensor::zeros(&[b_dim, hidden])?;
         let mut outputs = reserve_outputs(t_len, "Gru::forward_host")?;
