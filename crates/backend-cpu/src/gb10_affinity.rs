@@ -22,7 +22,7 @@
 //! ことであり、本モジュールはそのための**別系統**の機構を実装する
 //! （[`crate::thread_limit`] の判定・ゲート・キャッシュとは完全に独立
 //! しており、両モジュールが同時に活性化することはない。本モジュールは
-//! 常に既定 OFF・[`GB10_AFFINITY_ENABLED`] 単一 const ゲートで無効化
+//! 常に既定 OFF・`GB10_AFFINITY_ENABLED` 単一 const ゲートで無効化
 //! できる。詳細設計は `docs/backend-cpu-gb10-affinity-design.md`）。
 //!
 //! ## 大コア判定（検出）
@@ -52,7 +52,7 @@
 //!
 //! ### cgroup／cpuset 制約への fail-closed 対応
 //!
-//! `/proc/self/status` の `Cpus_allowed_list:` 行を読み、検出した大コア
+//! `/proc/thread-self/status` の `Cpus_allowed_list:` 行を読み、検出した大コア
 //! CPU-id 集合が allowed 集合の**部分集合**であることを確認する
 //! （`sched_setaffinity` が禁止 CPU に対し `EINVAL` を返すのを待たず、
 //! 事前に安全側へ倒す）。allowed 一覧自体が読めない・parse できない
@@ -78,7 +78,7 @@
 //! を使わない」）。GEMM の数値正しさは専用プールの有無に依存しない
 //! （モジュール doc「正しさ（bit 完全一致）契約」節）ため syscall 失敗
 //! 自体は安全だが、1 スレッドでも pin に失敗した場合は
-//! [`build_affinity_pool`] が専用プール全体を破棄し既存の全コア経路
+//! `build_affinity_pool` が専用プール全体を破棄し既存の全コア経路
 //! （グローバル rayon プール）へフォールバックする（Cursor Bugbot
 //! Medium 指摘。affinity なしの縮小プールを残さない）。
 //!
@@ -87,7 +87,7 @@
 //! `rayon::ThreadPoolBuilder::build_global()` はプロセス全体の既定
 //! プールを差し替え、`backend-cpu` 以外の rayon 利用（[`crate::mse`]
 //! 等）にも影響するため、GEMM 専用の `OnceLock<Option<ThreadPool>>`
-//! （[`affinity_pool`]）を新設し影響範囲を GEMM の並列公開入口 2 関数
+//! （`affinity_pool`）を新設し影響範囲を GEMM の並列公開入口 2 関数
 //! （[`crate::gemm_blis::gemm_blis_parallel_with_transpose`]・
 //! [`crate::gemm_blis::gemm_blis_bias_act_parallel`]）に限定する。
 //! 専用プール（大コア数スレッド）とグローバルプール（全コア数
@@ -153,7 +153,7 @@ pub(crate) fn should_route_to_affinity_pool(m: usize, n: usize, k: usize) -> boo
 /// （2D 動的分配／行パネル分割いずれか）を包むルーティングヘルパ。
 ///
 /// [`should_route_to_affinity_pool`] が対象と判定し、かつ
-/// [`affinity_pool`] が実際にプールを構築できた場合のみ `f` をその
+/// `affinity_pool` が実際にプールを構築できた場合のみ `f` をその
 /// 専用プール上で `install` する。ゲート OFF（既定）・
 /// `RAYON_NUM_THREADS` 明示設定・プラットフォーム判定失敗・
 /// 大形状のいずれでも `f()` を直接呼び出し、現行の global pool 実行と
@@ -218,7 +218,7 @@ fn build_affinity_pool() -> Option<rayon::ThreadPool> {
     // T20 より遅い。モジュール doc 冒頭の表）が示すとおり既存の全コア
     // 経路より遅くなりうる。専用プールを使わず既存の全コア経路
     // （グローバル rayon プール）へフォールバックさせるため `None` を
-    // 返す（呼び出し元 [`affinity_pool`] はこれをキャッシュし、以降
+    // 返す（呼び出し元 `affinity_pool` はこれをキャッシュし、以降
     // 常に `f()` 直呼びへフォールバックする）。
     if pin_ok.len() != ids.len() || pin_ok.iter().any(|&ok| !ok) {
         return None;
@@ -241,18 +241,18 @@ fn env_override_active() -> bool {
 /// 計画「スコープ外」節）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gb10AffinityReport {
-    /// [`GB10_AFFINITY_ENABLED`] の値。
+    /// `GB10_AFFINITY_ENABLED` の値。
     pub enabled: bool,
     /// `RAYON_NUM_THREADS` が有効な正整数として設定されているか。
     pub env_override: bool,
     /// プラットフォーム判定で検出した大コア CPU-id 集合
     /// （判定不能なら `None`）。
     pub detected_big_core_ids: Option<Vec<usize>>,
-    /// 専用 affinity プールが実際に利用可能か（[`affinity_pool`] の
+    /// 専用 affinity プールが実際に利用可能か（`affinity_pool` の
     /// `OnceLock` キャッシュを直接読んだ値。`enabled &&
     /// !env_override && detected_big_core_ids.is_some()` とは**同値
     /// ではない**: 検出が成功していてもスレッド生成失敗・pin 失敗
-    /// （Cursor Bugbot Medium 指摘。[`build_affinity_pool`] 参照）で
+    /// （Cursor Bugbot Medium 指摘。`build_affinity_pool` 参照）で
     /// キャッシュが `None` になりうるため、実際にキャッシュ済み
     /// プールが利用可能かを問う）。
     pub pool_active: bool,
@@ -266,7 +266,7 @@ pub fn gb10_affinity_report() -> Gb10AffinityReport {
     let env_override = env_override_active();
     let detected_big_core_ids = detect_big_core_ids();
     // `pool_active` は本番 GEMM 経路が実際に参照する
-    // [`affinity_pool`] の `OnceLock` キャッシュそのものを読む
+    // `affinity_pool` の `OnceLock` キャッシュそのものを読む
     // （codex P2 是正）。検出（`detect_big_core_ids`）が成功しても
     // `build_affinity_pool` はスレッド生成失敗・pin 失敗（Cursor
     // Bugbot Medium 指摘）を `None` としてキャッシュするため、
@@ -406,7 +406,7 @@ fn big_core_ids_from_sysfs(root: &Path) -> Option<Vec<usize>> {
     if matches { Some(freq_high) } else { None }
 }
 
-/// `/proc/self/status` の `Cpus_allowed_list:` 行（例: `0-19` や
+/// `/proc/thread-self/status` の `Cpus_allowed_list:` 行（例: `0-19` や
 /// `5-9,15-19`）を parse し、許可された CPU-id の集合を返す純関数。
 /// 行が無い・値が parse できない場合は `None`（cgroup／cpuset 制約を
 /// 検証できない以上、安全側〈大コア判定を採用しない〉へ倒すため
@@ -436,7 +436,11 @@ fn parse_cpus_allowed_list(text: &str) -> Option<Vec<usize>> {
     if ids.is_empty() { None } else { Some(ids) }
 }
 
-/// 検出した大コア CPU-id 集合が `/proc/self/status` の
+/// 検出した大コア CPU-id 集合が `/proc/thread-self/status`（プールを
+/// 初期化する呼び出しスレッド自身の affinity。`/proc/self/status` は
+/// メインスレッドの affinity を示すため、GEMM を呼ぶスレッドが別の
+/// CPU 集合へ制限されている構成では検査がすり抜ける／逆に不要な
+/// フォールバックが起きる。codex-review P2・PR #1660）の
 /// `Cpus_allowed_list:` の部分集合であることを確認する。`status_path`
 /// はテスト用 fixture 差し替えのため引数化する。読み取り・parse に
 /// 失敗した場合は制約を検証できないため `false`（安全側。
@@ -455,7 +459,7 @@ fn big_core_ids_within_allowed(big_core_ids: &[usize], status_path: &Path) -> bo
 #[cfg(target_os = "linux")]
 fn detect_big_core_ids() -> Option<Vec<usize>> {
     let big_core_ids = big_core_ids_from_sysfs(Path::new("/sys/devices/system/cpu"))?;
-    if big_core_ids_within_allowed(&big_core_ids, Path::new("/proc/self/status")) {
+    if big_core_ids_within_allowed(&big_core_ids, Path::new("/proc/thread-self/status")) {
         Some(big_core_ids)
     } else {
         None
@@ -471,7 +475,7 @@ fn detect_big_core_ids() -> Option<Vec<usize>> {
 // Affinity 設定（unsafe FFI 境界）
 // ---------------------------------------------------------------------
 
-/// [`build_affinity_pool`]（cfg 非分岐の共通関数）が `ThreadPool::
+/// `build_affinity_pool`（cfg 非分岐の共通関数）が `ThreadPool::
 /// broadcast` の各 worker クロージャから呼ぶプラットフォーム振り分け
 /// 薄いラッパ。Linux では [`affinity_ffi::pin_current_thread_to_cpu`]
 /// へ委譲し、それ以外のプラットフォームでは常に `false`（no-op）を
