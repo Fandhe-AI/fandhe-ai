@@ -37,19 +37,39 @@
 //!   （`tmp=[256,64]` → `d_input=[64,256]`）
 //!
 //! 本ファイルは production の `upload_operand_for_resident_gemm`
-//! （転置 view のゼロコピーアップロード。`ops.rs` 内 private 関数）を
-//! 経由せず、`MetalBuffer::new_with_data` で `g_t` 相当の行優先データを
-//! 直接アップロードする**簡略レプリカ**である（値そのものは無関係な
-//! 乱数。目的は同一形状・同一 dispatch 呼び出し列でのコスト分解であり、
+//! （転置 view のゼロコピーアップロード。`ops.rs` 内 private 関数）
+//! そのものは経由しないが、**その結果として実際に GEMM カーネルへ渡る
+//! `MatrixLayout` は本番と同一にする**（イシュー #1562 codex-review
+//! 是正）。production では `b = g_t = transpose2d(g)`（`g: [r, q]`
+//! 行優先・`g_t: [q, r]`）を `layout::classify_2d` に通すと
+//! `strides == [1, q]`・`sc(=q) >= rows(=q)` により
+//! `MatrixLayout { rows: q, cols: r, ld: q, transposed: true }`
+//! （転置＝strided ロード経路）を返す（`layout.rs:103-110`）。本ファイルは
+//! `g` の物理行優先ストレージ（`[r, q]`）そのものを `MetalBuffer::
+//! new_with_data` で直接アップロードし、`b_layout` を上記と同じ
+//! `{ rows: q, cols: r, ld: q, transposed: true }` に設定することで、
+//! `upload_operand_for_resident_gemm` を経由しない**簡略レプリカ**
+//! ながら、GEMM カーネルが実際に読むロード経路（NT strided）を本番と
+//! 一致させる（値そのものは無関係な乱数。目的は同一形状・同一
+//! ロードパターン・同一 dispatch 呼び出し列でのコスト分解であり、
 //! 数値正しさの検証ではない。`assert_parity` 等の複合判定は行わない）。
 //!
 //! # Variant A（現状相当）・Variant B（回収余地の上限測定）
 //!
 //! - Variant A: `encode_strided_bias_act_prepared`（encode）→
 //!   `ctx.synchronize()`（同期＝GPU 完了待ち）→ `read_to_vec`
-//!   （readback）→ ホスト側転置（`transpose_row_major`）の 4 区間を
+//!   （readback）→ 転置 view 作成（`transpose` 区間）の 4 区間を
 //!   `Instant` で分解する（現状の `dispatch_strided_bias_act_prepared`
-//!   全体に相当）。
+//!   全体に相当）。**転置 view 作成区間は production の
+//!   `d_input = transpose2d(tmp)`（`grad.rs`）と同じ `Tensor::transpose`
+//!   （`tensor-core::tensor.rs:388-406`。`storage` を `Arc::clone` する
+//!   だけの zero-copy stride view）を実際に呼び、戻り値を
+//!   `std::hint::black_box` で消費するだけの O(1) 操作である（旧版は
+//!   ここで `p*r` 要素すべてをコピーする独自ホスト転置
+//!   `transpose_row_major` を計測しており、production のコストを
+//!   過大に見積もっていた。イシュー #1562 codex-review 是正。回収余地の
+//!   本体は GEMM 本体＋同期＋readback であり、転置 view 作成自体は
+//!   計測誤差レベルの寄与しかない）。
 //! - Variant B: `encode_strided_bias_act_prepared` のみを計測し、
 //!   同期・readback を計測窓の外に出す（次 trial への影響を避けるため
 //!   計測外で `ctx.synchronize()` する）。`(Variant A の
@@ -60,8 +80,15 @@
 //! （`crates/autodiff`・`crates/backend-metal/src/{ops,grad}.rs` 等）は
 //! 変更しない（記録専用・non-gating）。
 //!
+//! **同一 GPU 資源競合の回避（イシュー #1562 codex-review 是正）**:
+//! 本ファイルの 2 テスト（L1・L2）はそれぞれ独立の `MetalContext::new()`
+//! を持つが、同一物理 GPU を奪い合うと互いの `synchronize()` 計測へ
+//! 資源競合が混入しうる。`cargo test` の既定（マルチスレッド並列実行）
+//! ではなく **`--test-threads=1` で直列化して実行する**（下記コマンド例・
+//! `orchestrate.sh`・README とも統一）。
+//!
 //! ```sh
-//! cargo test -p fandhe-ai-backend-metal --test resident_lhs_dinput_phase_bench -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --test resident_lhs_dinput_phase_bench -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! `internal-diagnostics` feature を有効にすると、Variant A の同期区間を
@@ -72,17 +99,19 @@
 //!
 //! ```sh
 //! cargo test -p fandhe-ai-backend-metal --features internal-diagnostics \
-//!   --test resident_lhs_dinput_phase_bench -- --ignored --nocapture
+//!   --test resident_lhs_dinput_phase_bench -- --ignored --nocapture --test-threads=1
 //! ```
 
 #![cfg(target_os = "macos")]
 
+use std::hint::black_box;
 use std::time::Instant;
 
 use bench_harness::median_q1_q3;
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_metal::layout::MatrixLayout;
 use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm};
+use fandhe_ai_tensor_core::Tensor;
 
 /// パイプライン初回コンパイル・プール未使用（本ファイルは
 /// `alloc_uninit_pooled` を経由しない生成のためプール自体は関与しないが、
@@ -93,21 +122,6 @@ const WARMUP: usize = 5;
 /// 5 回計測中央値方針（`.claude/rules/coding-rust.md`）。
 const TRIALS: usize = 5;
 
-/// `data`（`rows * cols` の行優先データ）を転置した `cols * rows` の
-/// 行優先データを返す。`grad::vjp` の `transpose2d`（`Tensor<f32>` 専用・
-/// autodiff クレート内 private）の簡略ホスト側レプリカ
-/// （`backend-metal` は `autodiff` に依存しないため独自実装する。
-/// 数値定義は同一: `out[c * rows + r] = data[r * cols + c]`）。
-fn transpose_row_major(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; rows * cols];
-    for r in 0..rows {
-        for c in 0..cols {
-            out[c * rows + r] = data[r * cols + c];
-        }
-    }
-    out
-}
-
 /// Variant A（4 区間分解）・Variant B（encode-only）双方の 1 形状分の
 /// 5 回計測中央値を求めて出力する。
 #[allow(clippy::too_many_arguments)]
@@ -116,11 +130,17 @@ fn run_case(label: &str, p: usize, q: usize, r: usize, seed_a: u64, seed_b: u64)
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
     let a_data = Xorshift64Star::new(seed_a).fill_vec(p * q);
-    let b_data = Xorshift64Star::new(seed_b).fill_vec(q * r);
+    // `g_data` は production の `g: [r, q]`（行優先。VJP upstream 勾配）の
+    // 物理ストレージそのものに相当する（`grad.rs` の `g_t = transpose2d(g)`
+    // は zero-copy view のため、物理バッファの内容・要素数は `g` と同一）。
+    // 要素数は `q * r`（`= r * q`）で変わらないが、値の意味づけが
+    // 「NN 配置の `g_t`」から「`g` の物理行優先データ」へ変わる点が
+    // イシュー #1562 codex-review 是正の要点（下記 `b_layout` 参照）。
+    let g_data = Xorshift64Star::new(seed_b).fill_vec(r * q);
     let a_buf =
         MetalBuffer::new_with_data(&ctx, &a_data).expect("A バッファのアップロードに失敗した");
     let b_buf =
-        MetalBuffer::new_with_data(&ctx, &b_data).expect("B バッファのアップロードに失敗した");
+        MetalBuffer::new_with_data(&ctx, &g_data).expect("B バッファのアップロードに失敗した");
     let zero_c = vec![0.0f32; p * r];
 
     let a_layout = MatrixLayout {
@@ -129,11 +149,19 @@ fn run_case(label: &str, p: usize, q: usize, r: usize, seed_a: u64, seed_b: u64)
         ld: q,
         transposed: false,
     };
+    // production が実際に `dispatch_strided_bias_act_prepared` へ渡す
+    // `b_layout` と同一（`layout::classify_2d` が `g_t: [q, r]`・
+    // `strides == [1, q]` を分類した結果。`docs/matmul-vjp-zero-copy-
+    // decision.md` §4.4）。`transposed: false`・`ld: r`（NN 配置）ではなく
+    // `transposed: true`・`ld: q`（strided／転置ロード経路）にすることで、
+    // 本ベンチが実際に本番と同じカーネル内ロードパターンを計測する
+    // （イシュー #1562 codex-review 是正。旧版は NN 配置で計測しており
+    // 本番の NT 配置と異なるロード経路を測っていた）。
     let b_layout = MatrixLayout {
         rows: q,
         cols: r,
-        ld: r,
-        transposed: false,
+        ld: q,
+        transposed: true,
     };
 
     // steady-state 到達（MSL パイプライン初回コンパイルコストの除去）。
@@ -185,13 +213,27 @@ fn run_case(label: &str, p: usize, q: usize, r: usize, seed_a: u64, seed_b: u64)
         let raw = c_buf.read_to_vec();
         readback_secs.push(t_readback.elapsed().as_secs_f64());
 
+        // production の `d_input = transpose2d(tmp)`（`grad.rs`）と同じ
+        // `Tensor::transpose`（zero-copy stride view。`storage` を
+        // `Arc::clone` するだけで要素コピーを行わない）を実際に呼び、
+        // その O(1) 操作自体のコストを計測する（イシュー #1562
+        // codex-review 是正。旧版は `raw` の全要素をコピーする独自の
+        // ホスト転置を計測しており、view 作成のコストを過大評価していた）。
+        // `tmp: [p, r]` 行優先データから `Tensor::new` で構築し
+        // `.transpose(0, 1)` する（`transpose2d` は `Tensor::transpose(0,1)`
+        // への薄い委譲。`grad.rs::transpose2d` 参照）。
         let t_transpose = Instant::now();
-        let transposed = transpose_row_major(&raw, p, r);
+        let tmp_tensor =
+            Tensor::new(raw, &[p, r]).expect("tmp Tensor の構築（p*r 要素）に失敗した");
+        let transposed = tmp_tensor
+            .transpose(0, 1)
+            .expect("transpose2d と同じ 2 軸転置 view 作成に失敗した");
+        black_box(&transposed);
         transpose_secs.push(t_transpose.elapsed().as_secs_f64());
         assert_eq!(
-            transposed.len(),
-            p * r,
-            "transpose_row_major の出力長は入力と一致するはず"
+            transposed.shape(),
+            &[r, p],
+            "transpose view の shape は [r, p] のはず（transpose2d と同一定義）"
         );
     }
 

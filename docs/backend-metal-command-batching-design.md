@@ -831,10 +831,15 @@ synchronize 1 回に集約された。`d_input` の GEMM 同期は依然とし�
   は `Sequential`／`DeviceParamStore::step`／`SequentialVars::
   trainable_grads` のいずれからも読まれない
   （`docs/autodiff-nograd-leaf-dinput-skip-decision.md` §2.2）。すなわち
-  **L1 の `d_input` 計算（GEMM 1 回＋同期 1 回＋転置 2 回＋`g_t` の
-  H2D）は現状 100% 無駄な計算**であり、回収余地としては #1219
+  **L1 の `d_input` 計算（GEMM 1 回＋同期 1 回＋`g_t` の H2D＋readback）
+  は現状 100% 無駄な計算**であり、回収余地としては #1219
   （`requires_grad` 前方伝播による opt-in スキップ。設計確定・未実装）
-  で完全に排除できる候補である。
+  で完全に排除できる候補である（`g_t = transpose2d(g)`・
+  `d_input = transpose2d(tmp)` の 2 回の転置はいずれも `Tensor::
+  transpose` による zero-copy stride view 作成であり計算コストを
+  持たない——「転置 2 回」を計算コストの内訳に含めない。イシュー #1562
+  codex-review 是正。§7.3.2「方針 B」の Variant A/B 分解も同じ理解へ
+  訂正済み）。
 - L2 の `d_input` は L1 の VJP の `upstream`（`g`）になる（多層伝播の
   中継点）。この連鎖は L1 側の ReLU epilogue マスク
   `elementwise_mul_mask`（`grad.rs:567-582`。`dense_vec` で host 配列化
@@ -860,20 +865,64 @@ Linux 実行環境（本エージェント実行環境）には Apple Silicon �
   （`#[ignore]`。`serialize_diagnostic_counter_tests()` 使用）が
   `tape.backward_device_param_store(&loss, store)` の**呼び出し前後
   だけ**でカウンタ差分（encode/command_buffer/wait）と壁時間（5 回
-  計測中央値）を取る。事前登録仮説: `encode_delta=4`（d_input 2 回 +
-  d_weight 2 回）・`command_buffer_delta=wait_delta=2`（d_input 2 回の
-  `gemm_resident_lhs` 由来の `download`。d_weight は #1555 で
-  encode-only 化済みのため寄与しない）。仮説と不一致の場合でも
-  assert では止めず（record only・non-gating）ログへ乖離を残す設計。
+  計測中央値）を取る。**事前登録仮説（イシュー #1562 codex-review 是正
+  後）**: 当初仮説（`encode_delta=4`・`command_buffer_delta=wait_delta=2`。
+  d_input 2 回＋d_weight 2 回のみを勘定）は、backward 区間が
+  `Op::MseLoss` の VJP（`grad.rs`。`ops.mse_loss_backward` → Metal
+  実装 `run_mse_backward_f32` が**それ自身の `ctx.dispatch_sync`
+  （encode + 即時 `synchronize`）を持つ**）から始まる事実を見落として
+  いた（Bugbot 指摘。呼び出し前に `loss.to_tensor().get(&[])` が
+  forward 側のバッチを既に flush・wait 済みのため、backward 開始時点
+  では `slots.open == None` が保証される）。backward の VJP 評価順は
+  ノード生成の逆順（`MseLoss` → `L2 LinearResident` → `L1
+  LinearResident`）であり、各ステップの GPU dispatch を `context.rs`
+  の `encode`（`slots.open.is_none()` のときのみ新規コマンドバッファを
+  生成し `diag_command_buffers` を加算）・`synchronize`（committed
+  バッチを `waitUntilCompleted` し `diag_wait_until_completed` を加算）
+  の契約に沿って机上で追跡すると次のようになる:
+  1. `MseLoss` VJP: `dispatch_sync` → encode #1（新規 cb #1）→
+     synchronize（wait #1、cb #1 を commit・待機して閉じる）
+  2. L2 `d_input`（`gemm_resident_lhs`）: `dispatch_strided_bias_act_
+     prepared` = encode #2（新規 cb #2）→ synchronize（wait #2）
+  3. L2 `d_weight`（encode-only。#1555/#1556）: encode #3（新規 cb #3。
+     同期しないため cb #3 は開いたまま残る）
+  4. L1 `d_input`: encode #4（**cb #3 が開いたままのため新規 cb を
+     開かず同じバッチへ追加**）→ synchronize（wait #3。cb #3 を
+     commit・待機——L2 の `d_weight` と L1 の `d_input` が同一バッチに
+     まとまって待たれる）
+  5. L1 `d_weight`（encode-only）: encode #5（新規 cb #4。窓終了時点
+     では未 commit のまま残り、`diag_command_buffers` は
+     **生成タイミングで加算される**ため本 delta に含まれるが、
+     `wait` はこの窓の外〈SGD update の bias `upload_into` 同期等〉で
+     発生する）
+  この机上トレースに基づく訂正仮説: `encode_delta=5`（上記 #1〜#5）・
+  `command_buffer_delta=4`（cb #1〜#4 の生成）・`wait_delta=3`（wait
+  #1〜#3。cb #4 の wait は窓外）。ただし本追跡は「backward 中の
+  `materialize_fallible`（`pred_val`／`x_val`／ReLU マスク用
+  `out_value`）がいずれも forward 時点でキャッシュ済みの値を返し、
+  新規デバイス同期を伴わない」という前提に立っており、実機での
+  検証は未実施。当初仮説・訂正仮説のいずれも実測との不一致は
+  assert では止めず（record only・non-gating）ログへ乖離を残す設計は
+  不変。
 - **方針 B（`gemm_resident_lhs` 単体の隔離マイクロベンチ）**:
   `crates/backend-metal/tests/resident_lhs_dinput_phase_bench.rs`
   （`#![cfg(target_os = "macos")]`・`#[ignore]`。自前の
   `MetalContext::new()`＋`MetalGemm::new(&ctx)` を使い、プロセスワイド
   singleton の診断カウンタ・共有バッチには影響しない隔離環境）が L1・L2
-  と同じ形状で:
+  と同じ形状で（**`--test-threads=1` で直列実行する**。L1・L2 は独立の
+  `MetalContext::new()` を持つが同一物理 GPU を奪い合うため、既定の
+  マルチスレッド並列実行では互いの `synchronize()` 計測へ資源競合が
+  混入しうる。イシュー #1562 codex-review 是正。`orchestrate.sh`・
+  README・本ファイルの実行例をすべて統一）:
   - Variant A（現状相当）: `encode_strided_bias_act_prepared`（encode）
-    → `ctx.synchronize()`（同期）→ `read_to_vec`（readback）→ ホスト側
-    転置（`transpose_row_major`）の 4 区間を `Instant` で分解する。
+    → `ctx.synchronize()`（同期）→ `read_to_vec`（readback）→ 転置
+    view 作成（production の `d_input = transpose2d(tmp)` と同じ
+    `Tensor::transpose`。`storage` を `Arc::clone` するだけの zero-copy
+    stride view で要素コピーを伴わない）の 4 区間を `Instant` で分解する。
+    戻り値は `std::hint::black_box` で消費する（旧版は全要素をコピーする
+    独自ホスト転置 `transpose_row_major` を計測しており、view 作成の
+    O(1) コストを実データコピーの O(n) コストへ過大に見積もっていた。
+    イシュー #1562 codex-review 是正）。
   - Variant B（回収余地の上限測定）: `encode_strided_bias_act_prepared`
     のみを計測し、同期・readback を計測窓の外に出す（次 trial への
     影響回避のため計測外で drain する）。
@@ -926,10 +975,10 @@ Linux 実行環境（本エージェント実行環境）には Apple Silicon �
 #### 7.3.4 実測記入欄（Mac セッション）
 
 ```
-実行コマンド:
-  cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture mnist_scale_train_reuse_metal_backward_dinput_phase
-  cargo test -p fandhe-ai-backend-metal --release --test resident_lhs_dinput_phase_bench -- --ignored --nocapture
-  cargo test -p fandhe-ai-backend-metal --release --features internal-diagnostics --test resident_lhs_dinput_phase_bench -- --ignored --nocapture
+実行コマンド（`--test-threads=1` で直列化。イシュー #1562 codex-review 是正）:
+  cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture --test-threads=1 mnist_scale_train_reuse_metal_backward_dinput_phase
+  cargo test -p fandhe-ai-backend-metal --release --test resident_lhs_dinput_phase_bench -- --ignored --nocapture --test-threads=1
+  cargo test -p fandhe-ai-backend-metal --release --features internal-diagnostics --test resident_lhs_dinput_phase_bench -- --ignored --nocapture --test-threads=1
 
 backward-only median（5 run 中央値・ms）: 未実測
 encode_delta / command_buffer_delta / wait_delta（trial ごと）: 未実測

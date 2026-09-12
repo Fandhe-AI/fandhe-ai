@@ -25,11 +25,13 @@ sh orchestrate.sh --dry-run
 
 - `backward_phase.log`: 方針 A（`mnist_scale_train_reuse_metal_backward_
   dinput_phase`）の `cargo test -p fandhe-ai --release --test
-  mnist_scale_train_reuse_bench -- --ignored --nocapture
+  mnist_scale_train_reuse_bench -- --ignored --nocapture --test-threads=1
   mnist_scale_train_reuse_metal_backward_dinput_phase` 全出力
 - `resident_lhs_phase.log`: 方針 B（`resident_lhs_dinput_phase_bench`）の
   `cargo test -p fandhe-ai-backend-metal --release --test
-  resident_lhs_dinput_phase_bench -- --ignored --nocapture` 全出力
+  resident_lhs_dinput_phase_bench -- --ignored --nocapture --test-threads=1`
+  全出力（L1・L2 の 2 テストを同一物理 GPU 上での資源競合を避けるため
+  直列実行する。イシュー #1562 codex-review 是正）
 - `resident_lhs_phase_gpu_timestamps.log`: 同上を `--features
   internal-diagnostics` 付きで再実行した出力（`kernel_gpu` 内訳込み）
 - `env_info.txt`: `uname -srm`・`sw_vers`・`rustc -V`・
