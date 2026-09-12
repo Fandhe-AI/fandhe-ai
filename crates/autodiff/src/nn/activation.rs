@@ -12,14 +12,17 @@
 //! 個別に `forward(&self, input: &Var<'t>) -> Var<'t>` を公開する
 //! （trait 統一は Linear・#91 と合わせて #94/#95 側で設計する）。
 //!
-//! スコープは ReLU・Sigmoid・Tanh の 3 種に限定する。Softmax は損失
-//! 関数（CrossEntropy）と密結合のため対象外、GELU 等の追加活性化は
-//! 必要になった時点の後続イシューに委ねる（イシュー #92 実装計画
-//! §2-3）。CrossEntropy（#191・親イシュー #189）は log-softmax → NLL を
-//! 個別オペ合成せず 1 個の融合オペ（`tape::Op::CrossEntropyLoss`）として
-//! 実装したため、独立した Softmax プリミティブは結局追加していない
-//! （`nn/loss.rs` 冒頭 doc 参照）。
+//! 当初のスコープは ReLU・Sigmoid・Tanh の 3 種に限定していた
+//! （CrossEntropy 損失〈#191〉は log-softmax → NLL を個別オペ合成せず
+//! 1 個の融合オペ〈`tape::Op::CrossEntropyLoss`〉として実装したため、
+//! 独立した Softmax プリミティブは当時追加していなかった。`nn/loss.rs`
+//! 冒頭 doc 参照）。イシュー #1594 で既存の行カーネル（`BackendOps::
+//! softmax`／`log_softmax`）へ接続する独立した [`Softmax`]／
+//! [`LogSoftmax`] を追加した（`CrossEntropyLoss` の内部 log-softmax
+//! 〈`eval::softmax_along`〉はこれとは別実装のまま不変）。GELU 等の
+//! さらなる追加活性化は必要になった時点の後続イシューに委ねる。
 
+use crate::error::AutodiffError;
 use crate::var::Var;
 
 /// ReLU（`max(x, 0)`）。`Var::relu` の薄いラッパー。
@@ -49,6 +52,56 @@ pub struct Tanh;
 impl Tanh {
     pub fn forward<'t>(&self, input: &Var<'t>) -> Var<'t> {
         input.tanh()
+    }
+}
+
+/// 行方向 softmax。`Var::softmax(dim)` の薄いラッパー（イシュー
+/// #1594）。`Relu`/`Sigmoid`/`Tanh` と異なり `dim` を保持するフィールド
+/// を持ち、`forward` は `dim` の軸範囲検査（`Var::softmax` 内部）により
+/// `Result` を返す（構造的に失敗しうる）。
+#[derive(Debug, Clone, Copy)]
+pub struct Softmax {
+    dim: usize,
+}
+
+impl Softmax {
+    /// `dim`（softmax を適用する軸）を指定して構築する。
+    pub fn new(dim: usize) -> Self {
+        Self { dim }
+    }
+
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.softmax(self.dim)
+    }
+
+    /// `nn/module.rs::Module::forward_host` の `Softmax` 実装が `dim` を
+    /// 読み出すためのクレート内アクセサ（`dim` フィールド自体は
+    /// カプセル化のため非公開のまま）。
+    pub(crate) fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+/// 行方向 log_softmax。`Var::log_softmax(dim)` の薄いラッパー（イシュー
+/// #1594）。[`Softmax`] と同じ `dim` 保持・fallible 契約。
+#[derive(Debug, Clone, Copy)]
+pub struct LogSoftmax {
+    dim: usize,
+}
+
+impl LogSoftmax {
+    /// `dim`（log_softmax を適用する軸）を指定して構築する。
+    pub fn new(dim: usize) -> Self {
+        Self { dim }
+    }
+
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.log_softmax(self.dim)
+    }
+
+    /// [`Softmax::dim`] と同じ理由のクレート内アクセサ。
+    pub(crate) fn dim(&self) -> usize {
+        self.dim
     }
 }
 
@@ -125,6 +178,63 @@ mod tests {
         // `Tensor` は意図的に `PartialEq` を derive しないため
         // （`tensor-core::Tensor` のドキュメント参照）、稠密化した
         // データ列で値の一致を検証する。
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    #[test]
+    fn softmax_forward_matches_var_softmax() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape
+            .var(&fandhe_ai_tensor_core::Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap());
+        let before = tape.len();
+
+        let via_module = Softmax::new(1).forward(&x).unwrap();
+        let via_var = x.softmax(1).unwrap();
+
+        assert_eq!(
+            tape.len(),
+            before + 2,
+            "forward 呼び出しごとに 1 ノード追記"
+        );
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    #[test]
+    fn softmax_forward_rejects_axis_out_of_range() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
+
+        let result = Softmax::new(5).forward(&x);
+
+        assert!(matches!(
+            result,
+            Err(crate::error::AutodiffError::Shape(
+                fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { axis: 5, rank: 1 }
+            ))
+        ));
+    }
+
+    #[test]
+    fn log_softmax_forward_matches_var_log_softmax() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape
+            .var(&fandhe_ai_tensor_core::Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap());
+        let before = tape.len();
+
+        let via_module = LogSoftmax::new(1).forward(&x).unwrap();
+        let via_var = x.log_softmax(1).unwrap();
+
+        assert_eq!(
+            tape.len(),
+            before + 2,
+            "forward 呼び出しごとに 1 ノード追記"
+        );
         assert_eq!(
             dense_vec(&via_module.to_tensor()),
             dense_vec(&via_var.to_tensor())

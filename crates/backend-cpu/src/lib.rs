@@ -176,5 +176,5 @@ pub use parity::{
     compare, matmul_reference_fma,
 };
 pub use rmsnorm::{RmsNormError, run_rmsnorm_f32};
-pub use softmax::{SoftmaxError, run_softmax_f32};
+pub use softmax::{SoftmaxError, run_log_softmax_f32, run_softmax_f32};
 pub use thread_limit::{ThreadLimitReport, thread_limit_report};

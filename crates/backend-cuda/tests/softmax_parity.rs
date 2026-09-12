@@ -347,3 +347,92 @@ fn softmax_matches_backend_cpu_directly() {
         &cpu_out,
     );
 }
+
+// --- BackendOps::softmax 独立エントリ（イシュー #1594。`run_fused` の
+//     softmax 一致経路〈上記〉とは別の独立 API）---
+
+/// 環境適応スモーク（属性なし。通常 CI で実行）。CUDA 非搭載環境では
+/// `BackendError::CudaUnavailable` を確認して panic しないことのみ
+/// 検証する（`softmax_run_fused_matches_cpu_composed_env_adaptive` と
+/// 同じ分岐パターン）。
+#[test]
+fn backend_ops_softmax_smoke_env_adaptive() {
+    use fandhe_ai_tensor_core::device::BackendError;
+    use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+    let rows = 3usize;
+    let cols = 8usize;
+    let x_data = Xorshift64Star::new(4001).fill_vec(rows * cols);
+    let x = Tensor::new(x_data.clone(), &[rows, cols]).expect("valid tensor");
+
+    let cuda = fandhe_ai_backend_cuda::CudaBackendOps::new(0);
+    match cuda.softmax(&x, 1) {
+        Ok(via_ops) => {
+            let expected = cpu_softmax_reference(&x_data, rows, cols);
+            assert_eq!(via_ops.shape(), &[rows, cols]);
+            fandhe_ai_backend_cpu::parity::assert_parity(
+                "BackendOps::softmax vs cpu naive reference",
+                via_ops.as_slice().expect("contiguous"),
+                &expected,
+            );
+        }
+        Err(BackendError::CudaUnavailable(msg)) => {
+            assert!(!msg.is_empty(), "error detail message must not be empty");
+        }
+        Err(other) => panic!("unexpected error variant for CudaBackendOps::softmax: {other}"),
+    }
+}
+
+/// 非最終軸は `Unsupported`（CUDA 非搭載環境でも軸検査は
+/// `row_softmax_layout` がドライバ非依存で先に行うため、実機なしでも
+/// 検証できる）。
+#[test]
+fn backend_ops_softmax_non_final_axis_is_unsupported() {
+    use fandhe_ai_tensor_core::device::BackendError;
+    use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+    let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("valid tensor");
+    let cuda = fandhe_ai_backend_cuda::CudaBackendOps::new(0);
+    let result = cuda.softmax(&x, 0);
+    assert!(matches!(result, Err(BackendError::Unsupported(_))));
+}
+
+/// `CudaBackendOps::softmax` を `fandhe_ai_backend_cpu::CpuBackendOps::
+/// softmax` と実機で直接 `assert_parity` 突合する（形状網羅）。実機
+/// 必須（`#[ignore]`）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn backend_ops_softmax_matches_cpu_backend_ops_across_shapes() {
+    use fandhe_ai_backend_cpu::CpuBackendOps;
+    use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+    common::parity_baseline::assert_tolerance_constants_pinned();
+
+    let cuda = fandhe_ai_backend_cuda::CudaBackendOps::new(0);
+    let cpu = CpuBackendOps::new();
+
+    let rows_cases: &[usize] = &[1, 3, 17];
+    let cols_cases: &[usize] = &[1, 31, 32, 33, 1024, 4097];
+    let mut seed = 5000u64;
+    for &rows in rows_cases {
+        for &cols in cols_cases {
+            seed += 1;
+            let x_data = Xorshift64Star::new(seed).fill_vec(rows * cols);
+            let x = Tensor::new(x_data, &[rows, cols]).expect("valid tensor");
+
+            let gpu_out = cuda
+                .softmax(&x, 1)
+                .expect("BackendOps::softmax must succeed on CUDA-equipped test runner");
+            let cpu_out = cpu
+                .softmax(&x, 1)
+                .expect("BackendOps::softmax must succeed on CPU");
+
+            assert_eq!(gpu_out.shape(), &[rows, cols]);
+            fandhe_ai_backend_cpu::parity::assert_parity(
+                &format!("BackendOps::softmax cpu-cuda direct parity rows={rows} cols={cols}"),
+                gpu_out.as_slice().expect("contiguous"),
+                cpu_out.as_slice().expect("contiguous"),
+            );
+        }
+    }
+}

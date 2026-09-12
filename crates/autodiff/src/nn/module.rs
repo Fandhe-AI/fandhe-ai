@@ -21,11 +21,13 @@
 
 use crate::error::AutodiffError;
 use crate::eval;
-use crate::nn::activation::{Relu, Sigmoid, Tanh};
+use crate::nn::activation::{LogSoftmax, Relu, Sigmoid, Softmax, Tanh};
 use crate::nn::linear::Linear;
 use crate::tape::Tape;
 use crate::var::Var;
-use fandhe_ai_tensor_core::{BackendError, BackendOps, Tensor, broadcast_shape, matmul_out_shape};
+use fandhe_ai_tensor_core::{
+    BackendError, BackendOps, Tensor, broadcast_shape, matmul_out_shape, reduce_out_shape,
+};
 
 /// `nn` の部品（層・活性化関数）に共通の forward シグネチャ。
 pub trait Module {
@@ -48,8 +50,9 @@ pub trait Module {
     /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
     /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
     /// ない）とする。既定は [`BackendError::Unsupported`] を返す
-    /// fail-safe（本クレート内 4 実装〈`Linear`・`Relu`・`Sigmoid`・
-    /// `Tanh`〉はいずれもこのデフォルトをオーバーライドする。呼び出し元
+    /// fail-safe（本クレート内 6 実装〈`Linear`・`Relu`・`Sigmoid`・
+    /// `Tanh`・`Softmax`・`LogSoftmax`〉はいずれもこのデフォルトを
+    /// オーバーライドする。呼び出し元
     /// が独自の `Module` 実装をこの経路で使う場合、`Unsupported` を
     /// フォールバックの合図として扱うこと）。
     fn forward_host(
@@ -225,6 +228,57 @@ impl Module for Tanh {
     }
 }
 
+/// `Softmax::forward` への委譲（イシュー #1594）。`Relu`/`Sigmoid`/
+/// `Tanh` と異なり `forward` 自体が `dim` の軸範囲検査により失敗しうる
+/// ため（fallible）、`?` で伝播するだけの `Relu` と違い戻り値をそのまま
+/// 返す。
+impl Module for Softmax {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Softmax::forward(self, input)
+    }
+
+    /// `Var::softmax()`（`var.rs`）と同じディスパッチ規律を `tape` 不要
+    /// 経路（`ops` を直接受け取る）で再現する: `dim` を [`reduce_out_shape`]
+    /// で事前検査してから `ops.softmax` を試み、`Unsupported` のときのみ
+    /// `eval::softmax_along` へフォールバックする（`Var::softmax` と
+    /// 同じ判定迂回を作らない規律。`.claude/rules/security.md` A08）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let dim = self.dim();
+        reduce_out_shape(input.shape(), Some(dim))?;
+        match ops.softmax(input, dim) {
+            Ok(v) => Ok(v),
+            Err(BackendError::Unsupported(_)) => Ok(eval::softmax_along(input, dim)),
+            Err(other) => Err(AutodiffError::Backend(other)),
+        }
+    }
+}
+
+/// `LogSoftmax::forward` への委譲（イシュー #1594）。`Softmax` と同じ
+/// fallible 契約・`forward_host` ディスパッチ規律。
+impl Module for LogSoftmax {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        LogSoftmax::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let dim = self.dim();
+        reduce_out_shape(input.shape(), Some(dim))?;
+        match ops.log_softmax(input, dim) {
+            Ok(v) => Ok(v),
+            Err(BackendError::Unsupported(_)) => Ok(eval::log_softmax_along(input, dim)),
+            Err(other) => Err(AutodiffError::Backend(other)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! `Module::forward` が既存の直接呼び出し（`Linear::bind().forward()`・
@@ -290,5 +344,87 @@ mod tests {
             dense_vec(&via_module.to_tensor()),
             dense_vec(&via_direct.to_tensor())
         );
+    }
+
+    #[test]
+    fn softmax_module_forward_matches_direct_forward() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap());
+        let softmax = Softmax::new(1);
+
+        let via_module = <Softmax as Module>::forward(&softmax, &tape, &x).unwrap();
+        let via_direct = softmax.forward(&x).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_direct.to_tensor())
+        );
+    }
+
+    #[test]
+    fn log_softmax_module_forward_matches_direct_forward() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap());
+        let log_softmax = LogSoftmax::new(1);
+
+        let via_module = <LogSoftmax as Module>::forward(&log_softmax, &tape, &x).unwrap();
+        let via_direct = log_softmax.forward(&x).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_direct.to_tensor())
+        );
+    }
+
+    /// `Module::forward_host`（tape 不要経路）と `Module::forward`
+    /// （tape 経路）が同一値を返すことを確認する（`Linear` 等の既存
+    /// 契約と同じ bit-exactness 期待。イシュー #1594）。
+    #[test]
+    fn softmax_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap();
+        let softmax = Softmax::new(1);
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Softmax as Module>::forward(&softmax, &tape, &xv).unwrap();
+
+        let via_host = softmax.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn log_softmax_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap();
+        let log_softmax = LogSoftmax::new(1);
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <LogSoftmax as Module>::forward(&log_softmax, &tape, &xv).unwrap();
+
+        let via_host = log_softmax.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn softmax_forward_host_rejects_axis_out_of_range() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-1.0, 2.0], &[2]).unwrap();
+        let softmax = Softmax::new(5);
+
+        let result = softmax.forward_host(test_ops().as_ref(), &x);
+
+        assert!(matches!(
+            result,
+            Err(AutodiffError::Shape(
+                fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { axis: 5, rank: 1 }
+            ))
+        ));
     }
 }

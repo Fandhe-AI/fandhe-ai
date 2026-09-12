@@ -128,6 +128,23 @@ pub(crate) fn vjp(
             let da = eval::mul(upstream, &factor);
             vec![(a, da)]
         }
+        Op::Softmax { input, dim } => {
+            // d/dx softmax(x) = y ⊙ (g − Σ_dim(g ⊙ y))（`y` = forward
+            // 記録値 `out_value` = softmax(x)。`Exp`/`Sigmoid` と同じ
+            // 「再計算しない」方針）。軸方向の縮約は f64 アキュムレータ
+            // （要素積は f32 で確定してから f64 へ昇格。
+            // `.claude/rules/coding-rust.md`「勾配の長軸縮約は f64
+            // アキュムレータで統一する」）。
+            let da = softmax_vjp_along(out_value, upstream, dim);
+            vec![(input, da)]
+        }
+        Op::LogSoftmax { input, dim } => {
+            // d/dx log_softmax(x) = g − exp(y) ⊙ Σ_dim(g)（`y` = forward
+            // 記録値 `out_value` = log_softmax(x)）。軸方向の縮約
+            // （`Σ_dim(g)`）は f64 アキュムレータ。
+            let da = log_softmax_vjp_along(out_value, upstream, dim);
+            vec![(input, da)]
+        }
         Op::Sum { input, dim } => {
             let input_shape = &nodes[input.0].shape;
             let da = unreduce_broadcast(upstream, input_shape, dim);
@@ -596,6 +613,72 @@ fn sigmoid_grad_factor(out_value: &Tensor<f32>) -> Tensor<f32> {
     let shape = out_value.shape().to_vec();
     let data = dense_vec(out_value);
     let out: Vec<f32> = data.iter().map(|&v| v * (1.0 - v)).collect();
+    build_tensor(out, &shape)
+}
+
+/// `Op::Softmax` の VJP 本体: `dx = y ⊙ (g − Σ_dim(g ⊙ y))`。
+/// `eval::softmax_along`／`log_softmax_along` と同じ「外側（outer）×
+/// 走査軸（axis_len）× 内側（inner）」の 3 段走査（`dim` は forward
+/// 側で範囲検査済みの前提）。`Σ_dim(g ⊙ y)` の要素積は `f32` で確定
+/// してから `f64` へ昇格して蓄積し（`.claude/rules/coding-rust.md`
+/// 「勾配の長軸縮約の要素積は f32 で確定してから f64 へ昇格」）、
+/// 最終書き出しで 1 回だけ `f32` へ downcast する。
+fn softmax_vjp_along(out_value: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+    let shape = out_value.shape().to_vec();
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let y = dense_vec(out_value);
+    let g = dense_vec(upstream);
+    let mut out = vec![0f32; y.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut dot_acc: f64 = 0.0;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                let term = g[idx] * y[idx];
+                dot_acc += term as f64;
+            }
+            let dot = dot_acc as f32;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                out[idx] = y[idx] * (g[idx] - dot);
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::LogSoftmax` の VJP 本体: `dx = g − exp(y) ⊙ Σ_dim(g)`。
+/// `softmax_vjp_along` と同じ 3 段走査・f64 縮約方針（本関数の縮約は
+/// 要素積ではなく単純和のため、`g` の各要素をそのまま `f64` へ昇格して
+/// 蓄積する）。
+fn log_softmax_vjp_along(
+    out_value: &Tensor<f32>,
+    upstream: &Tensor<f32>,
+    axis: usize,
+) -> Tensor<f32> {
+    let shape = out_value.shape().to_vec();
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let y = dense_vec(out_value);
+    let g = dense_vec(upstream);
+    let mut out = vec![0f32; y.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut sum_acc: f64 = 0.0;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                sum_acc += g[idx] as f64;
+            }
+            let sum_g = sum_acc as f32;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                out[idx] = g[idx] - y[idx].exp() * sum_g;
+            }
+        }
+    }
     build_tensor(out, &shape)
 }
 
@@ -1795,6 +1878,162 @@ mod tests {
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
         let expected = cross_entropy_loss_vjp(&logits, &targets, 1, Reduction::Mean, &g);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    // --- Softmax / LogSoftmax（イシュー #1594） ---
+    //
+    // softmax の行和は常に 1（一様重みでは L(x) = Σ softmax(x) が
+    // 定数となり勾配が恒等的に 0 になってしまい検証が空になる）ため、
+    // 射影重み `s` はすべて非一様にする。
+
+    #[test]
+    fn softmax_grad_matches_numeric_dim1() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+
+        let out_value = eval::softmax_along(&x, 1);
+        let da = softmax_vjp_along(&out_value, &s, 1);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::softmax_along(x, 1));
+
+        assert_grad_close("softmax dim1", &da, &num_da);
+    }
+
+    #[test]
+    fn softmax_grad_matches_numeric_dim0() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+
+        let out_value = eval::softmax_along(&x, 0);
+        let da = softmax_vjp_along(&out_value, &s, 0);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::softmax_along(x, 0));
+
+        assert_grad_close("softmax dim0", &da, &num_da);
+    }
+
+    #[test]
+    fn softmax_grad_matches_numeric_3d_middle_axis() {
+        let x = t(
+            &[
+                1.0, -1.0, 2.0, 0.5, -0.5, 1.5, 0.3, -0.2, 1.0, -1.0, 2.0, 0.1,
+            ],
+            &[2, 3, 2],
+        );
+        let s = t(
+            &[
+                1.0, -0.5, 2.0, 0.3, -1.0, 0.7, 0.4, -0.8, 1.2, -0.3, 0.6, -1.5,
+            ],
+            &[2, 3, 2],
+        );
+
+        let out_value = eval::softmax_along(&x, 1);
+        let da = softmax_vjp_along(&out_value, &s, 1);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::softmax_along(x, 1));
+
+        assert_grad_close("softmax 3d middle axis", &da, &num_da);
+    }
+
+    #[test]
+    fn log_softmax_grad_matches_numeric_dim1() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+
+        let out_value = eval::log_softmax_along(&x, 1);
+        let da = log_softmax_vjp_along(&out_value, &s, 1);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::log_softmax_along(x, 1));
+
+        assert_grad_close("log_softmax dim1", &da, &num_da);
+    }
+
+    #[test]
+    fn log_softmax_grad_matches_numeric_dim0() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3], &[2, 3]);
+
+        let out_value = eval::log_softmax_along(&x, 0);
+        let da = log_softmax_vjp_along(&out_value, &s, 0);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::log_softmax_along(x, 0));
+
+        assert_grad_close("log_softmax dim0", &da, &num_da);
+    }
+
+    #[test]
+    fn log_softmax_grad_matches_numeric_3d_middle_axis() {
+        let x = t(
+            &[
+                1.0, -1.0, 2.0, 0.5, -0.5, 1.5, 0.3, -0.2, 1.0, -1.0, 2.0, 0.1,
+            ],
+            &[2, 3, 2],
+        );
+        let s = t(
+            &[
+                1.0, -0.5, 2.0, 0.3, -1.0, 0.7, 0.4, -0.8, 1.2, -0.3, 0.6, -1.5,
+            ],
+            &[2, 3, 2],
+        );
+
+        let out_value = eval::log_softmax_along(&x, 1);
+        let da = log_softmax_vjp_along(&out_value, &s, 1);
+        let num_da = numeric_grad_unary(&x, &s, |x| eval::log_softmax_along(x, 1));
+
+        assert_grad_close("log_softmax 3d middle axis", &da, &num_da);
+    }
+
+    #[test]
+    fn vjp_dispatch_softmax_returns_single_input() {
+        let a = t(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[2, 2]);
+        let out_value = eval::softmax_along(&a, 1);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::Softmax {
+            input: NodeId(0),
+            dim: 1,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = softmax_vjp_along(&out_value, &g, 1);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    #[test]
+    fn vjp_dispatch_log_softmax_returns_single_input() {
+        let a = t(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[2, 2]);
+        let out_value = eval::log_softmax_along(&a, 1);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::LogSoftmax {
+            input: NodeId(0),
+            dim: 1,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = log_softmax_vjp_along(&out_value, &g, 1);
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
     }
 }

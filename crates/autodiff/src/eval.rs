@@ -506,6 +506,42 @@ pub(crate) fn softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
     build_tensor(out, &shape)
 }
 
+/// `axis` に沿った数値安定形 log_softmax（`x − m − ln(Σexp(x−m))`）。
+/// `softmax_along`（直上）と同じ「シフト → exp → 縮約」走査構造を共有
+/// するが、`ln(softmax_along(...))` へ委譲しない（`BackendOps::
+/// log_softmax` doc「`ln(softmax(x))` にしない理由」参照: softmax が
+/// アンダーフローで `0.0` になった要素の `ln(0.0) = -inf` を経由すると
+/// 数値精度を落とすため、解析形で直接計算する）。`pub(crate)`:
+/// `grad.rs` が VJP で・`var.rs` がホストフォールバックで再利用する。
+pub(crate) fn log_softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let data = dense_vec(input);
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut m = f32::NEG_INFINITY;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                m = nan_propagating_max(m, data[idx]);
+            }
+            let mut sum_exp = 0f32;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                sum_exp += (data[idx] - m).exp();
+            }
+            let lse = m + sum_exp.ln();
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                out[idx] = data[idx] - lse;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
 /// CrossEntropy 損失（log-sum-exp 安定化。クラス次元 `class_dim` 指定。
 /// #191・親イシュー #189）。shape 検査（`class_dim` 範囲・targets
 /// shape 一致・targets 添字範囲）は呼び出し元（`var.rs::
