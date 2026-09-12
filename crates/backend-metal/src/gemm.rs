@@ -78,6 +78,13 @@ thread_local! {
     /// 観測できる。
     pub(crate) static BIAS_ACT_FUSED_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
 
+    /// [`MetalGemm::encode_weight_and_bias_grad_with_offsets`] が
+    /// `encode_dispatch_bias_grad_reduce`（bias 勾配縮約）を実際に
+    /// dispatch した回数（イシュー #1566）。`BIAS_ACT_FUSED_LAUNCH_COUNT`
+    /// と同じ設計判断（スレッドローカル化の理由も同一）。`bias` 引数が
+    /// `None` の場合はカウントしない（weight のみのディスパッチ）。
+    pub(crate) static BIAS_GRAD_REDUCE_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
+
     /// [`MetalGemm::dispatch_strided_tiled_prepared`] が実際に呼ばれた回数
     /// （イシュー #1138）。`BIAS_ACT_FUSED_LAUNCH_COUNT` と同じ設計判断
     /// （スレッドローカル化の理由も同一。上記コメント参照）。
@@ -601,6 +608,15 @@ pub struct MetalGemm {
     /// カーネルと異なり `MetalGemm::new_with_gates` 構築時に eager に
     /// 1 回だけ構築する（`pipeline_tiled_bias_act` と同じ設計判断）。
     pipeline_splitk_reduce: objc2::rc::Retained<MtlPipeline>,
+    /// bias 勾配（`Op::LinearResident` の VJP における `g` の行方向和）を
+    /// GPU 側で計算する `gemm_bias_grad_reduce_f32`（イシュー #1566）の
+    /// パイプライン。function constant を持たない単一カーネルのため
+    /// `pipeline_tiled_bias_act`／`pipeline_splitk_reduce` と同じく
+    /// `MetalGemm::new_with_gates` 構築時に eager に 1 回だけ構築する。
+    /// `ops::MetalBackendOps::gemm_fp32_strict_into_with_bias_reduce_
+    /// tracked` の NT/TN encode-only 経路（`Self::
+    /// encode_weight_and_bias_grad_with_offsets`）からのみ参照する。
+    pipeline_bias_grad_reduce: objc2::rc::Retained<MtlPipeline>,
     /// [`Self::dispatch_auto`] が `tile::should_split_k` 判定に基づき
     /// split-K 2 パス経路へ分岐するかどうか（イシュー #1516）。
     /// `swizzle_enabled`/`fine_barrier_enabled`/`unroll_acc_enabled` 等と
@@ -1063,6 +1079,10 @@ impl MetalGemm {
         // ような遅延構築キャッシュを持たない）。
         let pipeline_splitk_reduce =
             pipeline::make_pipeline(ctx.device(), &library, "gemm_splitk_reduce")?;
+        // イシュー #1566: bias 勾配縮約も `pipeline_splitk_reduce` と同じ
+        // 単一カーネル・function constant なしのため eager 構築する。
+        let pipeline_bias_grad_reduce =
+            pipeline::make_pipeline(ctx.device(), &library, "gemm_bias_grad_reduce_f32")?;
         Ok(Self {
             pipeline_naive,
             pipeline_tiled,
@@ -1083,6 +1103,7 @@ impl MetalGemm {
             tile_class_mode,
             tiled_splitk_cache: Mutex::new(HashMap::new()),
             pipeline_splitk_reduce,
+            pipeline_bias_grad_reduce,
             split_k_auto_enabled,
         })
     }
@@ -3370,6 +3391,145 @@ impl MetalGemm {
         Ok(())
     }
 
+    /// `C = A @ B`（weight 勾配。bias 加算なし）を `out_buf` の
+    /// `weight_offset` へ書き込むのと**同一の `ctx.encode` 呼び出し内**
+    /// で、`bias` が `Some((bias_offset, n))` の場合は `B`（`g`）の行方向和
+    /// （bias 勾配。`crate::layout::MatrixLayout` から得た形状・転置情報を
+    /// 使う）も `out_buf` の `bias_offset` へ同時に書き込む（イシュー
+    /// #1566・`docs/backend-metal-command-batching-design.md` §10
+    /// 「案 A′」）。
+    ///
+    /// `ops::MetalBackendOps::gemm_fp32_strict_into_with_bias_reduce_
+    /// tracked` の NT/TN encode-only 経路からのみ呼ばれる。`encode_
+    /// strided_bias_act_prepared_with_c_offset` を土台に、GEMM epilogue
+    /// の bias 加算（`has_bias`）は常に無効（`0`）のまま `zero_bias` の
+    /// ダミーバッファを渡し（`Self::encode_strided_bias_act_prepared_
+    /// impl` の `bias: None` 分岐と同型）、bias **勾配**（別概念。`g` の
+    /// 縮約）の書き込みを追加ディスパッチとして同じ `encoder`（serial
+    /// `MTLComputeCommandEncoder`）へ積む——`ctx.encode` 呼び出し自体は
+    /// 1 回のため `command_batching_bench` の `encode_calls` は増えない
+    /// （`docs/backend-metal-command-batching-design.md` §10.6「同一
+    /// `ctx.encode()` 呼び出し」要求）。
+    ///
+    /// 戻り値は [`fandhe_ai_tensor_core::backend_ops::BackendOps::
+    /// gemm_fp32_strict_into_with_bias_reduce_tracked`] と同じ契約:
+    /// `bias` が `Some` かつディスパッチが実際に行われた場合のみ
+    /// `Ok(true)`、`bias` が `None` の場合は常に `Ok(false)`（weight は
+    /// 常に成功時 `Ok` で書き込まれる契約は変わらない）。
+    ///
+    /// `token`（`Some` の場合）は本 dispatch を含むバッチが実行時
+    /// エラーになった際に登録される（`encode_strided_bias_act_prepared_
+    /// with_c_offset` doc「同一ロック区間」参照。同じ設計）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn encode_weight_and_bias_grad_with_offsets(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        out_buf: &MetalBuffer,
+        weight_offset: usize,
+        bias: Option<(usize, usize)>,
+        m: usize,
+        n: usize,
+        k: usize,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<bool, MetalError> {
+        let (dims, strides) = validate_strided_dims_impl(
+            a_buf.len(),
+            a_offset,
+            a_layout,
+            b_buf.len(),
+            b_offset,
+            b_layout,
+            out_buf.len(),
+            Some(weight_offset),
+            m,
+            n,
+            k,
+        )?;
+
+        // イシュー #1566: bias 勾配の書き込み範囲は GEMM epilogue の
+        // bias 加算（`validate_strided_dims_impl` が検証する範囲）とは
+        // 無関係な別範囲（同じ `out_buf`＝grad staging 上の bias slot
+        // オフセット）のため、ここで個別に REQ-8・OWASP A03 の手動境界
+        // チェックを行う。
+        if let Some((bias_offset, bn)) = bias {
+            if bn != n {
+                return Err(MetalError::InvalidElementwiseShape {
+                    detail: format!(
+                        "encode_weight_and_bias_grad_with_offsets: bias n ({bn}) does not \
+                         match GEMM n ({n})"
+                    ),
+                });
+            }
+            let end = bias_offset
+                .checked_add(bn)
+                .ok_or(MetalError::DimProductOverflow)?;
+            if end > out_buf.len() {
+                return Err(MetalError::InvalidElementwiseShape {
+                    detail: format!(
+                        "encode_weight_and_bias_grad_with_offsets: bias write range \
+                         [{bias_offset}, {end}) exceeds out buffer length ({})",
+                        out_buf.len()
+                    ),
+                });
+            }
+        }
+
+        // weight 側は「上書き」契約（`gemm_fp32_strict_into` と同一。
+        // GEMM epilogue の bias 加算はしない——`Op::LinearResident` の
+        // d_weight = x_t @ g そのもの）。`encode_dispatch_bias_act` を
+        // `has_bias=0` で呼ぶため、`Self::encode_strided_bias_act_
+        // prepared_impl` の `bias: None` 分岐と同じダミー
+        // `zero_bias`（イシュー #1021: `alloc_zeroed_pooled`）が要る。
+        let zero_bias = MetalBuffer::alloc_zeroed_pooled(ctx, n)?;
+        let bias_written = bias.is_some();
+
+        ctx.encode(
+            "gemm_weight_and_bias_grad",
+            &[a_buf.raw(), b_buf.raw(), zero_bias.raw(), out_buf.raw()],
+            token,
+            |encoder| {
+                encode_dispatch_bias_act(
+                    encoder,
+                    &self.pipeline_tiled_bias_act,
+                    a_buf,
+                    a_offset,
+                    b_buf,
+                    b_offset,
+                    &zero_bias,
+                    0,
+                    out_buf,
+                    weight_offset,
+                    dims,
+                    0, // has_bias: このディスパッチは bias 加算なし
+                    0, // act: activation なし
+                    strides,
+                );
+                if let Some((bias_offset, _)) = bias {
+                    encode_dispatch_bias_grad_reduce(
+                        encoder,
+                        &self.pipeline_bias_grad_reduce,
+                        b_buf,
+                        b_offset,
+                        b_layout,
+                        out_buf,
+                        bias_offset,
+                    );
+                    BIAS_GRAD_REDUCE_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+                }
+            },
+        )?;
+
+        BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+
+        Ok(bias_written)
+    }
+
     /// f16 GEMM（`C = A @ B`。TASK-8.3b・#156）を実行し、結果をホストへ
     /// 読み出す。`gemm_simdgroup_f16`（`shaders/gemm.metal`）のみを対象と
     /// する明示ディスパッチ入口であり、[`Self::dispatch_auto`]／
@@ -3951,6 +4111,29 @@ fn validate_bias_act_dims(
     })
 }
 
+/// `shaders/gemm.metal::gemm_bias_grad_reduce_f32` の
+/// `constant BiasGradReduceParams&` とレイアウトを一致させる
+/// （`repr(C)`・4 × u32 = 16 バイト。イシュー #1566）。オフセットは
+/// 含めない——`a_offset`/`b_offset`（`GemmStrides` 系）と異なり、
+/// `encode_dispatch_bias_grad_reduce` は既存 `encode_dispatch_bias_act`
+/// と同じく `setBuffer:offset:atIndex:`（バイトオフセット）でバッファ
+/// 側を切り出すため、カーネル内で二重にオフセット演算をしない
+/// （advisor 指摘: params とバイトオフセットを併用すると二重適用の
+/// バグを生みやすい）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BiasGradReduceParams {
+    /// 縮約対象の行数（`g: [m, n]` の `m`。`b_layout.rows`）。
+    m: u32,
+    /// 出力列数（`g` の `n`。`b_layout.cols`）。
+    n: u32,
+    /// `g` の leading dimension（`crate::layout::MatrixLayout::ld`）。
+    b_ld: u32,
+    /// `g` が転置 view か（`crate::layout::MatrixLayout::transposed`。
+    /// 0/1）。
+    b_transposed: u32,
+}
+
 /// [`MetalGemm::dispatch_strided_bias_act_prepared`] 専用の検証
 /// （イシュー #1040）。`validate_bias_act_dims`（全体バッファ =
 /// `m*k`/`k*n` を前提とする密行優先専用の検証）と異なり、
@@ -4498,10 +4681,12 @@ fn encode_dispatch_bias_act(
         // イシュー #1040: `shaders/gemm.metal::gemm_tiled_bias_act` の
         // `constant GemmStrides& st [[buffer(7)]]` に対応する。この
         // `setBytes` を追加したことで buffer index 7 は
-        // `gemm_tiled_bias_act` を起動する全経路（本関数のみ）で必須と
-        // なった——本関数は唯一のディスパッチ入口であり、他のパイプライン
-        // 構築・エンコードコードパスは存在しない（`grep -rn
-        // 'gemm_tiled_bias_act\b'` で確認済み）。
+        // `gemm_tiled_bias_act` を起動する全経路で必須となった——本関数が
+        // 唯一のディスパッチ入口である点は変わらない（イシュー #1566で
+        // `MetalGemm::encode_weight_and_bias_grad_with_offsets` を追加
+        // したが、これも本関数を呼ぶ側であり別のエンコード経路を新設
+        // するものではない。`grep -rn 'gemm_tiled_bias_act\b'` で確認
+        // 済み）。
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&strides).cast(),
             std::mem::size_of::<GemmStrides>(),
@@ -4517,6 +4702,92 @@ fn encode_dispatch_bias_act(
     let threadgroups = MTLSize {
         width: (dims.n as usize).div_ceil(THREADGROUP_SIDE),
         height: (dims.m as usize).div_ceil(THREADGROUP_SIDE),
+        depth: 1,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// bias 勾配（`Op::LinearResident` の VJP における `g` の行方向和）を
+/// 計算する `gemm_bias_grad_reduce_f32`（イシュー #1566）用のパイプ
+/// ライン設定・バッファ結線・ディスパッチ。[`MetalGemm::
+/// encode_weight_and_bias_grad_with_offsets`] が `encode_dispatch_
+/// bias_act`（weight 書き込み）と**同じ `encoder`**（同一 `ctx.encode`
+/// クロージャ内・serial `MTLComputeCommandEncoder`）へ追加ディスパッチ
+/// する——`gemm_splitk_reduce` のパス 1→パス 2 と同じ「1 つの encoder に
+/// 複数 `dispatchThreadgroups` を積む」パターン。
+///
+/// `b_buf`（`g`）の論理形状は `b_layout`（`rows == m`・`cols == n`）。
+/// 縮約結果（列ごとの和。長さ `n`）は `out_buf` の `bias_offset` から
+/// 書き込む。走査順序（行 0..m 昇順）は `autodiff::eval::reduce_bias_
+/// grad_rows`（`crate::grad::reduce_to_shape` の rank-2→rank-1 特殊
+/// ケースと同一アルゴリズム）と揃え、蓄積方式も同じ `f64` 逐次加算
+/// （`double` 非対応の Metal では IEEE 754 binary64 加算を 64bit 整数で
+/// ソフトウェアエミュレート。ホスト側逐語モデル `crate::soft_f64`）で
+/// あるため、結果はホスト参照実装と bit 完全一致する契約
+/// （`shaders/gemm.metal::gemm_bias_grad_reduce_f32` 冒頭コメント
+/// 参照）。オフセット（`b_offset`・
+/// `bias_offset`）は要素単位から `size_of::<f32>()` 倍したバイト
+/// オフセットとして `setBuffer:offset:atIndex:` へ渡す（`encode_
+/// dispatch_bias_act` と同じ規約。`BiasGradReduceParams` にオフセットを
+/// 含めない理由は同構造体 doc 参照）。
+fn encode_dispatch_bias_grad_reduce(
+    encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    b_buf: &MetalBuffer,
+    b_offset: usize,
+    b_layout: MatrixLayout,
+    out_buf: &MetalBuffer,
+    bias_offset: usize,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    let params = BiasGradReduceParams {
+        m: b_layout.rows as u32,
+        n: b_layout.cols as u32,
+        b_ld: b_layout.ld as u32,
+        b_transposed: if b_layout.transposed { 1 } else { 0 },
+    };
+
+    // イシュー #1023「R3」と同じ規約: `*_offset` は要素単位のオフセット
+    // であり `setBuffer:offset:atIndex:` はバイト単位を要求するため
+    // `size_of::<f32>()` を掛けて変換する（呼び出し元 `encode_weight_
+    // and_bias_grad_with_offsets` が範囲検査を済ませているため、ここでの
+    // 追加検査は不要）。
+    let b_byte_offset = b_offset * std::mem::size_of::<f32>();
+    let bias_byte_offset = bias_offset * std::mem::size_of::<f32>();
+
+    // SAFETY: FFI 境界 1/2。`encode_dispatch_bias_act` の同種コメントと
+    // 同一の契約（`b_buf`/`out_buf` は `ctx.encode` の同期完了まで
+    // 呼び出し元スタックフレームで生存する）。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), b_byte_offset, 0);
+        encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), bias_byte_offset, 1);
+    }
+    // SAFETY: FFI 境界 2/2。`encode_dispatch_bias_act` の同種コメントと
+    // 同一の契約（`params` はローカル変数、長さは `size_of::
+    // <BiasGradReduceParams>()` と一致し `shaders/gemm.metal::
+    // gemm_bias_grad_reduce_f32` の `constant BiasGradReduceParams&`
+    // 宣言と一致させている）。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&params).cast(),
+            std::mem::size_of::<BiasGradReduceParams>(),
+            2,
+        );
+    }
+
+    // grid は 1 次元（`n` 個の出力列。1 スレッド = 1 列 = 行方向を直列に
+    // 和を取る。REQ-8: `shaders/gemm.metal::gemm_bias_grad_reduce_f32`
+    // 側の手動境界チェック `if (gid >= p.n) { return; }` が端を弾く）。
+    const REDUCE_TG: usize = 64;
+    let threads_per_tg = MTLSize {
+        width: REDUCE_TG,
+        height: 1,
+        depth: 1,
+    };
+    let threadgroups = MTLSize {
+        width: (params.n as usize).div_ceil(REDUCE_TG),
+        height: 1,
         depth: 1,
     };
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);

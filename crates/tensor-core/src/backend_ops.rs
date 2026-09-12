@@ -672,6 +672,90 @@ pub trait BackendOps {
         self.gemm_fp32_strict_into(a, b, out, out_offset)
     }
 
+    /// [`Self::gemm_fp32_strict_into_tracked`] と同じ `C = A @ B` を
+    /// 計算するが、加えて `b`（`Op::LinearResident` の VJP では
+    /// `d_weight = x_t @ g` の `g` そのもの）の**行方向の和**（bias 勾配。
+    /// `autodiff::grad::reduce_to_shape` の rank-2→rank-1 特殊ケースと
+    /// 同型の縮約〈shape の対応は同一だが蓄積方式は下記「# 引数」参照〉）
+    /// を計算できる場合は `out` の別範囲へ同時に書き込むための非破壊
+    /// 拡張（イシュー #1566・`docs/backend-metal-command-batching-
+    /// design.md` §10）。
+    ///
+    /// `docs/perf/train-resident-grad-device-update.md`（#1212）で
+    /// `d_weight` を resident staging へ直接書き込む経路が確立した後も、
+    /// bias 勾配（`Op::LinearResident.bias`）は依然ホスト側
+    /// `reduce_to_shape`（f32 逐次和）で計算し `MemoryOps::upload_into`
+    /// で書き戻していた。この `upload_into` が防御的に呼ぶ
+    /// `MetalContext::synchronize()` が `command_batching_bench` に残る
+    /// 最後の同期点だった（`docs/backend-metal-command-batching-design.md`
+    /// §10「案 A′」）。本メソッドは、既にアップロード済みの `g`
+    /// （d_weight 計算に使う `b` 引数）を再利用して bias 勾配も同一
+    /// ディスパッチ内で encode-only に計算することで、この同期点を
+    /// 削減する経路を提供する。
+    ///
+    /// # 引数
+    ///
+    /// `bias` が `Some((bias_offset, n))` の場合、`out[bias_offset ..
+    /// bias_offset + n]` へ `b` の行方向和（`b: [m, n]` の各列 `j` に
+    /// ついて `sum_{i=0}^{m-1} b[i, j]`。走査順は行 `0..m` 昇順）を書き
+    /// 込む。蓄積方式は `.claude/rules/coding-rust.md` の勾配長軸縮約
+    /// `f64` アキュムレータ方針（2026-09-12 ユーザー承認 A）に従い、
+    /// 実装はホスト `f64` アキュムレータ（`acc: f64 = 0.0` から行 `0..m`
+    /// を昇順に加算し最後に 1 回 `as f32`）、または `double` 非対応の
+    /// Metal では同じ演算列を IEEE 754 binary64 加算の 64bit 整数ソフト
+    /// ウェアエミュレーションで再現するカーネル（`fandhe_ai_backend_
+    /// metal::shaders::gemm_bias_grad_reduce_f32`。逐語モデルは
+    /// `fandhe_ai_backend_metal::soft_f64`）を用いる。いずれも
+    /// `fandhe_ai_backend_metal::layout::reduce_bias_grad_rows_host` と
+    /// **bit 完全一致**する（NaN のみ payload がハードウェア依存のため
+    /// クラス一致。`docs/backend-metal-command-batching-design.md`
+    /// §10.14）。
+    /// `bias_offset + n` は [`Self::gemm_fp32_strict_into`]
+    /// の `out_offset + m*n` と同じ検査規約（`checked_add`・範囲外は
+    /// [`BackendError::InvalidArgument`]。REQ-8・OWASP A03）を適用する。
+    ///
+    /// # 戻り値
+    ///
+    /// `Ok(bias_filled)`: weight（`out[out_offset..]`）は常に書き込まれる
+    /// （成功時）。`bias_filled` は `bias` が `Some` のときに実際に
+    /// `out[bias_offset..]` へも書き込めたかを示す——`bias` が `None` の
+    /// ときは常に `false`。バックエンドが weight のみ対応し bias 縮約を
+    /// 実装しない場合も `bias` を `Some` のまま `Ok(false)` を返してよい
+    /// （呼び出し元はホスト `reduce_to_shape` へフォールバックする。
+    /// weight/bias の対応可否は独立という契約——`autodiff::tape::
+    /// ResidentResolver::fill_resident_weight_grad` doc 参照）。
+    /// `Err`（`Unsupported` 含む）の場合は weight・bias いずれも `out` へ
+    /// 書き込まれていないことを呼び出し元は仮定してよい（`gemm_fp32_
+    /// strict_into` と同じ全体成功/失敗契約）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// `bias` を無視して [`Self::gemm_fp32_strict_into_tracked`]
+    /// （weight のみ）へ委譲し `Ok(false)` を返す（`CpuBackendOps`
+    /// （#1212）・`CudaBackendOps`（既定 `Unsupported` のまま）は本メソッド
+    /// を一切オーバーライドしない＝挙動変更ゼロ）。`backend-metal::ops::
+    /// MetalBackendOps`（#1566）のみオーバーライドし、NT/TN
+    /// （encode-only）経路では同一 `ctx.encode` 呼び出し内で bias 縮約
+    /// も追加ディスパッチし、それ以外（NN/TT・分類不能形状）は
+    /// ホスト経路フォールバック（`gemm_fp32_strict` → `upload_into` に
+    /// 続けて bias もホスト計算 → `upload_into`）で `bias` の有無に
+    /// 関わらず常に成功する（`gemm_fp32_strict_into_impl` の
+    /// `resident_grad_capability` 汚染防止契約を維持する）。
+    #[allow(clippy::too_many_arguments)]
+    fn gemm_fp32_strict_into_with_bias_reduce_tracked(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+        token: &DispatchFailureCell,
+    ) -> Result<bool, BackendError> {
+        let _ = bias;
+        self.gemm_fp32_strict_into_tracked(a, b, out, out_offset, token)?;
+        Ok(false)
+    }
+
     // elementwise（`docs/public-api-design.md` §4.2 と同じ 5 演算）
     fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;
     fn mul(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;

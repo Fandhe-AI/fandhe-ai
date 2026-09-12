@@ -123,8 +123,21 @@ fn resident_grads_to_host_weight_matches_matmul_reference_fma() {
 
 /// `param_grads_to_host`（統合版）の全 slot（weight・bias）が、
 /// host-only 経路（`model.bind` → `tape.backward` →
-/// `bound.trainable_grads`）と bit 完全一致することを検証する（2 層
-/// モデル。`device_param_store_train.rs::build_model` と同型）。
+/// `bound.trainable_grads`）と一致することを検証する（2 層モデル。
+/// `device_param_store_train.rs::build_model` と同型）。
+///
+/// **weight slot・bias slot とも bit 完全一致**（2026-09-12 ユーザー
+/// 承認 A・PR #1659 最終形）: `SequentialVars::forward`（host_model
+/// 側）は次層が `ReLU` の場合のみ `Op::LinearAct` へ融合し、出力層
+/// （次層なし）は非融合の `LinearVars::forward`（`Var::add` =
+/// `Op::Add`）を使う。一方 `forward_resident`（device_model 側）は常に
+/// `linear_forward_with_activation`（`Op::LinearResident`）を使うが、
+/// いずれの経路も bias 縮約は `grad::reduce_bias_grad`（`f64` 逐次和。
+/// `Op::Add` の bias パターンも同関数へ横展開済み）へ統一されており、
+/// Metal の resident 経路（`gemm_bias_grad_reduce_f32`。binary64 加算の
+/// 64bit 整数エミュレーション）もホストと bit 完全一致する契約のため、
+/// 両 slot を bit 比較で検証する（`crates/autodiff/src/grad.rs::
+/// reduce_bias_grad` doc 参照）。
 #[test]
 fn param_grads_to_host_matches_host_only_path_two_layer() {
     let device_model = build_two_layer();
@@ -174,11 +187,43 @@ fn param_grads_to_host_matches_host_only_path_two_layer() {
         .enumerate()
     {
         assert_eq!(d.shape(), h.shape(), "param {i} shape mismatch");
-        assert_eq!(
-            d.contiguous().as_slice().unwrap(),
-            h.contiguous().as_slice().unwrap(),
-            "param_grads_to_host の parameter {i} 勾配が host-only 経路と食い違う"
-        );
+        let d_slice = d.contiguous();
+        let h_slice = h.contiguous();
+        if d.shape().len() == 1 {
+            // bias slot（`Sequential::trainable_parameters` は層順に
+            // weight → bias。weight は rank-2・bias は rank-1 のため
+            // rank で判別する）。host_model 側の出力層は非融合の
+            // `LinearVars::forward`（`Op::Add` の VJP）、device_model 側は
+            // 常に `Op::LinearResident` を経由するが、両者の bias 縮約は
+            // いずれも `grad::reduce_bias_grad`（`f64` 逐次和。`Op::Add`
+            // への横展開は PR #1659）に統一されており、Metal の resident
+            // 経路（`gemm_bias_grad_reduce_f32`。binary64 加算の 64bit
+            // 整数エミュレーション）もホストと bit 完全一致する契約の
+            // ため、weight と同じく bit 完全一致で検証する（`+0.0`／
+            // `-0.0` を区別するため `to_bits` 比較）。
+            let d_bits: Vec<u32> = d_slice
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            let h_bits: Vec<u32> = h_slice
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            assert_eq!(
+                d_bits, h_bits,
+                "param_grads_to_host の parameter {i}（bias）勾配が host-only 経路と bit 単位で食い違う"
+            );
+        } else {
+            assert_eq!(
+                d_slice.as_slice().unwrap(),
+                h_slice.as_slice().unwrap(),
+                "param_grads_to_host の parameter {i}（weight）勾配が host-only 経路と                  食い違う"
+            );
+        }
     }
 }
 

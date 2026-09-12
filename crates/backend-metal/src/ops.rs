@@ -855,6 +855,205 @@ impl BackendOps for MetalBackendOps {
         self.gemm_fp32_strict_into_impl(a, b, out, out_offset, Some(token))
     }
 
+    /// [`BackendOps::gemm_fp32_strict_into_with_bias_reduce_tracked`] の
+    /// Metal 実装（イシュー #1566・`docs/backend-metal-command-batching-
+    /// design.md` §10「案 A′」）。`gemm_fp32_strict_into_impl` と同じ
+    /// NT/TN 判定条件（`layout::classify_2d` が両方 `Some` かつ
+    /// `transposed` が互いに異なり、かつ両方 `as_view_slice().is_some()`）
+    /// を使うが、bias 縮約も同時に試みる:
+    ///
+    /// - **NT/TN**: `gemm::MetalGemm::encode_weight_and_bias_grad_with_
+    ///   offsets`（**同一 `ctx.encode` 呼び出し**で weight・bias 両方を
+    ///   dispatch する。encode-only・待たない）へ委譲する。
+    /// - **NN/TT・分類不能形状**: `gemm_fp32_strict_into_impl` と同じ
+    ///   理由（`Unsupported` を返さない理由。同メソッド doc 参照）で
+    ///   ホスト経路にフォールバックする。weight は
+    ///   `self.gemm_fp32_strict(a, b)` → `upload_into`（既存と同型）。
+    ///   bias は `b`（`g`）を `contiguous()` してから
+    ///   `layout::reduce_bias_grad_rows_host`（行優先 `[m, n]` として
+    ///   読む。`grad::reduce_to_shape` の rank-2→rank-1 特殊ケースと
+    ///   同一アルゴリズムを独立実装。同関数 doc 参照）で計算し、
+    ///   `upload_into` で `out` の `bias_offset` へ書き込む。この
+    ///   2 回目の `upload_into`（weight に続く）は `docs/backend-metal-
+    ///   command-batching-design.md` §10.2-3「`committed` が空なら
+    ///   `synchronize` は早期リターン」により、NN/TT 経路が既に weight
+    ///   の `upload_into` で同期済みのため事実上 no-op wait であり、
+    ///   新規の恒久的な同期増加にはならない。
+    ///
+    /// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review P1
+    /// 是正）**: `.claude/rules/coding-rust.md` の勾配長軸縮約 `f64`
+    /// アキュムレータ方針に従い、ホスト経路 `reduce_bias_grad_rows_host`
+    /// は `f64` アキュムレータへ統一済み。GPU カーネル
+    /// `gemm_bias_grad_reduce_f32`（`double` 非対応の Metal）は IEEE 754
+    /// binary64 の逐次加算を 64bit 整数演算でソフトウェアエミュレート
+    /// し（ホスト側逐語モデル `crate::soft_f64`）、同じ演算列を辿る。
+    /// このため両経路は bit 完全一致する契約（`docs/backend-metal-
+    /// command-batching-design.md` §10.14・`shaders/gemm.metal::
+    /// gemm_bias_grad_reduce_f32` 冒頭コメント）。
+    #[allow(clippy::too_many_arguments)]
+    fn gemm_fp32_strict_into_with_bias_reduce_tracked(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+        token: &DispatchFailureCell,
+    ) -> Result<bool, BackendError> {
+        if out.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0], a.shape()[1]);
+        let n = b.shape()[1];
+        let _ = out_shape;
+
+        // REQ-8・OWASP A03: weight・bias 双方の書き込み範囲（および両者の
+        // 重複禁止。PR #1659 codex-review P1 是正: 従来は重複を検証して
+        // おらず、weight・bias が同一領域を指すと bias の書き込みが
+        // weight の一部を無言で上書きしていた）をカーネル起動・NT/TN
+        // 判定より前に検証する（`gemm_fp32_strict_into_impl` と同じ順序
+        // 規約）。検証本体（`m * n`／オフセット加算のオーバーフロー・
+        // バッファ範囲超過・weight/bias 範囲重複）は Linux 実行可能な
+        // 単体テストを持つ純関数 `layout::validate_gemm_bias_write_ranges`
+        // に委譲する。
+        layout::validate_gemm_bias_write_ranges(m, n, out_offset, out.numel(), bias)?;
+
+        let layout_pair = match (
+            layout::classify_2d(a.shape(), a.strides()),
+            layout::classify_2d(b.shape(), b.strides()),
+        ) {
+            (Some(la), Some(lb))
+                if la.transposed != lb.transposed
+                    && a.as_view_slice().is_some()
+                    && b.as_view_slice().is_some() =>
+            {
+                Some((la, lb))
+            }
+            _ => None,
+        };
+
+        let Some((la, lb)) = layout_pair else {
+            // NN・TT・分類不能形状: `gemm_fp32_strict_into_impl` の
+            // フォールバックと同じ理由で `Unsupported` を返さず常に
+            // 成功させる（同メソッド doc「`Unsupported` を返さない
+            // 理由」参照）。
+            let result = self.gemm_fp32_strict(a, b)?;
+            let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+            let mem = MetalMemory::from_shared(ctx);
+            mem.upload_into(&result, out, out_offset)?;
+
+            let Some((bias_offset, bn)) = bias else {
+                return Ok(false);
+            };
+            let b_owned = b.contiguous();
+            let b_slice = b_owned.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed(
+                    "gemm_fp32_strict_into_with_bias_reduce_tracked: bias reduce source not \
+                     contiguous after contiguous()"
+                        .into(),
+                )
+            })?;
+            // `contiguous()` 後は行優先密配置（`ld == n`・非転置）のため
+            // `MatrixLayout` を直接構成できる（`layout::classify_2d` を
+            // 経由する必要はない。値は `classify_2d(b.shape(),
+            // b.contiguous().strides())` が返すものと同一）。
+            let contiguous_layout = MatrixLayout {
+                rows: k,
+                cols: n,
+                ld: n,
+                transposed: false,
+            };
+            let contribution = layout::reduce_bias_grad_rows_host(b_slice, &contiguous_layout)?;
+            debug_assert_eq!(contribution.len(), bn);
+            let contribution_tensor =
+                Tensor::new(contribution, &[bn]).map_err(BackendError::ShapeMismatch)?;
+            let ctx2 = context_cache::cached_context().map_err(map_metal_error)?;
+            let mem2 = MetalMemory::from_shared(ctx2);
+            mem2.upload_into(&contribution_tensor, out, bias_offset)?;
+            return Ok(true);
+        };
+
+        // NT/TN: encode-only（`gemm_fp32_strict_into_impl` と同じ
+        // アップロード・ハンドル取得手順。bias 縮約も同一 `ctx.encode`
+        // 呼び出しへ含める）。
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mem = MetalMemory::from_shared(ctx.clone());
+
+        let a_slice = a.as_view_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed(
+                "gemm_fp32_strict_into_with_bias_reduce_tracked: lhs not contiguous".into(),
+            )
+        })?;
+        let a_dev_buf = mem
+            .upload_view(a_slice, a.shape())
+            .map_err(map_metal_error)?;
+        let a_handle = a_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_fp32_strict_into_with_bias_reduce_tracked: lhs buffer has numel > 0 but \
+                 no device allocation"
+                    .into(),
+            ));
+        };
+
+        let b_slice = b.as_view_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed(
+                "gemm_fp32_strict_into_with_bias_reduce_tracked: rhs not contiguous".into(),
+            )
+        })?;
+        let b_dev_buf = mem
+            .upload_view(b_slice, b.shape())
+            .map_err(map_metal_error)?;
+        let b_handle = b_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(b_buf) = b_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_fp32_strict_into_with_bias_reduce_tracked: rhs buffer has numel > 0 but \
+                 no device allocation"
+                    .into(),
+            ));
+        };
+
+        let out_handle = out
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(out_buf) = out_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_fp32_strict_into_with_bias_reduce_tracked: out buffer has numel > 0 but \
+                 no device allocation"
+                    .into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let bias_written = gemm
+            .encode_weight_and_bias_grad_with_offsets(
+                &ctx,
+                a_buf,
+                0,
+                la,
+                b_buf,
+                0,
+                lb,
+                out_buf,
+                out_offset,
+                bias,
+                m,
+                n,
+                k,
+                Some(token),
+            )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        Ok(bias_written)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
     /// `gemm` → `add` → `relu` 合成）を、GEMM epilogue に bias 加算・
     /// activation を融合したカーネル

@@ -130,6 +130,64 @@ pub(crate) fn dense_vec_ref(tensor: &Tensor<f32>) -> Cow<'_, [f32]> {
     }
 }
 
+/// `g: [m, n]`（rank-2）の**行方向の和**（列ごとに `sum_{row=0}^{m-1}
+/// g[row, col]`）を計算し、長さ `n` の `Vec<f32>` を返す（イシュー
+/// #1566）。
+///
+/// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review P1
+/// 是正）**: `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
+/// アキュムレータで統一する」規約（イシュー #1102・PR #1120）に従い、
+/// 各列は `f64` アキュムレータへ `dense_vec` で稠密化した行を `f64` へ
+/// 昇格して蓄積し、最後に 1 回だけ `f32` へ downcast する（単純な `f32`
+/// 逐次 `+=` は `[1e8, 1.0, -1e8]` のような相殺パターンで寄与が丸め
+/// 落ちして消える。回帰テスト `reduce_bias_grad_rows_tests::
+/// preserves_cancelling_contribution_via_f64_accumulator` 参照）。
+/// この変更により `grad::reduce_to_shape(g, &[n])`（同じ縮約を行う
+/// 汎用パス。`f32` 逐次和のまま**変更しない**——weight 勾配・`reduce_
+/// to_shape` 自体の bit 同一契約は本イシューのスコープ外）との bit
+/// 完全一致は失われる（意図的な乖離。両者の使い分けは呼び出し元 doc
+/// 「resident 経路のみ」を参照）。
+///
+/// **`m == 1` の特殊扱い**（PR #1659 codex-review P2 是正。f64 化後も
+/// 不変）: `m == 1` は加算を経由せず入力を直接コピーするため、`f64`
+/// 昇格・downcast のラウンドトリップでも符号付きゼロ（`-0.0`）を保持
+/// する（`f32` → `f64` → `f32` は値を変えない可逆変換）。
+///
+/// `pub(crate)`: `grad.rs`（`Op::LinearResident` の非 resident bias
+/// フォールバック。呼び出しは変更しない——既存の `reduce_to_shape` 経路
+/// を維持し、本関数は resident 経路のみで使う）・`optim::device_store`
+/// （weight tying 発生時の bias 勾配 tie 累積。`ResidentResolver::
+/// fill_resident_weight_grad` doc「bias tie」参照）から呼ばれる。
+///
+/// `g.shape()` が `[m, n]`（rank-2）でない呼び出しは契約違反
+/// （`debug_assert!` で検知。本番経路は空 `Vec` を返す安全側フォール
+/// バックとし panic しない。`.claude/rules/coding-rust.md`「本番経路で
+/// `unwrap()`/`expect()` を使わない」）。
+pub(crate) fn reduce_bias_grad_rows(g: &Tensor<f32>) -> Vec<f32> {
+    let shape = g.shape();
+    if shape.len() != 2 {
+        debug_assert!(
+            false,
+            "reduce_bias_grad_rows: g は rank-2 のはず（契約違反）"
+        );
+        return Vec::new();
+    }
+    let (m, n) = (shape[0], shape[1]);
+    let data = dense_vec(g);
+    if m == 1 {
+        // `reduce_to_shape` は `m == 1` の軸を縮約しないため、直接
+        // コピーして `-0.0` 等の符号付きゼロを保持する（上記 doc 参照）。
+        return data[0..n].to_vec();
+    }
+    let mut acc = vec![0f64; n];
+    for row in 0..m {
+        for (col, a) in acc.iter_mut().enumerate() {
+            *a += f64::from(data[row * n + col]);
+        }
+    }
+    acc.into_iter().map(|v| v as f32).collect()
+}
+
 /// shape とデータ長の一致を型で保証する非 panic 構築（TASK-12.1d・
 /// #164。`docs/fusion-graph-design.md` §2.5「eval.rs 非 panic 化の設計
 /// 方針」）。`Tensor::from_shape_fill`（`tensor-core` 側の総コンスト
@@ -689,6 +747,86 @@ mod dense_vec_ref_tests {
             "非 contiguous な入力は Cow::Owned（dense_vec フォールバック）を返す契約"
         );
         assert_eq!(&*owned, &dense_vec(&transposed)[..]);
+    }
+}
+
+#[cfg(test)]
+mod reduce_bias_grad_rows_tests {
+    use super::*;
+
+    // イシュー #1566・PR #1659 codex-review P1 是正（2026-09-12 ユーザー
+    // 承認 A）: `reduce_bias_grad_rows` は `f64` アキュムレータで列ごと
+    // に蓄積するため、単純な `f32` 逐次 `+=` なら桁落ちで消える寄与
+    // （`1e8 + 1.0 + (-1e8)` の `1.0`）が保持されることを確認する
+    // （`.claude/rules/coding-rust.md` の勾配長軸縮約 f64 方針）。
+    #[test]
+    fn preserves_cancelling_contribution_via_f64_accumulator() {
+        // 列 0: 1e8 + 1.0 + (-1e8) は f32 逐次和だと桁落ちで 1.0 の
+        // 寄与が失われ 0.0 になる（以前の実装の回帰記録は git 履歴
+        // 参照）が、f64 アキュムレータでは 1.0 が正しく残る。
+        let g = Tensor::<f32>::new(vec![1.0e8, 10.0, 1.0, 20.0, -1.0e8, 30.0], &[3, 2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let got = reduce_bias_grad_rows(&g);
+
+        // 参考: 素朴な f32 逐次和では 1.0 の寄与が失われることの確認
+        // （contrast のための計算。got との比較には使わない）。
+        let mut naive_f32_col0 = 0.0f32;
+        naive_f32_col0 += 1.0e8;
+        naive_f32_col0 += 1.0;
+        naive_f32_col0 += -1.0e8;
+        assert_eq!(
+            naive_f32_col0, 0.0,
+            "対照: f32 逐次和では桁落ちにより 1.0 の寄与が失われる"
+        );
+
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0], 1.0,
+            "f64 アキュムレータでは 1e8 + 1.0 + (-1e8) の 1.0 が保持されるはず"
+        );
+        assert_eq!(got[1], 60.0);
+    }
+
+    #[test]
+    fn preserves_negative_zero_and_nan_and_inf() {
+        let g = Tensor::<f32>::new(
+            vec![-0.0, f32::NAN, f32::INFINITY, 1.0, -0.0, f32::NEG_INFINITY],
+            &[3, 2],
+        )
+        .expect("test fixture: shape とデータ長は事前に一致させている");
+        let got = reduce_bias_grad_rows(&g);
+        assert_eq!(got.len(), 2);
+        // row0=[-0.0, NaN]・row1=[+inf, 1.0]・row2=[-0.0, -inf]
+        // （data は row-major: [row0col0, row0col1, row1col0, ...]）。
+        // col0: -0.0 + (+inf) + -0.0 = +inf
+        assert!(got[0].is_infinite() && got[0] > 0.0);
+        // col1: NaN + 1.0 + -inf = NaN（NaN の伝播）
+        assert!(got[1].is_nan());
+    }
+
+    #[test]
+    fn single_row_returns_row_unchanged() {
+        let g = Tensor::<f32>::new(vec![1.5, -2.5, 3.5], &[1, 3])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let got = reduce_bias_grad_rows(&g);
+        assert_eq!(got, vec![1.5f32, -2.5, 3.5]);
+    }
+
+    // PR #1659 codex-review P2 是正の回帰テスト（`reduce_bias_grad_rows`
+    // doc「`m == 1` の特殊扱い」）: `m == 1` の単純な `+=` 版
+    // （`0.0f32 + (-0.0f32) == +0.0f32`）だと符号付きゼロが失われる
+    // ことを直接検知する（`is_sign_negative` で `+0.0`/`-0.0` を区別）。
+    #[test]
+    fn single_row_preserves_negative_zero_sign() {
+        let g = Tensor::<f32>::new(vec![-0.0f32, 0.0f32], &[1, 2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let got = reduce_bias_grad_rows(&g);
+        assert_eq!(got.len(), 2);
+        assert!(
+            got[0].is_sign_negative(),
+            "m == 1 では -0.0 の符号を保持するはず（reduce_to_shape との bit 完全一致契約）"
+        );
+        assert!(!got[1].is_sign_negative());
     }
 }
 

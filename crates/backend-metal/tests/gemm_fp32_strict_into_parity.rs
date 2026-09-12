@@ -9,6 +9,11 @@
 //! フォールバックで成功〈codex-review 指摘・PR #1556〉・デバイス不一致の
 //! 拒否）を検証する。
 //!
+//! **イシュー #1566 追加**: `MetalBackendOps::gemm_fp32_strict_into_
+//! with_bias_reduce_tracked`（bias 勾配も同一ディスパッチで同時に
+//! 計算する拡張版）の bit 完全一致・NaN 事前充填非破壊・境界検査を
+//! 本ファイル末尾のテスト群で検証する。
+//!
 //! Linux CI での型検査（実機なしでもコンパイル可能性を担保）:
 //!
 //! ```sh
@@ -27,7 +32,7 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_metal::MetalBackendOps;
 use fandhe_ai_tensor_core::buffer::MemoryOps;
 use fandhe_ai_tensor_core::device::BackendError;
-use fandhe_ai_tensor_core::{BackendOps, Tensor};
+use fandhe_ai_tensor_core::{BackendOps, DispatchFailureCell, Tensor};
 
 fn random_matrix(seed: u64, len: usize) -> Vec<f32> {
     Xorshift64Star::new(seed).fill_vec(len)
@@ -374,5 +379,253 @@ fn gemm_fp32_strict_into_bit_matches_with_negative_zero_operands() {
         readback_nn_data,
         expected_nn_data,
         "NN フォールバック経路（符号付きゼロ入力）は gemm_fp32_strict と bit 完全一致するはず",
+    );
+}
+
+// === イシュー #1566: gemm_fp32_strict_into_with_bias_reduce_tracked ===
+
+/// NT/TN 経路（同一 `ctx.encode` 呼び出し内で weight・bias を同時に
+/// 書く）で、weight は `gemm_fp32_strict_into` と、bias は
+/// `layout::reduce_bias_grad_rows_host`（ホスト参照実装。`f64` 逐次和）
+/// と、いずれも bit 完全一致することを確認する（GPU カーネルは binary64
+/// 加算を 64bit 整数でエミュレートし同じ演算列を辿る。`docs/backend-metal-
+/// command-batching-design.md` §10.14）。戻り値は `bias` を渡した場合
+/// `Ok(true)` になるはず（`ops::MetalBackendOps::gemm_fp32_strict_into_
+/// with_bias_reduce_tracked` doc「NT/TN」参照）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn gemm_fp32_strict_into_with_bias_reduce_tracked_matches_reference_for_nt_tn() {
+    use fandhe_ai_backend_metal::layout::{MatrixLayout, reduce_bias_grad_rows_host};
+
+    let ops = MetalBackendOps::new();
+    let mem = ops
+        .memory_ops()
+        .expect("Metal MemoryOps must be available on a Metal-equipped test runner");
+    let token = DispatchFailureCell::new();
+
+    for &(batch, d_in, d_out) in &[(4usize, 8usize, 4usize), (37, 65, 33), (64, 129, 96)] {
+        let (x_t, g) = transposed_operand_pair(
+            0x3000 + d_in as u64,
+            0x4000 + d_out as u64,
+            batch,
+            d_in,
+            d_out,
+        );
+
+        let expected_weight = ops
+            .gemm_fp32_strict(&x_t, &g)
+            .expect("gemm_fp32_strict must succeed on a Metal-equipped test runner");
+        let expected_weight_c = expected_weight.contiguous();
+        let expected_weight_data = expected_weight_c.as_slice().unwrap();
+
+        let g_contiguous = g.contiguous();
+        let g_slice = g_contiguous.as_slice().unwrap();
+        let g_layout = MatrixLayout {
+            rows: batch,
+            cols: d_out,
+            ld: d_out,
+            transposed: false,
+        };
+        let expected_bias =
+            reduce_bias_grad_rows_host(g_slice, &g_layout).expect("valid layout/data in test");
+
+        let weight_mn = d_in * d_out;
+        let bias_offset = weight_mn + 2; // gap を空け範囲混同がないことも確認する
+        let total = bias_offset + d_out;
+        let seed = tensor(vec![f32::NAN; total], &[total]);
+        let mut staging = mem.upload(&seed).unwrap();
+
+        let bias_written = ops
+            .gemm_fp32_strict_into_with_bias_reduce_tracked(
+                &x_t,
+                &g,
+                &mut staging,
+                0,
+                Some((bias_offset, d_out)),
+                &token,
+            )
+            .expect("gemm_fp32_strict_into_with_bias_reduce_tracked must succeed for NT/TN");
+        assert!(
+            bias_written,
+            "NT/TN 経路は bias を渡すと常に Ok(true) を返すはず（batch={batch} \
+             d_in={d_in} d_out={d_out}）"
+        );
+
+        let readback = mem.download(&staging).unwrap();
+        let readback_c = readback.contiguous();
+        let readback_data = readback_c.as_slice().unwrap();
+
+        assert_bits_eq(
+            &readback_data[0..weight_mn],
+            expected_weight_data,
+            &format!(
+                "weight 部分は gemm_fp32_strict と bit 完全一致するはず（batch={batch} \
+                 d_in={d_in} d_out={d_out}）"
+            ),
+        );
+        assert!(
+            readback_data[weight_mn..bias_offset]
+                .iter()
+                .all(|v| v.is_nan()),
+            "weight と bias の間の未使用領域（NaN 事前充填）が変更された（batch={batch} \
+             d_in={d_in} d_out={d_out}）"
+        );
+        // bias も GPU カーネル（binary64 逐次加算の 64bit 整数エミュ
+        // レーション）とホスト参照実装（`f64` 逐次和）が同じ演算列を
+        // 辿るため、weight と同じ bit 完全一致契約で検証する
+        // （`crates/backend-metal/src/shaders/gemm.metal::
+        // gemm_bias_grad_reduce_f32` 冒頭コメント参照）。
+        assert_bits_eq(
+            &readback_data[bias_offset..bias_offset + d_out],
+            &expected_bias,
+            &format!(
+                "bias 部分は reduce_bias_grad_rows_host（ホスト参照実装）と bit 完全一致するはず \
+                 （batch={batch} d_in={d_in} d_out={d_out}）"
+            ),
+        );
+    }
+}
+
+/// NN フォールバック経路（`layout::classify_2d` が NT/TN と判定しない
+/// 形状）でも、weight・bias とも成功しホスト参照実装と bit 完全一致する
+/// ことを確認する（`ops::MetalBackendOps::gemm_fp32_strict_into_with_
+/// bias_reduce_tracked` doc「NN/TT・分類不能形状」）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn gemm_fp32_strict_into_with_bias_reduce_tracked_matches_reference_for_nn_fallback() {
+    use fandhe_ai_backend_metal::layout::{MatrixLayout, reduce_bias_grad_rows_host};
+
+    let ops = MetalBackendOps::new();
+    let mem = ops
+        .memory_ops()
+        .expect("Metal MemoryOps must be available on a Metal-equipped test runner");
+    let token = DispatchFailureCell::new();
+
+    let a = tensor(random_matrix(155, 2 * 3), &[2, 3]);
+    let b = tensor(random_matrix(166, 3 * 4), &[3, 4]);
+
+    let expected_weight = ops
+        .gemm_fp32_strict(&a, &b)
+        .expect("gemm_fp32_strict must succeed on a Metal-equipped test runner");
+    let expected_weight_c = expected_weight.contiguous();
+    let expected_weight_data = expected_weight_c.as_slice().unwrap();
+
+    let b_contiguous = b.contiguous();
+    let b_slice = b_contiguous.as_slice().unwrap();
+    let b_layout = MatrixLayout {
+        rows: 3,
+        cols: 4,
+        ld: 4,
+        transposed: false,
+    };
+    let expected_bias =
+        reduce_bias_grad_rows_host(b_slice, &b_layout).expect("valid layout/data in test");
+
+    let weight_mn = 2 * 4;
+    let bias_offset = weight_mn;
+    let total = bias_offset + 4;
+    let seed = tensor(vec![f32::NAN; total], &[total]);
+    let mut staging = mem.upload(&seed).unwrap();
+
+    let bias_written = ops
+        .gemm_fp32_strict_into_with_bias_reduce_tracked(
+            &a,
+            &b,
+            &mut staging,
+            0,
+            Some((bias_offset, 4)),
+            &token,
+        )
+        .expect("gemm_fp32_strict_into_with_bias_reduce_tracked must fall back for NN shapes");
+    assert!(
+        bias_written,
+        "NN フォールバック経路も bias を渡すと Ok(true) を返すはず（常に成功する契約）"
+    );
+
+    let readback = mem.download(&staging).unwrap();
+    let readback_c = readback.contiguous();
+    let readback_data = readback_c.as_slice().unwrap();
+
+    assert_bits_eq(
+        &readback_data[0..weight_mn],
+        expected_weight_data,
+        "NN フォールバック経路の weight は gemm_fp32_strict と bit 完全一致するはず",
+    );
+    assert_bits_eq(
+        &readback_data[bias_offset..bias_offset + 4],
+        &expected_bias,
+        "NN フォールバック経路の bias は reduce_bias_grad_rows_host と bit 完全一致するはず",
+    );
+}
+
+/// `bias` に `None` を渡した場合は既存の `gemm_fp32_strict_into_tracked`
+/// と完全に同じ（weight のみ・`Ok(false)`）ことを確認する
+/// （非破壊拡張契約）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn gemm_fp32_strict_into_with_bias_reduce_tracked_none_bias_matches_weight_only_entry() {
+    let ops = MetalBackendOps::new();
+    let mem = ops
+        .memory_ops()
+        .expect("Metal MemoryOps must be available on a Metal-equipped test runner");
+    let token = DispatchFailureCell::new();
+
+    let (x_t, g) = transposed_operand_pair(0x5000, 0x6000, 4, 8, 4);
+    let mn = 8 * 4;
+
+    let seed_a = tensor(vec![f32::NAN; mn], &[mn]);
+    let mut staging_a = mem.upload(&seed_a).unwrap();
+    ops.gemm_fp32_strict_into_tracked(&x_t, &g, &mut staging_a, 0, &token)
+        .expect("gemm_fp32_strict_into_tracked must succeed");
+
+    let seed_b = tensor(vec![f32::NAN; mn], &[mn]);
+    let mut staging_b = mem.upload(&seed_b).unwrap();
+    let bias_written = ops
+        .gemm_fp32_strict_into_with_bias_reduce_tracked(&x_t, &g, &mut staging_b, 0, None, &token)
+        .expect("gemm_fp32_strict_into_with_bias_reduce_tracked must succeed with bias=None");
+    assert!(!bias_written, "bias=None のときは常に Ok(false) のはず");
+
+    let readback_a = mem.download(&staging_a).unwrap();
+    let readback_a_c = readback_a.contiguous();
+    let readback_b = mem.download(&staging_b).unwrap();
+    let readback_b_c = readback_b.contiguous();
+    assert_bits_eq(
+        readback_b_c.as_slice().unwrap(),
+        readback_a_c.as_slice().unwrap(),
+        "bias=None の場合、gemm_fp32_strict_into_with_bias_reduce_tracked は \
+         gemm_fp32_strict_into_tracked と bit 完全一致するはず",
+    );
+}
+
+/// bias の書き込み範囲が `out` を超える場合は `InvalidArgument` で
+/// 拒否される（REQ-8・OWASP A03。weight 側の範囲検査と同じ規約）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn gemm_fp32_strict_into_with_bias_reduce_tracked_rejects_out_of_range_bias_offset() {
+    let ops = MetalBackendOps::new();
+    let mem = ops
+        .memory_ops()
+        .expect("Metal MemoryOps must be available on a Metal-equipped test runner");
+    let token = DispatchFailureCell::new();
+
+    let (x_t, g) = transposed_operand_pair(0x7000, 0x8000, 2, 2, 2);
+    // weight は 4 要素・bias は 2 要素だが、バッファは weight 分しか
+    // 確保しない（bias_offset=4 は範囲外）。
+    let seed = tensor(vec![0.0f32; 4], &[4]);
+    let mut staging = mem.upload(&seed).unwrap();
+
+    let err = ops
+        .gemm_fp32_strict_into_with_bias_reduce_tracked(
+            &x_t,
+            &g,
+            &mut staging,
+            0,
+            Some((4, 2)),
+            &token,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, BackendError::InvalidArgument(_)),
+        "範囲外の bias_offset は InvalidArgument であるべき: {err:?}"
     );
 }
