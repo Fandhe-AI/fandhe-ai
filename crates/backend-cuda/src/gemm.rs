@@ -5782,6 +5782,23 @@ impl CudaGemm {
         // 参照。
         self.with_driver_call(|| Ok(self.stream.synchronize()?))
     }
+
+    /// `h2d_staging`（イシュー #1585・H2D pinned staging。opt-in・既定
+    /// OFF）の全エントリを破棄し、解放したバイト数を返す
+    /// （[`crate::memory::CudaMemory::release_h2d_staging`] と同一契約の
+    /// `CudaGemm` 版。page-locked メモリ〈`Pinned` 種〉はホスト RAM を
+    /// 固定するため、長時間常駐する `CudaGemm` インスタンスに対しても
+    /// 明示解放手段を提供する必要がある。Cursor Bugbot 指摘: `CudaGemm`
+    /// のインスタンス単位キャッシュには本メソッド追加以前、解放手段が
+    /// 一切存在せず、`CudaMemory::release_h2d_staging` からも到達
+    /// できなかった〈別インスタンスのフィールドのため〉）。フラグ OFF
+    /// でも呼び出し自体は安全（`h2d_staging` が空のまま `0` を返す）。
+    pub fn release_h2d_staging(&self) -> u64 {
+        match self.h2d_staging.lock() {
+            Ok(mut guard) => guard.release_all(),
+            Err(poisoned) => poisoned.into_inner().release_all(),
+        }
+    }
 }
 
 /// `block_dim` に対し `m`/`n` を切り上げ（`div_ceil`）で包含するグリッド

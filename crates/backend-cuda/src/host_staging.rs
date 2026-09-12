@@ -400,11 +400,25 @@ pub(crate) fn put_back(
 // （`HostStagingKind::Pinned` 分岐。D2H 側と共有する既存の唯一の
 // `unsafe` ブロック）を再利用する。
 
-/// H2D pinned staging の opt-in フラグ本体。既定 `false`（従来の
-/// pageable 直接転送経路）。`crate::placement::MANAGED_PLACEMENT_ENABLED`
-/// と同型のプロセスワイド `AtomicBool`（`Ordering::SeqCst`。頻度の低い
+/// H2D pinned staging の既定値の単一情報源（イシュー #1585・codex-review
+/// P2 是正。`docs/backend-metal-splitk-decision.md` §5「定数ゲートの
+/// 撤去（#1547）」で確立した `split_k_runtime::SPLIT_K_DEFAULT_ENABLED`
+/// と同型のパターン）。既定 `false`（従来の pageable 直接転送経路）。
+///
+/// `PINNED_H2D_ENABLED` の初期値をこの定数から seed し、drift ガード
+/// テスト（[`tests::default_h2d_enabled_matches_declared_default`]）は
+/// `set_pinned_h2d_enabled` を一切呼ばずにこの定数自体を直接検査する。
+/// 旧実装は `assert!` の直前で `set_pinned_h2d_enabled(false)` を呼んで
+/// いたため、`static` の初期値そのものが誤って `true` へ差し戻されても
+/// テストが偽陽性で pass してしまい検知できない欠陥があった（codex-
+/// review 指摘）。
+pub(crate) const PINNED_H2D_DEFAULT_ENABLED: bool = false;
+
+/// H2D pinned staging の opt-in フラグ本体。[`PINNED_H2D_DEFAULT_ENABLED`]
+/// で初期化するプロセスワイド `AtomicBool`（`crate::placement::
+/// MANAGED_PLACEMENT_ENABLED` と同型。`Ordering::SeqCst`。頻度の低い
 /// 設定変更のため緩い順序による最適化は不要）。
-static PINNED_H2D_ENABLED: AtomicBool = AtomicBool::new(false);
+static PINNED_H2D_ENABLED: AtomicBool = AtomicBool::new(PINNED_H2D_DEFAULT_ENABLED);
 
 /// H2D pinned staging を有効化・無効化する（`facade::
 /// set_cuda_pinned_h2d_enabled` から委譲される。プロセスワイドな設定
@@ -673,14 +687,28 @@ mod h2d_staging_tests {
         }
     }
 
-    /// drift ガード: `PINNED_H2D_ENABLED` の既定が意図せず `true` へ
-    /// 差し戻されていないかを機械的に検知する（opt-in 契約。イシュー
-    /// #1585）。
+    /// drift ガード: `PINNED_H2D_DEFAULT_ENABLED`（`PINNED_H2D_ENABLED`
+    /// の唯一の初期値供給源）の宣言値が意図せず `true` へ差し戻されて
+    /// いないかを機械的に検知する（opt-in 契約。イシュー #1585・
+    /// codex-review P2 是正）。
+    ///
+    /// `set_pinned_h2d_enabled`／`pinned_h2d_enabled` を一切呼ばず定数
+    /// 自体を直接検査する点が旧実装との違い: 旧実装は `assert!` 直前で
+    /// `set_pinned_h2d_enabled(false)` を呼んでいたため、たとえ
+    /// `static` の初期値（コンパイル時定数）が `true` へ書き換えられて
+    /// いても、実行時に明示的な `false` 上書きでテストが偽陽性 pass
+    /// してしまい drift を検知できなかった。本テストは他テストの実行
+    /// 順序・`FlagGuard` の有無に関わらず常に同じ結果になる（プロセス
+    /// グローバルな `AtomicBool` の実行時状態を一切参照しないため）。
     #[test]
-    fn default_is_disabled_when_no_prior_test_left_it_enabled() {
-        let _guard = FlagGuard::acquire();
-        set_pinned_h2d_enabled(false);
-        assert!(!pinned_h2d_enabled());
+    fn default_h2d_enabled_matches_declared_default() {
+        // `std::hint::black_box` は clippy `assertions_on_constants`
+        // （定数評価済みの assert は無意味という lint）を、意図どおり
+        // 「コンパイル時定数の値そのもの」を検査対象にしたまま回避する
+        // （`crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED` の drift
+        // ガードテストと同じ手当て。定数畳み込みを抑止するだけで、
+        // 検査対象の値自体は変えない）。
+        assert!(!std::hint::black_box(PINNED_H2D_DEFAULT_ENABLED));
     }
 
     #[test]
