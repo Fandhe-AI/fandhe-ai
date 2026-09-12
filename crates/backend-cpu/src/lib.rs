@@ -178,5 +178,5 @@ pub use parity::{
 };
 pub use rmsnorm::{RmsNormError, run_rmsnorm_f32};
 pub use small_shape_thread_cap::{SmallShapeCapReport, small_shape_cap_report};
-pub use softmax::{SoftmaxError, run_softmax_f32};
+pub use softmax::{SoftmaxError, run_log_softmax_f32, run_softmax_f32};
 pub use thread_limit::{ThreadLimitReport, thread_limit_report};
