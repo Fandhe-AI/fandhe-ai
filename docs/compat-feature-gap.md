@@ -13,7 +13,8 @@
 
 fandhe-ai の公開面は現時点で **MLP（全結合＋3 活性化＋MSE/CrossEntropy 損失＋SGD/AdamW）専用**の
 薄いラッパーである。テンソルの汎用演算（indexing・slice・cat・stack・任意 elementwise・
-縮約の axis 指定・除算・べき乗等）は `Var`（autodiff 公開型）レベルにすら存在せず、
+縮約の複数軸同時指定・`keepdim`・除算・べき乗等）は `Var`（autodiff 公開型）レベルにすら存在せず
+（単一軸の `dim: Option<usize>` 指定〈`sum`/`max`〉自体はあるが複数軸同時指定・`keepdim` はない）、
 `Tensor<T>`（tensor-core 型）レベルでも shape 変形（transpose/permute/reshape/broadcast/narrow）
 止まりで、CNN・RNN・Attention を組むための演算プリミティブは構造的に欠落している。
 
@@ -278,7 +279,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | 動的テープ・`backward()` | `tf.GradientTape` | あり（`Tape::backward`。動的テープ方式。`Tape::reset` で再利用可能） | - | - |
 | `no_grad()`/`torch.inference_mode()` | `tf.stop_gradient` | なし（テープに載せない選択肢は「別 `Tape` を使わない」設計自体にない。`tape_free` 推論経路〈`Sequential::predict`〉はあるが汎用 `no_grad` コンテキストではない） | 葉ノード登録をスキップする API、または `Var` を「追跡なし」でラップする型 | M |
 | `detach()` | `tf.stop_gradient` | なし | 既存 `Var` から新規葉ノードへ変換する Op | S〜M |
-| `retain_graph=True` | - | なし（テープは 1 回 backward 前提の設計と推定。`Tape::reset` はステップ間再利用だが同一 backward の複数回実行契約は未確認） | 設計判断が必要（複数回 backward の勾配蓄積契約） | M |
+| `retain_graph=True` | - | 該当なし（`Tape::backward` はグラフノード〈`nodes`〉を破棄せず、呼び出しごとに独立した `Gradients` を新規生成するのみで、グラフ保持は既定動作。`retain_graph` フラグ自体が不要な設計。ただし PyTorch の `.grad` 蓄積〈複数回 `backward()` の勾配加算〉に相当する契約は無く、同一 loss に対する複数回 `backward()` の勾配蓄積セマンティクスは未検証） | 設計判断が必要（複数回 backward の勾配蓄積契約） | M |
 | 高階微分（`grad of grad`） | `tf.GradientTape` のネスト | なし（テープは 1 階のみを前提とした構造と推定） | Op 自体を微分可能にする再設計（VJP の VJP）。設計から要検討 | XL |
 | custom `autograd.Function` | `tf.custom_gradient` | なし（`Op` enum は crate 非公開の固定 variant 集合。ユーザー定義 Op を挿す口がない） | 拡張可能な Op プラグイン機構の設計（現行のクローズドな `Op` enum 設計を変更） | XL |
 | `torch.utils.checkpoint`（activation checkpointing） | `tf.recompute_grad` | 部分（view 系ノード〈reshape/transpose〉は #1080 で再計算方式化済みだが、任意サブグラフの再計算チェックポイントではない） | 汎用チェックポイント機構の設計 | L |

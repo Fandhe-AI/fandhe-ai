@@ -789,7 +789,7 @@ diff --git a/crates/backend-cpu/src/mse.rs b/crates/backend-cpu/src/mse.rs
 index 185e4fcc..13f111d0 100644
 --- a/crates/backend-cpu/src/mse.rs
 +++ b/crates/backend-cpu/src/mse.rs
-@@ -186,3 +186,89 @@ mod tests {
+@@ -186,3 +186,91 @@ mod tests {
          assert!(matches!(err, BackendError::ShapeMismatch(_)));
      }
  }
@@ -826,25 +826,27 @@ index 185e4fcc..13f111d0 100644
 +        let target: Vec<f32> = (0..N).map(|i| (i as f32) * 0.005 - 1.0).collect();
 +        let scale = 1.0f32 / (N as f32);
 +
-+        // bit 一致確認（(a) と (b) が同じ結果を返すこと）。
-+        let mut d_a = vec![0.0f32; N];
-+        let mut d_b = vec![0.0f32; N];
-+        mse_loss_backward_f32(&pred, &target, scale, &mut d_a).unwrap();
-+        naive_backward(&pred, &target, scale, &mut d_b);
-+        assert_eq!(d_a, d_b, "par_iter_mut 版と逐次版が bit 不一致");
++        // (d) 初回呼び出し（スレッドプール初期化・ワーカー起床を含みうる）
++        // と 2 回目以降を分離して計測する。bit 一致確認・
++        // `rayon::current_num_threads()`（プールを遅延初期化しうる）
++        // より必ず前に置く。
++        let mut dpred = vec![0.0f32; N];
++        let first_start = Instant::now();
++        mse_loss_backward_f32(&pred, &target, scale, &mut dpred).unwrap();
++        let first_ns = first_start.elapsed().as_nanos();
++        eprintln!("[diag] mse_loss_backward_f32 first call = {first_ns} ns");
 +
 +        eprintln!(
 +            "[diag] rayon::current_num_threads() = {}",
 +            rayon::current_num_threads()
 +        );
 +
-+        // (d) 初回呼び出し（スレッドプール初期化・ワーカー起床を含みうる）
-+        // と 2 回目以降を分離して計測する。
-+        let mut dpred = vec![0.0f32; N];
-+        let first_start = Instant::now();
-+        mse_loss_backward_f32(&pred, &target, scale, &mut dpred).unwrap();
-+        let first_ns = first_start.elapsed().as_nanos();
-+        eprintln!("[diag] mse_loss_backward_f32 first call = {first_ns} ns");
++        // bit 一致確認（(a) と (b) が同じ結果を返すこと）。初回計測後。
++        let mut d_a = vec![0.0f32; N];
++        let mut d_b = vec![0.0f32; N];
++        mse_loss_backward_f32(&pred, &target, scale, &mut d_a).unwrap();
++        naive_backward(&pred, &target, scale, &mut d_b);
++        assert_eq!(d_a, d_b, "par_iter_mut 版と逐次版が bit 不一致");
 +
 +        // ウォームアップ（スレッドプールは初回呼び出しで確立済みのはず）。
 +        for _ in 0..50 {
