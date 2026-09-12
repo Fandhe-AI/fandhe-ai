@@ -185,9 +185,14 @@ nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits >"$OUT/nvid
 # 終了コードへ反映する既定契約のため、これを付けない限り
 # checksum 不一致でも性能比が threshold 内なら成功扱いになってしまう
 # （codex-review [P1] 指摘。PR #1655）。フラグは opt-in のため既存呼び出し
-# （複合判定のみで足りる用途）の契約は変えない。
-python3 compare_gemm_ab.py --device cuda --task train --threshold 1.00 --per-run --modes reuse --phases \
-  --require-checksum-exact \
+# （複合判定のみで足りる用途）の契約は変えない。`--phases`（nargs=2）の
+# 直後に `--require-checksum-exact` を置くと、argparse がこれを
+# `--phases` の 2 個目の値として消費しようとして
+# `argument --phases: expected 2 arguments` で失敗し reuse 側の判定
+# 自体が実行されない（Cursor Bugbot High 指摘。PR #1655）。フラグ系を
+# 先に並べ `--phases` を最後（ファイル引数の直前）に置くことで解消する。
+python3 compare_gemm_ab.py --device cuda --task train --threshold 1.00 --per-run --modes reuse \
+  --require-checksum-exact --phases \
   "$OUT/results-before-${LABEL}-phases.jsonl" "$OUT/results-after-${LABEL}-phases.jsonl" \
   "$OUT/results-before-${LABEL}-train.jsonl" "$OUT/results-after-${LABEL}-train.jsonl" \
   >"compare-train-${LABEL}.md" 2>"compare-train-${LABEL}.err"

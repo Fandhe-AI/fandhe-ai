@@ -522,7 +522,15 @@ def per_run_ratios(before_rows, after_rows):
     return ratios
 
 
-def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, modes=None, per_run=False):
+def render_markdown(
+    cells,
+    threshold,
+    device=DEFAULT_DEVICE,
+    size_set=None,
+    modes=None,
+    per_run=False,
+    require_checksum_exact=False,
+):
     """`cells` を Markdown 表として整形する。
 
     列は `columns` リストへ 1 列 1 要素で積んでから
@@ -536,6 +544,12 @@ def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, mode
     指摘。イシュー #1517 PR #1531）。列リスト方式は header・sep・
     データ行の列数を機械的に一致させるため、この種のずれが再発しない。
     非 `--per-run`（既定）出力は本リファクタ前とバイト同一。
+
+    `require_checksum_exact`（既定 `False`。イシュー #1560 codex-review
+    [P2] 指摘）: `True` の場合、`checksum_exact_match` が `False` の
+    セルは複合判定が非後退でも「判定」列を後退相当として表示し、
+    `main` の終了コード判定（`--require-checksum-exact` 指定時の
+    `any_bad`）と Markdown レポートの結論を一致させる。
     """
     lines = []
     base_columns = ["size/mode", "before median", "after median", "after/before", "checksum", "判定"]
@@ -569,6 +583,13 @@ def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, mode
         note = ""
         if result["before_spread"] > 1.5:
             note = "（判定注意: before spread > 1.5x・負荷ノイズの疑い）"
+        verdict_label = result["verdict"]
+        if (
+            require_checksum_exact
+            and verdict_label == "非後退"
+            and not result["checksum_exact_match"]
+        ):
+            verdict_label = "後退相当（--require-checksum-exact: checksum 不一致）"
         row = [
             cell_label,
             f"{_fmt_ms(result['before_median_s'])} "
@@ -577,7 +598,7 @@ def render_markdown(cells, threshold, device=DEFAULT_DEVICE, size_set=None, mode
             f"(min {_fmt_ms(result['after_min_s'])} / max {_fmt_ms(result['after_max_s'])})",
             f"{result['ratio']:.4f}",
             checksum_label,
-            f"{result['verdict']}{note}",
+            f"{verdict_label}{note}",
         ]
         if per_run:
             ratios = per_run_ratios(before_rows, after_rows)
@@ -786,7 +807,13 @@ def main(argv):
 
     print(
         render_markdown(
-            cells, args.threshold, args.device, size_set=size_set, modes=modes, per_run=args.per_run
+            cells,
+            args.threshold,
+            args.device,
+            size_set=size_set,
+            modes=modes,
+            per_run=args.per_run,
+            require_checksum_exact=args.require_checksum_exact,
         )
     )
 

@@ -328,6 +328,38 @@ class MainTest(unittest.TestCase):
             os.unlink(before_path)
             os.unlink(after_path)
 
+    def test_require_checksum_exact_flag_on_markdown_matches_exit_code(self):
+        # イシュー #1560 codex-review [P2] 指摘: `--require-checksum-exact`
+        # 指定時、終了コードは checksum_exact_match=False を後退相当として
+        # 反映するが、render_markdown にはこの条件が渡らずレポート側は
+        # 「非後退」のままで結論が食い違っていた。render_markdown へ
+        # `require_checksum_exact` を渡すことで、Markdown 表の「判定」列も
+        # 終了コードと同じ結論（後退相当）を示すことを確認する。
+        before, after = _all_cells_rows(0.002, 0.0019)
+        for r in after:
+            if r["size"] == 4096 and r["mode"] == "reuse":
+                r["checksum"] = before[0]["checksum"] * (1 + 1e-9)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--require-checksum-exact", before_path, after_path]
+                )
+            self.assertEqual(code, 3)
+            report = out.getvalue()
+            # 対象セル（4096/reuse）の行に「後退相当」を含み、単純な
+            # 「非後退」表記のまま残っていないことを確認する。
+            lines = [ln for ln in report.splitlines() if ln.startswith("| 4096/reuse")]
+            self.assertEqual(len(lines), 1)
+            self.assertIn("後退相当", lines[0])
+            self.assertIn("--require-checksum-exact", lines[0])
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
     def test_require_checksum_exact_flag_on_all_exact_still_exit_zero(self):
         # 全セル checksum 完全一致なら `--require-checksum-exact` 指定でも
         # 従来どおり終了コード 0（フラグが誤って非後退セルまで巻き込まない
