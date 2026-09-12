@@ -108,6 +108,69 @@ pub fn run_softmax_f32(x: &[f32], rows: usize, cols: usize) -> Result<Vec<f32>, 
     Ok(out)
 }
 
+/// `x`（`[rows, cols]` の行優先 1 次元化済みスライス）へ行方向
+/// log_softmax（`x − m − ln(Σexp(x − m))`。`m` は行 max）を適用する
+/// （イシュー #1594。`BackendOps::log_softmax` の CPU 実装）。
+///
+/// `run_softmax_f32` と同じ検証・並列化閾値・行分割方針を踏襲するが、
+/// `ln(softmax(x))` へは委譲しない（`fandhe_ai_autodiff::eval::
+/// log_softmax_along`〈ホスト参照実装〉と同じ理由: softmax の出力が
+/// アンダーフローで `0.0` になった要素で `ln(0.0) = -inf` を経由すると
+/// 数値精度を落とすため）。NEON ベクトル化は行わない（scalar のみ。
+/// `exp`/`ln` 双方をベクトル化しない点は `run_softmax_f32` の exp 実装
+/// 方式判断と同じ理由——本イシュー時点では未検証の近似実装を出荷経路
+/// として採用しない）。
+pub fn run_log_softmax_f32(x: &[f32], rows: usize, cols: usize) -> Result<Vec<f32>, SoftmaxError> {
+    validate_softmax_launch(rows, cols, x.len())?;
+
+    if rows == 0 || cols == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut out = vec![0.0f32; x.len()];
+    let numel = rows * cols;
+
+    if numel >= PARALLEL_THRESHOLD && rows >= 2 {
+        out.par_chunks_mut(cols)
+            .zip(x.par_chunks(cols))
+            .for_each(|(out_row, in_row)| {
+                log_softmax_row(in_row, out_row);
+            });
+    } else {
+        for (out_row, in_row) in out.chunks_mut(cols).zip(x.chunks(cols)) {
+            log_softmax_row(in_row, out_row);
+        }
+    }
+
+    Ok(out)
+}
+
+/// 1 行分の log_softmax（scalar のみ。`run_softmax_f32` の 3 パス構成
+/// に対し「pass1: 行 max」「pass2: `exp(v-max)` の総和」「pass3:
+/// `v - max - ln(sum)` の書き込み」の 3 パス構成）。
+fn log_softmax_row(row: &[f32], out_row: &mut [f32]) {
+    let mut max_v = f32::NEG_INFINITY;
+    for &v in row {
+        if v > max_v {
+            max_v = v;
+        }
+    }
+    let mut sum_exp = 0.0f32;
+    for &v in row {
+        sum_exp += (v - max_v).exp();
+    }
+    // `max_v + ln(sum_exp)` を先に加算してから `v` から引くと、`max_v` が
+    // 大きい場合に `ln(sum_exp)` の寄与が `max_v` 自身の丸め精度に埋もれ
+    // て消える（`crates/autodiff/src/eval.rs::log_softmax_along` と同じ
+    // 数値安定性契約。丸め落ちの具体例はそちらの doc comment 参照）。
+    // `v - max_v` は Sterbenz の補題により丸め誤差なしで計算できるため、
+    // 先にこちらを計算してから `ln(sum_exp)` を引く順序にする。
+    let ln_sum_exp = sum_exp.ln();
+    for (o, &v) in out_row.iter_mut().zip(row.iter()) {
+        *o = (v - max_v) - ln_sum_exp;
+    }
+}
+
 /// 1 行分の softmax を計算する（NEON / スカラーの経路選択点）。
 fn softmax_row(row: &[f32], out_row: &mut [f32]) {
     #[cfg(target_arch = "aarch64")]
@@ -301,6 +364,68 @@ mod tests {
         for &v in &out {
             assert!(v.is_finite(), "expected finite, got {v}");
         }
+    }
+
+    // --- run_log_softmax_f32（イシュー #1594） ---
+
+    #[test]
+    fn run_log_softmax_f32_empty_rows_or_cols_returns_empty() {
+        assert_eq!(run_log_softmax_f32(&[], 0, 8).unwrap(), Vec::<f32>::new());
+        assert_eq!(run_log_softmax_f32(&[], 3, 0).unwrap(), Vec::<f32>::new());
+    }
+
+    #[test]
+    fn run_log_softmax_f32_matches_ln_of_softmax_naive() {
+        // 数値的に安定な入力域（アンダーフローしない）では
+        // `log_softmax(x) == ln(softmax(x))` が成り立つ。実装が解析形
+        // （`x - m - ln(Σexp)`）を正しく計算していることを、単純な
+        // `ln(softmax(x))` との突合で検証する（両実装とも同じ数値域を
+        // 使うため許容誤差は小さくてよい）。
+        let x = vec![1.0f32, 2.0, -1.0, 0.5, -1.0, 2.0, 0.0, 0.0];
+        let softmax = run_softmax_f32(&x, 2, 4).unwrap();
+        let log_softmax = run_log_softmax_f32(&x, 2, 4).unwrap();
+        for (s, ls) in softmax.iter().zip(log_softmax.iter()) {
+            assert!(
+                (s.ln() - ls).abs() < 1e-5,
+                "ln(softmax)={} log_softmax={}",
+                s.ln(),
+                ls
+            );
+        }
+    }
+
+    #[test]
+    fn run_log_softmax_f32_extreme_values_no_nan_inf() {
+        // softmax がアンダーフローで 0.0 になる極値でも log_softmax は
+        // 有限値を保つ（`ln(softmax(x))` 経由だと `-inf` を生む領域）。
+        let x = vec![1e4f32, -1e4, 1e4, -1e4];
+        let out = run_log_softmax_f32(&x, 1, 4).unwrap();
+        for &v in &out {
+            assert!(v.is_finite(), "expected finite, got {v}");
+        }
+    }
+
+    // codex-review 指摘（PR #1664）の回帰検証: `crates/autodiff/src/
+    // eval.rs::log_softmax_along_precision_tests` と同一のケース。
+    // `max_v + ln(sum_exp)` を先に加算してから `v` から引く実装では
+    // 丸め落ちが発生し `log_softmax([1e8, 1e8])` が `[0.0, 0.0]`
+    // （期待値 `[-ln(2), -ln(2)]`）になっていた。
+    #[test]
+    fn run_log_softmax_f32_large_common_offset_does_not_round_away_ln_sum_exp() {
+        let out = run_log_softmax_f32(&[1e8, 1e8], 1, 2).unwrap();
+        let expected = -(2.0f32).ln();
+        for (c, &v) in out.iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "log_softmax([1e8,1e8])[{c}] = {v}（期待値 {expected} 近傍）"
+            );
+        }
+    }
+
+    #[test]
+    fn run_log_softmax_f32_length_mismatch_is_invalid_shape() {
+        let err = run_log_softmax_f32(&[1.0, 2.0, 3.0], 2, 2).unwrap_err();
+        assert!(matches!(err, SoftmaxError::InvalidShape { .. }));
     }
 
     #[test]
