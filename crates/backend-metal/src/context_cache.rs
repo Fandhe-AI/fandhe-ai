@@ -73,6 +73,7 @@ use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
 use crate::gemm::MetalGemm;
 use crate::generic_cache::get_or_build;
+use crate::layer_norm::MetalLayerNorm;
 use crate::pool::MetalAllocator;
 use crate::rmsnorm::MetalRmsNorm;
 use crate::sgd::MetalSgd;
@@ -101,6 +102,7 @@ const _: fn() = || {
     assert_send_sync::<MetalGemm>();
     assert_send_sync::<MetalElementwise>();
     assert_send_sync::<MetalRmsNorm>();
+    assert_send_sync::<MetalLayerNorm>();
     assert_send_sync::<MetalSoftmax>();
     assert_send_sync::<MetalAllocator>();
 };
@@ -148,6 +150,17 @@ pub(crate) fn cached_rmsnorm(ctx: &Arc<MetalContext>) -> Result<Arc<MetalRmsNorm
     static CACHE: OnceLock<Mutex<Option<Arc<MetalRmsNorm>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || MetalRmsNorm::new(ctx))
+}
+
+/// [`MetalLayerNorm`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1596）。`ops::MetalBackendOps::layer_norm` の唯一の
+/// 呼び出し先。
+pub(crate) fn cached_layer_norm(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<MetalLayerNorm>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<MetalLayerNorm>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || MetalLayerNorm::new(ctx))
 }
 
 /// [`MetalSoftmax`] スイートをプロセス内キャッシュから取得する。

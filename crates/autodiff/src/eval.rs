@@ -470,6 +470,135 @@ pub(crate) fn mse_loss(
     build_tensor(vec![out], &[])
 }
 
+/// RMSNorm（`x · rsqrt(mean(x²) + eps) · w`。`w` が `None` の場合は乗算を
+/// スキップ）の行内統計（`mean`・`rstd`）を `f64` で計算する
+/// （イシュー #1596）。`x_row` は 1 行分（長さ `hidden`）。
+///
+/// **縮約精度契約**（`.claude/rules/coding-rust.md`「正規化統計の二乗和
+/// は要素を先に `f64` へ昇格してから二乗する」）: 二乗和は要素を
+/// `f64` へ昇格してから `f64::mul_add` で二乗・蓄積し、`rstd` へ代入
+/// する 1 回だけ `f32` へ downcast する（`backend-cpu::rmsnorm::
+/// rmsnorm_row_scalar` と同じ縮約方式のホスト参照実装ミラー）。
+/// `hidden == 0` は呼び出し元（[`rmsnorm_rows`]）が空出力として
+/// 早期処理する契約のため、本関数は `hidden >= 1` を前提とする
+/// （`inv_n` は呼び出し元が `1/hidden` を渡す）。
+pub(crate) fn row_rms_stats(x_row: &[f32], eps: f32, inv_n: f64) -> f32 {
+    let mut acc = 0.0f64;
+    for &v in x_row {
+        let v = v as f64;
+        acc = v.mul_add(v, acc);
+    }
+    (1.0f64 / acc.mul_add(inv_n, eps as f64).sqrt()) as f32
+}
+
+/// LayerNorm（`(x − mean(x)) · rsqrt(var(x) + eps) · w + b`。分散は
+/// biased ÷N）の行内統計（`mean`・`rstd`）を `f64` で計算する
+/// （イシュー #1596）。[`row_rms_stats`] と同じ縮約精度契約
+/// （二乗前に `f64` へ昇格。ここでは `(x − mean)` の偏差を昇格してから
+/// 二乗する）だが、LayerNorm は「二乗和」ではなく「二パス分散」
+/// （`Σ(x−μ)²`。`E[x²]−μ²` は使わない。実装計画 §3-3）のため専用
+/// 関数とする。`hidden >= 1` を前提とする（`inv_n = 1/hidden`）。
+pub(crate) fn row_ln_stats(x_row: &[f32], eps: f32, inv_n: f64) -> (f64, f32) {
+    let mut sum = 0.0f64;
+    for &v in x_row {
+        sum += v as f64;
+    }
+    let mean = sum * inv_n;
+    let mut sq_acc = 0.0f64;
+    for &v in x_row {
+        let d = v as f64 - mean;
+        sq_acc = d.mul_add(d, sq_acc);
+    }
+    let var = sq_acc * inv_n;
+    let rstd = (1.0f64 / (var + eps as f64).sqrt()) as f32;
+    (mean, rstd)
+}
+
+/// RMSNorm のホスト参照実装（`BackendOps::rmsnorm` が
+/// `Err(BackendError::Unsupported(_))` を返したときのみ `Var::rms_norm`
+/// がフォールバックする。イシュー #1596。`docs/norm-ops-design.md`）。
+///
+/// `x` は `[rows, hidden]` の行優先 1 次元化済みテンソル、`w` を渡す
+/// 場合は長さ `hidden` を要求する（呼び出し元 `var.rs::Var::rms_norm`
+/// が shape 検査済み）。`rows == 0` または `hidden == 0` は空出力を
+/// 返す（`backend-cpu::rmsnorm::run_rmsnorm_f32_raw` と同じ早期
+/// return 契約）。
+pub(crate) fn rmsnorm_rows(
+    x: &Tensor<f32>,
+    w: Option<&[f32]>,
+    eps: f32,
+    rows: usize,
+    hidden: usize,
+) -> Tensor<f32> {
+    let shape = x.shape().to_vec();
+    if rows == 0 || hidden == 0 {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let data = dense_vec(x);
+    let inv_n = 1.0f64 / hidden as f64;
+    let mut out = vec![0.0f32; data.len()];
+    for r in 0..rows {
+        let row = &data[r * hidden..(r + 1) * hidden];
+        let out_row = &mut out[r * hidden..(r + 1) * hidden];
+        let rstd = row_rms_stats(row, eps, inv_n);
+        match w {
+            Some(w) => {
+                for ((o, &v), &wv) in out_row.iter_mut().zip(row.iter()).zip(w.iter()) {
+                    *o = v * rstd * wv;
+                }
+            }
+            None => {
+                for (o, &v) in out_row.iter_mut().zip(row.iter()) {
+                    *o = v * rstd;
+                }
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// LayerNorm のホスト参照実装（`BackendOps::layer_norm` が
+/// `Err(BackendError::Unsupported(_))` を返したときのみ
+/// `Var::layer_norm` がフォールバックする。イシュー #1596。
+/// `docs/norm-ops-design.md`）。[`rmsnorm_rows`] と同じ shape 契約・
+/// 早期 return 契約を持つ。`bias` は `w` と独立に `None` を取りうる
+/// （`elementwise_affine=false` の `LayerNorm::without_affine` から
+/// 呼ばれる場合等）。
+pub(crate) fn layer_norm_rows(
+    x: &Tensor<f32>,
+    w: Option<&[f32]>,
+    b: Option<&[f32]>,
+    eps: f32,
+    rows: usize,
+    hidden: usize,
+) -> Tensor<f32> {
+    let shape = x.shape().to_vec();
+    if rows == 0 || hidden == 0 {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let data = dense_vec(x);
+    let inv_n = 1.0f64 / hidden as f64;
+    let mut out = vec![0.0f32; data.len()];
+    for r in 0..rows {
+        let row = &data[r * hidden..(r + 1) * hidden];
+        let out_row = &mut out[r * hidden..(r + 1) * hidden];
+        let (mean, rstd) = row_ln_stats(row, eps, inv_n);
+        let mean = mean as f32;
+        for (i, &v) in row.iter().enumerate() {
+            let xhat = (v - mean) * rstd;
+            let xhat = match w {
+                Some(w) => xhat * w[i],
+                None => xhat,
+            };
+            out_row[i] = match b {
+                Some(b) => xhat + b[i],
+                None => xhat,
+            };
+        }
+    }
+    build_tensor(out, &shape)
+}
+
 /// `axis` に沿った数値安定形 softmax（シフト → `exp` → 正規化）。
 /// `cross_entropy_loss`（forward。下記）の log-sum-exp 計算と
 /// `grad.rs::cross_entropy_loss_vjp`（`softmax(x) − onehot(t)`）が同じ
@@ -626,5 +755,120 @@ mod dense_vec_ref_tests {
             "非 contiguous な入力は Cow::Owned（dense_vec フォールバック）を返す契約"
         );
         assert_eq!(&*owned, &dense_vec(&transposed)[..]);
+    }
+}
+
+#[cfg(test)]
+mod norm_rows_tests {
+    //! [`rmsnorm_rows`]／[`layer_norm_rows`]（イシュー #1596）のホスト
+    //! 参照実装単体テスト。`backend-cpu` の実機カーネルとの parity は
+    //! `crates/backend-cpu/tests/{rmsnorm,layer_norm}_parity.rs` が担う
+    //! （本モジュールは `eval.rs` 自体の正しさのみを検証する）。
+
+    use super::*;
+
+    #[test]
+    fn rmsnorm_rows_basic_no_weight() {
+        // hidden=4, x=[1,2,3,4] -> mean(x^2)=(1+4+9+16)/4=7.5
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+        let out = rmsnorm_rows(&x, None, 0.0, 1, 4);
+        let rstd = 1.0f32 / 7.5f32.sqrt();
+        for (o, v) in dense_vec(&out).iter().zip([1.0f32, 2.0, 3.0, 4.0].iter()) {
+            assert!((o - v * rstd).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn rmsnorm_rows_applies_weight() {
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+        let w = [2.0f32, 1.0, 0.5, 1.0];
+        let out = dense_vec(&rmsnorm_rows(&x, Some(&w), 0.0, 1, 4));
+        let rstd = 1.0f32 / 7.5f32.sqrt();
+        let expected = [1.0 * rstd * 2.0, 2.0 * rstd, 3.0 * rstd * 0.5, 4.0 * rstd];
+        for (o, e) in out.iter().zip(expected.iter()) {
+            assert!((o - e).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn rmsnorm_rows_empty_rows_or_hidden_is_empty_output() {
+        let x0 = Tensor::new(Vec::<f32>::new(), &[0, 4]).unwrap();
+        assert_eq!(
+            dense_vec(&rmsnorm_rows(&x0, None, 1e-5, 0, 4)),
+            Vec::<f32>::new()
+        );
+        let x1 = Tensor::new(Vec::<f32>::new(), &[3, 0]).unwrap();
+        assert_eq!(
+            dense_vec(&rmsnorm_rows(&x1, None, 1e-5, 3, 0)),
+            Vec::<f32>::new()
+        );
+    }
+
+    #[test]
+    fn rmsnorm_rows_nan_propagates() {
+        let x = Tensor::new(vec![f32::NAN, 1.0, 1.0, 1.0], &[1, 4]).unwrap();
+        let out = dense_vec(&rmsnorm_rows(&x, None, 1e-5, 1, 4));
+        assert!(out.iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn layer_norm_rows_matches_manual_computation() {
+        // x = [1, 2, 3, 4] -> mean=2.5, var=Sigma(x-2.5)^2/4 = (2.25+0.25+0.25+2.25)/4 = 1.25
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+        let out = dense_vec(&layer_norm_rows(&x, None, None, 0.0, 1, 4));
+        let rstd = 1.0f32 / 1.25f32.sqrt();
+        let expected = [-1.5 * rstd, -0.5 * rstd, 0.5 * rstd, 1.5 * rstd];
+        for (o, e) in out.iter().zip(expected.iter()) {
+            assert!((o - e).abs() < 1e-5, "o={o} e={e}");
+        }
+    }
+
+    #[test]
+    fn layer_norm_rows_applies_weight_and_bias() {
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+        let w = [2.0f32, 1.0, 1.0, 0.5];
+        let b = [1.0f32, 0.0, -1.0, 2.0];
+        let out = dense_vec(&layer_norm_rows(&x, Some(&w), Some(&b), 0.0, 1, 4));
+        let rstd = 1.0f32 / 1.25f32.sqrt();
+        let xhat = [-1.5 * rstd, -0.5 * rstd, 0.5 * rstd, 1.5 * rstd];
+        let expected = [
+            xhat[0] * 2.0 + 1.0,
+            xhat[1] * 1.0 + 0.0,
+            xhat[2] * 1.0 - 1.0,
+            xhat[3] * 0.5 + 2.0,
+        ];
+        for (o, e) in out.iter().zip(expected.iter()) {
+            assert!((o - e).abs() < 1e-5, "o={o} e={e}");
+        }
+    }
+
+    #[test]
+    fn layer_norm_rows_empty_rows_or_hidden_is_empty_output() {
+        let x0 = Tensor::new(Vec::<f32>::new(), &[0, 4]).unwrap();
+        assert_eq!(
+            dense_vec(&layer_norm_rows(&x0, None, None, 1e-5, 0, 4)),
+            Vec::<f32>::new()
+        );
+        let x1 = Tensor::new(Vec::<f32>::new(), &[3, 0]).unwrap();
+        assert_eq!(
+            dense_vec(&layer_norm_rows(&x1, None, None, 1e-5, 3, 0)),
+            Vec::<f32>::new()
+        );
+    }
+
+    #[test]
+    fn layer_norm_rows_nan_propagates() {
+        let x = Tensor::new(vec![f32::NAN, 1.0, 1.0, 1.0], &[1, 4]).unwrap();
+        let out = dense_vec(&layer_norm_rows(&x, None, None, 1e-5, 1, 4));
+        assert!(out.iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn layer_norm_rows_extreme_scale_does_not_overflow_stats() {
+        // f64 promotion before squaring avoids overflow at this scale
+        // (coding-rust.md normalization-stat accumulator contract).
+        let x = Tensor::new(vec![2e20f32, -2e20, 2e20, -2e20], &[1, 4]).unwrap();
+        let out = dense_vec(&layer_norm_rows(&x, None, None, 1e-5, 1, 4));
+        assert!(out.iter().all(|v| v.is_finite()), "{out:?}");
     }
 }

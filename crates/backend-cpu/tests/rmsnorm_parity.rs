@@ -136,3 +136,75 @@ fn rmsnorm_run_fused_matches_per_op_composed() {
 // `#[cfg(test)] mod tests`（`pub(crate)` 関数への直接アクセスが必要な
 // ため、統合テストクレートからは呼べない）に置く
 // （`crates/backend-cpu/src/rmsnorm.rs::tests::neon_matches_scalar_various_hidden`）。
+
+// --- BackendOps::rmsnorm 独立エントリ（イシュー #1596） ---
+
+/// `CpuBackendOps::rmsnorm` が `run_rmsnorm_f32` と bit 同一であること
+/// （同一カーネルへのディスパッチであり別実装ではないことの確認）。
+#[test]
+fn backend_ops_rmsnorm_is_bit_identical_to_run_rmsnorm_f32() {
+    let rows = 3usize;
+    let hidden = 17usize;
+    let x_data = Xorshift64Star::new(8181).fill_vec(rows * hidden);
+    let w_data = Xorshift64Star::new(8182).fill_vec(hidden);
+    let x = Tensor::new(x_data.clone(), &[rows, hidden]).unwrap();
+    let w = Tensor::new(w_data.clone(), &[hidden]).unwrap();
+
+    let cpu = CpuBackendOps::new();
+    let via_ops = cpu.rmsnorm(&x, Some(&w), 1e-5).unwrap();
+    let via_kernel = run_rmsnorm_f32(&x_data, Some(&w_data), 1e-5, rows, hidden).unwrap();
+
+    assert_eq!(via_ops.shape(), &[rows, hidden]);
+    assert_eq!(via_ops.as_slice().unwrap(), via_kernel.as_slice());
+}
+
+/// `CpuBackendOps::rmsnorm` を `weight` なしで呼んだ場合も
+/// `run_rmsnorm_f32` と bit 同一。
+#[test]
+fn backend_ops_rmsnorm_no_weight_is_bit_identical_to_run_rmsnorm_f32() {
+    let rows = 2usize;
+    let hidden = 33usize; // NEON 端要素を含む。
+    let x_data = Xorshift64Star::new(9191).fill_vec(rows * hidden);
+    let x = Tensor::new(x_data.clone(), &[rows, hidden]).unwrap();
+
+    let cpu = CpuBackendOps::new();
+    let via_ops = cpu.rmsnorm(&x, None, 1e-6).unwrap();
+    let via_kernel = run_rmsnorm_f32(&x_data, None, 1e-6, rows, hidden).unwrap();
+
+    assert_eq!(via_ops.as_slice().unwrap(), via_kernel.as_slice());
+}
+
+/// 非 contiguous な入力（転置 view）は `contiguous()`（`ops.rs::
+/// CpuBackendOps::rmsnorm`）を経由して透過的に実体化されるため
+/// エラーにはならず、明示的に `contiguous()` した等価な入力と同じ
+/// 結果を返す（`gemm_contiguity_fail_safe` は `contiguous()` 自体が
+/// 失敗しない限り到達しない防御的分岐であることの確認）。
+#[test]
+fn backend_ops_rmsnorm_non_contiguous_input_matches_contiguous_equivalent() {
+    let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+    let transposed = x.transpose(0, 1).unwrap(); // [3, 2]・非 contiguous。
+
+    let cpu = CpuBackendOps::new();
+    let via_transposed = cpu.rmsnorm(&transposed, None, 1e-5).unwrap();
+    let via_contiguous = cpu.rmsnorm(&transposed.contiguous(), None, 1e-5).unwrap();
+
+    assert_eq!(
+        via_transposed.as_slice().unwrap(),
+        via_contiguous.as_slice().unwrap()
+    );
+}
+
+/// `weight` の shape 不一致（長さ違い）は `KernelLaunchFailed` を返す
+/// （`run_rmsnorm_f32` の `WeightLenMismatch` を写像。カーネル起動前の
+/// fail-closed 検証。REQ-8・OWASP A03）。
+#[test]
+fn backend_ops_rmsnorm_rejects_weight_length_mismatch() {
+    use fandhe_ai_tensor_core::device::BackendError;
+
+    let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+    let w = Tensor::new(vec![1.0, 1.0, 1.0], &[3]).unwrap();
+
+    let cpu = CpuBackendOps::new();
+    let result = cpu.rmsnorm(&x, Some(&w), 1e-5);
+    assert!(matches!(result, Err(BackendError::KernelLaunchFailed(_))));
+}

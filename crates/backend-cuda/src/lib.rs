@@ -372,6 +372,7 @@ mod init_cost_diag_tests;
 // クレートルートの兄弟モジュールとして配置する。
 mod kernels;
 mod kernels_elementwise;
+mod kernels_layer_norm;
 mod kernels_mma;
 mod kernels_mma_tf32;
 mod kernels_mma_tf32x3;
@@ -390,6 +391,7 @@ mod readout_regression_diag_tests_1436;
 // （`memory.rs`）が使う、形状ごとに再利用するホストステージング
 // バッファのキャッシュ。crate 内部限定（`memory.rs` のみが参照）。
 mod host_staging;
+mod layer_norm;
 pub mod memory;
 mod module_cache;
 mod mse;
@@ -549,6 +551,7 @@ pub use host_staging::HostStagingStats;
 // re-export と同一ゲート・同一理由。
 #[cfg(feature = "internal-diagnostics")]
 pub use host_staging::HostStagingKind;
+pub use layer_norm::CudaLayerNorm;
 pub use nvrtc::{
     CompiledDims, CudaKernelCacheKey, CudaKernelDescriptor, MAX_PIPELINE_STAGES, compile_ptx,
     derive_pipeline_stages, nvrtc_version,

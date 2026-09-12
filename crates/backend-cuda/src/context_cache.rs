@@ -432,6 +432,21 @@ pub(crate) fn cached_mse(device: &CudaDevice) -> Result<Arc<crate::mse::CudaMse>
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::layer_norm::
+/// CudaLayerNorm`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1596。キーは [`ContextKey`]。`cached_gemm` 冒頭コメント
+/// 参照）。`ops::CudaBackendOps::layer_norm` の唯一の呼び出し先。
+pub(crate) fn cached_layer_norm(
+    device: &CudaDevice,
+) -> Result<Arc<crate::layer_norm::CudaLayerNorm>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::layer_norm::CudaLayerNorm>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::layer_norm::CudaLayerNorm::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`crate::gemm_mma_tf32x3::
 /// CudaMmaTf32x3Gemm`]（3×TF32 split-single 法 GEMM。イシュー #1355。
 /// キーは [`ContextKey`]。`cached_gemm` 冒頭コメント参照）を
