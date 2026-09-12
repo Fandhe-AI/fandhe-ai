@@ -961,11 +961,17 @@ pub(crate) fn vjp(
         // `Var::broadcast_to`（`Var::expand` はこれへ委譲）が記録する
         // view ノード（イシュー #1597）。`upstream` は out_shape
         // （ブロードキャスト後）を持つため、`Op::Add`/`Op::Mul` の
-        // 暗黙ブロードキャストと同じ縮約（`reduce_to_shape`）で入力
-        // shape へ縮約する（`tape::Op::BroadcastTo` doc 参照）。
+        // 暗黙ブロードキャストと**同じ数値契約**で入力 shape へ縮約
+        // する（`tape::Op::BroadcastTo` doc 参照）。`reduce_bias_grad`
+        // は `[1, n]` 行方向縮約等の特定パターンに限り f64 アキュムレ
+        // ータ経路（`eval::reduce_bias_grad_rows`）へ委譲し、それ以外
+        // は `reduce_to_shape`（f32 逐次和）へフォールバックする関数
+        // であり、`Op::Add` の暗黙 broadcast 縮約（232〜233 行目）と
+        // 同一の関数を呼ぶことで明示 broadcast・暗黙 broadcast 間の
+        // 数値方式の食い違い（codex-review P1 是正）を防ぐ。
         Op::BroadcastTo { input } => {
             let input_shape = &nodes[input.0].shape;
-            let da = reduce_to_shape(upstream, input_shape);
+            let da = reduce_bias_grad(upstream, input_shape);
             vec![(input, da)]
         }
     };

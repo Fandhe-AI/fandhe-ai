@@ -498,7 +498,8 @@ fn squeeze_unsqueeze_flatten_backward_matches_expected() {
 ///     （forward・`dx`／`dy`）が、`add` の暗黙ブロードキャストのみで
 ///     計算した結果と bit 同一であることを検証する（`Op::BroadcastTo`
 ///     の VJP と `Op::Add` の暗黙ブロードキャスト VJP が同じ
-///     `reduce_to_shape` を使うため。イシュー #1597 の parity 要件）。
+///     `reduce_bias_grad` を使うため。イシュー #1597 の parity 要件・
+///     codex-review P1 是正で `reduce_to_shape` から切替済み）。
 #[test]
 fn broadcast_to_then_add_matches_implicit_broadcast_add_bit_exact() {
     let x_data = vec![1.0f32, -2.0, 3.0];
@@ -530,6 +531,39 @@ fn broadcast_to_then_add_matches_implicit_broadcast_add_bit_exact() {
     assert_eq!(forward_a, forward_b, "forward 値が bit 同一でない");
     assert_eq!(dx_a, dx_b, "dx が bit 同一でない");
     assert_eq!(dy_a, dy_b, "dy が bit 同一でない");
+}
+
+/// 22b. `Op::BroadcastTo` の VJP が `Op::Add` の暗黙ブロードキャスト
+///      縮約（`reduce_bias_grad`。行方向縮約パターンは `f64`
+///      アキュムレータ〈`eval::reduce_bias_grad_rows`〉経由）と同じ
+///      数値契約であることを、相殺を含む上流勾配（行順
+///      `[1e8, 1, -1e8]`）で検証する（codex-review P1 是正の回帰:
+///      旧実装は `reduce_to_shape`〈`f32` 逐次和〉のみを使い、
+///      `1e8 + 1` が `f32` 丸めで `1e8` へ吸収されたあと `-1e8` すると
+///      `0.0` になってしまっていたが、`f64` 経由では `1.0` が正しい
+///      解析値）。`loss = sum(broadcast_to(x, [3,1]) * c)` は
+///      `dx = sum(c)`（`c` は broadcast_to の上流勾配そのものに一致
+///      させるための定数）となり、`Op::Add` の行方向縮約と同一の
+///      shape 構造（`g: [3,1]`・`target: [1]`）を `Op::BroadcastTo`
+///      単体の VJP 経路で踏む。
+#[test]
+fn broadcast_to_backward_row_reduction_uses_f64_accumulator_on_cancelling_values() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0], &[1]));
+    let c = tape.var(&t(vec![1.0e8, 1.0, -1.0e8], &[3, 1]));
+    let bx = x.broadcast_to(&[3, 1]).unwrap();
+    let z = bx.mul(&c).unwrap();
+    let loss = z.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[1]);
+    assert_eq!(
+        dx.get(&[0]).unwrap(),
+        1.0,
+        "f64 アキュムレータ経由の解析値（1e8 + 1 - 1e8 = 1.0）と一致しない \
+         （f32 逐次和のままだと 1e8 + 1 が丸めで 1e8 に吸収され 0.0 になる）"
+    );
 }
 
 /// 23. bit 同一 parity: `x.permute(&[1,0])?.matmul(&w)` と

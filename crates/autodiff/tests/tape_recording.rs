@@ -561,6 +561,29 @@ fn flatten_invalid_range_returns_shape_error() {
     ));
 }
 
+/// 24b. `flatten` が潰す軸区間の部分積オーバーフローを `checked_mul`
+///      で検査し `ShapeError::ElementCountOverflow` を返すことを検証
+///      する（codex-review P1 是正の回帰: ゼロ長軸を含む形状
+///      `[0, usize::MAX, 2]` は総要素数自体は `0` で `Tensor::new` を
+///      通過するが、`flatten(1, 2)` が潰す区間 `[usize::MAX, 2]` の
+///      部分積は `checked_mul` なしでは debug panic・release ラップを
+///      起こす）。
+#[test]
+fn flatten_partial_product_overflow_returns_element_count_overflow() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // 総要素数は 0（先頭軸が 0）のため空データで構築できる。
+    let x = tape.var(&t(vec![], &[0, usize::MAX, 2]));
+
+    let err = x.flatten(1, 2).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)
+        ),
+        "オーバーフローを検出できていない: {err:?}"
+    );
+}
+
 /// 25. `permute → flatten`（非 contiguous 化した後の `reshape` 委譲）が
 ///     `reshape` と同じく `NonContiguousReshape` を返すことを検証する
 ///     （案 A 制約の継承。`Var::flatten` doc 参照）。

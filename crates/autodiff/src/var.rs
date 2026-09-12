@@ -1061,9 +1061,11 @@ impl<'t> Var<'t> {
     /// `end_dim >= rank` または `start_dim > end_dim` は
     /// `ShapeError::AxisOutOfRange`（後者は `axis: start_dim` として
     /// 報告する）。rank 0（スカラー）は `(start_dim, end_dim) ==
-    /// (0, 0)` のみ許容し `[1]` を返す（PyTorch と同じ）。要素数は
-    /// 潰す軸の積を 1 軸へまとめるだけで不変のため、オーバーフロー
-    /// 検査は `reshape` 側の検査で足りる。
+    /// (0, 0)` のみ許容し `[1]` を返す（PyTorch と同じ）。潰す軸区間
+    /// の部分積自体は `usize::MAX` を含むゼロ長軸混在形状で
+    /// オーバーフローしうるため `checked_mul` で検査し、オーバー
+    /// フロー時は `ShapeError::ElementCountOverflow` を返す（総要素数
+    /// が `reshape` 側で検査済みでも部分積は別途検査が要る）。
     ///
     /// 非 contiguous な入力に対する制約は `reshape` と同じ。
     pub fn flatten(&self, start_dim: usize, end_dim: usize) -> Result<Var<'t>, AutodiffError> {
@@ -1090,7 +1092,19 @@ impl<'t> Var<'t> {
                 rank,
             }));
         }
-        let flattened: usize = in_shape[start_dim..=end_dim].iter().product();
+        // 潰す軸区間の部分積は `checked_mul` で計算する（`reshape`／
+        // `broadcast_to` と同じ自前実装。ゼロ長軸を含む形状〈例:
+        // shape=[0, usize::MAX, 2]〉でも debug panic・release ラップを
+        // 起こさないための境界検査。REQ-8 趣旨の境界検査 A03 対策）。
+        let flattened = match in_shape[start_dim..=end_dim]
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        {
+            Some(n) => n,
+            None => {
+                return Err(AutodiffError::Shape(ShapeError::ElementCountOverflow));
+            }
+        };
         let mut out_shape: Vec<usize> = in_shape[..start_dim].to_vec();
         out_shape.push(flattened);
         out_shape.extend_from_slice(&in_shape[end_dim + 1..]);
