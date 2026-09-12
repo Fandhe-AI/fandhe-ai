@@ -390,7 +390,11 @@ mod kernels_wmma_opt;
 mod readout_regression_diag_tests_1436;
 // イシュー #1336: `MemoryOps::with_host_view` の CUDA 実装
 // （`memory.rs`）が使う、形状ごとに再利用するホストステージング
-// バッファのキャッシュ。crate 内部限定（`memory.rs` のみが参照）。
+// バッファのキャッシュ（D2H 側）。イシュー #1585 で H2D 側（`memory.rs`
+// の `upload_inner`／`upload_into`・`gemm.rs`・`ops.rs` の H2D 発行）
+// 向けの対称な opt-in staging を同モジュールへ追加した。crate 内部限定
+// （`memory.rs`／`gemm.rs`／`ops.rs` のみが参照。opt-in トグルのみ
+// `pub use` 経由で crate 外部へ公開）。
 mod host_staging;
 mod layer_norm;
 pub mod memory;
@@ -564,6 +568,14 @@ pub use host_staging::HostStagingStats;
 #[cfg(feature = "internal-diagnostics")]
 pub use host_staging::HostStagingKind;
 pub use layer_norm::CudaLayerNorm;
+// H2D pinned staging の opt-in スイッチ（イシュー #1585。`crate::
+// placement::{set_managed_placement_enabled, managed_placement_enabled}`
+// と同型のプロセスワイド `AtomicBool` トグル）。`internal-diagnostics`
+// feature でゲートしない: managed placement 同様、facade の公開 API
+// （`fandhe_ai::set_cuda_pinned_h2d_enabled`）が薄く委譲する通常の
+// 公開スイッチであり、統計・種別を覗く診断専用型（上記 2 つ）とは
+// 性質が異なる。
+pub use host_staging::{pinned_h2d_enabled, set_pinned_h2d_enabled};
 pub use nvrtc::{
     CompiledDims, CudaKernelCacheKey, CudaKernelDescriptor, MAX_PIPELINE_STAGES, compile_ptx,
     derive_pipeline_stages, nvrtc_version,

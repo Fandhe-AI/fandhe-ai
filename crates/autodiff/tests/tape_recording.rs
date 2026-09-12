@@ -361,3 +361,244 @@ fn transpose_axis_out_of_range_returns_shape_error() {
         AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
     ));
 }
+
+// --- permute / broadcast_to / expand / squeeze / unsqueeze / flatten
+// （イシュー #1597） ---
+
+/// 14. `Var::permute`/`Var::broadcast_to`/`Var::squeeze`/
+///     `Var::unsqueeze`/`Var::flatten` がテープへノードを 1 個ずつ
+///     追記することを検証する（受け入れ条件「forward 実行時にテープへ
+///     演算が記録される」の個別確認。`squeeze`/`unsqueeze`/`flatten` は
+///     `reshape` へ委譲するため記録されるノード種別は `Op::Reshape`）。
+#[test]
+fn shape_ops_record_single_node_each() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+    let before = tape.len();
+
+    let p = x.permute(&[1, 0]).unwrap();
+    assert_eq!(tape.len(), before + 1);
+    assert_eq!(p.to_tensor().shape(), &[3, 2]);
+
+    let b = x.broadcast_to(&[2, 2, 3]).unwrap();
+    assert_eq!(tape.len(), before + 2);
+    assert_eq!(b.to_tensor().shape(), &[2, 2, 3]);
+
+    let sq = x.reshape(&[1, 6]).unwrap().squeeze(Some(0)).unwrap();
+    assert_eq!(sq.to_tensor().shape(), &[6]);
+
+    let u = x.unsqueeze(0).unwrap();
+    assert_eq!(u.to_tensor().shape(), &[1, 2, 3]);
+
+    let f = x.flatten(0, 1).unwrap();
+    assert_eq!(f.to_tensor().shape(), &[6]);
+}
+
+/// 15. `Var::permute` が zero-copy（既存バッファの `Arc` 共有）で
+///     あることを実測する（`transpose` 同種の検証。イシュー #1597）。
+#[test]
+fn permute_shares_underlying_buffer() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let x_val = x.to_tensor();
+    let x_ptr = x_val
+        .as_view_slice()
+        .expect("contiguous な葉テンソルは必ず as_view_slice を返す")
+        .as_ptr();
+
+    let p = x.permute(&[1, 0]).unwrap();
+    let p_val = p.to_tensor();
+    let p_ptr = p_val
+        .as_view_slice()
+        .expect("permute は zero-copy のため as_view_slice を返す")
+        .as_ptr();
+    assert_eq!(p_ptr, x_ptr, "permute は入力と storage を共有するはず");
+}
+
+/// 16. `Var::permute` の forward 値が `Var::transpose(0, 1)` と一致する
+///     こと（2 軸 swap の一般化として正しいこと）を検証する。
+#[test]
+fn permute_two_axis_swap_matches_transpose() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let p = x.permute(&[1, 0]).unwrap();
+    let tr = x.transpose(0, 1).unwrap();
+    assert_eq!(p.to_tensor().shape(), tr.to_tensor().shape());
+    assert_eq!(dense_vec(&p.to_tensor()), dense_vec(&tr.to_tensor()));
+}
+
+/// 17. `permute` の異常系（perm 長不一致・範囲外・重複軸）が
+///     `AutodiffError::Shape(..)` を返すことを検証する。
+#[test]
+fn permute_invalid_perm_returns_shape_error() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let err = x.permute(&[0]).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::RankMismatch { .. })
+    ));
+
+    let err = x.permute(&[0, 5]).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+
+    let err = x.permute(&[0, 0]).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::DuplicateAxis { .. })
+    ));
+}
+
+/// 18. `broadcast_to`/`expand` の異常系（縮小方向・非互換 shape）が
+///     `AutodiffError::Shape(BroadcastIncompatible)` を返すことを検証
+///     する。`expand` は `broadcast_to` への薄い委譲のため同じ結果に
+///     なることも併せて確認する。
+#[test]
+fn broadcast_to_and_expand_incompatible_shape_returns_shape_error() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+
+    let err = x.broadcast_to(&[2]).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::BroadcastIncompatible { .. })
+    ));
+
+    let err = x.expand(&[2]).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::BroadcastIncompatible { .. })
+    ));
+}
+
+/// 19. `expand` が `broadcast_to` と同じ forward 値を生むことを検証
+///     する（PyTorch 名の別名であることの直接確認）。
+#[test]
+fn expand_matches_broadcast_to() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+
+    let b = x.broadcast_to(&[2, 3]).unwrap();
+    let e = x.expand(&[2, 3]).unwrap();
+    assert_eq!(dense_vec(&b.to_tensor()), dense_vec(&e.to_tensor()));
+}
+
+/// 20. `squeeze(Some(d))` の PyTorch 準拠 no-op 挙動（`shape[d] != 1` の
+///     場合は shape を変えずに成功する）を検証する（`Var::squeeze` doc
+///     の numpy／TensorFlow との差の直接確認）。
+#[test]
+fn squeeze_specific_axis_not_size_one_is_noop() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let sq = x.squeeze(Some(0)).unwrap();
+    assert_eq!(sq.to_tensor().shape(), &[2, 3]);
+    assert_eq!(dense_vec(&sq.to_tensor()), dense_vec(&x.to_tensor()));
+}
+
+/// 21. `squeeze(None)` が長さ 1 の軸をすべて除去することを検証する。
+#[test]
+fn squeeze_none_removes_all_size_one_axes() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 2, 1, 3]));
+
+    let sq = x.squeeze(None).unwrap();
+    assert_eq!(sq.to_tensor().shape(), &[2, 3]);
+}
+
+/// 22. `squeeze(Some(d))` の軸範囲外エラーを検証する。
+#[test]
+fn squeeze_axis_out_of_range_returns_shape_error() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+
+    let err = x.squeeze(Some(5)).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+}
+
+/// 23. `unsqueeze` が末尾挿入（`dim == rank`）を許容し、範囲外
+///     （`dim > rank`）はエラーになることを検証する。
+#[test]
+fn unsqueeze_allows_trailing_insertion_and_rejects_out_of_range() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let u = x.unsqueeze(2).unwrap();
+    assert_eq!(u.to_tensor().shape(), &[2, 3, 1]);
+
+    let err = x.unsqueeze(3).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+}
+
+/// 24. `flatten` の異常系（`end_dim` 範囲外・`start_dim > end_dim`）を
+///     検証する。
+#[test]
+fn flatten_invalid_range_returns_shape_error() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let err = x.flatten(0, 5).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+
+    let err = x.flatten(1, 0).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+}
+
+/// 24b. `flatten` が潰す軸区間の部分積オーバーフローを `checked_mul`
+///      で検査し `ShapeError::ElementCountOverflow` を返すことを検証
+///      する（codex-review P1 是正の回帰: ゼロ長軸を含む形状
+///      `[0, usize::MAX, 2]` は総要素数自体は `0` で `Tensor::new` を
+///      通過するが、`flatten(1, 2)` が潰す区間 `[usize::MAX, 2]` の
+///      部分積は `checked_mul` なしでは debug panic・release ラップを
+///      起こす）。
+#[test]
+fn flatten_partial_product_overflow_returns_element_count_overflow() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // 総要素数は 0（先頭軸が 0）のため空データで構築できる。
+    let x = tape.var(&t(vec![], &[0, usize::MAX, 2]));
+
+    let err = x.flatten(1, 2).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)
+        ),
+        "オーバーフローを検出できていない: {err:?}"
+    );
+}
+
+/// 25. `permute → flatten`（非 contiguous 化した後の `reshape` 委譲）が
+///     `reshape` と同じく `NonContiguousReshape` を返すことを検証する
+///     （案 A 制約の継承。`Var::flatten` doc 参照）。
+#[test]
+fn flatten_after_permute_is_non_contiguous_error() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let p = x.permute(&[1, 0]).unwrap(); // shape [3,2]・非 contiguous
+    let err = p.flatten(0, 1).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::NonContiguousReshape)
+        ),
+        "非 contiguous な permute 結果への flatten は NonContiguousReshape のはず: {err:?}"
+    );
+}

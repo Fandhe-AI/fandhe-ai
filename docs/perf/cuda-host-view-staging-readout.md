@@ -443,3 +443,9 @@ F2（構造的非到達）を裏付ける**参考値**として扱い、ADOPT �
   ステージング化・resident `GradStaging` の重み勾配ホスト読み出し API
   等）は §7 項目 1・2 のとおり対象外（兄弟イシュー #1479 が
   `GradStaging` 読み出し API を別途扱う）。
+- **H2D 側（ホスト→デバイス転送）の対称な pinned staging** は本ドキュメント
+  が扱う D2H 側（`with_host_view`）とは別イシュー（#1585）で追加した
+  （`crate::host_staging::{set_pinned_h2d_enabled, pinned_h2d_enabled}`・
+  `H2dStagingCache`。既存 `unsafe` を再利用し新規追加なし・既定 OFF）。
+  設計・事前登録判定規則・実測記入欄は `docs/perf/cuda-h2d-pinned-staging.md`
+  を参照。

@@ -471,3 +471,36 @@ Softmax`／`LogSoftmax`＋VJP・`autodiff::var::Var::softmax`／`log_softmax`・
   ベクトル化・CUDA 実機実測（本エージェント実行環境に CUDA 実機への到達手段がない
   ため未実施のまま記入欄を残す）
 
+## 追補（イシュー #1597）
+
+§2.3「形状操作」表（上記）は取り込み元スナップショットのギャップ記述の
+ため変更していないが、`permute`／`expand`（`broadcast_to`）／
+`squeeze`／`unsqueeze` の各行が指す欠落は本イシューで解消済みである。
+
+- `Var::permute`（新規 `tape::Op::Permute { input, perm }`。`Tensor::permute`
+  への zero-copy 接続・VJP は逆置換 `upstream.permute(&inverse_perm)`）
+- `Var::broadcast_to`（新規 `tape::Op::BroadcastTo { input }`。
+  `Tensor::broadcast_to` への stride 0 view 接続・VJP は `Op::Add`/`Op::Mul`
+  の暗黙ブロードキャストと同じ `reduce_to_shape` 縮約を再利用）
+- `Var::expand`（`Var::broadcast_to` への薄い委譲。PyTorch 名の別名。
+  負値〈-1 で軸維持〉は `shape: &[usize]` の型上表現できないため非対応）
+- `Var::squeeze`／`Var::unsqueeze` は新規 `Op` を持たず、いずれも
+  `Var::reshape`（既存 `Op::Reshape`）へ委譲する薄いラッパー（§4 の
+  「薄いラッパー」区分どおり）。`squeeze(Some(d))` は `shape[d] != 1` の
+  場合 PyTorch 準拠で no-op（numpy／TF はエラーにするが、適合する
+  `ShapeError` variant が存在せず crates.io 公開クレート `tensor-core` の
+  公開 enum への variant 追加は semver 可視の変更になるため見送った）
+- `Var::flatten`（PyTorch `torch.flatten(start_dim, end_dim)` 相当。同じく
+  `Var::reshape` への委譲。§2.3 表には行がないが同じ Tier 1 issue の
+  スコープとして実装した）
+
+いずれも `Var::reshape`／`transpose` と同じ「非 contiguous な入力への
+適用は `ShapeError::NonContiguousReshape`」制約（案 A）を継承する（
+`Var::contiguous()`〈明示コピー Op〉は本イシューでは追加せず、
+out-of-scope として記録した）。`cat`／`stack`／`split`（§2.3 の残り 2 行）
+は #1598 へ引き継ぎ。5 演算自体はホスト `Tensor` の stride 再解釈のみで
+`BackendOps` を経由しないため 3 バックエンドへの個別実装は不要——
+下流の融合経路（`add`）・GEMM カーネル（`matmul`）が view を正しく
+消費することを `crates/facade/tests/shape_ops_backend_parity.rs` で
+検証した（CPU 属性なし・Metal／CUDA `#[ignore]`）。
+

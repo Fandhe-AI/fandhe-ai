@@ -222,4 +222,14 @@ fn reset_with_view_node_does_not_panic() {
     let a2 = tape.leaf(0).unwrap();
     let reshaped2 = a2.reshape(&[4]).unwrap();
     assert_eq!(reshaped2.to_tensor().shape(), &[4]);
+
+    // permute／broadcast_to（イシュー #1597）も同じ view 系ノードの
+    // reset 契約を満たすことを併せて確認する（低コストな追加ケース）。
+    tape.reset();
+    assert_eq!(tape.len(), 1);
+    let a3 = tape.leaf(0).unwrap();
+    let permuted = a3.permute(&[1, 0]).unwrap();
+    assert_eq!(permuted.to_tensor().shape(), &[2, 2]);
+    let broadcasted = a3.broadcast_to(&[2, 2, 2]).unwrap();
+    assert_eq!(broadcasted.to_tensor().shape(), &[2, 2, 2]);
 }
