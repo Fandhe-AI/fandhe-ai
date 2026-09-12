@@ -140,14 +140,22 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
             "cmp w12, #16",
             "b.lt 10b",
             // k ループ: kc_len == 0 ならスキップ（za0 は C の値のまま）。
-            "cbz {kc:w}, 12f",
+            // `kc` は `usize`（64 bit）のフルレジスタ（`{kc}`＝X レジスタ）で
+            // 扱う。`cbz`/`subs` の 32 bit（`{kc:w}`＝W レジスタ）版は
+            // `kc_len` を暗黙的に下位 32 bit へ切り詰めるため、
+            // `kc_len > u32::MAX` の呼び出し（`BlockSizes::kc` が極端に
+            // 大きい場合。理論上は `usize` の契約上あり得る）で無音に
+            // 誤った反復回数になりうる（advisor レビュー指摘。到達可能な
+            // `kc_len` は `blocks.kc` で事実上有界だが、SAFETY 契約を
+            // レジスタ幅の暗黙の仮定に依存させない）。
+            "cbz {kc}, 12f",
             "11:",
             "ld1w {{z1.s}}, p0/z, [{a}]",
             "ld1w {{z2.s}}, p0/z, [{b}]",
             "fmopa za0.s, p0/m, p0/m, z1.s, z2.s",
             "add {a}, {a}, #64",
             "add {b}, {b}, #64",
-            "subs {kc:w}, {kc:w}, #1",
+            "subs {kc}, {kc}, #1",
             "b.ne 11b",
             "12:",
             // ストア: za0h.s[0..16] を C の 16 行へ書き戻す。
@@ -370,6 +378,57 @@ mod tests {
         assert_eq!(
             c_sme, expected,
             "非正規化数入力でも scalar 参照と bit 完全一致するはず"
+        );
+    }
+
+    /// 非正規化数「結果」の FTZ（flush-to-zero）差異を検出する
+    /// （advisor レビュー指摘: 上記
+    /// `sme_kernel_matches_scalar_reference_denormal_values` は入力が
+    /// 非正規化数のケースのみを検証しており、`a=b=c=1e-40` では
+    /// `fma(1e-40,1e-40,1e-40)` の積項が 0 へアンダーフローするため
+    /// 「非正規化数の乗算結果がストリーミングモードでフラッシュされない
+    /// こと」自体は検証できていなかった）。本テストは正規化数どうしの
+    /// 積が非正規化数（`1e-20 * 1e-20 = 1e-40`）になる入力を使い、SME
+    /// 側が FTZ でこの結果を 0 へ潰さず scalar 参照と bit 完全一致する
+    /// ことを確認する（R3(b) が本来意図した FZ 判別）。
+    #[test]
+    fn sme_kernel_matches_scalar_reference_denormal_result_from_normal_operands() {
+        let Some(kernel) = SmeKernel::try_new() else {
+            eprintln!("SME 非対応環境のためスキップ");
+            return;
+        };
+        let kc_len = 1;
+        let normal_small = 1e-20f32;
+        assert!(
+            normal_small.is_normal(),
+            "テスト前提: 1e-20 は正規化数であるはず"
+        );
+        let denormal_product = normal_small * normal_small;
+        assert!(
+            denormal_product != 0.0 && denormal_product.abs() < f32::MIN_POSITIVE,
+            "テスト前提: 1e-20 * 1e-20 は非正規化数（アンダーフロー結果）であるはず"
+        );
+
+        let ap = vec![normal_small; MR * kc_len];
+        let bp = vec![normal_small; kc_len * NR];
+        let c_init = vec![0.0f32; MR * NR];
+
+        let mut c_sme = c_init.clone();
+        kernel.run(&ap, &bp, &mut c_sme, kc_len);
+
+        let expected = scalar_reference(&ap, &bp, &c_init, NR, kc_len);
+        // scalar_reference（`f32::mul_add`）自身が非正規化数の結果を
+        // 生成することを前提の一部として確認する（テスト自体の健全性）。
+        assert!(
+            expected
+                .iter()
+                .all(|&v| v != 0.0 && v.abs() < f32::MIN_POSITIVE),
+            "scalar 参照側も非正規化数を生成するはず（テスト前提）"
+        );
+        assert_eq!(
+            c_sme, expected,
+            "正規化数どうしの積がアンダーフローする非正規化数の結果を、\
+             SME 側が FTZ で 0 へ潰さず scalar 参照と bit 完全一致するはず"
         );
     }
 
