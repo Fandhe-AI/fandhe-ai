@@ -18,7 +18,7 @@ use std::cell::Ref;
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, ShapeError, Tensor, broadcast_shape,
-    concat_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
+    concat_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -488,6 +488,175 @@ impl<'t> Var<'t> {
                 pred: self.id,
                 target: target.id,
                 reduction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 行方向 RMSNorm（`x · rsqrt(mean(x²) + eps) · w`。`w` が `None`
+    /// の場合は乗算をスキップ。イシュー #1596）。正規化軸は常に
+    /// 最終軸（[`row_norm_layout`] が `(rows, hidden)` を導出する）。
+    ///
+    /// 検査順序（`mse_loss_with` と同じ演算メソッド規律。`weight` を
+    /// 渡す場合のみクロステープ検査を追加）: ①`weight` があれば
+    /// `check_same_tape` → ②`eps` が有限かつ非負であることを検査
+    /// （違反は `AutodiffError::InvalidArgument`。`docs/norm-ops-design.md`
+    /// 「`eps` 検査」節） → ③`row_norm_layout` で `self` の shape から
+    /// `hidden` を導出し、`weight` の shape が `[hidden]` と厳密一致する
+    /// ことを検査（`ShapeError::ShapeMismatch`） → ④実体化（層 1）
+    /// → ⑤`self.tape.ops().rmsnorm` を試み `Unsupported` のときのみ
+    /// `eval::rmsnorm_rows` へフォールバック（それ以外のエラーは伝播。
+    /// 判定迂回経路を作らない。`.claude/rules/security.md` A08）
+    /// → ⑥バックエンド契約検証（戻り値 shape が入力と恒等）
+    /// → ⑦ノード記録。
+    pub fn rms_norm(&self, weight: Option<&Var<'t>>, eps: f32) -> Result<Var<'t>, AutodiffError> {
+        if let Some(w) = weight {
+            self.check_same_tape(w)?;
+        }
+        if !eps.is_finite() || eps < 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::rms_norm: eps must be finite and non-negative, got {eps}"
+            )));
+        }
+        let x_shape = self.shape();
+        let (_, hidden) = row_norm_layout(&x_shape)?;
+        if let Some(w) = weight {
+            require_same_shape(&w.shape(), &[hidden])?;
+        }
+        let (x_val, w_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let x_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let w_val = match weight {
+                Some(w) => Some(materialize_fallible(&nodes, self.tape.ops(), w.id)?.clone()),
+                None => None,
+            };
+            (x_val, w_val)
+        };
+        let value = match self.tape.ops().rmsnorm(&x_val, w_val.as_ref(), eps) {
+            Ok(v) => {
+                // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                // rmsnorm` doc「戻り値の shape は入力 `x` と恒等」）を
+                // 検証する（実装バグの黙認防止。`.claude/rules/
+                // security.md` A08）。
+                if v.shape() != x_val.shape() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: x_val.shape().to_vec(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => {
+                let (rows, hidden) = row_norm_layout(&x_shape)?;
+                // `as_slice()` は非 contiguous な入力（`weight` に転置
+                // view 等が渡された場合）で `None` を返しうるため、
+                // `dense_vec`（`contiguous()` 経由の稠密化。`eval.rs`）
+                // を使う——`as_slice()` を直接使うと非 contiguous な
+                // `weight` を誤って「重みなし」（乗算スキップ）として
+                // 扱ってしまう（判定迂回経路。`.claude/rules/
+                // security.md` A08）。
+                let w_dense = w_val.as_ref().map(eval::dense_vec);
+                eval::rmsnorm_rows(&x_val, w_dense.as_deref(), eps, rows, hidden)
+            }
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::RmsNorm {
+                input: self.id,
+                weight: weight.map(|w| w.id),
+                eps,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 行方向 LayerNorm（`(x − mean(x)) · rsqrt(var(x) + eps) · w + b`。
+    /// `w`／`b` はそれぞれ `None` の場合は対応する演算をスキップ。
+    /// 分散は biased（÷N）。イシュー #1596）。[`Self::rms_norm`] と
+    /// 同じ最終軸限定契約・検査順序（`bias` も `weight` と同じ
+    /// クロステープ検査・shape `[hidden]` 検査を受ける）。
+    pub fn layer_norm(
+        &self,
+        weight: Option<&Var<'t>>,
+        bias: Option<&Var<'t>>,
+        eps: f32,
+    ) -> Result<Var<'t>, AutodiffError> {
+        if let Some(w) = weight {
+            self.check_same_tape(w)?;
+        }
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+        if !eps.is_finite() || eps < 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::layer_norm: eps must be finite and non-negative, got {eps}"
+            )));
+        }
+        let x_shape = self.shape();
+        let (_, hidden) = row_norm_layout(&x_shape)?;
+        if let Some(w) = weight {
+            require_same_shape(&w.shape(), &[hidden])?;
+        }
+        if let Some(b) = bias {
+            require_same_shape(&b.shape(), &[hidden])?;
+        }
+        let (x_val, w_val, b_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let x_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let w_val = match weight {
+                Some(w) => Some(materialize_fallible(&nodes, self.tape.ops(), w.id)?.clone()),
+                None => None,
+            };
+            let b_val = match bias {
+                Some(b) => Some(materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone()),
+                None => None,
+            };
+            (x_val, w_val, b_val)
+        };
+        let value = match self
+            .tape
+            .ops()
+            .layer_norm(&x_val, w_val.as_ref(), b_val.as_ref(), eps)
+        {
+            Ok(v) => {
+                if v.shape() != x_val.shape() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: x_val.shape().to_vec(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => {
+                let (rows, hidden) = row_norm_layout(&x_shape)?;
+                // `rms_norm` と同じ理由（直上コメント）で `dense_vec`
+                // を使う（`as_slice()` は非 contiguous を無音で
+                // 「なし」化してしまう）。
+                let w_dense = w_val.as_ref().map(eval::dense_vec);
+                let b_dense = b_val.as_ref().map(eval::dense_vec);
+                eval::layer_norm_rows(
+                    &x_val,
+                    w_dense.as_deref(),
+                    b_dense.as_deref(),
+                    eps,
+                    rows,
+                    hidden,
+                )
+            }
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::LayerNorm {
+                input: self.id,
+                weight: weight.map(|w| w.id),
+                bias: bias.map(|b| b.id),
+                eps,
             },
             value,
         );

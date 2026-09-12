@@ -260,6 +260,32 @@ pub(crate) enum Op {
         dim0: usize,
         dim1: usize,
     },
+    /// 行方向 RMSNorm（イシュー #1596）。`BackendOps` に対応メソッド
+    /// （`rmsnorm`。既存の `run_fused` canonical プラン一致経路とは別の
+    /// 独立エントリ）があり非融合対象ではないが、`Add`/`Mul`/`Relu`/
+    /// `Exp`/`Tanh` の elementwise 5 演算（`is_lazy_elementwise`）には
+    /// 含めないため常に実体化済み（`push_eager`）とする。`weight` は
+    /// `None` の場合は乗算をスキップする（`nn::RmsNorm::without_
+    /// affine`）。`eps` は forward（`Var::rms_norm`）が有限・非負を
+    /// 事前検査済み。VJP（`grad.rs`）は forward 記録値だけでは
+    /// `rstd`（`weight` に 0 があると `out_value` から逆算できない）を
+    /// 復元できないため、`input` を `materialize_fallible` で再取得し
+    /// 統計を再計算する。
+    RmsNorm {
+        input: NodeId,
+        weight: Option<NodeId>,
+        eps: f32,
+    },
+    /// 行方向 LayerNorm（`(x−mean(x))·rsqrt(var(x)+eps)·w+b`。分散は
+    /// biased ÷N。イシュー #1596）。[`Op::RmsNorm`] と同じ非融合・
+    /// 常実体化・`eps` 事前検査済みの契約。`weight`／`bias` はそれぞれ
+    /// 独立に `None` を取りうる（`nn::LayerNorm::without_affine`）。
+    LayerNorm {
+        input: NodeId,
+        weight: Option<NodeId>,
+        bias: Option<NodeId>,
+        eps: f32,
+    },
     /// RNN（tanh 版）セル 1 step（イシュー #1647・設計 `docs/autodiff-
     /// rnn-cell-tape-design.md` 決定 1・5）。`h_t = tanh(x·W_ih + b_ih +
     /// h_{t-1}·W_hh + b_hh)`。RNN は LSTM／GRU と異なりゲート同士の要素
@@ -954,8 +980,9 @@ impl Tape {
         // `Op::Leaf` のみ葉ノード（`push_resident_leaf` の `Op::ResidentLeaf`
         // と合わせて #1048 の葉プレフィックス判定対象）。それ以外
         // （`MatMul`/`Sum`/`Max`/`Sigmoid`/`MseLoss`/`CrossEntropyLoss`/
-        // `LinearResident`/`Softmax`/`LogSoftmax`）は演算ノードのため、これから追記する直前の
-        // 長さで葉プレフィックスを固定する（`Tape::reset` doc 参照）。
+        // `LinearResident`/`RmsNorm`/`LayerNorm`/`Softmax`/`LogSoftmax`）は
+        // 演算ノードのため、これから追記する直前の長さで葉プレフィックスを
+        // 固定する（`Tape::reset` doc 参照）。
         if !matches!(op, Op::Leaf) {
             self.freeze_leaf_prefix(nodes.len());
         }

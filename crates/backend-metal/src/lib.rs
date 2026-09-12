@@ -428,6 +428,8 @@ mod gemm_hfrag_diag_tests;
 pub(crate) mod generic_cache;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
+#[cfg(target_os = "macos")]
+pub mod layer_norm;
 pub mod layout;
 #[cfg(target_os = "macos")]
 pub mod memory;
@@ -521,6 +523,8 @@ pub use error::MetalError;
 pub use gemm::{GemmVariant, MetalGemm, SplitKFallbackReason, SplitKRoute};
 #[cfg(target_os = "macos")]
 pub use half_buffer::MetalHalfBuffer;
+#[cfg(target_os = "macos")]
+pub use layer_norm::MetalLayerNorm;
 #[cfg(target_os = "macos")]
 pub use memory::MetalMemory;
 #[cfg(target_os = "macos")]

@@ -23,10 +23,12 @@ use crate::error::AutodiffError;
 use crate::eval;
 use crate::nn::activation::{LogSoftmax, Relu, Sigmoid, Softmax, Tanh};
 use crate::nn::linear::Linear;
+use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, Tensor, broadcast_shape, matmul_out_shape, reduce_out_shape,
+    BackendError, BackendOps, ShapeError, Tensor, broadcast_shape, matmul_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout,
 };
 
 /// `nn` の部品（層・活性化関数）に共通の forward シグネチャ。
@@ -50,8 +52,9 @@ pub trait Module {
     /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
     /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
     /// ない）とする。既定は [`BackendError::Unsupported`] を返す
-    /// fail-safe（本クレート内 6 実装〈`Linear`・`Relu`・`Sigmoid`・
-    /// `Tanh`・`Softmax`・`LogSoftmax`〉はいずれもこのデフォルトを
+    /// fail-safe（本クレート内 8 実装〈`Linear`・`Relu`・`Sigmoid`・
+    /// `Tanh`・`RmsNorm`・`LayerNorm`・`Softmax`・`LogSoftmax`〉はいずれも
+    /// このデフォルトを
     /// オーバーライドする。呼び出し元
     /// が独自の `Module` 実装をこの経路で使う場合、`Unsupported` を
     /// フォールバックの合図として扱うこと）。
@@ -225,6 +228,103 @@ impl Module for Tanh {
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         Ok(eval::tanh(input))
+    }
+}
+
+/// `RmsNorm::bind(tape).forward(input)` への委譲（イシュー #1596）。
+/// `Linear` と異なり `forward` 自体は fallible（`eps` 検査・`row_norm_
+/// layout` の shape 検査で失敗しうる）ため、戻り値をそのまま返す。
+impl Module for RmsNorm {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    /// `Var::rms_norm`（`var.rs`）と同じディスパッチ規律を `tape` 不要
+    /// 経路（`ops` を直接受け取る）で再現する: `row_norm_layout` で
+    /// `hidden` を導出し `weight` の shape を検査してから `ops.rmsnorm`
+    /// を試み、`Unsupported` のときのみ `eval::rmsnorm_rows` へ
+    /// フォールバックする（`Var::rms_norm` と同じ判定迂回を作らない
+    /// 規律。`.claude/rules/security.md` A08）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let (rows, hidden) = row_norm_layout(input.shape())?;
+        if let Some(w) = self.weight() {
+            require_same_shape(w.shape(), &[hidden])?;
+        }
+        let value = match ops.rmsnorm(input, self.weight(), self.eps()) {
+            Ok(v) => v,
+            Err(BackendError::Unsupported(_)) => {
+                let w_dense = self.weight().map(eval::dense_vec);
+                eval::rmsnorm_rows(input, w_dense.as_deref(), self.eps(), rows, hidden)
+            }
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        // `Var::rms_norm`（`var.rs`）と同じバックエンド契約検証
+        // （`BackendOps::rmsnorm` doc「戻り値の shape は入力 `x` と
+        // 恒等」）を tape 不要経路でも行う。省略すると `forward_host`
+        // 経由の推論のみ不整合 shape を素通りさせてしまい、`Var::
+        // rms_norm` と `forward_host` とで判定基準が食い違う
+        // （`.claude/rules/security.md` A08 の判定迂回経路になる）。
+        if value.shape() != input.shape() {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: input.shape().to_vec(),
+                },
+            )));
+        }
+        Ok(value)
+    }
+}
+
+/// `LayerNorm::bind(tape).forward(input)` への委譲（イシュー #1596）。
+/// `RmsNorm` と同じ fallible 契約・`forward_host` ディスパッチ規律。
+impl Module for LayerNorm {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let (rows, hidden) = row_norm_layout(input.shape())?;
+        if let Some(w) = self.weight() {
+            require_same_shape(w.shape(), &[hidden])?;
+        }
+        if let Some(b) = self.bias() {
+            require_same_shape(b.shape(), &[hidden])?;
+        }
+        let value = match ops.layer_norm(input, self.weight(), self.bias(), self.eps()) {
+            Ok(v) => v,
+            Err(BackendError::Unsupported(_)) => {
+                let w_dense = self.weight().map(eval::dense_vec);
+                let b_dense = self.bias().map(eval::dense_vec);
+                eval::layer_norm_rows(
+                    input,
+                    w_dense.as_deref(),
+                    b_dense.as_deref(),
+                    self.eps(),
+                    rows,
+                    hidden,
+                )
+            }
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        // `RmsNorm::forward_host`（直上）と同じバックエンド契約検証。
+        if value.shape() != input.shape() {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: input.shape().to_vec(),
+                },
+            )));
+        }
+        Ok(value)
     }
 }
 

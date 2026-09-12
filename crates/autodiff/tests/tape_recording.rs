@@ -653,7 +653,7 @@ fn narrow_records_view_node_and_shares_underlying_buffer() {
     // ポインタが `x_ptr` そのものと一致するわけではなく、同一 storage
     // 上で 1 要素分（4 バイト）だけ進んだ位置を指すはず（zero-copy の
     // 実測: 新規アロケーションであればこのオフセット関係は成立しない）。
-    let expected_ptr = unsafe { x_ptr.add(1) };
+    let expected_ptr = x_ptr.wrapping_add(1);
     assert_eq!(
         n_ptr, expected_ptr,
         "narrow は入力と storage を共有し、start 分だけオフセットされるはず"

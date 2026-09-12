@@ -22,6 +22,7 @@
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::parity::assert_parity;
 use fandhe_ai_backend_metal::{MetalContext, MetalRmsNorm};
+use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 /// テスト専用 CPU 参照実装（`f32::mul_add` を使用し、GPU 側 `fma()` と
 /// 丸め方針を揃える）。`out = x * rsqrt(mean(x^2, axis=-1) + eps) * w`
@@ -474,6 +475,74 @@ fn rmsnorm_matches_backend_cpu_with_multiple_inf_in_same_row() {
                     cpu_row[i]
                 );
             }
+        }
+    }
+}
+
+// --- BackendOps::rmsnorm 独立エントリ（イシュー #1596。`run_fused` の
+//     RMSNorm 一致経路〈上記〉とは別の独立 API）---
+
+/// `MetalBackendOps::rmsnorm` が `MetalRmsNorm::run_rmsnorm_f32` と
+/// bit 同一であること（同一カーネルへのディスパッチであり別実装では
+/// ないことの確認）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn backend_ops_rmsnorm_is_bit_identical_to_metal_rmsnorm() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let rmsnorm = MetalRmsNorm::new(&ctx).expect("RMSNorm パイプラインの構築に失敗した");
+
+    let rows = 3usize;
+    let hidden = 17usize;
+    let x_data = Xorshift64Star::new(6101).fill_vec(rows * hidden);
+    let w_data = Xorshift64Star::new(6102).fill_vec(hidden);
+    let x = Tensor::new(x_data.clone(), &[rows, hidden]).expect("valid tensor");
+    let w = Tensor::new(w_data.clone(), &[hidden]).expect("valid tensor");
+
+    let metal = fandhe_ai_backend_metal::MetalBackendOps::new();
+    let via_ops = metal
+        .rmsnorm(&x, Some(&w), 1e-5)
+        .expect("BackendOps::rmsnorm must succeed on Metal-equipped test runner");
+    let via_kernel = rmsnorm
+        .run_rmsnorm_f32(&ctx, &x_data, Some(&w_data), 1e-5, rows, hidden)
+        .expect("MetalRmsNorm::run_rmsnorm_f32 must succeed");
+
+    assert_eq!(via_ops.shape(), &[rows, hidden]);
+    assert_eq!(
+        via_ops.as_slice().expect("contiguous"),
+        via_kernel.as_slice()
+    );
+}
+
+/// `MetalBackendOps::rmsnorm` を CPU 参照実装と実機で直接
+/// `assert_parity` 突合する（形状網羅）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn backend_ops_rmsnorm_matches_cpu_reference_across_shapes() {
+    let metal = fandhe_ai_backend_metal::MetalBackendOps::new();
+    let cpu = fandhe_ai_backend_cpu::CpuBackendOps::new();
+
+    let rows_cases: &[usize] = &[1, 3, 17];
+    let hidden_cases: &[usize] = &[1, 31, 32, 33, 1024, 4097];
+    let mut seed = 8000u64;
+    for &rows in rows_cases {
+        for &hidden in hidden_cases {
+            seed += 1;
+            let x_data = Xorshift64Star::new(seed).fill_vec(rows * hidden);
+            let x = Tensor::new(x_data, &[rows, hidden]).expect("valid tensor");
+
+            let gpu_out = metal
+                .rmsnorm(&x, None, 1e-5)
+                .expect("BackendOps::rmsnorm must succeed on Metal-equipped test runner");
+            let cpu_out = cpu
+                .rmsnorm(&x, None, 1e-5)
+                .expect("BackendOps::rmsnorm must succeed on CPU");
+
+            assert_eq!(gpu_out.shape(), &[rows, hidden]);
+            assert_parity(
+                &format!("BackendOps::rmsnorm metal-cpu direct parity rows={rows} hidden={hidden}"),
+                gpu_out.as_slice().expect("contiguous"),
+                cpu_out.as_slice().expect("contiguous"),
+            );
         }
     }
 }

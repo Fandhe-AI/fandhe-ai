@@ -37,7 +37,7 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, require_same_shape,
-    row_softmax_layout,
+    row_norm_layout, row_softmax_layout,
 };
 
 use crate::context::MetalContext;
@@ -1957,6 +1957,87 @@ impl BackendOps for MetalBackendOps {
             .run_mse_backward_f32(&ctx, pred_slice, target_slice, scale)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::rmsnorm`] の Metal 実装
+    /// （イシュー #1596）。既存の [`Self::run_fused`] 経由（`match_
+    /// rmsnorm_plan` の canonical プラン一致限定・`mean` 化なし・`eps`
+    /// なし・`weight` なし）とは別の独立エントリで、[`row_norm_layout`]
+    /// で `(rows, hidden)` を導出してから [`crate::rmsnorm::MetalRmsNorm::
+    /// run_rmsnorm_f32`]（`mean` 化・`eps`・任意 `weight` を含む標準
+    /// RMSNorm）を直接呼ぶ（`run_fused_rmsnorm` と同じ
+    /// `context_cache::cached_rmsnorm` キャッシュを再利用する）。
+    fn rmsnorm(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("rmsnorm: input not contiguous".into())
+        })?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("rmsnorm: weight not contiguous".into())
+            })?),
+            None => None,
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let rmsnorm = context_cache::cached_rmsnorm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = rmsnorm
+            .run_rmsnorm_f32(&ctx, x_slice, w_slice, eps, rows, hidden)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::layer_norm`] の Metal 実装
+    /// （イシュー #1596）。[`Self::rmsnorm`] と同じ `row_norm_layout`
+    /// 導出だが、`run_fused`（canonical 融合プラン一致経路）への
+    /// LayerNorm 一致経路は追加しない——LayerNorm は本エントリ経由でのみ
+    /// 到達する（`docs/norm-ops-design.md`）。新設カーネル
+    /// [`crate::layer_norm::MetalLayerNorm::run_layer_norm_f32`]・
+    /// `context_cache::cached_layer_norm` を使う。
+    fn layer_norm(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("layer_norm: input not contiguous".into())
+        })?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("layer_norm: weight not contiguous".into())
+            })?),
+            None => None,
+        };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_slice = match &b_owned {
+            Some(b) => Some(b.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("layer_norm: bias not contiguous".into())
+            })?),
+            None => None,
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let layer_norm = context_cache::cached_layer_norm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = layer_norm
+            .run_layer_norm_f32(&ctx, x_slice, w_slice, b_slice, eps, rows, hidden)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::lstm_pointwise`] の Metal
