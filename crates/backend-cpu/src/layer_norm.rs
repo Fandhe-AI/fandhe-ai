@@ -511,4 +511,46 @@ mod tests {
             "単純な逐次和（是正前の実装）へ後退している可能性がある"
         );
     }
+
+    /// PR #1671 codex-review 2 回目の P1 指摘（イシュー #1596）の反例を
+    /// CPU 参照実装（本関数。`affine` は行末の `xhat.mul_add(wv, bv)`。
+    /// ハードウェア FMA）で再現する Linux 実行可能な回帰テスト
+    /// （Metal 実機依存版は `crates/backend-metal/tests/
+    /// layer_norm_parity.rs::
+    /// layer_norm_affine_overflow_boundary_matches_hardware_fma_not_double_rounding`）。
+    ///
+    /// `x` は平均 0・分散 256（`rstd=1/16`）となるよう構成した行で、
+    /// `xhat[0] = 31/16` が丸め無しで厳密に成立する。
+    /// `weight[0]=f32::from_bits(0x7f042108)`・`bias[0]=-1` との単一丸め
+    /// FMA（`f32::mul_add`）は有限の `f32::MAX` を返す（`f64` へ丸めて
+    /// から `f32` へ narrow する素朴な二段階丸めだと `+inf` になる、
+    /// という指摘の反例そのもの。Metal 側の是正〈round-to-odd 丸め加算
+    /// `ln_f64_add_ro`〉が本 CPU 参照実装〈ハードウェア FMA〉と同じ
+    /// 値を返すことを期待する契約の CPU 側担保）。
+    #[test]
+    fn affine_overflow_boundary_row_returns_f32_max_not_inf() {
+        let x = [
+            31.0f32, -31.0, 31.0, -31.0, 11.0, -11.0, 2.0, -2.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0,
+        ];
+        let mut w = [1.0f32; 16];
+        w[0] = f32::from_bits(0x7f042108);
+        let mut b = [0.0f32; 16];
+        b[0] = -1.0;
+
+        let out = run_layer_norm_f32(&x, Some(&w), Some(&b), 0.0, 1, 16)
+            .expect("run_layer_norm_f32 must succeed");
+        assert!(
+            out[0].is_finite(),
+            "expected out[0] to be finite (f32::MAX), got {:?}",
+            out[0]
+        );
+        assert_eq!(
+            out[0].to_bits(),
+            f32::MAX.to_bits(),
+            "out[0] は f32::MAX と bit 完全一致するはず（ハードウェア FMA \
+             f32::mul_add の結果）: got={:?}",
+            out[0]
+        );
+    }
 }

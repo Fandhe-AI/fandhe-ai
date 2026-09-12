@@ -39,6 +39,25 @@
 //! 未定義動作（Rust は debug panic・MSL は UB）のため、必ず分岐で除外して
 //! から shift する（`add_f64_bits` の桁合わせ・`narrow_f64_bits` の
 //! subnormal 経路）。`gemm.metal` を変更した場合は本ファイルも追従させる。
+//!
+//! # `layer_norm.metal` との対応（イシュー #1596・PR #1671）
+//!
+//! 本モジュールは `layer_norm.metal` の `ln_f64_*` 系関数（`widen`・
+//! `add`・`add_ro`・`sub`・`mul`・`div`・`narrow`・`recip_newton`・
+//! `rsqrt_newton`）のホスト側逐語モデルでもある（`gemm.metal` 用途と
+//! 機能重複するが、MSL は `newLibraryWithSource` でファイル単位に
+//! コンパイルされ翻訳単位を共有できないため、両ファイルは意図的に
+//! 独立実装を持つ。逐語対応の詳細は `layer_norm.metal` 冒頭コメント
+//! 「ホスト側の逐語モデル」を参照）。
+//!
+//! [`add_f64_bits_round_to_odd`] は [`add_f64_bits`] とは異なり
+//! **round-to-odd**（RO）丸めであり、Rust の `f64 +` 演算子に対応する
+//! ものではない（RO 自体は IEEE 754 の標準丸めモードではなく、二重
+//! 丸め回避のための補助的な丸め）。そのため [`fma_f32_bits`]
+//! （`a*b+c` を単一丸め FMA として計算する合成関数。LayerNorm の affine
+//! `x̂·w+b` のホスト側逐語モデル）経由でハードウェア `f32::mul_add` と
+//! bit 完全一致することをユニットテストで検証する（`add_f64_bits_
+//! round_to_odd` 自体の直接の比較対象は存在しない）。
 
 /// 64bit 値の leading zero count。MSL の `clz(ulong)` の可用性に依存せず
 /// 32bit `clz` 2 回で構成する（MSL 側 `bias_clz64` と同一構造）。
