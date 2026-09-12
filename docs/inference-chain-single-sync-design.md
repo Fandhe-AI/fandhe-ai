@@ -78,7 +78,9 @@ facade 側: `Sequential` が `layers` と `snapshot_resident_params` の leaves 
 
 中間出力 `DeviceBuffer` の `Drop` も同期点にならない。Metal はプール返却が `defer_pool_return` で in-flight 中は待たずに退避し、CUDA `CudaSlice::drop` はデバイス側 `stream.wait` のみで `has_async_alloc=true` は GB10 実測済み（`lowlayer-diagnosis` §2）。`has_async_alloc=false` 環境ではホスト同期へフォールバックしうるが、正しさ（数値契約）は不変と注記する。
 
-Metal は `should_auto_flush` によりコマンドバッファが分割されうるため、不変条件は **「`wait_until_completed` が predict 1 回あたり 1 増える」** と定義する（`command_buffers == 1` は 2 層規模〈784→256→ReLU→10〉での期待値に留め、不変条件本体には含めない）。
+`context.rs:599-604` の `diag_wait_until_completed` は `waitUntilCompleted()` の呼び出し回数（＝`synchronize_observed` が待つバッチ 1 個ごとに 1 増える）であり、`synchronize()`（＝`MemoryOps::download`／本チェーンの最終同期点）の呼び出し回数そのものではない。Metal は `should_auto_flush`（`MAX_DISPATCHES_PER_BATCH` 到達）により `encode` の途中でコマンドバッファが `flush_locked`（commit のみ・待たない）で分割されうるため、1 回の `synchronize()` 呼び出しが複数の committed バッチを待ち、`diag_wait_until_completed` を 2 以上増分することがある——これは実装の誤りではなく、正しい実装でも発生しうる。
+
+したがって**単一同期の不変条件は「`synchronize()` の呼び出し回数が predict 1 回あたり 1」として定義する**（`upload` 1 回＋層ごとの encode-only＋最終 `download` 内の `synchronize()` 1 回のみで、チェーン内に追加の `synchronize()` 呼び出しが無いこと）。`diag_wait_until_completed` の増分 1 という説明は、バッチ分割が発生しない計測条件（2 層規模〈784→256→ReLU→10〉で `MAX_DISPATCHES_PER_BATCH` に到達しない場合）に限定した参考値であり、`command_buffers == 1` と同様に不変条件本体には含めない。バッチ分割が生じる計測（層数が多い・`MAX_DISPATCHES_PER_BATCH` を超える）では `diag_wait_until_completed` は 2 以上になりうるため、実機 `#[ignore]` テストは `synchronize()` 呼び出し回数（コード経路上の呼び出し箇所数として静的に確認する、または計測用オブザーバで数える）を主契約とし、`diag_wait_until_completed == 1` はバッチ分割が起きない構成に限定した副次確認として扱う。
 
 ### 決定 4: Metal failure_token 契約
 
@@ -140,7 +142,7 @@ plan 構築不能（`Sigmoid`／`Tanh` 混在・leaves 件数不一致）、ま�
 ## 7. #1580／#1581 への引き渡し（テスト一覧）
 
 - Linux 実行可能: `linear_forward_device_tracked` 既定委譲テスト（`sgd_step_device_tracked_default_delegates_to_sgd_step_device` と同型）・download `Err` 伝播（poison しない）／`is_set()` 事後検査（poison する）の 2 分岐・plan 構築（`Linear`+`ReLU` 融合／`Sigmoid` 混在でフォールバック／leaves 過少・過剰拒否）・モック `BackendOps` で `Unsupported` 全体フォールバック・トークン set 済みで `download` 後に `StorePoisoned`・CPU バックエンドでの新旧 `predict_resident` bit 同一
-- 実機 `#[ignore]`: Metal／CUDA で新旧 `predict_resident` bit 同一・run-to-run 同一・Metal `wait_until_completed` 増分 1／predict・CUDA は `linear_forward_device_real_device.rs`（#1216 未実測分）を先に green にする
+- 実機 `#[ignore]`: Metal／CUDA で新旧 `predict_resident` bit 同一・run-to-run 同一・Metal `synchronize()` 呼び出し回数 1／predict（バッチ分割が発生しない 2 層規模では `diag_wait_until_completed` 増分 1 も副次確認できる。決定 3 参照）・CUDA は `linear_forward_device_real_device.rs`（#1216 未実測分）を先に green にする
 - A/B: 決定 9 の規則。#1580 は M4 Max、#1581 は GB10
 
 ## 8. 出典
