@@ -16,8 +16,18 @@ backward 内訳は 5 起動。詳細は §6）。
 
 | 系列 | 機体 | コード | 負荷 | 用途 |
 |------|------|--------|------|------|
-| DGX 0.8.0 | DGX Spark GB10（専有・sm_121） | ピン `fandhe-ai =0.8.0`（crates.io 公開版） | load ≈ 0.05 | framework-compare 全 task・diag テスト・RAYON sweep |
+| DGX 0.8.0 | DGX Spark GB10（専有・sm_121） | ピン `fandhe-ai =0.8.0`（crates.io 公開版） | load average 0.03〜4.45（5 点実測。注 1） | framework-compare 全 task・diag テスト・RAYON sweep |
 | Mac HEAD | Apple M4 Max（共有） | origin/main HEAD `097bff19` path patch＋backward 内訳計装（`f91cafa3` からの差分は Metal split-K トグル・#1556 のみ。CPU 計測経路は同一） | load ≈ 4 | backward 内訳・train phases・readout interleave |
+
+注 1: DGX 0.8.0 の負荷は単一値ではなく計測ステージごとに変動する。実測は
+`docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx/uptime_{before,after}_*.txt`
+（1 分平均）: `uptime_before_all.txt` 1.05・`uptime_after_all.txt` 1.76・
+`uptime_after_sweep.txt` 1.56・`uptime_before_run2.txt` 0.03・
+`uptime_after_run2.txt` 4.45。専有環境ではあるが他ログイン（`users` 8〜9）が
+残存しており、run2（大コア pin sweep・追加 CPU gemm 計測）の前後で
+最大 4.45 まで上昇している。全系列を一律 load ≈ 0.05 として扱った当初の
+記載は誤りであり、当該区間の framework-compare／診断テスト結果は
+完全な専有条件下の値ではない点に留意する。
 
 実行コマンド・オーケストレーションは
 `docs/perf/logs/lowlayer-diagnosis-2026-09-12/scripts/`
@@ -131,7 +141,8 @@ iter_total 2.470 → 2.677 ms。後退は GPU 待ち＋ダウンロードを含�
   正式判定は各後続 issue（§7 参照）で、専有ゲートまたは record_only 明記の
   実測プロトコルに従って別途行う。
 - framework-compare の全数値（§2・§3）は**共有負荷下**（Mac HEAD は
-  load ≈ 4）または**専有だが単一起動**（DGX 0.8.0 は load ≈ 0.05・
+  load ≈ 4）または**専有だが単一起動**（DGX 0.8.0 は §1 注 1 のとおり
+  load average 0.03〜4.45 で変動しており厳密な専有条件下ではない・
   ハーネス既定の内部反復のみで複数プロセス起動の中央値ではない）。
   スレッド sweep（§3）は 3 プロセス起動中央値、backward 内訳（§4）は
   5 プロセス起動中央値。

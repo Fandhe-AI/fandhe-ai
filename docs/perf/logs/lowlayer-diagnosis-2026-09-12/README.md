@@ -12,7 +12,7 @@ scratchpad 絶対パス 1 箇所のみ `<masked-scratchpad-path>` へ置換済�
 
 | 系列 | 機体 | コード | 負荷 | 証拠等級 |
 |------|------|--------|------|----------|
-| DGX 0.8.0 | DGX Spark GB10（専有・sm_121） | ピン `fandhe-ai =0.8.0`（crates.io 公開版） | load average ≈ 0.05 | framework-compare 全 task はハーネス既定の単一起動・内部 20 反復（`warmup=20`/`iters` 既定）中央値。RAYON スイープは 3 プロセス起動中央値 |
+| DGX 0.8.0 | DGX Spark GB10（専有・sm_121） | ピン `fandhe-ai =0.8.0`（crates.io 公開版） | load average 0.03〜4.45（`dgx/uptime_before_all.txt` 1.05・`uptime_after_all.txt` 1.76・`uptime_after_sweep.txt` 1.56・`uptime_before_run2.txt` 0.03・`uptime_after_run2.txt` 4.45。専有だが他ログイン残存で run2 前後に上昇） | framework-compare 全 task はハーネス既定の単一起動・内部 20 反復（`warmup=20`/`iters` 既定）中央値。RAYON スイープは 3 プロセス起動中央値 |
 | Mac HEAD | Apple M4 Max（共有） | origin/main HEAD `097bff19` の path patch＋`diag-instrumentation.patch`（backward 内訳計装・MSE/mask マイクロ計測。本番実装ではない診断専用パッチ）。CPU 計測経路自体は `f91cafa3`（HEAD）と同一 | load average ≈ 4 | backward 内訳・train phases・readout interleave は 5 プロセス起動中央値 |
 
 ## ディレクトリ構成
@@ -81,7 +81,7 @@ scratchpad 絶対パス 1 箇所のみ `<masked-scratchpad-path>` へ置換済�
 
 | ファイル | 機体 | ビルド | 負荷 | 実施 | 用途 |
 |---|---|---|---|---|---|
-| `results-dgx-0.8.0.jsonl`・`skipped-dgx-0.8.0.log` | DGX Spark GB10 | crates.io ピン `fandhe-ai =0.8.0`（`run_all_cuda.sh`。path patch なし） | 専有（load ≈ 0.05） | 2026-09-12 | 本記録 §2 |
+| `results-dgx-0.8.0.jsonl`・`skipped-dgx-0.8.0.log` | DGX Spark GB10 | crates.io ピン `fandhe-ai =0.8.0`（`run_all_cuda.sh`。path patch なし） | 専有（load average 0.03〜4.45・上表「系列・機体・証拠等級」の注参照） | 2026-09-12 | 本記録 §2 |
 | `results-dgx-py-0.8.0.jsonl` | DGX Spark GB10 | `bench_py.py`（torch 2.14.0+cu130・tensorflow 2.21 CPU・scipy） | 専有 | 2026-09-12 | 本記録 §2（Python 参照） |
 | `results-m4max-0.8.0.jsonl`・`skipped-m4max-0.8.0.log` | Apple M4 Max | crates.io ピン `fandhe-ai =0.8.0`（`run_all_m4max.sh` 相当。`GEMM_GATE_PATCH_FACADE_PATH` 未指定・ビルドログに `Compiling fandhe-ai v0.8.0`〈registry〉を確認） | 共有（load average 11.25 → 5.09） | 2026-09-12 午前 | 同日の敗因分析スコアボード（本記録の Mac 系列〈HEAD path patch〉とは別系列） |
 
