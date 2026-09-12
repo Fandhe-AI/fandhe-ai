@@ -64,8 +64,14 @@ small_shape_cap_sweep -- <global|dedicated:N>`）を用い、学習 5 形状
 `load average` 6.4〜9.1 → 計測後 4.7〜7.4。`docs/perf/logs/
 cpu-gemm-small-shape-thread-cap-1575/`）。
 
-**checksum**: 全腕・全形状で `f64` 逐次和のビット表現が完全一致
-（`aggregate_phase0.md` 冒頭。bit 完全一致契約を計測レベルでも確認）。
+**checksum**: 全腕・全形状で `f64` 逐次和のビット表現（16 進。
+`checksum_bits`）が完全一致（`aggregate_phase0.md` 冒頭）。checksum は
+全要素和という縮退した診断値であり、これ自体は出力配列全体の bit 完全
+一致の証明にはならない（異なる出力配列が同じ和になる可能性を排除
+できない）。bit 完全一致契約自体は `small_shape_thread_cap::tests::
+dedicated_pool_execution_matches_global_pool_bit_exact`（専用プール
+実行結果とグローバルプール実行結果の配列全体比較）が担保する
+（PR #1663 codex-review 指摘を受け表現を是正）。
 
 **計測範囲についての注記（PR #1663 codex-review 指摘を受け追記）**:
 上記の Phase 0 計測時点の `examples/small_shape_cap_sweep.rs` は
@@ -136,8 +142,16 @@ interleave 計測した（record_only。計測中 load average 22〜23 の共有
 | gemm:fresh:2048 | 0.019987500 | 0.023424041 | 1.1719 | 参考 |
 | gemm:reuse:2048 | 0.023663562 | 0.025603458 | 1.0820 | 参考 |
 
-checksum は全 10 セルで before/after 完全一致（bit 完全一致契約を
-本計測でも確認）。
+checksum は全 10 セルで記録値（JSONL の `checksum` フィールド）が
+before/after 一致した。ただし `aggregate_phase1.py` は
+`round(checksum, 6)`（小数第 6 位までの丸め）で比較しており、この一致
+は「記録された checksum（丸め済み）の一致」であって出力配列全体の
+bit 完全一致の証拠ではない（checksum は全要素和という縮退した診断値
+であり、異なる出力が同じ和になる可能性・丸めにより真の差異が埋もれる
+可能性のいずれも排除できない）。bit 完全一致契約自体は
+`small_shape_thread_cap::tests::
+dedicated_pool_execution_matches_global_pool_bit_exact` が保証する
+（PR #1663 codex-review 指摘を受け表現を是正）。
 
 **判定**: `train:fresh` の `ratio=1.0307`（>1.00）が事前登録規則
 「判定対象 4 セルすべてで `ratio<=1.00`」に抵触した。

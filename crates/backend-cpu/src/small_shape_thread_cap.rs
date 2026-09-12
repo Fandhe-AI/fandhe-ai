@@ -263,12 +263,23 @@ pub struct SmallShapeCapReport {
     pub cap_threads: usize,
     /// cap 対象の仕事量上限（`SMALL_SHAPE_CAP_MAX_WORK`）。
     pub max_work: usize,
-    /// 専用プールが実際に生成できているか（`pool()` が `Some` を返すか）。
+    /// 専用プールが**既に**生成済みで有効か（`POOL` の現在の状態を
+    /// 参照するのみ。診断のために新規生成はしない。codex-review・
+    /// Cursor Bugbot 指摘: 機構無効時や非対象環境でも
+    /// `small_shape_cap_report` を呼ぶだけで 6 スレッドの専用プールが
+    /// 生成・永続化されてしまうと、環境情報の採取自体が計測対象の
+    /// スレッド構成を変えてしまう。専用プールは実際に cap が発火した
+    /// 呼び出し（[`run_capped`]）でのみ生成する設計を維持するため、
+    /// ここでは `POOL.get()` で既存状態のみを読む）。
     pub pool_active: bool,
 }
 
 /// [`SmallShapeCapReport`] を構築する（本番 GEMM 経路からは呼ばれず、
 /// 診断・ベンチ・env_info 記録専用）。
+///
+/// `pool_active` は [`POOL`] を初期化しない（`pool()` を呼ばない）。
+/// 呼び出しても専用プールを新規生成しないため、機構無効時・
+/// 非対象プラットフォームで診断のためだけにスレッドが立つことはない。
 pub fn small_shape_cap_report() -> SmallShapeCapReport {
     SmallShapeCapReport {
         current: rayon::current_num_threads().max(1),
@@ -276,7 +287,7 @@ pub fn small_shape_cap_report() -> SmallShapeCapReport {
         env_override: env_override(),
         cap_threads: SMALL_SHAPE_CAP_THREADS,
         max_work: SMALL_SHAPE_CAP_MAX_WORK,
-        pool_active: pool().is_some(),
+        pool_active: POOL.get().is_some_and(|p| p.is_some()),
     }
 }
 
