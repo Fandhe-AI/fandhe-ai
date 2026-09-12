@@ -17,7 +17,7 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, ChecksumReadout, DType, FusionPlan, GemmChecksum, MseReduction,
-    SgdStepConfig, ShapeError, Tensor, require_same_shape,
+    SgdStepConfig, ShapeError, Tensor, require_same_shape, row_softmax_layout,
 };
 
 use crate::gemm_blis::{
@@ -1100,6 +1100,53 @@ impl BackendOps for CpuBackendOps {
         let mut dpred = vec![0.0f32; pred_slice.len()];
         mse::mse_loss_backward_f32(pred_slice, target_slice, scale, &mut dpred)?;
         Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::softmax`] の CPU 実装
+    /// （イシュー #1594）。[`row_softmax_layout`] が非最終軸を `Ok(None)`
+    /// で区別する契約に従い、その場合はデフォルトの `Unsupported`
+    /// （`Var::softmax` がホスト参照実装 `eval::softmax_along` へ
+    /// フォールバックする合図）と同じ挙動を返す。最終軸の場合は
+    /// [`softmax::run_softmax_f32`]（`run_fused` の softmax 一致経路
+    /// `run_fused_softmax` が使うものと同一カーネル）を直接呼ぶ。
+    fn softmax(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        let Some((rows, cols)) =
+            row_softmax_layout(x.shape(), dim).map_err(BackendError::ShapeMismatch)?
+        else {
+            return Err(BackendError::Unsupported(
+                "softmax: CPU 行カーネルは最終軸限定（非最終軸はホスト参照実装へ委ねる）".into(),
+            ));
+        };
+        let x_owned = x.contiguous();
+        let x_slice = x_owned
+            .as_slice()
+            .ok_or_else(|| gemm_contiguity_fail_safe("softmax: input not contiguous"))?;
+        let out = softmax::run_softmax_f32(x_slice, rows, cols)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::log_softmax`] の CPU 実装
+    /// （イシュー #1594）。[`Self::softmax`] と同じ最終軸限定契約。
+    /// `x − m − ln(Σexp(x − m))` の解析形（[`softmax::
+    /// run_log_softmax_f32`]）で計算する（`ln(softmax(x))` にしない
+    /// 理由は `BackendOps::log_softmax` doc 参照）。
+    fn log_softmax(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        let Some((rows, cols)) =
+            row_softmax_layout(x.shape(), dim).map_err(BackendError::ShapeMismatch)?
+        else {
+            return Err(BackendError::Unsupported(
+                "log_softmax: CPU 行カーネルは最終軸限定（非最終軸はホスト参照実装へ委ねる）"
+                    .into(),
+            ));
+        };
+        let x_owned = x.contiguous();
+        let x_slice = x_owned
+            .as_slice()
+            .ok_or_else(|| gemm_contiguity_fail_safe("log_softmax: input not contiguous"))?;
+        let out = softmax::run_log_softmax_f32(x_slice, rows, cols)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::run_fused`] のデフォルト実装（`Unsupported`

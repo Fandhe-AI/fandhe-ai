@@ -260,6 +260,22 @@ pub(crate) enum Op {
         dim0: usize,
         dim1: usize,
     },
+    /// 行方向 softmax（イシュー #1594）。`BackendOps` に対応メソッドが
+    /// あり（`softmax`。既存の `run_fused` canonical プラン一致経路とは
+    /// 別の独立エントリ）非融合対象ではないが、`Add`/`Mul`/`Relu`/
+    /// `Exp`/`Tanh` の elementwise 5 演算（`is_lazy_elementwise`）には
+    /// 含めないため常に実体化済み（`push_eager`）とする。`dim` は
+    /// forward（`Var::softmax`）が
+    /// [`fandhe_ai_tensor_core::reduce_out_shape`] で範囲検査済み。VJP
+    /// （`grad.rs`）は forward 記録値 `out_value`（= softmax(x)）を
+    /// `Exp`/`Sigmoid` と同じ「再計算しない」方針で再利用する。
+    Softmax { input: NodeId, dim: usize },
+    /// 行方向 log_softmax（イシュー #1594）。`Softmax` と同じ非融合・
+    /// 常実体化・`dim` 事前検査済みの契約。`ln(softmax(x))` ではなく
+    /// `x − m − ln(Σexp(x−m))` の解析形で計算する（`BackendOps::
+    /// log_softmax` doc「`ln(softmax(x))` にしない理由」参照）ため
+    /// `Softmax` とは別 variant とする。
+    LogSoftmax { input: NodeId, dim: usize },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
@@ -753,7 +769,7 @@ impl Tape {
         // `Op::Leaf` のみ葉ノード（`push_resident_leaf` の `Op::ResidentLeaf`
         // と合わせて #1048 の葉プレフィックス判定対象）。それ以外
         // （`MatMul`/`Sum`/`Max`/`Sigmoid`/`MseLoss`/`CrossEntropyLoss`/
-        // `LinearResident`）は演算ノードのため、これから追記する直前の
+        // `LinearResident`/`Softmax`/`LogSoftmax`）は演算ノードのため、これから追記する直前の
         // 長さで葉プレフィックスを固定する（`Tape::reset` doc 参照）。
         if !matches!(op, Op::Leaf) {
             self.freeze_leaf_prefix(nodes.len());
