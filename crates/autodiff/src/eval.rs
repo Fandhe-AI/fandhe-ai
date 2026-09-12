@@ -847,6 +847,17 @@ pub(crate) fn log_softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32>
 /// （`o`: outer 添字・`s`: 入力 i 内の dim 添字・`i`: inner 添字・
 /// `off_i`: 入力 i より前の dim 累積長・`total = out_shape[dim]`）。
 pub(crate) fn concat(inputs: &[&Tensor<f32>], dim: usize, out_shape: &[usize]) -> Tensor<f32> {
+    // 要素数ゼロ（`out_shape` のいずれかの次元が 0）のとき、
+    // `out_shape[..dim]`／`out_shape[dim+1..]` の部分積は数学的には
+    // 無関係な次元（例: `usize::MAX`）を含みうり、`concat_out_shape`
+    // が通した shape でも部分積単体では usize オーバーフローしうる
+    // （全体積は途中の 0 で吸収されるが部分積はそれを経由しない）。
+    // `softmax_along`（本ファイル上部）と同じ理由・同じ対処で、
+    // 本番経路 panic 禁止規約（`.claude/rules/coding-rust.md`）に従い
+    // outer/inner/out_numel を計算する前に空出力へ早期 return する。
+    if out_shape.contains(&0) {
+        return build_tensor(Vec::new(), out_shape);
+    }
     let outer: usize = out_shape[..dim].iter().product();
     let inner: usize = out_shape[dim + 1..].iter().product();
     let total = out_shape[dim];
@@ -1527,6 +1538,29 @@ mod softmax_empty_tensor_overflow_tests {
             .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
         let out = softmax_along(&input, 1);
         assert_eq!(out.shape(), &shape);
+        assert_eq!(out.numel(), 0);
+    }
+}
+
+#[cfg(test)]
+mod concat_empty_out_shape_overflow_tests {
+    use super::*;
+
+    // codex-review 指摘（PR #1680）の回帰検証: `concat_out_shape` が
+    // 受理しうる有効な空 `out_shape`（先頭が `0` で後続次元の部分積が
+    // overflow するケース）に対し、`concat` が `outer`／`inner` を
+    // ゼロ軸チェックより先に `.iter().product()` で計算していたため、
+    // overflow チェック有効時に本番経路の外（debug ビルド）で panic
+    // していた（`softmax_along` と同型の bug。上記
+    // `softmax_empty_tensor_overflow_tests` 参照）。`out_shape` に `0`
+    // を含む場合は部分積を計算する前に空出力へ早期 return することを
+    // 確認する（`dim=0` のとき `inner = out_shape[1..].iter().product()`
+    // `= usize::MAX * 2` が旧実装で overflow していた）。
+    #[test]
+    fn concat_empty_out_shape_with_overflow_prone_inner_does_not_panic() {
+        let out_shape = [0usize, usize::MAX, 2];
+        let out = concat(&[], 0, &out_shape);
+        assert_eq!(out.shape(), &out_shape);
         assert_eq!(out.numel(), 0);
     }
 }
