@@ -282,16 +282,17 @@ pub fn validate_gemm_bias_write_ranges(
 /// 完全一致は実機 `#[ignore]` テスト（`docs/backend-metal-command-
 /// batching-design.md` §10 実装記録参照）で確認する。
 ///
-/// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review P1
-/// 是正）**: `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
+/// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review 是正の
+/// 最終形）**: `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
 /// アキュムレータで統一する」規約（イシュー #1102・PR #1120）に従う。
 /// GPU カーネル（`gemm_bias_grad_reduce_f32`。Metal は `double` 型
-/// 非対応）は同規約下で Neumaier 改良版 Kahan 補償和（`gemm_splitk_
-/// reduce` と同型）を用いるため、本関数（ホスト `f64`）とは bit
-/// 完全一致しない。両者の一致は REQ-2 統一複合判定（相対誤差 1e-3
-/// 未満 または 絶対誤差 1e-5 未満）で検証する（NN/TT フォールバック
-/// 経路はホスト側で本関数のみを使うため、その経路の期待値との比較は
-/// 引き続き bit 完全一致）。
+/// 非対応）は IEEE 754 binary64 の逐次加算を 64bit 整数演算でソフト
+/// ウェアエミュレートし（ホスト側逐語モデル `crate::soft_f64`）、本
+/// 関数と同じ演算列（`0.0` から行 `0..rows` 昇順に加算し最後に 1 回
+/// `f32` へ downcast）を辿るため、結果は **bit 完全一致**する（NaN の
+/// み payload がハードウェア依存のためクラス一致。`docs/backend-metal-
+/// command-batching-design.md` §10.14）。NN/TT フォールバック経路は
+/// ホスト側で本関数のみを使うため、こちらも bit 完全一致。
 ///
 /// `data` は `g` を [`classify_2d`] で分類した [`MatrixLayout`]
 /// （`rows`/`cols`/`ld`/`transposed`）が示す添字式（本モジュール冒頭

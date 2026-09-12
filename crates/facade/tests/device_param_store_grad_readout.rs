@@ -126,16 +126,18 @@ fn resident_grads_to_host_weight_matches_matmul_reference_fma() {
 /// `bound.trainable_grads`）と一致することを検証する（2 層モデル。
 /// `device_param_store_train.rs::build_model` と同型）。
 ///
-/// **weight slot は bit 完全一致・bias slot は REQ-2 統一複合判定**
-/// （2026-09-12 ユーザー承認 A・PR #1659 codex-review 追加指摘）:
-/// `SequentialVars::forward`（host_model 側）は次層が `ReLU` の場合の
-/// み `Op::LinearAct` へ融合し、出力層（次層なし）は非融合の
-/// `LinearVars::forward`（`Var::add` = `Op::Add`。汎用 `reduce_to_shape`
-/// ＝ `f32` 逐次和のまま——ユーザー承認 A の対象外）を使う。一方
-/// `forward_resident`（device_model 側）は常に `linear_forward_with_
-/// activation`（`Op::LinearResident`）を使うため、出力層の bias は
-/// 経路によって数値方式（`f64` 相当 vs `f32` 逐次和）が異なりうる
-/// （`crates/autodiff/src/grad.rs::reduce_bias_grad` doc 参照）。
+/// **weight slot・bias slot とも bit 完全一致**（2026-09-12 ユーザー
+/// 承認 A・PR #1659 最終形）: `SequentialVars::forward`（host_model
+/// 側）は次層が `ReLU` の場合のみ `Op::LinearAct` へ融合し、出力層
+/// （次層なし）は非融合の `LinearVars::forward`（`Var::add` =
+/// `Op::Add`）を使う。一方 `forward_resident`（device_model 側）は常に
+/// `linear_forward_with_activation`（`Op::LinearResident`）を使うが、
+/// いずれの経路も bias 縮約は `grad::reduce_bias_grad`（`f64` 逐次和。
+/// `Op::Add` の bias パターンも同関数へ横展開済み）へ統一されており、
+/// Metal の resident 経路（`gemm_bias_grad_reduce_f32`。binary64 加算の
+/// 64bit 整数エミュレーション）もホストと bit 完全一致する契約のため、
+/// 両 slot を bit 比較で検証する（`crates/autodiff/src/grad.rs::
+/// reduce_bias_grad` doc 参照）。
 #[test]
 fn param_grads_to_host_matches_host_only_path_two_layer() {
     let device_model = build_two_layer();
