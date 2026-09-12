@@ -300,6 +300,11 @@ fn parse_midr_partnum(raw: &str) -> Option<u64> {
     Some((value >> 4) & 0xFFF)
 }
 
+/// `collect_freq_and_midr` の戻り値型（clippy::type_complexity 回避のためのエイリアス）。
+/// `(cpu_id, freq)` 列と `(cpu_id, midr_partnum)` 列のペア。
+#[cfg(any(target_os = "linux", test))]
+type FreqMidrLists = (Vec<(usize, u64)>, Vec<(usize, u64)>);
+
 /// `/sys/devices/system/cpu` 配下（`root` 引数はテスト用 fixture 差し替え
 /// のため）を走査し、`cpufreq/cpuinfo_max_freq`・
 /// `regs/identification/midr_el1` の両方が揃っている CPU のみを対象に
@@ -310,7 +315,7 @@ fn parse_midr_partnum(raw: &str) -> Option<u64> {
 /// 倒す）。`cpufreq`／`cpuidle`／`cpu-map` 等のデコイディレクトリは
 /// `strip_prefix("cpu")` 後に数字へ parse できないため自然に除外される。
 #[cfg(any(target_os = "linux", test))]
-fn collect_freq_and_midr(root: &Path) -> Option<(Vec<(usize, u64)>, Vec<(usize, u64)>)> {
+fn collect_freq_and_midr(root: &Path) -> Option<FreqMidrLists> {
     let read_dir = std::fs::read_dir(root).ok()?;
     let mut freqs: Vec<(usize, u64)> = Vec::new();
     let mut midrs: Vec<(usize, u64)> = Vec::new();
@@ -568,7 +573,7 @@ mod tests {
     fn with_affinity_gate_disabled_calls_closure_directly() {
         // GB10_AFFINITY_ENABLED は既定 false のため、対象形状であっても
         // affinity_pool() は常に None を返し f() が直接呼ばれる。
-        assert!(!GB10_AFFINITY_ENABLED);
+        const { assert!(!GB10_AFFINITY_ENABLED) };
         let result = with_gb10_affinity_if_applicable(64, 256, 784, || 42);
         assert_eq!(result, 42);
     }
