@@ -478,6 +478,16 @@ pub(crate) fn mse_loss(
 /// `pub(crate)`: `grad.rs` が VJP 計算で再利用する。
 pub(crate) fn softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
     let shape = input.shape().to_vec();
+    // 要素数ゼロ（shape のいずれかの次元が 0）のとき、`shape[..axis]`／
+    // `shape[axis+1..]` の部分積は数学的には無関係な次元（例:
+    // `usize::MAX`）を含みうり、`checked_numel`（`Tensor::new` 側）が
+    // 通した shape でも部分積単体では usize オーバーフローしうる
+    // （全体積は途中の 0 で吸収されるが部分積はそれを経由しない）。
+    // 本番経路 panic 禁止規約（`.claude/rules/coding-rust.md`）に従い、
+    // outer/axis_len/inner を計算する前に空出力へ早期 return する。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
     let outer: usize = shape[..axis].iter().product();
     let axis_len = shape[axis];
     let inner: usize = shape[axis + 1..].iter().product();
@@ -515,6 +525,10 @@ pub(crate) fn softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
 /// `grad.rs` が VJP で・`var.rs` がホストフォールバックで再利用する。
 pub(crate) fn log_softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
     let shape = input.shape().to_vec();
+    // `softmax_along` 直上と同じ早期 return（部分積オーバーフロー回避）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
     let outer: usize = shape[..axis].iter().product();
     let axis_len = shape[axis];
     let inner: usize = shape[axis + 1..].iter().product();
@@ -697,5 +711,39 @@ mod log_softmax_along_precision_tests {
                 "log_softmax([1e8,1e8])[{c}] = {v}（期待値 {expected} 近傍）"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod softmax_empty_tensor_overflow_tests {
+    use super::*;
+
+    // codex-review 指摘（PR #1664）の回帰検証: `Tensor::new(vec![],
+    // &[0, 0, usize::MAX, 2])` は `checked_numel` が要素数積を `0`
+    // （先頭の `0` が後続の積を吸収する）と評価するため構築できるが、
+    // `log_softmax_along(input, 1)` の `inner = shape[2..].iter()
+    // .product()`（`= usize::MAX * 2`）はこの吸収を経由しない部分積
+    // のため、overflow チェック有効時に本番経路の外で panic していた。
+    // `softmax_along`／`log_softmax_along` 冒頭の早期 return
+    // （`shape` がいずれかの次元 `0` を含めば空出力を返す）で、
+    // 部分積を計算する前に安全側へ倒れることを確認する。
+    #[test]
+    fn log_softmax_along_empty_tensor_with_overflow_prone_inner_does_not_panic() {
+        let shape = [0usize, 0, usize::MAX, 2];
+        let input = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let out = log_softmax_along(&input, 1);
+        assert_eq!(out.shape(), &shape);
+        assert_eq!(out.numel(), 0);
+    }
+
+    #[test]
+    fn softmax_along_empty_tensor_with_overflow_prone_inner_does_not_panic() {
+        let shape = [0usize, 0, usize::MAX, 2];
+        let input = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let out = softmax_along(&input, 1);
+        assert_eq!(out.shape(), &shape);
+        assert_eq!(out.numel(), 0);
     }
 }

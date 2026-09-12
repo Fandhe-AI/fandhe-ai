@@ -70,6 +70,13 @@ impl Softmax {
         Self { dim }
     }
 
+    /// `self.dim` 軸に沿って softmax を適用する（`Var::softmax` へ委譲）。
+    /// 戻り値 shape は `input` と同一（正規化は形状を変えない）。
+    /// `self.dim >= input.rank()`（rank 0 を含む）は
+    /// `AutodiffError::Shape` で fail-closed に拒否する。バックエンド
+    /// 側 `Unsupported`（非最終軸）はホスト参照実装へ透過的に
+    /// フォールバックし、それ以外のバックエンドエラーはそのまま
+    /// 伝播する（`Var::softmax` の契約をそのまま引き継ぐ）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.softmax(self.dim)
     }
@@ -95,6 +102,13 @@ impl LogSoftmax {
         Self { dim }
     }
 
+    /// `self.dim` 軸に沿って log_softmax を適用する
+    /// （`Var::log_softmax` へ委譲）。shape 不変・`self.dim` 範囲外の
+    /// 拒否（`AutodiffError::Shape`）は [`Softmax::forward`] と同一。
+    /// バックエンドが対応しない軸・演算（CUDA／Metal は現時点で
+    /// log_softmax を最終軸含め未実装のため常にホストへフォール
+    /// バックする）は `Unsupported` のときのみ透過的にホスト参照実装
+    /// へ切り替わり、それ以外のバックエンドエラーは伝播する。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.log_softmax(self.dim)
     }

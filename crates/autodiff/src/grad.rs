@@ -622,9 +622,17 @@ fn sigmoid_grad_factor(out_value: &Tensor<f32>) -> Tensor<f32> {
 /// 側で範囲検査済みの前提）。`Σ_dim(g ⊙ y)` の要素積は `f32` で確定
 /// してから `f64` へ昇格して蓄積し（`.claude/rules/coding-rust.md`
 /// 「勾配の長軸縮約の要素積は f32 で確定してから f64 へ昇格」）、
-/// 最終書き出しで 1 回だけ `f32` へ downcast する。
+/// `g` からの減算・`y` との最終乗算も（`log_softmax_vjp_along` と同じ
+/// 理由で）`f64` のまま保持し、最終書き出しで 1 回だけ `f32` へ
+/// downcast する（縮約値を先に `f32` へ戻すと、有限の `f32` 入力でも
+/// 減算・乗算の結果が overflow しうるため）。
 fn softmax_vjp_along(out_value: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
     let shape = out_value.shape().to_vec();
+    // `log_softmax_vjp_along` 直下と同じ早期 return（部分積オーバー
+    // フロー回避。`eval::softmax_along` 冒頭のコメント参照）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
     let outer: usize = shape[..axis].iter().product();
     let axis_len = shape[axis];
     let inner: usize = shape[axis + 1..].iter().product();
@@ -639,10 +647,18 @@ fn softmax_vjp_along(out_value: &Tensor<f32>, upstream: &Tensor<f32>, axis: usiz
                 let term = g[idx] * y[idx];
                 dot_acc += term as f64;
             }
-            let dot = dot_acc as f32;
+            // `dot_acc`（f64）を乗算前に `f32` へ downcast すると、
+            // `y * (g - dot)` が有限の `f32` 入力でも overflow しうる
+            // （例: `y=[0.25,0.75]`・上流勾配 `g=[3e38,-3e38]` で正しい
+            // 入力勾配 `[~1.125e38, ...]` が `[inf, ...]` になる）。
+            // `log_softmax_vjp_along` と同じ f64 アキュムレータ契約
+            // （`.claude/rules/coding-rust.md`）に従い、`g` からの減算・
+            // `y` との最終乗算まで f64 で保持し、最終書き出しでのみ
+            // `f32` へ downcast する。
             for a in 0..axis_len {
                 let idx = (o * axis_len + a) * inner + i;
-                out[idx] = y[idx] * (g[idx] - dot);
+                let d = (y[idx] as f64) * (g[idx] as f64 - dot_acc);
+                out[idx] = d as f32;
             }
         }
     }
@@ -662,6 +678,11 @@ fn log_softmax_vjp_along(
     axis: usize,
 ) -> Tensor<f32> {
     let shape = out_value.shape().to_vec();
+    // `softmax_vjp_along` 直上と同じ早期 return（部分積オーバーフロー
+    // 回避。`eval::softmax_along` 冒頭のコメント参照）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
     let outer: usize = shape[..axis].iter().product();
     let axis_len = shape[axis];
     let inner: usize = shape[axis + 1..].iter().product();
@@ -2071,5 +2092,67 @@ mod tests {
             );
             assert!(v.abs() < 1.0, "dx[{c}] = {v}（期待値は 0 近傍）");
         }
+    }
+
+    // codex-review 指摘（PR #1664）の回帰検証: 縮約後の `dot`（`Σ_dim
+    // (g ⊙ y)`）を `y[idx] * (g[idx] - dot)` の減算まで `f32` で行う
+    // 実装では、有限で表現可能な入力勾配が overflow して `inf`/`-inf`
+    // になる。`y=[0.25,0.75]`・上流勾配 `g=[3e38,-3e38]` では
+    // `dot=-1.5e38` に対し `g[0]-dot=4.5e38` が `f32::MAX`（約 3.4e38）
+    // を超えて `f32` では overflow するが、正しい入力勾配
+    // `y[0]*(g[0]-dot)=0.25*4.5e38=1.125e38` は有限。`log_softmax_vjp_
+    // along` と同じく `g` からの減算・`y` との最終乗算まで `f64` で
+    // 保持することで overflow を避ける。
+    #[test]
+    fn softmax_vjp_along_large_upstream_grad_does_not_overflow() {
+        let y = t(&[0.25, 0.75], &[1, 2]);
+        let g = t(&[3e38, -3e38], &[1, 2]);
+        let dx = softmax_vjp_along(&y, &g, 1);
+        let dx = dense_vec(&dx);
+        for (c, v) in dx.iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "dx[{c}] = {v} は有限であるべき（overflow 回帰）"
+            );
+        }
+        assert!(
+            (dx[0] - 1.125e38).abs() < 1e33,
+            "dx[0] = {}（期待値 1.125e38 近傍）",
+            dx[0]
+        );
+        assert!(
+            (dx[1] + 1.125e38).abs() < 1e33,
+            "dx[1] = {}（期待値 -1.125e38 近傍）",
+            dx[1]
+        );
+    }
+
+    // codex-review 指摘（PR #1664）の回帰検証: `eval::softmax_along`
+    // 冒頭コメント参照。`shape[axis+1..]` 等の部分積は `checked_numel`
+    // が通した shape（要素数積は `0`）でも overflow しうるため、
+    // `softmax_vjp_along`／`log_softmax_vjp_along` も同じ早期 return
+    // で部分積計算前に安全側へ倒れることを確認する。
+    #[test]
+    fn softmax_vjp_along_empty_tensor_with_overflow_prone_inner_does_not_panic() {
+        let shape = [0usize, 0, usize::MAX, 2];
+        let y = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let g = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let dx = softmax_vjp_along(&y, &g, 1);
+        assert_eq!(dx.shape(), &shape);
+        assert_eq!(dx.numel(), 0);
+    }
+
+    #[test]
+    fn log_softmax_vjp_along_empty_tensor_with_overflow_prone_inner_does_not_panic() {
+        let shape = [0usize, 0, usize::MAX, 2];
+        let y = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let g = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let dx = log_softmax_vjp_along(&y, &g, 1);
+        assert_eq!(dx.shape(), &shape);
+        assert_eq!(dx.numel(), 0);
     }
 }
