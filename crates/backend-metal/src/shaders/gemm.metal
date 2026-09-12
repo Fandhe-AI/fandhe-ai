@@ -2436,20 +2436,27 @@ kernel void gemm_splitk_reduce(
 // bias 勾配（`Op::LinearResident` の VJP における `g` の行方向和。
 // `reduce_to_shape` の rank-2→rank-1 特殊ケース）を GPU 側で計算し、
 // d_weight と同一の encode-only 書き込みで staging へ直接書く
-// （イシュー #1566）。ホスト `crates/autodiff/src/eval.rs::
+// （イシュー #1566）。
+//
+// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review P1
+// 是正）**: `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
+// アキュムレータで統一する」規約（イシュー #1102・PR #1120）に従う。
+// Metal は `double` 型非対応のため `f64` そのものは使えず、代わりに
+// Neumaier 改良版 Kahan 補償和（`gemm_splitk_reduce` と同型。縮約順序
+// は行 0..M 昇順・初期値 0.0f・非有限入力〈overflow による `inf`／
+// `NaN` 伝播〉では補正を適用せず単純加算と同じ挙動に揃える）で `m >= 2`
+// を蓄積する。この結果、ホスト参照実装 `crates/autodiff/src/eval.rs::
 // reduce_bias_grad_rows`（および `crates/backend-metal/src/layout.rs::
-// reduce_bias_grad_rows_host`）と bit 完全一致させるため、縮約順序
-// （行 0..M 昇順）・初期値（0.0f）・単純な `+=`（Neumaier 補正等は
-// 使わない）をそのまま複製する。`m == 1` は `0.0f` へ加算せず直接
-// コピーする（PR #1659 codex-review P2 是正。`reduce_to_shape` は
-// 既に `1` の軸を縮約しないため `-0.0` 等の符号付きゼロが保持され、
-// 単純な `+=` 版だと `0.0f + (-0.0f) == +0.0f` で符号を失うため。
-// 上記ホスト 2 関数と同じ特殊扱いをカーネル側にも実装する）。numeric
-// contract 一般原則（`f64` アキュムレータ。`.claude/rules/
-// coding-rust.md`）との不整合（`m >= 2` の通常経路）は
-// `reduce_to_shape` 自体の既存未解決事項であり本カーネルで新規に導入
-// するものではない（`docs/backend-metal-command-batching-design.md`
-// §10.2-1）。
+// reduce_bias_grad_rows_host`。いずれも `f64` アキュムレータ）とは
+// bit 完全一致しない——両者の一致は REQ-2 統一複合判定（相対誤差
+// 1e-3 未満 または 絶対誤差 1e-5 未満）で検証する
+// （`docs/backend-metal-command-batching-design.md` §10.2-1）。
+//
+// `m == 1` は加算を経由せず直接コピーする（PR #1659 codex-review P2
+// 是正。`reduce_to_shape` は既に `1` の軸を縮約しないため `-0.0` 等の
+// 符号付きゼロが保持される。上記ホスト 2 関数と同じ特殊扱いをカーネル
+// 側にも実装する。`f32` の直接コピーなので f64/Neumaier 化の対象外で
+// あり、ホスト側と bit 完全一致し続ける）。
 //
 // `crate::gemm::BiasGradReduceParams`（repr(C)）とレイアウトを一致
 // させる（4 × uint32 = 16 バイト）。`m`/`n`/`b_ld`/`b_transposed` は
@@ -2491,12 +2498,25 @@ kernel void gemm_bias_grad_reduce_f32(
         out[gid] = g[idx];
         return;
     }
+    // Neumaier 改良版 Kahan 補償和（`gemm_splitk_reduce` と同型。本
+    // ファイル冒頭の当該コメント参照）。非有限入力（overflow による
+    // `inf`／`NaN` 伝播）では補正を適用せず単純加算と同じ挙動にする。
     float acc = 0.0f;
+    float comp = 0.0f;
     for (uint row = 0; row < p.m; row++) {
         size_t idx = p.b_transposed
             ? (size_t)gid * (size_t)p.b_ld + (size_t)row
             : (size_t)row * (size_t)p.b_ld + (size_t)gid;
-        acc += g[idx];
+        float term = g[idx];
+        float t = acc + term;
+        if (isfinite(t)) {
+            if (fabs(acc) >= fabs(term)) {
+                comp += (acc - t) + term;
+            } else {
+                comp += (term - t) + acc;
+            }
+        }
+        acc = t;
     }
-    out[gid] = acc;
+    out[gid] = acc + comp;
 }

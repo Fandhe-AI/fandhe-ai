@@ -4718,11 +4718,13 @@ fn encode_dispatch_bias_act(
 ///
 /// `b_buf`（`g`）の論理形状は `b_layout`（`rows == m`・`cols == n`）。
 /// 縮約結果（列ごとの和。長さ `n`）は `out_buf` の `bias_offset` から
-/// 書き込む。走査順序（行 0..m 昇順・f32 逐次 `+=`・初期値 0.0）は
-/// `autodiff::eval::reduce_bias_grad_rows`（`crate::grad::
-/// reduce_to_shape` の rank-2→rank-1 特殊ケースと同一アルゴリズム）と
-/// bit 完全一致させる契約（`shaders/gemm.metal::
-/// gemm_bias_grad_reduce_f32` 冒頭コメント参照）。オフセット（`b_offset`・
+/// 書き込む。走査順序（行 0..m 昇順）は `autodiff::eval::reduce_bias_
+/// grad_rows`（`crate::grad::reduce_to_shape` の rank-2→rank-1 特殊
+/// ケースと同一アルゴリズム）と揃えるが、蓄積方式は Neumaier 改良版
+/// Kahan 補償和（ホスト側は `f64` アキュムレータ）のため bit 完全
+/// 一致ではなく REQ-2 統一複合判定で一致を検証する契約
+/// （`shaders/gemm.metal::gemm_bias_grad_reduce_f32` 冒頭コメント
+/// 参照）。オフセット（`b_offset`・
 /// `bias_offset`）は要素単位から `size_of::<f32>()` 倍したバイト
 /// オフセットとして `setBuffer:offset:atIndex:` へ渡す（`encode_
 /// dispatch_bias_act` と同じ規約。`BiasGradReduceParams` にオフセットを

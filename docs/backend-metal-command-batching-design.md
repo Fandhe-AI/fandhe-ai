@@ -1407,3 +1407,45 @@ warnings` を `--target aarch64-apple-darwin`（`cfg(target_os =
   1.00`・checksum 一致・`--phases` の `device_update` 内訳）。
 - `docs/perf/train-resident-grad-device-update.md` §8 として上記実測
   結果を追記する（本ドキュメントは実装記録のみで実測値は含まない）。
+
+### 10.8 #1659 追記（2026-09-12 ユーザー承認 A・codex-review P1 是正）
+
+§10.7 は自動運転セッションの判断として「(a)（`f64` アキュムレータ化）
+は選ばない」を記録したが、PR #1659 の codex-review 指摘（新設した bias
+勾配縮約が補償なしの `f32` 逐次和のままで `.claude/rules/coding-rust.md`
+の勾配長軸縮約 `f64` アキュムレータ規約に反し、`[1e8, 1.0, -1e8]` の
+ような相殺入力で寄与が失われる）を受け、ユーザーが **2026-09-12 に
+選択肢 A「規約どおり `f64` 相当へ統一する」を承認した**。これにより
+§10.2-1・§10.6・§10.7 が「未解決事項」として引き継いだ論点は解消済み。
+
+**実装した数値方式**（`.claude/rules/coding-rust.md` の勾配長軸縮約
+節と同型の使い分け）:
+
+- ホスト経路（`crates/autodiff/src/eval.rs::reduce_bias_grad_rows`・
+  `crates/backend-metal/src/layout.rs::reduce_bias_grad_rows_host`）:
+  各列を `f64` アキュムレータへ蓄積し、最後に 1 回だけ `f32` へ
+  downcast する。
+- GPU カーネル（`shaders/gemm.metal::gemm_bias_grad_reduce_f32`。
+  Metal は `double` 型非対応）: Neumaier 改良版 Kahan 補償和
+  （`gemm_splitk_reduce` と同型。非有限入力では補正を適用しない）。
+- `m == 1`／`rows == 1` の直接コピー特殊扱い（符号付きゼロ保持。PR
+  #1659 codex-review P2 是正）は不変（コピーのみで蓄積を経由しない
+  ため f64/Neumaier 化の対象外）。
+
+この結果、ホスト（`f64`）と GPU カーネル（Neumaier `f32`）は蓄積方式
+が異なるため bit 完全一致しない。`crates/backend-metal/tests/gemm_
+fp32_strict_into_parity.rs` の NT/TN テスト（GPU カーネル経路）は bias
+部分の判定を `assert_bits_eq` から `fandhe_ai_backend_cpu::
+assert_parity`（REQ-2 統一複合判定。相対誤差 1e-3 未満 または 絶対
+誤差 1e-5 未満）へ切り替えた。NN/TT フォールバックテスト（ホスト
+`reduce_bias_grad_rows_host` のみで完結）・weight 部分の判定は
+bit 完全一致契約のまま不変。
+
+`autodiff::grad::reduce_to_shape`（汎用縮約パス。weight 勾配・他の
+呼び出し箇所）自体は本イシューでは変更しない（§10.2-1 が指摘した
+`reduce_to_shape` 自体の `f32` 逐次和は既存の未整理点のまま残る）。
+
+**Mac 実機セッションへの申し送りの更新**: §10.7 末尾の TODO リストの
+うち bias に関する bit 完全一致確認は REQ-2 複合判定確認へ読み替える
+（`metal_reuse_step_grad_bit_dump` は weight 勾配限定〈#1555 の受け入れ
+確認〉のため対象外・変更不要）。

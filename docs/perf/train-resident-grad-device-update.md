@@ -322,9 +322,17 @@ d_weight・d_bias を同時に encode-only で書き込む拡張）を実装し�
   独立に tie 判定・累積を行う（詳細は `docs/backend-metal-command-batching-design.md`
   §10.7「実装中に発見した正当性の落とし穴」）。
 
-数値契約: `reduce_to_shape`（`f32` 逐次和）と bit 完全一致させる設計とし、
-`.claude/rules/coding-rust.md` の勾配長軸縮約 `f64` アキュムレータ方針との不整合は
-本イシューでは解消せず未解決のまま引き継ぐ（同上 §10.7）。
+数値契約: 当初は `reduce_to_shape`（`f32` 逐次和）と bit 完全一致させる設計とし、
+`.claude/rules/coding-rust.md` の勾配長軸縮約 `f64` アキュムレータ方針との不整合を
+未解決のまま引き継いでいた（同上 §10.7）。この着手条件（数値方式の整合または
+ユーザー承認済み例外）は、PR #1659 の codex-review 指摘を受けた **2026-09-12
+ユーザー承認「選択肢 A: 規約どおり `f64` 相当へ統一する」により充足**した
+（同上 §10.8）。ホスト経路（`eval::reduce_bias_grad_rows`・`layout::
+reduce_bias_grad_rows_host`）は `f64` アキュムレータへ、GPU カーネル
+（`gemm_bias_grad_reduce_f32`。Metal は `double` 非対応）は Neumaier 改良版
+Kahan 補償和へ統一した。`m == 1`／`rows == 1` の直接コピー特殊扱いは不変。
+`reduce_to_shape` 自体（本イシューが触れない他の呼び出し箇所）の `f32` 逐次和は
+引き続き未整理のまま残る（同上 §10.8）。
 
 **bias 部分の恒久的な同期削減効果**: `docs/backend-metal-command-batching-design.md`
 §4.2 と本 §5.5 が記録した「bias 分の `upload_into` が書き込み前に 1 回だけ
@@ -335,3 +343,12 @@ d_weight・d_bias を同時に encode-only で書き込む拡張）を実装し�
 1 層目は引き続き NN 扱い）。実測（実機カウンタ・A/B）は本 Linux セッションでは
 実施できないため未記入（`docs/backend-metal-command-batching-design.md` §10.7
 「Mac 実機セッションへの申し送り」参照）。
+
+**#1566 の A/B・checksum 比較の注意（f64 統一後。§10.8 追記に伴う補足）**:
+bias 勾配は before（main の `reduce_to_shape` f32 逐次和）と after（本イシューの
+f64 相当アキュムレータ）が bit 一致しない。これは事前登録規則の事後緩和ではなく、
+2026-09-12 のユーザー承認 A に伴う数値契約の明示的な変更である。このため
+Mac 実機セッションでの A/B・checksum 比較は、**bias 勾配については REQ-2
+統一複合判定**（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で行う。
+**weight 勾配・loss は従来どおり bit 同一契約**（`reduce_to_shape` 自体は
+不変・`gemm_fp32_strict_into` の weight 書き込みも不変のため）。

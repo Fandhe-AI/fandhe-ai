@@ -880,13 +880,15 @@ impl BackendOps for MetalBackendOps {
     ///   の `upload_into` で同期済みのため事実上 no-op wait であり、
     ///   新規の恒久的な同期増加にはならない。
     ///
-    /// **数値契約の未解決ギャップ（明記のみ・本イシューでは解消しない）**:
-    /// `reduce_bias_grad_rows_host`／GPU カーネル
-    /// `gemm_bias_grad_reduce_f32` はいずれも `f32` 逐次和（`.claude/
-    /// rules/coding-rust.md` の勾配長軸縮約 `f64` アキュムレータ方針との
-    /// 不整合）。`grad::reduce_to_shape` 自体が既に抱える未解決事項で
-    /// あり、本メソッドはこれを新規に導入するものではない
-    /// （`docs/backend-metal-command-batching-design.md` §10.2-1）。
+    /// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review P1
+    /// 是正）**: `.claude/rules/coding-rust.md` の勾配長軸縮約 `f64`
+    /// アキュムレータ方針に従い、ホスト経路 `reduce_bias_grad_rows_host`
+    /// は `f64` アキュムレータへ統一済み。GPU カーネル
+    /// `gemm_bias_grad_reduce_f32`（`double` 非対応の Metal）は
+    /// Neumaier 改良版 Kahan 補償和で同方針を満たす。両経路は蓄積方式が
+    /// 異なるため bit 完全一致ではなく REQ-2 統一複合判定で一致を検証
+    /// する契約（`docs/backend-metal-command-batching-design.md` §10.2-1・
+    /// `shaders/gemm.metal::gemm_bias_grad_reduce_f32` 冒頭コメント）。
     #[allow(clippy::too_many_arguments)]
     fn gemm_fp32_strict_into_with_bias_reduce_tracked(
         &self,

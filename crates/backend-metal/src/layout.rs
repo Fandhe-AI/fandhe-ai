@@ -268,17 +268,30 @@ pub fn validate_gemm_bias_write_ranges(
 /// bias 勾配（`Op::LinearResident` の VJP における `g` の行方向和）の
 /// ホスト参照実装（イシュー #1566）。GPU カーネル
 /// `shaders/gemm.metal::gemm_bias_grad_reduce_f32` の正しさを検証する
-/// 基準、および `ops::MetalBackendOps::gemm_fp32_strict_into_with_
-/// bias_reduce_tracked` の NN/TT・分類不能形状フォールバック経路
-/// （GPU ディスパッチを経由しない）の両方から使う。
+/// 基準（REQ-2 統一複合判定。下記「数値方式」参照）、および
+/// `ops::MetalBackendOps::gemm_fp32_strict_into_with_bias_reduce_
+/// tracked` の NN/TT・分類不能形状フォールバック経路（GPU ディスパッチ
+/// を経由しない）の両方から使う。
 ///
 /// `autodiff::eval::reduce_bias_grad_rows`（`grad::reduce_to_shape` の
 /// rank-2→rank-1 特殊ケース）と**アルゴリズム的に同一**（行 `0..rows`
-/// 昇順・初期値 `0.0f32`・単純な `+=`）だが、`backend-metal` は
+/// 昇順・`f64` アキュムレータで蓄積し最後に 1 回だけ `f32` へ
+/// downcast。下記「数値方式」参照）だが、`backend-metal` は
 /// `autodiff` に依存できない（クレート依存方向: `autodiff` →
 /// `backend-metal` の逆方向はない）ため独立実装する。両実装の bit
 /// 完全一致は実機 `#[ignore]` テスト（`docs/backend-metal-command-
 /// batching-design.md` §10 実装記録参照）で確認する。
+///
+/// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review P1
+/// 是正）**: `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
+/// アキュムレータで統一する」規約（イシュー #1102・PR #1120）に従う。
+/// GPU カーネル（`gemm_bias_grad_reduce_f32`。Metal は `double` 型
+/// 非対応）は同規約下で Neumaier 改良版 Kahan 補償和（`gemm_splitk_
+/// reduce` と同型）を用いるため、本関数（ホスト `f64`）とは bit
+/// 完全一致しない。両者の一致は REQ-2 統一複合判定（相対誤差 1e-3
+/// 未満 または 絶対誤差 1e-5 未満）で検証する（NN/TT フォールバック
+/// 経路はホスト側で本関数のみを使うため、その経路の期待値との比較は
+/// 引き続き bit 完全一致）。
 ///
 /// `data` は `g` を [`classify_2d`] で分類した [`MatrixLayout`]
 /// （`rows`/`cols`/`ld`/`transposed`）が示す添字式（本モジュール冒頭
@@ -330,18 +343,18 @@ pub fn reduce_bias_grad_rows_host(
         }
         return Ok(out);
     }
-    let mut out = vec![0f32; cols];
+    let mut acc = vec![0f64; cols];
     for row in 0..rows {
-        for (col, acc) in out.iter_mut().enumerate() {
+        for (col, a) in acc.iter_mut().enumerate() {
             let idx = if transposed {
                 col * ld + row
             } else {
                 row * ld + col
             };
-            *acc += data[idx];
+            *a += f64::from(data[idx]);
         }
     }
-    Ok(out)
+    Ok(acc.into_iter().map(|v| v as f32).collect())
 }
 
 #[cfg(test)]
@@ -683,16 +696,16 @@ mod tests {
         );
     }
 
-    // イシュー #1566: `reduce_bias_grad_rows_host` の回帰テスト
-    // （`autodiff::eval::reduce_bias_grad_rows` と同じ順序依存ケース。
-    // クレート依存方向〈`backend-metal` は `autodiff` に依存できない〉
-    // のため直接突合はできず、同一アルゴリズム〈行 0..rows 昇順・f32
-    // 逐次 `+=`〉であることを手計算した期待値との一致で独立に確認する）。
+    // イシュー #1566・PR #1659 codex-review P1 是正（2026-09-12 ユーザー
+    // 承認 A）: `reduce_bias_grad_rows_host` は `f64` アキュムレータで
+    // 列ごとに蓄積するため（`autodiff::eval::reduce_bias_grad_rows` と
+    // 同じ数値方式。クレート依存方向のため直接突合はできず、同一
+    // アルゴリズムであることを手計算した期待値との一致で独立に確認
+    // する）、単純な `f32` 逐次和なら桁落ちで消える寄与（`1e8 + 1.0 +
+    // (-1e8)` の `1.0`）が保持される。
     #[test]
-    fn reduce_bias_grad_rows_host_contiguous_matches_manual_add_order() {
-        // g: [3, 2]（行優先 contiguous）。列 0 は 1e8 + 1.0 + -1e8 が
-        // 昇順加算だと桁落ちで 1.0 の寄与が失われる順序依存ケース
-        // （`autodiff::eval` の同種テストと同じ意図）。
+    fn reduce_bias_grad_rows_host_preserves_cancelling_contribution_via_f64_accumulator() {
+        // g: [3, 2]（行優先 contiguous）。列 0 は 1e8 + 1.0 + -1e8。
         let data = vec![1.0e8, 10.0, 1.0, 20.0, -1.0e8, 30.0];
         let layout = MatrixLayout {
             rows: 3,
@@ -702,22 +715,22 @@ mod tests {
         };
         let got = reduce_bias_grad_rows_host(&data, &layout).expect("valid layout/data in test");
 
-        let mut expected_col0 = 0.0f32;
-        expected_col0 += 1.0e8;
-        expected_col0 += 1.0;
-        expected_col0 += -1.0e8;
-        let mut expected_col1 = 0.0f32;
-        expected_col1 += 10.0;
-        expected_col1 += 20.0;
-        expected_col1 += 30.0;
+        // 対照: f32 逐次和では 1.0 の寄与が失われることの確認。
+        let mut naive_f32_col0 = 0.0f32;
+        naive_f32_col0 += 1.0e8;
+        naive_f32_col0 += 1.0;
+        naive_f32_col0 += -1.0e8;
+        assert_eq!(
+            naive_f32_col0, 0.0,
+            "対照: f32 逐次和では桁落ちにより 1.0 の寄与が失われる"
+        );
 
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].to_bits(), expected_col0.to_bits());
-        assert_eq!(got[1].to_bits(), expected_col1.to_bits());
         assert_eq!(
-            expected_col0, 0.0,
-            "桁落ちにより 1.0 の寄与が失われることの確認"
+            got[0], 1.0,
+            "f64 アキュムレータでは 1e8 + 1.0 + (-1e8) の 1.0 が保持されるはず"
         );
+        assert_eq!(got[1], 60.0);
     }
 
     #[test]

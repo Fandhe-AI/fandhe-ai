@@ -129,33 +129,30 @@ pub(crate) fn dense_vec_ref(tensor: &Tensor<f32>) -> Cow<'_, [f32]> {
 /// g[row, col]`）を計算し、長さ `n` の `Vec<f32>` を返す（イシュー
 /// #1566）。
 ///
-/// `grad::reduce_to_shape(g, &[n])`（rank-2→rank-1 の bias 勾配特殊
-/// ケース）と**アルゴリズム的に同一**（`dense_vec` で稠密化した後、
-/// 行 `0..m` を昇順に走査し初期値 `0.0f32` へ単純な `+=` で蓄積する。
-/// `reduce_to_shape` 自身も内部で `dense_vec(g)` を呼び、`padded_target
-/// = [1, n]` に対し `outer=1`・`axis_len=m`・`inner=n` として同じ
-/// 走査式 `reduced[i] += data[row * n + i]` を実行するため、本関数は
-/// その特殊ケースを直接書き下したものであり bit 完全一致する）。
+/// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review P1
+/// 是正）**: `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
+/// アキュムレータで統一する」規約（イシュー #1102・PR #1120）に従い、
+/// 各列は `f64` アキュムレータへ `dense_vec` で稠密化した行を `f64` へ
+/// 昇格して蓄積し、最後に 1 回だけ `f32` へ downcast する（単純な `f32`
+/// 逐次 `+=` は `[1e8, 1.0, -1e8]` のような相殺パターンで寄与が丸め
+/// 落ちして消える。回帰テスト `reduce_bias_grad_rows_tests::
+/// preserves_cancelling_contribution_via_f64_accumulator` 参照）。
+/// この変更により `grad::reduce_to_shape(g, &[n])`（同じ縮約を行う
+/// 汎用パス。`f32` 逐次和のまま**変更しない**——weight 勾配・`reduce_
+/// to_shape` 自体の bit 同一契約は本イシューのスコープ外）との bit
+/// 完全一致は失われる（意図的な乖離。両者の使い分けは呼び出し元 doc
+/// 「resident 経路のみ」を参照）。
 ///
-/// **`m == 1` の特殊扱い**（PR #1659 codex-review P2 是正）:
-/// `reduce_to_shape` は `cur_shape[axis]` が既に `1` の軸を縮約対象
-/// から外す（`padded_target[axis] == 1 && cur_shape[axis] != 1` の
-/// 条件が偽になるため走査自体をスキップし `data` をそのまま
-/// `target_shape` へ詰め直す）ため、`m == 1` では入力をコピーする
-/// だけで `0.0f32` へ加算しない。単純な `+=` 版（`out[col] += data[col]`
-/// を `0.0` から 1 回だけ実行）だと `-0.0` が `+0.0` に化けて
-/// （IEEE 754 の `0.0 + (-0.0) == +0.0`）この等価性が崩れるため、
-/// `m == 1` の場合は加算せず直接コピーして符号付きゼロを保持する。
+/// **`m == 1` の特殊扱い**（PR #1659 codex-review P2 是正。f64 化後も
+/// 不変）: `m == 1` は加算を経由せず入力を直接コピーするため、`f64`
+/// 昇格・downcast のラウンドトリップでも符号付きゼロ（`-0.0`）を保持
+/// する（`f32` → `f64` → `f32` は値を変えない可逆変換）。
 ///
 /// `pub(crate)`: `grad.rs`（`Op::LinearResident` の非 resident bias
 /// フォールバック。呼び出しは変更しない——既存の `reduce_to_shape` 経路
 /// を維持し、本関数は resident 経路のみで使う）・`optim::device_store`
 /// （weight tying 発生時の bias 勾配 tie 累積。`ResidentResolver::
 /// fill_resident_weight_grad` doc「bias tie」参照）から呼ばれる。
-/// `.claude/rules/coding-rust.md` の勾配長軸縮約 `f64` アキュムレータ
-/// 方針との不整合（`docs/backend-metal-command-batching-design.md`
-/// §10.2-1）は `reduce_to_shape` 自体が既に抱える未解決事項であり、
-/// 本関数はその挙動を複製するのみで新規に導入するものではない。
 ///
 /// `g.shape()` が `[m, n]`（rank-2）でない呼び出しは契約違反
 /// （`debug_assert!` で検知。本番経路は空 `Vec` を返す安全側フォール
@@ -177,13 +174,13 @@ pub(crate) fn reduce_bias_grad_rows(g: &Tensor<f32>) -> Vec<f32> {
         // コピーして `-0.0` 等の符号付きゼロを保持する（上記 doc 参照）。
         return data[0..n].to_vec();
     }
-    let mut out = vec![0f32; n];
+    let mut acc = vec![0f64; n];
     for row in 0..m {
-        for col in 0..n {
-            out[col] += data[row * n + col];
+        for (col, a) in acc.iter_mut().enumerate() {
+            *a += f64::from(data[row * n + col]);
         }
     }
-    out
+    acc.into_iter().map(|v| v as f32).collect()
 }
 
 /// shape とデータ長の一致を型で保証する非 panic 構築（TASK-12.1d・
@@ -694,38 +691,37 @@ mod dense_vec_ref_tests {
 mod reduce_bias_grad_rows_tests {
     use super::*;
 
-    // イシュー #1566: `reduce_bias_grad_rows` が `grad::reduce_to_shape`
-    // の rank-2→rank-1 特殊ケース（行 0..m 昇順・f32 逐次 `+=`・初期値
-    // 0.0）と bit 完全一致するアルゴリズムであることを、順序依存の
-    // 入力（浮動小数点の桁落ちで加算順序が結果に現れる値）で確認する。
-    // `reduce_to_shape` 自体は `grad` モジュール private のためここから
-    // 直接突合できないが、本テストは手計算した期待値（同じ加算順序）と
-    // の一致を確認することで独立に契約を検証する。
+    // イシュー #1566・PR #1659 codex-review P1 是正（2026-09-12 ユーザー
+    // 承認 A）: `reduce_bias_grad_rows` は `f64` アキュムレータで列ごと
+    // に蓄積するため、単純な `f32` 逐次 `+=` なら桁落ちで消える寄与
+    // （`1e8 + 1.0 + (-1e8)` の `1.0`）が保持されることを確認する
+    // （`.claude/rules/coding-rust.md` の勾配長軸縮約 f64 方針）。
     #[test]
-    fn sums_rows_in_ascending_order_with_plain_add() {
-        // 列 0: 1e8 + 1.0 + (-1e8) は昇順加算だと 1.0 に丸め落ちしない
-        // 経路（(1e8+1.0)=1e8 のまま、-1e8 を足すと 0.0 になる: f32 の
-        // 桁落ちにより 1.0 が失われる）ことを検証する順序依存ケース。
+    fn preserves_cancelling_contribution_via_f64_accumulator() {
+        // 列 0: 1e8 + 1.0 + (-1e8) は f32 逐次和だと桁落ちで 1.0 の
+        // 寄与が失われ 0.0 になる（以前の実装の回帰記録は git 履歴
+        // 参照）が、f64 アキュムレータでは 1.0 が正しく残る。
         let g = Tensor::<f32>::new(vec![1.0e8, 10.0, 1.0, 20.0, -1.0e8, 30.0], &[3, 2])
             .expect("test fixture: shape とデータ長は事前に一致させている");
         let got = reduce_bias_grad_rows(&g);
 
-        // 手計算（行 0..3 昇順・+=）: col0 = ((1e8 + 1.0) + -1e8)
-        let mut expected_col0 = 0.0f32;
-        expected_col0 += 1.0e8;
-        expected_col0 += 1.0;
-        expected_col0 += -1.0e8;
-        let mut expected_col1 = 0.0f32;
-        expected_col1 += 10.0;
-        expected_col1 += 20.0;
-        expected_col1 += 30.0;
+        // 参考: 素朴な f32 逐次和では 1.0 の寄与が失われることの確認
+        // （contrast のための計算。got との比較には使わない）。
+        let mut naive_f32_col0 = 0.0f32;
+        naive_f32_col0 += 1.0e8;
+        naive_f32_col0 += 1.0;
+        naive_f32_col0 += -1.0e8;
+        assert_eq!(
+            naive_f32_col0, 0.0,
+            "対照: f32 逐次和では桁落ちにより 1.0 の寄与が失われる"
+        );
 
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].to_bits(), expected_col0.to_bits());
-        assert_eq!(got[1].to_bits(), expected_col1.to_bits());
-        // 桁落ちにより 1.0 の寄与が失われ 0.0 になることを明示的に確認
-        // する（加算順序を変えれば異なる結果になる非結合性の実証）。
-        assert_eq!(expected_col0, 0.0);
+        assert_eq!(
+            got[0], 1.0,
+            "f64 アキュムレータでは 1e8 + 1.0 + (-1e8) の 1.0 が保持されるはず"
+        );
+        assert_eq!(got[1], 60.0);
     }
 
     #[test]
