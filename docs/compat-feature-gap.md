@@ -504,3 +504,29 @@ out-of-scope として記録した）。`cat`／`stack`／`split`（§2.3 の残
 消費することを `crates/facade/tests/shape_ops_backend_parity.rs` で
 検証した（CPU 属性なし・Metal／CUDA `#[ignore]`）。
 
+## 追補（イシュー #1598）
+
+`cat`／`stack`／`split`（§2.3）・`narrow`（`docs/spec/04-requirements.md`
+「index 系」・#1599 の対象だった行）を実装済み化した:
+
+- `Var::cat(vars, dim)` — 新 Op `Op::Concat`（コピーを伴う `push_eager`
+  ノード。`BackendOps::concat`〈既定 `Unsupported`〉→ `eval::concat`
+  フォールバック）。3 バックエンド（CPU／CUDA／Metal）の専用カーネルは
+  本イシューでは実装せず（既定実装のホストフォールバックのみ）、
+  性能最適化は別イシューへ引き継ぐ（out-of-scope）。
+- `Var::stack(vars, dim)` — 各要素を `unsqueeze(dim)` してから `cat`
+  （PyTorch の定義そのもの）。
+- `Var::narrow(dim, start, len)` — 新 Op `Op::Narrow`（zero-copy view
+  ノード。`push_view`／`resolve_view` 経由。`Tensor::narrow` の再導出）。
+  `docs/compat-api-scope.md` §1.2「index 系」行の narrow はこれで解消
+  済み（残る where／gather／scatter は #1599 が引き続き対象）。
+- `Var::split(split_size, dim)`／`split_with_sizes(sizes, dim)`／
+  `chunk(chunks, dim)` — いずれも `Var::narrow` への委譲（PyTorch
+  意味論。`split` の VJP は「Split の VJP は Concat」の原則で
+  `Op::Narrow` の VJP が zero-pad `Concat` により入力 shape へ戻す）。
+
+facade への到達経路は既存の `pub use fandhe_ai_autodiff::Var` 再エクス
+ポートのみで、新規 `pub use`／`pub fn` は追加していない（`docs/
+compat-api-scope.md` §5 の手続きは Tier 1 列挙済み機能につき再適用
+不要と判断）。
+

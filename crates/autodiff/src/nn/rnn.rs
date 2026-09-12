@@ -19,11 +19,13 @@
 //! [`Rnn::forward_seq`] 等を使う。`Module::forward_host`（tape 不要・
 //! `predict` 経路）は本来の意味で実装する。
 //!
-//! **`[T,B,H]` 出力の非対称性（決定 4・#1598 依存）**: `forward_seq`
-//! （tape 経路）は `Var::stack`（#1598・未実装）が無いため出力を
-//! `Vec<Var<'t>>`（per-step。各 `[B,H]`）で返す。`forward_host`（tape
-//! 不要）はテープを介さないため、本モジュール内で `Tensor` を直接
-//! 連結し `[T,B,H]` を返せる（`stack_host_tensors`）。
+//! **`[T,B,H]` 出力の非対称性（決定 4）**: `Var::stack`（#1598）は
+//! 実装済みだが、`forward_seq`（tape 経路）は本イシュー時点でまだ
+//! `[T,B,H]` への集約結線を行わず、引き続き出力を `Vec<Var<'t>>`
+//! （per-step。各 `[B,H]`）で返す（`forward_seq` の返却型変更自体は
+//! 別途の変更単位として out-of-scope のまま残す）。`forward_host`
+//! （tape 不要）はテープを介さないため、本モジュール内で `Tensor` を
+//! 直接連結し `[T,B,H]` を返せる（`stack_host_tensors`）。
 
 use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor, matmul_out_shape, require_same_shape};
 
@@ -218,8 +220,9 @@ fn validate_gate_params(
 }
 
 /// `nn::rnn` 内の Sequence レベル `forward_host`（tape 不要経路）が
-/// `[T,B,H]` を組み立てるための水平連結（`Var::stack`〈#1598〉が tape
-/// 経路にまだ無いため、`Tensor` を直接扱えるこの経路限定で用意する）。
+/// `[T,B,H]` を組み立てるための水平連結（`Var::stack`〈#1598・実装
+/// 済み〉は tape 経路〈`Var<'t>`〉専用のため、`Tensor` を直接扱う
+/// この非追跡経路にはそのまま使えず、独立実装を維持する）。
 /// 各要素は `[B, H]`（`stack` 対象の shape が全て一致することを前提に
 /// 呼び出し元が保証する）。
 fn stack_host_tensors(
@@ -572,8 +575,9 @@ impl<'t> RnnCellVars<'t> {
 }
 
 /// [`Rnn::forward_seq`]／[`Gru::forward_seq`] の戻り値。`outputs` は
-/// 各 step の隠れ状態（`[B,H]`。決定 4「`Var::stack`〈#1598〉未実装の
-/// ため per-step の `Vec` で返す」）、`h_n` は最終 step の隠れ状態
+/// 各 step の隠れ状態（`[B,H]`。決定 4「`Var::stack`〈#1598・実装
+/// 済み〉への `[T,B,H]` 集約結線は別途の変更単位とし、per-step の
+/// `Vec` で返す」）、`h_n` は最終 step の隠れ状態
 /// （`outputs` の最後の要素と同一）。
 ///
 /// `params` は `forward_seq` が内部で `cell.bind(tape)` した、この

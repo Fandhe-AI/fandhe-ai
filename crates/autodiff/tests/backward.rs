@@ -630,3 +630,321 @@ fn shape_op_error_paths_return_shape_error() {
         AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
     ));
 }
+
+// --- cat / stack / narrow / split / chunk（イシュー #1598） ---
+
+/// 24. `cat` の backward: `loss = sum(cat([x, y], dim=1) * c)` は
+///     dim=1 で連結された各入力へ `c` の対応区間がそのまま流れる
+///     （解析値）。
+#[test]
+fn cat_backward_distributes_upstream_to_each_input() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let y = tape.var(&t(vec![5.0, 6.0], &[2, 1]));
+    let c = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let cat = fandhe_ai_autodiff::Var::cat(&[x, y], 1).unwrap();
+    assert_eq!(cat.to_tensor().shape(), &[2, 3]);
+    let z = cat.mul(&c).unwrap();
+    let loss = z.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    let dy = grads.get(&y).unwrap().expect("y は loss に到達する");
+    assert_eq!(dense_vec(dx), vec![1.0, 2.0, 4.0, 5.0]);
+    assert_eq!(dense_vec(dy), vec![3.0, 6.0]);
+}
+
+/// 25. `cat(&[x, x])` の fan-out 合算: 同一 `Var` を 2 回連結した場合、
+///     backward が両方の寄与を合算することを確認する（`Op::Concat`
+///     doc「同一 NodeId の重複は `accumulate` が合算する」）。
+#[test]
+fn cat_self_reference_accumulates_gradient() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[1, 2]));
+    let cat = fandhe_ai_autodiff::Var::cat(&[x, x], 0).unwrap();
+    let loss = cat.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dense_vec(dx), vec![2.0, 2.0]);
+}
+
+/// 26. `stack` の backward: `loss = sum(stack([x, y], dim=0))` は
+///     sum が形状・順序に依存しないため dx/dy は全要素 1。
+#[test]
+fn stack_backward_matches_expected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let y = tape.var(&t(vec![3.0, 4.0], &[2]));
+    let s = fandhe_ai_autodiff::Var::stack(&[x, y], 0).unwrap();
+    assert_eq!(s.to_tensor().shape(), &[2, 2]);
+    let loss = s.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    let dy = grads.get(&y).unwrap().expect("y は loss に到達する");
+    assert_eq!(dense_vec(dx), vec![1.0, 1.0]);
+    assert_eq!(dense_vec(dy), vec![1.0, 1.0]);
+}
+
+/// 27. `split`／`chunk` の backward: 各出力を異なる係数で重み付けした
+///     loss の解析勾配を検証する（各出力区間へ対応係数がそのまま
+///     流れる）。
+#[test]
+fn split_backward_matches_expected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5]));
+    let parts = x.split(2, 0).unwrap();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0].to_tensor().shape(), &[2]);
+    assert_eq!(parts[2].to_tensor().shape(), &[1]);
+
+    // 各パートに係数 1, 2, 3 を掛けてから合算する。
+    let coeffs = [1.0f32, 2.0, 3.0];
+    let mut terms = Vec::with_capacity(parts.len());
+    for (part, &coeff) in parts.iter().zip(coeffs.iter()) {
+        let scaled = part.sum(None).unwrap();
+        let c = tape.var(&t(vec![coeff], &[]));
+        terms.push(scaled.mul(&c).unwrap());
+    }
+    let mut loss = terms[0];
+    for term in &terms[1..] {
+        loss = loss.add(term).unwrap();
+    }
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    // part0=[1,2]*1, part1=[3,4]*2, part2=[5]*3
+    assert_eq!(dense_vec(dx), vec![1.0, 1.0, 2.0, 2.0, 3.0]);
+}
+
+/// 28. `chunk` の backward（`split` と同型の検証）。
+#[test]
+fn chunk_backward_matches_expected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5]));
+    let parts = x.chunk(3, 0).unwrap();
+    // ceil(5/3) = 2 -> [2, 2, 1]
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0].to_tensor().shape(), &[2]);
+    assert_eq!(parts[1].to_tensor().shape(), &[2]);
+    assert_eq!(parts[2].to_tensor().shape(), &[1]);
+
+    let loss = parts[0]
+        .sum(None)
+        .unwrap()
+        .add(&parts[1].sum(None).unwrap())
+        .unwrap()
+        .add(&parts[2].sum(None).unwrap())
+        .unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dense_vec(dx), vec![1.0, 1.0, 1.0, 1.0, 1.0]);
+}
+
+/// 29. `narrow` 単体の backward: 未選択領域の勾配は 0。
+#[test]
+fn narrow_backward_zeros_unselected_region() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5]));
+    let n = x.narrow(0, 1, 2).unwrap();
+    assert_eq!(n.to_tensor().shape(), &[2]);
+    let loss = n.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dense_vec(dx), vec![0.0, 1.0, 1.0, 0.0, 0.0]);
+}
+
+/// 30. `split` → `cat` の往復: forward が bit 同一・backward が全要素
+///     1（sum の入力）であることを検証する。
+#[test]
+fn split_then_cat_roundtrip_matches_original_bit_exact_and_backward_is_ones() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[6]));
+    let parts = x.split(2, 0).unwrap();
+    let rejoined = fandhe_ai_autodiff::Var::cat(&parts, 0).unwrap();
+    assert_eq!(dense_vec(&rejoined.to_tensor()), dense_vec(&x.to_tensor()));
+
+    let loss = rejoined.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dense_vec(dx), vec![1.0; 6]);
+}
+
+/// 32. `cat` 経由で loss に到達したパラメータの勾配（`dim=1` の
+///     連結なので非 contiguous な narrow view）を `optim::Sgd::step`
+///     に渡して 1 step 更新できることを確認する（view 勾配の消費側
+///     契約の回帰）。
+#[test]
+fn cat_gradient_view_can_be_consumed_by_sgd_step() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let w = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let y = tape.var(&t(vec![5.0, 6.0], &[2, 1]));
+    let cat = fandhe_ai_autodiff::Var::cat(&[w, y], 1).unwrap();
+    let loss = cat.sum(None).unwrap();
+
+    let grads = tape.backward(&loss).unwrap();
+    let dw = grads
+        .get(&w)
+        .unwrap()
+        .expect("w は loss に到達する")
+        .clone();
+
+    let mut sgd =
+        fandhe_ai_autodiff::optim::Sgd::new(fandhe_ai_autodiff::optim::SgdConfig::new(0.1))
+            .unwrap();
+    let w_val = w.to_tensor();
+    let updated = sgd
+        .step(&[&w_val], &[&dw])
+        .expect("view 勾配でも step が成功する");
+    assert_eq!(updated[0].shape(), &[2, 2]);
+}
+
+/// 33. edge ケース: `chunk` の `shape[dim] == 0`（`chunks` 個の空
+///     narrow）・`split` の `shape[dim] == 0`（1 個の空 narrow）・
+///     全区間 0 長の `cat`。
+#[test]
+fn zero_length_edge_cases_for_split_chunk_and_cat() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let empty = tape.var(&t(Vec::new(), &[0]));
+
+    let chunks = empty.chunk(3, 0).unwrap();
+    assert_eq!(chunks.len(), 3);
+    for c in &chunks {
+        assert_eq!(c.to_tensor().shape(), &[0]);
+    }
+
+    let splits = empty.split(4, 0).unwrap();
+    assert_eq!(splits.len(), 1);
+    assert_eq!(splits[0].to_tensor().shape(), &[0]);
+
+    let cat = fandhe_ai_autodiff::Var::cat(&[empty, empty], 0).unwrap();
+    assert_eq!(cat.to_tensor().shape(), &[0]);
+}
+
+// --- cat / stack / narrow / split / chunk のエラー経路 ---
+
+#[test]
+fn cat_empty_list_is_invalid_argument() {
+    let err = fandhe_ai_autodiff::Var::cat(&[], 0).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn stack_empty_list_is_invalid_argument() {
+    let err = fandhe_ai_autodiff::Var::stack(&[], 0).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn cat_cross_tape_is_rejected() {
+    let tape_a = Tape::new_with_ops(common::naive_ops());
+    let tape_b = Tape::new_with_ops(common::naive_ops());
+    let x = tape_a.var(&t(vec![1.0], &[1]));
+    let y = tape_b.var(&t(vec![2.0], &[1]));
+    let err = fandhe_ai_autodiff::Var::cat(&[x, y], 0).unwrap_err();
+    assert!(matches!(err, AutodiffError::TapeMismatch));
+}
+
+#[test]
+fn cat_rank_mismatch_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let y = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let err = fandhe_ai_autodiff::Var::cat(&[x, y], 0).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::RankMismatch { .. })
+    ));
+}
+
+#[test]
+fn cat_axis_mismatch_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let y = tape.var(&t(vec![1.0, 2.0, 3.0], &[3, 1]));
+    let err = fandhe_ai_autodiff::Var::cat(&[x, y], 0).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ShapeMismatch { .. })
+    ));
+}
+
+#[test]
+fn stack_axis_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let err = fandhe_ai_autodiff::Var::stack(&[x], 2).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange {
+            axis: 2,
+            rank: 2
+        })
+    ));
+}
+
+#[test]
+fn stack_shape_mismatch_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let y = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let err = fandhe_ai_autodiff::Var::stack(&[x, y], 0).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ShapeMismatch { .. })
+    ));
+}
+
+#[test]
+fn stack_non_contiguous_input_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let tr = x.transpose(0, 1).unwrap();
+    let err = fandhe_ai_autodiff::Var::stack(&[tr], 0).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::NonContiguousReshape)
+    ));
+}
+
+#[test]
+fn narrow_out_of_bounds_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let err = x.narrow(0, 2, 2).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::NarrowOutOfBounds { .. })
+    ));
+}
+
+#[test]
+fn split_zero_size_is_invalid_argument() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let err = x.split(0, 0).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn chunk_zero_chunks_is_invalid_argument() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let err = x.chunk(0, 0).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn split_with_sizes_sum_mismatch_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let err = x.split_with_sizes(&[1, 1], 0).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ShapeMismatch { .. })
+    ));
+}

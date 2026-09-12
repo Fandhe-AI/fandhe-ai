@@ -250,11 +250,44 @@ fn check_backward_through_view_chain_is_bounded_alloc() {
     );
 }
 
+/// 2c. `Var::narrow`（`split`／`chunk` の実体）の forward が同様に
+///     無視できる量しか確保しないことを検証する（`tape::Op::Narrow`。
+///     イシュー #1598）。
+fn check_narrow_forward_is_near_zero_alloc() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let leaf = make_leaf();
+    let x = tape.var(&leaf);
+
+    let (n, peak) = measure(|| {
+        let n = x
+            .narrow(0, 1, N - 1)
+            .expect("narrow(0, 1, N-1) は常に範囲内で成功する");
+        std::hint::black_box(&n);
+        n
+    });
+    std::hint::black_box(&n);
+
+    let peak =
+        peak.expect("GLOBAL_ALLOCATOR がテストバイナリの #[global_allocator] のため Some のはず");
+    let threshold = buffer_bytes() / THRESHOLD_DIVISOR;
+    println!(
+        "check_narrow_forward_is_near_zero_alloc: peak={peak} bytes, threshold={threshold} bytes, buffer={} bytes",
+        buffer_bytes()
+    );
+    assert!(
+        peak < threshold,
+        "narrow forward の純増分ピーク（{peak} バイト）が閾値（{threshold} バイト。\
+         入力バッファ {} バイトの 1/{THRESHOLD_DIVISOR}）を超えた——zero-copy 契約が破れている疑い",
+        buffer_bytes()
+    );
+}
+
 fn main() {
     check_transpose_forward_is_near_zero_alloc();
     check_reshape_forward_is_near_zero_alloc();
     check_permute_forward_is_near_zero_alloc();
     check_broadcast_to_forward_is_near_zero_alloc();
+    check_narrow_forward_is_near_zero_alloc();
     check_backward_through_view_chain_is_bounded_alloc();
     println!("view_zero_alloc: all checks passed");
 }
