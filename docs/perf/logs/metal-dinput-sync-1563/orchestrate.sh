@@ -5,7 +5,11 @@
 # 順に実行する:
 #
 #   1. bit 同一確認（両腕で `metal_reuse_step_grad_bit_dump` を実行し、
-#      `^(step\[|final\.param\[)` 行を diff。差分 0 を期待）
+#      `^(step\[|final\.param\[)` 行を diff。抽出件数が独立の期待値
+#      `EXPECTED_BITDUMP_LINES` と一致し項目ラベル集合が両腕で一致する
+#      ことを先に検証したうえで、差分 0 行を期待。検証に失敗した場合は
+#      「一致」ではなく「判定不能」として記録する〈PR #1665 codex-review
+#      指摘の是正〉）
 #   2. `#[ignore]` 群の非後退確認（after 腕で実行）
 #   3. カウンタ実測（after 腕で `mnist_scale_train_reuse_metal_batch_
 #      counters`〈hard assert 11/8/8〉・`mnist_scale_train_reuse_metal_
@@ -30,6 +34,8 @@
 #     （--dry-run はリポジトリパス環境変数なしでも動作する）
 #
 # 生成物: bitdump_before.log・bitdump_after.log・bitdump_diff.txt・
+# bitdump_before_labels.txt・bitdump_after_labels.txt・
+# bitdump_label_diff.txt（件数・項目集合検証の副産物）・
 # ignored_after.log・batch_counters_after.log・backward_phase_after.log・
 # ab/（`run_ab_dinput_sync_metal.sh` の出力一式。同スクリプトが
 # `scripts/bench/framework-compare/results/raw/` 配下へ書くため、実行後に
@@ -50,6 +56,14 @@ BEFORE_REPO="${DINPUT_SYNC_BEFORE_REPO:-}"
 AFTER_REPO="${DINPUT_SYNC_AFTER_REPO:-}"
 
 BIT_DUMP_CMD="cargo test -p fandhe-ai --release --test metal_reuse_step_grad_bit_dump -- --ignored --nocapture"
+
+# 独立の期待行数（`docs/perf/train-resident-grad-device-update.md` §5.3 実測値。
+# 同一 `metal_reuse_step_grad_bit_dump` テストの既知の出力行数）。before/after
+# 2 腕の grep 結果どうしを比較するだけでは、両腕で同じ抽出漏れ（テスト出力形式の
+# 変化・`--nocapture` の出力欠落等）が起きた場合に検出できない（両者とも空／同じ
+# 部分集合になり diff が 0 行のまま bit-identical と誤報告しうる）ため、腕間比較とは
+# 独立にこの期待値との突合を行う（イシュー #1563 PR #1665 codex-review 指摘）。
+EXPECTED_BITDUMP_LINES=4462
 IGNORED_CMD_MNIST="cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture --test-threads=1"
 IGNORED_CMD_GEMM_PARITY="cargo test -p fandhe-ai-backend-metal --release --test gemm_resident_parity -- --ignored --nocapture"
 IGNORED_CMD_STORE_PARITY="cargo test -p fandhe-ai --release --test device_param_store_backend_parity -- --ignored --nocapture"
@@ -118,12 +132,45 @@ tail -5 "$SCRIPT_DIR/bitdump_after.log"
 
 grep -E '^(step\[|final\.param\[)' "$SCRIPT_DIR/bitdump_before.log" >"$SCRIPT_DIR/bitdump_before_filtered.txt" || true
 grep -E '^(step\[|final\.param\[)' "$SCRIPT_DIR/bitdump_after.log" >"$SCRIPT_DIR/bitdump_after_filtered.txt" || true
+
+# 件数検証（イシュー #1563 PR #1665 codex-review 指摘）: grep が対象行を
+# 1 行も抽出できなくても（テスト出力形式の変化・実行失敗等）上の `|| true`
+# により本スクリプト自体は続行するため、その場合の空ファイル同士の diff は
+# 0 行になり「bit-identical」と誤判定しうる。また両腕で同じ項目が欠落した
+# 場合も腕間の diff だけでは検出できない。そのためまず両腕の抽出件数が
+# 0 より大きいこと・`EXPECTED_BITDUMP_LINES` と一致すること・抽出された
+# 項目ラベル集合（` = ` 左辺。値そのものは含まない）が両腕で一致することを
+# 独立に検証し、いずれかが崩れていれば「一致」ではなく「判定不能」として
+# 記録する（fail-closed。誤って bit-identical と報告しない）。
+BITDUMP_COUNT_BEFORE=$(wc -l <"$SCRIPT_DIR/bitdump_before_filtered.txt" | tr -d ' ')
+BITDUMP_COUNT_AFTER=$(wc -l <"$SCRIPT_DIR/bitdump_after_filtered.txt" | tr -d ' ')
+sed -E 's/ = .*$//' "$SCRIPT_DIR/bitdump_before_filtered.txt" | sort >"$SCRIPT_DIR/bitdump_before_labels.txt"
+sed -E 's/ = .*$//' "$SCRIPT_DIR/bitdump_after_filtered.txt" | sort >"$SCRIPT_DIR/bitdump_after_labels.txt"
+diff -u "$SCRIPT_DIR/bitdump_before_labels.txt" "$SCRIPT_DIR/bitdump_after_labels.txt" \
+    >"$SCRIPT_DIR/bitdump_label_diff.txt" 2>&1 || true
+
+BITDUMP_COUNT_OK=1
+if [ "$BITDUMP_COUNT_BEFORE" -eq 0 ] || [ "$BITDUMP_COUNT_AFTER" -eq 0 ]; then
+    echo "WARNING: bitdump filtered output is empty (before=$BITDUMP_COUNT_BEFORE after=$BITDUMP_COUNT_AFTER); grep may have failed to extract any line" >&2
+    BITDUMP_COUNT_OK=0
+fi
+if [ "$BITDUMP_COUNT_BEFORE" -ne "$EXPECTED_BITDUMP_LINES" ] || [ "$BITDUMP_COUNT_AFTER" -ne "$EXPECTED_BITDUMP_LINES" ]; then
+    echo "WARNING: bitdump filtered line count differs from expected ($EXPECTED_BITDUMP_LINES): before=$BITDUMP_COUNT_BEFORE after=$BITDUMP_COUNT_AFTER" >&2
+    BITDUMP_COUNT_OK=0
+fi
+if [ -s "$SCRIPT_DIR/bitdump_label_diff.txt" ]; then
+    echo "WARNING: bitdump_label_diff.txt is non-empty (item set differs between arms). See $SCRIPT_DIR/bitdump_label_diff.txt" >&2
+    BITDUMP_COUNT_OK=0
+fi
+
 diff -u "$SCRIPT_DIR/bitdump_before_filtered.txt" "$SCRIPT_DIR/bitdump_after_filtered.txt" \
     >"$SCRIPT_DIR/bitdump_diff.txt" 2>&1 || true
-if [ -s "$SCRIPT_DIR/bitdump_diff.txt" ]; then
+if [ "$BITDUMP_COUNT_OK" -eq 0 ]; then
+    echo "bit dump: UNDETERMINED（件数・項目集合の検証に失敗したため bit 同一の判定を確定できない。$SCRIPT_DIR/bitdump_diff.txt・bitdump_label_diff.txt を参照）" >&2
+elif [ -s "$SCRIPT_DIR/bitdump_diff.txt" ]; then
     echo "WARNING: bitdump_diff.txt is non-empty (bit mismatch detected). See $SCRIPT_DIR/bitdump_diff.txt" >&2
 else
-    echo "bit dump: 0 diff lines (bit-identical)"
+    echo "bit dump: $BITDUMP_COUNT_BEFORE/$BITDUMP_COUNT_AFTER 行・0 diff lines (bit-identical)"
 fi
 
 echo "=== 2. #[ignore] 群非後退確認（after 腕） ==="

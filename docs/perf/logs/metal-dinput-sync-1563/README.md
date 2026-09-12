@@ -45,8 +45,22 @@ sh orchestrate.sh --dry-run
   `metal_reuse_step_grad_bit_dump`（`--ignored --nocapture`）全出力
 - `bitdump_before_filtered.txt`／`bitdump_after_filtered.txt`：
   `^(step\[|final\.param\[)` 行のみを抽出したもの
-- `bitdump_diff.txt`: 上記 2 ファイルの `diff -u`。**空である（0 行）
-  ことを期待**（bit 完全一致。4462 行前後）
+- `bitdump_before_labels.txt`／`bitdump_after_labels.txt`：上記 2
+  ファイルの各行から ` = ` 右辺（値）を除いた項目ラベルのみを sort した
+  もの（件数・項目集合検証用。PR #1665 codex-review 指摘）
+- `bitdump_label_diff.txt`: 上記 2 ラベルファイルの `diff -u`。空（0
+  行）であることを期待（両腕の抽出項目集合が一致することの確認。
+  非空の場合は grep 抽出漏れ・出力形式変化等を疑う）
+- `bitdump_diff.txt`: `bitdump_before_filtered.txt`／
+  `bitdump_after_filtered.txt` の `diff -u`。**空である（0 行）ことを
+  期待**（bit 完全一致。`EXPECTED_BITDUMP_LINES=4462` 行前後）。ただし
+  この diff だけでは「両腕とも grep 抽出が 0 件（または同じ部分集合）」
+  で偶然 0 行になるケースを検出できないため、`orchestrate.sh` は比較前に
+  (i) 両腕の抽出件数が 0 より大きいこと、(ii) 両腕とも
+  `EXPECTED_BITDUMP_LINES` と一致すること、(iii) `bitdump_label_diff.txt`
+  が空であることを独立に検証し、いずれかが崩れていれば標準出力へ
+  「bit dump: UNDETERMINED」と記録する（「一致」と誤報告しない。
+  fail-closed）
 - `ignored_after_mnist.log`／`ignored_after_gemm_parity.log`／
   `ignored_after_store_parity.log`／`ignored_after_command_batching.log`:
   after 腕の既存 `#[ignore]` テスト群（非後退確認）
@@ -72,10 +86,16 @@ sh orchestrate.sh --dry-run
 
 ## 事前登録判定規則（record only・non-gating。計測後に緩和しない）
 
-1. bit 同一: `bitdump_diff.txt` が空（差分 0 行）であること。差分がある
-   場合は「回収しない」判断の対象（d_input・d_weight は独立計算という
-   前提が崩れている可能性）とし、コード側の assert 値（11/8/8・5/3/3）を
-   実測へ合わせるのではなく原因調査を優先する（fail-closed）
+1. bit 同一: 両腕の抽出件数が `EXPECTED_BITDUMP_LINES`（4462）と一致し
+   `bitdump_label_diff.txt` が空（項目集合一致）であることをまず確認し
+   たうえで、`bitdump_diff.txt` が空（差分 0 行）であること。件数・項目
+   集合検証に失敗した場合は「一致」と判定せず「判定不能
+   （UNDETERMINED）」として記録する（grep 抽出漏れ等による空ファイル
+   同士の見かけ上の一致を bit-identical と誤報告しないため）。
+   `bitdump_diff.txt` に実差分がある場合は「回収しない」判断の対象
+   （d_input・d_weight は独立計算という前提が崩れている可能性）とし、
+   コード側の assert 値（11/8/8・5/3/3）を実測へ合わせるのではなく原因
+   調査を優先する（fail-closed）
 2. `#[ignore]` 群非後退: `ignored_after_*.log` の各テストが pass する
    こと（既知の pre-existing FAIL がある場合はそのテスト個別実行で
    ベースラインを確認したうえで区別する）
