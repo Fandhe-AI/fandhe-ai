@@ -21,6 +21,10 @@ fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
 }
 
+/// `mlp_grads` の戻り値（dx／dw1／dw2 の 3 テンソル）用の型エイリアス
+/// （clippy::type_complexity 対応）。
+type MlpGrads = (Tensor<f32>, Tensor<f32>, Tensor<f32>);
+
 fn scalar(tensor: &Tensor<f32>) -> f32 {
     tensor
         .get(&[])
@@ -67,7 +71,7 @@ fn mlp_grads(
     w2: &Tensor<f32>,
     target: &Tensor<f32>,
     use_checkpoint: bool,
-) -> Result<(Tensor<f32>, Tensor<f32>, Tensor<f32>), AutodiffError> {
+) -> Result<MlpGrads, AutodiffError> {
     let tape = Tape::new_with_ops(common::naive_ops());
     let xv = tape.var(x);
     let w1v = tape.var(w1);
@@ -88,15 +92,15 @@ fn mlp_grads(
     let dx = grads
         .get(&xv)?
         .cloned()
-        .unwrap_or_else(|| t(vec![0.0; dense(x).len()], &x.shape().to_vec()));
+        .unwrap_or_else(|| t(vec![0.0; dense(x).len()], x.shape()));
     let dw1 = grads
         .get(&w1v)?
         .cloned()
-        .unwrap_or_else(|| t(vec![0.0; dense(w1).len()], &w1.shape().to_vec()));
+        .unwrap_or_else(|| t(vec![0.0; dense(w1).len()], w1.shape()));
     let dw2 = grads
         .get(&w2v)?
         .cloned()
-        .unwrap_or_else(|| t(vec![0.0; dense(w2).len()], &w2.shape().to_vec()));
+        .unwrap_or_else(|| t(vec![0.0; dense(w2).len()], w2.shape()));
     Ok((dx, dw1, dw2))
 }
 
@@ -319,7 +323,7 @@ fn checkpoint_returning_var_from_another_tape_is_rejected() {
     let other_tape = Tape::new_with_ops(common::naive_ops());
     let y_other = other_tape.var(&t(vec![1.0, 2.0], &[2]));
 
-    let result = tape.checkpoint(|| Ok(y_other.sum(None)?));
+    let result = tape.checkpoint(|| y_other.sum(None));
     assert!(matches!(result, Err(AutodiffError::TapeMismatch)));
 }
 
