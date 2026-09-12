@@ -21,7 +21,7 @@
 //! 後の `Gradients` は世代番号（`Gradients::epoch`）により無効化される
 //! （`Gradients::get` 参照）。
 
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 use crate::error::AutodiffError;
 use crate::grad;
@@ -213,7 +213,7 @@ impl Tape {
                 self.epoch(),
             )?;
             for (target, contribution) in contributions {
-                accumulate(&mut grads, target, contribution);
+                accumulate(self.ops(), &mut grads, target, contribution)?;
             }
         }
 
@@ -233,14 +233,30 @@ impl Tape {
 
 /// 同一入力ノードへ複数経路から流入した勾配を合算する（PoC-v2-2
 /// `accumulate()` 相当）。初回流入は `Some` を差し込むだけ、2 回目以降
-/// は既存値と `eval::add`（同 shape 加算）で合算する。
-fn accumulate(grads: &mut [Option<Tensor<f32>>], target: NodeId, contribution: Tensor<f32>) {
+/// は既存値と合算する。
+///
+/// **イシュー #1583**: fan-out（同一ノードが複数の下流ノードから
+/// 勾配を受け取る）で発生する同 shape 加算を、`grad::ELEMENTWISE_VJP_
+/// VIA_BACKEND_OPS` が `true` の場合は `ops.add`（forward の `Var::add`
+/// と同じ CPU 並列／CUDA／Metal カーネル経由）で計算する
+/// （`grad::vjp_elementwise_add` 経由。`.claude/rules/coding-rust.md`
+/// 「バックエンド間数値一致は複合判定」の対象外＝両者とも単一 IEEE
+/// 加算で bit 同一）。フォールバックは `crate::eval::add`（ホスト逐次
+/// 参照実装。ゲート `false` 時・`BackendError::Unsupported` 時の経路。
+/// `grad::vjp_elementwise_add` doc 参照）。
+fn accumulate(
+    ops: &dyn BackendOps,
+    grads: &mut [Option<Tensor<f32>>],
+    target: NodeId,
+    contribution: Tensor<f32>,
+) -> Result<(), AutodiffError> {
     match grads[target.0].take() {
         Some(existing) => {
-            grads[target.0] = Some(crate::eval::add(&existing, &contribution));
+            grads[target.0] = Some(grad::vjp_elementwise_add(ops, &existing, &contribution)?);
         }
         None => {
             grads[target.0] = Some(contribution);
         }
     }
+    Ok(())
 }

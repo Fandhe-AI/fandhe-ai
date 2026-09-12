@@ -183,3 +183,87 @@ fn mul_with_non_contiguous_view_matches_contiguous() {
         }
     }
 }
+
+/// 両オペランドとも非 contiguous view（transpose 後）の場合の general
+/// path（`ElementwiseReadOperand::View` × `View`。イシュー #1583）が
+/// `contiguous()` 実体化後の計算と bit 完全一致することを確認する
+/// （NaN／-0.0／subnormal を含め `to_bits()` で比較し、`assert_eq!` の
+/// NaN 非等価に左右されない）。
+#[test]
+fn mul_with_both_operands_non_contiguous_view_is_bit_exact() {
+    let a = Tensor::<f32>::new(vec![f32::NAN, -0.0, 1e-40, 1.0, 2.0, -3.5], &[2, 3]).unwrap();
+    let b = Tensor::<f32>::new(vec![1.0, f32::NAN, -0.0, 4.0, -5.0, 6.0], &[2, 3]).unwrap();
+    let a_t = a.transpose(0, 1).unwrap(); // shape [3, 2]、非 contiguous
+    let b_t = b.transpose(0, 1).unwrap(); // shape [3, 2]、非 contiguous
+
+    let out_view = mul(&a_t, &b_t).unwrap();
+    let out_contiguous = mul(&a_t.contiguous(), &b_t.contiguous()).unwrap();
+    for i in 0..3 {
+        for j in 0..2 {
+            let v = out_view.get(&[i, j]).unwrap();
+            let e = out_contiguous.get(&[i, j]).unwrap();
+            assert_eq!(
+                v.to_bits(),
+                e.to_bits(),
+                "index [{i},{j}]: view={v} (bits={:#x}) vs contiguous={e} (bits={:#x})",
+                v.to_bits(),
+                e.to_bits()
+            );
+        }
+    }
+}
+
+/// broadcast 拡張軸（stride 0）と transpose view（非負 stride）が同時に
+/// 現れる general path が `contiguous()` 実体化後と bit 完全一致する
+/// ことを確認する（イシュー #1583。`ElementwiseReadOperand::View` は
+/// stride 0 を含む view も扱う契約）。
+#[test]
+fn add_broadcast_stride_zero_with_transposed_operand_is_bit_exact() {
+    let a = Tensor::<f32>::new((0..6).map(|v| v as f32 + 0.25).collect(), &[2, 3])
+        .unwrap()
+        .transpose(0, 1)
+        .unwrap(); // shape [3, 2]、非 contiguous
+    // shape [3, 1] を [3, 2] へブロードキャスト（列方向 stride 0）
+    let b = Tensor::<f32>::new(vec![10.0, -20.0, 30.0], &[3, 1]).unwrap();
+
+    let out_view = add(&a, &b).unwrap();
+    let out_contiguous = add(&a.contiguous(), &b).unwrap();
+    assert_eq!(out_view.shape(), &[3, 2]);
+    for i in 0..3 {
+        for j in 0..2 {
+            let v = out_view.get(&[i, j]).unwrap();
+            let e = out_contiguous.get(&[i, j]).unwrap();
+            assert_eq!(v.to_bits(), e.to_bits(), "index [{i},{j}]");
+        }
+    }
+}
+
+/// general path の stride 読み（`ElementwiseReadOperand`）は
+/// `PARALLEL_THRESHOLD`（fast path 側の rayon 切替閾値）の影響を受けない
+/// 単一スレッド走査だが、大きめの要素数でも境界外アクセスを起こさない
+/// ことを rank-2 broadcast + transpose の組み合わせで確認する
+/// （イシュー #1583）。
+#[test]
+fn mul_view_path_handles_larger_broadcast_transpose() {
+    let rows = 64;
+    let cols = 96;
+    let a = Tensor::<f32>::new(
+        (0..rows * cols).map(|v| (v as f32) * 0.01 - 3.0).collect(),
+        &[rows, cols],
+    )
+    .unwrap()
+    .transpose(0, 1)
+    .unwrap(); // shape [cols, rows]、非 contiguous
+    let b = Tensor::<f32>::new(vec![2.0; rows], &[1, rows]).unwrap(); // stride 0 broadcast
+
+    let out_view = mul(&a, &b).unwrap();
+    let out_contiguous = mul(&a.contiguous(), &b).unwrap();
+    assert_eq!(out_view.shape(), &[cols, rows]);
+    for i in 0..cols {
+        for j in 0..rows {
+            let v = out_view.get(&[i, j]).unwrap();
+            let e = out_contiguous.get(&[i, j]).unwrap();
+            assert_eq!(v.to_bits(), e.to_bits(), "index [{i},{j}]");
+        }
+    }
+}
