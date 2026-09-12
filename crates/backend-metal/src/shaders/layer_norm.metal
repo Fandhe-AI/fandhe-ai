@@ -44,11 +44,19 @@
 // 得られる（`f32` へ丸めるのは各段の加算内部のみで、桁落ち成分
 // `comp` に残差を保持し続けるため）。
 //
-// 平均は比スケール総和 `(sum, comp)` を `inv_n` 倍してさらに doubled-float
-// （FMA によるロスレス乗算誤差抽出。Dekker の手法）へ拡張した
-// `(mean_hi, mean_lo)` として保持し、**偏差計算まで `f32` 単一値へ丸めず
-// 2 語のまま保持する**（codex-review 指摘: 平均を偏差計算前に丸めると
-// 丸め誤差がそのまま偏差へ伝播する）。偏差 `dev = (x_i/s - mean_hi) -
+// 平均は比スケール総和 `(sum, comp)` を `hidden` で厳密除算してさらに
+// doubled-float（FMA によるロスレス除算誤差抽出。Dekker の手法）へ
+// 拡張した `(mean_hi, mean_lo)` として保持し、**偏差計算まで `f32`
+// 単一値へ丸めず 2 語のまま保持する**（codex-review 指摘: 平均を
+// 偏差計算前に丸めると丸め誤差がそのまま偏差へ伝播する）。除算は
+// ホストから渡される `inv_n`〈事前丸め済み `1/hidden`〉への乗算では
+// なく `hidden` 自体（`(float)hidden` は `hidden <= 2^24` の実用範囲で
+// exact）への直接除算で行う（`inv_n` 経由だと `mean_hi+mean_lo` が
+// 表す値が真の平均 `sum/hidden` ではなく `sum*inv_n_rounded` になり、
+// `inv_n` 自身の丸め誤差が `mean_lo` へ残存する。全要素が同一値の行
+// では本来 0 になるべき偏差にこの残存誤差が現れ、後段で `eps` 由来の
+// 極小 `scale` により増幅されていた——codex-review 指摘・パス 2 の
+// 実装コメント参照）。偏差 `dev = (x_i/s - mean_hi) -
 // mean_lo` も比スケール領域内（`O(1)`）に収まるため overflow しない
 // （`[2^38, -2^38] × 999` のような偏差自体が `f32::MAX` を超える入力でも、
 // 比スケール領域では `dev` が有界に保たれる——真の偏差を **一度も
@@ -284,9 +292,24 @@ kernel void layer_norm_f32(
             ln_kahan_add(lane_sum, lane_comp, ratio);
         }
         ln_reduce_kahan(lane_sum, lane_comp);
-        float mean_hi = lane_sum * inv_n;
-        float mean_err = fma(lane_sum, inv_n, -mean_hi);
-        float mean_lo = fma(lane_comp, inv_n, mean_err);
+        // `hidden` による厳密除算（`hidden <= 2^24` の実用範囲では
+        // `(float)hidden` は exact 表現）を Dekker 型 div で
+        // doubled-float `(mean_hi, mean_lo)` へ拡張する（codex-review
+        // 指摘: ホストから渡される `inv_n`〈`1.0f32/hidden as f32`。
+        // 既に 1 回丸め済み〉をそのまま乗算して Dekker 分割すると、
+        // `mean_hi+mean_lo` が表す値は真の平均 `sum/hidden` ではなく
+        // `sum*inv_n_rounded` になる。全要素が同一値の行では本来
+        // 偏差が厳密に 0 になるべきだが、この差分〈`inv_n` 自身の
+        // 丸め誤差由来〉が `mean_lo` に残存し、後段で `eps` 由来の
+        // 極小 `scale` により 1000 倍規模へ増幅されていた（実測:
+        // `x=[1024,1024,1024], eps=1e-5` で本来 0 のところ約
+        // `-0.00965`）。`hidden` 自体による厳密除算に切り替えることで
+        // `mean_hi+mean_lo` が `sum/hidden`〈厳密値〉の doubled-float
+        // 表現になり、この増幅経路を根本から断つ）。
+        float hidden_f = (float)hidden;
+        float mean_hi = lane_sum / hidden_f;
+        float mean_div_r = fma(-mean_hi, hidden_f, lane_sum);
+        float mean_lo = mean_div_r / hidden_f + lane_comp / hidden_f;
 
         // パス 3: 分散（比スケール偏差 `dev = (x_i/row_scale - mean_hi) -
         // mean_lo` に対する scale/ssq 方式二乗和。`eps` は比スケール
@@ -300,8 +323,10 @@ kernel void layer_norm_f32(
             ln_ssq_add(scale, ssq, ssq_c, fabs(dev));
         }
         ln_reduce_ssq(scale, ssq, ssq_c);
-        float n = 1.0f / inv_n;
-        float eps_elem = (sqrt(eps) * sqrt(n)) / row_scale;
+        // `n` は上記で厳密表現済みの `hidden_f` を再利用する（`1.0f /
+        // inv_n` という間接的な再構成〈ホスト側丸め誤差を再度経由〉を
+        // 避ける）。
+        float eps_elem = (sqrt(eps) * sqrt(hidden_f)) / row_scale;
         ln_ssq_add(scale, ssq, ssq_c, eps_elem);
         // `1/sqrt((ssq+ssq_c)*inv_n)` は通常オーダーの値（`eps` 疑似要素
         // により `ssq+ssq_c` が 0 になることはない）。`scale` 側の逆数は
@@ -317,17 +342,25 @@ kernel void layer_norm_f32(
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
             float ratio = x[row_base + idx] / row_scale;
             float dev = (ratio - mean_hi) - mean_lo;
-            // `dev == 0.0` を明示的に分岐する（退化ケース——行の全要素が
-            // 同一の巨大値〈例 `[2e38, 2e38]`〉——では `scale` が `eps`
-            // 疑似要素のみに由来し、`sqrt(eps)*sqrt(n)/row_scale` が
-            // subnormal 域まで縮小しうる。Apple GPU は既定でシェーダ実行
-            // 時に subnormal を flush-to-zero しうるため `scale` が
-            // 実質 0 へ潰れ `dev/scale` が `0/0=NaN` になる場合がある。
-            // `dev` が厳密に 0 のときは `dev * (任意の有限値) = 0` が
-            // 数学的に自明なため、除算を経由せず直接 0 を返して
-            // subnormal・FTZ の影響を受けないようにする。codex-review
-            // 指摘の退化ケーステストで確認済み）。
-            float xhat = (dev == 0.0f) ? 0.0f : (dev / scale) * norm;
+            // `dev == 0.0 && eps > 0.0` の場合のみ明示的に 0 を返す
+            // （codex-review 指摘: 当初 `dev == 0.0` だけで分岐すると
+            // `eps == 0` かつ真の分散も 0 の退化ケース〈例 `x=[1,1],
+            // eps=0`〉で `scale` が数学的に厳密 0〈FTZ ではなく実際に
+            // ゼロの mathematical scale〉になり、CPU/CUDA・ホスト参照
+            // 実装が `0 * inf = NaN`（`rstd = 1/sqrt(var+eps) = 1/0 =
+            // inf`）として返す NaN 伝播契約と食い違い Metal だけ `[0,
+            // 0]` を返していた。`eps > 0.0` を条件に加えることで、この
+            // ゼロ返却は「`scale` が `eps` 由来の極小疑似要素のみに
+            // 由来し FTZ で潰れうる」退化ケース〈行の全要素が同一の
+            // 巨大値・`eps > 0`。例 `[2e38, 2e38]`〉に限定される。
+            // `eps == 0` かつ真の分散も 0 の場合は自然な `dev/scale =
+            // 0/0 = NaN` 分岐へフォールバックし、参照実装と同じ NaN
+            // 伝播契約を保つ。`eps > 0` かつ真の分散も 0 の通常ケース
+            // （`scale` が subnormal 域でない。例 `x=[1024,1024,1024],
+            // eps=1e-5`）では `dev` が厳密に 0 であるため、この分岐が
+            // なくとも `0 / scale(非ゼロ) = 0` が exact に成立する
+            // （分子が厳密 0 のため FTZ の影響を受けない）。
+            float xhat = (eps > 0.0f && dev == 0.0f) ? 0.0f : (dev / scale) * norm;
             float wv = (has_weight != 0) ? w[idx] : 1.0f;
             float bv = (has_bias != 0) ? b[idx] : 0.0f;
             out[row_base + idx] = fma(xhat, wv, bv);

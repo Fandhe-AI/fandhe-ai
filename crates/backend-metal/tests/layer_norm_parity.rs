@@ -367,3 +367,80 @@ fn backend_ops_layer_norm_matches_cpu_reference_across_shapes() {
         }
     }
 }
+
+/// codex-review 指摘の再現ケース（P1・#1671 スレッド 1 件目）: 行の全
+/// 要素が同一値（非 2 冪長・`hidden=3`）の場合、真の偏差は厳密に 0 に
+/// なるべきだが、平均を「ホストが事前丸めした `inv_n`〈`1/hidden`〉を
+/// `sum` へ乗算して doubled-float 化する」実装では `inv_n` 自身の丸め
+/// 誤差が `mean_lo` へ残存し、`eps` 由来の極小 `scale` で 1000 倍規模へ
+/// 増幅されていた（是正前は `x=[1024,1024,1024], eps=1e-5` で本来 0 の
+/// 偏差が約 `-0.00965` へ乖離するのを観測）。`hidden` 自体への厳密除算
+/// （Dekker 型 div）へ切り替えたことで、非 2 冪長の一様行でも出力が
+/// 厳密に `bias` 相当（affine なしなら 0）へ一致することを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_uniform_row_non_power_of_two_hidden_matches_zero_deviation() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    for &hidden in &[3usize, 5, 7, 17] {
+        let x = vec![1024.0f32; hidden];
+        let out = layer_norm
+            .run_layer_norm_f32(&ctx, &x, None, None, 1e-5, 1, hidden)
+            .expect("run_layer_norm_f32 must succeed");
+        for &v in &out {
+            assert!(
+                v.abs() < 1e-4,
+                "hidden={hidden}: expected near-zero deviation for uniform row, got {v}"
+            );
+        }
+    }
+}
+
+/// codex-review 指摘の再現ケース（P1・#1671 スレッド 2 件目）: `eps=0`
+/// かつ行の全要素が同一値（真の分散も 0）の退化ケースでは、CPU/CUDA・
+/// ホスト参照実装が `rstd = 1/sqrt(0+0) = inf`・`xhat = 0 * inf = NaN`
+/// という NaN 伝播契約を持つ。是正前の Metal 実装は `dev == 0.0` だけで
+/// 分岐し `scale` の FTZ 対策として無条件に `0.0` を返していたため、この
+/// 退化ケースでも `[0, 0]` を返し NaN 伝播契約と食い違っていた。
+/// `eps > 0.0` を条件に加えたことで、`eps == 0` の退化ケースは自然な
+/// `dev/scale = 0/0 = NaN` へフォールバックし、CPU 参照実装
+/// （`run_layer_norm_f32_propagates_nan_for_row_with_nan_element` 相当の
+/// 契約）と一致することを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_zero_eps_degenerate_row_propagates_nan() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    let x = vec![1.0f32, 1.0];
+    let out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, None, None, 0.0, 1, 2)
+        .expect("run_layer_norm_f32 must succeed");
+    assert!(
+        out.iter().all(|v| v.is_nan()),
+        "expected NaN propagation for eps=0 degenerate uniform row, got {out:?}"
+    );
+}
+
+/// `eps > 0` かつ真の分散が 0 の退化ケース
+/// （`layer_norm_constant_large_row_does_not_overflow` と同型だが
+/// `eps>0` ゲートの正当な適用範囲——`scale` が `eps` 由来の極小疑似
+/// 要素のみに由来し FTZ で潰れうるケース——を明示的に確認する回帰）:
+/// `eps>0` なら FTZ 対策のゼロ返却が引き続き有効で有限・近ゼロ出力を
+/// 維持する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_positive_eps_degenerate_row_stays_finite_near_zero() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    let x = vec![1.0f32, 1.0];
+    let out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, None, None, 1e-5, 1, 2)
+        .expect("run_layer_norm_f32 must succeed");
+    for &v in &out {
+        assert!(v.is_finite(), "expected finite output, got {v}");
+        assert!(v.abs() < 1e-2, "expected near-zero output, got {v}");
+    }
+}

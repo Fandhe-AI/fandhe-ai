@@ -80,10 +80,17 @@ fn mean_reduction_shuffles_sum_and_comp() {
 }
 
 /// 平均が `row_scale`（2 の冪。`ln_pow2_scale_from_maxabs`）で除した
-/// 比スケール領域の値を Neumaier 補償和で蓄積し、`inv_n` 倍を FMA による
-/// doubled-float 拡張（`mean_hi`／`mean_lo`）で保持することをロックする
-/// （codex-review 指摘の回帰防止: 平均を偏差計算前に単一 `f32` へ丸める
-/// 実装への逆戻りを検出する）。
+/// 比スケール領域の値を Neumaier 補償和で蓄積し、`hidden` による厳密
+/// 除算を FMA による doubled-float 拡張（`mean_hi`／`mean_lo`）で保持
+/// することをロックする（codex-review 指摘の回帰防止: 平均を偏差計算前
+/// に単一 `f32` へ丸める実装への逆戻りを検出する）。
+///
+/// PR #1671 codex-review 指摘（P1）の是正により、ホストが事前丸めした
+/// `inv_n`〈`1/hidden`〉への乗算ベースの Dekker 分割から、`hidden` 自体
+/// （`hidden_f`）への直接除算ベースの Dekker 型 div へ変更済み
+/// （`inv_n` 自身の丸め誤差が `mean_lo` へ残存し `eps` 由来の極小
+/// `scale` で増幅される問題の根治。`docs/backend-metal-splitk-decision.md`
+/// と同様、ロック対象の期待文字列も実装変更と同じ PR 内で更新する）。
 #[test]
 fn mean_pass_uses_row_scale_and_doubled_float_extension() {
     assert!(
@@ -91,7 +98,11 @@ fn mean_pass_uses_row_scale_and_doubled_float_extension() {
         "平均パスが行の比スケール領域（x/row_scale）で縮約していません"
     );
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("float mean_err = fma(lane_sum, inv_n, -mean_hi);"),
+        LAYER_NORM_METAL_SOURCE.contains("float mean_hi = lane_sum / hidden_f;"),
+        "平均パスが `hidden` による厳密除算で mean_hi を求めていません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("float mean_div_r = fma(-mean_hi, hidden_f, lane_sum);"),
         "平均パスが FMA による doubled-float 拡張（mean_hi/mean_lo）を行っていません"
     );
 }
