@@ -110,6 +110,38 @@ pub enum Activation {
     Relu,
 }
 
+/// [`BackendOps::binary_elementwise_device`] が適用する 2 項 elementwise
+/// 演算の種別（イシュー #1584。`BackendOps::add`／`mul` と同一の演算を
+/// [`DeviceBuffer`] 常駐のまま実行するための選択子）。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`Activation`／`MseReduction`
+/// と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryElementwiseOp {
+    /// `a + b`（`BackendOps::add` と同一の定義）。
+    Add,
+    /// `a * b`（`BackendOps::mul` と同一の定義）。
+    Mul,
+}
+
+/// [`BackendOps::unary_elementwise_device`] が適用する単項 elementwise
+/// 演算の種別（イシュー #1584。`BackendOps::relu`／`exp`／`tanh` と同一の
+/// 演算を [`DeviceBuffer`] 常駐のまま実行するための選択子）。
+///
+/// `#[non_exhaustive]`: `BinaryElementwiseOp` と同方針。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryElementwiseOp {
+    /// `max(x, 0)`（`BackendOps::relu` と同一の定義）。
+    Relu,
+    /// `exp(x)`（`BackendOps::exp` と同一の定義）。
+    Exp,
+    /// `tanh(x)`（`BackendOps::tanh` と同一の定義）。
+    Tanh,
+}
+
 /// [`BackendOps::mse_loss`]／[`BackendOps::mse_loss_backward`] の縮約種別
 /// （イシュー #1045・親イシュー #1043「カーネル融合・autodiff 実行モデル
 /// の強化」）。
@@ -1124,6 +1156,65 @@ pub trait BackendOps {
         ))
     }
 
+    /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `a`／`b`／戻り値
+    /// いずれも [`DeviceBuffer`] 常駐のまま計算する（イシュー #1584）。
+    /// `linear_forward_device` と同じ動機（`docs/inference-forward-
+    /// fixed-cost-design.md` §2.3 の「ホスト `Tensor` を返す `BackendOps`
+    /// API は戻り値の D2H が構造的な同期点」）で、H2D／D2H・同期を伴わず
+    /// ストリーム／コマンドバッファへ積むだけの経路を提供し、呼び出し元
+    /// が複数の elementwise 演算を連鎖させたうえで最後に 1 回だけ
+    /// `download` できるようにする。
+    ///
+    /// `a`・`b` は shape 完全一致限定（ブロードキャスト非対応。不一致は
+    /// `BackendError::ShapeMismatch` で fail-closed）。数値は対応する
+    /// ホスト版（`BackendOps::add`／`mul`）と同一カーネルにより bit 同一
+    /// となる契約。
+    ///
+    /// # デフォルト実装
+    ///
+    /// `linear_forward_device` と同じ非破壊拡張パターン（`BackendOps`
+    /// トレイトへのデフォルトメソッド追加。公開 API 非破壊はガードレール
+    /// 条件・`.claude/rules/security.md`）であり、既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とする（デバイス
+    /// 常駐の入出力を扱えないバックエンドが黙示のホストフォールバック
+    /// 〈`a`／`b` を download して `add`／`mul` へ委譲し結果を再 upload
+    /// する等〉を行い、「入出力とも D2H/H2D しない」という受け入れ条件を
+    /// 静かに破ることを防ぐため）。`backend-cpu`・`backend-cuda`・
+    /// `backend-metal` の各実装はこのデフォルトをオーバーライドする。
+    fn binary_elementwise_device(
+        &self,
+        _op: BinaryElementwiseOp,
+        _a: &DeviceBuffer<f32>,
+        _b: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "binary_elementwise_device: default fail-safe (no device-resident elementwise \
+             kernel available)"
+                .into(),
+        ))
+    }
+
+    /// `op(a)`（`op` は [`UnaryElementwiseOp`]）を `a`・戻り値いずれも
+    /// [`DeviceBuffer`] 常駐のまま計算する（イシュー #1584）。
+    /// [`Self::binary_elementwise_device`] の単項版で契約・デフォルト
+    /// 実装の設計方針は同一（数値は対応するホスト版〈`BackendOps::
+    /// relu`／`exp`／`tanh`〉と同一カーネルにより bit 同一）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::binary_elementwise_device`] と同じ非破壊拡張パターン。
+    /// 既定は [`BackendError::Unsupported`]。
+    fn unary_elementwise_device(
+        &self,
+        _op: UnaryElementwiseOp,
+        _a: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "unary_elementwise_device: default fail-safe (no device-resident elementwise \
+             kernel available)"
+                .into(),
+        ))
+    }
+
     /// 融合グラフ（#162 が検出した elementwise 連鎖・#163 が生成する
     /// カーネル）を 1 回のカーネル呼び出しで実行する（TASK-12.1d・#164）。
     ///
@@ -1688,6 +1779,34 @@ mod tests {
         let w_view = DeviceBufferView::new(&w_buf, 0, &[1]).unwrap();
 
         let result = ops.linear_forward_device(&a, w_view, None, Activation::None);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::binary_elementwise_device`] の既定実装が fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する（イシュー
+    /// #1584。`linear_forward_device_default_is_unsupported` と同型の
+    /// ガード）。
+    #[test]
+    fn binary_elementwise_device_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = empty_device_buffer(Device::Cpu);
+        let b = empty_device_buffer(Device::Cpu);
+
+        let result = ops.binary_elementwise_device(BinaryElementwiseOp::Add, &a, &b);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::unary_elementwise_device`] の既定実装が fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する（イシュー
+    /// #1584。`binary_elementwise_device_default_is_unsupported` と同型）。
+    #[test]
+    fn unary_elementwise_device_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = empty_device_buffer(Device::Cpu);
+
+        let result = ops.unary_elementwise_device(UnaryElementwiseOp::Relu, &a);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
