@@ -938,3 +938,173 @@ SAFETY コメントが要求する「`Mutex` 下でのみ `Batch` へ触れる�
 timestamps`（診断専用）が `MTLCommandBuffer::GPUStartTime`/
 `GPUEndTime` を読むオブザーバの実装先。本番経路は追加の FFI 呼び出し
 ゼロ（`docs/perf/metal-gemm-reuse-phase-breakdown.md` §2/§8 参照）。
+
+## 10. bias 勾配 resident 化 vs upload_into 同期遅延の比較・採用決定（イシュー #1565）
+
+### 10.1 背景
+
+#1555 で `d_weight` GEMM（NT/TN）の同期境界を最適化した結果（§7.2・
+`docs/perf/train-resident-grad-device-update.md` §5.2）、Metal reuse
+学習 1 step のコマンドバッファ生成数・`waitUntilCompleted` 呼び出し回数は
+`11 dispatch / 9 command_buffer / 9 wait` に収束したが、bias 勾配
+（`Op::LinearResident` の `d_bias`。ホスト側 `reduce_to_shape` で計算後、
+`MemoryOps::upload_into` でデバイスへ書き戻す経路）の `upload_into` が
+`MetalContext::synchronize()` を防御的に 1 回呼ぶ点は残っている
+（同 §5.2「bias 勾配 `upload_into` の防御的 synchronize 1 回に集約」）。
+`docs/perf/train-resident-grad-device-update.md` §5.5 のフェーズ分解
+実測は、この同期が `device_update` フェーズへ「同期点の移動」として
+現れる（backward 内の GPU 完了待ちが bias `upload_into` の synchronize
+先へ移動しただけで `step_total` 自体は 0.905 倍へ改善）ことを示した。
+本節はこの残存同期を消す 2 案（案 A: bias 勾配 resident 化／案 B:
+`upload_into` の同期遅延・条件付き省略）を比較し、採用案を記録する。
+**本イシューはコード変更を行わない**（受け入れ条件）。
+
+### 10.2 事前調査で確定した事実
+
+1. **bias 勾配の縮約はホスト上の逐次 `f32` 加算という既存実装**である
+   （事実の記述であり、この実装が規約上望ましいという主張ではない）。
+   `crates/autodiff/src/grad.rs::reduce_to_shape` は
+   `let mut reduced = vec![0f32; outer * inner];` に対して
+   `reduced[o * inner + i] += data[src];` という単純な `+=` ループで
+   縮約する（bias の場合、各出力列について行を昇順に加算）。
+   `.claude/rules/coding-rust.md`「基盤方針」節の「勾配の長軸縮約
+   （rmsnorm の `rstd` 二乗和・dw の行方向蓄積等）は `f64` アキュム
+   レータで統一する」は一般原則として定義されており、汎用ホスト関数
+   や bias 勾配を明示的な適用除外としていない。`reduce_to_shape` が
+   現状 `f32` 逐次加算のままなのは、本イシュー（および先行する
+   #1099〜#1564 系）が扱ってこなかった**既存実装の未整理点**であり、
+   本規則の適用除外が確定している箇所ではない。
+   このため、#1566 で「`reduce_to_shape` に bit 一致する Metal
+   カーネル」を新規に書くという設計は、既存ホスト実装への追従を
+   優先して数値契約の一般原則と整合しない縮約方式を GPU 側にも
+   複製することになる。**この矛盾は本イシューでは解消しない**（本
+   イシューの受け入れ条件は 2 案の比較・採用決定でありコード変更を
+   行わない）。#1566 の実装着手前に、(a) `reduce_to_shape` を含む
+   bias 勾配縮約の `f64` アキュムレータ化を数値契約に整合させる形で
+   別途行うか、(b) 汎用ホスト関数・bias 勾配を対象外とする例外を
+   `.claude/rules/coding-rust.md` 側へユーザー承認のうえ明示するか、
+   いずれかを選択する必要がある。この選択自体は本イシューのスコープ
+   外のため `.claude/rules/out-of-scope-tracking.md` の手順に従い
+   Issue で追跡する（実機検証・bit 同一の狙いそのものは #1566 へ
+   引き継ぐが、「見込み」の前提となるこの規約整合性の未決着を
+   #1566 側の記録にも明記する）。
+2. **`MetalMemory::upload_view`（`crates/backend-metal/src/memory.rs`）
+   は `synchronize()` を呼ばない**（新規バッファへの書き込みのみで
+   先行 GPU 書き込みを待つ必要がない）。
+3. **`MetalContext::synchronize`（`synchronize_observed` 経由）は
+   `slots.committed` を `mem::take` した結果が空なら
+   `waitUntilCompleted` を 1 回も呼ばずに早期リターンする**。これが
+   `11/9/9`（bias が複数あっても wait 増分が 1 のみ）の直接の原因:
+   最初の `upload_into` が先行する resident 経路の encode-only
+   dispatch を flush して待つが、2 個目以降の `upload_into` は
+   `committed` が既に空のため実質 no-op。
+4. **上記 3. は案 B（同期遅延・条件付き省略）の実効性を強く制約する**。
+   `synchronize()` はバッチ単位（グローバル）で「何か pending か」しか
+   判定しない。bias upload 時点では resident weight-grad の encode-only
+   書き込みが実際に in-flight（同一 `GradStaging.buf` の別オフセット）
+   であり、これは §3.6 の現行契約（GPU→ホストの可視性保証はコマンド
+   バッファ `Completed` 到達後・「commit 後・完了前にホストが**同一
+   バッファ**を読む/上書きすることは未定義動作」というバッファ粒度の
+   fail-closed 判定）の下では synchronize が必要な正当なケースである。
+   案 B を「オフセット単位で安全」と主張するには、(a) バッファ単位では
+   なくオフセット/バイト範囲単位で衝突を判定する新しい追跡機構
+   （`DeviceBuffer`／ハンドル単位の「最終書き込み世代」と「最終同期
+   世代」の比較。`MetalContext::encode` 呼び出し箇所全て・`gemm.rs`／
+   `sgd.rs`／`ops.rs` の書き込み系 dispatch 全てに影響する広範な変更）
+   が必要、かつ (b) §3.6 の「バッファ粒度で fail-closed」という既存の
+   保守的契約自体を「オフセット粒度でも安全」へ緩和する設計判断
+   （Apple 側の保証根拠が必要／実証が難しい非決定的レースの領域）が
+   必要になる。
+5. **#1561/#1563（`d_input` GEMM の同期境界回収）との依存関係**:
+   現在 `d_input` 側の `download` がまだ同期点を持っているため、案 B
+   の「何もしなければ synchronize は no-op」という前提（今日の
+   `11/9/9` の内訳）は #1563 が `d_input` の同期を削ると変わりうる。
+   #1557 ツリーの終端状態（backward 開始〜step 終了間で host からの
+   staging 書き込みをゼロにする）を基準に評価すべきであり、案 A
+   （bias も resident 化しホスト書き込み自体をなくす）はこの終端状態と
+   整合し #1561 と競合しない。
+6. **実装量を正しく見積もる変種（案 A′）**: `gemm_fp32_strict_into`
+   （NT/TN 分岐）はすでに `x_t`／`g` を device へアップロードして
+   d_weight を書き込んでいる。bias 用に独立した新規カーネル呼び出しを
+   作ると `g` を二重にアップロードすることになるため、実際に採用しうる
+   形は「同じ `BackendOps` 呼び出し（非破壊の default メソッド拡張・
+   `_tracked` 双子。#1555 と同じパターン）から d_weight と d_bias を
+   1 回のアップロードで両方 encode し、同一ロック区間で failure_token
+   を 1 箇所登録する」設計（案 A′）である。
+7. **`ResidentResolver` トレイト（`crates/autodiff/src/tape.rs`）と
+   `DeviceParamStore::fill_resident_weight_grad`
+   （`crates/autodiff/src/optim/device_store.rs`）は非破壊 default
+   メソッドとして追加された前例がある**。案 A′ でも同型の
+   `fill_resident_bias_grad`（または既存メソッドのシグネチャ拡張で
+   bias も同時に受け取る形）を同じパターンで追加でき、
+   `host_grads_for_staging`（`device_store.rs` の `step()` 内で bias を
+   集める箇所）を「resident 経由で埋まった bias は除外する」よう
+   `resident_filled_slots` 相当の bias 版判定へ拡張する範囲も同型。
+8. **`docs/device-memory-pool-design.md`（§3.3「Metal」・§3.5）との
+   整合**: `GradStaging.buf` は `mem.alloc_zeroed` で確保される
+   （プール経由になりうる）。案 A′（新たな encode-only writer が
+   増える）は既存の「in-flight なら `pending_pool_returns` へ退避」
+   不変条件（`record_pending_return`／`record_pending_merge` の
+   `BatchSlots` クリティカルセクション内対応）でそのままカバーされる
+   （新しい書き込み元が増えるだけで返却・合流順序は変わらない）。
+   案 B（synchronize を省略する）は「返却・合流のタイミングが遅延する
+   だけ」で `PoolStats` の不変条件自体は破らない。
+
+### 10.3 比較表
+
+| 比較軸 | 案 A′（bias 勾配 resident 化） | 案 B（`upload_into` 同期遅延・条件付き省略） |
+|---|---|---|
+| 実装量 | 新規 GPU 列縮約カーネル 1 本 + `BackendOps` 非破壊拡張 1 メソッド（`_tracked` 双子込み）+ `ResidentResolver` 拡張 + `device_store.rs` の bias 判定分岐（§10.2-6・7 の既存パターンに乗る） | 新規バッファ単位 dirty tracking 機構（`MetalBufferHandle` 世代カウンタ・全書き込み dispatch サイトへの計装）+ §3.6 契約緩和の設計変更（人間承認が要る独立の設計判断） |
+| `StorageModeShared` 上の競合書き込み安全性 | host 書き込み自体が発生しないため §3.6 の懸念が構造的に消える | 既存のバッファ粒度 fail-closed 契約（§3.6）を緩和しない限り正当化できない。緩和には Apple 側の保証根拠が必要で `.claude/rules/security.md` の安全側文化と摩擦がある |
+| 失敗トークン伝播（#1555 codex-review P0 契約） | 既存の `gemm_fp32_strict_into_tracked` と同一ロック区間・同一パターンに素直に乗る | 「同期を省略した」encode-only dispatch のエラーが `check_not_poisoned()` に伝播するタイミングがさらに遅延し得る |
+| `DeviceParamStore` 側の変更範囲 | `host_grads_for_staging` から bias 除外判定を追加する程度 | 変更なしで済む可能性はあるが、実効的な synchronize 省略のためには結局「in-flight か」を `DeviceParamStore` 側が判定し `MemoryOps` 側へ伝える新しい引数／API が必要になり、結果的に変更範囲が同程度以上になりうる |
+| #1564 の bit 同一要件との整合性 | §10.2-1 の `reduce_to_shape` が素朴な逐次 `f32` である事実を根拠に、bit 同一を狙える設計（実機検証は #1566 へ引き継ぎ） | 数値経路自体は変わらないため bit 同一に影響しないが、根本課題（同期の存在自体）は解消しない縮小策 |
+| #1561/#1563 との依存関係 | 影響なし（ホスト書き込み自体をなくすため #1557 ツリー終端状態と整合） | #1563 が `d_input` 側同期を削った後は「bias upload 時点で他に pending が無い」という前提が崩れる暫定策になりうる（§10.2-5） |
+| `docs/device-memory-pool-design.md` との整合 | 既存の pending 退避契約でそのままカバーされる（§10.2-8） | 返却・合流タイミングが遅延するのみで `PoolStats` 不変条件は破らない |
+
+### 10.4 採用案の記録
+
+**案 A′**（既存 `gemm_fp32_strict_into` と同一のアップロード・
+failure-token 登録から d_weight・d_bias を同時に encode-only で書き込む
+拡張）を採用候補として記録する。ただし本イシューはコード変更を行わない
+ため、この「採用」は #1566 での実装着手を承認する設計判断としての記録
+であり、bit 同一・非後退 A/B（#1564 の受け入れ条件）の確定は #1566 の
+実機検証に委ねる。
+
+### 10.5 却下理由
+
+案 B（`upload_into` の synchronize 遅延・条件付き省略）は以下 2 点を
+理由に不採用とする。
+
+1. 実効性のある省略には `synchronize()` の粒度をバッファ単位から
+   オフセット単位へ狭める新しい安全性保証が要り、これは §3.6 の既存
+   fail-closed 契約の緩和に相当し独立の設計判断（人間承認）が必要になる。
+2. #1561/#1563 が `d_input` 側の同期を削った後は前提（「bias upload
+   時点で他に pending が無い」）が崩れる暫定策である。
+
+### 10.6 #1566 への引き継ぎ
+
+- 実装: `fill_resident_bias_grad` 相当の Metal 列縮約カーネル・
+  `BackendOps` 拡張・`device_store.rs` 結線。
+- bit 同一回帰テスト: 重み・bias 双方のホスト読み出し値が結線前と
+  bit 同一であることの確認。
+- 失敗トークン `_tracked` 経路のテスト。
+- `command_batching_bench.rs` のカウンタ更新（現在の `11/9/9` からの
+  変化予測と実測）。
+- train reuse A/B（事前登録 `step_total` ≤ 1.00・5 run 中央値・
+  checksum 一致）の実施。
+- 案 A′ は既存 `gemm_fp32_strict_into`（`buffer.rs::write_slice_at` 等、
+  既存 unsafe の枠内）の延長であり新規 `unsafe` を増やさない設計を
+  意図している。#1566 実装時に unsafe が増える場合は security-auditor
+  レビュー必須とする。
+- tolerance／ガードレール閾値の変更は行わない。#1566 で bit 同一の
+  実機確認が不成立でも、tolerance を緩和する方向ではなく実装を
+  見直す方針とする。
+- **§10.2-1 で記録した数値契約の未決着事項**: `reduce_to_shape` に
+  bit 一致させる設計は `.claude/rules/coding-rust.md` の「勾配の長軸
+  縮約は `f64` アキュムレータで統一する」一般原則との整合が未確認
+  のまま。#1566 では (a) `f64` アキュムレータ化を数値契約に整合させて
+  実装するか、(b) 例外を一次規約側にユーザー承認のうえ明示するかを
+  決めたうえで着手する（`.claude/rules/out-of-scope-tracking.md` に
+  従い別 Issue で追跡）。「bit 同一」を無条件の受け入れ基準として
+  固定しない。
