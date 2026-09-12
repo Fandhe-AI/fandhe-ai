@@ -766,17 +766,26 @@ impl SmeKernel {
     /// 毎回 `rdsvl`（メモリアクセスを伴わない読み取り専用の 1 命令）を
     /// 発行するため、呼び出しのたびに再検証しても計測に有意な影響を
     /// 与えない（`sme_detect` モジュール doc 参照）。
-    fn assert_current_thread_capable(&self) {
-        let report = crate::sme_detect::sme_report();
-        assert!(
-            report.kernel_enabled,
-            "SmeKernel::run(_with_ldc) が SME 非対応スレッド上で呼ばれた \
-             （os_flag={}・svl_bytes={:?}）。SVL は Linux では \
-             prctl(PR_SME_SET_VL) によりスレッドごとに異なりうるため、\
-             `SmeKernel` を構築したスレッドと実行スレッドが異なる場合に \
-             発生しうる（イシュー #1587・SmeKernel doc 参照）",
-            report.os_flag, report.svl_bytes,
-        );
+    ///
+    /// ## panic ではなく bool を返す（codex-review P1 再指摘
+    /// `PRRT_kwDOTuUCJc6h0ZMD` への対応）
+    ///
+    /// 以前は本メソッドが `assert!` で判定していたため、`SmeKernel` を
+    /// 構築したスレッドと実際に `fmopa` を発行するスレッド（Rayon
+    /// worker 等）の SVL が異なる場合、正常な形状の入力でも panic して
+    /// いた。`run_with_ldc` は `Result` を返す入口である一方 `run` は
+    /// トレイトの必須メソッド（`#691` レビュー再指摘により非破壊のため
+    /// 非 `Result`。[`Microkernel::run`] doc 参照）で `Result` 化でき
+    /// ないため、両者で共通に扱えるよう本メソッド自体は `bool` を返す
+    /// 判定のみに留め、呼び出し元（`run`／`run_with_ldc`）が非対応時に
+    /// [`sme::scalar_fallback_kernel`]／[`sme::scalar_fallback_with_ldc`]
+    /// （`compute` と同一の演算列を安全な Rust で再現し、有限値入力で
+    /// bit 完全一致するフォールバック。`sme` モジュール該当関数 doc
+    /// 参照）へ切り替える。`.claude/rules/security.md`／AGENTS.md
+    /// 「本番経路の panic 禁止」への抵触を解消しつつ、実行スレッドでの
+    /// SVL 再確認自体は維持する。
+    fn current_thread_capable(&self) -> bool {
+        crate::sme_detect::sme_report().kernel_enabled
     }
 }
 
@@ -787,17 +796,22 @@ impl Microkernel for SmeKernel {
 
     fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
         // [`ScalarKernel::run`] のドキュメント参照（`Result` を `panic!`
-        // へ変換する経路を持たず [`sme::kernel_unchecked`] へ直接委譲する）。
-        //
-        // SAFETY: `assert_current_thread_capable` が **この呼び出しを
-        // 実行しているスレッド自身**で SME 対応・SVL=64 バイトを確認済み
-        // （`SmeKernel` 構造体 doc「SVL はスレッドごとに異なりうる」節。
-        // `Self` が try_new() 経由でのみ構築可能という事実だけでは、
-        // 構築スレッドと実行スレッドが異なりうる Rayon worker 分配の
-        // もとでは不十分なため、ここで実行スレッド自身の確認を必須とする）。
-        // `sme::kernel_unchecked` の `# Safety` 契約を満たす。
-        self.assert_current_thread_capable();
-        unsafe { sme::kernel_unchecked(ap, bp, c_tile, kc_len) }
+        // へ変換する経路を持たず、非対応時は
+        // [`sme::scalar_fallback_kernel`] へ委譲する。`current_thread_capable`
+        // doc 参照）。
+        if self.current_thread_capable() {
+            // SAFETY: `current_thread_capable` が **この呼び出しを実行
+            // しているスレッド自身**で SME 対応・SVL=64 バイトを確認済み
+            // （`SmeKernel` 構造体 doc「SVL はスレッドごとに異なりうる」
+            // 節。`Self` が try_new() 経由でのみ構築可能という事実だけ
+            // では、構築スレッドと実行スレッドが異なりうる Rayon worker
+            // 分配のもとでは不十分なため、ここで実行スレッド自身の確認
+            // を必須とする）。`sme::kernel_unchecked` の `# Safety` 契約
+            // を満たす。
+            unsafe { sme::kernel_unchecked(ap, bp, c_tile, kc_len) }
+        } else {
+            sme::scalar_fallback_kernel(ap, bp, c_tile, kc_len);
+        }
     }
 
     fn run_with_ldc(
@@ -808,11 +822,15 @@ impl Microkernel for SmeKernel {
         ldc: usize,
         kc_len: usize,
     ) -> Result<(), TileBoundsError> {
-        // SAFETY: `run` と同じ理由で `assert_current_thread_capable` を
-        // 実行スレッド自身で必ず呼ぶ（`sme::kernel_unchecked_with_ldc` の
-        // `# Safety` 契約を満たす）。
-        self.assert_current_thread_capable();
-        unsafe { sme::kernel_unchecked_with_ldc(ap, bp, c, ldc, kc_len) }
+        if self.current_thread_capable() {
+            // SAFETY: `run` と同じ理由で `current_thread_capable` を
+            // 実行スレッド自身で必ず確認してから呼ぶ
+            // （`sme::kernel_unchecked_with_ldc` の `# Safety` 契約を
+            // 満たす）。
+            unsafe { sme::kernel_unchecked_with_ldc(ap, bp, c, ldc, kc_len) }
+        } else {
+            sme::scalar_fallback_with_ldc(ap, bp, c, ldc, kc_len)
+        }
     }
 }
 

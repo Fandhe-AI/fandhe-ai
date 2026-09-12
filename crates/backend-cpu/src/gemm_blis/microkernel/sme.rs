@@ -247,6 +247,73 @@ pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: us
     unsafe { compute(ap, bp, c, NR, kc_len) };
 }
 
+/// `unsafe { compute(...) }`（`fmopa` アセンブリ）を発行できない場合の
+/// 安全な Rust フォールバック（イシュー #1587 codex-review P1 再指摘
+/// `PRRT_kwDOTuUCJc6h0ZMD` への対応）。
+///
+/// `SmeKernel` は「構築したスレッド」の SME 対応・SVL を保証するのみで、
+/// `Copy` により別スレッド（Rayon worker）へ渡された場合はそのスレッド
+/// 自身の SVL が異なる（Linux では `prctl(PR_SME_SET_VL)` によりスレッド
+/// ごとに変更可能）ことがある（[`super::SmeKernel`] doc 参照）。以前は
+/// 実行スレッド自身の再確認に失敗した場合 `panic!` していたが、これは
+/// `cfg(test)` 外の本番ライブラリコードであり
+/// `.claude/rules/security.md`／AGENTS.md「本番経路の panic 禁止」に
+/// 抵触する。本関数は `compute` の代わりに実行される安全なフォール
+/// バックとして、`compute` と**同一の演算列**（p 昇順・要素ごとに 1 回
+/// の `f32::mul_add` を適用し、レーン間の並べ替え・再結合を行わない）を
+/// 再現する。これにより `fmopa`（Arm ARM DDI0616 の非拡張 FP32 外積:
+/// `za[i][j] = fma(zn[i], zm[j], za[i][j])`）と本関数の結果は有限値
+/// 入力で bit 完全一致する（モジュール冒頭「bit 完全一致契約」節参照。
+/// `compute` が実行される経路と全く同一の呼び出し元契約〈`ap`／`bp`
+/// の長さ・`ldc` 境界〉を要求するため、境界検査は呼び出し元
+/// （[`kernel_unchecked_with_ldc`] 相当）にまかせず本関数自身でも
+/// 行う）。
+fn scalar_fallback(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+    for p in 0..kc_len {
+        for i in 0..MR {
+            let a_val = ap[p * MR + i];
+            for j in 0..NR {
+                let idx = i * ldc + j;
+                c[idx] = a_val.mul_add(bp[p * NR + j], c[idx]);
+            }
+        }
+    }
+}
+
+/// [`scalar_fallback`] の `ldc` 契約版・境界検査つき入口（
+/// [`kernel_unchecked_with_ldc`] と同型の検査を行い、`compute` の代わりに
+/// [`scalar_fallback`] を呼ぶ。`unsafe` を含まないため `unsafe fn` では
+/// ない）。
+pub(crate) fn scalar_fallback_with_ldc(
+    ap: &[f32],
+    bp: &[f32],
+    c: &mut [f32],
+    ldc: usize,
+    kc_len: usize,
+) -> Result<(), super::TileBoundsError> {
+    super::check_panel_lengths(MR, NR, kc_len, ap.len(), bp.len())?;
+    super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
+    scalar_fallback(ap, bp, c, ldc, kc_len);
+    Ok(())
+}
+
+/// [`scalar_fallback_with_ldc`] の従来シグネチャ版（`ldc = NR` 固定・
+/// 密パッキング契約。[`kernel_unchecked`] と同型の長さ検査を行う）。
+pub(crate) fn scalar_fallback_kernel(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
+    assert!(
+        super::panel_len_matches(ap.len(), MR, kc_len),
+        "packed A panel length mismatch (or MR*kc_len overflow): ap.len()={}, MR={MR}, kc_len={kc_len}",
+        ap.len()
+    );
+    assert!(
+        super::panel_len_matches(bp.len(), kc_len, NR),
+        "packed B panel length mismatch (or kc_len*NR overflow): bp.len()={}, kc_len={kc_len}, NR={NR}",
+        bp.len()
+    );
+    assert_eq!(c.len(), MR * NR, "C tile length mismatch");
+    scalar_fallback(ap, bp, c, NR, kc_len);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
