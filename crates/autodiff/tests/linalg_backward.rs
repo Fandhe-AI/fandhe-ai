@@ -13,7 +13,7 @@
 mod common;
 
 use fandhe_ai_autodiff::{AutodiffError, Tape};
-use fandhe_ai_tensor_core::{BackendError, MatrixNormOrd, Tensor};
+use fandhe_ai_tensor_core::{MatrixNormOrd, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
@@ -56,15 +56,12 @@ fn inv_singular_matrix_is_invalid_argument() {
     let a = tape.var(&t(vec![1.0, 2.0, 2.0, 4.0], &[2, 2]));
     let result = a.inv();
     // フォールバック経路（`eval::linalg::inv`）のエラーは CPU 本番経路
-    // （`BackendOps::linalg_inv`）と同じ `AutodiffError::Backend(
-    // BackendError::InvalidArgument(_))` に統一される（`Var::inv` の
-    // `unify_fallback_error`。codex-review／Cursor Bugbot 指摘: 実装
+    // （`BackendOps::linalg_inv`）と同じ公開ドキュメント記載の
+    // `AutodiffError::InvalidArgument(_)` に統一される（`Var::inv` の
+    // `unify_backend_error`。codex-review／Cursor Bugbot 指摘: 実装
     // 選択〈フォールバックか本番か〉で呼び出し元から見えるエラー
     // variant が変わってはならない）。
-    assert!(matches!(
-        result,
-        Err(AutodiffError::Backend(BackendError::InvalidArgument(_)))
-    ));
+    assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
 }
 
 #[test]
@@ -130,11 +127,8 @@ fn cholesky_non_positive_definite_is_invalid_argument() {
     let a = tape.var(&t(vec![1.0, 2.0, 2.0, 1.0], &[2, 2]));
     let result = a.cholesky();
     // `inv_singular_matrix_is_invalid_argument` と同じ理由でエラー型を
-    // 統一する（`Var::cholesky` の `unify_fallback_error`）。
-    assert!(matches!(
-        result,
-        Err(AutodiffError::Backend(BackendError::InvalidArgument(_)))
-    ));
+    // 統一する（`Var::cholesky` の `unify_backend_error`）。
+    assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
 }
 
 // --- qr: 多出力ノードの蓄積検証（sum(Q) + sum(R) を同時逆伝播） ---

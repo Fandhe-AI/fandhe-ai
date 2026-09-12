@@ -810,10 +810,8 @@ impl<'t> Var<'t> {
                 verify_shape(v.shape(), &shape)?;
                 v
             }
-            Err(BackendError::Unsupported(_)) => {
-                eval::linalg::inv(&a_val).map_err(unify_fallback_error)?
-            }
-            Err(other) => return Err(AutodiffError::Backend(other)),
+            Err(BackendError::Unsupported(_)) => eval::linalg::inv(&a_val)?,
+            Err(other) => return Err(unify_backend_error(other)),
         };
         let id = self.tape.push_eager(Op::Inv { input: self.id }, value);
         Ok(Var::from_raw(self.tape, id))
@@ -850,10 +848,8 @@ impl<'t> Var<'t> {
                 verify_shape(v.shape(), &expected_shape)?;
                 v
             }
-            Err(BackendError::Unsupported(_)) => {
-                eval::linalg::solve(&a_val, &b_val).map_err(unify_fallback_error)?
-            }
-            Err(other) => return Err(AutodiffError::Backend(other)),
+            Err(BackendError::Unsupported(_)) => eval::linalg::solve(&a_val, &b_val)?,
+            Err(other) => return Err(unify_backend_error(other)),
         };
         let id = self.tape.push_eager(
             Op::Solve {
@@ -881,7 +877,7 @@ impl<'t> Var<'t> {
                 v
             }
             Err(BackendError::Unsupported(_)) => eval::linalg::det(&a_val),
-            Err(other) => return Err(AutodiffError::Backend(other)),
+            Err(other) => return Err(unify_backend_error(other)),
         };
         let id = self.tape.push_eager(Op::Det { input: self.id }, value);
         Ok(Var::from_raw(self.tape, id))
@@ -889,9 +885,11 @@ impl<'t> Var<'t> {
 
     /// Cholesky 分解（`A: [n,n]`〈対称正定値。下三角のみ読む〉→
     /// `L: [n,n]`〈下三角、`A = L Lᵀ`〉）。イシュー #1621。非正定値は
-    /// `AutodiffError::Backend(BackendError::InvalidArgument(_))`
-    /// （CPU 本番経路・フォールバックとも `unify_fallback_error` で
-    /// 同一 variant に統一済み。codex-review 指摘の是正）。
+    /// `AutodiffError::InvalidArgument(_)`（CPU 本番経路・フォールバック
+    /// とも `unify_backend_error` で同一 variant に統一済み。
+    /// codex-review 指摘の是正: 以前は逆方向〈`Backend(InvalidArgument)`〉
+    /// へ統一していたため、本番経路の数値エラーがドキュメント記載の
+    /// variant と一致しなかった）。
     pub fn cholesky(&self) -> Result<Var<'t>, AutodiffError> {
         let shape = self.shape();
         require_square(&shape, "Var::cholesky")?;
@@ -904,10 +902,8 @@ impl<'t> Var<'t> {
                 verify_shape(v.shape(), &shape)?;
                 v
             }
-            Err(BackendError::Unsupported(_)) => {
-                eval::linalg::cholesky(&a_val).map_err(unify_fallback_error)?
-            }
-            Err(other) => return Err(AutodiffError::Backend(other)),
+            Err(BackendError::Unsupported(_)) => eval::linalg::cholesky(&a_val)?,
+            Err(other) => return Err(unify_backend_error(other)),
         };
         let id = self.tape.push_eager(Op::Cholesky { input: self.id }, value);
         Ok(Var::from_raw(self.tape, id))
@@ -943,7 +939,7 @@ impl<'t> Var<'t> {
                 (factors.q, factors.r)
             }
             Err(BackendError::Unsupported(_)) => eval::linalg::qr(&a_val),
-            Err(other) => return Err(AutodiffError::Backend(other)),
+            Err(other) => return Err(unify_backend_error(other)),
         };
         let q_id = self.tape.push_eager(
             Op::QrQ {
@@ -968,9 +964,9 @@ impl<'t> Var<'t> {
     /// reduced SVD（`A: [m,n]` → [`SvdVars`]。`k = min(m,n)`）。
     /// イシュー #1621。`qr` と同じ多出力設計（`Op::SvdU`／
     /// `Op::SvdS`／`Op::SvdVh`）。反復が収束しない場合は
-    /// `AutodiffError::Backend(BackendError::InvalidArgument(_))`
-    /// （CPU 本番経路・フォールバックとも `unify_fallback_error` で
-    /// 同一 variant に統一済み。codex-review 指摘の是正）。
+    /// `AutodiffError::InvalidArgument(_)`（CPU 本番経路・フォールバック
+    /// とも `unify_backend_error` で同一 variant に統一済み。
+    /// codex-review 指摘の是正）。
     pub fn svd(&self) -> Result<SvdVars<'t>, AutodiffError> {
         let shape = self.shape();
         if shape.len() != 2 {
@@ -992,10 +988,8 @@ impl<'t> Var<'t> {
                 verify_shape(factors.vh.shape(), &[k, n])?;
                 (factors.u, factors.s, factors.vh)
             }
-            Err(BackendError::Unsupported(_)) => {
-                eval::linalg::svd(&a_val).map_err(unify_fallback_error)?
-            }
-            Err(other) => return Err(AutodiffError::Backend(other)),
+            Err(BackendError::Unsupported(_)) => eval::linalg::svd(&a_val)?,
+            Err(other) => return Err(unify_backend_error(other)),
         };
         let u_id = self.tape.push_eager(
             Op::SvdU {
@@ -1050,10 +1044,8 @@ impl<'t> Var<'t> {
                 verify_shape(v.shape(), &[])?;
                 v
             }
-            Err(BackendError::Unsupported(_)) => {
-                eval::linalg::matrix_norm(&a_val, ord).map_err(unify_fallback_error)?
-            }
-            Err(other) => return Err(AutodiffError::Backend(other)),
+            Err(BackendError::Unsupported(_)) => eval::linalg::matrix_norm(&a_val, ord)?,
+            Err(other) => return Err(unify_backend_error(other)),
         };
         let id = self.tape.push_eager(
             Op::MatrixNorm {
@@ -1102,25 +1094,26 @@ fn verify_shape(actual: &[usize], expected: &[usize]) -> Result<(), AutodiffErro
     }
 }
 
-/// `eval::linalg`（ホスト参照実装。`BackendOps::linalg_*` が
-/// `Unsupported` を返したときのフォールバック経路）が返す
-/// `AutodiffError::InvalidArgument` を、CPU 本番経路
-/// （`BackendOps::linalg_*` → `Err(other) => AutodiffError::Backend(other)`）
-/// と同じ `AutodiffError::Backend(BackendError::InvalidArgument(_))`
-/// へ統一する。フォールバック経路と CPU 本番経路のどちらを通ったか
-/// （バックエンドが `linalg_*` を実装しているか否か）という実装選択の
-/// 差で、特異行列・非正定値・非収束という同一の論理的失敗が呼び出し
-/// 元から見て異なる `AutodiffError` variant として観測されていた
-/// （codex-review／Cursor Bugbot 指摘。パターンマッチで variant を
-/// 区別するコードが実装選択に依存してしまう）。`InvalidArgument`
-/// 以外（`eval::linalg` の内部で `Tensor::new`／view 操作が返しうる
-/// `Shape` 等）はそのまま通す。
-fn unify_fallback_error(err: AutodiffError) -> AutodiffError {
+/// CPU 本番経路（`BackendOps::linalg_*` が `Unsupported` 以外の `Err` を
+/// 返した場合）の `BackendError` を、公開ドキュメント（`Var::inv` 等の
+/// doc comment・`docs/autodiff-linalg-design.md` §3.5「エラー分類」）が
+/// 約束する `AutodiffError` variant へ写像する。`BackendError::
+/// InvalidArgument(_)`（特異行列・非正定値・非収束のいずれか）は
+/// `eval::linalg`（ホスト参照実装。`Unsupported` 時のフォールバック
+/// 経路）が返す `AutodiffError::InvalidArgument(_)` と同一 variant に
+/// 揃える——以前は逆方向（フォールバック側を `Backend(InvalidArgument)`
+/// へ包む）へ統一していたため、`fandhe_ai::tape()`（CPU 本番経路）を
+/// 使う呼び出し元が公開ドキュメントどおり `AutodiffError::
+/// InvalidArgument` を照合しても本番経路の数値エラーを捕捉できない
+/// 不整合があった（codex-review 指摘。再試行はしない・エラー内容は
+/// そのまま伝播するのみ）。`InvalidArgument` 以外の `BackendError`
+/// （`Unsupported`〈本関数の呼び出し元では既に分岐済み〉・
+/// `ShapeMismatch` 等）は意味を変えず `AutodiffError::Backend(_)` の
+/// まま伝播する。
+fn unify_backend_error(err: BackendError) -> AutodiffError {
     match err {
-        AutodiffError::InvalidArgument(msg) => {
-            AutodiffError::Backend(BackendError::InvalidArgument(msg))
-        }
-        other => other,
+        BackendError::InvalidArgument(msg) => AutodiffError::InvalidArgument(msg),
+        other => AutodiffError::Backend(other),
     }
 }
 

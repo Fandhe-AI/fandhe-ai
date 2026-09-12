@@ -176,3 +176,28 @@ fn facade_tape_reaches_cpu_backend_ops_linalg_inv_directly() {
     let a = t(vec![4.0, 1.0, 2.0, 3.0], &[2, 2]);
     assert!(ops.linalg_inv(&a).is_ok());
 }
+
+/// codex-review 指摘の回帰（`Var::unify_backend_error`）: `fandhe_ai::
+/// tape()`（`CpuBackendOps::linalg_cholesky` 本番経路）が返す数値
+/// エラー（非正定値）が、公開ドキュメントどおり
+/// `AutodiffError::InvalidArgument(_)` として観測できることを確認する。
+/// 以前は逆方向（フォールバック側を `Backend(InvalidArgument)` へ
+/// 包む）へ統一していたため、本番経路のみ `AutodiffError::
+/// Backend(BackendError::InvalidArgument(_))` になり、呼び出し元が
+/// ドキュメント記載の variant を照合しても本番経路の失敗を捕捉
+/// できなかった。
+#[test]
+fn cholesky_non_positive_definite_is_invalid_argument_on_cpu_production_path() {
+    // `[[-1]]` は対角が負のため非正定値（`CpuBackendOps::linalg_cholesky`
+    // の本番経路を直接通す。1x1 は必ず `Unsupported` 以外の値を返す）。
+    let facade_tape = fandhe_ai::tape();
+    let a = facade_tape.var(&t(vec![-1.0], &[1, 1]));
+    let result = a.cholesky();
+    assert!(
+        matches!(
+            result,
+            Err(fandhe_ai_autodiff::AutodiffError::InvalidArgument(_))
+        ),
+        "本番 CPU 経路の非正定値エラーが AutodiffError::InvalidArgument でない: {result:?}"
+    );
+}
