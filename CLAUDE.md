@@ -62,6 +62,7 @@ fandhe-ai/
 │   ├── workflows/           # implement-issue-tree.js（skills への相対 symlink）
 │   └── settings.json        # SessionStart / PostToolUse hooks
 └── docs/
+    ├── autodiff-higher-order-grad-decision.md # 高階微分（grad of grad）の設計判断（VJP の VJP・テープ再設計の要否検討。同一テープ方式は backward_impl の不変借用と衝突・子テープ方式〈create_graph〉を主案・forward-over-reverse〈HVP 限定〉を代替として比較。段階 0〈現時点では非対応と明文化〉を確定し実装は前提イシュー〈#1593／#1597／#1599／#1601／#1612〉完了後の別イシューへ引き継ぐ。承認事項は §10。#1622）
     ├── autodiff-linalg-design.md # 線形代数（inv／solve／det／qr／cholesky／svd）・matrix_norm の設計（REQ-9 2026-09-12 追記の Tier 2 対応・多出力ノード〈QrQ/QrR・SvdU/SvdS/SvdVh〉設計・数値契約〈f64 内部計算・符号／ゲージ規約〉・VJP 方式・eval と CPU 実装の意図的複製・テスト構成。CPU 実装先行・GPU は Unsupported フォールバック。イシュー #1621・親 #1573）
     ├── autodiff-nograd-leaf-dinput-skip-decision.md # 非学習葉（活性化入力 x 等）への d_input 伝播スキップの設計判断（`requires_grad` 前方伝播案の採用・`Gradients::get` 契約整理・多層依存整理・起票草案。#1151 起票案 I・#1219）
     ├── autodiff-rnn-cell-tape-design.md # RNN／LSTM／GRU のセル演算（専用 Op・payload 保持ゲート値）・LSTM 2 出力（h_t／c_t）の 2 ノード表現・時系列ループ（unrolled）の tape 設計判断（設計のみ・実装は #1647 へ引き継ぎ。facade 公開面拡張は `docs/compat-api-scope.md` §5 手続き〈#1591〉完了まで実装不可。#1646）
