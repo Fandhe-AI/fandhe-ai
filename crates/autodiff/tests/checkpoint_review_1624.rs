@@ -98,14 +98,22 @@ impl BackendOps for InstrumentedOps {
 /// **P0 是正の回帰**（codex-review・Cursor Bugbot 指摘。tape.rs
 /// `lazy_leaf_value` → `build_lazy_plan` 経由の fail-open）。
 ///
-/// `m = a.matmul(&b)` を checkpoint 区間に収め、区間の外で `r = m.relu()`
-/// （lazy elementwise。`m` を未実体化のまま参照する）を作り、`r` を
-/// そのまま `Tape::backward` の loss に渡す。`backward_impl` は開始直後
-/// に `materialize_fallible(loss)` で shape を読むため、ここで `r` の
-/// 実体化（`build_lazy_plan` の葉参照）が checkpoint 解放済みの `m` の
-/// 再計算（2 回目の `gemm` 呼び出し）を要求する。この再計算を意図的に
-/// 失敗させ、`Tape::backward` が `Err` を返すこと（ゼロテンソルへ
-/// 静かに変換されて成功しないこと）を確認する。
+/// **Cursor Bugbot 指摘の是正（イシュー #1624 PR #1681 レビュー）**:
+/// 旧実装は `m = a.matmul(&b)` を checkpoint の**戻り値そのもの**
+/// （`output`）にしていたため、`release_checkpoint_region` の契約
+/// （`[lo, output)`。`output` 自身は解放しない）により `m` が一度も
+/// 解放されず、目的の再計算（2 回目の `gemm`）が発生しないまま
+/// テストの意図が検証できていなかった。本テストでは `m` を checkpoint
+/// 区間の**内部中間ノード**にし、区間の出力を `m.relu()`（checkpoint
+/// 内で計算。`m` を入力に取る）にすることで `m` を確実に解放対象へする。
+///
+/// `out = relu(m)`（lazy・未実体化）をそのまま `Tape::backward` の
+/// loss に渡す。`backward_impl` は開始直後に `materialize_fallible
+/// (loss)` で `out` を実体化するため、`build_lazy_plan` の葉参照が
+/// checkpoint 解放済みの `m` の再計算（2 回目の `gemm` 呼び出し）を
+/// 要求する。この再計算を意図的に失敗させ、`Tape::backward` が `Err`
+/// を返すこと（ゼロテンソルへ静かに変換されて成功しないこと）を
+/// 確認する。
 #[test]
 fn layer1_recompute_error_propagates_instead_of_zero_fallback() {
     let gemm_calls = Arc::new(AtomicUsize::new(0));
@@ -121,12 +129,24 @@ fn layer1_recompute_error_propagates_instead_of_zero_fallback() {
     let a = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
     let b = tape.var(&t(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]));
 
-    let m = tape
-        .checkpoint(|| a.matmul(&b))
+    let out = tape
+        .checkpoint(|| {
+            // `m` は checkpoint 区間の**内部**ノード（`output` ではない）
+            // であるため `register_checkpoint` により確実に解放される。
+            // `out = m.relu()` は lazy elementwise（`Op::is_lazy_
+            // elementwise`）のため、ここではまだ実体化されない
+            // （`m.relu()` 呼び出し自体が backend を叩かない）。
+            let m = a.matmul(&b)?;
+            Ok(m.relu())
+        })
         .expect("checkpoint 内の forward（1 回目の gemm）は成功する");
-    let r = m.relu();
 
-    let result = tape.backward(&r);
+    // `out` を直接 loss として `backward` に渡す（`sum` 等で先に
+    // 実体化させない）。`backward_impl` 冒頭の `materialize_fallible
+    // (loss)` が `out`（lazy）の実体化を要求し、`build_lazy_plan` の
+    // 葉参照が checkpoint 解放済みの `m` の再計算（2 回目の `gemm`）を
+    // 要求する。
+    let result = tape.backward(&out);
     assert!(
         result.is_err(),
         "checkpoint 解放済みノードの再計算がバックエンドエラーを起こした場合、\
@@ -137,7 +157,8 @@ fn layer1_recompute_error_propagates_instead_of_zero_fallback() {
         gemm_calls.load(Ordering::SeqCst),
         2,
         "1 回目（forward）成功・2 回目（backward 再計算）失敗のシナリオである契約を\
-         テスト自身が満たしているかの自己検証"
+         テスト自身が満たしているかの自己検証（`m` が実際に解放され、\
+         backward が再計算を要求したことの証跡でもある）"
     );
 }
 
@@ -252,5 +273,69 @@ fn checkpoint_recompute_of_shared_ancestor_is_memoized() {
         "backward 側の再計算 gemm 呼び出し回数が指数的に増加していないことを確認\
          （実測 {backward_calls} 回、上限 {}）",
         N * N
+    );
+}
+
+/// **P0 是正の回帰（layer 2 poison 契約。codex-review 指摘。イシュー
+/// #1624 PR #1681 レビュー）**。
+///
+/// 層 2（`materialize_non_fallible`。`Var::value`／`Var::to_tensor` が
+/// 使う非 fallible 境界）は checkpoint 解放済みノードの再計算が真の
+/// バックエンド実行失敗を起こしても契約上 `Tensor<f32>`（ゼロ埋め
+/// フォールバック）を返さざるを得ない。本テストは、この失敗が
+/// `TapeNode::recompute_failed`（poison フラグ）として記録され、
+/// 以後 `Tape::backward`（層 1・`materialize_fallible` 経由）が
+/// このノードのキャッシュ済みゼロ値を「正しい実体化結果」として
+/// 信頼せず `Err` を返すことを確認する——poison 契約がなければ
+/// `to_tensor()` が握り潰したゼロテンソルをそのまま使って backward が
+/// 成功し、ゼロ勾配が静かに返ってしまう。
+#[test]
+fn layer2_poisoned_recompute_is_detected_by_layer1_backward() {
+    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let ops = InstrumentedOps {
+        inner: common::naive_ops(),
+        gemm_calls: Arc::clone(&gemm_calls),
+        // 1 回目（forward）は成功させ、2 回目（`m.to_tensor()` が
+        // 誘発する層 2 経由の再計算）だけを失敗させる。
+        fail_on_call: Some(2),
+    };
+    let tape = Tape::new_with_ops(Box::new(ops));
+
+    let a = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let b = tape.var(&t(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]));
+
+    // `checkpoint_from`（`Var::checkpoint_from`）を使い、`m`（matmul
+    // 結果）を通常の局所変数として保持したまま `out = m.relu()` を
+    // 区間の出力にする。`m` は区間内部ノードのため解放される。
+    let m = a.matmul(&b).expect("forward の 1 回目の gemm は成功する");
+    let out = m.relu();
+    let checkpointed_out = out
+        .checkpoint_from(&[&a, &b])
+        .expect("checkpoint_from 自体は forward を再実行しないため成功する");
+
+    // 層 2 を直接呼び、解放済み `m` の再計算失敗を誘発する。契約どおり
+    // panic せずゼロテンソルが返る（shape のみ保たれる）。
+    let zero_fallback = m.to_tensor();
+    assert_eq!(
+        zero_fallback.shape(),
+        &[2usize, 2],
+        "層 2 は失敗時も shape を保ったゼロテンソルを返す契約"
+    );
+
+    // 汚染済みのキャッシュ値を層 1（`Tape::backward`）が「正しい実体化
+    // 結果」として信頼し、ゼロ勾配のまま静かに成功してはならない。
+    let result = tape.backward(&checkpointed_out);
+    assert!(
+        result.is_err(),
+        "poison フラグが立った checkpoint 解放済みノードを層 1 が\
+         検出できず、ゼロ勾配のまま backward が成功してしまっている: {result:?}"
+    );
+    assert_eq!(
+        gemm_calls.load(Ordering::SeqCst),
+        2,
+        "1 回目（forward）成功・2 回目（`m.to_tensor()` 経由の再計算）\
+         失敗のシナリオである契約をテスト自身が満たしているかの自己検証\
+         （backward 自体は poison 検出により追加の gemm 呼び出しを\
+         要求しない）"
     );
 }

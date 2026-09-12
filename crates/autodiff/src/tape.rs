@@ -713,12 +713,22 @@ impl Op {
             // 済み view 値は基底バッファへの `Arc` を握るため、解放しな
             // いと基底側を解放しても実メモリが減らない。`Op::Permute`／
             // `Op::BroadcastTo`（イシュー #1597 で `Op::is_view()` へ
-            // 追加された variant）も同じ view 系のため同列に扱う
-            // （merge 時の非網羅 match 是正。review 指摘）。
+            // 追加された variant）・`Op::Narrow`（イシュー #1598 で
+            // 同じく `Op::is_view()` へ追加された variant。
+            // `recompute_value` が `base.narrow(..)` で再導出できる）も
+            // 同じ view 系のため同列に扱う（merge 時の非網羅 match
+            // 是正。review 指摘）。
             Op::Reshape { .. }
             | Op::Transpose { .. }
             | Op::Permute { .. }
-            | Op::BroadcastTo { .. } => true,
+            | Op::BroadcastTo { .. }
+            | Op::Narrow { .. } => true,
+            // `Op::Concat` は複数入力を 1 バッファへ結合する実体化演算
+            // であり view ではない。`recompute_value` に対応する再導出
+            // 分岐が未実装（`_` ワイルドカードで契約違反 `Err` を返す
+            // 経路にしか到達しない）ため、値を解放すると再導出不能に
+            // なる。§8 のスコープ外事項として非適格のまま保持する。
+            Op::Concat { .. } => false,
             // 遅延 elementwise: 値を持つ場合は `pre_materialize_for_
             // binary_merge`／`push_lazy` の `at_limit` による
             // `MAX_FUSED_CHAIN_LEN` 上限維持のための自己実体化であり、
@@ -825,6 +835,27 @@ pub(crate) struct TapeNode {
     /// （`push_view`）は本フィールドに関わらず常にこの再導出経路へ
     /// 分岐する（`Op::is_view` 判定が別途効くため）。
     pub(crate) recompute: bool,
+    /// **P0 是正（codex-review 指摘。イシュー #1624 PR #1681 レビュー）**:
+    /// 層 2（[`materialize_non_fallible`]。`Var::value`/`Var::to_tensor`
+    /// が使う非 fallible 境界）は `&'a Tensor<f32>` を返す必要があり
+    /// `OnceCell` を必ず埋めるため、checkpoint 解放済みノードの再計算が
+    /// 真のバックエンド実行失敗（shape 不整合・カーネル起動失敗等。
+    /// 単なる view 不変条件違反ではない）を起こしても
+    /// `debug_assert! + safe_zeros` で吸収した結果を `OnceCell` へ
+    /// 「正常値」として永続キャッシュしてしまう——release ビルドでは
+    /// 誤りが一切検出できない構造的な穴だった。
+    ///
+    /// 本フィールド（`Cell<bool>`。`TapeNode` は `RefCell<Vec<..>>` の
+    /// 共有参照〈`&[TapeNode]`〉からしか触れないため内部可変性が必要）
+    /// は [`recompute_infallible`] が `recompute_value` から `Err` を
+    /// 受け取った際に `true` へ立て、以後 [`materialize_fallible`]
+    /// （層 1。`Tape::backward`／`grad.rs` の VJP が使う fallible 境界）
+    /// がこのノードのキャッシュ済み値を読む前に検査し、汚染済みなら
+    /// 黙って使わず `Err` として伝播する（`.claude/rules/coding-rust.md`
+    /// の本番経路での握り潰し禁止方針）。層 2 は契約上 infallible の
+    /// ままだが、層 1 経由（`Tape::backward`）で汚染を検出できるため
+    /// 「ゼロ勾配が静かに成功として返る」事故を防げる。
+    pub(crate) recompute_failed: std::cell::Cell<bool>,
 }
 
 /// 演算を記録する Wengert list。`Var`（`var.rs`）上の演算のみがここに
@@ -1233,6 +1264,7 @@ impl Tape {
             value: OnceCell::from(value),
             lazy_chain_size: 0,
             recompute: false,
+            recompute_failed: std::cell::Cell::new(false),
         });
         id
     }
@@ -1258,6 +1290,7 @@ impl Tape {
             value: OnceCell::new(),
             lazy_chain_size: 0,
             recompute: false,
+            recompute_failed: std::cell::Cell::new(false),
         });
         id
     }
@@ -1286,6 +1319,7 @@ impl Tape {
             value: OnceCell::new(),
             lazy_chain_size: 0,
             recompute: false,
+            recompute_failed: std::cell::Cell::new(false),
         });
         id
     }
@@ -1364,6 +1398,7 @@ impl Tape {
             value: OnceCell::new(),
             lazy_chain_size: size,
             recompute: false,
+            recompute_failed: std::cell::Cell::new(false),
         });
         (id, at_limit)
     }
@@ -1719,6 +1754,26 @@ fn lazy_leaf_value(nodes: &[TapeNode], ops: &dyn BackendOps, n: usize) -> Tensor
 /// 走査する構造）。両条件が破られる（非適格な Op が未実体化のまま
 /// 到達する）のは真の契約違反であり、`Err` として呼び出し元
 /// （[`recompute_infallible`]）へ吸収させる。
+///
+/// **P0 是正（codex-review 指摘。イシュー #1624 PR #1681 レビュー）**:
+/// `TapeNode::recompute_failed` が立っている（層 2
+/// `materialize_non_fallible` がこのノードの再計算失敗をゼロ埋めへ
+/// 吸収した実績がある）場合、キャッシュ済み値を「正しい実体化結果」
+/// として信頼せず `Err` を返す。呼び出し元（[`recompute_value`]・
+/// [`materialize_fallible`]・[`lazy_leaf_value_fallible`]・
+/// `value_of`（fallible 版）の 4 箇所すべて）はこのノードのキャッシュ
+/// 済み値を読む前に本関数で検査する契約とする。
+fn poisoned_err(node: &TapeNode) -> Result<(), AutodiffError> {
+    if node.recompute_failed.get() {
+        return Err(AutodiffError::Backward(
+            "materialize: checkpoint 解放済みノードの再計算が過去にバックエンド実行失敗を\
+             起こしており、キャッシュ済み値は信頼できない（TapeNode::recompute_failed）"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn recompute_value(
     nodes: &[TapeNode],
     ops: &dyn BackendOps,
@@ -1726,7 +1781,14 @@ fn recompute_value(
     memo: &mut std::collections::HashMap<usize, Tensor<f32>>,
 ) -> Result<Tensor<f32>, AutodiffError> {
     if let Some(v) = nodes[id.0].value.get() {
-        return Ok(v.clone());
+        // **P0 是正（codex-review 指摘。イシュー #1624 PR #1681
+        // レビュー）**: この `OnceCell` の中身は層 2
+        // （`materialize_non_fallible`）が `recompute_infallible` の
+        // 失敗を握り潰して詰めたゼロ埋め値かもしれない
+        // （`TapeNode::recompute_failed` doc 参照）。ここで無条件に
+        // 「既に実体化済みの正しい値」として使うと、祖先の再計算失敗が
+        // 静かに伝播してしまう——`Err` として呼び出し元へ伝播する。
+        return poisoned_err(&nodes[id.0]).map(|()| v.clone());
     }
     // **P1 是正（codex-review 指摘・イシュー #1624 PR レビュー）**:
     // checkpoint 区間内の DAG が共有祖先を持つ場合（例:
@@ -1804,11 +1866,11 @@ fn recompute_value(
             start,
             len,
         } => {
-            let base = resolve_view(nodes, *input);
+            let base = recompute_value(nodes, ops, *input, memo)?;
             base.narrow(*dim, *start, *len).unwrap_or_else(|_| {
                 debug_assert!(
                     false,
-                    "resolve_view: Op::Narrow の再導出が失敗した（forward 側の契約違反）"
+                    "recompute_value: Op::Narrow の再導出が失敗した（forward 側の契約違反）"
                 );
                 safe_zeros(&node.shape)
             })
@@ -1881,13 +1943,35 @@ fn recompute_fallible(
 /// `lazy_leaf_value` から異なる（祖先）`id` に対して呼ばれる経路は
 /// この制約と無関係だが、実装を一本化するため同じ非キャッシュ契約を
 /// 適用する。
+///
+/// **P0 是正（codex-review 指摘。イシュー #1624 PR #1681 レビュー）**:
+/// `recompute_value` からの `Err` は「構造的な view 不変条件違反」
+/// （本来あり得ない契約違反）と「真のバックエンド実行失敗」（shape
+/// 不整合・カーネル起動失敗等。checkpoint 解放済みノードの再計算では
+/// 現実に起こりうる）を区別しない一つの経路だが、いずれの場合も
+/// `id`（呼び出し元。`materialize_non_fallible` の `get_or_init` が
+/// 埋めようとしているノード自身）の `TapeNode::recompute_failed` を
+/// `true` へ立てる。これにより層 2 は契約どおり `Tensor<f32>`
+/// （ゼロ埋めフォールバック）を返しつつ、汚染の事実を消さずに記録する。
+/// 以後 [`materialize_fallible`]（層 1）がこのノードを読む前に
+/// `recompute_failed` を検査し、汚染済みなら `Err` として伝播する
+/// （層 2 だけでは検出できない誤りを層 1 経由〈`Tape::backward`〉で
+/// 確実に検出可能にする）。
+///
+/// **`debug_assert!` を使わない理由**: checkpoint 解放済みノードの
+/// 再計算失敗は（`resolve_view`〈旧実装〉が想定していた「あり得ない
+/// 構造的契約違反」とは異なり）現実のバックエンド実行失敗
+/// （shape 不整合・カーネル起動失敗等）として普通に起こりうる。
+/// `debug_assert!(false)` を残すとテスト・debug ビルドでこの正常系
+/// フォールバック（poison 記録 + ゼロ埋め）自体が panic してしまい、
+/// 上記の poison 契約を exercise できない。真の契約違反（`push_view`／
+/// `is_checkpoint_eligible` の前提が破られる等）は `recompute_value`
+/// 自身が `Err` を返す時点で `AutodiffError::Backward` にメッセージが
+/// 残るため、ここでの `debug_assert!` は情報の重複でしかない。
 fn recompute_infallible(nodes: &[TapeNode], ops: &dyn BackendOps, id: NodeId) -> Tensor<f32> {
     let mut memo = std::collections::HashMap::new();
     recompute_value(nodes, ops, id, &mut memo).unwrap_or_else(|_| {
-        debug_assert!(
-            false,
-            "recompute_infallible: 再計算に失敗した（契約違反または backend エラー）"
-        );
+        nodes[id.0].recompute_failed.set(true);
         safe_zeros(&nodes[id.0].shape)
     })
 }
@@ -1916,7 +2000,12 @@ fn lazy_leaf_value_fallible(
 ) -> Result<Tensor<f32>, AutodiffError> {
     let node = &nodes[n];
     match node.value.get() {
-        Some(t) => Ok(t.clone()),
+        Some(t) => {
+            // `poisoned_err` doc 参照（P0 是正・イシュー #1624 PR
+            // #1681 レビュー）。
+            poisoned_err(node)?;
+            Ok(t.clone())
+        }
         None if node.op.is_view() || node.recompute => {
             recompute_value(nodes, ops, NodeId(n), recompute_memo)
         }
@@ -2043,6 +2132,9 @@ fn value_of(
     recompute_memo: &mut std::collections::HashMap<usize, Tensor<f32>>,
 ) -> Result<Tensor<f32>, AutodiffError> {
     if let Some(t) = nodes[n].value.get() {
+        // `poisoned_err` doc 参照（P0 是正・イシュー #1624 PR #1681
+        // レビュー）。
+        poisoned_err(&nodes[n])?;
         Ok(t.clone())
     } else if let Some(t) = computed.get(&n) {
         Ok(t.clone())
@@ -2087,6 +2179,10 @@ pub(crate) fn materialize_fallible<'a>(
     id: NodeId,
 ) -> Result<&'a Tensor<f32>, AutodiffError> {
     if let Some(v) = nodes[id.0].value.get() {
+        // `poisoned_err` doc 参照（P0 是正・イシュー #1624 PR #1681
+        // レビュー）: 層 2 が過去にゼロ埋めで吸収した値を層 1 が
+        // 「正しい実体化結果」として信頼しないための検査。
+        poisoned_err(&nodes[id.0])?;
         return Ok(v);
     }
 
@@ -2144,6 +2240,21 @@ pub(crate) fn materialize_fallible<'a>(
 /// 場合に限り `autodiff` 自身の `eval.rs`（#164 で非 panic 構造へ改修
 /// 済み）を最終手段として用いて再計算する。必ず `Tensor<f32>` を返し、
 /// `panic!` も `Err` も返さない。
+///
+/// **poison 契約（P0 是正・codex-review 指摘。イシュー #1624 PR #1681
+/// レビュー）**: 本関数は `&'a Tensor<f32>` を返す必要があり
+/// `OnceCell` を必ず埋めるため、checkpoint 解放済みノードの再計算
+/// （`recompute_infallible` 経由）が真のバックエンド実行失敗を起こした
+/// 場合でも `debug_assert! + safe_zeros` で吸収した結果をそのまま
+/// `OnceCell` へ書き込む——この事実自体は消せない（層 2 が infallible
+/// である以上、値を返さない選択肢がない）。代わりに
+/// `TapeNode::recompute_failed` を立てて汚染の事実を記録し、以後
+/// [`materialize_fallible`]（層 1。`Tape::backward`／`grad.rs` の VJP が
+/// 使う）がこのノードのキャッシュ済み値を読む前に検査して `Err` へ
+/// 変換する（`poisoned_err` 参照）。したがって `Var::value()`／
+/// `Var::to_tensor()` 単体の呼び出しは（契約どおり）ゼロテンソルを
+/// 返すが、その値をもとに `Tape::backward` を呼ぶと汚染が検出されて
+/// `Err` になる——「ゼロ勾配が静かに成功として返る」事故を防ぐ。
 pub(crate) fn materialize_non_fallible<'a>(
     nodes: &'a [TapeNode],
     ops: &dyn BackendOps,
