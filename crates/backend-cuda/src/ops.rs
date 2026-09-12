@@ -9,9 +9,14 @@
 //! 本ファイルのコードはこの分岐を意識せず既定 `run_tiled_f32` を呼ぶだけで
 //! よい。elementwise（`add`／`mul`／`relu`／`exp`／
 //! `tanh`）は `elementwise::CudaElementwise` へ委譲する（イシュー #599）。
-//! 汎用 reduction（`sum`／`max`）は未実装のまま
-//! [`fandhe_ai_tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。
-//! out-of-scope-tracking.md 対象）。イシュー #592 で `run_fused` を
+//! 汎用 reduction（`sum`／`max`。全軸・単一軸）は `reduce::CudaReduce`
+//! （`kernels_reduce.rs`。f64 アキュムレータ契約〈sum〉・厳密選択
+//! `fmaxf`〈max〉）へ委譲する（イシュー #1584・親イシュー #1571。旧
+//! `#599` スコープ外記述を解消）。DeviceBuffer 常駐版 elementwise
+//! （`binary_elementwise_device`／`unary_elementwise_device`。イシュー
+//! #1584）は `elementwise::CudaElementwise` の常駐起動 API
+//! （`launch_binary_resident`／`launch_unary_resident`。H2D/D2H なし）へ
+//! 委譲する。イシュー #592 で `run_fused` を
 //! オーバーライドし、canonical RMSNorm 融合プラン（`x * rsqrt(sum(x^2))`）
 //! 検出時のみ融合カーネル（[`crate::rmsnorm::CudaRmsNorm`]）へルーティング
 //! する（`sum`／`max` 単独 API とは独立した経路）。
@@ -28,9 +33,10 @@ use std::sync::Arc;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, DType, DispatchFailureCell, FusionPlan, MatrixNormOrd, MseReduction,
-    QrFactors, SegmentKey, SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor,
-    require_same_shape, row_softmax_layout,
+    Activation, BackendOps, BinaryElementwiseOp, DType, DispatchFailureCell, FusionPlan,
+    MatrixNormOrd, MseReduction, QrFactors, SegmentKey, SegmentResource, SegmentRun, ShapeError,
+    SvdFactors, Tensor, UnaryElementwiseOp, reduce_out_shape, require_same_shape,
+    row_softmax_layout,
 };
 
 use crate::context_cache;
@@ -687,6 +693,55 @@ impl CudaBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`Self::sum`]／[`Self::max`] 共通のディスパッチ（イシュー #1584）。
+    /// `reduce_out_shape` で `dim` を検査・出力 shape を導出した後、
+    /// `a.contiguous()` を `reduce::CudaReduce` の該当エントリ
+    /// （`kind` で分岐）へ渡す。`dim = Some(axis)` は `reduce::
+    /// reduce_axis_layout` で `(outer, axis_len, inner)` を導出する
+    /// （`ops.rs` 側は shape の正しさのみ検査し、`i32::MAX` 上限等の
+    /// カーネル起動前検証は `reduce.rs` 側に委ねる二重責務分離）。
+    fn reduce_dispatch(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+        kind: ReduceKind,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        let a_owned = a.contiguous();
+        let a_slice = a_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("reduce: input not contiguous".into())
+        })?;
+
+        let reduce = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_reduce(&device)
+            },
+        )?;
+
+        let data = match dim {
+            None => {
+                let value = self.with_driver_call(&[], map_reduce_error, || match kind {
+                    ReduceKind::Sum => reduce.run_sum_all_f32(a_slice),
+                    ReduceKind::Max => reduce.run_max_all_f32(a_slice),
+                })?;
+                vec![value]
+            }
+            Some(axis) => {
+                let (outer, axis_len, inner) =
+                    crate::reduce::reduce_axis_layout(a_owned.shape(), axis)
+                        .map_err(map_reduce_error)?;
+                self.with_driver_call(&[], map_reduce_error, || match kind {
+                    ReduceKind::Sum => reduce.run_sum_axis_f32(a_slice, outer, axis_len, inner),
+                    ReduceKind::Max => reduce.run_max_axis_f32(a_slice, outer, axis_len, inner),
+                })?
+            }
+        };
+        Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`BackendOps::run_fused`] の RMSNorm 一致経路（イシュー #592）。
     /// `match_rmsnorm_plan` が一致した後の dtype／leaf 数／leaf shape の
     /// 起動前 fail-closed 検証と、`CudaRmsNorm::run_rmsnorm_f32_raw`
@@ -905,6 +960,37 @@ fn static_cuda_memory(
     let mem: &'static CudaMemory = Box::leak(Box::new(CudaMemory::new(device)));
     guard.insert(ordinal, mem);
     Ok(mem)
+}
+
+/// [`CudaBackendOps::reduce_dispatch`] が `sum`／`max` のどちらを実行
+/// するかを選ぶ内部専用の選択子（イシュー #1584）。`tensor-core` 公開
+/// API の一部ではなく `ops.rs` 内でのみ使う（`BackendOps::sum`／`max`
+/// は演算ごとに別メソッドのため、この enum 自体は crate 外へ公開しない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReduceKind {
+    Sum,
+    Max,
+}
+
+/// `reduce::CudaReduce`／`reduce::reduce_axis_layout` が返す `CudaError`
+/// を `BackendError` へ写像する（イシュー #1584）。`CudaError::
+/// EmptyReduction` は `backend-cpu::reduction::ReduceError::
+/// EmptyReduction` と同一の `BackendError::KernelLaunchFailed` 文言
+/// （`"empty reduction for op \"{op}\""`）へ、`InvalidReduceShape`
+/// （起動前 `i32::MAX` 上限・`checked_mul` オーバーフロー検査の失敗。
+/// `ops.rs` 側の shape 検証〈`reduce_out_shape`〉を通過した入力からは
+/// 実質到達しない防御的経路）は `ShapeError::ElementCountOverflow` へ、
+/// それ以外は既存 [`map_cuda_error`] へ委譲する。
+fn map_reduce_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::EmptyReduction { op } => {
+            BackendError::KernelLaunchFailed(format!("empty reduction for op \"{op}\""))
+        }
+        CudaError::InvalidReduceShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
 }
 
 impl BackendOps for CudaBackendOps {
@@ -1961,6 +2047,172 @@ impl BackendOps for CudaBackendOps {
         Ok(c_dev_buf)
     }
 
+    /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `a`／`b`／戻り値
+    /// いずれも [`DeviceBuffer`] 常駐のまま計算する（イシュー #1584）。
+    /// `linear_forward_device` と同じ手順（世代検査 →
+    /// `numel == 0` 早期 return → ハンドル取り出し → `static_cuda_memory`
+    /// で出力確保 → `elementwise::CudaElementwise::launch_binary_
+    /// resident` → `download` せず返す）を踏襲する。`a`／`b` は shape
+    /// 完全一致限定（ブロードキャスト非対応）で、不一致は起動前に
+    /// `ShapeMismatch` で拒否する。
+    fn binary_elementwise_device(
+        &self,
+        op: BinaryElementwiseOp,
+        a: &DeviceBuffer<f32>,
+        b: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Cuda(self.ordinal) || b.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if a.shape() != b.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a.shape().to_vec(),
+                rhs: b.shape().to_vec(),
+            }));
+        }
+        let shape = a.shape().to_vec();
+        let numel = a.numel();
+
+        let resident_generations = [a.generation(), b.generation()];
+
+        if numel == 0 {
+            // 早期 return でも poison 状態・世代は fail-closed に検査する
+            // （`linear_forward_device` の `m == 0 || n == 0` 早期
+            // return と同じ理由。PR #1064 追補）。
+            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            let device = self.with_driver_call(
+                &resident_generations,
+                |e| BackendError::CudaUnavailable(e.to_string()),
+                || self.device_handle_raw(),
+            )?;
+            let mem = static_cuda_memory(self.ordinal, &device)?;
+            return mem.alloc_zeroed(&shape);
+        }
+
+        let a_handle = a
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_full) = a_handle.storage.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "binary_elementwise_device: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let b_handle = b
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(b_full) = b_handle.storage.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "binary_elementwise_device: b buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let device = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        // 出力は呼び出し元へ escape するため `static_cuda_memory`
+        // （`linear_forward_device` の「出力バッファの確保元」doc と
+        // 同じ判断。REQ-14 の単一計測系列）。
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        let mut out_dev_buf = mem.alloc_zeroed(&shape)?;
+        let out_handle = out_dev_buf
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(out_storage) = out_handle.storage.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "binary_elementwise_device: output buffer has numel > 0 but no device \
+                 allocation"
+                    .into(),
+            ));
+        };
+        let mut out_arg = out_storage.as_arg_mut();
+        let a_arg = a_full.as_arg();
+        let b_arg = b_full.as_arg();
+
+        let ew = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_elementwise(&device),
+        )?;
+        self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || ew.launch_binary_resident(op, &a_arg, &b_arg, &mut out_arg, numel),
+        )?;
+
+        // `download` しない: 同期点は呼び出し元の `download` へ集約
+        // （`linear_forward_device` と同じ契約）。
+        Ok(out_dev_buf)
+    }
+
+    /// [`Self::binary_elementwise_device`] の単項版（イシュー #1584）。
+    fn unary_elementwise_device(
+        &self,
+        op: UnaryElementwiseOp,
+        a: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let shape = a.shape().to_vec();
+        let numel = a.numel();
+
+        let resident_generations = [a.generation()];
+
+        if numel == 0 {
+            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            let device = self.with_driver_call(
+                &resident_generations,
+                |e| BackendError::CudaUnavailable(e.to_string()),
+                || self.device_handle_raw(),
+            )?;
+            let mem = static_cuda_memory(self.ordinal, &device)?;
+            return mem.alloc_zeroed(&shape);
+        }
+
+        let a_handle = a
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_full) = a_handle.storage.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "unary_elementwise_device: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let device = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        let mut out_dev_buf = mem.alloc_zeroed(&shape)?;
+        let out_handle = out_dev_buf
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(out_storage) = out_handle.storage.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "unary_elementwise_device: output buffer has numel > 0 but no device allocation"
+                    .into(),
+            ));
+        };
+        let mut out_arg = out_storage.as_arg_mut();
+        let a_arg = a_full.as_arg();
+
+        let ew = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_elementwise(&device),
+        )?;
+        self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || ew.launch_unary_resident(op, &a_arg, &mut out_arg, numel),
+        )?;
+
+        Ok(out_dev_buf)
+    }
+
     /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
     /// #1023「R3」）。`Op::LinearResident` の VJP が `d_input^T = w @ g^T`
     /// を計算するために使う。[`Self::gemm_resident_rhs`] と同じく `w` は
@@ -2221,22 +2473,25 @@ impl BackendOps for CudaBackendOps {
         ))
     }
 
-    /// 汎用 reduction カーネルは未実装のまま（#599 スコープ外・イシュー
-    /// #592 でも対象外）。イシュー #592 は融合 RMSNorm カーネル
-    /// （[`Self::run_fused`] 経由のみ）に閉じた縮約を実装したが、
-    /// `BackendOps::sum`（任意軸・非融合の単独縮約 API）自体の GPU
-    /// カーネル化は別イシューのスコープ（out-of-scope-tracking.md 対象）。
-    fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "CudaBackendOps::sum: reduction カーネル未実装（#599 スコープ外）".into(),
-        ))
+    /// 全軸・単一軸 `sum`（`reduce::CudaReduce::run_sum_all_f32`／
+    /// `run_sum_axis_f32` への委譲。イシュー #1584・親イシュー #1571）。
+    /// `reduce_out_shape` で `dim` の範囲検査・出力 shape を導出した後、
+    /// `a.contiguous()` で密なバッファへ実体化してから渡す（`elementwise_
+    /// binary`／`elementwise_unary` と同じ「非 contiguous はここで解消
+    /// する」方針）。空縮約の意味論は `reduce.rs` 冒頭コメント参照
+    /// （`backend-cpu::reduction::sum` と同一）。
+    fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        self.reduce_dispatch(a, dim, ReduceKind::Sum)
     }
 
-    /// [`Self::sum`] と同じ理由（汎用 reduction 未実装）。
-    fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "CudaBackendOps::max: reduction カーネル未実装（#599 スコープ外）".into(),
-        ))
+    /// [`Self::sum`] と同じ委譲構造（`run_max_all_f32`／
+    /// `run_max_axis_f32`）。`fmaxf` による厳密選択（丸めなし。`reduce.rs`
+    /// 冒頭コメント「max は厳密選択」参照）で、空縮約は
+    /// `BackendError::KernelLaunchFailed("empty reduction for op \"max\"")`
+    /// （`backend-cpu::reduction::max` と同一文言。`map_reduce_error`
+    /// 参照）を返す。
+    fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        self.reduce_dispatch(a, dim, ReduceKind::Max)
     }
 
     /// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）は

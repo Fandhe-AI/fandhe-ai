@@ -66,18 +66,20 @@ fn sample_tensor() -> Tensor<f32> {
 /// `context_cache::cached_gemm`（`ops::CudaBackendOps::gemm`）を通す。
 ///
 /// `product`（非スカラー）をそのまま `backward` の loss に渡す理由
-/// （Cursor Bugbot 指摘。イシュー #929 PR #946）: `product.sum(None)` は
-/// `BackendOps::sum` を直接呼ぶが、`CudaBackendOps::sum`
-/// （`backend-cuda/src/ops.rs`）は汎用 reduction カーネル未実装のため
-/// 常に `BackendError::Unsupported` を返す（#599 スコープ外・別イシュー）。
-/// このため本ベンチは cold/warm いずれの試行も `sum(None)` の時点で必ず
-/// panic し、計測自体が実行できていなかった。`Tape::backward` は
-/// 非スカラー loss に対し「全要素 1 のシードで逆伝播する」（`sum(loss)
-/// .backward()` と数学的に等価な暗黙の総和射影。`backward.rs`
-/// 「非スカラー loss のセマンティクス」参照）契約を持つため、`sum` を
-/// 経由せず `product` を直接 loss として渡せば計測対象（`tape_for` の
-/// 結線 + `matmul` 経由の `cached_gemm` + `backward`）を変えずに
-/// `CudaBackendOps::sum` の未実装を回避できる。
+/// （Cursor Bugbot 指摘。イシュー #929 PR #946）: 当時 `product.sum(None)`
+/// は `BackendOps::sum` を直接呼ぶが、`CudaBackendOps::sum`
+/// （`backend-cuda/src/ops.rs`）が汎用 reduction カーネル未実装のため
+/// 常に `BackendError::Unsupported` を返し、cold/warm いずれの試行も
+/// `sum(None)` の時点で必ず panic していた（`sum`／`max` はイシュー
+/// #1584 で実装済みとなり、この panic は現在は起きない）。`Tape::
+/// backward` は非スカラー loss に対し「全要素 1 のシードで逆伝播する」
+/// （`sum(loss).backward()` と数学的に等価な暗黙の総和射影。
+/// `backward.rs`「非スカラー loss のセマンティクス」参照）契約を持つ
+/// ため、`sum` の実装状況に関わらず `product` を直接 loss として渡せば
+/// 計測対象（`tape_for` の結線 + `matmul` 経由の `cached_gemm` +
+/// `backward`）を `sum` 呼び出し込みで肥大化させずに済む。過去の
+/// 回避理由が解消された現在も、計測対象を GEMM 経路に絞る目的で
+/// この構成を維持する。
 fn measure_tape_for_cuda_matmul() -> f64 {
     let t = Instant::now();
     let tape = fandhe_ai::tape_for(Device::Cuda(0))

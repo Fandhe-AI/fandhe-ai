@@ -19,11 +19,13 @@
 use std::sync::Arc;
 
 use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
+use fandhe_ai_tensor_core::{BinaryElementwiseOp, UnaryElementwiseOp};
 
 use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels_elementwise::{self, EW_BLOCK_DIM};
+use crate::memory::{CudaArg, CudaArgMut};
 use crate::nvrtc::compile_ptx;
 use crate::pool::CudaAllocator;
 
@@ -291,6 +293,143 @@ impl CudaElementwise {
     /// `out[i] = tanh(a[i])`（f32、単精度 `tanhf`）。
     pub fn run_tanh_f32(&self, a: &[f32]) -> Result<Vec<f32>, CudaError> {
         self.run_unary(&self.tanh_f32, a)
+    }
+
+    /// `op` に対応するコンパイル済みカーネルを返す（`launch_binary_resident`
+    /// の内部選択専用。ホスト版 `run_add_f32`／`run_mul_f32` と同一
+    /// カーネルを再利用するため bit 同一契約が成立する）。
+    ///
+    /// `BinaryElementwiseOp` は `#[non_exhaustive]`。未知 variant を
+    /// `_ =>` で `add_f32` 等へフォールバックすると、将来 variant が
+    /// 追加された際に「別の演算を代わりに計算して黙って成功する」
+    /// fail-open になる（advisor 指摘。イシュー #1584）。`gemm_bias_act`
+    /// の `Activation` 未知 variant 拒否と同方針で `Err` を返す。
+    fn function_for_binary(&self, op: BinaryElementwiseOp) -> Result<&CudaFunction, CudaError> {
+        match op {
+            BinaryElementwiseOp::Add => Ok(&self.add_f32),
+            BinaryElementwiseOp::Mul => Ok(&self.mul_f32),
+            _ => Err(CudaError::UnsupportedElementwiseOp {
+                detail: format!("unknown BinaryElementwiseOp variant: {op:?}"),
+            }),
+        }
+    }
+
+    /// [`Self::function_for_binary`] の単項版。
+    fn function_for_unary(&self, op: UnaryElementwiseOp) -> Result<&CudaFunction, CudaError> {
+        match op {
+            UnaryElementwiseOp::Relu => Ok(&self.relu_f32),
+            UnaryElementwiseOp::Exp => Ok(&self.exp_f32),
+            UnaryElementwiseOp::Tanh => Ok(&self.tanh_f32),
+            _ => Err(CudaError::UnsupportedElementwiseOp {
+                detail: format!("unknown UnaryElementwiseOp variant: {op:?}"),
+            }),
+        }
+    }
+
+    /// `a op b` を [`crate::memory::DeviceBuffer`] 常駐のまま計算する
+    /// （イシュー #1584。`tensor-core::BackendOps::
+    /// binary_elementwise_device` の CUDA 実装が呼ぶ）。[`Self::
+    /// run_binary`] と異なり H2D／D2H・`readback`（同期）を一切行わない:
+    /// `a`／`b`／`out` はいずれも呼び出し元（`ops.rs`）がデバイス常駐
+    /// バッファから取り出した [`CudaArg`]／[`CudaArgMut`] で、カーネル
+    /// 起動をストリームへ積むだけに留める（同期点は呼び出し元の
+    /// `download` へ集約する契約。`docs/backend-cuda-async-execution-
+    /// design.md`）。`a.len() == b.len() == out.len() == numel` は
+    /// 呼び出し元が検証済みの前提とする（本関数はカーネル引数の `int`
+    /// 上限のみ再検証する）。
+    pub(crate) fn launch_binary_resident(
+        &self,
+        op: BinaryElementwiseOp,
+        a: &CudaArg<'_>,
+        b: &CudaArg<'_>,
+        out: &mut CudaArgMut<'_>,
+        numel: usize,
+    ) -> Result<(), CudaError> {
+        validate_elementwise_binary_dims(a.len(), b.len())?;
+        validate_elementwise_len(out.len())?;
+        // `a.len()==b.len()==out.len()==numel` を明示検証する（advisor
+        // 指摘: 是正前は `a.len()==b.len()` と `out.len()` の i32 上限
+        // しか見ておらず、SAFETY コメントが主張する「`numel` 要素と
+        // 1:1 対応」を実際には担保していなかった。ここで fail-closed に
+        // 拒否することで SAFETY コメントの前提を実装が満たすようにする）。
+        if a.len() != numel || out.len() != numel {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "elementwise buffer length must equal numel: a_len={}, b_len={}, \
+                     out_len={}, numel={numel}",
+                    a.len(),
+                    b.len(),
+                    out.len()
+                ),
+            });
+        }
+        if numel == 0 {
+            return Ok(());
+        }
+
+        let func = self.function_for_binary(op)?;
+        let cfg = elementwise_launch_config(numel as u32);
+        let numel_i = numel as i32;
+
+        // SAFETY: `a`／`b`／`out` は呼び出し元（`ops.rs::
+        // binary_elementwise_device`）が `numel` 要素と 1:1 対応する
+        // ことを検証済みのデバイスバッファ・ビューであり（上記の
+        // `a.len()`／`out.len()` 検証で本関数自身も再検証している）、
+        // カーネル内の手動境界チェック（`if (idx < numel)`。
+        // `kernels_elementwise.rs` 参照、REQ-8）と合わせて OOB 読み書き
+        // が起きない根拠とする。
+        // `CudaArg`／`CudaArgMut` は配置（`Device`／`Managed`）ごとに
+        // 異なる cudarc 型へ委譲するのみで、カーネル本体・起動 config
+        // は配置に依らず完全に共有する（`gemm.rs::
+        // launch_tiled_bias_act_f32_resident` と同じ設計）。
+        unsafe {
+            let mut builder = self.stream.launch_builder(func);
+            a.push(&mut builder);
+            b.push(&mut builder);
+            out.push(&mut builder);
+            builder.arg(&numel_i).launch(cfg)?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::launch_binary_resident`] の単項版。
+    pub(crate) fn launch_unary_resident(
+        &self,
+        op: UnaryElementwiseOp,
+        a: &CudaArg<'_>,
+        out: &mut CudaArgMut<'_>,
+        numel: usize,
+    ) -> Result<(), CudaError> {
+        validate_elementwise_len(a.len())?;
+        validate_elementwise_len(out.len())?;
+        // `a.len()==out.len()==numel` を明示検証する（`launch_binary_
+        // resident` と同じ是正。advisor 指摘）。
+        if a.len() != numel || out.len() != numel {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "elementwise buffer length must equal numel: a_len={}, out_len={}, numel={numel}",
+                    a.len(),
+                    out.len()
+                ),
+            });
+        }
+        if numel == 0 {
+            return Ok(());
+        }
+
+        let func = self.function_for_unary(op)?;
+        let cfg = elementwise_launch_config(numel as u32);
+        let numel_i = numel as i32;
+
+        // SAFETY: `launch_binary_resident` と同一の根拠（`a.len()`／
+        // `out.len()` を `numel` と一致検証済み）。
+        unsafe {
+            let mut builder = self.stream.launch_builder(func);
+            a.push(&mut builder);
+            out.push(&mut builder);
+            builder.arg(&numel_i).launch(cfg)?;
+        }
+        Ok(())
     }
 }
 
