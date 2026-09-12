@@ -316,6 +316,20 @@ pub fn reduce_bias_grad_rows_host(
         );
     }
     let (rows, cols, ld, transposed) = (layout.rows, layout.cols, layout.ld, layout.transposed);
+    // `rows == 1` は直接コピーし `0.0f32` へ加算しない（PR #1659
+    // codex-review P2 是正）: `eval::reduce_bias_grad_rows` doc の
+    // 「`m == 1` の特殊扱い」と同じ理由で、`grad::reduce_to_shape` は
+    // 既に `1` の軸を縮約しないため `-0.0` 等の符号付きゼロが保持
+    // される一方、単純な `+=` 版は `0.0 + (-0.0) == +0.0` により
+    // 符号を失い bit 完全一致契約が崩れる。
+    if rows == 1 {
+        let mut out = Vec::with_capacity(cols);
+        for col in 0..cols {
+            let idx = if transposed { col * ld } else { col };
+            out.push(data[idx]);
+        }
+        return Ok(out);
+    }
     let mut out = vec![0f32; cols];
     for row in 0..rows {
         for (col, acc) in out.iter_mut().enumerate() {
@@ -740,6 +754,45 @@ mod tests {
         assert!(got[0].is_infinite() && got[0] > 0.0);
         // col1: NaN + 1.0 + -inf = NaN
         assert!(got[1].is_nan());
+    }
+
+    // PR #1659 codex-review P2 是正の回帰テスト（`reduce_bias_grad_rows_host`
+    // doc「`rows == 1` は直接コピー」）: `rows == 1` の単純な `+=` 版
+    // （`0.0f32 + (-0.0f32) == +0.0f32`）だと符号付きゼロが失われる
+    // ことを直接検知する。転置 view（`transposed: true`）でも同じ
+    // 契約が成立することを確認する。
+    #[test]
+    fn reduce_bias_grad_rows_host_single_row_preserves_negative_zero_sign() {
+        let data = vec![-0.0f32, 0.0f32];
+        let layout = MatrixLayout {
+            rows: 1,
+            cols: 2,
+            ld: 2,
+            transposed: false,
+        };
+        let got = reduce_bias_grad_rows_host(&data, &layout).expect("valid layout/data in test");
+        assert!(
+            got[0].is_sign_negative(),
+            "rows == 1 では -0.0 の符号を保持するはず（reduce_to_shape との bit 完全一致契約）"
+        );
+        assert!(!got[1].is_sign_negative());
+
+        // 転置 view: cols=1 の軸を rows==1 相当として扱う（`ld` 経由の
+        // 添字式は転置版でも col*ld+row のため cols==1 で row 走査は
+        // 単一要素になる想定だが、本関数の特殊扱いは `rows == 1` 判定
+        // のみのため、転置 view でも `rows` フィールドの値で分岐する
+        // ことを確認する）。
+        let data_t = vec![-0.0f32, 0.0f32];
+        let layout_t = MatrixLayout {
+            rows: 1,
+            cols: 2,
+            ld: 1,
+            transposed: true,
+        };
+        let got_t =
+            reduce_bias_grad_rows_host(&data_t, &layout_t).expect("valid layout/data in test");
+        assert!(got_t[0].is_sign_negative());
+        assert!(!got_t[1].is_sign_negative());
     }
 
     // PR #1659 codex-review P1 是正の回帰テスト: 空 `data` と最小 `MatrixLayout`

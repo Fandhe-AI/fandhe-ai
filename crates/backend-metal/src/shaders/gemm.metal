@@ -2440,8 +2440,13 @@ kernel void gemm_splitk_reduce(
 // reduce_bias_grad_rows`（および `crates/backend-metal/src/layout.rs::
 // reduce_bias_grad_rows_host`）と bit 完全一致させるため、縮約順序
 // （行 0..M 昇順）・初期値（0.0f）・単純な `+=`（Neumaier 補正等は
-// 使わない）をそのまま複製する。numeric contract 一般原則（`f64`
-// アキュムレータ。`.claude/rules/coding-rust.md`）との不整合は
+// 使わない）をそのまま複製する。`m == 1` は `0.0f` へ加算せず直接
+// コピーする（PR #1659 codex-review P2 是正。`reduce_to_shape` は
+// 既に `1` の軸を縮約しないため `-0.0` 等の符号付きゼロが保持され、
+// 単純な `+=` 版だと `0.0f + (-0.0f) == +0.0f` で符号を失うため。
+// 上記ホスト 2 関数と同じ特殊扱いをカーネル側にも実装する）。numeric
+// contract 一般原則（`f64` アキュムレータ。`.claude/rules/
+// coding-rust.md`）との不整合（`m >= 2` の通常経路）は
 // `reduce_to_shape` 自体の既存未解決事項であり本カーネルで新規に導入
 // するものではない（`docs/backend-metal-command-batching-design.md`
 // §10.2-1）。
@@ -2470,12 +2475,24 @@ kernel void gemm_bias_grad_reduce_f32(
     if (gid >= p.n) {
         return;
     }
+    // `crate::layout::MatrixLayout` の添字式と一致させる契約
+    // （`layout.rs` モジュール冒頭 doc「添字式」）: 転置 view
+    // （`b_transposed == 1`）は `data[col * ld + row]`、非転置は
+    // `data[row * ld + col]`。
+    if (p.m == 1) {
+        // `m == 1` は直接コピーし `0.0f` へ加算しない（PR #1659
+        // codex-review P2 是正。`crate::layout::
+        // reduce_bias_grad_rows_host` doc の「`rows == 1` は直接
+        // コピー」と同じ理由。`grad::reduce_to_shape` は既に `1` の
+        // 軸を縮約しないため `-0.0` 等の符号付きゼロが保持される）。
+        size_t idx = p.b_transposed
+            ? (size_t)gid * (size_t)p.b_ld
+            : (size_t)gid;
+        out[gid] = g[idx];
+        return;
+    }
     float acc = 0.0f;
     for (uint row = 0; row < p.m; row++) {
-        // `crate::layout::MatrixLayout` の添字式と一致させる契約
-        // （`layout.rs` モジュール冒頭 doc「添字式」）: 転置 view
-        // （`b_transposed == 1`）は `data[col * ld + row]`、非転置は
-        // `data[row * ld + col]`。
         size_t idx = p.b_transposed
             ? (size_t)gid * (size_t)p.b_ld + (size_t)row
             : (size_t)row * (size_t)p.b_ld + (size_t)gid;

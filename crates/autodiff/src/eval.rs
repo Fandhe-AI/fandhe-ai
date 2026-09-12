@@ -137,6 +137,16 @@ pub(crate) fn dense_vec_ref(tensor: &Tensor<f32>) -> Cow<'_, [f32]> {
 /// 走査式 `reduced[i] += data[row * n + i]` を実行するため、本関数は
 /// その特殊ケースを直接書き下したものであり bit 完全一致する）。
 ///
+/// **`m == 1` の特殊扱い**（PR #1659 codex-review P2 是正）:
+/// `reduce_to_shape` は `cur_shape[axis]` が既に `1` の軸を縮約対象
+/// から外す（`padded_target[axis] == 1 && cur_shape[axis] != 1` の
+/// 条件が偽になるため走査自体をスキップし `data` をそのまま
+/// `target_shape` へ詰め直す）ため、`m == 1` では入力をコピーする
+/// だけで `0.0f32` へ加算しない。単純な `+=` 版（`out[col] += data[col]`
+/// を `0.0` から 1 回だけ実行）だと `-0.0` が `+0.0` に化けて
+/// （IEEE 754 の `0.0 + (-0.0) == +0.0`）この等価性が崩れるため、
+/// `m == 1` の場合は加算せず直接コピーして符号付きゼロを保持する。
+///
 /// `pub(crate)`: `grad.rs`（`Op::LinearResident` の非 resident bias
 /// フォールバック。呼び出しは変更しない——既存の `reduce_to_shape` 経路
 /// を維持し、本関数は resident 経路のみで使う）・`optim::device_store`
@@ -162,6 +172,11 @@ pub(crate) fn reduce_bias_grad_rows(g: &Tensor<f32>) -> Vec<f32> {
     }
     let (m, n) = (shape[0], shape[1]);
     let data = dense_vec(g);
+    if m == 1 {
+        // `reduce_to_shape` は `m == 1` の軸を縮約しないため、直接
+        // コピーして `-0.0` 等の符号付きゼロを保持する（上記 doc 参照）。
+        return data[0..n].to_vec();
+    }
     let mut out = vec![0f32; n];
     for row in 0..m {
         for col in 0..n {
@@ -736,5 +751,22 @@ mod reduce_bias_grad_rows_tests {
             .expect("test fixture: shape とデータ長は事前に一致させている");
         let got = reduce_bias_grad_rows(&g);
         assert_eq!(got, vec![1.5f32, -2.5, 3.5]);
+    }
+
+    // PR #1659 codex-review P2 是正の回帰テスト（`reduce_bias_grad_rows`
+    // doc「`m == 1` の特殊扱い」）: `m == 1` の単純な `+=` 版
+    // （`0.0f32 + (-0.0f32) == +0.0f32`）だと符号付きゼロが失われる
+    // ことを直接検知する（`is_sign_negative` で `+0.0`/`-0.0` を区別）。
+    #[test]
+    fn single_row_preserves_negative_zero_sign() {
+        let g = Tensor::<f32>::new(vec![-0.0f32, 0.0f32], &[1, 2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let got = reduce_bias_grad_rows(&g);
+        assert_eq!(got.len(), 2);
+        assert!(
+            got[0].is_sign_negative(),
+            "m == 1 では -0.0 の符号を保持するはず（reduce_to_shape との bit 完全一致契約）"
+        );
+        assert!(!got[1].is_sign_negative());
     }
 }
