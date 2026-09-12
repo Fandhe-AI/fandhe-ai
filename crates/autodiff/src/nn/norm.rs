@@ -95,7 +95,7 @@ impl RmsNorm {
     }
 
     /// `eps`（`sum(x^2)*inv_n + eps` の加算項）。構築時に
-    /// [`validate_eps`] で有限かつ非負であることを検証済み。
+    /// `validate_eps` で有限かつ非負であることを検証済み。
     pub fn eps(&self) -> f32 {
         self.eps
     }
@@ -223,7 +223,7 @@ impl LayerNorm {
         self.bias.as_ref()
     }
 
-    /// `eps`（`var(x) + eps` の加算項）。構築時に [`validate_eps`] で
+    /// `eps`（`var(x) + eps` の加算項）。構築時に `validate_eps` で
     /// 有限かつ非負であることを検証済み。
     pub fn eps(&self) -> f32 {
         self.eps

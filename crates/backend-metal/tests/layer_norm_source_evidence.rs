@@ -26,18 +26,21 @@ fn row_base_uses_64bit_index_to_avoid_overflow() {
     );
 }
 
-/// 平均（`ln_reduce_sum`）・分散（`ln_reduce_ssq`）の両方が
-/// `simd_shuffle_xor` を用いた 5 段 butterfly（`offset` を 16u→1u へ
-/// 5 回半減させるループ）で reduction されることをロックする。
+/// `maxabs`（行の 2 の冪スケール導出）・平均（`ln_reduce_kahan`）・
+/// 分散（`ln_reduce_ssq`）の 3 箇所すべてが `simd_shuffle_xor` を用いた
+/// 5 段 butterfly（`offset` を 16u→1u へ 5 回半減させるループ）で
+/// reduction されることをロックする（codex-review 指摘を受けた Welford
+/// → 2 の冪スケーリング + 2 段補償和への設計変更。`layer_norm.metal`
+/// 冒頭コメント参照）。
 #[test]
-fn both_reductions_use_five_stage_butterfly() {
+fn all_three_reductions_use_five_stage_butterfly() {
     let occurrences = LAYER_NORM_METAL_SOURCE
         .matches("for (uint offset = 16u; offset > 0u; offset >>= 1u)")
         .count();
     assert_eq!(
-        occurrences, 2,
-        "5 段 butterfly ループ（16u→1u の 5 回半減）は平均・分散の 2 箇所に存在するはずだが \
-         {occurrences} 箇所しか見つからなかった"
+        occurrences, 3,
+        "5 段 butterfly ループ（16u→1u の 5 回半減）は maxabs・平均・分散の 3 箇所に \
+         存在するはずだが {occurrences} 箇所しか見つからなかった"
     );
 }
 
@@ -57,31 +60,39 @@ fn variance_reduction_shuffles_scale_ssq_and_compensation() {
     }
 }
 
-/// 平均の reduction が Welford オンライン平均の `(mean, count)` ペアを
-/// `simd_shuffle_xor` することをロックする（codex-review 指摘を受けた
-/// overflow 対策で Neumaier 補償和 → Welford オンライン平均へ変更。
-/// `docs/norm-ops-design.md`・`layer_norm.metal` 冒頭コメント参照）。
+/// 平均の reduction が Neumaier 補償和の `(sum, comp)` ペアを
+/// `simd_shuffle_xor` することをロックする（codex-review 指摘（平均を
+/// 偏差計算前に丸めると精度が失われる・`meanB-meanA` の単純減算が
+/// overflow しうる）を受け、Welford オンライン平均を破棄し「行内 2 の
+/// 冪スケーリングした比スケール領域での Neumaier 補償和 → doubled-float
+/// 拡張」設計へ変更した。`docs/norm-ops-design.md`・`layer_norm.metal`
+/// 冒頭コメント参照）。
 #[test]
-fn mean_reduction_shuffles_mean_and_count() {
-    for var_name in ["mean", "count"] {
+fn mean_reduction_shuffles_sum_and_comp() {
+    for var_name in ["sum", "comp"] {
         let needle = format!("simd_shuffle_xor({var_name}, offset)");
         assert!(
             LAYER_NORM_METAL_SOURCE.contains(&needle),
-            "平均 reduction が `{var_name}` を shuffle していません（Welford オンライン平均の \
+            "平均 reduction が `{var_name}` を shuffle していません（Neumaier 補償和の \
              overflow-safe 契約が壊れている可能性）"
         );
     }
 }
 
-/// 平均計算が Welford のオンライン更新式（`mean += delta / count`）を
-/// 使うことをロックする（単純合計〈旧 Neumaier 補償和〉は `f32` の
-/// 表現範囲を超える有限入力で overflow して `mean` が `NaN` 化するため
-/// 採用しない。codex-review 指摘の回帰防止）。
+/// 平均が `row_scale`（2 の冪。`ln_pow2_scale_from_maxabs`）で除した
+/// 比スケール領域の値を Neumaier 補償和で蓄積し、`inv_n` 倍を FMA による
+/// doubled-float 拡張（`mean_hi`／`mean_lo`）で保持することをロックする
+/// （codex-review 指摘の回帰防止: 平均を偏差計算前に単一 `f32` へ丸める
+/// 実装への逆戻りを検出する）。
 #[test]
-fn mean_pass_uses_welford_online_update() {
+fn mean_pass_uses_row_scale_and_doubled_float_extension() {
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("lane_mean += delta / lane_count;"),
-        "平均パスが Welford オンライン更新式（mean += delta / count）を使っていません"
+        LAYER_NORM_METAL_SOURCE.contains("float ratio = x[row_base + idx] / row_scale;"),
+        "平均パスが行の比スケール領域（x/row_scale）で縮約していません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("float mean_err = fma(lane_sum, inv_n, -mean_hi);"),
+        "平均パスが FMA による doubled-float 拡張（mean_hi/mean_lo）を行っていません"
     );
 }
 

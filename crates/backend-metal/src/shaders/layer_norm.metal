@@ -1,5 +1,5 @@
 // LayerNorm 順伝播カーネル（イシュー #1596。`rmsnorm.metal`〈#604〉と
-// 同じモジュール構成・縮約精度契約を踏襲する Metal 対応版）。
+// 同じモジュール構成を踏襲する Metal 対応版）。
 //
 // 意味論: out = (x - mean(x, axis=-1)) * rsqrt(var(x, axis=-1) + eps) * w + b
 // （has_weight == 0 の場合は w への乗算を、has_bias == 0 の場合は b への
@@ -13,16 +13,67 @@
 // FMA 契約統一。codex-review 指摘）。コンパイルオプションは
 // `pipeline::compile_options()` を適用する。
 //
-// 縮約精度契約（正規化統計の f64 アキュムレータ統一。イシュー #1102）:
-// Apple GPU の MSL は `double` を持たないため、`rmsnorm.metal` と同じ
-// Neumaier 改良版 Kahan 補償和 + scale/ssq 方式（分散の二乗和）を適用
-// する。**平均は Welford オンライン平均**（`ln_welford_merge`／
-// `ln_reduce_mean`。単純合計〈Neumaier 補償和〉では `f32` の表現範囲を
-// 超える有限入力〈例 `[2e38, 2e38]`〉で合計自体が overflow して `mean`
-// が `NaN` 化するため、各更新値が常に入力値域に収まり中間 overflow が
-// 起きない Welford 方式へ変更した。分散側の scale/ssq は `(x-mean)` の
-// 二乗和 overflow のみを救済し平均側の overflow は救済できない。
-// codex-review 指摘）。
+// 縮約精度契約（正規化統計の f64 アキュムレータ統一。イシュー #1102・
+// #1596）: `.claude/rules/coding-rust.md`「正規化統計の二乗和」節が定める
+// とおり Apple GPU の MSL は `double` を持たないため、Metal 実装形は
+// Neumaier 改良版 Kahan 補償和 + scale/ssq 方式（分散側。`rmsnorm.metal`
+// と同じ LAPACK SLASSQ 系 overflow-safe 二乗和）を正とする（同節の対象は
+// 「勾配の長軸縮約」〈#1566・soft_f64 の bit 完全一致方式〉とは別軸であり、
+// 正規化統計側はこの節が定める補償和方式のまま）。
+//
+// **平均計算（codex-review 指摘。当初の Welford オンライン平均を破棄した
+// 経緯）**: Welford（`mean_k = mean_{k-1} + (x_k-mean_{k-1})/k`）は各更新値
+// が入力値域に収まるため overflow-safe だが、butterfly merge の
+// `meanA + delta*(countB/countAB)` が毎ステップ `f32` へ丸められるため
+// `[16777216, 16777218]`（真の平均 `16777217` が `f32` で表現不能）で
+// 丸め誤差が生じ、CPU/CUDA（`f64` のまま偏差計算まで保持）と符号が食い違う
+// 結果（期待 `[-1,1]` に対し `[0, 1.4142]`）を生んだ。さらに Welford の
+// `meanB - meanA` 自体、入力 `[2^38, -2^38]` のような遠い有限値の差が
+// `f32` の表現範囲（`|x| <= f32::MAX ≈ 3.4e38`）を超え `±inf` へ overflow
+// する問題もあった。
+//
+// **採用した設計（行内 2 の冪スケーリング + 2 段補償和）**: 行の
+// `maxabs = max(|x_i|)` を求め、`s = 2^floor(log2(maxabs))`（`maxabs` 以下
+// の最大の 2 の冪。ビット直接構成——`as_type<uint>`/`as_type<float>` で
+// 指数フィールドを直接読み書きする。`crate::soft_f64` の bit 演算方針と
+// 同じスタイル）を求める。以降のすべての縮約は `x_i/s`（2 の冪除算は
+// 丸め無しの厳密演算）という**比スケール領域**（`|x_i/s| < 2`）で行う。
+// 比スケール領域では総和が `O(hidden)` に収まり overflow の心配がなく
+// （元の `x` がどれほど巨大でも比は高々 `[-2,2)`）、Neumaier 改良版 Kahan
+// 補償和（`ln_kahan_add`／`ln_reduce_kahan`）だけで `f64` 相当の精度が
+// 得られる（`f32` へ丸めるのは各段の加算内部のみで、桁落ち成分
+// `comp` に残差を保持し続けるため）。
+//
+// 平均は比スケール総和 `(sum, comp)` を `inv_n` 倍してさらに doubled-float
+// （FMA によるロスレス乗算誤差抽出。Dekker の手法）へ拡張した
+// `(mean_hi, mean_lo)` として保持し、**偏差計算まで `f32` 単一値へ丸めず
+// 2 語のまま保持する**（codex-review 指摘: 平均を偏差計算前に丸めると
+// 丸め誤差がそのまま偏差へ伝播する）。偏差 `dev = (x_i/s - mean_hi) -
+// mean_lo` も比スケール領域内（`O(1)`）に収まるため overflow しない
+// （`[2^38, -2^38] × 999` のような偏差自体が `f32::MAX` を超える入力でも、
+// 比スケール領域では `dev` が有界に保たれる——真の偏差を **一度も
+// 元スケールへ戻さない**のが要点。元スケールへ戻すと真値
+// `dev_actual ≈ 3.996e38` は `f32` で表現不能なため、比スケール領域内で
+// 完結させる必要がある）。
+//
+// 分散は比スケール偏差 `dev` に対する `rmsnorm.metal` と同型の scale/ssq
+// 方式（LAPACK SLASSQ 系）で求める。`eps` は比スケール領域の等価量
+// `eps/s^2` として `eps_elem = sqrt(eps)*sqrt(n)/s`（分散側の scale/ssq が
+// 使う「疑似要素」トリックをそのまま流用し、`s^2` で先に割らず `sqrt(eps)`
+// と `s` をそれぞれ独立に扱うことで `eps/s^2` 自体の overflow/underflow を
+// 避ける）という擬似要素として同じ scale/ssq 蓄積へ折り込む。
+//
+// **最終正規化係数は 1 つの逆数として合成しない**（codex-review が示唆
+// した通り、退化ケース——全要素が同一の巨大値の行〈例 `[2e38, 2e38]`〉
+// など——では実分散が 0 で `eps` 疑似要素だけが ssq の `scale` を極端に
+// 小さい値にしうるため、`1/(scale*sqrt(...))` を単独の中間値として計算
+// すると `f32::MAX` を超えて overflow しうる）。代わりに要素ごとに
+// `xhat = (dev_i / scale) * (1/sqrt((ssq+comp)*inv_n))` の順で計算する
+// （`dev_i` が 0 の退化ケースでは `0/scale = 0` が exact に成立し
+// overflow しない。`scale`・`ssq`・`comp` は比スケール領域の
+// scale/ssq 蓄積結果であり、比スケールの `s` は分子・分母で相殺して
+// 最終式には現れない——`docs/norm-ops-design.md` 参照）。
+//
 // `rmsnorm.metal` の同名ヘルパーとの重複実装だが、Metal ソースは
 // `newLibraryWithSource` で個別ファイル単位にコンパイルされ翻訳単位を
 // 共有できないため、`ln_` 接頭辞を付けた本ファイル内で独立に定義する
@@ -34,13 +85,12 @@
 // `rmsnorm.metal` と同じ設計（`docs/backend-metal-morton-mapping-decision.md`
 // と整合）。
 //
-// **rmsnorm.metal との差分**: 常に「2 パス」（device メモリを再読。
+// **rmsnorm.metal との差分**: 常に「4 パス」（device メモリを再読。
 // threadgroup memory 不使用）とし、`rmsnorm_f32_onepass` に相当する
-// threadgroup memory キャッシュ経路は持たない（LayerNorm は平均・分散の
-// 2 回の縮約〈mean → var〉が必要で、x を 2 回読む構造が RMSNorm より
-// 複雑になるため、本イシュー時点では単純な 3 パス〈mean → var → 書き
-// 出し〉構成のみを実装する。性能上の onepass 化は後続課題として
-// `docs/norm-ops-design.md` に記録する）。
+// threadgroup memory キャッシュ経路は持たない（LayerNorm は行の
+// `maxabs`・平均・分散・書き出しの計 4 回 `x` を読む構成のみを実装する。
+// 性能上の onepass 化は後続課題として `docs/norm-ops-design.md` に
+// 記録する）。
 //
 // REQ-8 境界検査: ベクトル化ロードは行わず（`rmsnorm.metal` の
 // `float4` 経路に相当する最適化は後続課題）、ループ添字は `ulong`
@@ -53,7 +103,11 @@ constant uint LAYER_NORM_SIMD_WIDTH = 32u;
 
 // Neumaier 改良版 Kahan 補償和の 1 ステップ（`rmsnorm.metal::
 // rmsnorm_kahan_add` と同一アルゴリズム。本ファイル内で独立定義する
-// 理由は冒頭コメント参照）。
+// 理由は冒頭コメント参照）。NaN 入力は通常の IEEE754 加減算を通じて
+// 自然に `sum`／`comp` へ伝播する（`isnan` 分岐を要さない。`ln_ssq_add`
+// が明示 `isnan` 分岐を必要とするのは scale/ssq の比較ベースの
+// リスケール判定〈`a > scale`〉が NaN を静かに無視しうるためで、本関数
+// は純粋な加減算のみのため同じ問題を持たない）。
 inline void ln_kahan_add(thread float& sum, thread float& comp, float value) {
     float t = sum + value;
     if (fabs(sum) >= fabs(value)) {
@@ -64,35 +118,48 @@ inline void ln_kahan_add(thread float& sum, thread float& comp, float value) {
     sum = t;
 }
 
-// 平均を Welford オンライン平均（`mean_{k} = mean_{k-1} + (x_k -
-// mean_{k-1})/k`）で計算する（overflow-safe。codex-review 指摘:
-// 単純合計〈旧 `ln_kahan_add`／`ln_reduce_sum` の Neumaier 補償和〉は
-// `f32` の表現範囲を超える有限入力〈例 `[2e38, 2e38]`〉で合計自体が
-// `inf` になり `mean` が `NaN` 化する。Welford は各更新値が常に入力
-// 値域に収まるため中間 overflow が起きない）。分散の scale/ssq 方式
-// とは独立の対策——分散側は `(x-mean)` の二乗和 overflow を救済する
-// のみで、平均そのものの overflow は救済できない）。
-inline void ln_welford_merge(thread float& meanA, thread float& countA,
-                              float meanB, float countB) {
-    float countAB = countA + countB;
-    if (countAB > 0.0f) {
-        float delta = meanB - meanA;
-        meanA = meanA + delta * (countB / countAB);
-    }
-    countA = countAB;
+// 2 レーン分の Neumaier 補償和状態 `(sum, comp)` を 1 つに統合する
+// （他方の `sum`・`comp` を順に取り込むだけの単純な合成。加算の結合則・
+// 交換則に依存するが `ln_kahan_add` 自体が誤差を追跡し続けるため合成
+// 順序に依らず妥当な結果へ収束する）。
+inline void ln_kahan_merge(thread float& sum, thread float& comp, float other_sum, float other_comp) {
+    ln_kahan_add(sum, comp, other_sum);
+    ln_kahan_add(sum, comp, other_comp);
 }
 
-// 32 レーンの `(mean, count)`（Welford 状態）を 5 段 butterfly で
-// all-reduce する（Chan の並列合成公式。`ln_ssq_combine` と同じ
-// butterfly パターン。加算の結合則・交換則と異なり Welford の合成は
-// 非可換だが、`ln_welford_merge` は対称〈`countA`／`countB` を対等に
-// 扱う〉ため任意の合成順序で正しい全体平均に収束する）。
-inline void ln_reduce_mean(thread float& mean, thread float& count) {
+// 32 レーンの `(sum, comp)` を 5 段 butterfly で all-reduce する。
+inline void ln_reduce_kahan(thread float& sum, thread float& comp) {
     for (uint offset = 16u; offset > 0u; offset >>= 1u) {
-        float other_mean = simd_shuffle_xor(mean, offset);
-        float other_count = simd_shuffle_xor(count, offset);
-        ln_welford_merge(mean, count, other_mean, other_count);
+        float other_sum = simd_shuffle_xor(sum, offset);
+        float other_comp = simd_shuffle_xor(comp, offset);
+        ln_kahan_merge(sum, comp, other_sum, other_comp);
     }
+}
+
+// 行の `maxabs = max(|x_i|)` から「`maxabs` 以下の最大の 2 の冪」`s` を
+// 直接ビット構成する（`crate::soft_f64` と同じ bit 直接操作スタイル。
+// 2 の冪除算は丸め無しの厳密演算のため、後続の比スケール縮約が
+// `f32` の丸め誤差を追加で持ち込まない）。`maxabs <= 0.0`（全要素 0）は
+// 任意の正の値でよいため `0.5` を返す（全要素比が `0` になり後続の
+// 偏差・分散も自然に `0` へ収束する）。`maxabs` が subnormal
+// （指数フィールド 0）の場合は最小正規化値 `2^-126` へフォールバックする
+// （この極small領域は本 PR のテスト対象外。有限かつ正であることのみ
+// 保証すれば十分）。`fmax` ベースの `maxabs` 縮約自体は NaN を無視する
+// （IEEE754 `fmax` の仕様）ため、行に NaN が含まれる場合 `maxabs` は
+// 残りの非 NaN 要素から決まるが、NaN 要素は `x_i/s` の除算で NaN の
+// まま残り、後続の `ln_kahan_add`（純粋な加減算）を通じて総和全体・
+// ひいては行全体の出力へ自然に伝播する（`ln_ssq_add` も独立に `isnan`
+// を検査するため二重に安全）。
+inline float ln_pow2_scale_from_maxabs(float maxabs) {
+    if (maxabs <= 0.0f) {
+        return 0.5f;
+    }
+    uint bits = as_type<uint>(maxabs);
+    uint exp_field = (bits >> 23u) & 0xFFu;
+    if (exp_field == 0u) {
+        return as_type<float>(1u << 23); // 2^-126（最小正規化値）
+    }
+    return as_type<float>(exp_field << 23u); // 2^(exp_field-127) <= maxabs
 }
 
 // scale/ssq 方式（LAPACK SLASSQ 系）による overflow-safe な二乗和蓄積の
@@ -177,19 +244,6 @@ inline void ln_reduce_ssq(thread float& scale, thread float& ssq, thread float& 
     }
 }
 
-// `scale`／`ssq`／`comp`（`ln_reduce_ssq` 適用後。`eps` の疑似要素折り
-// 込み前）と `eps`・`inv_n`（`= 1/hidden`）から
-// `rstd = 1/sqrt(var + eps)`（`var = sum((x-mean)^2)/hidden`）を
-// overflow-safe に導出する（`rmsnorm.metal::rmsnorm_finalize_rstd` と
-// 同一の疑似要素トリック: `sqrt(eps*n) = sqrt(eps)*sqrt(n)` で中間
-// overflow を回避）。
-inline float ln_finalize_rstd(float scale, float ssq, float comp, float eps, float inv_n) {
-    float n = 1.0f / inv_n;
-    float eps_elem = sqrt(eps) * sqrt(n);
-    ln_ssq_add(scale, ssq, comp, eps_elem);
-    return 1.0f / (scale * sqrt((ssq + comp) * inv_n));
-}
-
 kernel void layer_norm_f32(
     device const float* x [[buffer(0)]],
     device const float* w [[buffer(1)]],
@@ -208,38 +262,72 @@ kernel void layer_norm_f32(
     for (uint row = tg_id; row < rows; row += grid_size) {
         ulong row_base = (ulong)row * (ulong)hidden;
 
-        // パス 1: 平均（Welford オンライン平均。overflow-safe。上記
-        // `ln_welford_merge`／`ln_reduce_mean` 冒頭コメント参照）。
-        float lane_mean = 0.0f;
-        float lane_count = 0.0f;
+        // パス 1: 行の 2 の冪スケール `s`（`maxabs = max(|x_i|)` から
+        // 直接ビット構成。冒頭コメント参照）。
+        float lane_maxabs = 0.0f;
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
-            lane_count += 1.0f;
-            float delta = x[row_base + idx] - lane_mean;
-            lane_mean += delta / lane_count;
+            lane_maxabs = fmax(lane_maxabs, fabs(x[row_base + idx]));
         }
-        ln_reduce_mean(lane_mean, lane_count);
-        float mean = lane_mean;
+        for (uint offset = 16u; offset > 0u; offset >>= 1u) {
+            float other_maxabs = simd_shuffle_xor(lane_maxabs, offset);
+            lane_maxabs = fmax(lane_maxabs, other_maxabs);
+        }
+        float row_scale = ln_pow2_scale_from_maxabs(lane_maxabs);
 
-        // パス 2: 分散（`(x-mean)` に対する scale/ssq 方式二乗和）。
+        // パス 2: 平均（比スケール領域 `x_i/row_scale` の Neumaier 補償
+        // 総和 → `inv_n` 倍を Dekker の手法で doubled-float
+        // `(mean_hi, mean_lo)` へ拡張。冒頭コメント参照）。
+        float lane_sum = 0.0f;
+        float lane_comp = 0.0f;
+        for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
+            float ratio = x[row_base + idx] / row_scale;
+            ln_kahan_add(lane_sum, lane_comp, ratio);
+        }
+        ln_reduce_kahan(lane_sum, lane_comp);
+        float mean_hi = lane_sum * inv_n;
+        float mean_err = fma(lane_sum, inv_n, -mean_hi);
+        float mean_lo = fma(lane_comp, inv_n, mean_err);
+
+        // パス 3: 分散（比スケール偏差 `dev = (x_i/row_scale - mean_hi) -
+        // mean_lo` に対する scale/ssq 方式二乗和。`eps` は比スケール
+        // 等価量の疑似要素として同じ蓄積へ折り込む。冒頭コメント参照）。
         float scale = 0.0f;
         float ssq = 0.0f;
         float ssq_c = 0.0f;
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
-            float d = x[row_base + idx] - mean;
-            ln_ssq_add(scale, ssq, ssq_c, fabs(d));
+            float ratio = x[row_base + idx] / row_scale;
+            float dev = (ratio - mean_hi) - mean_lo;
+            ln_ssq_add(scale, ssq, ssq_c, fabs(dev));
         }
         ln_reduce_ssq(scale, ssq, ssq_c);
-        float rstd = ln_finalize_rstd(scale, ssq, ssq_c, eps, inv_n);
+        float n = 1.0f / inv_n;
+        float eps_elem = (sqrt(eps) * sqrt(n)) / row_scale;
+        ln_ssq_add(scale, ssq, ssq_c, eps_elem);
+        // `1/sqrt((ssq+ssq_c)*inv_n)` は通常オーダーの値（`eps` 疑似要素
+        // により `ssq+ssq_c` が 0 になることはない）。`scale` 側の逆数は
+        // 単独形成せず要素ごとに `dev_i / scale` として計算する
+        // （冒頭コメント「最終正規化係数は 1 つの逆数として合成しない」）。
+        float norm = 1.0f / sqrt((ssq + ssq_c) * inv_n);
 
-        // パス 3: 書き出し（device メモリを再読。threadgroup memory
-        // 不使用の 2 パス経路——`rmsnorm_f32_twopass` と同じ構成）。
-        // affine は CUDA カーネルの既定 FMA contraction・CPU/ホスト参照
-        // 実装の `f32::mul_add` と揃えるため `fma()` で明示的に融合する
+        // パス 4: 書き出し（device メモリを再読）。affine は CUDA
+        // カーネルの既定 FMA contraction・CPU/ホスト参照実装の
+        // `f32::mul_add` と揃えるため `fma()` で明示的に融合する
         // （`.claude/rules/coding-rust.md` の FMA 契約統一。codex-review
         // 指摘）。
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
-            float v = x[row_base + idx];
-            float xhat = (v - mean) * rstd;
+            float ratio = x[row_base + idx] / row_scale;
+            float dev = (ratio - mean_hi) - mean_lo;
+            // `dev == 0.0` を明示的に分岐する（退化ケース——行の全要素が
+            // 同一の巨大値〈例 `[2e38, 2e38]`〉——では `scale` が `eps`
+            // 疑似要素のみに由来し、`sqrt(eps)*sqrt(n)/row_scale` が
+            // subnormal 域まで縮小しうる。Apple GPU は既定でシェーダ実行
+            // 時に subnormal を flush-to-zero しうるため `scale` が
+            // 実質 0 へ潰れ `dev/scale` が `0/0=NaN` になる場合がある。
+            // `dev` が厳密に 0 のときは `dev * (任意の有限値) = 0` が
+            // 数学的に自明なため、除算を経由せず直接 0 を返して
+            // subnormal・FTZ の影響を受けないようにする。codex-review
+            // 指摘の退化ケーステストで確認済み）。
+            float xhat = (dev == 0.0f) ? 0.0f : (dev / scale) * norm;
             float wv = (has_weight != 0) ? w[idx] : 1.0f;
             float bv = (has_bias != 0) ? b[idx] : 0.0f;
             out[row_base + idx] = fma(xhat, wv, bv);

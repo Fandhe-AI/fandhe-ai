@@ -115,11 +115,18 @@ forward 記録値 `out_value` だけでは（`weight` に 0 要素があると�
 reduction で縮約する。`kernels_rmsnorm.rs` と同じ手法）。分散は「二パス」
 （`Σ(x−μ)²/N`。`E[x²]−μ²` は使わない）。
 
-`w`／`b` が `None` の場合のダミーバッファは、既存 `rmsnorm.rs` と同じ
-1 要素ゼロ初期化バッファで足りる（`has_weight`／`has_bias == 0` の条件分岐
-により決してデリファレンスされない契約。CUDA は `float4` ベクトル化を
-行わないカーネルではこの契約が安全に成立することを既存 RMSNorm 実装が
-実証済み——Metal 側の hidden 要素ダミー契約〈後述〉とは対照的）。
+`w`／`b` が `None` の場合のダミーバッファは `hidden` 要素のゼロ初期化
+バッファを渡す（実装は `crates/backend-cuda/src/layer_norm.rs` の
+`alloc_zeros::<f32>(hidden)`。`has_weight`／`has_bias == 0` により論理的には
+デリファレンスされない契約だが、`hidden` 要素すべてに対する
+`(has_weight != 0) ? w[i] : 1.0f` という warp 一様の三項式を nvcc が
+predicated load（`i` の全域で `w[i]` の読み出し自体は無条件発行し、
+書き込みのみ述語化する）へコンパイルしうるため、1 要素のダミーでは
+`hidden > 1` のとき境界外読み出しになりうる〈Cursor Bugbot 指摘〉。
+Metal 側 `layer_norm.rs`〈`MetalBuffer::alloc_zeroed_pooled(ctx, hidden)`。
+後述〉と同じ `hidden` 要素契約へ揃えてある。既存 `rmsnorm.rs::
+run_rmsnorm_f32_inner` の 1 要素ダミーはこの指摘の対象外〈スコープ外〉
+として別途記録されている）。
 
 ### Metal（`crates/backend-metal/src/shaders/layer_norm.metal`・`layer_norm.rs`）
 
@@ -129,20 +136,49 @@ reduction で縮約する。`kernels_rmsnorm.rs` と同じ手法）。分散は�
 する）・reduction は 5 段 butterfly（`simd_shuffle_xor` 幅 16/8/4/2/1）と、
 `rmsnorm.metal` の構造イディオムを踏襲する。
 
-MSL は `double` 型を持たないため、`rmsnorm.metal` と同じ **Neumaier 改良版
-Kahan 補償和 + scale/ssq 方式**（LAPACK SLASSQ 系の overflow-safe な二乗和
-アルゴリズム）を「`f64` アキュムレータ相当」の実装形として適用する（分散の
-二乗和のみ。平均は単純合計のため素の Neumaier 補償和で十分——実用域の入力
-規模では合計自体が `f32` の表現範囲を超えない）。`rmsnorm.metal` との
-アルゴリズム上の重複は意図的: Metal ソースは `newLibraryWithSource` で
-個別ファイル単位にコンパイルされ翻訳単位を共有できないため、`ln_` 接頭辞を
-付けた独立関数として `layer_norm.metal` 内に複製する。
+MSL は `double` 型を持たないため、分散の二乗和は `rmsnorm.metal` と同じ
+**Neumaier 改良版 Kahan 補償和 + scale/ssq 方式**（LAPACK SLASSQ 系の
+overflow-safe な二乗和アルゴリズム）を「`f64` アキュムレータ相当」の実装形
+として適用する。`rmsnorm.metal` とのアルゴリズム上の重複は意図的: Metal
+ソースは `newLibraryWithSource` で個別ファイル単位にコンパイルされ翻訳単位
+を共有できないため、`ln_` 接頭辞を付けた独立関数として `layer_norm.metal`
+内に複製する。
 
-`rmsnorm.metal` と異なり常に「2 パス」（device メモリ再読・threadgroup
-memory 不使用）とし、`rmsnorm_f32_onepass` に相当する threadgroup memory
-キャッシュ経路は持たない（LayerNorm は平均・分散の 2 回の縮約が必要で
-RMSNorm より構造が複雑になるため）。ベクトル化ロード（`float4`）も本
-イシューでは適用しない。
+**平均の実装形は当初「素の Neumaier 補償和で十分」としていたが、
+codex-review 指摘（PR #1671）を受け見直した**。Welford オンライン平均
+（一時的な中間案。`meanA + delta*(countB/countAB)` の butterfly merge）は
+各更新値が入力値域に収まるため overflow-safe だが、毎ステップ `f32` へ
+丸められるため `[16777216, 16777218]`（真の平均 `16777217` が `f32` で
+表現不能）で丸め誤差が生じ、CPU/CUDA（`f64` のまま偏差計算まで保持）と
+符号が食い違う結果を生んだ。さらに `meanB - meanA` 自体、入力
+`[2^38, -2^38]` のような遠い有限値の差が `f32` の表現範囲
+（`|x| <= f32::MAX ≈ 3.4e38`）を超え `±inf` へ overflow する問題もあった。
+
+採用した設計（**行内 2 の冪スケーリング + 2 段補償和**）は、行の
+`maxabs = max(|x_i|)` から「`maxabs` 以下の最大の 2 の冪」`row_scale` を
+ビット直接構成し（`as_type<uint>`／`as_type<float>` で指数フィールドを
+直接読み書き。`crate::soft_f64` と同じ bit 演算方針）、以降すべての縮約を
+`x_i/row_scale`（2 の冪除算は丸め無しの厳密演算）という**比スケール領域**
+（`|x_i/row_scale| < 2`）で行う。比スケール領域では総和が `O(hidden)` に
+収まり overflow の心配がないため、Neumaier 改良版 Kahan 補償和だけで
+`f64` 相当の精度が得られる。平均は比スケール総和を `inv_n` 倍してさらに
+doubled-float（FMA によるロスレス乗算誤差抽出。Dekker の手法）へ拡張した
+`(mean_hi, mean_lo)` として保持し、偏差計算まで `f32` 単一値へ丸めない。
+分散側の scale/ssq には比スケール偏差 `dev = (x_i/row_scale - mean_hi) -
+mean_lo` を渡し、`eps` は比スケール等価量 `eps_elem =
+sqrt(eps)*sqrt(n)/row_scale` として既存の疑似要素トリックへ折り込む。
+最終正規化係数は単独の逆数として合成せず、要素ごとに `xhat = (dev/scale)
+* norm` の順で計算する（退化ケース——行の全要素が同一の巨大値の場合など
+——で `1/(scale*sqrt(...))` を単独形成すると overflow しうるため）。
+詳細な数式・overflow 回避の根拠は `layer_norm.metal` 冒頭コメントを正本
+とする。
+
+`rmsnorm.metal` と異なり常に「4 パス」（device メモリ再読・threadgroup
+memory 不使用。`maxabs` → 平均 → 分散 → 書き出し）とし、
+`rmsnorm_f32_onepass` に相当する threadgroup memory キャッシュ経路は
+持たない（LayerNorm は平均・分散の 2 回の縮約に加え行スケール導出が
+必要で RMSNorm より構造が複雑になるため）。ベクトル化ロード（`float4`）
+も本イシューでは適用しない。
 
 `w`／`b` が `None` の場合のダミーバッファは `hidden` 要素のゼロ初期化
 バッファを渡す（CUDA と異なり、Metal コンパイラが `(has_weight != 0) ?

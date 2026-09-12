@@ -175,6 +175,99 @@ fn layer_norm_extreme_eps_does_not_overflow() {
     }
 }
 
+/// codex-review 指摘の再現ケース（P1・#1671 スレッド）: 平均が偏差計算前
+/// に `f32` 単一値へ丸められると、`2^24` 近傍で ULP が `2` になる領域
+/// （`[16777216, 16777218]`。真の平均 `16777217` が `f32` で表現不能）で
+/// 丸め誤差が出力へ伝播し、期待値 `[-1, 1]`（`eps=1e-5` は無視できる規模）
+/// から大きく乖離する（是正前は `[0, 1.4142]` を観測）。
+/// `crates/backend-cpu/src/layer_norm.rs` の同名テストと同じ意図。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_preserves_mean_precision_near_f32_epsilon_boundary() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    let x = vec![16777216.0f32, 16777218.0];
+    let out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, None, None, 1e-5, 1, 2)
+        .expect("run_layer_norm_f32 must succeed");
+    let rstd = 1.0f64 / (1.0f64 + 1e-5f64).sqrt();
+    let expected = [(-rstd) as f32, rstd as f32];
+    for (o, e) in out.iter().zip(expected.iter()) {
+        assert!((o - e).abs() < 1e-4, "o={o} e={e}");
+    }
+}
+
+/// codex-review 指摘の再現ケース（P1・#1671 スレッド）: `meanB - meanA`
+/// のような遠い有限値どうしの単純減算は、`[2^38, -2^38]` のような入力で
+/// `f32` の表現範囲（`|x| <= f32::MAX ≈ 3.4e38`）を超え `±inf` へ
+/// overflow しうる。CPU/CUDA（`f64` 演算）は有限値を返す前提のため、
+/// Metal も有限出力を維持することを確認する（比スケール領域に留める
+/// 設計。冒頭のカーネルコメント参照）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_large_opposite_sign_pair_stays_finite() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    let x = vec![2e38f32, -2e38];
+    let out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, None, None, 1e-5, 1, 2)
+        .expect("run_layer_norm_f32 must succeed");
+    for &v in &out {
+        assert!(v.is_finite(), "expected finite layer_norm output, got {v}");
+    }
+    // 期待値: mean=0（両者の厳密和が 0）・var=4e76・rstd ≈ 5e-39 と
+    // なり、xhat ≈ dev_i * rstd（dev[0]=+2e38・dev[1]=-2e38）で
+    // out ≈ [+1, -1] に収束する。
+    assert!((out[0] - 1.0).abs() < 1e-2, "out[0]={}", out[0]);
+    assert!((out[1] + 1.0).abs() < 1e-2, "out[1]={}", out[1]);
+}
+
+/// advisor が指摘した偏差自体の overflow ケース: 行の 1 要素が突出して
+/// 大きく（`2e38`）、残り 999 要素が反対符号の同スケール値
+/// （`-2e38`）の場合、平均は概ね `-1.996e38` となり、突出要素の偏差
+/// `dev = x - mean ≈ 3.996e38` が `f32::MAX` を超える（元スケールへ
+/// 戻すと表現不能）。比スケール領域内で完結させる設計により有限出力を
+/// 維持することを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_deviation_overflow_case_stays_finite() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    let mut x = vec![-2e38f32; 1000];
+    x[0] = 2e38;
+    let out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, None, None, 1e-5, 1, 1000)
+        .expect("run_layer_norm_f32 must succeed");
+    for &v in &out {
+        assert!(v.is_finite(), "expected finite layer_norm output, got {v}");
+    }
+}
+
+/// 退化ケース（codex-review が示唆）: 行の全要素が同一の巨大値
+/// （`2e38`）の場合、真の分散は 0 で `rstd` は `eps` のみで決まる。
+/// `1/(scale*sqrt(...))` を単独の中間値として形成すると `eps` 疑似要素
+/// により overflow しうるため、要素ごとに `dev/scale` を計算する設計
+/// （冒頭のカーネルコメント）で有限かつ 0 に近い出力を維持することを
+/// 確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_constant_large_row_does_not_overflow() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    let x = vec![2e38f32; 2];
+    let out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, None, None, 1e-5, 1, 2)
+        .expect("run_layer_norm_f32 must succeed");
+    for &v in &out {
+        assert!(v.is_finite(), "expected finite layer_norm output, got {v}");
+        assert!(v.abs() < 1e-3, "expected near-zero output, got {v}");
+    }
+}
+
 /// NaN 伝播（行内に NaN が 1 つでもあれば行全体が NaN。`rmsnorm_parity.rs`
 /// と同じ意味論契約）。
 #[test]
