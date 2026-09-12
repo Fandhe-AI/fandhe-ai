@@ -123,6 +123,41 @@ fn mse_loss_backward_matches_naive() {
     }
 }
 
+/// イシュー #1578: 要素数しきい値による逐次フォールバック導入後も
+/// `CpuBackendOps::mse_loss_backward`（本番既定しきい値経由）が
+/// 素朴参照実装と **bit 単位で完全一致**することを固定する
+/// （`assert_parity` の許容誤差付き判定ではなく `to_bits()` 厳密比較。
+/// backward は要素独立の map 演算のため丸めの発生源が存在せず、
+/// 逐次・並列どちらの分岐を通っても構成上 bit 同一になる契約。
+/// `docs/perf/cpu-mse-backward-sequential-threshold.md` 参照）。
+/// しきい値の内側／境界（640 付近）・実測スイープ境界（32768・65536
+/// 付近）を横断する。
+#[test]
+fn mse_loss_backward_bit_matches_naive() {
+    let ops = CpuBackendOps::new();
+    let extra_shapes = [640, 32767, 32768, 32769, 65535, 65536, 65537];
+    for n in shapes().into_iter().chain(extra_shapes) {
+        let (pred_data, target_data) = make_inputs(n);
+        let pred = Tensor::new(pred_data.clone(), &[n]).unwrap();
+        let target = Tensor::new(target_data.clone(), &[n]).unwrap();
+        let scale = 1.7f32;
+
+        let got = ops
+            .mse_loss_backward(&pred, &target, scale)
+            .unwrap_or_else(|e| panic!("mse_loss_backward failed for n={n}: {e:?}"));
+        let expected = naive_mse_loss_backward(&pred_data, &target_data, scale);
+        let got_slice = got.as_slice().unwrap();
+        assert_eq!(got_slice.len(), expected.len(), "n={n}");
+        for i in 0..n {
+            assert_eq!(
+                got_slice[i].to_bits(),
+                expected[i].to_bits(),
+                "n={n} i={i}: bit mismatch"
+            );
+        }
+    }
+}
+
 #[test]
 fn mse_loss_rejects_shape_mismatch() {
     use fandhe_ai_tensor_core::device::BackendError;
