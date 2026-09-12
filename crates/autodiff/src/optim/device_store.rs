@@ -122,8 +122,11 @@ use fandhe_ai_tensor_core::{Activation, BackendOps, DispatchFailureCell, SgdStep
 
 use crate::backward::Gradients;
 use crate::error::AutodiffError;
+use crate::eval::reduce_bias_grad_rows;
 use crate::optim::sgd::SgdConfig;
-use crate::tape::{NodeId, Op, ResidentResolver, Tape, TapeId};
+use crate::tape::{
+    NodeId, Op, ResidentBiasTarget, ResidentFillOutcome, ResidentResolver, Tape, TapeId,
+};
 use crate::var::Var;
 
 /// forward で登録済みだが `step()` にまだ消費されていない葉ノード列
@@ -201,6 +204,21 @@ struct GradStaging {
     /// しようとしている登録と同一か」（同一性検査。codex-review 指摘・
     /// イシュー #1212 追加是正）を、それぞれ検証する。
     filled: Vec<Option<ResidentFill>>,
+    /// `layout` と同じ添字（`slot`。実際には bias slot のみが使う）。
+    /// この backward 走査（`backward_serial`）中に、当該 slot の勾配が
+    /// **一度でも**通常の `Gradients` 経由（host route）へ回ったことを
+    /// 記録する（codex-review 指摘 P1・イシュー #1566: `(w1,b1)→(w1,b2)
+    /// →(w2,b2)` のように同一 bias を異なる weight 間で共有すると、
+    /// 2 番目の呼び出し〈weight tie・bias 未充填〉は host route を選ぶが
+    /// 3 番目の呼び出し〈別 weight の fresh・bias 未充填〉は同じ bias
+    /// slot を「初回」と誤認して resident 側へ上書きし、2 番目の host
+    /// 側寄与が `step()` から見えなくなる）。一度 `Some(backward_serial)`
+    /// が記録された slot は、同じ `backward_serial` の間は
+    /// `filled`〈resident 側〉が空でも二度と resident 書き込み対象に
+    /// 含めない（`fill_resident_weight_grad` の tie・fresh 両分岐が
+    /// 参照する）——host 側（`Gradients`）に一本化し、既存の
+    /// 複数寄与累積ロジック（`backward::accumulate`）へ委ねる。
+    bias_host_routed: Vec<Option<u64>>,
 }
 
 /// [`GradStaging::filled`] の 1 slot 分の記録（イシュー #1212 codex-
@@ -405,6 +423,159 @@ fn fold_sgd_step_config_key(config: &SgdStepConfig) -> u64 {
     hasher.finish()
 }
 
+/// `fill_resident_weight_grad` の weight tie／bias tie 双方から呼ばれる
+/// 共有ロジック（イシュー #1566。既存の weight 専用累積コード
+/// 〈`current_data[offset..end] += contribution_data`→再構築→
+/// `upload_into`〉を slot 非依存に切り出したもの）。`GradStaging::filled`
+/// は slot ごとに汎用のため、weight・bias のどちらの slot にも同一の
+/// 「現在値を 1 回 download → ホスト側で加算 → 1 回 upload_into」意味論
+/// が成立する（`docs/device-resident-update-design.md` 追補「同一
+/// backward 内で同じ slot への 2 回目以降の寄与」参照）。
+///
+/// `contribution_data` は呼び出し元がホストで計算済みの寄与（weight
+/// なら `ops.gemm_fp32_strict(x_t, g)` の結果、bias なら
+/// `crate::eval::reduce_bias_grad_rows(g)`）。`shape`（`layout[slot].
+/// shape` と一致するはず）の要素数と `contribution_data.len()` の不一致
+/// は fail-closed に拒否する。
+fn accumulate_into_resident_slot(
+    mem: &dyn MemoryOps,
+    staging: &mut GradStaging,
+    offset: usize,
+    shape: &[usize],
+    contribution_data: &[f32],
+) -> Result<(), AutodiffError> {
+    let numel: usize = shape.iter().product();
+    if contribution_data.len() != numel {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "DeviceParamStore::accumulate_into_resident_slot: contribution has {} elements but \
+             slot shape {:?} expects {numel}",
+            contribution_data.len(),
+            shape
+        )));
+    }
+    let current = mem.download(&staging.buf).map_err(AutodiffError::Backend)?;
+    let current = current.contiguous();
+    let current_data = current.as_slice().ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "DeviceParamStore::accumulate_into_resident_slot: staging バッファの download() \
+             結果が as_slice() で取得できない（契約違反）"
+                .to_string(),
+        )
+    })?;
+    let end = offset.checked_add(numel).ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "DeviceParamStore::accumulate_into_resident_slot: offset + numel overflowed usize"
+                .to_string(),
+        )
+    })?;
+    if end > current_data.len() {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "DeviceParamStore::accumulate_into_resident_slot: 累積対象範囲 [{offset}, {end}) が \
+             staging バッファ長 {} を超える",
+            current_data.len()
+        )));
+    }
+    let mut accumulated = current_data[offset..end].to_vec();
+    for (dst, src) in accumulated.iter_mut().zip(contribution_data.iter()) {
+        *dst += *src;
+    }
+    let accumulated_tensor = Tensor::new(accumulated, shape)
+        .map_err(|e| AutodiffError::Backend(BackendError::ShapeMismatch(e)))?;
+    mem.upload_into(&accumulated_tensor, &mut staging.buf, offset)
+        .map_err(AutodiffError::Backend)?;
+    Ok(())
+}
+
+/// bias slot 1 つ分の resident 書き込み（イシュー #1566）。呼び出し元
+/// （`fill_resident_weight_grad` の weight-tie 分岐）が weight 側の
+/// tie 処理と対称に呼ぶ——weight tying が起きるモデル（同一 Linear を
+/// 複数回 forward する RNN 等）では、weight と同じ bias `Var` も
+/// 複数回参照されるのが通例であり、bias 側にも独立した tie 追跡が
+/// 必要（`docs/device-resident-update-design.md` 追補「bias の同一
+/// backward 内 2 回目以降の寄与」）。
+///
+/// bias の**自身の** slot（weight の slot とは別添字）に対して、
+/// 同一 backward 走査内の「初回書き込み」か「2 回目以降（tie）」かを
+/// `staging.filled[bias.slot]` から独立に判定する:
+/// - 初回（`None`）: `reduce_bias_grad_rows(g)` の結果をそのまま
+///   `upload_into`（上書き契約。weight の初回 `_into_tracked` と同じ
+///   意味論）。**呼び出し元契約（下記）により実行時には到達しない
+///   防御的分岐**（コード上は残すが `debug_assert!` で契約違反を検知
+///   する）。
+/// - 2 回目以降（`Some` かつ由来一致）: [`accumulate_into_resident_slot`]
+///   で加算・再アップロード。
+/// - 由来不一致（別の `Op::ResidentLeaf` からの寄与混入）: weight と
+///   同じ理由で fail-closed に拒否する（`.claude/rules/security.md`
+///   A08）。
+///
+/// 常に `staging.filled[bias.slot]` を今回の由来で更新して `Ok(true)`
+/// を返す（呼び出し元はこれを `outcome.bias_filled` として使う）。
+///
+/// **呼び出し元契約（codex-review・Cursor Bugbot 指摘是正。PR #1566）**:
+/// 呼び出し元（`fill_resident_weight_grad` の tie 分岐・fresh 分岐の
+/// いずれも）は、`staging.filled[bias.slot]`（現在の `backward_serial`
+/// でフィルタ済み）が既に `Some`（＝ bias が今回の backward で既に
+/// resident 経由に統一されている）場合に限りこの関数を呼ぶ。bias が
+/// まだ resident 未充填（backend が bias 縮約に非対応、または今回が
+/// 真の初回）の場合は呼ばず `bias_filled: false` のまま返し、
+/// `grad::vjp` の通常 `Gradients` 経由累積へ一本化する（さもないと
+/// 既にホスト側 `Gradients` へ積まれた寄与を検査なしに resident
+/// staging で上書きし、その寄与が `step()` から silently 失われる）。
+#[allow(clippy::too_many_arguments)]
+fn fill_bias_slot_via_host_reduce(
+    mem: &dyn MemoryOps,
+    staging: &mut GradStaging,
+    bias: &ResidentBiasTarget,
+    bias_offset: usize,
+    tape_id: TapeId,
+    epoch: u64,
+    current_serial: u64,
+    g: &Tensor<f32>,
+) -> Result<bool, AutodiffError> {
+    let prev = staging.filled[bias.slot].filter(|r| r.backward_serial == current_serial);
+    // 呼び出し元契約（上記 doc）により `prev` は理論上常に `Some`。
+    // `None` は呼び出し元の契約違反（bias 未充填のままこの関数へ来た）
+    // であり、実害は本来ホスト `Gradients` 経由で累積されるはずだった
+    // 寄与を検査なしに resident staging の「初回書き込み」として上書き
+    // してしまうこと。`unwrap`/`expect` ではなく `debug_assert!` で
+    // 契約違反を検知する（`.claude/rules/coding-rust.md`「本番経路で
+    // unwrap()/expect() を使わない」。release では防御的分岐として
+    // そのまま初回書き込み扱いで進む）。
+    debug_assert!(
+        prev.is_some(),
+        "fill_bias_slot_via_host_reduce: 呼び出し元は bias slot が現在の backward_serial で \
+         既に resident 充填済みの場合に限りこの関数を呼ぶはずだが、prev が None だった \
+         （呼び出し元契約違反）"
+    );
+    if let Some(prev) = prev
+        && (prev.tape_id != tape_id || prev.epoch != epoch || prev.node_id != bias.node_id)
+    {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "DeviceParamStore::fill_resident_weight_grad: bias slot {} は同一 backward 走査内で \
+             既に別の葉（tape_id={:?}, epoch={}, node_id={:?}）から寄与を受けている（今回: \
+             tape_id={:?}, epoch={}, node_id={:?}）。異なる `Op::ResidentLeaf` 由来の勾配を \
+             同一 slot へ加算することはできない（fail-closed）",
+            bias.slot, prev.tape_id, prev.epoch, prev.node_id, tape_id, epoch, bias.node_id
+        )));
+    }
+    let contribution_data = reduce_bias_grad_rows(g);
+    if prev.is_some() {
+        accumulate_into_resident_slot(mem, staging, bias_offset, &bias.shape, &contribution_data)?;
+    } else {
+        let contribution_tensor = Tensor::new(contribution_data, &bias.shape)
+            .map_err(|e| AutodiffError::Backend(BackendError::ShapeMismatch(e)))?;
+        mem.upload_into(&contribution_tensor, &mut staging.buf, bias_offset)
+            .map_err(AutodiffError::Backend)?;
+    }
+    staging.filled[bias.slot] = Some(ResidentFill {
+        backward_serial: current_serial,
+        tape_id,
+        epoch,
+        node_id: bias.node_id,
+    });
+    Ok(true)
+}
+
 impl ResidentResolver for DeviceParamStore {
     /// `grad::vjp`（`Op::LinearResident` の VJP）から
     /// `Tape::backward_with_resident` 経由で呼ばれる（イシュー #1022）。
@@ -418,25 +589,33 @@ impl ResidentResolver for DeviceParamStore {
         self.checked_resident_buffer(store_id, slot)
             .map_err(AutodiffError::Backend)
     }
-
     /// `grad::vjp`（`Op::LinearResident` の VJP）から呼ばれる（イシュー
-    /// #1212）。`ops.gemm_fp32_strict_into`（`tensor-core`。既定
-    /// `Unsupported`）で d_weight を [`GradStaging`] の `layout[slot]`
-    /// オフセットへ直接書き込めるか試みる。
+    /// #1212・bias 対応はイシュー #1566）。`ops.
+    /// gemm_fp32_strict_into_with_bias_reduce_tracked`（`tensor-core`。
+    /// 既定は weight のみ `gemm_fp32_strict_into_tracked` へ委譲し
+    /// `bias_filled: false`）で d_weight を [`GradStaging`] の
+    /// `layout[slot]` オフセットへ、対応バックエンドでは bias 勾配
+    /// （`g` の行方向和）も同時に `layout[bias.slot]` オフセットへ
+    /// 直接書き込めるか試みる。
     ///
     /// 処理順（fail-closed。`.claude/rules/security.md` A08）:
     /// ① `store_id` 一致検査 → ② capability memo（既に非対応と判明済み
-    /// なら即 `Ok(false)`） → ③ `slot` 範囲・shape 検査 → ④ staging
-    /// バッファの遅延確保（初回のみ） → ⑤ `gemm_fp32_strict_into` 実行。
-    /// ④・⑤ で `Unsupported` を検出した場合のみ capability memo を
-    /// `Some(false)` へ倒し `Ok(false)` を返す（以後の backward で
-    /// 再試行しない）。それ以外のエラーは伝播する。
+    /// なら即 `Ok(全 false)`） → ③ weight・bias（`Some` の場合）の
+    /// `slot` 範囲・shape 検査（実際の書き込みより前にまとめて行う。
+    /// 部分書き込み後のエラー打ち切りを避ける） → ④ staging バッファの
+    /// 遅延確保（初回のみ） → ⑤ ディスパッチ実行。④・⑤ で
+    /// `Unsupported` を検出した場合のみ capability memo を `Some(false)`
+    /// へ倒し `Ok(全 false)` を返す（以後の backward で再試行しない）。
+    /// それ以外のエラーは伝播する。
     ///
     /// `tape_id`／`epoch`／`weight_node_id` は `grad::vjp` が差分対象
     /// テープから直接渡す resident 書き込みの由来（`ResidentResolver::
     /// fill_resident_weight_grad` doc・[`ResidentFill`] doc 参照）。
     /// `staging.filled[slot]` へ [`ResidentFill`] として記録し、
-    /// `step()` が現在の `pending` の対応する葉と突き合わせる。
+    /// `step()` が現在の `pending` の対応する葉と突き合わせる。`bias`
+    /// が `Some` の場合、bias 自身の slot にも独立に同じ記録を行う
+    /// （weight と bias は tie 状態が異なりうる。
+    /// [`fill_bias_slot_via_host_reduce`] doc 参照）。
     #[allow(clippy::too_many_arguments)]
     fn fill_resident_weight_grad(
         &self,
@@ -448,7 +627,12 @@ impl ResidentResolver for DeviceParamStore {
         weight_node_id: NodeId,
         x_t: &Tensor<f32>,
         g: &Tensor<f32>,
-    ) -> Result<bool, AutodiffError> {
+        bias: Option<ResidentBiasTarget>,
+    ) -> Result<ResidentFillOutcome, AutodiffError> {
+        let none_outcome = ResidentFillOutcome {
+            weight_filled: false,
+            bias_filled: false,
+        };
         if store_id != self.store_id {
             return Err(AutodiffError::InvalidArgument(
                 "DeviceParamStore::fill_resident_weight_grad: resident leaf belongs to a \
@@ -457,7 +641,7 @@ impl ResidentResolver for DeviceParamStore {
             ));
         }
         if self.resident_grad_capability.get() == Some(false) {
-            return Ok(false);
+            return Ok(none_outcome);
         }
         let layout = self.layout.get(slot).ok_or_else(|| {
             AutodiffError::InvalidArgument(format!(
@@ -483,9 +667,35 @@ impl ResidentResolver for DeviceParamStore {
         let total_numel = self.total_numel;
         let param_count = self.layout.len();
 
+        // イシュー #1566: bias も渡された場合、weight と同じタイミングで
+        // bias 側の slot・shape 妥当性を検証する（実際の書き込みより
+        // 前に検証を済ませ、部分書き込み後のエラー打ち切りを避ける）。
+        let expected_bias_shape = [g.shape()[1]];
+        let bias_offset = match &bias {
+            Some(b) => {
+                let bl = self.layout.get(b.slot).ok_or_else(|| {
+                    AutodiffError::InvalidArgument(format!(
+                        "DeviceParamStore::fill_resident_weight_grad: bias slot {} is out of \
+                         range (store has {} parameters)",
+                        b.slot,
+                        self.layout.len()
+                    ))
+                })?;
+                if bl.shape.as_slice() != expected_bias_shape || bl.shape != b.shape {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "DeviceParamStore::fill_resident_weight_grad: bias shape {:?} \
+                         (registered {:?}) does not match g's column count {}",
+                        b.shape, bl.shape, expected_bias_shape[0]
+                    )));
+                }
+                Some(bl.offset)
+            }
+            None => None,
+        };
+
         let Some(mem) = ops.memory_ops() else {
             self.resident_grad_capability.set(Some(false));
-            return Ok(false);
+            return Ok(none_outcome);
         };
 
         // Bugbot 指摘（#1212）是正: `resident_grad_capability` が未確定
@@ -507,7 +717,11 @@ impl ResidentResolver for DeviceParamStore {
         // 計算が余分に走る（probe への書き込み＋後段の永続バッファへの
         // 再計算）が、ストア生存期間中に 1 度だけ発生する初期化コストで
         // あり、対応可否が未確定の状態でストア全体分のメモリを無駄に
-        // 握り続けるより安全側と判断する。
+        // 握り続けるより安全側と判断する。probe は weight のみで
+        // capability を確定する（bias 縮約の対応可否は weight とは独立
+        // だが、`bias` を `Some` のまま渡しても `gemm_fp32_strict_into_
+        // with_bias_reduce_tracked` の既定実装は `bias` を無視するだけで
+        // 安全に動くため、probe 段階で bias を試す必要はない）。
         if self.resident_grad_capability.get().is_none() {
             let mn = expected_shape[0] * expected_shape[1];
             let mut probe = mem.alloc_zeroed(&[mn]).map_err(AutodiffError::Backend)?;
@@ -529,7 +743,7 @@ impl ResidentResolver for DeviceParamStore {
                 }
                 Err(BackendError::Unsupported(_)) => {
                     self.resident_grad_capability.set(Some(false));
-                    return Ok(false);
+                    return Ok(none_outcome);
                 }
                 Err(e) => return Err(AutodiffError::Backend(e)),
             }
@@ -542,11 +756,12 @@ impl ResidentResolver for DeviceParamStore {
                     *staging_ref = Some(GradStaging {
                         buf,
                         filled: vec![None; param_count],
+                        bias_host_routed: vec![None; param_count],
                     });
                 }
                 Err(BackendError::Unsupported(_)) => {
                     self.resident_grad_capability.set(Some(false));
-                    return Ok(false);
+                    return Ok(none_outcome);
                 }
                 Err(e) => return Err(AutodiffError::Backend(e)),
             }
@@ -613,14 +828,14 @@ impl ResidentResolver for DeviceParamStore {
             // 意図的な「NaN 事前充填領域は上書きされ、対象範囲は
             // `gemm_fp32_strict` と bit 完全一致する」検証と矛盾する）。
             // そのため、2 回目以降は `ops.gemm_fp32_strict`（ホスト
-            // Tensor を返す既存経路）で寄与を計算し、`mem.download` で
-            // 現在の staging 値を読み戻してから加算し `mem.upload_into`
-            // で書き戻す（`backward::accumulate` がホスト勾配に対して
-            // 行う「初回は代入・2 回目以降は加算」と同じ意味論を、
-            // resident 経路に対しても成立させる）。1 backward あたり
-            // 「同一 weight が複数回使われる」場合にのみ発生する経路
-            // であり、単一使用の高速経路（初回 `_into` 呼び出し）には
-            // 影響しない。
+            // Tensor を返す既存経路）で寄与を計算し、共有ヘルパ
+            // [`accumulate_into_resident_slot`] で現在の staging 値を
+            // 読み戻してから加算し書き戻す（`backward::accumulate` が
+            // ホスト勾配に対して行う「初回は代入・2 回目以降は加算」と
+            // 同じ意味論を、resident 経路に対しても成立させる）。1
+            // backward あたり「同一 weight が複数回使われる」場合にのみ
+            // 発生する経路であり、単一使用の高速経路（初回 `_into`
+            // 呼び出し）には影響しない。
             let contribution = ops
                 .gemm_fp32_strict(x_t, g)
                 .map_err(AutodiffError::Backend)?;
@@ -632,51 +847,136 @@ impl ResidentResolver for DeviceParamStore {
                         .to_string(),
                 )
             })?;
-
-            let current = mem.download(&staging.buf).map_err(AutodiffError::Backend)?;
-            let current = current.contiguous();
-            let current_data = current.as_slice().ok_or_else(|| {
-                AutodiffError::InvalidArgument(
-                    "DeviceParamStore::fill_resident_weight_grad: staging バッファの \
-                     download() 結果が as_slice() で取得できない（契約違反）"
-                        .to_string(),
-                )
-            })?;
-            let mn = expected_shape[0] * expected_shape[1];
-            let end = offset + mn;
-            if end > current_data.len() || mn != contribution_data.len() {
-                return Err(AutodiffError::InvalidArgument(format!(
-                    "DeviceParamStore::fill_resident_weight_grad: 累積対象範囲 [{offset}, \
-                     {end}) が staging バッファ長 {} または寄与要素数 {} と整合しない",
-                    current_data.len(),
-                    contribution_data.len()
-                )));
-            }
-            let mut accumulated = current_data[offset..end].to_vec();
-            for (dst, src) in accumulated.iter_mut().zip(contribution_data.iter()) {
-                *dst += *src;
-            }
-            let accumulated_tensor = Tensor::new(accumulated, &expected_shape)
-                .map_err(|e| AutodiffError::Backend(BackendError::ShapeMismatch(e)))?;
-            mem.upload_into(&accumulated_tensor, &mut staging.buf, offset)
-                .map_err(AutodiffError::Backend)?;
+            accumulate_into_resident_slot(
+                mem,
+                staging,
+                offset,
+                &expected_shape,
+                contribution_data,
+            )?;
             // `filled[slot]` は既に `Some(current_serial)`（このブロックへ
             // 入る条件そのもの）のため更新不要。
-            return Ok(true);
+
+            // イシュー #1566: weight が tie（このブロック）の場合、
+            // weight と同じ Linear を再利用するモデルでは bias の
+            // `Var` も再利用されるのが通例——bias 自身の slot に
+            // ついても独立に tie 判定・累積を行う（bias が weight の
+            // 高速経路〈下記フレッシュ分岐〉で既に resident 充填済み
+            // なら、ここで加算しなければその寄与が silently 失われる。
+            // [`fill_bias_slot_via_host_reduce`] doc 参照）。
+            let mut outcome = ResidentFillOutcome {
+                weight_filled: true,
+                bias_filled: false,
+            };
+            if let (Some(b), Some(b_offset)) = (&bias, bias_offset) {
+                // codex-review・Cursor Bugbot 指摘是正（PR #1566）: bias
+                // 縮約が resident 経由で書けるか（backend が
+                // `gemm_fp32_strict_into_with_bias_reduce_tracked` の
+                // 融合ディスパッチで実際に bias を書いたか）は weight の
+                // resident 対応可否と独立（`weight_filled`／`bias_filled`
+                // は独立契約。`ResidentResolver::fill_resident_weight_grad`
+                // doc 参照）。weight のみ resident 対応・bias は非対応の
+                // バックエンド（fresh 呼び出しで `bias_written == false`
+                // のまま `staging.filled[bias.slot]` が未充填）では、
+                // bias の最初の寄与は既に通常の `Gradients` 経由の累積
+                // （`grad::vjp` の `!outcome.bias_filled` 分岐）へ回って
+                // いる。ここで無条件に `fill_bias_slot_via_host_reduce`
+                // を呼ぶと、その最初の寄与を検査せず resident staging
+                // （今回の寄与のみ）で上書きしたことにしてしまい、
+                // `step()` は resident 側しか見ないため最初の寄与が
+                // silently 失われる。bias slot がこの backward 走査内で
+                // 既に resident 充填済み（＝ bias も resident 経由に
+                // 統一されている）場合に限り resident へ委譲し、そうで
+                // なければ `bias_filled: false` のまま返して呼び出し元の
+                // 通常累積（`Gradients` 経由）に一本化する。
+                let bias_already_resident = staging.filled[b.slot]
+                    .filter(|r| r.backward_serial == current_serial)
+                    .is_some();
+                if bias_already_resident {
+                    outcome.bias_filled = fill_bias_slot_via_host_reduce(
+                        mem,
+                        staging,
+                        b,
+                        b_offset,
+                        tape_id,
+                        epoch,
+                        current_serial,
+                        g,
+                    )?;
+                } else {
+                    // codex-review 指摘 P1 是正（イシュー #1566）:
+                    // ここで bias 寄与はホスト `Gradients` 経由へ回る
+                    // （`outcome.bias_filled` は初期値 `false` のまま）。
+                    // 同じ backward 走査中に別の（fresh 経路の）呼び出しが
+                    // 同じ bias slot をまだ未充填と見て resident 側へ
+                    // 上書きし、この寄与を消してしまわないよう
+                    // `bias_host_routed` へ記録する（`GradStaging::
+                    // bias_host_routed` doc 参照）。
+                    staging.bias_host_routed[b.slot] = Some(current_serial);
+                }
+            }
+            return Ok(outcome);
         }
 
         // `_tracked` 版を使う理由は probe 呼び出しと同じ（上記コメント
         // 参照）。ここは永続 `grad_staging`（学習全体で使い回すバッファ）
         // への書き込みのため、トークン未登録による見落としの影響が
         // probe よりも大きい（`step()` の poison 検査まで気付けない）。
-        match ops.gemm_fp32_strict_into_tracked(
+        // イシュー #1566: `bias`／`bias_offset` が揃っている場合のみ
+        // bias 縮約も同一ディスパッチで試みる（`out` は同じ
+        // `staging.buf`。weight・bias 独立の非破壊拡張契約——
+        // `BackendOps::gemm_fp32_strict_into_with_bias_reduce_tracked`
+        // doc 参照）。
+        //
+        // codex-review 是正（PR #1566 レビュー指摘・weight フレッシュ／
+        // bias 既充填の非対称ケース）: 融合ディスパッチ（GPU カーネル
+        // `gemm_bias_grad_reduce_f32` の `out[gid] = acc;`・ホスト
+        // フォールバックの `upload_into` いずれも「上書き契約」）へ
+        // bias を渡すと、bias slot が既に**今回の backward 走査内**で
+        // 別の寄与（同一 bias を共有する別の weight からの `fresh` 経路
+        // 呼び出し等）で埋まっていた場合、その寄与を検査なしに上書き
+        // してしまう（weight 自身の tie 判定・`fill_bias_slot_via_
+        // host_reduce` のいずれもこの「weight は fresh だが bias slot
+        // は既に別由来で埋まっている」非対称ケースを検査していなかった
+        // ため見落とされていた）。bias slot がこの backward 走査内で
+        // 未充填の場合に限り融合ディスパッチへ bias を含め、既に
+        // 充填済みの場合は融合ディスパッチから bias を除外したうえで
+        // weight 書き込み成功後に [`fill_bias_slot_via_host_reduce`]
+        // （tie 判定・累積・由来不一致時の fail-closed 拒否を一本化した
+        // 共有ロジック）へ委譲する。
+        let bias_slot_prefilled = bias.as_ref().is_some_and(|b| {
+            staging.filled[b.slot]
+                .filter(|r| r.backward_serial == current_serial)
+                .is_some()
+        });
+        // codex-review 指摘 P1 是正（イシュー #1566）: bias slot が
+        // この backward 走査中に既に host route（`Gradients` 経由）へ
+        // 回ったことがあるなら（`GradStaging::bias_host_routed` doc
+        // 参照）、`filled` 側がまだ空でも「初回」と誤認して resident
+        // 側へ上書きしない。`(w1,b1)→(w1,b2)→(w2,b2)` のような
+        // weight 非 tie・bias tie のケースで、2 番目の呼び出し
+        // （weight tie 分岐）が host route を選んだ後、3 番目の呼び出し
+        // （別 weight の fresh 分岐）が bias を「未充填」と見て融合
+        // ディスパッチへ含めてしまうと、2 番目の寄与が `step()` から
+        // 見えなくなる（fail-closed。`.claude/rules/security.md` A08）。
+        let bias_host_routed_now = bias
+            .as_ref()
+            .is_some_and(|b| staging.bias_host_routed[b.slot] == Some(current_serial));
+        let bias_reduce_arg = match (&bias, bias_offset) {
+            (Some(_), Some(off)) if !bias_slot_prefilled && !bias_host_routed_now => {
+                Some((off, expected_bias_shape[0]))
+            }
+            _ => None,
+        };
+        match ops.gemm_fp32_strict_into_with_bias_reduce_tracked(
             x_t,
             g,
             &mut staging.buf,
             offset,
+            bias_reduce_arg,
             &self.failure_token,
         ) {
-            Ok(()) => {
+            Ok(bias_written) => {
                 staging.filled[slot] = Some(ResidentFill {
                     backward_serial: current_serial,
                     tape_id,
@@ -684,36 +984,58 @@ impl ResidentResolver for DeviceParamStore {
                     node_id: weight_node_id,
                 });
                 self.resident_grad_capability.set(Some(true));
-                Ok(true)
+                let mut outcome = ResidentFillOutcome {
+                    weight_filled: true,
+                    bias_filled: false,
+                };
+                if bias_written && let Some(b) = &bias {
+                    staging.filled[b.slot] = Some(ResidentFill {
+                        backward_serial: current_serial,
+                        tape_id,
+                        epoch,
+                        node_id: b.node_id,
+                    });
+                    outcome.bias_filled = true;
+                } else if bias_slot_prefilled
+                    && let (Some(b), Some(b_offset)) = (&bias, bias_offset)
+                {
+                    // bias slot は既に今回の走査内で充填済みのため融合
+                    // ディスパッチから除外した（上記コメント）。tie 判定・
+                    // 累積・由来不一致時の fail-closed 拒否は共有ロジック
+                    // へ委譲する（由来一致なら加算、不一致なら拒否）。
+                    outcome.bias_filled = fill_bias_slot_via_host_reduce(
+                        mem,
+                        staging,
+                        b,
+                        b_offset,
+                        tape_id,
+                        epoch,
+                        current_serial,
+                        g,
+                    )?;
+                } else if let Some(b) = &bias {
+                    // bias 寄与はホスト `Gradients` 経由へ回る
+                    // （`bias_written == false` かつ `bias_slot_prefilled
+                    // == false`。バックエンドが bias 縮約に非対応、または
+                    // 上記 `bias_host_routed_now` によりこの走査で今回
+                    // 意図的にディスパッチから除外したケース）。
+                    // `bias_host_routed` へ記録し、以後同じ backward
+                    // 走査内の別呼び出しがこの bias slot を「未充填」と
+                    // 誤認して resident 側へ上書きしないようにする
+                    // （`GradStaging::bias_host_routed` doc・上記
+                    // `bias_host_routed_now` コメント参照）。
+                    staging.bias_host_routed[b.slot] = Some(current_serial);
+                }
+                Ok(outcome)
             }
             Err(BackendError::Unsupported(_)) => {
                 staging.filled[slot] = None;
                 self.resident_grad_capability.set(Some(false));
-                Ok(false)
+                Ok(none_outcome)
             }
             Err(e) => Err(AutodiffError::Backend(e)),
         }
     }
-
-    /// [`ResidentResolver::resident_backward_fingerprint`] の実装
-    /// （イシュー #1212 の codex-review P0 是正・その追加是正）。
-    /// `(store_id, backward_serial, pending 世代)` を返す。
-    /// `backward_serial` は `Tape::backward_with_resident` を呼ぶ前
-    /// （`Self::backward`）にインクリメント済みのため、走査中に行われる
-    /// `fill_resident_weight_grad` の全書き込みと同じ値になる。
-    ///
-    /// **3 つ目の要素（pending 世代）を追加した理由**: `backward_serial`
-    /// のみでは「`backward` → `step` 完了 → `register_resident_params`
-    /// で新しい葉を再登録 → **backward を呼ばずに**同じ古い
-    /// `Gradients` を再び `step` に渡す」という手順を検出できない
-    /// （`register_resident_params` は `backward_serial` を変更しない
-    /// ため、`current_serial` が据え置きのまま `GradStaging::filled`
-    /// の残留値と偶然一致し続ける）。この呼び出し時点（`backward` 実行
-    /// 中。`Self::backward` は `&self` のため `pending` はこの呼び出し
-    /// 前後で不変）で `self.pending` に登録されている
-    /// `PendingForward::generation` を焼き込むことで、`step` 側は
-    /// 「今まさに消費しようとしている `pending` と同じ世代の backward
-    /// 結果か」を追加検査できる（trait doc 参照）。
     fn resident_backward_fingerprint(&self) -> Option<(u64, u64, Option<u64>)> {
         Some((
             self.store_id,
@@ -1658,6 +1980,7 @@ impl DeviceParamStore {
                             *staging_ref = Some(GradStaging {
                                 buf,
                                 filled: vec![None; vars.len()],
+                                bias_host_routed: vec![None; vars.len()],
                             });
                         }
                         // codex-review P1 指摘対応（PR #1390 是正）:
@@ -2197,6 +2520,17 @@ mod tests {
         /// テストの挙動を変えない）、`resident_capable` コンストラクタ
         /// のみ `true` にする。
         resident_capable: bool,
+        /// `true`（既定）の場合、`resident_capable == true` のとき
+        /// `gemm_fp32_strict_into_with_bias_reduce_tracked` が bias 縮約
+        /// も融合ディスパッチへ含める（weight・bias とも resident 対応。
+        /// 既存 `resident_capable()` の挙動）。`false` の場合は
+        /// `BackendOps` の既定実装と同じく bias を無視して常に
+        /// `bias_filled: false` を返す（weight のみ resident 対応・bias
+        /// は非対応のバックエンド〈CPU 等〉を模す。イシュー #1566
+        /// codex-review・Cursor Bugbot 指摘の再現テスト
+        /// `fill_resident_weight_grad_tie_does_not_drop_first_bias_
+        /// contribution_when_bias_fusion_unsupported` 用）。
+        bias_fusion_capable: bool,
         /// `true` の場合のみ [`BackendOps::captured_segment_key`]／
         /// [`BackendOps::run_captured_sgd_step_segment`] を既定（`Ok(None)`／
         /// `Unsupported`）からオーバーライドし、CUDA Graph capture opt-in
@@ -2225,6 +2559,7 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
+                bias_fusion_capable: false,
                 graph_capable: false,
                 segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
                 seen_segment_keys: Arc::new(
@@ -2240,6 +2575,7 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
+                bias_fusion_capable: false,
                 graph_capable: false,
                 segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
                 seen_segment_keys: Arc::new(
@@ -2259,6 +2595,7 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
+                bias_fusion_capable: false,
                 graph_capable: true,
                 segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
                 seen_segment_keys: Arc::new(
@@ -2291,11 +2628,25 @@ mod tests {
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: true,
+                bias_fusion_capable: true,
                 graph_capable: false,
                 segment_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
                 seen_segment_keys: Arc::new(
                     std::sync::Mutex::new(std::collections::HashSet::new()),
                 ),
+            }
+        }
+
+        /// weight のみ resident 対応・bias 縮約の融合ディスパッチには
+        /// 非対応（`BackendOps` 既定実装と同じ `bias_filled: false` を
+        /// 常に返す）バックエンドを模す（イシュー #1566 codex-review・
+        /// Cursor Bugbot 指摘の再現テスト用。CPU 等「weight は
+        /// `gemm_fp32_strict_into` に対応するが bias 縮約カーネルは
+        /// 持たない」構成に相当する）。
+        fn resident_capable_bias_fusion_unsupported() -> Self {
+            Self {
+                bias_fusion_capable: false,
+                ..Self::resident_capable()
             }
         }
 
@@ -2608,6 +2959,50 @@ mod tests {
             }
             data[out_offset..out_offset + src.len()].copy_from_slice(src);
             Ok(())
+        }
+
+        /// [`Self::gemm_fp32_strict_into`] と同じ weight 書き込みに加え、
+        /// `resident_capable == true` かつ `bias` が `Some` の場合は
+        /// `crate::eval::reduce_bias_grad_rows`（`gemm_fp32_strict_into_
+        /// with_bias_reduce_tracked` doc の縮約と同一アルゴリズム）で
+        /// bias も同じ `out` へ書き込む（イシュー #1566 のテスト経路
+        /// `resident_bias_shared_grad_accumulates_matches_host_only_
+        /// grad_path` から到達可能にする）。
+        fn gemm_fp32_strict_into_with_bias_reduce_tracked(
+            &self,
+            a: &Tensor<f32>,
+            b: &Tensor<f32>,
+            out: &mut DeviceBuffer<f32>,
+            out_offset: usize,
+            bias: Option<(usize, usize)>,
+            _token: &DispatchFailureCell,
+        ) -> Result<bool, BackendError> {
+            self.gemm_fp32_strict_into(a, b, out, out_offset)?;
+            if !self.bias_fusion_capable {
+                // `BackendOps` の既定実装（`tensor-core::backend_ops`）と
+                // 同じ契約: bias 縮約に非対応のバックエンドは weight を
+                // 書いたうえで常に `Ok(false)` を返す（イシュー #1566
+                // `resident_capable_bias_fusion_unsupported` 用）。
+                return Ok(false);
+            }
+            let Some((bias_offset, n)) = bias else {
+                return Ok(false);
+            };
+            let contribution = crate::eval::reduce_bias_grad_rows(b);
+            debug_assert_eq!(contribution.len(), n);
+            let out_handle = out
+                .downcast_handle::<MockHandle>()
+                .ok_or(BackendError::DeviceMismatch)?;
+            let mut data = out_handle.data.borrow_mut();
+            if bias_offset + n > data.len() {
+                return Err(BackendError::InvalidArgument(
+                    "MockDeviceOps::gemm_fp32_strict_into_with_bias_reduce_tracked: \
+                     bias_offset + n exceeds buffer"
+                        .into(),
+                ));
+            }
+            data[bias_offset..bias_offset + n].copy_from_slice(&contribution);
+            Ok(true)
         }
 
         /// `w`（デバイス常駐）を [`MockDeviceOps::read_resident`] で直接
@@ -3005,8 +3400,17 @@ mod tests {
     /// `crate::eval::matmul` 委譲のため配管検証であり、本物のカーネル
     /// parity の検証ではない）で weight を forward・backward した後、
     /// `resident_grads_to_host` の weight slot が `crate::eval::matmul`
-    /// 参照実装と bit 完全一致し、bias slot（resident 未充填）は `None`
-    /// になることを検証する。facade 経由の実 CPU カーネル版は
+    /// 参照実装と bit 完全一致することを検証する。
+    ///
+    /// **イシュー #1566 追補**: bias slot についても、
+    /// `MockDeviceOps::gemm_fp32_strict_into_with_bias_reduce_tracked`
+    /// （本イシューで追加した重み・bias 同時 resident 充填の mock 実装）
+    /// により resident 経由で `Some` が返る（weight のみ・単回
+    /// forward のため tie は発生しない「素直な fresh」ケース）ことを
+    /// 検証するよう更新した（旧アサーション「bias は resident 経由で
+    /// 充填されないため None のはず」は本イシュー以前の
+    /// `BackendOps` 既定実装〈bias 縮約非対応〉を前提にしていたため、
+    /// 実装の追加に伴い正しく更新する）。facade 経由の実 CPU カーネル版は
     /// `crates/facade/tests/device_param_store_grad_readout.rs` を参照。
     #[test]
     fn resident_grads_to_host_returns_weight_slot_and_none_for_host_slots() {
@@ -3031,10 +3435,12 @@ mod tests {
             2,
             "パラメータ 2 個（weight・bias）分の slot が揃うはず"
         );
-        assert!(
-            result[1].is_none(),
-            "bias は resident 経由で充填されないため None のはず"
-        );
+        // イシュー #1566: `MockDeviceOps` が bias 縮約にも対応した
+        // ため、bias slot（単回 forward・tie なしの素直な fresh
+        // ケース）も resident 経由で `Some` になる。
+        let bias_grad = result[1]
+            .as_ref()
+            .expect("bias も resident 経由で新鮮に充填されているはず（イシュー #1566）");
 
         let weight_grad = result[0]
             .as_ref()
@@ -3074,6 +3480,14 @@ mod tests {
             weight_grad.contiguous().as_slice().unwrap(),
             expected.contiguous().as_slice().unwrap(),
             "resident_grads_to_host が返す weight 勾配が eval::matmul 参照実装と食い違う"
+        );
+        // bias 勾配は `d_pred` の行方向和（イシュー #1566。`x` が単一行
+        // `[1, 2]` のため `reduce_bias_grad_rows` は `d_pred` そのもの
+        // と一致する）。
+        assert_eq!(
+            bias_grad.contiguous().as_slice().unwrap(),
+            d_pred_tensor.contiguous().as_slice().unwrap(),
+            "resident_grads_to_host が返す bias 勾配が d_pred の行和と食い違う"
         );
 
         // 読み出し後も `step()` が通常どおり成功すること（非破壊契約）。
@@ -3130,7 +3544,21 @@ mod tests {
         assert_eq!(
             unified[1].contiguous().as_slice().unwrap(),
             b_grad_host.contiguous().as_slice().unwrap(),
-            "param_grads_to_host の bias 勾配（grads フォールバック）が host-only 経路と食い違う"
+            // イシュー #1566: `MockDeviceOps` が bias 縮約にも対応した
+            // ため、本テストの bias は実際には resident 経由（staging）
+            // で充填される（`grads` フォールバックではない）。本テストの
+            // `x` は単一行（`[1, 2]`）のため `reduce_bias_grad_rows` は
+            // 加算を経由せず直接コピーする特殊扱い（`m == 1`）が働き、
+            // `reduce_to_shape`（こちらも `m == 1` は縮約をスキップし
+            // コピーのみ）と値が一致する。2026-09-12 ユーザー承認 A
+            // （PR #1659）により `reduce_bias_grad_rows` は `m >= 2` で
+            // `f64` アキュムレータへ切り替わっており、一般には
+            // `reduce_to_shape`（`f32` 逐次和）と bit 完全一致しない
+            // （`crates/autodiff/src/grad.rs::reduce_bias_grad` doc・
+            // `crates/facade/tests/device_param_store_grad_readout.rs::
+            // param_grads_to_host_matches_host_only_path_two_layer` の
+            // `m >= 2` 回帰参照）。
+            "param_grads_to_host の bias 勾配（resident 経由）が host-only 経路と食い違う"
         );
     }
 
@@ -3368,6 +3796,426 @@ mod tests {
             resident_w.contiguous().as_slice().unwrap(),
             "同一 weight を 2 回共有した場合、resident 経由の累積と host-only の \
              `backward::accumulate` は一致するはず（後勝ち上書きバグがあれば食い違う）"
+        );
+    }
+
+    /// イシュー #1566（advisor 指摘の是正確認）: **weight と bias の両方**
+    /// を 2 つの `linear_forward` 呼び出しで共有した場合（`Linear` を
+    /// 2 回 forward する weight tying。bias も同じ `Var` を再利用する
+    /// のが通例）、resident 経由の高速経路（`gemm_fp32_strict_into_
+    /// with_bias_reduce_tracked`）が weight と bias を同時に fresh 充填
+    /// した後の 2 回目の呼び出し（tie）で bias 側の累積が正しく行われ、
+    /// silently に 1 回目の寄与が失われないことを bit 完全一致で検証
+    /// する（`fill_bias_slot_via_host_reduce` doc「なぜ bias 自身の tie
+    /// 追跡が必要か」参照。この対称処理がなければ、`resident_filled_
+    /// slots` が bias slot を「resident 経由で新鮮に充填済み」と
+    /// 誤認したまま 2 回目の寄与（`Gradients` 側）を無視してしまう）。
+    #[test]
+    fn resident_bias_shared_grad_accumulates_matches_host_only_grad_path() {
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let b_init = tensor(vec![0.5, -0.5], &[2]);
+        let x1 = tensor(vec![2.0, 3.0], &[1, 2]);
+        let x2 = tensor(vec![-1.0, 4.0], &[1, 2]);
+        let target1 = tensor(vec![10.0, 10.0], &[1, 2]);
+        let target2 = tensor(vec![-4.0, 7.0], &[1, 2]);
+
+        // resident 経路: `w_init`／`b_init` の両方を 2 つの
+        // `linear_forward` 呼び出しで共有する。
+        let resident_ops = MockDeviceOps::resident_capable();
+        let resident_tape =
+            Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let mut store = DeviceParamStore::new(&resident_tape, &[&w_init, &b_init]).unwrap();
+        let leaves = store.register_resident_params(&resident_tape).unwrap();
+        let x1_var = resident_tape.var(&x1);
+        let x2_var = resident_tape.var(&x2);
+        let pred1 = store
+            .linear_forward(&resident_tape, &x1_var, &leaves[0], Some(&leaves[1]))
+            .unwrap();
+        let pred2 = store
+            .linear_forward(&resident_tape, &x2_var, &leaves[0], Some(&leaves[1]))
+            .unwrap();
+        let target1_var = resident_tape.var(&target1);
+        let target2_var = resident_tape.var(&target2);
+        let loss1 = pred1.mse_loss(&target1_var).unwrap();
+        let loss2 = pred2.mse_loss(&target2_var).unwrap();
+        let loss = loss1.add(&loss2).unwrap();
+        let grads = store.backward(&resident_tape, &loss).unwrap();
+        store
+            .step(&resident_tape, &grads, &SgdConfig::new(0.1))
+            .unwrap();
+        let resident_params = store.sync_to_host(&resident_tape).unwrap();
+        let resident_w = resident_params[0].clone();
+        let resident_b = resident_params[1].clone();
+
+        // host-only 経路（同じ `w`／`b` Var を 2 回共有する参照実装）。
+        let host_tape = simple_tape(None);
+        let w = host_tape.var(&w_init);
+        let b = host_tape.var(&b_init);
+        let x1_var = host_tape.var(&x1);
+        let x2_var = host_tape.var(&x2);
+        let pred1 = x1_var.matmul(&w).unwrap().add(&b).unwrap();
+        let pred2 = x2_var.matmul(&w).unwrap().add(&b).unwrap();
+        let target1_var = host_tape.var(&target1);
+        let target2_var = host_tape.var(&target2);
+        let loss1 = pred1.mse_loss(&target1_var).unwrap();
+        let loss2 = pred2.mse_loss(&target2_var).unwrap();
+        let loss = loss1.add(&loss2).unwrap();
+        let grads = host_tape.backward(&loss).unwrap();
+        let w_grad = grads.get(&w).unwrap().unwrap().clone();
+        let b_grad = grads.get(&b).unwrap().unwrap().clone();
+        let mut sgd = crate::optim::sgd::Sgd::new(SgdConfig::new(0.1)).unwrap();
+        let host_updated = sgd.step(&[&w_init, &b_init], &[&w_grad, &b_grad]).unwrap();
+        let host_w = host_updated[0].clone();
+        let host_b = host_updated[1].clone();
+
+        assert_ne!(
+            host_b.get(&[0]).unwrap(),
+            0.5,
+            "退化した比較（更新前のまま）になっていないことを確認する"
+        );
+        assert_eq!(
+            host_w.contiguous().as_slice().unwrap(),
+            resident_w.contiguous().as_slice().unwrap(),
+            "weight の累積は既存の resident_shared_weight_grad_accumulates_... と同型で \
+             一致するはず"
+        );
+        assert_eq!(
+            host_b.contiguous().as_slice().unwrap(),
+            resident_b.contiguous().as_slice().unwrap(),
+            "同一 bias を 2 回共有した場合、resident 経由の累積（1 回目 fresh・2 回目 \
+             tie 累積）と host-only の `backward::accumulate` は一致するはず。bias 自身の \
+             tie 追跡がなければ 1 回目の寄与が silently に失われ、この比較は不一致になる"
+        );
+    }
+
+    /// codex-review・Cursor Bugbot 指摘の直接再現・是正確認（PR #1659）:
+    /// weight は resident 対応だが bias 縮約の融合ディスパッチには
+    /// 非対応（`resident_capable_bias_fusion_unsupported`。CPU 等
+    /// 「weight のみ resident 対応」バックエンドを模す）場合、同一
+    /// weight／bias を 2 つの `linear_forward` 呼び出しで共有する
+    /// weight tying でも、1 回目（fresh）の bias 寄与が 2 回目
+    /// （tie）の `fill_resident_weight_grad` 呼び出しによって silently
+    /// に上書き・消失しないことを bit 完全一致で検証する。
+    ///
+    /// 修正前は、weight の tie 分岐が無条件に
+    /// `fill_bias_slot_via_host_reduce` を呼び bias slot を「resident
+    /// 経由で充填済み」にしてしまうため、1 回目の寄与（このバックエンド
+    /// では bias 融合非対応のため通常の `Gradients` 経由で積まれる）が
+    /// `step()` から見えなくなっていた（`fill_bias_slot_via_host_reduce`
+    /// doc「呼び出し元契約」参照）。
+    #[test]
+    fn fill_resident_weight_grad_tie_does_not_drop_first_bias_contribution_when_bias_fusion_unsupported()
+     {
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let b_init = tensor(vec![0.5, -0.5], &[2]);
+        let x1 = tensor(vec![2.0, 3.0], &[1, 2]);
+        let x2 = tensor(vec![-1.0, 4.0], &[1, 2]);
+        let target1 = tensor(vec![10.0, 10.0], &[1, 2]);
+        let target2 = tensor(vec![-4.0, 7.0], &[1, 2]);
+
+        // resident 経路: weight のみ resident 対応・bias 縮約は非対応の
+        // バックエンドで、同一 weight／bias を 2 回共有する。
+        let resident_ops = MockDeviceOps::resident_capable_bias_fusion_unsupported();
+        let resident_tape =
+            Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let mut store = DeviceParamStore::new(&resident_tape, &[&w_init, &b_init]).unwrap();
+        let leaves = store.register_resident_params(&resident_tape).unwrap();
+        let x1_var = resident_tape.var(&x1);
+        let x2_var = resident_tape.var(&x2);
+        let pred1 = store
+            .linear_forward(&resident_tape, &x1_var, &leaves[0], Some(&leaves[1]))
+            .unwrap();
+        let pred2 = store
+            .linear_forward(&resident_tape, &x2_var, &leaves[0], Some(&leaves[1]))
+            .unwrap();
+        let target1_var = resident_tape.var(&target1);
+        let target2_var = resident_tape.var(&target2);
+        let loss1 = pred1.mse_loss(&target1_var).unwrap();
+        let loss2 = pred2.mse_loss(&target2_var).unwrap();
+        let loss = loss1.add(&loss2).unwrap();
+        let grads = store.backward(&resident_tape, &loss).unwrap();
+        store
+            .step(&resident_tape, &grads, &SgdConfig::new(0.1))
+            .unwrap();
+        let resident_params = store.sync_to_host(&resident_tape).unwrap();
+        let resident_w = resident_params[0].clone();
+        let resident_b = resident_params[1].clone();
+
+        // host-only 経路（同じ `w`／`b` Var を 2 回共有する参照実装。
+        // 通常の `backward::accumulate` が 2 回分の寄与を合算する）。
+        let host_tape = simple_tape(None);
+        let w = host_tape.var(&w_init);
+        let b = host_tape.var(&b_init);
+        let x1_var = host_tape.var(&x1);
+        let x2_var = host_tape.var(&x2);
+        let pred1 = x1_var.matmul(&w).unwrap().add(&b).unwrap();
+        let pred2 = x2_var.matmul(&w).unwrap().add(&b).unwrap();
+        let target1_var = host_tape.var(&target1);
+        let target2_var = host_tape.var(&target2);
+        let loss1 = pred1.mse_loss(&target1_var).unwrap();
+        let loss2 = pred2.mse_loss(&target2_var).unwrap();
+        let loss = loss1.add(&loss2).unwrap();
+        let grads = host_tape.backward(&loss).unwrap();
+        let w_grad = grads.get(&w).unwrap().unwrap().clone();
+        let b_grad = grads.get(&b).unwrap().unwrap().clone();
+        let mut sgd = crate::optim::sgd::Sgd::new(SgdConfig::new(0.1)).unwrap();
+        let host_updated = sgd.step(&[&w_init, &b_init], &[&w_grad, &b_grad]).unwrap();
+        let host_w = host_updated[0].clone();
+        let host_b = host_updated[1].clone();
+
+        assert_ne!(
+            host_b.get(&[0]).unwrap(),
+            0.5,
+            "退化した比較（更新前のまま）になっていないことを確認する"
+        );
+        assert_eq!(
+            host_w.contiguous().as_slice().unwrap(),
+            resident_w.contiguous().as_slice().unwrap(),
+            "weight は resident 経由の累積と host-only の `backward::accumulate` が \
+             一致するはず"
+        );
+        assert_eq!(
+            host_b.contiguous().as_slice().unwrap(),
+            resident_b.contiguous().as_slice().unwrap(),
+            "bias 縮約が非対応のバックエンドでは、1 回目（fresh）・2 回目（tie）とも \
+             `bias_filled: false` のまま通常の `Gradients` 経由で累積されるはず。是正前は \
+             tie 分岐が無条件に resident staging へ書き込み 1 回目の寄与を silently に \
+             上書きしていたため、この比較は不一致になっていた"
+        );
+    }
+
+    /// PR #1566 レビュー指摘（High）の直接再現・是正確認: **異なる 2 つの
+    /// weight**（別々の slot）が**同一の bias `ResidentLeaf`**（同一
+    /// `NodeId`）を共有する場合、両方の weight がいずれも自身の slot
+    /// では初回（fresh）呼び出しとなり、`fill_resident_weight_grad` の
+    /// 「weight フレッシュ」分岐（融合ディスパッチで weight・bias を
+    /// 同時に書き込む経路）を通る。逆順走査で weight2（2 番目に
+    /// `linear_forward` した方）が先に処理され bias slot を fresh 充填
+    /// した後、weight1 の処理でも同じ bias slot が対象になる——bias
+    /// slot 側の既充填検査がなければ 1 つ目（weight2 由来）の寄与が
+    /// 検査なしに上書きされ、host-only 参照実装（`Gradients::
+    /// accumulate` が `NodeId` キーで正しく加算する）と食い違う。
+    /// 本テストは bit 完全一致でこれが起きないことを検証する。
+    #[test]
+    fn resident_bias_shared_by_two_different_weights_accumulates_matches_host_only_grad_path() {
+        let w1_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let w2_init = tensor(vec![2.0, 0.0, 0.0, 3.0], &[2, 2]);
+        let b_init = tensor(vec![0.5, -0.5], &[2]);
+        let x1 = tensor(vec![2.0, 3.0], &[1, 2]);
+        let x2 = tensor(vec![-1.0, 4.0], &[1, 2]);
+        let target1 = tensor(vec![10.0, 10.0], &[1, 2]);
+        let target2 = tensor(vec![-4.0, 7.0], &[1, 2]);
+
+        // resident 経路: w1・w2 は別々の slot、bias は同一 slot（同一
+        // `ResidentLeaf`）を 2 つの `linear_forward` 呼び出しで共有する。
+        let resident_ops = MockDeviceOps::resident_capable();
+        let resident_tape =
+            Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let mut store =
+            DeviceParamStore::new(&resident_tape, &[&w1_init, &w2_init, &b_init]).unwrap();
+        let leaves = store.register_resident_params(&resident_tape).unwrap();
+        let x1_var = resident_tape.var(&x1);
+        let x2_var = resident_tape.var(&x2);
+        let pred1 = store
+            .linear_forward(&resident_tape, &x1_var, &leaves[0], Some(&leaves[2]))
+            .unwrap();
+        let pred2 = store
+            .linear_forward(&resident_tape, &x2_var, &leaves[1], Some(&leaves[2]))
+            .unwrap();
+        let target1_var = resident_tape.var(&target1);
+        let target2_var = resident_tape.var(&target2);
+        let loss1 = pred1.mse_loss(&target1_var).unwrap();
+        let loss2 = pred2.mse_loss(&target2_var).unwrap();
+        let loss = loss1.add(&loss2).unwrap();
+        let grads = store.backward(&resident_tape, &loss).unwrap();
+        store
+            .step(&resident_tape, &grads, &SgdConfig::new(0.1))
+            .unwrap();
+        let resident_params = store.sync_to_host(&resident_tape).unwrap();
+        let resident_w1 = resident_params[0].clone();
+        let resident_w2 = resident_params[1].clone();
+        let resident_b = resident_params[2].clone();
+
+        // host-only 経路（同じ `b` Var を 2 つの異なる weight（`w1`・
+        // `w2`）の forward で共有する参照実装。`backward::accumulate`
+        // が `NodeId` キーのハッシュマップで正しく合算する）。
+        let host_tape = simple_tape(None);
+        let w1 = host_tape.var(&w1_init);
+        let w2 = host_tape.var(&w2_init);
+        let b = host_tape.var(&b_init);
+        let x1_var = host_tape.var(&x1);
+        let x2_var = host_tape.var(&x2);
+        let pred1 = x1_var.matmul(&w1).unwrap().add(&b).unwrap();
+        let pred2 = x2_var.matmul(&w2).unwrap().add(&b).unwrap();
+        let target1_var = host_tape.var(&target1);
+        let target2_var = host_tape.var(&target2);
+        let loss1 = pred1.mse_loss(&target1_var).unwrap();
+        let loss2 = pred2.mse_loss(&target2_var).unwrap();
+        let loss = loss1.add(&loss2).unwrap();
+        let grads = host_tape.backward(&loss).unwrap();
+        let w1_grad = grads.get(&w1).unwrap().unwrap().clone();
+        let w2_grad = grads.get(&w2).unwrap().unwrap().clone();
+        let b_grad = grads.get(&b).unwrap().unwrap().clone();
+        let mut sgd = crate::optim::sgd::Sgd::new(SgdConfig::new(0.1)).unwrap();
+        let host_updated = sgd
+            .step(
+                &[&w1_init, &w2_init, &b_init],
+                &[&w1_grad, &w2_grad, &b_grad],
+            )
+            .unwrap();
+        let host_w1 = host_updated[0].clone();
+        let host_w2 = host_updated[1].clone();
+        let host_b = host_updated[2].clone();
+
+        assert_ne!(
+            host_b.get(&[0]).unwrap(),
+            0.5,
+            "退化した比較（更新前のまま）になっていないことを確認する"
+        );
+        assert_eq!(
+            host_w1.contiguous().as_slice().unwrap(),
+            resident_w1.contiguous().as_slice().unwrap(),
+            "weight1 は自身の slot でのみ寄与を受けるため常に一致するはず"
+        );
+        assert_eq!(
+            host_w2.contiguous().as_slice().unwrap(),
+            resident_w2.contiguous().as_slice().unwrap(),
+            "weight2 は自身の slot でのみ寄与を受けるため常に一致するはず"
+        );
+        assert_eq!(
+            host_b.contiguous().as_slice().unwrap(),
+            resident_b.contiguous().as_slice().unwrap(),
+            "異なる 2 つの weight が同一 bias を共有する場合、resident 経由の bias 累積は \
+             host-only の `Gradients::accumulate` と一致するはず。bias slot の既充填検査が \
+             なければ後から処理された weight 側の寄与だけが残り、この比較は不一致になる"
+        );
+    }
+
+    /// codex-review 指摘 P1（PR #1659）の直接再現: `(w1,b1)→(w1,b2)→
+    /// (w2,b2)` の順で `Op::LinearResident` を backward 処理すると
+    /// （weight は非 tie・bias のみ tie というケース）、2 番目の呼び出し
+    /// （weight1 の tie 分岐・bias2 未充填）は bias2 の寄与をホスト
+    /// `Gradients` へ返すが、3 番目の呼び出し（weight2 の fresh 分岐・
+    /// bias2 未充填）が同じ bias2 slot を「初回」と誤認して融合
+    /// ディスパッチで resident 側へ上書きすると、2 番目の寄与が
+    /// `step()` から見えなくなる（`GradStaging::bias_host_routed`
+    /// doc 参照）。
+    ///
+    /// backward はテープの逆順（最後に forward したノードから）走査
+    /// されるため、forward 順を C（w2,b2）→ B（w1,b2）→ A（w1,b1）に
+    /// することで、backward 処理順を A（w1,b1）→ B（w1,b2）→
+    /// C（w2,b2）にしている。
+    #[test]
+    fn resident_bias_tie_across_non_tied_weights_does_not_drop_middle_contribution() {
+        let w1_init = tensor(vec![1.0, 0.5, -0.5, 1.0], &[2, 2]);
+        let w2_init = tensor(vec![2.0, -1.0, 0.5, 3.0], &[2, 2]);
+        let b1_init = tensor(vec![0.5, -0.5], &[2]);
+        let b2_init = tensor(vec![-1.0, 2.0], &[2]);
+        let x_a = tensor(vec![2.0, 3.0], &[1, 2]);
+        let x_b = tensor(vec![1.0, -2.0], &[1, 2]);
+        let x_c = tensor(vec![-1.0, 4.0], &[1, 2]);
+        let target_a = tensor(vec![10.0, 10.0], &[1, 2]);
+        let target_b = tensor(vec![-4.0, 7.0], &[1, 2]);
+        let target_c = tensor(vec![3.0, -6.0], &[1, 2]);
+
+        let resident_ops = MockDeviceOps::resident_capable();
+        let resident_tape =
+            Tape::new_with_ops(Box::new(resident_ops) as Box<dyn BackendOps + Send>);
+        let mut store =
+            DeviceParamStore::new(&resident_tape, &[&w1_init, &w2_init, &b1_init, &b2_init])
+                .unwrap();
+        let leaves = store.register_resident_params(&resident_tape).unwrap();
+        let x_c_var = resident_tape.var(&x_c);
+        let x_b_var = resident_tape.var(&x_b);
+        let x_a_var = resident_tape.var(&x_a);
+        // forward 順: C → B → A（backward は逆順で A → B → C）。
+        let pred_c = store
+            .linear_forward(&resident_tape, &x_c_var, &leaves[1], Some(&leaves[3]))
+            .unwrap();
+        let pred_b = store
+            .linear_forward(&resident_tape, &x_b_var, &leaves[0], Some(&leaves[3]))
+            .unwrap();
+        let pred_a = store
+            .linear_forward(&resident_tape, &x_a_var, &leaves[0], Some(&leaves[2]))
+            .unwrap();
+        let target_c_var = resident_tape.var(&target_c);
+        let target_b_var = resident_tape.var(&target_b);
+        let target_a_var = resident_tape.var(&target_a);
+        let loss_c = pred_c.mse_loss(&target_c_var).unwrap();
+        let loss_b = pred_b.mse_loss(&target_b_var).unwrap();
+        let loss_a = pred_a.mse_loss(&target_a_var).unwrap();
+        let loss = loss_a.add(&loss_b).unwrap().add(&loss_c).unwrap();
+        let grads = store.backward(&resident_tape, &loss).unwrap();
+        store
+            .step(&resident_tape, &grads, &SgdConfig::new(0.1))
+            .unwrap();
+        let resident_params = store.sync_to_host(&resident_tape).unwrap();
+        let resident_w1 = resident_params[0].clone();
+        let resident_w2 = resident_params[1].clone();
+        let resident_b1 = resident_params[2].clone();
+        let resident_b2 = resident_params[3].clone();
+
+        let host_tape = simple_tape(None);
+        let w1 = host_tape.var(&w1_init);
+        let w2 = host_tape.var(&w2_init);
+        let b1 = host_tape.var(&b1_init);
+        let b2 = host_tape.var(&b2_init);
+        let x_c_var = host_tape.var(&x_c);
+        let x_b_var = host_tape.var(&x_b);
+        let x_a_var = host_tape.var(&x_a);
+        let pred_c = x_c_var.matmul(&w2).unwrap().add(&b2).unwrap();
+        let pred_b = x_b_var.matmul(&w1).unwrap().add(&b2).unwrap();
+        let pred_a = x_a_var.matmul(&w1).unwrap().add(&b1).unwrap();
+        let target_c_var = host_tape.var(&target_c);
+        let target_b_var = host_tape.var(&target_b);
+        let target_a_var = host_tape.var(&target_a);
+        let loss_c = pred_c.mse_loss(&target_c_var).unwrap();
+        let loss_b = pred_b.mse_loss(&target_b_var).unwrap();
+        let loss_a = pred_a.mse_loss(&target_a_var).unwrap();
+        let loss = loss_a.add(&loss_b).unwrap().add(&loss_c).unwrap();
+        let grads = host_tape.backward(&loss).unwrap();
+        let w1_grad = grads.get(&w1).unwrap().unwrap().clone();
+        let w2_grad = grads.get(&w2).unwrap().unwrap().clone();
+        let b1_grad = grads.get(&b1).unwrap().unwrap().clone();
+        let b2_grad = grads.get(&b2).unwrap().unwrap().clone();
+        let mut sgd = crate::optim::sgd::Sgd::new(SgdConfig::new(0.1)).unwrap();
+        let host_updated = sgd
+            .step(
+                &[&w1_init, &w2_init, &b1_init, &b2_init],
+                &[&w1_grad, &w2_grad, &b1_grad, &b2_grad],
+            )
+            .unwrap();
+        let host_w1 = host_updated[0].clone();
+        let host_w2 = host_updated[1].clone();
+        let host_b1 = host_updated[2].clone();
+        let host_b2 = host_updated[3].clone();
+
+        assert_ne!(
+            host_b2.get(&[0]).unwrap(),
+            b2_init.get(&[0]).unwrap(),
+            "退化した比較（更新前のまま）になっていないことを確認する"
+        );
+        assert_eq!(
+            host_w1.contiguous().as_slice().unwrap(),
+            resident_w1.contiguous().as_slice().unwrap(),
+            "w1 は自身が寄与する slot でのみ更新されるはず"
+        );
+        assert_eq!(
+            host_w2.contiguous().as_slice().unwrap(),
+            resident_w2.contiguous().as_slice().unwrap(),
+            "w2 は自身が寄与する slot でのみ更新されるはず"
+        );
+        assert_eq!(
+            host_b1.contiguous().as_slice().unwrap(),
+            resident_b1.contiguous().as_slice().unwrap(),
+            "b1 は A のみが使うため常に一致するはず"
+        );
+        assert_eq!(
+            host_b2.contiguous().as_slice().unwrap(),
+            resident_b2.contiguous().as_slice().unwrap(),
+            "b2 は B（weight tie・bias 未充填でホスト route）と C（別 weight の fresh・bias \
+             未充填で融合 dispatch）の両方から寄与を受ける。`bias_host_routed` による \
+             追跡がなければ B の寄与が C の resident 上書きで失われ、この比較は不一致になる"
         );
     }
 
