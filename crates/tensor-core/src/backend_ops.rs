@@ -658,11 +658,24 @@ pub trait BackendOps {
     /// batching-design.md` §10.13）で判定する。参照値 `S_ref`（入力を
     /// ホスト `f64` で index 順に逐次加算した和）・`y_ref`（`S_ref` の
     /// 1 回 downcast）に対し、Tier A（全入力に常に適用する明示式の
-    /// 理論上界 `|y − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|`。`ε32 =
+    /// 理論上界 `|y − y_ref| ≤ (4 + n·ε32) · ε32 · Σ|x_i|`。`ε32 =
     /// 2^-24`・`n` は縮約要素数）を満たしたうえで、Tier B（REQ-2
     /// 統一複合判定。相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は
-    /// `(3 + n·ε32)·ε32·Σ|x_i| ≤ max(1e-3·|S_ref|, 1e-5)` が入力から
+    /// `(4 + n·ε32)·ε32·Σ|x_i| ≤ max(1e-3·|S_ref|, 1e-5)` が入力から
     /// 事前に成立する列（条件数の上限と等価）にのみ適用する。
+    ///
+    /// **入力上限・非有限値のクラス一致（イシュー #1666・codex-review
+    /// 追加 P1 是正・`docs/backend-metal-command-batching-design.md`
+    /// §10.14）**: Tier A の明示式は縮約要素数 `m < 2^24` を前提とする
+    /// ため、`m >= 2^24`（上限定数は `fandhe_ai_backend_metal::layout::
+    /// BIAS_GRAD_MAX_ROWS` に単一定義）の呼び出しは実装側で
+    /// [`BackendError::InvalidArgument`] として fail-closed に拒否する
+    /// （無言フォールバックしない）契約とする。また `y_ref`（`S_ref` の
+    /// 1 回 downcast）が非有限（`NaN`／`±inf`）になる入力では、`y` は
+    /// `y_ref` と同クラス（`NaN`↔`NaN`・`±inf` は同符号）に到達する
+    /// ことを実装契約とする（Metal 実装は列内に非有限値を検出した場合
+    /// 2 のべき乗 scale 方式を経由せず、IEEE 754 のポイズン伝播に委ねる
+    /// 素朴な `f32` 逐次和へ切り替えることでこれを保証する）。
     /// `bias_offset + n` は [`Self::gemm_fp32_strict_into`]
     /// の `out_offset + m*n` と同じ検査規約（`checked_add`・範囲外は
     /// [`BackendError::InvalidArgument`]。REQ-8・OWASP A03）を適用する。

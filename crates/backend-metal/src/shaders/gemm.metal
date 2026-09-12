@@ -2535,30 +2535,25 @@ struct BiasGradReduceParams {
 // 入力に対し `0.0f` を返しうるが、この領域は REQ-2 の適用外と
 // 扱う。実務上の bias 勾配の値域では到達しない）。
 //
-// **`NaN` 伝播**: `x` が `NaN`、または既に `acc`/`scale` が `NaN`
-// （前回の呼び出しで検出済み）の場合、`acc` を `NaN` へ確定し `scale`
-// を有限の正値（`1.0f`）へ固定する（`rmsnorm_ssq_add` と同じ理由:
-// `scale` を `0.0f` のままにすると後続の呼び出しが `scale > 0.0f` の
-// 条件を満たさず汚染情報を握り潰してしまう）。以降のすべての呼び出し
-// はこの先頭ガードで即座に `NaN` を維持し続ける（sticky）。
-//
-// **符号付き無限大の伝播**: `x` が `±inf` の場合、`scale` を `+inf`
-// （`isinf` で判定可能な唯一の値）へ確定し、`acc` に符号
-// （`x > 0 ? 1.0f : -1.0f`）を厳密値として保持する（`x / scale` の
-// 除算〈`inf / inf` は `NaN` になる〉を経由しない）。`scale` が既に
-// `+inf` の状態で符号が一致する `±inf` が再び来た場合は何もしない
-// （`inf + inf == inf` と同じ挙動）。符号が食い違う場合（`+inf` の後に
-// `-inf`、またはその逆）は `acc` を `NaN` にする（`inf + (-inf) ==
-// NaN` と同じ挙動。IEEE 754 の逐次加算と同様、一度 `NaN` になると
-// 以降のどんな入力が来てもホスト `f64` 逐次和と同じく `NaN` のまま
-// 変わらない——次回呼び出しの先頭 `NaN` ガードが引き継ぐ）。`scale`
-// が `+inf` に確定した後の有限入力は無視する（`inf + finite == inf`）。
-//
-// 最終読み出し `scale * (acc + comp)` は上記いずれのケースでも
-// 追加の分岐なしに正しい値になる: `scale == 0`（列が全て `0`）なら
-// `0 * 0 == 0`、`scale == +inf` かつ `acc` が `±1.0f` なら `±inf`、
-// `acc` が `NaN` なら `scale`（有限）× `NaN == NaN`。呼び出し元
-// （`gemm_bias_grad_reduce_f32`）はこの式をそのまま使う。
+// **非有限値のクラス一致伝播（イシュー #1666・codex-review 追加 P1
+// 是正）**: 契約は「`y_ref`（ホスト `f64` 逐次和を 1 回 downcast した
+// `f32`）と `y_metal` の両方が有限なら Tier A／B、`y_ref` が非有限
+// なら `y_metal` は同クラス（`NaN`↔`NaN`・`±inf` は同符号）」
+// （`docs/backend-metal-command-batching-design.md` §10.13）。scale
+// 方式（2 のべき乗）は列内の要素がすべて有限であることを前提に
+// 中間 overflow を回避する設計のため、列内に `NaN`／`±inf` を含む
+// 場合は scale 方式を経由せず、`gemm_bias_grad_reduce_f32`（呼び出し
+// 元）側で**素朴な `f32` 逐次和**（`naive_acc += x` を単純な `+`
+// 演算子で行う）へ切り替える。`f32`／`f64` いずれの IEEE 754 逐次和も
+// `NaN`／`±inf` の伝播規則（`inf + finite == inf`・`inf + inf ==
+// inf`〈同符号〉・`inf + (-inf) == NaN`・`NaN + 任意 == NaN`〈sticky〉）
+// は精度に依存せず同一構造のため、素朴な `f32` 逐次和は `f64` 逐次和
+// と常に同じクラス（同符号の `±inf`、または `NaN`）に到達する
+// （有限項の大小・順序に関わらず、列内の `NaN`／`±inf` の出現パターン
+// のみでクラスが決まるため）。本関数（`bias_scale_sum_add`）自体は
+// **有限入力のみを受け取る契約**（`bias_pow2_floor` に非有限が渡ら
+// ないようにする設計。呼び出し元 `gemm_bias_grad_reduce_f32` が列内に
+// 非有限を検出した時点で本関数の呼び出しを止める）へ簡略化した。
 
 // Neumaier 改良版 Kahan 補償和の 1 ステップ（`rmsnorm.metal::
 // rmsnorm_kahan_add` と同一ロジック。別 `MTLLibrary` のため複製。上記
@@ -2573,8 +2568,11 @@ inline void bias_kahan_add(thread float& sum, thread float& comp, float value) {
     sum = t;
 }
 
-// `ax`（`> 0` の有限値を仮定。呼び出し元 `bias_scale_sum_add` が
-// `isnan`／`isinf` を事前に弾く）以下の最大の 2 のべき乗を、ビット
+// `ax`（`> 0` の有限値を仮定。呼び出し元 `gemm_bias_grad_reduce_f32`
+// が列内に非有限値を検出した時点で `bias_scale_sum_add`〈本関数の
+// 唯一の呼び出し元〉自体の呼び出しを止めるため、本関数へ非有限値が
+// 渡ることはない構造的不変量。`bias_scale_sum_add` 冒頭コメント
+// 「非有限値のクラス一致伝播」参照）以下の最大の 2 のべき乗を、ビット
 // パターンから仮数部（下位 23 bit）をゼロクリアするだけで exact に
 // 求める（`bias_scale_sum_add` 冒頭コメント「`scale` は...2 のべき
 // 乗に限定する」参照）。`ceil` ではなく `floor` を採用する理由: `ax`
@@ -2588,33 +2586,14 @@ inline float bias_pow2_floor(float ax) {
     return as_type<float>(bits);
 }
 
+// **契約（イシュー #1666・codex-review 追加 P1 是正）**: `x` は常に
+// 有限であることを呼び出し元（`gemm_bias_grad_reduce_f32`）が保証する
+// （列内に非有限値を検出した場合は本関数を一切呼ばず、素朴な `f32`
+// 逐次和 `naive_acc` へ切り替える。冒頭コメント「非有限値のクラス
+// 一致伝播」参照）。このため本関数自体は `NaN`／`±inf` の特殊扱いを
+// 持たず、`bias_pow2_floor` へも有限値のみが渡る。
 inline void bias_scale_sum_add(thread float& scale, thread float& acc, thread float& comp, float x) {
-    if (isnan(x) || isnan(acc) || isnan(scale)) {
-        scale = 1.0f;
-        acc = NAN;
-        comp = 0.0f;
-        return;
-    }
     float ax = fabs(x);
-    if (isinf(ax)) {
-        float sign = (x > 0.0f) ? 1.0f : -1.0f;
-        if (isinf(scale)) {
-            if (acc != sign) {
-                acc = NAN;
-                comp = 0.0f;
-            }
-            return;
-        }
-        scale = INFINITY;
-        acc = sign;
-        comp = 0.0f;
-        return;
-    }
-    if (isinf(scale)) {
-        // 既に無限大要素を確定済み。有限の追加要素は無視する
-        // （`inf + finite == inf`）。
-        return;
-    }
     if (ax > scale) {
         float new_scale = bias_pow2_floor(ax);
         if (scale > 0.0f) {
@@ -2660,15 +2639,28 @@ kernel void gemm_bias_grad_reduce_f32(
     }
     // scale 方式 + Neumaier 改良版 Kahan 補償和（`bias_scale_sum_add`。
     // 本ファイル冒頭の当該コメント参照。中間 overflow を構造的に回避
-    // する線形和版 scale/ssq 方式）。
+    // する線形和版 scale/ssq 方式）。列内に非有限値（`NaN`／`±inf`）を
+    // 検出した場合は scale 方式を経由せず、素朴な `f32` 逐次和
+    // `naive_acc`（IEEE 754 のポイズン伝播に委ねる）へ切り替える
+    // （イシュー #1666・codex-review 追加 P1「非有限値の伝播（クラス
+    // 一致）」是正。冒頭コメント「非有限値のクラス一致伝播」参照）。
     float scale = 0.0f;
     float acc = 0.0f;
     float comp = 0.0f;
+    float naive_acc = 0.0f;
+    bool has_nonfinite = false;
     for (uint row = 0; row < p.m; row++) {
         size_t idx = p.b_transposed
             ? (size_t)gid * (size_t)p.b_ld + (size_t)row
             : (size_t)row * (size_t)p.b_ld + (size_t)gid;
-        bias_scale_sum_add(scale, acc, comp, g[idx]);
+        float x = g[idx];
+        naive_acc += x;
+        if (isnan(x) || isinf(x)) {
+            has_nonfinite = true;
+        }
+        if (!has_nonfinite) {
+            bias_scale_sum_add(scale, acc, comp, x);
+        }
     }
-    out[gid] = scale * (acc + comp);
+    out[gid] = has_nonfinite ? naive_acc : (scale * (acc + comp));
 }

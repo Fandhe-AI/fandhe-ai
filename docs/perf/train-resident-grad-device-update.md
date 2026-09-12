@@ -434,12 +434,26 @@ train reuse A/B・`metal_reuse_step_grad_bit_dump` の Mac 実機比較は、bia
   （「厳密和」「真値」という語は使わない）。`y_ref` は `S_ref` を 1 回
   downcast した `f32`。
 - **Tier A（全入力へ常に適用）**: 明示式の理論上界
-  `|y_metal − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|`（`ε32 = 2^-24`・`n` は
+  `|y_metal − y_ref| ≤ (4 + n·ε32) · ε32 · Σ|x_i|`（`ε32 = 2^-24`・`n` は
   縮約要素数〈行数〉・有効範囲 `n < 2^24`。`O` 記法は使わない）。
-- **Tier B（REQ-2 複合判定）**: `(3 + n·ε32)·ε32·Σ|x_i| ≤ max(1e-3·|S_ref|,
+- **Tier B（REQ-2 複合判定）**: `(4 + n·ε32)·ε32·Σ|x_i| ≤ max(1e-3·|S_ref|,
   1e-5)` が入力から事前に成立する列にのみ適用する。
 
 上記の「REQ-2 統一複合判定」という表現はこの 2 層構造のうち Tier B を指す。
 契約の正本・導出・実測（Rust ホストモデルでの観測比実測）は `docs/metal-grad-
 reduction-parity-judgment-decision.md`（予定）・`docs/backend-metal-command-
 batching-design.md` §10.13 を参照し、本 doc では重複記載しない。
+
+**追補（イシュー #1666・codex-review 追加 P1「入力上限の明示拒否」・
+「非有限値の伝播（クラス一致）」是正。2026-09-12。詳細は `docs/backend-metal-
+command-batching-design.md` §10.14 を正とし本 doc では重複記載しない）**:
+Tier A は縮約要素数 `m < BIAS_GRAD_MAX_ROWS`（`crates/backend-metal/src/
+layout.rs` 定義の単一定数・`= 1 << 24`）の範囲でのみ有効であり、`m` がこれ
+以上の呼び出しは `gemm_fp32_strict_into` の bias 経路・`reduce_bias_grad_
+rows_host` の双方で `BackendError::InvalidArgument` として fail-closed に
+拒否する（無言フォールバックしない）。また `gemm_bias_grad_reduce_f32` は
+列内に非有限値（`NaN`／`±inf`）を検出した場合、2 のべき乗 `scale` 方式では
+なく素朴な `f32` 逐次和（IEEE 754 のポイズン伝播）へ切り替え、`y_ref` が
+非有限になる入力でも `y_metal` が同クラス（`NaN`↔`NaN`・`±inf` は同符号）に
+到達することを保証する。MSL 実機コンパイル確認は Mac セッションへ申し送る
+（同 §10.14「MSL 実機コンパイル検証」参照）。

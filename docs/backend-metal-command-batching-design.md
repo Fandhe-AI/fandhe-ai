@@ -1827,7 +1827,7 @@ Metal カーネル・ホスト `f64` 参照実装間の一致判定）は、契�
   `S_ref` を 1 回 downcast した `f32`。
 - **Tier A（全入力に常に適用）**: Metal bias 勾配 `y_metal` と `y_ref`
   の差が、明示式の理論上界
-  `|y_metal − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|`
+  `|y_metal − y_ref| ≤ (4 + n·ε32) · ε32 · Σ|x_i|`
   （`ε32 = 2^-24`・`n` は縮約要素数〈行数 `m`〉・有効範囲
   `n < 2^24`。`O` 記法は使わない）を満たす。`Σ|x_i|` はホスト `f64`
   で index 順に累積する。導出・Rust ホストモデルでの実測
@@ -1837,8 +1837,10 @@ Metal カーネル・ホスト `f64` 参照実装間の一致判定）は、契�
   tier_a_holds_for_high_kappa_random_columns,
   tier_b_predicate_selects_expected_cases_and_matches_assert_parity}`）
   は同ファイルのコメントを正とする（観測最大比 ≈ 3×10⁻⁸ で加法定数
-  `3` に対し十分な安全マージンを確認済み）。
-- **Tier B（REQ-2 複合判定）**: `(3 + n·ε32)·ε32·Σ|x_i| ≤
+  `4`〈2026-09-12 codex 指摘によりコーディネータが `C=3` → `C=4` へ
+  確定し直した。§10.14「2 のべき乗 scale 除算の underflow」参照〉に
+  対し十分な安全マージンを確認済み）。
+- **Tier B（REQ-2 複合判定）**: `(4 + n·ε32)·ε32·Σ|x_i| ≤
   max(1e-3·|S_ref|, 1e-5)` が入力から事前に成立する列（条件数
   `κ = Σ|x_i| / |S_ref|` の上限と等価）にのみ、従来どおりの相対誤差
   1e-3 未満 または 絶対誤差 1e-5 未満（`assert_parity`）を適用する。
@@ -1857,3 +1859,65 @@ Metal カーネル・ホスト `f64` 参照実装間の一致判定）は、契�
 本節自体はドキュメント整合のみでコード変更を伴わない
 （`crates/backend-metal/src/shaders/gemm.metal::bias_scale_sum_add`・
 `bias_pow2_floor`・`bias_kahan_add` は §10.11 の実装のまま不変）。
+
+### 10.14 #1666 codex-review 追加 P1 是正（入力上限の明示拒否・非有限値のクラス一致伝播。2026-09-12）
+
+§10.13 の Tier A 明示式は有効範囲 `n < 2^24`（`n` は縮約要素数＝行数
+`m`）を前提とする。これを**実装側でも fail-closed に強制する**契約
+是正（codex-review 追加 P1「入力上限の明示拒否」）と、`y_ref` が
+非有限になる入力での `y_metal` の伝播規則を明文化する是正（codex-review
+追加 P1「非有限値の伝播（クラス一致）」）を行った。
+
+- **入力上限の明示拒否**: `crates/backend-metal/src/layout.rs::
+  BIAS_GRAD_MAX_ROWS`（`= 1 << 24`）を単一の上限定数として定義し、
+  bias 勾配縮約に到達する 2 経路（Metal GPU カーネル `gemm_bias_grad_
+  reduce_f32` のディスパッチ前検証 `validate_gemm_bias_write_ranges`・
+  ホストフォールバック `reduce_bias_grad_rows_host` の事前検証）双方で
+  `m >= BIAS_GRAD_MAX_ROWS` を `BackendError::InvalidArgument` として
+  fail-closed 拒否する（無言フォールバックしない）。`reduce_bias_grad_
+  rows_host` はこの検査を `data` の実サイズ検証より前に置くため、
+  境界値テストは実バッファ確保なしに行える（`layout.rs` の
+  `bias_grad_max_rows_boundary_rejects_at_limit`／`_accepts_below_
+  limit`・`validate_gemm_bias_write_ranges_rejects_m_at_bias_grad_max_
+  rows`／`_accepts_m_just_below_bias_grad_max_rows`・`reduce_bias_grad_
+  rows_host_rejects_rows_at_bias_grad_max_rows_before_data_check`／
+  `_passes_rows_just_below_bias_grad_max_rows` の計 6 テストが機械
+  検査する）。
+- **非有限値の伝播（クラス一致）**: 契約は「`y_ref`（`S_ref` の 1 回
+  downcast）と `y_metal` の両方が有限なら Tier A／B（§10.13）を適用し、
+  `y_ref` が非有限（`NaN`／`±inf`）なら `y_metal` は同クラス
+  （`NaN`↔`NaN`・`±inf` は同符号）」と規定する。`gemm_bias_grad_
+  reduce_f32`（`gemm.metal`）は列内に非有限値（`NaN`／`±inf`）を検出
+  した時点で 2 のべき乗 `scale` 方式を経由せず、素朴な `f32` 逐次和
+  （`naive_acc += x`。IEEE 754 のポイズン伝播に委ねる）へ切り替える
+  構成へ改めた（`bias_scale_sum_add` は非有限入力を受け取らない契約
+  へ簡略化し、`bias_pow2_floor` に非有限が渡らないことを構造的に保証
+  する）。ホストモデル（`gemm_bias_scale_sum_host_model.rs::
+  bias_scale_sum_reduce`）にも同一分岐を逐語移植し、コーディネータ
+  指定の 6 ケース（`[f32::MAX, f32::MAX]`→両者 +inf・`[-f32::MAX,
+  -f32::MAX]`→両者 −inf・`[inf, -inf]`→両者 NaN・`[NaN, 1]`→NaN・
+  `[inf, 1, -5]`→+inf・`[f32::MAX, f32::MAX, -f32::MAX]`→有限で Tier A
+  成立）を `nonfinite_class_matching_cases` で機械検査した（`assert_
+  class_match` ヘルパ新設）。`tier_a_bound`／`assert_tier_a` の適用
+  条件も「`y_metal`・`y_ref` の両方が有限」へ明示的に限定した。
+- **2 のべき乗 scale 除算の underflow（codex-review 追加 P2）**: 商
+  `x / scale` が非正規化数域を超えて厳密 `0.0` へ丸められる要素
+  （例: `[2^127, 2^-149, -2^127]` の中央要素）を含む列でも、この
+  underflow による列合計への寄与欠落は `≤ n·2^-150·Σ|x_i| ≤
+  2^-126·Σ|x_i|` で Tier A の加法定数 `4`（downcast 誤差の安全側
+  換算・安全余裕分。上記コメント参照）に吸収済みと規定する。
+  `gemm_bias_scale_sum_host_model.rs::
+  {tier_a_holds_for_pow2_scale_underflow_case_single_tiny_term,
+  tier_a_holds_for_pow2_scale_underflow_case_two_tiny_terms}` が
+  `[2^127, 2^-149, -2^127]`・`[2^100, 2^-140, 2^-140, -2^100]` で
+  Tier A 成立を機械検査する。
+- **MSL 実機コンパイル検証**: 本 PR（#1659）実行環境に Apple Silicon
+  実機がないため、`gemm.metal` の再構成（`bias_scale_sum_add` 簡略化・
+  `gemm_bias_grad_reduce_f32` の `naive_acc`／`has_nonfinite` 追加）が
+  実機で問題なくコンパイル・実行できることの確認は **Mac セッションへ
+  申し送る**（Linux 側は Rust ホストモデルでの数値契約検証・
+  `layout.rs` の入力上限契約テストまでを本 PR の完了範囲とする）。
+
+契約の正本は引き続き `docs/metal-grad-reduction-parity-judgment-
+decision.md`（予定。契約 PR #1666 側）に置く。
+

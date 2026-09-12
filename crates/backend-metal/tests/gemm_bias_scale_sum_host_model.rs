@@ -37,11 +37,11 @@
 //! - **Tier A（全入力に常に適用）**: `y_metal`（本ファイルの
 //!   `bias_scale_sum_reduce`。`gemm_bias_grad_reduce_f32` の逐語移植）
 //!   と `y_ref` の差が明示的な理論上界
-//!   `|y_metal − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|`
+//!   `|y_metal − y_ref| ≤ (4 + n·ε32) · ε32 · Σ|x_i|`
 //!   （`ε32 = 2^-24`・`n` は縮約要素数〈行数 `m`〉・有効範囲
 //!   `n < 2^24`。`O` 記法は使わない）を満たす。`Σ|x_i|` はホスト
 //!   `f64` で index 順に累積する（`sum_abs` 関数参照）。
-//! - **Tier B（REQ-2 複合判定）**: `(3 + n·ε32)·ε32·Σ|x_i| ≤
+//! - **Tier B（REQ-2 複合判定）**: `(4 + n·ε32)·ε32·Σ|x_i| ≤
 //!   max(1e-3·|S_ref|, 1e-5)` が入力から事前に成立する列にのみ
 //!   `REQ-2` 統一複合判定（`fandhe_ai_backend_cpu::assert_parity`）を
 //!   適用する。不成立列は Tier A のみで検証する（本ファイルの
@@ -49,6 +49,27 @@
 //!
 //! `[assert_tier_a]`／`[tier_a_holds_for_cancelling_extreme_magnitude_
 //! sequence]` 等（下記）がこの契約を実装する。
+//!
+//! # 入力上限・非有限値のクラス一致（イシュー #1666・codex-review 追加
+//! P1 是正）
+//!
+//! - Tier A の有効範囲は縮約要素数 `n < 2^24`（`tier_a_bound` の
+//!   `assert!` で機械検査。上限定数 `BIAS_GRAD_MAX_ROWS` は
+//!   `crate::layout` 側で定義し、`m >= 2^24` を `BackendError::
+//!   InvalidArgument` として fail-closed 拒否する。`layout.rs` の
+//!   契約テスト参照）。
+//! - Tier A は `y_metal`・`y_ref` の**両方が有限の場合にのみ**適用する
+//!   （`tier_a_bound`／`assert_tier_a` doc 参照）。`y_ref` が非有限の
+//!   場合は `y_metal` が同クラス（`NaN`↔`NaN`・`±inf` は同符号）に
+//!   到達することを [`assert_class_match`] で検証する
+//!   （[`nonfinite_class_matching_cases`] 参照）。
+//! - 2 のべき乗 `scale` 除算の underflow（商が厳密 `0.0` へ丸められる
+//!   ケース。codex-review 追加 P2）は「列合計 `≤ n·2^-150·Σ|x_i| ≤
+//!   2^-126·Σ|x_i|` は Tier A の加法定数 `4`（安全余裕分）に
+//!   吸収済み」と規定する
+//!   （[`tier_a_holds_for_pow2_scale_underflow_case_single_tiny_term`]／
+//!   [`tier_a_holds_for_pow2_scale_underflow_case_two_tiny_terms`]
+//!   参照）。
 
 use bench_harness::rng::Xorshift64Star;
 
@@ -75,31 +96,16 @@ fn bias_pow2_floor(ax: f32) -> f32 {
 }
 
 /// `gemm.metal::bias_scale_sum_add` の逐語移植。
+///
+/// **契約（イシュー #1666・codex-review 追加 P1 是正）**: `x` は常に
+/// 有限であることを呼び出し元（`bias_scale_sum_reduce`）が保証する
+/// （列内に非有限値を検出した場合は本関数を一切呼ばず、素朴な `f32`
+/// 逐次和 `naive_acc` へ切り替える。`bias_scale_sum_reduce` doc
+/// 「非有限値のクラス一致伝播」参照）。このため本関数自体は
+/// `NaN`／`±inf` の特殊扱いを持たず、`bias_pow2_floor` へも有限値
+/// のみが渡る（`gemm.metal::bias_scale_sum_add` と同一構成）。
 fn bias_scale_sum_add(scale: &mut f32, acc: &mut f32, comp: &mut f32, x: f32) {
-    if x.is_nan() || acc.is_nan() || scale.is_nan() {
-        *scale = 1.0;
-        *acc = f32::NAN;
-        *comp = 0.0;
-        return;
-    }
     let ax = x.abs();
-    if ax.is_infinite() {
-        let sign = if x > 0.0 { 1.0f32 } else { -1.0f32 };
-        if scale.is_infinite() {
-            if *acc != sign {
-                *acc = f32::NAN;
-                *comp = 0.0;
-            }
-            return;
-        }
-        *scale = f32::INFINITY;
-        *acc = sign;
-        *comp = 0.0;
-        return;
-    }
-    if scale.is_infinite() {
-        return;
-    }
     if ax > *scale {
         let new_scale = bias_pow2_floor(ax);
         if *scale > 0.0 {
@@ -118,14 +124,43 @@ fn bias_scale_sum_add(scale: &mut f32, acc: &mut f32, comp: &mut f32, x: f32) {
 /// 縮約ループ本体）の逐語移植。`m == 1` の直接コピー特殊扱いはこの
 /// ループより手前で分岐する別経路のため、本関数の対象外
 /// （`reduce_bias_grad_rows_host`／`reduce_bias_grad_rows` と同型）。
+///
+/// **非有限値のクラス一致伝播（イシュー #1666・codex-review 追加 P1
+/// 是正）**: 契約は「`y_ref`（ホスト `f64` 逐次和を 1 回 downcast した
+/// `f32`）と `y_metal` の両方が有限なら Tier A／B、`y_ref` が非有限
+/// なら `y_metal` は同クラス（`NaN`↔`NaN`・`±inf` は同符号）」
+/// （`docs/backend-metal-command-batching-design.md` §10.13）。scale
+/// 方式（2 のべき乗）は列内の要素がすべて有限であることを前提に
+/// 中間 overflow を回避する設計のため、列内に `NaN`／`±inf` を含む
+/// 場合は scale 方式を経由せず、**素朴な `f32` 逐次和**
+/// （`naive_acc += x` を単純な `+` 演算子で行う）へ切り替える。
+/// `f32`／`f64` いずれの IEEE 754 逐次和も `NaN`／`±inf` の伝播規則
+/// （`inf + finite == inf`・`inf + inf == inf`〈同符号〉・
+/// `inf + (-inf) == NaN`・`NaN + 任意 == NaN`〈sticky〉）は精度に
+/// 依存せず同一構造のため、素朴な `f32` 逐次和は `f64` 逐次和と常に
+/// 同じクラス（同符号の `±inf`、または `NaN`）に到達する（有限項の
+/// 大小・順序に関わらず、列内の `NaN`／`±inf` の出現パターンのみで
+/// クラスが決まるため）。
 fn bias_scale_sum_reduce(xs: &[f32]) -> f32 {
     let mut scale = 0.0f32;
     let mut acc = 0.0f32;
     let mut comp = 0.0f32;
+    let mut naive_acc = 0.0f32;
+    let mut has_nonfinite = false;
     for &x in xs {
-        bias_scale_sum_add(&mut scale, &mut acc, &mut comp, x);
+        naive_acc += x;
+        if x.is_nan() || x.is_infinite() {
+            has_nonfinite = true;
+        }
+        if !has_nonfinite {
+            bias_scale_sum_add(&mut scale, &mut acc, &mut comp, x);
+        }
     }
-    scale * (acc + comp)
+    if has_nonfinite {
+        naive_acc
+    } else {
+        scale * (acc + comp)
+    }
 }
 
 /// (a) codex-review 指摘の直接再現・是正確認: 当初実装（`scale` が
@@ -227,8 +262,9 @@ fn matches_f64_reference_sum_for_mixed_magnitude_random_sequence() {
 /// 是正。定義は本ファイル冒頭 doc 参照）で共通に使う。
 const EPS32: f64 = 1.0 / (1u64 << 24) as f64;
 
-/// Tier A の明示式 `|y_metal − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|` の
-/// 加法定数 `3`。導出:
+/// Tier A の明示式 `|y_metal − y_ref| ≤ (4 + n·ε32) · ε32 · Σ|x_i|` の
+/// 加法定数 `4`（2026-09-12 codex 指摘によりコーディネータが `C=3` →
+/// `C=4` へ確定し直した。以下は改訂後の導出）:
 ///
 /// `gemm_bias_grad_reduce_f32` は 1 出力列につき 1 thread が `n`（行数
 /// `m`）要素を逐次処理する構成であり、`rmsnorm.metal` のような thread
@@ -246,14 +282,27 @@ const EPS32: f64 = 1.0 / (1u64 << 24) as f64;
 /// 適用すると `|Δ| ≤ (2 + n·ε32) · ε32 · Σ|x_i|` になる（`n²ε32² =
 /// n·ε32·ε32·n` を安全側に `n·ε32` 倍として単項化。有効範囲
 /// `n < 2^24` では `n·ε32 < 1` のため単調に効く）。ホスト参照
-/// （`S_ref`）側の `f64` → `f32` 最終 downcast 1 回も `≤ 0.5 ulp`
-/// 相対誤差（`0.5 ε32`）を追加しうる（`|S_ref| ≤ Σ|x_i|` のため
-/// `Σ|x_i|` 基準でも同じ上界に収まる）。合計 `2 + 0.5 = 2.5` を安全側に
-/// 切り上げ、`(3 + n·ε32) · ε32 · Σ|x_i|` を Tier A の明示式とする。
-const TIER_A_ADDITIVE_CONST: f64 = 3.0;
+/// （`S_ref`）側の `f64` → `f32` 最終 downcast 1 回の誤差は、基準を
+/// `Σ|x_i|` に統一すると（codex 指摘・是正）`0.5u` ではなく **`1u`**
+/// を計上する必要がある: downcast の丸め誤差は `|S_ref|` を基準に
+/// `≤ 0.5 ulp`（`0.5 ε32 · |S_ref|`）だが、`|S_ref| ≤ Σ|x_i|` という
+/// 不等式だけでは `0.5 ε32 · |S_ref| ≤ 0.5 ε32 · Σ|x_i|` の関係しか
+/// 導けず、`S_ref` 自体が `Σ|x_i|` よりはるかに小さい高条件数の入力
+/// （本ファイルの高 κ テスト群）では downcast 誤差の絶対値が
+/// `Σ|x_i|` の何倍にもなりうる場合と紙一重になるため、安全側に
+/// `1 ε32 · Σ|x_i|`（２倍の安全係数）を計上する。合計
+/// `2（Kahan/Neumaier 本体）+ 1（downcast）+ 1（安全余裕）= 4` を
+/// Tier A の加法定数とし、`(4 + n·ε32) · ε32 · Σ|x_i|` を明示式とする。
+const TIER_A_ADDITIVE_CONST: f64 = 4.0;
 
-/// Tier A 上界 `(3 + n·ε32) · ε32 · Σ|x_i|`（`n = xs.len()`。有効範囲
+/// Tier A 上界 `(4 + n·ε32) · ε32 · Σ|x_i|`（`n = xs.len()`。有効範囲
 /// `n < 2^24`）を計算する。
+///
+/// **適用条件（イシュー #1666・codex-review 追加 P1 是正）**: Tier A は
+/// `y_metal`・`y_ref` の**両方が有限の場合にのみ**適用する契約
+/// （`docs/backend-metal-command-batching-design.md` §10.13）。いずれか
+/// が非有限の場合は本関数・[`assert_tier_a`] の対象外であり、代わりに
+/// [`assert_class_match`]（非有限値のクラス一致検証）を使う。
 fn tier_a_bound(n: usize, sum_abs: f64) -> f64 {
     assert!(
         n < (1usize << 24),
@@ -276,7 +325,7 @@ fn sum_abs(xs: &[f32]) -> f64 {
     xs.iter().map(|&v| f64::from(v).abs()).sum()
 }
 
-/// Tier B 述語: `(3 + n·ε32)·ε32·Σ|x_i| ≤ max(1e-3·|S_ref|, 1e-5)`
+/// Tier B 述語: `(4 + n·ε32)·ε32·Σ|x_i| ≤ max(1e-3·|S_ref|, 1e-5)`
 /// （REQ-2 統一複合判定の閾値を Tier A 上界が事前に下回るか。条件数
 /// `κ = Σ|x_i| / |S_ref|` の上限と等価）。成立する列にのみ Tier B
 /// （`assert_parity`）を適用する契約。
@@ -289,16 +338,44 @@ fn tier_b_applicable(bound: f64, s_ref: f64) -> bool {
 fn assert_tier_a(label: &str, xs: &[f32]) -> f64 {
     let y_metal = bias_scale_sum_reduce(xs);
     let (_s_ref, y_ref) = s_ref_and_y_ref(xs);
+    assert!(
+        y_metal.is_finite() && y_ref.is_finite(),
+        "{label}: Tier A は y_metal・y_ref の両方が有限の場合にのみ適用する契約          （y_metal={y_metal}, y_ref={y_ref}）。非有限の場合は assert_class_match を使う"
+    );
     let sa = sum_abs(xs);
     let bound = tier_a_bound(xs.len(), sa);
     let delta = (f64::from(y_metal) - f64::from(y_ref)).abs();
     let ratio = if sa > 0.0 { delta / (EPS32 * sa) } else { 0.0 };
     assert!(
         delta <= bound,
-        "{label}: Tier A 上界超過（|Δ|={delta:e}, bound=(3+n·ε32)·ε32·Σ|x_i|={bound:e},          観測比={ratio:.4}, n={}）",
+        "{label}: Tier A 上界超過（|Δ|={delta:e}, bound=(4+n·ε32)·ε32·Σ|x_i|={bound:e},          観測比={ratio:.4}, n={}）",
         xs.len()
     );
     ratio
+}
+
+/// 非有限値のクラス一致（イシュー #1666・codex-review 追加 P1 是正）を
+/// 機械検査する: `y_ref`（`S_ref` の 1 回 downcast）が非有限の場合、
+/// `y_metal`（[`bias_scale_sum_reduce`]）が同クラス（`NaN`↔`NaN`・
+/// `±inf` は同符号）に到達することを確認する。
+fn assert_class_match(label: &str, xs: &[f32]) {
+    let y_metal = bias_scale_sum_reduce(xs);
+    let (s_ref, y_ref) = s_ref_and_y_ref(xs);
+    assert!(
+        !y_ref.is_finite(),
+        "{label}: assert_class_match は y_ref が非有限の入力専用（y_ref={y_ref},          S_ref={s_ref}）。有限なら assert_tier_a を使う"
+    );
+    if y_ref.is_nan() {
+        assert!(
+            y_metal.is_nan(),
+            "{label}: y_ref=NaN のクラスに y_metal が一致しない（y_metal={y_metal}）"
+        );
+    } else {
+        assert!(
+            y_metal.is_infinite() && y_metal.signum() == y_ref.signum(),
+            "{label}: y_ref={y_ref}（±inf）のクラスに y_metal が一致しない          （y_metal={y_metal}）"
+        );
+    }
 }
 
 /// Tier A 単体: codex-review 指摘の直接検証入力
@@ -397,7 +474,7 @@ fn tier_a_holds_for_high_kappa_random_columns() {
 ///
 /// **注記**: `[1e8, 1.0, -1e8]`（`preserves_non_cancelling_residual_
 /// contribution` の入力）は条件数 `κ = Σ|x_i|/|S_ref| ≈ 2×10^8` が
-/// 極めて高く、Tier A 明示式では Tier B 不成立（`bound ≈ 36` が
+/// 極めて高く、Tier A 明示式では Tier B 不成立（`bound ≈ 48` が
 /// `1e-3` を大きく超える）と判定される——実際の丸め誤差はゼロ
 /// （`delta = 0`）で REQ-2 自体には経験的に一致するが、これは Tier A
 /// 上界（最悪ケース保証）が緩いことの帰結であり、Tier B 契約（事前に
@@ -475,4 +552,82 @@ fn pow2_floor_is_exact_and_never_overflows_for_finite_input() {
     );
     assert_eq!(floor_of_max, 2f32.powi(127));
     assert!(floor_of_max <= f32::MAX);
+}
+
+/// 非有限値のクラス一致伝播（イシュー #1666・codex-review 追加 P1
+/// 是正）を機械検査する 6 ケース（コーディネータ指定の入力を逐語検査）。
+/// `y_ref` が非有限になる列（(1)〜(5)）は [`assert_class_match`] で
+/// クラス一致を確認し、`y_ref` が有限になる列（(6)）は [`assert_tier_a`]
+/// で通常の Tier A 上界検証を行う（両者有限の場合にのみ Tier A が
+/// 適用可能という条件そのものの確認を兼ねる）。
+#[test]
+fn nonfinite_class_matching_cases() {
+    // (1) [f32::MAX, f32::MAX] -> 両者 +inf（f64 逐次和が f32 表現範囲を
+    // 超えて downcast 時に +inf へ overflow する。scale 方式側も最終
+    // `scale * (acc + comp)` の f32 乗算自体が同じ理由で +inf へ overflow
+    // する——素朴な f32 逐次和と同一の IEEE 754 overflow 規則に従うため）。
+    assert_class_match("[f32::MAX, f32::MAX]", &[f32::MAX, f32::MAX]);
+
+    // (2) [-f32::MAX, -f32::MAX] -> 両者 -inf（(1) の符号反転）。
+    assert_class_match("[-f32::MAX, -f32::MAX]", &[-f32::MAX, -f32::MAX]);
+
+    // (3) [inf, -inf] -> 両者 NaN（`inf + (-inf) == NaN`）。
+    assert_class_match("[inf, -inf]", &[f32::INFINITY, f32::NEG_INFINITY]);
+
+    // (4) [NaN, 1] -> NaN（`NaN` は sticky に伝播する）。
+    assert_class_match("[NaN, 1]", &[f32::NAN, 1.0]);
+
+    // (5) [inf, 1, -5] -> +inf（有限項の値によらず符号付き無限大が支配する）。
+    assert_class_match("[inf, 1, -5]", &[f32::INFINITY, 1.0, -5.0]);
+
+    // (6) [f32::MAX, f32::MAX, -f32::MAX] -> 有限（S_ref = f32::MAX が
+    // f32 の表現範囲内に収まる）。両者有限のため Tier A（通常の理論上界）
+    // を適用する。
+    let xs_finite = [f32::MAX, f32::MAX, -f32::MAX];
+    let (s_ref, y_ref) = s_ref_and_y_ref(&xs_finite);
+    assert!(
+        y_ref.is_finite(),
+        "test fixture: [f32::MAX, f32::MAX, -f32::MAX] の y_ref は有限のはず          （y_ref={y_ref}, S_ref={s_ref}）"
+    );
+    let ratio = assert_tier_a("[f32::MAX, f32::MAX, -f32::MAX]", &xs_finite);
+    println!("[nonfinite_class_matching_cases] case(6) observed_ratio={ratio:.3e}");
+}
+
+/// 2 のべき乗 `scale` 除算の underflow（codex-review 追加 P2 是正・
+/// イシュー #1666）: 商 `x / scale` が非正規化数域を超えて厳密な `0.0`
+/// へ丸められる（gradual underflow の範囲外）要素を含む列でも、契約は
+/// 「列合計 `≤ n·2^-150·Σ|x_i| ≤ 2^-126·Σ|x_i|` は Tier A の加法定数
+/// `3`（`0.5u` の安全余裕）に吸収済み」と規定する。本テストはこの
+/// 契約どおり Tier A が成立することを機械検査する。
+///
+/// `[2^127, 2^-149, -2^127]`: `scale = 2^127`（列内最大絶対値）。中央
+/// 要素 `2^-149 / 2^127 = 2^-276` は `f32` の最小非正規化数
+/// （`2^-149`）を大幅に下回るため商は厳密に `0.0` へ丸められる
+/// （underflow）——`bias_kahan_add` への寄与が失われるが、この要素
+/// 自体が `Σ|x_i|`（`≈ 2 * 2^127`）に対して無視できるほど小さいため
+/// Tier A の理論上界（余裕分 `0.5u` 相当）に吸収される。
+#[test]
+fn tier_a_holds_for_pow2_scale_underflow_case_single_tiny_term() {
+    let xs = [2f32.powi(127), 2f32.powi(-149), -(2f32.powi(127))];
+    let ratio = assert_tier_a("[2^127, 2^-149, -2^127]", &xs);
+    println!(
+        "[tier_a_holds_for_pow2_scale_underflow_case_single_tiny_term] observed_ratio={ratio:.3e}"
+    );
+}
+
+/// `[2^100, 2^-140, 2^-140, -2^100]`: `scale = 2^100`。`2^-140 / 2^100 =
+/// 2^-240` も同様に厳密 `0.0` へ underflow する微小項を 2 個含む
+/// （相殺後の真値は `0`）。
+#[test]
+fn tier_a_holds_for_pow2_scale_underflow_case_two_tiny_terms() {
+    let xs = [
+        2f32.powi(100),
+        2f32.powi(-140),
+        2f32.powi(-140),
+        -(2f32.powi(100)),
+    ];
+    let ratio = assert_tier_a("[2^100, 2^-140, 2^-140, -2^100]", &xs);
+    println!(
+        "[tier_a_holds_for_pow2_scale_underflow_case_two_tiny_terms] observed_ratio={ratio:.3e}"
+    );
 }

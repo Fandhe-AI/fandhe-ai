@@ -186,6 +186,43 @@ pub fn required_span(layout: &MatrixLayout) -> Option<usize> {
         .checked_add(minor)
 }
 
+/// bias 勾配縮約（`gemm_bias_grad_reduce_f32`〈GPU〉・
+/// `reduce_bias_grad_rows_host`〈ホストフォールバック〉双方）の契約
+/// 有効範囲上限（イシュー #1666・codex-review 追加 P1「入力上限の
+/// 明示拒否」是正）: 縮約要素数（行数 `m`）は `2^24` 未満に限る
+/// （`docs/backend-metal-command-batching-design.md` §10.13 の Tier A
+/// 明示式 `|y_metal − y_ref| ≤ (3 + n·ε32) · ε32 · Σ|x_i|` が
+/// `n < 2^24` を前提とするため。`crates/backend-metal/tests/gemm_
+/// bias_scale_sum_host_model.rs::tier_a_bound` の同名アサートと同じ
+/// 値。GPU カーネル側・ホスト側とも `m >= BIAS_GRAD_MAX_ROWS` を
+/// 無言でフォールバックせず `BackendError::InvalidArgument` で
+/// fail-closed に拒否する。`validate_gemm_bias_write_ranges`（GPU
+/// ディスパッチ前の事前検証）・`reduce_bias_grad_rows_host`（ホスト
+/// フォールバック本体）の両方がこの定数を参照する単一の真実源）。
+pub const BIAS_GRAD_MAX_ROWS: usize = 1 << 24;
+
+/// `BIAS_GRAD_MAX_ROWS` の単発チェック（`validate_gemm_bias_write_
+/// ranges`・`reduce_bias_grad_rows_host` の共通部品）。実データ・実
+/// バッファを一切必要としない純粋な数値比較のため、境界値
+/// （`BIAS_GRAD_MAX_ROWS` そのもの・`BIAS_GRAD_MAX_ROWS - 1`）を
+/// 大きなメモリ確保なしに直接テストできる（本モジュール末尾の
+/// `bias_grad_max_rows_boundary_*` 参照）。
+fn check_bias_grad_rows_limit(
+    rows: usize,
+    caller: &str,
+) -> Result<(), fandhe_ai_tensor_core::device::BackendError> {
+    if rows >= BIAS_GRAD_MAX_ROWS {
+        return Err(
+            fandhe_ai_tensor_core::device::BackendError::InvalidArgument(format!(
+                "{caller}: bias 縮約の行数 ({rows}) が契約有効範囲上限 BIAS_GRAD_MAX_ROWS \
+             ({BIAS_GRAD_MAX_ROWS}) 以上のため fail-closed に拒否する（Tier A 明示式は \
+             n < 2^24 を前提とする）"
+            )),
+        );
+    }
+    Ok(())
+}
+
 /// `ops::MetalBackendOps::gemm_fp32_strict_into_with_bias_reduce_tracked`
 /// が weight（GEMM 出力 `[m, n]`）と bias（縮約結果 `[n]`）を同一 `out`
 /// バッファへ書く前に呼ぶ、範囲検証の純関数版（PR #1659 codex-review
@@ -207,6 +244,11 @@ pub fn required_span(layout: &MatrixLayout) -> Option<usize> {
 ///    weight・bias 両範囲が `[0, n)` で完全に重なり、bias の書き込みが
 ///    weight の一部を無言で上書きする。`m == 0` または `n == 0`
 ///    （空次元）は範囲自体が空集合になるため重複判定から除外する）。
+/// 4. `bias` が `Some` の場合、`m < BIAS_GRAD_MAX_ROWS`（イシュー
+///    #1666・codex-review 追加 P1「入力上限の明示拒否」是正。上記
+///    `BIAS_GRAD_MAX_ROWS` doc 参照）。weight のみ（`bias == None`）の
+///    ディスパッチには本上限を適用しない（bias 縮約カーネルを経由
+///    しないため契約有効範囲の対象外）。
 ///
 /// 呼び出し元は返り値の `Err` をそのまま伝播すればよい（`BackendError::
 /// InvalidArgument`）。
@@ -238,6 +280,7 @@ pub fn validate_gemm_bias_write_ranges(
     let Some((bias_offset, bn)) = bias else {
         return Ok(());
     };
+    check_bias_grad_rows_limit(m, "validate_gemm_bias_write_ranges")?;
     if bn != n {
         return Err(BackendError::InvalidArgument(format!(
             "validate_gemm_bias_write_ranges: bias n ({bn}) does not match GEMM n ({n})"
@@ -315,6 +358,13 @@ pub fn reduce_bias_grad_rows_host(
     data: &[f32],
     layout: &MatrixLayout,
 ) -> Result<Vec<f32>, fandhe_ai_tensor_core::device::BackendError> {
+    // イシュー #1666・codex-review 追加 P1「入力上限の明示拒否」是正:
+    // `required_span`／`data.len()` 検証（`data` の実サイズを要求する）
+    // より前に行数上限を検査する。`layout.rows` の値のみで判定でき
+    // 実データ・実バッファを必要としないため、境界値テスト
+    // （`BIAS_GRAD_MAX_ROWS` 自体・`BIAS_GRAD_MAX_ROWS - 1`）を大きな
+    // メモリ確保なしに実行できる。
+    check_bias_grad_rows_limit(layout.rows, "reduce_bias_grad_rows_host")?;
     let required = required_span(layout).ok_or_else(|| {
         fandhe_ai_tensor_core::device::BackendError::InvalidArgument(
             "reduce_bias_grad_rows_host: layout の添字計算が usize をオーバーフローする".into(),
@@ -913,5 +963,110 @@ mod tests {
             err,
             fandhe_ai_tensor_core::device::BackendError::InvalidArgument(_)
         ));
+    }
+
+    // イシュー #1666・codex-review 追加 P1「入力上限の明示拒否」是正の
+    // 契約テスト（境界値 `BIAS_GRAD_MAX_ROWS`・`BIAS_GRAD_MAX_ROWS - 1`）。
+    // `check_bias_grad_rows_limit` は `usize` 比較のみの純関数のため、
+    // 実データ・実バッファを一切確保せずに境界値を検証できる。
+
+    #[test]
+    fn bias_grad_max_rows_boundary_rejects_at_limit() {
+        let err = check_bias_grad_rows_limit(BIAS_GRAD_MAX_ROWS, "test")
+            .expect_err("rows == BIAS_GRAD_MAX_ROWS は契約有効範囲外のため Err のはず");
+        assert!(matches!(
+            err,
+            fandhe_ai_tensor_core::device::BackendError::InvalidArgument(_)
+        ));
+    }
+
+    #[test]
+    fn bias_grad_max_rows_boundary_accepts_below_limit() {
+        check_bias_grad_rows_limit(BIAS_GRAD_MAX_ROWS - 1, "test")
+            .expect("rows == BIAS_GRAD_MAX_ROWS - 1 は契約有効範囲内のため Ok のはず");
+    }
+
+    /// `validate_gemm_bias_write_ranges`（GPU ディスパッチ前の事前検証。
+    /// `ops::MetalBackendOps::gemm_fp32_strict_into_with_bias_reduce_
+    /// tracked` が呼ぶ実際の入口）が `m == BIAS_GRAD_MAX_ROWS` を
+    /// fail-closed に拒否することを確認する。本関数は `usize` 演算のみ
+    /// （実バッファを確保しない）のため、巨大な `m` を渡しても実行コスト
+    /// は一定。
+    #[test]
+    fn validate_gemm_bias_write_ranges_rejects_m_at_bias_grad_max_rows() {
+        let m = BIAS_GRAD_MAX_ROWS;
+        let n = 1usize;
+        let out_numel = m * n + 1;
+        let err = validate_gemm_bias_write_ranges(m, n, 0, out_numel, Some((m * n, n)))
+            .expect_err("m == BIAS_GRAD_MAX_ROWS は契約有効範囲外のため Err のはず");
+        assert!(matches!(
+            err,
+            fandhe_ai_tensor_core::device::BackendError::InvalidArgument(_)
+        ));
+    }
+
+    /// 対照: `m == BIAS_GRAD_MAX_ROWS - 1`（契約有効範囲内）は行数上限
+    /// チェックを通過し、他の検証（範囲・重複）のみで受理されることを
+    /// 確認する（実バッファは確保しない。`out_numel`・オフセットは
+    /// `usize` の値として与えるのみ）。
+    #[test]
+    fn validate_gemm_bias_write_ranges_accepts_m_just_below_bias_grad_max_rows() {
+        let m = BIAS_GRAD_MAX_ROWS - 1;
+        let n = 1usize;
+        let out_numel = m * n + 1;
+        validate_gemm_bias_write_ranges(m, n, 0, out_numel, Some((m * n, n))).expect(
+            "m == BIAS_GRAD_MAX_ROWS - 1 は契約有効範囲内のため他の検証のみで受理されるはず",
+        );
+    }
+
+    /// `reduce_bias_grad_rows_host`（ホストフォールバック本体）が
+    /// `rows == BIAS_GRAD_MAX_ROWS` を、`required_span`／`data.len()`
+    /// 検証（実データを要求する）より前に fail-closed で拒否すること
+    /// を確認する。`data` は空スライスのままでよい——行数上限チェックが
+    /// 先に走るため、実データ・実バッファは不要（エラーメッセージに
+    /// よって「行数上限による拒否」と「データ不足による拒否」を区別
+    /// する）。
+    #[test]
+    fn reduce_bias_grad_rows_host_rejects_rows_at_bias_grad_max_rows_before_data_check() {
+        let layout = MatrixLayout {
+            rows: BIAS_GRAD_MAX_ROWS,
+            cols: 1,
+            ld: 1,
+            transposed: false,
+        };
+        let err = reduce_bias_grad_rows_host(&[], &layout)
+            .expect_err("rows == BIAS_GRAD_MAX_ROWS は契約有効範囲外のため Err のはず");
+        let fandhe_ai_tensor_core::device::BackendError::InvalidArgument(msg) = err else {
+            panic!("InvalidArgument のはず");
+        };
+        assert!(
+            msg.contains("BIAS_GRAD_MAX_ROWS"),
+            "行数上限による拒否メッセージのはず（msg={msg}）"
+        );
+    }
+
+    /// 対照: `rows == BIAS_GRAD_MAX_ROWS - 1`（契約有効範囲内）は行数
+    /// 上限チェックを通過することを確認する（`data` は空スライスの
+    /// ままのため、後続の `required_span`／`data.len()` 検証で**別の
+    /// 理由**により `Err` になるが、そのエラーメッセージに
+    /// `BIAS_GRAD_MAX_ROWS` は含まれない——行数上限チェック自体は
+    /// 通過したことの確認。実データ・実バッファは不要）。
+    #[test]
+    fn reduce_bias_grad_rows_host_passes_rows_just_below_bias_grad_max_rows() {
+        let layout = MatrixLayout {
+            rows: BIAS_GRAD_MAX_ROWS - 1,
+            cols: 1,
+            ld: 1,
+            transposed: false,
+        };
+        let err = reduce_bias_grad_rows_host(&[], &layout)
+            .expect_err("data が空のため required_span 検査で Err になるはず（行数上限は通過）");
+        let fandhe_ai_tensor_core::device::BackendError::InvalidArgument(msg) = err else {
+            panic!("InvalidArgument のはず");
+        };
+        assert!(
+            !msg.contains("BIAS_GRAD_MAX_ROWS"),
+            "行数上限チェックは通過し、データ不足による別の理由で Err になるはず（msg={msg}）"
+        );
     }
 }
