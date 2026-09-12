@@ -98,14 +98,20 @@ const B: usize = 2;
 const D: usize = 3;
 const HID: usize = 4;
 
-fn rnn_fixture_data() -> (
+/// `rnn_fixture_data` の戻り値（x, h_prev, w_ih, w_hh, b_ih, b_hh）。
+/// clippy::type_complexity 回避のための型エイリアス
+/// （他ファイルで既に採用されているパターン。例:
+/// `crates/backend-cpu/src/rnn_cell.rs::TripleVecOutput`）。
+type RnnFixtureData = (
     Tensor<f32>,
     Tensor<f32>,
     Tensor<f32>,
     Tensor<f32>,
     Tensor<f32>,
     Tensor<f32>,
-) {
+);
+
+fn rnn_fixture_data() -> RnnFixtureData {
     let x = t(vec![0.10, -0.20, 0.30, 0.15, -0.25, 0.05], &[B, D]);
     let h_prev = t(
         vec![0.05, -0.10, 0.20, -0.15, 0.30, -0.05, 0.10, -0.20],
@@ -311,7 +317,9 @@ fn rnn_cell_gradients_match_numeric_diff_for_all_inputs() {
 // LSTM フィクスチャ（決定 5・12。ゲート順 i,f,g,o）。
 // =====================================================================
 
-fn lstm_fixture_data() -> (
+/// `lstm_fixture_data` の戻り値（x, h_prev, c_prev, w_ih, w_hh, b_ih, b_hh）。
+/// clippy::type_complexity 回避のための型エイリアス（上記 `RnnFixtureData` 参照）。
+type LstmFixtureData = (
     Tensor<f32>,
     Tensor<f32>,
     Tensor<f32>,
@@ -319,7 +327,9 @@ fn lstm_fixture_data() -> (
     Tensor<f32>,
     Tensor<f32>,
     Tensor<f32>,
-) {
+);
+
+fn lstm_fixture_data() -> LstmFixtureData {
     let x = t(vec![0.10, -0.20, 0.30, 0.15, -0.25, 0.05], &[B, D]);
     let h_prev = t(
         vec![0.05, -0.10, 0.20, -0.15, 0.30, -0.05, 0.10, -0.20],
@@ -588,14 +598,18 @@ fn lstm_cell_gradients_match_numeric_diff_for_all_inputs_including_c_path() {
 // GRU フィクスチャ（決定 1c・5・12。`reset_after=True`。ゲート順 r,z,n）。
 // =====================================================================
 
-fn gru_fixture_data() -> (
+/// `gru_fixture_data` の戻り値（x, h_prev, w_ih, w_hh, b_ih, b_hh）。
+/// clippy::type_complexity 回避のための型エイリアス（上記 `RnnFixtureData` 参照）。
+type GruFixtureData = (
     Tensor<f32>,
     Tensor<f32>,
     Tensor<f32>,
     Tensor<f32>,
     Tensor<f32>,
     Tensor<f32>,
-) {
+);
+
+fn gru_fixture_data() -> GruFixtureData {
     let x = t(vec![0.10, -0.20, 0.30, 0.15, -0.25, 0.05], &[B, D]);
     let h_prev = t(
         vec![0.05, -0.10, 0.20, -0.15, 0.30, -0.05, 0.10, -0.20],

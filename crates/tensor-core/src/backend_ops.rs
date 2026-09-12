@@ -1107,7 +1107,7 @@ pub trait BackendOps {
         _dh: &Tensor<f32>,
     ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
         Err(BackendError::Unsupported(
-            "lstm_hidden_backward: default fail-safe (no fused LSTM hidden backward kernel              available)"
+            "lstm_hidden_backward: default fail-safe (no fused LSTM hidden backward kernel available)"
                 .into(),
         ))
     }
@@ -1132,7 +1132,7 @@ pub trait BackendOps {
         _dc: &Tensor<f32>,
     ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
         Err(BackendError::Unsupported(
-            "lstm_cell_backward: default fail-safe (no fused LSTM cell backward kernel              available)"
+            "lstm_cell_backward: default fail-safe (no fused LSTM cell backward kernel available)"
                 .into(),
         ))
     }
