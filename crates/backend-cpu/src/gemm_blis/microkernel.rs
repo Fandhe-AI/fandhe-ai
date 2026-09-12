@@ -67,6 +67,14 @@ pub mod scalar;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
 
+// イシュー #1587: Arm SME（Scalable Matrix Extension）`fmopa` マイクロ
+// カーネル。NEON と同じく `cfg(target_arch = "aarch64")` 限定だが、NEON
+// と異なり実行時検出（[`SmeKernel::try_new`]）を経由しなければ安全に
+// 呼べない（`avx2`／`avx512` と同型の「検出済みトークンのみ構築可能」
+// パターン。本モジュール doc 冒頭参照）。
+#[cfg(target_arch = "aarch64")]
+pub mod sme;
+
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
 
@@ -704,6 +712,65 @@ impl Microkernel for NeonBLaneqVecKernel {
     }
 }
 
+/// aarch64 SME（Scalable Matrix Extension）`fmopa` トークン（イシュー
+/// #1587）。`SmeKernel::try_new` 経由でのみ構築でき、これが「実行 CPU が
+/// SME・非拡張 FP32 外積（`SME_F32F32`）に対応し SVL=512 bit である」
+/// ことを保証する（[`Avx2Kernel`] と同型の「検出済みトークンのみ構築
+/// 可能」パターン。[`Microkernel::run`]／[`Microkernel::run_with_ldc`]
+/// 内部の `unsafe { sme::kernel_unchecked… }` 呼び出しの SAFETY 根拠）。
+#[cfg(target_arch = "aarch64")]
+#[derive(Clone, Copy)]
+pub struct SmeKernel {
+    /// 外部からの直接構築を禁止する非公開フィールド（[`Avx2Kernel`] と
+    /// 同じ封止パターン）。
+    _private: (),
+}
+
+#[cfg(target_arch = "aarch64")]
+impl SmeKernel {
+    /// 実行 CPU が SME・非拡張 FP32 外積（`SME_F32F32`）に対応し
+    /// SVL=512 bit（64 バイト）の場合のみ `Some` を返す
+    /// （[`crate::sme_detect::sme_report`] が fail-closed に判定する。
+    /// モジュール doc「検出との関係」節参照）。
+    pub(crate) fn try_new() -> Option<Self> {
+        if crate::sme_detect::sme_report().kernel_enabled {
+            Some(Self { _private: () })
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Microkernel for SmeKernel {
+    const MR: usize = sme::MR;
+    const NR: usize = sme::NR;
+
+    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+        // [`ScalarKernel::run`] のドキュメント参照（`Result` を `panic!`
+        // へ変換する経路を持たず [`sme::kernel_unchecked`] へ直接委譲する）。
+        //
+        // SAFETY: Self は try_new() 経由でのみ構築可能であり、構築時点で
+        // `crate::sme_detect::sme_report().kernel_enabled` を確認済み
+        // （`sme::kernel_unchecked` の `# Safety` 契約を満たす）。
+        unsafe { sme::kernel_unchecked(ap, bp, c_tile, kc_len) }
+    }
+
+    fn run_with_ldc(
+        &self,
+        ap: &[f32],
+        bp: &[f32],
+        c: &mut [f32],
+        ldc: usize,
+        kc_len: usize,
+    ) -> Result<(), TileBoundsError> {
+        // SAFETY: Self は try_new() 経由でのみ構築可能であり、構築時点で
+        // `crate::sme_detect::sme_report().kernel_enabled` を確認済み
+        // （`sme::kernel_unchecked_with_ldc` の `# Safety` 契約を満たす）。
+        unsafe { sme::kernel_unchecked_with_ldc(ap, bp, c, ldc, kc_len) }
+    }
+}
+
 /// x86_64 AVX2+FMA トークン。`Avx2Kernel::try_new` 経由でのみ構築でき、
 /// これが実行 CPU の AVX2+FMA 対応を保証する（[`Microkernel::run`] 内部の
 /// `unsafe { avx2::kernel_unchecked(...) }` の SAFETY 根拠）。
@@ -1165,6 +1232,17 @@ mod tests {
     fn avx2_kernel_try_new_matches_feature_detection() {
         let expected = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
         assert_eq!(Avx2Kernel::try_new().is_some(), expected);
+    }
+
+    /// [`SmeKernel::try_new`] は [`crate::sme_detect::sme_report`] の
+    /// `kernel_enabled` 判定と一致する（イシュー #1587。`avx2` 版と
+    /// 同型の回帰テスト。SME 対応・非対応いずれの実行環境でも
+    /// 意味のある表明になる）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn sme_kernel_try_new_matches_feature_detection() {
+        let expected = crate::sme_detect::sme_report().kernel_enabled;
+        assert_eq!(SmeKernel::try_new().is_some(), expected);
     }
 
     #[cfg(all(target_arch = "x86_64", avx512_stable))]
