@@ -106,7 +106,7 @@ fandhe-ai/
     ├── kernel-fusion.md     # TASK-12.2b カーネル融合の適用範囲・限界（複合WLで融合を性能目標の前提にしない。#168）
     ├── license-matrix.md    # 許容依存 8 区分のライセンス可否表（TASK-1.3）
     ├── matmul-vjp-zero-copy-decision.md # matmul VJP の転置ゼロコピー化（`eval::matmul` の stride 対応）・CPU BLIS／CUDA／Metal gemm 結線を別イシューへ引き継ぐスコープ判断・実測記入欄（#1043 ツリー・#1046）
-    ├── metal-grad-reduction-parity-judgment-decision.md # 勾配の長軸縮約（dw 行方向蓄積・bias 勾配の行方向縮約）の Metal 実装形（Neumaier 改良版 Kahan 補償和 + 2 の冪 scale）の一致判定を、事前判定不能な「除外」ではなく事前判定可能な Tier A（無条件誤差上界 `(3+n·ε32)·ε32·Σ|x_i|`）／Tier B（REQ-2 統一複合判定の適用可否述語）の 2 層契約として定義（PR #1666 codex-review P1×2・P2 指摘への是正。係数 `C=3` は PR #1659 の逐語ホストモデル実測で確定・参照値 `S_ref` は参照実装〈`reduce_bias_grad_rows_host` 等〉の出力と定義〈真値ではない〉。spec 起票は未承認。イシュー #1566）
+    ├── metal-grad-reduction-parity-judgment-decision.md # 勾配の長軸縮約（dw 行方向蓄積・bias 勾配の行方向縮約）の Metal 実装形（Neumaier 改良版 Kahan 補償和 + 2 の冪 scale）の一致判定を、事前判定不能な「除外」ではなく事前判定可能な Tier A（無条件誤差上界）／Tier B（REQ-2 統一複合判定の適用可否述語）の 2 層契約として定義（PR #1666 codex-review 複数回の P1／P2 指摘への是正を経て確定。係数・上界式・参照値 `S_ref`〈参照実装 `reduce_bias_grad_rows_host` 等の出力。真値ではない〉の正は同文書。spec 起票は未承認。イシュー #1566）
     ├── oss-comparison-harness-decision.md # OSS 直接比較ハーネス（matrixmultiply・gemm crate・MLX・PyTorch）の恒久化・本体 workspace 外配置の設計判断・matrixmultiply/gemm の許容依存第 9 区分〈ベンチ比較対象〉としての条件付きユーザー承認記録（#755）
     ├── perf/                # 性能実測・下限確定の記録群（`performance-floor-decision.md` ほか。GEMM 最適化ツリー #479 の実測記録を含む）
     │   ├── performance-floor-decision.md # REQ-8 段階的下限の確定判断・追補記録（#158・#386・#393・#577）

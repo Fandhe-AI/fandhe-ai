@@ -35,8 +35,15 @@ PR #1666 に対する codex-review で、次の 7 件の指摘を段階的に受
    （round-to-nearest）の絶対誤差上界を `0.5u` としていたが、正しくは `u·|S_ref|`
    （`≤ u·Σ|x_i|`。例 `[1, 2^-24]`）であり、`C = 3`（`2u + 1u`）は安全余裕ゼロで
    underflow 誤差（項目 6）を吸収する根拠が崩れる
+8. **P2（2 件。スレッド `PRRT_kwDOTuUCJc6hv2ss`／`PRRT_kwDOTuUCJc6hv2sw`）**: `C = 4`
+   確定（項目 7）後の追随不足の是正。`CLAUDE.md` の docs 索引行に `(3+n·ε32)`・
+   `C=3` という古い式・値が残っていた（索引からは式を排し正本参照のみへ改める）。
+   また項目 7 の `[1, 2^-24]` 例で `f32` の刻み幅と丸め単位の記述が逆になっていた
+   （`1` 直上の `f32` は `1 + 2^-23` であり刻み幅は `2^-23`。中点 `1 + 2^-24` を
+   `1` へ丸める誤差が `2^-24 = ε32`〈`= u·|S_ref|`〉である旨へ是正。上界 `1u` の
+   結論自体は不変）
 
-本ドキュメントはこれら 7 件を踏まえ、`O` 記法を排した**計算可能な明示式**へ確定し、
+本ドキュメントはこれら 8 件を踏まえ、`O` 記法を排した**計算可能な明示式**へ確定し、
 参照値の定義を**参照実装（真値ではない）**として明確化したうえで、範囲外入力の
 fail-closed 拒否・非有限値のクラス一致規則・2 の冪 scale の exact 条件と underflow
 誤差の吸収を追加する。
@@ -202,7 +209,7 @@ Tier A・Tier B の上界式（実数の誤差上界）は、`y_ref` と `y_meta
 | 項目 | 上界 | 根拠 |
 |---|---|---|
 | 補償和自体の誤差（Neumaier。1 段・完全逐次） | `2u` | Higham『Accuracy and Stability of Numerical Algorithms』4.3（Neumaier (1974) の改良版補償和）の標準的な上界 |
-| `y_ref` の downcast（`S_ref`〈`f64`〉を 1 回 `f32` へ round-to-nearest） | `1u` | `\|y_ref − S_ref\| ≤ u·\|S_ref\| ≤ u·Σ\|x_i\|`。round-to-nearest の丸め誤差は一般に丸め単位 `u`（相対誤差の上界。ここでは絶対誤差 `u·\|S_ref\|` に換算）であり、**`0.5u` ではない**（旧版の誤り。例 `[1, 2^-24]`: `S_ref = 1 + 2^-24` を `f32` へ downcast する際、`f32` の刻み幅は `1` 付近で `ε32 = 2^-24` であり、丸め誤差は `0.5·ε32` 程度になりうるが、`S_ref` の絶対値がさらに大きい場合〈`Σ\|x_i\|` に対する `\|S_ref\|` の相対的な小ささを一般には仮定できない〉一般上界としては `u·\|S_ref\|` を用いる必要がある。codex-review P2・スレッド `PRRT_kwDOTuUCJc6hvxnm` の指摘） |
+| `y_ref` の downcast（`S_ref`〈`f64`〉を 1 回 `f32` へ round-to-nearest） | `1u` | `\|y_ref − S_ref\| ≤ u·\|S_ref\| ≤ u·Σ\|x_i\|`。round-to-nearest の丸め誤差は一般に丸め単位 `u`（相対誤差の上界。ここでは絶対誤差 `u·\|S_ref\|` に換算）であり、**`0.5u` ではない**（旧版の誤り。例 `[1, 2^-24]`: `S_ref = 1 + 2^-24`。`1` の次に大きい `f32` 値は `1 + 2^-23`（`[1, 2)` 区間の `f32` 刻み幅は 23bit 仮数部より `2^-23`）であり、`S_ref` はちょうどその中点 `1 + 2^-24` に一致する。round-to-nearest（-even）によりこの中点は `1` へ丸められ、丸め誤差は `2^-24 = ε32 = u`（`≈ u·\|S_ref\|`。`\|S_ref\| ≈ 1`）となる。すなわち丸め誤差は `0.5u`（`= 2^-25`）ではなく `u`（`= 2^-24`）そのものに達する、`u·\|S_ref\|` が正しい上界であることを示す最小例である。codex-review P2・スレッド `PRRT_kwDOTuUCJc6hvxnm` の指摘。刻み幅・丸め誤差の記述自体の是正はスレッド `PRRT_kwDOTuUCJc6hv2sw` の指摘） |
 | 安全余裕（下記 (a)(b)(c) の合計を吸収） | `1u` | `= ε32 · Σ\|x_i\| = 2^-24 · Σ\|x_i\|` |
 | **合計** | **`4u`** | **`C = 4`** |
 
@@ -344,7 +351,9 @@ nearest の丸め誤差は刻み幅の半分以下という性質）であり、
   指摘）・`PRRT_kwDOTuUCJc6hvrGx`（有効範囲外未定義への P1 指摘）・
   `PRRT_kwDOTuUCJc6hvrGy`（非有限値・overflow 未対応への P1 指摘）・
   `PRRT_kwDOTuUCJc6hvug6`（2 の冪 scale の underflow 時 exact 性への P2 指摘）・
-  `PRRT_kwDOTuUCJc6hvxnm`（downcast 誤差上界 `0.5u` の誤りへの P2 指摘）
+  `PRRT_kwDOTuUCJc6hvxnm`（downcast 誤差上界 `0.5u` の誤りへの P2 指摘）・
+  `PRRT_kwDOTuUCJc6hv2ss`（`CLAUDE.md` 索引の古い式・値残存への P2 指摘）・
+  `PRRT_kwDOTuUCJc6hv2sw`（downcast 例の刻み幅記述の誤りへの P2 指摘）
 - イシュー #1566（親。PR #1659 の codex-review 経緯・2026-09-12 ユーザー承認）
 - PR #1659（イシュー #1566 実装 PR。Metal bias 勾配 resident 化の実装本体・逐語
   ホストモデルによる `C` 確定実測〈「3.2」節〉の実施元）・`docs/backend-metal-command-
