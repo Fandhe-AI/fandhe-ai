@@ -163,7 +163,7 @@ iter_total 2.470 → 2.677 ms。後退は GPU 待ち＋ダウンロードを含�
 | A-5 SME | 不変（Mac 限定の答え） | §2 | 承認要（`unsafe asm!`） | 1587 |
 | A-6 GB10 診断 | 完了 → TMA Phase B を設計 issue として起票（実装は含めない） | §2 | 診断済み | 1589 |
 | A-7〜A-10・B-3 | 不変（A-9 は「マスク先行」を A-2 へ統合） | — | 各 issue のとおり | 1584／1583／1585 |
-| 新 A-11 MSE backward の逐次しきい値 | CPU: 要素数しきい値で rayon を回避（bit 同一） | §4 | 中立 | 1578 |
+| 新 A-11 MSE backward の逐次しきい値 | CPU: 要素数しきい値で rayon を回避（bit 同一） | §4 | 中立 | 1578（実装・実測は `docs/perf/cpu-mse-backward-sequential-threshold.md`。GB10 reuse セル後退により REJECT・既定 `MSE_BACKWARD_PARALLEL_MIN_ELEMS=0` で出荷） |
 | 新 D-1 Metal readout matmul 区間の切り分け | borrowed＋ダミー確保・解放腕 | §5 | 診断 | 1588 |
 
 本節の数値は方向づけ用。`docs/perf/` への正式記録（5 起動・専有ゲートまたは
