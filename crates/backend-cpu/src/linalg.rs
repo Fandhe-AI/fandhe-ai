@@ -399,11 +399,17 @@ pub(crate) fn qr(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), LinalgEr
         ));
     }
 
-    // Householder 反射を `r`（作業用に `A` を上書き）へ逐次適用しつつ、
-    // `Q = H_0 H_1 ... H_{k-1}` を明示的に蓄積する（k が小さい前提の
-    // 参照実装として、反射の合成を都度フル行列積で行う単純な方式）。
+    // Householder 反射を `r`（作業用に `A` を上書き）へ逐次適用する。
+    // `Q`（= `H_0 H_1 ... H_{k-1}`）は `m×m` の単位行列を明示構築せず、
+    // 正規化済み反射ベクトル `v`（列インデックス付き）のみを蓄積し、
+    // reduced 形（`[m,k]`）を後段で逆順適用により直接構築する
+    // （O(mk) メモリ。以前は `Mat::identity(m)` により `m×m` の `f64`
+    // 行列を確保しており、`[100000,1]` のような縦長入力でメモリ枯渇を
+    // 招いていた——`m×m` だけで約 80 GB。codex-review 指摘。
+    // `docs/autodiff-linalg-design.md` §3.4「QR」。`crates/autodiff::
+    // eval::linalg::qr` と同一アルゴリズム）。
     let mut r = mat;
-    let mut q = Mat::identity(m);
+    let mut reflectors: Vec<(usize, Vec<f64>)> = Vec::with_capacity(k);
 
     for col in 0..k {
         // Householder ベクトル `v`（列 `col` の対角以下）を作る。
@@ -413,7 +419,8 @@ pub(crate) fn qr(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), LinalgEr
         }
         let norm_x: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
         if norm_x == 0.0 {
-            // この列は既にゼロ以下三角化済み（rank 落ち）。反射不要。
+            // この列は既にゼロ以下三角化済み（rank 落ち）。反射不要
+            // （`reflectors` へ何も積まない＝恒等反射として扱う）。
             continue;
         }
         // 数値安定性のため `alpha` の符号は `x[0]` と逆にする
@@ -444,32 +451,39 @@ pub(crate) fn qr(a: &Tensor<f32>) -> Result<(Tensor<f32>, Tensor<f32>), LinalgEr
                 r.set(idx, c, r.get(idx, c) - 2.0 * vi * dot);
             }
         }
-        // `q ← q H`（列方向に反射を右から合成。`Q` の列 `col..` にのみ
-        // 作用する）。
-        for row in 0..m {
+        reflectors.push((col, v));
+    }
+
+    // reduced `Q`（`[m,k]`）を `E_k`（`I_m` の先頭 `k` 列）から出発し、
+    // 蓄積した反射を**逆順**（`col` の大きい順）に適用して構築する:
+    // `Q e_j = H_0 (H_1 (... (H_{k-1} e_j) ...))`（`Q = H_0 H_1 ...
+    // H_{k-1}` の定義どおり、ベクトルへ右から順に作用させるには
+    // 反射を逆順に適用する）。`col > j` の反射は `e_j`（`j` 列成分の
+    // みが非零）の `[col, m)` 区間が全て 0 のため内積が 0 になり恒等
+    // 変換となる（`if dot == 0.0 { continue }` が自然にスキップする）。
+    let mut q_reduced = Mat::zeros(m, k);
+    for i in 0..k {
+        q_reduced.set(i, i, 1.0);
+    }
+    for (col, v) in reflectors.iter().rev() {
+        let col = *col;
+        for c in 0..k {
             let mut dot = 0.0;
             for (i, &vi) in v.iter().enumerate() {
-                dot += vi * q.get(row, col + i);
+                dot += vi * q_reduced.get(col + i, c);
             }
             if dot == 0.0 {
                 continue;
             }
             for (i, &vi) in v.iter().enumerate() {
                 let idx = col + i;
-                q.set(row, idx, q.get(row, idx) - 2.0 * vi * dot);
+                q_reduced.set(idx, c, q_reduced.get(idx, c) - 2.0 * vi * dot);
             }
         }
     }
 
-    // reduced 形（`Q` の先頭 k 列・`R` の先頭 k 行）へ切り出しつつ、
-    // `R` 対角の符号を非負へ正規化する（対応する `Q` 列の符号も反転して
-    // `Q R = A` を保つ）。
-    let mut q_reduced = Mat::zeros(m, k);
-    for row in 0..m {
-        for c in 0..k {
-            q_reduced.set(row, c, q.get(row, c));
-        }
-    }
+    // `R` の先頭 k 行へ切り出しつつ対角の符号を非負へ正規化する
+    // （対応する `Q` 列の符号も反転して `Q R = A` を保つ）。
     let mut r_reduced = Mat::zeros(k, n);
     for row in 0..k {
         for c in 0..n {
@@ -1000,6 +1014,38 @@ mod tests {
         approx_eq(&reconstructed, &a, 1e-4);
     }
 
+    /// codex-review 指摘の回帰（`crates/autodiff::eval::linalg` と同型。
+    /// 同ドキュメント参照）: `[100000,1]` のような縦長入力で `m×m` の
+    /// 中間行列（約 80 GB）を確保せず O(mk) メモリで完了することを
+    /// 確認する。
+    #[test]
+    fn qr_tall_matrix_does_not_allocate_full_m_by_m_intermediate() {
+        let m = 100_000usize;
+        let data: Vec<f32> = (0..m).map(|i| 1.0 + (i % 7) as f32).collect();
+        let a = build_tensor(data, &[m, 1]).unwrap();
+        let (q, r) = qr(&a).unwrap();
+        assert_eq!(q.shape(), &[m, 1]);
+        assert_eq!(r.shape(), &[1, 1]);
+
+        let q_data = dense_vec(&q);
+        let norm: f64 = q_data.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+        assert!(
+            (norm.sqrt() - 1.0).abs() < 1e-3,
+            "Q 列が単位ノルムでない: norm={norm}"
+        );
+
+        let r_data = dense_vec(&r);
+        let a_data = dense_vec(&a);
+        for &i in &[0usize, 1, m / 2, m - 1] {
+            let reconstructed = q_data[i] * r_data[0];
+            assert!(
+                (reconstructed - a_data[i]).abs() < 1e-2,
+                "行 {i}: 再構成 {reconstructed} が入力 {} と乖離",
+                a_data[i]
+            );
+        }
+    }
+
     #[test]
     fn svd_reconstructs_square_input() {
         let mut a_data = vec![0.0f32; 9];
@@ -1082,6 +1128,67 @@ mod tests {
             &matrix_norm_inf(&b).unwrap(),
             &build_tensor(vec![9.0], &[]).unwrap(),
             1e-5,
+        );
+    }
+
+    /// codex-review 指摘の回帰（`crates/autodiff::eval::linalg` と同型）:
+    /// `sum > max_sum` は NaN に対して常に偽のため、NaN を含む唯一の
+    /// 列・行が最大値の更新へ一切寄与せず `[[NaN]]` のノルムが正常な
+    /// `0` として返ってしまっていた。
+    #[test]
+    fn matrix_norm_one_and_inf_propagate_nan() {
+        let a = build_tensor(vec![f32::NAN], &[1, 1]).unwrap();
+        assert!(dense_vec(&matrix_norm_one(&a).unwrap())[0].is_nan());
+        assert!(dense_vec(&matrix_norm_inf(&a).unwrap())[0].is_nan());
+    }
+
+    /// codex-review 指摘の回帰（`crates/autodiff::eval::linalg` と同型）:
+    /// Jacobi の収束判定に絶対下限 `.max(EPS)` があると入力スケール
+    /// 非依存の閾値が生じ、約 1e-15 スケールの入力で非直交な列を誤って
+    /// 収束扱いし、誤った特異値を返していた。相対収束判定へ是正後は
+    /// 正しい特異値（黄金比由来の `[1.618...e-15, 0.618...e-15]`）を
+    /// 返す。
+    #[test]
+    fn svd_tiny_scale_singular_values_are_accurate() {
+        let scale = 1e-15f32;
+        let a = build_tensor(vec![scale, scale, 0.0, scale], &[2, 2]).unwrap();
+        let (_, s, _) = svd(&a).unwrap();
+        let s_data = dense_vec(&s);
+        let expected0 = ((3.0 + 5.0f64.sqrt()) / 2.0).sqrt() * 1e-15;
+        let expected1 = ((3.0 - 5.0f64.sqrt()) / 2.0).sqrt() * 1e-15;
+        let rel_err0 = (f64::from(s_data[0]) - expected0).abs() / expected0;
+        let rel_err1 = (f64::from(s_data[1]) - expected1).abs() / expected1;
+        assert!(
+            rel_err0 < 1e-2,
+            "第一特異値が期待値から乖離: {} vs {expected0}",
+            s_data[0]
+        );
+        assert!(
+            rel_err1 < 1e-2,
+            "第二特異値が期待値から乖離: {} vs {expected1}",
+            s_data[1]
+        );
+    }
+
+    /// codex-review 指摘の回帰（`crates/autodiff::eval::linalg` と同型）:
+    /// 零特異値の `V` 列を Gram–Schmidt で直交補完した後にも「最大絶対
+    /// 値成分が正」という符号規約（設計文書 §3.5）が保たれることを
+    /// 確認する。
+    #[test]
+    fn svd_zero_sigma_gram_schmidt_column_respects_sign_convention() {
+        let a = build_tensor(vec![2.0, 1.0, 0.0, 0.0], &[2, 2]).unwrap();
+        let (_, s, vh) = svd(&a).unwrap();
+        let s_data = dense_vec(&s);
+        assert!(
+            s_data[1].abs() < 1e-6,
+            "第二特異値は厳密 0 のはず: {s_data:?}"
+        );
+        let vh_data = dense_vec(&vh);
+        let col = [vh_data[2], vh_data[3]];
+        let max_abs_idx = if col[0].abs() >= col[1].abs() { 0 } else { 1 };
+        assert!(
+            col[max_abs_idx] >= 0.0,
+            "補完後の V 列が符号規約（最大絶対値成分が正）に違反: {col:?}"
         );
     }
 

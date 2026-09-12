@@ -568,12 +568,20 @@ pub(crate) fn vjp(
         // に集約し、ここでは各 Op の入出力（forward 記録値・upstream・
         // 兄弟ノードの forward 値）を渡すだけに徹する。
         Op::Inv { input } => {
-            let da = eval::linalg::inv_vjp(out_value, upstream);
+            // `out_value`（forward が返す `f32` 記録値の `A^{-1}`）は
+            // 再利用せず、`input` から改めて `f64` で計算する
+            // （`eval::linalg::inv_vjp` doc 参照。codex-review 指摘）。
+            let a_val = materialize_fallible(nodes, ops, input)?;
+            let da = eval::linalg::inv_vjp(a_val, upstream)?;
             vec![(input, da)]
         }
         Op::Solve { a, b } => {
+            // `out_value`（forward の解 `X` の `f32` 記録値）は再利用
+            // せず、`a`／`b` から改めて `f64` で計算する
+            // （`eval::linalg::solve_vjp` doc 参照。codex-review 指摘）。
             let a_val = materialize_fallible(nodes, ops, a)?;
-            let (da, db) = eval::linalg::solve_vjp(a_val, out_value, upstream)?;
+            let b_val = materialize_fallible(nodes, ops, b)?;
+            let (da, db) = eval::linalg::solve_vjp(a_val, b_val, upstream)?;
             vec![(a, da), (b, db)]
         }
         Op::Det { input } => {
