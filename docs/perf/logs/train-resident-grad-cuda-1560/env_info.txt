@@ -1,0 +1,22 @@
+# イシュー #1560 CUDA resident weight 勾配経路 実測環境（記入欄）
+#
+# 本 PR 実行環境（Linux・QEMU VM）に DGX Spark GB10 実機への到達手段が
+# ないため未実測。GB10 実機での実測時にこのテンプレートを埋めること
+# （内部ホスト名・ユーザー名は書かない）。
+
+hostname: masked
+date:
+gpu:
+cpu:
+os:
+cuda_driver_version:
+rustc:
+cargo:
+before_sha: d77f8bde
+after_sha:
+before_arm: d77f8bde crates/facade（path patch）bench-fandhe sha256=
+after_arm: <branch> crates/facade（path patch）bench-fandhe sha256=
+load_gate_mode:
+bitdump_result:
+ab_verdict:
+graph_capture_secondary_observation:

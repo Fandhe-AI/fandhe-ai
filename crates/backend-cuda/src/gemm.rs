@@ -4858,7 +4858,11 @@ impl CudaGemm {
     /// 旧経路（`readback`〈D2H・sync〉+ ホスト `Vec`/`Tensor` 構築 +
     /// `upload_into`〈H2D・sync〉＝ m*n 要素データ転送 2 回 + sync 2 回）
     /// と比較し、データ転送ゼロで sync 1 回のみになるため net win が
-    /// 高いと判断する（実測は #1560 へ引き継ぐ）。ストリーム順序保証
+    /// 高いと判断する（実測は #1560 が引き継ぎ、GB10 実機での bit 同一
+    /// 検証・A/B のスキャフォールドを整備済み。
+    /// `docs/perf/train-resident-grad-device-update.md` §7・
+    /// `docs/perf/logs/train-resident-grad-cuda-1560/`。実機実測自体は
+    /// 本 PR 時点では未実施）。ストリーム順序保証
     /// （`cuMemFreeAsync` 相当）に依存して本 `synchronize()` を省略する
     /// 最適化は要レビュー承認の将来課題としてスコープ外のままとする。
     ///

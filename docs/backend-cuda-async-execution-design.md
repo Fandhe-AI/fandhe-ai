@@ -586,4 +586,7 @@ Metal と同型の「encode と登録の間に別スレッドの synchronize が
 m*n 要素データ転送 2 回 + sync 2 回を要したが、新経路はデータ転送ゼロ
 （デバイス上のバッファ間で完結）で sync 1 回のみに削減される設計。
 本イシュー時点では本エージェント実行環境に CUDA 実機がないため定量的な
-性能実測は行わない。
+性能実測は行わない。#1560 でスキャフォールド（実行スクリプト・事前登録
+判定規則）を整備済み（`docs/perf/train-resident-grad-device-update.md`
+§7・`docs/perf/logs/train-resident-grad-cuda-1560/`）。GB10 実機実測は
+本 PR 時点では未実施のまま同節へ引き継ぐ。
