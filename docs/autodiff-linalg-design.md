@@ -103,6 +103,21 @@ single_input`／`svd_multi_output_gradient_accumulates_to_single_input` で検�
   持たない。絶対下限があると `JACOBI_EPS² = 1e-28` という入力スケール非依存の閾値が
   生じ、列ノルムが約 1e-15 スケールの小さい入力で非直交な列を誤って収束扱いし、誤った
   特異値・特異ベクトルを返していた（codex-review 指摘・2026-09-13 是正）
+- **`det` の LU 対角積オーバーフロー対策**: `det(A)`（および `det_vjp` 内部で再計算する
+  `det(A)`）は LU 対角成分の総積を単純な `f64` 逐次積では計算しない。正負に極端な
+  スケールが混在する対角（例 `diag([1e30; 11], [1e-30; 11])`。真の行列式は約 `1.0`）
+  では、11 個の `1e30` を掛けた時点で `f64` の表現範囲（約 `1.8e308`）を超えて `Inf`
+  になり、続く `1e-30` を掛けても `Inf` のまま戻らない（対角順序を逆にすると `0.0` に
+  なる）——`det_vjp` の勾配 `dA = g · det(A) · A^{-T}` もこの中間値に依存するため、
+  本来有限な勾配が `Inf`／`NaN`／全ゼロになる（codex-review 指摘 PRRT_kwDOTuUCJc6hxiys）。
+  `eval::linalg::lu_diag_product`／`backend-cpu::linalg::lu_diag_product`（`frexp`／
+  `ldexp` 相当。`f64::to_bits`／`from_bits` によるビット操作のみで `unsafe` を使わない）
+  が、各対角要素を `m·2^e`（`0.5<=|m|<1`）へ分解し、仮数の積を毎回 `[0.5,1)` 近傍へ
+  正規化しつつ指数を整数（`i64`）で加算する方式で計算する。log-abs 方式（`ln` の和を
+  経由する方式）は不要な丸め誤差を追加するため採用しない。最終合成（`ldexp`）が `f64`
+  の表現範囲を超える場合にのみ `Inf`／`0.0` を返す（真値が範囲外のときの正しい挙動）。
+  `det`・`det_vjp` は同じ `lu_diag_product` を経由し、両クレートは意図的な複製として
+  同一の演算列を保つ（下記「eval と CPU の関係」）
 - **eval と CPU の関係**: `autodiff::eval::linalg`（`pub(crate)`）と `backend-cpu::linalg`
   は同一アルゴリズム・同一規約で実装するが、依存方向の制約（`autodiff` → `backend-cpu`
   の依存は作れる一方、逆に `backend-cpu` が `autodiff` の非公開実装へ依存することはでき
@@ -147,7 +162,7 @@ single_input`／`svd_multi_output_gradient_accumulates_to_single_input` で検�
 |---|---|---|
 | `Inv` | `dA = -(Xᵀ g Xᵀ)`（`X = A⁻¹`） | `X` は forward の `f32` 記録値を再利用せず、`a`（入力）から `f64` の `LuDecomp` で改めて計算する（極端なスケールで forward の `f32` 丸め済み `X` が `Inf` になり有限勾配が壊れるのを防ぐ。codex-review 指摘・2026-09-13 是正）。`Mat`（内部 `f64` 稠密行列）の `matmul` |
 | `Solve` | `dB = A^{-T} g`・`dA = -dB Xᵀ`（`X = A^{-1} B`） | `X` は forward の `f32` 記録値を再利用せず、`a`／`b`（両入力）から `f64` の `LuDecomp` で改めて計算する（`Inv` と同じ理由）。`dB` は `solve_transposed`（`Aᵀ` の LU 分解）で計算し `f32` へ downcast する前の `f64` 中間値を `dA` の計算にも使う |
-| `Det` | `dA = g · det(A) · A^{-T}` | `inv(a)` を再利用（特異なら fail-closed で伝播） |
+| `Det` | `dA = g · det(A) · A^{-T}` | `inv(a)` は呼ばず、`a` から改めて `LuDecomp` を作り行列式・逆行列を 1 回の分解から導出する（特異なら fail-closed で伝播）。`det(A)` は `lu_diag_product`（仮数・指数分離方式）で計算し、単純な `f64` 逐次積の中間オーバーフローを避ける（上記「`det` の LU 対角積オーバーフロー対策」） |
 | `Cholesky` | `Φ = tril(Lᵀ dL)`（対角 1/2）・`S = L^{-T} Φ L^{-1}`・`dA = (S+Sᵀ)/2` | `Lᵀ` の LU 分解を 2 回の三角解法に再利用 |
 | `QrQ`／`QrR` | `M = R dRᵀ − dQᵀQ`・`dA = (dQ + Q copyltu(M)) R^{-T}` | `m ≥ n` 限定（`m<n` は `InvalidArgument`）。`copyltu` は下三角を上三角へ複製して対称化 |
 | `SvdU`／`SvdS`／`SvdVh` | Townsend (2016) の標準式（`F_ij = 1/(s_j²−s_i²)`, `i≠j`）+ `m≠n` 補正項 `(I−UUᵀ)dU S⁻¹Vᵀ`・`US⁻¹dVᵀ(I−VVᵀ)` | 特異値が近接／重複（`|s_j²-s_i²| < 1e-9`）の場合 `InvalidArgument`。`U Uᵀ`（`m×m`）・`V Vᵀ`（`n×n`）は明示構築せず `X − U(UᵀX)` 型の積順序（結合則）で `k×k` 以下の中間行列のみを経由する（`m×m`／`n×n` の確保は `[100000,1]` のような入力で約 80 GB を要求しメモリ枯渇を招く。codex-review 指摘・2026-09-13 是正）。`du`／`dvh` が `None`（多出力ノードのうち他ノードのみが損失へ到達するケース）の項（`term2`／`term3`）はゼロ寄与であることが自明なため計算自体を省略する |

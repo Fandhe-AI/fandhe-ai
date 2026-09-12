@@ -334,9 +334,87 @@ pub(crate) fn solve(a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, Lin
     x.to_tensor()
 }
 
+/// `x = m · 2^e`（`0.5 <= |m| < 1`。`frexp` 相当）へ分解する。`0` と
+/// 非有限（`NaN`／`Inf`）はそのまま素通しする（`e = 0`）。
+/// `f64::to_bits`／`from_bits` によるビットフィールド抽出・再構成のみで
+/// 構成し `unsafe` を使わない（IEEE 754 binary64 の指数・仮数フィールド
+/// は安全に読み書きできる。非正規化数〈subnormal〉は `2^64` を掛けて
+/// 正規化してから指数を補正する）。[`lu_diag_product`] が使う
+/// （`crates/autodiff/src/eval/linalg.rs::frexp` と同一実装。設計文書
+/// §3「eval と CPU の関係」に沿った意図的複製。codex-review 指摘
+/// PRRT_kwDOTuUCJc6hxiys の是正）。
+fn frexp(x: f64) -> (f64, i32) {
+    if x == 0.0 || !x.is_finite() {
+        return (x, 0);
+    }
+    let bits = x.to_bits();
+    let exponent_field = (bits >> 52) & 0x7ff;
+    if exponent_field == 0 {
+        // 非正規化数: 2^64 倍して正規化してから指数を 64 引いて補正する
+        // （最小の非正規化数 × 2^64 でも正規化数の範囲に収まるため、
+        // この 1 回の再帰呼び出しで必ず正規化数の分岐へ入る）。
+        let (m, e) = frexp(x * 2f64.powi(64));
+        return (m, e - 64);
+    }
+    let sign_bit = bits & 0x8000_0000_0000_0000;
+    let mantissa_bits = bits & 0x000f_ffff_ffff_ffff;
+    // 指数フィールドを 1022（非バイアス指数 -1）へ差し替えると
+    // `1.mantissa_bits * 2^-1` となり、仮数が `[0.5, 1)`（符号付きなら
+    // `(-1, -0.5]` または `[0.5, 1)`）に収まる。
+    let new_bits = sign_bit | (1022u64 << 52) | mantissa_bits;
+    let m = f64::from_bits(new_bits);
+    let e = exponent_field as i32 - 1022;
+    (m, e)
+}
+
+/// `m · 2^e`（[`frexp`] の逆演算。`ldexp` 相当）。底が厳密に 2 の
+/// べき乗であるため `powi` は表現範囲内で丸め誤差を追加しない
+/// （`f64` の乗算は 2 のべき倍について常に正確）。`f64` の表現範囲
+/// （約 `±1.8e308`）を超える場合は標準の浮動小数点挙動どおり
+/// `Inf`／`0.0` を返す（真値が範囲外のときの正しい挙動）。
+fn ldexp(m: f64, e: i32) -> f64 {
+    m * 2f64.powi(e)
+}
+
+/// LU 対角成分の総積（置換符号込み）を仮数・指数分離（[`frexp`]／
+/// [`ldexp`] 相当）で計算する。単純な `f64` 逐次積では、正負に極端な
+/// スケールが混在する対角（例 `diag([1e30; 11], [1e-30; 11])`。真の
+/// 行列式は約 `1.0`）で中間積が `f64` の表現範囲を超えて `Inf` になり、
+/// 続く小スケール要素と乗算しても `Inf` のまま戻らない——本来有限な
+/// 行列式が `Inf`／`NaN` になってしまう（codex-review 指摘
+/// PRRT_kwDOTuUCJc6hxiys）。log-abs 方式（`ln` の和を経由する方式）は
+/// 不要な丸め誤差を追加するため採用せず、各対角要素を `m·2^e`
+/// （`0.5<=|m|<1`）へ分解し、仮数の積を毎回正規化しつつ指数を整数で
+/// 加算する方式を採る。最終合成（`ldexp`）が `f64` の範囲を超える
+/// 場合にのみ `Inf`／`0.0` を返す（真値が範囲外のときの正しい挙動）。
+fn lu_diag_product(lu: &LuDecomp) -> f64 {
+    let n = lu.lu.rows;
+    let mut mantissa = 1.0f64;
+    let mut exponent: i64 = 0;
+    for i in 0..n {
+        let (m, e) = frexp(lu.lu.get(i, i));
+        mantissa *= m;
+        exponent += i64::from(e);
+        // 仮数を毎回 `[0.5, 1)` 近傍へ正規化し直すことで、対角成分数が
+        // 多い場合でも仮数自体のアンダーフロー（正規化を怠ると
+        // `0.5^n` で消失しうる）を防ぐ。`0`／非有限は `frexp` が
+        // そのまま素通しする設計のため、ここでの再正規化もそのまま
+        // 伝播する。
+        if mantissa != 0.0 && mantissa.is_finite() {
+            let (m2, e2) = frexp(mantissa);
+            mantissa = m2;
+            exponent += i64::from(e2);
+        }
+    }
+    mantissa *= lu.sign;
+    let exponent = exponent.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    ldexp(mantissa, exponent)
+}
+
 /// `det(A)`（LU 対角積 × 置換符号）。空行列は空積 `1.0`。特異行列は
 /// `0.0`（エラーにしない。設計文書 §3.5・PyTorch `torch.linalg.det`
-/// 挙動）。
+/// 挙動）。対角積は [`lu_diag_product`]（仮数・指数分離）で計算し、
+/// 単純な `f64` 逐次積の中間オーバーフローを避ける。
 pub(crate) fn det(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
     let mat = Mat::from_tensor(a);
     let n = mat.rows;
@@ -345,13 +423,7 @@ pub(crate) fn det(a: &Tensor<f32>) -> Result<Tensor<f32>, LinalgError> {
     }
     let value = match lu_decompose(&mat) {
         None => 0.0,
-        Some(lu) => {
-            let mut prod = lu.sign;
-            for i in 0..n {
-                prod *= lu.lu.get(i, i);
-            }
-            prod
-        }
+        Some(lu) => lu_diag_product(&lu),
     };
     build_tensor(vec![value as f32], &[])
 }
@@ -986,6 +1058,50 @@ mod tests {
             &build_tensor(vec![1.0], &[]).unwrap(),
             1e-6,
         );
+    }
+
+    /// `values` を対角成分に持つ正方行列（非対角は 0）を組み立てる
+    /// テスト補助（`lu_diag_product` のオーバーフロー回帰テストで使う。
+    /// `autodiff` クレート `eval/linalg.rs` の同名テスト補助と同一
+    /// 実装。設計文書 §3「eval と CPU の関係」に沿った意図的複製）。
+    fn diag_tensor(values: &[f32]) -> Tensor<f32> {
+        let n = values.len();
+        let mut data = vec![0.0f32; n * n];
+        for (i, v) in values.iter().enumerate() {
+            data[i * n + i] = *v;
+        }
+        build_tensor(data, &[n, n]).unwrap()
+    }
+
+    /// codex-review 指摘 PRRT_kwDOTuUCJc6hxiys の回帰:
+    /// `diag([1e30; 11], [1e-30; 11])` の真の行列式は約 `1.0` だが、
+    /// LU 対角積の単純な `f64` 逐次積では 11 個の `1e30` を掛けた時点で
+    /// `f64` の表現範囲（約 `1.8e308`）を超えて `Inf` になり、続く
+    /// `1e-30` を掛けても `Inf` のまま戻らなかった。`lu_diag_product`
+    /// （仮数・指数分離方式）へ切替後は中間オーバーフローを避け、
+    /// 有限な値（約 `1.0`）を返すことを検証する。
+    #[test]
+    fn det_extreme_scale_diag_does_not_overflow() {
+        let mut values = vec![1e30f32; 11];
+        values.extend(std::iter::repeat_n(1e-30f32, 11));
+        let a = diag_tensor(&values);
+        let v = dense_vec(&det(&a).unwrap())[0];
+        assert!(v.is_finite(), "det must be finite: {v}");
+        assert!((v - 1.0).abs() < 1e-2, "det should be approx 1.0: {v}");
+    }
+
+    /// 上記の対角順序を逆にした回帰（codex-review 指摘: 順序を逆に
+    /// すると単純な逐次積では `0.0` になっていた）。順序に依らず
+    /// 約 `1.0` を返すことを検証する。
+    #[test]
+    fn det_extreme_scale_diag_reversed_order_does_not_underflow() {
+        let mut values = vec![1e-30f32; 11];
+        values.extend(std::iter::repeat_n(1e30f32, 11));
+        let a = diag_tensor(&values);
+        let v = dense_vec(&det(&a).unwrap())[0];
+        assert!(v.is_finite(), "det must be finite: {v}");
+        assert_ne!(v, 0.0, "det should not underflow to zero: {v}");
+        assert!((v - 1.0).abs() < 1e-2, "det should be approx 1.0: {v}");
     }
 
     #[test]
