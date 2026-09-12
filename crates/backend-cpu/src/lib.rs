@@ -161,6 +161,7 @@ mod ops;
 pub mod parity;
 pub mod reduction;
 pub mod rmsnorm;
+mod rnn_cell;
 mod small_shape_thread_cap;
 pub mod softmax;
 mod thread_limit;

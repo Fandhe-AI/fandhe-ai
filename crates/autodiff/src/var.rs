@@ -16,8 +16,9 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, ChecksumReadout, GemmChecksum, MatrixNormOrd, MseReduction,
-    ShapeError, Tensor, broadcast_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
+    Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, ShapeError, Tensor, broadcast_shape,
+    matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 
 use crate::error::AutodiffError;
@@ -788,6 +789,308 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// RNN（tanh 版）セル 1 step（イシュー #1647・設計 `docs/autodiff-
+    /// rnn-cell-tape-design.md` 決定 1・4・5）。
+    /// `h_t = tanh(x·W_ih + b_ih + h_{t-1}·W_hh + b_hh)`。
+    ///
+    /// `self` が `x_t: [B, D]`、`h_prev: [B, H]`、`p.w_ih: [D, H]`、
+    /// `p.w_hh: [H, H]`、`p.b_ih`／`p.b_hh` はいずれも `[H]`（両方
+    /// `Some` か両方 `None`。片方のみは [`AutodiffError::InvalidArgument`]）。
+    /// `D == 0`／`H == 0` は zero-K ガードとして拒否する。
+    pub fn rnn_cell(
+        &self,
+        h_prev: &Var<'t>,
+        p: GateParams<'_, 't>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(h_prev)?;
+        self.check_same_tape(p.w_ih)?;
+        self.check_same_tape(p.w_hh)?;
+        if let Some(b) = p.b_ih {
+            self.check_same_tape(b)?;
+        }
+        if let Some(b) = p.b_hh {
+            self.check_same_tape(b)?;
+        }
+        check_bias_pair(p.b_ih, p.b_hh)?;
+
+        let x_shape = self.shape();
+        let h_shape = h_prev.shape();
+        let w_ih_shape = p.w_ih.shape();
+        let w_hh_shape = p.w_hh.shape();
+        require_rank2_all(&[&x_shape, &h_shape, &w_ih_shape, &w_hh_shape], "rnn_cell")?;
+        let hidden = h_shape[1];
+        require_positive_dims(x_shape[1], hidden, "rnn_cell")?;
+
+        let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
+        let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
+        require_same_shape(&out_ih, &out_hh)?;
+        if out_ih[1] != hidden {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: out_ih,
+                rhs: vec![h_shape[0], hidden],
+            }));
+        }
+        if let Some(b) = p.b_ih {
+            require_same_shape(&b.shape(), &[hidden])?;
+        }
+        if let Some(b) = p.b_hh {
+            require_same_shape(&b.shape(), &[hidden])?;
+        }
+
+        let (x_val, h_prev_val, w_ih_val, w_hh_val, b_ih_val, b_hh_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let ops = self.tape.ops();
+            let x_val = materialize_fallible(&nodes, ops, self.id)?.clone();
+            let h_prev_val = materialize_fallible(&nodes, ops, h_prev.id)?.clone();
+            let w_ih_val = materialize_fallible(&nodes, ops, p.w_ih.id)?.clone();
+            let w_hh_val = materialize_fallible(&nodes, ops, p.w_hh.id)?.clone();
+            let b_ih_val = optional_materialize(&nodes, ops, p.b_ih)?;
+            let b_hh_val = optional_materialize(&nodes, ops, p.b_hh)?;
+            (x_val, h_prev_val, w_ih_val, w_hh_val, b_ih_val, b_hh_val)
+        };
+
+        let value = rnn_cell_forward_value(
+            self.tape.ops(),
+            &x_val,
+            &h_prev_val,
+            &CellWeights {
+                w_ih: &w_ih_val,
+                w_hh: &w_hh_val,
+                b_ih: b_ih_val.as_ref(),
+                b_hh: b_hh_val.as_ref(),
+            },
+        )?;
+
+        let id = self.tape.push_eager(
+            Op::RnnCell {
+                x: self.id,
+                h_prev: h_prev.id,
+                w_ih: p.w_ih.id,
+                w_hh: p.w_hh.id,
+                b_ih: p.b_ih.map(|b| b.id),
+                b_hh: p.b_hh.map(|b| b.id),
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// LSTM セル 1 step（イシュー #1647・設計 `docs/autodiff-rnn-cell-
+    /// tape-design.md` 決定 1・1b・1c・4・5・12）。ゲート順は `i,f,g,o`
+    /// （`p.w_ih`／`p.w_hh` は `[D, 4H]`／`[H, 4H]`、bias は `[4H]`）。
+    /// 2 ノード（`Op::LstmCell` → `Op::LstmHidden`）を **この順で**
+    /// push する（決定 1b の push 順序契約。backward の逆走査が
+    /// `LstmHidden` を先に処理し `nodes[cell.0].op` を参照するため）。
+    ///
+    /// 戻り値は `(h_t, c_t)`。
+    pub fn lstm_cell(
+        &self,
+        h_prev: &Var<'t>,
+        c_prev: &Var<'t>,
+        p: GateParams<'_, 't>,
+    ) -> Result<(Var<'t>, Var<'t>), AutodiffError> {
+        self.check_same_tape(h_prev)?;
+        self.check_same_tape(c_prev)?;
+        self.check_same_tape(p.w_ih)?;
+        self.check_same_tape(p.w_hh)?;
+        if let Some(b) = p.b_ih {
+            self.check_same_tape(b)?;
+        }
+        if let Some(b) = p.b_hh {
+            self.check_same_tape(b)?;
+        }
+        check_bias_pair(p.b_ih, p.b_hh)?;
+
+        let x_shape = self.shape();
+        let h_shape = h_prev.shape();
+        let c_shape = c_prev.shape();
+        let w_ih_shape = p.w_ih.shape();
+        let w_hh_shape = p.w_hh.shape();
+        require_rank2_all(
+            &[&x_shape, &h_shape, &c_shape, &w_ih_shape, &w_hh_shape],
+            "lstm_cell",
+        )?;
+        require_same_shape(&h_shape, &c_shape)?;
+        let hidden = h_shape[1];
+        require_positive_dims(x_shape[1], hidden, "lstm_cell")?;
+
+        let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
+        let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
+        require_same_shape(&out_ih, &out_hh)?;
+        let gate_width_4h = checked_gate_width(4, hidden)?;
+        if out_ih[1] != gate_width_4h {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: out_ih,
+                rhs: vec![h_shape[0], gate_width_4h],
+            }));
+        }
+        if let Some(b) = p.b_ih {
+            require_same_shape(&b.shape(), &[gate_width_4h])?;
+        }
+        if let Some(b) = p.b_hh {
+            require_same_shape(&b.shape(), &[gate_width_4h])?;
+        }
+
+        let (x_val, h_prev_val, c_prev_val, w_ih_val, w_hh_val, b_ih_val, b_hh_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let ops = self.tape.ops();
+            let x_val = materialize_fallible(&nodes, ops, self.id)?.clone();
+            let h_prev_val = materialize_fallible(&nodes, ops, h_prev.id)?.clone();
+            let c_prev_val = materialize_fallible(&nodes, ops, c_prev.id)?.clone();
+            let w_ih_val = materialize_fallible(&nodes, ops, p.w_ih.id)?.clone();
+            let w_hh_val = materialize_fallible(&nodes, ops, p.w_hh.id)?.clone();
+            let b_ih_val = optional_materialize(&nodes, ops, p.b_ih)?;
+            let b_hh_val = optional_materialize(&nodes, ops, p.b_hh)?;
+            (
+                x_val, h_prev_val, c_prev_val, w_ih_val, w_hh_val, b_ih_val, b_hh_val,
+            )
+        };
+
+        let out = lstm_cell_forward_values(
+            self.tape.ops(),
+            &x_val,
+            &h_prev_val,
+            &c_prev_val,
+            &CellWeights {
+                w_ih: &w_ih_val,
+                w_hh: &w_hh_val,
+                b_ih: b_ih_val.as_ref(),
+                b_hh: b_hh_val.as_ref(),
+            },
+        )?;
+
+        // 決定 1b: `gates` (`[B, 4H]`。列ブロック順 `i,f,g,o`) から
+        // `LstmCell` payload（`i,f,g`。`[B, 3H]`）と `LstmHidden`
+        // payload（`o`。`[B, H]`）を切り出す。`narrow` は zero-copy
+        // view のため `contiguous()` で実体化してから非追跡 payload
+        // として保持する（`Op` payload はホスト常駐の独立 `Tensor`
+        // でなければならない。view のまま埋め込むと backward 時に
+        // `resolve_view` が想定しない経路になる）。
+        // `gate_width_4h` が overflow せず検証済み（上記）のため、
+        // その内訳である `3 * hidden` も overflow しない
+        // （`3 * hidden < 4 * hidden <= usize::MAX`）。
+        let gate_width_3h = checked_gate_width(3, hidden)?;
+        let gates_ifg = out
+            .gates
+            .narrow(1, 0, gate_width_3h)
+            .map(|t| t.contiguous())?;
+        let gate_o = out
+            .gates
+            .narrow(1, gate_width_3h, hidden)
+            .map(|t| t.contiguous())?;
+
+        let cell_id = self.tape.push_eager(
+            Op::LstmCell {
+                x: self.id,
+                h_prev: h_prev.id,
+                c_prev: c_prev.id,
+                w_ih: p.w_ih.id,
+                w_hh: p.w_hh.id,
+                b_ih: p.b_ih.map(|b| b.id),
+                b_hh: p.b_hh.map(|b| b.id),
+                gates_ifg,
+            },
+            out.c,
+        );
+        let hidden_id = self.tape.push_eager(
+            Op::LstmHidden {
+                cell: cell_id,
+                gate_o,
+            },
+            out.h,
+        );
+        Ok((
+            Var::from_raw(self.tape, hidden_id),
+            Var::from_raw(self.tape, cell_id),
+        ))
+    }
+
+    /// GRU セル 1 step（イシュー #1647・設計 `docs/autodiff-rnn-cell-
+    /// tape-design.md` 決定 1c・4・5・12。`reset_after=True` 規約）。
+    /// ゲート順は `r,z,n`（`p.w_ih`／`p.w_hh` は `[D, 3H]`／`[H, 3H]`、
+    /// bias は `[3H]`）。1 ノード（`Op::GruCell`）で表現する（GRU は
+    /// LSTM と異なり単一出力 `h_t` のため 2 ノード分割は不要）。
+    pub fn gru_cell(
+        &self,
+        h_prev: &Var<'t>,
+        p: GateParams<'_, 't>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(h_prev)?;
+        self.check_same_tape(p.w_ih)?;
+        self.check_same_tape(p.w_hh)?;
+        if let Some(b) = p.b_ih {
+            self.check_same_tape(b)?;
+        }
+        if let Some(b) = p.b_hh {
+            self.check_same_tape(b)?;
+        }
+        check_bias_pair(p.b_ih, p.b_hh)?;
+
+        let x_shape = self.shape();
+        let h_shape = h_prev.shape();
+        let w_ih_shape = p.w_ih.shape();
+        let w_hh_shape = p.w_hh.shape();
+        require_rank2_all(&[&x_shape, &h_shape, &w_ih_shape, &w_hh_shape], "gru_cell")?;
+        let hidden = h_shape[1];
+        require_positive_dims(x_shape[1], hidden, "gru_cell")?;
+
+        let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
+        let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
+        require_same_shape(&out_ih, &out_hh)?;
+        let gate_width_3h = checked_gate_width(3, hidden)?;
+        if out_ih[1] != gate_width_3h {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: out_ih,
+                rhs: vec![h_shape[0], gate_width_3h],
+            }));
+        }
+        if let Some(b) = p.b_ih {
+            require_same_shape(&b.shape(), &[gate_width_3h])?;
+        }
+        if let Some(b) = p.b_hh {
+            require_same_shape(&b.shape(), &[gate_width_3h])?;
+        }
+
+        let (x_val, h_prev_val, w_ih_val, w_hh_val, b_ih_val, b_hh_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let ops = self.tape.ops();
+            let x_val = materialize_fallible(&nodes, ops, self.id)?.clone();
+            let h_prev_val = materialize_fallible(&nodes, ops, h_prev.id)?.clone();
+            let w_ih_val = materialize_fallible(&nodes, ops, p.w_ih.id)?.clone();
+            let w_hh_val = materialize_fallible(&nodes, ops, p.w_hh.id)?.clone();
+            let b_ih_val = optional_materialize(&nodes, ops, p.b_ih)?;
+            let b_hh_val = optional_materialize(&nodes, ops, p.b_hh)?;
+            (x_val, h_prev_val, w_ih_val, w_hh_val, b_ih_val, b_hh_val)
+        };
+
+        let out = gru_cell_forward_values(
+            self.tape.ops(),
+            &x_val,
+            &h_prev_val,
+            &CellWeights {
+                w_ih: &w_ih_val,
+                w_hh: &w_hh_val,
+                b_ih: b_ih_val.as_ref(),
+                b_hh: b_hh_val.as_ref(),
+            },
+        )?;
+
+        let id = self.tape.push_eager(
+            Op::GruCell {
+                x: self.id,
+                h_prev: h_prev.id,
+                w_ih: p.w_ih.id,
+                w_hh: p.w_hh.id,
+                b_ih: p.b_ih.map(|b| b.id),
+                b_hh: p.b_hh.map(|b| b.id),
+                gates_rzn: out.gates,
+                q: out.q,
+            },
+            out.h,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// `A^{-1}`（`A: [n,n]`）。イシュー #1621・親イシュー #1573
     /// 「Tier 2: 線形代数」・`docs/spec/04-requirements.md` REQ-9
     /// 2026-09-12 追記・`docs/autodiff-linalg-design.md`。
@@ -1055,6 +1358,160 @@ impl<'t> Var<'t> {
             value,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+}
+
+/// [`Var::rnn_cell`]／[`Var::lstm_cell`]／[`Var::gru_cell`] へ渡す
+/// ゲートパラメータのまとめ（イシュー #1647・設計 `docs/autodiff-rnn-
+/// cell-tape-design.md` 決定 5・10）。PyTorch のパラメータ順
+/// （`weight_ih, weight_hh, bias_ih, bias_hh`）を踏襲する。
+pub struct GateParams<'a, 't> {
+    pub w_ih: &'a Var<'t>,
+    pub w_hh: &'a Var<'t>,
+    pub b_ih: Option<&'a Var<'t>>,
+    pub b_hh: Option<&'a Var<'t>>,
+}
+
+/// `b_ih`／`b_hh` が両方 `Some` か両方 `None` であることを検査する
+/// （決定 4 のセル API 契約。片方のみは bias 加算の意味論が定義され
+/// ないため拒否する）。
+fn check_bias_pair(b_ih: Option<&Var<'_>>, b_hh: Option<&Var<'_>>) -> Result<(), AutodiffError> {
+    if b_ih.is_some() != b_hh.is_some() {
+        return Err(AutodiffError::InvalidArgument(
+            "gate cell: b_ih and b_hh must be both Some or both None".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 全入力が rank-2 であることを検査する（セル API 共通の shape 検査
+/// 冒頭）。
+fn require_rank2_all(shapes: &[&[usize]], op_name: &str) -> Result<(), AutodiffError> {
+    for shape in shapes {
+        if shape.len() != 2 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "{op_name}: all operands must be rank-2 (got shape {shape:?})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `input_size`（`D`）・`hidden_size`（`H`）双方が 0 でないことを検査
+/// する（zero-K ガード。決定 4）。
+fn require_positive_dims(d: usize, hidden: usize, op_name: &str) -> Result<(), AutodiffError> {
+    if d == 0 || hidden == 0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{op_name}: input_size (D={d}) and hidden_size (H={hidden}) must both be > 0"
+        )));
+    }
+    Ok(())
+}
+
+/// `gates * hidden`（ゲート幅）を `checked_mul` で検証する
+/// （`nn::rnn::checked_gate_width` と同型）。
+///
+/// 本番経路 panic 禁止（AGENTS.md）: `lstm_cell`／`gru_cell` は
+/// `h_prev.shape()[1]` から `hidden` を導出するが、`h_prev` が要素数
+/// 0 の空 `Var`（例: `h_shape = [0, 1usize << 62]`）であれば
+/// `require_positive_dims` の `hidden == 0` 検査を通過したまま
+/// `hidden` が `usize::MAX` 近傍になりうる。`4 * hidden`／`3 * hidden`
+/// を未検証のまま比較・`narrow` 幅へ使うと overflow により期待幅が
+/// 周回し、不正な形状を誤って受理してしまう（イシュー #1647
+/// codex-review P1 指摘）。
+fn checked_gate_width(gates: usize, hidden: usize) -> Result<usize, AutodiffError> {
+    gates.checked_mul(hidden).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "gates (={gates}) * hidden (={hidden}) overflowed usize"
+        ))
+    })
+}
+
+/// `Option<&Var>` を `Option<Tensor<f32>>` へ実体化する共通ヘルパー
+/// （`nodes` の借用スコープ内で使う）。
+fn optional_materialize(
+    nodes: &[crate::tape::TapeNode],
+    ops: &dyn BackendOps,
+    var: Option<&Var<'_>>,
+) -> Result<Option<Tensor<f32>>, AutodiffError> {
+    match var {
+        Some(v) => Ok(Some(materialize_fallible(nodes, ops, v.id)?.clone())),
+        None => Ok(None),
+    }
+}
+
+// =====================================================================
+// セル forward の値計算（イシュー #1647）。`Var::{rnn_cell,lstm_cell,
+// gru_cell}`（tape 経路）と `nn::rnn`（`forward_host`。tape 不要経路）
+// の両方から呼ばれる共有ロジックであり、同じ関数を通すことで両経路の
+// forward が bit-exact に一致することを構造的に保証する
+// （`docs/autodiff-rnn-cell-tape-design.md` 決定 9）。
+// =====================================================================
+
+/// ゲート演算（RNN／LSTM／GRU セル）の重み・bias をまとめた引数束
+/// （`clippy::too_many_arguments` 回避。イシュー #1647）。
+/// [`rnn_cell_forward_value`]／[`lstm_cell_forward_values`]／
+/// [`gru_cell_forward_values`] が共通で受け取る。
+pub(crate) struct CellWeights<'a> {
+    pub w_ih: &'a Tensor<f32>,
+    pub w_hh: &'a Tensor<f32>,
+    pub b_ih: Option<&'a Tensor<f32>>,
+    pub b_hh: Option<&'a Tensor<f32>>,
+}
+
+/// RNN（tanh 版）セルの forward 値計算。`BackendOps::gemm_bias_act` を
+/// 2 回（`x·W_ih+b_ih`・`h_prev·W_hh+b_hh`）呼び、`add` → `tanh` で
+/// 閉じる（決定 1「RNN は新規カーネル不要」）。
+pub(crate) fn rnn_cell_forward_value(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+    h_prev: &Tensor<f32>,
+    w: &CellWeights<'_>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let pre_ih = ops.gemm_bias_act(x, w.w_ih, w.b_ih, Activation::None)?;
+    let pre_hh = ops.gemm_bias_act(h_prev, w.w_hh, w.b_hh, Activation::None)?;
+    let pre = ops.add(&pre_ih, &pre_hh)?;
+    Ok(ops.tanh(&pre)?)
+}
+
+/// LSTM セルの forward 値計算。`pre = x·W_ih+b_ih + h_prev·W_hh+b_hh`
+/// （`[B, 4H]`）を計算したのち `BackendOps::lstm_pointwise` へ渡す
+/// （`Unsupported` のときのみ `eval::lstm_pointwise` へフォールバック。
+/// A08: 判定迂回経路を作らない）。
+pub(crate) fn lstm_cell_forward_values(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+    h_prev: &Tensor<f32>,
+    c_prev: &Tensor<f32>,
+    w: &CellWeights<'_>,
+) -> Result<LstmPointwiseOutput, AutodiffError> {
+    let pre_ih = ops.gemm_bias_act(x, w.w_ih, w.b_ih, Activation::None)?;
+    let pre_hh = ops.gemm_bias_act(h_prev, w.w_hh, w.b_hh, Activation::None)?;
+    let pre = ops.add(&pre_ih, &pre_hh)?;
+    match ops.lstm_pointwise(&pre, c_prev) {
+        Ok(v) => Ok(v),
+        Err(BackendError::Unsupported(_)) => Ok(eval::lstm_pointwise(&pre, c_prev)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// GRU セルの forward 値計算。`pre_i = x·W_ih+b_ih`・
+/// `pre_h = h_prev·W_hh+b_hh`（いずれも `[B, 3H]`。独立した 2 本の
+/// GEMM のため 1 本に足し込まない点が LSTM と異なる）を計算したのち
+/// `BackendOps::gru_pointwise` へ渡す（`Unsupported` のときのみ
+/// `eval::gru_pointwise` へフォールバック）。
+pub(crate) fn gru_cell_forward_values(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+    h_prev: &Tensor<f32>,
+    w: &CellWeights<'_>,
+) -> Result<GruPointwiseOutput, AutodiffError> {
+    let pre_i = ops.gemm_bias_act(x, w.w_ih, w.b_ih, Activation::None)?;
+    let pre_h = ops.gemm_bias_act(h_prev, w.w_hh, w.b_hh, Activation::None)?;
+    match ops.gru_pointwise(&pre_i, &pre_h, h_prev) {
+        Ok(v) => Ok(v),
+        Err(BackendError::Unsupported(_)) => Ok(eval::gru_pointwise(&pre_i, &pre_h, h_prev)),
+        Err(other) => Err(AutodiffError::Backend(other)),
     }
 }
 

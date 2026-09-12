@@ -34,9 +34,10 @@
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan, MatrixNormOrd,
-    MseReduction, QrFactors, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    require_same_shape, row_softmax_layout,
+    Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
+    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
+    QrFactors, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, require_same_shape,
+    row_softmax_layout,
 };
 
 use crate::context::MetalContext;
@@ -123,6 +124,44 @@ fn upload_operand_for_resident_gemm(
         transposed: false,
     };
     Ok((dev_buf, layout))
+}
+
+/// RNN／LSTM／GRU セル演算（イシュー #1647）の入口検査: `shape` が
+/// rank-2 であることを検証する（`backend-cpu::ops::require_rank2`・
+/// `backend-cuda::ops::require_rank2_cell` と同型。平坦化後の要素数
+/// 一致だけでは異形状の取り違えを検出できないため、
+/// `lstm_pointwise`／`lstm_hidden_backward`／`lstm_cell_backward`／
+/// `gru_pointwise`／`gru_backward` の各エントリで使う。codex-review
+/// P2 指摘）。
+fn require_rank2_cell(shape: &[usize]) -> Result<(), BackendError> {
+    if shape.len() != 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    Ok(())
+}
+
+/// RNN／LSTM／GRU 系エントリが形状比較の前に必要とする `gates * hidden`
+/// （ゲート幅）を `checked_mul` で検証する（`backend-cpu::ops::
+/// checked_gate_width`／`backend-cuda::ops::checked_gate_width` と
+/// 同型）。
+///
+/// 本番経路 panic 禁止（AGENTS.md）: `4 * hidden`／`3 * hidden` を
+/// 未検証のまま `require_same_shape` の期待値へ埋め込むと、`hidden`
+/// が `usize::MAX` 近傍（要素数 0 の空テンソルは `shape[1]` を自由に
+/// 取れる）のとき乗算が overflow して期待幅が小さい値へ周回し、
+/// 本来 shape mismatch で拒否すべき不正な入力を誤って受理してしまう
+/// （受理後は下層カーネルが `hidden` を使った添字アクセスで範囲外
+/// 参照する）。イシュー #1647 codex-review P1 指摘。
+fn checked_gate_width(gates: usize, hidden: usize) -> Result<usize, BackendError> {
+    gates.checked_mul(hidden).ok_or(BackendError::ShapeMismatch(
+        ShapeError::ElementCountMismatch {
+            expected: usize::MAX,
+            actual: 0,
+        },
+    ))
 }
 
 /// Metal バックエンドの `BackendOps` 実装。`Device::Metal` は ordinal を
@@ -1918,6 +1957,208 @@ impl BackendOps for MetalBackendOps {
             .run_mse_backward_f32(&ctx, pred_slice, target_slice, scale)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::lstm_pointwise`] の Metal
+    /// 実装（イシュー #1647）。`hidden` は `c_prev` の列数から導出する。
+    fn lstm_pointwise(
+        &self,
+        pre: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+    ) -> Result<LstmPointwiseOutput, BackendError> {
+        require_rank2_cell(c_prev.shape())?;
+        let hidden = c_prev.shape()[1];
+        let b_dim = c_prev.shape()[0];
+        let gate_width = checked_gate_width(4, hidden)?;
+        require_same_shape(pre.shape(), &[b_dim, gate_width])
+            .map_err(BackendError::ShapeMismatch)?;
+        let pre_owned = pre.contiguous();
+        let c_prev_owned = c_prev.contiguous();
+        let pre_slice = pre_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_pointwise: pre not contiguous".into())
+        })?;
+        let c_prev_slice = c_prev_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_pointwise: c_prev not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let rnn = context_cache::cached_rnn_cell(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (gates, c, h) = rnn
+            .run_lstm_pointwise_f32(&ctx, pre_slice, c_prev_slice, hidden)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Ok(LstmPointwiseOutput {
+            gates: Tensor::new(gates, &[b_dim, gate_width]).map_err(BackendError::ShapeMismatch)?,
+            c: Tensor::new(c, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+            h: Tensor::new(h, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::lstm_hidden_backward`] の
+    /// Metal 実装（イシュー #1647）。
+    fn lstm_hidden_backward(
+        &self,
+        c: &Tensor<f32>,
+        gate_o: &Tensor<f32>,
+        dh: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        require_rank2_cell(c.shape())?;
+        require_same_shape(gate_o.shape(), c.shape()).map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(dh.shape(), c.shape()).map_err(BackendError::ShapeMismatch)?;
+        let shape = c.shape().to_vec();
+        let c_owned = c.contiguous();
+        let gate_o_owned = gate_o.contiguous();
+        let dh_owned = dh.contiguous();
+        let c_slice = c_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_hidden_backward: c not contiguous".into())
+        })?;
+        let gate_o_slice = gate_o_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_hidden_backward: gate_o not contiguous".into())
+        })?;
+        let dh_slice = dh_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_hidden_backward: dh not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let rnn = context_cache::cached_rnn_cell(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (d_pre_o, dc) = rnn
+            .run_lstm_hidden_backward_f32(&ctx, c_slice, gate_o_slice, dh_slice)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Ok((
+            Tensor::new(d_pre_o, &shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(dc, &shape).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::lstm_cell_backward`] の
+    /// Metal 実装（イシュー #1647）。`hidden` は `c_prev` の列数から
+    /// 導出する。
+    fn lstm_cell_backward(
+        &self,
+        gates_ifg: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+        dc: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        require_rank2_cell(c_prev.shape())?;
+        let hidden = c_prev.shape()[1];
+        let b_dim = c_prev.shape()[0];
+        let gate_width = checked_gate_width(3, hidden)?;
+        require_same_shape(gates_ifg.shape(), &[b_dim, gate_width])
+            .map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(dc.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
+        let gates_owned = gates_ifg.contiguous();
+        let c_prev_owned = c_prev.contiguous();
+        let dc_owned = dc.contiguous();
+        let gates_slice = gates_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_cell_backward: gates_ifg not contiguous".into())
+        })?;
+        let c_prev_slice = c_prev_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_cell_backward: c_prev not contiguous".into())
+        })?;
+        let dc_slice = dc_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("lstm_cell_backward: dc not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let rnn = context_cache::cached_rnn_cell(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (d_pre_ifg, dc_prev) = rnn
+            .run_lstm_cell_backward_f32(&ctx, gates_slice, c_prev_slice, dc_slice, hidden)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Ok((
+            Tensor::new(d_pre_ifg, &[b_dim, gate_width]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(dc_prev, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gru_pointwise`] の Metal
+    /// 実装（イシュー #1647）。`hidden` は `h_prev` の列数から導出する。
+    fn gru_pointwise(
+        &self,
+        pre_i: &Tensor<f32>,
+        pre_h: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+    ) -> Result<GruPointwiseOutput, BackendError> {
+        require_rank2_cell(h_prev.shape())?;
+        let hidden = h_prev.shape()[1];
+        let b_dim = h_prev.shape()[0];
+        let gate_width = checked_gate_width(3, hidden)?;
+        require_same_shape(pre_i.shape(), &[b_dim, gate_width])
+            .map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(pre_h.shape(), &[b_dim, gate_width])
+            .map_err(BackendError::ShapeMismatch)?;
+        let pre_i_owned = pre_i.contiguous();
+        let pre_h_owned = pre_h.contiguous();
+        let h_prev_owned = h_prev.contiguous();
+        let pre_i_slice = pre_i_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_pointwise: pre_i not contiguous".into())
+        })?;
+        let pre_h_slice = pre_h_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_pointwise: pre_h not contiguous".into())
+        })?;
+        let h_prev_slice = h_prev_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_pointwise: h_prev not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let rnn = context_cache::cached_rnn_cell(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (gates, q, h) = rnn
+            .run_gru_pointwise_f32(&ctx, pre_i_slice, pre_h_slice, h_prev_slice, hidden)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Ok(GruPointwiseOutput {
+            gates: Tensor::new(gates, &[b_dim, gate_width]).map_err(BackendError::ShapeMismatch)?,
+            q: Tensor::new(q, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+            h: Tensor::new(h, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gru_backward`] の Metal
+    /// 実装（イシュー #1647）。`hidden` は `h_prev` の列数から導出する。
+    fn gru_backward(
+        &self,
+        gates_rzn: &Tensor<f32>,
+        q: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+        dh: &Tensor<f32>,
+    ) -> Result<GruBackwardOutput, BackendError> {
+        require_rank2_cell(h_prev.shape())?;
+        let hidden = h_prev.shape()[1];
+        let b_dim = h_prev.shape()[0];
+        let gate_width = checked_gate_width(3, hidden)?;
+        require_same_shape(gates_rzn.shape(), &[b_dim, gate_width])
+            .map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(q.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(dh.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
+        let gates_owned = gates_rzn.contiguous();
+        let q_owned = q.contiguous();
+        let h_prev_owned = h_prev.contiguous();
+        let dh_owned = dh.contiguous();
+        let gates_slice = gates_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_backward: gates_rzn not contiguous".into())
+        })?;
+        let q_slice = q_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_backward: q not contiguous".into())
+        })?;
+        let h_prev_slice = h_prev_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_backward: h_prev not contiguous".into())
+        })?;
+        let dh_slice = dh_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gru_backward: dh not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let rnn = context_cache::cached_rnn_cell(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (d_pre_i, d_pre_h, dh_prev_direct) = rnn
+            .run_gru_backward_f32(&ctx, gates_slice, q_slice, h_prev_slice, dh_slice, hidden)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Ok((
+            Tensor::new(d_pre_i, &[b_dim, gate_width]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(d_pre_h, &[b_dim, gate_width]).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(dh_prev_direct, &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?,
+        ))
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::softmax`] の Metal 実装

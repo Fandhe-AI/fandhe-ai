@@ -436,6 +436,8 @@ pub mod mse;
 #[cfg(target_os = "macos")]
 pub mod ops;
 pub mod pad;
+#[cfg(target_os = "macos")]
+pub mod rnn_cell;
 pub mod soft_f64;
 // `crate::buffer::MetalBuffer::alloc_zeroed_pooled`／`alloc_uninit_pooled`
 // からのみ到達する `pub(crate)` 面（イシュー #1021）。`tensor-core` の
@@ -527,6 +529,8 @@ pub use mse::MetalMse;
 pub use ops::MetalBackendOps;
 #[cfg(target_os = "macos")]
 pub use rmsnorm::MetalRmsNorm;
+#[cfg(target_os = "macos")]
+pub use rnn_cell::MetalRnnCell;
 #[cfg(target_os = "macos")]
 pub use softmax::MetalSoftmax;
 pub use tile::TileConfig;
