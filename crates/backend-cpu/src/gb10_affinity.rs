@@ -73,10 +73,14 @@
 //! [`crate::thread_limit`] doc 記載の `sysctlbyname` FFI と同型の、
 //! glibc に常にリンクされる C ABI 関数への直接 `extern "C"` 宣言で
 //! 実装する（[`affinity_ffi`] モジュール参照）。`unsafe` はこの syscall
-//! 呼び出し 1 箇所のみで、戻り値のエラーは panic させず無視する
-//! （affinity 未設定のまま続行しても正しさに影響しない。
-//! `.claude/rules/coding-rust.md`「本番経路で `unwrap`/`expect` を
-//! 使わない」）。
+//! 呼び出し 1 箇所のみで、戻り値のエラーは panic させず `bool` として
+//! 返す（`.claude/rules/coding-rust.md`「本番経路で `unwrap`/`expect`
+//! を使わない」）。GEMM の数値正しさは専用プールの有無に依存しない
+//! （モジュール doc「正しさ（bit 完全一致）契約」節）ため syscall 失敗
+//! 自体は安全だが、1 スレッドでも pin に失敗した場合は
+//! [`build_affinity_pool`] が専用プール全体を破棄し既存の全コア経路
+//! （グローバル rayon プール）へフォールバックする（Cursor Bugbot
+//! Medium 指摘。affinity なしの縮小プールを残さない）。
 //!
 //! ## 専用スレッドプール（グローバルプールを汚染しない）
 //!
@@ -188,19 +192,38 @@ fn build_affinity_pool() -> Option<rayon::ThreadPool> {
     if big_core_ids.is_empty() {
         return None;
     }
-    // `start_handler` は各 worker スレッド自身の上で 1 回だけ実行される
-    // （rayon の契約）ため、`worker_idx` 番目の要素を当該スレッドへ
-    // pin すれば重複なく大コア群全体を専用プールへ割り当てられる。
     let ids = big_core_ids;
-    rayon::ThreadPoolBuilder::new()
+    let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(ids.len())
-        .start_handler(move |worker_idx| {
-            if let Some(&cpu_id) = ids.get(worker_idx) {
-                let _ = pin_current_thread_to_cpu(cpu_id);
-            }
-        })
         .build()
-        .ok()
+        .ok()?;
+    // `start_handler` ではなく `ThreadPool::broadcast` で pin する。
+    // rayon-core（1.13.0）の `main_loop` は各 worker が「primed」
+    // ラッチを set した**直後・start_handler 呼び出しより前**に
+    // `ThreadPoolBuilder::build()` を起床させる（`registry.rs`
+    // `main_loop`: `Latch::set(primed)` → `start_handler` 呼び出しの
+    // 順）ため、`build()` の戻り時点では全 worker の start_handler
+    // 完了は保証されない。`broadcast` は各 worker が work-stealing
+    // ループへ入った後（＝ start_handler 呼び出しの後。同一スレッド
+    // 内の逐次実行）にしか処理されないジョブであり、全 worker からの
+    // 戻り値が揃うまでブロックするため、ここで pin し戻り値を集約
+    // すれば全スレッド分の pin 結果を確実に観測できる。
+    let pin_ok: Vec<bool> = pool.broadcast(|ctx| {
+        ids.get(ctx.index())
+            .is_some_and(|&cpu_id| pin_current_thread_to_cpu(cpu_id))
+    });
+    // Cursor Bugbot Medium 指摘: 1 スレッドでも pin に失敗すると、OS
+    // affinity なしの縮小プール（大コア数のみに間引かれただけの構成）
+    // が残ってしまい、この PR 自身の GB10 実測（無 pin T10 が無 pin
+    // T20 より遅い。モジュール doc 冒頭の表）が示すとおり既存の全コア
+    // 経路より遅くなりうる。専用プールを使わず既存の全コア経路
+    // （グローバル rayon プール）へフォールバックさせるため `None` を
+    // 返す（呼び出し元 [`affinity_pool`] はこれをキャッシュし、以降
+    // 常に `f()` 直呼びへフォールバックする）。
+    if pin_ok.len() != ids.len() || pin_ok.iter().any(|&ok| !ok) {
+        return None;
+    }
+    Some(pool)
 }
 
 /// `RAYON_NUM_THREADS` が有効な正整数として設定されているかを判定する
@@ -225,9 +248,13 @@ pub struct Gb10AffinityReport {
     /// プラットフォーム判定で検出した大コア CPU-id 集合
     /// （判定不能なら `None`）。
     pub detected_big_core_ids: Option<Vec<usize>>,
-    /// 専用 affinity プールが実際に活性化しているか
-    /// （`enabled && !env_override && detected_big_core_ids.is_some()`
-    /// と同値）。
+    /// 専用 affinity プールが実際に利用可能か（[`affinity_pool`] の
+    /// `OnceLock` キャッシュを直接読んだ値。`enabled &&
+    /// !env_override && detected_big_core_ids.is_some()` とは**同値
+    /// ではない**: 検出が成功していてもスレッド生成失敗・pin 失敗
+    /// （Cursor Bugbot Medium 指摘。[`build_affinity_pool`] 参照）で
+    /// キャッシュが `None` になりうるため、実際にキャッシュ済み
+    /// プールが利用可能かを問う）。
     pub pool_active: bool,
 }
 
@@ -238,7 +265,16 @@ pub fn gb10_affinity_report() -> Gb10AffinityReport {
     let enabled = GB10_AFFINITY_ENABLED;
     let env_override = env_override_active();
     let detected_big_core_ids = detect_big_core_ids();
-    let pool_active = enabled && !env_override && detected_big_core_ids.is_some();
+    // `pool_active` は本番 GEMM 経路が実際に参照する
+    // [`affinity_pool`] の `OnceLock` キャッシュそのものを読む
+    // （codex P2 是正）。検出（`detect_big_core_ids`）が成功しても
+    // `build_affinity_pool` はスレッド生成失敗・pin 失敗（Cursor
+    // Bugbot Medium 指摘）を `None` としてキャッシュするため、
+    // `enabled && !env_override && detected_big_core_ids.is_some()`
+    // のように判定条件を独自に再計算すると「検出は成功したが
+    // プールは実際にはフォールバックしている」ケースで診断が実態と
+    // 乖離する。
+    let pool_active = affinity_pool().is_some();
     Gb10AffinityReport {
         enabled,
         env_override,
@@ -300,6 +336,14 @@ fn parse_midr_partnum(raw: &str) -> Option<u64> {
     Some((value >> 4) & 0xFFF)
 }
 
+/// [`collect_freq_and_midr`] の戻り値型（`(周波数列, MIDR partnum 列)`）。
+/// clippy `type_complexity` 回避のためのエイリアス（意味は変えない。
+/// CI clippy ジョブが本 PR 追加時点から既に検出していた既存の指摘
+/// であり、`GB10_AFFINITY_ENABLED` 定数ゲートとは独立に常時評価される
+/// ため既定 OFF でも是正が必要）。
+#[cfg(any(target_os = "linux", test))]
+type FreqMidrPairs = (Vec<(usize, u64)>, Vec<(usize, u64)>);
+
 /// `/sys/devices/system/cpu` 配下（`root` 引数はテスト用 fixture 差し替え
 /// のため）を走査し、`cpufreq/cpuinfo_max_freq`・
 /// `regs/identification/midr_el1` の両方が揃っている CPU のみを対象に
@@ -310,7 +354,7 @@ fn parse_midr_partnum(raw: &str) -> Option<u64> {
 /// 倒す）。`cpufreq`／`cpuidle`／`cpu-map` 等のデコイディレクトリは
 /// `strip_prefix("cpu")` 後に数字へ parse できないため自然に除外される。
 #[cfg(any(target_os = "linux", test))]
-fn collect_freq_and_midr(root: &Path) -> Option<(Vec<(usize, u64)>, Vec<(usize, u64)>)> {
+fn collect_freq_and_midr(root: &Path) -> Option<FreqMidrPairs> {
     let read_dir = std::fs::read_dir(root).ok()?;
     let mut freqs: Vec<(usize, u64)> = Vec::new();
     let mut midrs: Vec<(usize, u64)> = Vec::new();
@@ -427,13 +471,14 @@ fn detect_big_core_ids() -> Option<Vec<usize>> {
 // Affinity 設定（unsafe FFI 境界）
 // ---------------------------------------------------------------------
 
-/// [`build_affinity_pool`]（cfg 非分岐の共通関数）の `start_handler` から
-/// 呼ばれるプラットフォーム振り分け薄いラッパ。Linux では
-/// [`affinity_ffi::pin_current_thread_to_cpu`] へ委譲し、それ以外の
-/// プラットフォームでは常に `false`（no-op）を返す（[`detect_big_core_ids`]
-/// が非 Linux で常に `None` を返すため、この分岐が実際に呼ばれる経路は
-/// 到達しないが、`start_handler` クロージャ自体は cfg 分岐せずコンパイル
-/// されるため、シグネチャを全プラットフォームで揃える必要がある）。
+/// [`build_affinity_pool`]（cfg 非分岐の共通関数）が `ThreadPool::
+/// broadcast` の各 worker クロージャから呼ぶプラットフォーム振り分け
+/// 薄いラッパ。Linux では [`affinity_ffi::pin_current_thread_to_cpu`]
+/// へ委譲し、それ以外のプラットフォームでは常に `false`（no-op）を
+/// 返す（[`detect_big_core_ids`] が非 Linux で常に `None` を返すため
+/// この分岐が実際に呼ばれる経路は到達しないが、`broadcast` クロージャ
+/// 自体は cfg 分岐せずコンパイルされるため、シグネチャを全
+/// プラットフォームで揃える必要がある）。
 #[cfg(target_os = "linux")]
 fn pin_current_thread_to_cpu(cpu_id: usize) -> bool {
     affinity_ffi::pin_current_thread_to_cpu(cpu_id)
@@ -464,23 +509,21 @@ mod affinity_ffi {
     pub(super) type CpuSet = [u64; 16];
 
     /// `cpu_set_t` が表現可能な最大 CPU 番号（`CPU_SETSIZE`）。
-    pub(super) const CPU_SETSIZE: usize = CpuSet::len_bits();
-
-    trait CpuSetLenBits {
-        fn len_bits() -> usize;
-    }
-    impl CpuSetLenBits for CpuSet {
-        fn len_bits() -> usize {
-            16 * 64
-        }
-    }
+    /// `CpuSet::len_bits()` のようなトレイトメソッド経由の定義は
+    /// const コンテキストで呼び出し不能（`E0015`）なため、
+    /// `size_of::<CpuSet>() * 8` という const 評価可能な式で直接
+    /// 定義する（`GB10_AFFINITY_ENABLED` の実行時ゲートに関わらず
+    /// const 評価自体は常に走るため、ゲート OFF でも Linux ターゲット
+    /// でのコンパイル成立が必須。codex P1 是正）。
+    pub(super) const CPU_SETSIZE: usize = std::mem::size_of::<CpuSet>() * 8;
 
     // SAFETY: この `extern "C"` 宣言は Linux glibc が公開する標準 API
     // `sched_setaffinity`（`<sched.h>`、`man 2 sched_setaffinity`）の
     // シグネチャと一致させている: 戻り値は `c_int`（0 は成功、非 0 は
     // エラー。errno 相当）、`pid`（0 は「呼び出しスレッド自身」を指す。
-    // rayon の `start_handler` は各 worker スレッド上で実行されるため
-    // `pid=0` で当該スレッドのみに適用される）・`cpusetsize`（`mask` の
+    // `ThreadPool::broadcast` の各クロージャは worker スレッド自身の
+    // 上で実行されるため `pid=0` で当該スレッドのみに適用される）・
+    // `cpusetsize`（`mask` の
     // バイト長）・`mask`（読み取り専用の CPU 集合ビットマスクへの
     // ポインタ）で、C ABI 上の型幅・呼び出し規約（`extern "C"`）は
     // glibc のヘッダ定義と 1:1 対応する。シンボルは全 Linux 実行環境で
@@ -499,9 +542,13 @@ mod affinity_ffi {
     /// のみへ設定する。`cpu_id` が [`CPU_SETSIZE`] 以上、または syscall
     /// 自体が失敗（戻り値 != 0。例: 対象 CPU が現在の cpuset で許可
     /// されていない）した場合は `false` を返すのみで panic しない
-    /// （呼び出し元 [`super::build_affinity_pool`] は戻り値を無視し
-    /// affinity 未設定のまま続行する。`.claude/rules/coding-rust.md`
-    /// 「本番経路で `unwrap()` / `expect()` を使わない」）。
+    /// （`.claude/rules/coding-rust.md`「本番経路で `unwrap()` /
+    /// `expect()` を使わない」）。呼び出し元 [`super::
+    /// build_affinity_pool`] は戻り値を無視せず、`broadcast` で集約
+    /// した全 worker 分の結果に 1 つでも `false` があれば専用プール
+    /// 自体を破棄して既存の全コア経路へフォールバックする
+    /// （Cursor Bugbot Medium 指摘。affinity 未設定のまま縮小プールを
+    /// 使い続けることはしない）。
     pub(super) fn pin_current_thread_to_cpu(cpu_id: usize) -> bool {
         if cpu_id >= CPU_SETSIZE {
             return false;
@@ -568,7 +615,11 @@ mod tests {
     fn with_affinity_gate_disabled_calls_closure_directly() {
         // GB10_AFFINITY_ENABLED は既定 false のため、対象形状であっても
         // affinity_pool() は常に None を返し f() が直接呼ばれる。
-        assert!(!GB10_AFFINITY_ENABLED);
+        // `const` の値に対する `assert!` は clippy
+        // `assertions_on_constants` の対象になるため、意図（ゲートが
+        // 万一 true へ切り替わった際にビルド時点で気づけるようにする）
+        // をより強く表す `const` ブロックへ寄せる。
+        const { assert!(!GB10_AFFINITY_ENABLED) };
         let result = with_gb10_affinity_if_applicable(64, 256, 784, || 42);
         assert_eq!(result, 42);
     }
