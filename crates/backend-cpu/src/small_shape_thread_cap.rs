@@ -70,6 +70,20 @@ use std::sync::OnceLock;
 /// Phase 1（framework-compare 同一バイナリ on/off。事前登録規則は
 /// イシュー #1575 コメント参照）の実測結果に基づき確定する。ADOPT な
 /// ら `true`・REJECT なら `false` へ 1 行差し戻すだけで済む。
+///
+/// **M4 Max 実機実測により `false` へ確定済み（REJECT）**: 判定対象
+/// 4 セル（train/infer cpu fresh/reuse。各 5 run 中央値・
+/// `SMALL_SHAPE_CAP_ENABLED=true` でビルドしたバイナリを
+/// `RAYON_NUM_THREADS` の有無で run 単位 interleave 計測）のうち
+/// `train:fresh` が `ratio(after/before)=1.0307`（>1.00）で事前登録規則
+/// 「1 セルでも >1.00 なら REJECT」に抵触した（`train:reuse=0.9243`・
+/// `infer:fresh=0.7706`・`infer:reuse=0.8535` は基準充足）。checksum は
+/// 全 10 セル（判定対象 4 ＋参考 6）で完全一致（bit 完全一致契約は
+/// 維持）。共有負荷下（record_only。計測中 load average 22〜23）での
+/// 単発計測であり `train:fresh` の後退幅（+3%）はノイズ帯の可能性も
+/// あるが、事前登録規則の事後緩和は行わない。実測記録は
+/// `docs/perf/cpu-gemm-small-shape-thread-cap.md`「Phase 1」節・
+/// `docs/perf/logs/cpu-gemm-small-shape-thread-cap-1575/` を参照。
 pub(crate) const SMALL_SHAPE_CAP_ENABLED: bool = false;
 
 /// 専用プールのスレッド数（Phase 0 スイープで確定。M4 Max 実機・

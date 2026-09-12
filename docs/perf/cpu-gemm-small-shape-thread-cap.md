@@ -97,7 +97,50 @@ Phase 0 完了後に上記 2 定数を確定・コミットし、Phase 1 の結�
 `env -u RAYON_NUM_THREADS`（after・cap 有効）／`RAYON_NUM_THREADS=16`
 （before・明示設定により cap 無効）で interleave 計測する。
 
-<!-- Phase 1 実測結果はここに追記する -->
+**実施内容**: `scripts/bench/framework-compare/` で
+`SMALL_SHAPE_CAP_ENABLED=true` にした本リポの `crates/facade` を
+`[patch.crates-io.fandhe-ai]`（path patch）で `bench-fandhe` へ差し込んで
+ビルドし（`cargo metadata` で `fandhe-ai` の解決元が path 依存
+〈`source: None`〉であることを確認済み）、判定対象 4 セル（train／infer
+cpu fresh／reuse）＋参考 6 セル（gemm cpu 512/1024/2048 fresh／reuse。
+本機構は `dispatch_two_d_dynamic` 呼び出し経路のため gemm タスクにも
+到達しうる。参考記録）を before/after 各 5 run（run 単位で実行順反転）
+interleave 計測した（record_only。計測中 load average 22〜23 の共有負荷
+下。`docs/perf/logs/cpu-gemm-small-shape-thread-cap-1575/phase1/`・
+`env_info_phase1.txt`）。
+
+**結果**（`aggregate_phase1.md`。ratio = after 5-run 中央値 / before
+5-run 中央値）:
+
+| セル | before (s) | after (s) | ratio | 判定対象 |
+|---|---|---|---|---|
+| train:fresh | 0.000781459 | 0.000805437 | **1.0307** | ○ |
+| train:reuse | 0.000940772 | 0.000869563 | 0.9243 | ○ |
+| infer:fresh | 0.000201937 | 0.000155605 | 0.7706 | ○ |
+| infer:reuse | 0.000190146 | 0.000162292 | 0.8535 | ○ |
+| gemm:fresh:512 | 0.000671271 | 0.000660709 | 0.9843 | 参考 |
+| gemm:reuse:512 | 0.000638167 | 0.000643062 | 1.0077 | 参考 |
+| gemm:fresh:1024 | 0.002987167 | 0.002976042 | 0.9963 | 参考 |
+| gemm:reuse:1024 | 0.004357084 | 0.003889521 | 0.8927 | 参考 |
+| gemm:fresh:2048 | 0.019987500 | 0.023424041 | 1.1719 | 参考 |
+| gemm:reuse:2048 | 0.023663562 | 0.025603458 | 1.0820 | 参考 |
+
+checksum は全 10 セルで before/after 完全一致（bit 完全一致契約を
+本計測でも確認）。
+
+**判定**: `train:fresh` の `ratio=1.0307`（>1.00）が事前登録規則
+「判定対象 4 セルすべてで `ratio<=1.00`」に抵触した。
+`train:reuse`／`infer:fresh`／`infer:reuse` の 3 セルは基準を満たしたが、
+規則は 4 セル全一致を要求するため **REJECT** と確定する
+（`SMALL_SHAPE_CAP_ENABLED = false` 維持。機構自体は削除せず維持）。
+
+共有負荷下（record_only）での単発計測であり `train:fresh` の後退幅
+（約 +3%）はノイズ帯の可能性もあるが、事前登録規則は結果を見て緩和・
+再解釈しない方針のため、本判定を正式結果として記録する（再測定・
+再判定は本 PR のスコープ外。必要であれば別イシューで低負荷環境
+再計測を提案する）。
+
+→ **verdict = REJECT**（`SMALL_SHAPE_CAP_ENABLED = false` 確定）
 
 ## GB10（DGX Spark）
 
