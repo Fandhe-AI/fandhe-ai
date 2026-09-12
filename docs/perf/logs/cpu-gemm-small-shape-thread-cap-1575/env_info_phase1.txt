@@ -1,0 +1,27 @@
+イシュー #1575 Phase 1 実測環境（内部ホスト名は含めない）。
+
+計測方式: record_only（専有ゲートなし。他セッション並走の共有負荷下。
+計測開始時 load average 22.09/10.98/7.65、計測中盤 23.41/12.50/8.33、
+計測直後 8.19/10.36/8.00）。
+
+ビルド: scripts/bench/framework-compare/ で
+  cargo build --release -p bench-fandhe \
+    --config 'patch.crates-io.fandhe-ai.path="<このリポの crates/facade 絶対パス>"'
+（SMALL_SHAPE_CAP_ENABLED=true にした状態でコミットしたソースを facade
+経由でビルド。`cargo metadata` で fandhe-ai の source が None＝path 依存
+であることを確認済み）。
+
+腕:
+- after: `env -u RAYON_NUM_THREADS <bin> ...`（cap 有効。eligible な形状
+  〈学習形状〉は専用 6 スレッドプールへ切替）
+- before: `RAYON_NUM_THREADS=16 <bin> ...`（env_override により cap 無効。
+  グローバルプールは 16 スレッドのまま）
+
+各セル 5 run（run 単位で before/after の実行順を反転。奇数 run:
+after→before・偶数 run: before→after）。生ログは phase1/ 配下に
+`<task>_<mode>_<size>_<arm>_run<N>.jsonl`。集計は aggregate_phase1.py／
+aggregate_phase1.md を参照。
+
+計測後、scripts/bench/framework-compare/Cargo.lock は承認済みピン
+（sha256 8a60ab14...）へ復元済み（path patch ビルドによる書き換えの
+後始末。deps-policy.md 第 9 区分の完全固定を維持）。
