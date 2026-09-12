@@ -17,6 +17,8 @@
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLDevice, MTLSize};
 
+use fandhe_ai_tensor_core::{BinaryElementwiseOp, UnaryElementwiseOp};
+
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
@@ -206,6 +208,83 @@ impl MetalElementwise {
     /// `out[i] = tanh(a[i])`（f32、`metal::precise::tanh`）。
     pub fn run_tanh_f32(&self, ctx: &MetalContext, a: &[f32]) -> Result<Vec<f32>, MetalError> {
         self.run_unary(ctx, &self.tanh_f32, a)
+    }
+
+    /// `op` に対応するコンパイル済みパイプラインを返す
+    /// （[`Self::dispatch_binary_resident`] 専用の内部選択。ホスト版
+    /// `run_add_f32`／`run_mul_f32` と同一カーネルを再利用するため bit
+    /// 同一契約が成立する）。
+    fn pipeline_for_binary(&self, op: BinaryElementwiseOp) -> &MtlPipeline {
+        match op {
+            BinaryElementwiseOp::Add => &self.add_f32,
+            BinaryElementwiseOp::Mul => &self.mul_f32,
+            // `BinaryElementwiseOp` は `#[non_exhaustive]`。呼び出し元
+            // （`ops.rs::MetalBackendOps::binary_elementwise_device`）は
+            // 既知 variant のみを渡す契約とし、未知 variant は `ops.rs`
+            // 側で `Unsupported` として明示拒否する（CUDA 側
+            // `elementwise.rs::function_for_binary` と同じ設計）。
+            _ => &self.add_f32,
+        }
+    }
+
+    /// [`Self::pipeline_for_binary`] の単項版。
+    fn pipeline_for_unary(&self, op: UnaryElementwiseOp) -> &MtlPipeline {
+        match op {
+            UnaryElementwiseOp::Relu => &self.relu_f32,
+            UnaryElementwiseOp::Exp => &self.exp_f32,
+            UnaryElementwiseOp::Tanh => &self.tanh_f32,
+            _ => &self.relu_f32,
+        }
+    }
+
+    /// `a op b` を [`MetalBuffer`] 常駐のまま計算する（イシュー #1584。
+    /// `tensor-core::BackendOps::binary_elementwise_device` の Metal
+    /// 実装が呼ぶ）。CUDA 版（`backend-cuda::elementwise::
+    /// launch_binary_resident`）と異なり、本メソッドは
+    /// [`MetalContext::dispatch_sync`]（encode → `waitUntilCompleted`
+    /// の同期版）を使う: Metal の encode-only（非同期・待たない）経路
+    /// は失敗検出のために `*_tracked` 版・`failure_token` への登録が
+    /// 必要になる設計上の要件があり（`linear_forward_device` が使う
+    /// `encode_strided_bias_act_prepared` 系と同じ制約）、本イシューの
+    /// スコープでは踏み込まない。そのため本 API は呼び出しごとに 1 回
+    /// 同期する（H2D／D2H 相当の転送は発生しないが、CUDA 版の「同期点を
+    /// 呼び出し元の `download` へ集約する」契約とは異なる）。
+    pub(crate) fn dispatch_binary_resident(
+        &self,
+        ctx: &MetalContext,
+        op: BinaryElementwiseOp,
+        a: &MetalBuffer,
+        b: &MetalBuffer,
+        out: &MetalBuffer,
+        numel: usize,
+    ) -> Result<(), MetalError> {
+        validate_elementwise_len(numel)?;
+        if numel == 0 {
+            return Ok(());
+        }
+        let pipeline = self.pipeline_for_binary(op);
+        ctx.dispatch_sync(|encoder| {
+            encode_binary_dispatch(encoder, pipeline, a, b, out, numel as u32);
+        })
+    }
+
+    /// [`Self::dispatch_binary_resident`] の単項版。
+    pub(crate) fn dispatch_unary_resident(
+        &self,
+        ctx: &MetalContext,
+        op: UnaryElementwiseOp,
+        a: &MetalBuffer,
+        out: &MetalBuffer,
+        numel: usize,
+    ) -> Result<(), MetalError> {
+        validate_elementwise_len(numel)?;
+        if numel == 0 {
+            return Ok(());
+        }
+        let pipeline = self.pipeline_for_unary(op);
+        ctx.dispatch_sync(|encoder| {
+            encode_unary_dispatch(encoder, pipeline, a, out, numel as u32);
+        })
     }
 }
 

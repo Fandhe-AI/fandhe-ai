@@ -34,8 +34,9 @@
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, DispatchFailureCell, FusionPlan, MatrixNormOrd, MseReduction,
-    QrFactors, ShapeError, SvdFactors, Tensor, require_same_shape, row_softmax_layout,
+    Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan, MatrixNormOrd,
+    MseReduction, QrFactors, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
+    require_same_shape, row_softmax_layout,
 };
 
 use crate::context::MetalContext;
@@ -1510,6 +1511,124 @@ impl BackendOps for MetalBackendOps {
         // `download`（`synchronize`）へ集約される（本メソッド doc
         // 「同期契約」参照）。
         Ok(c_dev_buf)
+    }
+
+    /// `a op b`（`op` は [`BinaryElementwiseOp`]）を [`MetalBuffer`]
+    /// 常駐のまま計算する（イシュー #1584）。`elementwise::
+    /// MetalElementwise::dispatch_binary_resident` へ委譲する（同メソッド
+    /// doc「同期契約」参照: `MetalContext::dispatch_sync` を使うため
+    /// 呼び出しごとに 1 回同期する。CUDA 版の「同期点を呼び出し元の
+    /// `download` へ集約する」契約とは異なる）。`a`／`b` は shape 完全
+    /// 一致限定（ブロードキャスト非対応）で、不一致は起動前に
+    /// `ShapeMismatch` で拒否する。
+    fn binary_elementwise_device(
+        &self,
+        op: BinaryElementwiseOp,
+        a: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        b: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Metal || b.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if a.shape() != b.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a.shape().to_vec(),
+                rhs: b.shape().to_vec(),
+            }));
+        }
+        let shape = a.shape().to_vec();
+        let numel = a.numel();
+
+        if numel == 0 {
+            return static_metal_memory()?.alloc_zeroed(&shape);
+        }
+
+        let a_handle = a
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "binary_elementwise_device: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let b_handle = b
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(b_buf) = b_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "binary_elementwise_device: b buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        // 出力は呼び出し元へ escape するため `static_metal_memory()`
+        // （`linear_forward_device` の「出力バッファの確保元」と同じ
+        // 判断。REQ-14 の単一計測系列）。
+        let mem = static_metal_memory()?;
+        let out_dev_buf = mem.alloc_zeroed(&shape)?;
+        let out_handle = out_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(out_buf) = out_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "binary_elementwise_device: output buffer has numel > 0 but no device \
+                 allocation"
+                    .into(),
+            ));
+        };
+
+        let ew = context_cache::cached_elementwise(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        ew.dispatch_binary_resident(&ctx, op, a_buf, b_buf, out_buf, numel)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        Ok(out_dev_buf)
+    }
+
+    /// [`Self::binary_elementwise_device`] の単項版（イシュー #1584）。
+    fn unary_elementwise_device(
+        &self,
+        op: UnaryElementwiseOp,
+        a: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let shape = a.shape().to_vec();
+        let numel = a.numel();
+
+        if numel == 0 {
+            return static_metal_memory()?.alloc_zeroed(&shape);
+        }
+
+        let a_handle = a
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "unary_elementwise_device: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mem = static_metal_memory()?;
+        let out_dev_buf = mem.alloc_zeroed(&shape)?;
+        let out_handle = out_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(out_buf) = out_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "unary_elementwise_device: output buffer has numel > 0 but no device allocation"
+                    .into(),
+            ));
+        };
+
+        let ew = context_cache::cached_elementwise(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        ew.dispatch_unary_resident(&ctx, op, a_buf, out_buf, numel)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        Ok(out_dev_buf)
     }
 
     /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
