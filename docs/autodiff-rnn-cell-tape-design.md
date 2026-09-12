@@ -56,7 +56,7 @@
 
 - 候補 A は LSTM 1 step あたり約 20 ノード以上（× T）になり、`Sigmoid` が `push_eager` のため融合が細切れになる（`MAX_FUSED_CHAIN_LEN = 6` の恩恵を受けない）
 - 候補 B は VJP でゲート値（i／f／g／o、または r／z／n）が必要になる。§2 で確認したとおり `vjp()` は `nodes`／`materialize_fallible` を通じて**自ノードの入力**（x_t・h_prev・weight・bias。いずれもテープに既存登録済み）を再取得できるため、**ゲート値そのものを payload に保存せず、VJP 内で入力から forward と同じ GEMM＋活性化を再計算する**ことも可能（再計算方式）。一方 payload 保存方式はメモリコストと引き換えに再計算 GEMM を避けられる
-- 再計算方式は「forward の GEMM をもう一度 backward で実行する」ため、backward の演算量が実質 2 倍（GEMM 分）になる。payload 保存方式はメモリ O(T·B·G·H)（G = ゲート数: RNN=1, GRU=3, LSTM=4）を要するが GEMM の再計算は不要
+- 再計算方式は「forward の GEMM をもう一度 backward で実行する」ため、backward の演算量が実質 2 倍（GEMM 分）になる。payload 保存方式はメモリ O(T·B·G·H)（G = ゲート数: RNN=1, LSTM=4。GRU は決定 1c により再帰側アフィン値 `q` を追加保持するため実効 G=4）を要するが GEMM の再計算は不要
 - `push_view`（`Reshape`／`Transpose`）が採用する「値を持たず再導出する」方式（`resolve_view`）は shape のみの軽量な再導出であり、GEMM を伴うセル演算とはコスト構造が異なる。将来の activation checkpointing（#1624）はこの再計算方式の一般化に相当する
 
 **採用案**: **候補 B（専用セル Op）を v1 として採用し、ゲート値は `Op` payload に非追跡 `Tensor<f32>` として保持する（payload 保存方式）**。理由: (1) v1 は正しさとテストの単純さを優先し、GEMM 再計算による誤差蓄積・実装複雑度の増加を避ける、(2) `CrossEntropyLoss { targets: Tensor<i32> }` の前例（非追跡 payload）と整合する、(3) メモリコスト O(T·B·G·H) は T・B・H が小さい典型的な RNN 用途では許容範囲。将来 T・B・H が大きくメモリが問題になる場合は再計算方式（GEMM 再計算方式。backward コストは payload 保存方式より大きい）への切り替えを別イシューで検討する。
@@ -77,13 +77,21 @@
 
 **付随事項（#1647 への引き渡し）**: セル variant は入力 `NodeId` を約 7 個（LSTM）持つ。§3 契約 7 のとおり汎用 `Op::inputs()` は存在しないため、入力を列挙する全 `match`（`Tape::effective_subtree_size`〈`tape.rs:872`〉・`build_lazy_plan`〈`tape.rs:943`〉・`grad::vjp`・`Op::is_lazy_elementwise`／`is_view` の否定分岐〈新 variant はいずれも `false` を返す＝eager・非 view〉）へ新 variant を追加する必要がある。
 
+### 決定 1c: GRU 専用ペイロードへの再帰側アフィン値 `q` の追加（GEMM 再計算不要契約の維持）
+
+**問題（codex-review 指摘。PR #1662）**: 決定 5 の GRU 式 `n_t = tanh(W_in x + b_in + r_t ⊙ (h_{t-1}·W_hn + b_hn))` において、`q_t := h_{t-1}·W_hn + b_hn`（再帰側アフィン値）は `pre_n_t := W_in x + b_in + r_t ⊙ q_t` の `r_t` に対する偏微分そのもの（`∂pre_n_t/∂r_t = q_t`）である。決定 1 の payload 保存方式は「ゲート値を保存して GEMM 再計算を避ける」ことを前提とするが、`r_t`・`z_t`・`n_t` の 3 値のみでは `q_t` を復元できない（`n_t` から逆算するには `tanh⁻¹` と `r_t` による除算が必要で、`r_t` が 0 に近い場合に非可逆・数値不安定になり、そもそも tanh 逆関数を経由する復元は本設計が避けたい追加計算そのもの）。`q_t` を保持しない場合、`∂n_t/∂r_t` の算出には backward 内で `h_{t-1}·W_hn + b_hn` の GEMM を再計算する必要が生じ、**決定 1 の「payload 保存方式は GEMM 再計算が不要」という前提が GRU に限り崩れる**。
+
+**採用案**: `Op::GruCell` の payload に `r_t`／`z_t`／`n_t` に加えて `q_t`（`[B, H]`。非追跡 `Tensor<f32>`）を保持する（例: `Op::GruCell { x, h_prev, w_ih, w_hh, b_ih, b_hh, gates_rzn: Tensor<f32>, q: Tensor<f32> }`）。VJP は `q_t` を直接読むだけで済み、GEMM 再計算を伴わない。これにより GRU の実効ゲート数は `G=4`（LSTM と同数。決定 1 のメモリコスト表を更新済み）となる。
+
+RNN／LSTM は本問題を生じない: RNN は `tanh` の引数がそのまま単一の GEMM 出力（他ゲートとの要素積を挟まない）。LSTM の `i／f／g／o` はいずれも独立な GEMM 出力へそのまま活性化関数を適用するのみで、ゲート同士の要素積（GRU の `r_t ⊙ q_t` に相当する構造）を経由しないため、ゲート値自体が偏微分の再構成に十分である。
+
 ### 決定 2: 時系列ループの tape 構築（展開 vs 単一 Sequence Op）
 
 **候補 A（展開・unrolled）**: セル Op を T 回、動的テープ上へ展開する。重み `NodeId` を T 回参照し、BPTT は `backward.rs::accumulate` の fan-in 蓄積で自動成立する（追加機構不要）。
 
 **候補 B（単一 Sequence Op）**: `Op::RnnSequence` 1 ノードが内部で forward 全 step を実行し、VJP 内で逆順ループする。テープ長は O(1) になるが、VJP が巨大化し「1 ノード＝1 VJP 寄与」という既存モデルに対する特殊化が必要（融合境界・`materialize_fallible` 層とも整合を取り直す必要がある）。
 
-**採用案**: **候補 A（unrolled）を v1 とする**。テープ成長 O(T)・保存活性化（ゲート payload 込み）メモリ O(T·B·G·H) を明記する。以下は v1 スコープ外とし §5 に記録する: truncated BPTT、`pack_padded_sequence` 相当の可変長系列、双方向（bidirectional）、多層スタック（ただし多層は Module 側で単層セルを逐次適用するだけで自然に表現できることを付記する）。
+**採用案**: **候補 A（unrolled）を v1 とする**。テープ成長 O(T)・保存活性化（ゲート payload 込み）メモリ O(T·B·G·H) を明記する。以下は v1 スコープ外とし §5 に記録する: truncated BPTT、`pack_padded_sequence` 相当の可変長系列、双方向（bidirectional）、層をまたいで勾配が連続する多層スタック（**codex-review 指摘〈PR #1662〉を受け訂正**: 単層セルを Module 側で逐次適用すること自体は可能だが、決定 4a のとおり候補 A の `Tensor` レベル入力スライスでは前段層への逆伝播が切れるため「自然に表現できる」は不正確。詳細は決定 4a）。
 
 ### 決定 3: `Tape::reset` との相互作用（reuse 学習ループ）
 
@@ -97,6 +105,16 @@
 - **候補 A**: セル API は `x_t: &Var`（`[B, D_in]`）を受け取り、時系列スライスは呼び出し側責務（`[T,B,D]` の `Tensor` を `Tensor::narrow`〈`tensor-core`。既存〉でスライスして `Tape::var` 登録＝各 step 入力は葉）
 - **候補 B**: Sequence API が `[T,B,D]` の `Var` を受け、`Var::narrow`（#1599）で内部スライス
 - **採用案**: **v1 は候補 A**（セル単位 API＋Module 側で `Tensor` レベルのスライス。`Var::narrow` 未実装でも成立する）。候補 B は #1599 完了後の拡張として §6 に記録する。出力 `[T,B,H]` の組み立ては `stack`（#1598）依存。GRU の `1 − z` は `Op::GruCell` 内部で閉じる（専用 Op のため `sub` 不要。候補 A 合成参照実装では `sub`〈#1593〉に依存する）
+
+### 決定 4a: 多層スタック時の勾配連続性（`Module` trait との整合。codex-review 指摘・PR #1662）
+
+**問題**: `Module` trait（§2 事実）は `forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError>` であり、`input` は既に tape 上のノードを指す `Var`（前段の学習可能層の出力でありうる）。一方、決定 4 採用案（候補 A）は「時系列方向のスライスは呼び出し側責務として `[T,B,D]` の生 `Tensor` を `Tensor::narrow` でスライスしてから `Tape::var`（葉）として登録する」設計である。この経路は、**もし Sequence レベル API（`Rnn`／`Lstm`／`Gru`）が標準 `Module` trait を実装し `input: &Var` を受け取ってしまうと、その `Var` を `.value()`／`to_tensor()` で `Tensor` へ detach してからスライス・葉再登録することを意味し、`input` を生成した前段層（別の RNN 層・埋め込み層等）へ向かう逆伝播経路をサイレントに断ち切る**（§3 契約 2「独立ノードとして登録されなかった中間値は追跡されない」の系）。これにより決定 2 が当初記していた「多層は Module 側で単層セルを逐次適用するだけで自然に表現できる」は不正確であり、決定 2 の記述を訂正した。
+
+**採用案**:
+
+1. v1 の Sequence レベル API（`Rnn`／`Lstm`／`Gru`）は標準 `Module` trait（`&Var` 入力）を実装せず、`x: &Tensor<f32>` を直接受け取る専用シグネチャ（例: `forward_seq(&self, tape: &Tape, x: &Tensor<f32>, h0: Option<&Var>) -> Result<Var, AutodiffError>`）とする。これにより「入力は detach 済みの生データである」ことを型シグネチャ上で明示し、`Var` を渡せてしまうことによるサイレントな勾配欠落を型レベルで防ぐ。
+2. 層をまたいで勾配が連続する多層スタック（前段 RNN 層のパラメータも学習対象に含む深い RNN）は v1 スコープ外とする。`Var::narrow`（#1599。候補 B）により各 step のスライスを勾配追跡可能な経路（`push_view` 相当）で行える設計に置き換わるまで実装しない。
+3. §5 のスコープ外一覧を本決定に合わせて修正する。
 
 ### 決定 5: ゲート配置・式・重み形状（parity の参照定義）
 
@@ -147,6 +165,8 @@ PyTorch 準拠で固定する:
 - (e) `Tape::reset` 後の葉保持（決定 3 の per-step 再登録契約）
 - (f) `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - (g) 未知 `Op` variant への fail-closed（型付きエラー。本番経路で `unwrap`／`expect` を使わない）
+- (h) GRU の `r_t` に対する勾配が payload 保存済み `q_t`（決定 1c）から算出され、backward 内で `h_{t-1}·W_hn+b_hn` の GEMM 再計算を伴わないこと（数値微分突合〈項目 (b)〉が通れば正しさは担保されるため、本項目は「`q_t` を意図的に欠落・破損させると (b) の数値微分突合が失敗する」ことを確認するテストとして実装し、payload 保存方式が実際に機能していることを構造的に検証する）
+- (i) Sequence レベル API（`Rnn`／`Lstm`／`Gru`）が標準 `Module` trait を実装せず `x: &Tensor<f32>` 専用シグネチャであること（決定 4a）の型検査。多層スタック（層をまたぐ勾配連続）は決定 4a により v1 スコープ外のため受入基準に含めない
 
 付随更新: `docs/public-api-design.md` §3.2 への追記、`Op` doc の「`Var` とほぼ 1:1」注記の更新、`docs/compat-feature-gap.md` §2.7 行の更新、`docs/kernel-fusion.md`（融合境界。専用セル Op は非 elementwise につき融合対象外である旨）への注記。
 
@@ -187,7 +207,7 @@ h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
 - truncated BPTT
 - `pack_padded_sequence` 相当の可変長系列サポート
 - 双方向（bidirectional）RNN／LSTM／GRU
-- 多層スタックの専用 API（Module 側での単層セル逐次適用は可能）
+- 層をまたいで勾配が連続する多層スタックの専用 API（決定 4a: 候補 A の `Tensor` レベル入力スライスでは前段層への逆伝播が切れるため `Var::narrow`〈#1599〉による候補 B 化が前提。単層セルを Module 側で逐次適用すること自体〈層間の勾配非連続を許容する場合〉は可能）
 - reuse（デバイス常駐）経路（決定 7）
 - `predict_resident`／`linear_forward_device` 連携（決定 9）
 - facade 公開面（`fandhe_ai`／`compat`）への統合（決定 10。§6 の承認事項）
@@ -197,7 +217,7 @@ h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
 ## 6. 承認事項（#1647 着手前の前提）
 
 1. **facade 公開面の拡張は実装不可**（決定 10）: `docs/compat-api-scope.md` §5 の範囲拡張手続きのうち、実装リポ側の §1／§2／§5 更新（#1591）が完了し、かつユーザー承認記録が残るまで、`fandhe_ai` 再エクスポートおよび `compat::Sequential::add_lstm` 等は実装しない。正本 spec 側（Fandhe-AI/fandhe-ai-spec#66）は既にマージ済みだが、これは §5 の手続き (1) のみを満たすものであり、実装リポ側の記録更新は別途必要
-2. **依存追加の起票案（起票自体は本文書の管轄外）**: #1619 の宣言依存に `#1599`（`Var::narrow`。決定 1b・決定 4 候補 B の前提）を追加することを提案する。本エージェントは自動運転・承認不可の制約により Issue 起票・コメント投稿を行わない。ユーザー承認後に `out-of-scope-tracking.md` の手続きで起票することを推奨する
+2. **依存追加の起票案（起票自体は本文書の管轄外）**: #1619 の宣言依存に `#1599`（`Var::narrow`。決定 1b・決定 4 候補 B・決定 4a〈層をまたぐ勾配連続の前提〉）を追加することを提案する。本エージェントは自動運転・承認不可の制約により Issue 起票・コメント投稿を行わない。ユーザー承認後に `out-of-scope-tracking.md` の手続きで起票することを推奨する
 3. **reuse 経路の累積契約の新設提案（決定 7）**: RNN 重み共有時の staging 累積（β=1 相当）契約を `docs/device-resident-update-design.md` へ追補する別イシューを提案する。本エージェントは起票を行わない
 4. 上記 1〜3 のいずれも、#1647（3 バックエンド実装）が着手する前に解消しておくべき前提として記録するに留め、本イシュー自体はここまでで完了とする
 
