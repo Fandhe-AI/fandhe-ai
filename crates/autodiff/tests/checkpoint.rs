@@ -418,8 +418,12 @@ fn escaped_intermediate_var_value_matches_original_after_release() {
         })
         .unwrap();
     let h1 = escaped.unwrap();
-    // `h1` は checkpoint 区間の内部ノード（output=h2 ではない）なので
-    // 解放されている。`value()`（層 2）は再計算で埋める。
+    // `h1` は `Op::Relu`（`Op::is_checkpoint_eligible()` が `false`
+    // を返す非対象 Op）であり checkpoint による解放対象ではない。
+    // 未実体化なのは checkpoint とは独立の理由（elementwise の遅延
+    // グラフ末端。`push_lazy`）であり、`value()`（層 2）が
+    // `materialize_infallible` 経由で通常どおり実体化するだけである
+    // （review 指摘: #1624 のコメント記述の訂正）。
     let recomputed = h1.to_tensor();
 
     // 独立に同じ forward を計算し、期待値と突き合わせる。

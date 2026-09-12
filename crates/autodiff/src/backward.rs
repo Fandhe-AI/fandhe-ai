@@ -186,6 +186,18 @@ impl Tape {
             // しか処理しないが、値自体は結果として保持し続ける必要が
             // ある。取り除くと非葉ノードの `get()` が常に `None` になる）。
             let Some(upstream) = grads[id].clone() else {
+                // 勾配未到達（loss から辿れない部分グラフ）でも、`id` が
+                // いずれかの checkpoint 区間の `lo` に一致する場合は
+                // 当該区間の再解放を行う必要がある（イシュー #1624
+                // review 指摘）。区間内で最初に push されたノード
+                // （`lo`）が loss への勾配経路上にない場合（区間内の
+                // 使い捨て中間値や `checkpoint_from` の介在ノードが
+                // `lo` に来るケース）でも「backward が区間を離れたら
+                // 再び捨てる」契約（`docs/autodiff-checkpoint-design.md`
+                // §3.1 点 4）を成立させるため、`continue` より前に
+                // 呼ぶ（下の通常経路と同じ呼び出しを重複させず一本化
+                // する）。
+                self.release_checkpoints_ending_at(id);
                 continue;
             };
             // 本反復専用の借用（ブロック末で drop）。ノード自身の

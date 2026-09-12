@@ -165,7 +165,130 @@ fn check_checkpoint_reduces_peak_memory() {
     );
 }
 
+/// review 指摘（イシュー #1624 Review。`docs/autodiff-checkpoint-design.md`
+/// §3.1 点 4 の契約検証）: checkpoint 区間の `lo`（区間内で最初に push
+/// されたノード）が loss への勾配経路上にない（使い捨ての中間値）場合
+/// でも、backward の再解放（`Tape::release_checkpoints_ending_at`）が
+/// 正しく発火することを実測する。
+///
+/// `region_compute_with_dead_end` は各区間に `h.matmul(&w_dead)`
+/// （出力を使わない使い捨て演算）を追加する。`dead_lead=true` では
+/// これが区間の `lo` に対応するノードとなり、`backward_impl` の逆走査
+/// でこのノードの `grads[id]` は決して `Some` にならない（どこからも
+/// upstream 勾配を受け取らない）。修正前は
+/// `let Some(upstream) = ... else { continue };` が
+/// `release_checkpoints_ending_at(id)` の呼び出し（ループ末尾）を
+/// 素通りするため、この区間は backward 側の再解放が一度も走らず、
+/// 再計算でキャッシュされた中間値が `Tape::reset()` まで生き残る
+/// （ピークメモリ削減がこの区間分だけ機能しない）。
+///
+/// 判定方法: 「使い捨て演算が区間の先頭（`lo`）に来る」構成と
+/// 「使い捨て演算を区間の非 `lo` 位置に置く」構成で同じ区間数・同じ
+/// 演算数の chain を組み、両者のピークメモリを比較する。`lo` が
+/// 勾配経路上にあるかどうかで解放の可否が変わらない（修正後は常に
+/// 解放される）ことを確認する——両者の差が小さいことをもって、`lo`
+/// が非到達ノードであっても再解放が機能していると判定する。
+fn dead_end_matmul<'t>(h: &Var<'t>, w_dead: &Var<'t>) -> Var<'t> {
+    // 出力を一切使わない使い捨て演算。テープへ実際にノードを push する
+    // ため（`h.matmul` は `Op::MatMul` を記録する）コンパイラ最適化で
+    // 消えることはないが、`black_box` で意図を明示する。
+    std::hint::black_box(h.matmul(w_dead).expect("forward は常に成功する構成"))
+}
+
+/// `dead_lead` が `true` の場合、区間内で最初に push されるノードを
+/// 使い捨て演算（loss への勾配経路上にない）にする。`false` の場合は
+/// 使い捨て演算を区間の非 `lo` 位置に置き、`lo` は通常どおり勾配経路上
+/// のノードになる。
+fn region_compute_with_dead_end<'t>(
+    h: &Var<'t>,
+    w_a: &Var<'t>,
+    w_b: &Var<'t>,
+    w_dead: &Var<'t>,
+    dead_lead: bool,
+) -> Result<Var<'t>, AutodiffError> {
+    if dead_lead {
+        let _dead = dead_end_matmul(h, w_dead);
+        let a = h.matmul(w_a)?;
+        let b = a.sigmoid();
+        let c = b.matmul(w_b)?;
+        Ok(c.sigmoid())
+    } else {
+        let a = h.matmul(w_a)?;
+        let b = a.sigmoid();
+        let _dead = dead_end_matmul(&b, w_dead);
+        let c = b.matmul(w_b)?;
+        Ok(c.sigmoid())
+    }
+}
+
+fn run_chain_with_dead_end(tape: &Tape, dead_lead: bool) {
+    let leaf = tape.var(&make_matrix(0));
+    let mut h = leaf;
+    let weights_a: Vec<_> = (0..K)
+        .map(|i| tape.var(&make_matrix(3 * i as u64 + 1)))
+        .collect();
+    let weights_b: Vec<_> = (0..K)
+        .map(|i| tape.var(&make_matrix(3 * i as u64 + 2)))
+        .collect();
+    let weights_dead: Vec<_> = (0..K)
+        .map(|i| tape.var(&make_matrix(3 * i as u64 + 3)))
+        .collect();
+    for i in 0..K {
+        let w_a = &weights_a[i];
+        let w_b = &weights_b[i];
+        let w_dead = &weights_dead[i];
+        h = tape
+            .checkpoint(|| region_compute_with_dead_end(&h, w_a, w_b, w_dead, dead_lead))
+            .expect("checkpoint 区間の forward は常に成功する構成");
+    }
+    let loss = h.sum(None).expect("sum(None) は常に成功する（全軸縮約）");
+    let grads = tape.backward(&loss).expect("backward は常に成功する構成");
+    std::hint::black_box(&grads);
+}
+
+fn check_checkpoint_releases_when_lo_is_dead_end() {
+    let (_lead, peak_lead) = measure(|| {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        run_chain_with_dead_end(&tape, true);
+        tape
+    });
+    let (_tail, peak_tail) = measure(|| {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        run_chain_with_dead_end(&tape, false);
+        tape
+    });
+
+    let peak_lead = peak_lead
+        .expect("GLOBAL_ALLOCATOR がテストバイナリの #[global_allocator] のため Some のはず");
+    let peak_tail = peak_tail
+        .expect("GLOBAL_ALLOCATOR がテストバイナリの #[global_allocator] のため Some のはず");
+
+    println!(
+        "checkpoint_peak_memory(dead-end lo): peak_lead={peak_lead} bytes, \
+         peak_tail={peak_tail} bytes, K={K}"
+    );
+
+    // 使い捨て演算が区間の `lo`（先頭）に来る場合と非 `lo` 位置に来る
+    // 場合とで、ピークメモリが大きく変わらないことを検証する。修正前
+    // （review 指摘の bug）では `dead_lead=true` 構成の全区間で
+    // backward 側の再解放が発火せず、中間ノードの再計算値が
+    // `Tape::reset()` まで残ってピークが大きく増える。許容差は活性化
+    // 1 個分（`activation_bytes()`）の半分未満とし、ノード管理
+    // オーバーヘッド程度の揺らぎは許容しつつ「区間丸ごと未解放」の
+    // ような大きな退行は検出する。
+    let diff = peak_lead.abs_diff(peak_tail);
+    let tolerance = activation_bytes() / 2;
+    assert!(
+        diff < tolerance,
+        "checkpoint 区間の `lo` が勾配経路上にない場合とある場合とでピークメモリの差が \
+         大きすぎる（diff={diff} バイト、許容={tolerance} バイト、peak_lead={peak_lead}、\
+         peak_tail={peak_tail}）——`lo` が非到達ノードのとき backward 側の再解放が \
+         機能していない疑い（イシュー #1624 review 指摘の再発）"
+    );
+}
+
 fn main() {
     check_checkpoint_reduces_peak_memory();
+    check_checkpoint_releases_when_lo_is_dead_end();
     println!("checkpoint_peak_memory: all checks passed");
 }

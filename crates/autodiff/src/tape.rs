@@ -653,8 +653,14 @@ impl Op {
             Op::MatMul(..) | Op::Sigmoid(..) | Op::Sum { .. } | Op::Max { .. } => true,
             // view（既存 `push_view`／再導出契約の一般化）。キャッシュ
             // 済み view 値は基底バッファへの `Arc` を握るため、解放しな
-            // いと基底側を解放しても実メモリが減らない。
-            Op::Reshape { .. } | Op::Transpose { .. } => true,
+            // いと基底側を解放しても実メモリが減らない。`Op::Permute`／
+            // `Op::BroadcastTo`（イシュー #1597 で `Op::is_view()` へ
+            // 追加された variant）も同じ view 系のため同列に扱う
+            // （merge 時の非網羅 match 是正。review 指摘）。
+            Op::Reshape { .. }
+            | Op::Transpose { .. }
+            | Op::Permute { .. }
+            | Op::BroadcastTo { .. } => true,
             // 遅延 elementwise: 値を持つ場合は `pre_materialize_for_
             // binary_merge`／`push_lazy` の `at_limit` による
             // `MAX_FUSED_CHAIN_LEN` 上限維持のための自己実体化であり、
@@ -1655,21 +1661,27 @@ fn recompute_value(
             ops.max(&input_val, *dim)?
         }
         Op::Permute { input, perm } => {
-            let base = resolve_view(nodes, *input);
+            // イシュー #1597 で `push_view` 経由の view 系ノードへ追加
+            // された variant。当時の再導出関数名 `resolve_view`
+            // （infallible）はイシュー #1624 で `recompute_value`
+            // （checkpoint 全般へ一般化した fallible 版）へ改称された
+            // ため、`?` で伝播するよう揃える（merge 時の呼び出し名
+            // 不整合の是正。review 指摘）。
+            let base = recompute_value(nodes, ops, *input)?;
             base.permute(perm).unwrap_or_else(|_| {
                 debug_assert!(
                     false,
-                    "resolve_view: Op::Permute の再導出が失敗した（forward 側の契約違反）"
+                    "recompute_value: Op::Permute の再導出が失敗した（forward 側の契約違反）"
                 );
                 safe_zeros(&node.shape)
             })
         }
         Op::BroadcastTo { input } => {
-            let base = resolve_view(nodes, *input);
+            let base = recompute_value(nodes, ops, *input)?;
             base.broadcast_to(&node.shape).unwrap_or_else(|_| {
                 debug_assert!(
                     false,
-                    "resolve_view: Op::BroadcastTo の再導出が失敗した（forward 側の契約違反）"
+                    "recompute_value: Op::BroadcastTo の再導出が失敗した（forward 側の契約違反）"
                 );
                 safe_zeros(&node.shape)
             })
