@@ -2323,7 +2323,12 @@ impl BackendOps for CudaBackendOps {
                 &[w.buffer().generation()],
                 |e| BackendError::KernelLaunchFailed(e.to_string()),
                 || {
-                    let bt_dev = device.stream().clone_htod(bt)?;
+                    // イシュー #1585: `gemm.upload_h2d_new` を経由し
+                    // H2D pinned staging（opt-in・既定 OFF）へ参加させる
+                    // （`gemm.rs::CudaGemm::upload_h2d_new` ドキュメンテー
+                    // ションコメント参照。フラグ OFF 時は `device.stream()
+                    // .clone_htod(bt)` と経路・出力とも bit 同一）。
+                    let bt_dev = gemm.upload_h2d_new(bt)?;
                     let mut c_dev = device.stream().alloc_zeros::<f32>(p * r)?;
                     // `launch_tiled_f32_resident_nt` が返す転置中間バッファ
                     // （`PooledCudaHandle`）は `readback` 完了まで保持する

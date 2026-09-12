@@ -33,7 +33,7 @@
 //!    （#34 で naive 専用だった手続きを共通化）。
 
 use std::cell::Cell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
@@ -41,6 +41,7 @@ use half::f16;
 use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
+use crate::host_staging::{self, H2dStagingCache};
 use crate::kernels;
 use crate::kernels_tiled_pipeline;
 use crate::kernels_tiled_pipeline_128x64;
@@ -267,6 +268,14 @@ pub struct CudaGemm {
     /// （`context_cache.rs::ContextKey` のドキュメントコメント参照。
     /// codex-review 指摘。イシュー #1020 PR #1061）。
     allocator: Arc<CudaAllocator>,
+    /// H2D pinned staging（イシュー #1585。`crate::host_staging` モジュール
+    /// 「H2D 用ステージング」節）の opt-in キャッシュ。`run_f32_kernel`
+    /// 等の各 `run_*`／`launch_*` 系が `clone_htod` 直呼びの代わりに
+    /// `host_staging::upload_new` へ渡す。`memory.rs::CudaMemory::
+    /// h2d_staging` と同じ「インスタンス単位キャッシュ」契約（`Arc<Mutex<_>>`
+    /// で `Clone` は同一キャッシュ系列への参照複製）。フラグ OFF（既定）
+    /// 時は本フィールドを一切参照しない。
+    h2d_staging: Arc<Mutex<H2dStagingCache>>,
     naive_f32: CudaFunction,
     naive_f16: CudaFunction,
     tiled_f32: CudaFunction,
@@ -2323,6 +2332,7 @@ impl CudaGemm {
             stream: device.stream().clone(),
             ordinal: device.ordinal(),
             allocator,
+            h2d_staging: Arc::new(Mutex::new(H2dStagingCache::new())),
             naive_f32,
             naive_f16,
             tiled_f32,
@@ -3987,14 +3997,14 @@ impl CudaGemm {
         // 参照（`run_f32_kernel` と同じくデバイスバッファの確保・起動・
         // 解放を丸ごと排他区間に収める）。
         self.with_driver_call(|| {
-            let a_dev = self.stream.clone_htod(a)?;
-            let b_dev = self.stream.clone_htod(b)?;
+            let a_dev = self.upload_h2d_new(a)?;
+            let b_dev = self.upload_h2d_new(b)?;
             // `bias` が `None` の場合はダミーの 1 要素バッファを渡す（null
             // ポインタをカーネル引数へ渡す経路を作らない。`has_bias == 0` の
             // ガードによりカーネル側は実際にはこのバッファを参照しない。
             // `kernels::TILED_BIAS_ACT_F32` ドキュメンテーションコメント参照）。
             let (bias_dev, has_bias): (CudaSlice<f32>, i32) = match bias {
-                Some(bias) => (self.stream.clone_htod(bias)?, 1),
+                Some(bias) => (self.upload_h2d_new(bias)?, 1),
                 None => (self.stream.alloc_zeros::<f32>(1)?, 0),
             };
             // イシュー #1020: `run_f32_kernel` と同じ理由（epilogue も
@@ -4327,8 +4337,8 @@ impl CudaGemm {
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
         // 参照。
         self.with_driver_call(|| {
-            let a_dev = self.stream.clone_htod(a)?;
-            let b_dev = self.stream.clone_htod(b)?;
+            let a_dev = self.upload_h2d_new(a)?;
+            let b_dev = self.upload_h2d_new(b)?;
             let mut c_dev = self
                 .stream
                 .alloc_zeros::<f32>((m as usize) * (n as usize))?;
@@ -4383,8 +4393,8 @@ impl CudaGemm {
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
         // 参照。
         self.with_driver_call(|| {
-            let a_dev = self.stream.clone_htod(a)?;
-            let b_dev = self.stream.clone_htod(b)?;
+            let a_dev = self.upload_h2d_new(a)?;
+            let b_dev = self.upload_h2d_new(b)?;
             let mut c_dev = self
                 .stream
                 .alloc_zeros::<f32>((m as usize) * (n as usize))?;
@@ -4439,8 +4449,8 @@ impl CudaGemm {
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
         // 参照。
         self.with_driver_call(|| {
-            let a_dev = self.stream.clone_htod(a)?;
-            let b_dev = self.stream.clone_htod(b)?;
+            let a_dev = self.upload_h2d_new(a)?;
+            let b_dev = self.upload_h2d_new(b)?;
             let mut c_dev = self
                 .stream
                 .alloc_zeros::<f32>((m as usize) * (n as usize))?;
@@ -4533,6 +4543,26 @@ impl CudaGemm {
         context_cache::with_driver_call(self.ordinal, f)
     }
 
+    /// **H2D pinned staging（イシュー #1585）への薄い委譲**。各
+    /// `run_*`／`launch_*` 系が `self.stream.clone_htod(data)` を直接
+    /// 呼ぶ代わりに使う（`crate::host_staging` モジュール「H2D 用
+    /// ステージング」節）。`self.ordinal` の現在世代（`context_cache::
+    /// current_generation`）を `self.h2d_staging` キャッシュのキーへ
+    /// 渡すことで、`context_cache::invalidate` 後の旧世代 pinned
+    /// バッファ誤使用を防ぐ（[`crate::host_staging::H2dStagingCache::
+    /// take`] の世代検査参照）。フラグ OFF（既定）・空データの場合は
+    /// `host_staging::upload_new` 内で `self.stream.clone_htod(data)`
+    /// へそのまま委譲されるため、導入前と経路・出力は bit 同一。
+    pub(crate) fn upload_h2d_new(&self, data: &[f32]) -> Result<CudaSlice<f32>, CudaError> {
+        host_staging::upload_new(
+            &self.stream,
+            &self.h2d_staging,
+            self.stream.context(),
+            context_cache::current_generation(self.ordinal),
+            data,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_f32_kernel(
         &self,
@@ -4576,8 +4606,8 @@ impl CudaGemm {
         // `f` 実行中ずっと生存〉により a_dev/b_dev/c_dev の解放もこの
         // 排他区間の内側に収まる）。
         self.with_driver_call(|| {
-            let a_dev = self.stream.clone_htod(a)?;
-            let b_dev = self.stream.clone_htod(b)?;
+            let a_dev = self.upload_h2d_new(a)?;
+            let b_dev = self.upload_h2d_new(b)?;
             // イシュー #1020: 出力バッファはサイズクラス別プール
             // （`crate::pool::CudaAllocator`）経由で確保する（都度
             // `alloc_zeros`／解放していた固定費の削減。#1008 実測が主因の
@@ -4732,8 +4762,8 @@ impl CudaGemm {
             return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
         }
 
-        let a_dev = self.stream.clone_htod(a)?;
-        let bt_dev = self.stream.clone_htod(bt)?;
+        let a_dev = self.upload_h2d_new(a)?;
+        let bt_dev = self.upload_h2d_new(bt)?;
         // `bt`（論理形状 [n,k] 行優先）を転置して標準 `b`（[k,n] 行優先）
         // を得る（`Self::transpose_to_pooled` ドキュメンテーションコメント
         // 参照）。
@@ -4789,8 +4819,8 @@ impl CudaGemm {
             return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
         }
 
-        let at_dev = self.stream.clone_htod(at)?;
-        let b_dev = self.stream.clone_htod(b)?;
+        let at_dev = self.upload_h2d_new(at)?;
+        let b_dev = self.upload_h2d_new(b)?;
         // `at`（論理形状 [k,m] 行優先）を転置して標準 `a`（[m,k] 行優先）
         // を得る。
         let a_std = self.transpose_to_pooled(&at_dev, k, m)?;
@@ -4911,8 +4941,8 @@ impl CudaGemm {
             return Ok(());
         }
 
-        let a_dev = self.stream.clone_htod(a)?;
-        let bt_dev = self.stream.clone_htod(bt)?;
+        let a_dev = self.upload_h2d_new(a)?;
+        let bt_dev = self.upload_h2d_new(bt)?;
         let b_std = self.transpose_to_pooled(&bt_dev, n, k)?;
 
         let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
@@ -4966,8 +4996,8 @@ impl CudaGemm {
             return Ok(());
         }
 
-        let at_dev = self.stream.clone_htod(at)?;
-        let b_dev = self.stream.clone_htod(b)?;
+        let at_dev = self.upload_h2d_new(at)?;
+        let b_dev = self.upload_h2d_new(b)?;
         let a_std = self.transpose_to_pooled(&at_dev, k, m)?;
 
         let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
@@ -5016,6 +5046,10 @@ impl CudaGemm {
         // 同一の根拠で `Self::with_driver_call` を経由する（上記コメント
         // 参照）。
         self.with_driver_call(|| {
+            // イシュー #1585: `upload_h2d_new` は f32 専用（H2D pinned
+            // staging は本イシューのスコープでは f32 経路限定。非 f32
+            // （f16）H2D の staging はスコープ外）のため、f16 カーネル
+            // は従来どおり `clone_htod` を直接呼ぶ。
             let a_dev = self.stream.clone_htod(a)?;
             let b_dev = self.stream.clone_htod(b)?;
             let mut c_dev = self
@@ -5080,8 +5114,8 @@ impl CudaGemm {
         // codex-review P0 指摘対応（PR #1390 是正）: `Self::with_driver_call`
         // 参照。
         self.with_driver_call(|| {
-            let a_dev = self.stream.clone_htod(a)?;
-            let b_dev = self.stream.clone_htod(b)?;
+            let a_dev = self.upload_h2d_new(a)?;
+            let b_dev = self.upload_h2d_new(b)?;
             Ok((
                 GuardedSlice::new(self.ordinal, a_dev),
                 GuardedSlice::new(self.ordinal, b_dev),
