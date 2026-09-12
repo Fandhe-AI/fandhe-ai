@@ -38,7 +38,16 @@ const RNN_THREADGROUP_WIDTH: usize = 256;
 /// `hidden > 0` と `numel = B * hidden`（`numel % hidden == 0`）を検証
 /// し `u32::MAX` 上限も検査する（`elementwise.rs::
 /// validate_elementwise_len` と同じ理由）。
-fn validate_rnn_dims(numel: usize, hidden: usize) -> Result<(), MetalError> {
+///
+/// `gates` はゲート配列の 1 行あたりのブロック数（LSTM 系は 4、GRU 系
+/// は 3）。シェーダ内で `base = row * gates * hidden` を 32bit `uint`
+/// で計算するため（`shaders/rnn_cell.metal` 参照）、`numel`／`hidden`
+/// 単体が `u32::MAX` に収まっていても `numel * gates`（＝ゲート配列
+/// 全体の要素数）が overflow すれば添字が周回し、書込先の重複・未
+/// 書込領域の読み戻しを起こしうる（REQ-8 境界検査。イシュー #1647
+/// codex-review 指摘）。ゲート配列を持たない呼び出しは `gates = 1`
+/// を渡す。
+fn validate_rnn_dims(numel: usize, hidden: usize, gates: usize) -> Result<(), MetalError> {
     if hidden == 0 {
         return Err(MetalError::InvalidElementwiseShape {
             detail: "rnn cell hidden must be > 0".to_string(),
@@ -58,6 +67,17 @@ fn validate_rnn_dims(numel: usize, hidden: usize) -> Result<(), MetalError> {
                  hidden={hidden}"
             ),
         });
+    }
+    match numel.checked_mul(gates) {
+        Some(gated) if gated <= u32::MAX as usize => {}
+        _ => {
+            return Err(MetalError::InvalidElementwiseShape {
+                detail: format!(
+                    "rnn cell numel * gates must fit in u32 (gate array index base uses \
+                     row * gates * hidden): numel={numel}, gates={gates}"
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -177,7 +197,7 @@ impl MetalRnnCell {
         hidden: usize,
     ) -> Result<TripleVecOutput, MetalError> {
         let numel = c_prev.len();
-        validate_rnn_dims(numel, hidden)?;
+        validate_rnn_dims(numel, hidden, 4)?;
         require_len(pre.len(), numel * 4, "pre")?;
         if numel == 0 {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
@@ -266,7 +286,7 @@ impl MetalRnnCell {
         hidden: usize,
     ) -> Result<(Vec<f32>, Vec<f32>), MetalError> {
         let numel = c_prev.len();
-        validate_rnn_dims(numel, hidden)?;
+        validate_rnn_dims(numel, hidden, 3)?;
         require_len(gates_ifg.len(), numel * 3, "gates_ifg")?;
         require_len(dc.len(), numel, "dc")?;
         if numel == 0 {
@@ -307,7 +327,7 @@ impl MetalRnnCell {
         hidden: usize,
     ) -> Result<TripleVecOutput, MetalError> {
         let numel = h_prev.len();
-        validate_rnn_dims(numel, hidden)?;
+        validate_rnn_dims(numel, hidden, 3)?;
         require_len(pre_i.len(), numel * 3, "pre_i")?;
         require_len(pre_h.len(), numel * 3, "pre_h")?;
         if numel == 0 {
@@ -356,7 +376,7 @@ impl MetalRnnCell {
         hidden: usize,
     ) -> Result<TripleVecOutput, MetalError> {
         let numel = h_prev.len();
-        validate_rnn_dims(numel, hidden)?;
+        validate_rnn_dims(numel, hidden, 3)?;
         require_len(gates_rzn.len(), numel * 3, "gates_rzn")?;
         require_len(q.len(), numel, "q")?;
         require_len(dh.len(), numel, "dh")?;
@@ -401,19 +421,35 @@ mod tests {
 
     #[test]
     fn validate_rnn_dims_rejects_zero_hidden() {
-        let err = validate_rnn_dims(4, 0).unwrap_err();
+        let err = validate_rnn_dims(4, 0, 4).unwrap_err();
         assert!(matches!(err, MetalError::InvalidElementwiseShape { .. }));
     }
 
     #[test]
     fn validate_rnn_dims_rejects_non_multiple() {
-        let err = validate_rnn_dims(5, 2).unwrap_err();
+        let err = validate_rnn_dims(5, 2, 4).unwrap_err();
         assert!(matches!(err, MetalError::InvalidElementwiseShape { .. }));
     }
 
     #[test]
     fn validate_rnn_dims_accepts_multiple() {
-        assert!(validate_rnn_dims(6, 2).is_ok());
+        assert!(validate_rnn_dims(6, 2, 4).is_ok());
+    }
+
+    /// P0（イシュー #1647 codex-review）: `numel`／`hidden` 単体は
+    /// `u32::MAX` に収まるが `numel * gates` が overflow する組合せを
+    /// 拒否することを確認する（B=1073741825, H=1, gates=4 が該当例）。
+    #[test]
+    fn validate_rnn_dims_rejects_gated_overflow() {
+        let numel = 1_073_741_825usize; // u32::MAX / 4 + 2
+        let err = validate_rnn_dims(numel, 1, 4).unwrap_err();
+        assert!(matches!(err, MetalError::InvalidElementwiseShape { .. }));
+    }
+
+    #[test]
+    fn validate_rnn_dims_accepts_gated_within_bound() {
+        let numel = (u32::MAX as usize) / 4;
+        assert!(validate_rnn_dims(numel, 1, 4).is_ok());
     }
 
     #[test]

@@ -25,7 +25,7 @@
 //! 不要）はテープを介さないため、本モジュール内で `Tensor` を直接
 //! 連結し `[T,B,H]` を返せる（`stack_host_tensors`）。
 
-use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor};
+use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor, matmul_out_shape, require_same_shape};
 
 use crate::error::AutodiffError;
 use crate::nn::init::{
@@ -70,18 +70,32 @@ fn build_gate_params(
         )));
     }
     let bound = 1.0 / (hidden_size as f32).sqrt();
-    let gh = gates * hidden_size;
+    // 本番経路 panic 禁止（AGENTS.md）: `gates * hidden_size`・
+    // `input_size * gh`・`hidden_size * gh` は公開コンストラクタから
+    // ユーザー入力（`hidden_size`／`input_size`）をそのまま乗じるため、
+    // 未検査のまま乗算すると大きな入力で overflow しうる（イシュー
+    // #1647 codex-review P1 指摘）。`checked_mul` で検証し失敗を
+    // 型付きエラーへ変換する。
+    let gh = gates.checked_mul(hidden_size).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "gates (={gates}) * hidden_size (={hidden_size}) overflowed usize"
+        ))
+    })?;
+    let w_ih_len = input_size.checked_mul(gh).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "input_size (={input_size}) * gates*hidden_size (={gh}) overflowed usize"
+        ))
+    })?;
+    let w_hh_len = hidden_size.checked_mul(gh).ok_or_else(|| {
+        AutodiffError::InvalidArgument(format!(
+            "hidden_size (={hidden_size}) * gates*hidden_size (={gh}) overflowed usize"
+        ))
+    })?;
 
     let w_ih_seed = derive_seed(seed, WEIGHT_SEED_SALT);
-    let weight_ih = Tensor::new(
-        uniform_init(input_size * gh, bound, w_ih_seed),
-        &[input_size, gh],
-    )?;
+    let weight_ih = Tensor::new(uniform_init(w_ih_len, bound, w_ih_seed), &[input_size, gh])?;
     let w_hh_seed = derive_seed(seed, WEIGHT_HH_SEED_SALT);
-    let weight_hh = Tensor::new(
-        uniform_init(hidden_size * gh, bound, w_hh_seed),
-        &[hidden_size, gh],
-    )?;
+    let weight_hh = Tensor::new(uniform_init(w_hh_len, bound, w_hh_seed), &[hidden_size, gh])?;
 
     let (bias_ih, bias_hh) = if bias {
         let b_ih_seed = derive_seed(seed, BIAS_SEED_SALT);
@@ -159,29 +173,24 @@ fn validate_gate_params(
 /// 経路にまだ無いため、`Tensor` を直接扱えるこの経路限定で用意する）。
 /// 各要素は `[B, H]`（`stack` 対象の shape が全て一致することを前提に
 /// 呼び出し元が保証する）。
-fn stack_host_tensors(steps: &[Tensor<f32>], b_dim: usize, hidden: usize) -> Tensor<f32> {
+fn stack_host_tensors(
+    steps: &[Tensor<f32>],
+    b_dim: usize,
+    hidden: usize,
+) -> Result<Tensor<f32>, AutodiffError> {
     let mut data = Vec::with_capacity(steps.len() * b_dim * hidden);
     for step in steps {
         let c = step.contiguous();
         data.extend_from_slice(c.as_slice().unwrap_or(&[]));
     }
     // `steps` は本モジュール内部でのみ組み立てられる（各 `[B,H]` の
-    // 演算結果）ため要素数は必ず一致し、`Tensor::new` は失敗しえない。
-    // それでも本番経路 panic 禁止方針（`.claude/rules/coding-rust.md`）
-    // のため `unwrap_or_else` で安全側フォールバック（全ゼロ）に吸収する。
-    Tensor::new(data, &[steps.len(), b_dim, hidden]).unwrap_or_else(|_| {
-        debug_assert!(
-            false,
-            "stack_host_tensors: 内部構築した shape が不整合だった（契約違反）"
-        );
-        Tensor::zeros(&[steps.len(), b_dim, hidden]).unwrap_or_else(|_| {
-            Tensor::new(
-                vec![0.0; steps.len() * b_dim * hidden],
-                &[steps.len(), b_dim, hidden],
-            )
-            .expect("stack_host_tensors: zero-fill fallback は shape 構築が必ず成功する")
-        })
-    })
+    // 演算結果）ため通常は要素数が一致するが、本番経路 panic 禁止
+    // 方針（`.claude/rules/coding-rust.md`）に従い `.expect()`／
+    // `debug_assert!(false)` の全ゼロフォールバックは使わず
+    // `Tensor::new` の失敗をそのまま呼び出し元へ伝播する（イシュー
+    // #1647 codex-review P1 指摘: 失敗を隠す全ゼロ出力は契約不整合を
+    // 検出不能にする）。
+    Ok(Tensor::new(data, &[steps.len(), b_dim, hidden])?)
 }
 
 /// `x: [T,B,D]` から step `t` の `[B,D]` をゼロコピー優先で切り出す
@@ -218,6 +227,75 @@ fn validate_seq_input(
         )));
     }
     Ok((t_len, b_dim, d_dim))
+}
+
+/// セル 1 step の入力形状を検証する（`Var::{rnn_cell,lstm_cell,
+/// gru_cell}`〈`var.rs`〉が tape 経路で行う検証と同型の rank・batch
+/// 数・hidden 次元・重み shape・bias shape チェック。`forward_host`
+/// （tape 不要・`Module::forward_host`／`predict` 経路。決定 9）は
+/// `Var` を経由せず `crate::var::{rnn_cell_forward_value,
+/// lstm_cell_forward_values, gru_cell_forward_values}` を直接呼ぶ
+/// ため、Var 経路が入口で行う検証を通らない（イシュー #1647
+/// codex-review P1 指摘: 不正形状〈例 LSTM で `c_prev` のバッチ数が
+/// `x`／`h_prev` と食い違う〉を素通しすると `eval::lstm_pointwise`
+/// 等が範囲外参照して panic しうる。本番経路 panic 禁止。
+/// `.claude/rules/coding-rust.md`）。`gates` はゲート数
+/// （RNN=1・GRU=3・LSTM=4）。戻り値は `hidden`（`h_shape[1]`）。
+#[allow(clippy::too_many_arguments)]
+fn validate_cell_host_shapes(
+    x_shape: &[usize],
+    h_shape: &[usize],
+    w_ih_shape: &[usize],
+    w_hh_shape: &[usize],
+    b_ih_shape: Option<&[usize]>,
+    b_hh_shape: Option<&[usize]>,
+    gates: usize,
+    op_name: &str,
+) -> Result<usize, AutodiffError> {
+    for shape in [x_shape, h_shape, w_ih_shape, w_hh_shape] {
+        if shape.len() != 2 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "{op_name}: all operands must be rank-2 (got shape {shape:?})"
+            )));
+        }
+    }
+    let hidden = h_shape[1];
+    if x_shape[1] == 0 || hidden == 0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{op_name}: input_size (D={}) and hidden_size (H={hidden}) must both be > 0",
+            x_shape[1]
+        )));
+    }
+    // バッチ数（軸 0）の不一致は matmul 自体は成立しうる（`x`／
+    // `h_prev` の行数は matmul の非縮約軸のため独立）が、後続の
+    // pointwise 段（`gates`・`c_prev`・`h_prev` を同一 `[B,H]` 前提で
+    // 要素ごとに読む）が破綻するため、ここで明示的に検査する。
+    if x_shape[0] != h_shape[0] {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: x_shape.to_vec(),
+            rhs: h_shape.to_vec(),
+        }));
+    }
+    let out_ih = matmul_out_shape(x_shape, w_ih_shape)
+        .map_err(|_| AutodiffError::InvalidArgument(format!("{op_name}: x * w_ih が不整合")))?;
+    let out_hh = matmul_out_shape(h_shape, w_hh_shape).map_err(|_| {
+        AutodiffError::InvalidArgument(format!("{op_name}: h_prev * w_hh が不整合"))
+    })?;
+    require_same_shape(&out_ih, &out_hh)?;
+    let expected_width = gates * hidden;
+    if out_ih[1] != expected_width {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: out_ih,
+            rhs: vec![h_shape[0], expected_width],
+        }));
+    }
+    if let Some(b) = b_ih_shape {
+        require_same_shape(b, &[expected_width])?;
+    }
+    if let Some(b) = b_hh_shape {
+        require_same_shape(b, &[expected_width])?;
+    }
+    Ok(hidden)
 }
 
 /// `Module::forward` を明示的に無効化するための共通エラー（決定 4a
@@ -331,6 +409,16 @@ impl RnnCell {
         x: &Tensor<f32>,
         h_prev: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        validate_cell_host_shapes(
+            x.shape(),
+            h_prev.shape(),
+            self.weight_ih.shape(),
+            self.weight_hh.shape(),
+            self.bias_ih.as_ref().map(|b| b.shape()),
+            self.bias_hh.as_ref().map(|b| b.shape()),
+            1,
+            "RnnCell::forward_host",
+        )?;
         crate::var::rnn_cell_forward_value(
             ops,
             x,
@@ -460,7 +548,7 @@ impl Module for Rnn {
             h = self.cell.forward_host(ops, &x_t, &h)?;
             outputs.push(h.clone());
         }
-        Ok(stack_host_tensors(&outputs, b_dim, hidden))
+        stack_host_tensors(&outputs, b_dim, hidden)
     }
 }
 
@@ -560,6 +648,21 @@ impl LstmCell {
         h_prev: &Tensor<f32>,
         c_prev: &Tensor<f32>,
     ) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
+        validate_cell_host_shapes(
+            x.shape(),
+            h_prev.shape(),
+            self.weight_ih.shape(),
+            self.weight_hh.shape(),
+            self.bias_ih.as_ref().map(|b| b.shape()),
+            self.bias_hh.as_ref().map(|b| b.shape()),
+            4,
+            "LstmCell::forward_host",
+        )?;
+        // LSTM は `c_prev` を pointwise 段で `h_prev` と同じ `[B,H]`
+        // 前提で要素ごとに読む（`eval::lstm_pointwise`）ため、matmul
+        // 自体には現れない `c_prev` の shape 一致も明示的に検査する
+        // （イシュー #1647 codex-review P1 指摘）。
+        require_same_shape(h_prev.shape(), c_prev.shape())?;
         let out = crate::var::lstm_cell_forward_values(
             ops,
             x,
@@ -702,7 +805,7 @@ impl Module for Lstm {
             c = c_t;
             outputs.push(h.clone());
         }
-        Ok(stack_host_tensors(&outputs, b_dim, hidden))
+        stack_host_tensors(&outputs, b_dim, hidden)
     }
 }
 
@@ -800,6 +903,16 @@ impl GruCell {
         x: &Tensor<f32>,
         h_prev: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        validate_cell_host_shapes(
+            x.shape(),
+            h_prev.shape(),
+            self.weight_ih.shape(),
+            self.weight_hh.shape(),
+            self.bias_ih.as_ref().map(|b| b.shape()),
+            self.bias_hh.as_ref().map(|b| b.shape()),
+            3,
+            "GruCell::forward_host",
+        )?;
         let out = crate::var::gru_cell_forward_values(
             ops,
             x,
@@ -909,6 +1022,6 @@ impl Module for Gru {
             h = self.cell.forward_host(ops, &x_t, &h)?;
             outputs.push(h.clone());
         }
-        Ok(stack_host_tensors(&outputs, b_dim, hidden))
+        stack_host_tensors(&outputs, b_dim, hidden)
     }
 }

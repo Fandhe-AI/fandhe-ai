@@ -1011,7 +1011,14 @@ fn affine_vjp(
         embed_columns_2d(&d_weight_blk, in_dim, total_cols, col_start)
     };
 
-    let d_bias_blk = reduce_to_shape(d_pre_blk, &[block_width]);
+    // 勾配の長軸縮約は f64（`.claude/rules/coding-rust.md`）。
+    // `d_pre_blk: [rows, block_width]` → `[block_width]` は行方向
+    // （軸 0）縮約であり `reduce_bias_grad` の row-axis 判定を満たす
+    // ため f64 アキュムレータ経路（`eval::reduce_bias_grad_rows`）へ
+    // 委譲する（RNN／LSTM／GRU 共通 bias 勾配。イシュー #1647
+    // codex-review P1 是正: 旧 `reduce_to_shape` は f32 逐次和のため
+    // 大きく相殺する上流勾配で桁落ちする）。
+    let d_bias_blk = reduce_bias_grad(d_pre_blk, &[block_width]);
     let d_bias_full = if full_width {
         d_bias_blk
     } else {

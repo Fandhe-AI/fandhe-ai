@@ -975,6 +975,262 @@ fn rnn_forward_seq_weight_gradient_is_sum_of_t_contributions() {
 }
 
 // =====================================================================
+// LSTM／GRU の複数ステップ（T>1）BPTT 勾配検証（イシュー #1647
+// codex-review P2 指摘: 上の RNN テストのみが T>1 の重み勾配を数値
+// 微分と突合しており、LSTM の `c_t` 経由の時系列勾配・GRU の複数
+// ステップ勾配が未検証だった。`rnn_manual_unrolled_loss` と同じ
+// 方針〈重み `Var` をループ外で 1 回だけ bind し T step 間で共有する
+// ことで `forward_seq` 内部の fan-in 蓄積〈`vars = cell.bind(tape)`
+// → ループ内 `vars.forward(...)`〉と同一の `Var::{lstm_cell,
+// gru_cell}` 経路を通す〉で LSTM／GRU へ横展開する。決定 11 (c) の
+// 受入基準〉。
+// =====================================================================
+
+fn lstm_seq_input(t_len: usize) -> Tensor<f32> {
+    seq_input(t_len)
+}
+
+/// LSTM 版 `rnn_manual_unrolled_loss`。`c_t` を次 step の `c_prev` として
+/// 連鎖させるため、時系列方向の勾配が `c` 経路のみを通じても正しく
+/// 伝播することを検証できる（`h` は毎 step `loss_sum` へも加算する）。
+#[allow(clippy::too_many_arguments)]
+fn lstm_manual_unrolled_loss(
+    x: &Tensor<f32>,
+    w_ih: &Tensor<f32>,
+    w_hh: &Tensor<f32>,
+    b_ih: &Tensor<f32>,
+    b_hh: &Tensor<f32>,
+    h0: &Tensor<f32>,
+    c0: &Tensor<f32>,
+    t_len: usize,
+) -> f32 {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let wih = tape.var(w_ih);
+    let whh = tape.var(w_hh);
+    let bih = tape.var(b_ih);
+    let bhh = tape.var(b_hh);
+    let mut h = tape.var(h0);
+    let mut c = tape.var(c0);
+    let mut loss_sum = tape.var(&t(vec![0.0], &[]));
+    for step in 0..t_len {
+        let x_t_data = x
+            .narrow(0, step, 1)
+            .unwrap()
+            .contiguous()
+            .reshape(&[B, D])
+            .unwrap();
+        let x_t = tape.var(&x_t_data);
+        let (h_t, c_t) = x_t
+            .lstm_cell(
+                &h,
+                &c,
+                GateParams {
+                    w_ih: &wih,
+                    w_hh: &whh,
+                    b_ih: Some(&bih),
+                    b_hh: Some(&bhh),
+                },
+            )
+            .unwrap();
+        h = h_t;
+        c = c_t;
+        // `c` を直接 loss へ加算し、`c_t` 経由（`h` を介さない）の
+        // 逆伝播経路も数値微分の対象に含める（決定 11 (c) の
+        // 「LSTM の c_t 経由の BPTT」要求）。
+        loss_sum = loss_sum
+            .add(&h.sum(None).unwrap())
+            .unwrap()
+            .add(&c.sum(None).unwrap())
+            .unwrap();
+    }
+    scalar(&loss_sum.to_tensor())
+}
+
+#[test]
+fn lstm_forward_seq_multi_step_gradient_matches_numeric_diff() {
+    let (_, h_prev, c_prev, w_ih_t, w_hh_t, b_ih_t, b_hh_t) = lstm_fixture_data();
+    let t_len = 3usize;
+    let x_t = lstm_seq_input(t_len);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let wih = tape.var(&w_ih_t);
+    let whh = tape.var(&w_hh_t);
+    let bih = tape.var(&b_ih_t);
+    let bhh = tape.var(&b_hh_t);
+    let mut h = tape.var(&h_prev);
+    let mut c = tape.var(&c_prev);
+    let h0_var = h;
+    let c0_var = c;
+    let mut loss_sum = tape.var(&t(vec![0.0], &[]));
+    for step in 0..t_len {
+        let x_t_data = x_t
+            .narrow(0, step, 1)
+            .unwrap()
+            .contiguous()
+            .reshape(&[B, D])
+            .unwrap();
+        let x_step = tape.var(&x_t_data);
+        let (h_t, c_t) = x_step
+            .lstm_cell(
+                &h,
+                &c,
+                GateParams {
+                    w_ih: &wih,
+                    w_hh: &whh,
+                    b_ih: Some(&bih),
+                    b_hh: Some(&bhh),
+                },
+            )
+            .unwrap();
+        h = h_t;
+        c = c_t;
+        loss_sum = loss_sum
+            .add(&h.sum(None).unwrap())
+            .unwrap()
+            .add(&c.sum(None).unwrap())
+            .unwrap();
+    }
+    let grads = tape.backward(&loss_sum).unwrap();
+    let dw_ih = grads.get(&wih).unwrap().unwrap().clone();
+    let dw_hh = grads.get(&whh).unwrap().unwrap().clone();
+    let dh0 = grads.get(&h0_var).unwrap().unwrap().clone();
+    let dc0 = grads.get(&c0_var).unwrap().unwrap().clone();
+
+    assert_grad_close(
+        "lstm seq dw_ih (T=3 fan-in sum, c_t path included)",
+        &dw_ih,
+        &numeric_grad(&w_ih_t, |v| {
+            lstm_manual_unrolled_loss(&x_t, &v, &w_hh_t, &b_ih_t, &b_hh_t, &h_prev, &c_prev, t_len)
+        }),
+    );
+    assert_grad_close(
+        "lstm seq dw_hh (T=3 fan-in sum, c_t path included)",
+        &dw_hh,
+        &numeric_grad(&w_hh_t, |v| {
+            lstm_manual_unrolled_loss(&x_t, &w_ih_t, &v, &b_ih_t, &b_hh_t, &h_prev, &c_prev, t_len)
+        }),
+    );
+    assert_grad_close(
+        "lstm seq dh0 (T=3, c_t path included)",
+        &dh0,
+        &numeric_grad(&h_prev, |v| {
+            lstm_manual_unrolled_loss(&x_t, &w_ih_t, &w_hh_t, &b_ih_t, &b_hh_t, &v, &c_prev, t_len)
+        }),
+    );
+    assert_grad_close(
+        "lstm seq dc0 (T=3, c_t path only)",
+        &dc0,
+        &numeric_grad(&c_prev, |v| {
+            lstm_manual_unrolled_loss(&x_t, &w_ih_t, &w_hh_t, &b_ih_t, &b_hh_t, &h_prev, &v, t_len)
+        }),
+    );
+}
+
+/// GRU 版 `rnn_manual_unrolled_loss`。
+fn gru_manual_unrolled_loss(
+    x: &Tensor<f32>,
+    w_ih: &Tensor<f32>,
+    w_hh: &Tensor<f32>,
+    b_ih: &Tensor<f32>,
+    b_hh: &Tensor<f32>,
+    h0: &Tensor<f32>,
+    t_len: usize,
+) -> f32 {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let wih = tape.var(w_ih);
+    let whh = tape.var(w_hh);
+    let bih = tape.var(b_ih);
+    let bhh = tape.var(b_hh);
+    let mut h = tape.var(h0);
+    let mut loss_sum = tape.var(&t(vec![0.0], &[]));
+    for step in 0..t_len {
+        let x_t_data = x
+            .narrow(0, step, 1)
+            .unwrap()
+            .contiguous()
+            .reshape(&[B, D])
+            .unwrap();
+        let x_t = tape.var(&x_t_data);
+        h = x_t
+            .gru_cell(
+                &h,
+                GateParams {
+                    w_ih: &wih,
+                    w_hh: &whh,
+                    b_ih: Some(&bih),
+                    b_hh: Some(&bhh),
+                },
+            )
+            .unwrap();
+        loss_sum = loss_sum.add(&h.sum(None).unwrap()).unwrap();
+    }
+    scalar(&loss_sum.to_tensor())
+}
+
+#[test]
+fn gru_forward_seq_multi_step_gradient_matches_numeric_diff() {
+    let (_, h_prev, w_ih_t, w_hh_t, b_ih_t, b_hh_t) = gru_fixture_data();
+    let t_len = 3usize;
+    let x_t = seq_input(t_len);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let wih = tape.var(&w_ih_t);
+    let whh = tape.var(&w_hh_t);
+    let bih = tape.var(&b_ih_t);
+    let bhh = tape.var(&b_hh_t);
+    let mut h = tape.var(&h_prev);
+    let h0_var = h;
+    let mut loss_sum = tape.var(&t(vec![0.0], &[]));
+    for step in 0..t_len {
+        let x_t_data = x_t
+            .narrow(0, step, 1)
+            .unwrap()
+            .contiguous()
+            .reshape(&[B, D])
+            .unwrap();
+        let x_step = tape.var(&x_t_data);
+        h = x_step
+            .gru_cell(
+                &h,
+                GateParams {
+                    w_ih: &wih,
+                    w_hh: &whh,
+                    b_ih: Some(&bih),
+                    b_hh: Some(&bhh),
+                },
+            )
+            .unwrap();
+        loss_sum = loss_sum.add(&h.sum(None).unwrap()).unwrap();
+    }
+    let grads = tape.backward(&loss_sum).unwrap();
+    let dw_ih = grads.get(&wih).unwrap().unwrap().clone();
+    let dw_hh = grads.get(&whh).unwrap().unwrap().clone();
+    let dh0 = grads.get(&h0_var).unwrap().unwrap().clone();
+
+    assert_grad_close(
+        "gru seq dw_ih (T=3 fan-in sum)",
+        &dw_ih,
+        &numeric_grad(&w_ih_t, |v| {
+            gru_manual_unrolled_loss(&x_t, &v, &w_hh_t, &b_ih_t, &b_hh_t, &h_prev, t_len)
+        }),
+    );
+    assert_grad_close(
+        "gru seq dw_hh (T=3 fan-in sum)",
+        &dw_hh,
+        &numeric_grad(&w_hh_t, |v| {
+            gru_manual_unrolled_loss(&x_t, &w_ih_t, &v, &b_ih_t, &b_hh_t, &h_prev, t_len)
+        }),
+    );
+    assert_grad_close(
+        "gru seq dh0 (T=3)",
+        &dh0,
+        &numeric_grad(&h_prev, |v| {
+            gru_manual_unrolled_loss(&x_t, &w_ih_t, &w_hh_t, &b_ih_t, &b_hh_t, &v, t_len)
+        }),
+    );
+}
+
+// =====================================================================
 // 決定 4a (i): セル単位の per-step 交互適用（多層スタック）の勾配連続性。
 // =====================================================================
 

@@ -1111,8 +1111,14 @@ impl BackendOps for CpuBackendOps {
         pre: &Tensor<f32>,
         c_prev: &Tensor<f32>,
     ) -> Result<LstmPointwiseOutput, BackendError> {
-        let hidden = c_prev.shape().get(1).copied().unwrap_or(0);
-        let b_dim = c_prev.shape().first().copied().unwrap_or(0);
+        require_rank2(c_prev.shape())?;
+        let hidden = c_prev.shape()[1];
+        let b_dim = c_prev.shape()[0];
+        // `pre` の rank・shape も検証する（平坦化後の要素数一致だけ
+        // では `pre=[4,2]` を `c_prev=[2,1]` に対する `[2,4]` と誤って
+        // 受理してしまう。イシュー #1647 codex-review P2 指摘）。
+        require_same_shape(pre.shape(), &[b_dim, 4 * hidden])
+            .map_err(BackendError::ShapeMismatch)?;
         let pre_c = pre.contiguous();
         let c_prev_c = c_prev.contiguous();
         let pre_slice = pre_c.as_slice().unwrap_or(&[]);
@@ -1133,6 +1139,9 @@ impl BackendOps for CpuBackendOps {
         gate_o: &Tensor<f32>,
         dh: &Tensor<f32>,
     ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        require_rank2(c.shape())?;
+        require_same_shape(gate_o.shape(), c.shape()).map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(dh.shape(), c.shape()).map_err(BackendError::ShapeMismatch)?;
         let shape = c.shape().to_vec();
         let c_c = c.contiguous();
         let gate_o_c = gate_o.contiguous();
@@ -1156,8 +1165,12 @@ impl BackendOps for CpuBackendOps {
         c_prev: &Tensor<f32>,
         dc: &Tensor<f32>,
     ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
-        let hidden = c_prev.shape().get(1).copied().unwrap_or(0);
-        let b_dim = c_prev.shape().first().copied().unwrap_or(0);
+        require_rank2(c_prev.shape())?;
+        let hidden = c_prev.shape()[1];
+        let b_dim = c_prev.shape()[0];
+        require_same_shape(gates_ifg.shape(), &[b_dim, 3 * hidden])
+            .map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(dc.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
         let gates_c = gates_ifg.contiguous();
         let c_prev_c = c_prev.contiguous();
         let dc_c = dc.contiguous();
@@ -1181,8 +1194,13 @@ impl BackendOps for CpuBackendOps {
         pre_h: &Tensor<f32>,
         h_prev: &Tensor<f32>,
     ) -> Result<GruPointwiseOutput, BackendError> {
-        let hidden = h_prev.shape().get(1).copied().unwrap_or(0);
-        let b_dim = h_prev.shape().first().copied().unwrap_or(0);
+        require_rank2(h_prev.shape())?;
+        let hidden = h_prev.shape()[1];
+        let b_dim = h_prev.shape()[0];
+        require_same_shape(pre_i.shape(), &[b_dim, 3 * hidden])
+            .map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(pre_h.shape(), &[b_dim, 3 * hidden])
+            .map_err(BackendError::ShapeMismatch)?;
         let pre_i_c = pre_i.contiguous();
         let pre_h_c = pre_h.contiguous();
         let h_prev_c = h_prev.contiguous();
@@ -1208,8 +1226,13 @@ impl BackendOps for CpuBackendOps {
         h_prev: &Tensor<f32>,
         dh: &Tensor<f32>,
     ) -> Result<GruBackwardOutput, BackendError> {
-        let hidden = h_prev.shape().get(1).copied().unwrap_or(0);
-        let b_dim = h_prev.shape().first().copied().unwrap_or(0);
+        require_rank2(h_prev.shape())?;
+        let hidden = h_prev.shape()[1];
+        let b_dim = h_prev.shape()[0];
+        require_same_shape(gates_rzn.shape(), &[b_dim, 3 * hidden])
+            .map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(q.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(dh.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
         let gates_c = gates_rzn.contiguous();
         let q_c = q.contiguous();
         let h_prev_c = h_prev.contiguous();

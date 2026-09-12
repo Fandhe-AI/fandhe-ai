@@ -63,12 +63,26 @@ fn derive_batch(numel: usize, hidden: usize, gates: usize) -> Result<usize, Back
             },
         ));
     }
-    let row = hidden * gates;
-    if !numel.is_multiple_of(row) {
+    // 本番経路 panic 禁止（AGENTS.md）: `hidden * gates` は
+    // `checked_mul` で検証する。overflow を放置すると（例:
+    // `hidden = 1usize << 62`・`gates = 4` で `row` が 0 へ wrap
+    // する）`row == 0` のまま以下の `numel % row`／`numel / row`
+    // へ進みゼロ除算 panic を起こす（イシュー #1647 codex-review P1
+    // 指摘）。`row == 0` は `hidden > 0` を検査済みのため overflow
+    // 以外では起こり得ず、overflow 検査で自動的に排除される。
+    let row = hidden
+        .checked_mul(gates)
+        .ok_or(BackendError::ShapeMismatch(
+            ShapeError::ElementCountMismatch {
+                expected: usize::MAX,
+                actual: 0,
+            },
+        ))?;
+    if row == 0 || !numel.is_multiple_of(row) {
         return Err(BackendError::ShapeMismatch(
             ShapeError::ElementCountMismatch {
                 expected: row,
-                actual: numel % row,
+                actual: numel.checked_rem(row).unwrap_or(numel),
             },
         ));
     }

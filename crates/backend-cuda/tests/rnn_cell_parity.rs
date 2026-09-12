@@ -1,5 +1,8 @@
-//! イシュー #1647: RNN／LSTM／GRU セル演算（pointwise 段・backward 段）
-//! の CPU-CUDA 数値一致検証。
+//! イシュー #1647: RNN／LSTM／GRU セル演算（pointwise 段・backward 段。
+//! `lstm_pointwise`／`lstm_hidden_backward`／`lstm_cell_backward`／
+//! `gru_pointwise`／`gru_backward` の全 5 種。codex-review P2 指摘を
+//! 受け `lstm_cell_backward`／`gru_backward` も網羅した）の
+//! CPU-CUDA 数値一致検証。
 //!
 //! `mse_parity.rs` と同じ構成方針を踏襲する: 環境適応スモーク（属性
 //! なし。通常 CI で実行し、CUDA 非搭載環境では
@@ -130,6 +133,79 @@ fn assert_gru_pointwise_parity(rnn: &CudaRnnCell, seed: u64, b: usize, h: usize)
     );
 }
 
+fn assert_lstm_cell_backward_parity(rnn: &CudaRnnCell, seed: u64, b: usize, h: usize) {
+    let gates_ifg = rand_vec(seed, b * 3 * h)
+        .into_iter()
+        .map(|v| (v.abs() * 0.4 + 0.3).min(0.95))
+        .collect::<Vec<f32>>();
+    let c_prev = rand_vec(seed.wrapping_add(1), b * h);
+    let dc = rand_vec(seed.wrapping_add(2), b * h);
+
+    let (gpu_d_pre_ifg, gpu_dc_prev) = rnn
+        .run_lstm_cell_backward_f32(&gates_ifg, &c_prev, &dc, h)
+        .expect("CudaRnnCell::run_lstm_cell_backward_f32 must succeed");
+
+    let cpu = CpuBackendOps::new();
+    let (cpu_d_pre_ifg, cpu_dc_prev) = cpu
+        .lstm_cell_backward(
+            &Tensor::new(gates_ifg, &[b, 3 * h]).unwrap(),
+            &Tensor::new(c_prev, &[b, h]).unwrap(),
+            &Tensor::new(dc, &[b, h]).unwrap(),
+        )
+        .unwrap();
+
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("lstm_cell_backward d_pre_ifg cpu-cuda parity b={b} h={h}"),
+        &gpu_d_pre_ifg,
+        cpu_d_pre_ifg.as_slice().unwrap(),
+    );
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("lstm_cell_backward dc_prev cpu-cuda parity b={b} h={h}"),
+        &gpu_dc_prev,
+        cpu_dc_prev.as_slice().unwrap(),
+    );
+}
+
+fn assert_gru_backward_parity(rnn: &CudaRnnCell, seed: u64, b: usize, h: usize) {
+    let gates_rzn = rand_vec(seed, b * 3 * h)
+        .into_iter()
+        .map(|v| (v.abs() * 0.4 + 0.3).min(0.95))
+        .collect::<Vec<f32>>();
+    let q = rand_vec(seed.wrapping_add(1), b * h);
+    let h_prev = rand_vec(seed.wrapping_add(2), b * h);
+    let dh = rand_vec(seed.wrapping_add(3), b * h);
+
+    let (gpu_d_pre_i, gpu_d_pre_h, gpu_dh_prev_direct) = rnn
+        .run_gru_backward_f32(&gates_rzn, &q, &h_prev, &dh, h)
+        .expect("CudaRnnCell::run_gru_backward_f32 must succeed");
+
+    let cpu = CpuBackendOps::new();
+    let (cpu_d_pre_i, cpu_d_pre_h, cpu_dh_prev_direct) = cpu
+        .gru_backward(
+            &Tensor::new(gates_rzn, &[b, 3 * h]).unwrap(),
+            &Tensor::new(q, &[b, h]).unwrap(),
+            &Tensor::new(h_prev, &[b, h]).unwrap(),
+            &Tensor::new(dh, &[b, h]).unwrap(),
+        )
+        .unwrap();
+
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("gru_backward d_pre_i cpu-cuda parity b={b} h={h}"),
+        &gpu_d_pre_i,
+        cpu_d_pre_i.as_slice().unwrap(),
+    );
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("gru_backward d_pre_h cpu-cuda parity b={b} h={h}"),
+        &gpu_d_pre_h,
+        cpu_d_pre_h.as_slice().unwrap(),
+    );
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("gru_backward dh_prev_direct cpu-cuda parity b={b} h={h}"),
+        &gpu_dh_prev_direct,
+        cpu_dh_prev_direct.as_slice().unwrap(),
+    );
+}
+
 /// 環境適応スモーク（属性なし。通常 CI で実行）。
 #[test]
 fn rnn_cell_parity_smoke_env_adaptive() {
@@ -144,6 +220,8 @@ fn rnn_cell_parity_smoke_env_adaptive() {
             assert_lstm_pointwise_parity(&rnn, 2101, 3, 7);
             assert_lstm_hidden_backward_parity(&rnn, 2103, 3, 7);
             assert_gru_pointwise_parity(&rnn, 2105, 3, 7);
+            assert_lstm_cell_backward_parity(&rnn, 2107, 3, 7);
+            assert_gru_backward_parity(&rnn, 2109, 3, 7);
         }
         Err(CudaError::NvrtcUnavailable { .. }) => {
             // NVRTC 非搭載環境。panic しないことのみ確認する
@@ -166,5 +244,7 @@ fn rnn_cell_matches_cpu_across_shapes() {
         assert_lstm_pointwise_parity(&rnn, 9001 + (b * h) as u64, b, h);
         assert_lstm_hidden_backward_parity(&rnn, 9101 + (b * h) as u64, b, h);
         assert_gru_pointwise_parity(&rnn, 9201 + (b * h) as u64, b, h);
+        assert_lstm_cell_backward_parity(&rnn, 9301 + (b * h) as u64, b, h);
+        assert_gru_backward_parity(&rnn, 9401 + (b * h) as u64, b, h);
     }
 }

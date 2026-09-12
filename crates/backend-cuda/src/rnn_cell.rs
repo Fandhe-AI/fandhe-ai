@@ -38,7 +38,18 @@ const RNN_BLOCK: (u32, u32, u32) = (RNN_BLOCK_DIM, 1, 1);
 /// し `i32::MAX` 上限も検査する（`elementwise.rs::
 /// validate_elementwise_len` と同じ理由。カーネル引数 `int numel`／
 /// `int hidden` は C の 32bit 符号付き整数のため）。
-fn validate_rnn_dims(numel: usize, hidden: usize) -> Result<(), CudaError> {
+///
+/// `gates` はゲート配列（`pre`／`gates`／`gates_ifg`／`gates_rzn` 等）の
+/// 1 行あたりのブロック数（LSTM 系は 4、GRU 系は 3）。カーネル内では
+/// `base = row * gates * hidden` を 32bit `int` で計算し `gates` 個の
+/// ブロックへアクセスするため（`kernels_rnn_cell.rs` 参照）、
+/// `numel`／`hidden` 単体が `i32::MAX` に収まっていても
+/// `numel * gates`（＝ゲート配列全体の要素数。`pre.len()`／
+/// `gates.len()` と一致）が overflow すれば添字計算が範囲外アクセス
+/// を起こしうる（REQ-8 境界検査・unsafe 不変条件。イシュー #1647
+/// codex-review 指摘）。ゲート配列を持たない呼び出し（`hidden_backward`
+/// 系）は `gates = 1` を渡す。
+fn validate_rnn_dims(numel: usize, hidden: usize, gates: usize) -> Result<(), CudaError> {
     if hidden == 0 {
         return Err(CudaError::InvalidElementwiseShape {
             detail: "rnn cell hidden must be > 0".to_string(),
@@ -58,6 +69,17 @@ fn validate_rnn_dims(numel: usize, hidden: usize) -> Result<(), CudaError> {
                  hidden={hidden}"
             ),
         });
+    }
+    match numel.checked_mul(gates) {
+        Some(gated) if gated <= i32::MAX as usize => {}
+        _ => {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "rnn cell numel * gates must fit in i32 (gate array index base uses \
+                     row * gates * hidden): numel={numel}, gates={gates}"
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -170,7 +192,7 @@ impl CudaRnnCell {
         hidden: usize,
     ) -> Result<TripleVecOutput, CudaError> {
         let numel = c_prev.len();
-        validate_rnn_dims(numel, hidden)?;
+        validate_rnn_dims(numel, hidden, 4)?;
         require_len(pre.len(), numel * 4, "pre")?;
         if numel == 0 {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
@@ -273,7 +295,7 @@ impl CudaRnnCell {
         hidden: usize,
     ) -> Result<(Vec<f32>, Vec<f32>), CudaError> {
         let numel = c_prev.len();
-        validate_rnn_dims(numel, hidden)?;
+        validate_rnn_dims(numel, hidden, 3)?;
         require_len(gates_ifg.len(), numel * 3, "gates_ifg")?;
         require_len(dc.len(), numel, "dc")?;
         if numel == 0 {
@@ -322,7 +344,7 @@ impl CudaRnnCell {
         hidden: usize,
     ) -> Result<TripleVecOutput, CudaError> {
         let numel = h_prev.len();
-        validate_rnn_dims(numel, hidden)?;
+        validate_rnn_dims(numel, hidden, 3)?;
         require_len(pre_i.len(), numel * 3, "pre_i")?;
         require_len(pre_h.len(), numel * 3, "pre_h")?;
         if numel == 0 {
@@ -375,7 +397,7 @@ impl CudaRnnCell {
         hidden: usize,
     ) -> Result<TripleVecOutput, CudaError> {
         let numel = h_prev.len();
-        validate_rnn_dims(numel, hidden)?;
+        validate_rnn_dims(numel, hidden, 3)?;
         require_len(gates_rzn.len(), numel * 3, "gates_rzn")?;
         require_len(q.len(), numel, "q")?;
         require_len(dh.len(), numel, "dh")?;
@@ -426,19 +448,36 @@ mod tests {
 
     #[test]
     fn validate_rnn_dims_rejects_zero_hidden() {
-        let err = validate_rnn_dims(4, 0).unwrap_err();
+        let err = validate_rnn_dims(4, 0, 4).unwrap_err();
         assert!(matches!(err, CudaError::InvalidElementwiseShape { .. }));
     }
 
     #[test]
     fn validate_rnn_dims_rejects_non_multiple() {
-        let err = validate_rnn_dims(5, 2).unwrap_err();
+        let err = validate_rnn_dims(5, 2, 4).unwrap_err();
         assert!(matches!(err, CudaError::InvalidElementwiseShape { .. }));
     }
 
     #[test]
     fn validate_rnn_dims_accepts_multiple() {
-        assert!(validate_rnn_dims(6, 2).is_ok());
+        assert!(validate_rnn_dims(6, 2, 4).is_ok());
+    }
+
+    /// P0（イシュー #1647 codex-review）: `numel`／`hidden` 単体は
+    /// `i32::MAX` に収まるが `numel * gates` が overflow する組合せを
+    /// 拒否することを確認する（B=536870913, H=1, gates=4 が該当例）。
+    #[test]
+    fn validate_rnn_dims_rejects_gated_overflow() {
+        let numel = 536_870_913usize; // i32::MAX / 4 + 2
+        let err = validate_rnn_dims(numel, 1, 4).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidElementwiseShape { .. }));
+    }
+
+    #[test]
+    fn validate_rnn_dims_accepts_gated_within_bound() {
+        // numel * gates == i32::MAX 未満に収まる境界値は許容する。
+        let numel = (i32::MAX as usize) / 4;
+        assert!(validate_rnn_dims(numel, 1, 4).is_ok());
     }
 
     #[test]

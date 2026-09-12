@@ -79,6 +79,22 @@ thread_local! {
 /// §3.2）。`rows == 0 || cols == 0` も呼び出し元の分岐を単純に保つため
 /// `None` とし、`contiguous()`（`is_contiguous()` が空テンソルで常に
 /// `true` を返す契約）に委ねる。
+/// RNN／LSTM／GRU セル演算（イシュー #1647）の入口検査: `shape` が
+/// rank-2 であることを検証する（`backend-cpu::ops::require_rank2` と
+/// 同型。平坦化後の要素数一致だけでは異形状の取り違えを検出できない
+/// ため、`lstm_pointwise`／`lstm_hidden_backward`／`lstm_cell_backward`
+/// ／`gru_pointwise`／`gru_backward` の各エントリで使う。codex-review
+/// P2 指摘）。
+fn require_rank2_cell(shape: &[usize]) -> Result<(), BackendError> {
+    if shape.len() != 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    Ok(())
+}
+
 fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
     if t.rank() != 2 {
         return None;
@@ -2409,8 +2425,14 @@ impl BackendOps for CudaBackendOps {
         pre: &Tensor<f32>,
         c_prev: &Tensor<f32>,
     ) -> Result<LstmPointwiseOutput, BackendError> {
-        let hidden = c_prev.shape().get(1).copied().unwrap_or(0);
-        let b_dim = c_prev.shape().first().copied().unwrap_or(0);
+        require_rank2_cell(c_prev.shape())?;
+        let hidden = c_prev.shape()[1];
+        let b_dim = c_prev.shape()[0];
+        // `pre` の rank・shape も検証する（平坦化後の要素数一致だけ
+        // では異形状を誤って受理しうる。イシュー #1647 codex-review
+        // P2 指摘）。
+        require_same_shape(pre.shape(), &[b_dim, 4 * hidden])
+            .map_err(BackendError::ShapeMismatch)?;
         let pre_owned = pre.contiguous();
         let c_prev_owned = c_prev.contiguous();
         let pre_slice = pre_owned.as_slice().ok_or_else(|| {
@@ -2448,6 +2470,9 @@ impl BackendOps for CudaBackendOps {
         gate_o: &Tensor<f32>,
         dh: &Tensor<f32>,
     ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        require_rank2_cell(c.shape())?;
+        require_same_shape(gate_o.shape(), c.shape()).map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(dh.shape(), c.shape()).map_err(BackendError::ShapeMismatch)?;
         let shape = c.shape().to_vec();
         let c_owned = c.contiguous();
         let gate_o_owned = gate_o.contiguous();
@@ -2489,8 +2514,12 @@ impl BackendOps for CudaBackendOps {
         c_prev: &Tensor<f32>,
         dc: &Tensor<f32>,
     ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
-        let hidden = c_prev.shape().get(1).copied().unwrap_or(0);
-        let b_dim = c_prev.shape().first().copied().unwrap_or(0);
+        require_rank2_cell(c_prev.shape())?;
+        let hidden = c_prev.shape()[1];
+        let b_dim = c_prev.shape()[0];
+        require_same_shape(gates_ifg.shape(), &[b_dim, 3 * hidden])
+            .map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(dc.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
         let gates_owned = gates_ifg.contiguous();
         let c_prev_owned = c_prev.contiguous();
         let dc_owned = dc.contiguous();
@@ -2531,8 +2560,13 @@ impl BackendOps for CudaBackendOps {
         pre_h: &Tensor<f32>,
         h_prev: &Tensor<f32>,
     ) -> Result<GruPointwiseOutput, BackendError> {
-        let hidden = h_prev.shape().get(1).copied().unwrap_or(0);
-        let b_dim = h_prev.shape().first().copied().unwrap_or(0);
+        require_rank2_cell(h_prev.shape())?;
+        let hidden = h_prev.shape()[1];
+        let b_dim = h_prev.shape()[0];
+        require_same_shape(pre_i.shape(), &[b_dim, 3 * hidden])
+            .map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(pre_h.shape(), &[b_dim, 3 * hidden])
+            .map_err(BackendError::ShapeMismatch)?;
         let pre_i_owned = pre_i.contiguous();
         let pre_h_owned = pre_h.contiguous();
         let h_prev_owned = h_prev.contiguous();
@@ -2575,8 +2609,13 @@ impl BackendOps for CudaBackendOps {
         h_prev: &Tensor<f32>,
         dh: &Tensor<f32>,
     ) -> Result<GruBackwardOutput, BackendError> {
-        let hidden = h_prev.shape().get(1).copied().unwrap_or(0);
-        let b_dim = h_prev.shape().first().copied().unwrap_or(0);
+        require_rank2_cell(h_prev.shape())?;
+        let hidden = h_prev.shape()[1];
+        let b_dim = h_prev.shape()[0];
+        require_same_shape(gates_rzn.shape(), &[b_dim, 3 * hidden])
+            .map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(q.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
+        require_same_shape(dh.shape(), &[b_dim, hidden]).map_err(BackendError::ShapeMismatch)?;
         let gates_owned = gates_rzn.contiguous();
         let q_owned = q.contiguous();
         let h_prev_owned = h_prev.contiguous();
