@@ -75,6 +75,17 @@ SKIP="$OUT/skipped-dgx-resident-grad-ab-${LABEL}.log"
 : > "$SKIP"
 ANY_FAILED=0
 
+# `run_train` の出力先（bench-common が `OpenOptions::append(true)` で
+# 書き込む）を実行開始時に必ず空へ初期化する。append 方式のため、
+# 中断後の再実行や同一ラベルでの再実行があると過去の計測行が残存し、
+# `compare_gemm_ab.py` の「各セルちょうど 5 件」検証が判定不能になる
+# （codex-review [P2] / Cursor Bugbot 指摘）。
+for _reset_arm in before after; do
+  for _reset_suffix in train phases; do
+    : > "$OUT/results-${_reset_arm}-${LABEL}-${_reset_suffix}.jsonl"
+  done
+done
+
 # `Cargo.lock` を退避し、異常終了含め終了時に必ず復元する。
 bench_fandhe_setup_lock_restore_trap
 
@@ -161,10 +172,31 @@ done
 echo "phases: $(uptime)" | tee -a "$OUT/uptime-${LABEL}.log"
 nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits >"$OUT/nvidia-smi-after-${LABEL}.txt" 2>&1 || true
 
-python3 compare_gemm_ab.py --device cuda --task train --threshold 1.00 --per-run --phases \
+# 事前登録した受け入れ契約は reuse のみを必須判定とする（cuda の
+# ゲート出力は reuse 想定・fresh は対照/参考。`--modes reuse` を
+# 明示し、fresh 参考行が必須判定へ混入するのを防ぐ。codex-review
+# [P2] 指摘）。この呼び出しの終了コード（0=非後退・2=判定不能・
+# 3=後退）を保存し、非 0 終了を `ANY_FAILED` へ反映してスクリプト
+# 全体の終了コードへ伝播させる（codex-review [P1] 指摘: 計測プロセス
+# 自体が成功していても、必須の A/B 判定失敗を検出できなければならない）。
+python3 compare_gemm_ab.py --device cuda --task train --threshold 1.00 --per-run --modes reuse --phases \
   "$OUT/results-before-${LABEL}-phases.jsonl" "$OUT/results-after-${LABEL}-phases.jsonl" \
   "$OUT/results-before-${LABEL}-train.jsonl" "$OUT/results-after-${LABEL}-train.jsonl" \
-  >"compare-train-${LABEL}.md" 2>"compare-train-${LABEL}.err" || echo "compare exit=$?" | tee -a "compare-train-${LABEL}.err"
+  >"compare-train-${LABEL}.md" 2>"compare-train-${LABEL}.err"
+COMPARE_EXIT=$?
+if [[ "$COMPARE_EXIT" -ne 0 ]]; then
+  echo "compare exit=$COMPARE_EXIT" | tee -a "compare-train-${LABEL}.err"
+  ANY_FAILED=$((ANY_FAILED + 1))
+fi
+
+# fresh は対照（事前登録どおり非判定）の参考表として別ファイルへ出力する。
+# この呼び出しの終了コードは判定に用いないため `ANY_FAILED` へは反映しない。
+python3 compare_gemm_ab.py --device cuda --task train --threshold 1.00 --per-run --modes fresh --phases \
+  "$OUT/results-before-${LABEL}-phases.jsonl" "$OUT/results-after-${LABEL}-phases.jsonl" \
+  "$OUT/results-before-${LABEL}-train.jsonl" "$OUT/results-after-${LABEL}-train.jsonl" \
+  >"compare-train-${LABEL}-fresh-reference.md" 2>"compare-train-${LABEL}-fresh-reference.err" ||
+  echo "fresh reference compare exit=$? (informational only; not part of the judged A/B)" \
+    | tee -a "compare-train-${LABEL}-fresh-reference.err"
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"
 if [[ "$ANY_FAILED" -gt 0 ]]; then
