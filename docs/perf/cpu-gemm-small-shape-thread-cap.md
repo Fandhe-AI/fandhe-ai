@@ -149,4 +149,12 @@ checksum は全 10 セルで before/after 完全一致（bit 完全一致契約�
 small_shape_cap_report_bounds`（`#[cfg(not(target_os = "macos"))]` 分岐）
 が構造的根拠として担保する。
 
-<!-- GB10 実機到達時の健全性記録（record_only・判定には用いない）はここに追記する -->
+**実機健全性確認（2026-09-12）**: GB10 実機（`local.fandhe.spark-dbd9`。
+rsync 転送・`PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH`）へ到達し
+`cargo test -p fandhe-ai-backend-cpu --lib small_shape` を実行、14 件
+全 pass を確認した（`eligible=false` を含む全契約テストが Linux 実機上
+でも成立）。機構が `SMALL_SHAPE_CAP_ENABLED=false`（Phase 1 REJECT 確定
+済み）のため本番挙動への影響は元々なく、`cfg(target_os = "macos")` の
+構造的非到達を実機上で直接確認する健全性記録に留める（framework-compare
+train/infer/gemm cpu の before/after 比較は、機構が既定 OFF かつ GB10 が
+構造的非到達のため意味を持たず実施しない）。
