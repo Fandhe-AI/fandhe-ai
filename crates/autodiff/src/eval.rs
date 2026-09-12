@@ -826,6 +826,66 @@ pub(crate) fn log_softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32>
     build_tensor(out, &shape)
 }
 
+/// `inputs` を `dim` 軸で連結するホスト参照実装（`torch.cat` 相当。
+/// イシュー #1598）。`BackendOps::concat` が `Unsupported` を返した
+/// ときのみ `grad::concat_with_fallback` から呼ばれる（`softmax_along`
+/// と同じ「バックエンド実装 → フォールバック」の二段構成。判定迂回
+/// 経路を作らない）。
+///
+/// `out_shape` は呼び出し元（`Var::cat`／`grad::concat_with_fallback`）
+/// が [`fandhe_ai_tensor_core::concat_out_shape`] で検査・確定済みの
+/// 出力 shape をそのまま渡す（本関数は shape 再検査を行わない前提）。
+/// `inputs` は strided view（`dense_vec_ref` で稠密化してから読む）で
+/// よい——`Op::Narrow` の VJP（`grad::concat_with_fallback` 経由）が
+/// zero-pad テンソルを渡す際、そのテンソル自体は contiguous のため
+/// 実害はないが、`Var::cat` の入力が transpose 直後の view でも
+/// 正しく動く契約とする。
+///
+/// レイアウト分解: `outer = prod(out_shape[..dim])`・
+/// `inner = prod(out_shape[dim+1..])`・出力の線形添字は
+/// `(o * total + off_i + s) * inner + i`
+/// （`o`: outer 添字・`s`: 入力 i 内の dim 添字・`i`: inner 添字・
+/// `off_i`: 入力 i より前の dim 累積長・`total = out_shape[dim]`）。
+pub(crate) fn concat(inputs: &[&Tensor<f32>], dim: usize, out_shape: &[usize]) -> Tensor<f32> {
+    // 要素数ゼロ（`out_shape` のいずれかの次元が 0）のとき、
+    // `out_shape[..dim]`／`out_shape[dim+1..]` の部分積は数学的には
+    // 無関係な次元（例: `usize::MAX`）を含みうり、`concat_out_shape`
+    // が通した shape でも部分積単体では usize オーバーフローしうる
+    // （全体積は途中の 0 で吸収されるが部分積はそれを経由しない）。
+    // `softmax_along`（本ファイル上部）と同じ理由・同じ対処で、
+    // 本番経路 panic 禁止規約（`.claude/rules/coding-rust.md`）に従い
+    // outer/inner/out_numel を計算する前に空出力へ早期 return する。
+    if out_shape.contains(&0) {
+        return build_tensor(Vec::new(), out_shape);
+    }
+    let outer: usize = out_shape[..dim].iter().product();
+    let inner: usize = out_shape[dim + 1..].iter().product();
+    let total = out_shape[dim];
+    let out_numel: usize = out_shape.iter().product();
+    let mut out = vec![0f32; out_numel];
+    if outer == 0 || inner == 0 || total == 0 {
+        return build_tensor(out, out_shape);
+    }
+    let mut off = 0usize;
+    for input in inputs {
+        let seg = input.shape()[dim];
+        if seg == 0 {
+            continue;
+        }
+        let data = dense_vec_ref(input);
+        for o in 0..outer {
+            for s in 0..seg {
+                let src_row_start = (o * seg + s) * inner;
+                let dst_row_start = (o * total + off + s) * inner;
+                out[dst_row_start..dst_row_start + inner]
+                    .copy_from_slice(&data[src_row_start..src_row_start + inner]);
+            }
+        }
+        off += seg;
+    }
+    build_tensor(out, out_shape)
+}
+
 /// CrossEntropy 損失（log-sum-exp 安定化。クラス次元 `class_dim` 指定。
 /// #191・親イシュー #189）。shape 検査（`class_dim` 範囲・targets
 /// shape 一致・targets 添字範囲）は呼び出し元（`var.rs::
@@ -1478,6 +1538,29 @@ mod softmax_empty_tensor_overflow_tests {
             .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
         let out = softmax_along(&input, 1);
         assert_eq!(out.shape(), &shape);
+        assert_eq!(out.numel(), 0);
+    }
+}
+
+#[cfg(test)]
+mod concat_empty_out_shape_overflow_tests {
+    use super::*;
+
+    // codex-review 指摘（PR #1680）の回帰検証: `concat_out_shape` が
+    // 受理しうる有効な空 `out_shape`（先頭が `0` で後続次元の部分積が
+    // overflow するケース）に対し、`concat` が `outer`／`inner` を
+    // ゼロ軸チェックより先に `.iter().product()` で計算していたため、
+    // overflow チェック有効時に本番経路の外（debug ビルド）で panic
+    // していた（`softmax_along` と同型の bug。上記
+    // `softmax_empty_tensor_overflow_tests` 参照）。`out_shape` に `0`
+    // を含む場合は部分積を計算する前に空出力へ早期 return することを
+    // 確認する（`dim=0` のとき `inner = out_shape[1..].iter().product()`
+    // `= usize::MAX * 2` が旧実装で overflow していた）。
+    #[test]
+    fn concat_empty_out_shape_with_overflow_prone_inner_does_not_panic() {
+        let out_shape = [0usize, usize::MAX, 2];
+        let out = concat(&[], 0, &out_shape);
+        assert_eq!(out.shape(), &out_shape);
         assert_eq!(out.numel(), 0);
     }
 }

@@ -130,6 +130,65 @@ pub fn reduce_out_shape(shape: &[usize], dim: Option<usize>) -> Result<Vec<usize
     }
 }
 
+/// `cat`（`Var::cat`。イシュー #1598）の出力 shape を検査・計算する。
+///
+/// `shapes` は連結対象の各テンソルの shape（空リストは呼び出し元
+/// `Var::cat` が `vars[0]` に触れる前に `AutodiffError::InvalidArgument`
+/// で弾く契約のため、本関数側では `ShapeError::RankMismatch { expected:
+/// 1, actual: 0 }` を fail-closed な代替として返す）。
+///
+/// - 全 shape の rank が一致しない場合 `ShapeError::RankMismatch`
+///   （`expected` は先頭要素の rank）。
+/// - `dim` が rank 範囲外の場合 `ShapeError::AxisOutOfRange`。
+/// - `dim` 軸以外の各軸が全 shape で一致しない場合
+///   `ShapeError::ShapeMismatch`（`lhs`＝先頭 shape・`rhs`＝不一致の
+///   あった shape）。
+/// - 出力 shape（`dim` 軸のみ各 shape の合計・他軸は共通値）の要素数積
+///   オーバーフローは `checked_numel` で検査し
+///   `ShapeError::ElementCountOverflow` を返す。
+pub fn concat_out_shape(shapes: &[&[usize]], dim: usize) -> Result<Vec<usize>, ShapeError> {
+    let first = match shapes.first() {
+        Some(s) => *s,
+        None => {
+            return Err(ShapeError::RankMismatch {
+                expected: 1,
+                actual: 0,
+            });
+        }
+    };
+    let rank = first.len();
+    if dim >= rank {
+        return Err(ShapeError::AxisOutOfRange { axis: dim, rank });
+    }
+    let mut dim_sum: usize = 0;
+    for &shape in shapes {
+        if shape.len() != rank {
+            return Err(ShapeError::RankMismatch {
+                expected: rank,
+                actual: shape.len(),
+            });
+        }
+        for (axis, (&s, &f)) in shape.iter().zip(first.iter()).enumerate() {
+            if axis == dim {
+                continue;
+            }
+            if s != f {
+                return Err(ShapeError::ShapeMismatch {
+                    lhs: first.to_vec(),
+                    rhs: shape.to_vec(),
+                });
+            }
+        }
+        dim_sum = dim_sum
+            .checked_add(shape[dim])
+            .ok_or(ShapeError::ElementCountOverflow)?;
+    }
+    let mut out = first.to_vec();
+    out[dim] = dim_sum;
+    checked_numel(&out)?;
+    Ok(out)
+}
+
 /// LayerNorm／RMSNorm（イシュー #1596。`BackendOps::layer_norm`／
 /// `rmsnorm` の共通入口）が起動前に `(rows, hidden)` を導出するための
 /// shape 検査。CPU／CUDA／Metal の各 `BackendOps` 実装が本関数の結果を
@@ -542,6 +601,94 @@ mod tests {
     #[test]
     fn row_softmax_layout_element_count_overflow_is_typed_error() {
         let err = row_softmax_layout(&[usize::MAX, 2], 1).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+    #[test]
+    fn concat_out_shape_empty_list_is_rank_mismatch() {
+        let err = concat_out_shape(&[], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 1,
+                actual: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn concat_out_shape_basic_dim0() {
+        let a: &[usize] = &[2, 3];
+        let b: &[usize] = &[4, 3];
+        let out = concat_out_shape(&[a, b], 0).unwrap();
+        assert_eq!(out, vec![6, 3]);
+    }
+
+    #[test]
+    fn concat_out_shape_basic_dim1() {
+        let a: &[usize] = &[2, 3];
+        let b: &[usize] = &[2, 5];
+        let out = concat_out_shape(&[a, b], 1).unwrap();
+        assert_eq!(out, vec![2, 8]);
+    }
+
+    #[test]
+    fn concat_out_shape_single_element_is_identity() {
+        let a: &[usize] = &[2, 3];
+        let out = concat_out_shape(&[a], 0).unwrap();
+        assert_eq!(out, vec![2, 3]);
+    }
+
+    #[test]
+    fn concat_out_shape_rank_mismatch() {
+        let a: &[usize] = &[2, 3];
+        let b: &[usize] = &[2, 3, 4];
+        let err = concat_out_shape(&[a, b], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 2,
+                actual: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn concat_out_shape_axis_out_of_range() {
+        let a: &[usize] = &[2, 3];
+        let err = concat_out_shape(&[a], 2).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::AxisOutOfRange { axis: 2, rank: 2 }
+        ));
+    }
+
+    #[test]
+    fn concat_out_shape_axis_mismatch_on_other_dim() {
+        let a: &[usize] = &[2, 3];
+        let b: &[usize] = &[2, 4];
+        let err = concat_out_shape(&[a, b], 0).unwrap_err();
+        match err {
+            ShapeError::ShapeMismatch { lhs, rhs } => {
+                assert_eq!(lhs, vec![2, 3]);
+                assert_eq!(rhs, vec![2, 4]);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn concat_out_shape_zero_length_dim_mixed() {
+        let a: &[usize] = &[0, 3];
+        let b: &[usize] = &[2, 3];
+        let out = concat_out_shape(&[a, b], 0).unwrap();
+        assert_eq!(out, vec![2, 3]);
+    }
+
+    #[test]
+    fn concat_out_shape_element_count_overflow() {
+        let a: &[usize] = &[usize::MAX, 2];
+        let b: &[usize] = &[1, 2];
+        let err = concat_out_shape(&[a, b], 0).unwrap_err();
         assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 }
