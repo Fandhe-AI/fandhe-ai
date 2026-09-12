@@ -86,10 +86,16 @@ impl RmsNorm {
         })
     }
 
+    /// `weight` パラメータ（`elementwise_affine=false`／
+    /// [`Self::without_affine`] の場合は `None`）。`Some` の場合は
+    /// shape `[hidden]`（[`Self::new`] の引数・`Var::rms_norm` の入力
+    /// 最終軸長と一致）。
     pub fn weight(&self) -> Option<&Tensor<f32>> {
         self.weight.as_ref()
     }
 
+    /// `eps`（`sum(x^2)*inv_n + eps` の加算項）。構築時に
+    /// [`validate_eps`] で有限かつ非負であることを検証済み。
     pub fn eps(&self) -> f32 {
         self.eps
     }
@@ -112,6 +118,11 @@ impl RmsNorm {
 /// （`Tape::backward` 後の `Gradients::get(&vars.weight)` は呼び出し側
 /// の責務）。
 pub struct RmsNormVars<'t> {
+    /// `RmsNorm::bind` 時点の `weight`（`elementwise_affine=false` の
+    /// 場合は `None`）をこの `tape` へ登録した `Var`。`Tape::backward`
+    /// 後に `Gradients::get(&vars.weight)`（`Some` の場合）で `dweight`
+    /// を取得する（呼び出し側の責務。[`crate::nn::linear::LinearVars`]
+    /// と同じ理由）。
     pub weight: Option<Var<'t>>,
     eps: f32,
 }
@@ -195,14 +206,25 @@ impl LayerNorm {
         Ok(Self { weight, bias, eps })
     }
 
+    /// `weight` パラメータ（`elementwise_affine=false`／
+    /// [`Self::without_affine`] の場合は `None`）。`Some` の場合は
+    /// shape `[hidden]`（[`Self::new`] の引数・`Var::layer_norm` の
+    /// 入力最終軸長と一致。`bias` とは独立に `None` を取りうる）。
     pub fn weight(&self) -> Option<&Tensor<f32>> {
         self.weight.as_ref()
     }
 
+    /// `bias` パラメータ（`elementwise_affine=false`／
+    /// [`Self::without_affine`] の場合は `None`）。`Some` の場合は
+    /// shape `[hidden]`（`weight` とは独立に `None` を取りうる。
+    /// [`Self::from_parameters`] は両方 `Some` の場合のみ shape 一致を
+    /// 要求する）。
     pub fn bias(&self) -> Option<&Tensor<f32>> {
         self.bias.as_ref()
     }
 
+    /// `eps`（`var(x) + eps` の加算項）。構築時に [`validate_eps`] で
+    /// 有限かつ非負であることを検証済み。
     pub fn eps(&self) -> f32 {
         self.eps
     }
@@ -222,7 +244,16 @@ impl LayerNorm {
 
 /// `LayerNorm::bind` が返す、1 ステップ分のテープに登録済みパラメータ。
 pub struct LayerNormVars<'t> {
+    /// `LayerNorm::bind` 時点の `weight`（`elementwise_affine=false`
+    /// の場合は `None`）をこの `tape` へ登録した `Var`。`Tape::backward`
+    /// 後に `Gradients::get(&vars.weight)`（`Some` の場合）で `dweight`
+    /// を取得する（呼び出し側の責務）。
     pub weight: Option<Var<'t>>,
+    /// `LayerNorm::bind` 時点の `bias`（`elementwise_affine=false` の
+    /// 場合は `None`）をこの `tape` へ登録した `Var`。`Tape::backward`
+    /// 後に `Gradients::get(&vars.bias)`（`Some` の場合）で `dbias`
+    /// を取得する（呼び出し側の責務。`weight` とは独立に `None` を
+    /// 取りうる）。
     pub bias: Option<Var<'t>>,
     eps: f32,
 }

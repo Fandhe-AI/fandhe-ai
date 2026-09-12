@@ -57,18 +57,32 @@ fn variance_reduction_shuffles_scale_ssq_and_compensation() {
     }
 }
 
-/// 平均の合計 reduction が `sum`／`comp` の Neumaier 補償和ペアを
-/// `simd_shuffle_xor` することをロックする。
+/// 平均の reduction が Welford オンライン平均の `(mean, count)` ペアを
+/// `simd_shuffle_xor` することをロックする（codex-review 指摘を受けた
+/// overflow 対策で Neumaier 補償和 → Welford オンライン平均へ変更。
+/// `docs/norm-ops-design.md`・`layer_norm.metal` 冒頭コメント参照）。
 #[test]
-fn mean_reduction_shuffles_sum_and_compensation() {
-    for var_name in ["sum", "comp"] {
+fn mean_reduction_shuffles_mean_and_count() {
+    for var_name in ["mean", "count"] {
         let needle = format!("simd_shuffle_xor({var_name}, offset)");
         assert!(
             LAYER_NORM_METAL_SOURCE.contains(&needle),
-            "平均 reduction が `{var_name}` を shuffle していません（Neumaier 補償和契約が \
-             壊れている可能性）"
+            "平均 reduction が `{var_name}` を shuffle していません（Welford オンライン平均の \
+             overflow-safe 契約が壊れている可能性）"
         );
     }
+}
+
+/// 平均計算が Welford のオンライン更新式（`mean += delta / count`）を
+/// 使うことをロックする（単純合計〈旧 Neumaier 補償和〉は `f32` の
+/// 表現範囲を超える有限入力で overflow して `mean` が `NaN` 化するため
+/// 採用しない。codex-review 指摘の回帰防止）。
+#[test]
+fn mean_pass_uses_welford_online_update() {
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("lane_mean += delta / lane_count;"),
+        "平均パスが Welford オンライン更新式（mean += delta / count）を使っていません"
+    );
 }
 
 /// `threadgroup_barrier` を使わないことをロックする（1 threadgroup =

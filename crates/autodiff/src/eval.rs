@@ -556,7 +556,15 @@ pub(crate) fn row_rms_stats(x_row: &[f32], eps: f32, inv_n: f64) -> f32 {
 /// 二乗する）だが、LayerNorm は「二乗和」ではなく「二パス分散」
 /// （`Σ(x−μ)²`。`E[x²]−μ²` は使わない。実装計画 §3-3）のため専用
 /// 関数とする。`hidden >= 1` を前提とする（`inv_n = 1/hidden`）。
-pub(crate) fn row_ln_stats(x_row: &[f32], eps: f32, inv_n: f64) -> (f64, f32) {
+///
+/// **`rstd` も `f64` のまま返す**（`row_rms_stats` は `f32` downcast
+/// 済みだが、LayerNorm は呼び出し元が `(x − mean)` を `f64` のまま
+/// 減算する必要があり、早期に `mean`／`rstd` いずれかを `f32` へ丸める
+/// と偏差計算の精度が損なわれる。codex-review 指摘: `x` の値域が
+/// `f32` 仮数精度限界〈`2^24` 付近〉に達する入力で `mean` の
+/// 早期丸めが出力を大きく歪める）。呼び出し元は `x̂` を書き出す
+/// 直前の 1 回だけ `f32` へ downcast する。
+pub(crate) fn row_ln_stats(x_row: &[f32], eps: f32, inv_n: f64) -> (f64, f64) {
     let mut sum = 0.0f64;
     for &v in x_row {
         sum += v as f64;
@@ -568,7 +576,7 @@ pub(crate) fn row_ln_stats(x_row: &[f32], eps: f32, inv_n: f64) -> (f64, f32) {
         sq_acc = d.mul_add(d, sq_acc);
     }
     let var = sq_acc * inv_n;
-    let rstd = (1.0f64 / (var + eps as f64).sqrt()) as f32;
+    let rstd = 1.0f64 / (var + eps as f64).sqrt();
     (mean, rstd)
 }
 
@@ -641,17 +649,37 @@ pub(crate) fn layer_norm_rows(
         let row = &data[r * hidden..(r + 1) * hidden];
         let out_row = &mut out[r * hidden..(r + 1) * hidden];
         let (mean, rstd) = row_ln_stats(row, eps, inv_n);
-        let mean = mean as f32;
-        for (i, &v) in row.iter().enumerate() {
-            let xhat = (v - mean) * rstd;
-            let xhat = match w {
-                Some(w) => xhat * w[i],
-                None => xhat,
-            };
-            out_row[i] = match b {
-                Some(b) => xhat + b[i],
-                None => xhat,
-            };
+        // `mean`／`rstd` を `f64` のまま偏差計算まで保持し、`x̂` を書き出す
+        // 直前の 1 回だけ `f32` へ downcast する（codex-review 指摘。
+        // [`row_ln_stats`] doc 参照）。affine は CUDA カーネルの既定 FMA
+        // contraction と揃えるため `w`／`b` がともに指定された場合のみ
+        // `f32::mul_add` で明示的に融合する（`.claude/rules/coding-rust.md`
+        // の FMA 契約統一）。`w`／`b` が `None` の演算は従来どおりスキップ
+        // する（`-0.0` 等の符号付きゼロを不要な `+0.0` 加算で変えない）。
+        match (w, b) {
+            (Some(w), Some(b)) => {
+                for (i, &v) in row.iter().enumerate() {
+                    let xhat = ((v as f64 - mean) * rstd) as f32;
+                    out_row[i] = xhat.mul_add(w[i], b[i]);
+                }
+            }
+            (Some(w), None) => {
+                for (i, &v) in row.iter().enumerate() {
+                    let xhat = ((v as f64 - mean) * rstd) as f32;
+                    out_row[i] = xhat * w[i];
+                }
+            }
+            (None, Some(b)) => {
+                for (i, &v) in row.iter().enumerate() {
+                    let xhat = ((v as f64 - mean) * rstd) as f32;
+                    out_row[i] = xhat + b[i];
+                }
+            }
+            (None, None) => {
+                for (i, &v) in row.iter().enumerate() {
+                    out_row[i] = ((v as f64 - mean) * rstd) as f32;
+                }
+            }
         }
     }
     build_tensor(out, &shape)

@@ -735,7 +735,11 @@ fn layer_norm_vjp_rows(
         let row = &x[r * hidden..(r + 1) * hidden];
         let dy_row = &dy[r * hidden..(r + 1) * hidden];
         let (mean, rstd) = eval::row_ln_stats(row, eps, inv_n);
-        let mean = mean as f32;
+        // `mean`／`rstd` を `f64` のまま偏差計算に使い、`x̂` を確定する
+        // 直前の 1 回だけ `f32` へ downcast する（forward `eval::
+        // layer_norm_rows` と同じ理由。codex-review 指摘: `mean` の
+        // 早期丸めは forward・backward 双方の `x̂` を歪める）。
+        let xhat_at = |i: usize| -> f32 { ((row[i] as f64 - mean) * rstd) as f32 };
         let dxhat_at = |i: usize| -> f32 {
             match w {
                 Some(w) => dy_row[i] * w[i],
@@ -744,8 +748,8 @@ fn layer_norm_vjp_rows(
         };
         let mut sum_dxhat = 0.0f64;
         let mut dot_acc = 0.0f64;
-        for (i, &xv) in row.iter().enumerate() {
-            let xhat = (xv - mean) * rstd;
+        for i in 0..row.len() {
+            let xhat = xhat_at(i);
             let dxhat = dxhat_at(i);
             sum_dxhat += dxhat as f64;
             let term = dxhat * xhat;
@@ -754,15 +758,15 @@ fn layer_norm_vjp_rows(
         let mean_dxhat = sum_dxhat * inv_n;
         let mean_dot = dot_acc * inv_n;
         let dx_row = &mut dx[r * hidden..(r + 1) * hidden];
-        for (i, &xv) in row.iter().enumerate() {
-            let xhat = (xv - mean) * rstd;
+        for (i, dxv) in dx_row.iter_mut().enumerate() {
+            let xhat = xhat_at(i);
             let dxhat = dxhat_at(i);
-            let d = (rstd as f64) * (dxhat as f64 - mean_dxhat - (xhat as f64) * mean_dot);
-            dx_row[i] = d as f32;
+            let d = rstd * (dxhat as f64 - mean_dxhat - (xhat as f64) * mean_dot);
+            *dxv = d as f32;
         }
         if let Some(dw_acc) = dw_acc.as_mut() {
-            for (i, (&xv, &dyv)) in row.iter().zip(dy_row.iter()).enumerate() {
-                let xhat = (xv - mean) * rstd;
+            for (i, &dyv) in dy_row.iter().enumerate() {
+                let xhat = xhat_at(i);
                 let term = dyv * xhat;
                 dw_acc[i] += term as f64;
             }

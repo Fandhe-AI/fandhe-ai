@@ -131,9 +131,14 @@ fn layer_norm_extreme_values_no_nan_inf() {
 fn layer_norm_multiple_inf_in_same_row() {
     let x = vec![f32::INFINITY, f32::INFINITY, 1.0, 2.0];
     let out = run_layer_norm_f32(&x, None, None, 1e-5, 1, 4).unwrap();
-    // NaN 伝播の意味論を明示的に確認する（inf-inf=NaN が行全体へ伝播
-    // することを許容する契約——特定の値を要求しない）。
-    let _ = out;
+    // NaN 伝播の意味論を実際に検証する（`mean` は `inf` になり、
+    // `inf` 要素の偏差 `inf - inf = NaN` が分散の縮約に混入して行全体が
+    // `NaN` になる。codex-review 指摘: 従来は `out` を捨てるだけで
+    // NaN 伝播自体を検証していなかった）。
+    assert!(
+        out.iter().all(|v| v.is_nan()),
+        "expected all-NaN row, got {out:?}"
+    );
 }
 
 /// NaN 伝播（`rmsnorm_parity.rs` の同名テストと同じ意味論）。

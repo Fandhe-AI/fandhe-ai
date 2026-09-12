@@ -6,16 +6,23 @@
 // 加算をそれぞれスキップ）。分散は biased（÷N。`E[x^2]-mean^2` ではなく
 // 二パス `Sigma(x-mean)^2/N` で計算する。`docs/norm-ops-design.md`）。
 //
-// FMA 契約: `rmsnorm.metal` と同じく `fma()` を明示使用しない単純な
-// 加減乗算のみ（正規化統計の縮約精度契約が優先するため。`.claude/rules/
-// coding-rust.md`）。コンパイルオプションは `pipeline::compile_options()`
-// を適用する。
+// FMA 契約: 正規化統計の縮約（平均・分散）自体は下記の縮約精度契約が
+// 優先し `fma()` を使わない単純な加減算のみだが、**affine（`x̂·w+b`）は
+// CUDA カーネル（`fmaf`）・CPU/ホスト参照実装（`f32::mul_add`）と揃える
+// ため `fma()` で明示的に融合する**（`.claude/rules/coding-rust.md` の
+// FMA 契約統一。codex-review 指摘）。コンパイルオプションは
+// `pipeline::compile_options()` を適用する。
 //
 // 縮約精度契約（正規化統計の f64 アキュムレータ統一。イシュー #1102）:
 // Apple GPU の MSL は `double` を持たないため、`rmsnorm.metal` と同じ
-// Neumaier 改良版 Kahan 補償和 + scale/ssq 方式（分散の二乗和のみ。平均
-// は単純合計のため素の Neumaier 補償和で十分——`f32` の表現範囲を超える
-// ほどの入力規模でも合計自体は有限に収まる実用域を想定する）を適用する。
+// Neumaier 改良版 Kahan 補償和 + scale/ssq 方式（分散の二乗和）を適用
+// する。**平均は Welford オンライン平均**（`ln_welford_merge`／
+// `ln_reduce_mean`。単純合計〈Neumaier 補償和〉では `f32` の表現範囲を
+// 超える有限入力〈例 `[2e38, 2e38]`〉で合計自体が overflow して `mean`
+// が `NaN` 化するため、各更新値が常に入力値域に収まり中間 overflow が
+// 起きない Welford 方式へ変更した。分散側の scale/ssq は `(x-mean)` の
+// 二乗和 overflow のみを救済し平均側の overflow は救済できない。
+// codex-review 指摘）。
 // `rmsnorm.metal` の同名ヘルパーとの重複実装だが、Metal ソースは
 // `newLibraryWithSource` で個別ファイル単位にコンパイルされ翻訳単位を
 // 共有できないため、`ln_` 接頭辞を付けた本ファイル内で独立に定義する
@@ -57,18 +64,34 @@ inline void ln_kahan_add(thread float& sum, thread float& comp, float value) {
     sum = t;
 }
 
-// 32 レーンの `(sum, comp)`（Neumaier 補償和の状態）を 5 段 butterfly で
-// all-reduce する。単純合計のため `rmsnorm_ssq_combine` のような
-// scale 併用は不要——`simd_shuffle_xor` で得た相手レーンの `sum`／`comp`
-// を素の Neumaier 加算で取り込むだけで全 32 レーンに正しい合計が伝播する
-// （加算の結合則・交換則により、この butterfly パターンは二重カウント
-// なしに全要素をちょうど 1 回ずつ合成する）。
-inline void ln_reduce_sum(thread float& sum, thread float& comp) {
+// 平均を Welford オンライン平均（`mean_{k} = mean_{k-1} + (x_k -
+// mean_{k-1})/k`）で計算する（overflow-safe。codex-review 指摘:
+// 単純合計〈旧 `ln_kahan_add`／`ln_reduce_sum` の Neumaier 補償和〉は
+// `f32` の表現範囲を超える有限入力〈例 `[2e38, 2e38]`〉で合計自体が
+// `inf` になり `mean` が `NaN` 化する。Welford は各更新値が常に入力
+// 値域に収まるため中間 overflow が起きない）。分散の scale/ssq 方式
+// とは独立の対策——分散側は `(x-mean)` の二乗和 overflow を救済する
+// のみで、平均そのものの overflow は救済できない）。
+inline void ln_welford_merge(thread float& meanA, thread float& countA,
+                              float meanB, float countB) {
+    float countAB = countA + countB;
+    if (countAB > 0.0f) {
+        float delta = meanB - meanA;
+        meanA = meanA + delta * (countB / countAB);
+    }
+    countA = countAB;
+}
+
+// 32 レーンの `(mean, count)`（Welford 状態）を 5 段 butterfly で
+// all-reduce する（Chan の並列合成公式。`ln_ssq_combine` と同じ
+// butterfly パターン。加算の結合則・交換則と異なり Welford の合成は
+// 非可換だが、`ln_welford_merge` は対称〈`countA`／`countB` を対等に
+// 扱う〉ため任意の合成順序で正しい全体平均に収束する）。
+inline void ln_reduce_mean(thread float& mean, thread float& count) {
     for (uint offset = 16u; offset > 0u; offset >>= 1u) {
-        float other_sum = simd_shuffle_xor(sum, offset);
-        float other_comp = simd_shuffle_xor(comp, offset);
-        ln_kahan_add(sum, comp, other_sum);
-        ln_kahan_add(sum, comp, other_comp);
+        float other_mean = simd_shuffle_xor(mean, offset);
+        float other_count = simd_shuffle_xor(count, offset);
+        ln_welford_merge(mean, count, other_mean, other_count);
     }
 }
 
@@ -185,14 +208,17 @@ kernel void layer_norm_f32(
     for (uint row = tg_id; row < rows; row += grid_size) {
         ulong row_base = (ulong)row * (ulong)hidden;
 
-        // パス 1: 平均（単純な Neumaier 補償和。冒頭コメント参照）。
-        float sum = 0.0f;
-        float sum_c = 0.0f;
+        // パス 1: 平均（Welford オンライン平均。overflow-safe。上記
+        // `ln_welford_merge`／`ln_reduce_mean` 冒頭コメント参照）。
+        float lane_mean = 0.0f;
+        float lane_count = 0.0f;
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
-            ln_kahan_add(sum, sum_c, x[row_base + idx]);
+            lane_count += 1.0f;
+            float delta = x[row_base + idx] - lane_mean;
+            lane_mean += delta / lane_count;
         }
-        ln_reduce_sum(sum, sum_c);
-        float mean = (sum + sum_c) * inv_n;
+        ln_reduce_mean(lane_mean, lane_count);
+        float mean = lane_mean;
 
         // パス 2: 分散（`(x-mean)` に対する scale/ssq 方式二乗和）。
         float scale = 0.0f;
@@ -207,12 +233,16 @@ kernel void layer_norm_f32(
 
         // パス 3: 書き出し（device メモリを再読。threadgroup memory
         // 不使用の 2 パス経路——`rmsnorm_f32_twopass` と同じ構成）。
+        // affine は CUDA カーネルの既定 FMA contraction・CPU/ホスト参照
+        // 実装の `f32::mul_add` と揃えるため `fma()` で明示的に融合する
+        // （`.claude/rules/coding-rust.md` の FMA 契約統一。codex-review
+        // 指摘）。
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
             float v = x[row_base + idx];
             float xhat = (v - mean) * rstd;
             float wv = (has_weight != 0) ? w[idx] : 1.0f;
             float bv = (has_bias != 0) ? b[idx] : 0.0f;
-            out[row_base + idx] = xhat * wv + bv;
+            out[row_base + idx] = fma(xhat, wv, bv);
         }
     }
 }

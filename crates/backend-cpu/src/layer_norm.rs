@@ -45,6 +45,10 @@ pub enum LayerNormError {
     WeightLenMismatch { hidden: usize, w_len: usize },
     /// `b` が指定されているが `b.len() != hidden`。
     BiasLenMismatch { hidden: usize, b_len: usize },
+    /// `eps` が有限でないか負（`backend-cuda::layer_norm::
+    /// validate_layer_norm_launch`／`row_kernel::validate_row_kernel_launch`
+    /// と同型の検証。CPU 側は本 PR まで欠落していた〈codex-review 指摘〉）。
+    InvalidEps { eps: f32 },
 }
 
 impl std::fmt::Display for LayerNormError {
@@ -61,15 +65,23 @@ impl std::fmt::Display for LayerNormError {
                 f,
                 "layer_norm bias length mismatch: hidden={hidden}, b.len()={b_len}"
             ),
+            LayerNormError::InvalidEps { eps } => {
+                write!(
+                    f,
+                    "layer_norm eps must be finite and non-negative: eps={eps}"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for LayerNormError {}
 
-/// 起動前 fail-closed 検証（`rmsnorm::validate_rmsnorm_launch` と同型。
-/// OWASP A03・`.claude/rules/security.md`）: `rows * hidden ==
-/// x.len()`（checked 乗算）・`w.len() == hidden`（`w` 指定時）・
+/// 起動前 fail-closed 検証（`rmsnorm::validate_rmsnorm_launch`・
+/// `backend-cuda::layer_norm::validate_layer_norm_launch` と同型。
+/// OWASP A03・`.claude/rules/security.md`）: `eps` が有限かつ非負
+/// （`is_finite() && eps >= 0.0`）・`rows * hidden == x.len()`
+/// （checked 乗算）・`w.len() == hidden`（`w` 指定時）・
 /// `b.len() == hidden`（`b` 指定時）。
 fn validate_layer_norm_launch(
     rows: usize,
@@ -77,7 +89,11 @@ fn validate_layer_norm_launch(
     x_len: usize,
     w_len: Option<usize>,
     b_len: Option<usize>,
+    eps: f32,
 ) -> Result<(), LayerNormError> {
+    if !eps.is_finite() || eps < 0.0 {
+        return Err(LayerNormError::InvalidEps { eps });
+    }
     let numel = rows
         .checked_mul(hidden)
         .ok_or_else(|| LayerNormError::InvalidShape {
@@ -122,6 +138,7 @@ pub fn run_layer_norm_f32(
         x.len(),
         w.map(|s| s.len()),
         b.map(|s| s.len()),
+        eps,
     )?;
 
     if rows == 0 || hidden == 0 {
@@ -150,8 +167,20 @@ pub fn run_layer_norm_f32(
 /// 1 行分の LayerNorm を計算する（スカラーのみ。冒頭コメント参照）。
 ///
 /// 平均は `f64` 逐次和、分散は「二パス」（`(x−μ)` を `f64` へ昇格して
-/// から二乗し `f64::mul_add` で蓄積）。`rstd` へ代入する 1 回だけ
-/// `f32` へ downcast する（`rmsnorm_row_scalar` と同じ縮約方式）。
+/// から二乗し `f64::mul_add` で蓄積）。**`mean`／`rstd` はいずれも
+/// `f64` のまま `x̂ = (x − mean) · rstd` の偏差計算まで保持し**、
+/// `x̂` を出力へ書き込む直前の 1 回だけ `f32` へ downcast する
+/// （codex-review 指摘: `mean` を偏差計算前に `f32` へ丸めると
+/// `mean` の丸め誤差がそのまま `x̂` へ伝播し、`x` の値域が `f32` の
+/// 仮数精度限界〈例: 2^24 付近〉に達する入力で顕著な誤差を生む。
+/// `rmsnorm_row_scalar` の `rstd` 単体丸めとは異なり、LayerNorm は
+/// `mean` 減算があるため両方を高精度に保つ必要がある）。
+///
+/// affine（`x̂·w+b`）は CUDA カーネル（`kernels_layer_norm.rs`。
+/// `xhat * wv + bv` が nvcc の既定 FMA contraction で `fmaf` 相当に
+/// 融合される）と揃えるため、`f32::mul_add` で明示的に融合する
+/// （`.claude/rules/coding-rust.md` の FMA 契約統一。codex-review
+/// 指摘）。
 fn layer_norm_row(
     row: &[f32],
     w: Option<&[f32]>,
@@ -171,8 +200,7 @@ fn layer_norm_row(
         sq_acc = d.mul_add(d, sq_acc);
     }
     let var = sq_acc * inv_n;
-    let rstd = (1.0f64 / (var + eps as f64).sqrt()) as f32;
-    let mean = mean as f32;
+    let rstd = 1.0f64 / (var + eps as f64).sqrt();
 
     match (w, b) {
         (Some(w), Some(b)) => {
@@ -182,22 +210,25 @@ fn layer_norm_row(
                 .zip(w.iter())
                 .zip(b.iter())
             {
-                *o = (v - mean) * rstd * wv + bv;
+                let xhat = ((v as f64 - mean) * rstd) as f32;
+                *o = xhat.mul_add(wv, bv);
             }
         }
         (Some(w), None) => {
             for ((o, &v), &wv) in out_row.iter_mut().zip(row.iter()).zip(w.iter()) {
-                *o = (v - mean) * rstd * wv;
+                let xhat = ((v as f64 - mean) * rstd) as f32;
+                *o = xhat * wv;
             }
         }
         (None, Some(b)) => {
             for ((o, &v), &bv) in out_row.iter_mut().zip(row.iter()).zip(b.iter()) {
-                *o = (v - mean) * rstd + bv;
+                let xhat = ((v as f64 - mean) * rstd) as f32;
+                *o = xhat + bv;
             }
         }
         (None, None) => {
             for (o, &v) in out_row.iter_mut().zip(row.iter()) {
-                *o = (v - mean) * rstd;
+                *o = ((v as f64 - mean) * rstd) as f32;
             }
         }
     }
@@ -209,26 +240,75 @@ mod tests {
 
     #[test]
     fn validate_layer_norm_launch_accepts_matching_dims() {
-        assert!(validate_layer_norm_launch(3, 8, 24, Some(8), Some(8)).is_ok());
-        assert!(validate_layer_norm_launch(3, 8, 24, None, None).is_ok());
+        assert!(validate_layer_norm_launch(3, 8, 24, Some(8), Some(8), 1e-5).is_ok());
+        assert!(validate_layer_norm_launch(3, 8, 24, None, None, 1e-5).is_ok());
     }
 
     #[test]
     fn validate_layer_norm_launch_rejects_x_len_mismatch() {
-        let err = validate_layer_norm_launch(3, 8, 23, None, None).unwrap_err();
+        let err = validate_layer_norm_launch(3, 8, 23, None, None, 1e-5).unwrap_err();
         assert!(matches!(err, LayerNormError::InvalidShape { .. }));
     }
 
     #[test]
     fn validate_layer_norm_launch_rejects_w_len_mismatch() {
-        let err = validate_layer_norm_launch(3, 8, 24, Some(7), None).unwrap_err();
+        let err = validate_layer_norm_launch(3, 8, 24, Some(7), None, 1e-5).unwrap_err();
         assert!(matches!(err, LayerNormError::WeightLenMismatch { .. }));
     }
 
     #[test]
     fn validate_layer_norm_launch_rejects_b_len_mismatch() {
-        let err = validate_layer_norm_launch(3, 8, 24, None, Some(7)).unwrap_err();
+        let err = validate_layer_norm_launch(3, 8, 24, None, Some(7), 1e-5).unwrap_err();
         assert!(matches!(err, LayerNormError::BiasLenMismatch { .. }));
+    }
+
+    #[test]
+    fn validate_layer_norm_launch_rejects_negative_eps() {
+        let err = validate_layer_norm_launch(3, 8, 24, None, None, -1.0).unwrap_err();
+        assert!(matches!(err, LayerNormError::InvalidEps { .. }));
+    }
+
+    #[test]
+    fn validate_layer_norm_launch_rejects_non_finite_eps() {
+        for eps in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let err = validate_layer_norm_launch(3, 8, 24, None, None, eps).unwrap_err();
+            assert!(matches!(err, LayerNormError::InvalidEps { .. }));
+        }
+    }
+
+    #[test]
+    fn validate_layer_norm_launch_accepts_zero_eps() {
+        assert!(validate_layer_norm_launch(3, 8, 24, None, None, 0.0).is_ok());
+    }
+
+    /// CPU の `run_layer_norm_f32` は起動前検証を経由するため、不正な
+    /// `eps` は `NaN` を返さず `Err` になる（codex-review 指摘: CUDA／
+    /// Metal は既に拒否するが CPU は本 PR まで受理し `NaN` 出力を
+    /// 生んでいた）。
+    #[test]
+    fn run_layer_norm_f32_rejects_invalid_eps() {
+        let x = vec![1.0f32, 2.0, 3.0, 4.0];
+        let err = run_layer_norm_f32(&x, None, None, -1.0, 1, 4).unwrap_err();
+        assert!(matches!(err, LayerNormError::InvalidEps { .. }));
+        let err = run_layer_norm_f32(&x, None, None, f32::NAN, 1, 4).unwrap_err();
+        assert!(matches!(err, LayerNormError::InvalidEps { .. }));
+    }
+
+    /// codex-review 指摘の再現ケース: `mean` を偏差計算前に `f32` へ
+    /// 丸めると `x=[16777216, 16777218]`（`2^24` 近傍で `f32` の ULP が
+    /// `2` になる領域）で `mean=16777217.0` が `16777216.0` へ丸められ、
+    /// 出力が期待値 `[-1, 1]`（`eps` 無視できる規模）から大きく乖離する
+    /// （偏差計算前丸めの場合 `[0, 1.99999]` になる）。`f64` のまま偏差
+    /// 計算まで保持すれば `[-1, 1]` に一致する。
+    #[test]
+    fn run_layer_norm_f32_preserves_mean_precision_near_f32_epsilon_boundary() {
+        let x = vec![16777216.0f32, 16777218.0];
+        let out = run_layer_norm_f32(&x, None, None, 1e-5, 1, 2).unwrap();
+        let rstd = 1.0f64 / (1.0f64 + 1e-5f64).sqrt();
+        let expected = [(-rstd) as f32, rstd as f32];
+        for (o, e) in out.iter().zip(expected.iter()) {
+            assert!((o - e).abs() < 1e-4, "o={o} e={e}");
+        }
     }
 
     #[test]

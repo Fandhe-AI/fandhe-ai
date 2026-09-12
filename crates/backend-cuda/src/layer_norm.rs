@@ -154,25 +154,30 @@ impl CudaLayerNorm {
             return Ok(Vec::new());
         }
 
-        let inv_n = 1.0f32 / hidden as f32;
         let rows_i = rows as i32;
         let hidden_i = hidden as i32;
 
         self.with_driver_call(|| {
             let x_dev = self.stream.clone_htod(x)?;
             // `w`／`b` が `None` の場合もカーネル引数としてポインタは
-            // 必要だが `has_weight`／`has_bias == 0` により決して
-            // デリファレンスされない（`rmsnorm.rs::run_rmsnorm_f32_inner`
-            // の `w_dev` ダミーと同じイディオム。1 要素のゼロ初期化
-            // バッファで足りる——`0` 要素バッファの確保を一部 CUDA
-            // driver が拒否しうる問題を避ける）。
+            // 必要だが `has_weight`／`has_bias == 0` により論理的には
+            // デリファレンスされない。ただし `hidden` 要素すべてに対する
+            // `(has_weight != 0) ? w[i] : 1.0f` という warp 一様の三項式は
+            // nvcc が predicated load（`i` の全域で `w[i]` の読み出し自体は
+            // 無条件発行し、書き込みのみ述語化する）へコンパイルしうる
+            // ため、1 要素のダミーでは `hidden > 1` のとき境界外読み出しに
+            // なりうる（Cursor Bugbot 指摘）。Metal 側 `layer_norm.rs`
+            // （`MetalBuffer::alloc_zeroed_pooled(ctx, hidden)`）と同じ
+            // `hidden` 要素ゼロ初期化バッファへ揃える（`rmsnorm.rs::
+            // run_rmsnorm_f32_inner` の 1 要素ダミーは本 PR のスコープ外
+            // として別途記録する）。
             let (w_dev, has_weight) = match w {
                 Some(w_slice) => (self.stream.clone_htod(w_slice)?, 1i32),
-                None => (self.stream.alloc_zeros::<f32>(1)?, 0i32),
+                None => (self.stream.alloc_zeros::<f32>(hidden)?, 0i32),
             };
             let (b_dev, has_bias) = match b {
                 Some(b_slice) => (self.stream.clone_htod(b_slice)?, 1i32),
-                None => (self.stream.alloc_zeros::<f32>(1)?, 0i32),
+                None => (self.stream.alloc_zeros::<f32>(hidden)?, 0i32),
             };
             let mut out_dev = self.stream.alloc_zeros::<f32>(x.len())?;
 
@@ -184,7 +189,7 @@ impl CudaLayerNorm {
             // SAFETY: `x_dev` は `rows*hidden` 要素の H2D 済みデバイス
             // バッファ、`w_dev`／`b_dev` は `has_weight`／`has_bias` が
             // 真のときのみ `hidden` 要素の実データ（偽のときは
-            // デリファレンスされない 1 要素ダミー）、`out_dev` は
+            // デリファレンスされない `hidden` 要素ゼロ初期化ダミー）、`out_dev` は
             // `x.len()` 要素確保済みでカーネルが行ごとに全要素を書く
             // （`kernels_layer_norm.rs` 参照）。grid 次元は `rows`
             // （1 CTA = 1 行）で `kernels_layer_norm.rs` 側の
@@ -200,7 +205,6 @@ impl CudaLayerNorm {
                     .arg(&rows_i)
                     .arg(&hidden_i)
                     .arg(&eps)
-                    .arg(&inv_n)
                     .arg(&has_weight)
                     .arg(&has_bias)
                     .launch(cfg)?;

@@ -49,7 +49,8 @@
 /// 未参照——ただし呼び出し元は必ず `hidden` 要素のダミーバッファを渡す。
 /// Metal 側 `rmsnorm.rs` と同じ理由でコンパイラの条件式最適化に対する
 /// fail-closed な境界確保）・`b`（同様）・`out`・`rows`・`hidden`・
-/// `eps`・`inv_n`（`= 1/hidden`）・`has_weight`・`has_bias`。
+/// `eps`・`has_weight`・`has_bias`（`inv_n = 1/hidden` はカーネル内で
+/// `double` のまま導出する。冒頭コメント「縮約精度契約」参照）。
 pub const LAYER_NORM_F32: &str = r#"
 extern "C" __global__ void layer_norm_f32(
     const float* __restrict__ x,
@@ -59,7 +60,6 @@ extern "C" __global__ void layer_norm_f32(
     int rows,
     int hidden,
     float eps,
-    float inv_n,
     int has_weight,
     int has_bias)
 {
@@ -72,6 +72,11 @@ extern "C" __global__ void layer_norm_f32(
     const float* x_row = x + row_base;
     float* out_row = out + row_base;
 
+    // `inv_n = 1/hidden` をカーネル内で double のまま導出する（ホストで
+    // `f32` 計算してから渡すと、丸め誤差が `double` へ昇格後も残存し
+    // `mean`／`var` の精度を損なう。codex-review 指摘）。
+    double inv_n = 1.0 / (double)hidden;
+
     // パス 1: 平均（double アキュムレータ）。
     double sum = 0.0;
     for (long long i = lane; i < hidden; i += 32) {
@@ -81,7 +86,7 @@ extern "C" __global__ void layer_norm_f32(
     for (int offset = 16; offset > 0; offset >>= 1) {
         sum += __shfl_xor_sync(0xffffffffu, sum, offset);
     }
-    double mean = sum * (double)inv_n;
+    double mean = sum * inv_n;
 
     // パス 2: 分散（二パス。`(x-mean)^2` を double で蓄積）。
     double sq_acc = 0.0;
@@ -93,16 +98,20 @@ extern "C" __global__ void layer_norm_f32(
     for (int offset = 16; offset > 0; offset >>= 1) {
         sq_acc += __shfl_xor_sync(0xffffffffu, sq_acc, offset);
     }
-    double var = sq_acc * (double)inv_n;
-    float rstd = (float)(1.0 / sqrt(var + (double)eps));
-    float mean_f = (float)mean;
+    double var = sq_acc * inv_n;
+    double rstd = 1.0 / sqrt(var + (double)eps);
 
-    // パス 3: 書き出し（device メモリを再読）。
+    // パス 3: 書き出し（device メモリを再読）。`mean`／`rstd` を double の
+    // まま偏差計算に使い、`x̂` を確定する直前の 1 回だけ `float` へ丸める
+    // （codex-review 指摘: 事前に `mean` を `float` へ丸めると `x` の値域が
+    // `float` 仮数精度限界〈`2^24` 付近〉に達する入力で `x̂` が大きく
+    // 歪む）。affine は `fmaf` で明示的に融合する（`.claude/rules/
+    // coding-rust.md` の FMA 契約統一。CPU/Metal/ホスト参照実装と揃える）。
     for (long long i = lane; i < hidden; i += 32) {
-        float xhat = (x_row[i] - mean_f) * rstd;
+        float xhat = (float)(((double)x_row[i] - mean) * rstd);
         float wv = (has_weight != 0) ? w[i] : 1.0f;
         float bv = (has_bias != 0) ? b[i] : 0.0f;
-        out_row[i] = xhat * wv + bv;
+        out_row[i] = fmaf(xhat, wv, bv);
     }
 }
 "#;
