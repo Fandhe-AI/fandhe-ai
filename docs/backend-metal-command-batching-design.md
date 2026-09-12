@@ -1679,3 +1679,78 @@ codex ジョブが `block-priorities: P0,P1` で fail する状態が続いた�
 数値契約自体（f64 相当への統一・Metal は Neumaier＋scale 方式・両者の
 一致は REQ-2 判定）は変わらないため、`.claude/rules/coding-rust.md`
 には実装形の精密化を追記するに留め、契約の記述は変更しない。
+
+### 10.11 #1665 取り込み後の codex-review 追加指摘の是正（2026-09-12・scale を 2 のべき乗へ限定）
+
+§10.10 が適用した scale 方式（列内の最大絶対値そのものを `scale` に
+採用する版）は、**相殺入力での丸め誤差**を防げないと codex-review から
+追加指摘された。`x / scale`・`acc *= ratio` の `scale`／`ratio` が
+一般の実数（2 のべき乗とは限らない）であるため、これらの除算・乗算が
+丸めを伴い、真値がちょうど相殺してゼロになる入力でも誤差が残る。契約
+自体（f64 相当への統一・両実装間の一致は REQ-2 統一複合判定）は不変で、
+Metal 側の実装形のみをさらに精密化する。
+
+**問題の再現**: 列 `[1e8, -100000008.0, 8.0]`（真値は `0`）を旧 scale
+方式で処理すると、1 項目 `x1=1e8` の時点で `scale=1e8` が確定し
+`x1/scale=1.0`（exact）だが、2 項目 `x2=-100000008.0` は
+`ax=100000008.0 > scale(1e8)` のため `scale` を `100000008.0` へ
+更新する際の `ratio = 1e8 / 100000008.0` が `f32` で丸められる。この
+丸め誤差が既存の `acc`（`1.0`）へそのまま乗算で伝播し、最終結果は
+真値 `0` に対し `f32` で約 `2.04` という REQ-2（相対誤差 1e-3 未満
+または 絶対誤差 1e-5 未満）に違反する誤差になる。
+
+**是正内容**: `scale` を「列内で見た最大絶対値以下の最大の 2 のべき
+乗」に限定する `bias_pow2_floor(ax)` を新設し、`bias_scale_sum_add` の
+再スケール分岐（`ax > scale` の場合）を `scale = ax` から
+`scale = bias_pow2_floor(ax)` へ変更した。`bias_pow2_floor` は `ax` の
+IEEE754 ビットパターンから仮数部（下位 23 bit）をゼロクリアするだけ
+（乗除算・超越関数を経由しない）で「`ax` 以下の最大の 2 のべき乗」を
+exact に求める。2 のべき乗による除算（`x / scale`）は仮数部を変えず
+指数部をずらすだけのため常に exact、2 のべき乗同士の比
+（`old_scale / new_scale`）も常に 2 のべき乗になるため exact——両方の
+丸め源が構造的に消える。
+
+**`ceil` ではなく `floor` を採用する理由**: コーディネータの当初提案は
+`scale = exp2(ceil(log2(ax)))`（`ax` 以上の最小の 2 のべき乗）だったが、
+`ax` が `f32::MAX` 付近の場合これは `f32` で表現できない
+（`f32::MAX` 自身の指数は 127 だが `ceil` 版は指数 128 を要求し、
+`f32` の最大指数 127 を超えて `+inf` へ overflow する）。`floor`
+（`ax` 以下の最大の 2 のべき乗）は `ax` 自身の指数をそのまま使うため
+overflow せず、かつ exactness の要件（除算・比が exact になること）は
+`floor` でも `ceil` と同様に満たされる（2 のべき乗であることが本質で
+あり、`ax` 以上か以下かは無関係）ため、`floor` へ変更した（元の
+提案からの逸脱。理由は本節に明記）。
+
+subnormal（非正規化数）域まで `ax` が落ち込む極端なケースは
+`bias_pow2_floor` が `0.0f` を返しうるため本方式の対象外とする
+（REQ-2 の適用外。実務上の bias 勾配の値域では到達しない）。
+
+**検証**: Linux で実行可能な Rust ホスト参照モデル
+（`crates/backend-metal/tests/gemm_bias_scale_sum_host_model.rs`。
+`gemm.metal` の `bias_scale_sum_add`／`bias_pow2_floor`／
+`bias_kahan_add` を逐語移植）を新設し、以下を確認した:
+
+- `preserves_cancelling_contribution_with_rounding_prone_values`:
+  `[1e8, -100000008.0, 8.0]` → 真値 `0` と REQ-2 複合判定で一致
+  （codex-review 指摘の直接再現・是正確認）。
+- `avoids_intermediate_overflow_for_finite_max_magnitude_inputs`:
+  `[f32::MAX, f32::MAX, -f32::MAX, -f32::MAX]` → 有限値・真値 `0` と
+  REQ-2 複合判定で一致（§10.10 の中間 overflow 回避が本是正でも
+  維持されていることの確認）。
+- `preserves_non_cancelling_residual_contribution`:
+  `[1e8, 1.0, -1e8]` → 真値 `1.0` と REQ-2 複合判定で一致。
+- `matches_f64_reference_sum_for_mixed_magnitude_random_sequence`:
+  桁の異なる値（`1e-3`〜`1e8` のスケールを乱数選択）が混在する 200
+  要素の決定的乱数列で `f64` 逐次和（真値の近似参照）と REQ-2 複合
+  判定で一致。
+- `pow2_floor_is_exact_and_never_overflows_for_finite_input`:
+  `bias_pow2_floor` 単体の性質（2 のべき乗の不動点・`f32::MAX` でも
+  有限値を返す）を確認。
+
+5 件すべて Linux 実行で green（`cargo test -p fandhe-ai-backend-metal
+--test gemm_bias_scale_sum_host_model`）。gemm.metal のコメント・本節
+を上記へ整合させ、`.claude/rules/coding-rust.md` の実装形記述も
+「Neumaier + 2 のべき乗 scale」へ更新した（契約自体は不変のため
+regression には当たらない）。実機（Apple Silicon）での MSL カーネル
+本体の実行確認は Mac セッションへ申し送る（`gemm_fp32_strict_into_
+parity.rs` の NT/TN テスト・NN フォールバックテストの非後退確認を含む）。

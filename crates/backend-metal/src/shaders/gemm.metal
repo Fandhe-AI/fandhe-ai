@@ -2500,10 +2500,40 @@ struct BiasGradReduceParams {
 // （`rmsnorm.metal::rmsnorm_kahan_add` とロジックは同一）。
 //
 // 不変量: `sum(x_i) == scale * (acc + comp)`（`isfinite(scale)` の間）。
-// `scale`（列内で見た最大絶対値）で正規化した項 `x_i / scale`（常に
-// `[-1, 1]` に収まる）を Neumaier 改良版 Kahan 補償和（`bias_kahan_add`）
-// で蓄積するため、部分和が行数 `m` で有界になり中間 overflow が
-// 構造的に起きない。
+// `scale` で正規化した項 `x_i / scale` を Neumaier 改良版 Kahan 補償和
+// （`bias_kahan_add`）で蓄積するため、部分和が行数 `m` で有界になり
+// 中間 overflow が構造的に起きない。
+//
+// **`scale` は列内の最大絶対値そのものではなく、その値以下の最大の
+// 2 のべき乗に限定する（codex-review 追加指摘・PR #1665 取り込み後の
+// 是正。`bias_pow2_floor`）**。理由: `scale` を単に「今まで見た最大
+// 絶対値」（任意の実数）にすると、`x / scale` の除算・`acc *= ratio`
+// の乗算が一般には丸めを伴う。相殺目的の入力（例:
+// `[1e8, -100000008.0, 8.0]`。真値 `0`）では、`x1=1e8` が最初の要素の
+// ため `scale = ax = 1e8` に確定し `x1/scale = 1.0`（丸めなし）だが、
+// 2 番目の要素 `x2=-100000008.0` は `ax=100000008.0 > scale(1e8)` の
+// ため `scale` を `100000008.0` へ更新する際の `ratio =
+// 1e8/100000008.0` が `f32` で丸められ、既存の `acc`（`1.0`）に
+// 掛かる誤差がそのまま最終結果へ伝播し、真値 `0` に対し `f32` で
+// 約 `2.04` という REQ-2（相対誤差 1e-3 未満 または 絶対誤差 1e-5
+// 未満）に違反する誤差が生じる（実機実測は不要——本 Rust ホスト
+// モデル・テスト `gemm_bias_scale_sum_host_model.rs` で確認済み）。
+// `scale` を「2 のべき乗」に限定すると、正規化数の範囲内では
+// `x / scale`（べき乗除算は仮数部を変えずに指数部をずらすだけ）・
+// `old_scale / new_scale`（2 のべき乗同士の比も 2 のべき乗）の
+// いずれも exact（丸めなし）になり、この誤差が構造的に発生しなく
+// なる。`bias_pow2_floor(ax)` は「`ax` 以下の最大の 2 のべき乗」
+// （`ceil` ではなく `floor`。`ax` が `f32::MAX` 付近でも `2^128` の
+// ような表現不能な値へ overflow せず、`ax` 自身の指数をそのまま
+// 使うため必ず有限に収まる）を、`ax` のビットパターンから仮数部
+// （下位 23 bit）をゼロクリアするだけで exact に求める（乗除算・
+// 超越関数を経由しない）。この結果 `x / scale` の大きさは常に
+// `[1, 2)`（新規スケール確定時の当該要素）または `(0, 2)`（既存
+// スケールのまま処理する要素）に収まり、部分和がさらに大きく
+// bound される。subnormal（非正規化数）域まで `ax` が落ち込む極端な
+// ケースは本方式の対象外とする（`bias_pow2_floor` は subnormal
+// 入力に対し `0.0f` を返しうるが、この領域は REQ-2 の適用外と
+// 扱う。実務上の bias 勾配の値域では到達しない）。
 //
 // **`NaN` 伝播**: `x` が `NaN`、または既に `acc`/`scale` が `NaN`
 // （前回の呼び出しで検出済み）の場合、`acc` を `NaN` へ確定し `scale`
@@ -2543,6 +2573,21 @@ inline void bias_kahan_add(thread float& sum, thread float& comp, float value) {
     sum = t;
 }
 
+// `ax`（`> 0` の有限値を仮定。呼び出し元 `bias_scale_sum_add` が
+// `isnan`／`isinf` を事前に弾く）以下の最大の 2 のべき乗を、ビット
+// パターンから仮数部（下位 23 bit）をゼロクリアするだけで exact に
+// 求める（`bias_scale_sum_add` 冒頭コメント「`scale` は...2 のべき
+// 乗に限定する」参照）。`ceil` ではなく `floor` を採用する理由: `ax`
+// が `f32::MAX` 付近の場合、`ax` 以上の最小の 2 のべき乗（`ceil`）は
+// `f32` で表現できず `+inf` へ overflow しうる（`f32::MAX` 自身の
+// 指数 127 に対し `ceil` は指数 128 を要求するが `f32` の最大指数は
+// 127）。`floor` は `ax` 自身の指数をそのまま使うため overflow しない。
+inline float bias_pow2_floor(float ax) {
+    uint bits = as_type<uint>(ax);
+    bits &= 0xFF800000u; // 符号（0・ax は非負）・指数はそのまま、仮数部をゼロに。
+    return as_type<float>(bits);
+}
+
 inline void bias_scale_sum_add(thread float& scale, thread float& acc, thread float& comp, float x) {
     if (isnan(x) || isnan(acc) || isnan(scale)) {
         scale = 1.0f;
@@ -2571,15 +2616,16 @@ inline void bias_scale_sum_add(thread float& scale, thread float& acc, thread fl
         return;
     }
     if (ax > scale) {
+        float new_scale = bias_pow2_floor(ax);
         if (scale > 0.0f) {
-            float ratio = scale / ax;
+            float ratio = scale / new_scale; // 2 のべき乗同士の比。exact。
             acc *= ratio;
             comp *= ratio;
         }
-        scale = ax;
-        bias_kahan_add(acc, comp, x / scale);
+        scale = new_scale;
+        bias_kahan_add(acc, comp, x / scale); // 2 のべき乗除算。exact。
     } else if (scale > 0.0f) {
-        bias_kahan_add(acc, comp, x / scale);
+        bias_kahan_add(acc, comp, x / scale); // 2 のべき乗除算。exact。
     }
     // `ax == 0.0f && scale == 0.0f`（列が現時点まで全て 0）は
     // 何もしない（0 は和に寄与せず、`0.0f / 0.0f` の `NaN` 化も回避）。
