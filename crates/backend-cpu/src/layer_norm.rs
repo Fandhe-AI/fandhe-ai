@@ -11,11 +11,23 @@
 //!
 //! # 縮約精度契約（`.claude/rules/coding-rust.md`）
 //!
-//! 平均は要素を `f64` へ昇格してから逐次和し、分散は「二パス」
-//! （`Σ(x−μ)²/N`。`E[x²]−μ²` は使わない）で `(x−μ)` を `f64` へ昇格
-//! してから二乗・蓄積する。`rstd` へ代入する 1 回だけ `f32` へ
-//! downcast する（`rmsnorm.rs::rmsnorm_row_scalar` と同じ縮約方式。
-//! イシュー #1102 の一般契約をそのまま適用する）。
+//! 平均・分散とも要素を `f64` へ昇格し、**GPU（CUDA
+//! `kernels_layer_norm.rs`／Metal `layer_norm.metal`）の warp／
+//! simdgroup butterfly 縮約と同一の加算順序**（[`warp_reduce_f64`]。
+//! 32 レーンのストライドアクセス + offset 16→8→4→2→1 の木構造縮約）
+//! で蓄積する（単純な先頭からの逐次和ではない。PR #1671 codex-review
+//! P1 是正・イシュー #1596）。分散は「二パス」（`Σ(x−μ)²/N`。
+//! `E[x²]−μ²` は使わない）で `(x−μ)` を `f64` へ昇格してから
+//! `f64::mul_add` で融合二乗・蓄積する。`rstd` へ代入する 1 回だけ
+//! `f32` へ downcast する。
+//!
+//! **加算順序を GPU 側へ揃える理由**: 相殺を含む入力
+//! （例 `x=[1e30, 1, -1e30, 0]`）では加算順序で結果が変わりうる
+//! （単純な逐次和は `0`、butterfly 縮約は数学的に正しい `1` を
+//! 返す）。GPU 側を逐次和へ合わせるには縮約を直列化する必要があり
+//! 性能面で著しく不利なため、CPU 参照実装
+//! （`autodiff::eval::row_ln_stats` も同型で追従）側を GPU の
+//! 決定的な縮約順序へ合わせた（`warp_reduce_f64` doc comment 参照）。
 //!
 //! # NEON 化について
 //!
@@ -163,13 +175,72 @@ pub fn run_layer_norm_f32(
     Ok(out)
 }
 
+/// GPU（CUDA `kernels_layer_norm.rs`::`__shfl_xor_sync`／Metal
+/// `layer_norm.metal`::`simd_shuffle_xor`）の warp／simdgroup 縮約と
+/// **同一の演算順序**を CPU 上で再現する（PR #1671 codex-review P1
+/// 指摘・イシュー #1596 是正）。
+///
+/// # 背景（なぜ縮約順序を揃える必要があるか）
+///
+/// GPU 側は 1 CTA/threadgroup = 32 レーンが 1 行を担当し、各レーンが
+/// `idx = lane, lane+32, lane+64, …`（ストライド 32）の要素を**逐次**
+/// 蓄積したのち、offset `16→8→4→2→1` の 5 段 butterfly（xor shuffle）
+/// で 32 レーン分を木構造に縮約する。これは CPU の単純な「先頭から
+/// 末尾まで 1 個ずつ逐次加算」とは**加算順序が異なる**。加算は
+/// 結合則を厳密には満たさないため、相殺を含む入力（例
+/// `x=[1e30, 1, -1e30, 0]`）では両者の結果が乖離しうる（実測:
+/// 逐次和は 0／butterfly 縮約は 1 になり、`mean` が 0 と 0.25 という
+/// REQ-2 統一複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉
+/// を超える差になる）。
+///
+/// **本関数は CPU 側を GPU の縮約順序へ合わせる**（逆ではない。
+/// butterfly 縮約は数学的に正しい値〈上記例では 1〉を返す一方、
+/// 単純な逐次和は `1e30` に埋もれて `+1` を取りこぼす／`0` へ丸め
+/// 落ちる側であり、GPU 側を「正しさが劣る」逐次和へ合わせると
+/// GPU 側の縮約全体を直列化する必要が生じ〈1 レーンが `hidden` 回の
+/// soft-f64 演算を担う〉性能面で著しく不利になる。既存の GPU
+/// カーネル実装〈CUDA／Metal〉は変更せず、CPU 参照実装
+/// 〈`autodiff::eval::row_ln_stats` も同型で追従〉側をこの決定的な
+/// 縮約順序へ合わせることで両者を一致させる）。
+///
+/// `contribute(idx, lane_acc)` はレーンの部分和へ要素 `idx` の寄与を
+/// 足し込んだ新しい部分和を返す（平均パスは単純加算、分散パスは
+/// `(x-mean)^2` を `f64::mul_add` で融合加算——GPU 側 CUDA の
+/// `fma(d, d, sq_acc)` と同じ単一丸め）。レーン間の合流
+/// （butterfly 段）は GPU 側と同じ単純加算で行う（CUDA
+/// `sq_acc += __shfl_xor_sync(...)`／Metal `ln_f64_add` と同型）。
+fn warp_reduce_f64(hidden: usize, mut contribute: impl FnMut(usize, f64) -> f64) -> f64 {
+    const LANES: usize = 32;
+    let mut lanes = [0.0f64; LANES];
+    for (lane, slot) in lanes.iter_mut().enumerate() {
+        let mut idx = lane;
+        while idx < hidden {
+            *slot = contribute(idx, *slot);
+            idx += LANES;
+        }
+    }
+    // butterfly 縮約（offset 16→8→4→2→1）。各段は「更新前」の全レーン値
+    // を参照する必要がある（GPU の `simd_shuffle_xor`／`__shfl_xor_sync`
+    // が段内で全レーン同時にシャッフルするのと同じ意味論）ため、段ごとに
+    // スナップショットを取ってから書き戻す（in-place 更新は不可）。
+    let mut offset = 16usize;
+    while offset > 0 {
+        let snapshot = lanes;
+        for (lane, slot) in lanes.iter_mut().enumerate() {
+            *slot = snapshot[lane] + snapshot[lane ^ offset];
+        }
+        offset >>= 1;
+    }
+    lanes[0]
+}
+
 /// 1 行分の LayerNorm を計算する（スカラーのみ。冒頭コメント参照）。
 ///
-/// 平均は `f64` 逐次和、分散は「二パス」（`(x−μ)` を `f64` へ昇格して
-/// から二乗し `f64::mul_add` で蓄積）。**`mean`／`rstd` はいずれも
-/// `f64` のまま `x̂ = (x − mean) · rstd` の偏差計算まで保持し**、
-/// `x̂` を出力へ書き込む直前の 1 回だけ `f32` へ downcast する
-/// （codex-review 指摘: `mean` を偏差計算前に `f32` へ丸めると
+/// 平均・分散とも GPU の warp/simdgroup butterfly 縮約と同一順序
+/// （[`warp_reduce_f64`] 参照）で `f64` 蓄積する。**`mean`／`rstd` は
+/// いずれも `f64` のまま `x̂ = (x − mean) · rstd` の偏差計算まで
+/// 保持し**、`x̂` を出力へ書き込む直前の 1 回だけ `f32` へ downcast
+/// する（codex-review 指摘: `mean` を偏差計算前に `f32` へ丸めると
 /// `mean` の丸め誤差がそのまま `x̂` へ伝播し、`x` の値域が `f32` の
 /// 仮数精度限界〈例: 2^24 付近〉に達する入力で顕著な誤差を生む。
 /// `rmsnorm_row_scalar` の `rstd` 単体丸めとは異なり、LayerNorm は
@@ -193,16 +264,12 @@ fn layer_norm_row(
     out_row: &mut [f32],
 ) {
     let n = hidden as f64;
-    let mut sum = 0.0f64;
-    for &v in row {
-        sum += v as f64;
-    }
+    let sum = warp_reduce_f64(hidden, |idx, acc| acc + row[idx] as f64);
     let mean = sum / n;
-    let mut sq_acc = 0.0f64;
-    for &v in row {
-        let d = v as f64 - mean;
-        sq_acc = d.mul_add(d, sq_acc);
-    }
+    let sq_acc = warp_reduce_f64(hidden, |idx, acc| {
+        let d = row[idx] as f64 - mean;
+        d.mul_add(d, acc)
+    });
     let var = sq_acc / n;
     let rstd = 1.0f64 / (var + eps as f64).sqrt();
 
@@ -417,5 +484,31 @@ mod tests {
             out_serial.extend(run_layer_norm_f32(chunk, None, None, 1e-5, 1, hidden).unwrap());
         }
         assert_eq!(out_par, out_serial);
+    }
+
+    /// PR #1671 codex-review P1 指摘（イシュー #1596）の反例そのものを
+    /// 再現する回帰テスト: `x=[1e30, 1, -1e30, 0]`（相殺を含む行）で
+    /// GPU の warp/simdgroup butterfly 縮約は `mean=0.25`（数学的に
+    /// 正しい値）を返すが、単純な先頭からの逐次和は `mean=0`（`+1` を
+    /// 取りこぼす）を返す。`warp_reduce_f64` 導入前は本関数が後者
+    /// （`mean=0`）を返しており、`out[3] == 0.0` になっていた。
+    /// 是正後は GPU 側の縮約順序に一致し `out[3] ≈ -sqrt(2)/4` になる
+    /// （指摘コメント記載の実測値 `-0.353553` と一致）。
+    #[test]
+    fn run_layer_norm_f32_matches_gpu_butterfly_order_on_cancelling_row() {
+        let x = vec![1e30f32, 1.0, -1e30, 0.0];
+        let w = vec![1.0f32, 1.0, 1.0, 1e30];
+        let out = run_layer_norm_f32(&x, Some(&w), None, 1e-5, 1, 4).unwrap();
+
+        let expected_out3 = -std::f64::consts::SQRT_2 / 4.0;
+        assert!(
+            (out[3] as f64 - expected_out3).abs() < 1e-3,
+            "out[3]={} expected~={expected_out3} (逐次和のままなら 0.0 になる回帰)",
+            out[3]
+        );
+        assert_ne!(
+            out[3], 0.0,
+            "単純な逐次和（是正前の実装）へ後退している可能性がある"
+        );
     }
 }

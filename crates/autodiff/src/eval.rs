@@ -556,9 +556,16 @@ pub(crate) fn row_rms_stats(x_row: &[f32], eps: f32, inv_n: f64) -> f32 {
 
 /// LayerNorm（`(x − mean(x)) · rsqrt(var(x) + eps) · w + b`。分散は
 /// biased ÷N）の行内統計（`mean`・`rstd`）を `f64` で計算する
-/// （イシュー #1596）。[`row_rms_stats`] と同じ縮約精度契約
-/// （二乗前に `f64` へ昇格。ここでは `(x − mean)` の偏差を昇格してから
-/// 二乗する）だが、LayerNorm は「二乗和」ではなく「二パス分散」
+/// （イシュー #1596）。`Var::layer_norm` のホスト参照実装
+/// （`Unsupported` フォールバック）・`grad::vjp` の `Op::LayerNorm`
+/// 逆伝播（統計再計算）の双方から呼ばれる。
+///
+/// 平均・分散とも [`warp_reduce_f64`] により GPU（CUDA／Metal）の
+/// warp／simdgroup butterfly 縮約と同一の加算順序で蓄積する（単純な
+/// 先頭からの逐次和ではない。PR #1671 codex-review P1 是正:
+/// 相殺を含む入力で加算順序により結果が乖離するため。
+/// `backend-cpu::layer_norm::warp_reduce_f64` doc comment 参照）。
+/// [`row_rms_stats`] とは異なり二乗和ではなく「二パス分散」
 /// （`Σ(x−μ)²`。`E[x²]−μ²` は使わない。実装計画 §3-3）のため専用
 /// 関数とする。`hidden >= 1` を前提とする。
 ///
@@ -579,19 +586,46 @@ pub(crate) fn row_rms_stats(x_row: &[f32], eps: f32, inv_n: f64) -> f32 {
 /// 直前の 1 回だけ `f32` へ downcast する。
 pub(crate) fn row_ln_stats(x_row: &[f32], eps: f32, hidden: usize) -> (f64, f64) {
     let n = hidden as f64;
-    let mut sum = 0.0f64;
-    for &v in x_row {
-        sum += v as f64;
-    }
+    let sum = warp_reduce_f64(hidden, |idx, acc| acc + x_row[idx] as f64);
     let mean = sum / n;
-    let mut sq_acc = 0.0f64;
-    for &v in x_row {
-        let d = v as f64 - mean;
-        sq_acc = d.mul_add(d, sq_acc);
-    }
+    let sq_acc = warp_reduce_f64(hidden, |idx, acc| {
+        let d = x_row[idx] as f64 - mean;
+        d.mul_add(d, acc)
+    });
     let var = sq_acc / n;
     let rstd = 1.0f64 / (var + eps as f64).sqrt();
     (mean, rstd)
+}
+
+/// GPU（CUDA `kernels_layer_norm.rs`::`__shfl_xor_sync`／Metal
+/// `layer_norm.metal`::`simd_shuffle_xor`）の warp／simdgroup 縮約と
+/// **同一の演算順序**を再現する（`backend-cpu::layer_norm::
+/// warp_reduce_f64` のホスト参照実装ミラー。PR #1671 codex-review P1
+/// 指摘・イシュー #1596 是正）。詳細な背景（なぜ単純な逐次和ではなく
+/// この順序へ揃えるか）は `backend-cpu::layer_norm` モジュール doc
+/// comment・同名関数の doc comment を正本とし、ここでは二重管理しない。
+///
+/// [`row_ln_stats`] のみが使用する（[`row_rms_stats`] は二乗和のみで
+/// 相殺が生じないため対象外。`docs/norm-ops-design.md`）。
+fn warp_reduce_f64(hidden: usize, mut contribute: impl FnMut(usize, f64) -> f64) -> f64 {
+    const LANES: usize = 32;
+    let mut lanes = [0.0f64; LANES];
+    for (lane, slot) in lanes.iter_mut().enumerate() {
+        let mut idx = lane;
+        while idx < hidden {
+            *slot = contribute(idx, *slot);
+            idx += LANES;
+        }
+    }
+    let mut offset = 16usize;
+    while offset > 0 {
+        let snapshot = lanes;
+        for (lane, slot) in lanes.iter_mut().enumerate() {
+            *slot = snapshot[lane] + snapshot[lane ^ offset];
+        }
+        offset >>= 1;
+    }
+    lanes[0]
 }
 
 /// RMSNorm のホスト参照実装（`BackendOps::rmsnorm` が
@@ -978,6 +1012,27 @@ mod norm_rows_tests {
         for (o, e) in out.iter().zip(expected.iter()) {
             assert!((o - e).abs() < 1e-5, "o={o} e={e}");
         }
+    }
+
+    /// PR #1671 codex-review P1 指摘（イシュー #1596）の反例を
+    /// ホスト参照実装側で再現する回帰テスト。詳細は
+    /// `backend-cpu::layer_norm::tests::
+    /// run_layer_norm_f32_matches_gpu_butterfly_order_on_cancelling_row`
+    /// の doc comment を参照（両実装は同じ `warp_reduce_f64` 順序を
+    /// 使うため同じ期待値になる）。
+    #[test]
+    fn layer_norm_rows_matches_gpu_butterfly_order_on_cancelling_row() {
+        let x = Tensor::new(vec![1e30f32, 1.0, -1e30, 0.0], &[1, 4]).unwrap();
+        let w = [1.0f32, 1.0, 1.0, 1e30];
+        let out = dense_vec(&layer_norm_rows(&x, Some(&w), None, 1e-5, 1, 4));
+
+        let expected_out3 = -std::f64::consts::SQRT_2 / 4.0;
+        assert!(
+            (out[3] as f64 - expected_out3).abs() < 1e-3,
+            "out[3]={} expected~={expected_out3}",
+            out[3]
+        );
+        assert_ne!(out[3], 0.0, "単純な逐次和への後退の可能性がある");
     }
 
     #[test]

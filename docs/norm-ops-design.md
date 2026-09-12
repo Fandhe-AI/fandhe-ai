@@ -104,6 +104,22 @@ forward 記録値 `out_value` だけでは（`weight` に 0 要素があると�
 として記録する（§9「対象外事項」参照）。`rayon` 行方向並列は既存 RMSNorm と
 同じ `PARALLEL_THRESHOLD` 閾値を再利用する。
 
+**縮約順序の是正（PR #1671 codex-review P1 指摘）**: 当初実装は上記の
+「先頭から末尾まで 1 個ずつ逐次加算」だったが、これは CUDA／Metal の
+warp／simdgroup butterfly 縮約（後述）とは加算順序が異なる。相殺を
+含む入力（例 `x=[1e30, 1, -1e30, 0]`）ではこの順序差により結果が
+乖離しうる（逐次和は `mean=0`、butterfly 縮約は数学的に正しい
+`mean=0.25` を返し、最終出力が REQ-2 統一複合判定を超えて食い違う）。
+そこで CPU 参照実装（`backend-cpu::layer_norm::warp_reduce_f64`）・
+autodiff ホスト参照実装（`autodiff::eval::row_ln_stats` の
+`warp_reduce_f64` ミラー。`grad::vjp` の逆伝播統計再計算も同関数を
+再利用するため自動的に追従する）を、GPU 側の縮約順序（32 レーンの
+ストライドアクセス + offset 16→8→4→2→1 の butterfly）へ合わせる形で
+是正した（逆〈GPU をホストの逐次和へ合わせる〉は GPU 側の縮約を
+直列化する必要があり性能面で著しく不利なため採用しない）。CUDA／Metal
+カーネル自体はこの是正で変更していない（後述の各節がすでに butterfly
+縮約を実装済みだったため）。
+
 ### CUDA（`crates/backend-cuda/src/kernels_layer_norm.rs`・`layer_norm.rs`）
 
 既存 `kernels_rmsnorm.rs` の persistent block・SMEM 常駐・`float4`
