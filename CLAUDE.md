@@ -105,6 +105,7 @@ fandhe-ai/
     ├── guardrail-change-policy.md    # TASK-6.2 判定器変更時フローの明文化（#149）
     ├── guardrail-self-repair-cli.md  # guardrail／self-repair CLI コマンド仕様（#183）
     ├── inference-forward-fixed-cost-design.md # 推論 forward の固定費削減（tape 不要経路・活性化デバイス常駐チェーン）の設計・bit-exactness 契約・実測記録（#1028）
+    ├── inference-chain-single-sync-design.md # GPU 推論チェーン単一同期化（`linear_forward_device` の facade 結線）の設計（`DeviceParamStore` への `predict_device_chain` 新設・Metal `*_tracked` failure_token 契約・CUDA ストリーム順序契約整合・bit 同一契約。設計のみ・実装は #1580〈Metal〉／#1581〈CUDA〉へ引き継ぎ。#1579）
     ├── kernel-fusion.md     # TASK-12.2b カーネル融合の適用範囲・限界（複合WLで融合を性能目標の前提にしない。#168）
     ├── license-matrix.md    # 許容依存 8 区分のライセンス可否表（TASK-1.3）
     ├── matmul-vjp-zero-copy-decision.md # matmul VJP の転置ゼロコピー化（`eval::matmul` の stride 対応）・CPU BLIS／CUDA／Metal gemm 結線を別イシューへ引き継ぐスコープ判断・実測記入欄（#1043 ツリー・#1046）
