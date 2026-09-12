@@ -21,14 +21,14 @@
 
 use crate::error::AutodiffError;
 use crate::eval;
-use crate::nn::activation::{Relu, Sigmoid, Tanh};
+use crate::nn::activation::{LogSoftmax, Relu, Sigmoid, Softmax, Tanh};
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, ShapeError, Tensor, broadcast_shape, matmul_out_shape,
-    require_same_shape, row_norm_layout,
+    reduce_out_shape, require_same_shape, row_norm_layout,
 };
 
 /// `nn` の部品（層・活性化関数）に共通の forward シグネチャ。
@@ -52,8 +52,9 @@ pub trait Module {
     /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
     /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
     /// ない）とする。既定は [`BackendError::Unsupported`] を返す
-    /// fail-safe（本クレート内 6 実装〈`Linear`・`Relu`・`Sigmoid`・
-    /// `Tanh`・`RmsNorm`・`LayerNorm`〉はいずれもこのデフォルトを
+    /// fail-safe（本クレート内 8 実装〈`Linear`・`Relu`・`Sigmoid`・
+    /// `Tanh`・`RmsNorm`・`LayerNorm`・`Softmax`・`LogSoftmax`〉はいずれも
+    /// このデフォルトを
     /// オーバーライドする。呼び出し元
     /// が独自の `Module` 実装をこの経路で使う場合、`Unsupported` を
     /// フォールバックの合図として扱うこと）。
@@ -327,6 +328,82 @@ impl Module for LayerNorm {
     }
 }
 
+/// `Softmax::forward` への委譲（イシュー #1594）。`Relu`/`Sigmoid`/
+/// `Tanh` と異なり `forward` 自体が `dim` の軸範囲検査により失敗しうる
+/// ため（fallible）、`?` で伝播するだけの `Relu` と違い戻り値をそのまま
+/// 返す。
+impl Module for Softmax {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Softmax::forward(self, input)
+    }
+
+    /// `Var::softmax()`（`var.rs`）と同じディスパッチ規律を `tape` 不要
+    /// 経路（`ops` を直接受け取る）で再現する: `dim` を [`reduce_out_shape`]
+    /// で事前検査してから `ops.softmax` を試み、`Unsupported` のときのみ
+    /// `eval::softmax_along` へフォールバックする（`Var::softmax` と
+    /// 同じ判定迂回を作らない規律。`.claude/rules/security.md` A08）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let dim = self.dim();
+        reduce_out_shape(input.shape(), Some(dim))?;
+        let value = match ops.softmax(input, dim) {
+            Ok(v) => v,
+            Err(BackendError::Unsupported(_)) => eval::softmax_along(input, dim),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        // `Var::softmax`（`var.rs`）と同じバックエンド契約検証
+        // （`BackendOps::softmax` doc「戻り値 shape は入力と恒等」）を
+        // tape 不要経路でも行う。ここを省略すると `forward_host`
+        // 経由の推論のみ不整合 shape を素通りさせてしまい、`Var::
+        // softmax` と `forward_host` とで判定基準が食い違う
+        // （`.claude/rules/security.md` A08 の判定迂回経路になる）。
+        if value.shape() != input.shape() {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: input.shape().to_vec(),
+                },
+            )));
+        }
+        Ok(value)
+    }
+}
+
+/// `LogSoftmax::forward` への委譲（イシュー #1594）。`Softmax` と同じ
+/// fallible 契約・`forward_host` ディスパッチ規律。
+impl Module for LogSoftmax {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        LogSoftmax::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let dim = self.dim();
+        reduce_out_shape(input.shape(), Some(dim))?;
+        let value = match ops.log_softmax(input, dim) {
+            Ok(v) => v,
+            Err(BackendError::Unsupported(_)) => eval::log_softmax_along(input, dim),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        // `Softmax::forward_host`（直上）と同じバックエンド契約検証。
+        if value.shape() != input.shape() {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: input.shape().to_vec(),
+                },
+            )));
+        }
+        Ok(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! `Module::forward` が既存の直接呼び出し（`Linear::bind().forward()`・
@@ -392,5 +469,163 @@ mod tests {
             dense_vec(&via_module.to_tensor()),
             dense_vec(&via_direct.to_tensor())
         );
+    }
+
+    #[test]
+    fn softmax_module_forward_matches_direct_forward() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap());
+        let softmax = Softmax::new(1);
+
+        let via_module = <Softmax as Module>::forward(&softmax, &tape, &x).unwrap();
+        let via_direct = softmax.forward(&x).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_direct.to_tensor())
+        );
+    }
+
+    #[test]
+    fn log_softmax_module_forward_matches_direct_forward() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap());
+        let log_softmax = LogSoftmax::new(1);
+
+        let via_module = <LogSoftmax as Module>::forward(&log_softmax, &tape, &x).unwrap();
+        let via_direct = log_softmax.forward(&x).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_direct.to_tensor())
+        );
+    }
+
+    /// `Module::forward_host`（tape 不要経路）と `Module::forward`
+    /// （tape 経路）が同一値を返すことを確認する（`Linear` 等の既存
+    /// 契約と同じ bit-exactness 期待。イシュー #1594）。
+    #[test]
+    fn softmax_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap();
+        let softmax = Softmax::new(1);
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Softmax as Module>::forward(&softmax, &tape, &xv).unwrap();
+
+        let via_host = softmax.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn log_softmax_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap();
+        let log_softmax = LogSoftmax::new(1);
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <LogSoftmax as Module>::forward(&log_softmax, &tape, &xv).unwrap();
+
+        let via_host = log_softmax.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn softmax_forward_host_rejects_axis_out_of_range() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-1.0, 2.0], &[2]).unwrap();
+        let softmax = Softmax::new(5);
+
+        let result = softmax.forward_host(test_ops().as_ref(), &x);
+
+        assert!(matches!(
+            result,
+            Err(AutodiffError::Shape(
+                fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { axis: 5, rank: 1 }
+            ))
+        ));
+    }
+
+    /// Cursor Bugbot 指摘（PR #1664）の回帰検証用モック: `softmax`／
+    /// `log_softmax` が入力と異なる shape を返す不正なバックエンドを
+    /// 模す（他のメソッドは非到達のため `unreachable!` でよい）。
+    /// `Var::softmax`（`var.rs`）はこの契約違反を `ShapeMismatch` で
+    /// 拒否するが、`Module::forward_host`（tape 不要推論経路）が同じ
+    /// 検証を省略していると不整合 shape を素通りさせてしまう
+    /// （`.claude/rules/security.md` A08 の判定迂回経路になる）。
+    struct WrongShapeOps;
+
+    impl BackendOps for WrongShapeOps {
+        fn device(&self) -> fandhe_ai_tensor_core::Device {
+            fandhe_ai_tensor_core::Device::Cpu
+        }
+        fn gemm(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは gemm は呼ばれない")
+        }
+        fn add(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは add は呼ばれない")
+        }
+        fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは mul は呼ばれない")
+        }
+        fn relu(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは relu は呼ばれない")
+        }
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは exp は呼ばれない")
+        }
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは tanh は呼ばれない")
+        }
+        fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは sum は呼ばれない")
+        }
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは max は呼ばれない")
+        }
+        fn softmax(&self, x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
+            // 入力 shape をそのまま返さず要素数を減らした shape で返す
+            // ことで、契約違反（`BackendOps::softmax` doc「戻り値 shape
+            // は入力と恒等」）を意図的に起こす。
+            let numel: usize = x.shape().iter().product();
+            Ok(Tensor::new(vec![0.0f32; numel], &[numel]).unwrap())
+        }
+        fn log_softmax(&self, x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
+            let numel: usize = x.shape().iter().product();
+            Ok(Tensor::new(vec![0.0f32; numel], &[numel]).unwrap())
+        }
+    }
+
+    #[test]
+    fn softmax_forward_host_rejects_wrong_shape_from_backend() {
+        let x = Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap();
+        let softmax = Softmax::new(1);
+
+        let result = softmax.forward_host(&WrongShapeOps, &x);
+
+        assert!(matches!(
+            result,
+            Err(AutodiffError::Backend(BackendError::ShapeMismatch(_)))
+        ));
+    }
+
+    #[test]
+    fn log_softmax_forward_host_rejects_wrong_shape_from_backend() {
+        let x = Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap();
+        let log_softmax = LogSoftmax::new(1);
+
+        let result = log_softmax.forward_host(&WrongShapeOps, &x);
+
+        assert!(matches!(
+            result,
+            Err(AutodiffError::Backend(BackendError::ShapeMismatch(_)))
+        ));
     }
 }

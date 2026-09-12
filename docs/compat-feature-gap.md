@@ -401,6 +401,27 @@ struct variant 化不要）、Conv や Attention のような新規演算カテ�
    呼ばれる」ことを保証する source-evidence テストを追加
 5. `docs/` の関連設計ドキュメントを更新
 
+## 追補（2026-09-12・イシュー #1594）
+
+§2.4 の「`softmax`/`log_softmax`」行（上記表）は取り込み元スナップショット
+（調査日 2026-09-12 時点）のギャップ記述のため変更していないが、同イシューで
+このギャップは解消済みである: `tensor-core::BackendOps::softmax`／
+`log_softmax`（デフォルト `Unsupported`）を新設し、`autodiff::tape::Op::
+Softmax`／`LogSoftmax`＋VJP・`autodiff::var::Var::softmax`／`log_softmax`・
+`nn::activation::Softmax`／`LogSoftmax`（`Module` 実装）を追加した（上記
+「再利用可能なテンプレート」と同型のテンプレートで実装）。3 バックエンドの
+既存行カーネル（CPU/CUDA/Metal の `softmax.rs`。§2.4 が「既存」と記す
+カーネル）へ接続済み。**GPU（CUDA／Metal）の `log_softmax` は行カーネルを
+新設せず、`BackendOps::log_softmax` の既定 `Unsupported` のままホスト参照
+実装（`eval::log_softmax_along`）へフォールバックする**（CPU のみ融合
+カーネル `backend-cpu::softmax::run_log_softmax_f32` で本番オーバーライド
+する）。非最終軸 softmax／log_softmax も同様にホストフォールバック。
+`cross_entropy_loss` 内部の log-softmax（`eval::softmax_along`。1 個の融合
+オペとして解析形で forward/backward を閉じる既存実装）は本イシューで
+変更しない（別実装のまま独立に存在する）。GPU `log_softmax` カーネル・
+非最終軸 GPU 対応は out-of-scope として記録し、起票はユーザー承認後に限る
+（`.claude/rules/out-of-scope-tracking.md`）。
+
 ### 追補（イシュー #1596）
 
 §2.7 の表（`nn.LayerNorm`／RMSNorm の行）は本ドキュメント作成時点（対象 HEAD

@@ -276,3 +276,87 @@ fn softmax_matches_backend_cpu_directly() {
         &cpu_out,
     );
 }
+
+// --- BackendOps::softmax 独立エントリ（イシュー #1594。`run_fused` の
+//     softmax 一致経路〈上記〉とは別の独立 API）---
+
+/// `MetalBackendOps::softmax` が `MetalSoftmax::run_softmax_f32` と
+/// bit 同一であること（同一カーネルへのディスパッチであり別実装では
+/// ないことの確認）。実機必須（`#[ignore]`）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn backend_ops_softmax_is_bit_identical_to_metal_softmax() {
+    use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let softmax = MetalSoftmax::new(&ctx).expect("softmax パイプラインの構築に失敗した");
+
+    let rows = 3usize;
+    let hidden = 17usize;
+    let x_data = Xorshift64Star::new(6001).fill_vec(rows * hidden);
+    let x = Tensor::new(x_data.clone(), &[rows, hidden]).expect("valid tensor");
+
+    let metal = fandhe_ai_backend_metal::MetalBackendOps::new();
+    let via_ops = metal
+        .softmax(&x, 1)
+        .expect("BackendOps::softmax must succeed on Metal-equipped test runner");
+    let via_kernel = softmax
+        .run_softmax_f32(&ctx, &x_data, rows, hidden)
+        .expect("MetalSoftmax::run_softmax_f32 must succeed");
+
+    assert_eq!(via_ops.shape(), &[rows, hidden]);
+    assert_eq!(
+        via_ops.as_slice().expect("contiguous"),
+        via_kernel.as_slice()
+    );
+}
+
+/// `MetalBackendOps::softmax` を CPU 参照実装と実機で直接
+/// `assert_parity` 突合する（形状網羅）。実機必須（`#[ignore]`）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn backend_ops_softmax_matches_cpu_reference_across_shapes() {
+    use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+    let metal = fandhe_ai_backend_metal::MetalBackendOps::new();
+
+    let rows_cases: &[usize] = &[1, 3, 17];
+    let hidden_cases: &[usize] = &[1, 31, 32, 33, 1024, 4097];
+    let mut seed = 7000u64;
+    for &rows in rows_cases {
+        for &hidden in hidden_cases {
+            seed += 1;
+            let x_data = Xorshift64Star::new(seed).fill_vec(rows * hidden);
+            let x = Tensor::new(x_data.clone(), &[rows, hidden]).expect("valid tensor");
+
+            let gpu_out = metal
+                .softmax(&x, 1)
+                .expect("BackendOps::softmax must succeed on Metal-equipped test runner");
+            let expected = cpu_softmax_reference(&x_data, rows, hidden);
+
+            assert_eq!(gpu_out.shape(), &[rows, hidden]);
+            assert_parity(
+                &format!("BackendOps::softmax vs cpu reference rows={rows} hidden={hidden}"),
+                gpu_out.as_slice().expect("contiguous"),
+                &expected,
+            );
+        }
+    }
+}
+
+/// 非最終軸は `Unsupported`（軸検査は Metal デバイスに触れる前に
+/// `row_softmax_layout` が行うため、非 macOS 実機環境の検証としても
+/// 有用だが、本ファイル自体が `cfg(target_os = "macos")` 限定のため
+/// 実機必須の他テストと同様 `#[ignore]` は付けない——デバイス初期化を
+/// 経ないため CI（macOS ランナー不在）以外の一般的な検証には寄与
+/// しないが、実機セッションでの通常実行に含める）。
+#[test]
+fn backend_ops_softmax_non_final_axis_is_unsupported() {
+    use fandhe_ai_tensor_core::device::BackendError;
+    use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+    let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("valid tensor");
+    let metal = fandhe_ai_backend_metal::MetalBackendOps::new();
+    let result = metal.softmax(&x, 0);
+    assert!(matches!(result, Err(BackendError::Unsupported(_))));
+}

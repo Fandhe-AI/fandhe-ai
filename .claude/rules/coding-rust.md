@@ -15,6 +15,7 @@
   - **正規化統計の二乗和**（rmsnorm の `rstd` 導出）は要素を**先に `f64` へ昇格してから二乗**する（`f32` のまま二乗すると有限入力〈例 `2e20f`〉でも overflow しうるため。CUDA は `fma((double)v, (double)v, acc)`）
   - **勾配の長軸縮約の要素積**（dw の行方向蓄積等）は overflow リスクが実用上小さいため、要素積を **`f32` で確定してから** `f64` へ昇格して蓄積する（CUDA は `float term = dyv * r * xv; acc = (double)term + acc;`）
   最終書き出しはいずれも 1 回だけ `f32` へ downcast する。Metal（MSL）は `double` 型非対応のため、Neumaier 改良版 Kahan 補償和 + **scale/ssq 方式**（LAPACK SLASSQ 系の overflow-safe な二乗和アルゴリズム。単純な Kahan 補償和のみでは要素の二乗を `f32` のまま先に計算するため、有限入力でも overflow して `NaN` を生む。scale/ssq 方式は最大絶対値を `scale` として括り出し残りを比の二乗で蓄積するため二乗を直接計算せず overflow を避ける。`NaN`／`inf` 入力の伝播も明示的に扱う）を正規化統計の「`f64` 相当」実装形として適用する。CUDA・CPU（NEON は倍精度 SIMD `float64x2_t`）は `double`／`f64` アキュムレータを直接使う。この契約は matmul 系の FMA 契約とは独立の軸であり、既存の丸め方針を変更するものではない（ユーザー承認 2026-09-01。実測記録は `docs/perf/cuda-parity-baseline.md` §9.8〜§9.10）
+  **勾配の長軸縮約（dw の行方向蓄積・bias 勾配の行方向縮約等）の Metal 実装形**は、正規化統計とは別に規定する。MSL は `double` 非対応のため、IEEE 754 binary64 逐次加算の 64bit 整数ソフトウェアエミュレーションとして実装し、ホスト `f64` 逐次和（index 順）を 1 回 `f32` へ downcast した値と**bit 完全一致**する（NaN のみ quiet NaN へ正規化しクラス一致で比較。tolerance・baseline・REQ-2 判定は不変）。f32 のみの補償和による近似契約（Tier A/B 等の事前判定可能な誤差上界方式）は、bit 一致するカーネル実装の採用により不要となる見込みである。**実装は PR #1659（イシュー #1566）で導入（未マージ時点では本契約のみが確定済みで、実装は未導入）**。契約・経緯の正本は `docs/metal-grad-reduction-parity-judgment-decision.md`（実装記録節は PR #1659 マージ後に追記）。
 
 ## コード品質
 

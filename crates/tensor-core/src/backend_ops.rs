@@ -696,6 +696,58 @@ pub trait BackendOps {
         ))
     }
 
+    /// 行方向 softmax（`exp(x - max(x)) / sum(exp(x - max(x)))`）の
+    /// 独立エントリ（イシュー #1594）。既存の [`Self::run_fused`] 経由
+    /// （`match_softmax_plan` の canonical プラン一致限定）とは別に、
+    /// `fandhe_ai_autodiff::var::Var::softmax` が直接呼べる入口を提供する。
+    ///
+    /// **契約**: `dim` が `x` の最終軸のときのみ計算を試みてよい
+    /// （[`crate::ops_shape::row_softmax_layout`] が非最終軸を `Ok(None)`
+    /// として区別する契約に対応。行カーネルは最終軸専用のため、
+    /// 非最終軸は本メソッドをオーバーライドしない実装でも
+    /// [`BackendError::Unsupported`] を返す既定のままでよい）。戻り値の
+    /// shape は入力 `x` と恒等（softmax は shape 不変）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、`Var::
+    /// softmax` は `Unsupported` のときのみホスト参照実装
+    /// （`eval::softmax_along`）へフォールバックする（それ以外のエラーは
+    /// 伝播する。判定迂回経路を作らない。`.claude/rules/security.md`
+    /// A08）。CPU／CUDA／Metal はいずれもこのデフォルトを既存の融合
+    /// softmax カーネル（`run_fused` の softmax 一致経路が使うものと同一
+    /// のカーネル実体）でオーバーライドする。
+    fn softmax(&self, _x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "softmax: default fail-safe (no fused softmax kernel available)".into(),
+        ))
+    }
+
+    /// 行方向 log_softmax（`x − m − ln(Σ exp(x − m))`。`m` は行 max）の
+    /// 独立エントリ（イシュー #1594）。[`Self::softmax`] と同じ最終軸
+    /// 限定契約・非破壊拡張・フォールバック規律に従う
+    /// （`Var::log_softmax` は `Unsupported` のときのみ `eval::
+    /// log_softmax_along` へフォールバックする）。
+    ///
+    /// **`ln(softmax(x))` にしない理由**: softmax の出力がアンダー
+    /// フローで `0.0` になった要素で `ln(0.0) = -inf` を経由し数値精度を
+    /// 落とすため、`x − m − ln(Σexp(x−m))` の解析形で計算する（PyTorch
+    /// `F.log_softmax` と同じ安定化方針）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::softmax`] と同じ非破壊拡張・fail-safe。本イシュー時点で
+    /// GPU 側（CUDA／Metal）に log_softmax 専用カーネルは存在しないため
+    /// 両バックエンドともこの既定のまま（ホストフォールバックに委ねる）
+    /// で、CPU のみ融合カーネル（`backend-cpu::softmax::
+    /// run_log_softmax_f32`）でオーバーライドする。
+    fn log_softmax(&self, _x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "log_softmax: default fail-safe (no fused log_softmax kernel available)".into(),
+        ))
+    }
+
     /// GEMM の epilogue（bias 加算・activation）を融合した
     /// `act(A @ B + bias)` を計算する（TASK-12.1f・#203）。
     ///
@@ -1482,6 +1534,31 @@ mod tests {
 
         assert!(matches!(forward, Err(BackendError::Unsupported(_))));
         assert!(matches!(backward, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::softmax`] の既定実装が fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する
+    /// （イシュー #1594。`mse_loss_default_is_unsupported` と同型）。
+    #[test]
+    fn softmax_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+
+        let result = ops.softmax(&x, 0);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::log_softmax`] の既定実装が fail-safe を返すことを
+    /// 確認する（イシュー #1594）。
+    #[test]
+    fn log_softmax_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+
+        let result = ops.log_softmax(&x, 0);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
 
     /// [`BackendOps::captured_segment_key`]／[`BackendOps::

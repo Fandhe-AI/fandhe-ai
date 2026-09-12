@@ -205,7 +205,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | Tier 1 機能 | 実装 issue |
 |---|---|
 | 要素演算（sub／div／pow／sqrt／log／三角関数／比較） | #1592・#1593 |
-| softmax／log_softmax | #1594 |
+| softmax／log_softmax | #1594（実装済み。`Var::softmax`／`log_softmax`・`nn::activation::Softmax`／`LogSoftmax`。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` は facade へ追加しない〉） |
 | GELU／SiLU 等の活性化 | #1595 |
 | LayerNorm／RMSNorm／BatchNorm | #1596（実装済み。`fandhe_ai_autodiff::Var::rms_norm`／`layer_norm`・`nn::RmsNorm`／`LayerNorm`。facade 到達経路は既存 `Var` 再エクスポート経由——新規 `pub use`／`pub fn` は facade へ追加しない。`docs/norm-ops-design.md`）・#1608（BatchNorm） |
 | 形状操作（permute／squeeze／expand／cat／stack／split） | #1597・#1598 |

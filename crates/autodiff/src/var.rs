@@ -661,6 +661,89 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// 行方向 softmax（`exp(x − max(x)) / Σexp(x − max(x))`。イシュー
+    /// #1594）。`dim` は [`reduce_out_shape`] で範囲検査する（既存の
+    /// `sum`/`max` と同じ軸検査ヘルパーを再利用。softmax は shape 不変
+    /// のため戻り値 shape 自体には使わないが、`AxisOutOfRange` の検査
+    /// 目的のみで呼ぶ）。
+    ///
+    /// `self.tape.ops().softmax`（`BackendOps::softmax`。CPU／CUDA／
+    /// Metal の行カーネル。最終軸専用）を試み、`Err(BackendError::
+    /// Unsupported(_))` のときのみホスト参照実装 `eval::softmax_along`
+    /// （最終軸に限らず任意軸へ対応）へフォールバックする（それ以外の
+    /// エラーは伝播する。判定迂回経路を作らない。`.claude/rules/
+    /// security.md` A08。`mse_loss_with` と同じ規律）。
+    pub fn softmax(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        reduce_out_shape(&shape, Some(dim))?;
+        let x_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().softmax(&x_val, dim) {
+            Ok(v) => {
+                // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                // softmax` doc「戻り値 shape は入力と恒等」）を検証する
+                // （実装バグの黙認防止。`.claude/rules/security.md` A08）。
+                if v.shape() != x_val.shape() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: x_val.shape().to_vec(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::softmax_along(&x_val, dim),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::Softmax {
+                input: self.id,
+                dim,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 行方向 log_softmax（`x − m − ln(Σexp(x − m))`。イシュー #1594）。
+    /// [`Self::softmax`] と同じ `dim` 検査・フォールバック規律
+    /// （`BackendOps::log_softmax` → `Unsupported` のときのみ `eval::
+    /// log_softmax_along` へフォールバック）。
+    pub fn log_softmax(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        reduce_out_shape(&shape, Some(dim))?;
+        let x_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().log_softmax(&x_val, dim) {
+            Ok(v) => {
+                if v.shape() != x_val.shape() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: x_val.shape().to_vec(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::log_softmax_along(&x_val, dim),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::LogSoftmax {
+                input: self.id,
+                dim,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// CrossEntropy 損失（log-sum-exp 安定化・クラス次元指定。#191・
     /// 親イシュー #189）。`self` = logits（追跡対象）、`targets` = 正解
     /// クラス添字（非追跡・`Tensor<i32>`。勾配は定義されないため

@@ -164,6 +164,48 @@ pub fn row_norm_layout(shape: &[usize]) -> Result<(usize, usize), ShapeError> {
     Ok((rows, hidden))
 }
 
+/// softmax／log_softmax（イシュー #1594。`BackendOps::softmax`／
+/// `log_softmax` の共通入口）が起動前に `(rows, cols)` を導出するための
+/// shape 検査。CPU／CUDA／Metal の各 `BackendOps` 実装が本関数の結果を
+/// 再導出せず共有する単一情報源とする（3 バックエンドで同じ軸判定
+/// ロジックを重複実装しない）。
+///
+/// - `dim` が `shape` の rank 範囲外の場合 `ShapeError::AxisOutOfRange`
+///   を返す（[`reduce_out_shape`] と同じ判定。rank 0 は常に範囲外）。
+/// - `dim` が最終軸でない場合（中間軸 softmax）は `Ok(None)` を返す。
+///   既存の行カーネル（`backend-cpu::softmax`・`backend-cuda::softmax`・
+///   `backend-metal::softmax`）はいずれも最終軸専用であり、呼び出し元
+///   （`fandhe_ai_autodiff::var::Var::softmax`／`log_softmax`）はこの
+///   `None` を「バックエンドが未対応の軸」の合図としてホスト参照実装
+///   （`eval::softmax_along`／`log_softmax_along`）へフォールバックする。
+/// - `dim` が最終軸の場合、行優先連続データとして `cols = shape[dim]`・
+///   `rows = numel / cols` を返す。`cols == 0` は `numel` も必然的に
+///   `0` になるため `checked_div` で `None` を吸収し `rows = 0` とする
+///   （ゼロ除算回避。行カーネル側の `rows == 0 || cols == 0` 早期
+///   return 契約〈`run_softmax_f32` 等〉と整合する）。
+pub fn row_softmax_layout(
+    shape: &[usize],
+    dim: usize,
+) -> Result<Option<(usize, usize)>, ShapeError> {
+    let rank = shape.len();
+    if dim >= rank {
+        return Err(ShapeError::AxisOutOfRange { axis: dim, rank });
+    }
+    if dim != rank - 1 {
+        return Ok(None);
+    }
+    let cols = shape[dim];
+    // `shape.iter().product()` の素朴な乗算は overflow しても panic
+    // せず（release ビルドではラップして誤った `numel` を返す）、本番
+    // 経路 panic 禁止規約（`.claude/rules/coding-rust.md`）に反する。
+    // `checked_numel`（`crate::tensor`。`Tensor::new` 等が使う単一
+    // 情報源と同じ検査）で `usize` 範囲の乗算オーバーフローを検出し
+    // `ShapeError::ElementCountOverflow` を返す。
+    let numel = checked_numel(shape)?;
+    let rows = numel.checked_div(cols).unwrap_or(0);
+    Ok(Some((rows, cols)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +469,79 @@ mod tests {
     #[test]
     fn row_norm_layout_element_count_overflow_is_typed_error() {
         let err = row_norm_layout(&[usize::MAX, 2, 2]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    // --- row_softmax_layout ---
+
+    #[test]
+    fn row_softmax_layout_rank1_last_axis() {
+        let out = row_softmax_layout(&[8], 0).unwrap();
+        assert_eq!(out, Some((1, 8)));
+    }
+
+    #[test]
+    fn row_softmax_layout_2d_last_axis() {
+        let out = row_softmax_layout(&[2, 8], 1).unwrap();
+        assert_eq!(out, Some((2, 8)));
+    }
+
+    #[test]
+    fn row_softmax_layout_non_final_axis_returns_none() {
+        // 中間軸（非最終軸）softmax は行カーネル未対応のためホスト
+        // フォールバックの合図として `None` を返す。
+        let out = row_softmax_layout(&[2, 8], 0).unwrap();
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn row_softmax_layout_3d_non_final_axis_returns_none() {
+        let out = row_softmax_layout(&[2, 3, 4], 1).unwrap();
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn row_softmax_layout_dim_out_of_range() {
+        let err = row_softmax_layout(&[2, 8], 2).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::AxisOutOfRange { axis: 2, rank: 2 }
+        ));
+    }
+
+    #[test]
+    fn row_softmax_layout_rank0_always_out_of_range() {
+        let err = row_softmax_layout(&[], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::AxisOutOfRange { axis: 0, rank: 0 }
+        ));
+    }
+
+    #[test]
+    fn row_softmax_layout_zero_cols_yields_zero_rows() {
+        // `cols == 0` は `numel` も 0 になるため `checked_div` を `0` へ
+        // 吸収する（ゼロ除算回避。行カーネルの `rows == 0 || cols == 0`
+        // 早期 return 契約と整合）。
+        let out = row_softmax_layout(&[3, 0], 1).unwrap();
+        assert_eq!(out, Some((0, 0)));
+    }
+
+    #[test]
+    fn row_softmax_layout_zero_numel_nonzero_cols() {
+        let out = row_softmax_layout(&[0, 4], 1).unwrap();
+        assert_eq!(out, Some((0, 4)));
+    }
+
+    // codex-review 指摘（PR #1664）の回帰検証: `shape.iter().product()`
+    // の素朴な乗算は overflow を検出せず（release ビルドではラップして
+    // 誤った `numel` を返す）、本番経路 panic 禁止規約
+    // （`.claude/rules/coding-rust.md`）に反していた。`checked_numel`
+    // による検査で `ShapeError::ElementCountOverflow` を返すことを
+    // 確認する。
+    #[test]
+    fn row_softmax_layout_element_count_overflow_is_typed_error() {
+        let err = row_softmax_layout(&[usize::MAX, 2], 1).unwrap_err();
         assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 }
