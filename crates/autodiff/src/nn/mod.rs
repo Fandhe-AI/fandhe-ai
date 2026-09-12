@@ -36,6 +36,7 @@ mod init;
 mod linear;
 mod module;
 mod norm;
+mod rnn;
 
 pub mod activation;
 pub mod loss;
@@ -45,4 +46,8 @@ pub use linear::{Linear, LinearVars};
 pub use module::Module;
 pub use norm::{
     LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, RMS_NORM_DEFAULT_EPS, RmsNorm, RmsNormVars,
+};
+pub use rnn::{
+    Gru, GruCell, GruCellVars, Lstm, LstmCell, LstmCellVars, LstmSeqOutput, Rnn, RnnCell,
+    RnnCellVars, RnnSeqOutput,
 };

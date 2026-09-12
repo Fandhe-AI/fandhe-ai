@@ -447,6 +447,23 @@ pub(crate) fn cached_layer_norm(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::rnn_cell::CudaRnnCell`]
+/// スイートをプロセス内キャッシュから取得する（イシュー #1647。キーは
+/// [`ContextKey`]。`cached_gemm` 冒頭コメント参照）。
+/// `ops::CudaBackendOps::{lstm_pointwise, lstm_hidden_backward,
+/// lstm_cell_backward, gru_pointwise, gru_backward}` の唯一の呼び出し
+/// 先。
+pub(crate) fn cached_rnn_cell(
+    device: &CudaDevice,
+) -> Result<Arc<crate::rnn_cell::CudaRnnCell>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::rnn_cell::CudaRnnCell>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::rnn_cell::CudaRnnCell::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`crate::reduce::CudaReduce`]
 /// スイートをプロセス内キャッシュから取得する（イシュー #1584。キーは
 /// [`ContextKey`]。`cached_mse` と同型）。`ops::CudaBackendOps::sum`／

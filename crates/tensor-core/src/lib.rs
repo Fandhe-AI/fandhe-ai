@@ -130,9 +130,9 @@ mod tensor;
 pub mod typed;
 
 pub use backend_ops::{
-    Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, GemmChecksum, MatrixNormOrd,
-    MseReduction, QrFactors, SegmentKey, SegmentResource, SegmentRun, SgdStepConfig, SvdFactors,
-    UnaryElementwiseOp, ops_for,
+    Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, GemmChecksum, GruBackwardOutput,
+    GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, SegmentKey,
+    SegmentResource, SegmentRun, SgdStepConfig, SvdFactors, UnaryElementwiseOp, ops_for,
 };
 pub use broadcast::broadcast_shape;
 pub use buffer::{BufferHandle, DeviceBuffer, DeviceBufferView, MemoryOps};

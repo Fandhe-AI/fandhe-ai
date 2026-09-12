@@ -23,7 +23,7 @@
 
 use std::borrow::Cow;
 
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::{GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, Tensor};
 
 use crate::layout;
 use crate::var::Reduction;
@@ -889,6 +889,262 @@ pub(crate) fn cross_entropy_loss(
         Reduction::Sum => total,
     };
     build_tensor(vec![loss], &[])
+}
+
+// =====================================================================
+// RNN／LSTM／GRU セル演算のホスト参照実装（イシュー #1647・設計
+// `docs/autodiff-rnn-cell-tape-design.md` 決定 1・1b・1c・5・12）。
+//
+// `BackendOps::{lstm_pointwise,lstm_hidden_backward,lstm_cell_backward,
+// gru_pointwise,gru_backward}`（`tensor-core::backend_ops`）が
+// [`fandhe_ai_tensor_core::BackendError::Unsupported`] を返した場合の
+// フォールバック（`var.rs::Var::{lstm_cell,gru_cell}` から呼ばれる。A08:
+// `Unsupported` 以外のエラーは伝播し暗黙にはここへ来ない）。数式の正は
+// 本モジュールであり、CPU／CUDA／Metal の各カーネル実装は同じ数式を
+// バックエンド固有の並列化・FMA 契約で再実装する（`.claude/rules/
+// coding-rust.md`）。
+//
+// ゲート配置（決定 5・PyTorch 準拠）: LSTM は列ブロック順 `i,f,g,o`
+// （`pre: [B, 4H]`）、GRU は `r,z,n`（`pre_i`／`pre_h`: `[B, 3H]`）。
+// =====================================================================
+
+/// `pre: [B, G*H]` から `(b, gate, col)` の要素を読む（行優先連続データ
+/// 前提。呼び出し元が `dense_vec` 済みのスライスを渡す）。
+fn gate_elem(data: &[f32], gates: usize, hidden: usize, b: usize, gate: usize, j: usize) -> f32 {
+    data[b * (gates * hidden) + gate * hidden + j]
+}
+
+/// LSTM セルの pointwise 段（決定 1・1b）参照実装。`pre: [B, 4H]`
+/// （列ブロック順 `i,f,g,o`）・`c_prev: [B, H]` から `gates`（活性化後
+/// `i,f,g,o`。`[B, 4H]`）・`c`（新セル状態。`[B, H]`）・`h`（新隠れ状態。
+/// `[B, H]`）を計算する。`H` は `c_prev` の列数から導出する。
+///
+/// `c = f·c_prev + i·g`（`f32::mul_add` で FMA 契約統一）、
+/// `h = o·tanh(c)`。
+pub(crate) fn lstm_pointwise(pre: &Tensor<f32>, c_prev: &Tensor<f32>) -> LstmPointwiseOutput {
+    let b_dim = c_prev.shape().first().copied().unwrap_or(0);
+    let hidden = c_prev.shape().get(1).copied().unwrap_or(0);
+    let pre_data = dense_vec(pre);
+    let c_prev_data = dense_vec(c_prev);
+
+    let mut gates = vec![0f32; b_dim * 4 * hidden];
+    let mut c_out = vec![0f32; b_dim * hidden];
+    let mut h_out = vec![0f32; b_dim * hidden];
+
+    for b in 0..b_dim {
+        for j in 0..hidden {
+            let i_pre = gate_elem(&pre_data, 4, hidden, b, 0, j);
+            let f_pre = gate_elem(&pre_data, 4, hidden, b, 1, j);
+            let g_pre = gate_elem(&pre_data, 4, hidden, b, 2, j);
+            let o_pre = gate_elem(&pre_data, 4, hidden, b, 3, j);
+
+            let i_val = sigmoid_scalar(i_pre);
+            let f_val = sigmoid_scalar(f_pre);
+            let g_val = g_pre.tanh();
+            let o_val = sigmoid_scalar(o_pre);
+
+            let base = b * 4 * hidden;
+            gates[base + j] = i_val;
+            gates[base + hidden + j] = f_val;
+            gates[base + 2 * hidden + j] = g_val;
+            gates[base + 3 * hidden + j] = o_val;
+
+            let c_prev_val = c_prev_data[b * hidden + j];
+            let c_val = f_val.mul_add(c_prev_val, i_val * g_val);
+            let h_val = o_val * c_val.tanh();
+            c_out[b * hidden + j] = c_val;
+            h_out[b * hidden + j] = h_val;
+        }
+    }
+
+    LstmPointwiseOutput {
+        gates: build_tensor(gates, &[b_dim, 4 * hidden]),
+        c: build_tensor(c_out, &[b_dim, hidden]),
+        h: build_tensor(h_out, &[b_dim, hidden]),
+    }
+}
+
+/// [`Op::LstmHidden`] の VJP 補助（決定 1b・1b 追記）参照実装。
+/// `d_pre_o = dh·tanh(c)·o·(1−o)`、`dc = dh·o·(1−tanh(c)²)`。
+pub(crate) fn lstm_hidden_backward(
+    c: &Tensor<f32>,
+    gate_o: &Tensor<f32>,
+    dh: &Tensor<f32>,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let shape = c.shape().to_vec();
+    let c_data = dense_vec(c);
+    let o_data = dense_vec(gate_o);
+    let dh_data = dense_vec(dh);
+
+    let mut d_pre_o = vec![0f32; c_data.len()];
+    let mut dc = vec![0f32; c_data.len()];
+    for idx in 0..c_data.len() {
+        let tanh_c = c_data[idx].tanh();
+        let o_val = o_data[idx];
+        let dh_val = dh_data[idx];
+        d_pre_o[idx] = dh_val * tanh_c * o_val * (1.0 - o_val);
+        dc[idx] = dh_val * o_val * (1.0 - tanh_c * tanh_c);
+    }
+    (build_tensor(d_pre_o, &shape), build_tensor(dc, &shape))
+}
+
+/// [`Op::LstmCell`] の VJP 補助（決定 1b）参照実装。`gates_ifg: [B, 3H]`
+/// （活性化後の `i,f,g`）・`c_prev: [B, H]`・`dc: [B, H]` から
+/// `d_pre_ifg: [B, 3H]`・`dc_prev: [B, H]` を計算する。
+///
+/// `d_pre_i = dc·g·i·(1−i)`、`d_pre_f = dc·c_prev·f·(1−f)`、
+/// `d_pre_g = dc·i·(1−g²)`、`dc_prev = dc·f`。
+pub(crate) fn lstm_cell_backward(
+    gates_ifg: &Tensor<f32>,
+    c_prev: &Tensor<f32>,
+    dc: &Tensor<f32>,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let b_dim = c_prev.shape().first().copied().unwrap_or(0);
+    let hidden = c_prev.shape().get(1).copied().unwrap_or(0);
+    let gates_data = dense_vec(gates_ifg);
+    let c_prev_data = dense_vec(c_prev);
+    let dc_data = dense_vec(dc);
+
+    let mut d_pre_ifg = vec![0f32; b_dim * 3 * hidden];
+    let mut dc_prev = vec![0f32; b_dim * hidden];
+    for b in 0..b_dim {
+        for j in 0..hidden {
+            let i_val = gate_elem(&gates_data, 3, hidden, b, 0, j);
+            let f_val = gate_elem(&gates_data, 3, hidden, b, 1, j);
+            let g_val = gate_elem(&gates_data, 3, hidden, b, 2, j);
+            let c_prev_val = c_prev_data[b * hidden + j];
+            let dc_val = dc_data[b * hidden + j];
+
+            let base = b * 3 * hidden;
+            d_pre_ifg[base + j] = dc_val * g_val * i_val * (1.0 - i_val);
+            d_pre_ifg[base + hidden + j] = dc_val * c_prev_val * f_val * (1.0 - f_val);
+            d_pre_ifg[base + 2 * hidden + j] = dc_val * i_val * (1.0 - g_val * g_val);
+            dc_prev[b * hidden + j] = dc_val * f_val;
+        }
+    }
+
+    (
+        build_tensor(d_pre_ifg, &[b_dim, 3 * hidden]),
+        build_tensor(dc_prev, &[b_dim, hidden]),
+    )
+}
+
+/// GRU セルの pointwise 段（決定 1c・5。`reset_after=True` 規約）参照
+/// 実装。`pre_i`／`pre_h: [B, 3H]`（列ブロック順 `r,z,n`）・
+/// `h_prev: [B, H]` から `gates`（活性化後 `r,z,n`。`[B, 3H]`）・`q`
+/// （再帰側アフィン値 `pre_h` の n 列ブロック。`[B, H]`）・`h`（新隠れ
+/// 状態。`[B, H]`）を計算する。
+///
+/// `r = σ(pre_i_r + pre_h_r)`、`z = σ(pre_i_z + pre_h_z)`、
+/// `q = pre_h_n`、`n = tanh(r·q + pre_i_n)`、
+/// `h = z·h_prev + (1−z)·n`。
+pub(crate) fn gru_pointwise(
+    pre_i: &Tensor<f32>,
+    pre_h: &Tensor<f32>,
+    h_prev: &Tensor<f32>,
+) -> GruPointwiseOutput {
+    let b_dim = h_prev.shape().first().copied().unwrap_or(0);
+    let hidden = h_prev.shape().get(1).copied().unwrap_or(0);
+    let pre_i_data = dense_vec(pre_i);
+    let pre_h_data = dense_vec(pre_h);
+    let h_prev_data = dense_vec(h_prev);
+
+    let mut gates = vec![0f32; b_dim * 3 * hidden];
+    let mut q_out = vec![0f32; b_dim * hidden];
+    let mut h_out = vec![0f32; b_dim * hidden];
+
+    for b in 0..b_dim {
+        for j in 0..hidden {
+            let r_pre = gate_elem(&pre_i_data, 3, hidden, b, 0, j)
+                + gate_elem(&pre_h_data, 3, hidden, b, 0, j);
+            let z_pre = gate_elem(&pre_i_data, 3, hidden, b, 1, j)
+                + gate_elem(&pre_h_data, 3, hidden, b, 1, j);
+            let q_val = gate_elem(&pre_h_data, 3, hidden, b, 2, j);
+            let pre_i_n = gate_elem(&pre_i_data, 3, hidden, b, 2, j);
+
+            let r_val = sigmoid_scalar(r_pre);
+            let z_val = sigmoid_scalar(z_pre);
+            let n_val = r_val.mul_add(q_val, pre_i_n).tanh();
+
+            let base = b * 3 * hidden;
+            gates[base + j] = r_val;
+            gates[base + hidden + j] = z_val;
+            gates[base + 2 * hidden + j] = n_val;
+            q_out[b * hidden + j] = q_val;
+
+            let h_prev_val = h_prev_data[b * hidden + j];
+            h_out[b * hidden + j] = z_val.mul_add(h_prev_val, (1.0 - z_val) * n_val);
+        }
+    }
+
+    GruPointwiseOutput {
+        gates: build_tensor(gates, &[b_dim, 3 * hidden]),
+        q: build_tensor(q_out, &[b_dim, hidden]),
+        h: build_tensor(h_out, &[b_dim, hidden]),
+    }
+}
+
+/// [`Op::GruCell`] の VJP 補助参照実装。`gates_rzn: [B, 3H]`（活性化後の
+/// `r,z,n`）・`q: [B, H]`（決定 1c）・`h_prev: [B, H]`・`dh: [B, H]` から
+/// `d_pre_i: [B, 3H]`・`d_pre_h: [B, 3H]`・`dh_prev_direct: [B, H]` を
+/// 計算する。
+///
+/// `dn = dh·(1−z)`、`dz = dh·(h_prev−n)`、`dh_prev_direct = dh·z`、
+/// `d_pre_n = dn·(1−n²)`、`dr = d_pre_n·q`、`d_pre_r = dr·r·(1−r)`、
+/// `d_pre_z = dz·z·(1−z)`。`d_pre_i = [d_pre_r, d_pre_z, d_pre_n]`、
+/// `d_pre_h = [d_pre_r, d_pre_z, d_pre_n·r]`（`n` の `q` に対する偏微分が
+/// `r` であるため、`n` 列ブロックのみ追加で `r` を乗じる）。
+pub(crate) fn gru_backward(
+    gates_rzn: &Tensor<f32>,
+    q: &Tensor<f32>,
+    h_prev: &Tensor<f32>,
+    dh: &Tensor<f32>,
+) -> GruBackwardOutput {
+    let b_dim = h_prev.shape().first().copied().unwrap_or(0);
+    let hidden = h_prev.shape().get(1).copied().unwrap_or(0);
+    let gates_data = dense_vec(gates_rzn);
+    let q_data = dense_vec(q);
+    let h_prev_data = dense_vec(h_prev);
+    let dh_data = dense_vec(dh);
+
+    let mut d_pre_i = vec![0f32; b_dim * 3 * hidden];
+    let mut d_pre_h = vec![0f32; b_dim * 3 * hidden];
+    let mut dh_prev_direct = vec![0f32; b_dim * hidden];
+
+    for b in 0..b_dim {
+        for j in 0..hidden {
+            let r_val = gate_elem(&gates_data, 3, hidden, b, 0, j);
+            let z_val = gate_elem(&gates_data, 3, hidden, b, 1, j);
+            let n_val = gate_elem(&gates_data, 3, hidden, b, 2, j);
+            let q_val = q_data[b * hidden + j];
+            let h_prev_val = h_prev_data[b * hidden + j];
+            let dh_val = dh_data[b * hidden + j];
+
+            let dn = dh_val * (1.0 - z_val);
+            let dz = dh_val * (h_prev_val - n_val);
+            let d_pre_n = dn * (1.0 - n_val * n_val);
+            let dr = d_pre_n * q_val;
+            let d_pre_r = dr * r_val * (1.0 - r_val);
+            let d_pre_z = dz * z_val * (1.0 - z_val);
+
+            let base = b * 3 * hidden;
+            d_pre_i[base + j] = d_pre_r;
+            d_pre_i[base + hidden + j] = d_pre_z;
+            d_pre_i[base + 2 * hidden + j] = d_pre_n;
+
+            d_pre_h[base + j] = d_pre_r;
+            d_pre_h[base + hidden + j] = d_pre_z;
+            d_pre_h[base + 2 * hidden + j] = d_pre_n * r_val;
+
+            dh_prev_direct[b * hidden + j] = dh_val * z_val;
+        }
+    }
+
+    (
+        build_tensor(d_pre_i, &[b_dim, 3 * hidden]),
+        build_tensor(d_pre_h, &[b_dim, 3 * hidden]),
+        build_tensor(dh_prev_direct, &[b_dim, hidden]),
+    )
 }
 
 #[cfg(test)]

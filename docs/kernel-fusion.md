@@ -381,6 +381,15 @@ fusion-graph-design.md` §1・§6.2「transpose 混在連鎖のメタデータ�
   更新は正本リポジトリ（`Fandhe-AI/fandhe-ai-spec`）側の課題で
   あり、本文書のスコープ外である（`docs/spec/` は編集しない）。
 
+- **RNN／LSTM／GRU セル演算（イシュー #1647）**: `Op::RnnCell`／
+  `Op::LstmCell`／`Op::LstmHidden`／`Op::GruCell`（設計 `docs/
+  autodiff-rnn-cell-tape-design.md`）は `push_eager`（非 elementwise。
+  `Op::is_lazy_elementwise` の `matches!` に未列挙のため常に `false`）
+  で登録され、`reshape`／`transpose`（view 系。§3 表参照）と同じく
+  融合対象外。GEMM 部分は既存の融合カーネル（`gemm_bias_act`）を
+  再利用するが、ゲート pointwise 演算（`lstm_pointwise` 等）は独立の
+  非融合カーネルとして実行する。
+
 ## 7. Phase G を受けた方針改定要否の判断（#591）
 
 Phase G（#582）の G-2（#586）・G-3（#588）が融合 IR のスコープを
