@@ -90,17 +90,36 @@ single_input`／`svd_multi_output_gradient_accumulates_to_single_input` で検�
 - **符号・ゲージ規約**（`eval::linalg` と `backend-cpu::linalg` の parity 成立に必須）:
   QR は `R` の対角を非負に正規化（Householder の符号を吸収）。SVD は特異値を降順（同値
   は安定ソート）に並べ、各 `V` 列は最大絶対値成分（同値は最小添字）が正になるよう符号を
-  正規化し `U = A V / σ` で導出する（`σ==0` の列は Gram–Schmidt で補完）。Cholesky は
-  下三角のみ返す（上三角は 0）
+  正規化する（`σ==0` の列は Gram–Schmidt で補完し、補完後にも同じ符号規約を適用する。
+  codex-review 指摘・2026-09-13 是正）。Cholesky は下三角のみ返す（上三角は 0）
+- **QR のメモリ方式**: reduced `Q`（`[m,k]`）は正規化済み Householder ベクトル
+  （列インデックス付き）のみを蓄積し、`E_k`（`I_m` の先頭 `k` 列）から出発して反射を
+  逆順（`col` の大きい順）に適用する O(mk) メモリの構築方式とする。以前は
+  `Q = H_0 H_1 ... H_{k-1}` を `m×m` の `f64` 単位行列上で明示構築していたため、
+  `[100000,1]` のような縦長入力（データ自体は約 400 KB）でも中間 `Q` だけで約 80 GB を
+  要求しメモリ枯渇を招いていた（codex-review 指摘・2026-09-13 是正）
+- **Jacobi SVD の収束判定**: `jacobi_svd_tall` の列直交収束判定は `gamma.abs() <=
+  JACOBI_EPS * sqrt(alpha*beta)` の相対しきい値のみで行い、絶対下限（`.max(EPS)`）を
+  持たない。絶対下限があると `JACOBI_EPS² = 1e-28` という入力スケール非依存の閾値が
+  生じ、列ノルムが約 1e-15 スケールの小さい入力で非直交な列を誤って収束扱いし、誤った
+  特異値・特異ベクトルを返していた（codex-review 指摘・2026-09-13 是正）
 - **eval と CPU の関係**: `autodiff::eval::linalg`（`pub(crate)`）と `backend-cpu::linalg`
   は同一アルゴリズム・同一規約で実装するが、依存方向の制約（`autodiff` → `backend-cpu`
   の依存は作れる一方、逆に `backend-cpu` が `autodiff` の非公開実装へ依存することはでき
   ない。`crates/autodiff/tests/architecture_boundaries.rs` が機械検査する不変条件）に
   より、コードは意図的に複製する（数式の実体を 2 か所に持つ）。受け入れ判定は REQ-2
   複合判定（`assert_parity`）とし bit 同一を受け入れ条件にしない
-- **エラー分類**: 特異／非正定値／非収束は `BackendError::InvalidArgument`（既存
-  variant）。`Unsupported` は「バックエンドが未実装」の意味に限定し、`Var` 側のフォール
-  バック条件から `InvalidArgument` を除外する
+- **エラー分類**: 特異／非正定値／非収束は、`Var`（`crates/autodiff/src/var.rs`）が
+  返す `AutodiffError` としては **`AutodiffError::InvalidArgument(_)`** に統一する
+  （公開ドキュメント契約。CPU 本番経路〈`BackendOps::linalg_*` が返す
+  `BackendError::InvalidArgument(_)`〉・フォールバック経路（`eval::linalg` が返す
+  `AutodiffError::InvalidArgument(_)`）のどちらを通ったかで呼び出し元から見える
+  variant が変わらないよう、`var.rs::unify_backend_error` が CPU 本番経路側を
+  `AutodiffError::InvalidArgument` へ写像する。以前は逆方向〈フォールバック側を
+  `AutodiffError::Backend(BackendError::InvalidArgument(_))` へ包む〉へ統一しており、
+  本番経路の数値エラーが公開ドキュメント記載の variant と一致しない不整合があった
+  （codex-review 指摘・2026-09-13 是正）。`Unsupported` は「バックエンドが未実装」の
+  意味に限定し、`Var` 側のフォールバック条件から `InvalidArgument` を除外する
 - 非有限入力（NaN／inf）は事前検査で拒否しない。実際に拒否できるかは演算ごとに異なり
   一様ではない（codex-review 指摘・2026-09-12 是正。当初の「LU／Cholesky／QR／SVD いず
   れも自然に検出し拒否する」という記述は不正確だった）: **Cholesky** は対角チェック
@@ -126,13 +145,13 @@ single_input`／`svd_multi_output_gradient_accumulates_to_single_input` で検�
 
 | Op | 式 | 実装方式 |
 |---|---|---|
-| `Inv` | `dA = -(Xᵀ g Xᵀ)`（`X = A⁻¹` = forward 記録値） | `Mat`（内部 `f64` 稠密行列）の `matmul` |
-| `Solve` | `dB = A^{-T} g`・`dA = -dB Xᵀ` | `solve_transposed`（`Aᵀ` の LU 分解） |
+| `Inv` | `dA = -(Xᵀ g Xᵀ)`（`X = A⁻¹`） | `X` は forward の `f32` 記録値を再利用せず、`a`（入力）から `f64` の `LuDecomp` で改めて計算する（極端なスケールで forward の `f32` 丸め済み `X` が `Inf` になり有限勾配が壊れるのを防ぐ。codex-review 指摘・2026-09-13 是正）。`Mat`（内部 `f64` 稠密行列）の `matmul` |
+| `Solve` | `dB = A^{-T} g`・`dA = -dB Xᵀ`（`X = A^{-1} B`） | `X` は forward の `f32` 記録値を再利用せず、`a`／`b`（両入力）から `f64` の `LuDecomp` で改めて計算する（`Inv` と同じ理由）。`dB` は `solve_transposed`（`Aᵀ` の LU 分解）で計算し `f32` へ downcast する前の `f64` 中間値を `dA` の計算にも使う |
 | `Det` | `dA = g · det(A) · A^{-T}` | `inv(a)` を再利用（特異なら fail-closed で伝播） |
 | `Cholesky` | `Φ = tril(Lᵀ dL)`（対角 1/2）・`S = L^{-T} Φ L^{-1}`・`dA = (S+Sᵀ)/2` | `Lᵀ` の LU 分解を 2 回の三角解法に再利用 |
 | `QrQ`／`QrR` | `M = R dRᵀ − dQᵀQ`・`dA = (dQ + Q copyltu(M)) R^{-T}` | `m ≥ n` 限定（`m<n` は `InvalidArgument`）。`copyltu` は下三角を上三角へ複製して対称化 |
-| `SvdU`／`SvdS`／`SvdVh` | Townsend (2016) の標準式（`F_ij = 1/(s_j²−s_i²)`, `i≠j`）+ `m≠n` 補正項 `(I−UUᵀ)dU S⁻¹Vᵀ`・`US⁻¹dVᵀ(I−VVᵀ)` | 特異値が近接／重複（`|s_j²-s_i²| < 1e-9`）の場合 `InvalidArgument` |
-| `MatrixNorm` | `Fro`: `g·A/‖A‖`（`‖A‖==0` は 0）／`One`／`Inf`: 最大列（行）の `sign(A)`（同値タイは最初の添字）／`Nuc`: `g·UVᵀ`／`Spectral`: `g·u₀v₀ᵀ` | `Nuc`／`Spectral` は VJP 内で `svd(a)` を再計算 |
+| `SvdU`／`SvdS`／`SvdVh` | Townsend (2016) の標準式（`F_ij = 1/(s_j²−s_i²)`, `i≠j`）+ `m≠n` 補正項 `(I−UUᵀ)dU S⁻¹Vᵀ`・`US⁻¹dVᵀ(I−VVᵀ)` | 特異値が近接／重複（`|s_j²-s_i²| < 1e-9`）の場合 `InvalidArgument`。`U Uᵀ`（`m×m`）・`V Vᵀ`（`n×n`）は明示構築せず `X − U(UᵀX)` 型の積順序（結合則）で `k×k` 以下の中間行列のみを経由する（`m×m`／`n×n` の確保は `[100000,1]` のような入力で約 80 GB を要求しメモリ枯渇を招く。codex-review 指摘・2026-09-13 是正）。`du`／`dvh` が `None`（多出力ノードのうち他ノードのみが損失へ到達するケース）の項（`term2`／`term3`）はゼロ寄与であることが自明なため計算自体を省略する |
+| `MatrixNorm` | `Fro`: `g·A/‖A‖`（`‖A‖==0` は 0）／`One`／`Inf`: 最大列（行）の `sign(A)`（同値タイは最初の添字・ゼロ要素は `sign(0)=0`）／`Nuc`: `g·UVᵀ`／`Spectral`: `g·u₀v₀ᵀ` | `Nuc`／`Spectral` は VJP 内で `svd(a)` を再計算。入力に NaN を含む場合（`Fro` の `‖A‖`・`One`／`Inf` の列／行和のいずれかが NaN）は「ノルム 0」分岐で勾配を 0 にすり替えず、勾配全体へ NaN を伝播する（codex-review 指摘・2026-09-13 是正） |
 
 行列積は `tensor-core::BackendOps::gemm_fp32_strict` を経由せず、`eval::linalg`
 内部の `Mat`（`f64` 稠密行列）型で完結させる（分解サイズが小さい前提の参照実装として、
@@ -142,12 +161,12 @@ single_input`／`svd_multi_output_gradient_accumulates_to_single_input` で検�
 
 | 層 | ファイル | 内容 |
 |---|---|---|
-| `eval::linalg`（自己完結） | `crates/autodiff/src/eval/linalg.rs` 内 `#[cfg(test)]` | forward の既知値・不変量（27 件）・VJP 数値微分（grad-check。#223 承認済み定数 `H=1e-3`／`TAU=1e-4`／`REL_TOL=1e-2`／`ABS_TOL=1e-3` をそのまま再利用） |
-| `Var`／`Tape` end-to-end | `crates/autodiff/tests/linalg_backward.rs` | `common::naive_ops()`（`linalg_*` 未実装）経由で `eval::linalg` フォールバック・多出力蓄積・エラー契約（17 件） |
-| `backend-cpu::linalg`（自己完結） | `crates/backend-cpu/src/linalg.rs` 内 `#[cfg(test)]` | forward の既知値・決定性（13 件） |
+| `eval::linalg`（自己完結） | `crates/autodiff/src/eval/linalg.rs` 内 `#[cfg(test)]` | forward の既知値・不変量・VJP 数値微分（grad-check。#223 承認済み定数 `H=1e-3`／`TAU=1e-4`／`REL_TOL=1e-2`／`ABS_TOL=1e-3` をそのまま再利用）に加え、codex-review 指摘の回帰（Jacobi 相対収束判定・QR の O(mk) メモリ・NaN 伝播・零特異値の符号規約・`Inv`／`Solve` VJP の f64 再計算）を含む（40 件） |
+| `Var`／`Tape` end-to-end | `crates/autodiff/tests/linalg_backward.rs` | `common::naive_ops()`（`linalg_*` 未実装）経由で `eval::linalg` フォールバック・多出力蓄積・エラー契約（18 件） |
+| `backend-cpu::linalg`（自己完結） | `crates/backend-cpu/src/linalg.rs` 内 `#[cfg(test)]` | forward の既知値・決定性に加え `eval::linalg` と同型の codex-review 回帰（22 件） |
 | `CpuBackendOps` trait 経由 | `crates/backend-cpu/tests/linalg_parity.rs` | `assert_parity`（REQ-2 複合判定）・決定性・エラー契約（14 件） |
 | CUDA／Metal 契約 | `crates/backend-cpu/tests/backend_ops_dispatch.rs` | 実機なしで `Unsupported`・panic しないことを確認（2 件追加） |
-| facade 到達性 | `crates/facade/tests/linalg_facade.rs` | `fandhe_ai::tape()`（CPU 実装経路）と `fandhe_ai_autodiff::Tape::new()`（`eval::linalg` フォールバック経路）の一致を `assert_parity` で突合（8 件） |
+| facade 到達性 | `crates/facade/tests/linalg_facade.rs` | `fandhe_ai::tape()`（CPU 実装経路）と `fandhe_ai_autodiff::Tape::new()`（`eval::linalg` フォールバック経路）の一致を `assert_parity` で突合。CPU 本番経路のエラー variant が公開ドキュメントどおり `AutodiffError::InvalidArgument` になることの直接確認を含む（9 件） |
 
 ## 5. スコープ外（`.claude/rules/out-of-scope-tracking.md` 対象）
 
