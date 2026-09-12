@@ -1,0 +1,17 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/gemm_transposed_perf.rs (target/release/deps/gemm_transposed_perf-66c03d994f8cbea6)
+
+running 2 tests
+test nt_transposed_entry_vs_contiguous_across_shapes ... NT m=64 k=784 n=256 before_median_s=0.000439 after_median_s=0.000079 speedup=5.563x
+NT m=64 k=256 n=10 before_median_s=0.000038 after_median_s=0.000036 speedup=1.057x
+NT m=1024 k=1024 n=1024 before_median_s=0.002463 after_median_s=0.000431 speedup=5.709x
+NT m=2048 k=2048 n=2048 before_median_s=0.013150 after_median_s=0.002219 speedup=5.926x
+ok
+test tn_transposed_entry_vs_contiguous_across_shapes ... TN m=64 k=784 n=256 before_median_s=0.000160 after_median_s=0.000072 speedup=2.242x
+TN m=64 k=256 n=10 before_median_s=0.000050 after_median_s=0.000024 speedup=2.096x
+TN m=1024 k=1024 n=1024 before_median_s=0.002458 after_median_s=0.000461 speedup=5.337x
+TN m=2048 k=2048 n=2048 before_median_s=0.022510 after_median_s=0.007973 speedup=2.823x
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.89s
+
