@@ -475,7 +475,7 @@ fn binary_elementwise(
             let y = b_op.read(&index, flat);
             debug_assert!(
                 x.is_some() && y.is_some(),
-                "binary_elementwise: as_view_slice の span 保証が破れ、境界外アクセスを検知した                  (index {index:?})"
+                "binary_elementwise: as_view_slice の span 保証が破れ、境界外アクセスを検知した (index {index:?})"
             );
             out.push(scalar_kernel(
                 x.unwrap_or_else(Element::zero),
