@@ -159,9 +159,15 @@ fn log_softmax_row(row: &[f32], out_row: &mut [f32]) {
     for &v in row {
         sum_exp += (v - max_v).exp();
     }
-    let lse = max_v + sum_exp.ln();
+    // `max_v + ln(sum_exp)` を先に加算してから `v` から引くと、`max_v` が
+    // 大きい場合に `ln(sum_exp)` の寄与が `max_v` 自身の丸め精度に埋もれ
+    // て消える（`crates/autodiff/src/eval.rs::log_softmax_along` と同じ
+    // 数値安定性契約。丸め落ちの具体例はそちらの doc comment 参照）。
+    // `v - max_v` は Sterbenz の補題により丸め誤差なしで計算できるため、
+    // 先にこちらを計算してから `ln(sum_exp)` を引く順序にする。
+    let ln_sum_exp = sum_exp.ln();
     for (o, &v) in out_row.iter_mut().zip(row.iter()) {
-        *o = v - lse;
+        *o = (v - max_v) - ln_sum_exp;
     }
 }
 
@@ -396,6 +402,23 @@ mod tests {
         let out = run_log_softmax_f32(&x, 1, 4).unwrap();
         for &v in &out {
             assert!(v.is_finite(), "expected finite, got {v}");
+        }
+    }
+
+    // codex-review 指摘（PR #1664）の回帰検証: `crates/autodiff/src/
+    // eval.rs::log_softmax_along_precision_tests` と同一のケース。
+    // `max_v + ln(sum_exp)` を先に加算してから `v` から引く実装では
+    // 丸め落ちが発生し `log_softmax([1e8, 1e8])` が `[0.0, 0.0]`
+    // （期待値 `[-ln(2), -ln(2)]`）になっていた。
+    #[test]
+    fn run_log_softmax_f32_large_common_offset_does_not_round_away_ln_sum_exp() {
+        let out = run_log_softmax_f32(&[1e8, 1e8], 1, 2).unwrap();
+        let expected = -(2.0f32).ln();
+        for (c, &v) in out.iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "log_softmax([1e8,1e8])[{c}] = {v}（期待値 {expected} 近傍）"
+            );
         }
     }
 

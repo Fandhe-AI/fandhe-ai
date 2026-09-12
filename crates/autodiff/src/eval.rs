@@ -532,10 +532,18 @@ pub(crate) fn log_softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32>
                 let idx = (o * axis_len + a) * inner + i;
                 sum_exp += (data[idx] - m).exp();
             }
-            let lse = m + sum_exp.ln();
+            // `m + ln(sum_exp)` を先に加算してから `data[idx]` から引くと、
+            // `m` が大きい（かつ `data[idx]` と近い）場合に `m` 自身の丸め
+            // 精度で `ln(sum_exp)` の寄与が失われる（例: 全要素 1e8 のとき
+            // `m + ln(sum_exp)` は `1e8` に丸まり `ln(2)` 分が消え、
+            // `log_softmax` が `0.0`〈期待値 `-ln(2)`〉になる）。
+            // `data[idx] - m` は Sterbenz の補題により丸め誤差なしで計算
+            // できるため、先にこちらを計算してから `ln(sum_exp)` を引く
+            // 順序（`(x - m) - ln(sum_exp)`）で丸め落ちを避ける。
+            let ln_sum_exp = sum_exp.ln();
             for a in 0..axis_len {
                 let idx = (o * axis_len + a) * inner + i;
-                out[idx] = data[idx] - lse;
+                out[idx] = (data[idx] - m) - ln_sum_exp;
             }
         }
     }
@@ -662,5 +670,32 @@ mod dense_vec_ref_tests {
             "非 contiguous な入力は Cow::Owned（dense_vec フォールバック）を返す契約"
         );
         assert_eq!(&*owned, &dense_vec(&transposed)[..]);
+    }
+}
+
+#[cfg(test)]
+mod log_softmax_along_precision_tests {
+    use super::*;
+
+    // codex-review 指摘（PR #1664）の回帰検証: `m + ln(sum_exp)` を
+    // 先に加算してから `x` から引く実装では、`m` が大きい共通オフセット
+    // を持つ入力で丸め落ちが発生し、`log_softmax([1e8, 1e8])` が
+    // 期待値 `[-ln(2), -ln(2)]` ではなく `[0.0, 0.0]` になっていた
+    // （`m + ln(2)` が `f32` の丸め精度で `m` そのものに丸まるため）。
+    // `(x - m) - ln(sum_exp)` の順で計算することで `x - m` を Sterbenz
+    // の補題により誤差なく求め、丸め落ちを避ける。
+    #[test]
+    fn large_common_offset_does_not_round_away_ln_sum_exp() {
+        let input = Tensor::<f32>::new(vec![1e8, 1e8], &[1, 2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let out = log_softmax_along(&input, 1);
+        let expected = -(2.0f32).ln();
+        for c in 0..2 {
+            let v = out.get(&[0, c]).unwrap();
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "log_softmax([1e8,1e8])[{c}] = {v}（期待値 {expected} 近傍）"
+            );
+        }
     }
 }

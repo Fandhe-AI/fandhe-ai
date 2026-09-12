@@ -652,7 +652,10 @@ fn softmax_vjp_along(out_value: &Tensor<f32>, upstream: &Tensor<f32>, axis: usiz
 /// `Op::LogSoftmax` の VJP 本体: `dx = g − exp(y) ⊙ Σ_dim(g)`。
 /// `softmax_vjp_along` と同じ 3 段走査・f64 縮約方針（本関数の縮約は
 /// 要素積ではなく単純和のため、`g` の各要素をそのまま `f64` へ昇格して
-/// 蓄積する）。
+/// 蓄積する）。`Σ_dim(g)` との乗算（`exp(y) ⊙ Σ_dim(g)`）・`g` からの
+/// 減算も f64 のまま行い、最終書き出しで 1 回だけ `f32` へ downcast
+/// する（縮約値を先に `f32` へ戻すと、有限の `f32` 入力でも乗算結果が
+/// overflow しうるため）。
 fn log_softmax_vjp_along(
     out_value: &Tensor<f32>,
     upstream: &Tensor<f32>,
@@ -672,10 +675,17 @@ fn log_softmax_vjp_along(
                 let idx = (o * axis_len + a) * inner + i;
                 sum_acc += g[idx] as f64;
             }
-            let sum_g = sum_acc as f32;
+            // `sum_acc`（f64）を乗算前に `f32` へ downcast すると、
+            // `exp(y) * sum_g` が有限の `f32` 入力でも overflow しうる
+            // （例: `y=[0,0]`・上流勾配 `g=[2e38,2e38]` で正しい入力勾配
+            // `[0,0]` が `[-inf,-inf]` になる）。`.claude/rules/
+            // coding-rust.md` の f64 アキュムレータ契約に従い、
+            // `exp(y)` との乗算・`g` からの減算まで f64 で保持し、
+            // 最終書き出しでのみ `f32` へ downcast する。
             for a in 0..axis_len {
                 let idx = (o * axis_len + a) * inner + i;
-                out[idx] = g[idx] - y[idx].exp() * sum_g;
+                let d = g[idx] as f64 - (y[idx].exp() as f64) * sum_acc;
+                out[idx] = d as f32;
             }
         }
     }
@@ -2035,5 +2045,31 @@ mod tests {
         assert_eq!(grads[0].0, NodeId(0));
         let expected = log_softmax_vjp_along(&out_value, &g, 1);
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    // codex-review 指摘（PR #1664）の回帰検証: `sum_acc`（f64）を
+    // `exp(y)` との乗算前に `f32` へ downcast する実装では、有限の
+    // `f32` 上流勾配でも overflow しうる（`logits=[0,0]` すなわち
+    // `y=log_softmax([0,0])=[-ln(2),-ln(2)]`・上流勾配 `g=[2e38,2e38]`
+    // で、正しい入力勾配 `[0,0]`〈`Σ_dim(g)=4e38` に対し `exp(y)=0.5`
+    // なので `g - exp(y)*Σg = 2e38 - 0.5*4e38 = 0` のはずが、`sum_g`
+    // を `f32` へ戻してから `exp(y) as f32 * sum_g` を計算すると
+    // `0.5 * 4e38 = 2e38` は有限だが、`f32::MAX ≈ 3.4e38` に近い値の
+    // 掛け算・加減算が丸め誤差で `-inf` を生む経路がある）。
+    // `exp(y)` との乗算・`g` からの減算まで f64 で保持することで
+    // overflow を避ける。
+    #[test]
+    fn log_softmax_vjp_along_large_upstream_grad_does_not_overflow() {
+        let logits = t(&[0.0, 0.0], &[1, 2]);
+        let y = eval::log_softmax_along(&logits, 1);
+        let g = t(&[2e38, 2e38], &[1, 2]);
+        let dx = log_softmax_vjp_along(&y, &g, 1);
+        for (c, v) in dense_vec(&dx).iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "dx[{c}] = {v} は有限であるべき（overflow 回帰）"
+            );
+            assert!(v.abs() < 1.0, "dx[{c}] = {v}（期待値は 0 近傍）");
+        }
     }
 }

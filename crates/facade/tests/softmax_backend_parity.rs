@@ -142,6 +142,12 @@ fn softmax_forward_on(device: Device) -> Tensor<f32> {
         .to_tensor()
 }
 
+// `Device::Metal` variant 自体が `cfg(target_os = "macos")` 限定
+// （`crates/tensor-core/src/device.rs`）のため、この variant を参照する
+// テスト関数はコンパイル自体を macOS 限定にする必要がある。
+// `#[ignore]` は実行のみをスキップしコンパイルはスキップしないため、
+// Linux（CI の ubuntu-latest）では `cfg` ゲートがないと E0599 でビルド不能になる。
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn metal_softmax_forward_matches_cpu() {

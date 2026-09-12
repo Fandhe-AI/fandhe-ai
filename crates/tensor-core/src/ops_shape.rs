@@ -161,7 +161,13 @@ pub fn row_softmax_layout(
         return Ok(None);
     }
     let cols = shape[dim];
-    let numel: usize = shape.iter().product();
+    // `shape.iter().product()` の素朴な乗算は overflow しても panic
+    // せず（release ビルドではラップして誤った `numel` を返す）、本番
+    // 経路 panic 禁止規約（`.claude/rules/coding-rust.md`）に反する。
+    // `checked_numel`（`crate::tensor`。`Tensor::new` 等が使う単一
+    // 情報源と同じ検査）で `usize` 範囲の乗算オーバーフローを検出し
+    // `ShapeError::ElementCountOverflow` を返す。
+    let numel = checked_numel(shape)?;
     let rows = numel.checked_div(cols).unwrap_or(0);
     Ok(Some((rows, cols)))
 }
@@ -438,5 +444,17 @@ mod tests {
     fn row_softmax_layout_zero_numel_nonzero_cols() {
         let out = row_softmax_layout(&[0, 4], 1).unwrap();
         assert_eq!(out, Some((0, 4)));
+    }
+
+    // codex-review 指摘（PR #1664）の回帰検証: `shape.iter().product()`
+    // の素朴な乗算は overflow を検出せず（release ビルドではラップして
+    // 誤った `numel` を返す）、本番経路 panic 禁止規約
+    // （`.claude/rules/coding-rust.md`）に反していた。`checked_numel`
+    // による検査で `ShapeError::ElementCountOverflow` を返すことを
+    // 確認する。
+    #[test]
+    fn row_softmax_layout_element_count_overflow_is_typed_error() {
+        let err = row_softmax_layout(&[usize::MAX, 2], 1).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 }

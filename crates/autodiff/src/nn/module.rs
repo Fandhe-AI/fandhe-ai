@@ -249,11 +249,26 @@ impl Module for Softmax {
     ) -> Result<Tensor<f32>, AutodiffError> {
         let dim = self.dim();
         reduce_out_shape(input.shape(), Some(dim))?;
-        match ops.softmax(input, dim) {
-            Ok(v) => Ok(v),
-            Err(BackendError::Unsupported(_)) => Ok(eval::softmax_along(input, dim)),
-            Err(other) => Err(AutodiffError::Backend(other)),
+        let value = match ops.softmax(input, dim) {
+            Ok(v) => v,
+            Err(BackendError::Unsupported(_)) => eval::softmax_along(input, dim),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        // `Var::softmax`（`var.rs`）と同じバックエンド契約検証
+        // （`BackendOps::softmax` doc「戻り値 shape は入力と恒等」）を
+        // tape 不要経路でも行う。ここを省略すると `forward_host`
+        // 経由の推論のみ不整合 shape を素通りさせてしまい、`Var::
+        // softmax` と `forward_host` とで判定基準が食い違う
+        // （`.claude/rules/security.md` A08 の判定迂回経路になる）。
+        if value.shape() != input.shape() {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: input.shape().to_vec(),
+                },
+            )));
         }
+        Ok(value)
     }
 }
 
@@ -271,11 +286,21 @@ impl Module for LogSoftmax {
     ) -> Result<Tensor<f32>, AutodiffError> {
         let dim = self.dim();
         reduce_out_shape(input.shape(), Some(dim))?;
-        match ops.log_softmax(input, dim) {
-            Ok(v) => Ok(v),
-            Err(BackendError::Unsupported(_)) => Ok(eval::log_softmax_along(input, dim)),
-            Err(other) => Err(AutodiffError::Backend(other)),
+        let value = match ops.log_softmax(input, dim) {
+            Ok(v) => v,
+            Err(BackendError::Unsupported(_)) => eval::log_softmax_along(input, dim),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        // `Softmax::forward_host`（直上）と同じバックエンド契約検証。
+        if value.shape() != input.shape() {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: input.shape().to_vec(),
+                },
+            )));
         }
+        Ok(value)
     }
 }
 
@@ -425,6 +450,82 @@ mod tests {
             Err(AutodiffError::Shape(
                 fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { axis: 5, rank: 1 }
             ))
+        ));
+    }
+
+    /// Cursor Bugbot 指摘（PR #1664）の回帰検証用モック: `softmax`／
+    /// `log_softmax` が入力と異なる shape を返す不正なバックエンドを
+    /// 模す（他のメソッドは非到達のため `unreachable!` でよい）。
+    /// `Var::softmax`（`var.rs`）はこの契約違反を `ShapeMismatch` で
+    /// 拒否するが、`Module::forward_host`（tape 不要推論経路）が同じ
+    /// 検証を省略していると不整合 shape を素通りさせてしまう
+    /// （`.claude/rules/security.md` A08 の判定迂回経路になる）。
+    struct WrongShapeOps;
+
+    impl BackendOps for WrongShapeOps {
+        fn device(&self) -> fandhe_ai_tensor_core::Device {
+            fandhe_ai_tensor_core::Device::Cpu
+        }
+        fn gemm(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは gemm は呼ばれない")
+        }
+        fn add(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは add は呼ばれない")
+        }
+        fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは mul は呼ばれない")
+        }
+        fn relu(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは relu は呼ばれない")
+        }
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは exp は呼ばれない")
+        }
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは tanh は呼ばれない")
+        }
+        fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは sum は呼ばれない")
+        }
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("本テストでは max は呼ばれない")
+        }
+        fn softmax(&self, x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
+            // 入力 shape をそのまま返さず要素数を減らした shape で返す
+            // ことで、契約違反（`BackendOps::softmax` doc「戻り値 shape
+            // は入力と恒等」）を意図的に起こす。
+            let numel: usize = x.shape().iter().product();
+            Ok(Tensor::new(vec![0.0f32; numel], &[numel]).unwrap())
+        }
+        fn log_softmax(&self, x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
+            let numel: usize = x.shape().iter().product();
+            Ok(Tensor::new(vec![0.0f32; numel], &[numel]).unwrap())
+        }
+    }
+
+    #[test]
+    fn softmax_forward_host_rejects_wrong_shape_from_backend() {
+        let x = Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap();
+        let softmax = Softmax::new(1);
+
+        let result = softmax.forward_host(&WrongShapeOps, &x);
+
+        assert!(matches!(
+            result,
+            Err(AutodiffError::Backend(BackendError::ShapeMismatch(_)))
+        ));
+    }
+
+    #[test]
+    fn log_softmax_forward_host_rejects_wrong_shape_from_backend() {
+        let x = Tensor::new(vec![-1.0, 2.0, 0.5, 1.0], &[2, 2]).unwrap();
+        let log_softmax = LogSoftmax::new(1);
+
+        let result = log_softmax.forward_host(&WrongShapeOps, &x);
+
+        assert!(matches!(
+            result,
+            Err(AutodiffError::Backend(BackendError::ShapeMismatch(_)))
         ));
     }
 }
