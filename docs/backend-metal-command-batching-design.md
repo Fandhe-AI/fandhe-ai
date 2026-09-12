@@ -1428,6 +1428,9 @@ warnings` を `--target aarch64-apple-darwin`（`cfg(target_os =
 - GPU カーネル（`shaders/gemm.metal::gemm_bias_grad_reduce_f32`。
   Metal は `double` 型非対応）: Neumaier 改良版 Kahan 補償和
   （`gemm_splitk_reduce` と同型。非有限入力では補正を適用しない）。
+  **この実装形は §10.10 で scale 方式併用へ精密化済み**（当初版は
+  有限入力の中間 overflow を防げないという codex-review 追加指摘を
+  受けた是正。契約自体〈f64 相当への統一・REQ-2 判定〉は不変）。
 - `m == 1`／`rows == 1` の直接コピー特殊扱い（符号付きゼロ保持。PR
   #1659 codex-review P2 是正）は不変（コピーのみで蓄積を経由しない
   ため f64/Neumaier 化の対象外）。
@@ -1524,3 +1527,45 @@ assert_parity`（REQ-2 統一複合判定）へ切り替えた。同型の理由
 **§10.8 の訂正**: `metal_reuse_step_grad_bit_dump` を bias 変更の影響
 対象外としていたのは誤りだった。§10.8 末尾に訂正を追記済み
 （本節参照）。
+
+### 10.10 #1659 codex-review 追加指摘の是正（2026-09-12・Metal 実装形の精密化）
+
+§10.8・§10.9 が適用した Metal GPU カーネル側の実装形（単純な Neumaier
+改良版 Kahan 補償和のみ。`isfinite(t)` で非有限を検知したら補正を
+止める版）は、**有限入力の中間 overflow** を防げないと codex-review
+から追加指摘された。契約自体（`.claude/rules/coding-rust.md` の
+「勾配の長軸縮約は `f64` アキュムレータで統一する」・両実装間の一致は
+REQ-2 統一複合判定）は不変で、Metal 側の実装形のみを精密化する。
+
+**問題の再現**: 列 `[f32::MAX, f32::MAX, -f32::MAX, -f32::MAX]`（真値
+は `0`）を単純な Neumaier 補償和で逐次加算すると、1 項目・2 項目の
+加算時点で `f32::MAX + f32::MAX` が `+inf` へ overflow する。以降
+`isfinite(t)` が常に偽になり補正が効かない単純加算（`+inf` のまま）へ
+縮退するため、カーネルは `+inf` を返す。一方ホスト `f64` アキュムレータ
+（`reduce_bias_grad_rows`）は `f64` の表現範囲内に収まるため正しく
+`0` を返す。`+inf` 対 `0` は REQ-2 統一複合判定でも不一致になり、
+codex ジョブが `block-priorities: P0,P1` で fail する状態が続いた。
+
+**是正内容**: `crates/backend-metal/src/shaders/gemm.metal` に
+`rmsnorm.metal::rmsnorm_ssq_add`（LAPACK SLASSQ 系 scale/ssq 方式）の
+**線形和版**（二乗和ではなく符号付き単純和が対象）である
+`bias_scale_sum_add` を新設し、`gemm_bias_grad_reduce_f32`（`m >= 2`
+経路）の蓄積方式をこれへ差し替えた。各項を列内の最大絶対値
+`scale` で正規化してから `[-1, 1]` の範囲で Neumaier 補償和
+（`bias_kahan_add`。`rmsnorm.metal::rmsnorm_kahan_add` と同一ロジックの
+自己完結複製——各 `.metal` ファイルは独立した `MTLLibrary` としてコン
+パイルされるため直接呼べない）へ蓄積するため、部分和が行数 `m` で
+有界になり中間 overflow が構造的に起きない。最終読み出しは
+`scale * (acc + comp)` の 1 式のみで、`scale == 0`（全ゼロ列）→ `0`・
+`scale == +inf`（符号付き無限大が確定）→ `±inf`／`NaN`・通常の有限列
+→ 正しい和、のいずれも追加分岐なしに成立する（`gemm.metal` の
+`bias_scale_sum_add` doc 参照）。`NaN`・符号付き `±inf`（`inf + -inf
+== NaN`・同符号は `inf + inf == inf`）の伝播も明示的に扱い、ホスト
+`f64` の逐次加算と同じ意味論に揃える。REQ-8 の手動境界チェック
+（`if (gid >= p.n) { return; }`）は変更しない。`m == 1` の直接コピー
+特殊扱い・resident/host の bias 比較（`assert_parity`。REQ-2 統一
+複合判定）は不変。
+
+数値契約自体（f64 相当への統一・Metal は Neumaier＋scale 方式・両者の
+一致は REQ-2 判定）は変わらないため、`.claude/rules/coding-rust.md`
+には実装形の精密化を追記するに留め、契約の記述は変更しない。

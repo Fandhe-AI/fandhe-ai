@@ -2438,14 +2438,32 @@ kernel void gemm_splitk_reduce(
 // d_weight と同一の encode-only 書き込みで staging へ直接書く
 // （イシュー #1566）。
 //
-// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review P1
+// **数値方式（2026-09-12 ユーザー承認 A・PR #1659 codex-review 追加
 // 是正）**: `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
 // アキュムレータで統一する」規約（イシュー #1102・PR #1120）に従う。
 // Metal は `double` 型非対応のため `f64` そのものは使えず、代わりに
-// Neumaier 改良版 Kahan 補償和（`gemm_splitk_reduce` と同型。縮約順序
-// は行 0..M 昇順・初期値 0.0f・非有限入力〈overflow による `inf`／
-// `NaN` 伝播〉では補正を適用せず単純加算と同じ挙動に揃える）で `m >= 2`
-// を蓄積する。この結果、ホスト参照実装 `crates/autodiff/src/eval.rs::
+// **Neumaier 改良版 Kahan 補償和 + scale 方式**（`rmsnorm.metal` の
+// scale/ssq 方式〈LAPACK SLASSQ 系。同ファイル冒頭コメント参照〉の
+// 線形和版。二乗和ではなく符号付きの単純和を対象とする点のみ異なる）
+// を `f64` アキュムレータ相当の実装形として `m >= 2` へ適用する
+// （`bias_scale_sum_add`。本カーネル直前に定義）。
+//
+// **単純な Neumaier 補償和のみでは不十分だった理由（codex-review
+// 指摘・PR #1659）**: 当初は `gemm_splitk_reduce` と同型の単純
+// Neumaier 補償和（`isfinite(t)` で非有限を検知したら補正を止める版）
+// を適用していたが、これは**有限入力の中間 overflow** を防げない。
+// 例えば列 `[f32::MAX, f32::MAX, -f32::MAX, -f32::MAX]`（真値は 0）は
+// `f32::MAX + f32::MAX` の時点で `+inf` へ overflow し、以降
+// `isfinite(t)` が常に偽になって単純加算（`+inf` のまま）に縮退する
+// ため `+inf` を返してしまう一方、ホスト `f64` アキュムレータ
+// （`reduce_bias_grad_rows`）は `f64` の表現範囲内に収まるため正しく
+// `0` を返す——REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差
+// 1e-5 未満）でも `+inf` 対 `0` は不一致になる。scale 方式は各項を
+// 都度 `scale`（列内の最大絶対値）で正規化してから蓄積するため
+// （各項は必ず `[-1, 1]` に収まる）、部分和が行数 `m` で有界になり
+// 中間 overflow が構造的に起きない。
+//
+// この結果、ホスト参照実装 `crates/autodiff/src/eval.rs::
 // reduce_bias_grad_rows`（および `crates/backend-metal/src/layout.rs::
 // reduce_bias_grad_rows_host`。いずれも `f64` アキュムレータ）とは
 // bit 完全一致しない——両者の一致は REQ-2 統一複合判定（相対誤差
@@ -2470,6 +2488,102 @@ struct BiasGradReduceParams {
     uint b_ld;
     uint b_transposed;
 };
+
+// `rmsnorm.metal::rmsnorm_ssq_add`（LAPACK SLASSQ 系 scale/ssq 方式）の
+// 線形和版。`ssq` 版は常に非負の二乗を蓄積するのに対し、本関数は
+// 符号付きの単純和（`x_i` そのもの。二乗しない）を蓄積する点のみ異なる
+// （`gemm_bias_grad_reduce_f32` 冒頭コメント「単純な Neumaier 補償和の
+// みでは不十分だった理由」参照）。各 `.metal` ファイルは独立した
+// `MTLLibrary` としてコンパイルされる（`include_str!` で個別に埋め込み・
+// `pipeline.rs` 参照）ため `rmsnorm.metal` の関数を直接呼べず、
+// `bias_kahan_add`（下記）を本ファイル内に自己完結で複製する
+// （`rmsnorm.metal::rmsnorm_kahan_add` とロジックは同一）。
+//
+// 不変量: `sum(x_i) == scale * (acc + comp)`（`isfinite(scale)` の間）。
+// `scale`（列内で見た最大絶対値）で正規化した項 `x_i / scale`（常に
+// `[-1, 1]` に収まる）を Neumaier 改良版 Kahan 補償和（`bias_kahan_add`）
+// で蓄積するため、部分和が行数 `m` で有界になり中間 overflow が
+// 構造的に起きない。
+//
+// **`NaN` 伝播**: `x` が `NaN`、または既に `acc`/`scale` が `NaN`
+// （前回の呼び出しで検出済み）の場合、`acc` を `NaN` へ確定し `scale`
+// を有限の正値（`1.0f`）へ固定する（`rmsnorm_ssq_add` と同じ理由:
+// `scale` を `0.0f` のままにすると後続の呼び出しが `scale > 0.0f` の
+// 条件を満たさず汚染情報を握り潰してしまう）。以降のすべての呼び出し
+// はこの先頭ガードで即座に `NaN` を維持し続ける（sticky）。
+//
+// **符号付き無限大の伝播**: `x` が `±inf` の場合、`scale` を `+inf`
+// （`isinf` で判定可能な唯一の値）へ確定し、`acc` に符号
+// （`x > 0 ? 1.0f : -1.0f`）を厳密値として保持する（`x / scale` の
+// 除算〈`inf / inf` は `NaN` になる〉を経由しない）。`scale` が既に
+// `+inf` の状態で符号が一致する `±inf` が再び来た場合は何もしない
+// （`inf + inf == inf` と同じ挙動）。符号が食い違う場合（`+inf` の後に
+// `-inf`、またはその逆）は `acc` を `NaN` にする（`inf + (-inf) ==
+// NaN` と同じ挙動。IEEE 754 の逐次加算と同様、一度 `NaN` になると
+// 以降のどんな入力が来てもホスト `f64` 逐次和と同じく `NaN` のまま
+// 変わらない——次回呼び出しの先頭 `NaN` ガードが引き継ぐ）。`scale`
+// が `+inf` に確定した後の有限入力は無視する（`inf + finite == inf`）。
+//
+// 最終読み出し `scale * (acc + comp)` は上記いずれのケースでも
+// 追加の分岐なしに正しい値になる: `scale == 0`（列が全て `0`）なら
+// `0 * 0 == 0`、`scale == +inf` かつ `acc` が `±1.0f` なら `±inf`、
+// `acc` が `NaN` なら `scale`（有限）× `NaN == NaN`。呼び出し元
+// （`gemm_bias_grad_reduce_f32`）はこの式をそのまま使う。
+
+// Neumaier 改良版 Kahan 補償和の 1 ステップ（`rmsnorm.metal::
+// rmsnorm_kahan_add` と同一ロジック。別 `MTLLibrary` のため複製。上記
+// `bias_scale_sum_add` 冒頭コメント参照）。
+inline void bias_kahan_add(thread float& sum, thread float& comp, float value) {
+    float t = sum + value;
+    if (fabs(sum) >= fabs(value)) {
+        comp += (sum - t) + value;
+    } else {
+        comp += (value - t) + sum;
+    }
+    sum = t;
+}
+
+inline void bias_scale_sum_add(thread float& scale, thread float& acc, thread float& comp, float x) {
+    if (isnan(x) || isnan(acc) || isnan(scale)) {
+        scale = 1.0f;
+        acc = NAN;
+        comp = 0.0f;
+        return;
+    }
+    float ax = fabs(x);
+    if (isinf(ax)) {
+        float sign = (x > 0.0f) ? 1.0f : -1.0f;
+        if (isinf(scale)) {
+            if (acc != sign) {
+                acc = NAN;
+                comp = 0.0f;
+            }
+            return;
+        }
+        scale = INFINITY;
+        acc = sign;
+        comp = 0.0f;
+        return;
+    }
+    if (isinf(scale)) {
+        // 既に無限大要素を確定済み。有限の追加要素は無視する
+        // （`inf + finite == inf`）。
+        return;
+    }
+    if (ax > scale) {
+        if (scale > 0.0f) {
+            float ratio = scale / ax;
+            acc *= ratio;
+            comp *= ratio;
+        }
+        scale = ax;
+        bias_kahan_add(acc, comp, x / scale);
+    } else if (scale > 0.0f) {
+        bias_kahan_add(acc, comp, x / scale);
+    }
+    // `ax == 0.0f && scale == 0.0f`（列が現時点まで全て 0）は
+    // 何もしない（0 は和に寄与せず、`0.0f / 0.0f` の `NaN` 化も回避）。
+}
 
 kernel void gemm_bias_grad_reduce_f32(
     device const float* g [[buffer(0)]],
@@ -2498,25 +2612,17 @@ kernel void gemm_bias_grad_reduce_f32(
         out[gid] = g[idx];
         return;
     }
-    // Neumaier 改良版 Kahan 補償和（`gemm_splitk_reduce` と同型。本
-    // ファイル冒頭の当該コメント参照）。非有限入力（overflow による
-    // `inf`／`NaN` 伝播）では補正を適用せず単純加算と同じ挙動にする。
+    // scale 方式 + Neumaier 改良版 Kahan 補償和（`bias_scale_sum_add`。
+    // 本ファイル冒頭の当該コメント参照。中間 overflow を構造的に回避
+    // する線形和版 scale/ssq 方式）。
+    float scale = 0.0f;
     float acc = 0.0f;
     float comp = 0.0f;
     for (uint row = 0; row < p.m; row++) {
         size_t idx = p.b_transposed
             ? (size_t)gid * (size_t)p.b_ld + (size_t)row
             : (size_t)row * (size_t)p.b_ld + (size_t)gid;
-        float term = g[idx];
-        float t = acc + term;
-        if (isfinite(t)) {
-            if (fabs(acc) >= fabs(term)) {
-                comp += (acc - t) + term;
-            } else {
-                comp += (term - t) + acc;
-            }
-        }
-        acc = t;
+        bias_scale_sum_add(scale, acc, comp, g[idx]);
     }
-    out[gid] = acc + comp;
+    out[gid] = scale * (acc + comp);
 }

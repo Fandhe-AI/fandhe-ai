@@ -4720,7 +4720,8 @@ fn encode_dispatch_bias_act(
 /// 縮約結果（列ごとの和。長さ `n`）は `out_buf` の `bias_offset` から
 /// 書き込む。走査順序（行 0..m 昇順）は `autodiff::eval::reduce_bias_
 /// grad_rows`（`crate::grad::reduce_to_shape` の rank-2→rank-1 特殊
-/// ケースと同一アルゴリズム）と揃えるが、蓄積方式は Neumaier 改良版
+/// ケースと同一アルゴリズム）と揃えるが、蓄積方式は scale 方式
+/// （LAPACK SLASSQ 系の線形和版。中間 overflow 回避）+ Neumaier 改良版
 /// Kahan 補償和（ホスト側は `f64` アキュムレータ）のため bit 完全
 /// 一致ではなく REQ-2 統一複合判定で一致を検証する契約
 /// （`shaders/gemm.metal::gemm_bias_grad_reduce_f32` 冒頭コメント

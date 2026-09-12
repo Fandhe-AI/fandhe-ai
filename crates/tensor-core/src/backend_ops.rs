@@ -647,8 +647,9 @@ pub trait BackendOps {
     /// ついて `sum_{i=0}^{m-1} b[i, j]`。走査順は行 `0..m` 昇順）を書き
     /// 込む。蓄積方式は `.claude/rules/coding-rust.md` の勾配長軸縮約
     /// `f64` アキュムレータ方針（2026-09-12 ユーザー承認 A）に従い、
-    /// 実装はホスト `f64` アキュムレータまたは Metal Neumaier 改良版
-    /// Kahan 補償和のいずれかを用いる（実装依存。`fandhe_ai_backend_
+    /// 実装はホスト `f64` アキュムレータまたは Metal の scale 方式
+    /// （LAPACK SLASSQ 系の線形和版。中間 overflow 回避）+ Neumaier
+    /// 改良版 Kahan 補償和のいずれかを用いる（実装依存。`fandhe_ai_backend_
     /// metal::shaders::gemm_bias_grad_reduce_f32`・`fandhe_ai_backend_
     /// metal::layout::reduce_bias_grad_rows_host` 参照）。このため
     /// 実装間・ホスト参照実装との一致は bit 完全一致ではなく REQ-2

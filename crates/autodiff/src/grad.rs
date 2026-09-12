@@ -638,21 +638,35 @@ fn reduce_to_shape(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
 /// （fresh〈`LinearAct`〉と reuse〈`LinearResident` フォールバック〉が
 /// 同じ形状パターンで異なる数値を返さないようにする）。
 ///
-/// 適用条件は `g` が rank-2 かつ `target_shape` の総要素数が `g` の
-/// 列数と一致する場合（`nn::Linear` の bias `[out_features]` を含む
-/// 典型的な行方向縮約）に限る。`eval::reduce_bias_grad_rows` は rank-2
-/// 入力・列ごとの和という契約（`gemm_bias_grad_reduce_f32` の
-/// `MatrixLayout` と同型）のため、それ以外の broadcast 形状
-/// （`linear_act` が許容する `[1, n]` 等。`nn::Linear`〈`from_parameters`
-/// が bias を `[out_features]` 厳密一致にしか構築しない〉経由では到達
-/// せず `pub(crate) fn linear_act` を直接呼ぶ経路限定。`var.rs` doc
-/// 「`linear_act` は `[n]` と厳密一致しない broadcast 可能な bias も
-/// 受理する」参照）は、既存の `reduce_to_shape`（`f32` 逐次和・
-/// 任意 rank 対応）のまま維持し挙動を変えない（安全側）。
+/// 適用条件は `g` が rank-2 `[m, n]` かつ `target_shape` が「軸 0
+/// （行／batch 軸）方向の縮約」を表す形状（末尾次元が `n` と一致し、
+/// それより前の全次元が `1`。典型例: `[n]`・`[1, n]`。`nn::Linear` の
+/// bias `[out_features]` を含む）の場合に限る。`eval::reduce_bias_grad_
+/// rows` は「rank-2 入力を行 `0..m` で縮約し列ごとの和を返す」という
+/// 固定の契約（`gemm_bias_grad_reduce_f32` の `MatrixLayout` と同型）
+/// のため、**軸 1（列）方向を縮約する broadcast 形状（例: `g: [2, 2]`
+/// に対する `target_shape: [2, 1]`。各行の bias が列方向へ複製される
+/// パターン）には適用できない**——列ごとの和という異なる縮約軸の結果を
+/// 返してしまい、値そのものが誤りになる（PR #1659 codex-review P2
+/// 是正。回帰テスト `reduce_bias_grad_does_not_misapply_row_reduction_
+/// to_column_broadcast_bias` 参照）。この判定は総要素数の一致だけでは
+/// 検出できない（`[2, 1]` も総要素数 `2` で `g` の列数 `2` と一致して
+/// しまうため、旧実装は shape 構造を見ずに誤って f64 経路へ分岐して
+/// いた）。`nn::Linear`〈`from_parameters` が bias を `[out_features]`
+/// 厳密一致にしか構築しない〉経由では軸 1 縮約の broadcast bias は
+/// 到達せず、`pub(crate) fn linear_act` を直接呼ぶ経路限定（`var.rs`
+/// doc「`linear_act` は `[n]` と厳密一致しない broadcast 可能な bias
+/// も受理する」参照）。適用条件を満たさない場合は既存の
+/// `reduce_to_shape`（`f32` 逐次和・任意 rank・任意軸対応）のまま
+/// 維持し挙動を変えない（安全側）。
 fn reduce_bias_grad(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
     let g_shape = g.shape();
-    let target_numel: usize = target_shape.iter().product();
-    if g_shape.len() == 2 && g_shape[1] == target_numel {
+    let is_row_axis_reduction = g_shape.len() == 2
+        && target_shape.last() == Some(&g_shape[1])
+        && target_shape[..target_shape.len().saturating_sub(1)]
+            .iter()
+            .all(|&d| d == 1);
+    if is_row_axis_reduction {
         let data = eval::reduce_bias_grad_rows(g);
         return build_tensor(data, target_shape);
     }
@@ -1503,6 +1517,69 @@ mod tests {
         let num_db = numeric_grad_unary(&b, &s, |x| eval::add(&a, x));
 
         assert_grad_close("reduce_to_shape(middle axis) dB", &db, &num_db);
+    }
+
+    // --- reduce_bias_grad（イシュー #1566・PR #1659 codex-review P2 是正） ---
+
+    /// `reduce_bias_grad` が「軸 0（行）方向の bias 縮約」用の f64 経路
+    /// （`eval::reduce_bias_grad_rows`）を、**軸 1（列）方向の
+    /// broadcast bias**（`target_shape` の末尾次元が `g` の列数と
+    /// 一致しない形状。例: `g: [2, 2]` に対する `target_shape: [2, 1]`）
+    /// へ誤って適用しないことを確認する回帰テスト（codex-review 指摘。
+    /// `[2, 1]` は総要素数が `2` で `g` の列数 `2` と偶然一致するため、
+    /// 総要素数のみで判定する実装だと誤って行縮約の f64 経路へ分岐し
+    /// てしまっていた）。
+    #[test]
+    fn reduce_bias_grad_does_not_misapply_row_reduction_to_column_broadcast_bias() {
+        // g = [[1, 2], [3, 4]]（行優先）。target_shape = [2, 1] は
+        // 各行の bias 値が 2 列へ複製される broadcast（軸 1 縮約）。
+        // 正しい勾配は行ごとの和: row0 = 1+2=3・row1 = 3+4=7。
+        // 行縮約（列ごとの和 col0=1+3=4・col1=2+4=6）を誤って適用すると
+        // 全く異なる値になる。
+        let g = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+
+        let got = reduce_bias_grad(&g, &[2, 1]);
+        let expected = reduce_to_shape(&g, &[2, 1]);
+
+        assert_eq!(got.shape(), &[2, 1]);
+        assert_eq!(
+            got.contiguous().as_slice().unwrap(),
+            expected.contiguous().as_slice().unwrap(),
+            "reduce_bias_grad は軸 1 縮約（[2, 1]）には reduce_to_shape をそのまま使う              はず（f64 行縮約経路を誤適用してはいけない）"
+        );
+        assert_eq!(
+            got.contiguous().as_slice().unwrap(),
+            &[3.0f32, 7.0],
+            "軸 1 縮約の正しい値（行ごとの和）と一致するはず"
+        );
+    }
+
+    /// 対照: 軸 0（行）方向の標準的な bias 縮約（`target_shape` の末尾
+    /// 次元が `g` の列数と一致し、それより前の次元がすべて `1`）は
+    /// 引き続き `eval::reduce_bias_grad_rows`（f64 経路）へ委譲される
+    /// ことを、`[n]`・`[1, n]` の両形状で確認する（値は
+    /// `reduce_to_shape`〈こちらは `f32` 逐次和〉と一致する範囲——
+    /// 相殺による桁落ちがない入力なので両経路の値自体は一致するが、
+    /// 経路選択の正しさを shape 網羅で確認する意図）。
+    #[test]
+    fn reduce_bias_grad_applies_row_reduction_for_rank1_and_leading_one_targets() {
+        let g = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+
+        let got_rank1 = reduce_bias_grad(&g, &[2]);
+        assert_eq!(got_rank1.shape(), &[2]);
+        assert_eq!(
+            got_rank1.contiguous().as_slice().unwrap(),
+            &[4.0f32, 6.0],
+            "target_shape=[2] は列ごとの和（col0=1+3=4・col1=2+4=6）のはず"
+        );
+
+        let got_leading_one = reduce_bias_grad(&g, &[1, 2]);
+        assert_eq!(got_leading_one.shape(), &[1, 2]);
+        assert_eq!(
+            got_leading_one.contiguous().as_slice().unwrap(),
+            &[4.0f32, 6.0],
+            "target_shape=[1, 2] も同じ列ごとの和になるはず（先頭次元 1 個の reshape）"
+        );
     }
 
     // --- vjp() ディスパッチの疎通確認（#18 との継ぎ目契約） ---

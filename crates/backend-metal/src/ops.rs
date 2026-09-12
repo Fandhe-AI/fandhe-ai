@@ -885,6 +885,7 @@ impl BackendOps for MetalBackendOps {
     /// アキュムレータ方針に従い、ホスト経路 `reduce_bias_grad_rows_host`
     /// は `f64` アキュムレータへ統一済み。GPU カーネル
     /// `gemm_bias_grad_reduce_f32`（`double` 非対応の Metal）は
+    /// scale 方式（LAPACK SLASSQ 系の線形和版。中間 overflow 回避）+
     /// Neumaier 改良版 Kahan 補償和で同方針を満たす。両経路は蓄積方式が
     /// 異なるため bit 完全一致ではなく REQ-2 統一複合判定で一致を検証
     /// する契約（`docs/backend-metal-command-batching-design.md` §10.2-1・
