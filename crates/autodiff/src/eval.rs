@@ -627,6 +627,55 @@ pub(crate) fn log_softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32>
     build_tensor(out, &shape)
 }
 
+/// `inputs` を `dim` 軸で連結するホスト参照実装（`torch.cat` 相当。
+/// イシュー #1598）。`BackendOps::concat` が `Unsupported` を返した
+/// ときのみ `grad::concat_with_fallback` から呼ばれる（`softmax_along`
+/// と同じ「バックエンド実装 → フォールバック」の二段構成。判定迂回
+/// 経路を作らない）。
+///
+/// `out_shape` は呼び出し元（`Var::cat`／`grad::concat_with_fallback`）
+/// が [`fandhe_ai_tensor_core::concat_out_shape`] で検査・確定済みの
+/// 出力 shape をそのまま渡す（本関数は shape 再検査を行わない前提）。
+/// `inputs` は strided view（`dense_vec_ref` で稠密化してから読む）で
+/// よい——`Op::Narrow` の VJP（`grad::concat_with_fallback` 経由）が
+/// zero-pad テンソルを渡す際、そのテンソル自体は contiguous のため
+/// 実害はないが、`Var::cat` の入力が transpose 直後の view でも
+/// 正しく動く契約とする。
+///
+/// レイアウト分解: `outer = prod(out_shape[..dim])`・
+/// `inner = prod(out_shape[dim+1..])`・出力の線形添字は
+/// `(o * total + off_i + s) * inner + i`
+/// （`o`: outer 添字・`s`: 入力 i 内の dim 添字・`i`: inner 添字・
+/// `off_i`: 入力 i より前の dim 累積長・`total = out_shape[dim]`）。
+pub(crate) fn concat(inputs: &[&Tensor<f32>], dim: usize, out_shape: &[usize]) -> Tensor<f32> {
+    let outer: usize = out_shape[..dim].iter().product();
+    let inner: usize = out_shape[dim + 1..].iter().product();
+    let total = out_shape[dim];
+    let out_numel: usize = out_shape.iter().product();
+    let mut out = vec![0f32; out_numel];
+    if outer == 0 || inner == 0 || total == 0 {
+        return build_tensor(out, out_shape);
+    }
+    let mut off = 0usize;
+    for input in inputs {
+        let seg = input.shape()[dim];
+        if seg == 0 {
+            continue;
+        }
+        let data = dense_vec_ref(input);
+        for o in 0..outer {
+            for s in 0..seg {
+                let src_row_start = (o * seg + s) * inner;
+                let dst_row_start = (o * total + off + s) * inner;
+                out[dst_row_start..dst_row_start + inner]
+                    .copy_from_slice(&data[src_row_start..src_row_start + inner]);
+            }
+        }
+        off += seg;
+    }
+    build_tensor(out, out_shape)
+}
+
 /// CrossEntropy 損失（log-sum-exp 安定化。クラス次元 `class_dim` 指定。
 /// #191・親イシュー #189）。shape 検査（`class_dim` 範囲・targets
 /// shape 一致・targets 添字範囲）は呼び出し元（`var.rs::

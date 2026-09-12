@@ -18,11 +18,12 @@ use std::cell::Ref;
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, ShapeError, Tensor, broadcast_shape,
-    matmul_out_shape, reduce_out_shape, require_same_shape,
+    concat_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
+use crate::grad::concat_with_fallback;
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
 /// `Var::mse_loss_with` の縮約種別（#190・TASK-9.1c 相当。親イシュー
@@ -1109,6 +1110,279 @@ impl<'t> Var<'t> {
         out_shape.push(flattened);
         out_shape.extend_from_slice(&in_shape[end_dim + 1..]);
         self.reshape(&out_shape)
+    }
+
+    /// 複数の `Var` を `dim` 軸で連結する（`torch.cat` 相当。イシュー
+    /// #1598）。関連関数（`&self` を取らない）——`Var` は `Copy` の
+    /// ため `&[Var<'t>]` で受ける。
+    ///
+    /// 検査順序: ①空リストは `vars[0]` に触れる前に
+    /// `AutodiffError::InvalidArgument` → ②先頭要素基準の
+    /// `check_same_tape`（`AutodiffError::TapeMismatch`）→ ③shape 検査
+    /// （[`fandhe_ai_tensor_core::concat_out_shape`]。rank 不一致・
+    /// `dim` 範囲外・`dim` 以外の軸不一致・要素数オーバーフローを
+    /// 個別 variant で報告）→ ④全入力を層 1 で実体化 → ⑤
+    /// `Tape::push_eager` で記録する（`Op::Concat` doc 参照）。
+    ///
+    /// forward 値は `grad::concat_with_fallback`（`ops.concat` →
+    /// `Unsupported` のときのみ `eval::concat`）で計算する。VJP
+    /// （`grad.rs`）は各入力へ `upstream.narrow` を zero-copy に分配
+    /// する。1 要素リストも通常どおり `Op::Concat` ノードを記録する
+    /// （恒等コピー）。
+    pub fn cat(vars: &[Var<'t>], dim: usize) -> Result<Var<'t>, AutodiffError> {
+        let first = match vars.first() {
+            Some(v) => v,
+            None => {
+                return Err(AutodiffError::InvalidArgument(
+                    "Var::cat: vars must not be empty".into(),
+                ));
+            }
+        };
+        for v in &vars[1..] {
+            first.check_same_tape(v)?;
+        }
+        let shapes: Vec<Vec<usize>> = vars.iter().map(|v| v.shape()).collect();
+        let shape_refs: Vec<&[usize]> = shapes.iter().map(|s| s.as_slice()).collect();
+        let out_shape = concat_out_shape(&shape_refs, dim).map_err(AutodiffError::Shape)?;
+
+        // `Tape::push_eager` に渡す forward 値を計算するため、全入力を
+        // 層 1 で実体化してから所有値として持ち出す（`nodes` の
+        // `RefCell` 借用を閉じてから `push_eager`〈`borrow_mut`〉を
+        // 呼ぶ規律。モジュール冒頭コメント参照）。
+        let materialized: Vec<Tensor<f32>> = {
+            let nodes = first.tape.nodes.borrow();
+            let ops = first.tape.ops();
+            let mut out = Vec::with_capacity(vars.len());
+            for v in vars {
+                out.push(materialize_fallible(&nodes, ops, v.id)?.clone());
+            }
+            out
+        };
+        let refs: Vec<&Tensor<f32>> = materialized.iter().collect();
+        let value = concat_with_fallback(first.tape.ops(), &refs, dim, &out_shape)?;
+
+        let id = first.tape.push_eager(
+            Op::Concat {
+                inputs: vars.iter().map(|v| v.id).collect(),
+                dim,
+            },
+            value,
+        );
+        Ok(Var::from_raw(first.tape, id))
+    }
+
+    /// 複数の `Var` を新規軸 `dim` で積み上げる（`torch.stack` 相当。
+    /// イシュー #1598）。各要素を `unsqueeze(dim)` してから
+    /// [`Self::cat`] する（PyTorch の定義そのもの）。関連関数。
+    ///
+    /// 検査順序: ①空リスト → `InvalidArgument`（`vars[0]` に触れる
+    /// 前）→ ②先頭要素基準の `check_same_tape` → ③`dim <= rank`
+    /// （`ShapeError::AxisOutOfRange { rank: rank + 1 }`）→ ④全要素の
+    /// shape 完全一致（`ShapeError::ShapeMismatch`）→ ここまで全て
+    /// 通過してから `unsqueeze` ノードを push する（失敗した `stack`
+    /// がテープに中間ノードを残さないよう、`unsqueeze` を呼ぶ前に
+    /// 全要素の contiguity も検査する）。
+    ///
+    /// `unsqueeze` は `reshape` へ委譲するため、**非 contiguous な
+    /// 要素**（`permute`／`transpose` 直後）は
+    /// `ShapeError::NonContiguousReshape` を返す（暗黙 `contiguous()`
+    /// はしない。`Var::reshape` doc「案 A」と同じ規律）。
+    pub fn stack(vars: &[Var<'t>], dim: usize) -> Result<Var<'t>, AutodiffError> {
+        let first = match vars.first() {
+            Some(v) => v,
+            None => {
+                return Err(AutodiffError::InvalidArgument(
+                    "Var::stack: vars must not be empty".into(),
+                ));
+            }
+        };
+        for v in &vars[1..] {
+            first.check_same_tape(v)?;
+        }
+        let in_shape = first.shape();
+        let rank = in_shape.len();
+        if dim > rank {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: dim,
+                rank: rank + 1,
+            }));
+        }
+        for v in &vars[1..] {
+            let s = v.shape();
+            if s != in_shape {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: in_shape.clone(),
+                    rhs: s,
+                }));
+            }
+        }
+        for v in vars {
+            let nodes = v.tape.nodes.borrow();
+            let val = materialize_fallible(&nodes, v.tape.ops(), v.id)?;
+            if !val.is_contiguous() {
+                return Err(AutodiffError::Shape(ShapeError::NonContiguousReshape));
+            }
+        }
+        let unsqueezed: Vec<Var<'t>> = vars
+            .iter()
+            .map(|v| v.unsqueeze(dim))
+            .collect::<Result<_, _>>()?;
+        Self::cat(&unsqueezed, dim)
+    }
+
+    /// `[start, start+len)` を切り出す zero-copy view（`torch.narrow`
+    /// 相当。イシュー #1598・#1599「narrow」行の解消）。
+    ///
+    /// 検査順序: ①`dim < rank`（`ShapeError::AxisOutOfRange`）→
+    /// ②`start + len <= shape[dim]`（`checked_add`。
+    /// `ShapeError::NarrowOutOfBounds`）→ ③層 1 で入力を実体化してから
+    /// `Tape::push_view`（`transpose`／`permute` と同じ規律）。
+    pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let rank = in_shape.len();
+        if dim >= rank {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: dim,
+                rank,
+            }));
+        }
+        let dim_size = in_shape[dim];
+        let in_bounds = start.checked_add(len).is_some_and(|end| end <= dim_size);
+        if !in_bounds {
+            return Err(AutodiffError::Shape(ShapeError::NarrowOutOfBounds {
+                dim,
+                start,
+                len,
+                dim_size,
+            }));
+        }
+        let mut out_shape = in_shape;
+        out_shape[dim] = len;
+
+        {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?;
+        }
+        let id = self.tape.push_view(
+            Op::Narrow {
+                input: self.id,
+                dim,
+                start,
+                len,
+            },
+            out_shape,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 指定した各長さ（`sizes`）で `dim` 軸を分割する（`torch.split`
+    /// の list 形式相当。イシュー #1598）。各出力は [`Self::narrow`]
+    /// （zero-copy view）。
+    ///
+    /// `sizes.iter().sum()`（`checked_add`）が `shape[dim]` と一致しな
+    /// い場合 `ShapeError::ShapeMismatch { lhs: [shape[dim]], rhs:
+    /// [sum] }` を返す。
+    pub fn split_with_sizes(
+        &self,
+        sizes: &[usize],
+        dim: usize,
+    ) -> Result<Vec<Var<'t>>, AutodiffError> {
+        let in_shape = self.shape();
+        let rank = in_shape.len();
+        if dim >= rank {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: dim,
+                rank,
+            }));
+        }
+        let dim_size = in_shape[dim];
+        let mut sum: usize = 0;
+        for &s in sizes {
+            sum = sum
+                .checked_add(s)
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+        }
+        if sum != dim_size {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![dim_size],
+                rhs: vec![sum],
+            }));
+        }
+        let mut out = Vec::with_capacity(sizes.len());
+        let mut start = 0usize;
+        for &len in sizes {
+            out.push(self.narrow(dim, start, len)?);
+            start += len;
+        }
+        Ok(out)
+    }
+
+    /// 先頭から `split_size` 刻みで `dim` 軸を分割する（`torch.split`
+    /// の int 形式相当。末尾は端数。イシュー #1598）。
+    ///
+    /// `split_size == 0` は `shape[dim]` の値に依らず一律
+    /// `AutodiffError::InvalidArgument`（PyTorch は `shape[dim] == 0`
+    /// のとき許容するが、0 除算相当の分岐を持たない単純な契約を
+    /// 優先する）。`shape[dim] == 0` かつ `split_size > 0` は PyTorch
+    /// と同じく `[narrow(dim, 0, 0)]` の 1 要素を返す。
+    pub fn split(&self, split_size: usize, dim: usize) -> Result<Vec<Var<'t>>, AutodiffError> {
+        let in_shape = self.shape();
+        let rank = in_shape.len();
+        if dim >= rank {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: dim,
+                rank,
+            }));
+        }
+        if split_size == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "Var::split: split_size must be nonzero".into(),
+            ));
+        }
+        let dim_size = in_shape[dim];
+        let mut sizes = Vec::new();
+        if dim_size == 0 {
+            sizes.push(0);
+        } else {
+            let mut remaining = dim_size;
+            while remaining > 0 {
+                let take = remaining.min(split_size);
+                sizes.push(take);
+                remaining -= take;
+            }
+        }
+        self.split_with_sizes(&sizes, dim)
+    }
+
+    /// `dim` 軸を `chunks` 個以下に分割する（`torch.chunk` 相当。
+    /// イシュー #1598）。`chunk_size = ceil(shape[dim] / chunks)`
+    /// （`div_ceil`）を [`Self::split`] へ委譲する。
+    ///
+    /// `chunks == 0` は `AutodiffError::InvalidArgument`。
+    /// `shape[dim] == 0` は `chunk_size` が 0 になり `split` の
+    /// `split_size == 0` 規則と衝突するため、`split` へ委譲せず
+    /// PyTorch と同じく `chunks` 個の空 `narrow(dim, 0, 0)` を返す
+    /// （[`Self::split_with_sizes`] へ `[0; chunks]` を渡す）。
+    pub fn chunk(&self, chunks: usize, dim: usize) -> Result<Vec<Var<'t>>, AutodiffError> {
+        if chunks == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "Var::chunk: chunks must be nonzero".into(),
+            ));
+        }
+        let in_shape = self.shape();
+        let rank = in_shape.len();
+        if dim >= rank {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: dim,
+                rank,
+            }));
+        }
+        let dim_size = in_shape[dim];
+        if dim_size == 0 {
+            return self.split_with_sizes(&vec![0; chunks], dim);
+        }
+        let chunk_size = dim_size.div_ceil(chunks);
+        self.split(chunk_size, dim)
     }
     /// LSTM セル 1 step（イシュー #1647・設計 `docs/autodiff-rnn-cell-
     /// tape-design.md` 決定 1・1b・1c・4・5・12）。ゲート順は `i,f,g,o`

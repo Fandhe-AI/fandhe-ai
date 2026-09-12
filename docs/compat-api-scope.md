@@ -208,8 +208,8 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | softmax／log_softmax | #1594（実装済み。`Var::softmax`／`log_softmax`・`nn::activation::Softmax`／`LogSoftmax`。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` は facade へ追加しない〉） |
 | GELU／SiLU 等の活性化 | #1595 |
 | LayerNorm／RMSNorm／BatchNorm | #1596・#1608 |
-| 形状操作（permute／squeeze／expand／cat／stack／split） | #1597（実装済み: permute／squeeze／unsqueeze／expand〈broadcast_to〉／flatten。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉）・#1598（cat／stack／split。未実装） |
-| index 系（narrow／where／gather／scatter） | #1599 |
+| 形状操作（permute／squeeze／expand／cat／stack／split） | #1597（実装済み: permute／squeeze／unsqueeze／expand〈broadcast_to〉／flatten。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉）・#1598（実装済み: `Var::cat`／`stack`／`narrow`／`split`／`split_with_sizes`／`chunk`。§5 は Tier 1 列挙済み機能につき再適用不要と判断し facade へ新規 `pub use`／`pub fn` を追加していない。narrow は本 issue で `#1599` 側の対象から解消済み） |
+| index 系（narrow／where／gather／scatter） | #1599（narrow は #1598 で実装済みのため対象外。where／gather／scatter が残対象） |
 | バッチ行列積 | #1600 |
 | 縮約（mean／min／argmax／var／std／複数軸） | #1601（`amax`／`max` の勾配分配方式はこの issue で設計判断を記録して確定。`04-requirements.md:234`。2 節参照） |
 | 乱数生成と RNG 契約 | #1602 |

@@ -974,8 +974,96 @@ pub(crate) fn vjp(
             let da = reduce_bias_grad(upstream, input_shape);
             vec![(input, da)]
         }
+        // `Var::cat` が記録するノード（イシュー #1598）。VJP は各入力
+        // へ `upstream.narrow(dim, off_i, len_i)`（zero-copy view）を
+        // 分配する（「Concat の VJP は Split（Narrow）」）。同一
+        // `NodeId` の重複（`cat(&[x, x])`）は呼び出し元（`backward.rs::
+        // accumulate`）が合算するため、ここでは単純に列挙する。
+        Op::Concat { inputs, dim } => {
+            let mut off = 0usize;
+            let mut contributions = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let len = nodes[input.0].shape[dim];
+                let da = upstream.narrow(dim, off, len).unwrap_or_else(|_| {
+                    debug_assert!(
+                        false,
+                        "grad::vjp: Op::Concat の逆伝播で narrow が失敗した（forward 側の契約違反）"
+                    );
+                    upstream.clone()
+                });
+                contributions.push((input, da));
+                off += len;
+            }
+            contributions
+        }
+        // `Var::narrow`（`split`／`split_with_sizes`／`chunk` の実体）が
+        // 記録するノード（イシュー #1598）。「Split の VJP は Concat」
+        // の原則どおり、選択されなかった前後の区間を zero-pad した
+        // テンソルと `upstream` を `dim` で連結し入力 shape へ戻す
+        // （`concat_with_fallback` を `Var::cat` の forward と共用。
+        // 空区間はスキップして 1 要素連結〈恒等コピー〉に落とす）。
+        Op::Narrow {
+            input,
+            dim,
+            start,
+            len,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let before_len = start;
+            let after_len = input_shape[dim] - start - len;
+            let mut before_shape = input_shape.clone();
+            before_shape[dim] = before_len;
+            let mut after_shape = input_shape.clone();
+            after_shape[dim] = after_len;
+            let before =
+                eval::build_tensor(vec![0f32; before_shape.iter().product()], &before_shape);
+            let after = eval::build_tensor(vec![0f32; after_shape.iter().product()], &after_shape);
+            let mut pieces: Vec<&Tensor<f32>> = Vec::with_capacity(3);
+            if before_len > 0 {
+                pieces.push(&before);
+            }
+            pieces.push(upstream);
+            if after_len > 0 {
+                pieces.push(&after);
+            }
+            let da = concat_with_fallback(ops, &pieces, dim, &input_shape)?;
+            vec![(input, da)]
+        }
     };
     Ok(contributions)
+}
+
+/// [`Op::Concat`] の forward（`Var::cat`）と [`Op::Narrow`] の VJP
+/// （直上）が共用する連結ヘルパー（イシュー #1598）。`ops.concat` →
+/// `Unsupported` のときのみ `eval::concat` へフォールバックする
+/// （`Op::Softmax` の「バックエンド実装 → フォールバック」二段構成と
+/// 同型。判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+///
+/// バックエンド実装（`Unsupported` 以外）が返した出力 shape を
+/// `out_shape` と照合し、不一致は
+/// `AutodiffError::Backend(BackendError::ShapeMismatch(..))` を返す
+/// （実装バグの黙認防止）。
+pub(crate) fn concat_with_fallback(
+    ops: &dyn BackendOps,
+    inputs: &[&Tensor<f32>],
+    dim: usize,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.concat(inputs, dim) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::concat(inputs, dim, out_shape)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
 }
 
 /// [`Op::Permute`] の VJP（`vjp` 内）が使う逆置換の算出（イシュー

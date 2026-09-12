@@ -115,7 +115,10 @@ shape 検査が正しければ到達しない）は `debug_assert!` + 安全側�
 - `permute`／`broadcast_to` の `Var` 化は #1597 で実装済み（同じ
   `push_view`／`resolve_view` 骨格をそのまま拡張。`Var::squeeze`／
   `unsqueeze`／`flatten` は新規 `Op` を持たず `Var::reshape` へ委譲）。
-  `narrow` の `Var` 化は #1599 へ引き継ぎ
+  `narrow` の `Var` 化は #1598 で実装済み（新 `Op::Narrow`。同じ
+  `push_view`／`resolve_view` 骨格。`split`／`split_with_sizes`／`chunk`
+  はいずれも `narrow` への委譲。#1599 は narrow を対象から除き
+  where／gather／scatter に集中する）
 - elementwise 融合連鎖の**内部**で view を解決する（`build_lazy_plan`
   への `ops` 配線・`FusionPlan` へのレイアウト情報導入）
 - `tensor-core` 非 contiguous `reshape` の案 B（暗黙コピー）採否

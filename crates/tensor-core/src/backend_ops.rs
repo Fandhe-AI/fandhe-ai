@@ -923,6 +923,29 @@ pub trait BackendOps {
         ))
     }
 
+    /// `inputs` を `dim` 軸で連結する（`torch.cat` 相当。イシュー
+    /// #1598）。入力は strided view（`contiguous()` を経ずに渡されうる）
+    /// でよく、出力は必ず contiguous・**bit 完全一致のコピー**（丸め
+    /// なし。REQ-2 の複合判定より強い bit 同一を parity テストで要求
+    /// する）。`dim` 以外の軸の shape 一致は呼び出し元
+    /// （[`crate::ops_shape::concat_out_shape`]）で検査済みだが、実装側
+    /// でも `inputs` の shape を再検査し、不一致は
+    /// [`BackendError::ShapeMismatch`] を返すこと（fail-closed。
+    /// 判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::softmax`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::cat`（`grad.rs::
+    /// concat_with_fallback` 経由）は `Unsupported` のときのみホスト
+    /// 参照実装（`eval::concat`）へフォールバックする（それ以外の
+    /// エラーは伝播する）。
+    fn concat(&self, _inputs: &[&Tensor<f32>], _dim: usize) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "concat: default fail-safe (no fused concat kernel available)".into(),
+        ))
+    }
+
     /// GEMM の epilogue（bias 加算・activation）を融合した
     /// `act(A @ B + bias)` を計算する（TASK-12.1f・#203）。
     ///
@@ -2042,6 +2065,19 @@ mod tests {
         let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
 
         let result = ops.log_softmax(&x, 0);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::concat`] の既定実装が fail-safe を返すことを
+    /// 確認する（イシュー #1598）。
+    #[test]
+    fn concat_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = Tensor::new(vec![1.0, 2.0], &[2]).unwrap();
+        let b = Tensor::new(vec![3.0, 4.0], &[2]).unwrap();
+
+        let result = ops.concat(&[&a, &b], 0);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

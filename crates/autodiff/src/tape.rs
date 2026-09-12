@@ -409,6 +409,34 @@ pub(crate) enum Op {
     /// する（`tests/view_zero_alloc.rs` は forward のみを zero-alloc
     /// 対象とする）。
     BroadcastTo { input: NodeId },
+    /// `Var::cat` が記録する連結ノード（イシュー #1598）。`Reshape`／
+    /// `Permute` 等と異なり**コピーを伴う**ため view ノードではなく
+    /// `push_eager` で登録する（`BackendOps` に対応メソッド `concat`
+    /// があるため融合対象外——`Op::is_lazy_elementwise` の elementwise
+    /// 5 演算には含めない）。
+    ///
+    /// VJP（`grad.rs`）は入力 `i` ごとに `upstream.narrow(dim, off_i,
+    /// len_i)`（zero-copy view）を返す（「Concat の VJP は Narrow」）。
+    /// 同一 `NodeId` が `inputs` に重複して現れる場合（例
+    /// `cat(&[x, x])`）は `backward.rs::accumulate` が寄与を合算する
+    /// ため本 variant 側での重複排除は不要。
+    Concat { inputs: Vec<NodeId>, dim: usize },
+    /// `Var::narrow`（および `split`／`split_with_sizes`／`chunk` の
+    /// 実体）が記録する view ノード（イシュー #1598・#1599「narrow」
+    /// 行の解消）。`Reshape`／`Transpose`／`Permute`／`BroadcastTo` と
+    /// 同じく**ホスト値を持たない**・**融合境界**（`resolve_view` が
+    /// `base.narrow(dim, start, len)` で再導出。同上）。
+    ///
+    /// VJP（`grad.rs`）は「Split の VJP は Concat」の原則どおり、
+    /// `[zeros(before), upstream, zeros(after)]` を `dim` で連結して
+    /// 入力 shape へ戻す（`grad::concat_with_fallback` を `Var::cat` と
+    /// 共用。空区間 `before`／`after` はスキップする）。
+    Narrow {
+        input: NodeId,
+        dim: usize,
+        start: usize,
+        len: usize,
+    },
     /// 行方向 softmax（イシュー #1594）。`BackendOps` に対応メソッドが
     /// あり（`softmax`。既存の `run_fused` canonical プラン一致経路とは
     /// 別の独立エントリ）非融合対象ではないが、`Add`/`Mul`/`Relu`/
@@ -617,9 +645,9 @@ impl Op {
         )
     }
 
-    /// view 系ノード（`reshape`/`transpose`/`permute`/`broadcast_to`。
-    /// イシュー #1047・#1597）かどうか。`push_view` で登録時は
-    /// `TapeNode::value` を空のまま保つノード種別を指し、
+    /// view 系ノード（`reshape`/`transpose`/`permute`/`broadcast_to`/
+    /// `narrow`。イシュー #1047・#1597・#1598）かどうか。`push_view` で
+    /// 登録時は `TapeNode::value` を空のまま保つノード種別を指し、
     /// `materialize_fallible`／`materialize_non_fallible` はこの判定で
     /// `resolve_view`（下記）への分岐を選ぶ（初回実体化後は同メソッドが
     /// `resolve_view` の結果を `value` へキャッシュする。`Op::Reshape`
@@ -627,7 +655,11 @@ impl Op {
     pub(crate) fn is_view(&self) -> bool {
         matches!(
             self,
-            Op::Reshape { .. } | Op::Transpose { .. } | Op::Permute { .. } | Op::BroadcastTo { .. }
+            Op::Reshape { .. }
+                | Op::Transpose { .. }
+                | Op::Permute { .. }
+                | Op::BroadcastTo { .. }
+                | Op::Narrow { .. }
         )
     }
 }
@@ -1417,6 +1449,21 @@ fn resolve_view(nodes: &[TapeNode], id: NodeId) -> Tensor<f32> {
                 debug_assert!(
                     false,
                     "resolve_view: Op::BroadcastTo の再導出が失敗した（forward 側の契約違反）"
+                );
+                safe_zeros(&node.shape)
+            })
+        }
+        Op::Narrow {
+            input,
+            dim,
+            start,
+            len,
+        } => {
+            let base = resolve_view(nodes, *input);
+            base.narrow(*dim, *start, *len).unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "resolve_view: Op::Narrow の再導出が失敗した（forward 側の契約違反）"
                 );
                 safe_zeros(&node.shape)
             })
