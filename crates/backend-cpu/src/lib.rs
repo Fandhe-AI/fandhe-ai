@@ -155,6 +155,7 @@ pub mod parity;
 pub mod reduction;
 pub mod rmsnorm;
 mod rnn_cell;
+mod small_shape_thread_cap;
 pub mod softmax;
 mod thread_limit;
 
@@ -177,5 +178,6 @@ pub use parity::{
     compare, matmul_reference_fma,
 };
 pub use rmsnorm::{RmsNormError, run_rmsnorm_f32};
+pub use small_shape_thread_cap::{SmallShapeCapReport, small_shape_cap_report};
 pub use softmax::{SoftmaxError, run_softmax_f32};
 pub use thread_limit::{ThreadLimitReport, thread_limit_report};

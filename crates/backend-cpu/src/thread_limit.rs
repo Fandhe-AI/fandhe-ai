@@ -42,6 +42,15 @@
 //! （`rayon::current_num_threads()`）をそのまま使う」へフォールバックする
 //! （panic 経路なし・`unwrap`／`expect` 不使用。R3・R4 に対応）。
 //!
+//! ## 別機構との関係（イシュー #1575）
+//!
+//! [`crate::small_shape_thread_cap`] は本モジュールとは**独立の別機構**
+//! である。本モジュールはコア種別（大コア数）に基づき「グローバル
+//! プールの既定並列度」自体を絞るのに対し、あちらは M×N×K の仕事量に
+//! 基づき「小形状 GEMM だけを専用の小さいプールで実行する」（コア種別
+//! 判定を経由しない）。両者は独立に有効化・無効化でき、本モジュールの
+//! `BIG_CORE_LIMIT_ENABLED` を変更しても影響しない。
+//!
 //! ## `RAYON_NUM_THREADS` との関係
 //!
 //! `RAYON_NUM_THREADS` が有効な正の整数として設定されている場合
@@ -189,7 +198,7 @@ fn resolve(current: usize, detected: Option<usize>, env_override: bool, enabled:
 /// （正の `usize` として parse できる場合のみ「明示設定あり」とみなす。
 /// 空文字列・`0`・負数・非数値は rayon 側でも無視されるため、本関数でも
 /// 同様に「未設定扱い」として `None` を返す）。
-fn parse_env_num_threads(raw: Option<&str>) -> Option<usize> {
+pub(crate) fn parse_env_num_threads(raw: Option<&str>) -> Option<usize> {
     let raw = raw?.trim();
     let value: usize = raw.parse().ok()?;
     if value == 0 { None } else { Some(value) }
@@ -297,7 +306,7 @@ fn big_cores_from_sysfs(root: &Path) -> Option<usize> {
 /// 観点でユーザー入力の連結を一切行わない。`.claude/rules/security.md`）
 /// で起動し、stdout を [`parse_sysctl_stdout`] で parse する。
 #[cfg(target_os = "macos")]
-fn read_sysctl(name: &str) -> Option<usize> {
+pub(crate) fn read_sysctl(name: &str) -> Option<usize> {
     use std::process::Command;
     let output = Command::new("/usr/sbin/sysctl")
         .env_clear()

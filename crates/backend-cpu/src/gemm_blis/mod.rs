@@ -580,17 +580,25 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
     // 戻る（`RowPanel` 参照実装と bit 完全一致・`num_threads`／
     // `panel_rows` の算出も従来どおり `else` 節内でのみ行う）。
     if TWO_D_DYNAMIC_PRODUCTION_ENABLED {
-        dispatch_two_d_dynamic(
-            a,
-            b,
-            c,
-            n,
-            k,
-            0..m,
-            blocks,
-            transpose,
-            TWO_D_JOBS_PER_WORKER,
-        )
+        // 小形状 GEMM の仕事量ベース rayon 並列度上限（イシュー #1575・
+        // [`crate::small_shape_thread_cap`]）。M4 Max 自機判定・仕事量
+        // 閾値未満の場合のみ専用の小さいプールで実行し、それ以外は
+        // 現行プール（グローバルプール）で `dispatch_two_d_dynamic` を
+        // そのまま呼ぶ（`crate::thread_limit`〈コア種別ベース。#1363〉
+        // とは独立の別機構。両モジュールの doc 相互参照を参照）。
+        crate::small_shape_thread_cap::run_capped(m, n, k, || {
+            dispatch_two_d_dynamic(
+                a,
+                b,
+                c,
+                n,
+                k,
+                0..m,
+                blocks,
+                transpose,
+                TWO_D_JOBS_PER_WORKER,
+            )
+        })
     } else {
         // 行パネル分割数を rayon の既定スレッド数ではなく実効スレッド数
         // （`crate::thread_limit::effective_num_threads`）から算出する
@@ -750,17 +758,23 @@ pub fn gemm_blis_bias_act_parallel(
     // §12「job ごとに K 全域完了後 1 回」の「または join 後に全体へ 1 回」
     // 案を採用）。
     if TWO_D_DYNAMIC_PRODUCTION_ENABLED {
-        dispatch_two_d_dynamic(
-            a,
-            b,
-            c,
-            n,
-            k,
-            0..m,
-            blocks,
-            GemmTranspose::Nn,
-            TWO_D_JOBS_PER_WORKER,
-        )?;
+        // 小形状 GEMM の仕事量ベース rayon 並列度上限（イシュー #1575。
+        // 上記 `gemm_blis_parallel_with_transpose` と同じ理由・同じ
+        // 機構を共有する。epilogue はプール切替と無関係に GEMM 本体
+        // 完了後へ適用する）。
+        crate::small_shape_thread_cap::run_capped(m, n, k, || {
+            dispatch_two_d_dynamic(
+                a,
+                b,
+                c,
+                n,
+                k,
+                0..m,
+                blocks,
+                GemmTranspose::Nn,
+                TWO_D_JOBS_PER_WORKER,
+            )
+        })?;
         apply_epilogue(c, n, bias, act)
     } else {
         // 行パネル分割数の実効スレッド数への差し替えは
