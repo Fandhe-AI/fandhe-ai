@@ -102,40 +102,17 @@
   overflow して `NaN` を生むため必須。`NaN`／`inf` 入力の伝播も明示的に扱う〉を
   正規化統計の「`f64` 相当」実装形として適用する（イシュー #1102。ユーザー承認
   2026-09-01。GB10 実機実測・Metal 実機実測: `docs/perf/cuda-parity-baseline.md`
-  §9.8〜§9.10）。さらに、**勾配の長軸縮約の Metal 実装形**は正規化統計とは別に
-  規定する。MSL は `double` 非対応のため二乗和と同じ scale/ssq 方式は転用できず
-  （勾配縮約は二乗和ではなく符号付き値の和であるため）、代わりに **Neumaier
-  改良版 Kahan 補償和 + 2 の冪 scale**（`bias_pow2_floor`。列内の要素の最大絶対値
-  以下の最大の 2 の冪で括り出し、除算・比は商が f32 正規化数の範囲（`|x_i|/scale ≥
-  2^-126`）にある限り exact〈underflow する要素の丸め誤差は安全余裕 `1u` へ吸収済み。
-  正本「3.4」節〉のため誤差項を追加しない）を
-  勾配縮約の「`f64` 相当」実装形として適用する。この実装形は f32 のみで構成される
-  ため、ホスト（CPU）`f64` 蓄積・CUDA `double` 蓄積と**厳密同値にはならない**。
-  一致判定は事前に入力から計算できる述語による 2 層契約（正本
-  `docs/metal-grad-reduction-parity-judgment-decision.md`）で規定する。**Tier A**
-  （全入力に常に適用・除外なし）: `|y_metal − y_ref| ≤ (4 + n·ε32)·ε32·Σ|x_i|`
-  （ε32 = 2^-24。`n` は縮約対象要素数。有効範囲 `n·ε32 < 1`。**2 次項 `n·ε32` の
-  係数 `1` は証明済み上界ではなく契約上の規約値**（PR #1659 実測の裏付けあり。
-  将来これが不成立となる場合は除外ではなく契約自体のユーザー再検討とする。正本
-  「3.1」節）。1 次項の係数 `4` は縮約段数 1
-  〈完全逐次 Neumaier 補償和〉の誤差上界 `2u` + `y_ref` downcast の丸め誤差上界
-  `1u`（`= u·|S_ref|`。round-to-nearest の一般上界であり `0.5u` ではない）+ 安全余裕
-  `1u`（underflow・参照和丸め等を吸収。正本「3.1」節）から導出し、PR #1659 の
-  逐語ホストモデル実測と整合する）。`y_ref` は参照実装（`reduce_bias_grad_rows_host`
-  ／`eval::reduce_bias_grad_rows`）が index 順に `f64` で逐次加算した和 `S_ref` を
-  1 回 `f32` へ downcast した値（無限精度の真値ではない）。**Tier B**（REQ-2 統一
-  複合判定）: 事前判定可能な述語
-  `(4 + n·ε32)·ε32·Σ|x_i| ≤ max(1e-3·|S_ref|, 1e-5)` が成立する列にのみ適用し、
-  不成立の列（`[2^48, 2^24, 1, -2^48, -2^24]` 等）は Tier A のみで判定する（除外
-  ではなく判定方式の事前分岐。片側変更ではなく `double` 非対応バックエンドに対する
-  実装形の規定である。ユーザー承認
-  2026-09-12・イシュー #1566）。契約の片側変更（一部バックエンドのみ精度を上げる
-  等）は P1。契約の有効範囲は `n < 2^24` とし、範囲外の入力は Metal 実装・ホスト
-  参照実装のいずれも `BackendError::InvalidArgument` で fail-closed に拒否する
-  （無言のフォールバックはしない。実装は PR #1659 側）。非有限値（NaN／±inf）を
-  含む場合は実数の上界式ではなくクラス一致（`y_ref` が NaN／±inf なら `y_metal` も
-  同一クラス）を要求し、`y_ref` と `y_metal` のクラスが食い違う場合は実装のバグ
-  とする（除外なし。詳細は正本ドキュメント「2.4」「2.5」節）
+  §9.8〜§9.10）。**勾配の長軸縮約の Metal 実装形**は正規化統計とは別に規定する。
+  MSL は `double` 非対応のため、IEEE 754 binary64 逐次加算の 64bit 整数ソフト
+  ウェアエミュレーション（`bias_f64_widen`／`bias_f64_add`／`bias_f64_narrow`。
+  ホスト側逐語モデル `crates/backend-metal/src/soft_f64.rs`）として実装し、
+  ホスト `f64` 逐次和（index 順）を 1 回 `f32` へ downcast した値と**bit 完全
+  一致**する（NaN のみ quiet NaN へ正規化しクラス一致で比較。tolerance・
+  baseline・REQ-2 判定は不変）。f32 のみの補償和による近似契約（Tier A/B 等の
+  事前判定可能な誤差上界方式）は検討の末、bit 一致するカーネル実装への置換
+  により不要となった（イシュー #1566・PR #1659。経緯・確定契約の正本は
+  `docs/backend-metal-command-batching-design.md` §10.10〜§10.14・
+  `docs/metal-grad-reduction-parity-judgment-decision.md`）
 - **TF32/f16 Tensor Core 経路の parity テスト判定方式（P1。テストの弱体化禁止の
   例外を明記する規約。正本仕様 `docs/spec/04-requirements.md` REQ-2「2026-09-02
   追記・Tensor Core 経路の受け入れ判定方式」〈fandhe-ai-spec PR #63〉が正式な
