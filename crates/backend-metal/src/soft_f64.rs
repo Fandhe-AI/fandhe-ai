@@ -266,6 +266,339 @@ pub fn narrow_f64_bits(bits: u64) -> u32 {
     sign | (exp_field << 23) | (q as u32)
 }
 
+/// `f64` の符号反転（`-x`）の bit 表現版。NaN も含め符号 bit を無条件に
+/// 反転する（IEEE754 の `negate` 演算・Rust の単項 `-` と同一）。
+#[inline]
+pub fn neg_f64_bits(a: u64) -> u64 {
+    a ^ F64_SIGN
+}
+
+/// `a - b` の bit 表現版（[`add_f64_bits`]`(a, `[`neg_f64_bits`]`(b))`。
+#[inline]
+pub fn sub_f64_bits(a: u64, b: u64) -> u64 {
+    add_f64_bits(a, neg_f64_bits(b))
+}
+
+/// `u64 x u64` の厳密な 128bit 積を `(hi, lo)`（`value = hi*2^64+lo`）で
+/// 返す（32bit 分割のスクールブック乗算。[`mul_f64_bits`] の仮数積算出に
+/// 使う。MSL 側 `ln_f64_mul64_wide` の逐語移植元——MSL は `ulong` のみで
+/// 同じ構造を再現するため、Rust 側もここでは `u128` を使わず同じ
+/// アルゴリズムを採る）。
+#[inline]
+fn mul64_wide(a: u64, b: u64) -> (u64, u64) {
+    let a_lo = a & 0xFFFF_FFFF;
+    let a_hi = a >> 32;
+    let b_lo = b & 0xFFFF_FFFF;
+    let b_hi = b >> 32;
+
+    let lo_lo = a_lo * b_lo;
+    let hi_lo = a_hi * b_lo;
+    let lo_hi = a_lo * b_hi;
+    let hi_hi = a_hi * b_hi;
+
+    let mid = (lo_lo >> 32) + (hi_lo & 0xFFFF_FFFF) + (lo_hi & 0xFFFF_FFFF);
+    let lo = (lo_lo & 0xFFFF_FFFF) | (mid << 32);
+    let hi = hi_hi + (hi_lo >> 32) + (lo_hi >> 32) + (mid >> 32);
+    (hi, lo)
+}
+
+/// `(hi,lo)`（128bit 値。両方 0 なら `None`）の先頭 1 の bit 位置
+/// （0-indexed・LSB 起点）。
+#[inline]
+fn leading_bit_pos128(hi: u64, lo: u64) -> Option<u32> {
+    if hi != 0 {
+        Some(64 + (63 - hi.leading_zeros()))
+    } else if lo != 0 {
+        Some(63 - lo.leading_zeros())
+    } else {
+        None
+    }
+}
+
+/// `(hi,lo)` の下位 `n` bit（`n <= 128`）を `(hi,lo)` 形式のまま取り出す。
+#[inline]
+fn low_bits128(hi: u64, lo: u64, n: u32) -> (u64, u64) {
+    if n == 0 {
+        (0, 0)
+    } else if n >= 128 {
+        (hi, lo)
+    } else if n <= 64 {
+        let mask = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
+        (0, lo & mask)
+    } else {
+        let n2 = n - 64;
+        let mask = if n2 == 64 { u64::MAX } else { (1u64 << n2) - 1 };
+        (hi & mask, lo)
+    }
+}
+
+/// `(hi,lo)` を右シフト `s`（`0..=128`）した値（sticky は持たない・
+/// 単純な切り捨てシフト。丸め判定は呼び出し側が [`low_bits128`] の
+/// 余りと別に行う）。
+#[inline]
+fn shr128(hi: u64, lo: u64, s: u32) -> (u64, u64) {
+    if s == 0 {
+        (hi, lo)
+    } else if s >= 128 {
+        (0, 0)
+    } else if s < 64 {
+        ((hi >> s), (lo >> s) | (hi << (64 - s)))
+    } else if s == 64 {
+        (0, hi)
+    } else {
+        (0, hi >> (s - 64))
+    }
+}
+
+/// `(hi,lo)` の辞書式（＝数値としての）比較。
+#[inline]
+fn cmp128(a: (u64, u64), b: (u64, u64)) -> core::cmp::Ordering {
+    a.cmp(&b)
+}
+
+/// `f64` の指数・仮数フィールド（`e`：バイアス済み・`f`：フラクション。
+/// `e==0 && f==0` の完全ゼロは呼び出し側で排除済みの前提）から
+/// 「隠れ 1 を bit52 に立てた 53bit 仮数 `m`」と、`value = m * 2^(exp_u
+/// - 52)` を満たす unbiased 指数 `exp_u` を求める（正規化数はそのまま、
+/// subnormal は仮数の先頭 1 の位置から逆算してシフトする）。
+/// [`mul_f64_bits`] 専用ヘルパー。
+#[inline]
+fn normalize_f64_mantissa(e: u64, f: u64) -> (u64, i64) {
+    if e == 0 {
+        // subnormal（`f != 0` が呼び出し前提）: 先頭 1 の位置 `lead`
+        // （0..=51）から bit52 へ寄せるシフト量を求める。
+        let lead = 63 - f.leading_zeros() as i64;
+        let shift = 52 - lead;
+        let m = f << shift;
+        let exp_u = -1022 - shift;
+        (m, exp_u)
+    } else {
+        (f | (1u64 << 52), e as i64 - 1023)
+    }
+}
+
+/// `f64 * f64`（最近接偶数丸め）の bit 表現版（NaN は quiet NaN へ
+/// 正規化）。仮数同士の厳密 106bit 積を [`mul64_wide`] で構成し、
+/// **1 回だけ**丸める（中間で `f32` はもとより暫定 `f64` へも丸めない。
+/// 二重丸め回避——特に underflow して subnormal 化する経路で、正規化数
+/// として一度丸めてから再度 subnormal へシフトし直すと誤った丸め結果に
+/// なりうるため、最終シフト量を先に確定してから 1 回で丸める）。
+pub fn mul_f64_bits(a: u64, b: u64) -> u64 {
+    let sa = a & F64_SIGN;
+    let sb = b & F64_SIGN;
+    let sign = sa ^ sb;
+    let ea = (a >> 52) & F64_EXP_MASK;
+    let eb = (b >> 52) & F64_EXP_MASK;
+    let fa = a & F64_FRAC_MASK;
+    let fb = b & F64_FRAC_MASK;
+
+    let a_nan = ea == F64_EXP_MASK && fa != 0;
+    let b_nan = eb == F64_EXP_MASK && fb != 0;
+    if a_nan || b_nan {
+        return F64_QNAN;
+    }
+    let a_inf = ea == F64_EXP_MASK; // fa==0 はここまでに NaN 判定済み。
+    let b_inf = eb == F64_EXP_MASK;
+    let a_zero = ea == 0 && fa == 0;
+    let b_zero = eb == 0 && fb == 0;
+    // `0 * inf` は無効演算（NaN）。一般の inf／zero 判定より先に見る。
+    if (a_zero && b_inf) || (a_inf && b_zero) {
+        return F64_QNAN;
+    }
+    if a_inf || b_inf {
+        return sign | F64_INF;
+    }
+    if a_zero || b_zero {
+        return sign;
+    }
+
+    // 仮数を「隠れ 1 を bit52 に立てた 53bit 値」へ正規化する（subnormal
+    // 入力も含め常に `m ∈ [2^52, 2^53)`。ゆえに積 `P = ma*mb` は常に
+    // `[2^104, 2^106)`）。
+    let (ma, ea_u) = normalize_f64_mantissa(ea, fa);
+    let (mb, eb_u) = normalize_f64_mantissa(eb, fb);
+    let (hi, lo) = mul64_wide(ma, mb);
+    let leadpos =
+        leading_bit_pos128(hi, lo).expect("非ゼロ仮数同士の積は非ゼロ（呼び出し前提より）");
+    // `exp_u`: 丸め前の暫定 unbiased 指数（`value = m0 * 2^(exp_u-52)`、
+    // `m0` は `leadpos-52` bit 右シフトした 53bit 候補仮数）。
+    let exp_u = ea_u + eb_u + (leadpos as i64 - 104);
+    let shift_normal = leadpos as i64 - 52; // 52 か 53（常に < 64）。
+
+    let biased_before_round = exp_u + 1023;
+    let (final_shift, is_subnormal_target) = if biased_before_round >= 1 {
+        (shift_normal, false)
+    } else {
+        // 単一丸めで subnormal 化するため、追加シフトを事前に織り込む。
+        (shift_normal + (1 - biased_before_round), true)
+    };
+
+    if !(0..128).contains(&final_shift) {
+        // 到達性: `f32` 由来の `x`／`weight` から生じる本カーネルの実用
+        // 値域では起きない極端な underflow（`final_shift` が 128 以上に
+        // なるのは指数が f64 の subnormal 下限をはるかに超えて離れる
+        // 場合のみ）。安全側として `±0` へ丸める（sticky 相当の判定を
+        // 省略しても、実際に到達しうる限り常に半分未満で `±0` が正しい）。
+        return sign;
+    }
+    let final_shift = final_shift as u32;
+    let (qhi, mut m) = shr128(hi, lo, final_shift);
+    debug_assert_eq!(qhi, 0, "mul_f64_bits: 商が 64bit を超えた（想定外）");
+    let (rhi, rlo) = low_bits128(hi, lo, final_shift);
+    let half = if final_shift == 0 {
+        (0u64, 0u64)
+    } else if final_shift - 1 < 64 {
+        (0u64, 1u64 << (final_shift - 1))
+    } else {
+        (1u64 << (final_shift - 1 - 64), 0u64)
+    };
+    let cmp = cmp128((rhi, rlo), half);
+    let round_up =
+        cmp == core::cmp::Ordering::Greater || (cmp == core::cmp::Ordering::Equal && (m & 1) == 1);
+    if round_up {
+        m += 1;
+    }
+
+    if !is_subnormal_target {
+        let mut exp_final = exp_u;
+        if m >= (1u64 << 53) {
+            m >>= 1;
+            exp_final += 1;
+        }
+        let biased_final = exp_final + 1023;
+        if biased_final >= (F64_EXP_MASK as i64) {
+            return sign | F64_INF;
+        }
+        sign | ((biased_final as u64) << 52) | (m & F64_FRAC_MASK)
+    } else {
+        // `m` は `[0, 2^52]`（丸め上げで最大 `2^52` に達しうる＝最小
+        // 正規化数への繰り上がり）。
+        if m >= (1u64 << 52) {
+            sign | (1u64 << 52) // biased_exp=1, frac=0
+        } else {
+            sign | m // exponent field 0（subnormal）
+        }
+    }
+}
+
+/// `x`（正規化数・subnormal 双方に対応。特殊値は呼び出し側で除外済みの
+/// 前提）を `2^k` 倍する（`k` は符号付き整数）。指数フィールドを直接
+/// 加算するだけの**厳密**演算（仮数は変えない）。結果が正規化数の指数
+/// 範囲を超える場合は `±inf`（overflow）・`±0`（極端な underflow）へ
+/// 丸めなしで潰す——本関数は Newton 反復の「種」（近似値）専用であり、
+/// 種が多少劣化しても反復で収束するため、真の 2 の冪乗算のような
+/// 厳密な subnormal 対応までは持たない（`mul_f64_bits` が本演算の
+/// 汎用・正確版に相当する）。
+#[inline]
+fn scale_pow2_f64_bits(x_bits: u64, k: i64) -> u64 {
+    let sign = x_bits & F64_SIGN;
+    let e = ((x_bits >> 52) & F64_EXP_MASK) as i64;
+    let f = x_bits & F64_FRAC_MASK;
+    let new_e = e + k;
+    if new_e >= F64_EXP_MASK as i64 {
+        return sign | F64_INF;
+    }
+    if new_e <= 0 {
+        return sign;
+    }
+    sign | ((new_e as u64) << 52) | f
+}
+
+/// [`recip_newton_f64_bits`]／[`rsqrt_newton_f64_bits`] 共通の種抽出:
+/// `x`（正・有限・非ゼロが呼び出し前提）の指数部と仮数部を分離し、
+/// 仮数側のみ `f32` 精度（ハードウェア除算・`sqrt`）で近似した後、
+/// 指数側は [`scale_pow2_f64_bits`] で厳密に合成し直す。`narrow_f64_bits`
+/// を `x` 全体へ直接適用しないため、`x` が `f32` の表現範囲外
+/// （`|x| < 2^-149` や `|x| > f32::MAX` 相当）でも種が potentially 0 や
+/// `inf` へ潰れず Newton 反復が退化しない（`layer_norm` の分散は
+/// `f32` 由来要素の二乗和を `hidden` で割った値のため、理論上は `f32`
+/// の表現範囲を超えて underflow/overflow しうる）。
+/// `reduce_shift`（`recip` は `0`、`rsqrt` は仮数を `[1,4)` へ正規化する
+/// ため指数の偶奇に応じて `0`／`1`）だけ挙動を切り替える。
+#[inline]
+fn extract_reduced_mantissa_and_exp(x_bits: u64, want_sqrt_range: bool) -> (u32, i64) {
+    let e = (x_bits >> 52) & F64_EXP_MASK;
+    let f = x_bits & F64_FRAC_MASK;
+    let (m, exp_u) = normalize_f64_mantissa(e, f); // value = m * 2^(exp_u-52), m∈[2^52,2^53)
+    if !want_sqrt_range {
+        // reduced = value / 2^exp_u ∈ [1,2)。
+        let reduced_bits = (1023u64 << 52) | (m & F64_FRAC_MASK);
+        (narrow_f64_bits(reduced_bits), exp_u)
+    } else if exp_u.rem_euclid(2) == 0 {
+        // reduced = value / 2^exp_u ∈ [1,2)、k = exp_u/2。
+        let reduced_bits = (1023u64 << 52) | (m & F64_FRAC_MASK);
+        (narrow_f64_bits(reduced_bits), exp_u / 2)
+    } else {
+        // reduced = value / 2^(exp_u-1) ∈ [2,4)、k = (exp_u-1)/2
+        // （`exp_u-1` は `exp_u` が奇数のとき常に偶数＝厳密に割り切れる）。
+        let reduced_bits = (1024u64 << 52) | (m & F64_FRAC_MASK);
+        (narrow_f64_bits(reduced_bits), (exp_u - 1) / 2)
+    }
+}
+
+/// `f64` の逆数 `1/x` を Newton-Raphson（`y_{n+1} = y_n*(2 - x*y_n)`。
+/// 除算命令を使わず [`mul_f64_bits`]／[`add_f64_bits`] のみで構成）で
+/// 求める bit 表現版。`x` は本カーネルの用途上（`hidden` 由来）常に有限・
+/// 正の値のため特殊値分岐は持たない（一般用途には非対応）。種は仮数を
+/// `f32` 精度（ハードウェア除算 1 回。約 24bit 精度）で近似し指数を
+/// 厳密合成した近似逆数（[`extract_reduced_mantissa_and_exp`] 参照）とし、
+/// 4 回の反復で各段階精度がほぼ倍加し `f64` の 52bit 精度に収束する
+/// （24→48→52…）。`shaders/layer_norm.metal` の `ln_f64_recip`（実体は
+/// 文字列リソースのためモジュールパスではなくファイル参照）と同じ
+/// 反復回数・アルゴリズム。
+pub fn recip_newton_f64_bits(x: u64) -> u64 {
+    let (reduced_bits, exp_u) = extract_reduced_mantissa_and_exp(x, false);
+    let seed_reduced = 1.0f32 / f32::from_bits(reduced_bits);
+    let mut y = scale_pow2_f64_bits(widen_f32_bits(seed_reduced.to_bits()), -exp_u);
+    const TWO: u64 = 0x4000_0000_0000_0000;
+    for _ in 0..4 {
+        let xy = mul_f64_bits(x, y);
+        let two_minus_xy = sub_f64_bits(TWO, xy);
+        y = mul_f64_bits(y, two_minus_xy);
+    }
+    y
+}
+
+/// `f64` の逆数平方根 `1/sqrt(x)` を Newton-Raphson（`y_{n+1} =
+/// y_n*(1.5 - 0.5*x*y_n^2)`。除算命令不要）で求める bit 表現版。
+/// `x` の特殊値は明示的に扱う（`x` は分散 `+ eps`〈ともに非負〉に由来し
+/// 数学的に非負のはずだが、防御的に負値も NaN として扱う）:
+/// `NaN -> NaN`・`±0 -> ±inf`（符号付きゼロの逆数平方根の IEEE754 規約）・
+/// 負（非ゼロ）`-> NaN`・`+inf -> +0`。これらは Newton 反復内で `0*inf`
+/// （不定形・NaN で汚染される）を発生させないための事前分岐であり、
+/// 反復本体には入らない。
+pub fn rsqrt_newton_f64_bits(x: u64) -> u64 {
+    let e = (x >> 52) & F64_EXP_MASK;
+    let f = x & F64_FRAC_MASK;
+    let sign = x & F64_SIGN;
+    if e == F64_EXP_MASK && f != 0 {
+        return F64_QNAN;
+    }
+    if e == 0 && f == 0 {
+        return sign | F64_INF;
+    }
+    if sign != 0 {
+        return F64_QNAN;
+    }
+    if e == F64_EXP_MASK {
+        return 0; // +inf -> +0（f==0・sign==0 はここまでに確定）。
+    }
+
+    let (reduced_bits, k) = extract_reduced_mantissa_and_exp(x, true);
+    let seed_reduced = 1.0f32 / f32::from_bits(reduced_bits).sqrt();
+    let mut y = scale_pow2_f64_bits(widen_f32_bits(seed_reduced.to_bits()), -k);
+    const ONE_HALF: u64 = 0x3FE0_0000_0000_0000;
+    const THREE_HALF: u64 = 0x3FF8_0000_0000_0000;
+    for _ in 0..4 {
+        let y2 = mul_f64_bits(y, y);
+        let xy2 = mul_f64_bits(x, y2);
+        let half_xy2 = mul_f64_bits(ONE_HALF, xy2);
+        let inner = sub_f64_bits(THREE_HALF, half_xy2);
+        y = mul_f64_bits(y, inner);
+    }
+    y
+}
+
 /// `gemm_bias_grad_reduce_f32` の `m >= 2` 経路の逐語モデル: `+0.0`（`f64`）
 /// から始めて `xs` を index 順に [`add_f64_bits`] で蓄積し、最後に 1 回
 /// [`narrow_f64_bits`] で `f32` へ落とす。`autodiff::eval::reduce_bias_grad_
@@ -598,6 +931,182 @@ mod tests {
                 f32_bits_match(got, host(&xs)),
                 "cancel #{i} {xs:?}: got={got:e} expected={:e}",
                 host(&xs)
+            );
+        }
+    }
+
+    #[test]
+    fn mul_matches_hardware_for_random_pairs() {
+        let mut rng = Rng(0x1357_9BDF_2468_ACE0);
+        for i in 0..4_000_000u32 {
+            let a = rng.f64_bits();
+            let b = rng.f64_bits();
+            let expected = f64::from_bits(a) * f64::from_bits(b);
+            assert_f64_eq(
+                mul_f64_bits(a, b),
+                expected,
+                &format!("mul #{i} {a:#x} * {b:#x}"),
+            );
+        }
+    }
+
+    #[test]
+    fn mul_matches_hardware_for_boundary_cases() {
+        let cases: [(f64, f64); 20] = [
+            (0.0, 0.0),
+            (0.0, -0.0),
+            (-0.0, -0.0),
+            (0.0, 1.0),
+            (0.0, f64::INFINITY),
+            (0.0, f64::NEG_INFINITY),
+            (f64::INFINITY, f64::INFINITY),
+            (f64::INFINITY, f64::NEG_INFINITY),
+            (f64::NAN, 1.0),
+            (f64::NAN, f64::INFINITY),
+            (f64::NAN, 0.0),
+            (f64::MAX, f64::MAX),
+            (f64::MAX, 2.0),
+            (f64::MIN_POSITIVE, f64::MIN_POSITIVE),
+            (f64::from_bits(1), f64::from_bits(1)),
+            (f64::from_bits(1), 2.0),
+            (f64::from_bits(F64_FRAC_MASK), f64::from_bits(1)),
+            (-1.0, f64::MAX),
+            (f64::from_bits(1), f64::MAX),
+            (1.5f64, 1.5f64),
+        ];
+        for (a, b) in cases {
+            assert_f64_eq(
+                mul_f64_bits(a.to_bits(), b.to_bits()),
+                a * b,
+                &format!("{a:e} * {b:e}"),
+            );
+            assert_f64_eq(
+                mul_f64_bits(b.to_bits(), a.to_bits()),
+                b * a,
+                &format!("{b:e} * {a:e}"),
+            );
+        }
+    }
+
+    #[test]
+    fn mul_matches_hardware_for_targeted_exponent_products() {
+        // 指数の組合せを広く総当たりし、正規化・subnormal 化・overflow の
+        // 各経路を機械的に網羅する（仮数は端値のみ）。
+        let fracs = [0u64, 1, F64_FRAC_MASK, F64_FRAC_MASK - 1, 1u64 << 51];
+        let exps = [0u64, 1, 2, 500, 1000, 1023, 1500, 2000, 2044, 2045, 2046];
+        for &ea in &exps {
+            for &eb in &exps {
+                for &fa in &fracs {
+                    for &fb in &fracs {
+                        for sa in [0u64, F64_SIGN] {
+                            for sb in [0u64, F64_SIGN] {
+                                let a = sa | (ea << 52) | fa;
+                                let b = sb | (eb << 52) | fb;
+                                let ctx = format!("ea={ea} eb={eb} a={a:#x} b={b:#x}");
+                                assert_f64_eq(
+                                    mul_f64_bits(a, b),
+                                    f64::from_bits(a) * f64::from_bits(b),
+                                    &ctx,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sub_matches_hardware_for_random_pairs() {
+        let mut rng = Rng(0xABCD_EF01_2345_6789);
+        for i in 0..500_000u32 {
+            let a = rng.f64_bits();
+            let b = rng.f64_bits();
+            let expected = f64::from_bits(a) - f64::from_bits(b);
+            assert_f64_eq(
+                sub_f64_bits(a, b),
+                expected,
+                &format!("sub #{i} {a:#x} - {b:#x}"),
+            );
+        }
+    }
+
+    /// [`recip_newton_f64_bits`] が本カーネルの実用域（`hidden ∈
+    /// [1, 2^24]`。有限・正の整数）で真の `f64` 逆数へ十分収束することを
+    /// 確認する（Newton 反復は必ずしも「最近接丸め」と bit 完全一致では
+    /// ないため、相対誤差ベースで検証する——`layer_norm.metal` 側の
+    /// 用途では `narrow_f64_bits` で `f32` へ最終的に丸めるため、この
+    /// 精度〈2^-50 未満〉があれば `f32` の丸め結果は真の値と一致する）。
+    #[test]
+    fn recip_newton_converges_for_hidden_range() {
+        for hidden in [1u64, 2, 3, 7, 97, 1024, 1 << 20, 1 << 24] {
+            let x = widen_f32_bits((hidden as f32).to_bits());
+            let got = f64::from_bits(recip_newton_f64_bits(x));
+            let expected = 1.0f64 / (hidden as f64);
+            let rel_err = ((got - expected) / expected).abs();
+            assert!(
+                rel_err < 1e-14,
+                "hidden={hidden}: got={got:e} expected={expected:e} rel_err={rel_err:e}"
+            );
+        }
+        // ランダムな正の有限値でも収束することを確認する。
+        let mut rng = Rng(0x2222_3333_4444_5555);
+        for _ in 0..10_000u32 {
+            let mut bits = rng.f64_bits();
+            bits &= !F64_SIGN; // 正へ強制。
+            let v = f64::from_bits(bits);
+            if !v.is_finite() || v == 0.0 {
+                continue;
+            }
+            let got = f64::from_bits(recip_newton_f64_bits(bits));
+            let expected = 1.0 / v;
+            // `recip_newton_f64_bits` は `hidden`（常に正規化数域の正の
+            // 整数）専用のため、逆数が subnormal 域まで潰れる極端な
+            // 入力（本関数の実用域外）は対象外とする（種の生成
+            // `scale_pow2_f64_bits` は Newton の種としての用途に限定した
+            // 簡略版で、そこまでの範囲は保証しない）。
+            if !expected.is_finite() || expected.abs() < f64::MIN_POSITIVE {
+                continue;
+            }
+            let rel_err = ((got - expected) / expected).abs();
+            assert!(rel_err < 1e-13, "v={v:e} got={got:e} expected={expected:e}");
+        }
+    }
+
+    /// [`rsqrt_newton_f64_bits`] の特殊値契約（NaN／±0/負/+inf）と、
+    /// 通常域での収束精度を確認する。
+    #[test]
+    fn rsqrt_newton_handles_special_values_and_converges() {
+        assert!(f64::from_bits(rsqrt_newton_f64_bits(f64::NAN.to_bits())).is_nan());
+        assert_eq!(
+            rsqrt_newton_f64_bits(0.0f64.to_bits()),
+            f64::INFINITY.to_bits()
+        );
+        assert_eq!(
+            rsqrt_newton_f64_bits((-0.0f64).to_bits()),
+            f64::NEG_INFINITY.to_bits()
+        );
+        assert!(f64::from_bits(rsqrt_newton_f64_bits((-1.0f64).to_bits())).is_nan());
+        assert_eq!(
+            rsqrt_newton_f64_bits(f64::INFINITY.to_bits()),
+            0.0f64.to_bits()
+        );
+
+        for v in [
+            1.0f64,
+            2.0,
+            0.5,
+            1e-300,
+            1e300,
+            1.5e75 * 1.5e75, // 巨大な分散相当値。
+            f64::MIN_POSITIVE,
+        ] {
+            let got = f64::from_bits(rsqrt_newton_f64_bits(v.to_bits()));
+            let expected = 1.0 / v.sqrt();
+            let rel_err = ((got - expected) / expected).abs();
+            assert!(
+                rel_err < 1e-14,
+                "v={v:e} got={got:e} expected={expected:e} rel_err={rel_err:e}"
             );
         }
     }

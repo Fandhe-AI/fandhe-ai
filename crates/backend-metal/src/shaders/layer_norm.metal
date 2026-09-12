@@ -6,150 +6,114 @@
 // 加算をそれぞれスキップ）。分散は biased（÷N。`E[x^2]-mean^2` ではなく
 // 二パス `Sigma(x-mean)^2/N` で計算する。`docs/norm-ops-design.md`）。
 //
-// FMA 契約: 正規化統計の縮約（平均・分散）自体は下記の縮約精度契約が
-// 優先し `fma()` を使わない単純な加減算のみだが、affine（`x̂·w+b`）は
-// 最終段を `fma()` で明示的に融合する（`.claude/rules/coding-rust.md`
-// の FMA 契約統一。codex-review 指摘）。`weight` の適用順序は要素ごと
-// に適応的に選ぶ（パス 4 コメント「重みの乗算順序の適応的選択」参照）
-// ——`dev/scale` が subnormal domain に入る**稀な**ケースに限り
-// `weight` を `scale` 除算より先に乗じ（`eps` が `x` を極端に上回る行
-// で中間値が subnormal に潰れ Apple GPU が flush-to-zero する問題への
-// 対応。この場合のみ最終段は `fma(xhat_weighted, norm, bv)` として
-// `norm`・`bias` を融合する）、**通常ケース**では `xhat = (dev/scale)*
-// norm` を先に確定してから最終段 `fma(xhat, weight, bias)` として
-// `weight`・`bias` を融合する（CUDA カーネル `fmaf`・CPU/ホスト参照
-// 実装 `xhat.mul_add(w,b)` と同じ「weight・bias を 1 回の融合演算で
-// 結合する」丸め経路。PR #1671 スレッド是正〈パス 4 コメント参照〉）。
-// `xhat` 自体の値は `row_scale`・scale/ssq 方式由来のため CPU/CUDA と
-// bit 一致しない（LayerNorm の CPU-Metal 数値一致は REQ-2 統一複合
-// 判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉であり bit-exact
-// 契約ではない）。コンパイルオプションは `pipeline::compile_options()`
-// を適用する。
+// FMA 契約: `affine`（`x̂·w+b`）は「積＋和を融合し 1 回だけ丸める」
+// （`.claude/rules/coding-rust.md` の FMA 契約統一）という意味論を
+// soft-f64（`ln_f64_mul` の積は常に `f64` の 53bit 仮数に厳密に収まる
+// ため丸め無し・続く `ln_f64_add` が実質的な丸め）で実現する（下記
+// パス 3 コメント「affine も soft-f64 で計算する理由」参照。GPU の
+// subnormal flush-to-zero 対策で平坦な `float` の `fma()` 命令を経由
+// しない）。CPU 参照実装（`crates/backend-cpu/src/layer_norm.rs::
+// layer_norm_row`）は `xhat.mul_add(wv, bv)`（ハードウェア FMA）、CUDA
+// （`kernels_layer_norm.rs`）は nvcc の既定 FMA contraction 経由で
+// 同じ「1 回だけ丸める」意味論を実現しており、丸め「経路」の意図は
+// 3 バックエンドで揃う。`xhat` 自体は本ファイルの soft-f64（下記）
+// 経由で導出するため CPU/CUDA と bit 一致はしない（REQ-2 統一複合
+// 判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉の範囲で
+// 一致させる。bit-exact 契約ではない）。
 //
-// 縮約精度契約（正規化統計の f64 アキュムレータ統一。イシュー #1102・
-// #1596）: `.claude/rules/coding-rust.md`「正規化統計の二乗和」節が定める
-// とおり Apple GPU の MSL は `double` を持たないため、Metal 実装形は
-// Neumaier 改良版 Kahan 補償和 + scale/ssq 方式（分散側。`rmsnorm.metal`
-// と同じ LAPACK SLASSQ 系 overflow-safe 二乗和）を正とする（同節の対象は
-// 「勾配の長軸縮約」〈#1566・soft_f64 の bit 完全一致方式〉とは別軸であり、
-// 正規化統計側はこの節が定める補償和方式のまま）。
+// **数値方式（soft-f64 経由の全面再設計。PR #1671 codex-review 指摘への
+// 是正・イシュー #1596）**: 当初実装（行の 2 の冪スケール `row_scale`
+// によるリスケール総和 + Neumaier 補償和 + scale/ssq 分散）は、次の
+// 2 系統の反例で数値契約を満たせないことが判明した:
 //
-// **平均計算（codex-review 指摘。当初の Welford オンライン平均を破棄した
-// 経緯）**: Welford（`mean_k = mean_{k-1} + (x_k-mean_{k-1})/k`）は各更新値
-// が入力値域に収まるため overflow-safe だが、butterfly merge の
-// `meanA + delta*(countB/countAB)` が毎ステップ `f32` へ丸められるため
-// `[16777216, 16777218]`（真の平均 `16777217` が `f32` で表現不能）で
-// 丸め誤差が生じ、CPU/CUDA（`f64` のまま偏差計算まで保持）と符号が食い違う
-// 結果（期待 `[-1,1]` に対し `[0, 1.4142]`）を生んだ。さらに Welford の
-// `meanB - meanA` 自体、入力 `[2^38, -2^38]` のような遠い有限値の差が
-// `f32` の表現範囲（`|x| <= f32::MAX ≈ 3.4e38`）を超え `±inf` へ overflow
-// する問題もあった。
+// 1. **行スケール除算での微小値消失**: `row_scale` は行の `maxabs`
+//    （または `eps` 側疑似要素）の大きい方から選ぶ 2 の冪だが、同じ行に
+//    「巨大な値」と「小さいが非ゼロな寄与を持つ値」が混在する場合
+//    （例 `x=[1e38,-1e38,1e-4,-1e-4]`）、小さい要素の比
+//    `x_i/row_scale` が `f32` の正規化下限を割り込む subnormal になり、
+//    Apple GPU 実機の flush-to-zero（FTZ）で消える。`weight` の乗算
+//    順序を適応的に選ぶ工夫（是正前の実装）は `xhat` 自体を計算した
+//    **後**の話であり、この「`ratio` 計算の時点」での消失には無力
+//    だった。
+// 2. **正規化係数の丸め誤差が affine の相殺で増幅される**: 分散の
+//    scale/ssq 状態 `(scale, ssq, comp)` は `f64` 相当の精度を保持
+//    していたが、`norm = 1/sqrt((ssq+comp)*inv_n)` の 1 行で単一
+//    `f32` へ丸めてから `sqrt`／逆数を取っていたため、この時点で
+//    `f64` 相当の精度が失われていた。`weight` が極端に大きく `bias`
+//    がほぼ相殺する行（例 `weight=1e8, bias≈-weight*sqrt(1.5)`）では、
+//    この 1 ULP 未満の差が `weight` 倍に増幅され CPU（`f64` で `mean`・
+//    `var`・`rstd` を保持してから 1 回だけ `f32` へ丸める）との差が
+//    数値契約を超えた。
 //
-// **採用した設計（行内 2 の冪スケーリング + 2 段補償和）**: 行の
-// `maxabs = max(|x_i|)` を求め、`s = 2^floor(log2(maxabs))`（`maxabs` 以下
-// の最大の 2 の冪。ビット直接構成——`as_type<uint>`/`as_type<float>` で
-// 指数フィールドを直接読み書きする。`crate::soft_f64` の bit 演算方針と
-// 同じスタイル）を求める。以降のすべての縮約は `x_i/s`（2 の冪除算は
-// 丸め無しの厳密演算）という**比スケール領域**（`|x_i/s| < 2`）で行う。
-// 比スケール領域では総和が `O(hidden)` に収まり overflow の心配がなく
-// （元の `x` がどれほど巨大でも比は高々 `[-2,2)`）、Neumaier 改良版 Kahan
-// 補償和（`ln_kahan_add`／`ln_reduce_kahan`）だけで `f64` 相当の精度が
-// 得られる（`f32` へ丸めるのは各段の加算内部のみで、桁落ち成分
-// `comp` に残差を保持し続けるため）。
+// 両方とも根本原因は同じ: **`f32` の限られた指数範囲・仮数精度に収まる
+// よう値をリスケールする**という当初のアプローチ自体が、リスケール後の
+// 値がさらに `f32` の範囲外（微小値の消失）や精度不足（丸め誤差の
+// 増幅）を引き起こす二次被害を生む。この問題は「もっと工夫したリ
+// スケール」では解消せず、**`f32` の範囲・精度そのものに依存しない
+// 計算方式**が必要だった。
 //
-// 平均は比スケール総和 `(sum, comp)` を `hidden` で厳密除算してさらに
-// doubled-float（FMA によるロスレス除算誤差抽出。Dekker の手法）へ
-// 拡張した `(mean_hi, mean_lo)` として保持し、**偏差計算まで `f32`
-// 単一値へ丸めず 2 語のまま保持する**（codex-review 指摘: 平均を
-// 偏差計算前に丸めると丸め誤差がそのまま偏差へ伝播する）。除算は
-// ホストから渡される `inv_n`〈事前丸め済み `1/hidden`〉への乗算では
-// なく `hidden` 自体（`(float)hidden` は `hidden <= 2^24` の範囲で
-// exact。この上限は暗黙の前提ではなく、ホスト側
-// `layer_norm.rs::validate_hidden_exact_f32` が起動前に fail-closed で
-// 検査する——codex-review 指摘・PR #1671 スレッド 1 件目: `hidden >
-// 2^24`〈例 `16777217`〉では `(float)hidden` が最近接偶数丸めで
-// `16777216` へ丸められ、真の除数とのずれが `mean_lo` へ残存し出力へ
-// 伝播しうるため、この軸長は起動前に明示的に拒否する）への直接除算で
-// 行う（`inv_n` 経由だと `mean_hi+mean_lo` が
-// 表す値が真の平均 `sum/hidden` ではなく `sum*inv_n_rounded` になり、
-// `inv_n` 自身の丸め誤差が `mean_lo` へ残存する。全要素が同一値の行
-// では本来 0 になるべき偏差にこの残存誤差が現れ、後段で `eps` 由来の
-// 極小 `scale` により増幅されていた——codex-review 指摘・パス 2 の
-// 実装コメント参照）。偏差 `dev = (x_i/s - mean_hi) -
-// mean_lo` も比スケール領域内（`O(1)`）に収まるため overflow しない
-// （`[2^38, -2^38] × 999` のような偏差自体が `f32::MAX` を超える入力でも、
-// 比スケール領域では `dev` が有界に保たれる——真の偏差を **一度も
-// 元スケールへ戻さない**のが要点。元スケールへ戻すと真値
-// `dev_actual ≈ 3.996e38` は `f32` で表現不能なため、比スケール領域内で
-// 完結させる必要がある）。
+// **採用した設計**: MSL は `double` 型非対応だが、64bit 整数
+// （`ulong`／`long`）による **IEEE 754 binary64 のソフトウェア
+// エミュレーション**（`gemm.metal::bias_f64_*`〈イシュー #1566・
+// PR #1659〉と同じ手法を本ファイル独自に拡張）で `widen`（`f32→f64`）・
+// `add`／`sub`・`mul`・Newton-Raphson 法による `recip`／`rsqrt`
+// （除算命令を使わず `mul`／`add` のみで構成）・`narrow`（`f64→f32`）を
+// 実装し、**CPU 参照実装と同じアルゴリズム構造**（`mean`／`var`／
+// `rstd` を `f64` 相当の精度で保持し、`xhat = (x-mean)*rstd` を確定
+// した後に 1 回だけ `f32` へ丸める）を Metal 上で再現する。`f64` は
+// `f32` の全域（正規化数・subnormal を問わず）を正規化数として表現
+// できる指数範囲を持つため（`f32` の subnormal 最小値 `2^-149` の平方
+// でも `2^-298` は `f64` の表現範囲〈最小 subnormal `2^-1074`〉に
+// 楽々収まる）、`row_scale` のようなリスケールが一切不要になり、
+// 上記 2 系統の反例はどちらも構造的に解消する（`x` の値がどれほど
+// 巨大・微小でも、二乗しても `f64` の指数範囲内に収まるため）。
 //
-// 分散は比スケール偏差 `dev` に対する `rmsnorm.metal` と同型の scale/ssq
-// 方式（LAPACK SLASSQ 系）で求める。`eps` は比スケール領域の等価量
-// `eps/s^2` として `eps_elem = sqrt(eps)*sqrt(n)/s`（分散側の scale/ssq が
-// 使う「疑似要素」トリックをそのまま流用し、`s^2` で先に割らず `sqrt(eps)`
-// と `s` をそれぞれ独立に扱うことで `eps/s^2` 自体の overflow/underflow を
-// 避ける）という擬似要素として同じ scale/ssq 蓄積へ折り込む。
+// **Newton-Raphson の精度契約**: `recip`／`rsqrt` は「最近接偶数丸め」
+// で正確に丸める代わりに、`f32` 精度（約 24bit）の種から出発し
+// 4 回の反復（1 回ごとに正しい桁数がほぼ倍加: 24→48→52…）で `f64` の
+// 52bit 精度へ収束させる（厳密な correctly-rounded ではないが、収束後
+// の相対誤差は `f64` の 1 ULP のごく僅かな定数倍に収まり、最終的に
+// `f32` へ丸める際の桁の決定には十分な余裕〈約 28bit 分〉がある。
+// `crates/backend-metal/src/soft_f64.rs` の同名関数がホスト側の
+// 逐語モデルであり、収束精度をユニットテストで検証する）。種の抽出
+// （仮数を `f32` 精度で近似し指数は厳密に分離合成する）も同モジュールの
+// `extract_reduced_mantissa_and_exp`／`scale_pow2_f64_bits` と 1 対 1
+// 対応する。
 //
-// **`row_scale` の eps 対応拡張・weight 先乗算（codex-review 指摘・
-// PR #1671 スレッド 2 件目の是正。2 段構え）**: `row_scale` を `x` の
-// `maxabs` のみから決めると、`eps` が `x` に比べて極端に大きい行
-// （例 `x=[1e-20,-1e-20], eps=1e38`）で `eps_elem =
-// sqrt(eps)*sqrt(n)/row_scale` 自体が `f32` の表現範囲（約 `3.4e38`）を
-// 超えて `+inf` になり、`ln_ssq_add` が `scale` を文字通り `+inf` へ
-// 設定してしまう。以降のすべての `dev/scale`（`x` 由来の実要素）が
-// `有限値/inf = 0` へ潰れ、期待される微小だが非ゼロな出力（本例では
-// `weight=1e38` と合わせて `out≈[0.1,-0.1]`）が得られず `[0, 0]` に
-// なっていた（`eps_elem` の真の数学的値〈約 `2.08e39`〉自体が `f32` で
-// 表現不能なため、計算順序の工夫では解決できない）。
+// **ホスト側の逐語モデル**: `crates/backend-metal/src/soft_f64.rs` の
+// `widen_f32_bits`／`neg_f64_bits`／`sub_f64_bits`／`add_f64_bits`／
+// `mul_f64_bits`／`narrow_f64_bits`／`recip_newton_f64_bits`／
+// `rsqrt_newton_f64_bits` が本ファイルの `ln_f64_*` 系関数と 1 対 1 に
+// 対応し、`f64` 実演算に対する bit 完全一致（`widen`／`add`／`mul`／
+// `narrow`）または収束精度（`recip`／`rsqrt`）をユニットテスト
+// （Linux 実行可能）で網羅検証する。本ファイルを変更した場合は同
+// モジュールも追従させること。
 //
-// **1 段目（`row_scale` 側）**: `row_scale` を「`x` の `maxabs` 由来の
-// 2 の冪」と「`eps` 側疑似要素 `sqrt(eps)*sqrt(hidden_f)` を安全マージン
-// だけ右シフトした 2 の冪（`LN_EPS_ELEM_SAFE_SHIFT`。`eps_elem` を
-// `[1,2)` へ収める「正準」な選び方ではなく、overflow を避けるのに
-// **必要最小限**の引き上げに留める）」の**大きい方**に選び直す（下記
-// パス 1 参照）。「正準」な選び方（`sqrt(eps)` の 2 の冪をそのまま
-// 採用）を最初に試したところ、`row_scale` が過大になり `x` 自身の比
-// `x_i/row_scale` が `f32` の正規化下限（約 `1.18e-38`）を割り込む
-// subnormal になり、Apple GPU 実機がこれを flush-to-zero して依然
-// `[0, 0]` を返すことを実機実測で確認した（必要最小限の引き上げに
-// 変更後は解消）。`eps` 側も `ln_pow2_scale_from_maxabs` を経由した
-// 2 の冪の `ldexp`（2 の冪同士の乗除のため丸め無し）であるため、
-// `row_scale` は常に厳密な 2 の冪のまま保たれる（除算が丸め無しの
-// 厳密演算という前提は崩れない）。`x` が優越する通常ケース（`eps` が
-// `x` に比べ十分小さい）では `eps_pow2_scale <= x_pow2_scale` となり
-// `row_scale` は従来どおり `x_pow2_scale` のまま変化しない（既存の大
-// `maxabs` 系テスト〈`layer_norm_deviation_overflow_case_stays_finite`
-// 等〉の挙動は不変）。
+// **縮約精度契約との関係**（`.claude/rules/coding-rust.md`「正規化統計の
+// 二乗和」節）: 同節は Metal の `f64` 相当実装形として Neumaier 補償和 +
+// scale/ssq 方式を挙げているが、本ファイルは上記の理由からより精度の
+// 高い soft-f64 方式を採用する（同節が禁止しているわけではなく、
+// 「`f64` 相当の精度を保つ」という契約自体は本方式でも満たす。むしろ
+// 補償和方式では満たせなかった反例が本方式で解消する）。
 //
-// **2 段目（パス 4・weight 乗算順序の適応的選択）**: 1 段目だけでは、
-// `eps` が `x` を極端に上回る行で `dev/scale` 自体が真に subnormal
-// （本例で `dev/scale≈7e-40`。数学的に正しい中間値であり計算順序の
-// 誤りではない）になる場合が残る。これは `weight` によって最終的に
-// 正常範囲へ戻るべき値であるため、この場合に限り `weight` を `scale`
-// 除算より**先に**乗じる（`pre = dev*wv` を先に求めてから
-// `pre/scale`）ことで中間値が正常範囲に留まるようにする。ただし
-// この並び替えを無条件に適用すると、通常ケース（`dev/scale` が
-// subnormal でない）で `weight` が巨大な値の行では `dev*wv` 自体が
-// overflow するため、`dev/scale` が subnormal domain に入るときだけ
-// この並び替えを適用し、それ以外は「先に `dev/scale` を計算してから
-// `weight` を乗じる」安全な順序を使う（詳細はパス 4 のコメント
-// 「重みの乗算順序の適応的選択」参照）。
+// **総和の順序について**: 本カーネルは 32 レーン SIMD 並列 + butterfly
+// reduction で総和する（下記）。CPU 参照実装は行内を逐次（index 順）に
+// 加算するため、加算順序は一致しない。`f64` 相当（52bit 精度）の
+// 加算は非結合性の影響が極めて小さく（各加算ステップの丸め誤差は
+// 少なくとも `2^-52` 相対）、REQ-2 統一複合判定（相対誤差 1e-3 未満
+// または絶対誤差 1e-5 未満）の範囲内では順序差は無視できる
+// （CUDA 実装〈`kernels_layer_norm.rs`〉も `double` を使うが warp
+// butterfly reduction で加算順序が CPU と異なり、同じ前提で運用
+// 済み）。
 //
-// **最終正規化係数は 1 つの逆数として合成しない**（codex-review が示唆
-// した通り、退化ケース——全要素が同一の巨大値の行〈例 `[2e38, 2e38]`〉
-// など——では実分散が 0 で `eps` 疑似要素だけが ssq の `scale` を極端に
-// 小さい値にしうるため、`1/(scale*sqrt(...))` を単独の中間値として計算
-// すると `f32::MAX` を超えて overflow しうる）。代わりに要素ごとに
-// `xhat = (dev_i / scale) * (1/sqrt((ssq+comp)*inv_n))` の順で計算する
-// （`dev_i` が 0 の退化ケースでは `0/scale = 0` が exact に成立し
-// overflow しない。`scale`・`ssq`・`comp` は比スケール領域の
-// scale/ssq 蓄積結果であり、比スケールの `s` は分子・分母で相殺して
-// 最終式には現れない——`docs/norm-ops-design.md` 参照）。
+// コンパイルオプションは `pipeline::compile_options()` を適用する。
 //
-// `rmsnorm.metal` の同名ヘルパーとの重複実装だが、Metal ソースは
-// `newLibraryWithSource` で個別ファイル単位にコンパイルされ翻訳単位を
-// 共有できないため、`ln_` 接頭辞を付けた本ファイル内で独立に定義する
-// （意図的な重複。`rmsnorm.metal` のアルゴリズム自体は変更しない）。
+// **平均計算で Welford を採用しない理由**: Welford オンライン平均
+// （`mean_k = mean_{k-1} + (x_k-mean_{k-1})/k`）は各更新値を毎回
+// `f32` へ丸めるため、`f64` 相当の soft-f64 総和よりも精度が劣る
+// （当初この問題に対処するため Welford を試したが `f32` 丸め誤差が
+// 残存する経緯があった。soft-f64 化によりこの制約自体が解消したため
+// 単純な総和で十分）。
 //
 // 1 threadgroup = 1 simdgroup（32 スレッド）固定・persistent threadgroup
 // 方式（`for (row = tg_id; row < rows; row += grid_size)`）・reduction は
@@ -157,12 +121,11 @@
 // `rmsnorm.metal` と同じ設計（`docs/backend-metal-morton-mapping-decision.md`
 // と整合）。
 //
-// **rmsnorm.metal との差分**: 常に「4 パス」（device メモリを再読。
-// threadgroup memory 不使用）とし、`rmsnorm_f32_onepass` に相当する
-// threadgroup memory キャッシュ経路は持たない（LayerNorm は行の
-// `maxabs`・平均・分散・書き出しの計 4 回 `x` を読む構成のみを実装する。
-// 性能上の onepass 化は後続課題として `docs/norm-ops-design.md` に
-// 記録する）。
+// **rmsnorm.metal との差分**: 常に「3 パス」（device メモリを再読。
+// threadgroup memory 不使用。旧実装の `row_scale` 算出パスは不要に
+// なったため 4 パス→3 パスへ削減）とし、`rmsnorm_f32_onepass` に相当
+// する threadgroup memory キャッシュ経路は持たない。性能上の onepass
+// 化は後続課題として `docs/norm-ops-design.md` に記録する。
 //
 // REQ-8 境界検査: ベクトル化ロードは行わず（`rmsnorm.metal` の
 // `float4` 経路に相当する最適化は後続課題）、ループ添字は `ulong`
@@ -173,164 +136,506 @@ using namespace metal;
 
 constant uint LAYER_NORM_SIMD_WIDTH = 32u;
 
-// `row_scale` の eps 対応拡張（パス 1）で `eps` 側疑似要素スケールを
-// 右シフトする量。`f32` の表現上限（指数 `127`）から十分な余裕
-// （`eps_elem` を `[2^100, 2^101)` 程度に収め、後続の scale/ssq 蓄積・
-// `sqrt` 等の演算でも overflow しない安全マージン）を残しつつ、`x` 側の
-// 比 `x_i/row_scale` を可能な限り正規化範囲内に保つ（`row_scale` の
-// 引き上げ幅を最小限にする）よう選んだ値。冒頭コメント「`row_scale` の
-// eps 対応拡張」参照。
-constant int LN_EPS_ELEM_SAFE_SHIFT = 100;
+// ---- IEEE 754 binary64 のソフトウェアエミュレーション ----
+// `crates/backend-metal/src/soft_f64.rs` の逐語移植（`u64`→`ulong`・
+// `u32`→`uint`・`leading_zeros()`→`clz()`。冒頭コメント「ホスト側の
+// 逐語モデル」参照）。定数は同モジュールの `F64_*`／`F32_*` と同値。
+// `gemm.metal::bias_f64_*` と機能重複するが、MSL は `newLibraryWithSource`
+// で個別ファイル単位にコンパイルされ翻訳単位を共有できないため、
+// `ln_f64_` 接頭辞を付けた本ファイル内で独立に定義する（意図的な
+// 重複。`gemm.metal` 側は `mul`／`recip`／`rsqrt` を持たないため一部
+// 機能はこちらが上位互換）。
 
-// `dev/scale` が GPU 上で flush-to-zero（FTZ）されうる subnormal 領域に
-// 入るかどうかの判定しきい値（`f32` の最小正規化値 `2^-126`）。
-// `fabs(dev) < scale * LN_FLT_MIN_NORMAL` が成り立つ場合、`dev/scale`
-// の絶対値は正規化下限を割り込む（数学的には代表可能な subnormal
-// 値だが、Apple GPU 実機は subnormal な中間値を flush-to-zero しうる。
-// パス 4 コメント「重みの乗算順序の適応的選択」参照）。
-constant float LN_FLT_MIN_NORMAL = 1.1754943508222875e-38f;
+#define LN_F64_SIGN      0x8000000000000000ul
+#define LN_F64_EXP_MASK  0x7FFul
+#define LN_F64_FRAC_MASK 0x000FFFFFFFFFFFFFul
+#define LN_F64_QNAN      0x7FF8000000000000ul
+#define LN_F64_INF       0x7FF0000000000000ul
+#define LN_F32_QNAN      0x7FC00000u
+#define LN_F32_INF       0x7F800000u
 
-// Neumaier 改良版 Kahan 補償和の 1 ステップ（`rmsnorm.metal::
-// rmsnorm_kahan_add` と同一アルゴリズム。本ファイル内で独立定義する
-// 理由は冒頭コメント参照）。NaN 入力は通常の IEEE754 加減算を通じて
-// 自然に `sum`／`comp` へ伝播する（`isnan` 分岐を要さない。`ln_ssq_add`
-// が明示 `isnan` 分岐を必要とするのは scale/ssq の比較ベースの
-// リスケール判定〈`a > scale`〉が NaN を静かに無視しうるためで、本関数
-// は純粋な加減算のみのため同じ問題を持たない）。
-inline void ln_kahan_add(thread float& sum, thread float& comp, float value) {
-    float t = sum + value;
-    if (fabs(sum) >= fabs(value)) {
-        comp += (sum - t) + value;
-    } else {
-        comp += (value - t) + sum;
-    }
-    sum = t;
+// 128bit 値（`hi:lo`）を表現する小さな構造体（MSL に `u128`／タプルが
+// ないため。[`ln_f64_mul64_wide`]／[`ln_f64_shr128`]／
+// [`ln_f64_low_bits128`] の戻り値に使う）。
+struct LnU128 {
+    ulong hi;
+    ulong lo;
+};
+
+// 正規化済み仮数 `m`（隠れ 1 を bit52 に立てた 53bit 値）と、
+// `value = m * 2^(exp_u - 52)` を満たす unbiased 指数 `exp_u` の対
+// （[`ln_f64_normalize_mantissa`] の戻り値）。
+struct LnNormMantissa {
+    ulong m;
+    long exp_u;
+};
+
+// 64bit leading zero count を 32bit `clz` 2 回で構成する（`clz(0u) == 32`
+// は MSL 仕様で定義済み。`soft_f64::clz64` と同一構造）。
+inline uint ln_f64_clz64(ulong x) {
+    uint hi = (uint)(x >> 32);
+    uint lo = (uint)x;
+    return (hi != 0u) ? clz(hi) : (32u + clz(lo));
 }
 
-// 2 レーン分の Neumaier 補償和状態 `(sum, comp)` を 1 つに統合する
-// （他方の `sum`・`comp` を順に取り込むだけの単純な合成。加算の結合則・
-// 交換則に依存するが `ln_kahan_add` 自体が誤差を追跡し続けるため合成
-// 順序に依らず妥当な結果へ収束する）。
-inline void ln_kahan_merge(thread float& sum, thread float& comp, float other_sum, float other_comp) {
-    ln_kahan_add(sum, comp, other_sum);
-    ln_kahan_add(sum, comp, other_comp);
-}
-
-// 32 レーンの `(sum, comp)` を 5 段 butterfly で all-reduce する。
-inline void ln_reduce_kahan(thread float& sum, thread float& comp) {
-    for (uint offset = 16u; offset > 0u; offset >>= 1u) {
-        float other_sum = simd_shuffle_xor(sum, offset);
-        float other_comp = simd_shuffle_xor(comp, offset);
-        ln_kahan_merge(sum, comp, other_sum, other_comp);
+// `f64::from(f32)`（NaN は quiet NaN へ正規化）。`soft_f64::widen_f32_bits`。
+inline ulong ln_f64_widen(uint bits) {
+    ulong sign = ((ulong)(bits >> 31)) << 63;
+    uint exp = (bits >> 23) & 0xFFu;
+    ulong frac = (ulong)(bits & 0x7FFFFFu);
+    if (exp == 0xFFu) {
+        return (frac != 0ul) ? LN_F64_QNAN : (sign | LN_F64_INF);
     }
-}
-
-// 行の `maxabs = max(|x_i|)` から「`maxabs` 以下の最大の 2 の冪」`s` を
-// 直接ビット構成する（`crate::soft_f64` と同じ bit 直接操作スタイル。
-// 2 の冪除算は丸め無しの厳密演算のため、後続の比スケール縮約が
-// `f32` の丸め誤差を追加で持ち込まない）。`maxabs <= 0.0`（全要素 0）は
-// 任意の正の値でよいため `0.5` を返す（全要素比が `0` になり後続の
-// 偏差・分散も自然に `0` へ収束する）。`maxabs` が subnormal
-// （指数フィールド 0）の場合は最小正規化値 `2^-126` へフォールバックする
-// （この極small領域は本 PR のテスト対象外。有限かつ正であることのみ
-// 保証すれば十分）。`fmax` ベースの `maxabs` 縮約自体は NaN を無視する
-// （IEEE754 `fmax` の仕様）ため、行に NaN が含まれる場合 `maxabs` は
-// 残りの非 NaN 要素から決まるが、NaN 要素は `x_i/s` の除算で NaN の
-// まま残り、後続の `ln_kahan_add`（純粋な加減算）を通じて総和全体・
-// ひいては行全体の出力へ自然に伝播する（`ln_ssq_add` も独立に `isnan`
-// を検査するため二重に安全）。
-inline float ln_pow2_scale_from_maxabs(float maxabs) {
-    if (maxabs <= 0.0f) {
-        return 0.5f;
-    }
-    uint bits = as_type<uint>(maxabs);
-    uint exp_field = (bits >> 23u) & 0xFFu;
-    if (exp_field == 0u) {
-        return as_type<float>(1u << 23); // 2^-126（最小正規化値）
-    }
-    return as_type<float>(exp_field << 23u); // 2^(exp_field-127) <= maxabs
-}
-
-// scale/ssq 方式（LAPACK SLASSQ 系）による overflow-safe な二乗和蓄積の
-// 1 ステップ（`rmsnorm.metal::rmsnorm_ssq_add` と同一アルゴリズム・同一
-// NaN／inf 伝播契約。本ファイル内で独立定義する理由は冒頭コメント参照）。
-inline void ln_ssq_add(thread float& scale, thread float& ssq, thread float& comp, float a) {
-    if (isnan(a) || isnan(ssq) || isnan(scale)) {
-        scale = 1.0f;
-        ssq = NAN;
-        comp = 0.0f;
-        return;
-    }
-    if (isinf(scale) && isinf(a)) {
-        ln_kahan_add(ssq, comp, 1.0f);
-        return;
-    }
-    if (a > scale) {
-        if (scale > 0.0f) {
-            float ratio = scale / a;
-            float r2 = ratio * ratio;
-            ssq *= r2;
-            comp *= r2;
+    if (exp == 0u) {
+        if (frac == 0ul) {
+            return sign;
         }
-        scale = a;
-        ln_kahan_add(ssq, comp, 1.0f);
-    } else if (scale > 0.0f) {
-        float ratio = a / scale;
-        ln_kahan_add(ssq, comp, ratio * ratio);
+        // f32 subnormal（`frac × 2^-149`）は f64 では正規化数。
+        uint p = 31u - clz((uint)frac);
+        ulong exp64 = (ulong)((int)p - 149 + 1023);
+        ulong frac64 = (frac << (52u - p)) & LN_F64_FRAC_MASK;
+        return sign | (exp64 << 52) | frac64;
     }
+    ulong exp64 = (ulong)exp + (1023ul - 127ul); // 減算を先にすると exp < 127 で下溢れ。
+    return sign | (exp64 << 52) | (frac << 29);
 }
 
-// 2 つの scale/ssq 状態を結合する（`rmsnorm.metal::rmsnorm_ssq_combine`
-// と同一アルゴリズム）。
-inline void ln_ssq_combine(thread float& scale, thread float& ssq, thread float& comp,
-                            float other_scale, float other_ssq, float other_comp) {
-    if (isnan(ssq) || isnan(other_ssq)) {
-        scale = 1.0f;
-        ssq = NAN;
-        comp = 0.0f;
-        return;
+// `f64` の符号反転。NaN も含め符号 bit を無条件に反転する。
+inline ulong ln_f64_neg(ulong a) {
+    return a ^ LN_F64_SIGN;
+}
+
+// `f64 + f64`（最近接偶数丸め。NaN は quiet NaN へ正規化）。
+// `soft_f64::add_f64_bits` と同一手順（特殊値 → ガード 3 bit 付き桁合わせ
+// → 加減算 → 正規化 → 丸め）。
+inline ulong ln_f64_add(ulong a, ulong b) {
+    ulong sa = a & LN_F64_SIGN;
+    ulong sb = b & LN_F64_SIGN;
+    ulong ea = (a >> 52) & LN_F64_EXP_MASK;
+    ulong eb = (b >> 52) & LN_F64_EXP_MASK;
+    ulong fa = a & LN_F64_FRAC_MASK;
+    ulong fb = b & LN_F64_FRAC_MASK;
+
+    if (ea == LN_F64_EXP_MASK || eb == LN_F64_EXP_MASK) {
+        bool a_nan = (ea == LN_F64_EXP_MASK) && (fa != 0ul);
+        bool b_nan = (eb == LN_F64_EXP_MASK) && (fb != 0ul);
+        if (a_nan || b_nan) {
+            return LN_F64_QNAN;
+        }
+        if (ea == LN_F64_EXP_MASK && eb == LN_F64_EXP_MASK) {
+            return (sa == sb) ? a : LN_F64_QNAN;
+        }
+        return (ea == LN_F64_EXP_MASK) ? a : b;
     }
-    if (other_scale == 0.0f) {
-        return;
+    bool a_zero = (ea == 0ul) && (fa == 0ul);
+    bool b_zero = (eb == 0ul) && (fb == 0ul);
+    if (a_zero && b_zero) {
+        return sa & sb;
     }
-    if (scale == 0.0f) {
-        scale = other_scale;
-        ssq = other_ssq;
-        comp = other_comp;
-        return;
+    if (a_zero) {
+        return b;
     }
-    if (isinf(scale) && isinf(other_scale)) {
-        ssq = 1.0f;
-        comp = 0.0f;
-        return;
+    if (b_zero) {
+        return a;
     }
-    if (scale >= other_scale) {
-        float ratio = other_scale / scale;
-        float r2 = ratio * ratio;
-        ln_kahan_add(ssq, comp, other_ssq * r2);
-        ln_kahan_add(ssq, comp, other_comp * r2);
+
+    ulong ma = (ea == 0ul) ? fa : (fa | (1ul << 52));
+    ulong ea_eff = (ea == 0ul) ? 1ul : ea;
+    ulong mb = (eb == 0ul) ? fb : (fb | (1ul << 52));
+    ulong eb_eff = (eb == 0ul) ? 1ul : eb;
+    if (ea_eff < eb_eff || (ea_eff == eb_eff && ma < mb)) {
+        ulong t;
+        t = ma; ma = mb; mb = t;
+        t = ea_eff; ea_eff = eb_eff; eb_eff = t;
+        t = sa; sa = sb; sb = t;
+    }
+    ma <<= 3;
+    mb <<= 3;
+    ulong d = ea_eff - eb_eff;
+    if (d >= 64ul) {
+        mb = (mb != 0ul) ? 1ul : 0ul;
+    } else if (d > 0ul) {
+        ulong lost = mb & ((1ul << d) - 1ul);
+        mb = (mb >> d) | ((lost != 0ul) ? 1ul : 0ul);
+    }
+
+    ulong e = ea_eff;
+    ulong m;
+    if (sa == sb) {
+        m = ma + mb;
+        if (m >= (1ul << 56)) {
+            ulong lost = m & 1ul;
+            m = (m >> 1) | lost;
+            e += 1ul;
+        }
     } else {
-        float ratio = scale / other_scale;
-        float r2 = ratio * ratio;
-        float new_ssq = other_ssq;
-        float new_comp = other_comp;
-        ln_kahan_add(new_ssq, new_comp, ssq * r2);
-        ln_kahan_add(new_ssq, new_comp, comp * r2);
-        scale = other_scale;
-        ssq = new_ssq;
-        comp = new_comp;
+        m = ma - mb;
+        if (m == 0ul) {
+            return 0ul;
+        }
+        ulong sh = (ulong)ln_f64_clz64(m);
+        sh = (sh >= 8ul) ? (sh - 8ul) : 0ul;
+        if (sh > e - 1ul) {
+            sh = e - 1ul;
+        }
+        m <<= sh;
+        e -= sh;
+    }
+
+    ulong r = m & 7ul;
+    m >>= 3;
+    if (r > 4ul || (r == 4ul && (m & 1ul) == 1ul)) {
+        m += 1ul;
+    }
+    if (m >= (1ul << 53)) {
+        m >>= 1;
+        e += 1ul;
+    }
+    ulong exp_field = (m >= (1ul << 52)) ? e : 0ul;
+    if (exp_field >= LN_F64_EXP_MASK) {
+        return sa | LN_F64_INF;
+    }
+    return sa | (exp_field << 52) | (m & LN_F64_FRAC_MASK);
+}
+
+// `a - b` = [`ln_f64_add`]`(a, `[`ln_f64_neg`]`(b))`。
+inline ulong ln_f64_sub(ulong a, ulong b) {
+    return ln_f64_add(a, ln_f64_neg(b));
+}
+
+// `f64 as f32`（最近接偶数丸め・overflow は `±inf`・underflow は f32
+// subnormal／`±0`。NaN は quiet NaN へ正規化）。`soft_f64::narrow_f64_bits`。
+inline uint ln_f64_narrow(ulong bits) {
+    uint sign = ((uint)(bits >> 63)) << 31;
+    ulong e = (bits >> 52) & LN_F64_EXP_MASK;
+    ulong f = bits & LN_F64_FRAC_MASK;
+    if (e == LN_F64_EXP_MASK) {
+        return (f != 0ul) ? LN_F32_QNAN : (sign | LN_F32_INF);
+    }
+    if (e == 0ul && f == 0ul) {
+        return sign;
+    }
+    ulong m = (e == 0ul) ? f : (f | (1ul << 52));
+    long ee = (e == 0ul) ? -1022l : ((long)e - 1023l);
+    long ef = ee + 127l;
+    if (ef >= 255l) {
+        return sign | LN_F32_INF;
+    }
+    long extra = (ef <= 0l) ? (1l - ef) : 0l;
+    long shift_l = 29l + extra;
+    if (shift_l >= 54l) {
+        return sign;
+    }
+    uint shift = (uint)shift_l;
+    ulong q0 = m >> shift;
+    ulong rem = m & ((1ul << shift) - 1ul);
+    ulong half_bit = 1ul << (shift - 1u);
+    ulong q = q0;
+    if (rem > half_bit || (rem == half_bit && (q0 & 1ul) == 1ul)) {
+        q += 1ul;
+    }
+    uint exp_field = (ef <= 0l) ? 0u : (uint)ef;
+    if (ef <= 0l) {
+        if (q >= (1ul << 23)) {
+            exp_field = 1u;
+            q -= 1ul << 23;
+        }
+    } else {
+        if (q >= (1ul << 24)) {
+            q >>= 1;
+            exp_field += 1u;
+        }
+        q -= 1ul << 23;
+    }
+    if (exp_field >= 255u) {
+        return sign | LN_F32_INF;
+    }
+    return sign | (exp_field << 23) | (uint)q;
+}
+
+// `u64 x u64` の厳密な 128bit 積（32bit 分割のスクールブック乗算。
+// `soft_f64::mul64_wide` の逐語移植）。
+inline LnU128 ln_f64_mul64_wide(ulong a, ulong b) {
+    ulong a_lo = a & 0xFFFFFFFFul;
+    ulong a_hi = a >> 32;
+    ulong b_lo = b & 0xFFFFFFFFul;
+    ulong b_hi = b >> 32;
+
+    ulong lo_lo = a_lo * b_lo;
+    ulong hi_lo = a_hi * b_lo;
+    ulong lo_hi = a_lo * b_hi;
+    ulong hi_hi = a_hi * b_hi;
+
+    ulong mid = (lo_lo >> 32) + (hi_lo & 0xFFFFFFFFul) + (lo_hi & 0xFFFFFFFFul);
+    LnU128 result;
+    result.lo = (lo_lo & 0xFFFFFFFFul) | (mid << 32);
+    result.hi = hi_hi + (hi_lo >> 32) + (lo_hi >> 32) + (mid >> 32);
+    return result;
+}
+
+// `(hi,lo)` を右シフト `s`（`0..=128`）した値（`soft_f64::shr128`）。
+inline LnU128 ln_f64_shr128(ulong hi, ulong lo, uint s) {
+    LnU128 r;
+    if (s == 0u) {
+        r.hi = hi; r.lo = lo;
+    } else if (s >= 128u) {
+        r.hi = 0ul; r.lo = 0ul;
+    } else if (s < 64u) {
+        r.hi = hi >> s;
+        r.lo = (lo >> s) | (hi << (64u - s));
+    } else if (s == 64u) {
+        r.hi = 0ul; r.lo = hi;
+    } else {
+        r.hi = 0ul; r.lo = hi >> (s - 64u);
+    }
+    return r;
+}
+
+// `(hi,lo)` の下位 `n` bit（`n <= 128`）（`soft_f64::low_bits128`）。
+inline LnU128 ln_f64_low_bits128(ulong hi, ulong lo, uint n) {
+    LnU128 r;
+    if (n == 0u) {
+        r.hi = 0ul; r.lo = 0ul;
+    } else if (n >= 128u) {
+        r.hi = hi; r.lo = lo;
+    } else if (n <= 64u) {
+        ulong mask = (n == 64u) ? (~0ul) : ((1ul << n) - 1ul);
+        r.hi = 0ul; r.lo = lo & mask;
+    } else {
+        uint n2 = n - 64u;
+        ulong mask = (n2 == 64u) ? (~0ul) : ((1ul << n2) - 1ul);
+        r.hi = hi & mask; r.lo = lo;
+    }
+    return r;
+}
+
+// `(ahi,alo)` と `(bhi,blo)` の数値比較（`-1`／`0`／`1`）。
+inline int ln_f64_cmp128(ulong ahi, ulong alo, ulong bhi, ulong blo) {
+    if (ahi != bhi) {
+        return (ahi < bhi) ? -1 : 1;
+    }
+    if (alo != blo) {
+        return (alo < blo) ? -1 : 1;
+    }
+    return 0;
+}
+
+// `f64` の指数・仮数フィールド（`e`：バイアス済み・`f`：フラクション。
+// `e==0 && f==0` の完全ゼロは呼び出し側で排除済みの前提）から
+// 「隠れ 1 を bit52 に立てた 53bit 仮数」と `value = m * 2^(exp_u-52)`
+// の unbiased 指数の対を求める（`soft_f64::normalize_f64_mantissa`）。
+inline LnNormMantissa ln_f64_normalize_mantissa(ulong e, ulong f) {
+    LnNormMantissa r;
+    if (e == 0ul) {
+        uint lead = 63u - ln_f64_clz64(f);
+        uint shift = 52u - lead;
+        r.m = f << shift;
+        r.exp_u = -1022l - (long)shift;
+    } else {
+        r.m = f | (1ul << 52);
+        r.exp_u = (long)e - 1023l;
+    }
+    return r;
+}
+
+// `f64 * f64`（最近接偶数丸め）の bit 表現版（NaN は quiet NaN へ
+// 正規化）。仮数同士の厳密 106bit 積を [`ln_f64_mul64_wide`] で構成し、
+// **1 回だけ**丸める（中間で `f32` はもとより暫定 `f64` へも丸めない。
+// 二重丸め回避）。`soft_f64::mul_f64_bits` の逐語移植。
+inline ulong ln_f64_mul(ulong a, ulong b) {
+    ulong sa = a & LN_F64_SIGN;
+    ulong sb = b & LN_F64_SIGN;
+    ulong sign = sa ^ sb;
+    ulong ea = (a >> 52) & LN_F64_EXP_MASK;
+    ulong eb = (b >> 52) & LN_F64_EXP_MASK;
+    ulong fa = a & LN_F64_FRAC_MASK;
+    ulong fb = b & LN_F64_FRAC_MASK;
+
+    bool a_nan = (ea == LN_F64_EXP_MASK) && (fa != 0ul);
+    bool b_nan = (eb == LN_F64_EXP_MASK) && (fb != 0ul);
+    if (a_nan || b_nan) {
+        return LN_F64_QNAN;
+    }
+    bool a_inf = (ea == LN_F64_EXP_MASK);
+    bool b_inf = (eb == LN_F64_EXP_MASK);
+    bool a_zero = (ea == 0ul) && (fa == 0ul);
+    bool b_zero = (eb == 0ul) && (fb == 0ul);
+    if ((a_zero && b_inf) || (a_inf && b_zero)) {
+        return LN_F64_QNAN;
+    }
+    if (a_inf || b_inf) {
+        return sign | LN_F64_INF;
+    }
+    if (a_zero || b_zero) {
+        return sign;
+    }
+
+    LnNormMantissa na = ln_f64_normalize_mantissa(ea, fa);
+    LnNormMantissa nb = ln_f64_normalize_mantissa(eb, fb);
+    LnU128 p = ln_f64_mul64_wide(na.m, nb.m);
+    // `na.m, nb.m ∈ [2^52, 2^53)` のため積は常に `[2^104, 2^106)`。
+    // よって `p.hi` は常に非ゼロ（bit104 以上は `hi` 側〈bit64 以降〉に
+    // 属する）。
+    uint leadpos = 64u + (63u - ln_f64_clz64(p.hi));
+    long exp_u = na.exp_u + nb.exp_u + ((long)leadpos - 104l);
+    long shift_normal = (long)leadpos - 52l; // 52 か 53（常に < 64）。
+
+    long biased_before_round = exp_u + 1023l;
+    long final_shift_l;
+    bool is_subnormal_target;
+    if (biased_before_round >= 1l) {
+        final_shift_l = shift_normal;
+        is_subnormal_target = false;
+    } else {
+        final_shift_l = shift_normal + (1l - biased_before_round);
+        is_subnormal_target = true;
+    }
+
+    if (final_shift_l < 0l || final_shift_l >= 128l) {
+        // 到達性: 本カーネルの実用値域（`f32` 由来の `x`／`eps`／
+        // `weight` から生じる soft-f64 中間値）では発生しない極端な
+        // underflow。安全側として `±0` へ丸める。
+        return sign;
+    }
+    uint final_shift = (uint)final_shift_l;
+    LnU128 q = ln_f64_shr128(p.hi, p.lo, final_shift);
+    ulong m = q.lo; // `q.hi` は常に 0（呼び出し前提の値域より）。
+    LnU128 rem = ln_f64_low_bits128(p.hi, p.lo, final_shift);
+    ulong half_hi = 0ul;
+    ulong half_lo = 0ul;
+    if (final_shift > 0u) {
+        if (final_shift - 1u < 64u) {
+            half_lo = 1ul << (final_shift - 1u);
+        } else {
+            half_hi = 1ul << (final_shift - 1u - 64u);
+        }
+    }
+    int cmp = ln_f64_cmp128(rem.hi, rem.lo, half_hi, half_lo);
+    bool round_up = (cmp > 0) || (cmp == 0 && (m & 1ul) == 1ul);
+    if (round_up) {
+        m += 1ul;
+    }
+
+    if (!is_subnormal_target) {
+        long exp_final = exp_u;
+        if (m >= (1ul << 53)) {
+            m >>= 1;
+            exp_final += 1l;
+        }
+        long biased_final = exp_final + 1023l;
+        if (biased_final >= (long)LN_F64_EXP_MASK) {
+            return sign | LN_F64_INF;
+        }
+        return sign | (((ulong)biased_final) << 52) | (m & LN_F64_FRAC_MASK);
+    } else {
+        if (m >= (1ul << 52)) {
+            return sign | (1ul << 52);
+        }
+        return sign | m;
     }
 }
 
-// 32 レーン全体の scale/ssq 状態を 5 段 butterfly で reduction する
-// （`rmsnorm.metal::rmsnorm_reduce_ssq` と同一）。
-inline void ln_reduce_ssq(thread float& scale, thread float& ssq, thread float& comp) {
-    for (uint offset = 16u; offset > 0u; offset >>= 1u) {
-        float other_scale = simd_shuffle_xor(scale, offset);
-        float other_ssq = simd_shuffle_xor(ssq, offset);
-        float other_comp = simd_shuffle_xor(comp, offset);
-        ln_ssq_combine(scale, ssq, comp, other_scale, other_ssq, other_comp);
+// `x`（正規化数・subnormal 双方に対応。特殊値は呼び出し側で除外済みの
+// 前提）を `2^k` 倍する（指数フィールドを直接加算するだけの厳密演算。
+// Newton 反復の「種」専用——範囲を超える場合は `±inf`／`±0` へ丸め
+// なしで潰す。`soft_f64::scale_pow2_f64_bits`）。
+inline ulong ln_f64_scale_pow2(ulong x_bits, long k) {
+    ulong sign = x_bits & LN_F64_SIGN;
+    long e = (long)((x_bits >> 52) & LN_F64_EXP_MASK);
+    ulong f = x_bits & LN_F64_FRAC_MASK;
+    long new_e = e + k;
+    if (new_e >= (long)LN_F64_EXP_MASK) {
+        return sign | LN_F64_INF;
     }
+    if (new_e <= 0l) {
+        return sign;
+    }
+    return sign | (((ulong)new_e) << 52) | f;
+}
+
+// 仮数・指数を分離した種抽出（`soft_f64::extract_reduced_mantissa_and_exp`）。
+// `want_sqrt_range == false`: `reduced ∈ [1,2)`・`exp_out = exp_u`
+// （[`ln_f64_recip_newton`] 用）。`want_sqrt_range == true`: `reduced ∈
+// [1,4)`（指数の偶奇に応じて範囲を揃える）・`exp_out = floor(exp_u/2)`
+// 相当（[`ln_f64_rsqrt_newton`] 用）。
+struct LnReducedSeed {
+    uint reduced_bits;
+    long exp_out;
+};
+
+inline LnReducedSeed ln_f64_extract_reduced_and_exp(ulong x_bits, bool want_sqrt_range) {
+    ulong e = (x_bits >> 52) & LN_F64_EXP_MASK;
+    ulong f = x_bits & LN_F64_FRAC_MASK;
+    LnNormMantissa n = ln_f64_normalize_mantissa(e, f);
+    LnReducedSeed r;
+    if (!want_sqrt_range) {
+        ulong reduced_bits = (1023ul << 52) | (n.m & LN_F64_FRAC_MASK);
+        r.reduced_bits = ln_f64_narrow(reduced_bits);
+        r.exp_out = n.exp_u;
+    } else if ((n.exp_u & 1l) == 0l) {
+        // `exp_u` が偶数（負値の剰余は `& 1` で符号に依らず 0/1 が出る）。
+        ulong reduced_bits = (1023ul << 52) | (n.m & LN_F64_FRAC_MASK);
+        r.reduced_bits = ln_f64_narrow(reduced_bits);
+        r.exp_out = n.exp_u >> 1; // 偶数の算術右シフトは厳密な /2。
+    } else {
+        ulong reduced_bits = (1024ul << 52) | (n.m & LN_F64_FRAC_MASK);
+        r.reduced_bits = ln_f64_narrow(reduced_bits);
+        r.exp_out = (n.exp_u - 1l) >> 1;
+    }
+    return r;
+}
+
+// `f64` の逆数 `1/x` を Newton-Raphson（`y_{n+1} = y_n*(2 - x*y_n)`）で
+// 求める（`x` は本カーネルの用途上〈`hidden` 由来〉常に有限・正の値。
+// `soft_f64::recip_newton_f64_bits` の逐語移植）。
+inline ulong ln_f64_recip_newton(ulong x) {
+    LnReducedSeed seed = ln_f64_extract_reduced_and_exp(x, false);
+    float seed_reduced = 1.0f / as_type<float>(seed.reduced_bits);
+    ulong y = ln_f64_scale_pow2(ln_f64_widen(as_type<uint>(seed_reduced)), -seed.exp_out);
+    const ulong TWO = 0x4000000000000000ul;
+    for (uint i = 0u; i < 4u; i++) {
+        ulong xy = ln_f64_mul(x, y);
+        ulong two_minus_xy = ln_f64_sub(TWO, xy);
+        y = ln_f64_mul(y, two_minus_xy);
+    }
+    return y;
+}
+
+// `f64` の逆数平方根 `1/sqrt(x)` を Newton-Raphson（`y_{n+1} =
+// y_n*(1.5 - 0.5*x*y_n^2)`）で求める。特殊値は明示的に扱う（`x` は
+// 分散 `+ eps`〈ともに非負〉由来で数学的に非負のはずだが、防御的に
+// 負値も NaN として扱う）: `NaN -> NaN`・`±0 -> ±inf`・負（非ゼロ）
+// `-> NaN`・`+inf -> +0`。`soft_f64::rsqrt_newton_f64_bits` の逐語移植。
+inline ulong ln_f64_rsqrt_newton(ulong x) {
+    ulong e = (x >> 52) & LN_F64_EXP_MASK;
+    ulong f = x & LN_F64_FRAC_MASK;
+    ulong sign = x & LN_F64_SIGN;
+    if (e == LN_F64_EXP_MASK && f != 0ul) {
+        return LN_F64_QNAN;
+    }
+    if (e == 0ul && f == 0ul) {
+        return sign | LN_F64_INF;
+    }
+    if (sign != 0ul) {
+        return LN_F64_QNAN;
+    }
+    if (e == LN_F64_EXP_MASK) {
+        return 0ul; // +inf -> +0
+    }
+
+    LnReducedSeed seed = ln_f64_extract_reduced_and_exp(x, true);
+    float seed_reduced = 1.0f / sqrt(as_type<float>(seed.reduced_bits));
+    ulong y = ln_f64_scale_pow2(ln_f64_widen(as_type<uint>(seed_reduced)), -seed.exp_out);
+    const ulong ONE_HALF = 0x3FE0000000000000ul;
+    const ulong THREE_HALF = 0x3FF8000000000000ul;
+    for (uint i = 0u; i < 4u; i++) {
+        ulong y2 = ln_f64_mul(y, y);
+        ulong xy2 = ln_f64_mul(x, y2);
+        ulong half_xy2 = ln_f64_mul(ONE_HALF, xy2);
+        ulong inner = ln_f64_sub(THREE_HALF, half_xy2);
+        y = ln_f64_mul(y, inner);
+    }
+    return y;
 }
 
 kernel void layer_norm_f32(
@@ -348,250 +653,90 @@ kernel void layer_norm_f32(
     uint tg_id [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]])
 {
+    // `inv_n`（ホストから渡される事前丸め済み `1/hidden`）は使わない
+    // （`hidden` 自体を soft-f64 の `recip_newton` へ渡し、二重丸めを
+    // 避ける。バッファレイアウト互換のため引数自体は残す）。
+    (void)inv_n;
+
     for (uint row = tg_id; row < rows; row += grid_size) {
         ulong row_base = (ulong)row * (ulong)hidden;
-        // `hidden` による厳密除算（`hidden <= 2^24` の範囲では
-        // `(float)hidden` は exact 表現。ホスト側 `layer_norm.rs::
-        // validate_hidden_exact_f32` が起動前に検査する）を平均計算
-        // （パス 2）より前に確定させる。パス 1 の `eps` 側スケール
-        // 計算（`sqrt(eps)*sqrt(hidden_f)`）でも使うため、ここで
-        // 1 回だけ計算する。
-        float hidden_f = (float)hidden;
 
-        // パス 1: 行の 2 の冪スケール `row_scale`（`maxabs = max(|x_i|)`
-        // から直接ビット構成した `x` 側スケールと、`sqrt(eps)` から同じ
-        // 手法で構成した `eps` 側スケールの大きい方を採用する。冒頭
-        // コメント「`row_scale` の eps 対応拡張」参照）。
-        float lane_maxabs = 0.0f;
+        // `hidden` の f64 逆数（行内で不変のため 1 回だけ計算する）。
+        ulong hidden_f64 = ln_f64_widen(as_type<uint>((float)hidden));
+        ulong hidden_recip = ln_f64_recip_newton(hidden_f64);
+
+        // パス 1: 平均（soft-f64 総和。冒頭コメント「総和の順序」参照）。
+        ulong lane_sum = 0ul; // +0.0（f64）。
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
-            lane_maxabs = fmax(lane_maxabs, fabs(x[row_base + idx]));
+            ulong xv = ln_f64_widen(as_type<uint>(x[row_base + idx]));
+            lane_sum = ln_f64_add(lane_sum, xv);
         }
         for (uint offset = 16u; offset > 0u; offset >>= 1u) {
-            float other_maxabs = simd_shuffle_xor(lane_maxabs, offset);
-            lane_maxabs = fmax(lane_maxabs, other_maxabs);
+            ulong other_hi = simd_shuffle_xor((uint)(lane_sum >> 32), offset);
+            ulong other_lo = simd_shuffle_xor((uint)lane_sum, offset);
+            ulong other_sum = (other_hi << 32) | other_lo;
+            lane_sum = ln_f64_add(lane_sum, other_sum);
         }
-        float x_pow2_scale = ln_pow2_scale_from_maxabs(lane_maxabs);
-        // `eps` 側スケールは `sqrt(eps)*sqrt(hidden_f)` 自体（= パス 3
-        // の `eps_elem` 分子。以下 `eps_pseudo_elem_scale`）の 2 の冪
-        // ではなく、それを `LN_EPS_ELEM_SAFE_SHIFT`（`2^100`）だけ
-        // 右シフトした**最小限の**値を採用する（`ldexp` は 2 の冪との
-        // 厳密乗除のため丸め無し）。`eps_pseudo_elem_scale` の 2 の冪を
-        // そのまま `row_scale` に採用する（`eps_elem` を `[1,2)` に
-        // 収める「正準」な選び方）と、`eps` が `x` に比べて極端に
-        // 大きい行（例 `x=[1e-20,-1e-20], eps=1e38`）で `row_scale` が
-        // 過大になり、`x` 自身の比 `x_i/row_scale` が `f32` の
-        // 正規化下限（約 `1.18e-38`）を割り込む subnormal になって
-        // しまう。Apple GPU は subnormal な中間値を flush-to-zero
-        // しうるため（実機実測で確認。codex-review 指摘・PR #1671
-        // スレッド 2 件目「共通スケール抽出や指数分離を用い、中間値・
-        // affine 適用まで有効精度を保つ」の対応）、`x` の比を正規化
-        // 範囲内に保てる**必要最小限**の `row_scale` 引き上げに留める。
-        // `eps_elem` は `row_scale` にこの引き上げを適用すると
-        // `[2^100, 2^101)` 相当（`f32` の表現上限 `2^128` 付近から
-        // 十分な余裕を持たせた値。以降の scale/ssq 蓄積・
-        // `ln_ssq_combine` はいずれも `scale` 同士の比〈`[0,1]` に
-        // 収まる〉のみを扱うため `scale` 自体がこの大きさでも
-        // overflow しない）に収まり overflow しない。`x` 側が優越する
-        // 通常ケース（`eps` が `x` に比べ十分小さい）では
-        // `eps_pow2_scale <= x_pow2_scale` となり `row_scale` は従来
-        // どおり `x_pow2_scale` のまま変化しない。
-        float eps_pseudo_elem_scale = (eps > 0.0f) ? sqrt(eps) * sqrt(hidden_f) : 0.0f;
-        float eps_pow2_scale = (eps_pseudo_elem_scale > 0.0f)
-            ? ldexp(ln_pow2_scale_from_maxabs(eps_pseudo_elem_scale), -LN_EPS_ELEM_SAFE_SHIFT)
-            : 0.0f;
-        float row_scale = fmax(x_pow2_scale, eps_pow2_scale);
+        ulong mean = ln_f64_mul(lane_sum, hidden_recip);
 
-        // パス 2: 平均（比スケール領域 `x_i/row_scale` の Neumaier 補償
-        // 総和 → `inv_n` 倍を Dekker の手法で doubled-float
-        // `(mean_hi, mean_lo)` へ拡張。冒頭コメント参照）。
-        float lane_sum = 0.0f;
-        float lane_comp = 0.0f;
+        // パス 2: 分散（二パス。`(x-mean)^2` を soft-f64 で蓄積する）。
+        ulong lane_sq = 0ul;
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
-            float ratio = x[row_base + idx] / row_scale;
-            ln_kahan_add(lane_sum, lane_comp, ratio);
+            ulong xv = ln_f64_widen(as_type<uint>(x[row_base + idx]));
+            ulong dev = ln_f64_sub(xv, mean);
+            ulong devsq = ln_f64_mul(dev, dev);
+            lane_sq = ln_f64_add(lane_sq, devsq);
         }
-        ln_reduce_kahan(lane_sum, lane_comp);
-        // `hidden` による厳密除算（`hidden <= 2^24` の実用範囲では
-        // `(float)hidden` は exact 表現）を Dekker 型 div で
-        // doubled-float `(mean_hi, mean_lo)` へ拡張する（codex-review
-        // 指摘: ホストから渡される `inv_n`〈`1.0f32/hidden as f32`。
-        // 既に 1 回丸め済み〉をそのまま乗算して Dekker 分割すると、
-        // `mean_hi+mean_lo` が表す値は真の平均 `sum/hidden` ではなく
-        // `sum*inv_n_rounded` になる。全要素が同一値の行では本来
-        // 偏差が厳密に 0 になるべきだが、この差分〈`inv_n` 自身の
-        // 丸め誤差由来〉が `mean_lo` に残存し、後段で `eps` 由来の
-        // 極小 `scale` により 1000 倍規模へ増幅されていた（実測:
-        // `x=[1024,1024,1024], eps=1e-5` で本来 0 のところ約
-        // `-0.00965`）。`hidden` 自体による厳密除算に切り替えることで
-        // `mean_hi+mean_lo` が `sum/hidden`〈厳密値〉の doubled-float
-        // 表現になり、この増幅経路を根本から断つ）。`hidden_f` は
-        // パス 1 冒頭で確定済み（`eps` 側スケール計算でも使うため）。
-        float mean_hi = lane_sum / hidden_f;
-        float mean_div_r = fma(-mean_hi, hidden_f, lane_sum);
-        float mean_lo = mean_div_r / hidden_f + lane_comp / hidden_f;
-
-        // パス 3: 分散（比スケール偏差 `dev = (x_i/row_scale - mean_hi) -
-        // mean_lo` に対する scale/ssq 方式二乗和。`eps` は比スケール
-        // 等価量の疑似要素として同じ蓄積へ折り込む。冒頭コメント参照）。
-        float scale = 0.0f;
-        float ssq = 0.0f;
-        float ssq_c = 0.0f;
-        for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
-            float ratio = x[row_base + idx] / row_scale;
-            float dev = (ratio - mean_hi) - mean_lo;
-            ln_ssq_add(scale, ssq, ssq_c, fabs(dev));
+        for (uint offset = 16u; offset > 0u; offset >>= 1u) {
+            ulong other_hi = simd_shuffle_xor((uint)(lane_sq >> 32), offset);
+            ulong other_lo = simd_shuffle_xor((uint)lane_sq, offset);
+            ulong other_sq = (other_hi << 32) | other_lo;
+            lane_sq = ln_f64_add(lane_sq, other_sq);
         }
-        ln_reduce_ssq(scale, ssq, ssq_c);
-        // `eps_pseudo_elem_scale`（パス 1 で確定済み。`sqrt(eps)*
-        // sqrt(hidden_f)`）を `row_scale` で割った比スケール疑似要素を
-        // 二乗和へ折り込む。`row_scale` はパス 1 で `eps_pow2_scale`
-        // （`eps_pseudo_elem_scale` を `LN_EPS_ELEM_SAFE_SHIFT` だけ
-        // 右シフトした最小限のスケール）を考慮済みのため、`eps` が
-        // `x` に比べ極端に大きい行でも `eps_elem` は `[2^100, 2^101)`
-        // 程度に収まり overflow しない（冒頭コメント「`row_scale` の
-        // eps 対応拡張」参照）。
-        float eps_elem = eps_pseudo_elem_scale / row_scale;
-        ln_ssq_add(scale, ssq, ssq_c, eps_elem);
-        // `1/sqrt((ssq+ssq_c)*inv_n)` は通常オーダーの値（`eps` 疑似要素
-        // により `ssq+ssq_c` が 0 になることはない）。`scale` 側の逆数は
-        // 単独形成せず要素ごとに `dev_i / scale` として計算する
-        // （冒頭コメント「最終正規化係数は 1 つの逆数として合成しない」）。
-        float norm = 1.0f / sqrt((ssq + ssq_c) * inv_n);
+        ulong var = ln_f64_mul(lane_sq, hidden_recip);
+        ulong eps_f64 = ln_f64_widen(as_type<uint>(eps));
+        ulong var_plus_eps = ln_f64_add(var, eps_f64);
+        ulong rstd = ln_f64_rsqrt_newton(var_plus_eps);
 
-        // パス 4: 書き出し（device メモリを再読）。affine の最終段
-        // （正規化係数の乗算 + bias 加算）を `fma()` で明示的に融合
-        // する（`.claude/rules/coding-rust.md` の FMA 契約統一。
-        // codex-review 指摘）。`weight` の乗算順序（`scale` 除算の前か
-        // 後か）は要素ごとに適応的に選ぶ（下記ループ内コメント「重みの
-        // 乗算順序の適応的選択」参照。冒頭コメント「FMA 契約」参照）。
+        // パス 3: 書き出し（device メモリを再読）。`xhat` を soft-f64 で
+        // 確定した後 1 回だけ `f32` へ丸める（`ln_f64_narrow`。CPU 参照
+        // 実装 `((x-mean)*rstd) as f32` と同じ丸め位置）。
+        //
+        // **affine も soft-f64 で計算する理由（GPU の subnormal
+        // flush-to-zero 対策。codex-review 指摘・PR #1671 スレッド 1
+        // 件目の反例で実機実測により発覚）**: `xhat`（`f32` へ丸めた
+        // 直後の値）自体が `f32` の subnormal になりうる（`dev`・
+        // `rstd` の値域次第。例 `x=[1e38,-1e38,1e-4,-1e-4]` の小さい
+        // 要素）。この `xhat` を平坦な `float` の `fma(xhat, wv, bv)`
+        // へそのまま渡すと、Apple GPU 実機がハードウェア命令の
+        // **入力側**で subnormal をゼロへ flush しうることを実機実測
+        // で確認した（`layer_norm_tiny_x_huge_eps_stays_finite_and_
+        // nonzero` の反例で出力が `[0.0, 0.0]` になる形で顕在化）。
+        // 対策として、`xhat`・`wv`・`bv` を soft-f64 へ widen し直し
+        // `mul`＋`add`（ともに subnormal を経由しても flush されない
+        // 64bit 整数演算のみで構成）で affine を計算してから 1 回だけ
+        // `f32` へ narrow する。`f32` の積は常に `f64` の 53bit 仮数に
+        // 厳密に収まる（48bit 以内）ため `mul` 自体は丸め無しの厳密演算
+        // となり、後続の `add`＋`narrow`（2 段階の丸め）が単一の正しく
+        // 丸められた `f32` 直接丸めと異なる結果になるのは「二重丸め」が
+        // 生じる極めて稀な境界一致ケースに限られる（`f64` の 53bit と
+        // `f32` の 24bit の差が約 29bit あり、REQ-2 統一複合判定の許容
+        // 誤差を大幅に下回る）。CPU 参照実装のハードウェア `fma`
+        // （`f32::mul_add`。x86/ARM CPU は subnormal 入力を flush しない）
+        // と数学的に同値の結果を、GPU の flush-to-zero に依存せず
+        // 再現する。
         for (uint idx = lane; idx < hidden; idx += LAYER_NORM_SIMD_WIDTH) {
-            float ratio = x[row_base + idx] / row_scale;
-            float dev = (ratio - mean_hi) - mean_lo;
+            ulong xv = ln_f64_widen(as_type<uint>(x[row_base + idx]));
+            ulong dev = ln_f64_sub(xv, mean);
+            ulong xhat64 = ln_f64_mul(dev, rstd);
+            uint xhat_bits = ln_f64_narrow(xhat64);
+
             float wv = (has_weight != 0) ? w[idx] : 1.0f;
             float bv = (has_bias != 0) ? b[idx] : 0.0f;
-
-            // **重みの乗算順序の適応的選択（codex-review 指摘・PR #1671
-            // スレッド 2 件目の是正）**: `dev/scale` を先に計算してから
-            // `weight` を乗じる「安全な順序」が既定だが、`eps` が `x`
-            // に比べて極端に大きい行では `dev/scale` 自体が真に
-            // `subnormal`（例 `x=[1e-20,-1e-20], eps=1e38,
-            // weight=[1e38,1e38]` で `dev/scale≈7e-40`。数学的に正しい
-            // 中間値であり計算順序の誤りではない——真の `xhat` 自体が
-            // subnormal 級）になりうる。GPU が subnormal 中間値を
-            // flush-to-zero（FTZ）する場合、安全な順序（先に `xhat` を
-            // 確定してから `weight` を乗じる）では `xhat` 自体が 0 へ
-            // 潰れて情報が失われる。この場合に限り `weight` を `dev`
-            // に先に乗じてから `scale` で割る（`pre = dev*wv` は
-            // 通常範囲に収まる——本例では `pre≈1.37e29`）ことで
-            // `pre/scale` も通常範囲（本例で `≈0.0707`）に収まり
-            // subnormal を経由しない。
-            //
-            // 逆に、`dev/scale` が subnormal domain（`|dev/scale| <
-            // LN_FLT_MIN_NORMAL`）でない**通常ケース**では「先に
-            // `weight` を乗じる」順序を常用すると、`weight` が巨大な
-            // 値（例 `3e38`）の行で `dev*wv` 自体が `f32` の表現範囲
-            // （約 `3.4e38`）を超えて overflow する（例 `dev=1.5,
-            // weight=3e38` で `dev*wv` が `±inf` へ潰れる。是正前の
-            // 無条件premultiply で確認された regression。
-            // `docs/norm-ops-design.md` 参照）。`dev/scale` が通常域
-            // （非 subnormal）であれば `xhat=dev/scale` 自体は
-            // `O(1)` 程度に収まる設計（`row_scale`・scale/ssq 方式の
-            // 比スケール正規化。冒頭コメント参照）であるため、
-            // `xhat*weight` の大きさは概ね `weight` と同程度に留まり
-            // （真の数学的結果が `f32` 表現範囲を超える場合のみ
-            // overflow し、これは CPU/CUDA 側も同じく `inf` を返す
-            // 正しい挙動であり artifact ではない）、安全な順序を既定に
-            // することで通常ケースの overflow を回避できる。
-            //
-            // 判定は `fabs(dev) < scale * LN_FLT_MIN_NORMAL` で行う
-            // （`scale` は比スケール scale/ssq 蓄積のスケール成分。
-            // `scale > 0` を前提とし、`scale == 0`〈全要素の偏差が
-            // 厳密 0 かつ `eps == 0` の退化ケース〉では安全な順序へ
-            // フォールバックする——この場合 `dev` も厳密 0 のため
-            // `dev/scale = 0/0 = NaN` が自然に成立し NaN 伝播契約は
-            // 維持される）。
-            bool subnormal_risk =
-                (scale > 0.0f) && (fabs(dev) < scale * LN_FLT_MIN_NORMAL);
-
-            // `dev == 0.0 && eps > 0.0` の場合は明示的に `0.0f * wv` を
-            // 経由させる（codex-review 指摘: 当初 `dev == 0.0` だけで
-            // 分岐すると `eps == 0` かつ真の分散も 0 の退化ケース
-            // 〈例 `x=[1,1], eps=0`〉で `scale` が数学的に厳密 0
-            // 〈FTZ ではなく実際にゼロの mathematical scale〉になり、
-            // CPU/CUDA・ホスト参照実装が `0 * inf = NaN`（`rstd =
-            // 1/sqrt(var+eps) = 1/0 = inf`）として返す NaN 伝播契約と
-            // 食い違い Metal だけ `[0, 0]` を返していた。`eps > 0.0`
-            // を条件に加えることで、このゼロ経由の分岐は「`scale` が
-            // `eps` 由来の極小疑似要素のみに由来し FTZ で潰れうる」
-            // 退化ケース〈行の全要素が同一の巨大値・`eps > 0`。例
-            // `[2e38, 2e38]`〉に限定される。`eps == 0` かつ真の分散も
-            // 0 の場合は自然な `dev/scale = 0/0 = NaN` へフォール
-            // バックし、参照実装と同じ NaN 伝播契約を保つ。
-            //
-            // **非有限 `weight` の NaN 伝播是正（codex-review 指摘）**:
-            // 是正前は `bv` を無条件に返しており、`weight` が
-            // `NaN`／`inf` の場合でも `[0,0]` 相当を返していた（例
-            // `x=[1,1], weight=[NaN,inf], eps=1e-5`）。CPU/CUDA・
-            // ホスト参照実装は `xhat=0` を `weight` と `mul_add` する
-            // ため `0*NaN=NaN`・`0*inf=NaN` が affine 出力へ伝播する。
-            // `wv` が有限の場合は従来どおり `bv` を直接返す（`norm` は
-            // このケースで `+inf` になりうる——退化ケース〈`eps>0` かつ
-            // 真の分散も 0〉では `ssq` が `eps` 疑似要素の flush-to-
-            // zero で厳密 0 になり `norm = 1/sqrt(0) = inf` となる。
-            // `0.0f * wv`〈`wv` 有限なら `0.0f`〉を経由して `fma(0.0f,
-            // inf, bv)` を計算すると IEEE 754 の `0*inf=NaN` 規則により
-            // NaN になってしまい、この短絡評価自体が無意味化する——
-            // この分岐の元々の存在理由）。`wv` が非有限の場合のみ
-            // `fma(0.0f * wv, norm, bv)` を経由させ、`0*NaN=NaN`／
-            // `0*inf=NaN` が `norm` の値に関わらず（`NaN` は `fma` の
-            // どの引数であっても結果を `NaN` にする）出力へ伝播する
-            // ようにする。
-            bool wv_finite = !isnan(wv) && !isinf(wv);
-
-            float affine;
-            if (eps > 0.0f && dev == 0.0f) {
-                affine = wv_finite ? bv : fma(0.0f * wv, norm, bv);
-            } else if (subnormal_risk) {
-                // subnormal ケース（`row_scale` の eps 対応拡張だけでは
-                // `dev/scale` 自体が真に subnormal になる残存ケース。
-                // 上記「重みの乗算順序の適応的選択」参照）: `weight` を
-                // `scale` 除算より先に乗じて underflow を回避する。この
-                // 場合は `norm`（正規化係数）と `bias` を最終段の fma で
-                // 融合する（weight は既に適用済みのため、通常ケースの
-                // ような「weight を最終 fma に含める」順序を採れない。
-                // 数学的に正しい極値ケースであり、通常ケースの精度
-                // 契約〈下記〉は要求しない）。
-                float xhat_weighted = (dev * wv) / scale;
-                affine = fma(xhat_weighted, norm, bv);
-            } else {
-                // **通常ケース（codex-review 指摘・PR #1671）**: 先に
-                // `xhat = (dev/scale)*norm`（weight 適用前の正規化値。
-                // CPU/CUDA/ホスト参照実装の `xhat` と同じ意味論）を
-                // `f32` で確定し、その後 `affine = fma(xhat, weight,
-                // bias)` を**1 回の融合演算**として計算する。是正前は
-                // `xhat_weighted = (dev/scale)*wv`（weight を先に乗じる
-                // 独立の丸めステップ）を経てから `fma(xhat_weighted,
-                // norm, bv)`（norm と bias を融合）としていたため、
-                // weight の乗算が fma の外側で個別に丸められ、CPU/CUDA
-                // 側の `xhat.mul_add(weight, bias)`〈`xhat*weight` を
-                // 無限精度で計算してから 1 回だけ丸めて bias を加える〉
-                // と丸め経路が食い違っていた。`bias` が `xhat*weight`
-                // とほぼ相殺する値の行では、この余分な丸めステップが
-                // 誤差を大きく増幅する（実測: `x=[-3,-1,1,3], eps=0,
-                // weight=[1e10;4], bias=[-4472135680;4]` の `x=1` 要素で
-                // 是正前 Metal 約 `251.7` vs CPU 契約 約 `221.5`）。
-                // `weight` を最終 fma へ含めることで、CUDA（`fmaf`）・
-                // CPU/ホスト参照実装（`xhat.mul_add(w,b)`）と同じ
-                // 「weight・bias を 1 回の融合演算で結合する」丸め経路
-                // に揃う（`row_scale`・scale/ssq 方式由来で `xhat` 自体
-                // の値は CPU/CUDA と bit 一致しないため、これは REQ-2
-                // 統一複合判定の範囲内での丸め経路の整合であり
-                // bit-exact 契約ではない。冒頭コメント「FMA 契約」
-                // 参照）。
-                float xhat = (dev / scale) * norm;
-                affine = fma(xhat, wv, bv);
-            }
-            out[row_base + idx] = affine;
+            ulong wv64 = ln_f64_widen(as_type<uint>(wv));
+            ulong bv64 = ln_f64_widen(as_type<uint>(bv));
+            ulong affine64 = ln_f64_add(ln_f64_mul(ln_f64_widen(xhat_bits), wv64), bv64);
+            out[row_base + idx] = as_type<float>(ln_f64_narrow(affine64));
         }
     }
 }

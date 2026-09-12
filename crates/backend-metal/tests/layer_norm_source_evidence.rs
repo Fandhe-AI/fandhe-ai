@@ -10,6 +10,18 @@
 //! 明記するアルゴリズム契約（1 threadgroup = 1 simdgroup 固定・
 //! `simd_shuffle_xor` 5 段 butterfly・`threadgroup_barrier` 非使用・
 //! `ulong row_base` によるオーバーフロー安全な添字）のロックを兼ねる。
+//!
+//! **PR #1671 codex-review 指摘（P1 2 件）を受けた全面書き換え**:
+//! 当初実装（行の 2 の冪スケール `row_scale` によるリスケール総和 +
+//! Neumaier 補償和 + scale/ssq 分散）は「行スケール除算での微小値消失」
+//! 「正規化係数の丸め誤差が affine の相殺で増幅される」という 2 系統の
+//! 反例で数値契約を満たせないことが判明し、IEEE 754 binary64 の
+//! ソフトウェアエミュレーション（`ln_f64_*` 系関数。`crates/backend-metal/
+//! src/soft_f64.rs` がホスト側逐語モデル）経由の設計へ全面的に置き換えた
+//! （`layer_norm.metal` 冒頭コメント「数値方式」参照）。旧設計固有の
+//! 文字列（`row_scale`・`ln_kahan_add`・`ln_ssq_add`・
+//! `LN_EPS_ELEM_SAFE_SHIFT`・`LN_FLT_MIN_NORMAL` 等）を検査していた
+//! テストは新設計の実際の構造に合わせて全面的に書き換えた。
 
 /// `crates/backend-metal/src/shaders/layer_norm.metal` のソース全文。
 const LAYER_NORM_METAL_SOURCE: &str = include_str!("../src/shaders/layer_norm.metal");
@@ -26,84 +38,80 @@ fn row_base_uses_64bit_index_to_avoid_overflow() {
     );
 }
 
-/// `maxabs`（行の 2 の冪スケール導出）・平均（`ln_reduce_kahan`）・
-/// 分散（`ln_reduce_ssq`）の 3 箇所すべてが `simd_shuffle_xor` を用いた
+/// 平均（パス 1）・分散（パス 2）の 2 箇所が `simd_shuffle_xor` を用いた
 /// 5 段 butterfly（`offset` を 16u→1u へ 5 回半減させるループ）で
-/// reduction されることをロックする（codex-review 指摘を受けた Welford
-/// → 2 の冪スケーリング + 2 段補償和への設計変更。`layer_norm.metal`
-/// 冒頭コメント参照）。
+/// reduction されることをロックする（soft-f64 化により `row_scale`
+/// 算出用の `maxabs` パスが不要になったため、旧設計の 3 箇所〈maxabs・
+/// 平均・分散〉から 2 箇所〈平均・分散〉へ削減済み。`layer_norm.metal`
+/// 冒頭コメント「`rmsnorm.metal` との差分」参照）。
 #[test]
-fn all_three_reductions_use_five_stage_butterfly() {
+fn mean_and_variance_reductions_use_five_stage_butterfly() {
     let occurrences = LAYER_NORM_METAL_SOURCE
         .matches("for (uint offset = 16u; offset > 0u; offset >>= 1u)")
         .count();
     assert_eq!(
-        occurrences, 3,
-        "5 段 butterfly ループ（16u→1u の 5 回半減）は maxabs・平均・分散の 3 箇所に \
+        occurrences, 2,
+        "5 段 butterfly ループ（16u→1u の 5 回半減）は平均・分散の 2 箇所に \
          存在するはずだが {occurrences} 箇所しか見つからなかった"
     );
 }
 
-/// 分散の二乗和 reduction が `scale`／`ssq`／補償項 `comp` の 3 つすべて
-/// を `simd_shuffle_xor` することをロックする（`rmsnorm.metal` と同じ
-/// overflow-safe な scale/ssq 方式。いずれかの shuffle が失われると
-/// `f64` アキュムレータ相当の精度契約が崩れる）。
+/// 平均・分散のいずれの reduction も、soft-f64 アキュムレータ（`ulong`。
+/// `lane_sum`／`lane_sq`）を 32bit 上位・下位へ分割して個別に
+/// `simd_shuffle_xor` することをロックする（MSL の `simd_shuffle_xor` が
+/// 64bit 値〈`ulong`〉を直接サポートするか不明瞭なため、既知に動作する
+/// `uint` 版を 2 回呼ぶ方式を採る。`layer_norm.metal` 冒頭コメント参照。
+/// 上位・下位いずれかの shuffle が失われると reduction 結果が破損する）。
 #[test]
-fn variance_reduction_shuffles_scale_ssq_and_compensation() {
-    for var_name in ["scale", "ssq", "comp"] {
-        let needle = format!("simd_shuffle_xor({var_name}, offset)");
+fn mean_and_variance_reductions_shuffle_both_halves_of_soft_f64_accumulator() {
+    for var_name in ["lane_sum", "lane_sq"] {
+        let hi_needle = format!("simd_shuffle_xor((uint)({var_name} >> 32), offset)");
+        let lo_needle = format!("simd_shuffle_xor((uint){var_name}, offset)");
         assert!(
-            LAYER_NORM_METAL_SOURCE.contains(&needle),
-            "分散 reduction が `{var_name}` を shuffle していません（overflow-safe 精度契約 \
-             が壊れている可能性）"
+            LAYER_NORM_METAL_SOURCE.contains(&hi_needle),
+            "`{var_name}` の上位 32bit（hi）を shuffle していません（soft-f64 \
+             アキュムレータの reduction が破損している可能性）"
+        );
+        assert!(
+            LAYER_NORM_METAL_SOURCE.contains(&lo_needle),
+            "`{var_name}` の下位 32bit（lo）を shuffle していません（soft-f64 \
+             アキュムレータの reduction が破損している可能性）"
         );
     }
 }
 
-/// 平均の reduction が Neumaier 補償和の `(sum, comp)` ペアを
-/// `simd_shuffle_xor` することをロックする（codex-review 指摘（平均を
-/// 偏差計算前に丸めると精度が失われる・`meanB-meanA` の単純減算が
-/// overflow しうる）を受け、Welford オンライン平均を破棄し「行内 2 の
-/// 冪スケーリングした比スケール領域での Neumaier 補償和 → doubled-float
-/// 拡張」設計へ変更した。`docs/norm-ops-design.md`・`layer_norm.metal`
-/// 冒頭コメント参照）。
+/// 平均・分散パスがそれぞれ `ln_f64_widen`（`f32→f64`）で行要素を
+/// 昇格したうえで `ln_f64_add`（soft-f64 加算）で蓄積し、`hidden` の
+/// soft-f64 逆数（`ln_f64_recip_newton`）を乗じて確定することをロック
+/// する（codex-review 指摘の回帰防止: `row_scale` によるリスケール総和
+/// への逆戻りを検出する。`layer_norm.metal` 冒頭コメント「数値方式」
+/// 参照）。
 #[test]
-fn mean_reduction_shuffles_sum_and_comp() {
-    for var_name in ["sum", "comp"] {
-        let needle = format!("simd_shuffle_xor({var_name}, offset)");
-        assert!(
-            LAYER_NORM_METAL_SOURCE.contains(&needle),
-            "平均 reduction が `{var_name}` を shuffle していません（Neumaier 補償和の \
-             overflow-safe 契約が壊れている可能性）"
-        );
-    }
-}
-
-/// 平均が `row_scale`（2 の冪。`ln_pow2_scale_from_maxabs`）で除した
-/// 比スケール領域の値を Neumaier 補償和で蓄積し、`hidden` による厳密
-/// 除算を FMA による doubled-float 拡張（`mean_hi`／`mean_lo`）で保持
-/// することをロックする（codex-review 指摘の回帰防止: 平均を偏差計算前
-/// に単一 `f32` へ丸める実装への逆戻りを検出する）。
-///
-/// PR #1671 codex-review 指摘（P1）の是正により、ホストが事前丸めした
-/// `inv_n`〈`1/hidden`〉への乗算ベースの Dekker 分割から、`hidden` 自体
-/// （`hidden_f`）への直接除算ベースの Dekker 型 div へ変更済み
-/// （`inv_n` 自身の丸め誤差が `mean_lo` へ残存し `eps` 由来の極小
-/// `scale` で増幅される問題の根治。`docs/backend-metal-splitk-decision.md`
-/// と同様、ロック対象の期待文字列も実装変更と同じ PR 内で更新する）。
-#[test]
-fn mean_pass_uses_row_scale_and_doubled_float_extension() {
+fn mean_and_variance_passes_use_soft_f64_widen_add_and_recip() {
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("float ratio = x[row_base + idx] / row_scale;"),
-        "平均パスが行の比スケール領域（x/row_scale）で縮約していません"
+        LAYER_NORM_METAL_SOURCE
+            .contains("ulong xv = ln_f64_widen(as_type<uint>(x[row_base + idx]));"),
+        "行要素を ln_f64_widen で f64 へ昇格していません"
     );
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("float mean_hi = lane_sum / hidden_f;"),
-        "平均パスが `hidden` による厳密除算で mean_hi を求めていません"
+        LAYER_NORM_METAL_SOURCE.contains("lane_sum = ln_f64_add(lane_sum, xv);"),
+        "平均パスが ln_f64_add で soft-f64 総和を蓄積していません"
     );
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("float mean_div_r = fma(-mean_hi, hidden_f, lane_sum);"),
-        "平均パスが FMA による doubled-float 拡張（mean_hi/mean_lo）を行っていません"
+        LAYER_NORM_METAL_SOURCE.contains("ulong hidden_recip = ln_f64_recip_newton(hidden_f64);"),
+        "hidden の soft-f64 逆数（ln_f64_recip_newton）が見つかりません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("ulong mean = ln_f64_mul(lane_sum, hidden_recip);"),
+        "平均が soft-f64 積（lane_sum * hidden_recip）で確定していません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("ulong var = ln_f64_mul(lane_sq, hidden_recip);"),
+        "分散が soft-f64 積（lane_sq * hidden_recip）で確定していません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("ulong rstd = ln_f64_rsqrt_newton(var_plus_eps);"),
+        "rstd が soft-f64 逆数平方根（ln_f64_rsqrt_newton）で確定していません"
     );
 }
 
@@ -119,19 +127,20 @@ fn does_not_use_threadgroup_barrier() {
     );
 }
 
-/// NaN／inf 伝播の明示処理（`isnan`／`isinf`）が分散計算の scale/ssq
-/// ヘルパーに残っていることをロックする（`rmsnorm.metal` の同名契約と
-/// 同じ理由。codex-review 指摘・PR #1120 の教訓を LayerNorm 側でも
-/// 引き継ぐ）。
+/// soft-f64 の特殊値伝播（NaN・0*inf）が `ln_f64_add`／`ln_f64_mul` に
+/// 明示的に存在することをロックする（`rmsnorm.metal`／旧設計の
+/// `isnan`／`isinf` 契約と同じ意図を soft-f64 版で引き継ぐ。codex-review
+/// 指摘・PR #1120 の教訓の延長）。
 #[test]
-fn variance_helpers_explicitly_handle_nan_and_inf() {
+fn soft_f64_add_and_mul_explicitly_handle_nan_and_zero_times_inf() {
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("isnan(a)"),
-        "ln_ssq_add に NaN 検出（isnan）が見つかりません"
+        LAYER_NORM_METAL_SOURCE.contains("bool a_nan = (ea == LN_F64_EXP_MASK) && (fa != 0ul);"),
+        "ln_f64_add に NaN 検出が見つかりません"
     );
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("isinf(scale) && isinf(a)"),
-        "ln_ssq_add に inf 同士の特殊分岐（isinf(scale) && isinf(a)）が見つかりません"
+        LAYER_NORM_METAL_SOURCE
+            .contains("if ((a_zero && b_inf) || (a_inf && b_zero)) {\n        return LN_F64_QNAN;"),
+        "ln_f64_mul に 0*inf（不定形）の明示分岐が見つかりません"
     );
 }
 
@@ -171,69 +180,76 @@ fn kernel_declares_four_buffer_arguments_in_expected_order() {
     );
 }
 
-/// `row_scale` の eps 対応拡張（PR #1671 スレッド 2 件目の是正）が
-/// `ldexp` による最小限の右シフト（`LN_EPS_ELEM_SAFE_SHIFT`）を経由する
-/// ことをロックする（`sqrt(eps)` の 2 の冪をそのまま採用する「正準」な
-/// 実装への逆戻りを検出する。正準な実装は `x` の比が subnormal に潰れ
-/// Apple GPU 実機で flush-to-zero される回帰を再導入する。冒頭コメント
-/// 「`row_scale` の eps 対応拡張・weight 先乗算」参照）。
+/// `eps` が `row_scale` 由来の擬似要素トリック（旧設計）を経由せず、
+/// `ln_f64_widen` で直接 soft-f64 へ昇格されることをロックする
+/// （codex-review 指摘の回帰防止: `eps` 側スケールを `f32` の表現範囲に
+/// 押し込める旧トリックへの逆戻りを検出する）。
 #[test]
-fn eps_row_scale_extension_uses_minimal_ldexp_shift() {
+fn eps_is_widened_directly_to_soft_f64() {
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("constant int LN_EPS_ELEM_SAFE_SHIFT ="),
-        "LN_EPS_ELEM_SAFE_SHIFT 定数が見つかりません"
+        LAYER_NORM_METAL_SOURCE.contains("ulong eps_f64 = ln_f64_widen(as_type<uint>(eps));"),
+        "eps が ln_f64_widen で直接 soft-f64 へ昇格されていません"
     );
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains(
-            "ldexp(ln_pow2_scale_from_maxabs(eps_pseudo_elem_scale), -LN_EPS_ELEM_SAFE_SHIFT)"
-        ),
-        "eps 側スケールが ldexp による最小限の右シフトを経由していません"
+        LAYER_NORM_METAL_SOURCE.contains("ulong var_plus_eps = ln_f64_add(var, eps_f64);"),
+        "var + eps が soft-f64 加算で確定していません"
     );
 }
 
-/// パス 4 が `weight` の乗算順序（`scale` 除算の前か後か）を
-/// `dev/scale` の subnormal リスクに応じて要素ごとに適応的に選ぶ
-/// ことをロックする（PR #1671 スレッド 2 件目の是正・#1671 codex-review
-/// 再指摘による通常ケースの是正〈`xhat` を先に確定してから最終段
-/// `fma(xhat, weight, bias)` で weight・bias を融合する〉を反映。`eps`
-/// が `x` を極端に上回る行で中間値が subnormal に潰れる回帰・巨大
-/// `weight` で無条件premultiplyがoverflowする回帰・`bias` と
-/// `xhat*weight` がほぼ相殺する行で weight の先行乗算が丸め誤差を
-/// 増幅する回帰のいずれも検出する。冒頭コメント「`row_scale` の eps
-/// 対応拡張・weight 乗算順序の適応的選択」参照）。
+/// パス 3（書き出し）の affine（`x̂·w+b`）が、GPU の subnormal
+/// flush-to-zero 対策として `xhat`／`weight`／`bias` すべてを soft-f64 へ
+/// widen し直し `mul`＋`add` で計算してから 1 回だけ `f32` へ narrow する
+/// ことをロックする（PR #1671 codex-review 反例〈`xhat` 自体が `f32`
+/// subnormal になる行で平坦な `float` の `fma()` が GPU 実機の入力側
+/// flush-to-zero に晒される〉の回帰防止。`layer_norm.metal` パス 3
+/// コメント「affine も soft-f64 で計算する理由」参照）。
 #[test]
-fn pass4_selects_weight_multiply_order_adaptively() {
+fn pass3_computes_affine_entirely_in_soft_f64_to_avoid_gpu_subnormal_flush() {
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("constant float LN_FLT_MIN_NORMAL ="),
-        "LN_FLT_MIN_NORMAL 定数（subnormal 判定しきい値）が見つかりません"
+        LAYER_NORM_METAL_SOURCE.contains("uint xhat_bits = ln_f64_narrow(xhat64);"),
+        "xhat が soft-f64 から f32 へ narrow されていません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("ulong wv64 = ln_f64_widen(as_type<uint>(wv));"),
+        "weight を soft-f64 へ widen していません"
+    );
+    assert!(
+        LAYER_NORM_METAL_SOURCE.contains("ulong bv64 = ln_f64_widen(as_type<uint>(bv));"),
+        "bias を soft-f64 へ widen していません"
     );
     assert!(
         LAYER_NORM_METAL_SOURCE.contains(
-            "bool subnormal_risk =
-                (scale > 0.0f) && (fabs(dev) < scale * LN_FLT_MIN_NORMAL);"
+            "ulong affine64 = ln_f64_add(ln_f64_mul(ln_f64_widen(xhat_bits), wv64), bv64);"
         ),
-        "subnormal リスク判定（fabs(dev) < scale * LN_FLT_MIN_NORMAL）が見つかりません"
+        "affine が soft-f64 の mul+add で計算されていません（平坦な float fma への \
+         逆戻りは GPU 実機の subnormal flush-to-zero を再導入する）"
     );
     assert!(
-        LAYER_NORM_METAL_SOURCE.contains("bool wv_finite = !isnan(wv) && !isinf(wv);"),
-        "weight の有限性判定（wv_finite）が見つかりません"
+        !LAYER_NORM_METAL_SOURCE.contains("out[row_base + idx] = fma(xhat, wv, bv);"),
+        "affine が平坦な float の fma() で計算されています（GPU 実機の subnormal \
+         flush-to-zero に対し脆弱な旧経路への回帰）"
     );
-    assert!(
-        LAYER_NORM_METAL_SOURCE.contains("affine = wv_finite ? bv : fma(0.0f * wv, norm, bv);"),
-        "ゼロ偏差短絡（weight 有限時は bv 直接返却・非有限時のみ fma 経由で NaN 伝播）が見つかりません"
-    );
-    assert!(
-        LAYER_NORM_METAL_SOURCE.contains(
-            "float xhat_weighted = (dev * wv) / scale;
-                affine = fma(xhat_weighted, norm, bv);"
-        ),
-        "subnormal ケースの weight 先行乗算（(dev*wv)/scale → fma(xhat_weighted, norm, bv)）が見つかりません"
-    );
-    assert!(
-        LAYER_NORM_METAL_SOURCE.contains(
-            "float xhat = (dev / scale) * norm;
-                affine = fma(xhat, wv, bv);"
-        ),
-        "通常ケースの weight・bias 融合（xhat=(dev/scale)*norm → fma(xhat, wv, bv)）が見つかりません"
-    );
+}
+
+/// soft-f64 の主要プリミティブ（`widen`／`add`／`mul`／`narrow`／
+/// `recip_newton`／`rsqrt_newton`）がすべて定義されていることをロック
+/// する（`crates/backend-metal/src/soft_f64.rs` のホスト側逐語モデルと
+/// 1 対 1 対応する契約。いずれかが欠落すると `layer_norm.metal` 冒頭
+/// コメント「ホスト側の逐語モデル」の前提が崩れる）。
+#[test]
+fn all_soft_f64_primitives_are_defined() {
+    for needle in [
+        "inline ulong ln_f64_widen(uint bits)",
+        "inline ulong ln_f64_add(ulong a, ulong b)",
+        "inline ulong ln_f64_sub(ulong a, ulong b)",
+        "inline uint ln_f64_narrow(ulong bits)",
+        "inline ulong ln_f64_mul(ulong a, ulong b)",
+        "inline ulong ln_f64_recip_newton(ulong x)",
+        "inline ulong ln_f64_rsqrt_newton(ulong x)",
+    ] {
+        assert!(
+            LAYER_NORM_METAL_SOURCE.contains(needle),
+            "soft-f64 プリミティブの定義が見つかりません: {needle}"
+        );
+    }
 }
