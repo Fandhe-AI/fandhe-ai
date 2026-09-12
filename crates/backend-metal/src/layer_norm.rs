@@ -55,6 +55,33 @@ fn validate_bias_len(hidden: usize, b_len: Option<usize>) -> Result<(), MetalErr
     Ok(())
 }
 
+/// `(float)hidden` が丸め無しで表現できる上限（`2^24`。`f32` の仮数部
+/// 23 bit + 暗黙の先頭 1 bit で表現できる最大の連続整数）。
+const LAYER_NORM_MAX_HIDDEN_EXACT_F32: usize = 1 << 24;
+
+/// `hidden` の起動前 fail-closed 検証（codex-review 指摘・PR #1671
+/// スレッド 1 件目）: `shaders/layer_norm.metal` は平均計算で `hidden`
+/// を `(float)hidden` へ直接変換し厳密除算する（`row_kernel::
+/// validate_row_kernel_launch` は `hidden` を `i32::MAX` までしか
+/// 検査しないため、この `f32` 表現の exact 境界〈`2^24`〉は本ファイル
+/// 側で別途検査する必要がある）。`hidden > 2^24`（例 `16777217`）では
+/// `(float)hidden` が最近接偶数丸めにより `16777216` へ丸められ、真の
+/// 除数とのずれが `mean_lo` へ残存して出力へ伝播しうるため、この軸長
+/// は「対応できない」として起動前に明示的に拒否する（対応する実装
+/// 〈整数の正確な値を保持した除算〉は行わない。`.claude/rules/
+/// coding-rust.md`「カーネル実装の境界検査」節）。
+fn validate_hidden_exact_f32(hidden: usize) -> Result<(), MetalError> {
+    if hidden > LAYER_NORM_MAX_HIDDEN_EXACT_F32 {
+        return Err(MetalError::InvalidRowKernelShape {
+            detail: format!(
+                "layer_norm hidden exceeds exact f32 integer range: hidden={hidden} > {LAYER_NORM_MAX_HIDDEN_EXACT_F32} (2^24); \
+                 Metal カーネルは平均計算で hidden を (float)hidden へ直接変換するため 2^24 超では丸め誤差が生じる"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// 融合 LayerNorm 順伝播カーネルのコンパイル済みパイプラインを保持する
 /// ハンドル。
 pub struct MetalLayerNorm {
@@ -115,6 +142,7 @@ impl MetalLayerNorm {
         )
         .map_err(map_validation_error)?;
         validate_bias_len(hidden, b.map(|s| s.len()))?;
+        validate_hidden_exact_f32(hidden)?;
 
         if rows == 0 || hidden == 0 {
             return Ok(Vec::new());
@@ -265,4 +293,28 @@ fn encode_layer_norm_dispatch(
         depth: 1,
     };
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// `validate_hidden_exact_f32`（Metal デバイスに触れないホスト側純関数
+/// 検証。codex-review 指摘・PR #1671 スレッド 1 件目）の自己検証。
+/// `layer_norm` モジュール自体が `cfg(target_os = "macos")` のため本
+/// テストも macOS 限定でのみコンパイルされるが、デバイス初期化は
+/// 不要なため `#[ignore]` は付けない。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_hidden_exact_f32_accepts_boundary() {
+        assert!(validate_hidden_exact_f32(LAYER_NORM_MAX_HIDDEN_EXACT_F32).is_ok());
+        assert!(validate_hidden_exact_f32(1).is_ok());
+        assert!(validate_hidden_exact_f32(0).is_ok());
+    }
+
+    #[test]
+    fn validate_hidden_exact_f32_rejects_above_boundary() {
+        let err = validate_hidden_exact_f32(LAYER_NORM_MAX_HIDDEN_EXACT_F32 + 1)
+            .expect_err("hidden = 2^24 + 1 must be rejected");
+        assert!(matches!(err, MetalError::InvalidRowKernelShape { .. }));
+    }
 }

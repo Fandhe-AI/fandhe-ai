@@ -444,3 +444,60 @@ fn layer_norm_positive_eps_degenerate_row_stays_finite_near_zero() {
         assert!(v.abs() < 1e-2, "expected near-zero output, got {v}");
     }
 }
+
+/// codex-review 指摘の再現ケース（P1・#1671 スレッド 2 件目）: `eps` が
+/// `x` に比べて極端に大きい行（`x=[1e-20,-1e-20]`・`eps=1e38`）では、
+/// 是正前の `row_scale`（`x` の `maxabs` のみから決定）だと `eps` 疑似
+/// 要素 `sqrt(eps)*sqrt(hidden)/row_scale` 自体が `f32` の表現範囲を
+/// 超えて `+inf` になり、`scale` が `+inf` へ潰れて実要素の寄与
+/// （`dev/scale`）がすべて厳密 0 になる（観測: `[0, 0]`）。`row_scale`
+/// を `eps` 側の要求も考慮して選び直す是正後は、`weight=[1e38,1e38]`
+/// と合わせて期待値 `[0.1, -0.1]` 近傍の有限出力を返すことを確認する
+/// （`shaders/layer_norm.metal` 冒頭コメント「`row_scale` の eps 対応
+/// 拡張」参照）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_tiny_x_huge_eps_stays_finite_and_nonzero() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    let x = vec![1e-20f32, -1e-20];
+    let w = vec![1e38f32, 1e38];
+    let out = layer_norm
+        .run_layer_norm_f32(&ctx, &x, Some(&w), None, 1e38, 1, 2)
+        .expect("run_layer_norm_f32 must succeed");
+    for &v in &out {
+        assert!(v.is_finite(), "expected finite output, got {v:?}: {out:?}");
+    }
+    assert!(
+        out[0].abs() > 1e-3,
+        "expected non-degenerate-zero output (row_scale must account for eps), got {out:?}"
+    );
+    assert!((out[0] - 0.1).abs() < 2e-2, "out[0]={} out={out:?}", out[0]);
+    assert!((out[1] + 0.1).abs() < 2e-2, "out[1]={} out={out:?}", out[1]);
+}
+
+/// codex-review 指摘の再現ケース（P1・#1671 スレッド 1 件目）: `hidden`
+/// が `2^24`（`(float)hidden` が丸め無しで表現できる上限）を超える
+/// 軸長は、平均計算の `(float)hidden` 直接変換が最近接偶数丸めで真の
+/// 除数とずれるため、起動前検証（`validate_hidden_exact_f32`）で
+/// fail-closed に拒否されることを確認する。境界値（`2^24` ちょうど）は
+/// 受理されることも合わせて確認する（`x.len()` を `hidden` に一致させる
+/// 必要はあるが、`hidden` 検証自体は `x_buf` 確保より前に行われるため
+/// `rows=0` で `x.len()==0` のまま検証のみ実行できる）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn layer_norm_rejects_hidden_exceeding_exact_f32_range() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let layer_norm = MetalLayerNorm::new(&ctx).expect("LayerNorm パイプラインの構築に失敗した");
+
+    let over_limit_hidden = (1usize << 24) + 1;
+    let err = layer_norm
+        .run_layer_norm_f32(&ctx, &[], None, None, 1e-5, 0, over_limit_hidden)
+        .expect_err("hidden = 2^24 + 1 must be rejected before launch");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("2^24") || msg.contains("16777216"),
+        "expected error to mention the exact-f32 boundary, got: {msg}"
+    );
+}
