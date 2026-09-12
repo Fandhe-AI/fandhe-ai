@@ -59,9 +59,12 @@
 //! 再入しても deadlock しない（同一 numel の再入は新規確保で対応する）。
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use cudarc::driver::{CudaContext, HostSlice, PinnedHostSlice};
+use cudarc::driver::{
+    CudaContext, CudaSlice, CudaStream, DevicePtrMut, HostSlice, PinnedHostSlice,
+};
 
 use crate::error::CudaError;
 
@@ -155,6 +158,22 @@ impl HostStaging {
         match self {
             HostStaging::Pinned(p) => Ok(p.as_slice()?),
             HostStaging::Pageable(v) => Ok(v.as_slice()),
+        }
+    }
+
+    /// H2D pinned staging（イシュー #1585・下部「H2D 用ステージング」節）
+    /// が呼び出し元データを書き込む先として使う可変ビュー。`Pinned`
+    /// 側の `as_mut_slice()` 内部 `event.synchronize()` は、直前の D2H
+    /// （このバッファを別用途で使っていた場合）や前回の H2D 発行が
+    /// 完了するまで待つ（`take` がキャッシュから取り出す＝前回の
+    /// `clone_htod`／`memcpy_htod` 発行が終わっていない可能性がある
+    /// ため、ここで待ってから上書きする契約。`PinnedHostSlice` の
+    /// event 追跡により、上書き前に前回の非同期 DMA 読み取りが完了
+    /// していることが保証される）。
+    pub(crate) fn as_mut_slice(&mut self) -> Result<&mut [f32], CudaError> {
+        match self {
+            HostStaging::Pinned(p) => Ok(p.as_mut_slice()?),
+            HostStaging::Pageable(v) => Ok(v.as_mut_slice()),
         }
     }
 
@@ -349,6 +368,452 @@ pub(crate) fn put_back(
         Err(poisoned) => poisoned.into_inner(),
     };
     guard.put(numel, generation, buf);
+}
+
+// ---------------------------------------------------------------------
+// H2D 用ステージング（イシュー #1585。低レイヤー診断
+// `docs/perf/lowlayer-diagnosis-2026-09-12.md` §7 表の B-3 行で起票された
+// 候補）。
+//
+// 上記の [`HostStagingCache`]・[`put_back`] は
+// `MemoryOps::with_host_view`（D2H 側。イシュー #1336/#1478）専用の
+// キャッシュだった。本節はホスト→デバイス方向（H2D）向けの対称な
+// 機構を、既定 OFF・明示 opt-in で追加する。
+//
+// 現行の CUDA H2D（`memory.rs::upload_inner`／`upload_into`・`gemm.rs`
+// の各 `run_*` 系・`ops.rs` の転置 NT 分岐）は、すべて pageable ホスト
+// メモリ（`&[f32]`）からの `stream.clone_htod`／`memcpy_htod` を直接
+// 発行している。cudarc-0.19.8 は内部で `cuMemcpyHtoDAsync` を発行する
+// が、pageable ソースでは driver が同期的に一時 pinned バッファへ
+// ステージングするため、呼び出し元が明示的に pinned メモリを用意すれば
+// この暗黙ステージングを避けられる（`docs/backend-cuda-async-execution-
+// design.md` §3 不変条件 I3 の再確認・追補も参照）。
+//
+// **既定 OFF・明示 opt-in**（`set_pinned_h2d_enabled`）。フラグ OFF・
+// `data` が空の場合は導入前と経路・出力とも bit 同一（`upload_new`／
+// `upload_into` 冒頭の早期分岐）。ON 時も、pinned バッファへ同期コピー
+// してから `clone_htod`／`memcpy_htod` へ渡すだけであり、DMA 転送
+// 対象の内容自体は変わらないため出力は bit 同一（数値契約は変えない。
+// `.claude/rules/coding-rust.md` の FMA 契約とは独立の軸）。
+//
+// **unsafe は追加しない**: 新規確保は [`HostStaging::alloc`]
+// （`HostStagingKind::Pinned` 分岐。D2H 側と共有する既存の唯一の
+// `unsafe` ブロック）を再利用する。
+
+/// H2D pinned staging の既定値の単一情報源（イシュー #1585・codex-review
+/// P2 是正。`docs/backend-metal-splitk-decision.md` §5「定数ゲートの
+/// 撤去（#1547）」で確立した `split_k_runtime::SPLIT_K_DEFAULT_ENABLED`
+/// と同型のパターン）。既定 `false`（従来の pageable 直接転送経路）。
+///
+/// `PINNED_H2D_ENABLED` の初期値をこの定数から seed し、drift ガード
+/// テスト（[`tests::default_h2d_enabled_matches_declared_default`]）は
+/// `set_pinned_h2d_enabled` を一切呼ばずにこの定数自体を直接検査する。
+/// 旧実装は `assert!` の直前で `set_pinned_h2d_enabled(false)` を呼んで
+/// いたため、`static` の初期値そのものが誤って `true` へ差し戻されても
+/// テストが偽陽性で pass してしまい検知できない欠陥があった（codex-
+/// review 指摘）。
+pub(crate) const PINNED_H2D_DEFAULT_ENABLED: bool = false;
+
+/// H2D pinned staging の opt-in フラグ本体。[`PINNED_H2D_DEFAULT_ENABLED`]
+/// で初期化するプロセスワイド `AtomicBool`（`crate::placement::
+/// MANAGED_PLACEMENT_ENABLED` と同型。`Ordering::SeqCst`。頻度の低い
+/// 設定変更のため緩い順序による最適化は不要）。
+static PINNED_H2D_ENABLED: AtomicBool = AtomicBool::new(PINNED_H2D_DEFAULT_ENABLED);
+
+/// H2D pinned staging を有効化・無効化する（`facade::
+/// set_cuda_pinned_h2d_enabled` から委譲される。プロセスワイドな設定
+/// であり、以降の全スレッド・全 `CudaMemory`／`CudaGemm` インスタンス
+/// の H2D 発行に反映される）。
+pub fn set_pinned_h2d_enabled(enabled: bool) {
+    PINNED_H2D_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// 現在の H2D pinned staging opt-in 状態を返す（既定 `false`）。
+pub fn pinned_h2d_enabled() -> bool {
+    PINNED_H2D_ENABLED.load(Ordering::SeqCst)
+}
+
+/// `PINNED_H2D_ENABLED` を操作するテスト間で共有する直列化ロック
+/// （`cfg(test)` 限定。`crate::placement::test_support` と同じ理由で
+/// 本フラグ専用の別ロックとして用意する）。
+#[cfg(test)]
+pub(crate) mod pinned_h2d_test_support {
+    use std::sync::Mutex as StdMutex;
+
+    pub(crate) fn pinned_h2d_flag_test_lock() -> &'static StdMutex<()> {
+        static LOCK: StdMutex<()> = StdMutex::new(());
+        &LOCK
+    }
+}
+
+/// [`H2dStagingCache`] が保持する 1 エントリ（`numel` ごとに複数
+/// エントリを許す設計上の理由は [`H2dStagingCache`] のドキュメンテー
+/// ションコメント参照）。
+struct H2dStagingEntry {
+    buf: HostStaging,
+    generation: u64,
+}
+
+/// H2D 用ホストステージングバッファのキャッシュ本体（イシュー #1585）。
+///
+/// [`HostStagingCache`]（D2H 側）と異なり、**同一 `numel` に対して
+/// 複数エントリ**（`HashMap<usize, Vec<H2dStagingEntry>>`）を保持する。
+/// 正方 GEMM は同じ要素数の A・B を連続して upload するため（例:
+/// `gemm.rs::run_f32_kernel` の `a_dev`／`b_dev`）、1 エントリ方式だと
+/// 2 個目（B）が毎回キャッシュ miss となり `cuMemHostAlloc`（ミリ秒級。
+/// `docs/perf/cuda-large-buffer-percall-alloc-transfer-threshold.md`）
+/// を毎回発行してしまい、機構と無関係な性能後退（REJECT 判定）を
+/// 招く。`take` は LIFO（`Vec::pop`）で取り出し、世代・長さ不一致の
+/// エントリは fail-closed に破棄する（[`HostStagingCache::take`] と同じ
+/// 契約。`context_cache::invalidate` 後の旧世代バッファ誤使用を防ぐ）。
+///
+/// `CudaMemory`／`CudaGemm` それぞれがインスタンス単位で本キャッシュを
+/// 持つため（`memory.rs`／`gemm.rs` のフィールド参照）、プロセス全体の
+/// pinned 常駐量は理論上 `cap_bytes` の複数倍になりうる点に注意
+/// （既定化判断〈本イシューのスコープ外〉で再検討する）。
+pub(crate) struct H2dStagingCache {
+    entries: HashMap<usize, Vec<H2dStagingEntry>>,
+    cached_bytes: u64,
+    cap_bytes: u64,
+    stats: HostStagingStats,
+}
+
+impl H2dStagingCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            cached_bytes: 0,
+            cap_bytes: HOST_STAGING_CAP_BYTES,
+            stats: HostStagingStats::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_cap(cap_bytes: u64) -> Self {
+        Self {
+            cap_bytes,
+            ..Self::new()
+        }
+    }
+
+    /// 統計スナップショット（[`HostStagingCache::stats`] と同じ
+    /// 「`cached_bytes` は唯一の真実源から合成する」設計）。
+    pub(crate) fn stats(&self) -> HostStagingStats {
+        HostStagingStats {
+            cached_bytes: self.cached_bytes,
+            ..self.stats
+        }
+    }
+
+    /// `numel` キーに対応する `Vec` の末尾（LIFO）から、`generation` に
+    /// 一致するエントリを探して取り出す。世代・長さ不一致のエントリは
+    /// 経路上で破棄する（fail-closed。[`HostStagingCache::take`] と同じ
+    /// 契約）。
+    pub(crate) fn take(&mut self, numel: usize, generation: u64) -> Option<HostStaging> {
+        let Some(vec) = self.entries.get_mut(&numel) else {
+            self.stats.misses += 1;
+            return None;
+        };
+        while let Some(entry) = vec.pop() {
+            self.cached_bytes = self.cached_bytes.saturating_sub(entry.buf.byte_len());
+            if entry.generation == generation && entry.buf.len() == numel {
+                self.stats.hits += 1;
+                if vec.is_empty() {
+                    self.entries.remove(&numel);
+                }
+                return Some(entry.buf);
+            }
+            self.stats.evicted += 1;
+        }
+        self.entries.remove(&numel);
+        self.stats.misses += 1;
+        None
+    }
+
+    /// 使用済みバッファをキャッシュへ返却する。`cap_bytes` を超える
+    /// 場合は登録せず破棄する（DoS 対策。page-locked メモリはホスト
+    /// RAM を固定するため特に重要。`.claude/rules/security.md`）。
+    pub(crate) fn put(&mut self, numel: usize, generation: u64, buf: HostStaging) {
+        let bytes = buf.byte_len();
+        let projected = self.cached_bytes.saturating_add(bytes);
+        if projected > self.cap_bytes {
+            self.stats.evicted += 1;
+            return;
+        }
+        self.cached_bytes = projected;
+        self.entries
+            .entry(numel)
+            .or_default()
+            .push(H2dStagingEntry { buf, generation });
+    }
+
+    /// 全エントリを破棄し解放したバイト数を返す（REQ-14
+    /// `release_cached` 系と同型の明示解放 API。
+    /// `CudaMemory::release_h2d_staging`／`CudaGemm::release_h2d_staging`
+    /// から呼ばれる）。
+    pub(crate) fn release_all(&mut self) -> u64 {
+        let bytes = self.cached_bytes;
+        self.entries.clear();
+        self.cached_bytes = 0;
+        bytes
+    }
+}
+
+/// [`H2dStagingCache::take`] の miss 時に [`HostStaging::alloc`]
+/// （`HostStagingKind::Pinned`。既存 `unsafe` 1 箇所を再利用）で新規
+/// 確保する（poison 時も `into_inner` で回復し panic しない。
+/// [`put_back`] と同じ方針）。
+fn take_or_alloc_h2d(
+    cache: &Mutex<H2dStagingCache>,
+    ctx: &Arc<CudaContext>,
+    numel: usize,
+    generation: u64,
+) -> Result<HostStaging, CudaError> {
+    let existing = {
+        let mut guard = match cache.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.take(numel, generation)
+    };
+    match existing {
+        Some(buf) => Ok(buf),
+        None => HostStaging::alloc(HostStagingKind::Pinned, ctx, numel),
+    }
+}
+
+/// 使用済み H2D ステージングバッファをキャッシュへ返却する
+/// （[`put_back`] の H2D 版）。
+fn put_back_h2d(cache: &Mutex<H2dStagingCache>, numel: usize, generation: u64, buf: HostStaging) {
+    let mut guard = match cache.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.put(numel, generation, buf);
+}
+
+/// **新規デバイスバッファへの H2D**（`stream.clone_htod(data)` の
+/// pinned staging 版）。`memory.rs::upload_inner`（`Device` 分岐）・
+/// `gemm.rs` の各 `run_*` 系（`a_dev`／`b_dev`／`bias_dev` 等）・
+/// `ops.rs` の転置 NT 分岐（`bt_dev`）から呼ばれる。
+///
+/// フラグ OFF または `data` が空の場合は `stream.clone_htod(data)` を
+/// そのまま呼ぶ（経路・出力とも導入前と bit 同一。0 要素で
+/// `cuMemHostAlloc` を発行しない）。ON の場合は `cache` から
+/// pinned バッファを取得（miss なら新規確保）し、`data` を同期コピー
+/// してから **`PinnedHostSlice` 自身**を `clone_htod` へ渡す
+/// （`as_slice()` で得た `&[f32]` を渡すと `[T]` 側の `HostSlice` 実装が
+/// event を記録せず、非同期 DMA と次回のホスト書き込みが競合しうる
+/// ため、必ずステージング型そのものを渡す契約）。
+pub(crate) fn upload_new(
+    stream: &Arc<CudaStream>,
+    cache: &Mutex<H2dStagingCache>,
+    ctx: &Arc<CudaContext>,
+    generation: u64,
+    data: &[f32],
+) -> Result<CudaSlice<f32>, CudaError> {
+    if !pinned_h2d_enabled() || data.is_empty() {
+        return Ok(stream.clone_htod(data)?);
+    }
+    let numel = data.len();
+    let mut staging = take_or_alloc_h2d(cache, ctx, numel, generation)?;
+    staging.as_mut_slice()?.copy_from_slice(data);
+    let result = match &staging {
+        HostStaging::Pinned(p) => stream.clone_htod(p)?,
+        HostStaging::Pageable(v) => stream.clone_htod(v.as_slice())?,
+    };
+    put_back_h2d(cache, numel, generation, staging);
+    Ok(result)
+}
+
+/// **既存デバイスバッファへの H2D**（`stream.memcpy_htod(data, dst)` の
+/// pinned staging 版）。`memory.rs::upload_into`（`Device` 分岐）から
+/// 呼ばれる（`DeviceParamStore::step` の毎 step grad staging 書き込み・
+/// `register_resident_leaves` の初期化）。
+///
+/// フラグ・空データの扱いは [`upload_new`] と同一（フラグ OFF・空
+/// データ時は `stream.memcpy_htod(data, dst)` をそのまま呼ぶ）。
+pub(crate) fn upload_into<Dst: DevicePtrMut<f32>>(
+    stream: &Arc<CudaStream>,
+    cache: &Mutex<H2dStagingCache>,
+    ctx: &Arc<CudaContext>,
+    generation: u64,
+    data: &[f32],
+    dst: &mut Dst,
+) -> Result<(), CudaError> {
+    if !pinned_h2d_enabled() || data.is_empty() {
+        stream.memcpy_htod(data, dst)?;
+        return Ok(());
+    }
+    let numel = data.len();
+    let mut staging = take_or_alloc_h2d(cache, ctx, numel, generation)?;
+    staging.as_mut_slice()?.copy_from_slice(data);
+    match &staging {
+        HostStaging::Pinned(p) => stream.memcpy_htod(p, dst)?,
+        HostStaging::Pageable(v) => stream.memcpy_htod(v.as_slice(), dst)?,
+    }
+    put_back_h2d(cache, numel, generation, staging);
+    Ok(())
+}
+
+#[cfg(test)]
+mod h2d_staging_tests {
+    use super::*;
+
+    /// フラグはプロセスグローバルのため、他のテストとの競合を避けて
+    /// 直列化・原状復帰する RAII ガード（`crate::placement::tests::
+    /// FlagGuard` と同型）。
+    struct FlagGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original: bool,
+    }
+
+    impl FlagGuard {
+        fn acquire() -> Self {
+            let lock = pinned_h2d_test_support::pinned_h2d_flag_test_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let original = pinned_h2d_enabled();
+            Self {
+                _lock: lock,
+                original,
+            }
+        }
+    }
+
+    impl Drop for FlagGuard {
+        fn drop(&mut self) {
+            set_pinned_h2d_enabled(self.original);
+        }
+    }
+
+    /// drift ガード: `PINNED_H2D_DEFAULT_ENABLED`（`PINNED_H2D_ENABLED`
+    /// の唯一の初期値供給源）の宣言値が意図せず `true` へ差し戻されて
+    /// いないかを機械的に検知する（opt-in 契約。イシュー #1585・
+    /// codex-review P2 是正）。
+    ///
+    /// `set_pinned_h2d_enabled`／`pinned_h2d_enabled` を一切呼ばず定数
+    /// 自体を直接検査する点が旧実装との違い: 旧実装は `assert!` 直前で
+    /// `set_pinned_h2d_enabled(false)` を呼んでいたため、たとえ
+    /// `static` の初期値（コンパイル時定数）が `true` へ書き換えられて
+    /// いても、実行時に明示的な `false` 上書きでテストが偽陽性 pass
+    /// してしまい drift を検知できなかった。本テストは他テストの実行
+    /// 順序・`FlagGuard` の有無に関わらず常に同じ結果になる（プロセス
+    /// グローバルな `AtomicBool` の実行時状態を一切参照しないため）。
+    #[test]
+    fn default_h2d_enabled_matches_declared_default() {
+        // `std::hint::black_box` は clippy `assertions_on_constants`
+        // （定数評価済みの assert は無意味という lint）を、意図どおり
+        // 「コンパイル時定数の値そのもの」を検査対象にしたまま回避する
+        // （`crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED` の drift
+        // ガードテストと同じ手当て。定数畳み込みを抑止するだけで、
+        // 検査対象の値自体は変えない）。
+        assert!(!std::hint::black_box(PINNED_H2D_DEFAULT_ENABLED));
+    }
+
+    #[test]
+    fn set_true_then_false_round_trips() {
+        let _guard = FlagGuard::acquire();
+        set_pinned_h2d_enabled(true);
+        assert!(pinned_h2d_enabled());
+        set_pinned_h2d_enabled(false);
+        assert!(!pinned_h2d_enabled());
+    }
+
+    #[test]
+    fn cache_take_miss_then_put_then_take_hit() {
+        let mut cache = H2dStagingCache::new();
+        assert!(cache.take(4, 0).is_none());
+        assert_eq!(cache.stats().misses, 1);
+
+        cache.put(4, 0, HostStaging::Pageable(vec![1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(cache.stats().cached_bytes, 16);
+
+        let hit = cache.take(4, 0).expect("同一 numel・世代は hit するはず");
+        assert_eq!(hit.as_slice().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(cache.stats().hits, 1);
+        assert_eq!(cache.stats().cached_bytes, 0);
+    }
+
+    /// 同一 numel に対して A・B（正方 GEMM の 2 入力）を連続して `put`
+    /// した場合、2 個とも独立にキャッシュされ、後続の 2 回の `take` が
+    /// いずれも hit することを検証する（`H2dStagingCache` が
+    /// `HostStagingCache` と異なり複数エントリを保持する設計そのものの
+    /// 回帰テスト。正方 GEMM の A/B が同一 numel の場合に 2 個目が毎回
+    /// miss してしまう欠陥を防ぐ）。
+    #[test]
+    fn cache_holds_multiple_entries_for_same_numel() {
+        let mut cache = H2dStagingCache::new();
+        cache.put(4, 0, HostStaging::Pageable(vec![1.0; 4]));
+        cache.put(4, 0, HostStaging::Pageable(vec![2.0; 4]));
+        assert_eq!(cache.stats().cached_bytes, 32);
+
+        let first = cache.take(4, 0).expect("2 個目（LIFO で後入れ）は hit");
+        assert_eq!(first.as_slice().unwrap(), &[2.0; 4]);
+        let second = cache.take(4, 0).expect("1 個目も hit");
+        assert_eq!(second.as_slice().unwrap(), &[1.0; 4]);
+        assert!(cache.take(4, 0).is_none(), "3 回目は miss");
+        assert_eq!(cache.stats().hits, 2);
+        assert_eq!(cache.stats().cached_bytes, 0);
+    }
+
+    #[test]
+    fn cache_take_discards_entry_with_mismatched_generation() {
+        let mut cache = H2dStagingCache::new();
+        cache.put(4, 0, HostStaging::Pageable(vec![0.0; 4]));
+
+        let result = cache.take(4, 1);
+        assert!(result.is_none());
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().evicted, 1);
+        assert_eq!(cache.stats().cached_bytes, 0);
+        assert!(cache.take(4, 0).is_none());
+    }
+
+    #[test]
+    fn cache_put_discards_entries_exceeding_cap() {
+        let mut cache = H2dStagingCache::with_cap(16);
+        cache.put(4, 0, HostStaging::Pageable(vec![0.0; 4]));
+        assert_eq!(cache.stats().cached_bytes, 16);
+
+        cache.put(2, 0, HostStaging::Pageable(vec![0.0; 2]));
+        assert_eq!(cache.stats().cached_bytes, 16, "cap 超過分は登録されない");
+        assert_eq!(cache.stats().evicted, 1);
+        assert!(cache.take(2, 0).is_none());
+    }
+
+    #[test]
+    fn release_all_clears_cache_and_returns_freed_bytes() {
+        let mut cache = H2dStagingCache::new();
+        cache.put(4, 0, HostStaging::Pageable(vec![0.0; 4]));
+        cache.put(8, 0, HostStaging::Pageable(vec![0.0; 8]));
+        assert_eq!(cache.stats().cached_bytes, 48);
+
+        let freed = cache.release_all();
+        assert_eq!(freed, 48);
+        assert_eq!(cache.stats().cached_bytes, 0);
+        assert!(cache.take(4, 0).is_none());
+        assert!(cache.take(8, 0).is_none());
+    }
+
+    #[test]
+    fn take_or_alloc_and_put_back_roundtrip_via_mutex_poison_recovery() {
+        // `Pinned` 種の alloc（miss 経路）は実 `CudaContext` を要求する
+        // ため実機テスト側で検証する（`take_or_alloc_h2d` 自体の
+        // poison 回復・`put_back_h2d` の往復は `H2dStagingCache` の
+        // `take`／`put`（上記テスト群）で検証済み）。ここでは poison
+        // 後も `put_back_h2d` が panic しないことのみを確認する。
+        let cache = Mutex::new(H2dStagingCache::new());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.lock().unwrap();
+            panic!("deliberately poison the mutex");
+        }));
+        assert!(result.is_err());
+        assert!(cache.is_poisoned());
+
+        put_back_h2d(&cache, 4, 0, HostStaging::Pageable(vec![1.0; 4]));
+        assert!(cache.lock().is_err());
+    }
 }
 
 #[cfg(test)]
