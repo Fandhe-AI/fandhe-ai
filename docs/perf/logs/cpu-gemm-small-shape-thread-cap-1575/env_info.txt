@@ -1,0 +1,26 @@
+イシュー #1575 Phase 0 実測環境（内部ホスト名は含めない）。
+
+OS: Darwin (macOS), arm64
+hw.perflevel0.logicalcpu: 12
+hw.logicalcpu: 16
+machdep.cpu.brand_string: Apple M4 Max
+rayon 既定プールスレッド数（RAYON_NUM_THREADS 未設定）: 16
+
+計測方式: record_only（専有ゲートなし。他セッション並走の共有負荷下）。
+uptime_before_phase0.txt に計測前後の load average を記録。
+
+ビルド: cargo build --release -p fandhe-ai-backend-cpu --example small_shape_cap_sweep
+バイナリ: target/release/examples/small_shape_cap_sweep
+
+腕ごとに 5 プロセス起動（各プロセス内で全 8 形状を 1 回ずつ計測。
+MeasurementConfig::default（warmup 20・iters 20）で 1 形状あたりの
+median_secs を得る。5 プロセスの median_secs から更に中央値を取り
+「5 回計測中央値」とする）。
+
+腕:
+- phase0_global.log: グローバルプール（RAYON_NUM_THREADS 未設定＝16）
+- phase0_dedicated_2.log / _4 / _6 / _8: 専用プール（cap N スレッド）
+  `pool.install(|| gemm_blis_parallel(...))`
+- phase0_rayon_env_4.log: プロセス全体 RAYON_NUM_THREADS=4（参照腕。
+  global アームと同じログ形式で arm=global と出力されるが本ファイルは
+  別プロセス系列）
