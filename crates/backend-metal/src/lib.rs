@@ -423,11 +423,21 @@ mod gemm_mpp_diag_tests;
 // （`tile.rs`／`gemm.rs`／`shaders/gemm.metal`）は無変更（診断テスト
 // 追加のみ。opt-in 候補としての前進可否は `docs/perf/
 // metal-gemm-hfrag-candidate.md` §9 側で判断する）。
+#[cfg(target_os = "macos")]
+pub mod gather_scatter;
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_hfrag_diag_tests;
 pub(crate) mod generic_cache;
+// `gather_scatter.metal`（`gather_f32`／`scatter_overwrite_f32`／
+// `scatter_add_f32`）のホスト側逐語モデル（イシュー #1778）。`soft_f64`・
+// `layout`／`pad` と同じ設計判断で `objc2` 系 FFI に触れないため
+// `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）でも
+// 単体テストが回る。
+pub mod gather_scatter_model;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
+#[cfg(target_os = "macos")]
+pub mod index_buffer;
 #[cfg(target_os = "macos")]
 pub mod layer_norm;
 pub mod layout;
@@ -519,6 +529,8 @@ pub use device::{MetalOccupancyInfo, probe_gpu_core_count};
 pub use elementwise::MetalElementwise;
 #[cfg(target_os = "macos")]
 pub use error::MetalError;
+#[cfg(target_os = "macos")]
+pub use gather_scatter::MetalGatherScatter;
 #[cfg(target_os = "macos")]
 pub use gemm::{GemmVariant, MetalGemm, SplitKFallbackReason, SplitKRoute};
 #[cfg(target_os = "macos")]

@@ -36,14 +36,15 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, require_same_shape,
-    row_norm_layout, row_softmax_layout,
+    QrFactors, ScatterReduce, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, gather_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
 };
 
 use crate::context::MetalContext;
 use crate::context_cache;
 use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
+use crate::gather_scatter_model::{validate_index_range, validate_shapes_fit_u32};
 use crate::layout::{self, MatrixLayout};
 use crate::memory::{MetalBufferHandle, MetalMemory, map_metal_error};
 use crate::row_kernel::{self, plan_dtype_is_f32};
@@ -2043,6 +2044,105 @@ impl BackendOps for MetalBackendOps {
              スコープ外）"
                 .into(),
         ))
+    }
+
+    /// `BackendOps::gather` の Metal 実装（イシュー #1778）。
+    /// [`gather_out_shape`] で `input`／`index` の shape を再検査し、
+    /// [`validate_shapes_fit_u32`]（rank・shape 要素の `u32` 収容）・
+    /// [`validate_index_range`]（`index` の値域）でカーネル起動前の
+    /// fail-closed 検査を行ってから `crate::gather_scatter::
+    /// MetalGatherScatter::run_gather_f32` へ委譲する（実装側の独立
+    /// 検査。`Var::gather` も同じ検査を済ませているが判定迂回経路を
+    /// 作らないため実装側でも独立に検査する。`.claude/rules/
+    /// security.md` A08。`crates/backend-cpu/src/ops.rs::gather` と
+    /// 同じ二重検査方針）。
+    fn gather(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        index: &Tensor<i32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = gather_out_shape(input.shape(), index.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+        let in_shape = input.shape().to_vec();
+        let index_shape = index.shape().to_vec();
+        validate_shapes_fit_u32(&[&in_shape, &index_shape]).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let index_owned = index.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gather: input not contiguous".into())
+        })?;
+        let index_slice = index_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gather: index not contiguous".into())
+        })?;
+
+        let dim_size = in_shape[dim];
+        validate_index_range(index_slice, dim, dim_size).map_err(BackendError::ShapeMismatch)?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let gs = context_cache::cached_gather_scatter(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = gs
+            .run_gather_f32(&ctx, input_slice, &in_shape, index_slice, &index_shape, dim)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::scatter` の Metal 実装（イシュー #1778）。
+    /// [`scatter_out_shape`] で `input`／`index`／`src` の shape を
+    /// 再検査し、[`Self::gather`] と同じ二重検査方針
+    /// （[`validate_shapes_fit_u32`]／[`validate_index_range`]）を
+    /// 適用してから `crate::gather_scatter::MetalGatherScatter::
+    /// run_scatter_f32` へ委譲する。未知 `ScatterReduce` variant への
+    /// フォールバックは `run_scatter_f32` 側（`Overwrite` へ委譲）が
+    /// 担う（CPU 参照実装と同じ安全側の割り切り方針）。
+    fn scatter(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        index: &Tensor<i32>,
+        src: &Tensor<f32>,
+        reduce: ScatterReduce,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = scatter_out_shape(input.shape(), index.shape(), src.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+        let index_shape = index.shape().to_vec();
+        validate_shapes_fit_u32(&[&out_shape, &index_shape])
+            .map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let index_owned = index.contiguous();
+        let src_owned = src.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scatter: input not contiguous".into())
+        })?;
+        let index_slice = index_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scatter: index not contiguous".into())
+        })?;
+        let src_slice = src_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scatter: src not contiguous".into())
+        })?;
+
+        let dim_size = out_shape[dim];
+        validate_index_range(index_slice, dim, dim_size).map_err(BackendError::ShapeMismatch)?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let gs = context_cache::cached_gather_scatter(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = gs
+            .run_scatter_f32(
+                &ctx,
+                input_slice,
+                &out_shape,
+                index_slice,
+                &index_shape,
+                src_slice,
+                dim,
+                reduce,
+            )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::mse_loss`] の Metal 実装
