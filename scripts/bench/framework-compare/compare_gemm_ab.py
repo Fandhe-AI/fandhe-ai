@@ -31,6 +31,13 @@ path patch。バージョン文字列は変わらない）には流用できな�
 する（split-K 結線前後 A/B の train セル判定用。`run_ab_splitk_metal.sh`
 が出力する JSONL を読む）。
 
+`--task infer`（イシュー #1689）指定時は `bench-fandhe --task infer` が
+emit する単一形状（`size=BATCH=64`）の `fresh`／`reuse` 2 セルを対象に
+する（CUDA 推論 forward チェーン単一同期化〈#1579／#1688〉の A/B 判定
+用。`run_ab_infer_chain_cuda.sh` が出力する JSONL を読む）。セル集合・
+`--phases` 対応は `train` と同じ扱い（`_VALID_SIZES_TRAIN`・
+`task_phases` 命名規約を task 名でパラメタ化して共用する）。
+
 fail-closed 方針（security.md A08。`compare_managed_ab.py` と同方針）:
 - `framework != "fandhe-ai"`・`task != <--task の指定値>`・
   `device != "metal"`・`tf32:true`・`managed:true` の行は判定不能行と
@@ -101,7 +108,7 @@ _GATE_SIZES_BY_DEVICE = {
 # 別の分岐は設けない）。
 _VALID_SIZES_TRAIN = frozenset({64})
 DEFAULT_TASK = "gemm"
-_VALID_TASKS = frozenset({"gemm", "train"})
+_VALID_TASKS = frozenset({"gemm", "train", "infer"})
 
 
 def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
@@ -109,10 +116,12 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
 
     `sizes_arg` は `"full"`（既定・後方互換。`_VALID_SIZES_BY_DEVICE` を
     そのまま使う）または `"gate"`（`_GATE_SIZES_BY_DEVICE` へ絞り込む）。
-    `task == "train"` の場合は `sizes_arg` を無視し `_VALID_SIZES_TRAIN`
-    （単一形状）を返す（train タスクに "gate" の概念は存在しない）。
+    `task` が `"train"`／`"infer"`（イシュー #1689 で追加）の場合は
+    `sizes_arg` を無視し `_VALID_SIZES_TRAIN`（単一形状。`bench-fandhe`
+    の `BATCH` 定数＝64 は train/infer で共通）を返す（train/infer
+    タスクに "gate" の概念は存在しない）。
     """
-    if task == "train":
+    if task in ("train", "infer"):
         return _VALID_SIZES_TRAIN
     if sizes_arg == "gate":
         return _GATE_SIZES_BY_DEVICE[device]
@@ -615,19 +624,24 @@ def render_markdown(
 _PHASE_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 
-def _valid_phase_row(obj, device):
-    """`train_phases` 行（`bench-fandhe --task train --phases`。イシュー
-    #1009）として `--phases` 診断表に使ってよいかを検証する。
+def _valid_phase_row(obj, device, task=DEFAULT_TASK):
+    """`{task}_phases` 行（`bench-fandhe --task train --phases` あるいは
+    `bench-fandhe --task infer --phases`。イシュー #1009・#1689）として
+    `--phases` 診断表に使ってよいかを検証する。
 
     `compare_ab.py::_valid_phase_row` は `device == "cuda"` 固定（イシュー
     #1083 の CUDA 専用ツール）だが、本関数は呼び出し元が渡す `device`
-    （`metal` 等）と突き合わせる（イシュー #1517「`train --phases` 診断表」。
-    `compare_ab.compare_phases` を流用しない理由は同モジュール docstring
-    参照）。
+    （`metal`／`cuda` 等）と突き合わせる（イシュー #1517「`train --phases`
+    診断表」・#1689「`infer --phases` 診断表」。`compare_ab.compare_phases`
+    を流用しない理由は同モジュール docstring 参照）。
+
+    `task`（既定 `"gemm"`。呼び出し元は `"train"`／`"infer"` のみを渡す）
+    で期待する `task` フィールド値（`f"{task}_phases"`）を切り替える
+    （イシュー #1689）。
     """
     if not isinstance(obj, dict):
         return False
-    if obj.get("framework") != "fandhe-ai" or obj.get("task") != "train_phases":
+    if obj.get("framework") != "fandhe-ai" or obj.get("task") != f"{task}_phases":
         return False
     if obj.get("device") != device:
         return False
@@ -640,14 +654,17 @@ def _valid_phase_row(obj, device):
     return True
 
 
-def render_phases_table(before_rows, after_rows, device, mode):
+def render_phases_table(before_rows, after_rows, device, mode, task=DEFAULT_TASK):
     """`--phases` 診断表（1 回計測・参考値。判定には用いない）を Markdown
     で返す。`before_rows`/`after_rows` は別ファイル（`--phases` 引数）から
     読んだ生の JSON オブジェクトのリスト。一致する行が無ければ空文字列
     （呼び出し元が節ごと省略する）。
+
+    `task`（既定 `"gemm"`。呼び出し元は `"train"`／`"infer"` のみを渡す）
+    を `_valid_phase_row` へそのまま渡す（イシュー #1689）。
     """
-    before = [r for r in before_rows if _valid_phase_row(r, device) and r.get("mode", "fresh") == mode]
-    after = [r for r in after_rows if _valid_phase_row(r, device) and r.get("mode", "fresh") == mode]
+    before = [r for r in before_rows if _valid_phase_row(r, device, task=task) and r.get("mode", "fresh") == mode]
+    after = [r for r in after_rows if _valid_phase_row(r, device, task=task) and r.get("mode", "fresh") == mode]
     if not before or not after:
         return ""
     before_by_phase = {r["phase"]: r for r in before}
@@ -718,8 +735,10 @@ def main(argv):
             "判定対象タスク（既定 'gemm'・後方互換。'train' は "
             "bench-fandhe --task train が emit する単一形状 "
             "（size=BATCH=64）のセルを対象にする。イシュー #1517。"
-            "'train' 指定時 --sizes は無視する（train に gate の概念は"
-            "ない）"
+            "'infer' も同様に bench-fandhe --task infer が emit する "
+            "単一形状（size=BATCH=64）の fresh/reuse セルを対象にする "
+            "（イシュー #1689）。'train'／'infer' 指定時 --sizes は無視する"
+            "（gate の概念はない）"
         ),
     )
     parser.add_argument(
@@ -728,10 +747,12 @@ def main(argv):
         metavar=("BEFORE_PHASES_JSONL", "AFTER_PHASES_JSONL"),
         default=None,
         help=(
-            "`--task train` 限定の診断表（`bench-fandhe --task train "
-            "--phases` が出す task:\"train_phases\" 行の before/after を "
+            "`--task train` または `--task infer` 限定の診断表（"
+            "`bench-fandhe --task train --phases` が出す "
+            "task:\"train_phases\" 行、あるいは `bench-fandhe --task infer "
+            "--phases` が出す task:\"infer_phases\" 行の before/after を "
             "1 回計測のまま並べる。判定には用いない参考値。"
-            "イシュー #1517）"
+            "イシュー #1517・#1689）"
         ),
     )
     parser.add_argument(
@@ -760,8 +781,11 @@ def main(argv):
         ),
     )
     args = parser.parse_args(argv[1:])
-    if args.phases is not None and args.task != "train":
-        print("ERROR: --phases は --task train と併用する場合のみ有効", file=sys.stderr)
+    if args.phases is not None and args.task not in ("train", "infer"):
+        print(
+            "ERROR: --phases は --task train または --task infer と併用する場合のみ有効",
+            file=sys.stderr,
+        )
         return 2
 
     modes = frozenset(m.strip() for m in args.modes.split(",") if m.strip())
@@ -828,7 +852,7 @@ def main(argv):
         else:
             for mode in sorted(modes):
                 table = render_phases_table(
-                    before_phase_rows, after_phase_rows, args.device, mode
+                    before_phase_rows, after_phase_rows, args.device, mode, task=args.task
                 )
                 if table:
                     print()
