@@ -889,6 +889,301 @@ class TaskTrainTest(unittest.TestCase):
             os.unlink(after_phases_path)
 
 
+def _rec_infer(median_s, checksum=-1.5, mode="reuse", version="0.8.0", warmup=5, iters=15):
+    """`bench-fandhe --task infer` 行の複製（イシュー #1689）。`_rec_train`
+    と同様に `parity` フィールドを持たない（`Record.parity: Option<
+    ParityStats>`。`run_infer`／`run_infer_reuse` は `parity: None` を
+    emit する）。`size` は `bench-fandhe` の `BATCH` 定数（64）固定。
+    """
+    return {
+        "framework": "fandhe-ai",
+        "version": version,
+        "task": "infer",
+        "device": "cuda",
+        "size": 64,
+        "median_s": median_s,
+        "q1_s": median_s,
+        "q3_s": median_s,
+        "checksum": checksum,
+        "warmup": warmup,
+        "iters": iters,
+        "mode": mode,
+    }
+
+
+def _all_infer_cells_rows(before_median, after_median, checksum=-1.5):
+    before = []
+    after = []
+    for mode in _MODES:
+        for _ in range(5):
+            before.append(_rec_infer(before_median, checksum=checksum, mode=mode))
+            after.append(_rec_infer(after_median, checksum=checksum, mode=mode))
+    return before, after
+
+
+class TaskInferTest(unittest.TestCase):
+    """イシュー #1689: `--task infer`（CUDA 推論 forward チェーン単一同期化
+    〈#1579／#1688〉の A/B 判定）の判定ロジックを検証する。`--task train`
+    向け `TaskTrainTest` 相当のテストを infer 用に複製する（`_size_set_for`
+    が `task in ("train", "infer")` で同じ `_VALID_SIZES_TRAIN` を返す
+    ため、判定ロジック自体は train と共有）。"""
+
+    def test_all_cells_non_regression(self):
+        before, after = _all_infer_cells_rows(0.010, 0.0099)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--task", "infer", "--device", "cuda", before_path, after_path]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(err.getvalue(), "")
+            self.assertEqual(out.getvalue().count("非後退"), 2)
+            self.assertIn("64/fresh", out.getvalue())
+            self.assertIn("64/reuse", out.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_regression_cell_detected(self):
+        before, after = _all_infer_cells_rows(0.010, 0.020)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--task", "infer", "--device", "cuda", before_path, after_path]
+                )
+            self.assertEqual(code, 3)
+            self.assertEqual(out.getvalue().count("後退"), 2)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_require_checksum_exact_flag_on_rejects_non_exact_match(self):
+        """イシュー #1689 の事前登録規則（reuse セルの checksum 完全一致
+        必須）を機械的に担保する `--require-checksum-exact` の挙動を
+        `--task infer` でも確認する（`--task train` 側の同名テストと同型。
+        イシュー #1560 codex-review [P1] 指摘の再検証）。"""
+        before, after = _all_infer_cells_rows(0.010, 0.0099)
+        # reuse セルの after 側 checksum のみ複合判定は通るが完全一致
+        # しない値へ差し替える（複合判定の許容誤差内でずらす）。
+        for r in after:
+            if r["mode"] == "reuse":
+                r["checksum"] = r["checksum"] * (1 + 1e-12)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    [
+                        "prog",
+                        "--task",
+                        "infer",
+                        "--device",
+                        "cuda",
+                        "--modes",
+                        "reuse",
+                        "--require-checksum-exact",
+                        before_path,
+                        after_path,
+                    ]
+                )
+            self.assertEqual(code, 3)
+            self.assertIn("--require-checksum-exact", out.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_gemm_rows_excluded_when_task_infer(self):
+        """`task:"gemm"` の行が紛れ込むと `--task infer` 実行時は不正行
+        として警告付きでスキップされ、fail-closed の「判定不能」（終了
+        コード 2）になることを確認する（`TaskTrainTest.
+        test_gemm_rows_excluded_when_task_train` の infer 版）。"""
+        before, after = _all_infer_cells_rows(0.010, 0.0099)
+        before.append(_rec(0.002, device="cuda"))
+        after.append(_rec(0.002, device="cuda"))
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    ["prog", "--task", "infer", "--device", "cuda", before_path, after_path]
+                )
+            self.assertEqual(code, 2)
+            self.assertIn("WARNING", err.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+
+    def test_phases_requires_train_or_infer_task(self):
+        """`--phases` は `--task train`／`--task infer` 併用時のみ有効
+        （既定 `--task gemm` では拒否）ことを確認する（`_VALID_TASKS`
+        3 値のうち `gemm` が対象外のままであることの回帰）。"""
+        before_path = _write_jsonl(_all_infer_cells_rows(0.010, 0.0099)[0])
+        after_path = _write_jsonl(_all_infer_cells_rows(0.010, 0.0099)[1])
+        phases_path = _write_jsonl([])
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    [
+                        "prog",
+                        "--device",
+                        "cuda",
+                        "--phases",
+                        phases_path,
+                        phases_path,
+                        before_path,
+                        after_path,
+                    ]
+                )
+            self.assertEqual(code, 2)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+            os.unlink(phases_path)
+
+    def test_phases_diagnostic_table_rendered_for_infer(self):
+        """`--task infer --phases` が `task:"infer_phases"` 行の
+        before/after を診断表として描画することを確認する
+        （`TaskTrainTest.test_phases_diagnostic_table_rendered` の
+        infer 版。`_valid_phase_row` の `task` パラメタ化〈イシュー
+        #1689〉の回帰）。"""
+        before, after = _all_infer_cells_rows(0.010, 0.0099)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        before_phases_path = _write_jsonl(
+            [
+                {
+                    "framework": "fandhe-ai",
+                    "version": "0.8.0",
+                    "task": "infer_phases",
+                    "device": "cuda",
+                    "size": 64,
+                    "median_s": 0.001,
+                    "q1_s": 0.001,
+                    "q3_s": 0.001,
+                    "checksum": -1.5,
+                    "warmup": 5,
+                    "iters": 15,
+                    "mode": "reuse",
+                    "phase": "predict_resident",
+                    "phase_index": 0,
+                }
+            ]
+        )
+        after_phases_path = _write_jsonl(
+            [
+                {
+                    "framework": "fandhe-ai",
+                    "version": "0.8.0",
+                    "task": "infer_phases",
+                    "device": "cuda",
+                    "size": 64,
+                    "median_s": 0.0009,
+                    "q1_s": 0.0009,
+                    "q3_s": 0.0009,
+                    "checksum": -1.5,
+                    "warmup": 5,
+                    "iters": 15,
+                    "mode": "reuse",
+                    "phase": "predict_resident",
+                    "phase_index": 0,
+                }
+            ]
+        )
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    [
+                        "prog",
+                        "--task",
+                        "infer",
+                        "--device",
+                        "cuda",
+                        "--phases",
+                        before_phases_path,
+                        after_phases_path,
+                        before_path,
+                        after_path,
+                    ]
+                )
+            self.assertEqual(code, 0)
+            stdout = out.getvalue()
+            self.assertIn("フェーズ分解（診断用・reuse・単発計測・非判定）", stdout)
+            self.assertIn("| predict_resident |", stdout)
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+            os.unlink(before_phases_path)
+            os.unlink(after_phases_path)
+
+    def test_train_phases_rows_not_mistaken_for_infer_phases(self):
+        """`task:"train_phases"` 行が `--task infer --phases` 実行時に
+        誤って `infer_phases` 診断表へ混入しないことを確認する
+        （`_valid_phase_row` の `task` パラメタ化が train/infer を正しく
+        区別する回帰。イシュー #1689）。"""
+        before, after = _all_infer_cells_rows(0.010, 0.0099)
+        before_path = _write_jsonl(before)
+        after_path = _write_jsonl(after)
+        train_phase_row = {
+            "framework": "fandhe-ai",
+            "version": "0.8.0",
+            "task": "train_phases",
+            "device": "cuda",
+            "size": 64,
+            "median_s": 0.001,
+            "q1_s": 0.001,
+            "q3_s": 0.001,
+            "checksum": -1.5,
+            "warmup": 5,
+            "iters": 15,
+            "mode": "reuse",
+            "phase": "backward",
+            "phase_index": 2,
+        }
+        before_phases_path = _write_jsonl([train_phase_row])
+        after_phases_path = _write_jsonl([train_phase_row])
+        try:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = compare_gemm_ab.main(
+                    [
+                        "prog",
+                        "--task",
+                        "infer",
+                        "--device",
+                        "cuda",
+                        "--phases",
+                        before_phases_path,
+                        after_phases_path,
+                        before_path,
+                        after_path,
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertNotIn("フェーズ分解", out.getvalue())
+        finally:
+            os.unlink(before_path)
+            os.unlink(after_path)
+            os.unlink(before_phases_path)
+            os.unlink(after_phases_path)
+
+
 class PerRunTest(unittest.TestCase):
     """イシュー #1517 実装計画 §4 rule (b)（run 内比 5/5 run 符号一貫の
     機械判定）向け `--per-run` 診断列を検証する。"""

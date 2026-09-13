@@ -143,6 +143,15 @@ cargo test -p fandhe-ai-backend-cuda --release --test linear_forward_device_real
 CI 実行可能なユニットテスト（§3）は本エージェント実行環境
 （CUDA toolkit 非搭載・`build-no-cuda-toolkit` 相当）で pass 済み。
 
+**#1689 追記**: 上記 `#[ignore]` 4 件＋record-only bench
+（`linear_forward_device_bench_cuda`）は、イシュー #1689
+（`docs/perf/infer-chain-single-sync-cuda-ab.md`・
+`docs/perf/logs/infer-chain-single-sync-cuda-1689/run_ignored_
+tests.sh` の R0「前提ゲート」）でも実行対象とした。結果（4 件＋bench）
+は `docs/perf/infer-chain-single-sync-cuda-ab.md` §5.1 の記入欄へ転記
+する運用とし、本エージェント実行環境に GB10 実機がないため引き続き
+未実測のまま記入欄を残す。
+
 ### 既存回帰（非後退確認）
 
 ```sh
