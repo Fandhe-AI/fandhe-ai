@@ -131,6 +131,38 @@ class JudgeInferAbTest(unittest.TestCase):
         code, out = self._run(before, after)
         self.assertEqual(code, 0, out)
 
+    def test_undetermined_when_checksum_missing_on_both_sides(self):
+        """codex-review 指摘: `checksum` が両腕とも欠落（`None`）のとき
+        `None == None` を「完全一致」と誤判定せず、undetermined に倒す。"""
+        before = [_rec("reuse", 0.010, checksum=None) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=None) for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+        self.assertIn("missing checksum", out)
+
+    def test_undetermined_when_checksum_key_absent(self):
+        before_rows = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
+        after_rows = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
+        for r in before_rows + after_rows:
+            del r["checksum"]
+        code, out = self._run(before_rows, after_rows)
+        self.assertEqual(code, 2, out)
+        self.assertIn("missing checksum", out)
+
+    def test_undetermined_when_median_s_missing(self):
+        before = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
+        del before[0]["median_s"]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+        self.assertIn("median_s", out)
+
+    def test_undetermined_when_median_s_non_positive(self):
+        before = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
+        after = [_rec("reuse", 0.0, checksum=1.5) for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,16 +8,20 @@ Metal）を「層境界ごとに D2H→H2D」から「入力を 1 回だけ `upl
 
 ## 1. 実装記録
 
-| ファイル | 変更概要 |
-|---|---|
-| `crates/tensor-core/src/backend_ops.rs` | `BackendOps::linear_forward_device_tracked`（デフォルトメソッド。`token` を無視して `linear_forward_device` へ委譲）を追加 |
-| `crates/autodiff/src/optim/device_store.rs` | `PredictChainStep` 型エイリアス・`DeviceParamStore::predict_device_chain`（`upload` 1 回・各層 `linear_forward_device_tracked`・末尾 `download` 1 回。決定 4 の 3 ケース状態遷移を実装）を追加 |
-| `crates/facade/src/compat/sequential.rs` | private ヘルパー `build_device_chain_steps`（`Linear`→融合可能な `ReLU` のみで構成される場合に `PredictChainStep` 列へ平坦化。`Sigmoid`／`Tanh` 混在等は `None` を返しフォールバックを促す）を追加し、`predict_resident` を「チェーン優先・`Unsupported` 検出でフォールバック」へ差し替え |
-| `crates/backend-metal/src/ops.rs` | `linear_forward_device` を `linear_forward_device_impl(.., token: Option<&DispatchFailureCell>)`（inherent メソッド）へ切り出し、`linear_forward_device` は薄いラッパー、新規 `linear_forward_device_tracked` は `encode_strided_bias_act_prepared_with_c_offset`（`c_offset=0`・`token` を渡す）へ委譲 |
-| `crates/backend-metal/tests/linear_forward_device_parity.rs` | `linear_forward_device_tracked_matches_linear_forward_device_and_leaves_token_unset`（`#[ignore]`）を追加 |
-| `crates/facade/tests/infer_device_chain_metal.rs`（新規） | `cfg(target_os = "macos")` + 理由付き `#[ignore]`。新チェーン経路 vs 手動 per-op チェーン（公開 API のみで再現）の bit 同一・run-to-run bit 同一・`diagnostic_batch_counters()` によるディスパッチ数検証（`encode_calls` 差分 2・`wait_until_completed` 差分 1）・record-only ベンチ |
-| `scripts/bench/framework-compare/run_ab_infer_chain_metal.sh`（新規） | `bench-fandhe --task infer --device metal --mode {fresh,reuse}` を before/after 2 本の path patch ビルドで交互実行する record-only スクリプト |
-| `scripts/bench/framework-compare/judge_infer_ab.py`（新規） | `--task infer` 専用の自己完結 A/B 判定ツール（`compare_gemm_ab.py` は `--task train` 限定で `--phases` を受け付ける設計のため、他イシューと共有する同ツールは変更せず新設） |
+コア実装（チェーン経路本体）は #1688（PR #1788）で着地済み。本 PR（#1580）
+が追加したのは実機テスト・A/B スキャフォールド・本 perf doc のみで、下記
+以外のコード変更は行っていない。
+
+| ファイル | 変更概要 | 帰属 |
+|---|---|---|
+| `crates/tensor-core/src/backend_ops.rs` | `BackendOps::linear_forward_device_tracked`（デフォルトメソッド。`token` を無視して `linear_forward_device` へ委譲） | #1688（PR #1788）で実装済み |
+| `crates/autodiff/src/optim/device_store.rs` | `ChainStep` 型エイリアス（非 pub）・`DeviceParamStore::predict_device_chain`（`upload` 1 回・各層 `linear_forward_device_tracked`・末尾 `download` 1 回。決定 4 の 3 ケース状態遷移） | #1688（PR #1788）で実装済み |
+| `crates/facade/src/compat/sequential.rs` | private ヘルパー `build_device_chain_steps` を追加し、`predict_resident` を「チェーン優先・`Unsupported` 検出でフォールバック」へ差し替え | #1688（PR #1788）で実装済み |
+| `crates/backend-metal/src/ops.rs` | `linear_forward_device_impl(.., token: Option<&DispatchFailureCell>)` への切り出し・`linear_forward_device_tracked` の `encode_strided_bias_act_prepared_with_c_offset` への配線 | #1688（PR #1788）で実装済み |
+| `crates/backend-metal/tests/linear_forward_device_parity.rs` | `linear_forward_device_tracked_matches_linear_forward_device_and_leaves_token_unset`（`#[ignore]`）を追加 | 本 PR（#1580） |
+| `crates/facade/tests/infer_device_chain_metal.rs`（新規） | `cfg(target_os = "macos")` + 理由付き `#[ignore]`。新チェーン経路 vs 手動 per-op チェーン（公開 API のみで再現）の bit 同一・run-to-run bit 同一・`diagnostic_batch_counters()` によるディスパッチ数検証（`encode_calls` 差分 2・`wait_until_completed` 差分 1）・record-only ベンチ | 本 PR（#1580） |
+| `scripts/bench/framework-compare/run_ab_infer_chain_metal.sh`（新規） | `bench-fandhe --task infer --device metal --mode {fresh,reuse}` を before/after 2 本の path patch ビルドで交互実行する record-only スクリプト | 本 PR（#1580） |
+| `scripts/bench/framework-compare/judge_infer_ab.py`（新規） | `--task infer` 専用の自己完結 A/B 判定ツール（`compare_gemm_ab.py` は `--task train` 限定で `--phases` を受け付ける設計のため、他イシューと共有する同ツールは変更せず新設） | 本 PR（#1580） |
 
 ## 2. 事前登録判定規則（設計 決定 9 の転記）
 
@@ -43,6 +47,13 @@ Metal）を「層境界ごとに D2H→H2D」から「入力を 1 回だけ `upl
 転記すること。
 
 ### 3.1 実機 `#[ignore]` テスト
+
+`infer_device_chain_metal.rs` 内の 4 テストは同一プロセス内の
+`MetalContext` シングルトンカウンタを共有するため、`METAL_SINGLETON_LOCK`
+（ファイル内 `static Mutex`）で Metal 実行区間を直列化している
+（codex-review 指摘対応。`--test-threads` の指定有無に依らず
+`predict_resident_device_chain_dispatch_counters_metal` のカウンタ差分
+計測が他テストの dispatch に汚染されない）。
 
 ```sh
 cargo test -p fandhe-ai-backend-metal --release --test linear_forward_device_parity -- --ignored --nocapture

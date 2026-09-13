@@ -13,6 +13,9 @@ fail-closed 方針（security.md A08。`compare_gemm_gate.py` 等と同方針）
 - 各セル（`mode` ごと）が before/after とも「ちょうど `--rounds`（既定 5）
   件」でなければ「判定不能」
 - `warmup`/`iters` が before/after で不一致なら「判定不能」
+- セル内のいずれかの行で `median_s` が欠落・非数値・非正値、または
+  `checksum` が欠落していれば「判定不能」（欠落を「一致」として扱わない。
+  codex-review 指摘対応）
 
 事前登録判定規則（イシュー #1580 計画）:
 - 判定セル: `mode == "reuse"`。対照（非判定・参考記録のみ）: `mode ==
@@ -61,6 +64,13 @@ def _judge_cell(before_rows, after_rows, rounds, threshold):
     """1 セル（`mode` 固定）の判定を行い `(verdict, detail_dict)` を返す。
 
     `verdict` は "ADOPT"／"REJECT"／"undetermined" のいずれか。
+
+    fail-closed 方針（codex-review 指摘対応。security.md A08 と同方針）:
+    `median_s`／`checksum` が欠落・非数値・（`median_s` のみ）非正値の行が
+    1 件でもあれば、それだけで "undetermined" とする。とくに `checksum`
+    が両腕とも欠落している場合に `None == None` で「完全一致」と誤判定
+    しないことを保証する（欠落は「一致が確認できていない」であって
+    「一致」ではない）
     """
     if len(before_rows) != rounds or len(after_rows) != rounds:
         return "undetermined", {
@@ -76,14 +86,24 @@ def _judge_cell(before_rows, after_rows, rounds, threshold):
     if len(before_iters) != 1 or len(after_iters) != 1 or before_iters != after_iters:
         return "undetermined", {"reason": "iters mismatch between before/after"}
 
+    all_rows = before_rows + after_rows
+    for r in all_rows:
+        median_s = r.get("median_s")
+        if not isinstance(median_s, (int, float)) or isinstance(median_s, bool) or median_s <= 0:
+            return "undetermined", {
+                "reason": f"missing or non-positive median_s: {median_s!r}"
+            }
+        if "checksum" not in r or r.get("checksum") is None:
+            return "undetermined", {"reason": "missing checksum"}
+
     before_medians = [r["median_s"] for r in before_rows]
     after_medians = [r["median_s"] for r in after_rows]
     before_median = statistics.median(before_medians)
     after_median = statistics.median(after_medians)
-    ratio = after_median / before_median if before_median != 0 else float("inf")
+    ratio = after_median / before_median
 
-    before_checksums = [r.get("checksum") for r in before_rows]
-    after_checksums = [r.get("checksum") for r in after_rows]
+    before_checksums = [r["checksum"] for r in before_rows]
+    after_checksums = [r["checksum"] for r in after_rows]
     checksum_exact_match = before_checksums == after_checksums
 
     detail = {

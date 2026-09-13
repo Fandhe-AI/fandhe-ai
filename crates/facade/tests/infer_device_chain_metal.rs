@@ -29,6 +29,7 @@
 //! ```
 #![cfg(target_os = "macos")]
 
+use std::sync::Mutex;
 use std::time::Instant;
 
 use bench_harness::median_q1_q3;
@@ -36,6 +37,20 @@ use fandhe_ai::compat::Sequential;
 use fandhe_ai::{Device, DeviceParamStore, Tensor};
 use fandhe_ai_backend_metal::MetalBackendOps;
 use fandhe_ai_tensor_core::Activation;
+
+/// `MetalContext` はプロセス単位のシングルトン（`fandhe_ai_backend_metal::
+/// __diagnostic_batch_counters_snapshot` が読む `encode_calls`／
+/// `wait_until_completed` カウンタもプロセス全体で共有）であり、本ファイル
+/// の 4 テストは同一テストバイナリ内で cargo test の既定並列実行
+/// （`--test-threads` 省略時は複数）により同時に走りうる。とくに
+/// `predict_resident_device_chain_dispatch_counters_metal`（テスト (c)）は
+/// `before`/`after` 2 回のスナップショット差分を厳密なディスパッチ回数
+/// として検証するため、その計測区間中に他テスト（(a)/(b)/(d)）由来の
+/// Metal dispatch が割り込むと誤検出・flaky 化する（codex-review 指摘）。
+/// 本ファイル内の全テストが Metal 実行区間の前後でこのロックを取得する
+/// ことで、同一プロセス内では常に直列実行され、この割り込みを構造的に
+/// 排除する（`--test-threads=1` の運用依存にしない）。
+static METAL_SINGLETON_LOCK: Mutex<()> = Mutex::new(());
 
 const SEED1: u64 = 5001;
 const SEED2: u64 = 5002;
@@ -105,6 +120,7 @@ fn manual_predict_via_public_api(store: &DeviceParamStore, input: &Tensor<f32>) 
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn predict_resident_device_chain_matches_manual_per_layer_chain_bit_exact_metal() {
+    let _metal_singleton_guard = METAL_SINGLETON_LOCK.lock().unwrap();
     let model = build_model();
     let init_tape = fandhe_ai::tape_for(Device::Metal).unwrap();
     let store = model.init_device_param_store(&init_tape).unwrap();
@@ -130,6 +146,7 @@ fn predict_resident_device_chain_matches_manual_per_layer_chain_bit_exact_metal(
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn predict_resident_device_chain_is_run_to_run_bit_identical_metal() {
+    let _metal_singleton_guard = METAL_SINGLETON_LOCK.lock().unwrap();
     let model = build_model();
     let init_tape = fandhe_ai::tape_for(Device::Metal).unwrap();
     let store = model.init_device_param_store(&init_tape).unwrap();
@@ -159,6 +176,7 @@ fn predict_resident_device_chain_is_run_to_run_bit_identical_metal() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn predict_resident_device_chain_dispatch_counters_metal() {
+    let _metal_singleton_guard = METAL_SINGLETON_LOCK.lock().unwrap();
     let model = build_model();
     let init_tape = fandhe_ai::tape_for(Device::Metal).unwrap();
     let store = model.init_device_param_store(&init_tape).unwrap();
@@ -197,6 +215,7 @@ fn predict_resident_device_chain_dispatch_counters_metal() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない（record only）"]
 fn predict_resident_device_chain_bench_metal() {
+    let _metal_singleton_guard = METAL_SINGLETON_LOCK.lock().unwrap();
     const WARMUP: usize = 20;
     const ITERS: usize = 20;
     const TRIALS: usize = 5;
