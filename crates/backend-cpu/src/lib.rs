@@ -121,7 +121,7 @@
 //! gemm cpu の before/after（両実機・全 12 セル非後退）で ADOPT を確定した
 //! （`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20）。
 //!
-//! イシュー #1698（親 #1649）で [`mod@typed_f16`] モジュール
+//! イシュー #1698（親 #1649）で `typed_f16` モジュール
 //! （`impl fandhe_ai_tensor_core::TypedOps<half::f16> for CpuBackendOps`）
 //! を追加し、`BackendOps::typed_ops_f16()` を `Some(self)` へ結線した。
 //! f16 をソフトウェア変換（`half` クレート）で f32 へ昇格し既存 f32
