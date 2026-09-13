@@ -202,3 +202,35 @@ impl BackendOps for NaiveOps {
 pub fn naive_ops() -> Box<dyn BackendOps + Send> {
     Box::new(NaiveOps)
 }
+
+/// REQ-2 統一複合判定（「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」・
+/// `.claude/rules/coding-rust.md`）の独立再実装。判定式・分母定義は
+/// `fandhe_ai_backend_cpu::parity::{RELATIVE_TOLERANCE,
+/// ABSOLUTE_RESCUE_THRESHOLD, compare}` と揃える（分母は両値の絶対値の
+/// 最大値を 1e-12 で下支え。`nn_cross_entropy.rs::assert_close` と同じ
+/// 方式）。`autodiff` は具体バックエンドクレート（`backend-cpu` 等）へ
+/// 依存しない設計上の不変条件（`docs/fusion-graph-design.md` §3.4・
+/// `tests/architecture_boundaries.rs::
+/// autodiff_cargo_toml_does_not_depend_on_concrete_backends`）があるため
+/// `parity::compare` を直接 import できず、本モジュールへ集約した
+/// テストローカルな独立実装として保つ（モジュール冒頭コメント参照）。
+/// `mod common;` で読み込む各テストファイルが個別に閾値・分母を
+/// 再定義するのを避け、判定の分散（閾値ハードコードの重複）を本
+/// モジュール 1 箇所へ抑える。
+pub const REQ2_RELATIVE_TOLERANCE: f64 = 1e-3;
+/// [`REQ2_RELATIVE_TOLERANCE`] と同じ理由・出典（`ABSOLUTE_RESCUE_THRESHOLD`
+/// 相当）。
+pub const REQ2_ABSOLUTE_RESCUE_THRESHOLD: f64 = 1e-5;
+
+/// 単一要素ペアの REQ-2 複合判定（真偽値のみ返す。呼び出し側が診断
+/// メッセージを組み立てる）。`actual`/`expected` が非有限（NaN・Inf）の
+/// 場合 `diff`/`rel` が NaN になり `<` 比較は IEEE 754 上つねに false と
+/// なるため、合格条件は成立せず自然に fail 側へ倒れる
+/// （`fandhe_ai_backend_cpu::parity::compare` と同じ設計。同モジュールの
+/// Cursor Bugbot 指摘対応コメント参照）。
+pub fn req2_close(actual: f64, expected: f64) -> bool {
+    let diff = (actual - expected).abs();
+    let scale = actual.abs().max(expected.abs()).max(1e-12);
+    let rel = diff / scale;
+    rel < REQ2_RELATIVE_TOLERANCE || diff < REQ2_ABSOLUTE_RESCUE_THRESHOLD
+}

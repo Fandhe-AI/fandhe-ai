@@ -3,8 +3,11 @@
 //! - **ブルートフォース n 次元参照実装**（`brute_force_einsum`。効率は
 //!   問わない独立実装）との forward 突合で、`Var::einsum` が正しい
 //!   縮約結果を返すことを検証する（判定は REQ-2 統一複合判定「相対
-//!   誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の独立再実装
-//!   `assert_req2_close` を使う）。
+//!   誤差 1e-3 未満 または 絶対誤差 1e-5 未満」を
+//!   `common::req2_close`〈`fandhe_ai_backend_cpu::parity::compare` と
+//!   分母定義まで揃えた共通実装。`autodiff` は具体バックエンドクレート
+//!   へ依存しないため import はできず `tests/common/mod.rs` へ集約〉
+//!   経由で判定する `assert_req2_close` を使う）。
 //! - `"ij,jk->ik"` が `Var::matmul` と厳密に同一の値を返すこと（分解
 //!   ドライバが恒等 permute／reshape をスキップし `MatMul` ノード
 //!   1 個に帰着する契約。`crate::einsum` モジュール doc 参照）。
@@ -116,9 +119,11 @@ fn brute_force_einsum(spec: &str, operands: &[&Tensor<f32>]) -> Tensor<f32> {
 }
 
 /// REQ-2 統一複合判定（「相対誤差 1e-3 未満 または 絶対誤差 1e-5
-/// 未満」。`.claude/rules/coding-rust.md`）の独立再実装。本体側の
-/// 判定関数（`fandhe_ai_backend_cpu::assert_parity` 等）は使わず、
-/// このテストファイル内で完結させる。
+/// 未満」。`.claude/rules/coding-rust.md`）。判定式自体は
+/// `common::req2_close`（`fandhe_ai_backend_cpu::parity::compare` と
+/// 分母定義〈両値の絶対値の最大値を 1e-12 で下支え〉まで揃えた共通
+/// 実装。`tests/common/mod.rs` 参照）に委譲し、本関数は要素ごとの
+/// 走査・診断メッセージの組み立てのみを担う。
 fn assert_req2_close(label: &str, actual: &Tensor<f32>, expected: &Tensor<f32>) {
     assert_eq!(
         actual.shape(),
@@ -131,11 +136,9 @@ fn assert_req2_close(label: &str, actual: &Tensor<f32>, expected: &Tensor<f32>) 
     for _ in 0..numel.max(1) {
         let av = actual.get(&idx).unwrap_or(0.0);
         let ev = expected.get(&idx).unwrap_or(0.0);
-        let diff = (av - ev).abs();
-        let rel = diff / ev.abs().max(1e-30);
         assert!(
-            diff < 1e-5 || rel < 1e-3,
-            "{label}[{idx:?}]: actual={av} expected={ev} diff={diff} rel={rel}"
+            common::req2_close(av as f64, ev as f64),
+            "{label}[{idx:?}]: actual={av} expected={ev}"
         );
         if shape.is_empty() {
             break;
