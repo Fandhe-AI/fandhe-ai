@@ -35,7 +35,6 @@
 //!    から `--exact --nocapture` 単独実行される想定。期待行数は
 //!    `BATCH * D_OUT` から機械的に決まる〈本ファイルでは 64*10=640〉）。
 
-use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Device;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai_tensor_core::Tensor;
@@ -164,15 +163,69 @@ const SEED_X: u64 = 0xDA7A_0001;
 const SEED_L1: u64 = 0x1111_1111;
 const SEED_L2: u64 = 0x2222_2222;
 
+/// `scripts/bench/framework-compare/bench-common/src/lib.rs::Xorshift64Star`
+/// の複製（cross-workspace 依存を避けリテラルで複製。上記コメント参照）。
+///
+/// **注意**: `bench_harness::rng::Xorshift64Star`（本クレートの
+/// `bench-harness` 依存）とはシフト定数・`[0, 1)` から `f32` への写像が
+/// 異なる別実装であり、同一シードでも異なる系列を生成する（Bugbot 指摘。
+/// `bench-harness` 側は `<<13`/`>>7`/`<<17` シフト・`[-1, 1)` 写像、
+/// `bench-common` 側は `>>12`/`<<25`/`>>27` シフト・`fill_vec` で
+/// `next_f32() - 0.5` による `[-0.5, 0.5)` 写像）。`bench-fandhe --task
+/// infer` の `mlp_data` が生成する入力テンソルと bit 完全に同一の値を
+/// このテストでも生成するため、`bench_harness::rng::Xorshift64Star` は
+/// 使わず本構造体（`bench-common` の実装をそのまま複製したもの）だけを
+/// 入力生成に用いる（重みは `add_linear(D_IN, D_HIDDEN, SEED_L1)` 等が
+/// facade 自身の RNG で決定的に生成するため、この乱数系列の相違とは
+/// 無関係にすでに一致している）。
+struct BenchCommonXorshift64Star {
+    state: u64,
+}
+
+impl BenchCommonXorshift64Star {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.state = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// `[0, 1)` の一様分布の f32 を返す（`bench-common` の
+    /// `next_f32` と同一の写像。写像自体は `[-0.5, 0.5)` への平行移動を
+    /// 含まない点に注意。平行移動は `fill_vec` 側で行う）。
+    fn next_f32(&mut self) -> f32 {
+        ((self.next_u64() >> 40) as f32) / (1u32 << 24) as f32
+    }
+
+    /// `[-0.5, 0.5)` の範囲の f32 ベクトルを生成する（`bench-common::
+    /// Xorshift64Star::fill_vec` と bit 完全一致する式）。
+    fn fill_vec(&mut self, n: usize) -> Vec<f32> {
+        (0..n).map(|_| self.next_f32() - 0.5).collect()
+    }
+}
+
 /// `scripts/bench/framework-compare/bench-fandhe/src/main.rs::build_model`
 /// ／`mlp_data` と同型の bench 形状モデル（784→256→ReLU→10・
-/// `Xorshift64Star` 決定的シード）を組み立てる。事前登録規則（イシュー
-/// #1689・`docs/perf/infer-chain-single-sync-cuda-ab.md`）が対象とする
-/// `bench-fandhe --task infer` の実形状で chain/legacy 一致・parity を
-/// 検証するための共通フィクスチャ。シード値（`SEED_X`／`SEED_L1`／
-/// `SEED_L2`）は `bench-common` の同名定数と一致させてあり、`bench-
-/// fandhe --task infer` が実際に計測する入力・モデルと同一データを
-/// 生成する（上記コメント参照）。
+/// `bench-common` の `Xorshift64Star` と bit 完全一致する決定的シード）
+/// を組み立てる。事前登録規則（イシュー #1689・`docs/perf/infer-chain-
+/// single-sync-cuda-ab.md`）が対象とする `bench-fandhe --task infer` の
+/// 実形状で chain/legacy 一致・parity を検証するための共通フィクスチャ。
+/// シード値（`SEED_X`／`SEED_L1`／`SEED_L2`）に加えて乱数生成アルゴリズム
+/// 自体も `bench-common` と揃えてあるため（`BenchCommonXorshift64Star`
+/// 参照）、`bench-fandhe --task infer` が実際に計測する入力・モデルと
+/// 同一データを生成する。
 fn bench_shape_model_and_input() -> (Sequential, Tensor<f32>) {
     let model = Sequential::new()
         .add_linear(D_IN, D_HIDDEN, SEED_L1)
@@ -180,7 +233,7 @@ fn bench_shape_model_and_input() -> (Sequential, Tensor<f32>) {
         .add_relu()
         .add_linear(D_HIDDEN, D_OUT, SEED_L2)
         .unwrap();
-    let mut rng = Xorshift64Star::new(SEED_X);
+    let mut rng = BenchCommonXorshift64Star::new(SEED_X);
     let input = tensor(rng.fill_vec(BATCH * D_IN), &[BATCH, D_IN]);
     (model, input)
 }
@@ -267,4 +320,24 @@ fn bits_vec_distinguishes_signed_zero() {
     );
     assert_eq!(bits_vec(&positive_zero)[0], 0.0_f32.to_bits());
     assert_eq!(bits_vec(&negative_zero)[0], (-0.0_f32).to_bits());
+}
+
+/// `BenchCommonXorshift64Star` が `scripts/bench/framework-compare/
+/// bench-common/src/lib.rs::Xorshift64Star` と bit 完全一致する出力を
+/// 生成することを固定値で回帰検証する（Bugbot 指摘：`bench_harness::
+/// rng::Xorshift64Star` とはシフト定数・写像が異なる別実装であるため、
+/// 複製が乖離しないことをこのテストで機械的に担保する。期待値は
+/// `bench-common` 側の `Xorshift64Star::new(SEED_X).fill_vec(5)` を
+/// 実際に実行して得た値〈2026-09-13 実測〉）。通常 CI（`#[ignore]`
+/// なし）で実行する。
+#[test]
+fn bench_common_xorshift64_star_matches_upstream_bit_exact() {
+    let mut rng = BenchCommonXorshift64Star::new(SEED_X);
+    let actual = rng.fill_vec(5);
+    let expected: Vec<f32> = vec![-0.20255262, 0.09809947, 0.413486, -0.00042378902, 0.2202937];
+    assert_eq!(
+        actual.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+        expected.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+        "BenchCommonXorshift64Star が bench-common::Xorshift64Star と bit 一致しない"
+    );
 }
