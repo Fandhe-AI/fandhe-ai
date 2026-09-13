@@ -435,6 +435,11 @@ mod sgd;
 mod softmax;
 mod swizzle;
 mod transpose;
+// イシュー #1704: `TypedOps<half::bf16>` の CUDA 実装（ホスト側 bf16⇔f32
+// 変換＋既存 f32 `BackendOps` カーネルへの委譲。cudarc 0.19.8 の
+// `DeviceRepr for half::bf16` 可用性調査結果は `typed_bf16.rs` 冒頭
+// コメント・`docs/backend-dtype-dispatch-design.md` §5／§12 参照）。
+mod typed_bf16;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use elementwise::CudaElementwise;
