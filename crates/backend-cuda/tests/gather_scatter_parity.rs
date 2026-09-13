@@ -336,7 +336,12 @@ fn gather_matches_cpu_across_shapes() {
     let cuda = CudaBackendOps::new(0);
     let base = Tensor::new((0..12).map(|v| v as f32).collect(), &[3, 4]).expect("valid tensor");
     let transposed = base.transpose(0, 1).expect("valid transpose");
-    let index = Tensor::<i32>::new(vec![0, 1, 2, 3, 0, 1, 2, 3], &[4, 2]).expect("valid tensor");
+    // `transposed` の shape は `[4, 3]`（`base` の `[3, 4]` を転置）のため、
+    // dim=1 の有効添字範囲は `0..=2`（PR #1795 codex-review 指摘の是正・
+    // イシュー #1777）。添字 `3` は範囲外で CPU 側が `IndexOutOfRange` を
+    // 返してしまい、意図していた非 contiguous 入力での CUDA/CPU 比較・
+    // 特殊値検証に到達できていなかった。
+    let index = Tensor::<i32>::new(vec![0, 1, 2, 0, 1, 2, 0, 1], &[4, 2]).expect("valid tensor");
     let cpu_out = cpu.gather(&transposed, 1, &index).expect("cpu gather");
     let cuda_out = cuda.gather(&transposed, 1, &index).expect("cuda gather");
     assert_eq!(

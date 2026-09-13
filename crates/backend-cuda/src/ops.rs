@@ -1263,6 +1263,29 @@ fn map_gather_scatter_error(err: CudaError) -> BackendError {
     }
 }
 
+/// shape の要素数積を `checked_mul` の畳み込みで検査する（PR #1795
+/// codex-review 指摘の是正・イシュー #1777）。`Tensor::contiguous()`
+/// は内部で `is_contiguous()` → `numel()`（`shape.iter().product()`。
+/// 無検査の乗算）を呼ぶため、たとえば `shape=[0, 2, usize::MAX]` を
+/// `transpose(0, 2)` して得られる `[usize::MAX, 2, 0]`（最終的な要素数
+/// は 0 だが `usize::MAX * 2` の中間積で `usize` の範囲を超える）を
+/// `CudaBackendOps::gather`／`scatter` に渡すと、`overflow-checks` 有効
+/// ビルドで `numel()` 内の乗算が panic しうる（`gather_out_shape`／
+/// `scatter_out_shape` は出力 shape の要素数をチェックするだけで、
+/// `input`／`index`／`src` それぞれの実体化前 shape 自体はここまで
+/// 検査していない）。本関数を各 `.contiguous()` 呼び出しの直前で
+/// 呼び、オーバーフロー時は型付きエラー
+/// `ShapeError::ElementCountOverflow` を返す（本番経路で panic
+/// させない方針。`.claude/rules/coding-rust.md`）。
+/// `gather_scatter::checked_numel`（`pub(crate)` ではなく private の
+/// ため crate を跨いで共有できない）と同型の検査を複製する。
+fn checked_shape_numel(shape: &[usize]) -> Result<usize, ShapeError> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or(ShapeError::ElementCountOverflow)
+}
+
 impl BackendOps for CudaBackendOps {
     fn device(&self) -> Device {
         Device::Cuda(self.ordinal)
@@ -2721,6 +2744,12 @@ impl BackendOps for CudaBackendOps {
         let out_shape = gather_out_shape(input.shape(), index.shape(), dim)
             .map_err(BackendError::ShapeMismatch)?;
 
+        // `.contiguous()`（内部で `numel()` の無検査乗算を呼ぶ）より前に
+        // 各 shape の要素数積をオーバーフロー検査する（PR #1795
+        // codex-review 指摘の是正。上記 `checked_shape_numel` doc 参照）。
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_shape_numel(index.shape()).map_err(BackendError::ShapeMismatch)?;
+
         let index_owned = index.contiguous();
         let index_slice = index_owned.as_slice().ok_or_else(|| {
             BackendError::KernelLaunchFailed("gather: index not contiguous".into())
@@ -2774,6 +2803,13 @@ impl BackendOps for CudaBackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         let out_shape = scatter_out_shape(input.shape(), index.shape(), src.shape(), dim)
             .map_err(BackendError::ShapeMismatch)?;
+
+        // `.contiguous()`（内部で `numel()` の無検査乗算を呼ぶ）より前に
+        // 各 shape の要素数積をオーバーフロー検査する（PR #1795
+        // codex-review 指摘の是正。`checked_shape_numel` doc 参照）。
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_shape_numel(index.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_shape_numel(src.shape()).map_err(BackendError::ShapeMismatch)?;
 
         let index_owned = index.contiguous();
         let index_slice = index_owned.as_slice().ok_or_else(|| {
@@ -3573,6 +3609,29 @@ mod tests {
             err,
             BackendError::KernelLaunchFailed(msg) if msg.contains("negative SM count")
         ));
+    }
+
+    /// [`checked_shape_numel`]: PR #1795 codex-review 指摘の再現・是正
+    /// 確認（イシュー #1777）。`shape=[0, 2, usize::MAX]` を
+    /// `transpose(0, 2)` すると `[usize::MAX, 2, 0]` になり、最終的な
+    /// 要素数は 0 だが中間積 `usize::MAX * 2` が `usize` の範囲を超える。
+    /// `.iter().product()`（`Tensor::numel()` の実装）は無検査のため
+    /// `overflow-checks` 有効ビルドで panic しうるが、`checked_mul` の
+    /// 畳み込みである本関数は panic せず型付きエラーを返す。
+    #[test]
+    fn checked_shape_numel_rejects_intermediate_overflow_even_when_final_product_is_zero() {
+        let shape = [usize::MAX, 2, 0];
+        // 素朴な `.iter().product::<usize>()` は途中で overflow する
+        // （このテスト自体は `overflow-checks` の有無に関わらず観測用途
+        // でしか使わず、`checked_shape_numel` の型付きエラー化が本旨）。
+        let err = checked_shape_numel(&shape).expect_err("intermediate overflow must be rejected");
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    /// [`checked_shape_numel`]: 通常形状は要素数積をそのまま返す。
+    #[test]
+    fn checked_shape_numel_accepts_ordinary_shape() {
+        assert_eq!(checked_shape_numel(&[2, 3, 4]).expect("no overflow"), 24);
     }
 
     #[test]
