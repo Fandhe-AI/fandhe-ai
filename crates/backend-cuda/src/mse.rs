@@ -204,6 +204,13 @@ impl CudaMse {
     /// で符号反転して得る契約（`backend_ops.rs::BackendOps::
     /// mse_loss_backward` doc 参照）のため、本関数は `dPred` のみを
     /// 計算する。`numel == 0` は空 `Vec` を返す。
+    ///
+    /// **ストリーム順序契約（イシュー #1692）**: 本関数は launch 直後の
+    /// 明示 `synchronize()` を持たず、末尾の [`readback`] 呼び出し 1 箇所
+    /// （D2H＋同期）へ完了待ちを集約する。`docs/backend-cuda-async-
+    /// execution-design.md` §2.3・§16 が定める「ホスト `Tensor` を返す
+    /// `BackendOps` 演算は戻り値の D2H が構造的な同期点」契約に既に
+    /// 準拠しており、本関数自体への変更は不要と確認済み。
     pub fn run_mse_backward_f32(
         &self,
         pred: &[f32],
