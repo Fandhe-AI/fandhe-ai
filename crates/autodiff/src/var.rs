@@ -17,14 +17,17 @@ use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
-    LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ShapeError,
-    Tensor, broadcast_shape, concat_out_shape, matmul_out_shape, reduce_out_shape,
-    require_same_shape, row_norm_layout,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
+    ShapeError, Tensor, broadcast_shape, concat_out_shape, gather_out_shape, matmul_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
-use crate::grad::{concat_with_fallback, scalar_binary_with_fallback, scalar_unary_with_fallback};
+use crate::grad::{
+    concat_with_fallback, gather_with_fallback, scalar_binary_with_fallback,
+    scalar_unary_with_fallback, scatter_with_fallback,
+};
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
 /// `Var::mse_loss_with` の縮約種別（#190・TASK-9.1c 相当。親イシュー
@@ -1840,6 +1843,210 @@ impl<'t> Var<'t> {
                 mask: mask_f32,
             },
             value_out,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `dim` 軸に沿って `index` が指す要素を独立に読み出す
+    /// （`torch.gather` 相当。イシュー #1776）。`index`（`Tensor<i32>`）
+    /// は非追跡データ（`Var::cross_entropy_loss` の `targets` と同じ
+    /// 「`Op` payload に直接埋め込む」設計。勾配は `index` 側には
+    /// 流れない）。
+    ///
+    /// 検査順序: ①[`fandhe_ai_tensor_core::gather_out_shape`]（`dim`
+    /// 範囲・`index` の rank・`dim` 以外の軸一致を検査し `out_shape`
+    /// を確定。違反は `AutodiffError::Shape`）→ ②`index` 全添字が
+    /// `0 <= idx < self.shape()[dim]`（違反は
+    /// `AutodiffError::InvalidArgument`。`cross_entropy_loss` の
+    /// targets 範囲検査と同じパターン）→ ③`index` を実体化
+    /// （`contiguous()`。`Op::Where` の `cond` と同じ「1 回だけ
+    /// 実体化し以後再計算しない」方針）→ ④`self` を層 1 で実体化 →
+    /// ⑤`ops.gather` → `Unsupported` のときのみホスト参照実装
+    /// （`eval::gather`）へフォールバック → ⑥戻り shape 検証
+    /// （`.claude/rules/security.md` A08）→ ⑦`push_eager`。
+    pub fn gather(&self, dim: usize, index: &Tensor<i32>) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape =
+            gather_out_shape(&in_shape, index.shape(), dim).map_err(AutodiffError::Shape)?;
+
+        // `gather_out_shape` が成功した時点で `dim < in_shape.len()` が
+        // 保証されるため、この添字アクセスは安全（`.claude/rules/
+        // coding-rust.md` REQ-8「境界検査を省略しない」の趣旨）。
+        let dim_size = in_shape[dim];
+        for v in eval::dense_vec_i32(index) {
+            if v < 0 || (v as usize) >= dim_size {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Var::gather: index 添字 {v} が範囲 [0, {dim_size}) を外れている"
+                )));
+            }
+        }
+
+        let index_c = index.contiguous();
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let value = gather_with_fallback(self.tape.ops(), &input_val, dim, &index_c, &out_shape)?;
+        if value.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Gather {
+                input: self.id,
+                dim,
+                index: index_c,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 1 次元 `index` で `dim` 軸を選択する（`torch.index_select`
+    /// 相当。イシュー #1776）。専用 `Op` は持たず、`index`（`[k]`）を
+    /// `self.shape()` と同 rank の stride-0 view（`reshape` して
+    /// `dim` 軸のみ `k`・他軸 `1` にしたあと `broadcast_to` で
+    /// `self.shape()` の `dim` 軸だけ `k` に置き換えた形へ拡張。
+    /// いずれも zero-copy）へ拡張してから [`Self::gather`] へ委譲する
+    /// （検査・VJP・Op 構築を 1 箇所に集約し重複を避ける設計判断。
+    /// 実装計画「設計判断」§1 参照）。`index` は rank 1 でなければ
+    /// `AutodiffError::Shape(ShapeError::RankMismatch)`。
+    pub fn index_select(&self, dim: usize, index: &Tensor<i32>) -> Result<Var<'t>, AutodiffError> {
+        let index_rank = index.shape().len();
+        if index_rank != 1 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 1,
+                actual: index_rank,
+            }));
+        }
+        let in_shape = self.shape();
+        let rank = in_shape.len();
+        if dim >= rank {
+            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+                axis: dim,
+                rank,
+            }));
+        }
+        let k = index.shape()[0];
+        let mut expand_shape = vec![1usize; rank];
+        expand_shape[dim] = k;
+        let index_reshaped = index.reshape(&expand_shape).map_err(AutodiffError::Shape)?;
+        let mut out_shape = in_shape;
+        out_shape[dim] = k;
+        let index_bc = index_reshaped
+            .broadcast_to(&out_shape)
+            .map_err(AutodiffError::Shape)?;
+        self.gather(dim, &index_bc)
+    }
+
+    /// `mask` が真の位置を上書きする（`torch.scatter` 相当。イシュー
+    /// #1776）。共通実装 [`Self::scatter_impl`] を
+    /// [`fandhe_ai_tensor_core::ScatterReduce::Overwrite`] で呼ぶ。
+    pub fn scatter(
+        &self,
+        dim: usize,
+        index: &Tensor<i32>,
+        src: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.scatter_impl(dim, index, src, ScatterReduce::Overwrite)
+    }
+
+    /// `index` が指す位置へ `src` を加算する（`torch.scatter_add`
+    /// 相当。イシュー #1776）。共通実装 [`Self::scatter_impl`] を
+    /// [`fandhe_ai_tensor_core::ScatterReduce::Add`] で呼ぶ
+    /// （決定的集約順序・`f64` アキュムレータ契約は
+    /// [`fandhe_ai_tensor_core::ScatterReduce`] doc を正とする）。
+    pub fn scatter_add(
+        &self,
+        dim: usize,
+        index: &Tensor<i32>,
+        src: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.scatter_impl(dim, index, src, ScatterReduce::Add)
+    }
+
+    /// [`Self::scatter`]／[`Self::scatter_add`] の共通実装（イシュー
+    /// #1776）。`index`（`Tensor<i32>`）は [`Self::gather`] と同じ
+    /// 非追跡データ、`src` は追跡対象（`self` と同一 `Tape` 上の
+    /// `Var` であること・`check_same_tape` で検査）。
+    ///
+    /// 検査順序: ①`check_same_tape`（`AutodiffError::TapeMismatch`）
+    /// → ②[`fandhe_ai_tensor_core::scatter_out_shape`]（`dim` 範囲・
+    /// `index` の rank・`index.shape() == src.shape()`・`dim` 以外の
+    /// 軸で `index.shape()[axis] <= self.shape()[axis]` を検査。
+    /// 違反は `AutodiffError::Shape`）→ ③`index` 全添字が
+    /// `0 <= idx < self.shape()[dim]`（違反は
+    /// `AutodiffError::InvalidArgument`）→ ④`index` を実体化
+    /// （`contiguous()`）→ ⑤`self`／`src` を層 1 で実体化 →
+    /// ⑥`ops.scatter` → `Unsupported` のときのみホスト参照実装
+    /// （`eval::scatter`。決定的集約契約に厳密に従う）へフォール
+    /// バック → ⑦戻り shape 検証 → ⑧`push_eager`。
+    fn scatter_impl(
+        &self,
+        dim: usize,
+        index: &Tensor<i32>,
+        src: &Var<'t>,
+        reduce: ScatterReduce,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(src)?;
+        let in_shape = self.shape();
+        let src_shape = src.shape();
+        let out_shape = scatter_out_shape(&in_shape, index.shape(), &src_shape, dim)
+            .map_err(AutodiffError::Shape)?;
+
+        // `scatter_out_shape` が成功した時点で `dim < in_shape.len()`
+        // が保証されるため、この添字アクセスは安全。
+        let dim_size = in_shape[dim];
+        for v in eval::dense_vec_i32(index) {
+            if v < 0 || (v as usize) >= dim_size {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Var::scatter: index 添字 {v} が範囲 [0, {dim_size}) を外れている"
+                )));
+            }
+        }
+
+        let index_c = index.contiguous();
+
+        let (input_val, src_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let ops = self.tape.ops();
+            let input_val = materialize_fallible(&nodes, ops, self.id)?.clone();
+            let src_val = materialize_fallible(&nodes, ops, src.id)?.clone();
+            (input_val, src_val)
+        };
+
+        let value = scatter_with_fallback(
+            self.tape.ops(),
+            &input_val,
+            dim,
+            &index_c,
+            &src_val,
+            reduce,
+            &out_shape,
+        )?;
+        if value.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Scatter {
+                input: self.id,
+                dim,
+                index: index_c,
+                src: src.id,
+                reduce,
+            },
+            value,
         );
         Ok(Var::from_raw(self.tape, id))
     }

@@ -189,6 +189,110 @@ pub fn concat_out_shape(shapes: &[&[usize]], dim: usize) -> Result<Vec<usize>, S
     Ok(out)
 }
 
+/// `gather`（`Var::gather`／`index_select`。イシュー #1776）の出力
+/// shape を検査・計算する。`torch.gather` と同じ意味論: 出力 shape は
+/// `index_shape` そのもの（各出力位置ごとに `input` から 1 要素を
+/// 独立に読み出す）。
+///
+/// - `dim >= input_shape` の rank の場合 `ShapeError::AxisOutOfRange`
+///   （`input_shape` の rank を基準とする）。
+/// - `index_shape` の rank が `input_shape` と一致しない場合
+///   `ShapeError::RankMismatch`（`expected` は `input_shape` の rank）。
+/// - `dim` 軸以外の各軸で `input_shape[axis] != index_shape[axis]`
+///   の場合 `ShapeError::ShapeMismatch`（`lhs`=`input_shape`・
+///   `rhs`=`index_shape`）。`dim` 軸自体は `index_shape[dim]` が
+///   `input_shape[dim]` と異なってもよい（各出力位置の添字値が
+///   `input` の `dim` 軸範囲内かどうかは値検査〈呼び出し元が
+///   データを走査して行う〉の対象であり、本関数の shape 検査対象
+///   ではない）。
+///
+/// 出力要素数は `index_shape` と同一のため、`concat_out_shape` と
+/// 異なり `checked_numel` によるオーバーフロー検査は不要（`index_shape`
+/// 自体が既に有効なテンソル shape として構築済みであることを呼び出し元
+/// が保証する）。
+pub fn gather_out_shape(
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+) -> Result<Vec<usize>, ShapeError> {
+    let rank = input_shape.len();
+    if dim >= rank {
+        return Err(ShapeError::AxisOutOfRange { axis: dim, rank });
+    }
+    if index_shape.len() != rank {
+        return Err(ShapeError::RankMismatch {
+            expected: rank,
+            actual: index_shape.len(),
+        });
+    }
+    for (axis, (&in_s, &idx_s)) in input_shape.iter().zip(index_shape.iter()).enumerate() {
+        if axis == dim {
+            continue;
+        }
+        if in_s != idx_s {
+            return Err(ShapeError::ShapeMismatch {
+                lhs: input_shape.to_vec(),
+                rhs: index_shape.to_vec(),
+            });
+        }
+    }
+    Ok(index_shape.to_vec())
+}
+
+/// `scatter`／`scatter_add`（`Var::scatter`／`scatter_add`。イシュー
+/// #1776）の出力 shape を検査・計算する。`torch.scatter` と同じ
+/// 意味論のうち、本実装は簡略化のため `index_shape == src_shape` を
+/// 要求する（PyTorch の「`index.size(d) <= src.size(d)`」という緩い
+/// 制約は対象外。`docs/` 実装計画のスコープ外事項）。
+///
+/// - `dim >= input_shape` の rank の場合 `ShapeError::AxisOutOfRange`。
+/// - `index_shape` の rank が `input_shape` と一致しない場合
+///   `ShapeError::RankMismatch`。
+/// - `index_shape != src_shape` の場合 `ShapeError::ShapeMismatch`
+///   （`lhs`=`index_shape`・`rhs`=`src_shape`）。
+/// - `dim` 軸以外の各軸で `index_shape[axis] > input_shape[axis]` の
+///   場合 `ShapeError::ShapeMismatch`（`lhs`=`input_shape`・
+///   `rhs`=`index_shape`）。`dim` 軸自体は値検査（添字が
+///   `[0, input_shape[dim])` の範囲内か）の対象であり本関数の
+///   shape 検査対象ではない。
+///
+/// 出力 shape は常に `input_shape`（scatter は shape を変えない）。
+pub fn scatter_out_shape(
+    input_shape: &[usize],
+    index_shape: &[usize],
+    src_shape: &[usize],
+    dim: usize,
+) -> Result<Vec<usize>, ShapeError> {
+    let rank = input_shape.len();
+    if dim >= rank {
+        return Err(ShapeError::AxisOutOfRange { axis: dim, rank });
+    }
+    if index_shape.len() != rank {
+        return Err(ShapeError::RankMismatch {
+            expected: rank,
+            actual: index_shape.len(),
+        });
+    }
+    if index_shape != src_shape {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: index_shape.to_vec(),
+            rhs: src_shape.to_vec(),
+        });
+    }
+    for (axis, (&in_s, &idx_s)) in input_shape.iter().zip(index_shape.iter()).enumerate() {
+        if axis == dim {
+            continue;
+        }
+        if idx_s > in_s {
+            return Err(ShapeError::ShapeMismatch {
+                lhs: input_shape.to_vec(),
+                rhs: index_shape.to_vec(),
+            });
+        }
+    }
+    Ok(input_shape.to_vec())
+}
+
 /// LayerNorm／RMSNorm（イシュー #1596。`BackendOps::layer_norm`／
 /// `rmsnorm` の共通入口）が起動前に `(rows, hidden)` を導出するための
 /// shape 検査。CPU／CUDA／Metal の各 `BackendOps` 実装が本関数の結果を
@@ -690,5 +794,109 @@ mod tests {
         let b: &[usize] = &[1, 2];
         let err = concat_out_shape(&[a, b], 0).unwrap_err();
         assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    // --- gather_out_shape ---
+
+    #[test]
+    fn gather_out_shape_basic() {
+        let out = gather_out_shape(&[3, 4], &[3, 2], 1).unwrap();
+        assert_eq!(out, vec![3, 2]);
+    }
+
+    #[test]
+    fn gather_out_shape_dim_axis_can_grow() {
+        // `dim` 軸自体は index 側が input より大きくてもよい（重複読み
+        // 出しを許すため）。
+        let out = gather_out_shape(&[3, 4], &[3, 10], 1).unwrap();
+        assert_eq!(out, vec![3, 10]);
+    }
+
+    #[test]
+    fn gather_out_shape_axis_out_of_range() {
+        let err = gather_out_shape(&[3, 4], &[3, 4], 2).unwrap_err();
+        assert_eq!(err, ShapeError::AxisOutOfRange { axis: 2, rank: 2 });
+    }
+
+    #[test]
+    fn gather_out_shape_rank_mismatch() {
+        let err = gather_out_shape(&[3, 4], &[3, 4, 1], 0).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 2,
+                actual: 3
+            }
+        );
+    }
+
+    #[test]
+    fn gather_out_shape_other_axis_mismatch() {
+        let err = gather_out_shape(&[3, 4], &[2, 4], 1).unwrap_err();
+        match err {
+            ShapeError::ShapeMismatch { lhs, rhs } => {
+                assert_eq!(lhs, vec![3, 4]);
+                assert_eq!(rhs, vec![2, 4]);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // --- scatter_out_shape ---
+
+    #[test]
+    fn scatter_out_shape_basic() {
+        let out = scatter_out_shape(&[3, 4], &[3, 2], &[3, 2], 1).unwrap();
+        assert_eq!(out, vec![3, 4]);
+    }
+
+    #[test]
+    fn scatter_out_shape_axis_out_of_range() {
+        let err = scatter_out_shape(&[3, 4], &[3, 4], &[3, 4], 2).unwrap_err();
+        assert_eq!(err, ShapeError::AxisOutOfRange { axis: 2, rank: 2 });
+    }
+
+    #[test]
+    fn scatter_out_shape_rank_mismatch() {
+        let err = scatter_out_shape(&[3, 4], &[3, 4, 1], &[3, 4, 1], 0).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 2,
+                actual: 3
+            }
+        );
+    }
+
+    #[test]
+    fn scatter_out_shape_index_src_mismatch() {
+        let err = scatter_out_shape(&[3, 4], &[3, 2], &[3, 3], 1).unwrap_err();
+        match err {
+            ShapeError::ShapeMismatch { lhs, rhs } => {
+                assert_eq!(lhs, vec![3, 2]);
+                assert_eq!(rhs, vec![3, 3]);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scatter_out_shape_other_axis_exceeds_input() {
+        let err = scatter_out_shape(&[3, 4], &[5, 2], &[5, 2], 1).unwrap_err();
+        match err {
+            ShapeError::ShapeMismatch { lhs, rhs } => {
+                assert_eq!(lhs, vec![3, 4]);
+                assert_eq!(rhs, vec![5, 2]);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scatter_out_shape_other_axis_smaller_than_input_is_ok() {
+        // dim 以外の軸で index が input より小さいのは許容（PyTorch の
+        // `index.size(d) <= input.size(d)` 契約と整合）。
+        let out = scatter_out_shape(&[3, 4], &[2, 2], &[2, 2], 1).unwrap();
+        assert_eq!(out, vec![3, 4]);
     }
 }

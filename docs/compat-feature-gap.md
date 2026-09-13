@@ -655,3 +655,37 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
 
 比較演算の bool dtype 出力（§2.4 表の該当行）は #1634 の対象外のまま
 （f32 の `0.0`／`1.0` 出力。`docs/scalar-op-dispatch-design.md` §10）。
+
+## 追補（イシュー #1776）
+
+§2.2 表の「花形インデックス `x[idx]`」（`Gather`）・「`scatter`/
+`scatter_add`/`index_put_`」（`Scatter`）行の**うち `gather`／
+`scatter`／`scatter_add`／`index_select` は実装済み化**（`index_put_`
+自体〈複数軸の花形インデックス書き込み〉は引き続き対象外）。
+
+- `Op::Gather { input, dim, index: Tensor<i32> }`／`Op::Scatter {
+  input, dim, index: Tensor<i32>, src, reduce: ScatterReduce }`
+  （`tensor-core::ScatterReduce`。`Overwrite`＝`torch.scatter`・
+  `Add`＝`torch.scatter_add`）を新設し、`Var::gather`／
+  `Var::index_select`（`gather` への薄い委譲。専用 `Op` は持たない）・
+  `Var::scatter`／`Var::scatter_add`（共通実装 `scatter_impl` 経由）
+  として実装済み。
+- `BackendOps::gather`／`scatter`（既定 `Unsupported`）・CPU 参照
+  実装（`backend-cpu::gather_scatter`）・ホストフォールバック
+  （`autodiff::eval::gather`／`scatter`）まで実装済み。CUDA／Metal
+  専用カーネルは #1777／#1778 が対象（現状はホストフォールバック
+  経由で機能する。性能最適化はまだ入らない）。
+- `scatter_add` は決定的集約順序契約（`index`／`src` を行優先で走査
+  し `f64` アキュムレータへ逐次加算。`tensor-core::ScatterReduce`
+  doc・`.claude/rules/coding-rust.md`「勾配の長軸縮約」節の先取り
+  適用）を持つ。
+- `Var` 公開メソッド追加のみで facade 新規公開面はない（既存 `Var`
+  再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md`
+  §5 手続きの再適用は不要）。
+- `masked_select`（出力 shape が動的）・`index_put_`（複数軸の花形
+  インデックス書き込み）・負値インデックスの wrap-around・
+  `index.shape()[d] <= src.shape()[d]` のみを要求する PyTorch の緩い
+  scatter 制約（本実装は `index.shape() == src.shape()` を要求する
+  簡略化版）は引き続き対象外（`docs/autodiff-linalg-design.md` と
+  同型の対象外整理。詳細は本文書 §2.2 表・実装計画のスコープ外節を
+  参照）。

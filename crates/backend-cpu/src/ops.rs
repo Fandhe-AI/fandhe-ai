@@ -18,8 +18,8 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan, GemmChecksum,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    require_same_shape, row_norm_layout, row_softmax_layout,
+    QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
+    gather_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -30,7 +30,9 @@ use crate::linalg::{self, LinalgError};
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::softmax::{self, match_softmax_plan};
-use crate::{elementwise, fused_elementwise, mse, reduction, rnn_cell, scalar_elementwise};
+use crate::{
+    elementwise, fused_elementwise, gather_scatter, mse, reduction, rnn_cell, scalar_elementwise,
+};
 
 /// `CpuBackendOps` が `MemoryOps` を実装するための、プロセスワイドに共有
 /// する単一 `CpuMemory`（イシュー #935・`docs/device-resident-update-design.md`
@@ -1179,6 +1181,40 @@ impl BackendOps for CpuBackendOps {
         value: f32,
     ) -> Result<Tensor<f32>, BackendError> {
         elementwise::masked_fill(x, mask, value).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::gather` の CPU 実装（イシュー #1776）。
+    /// [`gather_out_shape`] で `input`／`index` の shape を再検査して
+    /// から `gather_scatter::gather` へ委譲する（実装側の二重検査。
+    /// `.claude/rules/security.md` A08。呼び出し元 `Var::gather` も
+    /// 同じ検査を済ませているが、判定迂回経路を作らないため実装側
+    /// でも独立に検査する）。
+    fn gather(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        index: &Tensor<i32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = gather_out_shape(input.shape(), index.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+        gather_scatter::gather(input, dim, index, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::scatter` の CPU 実装（イシュー #1776）。
+    /// [`scatter_out_shape`] で `input`／`index`／`src` の shape を
+    /// 再検査してから `gather_scatter::scatter` へ委譲する（`gather`
+    /// と同じ二重検査方針）。
+    fn scatter(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        index: &Tensor<i32>,
+        src: &Tensor<f32>,
+        reduce: ScatterReduce,
+    ) -> Result<Tensor<f32>, BackendError> {
+        scatter_out_shape(input.shape(), index.shape(), src.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+        gather_scatter::scatter(input, dim, index, src, reduce).map_err(BackendError::ShapeMismatch)
     }
 
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {

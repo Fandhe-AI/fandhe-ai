@@ -30,8 +30,8 @@
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, ScalarBinaryOp, ScalarUnaryOp, ShapeError, Tensor,
-    row_norm_layout,
+    Activation, BackendError, BackendOps, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError,
+    Tensor, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -1152,6 +1152,67 @@ pub(crate) fn vjp(
             let d_input = masked_fill_vjp(&mask, upstream);
             vec![(input, d_input)]
         }
+        // `Var::gather`（`Var::index_select` も同一 Op へ委譲。イシュー
+        // #1776）。「Gather の VJP は scatter_add」の原則
+        // （`Op::Concat`⟷`Op::Narrow` の双対性と同型）: 入力 shape の
+        // ゼロテンソルへ `upstream` を `index` の位置へ加算する。
+        Op::Gather { input, dim, index } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let zeros = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+            let d_input = scatter_with_fallback(
+                ops,
+                &zeros,
+                dim,
+                &index,
+                upstream,
+                ScatterReduce::Add,
+                &input_shape,
+            )?;
+            vec![(input, d_input)]
+        }
+        // `Var::scatter`／`Var::scatter_add`（イシュー #1776）。
+        // `d_src` は `reduce` に依らず共通（各 `src` 要素は自身が
+        // 書き込んだ位置の upstream をそのまま受け取る）。`d_input`
+        // は `reduce` で分岐: `Add` は恒等（線形性）、`Overwrite` は
+        // 書き込まれた位置のみ upstream を 0 で上書きする
+        // （`grad_self.scatter_(dim, index, 0)` と同じ式）。
+        Op::Scatter {
+            input,
+            dim,
+            index,
+            src,
+            reduce,
+        } => {
+            let src_shape = nodes[src.0].shape.clone();
+            let input_shape = nodes[input.0].shape.clone();
+            let d_src = gather_with_fallback(ops, upstream, dim, &index, &src_shape)?;
+            let d_input = match reduce {
+                ScatterReduce::Add => upstream.clone(),
+                ScatterReduce::Overwrite => {
+                    let zeros_src = Tensor::zeros(&src_shape).map_err(AutodiffError::Shape)?;
+                    scatter_with_fallback(
+                        ops,
+                        upstream,
+                        dim,
+                        &index,
+                        &zeros_src,
+                        ScatterReduce::Overwrite,
+                        &input_shape,
+                    )?
+                }
+                // `ScatterReduce` は `#[non_exhaustive]`（`tensor-core`
+                // 側で将来 variant を追加しうる。`Activation` と同じ
+                // 非破壊拡張方針）。未知 variant は fail-closed に
+                // エラーを返す（`backend-cpu::ops::linear_forward_
+                // device` の `Activation` 未知 variant 分岐と同型）。
+                _ => {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Op::Scatter の VJP: 未知の ScatterReduce variant {reduce:?}"
+                    )));
+                }
+            };
+            vec![(input, d_input), (src, d_src)]
+        }
         // `Var::contiguous` が記録するノード（イシュー #1620。
         // `crate::einsum` の permute 後 reshape 前の明示実体化）。
         // メモリレイアウトのみが変わり値は変わらないため、VJP は
@@ -1342,6 +1403,71 @@ pub(crate) fn masked_fill_with_fallback(
             Ok(v)
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::masked_fill(x, mask, value)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Gather`] の forward（`Var::gather`／`Var::index_select` 経由）
+/// および [`Op::Gather`] の VJP（`Op::Scatter { reduce: Add }` を
+/// 経由せず直接 [`Op::Gather`] を再利用する `d_src` 計算）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1776）。
+/// [`where_cond_with_fallback`] と同型: `ops.gather` →
+/// `Unsupported` のときのみ `eval::gather` へフォールバックし、
+/// それ以外のエラーは伝播する（判定迂回経路を作らない）。バックエンド
+/// 実装が返した出力 shape を `out_shape` と照合し、不一致は
+/// `AutodiffError::Backend(BackendError::ShapeMismatch(..))` を返す。
+pub(crate) fn gather_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    dim: usize,
+    index: &Tensor<i32>,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.gather(input, dim, index) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::gather(input, dim, index, out_shape)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Scatter`] の forward（`Var::scatter`／`scatter_add` 経由）
+/// および [`Op::Gather`] の VJP（`d_input` 計算）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1776）。
+/// [`gather_with_fallback`] と同型: `ops.scatter` → `Unsupported` の
+/// ときのみ `eval::scatter`（[`ScatterReduce`] の決定的集約契約に
+/// 厳密に従う）へフォールバックする。
+pub(crate) fn scatter_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    dim: usize,
+    index: &Tensor<i32>,
+    src: &Tensor<f32>,
+    reduce: ScatterReduce,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.scatter(input, dim, index, src, reduce) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::scatter(input, dim, index, src, reduce)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }
