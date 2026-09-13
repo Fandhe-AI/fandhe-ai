@@ -1,6 +1,7 @@
-//! イシュー #1700/#1701: `BackendOps::scalar_unary`／`scalar_binary`
-//! （`Sqrt`／`Sub`／`Div`／`Pow`・`Neg`／`Abs`／`Log`／`Log2`／`Log10`／
-//! `Sin`／`Cos`／`Tan`）の CPU-CUDA 数値一致検証。
+//! イシュー #1700/#1701/#1702: `BackendOps::scalar_unary`／
+//! `scalar_binary`（`Sqrt`／`Sub`／`Div`／`Pow`・`Neg`／`Abs`／`Log`／
+//! `Log2`／`Log10`／`Sin`／`Cos`／`Tan`・比較演算 6 種（`Gt`／`Ge`／
+//! `Lt`／`Le`／`Eq`／`Ne`）・`Clamp`）の CPU-CUDA 数値一致検証。
 //!
 //! `where_masked_fill_parity.rs`（#1637）・`gemm_bias_act_parity.rs`
 //! （#599）と同じ構成方針を踏襲する: 環境適応スモーク（属性なし。通常
@@ -18,6 +19,9 @@
 //! `Pow`・`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`（超越関数。CUDA
 //! libm の ulp 誤差がホスト側 glibc libm と一致する保証がない）は
 //! `assert_parity` のみで検証する（既存 `exp`／`tanh` と同じ扱い）。
+//! 比較演算 6 種・`Clamp` は算術を含まない純粋な選択・比較演算のため
+//! bit 同一（`assert_eq!`）で検証する（`kernels_scalar_op.rs::unary_expr`
+//! の `Clamp` 分岐コメント・`binary_expr` の比較演算コメント参照）。
 //!
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
@@ -171,6 +175,87 @@ fn assert_binary_broadcast_parity(op: ScalarBinaryOp, seed_a: u64, seed_b: u64) 
     );
 }
 
+/// 比較演算（`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`）用の `(a, b)` ペアを
+/// 生成する。独立乱数 2 本では `Eq` が全 `0.0`・`Ne` が全 `1.0` になり
+/// 検証にならないため、`a` から意図的に等値・やや大きい値・やや小さい
+/// 値を混在させて派生させる（イシュー #1702）。
+fn comparison_pair_data(seed: u64, len: usize) -> (Vec<f32>, Vec<f32>) {
+    let a = positive_data(&mut Xorshift64Star::new(seed), len);
+    let b = a
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| match i % 3 {
+            0 => v,        // 等値ケース
+            1 => v + 0.25, // a < b
+            _ => v - 0.25, // a > b
+        })
+        .collect();
+    (a, b)
+}
+
+/// 比較演算 [`ScalarBinaryOp`]（`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`）の
+/// CPU-CUDA parity を bit 同一（0.0/1.0 リテラルの純粋な比較演算のため。
+/// モジュール doc参照）で検証する。
+fn assert_comparison_parity(op: ScalarBinaryOp, seed: u64, shape: &[usize]) {
+    let numel: usize = shape.iter().product();
+    let cpu = CpuBackendOps::new();
+    let cuda = CudaBackendOps::new(0);
+
+    let (a_data, b_data) = comparison_pair_data(seed, numel);
+    let a = Tensor::new(a_data, shape).expect("valid tensor");
+    let b = Tensor::new(b_data, shape).expect("valid tensor");
+
+    let cpu_result = cpu
+        .scalar_binary(op, &a, &b)
+        .expect("cpu scalar_binary always succeeds for implemented kinds");
+    let cuda_result = cuda
+        .scalar_binary(op, &a, &b)
+        .expect("cuda scalar_binary must succeed on CUDA-equipped test runner");
+
+    let cpu_slice = cpu_result.as_slice().expect("contiguous");
+    let cuda_slice = cuda_result.as_slice().expect("contiguous");
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("scalar_binary({op:?}) cpu-cuda parity shape={shape:?}"),
+        cuda_slice,
+        cpu_slice,
+    );
+    assert_eq!(
+        cuda_slice, cpu_slice,
+        "scalar_binary({op:?}): 比較演算は 0.0/1.0 の純粋な比較のため bit 同一のはず（shape={shape:?}）"
+    );
+}
+
+/// [`ScalarUnaryOp::Clamp`] の CPU-CUDA parity を bit 同一（算術を含ま
+/// ない純粋な選択演算のため）で検証する。
+fn assert_clamp_parity(min: f32, max: f32, seed: u64, shape: &[usize]) {
+    let numel: usize = shape.iter().product();
+    let cpu = CpuBackendOps::new();
+    let cuda = CudaBackendOps::new(0);
+    let op = ScalarUnaryOp::Clamp { min, max };
+
+    let a = Tensor::new(positive_data(&mut Xorshift64Star::new(seed), numel), shape)
+        .expect("valid tensor");
+
+    let cpu_result = cpu
+        .scalar_unary(op, &a)
+        .expect("cpu scalar_unary always succeeds for implemented kinds");
+    let cuda_result = cuda
+        .scalar_unary(op, &a)
+        .expect("cuda scalar_unary must succeed on CUDA-equipped test runner");
+
+    let cpu_slice = cpu_result.as_slice().expect("contiguous");
+    let cuda_slice = cuda_result.as_slice().expect("contiguous");
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("scalar_unary(Clamp{{min={min},max={max}}}) cpu-cuda parity shape={shape:?}"),
+        cuda_slice,
+        cpu_slice,
+    );
+    assert_eq!(
+        cuda_slice, cpu_slice,
+        "scalar_unary(Clamp{{min={min},max={max}}}): 純粋な選択演算のため bit 同一のはず（shape={shape:?}）"
+    );
+}
+
 /// 環境適応スモーク（属性なし。通常 CI で実行）。CUDA 不在なら
 /// `BackendError::CudaUnavailable` を確認して早期 return する。実機なら
 /// 形状網羅ケースまで実行する。
@@ -201,6 +286,11 @@ fn scalar_op_parity_smoke_env_adaptive() {
             assert_unary_parity(ScalarUnaryOp::Sin, Domain::Signed, 1716, &[4], false);
             assert_unary_parity(ScalarUnaryOp::Cos, Domain::Signed, 1717, &[4], false);
             assert_unary_parity(ScalarUnaryOp::Tan, Domain::Signed, 1718, &[4], false);
+
+            // 比較演算・Clamp（イシュー #1702）の代表ケース。
+            assert_comparison_parity(ScalarBinaryOp::Gt, 1719, &[4]);
+            assert_comparison_parity(ScalarBinaryOp::Eq, 1720, &[4]);
+            assert_clamp_parity(0.5, 1.5, 1721, &[4]);
 
             // スコープ境界の回帰ガード（fail-closed 契約の確認）: 未実装
             // kind は `BackendError::Unsupported` を返す（意図せず余分な
@@ -249,7 +339,7 @@ fn scalar_op_matches_cpu_across_shapes() {
     ];
     let mut seed = 9000u64;
     for &shape in shapes {
-        seed += 4;
+        seed += 14;
         assert_unary_parity(ScalarUnaryOp::Sqrt, Domain::Positive, seed, shape, true);
         assert_binary_parity(ScalarBinaryOp::Sub, seed + 1, seed + 2, shape, true);
         assert_binary_parity(ScalarBinaryOp::Div, seed + 1, seed + 2, shape, true);
@@ -275,6 +365,18 @@ fn scalar_op_matches_cpu_across_shapes() {
         assert_unary_parity(ScalarUnaryOp::Sin, Domain::Signed, seed + 9, shape, false);
         assert_unary_parity(ScalarUnaryOp::Cos, Domain::Signed, seed + 10, shape, false);
         assert_unary_parity(ScalarUnaryOp::Tan, Domain::Signed, seed + 11, shape, false);
+
+        for op in [
+            ScalarBinaryOp::Gt,
+            ScalarBinaryOp::Ge,
+            ScalarBinaryOp::Lt,
+            ScalarBinaryOp::Le,
+            ScalarBinaryOp::Eq,
+            ScalarBinaryOp::Ne,
+        ] {
+            assert_comparison_parity(op, seed + 12, shape);
+        }
+        assert_clamp_parity(0.5, 1.5, seed + 13, shape);
     }
 
     let cpu = CpuBackendOps::new();
@@ -499,6 +601,96 @@ fn scalar_op_matches_cpu_across_shapes() {
         );
     }
 
+    // 比較演算エッジ（イシュー #1702）: `NaN`／`-0.0`／`inf` を含む。
+    // `Eq(NaN, NaN) == 0.0`／`Ne(NaN, NaN) == 1.0`（NaN は自身とも等しく
+    // ない。IEEE 754）・`Eq(-0.0, 0.0) == 1.0`（符号付きゼロは数値として
+    // 等しい）・`Ge(inf, inf) == 1.0` を CPU と bit 同一で確認する。
+    let a = Tensor::new(vec![f32::NAN, -0.0, f32::INFINITY, 1.0, f32::NAN], &[5])
+        .expect("valid tensor");
+    let b = Tensor::new(vec![f32::NAN, 0.0, f32::INFINITY, 2.0, 1.0], &[5]).expect("valid tensor");
+    for op in [
+        ScalarBinaryOp::Gt,
+        ScalarBinaryOp::Ge,
+        ScalarBinaryOp::Lt,
+        ScalarBinaryOp::Le,
+        ScalarBinaryOp::Eq,
+        ScalarBinaryOp::Ne,
+    ] {
+        let cpu_result = cpu.scalar_binary(op, &a, &b).expect("cpu succeeds");
+        let cuda_result = cuda.scalar_binary(op, &a, &b).expect("cuda succeeds");
+        let cpu_slice = cpu_result.as_slice().expect("contiguous");
+        let cuda_slice = cuda_result.as_slice().expect("contiguous");
+        assert_eq!(
+            cuda_slice, cpu_slice,
+            "scalar_binary({op:?}) edge case (NaN/-0.0/inf) cpu/cuda bit mismatch"
+        );
+    }
+    assert_eq!(
+        cpu.scalar_binary(ScalarBinaryOp::Eq, &a, &b)
+            .expect("cpu succeeds")
+            .as_slice()
+            .expect("contiguous")[0],
+        0.0,
+        "Eq(NaN, NaN) must be 0.0 per IEEE 754"
+    );
+    assert_eq!(
+        cpu.scalar_binary(ScalarBinaryOp::Ne, &a, &b)
+            .expect("cpu succeeds")
+            .as_slice()
+            .expect("contiguous")[0],
+        1.0,
+        "Ne(NaN, NaN) must be 1.0 per IEEE 754"
+    );
+    assert_eq!(
+        cpu.scalar_binary(ScalarBinaryOp::Eq, &a, &b)
+            .expect("cpu succeeds")
+            .as_slice()
+            .expect("contiguous")[1],
+        1.0,
+        "Eq(-0.0, 0.0) must be 1.0 (signed zeros compare equal)"
+    );
+
+    // Clamp エッジ（イシュー #1702）: `NaN`／`inf`／`-inf`／`-0.0` を含む
+    // 入力・通常の `Clamp{-1,1}` と `min > max`（常に `max` を返す。§3.4
+    // 数値規約）の `Clamp{5.0, 1.0}` の両方を確認する。
+    let clamp_input = Tensor::new(
+        vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.0, 0.0],
+        &[5],
+    )
+    .expect("valid tensor");
+    for (min, max) in [(-1.0f32, 1.0f32), (5.0f32, 1.0f32), (0.0f32, 1.0f32)] {
+        let op = ScalarUnaryOp::Clamp { min, max };
+        let cpu_result = cpu.scalar_unary(op, &clamp_input).expect("cpu succeeds");
+        let cuda_result = cuda.scalar_unary(op, &clamp_input).expect("cuda succeeds");
+        let cpu_slice = cpu_result.as_slice().expect("contiguous");
+        let cuda_slice = cuda_result.as_slice().expect("contiguous");
+        for (i, (&c, &g)) in cpu_slice.iter().zip(cuda_slice.iter()).enumerate() {
+            if c.is_nan() {
+                assert!(
+                    g.is_nan(),
+                    "Clamp{{min={min},max={max}}} NaN propagation mismatch at index {i}"
+                );
+            } else {
+                assert_eq!(
+                    c.to_bits(),
+                    g.to_bits(),
+                    "Clamp{{min={min},max={max}}} cpu/cuda bit mismatch at index {i}"
+                );
+            }
+        }
+    }
+    // `-0.0` の保持（`Clamp{0.0, 1.0}` は `x < min` の比較で `-0.0 < 0.0`
+    // は false のため `-0.0` がそのまま通過する。IEEE 754 の符号付き
+    // ゼロ比較規約どおり）を bit で確認する。
+    let clamp_zero_result = cpu
+        .scalar_unary(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }, &clamp_input)
+        .expect("cpu succeeds");
+    assert_eq!(
+        clamp_zero_result.as_slice().expect("contiguous")[3].to_bits(),
+        (-0.0f32).to_bits(),
+        "Clamp{{0.0,1.0}} must preserve -0.0 sign bit"
+    );
+
     // numel == 0（空 shape）の早期 return。`Log` でも確認する（#1701）。
     let empty = Tensor::new(Vec::<f32>::new(), &[0]).expect("valid tensor");
     let cuda_empty_unary = cuda
@@ -513,4 +705,8 @@ fn scalar_op_matches_cpu_across_shapes() {
         .scalar_binary(ScalarBinaryOp::Sub, &empty, &empty)
         .expect("empty tensor must succeed");
     assert_eq!(cuda_empty_binary.shape(), &[0]);
+    let cuda_empty_clamp = cuda
+        .scalar_unary(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }, &empty)
+        .expect("empty tensor must succeed (Clamp)");
+    assert_eq!(cuda_empty_clamp.shape(), &[0]);
 }
