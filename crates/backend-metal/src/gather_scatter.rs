@@ -12,9 +12,13 @@
 //! [`fandhe_ai_tensor_core::scatter_out_shape`]）・
 //! [`crate::gather_scatter_model::validate_shapes_fit_u32`]・
 //! [`crate::gather_scatter_model::validate_index_range`] を済ませてから
-//! 本モジュールを呼ぶ契約のため、本モジュール自身は値検査を行わず
-//! ディスパッチに専念する（カーネル側には防御的ガードを残す。
-//! `shaders/gather_scatter.metal` 冒頭コメント参照）。
+//! 本モジュールを呼ぶ契約のため、shape 次元・index 範囲の検査は本
+//! モジュールでは行わずディスパッチに専念する（カーネル側には防御的
+//! ガードを残す。`shaders/gather_scatter.metal` 冒頭コメント参照）。
+//! ただし `numel`（形状次元の積）が `u32` カーネル引数へ収まるかの
+//! 検査（[`validate_gather_scatter_len`]）は上記呼び出し元検査ではまだ
+//! 担保されないため本モジュール側で行う（`crate::elementwise::
+//! validate_elementwise_len` と同じ理由）。
 
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLDevice, MTLSize};
@@ -88,6 +92,7 @@ impl MetalGatherScatter {
         if numel == 0 {
             return Ok(Vec::new());
         }
+        validate_gather_scatter_len(numel)?;
 
         let rank = in_shape.len();
         let mut shapes: Vec<u32> = Vec::with_capacity(rank * 2);
@@ -141,6 +146,7 @@ impl MetalGatherScatter {
         if numel_out == 0 {
             return Ok(Vec::new());
         }
+        validate_gather_scatter_len(numel_out)?;
 
         let rank = out_shape.len();
         let mut shapes: Vec<u32> = Vec::with_capacity(rank * 2);
@@ -298,6 +304,28 @@ fn encode_scatter_dispatch(
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
 }
 
+/// gather／scatter カーネル引数 `constant uint& numel`（`shaders/
+/// gather_scatter.metal`）は 32bit のため、`numel as u32` キャストを
+/// 検証なしに行うと `numel`（`index_shape`／`out_shape` の要素数積）が
+/// `u32::MAX` を超える形状で切り詰まり、`gs_dispatch_sizes` が実際の
+/// 要素数より少ないスレッドグループしかディスパッチしなくなる。結果と
+/// して `alloc_uninit_pooled` で確保した出力バッファの一部が未初期化
+/// のまま `read_to_vec()` でホストへ返る（`crate::elementwise::
+/// validate_elementwise_len` と同じ理由・同じ対策。呼び出し元の
+/// `gather_scatter_model::validate_shapes_fit_u32` は各 shape 次元が
+/// `u32::MAX` 以下であることのみを検査し、積である numel 自体は検査し
+/// ないため本関数が必要。OWASP A03。`.claude/rules/security.md`）。
+fn validate_gather_scatter_len(len: usize) -> Result<(), MetalError> {
+    if len > u32::MAX as usize {
+        return Err(MetalError::InvalidElementwiseShape {
+            detail: format!(
+                "gather/scatter numel must fit in u32 (kernel argument type): numel={len}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// `numel` に対する grid/threadgroup サイズを構築する（`crate::
 /// elementwise::ew_dispatch_sizes` と同一構成。`div_ceil` による末尾
 /// ブロックの余剰スレッドはカーネル内境界チェックに委ねる契約。REQ-8）。
@@ -314,4 +342,25 @@ fn gs_dispatch_sizes(numel: u32) -> (MTLSize, MTLSize) {
         depth: 1,
     };
     (threadgroups, threads_per_tg)
+}
+
+/// `validate_gather_scatter_len` は純関数（Metal ランタイム非依存）
+/// のため Linux 実行可能。`elementwise.rs::tests::
+/// validate_elementwise_len_*` と同型の境界値検査（review 指摘の
+/// 回帰防止。イシュー #1778 レビュー指摘）。
+#[cfg(test)]
+mod validate_len_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_len_at_u32_max() {
+        assert!(validate_gather_scatter_len(u32::MAX as usize).is_ok());
+    }
+
+    #[test]
+    fn rejects_len_exceeding_u32_max() {
+        let err = validate_gather_scatter_len(u32::MAX as usize + 1)
+            .expect_err("u32::MAX を超える numel は拒否されるべき");
+        assert!(matches!(err, MetalError::InvalidElementwiseShape { .. }));
+    }
 }
