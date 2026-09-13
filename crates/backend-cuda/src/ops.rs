@@ -39,6 +39,16 @@ use fandhe_ai_tensor_core::{
     SvdFactors, Tensor, UnaryElementwiseOp, reduce_out_shape, require_same_shape, row_norm_layout,
     row_softmax_layout,
 };
+// `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
+// この trait をスコープへ import すると、`self.add`／`self.relu`
+// 等（本ファイル内の `BackendOps` 実装が使う f32 専用の内部呼び出し）が
+// `impl TypedOps<bf16> for CudaBackendOps` の同名メソッドと衝突し
+// 「multiple applicable items in scope」で解決不能になる（引数の型が
+// 一致していても、trait メソッドの曖昧性はスコープ内の trait 集合のみで
+// 決まり引数型では解決されない）。`backend-cpu::ops` が
+// `fandhe_ai_tensor_core::TypedOps<f64>` を戻り値型でのみ完全修飾参照し
+// `use` しないのと同じ回避策。
+use half::bf16;
 
 use crate::context_cache;
 use crate::device::CudaDevice;
@@ -1262,6 +1272,24 @@ impl BackendOps for CudaBackendOps {
         static_cuda_memory(self.ordinal, &device)
             .ok()
             .map(|m| m as &dyn MemoryOps)
+    }
+
+    /// `TypedOps<half::bf16>` の CUDA 実装を公開する（イシュー #1704。
+    /// `crate::typed_bf16` にホスト側 bf16⇔f32 変換＋既存 f32
+    /// `BackendOps` カーネル委譲として実装済み）。
+    ///
+    /// **`memory_ops` との対比**: `memory_ops` は `CudaMemory` を構築
+    /// するために `device_handle()`（driver 初期化）を経由する必要が
+    /// あり、driver 不在時は `None` へ縮退する（上記参照）。一方
+    /// `TypedOps<bf16>` の実体は `self`（`CudaBackendOps`）自身であり、
+    /// accessor 自体は driver に一切触れない。実行時の CUDA 不在は
+    /// 各演算メソッド内部（`BackendOps::add` 等・`gemm_fp32_strict`）が
+    /// `BackendError::CudaUnavailable` を返す形で伝えるため、本
+    /// accessor は無条件に `Some(self)` を返してよい（`device_handle()`
+    /// を呼んで poison 検査を迂回する必要がない。本ファイル冒頭の
+    /// poison 検査に関する既存コメント参照）。
+    fn typed_ops_bf16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<bf16>> {
+        Some(self)
     }
 
     /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・

@@ -743,3 +743,17 @@ typed_bf16.rs`。設計 `docs/backend-dtype-dispatch-design.md` §11）。
   は触れていない。表本体のスナップショット（対象 HEAD `097bff19`）・
   必要工数見積り（XL）は変更しない（本追補は snapshot 後の部分実装差分
   の記録）。
+
+## #1704 の追補
+
+`float64`／`float16`／`bfloat16` 行（319〜320 行目）のスナップショット本文
+は不変のまま、CUDA バックエンド限定で `TypedOps<half::bf16>` が実装され
+`Tensor<bf16>` の `gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`
+が CUDA 経由で到達可能になった（`crates/backend-cuda/src/typed_bf16.rs`。
+cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
+していることを確認したうえでの実装。イシュー #1704・
+`docs/backend-dtype-dispatch-design.md` §12）。CUDA `TypedOps<f64>`／
+`TypedOps<f16>`（#1703）・Metal bf16（#1651）は未実装のまま（CPU bf16 は
+#1699・PR #1794 で実装済み・origin/main マージ済み。上記「#1699 の追補」参照）。`Var`／`Tape`／VJP・facade 公開面（`Tensor<bf16>` を受け
+取る facade API）は引き続き未接続で、本表の「未実装（欠落側）」列の評価
+（`Var` レベルの mixed precision）は変わらない。
