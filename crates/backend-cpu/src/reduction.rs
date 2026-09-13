@@ -84,7 +84,7 @@ use rayon::prelude::*;
 /// チャンク境界を跨ぐ演算順序の違いが bit 差を生まないよう、値は実装内で
 /// 固定する（呼び出し側からの変更点を持たない。ガードレール閾値ではないが、
 /// 数値一致回帰テストの前提となるため安易に変更しない）。
-const CHUNK: usize = 4096;
+pub(crate) const CHUNK: usize = 4096;
 
 /// reduction カーネル固有のエラー。`BackendError`（TASK-1.9 で導入予定）への
 /// ラップは `BackendOps` 実装時に行う想定であり、本モジュールでは行わない。
@@ -116,7 +116,7 @@ impl std::error::Error for ReduceError {}
 /// インデックスへ展開する。`row_major_strides`（tensor-core）と対の関係にある
 /// 展開処理で、`axis_reduce`（出力側の外側・内側インデックス復元）と
 /// `gather_elements`（非 contiguous 全縮約時の走査順再現）の両方から使う。
-fn unravel(mut idx: usize, dims: &[usize]) -> Vec<usize> {
+pub(crate) fn unravel(mut idx: usize, dims: &[usize]) -> Vec<usize> {
     let mut out = vec![0usize; dims.len()];
     for (axis, &d) in dims.iter().enumerate().rev() {
         if d == 0 {
@@ -207,7 +207,7 @@ fn max_slice(data: &[f32]) -> Option<f32> {
 /// アロケーション前の要素数計算にオーバーフローが混入すると過小確保・
 /// 境界不整合を招く（OWASP A03 相当。`.claude/rules/security.md`）ため、
 /// `tensor-core::checked_numel` と同方針でオーバーフローを検出する。
-fn checked_product(dims: &[usize]) -> Result<usize, ReduceError> {
+pub(crate) fn checked_product(dims: &[usize]) -> Result<usize, ReduceError> {
     dims.iter()
         .try_fold(1usize, |acc, &d| acc.checked_mul(d))
         .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))

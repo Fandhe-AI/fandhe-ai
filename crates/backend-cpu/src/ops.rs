@@ -445,6 +445,15 @@ impl BackendOps for CpuBackendOps {
         Some(self)
     }
 
+    /// `TypedOps<f64>` の CPU 実装（[`crate::typed_f64`]。イシュー #1697・
+    /// 親 #1649）への capability accessor。`CpuBackendOps` 自身が
+    /// `impl TypedOps<f64> for CpuBackendOps`（`typed_f64.rs`）を実装する
+    /// ため、`memory_ops` と同じパターンで `self` をそのまま返す。
+    /// f16／bf16 は #1698／#1699 まで既定 `None`（fail-closed）のまま。
+    fn typed_ops_f64(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<f64>> {
+        Some(self)
+    }
+
     /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
     /// `docs/device-resident-update-design.md` §3.2・§5.2）。CPU は
     /// 「デバイス」がホストメモリそのものであるため、`downcast_handle_mut`
@@ -1836,7 +1845,7 @@ fn linalg_error_to_backend_error(err: LinalgError) -> BackendError {
 /// 実行時失敗のため `KernelLaunchFailed` に寄せる（`BackendError` に
 /// reduction 専用 variant は設けない。§4.4 の 5 variant + TASK-1.9a/1.9c
 /// 拡張の範囲に収める）。
-fn reduce_error_to_backend_error(err: reduction::ReduceError) -> BackendError {
+pub(crate) fn reduce_error_to_backend_error(err: reduction::ReduceError) -> BackendError {
     match err {
         reduction::ReduceError::Shape(shape_err) => BackendError::ShapeMismatch(shape_err),
         reduction::ReduceError::EmptyReduction { op } => {

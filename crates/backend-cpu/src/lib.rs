@@ -120,6 +120,15 @@
 //! cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節）、framework-compare
 //! gemm cpu の before/after（両実機・全 12 セル非後退）で ADOPT を確定した
 //! （`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20）。
+//!
+//! イシュー #1697（親 #1649）で [`mod@typed_f64`] モジュール（`TypedOps<f64>`
+//! の CPU 実装。`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の
+//! 最小集合 8 演算）を追加し、`ops::CpuBackendOps::typed_ops_f64()`
+//! accessor（`fandhe_ai_tensor_core::BackendOps` の非破壊拡張。既定 `None`）を
+//! `Some(self)` へオーバーライドして結線した。f32 の `elementwise`／
+//! `reduction`／`gemm` 本体は変更せず（`typed_f64` モジュール冒頭コメント
+//! 参照）、f16／bf16 は #1698／#1699 が引き続き担当する
+//! （`docs/backend-dtype-dispatch-design.md` §10）。
 
 mod device;
 mod elementwise;
@@ -174,6 +183,11 @@ mod small_shape_thread_cap;
 mod sme_detect;
 pub mod softmax;
 mod thread_limit;
+// イシュー #1697（親 #1649）: `TypedOps<f64>` の CPU 実装。f32 の
+// `elementwise`／`reduction`／`gemm` 本体とは自己完結（モジュール冒頭
+// コメント参照）で、`ops::CpuBackendOps::typed_ops_f64()` accessor から
+// のみ到達する。
+mod typed_f64;
 
 pub use device::CpuDeviceProvider;
 pub use elementwise::{
@@ -194,7 +208,7 @@ pub use memory::CpuMemory;
 pub use ops::CpuBackendOps;
 pub use parity::{
     ABSOLUTE_RESCUE_THRESHOLD, CompareReport, ParityError, RELATIVE_TOLERANCE, assert_parity,
-    compare, matmul_reference_fma,
+    assert_parity_f64, compare, compare_f64, matmul_reference_fma, matmul_reference_fma_f64,
 };
 pub use rmsnorm::{RmsNormError, run_rmsnorm_f32};
 pub use small_shape_thread_cap::{SmallShapeCapReport, small_shape_cap_report};
