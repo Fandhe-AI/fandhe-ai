@@ -2699,10 +2699,15 @@ impl BackendOps for CudaBackendOps {
     }
 
     /// `BackendOps::gather` の CUDA 実装（イシュー #1777）。
-    /// [`gather_out_shape`] で `input`／`index` の shape を再検査してから
-    /// `gather_scatter::run_gather_f32` へ委譲する（`backend-cpu::ops::
-    /// CpuBackendOps::gather` と同じ二重検査方針。`.claude/rules/
-    /// security.md` A08）。
+    /// [`gather_out_shape`] で `input`／`index` の shape を再検査し、
+    /// `index` の値が `[0, input.shape()[dim])` 範囲内であることを
+    /// ホスト側で全走査して独立検証（`Var` 側の forward 時点検証と
+    /// 重複するが、`CudaBackendOps::gather` を `Var` を経由せず直接
+    /// 呼び出す経路でも範囲外 index による無言の誤った結果〈カーネル側
+    /// フォールバックが `0.0` を書いて `Ok` を返してしまう〉を防ぐため。
+    /// `scatter` の同処理・`backend-cpu::ops::CpuBackendOps::gather` と
+    /// 同じ二重検査方針。`.claude/rules/security.md` A08）してから
+    /// `gather_scatter::run_gather_f32` へ委譲する。
     fn gather(
         &self,
         input: &Tensor<f32>,
@@ -2712,13 +2717,24 @@ impl BackendOps for CudaBackendOps {
         let out_shape = gather_out_shape(input.shape(), index.shape(), dim)
             .map_err(BackendError::ShapeMismatch)?;
 
-        let input_owned = input.contiguous();
-        let input_slice = input_owned.as_slice().ok_or_else(|| {
-            BackendError::KernelLaunchFailed("gather: input not contiguous".into())
-        })?;
         let index_owned = index.contiguous();
         let index_slice = index_owned.as_slice().ok_or_else(|| {
             BackendError::KernelLaunchFailed("gather: index not contiguous".into())
+        })?;
+        let dim_size = input.shape()[dim];
+        for &v in index_slice {
+            if v < 0 || (v as usize) >= dim_size {
+                return Err(BackendError::ShapeMismatch(ShapeError::IndexOutOfRange {
+                    dim,
+                    index: v as i64,
+                    dim_size,
+                }));
+            }
+        }
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gather: input not contiguous".into())
         })?;
 
         let gs = self.with_driver_call(

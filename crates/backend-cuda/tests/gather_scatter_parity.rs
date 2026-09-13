@@ -229,6 +229,25 @@ fn gather_scatter_parity_smoke_env_adaptive() {
                 cpu_err, cuda_err,
                 "CPU と CUDA は同一の IndexOutOfRange を返す契約"
             );
+
+            // gather も scatter と同じ独立検査を持つ（イシュー #1777
+            // codex-review 指摘: 当初 `gather` にはこの検査が欠落しており
+            // 範囲外 index がカーネル側フォールバックで `0.0` を書いて
+            // `Ok` を返す silent data corruption になっていた）。
+            let bad_gather_index =
+                Tensor::<i32>::new(vec![0, 9, 2, 1], &[2, 2]).expect("valid tensor");
+            let cpu_gather_err = expect_shape_mismatch(
+                cpu.gather(&input, 1, &bad_gather_index)
+                    .expect_err("cpu must reject out-of-range index"),
+            );
+            let cuda_gather_err = expect_shape_mismatch(
+                cuda.gather(&input, 1, &bad_gather_index)
+                    .expect_err("cuda gather must reject out-of-range index"),
+            );
+            assert_eq!(
+                cpu_gather_err, cuda_gather_err,
+                "gather も CPU と CUDA で同一の IndexOutOfRange を返す契約"
+            );
         }
         Err(BackendError::CudaUnavailable(msg)) => {
             assert!(!msg.is_empty(), "error detail message must not be empty");
@@ -265,6 +284,21 @@ fn gather_scatter_parity_smoke_env_adaptive() {
                 .expect_err("cuda must reject out-of-range index even without CUDA device"),
             );
             assert_eq!(cpu_err, cuda_err);
+
+            // gather の範囲外 index 検査もデバイス初期化より前に走るため
+            // CUDA 非搭載環境でも検証できる（イシュー #1777 codex-review
+            // 指摘の是正）。
+            let bad_gather_index =
+                Tensor::<i32>::new(vec![0, 9, 2, 1], &[2, 2]).expect("valid tensor");
+            let cpu_gather_err = expect_shape_mismatch(
+                cpu.gather(&input, 1, &bad_gather_index)
+                    .expect_err("cpu must reject out-of-range index"),
+            );
+            let cuda_gather_err =
+                expect_shape_mismatch(cuda.gather(&input, 1, &bad_gather_index).expect_err(
+                    "cuda gather must reject out-of-range index even without CUDA device",
+                ));
+            assert_eq!(cpu_gather_err, cuda_gather_err);
         }
         Err(other) => panic!("unexpected error variant for CudaBackendOps::gather: {other}"),
     }

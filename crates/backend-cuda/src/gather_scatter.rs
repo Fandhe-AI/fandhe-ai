@@ -28,7 +28,7 @@
 //! である。
 //!
 //! `index` の値が `[0, dim_size)` 範囲内であることは呼び出し元
-//! （`ops.rs::gather_dispatch`／`scatter_dispatch`。ホスト側で index を
+//! （`ops.rs::CudaBackendOps::gather`／`scatter`。ホスト側で index を
 //! 全走査して検証する）が保証する契約とする（`fandhe_ai_autodiff::
 //! var::Var::gather`／`scatter`／`scatter_add` の forward 時点検証と
 //! 合わせた二重検査。`kernels_gather_scatter.rs` のカーネル側にも REQ-8
