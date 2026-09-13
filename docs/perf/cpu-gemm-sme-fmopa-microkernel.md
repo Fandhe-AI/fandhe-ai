@@ -125,6 +125,28 @@ GB10（DGX Spark GB10）の CPU（Grace）は SME 非対応であり、CPU GEMM 
   `mod tests`）で、長さ不一致時に panic ではなく `Result::Err` が
   返ることを確認済み（境界検査は SME 命令発行より前に完了するため、
   SME 非対応環境でも安全に呼び出せる）。
+- **保留中 lazy ZA save の後始末（テスト専用検証コード。
+  `crates/backend-cpu/src/gemm_blis/microkernel/sme.rs::PendingLazySaveGuard`）
+  を単一 asm ブロック内へ集約（codex-review P0 再指摘対応。
+  「ストリーミングモードを同じ asm ブロック内で解除する」）**: 以前は
+  ZA0 読み出し（`smstart sm` を伴う asm）を抜けた後、通常の Rust
+  メソッド呼び出し（`finish_pending_save`。別 asm で `msr TPIDR2_EL0,
+  xzr` → `smstop`）を挟んでいたため、PSTATE.SM=1 のまま関数呼び出し・
+  条件分岐というコンパイラ生成コードを実行する区間が生じ、Arm ACLE の
+  asm 制約（各 asm が呼び出し時点の PSTATE.SM を保存する）に違反し
+  うる状態だった。現在は `PendingLazySaveGuard::read_za0_and_finish_streaming`
+  が「`smstart sm` → ZA0 読み出し → `msr TPIDR2_EL0, xzr` → `smstop`」
+  を単一 asm ブロック内で完結させ、asm を抜けた時点で必ず
+  PSTATE.SM=0（かつ PSTATE.ZA=0）に戻す。panic 時の `Drop::drop` は
+  別経路の `finish_pending_save`（dormant のまま panic した場合専用。
+  `smstart` を発行しないため PSTATE.SM の遷移自体を伴わない）を呼び、
+  両者は `cleaned_up` フラグで二重発行を防ぐ。あわせて、
+  `smstart`/`smstop` を発行する全 asm ブロック（`compute`・
+  `enter_dormant_za_with_pending_lazy_save`・
+  `read_za0_and_finish_streaming`・`finish_pending_save`）に
+  Z0-Z31／P0-P15 に加え FFR のクロバー宣言（`out("v0") _ ...
+  out("p15") _, out("ffr") _`）を揃えた（モード切替で不定化される
+  レジスタの宣言網羅性。Arm ACLE の asm 制約が要求する事項）。
 - `asm!` は `compute` 1 箇所に局所化。SAFETY コメントに以下を明記:
   `smstart`/`smstop` を 1 ブロック内で対にする・v0〜v31／p0〜p15 全列挙・
   w12 明示・`preserves_flags` を付けない（`subs`/`cmp` 使用）・`nomem`/
