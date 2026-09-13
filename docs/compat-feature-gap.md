@@ -316,8 +316,8 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | PyTorch | TF/Keras | fandhe-ai | 実装に必要なもの | 難度 |
 |---|---|---|---|---|
 | `float32` | `float32` | あり（唯一の演算 dtype） | - | - |
-| `float64` | `float64` | 部分（`Tensor<f64>` は生成できるが `BackendOps`/`Var` の算術対象外） | `Element` 抽象を活かした dtype 別 dispatch の設計・全カーネルの多重化 | XL |
-| `float16`/`bfloat16` | 同左 | 部分（GPU カーネル内部の中間表現・Tensor Core 経路にのみ存在。公開 dtype ではない） | 公開 `Tensor<f16>` 演算経路・VJP のスケーリング契約設計（mixed precision） | XL |
+| `float64` | `float64` | 部分（`Tensor<f64>` は生成できるが `BackendOps`/`Var` の算術対象外） | `Element` 抽象を活かした dtype 別 dispatch の設計・全カーネルの多重化（設計はイシュー #1648・`docs/backend-dtype-dispatch-design.md` で確定済み。実装は #1649〜#1651 へ引き継ぎ） | XL |
+| `float16`/`bfloat16` | 同左 | 部分（GPU カーネル内部の中間表現・Tensor Core 経路にのみ存在。公開 dtype ではない） | 公開 `Tensor<f16>` 演算経路・VJP のスケーリング契約設計（mixed precision）（dtype dispatch 方式はイシュー #1648・`docs/backend-dtype-dispatch-design.md` で確定済み。AMP スケーリング契約は #1625 の対象） | XL |
 | `int32`/`int64`/`bool` | 同左 | 部分（`Tensor<T>` 生成のみ。CrossEntropy の `targets: Tensor<i32>` のように限定的に内部使用） | 汎用整数演算・型変換 API | L |
 | `.to(dtype)`（型変換） | `tf.cast` | なし | dtype 変換 Op（勾配は型により打ち切り／恒等など個別設計） | M |
 | AMP（自動混合精度） | `tf.keras.mixed_precision` | なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記） | 損失スケーリング・unscale ステップの追加（`optim.rs` の適用順序契約に定義済みの拡張点） | L |
@@ -543,3 +543,41 @@ facade への到達経路は既存の `pub use fandhe_ai_autodiff::Var` 再エ�
 compat-api-scope.md` §5 の手続きは Tier 1 列挙済み機能につき再適用
 不要と判断）。
 
+## 追補（イシュー #1637）
+
+§2.2「`masked_select`/`where`」行（スナップショット時点の記述は不変の
+まま）を実装済み化した:
+
+- `Var::where_cond(cond: &Tensor<bool>, a: &Var, b: &Var)` — 新 Op
+  `Op::Where { cond: Tensor<f32>, a: NodeId, b: NodeId }`（コピーを伴う
+  `push_eager` ノード。`BackendOps::where_cond`〈既定 `Unsupported`〉→
+  `eval::where_cond` フォールバック）。`cond`（`&Tensor<bool>`）は
+  `Var::where_cond` が `out_shape`（`a`／`b`／`cond` **3 入力**の
+  broadcast 後 shape。`cond` 単独が軸を拡張するケースも含む。PR #1684
+  で is-shape 契約を訂正）へ broadcast してから 1 回だけ f32 マスク
+  （`{0.0, 1.0}`）へ変換し Op が保持する（`MemoryOps` の f32 専用契約
+  に合わせるため）。真偽判定は 3 バックエンド共通で `c != 0.0`。
+- `Var::masked_fill(&self, mask: &Tensor<bool>, value: f32)` — 新 Op
+  `Op::MaskedFill { input: NodeId, mask: Tensor<f32> }`（`value` は
+  forward が焼き込んだ `TapeNode::value` に含まれるため Op へ二重保持
+  しない）。`BackendOps::masked_fill`〈既定 `Unsupported`〉→ `eval::
+  masked_fill` フォールバック。
+- **CPU／CUDA／Metal の 3 バックエンドとも専用カーネルを実装**
+  （`backend-cpu::elementwise::{where_slice, masked_fill_slice}`・
+  CUDA `kernels_elementwise.rs::{EW_WHERE_F32, EW_MASKED_FILL_F32}`・
+  Metal `shaders/elementwise.metal::{ew_where_f32, ew_masked_fill_f32}`。
+  `#1598` の cat／narrow 系とは異なりホストフォールバックのみに留めて
+  いない）。選択演算は丸めを伴わないため 3 バックエンドとも bit 同一
+  になることを parity テスト（`crates/backend-cuda/tests/
+  where_masked_fill_parity.rs`・`crates/backend-metal/tests/
+  where_masked_fill_parity.rs`。Metal は M4 Max 実機実測完了・CUDA は
+  本エージェント実行環境に実機なしのため未実測明記）で確認した。
+- **VJP はホスト実装**（`Op::Relu` と同型。`grad::elementwise_mul_mask`
+  を再利用）。デバイス常駐 VJP（`binary_elementwise_device` 相当）は
+  本イシューのスコープ外。
+- facade への到達経路は既存の `pub use fandhe_ai_autodiff::Var` 再エク
+  スポートのみで、新規 `pub use`／`pub fn` は追加していない（`docs/
+  compat-api-scope.md` §1.2「index 系」行を参照。§5 の範囲拡張手続きは
+  Tier 1 列挙済み機能につき再適用不要と判断）。
+- gather／scatter／scatter_add／index_select（`docs/compat-api-scope.md`
+  §1.2「index 系」行の残対象）は #1638 へ引き継ぐ。
