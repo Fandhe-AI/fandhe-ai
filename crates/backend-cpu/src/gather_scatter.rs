@@ -131,12 +131,19 @@ pub fn gather(
 /// 乗算が他軸のサイズ次第でオーバーフローしうる（例:
 /// `shape=[0, usize::MAX, 2]` は `numel == 0` だが
 /// `strides[1] = strides[2] * shape[2]` の後段 `strides[0] =
-/// strides[1] * shape[1]` が `2 * usize::MAX` でオーバーフローする）。
-/// 走査すべき要素が存在しない（`index_numel` も併せて 0。`scatter_
-/// out_shape` は `index`／`src` の要素数を `input` 以下に制限するため
-/// `input` が空なら `index`／`src` も空）ため、ストライド計算前に
-/// 空出力を返す（`autodiff::eval::scatter` の `out_shape.contains(&0)`
-/// 早期リターンと同じ方針。codex-review 指摘）。
+/// strides[1] * shape[1]` が `2 * usize::MAX` でオーバーフローする）ため
+/// ストライド計算前に空出力を返す（`autodiff::eval::scatter` の
+/// `out_shape.contains(&0)` 早期リターンと同じ方針）。**「`input` が空
+/// なら `index`／`src` も空」という前提は `dim` 軸に限り成立しない**
+/// （`scatter_out_shape` が `idx_s <= in_s` を課すのは非 `dim` 軸のみ
+/// で、`dim` 軸自体〈`axis == dim` はループでスキップ〉には制約がない
+/// ため。例: `input` shape=[0]・`dim`=0・`index`=[0]・`src`=[1.0] は
+/// `scatter_out_shape` を通過し `index_numel == 1 > 0` になりうる）。
+/// `Var::scatter`／`scatter_add` は forward 時点で index 値を検査済み
+/// だが、`CpuBackendOps::scatter` を `Var` を経由せず直接呼び出す経路
+/// では検査を経ないため、空出力を返す前に非空 `index` の値範囲を独立
+/// に検査し、範囲外は `ShapeError::IndexOutOfRange` を返す（codex-review
+/// 指摘）。
 pub fn scatter(
     input: &Tensor<f32>,
     dim: usize,
@@ -145,14 +152,44 @@ pub fn scatter(
     reduce: ScatterReduce,
 ) -> Result<Tensor<f32>, ShapeError> {
     let out_shape = input.shape().to_vec();
-    if out_shape.contains(&0) {
-        return Tensor::new(Vec::new(), &out_shape);
-    }
     let dim_size = out_shape[dim];
-    let numel: usize = out_shape.iter().product();
-    let out_strides = row_major_strides(&out_shape);
     let index_shape = index.shape().to_vec();
     let index_numel: usize = index_shape.iter().product();
+    if out_shape.contains(&0) {
+        // 空出力早期リターン（このブロック冒頭の doc comment を参照）。
+        // `scatter_out_shape` は `dim` 軸自体には `index_shape[dim] <=
+        // input_shape[dim]` を課さない（非 `dim` 軸のみ検査。`axis == dim`
+        // はループでスキップされる）ため、「`input` が空なら `index` も
+        // 空」という前提は `dim` 軸の `input.shape()[dim] == 0` では
+        // 成立しない（例: `input` shape=[0]・`dim`=0・`index`=[0] は
+        // `scatter_out_shape` を通過するが `index_numel == 1 > 0`）。
+        // `Var::scatter`／`scatter_add` は forward 時点で index 値を
+        // 検査済みだが、`CpuBackendOps::scatter` を `Var` を経由せず直接
+        // 呼び出す経路では検査を経ないため、ストライド計算（オーバー
+        // フロー回避で省略する）より前に非空 `index` の値範囲を独立に
+        // 検査し、範囲外は `ShapeError::IndexOutOfRange` を返す
+        // （`gather`／`resolve_pos` と同じ検査を空出力経路にも適用する。
+        // codex-review 指摘）。
+        for flat in 0..index_numel {
+            let coords = unravel(flat, &index_shape);
+            let dim_idx_raw = index.get(&coords);
+            debug_assert!(
+                dim_idx_raw.is_some(),
+                "scatter: index の走査ロジックにバグがあり範囲外になった（契約違反）"
+            );
+            let dim_idx_raw = dim_idx_raw.unwrap_or(0);
+            if dim_idx_raw < 0 || (dim_idx_raw as usize) >= dim_size {
+                return Err(ShapeError::IndexOutOfRange {
+                    dim,
+                    index: dim_idx_raw as i64,
+                    dim_size,
+                });
+            }
+        }
+        return Tensor::new(Vec::new(), &out_shape);
+    }
+    let numel: usize = out_shape.iter().product();
+    let out_strides = row_major_strides(&out_shape);
 
     // `dim` 軸を `dim_idx` へ差し替えた `out_shape` 上の多次元添字を
     // 導出し、`out_strides` で行優先の線形添字へ畳み込む（`Overwrite`・
@@ -345,5 +382,29 @@ mod tests {
         let out = scatter(&input, 1, &index, &src, ScatterReduce::Overwrite).unwrap();
         assert_eq!(out.shape(), &out_shape);
         assert_eq!(out.as_slice().unwrap().len(), 0);
+    }
+
+    /// codex-review 指摘（PR #1786）の回帰テスト: `input` shape=[0]・
+    /// `dim`=0 のとき `scatter_out_shape` は `dim` 軸自体に
+    /// `index_shape[dim] <= input_shape[dim]` を課さないため、非空
+    /// `index`（`scatter_out_shape` 自体は通過する）が `scatter_out_
+    /// shape` を経由しない直接呼び出しで素通りしうる。`CpuBackendOps::
+    /// scatter` を直接呼ぶ場合でも、空出力の早期リターンより前に非空
+    /// `index` の値範囲を検査し `IndexOutOfRange` で拒否することを
+    /// 確認する（`dim_size == 0` のため任意の添字値が範囲外）。
+    #[test]
+    fn scatter_rejects_out_of_range_index_on_zero_sized_dim_axis() {
+        let input = Tensor::new(Vec::<f32>::new(), &[0usize]).unwrap();
+        let index = Tensor::<i32>::new(vec![0], &[1usize]).unwrap();
+        let src = Tensor::new(vec![1.0], &[1usize]).unwrap();
+        let err = scatter(&input, 0, &index, &src, ScatterReduce::Overwrite).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 0,
+                index: 0,
+                dim_size: 0,
+            }
+        );
     }
 }
