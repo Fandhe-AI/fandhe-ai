@@ -249,6 +249,15 @@ Cursor Bugbot 1 件の指摘を是正した記録。tolerance 定数・既存テ
   タイ分割ではなく両入力の勾配を `(0.0, 0.0)` にする**規約へ統一し、
   §3.4 数値規約に明記した（本モジュール `binary_partials` 冒頭コメント
   参照）。
+- **P2（ELU の VJP 係数。`unary_grad_factor`。2 回目の codex-review
+  指摘）**: 負側の導関数 `alpha * exp(x)` を丸め済みの forward 出力
+  から `y + alpha` で復元していたため、`alpha` が大きく `x` が負の
+  とき（例 `x=-20, alpha=1e8`）`y` が `-alpha` へ丸まり係数が `0.0`
+  になって勾配が消失していた（解析値は約 `0.2061`）。入力 `x` から
+  直接 `alpha * x.exp()` を計算するよう変更した（§8 の ELU 導関数
+  契約どおり。f64 昇格は不要）。回帰テスト
+  `scalar_unary_elu_grad_is_computed_from_input_not_rounded_forward_output`
+  を `crates/autodiff/src/grad.rs` に追加。
 
 新規 `pub` 公開面は追加していない（`PARALLEL_THRESHOLD` の直接参照は
 `pub(crate)` のままクレート内単体テストから使う形。ホスト参照実装

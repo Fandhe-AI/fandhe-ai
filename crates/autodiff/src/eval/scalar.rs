@@ -113,9 +113,14 @@ pub(crate) fn unary_grad_factor(op: ScalarUnaryOp, x: f32, y: f32) -> f32 {
             if x > 0.0 {
                 1.0
             } else {
-                // forward: y = alpha * (exp(x) - 1) なので
-                // dy/dx = alpha * exp(x) = y + alpha。
-                y + alpha
+                // forward: y = alpha * (exp(x) - 1) なので数学的には
+                // dy/dx = alpha * exp(x) = y + alpha だが、丸め済みの
+                // forward 出力 `y` から復元すると `alpha` が大きく `x` が
+                // 負のとき `y` が `-alpha` へ丸まり係数が `0` になって
+                // 勾配が消失する（例: `x=-20, alpha=1e8` で解析値
+                // 約 `0.2061` が `0.0` になる。PR #1686 codex-review
+                // 指摘 P2）。入力 `x` から直接 `alpha * exp(x)` を計算する。
+                alpha * x.exp()
             }
         }
         ScalarUnaryOp::Softplus { beta, threshold } => {

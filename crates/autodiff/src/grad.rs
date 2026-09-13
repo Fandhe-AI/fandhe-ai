@@ -2781,6 +2781,25 @@ mod tests {
         assert_eq!((da, db), (0.0, 0.0), "Minimum(1.0, NaN) は勾配ゼロ");
     }
 
+    #[test]
+    fn scalar_unary_elu_grad_is_computed_from_input_not_rounded_forward_output() {
+        // 旧実装は forward 出力 `y = alpha * expm1(x)` から `y + alpha` で
+        // 復元していたため、`alpha` が大きく `x` が負のとき `y` が
+        // `-alpha` へ丸まり係数が `0.0` になって勾配が消失していた
+        // （PR #1686 codex-review 2 回目の指摘 P2）。
+        let alpha = 1e8_f32;
+        let x = -20.0_f32;
+        let y = ScalarUnaryOp::Elu { alpha }.apply(x);
+        assert_eq!(y, -alpha, "前提: forward 出力は -alpha へ丸まる");
+        let g = eval::scalar::unary_grad_factor(ScalarUnaryOp::Elu { alpha }, x, y);
+        let expected = alpha * x.exp(); // 約 0.20611536
+        assert!(
+            (g - expected).abs() <= expected * 1e-5,
+            "ELU 勾配は入力から計算した alpha*exp(x)={expected} に一致すべき: {g}"
+        );
+        assert!(g > 0.0, "勾配が消失してはならない");
+    }
+
     // --- Var::scalar_unary／scalar_binary の Tape 経由エンドツーエンド ---
 
     #[test]
