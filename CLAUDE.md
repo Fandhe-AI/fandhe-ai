@@ -287,6 +287,7 @@ fandhe-ai/
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）
     ├── real-hardware-verification-env.local.md.example # 上記の実値（内部ホスト名等）を書くローカル用テンプレート（#461。実体は .gitignore 対象）
+    ├── rng-global-contract-design.md # プロセスグローバルな決定的 RNG 契約（PyTorch `torch.manual_seed` 相当）の設計（`tensor-core::rng::{manual_seed, with_global_rng, Xorshift64Star}`・既定シード・Mutex 採用理由・既存の個別シード API〈`nn::Linear::new(.., seed)` 等〉との独立性・facade 到達経路〈新規 `pub fn manual_seed`〉。実際の乱数テンソル生成〈randn／rand／randint〉は #1725、arange 等の形状ユーティリティは #1726 が対象。親 #1602。イシュー #1724）
     ├── scalar-op-dispatch-design.md # `ScalarUnaryOp`／`ScalarBinaryOp`（`tensor-core::scalar_op`）dispatch 機構の設計記録。`BackendOps::scalar_unary`／`scalar_binary`（既定 `Unsupported`）・CPU 参照実装・autodiff VJP 接続まで実装（親 #1592 の分担 (a)）。CUDA／Metal カーネルは #1635／#1636、`Var` 公開メソッド・facade 配線は #1593／#1595 へ引き継ぎ。イシュー #1634。PR #1686 codex-review／Bugbot 指摘（§12）を是正: Softplus／ELU／Hardswish の極端入力での桁落ち・overflow、`gelu_tanh_grad`／unary `PowScalar`／binary `Pow`（da）／`Div`（db）の 0 除算・0×inf による NaN、`Maximum`／`Minimum` の NaN 入力時タイ分割誤りを修正し、後者は `Clamp` と同じ NaN 時勾配ゼロの規約へ統一
     ├── self-repair-candidate-isolation.md # 候補実行の OS レベル縦深防御の調査結果・採否判断（#414）
     ├── self-repair-revalidation-plan.md # TASK-3.3a 自己修復ループ再実証の実証計画・題材選定（#140）

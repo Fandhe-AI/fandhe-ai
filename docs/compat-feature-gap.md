@@ -655,3 +655,24 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
 
 比較演算の bool dtype 出力（§2.4 表の該当行）は #1634 の対象外のまま
 （f32 の `0.0`／`1.0` 出力。`docs/scalar-op-dispatch-design.md` §10）。
+
+## 追補（イシュー #1724）
+
+`§2.1`（テンソル生成）に列挙されていた「乱数生成と RNG 契約」の欠落は、
+プロセスグローバルな決定的 RNG 契約（`fandhe_ai::manual_seed`。PyTorch
+`torch.manual_seed` 相当）を新設したことで**基盤機構のみ実装済み**へ
+更新する。設計記録は `docs/rng-global-contract-design.md`。
+
+- 実装した契約: `manual_seed(seed: u64)`（facade 経由）・内部アクセサ
+  `tensor-core::rng::with_global_rng`（`autodiff`／`facade` へは非公開。
+  #1725 が `randn`／`rand`／`randint` を実装する際の消費側）。
+- 既存の個別シード API（`nn::Linear::new(.., seed)` 等）とは完全に独立
+  した別機構であり、本イシューはそれらのシグネチャ・挙動を変更していな
+  い（独立性は `crates/autodiff/src/nn/linear.rs::tests::
+  linear_new_is_unaffected_by_global_manual_seed_state` で機構的に固定）。
+- **実際の乱数テンソル生成（`randn`／`rand`／`randint`）自体は未実装の
+  まま**（#1725 のスコープ）。`arange`／`linspace`／`eye`／`zeros_like`／
+  `ones_like` も未実装のまま（#1726 のスコープ）。
+- facade 新規公開面: `pub fn manual_seed`（新規）。内部型・アクセサは
+  facade へ露出させない（`crates/facade/tests/api_surface.rs::
+  facade_does_not_expose_rng_internal_types` で機械検査）。

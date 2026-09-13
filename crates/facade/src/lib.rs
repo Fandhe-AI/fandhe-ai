@@ -299,6 +299,21 @@ pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
     Ok(Tape(fandhe_ai_autodiff::Tape::new_with_ops(ops)))
 }
 
+/// PyTorch `torch.manual_seed` 相当。プロセス全体で共有されるグローバル
+/// 決定的 RNG（将来の [`Var`] 乱数テンソル生成 API・イシュー #1725 の
+/// `randn`／`rand`／`randint` が消費する。#1602 本文の設計方針どおり
+/// ホスト生成のみで `BackendOps` は経由しない）の状態を `seed` から
+/// やり直す（イシュー #1724）。
+///
+/// `fandhe_ai_autodiff::manual_seed`（実体は `fandhe_ai_tensor_core::rng`）
+/// への薄い委譲（composition root。`docs/compat-api-scope.md` §0 の確定
+/// 公開面）。既存の個別シード API（`nn::Linear::new(.., seed)` 等）とは
+/// 独立した別機構であり、本関数を呼んでもそれらの挙動には一切影響しない
+/// （設計判断・スレッド安全性の範囲は `docs/rng-global-contract-design.md`）。
+pub fn manual_seed(seed: u64) {
+    fandhe_ai_autodiff::manual_seed(seed);
+}
+
 /// `device` に対応する具体 `BackendOps` を解決する（非公開）。
 ///
 /// composition root の中核: `Device` → 具体バックエンドクレートの

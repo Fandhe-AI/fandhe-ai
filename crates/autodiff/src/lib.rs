@@ -167,4 +167,10 @@ mod var;
 pub use backward::Gradients;
 pub use error::AutodiffError;
 pub use tape::{NodeId, Tape, TapeId};
+// `manual_seed`（イシュー #1724）: PyTorch `torch.manual_seed` 相当の
+// プロセスグローバル決定的 RNG 契約。実体は `tensor-core::rng`（本クレートの
+// `nn::init::Xorshift64Star` が委譲する共通コアと同じ場所）にあり、`autodiff`
+// はここで素通しするのみ。`facade::manual_seed` がさらにこれを再委譲する
+// （composition root。`docs/rng-global-contract-design.md`）。
+pub use fandhe_ai_tensor_core::rng::manual_seed;
 pub use var::{GateParams, QrVars, Reduction, SvdVars, Var, VarHostView};
