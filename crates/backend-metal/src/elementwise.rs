@@ -340,7 +340,18 @@ impl MetalElementwise {
     /// から都度受け取る点が違うだけで、バッファ確保・ディスパッチ・
     /// readback の手続きは既存 `run_unary`（非公開・境界検査・
     /// `numel == 0` 早期 return を含む）をそのまま再利用する。
-    pub fn run_scalar_unary_f32(
+    ///
+    /// `pub(crate)` 限定（イシュー #1798 codex-review 指摘）:
+    /// 呼び出し元は `context_cache` が保持する自クレート内キャッシュ
+    /// 由来の `MtlPipeline` に限られる契約であり、`run_unary`／
+    /// `run_binary` は「渡された `pipeline` が固定のバッファ配置・
+    /// 全出力要素書き切りの契約を満たす」ことを前提に
+    /// `alloc_uninit_pooled` の出力を読み戻す。`pub` のままだと外部
+    /// クレートが任意の `MtlPipeline` を渡せてしまい、契約を満たさない
+    /// カーネルでは境界外アクセスやプールの未初期化内容の返却に
+    /// つながる（CUDA 側 `elementwise.rs::run_scalar_unary_f32`／
+    /// `run_scalar_binary_f32` も同型の理由で `pub(crate)`）。
+    pub(crate) fn run_scalar_unary_f32(
         &self,
         ctx: &MetalContext,
         pipeline: &MtlPipeline,
@@ -351,7 +362,8 @@ impl MetalElementwise {
 
     /// [`Self::run_scalar_unary_f32`] の 2 項版
     /// （[`fandhe_ai_tensor_core::ScalarBinaryOp`]。イシュー #1707）。
-    pub fn run_scalar_binary_f32(
+    /// `pub(crate)` 限定の理由は [`Self::run_scalar_unary_f32`] を参照。
+    pub(crate) fn run_scalar_binary_f32(
         &self,
         ctx: &MetalContext,
         pipeline: &MtlPipeline,
