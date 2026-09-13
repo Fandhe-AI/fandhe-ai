@@ -104,10 +104,13 @@ path.txt`（実測実行時に生成）で確認する。
   経路の出力を CPU `Sequential::predict` と `fandhe_ai_backend_cpu::
   assert_parity` で突合）のみ。tolerance 定数（相対誤差 1e-3 未満 または
   絶対誤差 1e-5 未満）・`docs/spec/` は不変
-- **verdict の 3 値**: ADOPT（Tier 1 成立・R0/R1 green）／REJECT（R1
-  不一致、または Tier 1 で `ratio>1.00` か checksum 不一致）／
-  undetermined（専有ゲート不成立・件数不足・R0 未実行）。3 値とも正式
-  結果として記録し、規則は事後に緩めない（security.md A08）
+- **verdict の 3 値**: ADOPT（Tier 1 成立・R0/R1/R2 すべて green。
+  R2 は before／after 両ツリーで実行し `^out\[` 行が全 640 行一致する
+  ことを含む）／REJECT（R1 不一致・R2 不一致、または Tier 1 で
+  `ratio>1.00` か checksum 不一致）／undetermined（専有ゲート不成立・
+  件数不足・R0 未実行・R2 未実行〈diff 未生成・行数不一致等で判定不能な
+  場合を含む〉）。3 値とも正式結果として記録し、規則は事後に緩めない
+  （security.md A08）
 
 ## 4. 実行手順
 

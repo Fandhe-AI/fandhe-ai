@@ -150,16 +150,29 @@ const D_IN: usize = 784;
 const D_HIDDEN: usize = 256;
 const D_OUT: usize = 10;
 
-const SEED_INPUT: u64 = 0xC0FFEE;
-const SEED_L1: u64 = 0x5EED_0001;
-const SEED_L2: u64 = 0x5EED_0002;
+// `scripts/bench/framework-compare/bench-common/src/lib.rs::{SEED_X,
+// SEED_L1, SEED_L2}` と同一の値（cross-workspace 依存を避けリテラルで
+// 複製。bench-common は独立 workspace のため facade からは参照不可）。
+// 以前はこのテスト独自のシード（`SEED_INPUT = 0xC0FFEE`・`SEED_L1 =
+// 0x5EED_0001`・`SEED_L2 = 0x5EED_0002`）を使っており、R1/R2 が実際に
+// `bench-fandhe --task infer` が計測する入力・重みと異なるデータに対する
+// bit 一致検証になっていた（codex-review 指摘）。bench-fandhe の
+// `mlp_data`／`build_model` と同一シードへ揃えることで、R1（単一ツリー
+// bit 一致）・R2（cross-tree bit diff）が性能計測対象の出力そのものの
+// bit 同一の裏付けになるようにする。
+const SEED_X: u64 = 0xDA7A_0001;
+const SEED_L1: u64 = 0x1111_1111;
+const SEED_L2: u64 = 0x2222_2222;
 
 /// `scripts/bench/framework-compare/bench-fandhe/src/main.rs::build_model`
 /// ／`mlp_data` と同型の bench 形状モデル（784→256→ReLU→10・
 /// `Xorshift64Star` 決定的シード）を組み立てる。事前登録規則（イシュー
 /// #1689・`docs/perf/infer-chain-single-sync-cuda-ab.md`）が対象とする
 /// `bench-fandhe --task infer` の実形状で chain/legacy 一致・parity を
-/// 検証するための共通フィクスチャ。
+/// 検証するための共通フィクスチャ。シード値（`SEED_X`／`SEED_L1`／
+/// `SEED_L2`）は `bench-common` の同名定数と一致させてあり、`bench-
+/// fandhe --task infer` が実際に計測する入力・モデルと同一データを
+/// 生成する（上記コメント参照）。
 fn bench_shape_model_and_input() -> (Sequential, Tensor<f32>) {
     let model = Sequential::new()
         .add_linear(D_IN, D_HIDDEN, SEED_L1)
@@ -167,7 +180,7 @@ fn bench_shape_model_and_input() -> (Sequential, Tensor<f32>) {
         .add_relu()
         .add_linear(D_HIDDEN, D_OUT, SEED_L2)
         .unwrap();
-    let mut rng = Xorshift64Star::new(SEED_INPUT);
+    let mut rng = Xorshift64Star::new(SEED_X);
     let input = tensor(rng.fill_vec(BATCH * D_IN), &[BATCH, D_IN]);
     (model, input)
 }

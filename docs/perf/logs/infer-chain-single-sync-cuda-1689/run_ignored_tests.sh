@@ -50,18 +50,38 @@ then
   echo "done (R0 aborted). logs in $OUT_DIR"
   exit 1
 fi
-run_case linear_forward_device_matches_gemm_resident_rhs_act_bit_exact_on_real_device \
-  cargo test -p fandhe-ai-backend-cuda --release --test linear_forward_device_real_device -- \
-  --ignored --nocapture --exact linear_forward_device_matches_gemm_resident_rhs_act_bit_exact_on_real_device
-run_case linear_forward_device_two_layer_chain_matches_cpu_reference_on_real_device \
-  cargo test -p fandhe-ai-backend-cuda --release --test linear_forward_device_real_device -- \
-  --ignored --nocapture --exact linear_forward_device_two_layer_chain_matches_cpu_reference_on_real_device
-run_case linear_forward_device_rejects_shape_mismatches_and_handles_empty_input_on_real_device \
-  cargo test -p fandhe-ai-backend-cuda --release --test linear_forward_device_real_device -- \
-  --ignored --nocapture --exact linear_forward_device_rejects_shape_mismatches_and_handles_empty_input_on_real_device
-run_case linear_forward_device_bench_cuda \
-  cargo test -p fandhe-ai-backend-cuda --release --test linear_forward_device_real_device -- \
-  --ignored --nocapture --exact linear_forward_device_bench_cuda
+if ! run_case linear_forward_device_matches_gemm_resident_rhs_act_bit_exact_on_real_device \
+    cargo test -p fandhe-ai-backend-cuda --release --test linear_forward_device_real_device -- \
+    --ignored --nocapture --exact linear_forward_device_matches_gemm_resident_rhs_act_bit_exact_on_real_device
+then
+  echo "R0 未達: linear_forward_device_matches_gemm_resident_rhs_act_bit_exact_on_real_device が失敗したため R1 以降を打ち切る" >&2
+  echo "done (R0 aborted). logs in $OUT_DIR"
+  exit 1
+fi
+if ! run_case linear_forward_device_two_layer_chain_matches_cpu_reference_on_real_device \
+    cargo test -p fandhe-ai-backend-cuda --release --test linear_forward_device_real_device -- \
+    --ignored --nocapture --exact linear_forward_device_two_layer_chain_matches_cpu_reference_on_real_device
+then
+  echo "R0 未達: linear_forward_device_two_layer_chain_matches_cpu_reference_on_real_device が失敗したため R1 以降を打ち切る" >&2
+  echo "done (R0 aborted). logs in $OUT_DIR"
+  exit 1
+fi
+if ! run_case linear_forward_device_rejects_shape_mismatches_and_handles_empty_input_on_real_device \
+    cargo test -p fandhe-ai-backend-cuda --release --test linear_forward_device_real_device -- \
+    --ignored --nocapture --exact linear_forward_device_rejects_shape_mismatches_and_handles_empty_input_on_real_device
+then
+  echo "R0 未達: linear_forward_device_rejects_shape_mismatches_and_handles_empty_input_on_real_device が失敗したため R1 以降を打ち切る" >&2
+  echo "done (R0 aborted). logs in $OUT_DIR"
+  exit 1
+fi
+if ! run_case linear_forward_device_bench_cuda \
+    cargo test -p fandhe-ai-backend-cuda --release --test linear_forward_device_real_device -- \
+    --ignored --nocapture --exact linear_forward_device_bench_cuda
+then
+  echo "R0 未達: linear_forward_device_bench_cuda が失敗したため R1 以降を打ち切る" >&2
+  echo "done (R0 aborted). logs in $OUT_DIR"
+  exit 1
+fi
 
 # R1（chain bit 一致。イシュー #1689 新設）: `predict_device_chain_cuda_
 # bit_identity` の `#[ignore]` 5 件（小形状 2 種＋bench 形状の chain/

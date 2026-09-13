@@ -74,10 +74,12 @@ deps-policy.md 第 9 区分）で `bench-fandhe` をビルドする。
 - **REQ-2 複合判定の適用範囲**: `predict_resident_matches_cpu_reference_
   on_cuda`（CUDA chain 経路 vs CPU `Sequential::predict`）のみ。
   tolerance 定数・`docs/spec/` は不変
-- **verdict**: ADOPT（Tier 1 成立・R0/R1 green）／REJECT（R1 不一致、
-  または Tier 1 で `ratio>1.00` か checksum 不一致）／undetermined
-  （専有ゲート不成立・件数不足・R0 未実行）。3 値とも正式結果として記録
-  し、規則は事後に緩めない
+- **verdict**: ADOPT（Tier 1 成立・R0/R1/R2 すべて green。R2 は
+  before／after 両ツリーで実行し `^out\[` 行が全 640 行一致することを
+  含む）／REJECT（R1 不一致・R2 不一致、または Tier 1 で `ratio>1.00`
+  か checksum 不一致）／undetermined（専有ゲート不成立・件数不足・
+  R0 未実行・R2 未実行〈diff 未生成・行数不一致等で判定不能な場合を
+  含む〉）。3 値とも正式結果として記録し、規則は事後に緩めない
 
 ## ディレクトリ構成
 
