@@ -230,25 +230,65 @@ mod tests {
         );
     }
 
-    /// `add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の型シグネチャが
-    /// `TypedOps<f16>` として一貫して呼び出せることのコンパイル時＋
-    /// shape 検査（driver 不要な入力エラー経路。実際の演算結果〈driver
-    /// 必須〉は GB10 実機 `#[ignore]` テストへ引き継ぐ）。
+    /// `add`／`mul` は要素ごとの二項演算のため、shape 不一致（かつ
+    /// ブロードキャスト不能）な入力を渡すと `elementwise_binary`
+    /// （`ops.rs::CudaBackendOps::elementwise_binary`）の
+    /// `a.broadcast_with(b)` が driver に一切触れる前に
+    /// `BackendError::ShapeMismatch` を返す（`gemm` の shape 検証と
+    /// 同じ「driver 呼び出し前に事前検証」契約）。ここでは戻り値の
+    /// `Result` を実際に検査し、shape 検証が構造的に効いていることを
+    /// 確認する（以前は 7 演算すべての戻り値を `_ =` で握り潰しており、
+    /// shape 検証欠落や常時エラー化を検出できなかった。#1797 codex-review
+    /// 指摘の是正）。
     #[test]
-    fn elementwise_and_reduction_shape_errors_are_returned_type_safely() {
-        // `upcast_f16` 自体は shape 不変で失敗しないため、ここでは単に
-        // 呼び出し可能であることのみ確認する（実引数はダミー・driver
-        // 呼び出しは environment によりエラーになりうるためアサート
-        // しない。GB10 実機テストが実際の数値を検証する）。
+    fn add_mul_reject_shape_mismatch_before_touching_driver() {
+        let ops = CudaBackendOps::new(0);
+        let a = t(&[1.0, -2.0, 3.0], &[3]);
+        let b = t(&[3.0, 4.0], &[2]);
+        let add_err = TypedOps::<f16>::add(&ops, &a, &b).unwrap_err();
+        assert!(matches!(add_err, BackendError::ShapeMismatch(_)));
+        let mul_err = TypedOps::<f16>::mul(&ops, &a, &b).unwrap_err();
+        assert!(matches!(mul_err, BackendError::ShapeMismatch(_)));
+    }
+
+    /// `sum`／`max` は縮約軸 `dim` の範囲検査（`ops_shape::reduce_out_shape`）
+    /// が driver に触れる前に行われるため、rank を超える `dim` は
+    /// `BackendError::ShapeMismatch` を返す。戻り値を実際に検査する
+    /// （上記と同じ是正）。
+    #[test]
+    fn sum_max_reject_out_of_range_dim_before_touching_driver() {
         let ops = CudaBackendOps::new(0);
         let a = t(&[1.0, -2.0], &[2]);
-        let b = t(&[3.0, 4.0], &[2]);
-        let _ = TypedOps::<f16>::add(&ops, &a, &b);
-        let _ = TypedOps::<f16>::mul(&ops, &a, &b);
-        let _ = TypedOps::<f16>::relu(&ops, &a);
-        let _ = TypedOps::<f16>::exp(&ops, &a);
-        let _ = TypedOps::<f16>::tanh(&ops, &a);
-        let _ = TypedOps::<f16>::sum(&ops, &a, None);
-        let _ = TypedOps::<f16>::max(&ops, &a, None);
+        let sum_err = TypedOps::<f16>::sum(&ops, &a, Some(5)).unwrap_err();
+        assert!(matches!(sum_err, BackendError::ShapeMismatch(_)));
+        let max_err = TypedOps::<f16>::max(&ops, &a, Some(5)).unwrap_err();
+        assert!(matches!(max_err, BackendError::ShapeMismatch(_)));
+    }
+
+    /// `relu`／`exp`／`tanh` は単項演算で shape 検証点を持たないため、
+    /// 有効な入力に対する呼び出しが型シグネチャ通りにコンパイル・実行
+    /// できることのみを確認する（driver 不在環境では
+    /// `BackendError::CudaUnavailable` を返す契約。それ以外のエラー
+    /// 種別が返らないことを検査し、実際の数値〈driver 必須〉は GB10
+    /// 実機 `#[ignore]` テストへ引き継ぐ）。
+    #[test]
+    fn relu_exp_tanh_accept_valid_input_without_unexpected_error_kind() {
+        let ops = CudaBackendOps::new(0);
+        let a = t(&[1.0, -2.0], &[2]);
+        for result in [
+            TypedOps::<f16>::relu(&ops, &a),
+            TypedOps::<f16>::exp(&ops, &a),
+            TypedOps::<f16>::tanh(&ops, &a),
+        ] {
+            if let Err(e) = result {
+                assert!(
+                    matches!(
+                        e,
+                        BackendError::CudaUnavailable(_) | BackendError::KernelLaunchFailed(_)
+                    ),
+                    "unexpected error variant for valid-shape input: {e:?}"
+                );
+            }
+        }
     }
 }

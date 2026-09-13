@@ -148,8 +148,17 @@ fn typed_f16_elementwise_and_reduction_match_cpu_backend_ops_rounded() {
     let b32 = vec![0.1f32, 0.2, 0.3];
     let a16 = f16_tensor(&a32, &[2, 3]);
     let b16 = f16_tensor(&b32, &[3]);
-    let a32_full = Tensor::new(a32.clone(), &[2, 3]).unwrap();
-    let b32_full = Tensor::new(b32.clone(), &[3]).unwrap();
+    // CPU 参照側は CUDA 側が実際に計算へ使う値（f16 へ丸めた後の値。
+    // `typed_f16::upcast_f16` が `f16::to_f32` で復元する値と同一）を
+    // 使う。ここで元の `a32`／`b32` をそのまま使うと、f16 で正確に表現
+    // できない値（本テストの入力は 0.1／0.2／0.3 等 2 進小数で丸められる）
+    // について「入力の丸め誤差」と「演算自体の誤差」が REQ-2 複合判定
+    // に混在し、CUDA 側の演算経路（f32 昇格→f32 カーネル→f16 丸め）
+    // 自体の正しさを検証できなくなる（#1797 codex-review 指摘の是正）。
+    let a32_rounded: Vec<f32> = a32.iter().map(|&v| f16::from_f32(v).to_f32()).collect();
+    let b32_rounded: Vec<f32> = b32.iter().map(|&v| f16::from_f32(v).to_f32()).collect();
+    let a32_full = Tensor::new(a32_rounded, &[2, 3]).unwrap();
+    let b32_full = Tensor::new(b32_rounded, &[3]).unwrap();
 
     // add / mul（broadcast）。
     let cuda_add = TypedOps::<f16>::add(&cuda, &a16, &b16).expect("cuda add succeeds");
