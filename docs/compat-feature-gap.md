@@ -539,10 +539,11 @@ compat-api-scope.md` §5 の手続きは Tier 1 列挙済み機能につき再�
   `Op::Where { cond: Tensor<f32>, a: NodeId, b: NodeId }`（コピーを伴う
   `push_eager` ノード。`BackendOps::where_cond`〈既定 `Unsupported`〉→
   `eval::where_cond` フォールバック）。`cond`（`&Tensor<bool>`）は
-  `Var::where_cond` が `out_shape`（`a`／`b` の broadcast 後 shape）へ
-  broadcast してから 1 回だけ f32 マスク（`{0.0, 1.0}`）へ変換し Op が
-  保持する（`MemoryOps` の f32 専用契約に合わせるため）。真偽判定は
-  3 バックエンド共通で `c != 0.0`。
+  `Var::where_cond` が `out_shape`（`a`／`b`／`cond` **3 入力**の
+  broadcast 後 shape。`cond` 単独が軸を拡張するケースも含む。PR #1684
+  で is-shape 契約を訂正）へ broadcast してから 1 回だけ f32 マスク
+  （`{0.0, 1.0}`）へ変換し Op が保持する（`MemoryOps` の f32 専用契約
+  に合わせるため）。真偽判定は 3 バックエンド共通で `c != 0.0`。
 - `Var::masked_fill(&self, mask: &Tensor<bool>, value: f32)` — 新 Op
   `Op::MaskedFill { input: NodeId, mask: Tensor<f32> }`（`value` は
   forward が焼き込んだ `TapeNode::value` に含まれるため Op へ二重保持

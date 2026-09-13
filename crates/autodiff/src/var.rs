@@ -1560,16 +1560,27 @@ impl<'t> Var<'t> {
     /// `#[doc(alias = "where")]` は Rust 予約語 `where` の代替名として
     /// 検索性を確保する目的。
     ///
+    /// 出力 shape は `a`・`b`・`cond` **3 入力**の共通 broadcast 形状
+    /// とする（`cond` 単独が軸を拡張するケース、例えば `a`／`b` が
+    /// `[3]`・`cond` が `[2, 1]` で出力 `[2, 3]` になるケースを含む。
+    /// codex-review 指摘・PR #1684）。
+    ///
     /// 手順: ①`a.check_same_tape(b)` → ②`out_shape =
-    /// broadcast_shape(a.shape, b.shape)` → ③`cond` を `out_shape` へ
-    /// broadcast（不可なら `AutodiffError::Shape`）→ ④bool→f32 変換
-    /// （`out_shape` ちょうどの contiguous テンソルへ 1 回だけ実体化。
+    /// broadcast_shape(broadcast_shape(a.shape, b.shape), cond.shape)`
+    /// → ③`cond` を `out_shape` へ broadcast（不可なら
+    /// `AutodiffError::Shape`）→ ④bool→f32 変換（`out_shape` ちょうど
+    /// の contiguous テンソルへ 1 回だけ実体化。
     /// [`fandhe_ai_tensor_core::BackendOps::where_cond`] doc の f32
     /// マスク契約）→ ⑤`a`／`b` を層 1 で実体化（`RefCell` 借用を
     /// 閉じてから `push_eager` を呼ぶ規律。`Var::cat` と同型）→
     /// ⑥`ops.where_cond` → `Unsupported` のときのみホスト参照実装
     /// （`eval::where_cond`）へフォールバック → ⑦戻り shape 検証
     /// （`.claude/rules/security.md` A08）→ ⑧`push_eager`。
+    ///
+    /// backward（[`where_vjp`]）は `a`／`b` の勾配を `out_shape` から
+    /// 元の `a_shape`／`b_shape`（`cond` を含まない）へ
+    /// `reduce_to_shape` で縮約するため、`cond` 由来の拡張軸は
+    /// `Op::Mul` 等の一般 broadcast VJP と同じ経路で正しく縮約される。
     #[doc(alias = "where")]
     pub fn where_cond(
         cond: &fandhe_ai_tensor_core::Tensor<bool>,
@@ -1577,7 +1588,8 @@ impl<'t> Var<'t> {
         b: &Var<'t>,
     ) -> Result<Var<'t>, AutodiffError> {
         a.check_same_tape(b)?;
-        let out_shape = broadcast_shape(&a.shape(), &b.shape()).map_err(AutodiffError::Shape)?;
+        let ab_shape = broadcast_shape(&a.shape(), &b.shape()).map_err(AutodiffError::Shape)?;
+        let out_shape = broadcast_shape(&ab_shape, cond.shape()).map_err(AutodiffError::Shape)?;
         let cond_bc = cond
             .broadcast_to(&out_shape)
             .map_err(AutodiffError::Shape)?

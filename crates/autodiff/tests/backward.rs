@@ -1017,6 +1017,49 @@ fn where_backward_broadcast_reduces_dy_to_input_shape() {
     assert_eq!(dense_vec(dy), vec![1.0, 1.0, 1.0]);
 }
 
+/// ③b `cond` 単独が軸を拡張するケース（`a`／`b:[3]`・`cond:[2,1]` →
+/// 出力 `[2, 3]`）。出力 shape を `a`／`b` だけから決めていた旧実装
+/// では `cond` を `[3]` へ broadcast しようとして `Shape` エラーに
+/// なっていた（codex-review 指摘・PR #1684）。forward・backward
+/// （数値微分突合）の両方を検証する。
+#[test]
+fn where_cond_alone_expands_output_shape() {
+    let cond = tb(vec![true, false], &[2, 1]);
+    let a0 = t(vec![1.0, 2.0, 3.0], &[3]);
+    let b0 = t(vec![10.0, 20.0, 30.0], &[3]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let av = tape.var(&a0);
+    let bv = tape.var(&b0);
+    let out = fandhe_ai_autodiff::Var::where_cond(&cond, &av, &bv).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[2, 3]);
+    // cond broadcast: row0=true（a 選択）・row1=false（b 選択）。
+    assert_eq!(
+        dense_vec(&out.to_tensor()),
+        vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0]
+    );
+
+    let forward = |a: &Tensor<f32>, b: &Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let av = tape.var(a);
+        let bv = tape.var(b);
+        let out = fandhe_ai_autodiff::Var::where_cond(&cond, &av, &bv).unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let da = grads.get(&av).unwrap().expect("a は loss に到達する");
+    let db = grads.get(&bv).unwrap().expect("b は loss に到達する");
+    assert_eq!(da.shape(), &[3]);
+    assert_eq!(db.shape(), &[3]);
+
+    let num_da = numeric_grad(&a0, |a| forward(&a, &b0));
+    let num_db = numeric_grad(&b0, |b| forward(&a0, &b));
+    assert_grad_close("where cond-only-expand dA", da, &num_da);
+    assert_grad_close("where cond-only-expand dB", db, &num_db);
+}
+
 /// ④同一 `Var` を `a`／`b` 両方に指定した場合（`where(c, x, x)`）、
 /// `accumulate` が合算し `dx = g`（全要素 upstream をそのまま通す）
 /// ことを確認する。
