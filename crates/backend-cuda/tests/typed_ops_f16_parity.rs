@@ -27,11 +27,16 @@ fn f16_to_f32_vec(t: &Tensor<f16>) -> Vec<f32> {
 // (a) 実機非依存
 // ---------------------------------------------------------------------
 
+// `typed_ops_bf16()` は元は #1704 の対象範囲外だったが、origin/main
+// マージ（#1704 実装取り込み）により `CudaBackendOps::typed_ops_bf16()`
+// が `Some(self)` を返すようになったため、本テストはその実装
+// （`crate::typed_bf16`）と整合するアサーションへ更新した
+// （`docs/backend-dtype-dispatch-design.md` §13 参照）。
 #[test]
-fn typed_ops_f16_accessor_is_some_and_bf16_is_none() {
+fn typed_ops_f16_and_bf16_accessors_are_both_some() {
     let ops = CudaBackendOps::new(0);
     assert!(BackendOps::typed_ops_f16(&ops).is_some());
-    assert!(BackendOps::typed_ops_bf16(&ops).is_none());
+    assert!(BackendOps::typed_ops_bf16(&ops).is_some());
 }
 
 #[test]
@@ -99,6 +104,15 @@ fn typed_f16_gemm_is_bit_identical_to_cuda_gemm_auto_run_f16() {
 /// `TypedOps<f16>::gemm` の数値が CPU f32 参照実装（`matmul_reference_fma`）
 /// を f16 へ丸めた値と REQ-2 統一複合判定で一致することを確認する
 /// （`gemm_auto.rs::run_f16_matches_cpu_reference` と同一入力・同一手順）。
+///
+/// CPU 参照側は CUDA 側が実際に計算へ使う値（f16 へ丸めた後に `f16::to_f32`
+/// で復元した値。`typed_f16::upcast_f16` が生成するのと同じ値）を使う。
+/// 丸め前の `a_f32`／`b_f32`（本テストの入力 `(i % 7) * 0.1` 等は 2 進小数で
+/// 正確に表現できず f16 へ丸めると値がずれる）をそのまま参照計算へ渡すと、
+/// 「入力の量子化誤差」と「GEMM 演算自体の誤差」が REQ-2 複合判定に混在し、
+/// CUDA 側の演算経路（f16 → f32 昇格 → `CudaGemmAuto::run_f16` → f16 丸め）
+/// 自体の正しさを検証できなくなる（elementwise テストと同型の是正。
+/// codex-review 指摘）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn typed_f16_gemm_matches_cpu_reference_rounded() {
@@ -115,9 +129,21 @@ fn typed_f16_gemm_matches_cpu_reference_rounded() {
     let gpu = TypedOps::<f16>::gemm(&ops, &a16, &b16)
         .expect("TypedOps::<f16>::gemm succeeds on real hardware");
 
+    // CUDA 側が実際に乗算へ使う値（f16 丸め後を f32 へ復元した値）を
+    // CPU 参照実装への入力として使う。
+    let a_f32_rounded: Vec<f32> = a_f32.iter().map(|&x| f16::from_f32(x).to_f32()).collect();
+    let b_f32_rounded: Vec<f32> = b_f32.iter().map(|&x| f16::from_f32(x).to_f32()).collect();
+
     let mut reference_f32 = vec![0.0f32; m * n];
-    fandhe_ai_backend_cpu::matmul_reference_fma(&a_f32, &b_f32, &mut reference_f32, m, n, k)
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a_f32_rounded,
+        &b_f32_rounded,
+        &mut reference_f32,
+        m,
+        n,
+        k,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
     let reference_rounded: Vec<f32> = reference_f32
         .iter()
         .map(|&x| f16::from_f32(x).to_f32())

@@ -191,14 +191,18 @@ mod tests {
         Tensor::new(d, shape).unwrap()
     }
 
-    /// `typed_ops_f16()` accessor が `Some` を返し、`typed_ops_bf16()`
-    /// は `None` のまま（#1704 の範囲を侵さない契約）であることを
-    /// 確認する。
+    /// `typed_ops_f16()` accessor が `Some` を返すことを確認する
+    /// （本イシュー #1703 の対象）。`typed_ops_bf16()` は元は #1704 の
+    /// 対象範囲外だったが、origin/main マージ（#1704 実装取り込み）に
+    /// より `CudaBackendOps::typed_ops_bf16()` が `Some(self)` を返す
+    /// ようになったため、本テストはその実装（`crate::typed_bf16`）と
+    /// 整合するアサーションへ更新した（`docs/backend-dtype-dispatch-
+    /// design.md` §13 参照）。
     #[test]
-    fn typed_ops_f16_is_some_and_bf16_stays_none() {
+    fn typed_ops_f16_and_bf16_are_both_some() {
         let ops = CudaBackendOps::new(0);
         assert!(BackendOps::typed_ops_f16(&ops).is_some());
-        assert!(BackendOps::typed_ops_bf16(&ops).is_none());
+        assert!(BackendOps::typed_ops_bf16(&ops).is_some());
     }
 
     /// shape 不一致は driver に一切触れる前に `ShapeMismatch` を返す
