@@ -241,7 +241,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 |---|---|---|---|---|
 | `matmul`（2D） | `tf.matmul` | あり（`Var::matmul`。CPU BLIS／CUDA Tensor Core／Metal simdgroup 全対応・TF32/split-K opt-in 込み） | - | - |
 | `bmm`（バッチ行列積） | `tf.linalg.matmul`（バッチ次元対応） | **なし（確定）**。`crates/tensor-core/src/ops_shape.rs:43-` `matmul_out_shape` が `lhs.len() != 2`/`rhs.len() != 2` を `ShapeError::RankMismatch` で拒否し、`Var::matmul`（`var.rs:195-208`）はこれを経由するため rank 2 のみ受理する | バッチ次元対応の GEMM 拡張（3 バックエンドのループ or バッチ化カーネル） | L |
-| `einsum` | `tf.einsum` | なし | 汎用縮約記法の解釈器＋既存 GEMM/縮約への分解実装 | XL |
+| `einsum` | `tf.einsum` | **あり（#1620）**。`Var::einsum`（オペランド 1〜2 個・batch 添字を伴う縮約は対象外〈末尾追補参照〉） | - | - |
 | `transpose`（線形代数用） | 同左 | あり（2.3 節参照） | - | - |
 | `torch.linalg.inv` | `tf.linalg.inv` | **あり（#1621）**。`Var::inv`（rank-2 正方限定。CPU 実装・GPU は `Unsupported`） | - | - |
 | `torch.linalg.solve` | `tf.linalg.solve` | **あり（#1621）**。`Var::solve` | - | - |
@@ -581,3 +581,52 @@ compat-api-scope.md` §5 の手続きは Tier 1 列挙済み機能につき再�
   Tier 1 列挙済み機能につき再適用不要と判断）。
 - gather／scatter／scatter_add／index_select（`docs/compat-api-scope.md`
   §1.2「index 系」行の残対象）は #1638 へ引き継ぐ。
+
+## 追補（イシュー #1620）
+
+§2.6「`einsum`」行（スナップショット時点の記述は不変のまま）を実装済み
+化した:
+
+- `Var::einsum(spec: &str, operands: &[&Var])` — 新 Op `Op::Contiguous
+  { input: NodeId }`（`permute` 後の非 contiguous view を `reshape` へ
+  渡す前段の明示実体化。eager・`push_eager`。VJP はホスト側で upstream
+  パススルー）以外の新規カーネルは追加せず、既存の `Var::matmul`
+  （GEMM）・`sum`（縮約）・`permute`／`reshape`（view）・`mul`
+  （broadcast 乗算）への分解として実装した。`BackendOps` へのメソッド
+  追加はなし——分解先の演算がすでに CPU／CUDA／Metal の 3 バックエンド
+  で実装済みのため「該当バックエンドすべてに実装」は分解によって自動
+  的に充足される。VJP も `einsum` 専用のものは追加せず、分解先各演算の
+  VJP 合成として自動的に成立する。
+- 受理範囲（v1・安全側）: 添字は ASCII 英字のみ・オペランド 1〜2 個・
+  `->` 省略時は NumPy 既定（入力に 1 回だけ現れる添字を ASCII 昇順）。
+  ellipsis（`...`）・同一オペランド内の添字重複（対角／trace）・出力
+  添字の重複・オペランド 3 個以上は `AutodiffError::InvalidArgument`
+  で拒否する。
+- **batch 添字を伴う縮約（例 `"bij,bjk->bik"`）は非対応**。当初の見積
+  もり（本表 §2.6「実装に必要なもの」列。スナップショット記述）は
+  「バッチ次元対応の GEMM 拡張」とだけ記していたが、実装時に判明した
+  正確な見積もりは以下のとおり: `einsum` 分解ドライバ自体は rank≥3
+  `matmul`（`bmm`。#1600）の有無に関わらず batch 添字の分類
+  （`compute_binary_plan`）まで機構として持っているため、対応は単なる
+  「ガード撤去」では済まず、#1600 実装後に `einsum_matmul_path` を
+  `[batch..., L, K] × [batch..., K, R]` 形状の rank≥3 `matmul` 呼び出し
+  （現行の 2 次元 `[L, K] × [K, R]` から一般化）・対応する `reshape`／
+  `permute` 目標形状（batch 次元を保持したまま `left`／`contract`／
+  `right` を畳み込む）へ再設計する必要がある。
+- **検証と `Var` 操作の分離**: `compute_binary_plan`（純関数・添字集合
+  のみで分類・拒否判定を行う）がすべての検証（presum 計画・
+  batch/contract/left/right 分類・内部整合性検査・batch∧contract 非空
+  の拒否）を完了してから、初めて `Var::sum`（presum の実行）を呼ぶ
+  設計とした。分類は添字集合のみで決まり presum の実行結果には依存
+  しないため、拒否時に tape へ迷子ノードが残らない。
+- **恒等最適化**: 恒等 permute（並べ替え不要）・shape 不変の reshape
+  はいずれも `Var::permute`／`reshape` を呼ばずスキップする。この結果
+  `"ij,jk->ik"` は `Var::matmul` 直接呼び出しと bit 同一（`MatMul`
+  ノード 1 個だけを記録する）。
+- facade への到達経路は既存の `pub use fandhe_ai_autodiff::Var` 再エク
+  スポートのみで、新規 `pub use`／`pub fn` は追加していない（`docs/
+  compat-api-scope.md` §1.3「einsum」行参照）。
+- CPU（`CpuBackendOps`）・Metal（M4 Max 実機実測完了）は分解先演算の
+  parity を確認済み。CUDA は本エージェント実行環境に実機がないため
+  `#[ignore]` テスト（`crates/facade/tests/einsum_backend_parity.rs`）
+  として未実測のまま記録し、GB10 実機セッションへ引き継ぐ。

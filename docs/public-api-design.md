@@ -493,6 +493,21 @@ Metal は既定 `Unsupported`（`BackendOps::linalg_*` は非破壊拡張の
 （`f64` 内部計算・符号／ゲージ規約・エラー分類）の詳細は `docs/
 autodiff-linalg-design.md` を参照。
 
+**イシュー #1620 追加**: `einsum`（PyTorch `torch.einsum`／TF
+`tf.einsum` 相当の汎用縮約記法）を追加した。`crate::einsum` モジュール
+が新規カーネルを一切追加せず、既存の `Var::matmul`（GEMM）・`sum`
+（縮約）・`permute`／`reshape`（view）・`mul`（broadcast 乗算）への
+分解ドライバとして実装している（`BackendOps` への拡張なし）。この
+分解の前段として、非 contiguous な `permute` 結果を `reshape` へ渡す
+ための明示実体化 eager ノード `Var::contiguous`（`pub(crate)` 限定。
+`tape::Op::Contiguous`）も新設した——`Var::reshape` が非 contiguous
+入力を暗黙コピーせず `ShapeError::NonContiguousReshape` で拒否する
+案 A 契約（前段落参照）と整合させるための内部専用演算であり、facade
+へは公開しない。受理範囲（オペランド 1〜2 個・batch 添字を伴う縮約は
+rank≥3 `matmul`〈#1600〉未実装のため対象外）・分解アルゴリズムの詳細
+は `crate::einsum` モジュール doc・`docs/compat-feature-gap.md` §2.6
+追補を参照。
+
 ## 4. backend 入口公開 API
 
 ### 4.1 デバイス選択

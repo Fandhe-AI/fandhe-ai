@@ -185,6 +185,7 @@ fn recompute_value(
 - `nn::Sequential`／compat 層へのチェックポイント指定 API
 - 祖先の再計算結果を `recompute_value` 自身がキャッシュしない設計（§4）による性能面のトレードオフ（同一 checkpoint 区間内で複数ノードが同じ祖先を必要とする場合、その祖先を都度再計算する）の最適化
 - `tape.rs` 内の `#[cfg(test)]` 単体テスト（private フィールドへの直接アクセスによる `recompute` フラグ・レジストリの検証）の追加
+- `Op::Contiguous`（イシュー #1620・`crate::einsum` が新設）は `recompute_value` に再導出分岐を持たないため `is_checkpoint_eligible() == false`（`Op::Concat` と同列）のまま非適格。適格化（再導出分岐の追加）は上記「対象拡大」と同様に後続の別対応とする
 
 ## 9. 承認事項
 

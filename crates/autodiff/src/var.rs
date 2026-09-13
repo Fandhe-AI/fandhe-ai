@@ -146,13 +146,24 @@ impl<'t> Var<'t> {
     /// TASK-12.1d・#164）。演算入口の shape 検査は本メソッドを使い、
     /// `value()`/`materialize_fallible` を呼ばない（`docs/
     /// fusion-graph-design.md` §3.5.1「shape 検証と実行を分離する」）。
-    fn shape(&self) -> Vec<usize> {
+    ///
+    /// **`pub(crate)` 化（イシュー #1620）**: `crate::einsum` が
+    /// 添字ごとの次元サイズ検査・presum／permute／reshape の計画算出に
+    /// 使う唯一のクレート外モジュール呼び出し元。`Var` は facade から
+    /// 再エクスポートされるが、本メソッド自体は facade へは公開しない
+    /// （`pub` にすると `docs/compat-api-scope.md` §5 手続きの対象になる
+    /// 新規公開 API を無断で追加してしまう）。
+    pub(crate) fn shape(&self) -> Vec<usize> {
         self.tape.nodes.borrow()[self.id.0].shape.clone()
     }
 
     /// 演算入口で必ず shape 検査より前に呼ぶクロステープ検査
     /// （`docs/public-api-design.md` §3.1「クロステープ安全性」）。
-    fn check_same_tape(&self, other: &Var<'t>) -> Result<(), AutodiffError> {
+    ///
+    /// **`pub(crate)` 化（イシュー #1620）**: `crate::einsum::einsum`
+    /// が複数オペランド間のクロステープ検査に使う（`shape()` と同じ
+    /// 理由で `pub` にはしない）。
+    pub(crate) fn check_same_tape(&self, other: &Var<'t>) -> Result<(), AutodiffError> {
         if self.tape.id != other.tape.id {
             return Err(AutodiffError::TapeMismatch);
         }
@@ -1043,6 +1054,61 @@ impl<'t> Var<'t> {
             out_shape,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `permute`／`transpose` 後の非 contiguous view を明示的に行優先
+    /// 連続バッファへ実体化する eager ノード（イシュー #1620）。
+    /// `Var::reshape` は非 contiguous 入力を暗黙コピーせず
+    /// `ShapeError::NonContiguousReshape` で拒否する契約（案 A・
+    /// `docs/public-api-design.md` §3.2）のため、`crate::einsum` が
+    /// permute 後に reshape へ渡す前段の明示コピーとして使う。
+    ///
+    /// 可視性は `pub(crate)` に留める——`Var` は facade から
+    /// 再エクスポートされるため、`docs/compat-api-scope.md` の Tier
+    /// 列挙にない `contiguous` を `pub` にすると同 §5 手続きの対象になる
+    /// 新規公開 API を無断で追加してしまう（承認範囲は `Var::einsum`
+    /// 自体のみ）。消費者は `crate::einsum` のみ。
+    ///
+    /// 既に contiguous な場合は新規ノードを積まず `self` をそのまま
+    /// 返す（`Tensor::contiguous` 自体は contiguous なら clone のみだが、
+    /// tape ノードの増殖と VJP パススルー 1 段の追加コストを避ける。
+    /// `crate::einsum::apply_permute`／`apply_reshape` の恒等スキップと
+    /// 同じ方針）。
+    pub(crate) fn contiguous(&self) -> Result<Var<'t>, AutodiffError> {
+        let value = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        if value.is_contiguous() {
+            return Ok(*self);
+        }
+        let out = value.contiguous();
+        let id = self.tape.push_eager(Op::Contiguous { input: self.id }, out);
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// einsum 記法（PyTorch `torch.einsum`／TF `tf.einsum` 相当）による
+    /// 汎用縮約（イシュー #1620）。既存の `matmul`／`sum`／`permute`／
+    /// `reshape`／`mul`（`crate::einsum` モジュール）への分解として
+    /// 実装しており、新規カーネルは追加していない。VJP は分解先の
+    /// 各演算の VJP 合成として自動的に成立する（`einsum` 専用の VJP を
+    /// `grad.rs` に追加していない）。
+    ///
+    /// **受理範囲（v1・安全側）**: 添字は ASCII 英字のみ（空白は無視）。
+    /// オペランドは 1〜2 個限定。ellipsis（`...`）・同一オペランド内の
+    /// 添字重複（対角／trace）・出力添字の重複・batch 添字を伴う縮約
+    /// （rank≥3 `matmul`〈#1600〉が未実装のため。例 `"bij,bjk->bik"`）は
+    /// `AutodiffError::InvalidArgument` で拒否する。`->` 省略時は
+    /// NumPy `einsum` 既定（入力に 1 回だけ現れる添字を ASCII 昇順）を
+    /// 出力とみなす。詳細な受理範囲・分解アルゴリズムは
+    /// `crate::einsum` モジュール doc を参照。
+    ///
+    /// **数値契約**: 縮約（`contract` が非空）を伴う場合は
+    /// `Var::matmul` をそのまま呼ぶため、CUDA TF32 opt-in の挙動を
+    /// 含めて `matmul` と同一（`.claude/rules/coding-rust.md` FMA
+    /// 契約統一）。
+    pub fn einsum(spec: &str, operands: &[&Var<'t>]) -> Result<Var<'t>, AutodiffError> {
+        crate::einsum::einsum(spec, operands)
     }
 
     /// RNN（tanh 版）セル 1 step（イシュー #1647・設計 `docs/autodiff-
