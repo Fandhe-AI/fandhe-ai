@@ -736,12 +736,94 @@ mod tests {
         // panic しないことのみを確認する。
     }
 
+    /// AAPCS64／Arm ACLE が規定する TPIDR2 ブロックの最小レイアウト
+    /// （<https://arm-software.github.io/acle/main/acle.html#tpidr2_el0>
+    /// 「TPIDR2 block」節）を模した構造体。オフセット 0 に保存バッファ
+    /// 先頭アドレス（`za_save_buffer`）・オフセット 8 に
+    /// `num_za_save_slices`（16 bit）を置き、残りは予約領域とする。
+    /// ACLE はブロック自体を 16 バイト境界へ整列することを要求するため
+    /// `#[repr(C, align(16))]` を付ける。
+    ///
+    /// codex-review 追加指摘 1（本ファイル冒頭の呼び出し元コメント参照）
+    /// への対応: 従来はダミー定数（有効なメモリを指さない値）を
+    /// `TPIDR2_EL0` へ直接設定していたが、これは AAPCS64 の
+    /// 「`TPIDR2_EL0 != 0` は有効な TPIDR2 ブロックを指す」という不変
+    /// 条件に違反する。フォールバック方式（[`has_pending_lazy_za_save`]
+    /// doc「採用方式」節）自体は `compute` を呼ばないため本実装の下で
+    /// 実際に lazy save トラップが発生することはないが、`unsafe` の
+    /// 不変条件はハードウェア側の契約として独立に満たす必要がある
+    /// （検証対象コード自身が守ることだけを安全性の根拠にしない）。
+    #[repr(C, align(16))]
+    struct Tpidr2Block {
+        za_save_buffer: u64,
+        num_za_save_slices: u16,
+        _reserved: [u8; 6],
+    }
+
+    /// [`Tpidr2Block::za_save_buffer`] が指す保存バッファ本体を 16 バイト
+    /// 整列で確保する RAII ラッパー。`Vec<u8>` は align(1) しか保証しない
+    /// ため、`std::alloc` を直接使い明示的な整列を要求する。
+    struct AlignedSaveBuffer {
+        ptr: std::ptr::NonNull<u8>,
+        layout: std::alloc::Layout,
+    }
+
+    impl AlignedSaveBuffer {
+        /// `len` バイトをゼロ初期化して 16 バイト整列で確保する。
+        /// `len` は呼び出し元（[`enter_dormant_za_with_pending_lazy_save`]）
+        /// が実行時 SVL から算出した正の値を渡す契約。
+        fn new_zeroed(len: usize) -> Self {
+            let layout = std::alloc::Layout::from_size_align(len, 16)
+                .expect("len は MR × 実行時 SVL バイトで常に正・有効な整列のはず");
+            // SAFETY: `layout` はサイズ 0 でない（呼び出し元契約）。
+            // `alloc_zeroed` はゼロ初期化済みメモリを返すため、以降の
+            // `msr`/`mrs` 経由でこのバッファが万一参照されても未初期化
+            // 読み取りにはならない。
+            let raw = unsafe { std::alloc::alloc_zeroed(layout) };
+            let ptr = std::ptr::NonNull::new(raw)
+                .unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
+            Self { ptr, layout }
+        }
+
+        fn as_mut_ptr(&mut self) -> *mut u8 {
+            self.ptr.as_ptr()
+        }
+    }
+
+    impl Drop for AlignedSaveBuffer {
+        fn drop(&mut self) {
+            // SAFETY: `self.ptr`／`self.layout` は `new_zeroed` が
+            // `std::alloc::alloc_zeroed` で確保したものと一致し、
+            // `AlignedSaveBuffer` は `Clone`/`Copy` を実装しないため
+            // 二重解放は起こらない。
+            unsafe { std::alloc::dealloc(self.ptr.as_ptr(), self.layout) };
+        }
+    }
+
+    /// [`enter_dormant_za_with_pending_lazy_save`] が確保した TPIDR2
+    /// ブロック・保存バッファの所有権を呼び出し元へ返す RAII ガード。
+    /// `TPIDR2_EL0` に設定したアドレスが指すメモリを、
+    /// [`read_za0_and_clear_pending_lazy_save`] が `TPIDR2_EL0` を
+    /// クリアするまで生存させ続けるために必要（クリア前にこの構造体を
+    /// drop するとダングリングポインタを指したままになる。追加指摘 1
+    /// 対応）。フィールドは値を読み書きしないため `_` 接頭辞を付けるが、
+    /// 生存期間の保持自体が本構造体の責務。
+    struct PendingLazySaveGuard {
+        _block: Box<Tpidr2Block>,
+        _save_buffer: AlignedSaveBuffer,
+    }
+
     /// ZA0 へ既知パターン（`za_pattern.len() == MR * NR`）を書き込み、
     /// `smstop sm`（PSTATE.SM のみ解除・PSTATE.ZA は 1 のまま =
-    /// **dormant**）してから `TPIDR2_EL0`（符号化名 `S3_3_C13_C0_5`）へ
-    /// ダミーの非ゼロ値を設定する（AAPCS64 の「保留中 lazy ZA save」を
-    /// 模す。実際の TPIDR2 ブロック・save バッファは用意しない — 本実装の
-    /// フォールバック方式は ZA へ一切触れないため参照されない）。
+    /// **dormant**）してから、実在する TPIDR2 ブロック（[`Tpidr2Block`]）
+    /// を指す非ゼロ値を `TPIDR2_EL0`（符号化名 `S3_3_C13_C0_5`）へ設定
+    /// する（AAPCS64 の「保留中 lazy ZA save」を模す）。ブロックの
+    /// `num_za_save_slices` は本関数が ZA0 へ書き込んだ行数（`MR`）に
+    /// 合わせ、保存バッファは `MR * svl_bytes`（実行時 `rdsvl` 相当。
+    /// `crate::sme_detect::sme_report` 経由で取得）バイトをゼロ初期化
+    /// して確保する。返す [`PendingLazySaveGuard`] は
+    /// [`read_za0_and_clear_pending_lazy_save`] へ渡すまで呼び出し元が
+    /// 保持し、`TPIDR2_EL0` クリアより前に drop してはならない。
     ///
     /// [`sme_kernel_falls_back_without_corrupting_dormant_za_when_lazy_save_pending`]・
     /// [`sme_kernel_unchecked_with_ldc_falls_back_without_corrupting_dormant_za_when_lazy_save_pending`]・
@@ -764,8 +846,29 @@ mod tests {
     /// 使うため `nomem`/`pure` は付けない。スタック未使用のため
     /// `options(nostack)`。本関数はテスト専用の ZA 状態構築であり
     /// `compute` の呼び出し規約とは独立。
-    unsafe fn enter_dormant_za_with_pending_lazy_save(za_pattern: &[f32]) {
-        const DUMMY_TPIDR2: u64 = 0x1234_5678_9abc_def0;
+    unsafe fn enter_dormant_za_with_pending_lazy_save(za_pattern: &[f32]) -> PendingLazySaveGuard {
+        // 実行時 SVL。`SmeKernel::try_new()` を確認済みのスレッド前提
+        // （呼び出し元契約）のため、`crate::sme_detect::sme_report()` は
+        // 常に `kernel_enabled == true` かつ `svl_bytes == Some(_)` を
+        // 返すはず（本番マイクロカーネルと同じ SVL を都度取得する方針。
+        // モジュール冒頭「検出との関係」節）。
+        let svl_bytes = crate::sme_detect::sme_report()
+            .svl_bytes
+            .expect("呼び出し元契約により SME 対応・SVL 確認済みのはず");
+
+        // 保存バッファは ZA0 へ実際に書き込んだ行数（MR）× SVL バイト
+        // 分だけ確保する（本関数のフォールバック検証では実トラップは
+        // 発生しないため full ZA 分は不要。呼び出し元 doc 参照）。
+        let mut save_buffer = AlignedSaveBuffer::new_zeroed(MR * svl_bytes);
+        let save_buffer_addr = save_buffer.as_mut_ptr() as u64;
+
+        let block = Box::new(Tpidr2Block {
+            za_save_buffer: save_buffer_addr,
+            num_za_save_slices: MR as u16,
+            _reserved: [0; 6],
+        });
+        let block_addr = &*block as *const Tpidr2Block as u64;
+
         // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）を引き継ぐ。
         unsafe {
             let p = za_pattern.as_ptr();
@@ -783,13 +886,12 @@ mod tests {
                 "b.lt 20b",
                 // SM のみ解除（ZA は有効のまま）: dormant 状態。
                 "smstop sm",
-                // AAPCS64 の「保留中 lazy ZA save」を模すダミーの
-                // TPIDR2_EL0（実際の save バッファは用意しない。
-                // フォールバック方式は ZA へ一切触れないため
-                // 参照されない）。
-                "msr S3_3_C13_C0_5, {dummy}",
+                // AAPCS64 の「保留中 lazy ZA save」を模す。`{block}` は
+                // 上で確保した実在の TPIDR2 ブロックのアドレス
+                // （ダミー値ではない。追加指摘 1 対応）。
+                "msr S3_3_C13_C0_5, {block}",
                 p = inout(reg) p => _,
-                dummy = in(reg) DUMMY_TPIDR2,
+                block = in(reg) block_addr,
                 out("w12") _,
                 out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
                 out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
@@ -805,6 +907,11 @@ mod tests {
                 options(nostack),
             );
         }
+
+        PendingLazySaveGuard {
+            _block: block,
+            _save_buffer: save_buffer,
+        }
     }
 
     /// dormant のあいだ（PSTATE.SM=0, PSTATE.ZA=1）に検証対象の呼び出し
@@ -812,16 +919,30 @@ mod tests {
     /// 済ませたあと、`smstart sm`（PSTATE.ZA は 1 のままなので 0→1 遷移
     /// によるゼロ初期化は発生しない — 実機で事前確認済み）で再びストリー
     /// ミングモードへ戻って ZA0 を `out.len() == MR * NR` へ読み出し、
-    /// 最後に `TPIDR2_EL0` をクリアする（
-    /// [`enter_dormant_za_with_pending_lazy_save`] と対になる検証手順の
-    /// 手順 4〜5 を切り出した共通ヘルパ）。
+    /// **同じ asm ブロック内で** `TPIDR2_EL0` をクリアしてから
+    /// `smstop` する（[`enter_dormant_za_with_pending_lazy_save`] と
+    /// 対になる検証手順の手順 4〜5 を切り出した共通ヘルパ）。
+    ///
+    /// codex-review 追加指摘 2 対応: AAPCS64 は「ZA を無効化する前に
+    /// 保留中の save 状態を解消する（`TPIDR2_EL0` をゼロクリアする）」
+    /// 順序を要求する。旧実装は `smstop`（PSTATE.ZA を 0 へ）した後に
+    /// 別の asm ブロックで `TPIDR2_EL0` をクリアしており、その間
+    /// 「ZA は無効なのに保留中 save を示す TPIDR2_EL0 が非ゼロのまま」
+    /// という AAPCS64 上不正な中間状態を作っていた。本実装は ZA0 読み
+    /// 出し完了後・`smstop` 実行前に `TPIDR2_EL0` をクリアすることで
+    /// この順序を満たす。
+    ///
+    /// `guard`（[`enter_dormant_za_with_pending_lazy_save`] が返した
+    /// TPIDR2 ブロック・保存バッファの所有権）は `TPIDR2_EL0` を
+    /// クリアした後に drop する（クリア前に参照先メモリを解放しない
+    /// ため。追加指摘 1 対応）。
     ///
     /// # Safety
     ///
     /// [`enter_dormant_za_with_pending_lazy_save`] と同一（実行 CPU が
     /// SME 対応であること。`out.len() == MR * NR` を満たさない場合の
     /// 挙動は未定義）。
-    unsafe fn read_za0_and_clear_pending_lazy_save(out: &mut [f32]) {
+    unsafe fn read_za0_and_clear_pending_lazy_save(out: &mut [f32], guard: PendingLazySaveGuard) {
         // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）を引き継ぐ。
         // `smstart sm` で SM のみ再度有効化するため、既に有効な
         // PSTATE.ZA=1 の内容は変化しない（PSTATE.ZA が 0→1 へ遷移する
@@ -841,6 +962,9 @@ mod tests {
                 "add w12, w12, #1",
                 "cmp w12, #16",
                 "b.lt 21b",
+                // AAPCS64 の要求順序: ZA 無効化（smstop）より前に保留中
+                // save の解消（TPIDR2_EL0 クリア）を完了する。
+                "msr S3_3_C13_C0_5, xzr",
                 "smstop",
                 out_p = inout(reg) out_p => _,
                 out("w12") _,
@@ -859,18 +983,12 @@ mod tests {
             );
         }
 
-        // 後始末（TPIDR2_EL0 をクリア）。
-        //
-        // SAFETY: 直前までの手順で実行 CPU の SME 対応を確認済み。
-        // `mrs`/`msr` はメモリアクセス・スタック使用を伴わずフラグも
-        // 変更しない（`has_pending_lazy_za_save` と同型の宣言）。
-        unsafe {
-            asm!(
-                ".arch_extension sme",
-                "msr S3_3_C13_C0_5, xzr",
-                options(nomem, nostack, preserves_flags),
-            );
-        }
+        // TPIDR2_EL0 は上の asm ブロック内で既にクリア済み。ここで
+        // `guard` を明示的に drop し、保存バッファ・ブロックの解放が
+        // 「クリア後」であることをコード上明確にする（追加指摘 1 対応。
+        // 実際には関数末尾で自然に drop されるが、契約の可視化のため
+        // 明示する）。
+        drop(guard);
     }
 
     /// 保留中 lazy ZA save（`TPIDR2_EL0 != 0`）がある状態で `kernel.run`
@@ -921,7 +1039,7 @@ mod tests {
             // doc の「構築したスレッド」に関する注意は本 unsafe 呼び出し
             // 自体〈`try_new` を呼んだのと同じスレッド上でのテスト専用
             // ZA 操作〉には影響しない）。
-            unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
+            let guard = unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
 
             // 手順 2〜3: dormant のあいだ（PSTATE.SM=0）に kernel.run を
             // 呼ぶ。`current_thread_capable()` が TPIDR2_EL0 != 0 を検出し
@@ -943,7 +1061,7 @@ mod tests {
             // 手順 4。
             //
             // SAFETY: 手順 1 と同型の契約。
-            unsafe { read_za0_and_clear_pending_lazy_save(&mut za_readback) };
+            unsafe { read_za0_and_clear_pending_lazy_save(&mut za_readback, guard) };
 
             assert_eq!(
                 za_readback, za_pattern,
@@ -990,7 +1108,7 @@ mod tests {
             // spawn した外側で `SmeKernel::try_new()` により確認済み
             // （`enter_dormant_za_with_pending_lazy_save` の `# Safety`
             // 契約を満たす）。
-            unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
+            let guard = unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
 
             // 端タイル相当（`ldc > NR`）で `kernel_unchecked_with_ldc` を
             // 直接呼ぶ。`TPIDR2_EL0` が非ゼロのため、本関数自身が
@@ -1020,7 +1138,7 @@ mod tests {
             );
 
             // SAFETY: 手順 1 と同型の契約。
-            unsafe { read_za0_and_clear_pending_lazy_save(&mut za_readback) };
+            unsafe { read_za0_and_clear_pending_lazy_save(&mut za_readback, guard) };
 
             assert_eq!(
                 za_readback, za_pattern,
@@ -1055,7 +1173,7 @@ mod tests {
 
             // SAFETY: `kernel_unchecked_with_ldc_falls_back_...` と同型
             // の契約。
-            unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
+            let guard = unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
 
             let kc_len = 7usize;
             let ap = xorshift32_vec(0x1122_3344, MR * kc_len);
@@ -1078,7 +1196,7 @@ mod tests {
             );
 
             // SAFETY: 手順 1 と同型の契約。
-            unsafe { read_za0_and_clear_pending_lazy_save(&mut za_readback) };
+            unsafe { read_za0_and_clear_pending_lazy_save(&mut za_readback, guard) };
 
             assert_eq!(
                 za_readback, za_pattern,
