@@ -445,7 +445,7 @@ impl BackendOps for CpuBackendOps {
         Some(self)
     }
 
-    /// `TypedOps<f64>` の CPU 実装（[`crate::typed_f64`]。イシュー #1697・
+    /// `TypedOps<f64>` の CPU 実装（`crate::typed_f64`。イシュー #1697・
     /// 親 #1649）への capability accessor。`CpuBackendOps` 自身が
     /// `impl TypedOps<f64> for CpuBackendOps`（`typed_f64.rs`）を実装する
     /// ため、`memory_ops` と同じパターンで `self` をそのまま返す。

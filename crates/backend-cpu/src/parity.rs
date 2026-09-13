@@ -163,7 +163,7 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
 /// `ABSOLUTE_RESCUE_THRESHOLD` は f32 版と完全に共有し、値は変更しない
 /// （`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの
 /// 許容誤差を単独で緩和しない」・ユーザー承認範囲外）。判定ロジック本体
-/// （[`compare_pairs`]）は f32 版と共通化しており、`x as f64` への昇格を
+/// （`compare_pairs`）は f32 版と共通化しており、`x as f64` への昇格を
 /// 経ない分、f64 入力はより高い精度のまま比較される。
 pub fn compare_f64(a: &[f64], b: &[f64]) -> Result<CompareReport, ParityError> {
     if a.len() != b.len() {

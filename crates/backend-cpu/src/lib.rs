@@ -121,7 +121,7 @@
 //! gemm cpu の before/after（両実機・全 12 セル非後退）で ADOPT を確定した
 //! （`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20）。
 //!
-//! イシュー #1697（親 #1649）で [`mod@typed_f64`] モジュール（`TypedOps<f64>`
+//! イシュー #1697（親 #1649）で `typed_f64` モジュール（`TypedOps<f64>`
 //! の CPU 実装。`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の
 //! 最小集合 8 演算）を追加し、`ops::CpuBackendOps::typed_ops_f64()`
 //! accessor（`fandhe_ai_tensor_core::BackendOps` の非破壊拡張。既定 `None`）を
