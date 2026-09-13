@@ -880,10 +880,14 @@ impl CudaBackendOps {
                  (#1701/#1702 が担当するスコープ外の可能性あり)"
             )));
         };
+        // `Clamp` 等ペイロードあり kind の起動引数（イシュー #1702）。
+        // ペイロードなし kind（`Sqrt` 等）は `unary_payload` が空スライス
+        // を返すため既存呼び出しと同じ起動引数列になる。
+        let payload = crate::kernels_scalar_op::unary_payload(op);
         let out = self.with_driver_call(
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
-            || ew.run_scalar_unary_f32(&func, a_slice),
+            || ew.run_scalar_unary_f32(&func, a_slice, payload.as_slice()),
         )?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
@@ -2817,10 +2821,10 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// `BackendOps::scalar_unary` の CUDA 実装（イシュー #1700）。
-    /// `Sqrt` のみ実装済み（`kernels_scalar_op` モジュール doc「スコープ」
-    /// 参照）で、他 kind は `Unsupported` を返しホスト参照実装へ
-    /// フォールバックする（既定トレイト実装と同じ挙動）。
+    /// `BackendOps::scalar_unary` の CUDA 実装（イシュー #1700・#1702）。
+    /// `Sqrt`／`Clamp` のみ実装済み（`kernels_scalar_op` モジュール doc
+    /// 「スコープ」参照）で、他 kind は `Unsupported` を返しホスト参照
+    /// 実装へフォールバックする（既定トレイト実装と同じ挙動）。
     fn scalar_unary(
         &self,
         op: ScalarUnaryOp,
@@ -2829,8 +2833,9 @@ impl BackendOps for CudaBackendOps {
         self.scalar_unary_dispatch(op, a)
     }
 
-    /// `BackendOps::scalar_binary` の CUDA 実装（イシュー #1700）。
-    /// `Sub`／`Div`／`Pow` のみ実装済み。
+    /// `BackendOps::scalar_binary` の CUDA 実装（イシュー #1700・#1702）。
+    /// `Sub`／`Div`／`Pow`／比較 6 種（`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`）
+    /// のみ実装済み。
     fn scalar_binary(
         &self,
         op: ScalarBinaryOp,

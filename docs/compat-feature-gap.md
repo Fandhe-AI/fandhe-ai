@@ -735,3 +735,7 @@ gather／scatter／scatter_add（#1637 で where／masked_fill を実装済み�
 - facade 新規公開面なし（既存 `Var::gather`／`scatter`／`scatter_add`／
   `index_select` の再エクスポート経由でそのまま CUDA バックエンドへ
   到達する）。Metal 専用カーネルは #1778 が残対象。
+#### #1697 の追補（`backend-cpu` の `TypedOps<f64>` 実装）
+
+- 319 行目の `float64` 行の「部分」記載は本イシューにより CPU バックエンド限定で解消: `crates/backend-cpu` が `TypedOps<f64>`（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の 8 演算）を実装し、`CpuBackendOps::typed_ops_f64()` accessor 経由で到達可能になった（`docs/backend-dtype-dispatch-design.md` §10）
+- `Var`／`Tape`／facade は本イシューの対象外のまま不変（表本体の「XL」見積り自体は #1650／#1651〈CUDA／Metal〉・`Var`／`Tape` 昇格の残作業を含むため据え置く）。CUDA（#1650）・Metal（#1651）は未実装のまま
