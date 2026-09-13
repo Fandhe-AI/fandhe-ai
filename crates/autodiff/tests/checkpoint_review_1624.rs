@@ -1,5 +1,5 @@
 //! PR #1681（イシュー #1624 activation checkpointing）の codex-review・
-//! Cursor Bugbot 指摘 3 件（tape.rs P0/P1/P1）に対する回帰テスト。
+//! Cursor Bugbot 指摘に対する回帰テスト。
 //!
 //! - `layer1_recompute_error_propagates_instead_of_zero_fallback`:
 //!   checkpoint 解放済みノードの再計算が backend エラーを起こした場合、
@@ -14,6 +14,26 @@
 //!   `NodeId` を指す fan-in）を checkpoint 区間に収めた場合、
 //!   `gemm` 呼び出し回数が指数的に増加せず線形〜多項式に収まることを
 //!   確認する（P1 是正の回帰。共有祖先の重複再計算対策）。
+//! - `layer2_poisoned_recompute_is_detected_by_layer1_backward`:
+//!   層 2（`to_tensor()`）が checkpoint 解放済みノードの再計算失敗を
+//!   ゼロ値へ吸収して poison フラグを立てた場合、その後の層 1
+//!   （`Tape::backward`）がキャッシュ済みゼロ値を信頼せず `Err` を
+//!   返すことを確認する（P0 是正の回帰。祖先自身の poison 検出）。
+//! - `layer2_poison_propagates_to_lazy_descendant`: `out = m.relu()`
+//!   のような lazy elementwise 子孫を、祖先 `m`（checkpoint 解放済み）
+//!   の再計算に一度も成功していない状態で層 2（`to_tensor()`）から
+//!   直接読み出すと、旧実装は `materialize_non_fallible` の最終手段
+//!   `eval_fallback`（poison 検査なし）を経由してゼロ値を「正常な値」
+//!   として `out` 自身の `OnceCell` へキャッシュしてしまい、`out` の
+//!   `recompute_failed` が立たないまま以後の層 1 が汚染を見逃していた。
+//!   祖先の再計算失敗が子孫（lazy 出力）の poison にも伝播し、以後の
+//!   `Tape::backward` が確実に `Err` を返すことを確認する（P0 是正の
+//!   回帰。codex-review・Cursor Bugbot 指摘）。
+//! - `deep_checkpoint_chain_recompute_does_not_overflow_stack`: 数万段
+//!   の `sigmoid` 連鎖を checkpoint 区間に収め、解放後の単一の
+//!   再計算呼び出し（`recompute_value`）がこの深さを反復的な作業
+//!   スタックで評価し切り、Rust の呼び出しスタックオーバーフローで
+//!   プロセスが abort しないことを確認する（P1 是正の回帰）。
 
 mod common;
 
@@ -31,15 +51,28 @@ fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
 
 /// [`common::NaiveOps`] 相当の `gemm` に薄い計装をかける `BackendOps`
 /// ラッパー。`gemm` 呼び出し回数をカウントし、`fail_on_call`（1 始まり）
-/// に一致した呼び出しだけ意図的に `Err` を返す（`None` なら常に成功）。
-/// `common::NaiveOps` は非公開（`autodiff` の統合テストからは
-/// `mod common;` 経由でのみ見える）ため、同じ意味論を薄く再実装する
-/// （`common::mod.rs` 冒頭コメントと同じ理由: 具体バックエンドクレート
-/// へ依存しない）。
+/// に一致した呼び出しだけ、または `fail_from_call`（1 始まり）**以降の
+/// 全呼び出し**を意図的に `Err` を返す（いずれも `None` なら常に成功）。
+/// `fail_from_call` は、`materialize_non_fallible`（層 2）の
+/// `build_lazy_plan` → `fallback_per_op` → `eval_fallback` という
+/// 3 段の再計算試行が**すべて**失敗することを要求するテスト
+/// （`layer2_poison_propagates_to_lazy_descendant`）のために追加した
+/// （`fail_on_call` の単発失敗では 2 段目・3 段目が成功してしまい
+/// 目的のシナリオを再現できない）。`common::NaiveOps` は非公開
+/// （`autodiff` の統合テストからは `mod common;` 経由でのみ見える）
+/// ため、同じ意味論を薄く再実装する（`common::mod.rs` 冒頭コメントと
+/// 同じ理由: 具体バックエンドクレートへ依存しない）。
 struct InstrumentedOps {
     inner: Box<dyn BackendOps + Send>,
     gemm_calls: Arc<AtomicUsize>,
     fail_on_call: Option<usize>,
+    fail_from_call: Option<usize>,
+    // `fail_from_call` の失敗区間の終端（inclusive）。`None` は
+    // 無期限（`fail_from_call` 以降ずっと失敗）を意味する。層 2 の
+    // 3 段フォールバック試行だけを失敗させ、その後（`Tape::backward`
+    // 自身の反復による独立した再計算試行）は成功させたいテスト
+    // （`layer2_poison_propagates_to_lazy_descendant`）のために追加。
+    fail_until_call: Option<usize>,
 }
 
 impl BackendOps for InstrumentedOps {
@@ -49,7 +82,11 @@ impl BackendOps for InstrumentedOps {
 
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         let n = self.gemm_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if self.fail_on_call == Some(n) {
+        let in_fail_range = self
+            .fail_from_call
+            .is_some_and(|from| n >= from && self.fail_until_call.is_none_or(|until| n <= until));
+        let should_fail = self.fail_on_call == Some(n) || in_fail_range;
+        if should_fail {
             return Err(BackendError::KernelLaunchFailed(format!(
                 "InstrumentedOps: 意図的な再計算失敗（呼び出し {n} 回目）"
             )));
@@ -123,6 +160,8 @@ fn layer1_recompute_error_propagates_instead_of_zero_fallback() {
         // 1 回目（checkpoint 内の forward）は成功させ、2 回目
         // （backward 側の再計算）だけを失敗させる。
         fail_on_call: Some(2),
+        fail_from_call: None,
+        fail_until_call: None,
     };
     let tape = Tape::new_with_ops(Box::new(ops));
 
@@ -225,6 +264,8 @@ fn checkpoint_recompute_of_shared_ancestor_is_memoized() {
         inner: common::naive_ops(),
         gemm_calls: Arc::clone(&gemm_calls),
         fail_on_call: None,
+        fail_from_call: None,
+        fail_until_call: None,
     };
     let tape = Tape::new_with_ops(Box::new(ops));
 
@@ -298,6 +339,8 @@ fn layer2_poisoned_recompute_is_detected_by_layer1_backward() {
         // 1 回目（forward）は成功させ、2 回目（`m.to_tensor()` が
         // 誘発する層 2 経由の再計算）だけを失敗させる。
         fail_on_call: Some(2),
+        fail_from_call: None,
+        fail_until_call: None,
     };
     let tape = Tape::new_with_ops(Box::new(ops));
 
@@ -338,4 +381,176 @@ fn layer2_poisoned_recompute_is_detected_by_layer1_backward() {
          （backward 自体は poison 検出により追加の gemm 呼び出しを\
          要求しない）"
     );
+}
+
+/// **P0 是正の回帰（lazy descendant poison 伝播。codex-review・Cursor
+/// Bugbot 指摘。イシュー #1624 PR #1681 レビュー）**。
+///
+/// 前テスト（`layer2_poisoned_recompute_is_detected_by_layer1_backward`）
+/// は `m.to_tensor()` を**先に**呼んで `m` 自身を直接 poison するため、
+/// 以後の `build_lazy_plan` は「既に実体化済み（かつ poison 済み）の
+/// 葉」として `m` を検出でき、`lazy_leaf_value_fallible` の
+/// `poisoned_err` チェックだけで層 1 が正しく `Err` を返す——この経路は
+/// 旧実装でも正しく動いており、`materialize_non_fallible` の最終手段
+/// `eval_fallback`（poison 検査を持たない旧 `lazy_leaf_value` 経由）は
+/// 一度も通らない。
+///
+/// 本テストは `m` を**一度も単独で読み出さず**、`out = m.relu()` を
+/// 層 2（`to_tensor()`）から直接実体化させる。`m` は未実体化のまま
+/// なので、`materialize_non_fallible(out)` は `build_lazy_plan` →
+/// `fallback_per_op` → `eval_fallback` の 3 段の再計算試行をすべて
+/// 経由する（`fail_from_call`〜`fail_until_call` の区間 `[2, 4]` で
+/// この 3 段だけを確実に失敗させる。実測値: `to_tensor()` 完了時点で
+/// `gemm_calls == 4`〈1 回目の forward + 3 段の再計算試行〉）。
+///
+/// **区間指定にした理由**（単なる `fail_from_call`〈無期限〉ではなく
+/// `[2, 4]` に限定する理由）: `Tape::backward` 自身の逆走査ループは
+/// `id = out` を処理した**後**、`id = m` を処理する際にも
+/// （`grad::vjp` が実際に値を使うかどうかに関わらず）
+/// `materialize_fallible(m)` を無条件に呼び、`m` の再計算を独立に
+/// もう一度試みる（`backward.rs` 該当行 doc 参照）。この 5 回目の
+/// 呼び出しまで失敗させ続けると、`out` 自身の poison 検出が効いて
+/// いなくても「`m` の再計算自体が失敗して `Err` になる」という
+/// **別の理由**で本テストが `is_err()` を満たしてしまい、目的の
+/// 伝播漏れを検出できなくなる（是正前のコードでも偶然 pass する）。
+/// 5 回目以降を成功させることで、是正前のコードでは「`out` の
+/// poison が検出されないまま `materialize_fallible(out)` がキャッシュ
+/// 済みゼロ値を正常値として通し、`m` 自身は 5 回目の再計算で正しい
+/// 値を得て `Tape::backward` 全体が **`Ok`** で完走してしまう
+/// （ゼロ埋めされた `out_value` に由来する誤った——ゼロに潰れた——
+/// 勾配を silently 返す）」という本来の不具合を明確に区別できる。
+#[test]
+fn layer2_poison_propagates_to_lazy_descendant() {
+    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let ops = InstrumentedOps {
+        inner: common::naive_ops(),
+        gemm_calls: Arc::clone(&gemm_calls),
+        fail_on_call: None,
+        // 1 回目（forward）は成功させ、2〜4 回目（`out.to_tensor()` が
+        // 誘発する `m` の再計算試行。`build_lazy_plan`／
+        // `fallback_per_op`／`eval_fallback` の 3 回）だけを失敗させる。
+        // 5 回目以降（`Tape::backward` 自身の独立した再計算試行）は
+        // 成功させる（doc 参照）。
+        fail_from_call: Some(2),
+        fail_until_call: Some(4),
+    };
+    let tape = Tape::new_with_ops(Box::new(ops));
+
+    let a = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let b = tape.var(&t(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]));
+
+    // `m` は checkpoint 区間の内部中間ノード（`checkpoint_from` の
+    // `output` ではない）であるため確実に解放される。`out = m.relu()`
+    // は lazy elementwise のため `m.relu()` 呼び出し自体は backend を
+    // 叩かず、`out` は未実体化のまま区間の出力になる。
+    let m = a.matmul(&b).expect("forward の 1 回目の gemm は成功する");
+    let out = m.relu();
+    let checkpointed_out = out
+        .checkpoint_from(&[&a, &b])
+        .expect("checkpoint_from 自体は forward を再実行しないため成功する");
+
+    // `m` を一度も単独で読み出さず、`out` 自身を層 2 から直接実体化
+    // する。契約どおり panic せずゼロテンソル（shape のみ保たれる）が
+    // 返る。
+    let zero_fallback = checkpointed_out.to_tensor();
+    assert_eq!(
+        zero_fallback.shape(),
+        &[2usize, 2],
+        "層 2 は失敗時も shape を保ったゼロテンソルを返す契約"
+    );
+    assert_eq!(
+        gemm_calls.load(Ordering::SeqCst),
+        4,
+        "1 回目（forward）成功・2〜4 回目（層 2 の 3 段フォールバック \
+         試行）失敗のシナリオである契約をテスト自身が満たしているかの \
+         自己検証"
+    );
+
+    // `out` 自身は checkpoint の解放対象ではない（`Op::Relu` は
+    // elementwise で非適格）が、祖先 `m` の再計算失敗が `out` の
+    // poison フラグへ伝播しているはずであり、以後の層 1
+    // （`Tape::backward`）が `out` を読む時点（`m` 自身の 5 回目の
+    // 再計算を試みるより前）で検出して `Err` を返すべき。
+    let result = tape.backward(&checkpointed_out);
+    assert!(
+        result.is_err(),
+        "祖先（checkpoint 解放済みノード）の再計算失敗が lazy な子孫の \
+         poison へ伝播しておらず、層 1 がゼロ勾配のまま backward を \
+         成功させてしまっている: {result:?}"
+    );
+    // `out` の poison 検出（`materialize_fallible` 冒頭のキャッシュ済み
+    // 値チェック）で即座に `Err` になるはずであり、`m` 自身の 5 回目の
+    // 再計算試行（成功するよう仕込んである）には到達しない契約——
+    // 到達してしまっている場合、`out` の poison 検出ではなく別の理由
+    // （`m` 自身の再計算失敗等）で偶然 `Err` になっているだけであり、
+    // 本テストが検証したい伝播漏れを実際には検出できていないことを
+    // 意味する。
+    assert_eq!(
+        gemm_calls.load(Ordering::SeqCst),
+        4,
+        "`Tape::backward` が `out` の poison 検出より先に `m` 自身の \
+         再計算（5 回目の gemm 呼び出し）へ到達してしまっている（伝播が \
+         効いていれば `out` の時点で即座に Err になり `m` の再計算には \
+         到達しないはず）"
+    );
+}
+
+/// **P1 是正の回帰（`recompute_value` の反復化。codex-review 指摘。
+/// イシュー #1624 PR #1681 レビュー）**。
+///
+/// `sigmoid` を数万段連鎖させた区間を checkpoint に収めると、区間内の
+/// 全中間ノード（`output` 自身を除く）が解放される。旧実装の
+/// `recompute_value` は Rust の呼び出しスタックを直接使う再帰関数
+/// だったため、この深さの祖先鎖を単一の再計算呼び出しで辿ると
+/// スタックオーバーフローでプロセスが abort していた。本テストは
+/// カスタムのスタックサイズ指定（`std::thread::Builder::stack_size`）
+/// を使わず、テストランナーの既定スタックのまま深い連鎖を単一の
+/// `to_tensor()` 呼び出し（層 2 → `recompute_infallible` →
+/// `recompute_value`）で解決できることを確認する。
+#[test]
+fn deep_checkpoint_chain_recompute_does_not_overflow_stack() {
+    // 旧再帰実装であれば既定のスレッドスタックサイズを優に超える深さ
+    // （1 段あたり複数のスタックフレーム・ローカル変数を消費する）。
+    const CHAIN_LEN: usize = 50_000;
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x0 = tape.var(&t(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]));
+
+    // ループ内で「区間出力の 1 つ手前」（深さ `CHAIN_LEN - 1` の祖先鎖
+    // を持つ、確実に解放される中間ノード）を保持しておく。
+    let mut deepest_freed: Option<fandhe_ai_autodiff::Var<'_>> = None;
+    let output = tape
+        .checkpoint(|| {
+            let mut cur = x0;
+            for i in 0..CHAIN_LEN {
+                cur = cur.sigmoid();
+                if i == CHAIN_LEN - 2 {
+                    deepest_freed = Some(cur);
+                }
+            }
+            Ok(cur)
+        })
+        .expect("checkpoint 内の forward（CHAIN_LEN 回の sigmoid）は成功する");
+    // `output`（区間の戻り値。`checkpoint` の契約により解放されない）
+    // 自体は本テストの検証対象ではないが、変数として保持しないと
+    // 「未使用」警告になるため明示的に握りつぶす。
+    let _ = output;
+
+    let deepest = deepest_freed.expect("CHAIN_LEN >= 2 のためループ内で必ず設定される");
+
+    // 単一の `to_tensor()` 呼び出しが、深さ `CHAIN_LEN - 1` の祖先鎖を
+    // 反復的な作業スタック（ヒープ確保）で評価し切り、abort せずに
+    // 戻ってくること自体が本テストの主張。
+    let value = deepest.to_tensor();
+    assert_eq!(value.shape(), &[2usize, 2]);
+    let data = value
+        .as_slice()
+        .expect("test fixture: contiguous な出力のはず");
+    for v in data {
+        assert!(
+            v.is_finite() && *v > 0.0 && *v < 1.0,
+            "sigmoid の出力域 (0, 1) に収まっているはず（反復評価が forward と \
+             同じ計算を再現していることの弱い間接検証）: {v}"
+        );
+    }
 }

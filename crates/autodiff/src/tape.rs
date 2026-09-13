@@ -1774,123 +1774,252 @@ fn poisoned_err(node: &TapeNode) -> Result<(), AutodiffError> {
     Ok(())
 }
 
+/// `recompute_value` の内部作業スタックが積むフレーム。`Visit` は
+/// 「このノードをまだ調べていない」状態、`Process` は「入力側の再帰
+/// 呼び出し（＝子ノードの `Visit`）を先に済ませ、あとは自ノードの値を
+/// 組み立てるだけ」の状態を表す（古典的な反復的 post-order 走査の
+/// 2 段フレーム方式。`recompute_value` doc「P1 是正」参照）。
+enum RecomputeFrame {
+    Visit(NodeId),
+    Process(NodeId),
+}
+
+/// `memo` から子ノードの値を取り出す。postorder 走査が正しく子を
+/// 先に処理していれば必ず `Some` になる契約であり、`None` は
+/// `recompute_value` 自身のスタック操作に不変条件違反があることを
+/// 意味する（`unwrap`/`panic!` は使わず型付きエラーへ変換する）。
+fn recompute_memo_get(
+    memo: &std::collections::HashMap<usize, Tensor<f32>>,
+    id: usize,
+) -> Result<Tensor<f32>, AutodiffError> {
+    memo.get(&id).cloned().ok_or_else(|| {
+        AutodiffError::Backward(format!(
+            "recompute_value: 反復評価の内部不変条件違反（node {id} の値が \
+             post-order 完了時点で memo に存在しない）"
+        ))
+    })
+}
+
+/// checkpoint で解放された（`TapeNode::recompute == true`）ノードを、
+/// 入力側へ辿って再導出する（burn-autodiff の `retro_forward` 相当を、
+/// view 限定から `Op::is_checkpoint_eligible()` な eager ノード全般へ
+/// 一般化したもの。`docs/autodiff-checkpoint-design.md` §3.4）。
+///
+/// **forward と bit 同一である理由**: 各分岐は `Var::matmul`／
+/// `sigmoid`／`sum`／`max`（`var.rs`）が forward 時に呼ぶのと**同じ**
+/// `ops`／`eval` メソッド呼び出しをそのまま再現する（同一 CPU BLIS／
+/// CUDA／Metal カーネル・同一 FMA 契約。`.claude/rules/
+/// coding-rust.md`）ため、再計算値は初回計算値と bit 同一になる。
+///
+/// **P1 是正（codex-review 指摘。イシュー #1624 PR #1681 レビュー）**:
+/// 旧実装は Rust の呼び出しスタックを直接使う再帰関数だった。`memo`
+/// （下記）は共有祖先の重複計算を防ぐだけで再帰**深さ**自体は
+/// 抑制しないため、checkpoint 区間内に十分深い祖先鎖（例: 小さい
+/// テンソルへの `sigmoid` を数万段連鎖させた区間）を forward で
+/// 構築したうえで checkpoint 解放後に backward すると、Rust の
+/// スタックサイズを超えてプロセスが abort する（本番経路 panic
+/// 禁止方針にも反する。`panic!`/`unwrap()` 以前に OS レベルで abort
+/// するため型付きエラーにすら変換できない）。本関数はヒープ確保の
+/// 明示的な作業スタック（[`RecomputeFrame`]）による反復的な
+/// post-order 走査へ書き換えており、再帰深さは常に定数（この関数の
+/// 呼び出しフレーム自体は 1 段）で済む。
+///
+/// **再帰の終端（走査の終端）**: `push_view`／checkpoint 解放の
+/// いずれも「入力は呼び出し時点で実体化済み、または同じくこの経路で
+/// 再導出可能」のいずれかであることを前提にする（`push_view` の事前
+/// 実体化契約・`Op::is_checkpoint_eligible()` が入力ノードを含む区間
+/// 全体を対象に走査する構造）。両条件が破られる（非適格な Op が
+/// 未実体化のまま到達する）のは真の契約違反であり、`Err` として
+/// 呼び出し元（[`recompute_infallible`]）へ吸収させる。
+///
+/// **P0 是正（codex-review 指摘。イシュー #1624 PR #1681 レビュー）**:
+/// `TapeNode::recompute_failed` が立っている（層 2
+/// `materialize_non_fallible` がこのノードの再計算失敗をゼロ埋めへ
+/// 吸収した実績がある）場合、キャッシュ済み値を「正しい実体化結果」
+/// として信頼せず `Err` を返す。呼び出し元（[`materialize_fallible`]・
+/// [`lazy_leaf_value_fallible`]・`value_of`（fallible 版）を含む）は
+/// このノードのキャッシュ済み値を読む前に本関数で検査する契約とする。
+///
+/// **P1 是正（codex-review 指摘・イシュー #1624 PR レビュー）**:
+/// checkpoint 区間内の DAG が共有祖先を持つ場合（例: `h =
+/// h.matmul(&h)` を n 回繰り返す構造）、`memo` なしでは左右の入力
+/// （`Op::MatMul(a, b)` の `a`／`b` が同一 `NodeId` を指す等）を
+/// 独立に評価してしまい、共有部分木の再計算回数が段数に対して指数的
+/// に増える（O(2^n) の GEMM 再計算）。`memo` に一度計算した `NodeId`
+/// を記録し、以後の参照はそこから引くことで、同一 `recompute_value`
+/// 呼び出し木の中では各ノードを高々 1 回しか再計算しないようにする
+/// （`Visit` フレームの冒頭で `memo` を検査し、既に解決済みなら子の
+/// push・計算を一切行わずスキップする）。
 fn recompute_value(
     nodes: &[TapeNode],
     ops: &dyn BackendOps,
     id: NodeId,
     memo: &mut std::collections::HashMap<usize, Tensor<f32>>,
 ) -> Result<Tensor<f32>, AutodiffError> {
-    if let Some(v) = nodes[id.0].value.get() {
-        // **P0 是正（codex-review 指摘。イシュー #1624 PR #1681
-        // レビュー）**: この `OnceCell` の中身は層 2
-        // （`materialize_non_fallible`）が `recompute_infallible` の
-        // 失敗を握り潰して詰めたゼロ埋め値かもしれない
-        // （`TapeNode::recompute_failed` doc 参照）。ここで無条件に
-        // 「既に実体化済みの正しい値」として使うと、祖先の再計算失敗が
-        // 静かに伝播してしまう——`Err` として呼び出し元へ伝播する。
-        return poisoned_err(&nodes[id.0]).map(|()| v.clone());
+    let mut stack: Vec<RecomputeFrame> = vec![RecomputeFrame::Visit(id)];
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            RecomputeFrame::Visit(cur) => {
+                if memo.contains_key(&cur.0) {
+                    continue;
+                }
+                if let Some(v) = nodes[cur.0].value.get() {
+                    // **P0 是正**（doc 参照）: この `OnceCell` の中身は
+                    // 層 2（`materialize_non_fallible`）が
+                    // `recompute_infallible` の失敗を握り潰して詰めた
+                    // ゼロ埋め値かもしれない。無条件に「既に実体化済み
+                    // の正しい値」として使うと、祖先の再計算失敗が
+                    // 静かに伝播してしまう——`Err` として呼び出し元へ
+                    // 伝播する。
+                    poisoned_err(&nodes[cur.0])?;
+                    memo.insert(cur.0, v.clone());
+                    continue;
+                }
+                // 自ノードの `Process`（値の組み立て）を先に積み、
+                // その後に子ノードの `Visit` を積む。スタックは LIFO
+                // のため、後で積んだ子側が先に処理され、子の post-order
+                // 処理（値が `memo` へ入る）が完了してから自ノードの
+                // `Process` に到達する。
+                stack.push(RecomputeFrame::Process(cur));
+                match &nodes[cur.0].op {
+                    Op::Reshape { input }
+                    | Op::Transpose { input, .. }
+                    | Op::Sigmoid(input)
+                    | Op::Sum { input, .. }
+                    | Op::Max { input, .. }
+                    | Op::Permute { input, .. }
+                    | Op::BroadcastTo { input }
+                    | Op::Narrow { input, .. } => {
+                        stack.push(RecomputeFrame::Visit(*input));
+                    }
+                    Op::MatMul(a, b) => {
+                        // `a`/`b` が同一 `NodeId`（`h.matmul(&h)`）でも
+                        // 正しく動作する: 先に積んだ `a` 側は `b` 側の
+                        // 部分木が完全に片付く（LIFO で上に積まれた
+                        // フレームがすべて消化される）までポップされ
+                        // ないため、`b` 側で `memo` に値が入った時点で
+                        // `a` 側の `Visit` は即座にスキップされる。
+                        stack.push(RecomputeFrame::Visit(*a));
+                        stack.push(RecomputeFrame::Visit(*b));
+                    }
+                    _ => {
+                        // `Op::is_checkpoint_eligible()` が解放しない
+                        // Op、かつ view でもないノードが未実体化のまま
+                        // ここへ渡ることは構造上あり得ない
+                        // （`push_view` の事前実体化契約・checkpoint
+                        // 解放が eligible なノードにしか `recompute` を
+                        // 立てないため）。到達すれば契約違反であり、
+                        // 安全側フォールバックへ吸収する呼び出し元に
+                        // 委ねるため `Err` を返す。
+                        return Err(AutodiffError::Backward(format!(
+                            "recompute_value: 再計算対象外の Op（node {}）が\
+                             未実体化のまま到達した（契約違反）",
+                            cur.0
+                        )));
+                    }
+                }
+            }
+            RecomputeFrame::Process(cur) => {
+                if memo.contains_key(&cur.0) {
+                    // 同一ノードが複数の親から共有され、別経路の
+                    // `Visit`/`Process` が先に処理を終えていた場合
+                    // （`memo` による重複計算対策の一部）。
+                    continue;
+                }
+                let node = &nodes[cur.0];
+                let value = match &node.op {
+                    Op::Reshape { input } => {
+                        let base = recompute_memo_get(memo, input.0)?;
+                        base.reshape(&node.shape)?
+                    }
+                    Op::Transpose { input, dim0, dim1 } => {
+                        let base = recompute_memo_get(memo, input.0)?;
+                        base.transpose(*dim0, *dim1)?
+                    }
+                    Op::MatMul(a, b) => {
+                        // `Var::matmul` と同じ `ops.gemm` 呼び出し
+                        // （`var.rs` `Var::matmul` doc 参照）。
+                        let a_val = recompute_memo_get(memo, a.0)?;
+                        let b_val = recompute_memo_get(memo, b.0)?;
+                        ops.gemm(&a_val, &b_val)?
+                    }
+                    Op::Sigmoid(a) => {
+                        // `Var::sigmoid` と同じ `eval::sigmoid` 呼び出し
+                        // （`ops` に対応メソッドがないため融合対象外。
+                        // `tape::Op::Sigmoid` doc 参照）。
+                        let a_val = recompute_memo_get(memo, a.0)?;
+                        crate::eval::sigmoid(&a_val)
+                    }
+                    Op::Sum { input, dim } => {
+                        let input_val = recompute_memo_get(memo, input.0)?;
+                        ops.sum(&input_val, *dim)?
+                    }
+                    Op::Max { input, dim } => {
+                        let input_val = recompute_memo_get(memo, input.0)?;
+                        ops.max(&input_val, *dim)?
+                    }
+                    Op::Permute { input, perm } => {
+                        // イシュー #1597 で `push_view` 経由の view 系
+                        // ノードへ追加された variant。当時の再導出関数
+                        // 名 `resolve_view`（infallible）はイシュー
+                        // #1624 で `recompute_value`（checkpoint 全般へ
+                        // 一般化した fallible 版）へ改称されたため、
+                        // `?` で伝播するよう揃える（merge 時の呼び出し
+                        // 名不整合の是正。review 指摘）。
+                        let base = recompute_memo_get(memo, input.0)?;
+                        base.permute(perm).unwrap_or_else(|_| {
+                            debug_assert!(
+                                false,
+                                "recompute_value: Op::Permute の再導出が\
+                                 失敗した（forward 側の契約違反）"
+                            );
+                            safe_zeros(&node.shape)
+                        })
+                    }
+                    Op::BroadcastTo { input } => {
+                        let base = recompute_memo_get(memo, input.0)?;
+                        base.broadcast_to(&node.shape).unwrap_or_else(|_| {
+                            debug_assert!(
+                                false,
+                                "recompute_value: Op::BroadcastTo の再導出が\
+                                 失敗した（forward 側の契約違反）"
+                            );
+                            safe_zeros(&node.shape)
+                        })
+                    }
+                    Op::Narrow {
+                        input,
+                        dim,
+                        start,
+                        len,
+                    } => {
+                        let base = recompute_memo_get(memo, input.0)?;
+                        base.narrow(*dim, *start, *len).unwrap_or_else(|_| {
+                            debug_assert!(
+                                false,
+                                "recompute_value: Op::Narrow の再導出が\
+                                 失敗した（forward 側の契約違反）"
+                            );
+                            safe_zeros(&node.shape)
+                        })
+                    }
+                    _ => {
+                        // `Visit` 側で既に弾いているため構造上到達
+                        // しない。到達した場合に備えた防御的フォール。
+                        return Err(AutodiffError::Backward(format!(
+                            "recompute_value: 再計算対象外の Op（node {}）が\
+                             未実体化のまま到達した（契約違反）",
+                            cur.0
+                        )));
+                    }
+                };
+                memo.insert(cur.0, value);
+            }
+        }
     }
-    // **P1 是正（codex-review 指摘・イシュー #1624 PR レビュー）**:
-    // checkpoint 区間内の DAG が共有祖先を持つ場合（例:
-    // `h = h.matmul(&h)` を n 回繰り返す構造）、`memo` なしでは左右の
-    // 入力（`Op::MatMul(a, b)` の `a`／`b` が同一 `NodeId` を指す等）を
-    // 独立に再帰評価してしまい、共有部分木の再計算回数が呼び出し段数に
-    // 対して指数的に増える（O(2^n) の GEMM 再計算）。`memo` に
-    // 一度計算した `NodeId` を記録し、以後の参照はそこから引くことで
-    // 同一 `recompute_value` 呼び出し木の中では各ノードを高々 1 回しか
-    // 再計算しないようにする。
-    if let Some(v) = memo.get(&id.0) {
-        return Ok(v.clone());
-    }
-    let node = &nodes[id.0];
-    let value = match &node.op {
-        Op::Reshape { input } => {
-            let base = recompute_value(nodes, ops, *input, memo)?;
-            base.reshape(&node.shape)?
-        }
-        Op::Transpose { input, dim0, dim1 } => {
-            let base = recompute_value(nodes, ops, *input, memo)?;
-            base.transpose(*dim0, *dim1)?
-        }
-        Op::MatMul(a, b) => {
-            // `Var::matmul` と同じ `ops.gemm` 呼び出し（`var.rs`
-            // `Var::matmul` doc 参照）。
-            let a_val = recompute_value(nodes, ops, *a, memo)?;
-            let b_val = recompute_value(nodes, ops, *b, memo)?;
-            ops.gemm(&a_val, &b_val)?
-        }
-        Op::Sigmoid(a) => {
-            // `Var::sigmoid` と同じ `eval::sigmoid` 呼び出し（`ops` に
-            // 対応メソッドがないため融合対象外。`tape::Op::Sigmoid`
-            // doc 参照）。
-            let a_val = recompute_value(nodes, ops, *a, memo)?;
-            crate::eval::sigmoid(&a_val)
-        }
-        Op::Sum { input, dim } => {
-            let input_val = recompute_value(nodes, ops, *input, memo)?;
-            ops.sum(&input_val, *dim)?
-        }
-        Op::Max { input, dim } => {
-            let input_val = recompute_value(nodes, ops, *input, memo)?;
-            ops.max(&input_val, *dim)?
-        }
-        Op::Permute { input, perm } => {
-            // イシュー #1597 で `push_view` 経由の view 系ノードへ追加
-            // された variant。当時の再導出関数名 `resolve_view`
-            // （infallible）はイシュー #1624 で `recompute_value`
-            // （checkpoint 全般へ一般化した fallible 版）へ改称された
-            // ため、`?` で伝播するよう揃える（merge 時の呼び出し名
-            // 不整合の是正。review 指摘）。
-            let base = recompute_value(nodes, ops, *input, memo)?;
-            base.permute(perm).unwrap_or_else(|_| {
-                debug_assert!(
-                    false,
-                    "recompute_value: Op::Permute の再導出が失敗した（forward 側の契約違反）"
-                );
-                safe_zeros(&node.shape)
-            })
-        }
-        Op::BroadcastTo { input } => {
-            let base = recompute_value(nodes, ops, *input, memo)?;
-            base.broadcast_to(&node.shape).unwrap_or_else(|_| {
-                debug_assert!(
-                    false,
-                    "recompute_value: Op::BroadcastTo の再導出が失敗した（forward 側の契約違反）"
-                );
-                safe_zeros(&node.shape)
-            })
-        }
-        Op::Narrow {
-            input,
-            dim,
-            start,
-            len,
-        } => {
-            let base = recompute_value(nodes, ops, *input, memo)?;
-            base.narrow(*dim, *start, *len).unwrap_or_else(|_| {
-                debug_assert!(
-                    false,
-                    "recompute_value: Op::Narrow の再導出が失敗した（forward 側の契約違反）"
-                );
-                safe_zeros(&node.shape)
-            })
-        }
-        _ => {
-            // `Op::is_checkpoint_eligible()` が解放しない Op、かつ
-            // view でもないノードが未実体化のままここへ渡ることは
-            // 構造上あり得ない（`push_view` の事前実体化契約・
-            // checkpoint 解放が eligible なノードにしか `recompute` を
-            // 立てないため）。到達すれば契約違反であり、安全側
-            // フォールバックへ吸収する呼び出し元に委ねるため `Err` を
-            // 返す。
-            return Err(AutodiffError::Backward(format!(
-                "recompute_value: 再計算対象外の Op（node {}）が未実体化のまま到達した（契約違反）",
-                id.0
-            )));
-        }
-    };
-    memo.insert(id.0, value.clone());
-    Ok(value)
+
+    recompute_memo_get(memo, id.0)
 }
 
 /// [`recompute_value`] の fallible ラッパー。`id` **自身**の
@@ -2272,19 +2401,102 @@ pub(crate) fn materialize_non_fallible<'a>(
         // view ノード（イシュー #1047）／checkpoint 解放済みノード
         // （イシュー #1624）: 融合・per-op フォールバックの前に最優先で
         // 判定する（`recompute_infallible` は infallible なため、ここで
-        // 確実に値が決まる。層 1 の同分岐と対応）。
+        // 確実に値が決まる。層 1 の同分岐と対応）。この分岐自身が
+        // `recompute_infallible` 経由で `id` 自身の `recompute_failed`
+        // を立てる契約のため、下記の子孫 poison 伝播検査は不要
+        // （`id` 自身が checkpoint 解放済みノードそのものであり、
+        // 「祖先の poison を子孫へ伝播する」対象の子孫側ではない）。
         if nodes[id.0].op.is_view() || nodes[id.0].recompute {
             return recompute_infallible(nodes, ops, id);
         }
-        build_lazy_plan(nodes, ops, id)
+        let value = build_lazy_plan(nodes, ops, id)
             .ok()
             .and_then(|(plan, leaves, _root)| {
                 let leaf_refs: Vec<&Tensor<f32>> = leaves.iter().collect();
                 ops.run_fused(&plan, &leaf_refs).ok()
             })
             .or_else(|| fallback_per_op(nodes, ops, id).ok())
-            .unwrap_or_else(|| eval_fallback(nodes, ops, id))
+            .unwrap_or_else(|| eval_fallback(nodes, ops, id));
+        // **P0 是正（codex-review・Cursor Bugbot 指摘。イシュー #1624
+        // PR #1681 レビュー）**: `id` は elementwise の lazy 出力
+        // （`Op::Add`/`Mul`/`Relu`/`Exp`/`Tanh`。checkpoint 非適格の
+        // ため `id` 自身は上の分岐で解放されない）であり、その
+        // 未実体化 elementwise 連結成分の葉に checkpoint 解放済み祖先
+        // （例: `out = m.relu()` の `m`）が含まれる場合がある。
+        // `build_lazy_plan`／`fallback_per_op` は葉参照に
+        // `lazy_leaf_value_fallible`（poison 検査つき）を使うため祖先
+        // poison を検出すれば `Err` を返すが、その `Err` は
+        // `.ok()`／`.or_else` で握り潰され、最終手段
+        // `eval_fallback`（poison を検査しない旧 `lazy_leaf_value`
+        // 経由）がゼロ値で `id` の値を静かに確定させてしまう
+        // （層 2 は infallible な契約上、値そのものを返さない選択肢が
+        // ないため、返す値自体は変えられない）。祖先側の
+        // `recompute_failed` はこの過程のどこかで（`eval_fallback` の
+        // `lazy_leaf_value` → `recompute_infallible` 経由で）既に
+        // 立っているはずなので、ここで `id` を根とする未実体化
+        // elementwise 連結成分を再走査し、葉のいずれかが poison
+        // 済みなら `id` 自身の `recompute_failed` にも伝播させる。
+        // これにより以後 [`materialize_fallible`]（層 1）がこの `id`
+        // を読む前に `poisoned_err` で確実に `Err` へ変換できる。
+        if elementwise_leaves_poisoned(nodes, id) {
+            nodes[id.0].recompute_failed.set(true);
+        }
+        value
     })
+}
+
+/// [`materialize_non_fallible`] の P0 是正が使う補助走査。`id` を根と
+/// する未実体化 elementwise 連結成分（`Op::Add`/`Mul`/`Relu`/`Exp`/
+/// `Tanh` のうち `value` が空のもの。`build_lazy_plan`／
+/// `eval_fallback` と同じ「発生順に遡って `reachable` を広げる」走査）
+/// を辿り、到達した**葉**（elementwise 以外の Op、または既に実体化済み
+/// の elementwise ノード）のいずれかで [`TapeNode::recompute_failed`]
+/// が立っているかを検査する。
+///
+/// **`value.get().is_some()` の有無に関わらず `recompute_failed` を
+/// 見る理由**: checkpoint 解放済みノード（`m` 等）は再計算に失敗しても
+/// `recompute_infallible`／`recompute_value` 自身が `m` の `OnceCell`
+/// へ値を `set` するとは限らない（`lazy_leaf_value_fallible`／
+/// `recompute_value` 経由の再計算失敗は `Err` を返すだけで `m` の
+/// `OnceCell` に触れない。`m` の `OnceCell` が埋まるのは
+/// `recompute_infallible` が実際に呼ばれた場合のみ）。したがって
+/// 葉ノードが未実体化のままであっても `recompute_failed` だけは立って
+/// いる状態がありうるため、`value` の有無で判定を分岐せず常に
+/// `recompute_failed` を検査する。
+fn elementwise_leaves_poisoned(nodes: &[TapeNode], id: NodeId) -> bool {
+    use std::collections::HashMap;
+
+    let mut reachable: HashMap<usize, ()> = HashMap::new();
+    reachable.insert(id.0, ());
+    for cur in (0..=id.0).rev() {
+        if !reachable.contains_key(&cur) {
+            continue;
+        }
+        let node = &nodes[cur];
+        let is_unresolved_lazy_elementwise = node.value.get().is_none()
+            && matches!(
+                node.op,
+                Op::Add(..) | Op::Mul(..) | Op::Relu(..) | Op::Exp(..) | Op::Tanh(..)
+            );
+        if is_unresolved_lazy_elementwise {
+            match &node.op {
+                Op::Add(a, b) | Op::Mul(a, b) => {
+                    reachable.insert(a.0, ());
+                    reachable.insert(b.0, ());
+                }
+                Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) => {
+                    reachable.insert(a.0, ());
+                }
+                _ => unreachable!(
+                    "elementwise_leaves_poisoned: is_unresolved_lazy_elementwise の \
+                     matches! と本 match の対象演算が食い違っている（契約違反）"
+                ),
+            }
+        } else if node.recompute_failed.get() {
+            return true;
+        }
+    }
+    false
 }
 
 /// `materialize_non_fallible` の最終手段: `ops` の per-op メソッドも

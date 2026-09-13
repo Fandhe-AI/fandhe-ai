@@ -52,7 +52,7 @@
 | 分類 | Op | 扱い |
 |---|---|---|
 | 再計算可能（解放対象） | `MatMul`・`Sigmoid`・`Sum`・`Max` | `value` を `take()`・`recompute = true` |
-| view（解放対象） | `Reshape`・`Transpose` | 既存の再計算方式化（イシュー #1047）と統合 |
+| view（解放対象） | `Reshape`・`Transpose`・`Permute`（#1597）・`BroadcastTo`（#1597）・`Narrow`（#1598） | 既存の再計算方式化（イシュー #1047・#1597・#1598）と統合。`Op::is_checkpoint_eligible()` は網羅 match（ワイルドカードなし）のため、新規 view variant 追加時はコンパイルエラーで判断が強制される（PR #1681 codex-review 指摘: merge 時に `Narrow` の分岐漏れが一時発生していたのもこの網羅性チェックにより検出された） |
 | 遅延 elementwise（**解放しない**） | `Add`・`Mul`・`Relu`・`Exp`・`Tanh` | `MAX_FUSED_CHAIN_LEN` 上限維持のための自己実体化であり、解放すると `build_lazy_plan` の不変条件を壊す |
 | 非適格（値を保持・エラーにしない） | `Leaf`・`ResidentLeaf`・`LinearResident`・`LinearAct`・`MseLoss`・`CrossEntropyLoss`・`RnnCell`・`LstmCell`・`LstmHidden`・`GruCell`・`Inv`・`Solve`・`Det`・`Cholesky`・`QrQ`／`QrR`・`SvdU`／`SvdS`／`SvdVh`・`MatrixNorm`・`Softmax`・`LogSoftmax` | 正しさ優先・メモリ削減はベストエフォート（§8 スコープ外） |
 
@@ -69,10 +69,15 @@
 `crates/autodiff/src/tape.rs` に以下を実装した:
 
 ```
-fn recompute_value(nodes: &[TapeNode], ops: &dyn BackendOps, id: NodeId) -> Result<Tensor<f32>, AutodiffError>
+fn recompute_value(
+    nodes: &[TapeNode],
+    ops: &dyn BackendOps,
+    id: NodeId,
+    memo: &mut std::collections::HashMap<usize, Tensor<f32>>,
+) -> Result<Tensor<f32>, AutodiffError>
 ```
 
-- `Op::Reshape`／`Op::Transpose`: 既存 `resolve_view` と同じ `Tensor::reshape`／`transpose`（zero-copy view 合成）
+- `Op::Reshape`／`Op::Transpose`／`Op::Permute`（#1597）／`Op::BroadcastTo`（#1597）／`Op::Narrow`（#1598）: 既存 `resolve_view`（旧名）と同じ `Tensor::reshape`／`transpose`／`permute`／`broadcast_to`／`narrow`（zero-copy view 合成）
 - `Op::MatMul(a, b)`: `ops.gemm(&a_val, &b_val)`（`Var::matmul` と同一呼び出し）
 - `Op::Sigmoid(a)`: `eval::sigmoid(&a_val)`（`Var::sigmoid` と同一呼び出し）
 - `Op::Sum { input, dim }`: `ops.sum(&input_val, dim)`（`Var::sum` と同一呼び出し）
@@ -82,6 +87,19 @@ fn recompute_value(nodes: &[TapeNode], ops: &dyn BackendOps, id: NodeId) -> Resu
 `recompute_fallible`（層 1 用。`id` 自身の `OnceCell` へキャッシュする）と `recompute_infallible`（層 2 用。キャッシュしない）の 2 段構成にした理由は §4「reentrant init 問題と解決」参照。
 
 **決定性の前提**: CPU BLIS・CUDA・Metal の GEMM は run-to-run bit 同一（既存の parity テスト・candle 比較で担保済み）。再計算は forward と同一の `ops` メソッド・同一入力を用いるため出力 bit 同一になる。
+
+**反復的な post-order 走査（PR #1681 codex-review 是正・イシュー #1624）**: 当初実装の `recompute_value` は Rust の呼び出しスタックを直接使う再帰関数だった。`memo`（共有祖先の重複計算防止。§4 参照）は再帰**深さ**自体は抑制しないため、checkpoint 区間内に十分深い祖先鎖（例: 小さいテンソルへの `sigmoid` を数万段連鎖させた区間）を forward で構築し checkpoint 解放後に backward で再計算すると、Rust のスタックサイズを超えてプロセスが abort していた（本番経路 panic 禁止方針にも反し、`Result` にすら変換できない）。`RecomputeFrame::{Visit, Process}` の 2 段フレームによる明示的な作業スタック（`Vec`。ヒープ確保）を使う反復的な post-order 走査へ書き換え、`recompute_value` 自身の再帰深さを定数（この関数の呼び出しフレーム自体は 1 段）に固定した。共有祖先の重複計算防止（`memo` によるメモ化。`h = h.matmul(&h)` 型の fan-in）は `Visit` フレームの冒頭で `memo` を検査してスキップする形で従来どおり成立する。回帰テストは `crates/autodiff/tests/checkpoint_review_1624.rs::deep_checkpoint_chain_recompute_does_not_overflow_stack`（`sigmoid` を 50,000 段連鎖させた区間の単一の再計算呼び出しが abort しないことを確認）。
+
+### 3.5 poison 契約: checkpoint 解放済みノードの再計算失敗を検出・伝播する（PR #1681 codex-review・Cursor Bugbot 指摘。イシュー #1624）
+
+再計算（`recompute_value`）はバックエンド実行を伴うため、`push_view` の再導出前提（「入力は必ず実体化済み・再導出可能」という**構造的**契約）とは異なり、shape 不整合・カーネル起動失敗等の**実際に起こりうるバックエンド実行失敗**を持ちうる。この失敗を「あり得ない契約違反」として `debug_assert!` で握り潰すと、release ビルドではゼロテンソルへ静かに変換され、以後の計算・勾配が破損したまま「成功」として伝わってしまう（fail-open）。
+
+- **`TapeNode::recompute_failed: Cell<bool>`**（poison フラグ）を追加した。層 2 専用ヘルパー `recompute_infallible`（`Result` を返せない契約のため、失敗時はゼロテンソルで応答せざるを得ない）が、対象ノード自身の再計算に失敗した場合にこのフラグを立てる。
+- **`poisoned_err(node)`**: `recompute_failed` が立っているノードのキャッシュ済み値を「正しい実体化結果」として信頼せず `Err` を返すゲート。層 1 の全ての値読み出し経路（`recompute_value` 自身の cached-value 早期リターン・`materialize_fallible`・`lazy_leaf_value_fallible`・`value_of`〈fallible 版〉）がキャッシュ済み値を読む前に必ず呼ぶ契約とする。これにより `Tape::backward`（層 1 のみを経由する）は、checkpoint 解放済みノード自身が過去に再計算失敗を起こしていれば確実に `Err` を返す。
+- **lazy な子孫への伝播（Bugbot 指摘の追加是正）**: `out = m.relu()` のように、checkpoint 解放済みノード `m` を入力に取る**未実体化 elementwise ノード `out`**（`m` 自身は非適格〈`Op::Relu` は §3.3 の「遅延 elementwise」〉のため `out` 自身は checkpoint に解放されない）を層 2（`to_tensor()`）から直接実体化すると、`materialize_non_fallible` は `build_lazy_plan` → `fallback_per_op`（いずれも `lazy_leaf_value_fallible` 経由で poison 検査つき）→ **`eval_fallback`**（最終手段。旧 `lazy_leaf_value`〈poison 検査なし〉経由）の順にフォールバックする。`build_lazy_plan`／`fallback_per_op` が `m` の poison を検出して返す `Err` は `.ok()` で握り潰され、最終的に `eval_fallback` がゼロ値で `out` の値を確定してしまう——`m` 自身は `recompute_infallible` 経由で poison されるが、`out` 自身の `recompute_failed` は**立たない**ため、`out` のキャッシュ済みゼロ値がそのまま「正常値」として以後の層 1 に読まれてしまう（層 2 は infallible な契約上、値そのものを返さない選択肢がないため、返す値自体は変えられない）。この伝播漏れを埋めるため、`materialize_non_fallible` はクロージャ内で値を計算した**後**に `elementwise_leaves_poisoned(nodes, id)`（`id` を根とする未実体化 elementwise 連結成分を `build_lazy_plan`／`eval_fallback` と同じ走査で辿り、到達した葉ノードのいずれかで `recompute_failed` が立っているかを検査する補助関数）を呼び、真なら `id` 自身の `recompute_failed` も立てる。以後 `materialize_fallible`（層 1）がこの `id` を読む際、`poisoned_err` で確実に `Err` へ変換できる。
+- 回帰テストは `crates/autodiff/tests/checkpoint_review_1624.rs`:
+  - `layer2_poisoned_recompute_is_detected_by_layer1_backward` — checkpoint 解放済みノード自身（`m`）が層 2 で先に poison された場合の検出（既存の `lazy_leaf_value_fallible` の poison 検査で成立）
+  - `layer2_poison_propagates_to_lazy_descendant` — `m` を一度も単独で読み出さず、lazy な子孫 `out = m.relu()` を層 2 から直接実体化した場合の伝播漏れの検出（本節の追加是正が必要な回帰）
 
 ## 4. reentrant init 問題と解決（実装中に発見した設計上の落とし穴）
 
