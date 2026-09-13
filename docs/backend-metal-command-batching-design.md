@@ -1108,6 +1108,92 @@ env_info（内部ホスト名は含めない）: 未実測
 実測は `docs/perf/logs/metal-dinput-sync-1563/`（生ログ・env_info）へ
 記録する。
 
+### 7.5 #1690: MSE forward/backward の encode-only 化
+
+親イシュー #1582（MSE backward の Metal encode-only／CUDA ストリーム
+化）の分解タスク。`crates/backend-metal/src/mse.rs` に残っていた 3 箇所
+の `ctx.dispatch_sync`（forward `run_mse_loss_f32` の `mse_partial_f32`／
+`mse_finalize_f32` 2 段リダクション・backward `run_mse_backward_f32` の
+1 段）を、`sgd.rs::MetalSgd::run` と同型の `ctx.encode` +
+`fandhe_ai_tensor_core::DispatchFailureCell` 登録パターンへ切り替えた
+（§3.7 の failure token 契約と同じ設計）。
+
+#### 7.5.1 変更内容
+
+- `MetalMse::run_mse_loss_f32`／`run_mse_backward_f32` の既存公開
+  シグネチャ・戻り値契約（GPU 実行完了まで待って結果を返す）は不変の
+  まま、内部でローカル `DispatchFailureCell` を生成して新設の
+  `_tracked` メソッド（`run_mse_loss_f32_tracked`／
+  `run_mse_backward_f32_tracked`）へ委譲する薄いラッパーへ変更した
+  （`sgd.rs::MetalSgd::run` の `token: Option<&DispatchFailureCell>`
+  引数とは異なり、MSE 側は常に関数内で自ら `ctx.synchronize()` する
+  ため `token` は必須引数——forward・backward いずれも呼び出し元へは
+  同期済みの結果を返す契約自体を変えないため）。
+- forward: `mse_partial_f32`（1 段目）・`mse_finalize_f32`（2 段目）を
+  いずれも `ctx.encode`（待たない）へ変更し、最後に 1 回だけ
+  `ctx.synchronize()` する。2 段目の間にある `partial_buf`／`out_buf`
+  の `MetalBuffer::alloc_uninit_pooled` 確保は `zero_on_reuse=false`
+  （未初期化確保）のため同期を強制せず、2 encode を同一バッチへ積む
+  ことを妨げない（`buffer.rs` 参照）。
+- backward: `mse_backward_f32` を `ctx.encode` へ変更したが、呼び出し元
+  `crates/autodiff/src/grad.rs`（`Op::MseLoss` の VJP）が戻り値
+  `Tensor<f32>`（`dpred`）に対して直後に `dense_vec(&dpred)`（ホスト
+  即時アクセス）で `dtarget` を計算する契約のため、本関数は関数を出る
+  前に**必ず自ら** `ctx.synchronize()` する（無条件）。
+- 両関数とも `ctx.synchronize()` が `Ok` を返した直後に
+  `token.is_set()` を追加検査する共通ヘルパ `check_dispatch_token`
+  （`mse.rs` 内 private 関数）を経由する: プロセスワイド singleton
+  `MetalContext` を使う別スレッドが本関数自身の `synchronize()` より
+  先に同じバッチを `synchronize()` し尽くしていた場合、本関数の
+  `synchronize()` は「待つべきバッチが既に空」で無条件に `Ok(())` を
+  返してしまい実行時エラーを見逃す（fail-open）おそれがあるため
+  （§3.7 (2) と同種の競合）。`token` は `encode` と同一ロック区間で
+  登録済みのため、他スレッドの `synchronize()` がエラーを検出して
+  いれば確実に `set()` 済みであり、`is_set()` の追加検査で
+  fail-closed に拾い上げる。
+
+#### 7.5.2 カウンタ見積り（机上導出）
+
+`crates/facade/tests/mnist_scale_train_reuse_bench.rs::
+mnist_scale_train_reuse_metal_batch_counters`（1 step 全体の計測窓。
+`MseLoss::forward` の GPU dispatch もこの窓に含まれる）のカウンタは
+#1566 適用後の **11 / 8 / 8**（encode / command_buffer / wait）から
+**11 / 7 / 7** へ変わる見積り。forward の 2 encode（旧: 各々が独立に
+`dispatch_sync` で commit・wait していた）を 1 回の `synchronize()` へ
+まとめたことによる −1 cb・−1 wait であり、この削減量は「直前に他の
+encode-only dispatch がどれだけ溜まっていたか」に依存しない局所的な
+差分である（2 回の同期点を 1 回へ統合すれば常に厳密に 1 減る）。
+
+一方、同ファイルの `mnist_scale_train_reuse_metal_backward_dinput_
+phase`（record-only。backward 区間限定の計測窓で forward を含まない）
+の事前登録仮説（`encode_delta=5`／`command_buffer_delta=3`／
+`wait_delta=3`）は**変わらない**。この窓に寄与するのは backward の
+`MseLoss` VJP（`run_mse_backward_f32`）1 回のみで、上記のとおり本
+関数は encode-only 化後も呼び出し元の即時ホストアクセス契約により
+自ら 1 回 `synchronize()` するため、wait 回数は 1→1 のまま変わらない。
+
+いずれも Mac 実機セッションでの実測確認はまだ行っていない
+（`docs/perf/logs/` への記録は #1691 へ引き継ぐ）。
+
+#### 7.5.3 #1561・#1564・#1566 との関係（同期の二重主張をしない）
+
+本イシューが削減するのは MSE forward 自身の 2→1 のみである。
+`Op::LinearResident` の `d_input`（#1561・#1562・#1563）・bias 勾配
+（#1564・#1566）側の同期境界は本イシューでは変更しておらず、それら
+の待ちについて本イシューは何も主張しない（`crates/backend-metal/
+src/gemm.rs`・`crates/autodiff/src/grad.rs` の resident 経路は本
+イシューで変更していない）。
+
+#### 7.5.4 実測記入欄（Mac セッション。#1691 へ引き継ぎ）
+
+```
+bit 同一（既存 `#[ignore]` テスト mse_parity.rs 等）: 未実測
+カウンタ（mnist_scale_train_reuse_metal_batch_counters）:
+  before（#1566 時点。再現確認）: encode= command_buffer= wait=
+  after（#1690）: encode= command_buffer= wait=
+env_info（内部ホスト名は含めない）: 未実測
+```
+
 ## 8. 実装記録（#1099。§4.2・§4.4・§4.5・§3.4・§3.5 の追記）
 
 §4.2・§4.5 が特定した「9 個のバッチがいずれも dispatch 数 1（マージ
