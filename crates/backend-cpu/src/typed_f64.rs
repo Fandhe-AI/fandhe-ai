@@ -114,6 +114,16 @@ fn contiguity_fail_safe(msg: impl std::fmt::Display) -> BackendError {
 /// `c` はゼロ初期化済みの前提（呼び出し元 [`gemm_f64`] が `vec![0.0f64; m*n]`
 /// を渡す）。
 fn gemm_row_parallel_f64(a: &[f64], b: &[f64], c: &mut [f64], n: usize, k: usize) {
+    // `n == 0`（出力列数 0）の場合、`rayon::par_chunks_mut(0)` は
+    // `chunk_size must not be zero` で panic する。`c` はこのとき必ず
+    // 空スライス（`m * 0 == 0`）であり書き込むべき要素も存在しないため、
+    // ここで早期リターンして panic を回避する（`BackendOps::gemm`
+    // 〈f32 版〉が `n == 0` を `Ok([m, 0])` として正しく扱う契約・
+    // `crate::parity::matmul_reference_fma_f64` が `n == 0` を単に
+    // 0 回ループとして扱う契約と揃える。イシュー #1697 レビュー指摘）。
+    if n == 0 {
+        return;
+    }
     c.par_chunks_mut(n).enumerate().for_each(|(i, c_row)| {
         let a_row = &a[i * k..i * k + k];
         for (p, &a_ip) in a_row.iter().enumerate() {
@@ -568,6 +578,39 @@ mod tests {
         // a: [1,3], b: [2,1] -> k mismatch (3 != 2)。
         let err = gemm_f64(&a, &b).unwrap_err();
         assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    #[test]
+    fn gemm_f64_handles_zero_output_columns() {
+        // n == 0 (b: [k, 0]) の場合、rayon `par_chunks_mut(0)` の panic
+        // （`chunk_size must not be zero`）を回避しつつ `Ok([m, 0])` を
+        // 返すことを確認する（`BackendOps::gemm`〈f32 版〉と揃える契約。
+        // イシュー #1697 レビュー指摘）。
+        let a = Tensor::new(vec![1.0; 6], &[2, 3]).unwrap();
+        let b = Tensor::new(vec![], &[3, 0]).unwrap();
+        let c = gemm_f64(&a, &b).unwrap();
+        assert_eq!(c.shape(), &[2, 0]);
+        assert_eq!(c.as_slice().unwrap(), &[] as &[f64]);
+    }
+
+    #[test]
+    fn gemm_f64_handles_zero_output_rows() {
+        // m == 0 の場合も同様に empty 出力を返すことを確認する。
+        let a = Tensor::new(vec![], &[0, 3]).unwrap();
+        let b = Tensor::new(vec![1.0; 6], &[3, 2]).unwrap();
+        let c = gemm_f64(&a, &b).unwrap();
+        assert_eq!(c.shape(), &[0, 2]);
+        assert_eq!(c.as_slice().unwrap(), &[] as &[f64]);
+    }
+
+    #[test]
+    fn gemm_f64_handles_zero_contraction_dim() {
+        // k == 0 の場合は出力が全てゼロ（contraction 次元が空のため）。
+        let a = Tensor::new(vec![], &[2, 0]).unwrap();
+        let b = Tensor::new(vec![], &[0, 3]).unwrap();
+        let c = gemm_f64(&a, &b).unwrap();
+        assert_eq!(c.shape(), &[2, 3]);
+        assert_eq!(c.as_slice().unwrap(), &[0.0; 6]);
     }
 
     #[test]
