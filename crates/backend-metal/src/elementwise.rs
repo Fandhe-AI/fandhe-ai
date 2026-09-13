@@ -332,6 +332,35 @@ impl MetalElementwise {
         self.run_unary(ctx, &self.tanh_f32, a)
     }
 
+    /// テンプレート生成された [`fandhe_ai_tensor_core::ScalarUnaryOp`]
+    /// カーネルの起動（イシュー #1707。CUDA 側
+    /// `elementwise.rs::run_scalar_unary_f32`〈#1700〉の Metal 対応版）。
+    /// `run_relu_f32` 等と異なり `pipeline` を `new` 時の固定フィールド
+    /// ではなく呼び出し元（`context_cache::cached_scalar_unary_pipeline`）
+    /// から都度受け取る点が違うだけで、バッファ確保・ディスパッチ・
+    /// readback の手続きは既存 `run_unary`（非公開・境界検査・
+    /// `numel == 0` 早期 return を含む）をそのまま再利用する。
+    pub fn run_scalar_unary_f32(
+        &self,
+        ctx: &MetalContext,
+        pipeline: &MtlPipeline,
+        a: &[f32],
+    ) -> Result<Vec<f32>, MetalError> {
+        self.run_unary(ctx, pipeline, a)
+    }
+
+    /// [`Self::run_scalar_unary_f32`] の 2 項版
+    /// （[`fandhe_ai_tensor_core::ScalarBinaryOp`]。イシュー #1707）。
+    pub fn run_scalar_binary_f32(
+        &self,
+        ctx: &MetalContext,
+        pipeline: &MtlPipeline,
+        a: &[f32],
+        b: &[f32],
+    ) -> Result<Vec<f32>, MetalError> {
+        self.run_binary(ctx, pipeline, a, b)
+    }
+
     /// `op` に対応するコンパイル済みパイプラインを返す
     /// （[`Self::dispatch_binary_resident`] 専用の内部選択。ホスト版
     /// `run_add_f32`／`run_mul_f32` と同一カーネルを再利用するため bit
