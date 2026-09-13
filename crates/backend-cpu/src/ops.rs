@@ -449,7 +449,7 @@ impl BackendOps for CpuBackendOps {
     /// 親 #1649）への capability accessor。`CpuBackendOps` 自身が
     /// `impl TypedOps<f64> for CpuBackendOps`（`typed_f64.rs`）を実装する
     /// ため、`memory_ops` と同じパターンで `self` をそのまま返す。
-    /// bf16 は #1699 まで既定 `None`（fail-closed）のまま。
+    /// f16（#1698）・bf16（#1699）とも下記アクセサでオーバーライド済み。
     fn typed_ops_f64(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<f64>> {
         Some(self)
     }
@@ -460,6 +460,14 @@ impl BackendOps for CpuBackendOps {
     /// へ昇格し既存 f32 カーネルへ委譲するラッパー）ため、`memory_ops`
     /// と同じく `self` をそのまま返す。
     fn typed_ops_f16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::f16>> {
+        Some(self)
+    }
+
+    /// `crate::typed_bf16`（イシュー #1699）が `CpuBackendOps` へ
+    /// `impl TypedOps<half::bf16>` を実装しているため、`memory_ops` と
+    /// 同じ「`Some(self)` を返す capability accessor オーバーライド」
+    /// パターンで結線する。
+    fn typed_ops_bf16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::bf16>> {
         Some(self)
     }
 
