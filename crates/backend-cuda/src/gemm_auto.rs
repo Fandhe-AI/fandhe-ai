@@ -1657,12 +1657,17 @@ impl CudaGemmAuto {
     ///
     /// `CudaMmaGemm::new` は `compile_ptx` 直呼び（LRU カーネル
     /// キャッシュ非経由）で base／swizzle 2 カーネルをコンパイルするため
-    /// `CudaGemmAuto::new` 自体の構築コストは増える。ただし `CudaGemmAuto`
-    /// を構築する本番経路は現状存在せず（`facade`／`backend-cuda::ops`／
-    /// `bench-harness` のいずれからも未参照。`BackendOps::gemm` は f32
-    /// tiled 固定）、到達するのは `tests/gemm_auto.rs`・
-    /// `tests/dispatch_boundary.rs` の `#[ignore]` テストのみのため、
-    /// 利用者向け起動コスト（`startup-bench`）への影響はない。
+    /// `CudaGemmAuto::new` 自体の構築コストは増える。イシュー #1703 以前
+    /// は `CudaGemmAuto` を構築する本番経路が存在しなかった（`facade`／
+    /// `backend-cuda::ops`／`bench-harness` のいずれからも未参照）が、
+    /// 現在は `crate::context_cache::cached_gemm_auto` 経由で
+    /// `TypedOps<half::f16>::gemm`（`crate::typed_f16`。`BackendOps::
+    /// typed_ops_f16()` accessor 経由）から到達する。`cached_gemm_auto`
+    /// はプロセス内キャッシュのため、この構築コストは
+    /// `TypedOps<f16>::gemm` を初めて呼んだときにのみ 1 回だけ支払われる
+    /// （2 回目以降はキャッシュヒット）。`f32` 側 `BackendOps::gemm`
+    /// （tiled 固定・不変）は本経路と無関係であり、利用者向け起動コスト
+    /// （`startup-bench`）への影響はない。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         let gemm = CudaGemm::new(device)?;
         let wmma = CudaWmmaGemm::new(device).ok();

@@ -566,6 +566,33 @@ pub(crate) fn cached_mma_tf32x3(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::gemm_auto::CudaGemmAuto`]
+/// （naive／tiled／WMMA／`mma.sync` 全 f16/f32 GEMM カーネルを保持する
+/// 自動経路選択スイート）をプロセス内キャッシュから取得する（イシュー
+/// #1703。キーは [`ContextKey`]。`cached_gemm` 冒頭コメント参照）。
+///
+/// `crate::typed_f16::TypedOps<half::f16>::gemm`（`ops::CudaBackendOps`
+/// の `typed_ops_f16()` accessor 経由）の唯一の呼び出し先。
+/// `CudaGemmAuto::new` は naive/tiled に加え WMMA・`mma.sync`（cc ゲート
+/// 非対応・NVRTC コンパイル失敗時は fail-soft に `None` 保持）を NVRTC
+/// コンパイルするため `cached_gemm` 単体より構築コストが大きい。本関数
+/// 経由でキャッシュすることで、`TypedOps<f16>::gemm` の 2 回目以降の
+/// 呼び出しはこの構築コストを再度支払わない（`cached_gemm`／
+/// `cached_mma_tf32x3` と同じ受け入れ条件）。`f32` 側 `BackendOps::gemm`
+/// （`cached_gemm` 経由）の起動コストには一切影響しない
+/// （`gemm_auto.rs::CudaGemmAuto::new` doc comment 参照:
+/// `TypedOps<f16>::gemm` を初めて呼んだときにのみ遅延構築される）。
+pub(crate) fn cached_gemm_auto(
+    device: &CudaDevice,
+) -> Result<Arc<crate::gemm_auto::CudaGemmAuto>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::gemm_auto::CudaGemmAuto>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::gemm_auto::CudaGemmAuto::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`CudaAllocator`]（出力バッファの
 /// サイズクラス別プール。イシュー #1020・REQ-14）をプロセス内キャッシュ
 /// から取得する。キーは [`ContextKey`]（ordinal + context の同一性）
