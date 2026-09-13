@@ -710,3 +710,28 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
 - facade 新規公開面: `pub fn manual_seed`（新規）。内部型・アクセサは
   facade へ露出させない（`crates/facade/tests/api_surface.rs::
   facade_does_not_expose_rng_internal_types` で機械検査）。
+
+## 追補（イシュー #1777）
+
+gather／scatter／scatter_add（#1637 で where／masked_fill を実装済みへ
+更新した「index 系」欄。#1776 で Op 定義・CPU 参照実装・VJP を実装済み）
+の CUDA ネイティブカーネル（`CudaBackendOps::gather`／`scatter`。
+`crates/backend-cuda/src/gather_scatter.rs`・`kernels_gather_scatter.rs`）
+を実装した。
+
+- **数値契約**: bit 同一（run-to-run 完全一致・CPU 参照実装と bit 完全
+  一致）。`scatter_add` は `fandhe_ai_tensor_core::ScatterReduce` doc の
+  決定的集約契約（row-major 走査順・`f64` アキュムレータ・最後に 1 回
+  だけ `f32` downcast）を CUDA カーネル内で再現する。
+- **fail-closed 検査**: `input`／`index`／`src` の shape 再検査
+  （`gather_out_shape`／`scatter_out_shape`）・`index` 値の範囲検査は
+  ホスト側でデバイス初期化より前に行い、CPU 実装と同一の
+  `BackendError::ShapeMismatch(ShapeError::IndexOutOfRange)` を返す。
+- **性能最適化は対象外**（`O(numel_out × index_shape[dim])` 走査。並列化
+  方式の高度化は別イシューのスコープ）。
+- **GB10 実機実測は未実施**（本エージェント実行環境に CUDA 実機なし。
+  実行コマンドは `crates/backend-cuda/tests/gather_scatter_parity.rs`
+  冒頭コメント参照）。
+- facade 新規公開面なし（既存 `Var::gather`／`scatter`／`scatter_add`／
+  `index_select` の再エクスポート経由でそのまま CUDA バックエンドへ
+  到達する）。Metal 専用カーネルは #1778 が残対象。

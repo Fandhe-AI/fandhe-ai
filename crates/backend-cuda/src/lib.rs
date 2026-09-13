@@ -411,6 +411,12 @@ mod rnn_cell;
 // （起動 API／NVRTC カーネル文字列の責務分離）。
 mod kernels_reduce;
 mod reduce;
+// イシュー #1777: gather／scatter（`torch.gather`／`torch.scatter`／
+// `torch.scatter_add` 相当）起動 API・カーネルソース。`reduce.rs`／
+// `kernels_reduce.rs` と同じ 2 ファイル構成（起動 API／NVRTC カーネル
+// 文字列の責務分離）。
+mod gather_scatter;
+mod kernels_gather_scatter;
 // イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線
 // （`gemm.rs::CudaGemm::new`）を実機で検証する `#[ignore]` テスト。
 // `context_cache`（非公開 `mod`）へ到達する必要があるため

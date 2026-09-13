@@ -35,9 +35,9 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DType, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ScalarBinaryOp, ScalarUnaryOp, SegmentKey, SegmentResource, SegmentRun, ShapeError,
-    SvdFactors, Tensor, UnaryElementwiseOp, reduce_out_shape, require_same_shape, row_norm_layout,
-    row_softmax_layout,
+    QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey, SegmentResource,
+    SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, gather_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
 };
 
 use crate::context_cache;
@@ -1236,6 +1236,23 @@ fn map_reduce_error(err: CudaError) -> BackendError {
             BackendError::KernelLaunchFailed(format!("empty reduction for op \"{op}\""))
         }
         CudaError::InvalidReduceShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
+}
+
+/// `gather_scatter::CudaGatherScatter` が返す `CudaError` を
+/// `BackendError` へ写像する（イシュー #1777）。`InvalidGatherScatterShape`
+/// （起動前の要素数積オーバーフロー・`i32::MAX` 上限・長さ不一致検査の
+/// 失敗。`ops.rs` 側の shape 検証〈`gather_out_shape`／
+/// `scatter_out_shape`〉を通過した入力からは実質到達しない防御的経路）
+/// は `map_reduce_error` の `InvalidReduceShape` と同じ理由で
+/// `ShapeError::ElementCountOverflow` へ、それ以外は既存 [`map_cuda_error`]
+/// へ委譲する。
+fn map_gather_scatter_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::InvalidGatherScatterShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
         other => map_cuda_error(other),
@@ -2679,6 +2696,109 @@ impl BackendOps for CudaBackendOps {
         self.elementwise_binary_scalar(x, mask, value, |ew, x_s, mask_s, v| {
             ew.run_masked_fill_f32(x_s, mask_s, v)
         })
+    }
+
+    /// `BackendOps::gather` の CUDA 実装（イシュー #1777）。
+    /// [`gather_out_shape`] で `input`／`index` の shape を再検査してから
+    /// `gather_scatter::run_gather_f32` へ委譲する（`backend-cpu::ops::
+    /// CpuBackendOps::gather` と同じ二重検査方針。`.claude/rules/
+    /// security.md` A08）。
+    fn gather(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        index: &Tensor<i32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = gather_out_shape(input.shape(), index.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gather: input not contiguous".into())
+        })?;
+        let index_owned = index.contiguous();
+        let index_slice = index_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gather: index not contiguous".into())
+        })?;
+
+        let gs = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_gather_scatter(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_gather_scatter_error, || {
+            gs.run_gather_f32(input_slice, index_slice, input.shape(), index.shape(), dim)
+        })?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::scatter` の CUDA 実装（イシュー #1777）。
+    /// [`scatter_out_shape`] で `input`／`index`／`src` の shape を
+    /// 再検査し、`index` の値が `[0, input.shape()[dim])` 範囲内である
+    /// ことをホスト側で全走査して独立検証（`Var` 側の forward 時点検証と
+    /// 重複するが、`CudaBackendOps::scatter` を `Var` を経由せず直接
+    /// 呼び出す経路でも誤ったデバイス書き込みを防ぐための判定迂回経路
+    /// 排除。`backend-cpu::gather_scatter::scatter` モジュール doc と
+    /// 同じ理由。`.claude/rules/security.md` A08）してから
+    /// `gather_scatter::run_scatter_f32` へ委譲する。
+    fn scatter(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        index: &Tensor<i32>,
+        src: &Tensor<f32>,
+        reduce: ScatterReduce,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = scatter_out_shape(input.shape(), index.shape(), src.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+
+        let index_owned = index.contiguous();
+        let index_slice = index_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scatter: index not contiguous".into())
+        })?;
+        let dim_size = input.shape()[dim];
+        for &v in index_slice {
+            if v < 0 || (v as usize) >= dim_size {
+                return Err(BackendError::ShapeMismatch(ShapeError::IndexOutOfRange {
+                    dim,
+                    index: v as i64,
+                    dim_size,
+                }));
+            }
+        }
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scatter: input not contiguous".into())
+        })?;
+        let src_owned = src.contiguous();
+        let src_slice = src_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scatter: src not contiguous".into())
+        })?;
+
+        let gs = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_gather_scatter(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_gather_scatter_error, || {
+            gs.run_scatter_f32(
+                input_slice,
+                index_slice,
+                src_slice,
+                input.shape(),
+                index.shape(),
+                dim,
+                reduce,
+            )
+        })?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// `BackendOps::scalar_unary` の CUDA 実装（イシュー #1700）。

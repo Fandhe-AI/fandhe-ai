@@ -487,6 +487,22 @@ pub(crate) fn cached_reduce(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::gather_scatter::
+/// CudaGatherScatter`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1777。キーは [`ContextKey`]。`cached_reduce` と同型）。
+/// `ops::CudaBackendOps::gather`／`scatter` の唯一の呼び出し先。
+pub(crate) fn cached_gather_scatter(
+    device: &CudaDevice,
+) -> Result<Arc<crate::gather_scatter::CudaGatherScatter>, CudaError> {
+    static CACHE: OnceLock<
+        SingleFlightCache<ContextKey, crate::gather_scatter::CudaGatherScatter>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::gather_scatter::CudaGatherScatter::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する `op`（[`ScalarUnaryOp`]）の
 /// テンプレート生成カーネルをプロセス内キャッシュから取得する
 /// （イシュー #1700。キーは [`ContextKey`]。`cached_gemm` 冒頭コメント
