@@ -367,7 +367,7 @@ impl MetalBackendOps {
         if crate::scalar_op_source::unary_kernel_source(op).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "scalar_unary: Metal template kernel not implemented for {op:?} \
-                 (#1708／#1709 が担当するスコープ外の可能性あり)"
+                 (#1709 が担当するスコープ外の可能性あり)"
             )));
         }
 
@@ -385,7 +385,7 @@ impl MetalBackendOps {
         let Some(pipeline) = pipeline else {
             return Err(BackendError::Unsupported(format!(
                 "scalar_unary: Metal template kernel not implemented for {op:?} \
-                 (#1708／#1709 が担当するスコープ外の可能性あり)"
+                 (#1709 が担当するスコープ外の可能性あり)"
             )));
         };
         let out = ew
@@ -406,7 +406,7 @@ impl MetalBackendOps {
         if crate::scalar_op_source::binary_kernel_source(op).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "scalar_binary: Metal template kernel not implemented for {op:?} \
-                 (#1708／#1709 が担当するスコープ外の可能性あり)"
+                 (#1709 が担当するスコープ外の可能性あり)"
             )));
         }
 
@@ -429,7 +429,7 @@ impl MetalBackendOps {
         let Some(pipeline) = pipeline else {
             return Err(BackendError::Unsupported(format!(
                 "scalar_binary: Metal template kernel not implemented for {op:?} \
-                 (#1708／#1709 が担当するスコープ外の可能性あり)"
+                 (#1709 が担当するスコープ外の可能性あり)"
             )));
         };
         let out = ew
@@ -2051,9 +2051,11 @@ impl BackendOps for MetalBackendOps {
         })
     }
 
-    /// `BackendOps::scalar_unary` の Metal 実装（イシュー #1707）。
-    /// `Sqrt` のみ実装済み（`crate::scalar_op_source` モジュール doc
-    /// 「スコープ」参照。他 kind は既定 `Unsupported` のまま）。
+    /// `BackendOps::scalar_unary` の Metal 実装（イシュー #1707・#1708）。
+    /// `Sqrt`（#1707）＋超越関数系 8 kind（`Neg`／`Abs`／`Log`／`Log2`／
+    /// `Log10`／`Sin`／`Cos`／`Tan`。#1708）実装済み（`crate::
+    /// scalar_op_source` モジュール doc「スコープ」参照。他 kind は既定
+    /// `Unsupported` のまま）。
     fn scalar_unary(
         &self,
         op: ScalarUnaryOp,
