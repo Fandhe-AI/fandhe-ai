@@ -308,7 +308,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `detach()` | `tf.stop_gradient` | なし | 既存 `Var` から新規葉ノードへ変換する Op | S〜M |
 | `retain_graph=True` | - | 該当なし（`Tape::backward` はグラフノード〈`nodes`〉を破棄せず、呼び出しごとに独立した `Gradients` を新規生成するのみで、グラフ保持は既定動作。`retain_graph` フラグ自体が不要な設計。ただし PyTorch の `.grad` 蓄積〈複数回 `backward()` の勾配加算〉に相当する契約は無く、同一 loss に対する複数回 `backward()` の勾配蓄積セマンティクスは未検証） | 設計判断が必要（複数回 backward の勾配蓄積契約） | M |
 | 高階微分（`grad of grad`） | `tf.GradientTape` のネスト | なし（テープは 1 階のみを前提とした構造と推定） | Op 自体を微分可能にする再設計（VJP の VJP）。設計: `docs/autodiff-higher-order-grad-decision.md`（#1622） | XL |
-| custom `autograd.Function` | `tf.custom_gradient` | なし（`Op` enum は crate 非公開の固定 variant 集合。ユーザー定義 Op を挿す口がない） | 拡張可能な Op プラグイン機構の設計（現行のクローズドな `Op` enum 設計を変更） | XL |
+| custom `autograd.Function` | `tf.custom_gradient` | なし（`Op` enum は crate 非公開の固定 variant 集合。ユーザー定義 Op を挿す口がない） | 拡張可能な Op プラグイン機構の設計（現行のクローズドな `Op` enum 設計を変更）。設計: `docs/autodiff-custom-function-decision.md`（#1623） | XL |
 | `torch.utils.checkpoint`（activation checkpointing） | `tf.recompute_grad` | 部分（view 系ノード〈reshape/transpose〉は #1080 で再計算方式化済みだが、任意サブグラフの再計算チェックポイントではない） | 汎用チェックポイント機構の設計 | L |
 
 ### 2.12 dtype
@@ -316,8 +316,8 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | PyTorch | TF/Keras | fandhe-ai | 実装に必要なもの | 難度 |
 |---|---|---|---|---|
 | `float32` | `float32` | あり（唯一の演算 dtype） | - | - |
-| `float64` | `float64` | 部分（`Tensor<f64>` は生成できるが `BackendOps`/`Var` の算術対象外） | `Element` 抽象を活かした dtype 別 dispatch の設計・全カーネルの多重化 | XL |
-| `float16`/`bfloat16` | 同左 | 部分（GPU カーネル内部の中間表現・Tensor Core 経路にのみ存在。公開 dtype ではない） | 公開 `Tensor<f16>` 演算経路・VJP のスケーリング契約設計（mixed precision） | XL |
+| `float64` | `float64` | 部分（`Tensor<f64>` は生成できるが `BackendOps`/`Var` の算術対象外） | `Element` 抽象を活かした dtype 別 dispatch の設計・全カーネルの多重化（設計はイシュー #1648・`docs/backend-dtype-dispatch-design.md` で確定済み。実装は #1649〜#1651 へ引き継ぎ） | XL |
+| `float16`/`bfloat16` | 同左 | 部分（GPU カーネル内部の中間表現・Tensor Core 経路にのみ存在。公開 dtype ではない） | 公開 `Tensor<f16>` 演算経路・VJP のスケーリング契約設計（mixed precision）（dtype dispatch 方式はイシュー #1648・`docs/backend-dtype-dispatch-design.md` で確定済み。AMP スケーリング契約は #1625 の対象） | XL |
 | `int32`/`int64`/`bool` | 同左 | 部分（`Tensor<T>` 生成のみ。CrossEntropy の `targets: Tensor<i32>` のように限定的に内部使用） | 汎用整数演算・型変換 API | L |
 | `.to(dtype)`（型変換） | `tf.cast` | なし | dtype 変換 Op（勾配は型により打ち切り／恒等など個別設計） | M |
 | AMP（自動混合精度） | `tf.keras.mixed_precision` | なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記） | 損失スケーリング・unscale ステップの追加（`optim.rs` の適用順序契約に定義済みの拡張点） | L |
