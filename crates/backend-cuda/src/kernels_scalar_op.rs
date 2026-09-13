@@ -26,29 +26,37 @@
 //! `nvrtc::compile_ptx` は `prec-div`／`prec-sqrt` が既定 true
 //! （fast-math 未指定）で IEEE 754 丸めになる（`kernels_rmsnorm.rs`
 //! 冒頭コメント「近似 intrinsic `rsqrtf` を使わない理由」で実機確認済み）。
-//! よって `Sub`（`-`）・`Div`（`/`）・`Sqrt`（`sqrtf`。`rsqrtf` は使わない）
+//! よって `Sub`（`-`）・`Div`（`/`）・`Sqrt`（`sqrtf`。`rsqrtf` は使わない）・
+//! `Neg`（`-x`。符号ビット反転）・`Abs`（`fabsf`。符号ビットクリア）
 //! はホスト `f32` 演算と bit 同一になる想定（`elementwise_matches_cpu_
-//! across_ops` の `add`／`mul`／`relu` と同じ扱い）。`Pow`（`powf`）は
-//! 超越関数の合成近似のため bit 同一を主張せず REQ-2 複合判定のみで
-//! 検証する（既存 `exp`／`tanh` と同じ扱い）。
+//! across_ops` の `add`／`mul`／`relu` と同じ扱い。`NaN` 入力は payload
+//! が処理系依存のためクラス一致で検証する）。`Pow`（`powf`）・
+//! `Log`／`Log2`／`Log10`（`logf`／`log2f`／`log10f`）・`Sin`／`Cos`／
+//! `Tan`（`sinf`／`cosf`／`tanf`）は超越関数（CUDA libm の ulp 誤差が
+//! ホスト側 glibc libm と一致する保証がない）のため bit 同一を主張せず
+//! REQ-2 複合判定のみで検証する（既存 `exp`／`tanh` と同じ扱い）。
+//! 近似 intrinsic（`__logf`／`__sinf` 等の `__` プレフィックス付き）・
+//! `double` 版（`log`／`sin` 等への暗黙昇格）は使わない。
 //!
 //! # スコープ
 //!
-//! 本イシュー（#1700）は [`ScalarBinaryOp::Sub`]／[`ScalarBinaryOp::Div`]／
-//! [`ScalarBinaryOp::Pow`]、[`ScalarUnaryOp::Sqrt`] のみ実装する。他 kind
-//! は `None`（未実装。呼び出し元 `ops::CudaBackendOps::scalar_unary`／
-//! `scalar_binary` が `BackendError::Unsupported` を返しホスト参照実装
-//! （`ScalarUnaryOp::apply`／`ScalarBinaryOp::apply`）へフォールバック
-//! する既存契約。`fandhe_ai_autodiff::grad::scalar_unary_with_fallback`／
-//! `scalar_binary_with_fallback` 参照）。超越関数系（`log`／`log2`／
-//! `log10`／`sin`／`cos`／`tan`／`abs`／`neg`）は #1701、比較演算＋
-//! `Clamp` は #1702 が同じ関数へ match arm を追加する形で拡張する。
-//! `LeakyRelu`／`Elu`／`Softplus`／`Clamp`／`PowScalar`（ペイロードあり
-//! unary kind）・活性化 unary kind（`Relu`／`Exp`／`Tanh`／`Sigmoid`／
-//! `Gelu`／`GeluTanh`／`Silu`／`Hardswish`）・`Add`／`Mul`／`Maximum`／
-//! `Minimum`（比較・算術以外の残り binary kind）はいずれの sub issue
-//! にも含まれず対象外のまま残る（`.claude/rules/out-of-scope-
-//! tracking.md` 対象。必要なら別イシューで追跡）。
+//! [`ScalarBinaryOp::Sub`]／[`ScalarBinaryOp::Div`]／[`ScalarBinaryOp::Pow`]
+//! （#1700）に加え、[`ScalarUnaryOp::Sqrt`]（#1700）・[`ScalarUnaryOp::Neg`]／
+//! [`ScalarUnaryOp::Abs`]／[`ScalarUnaryOp::Log`]／[`ScalarUnaryOp::Log2`]／
+//! [`ScalarUnaryOp::Log10`]／[`ScalarUnaryOp::Sin`]／[`ScalarUnaryOp::Cos`]／
+//! [`ScalarUnaryOp::Tan`]（#1701）を実装する。他 kind は `None`（未実装。
+//! 呼び出し元 `ops::CudaBackendOps::scalar_unary`／`scalar_binary` が
+//! `BackendError::Unsupported` を返しホスト参照実装（`ScalarUnaryOp::apply`／
+//! `ScalarBinaryOp::apply`）へフォールバックする既存契約。
+//! `fandhe_ai_autodiff::grad::scalar_unary_with_fallback`／
+//! `scalar_binary_with_fallback` 参照）。比較演算（`Gt`／`Ge`／`Lt`／
+//! `Le`／`Eq`／`Ne`）＋`Clamp` は #1702 が同じ関数へ match arm を追加
+//! する形で拡張する。`LeakyRelu`／`Elu`／`Softplus`／`PowScalar`
+//! （ペイロードあり unary kind）・活性化 unary kind（`Relu`／`Exp`／
+//! `Tanh`／`Sigmoid`／`Gelu`／`GeluTanh`／`Silu`／`Hardswish`）・
+//! `Add`／`Mul`／`Maximum`／`Minimum`（比較・算術以外の残り binary kind）
+//! はいずれの sub issue にも含まれず対象外のまま残る（`.claude/rules/
+//! out-of-scope-tracking.md` 対象。必要なら別イシューで追跡）。
 
 use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 
@@ -57,6 +65,19 @@ use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
     match op {
         ScalarUnaryOp::Sqrt => Some("sqrtf(x)"),
+        // `Neg`／`Abs` はホスト `f32` 演算（`-x`／`f32::abs`）と bit
+        // 同一（モジュール doc「NVRTC 既定オプションと数値契約」参照）。
+        ScalarUnaryOp::Neg => Some("-x"),
+        ScalarUnaryOp::Abs => Some("fabsf(x)"),
+        // 超越関数系（`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`）は
+        // 単精度 libm 名のみを使う（`__` プレフィックス付き近似
+        // intrinsic・`double` 版への暗黙昇格は使わない）。
+        ScalarUnaryOp::Log => Some("logf(x)"),
+        ScalarUnaryOp::Log2 => Some("log2f(x)"),
+        ScalarUnaryOp::Log10 => Some("log10f(x)"),
+        ScalarUnaryOp::Sin => Some("sinf(x)"),
+        ScalarUnaryOp::Cos => Some("cosf(x)"),
+        ScalarUnaryOp::Tan => Some("tanf(x)"),
         _ => None,
     }
 }
@@ -164,10 +185,52 @@ mod tests {
         }
     }
 
+    /// #1701 の対象 8 kind が REQ-8 境界チェックを含み、単精度 libm のみ
+    /// を使う（近似 intrinsic・`double` 版への暗黙昇格を含まない）ことを
+    /// 静的ソース検査で固定する（`kernels_rmsnorm.rs` の同型契約）。
+    #[test]
+    fn transcendental_unary_kinds_include_bounds_check_and_use_precise_libm() {
+        for op in [
+            ScalarUnaryOp::Neg,
+            ScalarUnaryOp::Abs,
+            ScalarUnaryOp::Log,
+            ScalarUnaryOp::Log2,
+            ScalarUnaryOp::Log10,
+            ScalarUnaryOp::Sin,
+            ScalarUnaryOp::Cos,
+            ScalarUnaryOp::Tan,
+        ] {
+            let src = unary_kernel_source(op)
+                .unwrap_or_else(|| panic!("{} must be implemented by #1701", op.kind_name()));
+            assert!(src.contains("if (idx < numel)"));
+            assert!(src.contains(&unary_function_name(op)));
+            // 近似 intrinsic（`__` プレフィックス）は使わない。
+            assert!(!src.contains("__logf("));
+            assert!(!src.contains("__log2f("));
+            assert!(!src.contains("__log10f("));
+            assert!(!src.contains("__sinf("));
+            assert!(!src.contains("__cosf("));
+            assert!(!src.contains("__tanf("));
+            // `double` 版（`logf` ではなく `log` 等）への暗黙昇格も
+            // 使わない（`sinf(` 等の単精度名のみを許容）。
+            assert!(!src.contains(" log("));
+            assert!(!src.contains(" log2("));
+            assert!(!src.contains(" log10("));
+            assert!(!src.contains(" sin("));
+            assert!(!src.contains(" cos("));
+            assert!(!src.contains(" tan("));
+            assert!(!src.contains(" fabs("));
+        }
+    }
+
     #[test]
     fn unimplemented_kinds_return_none() {
-        assert!(unary_kernel_source(ScalarUnaryOp::Log).is_none());
+        // `Log` は #1701 で実装済みになったため、番兵 kind を未実装のまま
+        // 残る kind（#1702 が担当する比較演算・活性化系）へ付け替える
+        // （残すと未実装 kind への `None` フォールバック契約の検証が
+        // 消えてしまう）。
         assert!(unary_kernel_source(ScalarUnaryOp::Relu).is_none());
+        assert!(unary_kernel_source(ScalarUnaryOp::Sigmoid).is_none());
         assert!(binary_kernel_source(ScalarBinaryOp::Add).is_none());
         assert!(binary_kernel_source(ScalarBinaryOp::Maximum).is_none());
     }
@@ -178,6 +241,20 @@ mod tests {
             unary_function_name(ScalarUnaryOp::Sqrt),
             "scalar_unary_sqrt"
         );
+        assert_eq!(unary_function_name(ScalarUnaryOp::Neg), "scalar_unary_neg");
+        assert_eq!(unary_function_name(ScalarUnaryOp::Abs), "scalar_unary_abs");
+        assert_eq!(unary_function_name(ScalarUnaryOp::Log), "scalar_unary_log");
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::Log2),
+            "scalar_unary_log2"
+        );
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::Log10),
+            "scalar_unary_log10"
+        );
+        assert_eq!(unary_function_name(ScalarUnaryOp::Sin), "scalar_unary_sin");
+        assert_eq!(unary_function_name(ScalarUnaryOp::Cos), "scalar_unary_cos");
+        assert_eq!(unary_function_name(ScalarUnaryOp::Tan), "scalar_unary_tan");
         assert_eq!(
             binary_function_name(ScalarBinaryOp::Sub),
             "scalar_binary_sub"
@@ -190,5 +267,27 @@ mod tests {
             binary_function_name(ScalarBinaryOp::Pow),
             "scalar_binary_pow"
         );
+    }
+
+    /// `Neg`（`-x`）／`Abs`（`fabsf`）はホスト `f32` 演算と bit 同一に
+    /// なる想定（モジュール doc 参照）。特殊値（`-0.0`／`NaN`）でも
+    /// ホスト側の符号規約と一致することをここで明示しておく（NVRTC 実機
+    /// 経由の parity テストは `tests/scalar_op_parity.rs` を参照）。
+    #[test]
+    fn neg_and_abs_host_reference_matches_documented_bit_contract() {
+        assert_eq!(
+            ScalarUnaryOp::Neg.apply(0.0_f32).to_bits(),
+            (-0.0_f32).to_bits()
+        );
+        assert_eq!(
+            ScalarUnaryOp::Neg.apply(-0.0_f32).to_bits(),
+            (0.0_f32).to_bits()
+        );
+        assert_eq!(
+            ScalarUnaryOp::Abs.apply(-0.0_f32).to_bits(),
+            (0.0_f32).to_bits()
+        );
+        assert!(ScalarUnaryOp::Neg.apply(f32::NAN).is_nan());
+        assert!(ScalarUnaryOp::Abs.apply(f32::NAN).is_nan());
     }
 }

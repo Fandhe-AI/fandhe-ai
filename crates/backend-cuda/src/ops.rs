@@ -854,7 +854,7 @@ impl CudaBackendOps {
         if crate::kernels_scalar_op::unary_kernel_source(op).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "scalar_unary: CUDA template kernel not implemented for {op:?} \
-                 (#1701/#1702 が担当するスコープ外の可能性あり)"
+                 (#1702 が担当するスコープ外の可能性あり)"
             )));
         }
 
@@ -877,7 +877,7 @@ impl CudaBackendOps {
         let Some(func) = func else {
             return Err(BackendError::Unsupported(format!(
                 "scalar_unary: CUDA template kernel not implemented for {op:?} \
-                 (#1701/#1702 が担当するスコープ外の可能性あり)"
+                 (#1702 が担当するスコープ外の可能性あり)"
             )));
         };
         let out = self.with_driver_call(
@@ -903,7 +903,7 @@ impl CudaBackendOps {
         if crate::kernels_scalar_op::binary_kernel_source(op).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "scalar_binary: CUDA template kernel not implemented for {op:?} \
-                 (#1701/#1702 が担当するスコープ外の可能性あり)"
+                 (#1702 が担当するスコープ外の可能性あり)"
             )));
         }
 
@@ -931,7 +931,7 @@ impl CudaBackendOps {
         let Some(func) = func else {
             return Err(BackendError::Unsupported(format!(
                 "scalar_binary: CUDA template kernel not implemented for {op:?} \
-                 (#1701/#1702 が担当するスコープ外の可能性あり)"
+                 (#1702 が担当するスコープ外の可能性あり)"
             )));
         };
         let out = self.with_driver_call(
