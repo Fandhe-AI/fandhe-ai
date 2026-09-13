@@ -132,7 +132,15 @@ def run_aggregate(logdir, n_runs=5, out=sys.stdout):
         f"{'case':16s} {'numel':>9s} {'before_med_s':>14s} {'after_med_s':>14s} {'ratio':>8s} {'grad_ok':>8s}",
         file=out,
     )
-    all_ok = True
+    # `grad_all_ok`（fold_bits 完全一致）と `ratio_all_ok`（全セル 5 run
+    # 中央値比 after/before <= 1.00）は独立に集計する。総合合否
+    # （呼び出し元 main() の終了コードに反映される `all_ok`）は両方の
+    # 論理積とする（codex-review [P1] 指摘対応: 従来は grad_ok のみで
+    # `all_ok` を決めており、全セルで性能が後退していても fold_bits さえ
+    # 一致すれば成功終了していた。事前登録判定規則「5 run 中央値比
+    # after/before <= 1.00」を成功条件へ正しく含める）。
+    grad_all_ok = True
+    ratio_all_ok = True
     for k in keys:
         bench_samples_b = before_samples[k]
         bench_samples_a = after_samples[k]
@@ -147,6 +155,12 @@ def run_aggregate(logdir, n_runs=5, out=sys.stdout):
         bmed = statistics.median(bench_samples_b)
         amed = statistics.median(bench_samples_a)
         ratio = amed / bmed if bmed > 0 else float("nan")
+        # `ratio` が NaN（bmed<=0 の異常値）の場合 `ratio <= 1.00` は
+        # Python の比較規則により False になるため、fail-closed で
+        # ratio_ok=False として扱われる（NaN を「非後退」と誤判定しない）。
+        ratio_ok = ratio <= 1.00
+        if not ratio_ok:
+            ratio_all_ok = False
 
         bvals = before_grad[k]
         avals = after_grad[k]
@@ -158,16 +172,19 @@ def run_aggregate(logdir, n_runs=5, out=sys.stdout):
             and set(bvals) == set(avals)
         )
         if not grad_ok:
-            all_ok = False
+            grad_all_ok = False
         flag = "OK" if grad_ok else "MISMATCH"
-        over = " <=1.00" if ratio <= 1.00 else " >1.00"
+        over = " <=1.00" if ratio_ok else " >1.00"
         print(
             f"{k[0]:16s} {k[1]:9d} {bmed:14.9f} {amed:14.9f} {ratio:8.4f} {flag:>8s}{over}",
             file=out,
         )
 
+    all_ok = grad_all_ok and ratio_all_ok
     print(file=out)
-    print("grad bit-fold all match:", all_ok, file=out)
+    print("grad bit-fold all match:", grad_all_ok, file=out)
+    print("all cells ratio<=1.00:", ratio_all_ok, file=out)
+    print("overall judgement (grad match and ratio<=1.00):", all_ok, file=out)
     return all_ok
 
 
@@ -280,7 +297,31 @@ def self_test():
         assert ok is False, "fold_bits mismatch fixture should report all_ok=False"
         assert "grad bit-fold all match: False" in buf.getvalue()
 
-    print("self-test: all fixtures passed (normal / missing-cell / duplicate-key / fold-bits-mismatch)")
+    # --- fixture 5: ratio>1.00（after が全セルで遅い。grad は完全一致）。
+    # codex-review [P1] 指摘対応の回帰確認: grad_ok が全セルで True でも
+    # 性能後退があれば all_ok=False・終了コード非 0 になることを検証する
+    # （旧実装は grad_ok のみで all_ok を決めていたため、この fixture は
+    # 旧実装では誤って ok=True を返していた）。
+    with tempfile.TemporaryDirectory() as d:
+        for run in range(1, 6):
+            fold_by_key = {k: fixed_bits for k in keys}
+            b_lines, g_lines = _fixture_lines({k: 0.001 for k in keys}, fold_by_key)
+            _write_log(os.path.join(d, f"before_round{run}.log"), b_lines, g_lines)
+            # after は before の 2 倍遅い（ratio=2.0 > 1.00）。
+            b_lines_a, g_lines_a = _fixture_lines({k: 0.002 for k in keys}, fold_by_key)
+            _write_log(os.path.join(d, f"after_round{run}.log"), b_lines_a, g_lines_a)
+        buf = io.StringIO()
+        ok = run_aggregate(d, 5, out=buf)
+        assert ok is False, "ratio>1.00 fixture should fail even when grad matches"
+        out_text = buf.getvalue()
+        assert "grad bit-fold all match: True" in out_text
+        assert "all cells ratio<=1.00: False" in out_text
+        assert "overall judgement (grad match and ratio<=1.00): False" in out_text
+
+    print(
+        "self-test: all fixtures passed (normal / missing-cell / duplicate-key / "
+        "fold-bits-mismatch / ratio-regression)"
+    )
 
 
 if __name__ == "__main__":

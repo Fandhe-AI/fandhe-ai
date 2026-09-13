@@ -130,6 +130,24 @@ if [ ! -f "$AFTER_REPO/Cargo.toml" ]; then
     exit 1
 fi
 
+# BEFORE_REPO 配置手順（`docs/perf/logs/cuda-mse-backward-1692/orchestrate.sh`
+# と同型の防御的コピー）: (d) で使う `mse_backward_bench.rs` は
+# `crates/facade/tests/mse_backward_bench.rs`。84490ad1 時点で既に存在する
+# ことを確認済み（`git diff 84490ad1 HEAD -- crates/facade/tests/
+# mse_backward_bench.rs` は無差分）だが、将来 BEFORE_REPO がこのファイル
+# 導入前のコミットを指すケースに備え、未配置の場合のみ AFTER_REPO 側の
+# 内容をコピーして補う（既に配置済みなら上書きしない）。
+BENCH_REL_PATH="crates/facade/tests/mse_backward_bench.rs"
+if [ ! -f "$AFTER_REPO/$BENCH_REL_PATH" ]; then
+    echo "error: $AFTER_REPO/$BENCH_REL_PATH not found" >&2
+    exit 1
+fi
+if [ ! -f "$BEFORE_REPO/$BENCH_REL_PATH" ]; then
+    echo "info: $BEFORE_REPO/$BENCH_REL_PATH が未配置のためコピーします" >&2
+    mkdir -p "$(dirname "$BEFORE_REPO/$BENCH_REL_PATH")"
+    cp "$AFTER_REPO/$BENCH_REL_PATH" "$BEFORE_REPO/$BENCH_REL_PATH"
+fi
+
 echo "=== env_info (before) ==="
 {
     uname -srm
@@ -153,8 +171,11 @@ cat "$SCRIPT_DIR/env_info_after.txt"
 uptime >"$SCRIPT_DIR/uptime_before.txt"
 
 echo "=== (a) REQ-2 正しさ確認（after 腕・mse_parity） ==="
-(cd "$AFTER_REPO" && eval "$MSE_PARITY_CMD") >"$SCRIPT_DIR/mse_parity_after.log" 2>&1 || \
+MSE_PARITY_OK=1
+if ! (cd "$AFTER_REPO" && eval "$MSE_PARITY_CMD") >"$SCRIPT_DIR/mse_parity_after.log" 2>&1; then
+    MSE_PARITY_OK=0
     echo "WARNING: mse_parity (after) failed; see $SCRIPT_DIR/mse_parity_after.log" >&2
+fi
 tail -20 "$SCRIPT_DIR/mse_parity_after.log"
 
 echo "=== (b) bit 同一確認（before 腕） ==="
@@ -193,9 +214,12 @@ fi
 
 diff -u "$SCRIPT_DIR/bitdump_before_filtered.txt" "$SCRIPT_DIR/bitdump_after_filtered.txt" \
     >"$SCRIPT_DIR/bitdump_diff.txt" 2>&1 || true
+BITDUMP_OK=1
 if [ "$BITDUMP_COUNT_OK" -eq 0 ]; then
+    BITDUMP_OK=0
     echo "bit dump: UNDETERMINED（件数・項目集合の検証に失敗したため bit 同一の判定を確定できない。$SCRIPT_DIR/bitdump_diff.txt・bitdump_label_diff.txt を参照）" >&2
 elif [ -s "$SCRIPT_DIR/bitdump_diff.txt" ]; then
+    BITDUMP_OK=0
     echo "WARNING: bitdump_diff.txt is non-empty (bit mismatch detected). See $SCRIPT_DIR/bitdump_diff.txt" >&2
 else
     echo "bit dump: $BITDUMP_COUNT_BEFORE/$BITDUMP_COUNT_AFTER 行・0 diff lines (bit-identical)"
@@ -214,8 +238,15 @@ tail -20 "$SCRIPT_DIR/batch_counters_before.log"
 tail -20 "$SCRIPT_DIR/backward_phase_before.log"
 
 echo "=== (d) backward マイクロベンチ 5 round・起動順反転 ==="
+# `set -eu` 下では「サブシェル呼び出し + リダイレクト」だけの単純コマンドが
+# 非 0 終了すると、続く `xxx_rc=$?` 行の実行前に `set -e` がスクリプトを
+# 即座に終了させてしまい、対をなす腕の実行や rc 判定・rounds.log 出力が
+# スキップされる（Bugbot 指摘・#1691 レビュー是正）。各コマンドの周囲だけ
+# `set +e`/`set -e` で挟み、rc を確実に捕捉してから通常の fail-closed 判定
+# （下の if 節）へ渡す。
 for round in $(seq 1 "$ROUNDS"); do
     echo "-- round ${round}/${ROUNDS} --"
+    set +e
     if [ $((round % 2)) -eq 1 ]; then
         order="before_first"
         (cd "$BEFORE_REPO" && eval "$MSE_BENCH_CMD") >"$SCRIPT_DIR/before_round${round}.log" 2>&1
@@ -229,6 +260,7 @@ for round in $(seq 1 "$ROUNDS"); do
         (cd "$BEFORE_REPO" && eval "$MSE_BENCH_CMD") >"$SCRIPT_DIR/before_round${round}.log" 2>&1
         before_rc=$?
     fi
+    set -e
     echo "round=${round} order=${order} before_rc=${before_rc} after_rc=${after_rc}" >>"$SCRIPT_DIR/rounds.log"
     if [ "$before_rc" -ne 0 ] || [ "$after_rc" -ne 0 ]; then
         echo "エラー: round ${round} で非 0 終了（before_rc=${before_rc} after_rc=${after_rc}）" >&2
@@ -236,7 +268,12 @@ for round in $(seq 1 "$ROUNDS"); do
     fi
 done
 
-python3 "$SCRIPT_DIR/aggregate.py" "$SCRIPT_DIR" "$ROUNDS" | tee "$SCRIPT_DIR/aggregate.md"
+AGGREGATE_OK=1
+if ! python3 "$SCRIPT_DIR/aggregate.py" "$SCRIPT_DIR" "$ROUNDS" >"$SCRIPT_DIR/aggregate.md" 2>&1; then
+    AGGREGATE_OK=0
+    echo "WARNING: aggregate.py exited non-zero (regression ratio>1.00 or grad mismatch); see $SCRIPT_DIR/aggregate.md" >&2
+fi
+cat "$SCRIPT_DIR/aggregate.md"
 
 echo "=== (f) #[ignore] 群非後退確認（after 腕） ==="
 (cd "$AFTER_REPO" && eval "$IGNORED_CMD_MSE_PARITY") >"$SCRIPT_DIR/ignored_after_mse_parity.log" 2>&1
@@ -254,13 +291,16 @@ tail -20 "$SCRIPT_DIR/ignored_after_device_param_store_backend_parity.log"
 
 echo "=== (e) A/B（framework-compare train。5 round・record_only） ==="
 mkdir -p "$SCRIPT_DIR/ab"
-(
+AB_OK=1
+if ! (
     cd "$AFTER_REPO/scripts/bench/framework-compare" && \
     AB_BEFORE_FACADE_PATH="$BEFORE_REPO/crates/facade" \
     AB_AFTER_FACADE_PATH="$AFTER_REPO/crates/facade" \
     bash run_ab_mse_encode_metal.sh 1691
-) >"$SCRIPT_DIR/ab/run_ab_1691.log" 2>&1 || \
-    echo "WARNING: A/B script exited non-zero; see $SCRIPT_DIR/ab/run_ab_1691.log" >&2
+) >"$SCRIPT_DIR/ab/run_ab_1691.log" 2>&1; then
+    AB_OK=0
+    echo "WARNING: A/B script exited non-zero (regression, checksum mismatch, or undetermined); see $SCRIPT_DIR/ab/run_ab_1691.log" >&2
+fi
 tail -40 "$SCRIPT_DIR/ab/run_ab_1691.log"
 # A/B 生成物（results/raw 配下・compare-train-1691*.md 等）はコピーせず
 # `$AFTER_REPO/scripts/bench/framework-compare/` 配下に残す（README
@@ -268,4 +308,23 @@ tail -40 "$SCRIPT_DIR/ab/run_ab_1691.log"
 
 uptime >"$SCRIPT_DIR/uptime_after.txt"
 
-echo DONE
+# 総合判定（README「事前登録判定規則」の総合判定節）: (a)(b)(f) pass かつ
+# (c) 一致かつ (d)(e) すべて ratio<=1.00 → ADOPT（終了コード 0）。
+# (e) または (d) に ratio>1.00、あるいは実機到達不能・件数検証失敗による
+# UNDETERMINED → REJECT/UNDETERMINED のいずれでも非 0 終了とする
+# （codex-review [P1] 指摘対応: 判定失敗・判定不能を WARNING 表示のみで
+# 終了コード 0 のまま握り潰さない）。(c)(f) は非 0 終了時に `set -eu` が
+# 即座にスクリプトを中断させるため、ここに到達した時点で既に pass 確定。
+# (d) の round 単位失敗も同様に既に exit 1 済み。
+OVERALL_OK=1
+[ "$MSE_PARITY_OK" -eq 1 ] || OVERALL_OK=0
+[ "$BITDUMP_OK" -eq 1 ] || OVERALL_OK=0
+[ "$AGGREGATE_OK" -eq 1 ] || OVERALL_OK=0
+[ "$AB_OK" -eq 1 ] || OVERALL_OK=0
+
+if [ "$OVERALL_OK" -eq 1 ]; then
+    echo "DONE（総合判定: ADOPT 相当。(a)(b)(c)(d)(e)(f) すべて pass・非後退）"
+else
+    echo "DONE（総合判定: NOT ADOPT。mse_parity_ok=$MSE_PARITY_OK bitdump_ok=$BITDUMP_OK aggregate_ok=$AGGREGATE_OK ab_ok=$AB_OK のいずれかが 0。詳細は各ログ・aggregate.md・ab/run_ab_1691.log を参照）" >&2
+    exit 1
+fi
