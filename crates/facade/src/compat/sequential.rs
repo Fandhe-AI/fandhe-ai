@@ -534,12 +534,30 @@ impl Sequential {
     /// 変化させない。#1022 で download を撤去済み）で得た [`ResidentLeaf`]
     /// 列から forward する。`Tape` はこの呼び出しのスコープ内で破棄される
     /// （`Sequential::predict` と同じ運用。`fandhe_ai_autodiff::nn::linear`
-    /// 「`Tape` はステップごとに生成・破棄される前提」参照）。既存
-    /// `ActivationKind`／`BackendOps::sigmoid` 等を新設せず
-    /// `forward_from_flat_leaves`（`forward_resident` と共有する同一の
-    /// 層イテレーション。private ヘルパーのためインドキュメントリンクは
-    /// 張らずコードスパン表記とする）を再利用することで、`predict` との
-    /// parity を構造的に保証する（設計文書 §3.3c）。
+    /// 「`Tape` はステップごとに生成・破棄される前提」参照）。
+    ///
+    /// **単一同期チェーン優先（イシュー #1688・親 #1581／#1580・
+    /// `docs/inference-chain-single-sync-design.md`）**: `self.layers`
+    /// が `Linear`（＋`ReLU` 融合）のみで構成できる場合、`build_device_
+    /// chain_steps` で構築した `steps` を `DeviceParamStore::
+    /// predict_device_chain`（入力側 `upload` 1 回・出力側 `download`
+    /// 1 回にチェーン全体の同期点を集約する経路）へ渡す。バックエンドが
+    /// 対応しない場合（`BackendError::Unsupported`）は下記の現行経路
+    /// （`forward_from_flat_leaves`。層ごとに `linear_forward_with_
+    /// activation` の戻り値〈ホスト `Tensor`〉を経由するため層境界ごとに
+    /// 同期点が生じる）へ全体フォールバックする（設計文書決定 7。部分的
+    /// にチェーンを進めた結果は使わない）。`Sigmoid`／`Tanh` 混在・
+    /// `leaves` 過不足（不正な `DeviceParamStore` を渡した等）の場合も
+    /// `build_device_chain_steps` が `None` を返し同様にフォールバック
+    /// する。
+    ///
+    /// **chain 経路と現行経路の bit 同一契約について**: 両経路は異なる
+    /// カーネル入口（`BackendOps::linear_forward_device_tracked` vs
+    /// `gemm_resident_rhs_act`）を経由するため、`predict` との parity は
+    /// 「`forward_from_flat_leaves` を共有する」という構造的保証ではなく、
+    /// 各バックエンドの `linear_forward_device ≡ gemm_resident_rhs_act`
+    /// 数値契約（CPU: 融合・非融合の推移的一致。`docs/perf/linear-
+    /// forward-device-gpu.md`）に依存する。
     pub fn predict_resident(
         &self,
         store: &DeviceParamStore,
@@ -547,9 +565,83 @@ impl Sequential {
     ) -> Result<Tensor<f32>, AutodiffError> {
         let tape = crate::tape_for(store.device())?;
         let leaves = store.snapshot_resident_params(&tape.0)?;
+
+        if let Some(steps) = self.build_device_chain_steps(&leaves) {
+            match store.predict_device_chain(&tape.0, input, &steps) {
+                Ok(output) => return Ok(output),
+                Err(BackendError::Unsupported(_)) => {
+                    // 決定 7（設計文書）: バックエンドがデバイス常駐
+                    // チェーンに対応しない——全体を現行経路へフォール
+                    // バックする。
+                }
+                Err(e) => return Err(AutodiffError::Backend(e)),
+            }
+        }
+
         let input_var = tape.var(input);
         let output = self.forward_from_flat_leaves(&tape.0, &input_var, &leaves, store)?;
         Ok(output.to_tensor())
+    }
+
+    /// `self.layers` を走査し、[`DeviceParamStore::predict_device_chain`]
+    /// へ渡す steps（`(weight, bias, act)` の列）を構築する（イシュー
+    /// #1688。`forward_from_flat_leaves` と同じ走査規則——`Linear` 層は
+    /// 次層が `ReLU` なら融合し、`bias` は `Some` の場合のみ 1 要素
+    /// 消費する——を共有する）。
+    ///
+    /// `Linear`（＋`ReLU` 融合）以外の層（`Sigmoid`／`Tanh`・独立した
+    /// `ReLU` 等）に遭遇した場合、または `leaves` の過不足がある場合は
+    /// `None` を返し、呼び出し元（`Self::predict_resident`）は現行経路
+    /// （`forward_from_flat_leaves`）へ全体フォールバックする（設計文書
+    /// 決定 7）。層が 1 つもない場合（空 `Sequential`）も `None` を返す
+    /// （空チェーンのための無意味な upload/download を避ける）。
+    fn build_device_chain_steps<'a, 't>(
+        &'a self,
+        leaves: &'a [ResidentLeaf<'t>],
+    ) -> Option<
+        Vec<(
+            &'a ResidentLeaf<'t>,
+            Option<&'a ResidentLeaf<'t>>,
+            Activation,
+        )>,
+    > {
+        if self.layers.is_empty() {
+            return None;
+        }
+        let mut steps = Vec::new();
+        let mut cursor = leaves.iter();
+        let mut i = 0;
+        while i < self.layers.len() {
+            let layer = &self.layers[i];
+            // `Linear` 以外の層（`Sigmoid`／`Tanh` 等）は chain 経路
+            // 非対応のため `None` を返しフォールバックさせる。
+            let linear = layer.as_linear()?;
+            let weight = cursor.next()?;
+            let bias = if linear.bias().is_some() {
+                Some(cursor.next()?)
+            } else {
+                None
+            };
+            let act = if self.layers.get(i + 1).is_some_and(|next| next.as_relu()) {
+                Activation::Relu
+            } else {
+                Activation::None
+            };
+            steps.push((weight, bias, act));
+            i += if matches!(act, Activation::Relu) {
+                2
+            } else {
+                1
+            };
+        }
+        if cursor.next().is_some() {
+            // `leaves` が `self.layers` の要求件数より多い（位置対応
+            // 契約が崩れている）場合は chain 経路を使わずフォール
+            // バックさせる（`forward_from_flat_leaves` の同種チェックと
+            // 同じ理由。`.claude/rules/security.md` A03）。
+            return None;
+        }
+        Some(steps)
     }
 
     /// `tape`（`self.layers` を辿る forward 用）と `leaves`（`self.layers`
@@ -1707,5 +1799,126 @@ mod tests {
                 "{label}: 融合経路（Op::LinearAct）と非融合合成の勾配がビット一致しない"
             );
         }
+    }
+
+    /// `Linear`（bias 付き）→`ReLU`→`Linear`（bias 付き）の
+    /// `build_device_chain_steps` が `Some` を返し、`ReLU` 融合
+    /// （`Activation::Relu`）が 1 層目にのみ適用されることを検証する
+    /// （イシュー #1688）。
+    #[test]
+    fn build_device_chain_steps_fuses_linear_relu() {
+        let model = Sequential::new()
+            .add_linear(4, 8, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_linear(8, 2, SEED2)
+            .unwrap();
+        let tape = crate::tape();
+        let store = model.init_device_param_store(&tape).unwrap();
+        let leaves = store.snapshot_resident_params(&tape.0).unwrap();
+
+        let steps = model
+            .build_device_chain_steps(&leaves)
+            .expect("Linear+ReLU+Linear は chain 経路対応のはず");
+
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(steps[0].2, Activation::Relu));
+        assert!(matches!(steps[1].2, Activation::None));
+        assert!(
+            steps[0].1.is_some(),
+            "1 層目の bias が steps へ含まれていない"
+        );
+        assert!(
+            steps[1].1.is_some(),
+            "2 層目の bias が steps へ含まれていない"
+        );
+    }
+
+    /// `Linear`→`Sigmoid` の構成では `Sigmoid` が chain 経路非対応の
+    /// ため `None`（フォールバック対象）を返すことを検証する（イシュー
+    /// #1688）。
+    #[test]
+    fn build_device_chain_steps_returns_none_for_sigmoid_mix() {
+        let model = Sequential::new()
+            .add_linear(4, 8, SEED1)
+            .unwrap()
+            .add_sigmoid();
+        let tape = crate::tape();
+        let store = model.init_device_param_store(&tape).unwrap();
+        let leaves = store.snapshot_resident_params(&tape.0).unwrap();
+
+        assert!(model.build_device_chain_steps(&leaves).is_none());
+    }
+
+    /// `leaves` が `self.layers` の要求件数より少ない・多いいずれの場合も
+    /// `None`（フォールバック対象）を返すことを検証する（イシュー
+    /// #1688。`forward_from_flat_leaves` の同種検査と同じ位置対応契約）。
+    #[test]
+    fn build_device_chain_steps_returns_none_for_leaf_count_mismatch() {
+        let model = Sequential::new()
+            .add_linear(4, 8, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_linear(8, 2, SEED2)
+            .unwrap();
+        let tape = crate::tape();
+        let store = model.init_device_param_store(&tape).unwrap();
+        let leaves = store.snapshot_resident_params(&tape.0).unwrap();
+
+        // 過少: 末尾（2 層目の bias）を切り詰める。
+        let too_few = &leaves[..leaves.len() - 1];
+        assert!(model.build_device_chain_steps(too_few).is_none());
+
+        // 過剰: `ResidentLeaf` は `Clone` なので複製して水増しする。
+        let mut too_many = leaves.clone();
+        too_many.push(leaves[0].clone());
+        assert!(model.build_device_chain_steps(&too_many).is_none());
+    }
+
+    /// 空 `Sequential`（層が 1 つもない）の場合は `None` を返すことを
+    /// 検証する（イシュー #1688。空チェーンのための無意味な
+    /// upload/download を避けるための早期リターン）。
+    #[test]
+    fn build_device_chain_steps_returns_none_for_empty_sequential() {
+        let model = Sequential::new();
+        let tape = crate::tape();
+        let store = model.init_device_param_store(&tape).unwrap();
+        let leaves = store.snapshot_resident_params(&tape.0).unwrap();
+
+        assert!(leaves.is_empty());
+        assert!(model.build_device_chain_steps(&leaves).is_none());
+    }
+
+    /// `Linear`（bias なし）→`Linear`（bias あり）の構成で
+    /// `build_device_chain_steps` が `bias: None` を正しく含む steps を
+    /// 返すことを検証する（イシュー #1688。`Sequential::add_linear`
+    /// 〈唯一の公開層追加 API〉は常に bias あり `Linear` を積むため
+    /// （`Sequential::add_linear` doc 参照）、bias なし層は公開 API から
+    /// 構成できず、本テスト〈同一クレート内・`Linear::new` を直接呼ぶ〉
+    /// でのみカバー可能。`crates/facade/tests/
+    /// predict_device_chain_cpu_bit_exact.rs` の bit 完全一致テストは
+    /// 公開 API 経由で構成可能な bias あり構成のみを対象とする旨も
+    /// 同ファイル冒頭に明記済み）。
+    #[test]
+    fn build_device_chain_steps_includes_none_bias_for_no_bias_linear() {
+        let linear_no_bias = Linear::new(4, 8, false, SEED1).unwrap();
+        let linear_with_bias = Linear::new(8, 2, true, SEED2).unwrap();
+        let model = Sequential {
+            layers: vec![Box::new(linear_no_bias), Box::new(linear_with_bias)],
+        };
+        let tape = crate::tape();
+        let store = model.init_device_param_store(&tape).unwrap();
+        let leaves = store.snapshot_resident_params(&tape.0).unwrap();
+
+        let steps = model
+            .build_device_chain_steps(&leaves)
+            .expect("bias なし Linear + bias あり Linear は chain 経路対応のはず");
+
+        assert_eq!(steps.len(), 2);
+        assert!(steps[0].1.is_none(), "1 層目（bias なし）が None ではない");
+        assert!(steps[1].1.is_some(), "2 層目（bias あり）が Some ではない");
+        // 位置対応契約: leaves は weight のみ（1 層目）+ weight/bias
+        // （2 層目）の 3 要素のはず。
+        assert_eq!(leaves.len(), 3);
     }
 }

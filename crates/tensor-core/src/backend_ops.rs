@@ -1324,6 +1324,31 @@ pub trait BackendOps {
         ))
     }
 
+    /// [`Self::linear_forward_device`] と同型だが、Metal のコマンドバッファ
+    /// 共有（イシュー #1017）向けに共有失敗トークン [`DispatchFailureCell`]
+    /// を追加引数として受け取る非破壊拡張（`sgd_step_device_tracked`／
+    /// `gemm_fp32_strict_into_tracked` と同じ「デフォルトメソッド追加」
+    /// パターン）。
+    ///
+    /// # デフォルト実装
+    /// 既定は `token` を無視して [`Self::linear_forward_device`] へそのまま
+    /// 委譲する。CPU は同期実行のため実行時エラーが即座に返り遅延失敗
+    /// トークンを必要としない。CUDA はストリーム順序契約
+    /// （`docs/backend-cuda-async-execution-design.md`）に従い本 `token`
+    /// を使わずオーバーライドもしない（`sgd_step_device_tracked` と同じ
+    /// 判断。設計文書 `docs/inference-chain-single-sync-design.md` 決定 5）。
+    /// Metal のオーバーライドはイシュー #1580 で追加する。
+    fn linear_forward_device_tracked(
+        &self,
+        a: &DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.linear_forward_device(a, w, bias, act)
+    }
+
     /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `a`／`b`／戻り値
     /// いずれも [`DeviceBuffer`] 常駐のまま計算する（イシュー #1584）。
     /// `linear_forward_device` と同じ動機（`docs/inference-forward-
@@ -2281,6 +2306,32 @@ mod tests {
         let result = ops.linear_forward_device(&a, w_view, None, Activation::None);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::linear_forward_device_tracked`] のデフォルト実装が
+    /// `token` を無視して [`BackendOps::linear_forward_device`] へそのまま
+    /// 委譲することを確認する（イシュー #1688。
+    /// `sgd_step_device_tracked_default_delegates_to_sgd_step_device` と
+    /// 同型のガード）。
+    #[test]
+    fn linear_forward_device_tracked_default_delegates_to_linear_forward_device() {
+        let ops = MockOps(Device::Cpu);
+        let a = empty_device_buffer(Device::Cpu);
+        let w_buf = empty_device_buffer(Device::Cpu);
+        let w_view = DeviceBufferView::new(&w_buf, 0, &[1]).unwrap();
+        let token = DispatchFailureCell::new();
+
+        let direct = ops.linear_forward_device(&a, w_view, None, Activation::None);
+        let tracked = ops.linear_forward_device_tracked(&a, w_view, None, Activation::None, &token);
+
+        match (direct, tracked) {
+            (Err(BackendError::Unsupported(a)), Err(BackendError::Unsupported(b))) => {
+                assert_eq!(a, b);
+            }
+            other => panic!("expected both to return the same Unsupported error: {other:?}"),
+        }
+        // デフォルト委譲は token に一切触れない。
+        assert!(!token.is_set());
     }
 
     /// [`BackendOps::scalar_unary`] の既定実装が fail-safe

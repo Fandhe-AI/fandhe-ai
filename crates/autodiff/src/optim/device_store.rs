@@ -1045,6 +1045,16 @@ impl ResidentResolver for DeviceParamStore {
     }
 }
 
+/// [`DeviceParamStore::predict_device_chain`] の 1 layer 分のステップ
+/// （非 pub 型エイリアス。展開先はすべて既存の公開型のタプルのため、
+/// 本エイリアス自体は新規 pub 型を公開面へ追加しない
+/// 〈`docs/compat-api-scope.md` §5・設計文書決定 1(b)〉）。
+type ChainStep<'a, 't> = (
+    &'a ResidentLeaf<'t>,
+    Option<&'a ResidentLeaf<'t>>,
+    Activation,
+);
+
 impl DeviceParamStore {
     /// `params`（呼び出し元の位置対応契約に従うホスト常駐パラメータ列。
     /// 典型的には `fandhe_ai::compat::Sequential::trainable_parameters()`
@@ -1663,6 +1673,117 @@ impl DeviceParamStore {
             y,
         );
         Ok(Var::from_raw(tape, node_id))
+    }
+
+    /// 推論 forward チェーン（`Linear`〈＋`ReLU` 融合〉の連なり）を、
+    /// 入力側 `upload` 1 回・出力側 `download` 1 回のみに同期点を集約して
+    /// 計算する（`docs/inference-chain-single-sync-design.md`。イシュー
+    /// #1688・親 #1581／#1580）。層ごとに `BackendOps::
+    /// linear_forward_device_tracked`（`a`／`w`／`bias`／戻り値すべて
+    /// [`DeviceBuffer`] 常駐）を呼び、層境界ごとの D2H／H2D を発生させ
+    /// ない（`linear_forward_with_activation` はホスト `Tensor` を
+    /// 返すため層ごとに同期点が生じる。本メソッドはその固定費を
+    /// 除去する経路）。
+    ///
+    /// `steps` の各要素は `(weight, bias, act)` で、`weight`／`bias` は
+    /// `self` が同じ `tape` に対して発行した [`ResidentLeaf`] でなければ
+    /// ならない（`checked_resident_buffer` が `store_id`／`slot` を、
+    /// 本メソッドが `tape_id` を検証する。`linear_forward_with_activation`
+    /// と同じ縦深防御）。
+    ///
+    /// バックエンドが `linear_forward_device_tracked` を実装しない場合
+    /// （既定委譲経由で `linear_forward_device` の既定実装が返す）
+    /// [`BackendError::Unsupported`] をそのまま伝播する。呼び出し元
+    /// （`fandhe_ai_facade::compat::sequential::Sequential::
+    /// predict_resident`）はこれを検出して現行の per-layer 経路へ全体
+    /// フォールバックする契約とする（部分的にチェーンを進めた結果を
+    /// 使わない。設計文書決定 7）。
+    ///
+    /// # poison（失敗トークン）契約
+    ///
+    /// Metal のコマンドバッファ共有下では、`download` 自体が `Ok` を
+    /// 返した後でも、他スレッドが検出したバッチエラーが
+    /// `self.failure_token` へ遅れて反映される可能性がある
+    /// （`sgd_step_device_tracked` doc の 4 状態機械エントリと同型の
+    /// レース）。本メソッドは `download` 完了後に `failure_token.
+    /// is_set()` を再検査し、セット済みなら `self.poisoned` を立てて
+    /// `BackendError::StorePoisoned` を返す（`register_resident_leaves`
+    /// の「事後再検査」パターンと同じ）。
+    pub fn predict_device_chain<'t>(
+        &self,
+        tape: &'t Tape,
+        input: &Tensor<f32>,
+        steps: &[ChainStep<'_, 't>],
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+
+        for (weight, bias, _act) in steps {
+            if weight.tape_id != tape.id {
+                return Err(BackendError::TapeMismatch);
+            }
+            if let Some(b) = bias
+                && b.tape_id != tape.id
+            {
+                return Err(BackendError::TapeMismatch);
+            }
+        }
+
+        let mem = tape.ops().memory_ops().ok_or_else(|| {
+            BackendError::Unsupported(
+                "DeviceParamStore::predict_device_chain: backend does not implement MemoryOps"
+                    .to_string(),
+            )
+        })?;
+
+        // 決定 3（設計文書）: 入力側の同期点は upload 1 回のみ
+        // （`upload_into` は使わない。Metal の `upload_into` は
+        // synchronize を挟むため「チェーン全体で同期 1 回」の契約に
+        // 反する）。
+        let mut current = mem.upload(input)?;
+
+        for (weight, bias, act) in steps {
+            let w_buf = self.checked_resident_buffer(weight.store_id, weight.slot)?;
+            let b_buf = match bias {
+                Some(b) => Some(self.checked_resident_buffer(b.store_id, b.slot)?),
+                None => None,
+            };
+            if let (Some(b), Some(n)) = (&b_buf, w_buf.shape().get(1))
+                && b.shape() != [*n]
+            {
+                return Err(BackendError::ShapeMismatch(
+                    fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                        lhs: b.shape().to_vec(),
+                        rhs: vec![*n],
+                    },
+                ));
+            }
+            // 決定 7（設計文書）: `Unsupported` はここで即座に伝播し、
+            // 呼び出し元（`Sequential::predict_resident`）が全体
+            // フォールバックする。本メソッドは `self` の可変状態を
+            // 書き換えないため、途中終了しても部分結果が漏れることは
+            // ない。
+            current = tape.ops().linear_forward_device_tracked(
+                &current,
+                w_buf,
+                b_buf,
+                *act,
+                &self.failure_token,
+            )?;
+        }
+
+        // 決定 3: 最終出力側の同期点は download 1 回のみ。
+        let result = mem.download(&current)?;
+
+        // poison 契約（doc 参照）: download 自体は Ok を返したが、その
+        // 間に他スレッドがバッチエラーを検出し failure_token を set
+        // した可能性がある事後再検査。
+        if self.failure_token.is_set() {
+            self.poisoned.store(true, Ordering::SeqCst);
+            return Err(BackendError::StorePoisoned);
+        }
+
+        Ok(result)
     }
 
     /// `loss` から逆伝播し、常駐 weight／bias（`Op::ResidentLeaf`・
@@ -2549,6 +2670,23 @@ mod tests {
         segment_runs: Arc<std::sync::Mutex<Vec<fandhe_ai_tensor_core::SegmentRun>>>,
         seen_segment_keys:
             Arc<std::sync::Mutex<std::collections::HashSet<fandhe_ai_tensor_core::SegmentKey>>>,
+        /// `true` の場合のみ [`BackendOps::linear_forward_device`] を
+        /// オーバーライドし（既定 `Unsupported`）、`DeviceParamStore::
+        /// predict_device_chain` の chain 経路を `autodiff` クレート
+        /// 自身の単体テストで実行可能にする（イシュー #1688）。
+        chain_capable: bool,
+        /// `chain_capable == true` のとき、`linear_forward_device_tracked`
+        /// が計算自体は成功させたうえで `token.set(..)` する（決定 4
+        /// ケース 3「download 後の事後再検査で poison する」レースの
+        /// 再現用。`predict_device_chain` は `download` 完了後に
+        /// `failure_token.is_set()` を再検査するため、本フラグは
+        /// download 自体は成功する前提を保つ）。
+        set_token_then_succeed: bool,
+        /// `true` の場合 [`MemoryOps::download`] が常に `Err` を返す
+        /// （決定 4 ケース 2「download 自体が Err」の再現用。
+        /// `chain_capable` と併用し「チェーンの各ステップは成功する
+        /// が最終 download が落ちる」を模す）。
+        download_fails: bool,
     }
 
     impl MockDeviceOps {
@@ -2565,6 +2703,9 @@ mod tests {
                 seen_segment_keys: Arc::new(
                     std::sync::Mutex::new(std::collections::HashSet::new()),
                 ),
+                chain_capable: false,
+                set_token_then_succeed: false,
+                download_fails: false,
             }
         }
 
@@ -2581,6 +2722,9 @@ mod tests {
                 seen_segment_keys: Arc::new(
                     std::sync::Mutex::new(std::collections::HashSet::new()),
                 ),
+                chain_capable: false,
+                set_token_then_succeed: false,
+                download_fails: false,
             }
         }
 
@@ -2601,6 +2745,9 @@ mod tests {
                 seen_segment_keys: Arc::new(
                     std::sync::Mutex::new(std::collections::HashSet::new()),
                 ),
+                chain_capable: false,
+                set_token_then_succeed: false,
+                download_fails: false,
             }
         }
 
@@ -2634,6 +2781,9 @@ mod tests {
                 seen_segment_keys: Arc::new(
                     std::sync::Mutex::new(std::collections::HashSet::new()),
                 ),
+                chain_capable: false,
+                set_token_then_succeed: false,
+                download_fails: false,
             }
         }
 
@@ -2648,6 +2798,56 @@ mod tests {
                 bias_fusion_capable: false,
                 ..Self::resident_capable()
             }
+        }
+
+        /// [`BackendOps::linear_forward_device`] をオーバーライドし、
+        /// `DeviceParamStore::predict_device_chain` の chain 経路（イシュー
+        /// #1688）を単体テストで実行可能にするモック。既存の `new()` 等は
+        /// `chain_capable: false` のままのため（本コンストラクタのみ
+        /// `true`）、既存テストの挙動は変わらない。
+        fn chain_capable() -> Self {
+            Self {
+                chain_capable: true,
+                ..Self::new()
+            }
+        }
+
+        /// [`Self::chain_capable`] に加え、`linear_forward_device_tracked`
+        /// が計算成功後に `failure_token` へ set する（決定 4 ケース 3
+        /// の再現。`predict_device_chain_deferred_token_after_download_
+        /// poisons_store` 用）。
+        fn chain_capable_poisoning() -> Self {
+            Self {
+                chain_capable: true,
+                set_token_then_succeed: true,
+                ..Self::new()
+            }
+        }
+
+        /// `download()` が常に `Err` を返すモック（決定 4 ケース 2 の
+        /// 再現。`chain_capable` も `true` にして「チェーンの各ステップ
+        /// 自体は成功するが最終 download が落ちる」を模す。
+        /// `predict_device_chain_download_err_propagates_without_
+        /// poisoning` 用）。
+        fn download_failing() -> Self {
+            Self {
+                chain_capable: true,
+                download_fails: true,
+                ..Self::new()
+            }
+        }
+
+        /// [`DeviceBuffer`] 全体の中身をコピー取得する（`download()` を
+        /// 経由しないため `download_count` を増やさない。`read_resident`
+        /// の `DeviceBuffer` 全体版。`linear_forward_device` の入力
+        /// `a`〈`DeviceBufferView` ではなく `&DeviceBuffer<f32>`〉を
+        /// 読むために使う）。
+        fn read_buffer(buf: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
+            let handle = buf
+                .downcast_handle::<MockHandle>()
+                .ok_or(BackendError::DeviceMismatch)?;
+            let data = handle.data.borrow().clone();
+            Tensor::new(data, buf.shape()).map_err(BackendError::ShapeMismatch)
         }
 
         /// カウンタの共有ハンドルを複製する（`Tape::new_with_ops` へ
@@ -2716,6 +2916,15 @@ mod tests {
 
         fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
             self.download_count.fetch_add(1, Ordering::SeqCst);
+            // イシュー #1688: `predict_device_chain` の poison 契約
+            // 「決定 4 ケース 2（download 自体が Err）」を再現するための
+            // 分岐（`download_fails`。既定 `false` のため既存テストの
+            // 挙動は変わらない）。
+            if self.download_fails {
+                return Err(BackendError::KernelLaunchFailed(
+                    "MockDeviceOps: simulated download failure".into(),
+                ));
+            }
             let handle = buffer
                 .downcast_handle::<MockHandle>()
                 .ok_or(BackendError::DeviceMismatch)?;
@@ -2921,6 +3130,70 @@ mod tests {
 
         fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
             Ok(crate::eval::matmul(a, b))
+        }
+
+        /// `chain_capable == true` のときのみ `DeviceParamStore::
+        /// predict_device_chain`（イシュー #1688）の chain 経路を到達
+        /// 可能にするオーバーライド。`BackendOps` 既定実装（`false`）は
+        /// `Unsupported` を返し、`predict_device_chain_unsupported_
+        /// backend_propagates_unsupported_without_poisoning` が検証する
+        /// 「黙示のホストフォールバックへ落ちない」契約をそのまま踏襲
+        /// する。
+        fn linear_forward_device(
+            &self,
+            a: &DeviceBuffer<f32>,
+            w: DeviceBufferView<'_>,
+            bias: Option<DeviceBufferView<'_>>,
+            act: Activation,
+        ) -> Result<DeviceBuffer<f32>, BackendError> {
+            if !self.chain_capable {
+                return Err(BackendError::Unsupported(
+                    "MockDeviceOps: chain_capable == false (default fail-safe)".into(),
+                ));
+            }
+            let a_tensor = Self::read_buffer(a)?;
+            let w_tensor = Self::read_resident(w)?;
+            let mut y = crate::eval::matmul(&a_tensor, &w_tensor);
+            if let Some(b) = bias {
+                y = crate::eval::add(&y, &Self::read_resident(b)?);
+            }
+            match act {
+                Activation::None => {}
+                Activation::Relu => y = crate::eval::relu(&y),
+                _ => {
+                    return Err(BackendError::Unsupported(
+                        "MockDeviceOps::linear_forward_device: unsupported activation".into(),
+                    ));
+                }
+            }
+            let contiguous = y.contiguous();
+            let handle: Box<dyn BufferHandle> = Box::new(MockHandle {
+                data: RefCell::new(contiguous.as_slice().unwrap_or(&[]).to_vec()),
+            });
+            Ok(DeviceBuffer::new(Device::Cpu, y.shape().to_vec(), handle))
+        }
+
+        /// `set_token_then_succeed == true` の場合、計算自体は成功させた
+        /// うえで `token.set(..)` する（決定 4 ケース 3「download 後の
+        /// 事後再検査で poison する」レースの再現。`predict_device_chain`
+        /// はこの `token` を `download` 完了後に再検査する）。
+        fn linear_forward_device_tracked(
+            &self,
+            a: &DeviceBuffer<f32>,
+            w: DeviceBufferView<'_>,
+            bias: Option<DeviceBufferView<'_>>,
+            act: Activation,
+            token: &DispatchFailureCell,
+        ) -> Result<DeviceBuffer<f32>, BackendError> {
+            let result = self.linear_forward_device(a, w, bias, act);
+            if self.set_token_then_succeed && result.is_ok() {
+                token.set(BackendError::KernelLaunchFailed(
+                    "MockDeviceOps: simulated race — another batch's error reached this token \
+                     after this call already succeeded"
+                        .into(),
+                ));
+            }
+            result
         }
 
         /// `resident_capable == true` のときのみ `x_t @ g` を `out` の
@@ -4732,6 +5005,143 @@ mod tests {
             store.snapshot_resident_params(&tape),
             Err(BackendError::StorePoisoned)
         ));
+    }
+
+    /// イシュー #1688: `DeviceParamStore::predict_device_chain` がバック
+    /// エンド未対応（既定 `MockDeviceOps::new()`。`chain_capable ==
+    /// false`）の場合に `Unsupported` を返し、かつ `failure_token`・
+    /// `poisoned` のいずれも変化させないこと（黙示のホストフォール
+    /// バックへ落ちず、呼び出し元〈`Sequential::predict_resident`〉が
+    /// 現行経路へ全体フォールバックできる契約）を検証する。
+    #[test]
+    fn predict_device_chain_unsupported_backend_propagates_unsupported_without_poisoning() {
+        let tape = simple_tape(None);
+        let w = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+
+        let steps = vec![(&leaves[0], None, Activation::None)];
+        let result = store.predict_device_chain(&tape, &input, &steps);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+        assert!(!store.failure_token.is_set());
+        assert!(!store.poisoned.load(Ordering::SeqCst));
+    }
+
+    /// 決定 4 ケース 2（設計文書）: `download` 自体が `Err` を返す場合、
+    /// その `Err` がそのまま伝播し `poisoned` は立たないこと（`download`
+    /// 自体のエラーは「その場で分かる」失敗であり、`failure_token` 経由
+    /// の遅延失敗〈ケース 3〉と区別する）を検証する。
+    #[test]
+    fn predict_device_chain_download_err_propagates_without_poisoning() {
+        let ops = MockDeviceOps::download_failing();
+        let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+        let w = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+
+        let steps = vec![(&leaves[0], None, Activation::None)];
+        let result = store.predict_device_chain(&tape, &input, &steps);
+
+        assert!(matches!(result, Err(BackendError::KernelLaunchFailed(_))));
+        assert!(!store.poisoned.load(Ordering::SeqCst));
+    }
+
+    /// 決定 4 ケース 3（設計文書）: `download` 自体は `Ok` を返した後、
+    /// 事後再検査で `failure_token.is_set()` を検出した場合に
+    /// `StorePoisoned` へ自己遷移することを検証する（Metal のコマンド
+    /// バッファ共有下でのレース再現。`deferred_failure_token_poisons_
+    /// store_on_next_entry` と同型の「遅延失敗」契約を chain 経路にも
+    /// 適用したもの）。
+    #[test]
+    fn predict_device_chain_deferred_token_after_download_poisons_store() {
+        let ops = MockDeviceOps::chain_capable_poisoning();
+        let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+        let w = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+
+        let steps = vec![(&leaves[0], None, Activation::None)];
+        let result = store.predict_device_chain(&tape, &input, &steps);
+
+        assert!(matches!(result, Err(BackendError::StorePoisoned)));
+        assert!(store.poisoned.load(Ordering::SeqCst));
+    }
+
+    /// 別の `Tape` で発行した [`ResidentLeaf`] を渡した場合に
+    /// `TapeMismatch` で拒否すること（`linear_forward_with_activation`
+    /// の tape_id 検査と同型の縦深防御）を検証する。
+    #[test]
+    fn predict_device_chain_rejects_leaf_from_different_tape() {
+        let ops1 = MockDeviceOps::chain_capable();
+        let tape1 = Tape::new_with_ops(Box::new(ops1) as Box<dyn BackendOps + Send>);
+        let ops2 = MockDeviceOps::chain_capable();
+        let tape2 = Tape::new_with_ops(Box::new(ops2) as Box<dyn BackendOps + Send>);
+
+        let w = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let store1 = DeviceParamStore::new(&tape1, &[&w]).unwrap();
+        let store2 = DeviceParamStore::new(&tape2, &[&w]).unwrap();
+        // tape2 上で発行した leaf を store1／tape1 の呼び出しへ混入させる。
+        let leaves2 = store2.snapshot_resident_params(&tape2).unwrap();
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+
+        let steps = vec![(&leaves2[0], None, Activation::None)];
+        let result = store1.predict_device_chain(&tape1, &input, &steps);
+
+        assert!(matches!(result, Err(BackendError::TapeMismatch)));
+    }
+
+    /// chain 経路（`predict_device_chain`）が `linear_forward_with_
+    /// activation` ベースの逐次計算と数値一致することを確認し、
+    /// steps 構築・resident buffer 解決の配線自体が正しいことを補強する
+    /// （2 層・1 層目 bias + `Activation::Relu` 融合・2 層目 bias なし）。
+    #[test]
+    fn predict_device_chain_matches_linear_forward_with_activation_when_chain_capable() {
+        let build_ops = || MockDeviceOps::chain_capable();
+        let w1 = tensor(vec![1.0, -2.0, 0.5, 1.0], &[2, 2]);
+        let b1 = tensor(vec![0.1, -0.2], &[2]);
+        let w2 = tensor(vec![2.0, 0.0, 0.0, 2.0], &[2, 2]);
+        let input = tensor(vec![1.0, -3.0], &[1, 2]);
+
+        // chain 経路。
+        let chain_tape = Tape::new_with_ops(Box::new(build_ops()) as Box<dyn BackendOps + Send>);
+        let chain_store = DeviceParamStore::new(&chain_tape, &[&w1, &b1, &w2]).unwrap();
+        let chain_leaves = chain_store.snapshot_resident_params(&chain_tape).unwrap();
+        let steps = vec![
+            (&chain_leaves[0], Some(&chain_leaves[1]), Activation::Relu),
+            (&chain_leaves[2], None, Activation::None),
+        ];
+        let chain_result = chain_store
+            .predict_device_chain(&chain_tape, &input, &steps)
+            .unwrap();
+
+        // 逐次経路（`linear_forward_with_activation` を 2 回呼ぶ）。
+        let seq_tape = Tape::new_with_ops(Box::new(build_ops()) as Box<dyn BackendOps + Send>);
+        let seq_store = DeviceParamStore::new(&seq_tape, &[&w1, &b1, &w2]).unwrap();
+        let seq_leaves = seq_store.snapshot_resident_params(&seq_tape).unwrap();
+        let x = seq_tape.var(&input);
+        let h = seq_store
+            .linear_forward_with_activation(
+                &seq_tape,
+                &x,
+                &seq_leaves[0],
+                Some(&seq_leaves[1]),
+                Activation::Relu,
+            )
+            .unwrap();
+        let seq_result = seq_store
+            .linear_forward_with_activation(&seq_tape, &h, &seq_leaves[2], None, Activation::None)
+            .unwrap()
+            .to_tensor();
+
+        assert_eq!(
+            chain_result.contiguous().as_slice().unwrap(),
+            seq_result.contiguous().as_slice().unwrap(),
+            "chain 経路と逐次経路の出力が食い違う"
+        );
     }
 
     #[test]
