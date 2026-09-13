@@ -15,17 +15,21 @@
 //! 本モジュールを呼ぶが、[`MetalGatherScatter::run_gather_f32`]／
 //! [`MetalGatherScatter::run_scatter_f32`] は `pub` であり `ops.rs` を
 //! 経由せず直接呼び出せるため、呼び出し元の検査結果を信頼せず本モジュール
-//! 自身でも独立に同じ検査（rank・shape 各次元の `u32` 収容・`in_shape`／
-//! `out_shape` と `index_shape` の rank 一致・`dim` が rank 範囲内・
-//! `index` の値域・**各スライス〈`input`／`index`／`src`〉の実長が対応
-//! する shape の要素数積と一致すること**）を行う（判定迂回経路を作ら
-//! ないための多層防御。`.claude/rules/security.md` A08。`crates/
+//! 自身でも独立に同じ検査（[`fandhe_ai_tensor_core::gather_out_shape`]／
+//! [`fandhe_ai_tensor_core::scatter_out_shape`] の再利用による rank 一致・
+//! `dim` が rank 範囲内・非 `dim` 軸の `in_shape`／`out_shape` と
+//! `index_shape` の整合〈gather は完全一致・scatter は
+//! `index_shape[axis] <= out_shape[axis]`〉・shape 各次元の `u32`
+//! 収容・`index` の値域・**各スライス〈`input`／`index`／`src`〉の実長
+//! が対応する shape の要素数積と一致すること**）を行う（判定迂回経路を
+//! 作らないための多層防御。`.claude/rules/security.md` A08。`crates/
 //! backend-cpu/src/gather_scatter.rs` と同じ二重検査方針。codex-review
-//! 指摘）。rank 一致・`dim` 範囲の検査を怠ると、カーネル（`shaders/
-//! gather_scatter.metal`）が `shapes` 定数バッファを厳密に `2 * rank`
-//! 要素（`in_shape`／`index_shape`、または `out_shape`／`index_shape`
-//! それぞれ `rank` 要素ずつ）として読む前提が崩れ、GPU 側バッファ
-//! 範囲外読み出しになりうる。スライス実長の検査を怠ると、`shape`
+//! 指摘）。非 `dim` 軸の整合検査を怠ると、rank・`dim` 自体は正しくても
+//! （例: `in_shape=[2,3]`・`index_shape=[5,3]`・`dim=1`）カーネル
+//! （`shaders/gather_scatter.metal`）の `gs_ravel(coords, in_shape,
+//! rank)` が `index_shape` 由来の非 `dim` 軸座標から `in_shape` の
+//! 実バッファ長を超えるオフセットを計算し GPU 側バッファ範囲外読み出し
+//! になりうる（advisor 指摘）。スライス実長の検査を怠ると、`shape`
 //! 引数（要素数積からカーネル引数 `numel` を導出）とスライス自体の
 //! 実長が食い違う入力（`MetalBuffer`／`MetalIndexBuffer` は渡された
 //! スライスの実長でバッファを確保する）で、カーネルが `shapes`／
@@ -116,19 +120,18 @@ impl MetalGatherScatter {
         dim: usize,
     ) -> Result<Vec<f32>, MetalError> {
         validate_shapes_fit_u32(&[in_shape, index_shape]).map_err(shape_err_to_metal)?;
+        // `gather_out_shape` は rank 一致・`dim` 範囲に加え、非 `dim`
+        // 軸の `in_shape`／`index_shape` が完全一致することも検査する
+        // （`ops.rs::MetalBackendOps::gather` が同じ関数で検査している
+        // ものと同一の一次情報源。手書きの rank／dim 検査だけでは
+        // 「rank・dim は正しいが非 dim 軸の次元が食い違う」入力
+        // 〈例: in_shape=[2,3]・index_shape=[5,3]・dim=1〉を見逃し、
+        // カーネル側の `gs_ravel(coords, in_shape, rank)` が `in_shape`
+        // より大きい `index_shape` の非 dim 軸座標から `input` の
+        // 実バッファ長を超えるオフセットを計算しうる。advisor 指摘）。
+        fandhe_ai_tensor_core::gather_out_shape(in_shape, index_shape, dim)
+            .map_err(shape_err_to_metal)?;
         let rank = in_shape.len();
-        if index_shape.len() != rank {
-            return Err(shape_err_to_metal(ShapeError::RankMismatch {
-                expected: rank,
-                actual: index_shape.len(),
-            }));
-        }
-        if dim >= rank {
-            return Err(shape_err_to_metal(ShapeError::AxisOutOfRange {
-                axis: dim,
-                rank,
-            }));
-        }
 
         let numel = checked_numel(index_shape).map_err(shape_err_to_metal)?;
         if numel == 0 {
@@ -217,19 +220,17 @@ impl MetalGatherScatter {
         reduce: ScatterReduce,
     ) -> Result<Vec<f32>, MetalError> {
         validate_shapes_fit_u32(&[out_shape, index_shape]).map_err(shape_err_to_metal)?;
+        // `scatter_out_shape` は rank 一致・`dim` 範囲に加え、非 `dim`
+        // 軸で `index_shape[axis] <= out_shape[axis]` であることも検査
+        // する（[`Self::run_gather_f32`] と同じ理由。第 3 引数
+        // `src_shape` には本関数の `index_shape` パラメータをそのまま
+        // 渡す——`index`／`src` は同一 shape の契約〈本モジュール冒頭
+        // コメント・`shaders/gather_scatter.metal` 冒頭コメント〉のため
+        // 自明に等しく、実際の `src` スライスとの一致は下記のスライス
+        // 実長検査で別途担保する）。
+        fandhe_ai_tensor_core::scatter_out_shape(out_shape, index_shape, index_shape, dim)
+            .map_err(shape_err_to_metal)?;
         let rank = out_shape.len();
-        if index_shape.len() != rank {
-            return Err(shape_err_to_metal(ShapeError::RankMismatch {
-                expected: rank,
-                actual: index_shape.len(),
-            }));
-        }
-        if dim >= rank {
-            return Err(shape_err_to_metal(ShapeError::AxisOutOfRange {
-                axis: dim,
-                rank,
-            }));
-        }
 
         let numel_out = checked_numel(out_shape).map_err(shape_err_to_metal)?;
         if numel_out == 0 {

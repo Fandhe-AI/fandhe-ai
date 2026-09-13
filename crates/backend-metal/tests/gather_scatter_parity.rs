@@ -355,6 +355,31 @@ fn gather_scatter_direct_call_rejects_rank_mismatch_and_bad_dim() {
     );
 }
 
+/// イシュー #1799（advisor 指摘）の回帰テスト: `in_shape`／`index_shape`
+/// の rank・`dim` 自体は正しくても、非 `dim` 軸の次元が食い違う
+/// （`in_shape=[2,3]`・`index_shape=[5,3]`・`dim=1`）gather を拒否する
+/// ことを確認する。`rank`／`dim` のみの検査では見逃され、カーネルの
+/// `gs_ravel(coords, in_shape, rank)` が `in_shape` の実バッファ長
+/// （6 要素）を超えるオフセット（最大 `4*3+2=14`）を計算し GPU 側
+/// バッファ範囲外読み出しになりうる。
+#[test]
+#[ignore = "Apple Silicon 実機（Metal）が必要"]
+fn gather_direct_call_rejects_non_dim_axis_mismatch() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gs = MetalGatherScatter::new(&ctx).expect("gather/scatter カーネルのコンパイルに失敗した");
+
+    let input = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    // index_shape[0]=5 > in_shape[0]=2（dim=1 のため axis 0 は非 dim）。
+    let index = vec![0i32; 15];
+    let err = gs
+        .run_gather_f32(&ctx, &input, &[2, 3], &index, &[5, 3], 1)
+        .expect_err("非 dim 軸の shape 不一致は拒否されるべき");
+    assert!(
+        matches!(err, MetalError::InvalidGatherScatterShape { .. }),
+        "非 dim 軸の shape 不一致は InvalidGatherScatterShape であるべき: {err:?}"
+    );
+}
+
 /// イシュー #1799（codex-review P0 指摘・「スライス長」検証）の回帰
 /// テスト: `index_shape` の要素数積（`numel`）と実際の `index` スライス
 /// 長が食い違う直接呼び出しを拒否することを確認する（一致していれば
