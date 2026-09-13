@@ -4,12 +4,17 @@
 //! - `graph`: `ModelProto` -> 内部グラフ表現（トポロジカル順検証・initializer 復号。TASK-7.2a）
 //! - `interp`: グラフ実行インタープリタ（`Graph` のノード列を `ops::*` へディスパッチ。
 //!   TASK-7.2b・イシュー #78）
+//! - `export`: 内部グラフ表現 `Graph` -> `GraphProto`／`ModelProto` への降下
+//!   （`graph` の逆方向。イシュー #1772）。op ごとの属性マッピング（内部 op ->
+//!   `NodeProto`）は #1773 のスコープで、本モジュールは node の意味論には
+//!   関与しない。
 //!
 //! 8 オペ実装は #79（`crate::ops`）、PoC 数値突合テストは #80
 //! （`tests/onnx_poc_v2_6_match.rs`・`tests/onnx_slice_dynamic_bounds.rs`）で追加済み。
 //! TASK-7.3 系 14 オペのディスパッチ結線は #274 で追跡する（`interp` モジュール
 //! 冒頭コメント参照）。
 
+pub mod export;
 pub mod graph;
 pub mod interp;
 pub mod proto;

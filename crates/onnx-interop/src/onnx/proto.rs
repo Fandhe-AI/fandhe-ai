@@ -3,11 +3,19 @@
 //! ## 生成方法についての設計判断（REQ-7・deps-policy.md・PoC-v2-6）
 //!
 //! `prost-build`（`protoc` へのビルド時依存）は使わず、TASK-7.2a（本モジュール）が
-//! 必要とする 6 メッセージ（`ModelProto` / `GraphProto` / `NodeProto` /
-//! `AttributeProto` / `TensorProto` / `ValueInfoProto`）のみをフィールド番号を
-//! 一致させた `#[derive(prost::Message)]` 構造体として手書きする。`protoc` 非依存の
-//! 手書き derive は OWASP A06（サプライチェーン）の観点でもむしろ縮小になる（PoC-v2-6
-//! advisor レビュー由来の判断）。
+//! 必要とする 7 メッセージ（`ModelProto` / `GraphProto` / `NodeProto` /
+//! `AttributeProto` / `TensorProto` / `ValueInfoProto` / `OperatorSetIdProto`）のみを
+//! フィールド番号を一致させた `#[derive(prost::Message)]` 構造体として手書きする。
+//! `protoc` 非依存の手書き derive は OWASP A06（サプライチェーン）の観点でもむしろ
+//! 縮小になる（PoC-v2-6 advisor レビュー由来の判断）。
+//!
+//! `ModelProto.opset_import`（tag=8）・`GraphProto.value_info`（tag=13）はイシュー
+//! #1772（`onnx::export`。内部グラフ表現 -> `GraphProto`／`ModelProto` への降下）で
+//! 追加した。フィールド番号の出典は本モジュール既存フィールドと同じ `onnx==1.22.0`
+//! 同梱の `onnx/onnx.proto`（`OperatorSetIdProto{ domain: string tag=1, version:
+//! int64 tag=2 }`）。`value_info` は decode 方向では常に空 `Vec` のまま扱われ
+//! （`graph::build_graph` は `value_info` を読まない）、export 方向（`onnx::export`）が
+//! 書き込む契約は同モジュールのドキュメンテーションコメントを参照。
 //!
 //! `prost::Message::decode` は構造体に未宣言のフィールド番号を protobuf のワイヤ
 //! フォーマット仕様どおり自動的にスキップするため、`TypeProto`（`ValueInfoProto.type`）
@@ -36,6 +44,26 @@ pub struct ModelProto {
     pub producer_name: String,
     #[prost(message, optional, tag = "7")]
     pub graph: Option<GraphProto>,
+    /// このモデルが要求する opset（ドメイン・バージョンの組。複数ドメインを持つ
+    /// モデルもありうるため `repeated`）。decode 方向では現状どの呼び出し元も
+    /// 参照していない（#78 のインタープリタは opset を見ずに `op_type` 名で直接
+    /// ディスパッチする）が、export 方向（`onnx::export::build_model_proto`。
+    /// イシュー #1772）が書き込む。
+    #[prost(message, repeated, tag = "8")]
+    pub opset_import: Vec<OperatorSetIdProto>,
+}
+
+/// モデルが要求する opset の 1 エントリ（ドメイン・バージョンの組）。
+/// `ModelProto.opset_import`（tag=8）の要素型。
+#[derive(Clone, PartialEq, Message)]
+pub struct OperatorSetIdProto {
+    /// opset のドメイン。既定 opset は空文字列（`onnx==1.22.0` の慣習。
+    /// `ExportOptions::default()` も同じ既定値を使う）。
+    #[prost(string, tag = "1")]
+    pub domain: String,
+    /// opset バージョン番号。
+    #[prost(int64, tag = "2")]
+    pub version: i64,
 }
 
 /// 計算グラフ本体。ONNX 仕様は `node` がトポロジカル順であることを要求するが、
@@ -52,6 +80,12 @@ pub struct GraphProto {
     pub input: Vec<ValueInfoProto>,
     #[prost(message, repeated, tag = "12")]
     pub output: Vec<ValueInfoProto>,
+    /// 中間テンソルの型・形状ヒント（ONNX 仕様上は任意）。`graph::build_graph`
+    /// は読まない（`Graph` は中間テンソルの型／形状情報を保持しない設計）。
+    /// export 方向（`onnx::export`。イシュー #1772）は常に空のまま書き出す
+    /// （理由は `onnx::export` モジュールのドキュメンテーションコメント参照）。
+    #[prost(message, repeated, tag = "13")]
+    pub value_info: Vec<ValueInfoProto>,
 }
 
 /// 演算グラフの 1 ノード（1 オペレータ呼び出し）。

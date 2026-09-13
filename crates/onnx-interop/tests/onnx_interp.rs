@@ -149,9 +149,11 @@ fn slice_repro_onnx_end_to_end_matches_reference_within_req7_tolerance() {
 
 fn minimal_model_with_node(node: NodeProto, inputs: Vec<&str>, outputs: Vec<&str>) -> ModelProto {
     ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![node],
             name: "g".to_string(),
             initializer: vec![],
@@ -312,9 +314,11 @@ fn run_feed_overrides_initializer_pre_ir4_pattern() {
         domain: String::new(),
     };
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![node],
             name: "g".to_string(),
             initializer: vec![init],
