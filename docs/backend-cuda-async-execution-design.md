@@ -42,6 +42,7 @@
 | `transpose.rs` | 393, 418, 450, 599 | 同上 |
 | `sgd.rs` | 174 | デバイス常駐経路（`sgd_step_device`）→ **最優先の除去対象**（D2H を伴わない唯一の経路） |
 | `memory.rs` | 276 | `download` の D2H 境界 → **維持**（契約上の同期点） |
+| `mse.rs` | — | `CudaMse::run_mse_loss_f32`／`run_mse_backward_f32` は launch 直後の明示 `synchronize()` を持たず、`memory::readback` の 1 箇所（D2H＋同期）へ既に集約済み → **確認のみ・変更不要**（イシュー #1692。§16） |
 | `fresh_overhead_diag_tests.rs`・`jit_cache_bench_tests.rs` | — | 診断・ベンチ専用 → 対象外 |
 
 ### 2.3 API 形状の制約
@@ -592,3 +593,47 @@ m*n 要素データ転送 2 回 + sync 2 回を要したが、新経路はデー
 判定規則）を整備済み（`docs/perf/train-resident-grad-device-update.md`
 §7・`docs/perf/logs/train-resident-grad-cuda-1560/`）。GB10 実機実測は
 本 PR 時点では未実施のまま同節へ引き継ぐ。
+
+## 16. 実装記録（#1692・`mse_loss_backward` ストリーム順序契約確認）
+
+親 #1582（MSE backward を Metal encode-only／CUDA ストリーム化）の
+分解 sub-issue。イシュー #1692 は「CUDA 側 `mse_loss_backward` が本
+設計文書の非同期投入契約（§3）に既に準拠していることを確認し、必要な
+場合のみ軽微な調整を行う」ことを目的とし、コード読解の結果は以下の
+とおり：
+
+- `crates/backend-cuda/src/ops.rs::CudaBackendOps::mse_loss_backward` は
+  `pred`／`target` を `contiguous()` 化したうえで
+  `crates/backend-cuda/src/mse.rs::CudaMse::run_mse_backward_f32` へ
+  委譲するのみで、明示的な `stream.synchronize()` 呼び出しを持たない。
+- `run_mse_backward_f32`（および forward の
+  `run_mse_loss_f32`）は `clone_htod`（非同期 H2D）→ カーネル起動
+  （非同期）→ `memory::readback`（`clone_dtoh` + `stream.synchronize()`
+  を 1 箇所だけ呼ぶ）という構成であり、`grep -rn synchronize
+  crates/backend-cuda/src/{mse,kernels_mse}.rs` は 0 件（§2.2 棚卸し表
+  参照）。これは §2.3 が定める「ホスト `Tensor` を返す `BackendOps`
+  演算は戻り値の D2H が構造的な同期点であり、readback 境界 1 箇所へ
+  集約する」契約に**既に準拠している**。
+- 唯一の潜在リスクだった I4（`CudaSlice::drop` が `has_async_alloc()`
+  偽の環境ではホスト側 `stream.synchronize()` へフォールバックする。
+  §2.4）は、`docs/perf/lowlayer-diagnosis-2026-09-12.md` §2（出典
+  `docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx/
+  async_ordering_real_device.log`：`probe_has_async_alloc_on_real_device`
+  が GB10 実機で `CudaContext::has_async_alloc() = true (ordinal=0)` を
+  実測済み）により解消済みと確認した。`pred_dev`／`target_dev`（本関数
+  内の `clone_htod` が返す生 `CudaSlice`。プール経由ではない）の
+  `Drop` も `cuMemFreeAsync` のみでホストを塞がない。
+
+**結論**: `crates/backend-cuda/src/{ops,mse}.rs` への機能変更は不要
+（本設計文書の不変条件・同期点一覧に対する影響なし）。本節は §2.2
+棚卸し表の欠落行を埋め確認結果を明文化する目的でのみ追加する。
+
+**GB10 実機 A/B**: 事前登録判定規則（比較腕・判定式）はイシュー
+#1692 のコメント
+<https://github.com/Fandhe-AI/fandhe-ai/issues/1692#issuecomment-5654656690>
+に固定済み。詳細な実測記録・スキャフォールドは
+`docs/perf/cuda-mse-backward-stream-contract.md`・
+`docs/perf/logs/cuda-mse-backward-1692/` を参照（本エージェント実行
+環境に DGX Spark GB10 実機への到達手段がなく、本 PR 時点では未実測の
+まま同節へ引き継ぐ。`docs/perf/logs/train-resident-grad-cuda-1560/` と
+同型の運用）。
