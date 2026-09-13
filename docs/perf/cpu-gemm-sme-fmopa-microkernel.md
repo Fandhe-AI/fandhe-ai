@@ -45,8 +45,22 @@ GB10（DGX Spark GB10）の CPU（Grace）は SME 非対応であり、CPU GEMM 
 - 上記が真の場合に限り `rdsvl`（読み取り専用命令。`options(nomem, nostack,
   preserves_flags)`）で SVL を実測し、**64 バイト（512 bit）のときのみ**
   `SmeReport::kernel_enabled = true`。
-- 結果は `OnceLock` にキャッシュ（`Isa::detect` と同型）。環境変数による
-  上書き機構は設けない（既存方針。OWASP A03）。
+- **キャッシュ範囲（`SmeReport` 全体ではなく OS フラグのみ）**: OS フラグ
+  （CPU モデルに紐づく静的性質）のみ `OnceLock` にプロセス全体キャッシュ
+  する（`Isa::detect` と同型）。**SVL は `sme_report()` を呼ぶたびに
+  `rdsvl` で毎回読み直し**、`SmeKernel::run`／`run_with_ldc` が実際に
+  `fmopa` を発行するスレッド自身で毎回呼び直す契約とする（Linux では
+  `prctl(PR_SME_SET_VL)` によりスレッドごとに SVL が異なりうるため。
+  `rdsvl` はメモリアクセスを伴わない読み取り専用の 1 命令でありキャッシュ
+  しなくても計測に有意な影響を与えない）。環境変数による上書き機構は
+  設けない（既存方針。OWASP A03）。
+- **保留中 lazy ZA save の検査（TPIDR2_EL0）**: 上記に加え、実行スレッド
+  自身の `TPIDR2_EL0`（`mrs S3_3_C13_C0_5`。AAPCS64／ACLE の private-ZA
+  関数契約）が非ゼロでない（呼び出し元が ZA を dormant のまま呼んで
+  いない）ことも毎回確認する。非ゼロの場合は SME 対応・SVL 一致でも
+  「実行不可」として扱いフォールバックへ倒す（本節末尾「フォール
+  バック契約」参照）。この確認も `rdsvl` と同様キャッシュしない
+  （codex-review P0 指摘対応。`crates/backend-cpu/src/gemm_blis/microkernel/sme.rs::has_pending_lazy_za_save`）。
 
 ### 3.2 マイクロカーネル（`crates/backend-cpu/src/gemm_blis/microkernel/sme.rs`）
 
@@ -62,6 +76,19 @@ GB10（DGX Spark GB10）の CPU（Grace）は SME 非対応であり、CPU GEMM 
   `c[i][j]`、p 昇順に 1 回ずつ `fma(a[p][i], b[p][j], acc)`」となり、
   NEON `vfmaq_laneq_f32(acc, b, a, lane)` = `acc + b*a[lane]` と乗算の
   可換性を除いて演算列が完全に同一になる。
+- **フォールバック契約（codex-review P0 指摘対応）**: `SmeKernel::run`／
+  `run_with_ldc` は `unsafe { compute(...) }`（`smstart`／`fmopa`／`mova`
+  で ZA0 に触れる）を呼ぶ前に、実行スレッド自身で (a) SVL=64 バイト一致・
+  (b) `TPIDR2_EL0 == 0`（保留中 lazy ZA save が無い）の両方を確認する
+  （`current_thread_capable`）。(a)(b) いずれかが不成立の場合は
+  `panic!` ではなく `scalar_fallback_kernel`／`scalar_fallback_with_ldc`
+  （`compute` と同一の演算列を安全な Rust で再現し、有限値入力で bit
+  完全一致する）へ切り替え、`compute` 自体を一切呼ばない（＝ZA に
+  一切触れない）。TPIDR2_EL0 の確認を怠ると、呼び出し元（さらに上位の
+  private-ZA 関数）が ZA を dormant のまま本関数を呼んだ場合に
+  `smstart`／`mova` が呼び出し元の未保存 ZA を破壊しうる
+  （`crates/backend-cpu/src/gemm_blis/microkernel/sme.rs::has_pending_lazy_za_save`
+  doc 参照）。
 - `asm!` は `compute` 1 箇所に局所化。SAFETY コメントに以下を明記:
   `smstart`/`smstop` を 1 ブロック内で対にする・v0〜v31／p0〜p15 全列挙・
   w12 明示・`preserves_flags` を付けない（`subs`/`cmp` 使用）・`nomem`/
@@ -204,13 +231,18 @@ SME 非対応）、GB10 側の役割は「本番経路への副作用がない�
 
 ## 6. セキュリティ考慮（OWASP Top 10）
 
-- **unsafe の統制**: `asm!` は `compute`（`sme.rs`）と `rdsvl_bytes`
-  （`sme_detect.rs`）の 2 箇所に局所化。各所に SAFETY コメントで契約を
-  明記（§3.2・§3.1）。
+- **unsafe の統制**: `asm!` は `compute`／`has_pending_lazy_za_save`
+  （`sme.rs`）と `rdsvl_bytes`（`sme_detect.rs`）の 3 箇所に局所化。
+  各所に SAFETY コメントで契約を明記（§3.2・§3.1）。
 - **A03**: 検出は固定引数の子プロセス（`sysctl`。`env_clear()`）と
   `/proc/cpuinfo` 読み取りのみ。環境変数による ISA 上書き機構は設けない。
 - **A08**: 数値契約は bit 一致を維持（tolerance 変更なし）。fail-closed
-  （検出不能・SVL≠64・OS フラグ欠落はすべて NEON）。
+  （検出不能・SVL≠64・OS フラグ欠落は `dispatch_two_d_dynamic` 側の
+  ディスパッチ判定〈`sme_shape_eligible`／`SmeKernel::try_new`〉により
+  すべて NEON。SVL 不一致・`TPIDR2_EL0` 非ゼロ〈保留中 lazy ZA save〉は
+  `SmeKernel::try_new()` 自体は成功した後で `run`／`run_with_ldc` が
+  実行スレッド自身で再確認し、`compute` を呼ばずスカラーフォール
+  バックへ切り替える。§3.2「フォールバック契約」参照）。
 - **REQ-8**: `check_panel_lengths`／`check_c_tile_bounds` を asm 呼び出し
   前に必ず通す（最適化を理由に境界検査を省略しない）。
 

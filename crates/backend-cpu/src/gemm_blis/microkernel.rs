@@ -729,12 +729,21 @@ impl Microkernel for NeonBLaneqVecKernel {
 /// [`Microkernel::run_with_ldc`] は **実際に `fmopa` を発行するスレッド
 /// 自身で [`crate::sme_detect::sme_report`] を呼び直し、SVL がその
 /// スレッド上でも要求値と一致することを確認してから**
-/// `unsafe { sme::kernel_unchecked… }` を呼ぶ。一致しない場合は
-/// `panic!` で停止する（本カーネルは MR=16×NR=16 固定でパックされた
-/// 入力を前提とし、MR=8×NR=12 の [`NeonKernel`] 等へ実行時に安全に
-/// 差し替えることはできない〈パック済みバッファの形状が食い違う〉ため、
-/// 差し替えフォールバックではなく `unsafe` 呼び出し自体を行わない
-/// fail-closed を採る。`.claude/rules/security.md` の fail-closed 方針）。
+/// `unsafe { sme::kernel_unchecked… }` を呼ぶ。SVL が一致しない場合、
+/// または実行スレッド自身の `TPIDR2_EL0` が非ゼロ（呼び出し元が ZA を
+/// dormant のまま呼んだ＝AAPCS64 の保留中 lazy save が存在する。
+/// `current_thread_capable`／`sme::has_pending_lazy_za_save`〈非公開関数
+/// のためコードスパン表記〉doc 参照）の場合は、`panic!` ではなく
+/// `sme::scalar_fallback_kernel`／`sme::scalar_fallback_with_ldc`
+/// （いずれも `pub(crate)` のためコードスパン表記。`compute` と同一の
+/// 演算列を安全な Rust で再現し、有限値入力で bit 完全一致する
+/// フォールバック）へ切り替える（`current_thread_capable` doc 参照）。
+/// パック済みバッファは
+/// MR=16×NR=16 固定形状のままフォールバック側でも共有できるため、
+/// MR=8×NR=12 の [`NeonKernel`] 等〈形状が食い違い差し替え不可〉への
+/// 切り替えとは異なりこの委譲が可能。`unsafe { sme::kernel_unchecked… }`
+/// 自体は呼ばない（ZA に一切触れない）という意味で fail-closed を維持
+/// する（`.claude/rules/security.md` の fail-closed 方針）。
 #[cfg(target_arch = "aarch64")]
 #[derive(Clone, Copy)]
 pub struct SmeKernel {
@@ -784,8 +793,26 @@ impl SmeKernel {
     /// 参照）へ切り替える。`.claude/rules/security.md`／AGENTS.md
     /// 「本番経路の panic 禁止」への抵触を解消しつつ、実行スレッドでの
     /// SVL 再確認自体は維持する。
+    ///
+    /// ## 保留中 lazy ZA save の検査（codex-review P0 指摘
+    /// `PRRT_kwDOTuUCJc6h0ZMD` 対応。[`sme::has_pending_lazy_za_save`]
+    /// doc 参照）
+    ///
+    /// SVL 一致に加え、実行スレッド自身の `TPIDR2_EL0` が非ゼロ（呼び出し
+    /// 元が ZA を dormant のまま本関数を呼んだ＝AAPCS64 の保留中 lazy
+    /// save が存在する）でないことも確認する。非ゼロの場合は SME 対応・
+    /// SVL 一致であっても `false` を返し、`compute` を一切呼ばせない
+    /// （`smstart`／`mova` による ZA0 上書きが呼び出し元の保留中 save を
+    /// 破壊するのを防ぐ fail-closed 方針）。
     fn current_thread_capable(&self) -> bool {
-        crate::sme_detect::sme_report().kernel_enabled
+        if !crate::sme_detect::sme_report().kernel_enabled {
+            return false;
+        }
+        // SAFETY: 直前の `kernel_enabled` 確認により実行 CPU は SME 対応
+        // （`TPIDR2_EL0` へのアクセスが安全。`has_pending_lazy_za_save`
+        // の `# Safety` 契約を満たす）。
+        let pending_lazy_save = unsafe { sme::has_pending_lazy_za_save() };
+        !pending_lazy_save
     }
 }
 
