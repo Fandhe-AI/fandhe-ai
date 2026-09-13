@@ -17,14 +17,19 @@
 //! 経由せず直接呼び出せるため、呼び出し元の検査結果を信頼せず本モジュール
 //! 自身でも独立に同じ検査（rank・shape 各次元の `u32` 収容・`in_shape`／
 //! `out_shape` と `index_shape` の rank 一致・`dim` が rank 範囲内・
-//! `index` の値域）を行う（判定迂回経路を作らないための多層防御。
-//! `.claude/rules/security.md` A08。`crates/backend-cpu/src/
-//! gather_scatter.rs` と同じ二重検査方針。codex-review 指摘）。
-//! rank 一致・`dim` 範囲の検査を怠ると、カーネル（`shaders/
+//! `index` の値域・**各スライス〈`input`／`index`／`src`〉の実長が対応
+//! する shape の要素数積と一致すること**）を行う（判定迂回経路を作ら
+//! ないための多層防御。`.claude/rules/security.md` A08。`crates/
+//! backend-cpu/src/gather_scatter.rs` と同じ二重検査方針。codex-review
+//! 指摘）。rank 一致・`dim` 範囲の検査を怠ると、カーネル（`shaders/
 //! gather_scatter.metal`）が `shapes` 定数バッファを厳密に `2 * rank`
 //! 要素（`in_shape`／`index_shape`、または `out_shape`／`index_shape`
 //! それぞれ `rank` 要素ずつ）として読む前提が崩れ、GPU 側バッファ
-//! 範囲外読み出しになりうる。
+//! 範囲外読み出しになりうる。スライス実長の検査を怠ると、`shape`
+//! 引数（要素数積からカーネル引数 `numel` を導出）とスライス自体の
+//! 実長が食い違う入力（`MetalBuffer`／`MetalIndexBuffer` は渡された
+//! スライスの実長でバッファを確保する）で、カーネルが `shapes`／
+//! `numel` から導出した添字でバッファ範囲外を読む GPU 側 OOB になりうる。
 //! これに加え、`numel`（形状次元の積）が `u32` カーネル引数へ収まるかの
 //! 検査（`validate_gather_scatter_len`。private 関数のためコードスパン
 //! 表記とする）はカーネル引数の型制約に固有であり呼び出し元検査でも
@@ -134,6 +139,27 @@ impl MetalGatherScatter {
         let dim_size = in_shape[dim];
         validate_index_range(index, dim, dim_size).map_err(shape_err_to_metal)?;
 
+        // `input`／`index` の実スライス長が `in_shape`／`index_shape` の
+        // 要素数積と一致することを検証する（codex-review P0 指摘:
+        // shape 引数とスライス長は独立したパラメータのため、両者が
+        // 食い違う直接呼び出しでは `MetalBuffer::new_with_data`／
+        // `MetalIndexBuffer::new_with_i32` が実スライス長でバッファを
+        // 確保する一方、カーネルは `shapes`／`numel` から導出した
+        // 添字で読むため GPU 側バッファ範囲外読み出しになりうる）。
+        let in_numel = checked_numel(in_shape).map_err(shape_err_to_metal)?;
+        if input.len() != in_numel {
+            return Err(shape_err_to_metal(ShapeError::ElementCountMismatch {
+                expected: in_numel,
+                actual: input.len(),
+            }));
+        }
+        if index.len() != numel {
+            return Err(shape_err_to_metal(ShapeError::ElementCountMismatch {
+                expected: numel,
+                actual: index.len(),
+            }));
+        }
+
         let mut shapes: Vec<u32> = Vec::with_capacity(rank * 2);
         shapes.extend(in_shape.iter().map(|&d| d as u32));
         shapes.extend(index_shape.iter().map(|&d| d as u32));
@@ -214,9 +240,40 @@ impl MetalGatherScatter {
         let dim_size = out_shape[dim];
         validate_index_range(index, dim, dim_size).map_err(shape_err_to_metal)?;
 
+        // `input` の実スライス長が `out_shape` の要素数積と一致することを
+        // 検証する（codex-review P0 指摘。`run_gather_f32` と同じ理由。
+        // `numel_out == 0`〈上の早期 return〉の場合は `input` を一切
+        // 読まないためここでは不要）。この検証は `idx_numel == 0` の
+        // パススルー〈直下〉が `input` をそのまま返す前提でもあり、
+        // 誤長の `input` を「正しい」パススルー結果として返さないため
+        // にも必要。
+        if input.len() != numel_out {
+            return Err(shape_err_to_metal(ShapeError::ElementCountMismatch {
+                expected: numel_out,
+                actual: input.len(),
+            }));
+        }
+
         let idx_numel = checked_numel(index_shape).map_err(shape_err_to_metal)?;
         if idx_numel == 0 {
             return Ok(input.to_vec());
+        }
+
+        // `index`／`src` の実スライス長が `index_shape` の要素数積と
+        // 一致することを検証する（`run_gather_f32` と同じ理由。
+        // `idx_numel == 0` の場合は上のパススルーで `index`／`src` を
+        // 一切読まないためここでは不要）。
+        if index.len() != idx_numel {
+            return Err(shape_err_to_metal(ShapeError::ElementCountMismatch {
+                expected: idx_numel,
+                actual: index.len(),
+            }));
+        }
+        if src.len() != idx_numel {
+            return Err(shape_err_to_metal(ShapeError::ElementCountMismatch {
+                expected: idx_numel,
+                actual: src.len(),
+            }));
         }
 
         let mut shapes: Vec<u32> = Vec::with_capacity(rank * 2);

@@ -355,6 +355,79 @@ fn gather_scatter_direct_call_rejects_rank_mismatch_and_bad_dim() {
     );
 }
 
+/// イシュー #1799（codex-review P0 指摘・「スライス長」検証）の回帰
+/// テスト: `index_shape` の要素数積（`numel`）と実際の `index` スライス
+/// 長が食い違う直接呼び出しを拒否することを確認する（一致していれば
+/// `MetalIndexBuffer` が渡されたスライス実長でバッファを確保する一方
+/// カーネルは `numel` から導出した添字で読むため、実長の方が短い場合
+/// GPU 側バッファ範囲外読み出しになりうる）。
+#[test]
+#[ignore = "Apple Silicon 実機（Metal）が必要"]
+fn gather_scatter_direct_call_rejects_slice_length_mismatch() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gs = MetalGatherScatter::new(&ctx).expect("gather/scatter カーネルのコンパイルに失敗した");
+
+    // gather: index_shape=[2, 3]（numel=6）に対し index の実長が 3 のみ。
+    let input = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let short_index = vec![0i32, 1, 0];
+    let err = gs
+        .run_gather_f32(&ctx, &input, &[2, 3], &short_index, &[2, 3], 1)
+        .expect_err("index スライス長不一致は拒否されるべき");
+    assert!(
+        matches!(err, MetalError::InvalidGatherScatterShape { .. }),
+        "index スライス長不一致は InvalidGatherScatterShape であるべき: {err:?}"
+    );
+
+    // gather: in_shape=[2, 3]（in_numel=6）に対し input の実長が 3 のみ。
+    let short_input = vec![1.0f32, 2.0, 3.0];
+    let full_index = vec![0i32, 1, 2, 0, 1, 2];
+    let err = gs
+        .run_gather_f32(&ctx, &short_input, &[2, 3], &full_index, &[2, 3], 1)
+        .expect_err("input スライス長不一致は拒否されるべき");
+    assert!(
+        matches!(err, MetalError::InvalidGatherScatterShape { .. }),
+        "input スライス長不一致は InvalidGatherScatterShape であるべき: {err:?}"
+    );
+
+    // scatter: out_shape=[2, 3]（numel_out=6）に対し input の実長が 3 のみ。
+    let src = vec![9.0f32, 9.0, 9.0, 9.0, 9.0, 9.0];
+    let err = gs
+        .run_scatter_f32(
+            &ctx,
+            &short_input,
+            &[2, 3],
+            &full_index,
+            &[2, 3],
+            &src,
+            1,
+            ScatterReduce::Overwrite,
+        )
+        .expect_err("scatter の input スライス長不一致は拒否されるべき");
+    assert!(
+        matches!(err, MetalError::InvalidGatherScatterShape { .. }),
+        "scatter の input スライス長不一致は InvalidGatherScatterShape であるべき: {err:?}"
+    );
+
+    // scatter: index_shape=[2, 3]（idx_numel=6）に対し src の実長が 3 のみ。
+    let short_src = vec![9.0f32, 9.0, 9.0];
+    let err = gs
+        .run_scatter_f32(
+            &ctx,
+            &input,
+            &[2, 3],
+            &full_index,
+            &[2, 3],
+            &short_src,
+            1,
+            ScatterReduce::Overwrite,
+        )
+        .expect_err("scatter の src スライス長不一致は拒否されるべき");
+    assert!(
+        matches!(err, MetalError::InvalidGatherScatterShape { .. }),
+        "scatter の src スライス長不一致は InvalidGatherScatterShape であるべき: {err:?}"
+    );
+}
+
 /// イシュー #1799（Cursor Bugbot Medium／codex-review P2 指摘）の回帰
 /// テスト: `input` が非空でも `index`／`src`（`index_shape` の要素数積が
 /// 0）が空の scatter は、`MetalIndexBuffer`／`MetalBuffer` の 0 バイト
