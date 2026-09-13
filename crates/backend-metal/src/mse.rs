@@ -8,7 +8,25 @@
 //! バッファ確保・ディスパッチ・readback を内部で完結できる。
 //! `ops.rs::MetalBackendOps::mse_loss`／`mse_loss_backward` から
 //! `BackendOps` の実装として呼ばれる。
+//!
+//! イシュー #1690（親 #1582）で本モジュールに残っていた 3 箇所の
+//! `ctx.dispatch_sync`（forward の `mse_partial_f32`／`mse_finalize_f32`
+//! 2 段・backward の `mse_backward_f32` 1 段）を `ctx.encode` +
+//! [`fandhe_ai_tensor_core::DispatchFailureCell`] 登録へ切り替えた
+//! （`sgd.rs::MetalSgd::run` と同型のパターン。`docs/backend-metal-
+//! command-batching-design.md` §3.7）。forward は 2 段目の間にある
+//! `partial_buf`／`out_buf` の `alloc_uninit_pooled` 確保が
+//! `zero_on_reuse=false`（＝同期を強制しない。`buffer.rs` 参照）ため、
+//! 2 encode を同一バッチへ積んでから最後に 1 回だけ
+//! `ctx.synchronize()` する形へ実際に集約できる（2 wait → 1 wait）。
+//! backward は呼び出し元 `crates/autodiff/src/grad.rs`（`Op::MseLoss`
+//! の VJP）が戻り値 `Tensor<f32>`（`dpred`）へ直後に `dense_vec(&dpred)`
+//! （ホスト即時アクセス）で `dtarget` を計算する契約のため、本関数は
+//! 関数を出る前に必ず自ら `ctx.synchronize()` する必要があり、wait 回数
+//! は 1→1 のまま変わらない（詳細は `run_mse_backward_f32_tracked` の
+//! doc コメント）。
 
+use fandhe_ai_tensor_core::DispatchFailureCell;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLDevice, MTLSize};
 
@@ -107,12 +125,47 @@ impl MetalMse {
     /// target.len()` は呼び出し元（`ops.rs`）が検証済みの契約。
     /// `numel == 0` はディスパッチを回避し `0.0` を返す（`Mean`／`Sum`
     /// いずれも空和の契約。`backend-cpu::mse` と同じ）。
+    ///
+    /// 内部でローカルの [`DispatchFailureCell`] を生成し
+    /// [`Self::run_mse_loss_f32_tracked`] へ委譲する薄いラッパー
+    /// （イシュー #1690）。既存の公開シグネチャ・戻り値契約（GPU 実行
+    /// 完了まで待って `f32` を返す）は不変。
     pub fn run_mse_loss_f32(
         &self,
         ctx: &MetalContext,
         pred: &[f32],
         target: &[f32],
         factor: f32,
+    ) -> Result<f32, MetalError> {
+        let token = DispatchFailureCell::new();
+        self.run_mse_loss_f32_tracked(ctx, pred, target, factor, &token)
+    }
+
+    /// [`Self::run_mse_loss_f32`] の本体（イシュー #1690）。forward
+    /// 1・2 段目とも `ctx.encode`（待たない）で同一バッチへ積み、最後に
+    /// 1 回だけ `ctx.synchronize()` する（2 wait → 1 wait。モジュール
+    /// 冒頭コメント参照）。`token` はバッチ全体で共有する
+    /// `DispatchFailureCell` で、両 `encode` 呼び出しがそれぞれ登録する
+    /// （first-writer-wins のため二重登録しても安全）。
+    ///
+    /// `ctx.synchronize()` が `Ok` を返した直後にも `token.is_set()` を
+    /// 検査する: プロセスワイド singleton `MetalContext` を使う別スレッド
+    /// が本関数の `synchronize()` より先に同じバッチを `synchronize()`
+    /// し尽くしていた場合、本関数自身の `synchronize()` は「待つべき
+    /// バッチが既に空」で無条件に `Ok(())` を返してしまい、本来検出す
+    /// べき実行時エラーを見逃す（fail-open）おそれがある
+    /// （`docs/backend-metal-command-batching-design.md` §3.7 (2) と
+    /// 同種の競合）。`token` は `encode` と同一ロック区間で登録済みの
+    /// ため、他スレッドの `synchronize()` がエラーを検出していれば
+    /// 確実に `set()` 済みであり、`is_set()` の追加検査で fail-closed に
+    /// 拾い上げる（`.claude/rules/security.md` A08）。
+    pub fn run_mse_loss_f32_tracked(
+        &self,
+        ctx: &MetalContext,
+        pred: &[f32],
+        target: &[f32],
+        factor: f32,
+        token: &DispatchFailureCell,
     ) -> Result<f32, MetalError> {
         validate_mse_binary_len(pred.len(), target.len())?;
         let numel = pred.len();
@@ -129,29 +182,45 @@ impl MetalMse {
         // と同じ適用条件。イシュー #1021 設計文書 §6「A02」）。
         let partial_buf = MetalBuffer::alloc_uninit_pooled(ctx, num_tg)?;
 
-        ctx.dispatch_sync(|encoder| {
-            encode_partial_dispatch(
-                encoder,
-                &self.partial_f32,
-                &pred_buf,
-                &target_buf,
-                &partial_buf,
-                numel as u32,
-                num_tg,
-            );
-        })?;
+        ctx.encode(
+            "mse_partial_f32",
+            &[pred_buf.raw(), target_buf.raw(), partial_buf.raw()],
+            Some(token),
+            |encoder| {
+                encode_partial_dispatch(
+                    encoder,
+                    &self.partial_f32,
+                    &pred_buf,
+                    &target_buf,
+                    &partial_buf,
+                    numel as u32,
+                    num_tg,
+                );
+            },
+        )?;
 
+        // `alloc_uninit_pooled` は `zero_on_reuse=false`（未初期化確保）
+        // のため、この 2 段目の確保自体が 1 段目の GPU 完了を待つ同期
+        // 境界にはならない（モジュール冒頭コメント参照）。したがって
+        // 1・2 段目とも待たずに同一バッチへ積める。
         let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, 1)?;
-        ctx.dispatch_sync(|encoder| {
-            encode_finalize_dispatch(
-                encoder,
-                &self.finalize_f32,
-                &partial_buf,
-                &out_buf,
-                num_tg as u32,
-                factor,
-            );
-        })?;
+        ctx.encode(
+            "mse_finalize_f32",
+            &[partial_buf.raw(), out_buf.raw()],
+            Some(token),
+            |encoder| {
+                encode_finalize_dispatch(
+                    encoder,
+                    &self.finalize_f32,
+                    &partial_buf,
+                    &out_buf,
+                    num_tg as u32,
+                    factor,
+                );
+            },
+        )?;
+
+        check_dispatch_token(ctx.synchronize(), token)?;
 
         Ok(out_buf.read_to_vec().first().copied().unwrap_or(0.0))
     }
@@ -160,12 +229,42 @@ impl MetalMse {
     /// 呼び出し元がホスト側で符号反転して得る契約（`backend_ops.rs::
     /// BackendOps::mse_loss_backward` doc 参照）のため、本関数は
     /// `dPred` のみを計算する。`numel == 0` は空 `Vec` を返す。
+    ///
+    /// 内部でローカルの [`DispatchFailureCell`] を生成し
+    /// [`Self::run_mse_backward_f32_tracked`] へ委譲する薄いラッパー
+    /// （イシュー #1690）。既存の公開シグネチャ・戻り値契約は不変。
     pub fn run_mse_backward_f32(
         &self,
         ctx: &MetalContext,
         pred: &[f32],
         target: &[f32],
         scale: f32,
+    ) -> Result<Vec<f32>, MetalError> {
+        let token = DispatchFailureCell::new();
+        self.run_mse_backward_f32_tracked(ctx, pred, target, scale, &token)
+    }
+
+    /// [`Self::run_mse_backward_f32`] の本体（イシュー #1690）。ディス
+    /// パッチ自体は `ctx.encode`（待たない）へ切り替えたが、呼び出し元
+    /// `crates/autodiff/src/grad.rs`（`Op::MseLoss` の VJP）が戻り値
+    /// `Tensor<f32>`（`dpred`）に対して直後に `dense_vec(&dpred)`（ホスト
+    /// 即時アクセス）で `dtarget` を計算する契約のため、本関数は関数を
+    /// 出る前に**必ず自ら** `ctx.synchronize()` する（無条件）。
+    /// backward は 1 encode のみのため、この待ちは encode-only 化の
+    /// 前後で 1→1 のまま変わらない（forward の 2→1 とは異なり待ち回数
+    /// の削減効果はない。モジュール冒頭コメント参照。PR 本文にも明記）。
+    ///
+    /// `token.is_set()` の追加検査は
+    /// [`Self::run_mse_loss_f32_tracked`] と同じ理由
+    /// （別スレッドが先に同じバッチを drain してしまう競合への fail-
+    /// closed な保険）。
+    pub fn run_mse_backward_f32_tracked(
+        &self,
+        ctx: &MetalContext,
+        pred: &[f32],
+        target: &[f32],
+        scale: f32,
+        token: &DispatchFailureCell,
     ) -> Result<Vec<f32>, MetalError> {
         validate_mse_binary_len(pred.len(), target.len())?;
         let numel = pred.len();
@@ -181,20 +280,53 @@ impl MetalMse {
         // 同じ適用条件）。
         let dpred_buf = MetalBuffer::alloc_uninit_pooled(ctx, numel)?;
 
-        ctx.dispatch_sync(|encoder| {
-            encode_backward_dispatch(
-                encoder,
-                &self.backward_f32,
-                &pred_buf,
-                &target_buf,
-                &dpred_buf,
-                numel as u32,
-                scale,
-            );
-        })?;
+        ctx.encode(
+            "mse_backward_f32",
+            &[pred_buf.raw(), target_buf.raw(), dpred_buf.raw()],
+            Some(token),
+            |encoder| {
+                encode_backward_dispatch(
+                    encoder,
+                    &self.backward_f32,
+                    &pred_buf,
+                    &target_buf,
+                    &dpred_buf,
+                    numel as u32,
+                    scale,
+                );
+            },
+        )?;
+
+        check_dispatch_token(ctx.synchronize(), token)?;
 
         Ok(dpred_buf.read_to_vec())
     }
+}
+
+/// `ctx.synchronize()` の戻り値を `token` の状態と突き合わせる共通
+/// ヘルパ（[`MetalMse::run_mse_loss_f32_tracked`]／
+/// [`MetalMse::run_mse_backward_f32_tracked`] で共有。イシュー #1690）。
+///
+/// `sync_result` が `Err` ならそれをそのまま伝播する（`token` への
+/// 二重報告はしない）。`Ok(())` の場合のみ `token.is_set()` を検査し、
+/// 設定済みなら（別スレッドが先に同じバッチを `synchronize()` して
+/// 実行時エラーを消費してしまった競合。両関数の doc コメント参照）
+/// [`MetalError::CommandBufferExecutionFailed`] として fail-closed に
+/// 返す。
+fn check_dispatch_token(
+    sync_result: Result<(), MetalError>,
+    token: &DispatchFailureCell,
+) -> Result<(), MetalError> {
+    sync_result?;
+    if token.is_set() {
+        let message = token.take().map(|err| err.to_string()).unwrap_or_else(|| {
+            "dispatch failure token was set by a concurrent synchronize() on the shared \
+                 MetalContext before this call's own synchronize() observed the batch"
+                .to_string()
+        });
+        return Err(MetalError::CommandBufferExecutionFailed { message });
+    }
+    Ok(())
 }
 
 fn mse_dispatch_sizes(units: usize, threadgroup_width: usize) -> (MTLSize, MTLSize) {
@@ -212,9 +344,10 @@ fn mse_dispatch_sizes(units: usize, threadgroup_width: usize) -> (MTLSize, MTLSi
 }
 
 /// forward 1 段目のエンコード（バッファ結線 index 0〜2・`numel` index
-/// 3・`num_tg` 個の threadgroup をディスパッチ）。[`MetalMse::
-/// run_mse_loss_f32`] が [`MetalContext::dispatch_sync`] のクロージャ
-/// から呼ぶ。
+/// 3・`num_tg` 個の threadgroup をディスパッチ）。
+/// [`MetalMse::run_mse_loss_f32_tracked`] が [`MetalContext::encode`]
+/// のクロージャから呼ぶ（イシュー #1690。旧 `ctx.dispatch_sync` から
+/// 切替）。
 fn encode_partial_dispatch(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &MtlPipeline,
@@ -229,7 +362,11 @@ fn encode_partial_dispatch(
     // SAFETY: FFI 境界 1/2。`setBuffer_offset_atIndex` は生存中の
     // `MTLBuffer` への参照を保持するのみで即座に読み書きしない
     // （`elementwise.rs::encode_binary_dispatch` と同種のコメント参照）。
-    // 各バッファは呼び出し元 `ctx.dispatch_sync` が完了するまで生存する。
+    // 各バッファは `MetalMse::run_mse_loss_f32_tracked` が `ctx.encode`
+    // の `resources` 引数として渡し `Batch::in_flight` へ retain
+    // される、または本関数呼び出し中は関数スコープで生存するため
+    // （イシュー #1690。`sgd.rs::encode_sgd_dispatch` と同種の根拠）、
+    // エンコード完了まで有効である。
     unsafe {
         encoder.setBuffer_offset_atIndex(Some(pred_buf.raw()), 0, 0);
         encoder.setBuffer_offset_atIndex(Some(target_buf.raw()), 0, 1);

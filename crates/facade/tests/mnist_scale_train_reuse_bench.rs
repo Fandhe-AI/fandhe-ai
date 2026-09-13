@@ -412,6 +412,37 @@ fn mnist_scale_train_fresh_vs_reuse_metal() {
 /// こと（事前登録規則の事後緩和ではなく、机上導出の誤りを実測で
 /// 訂正する通常のフロー）。
 ///
+/// **#1690 追記**: `crates/backend-metal/src/mse.rs` の forward
+/// （`run_mse_loss_f32`。`mse_partial_f32`／`mse_finalize_f32` の 2 段
+/// リダクション）が本テストの 1 step 計測窓にも含まれる
+/// （`MseLoss::forward` → `Var::mse_loss_with` → `BackendOps::mse_loss`
+/// → `MetalBackendOps::mse_loss` → `MetalMse::run_mse_loss_f32` という
+/// 呼び出し経路。forward パス自体は `Sequential::forward_resident` の
+/// 直後にこの loss 計算を挟む）。同イシューで forward 2 段の
+/// `ctx.dispatch_sync` を `ctx.encode`（待たない）へ切り替え、2 段目の
+/// 間にある `partial_buf`／`out_buf` の `alloc_uninit_pooled` 確保が
+/// `zero_on_reuse=false`（同期を強制しない）ことを利用して、両段を
+/// 待たずに積んでから最後に 1 回だけ `ctx.synchronize()` する形へ
+/// 変更した。旧実装は 2 回の `dispatch_sync` がそれぞれ独立に
+/// `encode`＋`synchronize()`（commit＋wait）を行っていたため、直前に
+/// 何が同一バッチへ積まれていたかに関わらず、この 2 回の呼び出しが
+/// 締めくくる cb・wait は 2 個だった。新実装は同じ 2 回の `encode`
+/// 呼び出し（`encode_delta` への寄与は不変）を 1 回の
+/// `synchronize()` でまとめて締めくくるため、この 2 回の呼び出しが
+/// 締めくくる cb・wait は 1 個へ減る（forward の他の encode-only
+/// dispatch がこの直前に未 flush のまま溜まっていた場合、その分も
+/// まとめて 1 回の wait に合流するため、削減量は常に厳密に 1 のまま
+/// 変わらない——「何が一緒に溜まっていたか」に依存しない局所的な
+/// 差分である）。この結果、steady-state 1 step のカウンタは
+/// #1566 適用後の **11 / 8 / 8** から **11 / 7 / 7**
+/// （encode / command_buffer / wait）へ変わる（backward 側の
+/// `run_mse_backward_f32` は #1690 でも encode-only 化したが、呼び
+/// 出し元 `crates/autodiff/src/grad.rs`（`Op::MseLoss` の VJP）が
+/// 戻り値へ直後にホスト即時アクセスする契約のため関数内で自ら
+/// `ctx.synchronize()` する——wait 回数は 1→1 のまま不変であり、
+/// この節の削減には寄与しない）。この結論も上記と同じく机上導出
+/// であり、Mac 実機セッションでの実測確認はまだ行っていない。
+///
 /// warmup（`WARMUP` step）で MSL パイプライン初回コンパイル・プールの
 /// フリーリスト充足を steady-state 化してから、その次の 1 step だけを
 /// 計測窓に取る（`run_fresh`／`run_reuse` と同じモデル形状・シードだが、
@@ -507,24 +538,26 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
     assert_eq!(
         encode_delta, 11,
         "encode() 呼び出し総数（= dispatch 総数）は #1223（Op::LinearResident \
-         の VJP が Metal GPU dispatch を追加）適用後から #1555・#1563・#1566 \
-         適用後も変わらず 11 のはず（d_weight 計算 2 回の GPU dispatch 自体は \
-         残り、#1566 の bias 縮約は既存ディスパッチへ折り込まれるだけで \
-         新規 encode を増やさないため）"
+         の VJP が Metal GPU dispatch を追加）適用後から #1555・#1563・#1566・ \
+         #1690 適用後も変わらず 11 のはず（d_weight 計算 2 回の GPU dispatch \
+         自体は残り、#1566 の bias 縮約・#1690 の MSE forward encode-only \
+         化はいずれも既存の `ctx.encode` 呼び出し回数を増減させないため）"
     );
     assert_eq!(
-        command_buffer_delta, 8,
+        command_buffer_delta, 7,
         "コマンドバッファ生成数は #1563（d_weight encode を d_input の同期点より \
          前へ移し層内で合流。upload_into の防御的同期が no-op 化）適用後は \
-         9→8 のはず（d_input 自身の同期境界 2 件〈L1・L2〉のみが残る）。#1566 \
-         は既に no-op だった bias 用 upload_into を除去するのみのため \
-         8 から不変のはず（机上導出。Mac 実機未確認）"
+         9→8、#1690（MSE forward の 2 段リダクションを encode-only 化し \
+         1 回の synchronize() へ統合。alloc_uninit_pooled が zero_on_reuse= \
+         false のため 2 段目の確保自体は同期を強制しない）適用後は \
+         8→7 のはず（机上導出。Mac 実機未確認。本ファイル冒頭 doc comment \
+         「#1690 追記」参照）"
     );
     assert_eq!(
-        wait_delta, 8,
-        "waitUntilCompleted() 呼び出し数は #1563 適用後は 9→8 のはず \
-         （command_buffer_delta と同じ理由）。#1566 適用後も同じ理由で \
-         8 から不変のはず（机上導出。Mac 実機未確認）"
+        wait_delta, 7,
+        "waitUntilCompleted() 呼び出し数は #1563 適用後は 9→8、#1690 適用後は \
+         8→7 のはず（command_buffer_delta と同じ理由。本ファイル冒頭 doc \
+         comment「#1690 追記」参照。机上導出。Mac 実機未確認）"
     );
 }
 
@@ -601,6 +634,21 @@ fn mnist_scale_train_reuse_metal_batch_counters() {
 /// （SGD update）分のカウンタ・時間はこの計測窓の外（bias の
 /// `upload_into` 同期はここに含まれない。冒頭 doc comment
 /// 「#1564 のスコープ」参照）。
+///
+/// **#1690 追記**: 本テストの計測窓は `before` snapshot を forward・
+/// loss 計算完了後（`loss.to_tensor().get(&[])` によるホスト同期後）
+/// に取るため forward を含まない。`crates/backend-metal/src/mse.rs`
+/// の forward（`run_mse_loss_f32`）2 段リダクションの encode-only 化
+/// （#1690。本ファイル冒頭 doc comment「#1690 追記」参照）は本窓には
+/// 影響しない。窓内で寄与するのは backward の `MseLoss` VJP
+/// （`run_mse_backward_f32`。上記イベント列 #1）のみで、この関数は
+/// #1690 でも呼び出し元 `crates/autodiff/src/grad.rs` のホスト即時
+/// アクセス契約により関数内で自ら 1 回 `ctx.synchronize()` する
+/// ため、encode-only 化の前後で wait 回数は 1→1 のまま変わらない
+/// （forward の 2→1 とは異なり削減効果はない）。したがって上記の
+/// 事前登録仮説（`encode_delta=5`／`command_buffer_delta=3`／
+/// `wait_delta=3`）は #1690 適用後も変わらない（実測は Mac 実機
+/// セッション〈#1691〉へ引き継ぐ）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn mnist_scale_train_reuse_metal_backward_dinput_phase() {
