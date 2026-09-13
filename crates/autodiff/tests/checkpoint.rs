@@ -561,3 +561,73 @@ fn checkpoint_region_containing_ineligible_op_does_not_error() {
     let dx_ckpt = run(true);
     assert_bit_identical(&dx_plain, &dx_ckpt);
 }
+
+// --- (12) 固定長の小区間を多数連鎖させた backward の完走（codex-review
+//     P2 是正・イシュー #1624 PR #1681 レビュー: `release_checkpoints_
+//     ending_at` の O(N*K) 線形走査を lo キーの索引へ置き換えた回帰
+//     テスト。時間計測はせず完走と結果一致のみを確認する） ---
+
+/// 固定長の小区間（`matmul → sigmoid`）を多数連鎖させ、10 区間おきに
+/// 入れ子区間を挟んだ backward が完走し、checkpoint 無しの同一計算・
+/// 複数回 backward 呼び出しといずれも **bit 同一**になることを検証する。
+#[test]
+fn many_chained_small_checkpoint_regions_complete_with_nesting() {
+    const STEPS: usize = 150;
+
+    let x = t(vec![0.3, -0.2, 0.1, 0.4], &[2, 2]);
+    let weights: Vec<Tensor<f32>> = (0..STEPS)
+        .map(|i| {
+            // sigmoid で毎ステップ出力を (0, 1) へ押し込めるため、
+            // ステップ数を増やしても値が発散・消失しない（決定的な
+            // 振幅のみ変化させる小さな係数）。
+            let s = 0.05 + (i % 7) as f32 * 0.01;
+            t(vec![s, -s * 0.5, s * 0.3, s * 0.7], &[2, 2])
+        })
+        .collect();
+
+    let run = |use_checkpoint: bool| -> Tensor<f32> {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let wvs: Vec<_> = weights.iter().map(|w| tape.var(w)).collect();
+        let mut h = xv;
+        let mut i = 0usize;
+        while i < STEPS {
+            if use_checkpoint && i.is_multiple_of(10) && i + 1 < STEPS {
+                // 10 区間おきに入れ子区間を挟む: 外側区間の中で内側
+                // 区間（1 ステップぶん）をもう一度 checkpoint する。
+                let w0 = &wvs[i];
+                let w1 = &wvs[i + 1];
+                h = tape
+                    .checkpoint(|| {
+                        let inner = tape.checkpoint(|| Ok(h.matmul(w0)?.sigmoid()))?;
+                        Ok(inner.matmul(w1)?.sigmoid())
+                    })
+                    .unwrap();
+                i += 2;
+            } else if use_checkpoint {
+                let w = &wvs[i];
+                h = tape.checkpoint(|| Ok(h.matmul(w)?.sigmoid())).unwrap();
+                i += 1;
+            } else {
+                let w = &wvs[i];
+                h = h.matmul(w).unwrap().sigmoid();
+                i += 1;
+            }
+        }
+
+        let loss = h.sum(None).unwrap();
+        let grads1 = tape.backward(&loss).unwrap();
+        // 区間は消費されず epoch を跨がない限り再利用可能な契約
+        // （`Tape::checkpoint` doc）。2 回目の backward も同一区間索引
+        // を再解放するため、索引化後も同じ結果になることを確認する。
+        let grads2 = tape.backward(&loss).unwrap();
+        let dx1 = grads1.get(&xv).unwrap().cloned().unwrap();
+        let dx2 = grads2.get(&xv).unwrap().cloned().unwrap();
+        assert_bit_identical(&dx1, &dx2);
+        dx1
+    };
+
+    let dx_plain = run(false);
+    let dx_ckpt = run(true);
+    assert_bit_identical(&dx_plain, &dx_ckpt);
+}

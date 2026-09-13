@@ -21,6 +21,7 @@
 //! フォールバックする。
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
@@ -1101,14 +1102,27 @@ pub struct Tape {
     /// は現在の全ノードを保持する（`leaf_count`/`reset` 参照）。
     retained_leaf_len: Cell<Option<usize>>,
     /// activation checkpointing（イシュー #1624）が登録した解放済み区間
-    /// の一覧。`Tape::checkpoint`／`Var::checkpoint_from` が push し、
+    /// を `lo`（区間の先頭ノード ID）ごとにグルーピングした索引。
+    /// `Tape::checkpoint`／`Var::checkpoint_from` が push し、
     /// `backward_impl`（`backward.rs`）が逆走査中に `id == region.lo`
     /// を処理し終えるたびに当該区間を再解放する（forward 時点の解放で
     /// 空けたメモリを、backward の再計算後にもう一度空けるための帳
     /// 簿。`docs/autodiff-checkpoint-design.md` §3.1 点 4）。`Tape::reset`
     /// で消去する（区間は常に旧 epoch の葉プレフィックスより後ろにしか
     /// 存在しないため、reset 後に stale な区間が残る余地はない）。
-    checkpoints: RefCell<Vec<CheckpointRegion>>,
+    ///
+    /// **索引化の理由（codex-review P2 是正・イシュー #1624 PR #1681
+    /// レビュー）**: 旧実装は `Vec<CheckpointRegion>` の線形走査で
+    /// `release_checkpoints_ending_at` を実装しており、backward の全
+    /// ノード（N 個）で毎回登録済み全区間（K 個）を走査するため
+    /// `O(N*K)`（固定長の小区間を連鎖させる典型利用では `O(N^2)`）に
+    /// 増加していた。`lo` をキーにした `HashMap` へ変えることで
+    /// `release_checkpoints_ending_at(id)` は該当区間のみを平均 `O(1)`
+    /// で取得できる。同一 `lo` を持つ複数区間（入れ子区間が同じ地点
+    /// から始まる場合）は `Vec` で共存させ、複数回 backward（区間は
+    /// 消費されず `Tape::reset` まで再利用可能）の契約も従来どおり
+    /// 維持する。
+    checkpoints: RefCell<HashMap<usize, Vec<CheckpointRegion>>>,
 }
 
 /// activation checkpointing の 1 区間。ノード ID の閉区間
@@ -1182,7 +1196,7 @@ impl Tape {
             ops,
             epoch: Cell::new(0),
             retained_leaf_len: Cell::new(None),
-            checkpoints: RefCell::new(Vec::new()),
+            checkpoints: RefCell::new(HashMap::new()),
         }
     }
 
@@ -1374,6 +1388,8 @@ impl Tape {
         }
         self.checkpoints
             .borrow_mut()
+            .entry(lo)
+            .or_default()
             .push(CheckpointRegion { lo, output });
         Ok(())
     }
@@ -1408,13 +1424,13 @@ impl Tape {
     /// で失敗を検出し型付きエラーとして呼び出し元（`backward_impl`）へ
     /// 伝播する。
     pub(crate) fn release_checkpoints_ending_at(&self, id: usize) -> Result<(), AutodiffError> {
-        let regions: Vec<CheckpointRegion> = self
-            .checkpoints
-            .borrow()
-            .iter()
-            .filter(|r| r.lo == id)
-            .copied()
-            .collect();
+        // `lo == id` の区間だけを索引から直接取得する（平均 O(1)。上記
+        // `checkpoints` フィールド doc「索引化の理由」参照）。旧実装の
+        // 全区間線形走査（`iter().filter(...)`）を置き換えた本体。
+        let regions: Vec<CheckpointRegion> = match self.checkpoints.borrow().get(&id) {
+            Some(regions) => regions.clone(),
+            None => return Ok(()),
+        };
         if regions.is_empty() {
             return Ok(());
         }

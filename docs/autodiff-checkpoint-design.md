@@ -32,7 +32,7 @@
 
 ### 3.1 モデル: 「記録は残し、値だけ捨てる。必要時に再計算し、backward が区間を離れたら再び捨てる」
 
-1. **区間の登録**: チェックポイント区間 = ノード ID の閉区間 `[lo, output]`（`output` を除く）。`Tape` に区間レジストリ `checkpoints: RefCell<Vec<CheckpointRegion { lo, output }>>` を追加
+1. **区間の登録**: チェックポイント区間 = ノード ID の閉区間 `[lo, output]`（`output` を除く）。`Tape` に区間レジストリ `checkpoints: RefCell<HashMap<usize, Vec<CheckpointRegion { lo, output }>>>`（`lo` をキーとする索引。§3.6 参照。当初実装は `RefCell<Vec<CheckpointRegion>>` の線形走査だったが PR #1681 codex-review 指摘で索引化した）を追加
 2. **解放（release）**: 区間内で「再計算可能（§3.3）かつ `output` 以外」のノードの `value` を `OnceCell::take()` で空にし、`TapeNode.recompute = true` を立てる
 3. **再計算**: `materialize_fallible`／`materialize_non_fallible` の冒頭で `is_view() || recompute` を判定し、`recompute_fallible`／`recompute_infallible`（§3.4）へ分岐する。これらは入力側を再帰的に辿り、必要な値を都度計算する
 4. **backward 中の再解放**: `backward_impl` の逆走査で `id == region.lo` を処理し終えた時点で、その区間を再び解放する（`Tape::release_checkpoints_ending_at`）。これにより forward 直後の解放で空けたメモリを、backward の再計算後にもう一度空けられる
@@ -111,6 +111,15 @@ fn recompute_value(
 - **`Tape::push_eager`** は新規ノード登録の直前に `op.for_each_input` で全入力を走査し、`elementwise_leaves_poisoned(&nodes, input_id)`（§3.5 と同じ補助関数の再利用。入力自身が直接 poison されている場合・入力が未実体化の lazy elementwise 連鎖でその葉が poison されている場合の両方を検出する）がいずれかの入力で真なら、登録するノード自身も `recompute_failed: true` で登録する。
 - **本チェックが実際に効く経路は限定的**: `push_eager` の呼び出し元のうち `matmul`／`sum`／`max`／`rnn_cell`／線形代数系（`inv`／`solve`／`det`／`cholesky`／`qr`／`svd`）等は入力を `materialize_fallible`（層 1）で読み `?` で poison を即座に `Err` 化するため、これらは元々 poison した入力で `push_eager` へ到達しない（`elementwise_leaves_poisoned` は常に false）。実際に効くのは `Var::sigmoid`（`.value()`／層 2 経由）のような infallible 読み出しを行う経路のみであり、将来同種の経路が追加された場合の安全網としても機能する。
 - 回帰テストは `crates/autodiff/tests/checkpoint_review_1624.rs::eager_sigmoid_propagates_poison_from_checkpoint_freed_input`（`m.sigmoid()` の出力が `m` の poison を継承し、以後の `sum(None)`・`Tape::backward` がいずれも `Err` を返すことを確認する）。
+
+### 3.6 区間索引の `lo` キー化（codex-review P2 是正・PR #1681 レビュー）
+
+当初実装（本 §3.1 点 1 の初版）は `checkpoints: RefCell<Vec<CheckpointRegion>>` を単純な `Vec` として保持し、`Tape::release_checkpoints_ending_at(id)`（backward の逆走査が各ノードを処理し終えるたびに呼ぶ。§3.1 点 4）が毎回 `.iter().filter(|r| r.lo == id)` で全区間を線形走査していた。backward の全ノード数を N・登録済み区間数を K とすると、この走査だけで `O(N*K)` かかり、固定長の小区間（例: 1 ノードごとに `Tape::checkpoint` を挟む典型利用）を連鎖させると `K` が `N` に比例して増えるため全体で `O(N^2)` に悪化する。小さいテンソルではこの管理処理（区間検索）自体が本来の演算コストを上回りうる。
+
+- **是正**: `checkpoints` を `RefCell<HashMap<usize, Vec<CheckpointRegion>>>`（`lo` をキーとする索引）へ変更した。`Tape::register_checkpoint` は `checkpoints.borrow_mut().entry(lo).or_default().push(...)` で該当 `lo` のバケットへ追記し、`release_checkpoints_ending_at(id)` は `checkpoints.borrow().get(&id)` で該当区間のみを平均 `O(1)` で取得する（`HashMap` の探索コストのみで、無関係な区間を走査しない）。
+- **入れ子区間の対応**: 同じ `lo` から複数の区間が始まる場合（外側区間の直後にもう一段 checkpoint を挟む等）があり得るため、バケットの値型は `Vec<CheckpointRegion>`（単一区間ではなく複数区間の集合）のままとした。`Tape::checkpoint`／`Var::checkpoint_from` の呼び出しごとに `push` するだけで、既存の `lo` に対する追記か新規キーの作成かは `entry(...).or_default()` が吸収する。
+- **複数回 backward の対応**: `release_checkpoints_ending_at` は取得した `Vec<CheckpointRegion>` を `HashMap` から**取り除かない**（`get` のみで `remove` しない）。区間は `Tape::reset()` が呼ばれるまで `HashMap` に残り続けるため、同一 `Tape` に対して `backward()` を複数回呼んでも毎回同じ区間が再解放される（§3.1 点 5 の契約は不変）。`Tape::reset()` は `checkpoints.get_mut().clear()`（`HashMap::clear`）で索引ごと消去する。
+- **回帰テスト**: `crates/autodiff/tests/checkpoint.rs::many_chained_small_checkpoint_regions_complete_with_nesting`（固定長の小区間〈`matmul → sigmoid`〉150 個を連鎖させ、10 区間おきに入れ子区間を挟んだ backward が完走し、checkpoint 無しの同一計算・複数回 backward 呼び出しといずれも bit 同一になることを確認する。時間計測はせず完走と結果一致のみを検証する）。
 
 ## 4. reentrant init 問題と解決（実装中に発見した設計上の落とし穴）
 
