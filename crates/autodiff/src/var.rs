@@ -1577,7 +1577,7 @@ impl<'t> Var<'t> {
     /// （`eval::where_cond`）へフォールバック → ⑦戻り shape 検証
     /// （`.claude/rules/security.md` A08）→ ⑧`push_eager`。
     ///
-    /// backward（[`where_vjp`]）は `a`／`b` の勾配を `out_shape` から
+    /// backward（`where_vjp`）は `a`／`b` の勾配を `out_shape` から
     /// 元の `a_shape`／`b_shape`（`cond` を含まない）へ
     /// `reduce_to_shape` で縮約するため、`cond` 由来の拡張軸は
     /// `Op::Mul` 等の一般 broadcast VJP と同じ経路で正しく縮約される。
