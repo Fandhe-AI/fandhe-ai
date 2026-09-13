@@ -1,0 +1,23 @@
+# イシュー #1692 CUDA mse_loss_backward ストリーム順序契約確認 実測環境（記入欄）
+#
+# 本 PR 実行環境（Linux コンテナ／worktree）に DGX Spark GB10 実機への
+# 到達手段がないため未実測。GB10 実機での実測時にこのテンプレートを
+# 埋めること（内部ホスト名・ユーザー名は書かない）。
+
+hostname: masked
+date:
+gpu:
+cpu:
+os:
+cuda_driver_version:
+rustc:
+cargo:
+before_sha:
+after_sha:
+mse_parity_result:
+train_shape_median_s_ratio:
+general_shape_16384_ratio:
+general_shape_65536_ratio:
+general_shape_1048576_ratio:
+fold_bits_match:
+verdict:
