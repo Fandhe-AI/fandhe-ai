@@ -285,4 +285,53 @@ mod tests {
         assert!(s[1].is_infinite() && s[1] < 0.0);
         assert!(s[2].is_nan());
     }
+
+    /// 非 contiguous view（transpose）に対する `upcast_bf16`／
+    /// `downcast_f32` が contiguous 等価物と bit 完全一致することを
+    /// 確認する（レビュー指摘対応。`crates/backend-cpu/src/typed_f16.rs
+    /// ::non_contiguous_transpose_view_matches_contiguous_equivalent`
+    /// と同型の懸念に対する CUDA 側の検証）。
+    ///
+    /// `TypedOps::<bf16>` の演算本体（`gemm`／`add` 等）は
+    /// `device_handle()` 経由で実 CUDA driver を要求するため、実機
+    /// 非搭載の通常 CI では `CudaUnavailable` にしかならず非
+    /// contiguous 経路の検証にならない。一方 [`upcast_bf16`]／
+    /// [`downcast_f32`] はモジュール doc の「1. 昇格」「3. 丸め」段が
+    /// 述べるとおり `Tensor::host_slice()`（非 contiguous view は
+    /// ここで実体化）のみに依存するホスト側関数で、GPU 不要かつ
+    /// 各 `TypedOps<bf16>` メソッドが実際に非 contiguous 入力へ辿る
+    /// 経路そのものである。この関数がどんな view に対しても同じ結果
+    /// （bit 完全一致）を返すことを検証すれば、`TypedOps<bf16>` 各
+    /// メソッド全体としての非 contiguous 対応は構造的に保証される。
+    #[test]
+    fn non_contiguous_transpose_view_upcast_matches_contiguous_equivalent() {
+        let a = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let a_t = a.transpose_2d().unwrap();
+        assert!(
+            !a_t.is_contiguous(),
+            "transpose_2d は非 contiguous view を返すはず"
+        );
+        let a_t_contig = a_t.contiguous();
+
+        let up_view = upcast_bf16(&a_t).unwrap();
+        let up_contig = upcast_bf16(&a_t_contig).unwrap();
+        assert_eq!(
+            up_view.host_slice().as_ref(),
+            up_contig.host_slice().as_ref(),
+            "非 contiguous view と contiguous 等価物で upcast_bf16 の結果が一致しない"
+        );
+
+        // downcast_f32 側（f32 → bf16）も同様に非 contiguous 入力を
+        // 実体化してから丸める。upcast 側の出力（f32）をそのまま
+        // 非 contiguous view として渡し、対称性を確認する。
+        let up_view_t = up_view.transpose_2d().unwrap();
+        let up_contig_t = up_view_t.contiguous();
+        let down_view = downcast_f32(&up_view_t).unwrap();
+        let down_contig = downcast_f32(&up_contig_t).unwrap();
+        assert_eq!(
+            f32v(&down_view),
+            f32v(&down_contig),
+            "非 contiguous view と contiguous 等価物で downcast_f32 の結果が一致しない"
+        );
+    }
 }
