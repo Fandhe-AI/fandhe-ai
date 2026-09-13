@@ -457,6 +457,8 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 依存追加は行わない**。implement-issue-tree で Phase 3（親 #1573）を
 消化する際は、#1627 を skip／blocked 扱いとする。
 
+**#1628 の設計記録は `docs/facade-multi-gpu-ddp-decision.md` として完了した。**
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |
