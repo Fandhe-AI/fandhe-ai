@@ -137,9 +137,22 @@
 //! 制約を継承。`docs/autodiff-view-recompute-decision.md` §5 が予告
 //! した拡張）。
 
+//! イシュー #1620 で `Var::einsum`（PyTorch `torch.einsum`／TF
+//! `tf.einsum` 相当の汎用縮約記法）を追加した。新規カーネルは追加せず、
+//! 既存の `Var::matmul`（GEMM）・`sum`（縮約）・`permute`／`reshape`
+//! （view）・`mul`（broadcast 乗算）への分解（`einsum` モジュール）
+//! として実装しているため、VJP は分解先各演算の VJP 合成として自動的
+//! に成立する（`einsum` 専用の VJP は `grad.rs` に追加していない）。
+//! 分解の前段で `permute` 後の非 contiguous view を明示実体化する
+//! eager ノード `Var::contiguous`（`pub(crate)`。`tape::Op::Contiguous`）
+//! も新設した。受理範囲（batch 添字を伴う縮約は rank≥3 `matmul`
+//! 〈#1600〉未実装のため拒否等）・分解アルゴリズムは `einsum` モジュール
+//! doc を参照。
+
 mod backward;
 pub mod compat;
 mod default_ops;
+mod einsum;
 mod error;
 mod eval;
 mod grad;

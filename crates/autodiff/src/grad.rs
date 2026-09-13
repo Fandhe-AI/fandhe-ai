@@ -1120,6 +1120,14 @@ pub(crate) fn vjp(
             let d_input = masked_fill_vjp(&mask, upstream);
             vec![(input, d_input)]
         }
+        // `Var::contiguous` が記録するノード（イシュー #1620。
+        // `crate::einsum` の permute 後 reshape 前の明示実体化）。
+        // メモリレイアウトのみが変わり値は変わらないため、VJP は
+        // upstream をそのまま入力へ渡す恒等パススルー（`tape::
+        // Op::Contiguous` doc 参照）。
+        Op::Contiguous { input } => {
+            vec![(input, upstream.clone())]
+        }
     };
     Ok(contributions)
 }
@@ -4415,6 +4423,33 @@ release ビルドでも検知できるよう `assert!` を使う）"
         assert_eq!(grads[0].0, NodeId(0));
         let expected = reduce_to_shape(&g, &[3]);
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    /// `Op::Contiguous`（イシュー #1620）の VJP は upstream をそのまま
+    /// 単一入力へ渡す恒等パススルー（`tape::Op::Contiguous` doc参照）。
+    #[test]
+    fn vjp_dispatch_contiguous_returns_single_input() {
+        let a = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let out_value = a.clone();
+        let g = t(&[1.0, -1.0, 2.0, 0.5], &[2, 2]);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::Contiguous { input: NodeId(0) };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&g));
     }
 
     /// codex-review P2 指摘の是正（PRRT_kwDOTuUCJc6hxBOl。設計 `docs/

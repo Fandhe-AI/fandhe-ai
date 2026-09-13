@@ -261,6 +261,16 @@ pub(crate) enum Op {
         dim0: usize,
         dim1: usize,
     },
+    /// `Var::contiguous` が記録する eager 実体化ノード（イシュー
+    /// #1620・`crate::einsum` が `permute` 後の非 contiguous view を
+    /// `reshape` へ渡す前段の明示コピーとして使う）。`Reshape`／
+    /// `Transpose`／`Permute` とは異なり**ホスト値を持つ**（`push_eager`
+    /// で登録。`Var::contiguous` が `value.contiguous()` の結果を渡す）
+    /// ため `is_view()` には含めない——`Op::Concat` と同じ「複数（本
+    /// variant は単一）入力を 1 バッファへ実体化する」性質の view では
+    /// ない演算。VJP（`grad.rs`）は upstream をそのまま入力へ渡す恒等
+    /// パススルー（メモリレイアウトのみが変わり値は変わらないため）。
+    Contiguous { input: NodeId },
     /// 行方向 RMSNorm（イシュー #1596）。`BackendOps` に対応メソッド
     /// （`rmsnorm`。既存の `run_fused` canonical プラン一致経路とは別の
     /// 独立エントリ）があり非融合対象ではないが、`Add`/`Mul`/`Relu`/
@@ -764,6 +774,13 @@ impl Op {
             // 経路にしか到達しない）ため、値を解放すると再導出不能に
             // なる。§8 のスコープ外事項として非適格のまま保持する。
             Op::Concat { .. } => false,
+            // `Op::Contiguous`（イシュー #1620）は `Op::Concat` と同じく
+            // 実体化演算であり view ではない。`recompute_value` に対応
+            // する再導出分岐が未実装（`_` ワイルドカードで契約違反
+            // `Err` を返す経路にしか到達しない）ため非適格のまま保持
+            // する。適格化（再導出分岐の追加）は §8 のスコープ外事項
+            // として `docs/autodiff-checkpoint-design.md` に記録済み。
+            Op::Contiguous { .. } => false,
             // 遅延 elementwise: 値を持つ場合は `pre_materialize_for_
             // binary_merge`／`push_lazy` の `at_limit` による
             // `MAX_FUSED_CHAIN_LEN` 上限維持のための自己実体化であり、
@@ -849,6 +866,7 @@ impl Op {
             | Op::Permute { input, .. }
             | Op::BroadcastTo { input }
             | Op::Narrow { input, .. }
+            | Op::Contiguous { input }
             | Op::Softmax { input, .. }
             | Op::LogSoftmax { input, .. }
             | Op::CrossEntropyLoss { logits: input, .. } => f(*input),

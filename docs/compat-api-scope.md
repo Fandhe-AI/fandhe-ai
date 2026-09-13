@@ -237,7 +237,7 @@ Phase 3（親 #1573）の各 issue へ対応付ける。
 | Tier 2 機能 | 実装 issue |
 |---|---|
 | RNN／LSTM／GRU | #1619 |
-| einsum | #1620 |
+| einsum | #1620（実装済み。`Var::einsum`。既存の `matmul`／`sum`／`permute`／`reshape`／`mul` への分解のみで新規カーネルは追加していないため `BackendOps` は非拡張。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉。batch 添字を伴う縮約〈例 `"bij,bjk->bik"`〉は rank≥3 `matmul`〈#1600〉未実装のため対象外——ガード撤去のみでは対応できず #1600 実装後に分解経路の再設計が必要。`docs/compat-feature-gap.md` §2.6 追補参照） |
 | 線形代数（inv／solve／det／qr／cholesky／svd） | #1621（実装済み。`Var::inv`／`solve`／`det`／`cholesky`／`qr`／`svd`／`matrix_norm`。rank-2 限定・CPU 実装先行・GPU は `Unsupported` フォールバック。`docs/autodiff-linalg-design.md`） |
 | 高階微分 | #1622（設計記録。`docs/autodiff-higher-order-grad-decision.md`） |
 | custom autograd Function | #1623（設計記録。`docs/autodiff-custom-function-decision.md`） |
