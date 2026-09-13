@@ -98,9 +98,14 @@ impl Element for bf16 {
 
 mod private {
     //! `Scalar` の実装先をこのクレート内の dtype に限定する封印
-    //! （sealed trait パターン）。`TypedOps<T>`（`crate::typed_ops`）を
-    //! 外部クレートが独自 dtype に実装すること自体は妨げない
-    //! （封印されるのは `Scalar` 側のみ）。
+    //! （sealed trait パターン）。`TypedOps<T: Scalar>`（`crate::typed_ops`）の
+    //! 型パラメータ `T` はこの `Scalar` に境界付けられるため、外部クレートは
+    //! 独自の新規 dtype に対して `TypedOps<MyDtype>` を実装することはできない
+    //! （`MyDtype` が封印済みの `Scalar` を実装できないため）。外部クレートに
+    //! できるのは、既存 4 dtype（`f32`／`f64`／`half::f16`／`half::bf16`）の
+    //! いずれかに対する `TypedOps<f64>` 等を、自前のバックエンド型
+    //! （`Self` 側）に実装することのみである（封印されるのは dtype 側の
+    //! `Scalar` であり、バックエンド型の `TypedOps` 実装先ではない）。
 
     /// 封印マーカー。このモジュール外からは実装できない。
     pub trait Sealed {}
