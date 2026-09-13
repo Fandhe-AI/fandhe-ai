@@ -53,6 +53,8 @@ use crate::dispatch_failure::DispatchFailureCell;
 use crate::fusion::FusionPlan;
 use crate::pool_core::PoolStats;
 use crate::scalar_op::{ScalarBinaryOp, ScalarUnaryOp};
+use crate::typed_ops::TypedOps;
+use half::{bf16, f16};
 
 /// [`BackendOps::sgd_step_device`] の 1 ステップ分のハイパーパラメータ
 /// （イシュー #935・`docs/device-resident-update-design.md` §3.1）。
@@ -353,6 +355,30 @@ pub trait BackendOps {
     /// バックエンドはいずれも本デフォルトを `Some(self)` へオーバーライド
     /// する（各バックエンドクレートの `ops.rs` 参照）。
     fn memory_ops(&self) -> Option<&dyn MemoryOps> {
+        None
+    }
+
+    /// `f64` 演算本体（[`TypedOps<f64>`]）への capability accessor
+    /// （イシュー #1687・`docs/backend-dtype-dispatch-design.md`）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は `None`（f64 演算未対応。fail-closed）。`memory_ops` と同じ
+    /// 非破壊拡張パターンで、`BackendOps` を実装する外部クレートは何も
+    /// しなくても既存実装のままコンパイルが通る。CPU 実装は #1697 が
+    /// `Some(self)` へオーバーライドする。
+    fn typed_ops_f64(&self) -> Option<&dyn TypedOps<f64>> {
+        None
+    }
+
+    /// `half::f16` 演算本体（[`TypedOps<f16>`]）への capability accessor。
+    /// 同上のデフォルト（`None`）。CPU 実装は #1698 が担当する。
+    fn typed_ops_f16(&self) -> Option<&dyn TypedOps<f16>> {
+        None
+    }
+
+    /// `half::bf16` 演算本体（[`TypedOps<bf16>`]）への capability
+    /// accessor。同上のデフォルト（`None`）。CPU 実装は #1699 が担当する。
+    fn typed_ops_bf16(&self) -> Option<&dyn TypedOps<bf16>> {
         None
     }
 
@@ -1891,6 +1917,94 @@ mod tests {
         }
     }
 
+    /// [`TypedOps<f64>`] の positive-path テスト用スタブ（イシュー #1687）。
+    /// 全メソッドが `Unsupported` を返すだけだが、`&Self → &dyn
+    /// TypedOps<f64>` の coercion・dyn 呼び出しが実際に機能することを
+    /// 検証する目的のため、値の正しさではなく呼び出しの到達を確認する。
+    struct TypedF64StubOps;
+
+    impl TypedOps<f64> for TypedF64StubOps {
+        fn gemm(&self, _a: &Tensor<f64>, _b: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+            Err(BackendError::Unsupported("stub: gemm".into()))
+        }
+
+        fn add(&self, _a: &Tensor<f64>, _b: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+            Err(BackendError::Unsupported("stub: add".into()))
+        }
+
+        fn mul(&self, _a: &Tensor<f64>, _b: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+            Err(BackendError::Unsupported("stub: mul".into()))
+        }
+
+        fn relu(&self, _a: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+            Err(BackendError::Unsupported("stub: relu".into()))
+        }
+
+        fn exp(&self, _a: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+            Err(BackendError::Unsupported("stub: exp".into()))
+        }
+
+        fn tanh(&self, _a: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+            Err(BackendError::Unsupported("stub: tanh".into()))
+        }
+
+        fn sum(&self, _a: &Tensor<f64>, _dim: Option<usize>) -> Result<Tensor<f64>, BackendError> {
+            Err(BackendError::Unsupported("stub: sum".into()))
+        }
+
+        fn max(&self, _a: &Tensor<f64>, _dim: Option<usize>) -> Result<Tensor<f64>, BackendError> {
+            Err(BackendError::Unsupported("stub: max".into()))
+        }
+    }
+
+    /// `typed_ops_f64` を `Some(self.0)` へオーバーライドする `BackendOps`
+    /// 実装（イシュー #1687）。`&dyn BackendOps` 経由で `TypedOps<f64>` の
+    /// 具象実装へ実際に到達できることを検証するために使う（#1697 が
+    /// CPU 実装で使うのと同じオーバーライドパターン）。
+    struct OpsWithTypedF64(TypedF64StubOps);
+
+    impl BackendOps for OpsWithTypedF64 {
+        fn device(&self) -> Device {
+            Device::Cpu
+        }
+
+        fn typed_ops_f64(&self) -> Option<&dyn TypedOps<f64>> {
+            Some(&self.0)
+        }
+
+        fn gemm(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: gemm".into()))
+        }
+
+        fn add(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: add".into()))
+        }
+
+        fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: mul".into()))
+        }
+
+        fn relu(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: relu".into()))
+        }
+
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: exp".into()))
+        }
+
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: tanh".into()))
+        }
+
+        fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: sum".into()))
+        }
+
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: max".into()))
+        }
+    }
+
     /// `gemm_bias_act` のデフォルト実装（非融合合成）を数値検証するための
     /// naive 計算モック。`MockOps`（常に `Unsupported`）と異なり `gemm`／
     /// `add`／`relu` を実際に計算する（行方向ブロードキャストのみ対応する
@@ -2480,5 +2594,48 @@ mod tests {
             ops.linalg_matrix_norm(&a, MatrixNormOrd::Fro),
             Err(BackendError::Unsupported(_))
         ));
+    }
+
+    /// `typed_ops_f64`／`typed_ops_f16`／`typed_ops_bf16` の 3 accessor が
+    /// いずれも既定で `None`（f64/f16/bf16 演算未対応）を返すことを確認
+    /// する（イシュー #1687・非破壊拡張の fail-closed 既定値回帰ガード）。
+    #[test]
+    fn typed_ops_accessors_default_to_none() {
+        let ops = MockOps(Device::Cpu);
+        assert!(ops.typed_ops_f64().is_none());
+        assert!(ops.typed_ops_f16().is_none());
+        assert!(ops.typed_ops_bf16().is_none());
+    }
+
+    /// `Box<dyn BackendOps + Send>` が成立し続けることを直接検証する
+    /// （`fandhe_ai_autodiff::Tape.ops` と同じ型。イシュー #1687の
+    /// `typed_ops_*` accessor 追加が object safety・`Send` 境界の両方を
+    /// 壊していないことの回帰ガード）。
+    fn assert_object_safe_send(_ops: Box<dyn BackendOps + Send>) {}
+
+    #[test]
+    fn backend_ops_boxed_with_send_is_object_safe() {
+        assert_object_safe_send(Box::new(MockOps(Device::Cpu)) as Box<dyn BackendOps + Send>);
+    }
+
+    /// `typed_ops_f64` accessor が `&dyn BackendOps` 経由で具象
+    /// `TypedOps<f64>` 実装まで到達することを検証する（イシュー #1687）。
+    /// `&Self → &dyn TypedOps<f64>` の coercion・`TypedOps<f64>` の dyn
+    /// 互換性・`dyn BackendOps` からの accessor 経由呼び出しの 3 点が
+    /// 実際にコンパイル・実行できることの機械検証（#1697 が同じ
+    /// オーバーライドパターンを使う前提の裏付け）。
+    #[test]
+    fn typed_ops_f64_accessor_reaches_concrete_impl_through_dyn_backend_ops() {
+        let stub = OpsWithTypedF64(TypedF64StubOps);
+        let ops: &dyn BackendOps = &stub;
+
+        let a = Tensor::new(vec![1.0f64, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let b = Tensor::new(vec![5.0f64, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+
+        let result = ops
+            .typed_ops_f64()
+            .expect("typed_ops_f64 should be Some for OpsWithTypedF64")
+            .gemm(&a, &b);
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
 }
