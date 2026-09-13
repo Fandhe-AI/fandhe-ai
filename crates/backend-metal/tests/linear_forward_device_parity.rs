@@ -14,7 +14,7 @@ use bench_harness::median_q1_q3;
 use fandhe_ai_backend_metal::MetalBackendOps;
 use fandhe_ai_tensor_core::buffer::DeviceBufferView;
 use fandhe_ai_tensor_core::device::{BackendError, Device};
-use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
+use fandhe_ai_tensor_core::{Activation, BackendOps, DispatchFailureCell, Tensor};
 
 fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).unwrap()
@@ -399,4 +399,61 @@ fn linear_forward_device_bench_metal() {
         "[linear_forward_device_bench:metal] before_median_s={before_median:.6} \
          after_median_s={after_median:.6} speedup_x={speedup:.3}"
     );
+}
+
+/// (e) [`MetalBackendOps::linear_forward_device_tracked`]（イシュー
+/// #1580）が [`MetalBackendOps::linear_forward_device`] と bit 完全一致
+/// する出力を返し、成功時は `token`（[`DispatchFailureCell`]）を
+/// セットしないまま残すことを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn linear_forward_device_tracked_matches_linear_forward_device_and_leaves_token_unset() {
+    let metal_ops = MetalBackendOps::new();
+    let metal_mem = metal_ops
+        .memory_ops()
+        .expect("MetalBackendOps must implement MemoryOps");
+
+    for &(m, k, n) in &[(1, 1, 1), (4, 8, 4), (37, 65, 33)] {
+        for has_bias in [false, true] {
+            for act in [Activation::None, Activation::Relu] {
+                let a = tensor(xorshift_fill(0x2222_3333 ^ (m as u64), m * k), &[m, k]);
+                let w = tensor(xorshift_fill(0x4444_5555 ^ (k as u64), k * n), &[k, n]);
+                let bias =
+                    has_bias.then(|| tensor(xorshift_fill(0x6666_7777 ^ (n as u64), n), &[n]));
+
+                let a_dev = metal_mem.upload(&a).unwrap();
+                let w_dev = metal_mem.upload(&w).unwrap();
+                let w_shape = [k, n];
+                let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
+                let bias_dev = bias.as_ref().map(|b| metal_mem.upload(b).unwrap());
+                let bias_shape = [n];
+                let bias_view = bias_dev
+                    .as_ref()
+                    .map(|buf| DeviceBufferView::new(buf, 0, &bias_shape).unwrap());
+
+                let expected_dev = metal_ops
+                    .linear_forward_device(&a_dev, w_view, bias_view, act)
+                    .unwrap();
+                let expected = metal_mem.download(&expected_dev).unwrap();
+
+                let token = DispatchFailureCell::new();
+                let actual_dev = metal_ops
+                    .linear_forward_device_tracked(&a_dev, w_view, bias_view, act, &token)
+                    .unwrap();
+                let actual = metal_mem.download(&actual_dev).unwrap();
+                assert!(
+                    !token.is_set(),
+                    "成功時は token をセットしないはず: m={m} k={k} n={n} has_bias={has_bias} \
+                     act={act:?}"
+                );
+
+                assert_eq!(
+                    actual.contiguous().as_slice().unwrap(),
+                    expected.contiguous().as_slice().unwrap(),
+                    "linear_forward_device_tracked は linear_forward_device と bit 完全一致 \
+                     するはず: m={m} k={k} n={n} has_bias={has_bias} act={act:?}"
+                );
+            }
+        }
+    }
 }

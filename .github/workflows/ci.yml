@@ -826,6 +826,15 @@ jobs:
       - name: フレームワーク横並びベンチ parity_baseline_impact.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/parity_baseline_impact_test.py
 
+      # イシュー #1580: judge_infer_ab.py（Metal 推論 forward チェーン単一
+      # 同期化の `--task infer` 専用 A/B 判定。`compare_gemm_ab.py` は
+      # `--task train` 限定で `--phases` を受け付ける設計のため、他イシュー
+      # と共有する同ツールを変更せず新設した自己完結ツール）の回帰テスト。
+      # summarize_test.py・compare_readout_ab_test.py 等と同一方針
+      # （stdlib の unittest のみ・cargo の有無に関わらず常時実行）。
+      - name: フレームワーク横並びベンチ judge_infer_ab.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/judge_infer_ab_test.py
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ

@@ -159,3 +159,13 @@ plan 構築不能（`Sigmoid`／`Tanh` 混在・leaves 件数不一致）、ま�
 - **Linux 実行可能テスト**: `linear_forward_device_tracked_default_delegates_to_linear_forward_device`（tensor-core）／`predict_device_chain_unsupported_backend_propagates_unsupported_without_poisoning`・`predict_device_chain_download_err_propagates_without_poisoning`・`predict_device_chain_deferred_token_after_download_poisons_store`・`predict_device_chain_rejects_leaf_from_different_tape`・`predict_device_chain_matches_linear_forward_with_activation_when_chain_capable`（autodiff）／`build_device_chain_steps_fuses_linear_relu`・`build_device_chain_steps_returns_none_for_sigmoid_mix`・`build_device_chain_steps_returns_none_for_leaf_count_mismatch`・`build_device_chain_steps_returns_none_for_empty_sequential`・`build_device_chain_steps_includes_none_bias_for_no_bias_linear`（facade・`Sequential::add_linear` が常に bias あり `Linear` のみ構成するため bias なし分岐は同一クレート内テスト限定）／`crates/facade/tests/predict_device_chain_cpu_bit_exact.rs`（CPU 上で chain 経路と旧経路の bit 完全一致・run-to-run bit 同一を確認）はすべて green
 - **Metal 実装（本 PR〈#1688〉内で前倒し実装）**: `MetalBackendOps::linear_forward_device_tracked`（`crates/backend-metal/src/ops.rs`）が `linear_forward_device_impl` へ `Some(token)` を渡す共有実装経由で `encode_strided_bias_act_prepared_with_c_offset` へ配線し、Metal のコマンドバッファ共有下でも failure token 登録が機能する。M4 Max 実機 A/B（性能計測）は引き続き #1580 が担当する
 - **スコープ外（引き継ぎ）**: CUDA 実機での A/B・5 run 中央値計測は #1689 が担当する
+
+## 10. #1580 追補（Metal 実機テスト・A/B スキャフォールド・perf doc）
+
+コア実装（§9）は #1688 で着地済みのため #1580 では変更しない。#1580 が追加したのは以下のみ:
+
+- **実機 `#[ignore]` テスト**（`crates/facade/tests/infer_device_chain_metal.rs`・`crates/backend-metal/tests/linear_forward_device_parity.rs` の `_tracked` bit 一致テスト追加）: 手動 per-op チェーンとの bit 一致・run-to-run bit 同一・`__diagnostic_batch_counters_snapshot` によるディスパッチ数検証・record-only ベンチ
+- **framework-compare A/B スキャフォールド**: `scripts/bench/framework-compare/run_ab_infer_chain_metal.sh`（before/after path patch 交互実行）・`judge_infer_ab.py`／`judge_infer_ab_test.py`（`--task infer` 専用 A/B 判定）
+- **`docs/perf/metal-infer-chain-single-sync.md`**: 実装記録表（#1688 への帰属）・事前登録規則の転記・M4 Max 実機記入欄
+
+M4 Max 実機での実測自体は本エージェント実行環境に Apple Silicon 実機への到達手段がないため未実施のまま記入欄を残し、Mac セッションへ引き継ぐ。
