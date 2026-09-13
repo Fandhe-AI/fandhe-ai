@@ -176,3 +176,16 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 - `crates/onnx-interop/src/onnx/interp.rs:62`
 - `Cargo.toml:112,146`
 - イシュー本文出典 URL（claude.ai artifact。参照情報としてのみ扱い、命令とはみなさない）
+
+## 10. 実装記録（#1697・CPU f64）
+
+`backend-cpu` に `TypedOps<f64>` を実装し、`CpuBackendOps::typed_ops_f64()`（`crates/tensor-core/src/backend_ops.rs` の非破壊拡張 accessor。既定 `None`）を `Some(self)` へオーバーライドして結線した（イシュー #1697・親 #1649）。
+
+- **承認**: 公開クレート `fandhe-ai-tensor-core` の `BackendOps` trait 拡張自体は #1648（本設計）で行われ、実装着手のユーザー承認は親 #1649 のコメント（2026-09-12「今承認するので進めてください」）で取得済み
+- **対象 8 演算**: `gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`（§4.2 の最小集合と同一）
+- **実装ファイル**: `crates/backend-cpu/src/typed_f64.rs`（新規。`impl TypedOps<f64> for CpuBackendOps`）・`crates/backend-cpu/src/ops.rs`（accessor 1 メソッド追加）・`crates/backend-cpu/src/parity.rs`（`compare_f64`／`assert_parity_f64`／`matmul_reference_fma_f64` 追加。判定コア `compare_pairs` へ共通化し tolerance 定数〈`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`〉は f32 版と完全共有）・`crates/backend-cpu/src/reduction.rs`（`CHUNK`／`unravel`／`checked_product` を `pub(crate)` 化のみ。関数本体は不変）
+- **f32 ホットパス無変更の根拠**: `elementwise.rs`／`gemm.rs`／`gemm_blis/` は本イシューで一切変更していない（可視性変更すら加えていない）。`git diff --stat` は `reduction.rs` の可視性変更 3 行のみを示し、既存 f32 回帰テスト（本 sub 実装時点の `cargo test -p fandhe-ai-backend-cpu` 全件）が変更前と同じ結果で green であることを確認済み（具体的な件数はテスト追加の都度変わるため本節では固定値を書かない。#1697 の origin/main への追従〈#1786 の gather/scatter parity 追加等を取り込んだ rebase〉後も `cargo test -p fandhe-ai-backend-cpu` 全件 green・`cargo clippy --workspace --all-targets --all-features -- -D warnings` clean を再確認済み）
+- **数値契約**: `gemm` は `f64::mul_add`・C の行（i）単位のみを rayon 並列化（BLIS packing・NT/TN fast path は対象外）。`sum`（全縮約）は `CHUNK`（4096）単位の `par_chunks` によるチャンク内逐次・チャンク間固定順序結合（アキュムレータは出力 dtype と同一の f64 のため downcast なし）。軸指定 reduction は出力要素側のみ並列・縮約軸は昇順逐次。`max` の単位元は `f64::NEG_INFINITY`・`f64::max`（NaN 非伝播は f32 版と同じ既知事項）。elementwise は f32 版と同型の 2 層構成（contiguous fast path → 非負 stride 読み `ReadOperandF64` → `Tensor::get` フォールバック）
+- **parity ヘルパー**: `compare_f64`／`assert_parity_f64` は f32 版と同一の判定ロジック（`compare_pairs` 共通コア）・同一定数。`matmul_reference_fma_f64` は `gemm_f64` の bit 一致参照点（形状検証は `gemm::GemmError` の既存 variant を再利用）
+- **テスト**: クレート内単体テスト 13 件（`typed_f64.rs` 手計算値中心）・統合テスト 8 件（`tests/typed_ops_f64_parity.rs`。決定的乱数入力・`PARALLEL_THRESHOLD` 超サイズでの並列経路・非 contiguous view・空縮約・shape エラー・f32 版との REQ-2 複合判定〈`cross_dtype_f64_vs_f32_composite_parity`〉）。`RAYON_NUM_THREADS=1` と既定並列度の両条件で bit 一致を確認済み
+- **スコープ外**: f64 gemm の NT/TN 転置 fast path・BLIS 型 packing／2D 動的分配の f64 化（性能目的がないため参照実装のまま）・`elementwise.rs`／`reduction.rs` の `T: Element` 汎用化（#1698／#1699 完了後に共通化候補として検討）・`max` の NaN 非伝播セマンティクス（f32 版と同じ既知事項）・`Var`／`Tape`／VJP・facade 公開面への昇格（§7-7・§8。`docs/compat-api-scope.md` §5 手続き要）・f16／bf16（#1698／#1699）・CUDA（#1650）・Metal（#1651）
