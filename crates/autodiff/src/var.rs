@@ -17,13 +17,14 @@ use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
-    LstmPointwiseOutput, MatrixNormOrd, MseReduction, ShapeError, Tensor, broadcast_shape,
-    concat_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ShapeError,
+    Tensor, broadcast_shape, concat_out_shape, matmul_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
-use crate::grad::concat_with_fallback;
+use crate::grad::{concat_with_fallback, scalar_binary_with_fallback, scalar_unary_with_fallback};
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
 /// `Var::mse_loss_with` の縮約種別（#190・TASK-9.1c 相当。親イシュー
@@ -386,6 +387,68 @@ impl<'t> Var<'t> {
             let nodes = self.tape.nodes.borrow();
             materialize_fallible(&nodes, self.tape.ops(), id)?;
         }
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `ScalarUnaryOp` 汎用 dispatch の `Var` 入口（イシュー #1634）。
+    /// `pub(crate)`: 公開 API 面（`sub`／`div`／`pow`／活性化等の個別
+    /// メソッド）は #1593／#1595 が `facade` の compat 公開面
+    /// （`docs/compat-api-scope.md` §5）拡張として別途ユーザー承認を
+    /// 得たうえで追加する。本メソッドはそれらが呼ぶ共通実装。
+    ///
+    /// `where_cond`（`crate::grad::where_cond_with_fallback` 経由）と
+    /// 同じ eager 実体化契約: ①入力値を層 1（[`materialize_fallible`]）
+    /// で実体化し `RefCell` 借用を閉じる → ②`scalar_unary_with_fallback`
+    /// （バックエンド実装 → `Unsupported` のときのみホスト参照実装
+    /// フォールバック）→ ③`push_eager`。遅延融合（`push_lazy`）は
+    /// 使わない（`Op::ScalarUnary` doc「eager」参照）。
+    ///
+    /// `#[allow(dead_code)]`: `Op::ScalarUnary` doc と同じ理由（公開 API
+    /// 面の配線は #1593／#1595）・同じ撤去条件。
+    #[allow(dead_code)]
+    pub(crate) fn scalar_unary(&self, op: ScalarUnaryOp) -> Result<Var<'t>, AutodiffError> {
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = scalar_unary_with_fallback(self.tape.ops(), op, &input_val)?;
+        let id = self
+            .tape
+            .push_eager(Op::ScalarUnary { op, input: self.id }, value);
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `ScalarBinaryOp` 汎用 dispatch の `Var` 入口（イシュー #1634）。
+    /// [`Var::scalar_unary`] の 2 項版で設計方針は同一
+    /// （`pub(crate)`・eager・フォールバック契約）。`add`／`mul` と同じ
+    /// NumPy 互換ブロードキャスト（`broadcast_shape`）。
+    ///
+    /// `#[allow(dead_code)]`: [`Var::scalar_unary`] と同じ理由・同じ
+    /// 撤去条件。
+    #[allow(dead_code)]
+    pub(crate) fn scalar_binary(
+        &self,
+        other: &Var<'t>,
+        op: ScalarBinaryOp,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(other)?;
+        let out_shape = broadcast_shape(&self.shape(), &other.shape())?;
+        let (a_val, b_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let ops = self.tape.ops();
+            let a_val = materialize_fallible(&nodes, ops, self.id)?.clone();
+            let b_val = materialize_fallible(&nodes, ops, other.id)?.clone();
+            (a_val, b_val)
+        };
+        let value = scalar_binary_with_fallback(self.tape.ops(), op, &a_val, &b_val, &out_shape)?;
+        let id = self.tape.push_eager(
+            Op::ScalarBinary {
+                op,
+                a: self.id,
+                b: other.id,
+            },
+            value,
+        );
         Ok(Var::from_raw(self.tape, id))
     }
 

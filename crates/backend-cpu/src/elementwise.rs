@@ -421,7 +421,12 @@ mod bench_internal {
 /// general path（非 contiguous な strided 反復）の内部ヘルパー。`shape` の
 /// 範囲内でのみ繰り上がるため、`Tensor::get` に渡す index は常に軸範囲内
 /// になる（`tensor.rs` の `contiguous()` と同じ走査パターン）。
-fn increment_index(index: &mut [usize], shape: &[usize]) {
+///
+/// `pub(crate)`: `scalar_elementwise` モジュール（イシュー #1634）が
+/// 同じ多次元 index 繰り上げロジックを再利用する（`fused_elementwise`
+/// が `PARALLEL_THRESHOLD` を再利用するのと同じ理由でクレート内共有
+/// する。数式・走査ロジックの二重管理を避ける）。
+pub(crate) fn increment_index(index: &mut [usize], shape: &[usize]) {
     for axis in (0..shape.len()).rev() {
         index[axis] += 1;
         if index[axis] < shape[axis] {
@@ -437,7 +442,13 @@ fn increment_index(index: &mut [usize], shape: &[usize]) {
 /// 借用スライスへ直接インデックスする。`binary_elementwise` は呼び出し前に
 /// 両オペランドを `broadcast_to(&out_shape)` 済みのため、ここでの `View`
 /// stride は broadcast 拡張軸の stride 0 も含みうる。
-enum ElementwiseReadOperand<'a> {
+///
+/// `pub(crate)`: `scalar_elementwise` モジュール（イシュー #1634）が
+/// 同じ stride 読み経路を再利用する（`add`/`mul` に限らず新しい
+/// スカラー演算でも非 contiguous 入力を `Tensor::get` の rank・範囲
+/// 検査を経由せず読むため。数式は各呼び出し元が持つが読み出し経路の
+/// 二重管理は避ける）。
+pub(crate) enum ElementwiseReadOperand<'a> {
     Contig(&'a [f32]),
     View {
         span: &'a [f32],
@@ -454,7 +465,7 @@ impl<'a> ElementwiseReadOperand<'a> {
     /// 呼び出し元 [`binary_elementwise`] は `Tensor::get` 経由の既存経路
     /// へ経路全体を丸ごとフォールバックする（部分的に混在させない。
     /// `.claude/rules/security.md` A08 が禁じる判定迂回ではない）。
-    fn classify(t: &'a Tensor<f32>) -> Option<Self> {
+    pub(crate) fn classify(t: &'a Tensor<f32>) -> Option<Self> {
         if let Some(s) = t.as_slice() {
             return Some(Self::Contig(s));
         }
@@ -474,7 +485,7 @@ impl<'a> ElementwiseReadOperand<'a> {
     /// 元が渡す `out_shape` 範囲内の `idx` では常に `Some` を返す
     /// （`MaskReadOperand::read` と同じ安全性の根拠）。
     #[inline]
-    fn read(&self, idx: &[usize], flat: usize) -> Option<f32> {
+    pub(crate) fn read(&self, idx: &[usize], flat: usize) -> Option<f32> {
         match self {
             Self::Contig(s) => s.get(flat).copied(),
             Self::View { span, strides } => {

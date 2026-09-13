@@ -118,6 +118,7 @@ mod fusion;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pool;
+pub mod scalar_op;
 // プールの共通コアロジック（サイズクラス・フリーリスト・統計）。`backend-cuda`／
 // `backend-metal` が具体ハンドル型で実装を組み立てるためのクレート横断内部面で
 // あり、サポート対象の公開 API ではない（PR #1063 codex-review P1 対応。公開契約
@@ -164,5 +165,6 @@ pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
 // みを再公開する（`backend_ops::BackendOps::device_memory_pool_stats` の
 // 戻り値型。CUDA〈#1020〉・Metal〈#1021〉共通の統計スナップショット型）。
 pub use pool_core::PoolStats;
+pub use scalar_op::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 pub use tensor::Tensor;
 pub use typed::{BatchedFeatures, FixedMat, FixedVec};

@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, DType, DeviceBufferView, FusedOpKind, FusionPlan,
-    MAX_FUSED_CHAIN_LEN, Tensor,
+    MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp, Tensor,
 };
 
 use crate::error::AutodiffError;
@@ -109,6 +109,48 @@ pub(crate) enum Op {
     /// 数値安定形の forward は `eval.rs`（`eval::sigmoid`）、VJP は
     /// `grad.rs`（`out_value` 再利用方式）を参照。
     Sigmoid(NodeId),
+    /// スカラー単項演算（`ScalarUnaryOp`。イシュー #1634・親 #1592）。
+    /// `add`/`mul`/`relu`/`exp`/`tanh`（固定 5 演算）を拡張する汎用
+    /// dispatch 機構の autodiff 側入口（`crate::scalar_op` モジュール
+    /// doc 参照）。**eager**（`push_eager`。`Op::Sigmoid`／`Op::Where`
+    /// と同型）で登録し、遅延融合経路（`push_lazy`／
+    /// `is_lazy_elementwise`）には入れない——`BackendOps::scalar_unary`
+    /// は `FusionPlan` を持たず、`is_checkpoint_eligible` も `false`
+    /// （`recompute_value` 分岐を持たないため。最小・安全側の判断。
+    /// `docs/scalar-op-dispatch-design.md` §3.5）。forward は
+    /// `BackendOps::scalar_unary` → `Unsupported` のときのみ
+    /// `eval::scalar::unary` へフォールバック（`grad.rs::
+    /// scalar_unary_with_fallback`）。VJP は `eval::scalar::
+    /// unary_grad_factor` が返す係数を `upstream` に乗じる
+    /// （`grad.rs::vjp_scalar_unary`）。
+    ///
+    /// `#[allow(dead_code)]`: 本イシュー（#1634）は enum・dispatch・
+    /// CPU 参照実装・VJP のみを実装し、`Var::scalar_unary`（`pub(crate)`。
+    /// 本 variant を構築する唯一の経路）を呼ぶ公開 API 面の配線は
+    /// #1593／#1595 が別途ユーザー承認を得て追加する（`docs/scalar-op-
+    /// dispatch-design.md` §3.5・親 #1592 の分担）。そのため現時点では
+    /// `#[cfg(test)]` 経由（`crate::grad::tests`）以外から構築されず
+    /// `-D warnings` 下で dead_code 警告になる。`crates/tensor-core/
+    /// src/fusion/mod.rs`（`crates/backend-cuda/src/kernels_wmma_opt.rs`
+    /// 由来）と同じ「結線待ちコードへの理由付き `#[allow(dead_code)]`」
+    /// プラクティスに従う（#1593／#1595 が `Var` 公開メソッドを追加し
+    /// 本 variant が到達可能になった時点で撤去する）。
+    #[allow(dead_code)]
+    ScalarUnary { op: ScalarUnaryOp, input: NodeId },
+    /// スカラー 2 項演算（`ScalarBinaryOp`。イシュー #1634）。
+    /// [`Op::ScalarUnary`] の 2 項版で設計方針は同一（eager・非
+    /// checkpoint 適格・`eval::scalar::binary`／`binary_partials` を
+    /// 使うフォールバック・VJP）。`a`／`b` は `Op::Add`／`Op::Mul` と
+    /// 同じ NumPy 互換ブロードキャスト。
+    ///
+    /// `#[allow(dead_code)]`: [`Op::ScalarUnary`] と同じ理由・同じ撤去
+    /// 条件（#1593／#1595）。
+    #[allow(dead_code)]
+    ScalarBinary {
+        op: ScalarBinaryOp,
+        a: NodeId,
+        b: NodeId,
+    },
     /// 非 elementwise。常に実体化済み。
     Sum { input: NodeId, dim: Option<usize> },
     /// 非 elementwise。常に実体化済み。
@@ -829,6 +871,12 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （merge 時の非網羅 match 是正）。
             Op::Where { .. } | Op::MaskedFill { .. } => false,
+            // `Op::ScalarUnary`／`Op::ScalarBinary`（イシュー #1634）は
+            // eager 実体化演算だが `recompute_value` に再計算分岐を
+            // 持たないため非適格（`Op` doc「最小・安全側の判断」参照。
+            // 将来 `true` 化する場合は `Op::Sigmoid` 型の再計算分岐を
+            // 追加する）。
+            Op::ScalarUnary { .. } | Op::ScalarBinary { .. } => false,
         }
     }
 
@@ -875,6 +923,11 @@ impl Op {
                 f(*b);
             }
             Op::MaskedFill { input, .. } => f(*input),
+            Op::ScalarUnary { input, .. } => f(*input),
+            Op::ScalarBinary { a, b, .. } => {
+                f(*a);
+                f(*b);
+            }
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);
                 f(*target);

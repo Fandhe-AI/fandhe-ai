@@ -630,3 +630,28 @@ compat-api-scope.md` §5 の手続きは Tier 1 列挙済み機能につき再�
   parity を確認済み。CUDA は本エージェント実行環境に実機がないため
   `#[ignore]` テスト（`crates/facade/tests/einsum_backend_parity.rs`）
   として未実測のまま記録し、GB10 実機セッションへ引き継ぐ。
+
+## 追補（イシュー #1634）
+
+§2.4「要素演算」の各行（`sub`／`div`／比較演算／`sin`/`cos`/`tan`／
+`pow`/`sqrt`／`log`系／`gelu`/`silu`）が挙げる「実装に必要なもの」の
+うち、**enum・dispatch 機構・CPU 参照実装・VJP は #1634 で共通基盤とし
+て実装済み**（`ScalarUnaryOp`／`ScalarBinaryOp`。`tensor-core::
+scalar_op`・`BackendOps::scalar_unary`／`scalar_binary`〈既定
+`Unsupported`〉・`backend-cpu::scalar_elementwise`・`autodiff::Op::
+ScalarUnary`／`ScalarBinary`〈汎用 VJP〉。設計記録は `docs/scalar-op-
+dispatch-design.md`）。表の各行自体は変更しない（本イシューでは
+`Var` 個別メソッド〈`sub`／`div`／`pow`／活性化等〉を追加しないため）。
+残作業は 2 系統:
+
+- **CUDA／Metal カーネル**（#1635／#1636）: 現状は `BackendOps::
+  scalar_unary`／`scalar_binary` が既定 `Unsupported` のままのため、
+  CUDA／Metal 実行時はホスト参照実装（`autodiff::eval::scalar`）への
+  フォールバックで動作する（性能最適化はまだ入らない）。
+- **`Var` 公開メソッド・facade 配線**（#1593／#1595）: `Var::
+  scalar_unary`／`scalar_binary` は `pub(crate)` のまま（公開 API 面の
+  範囲拡張は `docs/compat-api-scope.md` §5 の手続きに従い別途ユーザー
+  承認を得る）。
+
+比較演算の bool dtype 出力（§2.4 表の該当行）は #1634 の対象外のまま
+（f32 の `0.0`／`1.0` 出力。`docs/scalar-op-dispatch-design.md` §10）。

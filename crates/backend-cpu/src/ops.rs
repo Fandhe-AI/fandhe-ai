@@ -30,7 +30,7 @@ use crate::linalg::{self, LinalgError};
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::softmax::{self, match_softmax_plan};
-use crate::{elementwise, fused_elementwise, mse, reduction, rnn_cell};
+use crate::{elementwise, fused_elementwise, mse, reduction, rnn_cell, scalar_elementwise};
 
 /// `CpuBackendOps` が `MemoryOps` を実装するための、プロセスワイドに共有
 /// する単一 `CpuMemory`（イシュー #935・`docs/device-resident-update-design.md`
@@ -1134,6 +1134,29 @@ impl BackendOps for CpuBackendOps {
 
     fn tanh(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         elementwise::tanh(a).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::scalar_unary` の CPU 実装（イシュー #1634）。
+    /// `scalar_elementwise::scalar_unary`（汎用 `rayon` ループ参照実装。
+    /// 既存 `add`/`mul`/`relu`/`exp`/`tanh` と bit 同一な理由は
+    /// `scalar_elementwise` モジュール doc 参照）へ委譲する。
+    fn scalar_unary(
+        &self,
+        op: fandhe_ai_tensor_core::ScalarUnaryOp,
+        a: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        scalar_elementwise::scalar_unary(a, op).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::scalar_binary` の CPU 実装（イシュー #1634）。
+    /// `scalar_unary` と同型（`scalar_elementwise::scalar_binary` へ委譲）。
+    fn scalar_binary(
+        &self,
+        op: fandhe_ai_tensor_core::ScalarBinaryOp,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        scalar_elementwise::scalar_binary(a, b, op).map_err(BackendError::ShapeMismatch)
     }
 
     /// `BackendOps::where_cond` の CPU 実装（イシュー #1637）。

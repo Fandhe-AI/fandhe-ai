@@ -52,6 +52,7 @@ use crate::device::{BackendError, Device};
 use crate::dispatch_failure::DispatchFailureCell;
 use crate::fusion::FusionPlan;
 use crate::pool_core::PoolStats;
+use crate::scalar_op::{ScalarBinaryOp, ScalarUnaryOp};
 
 /// [`BackendOps::sgd_step_device`] の 1 ステップ分のハイパーパラメータ
 /// （イシュー #935・`docs/device-resident-update-design.md` §3.1）。
@@ -800,6 +801,60 @@ pub trait BackendOps {
     fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;
     fn exp(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;
     fn tanh(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;
+
+    /// `op(a)`（`op` は [`ScalarUnaryOp`]）をホスト常駐 `Tensor<f32>`
+    /// 入出力で計算する（イシュー #1634・親 #1592）。
+    ///
+    /// 上記 5 演算固定の elementwise 面を、演算を 1 つ足すごとに trait
+    /// メソッド追加が要らない形へ拡張する機構（`crate::scalar_op` モジュ
+    /// ール doc「動機」参照）。`a` は broadcast 不要（単項）。数値契約
+    /// （`NaN`／`inf` の伝播・`Relu` variant が既存 `Self::relu` と
+    /// 異なる点）は [`ScalarUnaryOp::apply`] のドキュメントを正とする。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::linear_forward_device`] 等と同じ非破壊拡張パターン
+    /// （`BackendOps` トレイトへのデフォルトメソッド追加。公開 API
+    /// 非破壊はガードレール条件・`.claude/rules/security.md`）であり、
+    /// 既定は [`BackendError::Unsupported`] を返す fail-safe とする。
+    /// `backend-cpu`（`CpuBackendOps`）はこのデフォルトを汎用 `rayon`
+    /// ループ（`backend-cpu::scalar_elementwise`）でオーバーライド
+    /// する。`backend-cuda`／`backend-metal` は本イシュー時点では未
+    /// 実装で既定のまま（親 #1592 の分担: #1635／#1636 が担当）。
+    /// 呼び出し元（`fandhe_ai_autodiff::grad::scalar_unary_with_
+    /// fallback`）は `Unsupported` を検出した場合ホスト参照実装
+    /// （`ScalarUnaryOp::apply` の逐次適用）へフォールバックする契約。
+    fn scalar_unary(
+        &self,
+        op: ScalarUnaryOp,
+        a: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let _ = (op, a);
+        Err(BackendError::Unsupported(
+            "scalar_unary: default fail-safe (no ScalarUnaryOp kernel available for this \
+             backend; #1592 分担: CUDA/Metal は #1635/#1636)"
+                .into(),
+        ))
+    }
+
+    /// `op(a, b)`（`op` は [`ScalarBinaryOp`]）をホスト常駐 `Tensor<f32>`
+    /// 入出力で計算する（イシュー #1634）。[`Self::scalar_unary`] の
+    /// 2 項版で契約・デフォルト実装の設計方針は同一。`a`／`b` は
+    /// `BackendOps::add`／`mul` と同じ NumPy 互換ブロードキャスト
+    /// （broadcast 後の共通 shape で計算する）。
+    fn scalar_binary(
+        &self,
+        op: ScalarBinaryOp,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let _ = (op, a, b);
+        Err(BackendError::Unsupported(
+            "scalar_binary: default fail-safe (no ScalarBinaryOp kernel available for this \
+             backend; #1592 分担: CUDA/Metal は #1635/#1636)"
+                .into(),
+        ))
+    }
 
     // reduction（`docs/public-api-design.md` §4.2 と同じ 2 演算）
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError>;
@@ -2110,6 +2165,34 @@ mod tests {
         let w_view = DeviceBufferView::new(&w_buf, 0, &[1]).unwrap();
 
         let result = ops.linear_forward_device(&a, w_view, None, Activation::None);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::scalar_unary`] の既定実装が fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する（イシュー
+    /// #1634。CUDA／Metal は本イシュー時点で未実装のため既定のまま
+    /// （親 #1592 の分担）であることのガード）。
+    #[test]
+    fn scalar_unary_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = Tensor::new(vec![1.0_f32, 2.0, 3.0], &[3]).unwrap();
+
+        let result = ops.scalar_unary(crate::scalar_op::ScalarUnaryOp::Relu, &a);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::scalar_binary`] の既定実装が fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する（イシュー
+    /// #1634。`scalar_unary_default_is_unsupported` と同型のガード）。
+    #[test]
+    fn scalar_binary_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = Tensor::new(vec![1.0_f32, 2.0, 3.0], &[3]).unwrap();
+        let b = Tensor::new(vec![4.0_f32, 5.0, 6.0], &[3]).unwrap();
+
+        let result = ops.scalar_binary(crate::scalar_op::ScalarBinaryOp::Add, &a, &b);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
