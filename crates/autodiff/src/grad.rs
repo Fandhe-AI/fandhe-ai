@@ -3247,6 +3247,8 @@ release ビルドでも検知できるよう `assert!` を使う）"
             shape,
             value: std::cell::OnceCell::from(value),
             lazy_chain_size: 0,
+            recompute: false,
+            recompute_failed: std::cell::Cell::new(false),
         }
     }
 
@@ -4584,6 +4586,8 @@ release ビルドでも検知できるよう `assert!` を使う）"
                 shape: c_t.shape().to_vec(),
                 value: std::cell::OnceCell::from(c_t.clone()),
                 lazy_chain_size: 0,
+                recompute: false,
+                recompute_failed: std::cell::Cell::new(false),
             };
             vec![
                 leaf_node(x.clone()),
