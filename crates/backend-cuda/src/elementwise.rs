@@ -371,7 +371,18 @@ impl CudaElementwise {
     }
 
     /// 単項演算共通の起動手続き。[`Self::run_binary`] と同一構造。
-    fn run_unary(&self, func: &CudaFunction, a: &[f32]) -> Result<Vec<f32>, CudaError> {
+    ///
+    /// `payload`: `numel` の後ろへ順序どおり追加するスカラー起動引数
+    /// （イシュー #1702。`kernels_scalar_op::UnaryPayload::as_slice`
+    /// 参照）。既存呼び出し（`run_relu_f32`／`run_exp_f32`／
+    /// `run_tanh_f32`・`run_scalar_unary_f32` のペイロードなし kind）は
+    /// 空スライス `&[]` を渡すため起動引数列は変更前と不変（bit 同一）。
+    fn run_unary(
+        &self,
+        func: &CudaFunction,
+        a: &[f32],
+        payload: &[f32],
+    ) -> Result<Vec<f32>, CudaError> {
         validate_elementwise_len(a.len())?;
         let numel = a.len();
         if numel == 0 {
@@ -386,15 +397,24 @@ impl CudaElementwise {
 
             let cfg = elementwise_launch_config(numel as u32);
             let numel_i = numel as i32;
+            // `out_dev.as_view_mut()` の一時値をローカルへ束縛する
+            // （文を分けず式チェーンのまま `.arg(&mut out_dev.as_view_mut())`
+            // と書くと、`payload` 分の `.arg(p)` 呼び出しを間に挟む際に
+            // 一時値の生存期間が途中で終わり借用エラーになるため）。
+            let mut out_view = out_dev.as_view_mut();
 
             // SAFETY: run_binary と同一の根拠（上記コメント参照）。
+            // `payload` の各要素はカーネル引数列の末尾（`numel` の後ろ）
+            // へ `kernels_scalar_op::unary_kernel_source` が宣言する
+            // `p0`／`p1`（あれば）の順で対応し、スカラー値渡しのため
+            // デバイスメモリの境界外アクセスとは無関係。
             unsafe {
-                self.stream
-                    .launch_builder(func)
-                    .arg(&a_dev)
-                    .arg(&mut out_dev.as_view_mut())
-                    .arg(&numel_i)
-                    .launch(cfg)?;
+                let mut builder = self.stream.launch_builder(func);
+                builder.arg(&a_dev).arg(&mut out_view).arg(&numel_i);
+                for p in payload {
+                    builder.arg(p);
+                }
+                builder.launch(cfg)?;
             }
             // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
             // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
@@ -415,32 +435,36 @@ impl CudaElementwise {
 
     /// `out[i] = max(a[i], 0)`（f32）。
     pub fn run_relu_f32(&self, a: &[f32]) -> Result<Vec<f32>, CudaError> {
-        self.run_unary(&self.relu_f32, a)
+        self.run_unary(&self.relu_f32, a, &[])
     }
 
     /// `out[i] = exp(a[i])`（f32、単精度 `expf`）。
     pub fn run_exp_f32(&self, a: &[f32]) -> Result<Vec<f32>, CudaError> {
-        self.run_unary(&self.exp_f32, a)
+        self.run_unary(&self.exp_f32, a, &[])
     }
 
     /// `out[i] = tanh(a[i])`（f32、単精度 `tanhf`）。
     pub fn run_tanh_f32(&self, a: &[f32]) -> Result<Vec<f32>, CudaError> {
-        self.run_unary(&self.tanh_f32, a)
+        self.run_unary(&self.tanh_f32, a, &[])
     }
 
     /// テンプレート生成された [`fandhe_ai_tensor_core::ScalarUnaryOp`]
-    /// カーネルの起動（イシュー #1700）。`run_relu_f32` 等と異なり `func`
-    /// を `new` 時の固定フィールドではなく呼び出し元
-    /// （`context_cache::cached_scalar_unary_kernel`）から都度受け取る点が
-    /// 違うだけで、H2D／確保／起動／readback の手続きは既存 `run_unary`
-    /// （境界検査・`numel == 0` 早期 return・CUDA Graph capture 排他を
-    /// 含む）をそのまま再利用する。
+    /// カーネルの起動（イシュー #1700。ペイロード対応は #1702）。
+    /// `run_relu_f32` 等と異なり `func` を `new` 時の固定フィールドでは
+    /// なく呼び出し元（`context_cache::cached_scalar_unary_kernel`）から
+    /// 都度受け取る点が違うだけで、H2D／確保／起動／readback の手続きは
+    /// 既存 `run_unary`（境界検査・`numel == 0` 早期 return・CUDA Graph
+    /// capture 排他を含む）をそのまま再利用する。`payload`: `Clamp` 等
+    /// ペイロードあり kind の起動引数（`kernels_scalar_op::unary_payload`
+    /// が返す値をそのまま渡す。呼び出し元 `ops.rs::scalar_unary_dispatch`
+    /// 参照）。ペイロードなし kind（`Sqrt` 等）は空スライスを渡す。
     pub(crate) fn run_scalar_unary_f32(
         &self,
         func: &CudaFunction,
         a: &[f32],
+        payload: &[f32],
     ) -> Result<Vec<f32>, CudaError> {
-        self.run_unary(func, a)
+        self.run_unary(func, a, payload)
     }
 
     /// [`Self::run_scalar_unary_f32`] の 2 項版
