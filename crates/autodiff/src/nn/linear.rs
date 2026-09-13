@@ -515,4 +515,75 @@ mod tests {
              いずれもホスト reduce_bias_grad を経由するため bit 完全一致するはず"
         );
     }
+
+    /// 個別シード API（`Linear::new(.., seed)`）とプロセスグローバル
+    /// 決定的 RNG（`tensor-core::rng::manual_seed`）が完全に独立した
+    /// 別機構であることを機構的に固定する（イシュー #1724・受入基準
+    /// 「既存の個別シード API との整合性」）。`manual_seed` を任意の値で
+    /// 何度呼んでも `Linear::new(.., seed)` の出力（weight/bias）が
+    /// 一切変わらないことを確認する。
+    #[test]
+    fn linear_new_is_unaffected_by_global_manual_seed_state() {
+        // 他の rng テスト（`tensor-core::rng` の `#[cfg(test)]` 直列化
+        // ロック）とは別クレートのテストのため直接の競合はないが、
+        // `manual_seed` はプロセスグローバルであり `cargo test` の
+        // 既定並列実行下で他クレートのテストと同時に走りうる。本テスト
+        // は「`manual_seed` を呼んだ後でも `Linear::new` の出力が
+        // 変わらない」ことのみを主張するため、他プロセス外テストとの
+        // 競合があっても主張自体は影響を受けない（`manual_seed` の値に
+        // 依存しない契約を検証している）。
+        let baseline = Linear::new(4, 3, true, 7).unwrap();
+
+        fandhe_ai_tensor_core::rng::manual_seed(1);
+        let after_seed_1 = Linear::new(4, 3, true, 7).unwrap();
+
+        fandhe_ai_tensor_core::rng::manual_seed(999_999);
+        let after_seed_2 = Linear::new(4, 3, true, 7).unwrap();
+
+        assert_eq!(
+            baseline.weight.contiguous().as_slice().unwrap(),
+            after_seed_1.weight.contiguous().as_slice().unwrap(),
+            "manual_seed(1) の前後で Linear::new(.., 7) の weight が変化した \
+             （グローバル RNG と個別シード API は独立のはず）"
+        );
+        assert_eq!(
+            baseline.weight.contiguous().as_slice().unwrap(),
+            after_seed_2.weight.contiguous().as_slice().unwrap(),
+            "manual_seed(999_999) の前後で Linear::new(.., 7) の weight が変化した"
+        );
+        assert_eq!(
+            baseline
+                .bias
+                .as_ref()
+                .unwrap()
+                .contiguous()
+                .as_slice()
+                .unwrap(),
+            after_seed_1
+                .bias
+                .as_ref()
+                .unwrap()
+                .contiguous()
+                .as_slice()
+                .unwrap(),
+            "manual_seed(1) の前後で Linear::new(.., 7) の bias が変化した"
+        );
+        assert_eq!(
+            baseline
+                .bias
+                .as_ref()
+                .unwrap()
+                .contiguous()
+                .as_slice()
+                .unwrap(),
+            after_seed_2
+                .bias
+                .as_ref()
+                .unwrap()
+                .contiguous()
+                .as_slice()
+                .unwrap(),
+            "manual_seed(999_999) の前後で Linear::new(.., 7) の bias が変化した"
+        );
+    }
 }

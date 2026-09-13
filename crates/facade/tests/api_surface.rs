@@ -654,3 +654,36 @@ fn release_cached_memory_and_pool_stats_are_reachable_via_facade() {
     let b = a;
     assert_eq!(a, b, "test fixture: PoolStats は値として比較できるはず");
 }
+
+/// `fandhe_ai::manual_seed`（イシュー #1724）が facade から呼び出し可能な
+/// `pub fn` として型検査できることを固定する（コンパイル時裏付け）。
+/// グローバル RNG 状態を実際に変更するため、他テストとの競合を避ける
+/// 目的で値の検証は行わず、呼べることだけを確認する（決定性・独立性の
+/// 単体テストは `crates/tensor-core/src/rng.rs`・
+/// `crates/autodiff/src/nn/init.rs` 側に別途整備済み）。
+#[test]
+fn manual_seed_is_reachable_via_facade() {
+    fandhe_ai::manual_seed(42);
+}
+
+/// `fandhe_ai::src/` の公開面に、プロセスグローバル RNG の内部実装型
+/// （`Xorshift64Star`・内部アクセサ `with_global_rng`）が一切露出して
+/// いないことを固定する（`manual_seed` のみを公開面とし、将来の
+/// `randn`／`rand`／`randint`〈#1725〉が消費する内部アクセサはサポート
+/// 対象外に留める設計。`docs/rng-global-contract-design.md`）。
+#[test]
+fn facade_does_not_expose_rng_internal_types() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for forbidden in ["Xorshift64Star", "with_global_rng"] {
+            if content.contains(forbidden) {
+                offending.push(format!("{}: {forbidden} を含む", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が RNG 内部実装型・内部アクセサを含んでいる: {offending:?}"
+    );
+}

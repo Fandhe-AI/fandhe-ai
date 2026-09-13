@@ -105,6 +105,13 @@
 //! 添字契約（`backend-metal::shaders::gemm.metal` の
 //! `gemm_tiled_bias_act`）を正とする双子モジュールであり、変更する際は
 //! 両方に反映する（設計判断の記録は `docs/matmul-vjp-zero-copy-decision.md`）。
+//!
+//! `rng`（イシュー #1724。親 #1602）は PyTorch `torch.manual_seed` 相当の
+//! プロセスグローバルな決定的 RNG 契約（[`rng::manual_seed`]・
+//! `rng::with_global_rng`）を提供する。`autodiff::nn::Linear::new(..,
+//! seed)` 等の既存の個別シード API とは独立した別機構であり、将来の
+//! `randn`／`rand`／`randint`（#1725）がホスト側で消費する土台となる
+//! （設計判断は `docs/rng-global-contract-design.md`）。
 
 mod backend_ops;
 mod broadcast;
@@ -127,6 +134,7 @@ pub mod scalar_op;
 // あることを明示する）。
 #[doc(hidden)]
 pub mod pool_core;
+pub mod rng;
 mod tensor;
 pub mod typed;
 
@@ -165,6 +173,7 @@ pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
 // みを再公開する（`backend_ops::BackendOps::device_memory_pool_stats` の
 // 戻り値型。CUDA〈#1020〉・Metal〈#1021〉共通の統計スナップショット型）。
 pub use pool_core::PoolStats;
+pub use rng::manual_seed;
 pub use scalar_op::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 pub use tensor::Tensor;
 pub use typed::{BatchedFeatures, FixedMat, FixedVec};
