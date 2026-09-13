@@ -459,6 +459,21 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 
 **#1628 の設計記録は `docs/facade-multi-gpu-ddp-decision.md` として完了した。**
 
+**適用記録（`DeviceParamStore::predict_device_chain`。イシュー #1688）**:
+GPU 推論チェーン単一同期化（`docs/inference-chain-single-sync-design.md`。
+#1579 設計・#1688 実装）に伴い、`fandhe_ai_autodiff::optim::
+DeviceParamStore` へ新規 `pub fn predict_device_chain` を追加した
+（決定 1(b) 採用。展開先はすべて既存の公開型のタプルのため新規 `pub`
+型は追加しない）。`crate::DeviceParamStore` は `fandhe_ai_autodiff::
+optim::DeviceParamStore` の直接再エクスポート（facade `lib.rs`）のため、
+本メソッドはそのまま `fandhe_ai` の公開面拡張になる。**回避不能な理由**:
+`Tape::ops()` が `pub(crate)`（`crates/autodiff/src/tape.rs`）であり、
+facade 側から `BackendOps` へ直接到達する手段がない。既存の
+`linear_forward`／`linear_forward_with_activation`（同型の設計）と同じ
+理由で `DeviceParamStore` 側に新規メソッドを追加する必要がある。
+`fandhe_ai_facade::compat::sequential::Sequential::predict_resident` の
+シグネチャ自体は不変（内部実装のみ chain 経路を優先するよう差し替え）。
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |

@@ -746,6 +746,180 @@ impl MetalBackendOps {
         )
         .map_err(map_metal_error)
     }
+
+    /// [`Self::linear_forward_device`]／[`Self::
+    /// linear_forward_device_tracked`] の共有本体（`gemm_fp32_strict_
+    /// into_impl` と同じ二重化回避パターン）。`token` は
+    /// [`gemm::MetalGemm::encode_strided_bias_act_prepared_with_c_
+    /// offset`] へそのまま渡す。
+    fn linear_forward_device_impl(
+        &self,
+        a: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Metal || w.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let a_shape = a.shape();
+        if a_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a_shape.len(),
+            }));
+        }
+        let (m, k) = (a_shape[0], a_shape[1]);
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[0] != k {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a_shape.to_vec(),
+                rhs: w_shape.to_vec(),
+            }));
+        }
+        let n = w_shape[1];
+        if let Some(b) = bias {
+            if b.device() != Device::Metal {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if b.shape() != [n] {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![n],
+                }));
+            }
+        }
+        let act_relu = match act {
+            Activation::None => false,
+            Activation::Relu => true,
+            // `Activation` は `#[non_exhaustive]`。CPU／CUDA 実装と同じ
+            // 方針で未知 variant を黙って恒等関数として扱わず明示的に
+            // 拒否する。
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "linear_forward_device: unsupported activation {act:?}"
+                )));
+            }
+        };
+        if k == 0 {
+            // `gemm_resident_rhs` と同じ理由（`Linear::new` が
+            // `in_features == 0` を構築時に拒否するため到達不能）で
+            // フォールバックを設けず型付きエラーで拒否する。
+            return Err(BackendError::InvalidArgument(
+                "linear_forward_device: k == 0 is unreachable via Linear::new (in_features == 0 \
+                 is rejected at construction); a host epilogue fallback would require \
+                 downloading the resident inputs, defeating the zero-D2H contract this method \
+                 exists for"
+                    .to_string(),
+            ));
+        }
+        if m == 0 || n == 0 {
+            return static_metal_memory()?.alloc_zeroed(&[m, n]);
+        }
+
+        let a_handle = a
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let a_layout = MatrixLayout {
+            rows: m,
+            cols: k,
+            ld: k,
+            transposed: false,
+        };
+
+        let w_handle = w
+            .buffer()
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(w_buf) = w_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device: w buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let w_layout = MatrixLayout {
+            rows: k,
+            cols: n,
+            ld: n,
+            transposed: false,
+        };
+
+        let bias_handle = bias
+            .map(|b| {
+                b.buffer()
+                    .downcast_handle::<MetalBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)
+                    .map(|h| (h, b.offset()))
+            })
+            .transpose()?;
+        let bias_arg = match &bias_handle {
+            Some((h, offset)) => {
+                let buf = h.buffer.as_ref().ok_or_else(|| {
+                    BackendError::DeviceAllocationFailed(
+                        "linear_forward_device: bias buffer has numel > 0 but no device \
+                         allocation"
+                            .into(),
+                    )
+                })?;
+                Some((buf, *offset))
+            }
+            None => None,
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        // 出力は呼び出し元へ escape するため `static_metal_memory()`（`memory_ops()`
+        // と同一インスタンス）で確保する（本メソッド doc「出力バッファの
+        // 確保元」参照。`gemm_resident_rhs` の一時 `MetalMemory::
+        // from_shared` とは異なる）。
+        let mem = static_metal_memory()?;
+        let c_dev_buf = mem.alloc_zeroed(&[m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_buf) = c_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device: output buffer has numel > 0 but no device allocation"
+                    .into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        // `encode_strided_bias_act_prepared`（encode-only・待たない）を
+        // 使う（本メソッド doc「同期契約」参照。codex-review・Cursor
+        // Bugbot 指摘対応: `dispatch_strided_bias_act_prepared`
+        //〈`ctx.dispatch_sync` 経由〉は呼ぶたびに `waitUntilCompleted`
+        // するため、多層チェーンで層ごとの同期点が生じ「同期点を最終
+        // `download` の 1 回へ集約する」契約を満たさなかった）。
+        gemm.encode_strided_bias_act_prepared_with_c_offset(
+            &ctx,
+            a_buf,
+            0,
+            a_layout,
+            w_buf,
+            w.offset(),
+            w_layout,
+            bias_arg,
+            act_relu,
+            c_buf,
+            0,
+            m,
+            n,
+            k,
+            token,
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        // `download`／`synchronize` しない: 同期点は呼び出し元の
+        // `download`（`synchronize`）へ集約される（本メソッド doc
+        // 「同期契約」参照）。
+        Ok(c_dev_buf)
+    }
 }
 
 impl BackendOps for MetalBackendOps {
@@ -1488,163 +1662,34 @@ impl BackendOps for MetalBackendOps {
         bias: Option<DeviceBufferView<'_>>,
         act: Activation,
     ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
-        if a.device() != Device::Metal || w.device() != Device::Metal {
-            return Err(BackendError::DeviceMismatch);
-        }
-        let a_shape = a.shape();
-        if a_shape.len() != 2 {
-            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
-                expected: 2,
-                actual: a_shape.len(),
-            }));
-        }
-        let (m, k) = (a_shape[0], a_shape[1]);
-        let w_shape = w.shape();
-        if w_shape.len() != 2 || w_shape[0] != k {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: a_shape.to_vec(),
-                rhs: w_shape.to_vec(),
-            }));
-        }
-        let n = w_shape[1];
-        if let Some(b) = bias {
-            if b.device() != Device::Metal {
-                return Err(BackendError::DeviceMismatch);
-            }
-            if b.shape() != [n] {
-                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                    lhs: b.shape().to_vec(),
-                    rhs: vec![n],
-                }));
-            }
-        }
-        let act_relu = match act {
-            Activation::None => false,
-            Activation::Relu => true,
-            // `Activation` は `#[non_exhaustive]`。CPU／CUDA 実装と同じ
-            // 方針で未知 variant を黙って恒等関数として扱わず明示的に
-            // 拒否する。
-            _ => {
-                return Err(BackendError::Unsupported(format!(
-                    "linear_forward_device: unsupported activation {act:?}"
-                )));
-            }
-        };
-        if k == 0 {
-            // `gemm_resident_rhs` と同じ理由（`Linear::new` が
-            // `in_features == 0` を構築時に拒否するため到達不能）で
-            // フォールバックを設けず型付きエラーで拒否する。
-            return Err(BackendError::InvalidArgument(
-                "linear_forward_device: k == 0 is unreachable via Linear::new (in_features == 0 \
-                 is rejected at construction); a host epilogue fallback would require \
-                 downloading the resident inputs, defeating the zero-D2H contract this method \
-                 exists for"
-                    .to_string(),
-            ));
-        }
-        if m == 0 || n == 0 {
-            return static_metal_memory()?.alloc_zeroed(&[m, n]);
-        }
+        self.linear_forward_device_impl(a, w, bias, act, None)
+    }
 
-        let a_handle = a
-            .downcast_handle::<MetalBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(a_buf) = a_handle.buffer.as_ref() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "linear_forward_device: a buffer has numel > 0 but no device allocation".into(),
-            ));
-        };
-        let a_layout = MatrixLayout {
-            rows: m,
-            cols: k,
-            ld: k,
-            transposed: false,
-        };
-
-        let w_handle = w
-            .buffer()
-            .downcast_handle::<MetalBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(w_buf) = w_handle.buffer.as_ref() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "linear_forward_device: w buffer has numel > 0 but no device allocation".into(),
-            ));
-        };
-        let w_layout = MatrixLayout {
-            rows: k,
-            cols: n,
-            ld: n,
-            transposed: false,
-        };
-
-        let bias_handle = bias
-            .map(|b| {
-                b.buffer()
-                    .downcast_handle::<MetalBufferHandle>()
-                    .ok_or(BackendError::DeviceMismatch)
-                    .map(|h| (h, b.offset()))
-            })
-            .transpose()?;
-        let bias_arg = match &bias_handle {
-            Some((h, offset)) => {
-                let buf = h.buffer.as_ref().ok_or_else(|| {
-                    BackendError::DeviceAllocationFailed(
-                        "linear_forward_device: bias buffer has numel > 0 but no device \
-                         allocation"
-                            .into(),
-                    )
-                })?;
-                Some((buf, *offset))
-            }
-            None => None,
-        };
-
-        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
-        // 出力は呼び出し元へ escape するため `static_metal_memory()`（`memory_ops()`
-        // と同一インスタンス）で確保する（本メソッド doc「出力バッファの
-        // 確保元」参照。`gemm_resident_rhs` の一時 `MetalMemory::
-        // from_shared` とは異なる）。
-        let mem = static_metal_memory()?;
-        let c_dev_buf = mem.alloc_zeroed(&[m, n])?;
-        let c_handle = c_dev_buf
-            .downcast_handle::<MetalBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(c_buf) = c_handle.buffer.as_ref() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "linear_forward_device: output buffer has numel > 0 but no device allocation"
-                    .into(),
-            ));
-        };
-
-        let gemm = context_cache::cached_gemm(&ctx)
-            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
-        // `encode_strided_bias_act_prepared`（encode-only・待たない）を
-        // 使う（本メソッド doc「同期契約」参照。codex-review・Cursor
-        // Bugbot 指摘対応: `dispatch_strided_bias_act_prepared`
-        //〈`ctx.dispatch_sync` 経由〉は呼ぶたびに `waitUntilCompleted`
-        // するため、多層チェーンで層ごとの同期点が生じ「同期点を最終
-        // `download` の 1 回へ集約する」契約を満たさなかった）。
-        gemm.encode_strided_bias_act_prepared(
-            &ctx,
-            a_buf,
-            0,
-            a_layout,
-            w_buf,
-            w.offset(),
-            w_layout,
-            bias_arg,
-            act_relu,
-            c_buf,
-            m,
-            n,
-            k,
-        )
-        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
-
-        // `download`／`synchronize` しない: 同期点は呼び出し元の
-        // `download`（`synchronize`）へ集約される（本メソッド doc
-        // 「同期契約」参照）。
-        Ok(c_dev_buf)
+    /// [`BackendOps::linear_forward_device_tracked`] の Metal オーバー
+    /// ライド（イシュー #1688 codex-review 指摘対応）。`token` を
+    /// `linear_forward_device_impl` → `gemm::MetalGemm::
+    /// encode_strided_bias_act_prepared_with_c_offset` → `context.rs::
+    /// MetalContext::encode` へそのまま渡し、`encode` と同一ロック区間で
+    /// バッチへ登録させる（`gemm_fp32_strict_into_tracked`／
+    /// `sgd_step_device_tracked` と同一の設計。トレイト側 doc「共有
+    /// `MetalContext` を使う別スレッドが先に `synchronize()` して...」
+    /// 参照）。既定実装（`token` を無視して `linear_forward_device` へ
+    /// 委譲するのみ）のままでは、`encode_strided_bias_act_prepared`
+    /// （`token: None`）経由のため本メソッドが表す dispatch の失敗が
+    /// どの `DispatchFailureCell` にも登録されず、共有 `MetalContext`
+    /// を使う別スレッドが先に `synchronize()` して失敗バッチを回収して
+    /// しまうと、本経路の `download`（次層以降の `synchronize`）は
+    /// エラーを検出できず不正な結果を成功として返しかねない
+    /// （fail-closed 維持規約違反）ため、このオーバーライドが必須。
+    fn linear_forward_device_tracked(
+        &self,
+        a: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+        token: &DispatchFailureCell,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.linear_forward_device_impl(a, w, bias, act, Some(token))
     }
 
     /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `MetalBuffer`
