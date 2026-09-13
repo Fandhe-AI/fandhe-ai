@@ -181,3 +181,18 @@ init_s（reuse・`DeviceParamStore` 構築。Metal デバイスハンドル初�
 - 上記 §4/§5 の JSONL は `--strict` exit 0（無効データなし）。
   `--target candle` は infer が未達のため exit 3（期待どおり。データ不正
   ではない）
+
+## 9. 後続（イシュー #1689）
+
+facade Phase 2（#1216 の `linear_forward_device` 結線・上記本文が
+「metal 改善は限定的」と明記していた原因）は #1688 で実装済み
+（`DeviceParamStore::predict_device_chain`・`Sequential::predict_
+resident` の chain 経路優先化。`docs/inference-chain-single-sync-
+design.md` §9）。その効果を CUDA 実機で計測する A/B・bit 同一確認は
+#1689（`docs/perf/infer-chain-single-sync-cuda-ab.md`。同ドキュメント
+の `--task infer` A/B スクリプト `run_ab_infer_chain_cuda.sh` は
+`scripts/bench/framework-compare/run_ab_resident_grad_cuda.sh`〈#1560〉
+と同じ「before／after 2 ツリーを path patch でビルドして比較する」
+方式へ、本ファイル §3 が定義する `infer --mode reuse`／`infer --phases`
+の計測プロトコルを拡張したもの）が担当する。本エージェント実行環境に
+GB10 実機がないため未実測のまま記入欄を残す。

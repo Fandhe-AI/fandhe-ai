@@ -711,6 +711,11 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
   facade へ露出させない（`crates/facade/tests/api_surface.rs::
   facade_does_not_expose_rng_internal_types` で機械検査）。
 
+#### #1697 の追補（`backend-cpu` の `TypedOps<f64>` 実装）
+
+- 319 行目の `float64` 行の「部分」記載は本イシューにより CPU バックエンド限定で解消: `crates/backend-cpu` が `TypedOps<f64>`（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の 8 演算）を実装し、`CpuBackendOps::typed_ops_f64()` accessor 経由で到達可能になった（`docs/backend-dtype-dispatch-design.md` §10）
+- `Var`／`Tape`／facade は本イシューの対象外のまま不変（表本体の「XL」見積り自体は #1650／#1651〈CUDA／Metal〉・`Var`／`Tape` 昇格の残作業を含むため据え置く）。CUDA（#1650）・Metal（#1651）は未実装のまま
+
 #### #1699 の追補
 
 `§2.12`（float64／float16・bfloat16。320 行目）の bfloat16 行に関して、
@@ -718,7 +723,7 @@ CPU バックエンド限定で `fandhe_ai_tensor_core::TypedOps<half::bf16>` �
 `CpuBackendOps` に実装され、`BackendOps::typed_ops_bf16()` accessor
 経由で bf16 の 8 演算（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／
 `sum`／`max`）が CPU 上で実行可能になった（`crates/backend-cpu/src/
-typed_bf16.rs`。設計 `docs/backend-dtype-dispatch-design.md` §10）。
+typed_bf16.rs`。設計 `docs/backend-dtype-dispatch-design.md` §11）。
 
 - 実装方式は既存 f32 カーネルの再利用（bf16→f32 昇格 → f32 カーネル
   → f32→bf16 丸め）であり、新規カーネルは追加していない。
