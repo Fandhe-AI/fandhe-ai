@@ -387,10 +387,20 @@ fn scalar_op_matches_cpu_across_shapes() {
     let cuda_result = cuda.scalar_unary(ScalarUnaryOp::Neg, &a).expect("succeeds");
     let cpu_slice = cpu_result.as_slice().expect("contiguous");
     let cuda_slice = cuda_result.as_slice().expect("contiguous");
-    assert_eq!(
-        cpu_slice, cuda_slice,
-        "Neg must be bit-exact across cpu/cuda for signed-zero/inf inputs"
-    );
+    // `assert_eq!` を f32 スライスへ直接使うと `+0.0 == -0.0` が真になり
+    // 符号反転の回帰を検出できないため、Abs と同様に `to_bits()` で
+    // ビット単位比較する（NaN 混入時はクラス一致で確認する）。
+    for (i, (&c, &g)) in cpu_slice.iter().zip(cuda_slice.iter()).enumerate() {
+        if c.is_nan() {
+            assert!(g.is_nan(), "Neg NaN propagation mismatch at index {i}");
+        } else {
+            assert_eq!(
+                c.to_bits(),
+                g.to_bits(),
+                "Neg cpu/cuda bit mismatch at index {i}"
+            );
+        }
+    }
     assert_eq!(cpu_slice[0].to_bits(), (-0.0_f32).to_bits());
     assert_eq!(cpu_slice[1].to_bits(), (0.0_f32).to_bits());
 
