@@ -166,8 +166,12 @@ fn scalar_op_parity_smoke_env_adaptive() {
             assert!(matches!(unsupported_bin, Err(BackendError::Unsupported(_))));
 
             // 形状不一致は `BackendError::ShapeMismatch` を返す
-            // （`elementwise_binary` の既存契約と同様の再検査）。
-            let bad = Tensor::new(vec![1.0, 2.0], &[2]).expect("valid tensor");
+            // （`elementwise_binary` の既存契約と同様の再検査）。`a` は
+            // `[2, 2]` のため、末尾次元が `1`／`2` 以外でブロードキャスト
+            // 不能な `[3]` を使う（`[2]` は `Tensor::broadcast_with` の
+            // 契約上ブロードキャスト可能で shape mismatch にならない。
+            // codex-review 指摘・PR #1781）。
+            let bad = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).expect("valid tensor");
             let err = cuda
                 .scalar_binary(ScalarBinaryOp::Sub, &a, &bad)
                 .expect_err("shape mismatch (non-broadcastable) must be rejected");
@@ -267,11 +271,33 @@ fn scalar_op_matches_cpu_across_shapes() {
         .expect("cuda succeeds");
     let cpu_slice = cpu_result.as_slice().expect("contiguous");
     let cuda_slice = cuda_result.as_slice().expect("contiguous");
+    // index 2（`(-2.0).powf(0.5)`）は CPU・CUDA いずれも NaN になるため、
+    // NaN 要素はクラス一致（両方 NaN）で個別確認し、`assert_parity` には
+    // 有限値の要素のみを渡す（NaN 同士は数値比較上不合格になり、後続の
+    // 空テンソル検証等へ到達できなくなるため。Sqrt／Div の既存 NaN 個別
+    // 確認と同じ扱い。codex-review 指摘・PR #1781）。
+    let finite_cpu: Vec<f32> = cpu_slice
+        .iter()
+        .zip(cuda_slice.iter())
+        .filter(|(c, _)| !c.is_nan())
+        .map(|(&c, _)| c)
+        .collect();
+    let finite_cuda: Vec<f32> = cpu_slice
+        .iter()
+        .zip(cuda_slice.iter())
+        .filter(|(c, _)| !c.is_nan())
+        .map(|(_, &g)| g)
+        .collect();
     fandhe_ai_backend_cpu::parity::assert_parity(
         "scalar_binary(Pow) 0^0/negative-base edge cases",
-        cuda_slice,
-        cpu_slice,
+        &finite_cuda,
+        &finite_cpu,
     );
+    for (i, (&c, &g)) in cpu_slice.iter().zip(cuda_slice.iter()).enumerate() {
+        if c.is_nan() {
+            assert!(g.is_nan(), "Pow NaN propagation mismatch at index {i}");
+        }
+    }
     assert_eq!(
         cpu_slice[0], 1.0,
         "0^0 must be 1.0 per IEEE 754 pow contract"

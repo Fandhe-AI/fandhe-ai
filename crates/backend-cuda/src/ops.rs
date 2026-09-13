@@ -843,6 +843,21 @@ impl CudaBackendOps {
         op: ScalarUnaryOp,
         a: &Tensor<f32>,
     ) -> Result<Tensor<f32>, BackendError> {
+        // 対応 kind 判定（CUDA デバイス取得・カーネルコンパイルより前に行う）。
+        // `kernels_scalar_op::unary_kernel_source` はソース文字列生成のみの
+        // 純関数（デバイス・NVRTC 非依存）で、未対応 kind では `None` を返す。
+        // ここで先に判定しないと、CUDA/NVRTC 利用不可環境で未対応 kind に対し
+        // 本来返すべき `Unsupported`（ホスト参照実装へフォールバックする契約。
+        // `fandhe_ai_autodiff::grad::scalar_unary_with_fallback` 参照）ではなく
+        // `CudaUnavailable` を返してしまい、フォールバック契約が後退する
+        // （codex-review 指摘・PR #1781）。
+        if crate::kernels_scalar_op::unary_kernel_source(op).is_none() {
+            return Err(BackendError::Unsupported(format!(
+                "scalar_unary: CUDA template kernel not implemented for {op:?} \
+                 (#1701/#1702 が担当するスコープ外の可能性あり)"
+            )));
+        }
+
         let out_shape = a.shape().to_vec();
         let a_owned = a.contiguous();
         let a_slice = a_owned.as_slice().ok_or_else(|| {
@@ -882,6 +897,16 @@ impl CudaBackendOps {
         a: &Tensor<f32>,
         b: &Tensor<f32>,
     ) -> Result<Tensor<f32>, BackendError> {
+        // 対応 kind 判定を CUDA デバイス取得・カーネルコンパイルより前に行う
+        // 理由は `scalar_unary_dispatch` 冒頭コメントと同じ（codex-review
+        // 指摘・PR #1781）。
+        if crate::kernels_scalar_op::binary_kernel_source(op).is_none() {
+            return Err(BackendError::Unsupported(format!(
+                "scalar_binary: CUDA template kernel not implemented for {op:?} \
+                 (#1701/#1702 が担当するスコープ外の可能性あり)"
+            )));
+        }
+
         let (a_bc, b_bc) = a.broadcast_with(b).map_err(BackendError::ShapeMismatch)?;
         let out_shape = a_bc.shape().to_vec();
         let a_owned = a_bc.contiguous();
