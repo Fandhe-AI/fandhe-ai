@@ -79,7 +79,17 @@ IGNORED_CMD_MNIST="cargo test -p fandhe-ai --release --test mnist_scale_train_re
 IGNORED_CMD_COMMAND_BATCHING="cargo test -p fandhe-ai-backend-metal --release --test command_batching -- --ignored --nocapture"
 IGNORED_CMD_COMMAND_BATCHING_BENCH="cargo test -p fandhe-ai-backend-metal --release --test command_batching_bench -- --ignored --nocapture"
 IGNORED_CMD_GEMM_RESIDENT_PARITY="cargo test -p fandhe-ai-backend-metal --release --test gemm_resident_parity -- --ignored --nocapture"
-IGNORED_CMD_STORE_PARITY="cargo test -p fandhe-ai --release --test device_param_store_backend_parity -- --ignored --nocapture"
+# `device_param_store_backend_parity` は Metal・CUDA 両方の `#[ignore]`
+# テスト（`device_resident_matches_host_sgd_on_{metal,cuda}_across_100_steps`・
+# `grad_readout_contract_on_{metal,cuda}`）を同一バイナリに含む
+# （`crates/facade/tests/device_param_store_backend_parity.rs`）。フィルタ
+# なしで `--ignored` を実行すると M4 Max 実機上で CUDA 必須テストまで
+# 選択されて失敗し、`set -eu` によりオーケストレーション本体（(e) の
+# 主判定 A/B）へ到達できなくなる（codex-review [P1] 指摘対応。
+# `mnist_scale_train_reuse_bench` は `#![cfg(target_os = "macos")]` で
+# ファイル全体が macOS 限定のため CUDA テストを含まず対象外）。
+# `on_metal` 部分一致フィルタで Metal 用 2 ケースへ限定する。
+IGNORED_CMD_STORE_PARITY="cargo test -p fandhe-ai --release --test device_param_store_backend_parity -- --ignored --nocapture on_metal"
 
 BATCH_COUNTERS_CMD="cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture --test-threads=1 mnist_scale_train_reuse_metal_batch_counters"
 BACKWARD_PHASE_CMD="cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture --test-threads=1 mnist_scale_train_reuse_metal_backward_dinput_phase"
