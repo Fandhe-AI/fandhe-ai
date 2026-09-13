@@ -13,7 +13,7 @@
 
 use onnx_interop::onnx::export::{ExportError, ExportOptions, build_model_proto, encode_tensor};
 use onnx_interop::onnx::graph::{RawTensor, build_graph};
-use onnx_interop::onnx::proto::{GraphProto, ModelProto};
+use onnx_interop::onnx::proto::{GraphProto, ModelProto, OperatorSetIdProto};
 use prost::Message;
 use std::path::PathBuf;
 
@@ -61,6 +61,32 @@ fn roundtrip_via_build_graph(name: &str, tensor: &RawTensor) -> RawTensor {
 #[test]
 fn model_onnx_roundtrips_through_export_structurally() {
     let model = load_model("model.onnx");
+
+    // decode 経路の実フィクスチャ自体（本モジュールの export を一切経由しない
+    // `ModelProto`）に対して opset_import／value_info を直接検証する。以下の
+    // encode -> decode 経路の検証は同一 prost 構造体を encode/decode 双方が
+    // 共有するため、tag 番号（opset_import=8／value_info=13）を取り違えても
+    // 自己整合的に pass してしまい得る（レビュー指摘）。ここで実ファイルの
+    // decode 結果を直接 assert することで、tag 番号自体が正しく解釈されて
+    // いることを本クレートの export に依存せず確認する。
+    assert_eq!(
+        model.opset_import,
+        vec![OperatorSetIdProto {
+            domain: String::new(),
+            version: 17,
+        }],
+        "model.onnx（PyTorch 2.12.1 export）実測値と一致するはず（ExportOptions::default() のコメント参照）"
+    );
+    assert!(
+        model
+            .graph
+            .as_ref()
+            .expect("model.onnx に graph はあるはず")
+            .value_info
+            .is_empty(),
+        "model.onnx（PyTorch 2.12.1 export）実測値は value_info を持たない"
+    );
+
     let graph = build_graph(&model).expect("build_graph は model.onnx で成功するはず");
 
     let options = ExportOptions::default();

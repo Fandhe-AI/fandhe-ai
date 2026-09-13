@@ -250,23 +250,14 @@ pub fn build_model_proto(
     // `Graph` から呼び出すたびに異なるバイト列が生成されるのを避けるため、
     // テンソル名でソートしてから `encode_tensor` を適用する（決定的な出力。
     // reproducibility・テスト容易性のための明示的な設計判断）。
-    let mut names: Vec<&String> = graph.initializers.keys().collect();
-    names.sort();
-    let mut initializer = Vec::with_capacity(names.len());
-    for name in names {
-        // `names` は `graph.initializers.keys()` そのものから作った Vec のため
-        // `get` は必ず `Some` を返す。それでも `unwrap`/`expect` は使わず、
-        // 万一の内部不整合（将来の実装変更で崩れた場合）にも fail-closed に
-        // 型付きエラーで応答する（`coding-rust.md`）。
-        let tensor =
-            graph
-                .initializers
-                .get(name)
-                .ok_or_else(|| ExportError::ShapeDataMismatch {
-                    tensor_name: name.to_string(),
-                    expected_elements: 0,
-                    actual_elements: 0,
-                })?;
+    // `(name, tensor)` を直接 `Vec` へ集めてソートすることで、名前だけを
+    // 先にソートしてから同じ `HashMap` を再度 `get` で引き直す（`Some` が
+    // 保証されるにもかかわらずエラー分岐を用意する必要が生じる）間接参照を
+    // 避ける（レビュー指摘）。
+    let mut entries: Vec<(&String, &RawTensor)> = graph.initializers.iter().collect();
+    entries.sort_by_key(|(name, _)| *name);
+    let mut initializer = Vec::with_capacity(entries.len());
+    for (name, tensor) in entries {
         initializer.push(encode_tensor(name, tensor)?);
     }
 
