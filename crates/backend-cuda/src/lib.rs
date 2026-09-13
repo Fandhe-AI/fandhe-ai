@@ -379,6 +379,11 @@ mod kernels_mma_tf32x3;
 mod kernels_mse;
 mod kernels_rmsnorm;
 mod kernels_rnn_cell;
+// イシュー #1700: `ScalarUnaryOp`／`ScalarBinaryOp`（`tensor-core::
+// scalar_op`）の式テンプレート基盤（NVRTC ソース生成）。固定カーネル
+// 集合の `kernels_elementwise` とは異なり、kind ごとにソースを実行時
+// 生成する。
+mod kernels_scalar_op;
 mod kernels_sgd;
 mod kernels_softmax;
 mod kernels_tiled_pipeline;
@@ -413,12 +418,19 @@ mod reduce;
 // 配置する。
 #[cfg(test)]
 mod module_cache_wiring_tests;
+// イシュー #1700: `context_cache::cached_scalar_unary_kernel`／
+// `cached_scalar_binary_kernel`（非公開 `context_cache` へ到達する必要が
+// あるため `module_cache_wiring_tests` と同じ理由でクレートルートの
+// 兄弟モジュールとして配置する）への結線を実機で検証する `#[ignore]`
+// テスト。
 mod nvrtc;
 mod ops;
 pub mod placement;
 mod pool;
 pub mod precision;
 mod rmsnorm;
+#[cfg(test)]
+mod scalar_op_cache_wiring_tests;
 mod sgd;
 mod softmax;
 mod swizzle;

@@ -35,8 +35,9 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DType, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, SegmentKey, SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    QrFactors, ScalarBinaryOp, ScalarUnaryOp, SegmentKey, SegmentResource, SegmentRun, ShapeError,
+    SvdFactors, Tensor, UnaryElementwiseOp, reduce_out_shape, require_same_shape, row_norm_layout,
+    row_softmax_layout,
 };
 
 use crate::context_cache;
@@ -824,6 +825,119 @@ impl CudaBackendOps {
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
             || run(&ew, a_slice),
+        )?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`BackendOps::scalar_unary`] の CUDA ディスパッチ（イシュー
+    /// #1700）。`kernels_scalar_op` が対応する kind のみカーネルを生成・
+    /// キャッシュして起動し、未対応 kind は `BackendError::Unsupported`
+    /// を返す（呼び出し元 `fandhe_ai_autodiff::grad::scalar_unary_with_
+    /// fallback` がホスト参照実装へフォールバックする既存契約。
+    /// `BackendOps::scalar_unary` の既定トレイト実装と同じエラー種別を
+    /// 返すことで判定迂回経路を作らない。`.claude/rules/security.md`
+    /// A08）。`elementwise_unary` と異なり、カーネルの有無自体を
+    /// （呼び出し前に）判定する必要があるため専用の dispatch にする。
+    fn scalar_unary_dispatch(
+        &self,
+        op: ScalarUnaryOp,
+        a: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        // 対応 kind 判定（CUDA デバイス取得・カーネルコンパイルより前に行う）。
+        // `kernels_scalar_op::unary_kernel_source` はソース文字列生成のみの
+        // 純関数（デバイス・NVRTC 非依存）で、未対応 kind では `None` を返す。
+        // ここで先に判定しないと、CUDA/NVRTC 利用不可環境で未対応 kind に対し
+        // 本来返すべき `Unsupported`（ホスト参照実装へフォールバックする契約。
+        // `fandhe_ai_autodiff::grad::scalar_unary_with_fallback` 参照）ではなく
+        // `CudaUnavailable` を返してしまい、フォールバック契約が後退する
+        // （codex-review 指摘・PR #1781）。
+        if crate::kernels_scalar_op::unary_kernel_source(op).is_none() {
+            return Err(BackendError::Unsupported(format!(
+                "scalar_unary: CUDA template kernel not implemented for {op:?} \
+                 (#1701/#1702 が担当するスコープ外の可能性あり)"
+            )));
+        }
+
+        let out_shape = a.shape().to_vec();
+        let a_owned = a.contiguous();
+        let a_slice = a_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scalar_unary: input not contiguous".into())
+        })?;
+
+        let (ew, func) = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                let ew = context_cache::cached_elementwise(&device)?;
+                let func = context_cache::cached_scalar_unary_kernel(&device, op)?;
+                Ok((ew, func))
+            },
+        )?;
+        let Some(func) = func else {
+            return Err(BackendError::Unsupported(format!(
+                "scalar_unary: CUDA template kernel not implemented for {op:?} \
+                 (#1701/#1702 が担当するスコープ外の可能性あり)"
+            )));
+        };
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || ew.run_scalar_unary_f32(&func, a_slice),
+        )?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`Self::scalar_unary_dispatch`] の 2 項版（イシュー #1700）。
+    /// ブロードキャストは `elementwise_binary`（`add`／`mul`）と同じ
+    /// `Tensor::broadcast_with`。
+    fn scalar_binary_dispatch(
+        &self,
+        op: ScalarBinaryOp,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        // 対応 kind 判定を CUDA デバイス取得・カーネルコンパイルより前に行う
+        // 理由は `scalar_unary_dispatch` 冒頭コメントと同じ（codex-review
+        // 指摘・PR #1781）。
+        if crate::kernels_scalar_op::binary_kernel_source(op).is_none() {
+            return Err(BackendError::Unsupported(format!(
+                "scalar_binary: CUDA template kernel not implemented for {op:?} \
+                 (#1701/#1702 が担当するスコープ外の可能性あり)"
+            )));
+        }
+
+        let (a_bc, b_bc) = a.broadcast_with(b).map_err(BackendError::ShapeMismatch)?;
+        let out_shape = a_bc.shape().to_vec();
+        let a_owned = a_bc.contiguous();
+        let b_owned = b_bc.contiguous();
+        let a_slice = a_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scalar_binary: lhs not contiguous".into())
+        })?;
+        let b_slice = b_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scalar_binary: rhs not contiguous".into())
+        })?;
+
+        let (ew, func) = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                let ew = context_cache::cached_elementwise(&device)?;
+                let func = context_cache::cached_scalar_binary_kernel(&device, op)?;
+                Ok((ew, func))
+            },
+        )?;
+        let Some(func) = func else {
+            return Err(BackendError::Unsupported(format!(
+                "scalar_binary: CUDA template kernel not implemented for {op:?} \
+                 (#1701/#1702 が担当するスコープ外の可能性あり)"
+            )));
+        };
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || ew.run_scalar_binary_f32(&func, a_slice, b_slice),
         )?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
@@ -2565,6 +2679,29 @@ impl BackendOps for CudaBackendOps {
         self.elementwise_binary_scalar(x, mask, value, |ew, x_s, mask_s, v| {
             ew.run_masked_fill_f32(x_s, mask_s, v)
         })
+    }
+
+    /// `BackendOps::scalar_unary` の CUDA 実装（イシュー #1700）。
+    /// `Sqrt` のみ実装済み（`kernels_scalar_op` モジュール doc「スコープ」
+    /// 参照）で、他 kind は `Unsupported` を返しホスト参照実装へ
+    /// フォールバックする（既定トレイト実装と同じ挙動）。
+    fn scalar_unary(
+        &self,
+        op: ScalarUnaryOp,
+        a: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.scalar_unary_dispatch(op, a)
+    }
+
+    /// `BackendOps::scalar_binary` の CUDA 実装（イシュー #1700）。
+    /// `Sub`／`Div`／`Pow` のみ実装済み。
+    fn scalar_binary(
+        &self,
+        op: ScalarBinaryOp,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.scalar_binary_dispatch(op, a, b)
     }
 
     fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {

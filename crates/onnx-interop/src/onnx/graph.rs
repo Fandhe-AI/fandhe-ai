@@ -179,7 +179,7 @@ pub enum RawTensor {
 
 /// 実行順が確定したグラフ。`nodes` の順序がトポロジカル順であることは
 /// `build_graph` が検証済み。
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Graph {
     pub nodes: Vec<NodeProto>,
     pub initializers: HashMap<String, RawTensor>,
@@ -189,7 +189,7 @@ pub struct Graph {
 
 /// `dims` から要素数を安全に計算する。負の dim・オーバーフローはここで拒否し、
 /// 要素データの復号（バイト列走査）より前に弾く（長さ・形状検証の先行）。
-fn element_count(tensor_name: &str, dims: &[i64]) -> Result<usize, GraphError> {
+pub(super) fn element_count(tensor_name: &str, dims: &[i64]) -> Result<usize, GraphError> {
     let mut count: usize = 1;
     for &d in dims {
         if d < 0 {

@@ -124,10 +124,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
+use cudarc::driver::CudaFunction;
+use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
+
 use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
+use crate::nvrtc::compile_ptx;
 use crate::pool::CudaAllocator;
 use crate::rmsnorm::CudaRmsNorm;
 use crate::softmax::CudaSoftmax;
@@ -151,6 +155,10 @@ const _: fn() = || {
     assert_send_sync::<CudaSoftmax>();
     assert_send_sync::<CudaAllocator>();
     assert_send_sync::<crate::gemm_mma_tf32x3::CudaMmaTf32x3Gemm>();
+    // イシュー #1700: `cached_scalar_unary_kernel`／`cached_scalar_binary_kernel`
+    // が `Arc<Mutex<Option<Arc<CudaFunction>>>>` として直接キャッシュする値の
+    // Send/Sync をコンパイル時に固定する（既存エントリと同じ意図）。
+    assert_send_sync::<CudaFunction>();
 };
 
 /// キャッシュキー単位の single-flight ロック。`None` は未構築（または
@@ -477,6 +485,62 @@ pub(crate) fn cached_reduce(
     get_or_build(cache, ContextKey::from_device(device), || {
         crate::reduce::CudaReduce::new(device)
     })
+}
+
+/// `device` の `CudaContext` に対応する `op`（[`ScalarUnaryOp`]）の
+/// テンプレート生成カーネルをプロセス内キャッシュから取得する
+/// （イシュー #1700。キーは [`ContextKey`]。`cached_gemm` 冒頭コメント
+/// 参照）。
+///
+/// キーは `(ContextKey, op.kind_name())`（[`ScalarOpKind::kind_name`]。
+/// ペイロード値〈`f32`〉はキャッシュキーに含めない — `tensor-core::
+/// scalar_op` モジュール doc「#1635 への申し送り」の契約どおり。本
+/// イシュー（#1700）が対象とする kind はいずれもペイロードなしのため、
+/// この区別は将来 #1701／#1702 がペイロードあり kind を追加する際にも
+/// 同じキー方式のまま拡張できるようにするための設計）。
+///
+/// [`crate::kernels_scalar_op::unary_kernel_source`] が `None`（未実装
+/// kind）を返す場合はキャッシュへ触れずに `Ok(None)` を返す（呼び出し元
+/// `ops::CudaBackendOps::scalar_unary` が `BackendError::Unsupported`
+/// へ変換しホスト参照実装へフォールバックする）。
+pub(crate) fn cached_scalar_unary_kernel(
+    device: &CudaDevice,
+    op: ScalarUnaryOp,
+) -> Result<Option<Arc<CudaFunction>>, CudaError> {
+    let Some(source) = crate::kernels_scalar_op::unary_kernel_source(op) else {
+        return Ok(None);
+    };
+    static CACHE: OnceLock<SingleFlightCache<(ContextKey, &'static str), CudaFunction>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (ContextKey::from_device(device), op.kind_name());
+    let func = get_or_build(cache, key, || {
+        let ptx = compile_ptx(&source, device.arch())?;
+        let name = crate::kernels_scalar_op::unary_function_name(op);
+        Ok(device.context().load_module(ptx)?.load_function(&name)?)
+    })?;
+    Ok(Some(func))
+}
+
+/// [`cached_scalar_unary_kernel`] の 2 項版（[`ScalarBinaryOp`]。
+/// イシュー #1700）。
+pub(crate) fn cached_scalar_binary_kernel(
+    device: &CudaDevice,
+    op: ScalarBinaryOp,
+) -> Result<Option<Arc<CudaFunction>>, CudaError> {
+    let Some(source) = crate::kernels_scalar_op::binary_kernel_source(op) else {
+        return Ok(None);
+    };
+    static CACHE: OnceLock<SingleFlightCache<(ContextKey, &'static str), CudaFunction>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (ContextKey::from_device(device), op.kind_name());
+    let func = get_or_build(cache, key, || {
+        let ptx = compile_ptx(&source, device.arch())?;
+        let name = crate::kernels_scalar_op::binary_function_name(op);
+        Ok(device.context().load_module(ptx)?.load_function(&name)?)
+    })?;
+    Ok(Some(func))
 }
 
 /// `device` の `CudaContext` に対応する [`crate::gemm_mma_tf32x3::

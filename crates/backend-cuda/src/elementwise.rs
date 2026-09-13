@@ -428,6 +428,32 @@ impl CudaElementwise {
         self.run_unary(&self.tanh_f32, a)
     }
 
+    /// テンプレート生成された [`fandhe_ai_tensor_core::ScalarUnaryOp`]
+    /// カーネルの起動（イシュー #1700）。`run_relu_f32` 等と異なり `func`
+    /// を `new` 時の固定フィールドではなく呼び出し元
+    /// （`context_cache::cached_scalar_unary_kernel`）から都度受け取る点が
+    /// 違うだけで、H2D／確保／起動／readback の手続きは既存 `run_unary`
+    /// （境界検査・`numel == 0` 早期 return・CUDA Graph capture 排他を
+    /// 含む）をそのまま再利用する。
+    pub(crate) fn run_scalar_unary_f32(
+        &self,
+        func: &CudaFunction,
+        a: &[f32],
+    ) -> Result<Vec<f32>, CudaError> {
+        self.run_unary(func, a)
+    }
+
+    /// [`Self::run_scalar_unary_f32`] の 2 項版
+    /// （[`fandhe_ai_tensor_core::ScalarBinaryOp`]。イシュー #1700）。
+    pub(crate) fn run_scalar_binary_f32(
+        &self,
+        func: &CudaFunction,
+        a: &[f32],
+        b: &[f32],
+    ) -> Result<Vec<f32>, CudaError> {
+        self.run_binary(func, a, b)
+    }
+
     /// `op` に対応するコンパイル済みカーネルを返す（`launch_binary_resident`
     /// の内部選択専用。ホスト版 `run_add_f32`／`run_mul_f32` と同一
     /// カーネルを再利用するため bit 同一契約が成立する）。

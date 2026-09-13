@@ -33,7 +33,11 @@
 //!   TASK-7.2d（#80）が `crates/onnx-interop/tests/onnx_poc_v2_6_match.rs`・
 //!   `tests/onnx_slice_dynamic_bounds.rs` として整備し、decode→build_graph→run の
 //!   全経路突合は `tests/onnx_interp.rs`（TASK-7.2b・#78）が担う（safetensors 経路の
-//!   同種突合は `tests/st_poc_v2_6_match.rs`・#75）。
+//!   同種突合は `tests/st_poc_v2_6_match.rs`・#75）。[`onnx::export`] は逆方向
+//!   （内部グラフ表現 `onnx::graph::Graph` -> `GraphProto`／`ModelProto`）の
+//!   構造的な組み立てを担う（イシュー #1772）。`onnx-interop` は crates.io 非公開
+//!   クレートであり、`onnx::export` は本クレート内部 API のみで facade からの
+//!   参照・再エクスポートは行わない（facade 公開の要否は #1775 が判断する）。
 //! - [`st_save`]: `tensor-core::Tensor<f32>` → safetensors ワイヤフォーマットへの
 //!   書き出し（TASK-7.1c・#197・REQ-7）。[`st_load`] と対称の契約（暗黙アダプタを
 //!   設けない・dtype は F32 のみ）を持つ保存経路。親イシュー #196 の

@@ -158,9 +158,11 @@ fn broken_protobuf_bytes_are_rejected_as_decode_error() {
 
 fn model_with_single_initializer(t: TensorProto) -> ModelProto {
     ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![],
             name: "g".to_string(),
             initializer: vec![t],
@@ -498,9 +500,11 @@ fn duplicate_initializer_name_is_rejected_not_silently_overwritten() {
         raw_data: vec![],
     };
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![],
             name: "g".to_string(),
             initializer: vec![t1, t2],
@@ -522,9 +526,11 @@ fn non_topological_node_order_is_rejected() {
     // ノード n1 が、まだどこからも生成されていない "phantom" を入力に取る
     // （トポロジカル順違反）。initializer・グラフ入力のいずれにも属さない。
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["phantom".to_string()],
                 output: vec!["y".to_string()],
@@ -562,9 +568,11 @@ fn unknown_graph_output_is_rejected() {
     // 一致しない名前（"nope"）を宣言している。唯一のノードは "y" を生成する
     // のみで "nope" は誰からも生成されない（レビュー指摘: 未検証コピーの再現）。
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["y".to_string()],
@@ -597,9 +605,11 @@ fn duplicate_node_output_name_is_rejected() {
     // 2 つのノードがともに出力 "y" を生成する（ONNX が要求するグラフ内 SSA
     // 違反）。`DuplicateInitializerName` と同一の欠陥クラス（レビュー指摘）。
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![
                 NodeProto {
                     input: vec!["x".to_string()],
@@ -653,9 +663,11 @@ fn node_output_shadowing_initializer_name_is_rejected() {
         raw_data: vec![],
     };
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["w".to_string()],
@@ -694,9 +706,11 @@ fn duplicate_graph_input_name_is_rejected_not_silently_absorbed() {
     // ONNX モデル）。`HashSet::insert` の戻り値を見ずに無言で吸収すると
     // `Graph.inputs` に重複名が残ってしまう（レビュー指摘 #77）。
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["y".to_string()],
@@ -736,9 +750,11 @@ fn duplicate_graph_output_name_is_rejected_not_silently_absorbed() {
     // silently_absorbed）と対称の検査が無いと `Graph.outputs` に重複名が
     // 無言で複写され、no-silent-skip 契約と矛盾する（Bugbot 指摘）。
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["y".to_string()],
@@ -785,9 +801,11 @@ fn graph_input_name_matching_initializer_name_is_accepted() {
         raw_data: vec![],
     };
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["y".to_string()],
@@ -814,9 +832,11 @@ fn optional_empty_string_input_is_not_treated_as_missing() {
     // ONNX の省略可能入力は空文字列で表される規約（onnx.proto3）。
     // 空文字列入力はトポロジカル順検証の対象外とし、拒否されないことを確認する。
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string(), String::new()],
                 output: vec!["y".to_string()],
@@ -845,9 +865,11 @@ fn node_with_multiple_optional_empty_outputs_is_accepted() {
     // 空文字列出力を持っていても `DuplicateOutputName` を誤検出しないことを
     // 確認する（グラフ入力側の対称テスト。レビュー指摘 #77）。
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["y".to_string(), String::new(), String::new()],
@@ -876,9 +898,11 @@ fn two_nodes_with_empty_trailing_output_are_both_accepted() {
     // `DuplicateOutputName { tensor_name: "" }` として誤拒否される
     // （レビュー指摘 #77）。
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
+            value_info: Vec::new(),
             node: vec![
                 NodeProto {
                     input: vec!["x".to_string()],
@@ -913,6 +937,7 @@ fn two_nodes_with_empty_trailing_output_are_both_accepted() {
 #[test]
 fn model_without_graph_is_rejected() {
     let model = ModelProto {
+        opset_import: Vec::new(),
         ir_version: 8,
         producer_name: "test".to_string(),
         graph: None,
