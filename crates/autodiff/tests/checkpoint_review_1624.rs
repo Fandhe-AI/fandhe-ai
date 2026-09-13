@@ -649,3 +649,36 @@ fn eager_sigmoid_propagates_poison_from_checkpoint_freed_input() {
          ゼロ勾配のまま backward が成功してしまっている: {backward_result:?}"
     );
 }
+
+/// [`elementwise_leaves_poisoned`] を「到達可能なノードのみ走査」する
+/// よう書き換えた codex-review 是正（イシュー #1624 PR #1681 レビュー・
+/// `crates/autodiff/src/tape.rs:2700` 付近）の回帰テスト。
+///
+/// checkpoint を一度も使わない `sigmoid` の N 段連鎖（`Var::sigmoid` は
+/// `push_eager` 経由の eager 演算で、各段の出力は即座に実体化される）
+/// は、旧実装（`id` から `0` まで全 `NodeId` を線形走査）だと 1 段ごとに
+/// O(N) の検査が乗り forward 全体が O(N²) へ悪化する。是正後は各段の
+/// 入力（直前の sigmoid 出力）が既に実体化済みであるため
+/// `elementwise_leaves_poisoned` が即返しの高速経路（自身の
+/// `recompute_failed` フラグ検査のみ）を通り、1 段あたり O(1) に戻る。
+/// 本テストは実行時間を計測せず、数万段の連鎖でも forward が
+/// （タイムアウトせずに）完走することのみを確認する。
+#[test]
+fn eager_sigmoid_chain_without_checkpoint_completes_forward() {
+    const CHAIN_LEN: usize = 50_000;
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let mut cur = tape.var(&t(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]));
+    for _ in 0..CHAIN_LEN {
+        cur = cur.sigmoid();
+    }
+
+    // checkpoint を経由しないため `to_tensor()`（層 2）はすべて既に
+    // eager に実体化済みの値をそのまま返すはずで、`Err` にはならない。
+    let out = cur.to_tensor();
+    assert_eq!(
+        out.shape(),
+        &[2, 2],
+        "eager sigmoid 連鎖の出力 shape が入力から変化してはならない"
+    );
+}

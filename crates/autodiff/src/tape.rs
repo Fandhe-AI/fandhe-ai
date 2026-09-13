@@ -2678,11 +2678,22 @@ pub(crate) fn materialize_non_fallible<'a>(
 
 /// [`materialize_non_fallible`] の P0 是正が使う補助走査。`id` を根と
 /// する未実体化 elementwise 連結成分（`Op::Add`/`Mul`/`Relu`/`Exp`/
-/// `Tanh` のうち `value` が空のもの。`build_lazy_plan`／
-/// `eval_fallback` と同じ「発生順に遡って `reachable` を広げる」走査）
-/// を辿り、到達した**葉**（elementwise 以外の Op、または既に実体化済み
-/// の elementwise ノード）のいずれかで [`TapeNode::recompute_failed`]
-/// が立っているかを検査する。
+/// `Tanh` のうち `value` が空のもの）を辿り、到達した**葉**
+/// （elementwise 以外の Op、または既に実体化済みの elementwise ノード）
+/// のいずれかで [`TapeNode::recompute_failed`] が立っているかを検査
+/// する。
+///
+/// **到達可能ノード限定の走査（codex-review 指摘・イシュー #1624
+/// PR #1681 レビュー是正）**: 当初実装は `id` から `0` まで全 `NodeId`
+/// を線形走査していたため、`push_eager`（層 0）が elementwise 演算
+/// ごとに毎回本関数を呼ぶ構成と組み合わさると、checkpoint を一度も
+/// 使わない小さなテンソルの sigmoid 等 N 段連鎖でも forward 全体が
+/// O(N) から O(N²) へ悪化する。本実装は入力（`Op::for_each_input`）を
+/// 辿る明示的な作業スタック（DFS・`visited` で重複抑止）に置き換え、
+/// 実際に到達可能なノードのみを走査する。`id` 自身が実体化済み・
+/// 非 elementwise の場合はスタックにすら積まず自身のフラグ検査のみで
+/// 即座に返す（`push_eager` から呼ばれる大半のケースはこの即返し
+/// 経路を通る）。
 ///
 /// **`value.get().is_some()` の有無に関わらず `recompute_failed` を
 /// 見る理由**: checkpoint 解放済みノード（`m` 等）は再計算に失敗しても
@@ -2695,34 +2706,34 @@ pub(crate) fn materialize_non_fallible<'a>(
 /// いる状態がありうるため、`value` の有無で判定を分岐せず常に
 /// `recompute_failed` を検査する。
 fn elementwise_leaves_poisoned(nodes: &[TapeNode], id: NodeId) -> bool {
-    use std::collections::HashMap;
+    use std::collections::HashSet;
 
-    let mut reachable: HashMap<usize, ()> = HashMap::new();
-    reachable.insert(id.0, ());
-    for cur in (0..=id.0).rev() {
-        if !reachable.contains_key(&cur) {
-            continue;
-        }
-        let node = &nodes[cur];
-        let is_unresolved_lazy_elementwise = node.value.get().is_none()
+    // `id` 自身が未実体化の対象 elementwise 演算かどうか。`false` なら
+    // `id` は本走査における「葉」そのもの（実体化済み、または対象外の
+    // Op）であり、子孫を辿らず自身のフラグだけを見て即返せばよい。
+    let is_unresolved_lazy_elementwise = |node: &TapeNode| -> bool {
+        node.value.get().is_none()
             && matches!(
                 node.op,
                 Op::Add(..) | Op::Mul(..) | Op::Relu(..) | Op::Exp(..) | Op::Tanh(..)
-            );
-        if is_unresolved_lazy_elementwise {
-            match &node.op {
-                Op::Add(a, b) | Op::Mul(a, b) => {
-                    reachable.insert(a.0, ());
-                    reachable.insert(b.0, ());
+            )
+    };
+
+    if !is_unresolved_lazy_elementwise(&nodes[id.0]) {
+        return nodes[id.0].recompute_failed.get();
+    }
+
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut stack: Vec<usize> = vec![id.0];
+    visited.insert(id.0);
+    while let Some(cur) = stack.pop() {
+        let node = &nodes[cur];
+        if is_unresolved_lazy_elementwise(node) {
+            node.op.for_each_input(|input_id| {
+                if visited.insert(input_id.0) {
+                    stack.push(input_id.0);
                 }
-                Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) => {
-                    reachable.insert(a.0, ());
-                }
-                _ => unreachable!(
-                    "elementwise_leaves_poisoned: is_unresolved_lazy_elementwise の \
-                     matches! と本 match の対象演算が食い違っている（契約違反）"
-                ),
-            }
+            });
         } else if node.recompute_failed.get() {
             return true;
         }
