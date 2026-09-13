@@ -94,13 +94,14 @@ fn cached_scalar_binary_kernel_second_call_reuses_cache() {
     );
 }
 
-/// 未実装 kind（[`ScalarUnaryOp::Log`]）に対して `cached_scalar_unary_
-/// kernel` が `Ok(None)`（`Err` ではない）を返すことを実機で確認する
-/// （fail-closed 契約: 未実装 kind はキャッシュへ触れず呼び出し元へ
-/// `None` を伝播し、`ops.rs::CudaBackendOps::scalar_unary` が
-/// `BackendError::Unsupported` へ変換する。`kernels_scalar_op.rs` の
-/// ホストのみユニットテストと同じ内容だが、こちらは実際の `CudaDevice`
-/// を経由する結線を検証する点が異なる）。
+/// 未実装 kind（[`ScalarUnaryOp::Relu`]。#1701 で `Log` が実装済みに
+/// なったため、#1702 が担当する残りの未実装 kind へ番兵を付け替え）
+/// に対して `cached_scalar_unary_kernel` が `Ok(None)`（`Err` ではない）
+/// を返すことを実機で確認する（fail-closed 契約: 未実装 kind はキャッ
+/// シュへ触れず呼び出し元へ `None` を伝播し、`ops.rs::CudaBackendOps::
+/// scalar_unary` が `BackendError::Unsupported` へ変換する。
+/// `kernels_scalar_op.rs` のホストのみユニットテストと同じ内容だが、
+/// こちらは実際の `CudaDevice` を経由する結線を検証する点が異なる）。
 #[test]
 #[ignore = "実機（DGX Spark GB10 等の CUDA 搭載環境）専用。libnvrtc 必須"]
 fn cached_scalar_unary_kernel_returns_none_for_unimplemented_kind() {
@@ -113,11 +114,38 @@ fn cached_scalar_unary_kernel_returns_none_for_unimplemented_kind() {
         Err(e) => panic!("unexpected CudaError from context_cache::cached_device: {e}"),
     };
 
-    let result = context_cache::cached_scalar_unary_kernel(&device, ScalarUnaryOp::Log)
+    let result = context_cache::cached_scalar_unary_kernel(&device, ScalarUnaryOp::Relu)
         .expect("unimplemented kind must not error");
     assert!(
         result.is_none(),
         "unimplemented ScalarUnaryOp kind must return Ok(None), not Some(_)"
+    );
+}
+
+/// [`cached_scalar_unary_kernel_second_call_reuses_cache`] の超越関数
+/// 代表版（`ScalarUnaryOp::Log`。#1701 で実装した 8 kind のうち NVRTC
+/// キャッシュ結線が kind 非依存の汎用機構であることの追加確認）。
+#[test]
+#[ignore = "実機（DGX Spark GB10 等の CUDA 搭載環境）専用。libnvrtc 必須"]
+fn cached_scalar_unary_kernel_second_call_reuses_cache_for_transcendental_kind() {
+    let device = match context_cache::cached_device(0) {
+        Ok(dev) => dev,
+        Err(e) if is_environment_unavailable_error(&e) => {
+            eprintln!("CUDA/NVRTC 非搭載環境のためスキップ: {e}");
+            return;
+        }
+        Err(e) => panic!("unexpected CudaError from context_cache::cached_device: {e}"),
+    };
+
+    let first = context_cache::cached_scalar_unary_kernel(&device, ScalarUnaryOp::Log)
+        .expect("Log is implemented and device is available")
+        .expect("Log must return Some(Arc<CudaFunction>)");
+    let second = context_cache::cached_scalar_unary_kernel(&device, ScalarUnaryOp::Log)
+        .expect("2nd call must succeed given the 1st succeeded")
+        .expect("Log must return Some(Arc<CudaFunction>)");
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "2nd cached_scalar_unary_kernel call must reuse the cached CudaFunction (no recompile)"
     );
 }
 

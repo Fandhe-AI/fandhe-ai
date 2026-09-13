@@ -147,6 +147,37 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 6. 最小演算集合（§4.2）と、#1649〜#1651 の受け入れ条件の再スコープ（`Var`／`Tape`／VJP は本段階の対象外。§8 参照）
 7. facade（`crates/facade`）公開面への昇格は本設計の対象外。`docs/compat-api-scope.md` §5 に定める昇格手続きを別途要する
 
+## 7.5 実装記録（#1698・CPU `TypedOps<f16>`）
+
+親 #1649 コメント（2026-09-12 ユーザー承認。§7-1〜7-2 の承認事項に対応）を受け、
+`crates/backend-cpu` に `impl TypedOps<half::f16> for CpuBackendOps`（§4.2 最小
+集合 8 演算：`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`）を実装した。
+
+- **設計**: §5 の実現可否表どおり `half` によるソフトウェア変換（aarch64 fp16
+  intrinsics 等の `unsafe` は使わない。承認事項 5 の既定側）。各演算は
+  「f16 → f32 昇格（`crate::typed_f16::upcast_f16`）→ 既存 f32
+  `BackendOps` カーネルへ委譲 → f32 → f16 へ 1 回丸め
+  （`crate::typed_f16::downcast_f32`）」の 3 段構成で実装し、`elementwise.rs`／
+  `gemm.rs`／`gemm_blis/**`／`reduction.rs`／`parity.rs`（f32 経路本体）は
+  一切変更しない
+- **ファイル**: `crates/backend-cpu/src/typed_f16.rs`（新規）・`ops.rs`
+  （`typed_ops_f16(&self) -> Option<&dyn TypedOps<half::f16>>` accessor を
+  `Some(self)` へ結線）・`lib.rs`（`mod typed_f16;`）
+- **数値契約**: `gemm` は `f16::from_f32(matmul_reference_fma(...))` と bit
+  完全一致（既存 GEMM 契約テストが f32 経路の bit 一致を別途保証済み）。
+  `add`／`mul`／`relu`／`exp`／`tanh` はスカラー参照実装の f16 丸め値と bit
+  完全一致。`sum`／`max` は f64 逐次和／`f32::max` 参照との複合判定
+  （`assert_parity`。tolerance 定数は不変）。`exp` 等で f16 表現範囲
+  （`|x| <= 65504`）を超える場合は IEEE 754 の ±inf 丸めへ落ちる（PyTorch
+  `half` と同じ挙動。既知事項として明文化）
+- **テスト**: `crates/backend-cpu/src/typed_f16.rs` 内単体テスト（既知値・
+  空/端点・エラー経路）・`crates/backend-cpu/tests/typed_ops_f16_parity.rs`
+  （形状グリッド・非 contiguous view・CHUNK 境界を跨ぐ reduction）
+- **f32 経路無変更の根拠**: `git diff --stat main -- crates/backend-cpu/src/elementwise.rs crates/backend-cpu/src/gemm.rs crates/backend-cpu/src/gemm_blis crates/backend-cpu/src/reduction.rs crates/backend-cpu/src/parity.rs crates/tensor-core` が空
+- **スコープ外**: bf16（#1699）・CUDA（#1650）・Metal（#1651）・`Var`／`Tape`／
+  VJP・facade 公開面昇格・aarch64 fp16 intrinsics 高速化・非 contiguous
+  view の stride 読み高速経路（性能最適化は対象外）
+
 ## 8. スコープ外・引き継ぎ
 
 - **`Var`／`Tape` の dtype 一般化**: `Tape.ops: Box<dyn BackendOps + Send>`（`crates/autodiff/src/tape.rs:775`）は本段階では `f32` のまま不変。dtype ジェネリックな `Var<T>`・VJP・`FusionPlan` の対応は別イシュー
