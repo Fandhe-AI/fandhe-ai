@@ -744,3 +744,31 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
   がないため未実施のまま Mac セッションへ申し送る（Linux 実行可能な
   ホスト逐語モデル bit 一致テスト・ソース証跡テスト・
   `aarch64-apple-darwin` クロス型検査は本 PR で完了済み）。
+
+#### #1698 の追補
+
+`float16` 行（319〜320 行目）のスナップショット本文は不変のまま、CPU
+バックエンド限定で `TypedOps<half::f16>` が実装され `Tensor<f16>` の
+`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` が CPU 経由で到達
+可能になった（`crates/backend-cpu/src/typed_f16.rs`。イシュー #1698）。
+CUDA（#1650）・Metal（#1651）は未実装のまま。`Var`／`Tape`／VJP・facade
+公開面（`Tensor<f16>` を受け取る facade API）は引き続き未接続で、本表の
+「未実装（欠落側）」列の評価（`Var` レベルの mixed precision）は変わらない。
+
+#### #1699 の追補
+
+`§2.12`（float64／float16・bfloat16。320 行目）の bfloat16 行に関して、
+CPU バックエンド限定で `fandhe_ai_tensor_core::TypedOps<half::bf16>` が
+`CpuBackendOps` に実装され、`BackendOps::typed_ops_bf16()` accessor
+経由で bf16 の 8 演算（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／
+`sum`／`max`）が CPU 上で実行可能になった（`crates/backend-cpu/src/
+typed_bf16.rs`。設計 `docs/backend-dtype-dispatch-design.md` §11）。
+
+- 実装方式は既存 f32 カーネルの再利用（bf16→f32 昇格 → f32 カーネル
+  → f32→bf16 丸め）であり、新規カーネルは追加していない。
+- `facade`（唯一の公開 API 面）への新規公開面はない。`Var`／`Tape`／
+  VJP・resident 系・カーネル融合は対象外のまま。
+- f16（#1698）・CUDA bf16（#1704）・Metal bf16（#1706）は本イシューで
+  は触れていない。表本体のスナップショット（対象 HEAD `097bff19`）・
+  必要工数見積り（XL）は変更しない（本追補は snapshot 後の部分実装差分
+  の記録）。
