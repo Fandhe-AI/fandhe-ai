@@ -103,6 +103,28 @@ GB10（DGX Spark GB10）の CPU（Grace）は SME 非対応であり、CPU GEMM 
   へ変更）、`SmeKernel::run`／`run_with_ldc` 経由の `current_thread_capable`
   確認とは独立に、この 2 入口自身が fail-closed を担保する二重の防御と
   なる。
+- **長さ・境界検査の型付きエラー化（codex-review P1 再指摘対応）**:
+  公開 unsafe 入口 `sme::kernel_unchecked`（従来シグネチャ後方互換
+  ラッパー）と安全な公開フォールバック入口 `sme::scalar_fallback_kernel`
+  は、以前は `ap`／`bp`／`c` の長さ契約違反を `assert!`／`assert_eq!` で
+  検出していたため、`SmeKernel::run` を経由せずこれらを直接呼び出す
+  外部コードへ panic が漏れ得た（AGENTS.md「本番経路の panic 禁止」）。
+  現在は `sme::kernel_unchecked` は `sme::kernel_unchecked_with_ldc`
+  （既に `check_panel_lengths`／`check_c_tile_bounds` を経て
+  `TileBoundsError` を返す）へ `ldc = NR` で委譲し、
+  `sme::scalar_fallback_kernel` も同様に `sme::scalar_fallback_with_ldc`
+  へ委譲する形へ変更した。境界検査そのもの（REQ-8 境界検査規約）は
+  維持し、検出結果を `Result<(), TileBoundsError>` として返す点のみが
+  変わる。トレイト `Microkernel::run`（`()` を返す必須メソッド。#691
+  レビューにより非破壊のため `Result` 化不可）から呼ばれる場合は、
+  呼び出し元契約（`gemm_blis_region` が常に正しい長さで呼ぶ）により
+  `Err` は実際には到達しないため、`SmeKernel::run` はこの `Result` を
+  明示的に破棄する（`let _ = ...`）。非実機で実行できる回帰テスト
+  （`kernel_unchecked_returns_err_instead_of_panicking_on_ap_length_mismatch`
+  等。`crates/backend-cpu/src/gemm_blis/microkernel/sme.rs` 末尾の
+  `mod tests`）で、長さ不一致時に panic ではなく `Result::Err` が
+  返ることを確認済み（境界検査は SME 命令発行より前に完了するため、
+  SME 非対応環境でも安全に呼び出せる）。
 - `asm!` は `compute` 1 箇所に局所化。SAFETY コメントに以下を明記:
   `smstart`/`smstop` を 1 ブロック内で対にする・v0〜v31／p0〜p15 全列挙・
   w12 明示・`preserves_flags` を付けない（`subs`/`cmp` 使用）・`nomem`/

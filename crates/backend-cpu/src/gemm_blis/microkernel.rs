@@ -209,11 +209,22 @@ pub(crate) fn panel_len_matches(actual: usize, factor_a: usize, factor_b: usize)
 /// 入口は `assert_eq!` で ap/bp 長不一致を検出していたが、`Result` を
 /// 返せる入口である以上ここも panic ではなく型付きエラーへ揃えるのが
 /// 一貫する（#691 レビュー P0 再指摘への対応）。一方、従来どおり `()` を
-/// 返す必須シグネチャの後方互換ラッパー（各 ISA の `kernel`／
-/// `kernel_unchecked`／`kernel_12x8`）は `Result` を返せないため、
-/// [`panel_len_matches`] を直接使う `assert!` のまま維持する（`assert!`
-/// は `debug_assert!` と異なり release ビルドでも有効であり、
-/// オーバーフロー起因の検査素通りは起きない）。
+/// 返す必須シグネチャの後方互換ラッパー（`scalar`／`neon`／`avx2`／
+/// `avx512` 各 ISA の `kernel`／`kernel_unchecked`／`kernel_12x8`）は
+/// `Result` を返せないため、[`panel_len_matches`] を直接使う `assert!`
+/// のまま維持する（`assert!` は `debug_assert!` と異なり release
+/// ビルドでも有効であり、オーバーフロー起因の検査素通りは起きない）。
+///
+/// **例外（イシュー #1587・codex-review P1 再指摘対応）**: `sme::kernel_unchecked`
+/// のみ、内部で `sme::kernel_unchecked_with_ldc`（既に `Result` を返す
+/// 公開入口）へ `ldc = NR` で委譲する構成へ変更したため、本関数を経由し
+/// `Result<(), TileBoundsError>` を返す（`assert!` を持たない）。これは
+/// [`Microkernel::run`] トレイトメソッド（`()` を返す必須シグネチャ・
+/// `SmeKernel::run` 経由）とは別の `pub unsafe fn`（外部から直接呼び
+/// うる公開入口）であり、`SmeKernel::run` 側は本関数の戻り値を
+/// （呼び出し元契約により実際には到達しない `Err` 分岐として）明示的に
+/// 破棄する（`crates/backend-cpu/src/gemm_blis/microkernel.rs::SmeKernel::run`
+/// 参照）。
 pub(crate) fn check_panel_lengths(
     mr: usize,
     nr: usize,
@@ -826,6 +837,21 @@ impl Microkernel for SmeKernel {
         // へ変換する経路を持たず、非対応時は
         // [`sme::scalar_fallback_kernel`] へ委譲する。`current_thread_capable`
         // doc 参照）。
+        //
+        // `sme::kernel_unchecked`／`sme::scalar_fallback_kernel` は
+        // codex-review P1 再指摘（`crates/backend-cpu/src/gemm_blis/
+        // microkernel/sme.rs` doc 参照）により `Result<(), TileBoundsError>`
+        // を返すよう変更済みだが、本メソッドは [`Microkernel::run`]
+        // トレイトの必須メソッド（#691 レビューにより非破壊のため非
+        // `Result`。同 doc 参照）で `Result` 化できない。本メソッドの
+        // 呼び出し元（`super::gemm_blis_region`）は常に
+        // `ap.len() == MR*kc_len`・`bp.len() == kc_len*NR`・
+        // `c_tile.len() == MR*NR` を満たす呼び出ししか行わないため
+        // （[`Microkernel::run`] の呼び出し元契約）、`Err` は実際には
+        // 到達しない。`Err` を `panic!`／`unwrap`／`expect` へ変換する
+        // 経路は持たせず（AGENTS.md「本番経路の panic 禁止」）、
+        // 明示的に破棄する（[`ScalarKernel::run`]／[`NeonKernel::run`]
+        // 等の他 ISA トークンも同じ呼び出し元契約に依拠する）。
         if self.current_thread_capable() {
             // SAFETY: `current_thread_capable` が **この呼び出しを実行
             // しているスレッド自身**で SME 対応・SVL=64 バイトを確認済み
@@ -835,9 +861,9 @@ impl Microkernel for SmeKernel {
             // 分配のもとでは不十分なため、ここで実行スレッド自身の確認
             // を必須とする）。`sme::kernel_unchecked` の `# Safety` 契約
             // を満たす。
-            unsafe { sme::kernel_unchecked(ap, bp, c_tile, kc_len) }
+            let _ = unsafe { sme::kernel_unchecked(ap, bp, c_tile, kc_len) };
         } else {
-            sme::scalar_fallback_kernel(ap, bp, c_tile, kc_len);
+            let _ = sme::scalar_fallback_kernel(ap, bp, c_tile, kc_len);
         }
     }
 

@@ -333,33 +333,30 @@ pub unsafe fn kernel_unchecked_with_ldc(
 /// スパン表記〉へ切り替える（同関数「保留中 lazy ZA save の自己防御」
 /// 節参照）。
 ///
+/// ## 長さ・境界検査を型付きエラー化（codex-review P1 再指摘対応）
+///
+/// 以前は本関数自身が `assert!`／`assert_eq!` で `ap`／`bp`／`c` の長さを
+/// 検査していたため、`SmeKernel::run` を経由せずに本関数（`pub unsafe fn`）
+/// を直接呼び出す外部コードへ panic が漏れ、「本番経路の panic 禁止」
+/// （`.claude/rules/security.md`／AGENTS.md）に抵触していた。境界検査
+/// 自体は維持しつつ（REQ-8 境界検査規約）、[`kernel_unchecked_with_ldc`]
+/// （`super::check_panel_lengths`／`super::check_c_tile_bounds` を経由し
+/// [`super::TileBoundsError`] を返す）へ `ldc = NR` で委譲する形へ変更
+/// した（`assert!` の重複実装を持たない）。
+///
 /// # Safety
 ///
 /// [`kernel_unchecked_with_ldc`] と同一（`TPIDR2_EL0` 非ゼロ時の
 /// 自動フォールバックを含む）。
-pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
-    assert!(
-        super::panel_len_matches(ap.len(), MR, kc_len),
-        "packed A panel length mismatch (or MR*kc_len overflow): ap.len()={}, MR={MR}, kc_len={kc_len}",
-        ap.len()
-    );
-    assert!(
-        super::panel_len_matches(bp.len(), kc_len, NR),
-        "packed B panel length mismatch (or kc_len*NR overflow): bp.len()={}, kc_len={kc_len}, NR={NR}",
-        bp.len()
-    );
-    assert_eq!(c.len(), MR * NR, "C tile length mismatch");
-    // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）により実行 CPU は
-    // SME 対応（`has_pending_lazy_za_save` の `# Safety` 契約を満たす）。
-    if unsafe { has_pending_lazy_za_save() } {
-        // 保留中の lazy ZA save を検出。`compute` を呼ばずフォールバック
-        // へ切り替える（[`kernel_unchecked_with_ldc`] と同型）。
-        scalar_fallback(ap, bp, c, NR, kc_len);
-        return;
-    }
-    // SAFETY: [`compute`] のドキュメント参照（呼び出し元契約を引き継ぐ。
-    // 上記検査で保留中の lazy ZA save がないことも確認済み）。
-    unsafe { compute(ap, bp, c, NR, kc_len) };
+pub unsafe fn kernel_unchecked(
+    ap: &[f32],
+    bp: &[f32],
+    c: &mut [f32],
+    kc_len: usize,
+) -> Result<(), super::TileBoundsError> {
+    // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）を [`kernel_unchecked_with_ldc`]
+    // へそのまま引き継ぐ。
+    unsafe { kernel_unchecked_with_ldc(ap, bp, c, NR, kc_len) }
 }
 
 /// `unsafe { compute(...) }`（`fmopa` アセンブリ）を発行できない場合の
@@ -414,25 +411,111 @@ pub(crate) fn scalar_fallback_with_ldc(
 
 /// [`scalar_fallback_with_ldc`] の従来シグネチャ版（`ldc = NR` 固定・
 /// 密パッキング契約。[`kernel_unchecked`] と同型の長さ検査を行う）。
-pub(crate) fn scalar_fallback_kernel(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
-    assert!(
-        super::panel_len_matches(ap.len(), MR, kc_len),
-        "packed A panel length mismatch (or MR*kc_len overflow): ap.len()={}, MR={MR}, kc_len={kc_len}",
-        ap.len()
-    );
-    assert!(
-        super::panel_len_matches(bp.len(), kc_len, NR),
-        "packed B panel length mismatch (or kc_len*NR overflow): bp.len()={}, kc_len={kc_len}, NR={NR}",
-        bp.len()
-    );
-    assert_eq!(c.len(), MR * NR, "C tile length mismatch");
-    scalar_fallback(ap, bp, c, NR, kc_len);
+///
+/// ## 長さ・境界検査を型付きエラー化（codex-review P1 再指摘対応）
+///
+/// [`kernel_unchecked`] と同じ理由により、`assert!`／`assert_eq!` の
+/// 重複実装をやめ [`scalar_fallback_with_ldc`] へ `ldc = NR` で委譲する
+/// （`unsafe` を含まないため呼び出し規約は変更せず、戻り値のみ
+/// [`super::TileBoundsError`] を返す `Result` へ変更する）。
+pub(crate) fn scalar_fallback_kernel(
+    ap: &[f32],
+    bp: &[f32],
+    c: &mut [f32],
+    kc_len: usize,
+) -> Result<(), super::TileBoundsError> {
+    scalar_fallback_with_ldc(ap, bp, c, NR, kc_len)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gemm_blis::microkernel::{Microkernel, SmeKernel};
+    use crate::gemm_blis::microkernel::{Microkernel, SmeKernel, TileBoundsError};
+
+    /// [`kernel_unchecked`]（`pub unsafe fn`。`SmeKernel::run` を経由せず
+    /// 外部から直接呼びうる）が、長さ不一致（`ap` 長不足）を `panic!` で
+    /// はなく `Result::Err(TileBoundsError::PanelLengthMismatch)` として
+    /// 返すことを確認する（codex-review P1 再指摘対応。本テストの主張は
+    /// [`kernel_unchecked`] doc「長さ・境界検査を型付きエラー化」節）。
+    ///
+    /// 実機（SME 対応 aarch64）非依存で実行できる: `ap`／`bp`／`c` の長さ
+    /// 検査（`super::check_panel_lengths`／`super::check_c_tile_bounds`）
+    /// は [`has_pending_lazy_za_save`]（`TPIDR2_EL0` 読み取り。SME 対応
+    /// CPU を要求）や `compute`（`fmopa` 発行）より前に必ず実行され、
+    /// 不一致時はそれらの SME 命令発行前に early return するため、SME
+    /// 非対応の aarch64 環境（本ファイルは `cfg(target_arch = "aarch64")`
+    /// 限定でコンパイルされるため実行環境は常に aarch64）でも安全に
+    /// 呼び出せる（本モジュール上部「その他の実機依存テスト」で使う
+    /// `#[ignore]` は不要）。
+    #[test]
+    fn kernel_unchecked_returns_err_instead_of_panicking_on_ap_length_mismatch() {
+        let kc_len = 3usize;
+        // 本来必要な `MR * kc_len` より 1 要素少ない `ap`。
+        let ap = vec![0.0f32; MR * kc_len - 1];
+        let bp = vec![0.0f32; kc_len * NR];
+        let mut c = vec![0.0f32; MR * NR];
+
+        // SAFETY: 上記コメントのとおり、長さ検査は SME 命令発行より前に
+        // 完了し `Err` で early return するため、実行 CPU の SME 対応
+        // 有無に関わらず本呼び出しは安全に完了する。
+        let result = unsafe { kernel_unchecked(&ap, &bp, &mut c, kc_len) };
+
+        assert_eq!(
+            result,
+            Err(TileBoundsError::PanelLengthMismatch {
+                panel: "ap",
+                actual: ap.len()
+            }),
+            "panic ではなく Result::Err を返すはず"
+        );
+    }
+
+    /// [`kernel_unchecked`] が C タイル長不一致（`c.len() != MR * NR`）も
+    /// 同様に `Result::Err(TileBoundsError)` で返すことを確認する
+    /// （[`kernel_unchecked_returns_err_instead_of_panicking_on_ap_length_mismatch`]
+    /// と同型・実機非依存の理由も同一）。
+    #[test]
+    fn kernel_unchecked_returns_err_instead_of_panicking_on_c_length_mismatch() {
+        let kc_len = 2usize;
+        let ap = vec![0.0f32; MR * kc_len];
+        let bp = vec![0.0f32; kc_len * NR];
+        // 本来必要な `MR * NR` より短い `c`。
+        let mut c = vec![0.0f32; MR * NR - 1];
+
+        // SAFETY: `kernel_unchecked_returns_err_instead_of_panicking_on_ap_length_mismatch`
+        // と同一の理由。
+        let result = unsafe { kernel_unchecked(&ap, &bp, &mut c, kc_len) };
+
+        assert!(
+            result.is_err(),
+            "panic ではなく Result::Err を返すはず: {result:?}"
+        );
+    }
+
+    /// [`scalar_fallback_kernel`]（`unsafe` を含まない安全な公開
+    /// フォールバック入口）も同じ長さ検査を経由し、`panic!` ではなく
+    /// `Result::Err(TileBoundsError)` を返すことを確認する
+    /// （codex-review P1 再指摘「scalar_fallback_kernel の 418・423・
+    /// 428 行」対応）。
+    #[test]
+    fn scalar_fallback_kernel_returns_err_instead_of_panicking_on_length_mismatch() {
+        let kc_len = 4usize;
+        let ap = vec![0.0f32; MR * kc_len];
+        // 本来必要な `kc_len * NR` より短い `bp`。
+        let bp = vec![0.0f32; kc_len * NR - 1];
+        let mut c = vec![0.0f32; MR * NR];
+
+        let result = scalar_fallback_kernel(&ap, &bp, &mut c, kc_len);
+
+        assert_eq!(
+            result,
+            Err(TileBoundsError::PanelLengthMismatch {
+                panel: "bp",
+                actual: bp.len()
+            }),
+            "panic ではなく Result::Err を返すはず"
+        );
+    }
 
     /// 有限値・非正規化数入力を含むスカラー参照（p 昇順 `f32::mul_add`
     /// 連鎖）との bit 完全一致を検証する下請け関数。以下の各テストは
@@ -984,7 +1067,8 @@ mod tests {
             // `TPIDR2_EL0` が非ゼロの場合は `kernel_unchecked` 自身が
             // フォールバックへ切り替える（`kernel_unchecked` doc「保留中
             // lazy ZA save の自己防御」節）。
-            unsafe { kernel_unchecked(&ap, &bp, &mut c, kc_len) };
+            unsafe { kernel_unchecked(&ap, &bp, &mut c, kc_len) }
+                .expect("長さは事前に用意済みのため成功するはず");
 
             let expected = scalar_reference(&ap, &bp, &c_init, NR, kc_len);
             assert_eq!(
