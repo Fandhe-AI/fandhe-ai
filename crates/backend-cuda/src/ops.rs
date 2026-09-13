@@ -2744,9 +2744,34 @@ impl BackendOps for CudaBackendOps {
         let out_shape = gather_out_shape(input.shape(), index.shape(), dim)
             .map_err(BackendError::ShapeMismatch)?;
 
+        // 出力が空（`out_shape` がいずれかの軸で 0）なら、`input`／
+        // `index` の shape に依らず結果は必ず空である。`dim` 軸は
+        // `gather_out_shape` の等値検査から除外されるため（呼び出し元が
+        // 繰り返し gather 用に index 側で自由に軸長を選べる契約）、
+        // `input.shape()` だけが `dim` 軸に巨大な値を持ち、かつ非 `dim`
+        // 軸のどこかが 0 という組合せ（例: transpose 由来の
+        // `[usize::MAX, 2, 0]`）が有効な入力として構築されうる——この
+        // とき `out_shape` 自身（`index.shape()` と同一）は `dim` 軸に
+        // 小さい値を選べるため素朴な積でもオーバーフローしない一方、
+        // 巨大な `input.shape()` へ後段の `checked_shape_numel`／
+        // `.contiguous()` を無条件適用すると誤って拒否・panic しうる
+        // （PR #1795 Cursor Bugbot 指摘）。空出力を先に確定させ、
+        // `input`／`index` の実体化（`.contiguous()`）自体を回避する
+        // ことでこの非対称を解消する（`out_shape` 自体が病的な場合は
+        // 実際に要素数積オーバーフローの恐れがあるため `Tensor::new` の
+        // 検査へ委ね、`ElementCountOverflow` を返す——CPU 側
+        // `backend-cpu::gather_scatter` の既存契約〈out_shape 由来の
+        // オーバーフローは拒否する〉と同じ扱い）。
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+
         // `.contiguous()`（内部で `numel()` の無検査乗算を呼ぶ）より前に
         // 各 shape の要素数積をオーバーフロー検査する（PR #1795
         // codex-review 指摘の是正。上記 `checked_shape_numel` doc 参照）。
+        // 直上の早期リターンにより、ここへ到達する `input.shape()`／
+        // `index.shape()` はいずれも非 `dim` 軸に 0 を含まない
+        // （含めば `out_shape` にも同じ 0 が現れ早期リターン済みのため）。
         checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
         checked_shape_numel(index.shape()).map_err(BackendError::ShapeMismatch)?;
 
@@ -3632,6 +3657,42 @@ mod tests {
     #[test]
     fn checked_shape_numel_accepts_ordinary_shape() {
         assert_eq!(checked_shape_numel(&[2, 3, 4]).expect("no overflow"), 24);
+    }
+
+    /// [`CudaBackendOps::gather`] の回帰テスト（PR #1795 Cursor Bugbot
+    /// 指摘の是正確認・イシュー #1777）。`gather_out_shape` は `dim` 軸を
+    /// 等値検査から除外するため、`input.shape()` が `dim` 軸に巨大な値
+    /// （`usize::MAX`）を持ちつつ非 `dim` 軸のどこかが `0` という有効な
+    /// 形状（`transpose` で構築。`Tensor::new` へ直接 `[usize::MAX, 2,
+    /// 0]` を渡すと構築自体がオーバーフロー検査で拒否されるため、
+    /// `[0, 2, usize::MAX]` として構築してから軸を入れ替えて再現する
+    /// ——`backend-cpu::gather_scatter` の同型回帰テストと同じ手法）を、
+    /// `index`（＝`out_shape`）側は `dim` 軸を小さい値に選んで構築できる
+    /// （`out_shape` 自体は病的でない）。この入力に対し `CudaBackendOps
+    /// ::gather` は空出力を早期リターンし、`input.shape()` へ
+    /// `checked_shape_numel`／`.contiguous()` を適用しない（適用すると
+    /// 中間積オーバーフローで誤って `Err` を返すか、`overflow-checks`
+    /// 有効ビルドで `Tensor::numel()` が panic しうる）。早期リターンは
+    /// 実デバイスへ触れる前（`with_driver_call` 呼び出し前）に完了する
+    /// ため、GPU 非依存の通常テストとして Linux CI でも実行できる。
+    #[test]
+    fn gather_returns_empty_for_dim_axis_large_input_with_zero_sized_other_axis() {
+        let input_base = Tensor::<f32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let input = input_base.transpose(0, 2).unwrap();
+        assert_eq!(input.shape(), &[usize::MAX, 2, 0]);
+
+        // `index`（`out_shape`）は `dim`（=0）軸を小さい値に選べるため
+        // 病的にならない: `gather_out_shape` は非 `dim` 軸（1・2）の
+        // 等値のみを課し、`dim` 軸（0）は index 側で自由に選べる契約
+        // （`ops_shape.rs::gather_out_shape` doc）。
+        let index = Tensor::<i32>::new(Vec::new(), &[3usize, 2usize, 0usize]).unwrap();
+
+        let ops = CudaBackendOps::new(0);
+        let out = ops
+            .gather(&input, 0, &index)
+            .expect("empty gather must succeed");
+        assert_eq!(out.shape(), &[3, 2, 0]);
+        assert_eq!(out.numel(), 0);
     }
 
     #[test]

@@ -200,6 +200,20 @@ impl CudaGatherScatter {
                 ),
             });
         }
+        if numel_out == 0 {
+            // 空出力早期リターン（`run_scatter_f32` の
+            // `in_shape.contains(&0)` 早期リターンと同じ理由・同じ
+            // 順序方針: `checked_numel(in_shape)` を `numel_out == 0`
+            // 判定より前に計算すると、`gather_out_shape` が `dim` 軸を
+            // 等値検査から除外する契約上、`in_shape` の非 `dim` 軸に
+            // 巨大値を残したまま `dim` 軸だけ縮めた病的 shape
+            // （例: `[usize::MAX, 2, 0]`）でも `checked_numel(in_shape)`
+            // が中間積オーバーフローで誤って `Err` を返しうる
+            // 〈PR #1795 Cursor Bugbot 指摘〉。出力が空であれば `input`
+            // を読む必要が一切ないため、`in_shape` の要素数検査自体を
+            // 行わずに空 `Vec` を返す）。
+            return Ok(Vec::new());
+        }
         let numel_in = checked_numel(in_shape)?;
         if input.len() != numel_in {
             return Err(CudaError::InvalidGatherScatterShape {
@@ -208,9 +222,6 @@ impl CudaGatherScatter {
                     input.len()
                 ),
             });
-        }
-        if numel_out == 0 {
-            return Ok(Vec::new());
         }
         validate_i32_bound(numel_out, "numel_out")?;
         let in_dim_size = in_shape[dim];
