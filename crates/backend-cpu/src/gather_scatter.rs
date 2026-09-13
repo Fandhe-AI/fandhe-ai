@@ -10,7 +10,14 @@
 //! 側の二重検査が fail-closed 境界。`.claude/rules/security.md` A08）。
 //! `index` の値が `[0, input.shape()[dim])` 範囲内であることは呼び出し元
 //! （`fandhe_ai_autodiff::var::Var::gather`／`scatter`／`scatter_add`）が
-//! forward 時点で検査済みの前提（本モジュールは値検査を行わない）。
+//! forward 時点で検査済みだが、本モジュール（[`BackendOps::gather`]／
+//! [`BackendOps::scatter`] の CPU 実装本体）を `Var` を経由せず直接
+//! 呼び出す経路でも誤書き込み・panic（release ビルドは `debug_assert!`
+//! が無効化されるため黙って誤った結果を返す）を防ぐため、`gather`／
+//! `scatter` は自身でも `index` の値を `[0, dim_size)` へ検査し、範囲
+//! 外は `ShapeError::IndexOutOfRange` を返す（`Var` 側の検査と重複する
+//! が判定迂回経路を作らないための独立検査。`.claude/rules/security.md`
+//! A08。codex-review 指摘）。
 //!
 //! **決定的集約順序・精度契約**（[`fandhe_ai_tensor_core::ScatterReduce`]
 //! doc を正とする）: `scatter` は `index`（`Add` は `src` も同 shape）を
@@ -69,30 +76,42 @@ fn ravel(coords: &[usize], strides: &[usize]) -> usize {
 /// [`fandhe_ai_tensor_core::BackendOps::gather`] の CPU 実装本体
 /// （イシュー #1776）。`out_shape`（＝`index.shape()`）は呼び出し元
 /// （`ops.rs`）が検査済みで渡す。各出力位置は独立読み出しのため
-/// 決定的集約順序の契約は不要。
+/// 決定的集約順序の契約は不要。`index` の値は `[0, dim_size)` を
+/// 独立検査し、範囲外は `ShapeError::IndexOutOfRange` を返す
+/// （`Var` を経由しない直接呼び出しからの誤書き込み・panic を防ぐ。
+/// モジュール doc・codex-review 指摘）。
 pub fn gather(
     input: &Tensor<f32>,
     dim: usize,
     index: &Tensor<i32>,
     out_shape: &[usize],
 ) -> Result<Tensor<f32>, ShapeError> {
+    let dim_size = input.shape()[dim];
     let numel: usize = out_shape.iter().product();
     let mut out = Vec::with_capacity(numel);
     for flat in 0..numel {
         let coords = unravel(flat, out_shape);
-        let dim_idx = index.get(&coords);
+        let dim_idx_raw = index.get(&coords);
         debug_assert!(
-            dim_idx.is_some(),
+            dim_idx_raw.is_some(),
             "gather: index の走査ロジックにバグがあり範囲外になった（契約違反）"
         );
-        let dim_idx = dim_idx.unwrap_or(0) as usize;
+        let dim_idx_raw = dim_idx_raw.unwrap_or(0);
+        if dim_idx_raw < 0 || (dim_idx_raw as usize) >= dim_size {
+            return Err(ShapeError::IndexOutOfRange {
+                dim,
+                index: dim_idx_raw as i64,
+                dim_size,
+            });
+        }
+        let dim_idx = dim_idx_raw as usize;
         let mut src_coords = coords;
         src_coords[dim] = dim_idx;
         let value = input.get(&src_coords);
         debug_assert!(
             value.is_some(),
-            "gather: input の走査ロジックにバグがあり範囲外になった（契約違反。index 値検査は \
-             呼び出し元 Var::gather が済ませている前提）"
+            "gather: input の走査ロジックにバグがあり範囲外になった（契約違反。dim_idx は直上で \
+             [0, dim_size) を検査済み）"
         );
         out.push(value.unwrap_or(0.0));
     }
@@ -103,7 +122,21 @@ pub fn gather(
 /// （イシュー #1776）。出力 shape は `input.shape()` と恒等。`reduce`
 /// で `Overwrite`／`Add` を分岐する（決定的集約順序・精度契約は
 /// モジュール doc・[`fandhe_ai_tensor_core::ScatterReduce`] doc を
-/// 正とする）。
+/// 正とする）。`index` の値は `[0, dim_size)` を独立検査し、範囲外は
+/// `ShapeError::IndexOutOfRange` を返す（`gather` と同じ方針。モジュール
+/// doc・codex-review 指摘）。
+///
+/// **空テンソルの早期リターン**: `out_shape`（＝`input.shape()`）が
+/// いずれかの軸で 0 を含む場合（`numel == 0`）、`row_major_strides` の
+/// 乗算が他軸のサイズ次第でオーバーフローしうる（例:
+/// `shape=[0, usize::MAX, 2]` は `numel == 0` だが
+/// `strides[1] = strides[2] * shape[2]` の後段 `strides[0] =
+/// strides[1] * shape[1]` が `2 * usize::MAX` でオーバーフローする）。
+/// 走査すべき要素が存在しない（`index_numel` も併せて 0。`scatter_
+/// out_shape` は `index`／`src` の要素数を `input` 以下に制限するため
+/// `input` が空なら `index`／`src` も空）ため、ストライド計算前に
+/// 空出力を返す（`autodiff::eval::scatter` の `out_shape.contains(&0)`
+/// 早期リターンと同じ方針。codex-review 指摘）。
 pub fn scatter(
     input: &Tensor<f32>,
     dim: usize,
@@ -112,6 +145,10 @@ pub fn scatter(
     reduce: ScatterReduce,
 ) -> Result<Tensor<f32>, ShapeError> {
     let out_shape = input.shape().to_vec();
+    if out_shape.contains(&0) {
+        return Tensor::new(Vec::new(), &out_shape);
+    }
+    let dim_size = out_shape[dim];
     let numel: usize = out_shape.iter().product();
     let out_strides = row_major_strides(&out_shape);
     let index_shape = index.shape().to_vec();
@@ -119,18 +156,28 @@ pub fn scatter(
 
     // `dim` 軸を `dim_idx` へ差し替えた `out_shape` 上の多次元添字を
     // 導出し、`out_strides` で行優先の線形添字へ畳み込む（`Overwrite`・
-    // `Add` 両分岐・未知 variant フォールバックで共有する）。
-    let resolve_pos = |flat: usize| -> usize {
+    // `Add` 両分岐・未知 variant フォールバックで共有する）。`dim_idx`
+    // が `[0, dim_size)` を外れる場合は `ShapeError::IndexOutOfRange`
+    // を返す。
+    let resolve_pos = |flat: usize| -> Result<usize, ShapeError> {
         let coords = unravel(flat, &index_shape);
-        let dim_idx = index.get(&coords);
+        let dim_idx_raw = index.get(&coords);
         debug_assert!(
-            dim_idx.is_some(),
+            dim_idx_raw.is_some(),
             "scatter: index の走査ロジックにバグがあり範囲外になった（契約違反）"
         );
-        let dim_idx = dim_idx.unwrap_or(0) as usize;
+        let dim_idx_raw = dim_idx_raw.unwrap_or(0);
+        if dim_idx_raw < 0 || (dim_idx_raw as usize) >= dim_size {
+            return Err(ShapeError::IndexOutOfRange {
+                dim,
+                index: dim_idx_raw as i64,
+                dim_size,
+            });
+        }
+        let dim_idx = dim_idx_raw as usize;
         let mut dst_coords = coords;
         dst_coords[dim] = dim_idx;
-        ravel(&dst_coords, &out_strides)
+        Ok(ravel(&dst_coords, &out_strides))
     };
     let read_src = |flat: usize| -> f32 {
         let coords = unravel(flat, &index_shape);
@@ -155,7 +202,7 @@ pub fn scatter(
                 acc.push(value.unwrap_or(0.0) as f64);
             }
             for flat in 0..index_numel {
-                let pos = resolve_pos(flat);
+                let pos = resolve_pos(flat)?;
                 acc[pos] += read_src(flat) as f64;
             }
             let out: Vec<f32> = acc.iter().map(|&v| v as f32).collect();
@@ -180,7 +227,7 @@ pub fn scatter(
                 out.push(value.unwrap_or(0.0));
             }
             for flat in 0..index_numel {
-                let pos = resolve_pos(flat);
+                let pos = resolve_pos(flat)?;
                 out[pos] = read_src(flat);
             }
             Tensor::new(out, &out_shape)
@@ -230,5 +277,73 @@ mod tests {
         let src = Tensor::new(vec![1.5, 2.5], &[2, 1]).unwrap();
         let out = scatter(&input, 0, &index, &src, ScatterReduce::Add).unwrap();
         assert_eq!(out.as_slice().unwrap(), &[4.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// `Var` を経由しない直接呼び出し（本モジュール単体テスト）でも
+    /// `gather` は範囲外添字を型付きエラーで拒否する（`unwrap_or(0)`
+    /// による黙った誤り書き込みではなく `ShapeError::IndexOutOfRange`
+    /// を返す。codex-review 指摘。イシュー #1776）。
+    #[test]
+    fn gather_rejects_out_of_range_index() {
+        let input = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        // dim=1 の dim_size は 3。添字 5 は範囲外。
+        let index = Tensor::<i32>::new(vec![0, 5, 2, 1], &[2, 2]).unwrap();
+        let err = gather(&input, 1, &index, &[2, 2]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 1,
+                index: 5,
+                dim_size: 3,
+            }
+        );
+    }
+
+    /// 負の添字も同様に拒否する。
+    #[test]
+    fn gather_rejects_negative_index() {
+        let input = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let index = Tensor::<i32>::new(vec![0, -1, 2, 1], &[2, 2]).unwrap();
+        let err = gather(&input, 1, &index, &[2, 2]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 1,
+                index: -1,
+                dim_size: 3,
+            }
+        );
+    }
+
+    /// `scatter` も同様に範囲外添字を型付きエラーで拒否する。
+    #[test]
+    fn scatter_rejects_out_of_range_index() {
+        let input = Tensor::new(vec![0.0; 6], &[2, 3]).unwrap();
+        let index = Tensor::<i32>::new(vec![0, 9, 2, 1], &[2, 2]).unwrap();
+        let src = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let err = scatter(&input, 1, &index, &src, ScatterReduce::Overwrite).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 1,
+                index: 9,
+                dim_size: 3,
+            }
+        );
+    }
+
+    /// `out_shape`（＝`input.shape()`）がいずれかの軸で 0 を含む場合
+    /// （`shape=[0, usize::MAX, 2]` 等）でも `row_major_strides` の
+    /// 乗算オーバーフローに到達せず、空テンソルを返す（codex-review
+    /// 指摘。イシュー #1776）。
+    #[test]
+    fn scatter_with_zero_sized_axis_does_not_overflow() {
+        let out_shape = [0usize, usize::MAX, 2usize];
+        let input = Tensor::new(Vec::<f32>::new(), &out_shape).unwrap();
+        let index = Tensor::<i32>::new(Vec::new(), &[0usize, usize::MAX, 2usize]).unwrap();
+        let src = Tensor::new(Vec::<f32>::new(), &[0usize, usize::MAX, 2usize]).unwrap();
+        let out = scatter(&input, 1, &index, &src, ScatterReduce::Overwrite).unwrap();
+        assert_eq!(out.shape(), &out_shape);
+        assert_eq!(out.as_slice().unwrap().len(), 0);
     }
 }

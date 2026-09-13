@@ -590,9 +590,14 @@ pub(crate) enum Op {
     /// あるため非融合対象（`push_eager` で常に実体化）。
     ///
     /// VJP（`grad.rs`）:
-    /// - `d_src = gather(upstream, dim, index)`（`Overwrite`／`Add`
-    ///   共通。重複添字があっても各 `src` 要素は自身が書き込んだ
-    ///   位置の upstream をそのまま受け取る）。
+    /// - `d_src = gather(upstream, dim, index)`（`dim` 以外の軸が
+    ///   `input` より小さい場合は `upstream` を先頭から narrow して
+    ///   から gather する）。`Add` は重複添字があっても各 `src` 要素が
+    ///   自身の書き込み位置の upstream をそのまま受け取るが、
+    ///   `Overwrite` は forward の「最後に処理された値のみ残る」
+    ///   決定的集約契約に従い、上書きされて消えた重複書き込みへは
+    ///   0 を返す（`scatter_overwrite_last_writer_mask`。イシュー
+    ///   #1776・codex-review 指摘）。
     /// - `d_input`（`reduce` で分岐）: `Add` は恒等
     ///   （`out = input + Σ contributions` の線形性）。`Overwrite` は
     ///   `upstream` を `scatter(dim, index, zeros_like(index),

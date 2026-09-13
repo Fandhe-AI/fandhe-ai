@@ -84,6 +84,22 @@ pub enum ShapeError {
     /// 例: `mse_loss` の予測値と target）で shape が一致しない
     /// （TASK-1.4c・#13。`docs/public-api-design.md` §3.2）。
     ShapeMismatch { lhs: Vec<usize>, rhs: Vec<usize> },
+
+    /// `gather`／`scatter`／`scatter_add`（イシュー #1776）の `index`
+    /// 添字値が対象軸の範囲 `[0, dim_size)` を外れている。
+    ///
+    /// 呼び出し元（`fandhe_ai_autodiff::var::Var::gather`／`scatter`／
+    /// `scatter_add`）は forward 時点で同じ検査を行うが、
+    /// `BackendOps::gather`／`scatter`（CPU 実装
+    /// `backend-cpu::gather_scatter`）を直接呼び出す経路（`Var` を
+    /// 経由しない）でも誤書き込みを防ぐため、実装側でも独立に検査
+    /// する（`.claude/rules/security.md` A08。判定迂回経路を作らない。
+    /// codex-review 指摘）。
+    IndexOutOfRange {
+        dim: usize,
+        index: i64,
+        dim_size: usize,
+    },
 }
 
 impl fmt::Display for ShapeError {
@@ -133,6 +149,14 @@ impl fmt::Display for ShapeError {
             ShapeError::ShapeMismatch { lhs, rhs } => {
                 write!(f, "shape mismatch: lhs {lhs:?} rhs {rhs:?}")
             }
+            ShapeError::IndexOutOfRange {
+                dim,
+                index,
+                dim_size,
+            } => write!(
+                f,
+                "index {index} out of range [0, {dim_size}) for dim {dim}"
+            ),
         }
     }
 }

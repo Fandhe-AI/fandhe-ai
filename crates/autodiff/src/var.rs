@@ -1936,7 +1936,16 @@ impl<'t> Var<'t> {
         let k = index.shape()[0];
         let mut expand_shape = vec![1usize; rank];
         expand_shape[dim] = k;
-        let index_reshaped = index.reshape(&expand_shape).map_err(AutodiffError::Shape)?;
+        // `reshape` は contiguous なテンソルしか受け付けない
+        // （`ShapeError::NonContiguousReshape`）。`index`（strided な
+        // 1 次元 view。例: 別の `narrow` の結果）を直接 `reshape` する
+        // と `Var::gather` 側（`index.contiguous()` を経由する）とは
+        // 非対称に失敗しうるため、ここでも先に実体化する（Bugbot
+        // 指摘。イシュー #1776）。
+        let index_c = index.contiguous();
+        let index_reshaped = index_c
+            .reshape(&expand_shape)
+            .map_err(AutodiffError::Shape)?;
         let mut out_shape = in_shape;
         out_shape[dim] = k;
         let index_bc = index_reshaped
@@ -1946,7 +1955,7 @@ impl<'t> Var<'t> {
     }
 
     /// `mask` が真の位置を上書きする（`torch.scatter` 相当。イシュー
-    /// #1776）。共通実装 [`Self::scatter_impl`] を
+    /// #1776）。共通実装 `Self::scatter_impl`（非公開）を
     /// [`fandhe_ai_tensor_core::ScatterReduce::Overwrite`] で呼ぶ。
     pub fn scatter(
         &self,
@@ -1958,7 +1967,7 @@ impl<'t> Var<'t> {
     }
 
     /// `index` が指す位置へ `src` を加算する（`torch.scatter_add`
-    /// 相当。イシュー #1776）。共通実装 [`Self::scatter_impl`] を
+    /// 相当。イシュー #1776）。共通実装 `Self::scatter_impl`（非公開）を
     /// [`fandhe_ai_tensor_core::ScatterReduce::Add`] で呼ぶ
     /// （決定的集約順序・`f64` アキュムレータ契約は
     /// [`fandhe_ai_tensor_core::ScatterReduce`] doc を正とする）。

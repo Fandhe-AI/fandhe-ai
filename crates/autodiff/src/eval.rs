@@ -954,7 +954,7 @@ pub(crate) fn masked_fill(x: &Tensor<f32>, mask: &Tensor<f32>, value: f32) -> Te
 /// 補助関数と対の関係にある独立実装——`autodiff` → 具体バックエンド
 /// クレートへの依存は作れない〈`.claude/rules/coding-rust.md`／
 /// `docs/fusion-graph-design.md` §3.4〉ため、ここでは重複実装する）。
-fn row_major_strides(shape: &[usize]) -> Vec<usize> {
+pub(crate) fn row_major_strides(shape: &[usize]) -> Vec<usize> {
     let mut strides = vec![1usize; shape.len()];
     for i in (0..shape.len().saturating_sub(1)).rev() {
         strides[i] = strides[i + 1] * shape[i + 1];
@@ -965,7 +965,7 @@ fn row_major_strides(shape: &[usize]) -> Vec<usize> {
 /// 線形添字（行優先）を `shape` の多次元添字へ展開する（上記
 /// `row_major_strides` と対。CPU バックエンドクレートの reduction
 /// モジュールにある同名の補助関数と同型の独立実装）。
-fn unravel(mut idx: usize, shape: &[usize]) -> Vec<usize> {
+pub(crate) fn unravel(mut idx: usize, shape: &[usize]) -> Vec<usize> {
     let mut out = vec![0usize; shape.len()];
     for (axis, &d) in shape.iter().enumerate().rev() {
         if d == 0 {
