@@ -174,6 +174,7 @@ pmset -g therm >"$OUT/pmset_therm_after-${LABEL}.txt" 2>&1 || true
 # を事前登録した非後退規則とする（fresh は対照・非判定）。
 python3 judge_infer_ab.py --before "$OUT/results-before-${LABEL}-infer.jsonl" \
   --after "$OUT/results-after-${LABEL}-infer.jsonl" \
+  --rounds "$ROUNDS" \
   >"compare-infer-${LABEL}.md" 2>"compare-infer-${LABEL}.err"
 JUDGE_EXIT=$?
 cat "compare-infer-${LABEL}.md"
