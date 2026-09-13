@@ -445,6 +445,17 @@ impl BackendOps for CpuBackendOps {
         Some(self)
     }
 
+    /// `crate::typed_bf16`（イシュー #1699）が `CpuBackendOps` へ
+    /// `impl TypedOps<half::bf16>` を実装しているため、`memory_ops` と
+    /// 同じ「`Some(self)` を返す capability accessor オーバーライド」
+    /// パターンで結線する。f64（#1697）／f16（#1698）は別イシューが
+    /// 担当し、本オーバーライドは触れない（`typed_ops_f64`／
+    /// `typed_ops_f16` の既定 `None` はそれぞれの実装が追加され次第
+    /// 同様にオーバーライドされる想定）。
+    fn typed_ops_bf16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::bf16>> {
+        Some(self)
+    }
+
     /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
     /// `docs/device-resident-update-design.md` §3.2・§5.2）。CPU は
     /// 「デバイス」がホストメモリそのものであるため、`downcast_handle_mut`
@@ -1836,7 +1847,7 @@ fn linalg_error_to_backend_error(err: LinalgError) -> BackendError {
 /// 実行時失敗のため `KernelLaunchFailed` に寄せる（`BackendError` に
 /// reduction 専用 variant は設けない。§4.4 の 5 variant + TASK-1.9a/1.9c
 /// 拡張の範囲に収める）。
-fn reduce_error_to_backend_error(err: reduction::ReduceError) -> BackendError {
+pub(crate) fn reduce_error_to_backend_error(err: reduction::ReduceError) -> BackendError {
     match err {
         reduction::ReduceError::Shape(shape_err) => BackendError::ShapeMismatch(shape_err),
         reduction::ReduceError::EmptyReduction { op } => {

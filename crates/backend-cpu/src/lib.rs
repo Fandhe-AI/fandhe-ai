@@ -174,6 +174,13 @@ mod small_shape_thread_cap;
 mod sme_detect;
 pub mod softmax;
 mod thread_limit;
+// イシュー #1699（親 #1649）: `fandhe_ai_tensor_core::TypedOps<half::bf16>`
+// の CPU 実装。既存 f32 カーネル（`elementwise`/`gemm`/`gemm_blis`/
+// `reduction`）を変更せず、bf16⇄f32 昇格・丸めの薄いラッパーとして
+// `crate::ops::CpuBackendOps` へ `impl TypedOps<bf16>` する
+// （`crate::ops` の `pub(crate) fn reduce_error_to_backend_error` へ
+// 到達するためクレートルートの兄弟モジュールとして配置する）。
+mod typed_bf16;
 
 pub use device::CpuDeviceProvider;
 pub use elementwise::{

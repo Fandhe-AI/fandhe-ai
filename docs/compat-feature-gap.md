@@ -710,3 +710,21 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
 - facade 新規公開面: `pub fn manual_seed`（新規）。内部型・アクセサは
   facade へ露出させない（`crates/facade/tests/api_surface.rs::
   facade_does_not_expose_rng_internal_types` で機械検査）。
+
+#### #1699 の追補
+
+`§2.12`（float64／float16・bfloat16。320 行目）の bfloat16 行に関して、
+CPU バックエンド限定で `fandhe_ai_tensor_core::TypedOps<half::bf16>` が
+`CpuBackendOps` に実装され、`BackendOps::typed_ops_bf16()` accessor
+経由で bf16 の 8 演算（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／
+`sum`／`max`）が CPU 上で実行可能になった（`crates/backend-cpu/src/
+typed_bf16.rs`。設計 `docs/backend-dtype-dispatch-design.md` §10）。
+
+- 実装方式は既存 f32 カーネルの再利用（bf16→f32 昇格 → f32 カーネル
+  → f32→bf16 丸め）であり、新規カーネルは追加していない。
+- `facade`（唯一の公開 API 面）への新規公開面はない。`Var`／`Tape`／
+  VJP・resident 系・カーネル融合は対象外のまま。
+- f16（#1698）・CUDA bf16（#1704）・Metal bf16（#1706）は本イシューで
+  は触れていない。表本体のスナップショット（対象 HEAD `097bff19`）・
+  必要工数見積り（XL）は変更しない（本追補は snapshot 後の部分実装差分
+  の記録）。
