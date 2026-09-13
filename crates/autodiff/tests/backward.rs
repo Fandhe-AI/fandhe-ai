@@ -1163,3 +1163,362 @@ fn masked_fill_non_broadcastable_mask_is_rejected() {
     let err = x.masked_fill(&mask, 0.0).unwrap_err();
     assert!(matches!(err, AutodiffError::Shape(_)));
 }
+
+// --- Gather／Scatter（イシュー #1776） ---
+
+fn i32t(data: Vec<i32>, shape: &[usize]) -> Tensor<i32> {
+    Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
+}
+
+/// ①forward 値（解析）: `gather` が `dim` 軸に沿って `index` の
+/// 添字位置を独立に読み出すことを確認する。
+#[test]
+fn gather_forward_selects_along_dim() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+    let index = i32t(vec![0, 2, 1, 0], &[2, 2]);
+    let out = x.gather(1, &index).unwrap();
+    assert_eq!(dense_vec(&out.to_tensor()), vec![1.0, 3.0, 5.0, 4.0]);
+}
+
+/// ②`gather` の backward を中央差分と突合する（重複添字を含み、
+/// `d_input` が読み出し回数分だけ加算蓄積されることを検証する）。
+#[test]
+fn gather_backward_matches_numeric_with_duplicate_indices() {
+    // 全読み出しが x[0] を 2 回・x[1] を 1 回参照する。
+    let index = i32t(vec![0, 0, 1], &[1, 3]);
+    let x0 = t(vec![1.0, 2.0], &[1, 2]);
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let out = xv.gather(1, &index).unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let out = xv.gather(1, &index).unwrap();
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close("gather dX (duplicate index)", dx, &num_dx);
+    // 解析的検証: x[0] は 2 回・x[1] は 1 回読まれるため dx=[2,1]。
+    assert_eq!(dense_vec(dx), vec![2.0, 1.0]);
+}
+
+/// ③エラー経路: `dim` が rank 範囲外なら `AutodiffError::Shape`
+/// （`AxisOutOfRange`）を返す。
+#[test]
+fn gather_axis_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let index = i32t(vec![0], &[1]);
+    let err = x.gather(1, &index).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange {
+            axis: 1,
+            rank: 1
+        })
+    ));
+}
+
+/// ④エラー経路: `index` の値が `[0, shape[dim])` を外れると
+/// `AutodiffError::InvalidArgument` を返す。
+#[test]
+fn gather_index_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let index = i32t(vec![5], &[1]);
+    let err = x.gather(0, &index).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// ⑤エラー経路: `index` の負値も範囲外として拒否する
+/// （PyTorch のような負値ラップアラウンドは対象外）。
+#[test]
+fn gather_negative_index_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let index = i32t(vec![-1], &[1]);
+    let err = x.gather(0, &index).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// `index_select` が `gather` と同一の 1 ノードのみを記録し、1 次元
+/// `index` を `dim` 軸へ拡張した結果が `gather` と一致することを
+/// 確認する。
+#[test]
+fn index_select_matches_gather_single_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+    let index = i32t(vec![2, 0], &[2]);
+
+    let before = tape.len();
+    let out = x.index_select(1, &index).unwrap();
+    assert_eq!(
+        tape.len(),
+        before + 1,
+        "index_select は gather と同じ 1 ノードのみ追加するはず"
+    );
+    assert_eq!(out.to_tensor().shape(), &[2, 2]);
+    assert_eq!(dense_vec(&out.to_tensor()), vec![3.0, 1.0, 6.0, 4.0]);
+}
+
+/// `index_select` のエラー経路: `index` が rank 1 でなければ
+/// `AutodiffError::Shape(RankMismatch)` を返す。
+#[test]
+fn index_select_rank_mismatch_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let index = i32t(vec![0, 1], &[1, 2]);
+    let err = x.index_select(0, &index).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::RankMismatch {
+            expected: 1,
+            actual: 2
+        })
+    ));
+}
+
+/// `index_select` は strided（非 contiguous）な 1 次元 `index` も
+/// 受け付ける必要がある。`Var::gather` は `index.contiguous()` を
+/// 経由するが、`index_select` は内部で `index.reshape(..)` を直接
+/// 呼んでいたため、非 contiguous な `index`（例: `broadcast_to` で
+/// stride 0 に拡張した rank-1 テンソル）を渡すと
+/// `ShapeError::NonContiguousReshape` になり `gather` との間で非対称
+/// だった（Bugbot 指摘。イシュー #1776）。
+#[test]
+fn index_select_accepts_non_contiguous_index() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![10.0, 20.0, 30.0, 40.0], &[4]));
+    // shape [1] を stride 0 で shape [3] へ拡張した非 contiguous な
+    // 1 次元 index（全要素が同じ添字 2 を指す）。
+    let index_base = i32t(vec![2], &[1]);
+    let index = index_base.broadcast_to(&[3]).unwrap();
+    assert!(!index.is_contiguous());
+
+    let out = x.index_select(0, &index).unwrap();
+    assert_eq!(dense_vec(&out.to_tensor()), vec![30.0, 30.0, 30.0]);
+}
+
+/// `scatter`（`Overwrite`）の forward 値を確認する。
+#[test]
+fn scatter_overwrite_forward() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0; 6], &[2, 3]));
+    let index = i32t(vec![0, 2, 2, 1], &[2, 2]);
+    let src = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let out = x.scatter(1, &index, &src).unwrap();
+    assert_eq!(
+        dense_vec(&out.to_tensor()),
+        vec![1.0, 0.0, 2.0, 0.0, 4.0, 3.0]
+    );
+}
+
+/// `scatter`（`Overwrite`）の backward を中央差分と突合する
+/// （`d_input`／`d_src` の両方）。
+#[test]
+fn scatter_overwrite_backward_matches_numeric() {
+    let index = i32t(vec![0, 2, 2, 1], &[2, 2]);
+    let x0 = t(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6], &[2, 3]);
+    let src0 = t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+
+    let forward = |x: &Tensor<f32>, src: &Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(x);
+        let sv = tape.var(src);
+        let out = xv.scatter(1, &index, &sv).unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let sv = tape.var(&src0);
+    let out = xv.scatter(1, &index, &sv).unwrap();
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+    let dsrc = grads.get(&sv).unwrap().expect("src は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, |x| forward(&x, &src0));
+    let num_dsrc = numeric_grad(&src0, |s| forward(&x0, &s));
+    assert_grad_close("scatter(overwrite) dX", dx, &num_dx);
+    assert_grad_close("scatter(overwrite) dSrc", dsrc, &num_dsrc);
+}
+
+/// `scatter`（`Overwrite`）で同一出力位置へ複数回書き込まれる場合、
+/// forward の決定的集約契約（行優先走査順で「最後に処理された値」
+/// のみが残る）どおり、上書きされて消えた重複書き込みへの `d_src`
+/// は 0 になる必要がある（codex-review 指摘。イシュー #1776）。
+/// `input=[0]`／`index=[0,0]`／`src=[2,3]`（dim=0）は
+/// `out = scatter(...) = [3]`（`src[1]=3` が最後の書き手）となり、
+/// `d_src` は `[0, 1]`（`src[0]` は 0・`src[1]` は 1）になるはず。
+#[test]
+fn scatter_overwrite_backward_last_writer_wins_duplicate_indices() {
+    let index = i32t(vec![0, 0], &[2]);
+    let x0 = t(vec![0.0], &[1]);
+    let src0 = t(vec![2.0, 3.0], &[2]);
+
+    let forward = |x: &Tensor<f32>, src: &Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(x);
+        let sv = tape.var(src);
+        let out = xv.scatter(0, &index, &sv).unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let sv = tape.var(&src0);
+    let out = xv.scatter(0, &index, &sv).unwrap();
+    assert_eq!(dense_vec(&out.to_tensor()), vec![3.0]);
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dsrc = grads.get(&sv).unwrap().expect("src は loss に到達する");
+    assert_eq!(
+        dense_vec(dsrc),
+        vec![0.0, 1.0],
+        "上書きされて消えた src[0] への勾配は 0・実際に出力へ残った src[1] は 1 のはず"
+    );
+
+    let num_dsrc = numeric_grad(&src0, |s| forward(&x0, &s));
+    assert_grad_close("scatter(overwrite) duplicate dSrc", dsrc, &num_dsrc);
+}
+
+/// `scatter_out_shape` は `dim` 以外の軸で `index`／`src` が `input`
+/// より小さいことを許容する（`index_shape[axis] <= input_shape[axis]`）
+/// が、`d_src` を求める `gather` は `dim` 以外の軸の完全一致を要求
+/// するため、`upstream` を `src_shape` へ narrow しないと有効な
+/// forward 入力に対し backward が `ShapeMismatch` になっていた
+/// （codex-review 指摘。イシュー #1776）。`input` shape `[3, 4]`・
+/// `index`／`src` shape `[2, 2]`（dim=1。行 0・1 のみ、列 0 の
+/// 位置のみ書き込む）で backward が成功し中央差分と一致することを
+/// 確認する。
+#[test]
+fn scatter_overwrite_backward_narrows_upstream_for_shrunk_non_dim_axes() {
+    let index = i32t(vec![1, 3, 0, 2], &[2, 2]);
+    let x0 = t(
+        vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2],
+        &[3, 4],
+    );
+    let src0 = t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+
+    let forward = |x: &Tensor<f32>, src: &Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(x);
+        let sv = tape.var(src);
+        let out = xv.scatter(1, &index, &sv).unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let sv = tape.var(&src0);
+    let out = xv.scatter(1, &index, &sv).unwrap();
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+    let dsrc = grads.get(&sv).unwrap().expect("src は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, |x| forward(&x, &src0));
+    let num_dsrc = numeric_grad(&src0, |s| forward(&x0, &s));
+    assert_grad_close("scatter(overwrite, shrunk non-dim axis) dX", dx, &num_dx);
+    assert_grad_close(
+        "scatter(overwrite, shrunk non-dim axis) dSrc",
+        dsrc,
+        &num_dsrc,
+    );
+}
+
+/// `scatter_add` の forward 値（重複添字の加算）を確認する。
+#[test]
+fn scatter_add_forward_accumulates_duplicates() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![10.0, 0.0, 0.0], &[1, 3]));
+    let index = i32t(vec![0, 0, 0], &[1, 3]);
+    let src = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
+    let out = x.scatter_add(1, &index, &src).unwrap();
+    assert_eq!(dense_vec(&out.to_tensor()), vec![16.0, 0.0, 0.0]);
+}
+
+/// `scatter_add` の backward を中央差分と突合する（`d_input` は
+/// 恒等・`d_src` は各要素が自身の書き込み先の upstream をそのまま
+/// 受け取ることを解析的にも確認する）。
+#[test]
+fn scatter_add_backward_matches_numeric_with_duplicate_indices() {
+    let index = i32t(vec![0, 0, 1], &[1, 3]);
+    let x0 = t(vec![0.1, 0.2], &[1, 2]);
+    let src0 = t(vec![1.0, 2.0, 3.0], &[1, 3]);
+
+    let forward = |x: &Tensor<f32>, src: &Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(x);
+        let sv = tape.var(src);
+        let out = xv.scatter_add(1, &index, &sv).unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let sv = tape.var(&src0);
+    let out = xv.scatter_add(1, &index, &sv).unwrap();
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+    let dsrc = grads.get(&sv).unwrap().expect("src は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, |x| forward(&x, &src0));
+    let num_dsrc = numeric_grad(&src0, |s| forward(&x0, &s));
+    assert_grad_close("scatter_add dX", dx, &num_dx);
+    assert_grad_close("scatter_add dSrc", dsrc, &num_dsrc);
+    // Add: d_input は恒等（線形性）のため upstream（全要素 1）のまま。
+    assert_eq!(dense_vec(dx), vec![1.0, 1.0]);
+    // d_src はどの要素も自身の書き込み先の upstream(=1) をそのまま
+    // 受け取るため全て 1（重複があっても影響しない）。
+    assert_eq!(dense_vec(dsrc), vec![1.0, 1.0, 1.0]);
+}
+
+/// エラー経路: 異なる `Tape` の `Var` を `scatter` の `src` に渡すと
+/// `AutodiffError::TapeMismatch` を返す。
+#[test]
+fn scatter_cross_tape_is_rejected() {
+    let tape_a = Tape::new_with_ops(common::naive_ops());
+    let tape_b = Tape::new_with_ops(common::naive_ops());
+    let x = tape_a.var(&t(vec![1.0, 2.0], &[1, 2]));
+    let src = tape_b.var(&t(vec![3.0, 4.0], &[1, 2]));
+    let index = i32t(vec![0, 1], &[1, 2]);
+    let err = x.scatter(1, &index, &src).unwrap_err();
+    assert!(matches!(err, AutodiffError::TapeMismatch));
+}
+
+/// エラー経路: `index` と `src` の shape が一致しなければ
+/// `AutodiffError::Shape(ShapeMismatch)` を返す。
+#[test]
+fn scatter_index_src_shape_mismatch_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
+    let index = i32t(vec![0, 1], &[1, 2]);
+    let src = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
+    let err = x.scatter(1, &index, &src).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ShapeMismatch { .. })
+    ));
+}
+
+/// エラー経路: `scatter` の `index` 値が範囲外なら
+/// `AutodiffError::InvalidArgument` を返す。
+#[test]
+fn scatter_index_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
+    let index = i32t(vec![5], &[1, 1]);
+    let src = tape.var(&t(vec![9.0], &[1, 1]));
+    let err = x.scatter(1, &index, &src).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}

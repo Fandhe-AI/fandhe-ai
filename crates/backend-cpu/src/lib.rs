@@ -124,6 +124,7 @@
 mod device;
 mod elementwise;
 pub mod fused_elementwise;
+mod gather_scatter;
 pub mod gemm;
 pub mod gemm_blis;
 mod scalar_elementwise;

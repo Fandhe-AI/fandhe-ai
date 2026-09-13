@@ -23,7 +23,9 @@
 
 use std::borrow::Cow;
 
-use fandhe_ai_tensor_core::{GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, Tensor};
+use fandhe_ai_tensor_core::{
+    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, Tensor,
+};
 
 use crate::layout;
 use crate::var::Reduction;
@@ -943,6 +945,169 @@ pub(crate) fn masked_fill(x: &Tensor<f32>, mask: &Tensor<f32>, value: f32) -> Te
         .map(|(&xv, &mv)| if mv != 0.0 { value } else { xv })
         .collect();
     build_tensor(out, &shape)
+}
+
+/// 行優先（C-order）ストライドを計算する（`Tensor::contiguous()` が
+/// 実体化する順序と同一の走査順を、`gather`／`scatter`（下記）が
+/// 独自に `input`／`index` の多次元添字から線形添字を導出するために
+/// 使う。CPU バックエンドクレートの reduction モジュールにある同名の
+/// 補助関数と対の関係にある独立実装——`autodiff` → 具体バックエンド
+/// クレートへの依存は作れない〈`.claude/rules/coding-rust.md`／
+/// `docs/fusion-graph-design.md` §3.4〉ため、ここでは重複実装する）。
+pub(crate) fn row_major_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    for i in (0..shape.len().saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+    strides
+}
+
+/// 線形添字（行優先）を `shape` の多次元添字へ展開する（上記
+/// `row_major_strides` と対。CPU バックエンドクレートの reduction
+/// モジュールにある同名の補助関数と同型の独立実装）。
+pub(crate) fn unravel(mut idx: usize, shape: &[usize]) -> Vec<usize> {
+    let mut out = vec![0usize; shape.len()];
+    for (axis, &d) in shape.iter().enumerate().rev() {
+        if d == 0 {
+            out[axis] = 0;
+            continue;
+        }
+        out[axis] = idx % d;
+        idx /= d;
+    }
+    out
+}
+
+/// `dim` 軸に沿った独立読み出しのホスト参照実装（`torch.gather`
+/// 相当。イシュー #1776）。`BackendOps::gather` が `Unsupported` を
+/// 返したときのみ `grad::gather_with_fallback` から呼ばれる。
+///
+/// `out_shape` は呼び出し元（`Var::gather`／
+/// `grad::gather_with_fallback`）が
+/// [`fandhe_ai_tensor_core::gather_out_shape`] で検査・確定済みの
+/// 出力 shape（＝`index.shape()`）をそのまま渡す。`index` の値は
+/// `[0, input.shape()[dim])` の範囲内であることを `Var::gather` が
+/// forward 時点で検査済み（本関数は値検査を行わない前提）。
+///
+/// `input`／`index` は strided view でよい（`dense_vec_ref`／
+/// `dense_vec_i32` で行優先稠密化してから読む）。出力位置同士の
+/// 書き込み衝突がないため決定的集約順序の契約は不要
+/// （[`fandhe_ai_tensor_core::ScatterReduce`] doc 参照）。
+pub(crate) fn gather(
+    input: &Tensor<f32>,
+    dim: usize,
+    index: &Tensor<i32>,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    if out_shape.contains(&0) {
+        return build_tensor(Vec::new(), out_shape);
+    }
+    let input_shape = input.shape().to_vec();
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&input_shape);
+    let index_data = dense_vec_i32(index);
+
+    let numel: usize = out_shape.iter().product();
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let coords = unravel(flat, out_shape);
+        let dim_idx = index_data[flat] as usize;
+        let mut pos = 0usize;
+        for (axis, &stride) in input_strides.iter().enumerate() {
+            let coord = if axis == dim { dim_idx } else { coords[axis] };
+            pos += coord * stride;
+        }
+        *out_val = input_data[pos];
+    }
+    build_tensor(out, out_shape)
+}
+
+/// `dim` 軸に沿った書き込みのホスト参照実装（`torch.scatter`／
+/// `torch.scatter_add` 相当。`reduce` で分岐。イシュー #1776）。
+/// `BackendOps::scatter` が `Unsupported` を返したときのみ
+/// `grad::scatter_with_fallback` から呼ばれる。出力 shape は
+/// `input.shape()` と恒等（scatter は shape を変えない）。`index`／
+/// `src` は同一 shape であることを呼び出し元
+/// （[`fandhe_ai_tensor_core::scatter_out_shape`]）が検査済み。
+/// `index` の値は `[0, input.shape()[dim])` の範囲内であることを
+/// `Var::scatter`／`scatter_add` が forward 時点で検査済み。
+///
+/// **決定的集約契約（[`fandhe_ai_tensor_core::ScatterReduce`] doc を
+/// 正とする）**: `index`／`src` を行優先（row-major）で走査し、同一
+/// 出力位置への複数回書き込みは「この走査順で逐次処理」した結果と
+/// する。`Overwrite` は最後に処理された値が残る単純代入、`Add` は
+/// 出力位置ごとの `f64` アキュムレータへ逐次加算し走査完了後に
+/// **1 回だけ** `f32` へ downcast する（未書き込み位置も
+/// `input[pos] as f64` → `as f32` の往復のみを経る。`f32` は
+/// `f64` へ丸めなしで昇格でき、加算がなければ最近接偶数丸めで元の
+/// 値に戻るため実害はない）。単一スレッド逐次ループで実装する
+/// （並列化する場合は本関数と同じ観測結果になる集約方式——出力位置
+/// ごとの排他アキュムレータ・決定的な reduce 木——を選定すること。
+/// `.claude/rules/out-of-scope-tracking.md` 対象・並列化自体は本
+/// issue のスコープ外）。
+pub(crate) fn scatter(
+    input: &Tensor<f32>,
+    dim: usize,
+    index: &Tensor<i32>,
+    src: &Tensor<f32>,
+    reduce: ScatterReduce,
+) -> Tensor<f32> {
+    let out_shape = input.shape().to_vec();
+    if out_shape.contains(&0) {
+        return build_tensor(Vec::new(), &out_shape);
+    }
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&out_shape);
+    let index_data = dense_vec_i32(index);
+    let index_shape = index.shape().to_vec();
+    let src_data = dense_vec_ref(src);
+    let index_numel: usize = index_shape.iter().product();
+
+    // `flat`（`index`／`src` の行優先線形添字）から書き込み先の
+    // `input`（＝`out_shape`）行優先線形添字を導出する共通ロジック
+    // （`Overwrite`／`Add` 両分岐・フォールバック分岐で共有し、
+    // 重複実装によるドリフトを避ける）。
+    let resolve_pos = |flat: usize| -> usize {
+        let coords = unravel(flat, &index_shape);
+        let dim_idx = index_data[flat] as usize;
+        let mut pos = 0usize;
+        for (axis, &stride) in input_strides.iter().enumerate() {
+            let coord = if axis == dim { dim_idx } else { coords[axis] };
+            pos += coord * stride;
+        }
+        pos
+    };
+
+    match reduce {
+        ScatterReduce::Add => {
+            let mut acc: Vec<f64> = input_data.iter().map(|&v| v as f64).collect();
+            for flat in 0..index_numel {
+                let pos = resolve_pos(flat);
+                acc[pos] += src_data[flat] as f64;
+            }
+            let out: Vec<f32> = acc.iter().map(|&v| v as f32).collect();
+            build_tensor(out, &out_shape)
+        }
+        // `Overwrite`、および `ScatterReduce`（`#[non_exhaustive]`。
+        // `tensor-core` 側で将来 variant を追加しうる）の未知 variant
+        // は同じ「上書き」意味論へ安全側フォールバックする（本関数は
+        // infallible 契約のため `Result` を返せない。未知 variant への
+        // 到達は契約違反として `debug_assert!` で検知するのみに留め、
+        // release ビルドでは黙って `Overwrite` として振る舞う。
+        // `.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
+        reduce => {
+            debug_assert!(
+                matches!(reduce, ScatterReduce::Overwrite),
+                "eval::scatter: 未知の ScatterReduce variant へフォールバックした（契約違反）"
+            );
+            let mut out = input_data.to_vec();
+            for flat in 0..index_numel {
+                let pos = resolve_pos(flat);
+                out[pos] = src_data[flat];
+            }
+            build_tensor(out, &out_shape)
+        }
+    }
 }
 
 /// CrossEntropy 損失（log-sum-exp 安定化。クラス次元 `class_dim` 指定。

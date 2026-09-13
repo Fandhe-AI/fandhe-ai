@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, DType, DeviceBufferView, FusedOpKind, FusionPlan,
-    MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp, Tensor,
+    MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, Tensor,
 };
 
 use crate::error::AutodiffError;
@@ -566,6 +566,50 @@ pub(crate) enum Op {
     /// （fill 位置の勾配は 0。broadcast なし・shape 不変のため縮約は
     /// 不要）。
     MaskedFill { input: NodeId, mask: Tensor<f32> },
+    /// `Var::gather`（`torch.gather` 相当。`Var::index_select` も
+    /// 1-D `index` を同 rank の stride-0 view へ拡張したうえで本
+    /// variant へ委譲する。イシュー #1776）。`index`（非追跡データ・
+    /// `Op::CrossEntropyLoss.targets` と同じ「`Op` payload に直接
+    /// `Tensor<i32>` を埋め込む」設計）は forward 時点
+    /// （`Var::gather`）で値範囲検査（`[0, input.shape()[dim])`）済み。
+    /// `BackendOps::gather` に対応メソッドがあるため非融合対象
+    /// （`push_eager` で常に実体化。`Op::Where`／`MaskedFill` と同型）。
+    ///
+    /// VJP（`grad.rs`）: `d_input = scatter_add(zeros_like(input), dim,
+    /// index, upstream)`（「Gather の VJP は scatter_add」の原則。
+    /// `Op::Concat`⟷`Op::Narrow` の双対性と同型）。
+    Gather {
+        input: NodeId,
+        dim: usize,
+        index: Tensor<i32>,
+    },
+    /// `Var::scatter`／`Var::scatter_add`（`torch.scatter`／
+    /// `torch.scatter_add` 相当。`reduce` で分岐。イシュー #1776）。
+    /// `index` は [`Op::Gather`] と同じ非追跡データ埋め込み。`src` は
+    /// 追跡対象の入力ノード。`BackendOps::scatter` に対応メソッドが
+    /// あるため非融合対象（`push_eager` で常に実体化）。
+    ///
+    /// VJP（`grad.rs`）:
+    /// - `d_src = gather(upstream, dim, index)`（`dim` 以外の軸が
+    ///   `input` より小さい場合は `upstream` を先頭から narrow して
+    ///   から gather する）。`Add` は重複添字があっても各 `src` 要素が
+    ///   自身の書き込み位置の upstream をそのまま受け取るが、
+    ///   `Overwrite` は forward の「最後に処理された値のみ残る」
+    ///   決定的集約契約に従い、上書きされて消えた重複書き込みへは
+    ///   0 を返す（`scatter_overwrite_last_writer_mask`。イシュー
+    ///   #1776・codex-review 指摘）。
+    /// - `d_input`（`reduce` で分岐）: `Add` は恒等
+    ///   （`out = input + Σ contributions` の線形性）。`Overwrite` は
+    ///   `upstream` を `scatter(dim, index, zeros_like(index),
+    ///   Overwrite)` で書き込まれた位置のみ 0 上書き（`grad_self.
+    ///   scatter_(dim, index, 0)` と同じ式）。
+    Scatter {
+        input: NodeId,
+        dim: usize,
+        index: Tensor<i32>,
+        src: NodeId,
+        reduce: ScatterReduce,
+    },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
@@ -877,6 +921,12 @@ impl Op {
             // 将来 `true` 化する場合は `Op::Sigmoid` 型の再計算分岐を
             // 追加する）。
             Op::ScalarUnary { .. } | Op::ScalarBinary { .. } => false,
+            // `Op::Gather`／`Op::Scatter`（イシュー #1776）は `Op::Where`／
+            // `Op::MaskedFill` と同じく `index`（`Scatter` はさらに
+            // `reduce`）を `Op` 自身が保持する eager 実体化演算で、
+            // `recompute_value` に再計算経路を持たないため解放しない
+            // （非網羅 match 是正で新規 variant 追加時に強制される）。
+            Op::Gather { .. } | Op::Scatter { .. } => false,
         }
     }
 
@@ -927,6 +977,11 @@ impl Op {
             Op::ScalarBinary { a, b, .. } => {
                 f(*a);
                 f(*b);
+            }
+            Op::Gather { input, .. } => f(*input),
+            Op::Scatter { input, src, .. } => {
+                f(*input);
+                f(*src);
             }
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);

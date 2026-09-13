@@ -786,3 +786,40 @@ fn where_and_masked_fill_record_single_eager_node() {
     );
     assert_eq!(filled.to_tensor().shape(), &[4]);
 }
+
+/// 31. `gather`／`scatter`／`scatter_add`（イシュー #1776）が
+///     それぞれ 1 ノードのみ追加する `push_eager`（実体化済み）
+///     ノードとして記録されることを検証する（`Op::Where`／
+///     `Op::MaskedFill` と同型。view ノードではない）。
+#[test]
+fn gather_and_scatter_record_single_eager_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+    let index = Tensor::<i32>::new(vec![0, 2, 1, 0], &[2, 2])
+        .expect("test fixture: shape とデータ長は事前に一致させている");
+
+    let before = tape.len();
+    let gathered = x.gather(1, &index).unwrap();
+    assert_eq!(tape.len(), before + 1, "gather は 1 ノードのみ追加するはず");
+    assert_eq!(gathered.to_tensor().shape(), &[2, 2]);
+
+    let src = tape.var(&t(vec![9.0, 9.0, 9.0, 9.0], &[2, 2]));
+
+    let before2 = tape.len();
+    let overwritten = x.scatter(1, &index, &src).unwrap();
+    assert_eq!(
+        tape.len(),
+        before2 + 1,
+        "scatter は 1 ノードのみ追加するはず"
+    );
+    assert_eq!(overwritten.to_tensor().shape(), &[2, 3]);
+
+    let before3 = tape.len();
+    let added = x.scatter_add(1, &index, &src).unwrap();
+    assert_eq!(
+        tape.len(),
+        before3 + 1,
+        "scatter_add は 1 ノードのみ追加するはず"
+    );
+    assert_eq!(added.to_tensor().shape(), &[2, 3]);
+}

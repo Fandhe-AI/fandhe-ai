@@ -30,8 +30,8 @@
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, ScalarBinaryOp, ScalarUnaryOp, ShapeError, Tensor,
-    row_norm_layout,
+    Activation, BackendError, BackendOps, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError,
+    Tensor, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -1152,6 +1152,105 @@ pub(crate) fn vjp(
             let d_input = masked_fill_vjp(&mask, upstream);
             vec![(input, d_input)]
         }
+        // `Var::gather`（`Var::index_select` も同一 Op へ委譲。イシュー
+        // #1776）。「Gather の VJP は scatter_add」の原則
+        // （`Op::Concat`⟷`Op::Narrow` の双対性と同型）: 入力 shape の
+        // ゼロテンソルへ `upstream` を `index` の位置へ加算する。
+        Op::Gather { input, dim, index } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let zeros = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+            let d_input = scatter_with_fallback(
+                ops,
+                &zeros,
+                dim,
+                &index,
+                upstream,
+                ScatterReduce::Add,
+                &input_shape,
+            )?;
+            vec![(input, d_input)]
+        }
+        // `Var::scatter`／`Var::scatter_add`（イシュー #1776）。
+        // `d_src` は `upstream`（shape=`input_shape`）を `index`
+        // （shape=`src_shape`）で gather して求める。`scatter_out_shape`
+        // は `dim` 以外の軸で `index_shape[axis] <= input_shape[axis]`
+        // （縮小）を許容するが、`gather_out_shape` は `dim` 以外の軸の
+        // 完全一致を要求するため、縮小されている軸がある場合は
+        // `upstream` を該当軸の先頭 `src_shape[axis]` 要素へ narrow
+        // してから gather する（scatter の非 `dim` 軸は index の座標系
+        // がそのまま input の座標系となる〈オフセットなし〉ため、
+        // 先頭からの narrow で forward の書き込み対象範囲と一致する。
+        // codex-review 指摘）。
+        //
+        // `d_input` は `reduce` で分岐: `Add` は恒等（線形性）、
+        // `Overwrite` は書き込まれた位置のみ upstream を 0 で上書きする
+        // （`grad_self.scatter_(dim, index, 0)` と同じ式）。
+        //
+        // `Overwrite` の `d_src` はさらに、forward の決定的集約契約
+        // （`ScatterReduce::Overwrite` doc: 同一出力位置への複数回
+        // 書き込みは行優先走査順で「最後に処理された値」だけが出力に
+        // 残る）に従い、上書きされて消えた重複書き込みへは 0 を返す
+        // 必要がある（`scatter_overwrite_last_writer_mask`）。さもないと
+        // 例えば `input=[0]／index=[0,0]／src=[2,3]` のように出力が
+        // 実際には最後の書き手（`src[1]=3`）のみを反映するにも
+        // 関わらず両方の `src` 要素へ勾配が流れ、数値微分と不整合に
+        // なる（codex-review 指摘）。`Add` は線形なので重複書き込みが
+        // あっても各 `src` 要素はそのまま upstream を受け取る
+        // （マスク不要）。
+        Op::Scatter {
+            input,
+            dim,
+            index,
+            src,
+            reduce,
+        } => {
+            let src_shape = nodes[src.0].shape.clone();
+            let input_shape = nodes[input.0].shape.clone();
+
+            let mut d_src_upstream = upstream.clone();
+            for (axis, &in_s) in input_shape.iter().enumerate() {
+                if axis == dim {
+                    continue;
+                }
+                let idx_s = src_shape[axis];
+                if idx_s < in_s {
+                    d_src_upstream = d_src_upstream
+                        .narrow(axis, 0, idx_s)
+                        .map_err(AutodiffError::Shape)?;
+                }
+            }
+            let raw_d_src = gather_with_fallback(ops, &d_src_upstream, dim, &index, &src_shape)?;
+
+            let (d_input, d_src) = match reduce {
+                ScatterReduce::Add => (upstream.clone(), raw_d_src),
+                ScatterReduce::Overwrite => {
+                    let zeros_src = Tensor::zeros(&src_shape).map_err(AutodiffError::Shape)?;
+                    let d_input = scatter_with_fallback(
+                        ops,
+                        upstream,
+                        dim,
+                        &index,
+                        &zeros_src,
+                        ScatterReduce::Overwrite,
+                        &input_shape,
+                    )?;
+                    let mask = scatter_overwrite_last_writer_mask(&index, dim, &input_shape);
+                    let d_src = elementwise_mul_mask(&raw_d_src, &mask, |m| m != 0.0);
+                    (d_input, d_src)
+                }
+                // `ScatterReduce` は `#[non_exhaustive]`（`tensor-core`
+                // 側で将来 variant を追加しうる。`Activation` と同じ
+                // 非破壊拡張方針）。未知 variant は fail-closed に
+                // エラーを返す（`backend-cpu::ops::linear_forward_
+                // device` の `Activation` 未知 variant 分岐と同型）。
+                _ => {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Op::Scatter の VJP: 未知の ScatterReduce variant {reduce:?}"
+                    )));
+                }
+            };
+            vec![(input, d_input), (src, d_src)]
+        }
         // `Var::contiguous` が記録するノード（イシュー #1620。
         // `crate::einsum` の permute 後 reshape 前の明示実体化）。
         // メモリレイアウトのみが変わり値は変わらないため、VJP は
@@ -1344,6 +1443,119 @@ pub(crate) fn masked_fill_with_fallback(
         Err(BackendError::Unsupported(_)) => Ok(eval::masked_fill(x, mask, value)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
+}
+
+/// [`Op::Gather`] の forward（`Var::gather`／`Var::index_select` 経由）
+/// および [`Op::Gather`] の VJP（`Op::Scatter { reduce: Add }` を
+/// 経由せず直接 [`Op::Gather`] を再利用する `d_src` 計算）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1776）。
+/// [`where_cond_with_fallback`] と同型: `ops.gather` →
+/// `Unsupported` のときのみ `eval::gather` へフォールバックし、
+/// それ以外のエラーは伝播する（判定迂回経路を作らない）。バックエンド
+/// 実装が返した出力 shape を `out_shape` と照合し、不一致は
+/// `AutodiffError::Backend(BackendError::ShapeMismatch(..))` を返す。
+pub(crate) fn gather_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    dim: usize,
+    index: &Tensor<i32>,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.gather(input, dim, index) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::gather(input, dim, index, out_shape)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Scatter`] の forward（`Var::scatter`／`scatter_add` 経由）
+/// および [`Op::Gather`] の VJP（`d_input` 計算）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1776）。
+/// [`gather_with_fallback`] と同型: `ops.scatter` → `Unsupported` の
+/// ときのみ `eval::scatter`（[`ScatterReduce`] の決定的集約契約に
+/// 厳密に従う）へフォールバックする。
+pub(crate) fn scatter_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    dim: usize,
+    index: &Tensor<i32>,
+    src: &Tensor<f32>,
+    reduce: ScatterReduce,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.scatter(input, dim, index, src, reduce) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::scatter(input, dim, index, src, reduce)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Scatter`]（`reduce = Overwrite`）の VJP 補助（イシュー
+/// #1776・codex-review 指摘）。forward の決定的集約契約
+/// （`ScatterReduce::Overwrite` doc: `index`／`src` を行優先で走査し、
+/// 同一出力位置への複数回書き込みは「最後に処理された値」だけが
+/// 残る）に従い、`d_src` は各出力位置の最後の書き手にのみ流し、
+/// 上書きされて消えた重複書き込みへは 0 を返す必要がある。`index`
+/// （`src` と同 shape）を forward と同じ行優先走査順で処理し「各
+/// 出力位置（`input_shape` 上の線形添字）ごとの最後の書き手 flat
+/// 添字」を求め、その添字だけ `1.0`・それ以外 `0.0` の `index` と
+/// 同 shape のマスクを返す（`gather_scatter.rs::scatter` の
+/// `resolve_pos` と同じ位置計算式の独立実装——`autodiff` は具体
+/// バックエンドクレートへ依存できないため重複実装する。
+/// `.claude/rules/coding-rust.md`）。`index` の値は呼び出し元
+/// （`Var::scatter`／`scatter_add` の forward）が範囲検査済みの前提。
+fn scatter_overwrite_last_writer_mask(
+    index: &Tensor<i32>,
+    dim: usize,
+    input_shape: &[usize],
+) -> Tensor<f32> {
+    let index_shape = index.shape().to_vec();
+    let index_numel: usize = index_shape.iter().product();
+    if index_numel == 0 {
+        return build_tensor(Vec::new(), &index_shape);
+    }
+    let index_data = eval::dense_vec_i32(index);
+    let input_strides = eval::row_major_strides(input_shape);
+
+    // 出力位置（線形添字）ごとの最後の書き手 flat 添字。行優先で
+    // 走査し後勝ちで上書きするだけで「最後の書き手」が求まる。
+    let mut last_writer: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::with_capacity(index_numel);
+    for (flat, &dim_idx_raw) in index_data.iter().enumerate() {
+        let coords = eval::unravel(flat, &index_shape);
+        let dim_idx = dim_idx_raw as usize;
+        let mut pos = 0usize;
+        for (axis, &stride) in input_strides.iter().enumerate() {
+            let coord = if axis == dim { dim_idx } else { coords[axis] };
+            pos += coord * stride;
+        }
+        last_writer.insert(pos, flat);
+    }
+    let mut mask = vec![0f32; index_numel];
+    for &flat in last_writer.values() {
+        mask[flat] = 1.0;
+    }
+    build_tensor(mask, &index_shape)
 }
 
 /// `Op::RmsNorm` の VJP 本体（イシュー #1596）:

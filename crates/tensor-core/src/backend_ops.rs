@@ -166,6 +166,44 @@ pub enum MseReduction {
     Sum,
 }
 
+/// [`BackendOps::scatter`] が行う縮約種別（イシュー #1776）。
+/// `torch.scatter`（`Overwrite`）と `torch.scatter_add`（`Add`）の
+/// 差異を 1 メソッドへ集約する（`Var::scatter`／`Var::scatter_add` は
+/// それぞれ本 enum の異なる値で共通実装 `scatter_impl` を呼ぶ）。
+///
+/// **`Add` の決定的集約順序・精度契約（実装側が必ず守ること）**:
+/// `index`（同 shape の `src`）を row-major（`Tensor::contiguous()` と
+/// 同じ末尾軸最速の C-order）で走査し、同一出力位置への複数回の書き込み
+/// は「この走査順で逐次加算」した結果とする。出力位置ごとに `f64`
+/// アキュムレータを `input[pos] as f64` で初期化し、走査順に
+/// `acc += src[p] as f64` を適用したうえで、走査完了後に**1 回だけ**
+/// `as f32` へ downcast する（`.claude/rules/coding-rust.md`
+/// 「勾配の長軸縮約」節・要素積を伴わない単純な行方向和と同じ精度
+/// 規律の先取り適用。CUDA は `double` アキュムレータ、Metal は
+/// `crates/backend-metal/src/soft_f64.rs`〈イシュー #1659 で導入済みの
+/// binary64 逐次和ソフトウェアエミュレーション〉が同じ契約を満たす
+/// 既存手段として使える）。`Overwrite` はこの走査順で「最後に処理された
+/// 値」が残る単純代入のため `f64` 昇格は不要。
+///
+/// 本 issue（#1776）の CPU 参照実装（`backend-cpu::gather_scatter`）・
+/// ホストフォールバック（`autodiff::eval::scatter`）はいずれも単一
+/// スレッド逐次ループでこの契約を実装する（並列化は将来の性能最適化
+/// issue のスコープ・`.claude/rules/out-of-scope-tracking.md` 対象）。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`Activation`／`MseReduction`
+/// と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScatterReduce {
+    /// 上書き（`torch.scatter` 相当）。同一位置への複数回書き込みは
+    /// row-major 走査順で最後に処理された値が残る。
+    Overwrite,
+    /// 加算（`torch.scatter_add` 相当）。上記の決定的集約契約
+    /// （`f64` アキュムレータ・row-major 走査順の逐次加算）に従う。
+    Add,
+}
+
 /// [`BackendOps::captured_segment_key`]／[`BackendOps::run_captured_sgd_step_segment`]
 /// が扱う 1 個のデバイスバッファの識別子（イシュー #1349・親 #1348・
 /// ルート #1341 → #1269）。
@@ -1082,6 +1120,81 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "masked_fill: default fail-safe (no fused masked_fill kernel available)".into(),
+        ))
+    }
+
+    /// `dim` 軸に沿って `index` が指す要素を独立に読み出す
+    /// （`torch.gather` 相当。イシュー #1776）。各出力位置 `p`
+    /// （`p` は `index.shape()` 上の多次元添字）は
+    /// `out[p] = input[p[0], .., index[p], .., p[rank-1]]`
+    /// （`index[p]` を `dim` 軸の添字に差し替えた位置から読む）で
+    /// 決まり、出力位置同士の書き込み衝突がないため決定的集約順序の
+    /// 契約は不要（[`ScatterReduce`] doc 参照）。`index` の値は
+    /// `[0, input.shape()[dim])` の範囲内であることを呼び出し元
+    /// （`fandhe_ai_autodiff::var::Var::gather`）が forward 時点で
+    /// 検査済み（本メソッドは値検査を行わない前提）。
+    ///
+    /// 出力 shape は `index.shape()` と恒等（`dim` 軸以外は
+    /// `input.shape()` と一致する必要がある。
+    /// [`crate::ops_shape::gather_out_shape`] 参照）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::masked_fill`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::gather` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::gather`）へフォールバックする
+    /// （それ以外のエラーは伝播する。判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。実装側でも `input`／`index`
+    /// の shape を [`crate::ops_shape::gather_out_shape`] で再検査し、
+    /// 不一致は [`BackendError::ShapeMismatch`] を返すこと
+    /// （fail-closed）。
+    fn gather(
+        &self,
+        _input: &Tensor<f32>,
+        _dim: usize,
+        _index: &Tensor<i32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "gather: default fail-safe (no fused gather kernel available)".into(),
+        ))
+    }
+
+    /// `dim` 軸に沿って `index` が指す位置へ `src` の値を書き込む
+    /// （`torch.scatter`／`torch.scatter_add` 相当。`reduce` で選択。
+    /// イシュー #1776）。出力 shape は `input.shape()` と恒等
+    /// （scatter は shape を変えない）。`index`／`src` は同一 shape
+    /// であることを要求する（本実装の簡略化。PyTorch の
+    /// `index.size(d) <= src.size(d)` という緩い制約は対象外。
+    /// [`crate::ops_shape::scatter_out_shape`] 参照）。
+    ///
+    /// 同一出力位置に複数回書き込まれる場合の意味論・数値契約は
+    /// [`ScatterReduce`] のドキュメントを正とする（決定的集約順序・
+    /// `Add` の `f64` アキュムレータ契約）。`index` の値は
+    /// `[0, input.shape()[dim])` の範囲内であることを呼び出し元
+    /// （`fandhe_ai_autodiff::var::Var::scatter`／`scatter_add`）が
+    /// forward 時点で検査済み（本メソッドは値検査を行わない前提）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::gather`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::scatter`／
+    /// `scatter_add` は `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::scatter`。[`ScatterReduce`] の
+    /// 決定的集約契約に厳密に従う）へフォールバックする。実装側でも
+    /// `input`／`index`／`src` の shape を
+    /// [`crate::ops_shape::scatter_out_shape`] で再検査し、不一致は
+    /// [`BackendError::ShapeMismatch`] を返すこと（fail-closed）。
+    fn scatter(
+        &self,
+        _input: &Tensor<f32>,
+        _dim: usize,
+        _index: &Tensor<i32>,
+        _src: &Tensor<f32>,
+        _reduce: ScatterReduce,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "scatter: default fail-safe (no fused scatter kernel available)".into(),
         ))
     }
 
@@ -2475,6 +2588,33 @@ mod tests {
         let mask = Tensor::new(vec![1.0, 0.0], &[2]).unwrap();
 
         let result = ops.masked_fill(&x, &mask, -1.0);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::gather`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1776）。
+    #[test]
+    fn gather_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let index = Tensor::<i32>::new(vec![0, 0, 1, 0], &[2, 2]).unwrap();
+
+        let result = ops.gather(&input, 1, &index);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::scatter`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1776）。
+    #[test]
+    fn scatter_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let index = Tensor::<i32>::new(vec![0, 0, 1, 0], &[2, 2]).unwrap();
+        let src = Tensor::new(vec![9.0, 9.0, 9.0, 9.0], &[2, 2]).unwrap();
+
+        let result = ops.scatter(&input, 1, &index, &src, ScatterReduce::Overwrite);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
