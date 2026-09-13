@@ -44,6 +44,15 @@ fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
         .to_vec()
 }
 
+/// `dense_vec` の各要素を [`f32::to_bits`] で比較する（codex-review 指摘
+/// 対応: `assert_eq!` による `Vec<f32>` の数値比較は IEEE 754 の
+/// `+0.0 == -0.0` により符号付きゼロを区別できず、decision 6 が要求する
+/// 「bit 完全一致」の検証にならない。`to_bits` は `NaN` の payload も
+/// 区別するビット列比較のため、bit 完全一致の検証として厳密）。
+fn bits_vec(t: &Tensor<f32>) -> Vec<u32> {
+    dense_vec(t).into_iter().map(f32::to_bits).collect()
+}
+
 /// `model` を chain 経路（`predict_resident`）・旧経路
 /// （`forward_resident` 経由。`&mut store` を要するため呼び出しごとに
 /// 独立した `DeviceParamStore` を使う）の双方で forward し、出力が
@@ -60,8 +69,8 @@ fn assert_chain_matches_legacy_bit_exact(model: &Sequential, input: &Tensor<f32>
     // 完全に同じ出力になることを確認する。
     let chain_output_again = model.predict_resident(&chain_store, input).unwrap();
     assert_eq!(
-        dense_vec(&chain_output),
-        dense_vec(&chain_output_again),
+        bits_vec(&chain_output),
+        bits_vec(&chain_output_again),
         "predict_resident の run-to-run 出力が bit 一致しない"
     );
 
@@ -81,8 +90,8 @@ fn assert_chain_matches_legacy_bit_exact(model: &Sequential, input: &Tensor<f32>
     legacy_store.abandon_pending_forward();
 
     assert_eq!(
-        dense_vec(&chain_output),
-        dense_vec(&legacy_output),
+        bits_vec(&chain_output),
+        bits_vec(&legacy_output),
         "chain 経路（predict_device_chain）と旧経路（forward_resident）の出力が bit 一致しない"
     );
 }
@@ -122,4 +131,34 @@ fn predict_device_chain_matches_legacy_path_bit_exact_no_activation_fusion() {
     );
 
     assert_chain_matches_legacy_bit_exact(&model, &input);
+}
+
+/// `bits_vec`（`f32::to_bits`）が符号付きゼロ（`+0.0`／`-0.0`）を区別
+/// できることを確認する（codex-review 指摘対応。上記 2 系統の bit 完全
+/// 一致検証で使う `bits_vec` 自体が、`assert_eq!` の `Vec<f32>` 直接比較
+/// では `+0.0 == -0.0` により見逃していた差異を検出できることの根拠。
+/// IEEE 754 は `+0.0 == -0.0` だが、`to_bits()` はそれぞれ `0x0000_0000`
+/// ／`0x8000_0000` を返しビット列としては異なる）。
+#[test]
+fn bits_vec_distinguishes_signed_zero() {
+    let positive_zero = tensor(vec![0.0_f32, 1.0, -2.0], &[3]);
+    let negative_zero = tensor(vec![-0.0_f32, 1.0, -2.0], &[3]);
+
+    // 素朴な `==`（`assert_eq!` の `Vec<f32>` 比較と同じ意味論）では
+    // 符号付きゼロを区別できないことをまず確認する（この事実がまさに
+    // codex-review 指摘の対象だった）。
+    assert_eq!(
+        dense_vec(&positive_zero),
+        dense_vec(&negative_zero),
+        "IEEE 754 の `==` は +0.0 と -0.0 を等しいと判定するはず"
+    );
+
+    // `bits_vec` はビット列比較のため、符号付きゼロの差異を検出できる。
+    assert_ne!(
+        bits_vec(&positive_zero),
+        bits_vec(&negative_zero),
+        "bits_vec は +0.0 と -0.0 を異なるビット列として区別できるはず"
+    );
+    assert_eq!(bits_vec(&positive_zero)[0], 0.0_f32.to_bits());
+    assert_eq!(bits_vec(&negative_zero)[0], (-0.0_f32).to_bits());
 }

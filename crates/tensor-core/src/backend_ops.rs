@@ -1337,7 +1337,11 @@ pub trait BackendOps {
     /// （`docs/backend-cuda-async-execution-design.md`）に従い本 `token`
     /// を使わずオーバーライドもしない（`sgd_step_device_tracked` と同じ
     /// 判断。設計文書 `docs/inference-chain-single-sync-design.md` 決定 5）。
-    /// Metal のオーバーライドはイシュー #1580 で追加する。
+    /// Metal のオーバーライド（`backend-metal::ops::MetalBackendOps`）は
+    /// イシュー #1688 codex-review 指摘対応で追加済み: `token` を
+    /// `gemm::MetalGemm::encode_strided_bias_act_prepared_with_c_offset`
+    /// へ渡し、`encode` と同一ロック区間でバッチへ登録させる（`gemm_
+    /// fp32_strict_into_tracked` と同型）。
     fn linear_forward_device_tracked(
         &self,
         a: &DeviceBuffer<f32>,
