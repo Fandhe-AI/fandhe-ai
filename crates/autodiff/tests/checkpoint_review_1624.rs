@@ -34,6 +34,14 @@
 //!   再計算呼び出し（`recompute_value`）がこの深さを反復的な作業
 //!   スタックで評価し切り、Rust の呼び出しスタックオーバーフローで
 //!   プロセスが abort しないことを確認する（P1 是正の回帰）。
+//! - `eager_sigmoid_propagates_poison_from_checkpoint_freed_input`:
+//!   `push_eager`（`Var::sigmoid` 等、`.value()` で入力を infallible に
+//!   読んでから即座に計算する経路）が、checkpoint 解放済み入力の
+//!   再計算失敗（poison）を出力ノードへ伝播し損ねていた P0 是正の
+//!   回帰（codex-review 指摘。PR #1681 スレッド
+//!   `crates/autodiff/src/tape.rs:1267`）。`m.sigmoid()` の出力が
+//!   `m` の poison を継承し、以後の `sum(None)`（fallible）と
+//!   `Tape::backward` がいずれも `Err` を返すことを確認する。
 
 mod common;
 
@@ -553,4 +561,91 @@ fn deep_checkpoint_chain_recompute_does_not_overflow_stack() {
              同じ計算を再現していることの弱い間接検証）: {v}"
         );
     }
+}
+
+/// **P0 是正の回帰（eager 演算の poison 伝播漏れ。codex-review 指摘。
+/// PR #1681 スレッド `crates/autodiff/src/tape.rs:1267`）**。
+///
+/// `Var::sigmoid`（`push_eager` 経由の eager 演算。`materialize_
+/// fallible` を経由せず `.value()`〈層 2・非 fallible〉で入力を読んで
+/// 即座に計算する）が、checkpoint 解放済み入力の再計算失敗（poison）を
+/// 出力ノードへ伝播していなかった不具合の回帰。
+///
+/// `m = a.matmul(&b)` を checkpoint 区間の**内部**ノードとして解放した
+/// 後（区間の出力は `m.relu()`。`layer2_poisoned_recompute_is_detected_
+/// by_layer1_backward` と同じ `checkpoint_from` パターン）、`m.sigmoid()`
+/// を呼ぶと `Var::sigmoid` 内部の `self.value()` が `m` の再計算
+/// （意図的に失敗させた 2 回目の `gemm`）を誘発し、`m` の
+/// `TapeNode::recompute_failed`（poison）を立てたうえで契約どおり
+/// ゼロテンソルを返す（`eval::sigmoid(0.0) == 0.5`）。
+///
+/// 是正前は `push_eager` がこの poison を無視して `sigmoid` の出力を
+/// 常に `recompute_failed: false` で登録していたため、`sig.sum(None)`
+/// （fallible）が「0.5 の一様値」を正常な計算結果として `Ok` を返し、
+/// `Tape::backward` も poison を検出できずに完走してしまっていた
+/// （fail-closed 契約違反。`.claude/rules/security.md` A08）。是正後は
+/// `push_eager` が `Op::for_each_input` で `m` の poison を検出し
+/// `sig` へ継承するため、`sum(None)`・`backward` のいずれも `Err` を
+/// 返す。
+#[test]
+fn eager_sigmoid_propagates_poison_from_checkpoint_freed_input() {
+    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let ops = InstrumentedOps {
+        inner: common::naive_ops(),
+        gemm_calls: Arc::clone(&gemm_calls),
+        // 1 回目（forward）は成功させ、2 回目（`m.sigmoid()` が
+        // `self.value()` 経由で誘発する `m` の再計算）だけを失敗させる。
+        fail_on_call: Some(2),
+        fail_from_call: None,
+        fail_until_call: None,
+    };
+    let tape = Tape::new_with_ops(Box::new(ops));
+
+    let a = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let b = tape.var(&t(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]));
+
+    // `m` は checkpoint 区間の内部中間ノード（`checkpoint_from` の
+    // `output` ではない）であるため確実に解放される。
+    let m = a.matmul(&b).expect("forward の 1 回目の gemm は成功する");
+    let out = m.relu();
+    let checkpointed_out = out
+        .checkpoint_from(&[&a, &b])
+        .expect("checkpoint_from 自体は forward を再実行しないため成功する");
+    // `checkpointed_out`（区間の出力）は本テストの検証対象ではないが、
+    // `m` を解放するために `checkpoint_from` を呼ぶ必要があるため
+    // 変数として保持する（未使用警告の抑止）。
+    let _ = &checkpointed_out;
+
+    // `m.sigmoid()` は eager 演算（`push_eager` 経由）。内部の
+    // `self.value()` が `m` の再計算（2 回目の gemm・意図的に失敗）を
+    // 誘発し、`m` の poison フラグを立てたうえでゼロテンソル
+    // （`eval::sigmoid(0.0) == 0.5`）を返す。この時点で `Var::sigmoid`
+    // 自身は非 fallible な契約のため panic せず `Var` を返す。
+    let sig = m.sigmoid();
+    assert_eq!(
+        gemm_calls.load(Ordering::SeqCst),
+        2,
+        "1 回目（forward）成功・2 回目（`m.sigmoid()` 経由の再計算）\
+         失敗のシナリオである契約をテスト自身が満たしているかの自己検証"
+    );
+
+    // 是正前は poison が `sig` へ伝播せず、`sum(None)` が「0.5 の一様値」
+    // を正常な計算結果として `Ok` を返してしまっていた。
+    let sum_result = sig.sum(None);
+    assert!(
+        sum_result.is_err(),
+        "checkpoint 解放済み入力 `m` の再計算失敗（poison）が eager 演算 \
+         `sigmoid` の出力へ伝播しておらず、後続の fallible 演算 `sum` が \
+         汚染された値をそのまま `Ok` として返してしまっている: {sum_result:?}"
+    );
+
+    // `Tape::backward` も同じ poison 検出（`materialize_fallible` 冒頭の
+    // `poisoned_err`）により `Err` を返すべき（ゼロ勾配のまま静かに
+    // 成功してはならない）。
+    let backward_result = tape.backward(&sig);
+    assert!(
+        backward_result.is_err(),
+        "poison 済みの eager 演算出力 `sig` を `Tape::backward` が検出できず、\
+         ゼロ勾配のまま backward が成功してしまっている: {backward_result:?}"
+    );
 }

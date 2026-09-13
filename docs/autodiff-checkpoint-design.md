@@ -101,6 +101,15 @@ fn recompute_value(
   - `layer2_poisoned_recompute_is_detected_by_layer1_backward` — checkpoint 解放済みノード自身（`m`）が層 2 で先に poison された場合の検出（既存の `lazy_leaf_value_fallible` の poison 検査で成立）
   - `layer2_poison_propagates_to_lazy_descendant` — `m` を一度も単独で読み出さず、lazy な子孫 `out = m.relu()` を層 2 から直接実体化した場合の伝播漏れの検出（本節の追加是正が必要な回帰）
 
+### 3.5.1 eager 演算（`push_eager`）への poison 伝播（PR #1681 codex-review 追加指摘。イシュー #1624）
+
+上記 §3.5 の伝播は「未実体化 lazy elementwise 連鎖」を対象にしたものであり、`Var::sigmoid` 等の **eager 演算**（`Tape::push_eager` 経由で登録される非 elementwise・常実体化のノード。`Op::MatMul`／`Sum`／`Max`／`Sigmoid`／`MseLoss`／`LinearResident` 等）は対象外だった。`Var::sigmoid` は非 fallible な契約を保つため入力を `materialize_fallible`（層 1）ではなく `self.value()`（層 2）で読む——`m = a.matmul(&b)` を checkpoint 区間の内部ノードとして解放した後、`m.sigmoid()` の再計算失敗が `m` に poison を立てても、`push_eager` は新規登録するノードを常に `recompute_failed: false` で登録していたため、`sigmoid` の出力が「0.5 の一様値」を正常な計算結果として以後の `sum(None)`（fallible）・`Tape::backward` へ渡してしまっていた（fail-closed 契約違反。`.claude/rules/security.md` A08）。
+
+- **`Op::for_each_input`**（`is_checkpoint_eligible` と同じくワイルドカードなしの網羅 match）を追加した。`self` が参照する全入力 `NodeId` を列挙する（`Op::Concat` のみ複数回・`Option<NodeId>` フィールドは `Some` の場合のみ）。新しい `Op` variant を追加した際に「どのフィールドが入力ノードか」の判断漏れをコンパイルエラーで検出する。
+- **`Tape::push_eager`** は新規ノード登録の直前に `op.for_each_input` で全入力を走査し、`elementwise_leaves_poisoned(&nodes, input_id)`（§3.5 と同じ補助関数の再利用。入力自身が直接 poison されている場合・入力が未実体化の lazy elementwise 連鎖でその葉が poison されている場合の両方を検出する）がいずれかの入力で真なら、登録するノード自身も `recompute_failed: true` で登録する。
+- **本チェックが実際に効く経路は限定的**: `push_eager` の呼び出し元のうち `matmul`／`sum`／`max`／`rnn_cell`／線形代数系（`inv`／`solve`／`det`／`cholesky`／`qr`／`svd`）等は入力を `materialize_fallible`（層 1）で読み `?` で poison を即座に `Err` 化するため、これらは元々 poison した入力で `push_eager` へ到達しない（`elementwise_leaves_poisoned` は常に false）。実際に効くのは `Var::sigmoid`（`.value()`／層 2 経由）のような infallible 読み出しを行う経路のみであり、将来同種の経路が追加された場合の安全網としても機能する。
+- 回帰テストは `crates/autodiff/tests/checkpoint_review_1624.rs::eager_sigmoid_propagates_poison_from_checkpoint_freed_input`（`m.sigmoid()` の出力が `m` の poison を継承し、以後の `sum(None)`・`Tape::backward` がいずれも `Err` を返すことを確認する）。
+
 ## 4. reentrant init 問題と解決（実装中に発見した設計上の落とし穴）
 
 当初、`materialize_non_fallible`（`OnceCell::get_or_init` を使う層 2）の `get_or_init` クロージャ内で、対象ノード自身の値を再計算し `OnceCell::set()` する実装にしたところ、`thread '...' panicked ... reentrant init` が発生した。原因は `OnceCell::get_or_init` が自身のクロージャ実行中に同じセルへの書き込み（`set`）を検出すると reentrant として panic する契約のため。

@@ -774,6 +774,144 @@ impl Op {
             | Op::LayerNorm { .. } => false,
         }
     }
+
+    /// `self` が参照する入力 `NodeId` を `f` へ順に渡す（`Op::Concat`
+    /// のみ複数回・`Option<NodeId>` フィールドは `Some` の場合のみ）。
+    /// `Tape::push_eager` の poison 伝播判定（イシュー #1624 PR #1681
+    /// codex-review P0 是正。下記 doc 参照）が使う唯一の呼び出し元。
+    ///
+    /// **網羅 match（ワイルドカードなし）とする理由**: `is_checkpoint_
+    /// eligible` と同じ——新しい `Op` variant を追加するたびに「どの
+    /// フィールドが入力ノードか」をコンパイルエラーで判断させ、
+    /// 判断漏れのまま既定で「入力なし」扱いにしてしまう事故
+    /// （poison 伝播の抜け穴。`.claude/rules/security.md` A08）を防ぐ。
+    fn for_each_input(&self, mut f: impl FnMut(NodeId)) {
+        match self {
+            Op::Leaf | Op::ResidentLeaf { .. } => {}
+            Op::MatMul(a, b) | Op::Add(a, b) | Op::Mul(a, b) | Op::Solve { a, b } => {
+                f(*a);
+                f(*b);
+            }
+            Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) | Op::Sigmoid(a) => f(*a),
+            Op::Sum { input, .. }
+            | Op::Max { input, .. }
+            | Op::Reshape { input }
+            | Op::Transpose { input, .. }
+            | Op::Inv { input }
+            | Op::Det { input }
+            | Op::Cholesky { input }
+            | Op::QrQ { input, .. }
+            | Op::QrR { input, .. }
+            | Op::SvdU { input, .. }
+            | Op::SvdS { input, .. }
+            | Op::SvdVh { input, .. }
+            | Op::MatrixNorm { input, .. }
+            | Op::Permute { input, .. }
+            | Op::BroadcastTo { input }
+            | Op::Narrow { input, .. }
+            | Op::Softmax { input, .. }
+            | Op::LogSoftmax { input, .. }
+            | Op::CrossEntropyLoss { logits: input, .. } => f(*input),
+            Op::MseLoss { pred, target, .. } => {
+                f(*pred);
+                f(*target);
+            }
+            Op::LinearResident {
+                input,
+                weight,
+                bias,
+                ..
+            }
+            | Op::LinearAct {
+                input,
+                weight,
+                bias,
+                ..
+            } => {
+                f(*input);
+                f(*weight);
+                if let Some(b) = bias {
+                    f(*b);
+                }
+            }
+            Op::RmsNorm { input, weight, .. } => {
+                f(*input);
+                if let Some(w) = weight {
+                    f(*w);
+                }
+            }
+            Op::LayerNorm {
+                input,
+                weight,
+                bias,
+                ..
+            } => {
+                f(*input);
+                if let Some(w) = weight {
+                    f(*w);
+                }
+                if let Some(b) = bias {
+                    f(*b);
+                }
+            }
+            Op::RnnCell {
+                x,
+                h_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+            }
+            | Op::GruCell {
+                x,
+                h_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+                ..
+            } => {
+                f(*x);
+                f(*h_prev);
+                f(*w_ih);
+                f(*w_hh);
+                if let Some(b) = b_ih {
+                    f(*b);
+                }
+                if let Some(b) = b_hh {
+                    f(*b);
+                }
+            }
+            Op::LstmCell {
+                x,
+                h_prev,
+                c_prev,
+                w_ih,
+                w_hh,
+                b_ih,
+                b_hh,
+                ..
+            } => {
+                f(*x);
+                f(*h_prev);
+                f(*c_prev);
+                f(*w_ih);
+                f(*w_hh);
+                if let Some(b) = b_ih {
+                    f(*b);
+                }
+                if let Some(b) = b_hh {
+                    f(*b);
+                }
+            }
+            Op::LstmHidden { cell, .. } => f(*cell),
+            Op::Concat { inputs, .. } => {
+                for i in inputs {
+                    f(*i);
+                }
+            }
+        }
+    }
 }
 
 /// テープ上の 1 ノード。演算種別（`Op`）・構造的に確定する出力 shape・
@@ -855,6 +993,17 @@ pub(crate) struct TapeNode {
     /// の本番経路での握り潰し禁止方針）。層 2 は契約上 infallible の
     /// ままだが、層 1 経由（`Tape::backward`）で汚染を検出できるため
     /// 「ゼロ勾配が静かに成功として返る」事故を防げる。
+    ///
+    /// **セットされるもう 1 つの経路（codex-review 指摘・イシュー
+    /// #1624 PR #1681 レビュー）**: 上記の [`recompute_infallible`]
+    /// 直接セットに加え、[`Tape::push_eager`] が新規ノード登録時に
+    /// `op` の全入力（[`Op::for_each_input`]）を検査し、いずれかが
+    /// 既に poison 済みなら**登録と同時に** `true` を継承する。これは
+    /// `Var::sigmoid` 等（`materialize_fallible` を経由せず `.value()`
+    /// で入力を infallible に読んで即座に計算する eager 演算）が、
+    /// checkpoint 解放済み入力の再計算失敗を出力へ伝播し損ねると
+    /// 「poison された入力からの計算結果が正常値として登録される」
+    /// 事故になるため（`push_eager` doc 参照）。
     pub(crate) recompute_failed: std::cell::Cell<bool>,
 }
 
@@ -1257,6 +1406,44 @@ impl Tape {
         if !matches!(op, Op::Leaf) {
             self.freeze_leaf_prefix(nodes.len());
         }
+        // **P0 是正（codex-review 指摘・イシュー #1624 PR #1681
+        // レビュー）**: eager 演算（`Var::sigmoid` 等、`.value()` で
+        // 入力を infallible に読んでから即座に計算する経路）は、
+        // その入力ノードが checkpoint 再計算失敗により poison
+        // （`TapeNode::recompute_failed`）済みでも出力ノードには
+        // 反映せず常に `recompute_failed: false` で登録していたため、
+        // poison が失われ後続の fallible 演算（`materialize_
+        // fallible`）が汚染された値を誤って `Ok` として返していた
+        // （例: `m = a.matmul(&b)` を checkpoint 区間の内部ノードと
+        // して解放後、`m.sigmoid()` の再計算失敗が `m` に poison を
+        // 立てても `sigmoid` の出力ノードには伝わらなかった）。
+        //
+        // `op` が参照する全入力（`Op::for_each_input`。網羅的 match で
+        // 新規 variant の更新漏れをコンパイルエラーで検出する）の
+        // いずれかが poison 済みなら、出力ノードも `recompute_failed:
+        // true` で登録し、以後 `materialize_fallible`／
+        // `lazy_leaf_value_fallible`（`poisoned_err` 経由）が確実に
+        // `Err` へ変換できるようにする。`elementwise_leaves_poisoned`
+        // を再利用することで、入力自身が直接 poison されている場合
+        // だけでなく、入力が未実体化の elementwise 連鎖（`Op::Add`/
+        // `Mul`/`Relu`/`Exp`/`Tanh`）でその葉が poison されている
+        // 場合も検出する（`materialize_non_fallible` の P0 是正と
+        // 同じ関数を使い判定ロジックを重複させない）。
+        //
+        // 本 push_eager の呼び出し元のうち `matmul`／`sum`／`max`／
+        // `rnn_cell`／線形代数系等は `materialize_fallible`（層 1）で
+        // 入力を読み `?` で poison を即座に `Err` 化するため、これらは
+        // 元々 poison した入力で本関数へ到達しない（`elementwise_
+        // leaves_poisoned` は常に false を返す）。本チェックは
+        // `Var::sigmoid`（`.value()`／層 2 経由）のような infallible
+        // 読み出しを行う経路、および将来同種の経路が追加された場合の
+        // 安全網として機能する。
+        let mut poisoned = false;
+        op.for_each_input(|input_id| {
+            if elementwise_leaves_poisoned(&nodes, input_id) {
+                poisoned = true;
+            }
+        });
         let id = NodeId(nodes.len());
         nodes.push(TapeNode {
             op,
@@ -1264,7 +1451,7 @@ impl Tape {
             value: OnceCell::from(value),
             lazy_chain_size: 0,
             recompute: false,
-            recompute_failed: std::cell::Cell::new(false),
+            recompute_failed: std::cell::Cell::new(poisoned),
         });
         id
     }
