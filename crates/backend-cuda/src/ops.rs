@@ -35,9 +35,9 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DType, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ScalarBinaryOp, ScalarUnaryOp, SegmentKey, SegmentResource, SegmentRun, ShapeError,
-    SvdFactors, Tensor, UnaryElementwiseOp, reduce_out_shape, require_same_shape, row_norm_layout,
-    row_softmax_layout,
+    QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey, SegmentResource,
+    SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, gather_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -1254,6 +1254,46 @@ fn map_reduce_error(err: CudaError) -> BackendError {
         }
         other => map_cuda_error(other),
     }
+}
+
+/// `gather_scatter::CudaGatherScatter` が返す `CudaError` を
+/// `BackendError` へ写像する（イシュー #1777）。`InvalidGatherScatterShape`
+/// （起動前の要素数積オーバーフロー・`i32::MAX` 上限・長さ不一致検査の
+/// 失敗。`ops.rs` 側の shape 検証〈`gather_out_shape`／
+/// `scatter_out_shape`〉を通過した入力からは実質到達しない防御的経路）
+/// は `map_reduce_error` の `InvalidReduceShape` と同じ理由で
+/// `ShapeError::ElementCountOverflow` へ、それ以外は既存 [`map_cuda_error`]
+/// へ委譲する。
+fn map_gather_scatter_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::InvalidGatherScatterShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
+}
+
+/// shape の要素数積を `checked_mul` の畳み込みで検査する（PR #1795
+/// codex-review 指摘の是正・イシュー #1777）。`Tensor::contiguous()`
+/// は内部で `is_contiguous()` → `numel()`（`shape.iter().product()`。
+/// 無検査の乗算）を呼ぶため、たとえば `shape=[0, 2, usize::MAX]` を
+/// `transpose(0, 2)` して得られる `[usize::MAX, 2, 0]`（最終的な要素数
+/// は 0 だが `usize::MAX * 2` の中間積で `usize` の範囲を超える）を
+/// `CudaBackendOps::gather`／`scatter` に渡すと、`overflow-checks` 有効
+/// ビルドで `numel()` 内の乗算が panic しうる（`gather_out_shape`／
+/// `scatter_out_shape` は出力 shape の要素数をチェックするだけで、
+/// `input`／`index`／`src` それぞれの実体化前 shape 自体はここまで
+/// 検査していない）。本関数を各 `.contiguous()` 呼び出しの直前で
+/// 呼び、オーバーフロー時は型付きエラー
+/// `ShapeError::ElementCountOverflow` を返す（本番経路で panic
+/// させない方針。`.claude/rules/coding-rust.md`）。
+/// `gather_scatter::checked_numel`（`pub(crate)` ではなく private の
+/// ため crate を跨いで共有できない）と同型の検査を複製する。
+fn checked_shape_numel(shape: &[usize]) -> Result<usize, ShapeError> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or(ShapeError::ElementCountOverflow)
 }
 
 impl BackendOps for CudaBackendOps {
@@ -2713,6 +2753,163 @@ impl BackendOps for CudaBackendOps {
         })
     }
 
+    /// `BackendOps::gather` の CUDA 実装（イシュー #1777）。
+    /// [`gather_out_shape`] で `input`／`index` の shape を再検査し、
+    /// `index` の値が `[0, input.shape()[dim])` 範囲内であることを
+    /// ホスト側で全走査して独立検証（`Var` 側の forward 時点検証と
+    /// 重複するが、`CudaBackendOps::gather` を `Var` を経由せず直接
+    /// 呼び出す経路でも範囲外 index による無言の誤った結果〈カーネル側
+    /// フォールバックが `0.0` を書いて `Ok` を返してしまう〉を防ぐため。
+    /// `scatter` の同処理・`backend-cpu::ops::CpuBackendOps::gather` と
+    /// 同じ二重検査方針。`.claude/rules/security.md` A08）してから
+    /// `gather_scatter::run_gather_f32` へ委譲する。
+    fn gather(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        index: &Tensor<i32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = gather_out_shape(input.shape(), index.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+
+        // 出力が空（`out_shape` がいずれかの軸で 0）なら、`input`／
+        // `index` の shape に依らず結果は必ず空である。`dim` 軸は
+        // `gather_out_shape` の等値検査から除外されるため（呼び出し元が
+        // 繰り返し gather 用に index 側で自由に軸長を選べる契約）、
+        // `input.shape()` だけが `dim` 軸に巨大な値を持ち、かつ非 `dim`
+        // 軸のどこかが 0 という組合せ（例: transpose 由来の
+        // `[usize::MAX, 2, 0]`）が有効な入力として構築されうる——この
+        // とき `out_shape` 自身（`index.shape()` と同一）は `dim` 軸に
+        // 小さい値を選べるため素朴な積でもオーバーフローしない一方、
+        // 巨大な `input.shape()` へ後段の `checked_shape_numel`／
+        // `.contiguous()` を無条件適用すると誤って拒否・panic しうる
+        // （PR #1795 Cursor Bugbot 指摘）。空出力を先に確定させ、
+        // `input`／`index` の実体化（`.contiguous()`）自体を回避する
+        // ことでこの非対称を解消する（`out_shape` 自体が病的な場合は
+        // 実際に要素数積オーバーフローの恐れがあるため `Tensor::new` の
+        // 検査へ委ね、`ElementCountOverflow` を返す——CPU 側
+        // `backend-cpu::gather_scatter` の既存契約〈out_shape 由来の
+        // オーバーフローは拒否する〉と同じ扱い）。
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+
+        // `.contiguous()`（内部で `numel()` の無検査乗算を呼ぶ）より前に
+        // 各 shape の要素数積をオーバーフロー検査する（PR #1795
+        // codex-review 指摘の是正。上記 `checked_shape_numel` doc 参照）。
+        // 直上の早期リターンにより、ここへ到達する `input.shape()`／
+        // `index.shape()` はいずれも非 `dim` 軸に 0 を含まない
+        // （含めば `out_shape` にも同じ 0 が現れ早期リターン済みのため）。
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_shape_numel(index.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let index_owned = index.contiguous();
+        let index_slice = index_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gather: index not contiguous".into())
+        })?;
+        let dim_size = input.shape()[dim];
+        for &v in index_slice {
+            if v < 0 || (v as usize) >= dim_size {
+                return Err(BackendError::ShapeMismatch(ShapeError::IndexOutOfRange {
+                    dim,
+                    index: v as i64,
+                    dim_size,
+                }));
+            }
+        }
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("gather: input not contiguous".into())
+        })?;
+
+        let gs = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_gather_scatter(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_gather_scatter_error, || {
+            gs.run_gather_f32(input_slice, index_slice, input.shape(), index.shape(), dim)
+        })?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::scatter` の CUDA 実装（イシュー #1777）。
+    /// [`scatter_out_shape`] で `input`／`index`／`src` の shape を
+    /// 再検査し、`index` の値が `[0, input.shape()[dim])` 範囲内である
+    /// ことをホスト側で全走査して独立検証（`Var` 側の forward 時点検証と
+    /// 重複するが、`CudaBackendOps::scatter` を `Var` を経由せず直接
+    /// 呼び出す経路でも誤ったデバイス書き込みを防ぐための判定迂回経路
+    /// 排除。`backend-cpu::gather_scatter::scatter` モジュール doc と
+    /// 同じ理由。`.claude/rules/security.md` A08）してから
+    /// `gather_scatter::run_scatter_f32` へ委譲する。
+    fn scatter(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        index: &Tensor<i32>,
+        src: &Tensor<f32>,
+        reduce: ScatterReduce,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = scatter_out_shape(input.shape(), index.shape(), src.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+
+        // `.contiguous()`（内部で `numel()` の無検査乗算を呼ぶ）より前に
+        // 各 shape の要素数積をオーバーフロー検査する（PR #1795
+        // codex-review 指摘の是正。`checked_shape_numel` doc 参照）。
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_shape_numel(index.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_shape_numel(src.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let index_owned = index.contiguous();
+        let index_slice = index_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scatter: index not contiguous".into())
+        })?;
+        let dim_size = input.shape()[dim];
+        for &v in index_slice {
+            if v < 0 || (v as usize) >= dim_size {
+                return Err(BackendError::ShapeMismatch(ShapeError::IndexOutOfRange {
+                    dim,
+                    index: v as i64,
+                    dim_size,
+                }));
+            }
+        }
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scatter: input not contiguous".into())
+        })?;
+        let src_owned = src.contiguous();
+        let src_slice = src_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scatter: src not contiguous".into())
+        })?;
+
+        let gs = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_gather_scatter(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_gather_scatter_error, || {
+            gs.run_scatter_f32(
+                input_slice,
+                index_slice,
+                src_slice,
+                input.shape(),
+                index.shape(),
+                dim,
+                reduce,
+            )
+        })?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// `BackendOps::scalar_unary` の CUDA 実装（イシュー #1700・#1702）。
     /// `Sqrt`／`Clamp` のみ実装済み（`kernels_scalar_op` モジュール doc
     /// 「スコープ」参照）で、他 kind は `Unsupported` を返しホスト参照
@@ -3465,6 +3662,65 @@ mod tests {
             err,
             BackendError::KernelLaunchFailed(msg) if msg.contains("negative SM count")
         ));
+    }
+
+    /// [`checked_shape_numel`]: PR #1795 codex-review 指摘の再現・是正
+    /// 確認（イシュー #1777）。`shape=[0, 2, usize::MAX]` を
+    /// `transpose(0, 2)` すると `[usize::MAX, 2, 0]` になり、最終的な
+    /// 要素数は 0 だが中間積 `usize::MAX * 2` が `usize` の範囲を超える。
+    /// `.iter().product()`（`Tensor::numel()` の実装）は無検査のため
+    /// `overflow-checks` 有効ビルドで panic しうるが、`checked_mul` の
+    /// 畳み込みである本関数は panic せず型付きエラーを返す。
+    #[test]
+    fn checked_shape_numel_rejects_intermediate_overflow_even_when_final_product_is_zero() {
+        let shape = [usize::MAX, 2, 0];
+        // 素朴な `.iter().product::<usize>()` は途中で overflow する
+        // （このテスト自体は `overflow-checks` の有無に関わらず観測用途
+        // でしか使わず、`checked_shape_numel` の型付きエラー化が本旨）。
+        let err = checked_shape_numel(&shape).expect_err("intermediate overflow must be rejected");
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    /// [`checked_shape_numel`]: 通常形状は要素数積をそのまま返す。
+    #[test]
+    fn checked_shape_numel_accepts_ordinary_shape() {
+        assert_eq!(checked_shape_numel(&[2, 3, 4]).expect("no overflow"), 24);
+    }
+
+    /// [`CudaBackendOps::gather`] の回帰テスト（PR #1795 Cursor Bugbot
+    /// 指摘の是正確認・イシュー #1777）。`gather_out_shape` は `dim` 軸を
+    /// 等値検査から除外するため、`input.shape()` が `dim` 軸に巨大な値
+    /// （`usize::MAX`）を持ちつつ非 `dim` 軸のどこかが `0` という有効な
+    /// 形状（`transpose` で構築。`Tensor::new` へ直接 `[usize::MAX, 2,
+    /// 0]` を渡すと構築自体がオーバーフロー検査で拒否されるため、
+    /// `[0, 2, usize::MAX]` として構築してから軸を入れ替えて再現する
+    /// ——`backend-cpu::gather_scatter` の同型回帰テストと同じ手法）を、
+    /// `index`（＝`out_shape`）側は `dim` 軸を小さい値に選んで構築できる
+    /// （`out_shape` 自体は病的でない）。この入力に対し `CudaBackendOps
+    /// ::gather` は空出力を早期リターンし、`input.shape()` へ
+    /// `checked_shape_numel`／`.contiguous()` を適用しない（適用すると
+    /// 中間積オーバーフローで誤って `Err` を返すか、`overflow-checks`
+    /// 有効ビルドで `Tensor::numel()` が panic しうる）。早期リターンは
+    /// 実デバイスへ触れる前（`with_driver_call` 呼び出し前）に完了する
+    /// ため、GPU 非依存の通常テストとして Linux CI でも実行できる。
+    #[test]
+    fn gather_returns_empty_for_dim_axis_large_input_with_zero_sized_other_axis() {
+        let input_base = Tensor::<f32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let input = input_base.transpose(0, 2).unwrap();
+        assert_eq!(input.shape(), &[usize::MAX, 2, 0]);
+
+        // `index`（`out_shape`）は `dim`（=0）軸を小さい値に選べるため
+        // 病的にならない: `gather_out_shape` は非 `dim` 軸（1・2）の
+        // 等値のみを課し、`dim` 軸（0）は index 側で自由に選べる契約
+        // （`ops_shape.rs::gather_out_shape` doc）。
+        let index = Tensor::<i32>::new(Vec::new(), &[3usize, 2usize, 0usize]).unwrap();
+
+        let ops = CudaBackendOps::new(0);
+        let out = ops
+            .gather(&input, 0, &index)
+            .expect("empty gather must succeed");
+        assert_eq!(out.shape(), &[3, 2, 0]);
+        assert_eq!(out.numel(), 0);
     }
 
     #[test]
