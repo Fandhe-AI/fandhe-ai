@@ -270,6 +270,20 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
 /// 経由でのみ安全に呼べるため `unsafe fn` とする（`super::avx2::kernel_unchecked_with_ldc`。
 /// x86_64 限定のためコードスパン表記）と同型）。
 ///
+/// ## 保留中 lazy ZA save の自己防御（codex-review P0 再指摘対応）
+///
+/// 本関数は `super::SmeKernel::run_with_ldc`〈`pub(crate)` のため
+/// コードスパン表記〉経由に限らず外部から直接呼び出しうる `pub unsafe fn`
+/// のため、`# Safety` 契約が SME 対応・SVL のみを要求し
+/// `has_pending_lazy_za_save`〈非公開関数のためコードスパン表記〉の事前
+/// 確認を呼び出し元の努力目標にとどめる設計では、契約を字面どおり満たした
+/// 呼び出しでも保留中の lazy ZA save を破壊しうる（本モジュール「背景」
+/// 節）。そこで本関数自身が `has_pending_lazy_za_save` を検査し、非ゼロ
+/// （保留中）であれば `compute`〈非公開関数のためコードスパン表記〉を
+/// 一切呼ばず（＝ZA に一切触れず）`scalar_fallback`〈非公開関数のため
+/// コードスパン表記〉（`compute` と同一の演算列で bit 完全一致）へ
+/// 切り替える。
+///
 /// # Safety
 ///
 /// 呼び出し元は実行 CPU が SME・非拡張 FP32 外積（`SME_F32F32`）に対応し
@@ -277,7 +291,10 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
 /// コードスパン表記。64 バイト）であることを保証しなければならない
 /// （`super::SmeKernel::try_new`〈`pub(crate)` のためコードスパン表記〉
 /// 経由の実行時検出済み呼び出しがこれを
-/// 満たす）。
+/// 満たす）。**`TPIDR2_EL0` が非ゼロ（保留中の lazy ZA save あり）の場合は
+/// 本関数が自動的にフォールバックへ切り替えるため、呼び出し元が事前に
+/// `has_pending_lazy_za_save`〈非公開関数のためコードスパン表記〉を確認
+/// する必要はない**（上記「保留中 lazy ZA save の自己防御」節）。
 pub unsafe fn kernel_unchecked_with_ldc(
     ap: &[f32],
     bp: &[f32],
@@ -287,8 +304,19 @@ pub unsafe fn kernel_unchecked_with_ldc(
 ) -> Result<(), super::TileBoundsError> {
     super::check_panel_lengths(MR, NR, kc_len, ap.len(), bp.len())?;
     super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
+    // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）により実行 CPU は
+    // SME 対応（`TPIDR2_EL0` へのアクセスが安全。`has_pending_lazy_za_save`
+    // の `# Safety` 契約を満たす）。
+    if unsafe { has_pending_lazy_za_save() } {
+        // 保留中の lazy ZA save を検出。`compute` を呼ばず ZA に一切
+        // 触れないフォールバックへ切り替える（上記「保留中 lazy ZA save
+        // の自己防御」節）。長さ・境界は直前の検査で確認済み。
+        scalar_fallback(ap, bp, c, ldc, kc_len);
+        return Ok(());
+    }
     // SAFETY: [`compute`] のドキュメント参照（直前の検査により長さ前提を
-    // 満たし、SME 対応は本関数の呼び出し元契約として引き継ぐ）。
+    // 満たし、SME 対応は本関数の呼び出し元契約として引き継ぐ。上記検査で
+    // 保留中の lazy ZA save がないことも確認済み）。
     unsafe { compute(ap, bp, c, ldc, kc_len) };
     Ok(())
 }
@@ -297,9 +325,18 @@ pub unsafe fn kernel_unchecked_with_ldc(
 /// `super::avx2::kernel_unchecked`（x86_64 限定のためコードスパン表記）
 /// と同型）。
 ///
+/// ## 保留中 lazy ZA save の自己防御
+///
+/// [`kernel_unchecked_with_ldc`] と同じ理由・同じ方式で
+/// `has_pending_lazy_za_save`〈非公開関数のためコードスパン表記〉を自己
+/// 検査し、保留中であれば `scalar_fallback`〈非公開関数のためコード
+/// スパン表記〉へ切り替える（同関数「保留中 lazy ZA save の自己防御」
+/// 節参照）。
+///
 /// # Safety
 ///
-/// [`kernel_unchecked_with_ldc`] と同一。
+/// [`kernel_unchecked_with_ldc`] と同一（`TPIDR2_EL0` 非ゼロ時の
+/// 自動フォールバックを含む）。
 pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
     assert!(
         super::panel_len_matches(ap.len(), MR, kc_len),
@@ -312,7 +349,16 @@ pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: us
         bp.len()
     );
     assert_eq!(c.len(), MR * NR, "C tile length mismatch");
-    // SAFETY: [`compute`] のドキュメント参照（呼び出し元契約を引き継ぐ）。
+    // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）により実行 CPU は
+    // SME 対応（`has_pending_lazy_za_save` の `# Safety` 契約を満たす）。
+    if unsafe { has_pending_lazy_za_save() } {
+        // 保留中の lazy ZA save を検出。`compute` を呼ばずフォールバック
+        // へ切り替える（[`kernel_unchecked_with_ldc`] と同型）。
+        scalar_fallback(ap, bp, c, NR, kc_len);
+        return;
+    }
+    // SAFETY: [`compute`] のドキュメント参照（呼び出し元契約を引き継ぐ。
+    // 上記検査で保留中の lazy ZA save がないことも確認済み）。
     unsafe { compute(ap, bp, c, NR, kc_len) };
 }
 
@@ -607,6 +653,143 @@ mod tests {
         // panic しないことのみを確認する。
     }
 
+    /// ZA0 へ既知パターン（`za_pattern.len() == MR * NR`）を書き込み、
+    /// `smstop sm`（PSTATE.SM のみ解除・PSTATE.ZA は 1 のまま =
+    /// **dormant**）してから `TPIDR2_EL0`（符号化名 `S3_3_C13_C0_5`）へ
+    /// ダミーの非ゼロ値を設定する（AAPCS64 の「保留中 lazy ZA save」を
+    /// 模す。実際の TPIDR2 ブロック・save バッファは用意しない — 本実装の
+    /// フォールバック方式は ZA へ一切触れないため参照されない）。
+    ///
+    /// [`sme_kernel_falls_back_without_corrupting_dormant_za_when_lazy_save_pending`]・
+    /// [`sme_kernel_unchecked_with_ldc_falls_back_without_corrupting_dormant_za_when_lazy_save_pending`]・
+    /// [`sme_kernel_unchecked_falls_back_without_corrupting_dormant_za_when_lazy_save_pending`]
+    /// で共有する検証手順の手順 1 を切り出した共通ヘルパ（codex-review
+    /// P0 指摘 `PRRT_kwDOTuUCJc6h0ZMD` およびその追加指摘への対応）。
+    ///
+    /// # Safety
+    ///
+    /// 呼び出し元は実行 CPU が SME 対応であることを保証しなければ
+    /// ならない（`SmeKernel::try_new()` を確認済みのスレッドから spawn
+    /// したクロージャ内で呼ぶ想定）。`za_pattern.len() == MR * NR` を
+    /// 満たさない場合の挙動は未定義（`ld1w` が範囲外を読む）。
+    ///
+    /// `.arch_extension sme` はコンパイル時のみに影響。`smstart`
+    /// （Z/P レジスタ不定化）に対応する `out("v0") _ ... out("p15") _`
+    /// 全列挙・`mova` の index レジスタ `w12` の宣言は `compute`
+    /// （本モジュール上部）と同型の契約。フラグ変更命令（`cmp`/`b.lt`）を
+    /// 使うため `preserves_flags` は付けない。`ld1w`（メモリアクセス）を
+    /// 使うため `nomem`/`pure` は付けない。スタック未使用のため
+    /// `options(nostack)`。本関数はテスト専用の ZA 状態構築であり
+    /// `compute` の呼び出し規約とは独立。
+    unsafe fn enter_dormant_za_with_pending_lazy_save(za_pattern: &[f32]) {
+        const DUMMY_TPIDR2: u64 = 0x1234_5678_9abc_def0;
+        // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）を引き継ぐ。
+        unsafe {
+            let p = za_pattern.as_ptr();
+            asm!(
+                ".arch_extension sme",
+                "smstart",
+                "ptrue p0.s",
+                "mov w12, #0",
+                "20:",
+                "ld1w {{z0.s}}, p0/z, [{p}]",
+                "mova za0h.s[w12, #0], p0/m, z0.s",
+                "add {p}, {p}, #64",
+                "add w12, w12, #1",
+                "cmp w12, #16",
+                "b.lt 20b",
+                // SM のみ解除（ZA は有効のまま）: dormant 状態。
+                "smstop sm",
+                // AAPCS64 の「保留中 lazy ZA save」を模すダミーの
+                // TPIDR2_EL0（実際の save バッファは用意しない。
+                // フォールバック方式は ZA へ一切触れないため
+                // 参照されない）。
+                "msr S3_3_C13_C0_5, {dummy}",
+                p = inout(reg) p => _,
+                dummy = in(reg) DUMMY_TPIDR2,
+                out("w12") _,
+                out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+                out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
+                out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _,
+                out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+                out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
+                out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
+                out("v30") _, out("v31") _,
+                out("p0") _, out("p1") _, out("p2") _, out("p3") _, out("p4") _,
+                out("p5") _, out("p6") _, out("p7") _, out("p8") _, out("p9") _,
+                out("p10") _, out("p11") _, out("p12") _, out("p13") _, out("p14") _,
+                out("p15") _,
+                options(nostack),
+            );
+        }
+    }
+
+    /// dormant のあいだ（PSTATE.SM=0, PSTATE.ZA=1）に検証対象の呼び出し
+    /// （`kernel.run`／`kernel_unchecked_with_ldc`／`kernel_unchecked`）を
+    /// 済ませたあと、`smstart sm`（PSTATE.ZA は 1 のままなので 0→1 遷移
+    /// によるゼロ初期化は発生しない — 実機で事前確認済み）で再びストリー
+    /// ミングモードへ戻って ZA0 を `out.len() == MR * NR` へ読み出し、
+    /// 最後に `TPIDR2_EL0` をクリアする（
+    /// [`enter_dormant_za_with_pending_lazy_save`] と対になる検証手順の
+    /// 手順 4〜5 を切り出した共通ヘルパ）。
+    ///
+    /// # Safety
+    ///
+    /// [`enter_dormant_za_with_pending_lazy_save`] と同一（実行 CPU が
+    /// SME 対応であること。`out.len() == MR * NR` を満たさない場合の
+    /// 挙動は未定義）。
+    unsafe fn read_za0_and_clear_pending_lazy_save(out: &mut [f32]) {
+        // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）を引き継ぐ。
+        // `smstart sm` で SM のみ再度有効化するため、既に有効な
+        // PSTATE.ZA=1 の内容は変化しない（PSTATE.ZA が 0→1 へ遷移する
+        // ときにのみゼロ初期化されるという Arm SME の仕様を本実装
+        // セッションで実機事前確認済み）。
+        unsafe {
+            let out_p = out.as_mut_ptr();
+            asm!(
+                ".arch_extension sme",
+                "smstart sm",
+                "ptrue p0.s",
+                "mov w12, #0",
+                "21:",
+                "mova z1.s, p0/m, za0h.s[w12, #0]",
+                "st1w {{z1.s}}, p0, [{out_p}]",
+                "add {out_p}, {out_p}, #64",
+                "add w12, w12, #1",
+                "cmp w12, #16",
+                "b.lt 21b",
+                "smstop",
+                out_p = inout(reg) out_p => _,
+                out("w12") _,
+                out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+                out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
+                out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _,
+                out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+                out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
+                out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
+                out("v30") _, out("v31") _,
+                out("p0") _, out("p1") _, out("p2") _, out("p3") _, out("p4") _,
+                out("p5") _, out("p6") _, out("p7") _, out("p8") _, out("p9") _,
+                out("p10") _, out("p11") _, out("p12") _, out("p13") _, out("p14") _,
+                out("p15") _,
+                options(nostack),
+            );
+        }
+
+        // 後始末（TPIDR2_EL0 をクリア）。
+        //
+        // SAFETY: 直前までの手順で実行 CPU の SME 対応を確認済み。
+        // `mrs`/`msr` はメモリアクセス・スタック使用を伴わずフラグも
+        // 変更しない（`has_pending_lazy_za_save` と同型の宣言）。
+        unsafe {
+            asm!(
+                ".arch_extension sme",
+                "msr S3_3_C13_C0_5, xzr",
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+    }
+
     /// 保留中 lazy ZA save（`TPIDR2_EL0 != 0`）がある状態で `kernel.run`
     /// を呼んだとき、`compute`（`fmopa` 経路。ZA0 を上書きする）を一切
     /// 実行せず、呼び出し元が dormant のまま残した ZA0 の内容を破壊
@@ -616,26 +799,20 @@ mod tests {
     ///
     /// ## 検証手順
     ///
-    /// 1. 専用スレッド上で ZA0 に既知パターンを書き込み、`smstop sm`
-    ///    （PSTATE.SM のみ解除・PSTATE.ZA は 1 のまま = **dormant**）
-    ///    してから `TPIDR2_EL0`（符号化名 `S3_3_C13_C0_5`）へダミーの
-    ///    非ゼロ値を設定する。実際の TPIDR2 ブロック・save バッファは
-    ///    用意しない（本実装のフォールバック方式は ZA へ一切触れない
-    ///    ため参照されない。実機で「dormant のあいだ〈PSTATE.SM=0〉は
-    ///    通常の Rust コードを安全に実行できる」ことを事前確認済み —
-    ///    PSTATE.ZA=1 は ZA タイル用命令以外へ影響しない）。
+    /// 1. 専用スレッド上で [`enter_dormant_za_with_pending_lazy_save`]
+    ///    により ZA0 に既知パターンを書き込み dormant 状態を作る（実機で
+    ///    「dormant のあいだ〈PSTATE.SM=0〉は通常の Rust コードを安全に
+    ///    実行できる」ことを事前確認済み — PSTATE.ZA=1 は ZA タイル用
+    ///    命令以外へ影響しない）。
     /// 2. dormant のあいだに `kernel.run(...)` を呼ぶ。
     ///    `current_thread_capable()` が `TPIDR2_EL0 != 0` を検出し
     ///    `compute` を呼ばずスカラーフォールバックへ切り替わるはず
     ///    （本テストの主張）。
     /// 3. 結果が scalar 参照と bit 完全一致すること（フォールバック
     ///    自体の正しさ）を確認する。
-    /// 4. `smstart sm`（PSTATE.ZA は 1 のままなので 0→1 遷移によるゼロ
-    ///    初期化は発生しない — 実機で事前確認済み）で再びストリーミング
-    ///    モードへ戻り ZA0 を読み出し、手順 1 で書き込んだパターンと
-    ///    bit 完全一致する（＝`compute` が一度も ZA0 を上書きしていない）
-    ///    ことを確認する。
-    /// 5. 後始末として `TPIDR2_EL0` をクリアする。
+    /// 4. [`read_za0_and_clear_pending_lazy_save`] で ZA0 を読み出し、
+    ///    手順 1 で書き込んだパターンと bit 完全一致する（＝`compute`
+    ///    が一度も ZA0 を上書きしていない）ことを確認する。
     ///
     /// `TPIDR2_EL0`／ストリーミングモード／ZA はスレッドごとの状態
     /// （モジュール冒頭「SVL はスレッドごとに異なりうる」節と同じ理由）
@@ -650,68 +827,18 @@ mod tests {
         };
 
         let handle = std::thread::spawn(move || {
-            const DUMMY_TPIDR2: u64 = 0x1234_5678_9abc_def0;
             let za_pattern = xorshift32_vec(0xdddd_4444, MR * NR);
             let mut za_readback = vec![0.0f32; MR * NR];
 
-            // 手順 1: ZA0 に既知パターンを書き込み、SM のみ解除して
-            // dormant（PSTATE.SM=0, PSTATE.ZA=1）状態を作り、TPIDR2_EL0
-            // へダミー非ゼロ値を設定する。
+            // 手順 1。
             //
             // SAFETY: `SmeKernel::try_new()` が実行 CPU の SME 対応を
             // 確認済み（本スレッドはこれを確認したスレッドから spawn
             // されたクロージャ内で直接実行するため、`SmeKernel` 構造体
-            // doc の「構築したスレッド」に関する注意は本 unsafe ブロック
+            // doc の「構築したスレッド」に関する注意は本 unsafe 呼び出し
             // 自体〈`try_new` を呼んだのと同じスレッド上でのテスト専用
-            // ZA 操作〉には影響しない）。`.arch_extension sme` は
-            // コンパイル時のみに影響。`smstart`（Z/P レジスタ不定化）に
-            // 対応する `out("v0") _ ... out("p15") _` 全列挙・`mova` の
-            // index レジスタ `w12` の宣言は `compute`（本モジュール上部）
-            // と同型の契約。フラグ変更命令（`cmp`/`b.lt`）を使うため
-            // `preserves_flags` は付けない。`ld1w`（メモリアクセス）を
-            // 使うため `nomem`/`pure` は付けない。スタック未使用のため
-            // `options(nostack)`。本ブロックはテスト専用の ZA 状態構築
-            // であり `compute` の呼び出し規約とは独立（この状態下で
-            // `kernel.run` を呼んだときの振る舞いの検証こそが本テストの
-            // 目的）。
-            unsafe {
-                let p = za_pattern.as_ptr();
-                asm!(
-                    ".arch_extension sme",
-                    "smstart",
-                    "ptrue p0.s",
-                    "mov w12, #0",
-                    "20:",
-                    "ld1w {{z0.s}}, p0/z, [{p}]",
-                    "mova za0h.s[w12, #0], p0/m, z0.s",
-                    "add {p}, {p}, #64",
-                    "add w12, w12, #1",
-                    "cmp w12, #16",
-                    "b.lt 20b",
-                    // SM のみ解除（ZA は有効のまま）: dormant 状態。
-                    "smstop sm",
-                    // AAPCS64 の「保留中 lazy ZA save」を模すダミーの
-                    // TPIDR2_EL0（実際の save バッファは用意しない。
-                    // フォールバック方式は ZA へ一切触れないため
-                    // 参照されない）。
-                    "msr S3_3_C13_C0_5, {dummy}",
-                    p = inout(reg) p => _,
-                    dummy = in(reg) DUMMY_TPIDR2,
-                    out("w12") _,
-                    out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
-                    out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
-                    out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _,
-                    out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
-                    out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
-                    out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
-                    out("v30") _, out("v31") _,
-                    out("p0") _, out("p1") _, out("p2") _, out("p3") _, out("p4") _,
-                    out("p5") _, out("p6") _, out("p7") _, out("p8") _, out("p9") _,
-                    out("p10") _, out("p11") _, out("p12") _, out("p13") _, out("p14") _,
-                    out("p15") _,
-                    options(nostack),
-                );
-            }
+            // ZA 操作〉には影響しない）。
+            unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
 
             // 手順 2〜3: dormant のあいだ（PSTATE.SM=0）に kernel.run を
             // 呼ぶ。`current_thread_capable()` が TPIDR2_EL0 != 0 を検出し
@@ -730,58 +857,10 @@ mod tests {
                  bit 完全一致するはず"
             );
 
-            // 手順 4: 再びストリーミングモードへ入り（PSTATE.ZA は
-            // 1 のまま変化していないため 0→1 遷移によるゼロ初期化は
-            // 起きない）ZA0 を読み出し、手順 1 のパターンと比較する。
+            // 手順 4。
             //
-            // SAFETY: 上記と同型の契約。`smstart sm` で SM のみ再度
-            // 有効化するため、既に有効な PSTATE.ZA=1 の内容は変化しない
-            // （PSTATE.ZA が 0→1 へ遷移するときにのみゼロ初期化される
-            // という Arm SME の仕様を本実装セッションで実機事前確認済み）。
-            unsafe {
-                let out_p = za_readback.as_mut_ptr();
-                asm!(
-                    ".arch_extension sme",
-                    "smstart sm",
-                    "ptrue p0.s",
-                    "mov w12, #0",
-                    "21:",
-                    "mova z1.s, p0/m, za0h.s[w12, #0]",
-                    "st1w {{z1.s}}, p0, [{out_p}]",
-                    "add {out_p}, {out_p}, #64",
-                    "add w12, w12, #1",
-                    "cmp w12, #16",
-                    "b.lt 21b",
-                    "smstop",
-                    out_p = inout(reg) out_p => _,
-                    out("w12") _,
-                    out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
-                    out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
-                    out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _,
-                    out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
-                    out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
-                    out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
-                    out("v30") _, out("v31") _,
-                    out("p0") _, out("p1") _, out("p2") _, out("p3") _, out("p4") _,
-                    out("p5") _, out("p6") _, out("p7") _, out("p8") _, out("p9") _,
-                    out("p10") _, out("p11") _, out("p12") _, out("p13") _, out("p14") _,
-                    out("p15") _,
-                    options(nostack),
-                );
-            }
-
-            // 手順 5: 後始末（TPIDR2_EL0 をクリア）。
-            //
-            // SAFETY: 直前までの手順で実行 CPU の SME 対応を確認済み。
-            // `mrs`/`msr` はメモリアクセス・スタック使用を伴わずフラグも
-            // 変更しない（`has_pending_lazy_za_save` と同型の宣言）。
-            unsafe {
-                asm!(
-                    ".arch_extension sme",
-                    "msr S3_3_C13_C0_5, xzr",
-                    options(nomem, nostack, preserves_flags),
-                );
-            }
+            // SAFETY: 手順 1 と同型の契約。
+            unsafe { read_za0_and_clear_pending_lazy_save(&mut za_readback) };
 
             assert_eq!(
                 za_readback, za_pattern,
@@ -793,5 +872,139 @@ mod tests {
         handle
             .join()
             .expect("SME フォールバック検証用スレッドが panic した");
+    }
+
+    /// [`sme_kernel_falls_back_without_corrupting_dormant_za_when_lazy_save_pending`]
+    /// の [`kernel_unchecked_with_ldc`] 直接呼び出し版。
+    ///
+    /// codex-review P0 追加指摘（`kernel_unchecked_with_ldc`／
+    /// `kernel_unchecked` は公開 `unsafe fn` のため `SmeKernel::run*`
+    /// を経由せず外部から直接呼びうるが、以前はこれらの入口自身が
+    /// [`has_pending_lazy_za_save`] を検査していなかった）への対応。
+    /// 本テストは同じ dormant ZA + `TPIDR2_EL0` 設定の構成で
+    /// `kernel_unchecked_with_ldc` を直接呼び、結果の bit 一致・ZA0 の
+    /// 非破壊・`TPIDR2_EL0` が非ゼロのまま維持されることを検証する
+    /// （[`kernel_unchecked_with_ldc`] の doc「保留中 lazy ZA save の
+    /// 自己防御」節が主張する契約そのもの）。
+    #[test]
+    #[ignore = "実機（SME 対応 aarch64。例: Apple M4）限定の検証専用（イシュー #1587。\
+                cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_kernel --nocapture）"]
+    fn sme_kernel_unchecked_with_ldc_falls_back_without_corrupting_dormant_za_when_lazy_save_pending()
+     {
+        // `pub unsafe fn kernel_unchecked_with_ldc` を直接呼ぶには実行
+        // CPU の SME 対応確認が必要（`SmeKernel::try_new()` を代わりに
+        // 使い、`Some` の場合のみ実行することでこれを満たす）。
+        if SmeKernel::try_new().is_none() {
+            eprintln!("SME 非対応環境のためスキップ");
+            return;
+        }
+
+        let handle = std::thread::spawn(move || {
+            let za_pattern = xorshift32_vec(0xeeee_5555, MR * NR);
+            let mut za_readback = vec![0.0f32; MR * NR];
+
+            // SAFETY: 呼び出し元スレッド自身の SME 対応は本スレッドを
+            // spawn した外側で `SmeKernel::try_new()` により確認済み
+            // （`enter_dormant_za_with_pending_lazy_save` の `# Safety`
+            // 契約を満たす）。
+            unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
+
+            // 端タイル相当（`ldc > NR`）で `kernel_unchecked_with_ldc` を
+            // 直接呼ぶ。`TPIDR2_EL0` が非ゼロのため、本関数自身が
+            // `has_pending_lazy_za_save` を検査し `compute` を呼ばず
+            // `scalar_fallback` へ切り替わるはず。
+            let kc_len = 5usize;
+            let ldc = NR + 3;
+            let ap = xorshift32_vec(0x1357_9bdf, MR * kc_len);
+            let bp = xorshift32_vec(0x2468_ace0, kc_len * NR);
+            let mut c = xorshift32_vec(0x0f0f_1e1e, (MR - 1) * ldc + ldc);
+            let c_init = c.clone();
+
+            // SAFETY: 実行 CPU は SME 対応（呼び出し元契約）。
+            // `TPIDR2_EL0` が非ゼロの場合は本関数自身がフォールバックへ
+            // 切り替えるため（`kernel_unchecked_with_ldc` doc「保留中
+            // lazy ZA save の自己防御」節）、事前の
+            // `has_pending_lazy_za_save` 確認は不要（本テストの主張）。
+            unsafe { kernel_unchecked_with_ldc(&ap, &bp, &mut c, ldc, kc_len) }
+                .expect("長さ・境界は事前に検査済みのため成功するはず");
+
+            let expected = scalar_reference(&ap, &bp, &c_init, ldc, kc_len);
+            assert_eq!(
+                c, expected,
+                "TPIDR2_EL0 非ゼロ時は kernel_unchecked_with_ldc 自身が \
+                 フォールバックへ切り替わり scalar 参照と bit 完全一致 \
+                 するはず"
+            );
+
+            // SAFETY: 手順 1 と同型の契約。
+            unsafe { read_za0_and_clear_pending_lazy_save(&mut za_readback) };
+
+            assert_eq!(
+                za_readback, za_pattern,
+                "kernel_unchecked_with_ldc を TPIDR2_EL0 非ゼロで直接 \
+                 呼んでも compute（fmopa 経路）が一度も ZA0 を上書き \
+                 しないはず（呼び出し元の dormant ZA を破壊しない）"
+            );
+        });
+        handle
+            .join()
+            .expect("kernel_unchecked_with_ldc フォールバック検証用スレッドが panic した");
+    }
+
+    /// [`sme_kernel_falls_back_without_corrupting_dormant_za_when_lazy_save_pending`]
+    /// の [`kernel_unchecked`] 直接呼び出し版。
+    ///
+    /// [`sme_kernel_unchecked_with_ldc_falls_back_without_corrupting_dormant_za_when_lazy_save_pending`]
+    /// と同じ codex-review P0 追加指摘への対応（従来シグネチャ後方互換
+    /// ラッパー側の入口も同様に自己防御することを検証する）。
+    #[test]
+    #[ignore = "実機（SME 対応 aarch64。例: Apple M4）限定の検証専用（イシュー #1587。\
+                cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_kernel --nocapture）"]
+    fn sme_kernel_unchecked_falls_back_without_corrupting_dormant_za_when_lazy_save_pending() {
+        if SmeKernel::try_new().is_none() {
+            eprintln!("SME 非対応環境のためスキップ");
+            return;
+        }
+
+        let handle = std::thread::spawn(move || {
+            let za_pattern = xorshift32_vec(0xffff_6666, MR * NR);
+            let mut za_readback = vec![0.0f32; MR * NR];
+
+            // SAFETY: `kernel_unchecked_with_ldc_falls_back_...` と同型
+            // の契約。
+            unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
+
+            let kc_len = 7usize;
+            let ap = xorshift32_vec(0x1122_3344, MR * kc_len);
+            let bp = xorshift32_vec(0x5566_7788, kc_len * NR);
+            let c_init = xorshift32_vec(0x99aa_bbcc, MR * NR);
+            let mut c = c_init.clone();
+
+            // SAFETY: 実行 CPU は SME 対応（呼び出し元契約）。
+            // `TPIDR2_EL0` が非ゼロの場合は `kernel_unchecked` 自身が
+            // フォールバックへ切り替える（`kernel_unchecked` doc「保留中
+            // lazy ZA save の自己防御」節）。
+            unsafe { kernel_unchecked(&ap, &bp, &mut c, kc_len) };
+
+            let expected = scalar_reference(&ap, &bp, &c_init, NR, kc_len);
+            assert_eq!(
+                c, expected,
+                "TPIDR2_EL0 非ゼロ時は kernel_unchecked 自身がフォール \
+                 バックへ切り替わり scalar 参照と bit 完全一致するはず"
+            );
+
+            // SAFETY: 手順 1 と同型の契約。
+            unsafe { read_za0_and_clear_pending_lazy_save(&mut za_readback) };
+
+            assert_eq!(
+                za_readback, za_pattern,
+                "kernel_unchecked を TPIDR2_EL0 非ゼロで直接呼んでも \
+                 compute（fmopa 経路）が一度も ZA0 を上書きしないはず \
+                 （呼び出し元の dormant ZA を破壊しない）"
+            );
+        });
+        handle
+            .join()
+            .expect("kernel_unchecked フォールバック検証用スレッドが panic した");
     }
 }

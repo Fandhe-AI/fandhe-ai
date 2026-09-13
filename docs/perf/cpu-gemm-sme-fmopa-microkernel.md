@@ -89,6 +89,20 @@ GB10（DGX Spark GB10）の CPU（Grace）は SME 非対応であり、CPU GEMM 
   `smstart`／`mova` が呼び出し元の未保存 ZA を破壊しうる
   （`crates/backend-cpu/src/gemm_blis/microkernel/sme.rs::has_pending_lazy_za_save`
   doc 参照）。
+  **本契約は `SmeKernel::run`／`run_with_ldc` 経由に限らず、公開 unsafe
+  入口 `sme::kernel_unchecked_with_ldc`／`sme::kernel_unchecked` 自身も
+  対象とする**（codex-review P0 再指摘対応。`PRRT_kwDOTuUCJc6h0ZMD` の
+  追加指摘）。これらは `# Safety` 契約が SME 対応・SVL 一致のみを要求し
+  `TPIDR2_EL0` の事前確認を呼び出し元の努力目標にとどめる設計では、
+  契約を字面どおり満たした外部からの直接呼び出しでも保留中の lazy ZA
+  save を破壊しうる。そのため両関数は自身の内部で
+  `has_pending_lazy_za_save()` を検査し、非ゼロ（保留中）であれば
+  `compute` を一切呼ばず同じパック形状の `scalar_fallback`（bit 完全
+  一致）へ切り替える。呼び出し元は `TPIDR2_EL0` の事前確認を保証する
+  必要がなくなり（`# Safety` 契約が「非ゼロ時は自動フォールバックする」
+  へ変更）、`SmeKernel::run`／`run_with_ldc` 経由の `current_thread_capable`
+  確認とは独立に、この 2 入口自身が fail-closed を担保する二重の防御と
+  なる。
 - `asm!` は `compute` 1 箇所に局所化。SAFETY コメントに以下を明記:
   `smstart`/`smstop` を 1 ブロック内で対にする・v0〜v31／p0〜p15 全列挙・
   w12 明示・`preserves_flags` を付けない（`subs`/`cmp` 使用）・`nomem`/
