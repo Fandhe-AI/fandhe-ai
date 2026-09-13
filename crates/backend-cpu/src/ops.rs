@@ -445,6 +445,15 @@ impl BackendOps for CpuBackendOps {
         Some(self)
     }
 
+    /// `BackendOps::typed_ops_f16` の CPU 実装（イシュー #1698・親 #1649）。
+    /// `CpuBackendOps` 自身が [`fandhe_ai_tensor_core::TypedOps<half::f16>`]
+    /// を実装する（`crate::typed_f16` 参照。f16 をソフトウェア変換で f32
+    /// へ昇格し既存 f32 カーネルへ委譲するラッパー）ため、`memory_ops`
+    /// と同じく `self` をそのまま返す。
+    fn typed_ops_f16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::f16>> {
+        Some(self)
+    }
+
     /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
     /// `docs/device-resident-update-design.md` §3.2・§5.2）。CPU は
     /// 「デバイス」がホストメモリそのものであるため、`downcast_handle_mut`

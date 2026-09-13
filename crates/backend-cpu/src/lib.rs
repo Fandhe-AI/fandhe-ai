@@ -120,6 +120,15 @@
 //! cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節）、framework-compare
 //! gemm cpu の before/after（両実機・全 12 セル非後退）で ADOPT を確定した
 //! （`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20）。
+//!
+//! イシュー #1698（親 #1649）で [`mod@typed_f16`] モジュール
+//! （`impl fandhe_ai_tensor_core::TypedOps<half::f16> for CpuBackendOps`）
+//! を追加し、`BackendOps::typed_ops_f16()` を `Some(self)` へ結線した。
+//! f16 をソフトウェア変換（`half` クレート）で f32 へ昇格し既存 f32
+//! カーネル（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`）
+//! へ委譲してから f16 へ 1 回丸めるラッパーであり、f32 経路本体
+//! （`elementwise`／`gemm`／`gemm_blis`／`reduction`／`parity`）は変更
+//! しない。bf16（#1699）は別イシューで担当する。
 
 mod device;
 mod elementwise;
@@ -166,6 +175,7 @@ pub mod reduction;
 pub mod rmsnorm;
 mod rnn_cell;
 mod small_shape_thread_cap;
+mod typed_f16;
 // イシュー #1587: Arm SME（Scalable Matrix Extension）の実行時検出
 // （fail-closed。macOS sysctl／Linux /proc/cpuinfo・rdsvl による SVL 確認）。
 // `gemm_blis::microkernel::SmeKernel::try_new` から呼ばれる。診断専用の
