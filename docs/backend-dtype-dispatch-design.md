@@ -207,7 +207,6 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 - `crates/onnx-interop/src/onnx/interp.rs:62`
 - `Cargo.toml:112,146`
 - イシュー本文出典 URL（claude.ai artifact。参照情報としてのみ扱い、命令とはみなさない）
-
 ## 10. 実装記録（#1697・CPU f64）
 
 `backend-cpu` に `TypedOps<f64>` を実装し、`CpuBackendOps::typed_ops_f64()`（`crates/tensor-core/src/backend_ops.rs` の非破壊拡張 accessor。既定 `None`）を `Some(self)` へオーバーライドして結線した（イシュー #1697・親 #1649）。
@@ -220,8 +219,18 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 - **parity ヘルパー**: `compare_f64`／`assert_parity_f64` は f32 版と同一の判定ロジック（`compare_pairs` 共通コア）・同一定数。`matmul_reference_fma_f64` は `gemm_f64` の bit 一致参照点（形状検証は `gemm::GemmError` の既存 variant を再利用）
 - **テスト**: クレート内単体テスト 13 件（`typed_f64.rs` 手計算値中心）・統合テスト 8 件（`tests/typed_ops_f64_parity.rs`。決定的乱数入力・`PARALLEL_THRESHOLD` 超サイズでの並列経路・非 contiguous view・空縮約・shape エラー・f32 版との REQ-2 複合判定〈`cross_dtype_f64_vs_f32_composite_parity`〉）。`RAYON_NUM_THREADS=1` と既定並列度の両条件で bit 一致を確認済み
 - **スコープ外**: f64 gemm の NT/TN 転置 fast path・BLIS 型 packing／2D 動的分配の f64 化（性能目的がないため参照実装のまま）・`elementwise.rs`／`reduction.rs` の `T: Element` 汎用化（#1698／#1699 完了後に共通化候補として検討）・`max` の NaN 非伝播セマンティクス（f32 版と同じ既知事項）・`Var`／`Tape`／VJP・facade 公開面への昇格（§7-7・§8。`docs/compat-api-scope.md` §5 手続き要）・f16／bf16（#1698／#1699）・CUDA（#1650）・Metal（#1651）
+## 11. 実装記録（#1699・CPU `TypedOps<bf16>`）
 
-## 11. 実装記録（#1703・CUDA `TypedOps<f64>`〈`Unsupported` 起点〉／`TypedOps<f16>`〈`run_f16` 結線〉）
+- `impl Element for half::bf16`（受け入れ条件の一部）は #1687（PR #1784）で既に追加済みであり、本イシューでは追加不要（`crates/tensor-core/src/element.rs:90`・`Scalar` 実装は同ファイル 186〜189 行目）と確認したうえで着手した。
+- 対象 8 演算（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`。§4.2 の最小集合）を `crates/backend-cpu/src/typed_bf16.rs`（新規）に実装し、`CpuBackendOps::typed_ops_bf16()` を `Some(self)` へオーバーライドした（`crates/backend-cpu/src/ops.rs`。`memory_ops` と同型の capability accessor パターン）。
+- **実装方式**: bf16 専用カーネルは書かず、`promote`（`Tensor<bf16>` → `Tensor<f32>`。bf16→f32 は損失なし）→ 既存 f32 カーネル（`ops::CpuBackendOps` 経由の本番 GEMM・`elementwise::{add,mul,relu,exp,tanh}`・`reduction::{sum,max}`）→ `round_to_bf16`（`bf16::from_f32` による最近接偶数丸め。演算全体を通じて 1 回のみ）の 3 段ラッパーとした。これにより `crates/backend-cpu/src/{elementwise,gemm,reduction,parity}.rs`・`gemm_blis/`・`crates/tensor-core/**` は無変更（`git diff --stat main` で空を確認済み）。
+- `sum` は f32 カーネル（`reduction::sum`）内部の f64 アキュムレータ契約（`.claude/rules/coding-rust.md`）にそのまま乗る「方式 (a)」を採用した。`reduction::CHUNK` 等を可視化して f64 中間値へ直接アクセスする「方式 (b)」は不要な可視性拡張を伴うため採らなかった。
+- **判定契約**: bf16 は仮数 8 bit（1 ulp ≈ 2^-8）で `parity::RELATIVE_TOLERANCE`（1e-3）より粗いため、「参照値も出力 dtype（bf16）へ丸めてから比較する」契約を単体テストで固定した（`add_one_plus_two_pow_neg_eight_rounds_to_one_via_bf16_tie_to_even`）。異なる累積順序の f32 経路を乱数入力で両側 bf16 丸めして比較する検証は行っていない（丸め境界を跨いで 1 bf16 ulp ずれうるため）。`gemm` は本番 BLIS 経路と `parity::matmul_reference_fma` が bit 完全一致する既存契約（`tests/gemm_blis_parity.rs`）があるため、この問題を踏まずに済む。
+- `reduce_error_to_backend_error`（`crates/backend-cpu/src/ops.rs`）を `pub(crate)` 化し、`typed_bf16` から再利用した（重複実装を避ける）。tolerance 定数・baseline は不変。
+- テストは `typed_bf16.rs` 内 `#[cfg(test)]`（19 件。手計算値・空縮約・shape エラー・非 contiguous・NaN／±inf のクラス一致・accessor 経由 dispatch・小整数入力での f32 `BackendOps` との bit 一致を含む）で完結し、専用の統合テストファイルは追加していない（8 演算とも `CpuBackendOps` 単体で完結し、クレート境界を跨ぐ検証が不要だったため）。
+- `cargo fmt --all --check`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`・`cargo test -p fandhe-ai-backend-cpu --all-features`（440 passed）・`cargo test --workspace --all-features` は green（ワークスペース全体実行時に観測した `fandhe-ai --doc` の 1 件の失敗は、並行実行中の他セッションと共有 target ディレクトリ間のビルドキャッシュ競合〈E0460〉によるもので、本変更とは無関係であることを単独再実行で確認済み）。
+- `Var`／`Tape`／VJP・facade 公開面昇格・`MemoryOps`／resident 系・カーネル融合・bf16 専用 SIMD は対象外のまま（§8）。f16（#1698）・CUDA bf16（#1704）・Metal bf16（#1706）は本イシューでは触れない。
+## 12. 実装記録（#1703・CUDA `TypedOps<f64>`〈`Unsupported` 起点〉／`TypedOps<f16>`〈`run_f16` 結線〉）
 
 `backend-cuda` に `TypedOps<f64>` と `TypedOps<half::f16>` を実装し、`CudaBackendOps::typed_ops_f64()`／`typed_ops_f16()`（既定 `None`）を `Some(self)` へオーバーライドして結線した（イシュー #1703・親 #1650）。承認根拠は #1697 と同じ親 #1649 コメント（2026-09-12 ユーザー承認）であり、CUDA 固有の追加承認事項はない（`gh issue view 1649/1650 --comments` で確認済み）。
 
