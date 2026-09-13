@@ -30,7 +30,8 @@
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, ShapeError, Tensor, row_norm_layout,
+    Activation, BackendError, BackendOps, ScalarBinaryOp, ScalarUnaryOp, ShapeError, Tensor,
+    row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -271,6 +272,37 @@ pub(crate) fn vjp(
             let factor = sigmoid_grad_factor(out_value);
             let da = vjp_elementwise_mul(ops, upstream, &factor)?;
             vec![(a, da)]
+        }
+        Op::ScalarUnary { op: sop, input } => {
+            // イシュー #1634: `ScalarUnaryOp` の汎用 VJP。`eval::scalar::
+            // unary_grad_factors` が forward 記録値 `out_value` を
+            // 再利用しつつ入力値 `x_val` から係数テンソルを組み立て、
+            // 既存の `vjp_elementwise_mul`（イシュー #1583 のゲート
+            // 付き乗算。`Exp`/`Tanh`/`Sigmoid` と同じ経路）へ渡す。
+            let x_val = materialize_fallible(nodes, ops, input)?;
+            let factor = eval::scalar::unary_grad_factors(x_val, out_value, sop);
+            let da = vjp_elementwise_mul(ops, upstream, &factor)?;
+            vec![(input, da)]
+        }
+        Op::ScalarBinary { op: sop, a, b } => {
+            // イシュー #1634: `ScalarBinaryOp` の汎用 VJP。`eval::scalar::
+            // binary_grad_factors` が broadcast 後 shape（= `out_value`
+            // の shape）で `(da 係数, db 係数)` を返し、`Op::Add` と
+            // 同じ `reduce_bias_grad`（f64 相当のアキュムレータ）で
+            // 元の `a`/`b` shape へ縮約する（§3.5 設計方針）。
+            let a_val = materialize_fallible(nodes, ops, a)?;
+            let b_val = materialize_fallible(nodes, ops, b)?;
+            let (factor_a, factor_b) =
+                eval::scalar::binary_grad_factors(a_val, b_val, out_value, sop);
+            let da = reduce_bias_grad(
+                &vjp_elementwise_mul(ops, upstream, &factor_a)?,
+                a_val.shape(),
+            );
+            let db = reduce_bias_grad(
+                &vjp_elementwise_mul(ops, upstream, &factor_b)?,
+                b_val.shape(),
+            );
+            vec![(a, da), (b, db)]
         }
         Op::Softmax { input, dim } => {
             // d/dx softmax(x) = y ⊙ (g − Σ_dim(g ⊙ y))（`y` = forward
@@ -1216,6 +1248,74 @@ pub(crate) fn where_cond_with_fallback(
             Ok(v)
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::where_cond(cond, a, b, out_shape)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::ScalarUnary`] の forward（`Var::scalar_unary`）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1634）。
+/// [`where_cond_with_fallback`] と同型: `ops.scalar_unary` →
+/// `Unsupported` のときのみ `eval::scalar::unary` へフォールバックし、
+/// それ以外のエラーは伝播する（判定迂回経路を作らない）。バックエンド
+/// 実装が返した出力 shape を `a` の shape と照合し、不一致は
+/// `AutodiffError::Backend(BackendError::ShapeMismatch(..))` を返す
+/// （単項のため shape は不変契約）。
+///
+/// `#[allow(dead_code)]`: `tape::Op::ScalarUnary` doc と同じ理由
+/// （呼び出し元 `Var::scalar_unary` の公開 API 配線は #1593／#1595）・
+/// 同じ撤去条件。
+#[allow(dead_code)]
+pub(crate) fn scalar_unary_with_fallback(
+    ops: &dyn BackendOps,
+    op: ScalarUnaryOp,
+    a: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.scalar_unary(op, a) {
+        Ok(v) => {
+            if v.shape() != a.shape() {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: a.shape().to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::scalar::unary(a, op)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::ScalarBinary`] の forward（`Var::scalar_binary`）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1634）。
+/// [`scalar_unary_with_fallback`] の 2 項版で設計方針は同一。
+/// `out_shape`（呼び出し元が `broadcast_shape(a, b)` で事前計算）と
+/// 戻り shape を照合する。
+///
+/// `#[allow(dead_code)]`: [`scalar_unary_with_fallback`] と同じ理由・
+/// 同じ撤去条件。
+#[allow(dead_code)]
+pub(crate) fn scalar_binary_with_fallback(
+    ops: &dyn BackendOps,
+    op: ScalarBinaryOp,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.scalar_binary(op, a, b) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::scalar::binary(a, b, op)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }
@@ -2419,6 +2519,244 @@ mod tests {
             grad[i] = ((lp - lm) / (2.0 * H)) as f32;
         }
         build_tensor(grad, &shape)
+    }
+
+    // --- ScalarUnary／ScalarBinary（イシュー #1634） ---
+    //
+    // `scalar_unary_with_fallback`／`scalar_binary_with_fallback`
+    // （`ops.scalar_unary`／`scalar_binary` が常に `Unsupported` を返す
+    // `test_ops()`〈`TestOps`。イシュー #1634 では `scalar_unary`／
+    // `scalar_binary` を実装しないため既定 `Unsupported` のまま〉経由で
+    // `eval::scalar::unary`／`binary` へのフォールバックを実地に叩く）と
+    // `vjp()` ディスパッチの解析勾配を中央差分と突合する。
+
+    /// 微分可能点（kink を避けた固定値）でのみ検証する unary variant
+    /// （代表値・入力）。`LeakyRelu`／`Elu`／`Softplus` は `x == 0`
+    /// 近傍の折れ点を避けるため `x` を離す。`Sqrt`/`Log*` は定義域が
+    /// 正のため正の値のみ使う。
+    fn unary_numeric_grad_cases() -> Vec<(ScalarUnaryOp, Vec<f32>)> {
+        let general = vec![-1.7_f32, -0.6, 0.9, 2.3];
+        let positive = vec![0.4_f32, 1.1, 2.7, 5.0];
+        vec![
+            (ScalarUnaryOp::Neg, general.clone()),
+            (ScalarUnaryOp::Sqrt, positive.clone()),
+            (ScalarUnaryOp::Log, positive.clone()),
+            (ScalarUnaryOp::Log2, positive.clone()),
+            (ScalarUnaryOp::Log10, positive.clone()),
+            (ScalarUnaryOp::Sin, general.clone()),
+            (ScalarUnaryOp::Cos, general.clone()),
+            (ScalarUnaryOp::Tan, vec![-0.7, -0.2, 0.3, 0.8]),
+            (ScalarUnaryOp::Relu, vec![-1.7, -0.6, 0.9, 2.3]),
+            (ScalarUnaryOp::Exp, general.clone()),
+            (ScalarUnaryOp::Tanh, general.clone()),
+            (ScalarUnaryOp::Sigmoid, general.clone()),
+            (ScalarUnaryOp::Gelu, general.clone()),
+            (ScalarUnaryOp::GeluTanh, general.clone()),
+            (ScalarUnaryOp::Silu, general.clone()),
+            (ScalarUnaryOp::Hardswish, vec![-4.0, -1.0, 1.0, 4.0]),
+            (
+                ScalarUnaryOp::LeakyRelu {
+                    negative_slope: 0.1,
+                },
+                vec![-1.7, -0.6, 0.9, 2.3],
+            ),
+            (
+                ScalarUnaryOp::Elu { alpha: 1.3 },
+                vec![-1.7, -0.6, 0.9, 2.3],
+            ),
+            (
+                ScalarUnaryOp::Softplus {
+                    beta: 1.0,
+                    threshold: 20.0,
+                },
+                general.clone(),
+            ),
+            (
+                ScalarUnaryOp::Clamp {
+                    min: -1.0,
+                    max: 1.0,
+                },
+                vec![-2.0, -0.3, 0.3, 2.0], // 境界 ±1.0 は避ける
+            ),
+            (ScalarUnaryOp::PowScalar { exponent: 2.5 }, positive),
+        ]
+    }
+
+    #[test]
+    fn scalar_unary_analytic_grad_matches_numeric_for_all_variants() {
+        let ops = test_ops();
+        for (op, xs) in unary_numeric_grad_cases() {
+            let x = t(&xs, &[xs.len()]);
+            let s = t(&vec![1.0; xs.len()], &[xs.len()]);
+
+            let y = scalar_unary_with_fallback(&ops, op, &x).unwrap();
+            let factor = eval::scalar::unary_grad_factors(&x, &y, op);
+            let analytic = eval::mul(&factor, &s);
+
+            let numeric = numeric_grad_unary(&x, &s, |xt| {
+                scalar_unary_with_fallback(&ops, op, xt).unwrap()
+            });
+
+            assert_grad_close(&format!("scalar_unary({op:?})"), &analytic, &numeric);
+        }
+    }
+
+    /// kink（劣勾配）点は中央差分がまたいで不定になるため、解析値を
+    /// 直接検証する（§3.4 数値規約）。
+    #[test]
+    fn scalar_unary_subgradient_at_kink_points() {
+        assert_eq!(
+            eval::scalar::unary_grad_factor(ScalarUnaryOp::Relu, 0.0, 0.0),
+            0.0
+        );
+        assert_eq!(
+            eval::scalar::unary_grad_factor(ScalarUnaryOp::Abs, 0.0, 0.0),
+            0.0
+        );
+        let clamp = ScalarUnaryOp::Clamp {
+            min: -1.0,
+            max: 1.0,
+        };
+        // 境界上は 1（通過）。
+        assert_eq!(eval::scalar::unary_grad_factor(clamp, -1.0, -1.0), 1.0);
+        assert_eq!(eval::scalar::unary_grad_factor(clamp, 1.0, 1.0), 1.0);
+        // 範囲外は 0。
+        assert_eq!(eval::scalar::unary_grad_factor(clamp, -2.0, -1.0), 0.0);
+    }
+
+    fn binary_numeric_grad_cases() -> Vec<(ScalarBinaryOp, Vec<f32>, Vec<f32>)> {
+        let a = vec![1.3_f32, -0.7, 2.1, 0.4];
+        let b = vec![0.6_f32, 1.8, -1.1, 2.4]; // Div/Pow の分母・底が 0 に近すぎない
+        vec![
+            (ScalarBinaryOp::Add, a.clone(), b.clone()),
+            (ScalarBinaryOp::Sub, a.clone(), b.clone()),
+            (ScalarBinaryOp::Mul, a.clone(), b.clone()),
+            (ScalarBinaryOp::Div, a.clone(), b.clone()),
+            (
+                ScalarBinaryOp::Pow,
+                vec![1.3, 0.7, 2.1, 0.4], // Pow は a > 0 前提（ln(a) を使うため）
+                b.clone(),
+            ),
+            (
+                ScalarBinaryOp::Maximum,
+                a.clone(),
+                vec![0.1, -1.5, 3.0, -0.2],
+            ),
+            (ScalarBinaryOp::Minimum, a, vec![0.1, -1.5, 3.0, -0.2]),
+        ]
+    }
+
+    #[test]
+    fn scalar_binary_analytic_grad_matches_numeric_for_all_variants() {
+        let ops = test_ops();
+        for (op, a_data, b_data) in binary_numeric_grad_cases() {
+            let len = a_data.len();
+            let a = t(&a_data, &[len]);
+            let b = t(&b_data, &[len]);
+            let s = t(&vec![1.0; len], &[len]);
+
+            let y = scalar_binary_with_fallback(&ops, op, &a, &b, &[len]).unwrap();
+            let (factor_a, factor_b) = eval::scalar::binary_grad_factors(&a, &b, &y, op);
+            let analytic_da = eval::mul(&factor_a, &s);
+            let analytic_db = eval::mul(&factor_b, &s);
+
+            let numeric_da = numeric_grad_unary(&a, &s, |xt| {
+                scalar_binary_with_fallback(&ops, op, xt, &b, &[len]).unwrap()
+            });
+            let numeric_db = numeric_grad_unary(&b, &s, |xt| {
+                scalar_binary_with_fallback(&ops, op, &a, xt, &[len]).unwrap()
+            });
+
+            assert_grad_close(
+                &format!("scalar_binary({op:?}) da"),
+                &analytic_da,
+                &numeric_da,
+            );
+            assert_grad_close(
+                &format!("scalar_binary({op:?}) db"),
+                &analytic_db,
+                &numeric_db,
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_binary_maximum_minimum_tie_and_comparison_zero_grad() {
+        let (da, db) = eval::scalar::binary_partials(ScalarBinaryOp::Maximum, 1.0, 1.0, 1.0);
+        assert_eq!((da, db), (0.5, 0.5));
+        let (da, db) = eval::scalar::binary_partials(ScalarBinaryOp::Gt, 1.0, 2.0, 0.0);
+        assert_eq!((da, db), (0.0, 0.0));
+    }
+
+    #[test]
+    fn scalar_binary_pow_db_masked_at_zero_base() {
+        let (_, db) = eval::scalar::binary_partials(ScalarBinaryOp::Pow, 0.0, 2.0, 0.0);
+        assert_eq!(
+            db, 0.0,
+            "a==0 では ln(a) 発散を避けるため db=0 にマスクする"
+        );
+    }
+
+    // --- Var::scalar_unary／scalar_binary の Tape 経由エンドツーエンド ---
+
+    #[test]
+    fn var_scalar_unary_backward_matches_manual_relu_subgradient() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[1.5, -2.0, 0.0, 3.0], &[4]));
+        let y = x.scalar_unary(ScalarUnaryOp::Relu).unwrap();
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        let expected = [1.0, 0.0, 0.0, 1.0];
+        for (i, &e) in expected.iter().enumerate() {
+            assert_eq!(dx.get(&[i]).unwrap(), e, "d(relu)/dx[{i}]");
+        }
+    }
+
+    #[test]
+    fn var_scalar_binary_backward_matches_manual_add_grad() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let a = tape.var(&t(&[1.0, 2.0, 3.0], &[3]));
+        let b = tape.var(&t(&[10.0, 20.0, 30.0], &[3]));
+        let y = a.scalar_binary(&b, ScalarBinaryOp::Add).unwrap();
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let da = grads.get(&a).unwrap().unwrap();
+        let db = grads.get(&b).unwrap().unwrap();
+        for i in 0..3 {
+            assert_eq!(da.get(&[i]).unwrap(), 1.0);
+            assert_eq!(db.get(&[i]).unwrap(), 1.0);
+        }
+    }
+
+    /// `Op::ScalarUnary`／`ScalarBinary` は `is_checkpoint_eligible ==
+    /// false`（最小・安全側の判断。`tape.rs::Op` doc 参照）。
+    #[test]
+    fn scalar_unary_and_binary_ops_are_not_checkpoint_eligible() {
+        assert!(
+            !crate::tape::Op::ScalarUnary {
+                op: ScalarUnaryOp::Relu,
+                input: NodeId(0),
+            }
+            .is_checkpoint_eligible()
+        );
+        assert!(
+            !crate::tape::Op::ScalarBinary {
+                op: ScalarBinaryOp::Add,
+                a: NodeId(0),
+                b: NodeId(1),
+            }
+            .is_checkpoint_eligible()
+        );
+    }
+
+    #[test]
+    fn scalar_binary_rejects_non_broadcastable_shape_via_var() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let a = tape.var(&t(&[1.0; 6], &[2, 3]));
+        let b = tape.var(&t(&[1.0; 4], &[2, 2]));
+        let err = a.scalar_binary(&b, ScalarBinaryOp::Add).unwrap_err();
+        assert!(matches!(err, AutodiffError::Shape(_)));
     }
 
     // --- MatMul ---

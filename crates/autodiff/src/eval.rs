@@ -32,6 +32,7 @@ use crate::var::Reduction;
 /// 参照実装（イシュー #1621）。行数が大きいため子モジュールへ分ける
 /// （モジュール冒頭コメント参照）。
 pub(crate) mod linalg;
+pub(crate) mod scalar;
 
 std::thread_local! {
     /// `matmul`（下記）が転置 view（`grad.rs::transpose2d` が作る
@@ -327,7 +328,11 @@ pub(crate) fn matmul(lhs: &Tensor<f32>, rhs: &Tensor<f32>) -> Tensor<f32> {
 /// shape 検査（`broadcast_shape`）は呼び出し元が済ませている前提。
 /// `tensor-core::Tensor::broadcast_with` で両者を共通 shape の view へ
 /// 揃えたうえで要素ごとに `op` を適用する。
-fn broadcast_binary(
+///
+/// `pub(crate)`: `eval::scalar`（イシュー #1634。`ScalarBinaryOp` の
+/// ホストフォールバック forward）が同じ broadcast 走査ロジックを再利用
+/// する（`add`/`mul` と数式は異なるが走査部分の二重管理を避ける）。
+pub(crate) fn broadcast_binary(
     lhs: &Tensor<f32>,
     rhs: &Tensor<f32>,
     op: impl Fn(f32, f32) -> f32,
