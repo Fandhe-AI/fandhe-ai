@@ -34,6 +34,7 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_backend_metal::MetalBackendOps;
 use fandhe_ai_backend_metal::soft_f64::f32_bits_match;
+use fandhe_ai_backend_metal::{MetalContext, MetalError, MetalGatherScatter};
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{BackendOps, ScatterReduce, ShapeError, Tensor};
 
@@ -295,6 +296,101 @@ fn gather_backward_matches_cpu_tape() {
         assert!(
             f32_bits_match(*b, *a),
             "gather backward: CPU/Metal 勾配不一致: cpu={a} metal={b}"
+        );
+    }
+}
+
+/// イシュー #1799（codex-review・Cursor Bugbot 指摘）の回帰テスト:
+/// `MetalGatherScatter::run_gather_f32`／`run_scatter_f32` は `pub` で
+/// `ops.rs` を経由せず直接呼べるため、`ops.rs` 側の検査（`gather_out_shape`
+/// ／`scatter_out_shape`・`validate_shapes_fit_u32`・`validate_index_range`）
+/// を迂回した不正な入力（rank 不一致・`dim` 範囲外）を本関数自身が独立に
+/// 拒否することを確認する（P0: shape 不一致による GPU バッファ範囲外
+/// アクセス防止）。
+#[test]
+#[ignore = "Apple Silicon 実機（Metal）が必要"]
+fn gather_scatter_direct_call_rejects_rank_mismatch_and_bad_dim() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gs = MetalGatherScatter::new(&ctx).expect("gather/scatter カーネルのコンパイルに失敗した");
+
+    // gather: in_shape と index_shape の rank が不一致（ops.rs の
+    // `gather_out_shape` が通常拒否するが、直接呼び出しでは迂回できる）。
+    let input = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let index = vec![0i32, 1, 0];
+    let err = gs
+        .run_gather_f32(&ctx, &input, &[2, 3], &index, &[3], 1)
+        .expect_err("rank 不一致は拒否されるべき");
+    assert!(
+        matches!(err, MetalError::InvalidGatherScatterShape { .. }),
+        "rank 不一致は InvalidGatherScatterShape であるべき: {err:?}"
+    );
+
+    // gather: dim が rank 範囲外（カーネルが `shapes` バッファを
+    // `in_shape[dim]` で読む前提が崩れ GPU 側範囲外読み出しになりうる）。
+    let err = gs
+        .run_gather_f32(&ctx, &input, &[2, 3], &index, &[2, 3], 5)
+        .expect_err("dim 範囲外は拒否されるべき");
+    assert!(
+        matches!(err, MetalError::InvalidGatherScatterShape { .. }),
+        "dim 範囲外は InvalidGatherScatterShape であるべき: {err:?}"
+    );
+
+    // scatter も同じ独立検査を持つ（out_shape 側）。
+    let src = vec![9.0f32, 9.0, 9.0];
+    let err = gs
+        .run_scatter_f32(
+            &ctx,
+            &input,
+            &[2, 3],
+            &index,
+            &[3],
+            &src,
+            1,
+            ScatterReduce::Overwrite,
+        )
+        .expect_err("scatter も rank 不一致を拒否するべき");
+    assert!(
+        matches!(err, MetalError::InvalidGatherScatterShape { .. }),
+        "scatter の rank 不一致は InvalidGatherScatterShape であるべき: {err:?}"
+    );
+}
+
+/// イシュー #1799（Cursor Bugbot Medium／codex-review P2 指摘）の回帰
+/// テスト: `input` が非空でも `index`／`src`（`index_shape` の要素数積が
+/// 0）が空の scatter は、`MetalIndexBuffer`／`MetalBuffer` の 0 バイト
+/// 確保拒否（`ZeroLengthAllocation`）に落ちず、CPU 参照実装・ホスト
+/// モデル（`gather_scatter_model::scatter_model`）と同じ `input` の
+/// 完全なパススルーを返すことを確認する。
+#[test]
+#[ignore = "Apple Silicon 実機（Metal）が必要"]
+fn gather_scatter_direct_call_empty_index_scatter_passes_through_input() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gs = MetalGatherScatter::new(&ctx).expect("gather/scatter カーネルのコンパイルに失敗した");
+
+    let input = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let out_shape = [2usize, 3usize];
+    // index_shape の非 dim 軸（axis 0）が 0 のため idx_numel = 0 だが
+    // out_shape（＝ input.len()）は非空。
+    let index_shape = [0usize, 3usize];
+    let empty_index: Vec<i32> = Vec::new();
+    let empty_src: Vec<f32> = Vec::new();
+
+    for reduce in [ScatterReduce::Overwrite, ScatterReduce::Add] {
+        let out = gs
+            .run_scatter_f32(
+                &ctx,
+                &input,
+                &out_shape,
+                &empty_index,
+                &index_shape,
+                &empty_src,
+                1,
+                reduce,
+            )
+            .expect("空 index の scatter は ZeroLengthAllocation で失敗してはならない");
+        assert_eq!(
+            out, input,
+            "空 index の scatter は input の完全なパススルーであるべき（reduce={reduce:?}）"
         );
     }
 }

@@ -8,28 +8,49 @@
 //! 完結できる（`crate::elementwise::MetalElementwise` と同じ構成方針）。
 //!
 //! `ops.rs::MetalBackendOps::gather`／`scatter` から呼ばれる。呼び出し元
-//! （`ops.rs`）が shape 検査（[`fandhe_ai_tensor_core::gather_out_shape`]／
+//! （`ops.rs`）は shape 検査（[`fandhe_ai_tensor_core::gather_out_shape`]／
 //! [`fandhe_ai_tensor_core::scatter_out_shape`]）・
 //! [`crate::gather_scatter_model::validate_shapes_fit_u32`]・
 //! [`crate::gather_scatter_model::validate_index_range`] を済ませてから
-//! 本モジュールを呼ぶ契約のため、shape 次元・index 範囲の検査は本
-//! モジュールでは行わずディスパッチに専念する（カーネル側には防御的
-//! ガードを残す。`shaders/gather_scatter.metal` 冒頭コメント参照）。
-//! ただし `numel`（形状次元の積）が `u32` カーネル引数へ収まるかの
-//! 検査（[`validate_gather_scatter_len`]）は上記呼び出し元検査ではまだ
+//! 本モジュールを呼ぶが、[`MetalGatherScatter::run_gather_f32`]／
+//! [`MetalGatherScatter::run_scatter_f32`] は `pub` であり `ops.rs` を
+//! 経由せず直接呼び出せるため、呼び出し元の検査結果を信頼せず本モジュール
+//! 自身でも独立に同じ検査（rank・shape 各次元の `u32` 収容・`in_shape`／
+//! `out_shape` と `index_shape` の rank 一致・`dim` が rank 範囲内・
+//! `index` の値域）を行う（判定迂回経路を作らないための多層防御。
+//! `.claude/rules/security.md` A08。`crates/backend-cpu/src/
+//! gather_scatter.rs` と同じ二重検査方針。codex-review 指摘）。
+//! rank 一致・`dim` 範囲の検査を怠ると、カーネル（`shaders/
+//! gather_scatter.metal`）が `shapes` 定数バッファを厳密に `2 * rank`
+//! 要素（`in_shape`／`index_shape`、または `out_shape`／`index_shape`
+//! それぞれ `rank` 要素ずつ）として読む前提が崩れ、GPU 側バッファ
+//! 範囲外読み出しになりうる。
+//! これに加え、`numel`（形状次元の積）が `u32` カーネル引数へ収まるかの
+//! 検査（`validate_gather_scatter_len`。private 関数のためコードスパン
+//! 表記とする）はカーネル引数の型制約に固有であり呼び出し元検査でも
 //! 担保されないため本モジュール側で行う（`crate::elementwise::
 //! validate_elementwise_len` と同じ理由）。
 
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLDevice, MTLSize};
 
-use fandhe_ai_tensor_core::ScatterReduce;
+use fandhe_ai_tensor_core::{ScatterReduce, ShapeError};
 
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
+use crate::gather_scatter_model::{checked_numel, validate_index_range, validate_shapes_fit_u32};
 use crate::index_buffer::MetalIndexBuffer;
 use crate::pipeline::{self, MtlPipeline};
+
+/// [`ShapeError`] を [`MetalError::InvalidGatherScatterShape`] へ変換
+/// する（本モジュールが独立に行う shape・rank・`dim`・`index` 検査
+/// 〈モジュール冒頭コメント参照〉の共通変換ヘルパー）。
+fn shape_err_to_metal(err: ShapeError) -> MetalError {
+    MetalError::InvalidGatherScatterShape {
+        detail: err.to_string(),
+    }
+}
 
 /// `shaders/gather_scatter.metal` のソース（3 カーネルを含む）。
 const GATHER_SCATTER_MSL_SRC: &str = include_str!("shaders/gather_scatter.metal");
@@ -75,8 +96,9 @@ impl MetalGatherScatter {
 
     /// `gather_f32` カーネルを起動する（`torch.gather` 相当）。
     ///
-    /// 呼び出し前提（本モジュール冒頭コメント参照）: `input`／`index` は
-    /// 既に shape・値検査済み。`out_numel == index_shape` の要素数積が
+    /// `ops.rs` を経由しない直接呼び出しでも安全なよう、本関数自身が
+    /// 独立に shape・rank・`dim`・`index` 値域を検査する（モジュール
+    /// 冒頭コメント参照）。`index_shape` の要素数積（＝出力要素数）が
     /// 0 の場合は空配列を返す（`MetalBuffer` は 0 バイト確保を拒否する
     /// ため、デバイス確保前に早期リターンする）。
     pub fn run_gather_f32(
@@ -88,13 +110,30 @@ impl MetalGatherScatter {
         index_shape: &[usize],
         dim: usize,
     ) -> Result<Vec<f32>, MetalError> {
-        let numel: usize = index_shape.iter().product();
+        validate_shapes_fit_u32(&[in_shape, index_shape]).map_err(shape_err_to_metal)?;
+        let rank = in_shape.len();
+        if index_shape.len() != rank {
+            return Err(shape_err_to_metal(ShapeError::RankMismatch {
+                expected: rank,
+                actual: index_shape.len(),
+            }));
+        }
+        if dim >= rank {
+            return Err(shape_err_to_metal(ShapeError::AxisOutOfRange {
+                axis: dim,
+                rank,
+            }));
+        }
+
+        let numel = checked_numel(index_shape).map_err(shape_err_to_metal)?;
         if numel == 0 {
             return Ok(Vec::new());
         }
         validate_gather_scatter_len(numel)?;
 
-        let rank = in_shape.len();
+        let dim_size = in_shape[dim];
+        validate_index_range(index, dim, dim_size).map_err(shape_err_to_metal)?;
+
         let mut shapes: Vec<u32> = Vec::with_capacity(rank * 2);
         shapes.extend(in_shape.iter().map(|&d| d as u32));
         shapes.extend(index_shape.iter().map(|&d| d as u32));
@@ -128,8 +167,17 @@ impl MetalGatherScatter {
     /// `scatter_overwrite_f32`／`scatter_add_f32` カーネルを起動する
     /// （`torch.scatter`／`torch.scatter_add` 相当。`reduce` で選択）。
     ///
-    /// 呼び出し前提は [`Self::run_gather_f32`] と同じ。`out_shape`
+    /// 独立検査の方針は [`Self::run_gather_f32`] と同じ。`out_shape`
     /// （＝`input.shape()`）の要素数積が 0 の場合は空配列を返す。
+    /// `index_shape`（＝`src.shape()`）の要素数積が 0（`out_shape` は
+    /// 非空）の場合は、`scatter_out_shape` が非 `dim` 軸で
+    /// `index_shape[axis] <= out_shape[axis]` のみを課す契約上
+    /// （`shaders/gather_scatter.metal` 冒頭コメント「scatter」節）
+    /// どの出力位置も `index` から触れられずホストモデル
+    /// （[`crate::gather_scatter_model::scatter_model`]）と同じく
+    /// `input` の完全なパススルーになるため、`MetalIndexBuffer`／
+    /// `MetalBuffer` が 0 バイト確保を拒否する前にこの契約上自明な
+    /// 結果を返す（Cursor Bugbot・codex-review P2 指摘）。
     #[allow(clippy::too_many_arguments)]
     pub fn run_scatter_f32(
         &self,
@@ -142,13 +190,35 @@ impl MetalGatherScatter {
         dim: usize,
         reduce: ScatterReduce,
     ) -> Result<Vec<f32>, MetalError> {
-        let numel_out: usize = out_shape.iter().product();
+        validate_shapes_fit_u32(&[out_shape, index_shape]).map_err(shape_err_to_metal)?;
+        let rank = out_shape.len();
+        if index_shape.len() != rank {
+            return Err(shape_err_to_metal(ShapeError::RankMismatch {
+                expected: rank,
+                actual: index_shape.len(),
+            }));
+        }
+        if dim >= rank {
+            return Err(shape_err_to_metal(ShapeError::AxisOutOfRange {
+                axis: dim,
+                rank,
+            }));
+        }
+
+        let numel_out = checked_numel(out_shape).map_err(shape_err_to_metal)?;
         if numel_out == 0 {
             return Ok(Vec::new());
         }
         validate_gather_scatter_len(numel_out)?;
 
-        let rank = out_shape.len();
+        let dim_size = out_shape[dim];
+        validate_index_range(index, dim, dim_size).map_err(shape_err_to_metal)?;
+
+        let idx_numel = checked_numel(index_shape).map_err(shape_err_to_metal)?;
+        if idx_numel == 0 {
+            return Ok(input.to_vec());
+        }
+
         let mut shapes: Vec<u32> = Vec::with_capacity(rank * 2);
         shapes.extend(out_shape.iter().map(|&d| d as u32));
         shapes.extend(index_shape.iter().map(|&d| d as u32));

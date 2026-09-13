@@ -104,7 +104,13 @@ fn ravel(coords: &[usize], strides: &[usize]) -> usize {
 /// shape の要素数積を検査付きで計算する（オーバーフロー時は
 /// `ShapeError::ElementCountOverflow`。`crates/backend-cpu/src/
 /// gather_scatter.rs::checked_numel` と同型の独立複製）。
-fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
+///
+/// `pub(crate)`: `crate::gather_scatter`（実カーネル起動 API）の
+/// `MetalGatherScatter::run_gather_f32`／`run_scatter_f32` も、無検査の
+/// `.iter().product()`（大きな shape でオーバーフローし本番経路で panic
+/// しうる。`.claude/rules/coding-rust.md`）の代わりに本関数を再利用する
+/// （codex-review 指摘。イシュー #1778）。
+pub(crate) fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
     shape
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
@@ -119,15 +125,26 @@ fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
 /// 値検査を行わない（カーネル同様に、範囲外添字は呼び出し元が事前に
 /// 拒否している前提。防御的ガードはカーネル側にのみ持たせ、ホスト
 /// モデルはカーネルの「正常系」の逐語再現に専念する）。
+///
+/// `index_shape` の要素数積は `checked_numel`（`pub(crate)`。public
+/// docs からは private 相当のためコードスパン表記とする）で検査してから求める
+/// （無検査の `.iter().product()` は大きな shape で `usize` オーバー
+/// フローし、本番経路で panic しうる。`.claude/rules/coding-rust.md`。
+/// codex-review 指摘）。本関数は `pub`（`crate::gather_scatter_model`
+/// はクレート公開モジュール）のため、テスト以外からの呼び出しでも
+/// 同じ理由で頑健性が必要。
 pub fn gather_model(
     input: &[f32],
     in_shape: &[usize],
     index: &[i32],
     index_shape: &[usize],
     dim: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, ShapeError> {
+    let numel = checked_numel(index_shape)?;
+    if numel == 0 {
+        return Ok(Vec::new());
+    }
     let in_strides = row_major_strides(in_shape);
-    let numel = index_shape.iter().product::<usize>();
     let mut out = vec![0.0f32; numel];
     for (gid, out_slot) in out.iter_mut().enumerate() {
         let mut coords = unravel(gid, index_shape);
@@ -136,7 +153,7 @@ pub fn gather_model(
         let src_off = ravel(&coords, &in_strides);
         *out_slot = input[src_off];
     }
-    out
+    Ok(out)
 }
 
 /// `scatter_overwrite_f32`／`scatter_add_f32` カーネルのホスト側逐語
@@ -146,6 +163,13 @@ pub fn gather_model(
 /// `out_shape`（＝`input.shape()`）・`index_shape`（＝`src.shape()`）は
 /// 呼び出し元が shape 検査（[`fandhe_ai_tensor_core::scatter_out_shape`]）・
 /// [`validate_shapes_fit_u32`]・[`validate_index_range`] 済みで渡す契約。
+///
+/// `numel_out` が 0（`out_shape` のいずれかの軸が 0）の早期 return を
+/// `row_major_strides(index_shape)` の**前**に行う（無検査の `*`
+/// 乗算チェーンを含む `row_major_strides` を、出力が空で本来不要な
+/// 計算のためだけに大きな `index_shape` に対して呼び、`usize`
+/// オーバーフローで panic するのを防ぐ。`.claude/rules/
+/// coding-rust.md`「本番経路で panic 禁止」。codex-review 指摘）。
 pub fn scatter_model(
     input: &[f32],
     out_shape: &[usize],
@@ -157,6 +181,9 @@ pub fn scatter_model(
 ) -> Result<Vec<f32>, ShapeError> {
     let rank = out_shape.len();
     let numel_out = checked_numel(out_shape)?;
+    if numel_out == 0 {
+        return Ok(Vec::new());
+    }
     let index_strides = row_major_strides(index_shape);
     let mut out = vec![0.0f32; numel_out];
 
@@ -245,7 +272,7 @@ mod tests {
         let index = Tensor::<i32>::new(index_data.clone(), index_shape).unwrap();
         let cpu_out = cpu.gather(&input, dim, &index).unwrap();
 
-        let model_out = gather_model(&input_data, in_shape, &index_data, index_shape, dim);
+        let model_out = gather_model(&input_data, in_shape, &index_data, index_shape, dim).unwrap();
         assert_eq!(
             model_out.len(),
             cpu_out.as_slice().unwrap().len(),

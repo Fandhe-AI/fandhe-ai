@@ -163,6 +163,17 @@ pub enum MetalError {
     /// strided 経路（`gemm_tiled_bias_act`）へのフォールバック判断材料と
     /// して使う（fail-closed。`.claude/rules/security.md`「A03」参照）。
     StridedTiledIneligible { detail: String },
+    /// `crate::gather_scatter::MetalGatherScatter::run_gather_f32`／
+    /// `run_scatter_f32`（イシュー #1778）が起動前に独自検証する shape・
+    /// `dim`・`index` 値域が不正だった。`pub` な起動 API を `ops.rs` を
+    /// 経由せず直接呼び出す経路でも、カーネル（`shaders/
+    /// gather_scatter.metal`）が `shapes` 定数バッファを
+    /// `rank`／`in_shape`／`index_shape` 前提で読む都合上の GPU 側
+    /// バッファ範囲外アクセスや、`usize` 積のオーバーフローを防ぐための
+    /// 型付きエラー（`.claude/rules/security.md` A08。codex-review
+    /// 指摘）。`detail` は元の
+    /// [`fandhe_ai_tensor_core::ShapeError`] の `Display` 文字列表現。
+    InvalidGatherScatterShape { detail: String },
 }
 
 impl fmt::Display for MetalError {
@@ -267,6 +278,9 @@ impl fmt::Display for MetalError {
             }
             MetalError::StridedTiledIneligible { detail } => {
                 write!(f, "strided tiled GEMM route ineligible: {detail}")
+            }
+            MetalError::InvalidGatherScatterShape { detail } => {
+                write!(f, "invalid gather/scatter shape, dim or index: {detail}")
             }
         }
     }
