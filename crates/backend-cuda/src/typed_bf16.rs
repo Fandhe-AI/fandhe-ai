@@ -96,7 +96,7 @@
 //! bf16 デバイス常駐経路（bf16 のまま H2D し device 側で widen/narrow
 //! する 2 カーネル方式）・bf16 `mma.sync` GEMM カーネル（cc ≥ 8.0。
 //! 設計 §8「#1650 の実装事項」）・CUDA `TypedOps<f64>`／`TypedOps<f16>`
-//! （#1703）・Metal（#1651）・CPU bf16（#1699・PR #1794）・`Var`／
+//! （#1703）・Metal（#1651）・`Var`／
 //! `Tape`／VJP の dtype 一般化・facade 公開面への昇格・GB10 実機での
 //! `#[ignore]` テスト実測（本エージェント実行環境に到達手段がなく未実測。
 //! 設計文書 §12 記入欄・親 #1650 へ申し送り）。
@@ -222,7 +222,6 @@ mod tests {
     /// できること自体が「可」判定の直接証跡であり、cudarc の feature
     /// 構成（`f16` feature）が崩れて `DeviceRepr` impl が消えた場合に
     /// ビルドが壊れることで検出する。
-    #[allow(dead_code)]
     fn assert_bf16_is_device_repr<T>()
     where
         T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits,
@@ -234,10 +233,7 @@ mod tests {
         // 型引数を明示するだけで上記の trait 境界がコンパイル時に検査
         // される。実行時アサーションは不要（コンパイルが通ること自体が
         // 検証）。
-        fn use_it() {
-            assert_bf16_is_device_repr::<bf16>();
-        }
-        use_it();
+        assert_bf16_is_device_repr::<bf16>();
     }
 
     fn t(data: &[f32], shape: &[usize]) -> Tensor<bf16> {
@@ -262,15 +258,21 @@ mod tests {
 
     #[test]
     fn downcast_rounds_to_nearest_even_at_bf16_boundary() {
-        // bf16 の仮数部は 7 bit。1.0 + 2^-8 は bf16 で正確に表現できず
+        // bf16 の仮数部は 7 bit。1.0 + 2^-8 は 1.0 と 1.0078125（2^-7 刻み
+        // の隣接表現値）のちょうど中間点で、bf16 で正確に表現できず
         // 最近接偶数丸めが働く（`half::bf16::from_f32` の契約どおり）。
+        // 1.0（末尾仮数ビット 0＝偶数）・1.0078125（末尾仮数ビット 1＝
+        // 奇数）のうち偶数側の 1.0 へ丸められるはず（tie-to-even。
+        // `crates/backend-cpu/src/typed_bf16.rs::
+        // add_one_plus_two_pow_neg_eight_rounds_to_one_via_bf16_tie_to_even`
+        // と同じ丸め契約の根拠をコードで固定する）。
         let value = 1.0f32 + f32::from_bits(0x3b800000); // 2^-8
         let rounded = bf16::from_f32(value);
-        // 丸め後の値は 1.0 か 1.0078125（2^-7 刻みの隣接値）のいずれか。
-        let rf = rounded.to_f32();
-        assert!(
-            rf == 1.0 || (rf - 1.0078125).abs() < 1e-9,
-            "unexpected rounding result: {rf}"
+        assert_eq!(
+            rounded.to_bits(),
+            bf16::from_f32(1.0).to_bits(),
+            "tie-to-even は偶数側（1.0）へ丸められるはずが {} へ丸められた",
+            rounded.to_f32()
         );
     }
 

@@ -10,17 +10,22 @@
 //!   `BackendError::CudaUnavailable` を panic なく返すことを確認する
 //! - **層 1（`#[ignore]`・実機）**: 同一バックエンド内の構造的不変条件
 //!   `TypedOps::<bf16>::op(x) == bf16::from_f32(BackendOps::op_f32(f32(x)))`
-//!   を bit 完全一致で検証する（`gemm` のみ `gemm_fp32_strict` と比較）。
-//!   run-to-run 決定性（2 回実行の bit 一致）も併せて確認する
+//!   を `gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の 8 演算
+//!   すべてについて bit 完全一致で検証する（`gemm` のみ `gemm_fp32_strict`
+//!   と比較）。同一バックエンド内比較のため丸め境界またぎの問題がなく
+//!   `exp`／`tanh` も他演算と同様に検証できる。run-to-run 決定性
+//!   （2 回実行の bit 一致）も併せて確認する
 //! - **層 2（`#[ignore]`・実機）**: CPU `BackendOps`（f32 参照実装）を
 //!   bf16 へ丸めた値とのクロスバックエンド判定。丸め境界またぎによる
 //!   誤判定（`typed_bf16.rs` モジュール doc 参照）を避けるため、入力を
 //!   bf16 で正確に表現できる小整数・小 K（累算順序に依存しない）に
-//!   限定する。`exp`／`tanh` はこの技法が使えないため対象外とする。
+//!   限定する。`exp`／`tanh` はこの技法（累算順序非依存な小整数入力への
+//!   限定）が使えないため層 2 の対象外とし、層 1 で検証する
 //!   （**注記**: CPU 側 `TypedOps<bf16>` はイシュー #1699・PR #1794 で
-//!   別途実装中で本ファイル作成時点では未マージのため、参照値は CPU の
-//!   既存 f32 `BackendOps` をホスト側で bf16 丸めして構築する。CPU 版が
-//!   マージされ次第、`TypedOps::<bf16>::op` 同士の比較へ差し替え可能）
+//!   実装済み・origin/main マージ済み。参照値は本ファイル作成時点と
+//!   同様に CPU の既存 f32 `BackendOps` をホスト側で bf16 丸めして構築
+//!   しており、`TypedOps::<bf16>::op` 同士の比較への差し替えは対象外
+//!   のまま残す）
 //!
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
@@ -154,6 +159,25 @@ fn run_layer1_structural_checks(cuda: &CudaBackendOps) {
         f32_of(&typed_relu),
         round_via_bf16(&ref_relu),
         "relu bit mismatch"
+    );
+
+    // exp/tanh: 同一バックエンド内比較のため丸め境界またぎの問題がなく
+    // 検証できる（層 2 では小整数入力への限定という技法が使えず対象外
+    // としているが、層 1 はこの限定を必要としない）。
+    let typed_exp = TypedOps::<bf16>::exp(typed, &x).unwrap();
+    let ref_exp = BackendOps::exp(cuda, &x32).unwrap();
+    assert_eq!(
+        f32_of(&typed_exp),
+        round_via_bf16(&ref_exp),
+        "exp bit mismatch"
+    );
+
+    let typed_tanh = TypedOps::<bf16>::tanh(typed, &x).unwrap();
+    let ref_tanh = BackendOps::tanh(cuda, &x32).unwrap();
+    assert_eq!(
+        f32_of(&typed_tanh),
+        round_via_bf16(&ref_tanh),
+        "tanh bit mismatch"
     );
 
     // sum/max: 軸縮約。
