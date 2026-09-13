@@ -1,0 +1,26 @@
+# イシュー #1689 CUDA 推論 forward チェーン単一同期化 実測環境（記入欄）
+#
+# 本 PR 実行環境（Linux。DGX Spark GB10 実機への到達手段なし・ローカル
+# GPU は driver/library version mismatch で NVML／CUDA 初期化不可）の
+# ため未実測。GB10 実機での実測時にこのテンプレートを埋めること
+# （内部ホスト名・ユーザー名は書かない）。
+
+hostname: masked
+date:
+gpu:
+cpu:
+os:
+cuda_driver_version:
+rustc:
+cargo:
+before_sha: edb85c43
+after_sha:
+before_arm: edb85c43 crates/facade（path patch）bench-fandhe sha256=
+after_arm: <branch> crates/facade（path patch）bench-fandhe sha256=
+load_gate_mode:
+r0_result:
+r1_result:
+r2_bitdump_result:
+tier1_ratio_reuse:
+checksum_exact_match_reuse:
+ab_verdict:

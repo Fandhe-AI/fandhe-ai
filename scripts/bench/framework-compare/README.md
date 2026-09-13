@@ -985,6 +985,36 @@ CUDA Graph で capture・再利用する経路（`fandhe_ai::set_cuda_graph_step
   `docs/perf/train-resident-grad-device-update.md` §7 を参照（本 PR 時点では
   実機到達手段がなく未実測のままスキャフォールドのみ）
 
+### CUDA 推論 forward チェーン単一同期化 before/after A/B（イシュー #1689）
+
+#1579（設計）・#1688（実装。`DeviceParamStore::predict_device_chain`・
+`BackendOps::linear_forward_device_tracked`〈default メソッド〉・facade
+`Sequential::predict_resident` の chain 経路優先化）の bit 同一検証・性能
+A/B。`run_ab_resident_grad_cuda.sh`〈#1560〉と同じ「before／after 2 本の
+独立ツリーをそれぞれ path patch でビルドして比較する」方式の `--task infer`
+移植。
+
+- **`run_ab_infer_chain_cuda.sh <label>`**: `AB_BEFORE_FACADE_PATH`／
+  `AB_AFTER_FACADE_PATH`（いずれも絶対パス必須・`Cargo.toml` の
+  `name = "fandhe-ai"` 検証込み）が指す 2 つの `crates/facade` をそれぞれ
+  path patch でビルドし、`--task infer --device cuda --mode {fresh,reuse}`
+  を 5 round・run 単位で起動順を反転しながら交互実行する。`Cargo.lock` は
+  `bench_fandhe_lock_restore.sh` の共有ヘルパーで退避・EXIT trap 復元する
+  （deps-policy.md 第 9 区分。`[patch]` は CLI 引数のみで与え workspace の
+  `Cargo.toml`／`Cargo.lock` へはコミットしない）
+- 判定は `compare_gemm_ab.py --task infer --device cuda --threshold 1.00
+  --per-run --modes reuse --require-checksum-exact --phases` を末尾で自動
+  実行し `compare-infer-<label>.md`（reuse。判定対象）・
+  `compare-infer-<label>-fresh-reference.md`（fresh。対照・非判定）を出力する
+  （`--task infer` 対応は `compare_gemm_ab.py` の `_VALID_TASKS`／
+  `_size_set_for`／`_valid_phase_row`／`render_phases_table` を `train` と
+  共有する形でイシュー #1689 が追加した。単体テストは
+  `compare_gemm_ab_test.py::TaskInferTest`）
+- 実測記録・事前登録判定規則・GB10 実機での実行手順は
+  `docs/perf/logs/infer-chain-single-sync-cuda-1689/README.md`・
+  `docs/perf/infer-chain-single-sync-cuda-ab.md` を参照（本 PR 時点では
+  実機到達手段がなく未実測のままスキャフォールドのみ）
+
 ### `--metal-split-k <on|off>`（イシュー #1545。Metal GEMM split-K opt-in 経路の runtime トグル A/B）
 
 Metal GEMM split-K opt-in 経路（`crates/backend-metal`。イシュー #1516 で
