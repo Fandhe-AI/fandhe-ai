@@ -808,9 +808,94 @@ mod tests {
     /// drop するとダングリングポインタを指したままになる。追加指摘 1
     /// 対応）。フィールドは値を読み書きしないため `_` 接頭辞を付けるが、
     /// 生存期間の保持自体が本構造体の責務。
+    ///
+    /// codex-review 追加指摘（P0）対応: 正常経路（手順 4.
+    /// [`read_za0_and_clear_pending_lazy_save`]）に到達する前に
+    /// 呼び出し側の `assert_eq!`／`expect` が panic すると、以前の実装
+    /// では `TPIDR2_EL0` が解放済みメモリ（`_block`／`_save_buffer`）を
+    /// 指したまま unwind が続いた（`Drop` 未実装のため）。これは
+    /// [`Tpidr2Block`] doc が要求する「クリアされるまでポインタが有効な
+    /// メモリを指し続ける」不変条件、および `unsafe` の統制不変条件に
+    /// 違反する。[`Drop`] を実装し、フィールド（`_block`／
+    /// `_save_buffer`）の解放より **前**に必ず `TPIDR2_EL0` クリア＋
+    /// `smstop` の後始末を完了させる（Rust の drop 順序はガード自身の
+    /// `Drop::drop` 本体を実行してからフィールドを宣言順に drop するため、
+    /// この順序は言語仕様として保証される）。正常経路
+    /// （[`read_za0_and_clear_pending_lazy_save`]）・panic 時の `Drop`
+    /// 双方が [`Self::finish_pending_save`] を通じて同じ asm 後始末を
+    /// 共有し、二重後始末（`msr`／`smstop` の重複発行）を `cleaned_up`
+    /// フラグで防ぐ。
     struct PendingLazySaveGuard {
         _block: Box<Tpidr2Block>,
         _save_buffer: AlignedSaveBuffer,
+        /// [`Self::finish_pending_save`] による後始末が完了済みかどうか。
+        /// 正常経路で既に完了していれば `Drop::drop` は何もしない
+        /// （二重の `msr`／`smstop` 発行を避けるため）。
+        cleaned_up: bool,
+    }
+
+    impl PendingLazySaveGuard {
+        /// `TPIDR2_EL0` のクリア（保留中 save の解消）と `smstop`（ZA を
+        /// 含む SME 状態の無効化）を行う共有後始末。AAPCS64 が要求する
+        /// 順序（ZA 無効化より前に保留中 save を解消する）を満たすため
+        /// `msr` を `smstop` より必ず先に発行する。
+        ///
+        /// [`read_za0_and_clear_pending_lazy_save`]（ZA0 読み出し後の
+        /// 正常経路）・[`Drop::drop`]（panic 時の異常経路）の両方から
+        /// 呼ばれる唯一の後始末経路とすることで、asm を二重に書かず
+        /// 「正常経路と Drop 経路で同じ後始末を利用する」codex-review
+        /// 指摘を満たす。`cleaned_up` により冪等（2 回目以降は no-op）。
+        ///
+        /// # Safety
+        ///
+        /// 呼び出し元は実行 CPU が SME 対応であり、本スレッドが
+        /// dormant（PSTATE.SM=0・PSTATE.ZA=1）または `smstart sm` で
+        /// 再突入済みのストリーミングモード（PSTATE.SM=1・PSTATE.ZA=1）の
+        /// いずれかにあることを保証しなければならない
+        /// （[`enter_dormant_za_with_pending_lazy_save`] の戻り値である
+        /// 本構造体が生存している限り、この前提は
+        /// [`SmeKernel::try_new`]（`super::SmeKernel::try_new`。
+        /// `pub(crate)` のためコードスパン表記）を確認済みのスレッド上で
+        /// 常に成立する）。
+        unsafe fn finish_pending_save(&mut self) {
+            if self.cleaned_up {
+                // 正常経路（`read_za0_and_clear_pending_lazy_save`）が
+                // 既に本関数を呼び終えている場合、後続の `Drop::drop` は
+                // ここで no-op になる（`msr`／`smstop` の二重発行を防ぐ）。
+                return;
+            }
+            // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）を引き継ぐ。
+            // `msr`（システムレジスタ書き込み）・`smstop`（PSTATE 遷移）
+            // ともメモリへアクセスしないため `nomem` を付ける。Arm ACLE は
+            // SMSTART／SMSTOP が NZCV フラグを変更しないと規定するため
+            // `preserves_flags` を付ける。スタック未使用のため `nostack`。
+            unsafe {
+                asm!(
+                    ".arch_extension sme",
+                    // AAPCS64 の要求順序: ZA 無効化（smstop）より前に
+                    // 保留中 save の解消（TPIDR2_EL0 クリア）を完了する。
+                    "msr S3_3_C13_C0_5, xzr",
+                    "smstop",
+                    options(nomem, nostack, preserves_flags),
+                );
+            }
+            self.cleaned_up = true;
+        }
+    }
+
+    impl Drop for PendingLazySaveGuard {
+        fn drop(&mut self) {
+            // SAFETY: `PendingLazySaveGuard` は
+            // `enter_dormant_za_with_pending_lazy_save` の戻り値としてのみ
+            // 構築され、同関数の doc が要求する「dormant のまま」または
+            // 正常経路の `smstart sm` 再突入済み状態のいずれかで生存する
+            // （前者は panic 経路、後者は正常経路が `cleaned_up=true` に
+            // 済ませているため実際にはここへ到達しない）。呼び出し元は
+            // 本ガードを `SmeKernel::try_new()` を確認済みのスレッドから
+            // spawn したクロージャ内でのみ生成する契約
+            // （`enter_dormant_za_with_pending_lazy_save` `# Safety` 節）。
+            unsafe { self.finish_pending_save() };
+        }
     }
 
     /// ZA0 へ既知パターン（`za_pattern.len() == MR * NR`）を書き込み、
@@ -911,6 +996,7 @@ mod tests {
         PendingLazySaveGuard {
             _block: block,
             _save_buffer: save_buffer,
+            cleaned_up: false,
         }
     }
 
@@ -919,9 +1005,10 @@ mod tests {
     /// 済ませたあと、`smstart sm`（PSTATE.ZA は 1 のままなので 0→1 遷移
     /// によるゼロ初期化は発生しない — 実機で事前確認済み）で再びストリー
     /// ミングモードへ戻って ZA0 を `out.len() == MR * NR` へ読み出し、
-    /// **同じ asm ブロック内で** `TPIDR2_EL0` をクリアしてから
-    /// `smstop` する（[`enter_dormant_za_with_pending_lazy_save`] と
-    /// 対になる検証手順の手順 4〜5 を切り出した共通ヘルパ）。
+    /// [`PendingLazySaveGuard::finish_pending_save`]（正常経路・`Drop`
+    /// 双方が共有する唯一の後始末経路）で `TPIDR2_EL0` クリア→`smstop`
+    /// する（[`enter_dormant_za_with_pending_lazy_save`] と対になる検証
+    /// 手順の手順 4〜5 を切り出した共通ヘルパ）。
     ///
     /// codex-review 追加指摘 2 対応: AAPCS64 は「ZA を無効化する前に
     /// 保留中の save 状態を解消する（`TPIDR2_EL0` をゼロクリアする）」
@@ -929,25 +1016,43 @@ mod tests {
     /// 別の asm ブロックで `TPIDR2_EL0` をクリアしており、その間
     /// 「ZA は無効なのに保留中 save を示す TPIDR2_EL0 が非ゼロのまま」
     /// という AAPCS64 上不正な中間状態を作っていた。本実装は ZA0 読み
-    /// 出し完了後・`smstop` 実行前に `TPIDR2_EL0` をクリアすることで
-    /// この順序を満たす。
+    /// 出し完了直後（Rust コードを一切挟まず）に
+    /// `finish_pending_save` を呼ぶことでこの順序を満たす。
+    ///
+    /// codex-review 追加指摘（P0）対応: 以前は「ZA0 読み出し→
+    /// `TPIDR2_EL0` クリア→`smstop`」を単一の asm ブロックで行っていた
+    /// ため、呼び出し元の `assert_eq!` 等が読み出し結果を検査する前に
+    /// panic しても後始末自体は既に完了していたが、逆に
+    /// [`enter_dormant_za_with_pending_lazy_save`] 呼び出し後・本関数
+    /// 呼び出し前に呼び出し元が panic するケース（3 実機テストとも
+    /// `kernel.run` 直後の `assert_eq!` が本関数呼び出しより前にある）
+    /// では後始末が一切走らなかった。本関数は ZA0 読み出しのみを行い、
+    /// 後始末は `guard.finish_pending_save()`（`Drop` とも共有）へ委譲
+    /// することで、正常経路・panic 経路のどちらでも後始末が保証される。
     ///
     /// `guard`（[`enter_dormant_za_with_pending_lazy_save`] が返した
     /// TPIDR2 ブロック・保存バッファの所有権）は `TPIDR2_EL0` を
     /// クリアした後に drop する（クリア前に参照先メモリを解放しない
-    /// ため。追加指摘 1 対応）。
+    /// ため。追加指摘 1 対応。`finish_pending_save` 完了後に `guard` を
+    /// 関数末尾で自然に drop させることでこれを満たす）。
     ///
     /// # Safety
     ///
     /// [`enter_dormant_za_with_pending_lazy_save`] と同一（実行 CPU が
     /// SME 対応であること。`out.len() == MR * NR` を満たさない場合の
     /// 挙動は未定義）。
-    unsafe fn read_za0_and_clear_pending_lazy_save(out: &mut [f32], guard: PendingLazySaveGuard) {
+    unsafe fn read_za0_and_clear_pending_lazy_save(
+        out: &mut [f32],
+        mut guard: PendingLazySaveGuard,
+    ) {
         // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）を引き継ぐ。
         // `smstart sm` で SM のみ再度有効化するため、既に有効な
         // PSTATE.ZA=1 の内容は変化しない（PSTATE.ZA が 0→1 へ遷移する
         // ときにのみゼロ初期化されるという Arm SME の仕様を本実装
-        // セッションで実機事前確認済み）。
+        // セッションで実機事前確認済み）。本ブロックは ZA0 の読み出し
+        // までを行い、`TPIDR2_EL0` クリア・`smstop` は続く
+        // `guard.finish_pending_save()`（Rust コードを挟まず直後に実行）
+        // へ委譲する（asm 二重記述を避けつつ Drop と共有するため）。
         unsafe {
             let out_p = out.as_mut_ptr();
             asm!(
@@ -962,10 +1067,6 @@ mod tests {
                 "add w12, w12, #1",
                 "cmp w12, #16",
                 "b.lt 21b",
-                // AAPCS64 の要求順序: ZA 無効化（smstop）より前に保留中
-                // save の解消（TPIDR2_EL0 クリア）を完了する。
-                "msr S3_3_C13_C0_5, xzr",
-                "smstop",
                 out_p = inout(reg) out_p => _,
                 out("w12") _,
                 out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
@@ -983,12 +1084,96 @@ mod tests {
             );
         }
 
-        // TPIDR2_EL0 は上の asm ブロック内で既にクリア済み。ここで
-        // `guard` を明示的に drop し、保存バッファ・ブロックの解放が
-        // 「クリア後」であることをコード上明確にする（追加指摘 1 対応。
-        // 実際には関数末尾で自然に drop されるが、契約の可視化のため
-        // 明示する）。
+        // SAFETY: 直前の asm ブロックで `smstart sm` により再突入した
+        // ストリーミングモード（PSTATE.SM=1・PSTATE.ZA=1）のまま、
+        // 間に他の Rust コードを挟まず呼ぶ（`finish_pending_save`
+        // `# Safety` 節の前提を満たす）。
+        unsafe { guard.finish_pending_save() };
+
+        // `TPIDR2_EL0` は上の `finish_pending_save` で既にクリア済み。
+        // ここで `guard` を明示的に drop し、保存バッファ・ブロックの
+        // 解放が「クリア後」であることをコード上明確にする（追加指摘 1
+        // 対応。実際には関数末尾で自然に drop されるが、契約の可視化の
+        // ため明示する）。
         drop(guard);
+    }
+
+    /// [`PendingLazySaveGuard`] を [`read_za0_and_clear_pending_lazy_save`]
+    /// へ渡さずに（＝panic 時と同じく手順 4 に到達しない経路で）drop
+    /// した場合でも、`Drop::drop` が `TPIDR2_EL0` クリア・`smstop` の
+    /// 後始末を行うことを検証する（codex-review 追加指摘（P0）対応。
+    /// [`PendingLazySaveGuard`] doc 参照）。
+    ///
+    /// 実際の panic を発生させる代わりに、意図的に本関数呼び出しを
+    /// 省略して即座に `drop(guard)` する（panic-unwind 経路と `drop`
+    /// が呼ばれる点は同一であり、`Drop::drop` の実装自体は panic
+    /// 発生有無を区別しないため、本テストは非破壊なまま
+    /// `Drop::drop` が単独で正しく後始末することを確認できる）。
+    ///
+    /// 確認する 2 点:
+    /// 1. `TPIDR2_EL0 == 0`（[`has_pending_lazy_za_save`] が偽を返す。
+    ///    ダングリングポインタを指したまま残らないことの直接証拠）。
+    /// 2. `smstart`（フル: SM・ZA 両方）で PSTATE.ZA=0 から 1 へ正常に
+    ///    遷移できる（`PendingLazySaveGuard::Drop` が `smstop` で
+    ///    PSTATE.SM／PSTATE.ZA を無効化済みであることの間接証拠。
+    ///    無効化されていなければ `SmeKernel::try_new()` 経由の以降の
+    ///    `kernel.run` 呼び出しが同スレッド上で不整合な状態から
+    ///    始まってしまう）。
+    #[test]
+    #[ignore = "実機（SME 対応 aarch64。例: Apple M4）限定の検証専用（イシュー #1587。\
+                cargo test -p fandhe-ai-backend-cpu --lib -- --ignored sme_kernel --nocapture）"]
+    fn sme_kernel_pending_lazy_save_guard_drop_without_read_clears_tpidr2_and_za() {
+        let Some(kernel) = SmeKernel::try_new() else {
+            eprintln!("SME 非対応環境のためスキップ");
+            return;
+        };
+
+        let handle = std::thread::spawn(move || {
+            let za_pattern = xorshift32_vec(0xeeee_5555, MR * NR);
+
+            // SAFETY: 手順は
+            // `sme_kernel_falls_back_without_corrupting_dormant_za_when_lazy_save_pending`
+            // と同型（`SmeKernel::try_new()` を確認済みのスレッドから
+            // spawn したクロージャ内で直接実行）。
+            let guard = unsafe { enter_dormant_za_with_pending_lazy_save(&za_pattern) };
+
+            // `read_za0_and_clear_pending_lazy_save` を呼ばず、
+            // panic 時と同じ「後始末未完了のまま drop される」経路を
+            // 意図的に再現する。
+            drop(guard);
+
+            // 確認 1: `TPIDR2_EL0` がクリアされている
+            // （ダングリングポインタを指したまま残っていない）。
+            //
+            // SAFETY: 本スレッドは `SmeKernel::try_new()` を確認済み
+            // （`has_pending_lazy_za_save` `# Safety` 節と同一契約）。
+            let still_pending = unsafe { has_pending_lazy_za_save() };
+            assert!(
+                !still_pending,
+                "PendingLazySaveGuard を Drop しただけで TPIDR2_EL0 が \
+                 クリアされているはず（panic 時の後始末保証。\
+                 codex-review 追加指摘対応）"
+            );
+
+            // 確認 2: PSTATE.SM／PSTATE.ZA が無効化済みで、以降
+            // 通常どおり `kernel.run` を実行できる（`smstart` 由来の
+            // ZA=0→1 ゼロ初期化を経由する新規呼び出しが問題なく通る）。
+            let kc_len = 2usize;
+            let ap = xorshift32_vec(0x1234_5678, MR * kc_len);
+            let bp = xorshift32_vec(0x8765_4321, kc_len * NR);
+            let c_init = xorshift32_vec(0x0f0f_0f0f, MR * NR);
+            let mut c = c_init.clone();
+            kernel.run(&ap, &bp, &mut c, kc_len);
+            let expected = scalar_reference(&ap, &bp, &c_init, NR, kc_len);
+            assert_eq!(
+                c, expected,
+                "Drop 後の後始末が完了していれば、以降の kernel.run は \
+                 通常経路（fmopa）で scalar 参照と bit 完全一致するはず"
+            );
+        });
+        handle
+            .join()
+            .expect("PendingLazySaveGuard Drop 後始末検証用スレッドが panic した");
     }
 
     /// 保留中 lazy ZA save（`TPIDR2_EL0 != 0`）がある状態で `kernel.run`
