@@ -105,7 +105,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     echo "[after repo]  $IGNORED_CMD_COMMAND_BATCHING_BENCH"
     echo "[after repo]  $IGNORED_CMD_GEMM_RESIDENT_PARITY"
     echo "[after repo]  $IGNORED_CMD_STORE_PARITY"
-    echo "[after repo]  MSE_AB_BEFORE_FACADE_PATH=\$BEFORE_REPO/crates/facade MSE_AB_AFTER_FACADE_PATH=\$AFTER_REPO/crates/facade bash scripts/bench/framework-compare/run_ab_mse_encode_metal.sh 1691"
+    echo "[after repo]  AB_BEFORE_FACADE_PATH=\$BEFORE_REPO/crates/facade AB_AFTER_FACADE_PATH=\$AFTER_REPO/crates/facade bash scripts/bench/framework-compare/run_ab_mse_encode_metal.sh 1691"
     exit 0
 fi
 
