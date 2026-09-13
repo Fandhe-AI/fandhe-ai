@@ -34,41 +34,104 @@
 //!
 //! # スコープ
 //!
-//! 本イシュー（#1700）は [`ScalarBinaryOp::Sub`]／[`ScalarBinaryOp::Div`]／
-//! [`ScalarBinaryOp::Pow`]、[`ScalarUnaryOp::Sqrt`] のみ実装する。他 kind
-//! は `None`（未実装。呼び出し元 `ops::CudaBackendOps::scalar_unary`／
-//! `scalar_binary` が `BackendError::Unsupported` を返しホスト参照実装
+//! #1700 が [`ScalarBinaryOp::Sub`]／[`ScalarBinaryOp::Div`]／
+//! [`ScalarBinaryOp::Pow`]、[`ScalarUnaryOp::Sqrt`] を実装済み。本イシュー
+//! （#1702）はこれへ比較演算 6 種（[`ScalarBinaryOp::Gt`]／[`Ge`]／[`Lt`]／
+//! [`Le`]／[`Eq`]／[`Ne`]。[`ScalarBinaryOp`] 参照）と
+//! [`ScalarUnaryOp::Clamp`] を追加する。他 kind は `None`（未実装。呼び出し元
+//! `ops::CudaBackendOps::scalar_unary`／`scalar_binary` が
+//! `BackendError::Unsupported` を返しホスト参照実装
 //! （`ScalarUnaryOp::apply`／`ScalarBinaryOp::apply`）へフォールバック
 //! する既存契約。`fandhe_ai_autodiff::grad::scalar_unary_with_fallback`／
 //! `scalar_binary_with_fallback` 参照）。超越関数系（`log`／`log2`／
-//! `log10`／`sin`／`cos`／`tan`／`abs`／`neg`）は #1701、比較演算＋
-//! `Clamp` は #1702 が同じ関数へ match arm を追加する形で拡張する。
-//! `LeakyRelu`／`Elu`／`Softplus`／`Clamp`／`PowScalar`（ペイロードあり
-//! unary kind）・活性化 unary kind（`Relu`／`Exp`／`Tanh`／`Sigmoid`／
-//! `Gelu`／`GeluTanh`／`Silu`／`Hardswish`）・`Add`／`Mul`／`Maximum`／
-//! `Minimum`（比較・算術以外の残り binary kind）はいずれの sub issue
-//! にも含まれず対象外のまま残る（`.claude/rules/out-of-scope-
-//! tracking.md` 対象。必要なら別イシューで追跡）。
+//! `log10`／`sin`／`cos`／`tan`／`abs`／`neg`）は #1701 が同じ関数へ match
+//! arm を追加する形で拡張する。
+//!
+//! `Clamp` は本モジュールで初めて `f32` ペイロードを持つ unary kind
+//! （[`UnaryPayload`] 参照）。モジュール doc冒頭「#1635 への申し送り」の
+//! 契約どおり、NVRTC キャッシュキー・カーネル関数名は `kind_name()`
+//! （ペイロード非依存）のみに依存させ、ペイロード値はソース文字列へ
+//! 埋め込まずカーネル起動引数として渡す（`unary_kernel_source` が
+//! `numel` の後ろへ `float p0, float p1` を宣言し、
+//! `elementwise.rs::run_unary`／`run_scalar_unary_f32` が
+//! [`unary_payload`] の返す値をその順序で追加起動引数として渡す）。
+//!
+//! `LeakyRelu`／`Elu`／`Softplus`／`PowScalar`（他のペイロードあり unary
+//! kind）・活性化 unary kind（`Relu`／`Exp`／`Tanh`／`Sigmoid`／`Gelu`／
+//! `GeluTanh`／`Silu`／`Hardswish`）・`Add`／`Mul`／`Maximum`／`Minimum`
+//! （比較・算術以外の残り binary kind）はいずれの sub issue にも含まれず
+//! 対象外のまま残る（`.claude/rules/out-of-scope-tracking.md` 対象。
+//! 必要なら別イシューで追跡）。
 
 use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 
-/// [`ScalarUnaryOp`] の CUDA C 式（変数名は `x`）。未実装 kind は
+/// [`ScalarUnaryOp`] の CUDA C 式（変数名は `x`。ペイロードあり kind は
+/// `p0`／`p1` も使う。[`unary_payload`] 参照）。未実装 kind は
 /// `None`（呼び出し元がホスト参照実装へフォールバックする）。
 fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
     match op {
         ScalarUnaryOp::Sqrt => Some("sqrtf(x)"),
+        // `ScalarUnaryOp::apply` の `Clamp` 分岐（`scalar_op.rs`）を
+        // 逐語で写す（`isnan(x)` → `NaN` を伝播 / `p0 > p1`（min > max）
+        // → 常に `p1`（max） / `x < p0` → `p0` / `x > p1` → `p1` /
+        // それ以外 → `x`。`fminf`／`fmaxf`〈IEEE minNum/maxNum は非 NaN
+        // 側を優先し `is_nan` 明示分岐と異なる〉は使わない。モジュール
+        // doc「forward 数式の正」参照）。
+        ScalarUnaryOp::Clamp { .. } => {
+            Some("isnan(x) ? x : (p0 > p1 ? p1 : (x < p0 ? p0 : (x > p1 ? p1 : x)))")
+        }
         _ => None,
     }
 }
 
-/// [`ScalarBinaryOp`] の CUDA C 式（変数名は `a_v`／`b_v`）。未実装 kind
+/// [`ScalarBinaryOp`] の CUDA C 式（変数名は `a_v`／`b_v`）。比較演算は
+/// `bool_to_f32`（`scalar_op.rs`）と同じ `0.0f`／`1.0f` を返す（`docs/
+/// scalar-op-dispatch-design.md` §3.2「bool 出力」契約）。未実装 kind
 /// は `None`。
 fn binary_expr(op: ScalarBinaryOp) -> Option<&'static str> {
     match op {
         ScalarBinaryOp::Sub => Some("a_v - b_v"),
         ScalarBinaryOp::Div => Some("a_v / b_v"),
         ScalarBinaryOp::Pow => Some("powf(a_v, b_v)"),
+        ScalarBinaryOp::Gt => Some("(a_v > b_v) ? 1.0f : 0.0f"),
+        ScalarBinaryOp::Ge => Some("(a_v >= b_v) ? 1.0f : 0.0f"),
+        ScalarBinaryOp::Lt => Some("(a_v < b_v) ? 1.0f : 0.0f"),
+        ScalarBinaryOp::Le => Some("(a_v <= b_v) ? 1.0f : 0.0f"),
+        ScalarBinaryOp::Eq => Some("(a_v == b_v) ? 1.0f : 0.0f"),
+        ScalarBinaryOp::Ne => Some("(a_v != b_v) ? 1.0f : 0.0f"),
         _ => None,
+    }
+}
+
+/// [`ScalarUnaryOp`] のカーネル起動引数として渡す `f32` ペイロード
+/// （ソース文字列へは埋め込まない。モジュール doc「スコープ」参照）。
+/// `None` はペイロードなし kind（起動引数列は既存 `numel` までで不変＝
+/// bit 同一）、`Two([p0, p1])` は 2 引数ペイロード kind（現状 `Clamp`
+/// のみ）。
+pub(crate) enum UnaryPayload {
+    None,
+    Two([f32; 2]),
+}
+
+impl UnaryPayload {
+    /// カーネル起動引数として `numel` の後ろへ渡す順序どおりのスライス
+    /// （空スライスは追加引数なし＝既存 kind と同じ起動引数列）。
+    pub(crate) fn as_slice(&self) -> &[f32] {
+        match self {
+            Self::None => &[],
+            Self::Two(v) => v,
+        }
+    }
+}
+
+/// `op` のカーネル起動ペイロードを返す（[`unary_kernel_source`] が
+/// 宣言する `p0`／`p1` パラメータへ対応する値。呼び出し順は
+/// `elementwise.rs::run_scalar_unary_f32` → `run_unary` が
+/// `as_slice()` の順序で `numel` の後ろへ追加起動引数として渡す）。
+pub(crate) fn unary_payload(op: ScalarUnaryOp) -> UnaryPayload {
+    match op {
+        ScalarUnaryOp::Clamp { min, max } => UnaryPayload::Two([min, max]),
+        _ => UnaryPayload::None,
     }
 }
 
@@ -93,12 +156,23 @@ pub(crate) fn binary_function_name(op: ScalarBinaryOp) -> String {
 pub(crate) fn unary_kernel_source(op: ScalarUnaryOp) -> Option<String> {
     let expr = unary_expr(op)?;
     let name = unary_function_name(op);
+    // ペイロードあり kind（`Clamp` 等）は `numel` の後ろへ `float p0,
+    // float p1` を追加宣言する（モジュール doc「スコープ」参照）。
+    // ペイロード値自体はここへ埋め込まず、常に固定パラメータ名
+    // （`p0`／`p1`）のみを使うため、`kind_name()` が同じ限り payload
+    // 値が異なってもソース文字列は完全一致する（NVRTC キャッシュキーが
+    // payload 非依存であることの根拠。単体テスト
+    // `clamp_source_declares_payload_params_and_omits_values` 参照）。
+    let payload_params = match unary_payload(op) {
+        UnaryPayload::None => String::new(),
+        UnaryPayload::Two(_) => ", float p0, float p1".to_string(),
+    };
     Some(format!(
         r#"
 extern "C" __global__ void {name}(
     const float* __restrict__ a,
     float* __restrict__ out,
-    int numel)
+    int numel{payload_params})
 {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numel) {{
@@ -157,10 +231,97 @@ mod tests {
             ScalarBinaryOp::Sub,
             ScalarBinaryOp::Div,
             ScalarBinaryOp::Pow,
+            ScalarBinaryOp::Gt,
+            ScalarBinaryOp::Ge,
+            ScalarBinaryOp::Lt,
+            ScalarBinaryOp::Le,
+            ScalarBinaryOp::Eq,
+            ScalarBinaryOp::Ne,
         ] {
             let src = binary_kernel_source(op).expect("must be implemented");
             assert!(src.contains("if (idx < numel)"));
             assert!(src.contains(&binary_function_name(op)));
+        }
+    }
+
+    #[test]
+    fn comparison_ops_return_zero_or_one_literals() {
+        // 比較 6 種は `bool_to_f32`（`scalar_op.rs`）と同じ `0.0f`／
+        // `1.0f` を返す（`docs/scalar-op-dispatch-design.md` §3.2「bool
+        // 出力」契約）。式に浮動小数点数以外の値（整数 `1`／`0` 等）が
+        // 紛れていないことをソース内容で固定する。
+        for op in [
+            ScalarBinaryOp::Gt,
+            ScalarBinaryOp::Ge,
+            ScalarBinaryOp::Lt,
+            ScalarBinaryOp::Le,
+            ScalarBinaryOp::Eq,
+            ScalarBinaryOp::Ne,
+        ] {
+            let src = binary_kernel_source(op).expect("must be implemented");
+            assert!(src.contains("1.0f"), "{op:?} source must contain 1.0f");
+            assert!(src.contains("0.0f"), "{op:?} source must contain 0.0f");
+        }
+    }
+
+    #[test]
+    fn clamp_source_declares_payload_params_and_omits_values() {
+        let src = unary_kernel_source(ScalarUnaryOp::Clamp {
+            min: 0.123,
+            max: 4.567,
+        })
+        .expect("Clamp must be implemented");
+        assert!(src.contains("float p0, float p1"));
+        assert!(!src.contains("0.123"));
+        assert!(!src.contains("4.567"));
+        assert!(src.contains("if (idx < numel)"));
+        assert!(src.contains("scalar_unary_clamp"));
+    }
+
+    #[test]
+    fn clamp_source_is_payload_value_independent() {
+        // NVRTC キャッシュキーが `kind_name()` のみに依存する契約
+        // （`context_cache::cached_scalar_unary_kernel` doc 参照）の
+        // 前提: 異なる payload 値でも生成ソースは完全一致する。
+        let src_a = unary_kernel_source(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 })
+            .expect("Clamp must be implemented");
+        let src_b = unary_kernel_source(ScalarUnaryOp::Clamp {
+            min: -5.0,
+            max: 5.0,
+        })
+        .expect("Clamp must be implemented");
+        assert_eq!(src_a, src_b);
+    }
+
+    #[test]
+    fn clamp_source_does_not_use_fminf_fmaxf() {
+        // `fminf`／`fmaxf`（IEEE minNum/maxNum。非 NaN 側を優先）は
+        // `ScalarUnaryOp::apply` の `Clamp` 分岐（明示 `is_nan` 分岐）と
+        // 数値契約が異なるため使わない（`kernels_rmsnorm.rs` の
+        // `rsqrtf` 不在テストと同型）。
+        let src = unary_kernel_source(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 })
+            .expect("Clamp must be implemented");
+        assert!(!src.contains("fminf("));
+        assert!(!src.contains("fmaxf("));
+    }
+
+    #[test]
+    fn payload_param_count_matches_source_for_all_implemented_unary_kinds() {
+        // 実装済み unary kind すべてについて、ソース中の `float p`
+        // パラメータ宣言数が `unary_payload(op).as_slice().len()` と
+        // 一致することを固定する（引数個数の不一致はカーネル起動時
+        // にしか露見しないため事前にホスト側で検出する）。
+        for op in [
+            ScalarUnaryOp::Sqrt,
+            ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 },
+        ] {
+            let src = unary_kernel_source(op).expect("must be implemented");
+            let declared = src.matches("float p").count();
+            let expected = unary_payload(op).as_slice().len();
+            assert_eq!(
+                declared, expected,
+                "{op:?}: declared payload params ({declared}) != unary_payload len ({expected})"
+            );
         }
     }
 
@@ -179,6 +340,10 @@ mod tests {
             "scalar_unary_sqrt"
         );
         assert_eq!(
+            unary_function_name(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }),
+            "scalar_unary_clamp"
+        );
+        assert_eq!(
             binary_function_name(ScalarBinaryOp::Sub),
             "scalar_binary_sub"
         );
@@ -190,5 +355,11 @@ mod tests {
             binary_function_name(ScalarBinaryOp::Pow),
             "scalar_binary_pow"
         );
+        assert_eq!(binary_function_name(ScalarBinaryOp::Gt), "scalar_binary_gt");
+        assert_eq!(binary_function_name(ScalarBinaryOp::Ge), "scalar_binary_ge");
+        assert_eq!(binary_function_name(ScalarBinaryOp::Lt), "scalar_binary_lt");
+        assert_eq!(binary_function_name(ScalarBinaryOp::Le), "scalar_binary_le");
+        assert_eq!(binary_function_name(ScalarBinaryOp::Eq), "scalar_binary_eq");
+        assert_eq!(binary_function_name(ScalarBinaryOp::Ne), "scalar_binary_ne");
     }
 }
