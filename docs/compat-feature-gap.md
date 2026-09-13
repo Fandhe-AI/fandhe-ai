@@ -715,3 +715,13 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
 
 - 319 行目の `float64` 行の「部分」記載は本イシューにより CPU バックエンド限定で解消: `crates/backend-cpu` が `TypedOps<f64>`（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の 8 演算）を実装し、`CpuBackendOps::typed_ops_f64()` accessor 経由で到達可能になった（`docs/backend-dtype-dispatch-design.md` §10）
 - `Var`／`Tape`／facade は本イシューの対象外のまま不変（表本体の「XL」見積り自体は #1650／#1651〈CUDA／Metal〉・`Var`／`Tape` 昇格の残作業を含むため据え置く）。CUDA（#1650）・Metal（#1651）は未実装のまま
+
+## #1698 の追補
+
+`float16` 行（319〜320 行目）のスナップショット本文は不変のまま、CPU
+バックエンド限定で `TypedOps<half::f16>` が実装され `Tensor<f16>` の
+`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` が CPU 経由で到達
+可能になった（`crates/backend-cpu/src/typed_f16.rs`。イシュー #1698）。
+CUDA（#1650）・Metal（#1651）は未実装のまま。`Var`／`Tape`／VJP・facade
+公開面（`Tensor<f16>` を受け取る facade API）は引き続き未接続で、本表の
+「未実装（欠落側）」列の評価（`Var` レベルの mixed precision）は変わらない。
