@@ -806,6 +806,11 @@ impl Op {
             | Op::LogSoftmax { .. }
             | Op::RmsNorm { .. }
             | Op::LayerNorm { .. } => false,
+            // `Op::Where`／`Op::MaskedFill`（イシュー #1637）は `cond`／`mask`
+            // テンソルを `Op` 自身が保持する eager 実体化演算で、
+            // `recompute_value` に再計算経路を持たないため解放しない
+            // （merge 時の非網羅 match 是正）。
+            Op::Where { .. } | Op::MaskedFill { .. } => false,
         }
     }
 
@@ -846,6 +851,11 @@ impl Op {
             | Op::Softmax { input, .. }
             | Op::LogSoftmax { input, .. }
             | Op::CrossEntropyLoss { logits: input, .. } => f(*input),
+            Op::Where { a, b, .. } => {
+                f(*a);
+                f(*b);
+            }
+            Op::MaskedFill { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);
                 f(*target);
