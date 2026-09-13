@@ -1,13 +1,17 @@
 //! 決定的シードの重み初期化ヘルパー（`nn::Linear`・TASK-9.1a・#91）。
 //!
-//! xorshift64* PRNG コア（`Xorshift64Star`）は `bench-harness::rng::Xorshift64Star`
-//! （`crates/bench-harness/src/rng.rs`）と**同一アルゴリズムを差分なしで
-//! 再掲**する。`bench-harness` はベンチ計測クレートであり、`autodiff`
-//! の本体コード（`src/`）から依存すると層構造上不適切（`autodiff` は
-//! `crates/tensor-core` のみに依存する薄いコアであるべき。TASK-9.1a
-//! 計画 §3.3）なので、`dev-dependencies` に留めたまま意図的に限定重複
-//! させる。`autodiff/tests/poc_v2_2_parity.rs` は引き続き
-//! `bench-harness` 版をテスト専用に使う（重複はここだけ）。
+//! xorshift64* PRNG コア（`Xorshift64Star`）は、以前は `bench-harness::
+//! rng::Xorshift64Star` と同一アルゴリズムを本ファイルへ差分なしで
+//! 再掲していたが、イシュー #1724（プロセスグローバル決定的 RNG 契約
+//! `manual_seed` の新設）で共通コアを `tensor-core::rng::Xorshift64Star`
+//! へ一本化したため、本ファイルはそこへ委譲する（`tensor-core` は
+//! `autodiff` の依存先であり層構造上の逆転は生じない。`autodiff` 本体
+//! コードが `bench-harness`〈ベンチ計測クレート〉に依存しない方針
+//! 自体は不変。TASK-9.1a 計画 §3.3）。`bench-harness::rng::
+//! Xorshift64Star` は同アルゴリズムのまま意図的に独立重複を続ける
+//! （層構造上の理由は同ファイル冒頭コメント参照。統合しない）。
+//! `autodiff/tests/poc_v2_2_parity.rs` は引き続き `bench-harness` 版を
+//! テスト専用に使う。
 //!
 //! PRNG コアの**上**に `derive_seed`（本ファイル下部）というシード導出層
 //! を重ねている点は `bench-harness` 版との差分である。`Linear::new`
@@ -21,43 +25,20 @@
 //! `(seed, salt)` を独立した 64bit 値へ拡散するため、salt が異なれば
 //! 隣接する呼び出しシード同士でも衝突しない。
 //!
+//! **既存の個別シード API と `tensor-core::rng::manual_seed` の関係**:
+//! 本ファイルの `Xorshift64Star` は `uniform_init`／`try_uniform_init`
+//! の呼び出しごとに新規構築される一時的な状態であり、
+//! `tensor-core::rng` が提供するプロセスグローバルな RNG 状態
+//! （`manual_seed`）とは完全に独立する（`manual_seed` を何度呼んでも
+//! `Linear::new(.., seed)` の出力は変わらない。イシュー #1724。設計は
+//! `docs/rng-global-contract-design.md`）。
+//!
 //! **用途限定（重要）**: xorshift64* は暗号学的に安全な PRNG ではない。
 //! 重み初期化・回帰テストの決定性確保には十分だが、鍵・トークン生成や
 //! その他セキュリティ用途には使用しないこと
 //! （OWASP A02 暗号化の失敗の観点。`.claude/rules/security.md`）。
 
-/// xorshift64* 状態。`bench-harness::rng::Xorshift64Star` と同一実装
-/// （移植元: `docs/spec/03-poc/poc-v2-5-backend-numeric-parity/code/rust/src/rng.rs`）。
-struct Xorshift64Star {
-    state: u64,
-}
-
-impl Xorshift64Star {
-    /// シードが 0 だと xorshift の不動点（常に 0 を返す）に陥るため、
-    /// 0 は非零値（黄金比由来の定数）に補正する。
-    fn new(seed: u64) -> Self {
-        Self {
-            state: if seed == 0 { 0x9E3779B97F4A7C15 } else { seed },
-        }
-    }
-
-    /// 次の 64bit 乱数を返す。
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.state = x;
-        x.wrapping_mul(0x2545F4914F6CDD1D)
-    }
-
-    /// `[-1.0, 1.0)` の範囲に収まる f32 を返す。
-    fn next_f32(&mut self) -> f32 {
-        let bits = (self.next_u64() >> 40) as u32; // 24bit
-        let unit = bits as f32 / (1u32 << 24) as f32; // [0, 1)
-        unit * 2.0 - 1.0
-    }
-}
+use fandhe_ai_tensor_core::rng::Xorshift64Star;
 
 /// `Linear::new`（`nn/linear.rs`）から呼ばれる重み初期化本体。
 ///

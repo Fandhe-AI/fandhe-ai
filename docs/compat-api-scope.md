@@ -212,7 +212,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | index 系（narrow／where／gather／scatter） | #1599（narrow は #1598 で実装済み・where／masked_fill は #1637 で実装済み〈`Var::where_cond`／`masked_fill`。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない〉のため対象外。gather／scatter／scatter_add／index_select は #1638（→ #1776 で Op 定義・CPU 参照実装・VJP 実装済み。`Var::gather`／`index_select`／`scatter`／`scatter_add`。facade 到達経路は既存 `Var` 再エクスポート経由で同様に新規公開面なし。CUDA／Metal 専用カーネルは #1777／#1778 が残対象）のため対象外） |
 | バッチ行列積 | #1600 |
 | 縮約（mean／min／argmax／var／std／複数軸） | #1601（`amax`／`max` の勾配分配方式はこの issue で設計判断を記録して確定。`04-requirements.md:234`。2 節参照） |
-| 乱数生成と RNG 契約 | #1602 |
+| 乱数生成と RNG 契約 | #1602（#1724 実装済み: グローバル RNG 契約〈manual_seed〉。`fandhe_ai::manual_seed`。facade 到達経路は新規 `pub fn`。`docs/rng-global-contract-design.md`。randn／rand／randint は #1725、arange／linspace／eye／zeros_like／ones_like は #1726 で別途対応） |
 | Dropout | #1603 |
 | Embedding | #1604 |
 | MultiheadAttention | #1605 |
@@ -456,6 +456,8 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 **#1628（DDP）は設計判断の記録（docs のみ）に留め、実装・通信層の
 依存追加は行わない**。implement-issue-tree で Phase 3（親 #1573）を
 消化する際は、#1627 を skip／blocked 扱いとする。
+
+**#1628 の設計記録は `docs/facade-multi-gpu-ddp-decision.md` として完了した。**
 
 ## 6. 出典一覧
 

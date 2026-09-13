@@ -328,7 +328,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 |---|---|---|---|---|
 | 単一 GPU 選択（`device='cuda:0'`） | `tf.device` | あり（`Device::Cuda(ordinal)`） | - | - |
 | `.to(device)`（テンソル転送） | `tf.identity` with device | なし（`tape_for` でバックエンドごと `Tape` を切替える設計。テンソル単体を明示転送する API はない） | `Tensor`/`Var` のデバイス間コピー API | M |
-| 複数 GPU・`DataParallel`/`DDP` | `tf.distribute.MirroredStrategy` | なし | 勾配 all-reduce・パラメータ複製の設計（ネットワーク層から必要） | XL |
+| 複数 GPU・`DataParallel`/`DDP` | `tf.distribute.MirroredStrategy` | なし | 勾配 all-reduce・パラメータ複製の設計（ネットワーク層から必要）。設計: `docs/facade-multi-gpu-ddp-decision.md`（#1628） | XL |
 | デバイス自動列挙（`torch.cuda.device_count()`） | `tf.config.list_physical_devices` | なし（`docs/public-api-design.md` §4.1 未決事項として明記） | `Device::available()` 相当の列挙 API | S〜M |
 
 ### 2.14 データ
@@ -689,3 +689,24 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
   簡略化版）は引き続き対象外（`docs/autodiff-linalg-design.md` と
   同型の対象外整理。詳細は本文書 §2.2 表・実装計画のスコープ外節を
   参照）。
+
+## 追補（イシュー #1724）
+
+`§2.1`（テンソル生成）に列挙されていた「乱数生成と RNG 契約」の欠落は、
+プロセスグローバルな決定的 RNG 契約（`fandhe_ai::manual_seed`。PyTorch
+`torch.manual_seed` 相当）を新設したことで**基盤機構のみ実装済み**へ
+更新する。設計記録は `docs/rng-global-contract-design.md`。
+
+- 実装した契約: `manual_seed(seed: u64)`（facade 経由）・内部アクセサ
+  `tensor-core::rng::with_global_rng`（`autodiff`／`facade` へは非公開。
+  #1725 が `randn`／`rand`／`randint` を実装する際の消費側）。
+- 既存の個別シード API（`nn::Linear::new(.., seed)` 等）とは完全に独立
+  した別機構であり、本イシューはそれらのシグネチャ・挙動を変更していな
+  い（独立性は `crates/autodiff/src/nn/linear.rs::tests::
+  linear_new_is_unaffected_by_global_manual_seed_state` で機構的に固定）。
+- **実際の乱数テンソル生成（`randn`／`rand`／`randint`）自体は未実装の
+  まま**（#1725 のスコープ）。`arange`／`linspace`／`eye`／`zeros_like`／
+  `ones_like` も未実装のまま（#1726 のスコープ）。
+- facade 新規公開面: `pub fn manual_seed`（新規）。内部型・アクセサは
+  facade へ露出させない（`crates/facade/tests/api_surface.rs::
+  facade_does_not_expose_rng_internal_types` で機械検査）。
