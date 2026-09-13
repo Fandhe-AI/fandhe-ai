@@ -1,0 +1,31 @@
+# イシュー #1691 Metal mse_loss_backward encode-only 化 実測環境（記入欄）
+#
+# 本 PR 実行環境（Linux コンテナ／worktree）に Apple Silicon 実機への
+# 到達手段がないため未実測。M4 Max 実機での実測時にこのテンプレートを
+# 埋めること（内部ホスト名・ユーザー名は書かない）。
+
+hostname: masked
+date:
+os:
+cpu:
+rustc:
+cargo:
+before_sha:
+after_sha:
+mse_parity_result:
+bitdump_line_count:
+bitdump_label_diff_empty:
+bitdump_diff_empty:
+batch_counters_after:
+batch_counters_before:
+backward_phase_after:
+backward_phase_before:
+train_shape_median_s_ratio:
+general_shape_16384_ratio:
+general_shape_65536_ratio:
+general_shape_1048576_ratio:
+fold_bits_match:
+ab_reuse_step_total_ratio:
+ab_checksum_exact_match:
+ignored_tests_result:
+verdict:
