@@ -202,7 +202,15 @@ impl ScalarUnaryOp {
             Self::Gelu => gelu_erf(x),
             Self::GeluTanh => gelu_tanh_approx(x),
             Self::Silu => x * sigmoid_stable(x),
-            Self::Hardswish => x * relu6(x + 3.0) / 6.0,
+            // `x * relu6(x + 3.0) / 6.0` は乗算 `x * relu6(...)` を
+            // 先に評価するため、恒等領域（`x >= 3.0` で
+            // `relu6(x+3.0) == 6.0`）の大きな `x`（例: `1e38`）で
+            // `x * 6.0` が `f32` の範囲を overflow して `inf` になる
+            // （本来の値は `x` そのもの）。`relu6(...) / 6.0` を先に
+            // 計算して `[0.0, 1.0]` の範囲へ収めてから `x` に掛ける
+            // 順序へ変更する（非恒等領域でも数学的に同値だが丸め順序は変わりうる。
+            // PR #1686 codex-review 指摘 P2）。
+            Self::Hardswish => x * (relu6(x + 3.0) / 6.0),
             Self::LeakyRelu { negative_slope } => {
                 if x >= 0.0 {
                     x
@@ -214,14 +222,30 @@ impl ScalarUnaryOp {
                 if x > 0.0 {
                     x
                 } else {
-                    alpha * (x.exp() - 1.0)
+                    // `alpha * (x.exp() - 1.0)` は `x` が `0` に近い
+                    // 場合に `x.exp()` が `1.0` へ丸まり桁落ちする
+                    // （`alpha` が大きいと相対誤差が拡大する。例:
+                    // `x=-1e-8, alpha=1e8` で `-1.0` にならず `0.0` に
+                    // なる）。`f32::exp_m1`（`exp(x) - 1` を桁落ちなく
+                    // 計算する標準ライブラリ関数）へ置き換える
+                    // （PR #1686 codex-review 指摘 P2）。
+                    alpha * x.exp_m1()
                 }
             }
             Self::Softplus { beta, threshold } => {
                 if x * beta > threshold {
                     x
                 } else {
-                    (1.0 / beta) * (1.0 + (beta * x).exp()).ln()
+                    // `(1.0 + (beta * x).exp()).ln()` は `(beta * x)`
+                    // が大きく負のとき `(beta * x).exp()` が `1.0` の
+                    // ulp（約 `1.19e-7`）近傍まで小さくなり、`1.0 + …`
+                    // の加算で桁落ちする（例: `beta=1e-6,
+                    // threshold=20, x=-15000000` で正しい値
+                    // `0.305902` の代わりに `0.357628` を返していた）。
+                    // `f32::ln_1p`（`ln(1+y)` を `y` が小さくても桁落ち
+                    // なく計算する標準ライブラリ関数）へ置き換える
+                    // （PR #1686 codex-review 指摘 P2）。
+                    (beta * x).exp().ln_1p() / beta
                 }
             }
             Self::Clamp { min, max } => {
@@ -430,8 +454,21 @@ pub fn gelu_tanh_grad(x: f32) -> f32 {
     const C: f32 = 0.797_884_6; // sqrt(2 / pi)
     let u = C * (x + 0.044_715 * x * x * x);
     let tanh_u = u.tanh();
-    let du_dx = C * (1.0 + 3.0 * 0.044_715 * x * x);
-    0.5 * (1.0 + tanh_u) + 0.5 * x * (1.0 - tanh_u * tanh_u) * du_dx
+    // `sech^2(u) = 1 - tanh(u)^2`。`|x|` が極端に大きい（例: `1e20`）
+    // と `x*x*x`／`x*x` が overflow して `du_dx` が `inf` になる一方、
+    // `u` も同時に飽和し `tanh_u` が厳密に `±1.0` になって
+    // `sech2 == 0.0` になる。この場合ガードなしだと `0.0 * inf` で
+    // `NaN` が生じる（PR #1686 codex-review 指摘 P2）。`sech2 == 0.0`
+    // （飽和済み）のときは第 2 項を解析的な極限値である `0.0` として
+    // 扱い、`du_dx` の evaluation 自体を経由しない。
+    let sech2 = 1.0 - tanh_u * tanh_u;
+    let second_term = if sech2 == 0.0 {
+        0.0
+    } else {
+        let du_dx = C * (1.0 + 3.0 * 0.044_715 * x * x);
+        0.5 * x * sech2 * du_dx
+    };
+    0.5 * (1.0 + tanh_u) + second_term
 }
 
 /// SiLU（`x * sigmoid(x)`）の導関数 `s + x·s·(1-s)`（`s = sigmoid(x)`）。
@@ -666,5 +703,66 @@ mod tests {
         );
         assert_eq!(ScalarUnaryOp::Relu.kind_name(), "relu");
         assert_eq!(ScalarBinaryOp::Add.kind_name(), "add");
+    }
+
+    // ---------------------------------------------------------------------
+    // PR #1686 codex-review 指摘 P2 の回帰テスト（極端な入力での
+    // NaN／overflow を有限入力から生まないこと。
+    // `docs/scalar-op-dispatch-design.md`「PR #1686 codex-review／Bugbot
+    // 指摘の是正」参照）。
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn softplus_large_negative_x_avoids_log1p_catastrophic_cancellation() {
+        // beta=1e-6, threshold=20, x=-15000000 は `1.0 + exp(beta*x)` を
+        // 素朴に評価すると `exp(beta*x)`（約 3.06e-7）が `1.0` の ulp
+        // （約 1.19e-7）近傍まで小さく桁落ちし `0.357628` を返していた
+        // （正しくは `0.305902`）。`ln_1p` 経由なら桁落ちしない。
+        let out = ScalarUnaryOp::Softplus {
+            beta: 1e-6,
+            threshold: 20.0,
+        }
+        .apply(-15_000_000.0);
+        assert_close(out, 0.305_902, 1e-5, "softplus large negative x");
+    }
+
+    #[test]
+    fn elu_tiny_negative_x_with_large_alpha_avoids_exp_cancellation() {
+        // alpha=1e8, x=-1e-8 は `alpha * (x.exp() - 1.0)` だと
+        // `x.exp()` が `1.0` へ丸まり `0.0` を返していた（正しくは
+        // ほぼ `-1.0`）。`exp_m1` 経由なら桁落ちしない。
+        let out = ScalarUnaryOp::Elu { alpha: 1e8 }.apply(-1e-8);
+        assert_close(out, -1.0, 1e-2, "elu tiny negative x, large alpha");
+    }
+
+    #[test]
+    fn hardswish_huge_positive_x_stays_finite_in_identity_region() {
+        // x=1e38（恒等領域 x>=3）で `x * relu6(x+3.0)` を先に評価すると
+        // `x * 6.0` が f32 の範囲を overflow して `inf` になっていた
+        // （正しくは `x` そのもの）。
+        let out = ScalarUnaryOp::Hardswish.apply(1e38);
+        assert!(out.is_finite(), "hardswish(1e38) は有限値であるべき: {out}");
+        assert_close(out, 1e38, 1e30, "hardswish huge positive x");
+    }
+
+    #[test]
+    fn gelu_tanh_grad_huge_magnitude_input_does_not_produce_nan() {
+        // x=1e20（正負とも）で `du_dx` が inf へ overflow する一方 `tanh`
+        // は飽和して `sech2 == 0.0` になり、ガードなしだと `0.0 * inf`
+        // で `NaN` になっていた。飽和域の解析的極限（正側 1.0、負側
+        // 0.0）に一致することを確認する。
+        let pos = gelu_tanh_grad(1e20);
+        assert!(
+            !pos.is_nan(),
+            "gelu_tanh_grad(1e20) は NaN であってはならない"
+        );
+        assert_close(pos, 1.0, 1e-3, "gelu_tanh_grad huge positive x");
+
+        let neg = gelu_tanh_grad(-1e20);
+        assert!(
+            !neg.is_nan(),
+            "gelu_tanh_grad(-1e20) は NaN であってはならない"
+        );
+        assert_close(neg, 0.0, 1e-3, "gelu_tanh_grad huge negative x");
     }
 }

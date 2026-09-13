@@ -182,3 +182,80 @@ code-comment-style.md` が禁じる「同一クレート内の陳腐化しやす
   証・`Var::scalar_unary`／`scalar_binary` の `Tape` 経由エンドツーエ
   ンド（backward・poison 伝播・`is_checkpoint_eligible == false`）・
   shape 不一致の fail-closed。
+
+## 12. PR #1686 codex-review／Bugbot 指摘の是正
+
+PR #1686（本ドキュメント §1〜11 の実装）に対する codex-review 7 件・
+Cursor Bugbot 1 件の指摘を是正した記録。tolerance 定数・既存テストの
+許容誤差は変更していない（`.claude/rules/coding-rust.md` 「バックエン
+ド間数値一致テストの許容誤差を単独で緩和しない」）。
+
+- **P1（`crates/backend-cpu/tests/scalar_op_parity.rs`）**:
+  `elementwise::PARALLEL_THRESHOLD`（`pub(crate)`）の値を統合テスト側
+  でリテラル複製していた。逐次／`rayon` 並列の境界検証テストを
+  `crates/backend-cpu/src/scalar_elementwise.rs` 内 `#[cfg(test)]`
+  単体テストへ移し、`PARALLEL_THRESHOLD` を直接参照する形にして複製
+  を解消した。
+- **P2（unary `PowScalar` の勾配。`crates/autodiff/src/eval/scalar.rs`
+  `unary_grad_factor`）**: `x == 0.0` かつ `exponent == 0.0` のとき
+  `exponent * x.powf(exponent - 1.0)` が `0.0 * inf` = `NaN` になって
+  いた。forward は `x^0 = 1`（IEEE 754 の `0^0` 規約どおり有限）の
+  定数関数のため、`exponent == 0.0` を先に判定し勾配 `0.0` を返すよう
+  にした。
+- **P2（binary `Pow` の `db`。`crates/autodiff/src/eval/scalar.rs`
+  `binary_partials`）**: `a == 0.0` かつ `b == 0.0` のとき
+  `da = b * a.powf(b - 1.0)` が同型の `NaN` を生んでいた
+  （`db` は既存の `a == 0.0` マスクで元々 `0.0`）。`da` も
+  `b == 0.0` を先に判定し `0.0` を返すようマスクした（forward が
+  `b` に関して定数関数 `a^0 = 1` になるため）。
+- **P2（binary `Div` の `db`。同ファイル）**: `db = -a / (b * b)` は
+  `b * b` を先に評価するため `a == b == 1e-30` で `b*b` が `0.0` へ
+  underflow して `-inf`、`a == b == 1e20` で `b*b` が `inf` へ
+  overflow して `-0.0` になり、いずれも数学的に有限な値
+  （`-1/b`）から乖離していた。`db = -(a / b) / b` へ変形し、非 NaN
+  入力では既存式と数学的に同値のまま overflow/underflow 耐性を上げた。
+- **P2（Softplus forward。`crates/tensor-core/src/scalar_op.rs`）**:
+  `(1.0 + (beta * x).exp()).ln()` は `(beta * x)` が大きく負のとき
+  `(beta * x).exp()` が `1.0` の ulp 近傍まで小さくなり `1.0 + …` の
+  加算で桁落ちしていた（`beta=1e-6, threshold=20, x=-15000000` で
+  正しい `0.305902` の代わりに `0.357628` を返す）。`f32::ln_1p` を
+  使う `(beta * x).exp().ln_1p() / beta` へ置き換えた。
+- **P2（ELU forward。同ファイル）**: `alpha * (x.exp() - 1.0)` は
+  `x` が `0` に近いとき `x.exp()` が `1.0` へ丸まり桁落ちしていた
+  （`x=-1e-8, alpha=1e8` でほぼ `-1.0` になるべきが `0.0` になる）。
+  `f32::exp_m1` を使う `alpha * x.exp_m1()` へ置き換えた。
+- **P2（Hardswish forward。同ファイル）**: `x * relu6(x + 3.0) / 6.0`
+  は乗算 `x * relu6(...)` を先に評価するため、恒等領域（`x >= 3.0`）
+  の巨大な `x`（例 `1e38`）で `x * 6.0` が overflow して `inf` に
+  なっていた（正しい値は `x` 自身）。`x * (relu6(x + 3.0) / 6.0)` へ
+  括弧を入れ替え、先に `[0.0, 1.0]` へ正規化してから `x` を掛ける
+  順序にした（非恒等領域では数学的に同値。ULP 単位の丸め差はあり
+  うるが bit 同一を主張する既存テストは add/mul/relu/exp/tanh の
+  5 演算限定であり Hardswish には無関係。§11 の許容誤差ベース検証
+  はそのまま通る）。
+- **P2（GELU tanh 近似版の勾配。`gelu_tanh_grad`。同ファイル）**:
+  `|x|` が極端に大きい（例 `1e20`）と `x*x*x`／`x*x` が overflow して
+  `du_dx` が `inf` になる一方、`u` も同時に飽和し `tanh_u` が厳密に
+  `±1.0` になって `sech2 = 1 - tanh_u^2` が `0.0` になり、
+  `0.0 * inf` で `NaN` が生じていた。`sech2 == 0.0`（飽和済み）の
+  場合は第 2 項を解析的な極限値である `0.0` として扱い、`du_dx` の
+  評価自体を経由しないガードを追加した。
+- **Bugbot Low（binary `Maximum`／`Minimum` の VJP。`binary_partials`）**:
+  `a`／`b` のいずれかが `NaN` のとき IEEE 754 比較（`>`／`<`）が
+  すべて `false` になりタイ分割（`0.5`/`0.5`）へ落ちていた。forward
+  （`nan_propagating_max`/`_min`）は `NaN` を明示伝播しており、
+  `Clamp` が `NaN` 入力で勾配をゼロにする規約（§3.4）とも整合しない
+  ため、**`Maximum`／`Minimum` は `NaN` 入力（いずれか一方でも）では
+  タイ分割ではなく両入力の勾配を `(0.0, 0.0)` にする**規約へ統一し、
+  §3.4 数値規約に明記した（本モジュール `binary_partials` 冒頭コメント
+  参照）。
+
+新規 `pub` 公開面は追加していない（`PARALLEL_THRESHOLD` の直接参照は
+`pub(crate)` のままクレート内単体テストから使う形。ホスト参照実装
+`ScalarUnaryOp::apply`／`ScalarBinaryOp::apply`・VJP 係数関数
+（`unary_grad_factor`／`binary_partials`）のシグネチャは不変）。
+回帰テストは `crates/tensor-core/src/scalar_op.rs`（Softplus／ELU／
+Hardswish／`gelu_tanh_grad` の極端入力）・`crates/autodiff/src/grad.rs`
+（PowScalar／Pow da／Div db／Maximum・Minimum の NaN）・
+`crates/backend-cpu/src/scalar_elementwise.rs`（`PARALLEL_THRESHOLD`
+境界の移設）に追加した。

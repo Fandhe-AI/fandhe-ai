@@ -53,9 +53,15 @@ pub(crate) fn binary(lhs: &Tensor<f32>, rhs: &Tensor<f32>, op: ScalarBinaryOp) -
 //   常に `0`（forward が常に `max` を返す定数関数のため）。
 // - `Maximum`／`Minimum` の tie（`a == b`）は `0.5`／`0.5` に分配
 //   （PyTorch 準拠。`Var::max`〈縮約〉の先勝ち規約とは別演算）。
+//   **`a`／`b` のいずれかが `NaN` の場合はタイ分割ではなく `(0.0, 0.0)`**
+//   （`Clamp` の NaN 規約と統一。PR #1686 codex-review／Bugbot 指摘の
+//   是正・`docs/scalar-op-dispatch-design.md` 参照）。
 // - `Pow`（binary）の `db`（`∂/∂b[a^b] = a^b・ln(a)`）は `a == 0` の
 //   場合 `0` にマスクする（PyTorch のマスク規約。`ln(0) = -inf` に
-//   `y = 0` が掛かり `NaN` になるのを避ける）。
+//   `y = 0` が掛かり `NaN` になるのを避ける）。`da`
+//   （`∂/∂a[a^b] = b・a^(b-1)`）も `b == 0` の場合 `0` にマスクする
+//   （`a == 0` かつ `b == 0` で `0・inf = NaN` になるのを避ける。
+//   unary `PowScalar` の `exponent == 0` マスクと同型）。
 // ---------------------------------------------------------------------
 
 /// [`ScalarUnaryOp`] の VJP 係数 `d/dx[op(x)]`。`y` は forward 出力値
@@ -126,7 +132,19 @@ pub(crate) fn unary_grad_factor(op: ScalarUnaryOp, x: f32, y: f32) -> f32 {
                 1.0
             }
         }
-        ScalarUnaryOp::PowScalar { exponent } => exponent * x.powf(exponent - 1.0),
+        ScalarUnaryOp::PowScalar { exponent } => {
+            // `exponent == 0.0` は forward が定数関数（`x^0 = 1`）に
+            // なるため勾配は常に 0。ガードなしだと `x == 0.0` かつ
+            // `exponent == 0.0` で `0.0 * 0.0.powf(-1.0)` = `0.0 * inf`
+            // = `NaN` になる（PR #1686 codex-review 指摘 P2。
+            // `docs/scalar-op-dispatch-design.md`「PR #1686 codex-review／
+            // Bugbot 指摘の是正」参照）。
+            if exponent == 0.0 {
+                0.0
+            } else {
+                exponent * x.powf(exponent - 1.0)
+            }
+        }
         // `ScalarUnaryOp` は `#[non_exhaustive]`（`tensor-core` 側で
         // 将来 variant を追加できるようにするため）で、crate 境界を
         // またぐ match は列挙済み variant のみでは非網羅と判定される。
@@ -149,14 +167,36 @@ pub(crate) fn binary_partials(op: ScalarBinaryOp, a: f32, b: f32, y: f32) -> (f3
         ScalarBinaryOp::Add => (1.0, 1.0),
         ScalarBinaryOp::Sub => (1.0, -1.0),
         ScalarBinaryOp::Mul => (b, a),
-        ScalarBinaryOp::Div => (1.0 / b, -a / (b * b)),
+        // `db = -a / b^2` を `-(a / b) / b` へ変形する（PR #1686
+        // codex-review 指摘 P2）。`b * b` を先に計算すると
+        // `a == b == 1e-30` で `b*b` が 0 へ underflow して `-inf`、
+        // `a == b == 1e20` で `b*b` が `inf` へ overflow して `-0.0`
+        // になり、いずれも数学的に有限な値（`-1/b`）から懸け離れる。
+        // 変形後の式は非 NaN 入力では既存式と同値だが overflow/underflow
+        // 耐性が高い。
+        ScalarBinaryOp::Div => (1.0 / b, -(a / b) / b),
         ScalarBinaryOp::Pow => {
-            let da = b * a.powf(b - 1.0);
+            // `b == 0.0` は forward が定数関数（`a^0 = 1`）になるため
+            // da は常に 0。ガードなしだと `a == 0.0` かつ `b == 0.0` で
+            // `0.0 * 0.0.powf(-1.0)` = `0.0 * inf` = `NaN` になる（unary
+            // `PowScalar` と同型の bug。PR #1686 codex-review 指摘 P2）。
+            let da = if b == 0.0 { 0.0 } else { b * a.powf(b - 1.0) };
             let db = if a == 0.0 { 0.0 } else { y * a.ln() };
             (da, db)
         }
+        // `a`／`b` のいずれかが `NaN` のとき、IEEE 754 比較
+        // （`>`／`<`）はすべて `false` になり `else` 節（タイ分割
+        // `0.5`/`0.5`）へ落ちてしまう（Bugbot 指摘）。forward
+        // （`tensor_core::scalar_op::nan_propagating_max`/`_min`）は
+        // `NaN` を明示伝播しており、`Clamp` が `NaN` 入力で勾配を
+        // ゼロにする規約（本モジュール doc「数値規約」）と揃え、
+        // `Maximum`/`Minimum` も `NaN` 入力では両入力の勾配をゼロに
+        // する（`docs/scalar-op-dispatch-design.md`「PR #1686
+        // codex-review／Bugbot 指摘の是正」で規約として明記）。
         ScalarBinaryOp::Maximum => {
-            if a > b {
+            if a.is_nan() || b.is_nan() {
+                (0.0, 0.0)
+            } else if a > b {
                 (1.0, 0.0)
             } else if a < b {
                 (0.0, 1.0)
@@ -165,7 +205,9 @@ pub(crate) fn binary_partials(op: ScalarBinaryOp, a: f32, b: f32, y: f32) -> (f3
             }
         }
         ScalarBinaryOp::Minimum => {
-            if a < b {
+            if a.is_nan() || b.is_nan() {
+                (0.0, 0.0)
+            } else if a < b {
                 (1.0, 0.0)
             } else if a > b {
                 (0.0, 1.0)

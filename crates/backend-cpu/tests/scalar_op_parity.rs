@@ -16,11 +16,6 @@ use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{BackendOps, ScalarBinaryOp, ScalarUnaryOp, Tensor};
 
-/// `backend-cpu::elementwise::PARALLEL_THRESHOLD`（`pub(crate)`。テスト
-/// クレートからは見えないため値を複製する）と同じ値。逐次／`rayon`
-/// 並列の切り替え境界をまたぐ入力サイズを検証するために使う。
-const PARALLEL_THRESHOLD: usize = 1 << 15;
-
 fn unary_variants() -> Vec<ScalarUnaryOp> {
     vec![
         ScalarUnaryOp::Neg,
@@ -139,56 +134,12 @@ fn scalar_binary_all_variants_match_sequential_host_reference() {
 }
 
 // ---------------------------------------------------------------------
-// 2. PARALLEL_THRESHOLD 境界（ちょうど／±1）: 逐次/並列分岐をまたいでも
-//    bit 同一（Relu／Add を代表として使う。数式は要素独立の map 演算の
-//    ため並列分割は結果に影響しない契約。モジュール doc 参照）
+// 2. PARALLEL_THRESHOLD 境界（ちょうど／±1）テストは
+//    `crates/backend-cpu/src/scalar_elementwise.rs` のクレート内単体
+//    テストへ移設済み（PR #1686 codex-review 指摘 P1。`PARALLEL_
+//    THRESHOLD` は `pub(crate)` のため統合テストからは見えず、値の
+//    複製を避けるため）。
 // ---------------------------------------------------------------------
-
-#[test]
-fn scalar_unary_parallel_threshold_boundary_matches_sequential_reference() {
-    let ops = CpuBackendOps::new();
-    let mut rng = Xorshift64Star::new(0x1634_0003);
-    for &len in &[
-        PARALLEL_THRESHOLD - 1,
-        PARALLEL_THRESHOLD,
-        PARALLEL_THRESHOLD + 1,
-    ] {
-        let data = rng.fill_vec(len);
-        let a = Tensor::new(data.clone(), &[len]).unwrap();
-        let expected: Vec<f32> = data.iter().map(|&x| ScalarUnaryOp::Relu.apply(x)).collect();
-        let out = ops.scalar_unary(ScalarUnaryOp::Relu, &a).unwrap();
-        assert!(
-            bits_eq(&out, &expected),
-            "scalar_unary(Relu) at len={len}: 境界越え不一致"
-        );
-    }
-}
-
-#[test]
-fn scalar_binary_parallel_threshold_boundary_matches_sequential_reference() {
-    let ops = CpuBackendOps::new();
-    let mut rng = Xorshift64Star::new(0x1634_0004);
-    for &len in &[
-        PARALLEL_THRESHOLD - 1,
-        PARALLEL_THRESHOLD,
-        PARALLEL_THRESHOLD + 1,
-    ] {
-        let a_data = rng.fill_vec(len);
-        let b_data = rng.fill_vec(len);
-        let a = Tensor::new(a_data.clone(), &[len]).unwrap();
-        let b = Tensor::new(b_data.clone(), &[len]).unwrap();
-        let expected: Vec<f32> = a_data
-            .iter()
-            .zip(b_data.iter())
-            .map(|(&x, &y)| ScalarBinaryOp::Add.apply(x, y))
-            .collect();
-        let out = ops.scalar_binary(ScalarBinaryOp::Add, &a, &b).unwrap();
-        assert!(
-            bits_eq(&out, &expected),
-            "scalar_binary(Add) at len={len}: 境界越え不一致"
-        );
-    }
-}
 
 // ---------------------------------------------------------------------
 // 3. 非 contiguous 入力（transpose view・broadcast）が contiguous

@@ -164,3 +164,71 @@ pub fn scalar_binary(
     }
     Tensor::new(out, &out_shape)
 }
+
+#[cfg(test)]
+mod tests {
+    //! `PARALLEL_THRESHOLD`（逐次／`rayon` 並列の切り替え境界）をまたぐ
+    //! 入力サイズで bit 同一になることの検証（PR #1686 codex-review
+    //! 指摘 P1）。従来は `tests/scalar_op_parity.rs`（統合テスト）が
+    //! `PARALLEL_THRESHOLD` の値をリテラルで複製していたが、本モジュール
+    //! 内の単体テストへ移し `super::PARALLEL_THRESHOLD`
+    //! （`crate::elementwise::PARALLEL_THRESHOLD` の re-export。`pub(crate)`
+    //! でクレート内から直接参照できる）を使うことで複製をなくす。
+    //! 判定式・許容誤差の独自定義は行わない（`tests/scalar_op_parity.rs`
+    //! モジュール doc と同じ bit 同一判定）。
+
+    use bench_harness::rng::Xorshift64Star;
+    use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarUnaryOp, Tensor};
+
+    use super::{PARALLEL_THRESHOLD, scalar_binary, scalar_unary};
+
+    fn bits_eq(a: &Tensor<f32>, b: &[f32]) -> bool {
+        let av = a.contiguous();
+        let av = av.as_slice().expect("contiguous() は常に as_slice() 可能");
+        av.len() == b.len() && av.iter().zip(b).all(|(&x, &y)| x.to_bits() == y.to_bits())
+    }
+
+    #[test]
+    fn scalar_unary_parallel_threshold_boundary_matches_sequential_reference() {
+        let mut rng = Xorshift64Star::new(0x1634_1003);
+        for &len in &[
+            PARALLEL_THRESHOLD - 1,
+            PARALLEL_THRESHOLD,
+            PARALLEL_THRESHOLD + 1,
+        ] {
+            let data = rng.fill_vec(len);
+            let a = Tensor::new(data.clone(), &[len]).unwrap();
+            let expected: Vec<f32> = data.iter().map(|&x| ScalarUnaryOp::Relu.apply(x)).collect();
+            let out = scalar_unary(&a, ScalarUnaryOp::Relu).unwrap();
+            assert!(
+                bits_eq(&out, &expected),
+                "scalar_unary(Relu) at len={len}: 境界越え不一致"
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_binary_parallel_threshold_boundary_matches_sequential_reference() {
+        let mut rng = Xorshift64Star::new(0x1634_1004);
+        for &len in &[
+            PARALLEL_THRESHOLD - 1,
+            PARALLEL_THRESHOLD,
+            PARALLEL_THRESHOLD + 1,
+        ] {
+            let a_data = rng.fill_vec(len);
+            let b_data = rng.fill_vec(len);
+            let a = Tensor::new(a_data.clone(), &[len]).unwrap();
+            let b = Tensor::new(b_data.clone(), &[len]).unwrap();
+            let expected: Vec<f32> = a_data
+                .iter()
+                .zip(b_data.iter())
+                .map(|(&x, &y)| ScalarBinaryOp::Add.apply(x, y))
+                .collect();
+            let out = scalar_binary(&a, &b, ScalarBinaryOp::Add).unwrap();
+            assert!(
+                bits_eq(&out, &expected),
+                "scalar_binary(Add) at len={len}: 境界越え不一致"
+            );
+        }
+    }
+}

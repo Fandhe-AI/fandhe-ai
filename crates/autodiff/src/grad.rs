@@ -2697,6 +2697,90 @@ mod tests {
         );
     }
 
+    // --- PR #1686 codex-review／Bugbot 指摘の回帰テスト ---
+    // （`docs/scalar-op-dispatch-design.md`「PR #1686 codex-review／Bugbot
+    // 指摘の是正」参照。以下は既存 db マスク〈a==0〉と対になる da
+    // マスク〈b==0〉・unary PowScalar の exponent==0 マスク・Div の
+    // overflow/underflow 耐性・Maximum/Minimum の NaN 規約）。
+
+    #[test]
+    fn scalar_binary_pow_da_masked_at_zero_exponent_even_when_base_is_also_zero() {
+        // a=0, b=0 はガードなしだと `da = b * a.powf(b-1)` =
+        // `0.0 * 0.0.powf(-1.0)` = `0.0 * inf` = `NaN` になっていた
+        // （forward `y = 0.0.powf(0.0) = 1.0` は IEEE 754 の 0^0 規約
+        // どおり有限値のため、勾配だけが不正に NaN 化する非対称な bug）。
+        let (da, db) = eval::scalar::binary_partials(ScalarBinaryOp::Pow, 0.0, 0.0, 1.0);
+        assert_eq!(
+            (da, db),
+            (0.0, 0.0),
+            "a==0 かつ b==0 では da/db とも 0 にマスクする（b==0 は定数関数のため da=0、\
+             a==0 は ln(0) 発散回避のため db=0）"
+        );
+        // a!=0, b=0 でも da は定数関数（a^0=1）の勾配として 0。
+        let (da2, _) = eval::scalar::binary_partials(ScalarBinaryOp::Pow, 3.0, 0.0, 1.0);
+        assert_eq!(da2, 0.0, "b==0 では a の値によらず da=0（定数関数）");
+    }
+
+    #[test]
+    fn scalar_unary_pow_scalar_grad_masked_at_zero_exponent_even_when_x_is_also_zero() {
+        // x=0, exponent=0 はガードなしだと `exponent * x.powf(exponent-1)`
+        // = `0.0 * 0.0.powf(-1.0)` = `NaN` になっていた（binary Pow の
+        // da と同型の bug）。
+        let grad =
+            eval::scalar::unary_grad_factor(ScalarUnaryOp::PowScalar { exponent: 0.0 }, 0.0, 1.0);
+        assert_eq!(
+            grad, 0.0,
+            "exponent==0 では x の値によらず勾配 0（定数関数）"
+        );
+    }
+
+    #[test]
+    fn scalar_binary_div_db_avoids_underflow_and_overflow_of_b_squared() {
+        // a=b=1e-30: 素朴な `-a/(b*b)` は `b*b` が 0 へ underflow して
+        // `-inf` になっていたが、数学的な値は `-1/b = -1e30`（有限）。
+        let (_, db_small) = eval::scalar::binary_partials(ScalarBinaryOp::Div, 1e-30, 1e-30, 1.0);
+        assert!(
+            db_small.is_finite(),
+            "a=b=1e-30 の db は有限値であるべき: {db_small}"
+        );
+        let rel = (db_small - (-1e30)).abs() / 1e30;
+        assert!(rel < 1e-3, "db_small={db_small} が -1e30 から乖離しすぎ");
+
+        // a=b=1e20: 素朴な `-a/(b*b)` は `b*b` が inf へ overflow して
+        // `-0.0`（実質ゼロ）になっていたが、数学的な値は
+        // `-1/b = -1e-20`（有限の非ゼロ値）。
+        let (_, db_large) = eval::scalar::binary_partials(ScalarBinaryOp::Div, 1e20, 1e20, 1.0);
+        assert!(
+            db_large.is_finite() && db_large != 0.0,
+            "a=b=1e20 の db は有限の非ゼロ値であるべき: {db_large}"
+        );
+        let rel_large = (db_large - (-1e-20)).abs() / 1e-20;
+        assert!(
+            rel_large < 1e-3,
+            "db_large={db_large} が -1e-20 から乖離しすぎ"
+        );
+    }
+
+    #[test]
+    fn scalar_binary_maximum_minimum_nan_input_yields_zero_grad_for_both_sides() {
+        // NaN 入力では IEEE 754 比較（`>`／`<`）がすべて false になり
+        // タイ分割（0.5/0.5）へ落ちていた（Bugbot 指摘）。forward が
+        // NaN を明示伝播する契約（`nan_propagating_max`/`_min`）と
+        // `Clamp` の NaN 規約に揃え、両入力の勾配をゼロにする。
+        let (da, db) = eval::scalar::binary_partials(ScalarBinaryOp::Maximum, f32::NAN, 1.0, 0.0);
+        assert_eq!((da, db), (0.0, 0.0), "Maximum(NaN, 1.0) は勾配ゼロ");
+        let (da, db) = eval::scalar::binary_partials(ScalarBinaryOp::Maximum, 1.0, f32::NAN, 0.0);
+        assert_eq!((da, db), (0.0, 0.0), "Maximum(1.0, NaN) は勾配ゼロ");
+        let (da, db) =
+            eval::scalar::binary_partials(ScalarBinaryOp::Maximum, f32::NAN, f32::NAN, 0.0);
+        assert_eq!((da, db), (0.0, 0.0), "Maximum(NaN, NaN) は勾配ゼロ");
+
+        let (da, db) = eval::scalar::binary_partials(ScalarBinaryOp::Minimum, f32::NAN, 1.0, 0.0);
+        assert_eq!((da, db), (0.0, 0.0), "Minimum(NaN, 1.0) は勾配ゼロ");
+        let (da, db) = eval::scalar::binary_partials(ScalarBinaryOp::Minimum, 1.0, f32::NAN, 0.0);
+        assert_eq!((da, db), (0.0, 0.0), "Minimum(1.0, NaN) は勾配ゼロ");
+    }
+
     // --- Var::scalar_unary／scalar_binary の Tape 経由エンドツーエンド ---
 
     #[test]
