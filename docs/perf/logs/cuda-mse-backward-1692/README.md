@@ -21,8 +21,15 @@ before/after 2 ツリーで実行し、ノイズ床・再現性を記録する�
 
 ## 比較対象 2 腕（事前登録・固定）
 
-- **before 腕**: 本イシューのブランチのマージ直前の `main`（新設ベンチ
-  ファイル・`mse.rs` の doc comment 追記なし）
+- **before 腕**: 本イシューのブランチのマージ直前の `main`（`mse.rs`
+  の doc comment 追記なし）。**新設ベンチファイル
+  `crates/facade/tests/mse_backward_bench.rs` はこの時点の `main` には
+  存在しない**（#1692 で新設したベンチ専用ファイルのため）。同一ベン
+  チで noise floor を比較する事前登録の前提上、`orchestrate.sh` が
+  `BEFORE_TREE` 側に同ファイルが未配置であれば自動でコピーして補う
+  （手順は下記「使い方」節・`orchestrate.sh` 冒頭コメント参照。この
+  コピーはベンチファイル自体の追加のみであり `crates/*/src` の機能
+  差分ではない）
 - **after 腕**: 本イシューのブランチ（`crates/*/src` の機能差分は
   `mse.rs` の doc comment 追記のみ。`git diff <before_sha> -- 'crates/*/src'`
   が意味のある機能差分を含まないことは本 PR の diff で確認できる）
@@ -50,13 +57,23 @@ deps-policy.md 第 9 区分）は不要（本ベンチは framework-compare 経�
 
 ## 使い方（GB10 実機。ユーザー承認・別セッション）
 
+1. `BEFORE_TREE` は本イシューのブランチのマージ直前の `main` を
+   checkout した独立ツリー、`AFTER_TREE` は本イシューのブランチ
+   （またはマージ後の HEAD）を checkout した独立ツリーとして用意する。
+2. `./orchestrate.sh 1692` を実行する（下記コマンド）。`BEFORE_TREE`
+   に `crates/facade/tests/mse_backward_bench.rs` が存在しない場合は
+   本スクリプトが自身のツリー（本 orchestrate.sh が置かれているツリー
+   ＝ after 相当）から同ファイルをコピーして補ってから計測を開始する
+   （手動でのファイル配置は不要）。
+
 ```bash
 BEFORE_TREE=/home/<user>/work/rust-ai-library-run-1692-before \
 AFTER_TREE=/home/<user>/work/rust-ai-library-run-1692-after \
   ./orchestrate.sh 1692
 ```
 
-`--dry-run` で経路解決のみ検証できる（実機不要。Linux で自己検証可能）。
+`--dry-run` で経路解決のみ検証できる（実機不要。Linux で自己検証可能。
+ベンチファイルのコピーは `--dry-run` では実行しない）。
 
 ## 出力
 

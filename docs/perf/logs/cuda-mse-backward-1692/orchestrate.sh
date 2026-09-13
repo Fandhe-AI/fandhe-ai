@@ -56,6 +56,26 @@ for v in BEFORE_TREE AFTER_TREE; do
   fi
 done
 
+# BEFORE_TREE 配置手順（本イシューで新設したベンチファイルの補完）:
+# BEFORE_TREE は「本イシューのブランチのマージ直前の main」であり、
+# `crates/facade/tests/mse_backward_bench.rs`（#1692 で新設。機能変更
+# ではなくベンチ専用の追加ファイル）がそのままでは存在しない。本スク
+# リプトが持つ同ファイル（本 orchestrate.sh 自身のツリー＝ AFTER_TREE
+# 相当の内容）を BEFORE_TREE 側に未配置の場合のみコピーして補う（ベン
+# チファイル自体は before/after で同一内容を使うことが事前登録の前提
+# のため、既に配置済みならコピーで上書きしない）。
+BENCH_REL_PATH="crates/facade/tests/mse_backward_bench.rs"
+BENCH_SRC="${SELF_DIR}/../../../../${BENCH_REL_PATH}"
+if [[ ! -f "$BENCH_SRC" ]]; then
+  echo "error: bench source file not found ($BENCH_SRC)" >&2
+  exit 1
+fi
+if [[ ! -f "${BEFORE_TREE}/${BENCH_REL_PATH}" ]]; then
+  echo "info: ${BEFORE_TREE}/${BENCH_REL_PATH} が未配置のためコピーします" >&2
+  mkdir -p "$(dirname "${BEFORE_TREE}/${BENCH_REL_PATH}")"
+  cp "$BENCH_SRC" "${BEFORE_TREE}/${BENCH_REL_PATH}"
+fi
+
 mkdir -p "$OUT_DIR"
 
 run_bench() { # run_bench <tree_path> <out_file>

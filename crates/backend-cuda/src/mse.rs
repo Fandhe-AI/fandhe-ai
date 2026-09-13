@@ -206,7 +206,7 @@ impl CudaMse {
     /// 計算する。`numel == 0` は空 `Vec` を返す。
     ///
     /// **ストリーム順序契約（イシュー #1692）**: 本関数は launch 直後の
-    /// 明示 `synchronize()` を持たず、末尾の [`readback`] 呼び出し 1 箇所
+    /// 明示 `synchronize()` を持たず、末尾の `readback` 呼び出し 1 箇所
     /// （D2H＋同期）へ完了待ちを集約する。`docs/backend-cuda-async-
     /// execution-design.md` §2.3・§16 が定める「ホスト `Tensor` を返す
     /// `BackendOps` 演算は戻り値の D2H が構造的な同期点」契約に既に
