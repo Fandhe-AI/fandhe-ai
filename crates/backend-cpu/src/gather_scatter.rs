@@ -73,6 +73,25 @@ fn ravel(coords: &[usize], strides: &[usize]) -> usize {
         .sum()
 }
 
+/// shape の要素数積を `checked_mul` の畳み込みで検査する
+/// （`tensor-core::tensor::checked_numel` と同型だが `pub(crate)` で
+/// クレートを跨いで共有できないため、このモジュール専用に複製する）。
+///
+/// 空 shape チェック（`out_shape.contains(&0)` 等）より前に無検査の
+/// `.iter().product()` を計算すると、末尾軸が 0 でも先行する軸同士の
+/// 積が `usize` の範囲でオーバーフローし、overflow-checks 有効時
+/// （debug ビルド等）に panic しうる（本番経路の panic 禁止・
+/// `.claude/rules/coding-rust.md`。例: `[usize::MAX, 2, 0]` は積が
+/// 0 だが `usize::MAX * 2` の時点で既にオーバーフローする）。
+/// `gather`／`scatter` の要素数計算はすべて本関数を経由し、
+/// オーバーフロー時は `ShapeError::ElementCountOverflow` を返す。
+fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or(ShapeError::ElementCountOverflow)
+}
+
 /// [`fandhe_ai_tensor_core::BackendOps::gather`] の CPU 実装本体
 /// （イシュー #1776）。`out_shape`（＝`index.shape()`）は呼び出し元
 /// （`ops.rs`）が検査済みで渡す。各出力位置は独立読み出しのため
@@ -87,7 +106,7 @@ pub fn gather(
     out_shape: &[usize],
 ) -> Result<Tensor<f32>, ShapeError> {
     let dim_size = input.shape()[dim];
-    let numel: usize = out_shape.iter().product();
+    let numel = checked_numel(out_shape)?;
     let mut out = Vec::with_capacity(numel);
     for flat in 0..numel {
         let coords = unravel(flat, out_shape);
@@ -154,7 +173,7 @@ pub fn scatter(
     let out_shape = input.shape().to_vec();
     let dim_size = out_shape[dim];
     let index_shape = index.shape().to_vec();
-    let index_numel: usize = index_shape.iter().product();
+    let index_numel = checked_numel(&index_shape)?;
     if out_shape.contains(&0) {
         // 空出力早期リターン（このブロック冒頭の doc comment を参照）。
         // `scatter_out_shape` は `dim` 軸自体には `index_shape[dim] <=
@@ -188,7 +207,7 @@ pub fn scatter(
         }
         return Tensor::new(Vec::new(), &out_shape);
     }
-    let numel: usize = out_shape.iter().product();
+    let numel = checked_numel(&out_shape)?;
     let out_strides = row_major_strides(&out_shape);
 
     // `dim` 軸を `dim_idx` へ差し替えた `out_shape` 上の多次元添字を
@@ -406,5 +425,72 @@ mod tests {
                 dim_size: 0,
             }
         );
+    }
+
+    /// codex-review 指摘（PR #1786）の回帰テスト: `gather` は空軸を
+    /// 確認する前に無検査の `.iter().product()` で `numel` を計算して
+    /// いたため、`Tensor::new(vec![], &[0, 2, usize::MAX])` を
+    /// `transpose(0, 2)` した shape `[usize::MAX, 2, 0]`（末尾軸が 0
+    /// のため要素数積は 0 だが、走査順の先頭 2 軸の積 `usize::MAX * 2`
+    /// が先にオーバーフローする）では overflow-checks 有効時に panic
+    /// しうる。`checked_numel` により `Err(ElementCountOverflow)` を
+    /// 返すことを確認する（`Tensor::new` 自体は shape の要素数積の
+    /// 積算順序に依らずオーバーフローを検査済みのため、`[0, 2,
+    /// usize::MAX]` で構築してから `transpose` で軸順を入れ替え、
+    /// `Tensor::new` の検査を経ずに問題の軸順を再現する）。
+    #[test]
+    fn gather_out_shape_leading_large_dims_trailing_zero_does_not_overflow() {
+        // `Tensor::new` は shape をそのまま渡すと `checked_numel` の
+        // 左結合畳み込みが `usize::MAX * 2` の時点でオーバーフロー
+        // 検出してしまい `[usize::MAX, 2, 0]` を直接構築できない
+        // （0 が先頭に来る `[0, 2, usize::MAX]` としてなら構築でき、
+        // 積は 0 のまま検査を通る）。`transpose` は shape・strides の
+        // メタデータを入れ替えるだけで要素数積を再計算しないため、
+        // `Tensor::new` の左結合オーバーフロー検査を経ずに問題の
+        // 軸順 `[usize::MAX, 2, 0]` を持つ有効なテンソルを再現できる
+        // （codex-review 指摘が示した実際の到達経路と同型）。
+        let base_f32 = Tensor::<f32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let input = base_f32.transpose(0, 2).unwrap();
+        let out_shape = input.shape().to_vec();
+        assert_eq!(out_shape, vec![usize::MAX, 2, 0]);
+
+        let base_i32 = Tensor::<i32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let index = base_i32.transpose(0, 2).unwrap();
+        assert_eq!(index.shape(), out_shape.as_slice());
+
+        let err = gather(&input, 2, &index, &out_shape).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    /// codex-review 指摘（PR #1786）の回帰テスト: `scatter` は空出力
+    /// 早期リターン（`out_shape.contains(&0)`）より前に無検査の
+    /// `.iter().product()` で `index_numel` を計算していたため、
+    /// `index_shape` が `gather` と同じ「末尾軸が 0・先頭 2 軸の積が
+    /// オーバーフローする」形状のとき panic しうる。`checked_numel`
+    /// により `Err(ElementCountOverflow)` を返すことを確認する。
+    #[test]
+    fn scatter_index_shape_leading_large_dims_trailing_zero_does_not_overflow() {
+        // `gather` の回帰テストと同じ理由で、`index`／`src` は
+        // `[0, 2, usize::MAX]` として構築してから `transpose` で
+        // `[usize::MAX, 2, 0]` へ入れ替える（`Tensor::new` へ
+        // `[usize::MAX, 2, 0]` を直接渡すと `checked_numel` の
+        // 左結合畳み込みが `usize::MAX * 2` でオーバーフロー検出して
+        // しまい構築できないため）。
+        let index_base = Tensor::<i32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let index = index_base.transpose(0, 2).unwrap();
+        let index_shape = index.shape().to_vec();
+        assert_eq!(index_shape, vec![usize::MAX, 2, 0]);
+        let src_base = Tensor::<f32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let src = src_base.transpose(0, 2).unwrap();
+
+        // `input`（out_shape）は非空軸のみで dim_size を持たせる
+        // （`out_shape.contains(&0)` を発火させないため）。本テストの
+        // 目的は `index_numel` 計算のオーバーフロー検査のみであり、
+        // 空出力早期リターン経路（既存の
+        // `scatter_with_zero_sized_axis_does_not_overflow` が対象）とは
+        // 独立に検査する。
+        let input = Tensor::<f32>::new(vec![0.0; 6], &[3usize, 2usize]).unwrap();
+        let err = scatter(&input, 0, &index, &src, ScatterReduce::Overwrite).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
     }
 }
