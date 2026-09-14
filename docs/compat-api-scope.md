@@ -206,7 +206,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 |---|---|
 | 要素演算（sub／div／pow／sqrt／log／三角関数／比較） | #1592・#1593（#1710 で算術系〈`Var::sub`／`div`／`pow`／`sqrt`〉実装済み。#1711 で `log`／`log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg` 実装済み。#1712 で `clamp`／比較演算 6 種〈`Var::clamp`／`gt`／`ge`／`lt`／`le`／`eq`／`ne`〉実装済み。いずれも `ScalarUnaryOp`／`ScalarBinaryOp`〈#1634〉への薄い委譲・facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない。比較演算の出力は f32 の 0/1 マスク・`Tensor<bool>` 出力は #1613 の対象で本イシュー範囲外。CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッションへ申し送り） |
 | softmax／log_softmax | #1594（実装済み。`Var::softmax`／`log_softmax`・`nn::activation::Softmax`／`LogSoftmax`。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` は facade へ追加しない〉） |
-| GELU／SiLU 等の活性化 | #1595 |
+| GELU／SiLU 等の活性化 | #1595（#1713 で GELU〈誤差関数版・tanh 近似版〉・Softplus 実装済み。`Var::gelu`／`gelu_tanh`／`softplus`・`nn::activation::Gelu`／`GeluTanh`／`Softplus`。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` は facade へ追加していない。`compat::Sequential::add_gelu` 等の builder はユーザー承認待ちで未実装〉。CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッションへ申し送り。残る SiLU／LeakyReLU／ELU／Hardswish は #1714 が対象） |
 | LayerNorm／RMSNorm／BatchNorm | #1596（実装済み。`fandhe_ai_autodiff::Var::rms_norm`／`layer_norm`・`nn::RmsNorm`／`LayerNorm`。facade 到達経路は既存 `Var` 再エクスポート経由——新規 `pub use`／`pub fn` は facade へ追加しない。`docs/norm-ops-design.md`）・#1608（BatchNorm） |
 | 形状操作（permute／squeeze／expand／cat／stack／split） | #1597（実装済み: permute／squeeze／unsqueeze／expand〈broadcast_to〉／flatten。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉）・#1598（実装済み: `Var::cat`／`stack`／`narrow`／`split`／`split_with_sizes`／`chunk`。§5 は Tier 1 列挙済み機能につき再適用不要と判断し facade へ新規 `pub use`／`pub fn` を追加していない。narrow は本 issue で `#1599` 側の対象から解消済み） |
 | index 系（narrow／where／gather／scatter） | #1599（narrow は #1598 で実装済み・where／masked_fill は #1637 で実装済み〈`Var::where_cond`／`masked_fill`。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない〉のため対象外。gather／scatter／scatter_add／index_select は #1638（→ #1776 で Op 定義・CPU 参照実装・VJP 実装済み。`Var::gather`／`index_select`／`scatter`／`scatter_add`。facade 到達経路は既存 `Var` 再エクスポート経由で同様に新規公開面なし。CUDA は #1777・Metal は #1778 でそれぞれ実装済み〈`CudaBackendOps`／`MetalBackendOps` の `gather`／`scatter`。facade 新規公開面なし〉）のため対象外） |
@@ -247,7 +247,7 @@ Phase 3（親 #1573）の各 issue へ対応付ける。
 | **量子化** | #1627（除外事項「分散学習・量子化の網羅対応」〈Won't・条件付き〉に従属。実装着手は同除外事項の格上げ条件充足と Phase 4 要件見直しでの新 REQ 追加のユーザー承認まで不可。5 節参照） |
 | **複数 GPU／DDP** | #1628（同上に従属。設計判断の記録〈docs のみ〉に留め、実装・通信層の依存追加は行わない。5 節参照） |
 | ONNX import 公開／export | #1629（#1652 で import 側の設計判断を記録・#1775 で export 側の設計判断を記録。案 B〈薄いラッパー型〉を方針として推奨するが、facade は crates.io 公開クレートのため公開には `onnx-interop` 自体の crates.io 公開という別個のユーザー承認が必要——2026-09-12 の facade 公開面拡張の承認範囲には含まれない。現状は import・export とも非公開のまま段階 0。`docs/facade-onnx-import-exposure-decision.md`・`docs/facade-onnx-export-exposure-decision.md`） |
-| topk／sort／cumsum | #1630 |
+| topk／sort／cumsum | #1733 で sort／argsort／topk 実装済み（`Var::sort`／`argsort`／`topk`。CPU 参照実装〈`backend-cpu::sort_topk`〉・scatter ベース VJP〈`Op::Sort`／`Op::Topk`〉・facade 新規公開面なし〈既存 `Var` 再エクスポート経由〉。CUDA／Metal カーネルは #1741、cumsum／cumprod は #1731 が残対象。`docs/compat-feature-gap.md` §2.2 追補参照） |
 | `nn.functional` の残り（pad／interpolate／one_hot 等） | #1631 |
 
 1.2／1.3 共通の注記: 各機能の追加は薄いラッパー原則（3 節）・完全自作

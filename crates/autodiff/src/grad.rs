@@ -1281,6 +1281,31 @@ pub(crate) fn vjp(
             };
             vec![(input, d_input), (src, d_src)]
         }
+        // `Var::sort`／`Var::topk`（`Var::argsort` はノードを記録しない
+        // ため到達しない。イシュー #1733）。forward が
+        // `values = gather(input, dim, index)` と数学的に同一
+        // （並べ替え・選択は算術演算を含まない要素の並べ替えのみ）で
+        // あるため、VJP は `Op::Gather` と同じ「scatter_add で零テンソル
+        // へ upstream を index の位置へ加算する」式を使う。同一出力
+        // 位置（`index` 内）に重複する添字は存在しない（sort／topk は
+        // 各出力位置ごとに `input` の異なる要素を選ぶ全単射・部分
+        // 単射のため）ので `ScatterReduce::Add` と `Overwrite` は同値
+        // だが、`Op::Gather` VJP と実装を揃え `Add`（`f64` 経路も
+        // `0.0 + x` で bit 一致）を使う。
+        Op::Sort { input, dim, index } | Op::Topk { input, dim, index } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let zeros = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+            let d_input = scatter_with_fallback(
+                ops,
+                &zeros,
+                dim,
+                &index,
+                upstream,
+                ScatterReduce::Add,
+                &input_shape,
+            )?;
+            vec![(input, d_input)]
+        }
         // `Var::contiguous` が記録するノード（イシュー #1620。
         // `crate::einsum` の permute 後 reshape 前の明示実体化）。
         // メモリレイアウトのみが変わり値は変わらないため、VJP は
@@ -1537,6 +1562,67 @@ pub(crate) fn scatter_with_fallback(
             Ok(v)
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::scatter(input, dim, index, src, reduce)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Sort`] の forward（`Var::sort`／`argsort` 経由）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1733）。
+/// [`gather_with_fallback`] と同型: `ops.sort` → `Unsupported` の
+/// ときのみ `eval::sort`（[`fandhe_ai_tensor_core::BackendOps::sort`]
+/// の順序契約に厳密に従う）へフォールバックし、それ以外のエラーは
+/// 伝播する（判定迂回経路を作らない）。バックエンド実装が返した
+/// `values`／`index` の shape を `out_shape` と照合し、不一致は
+/// `AutodiffError::Backend(BackendError::ShapeMismatch(..))` を返す。
+pub(crate) fn sort_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    dim: usize,
+    descending: bool,
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), AutodiffError> {
+    match ops.sort(input, dim, descending) {
+        Ok((values, index)) => {
+            if values.shape() != out_shape || index.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: values.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok((values, index))
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::sort(input, dim, descending)?),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Topk`] の forward（`Var::topk` 経由）が使う「バックエンド
+/// 実装 → フォールバック」ヘルパー（イシュー #1733）。
+/// [`sort_with_fallback`] と同型: `ops.topk` → `Unsupported` の
+/// ときのみ `eval::topk` へフォールバックする。
+pub(crate) fn topk_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    dim: usize,
+    k: usize,
+    largest: bool,
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), AutodiffError> {
+    match ops.topk(input, dim, k, largest) {
+        Ok((values, index)) => {
+            if values.shape() != out_shape || index.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: values.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok((values, index))
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::topk(input, dim, k, largest, out_shape)?),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }
@@ -3434,6 +3520,119 @@ mod tests {
         let x = tape.var(&t(&[-1.0], &[1]));
         let y = x.sqrt().unwrap();
         assert!(dense_vec(&y.to_tensor())[0].is_nan());
+    }
+
+    #[test]
+    fn var_gelu_forward_and_backward_matches_manual_grad() {
+        // GELU（誤差関数版）: y = 0.5*x*(1+erf(x/sqrt(2)))。
+        // x=0 で y=0・dy/dx=0.5（Φ(0)=0.5・φ(0)=1/sqrt(2π)≈0.3989 より
+        // dy/dx = Φ(0) + 0*φ(0) = 0.5）。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[0.0, 1.0], &[2]));
+        let y = x.gelu().unwrap();
+        let out = dense_vec(&y.to_tensor());
+        assert!((out[0] - 0.0).abs() < 1e-6, "gelu(0) = {}", out[0]);
+        assert!((out[1] - 0.841_344_7).abs() < 1e-5, "gelu(1) = {}", out[1]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_grad_close(
+            "gelu dx",
+            dx,
+            &t(
+                &[0.5, fandhe_ai_tensor_core::scalar_op::gelu_erf_grad(1.0)],
+                &[2],
+            ),
+        );
+    }
+
+    #[test]
+    fn var_gelu_tanh_forward_and_backward_matches_manual_grad() {
+        // GELU（tanh 近似版）: x=0 で y=0（奇関数なので tanh(0)=0）。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[0.0, 1.0], &[2]));
+        let y = x.gelu_tanh().unwrap();
+        let out = dense_vec(&y.to_tensor());
+        assert!((out[0] - 0.0).abs() < 1e-6, "gelu_tanh(0) = {}", out[0]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_grad_close(
+            "gelu_tanh dx",
+            dx,
+            &t(
+                &[
+                    fandhe_ai_tensor_core::scalar_op::gelu_tanh_grad(0.0),
+                    fandhe_ai_tensor_core::scalar_op::gelu_tanh_grad(1.0),
+                ],
+                &[2],
+            ),
+        );
+    }
+
+    #[test]
+    fn var_softplus_forward_and_backward_matches_manual_grad() {
+        // softplus(0) = ln(2)（既定 beta=1・threshold=20 では恒等分岐
+        // 〈x*beta > threshold〉に入らない）。dy/dx = sigmoid(beta*x)。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[0.0, 1.0], &[2]));
+        let y = x.softplus(1.0, 20.0).unwrap();
+        let out = dense_vec(&y.to_tensor());
+        assert!(
+            (out[0] - std::f32::consts::LN_2).abs() < 1e-5,
+            "softplus(0) = {}",
+            out[0]
+        );
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        let sigmoid = |v: f32| 1.0 / (1.0 + (-v).exp());
+        assert_grad_close("softplus dx", dx, &t(&[sigmoid(0.0), sigmoid(1.0)], &[2]));
+    }
+
+    #[test]
+    fn var_softplus_identity_branch_gradient_is_one() {
+        // beta=2.0・threshold=1.0 では x=1.0 のとき x*beta=2.0 > 1.0 で
+        // 恒等分岐（y=x・dy/dx=1.0）に入る。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[1.0], &[1]));
+        let y = x.softplus(2.0, 1.0).unwrap();
+        assert_eq!(dense_vec(&y.to_tensor()), vec![1.0]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_grad_close("softplus identity-branch dx", dx, &t(&[1.0], &[1]));
+    }
+
+    #[test]
+    fn var_softplus_rejects_non_positive_or_non_finite_beta_and_non_finite_threshold() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[1.0], &[1]));
+        assert!(matches!(
+            x.softplus(0.0, 20.0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            x.softplus(-1.0, 20.0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            x.softplus(f32::NAN, 20.0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            x.softplus(f32::INFINITY, 20.0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            x.softplus(1.0, f32::NAN),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            x.softplus(1.0, f32::INFINITY),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(x.softplus(1.0, 20.0).is_ok());
     }
 
     #[test]

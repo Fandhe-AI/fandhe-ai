@@ -1,7 +1,8 @@
-//! イシュー #1700/#1701/#1702: `BackendOps::scalar_unary`／
+//! イシュー #1700/#1701/#1702/#1713: `BackendOps::scalar_unary`／
 //! `scalar_binary`（`Sqrt`／`Sub`／`Div`／`Pow`・`Neg`／`Abs`／`Log`／
 //! `Log2`／`Log10`／`Sin`／`Cos`／`Tan`・比較演算 6 種（`Gt`／`Ge`／
-//! `Lt`／`Le`／`Eq`／`Ne`）・`Clamp`）の CPU-CUDA 数値一致検証。
+//! `Lt`／`Le`／`Eq`／`Ne`）・`Clamp`・`Gelu`／`GeluTanh`／`Softplus`）の
+//! CPU-CUDA 数値一致検証。
 //!
 //! `where_masked_fill_parity.rs`（#1637）・`gemm_bias_act_parity.rs`
 //! （#599）と同じ構成方針を踏襲する: 環境適応スモーク（属性なし。通常
@@ -22,6 +23,8 @@
 //! 比較演算 6 種・`Clamp` は算術を含まない純粋な選択・比較演算のため
 //! bit 同一（`assert_eq!`）で検証する（`kernels_scalar_op.rs::unary_expr`
 //! の `Clamp` 分岐コメント・`binary_expr` の比較演算コメント参照）。
+//! `Gelu`／`GeluTanh`（`erff`／`tanhf`）・`Softplus`（`log1pf`／`expf`）
+//! は超越関数のため `assert_parity` のみで検証する（イシュー #1713）。
 //!
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
@@ -256,6 +259,38 @@ fn assert_clamp_parity(min: f32, max: f32, seed: u64, shape: &[usize]) {
     );
 }
 
+/// [`ScalarUnaryOp::Softplus`] の CPU-CUDA parity を REQ-2 複合判定
+/// （超越関数〈`log1pf`／`expf`〉のため bit 同一は主張しない。
+/// `assert_unary_parity` の `bit_exact=false` 経路と同型）で検証する
+/// （イシュー #1713）。
+fn assert_softplus_parity(beta: f32, threshold: f32, seed: u64, shape: &[usize]) {
+    let numel: usize = shape.iter().product();
+    let cpu = CpuBackendOps::new();
+    let cuda = CudaBackendOps::new(0);
+    let op = ScalarUnaryOp::Softplus { beta, threshold };
+
+    let a = Tensor::new(signed_data(&mut Xorshift64Star::new(seed), numel), shape)
+        .expect("valid tensor");
+
+    let cpu_result = cpu
+        .scalar_unary(op, &a)
+        .expect("cpu scalar_unary always succeeds for implemented kinds");
+    let cuda_result = cuda
+        .scalar_unary(op, &a)
+        .expect("cuda scalar_unary must succeed on CUDA-equipped test runner");
+
+    let cpu_slice = cpu_result.as_slice().expect("contiguous");
+    let cuda_slice = cuda_result.as_slice().expect("contiguous");
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!(
+            "scalar_unary(Softplus{{beta={beta},threshold={threshold}}}) cpu-cuda parity \
+             shape={shape:?}"
+        ),
+        cuda_slice,
+        cpu_slice,
+    );
+}
+
 /// 環境適応スモーク（属性なし。通常 CI で実行）。CUDA 不在なら
 /// `BackendError::CudaUnavailable` を確認して早期 return する。実機なら
 /// 形状網羅ケースまで実行する。
@@ -291,6 +326,14 @@ fn scalar_op_parity_smoke_env_adaptive() {
             assert_comparison_parity(ScalarBinaryOp::Gt, 1719, &[4]);
             assert_comparison_parity(ScalarBinaryOp::Eq, 1720, &[4]);
             assert_clamp_parity(0.5, 1.5, 1721, &[4]);
+
+            // GELU（誤差関数版・tanh 近似版）・Softplus（イシュー #1713）
+            // のスモーク。既定 beta/threshold（1.0/20.0）に加え、恒等
+            // 分岐（`x*beta > threshold`）が発火する組合せも確認する。
+            assert_unary_parity(ScalarUnaryOp::Gelu, Domain::Signed, 1722, &[4], false);
+            assert_unary_parity(ScalarUnaryOp::GeluTanh, Domain::Signed, 1723, &[4], false);
+            assert_softplus_parity(1.0, 20.0, 1724, &[4]);
+            assert_softplus_parity(2.0, 1.0, 1725, &[4]);
 
             // スコープ境界の回帰ガード（fail-closed 契約の確認）: 未実装
             // kind は `BackendError::Unsupported` を返す（意図せず余分な
@@ -377,6 +420,17 @@ fn scalar_op_matches_cpu_across_shapes() {
             assert_comparison_parity(op, seed + 12, shape);
         }
         assert_clamp_parity(0.5, 1.5, seed + 13, shape);
+
+        assert_unary_parity(ScalarUnaryOp::Gelu, Domain::Signed, seed + 14, shape, false);
+        assert_unary_parity(
+            ScalarUnaryOp::GeluTanh,
+            Domain::Signed,
+            seed + 15,
+            shape,
+            false,
+        );
+        assert_softplus_parity(1.0, 20.0, seed + 16, shape);
+        assert_softplus_parity(2.0, 1.0, seed + 17, shape);
     }
 
     let cpu = CpuBackendOps::new();

@@ -24,7 +24,7 @@
 use std::borrow::Cow;
 
 use fandhe_ai_tensor_core::{
-    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, Tensor,
+    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, ShapeError, Tensor,
     VectorNormOrd,
 };
 
@@ -1217,6 +1217,201 @@ pub(crate) fn scatter(
             build_tensor(out, &out_shape)
         }
     }
+}
+
+/// `i32` 版 `build_tensor`（上記）。sort／topk（下記）の `index` 出力
+/// 構築に使う（`build_tensor` と同じ「shape 検査済みのはずのデータ長
+/// 不一致は契約違反として `debug_assert!` で検知しつつ安全側
+/// フォールバックする」infallible 契約）。
+fn build_index_tensor(data: Vec<i32>, shape: &[usize]) -> Tensor<i32> {
+    debug_assert_eq!(
+        data.len(),
+        shape.iter().product::<usize>(),
+        "build_index_tensor: shape 検査済みのはずのデータ長が一致しない（契約違反）"
+    );
+    Tensor::new(data, shape).unwrap_or_else(|_| {
+        debug_assert!(
+            false,
+            "build_index_tensor: shape の要素数積がオーバーフローした（契約違反）"
+        );
+        Tensor::scalar(0)
+    })
+}
+
+/// `sort`／`topk`（下記）共通の全順序比較（`(値, 元添字)` タプル）。
+/// [`fandhe_ai_tensor_core::BackendOps::sort`] doc の順序契約 1〜3 を
+/// 実装する:
+///
+/// 1. **安定性**: 値side の比較（`value_cmp_ascending`）が同値
+///    （`Equal`）を返した場合、添字（`.1`）の昇順で確定する
+///    （`descending` の場合も同じ——後述のとおり値側の比較のみを
+///    反転するため、添字側は常に昇順のまま）。
+/// 2. **NaN**: NaN は任意の非 NaN より大きい・NaN 同士は同値
+///    （`value_cmp_ascending`）。
+/// 3. **±0**: `f32::partial_cmp` が `Equal` を返すため 1 の安定性
+///    契約により同値扱い（添字順）となる。
+///
+/// `descending` は `value_cmp_ascending(b.0, a.0)`（オペランドを
+/// 入れ替えて呼ぶ）で値側の大小関係のみを反転する。「昇順ソート
+/// 結果を丸ごと `reverse()` する」実装は同値の添字順まで反転させて
+/// しまうため意図的に避けている（`sort_by` はこの比較関数を直接
+/// 使うため安定ソートの副作用に依存しない——`Vec::sort_by` 自体は
+/// 安定ソートだが、本関数のタイブレークがどのような実装
+/// （安定・非安定）のソートでも同じ結果になるよう明示的に定める）。
+fn sort_cmp(a: (f32, usize), b: (f32, usize), descending: bool) -> std::cmp::Ordering {
+    fn value_cmp_ascending(x: f32, y: f32) -> std::cmp::Ordering {
+        match (x.is_nan(), y.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        }
+    }
+    let primary = if descending {
+        value_cmp_ascending(b.0, a.0)
+    } else {
+        value_cmp_ascending(a.0, b.0)
+    };
+    primary.then(a.1.cmp(&b.1))
+}
+
+/// `dim` 軸に沿った並べ替えのホスト参照実装（`torch.sort` 相当。
+/// イシュー #1733）。`BackendOps::sort` が `Unsupported` を返した
+/// ときのみ `Var::sort` から呼ばれる。
+///
+/// 出力 shape（`values`／`index` とも）は `input.shape()` と恒等
+/// （[`fandhe_ai_tensor_core::sort_out_shape`] 参照）。順序契約は
+/// [`fandhe_ai_tensor_core::BackendOps::sort`] doc の 1〜4 を正と
+/// する（本関数は [`sort_cmp`] で契約 1〜3 を、単一スレッド逐次
+/// 実装で契約 4〈決定性〉を満たす）。
+///
+/// 元添字（`orig_idx: usize`）は出力の `index` テンソルへ `i32` で
+/// 書き戻すため、`i32::MAX` を超える添字は `i32::try_from` の失敗を
+/// `ShapeError::IndexRangeOverflow` として伝播する（codex-review
+/// 指摘・PR #1818。`crates/backend-cpu/src/sort_topk.rs::sort` が
+/// 同条件で返す契約と一致させ、CUDA／Metal がこのホスト
+/// フォールバックを経由してもバックエンド間の添字契約を崩さない）。
+pub(crate) fn sort(
+    input: &Tensor<f32>,
+    dim: usize,
+    descending: bool,
+) -> Result<(Tensor<f32>, Tensor<i32>), ShapeError> {
+    let shape = input.shape().to_vec();
+    if shape.contains(&0) {
+        return Ok((
+            build_tensor(Vec::new(), &shape),
+            build_index_tensor(Vec::new(), &shape),
+        ));
+    }
+    let data = dense_vec_ref(input);
+    let strides = row_major_strides(&shape);
+    let dim_size = shape[dim];
+    let numel = data.len();
+    let mut out_vals = vec![0f32; numel];
+    let mut out_idx = vec![0i32; numel];
+
+    for flat in 0..numel {
+        let coords = unravel(flat, &shape);
+        // 各ライン（`dim` 軸以外の添字が共通の要素列）は、その先頭
+        // （`dim` 軸添字 0）の位置に到達したときだけ 1 回処理する。
+        if coords[dim] != 0 {
+            continue;
+        }
+        let mut line: Vec<(f32, usize)> = Vec::with_capacity(dim_size);
+        for idx in 0..dim_size {
+            let mut pos = 0usize;
+            for (axis, &stride) in strides.iter().enumerate() {
+                let coord = if axis == dim { idx } else { coords[axis] };
+                pos += coord * stride;
+            }
+            line.push((data[pos], idx));
+        }
+        line.sort_by(|&a, &b| sort_cmp(a, b, descending));
+        for (out_pos, &(val, orig_idx)) in line.iter().enumerate() {
+            let mut pos = 0usize;
+            for (axis, &stride) in strides.iter().enumerate() {
+                let coord = if axis == dim { out_pos } else { coords[axis] };
+                pos += coord * stride;
+            }
+            out_vals[pos] = val;
+            out_idx[pos] = i32::try_from(orig_idx)
+                .map_err(|_| ShapeError::IndexRangeOverflow { index: orig_idx })?;
+        }
+    }
+    Ok((
+        build_tensor(out_vals, &shape),
+        build_index_tensor(out_idx, &shape),
+    ))
+}
+
+/// `dim` 軸に沿った上位（`largest=true`）／下位（`largest=false`）
+/// `k` 個抽出のホスト参照実装（`torch.topk` 相当・`sorted=True`
+/// 固定。イシュー #1733）。`BackendOps::topk` が `Unsupported` を
+/// 返したときのみ `Var::topk` から呼ばれる。`largest` は [`sort`] の
+/// `descending` へそのまま対応する（`largest=true` → 降順 sort の
+/// 先頭 `k`）ため、[`sort_cmp`] を共有する。
+///
+/// `out_shape` は呼び出し元（`Var::topk`）が
+/// [`fandhe_ai_tensor_core::topk_out_shape`] で検査・確定済みの
+/// 出力 shape（`dim` 軸のみ `k` に置換）をそのまま渡す。
+///
+/// [`sort`] と同じ理由で、元添字が `i32::MAX` を超える場合は
+/// `ShapeError::IndexRangeOverflow` を返す（codex-review 指摘・
+/// PR #1818。`crates/backend-cpu/src/sort_topk.rs::topk` と契約を
+/// 一致させる）。
+pub(crate) fn topk(
+    input: &Tensor<f32>,
+    dim: usize,
+    k: usize,
+    largest: bool,
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), ShapeError> {
+    if out_shape.contains(&0) {
+        return Ok((
+            build_tensor(Vec::new(), out_shape),
+            build_index_tensor(Vec::new(), out_shape),
+        ));
+    }
+    let shape = input.shape().to_vec();
+    let data = dense_vec_ref(input);
+    let strides = row_major_strides(&shape);
+    let out_strides = row_major_strides(out_shape);
+    let dim_size = shape[dim];
+    let numel = data.len();
+    let out_numel: usize = out_shape.iter().product();
+    let mut out_vals = vec![0f32; out_numel];
+    let mut out_idx = vec![0i32; out_numel];
+
+    for flat in 0..numel {
+        let coords = unravel(flat, &shape);
+        if coords[dim] != 0 {
+            continue;
+        }
+        let mut line: Vec<(f32, usize)> = Vec::with_capacity(dim_size);
+        for idx in 0..dim_size {
+            let mut pos = 0usize;
+            for (axis, &stride) in strides.iter().enumerate() {
+                let coord = if axis == dim { idx } else { coords[axis] };
+                pos += coord * stride;
+            }
+            line.push((data[pos], idx));
+        }
+        line.sort_by(|&a, &b| sort_cmp(a, b, largest));
+        for (out_pos, &(val, orig_idx)) in line.iter().take(k).enumerate() {
+            let mut pos = 0usize;
+            for (axis, &stride) in out_strides.iter().enumerate() {
+                let coord = if axis == dim { out_pos } else { coords[axis] };
+                pos += coord * stride;
+            }
+            out_vals[pos] = val;
+            out_idx[pos] = i32::try_from(orig_idx)
+                .map_err(|_| ShapeError::IndexRangeOverflow { index: orig_idx })?;
+        }
+    }
+    Ok((
+        build_tensor(out_vals, out_shape),
+        build_index_tensor(out_idx, out_shape),
+    ))
 }
 
 /// CrossEntropy 損失（log-sum-exp 安定化。クラス次元 `class_dim` 指定。
