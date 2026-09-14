@@ -1625,3 +1625,15 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - facade（`crates/facade/src/optim.rs`）は `pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};` の 1 行のみ追加（純再エクスポート）。`crates/facade/tests/api_surface.rs` の期待集合・到達性検査（既定値 `eps=1e-6`・`weight_decay=0.0` のドリフトガード込み）、`crates/facade/tests/optim_train_loop.rs` の facade-only 学習ループ収束テスト（`lamb_with_clip_converges_via_facade_only`。trust ratio により実効ステップが縮むため `AdamW` 用 lr のままでは収束せず、lr=0.02 へ調整）も追加済み。
 - **`DeviceParamStore` 非対応**: `crate::optim::device_store::DeviceParamStore::step` は `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、`Lamb` は結線されていない（`AdamW`／`Adam` も同様）。LAMB のデバイス常駐化にはパラメータテンソルごとの L2 norm reduction カーネルと trust ratio 適用カーネル（3 バックエンド）が必要で本イシューの対象外。
 - 新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は一切追加していない（`AdamW`／`Adam` と同じく `Tape`／`Var`／`BackendOps` に依存しない値型・純関数）。
+
+## 追補（イシュー #1745）
+
+§2.10 の `CosineAnnealingLR`・`ExponentialLR` 行を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `CosineAnnealingLr`・`ExponentialLr`・`LinearWarmupLr`（`crates/autodiff/src/nn/optim/lr_scheduler.rs`）を `ConstantLr`／`StepLr` と同じ `LrScheduler` trait 実装として追加した。いずれも `lr_at(step) -> f32` のみを持つ stateless 純関数で、新規 `Op`／`BackendOps`／`Var` は拡張していない。
+- `CosineAnnealingLr` は PyTorch `CosineAnnealingLR._get_closed_form_lr` 準拠の閉形式（`eta_min + (base_lr - eta_min) * (1 + cos(π * step / t_max)) / 2`）を採用し、`step > t_max` では TensorFlow `CosineDecay` のように clamp せず周期的に振る舞う（PyTorch 準拠）。
+- `ExponentialLr` は `lr(step) = base_lr * gamma^step`（PyTorch `ExponentialLR` と同一）。
+- `LinearWarmupLr` は PyTorch に同名クラスがないため、`LinearLR` の `end_factor = 1.0` 固定形として定義した独自スケジューラ。
+- いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する（`cos`／`powf` の libm 差による ULP 揺れを抑える精度方針。bit 同一契約は主張しない）。
+- facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
+- 状態保持型の `ReduceLROnPlateau`・`OneCycleLR` は本 issue の対象外のまま残る（兄弟イシュー #1746／#1747 が担当）。

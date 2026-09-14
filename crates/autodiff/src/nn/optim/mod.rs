@@ -73,7 +73,9 @@ pub use amp::{
 };
 pub use clip::{ClipGradResult, clip_grad_norm, clip_grad_value, global_grad_norm};
 pub use lamb::{Lamb, LambConfig};
-pub use lr_scheduler::{ConstantLr, LrScheduler, StepLr};
+pub use lr_scheduler::{
+    ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, StepLr,
+};
 pub use rmsprop::{RmsProp, RmsPropConfig};
 
 // イシュー #1721: 損失スケーリング（`amp::scale_loss`/`amp::GradScaler::
@@ -133,3 +135,14 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // ごとの L2 norm reduction カーネルが未実装のため）。#1610 配下の
 // optimizer sub-issue のうち LAMB（本イシュー）で Adam〈#1742〉に
 // 続き完了する（RMSprop／Adagrad は #1743 が別途対応）。
+
+// イシュー #1745（親 #1611）: CosineAnnealingLr／ExponentialLr／
+// LinearWarmupLr（式ベース・stateless 純関数の LR スケジューラ 3 種）を
+// 追加した（`lr_scheduler` モジュール doc 参照）。新規 `Op`／
+// `BackendOps` メソッド／`Var`／VJP は追加していない（テンソル演算では
+// なくホスト側 `f32` 純関数のため）。facade（`fandhe_ai::optim`）への
+// 公開・`crates/facade/tests/api_surface.rs` の期待集合更新・
+// `docs/compat-api-scope.md` §1.2 scheduler 行の更新も本イシューで
+// 完了済み（純再エクスポート。`crates/facade/src/optim.rs` 参照）。
+// 状態保持型の `ReduceLROnPlateau`／`OneCycleLR` は対象外（兄弟
+// イシュー #1746／#1747 が担当）。

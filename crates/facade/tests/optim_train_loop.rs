@@ -33,8 +33,9 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::optim::{
-    Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, ConstantLr, Lamb, LambConfig,
-    LrScheduler, RmsProp, RmsPropConfig, Sgd, SgdConfig, StepLr, clip_grad_norm, clip_grad_value,
+    Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, ConstantLr, CosineAnnealingLr,
+    ExponentialLr, Lamb, LambConfig, LinearWarmupLr, LrScheduler, RmsProp, RmsPropConfig, Sgd,
+    SgdConfig, StepLr, clip_grad_norm, clip_grad_value,
 };
 
 const BATCH: usize = 4;
@@ -799,4 +800,80 @@ fn sgd_with_clip_value_converges_via_facade_only() {
         final_loss < 0.5 * initial,
         "loss did not converge sufficiently: initial={initial} final={final_loss}"
     );
+}
+/// イシュー #1745（親 #1611）: `CosineAnnealingLr`／`ExponentialLr`／
+/// `LinearWarmupLr` が `ConstantLr`／`StepLr` と同じく `fandhe_ai::optim`
+/// のみへの依存で学習ループを駆動できることを固定する（facade のみ
+/// import の裏付け。`lr_scheduler_drives_sgd_config_via_facade_only` の
+/// 姉妹テスト）。`CosineAnnealingLr` の系列を毎 step `lr_at(step)` で
+/// 取り出して `SgdConfig` を作り直す構成のみ確認し、他 2 種は
+/// `nn_optim_lr_scheduler.rs` の系列テストへ委ねる。
+#[test]
+fn cosine_annealing_lr_scheduler_drives_sgd_config_via_facade_only() {
+    const STEPS: usize = 6;
+    const BASE_LR: f32 = 0.1;
+    const T_MAX: usize = 4;
+
+    let scheduler = CosineAnnealingLr::new(BASE_LR, T_MAX, 0.0)
+        .unwrap_or_else(|e| panic!("test fixture: CosineAnnealingLr::new が失敗した: {e}"));
+
+    let mut model = build_model();
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let mut log = Vec::with_capacity(STEPS);
+
+    for step in 0..STEPS {
+        let lr = scheduler.lr_at(step);
+        // lr_at は非負を返しうる。`SgdConfig::validate` は lr<0.0 のみ
+        // 拒否し lr==0.0 は受理するため、非負であれば常に Sgd::new は
+        // 成功する（`ConstantLr`／`StepLr` と同じ制約）。
+        let mut sgd = Sgd::new(SgdConfig::new(lr))
+            .unwrap_or_else(|e| panic!("test fixture: Sgd::new が失敗した: {e}"));
+
+        let updated = {
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+
+            let pred = bound
+                .forward(&tape, &x)
+                .unwrap_or_else(|e| panic!("test fixture: forward が失敗した: {e}"));
+            let loss = pred
+                .mse_loss(&y)
+                .unwrap_or_else(|e| panic!("test fixture: mse_loss が失敗した: {e}"));
+            log.push(scalar(&loss.to_tensor()));
+
+            let grads = tape
+                .backward(&loss)
+                .unwrap_or_else(|e| panic!("test fixture: backward が失敗した: {e}"));
+            let grad_refs = bound
+                .trainable_grads(&grads)
+                .unwrap_or_else(|e| panic!("test fixture: trainable_grads が失敗した: {e}"));
+            let param_refs = model.trainable_parameters();
+            sgd.step(&param_refs, &grad_refs)
+                .unwrap_or_else(|e| panic!("test fixture: Sgd::step が失敗した: {e}"))
+        };
+        model
+            .apply_parameters(updated)
+            .unwrap_or_else(|e| panic!("test fixture: apply_parameters が失敗した: {e}"));
+    }
+
+    assert_eq!(log.len(), STEPS);
+    let initial = log[0];
+    let final_loss = *log.last().unwrap_or_else(|| unreachable!("log は空でない"));
+    assert!(final_loss.is_finite(), "final loss が非有限: {final_loss}");
+    assert!(
+        final_loss < initial,
+        "loss did not decrease: initial={initial} final={final_loss}"
+    );
+
+    // `ExponentialLr`／`LinearWarmupLr` も同モジュールから到達可能で
+    // あることを併せて確認する（facade のみ依存で
+    // `optim::{ExponentialLr, LinearWarmupLr}` を使える裏付け）。
+    let exponential = ExponentialLr::new(BASE_LR, 0.9)
+        .unwrap_or_else(|e| panic!("test fixture: ExponentialLr::new が失敗した: {e}"));
+    let warmup = LinearWarmupLr::new(BASE_LR, T_MAX, 0.25)
+        .unwrap_or_else(|e| panic!("test fixture: LinearWarmupLr::new が失敗した: {e}"));
+    assert!((exponential.lr_at(0) - BASE_LR).abs() < 1e-6);
+    assert!((warmup.lr_at(T_MAX) - BASE_LR).abs() < 1e-6);
 }
