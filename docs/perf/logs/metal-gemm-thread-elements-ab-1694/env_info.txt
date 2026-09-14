@@ -1,0 +1,35 @@
+thread_elements() 方式 BlockMMA 候補 A/B（イシュー #1694）env_info
+
+本 PR 時点では実測未実施（本エージェント実行環境に Apple Silicon 実機
+がないため）。以下は Mac セッションが記入する記入欄。
+
+== 機種・OS・toolchain ==
+機種: （記入欄。内部ホスト名は記録しない）
+sw_vers:
+uname -srm:
+rustc --version:
+
+== base commit・作業ブランチ ==
+base commit:
+作業ブランチ:
+
+== 参照 ==
+事前登録判定規則: docs/perf/logs/metal-gemm-thread-elements-ab-1694/README.md
+運用方針（専有ゲートなし・record_only）: ルート #1519 のユーザー指示
+
+== gate（R0〜R3）結果 ==
+R0（probe）:
+R1（parity・all_staged_candidates）:
+R2（非 staged 拒否）:
+R3（本番との bit 一致）:
+
+== run ごとの負荷推移・並走プロセス（実測後に追記） ==
+run1:
+run2:
+run3:
+run4:
+run5:
+
+== run 数・中断有無 ==
+
+== pmset -g therm（実行前後） ==

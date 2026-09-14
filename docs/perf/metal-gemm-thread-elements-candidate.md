@@ -126,6 +126,8 @@ probe の実行は未実施**（本エージェント実行環境に Apple Silic
 MSL 自体のコンパイル可否（構文エラーの有無）も上記実機実行で初めて
 確認できる（Linux 上ではクロスコンパイル検証の対象外）。
 
+**性能 A/B（R0〜R3 通過後の実機計測）は §7 を参照。**
+
 ## §5 #1694 への引き継ぎ
 
 1. R0（probe）→ R1（parity/bit 一致）→ 性能 A/B の順に進める。
@@ -139,6 +141,9 @@ MSL 自体のコンパイル可否（構文エラーの有無）も上記実機�
 4. probe（R0）で不一致が出た場合、原因は緩和せず切り分ける（レーン
    対応の実機仕様差異そのものが本候補の viability を左右するため）。
 
+**性能 A/B のスキャフォールド・事前登録判定規則・記入欄は #1694（§7）で
+整備済み。**
+
 ## §6 スコープ外
 
 - 本番結線（`tile::select`／`dispatch_auto` 既定化）。
@@ -148,3 +153,86 @@ MSL 自体のコンパイル可否（構文エラーの有無）も上記実機�
 - fused epilogue／非 `pad8` の C 直接書き込み。
 - REQ-2 baseline 行の追加（人間承認必須）。
 - MSL コンパイル自体の Linux 上での検証（Mac セッションへ申し送り）。
+
+## §7 #1694 A/B（事前登録規則・プロトコル・記入欄）
+
+### §7.0 目的
+
+R0〜R3（§4）を前提ゲートとして通したうえで、候補カーネル
+（`MetalGemm::new_with_mma_frag_load(&ctx, MmaFragLoad::ThreadElements)`）
+と本番選択構成（`tile::select_for_device`。`MetalGemm::new(&ctx)`）を
+同一タイル・同一入力・同一 `diag_encode_tiled_nn` 計測境界で `kernel_gpu`
+（GPU タイムスタンプ純カーネル時間）5 プロセス起動中央値比較し、REQ-2
+複合判定で正しさを確認し、前後比較を記録する。**本番結線
+（`tile::select`／`dispatch_auto` 既定化）可否は本節の対象外**（いずれの
+判定でも本番結線は行わない）。
+
+本エージェント実行環境は Linux で Apple Silicon 実機に到達できないため、
+本節時点では計測スキャフォールドと事前登録判定規則のみを整備し、
+実測値は含めない（`verdict=undetermined` で出荷。#1689／#1691／#1692
+と同じ運用）。
+
+### §7.1 事前登録判定規則（イシュー #1694 issue コメントで固定・事後緩和禁止）
+
+1. **前提ゲート（順序固定）**: R0 → R1 → R2 → R3（§4）。R0 または R1 が
+   FAIL なら正しさ不成立として REJECT を確定し性能 A/B は実施しない。
+   R2／R3 の FAIL は機構契約の不成立として記録し、性能 A/B は実施しても
+   参考値扱い（verdict は undetermined）。
+2. **正しさ（REQ-2）**: 各 run・各 N（512/1024/2048/4096）で trial 0 の
+   head 出力が CPU 参照（`matmul_reference_fma`）と複合判定（相対誤差
+   1e-3 未満 または 絶対誤差 1e-5 未満）を pass すること（診断テスト内
+   で fail-closed に検証。tolerance・baseline は不変）。
+3. **checksum 完全一致**: 各 run・各 N で base／head の trial 0 出力の
+   checksum（f64 逐次和）が bit 完全一致（`bit_identical=true`）。
+   1 セルでも不一致なら当該 N は比の値によらず REJECT。
+4. **性能指標**: `head_over_base_kernel_gpu`（同一 run 内の head 中央値 /
+   base 中央値）。N ごとに 5 run の中央値を採用。
+5. **N ごとの判定**: 5 run 中央値 `<=1.00` かつ 5/5 run 符号一貫 →
+   `ADOPT-as-opt-in-candidate`。中央値 `>1.00` かつ 5/5 run 符号一貫 →
+   `REJECT`。符号が run 間で反転 → `undetermined`。
+6. **総合判定**: 全 4 形状が ADOPT → 候補前進を推奨。1 形状でも REJECT
+   → 全形状通した無条件前進は推奨しない（形状別結果は併記）。
+   undetermined を含む場合は総合も undetermined。いずれの場合も
+   **本番結線は行わない**（別イシューでユーザー承認を要する）。
+7. **負荷**: record_only。共有負荷下でも 5/5 run 符号一貫なら
+   undetermined へ格下げしない（E7／E8 慣行）。
+8. **フォールバック**: `resolved_cfg != cfg` が 1 trial でも発生した run
+   は診断テスト側の assert で abort する。5 run 揃わない場合は追加起動
+   せず、揃った run 数と undetermined を記録する。
+9. **未実測時**: `verdict=undetermined`（計測未実施）で出荷し、実測は
+   Mac セッションへ申し送る。
+
+### §7.2 プロトコル
+
+- テスト: `crates/backend-metal/src/gemm_te_diag_tests.rs::
+  te_kernel_gpu_ab_vs_production_select`（`#[ignore]`。
+  `--test-threads=1` 必須）。
+- base: `MetalGemm::new(&ctx)`（`MmaFragLoad::SimdgroupLoad`）。head:
+  `MetalGemm::new_with_mma_frag_load(&ctx, MmaFragLoad::ThreadElements)`。
+- 対象サイズ: N=512/1024/2048/4096（正方）。20 warmup + 20 測定・
+  trial 偶奇で計測順反転（order-bias 相殺）。
+- スキャフォールド: `docs/perf/logs/metal-gemm-thread-elements-ab-1694/`
+  （`orchestrate.sh gate`／`orchestrate.sh <run番号>`・`aggregate.py`・
+  `README.md`・`env_info.txt`）。実行手順は同 README を正とする。
+
+### §7.3 実機記入欄
+
+以下は Mac セッションが記入する。
+
+- R0〜R3 結果: `docs/perf/logs/metal-gemm-thread-elements-ab-1694/
+  env_info.txt` 参照。
+- N 別表（5 run 中央値・符号一貫・checksum 一致・判定）:
+  `docs/perf/logs/metal-gemm-thread-elements-ab-1694/aggregate.md`
+  参照（未生成）。
+
+### §7.4 総合判定
+
+**undetermined（未実測）。**
+
+### §7.5 スコープ外
+
+- 本番結線（`tile::select`／`dispatch_auto` 既定化）。
+- framework-compare（facade から候補へ到達不能のため対象外）。
+- split-K・タイルクラス分割との併用計測。
+- tolerance／baseline の変更。
+

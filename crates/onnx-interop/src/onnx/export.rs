@@ -19,8 +19,12 @@
 //!   から組み立てる（詳細対応表は `docs/onnx-export-op-mapping.md`）。
 //! - import -> export -> import の構造一致 roundtrip テスト・未対応 op の
 //!   fail-closed 確認は `tests/onnx_export_roundtrip.rs` で固定済み（#1774）。
-//! - facade 公開は #1775（#1652 の判断待ち）。本モジュールは `onnx-interop`
-//!   内部 API のみを提供し facade へは一切公開しない
+//! - facade 公開は #1775 が判断済み（方針としては公開〈薄いラッパー型〉を
+//!   推奨するが、facade は crates.io 公開クレートのため `onnx-interop` 自体の
+//!   crates.io 公開というユーザー承認未取得の別個の前提が要り、それまでは
+//!   非公開のまま段階 0。close はしない。
+//!   `docs/facade-onnx-export-exposure-decision.md`）。本モジュールは
+//!   `onnx-interop` 内部 API のみを提供し facade へは一切公開しない
 //!   （`onnx-interop` は crates.io 非公開クレート・`docs/compat-api-scope.md` の
 //!   対象外）。
 //!
@@ -54,7 +58,8 @@ use std::fmt;
 // `export_ops`（イシュー #1773。内部 op -> `NodeProto` の意味論的マッピング）の
 // 公開面を本モジュールから再エクスポートする（`onnx::export_ops::X` ではなく
 // `onnx::export::X` として利用可能にする。呼び出し元は #1773 以降のテスト・
-// 将来の codegen・#1775 の facade 結線判断）。
+// 将来の codegen・facade 結線〈#1775 が判断済み・publish 承認待ちの段階 0。
+// `docs/facade-onnx-export-exposure-decision.md`〉）。
 pub use export_ops::{ConstantAttr, ExportNode, ExportOp, SUPPORTED_OP_TYPES, to_node_proto};
 
 /// export 処理で発生しうるエラー。本番経路で `unwrap()` / `expect()` を使わない
