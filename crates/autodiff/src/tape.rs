@@ -125,9 +125,10 @@ pub(crate) enum Op {
     /// （`grad.rs::vjp_scalar_unary`）。
     ///
     /// 公開 API 面（`Var::sqrt` 等）の配線はイシュー #1710（算術系。
-    /// 親 #1593）・#1711（対数・三角関数系）・#1595（活性化系）が担う。
-    /// #1710 で `Var::sqrt` から、#1711 で `Var::log`／`log2`／`log10`／
-    /// `sin`／`cos`／`tan`／`abs`／`neg` から到達可能になったため
+    /// 親 #1593）・#1711（対数・三角関数系）・#1712（`Var::clamp`）・
+    /// #1595（活性化系）が担う。#1710 で `Var::sqrt` から、#1711 で
+    /// `Var::log`／`log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg`
+    /// から、#1712 で `Var::clamp` から到達可能になったため
     /// `#[allow(dead_code)]` は撤去済み（旧
     /// `crates/tensor-core/src/fusion/mod.rs` と同型の「結線待ちコード
     /// への理由付き `#[allow(dead_code)]`」は不要になった）。
@@ -138,7 +139,8 @@ pub(crate) enum Op {
     /// 使うフォールバック・VJP）。`a`／`b` は `Op::Add`／`Op::Mul` と
     /// 同じ NumPy 互換ブロードキャスト。
     ///
-    /// #1710 で `Var::sub`／`div`／`pow` から到達可能になったため
+    /// #1710 で `Var::sub`／`div`／`pow`、#1712 で `Var::gt`／`ge`／
+    /// `lt`／`le`／`eq`／`ne` から到達可能になったため
     /// `#[allow(dead_code)]` は撤去済み（[`Op::ScalarUnary`] と同じ
     /// 経緯）。
     ScalarBinary {
