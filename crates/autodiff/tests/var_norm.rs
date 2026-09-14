@@ -202,7 +202,7 @@ fn var_full_grad_matches_numeric() {
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
 
     let numeric = numeric_grad(&x_val, forward_loss);
-    assert_close(&dx, &numeric);
+    assert_close(dx, &numeric);
 }
 
 #[test]
@@ -224,7 +224,7 @@ fn var_axis_grad_matches_numeric() {
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
 
     let numeric = numeric_grad(&x_val, forward_loss);
-    assert_close(&dx, &numeric);
+    assert_close(dx, &numeric);
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn std_full_grad_matches_numeric() {
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
 
     let numeric = numeric_grad(&x_val, forward_loss);
-    assert_close(&dx, &numeric);
+    assert_close(dx, &numeric);
 }
 
 #[test]
@@ -267,7 +267,7 @@ fn norm_l1_full_grad_matches_numeric() {
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
 
     let numeric = numeric_grad(&x_val, forward_loss);
-    assert_close(&dx, &numeric);
+    assert_close(dx, &numeric);
 }
 
 #[test]
@@ -288,7 +288,7 @@ fn norm_l2_full_grad_matches_numeric() {
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
 
     let numeric = numeric_grad(&x_val, forward_loss);
-    assert_close(&dx, &numeric);
+    assert_close(dx, &numeric);
 }
 
 // =====================================================================
