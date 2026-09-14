@@ -144,6 +144,25 @@
 //! 常駐更新との違い」節参照。RMSprop・Adagrad とも本 issue では対応
 //! する `BackendOps` メソッドを追加していないため非対応）。
 //!
+//! # ReduceLrOnPlateau（イシュー #1746・親 #1611）
+//!
+//! [`crate::optim::ReduceLrOnPlateau`]／[`crate::optim::ReduceLrOnPlateauConfig`]・
+//! [`crate::optim::PlateauMode`]／[`crate::optim::ThresholdMode`] を
+//! `fandhe_ai_autodiff::nn::optim`（実体は `nn::optim::reduce_lr_on_plateau`
+//! モジュール）から同じく素の再エクスポートで公開する。PyTorch
+//! `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当で、既存
+//! [`crate::optim::ConstantLr`]／[`crate::optim::StepLr`]（stateless
+//! 純関数）とは異なり、検証指標の観測に応じて内部状態
+//! （patience／best／cooldown カウンタ）を進める **状態保持型**である
+//! （詳細は `nn::optim::reduce_lr_on_plateau` モジュール doc）。
+//! [`crate::optim::LrScheduler`] は実装するが、状態を進める入口は
+//! [`crate::optim::ReduceLrOnPlateau::step`]（検証指標を受け取る）のみで
+//! `lr_at` は現在値を返すだけ（`ConstantLr` と同型）。他の optim 型と
+//! 同じく `Tape`／`Var`／`BackendOps` に一切依存しない値型・純関数で
+//! あり、新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は
+//! 追加していない（カーネルなし）。`crate::DeviceParamStore` には
+//! 未結線（「デバイス常駐更新との違い」節参照）。
+//!
 //! # デバイス常駐更新との違い（誤認防止）
 //!
 //! 本モジュールの再エクスポートはホスト側 `Tensor<f32>` を介した
@@ -184,6 +203,8 @@ pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
 pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, LinearWarmupLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
 pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
+pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};
+pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};
 pub use fandhe_ai_autodiff::nn::optim::{RmsProp, RmsPropConfig};
 pub use fandhe_ai_autodiff::nn::optim::{clip_grad_norm, global_grad_norm};
 pub use fandhe_ai_autodiff::nn::optim::{has_non_finite, scale_grads, scale_loss, unscale_grads};
