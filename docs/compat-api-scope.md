@@ -171,7 +171,8 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下の
 - **基本レイヤー・基本活性化関数の薄いラッパー**（TASK-9.1）:
   - Linear 層（TASK-9.1a・#91）
   - ReLU・Sigmoid・Tanh の 3 活性化関数（TASK-9.1b・#92 で実装済み。
-    `crates/autodiff/src/nn/activation.rs`）
+    `crates/autodiff/src/nn/activation.rs`）。イシュー #1714 で
+    Silu／Hardswish／LeakyRelu／Elu を追加（1.2 節該当行参照）
 - **`Var::host_view`／`Tensor::host_slice`（借用ビュー読み出し API）**:
   5 節手続き 2（ユーザー承認済みイシュー #1335 起票）により対象範囲へ
   追加。compat 層固有のラッパーではなく `fandhe_ai_autodiff`／
@@ -206,7 +207,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 |---|---|
 | 要素演算（sub／div／pow／sqrt／log／三角関数／比較） | #1592・#1593（#1710 で算術系〈`Var::sub`／`div`／`pow`／`sqrt`〉実装済み。#1711 で `log`／`log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg` 実装済み。いずれも `ScalarUnaryOp`／`ScalarBinaryOp`〈#1634〉への薄い委譲・facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない。CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッションへ申し送り）。clamp／比較演算は #1712 が対象 |
 | softmax／log_softmax | #1594（実装済み。`Var::softmax`／`log_softmax`・`nn::activation::Softmax`／`LogSoftmax`。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` は facade へ追加しない〉） |
-| GELU／SiLU 等の活性化 | #1595 |
+| GELU／SiLU 等の活性化 | #1595（#1714 実装済み: `Silu`／`Hardswish`／`LeakyRelu`／`Elu`。`Var::silu`／`hardswish`／`leaky_relu`／`elu`・`nn::activation::{Silu, Hardswish, LeakyRelu, Elu}`・`compat::Sequential::add_silu`／`add_hardswish`／`add_leaky_relu`／`add_elu`。CUDA／Metal 専用カーネル実装済み〈`LeakyRelu`／`Hardswish` は選択・算術のみで bit 同一想定・`Silu`／`Elu` は超越関数を含むため REQ-2 統一複合判定のみ。Metal `Elu` は `expm1` 相当が MSL に無いため `exp(x) - 1.0f` で代替——`scalar_op_source.rs` モジュール doc「`Elu` の `expm1` 非対応」参照〉・facade `compat::Sequential::add_*` 4 件の新規公開面追加は親 #1595 コメント〈2026-09-12 ユーザー承認〉に基づく §5 経路 2 の適用。CUDA／Metal 実機での parity は未実測のまま Mac／GB10 セッションへ申し送り。GELU／Softplus は #1713 が別途対応） |
 | LayerNorm／RMSNorm／BatchNorm | #1596（実装済み。`fandhe_ai_autodiff::Var::rms_norm`／`layer_norm`・`nn::RmsNorm`／`LayerNorm`。facade 到達経路は既存 `Var` 再エクスポート経由——新規 `pub use`／`pub fn` は facade へ追加しない。`docs/norm-ops-design.md`）・#1608（BatchNorm） |
 | 形状操作（permute／squeeze／expand／cat／stack／split） | #1597（実装済み: permute／squeeze／unsqueeze／expand〈broadcast_to〉／flatten。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉）・#1598（実装済み: `Var::cat`／`stack`／`narrow`／`split`／`split_with_sizes`／`chunk`。§5 は Tier 1 列挙済み機能につき再適用不要と判断し facade へ新規 `pub use`／`pub fn` を追加していない。narrow は本 issue で `#1599` 側の対象から解消済み） |
 | index 系（narrow／where／gather／scatter） | #1599（narrow は #1598 で実装済み・where／masked_fill は #1637 で実装済み〈`Var::where_cond`／`masked_fill`。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない〉のため対象外。gather／scatter／scatter_add／index_select は #1638（→ #1776 で Op 定義・CPU 参照実装・VJP 実装済み。`Var::gather`／`index_select`／`scatter`／`scatter_add`。facade 到達経路は既存 `Var` 再エクスポート経由で同様に新規公開面なし。CUDA は #1777・Metal は #1778 でそれぞれ実装済み〈`CudaBackendOps`／`MetalBackendOps` の `gather`／`scatter`。facade 新規公開面なし〉）のため対象外） |

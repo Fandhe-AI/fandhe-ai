@@ -46,18 +46,21 @@
 //! [`ScalarUnaryOp::Log10`]／[`ScalarUnaryOp::Sin`]／[`ScalarUnaryOp::Cos`]／
 //! [`ScalarUnaryOp::Tan`]（#1701）・比較演算（[`ScalarBinaryOp::Gt`]／
 //! [`Ge`]／[`Lt`]／[`Le`]／[`Eq`]／[`Ne`]）＋[`ScalarUnaryOp::Clamp`]
-//! （#1702）を実装する。他 kind は `None`（未実装。呼び出し元
-//! `ops::CudaBackendOps::scalar_unary`／`scalar_binary` が
+//! （#1702）に加え、[`ScalarUnaryOp::Silu`]／[`ScalarUnaryOp::Hardswish`]／
+//! [`ScalarUnaryOp::LeakyRelu`]／[`ScalarUnaryOp::Elu`]（イシュー #1714）を
+//! 実装する。`LeakyRelu`／`Elu` は本モジュールで初めて 1 引数ペイロード
+//! （[`UnaryPayload::One`]）を持つ unary kind（`Clamp` の
+//! [`UnaryPayload::Two`] と同型の拡張）。他 kind は `None`（未実装。
+//! 呼び出し元 `ops::CudaBackendOps::scalar_unary`／`scalar_binary` が
 //! `BackendError::Unsupported` を返しホスト参照実装（`ScalarUnaryOp::apply`／
 //! `ScalarBinaryOp::apply`）へフォールバックする既存契約。
 //! `fandhe_ai_autodiff::grad::scalar_unary_with_fallback`／
-//! `scalar_binary_with_fallback` 参照）。`LeakyRelu`／`Elu`／`Softplus`／
-//! `PowScalar`（他のペイロードあり unary kind）・活性化 unary kind
-//! （`Relu`／`Exp`／`Tanh`／`Sigmoid`／`Gelu`／`GeluTanh`／`Silu`／
-//! `Hardswish`）・`Add`／`Mul`／`Maximum`／`Minimum`（比較・算術以外の
-//! 残り binary kind）はいずれの sub issue にも含まれず対象外のまま残る
-//! （`.claude/rules/out-of-scope-tracking.md` 対象。必要なら別イシューで
-//! 追跡）。
+//! `scalar_binary_with_fallback` 参照）。`Softplus`／`PowScalar`
+//! （残るペイロードあり unary kind）・`Relu`／`Exp`／`Tanh`／`Sigmoid`／
+//! `Gelu`／`GeluTanh`（残る活性化 unary kind）・`Add`／`Mul`／`Maximum`／
+//! `Minimum`（比較・算術以外の残り binary kind）はいずれの sub issue にも
+//! 含まれず対象外のまま残る（`.claude/rules/out-of-scope-tracking.md`
+//! 対象。必要なら別イシューで追跡）。
 //!
 //! `Clamp` は本モジュールで初めて `f32` ペイロードを持つ unary kind
 //! （[`UnaryPayload`] 参照）。モジュール doc冒頭「#1635 への申し送り」の
@@ -98,6 +101,34 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         ScalarUnaryOp::Clamp { .. } => {
             Some("isnan(x) ? x : (p0 > p1 ? p1 : (x < p0 ? p0 : (x > p1 ? p1 : x)))")
         }
+        // `ScalarUnaryOp::apply` の `LeakyRelu` 分岐（`scalar_op.rs`）を
+        // 逐語で写す（`x >= 0` は `x`、それ以外は `p0 * x`。選択と乗算
+        // のみのためホスト `f32` 演算と bit 同一になる想定。モジュール
+        // doc「forward 数式の正」参照）。
+        ScalarUnaryOp::LeakyRelu { .. } => Some("(x >= 0.0f) ? x : (p0 * x)"),
+        // `ScalarUnaryOp::apply` の `Hardswish` 分岐を逐語で写す
+        // （`x * (relu6(x + 3.0) / 6.0)`。乗算より先に `relu6(...) /
+        // 6.0` を評価する演算順序を保つ——`scalar_op.rs` の該当分岐
+        // コメント参照。`fminf`／`fmaxf`〈IEEE minNum/maxNum は非 NaN
+        // 側を優先し `is_nan` 明示分岐と異なる〉は使わず、`+ / *` の
+        // 三項演算のみで書くため `NaN` は比較が常に false で自然に
+        // 伝播する）。
+        ScalarUnaryOp::Hardswish => {
+            Some("x * ((x + 3.0f < 0.0f) ? 0.0f : ((x + 3.0f > 6.0f) ? 6.0f : (x + 3.0f)) / 6.0f)")
+        }
+        // `ScalarUnaryOp::apply` の `Silu` 分岐（`x * sigmoid_stable(x)`。
+        // `scalar_op.rs::sigmoid_stable` の符号分岐を鏡写しにし、大きな
+        // `|x|` での `exp` overflow 挙動をホストと揃える）。超越関数
+        // （`expf`）を含むため bit 同一を主張せず REQ-2 複合判定のみで
+        // 検証する（モジュール doc「NVRTC 既定オプションと数値契約」と
+        // 同じ扱い）。
+        ScalarUnaryOp::Silu => Some(
+            "(x >= 0.0f) ? (x * (1.0f / (1.0f + expf(-x)))) : (x * (expf(x) / (1.0f + expf(x))))",
+        ),
+        // `ScalarUnaryOp::apply` の `Elu` 分岐（`x > 0` は `x`、それ以外
+        // は `p0 * expm1f(x)`。ホスト `f32::exp_m1` に対応する
+        // `expm1f`）。超越関数のため REQ-2 複合判定のみで検証する。
+        ScalarUnaryOp::Elu { .. } => Some("(x > 0.0f) ? x : (p0 * expm1f(x))"),
         _ => None,
     }
 }
@@ -128,6 +159,9 @@ fn binary_expr(op: ScalarBinaryOp) -> Option<&'static str> {
 /// のみ）。
 pub(crate) enum UnaryPayload {
     None,
+    /// 1 引数ペイロード（`LeakyRelu { negative_slope }`／
+    /// `Elu { alpha }`。イシュー #1714）。
+    One([f32; 1]),
     Two([f32; 2]),
 }
 
@@ -137,6 +171,7 @@ impl UnaryPayload {
     pub(crate) fn as_slice(&self) -> &[f32] {
         match self {
             Self::None => &[],
+            Self::One(v) => v,
             Self::Two(v) => v,
         }
     }
@@ -149,6 +184,8 @@ impl UnaryPayload {
 pub(crate) fn unary_payload(op: ScalarUnaryOp) -> UnaryPayload {
     match op {
         ScalarUnaryOp::Clamp { min, max } => UnaryPayload::Two([min, max]),
+        ScalarUnaryOp::LeakyRelu { negative_slope } => UnaryPayload::One([negative_slope]),
+        ScalarUnaryOp::Elu { alpha } => UnaryPayload::One([alpha]),
         _ => UnaryPayload::None,
     }
 }
@@ -183,6 +220,7 @@ pub(crate) fn unary_kernel_source(op: ScalarUnaryOp) -> Option<String> {
     // `clamp_source_declares_payload_params_and_omits_values` 参照）。
     let payload_params = match unary_payload(op) {
         UnaryPayload::None => String::new(),
+        UnaryPayload::One(_) => ", float p0".to_string(),
         UnaryPayload::Two(_) => ", float p0, float p1".to_string(),
     };
     Some(format!(
@@ -370,6 +408,10 @@ mod tests {
         for op in [
             ScalarUnaryOp::Sqrt,
             ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 },
+            ScalarUnaryOp::LeakyRelu {
+                negative_slope: 0.1,
+            },
+            ScalarUnaryOp::Elu { alpha: 1.0 },
         ] {
             let src = unary_kernel_source(op).expect("must be implemented");
             let declared = src.matches("float p").count();
@@ -383,10 +425,11 @@ mod tests {
 
     #[test]
     fn unimplemented_kinds_return_none() {
-        // `Log` は #1701 で実装済みになったため、番兵 kind を未実装のまま
-        // 残る kind（#1702 が担当する比較演算・活性化系）へ付け替える
-        // （残すと未実装 kind への `None` フォールバック契約の検証が
-        // 消えてしまう）。
+        // `Log`（#1701）・`Silu`／`Hardswish`／`LeakyRelu`／`Elu`
+        // （#1714）は実装済みになったため、番兵 kind を未実装のまま残る
+        // kind（`Relu`／`Sigmoid`〈活性化系〉・`Add`／`Maximum`〈比較・
+        // 算術以外の残り binary kind〉）へ付け替える（残すと未実装 kind
+        // への `None` フォールバック契約の検証が消えてしまう）。
         assert!(unary_kernel_source(ScalarUnaryOp::Relu).is_none());
         assert!(unary_kernel_source(ScalarUnaryOp::Sigmoid).is_none());
         assert!(binary_kernel_source(ScalarBinaryOp::Add).is_none());
@@ -457,5 +500,87 @@ mod tests {
         );
         assert!(ScalarUnaryOp::Neg.apply(f32::NAN).is_nan());
         assert!(ScalarUnaryOp::Abs.apply(f32::NAN).is_nan());
+    }
+
+    /// イシュー #1714 の対象 4 kind（`Silu`／`Hardswish`／`LeakyRelu`／
+    /// `Elu`）が REQ-8 境界チェック・関数名を含むことを固定する
+    /// （CUDA 側「静的ソース内容検査」の方針を踏襲）。
+    #[test]
+    fn silu_hardswish_leaky_relu_elu_include_bounds_check() {
+        for op in [
+            ScalarUnaryOp::Silu,
+            ScalarUnaryOp::Hardswish,
+            ScalarUnaryOp::LeakyRelu {
+                negative_slope: 0.1,
+            },
+            ScalarUnaryOp::Elu { alpha: 1.0 },
+        ] {
+            let src = unary_kernel_source(op)
+                .unwrap_or_else(|| panic!("{} must be implemented by #1714", op.kind_name()));
+            assert!(src.contains("if (idx < numel)"));
+            assert!(src.contains(&unary_function_name(op)));
+        }
+    }
+
+    /// `LeakyRelu`／`Elu` はペイロード値をソース文字列へ埋め込まない
+    /// （NVRTC キャッシュキーが `kind_name()` のみに依存する契約。
+    /// `clamp_source_is_payload_value_independent` と同型）。
+    #[test]
+    fn leaky_relu_and_elu_sources_are_payload_value_independent() {
+        let lr_a = unary_kernel_source(ScalarUnaryOp::LeakyRelu {
+            negative_slope: 0.01,
+        })
+        .expect("LeakyRelu must be implemented");
+        let lr_b = unary_kernel_source(ScalarUnaryOp::LeakyRelu {
+            negative_slope: 0.5,
+        })
+        .expect("LeakyRelu must be implemented");
+        assert_eq!(lr_a, lr_b);
+        assert!(!lr_a.contains("0.01"));
+        assert!(!lr_a.contains("0.5"));
+
+        let elu_a = unary_kernel_source(ScalarUnaryOp::Elu { alpha: 1.0 })
+            .expect("Elu must be implemented");
+        let elu_b = unary_kernel_source(ScalarUnaryOp::Elu { alpha: 2.5 })
+            .expect("Elu must be implemented");
+        assert_eq!(elu_a, elu_b);
+        assert!(!elu_a.contains("2.5"));
+    }
+
+    /// `Silu`／`Elu` は超越関数（`expf`／`expm1f`）を単精度 libm 名の
+    /// みで呼ぶ（近似 intrinsic・`double` 版への暗黙昇格を使わない。
+    /// `transcendental_unary_kinds_include_bounds_check_and_use_precise_libm`
+    /// と同方針）。
+    #[test]
+    fn silu_and_elu_use_precise_single_precision_libm() {
+        let silu_src = unary_kernel_source(ScalarUnaryOp::Silu).expect("Silu must be implemented");
+        assert!(silu_src.contains("expf("));
+        assert!(!silu_src.contains("__expf("));
+        assert!(!silu_src.contains(" exp("));
+
+        let elu_src = unary_kernel_source(ScalarUnaryOp::Elu { alpha: 1.0 })
+            .expect("Elu must be implemented");
+        assert!(elu_src.contains("expm1f("));
+        assert!(!elu_src.contains("__expm1f("));
+        assert!(!elu_src.contains(" expm1("));
+    }
+
+    /// `Hardswish`／`LeakyRelu` は選択・算術のみで `fminf`／`fmaxf`
+    /// （IEEE minNum/maxNum。`ScalarUnaryOp::apply` の明示分岐と数値
+    /// 契約が異なる）を使わない（`clamp_source_does_not_use_fminf_fmaxf`
+    /// と同方針）。
+    #[test]
+    fn hardswish_and_leaky_relu_do_not_use_fminf_fmaxf() {
+        let hs_src =
+            unary_kernel_source(ScalarUnaryOp::Hardswish).expect("Hardswish must be implemented");
+        assert!(!hs_src.contains("fminf("));
+        assert!(!hs_src.contains("fmaxf("));
+
+        let lr_src = unary_kernel_source(ScalarUnaryOp::LeakyRelu {
+            negative_slope: 0.1,
+        })
+        .expect("LeakyRelu must be implemented");
+        assert!(!lr_src.contains("fminf("));
+        assert!(!lr_src.contains("fmaxf("));
     }
 }

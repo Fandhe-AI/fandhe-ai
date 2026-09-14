@@ -292,6 +292,28 @@ fn scalar_op_parity_smoke_env_adaptive() {
             assert_comparison_parity(ScalarBinaryOp::Eq, 1720, &[4]);
             assert_clamp_parity(0.5, 1.5, 1721, &[4]);
 
+            // Silu／Hardswish／LeakyRelu／Elu（イシュー #1714）のスモーク。
+            // `LeakyRelu`／`Hardswish` は選択・算術のみで bit 同一想定、
+            // `Silu`／`Elu` は超越関数を含むため REQ-2 複合判定のみ。
+            assert_unary_parity(ScalarUnaryOp::Silu, Domain::Signed, 1722, &[4], false);
+            assert_unary_parity(ScalarUnaryOp::Hardswish, Domain::Signed, 1723, &[4], true);
+            assert_unary_parity(
+                ScalarUnaryOp::LeakyRelu {
+                    negative_slope: 0.1,
+                },
+                Domain::Signed,
+                1724,
+                &[4],
+                true,
+            );
+            assert_unary_parity(
+                ScalarUnaryOp::Elu { alpha: 1.3 },
+                Domain::Signed,
+                1725,
+                &[4],
+                false,
+            );
+
             // スコープ境界の回帰ガード（fail-closed 契約の確認）: 未実装
             // kind は `BackendError::Unsupported` を返す（意図せず余分な
             // kind を実装してしまっていないかの検出）。番兵 kind は
@@ -339,7 +361,10 @@ fn scalar_op_matches_cpu_across_shapes() {
     ];
     let mut seed = 9000u64;
     for &shape in shapes {
-        seed += 14;
+        // イシュー #1714 で offset 14〜17 を追加したため、次イテレーション
+        // の base seed（`seed + offset`）が前イテレーションの追加 offset
+        // と衝突しないよう増分を 14 → 18 へ拡張する。
+        seed += 18;
         assert_unary_parity(ScalarUnaryOp::Sqrt, Domain::Positive, seed, shape, true);
         assert_binary_parity(ScalarBinaryOp::Sub, seed + 1, seed + 2, shape, true);
         assert_binary_parity(ScalarBinaryOp::Div, seed + 1, seed + 2, shape, true);
@@ -377,6 +402,32 @@ fn scalar_op_matches_cpu_across_shapes() {
             assert_comparison_parity(op, seed + 12, shape);
         }
         assert_clamp_parity(0.5, 1.5, seed + 13, shape);
+
+        // Silu／Hardswish／LeakyRelu／Elu（イシュー #1714）。
+        assert_unary_parity(ScalarUnaryOp::Silu, Domain::Signed, seed + 14, shape, false);
+        assert_unary_parity(
+            ScalarUnaryOp::Hardswish,
+            Domain::Signed,
+            seed + 15,
+            shape,
+            true,
+        );
+        assert_unary_parity(
+            ScalarUnaryOp::LeakyRelu {
+                negative_slope: 0.1,
+            },
+            Domain::Signed,
+            seed + 16,
+            shape,
+            true,
+        );
+        assert_unary_parity(
+            ScalarUnaryOp::Elu { alpha: 1.3 },
+            Domain::Signed,
+            seed + 17,
+            shape,
+            false,
+        );
     }
 
     let cpu = CpuBackendOps::new();
@@ -689,6 +740,82 @@ fn scalar_op_matches_cpu_across_shapes() {
         clamp_zero_result.as_slice().expect("contiguous")[3].to_bits(),
         (-0.0f32).to_bits(),
         "Clamp{{0.0,1.0}} must preserve -0.0 sign bit"
+    );
+
+    // Silu／Hardswish／LeakyRelu／Elu（イシュー #1714）: 特殊値
+    // （0／-0／inf／-inf／NaN）の伝播確認。`LeakyRelu`／`Hardswish` は
+    // bit 同一（NaN はクラス一致）、`Silu`／`Elu` は超越関数を含むため
+    // 有限入力のみ `assert_parity` で確認する（Pow と同じ扱い）。
+    let a = Tensor::new(
+        vec![0.0, -0.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN],
+        &[5],
+    )
+    .expect("valid tensor");
+    for op in [
+        ScalarUnaryOp::Hardswish,
+        ScalarUnaryOp::LeakyRelu {
+            negative_slope: 0.1,
+        },
+    ] {
+        let cpu_result = cpu.scalar_unary(op, &a).expect("cpu succeeds");
+        let cuda_result = cuda.scalar_unary(op, &a).expect("cuda succeeds");
+        let cpu_slice = cpu_result.as_slice().expect("contiguous");
+        let cuda_slice = cuda_result.as_slice().expect("contiguous");
+        for (i, (&c, &g)) in cpu_slice.iter().zip(cuda_slice.iter()).enumerate() {
+            if c.is_nan() {
+                assert!(g.is_nan(), "{op:?} NaN propagation mismatch at index {i}");
+            } else {
+                assert_eq!(
+                    c.to_bits(),
+                    g.to_bits(),
+                    "{op:?} cpu/cuda bit mismatch at index {i}"
+                );
+            }
+        }
+    }
+    for op in [ScalarUnaryOp::Silu, ScalarUnaryOp::Elu { alpha: 1.0 }] {
+        let cpu_result = cpu.scalar_unary(op, &a).expect("cpu succeeds");
+        let cuda_result = cuda.scalar_unary(op, &a).expect("cuda succeeds");
+        let cpu_slice = cpu_result.as_slice().expect("contiguous");
+        let cuda_slice = cuda_result.as_slice().expect("contiguous");
+        let finite_cpu: Vec<f32> = cpu_slice
+            .iter()
+            .zip(cuda_slice.iter())
+            .filter(|(c, _)| c.is_finite())
+            .map(|(&c, _)| c)
+            .collect();
+        let finite_cuda: Vec<f32> = cpu_slice
+            .iter()
+            .zip(cuda_slice.iter())
+            .filter(|(c, _)| c.is_finite())
+            .map(|(_, &g)| g)
+            .collect();
+        fandhe_ai_backend_cpu::parity::assert_parity(
+            &format!("scalar_unary({op:?}) edge case finite elements"),
+            &finite_cuda,
+            &finite_cpu,
+        );
+        for (i, (&c, &g)) in cpu_slice.iter().zip(cuda_slice.iter()).enumerate() {
+            if c.is_nan() {
+                assert!(g.is_nan(), "{op:?} NaN propagation mismatch at index {i}");
+            } else if c.is_infinite() {
+                assert_eq!(
+                    c.is_sign_positive(),
+                    g.is_sign_positive(),
+                    "{op:?} infinite sign mismatch at index {i}"
+                );
+                assert!(g.is_infinite(), "{op:?} must stay infinite at index {i}");
+            }
+        }
+    }
+    // `Elu(-inf) == -alpha`（`expm1f(-inf) == -1.0`）を確認する。
+    let elu_neg_inf = cuda
+        .scalar_unary(ScalarUnaryOp::Elu { alpha: 1.0 }, &a)
+        .expect("cuda succeeds");
+    assert_eq!(
+        elu_neg_inf.as_slice().expect("contiguous")[3],
+        -1.0,
+        "Elu(-inf) with alpha=1.0 must be -1.0"
     );
 
     // numel == 0（空 shape）の早期 return。`Log` でも確認する（#1701）。

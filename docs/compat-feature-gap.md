@@ -987,3 +987,27 @@ CPU／CUDA／Metal 3 バックエンドの `BackendOps::scalar_unary`／
   へ申し送る。
 - `sub`／`div`／`pow`／`sqrt`（#1710）・`clamp`／比較演算（#1712）は本
   issue の対象外のまま。
+
+**#1714 追補（SiLU・LeakyReLU・ELU・Hardswish）**: 本調査時点で §2.4／
+§2.7 が欠落と判定した ReLU 系派生活性化のうち、SiLU／LeakyReLU／ELU／
+Hardswish を実装済み化した（GELU／Softplus は #1713 が別途対応）。
+`Var::silu`／`leaky_relu`／`elu`／`hardswish`（`ScalarUnaryOp::Silu`／
+`LeakyRelu`／`Elu`／`Hardswish` への薄い委譲。`#1592`／`#1634` が敷いた
+`ScalarUnaryOp` 汎用 dispatch 基盤の上）・`nn::activation::{Silu,
+Hardswish, LeakyRelu, Elu}`（`Module` 実装込み）・
+`compat::Sequential::add_silu`／`add_hardswish`／`add_leaky_relu`／
+`add_elu`を追加した。CUDA（`kernels_scalar_op.rs`）・Metal
+（`scalar_op_source.rs`）の専用カーネルも実装済み（`LeakyRelu`／
+`Hardswish` は選択・算術のみで bit 同一想定、`Silu`／`Elu` は超越関数
+〈`exp`〉を含むため REQ-2 統一複合判定のみ）。`LeakyRelu`／`Elu` は本
+実装で初めて 1 引数ペイロード（CUDA／Metal 双方に
+`UnaryPayload::One`）を持つ unary kind として追加した。Metal の `Elu`
+は MSL に `expm1` 相当が存在しないため `exp(x) - 1.0f` で代替し、ホスト
+`f32::exp_m1`（桁落ち回避）と異なる数値経路になる（誤差は REQ-2 複合
+判定の絶対誤差救済項の範囲内。`scalar_op_source.rs` モジュール doc
+「`Elu` の `expm1` 非対応」参照）。facade `compat::Sequential::add_*` 4
+件の新規公開面は親 #1595 コメント（2026-09-12 ユーザー承認）に基づく
+`docs/compat-api-scope.md` §5 経路 2 の適用。CUDA（DGX Spark GB10）・
+Metal（Apple Silicon）実機での parity テストは、本実装エージェントの
+実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ
+申し送る。

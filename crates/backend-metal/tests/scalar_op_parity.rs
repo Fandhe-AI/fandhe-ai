@@ -289,7 +289,10 @@ fn scalar_op_matches_cpu_across_shapes() {
     ];
     let mut seed = 11_000u64;
     for &shape in shapes {
-        seed += 20;
+        // イシュー #1714 で offset 14〜17 を追加したため、増分を
+        // CUDA 側と同じ理由（次イテレーションの base seed が前
+        // イテレーションの追加 offset と衝突しないように）で拡張する。
+        seed += 24;
         assert_unary_parity(ScalarUnaryOp::Sqrt, Domain::Positive, seed, shape, true);
         assert_binary_parity(ScalarBinaryOp::Sub, seed, seed + 1, shape, true);
         assert_binary_parity(ScalarBinaryOp::Div, seed, seed + 1, shape, true);
@@ -328,6 +331,32 @@ fn scalar_op_matches_cpu_across_shapes() {
             assert_comparison_parity(op, seed + 12, shape);
         }
         assert_clamp_parity(0.5, 1.5, seed + 13, shape);
+
+        // Silu／Hardswish／LeakyRelu／Elu（イシュー #1714）。
+        assert_unary_parity(ScalarUnaryOp::Silu, Domain::Signed, seed + 14, shape, false);
+        assert_unary_parity(
+            ScalarUnaryOp::Hardswish,
+            Domain::Signed,
+            seed + 15,
+            shape,
+            true,
+        );
+        assert_unary_parity(
+            ScalarUnaryOp::LeakyRelu {
+                negative_slope: 0.1,
+            },
+            Domain::Signed,
+            seed + 16,
+            shape,
+            true,
+        );
+        assert_unary_parity(
+            ScalarUnaryOp::Elu { alpha: 1.3 },
+            Domain::Signed,
+            seed + 17,
+            shape,
+            false,
+        );
     }
 }
 
@@ -701,6 +730,94 @@ fn comparison_and_clamp_edge_cases() {
         clamp_zero_result.as_slice().expect("contiguous")[3].to_bits(),
         (-0.0f32).to_bits(),
         "Clamp{{0.0,1.0}} must preserve -0.0 sign bit"
+    );
+}
+
+/// Silu／Hardswish／LeakyRelu／Elu（イシュー #1714）の特殊値
+/// （0／-0／inf／-inf／NaN）伝播確認。`LeakyRelu`／`Hardswish` は選択・
+/// 算術のみで bit 同一（NaN はクラス一致）、`Silu`／`Elu` は超越関数を
+/// 含むため有限入力のみ `assert_parity` で確認する（CUDA 側
+/// `backend-cuda/tests/scalar_op_parity.rs` の同型セクションと方針を
+/// 揃える）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn silu_hardswish_leaky_relu_elu_edge_cases() {
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+
+    let a = Tensor::new(
+        vec![0.0, -0.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN],
+        &[5],
+    )
+    .expect("valid tensor");
+
+    for op in [
+        ScalarUnaryOp::Hardswish,
+        ScalarUnaryOp::LeakyRelu {
+            negative_slope: 0.1,
+        },
+    ] {
+        let cpu_result = cpu.scalar_unary(op, &a).expect("cpu succeeds");
+        let metal_result = metal.scalar_unary(op, &a).expect("metal succeeds");
+        let cpu_slice = cpu_result.as_slice().expect("contiguous");
+        let metal_slice = metal_result.as_slice().expect("contiguous");
+        for (i, (&c, &g)) in cpu_slice.iter().zip(metal_slice.iter()).enumerate() {
+            if c.is_nan() {
+                assert!(g.is_nan(), "{op:?} NaN propagation mismatch at index {i}");
+            } else {
+                assert_eq!(
+                    c.to_bits(),
+                    g.to_bits(),
+                    "{op:?} cpu/metal bit mismatch at index {i}"
+                );
+            }
+        }
+    }
+
+    for op in [ScalarUnaryOp::Silu, ScalarUnaryOp::Elu { alpha: 1.0 }] {
+        let cpu_result = cpu.scalar_unary(op, &a).expect("cpu succeeds");
+        let metal_result = metal.scalar_unary(op, &a).expect("metal succeeds");
+        let cpu_slice = cpu_result.as_slice().expect("contiguous");
+        let metal_slice = metal_result.as_slice().expect("contiguous");
+        let finite_cpu: Vec<f32> = cpu_slice
+            .iter()
+            .zip(metal_slice.iter())
+            .filter(|(c, _)| c.is_finite())
+            .map(|(&c, _)| c)
+            .collect();
+        let finite_metal: Vec<f32> = cpu_slice
+            .iter()
+            .zip(metal_slice.iter())
+            .filter(|(c, _)| c.is_finite())
+            .map(|(_, &g)| g)
+            .collect();
+        fandhe_ai_backend_cpu::parity::assert_parity(
+            &format!("scalar_unary({op:?}) edge case finite elements"),
+            &finite_metal,
+            &finite_cpu,
+        );
+        for (i, (&c, &g)) in cpu_slice.iter().zip(metal_slice.iter()).enumerate() {
+            if c.is_nan() {
+                assert!(g.is_nan(), "{op:?} NaN propagation mismatch at index {i}");
+            } else if c.is_infinite() {
+                assert_eq!(
+                    c.is_sign_positive(),
+                    g.is_sign_positive(),
+                    "{op:?} infinite sign mismatch at index {i}"
+                );
+                assert!(g.is_infinite(), "{op:?} must stay infinite at index {i}");
+            }
+        }
+    }
+
+    // `Elu(-inf) == -alpha`（`exp(-inf) - 1.0 == -1.0`）を確認する。
+    let elu_neg_inf = metal
+        .scalar_unary(ScalarUnaryOp::Elu { alpha: 1.0 }, &a)
+        .expect("metal succeeds");
+    assert_eq!(
+        elu_neg_inf.as_slice().expect("contiguous")[3],
+        -1.0,
+        "Elu(-inf) with alpha=1.0 must be -1.0"
     );
 }
 

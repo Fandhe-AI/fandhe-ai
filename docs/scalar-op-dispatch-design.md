@@ -28,7 +28,7 @@ dispatch メソッド（既定 `Unsupported`）へ集約する」機構を `tens
 | (b) CUDA | enum から式テンプレートを生成する CUDA カーネル | #1635 |
 | (c) Metal | 同・Metal カーネル | #1636 |
 | `Var` 公開メソッド | `sub`／`div`／`pow`／比較等の facade 到達経路 | #1593 |
-| 活性化 | GELU／SiLU／…の facade 到達経路 | #1595 |
+| 活性化 | GELU／SiLU／…の facade 到達経路 | #1595（`Silu`／`Hardswish`／`LeakyRelu`／`Elu` は #1714 で実装済み。GELU／Softplus は #1713） |
 
 ## 3. enum variant 表
 
@@ -162,19 +162,28 @@ code-comment-style.md` が禁じる「同一クレート内の陳腐化しやす
 ## 10. 未実装・スコープ外
 
 - CUDA／Metal の `ScalarOp` カーネル（#1635／#1636）。CUDA は #1700〜
-  #1702（算術・超越関数・比較演算＋`Clamp`）で実装済み。Metal は #1707
-  （算術系 `Sub`／`Div`／`Pow`／`Sqrt`）＋#1708（超越関数系 `Neg`／
-  `Abs`／`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`）＋#1709（比較演算
-  6 種〈`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`〉＋`Clamp`。ペイロードあり
-  unary kind 向け起動引数配線〈`crates/backend-metal/src/
-  scalar_op_source.rs::UnaryPayload`〉を新設）で実装済み。両バックエンド
-  とも残 kind（`Add`／`Mul`／`Maximum`／`Minimum`・活性化系・
-  `LeakyRelu`／`Elu`／`Softplus`／`PowScalar`）はいずれの sub issue にも
-  含まれず対象外（`.claude/rules/out-of-scope-tracking.md` 対象）。
+  #1702（算術・超越関数・比較演算＋`Clamp`）＋#1714（`Silu`／
+  `Hardswish`／`LeakyRelu`／`Elu`。`LeakyRelu`／`Elu` は本実装で初めて
+  1 引数ペイロード〈`UnaryPayload::One`〉を持つ unary kind）で実装済み。
+  Metal は #1707（算術系 `Sub`／`Div`／`Pow`／`Sqrt`）＋#1708（超越関数系
+  `Neg`／`Abs`／`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`）＋#1709
+  （比較演算 6 種〈`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`〉＋`Clamp`。
+  ペイロードあり unary kind 向け起動引数配線〈`crates/backend-metal/src/
+  scalar_op_source.rs::UnaryPayload`〉を新設）＋#1714（`Silu`／
+  `Hardswish`／`LeakyRelu`／`Elu`。`Elu` は MSL に `expm1` 相当が存在
+  しないため `exp(x) - 1.0f` で代替——`scalar_op_source.rs` モジュール
+  doc「`Elu` の `expm1` 非対応」参照）で実装済み。両バックエンドとも
+  残 kind（`Add`／`Mul`／`Maximum`／`Minimum`・`Relu`／`Exp`／`Tanh`／
+  `Sigmoid`／`Gelu`／`GeluTanh`〈残る活性化系〉・`Softplus`／
+  `PowScalar`）はいずれの sub issue にも含まれず対象外
+  （`.claude/rules/out-of-scope-tracking.md` 対象）。
 - `Var` 公開メソッド（`sub`／`div`／`pow`／`sqrt` は #1710、`log`／
   `log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg` は #1711 で実装済み。
   `pub(crate)` 入口自体は不変・facade 新規公開面なし）・facade 範囲拡張
-  （#1593／#1595）。`clamp`／比較演算は #1712、活性化等は #1595 が対象。
+  （#1593／#1595）。`clamp`／比較演算は #1712、`silu`／`hardswish`／
+  `leaky_relu`／`elu` は #1714 で実装済み（`Var` 公開メソッド・
+  `nn::activation` 4 構造体・`compat::Sequential::add_*` 4 件。GELU／
+  Softplus は #1713）。
 - `DeviceBuffer` 常駐版 `ScalarOp` dispatch（`binary_elementwise_device`
   ／`unary_elementwise_device` と同型の常駐版）。
 - checkpoint 再計算適格化（`is_checkpoint_eligible == true`）。
