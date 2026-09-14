@@ -24,7 +24,7 @@
 
 use crate::broadcast::broadcast_shape;
 use crate::error::ShapeError;
-use crate::tensor::checked_numel;
+use crate::tensor::{checked_numel, checked_numel_for};
 
 /// matmul の 2 次元厳密版（`docs/public-api-design.md` §3.2）の出力 shape
 /// を検査・計算する。
@@ -502,9 +502,20 @@ pub fn scatter_out_shape(
 ///   （`shape` が空・`pads` も空）は恒等（空 `Vec` を返す）。
 /// - 各軸で `shape[axis] + before + after` を `checked_add` で 2 回
 ///   検査し、オーバーフローする場合 `ShapeError::ElementCountOverflow`。
-/// - 最後に `checked_numel`（`crate::tensor`。`Tensor::new` 等が使う
-///   単一情報源と同じ検査）で出力要素数積の `usize` オーバーフローを
-///   検査する（`concat_out_shape` と同型）。
+/// - 最後に `checked_numel_for::<f32>`（`crate::tensor`。`randn`/`rand`
+///   等が使う単一情報源と同じ検査）で出力要素数積の `usize`
+///   オーバーフローに加え、`f32` で確保した場合のバイトサイズが
+///   `Vec` の allocation 上限（`isize::MAX` バイト）に収まるかも
+///   検査する。全バックエンド（CPU／CUDA／Metal／`autodiff::eval`）は
+///   `Tensor<f32>` を確保するため出力バッファは常に `f32` 単位であり、
+///   `checked_numel` 単体（`usize` 要素数積のみの検査）では
+///   `shape=[1]`・`pads=[(0, usize::MAX-1)]` のように要素数自体は
+///   オーバーフローしない shape を通過させてしまい、後続の
+///   `Vec::with_capacity(numel)` が `numel * size_of::<f32>() >
+///   isize::MAX` で capacity overflow パニックする（本番経路 panic
+///   禁止規約 `.claude/rules/coding-rust.md` に反する DoS 経路。
+///   `checked_numel_for` の doc と同じ理由。イシュー #1756・
+///   PR #1831 codex-review P1 是正）。
 ///
 /// `pads` の各要素は先頭次元から順に対応する（PyTorch `F.pad` の
 /// 「末尾次元から逆順の平坦リスト」とは異なる意図的な設計。
@@ -527,7 +538,7 @@ pub fn pad_out_shape(shape: &[usize], pads: &[(usize, usize)]) -> Result<Vec<usi
             .ok_or(ShapeError::ElementCountOverflow)?;
         out.push(total);
     }
-    checked_numel(&out)?;
+    checked_numel_for::<f32>(&out)?;
     Ok(out)
 }
 
@@ -1392,6 +1403,20 @@ mod tests {
     fn pad_out_shape_rank_zero_identity() {
         let out = pad_out_shape(&[], &[]).unwrap();
         assert_eq!(out, Vec::<usize>::new());
+    }
+
+    #[test]
+    fn pad_out_shape_rejects_byte_size_overflow_without_numel_overflow() {
+        // `shape=[1]`・`pads=[(0, usize::MAX-1)]` は `usize` の要素数積
+        // （`checked_numel`）としてはオーバーフローしない
+        // （`1 + (usize::MAX-1) = usize::MAX`）が、`f32`（4 バイト）で
+        // 確保すると `numel * 4` が `isize::MAX` バイトを大幅に超える。
+        // `checked_numel_for::<f32>` によるバイトサイズ検査がなければ
+        // ここを通過し、後続の `Vec::with_capacity` が capacity
+        // overflow で panic する（PR #1831 codex-review P1 是正の
+        // 回帰テスト）。
+        let err = pad_out_shape(&[1], &[(0, usize::MAX - 1)]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 
     #[test]

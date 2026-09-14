@@ -114,6 +114,19 @@ impl MetalConstantPad {
         }
 
         let rank = out_shape.len();
+        if rank == 0 {
+            // rank 0（スカラー）は `pads` も空のため恒等コピー
+            // （`eval::pad`／CPU `constant_pad::pad` の同型早期分岐と
+            // 対称）。`shapes` 配列がここで空（`rank * 4 == 0`）になり
+            // `MetalIndexBuffer::new_with_u32` が空スライスに対して
+            // `MetalError::ZeroLengthAllocation` を返してしまう
+            // （バッファ確保前に検査済みの `numel == 1` を使い切り
+            // カーネル起動自体を回避する。PR #1831 codex-review P2
+            // 是正）。`validate_pad_launch` が `input.len() ==
+            // checked_numel(in_shape) == 1` を既に保証しているため
+            // `input.to_vec()` は必ず 1 要素の `Vec` になる。
+            return Ok(input.to_vec());
+        }
         let in_strides = row_major_strides_u32(in_shape);
 
         let mut shapes: Vec<u32> = Vec::with_capacity(rank * 4);

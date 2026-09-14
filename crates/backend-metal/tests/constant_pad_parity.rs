@@ -138,6 +138,27 @@ fn pad_empty_input_matches_cpu() {
     );
 }
 
+/// rank 0（スカラー）の pad が恒等コピーとして CPU と一致する
+/// （`pads` は空・`shapes` バッファも空になるため、確保前の早期
+/// リターンでカーネル起動自体を回避しないと `MetalIndexBuffer::
+/// new_with_u32` が `MetalError::ZeroLengthAllocation` を返し
+/// `KernelLaunchFailed` になっていた。PR #1831 codex-review P2 是正）。
+#[test]
+#[ignore = "Apple Silicon 実機必須"]
+fn pad_rank_zero_matches_cpu() {
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+    let scalar = Tensor::new(vec![7.5f32], &[]).expect("valid rank-0 tensor");
+    let cpu_out = cpu.pad(&scalar, &[], 0.0).expect("cpu pad rank-0");
+    let metal_out = metal.pad(&scalar, &[], 0.0).expect("metal pad rank-0");
+    assert_eq!(metal_out.shape(), cpu_out.shape());
+    assert_eq!(
+        metal_out.as_slice().expect("contiguous"),
+        cpu_out.as_slice().expect("contiguous"),
+    );
+    assert_eq!(cpu_out.as_slice().expect("contiguous"), &[7.5f32]);
+}
+
 /// `Var::pad` の backward（narrow view 連鎖）が CPU テープと bit 一致
 /// することを確認する。
 #[test]
