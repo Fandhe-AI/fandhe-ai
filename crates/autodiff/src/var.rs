@@ -2536,6 +2536,107 @@ impl<'t> Var<'t> {
         self.gather(dim, &index_bc)
     }
 
+    /// embedding テーブル（`self`。`[num_embeddings, embedding_dim]`）
+    /// から `index` が指す行を抽出する（`nn::Embedding` の forward
+    /// 本体。`torch.nn.functional.embedding` 相当。イシュー #1604）。
+    /// `index` は非追跡データ（[`Self::gather`] の `index` と同じ
+    /// 「`Op` payload に直接埋め込む」設計。勾配は `index` 側には
+    /// 流れない）で、任意 rank（0 次元＝単一 id も含む）を受理する。
+    /// `padding_idx`（`Some(p)`）を渡すと forward は行 `p` の現在値を
+    /// そのまま返すが、勾配は本メソッドの `Op::Embedding` VJP（
+    /// `grad.rs`）が行 `p` をゼロ上書きするため流れない（PyTorch
+    /// `nn.Embedding(padding_idx=..)` の意味論）。
+    ///
+    /// 検査順序: ①`self.shape().len() == 2`（違反は
+    /// `AutodiffError::Shape(ShapeError::RankMismatch)`）→
+    /// ②`padding_idx < num_embeddings`（違反は
+    /// `AutodiffError::InvalidArgument`）→ ③`index` 全添字が
+    /// `0 <= id < num_embeddings`（違反は `AutodiffError::
+    /// InvalidArgument`。[`Self::gather`] と同じ「バックエンド呼び出し
+    /// 前に検査する」契約。`.claude/rules/security.md` A03）→ ④`index`
+    /// を `[N, D]`（`N = index.numel()`）へ実体化（`contiguous()` →
+    /// `reshape([N, 1])` → `broadcast_to([N, D])` → `contiguous()`。
+    /// いずれも [`Self::index_select`] と同じ zero-copy な view 拡張
+    /// 手順の最終段のみ実体化する）→ ⑤`self`（weight）を層 1
+    /// （[`materialize_fallible`]）で実体化 → ⑥[`gather_with_fallback`]
+    /// → ⑦戻り shape 検証 → ⑧`push_eager` →
+    /// ⑨`index.rank() != 1` のときのみ、ノード shape（常に `[N, D]`）を
+    /// `index.shape() ++ [D]` へ [`Self::reshape`] する（1-D ids は
+    /// `[N] ++ [D] == [N, D]` で既に一致するため省略。rank-0 ids は
+    /// `N == 1` から `[1, D]` を `[D]` へ縮める）。
+    pub fn embedding(
+        &self,
+        index: &Tensor<i32>,
+        padding_idx: Option<usize>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let weight_shape = self.shape();
+        if weight_shape.len() != 2 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 2,
+                actual: weight_shape.len(),
+            }));
+        }
+        let num_embeddings = weight_shape[0];
+        let embedding_dim = weight_shape[1];
+
+        if let Some(p) = padding_idx
+            && p >= num_embeddings
+        {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::embedding: padding_idx {p} が範囲 [0, {num_embeddings}) を外れている"
+            )));
+        }
+
+        for v in eval::dense_vec_i32(index) {
+            if v < 0 || (v as usize) >= num_embeddings {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Var::embedding: index 添字 {v} が範囲 [0, {num_embeddings}) を外れている"
+                )));
+            }
+        }
+
+        let ids_rank = index.rank();
+        let n = index.numel();
+        let index_c = index.contiguous();
+        let index_2d = index_c.reshape(&[n, 1]).map_err(AutodiffError::Shape)?;
+        let index_nd = index_2d
+            .broadcast_to(&[n, embedding_dim])
+            .map_err(AutodiffError::Shape)?
+            .contiguous();
+
+        let weight_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let out_shape = vec![n, embedding_dim];
+        let value = gather_with_fallback(self.tape.ops(), &weight_val, 0, &index_nd, &out_shape)?;
+        if value.shape() != out_shape.as_slice() {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Embedding {
+                weight: self.id,
+                index: index_nd,
+                padding_idx,
+            },
+            value,
+        );
+        let out = Var::from_raw(self.tape, id);
+        if ids_rank == 1 {
+            Ok(out)
+        } else {
+            let mut final_shape = index.shape().to_vec();
+            final_shape.push(embedding_dim);
+            out.reshape(&final_shape)
+        }
+    }
+
     /// 一意値集合を返す（`torch.unique(input, sorted=True)` の values
     /// のみ。イシュー #1734・契約は
     /// [`fandhe_ai_tensor_core::BackendOps::unique`] doc を正とする）。

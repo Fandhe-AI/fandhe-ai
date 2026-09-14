@@ -680,6 +680,36 @@ pub(crate) enum Op {
         src: NodeId,
         reduce: ScatterReduce,
     },
+    /// `Var::embedding`（`nn::Embedding` の forward 本体。`torch.nn.
+    /// Embedding` 相当。イシュー #1604）。`weight`（`[V, D]`）から
+    /// `index`（`[N, D]` へ broadcast・contiguous 済みの非追跡
+    /// `Tensor<i32>`。`Var::embedding` が `ids.contiguous()` →
+    /// `reshape([N, 1])` → `broadcast_to([N, D])` → `contiguous()` で
+    /// 1 回だけ構築し、forward の gather と backward の scatter_add で
+    /// 共用する——`Op::Gather` の `index` と同じ「`Op` payload に直接
+    /// 埋め込む」設計）で行を抽出する。`padding_idx` は forward では
+    /// 使わない（当該行の現在値をそのまま返す。PyTorch 準拠）が、
+    /// VJP が当該行の勾配をゼロ上書きするために保持する。`BackendOps::
+    /// gather` に対応メソッドがあるため非融合対象（`push_eager` で
+    /// 常に実体化。`Op::Gather` と同型）・checkpoint 非適格
+    /// （`is_checkpoint_eligible` 参照）。
+    ///
+    /// ノード shape は常に `[N, D]`（`N = index.numel()`。1-D ids 以外
+    /// は `Var::embedding` が呼び出し側の `ids.shape() ++ [D]` へ
+    /// 別途 `Var::reshape` する——`Op::Reshape` が別ノードとして記録
+    /// されるため、本 `Op` 自身は `[N, D]` の外を扱わない）。
+    ///
+    /// VJP（`grad.rs`）: `d_weight = scatter_add(zeros_like(weight), 0,
+    /// index, upstream)`（`Op::Gather` の VJP と同じ「Gather の VJP は
+    /// scatter_add」の原則・`ScatterReduce::Add` の決定的集約契約）の
+    /// のち、`padding_idx` が `Some(p)` の場合のみ行 `p` をゼロで
+    /// 上書きする（forward が当該行の現在値を使う一方、勾配は流さない
+    /// という PyTorch `nn.Embedding(padding_idx=..)` の意味論）。
+    Embedding {
+        weight: NodeId,
+        index: Tensor<i32>,
+        padding_idx: Option<usize>,
+    },
     /// `dim` 軸に沿った累積和（`Var::cumsum`。`torch.cumsum` 相当。
     /// イシュー #1731）。`BackendOps::cumsum` に対応メソッドがあり
     /// （`Softmax`／`Gather` と同様）非融合対象——`Op::
@@ -1083,6 +1113,12 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （非網羅 match 是正で新規 variant 追加時に強制される）。
             Op::Gather { .. } | Op::Scatter { .. } => false,
+            // `Op::Embedding`（イシュー #1604）は `Op::Gather` と同じく
+            // `index`（`padding_idx` も）を `Op` 自身が保持する eager
+            // 実体化演算で、`recompute_value` に再計算経路を持たない
+            // ため解放しない（非網羅 match 是正で新規 variant 追加時に
+            // 強制される）。
+            Op::Embedding { .. } => false,
             // `Op::Var`／`Op::VectorNorm`（イシュー #1723）・
             // `Op::Std`（同イシュー・レビュー是正で追加）は
             // `Op::ScalarUnary`／`Op::ScalarBinary` と同じく eager
@@ -1169,6 +1205,7 @@ impl Op {
                 f(*input);
                 f(*src);
             }
+            Op::Embedding { weight, .. } => f(*weight),
             Op::Sort { input, .. } | Op::Topk { input, .. } => f(*input),
             Op::OneHot { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
