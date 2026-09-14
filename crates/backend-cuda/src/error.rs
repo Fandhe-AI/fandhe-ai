@@ -417,6 +417,16 @@ pub enum CudaError {
     /// 内で `BackendError` variant ごとの再試行可否を区別する呼び出し元が
     /// 現状存在しないため、型を素通しせず detail 文字列へ畳み込む）。
     CaptureExclusionRejected { detail: String },
+
+    /// pad 起動 API（`constant_pad.rs::CudaConstantPad`）のホスト側検証
+    /// （`checked_numel` の要素数積オーバーフロー・`i32::MAX` 上限・
+    /// `input` の長さが `in_shape` から導出した期待長と一致しないこと）
+    /// が拒否した入力（イシュー #1756）。`InvalidGatherScatterShape` と
+    /// 同じ理由で独立 variant に分離する。`input.shape()`／`pads` の
+    /// rank 整合（`pad_out_shape`）は呼び出し元 `ops.rs` が事前検査済み
+    /// の契約のため、本 variant は主に長さ・オーバーフローに関する
+    /// 起動前検証の失敗を表す。
+    InvalidConstantPadShape { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -527,6 +537,9 @@ impl fmt::Display for CudaError {
                     f,
                     "cuda graph capture exclusion rejected the call: {detail}"
                 )
+            }
+            CudaError::InvalidConstantPadShape { detail } => {
+                write!(f, "invalid pad shape: {detail}")
             }
         }
     }

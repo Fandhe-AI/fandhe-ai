@@ -293,6 +293,46 @@ pub fn scatter_out_shape(
     Ok(input_shape.to_vec())
 }
 
+/// `pad`（`Var::pad`。`torch.nn.functional.pad(mode='constant')` 相当。
+/// イシュー #1756）の出力 shape を検査・計算する。各軸を
+/// `(before, after)` だけ定数値で拡張する（負パディング・
+/// `reflect`／`replicate` モードは対象外。`docs/compat-feature-gap.md`
+/// 追補参照）。
+///
+/// - `pads.len() != shape` の rank の場合 `ShapeError::RankMismatch`
+///   （`expected`=`shape` の rank・`actual`=`pads.len()`）。rank 0
+///   （`shape` が空・`pads` も空）は恒等（空 `Vec` を返す）。
+/// - 各軸で `shape[axis] + before + after` を `checked_add` で 2 回
+///   検査し、オーバーフローする場合 `ShapeError::ElementCountOverflow`。
+/// - 最後に `checked_numel`（`crate::tensor`。`Tensor::new` 等が使う
+///   単一情報源と同じ検査）で出力要素数積の `usize` オーバーフローを
+///   検査する（`concat_out_shape` と同型）。
+///
+/// `pads` の各要素は先頭次元から順に対応する（PyTorch `F.pad` の
+/// 「末尾次元から逆順の平坦リスト」とは異なる意図的な設計。
+/// `docs/compat-feature-gap.md` 追補参照）。
+pub fn pad_out_shape(shape: &[usize], pads: &[(usize, usize)]) -> Result<Vec<usize>, ShapeError> {
+    let rank = shape.len();
+    if pads.len() != rank {
+        return Err(ShapeError::RankMismatch {
+            expected: rank,
+            actual: pads.len(),
+        });
+    }
+    let mut out = Vec::with_capacity(rank);
+    for (&s, &(before, after)) in shape.iter().zip(pads.iter()) {
+        let with_before = s
+            .checked_add(before)
+            .ok_or(ShapeError::ElementCountOverflow)?;
+        let total = with_before
+            .checked_add(after)
+            .ok_or(ShapeError::ElementCountOverflow)?;
+        out.push(total);
+    }
+    checked_numel(&out)?;
+    Ok(out)
+}
+
 /// `sort`（`Var::sort`／`argsort`。`torch.sort` 相当。イシュー #1733）の
 /// 出力 shape を検査する。sort は `dim` 軸のみを並べ替える純粋な
 /// 並べ替えであり、出力 shape は `shape` と恒等（`gather` と異なり
@@ -945,6 +985,58 @@ mod tests {
         // dim 以外の軸で index が input より小さいのは許容（PyTorch の
         // `index.size(d) <= input.size(d)` 契約と整合）。
         let out = scatter_out_shape(&[3, 4], &[2, 2], &[2, 2], 1).unwrap();
+        assert_eq!(out, vec![3, 4]);
+    }
+
+    // --- pad_out_shape ---
+
+    #[test]
+    fn pad_out_shape_1d_basic() {
+        let out = pad_out_shape(&[3], &[(1, 2)]).unwrap();
+        assert_eq!(out, vec![6]);
+    }
+
+    #[test]
+    fn pad_out_shape_2d_both_axes() {
+        let out = pad_out_shape(&[3, 4], &[(1, 1), (2, 0)]).unwrap();
+        assert_eq!(out, vec![5, 6]);
+    }
+
+    #[test]
+    fn pad_out_shape_rank_mismatch() {
+        let err = pad_out_shape(&[3, 4], &[(1, 1)]).unwrap_err();
+        match err {
+            ShapeError::RankMismatch { expected, actual } => {
+                assert_eq!(expected, 2);
+                assert_eq!(actual, 1);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pad_out_shape_before_overflow() {
+        let err = pad_out_shape(&[usize::MAX], &[(1, 0)]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    #[test]
+    fn pad_out_shape_after_overflow() {
+        // before 側は加算できるが after 側の加算でオーバーフローする
+        // ケースを個別に検証する（2 回の checked_add の両方を通す）。
+        let err = pad_out_shape(&[usize::MAX - 1], &[(1, 1)]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    #[test]
+    fn pad_out_shape_rank_zero_identity() {
+        let out = pad_out_shape(&[], &[]).unwrap();
+        assert_eq!(out, Vec::<usize>::new());
+    }
+
+    #[test]
+    fn pad_out_shape_all_zero_pads_is_identity() {
+        let out = pad_out_shape(&[3, 4], &[(0, 0), (0, 0)]).unwrap();
         assert_eq!(out, vec![3, 4]);
     }
 

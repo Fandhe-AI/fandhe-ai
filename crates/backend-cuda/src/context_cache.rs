@@ -503,6 +503,21 @@ pub(crate) fn cached_gather_scatter(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::constant_pad::
+/// CudaConstantPad`] をプロセス内キャッシュから取得する（イシュー
+/// #1756。キーは [`ContextKey`]。`cached_gather_scatter` と同型）。
+/// `ops::CudaBackendOps::pad` の唯一の呼び出し先。
+pub(crate) fn cached_constant_pad(
+    device: &CudaDevice,
+) -> Result<Arc<crate::constant_pad::CudaConstantPad>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::constant_pad::CudaConstantPad>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::constant_pad::CudaConstantPad::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する `op`（[`ScalarUnaryOp`]）の
 /// テンプレート生成カーネルをプロセス内キャッシュから取得する
 /// （イシュー #1700。キーは [`ContextKey`]。`cached_gemm` 冒頭コメント

@@ -1160,6 +1160,42 @@ pub trait BackendOps {
         ))
     }
 
+    /// 各軸を `(before, after)` だけ定数値 `value` で拡張する
+    /// （`torch.nn.functional.pad(mode='constant')` 相当。イシュー
+    /// #1756）。出力の各要素は「`input` 内部位置ならそのままコピー・
+    /// パディング領域なら `value`」の 2 分岐のみで決まる純粋なコピー
+    /// 演算（算術を含まない）であり、`f64` アキュムレータ契約は非該当。
+    /// バックエンド間数値一致は REQ-2 複合判定ではなく **bit 完全
+    /// 一致**（`value` が NaN の場合のみクラス一致。`.claude/rules/
+    /// coding-rust.md` 数値契約節参照）。
+    ///
+    /// `pads` は先頭次元から順に対応する（PyTorch `F.pad` の「末尾次元
+    /// から逆順の平坦リスト」とは異なる意図的な設計。
+    /// `docs/compat-feature-gap.md` 追補参照）。出力 shape は
+    /// [`crate::ops_shape::pad_out_shape`] が定める。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::gather`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::pad` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::pad`）へフォールバックする（それ
+    /// 以外のエラーは伝播する。判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。実装側でも `input.shape()`
+    /// と `pads` を [`crate::ops_shape::pad_out_shape`] で再検査し、
+    /// 不一致は [`BackendError::ShapeMismatch`] を返すこと
+    /// （fail-closed）。
+    fn pad(
+        &self,
+        _input: &Tensor<f32>,
+        _pads: &[(usize, usize)],
+        _value: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "pad: default fail-safe (no fused pad kernel available)".into(),
+        ))
+    }
+
     /// `dim` 軸に沿って `index` が指す位置へ `src` の値を書き込む
     /// （`torch.scatter`／`torch.scatter_add` 相当。`reduce` で選択。
     /// イシュー #1776）。出力 shape は `input.shape()` と恒等
@@ -2681,6 +2717,18 @@ mod tests {
         let index = Tensor::<i32>::new(vec![0, 0, 1, 0], &[2, 2]).unwrap();
 
         let result = ops.gather(&input, 1, &index);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::pad`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1756）。
+    #[test]
+    fn pad_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+
+        let result = ops.pad(&input, &[(1, 0), (0, 1)], 0.0);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

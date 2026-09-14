@@ -248,7 +248,7 @@ Phase 3（親 #1573）の各 issue へ対応付ける。
 | **複数 GPU／DDP** | #1628（同上に従属。設計判断の記録〈docs のみ〉に留め、実装・通信層の依存追加は行わない。5 節参照） |
 | ONNX import 公開／export | #1629（#1652 で import 側の設計判断を記録・#1775 で export 側の設計判断を記録。案 B〈薄いラッパー型〉を方針として推奨するが、facade は crates.io 公開クレートのため公開には `onnx-interop` 自体の crates.io 公開という別個のユーザー承認が必要——2026-09-12 の facade 公開面拡張の承認範囲には含まれない。現状は import・export とも非公開のまま段階 0。`docs/facade-onnx-import-exposure-decision.md`・`docs/facade-onnx-export-exposure-decision.md`） |
 | topk／sort／cumsum | #1733 で sort／argsort／topk 実装済み（`Var::sort`／`argsort`／`topk`。CPU 参照実装〈`backend-cpu::sort_topk`〉・scatter ベース VJP〈`Op::Sort`／`Op::Topk`〉・facade 新規公開面なし〈既存 `Var` 再エクスポート経由〉。CUDA／Metal カーネルは #1741、cumsum／cumprod は #1731 が残対象。`docs/compat-feature-gap.md` §2.2 追補参照） |
-| `nn.functional` の残り（pad／interpolate／one_hot 等） | #1631 |
+| `nn.functional` の残り（pad／interpolate／one_hot 等） | #1756 で pad 実装済み（`Var::pad`・`BackendOps::pad`〈既定 `Unsupported`〉・narrow 基盤流用 VJP〈zero-copy view 連鎖〉・CPU／CUDA／Metal 専用カーネル実装済み〈算術を含まない純粋なコピー演算のため 3 バックエンド bit 完全一致契約〉・facade 新規公開面なし〈既存 `Var` 再エクスポート経由〉。CUDA／Metal 実機実測は未実施のまま申し送り。`docs/compat-feature-gap.md` 追補参照。interpolate／one_hot 等の残対象は #1631 |
 
 1.2／1.3 共通の注記: 各機能の追加は薄いラッパー原則（3 節）・完全自作
 コア（REQ-1）を維持し、バックエンド間数値一致は REQ-2 統一複合判定・

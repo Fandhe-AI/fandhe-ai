@@ -420,6 +420,11 @@ mod reduce;
 // 文字列の責務分離）。
 mod gather_scatter;
 mod kernels_gather_scatter;
+// イシュー #1756: pad（`torch.nn.functional.pad(mode='constant')`
+// 相当）起動 API・カーネルソース。`gather_scatter.rs`／
+// `kernels_gather_scatter.rs` と同じ 2 ファイル構成。
+mod constant_pad;
+mod kernels_constant_pad;
 // イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線
 // （`gemm.rs::CudaGemm::new`）を実機で検証する `#[ignore]` テスト。
 // `context_cache`（非公開 `mod`）へ到達する必要があるため

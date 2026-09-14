@@ -41,8 +41,8 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, gather_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape,
+    UnaryElementwiseOp, gather_out_shape, pad_out_shape, require_same_shape, row_norm_layout,
+    row_softmax_layout, scatter_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -2259,6 +2259,49 @@ impl BackendOps for MetalBackendOps {
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let out = gs
             .run_gather_f32(&ctx, input_slice, &in_shape, index_slice, &index_shape, dim)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::pad` の Metal 実装（イシュー #1756）。[`pad_out_shape`]
+    /// で `input.shape()`／`pads` を再検査し、[`validate_shapes_fit_u32`]
+    /// （shape 要素の `u32` 収容）でカーネル起動前の fail-closed 検査を
+    /// 行ってから `crate::constant_pad::MetalConstantPad::run_pad_f32`
+    /// へ委譲する（`gather` と同じ二重検査方針。`.claude/rules/
+    /// security.md` A08）。pad は `dim` 軸限定の gather／scatter と異なり
+    /// カーネル側が固定長スタック配列（`GS_MAX_RANK`）を使わない設計
+    /// （`shaders/constant_pad.metal` モジュール doc 参照）のため rank
+    /// 上限検査は不要。
+    fn pad(
+        &self,
+        input: &Tensor<f32>,
+        pads: &[(usize, usize)],
+        value: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = pad_out_shape(input.shape(), pads).map_err(BackendError::ShapeMismatch)?;
+        let in_shape = input.shape().to_vec();
+        validate_shapes_fit_u32(&[&in_shape, &out_shape]).map_err(BackendError::ShapeMismatch)?;
+
+        // `input` が空でも出力は非空になりうる（全要素 `value`）ため、
+        // その場合は `input` を実体化・GPU 転送せずに埋める
+        // （`constant_pad.rs::MetalConstantPad::run_pad_f32` 内の同型
+        // 早期リターンと対称。ここで先に判定することで `.contiguous()`
+        // 呼び出し自体を回避する）。
+        if in_shape.contains(&0) {
+            return Tensor::new(vec![value; out_shape.iter().product()], &out_shape)
+                .map_err(BackendError::ShapeMismatch);
+        }
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("pad: input not contiguous".into()))?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let cp = context_cache::cached_constant_pad(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = cp
+            .run_pad_f32(&ctx, input_slice, &in_shape, pads, &out_shape, value)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
