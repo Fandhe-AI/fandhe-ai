@@ -94,9 +94,13 @@
 //! #1714）も実装する。`LeakyRelu`／`Elu` は本モジュールで初めて 1
 //! 引数ペイロード（[`UnaryPayload::One`]）を持つ unary kind（`Clamp` の
 //! [`UnaryPayload::Two`] と同型の拡張）。`Elu` は MSL に `expm1`
-//! 相当が存在しないため `metal::precise::exp(x) - 1.0f` で近似し、
-//! ホストの `f32::exp_m1`（`0` 近傍の桁落ち回避）と異なる数値経路に
-//! なる（下記「`Elu` の `expm1` 非対応」節参照）。
+//! 相当が存在しないため、`exp`／`log` から桁落ちなく再構成する
+//! `fai_expm1_f32` ヘルパー関数（下記「`Elu` の `expm1` 非対応」節
+//! 参照）を [`unary_preamble`] で kernel 本体の前に挿入して使う
+//! （PR #1825 codex-review P1 是正: 単純な `exp(x) - 1.0f` は
+//! `x=-1e-8, alpha=1e8` のようなゼロ近傍・大 `alpha` の入力で
+//! `exp(x)` が `1.0` へ丸まり桁落ちし、CPU/CUDA の `expm1` 相当と
+//! REQ-2 統一複合判定を満たさなかった）。
 //!
 //! 残 kind（`Add`／`Mul`／`Maximum`／`Minimum`・活性化系〈`Relu`／
 //! `Exp`／`Tanh`／`Sigmoid`／`Gelu`／`GeluTanh`〉・`Softplus`／
@@ -108,20 +112,36 @@
 //! `scalar_binary_with_fallback` 参照）。
 //! `.claude/rules/out-of-scope-tracking.md` の追跡対象。
 //!
-//! # `Elu` の `expm1` 非対応（イシュー #1714）
+//! # `Elu` の `expm1` 非対応（イシュー #1714・PR #1825 codex-review P1 是正）
 //!
 //! ホスト参照実装（`scalar_op.rs::ScalarUnaryOp::apply` の `Elu` 分岐）
 //! は `f32::exp_m1`（`exp(x) - 1` を `x` が `0` に近くても桁落ちなく
 //! 計算する標準ライブラリ関数）を使うが、MSL には `expm1` 相当の
 //! 組み込み関数が存在しない（`.claude/skills/apple-silicon/references/
-//! msl/` に該当なしを確認済み）。本モジュールは `metal::precise::exp(x)
-//! - 1.0f` で代替するため、`|x|` が `0` に近い領域では `exp_m1` が
-//! 避ける桁落ちがそのまま残る。この誤差は `|alpha * x|` 程度に留まり
-//! REQ-2 統一複合判定（絶対誤差 1e-5 未満の救済項）の適用範囲内である
-//! （tolerance 自体の変更ではない。`.claude/rules/coding-rust.md`）。
-//! 実機〈Apple Silicon〉実測で不成立が判明した場合の是正候補は Kahan
-//! の再構成式（`let u = exp(x); u == 1.0 ? x : (u - 1.0) * x / log(u)`）
-//! だが、本イシュー時点では単純な `exp(x) - 1.0f` のまま実装する。
+//! msl/` に該当なしを確認済み）。当初は `metal::precise::exp(x) -
+//! 1.0f` で代替していたが、`|x|` が `0` に近く `alpha` が大きい入力
+//! （例: `x=-1e-8, alpha=1e8`）で `exp(x)` が `1.0f` へ丸まって
+//! `expm1(x)` が `0.0` になり（正しくは `x` 自身にほぼ等しい
+//! `-1e-8`）、`alpha` 倍された結果が CPU/CUDA の `expm1` 相当と
+//! REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5
+//! 未満）を満たさなかった（`tensor-core::scalar_op` の
+//! `elu_tiny_negative_x_with_large_alpha_avoids_exp_cancellation` が
+//! 同じ入力で CPU 側の桁落ちを既に回帰検査済み）。
+//!
+//! 本モジュールは Kahan/Goldberg の再構成式（`u = exp(x)` を計算した
+//! うえで `u == 1.0` なら `expm1(x) ≈ x` を返し、それ以外は
+//! `(u - 1) * x / log(u)` で桁落ちなく再構成する）を [`unary_preamble`]
+//! が返す `fai_expm1_f32` ヘルパー関数として `unary_kernel_source` の
+//! kernel 本体前へ挿入し、`Elu` の `expr`（[`unary_expr`]）から呼ぶ。
+//! `x` が十分小さく `exp(x)` が `f32` の最小非正規化数未満へ
+//! underflow して `u == 0.0` になる領域（`x` がおよそ `-104` 未満）は
+//! 上記の式だと `log(0) = -inf` で `(u-1)*x/log(u)` が `0`（正しくは
+//! `expm1(x) ≈ -1`）に潰れるため、`u == 0.0` を追加で分岐し `-1.0f`
+//! を直接返す。近似ではなく `exp`／`log` の 2 回呼び出しへ分解した
+//! 再構成のため、ホストの `f32::exp_m1`（正確な libm 実装）とは
+//! 一般に bit 同一にならず、超越関数系と同じく REQ-2 統一複合判定の
+//! みで検証する（tolerance 定数自体は不変。`.claude/rules/
+//! coding-rust.md`）。
 //!
 //! # cfg 方針
 //!
@@ -202,14 +222,40 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
             "(x >= 0.0f) ? (x * (1.0f / (1.0f + metal::precise::exp(-x)))) : (x * \
              (metal::precise::exp(x) / (1.0f + metal::precise::exp(x))))",
         ),
-        // `ScalarUnaryOp::apply` の `Elu` 分岐。MSL に `expm1` 相当が
-        // 存在しないため `metal::precise::exp(x) - 1.0f` で代替する
-        // （モジュール doc「`Elu` の `expm1` 非対応」参照。REQ-2 複合
-        // 判定のみで検証する）。
-        ScalarUnaryOp::Elu { .. } => {
-            Some("(x > 0.0f) ? x : (p0 * (metal::precise::exp(x) - 1.0f))")
-        }
+        // `ScalarUnaryOp::apply` の `Elu` 分岐。`fai_expm1_f32`
+        // （[`unary_preamble`] が kernel 本体の前へ挿入するヘルパー
+        // 関数。モジュール doc「`Elu` の `expm1` 非対応」参照）を使い
+        // ゼロ近傍の桁落ちを避ける。REQ-2 複合判定のみで検証する。
+        ScalarUnaryOp::Elu { .. } => Some("(x > 0.0f) ? x : (p0 * fai_expm1_f32(x))"),
         _ => None,
+    }
+}
+
+/// `op` の [`unary_expr`] が参照する device 側ヘルパー関数の宣言（kernel
+/// 本体より前に挿入する。既存 kind との後方互換のため既定は空文字列＝
+/// 挿入なし＝生成ソース不変）。`Elu` のみが `fai_expm1_f32`
+/// （モジュール doc「`Elu` の `expm1` 非対応」参照。PR #1825
+/// codex-review P1 是正）を必要とする。
+///
+/// `static inline` を使うのは `elementwise.metal` に既存のヘルパー
+/// 関数（`ew_*` の前段に置かれるものはないが、MSL の関数はデフォルトで
+/// 内部リンケージのため `static` は必須ではない。`shaders/` 系との
+/// 記法統一のため明示する）。
+fn unary_preamble(op: ScalarUnaryOp) -> &'static str {
+    match op {
+        // `expm1(x) = exp(x) - 1` を桁落ちなく計算する Kahan/Goldberg
+        // の再構成式。`u == 1.0f`（`x` が `0` に非常に近く `exp(x)` が
+        // `1.0` へ丸まる領域）では `expm1(x) ≈ x` を直接返す。
+        // `u == 0.0f`（`exp(x)` が最小非正規化数未満へ underflow する
+        // 領域。`x` がおよそ `-104` 未満）では `log(u) = -inf` になり
+        // 一般式が `0` に潰れてしまう（正しくは `expm1(x) ≈ -1`）ため
+        // 追加で分岐し `-1.0f` を直接返す。それ以外は
+        // `(u - 1) * x / log(u)` で再構成する（`log(u) ≈ x` となる
+        // ため桁落ちしない）。
+        ScalarUnaryOp::Elu { .. } => {
+            "static inline float fai_expm1_f32(float x) {\n    float u = metal::precise::exp(x);\n    if (u == 1.0f) {\n        return x;\n    }\n    if (u == 0.0f) {\n        return -1.0f;\n    }\n    return (u - 1.0f) * x / metal::precise::log(u);\n}\n\n"
+        }
+        _ => "",
     }
 }
 
@@ -318,11 +364,14 @@ pub(crate) fn unary_kernel_source(op: ScalarUnaryOp) -> Option<String> {
                 .to_string()
         }
     };
+    // 既存 kind（`preamble == ""`）は挿入前と生成ソース完全一致
+    // （`kind_name()` 依存のキャッシュキー契約を壊さない）。
+    let preamble = unary_preamble(op);
     Some(format!(
         r#"#include <metal_stdlib>
 using namespace metal;
 
-kernel void {name}(
+{preamble}kernel void {name}(
     device const float* a [[buffer(0)]],
     device float* out [[buffer(1)]],
     constant uint& numel [[buffer(2)]]{payload_params},
@@ -773,6 +822,100 @@ mod tests {
             .expect("Elu must be implemented");
         assert!(elu_src.contains("metal::precise::exp("));
         assert!(!elu_src.contains("fast::exp("));
+    }
+
+    /// PR #1825 codex-review P1 是正の回帰テスト: `Elu` の生成ソースが
+    /// `metal::precise::exp(x) - 1.0f` という単純差分（ゼロ近傍で
+    /// 桁落ちする式。`x=-1e-8, alpha=1e8` で `0.0` を返し CPU/CUDA の
+    /// `expm1` 相当〈約 `-1`〉と REQ-2 統一複合判定を満たさなかった）
+    /// を含まないこと、代わりに `fai_expm1_f32` ヘルパー（[`unary_
+    /// preamble`]）を kernel 本体より前で宣言し `Elu` の式から呼ぶ
+    /// ことを固定する。
+    #[test]
+    fn elu_source_uses_expm1_helper_not_naive_exp_minus_one() {
+        let elu_src = unary_kernel_source(ScalarUnaryOp::Elu { alpha: 1.0 })
+            .expect("Elu must be implemented");
+        assert!(
+            !elu_src.contains("metal::precise::exp(x) - 1.0f"),
+            "ゼロ近傍で桁落ちする単純差分が残っている: {elu_src}"
+        );
+        assert!(elu_src.contains("fai_expm1_f32"));
+        assert!(elu_src.contains("float fai_expm1_f32(float x)"));
+        // ヘルパー宣言は kernel 本体（`kernel void`）より前に来ること。
+        let helper_pos = elu_src
+            .find("float fai_expm1_f32(float x)")
+            .expect("helper must be declared");
+        let kernel_pos = elu_src.find("kernel void").expect("kernel must exist");
+        assert!(helper_pos < kernel_pos);
+        // underflow（`u == 0.0f`）・ゼロ近傍（`u == 1.0f`）双方の分岐を
+        // 含むこと（モジュール doc「`Elu` の `expm1` 非対応」参照）。
+        assert!(elu_src.contains("u == 1.0f"));
+        assert!(elu_src.contains("u == 0.0f"));
+    }
+
+    /// 他 kind（`Silu` 等ペイロードなし）は `unary_preamble` が空文字列
+    /// を返すため、preamble 挿入前後でソースが完全不変である
+    /// （既存キャッシュキー契約〈`kind_name()` のみへ依存〉を壊さない
+    /// ことの回帰確認）。
+    #[test]
+    fn preamble_is_empty_for_kinds_without_expm1_helper() {
+        let silu_src = unary_kernel_source(ScalarUnaryOp::Silu).expect("Silu must be implemented");
+        assert!(!silu_src.contains("fai_expm1_f32"));
+        assert!(silu_src.trim_start().starts_with("#include <metal_stdlib>"));
+
+        let hs_src =
+            unary_kernel_source(ScalarUnaryOp::Hardswish).expect("Hardswish must be implemented");
+        assert!(!hs_src.contains("fai_expm1_f32"));
+    }
+
+    /// `fai_expm1_f32` の再構成式（`u == 1.0 ? x : (u == 0.0 ? -1.0 :
+    /// (u - 1) * x / log(u))`）をホスト側 `f64` で忠実に再現し、
+    /// codex-review 指摘の入力（`x=-1e-8`）・underflow 域
+    /// （`x=-150.0`）・通常域（`x=-1.0`）で `f32::exp_m1` 相当の
+    /// 正しい `expm1(x)` に近い値を返すことを検証する（Metal 実機
+    /// なしで式そのものの正しさを Linux 上で確認する diagnostic）。
+    #[test]
+    fn expm1_reconstruction_formula_matches_exp_m1_reference() {
+        fn expm1_reconstruction(x: f32) -> f32 {
+            let u = x.exp();
+            if u == 1.0 {
+                x
+            } else if u == 0.0 {
+                -1.0
+            } else {
+                (u - 1.0) * x / u.ln()
+            }
+        }
+
+        // codex-review 指摘の入力: ゼロ近傍・大 alpha で顕在化した
+        // ケース。単純差分は `0.0` を返すが正しくは `x` にほぼ等しい。
+        let x = -1e-8_f32;
+        let got = expm1_reconstruction(x);
+        let want = x.exp_m1();
+        assert!(
+            (got - want).abs() < 1e-5,
+            "got={got}, want={want} (naive exp(x)-1 would give 0.0)"
+        );
+        assert_ne!(got, 0.0, "expm1(-1e-8) が 0.0 に桁落ちしてはならない");
+
+        // underflow 域（`exp(x)` が `f32` 最小非正規化数未満）: 単純式
+        // だけでなく `log(0)=-inf` 経路も `-1.0` へ正しく落ちること。
+        let x = -150.0_f32;
+        let got = expm1_reconstruction(x);
+        let want = x.exp_m1();
+        assert!(
+            (got - want).abs() < 1e-5,
+            "got={got}, want={want} (underflow branch)"
+        );
+
+        // 通常域（桁落ちが問題にならない典型値）。
+        let x = -1.0_f32;
+        let got = expm1_reconstruction(x);
+        let want = x.exp_m1();
+        assert!(
+            (got - want).abs() < 1e-5,
+            "got={got}, want={want} (normal range)"
+        );
     }
 
     /// `Hardswish`／`LeakyRelu` は選択・算術のみで `fmin`／`fmax`／
