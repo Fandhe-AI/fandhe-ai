@@ -185,6 +185,7 @@ pub mod reduction;
 pub mod rmsnorm;
 mod rnn_cell;
 mod small_shape_thread_cap;
+mod sort_topk;
 mod typed_f16;
 // イシュー #1587: Arm SME（Scalable Matrix Extension）の実行時検出
 // （fail-closed。macOS sysctl／Linux /proc/cpuinfo・rdsvl による SVL 確認）。

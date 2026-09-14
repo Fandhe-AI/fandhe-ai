@@ -846,3 +846,31 @@ fn cumsum_and_cumprod_record_single_eager_node() {
     );
     assert_eq!(cp.to_tensor().shape(), &[2, 3]);
 }
+
+/// 32. `sort`／`topk`（イシュー #1733）が 1 ノードのみ追加する
+///     `push_eager`（実体化済み）ノードとして記録され、`argsort` は
+///     **ノードを追加しない**（非微分演算。`Op::Sort` を経由しない）
+///     ことを検証する。
+#[test]
+fn sort_topk_record_single_node_and_argsort_records_none() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3.0, 1.0, 4.0, 1.5], &[1, 4]));
+
+    let before = tape.len();
+    let (sorted, _index) = x.sort(1, false).unwrap();
+    assert_eq!(tape.len(), before + 1, "sort は 1 ノードのみ追加するはず");
+    assert_eq!(sorted.to_tensor().shape(), &[1, 4]);
+
+    let before2 = tape.len();
+    let (topk_out, _topk_index) = x.topk(2, 1, true).unwrap();
+    assert_eq!(tape.len(), before2 + 1, "topk は 1 ノードのみ追加するはず");
+    assert_eq!(topk_out.to_tensor().shape(), &[1, 2]);
+
+    let before3 = tape.len();
+    let _argsort_index = x.argsort(1, false).unwrap();
+    assert_eq!(
+        tape.len(),
+        before3,
+        "argsort はテープへノードを追加しないはず"
+    );
+}
