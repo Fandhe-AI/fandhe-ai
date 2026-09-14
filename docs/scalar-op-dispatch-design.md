@@ -158,7 +158,8 @@ code-comment-style.md` が禁じる「同一クレート内の陳腐化しやす
 
 - CUDA／Metal の `ScalarOp` カーネル（#1635／#1636）。CUDA は #1700〜
   #1702（算術・超越関数・比較演算＋`Clamp`）で実装済み。Metal は #1707
-  （算術系 `Sub`／`Div`／`Pow`／`Sqrt`）で実装済み・超越関数系は #1708、
+  （算術系 `Sub`／`Div`／`Pow`／`Sqrt`）＋#1708（超越関数系 `Neg`／
+  `Abs`／`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`）で実装済み・
   比較演算＋`Clamp` は #1709 が残対象。
 - `Var` 公開メソッド（`sub`／`div`／`pow`／活性化等）・facade 範囲拡張
   （#1593／#1595）。

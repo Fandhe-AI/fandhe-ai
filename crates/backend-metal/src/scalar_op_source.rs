@@ -41,6 +41,24 @@
 //! correctly rounded を保証されない（最大 16 ulp。CUDA 側 `powf` と同じ
 //! 扱い）ため bit 同一を主張せず REQ-2 複合判定のみで検証する。
 //!
+//! `Neg`（`-x`）・`Abs`（`metal::fabs(x)`）は算術・選択のみのため
+//! ホスト `f32` 演算と bit 同一になる想定（`NaN` は payload が処理系
+//! 依存のためクラス一致で検証する）。超越関数系（`Log`／`Log2`／
+//! `Log10`／`Sin`／`Cos`／`Tan`）は `metal::precise::` 名前空間を明示
+//! 使用する（`fast::` 近似 intrinsic は使わない）が、MSL 数値準拠仕様
+//! （`.claude/skills/apple-silicon/references/msl/
+//! numerical-compliance.md` Table 8.1）は precise 変種を最大 4 ulp と
+//! 規定し correctly rounded を保証しないため、`Pow` と同様 bit 同一を
+//! 主張せず REQ-2 複合判定のみで検証する（ホスト libm との ulp 一致は
+//! 保証されない）。
+//!
+//! MSL 仕様は subnormal（非正規化数）の flush-to-zero を許容するため、
+//! `Neg`／`Abs` の bit 同一検証に使う乱数入力は `[-1, 1)`（subnormal
+//! 非到達域）とする。将来 Mac 実機で subnormal 起因の bit 差異が判明
+//! した場合の対処は「subnormal 限定でクラス一致へ切り替える」であり、
+//! tolerance 定数の変更ではない（`.claude/rules/coding-rust.md` の
+//! 許容誤差はユーザー承認必須のポリシー除外対象）。
+//!
 //! # ペイロード seam（#1709 `Clamp` 向け申し送り。本イシューでは実装しない）
 //!
 //! CUDA 側 `kernels_scalar_op::UnaryPayload`（`Clamp` の `min`/`max` を
@@ -56,8 +74,10 @@
 //! # スコープ
 //!
 //! [`ScalarBinaryOp::Sub`]／[`ScalarBinaryOp::Div`]／[`ScalarBinaryOp::Pow`]
-//! ・[`ScalarUnaryOp::Sqrt`]（#1707）を実装する。超越関数系
-//! （`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`／`Abs`／`Neg`）は #1708、
+//! ・[`ScalarUnaryOp::Sqrt`]（#1707）に加え、[`ScalarUnaryOp::Neg`]／
+//! [`ScalarUnaryOp::Abs`]／[`ScalarUnaryOp::Log`]／[`ScalarUnaryOp::Log2`]／
+//! [`ScalarUnaryOp::Log10`]／[`ScalarUnaryOp::Sin`]／[`ScalarUnaryOp::Cos`]／
+//! [`ScalarUnaryOp::Tan`]（超越関数系 8 kind。#1708）を実装する。
 //! 比較 6 種＋`Clamp`（ペイロード実装）は #1709 の担当。他 kind は
 //! `None`（未実装。呼び出し元 `ops::MetalBackendOps::scalar_unary`／
 //! `scalar_binary` が `BackendError::Unsupported` を返しホスト参照実装
@@ -90,6 +110,28 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         // 「コンパイルオプションと数値契約」参照）。`fast::sqrt`／
         // `rsqrt` 系近似 intrinsic は使わない。
         ScalarUnaryOp::Sqrt => Some("metal::precise::sqrt(x)"),
+        // `Neg`／`Abs` は算術・選択のみでホスト `f32` 演算（`-x`／
+        // `f32::abs`）と bit 同一になる想定（モジュール doc「コンパイル
+        // オプションと数値契約」参照）。`Abs` は `metal::fabs` を明示
+        // 使用する（`abs` は整数オーバーロードとの曖昧性を避けるため。
+        // CUDA 側 `kernels_scalar_op.rs::unary_expr` の `fabsf` と同じ
+        // 判断）。
+        ScalarUnaryOp::Neg => Some("-x"),
+        ScalarUnaryOp::Abs => Some("metal::fabs(x)"),
+        // 超越関数系（`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`）は
+        // `metal::precise::` 名前空間を明示使用する（`fast::` 近似
+        // intrinsic は使わない。モジュール doc「コンパイルオプションと
+        // 数値契約」参照）。MSL 数値準拠仕様（`.claude/skills/
+        // apple-silicon/references/msl/numerical-compliance.md` Table
+        // 8.1）は precise 変種を最大 4 ulp と規定し correctly rounded を
+        // 保証しないため、`Pow` と同じく bit 同一を主張せず REQ-2
+        // 複合判定のみで検証する。
+        ScalarUnaryOp::Log => Some("metal::precise::log(x)"),
+        ScalarUnaryOp::Log2 => Some("metal::precise::log2(x)"),
+        ScalarUnaryOp::Log10 => Some("metal::precise::log10(x)"),
+        ScalarUnaryOp::Sin => Some("metal::precise::sin(x)"),
+        ScalarUnaryOp::Cos => Some("metal::precise::cos(x)"),
+        ScalarUnaryOp::Tan => Some("metal::precise::tan(x)"),
         _ => None,
     }
 }
@@ -241,14 +283,93 @@ mod tests {
 
     #[test]
     fn unimplemented_unary_kinds_return_none() {
-        // `Sqrt` は #1707 で実装済みになったため、番兵 kind を未実装の
-        // まま残る kind（#1708 が担当する超越関数・#1709 が担当する
-        // `Clamp`）へ付け替える（残すと未実装 kind への `None`
-        // フォールバック契約の検証が消えてしまう）。
-        assert!(unary_kernel_source(ScalarUnaryOp::Log).is_none());
-        assert!(unary_kernel_source(ScalarUnaryOp::Neg).is_none());
+        // `Sqrt`（#1707）・超越関数系 8 kind（`Neg`／`Abs`／`Log`／
+        // `Log2`／`Log10`／`Sin`／`Cos`／`Tan`。#1708）は実装済みになった
+        // ため、番兵 kind を未実装のまま残る kind（`Relu`〈活性化系。
+        // いずれの sub issue にも含まれない〉・`Clamp`〈#1709 が担当〉）
+        // へ付け替える（残すと未実装 kind への `None` フォールバック
+        // 契約の検証が消えてしまう）。
         assert!(unary_kernel_source(ScalarUnaryOp::Relu).is_none());
+        assert!(unary_kernel_source(ScalarUnaryOp::Sigmoid).is_none());
         assert!(unary_kernel_source(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }).is_none());
+    }
+
+    /// 超越関数系 8 kind すべてが REQ-8 境界チェック・buffer index
+    /// 契約・関数名を満たし、6 超越関数（`Log`／`Log2`／`Log10`／
+    /// `Sin`／`Cos`／`Tan`）が `metal::precise::` 名前空間のみを使い
+    /// `fast::` を使わないことを固定する（CUDA 側
+    /// `kernels_scalar_op.rs` の「静的ソース内容検査」と同型）。
+    ///
+    /// `metal::precise::log(x)` 自体が部分文字列 `"log("` を含むため、
+    /// 「裸の呼び出しがない」検査は先頭スペース付きパターン
+    /// （`" log("` 等）で行う（`!contains("log(")` では `precise::log(`
+    /// にも誤反応してしまう）。
+    #[test]
+    fn transcendental_unary_kinds_include_bounds_check_and_use_precise_msl() {
+        let unary_kinds = [
+            ScalarUnaryOp::Neg,
+            ScalarUnaryOp::Abs,
+            ScalarUnaryOp::Log,
+            ScalarUnaryOp::Log2,
+            ScalarUnaryOp::Log10,
+            ScalarUnaryOp::Sin,
+            ScalarUnaryOp::Cos,
+            ScalarUnaryOp::Tan,
+        ];
+        for op in unary_kinds {
+            let src =
+                unary_kernel_source(op).unwrap_or_else(|| panic!("{op:?} must be implemented"));
+            assert!(src.contains("if (idx < numel)"));
+            assert!(src.contains(&format!("kernel void {}(", unary_function_name(op))));
+            assert!(src.contains("[[buffer(0)]]"));
+            assert!(src.contains("[[buffer(1)]]"));
+            assert!(src.contains("[[buffer(2)]]"));
+            assert!(!src.contains("[[buffer(3)]]"));
+        }
+
+        let neg_src = unary_kernel_source(ScalarUnaryOp::Neg).expect("Neg implemented");
+        assert!(neg_src.contains("-x"));
+        let abs_src = unary_kernel_source(ScalarUnaryOp::Abs).expect("Abs implemented");
+        assert!(abs_src.contains("metal::fabs("));
+
+        for (op, fn_name) in [
+            (ScalarUnaryOp::Log, "log"),
+            (ScalarUnaryOp::Log2, "log2"),
+            (ScalarUnaryOp::Log10, "log10"),
+            (ScalarUnaryOp::Sin, "sin"),
+            (ScalarUnaryOp::Cos, "cos"),
+            (ScalarUnaryOp::Tan, "tan"),
+        ] {
+            let src =
+                unary_kernel_source(op).unwrap_or_else(|| panic!("{op:?} must be implemented"));
+            assert!(
+                src.contains(&format!("metal::precise::{fn_name}(")),
+                "{op:?} source must call metal::precise::{fn_name}(): {src}"
+            );
+            assert!(
+                !src.contains(&format!("fast::{fn_name}(")),
+                "{op:?} source must not call fast::{fn_name}()"
+            );
+            // 先頭スペース付きパターンで裸呼び出し（`metal::` 修飾なし）
+            // が無いことを確認する（`precise::log(` 自体が `"log("` を
+            // 含むため `!contains("log(")` では書けない）。
+            assert!(
+                !src.contains(&format!(" {fn_name}(")),
+                "{op:?} source must not call bare {fn_name}() without a namespace qualifier"
+            );
+        }
+    }
+
+    /// `Neg`／`Abs` のホスト参照値の符号規約を固定する（CUDA 側
+    /// `kernels_scalar_op.rs` 相当の bit 契約テスト。`+0.0 == -0.0` が
+    /// 真になる `assert_eq!` を避け `to_bits()` で比較する）。
+    #[test]
+    fn neg_and_abs_host_reference_matches_documented_bit_contract() {
+        assert_eq!((-0.0f32).to_bits(), (-(0.0f32)).to_bits());
+        assert_eq!((0.0f32).to_bits(), (-(-0.0f32)).to_bits());
+        assert!((-f32::NAN).is_nan());
+        assert_eq!((0.0f32).to_bits(), (-0.0f32).abs().to_bits());
+        assert!(f32::NAN.abs().is_nan());
     }
 
     #[test]
@@ -276,6 +397,20 @@ mod tests {
             binary_function_name(ScalarBinaryOp::Pow),
             "scalar_binary_pow"
         );
+        assert_eq!(unary_function_name(ScalarUnaryOp::Neg), "scalar_unary_neg");
+        assert_eq!(unary_function_name(ScalarUnaryOp::Abs), "scalar_unary_abs");
+        assert_eq!(unary_function_name(ScalarUnaryOp::Log), "scalar_unary_log");
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::Log2),
+            "scalar_unary_log2"
+        );
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::Log10),
+            "scalar_unary_log10"
+        );
+        assert_eq!(unary_function_name(ScalarUnaryOp::Sin), "scalar_unary_sin");
+        assert_eq!(unary_function_name(ScalarUnaryOp::Cos), "scalar_unary_cos");
+        assert_eq!(unary_function_name(ScalarUnaryOp::Tan), "scalar_unary_tan");
     }
 
     /// 生成ソースが payload 値を一切含まないこと（モジュール doc

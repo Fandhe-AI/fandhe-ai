@@ -113,6 +113,17 @@ pub enum CudaError {
     /// み。`sum` は単位元 `0.0` を持つため到達しない）。
     EmptyReduction { op: &'static str },
 
+    /// gather／scatter 起動 API（`gather_scatter.rs::CudaGatherScatter`）
+    /// のホスト側検証（`checked_numel` の要素数積オーバーフロー・
+    /// `i32::MAX` 上限・`index`／`input`／`src` の長さが shape から導出
+    /// した期待長と一致しないこと）が拒否した入力（イシュー #1777）。
+    /// `InvalidReduceShape` と同じ理由で独立 variant に分離し `Display`
+    /// メッセージの誤表示を避ける。`input`／`index`／`src` の rank・軸
+    /// 整合（`gather_out_shape`／`scatter_out_shape`）は呼び出し元
+    /// `ops.rs` が事前検査済みの契約のため、本 variant は主に長さ・
+    /// オーバーフローに関する起動前検証の失敗を表す。
+    InvalidGatherScatterShape { detail: String },
+
     /// f16 WMMA GEMM（`gemm_wmma.rs::CudaWmmaGemm`）が、Tensor Core（WMMA）
     /// の要件を満たさないデバイス上で要求された。
     ///
@@ -444,6 +455,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::EmptyReduction { op } => {
                 write!(f, "cannot compute {op} of an empty reduction")
+            }
+            CudaError::InvalidGatherScatterShape { detail } => {
+                write!(f, "invalid gather/scatter shape: {detail}")
             }
             CudaError::TensorCoreUnsupported { detail } => {
                 write!(f, "tensor core (WMMA) unsupported on this device: {detail}")
