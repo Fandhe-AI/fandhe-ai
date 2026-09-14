@@ -287,7 +287,7 @@ fn sum_dims_gradient_matches_numeric() {
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
 
     let numeric = numeric_grad(&x, |xt| forward(&xt));
-    assert_tensor_close("sum_dims grad", &dx, &numeric);
+    assert_tensor_close("sum_dims grad", dx, &numeric);
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn mean_dims_gradient_matches_numeric() {
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
 
     let numeric = numeric_grad(&x, |xt| forward(&xt));
-    assert_tensor_close("mean_dims grad", &dx, &numeric);
+    assert_tensor_close("mean_dims grad", dx, &numeric);
 }
 
 #[test]
@@ -325,7 +325,7 @@ fn mean_single_axis_gradient_matches_numeric() {
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
 
     let numeric = numeric_grad(&x, |xt| forward(&xt));
-    assert_tensor_close("mean(Some(1)) grad", &dx, &numeric);
+    assert_tensor_close("mean(Some(1)) grad", dx, &numeric);
 }
 
 #[test]
@@ -343,7 +343,7 @@ fn mean_none_gradient_matches_numeric() {
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
 
     let numeric = numeric_grad(&x, |xt| forward(&xt));
-    assert_tensor_close("mean(None) grad", &dx, &numeric);
+    assert_tensor_close("mean(None) grad", dx, &numeric);
 }
 
 // --- 5. max_dims の同値タイの決定性 ---
@@ -359,7 +359,7 @@ fn max_dims_tie_is_deterministic_across_runs() {
         let loss = y; // すでにスカラー
         let grads = tape.backward(&loss).unwrap();
         let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
-        results.push(dense(&dx));
+        results.push(dense(dx));
     }
     for r in &results[1..] {
         assert_eq!(&results[0], r, "max_dims のタイ分配が run ごとに揺れている");
@@ -448,8 +448,8 @@ fn mean_recompute_via_checkpoint_is_bit_identical_to_forward() {
     let dx_ckpt = grads_ckpt.get(&xv2).unwrap().expect("x は loss に到達する");
 
     assert_eq!(
-        dense(&dx_plain),
-        dense(&dx_ckpt),
+        dense(dx_plain),
+        dense(dx_ckpt),
         "checkpoint 有無で Op::Mean の逆伝播値が bit 一致しない"
     );
 }
