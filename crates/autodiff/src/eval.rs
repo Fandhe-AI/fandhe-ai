@@ -891,11 +891,31 @@ pub(crate) fn bce_elem_grad_target(input: f32, _target: f32, kind: BceKind) -> f
     }
 }
 
+/// [`bce_loss`] の縮約チャンクサイズ（`backend-cpu::bce::CHUNK` と
+/// 同値。ホストフォールバック〈本関数〉と CPU 融合カーネル
+/// （`Unsupported` でないときに呼ばれる経路）とで縮約精度を揃える
+/// ための意図的複製。チャンク内は逐次 `f32` 加算・チャンク間は
+/// チャンク番号順に逐次結合し、単純な全要素逐次加算より丸め誤差を
+/// 抑える。codex-review 指摘（PR #1848）: フォールバック側が全要素
+/// 逐次加算のままだと、`BackendOps::bce_loss` が `Unsupported` の
+/// バックエンドへ切り替わった際に損失値が
+/// 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を
+/// 超えて乖離しうる（大きな入力での実測差: 相対差 約 0.00648・
+/// 絶対差 約 0.00449）。
+const BCE_HOST_FALLBACK_CHUNK: usize = 4096;
+
 /// 二値交差エントロピー損失のホスト参照実装（`Var::bce_loss`／
 /// `bce_with_logits_loss`〈`var.rs`〉から `BackendOps::bce_loss` が
 /// `Unsupported` のときのみ呼ばれる。イシュー #1737）。`mse_loss`
 /// （直上）と同じ「shape 一致検査は呼び出し元が済ませている・
 /// `numel == 0` は `Mean`／`Sum` とも `0.0`」契約。
+///
+/// 縮約精度は `backend-cpu::bce::bce_sum_f32`（CPU 融合カーネル）と
+/// 同じ固定チャンク（[`BCE_HOST_FALLBACK_CHUNK`]）縮約方式を用いる
+/// （`.claude/rules/coding-rust.md`「正規化統計・勾配の長軸縮約は
+/// `f64` アキュムレータで統一する」と同種の、縮約経路間の数値契約
+/// 統一。BCE の場合は `f64` ではなくチャンク分割方式で backend-cpu
+/// 側と揃える。PR #1848 codex-review 指摘）。
 pub(crate) fn bce_loss(
     input: &Tensor<f32>,
     target: &Tensor<f32>,
@@ -906,10 +926,15 @@ pub(crate) fn bce_loss(
     let target_data = dense_vec(target);
     let numel = input_data.len();
     let sum_loss: f32 = input_data
-        .iter()
-        .zip(target_data.iter())
-        .map(|(&p, &y)| bce_elem_loss(p, y, kind))
-        .sum();
+        .chunks(BCE_HOST_FALLBACK_CHUNK)
+        .zip(target_data.chunks(BCE_HOST_FALLBACK_CHUNK))
+        .map(|(i_chunk, t_chunk)| {
+            i_chunk
+                .iter()
+                .zip(t_chunk.iter())
+                .fold(0.0f32, |acc, (&p, &y)| acc + bce_elem_loss(p, y, kind))
+        })
+        .fold(0.0f32, |acc, v| acc + v);
     let out = match reduction {
         crate::var::Reduction::Mean => {
             if numel == 0 {
