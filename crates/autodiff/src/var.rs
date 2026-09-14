@@ -235,6 +235,49 @@ impl<'t> Var<'t> {
         self.tape.epoch()
     }
 
+    /// この `Var` が指すノードの勾配追跡フラグ（イシュー #1748・
+    /// `TapeNode::requires_grad` doc 参照）。`backward.rs::Gradients::get`
+    /// が「対象ノードが構造的に勾配を持ちうるか」を判定するのに使う
+    /// （`tape_id`/`tape_epoch` と同じ `pub(crate)` アクセサ方針）。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.tape.nodes.borrow()[self.id.0].requires_grad
+    }
+
+    /// 追跡を切り離し、現在の値を `requires_grad == false` の新しい
+    /// 葉ノードとして同じ `Tape` へ登録する（イシュー #1748。PyTorch
+    /// `Tensor.detach()` 相当。設計は `docs/
+    /// autodiff-nograd-leaf-dinput-skip-decision.md` §5「案 B」）。
+    ///
+    /// **専用 `Op` を追加しない設計**: 「detach された `Var`」を
+    /// 「`requires_grad == false` の通常の葉ノード」として表現する
+    /// （`Tape::var_no_grad` と実体を共有する）。専用 `Op::Detach`
+    /// variant を追加する案は、前方伝播（`Op::for_each_input` の網羅
+    /// match）・`is_checkpoint_eligible`・`grad::vjp` の網羅 match に
+    /// 3 箇所以上の更新を要するのに対し、本 issue が満たすべき契約
+    /// （値を共有しつつ勾配経路を切る）は既存の葉ノード機構で過不足
+    /// なく表現できるため採用しなかった。
+    ///
+    /// **値の共有**: `Tensor<f32>` は内部 `storage: Arc<Storage<T>>` を
+    /// 共有する値型（immutable）のため、新しい葉ノードへ渡す
+    /// `materialize_fallible` の戻り値の `.clone()` は `Arc` のポインタ
+    /// 複製のみで実データのコピーは発生しない（PyTorch の `detach()` が
+    /// storage を共有するのと同型）。
+    ///
+    /// **副作用**: 対象がまだ実体化されていない lazy elementwise 連鎖・
+    /// view ノードの場合、本メソッド呼び出し時点でその実体化が走る
+    /// （`materialize_fallible` 経由）。また checkpoint 解放済み
+    /// （イシュー #1624）で再計算に失敗（poison）した値を `detach` する
+    /// と `Err` を返す（stale／不正な値を新しい葉へ複製しない
+    /// fail-closed 方針）。
+    pub fn detach(&self) -> Result<Var<'t>, AutodiffError> {
+        let value = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let id = self.tape.push_leaf(value, false);
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// `matmul`（rank≥2。バッチ次元は NumPy 互換ブロードキャスト。
     /// `docs/public-api-design.md` §3.2・spec REQ-9 2026-09-12 追記
     /// Tier 1「バッチ行列積」・`docs/compat-api-scope.md` §1.2。
