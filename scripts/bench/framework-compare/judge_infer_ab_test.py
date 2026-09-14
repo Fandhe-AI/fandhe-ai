@@ -16,6 +16,9 @@ tempfile への合成 JSONL 書き出し）。CI（`ci.yml` の `deps-forbidden`
 - `mode=fresh`（対照）の後退は終了コードへ影響しない。
 - `framework != "fandhe-ai"`／`device != "metal"`／`task != "infer"` の行は
   判定対象から除外する。
+- 空行以外の JSON 解析失敗（破損した計測行）が 1 件でも混在すれば、
+  正常な行が `--rounds` 件残っていても判定全体が undetermined・終了
+  コード 2 になる（空行のみは従来どおり読み飛ばして許容する）。
 """
 
 import importlib.util
@@ -279,6 +282,52 @@ class JudgeInferAbTest(unittest.TestCase):
             self.assertEqual(code, 2, buf.getvalue())
             self.assertIn("checksum", buf.getvalue())
 
+    def test_undetermined_when_malformed_json_line_mixed_in(self):
+        """codex-review P0 指摘: 途中で切れた計測行（壊れた JSON）が
+        混在していても、正常な reuse 行が `--rounds` 件残っていれば
+        従来は黙って除外され ADOPT・終了コード 0 になり得た。壊れた行を
+        検出したら判定全体を undetermined（終了コード 2）へ倒し、行番号
+        付きの理由を報告する。"""
+        with tempfile.TemporaryDirectory() as tdir:
+            before_path = os.path.join(tdir, "before.jsonl")
+            after_path = os.path.join(tdir, "after.jsonl")
+            before_rows = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
+            after_rows = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
+            _write_jsonl(before_path, before_rows)
+            _write_jsonl(after_path, after_rows)
+            # 途中で切れた（末尾が欠落した）計測行を末尾に 1 行追記する。
+            with open(before_path, "a", encoding="utf-8") as f:
+                f.write('{"framework": "fandhe-ai", "task": "infer", "mode": "reu\n')
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = judge_infer_ab.main(
+                    ["--before", before_path, "--after", after_path]
+                )
+            self.assertEqual(code, 2, buf.getvalue())
+            self.assertIn("undetermined", buf.getvalue())
+            self.assertIn(f"{before_path}:6", buf.getvalue())
+
+    def test_blank_lines_only_are_still_permitted(self):
+        """空行のみ（データを持たない行）は従来どおり読み飛ばしてよく、
+        malformed 判定の対象にはしない（P0 是正が空行除外の既存挙動まで
+        破壊していないことの確認）。"""
+        with tempfile.TemporaryDirectory() as tdir:
+            before_path = os.path.join(tdir, "before.jsonl")
+            after_path = os.path.join(tdir, "after.jsonl")
+            before_rows = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
+            after_rows = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
+            _write_jsonl(before_path, before_rows)
+            _write_jsonl(after_path, after_rows)
+            with open(before_path, "a", encoding="utf-8") as f:
+                f.write("\n\n   \n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = judge_infer_ab.main(
+                    ["--before", before_path, "--after", after_path]
+                )
+            self.assertEqual(code, 0, buf.getvalue())
+            self.assertIn("ADOPT", buf.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

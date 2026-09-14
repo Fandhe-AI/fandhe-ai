@@ -8,6 +8,10 @@
 本ファイルを `--task infer` 専用の自己完結ツールとして新設する。
 
 fail-closed 方針（security.md A08。`compare_gemm_gate.py` 等と同方針）:
+- 空行以外で JSON として解析できない行が 1 件でもあれば、その行を
+  黙って除外して判定を継続せず、行番号付きのエラーとして判定全体を
+  「判定不能」（終了コード 2）へ倒す（`--rounds` 件数チェックのすり
+  抜け防止。codex-review P0 指摘対応）
 - `framework != "fandhe-ai"` の行・`device != "metal"` の行・`task !=
   "infer"` の行は判定対象から除外する
 - 各セル（`mode` ごと）が before/after とも「ちょうど `--rounds`（既定 5）
@@ -43,17 +47,35 @@ import statistics
 import sys
 
 
+class MalformedJsonlError(Exception):
+    """`_load_rows` が空行以外の JSON 解析失敗を検出したときに送出する
+    例外（codex-review P0 指摘対応）。従来は `json.JSONDecodeError` を
+    握りつぶして当該行を黙って除外していたため、途中で切れた計測行が
+    混在していても他の正常な reuse 行が「ちょうど `--rounds` 件」残って
+    さえいれば ADOPT・終了コード 0 になり得た。解析できない行は対象外の
+    計測なのか入力破損なのか判別できず、fail-closed（security.md A08）
+    の観点で「ちょうど N 件」という完全性検査をすり抜けさせてはならない
+    ため、行番号付きのエラーとして `main` まで伝播させ、判定全体を
+    undetermined（終了コード 2）へ倒す。"""
+
+    def __init__(self, path, lineno, original):
+        self.path = path
+        self.lineno = lineno
+        self.original = original
+        super().__init__(f"{path}:{lineno}: invalid JSON ({original})")
+
+
 def _load_rows(path):
     rows = []
     with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+        for lineno, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped:
                 continue
             try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+                obj = json.loads(stripped)
+            except json.JSONDecodeError as e:
+                raise MalformedJsonlError(path, lineno, e) from e
             if obj.get("framework") != "fandhe-ai":
                 continue
             if obj.get("device") != "metal":
@@ -164,8 +186,16 @@ def main(argv=None):
     parser.add_argument("--threshold", type=float, default=1.00, help="非後退判定の閾値（既定 1.00）")
     args = parser.parse_args(argv)
 
-    before_rows = _load_rows(args.before)
-    after_rows = _load_rows(args.after)
+    try:
+        before_rows = _load_rows(args.before)
+        after_rows = _load_rows(args.after)
+    except MalformedJsonlError as e:
+        print("# infer chain metal A/B (issue #1580)")
+        print()
+        print("## judgement")
+        print("- verdict: undetermined")
+        print(f"- reason: malformed JSONL row detected — {e}")
+        return 2
 
     lines = ["# infer chain metal A/B (issue #1580)", ""]
     judged_verdict = None
