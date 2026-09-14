@@ -246,7 +246,7 @@ Phase 3（親 #1573）の各 issue へ対応付ける。
 | f64／f16／bf16 演算 | #1626 |
 | **量子化** | #1627（除外事項「分散学習・量子化の網羅対応」〈Won't・条件付き〉に従属。実装着手は同除外事項の格上げ条件充足と Phase 4 要件見直しでの新 REQ 追加のユーザー承認まで不可。5 節参照） |
 | **複数 GPU／DDP** | #1628（同上に従属。設計判断の記録〈docs のみ〉に留め、実装・通信層の依存追加は行わない。5 節参照） |
-| ONNX import 公開／export | #1629 |
+| ONNX import 公開／export | #1629（#1652 で設計判断を記録。案 B〈薄いラッパー型〉を方針として推奨するが、facade は crates.io 公開クレートのため公開には `onnx-interop` 自体の crates.io 公開という別個のユーザー承認が必要——2026-09-12 の facade 公開面拡張の承認範囲には含まれない。現状は非公開のまま段階 0。`docs/facade-onnx-import-exposure-decision.md`） |
 | topk／sort／cumsum | #1630 |
 | `nn.functional` の残り（pad／interpolate／one_hot 等） | #1631 |
 
@@ -458,6 +458,8 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 消化する際は、#1627 を skip／blocked 扱いとする。
 
 **#1628 の設計記録は `docs/facade-multi-gpu-ddp-decision.md` として完了した。**
+
+**#1652（ONNX import 公開可否）の設計記録は `docs/facade-onnx-import-exposure-decision.md` として完了した。** DDP／量子化と異なり本項目は正本 spec の除外事項（上記）に従属しない——facade へ公開する方針自体は案 B（薄いラッパー型）として推奨されるが、facade は crates.io 公開クレートであり非公開クレートへの通常依存を持てないため、「facade から公開する」は `onnx-interop` 自体を crates.io へ公開することと構造的に等価になる。この publish 承認（命名確定・`RELEASE_CRATES` 変更を含む）は 2026-09-12 の facade 公開面拡張の承認範囲には含まれない別個の事項であり、承認が得られるまでは非公開のまま段階 0（現状維持）とする。#1775（ONNX export の facade 公開）・#1754（safetensors save／load の facade 再公開）はいずれも同じ publish 前提を共有するため blocked のまま close しない（同 doc §6.2）。
 
 **適用記録（`DeviceParamStore::predict_device_chain`。イシュー #1688）**:
 GPU 推論チェーン単一同期化（`docs/inference-chain-single-sync-design.md`。
