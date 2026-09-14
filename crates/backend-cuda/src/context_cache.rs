@@ -582,6 +582,33 @@ pub(crate) fn cached_mma_tf32x3(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::gemm_auto::CudaGemmAuto`]
+/// （naive／tiled／WMMA／`mma.sync` 全 f16/f32 GEMM カーネルを保持する
+/// 自動経路選択スイート）をプロセス内キャッシュから取得する（イシュー
+/// #1703。キーは [`ContextKey`]。`cached_gemm` 冒頭コメント参照）。
+///
+/// `crate::typed_f16::TypedOps<half::f16>::gemm`（`ops::CudaBackendOps`
+/// の `typed_ops_f16()` accessor 経由）の唯一の呼び出し先。
+/// `CudaGemmAuto::new` は naive/tiled に加え WMMA・`mma.sync`（cc ゲート
+/// 非対応・NVRTC コンパイル失敗時は fail-soft に `None` 保持）を NVRTC
+/// コンパイルするため `cached_gemm` 単体より構築コストが大きい。本関数
+/// 経由でキャッシュすることで、`TypedOps<f16>::gemm` の 2 回目以降の
+/// 呼び出しはこの構築コストを再度支払わない（`cached_gemm`／
+/// `cached_mma_tf32x3` と同じ受け入れ条件）。`f32` 側 `BackendOps::gemm`
+/// （`cached_gemm` 経由）の起動コストには一切影響しない
+/// （`gemm_auto.rs::CudaGemmAuto::new` doc comment 参照:
+/// `TypedOps<f16>::gemm` を初めて呼んだときにのみ遅延構築される）。
+pub(crate) fn cached_gemm_auto(
+    device: &CudaDevice,
+) -> Result<Arc<crate::gemm_auto::CudaGemmAuto>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::gemm_auto::CudaGemmAuto>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::gemm_auto::CudaGemmAuto::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`CudaAllocator`]（出力バッファの
 /// サイズクラス別プール。イシュー #1020・REQ-14）をプロセス内キャッシュ
 /// から取得する。キーは [`ContextKey`]（ordinal + context の同一性）
@@ -1621,6 +1648,29 @@ fn classify_cuda_result(err: &cudarc::driver::result::DriverError) -> ResultClas
     }
 }
 
+/// [`classify_cuda_result`] を呼び出し元（`gemm_auto.rs::CudaGemmAuto::new`
+/// 等）へ公開する薄いラッパー（イシュー #1703・PR #1797 codex-review
+/// 指摘対応）。
+///
+/// `CudaGemmAuto::new` は WMMA／MMA サブカーネルの構築失敗時、sticky な
+/// `CudaError::Driver`（load_module/load_function 経由）のみを `Self::new`
+/// 自体の `Err` として伝播し、それ以外（`OperationLocal` 分類の
+/// `CUDA_ERROR_OUT_OF_MEMORY`／`CUDA_ERROR_NO_BINARY_FOR_GPU`／
+/// `CUDA_ERROR_INVALID_PTX` 等）は従来どおり `wmma`/`mma` を `None` として
+/// fail-soft に握り潰し `run_f16` を tiled へフォールバックさせる必要が
+/// ある。両者を区別せず全ての `CudaError::Driver` を即座に `Err` へ倒すと、
+/// 本来 `None` キャッシュすべき operation-local な構築失敗（例:
+/// 特定 GPU アーキテクチャ向け PTX が生成できない環境）でも
+/// `cached_gemm_auto`（`context_cache`）へキャッシュされず、
+/// `TypedOps<f16>::gemm` の呼び出しのたびに `CudaGemmAuto::new` が
+/// 再試行され、失敗するたびに NVRTC フルコンパイルを再実行してしまう
+/// （性能劣化。Cursor Bugbot 指摘）。本関数は `classify_cuda_result` と
+/// 同じ分類ロジックを再利用することで、この区別の重複実装・分岐先の
+/// ドリフトを避ける。
+pub(crate) fn is_sticky_driver_error(err: &cudarc::driver::result::DriverError) -> bool {
+    classify_cuda_result(err) == ResultClass::Sticky
+}
+
 /// `invalidate`（本体は [`invalidate_with`]。実 CUDA のプローブ処理は
 /// 本関数自身では実装せず、`ops.rs`／`memory.rs` 側の復旧経路が実 CUDA
 /// クロージャを渡して呼ぶ想定）。本 PR（#1064）で検出側
@@ -2250,6 +2300,29 @@ mod poison_state_tests {
             classify_cuda_result(&DriverError(CUresult::CUDA_ERROR_UNKNOWN)),
             ResultClass::Sticky
         );
+    }
+
+    /// [`is_sticky_driver_error`] が `classify_cuda_result` と同じ分類結果を
+    /// 返すことを確認する（イシュー #1703・PR #1797 Cursor Bugbot 指摘。
+    /// `gemm_auto.rs::CudaGemmAuto::new` が本関数経由で sticky／
+    /// operation-local を区別する契約の直接検証）。
+    #[test]
+    fn is_sticky_driver_error_matches_classify_cuda_result() {
+        assert!(is_sticky_driver_error(&sticky_err()));
+        assert!(!is_sticky_driver_error(&operation_local_err()));
+        // `CudaGemmAuto::new` が `wmma`/`mma` を `None` フォールバックさせる
+        // べき代表的な operation-local コード（性能劣化の再現条件だった
+        // コード）も明示確認する。
+        for code in [
+            CUresult::CUDA_ERROR_OUT_OF_MEMORY,
+            CUresult::CUDA_ERROR_NO_BINARY_FOR_GPU,
+            CUresult::CUDA_ERROR_INVALID_PTX,
+        ] {
+            assert!(
+                !is_sticky_driver_error(&DriverError(code)),
+                "{code:?} は operation-local と判定され fail-soft フォール                  バック対象となるはず"
+            );
+        }
     }
 
     #[test]

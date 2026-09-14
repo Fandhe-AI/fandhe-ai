@@ -1641,33 +1641,94 @@ impl CudaGemmAuto {
     ///
     /// naive／tiled の構築失敗（NVRTC 不在等）はそのまま `Err` として
     /// 呼び出し元へ伝播する（naive／tiled は最終フォールバックであり
-    /// 失敗を握り潰すべきではない）。WMMA の構築失敗（cc ゲート非対応の
-    /// `TensorCoreUnsupported`・NVRTC コンパイル失敗のいずれも）は
+    /// 失敗を握り潰すべきではない）。WMMA の構築失敗のうち、対応外
+    /// capability（`TensorCoreUnsupported`）・NVRTC コンパイル失敗
+    /// （`NvrtcUnavailable`／`Compile`）・**operation-local な
+    /// `CudaError::Driver`**（`context_cache::is_sticky_driver_error` が
+    /// `false` を返すもの。例: `CUDA_ERROR_OUT_OF_MEMORY`・
+    /// `CUDA_ERROR_NO_BINARY_FOR_GPU`・`CUDA_ERROR_INVALID_PTX`）は
     /// `wmma = None` として握り潰し、`run_f16` を tiled へ倒す
-    /// （fail-safe。`docs/dispatch-rules-design.md` §2.2）。
+    /// （fail-safe。`docs/dispatch-rules-design.md` §2.2）。**一方、
+    /// `load_module`/`load_function` 経由の sticky な `CudaError::Driver`
+    /// のみはフォールバック対象外**であり、[`Self::new`] 自体の `Err`
+    /// として呼び出し元へ伝播する（codex-review P0 指摘・PR #1797。この
+    /// 伝播により、[`Self::new`] を包む外側の `with_driver_call`/
+    /// `observe_cuda_result`〈`crate::typed_f16::TypedOps::<f16>::gemm`
+    /// 経由〉が sticky エラーを観測し ordinal を poison できる。`.ok()`／
+    /// 文字列化で無条件に吸収すると観測不能になり fail-closed 契約
+    /// 〈`.claude/rules/security.md` A08〉に反するため）。
     ///
-    /// `mma`（[`CudaMmaGemm`]）も `wmma` と同様の fail-soft で構築する
-    /// （#1152。`cc < 8.0` の `TensorCoreUnsupported`・NVRTC コンパイル
-    /// 失敗とも `None`。`docs/dispatch-rules-design.md` §5.6）。構築失敗
+    /// sticky／operation-local の判定は `context_cache::classify_cuda_result`
+    /// が使う分類テーブルを `context_cache::is_sticky_driver_error`
+    /// （クレート内部関数。`pub(crate)` のため外部公開 API からはリンク
+    /// 不可）経由で再利用し、本関数側に独自の分類ロジックを重複実装しない
+    /// （Cursor Bugbot 指摘・PR #1797。全ての `CudaError::Driver` を
+    /// 無条件に早期 return すると、本来 `None` としてキャッシュされる
+    /// べき operation-local な構築失敗まで `Self::new` の `Err` になり、
+    /// `context_cache::cached_gemm_auto` へキャッシュされないまま
+    /// `TypedOps<f16>::gemm` の呼び出しのたびに NVRTC フルコンパイルを
+    /// 再試行してしまう〈性能劣化〉）。
+    ///
+    /// `mma`（[`CudaMmaGemm`]）も `wmma` と同じ区別で構築する（#1152・
+    /// PR #1797。`cc < 8.0` の `TensorCoreUnsupported`・NVRTC コンパイル
+    /// 失敗・operation-local な `CudaError::Driver` は `None`・構築失敗
     /// 理由は `mma_construct_error` へ退避し [`Self::mma_unavailable_reason`]
-    /// から読める（`mma` フィールド自体の値は `.ok()` と完全に同値）。
-    /// `mma` は `wmma` の後に構築する（`gemm` の構築失敗はそのまま
-    /// 呼び出し元へ伝播するため、naive/tiled すら構築できない環境で
-    /// 無駄な NVRTC コンパイルを行わない）。
+    /// から読める（`mma` フィールド自体の値は非 sticky エラー時のみ
+    /// `.ok()` と同値）。sticky な `CudaError::Driver` は `wmma` と同じく
+    /// [`Self::new`] の `Err` として伝播する）。`mma` は `wmma` の後に
+    /// 構築する（`gemm` の構築失敗はそのまま呼び出し元へ伝播するため、
+    /// naive/tiled すら構築できない環境で無駄な NVRTC コンパイルを
+    /// 行わない）。
     ///
     /// `CudaMmaGemm::new` は `compile_ptx` 直呼び（LRU カーネル
     /// キャッシュ非経由）で base／swizzle 2 カーネルをコンパイルするため
-    /// `CudaGemmAuto::new` 自体の構築コストは増える。ただし `CudaGemmAuto`
-    /// を構築する本番経路は現状存在せず（`facade`／`backend-cuda::ops`／
-    /// `bench-harness` のいずれからも未参照。`BackendOps::gemm` は f32
-    /// tiled 固定）、到達するのは `tests/gemm_auto.rs`・
-    /// `tests/dispatch_boundary.rs` の `#[ignore]` テストのみのため、
-    /// 利用者向け起動コスト（`startup-bench`）への影響はない。
+    /// `CudaGemmAuto::new` 自体の構築コストは増える。イシュー #1703 以前
+    /// は `CudaGemmAuto` を構築する本番経路が存在しなかった（`facade`／
+    /// `backend-cuda::ops`／`bench-harness` のいずれからも未参照）が、
+    /// 現在は `crate::context_cache::cached_gemm_auto` 経由で
+    /// `TypedOps<half::f16>::gemm`（`crate::typed_f16`。`BackendOps::
+    /// typed_ops_f16()` accessor 経由）から到達する。`cached_gemm_auto`
+    /// はプロセス内キャッシュのため、この構築コストは
+    /// `TypedOps<f16>::gemm` を初めて呼んだときにのみ 1 回だけ支払われる
+    /// （2 回目以降はキャッシュヒット）。`f32` 側 `BackendOps::gemm`
+    /// （tiled 固定・不変）は本経路と無関係であり、利用者向け起動コスト
+    /// （`startup-bench`）への影響はない。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         let gemm = CudaGemm::new(device)?;
-        let wmma = CudaWmmaGemm::new(device).ok();
+        let wmma = match CudaWmmaGemm::new(device) {
+            Ok(w) => Some(w),
+            // sticky な driver エラー（`load_module`/`load_function` 経由の
+            // `CudaError::Driver`）のみは fail-soft フォールバックの対象
+            // ではない（codex-review P0 指摘・PR #1797。`.ok()` で握り潰す
+            // と呼び出し元 `with_driver_call` が sticky エラーを一切観測
+            // できず、ordinal が poison されないまま後続の driver 呼び出し
+            // へ進んでしまう）。呼び出し元へそのまま伝播し、外側の
+            // `with_driver_call`/`observe_cuda_result` に分類・poison
+            // させる（`.claude/rules/security.md` A08 fail-closed）。
+            // operation-local な `CudaError::Driver`（`OUT_OF_MEMORY`／
+            // `NO_BINARY_FOR_GPU`／`INVALID_PTX` 等。`is_sticky_driver_error`
+            // が `false` を返すもの）は sticky ではないため、この分岐には
+            // 含めず下の `Err(_)` 側へフォールスルーさせ `None` として
+            // キャッシュする（Cursor Bugbot 指摘・PR #1797。分類は
+            // `context_cache::classify_cuda_result` を再利用し重複実装
+            // しない）。
+            Err(CudaError::Driver(e)) if crate::context_cache::is_sticky_driver_error(&e) => {
+                return Err(CudaError::Driver(e));
+            }
+            // 対応外 capability（`TensorCoreUnsupported`）・コンパイル失敗
+            // （`NvrtcUnavailable`／`Compile`）・operation-local な
+            // `CudaError::Driver` は引き続き fail-soft に握り潰し、
+            // `run_f16` を tiled へ倒す（既存契約。上記モジュールコメント
+            // 参照）。
+            Err(_) => None,
+        };
         let (mma, mma_construct_error) = match CudaMmaGemm::new(device) {
             Ok(mma) => (Some(mma), None),
+            // 上記 `wmma` と同じ理由: sticky な driver エラーのみフォール
+            // バック対象外として呼び出し元へ伝播する。
+            Err(CudaError::Driver(e)) if crate::context_cache::is_sticky_driver_error(&e) => {
+                return Err(CudaError::Driver(e));
+            }
             Err(err) => (None, Some(err.to_string())),
         };
         let caps = DeviceCaps::cuda(device.compute_capability());

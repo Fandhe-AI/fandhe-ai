@@ -146,14 +146,26 @@ impl CudaWmmaGemm {
         const _: () = assert!(kernels_wmma_opt::WMMA_F16_OPT_A_PAD.is_multiple_of(8));
         const _: () = assert!(kernels_wmma_opt::WMMA_F16_OPT_B_PAD.is_multiple_of(8));
 
-        // opt カーネルは基本版と独立にコンパイルし、失敗を `new` の早期
-        // return に合流させない（`Self::wmma_f16_opt` フィールドの
-        // ドキュメンテーションコメント参照）。失敗理由は
+        // opt カーネルは基本版と独立にコンパイルし、対応外 capability・
+        // NVRTC コンパイル失敗・operation-local な `CudaError::Driver`
+        // （`context_cache::is_sticky_driver_error` が `false` を返すもの）
+        // は `new` の早期 return に合流させない（`Self::wmma_f16_opt`
+        // フィールドのドキュメンテーションコメント参照）。失敗理由は
         // `wmma_f16_opt_error` へ退避し、`wmma_f16_opt_unavailable_reason`
         // 経由でテストから参照できるようにする（`gemm.rs::CudaGemm::new`
-        // の TF32 opt 側と同じ分岐構造）。
+        // の TF32 opt 側と同じ分岐構造）。**一方、`load_module`/
+        // `load_function` 経由の sticky な `CudaError::Driver` のみは
+        // フォールバック対象外**であり `Self::new` 自体の `Err` として
+        // 呼び出し元（`gemm_auto.rs::CudaGemmAuto::new`）へ伝播する
+        // （codex-review P0 指摘・PR #1797。基本版 `wmma_f16` の構築
+        // 失敗〈上の `?` 経由〉と同じ扱いへ揃え、opt 版だけ sticky
+        // エラーを吸収して `with_driver_call` が観測できないまま
+        // 先へ進む抜け道を塞ぐ）。
         let (wmma_f16_opt, wmma_f16_opt_error) = match compile_wmma_f16_opt(device, arch) {
             Ok(func) => (Some(func), None),
+            Err(CudaError::Driver(e)) if context_cache::is_sticky_driver_error(&e) => {
+                return Err(CudaError::Driver(e));
+            }
             Err(err) => (None, Some(err.to_string())),
         };
 
