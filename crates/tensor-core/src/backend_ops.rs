@@ -54,6 +54,7 @@ use crate::error::ShapeError;
 use crate::fusion::FusionPlan;
 use crate::pool_core::PoolStats;
 use crate::scalar_op::{ScalarBinaryOp, ScalarUnaryOp};
+use crate::tensor::checked_numel;
 use crate::typed_ops::TypedOps;
 use half::{bf16, f16};
 
@@ -2096,6 +2097,11 @@ fn default_gemm_batched<T: BackendOps + ?Sized>(
 ///
 /// - `operand` の rank が 2 未満の場合 `BackendError::ShapeMismatch`
 ///   （`ShapeError::RankMismatch { expected: 2, actual }`）を返す。
+/// - `out_batch_shape` の要素数積が `usize` の範囲でオーバーフローする
+///   場合も同様に `BackendError::ShapeMismatch`
+///   （`ShapeError::ElementCountOverflow`）を返す（`checked_numel` 経由。
+///   PR #1810 codex-review 指摘。呼び出し元の契約に依存せず自前で検証
+///   する理由は上記 rank 検証と同じ）。
 ///
 /// `operand` 自身のバッチ shape（先頭 rank−2 軸）が出力バッチ shape
 /// `out_batch_shape` と**異なる**場合（broadcast が必要。中間軸の
@@ -2120,7 +2126,14 @@ pub fn normalize_batched_operand(
     }
     let operand_batch_shape = &operand.shape()[..operand_rank - 2];
 
-    let flat_len: usize = out_batch_shape.iter().product();
+    // `out_batch_shape` の要素数積を `checked_numel`（`tensor.rs` と共有）で
+    // 検査する（PR #1810 codex-review 指摘。本関数は `pub` 公開面のため、
+    // 呼び出し元が渡す `out_batch_shape` の健全性を前提にせず自前で
+    // オーバーフローを検査する。未検証の `iter().product()` のままだと
+    // 例えば `[usize::MAX, 2]` のような値でオーバーフローチェック有効
+    // ビルドで乗算が panic し `.claude/rules/coding-rust.md` の本番経路
+    // panic 禁止方針に反する）。
+    let flat_len = checked_numel(out_batch_shape).map_err(BackendError::ShapeMismatch)?;
     let mut flat_shape = Vec::with_capacity(out_batch_shape.len() + 2);
 
     let normalized = if operand_batch_shape == out_batch_shape {
@@ -3200,6 +3213,23 @@ mod tests {
                 expected: 2,
                 actual: 1
             })
+        ));
+    }
+
+    #[test]
+    fn normalize_batched_operand_rejects_batch_shape_element_count_overflow() {
+        // PR #1810 codex-review 指摘: `out_batch_shape` の要素数積を
+        // 未検証の `iter().product()` で計算すると、正常な rank≥2 の
+        // `operand` を渡していても `out_batch_shape` に
+        // `[usize::MAX, 2]` のような値が混入した場合、オーバーフロー
+        // チェック有効ビルドでは `broadcast_to`／`reshape` へ到達する
+        // 前に乗算自体が panic する。`checked_numel` 経由の事前検査で
+        // `Err(ShapeError::ElementCountOverflow)` を返すことを確認する。
+        let operand = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let err = normalize_batched_operand(&operand, &[usize::MAX, 2], 2, 2).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         ));
     }
 }
