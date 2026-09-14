@@ -2821,7 +2821,7 @@ impl BackendOps for MetalBackendOps {
     }
 
     /// `BackendOps::interpolate` の Metal 実装（イシュー #1757）。
-    /// [`interpolate_out_shape`] で `input`／`size` の shape を再検査
+    /// [`fandhe_ai_tensor_core::interpolate_out_shape`] で `input`／`size` の shape を再検査
     /// してから `interpolate.rs::MetalInterpolate::run_nearest_f32`
     /// へ委譲する（`gather`／`scatter` と同じ二重検査方針）。
     /// interpolate カーネルは gather／scatter と異なり座標配列を

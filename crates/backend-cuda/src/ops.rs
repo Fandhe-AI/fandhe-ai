@@ -3323,7 +3323,7 @@ impl BackendOps for CudaBackendOps {
     }
 
     /// `BackendOps::interpolate` の CUDA 実装（イシュー #1757）。
-    /// [`interpolate_out_shape`] で `input`／`size` の shape を再検査
+    /// [`fandhe_ai_tensor_core::interpolate_out_shape`] で `input`／`size` の shape を再検査
     /// してから `interpolate.rs::CudaInterpolate::run_nearest_f32` へ
     /// 委譲する（`gather`／`scatter` と同じ二重検査方針）。`mode` の
     /// 未知 variant（`InterpolateMode` は `#[non_exhaustive]`。将来の
