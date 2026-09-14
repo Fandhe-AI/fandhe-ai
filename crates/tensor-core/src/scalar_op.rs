@@ -343,6 +343,21 @@ impl ScalarBinaryOp {
             Self::Ne => bool_to_f32(a != b),
         }
     }
+
+    /// `Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne` の 6 種か判定する。呼び出し元
+    /// （`autodiff::grad::vjp` の `Op::ScalarBinary` 分岐）が比較演算の
+    /// VJP を「係数ゼロを upstream に乗算する」経路ではなく「各入力
+    /// shape のゼロテンソルを直接返す」経路へ分岐させるために使う
+    /// （codex-review 指摘・PR #1823: 比較演算は区分定数で勾配が常に
+    /// 恒等的にゼロのため、乗算経由だと upstream が `inf`／`NaN` の
+    /// とき `0.0 * inf = NaN` で汚染されうる。直接ゼロ生成なら
+    /// upstream の値に関わらず常に有限のゼロを返せる）。
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            Self::Gt | Self::Ge | Self::Lt | Self::Le | Self::Eq | Self::Ne
+        )
+    }
 }
 
 #[inline]
