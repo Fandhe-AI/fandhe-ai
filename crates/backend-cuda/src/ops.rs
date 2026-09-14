@@ -38,7 +38,8 @@ use fandhe_ai_tensor_core::{
     MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey,
     SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
     gather_out_shape, interpolate_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape,
-    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -1435,6 +1436,33 @@ fn map_unique_error(err: CudaError) -> BackendError {
     match err {
         CudaError::UniqueSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
         CudaError::InvalidUniqueShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
+}
+
+/// `sort.rs::CudaSort::run_sort_f32` のエラーを `BackendOps::sort`／
+/// `topk` の戻り値へ変換する（イシュー #1741）。`map_unique_error` と
+/// 同じ方針: [`CudaError::SortSizeLimitExceeded`]（バックエンド固有
+/// 上限超過）**のみ** `BackendError::Unsupported` へ写像し
+/// `Var::sort`／`Var::topk` のホストフォールバックへ委ねる。
+/// [`CudaError::InvalidSortShape`]（内部契約違反。呼び出し元の事前
+/// 検証を通過した入力からは実質到達しない防御的経路）は
+/// `ShapeError::ElementCountOverflow` へ、それ以外（driver 不在等）は
+/// 既存 [`map_cuda_error`] へ委譲する。[`CudaError::SortDimSizeTooLarge`]
+/// （`dim_size` が `i32::MAX` を超える）は `InvalidSortShape` とは別に
+/// `ShapeError::IndexRangeOverflow` へ写像する（PR #1844 codex-review
+/// 指摘の是正: CPU 参照実装 `backend-cpu::sort_topk` が同じ状況
+/// （軸内添字の `i32::try_from` 失敗）で返す variant とバックエンド間で
+/// 揃える。Metal 側 `ops.rs::map_sort_prepare_error` も同型に是正済み）。
+fn map_sort_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::SortSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        CudaError::SortDimSizeTooLarge { dim_size } => {
+            BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { index: dim_size })
+        }
+        CudaError::InvalidSortShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
         other => map_cuda_error(other),
@@ -3362,6 +3390,95 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, &[m]).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::sort` の CUDA 実装（イシュー #1741）。順序契約
+    /// （安定性・NaN・±0・決定性）は `fandhe_ai_tensor_core::
+    /// BackendOps::sort` doc の 1〜4 を正とし、`sort.rs::CudaSort::
+    /// run_sort_f32`（64bit 合成キー方式ビットニックソート。
+    /// `sort_model.rs` モジュール doc 参照）が同契約を機構的に満たす。
+    /// `dim` を [`sort_out_shape`] で再検査してから `checked_shape_numel`
+    /// （`x.contiguous()` 前のオーバーフロー検査。`unique`／`gather` と
+    /// 同じ二重検査方針）を適用する。
+    fn sort(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        descending: bool,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape = sort_out_shape(input.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            // 空出力早期リターン（`checked_shape_numel`／`contiguous`
+            // より前。`sort_topk::sort`〈CPU 参照実装〉と同じ方針）。
+            return Ok((
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+            ));
+        }
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        let dim_size = input.shape()[dim];
+        let input_owned = input.contiguous();
+        let input_slice = input_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("sort: input not contiguous".into()))?;
+
+        let s = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_sort(&device)
+            },
+        )?;
+        let (values, index) = self.with_driver_call(&[], map_sort_error, || {
+            s.run_sort_f32(input_slice, input.shape(), dim, descending, dim_size)
+        })?;
+        Ok((
+            Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(index, &out_shape).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// `BackendOps::topk` の CUDA 実装（`sorted=True` 固定。イシュー
+    /// #1741）。[`Self::sort`] と同一エンジン（`sort.rs::CudaSort::
+    /// run_sort_f32`）を `out_len = k`・`descending = largest` で呼ぶ
+    /// だけの薄いラッパー（順序契約 1〜4 は [`Self::sort`] と共有）。
+    fn topk(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        k: usize,
+        largest: bool,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape =
+            topk_out_shape(input.shape(), dim, k).map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Ok((
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+            ));
+        }
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_owned = input.contiguous();
+        let input_slice = input_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("topk: input not contiguous".into()))?;
+
+        let s = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_sort(&device)
+            },
+        )?;
+        let (values, index) = self.with_driver_call(&[], map_sort_error, || {
+            s.run_sort_f32(input_slice, input.shape(), dim, largest, k)
+        })?;
+        Ok((
+            Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(index, &out_shape).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
     /// `BackendOps::scalar_unary` の CUDA 実装（イシュー #1700・#1702）。
     /// `Sqrt`／`Clamp` のみ実装済み（`kernels_scalar_op` モジュール doc
     /// 「スコープ」参照）で、他 kind は `Unsupported` を返しホスト参照
@@ -4302,6 +4419,62 @@ mod tests {
             err,
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         ));
+    }
+
+    /// [`CudaBackendOps::sort`] の回帰テスト（イシュー #1741）。
+    /// `unique_rejects_transposed_shape_with_overflowing_intermediate_
+    /// product` と同じ `[0, 2, usize::MAX]` → `transpose(0, 2)` →
+    /// `[usize::MAX, 2, 0]` の再現手法で、CPU 参照実装（`backend-cpu::
+    /// sort_topk::sort`）と同じ variant（`out_shape` に `0` を含むため
+    /// `Tensor::new(Vec::new(), &out_shape)` 自身が内部の
+    /// `checked_numel` で overflow を検出し `ShapeMismatch
+    /// (ElementCountOverflow)` を返す——空出力早期リターンの経路でも
+    /// driver に触れず・`overflow-checks` 有効ビルドでも panic しない
+    /// ことを確認する。実装計画 §2.4「8」の variant 等価性ゲート）。
+    #[test]
+    fn sort_rejects_transposed_shape_with_overflowing_intermediate_product() {
+        let input_base = Tensor::<f32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let input = input_base.transpose(0, 2).unwrap();
+        assert_eq!(input.shape(), &[usize::MAX, 2, 0]);
+
+        let ops = CudaBackendOps::new(0);
+        let err = BackendOps::sort(&ops, &input, 0, false).expect_err("overflow must be rejected");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    /// [`CudaBackendOps::sort`]／[`CudaBackendOps::topk`] が `dim` 範囲外・
+    /// `k` 超過を driver に触れず `ShapeMismatch` で拒否することを確認
+    /// する（イシュー #1741。`sort_out_shape`／`topk_out_shape` の
+    /// 再検査が `with_driver_call` 到達前に完結する契約）。
+    #[test]
+    fn sort_and_topk_reject_out_of_range_dim_and_k_without_driver_call() {
+        let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+        let ops = CudaBackendOps::new(0);
+
+        let err = BackendOps::sort(&ops, &x, 5, false).expect_err("dim out of range");
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
+
+        let err = BackendOps::topk(&ops, &x, 5, 2, true).expect_err("dim out of range");
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
+
+        let err = BackendOps::topk(&ops, &x, 1, 99, true).expect_err("k exceeds dim size");
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    /// 空出力（`topk(k=0)`）が GPU 起動なしで早期リターンすることを
+    /// 確認する（イシュー #1741。`ops.rs::CudaBackendOps::topk` の
+    /// `out_shape.contains(&0)` 早期リターン経路。driver 不在環境でも
+    /// green のはず）。
+    #[test]
+    fn topk_k_zero_returns_empty_without_driver_call() {
+        let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let (values, index) = BackendOps::topk(&ops, &x, 1, 0, true).expect("k=0 is valid");
+        assert_eq!(values.shape(), &[1, 0]);
+        assert_eq!(index.shape(), &[1, 0]);
     }
 
     /// Cursor Bugbot 指摘（イシュー #1834・PR レビュー）の回帰テスト。

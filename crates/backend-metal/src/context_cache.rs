@@ -285,6 +285,17 @@ pub(crate) fn cached_interpolate(
     })
 }
 
+/// `sort`／`topk` カーネル（`sort.rs::MetalSort`）のコンパイル済み
+/// パイプラインをプロセス内キャッシュから取得する（イシュー #1741。
+/// `cached_unique` と同型）。
+pub(crate) fn cached_sort(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::sort::MetalSort>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::sort::MetalSort>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::sort::MetalSort::new(ctx))
+}
+
 pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAllocator>, MetalError> {
     static CACHE: OnceLock<Mutex<Option<Arc<MetalAllocator>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));

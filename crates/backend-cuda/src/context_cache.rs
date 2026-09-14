@@ -548,6 +548,17 @@ pub(crate) fn cached_interpolate(
     })
 }
 
+/// `device` の `CudaContext` に対応する `sort`／`topk` カーネル
+/// （`sort.rs::CudaSort`）のコンパイル済みハンドルをプロセス内
+/// キャッシュから取得する（イシュー #1741。`cached_unique` と同型）。
+pub(crate) fn cached_sort(device: &CudaDevice) -> Result<Arc<crate::sort::CudaSort>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::sort::CudaSort>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::sort::CudaSort::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する `op`（[`ScalarUnaryOp`]）の
 /// テンプレート生成カーネルをプロセス内キャッシュから取得する
 /// （イシュー #1700。キーは [`ContextKey`]。`cached_gemm` 冒頭コメント

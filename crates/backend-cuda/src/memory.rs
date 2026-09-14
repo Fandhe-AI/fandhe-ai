@@ -677,6 +677,14 @@ impl ReadbackSentinel for u32 {
     const SENTINEL: u32 = 0xDEAD_BEEF;
 }
 
+/// `sort.rs::CudaSort::run_sort_f32` の `index` 出力（元添字）
+/// readback 用（イシュー #1741）。`0` は「事前タッチ」の意図を満たさ
+/// ない（トレイト doc 参照）ため非ゼロの任意値を選ぶ（`0` も有効な
+/// 添字値のため、事前タッチ検知の目的でのみ非ゼロを要求する）。
+impl ReadbackSentinel for i32 {
+    const SENTINEL: i32 = -1;
+}
+
 /// `numel` 要素ぶんの事前タッチ済みホストバッファを確保する
 /// （[`ReadbackDest::PretouchedFresh`] 専用ヘルパー）。`vec![T::SENTINEL;
 /// numel]` は `Vec::from_elem` 経由で全要素を明示的に書き込むため

@@ -99,6 +99,57 @@ impl MetalIndexBuffer {
         })
     }
 
+    /// `len` 要素分の `u64`（8 バイト要素）ゼロ初期化バッファを確保
+    /// する（`sort.rs::MetalSort` の合成キー配列専用。イシュー
+    /// #1741）。GPU カーネル（`sort_build_keys_u64`）が全要素を書く
+    /// 契約のためゼロ初期化自体に意味はないが、`MTLResourceOptions::
+    /// StorageModeShared` バッファの初期状態を決定的にする（`crate::
+    /// buffer::MetalBuffer::new_zeroed` と同じ判断）。`self.len` は
+    /// `u32` readback 専用の [`Self::read_to_vec_u32`] とは非互換の
+    /// ため、本メソッドで確保したバッファに対しては読み出しを行わない
+    /// （呼び出し元は GPU 上でのみキー配列を消費し、ホストへは読み
+    /// 戻さない設計。`sort.rs` 冒頭コメント参照）。
+    pub fn new_zeroed_u64(ctx: &MetalContext, len: usize) -> Result<Self, MetalError> {
+        if len == 0 {
+            return Err(MetalError::ZeroLengthAllocation);
+        }
+        let bytes_len = len
+            .checked_mul(std::mem::size_of::<u64>())
+            .ok_or(MetalError::AllocationSizeOverflow { len })?;
+        let buffer = ctx
+            .device()
+            .newBufferWithLength_options(bytes_len, MTLResourceOptions::StorageModeShared)
+            .ok_or(MetalError::BufferAllocation { bytes: bytes_len })?;
+        Ok(Self { buffer, len })
+    }
+
+    /// `len` 要素分の `i32` ゼロ初期化バッファを確保する（`sort.rs::
+    /// MetalSort::run_sort_f32` の `index` 出力専用。イシュー #1741）。
+    /// [`Self::read_to_vec_i32`] で読み戻す。
+    pub fn new_zeroed_i32(ctx: &MetalContext, len: usize) -> Result<Self, MetalError> {
+        if len == 0 {
+            return Err(MetalError::ZeroLengthAllocation);
+        }
+        let bytes_len = checked_byte_len(len)?;
+        let buffer = ctx
+            .device()
+            .newBufferWithLength_options(bytes_len, MTLResourceOptions::StorageModeShared)
+            .ok_or(MetalError::BufferAllocation { bytes: bytes_len })?;
+        Ok(Self { buffer, len })
+    }
+
+    /// バッファの内容（`i32`）をホストへ読み出し新規 `Vec` として
+    /// コピーする（`sort.rs::MetalSort::run_sort_f32` の `index` 出力
+    /// readback 専用。イシュー #1741）。[`Self::read_to_vec_u32`] と
+    /// 同一の安全性契約（呼び出し元が `dispatch_sync` 完了後にのみ
+    /// 呼ぶこと）。
+    pub fn read_to_vec_i32(&self) -> Vec<i32> {
+        let ptr = self.buffer.contents();
+        // SAFETY: `read_to_vec_u32` と同一の契約（同期済み・排他書き込み
+        // なし・`self.len` は確保時に検証済みの要素数）。
+        unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const i32, self.len) }.to_vec()
+    }
+
     /// `crate::gather_scatter`／`crate::unique` のエンコード関数から
     /// 参照される生バッファ。
     pub fn raw(&self) -> &MtlBuffer {
