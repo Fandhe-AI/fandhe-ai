@@ -80,9 +80,11 @@ pub fn bilinear_scale(in_size: usize, out_size: usize, align_corners: bool) -> f
 ///
 /// `i0 = min(floor(src), in_size-1)`（REQ-8 の縦深防御クランプ。
 /// `in_size==0` は呼び出し元が事前に拒否する契約——`interpolate_
-/// out_shape` は入力側の空間軸 0 を明示検査しないが `Var::interpolate`
-/// は `in_shape` の空間軸が 0 の場合も出力を確定できる——本関数は
-/// `in_size==0` でも `0` を返し `usize` 減算 underflow を起こさない）。
+/// out_shape`（`crates/tensor-core/src/ops_shape.rs`）は入力側の
+/// 空間軸 0 を `shape[axis] == 0` として明示検査済みのため
+/// `Var::interpolate` 経由では本関数へ `in_size==0` は到達しない——
+/// が、本関数はそれでも縦深防御として `in_size==0` でも `0` を返し
+/// `usize` 減算 underflow を起こさない）。
 /// `i1 = min(i0+1, in_size-1)`。`lambda1 = src - i0 as f32`
 /// （クランプ後の `src` との差。`in_size==1` や `dst` が上限に達する
 /// 境界では `i0==i1` になり `lambda1` が非ゼロでも重複コーナーとして
