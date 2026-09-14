@@ -617,15 +617,15 @@ impl BackendOps for CpuBackendOps {
         let plan = fandhe_ai_tensor_core::batched_matmul_plan(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
 
-        if plan.batch_shape.is_empty() {
+        if plan.batch_shape().is_empty() {
             return self.gemm(a, b);
         }
 
-        let (m, k, n) = (plan.m, plan.k, plan.n);
-        let batch_len: usize = plan.batch_shape.iter().product();
+        let (m, k, n) = (plan.m(), plan.k(), plan.n());
+        let batch_len: usize = plan.batch_shape().iter().product();
 
-        let a_norm = fandhe_ai_tensor_core::normalize_batched_operand(a, &plan.batch_shape, m, k)?;
-        let b_norm = fandhe_ai_tensor_core::normalize_batched_operand(b, &plan.batch_shape, k, n)?;
+        let a_norm = fandhe_ai_tensor_core::normalize_batched_operand(a, plan.batch_shape(), m, k)?;
+        let b_norm = fandhe_ai_tensor_core::normalize_batched_operand(b, plan.batch_shape(), k, n)?;
 
         let mn = m.checked_mul(n).ok_or_else(|| {
             BackendError::InvalidArgument("gemm_batched: m * n overflowed usize".into())

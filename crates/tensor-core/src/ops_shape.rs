@@ -105,23 +105,64 @@ pub fn matmul_out_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, Shap
 /// `lhs_batch_shape`/`rhs_batch_shape` は各オペランド自身のバッチ形状
 /// （ブロードキャスト前）であり、出力バッチ添字から各オペランドの
 /// （ブロードキャスト後）フラット添字への写像に使う。
+///
+/// 全フィールドを非公開（`pub(self)` 相当）にし、構築は
+/// [`batched_matmul_plan`]（本モジュール内で不変条件を検査したうえで
+/// 構築する唯一の経路）に限定する。読み取りは下記のアクセサ経由のみ
+/// 許可し、フィールドを個別に差し替え可能な `pub` にしない（PR #1810
+/// codex-review 指摘。全フィールド `pub` だと呼び出し側が
+/// `batch_shape.clear()` 等で `lhs_batch_shape`／`rhs_batch_shape` より
+/// rank の小さい不整合な `batch_shape` を作れてしまい、その後
+/// `operand_batch_index` を呼ぶと `flat_index` 内の `rank -
+/// operand_shape.len()` が `usize` 減算アンダーフローして panic する
+/// （`.claude/rules/coding-rust.md` の本番経路 panic 禁止方針）ため）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchedMatmulPlan {
     /// 出力のバッチ形状（`broadcast_shape(lhs_batch, rhs_batch)`）。
-    pub batch_shape: Vec<usize>,
+    batch_shape: Vec<usize>,
     /// 行列積の m（`lhs` の最後から 2 番目の軸）。
-    pub m: usize,
+    m: usize,
     /// 行列積の内部次元 k（`lhs` の最終軸・`rhs` の最後から 2 番目の軸）。
-    pub k: usize,
+    k: usize,
     /// 行列積の n（`rhs` の最終軸）。
-    pub n: usize,
+    n: usize,
     /// `lhs` 自身のバッチ形状（ブロードキャスト前。`lhs[..rank-2]`）。
-    pub lhs_batch_shape: Vec<usize>,
+    lhs_batch_shape: Vec<usize>,
     /// `rhs` 自身のバッチ形状（ブロードキャスト前。`rhs[..rank-2]`）。
-    pub rhs_batch_shape: Vec<usize>,
+    rhs_batch_shape: Vec<usize>,
 }
 
 impl BatchedMatmulPlan {
+    /// 出力のバッチ形状（`broadcast_shape(lhs_batch, rhs_batch)`）。
+    pub fn batch_shape(&self) -> &[usize] {
+        &self.batch_shape
+    }
+
+    /// 行列積の m（`lhs` の最後から 2 番目の軸）。
+    pub fn m(&self) -> usize {
+        self.m
+    }
+
+    /// 行列積の内部次元 k（`lhs` の最終軸・`rhs` の最後から 2 番目の軸）。
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
+    /// 行列積の n（`rhs` の最終軸）。
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// `lhs` 自身のバッチ形状（ブロードキャスト前。`lhs[..rank-2]`）。
+    pub fn lhs_batch_shape(&self) -> &[usize] {
+        &self.lhs_batch_shape
+    }
+
+    /// `rhs` 自身のバッチ形状（ブロードキャスト前。`rhs[..rank-2]`）。
+    pub fn rhs_batch_shape(&self) -> &[usize] {
+        &self.rhs_batch_shape
+    }
+
     /// 出力 shape（`batch_shape ++ [m, n]`）を返す。
     pub fn out_shape(&self) -> Vec<usize> {
         let mut out = Vec::with_capacity(self.batch_shape.len() + 2);
@@ -704,12 +745,12 @@ mod tests {
     #[test]
     fn batched_matmul_plan_fields() {
         let plan = batched_matmul_plan(&[5, 2, 3], &[5, 3, 4]).unwrap();
-        assert_eq!(plan.batch_shape, vec![5]);
-        assert_eq!(plan.m, 2);
-        assert_eq!(plan.k, 3);
-        assert_eq!(plan.n, 4);
-        assert_eq!(plan.lhs_batch_shape, vec![5]);
-        assert_eq!(plan.rhs_batch_shape, vec![5]);
+        assert_eq!(plan.batch_shape(), &[5]);
+        assert_eq!(plan.m(), 2);
+        assert_eq!(plan.k(), 3);
+        assert_eq!(plan.n(), 4);
+        assert_eq!(plan.lhs_batch_shape(), &[5]);
+        assert_eq!(plan.rhs_batch_shape(), &[5]);
         assert_eq!(plan.out_shape(), vec![5, 2, 4]);
     }
 
@@ -718,7 +759,7 @@ mod tests {
         // lhs は [1, 2, 3]（バッチ 1）、rhs は [5, 3, 4]（バッチ 5）。
         // 出力バッチ添字 i に対し lhs は常に 0、rhs は i を指す。
         let plan = batched_matmul_plan(&[1, 2, 3], &[5, 3, 4]).unwrap();
-        assert_eq!(plan.batch_shape, vec![5]);
+        assert_eq!(plan.batch_shape(), &[5]);
         for i in 0..5 {
             assert_eq!(plan.operand_batch_index(i), (0, i));
         }
@@ -728,7 +769,7 @@ mod tests {
     fn batched_matmul_plan_operand_batch_index_rank_mismatch() {
         // lhs は 2 次元（暗黙のバッチ rank 0）。rhs は [5, 3, 4]。
         let plan = batched_matmul_plan(&[2, 3], &[5, 3, 4]).unwrap();
-        assert_eq!(plan.batch_shape, vec![5]);
+        assert_eq!(plan.batch_shape(), &[5]);
         for i in 0..5 {
             assert_eq!(plan.operand_batch_index(i), (0, i));
         }
@@ -743,7 +784,7 @@ mod tests {
         // ではなく末尾軸比較なので [2,1] vs [3,1] は軸0: 2 vs 3 で
         // 不一致になってしまうため、ここでは一致する形状で検証する。
         let plan = batched_matmul_plan(&[2, 3, 2, 3], &[2, 1, 3, 4]).unwrap();
-        assert_eq!(plan.batch_shape, vec![2, 3]);
+        assert_eq!(plan.batch_shape(), &[2, 3]);
         // out batch (0, 0) -> multi [0, 0] -> lhs idx 0*3+0=0, rhs idx 0*1+0=0
         assert_eq!(plan.operand_batch_index(0), (0, 0));
         // out batch flat 4 -> multi [1, 1] (row-major over [2,3]) ->

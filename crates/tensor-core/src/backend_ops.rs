@@ -50,6 +50,7 @@ use crate::Tensor;
 use crate::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use crate::device::{BackendError, Device};
 use crate::dispatch_failure::DispatchFailureCell;
+use crate::error::ShapeError;
 use crate::fusion::FusionPlan;
 use crate::pool_core::PoolStats;
 use crate::scalar_op::{ScalarBinaryOp, ScalarUnaryOp};
@@ -2036,20 +2037,20 @@ fn default_gemm_batched<T: BackendOps + ?Sized>(
     // 委譲する。バッチをほどく正規化・ループを経由しないため、
     // rank 2 入力に対しては `gemm`/`gemm_fp32_strict` 単体呼び出しと
     // bit 完全一致することが構造的に保証される。
-    if plan.batch_shape.is_empty() {
+    if plan.batch_shape().is_empty() {
         return dispatch(a, b);
     }
 
-    let m = plan.m;
-    let k = plan.k;
-    let n = plan.n;
-    let batch_len: usize = plan.batch_shape.iter().product();
+    let m = plan.m();
+    let k = plan.k();
+    let n = plan.n();
+    let batch_len: usize = plan.batch_shape().iter().product();
 
     // 各オペランドを `[B, m, k]`／`[B, k, n]` の contiguous 3 次元へ
     // 正規化する（`docs/compat-api-scope.md` §1.2 実装記録・イシュー
     // #1715 実装計画 §2.2 の「正規化規則」）。
-    let a_norm = normalize_batched_operand(a, &plan.batch_shape, m, k)?;
-    let b_norm = normalize_batched_operand(b, &plan.batch_shape, k, n)?;
+    let a_norm = normalize_batched_operand(a, plan.batch_shape(), m, k)?;
+    let b_norm = normalize_batched_operand(b, plan.batch_shape(), k, n)?;
 
     let mut out_data: Vec<f32> = Vec::with_capacity(batch_len * m * n);
     for i in 0..batch_len {
@@ -2080,11 +2081,21 @@ fn default_gemm_batched<T: BackendOps + ?Sized>(
     Tensor::new(out_data, &out_shape).map_err(BackendError::ShapeMismatch)
 }
 
-/// [`default_gemm_batched`] が呼ぶ、オペランドをバッチ次元付き
+/// `default_gemm_batched` が呼ぶ、オペランドをバッチ次元付き
 /// contiguous 3 次元 `[B, rows, cols]` へ正規化するヘルパー
 /// （イシュー #1715）。`pub` にして `crates/backend-cpu` の
 /// `CpuBackendOps::gemm_batched` オーバーライドからも再利用できるように
-/// する（既定合成実装と同じ正規化規則を 2 重管理しない）。
+/// する（既定合成実装と同じ正規化規則を 2 重管理しない）。呼び出し元
+/// （同上）はいずれも `batched_matmul_plan`（`ops_shape.rs`）が
+/// 検査済みの rank≥2 shape から `[m, k]`/`[k, n]` を渡すが、本関数は
+/// `pub` 公開面であり呼び出し元の契約に依存せず自前で rank を検証する
+/// （PR #1810 codex-review 指摘。rank<2 のテンソルを渡すと
+/// `operand_rank - 2` が `usize` 減算アンダーフローし、デバッグビルドでは
+/// panic・リリースビルドでは範囲外スライス参照になる。
+/// `.claude/rules/coding-rust.md` の本番経路 panic 禁止方針）。
+///
+/// - `operand` の rank が 2 未満の場合 `BackendError::ShapeMismatch`
+///   （`ShapeError::RankMismatch { expected: 2, actual }`）を返す。
 ///
 /// `operand` 自身のバッチ shape（先頭 rank−2 軸）が出力バッチ shape
 /// `out_batch_shape` と**異なる**場合（broadcast が必要。中間軸の
@@ -2101,6 +2112,12 @@ pub fn normalize_batched_operand(
     cols: usize,
 ) -> Result<Tensor<f32>, BackendError> {
     let operand_rank = operand.shape().len();
+    if operand_rank < 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: operand_rank,
+        }));
+    }
     let operand_batch_shape = &operand.shape()[..operand_rank - 2];
 
     let flat_len: usize = out_batch_shape.iter().product();
@@ -2185,7 +2202,6 @@ pub fn ops_for<'a>(
 mod tests {
     use super::*;
     use crate::buffer::BufferHandle;
-    use crate::error::ShapeError;
     use std::any::Any;
 
     /// テスト専用のモック `BackendOps`。実バックエンドに依存せず
@@ -3156,5 +3172,34 @@ mod tests {
         let standard = ops.gemm_batched(&a, &b).unwrap();
         let strict = ops.gemm_batched_fp32_strict(&a, &b).unwrap();
         assert_eq!(standard.as_slice().unwrap(), strict.as_slice().unwrap());
+    }
+
+    #[test]
+    fn normalize_batched_operand_rejects_rank_below_2() {
+        // PR #1810 codex-review 指摘: `pub` 公開面である
+        // `normalize_batched_operand` は呼び出し元の契約（rank≥2 の shape
+        // のみ渡す）に依存せず、rank 0（スカラー）・rank 1 の入力を自前で
+        // 検出して `Err` を返さなければならない（`operand_rank - 2` の
+        // `usize` 減算アンダーフローによる panic・範囲外スライス参照を
+        // 防ぐため）。
+        let scalar = Tensor::new(vec![1.0f32], &[]).unwrap();
+        let err = normalize_batched_operand(&scalar, &[2], 3, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: 0
+            })
+        ));
+
+        let rank1 = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        let err = normalize_batched_operand(&rank1, &[2], 3, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: 1
+            })
+        ));
     }
 }

@@ -239,7 +239,7 @@ impl<'t> Var<'t> {
     ///
     /// **TASK-12.1d（#164）**: 非 elementwise のため常に実体化済みで
     /// 返る（`push_eager`）。実行は `eval.rs` 直接呼び出しから
-    /// [`matmul_forward`]（`BackendOps` 経由。rank 2 は `ops.gemm`・
+    /// `matmul_forward`（`BackendOps` 経由。rank 2 は `ops.gemm`・
     /// rank≥3 を含む場合は `ops.gemm_batched` へ分岐）へ置き換えた
     /// （TASK-1.9「backend 経由実行への置き換え」・設計書 §3.5.2）。
     /// 入力が elementwise の遅延グラフであった場合は
