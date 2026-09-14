@@ -408,9 +408,12 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
   追加であり承認は不要。ただし facade からの到達は既存 `Var` 再エクスポート
   経由に限り、facade クレートへの新規 `pub` 追加は行わない。
 - **tolerance／baseline は不変**。変更が必要になった場合は別途承認を要する。
-- **#1641 との整合確認**: #1641（Conv 実装方式設計）が NCHW・引数命名・
-  `ceil_mode` の扱いについて本 doc と異なる規約を採用した場合、#1728 着手前
-  に整合を取り直す必要がある（§0.1）。
+- **#1641 との整合確認**: #1641（`docs/conv-ops-design.md` §2／§0.2）で
+  NCHW／NCL・1d→2d 併合・引数命名（`kernel_size`／`stride`／`padding`／
+  `dilation`）が本 doc と同一規約で確定した（整合確認の保留を解消）。
+  `ceil_mode` は Conv に存在せず齟齬なし。`padding` の許容範囲は Conv が
+  意図的に上限なし（Pooling の `padding ≤ floor(kernel/2)` とは異なる）
+  であることも確認済み。
 
 ## 13. #1728〜#1730 への受入テスト一覧
 

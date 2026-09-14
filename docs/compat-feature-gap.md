@@ -259,7 +259,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | PyTorch | TF/Keras | fandhe-ai | 実装に必要なもの | 難度 |
 |---|---|---|---|---|
 | `nn.Linear` | `layers.Dense` | あり（`Linear`。bias 有無・epilogue 融合済み） | - | - |
-| `nn.Conv1d`/`Conv2d` | `layers.Conv1D`/`Conv2D` | **なし** | im2col か直接畳み込みカーネル（CPU/CUDA/Metal）＋VJP（d_input は転置畳み込み・d_weight は相関）＋parity。GEMM 基盤を再利用可能だが新カーネル必須 | XL |
+| `nn.Conv1d`/`Conv2d` | `layers.Conv1D`/`Conv2D` | **なし** | im2col か直接畳み込みカーネル（CPU/CUDA/Metal）＋VJP（d_input は転置畳み込み・d_weight は相関）＋parity。GEMM 基盤を再利用可能だが新カーネル必須。設計: `docs/conv-ops-design.md`（#1641） | XL |
 | `nn.BatchNorm2d` | `layers.BatchNormalization` | **なし**（rmsnorm はあるが batchnorm は統計対象軸・running stats が異なる） | 新 Op（バッチ統計・running mean/var の状態保持）＋3 バックエンド | L |
 | `nn.LayerNorm` | `layers.LayerNormalization` | **なし**（`BackendOps` に layer_norm メソッドなし。onnx-interop にはホスト実装あり・非公開） | `BackendOps::layer_norm` 新設＋VJP＋3 バックエンド（rmsnorm の実装パターンを流用可能） | M〜L |
 | RMSNorm | （TF に相当レイヤーなし。カスタム実装が一般的） | リポ内非公開（`backend-{cpu,cuda,metal}::rmsnorm` に行カーネルあり・`BackendOps`/`Var` 未接続） | `BackendOps::rmsnorm` 新設・`Var`/`nn::RmsNorm` 配線 | M（カーネルは既存） |
