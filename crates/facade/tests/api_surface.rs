@@ -26,7 +26,10 @@
 //! 実体は `fandhe_ai_autodiff::nn::optim::adam` モジュール）を期待集合へ
 //! 追加した。イシュー #1743（親 #1610）で RMSprop（`RmsProp`／
 //! `RmsPropConfig`）・Adagrad（`Adagrad`／`AdagradConfig`）を期待集合へ
-//! 追加した。
+//! 追加した。イシュー #1746（親 #1611）で ReduceLrOnPlateau
+//! （`ReduceLrOnPlateau`／`ReduceLrOnPlateauConfig`／`PlateauMode`／
+//! `ThresholdMode`。実体は `fandhe_ai_autodiff::nn::optim::
+//! reduce_lr_on_plateau` モジュール）を期待集合へ追加した。
 //!
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
 //! （`Cargo.toml`・`src/`）以外は走査しない固定パスのみを対象とし、
@@ -303,6 +306,10 @@ fn optim_module_reexports_exactly_expected_surface() {
         "StepLr",
         "RmsProp",
         "RmsPropConfig",
+        "PlateauMode",
+        "ThresholdMode",
+        "ReduceLrOnPlateau",
+        "ReduceLrOnPlateauConfig",
         "Sgd",
         "SgdConfig",
         "GradScaler",
@@ -710,6 +717,37 @@ fn optim_types_are_reachable_via_facade_only() {
     assert_eq!(
         scaled_value, 2.0,
         "test fixture: scale_loss(1.0, 2.0) は 2.0 のはず"
+    );
+
+    // ReduceLrOnPlateau（イシュー #1746・親 #1611）が facade のみを
+    // 通じて到達可能であることの固定＋既定値ドリフトガード
+    // （PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` の既定値と
+    // 一致することを `nn::optim::reduce_lr_on_plateau` doc と合わせて
+    // 固定する）。
+    let plateau_config = fandhe_ai::optim::ReduceLrOnPlateauConfig::default();
+    assert_eq!(
+        plateau_config.mode,
+        fandhe_ai::optim::PlateauMode::Min,
+        "test fixture: ReduceLrOnPlateauConfig の既定 mode は PyTorch と同じ Min"
+    );
+    assert_eq!(
+        plateau_config.threshold_mode,
+        fandhe_ai::optim::ThresholdMode::Rel,
+        "test fixture: ReduceLrOnPlateauConfig の既定 threshold_mode は PyTorch と同じ Rel"
+    );
+    assert_eq!(
+        plateau_config.patience, 10,
+        "test fixture: ReduceLrOnPlateauConfig の既定 patience は PyTorch と同じ 10"
+    );
+    let mut plateau = fandhe_ai::optim::ReduceLrOnPlateau::new(0.1, plateau_config)
+        .unwrap_or_else(|e| panic!("test fixture: ReduceLrOnPlateau::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &plateau;
+    let updated_lr = plateau
+        .step(1.0)
+        .unwrap_or_else(|e| panic!("test fixture: ReduceLrOnPlateau::step が失敗した: {e}"));
+    assert_eq!(
+        updated_lr, 0.1,
+        "test fixture: 初回観測（改善扱い）では減衰しないはず"
     );
 }
 
