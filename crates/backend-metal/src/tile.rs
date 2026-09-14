@@ -1811,7 +1811,7 @@ pub(crate) const TILE_CLASS_MODE: TileClassMode = TileClassMode::Legacy;
 /// に対し、候補カーネルは MLX steel（`mlx/backend/metal/kernels/steel/
 /// gemm/mma.h::BaseMMAFrag<T,8,8>`）・candle と同様に
 /// `simdgroup_float8x8::thread_elements()`（MSL 標準 API）でレーンごとの
-/// フラグメント要素（2 個。[`thread_elements_coord`] が返す `(fm, fn)`・
+/// フラグメント要素（2 個。`thread_elements_coord` が返す `(fm, fn)`・
 /// `(fm, fn+1)`）を直接読み書きする方式を試す。`SimdgroupLoad`（本番既定）
 /// では `crate::gemm::MetalGemm::pipeline_for_tile` が `gemm_simdgroup_tiled`
 /// を選ぶため既定挙動は不変。`ThreadElements` は `crate::gemm::MetalGemm::
