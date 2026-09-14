@@ -568,7 +568,11 @@ pub(crate) fn validate_tiled_k_bound(k: u32) -> Result<(), CudaError> {
 /// `batch * (per-batch 要素数)` と一致すること（`checked_mul`。`usize`
 /// オーバーフローは `CudaError::InvalidShape` で拒否）を追加で検証する
 /// （REQ-8「シェーダ・カーネル側の手動境界チェックを省略しない」・
-/// OWASP A03。`.claude/rules/security.md`）。
+/// OWASP A03。`.claude/rules/security.md`）。`k == 0` では per-batch
+/// `m*k`/`k*n` がいずれも 0 になり上記 2 検査が自明に通過するため、
+/// `c`（出力）側が使う `batch*m*n` の usize／バイトサイズオーバーフロー
+/// も `fandhe_ai_tensor_core::checked_gemm_batched_output_len` で別途
+/// 検証する（Cursor Bugbot 指摘・PR #1841）。
 pub(crate) fn validate_batched_gemm_dims(
     batch: usize,
     a_len: usize,
@@ -604,6 +608,25 @@ pub(crate) fn validate_batched_gemm_dims(
         .ok_or_else(|| CudaError::InvalidShape {
             detail: format!("batch*k*n overflows usize: batch={batch}, k={k}, n={n}"),
         })?;
+
+    // `k == 0` の場合 `mk`/`kn` はいずれも 0 になり上記 2 検査が
+    // 自明に通過するため、`run_tiled_f32_batched` の zero-fill 経路
+    // （`vec![0.0f32; batch * mn]`）・`alloc_uninit_f32(batch * mn)`
+    // が使う `batch*m*n` の usize／バイトサイズオーバーフローを別途
+    // 検証する（Cursor Bugbot 指摘・PR #1841。`m*k`/`k*n` の非ゼロ性
+    // だけでは `m*n` の大きさを保証しない）。`fandhe_ai_tensor_core`
+    // 側の単一情報源 `checked_gemm_batched_output_len`（イシュー
+    // #1715・PR #1810）を再利用し、`backend-cpu::CpuBackendOps::
+    // gemm_batched` と同じ判定基準に揃える。
+    fandhe_ai_tensor_core::checked_gemm_batched_output_len(batch, m_usize, n_usize).map_err(
+        |_| CudaError::InvalidShape {
+            detail: format!(
+                "batch*m*n overflows usize or exceeds allocation byte limit: \
+                 batch={batch}, m={m}, n={n}"
+            ),
+        },
+    )?;
+
     if a_len != expected_a_len {
         return Err(CudaError::InvalidShape {
             detail: format!(
@@ -7049,6 +7072,47 @@ mod tests {
         // 先に発火するため任意でよい。
         let err =
             validate_batched_gemm_dims(usize::MAX, usize::MAX, usize::MAX, 2, 1, 1).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    /// Cursor Bugbot 指摘（PR #1841）の回帰テスト。`k == 0` では per-batch
+    /// `m*k`/`k*n` がいずれも 0 になり `expected_a_len`/`expected_b_len`
+    /// 検査が `a_len=0`/`b_len=0` で自明に通過するため、`m*n` が大きい
+    /// 形状では `run_tiled_f32_batched` の zero-fill 経路（`vec![0.0f32;
+    /// batch * mn]`）・`alloc_uninit_f32(batch * mn)` が使う `batch*m*n`
+    /// の usize オーバーフローが `m*k`/`k*n` の検査だけでは拒否されない
+    /// 欠落があった。`checked_gemm_batched_output_len` の追加検証により
+    /// 拒否されることを確認する。
+    #[test]
+    fn validate_batched_gemm_dims_rejects_batch_mul_mn_overflow_when_k_is_zero() {
+        // m=n=32768（2^15）で m*n=2^30 は i32::MAX 未満のため
+        // `validate_gemm_dims` 内の i32 積ガードは通過する。k=0 のため
+        // mk=kn=0・a_len=b_len=0 で expected_a_len/expected_b_len 検査も
+        // 素通りする。batch=usize::MAX を掛けると batch*m*n の
+        // `checked_mul` が usize オーバーフローで None を返す。
+        let m: u32 = 1 << 15;
+        let n: u32 = 1 << 15;
+        let batch: usize = usize::MAX;
+        let err = validate_batched_gemm_dims(batch, 0, 0, m, n, 0).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    /// 上記の姉妹テスト: `batch*m*n` 自体は `usize` に収まるが、
+    /// `f32` 要素込みのバイトサイズが `isize::MAX`（`Vec` の allocation
+    /// 上限）を超える形状も拒否されることを確認する
+    /// （`checked_gemm_batched_output_len` のバイト上限検査。`k == 0`
+    /// で `m*k`/`k*n` の検査を迂回する経路）。
+    #[test]
+    fn validate_batched_gemm_dims_rejects_batch_mul_mn_byte_overflow_when_k_is_zero() {
+        // m=n=32768（mn=2^30）・batch=3*2^30 で total=batch*mn=3*2^60。
+        // total*4（バイトサイズ）=3*2^62 は u64::MAX 未満で乗算自体は
+        // オーバーフローしないが、isize::MAX（2^63-1）を超えるため
+        // `checked_gemm_batched_output_len` の明示的なバイト上限検査
+        // （`bytes > isize::MAX as usize`）で拒否される。
+        let m: u32 = 1 << 15;
+        let n: u32 = 1 << 15;
+        let batch: usize = 3usize << 30;
+        let err = validate_batched_gemm_dims(batch, 0, 0, m, n, 0).unwrap_err();
         assert!(matches!(err, CudaError::InvalidShape { .. }));
     }
 

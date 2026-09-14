@@ -2413,11 +2413,11 @@ pub fn checked_gemm_batched_output_len(
 }
 
 /// [`BackendOps::gemm_batched`] の既定合成実装（`default_gemm_batched`
-/// を [`BatchedGemmKind::Standard`] で呼ぶ薄いラッパー）を、
+/// を `BatchedGemmKind::Standard` で呼ぶ薄いラッパー）を、
 /// [`BackendOps::gemm_batched`] をオーバーライド済みのバックエンドから
 /// でも明示的に呼べるようにする公開入口（イシュー #1716）。
 ///
-/// `default_gemm_batched`・[`BatchedGemmKind`] 自体は private のため、
+/// `default_gemm_batched`・`BatchedGemmKind` 自体は private のため、
 /// `crates/backend-cuda` のように精度モード（TF32 opt-in）ごとに経路を
 /// 分岐する必要があるオーバーライドは、この関数を経由して「既定合成
 /// （per-batch `T::gemm` 呼び出し）」へ明示的に戻す。**一般利用の公開

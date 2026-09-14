@@ -1928,7 +1928,7 @@ impl BackendOps for CudaBackendOps {
     ///
     /// `crate::precision::gemm_precision()` が
     /// [`crate::precision::CudaGemmPrecision::Fp32Strict`]（既定）の
-    /// 場合のみ、[`Self::gemm_batched_fp32_strict_impl`]（H2D 2 回・
+    /// 場合のみ、`gemm_batched_fp32_strict_impl`（H2D 2 回・
     /// 出力確保 1 回・バッチループ起動・D2H 1 回のデバイス常駐バッチ
     /// ループ経路。`gemm_fp32_strict` オーバーライドと bit 同一の
     /// カーネル選択）へ委譲する。`Tf32`／`Tf32x3` opt-in 時は
@@ -1956,7 +1956,7 @@ impl BackendOps for CudaBackendOps {
     /// CUDA オーバーライド（イシュー #1716）。`gemm_fp32_strict` と同じ
     /// 理由（`autodiff::grad::matmul_vjp` の rank≥3 分岐が `dyn
     /// BackendOps` 経由で呼ぶ）で `crate::precision::gemm_precision()`
-    /// を一切見ず、常に [`Self::gemm_batched_fp32_strict_impl`] へ直結
+    /// を一切見ず、常に `gemm_batched_fp32_strict_impl` へ直結
     /// する。
     fn gemm_batched_fp32_strict(
         &self,
