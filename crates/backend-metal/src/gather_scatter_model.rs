@@ -276,6 +276,54 @@ pub fn validate_scatter_launch(
     })
 }
 
+/// `MetalGatherScatter::run_one_hot_f32`（`crate::gather_scatter`）の
+/// 起動前検査をカーネル本体から切り離した純関数版（**非微分演算**。
+/// [`validate_gather_launch`]・[`validate_scatter_launch`] と同じ
+/// 理由で Linux 実行可能。イシュー #1755）。`gather`／`scatter` と
+/// 異なり `one_hot_f32` カーネルは座標展開・ストライド配列（`shapes`
+/// バッファ）を一切使わないため、[`validate_shapes_fit_u32`] は呼ばず
+/// [`checked_numel`]／[`validate_launch_len`]（出力要素数の `u32`
+/// 収容）・[`validate_index_range`]（`index` 値域）のみで検証する。
+///
+/// 検査順序: [`fandhe_ai_tensor_core::one_hot_out_shape`]（`num_classes
+/// == 0` を含む shape 検査。`Err(ShapeError::IndexOutOfRange { dim:
+/// index_shape.len(), index: 0, dim_size: 0 })` を返しうる）→
+/// `checked_numel`（出力要素数。0 なら早期 `Ok(0)`）→
+/// `validate_launch_len`（`u32` 収容。`num_classes` 自体は `row_numel`
+/// が 1 以上の下で `numel`（`row_numel` と `num_classes` の積）が
+/// `num_classes` 以上になるため、この検査が `num_classes` の `u32`
+/// 収容も暗に保証する——`row_numel == 0` の場合は直前の早期 `Ok(0)`
+/// で既に return 済み）
+/// → [`validate_index_range`]（`dim` ラベルは `gather`／`scatter` と
+/// 同じ「範囲外添字が属する軸の位置」の意味で `index_shape.len()` を
+/// 渡す。`Var::one_hot`・CPU／CUDA 実装と同じ規約）→ `index` の実
+/// スライス長検証。戻り値は出力要素数（`numel`。0 の場合はカーネル
+/// 起動不要を呼び出し元へ伝える）。
+pub fn validate_one_hot_launch(
+    index: &[i32],
+    index_shape: &[usize],
+    num_classes: usize,
+) -> Result<usize, ShapeError> {
+    let out_shape = fandhe_ai_tensor_core::one_hot_out_shape(index_shape, num_classes)?;
+
+    let numel = checked_numel(&out_shape)?;
+    if numel == 0 {
+        return Ok(0);
+    }
+    validate_launch_len(numel)?;
+
+    validate_index_range(index, index_shape.len(), num_classes)?;
+
+    let row_numel = checked_numel(index_shape)?;
+    if index.len() != row_numel {
+        return Err(ShapeError::ElementCountMismatch {
+            expected: row_numel,
+            actual: index.len(),
+        });
+    }
+    Ok(numel)
+}
+
 /// `gather_f32` カーネルのホスト側逐語モデル（イシュー #1778）。
 ///
 /// 本関数は `pub`（`crate::gather_scatter_model` はクレート公開
@@ -396,6 +444,38 @@ pub fn scatter_model(
         }
     }
 
+    Ok(out)
+}
+
+/// `one_hot_f32` カーネルのホスト側逐語モデル（**非微分演算**。イシュー
+/// #1755）。`shaders/gather_scatter.metal::one_hot_f32` と同じ
+/// `row = gid / num_classes`・`c = gid % num_classes` の単純な整数
+/// 除算・剰余のみ（座標展開・ストライドは使わない）。
+///
+/// 本関数は `pub` かつ `#[cfg(test)]` の外にあるため、[`gather_model`]
+/// と同じ理由で入口に [`validate_one_hot_launch`] を呼び、配列
+/// アクセスで panic しないようにする。`numel == 0` は空配列を返す。
+pub fn one_hot_model(
+    index: &[i32],
+    index_shape: &[usize],
+    num_classes: usize,
+) -> Result<Vec<f32>, ShapeError> {
+    let numel = validate_one_hot_launch(index, index_shape, num_classes)?;
+    if numel == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = vec![0.0f32; numel];
+    for (gid, out_slot) in out.iter_mut().enumerate() {
+        let row = gid / num_classes;
+        let c = gid % num_classes;
+        let index_val = index[row];
+        *out_slot =
+            if index_val >= 0 && (index_val as usize) < num_classes && index_val as usize == c {
+                1.0
+            } else {
+                0.0
+            };
+    }
     Ok(out)
 }
 
@@ -896,6 +976,96 @@ mod tests {
                 dim: 0,
                 index: 0,
                 dim_size: 0
+            }
+        );
+    }
+
+    // --- one_hot（非微分演算。イシュー #1755） ---
+
+    fn assert_one_hot_matches_cpu(index_shape: &[usize], num_classes: usize, seed: u64) {
+        let cpu = CpuBackendOps::new();
+        let idx_numel: usize = index_shape.iter().product();
+        let index_data = i32_index(seed, idx_numel, num_classes);
+
+        let index = Tensor::<i32>::new(index_data.clone(), index_shape).unwrap();
+        let cpu_out = cpu.one_hot(&index, num_classes).unwrap();
+
+        let model_out = one_hot_model(&index_data, index_shape, num_classes).unwrap();
+        assert_eq!(
+            model_out.len(),
+            cpu_out.as_slice().unwrap().len(),
+            "one_hot_model と CPU 出力の要素数が不一致"
+        );
+        for (a, b) in model_out.iter().zip(cpu_out.as_slice().unwrap().iter()) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "one_hot_model が CPU 参照実装と bit 不一致"
+            );
+        }
+    }
+
+    #[test]
+    fn one_hot_model_matches_cpu_1d() {
+        assert_one_hot_matches_cpu(&[4], 3, 4001);
+    }
+
+    #[test]
+    fn one_hot_model_matches_cpu_2d() {
+        assert_one_hot_matches_cpu(&[2, 3], 5, 4002);
+    }
+
+    #[test]
+    fn one_hot_model_matches_cpu_3d() {
+        assert_one_hot_matches_cpu(&[2, 2, 2], 4, 4003);
+    }
+
+    #[test]
+    fn one_hot_model_empty_index_returns_empty_output() {
+        let out = one_hot_model(&[], &[0], 3).unwrap();
+        assert_eq!(out.len(), 0);
+    }
+
+    #[test]
+    fn one_hot_model_rejects_out_of_range_index_instead_of_panicking() {
+        let err = one_hot_model(&[3], &[1], 3).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 1,
+                index: 3,
+                dim_size: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn one_hot_model_rejects_negative_index_instead_of_panicking() {
+        let err = one_hot_model(&[-1], &[1], 3).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 1,
+                index: -1,
+                dim_size: 3,
+            }
+        );
+    }
+
+    /// `num_classes == 0` は `one_hot_out_shape` が構造的に
+    /// `Err(IndexOutOfRange { dim: index_shape.len(), index: 0,
+    /// dim_size: 0 })` を返すため、`validate_one_hot_launch` もこの
+    /// エラーをそのまま透過する（`ops_shape.rs::one_hot_out_shape` doc
+    /// と同じ意味論）。
+    #[test]
+    fn validate_one_hot_launch_rejects_num_classes_zero() {
+        let err = validate_one_hot_launch(&[0], &[1], 0).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 1,
+                index: 0,
+                dim_size: 0,
             }
         );
     }

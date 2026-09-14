@@ -1300,6 +1300,17 @@ pub(crate) fn vjp(
         Op::Contiguous { input } => {
             vec![(input, upstream.clone())]
         }
+        // `Var::one_hot`（**非微分演算**。イシュー #1755）。クラス id
+        // から 0/1 行列を作る操作は入力に対し微分不能なため、
+        // `upstream` の値を無視して常に入力 shape の**明示ゼロ**
+        // テンソルを返す（`Op` doc 参照: 寄与なし〈`vec![]`〉ではなく
+        // 「ゼロ勾配が流れる」ことを `Gradients::get` で観測可能にする
+        // ための意図的な設計）。
+        Op::OneHot { input, .. } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let d_input = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, d_input)]
+        }
     };
     Ok(contributions)
 }
@@ -1609,6 +1620,34 @@ pub(crate) fn topk_with_fallback(
             Ok((values, index))
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::topk(input, dim, k, largest, out_shape)?),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::OneHot`] の forward（`Var::one_hot` 経由）が使う「バックエンド
+/// 実装 → フォールバック」ヘルパー（イシュー #1755）。[`gather_with_
+/// fallback`] と同型: `ops.one_hot` → `Unsupported` のときのみ
+/// `eval::one_hot` へフォールバックし、それ以外のエラーは伝播する
+/// （判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+pub(crate) fn one_hot_with_fallback(
+    ops: &dyn BackendOps,
+    index: &Tensor<i32>,
+    num_classes: usize,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.one_hot(index, num_classes) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::one_hot(index, num_classes, out_shape)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }

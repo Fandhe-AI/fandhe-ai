@@ -291,6 +291,58 @@ pub fn scatter(
     }
 }
 
+/// [`fandhe_ai_tensor_core::BackendOps::one_hot`] の CPU 実装本体
+/// （イシュー #1755）。`out_shape`（＝`index.shape() ++ [num_classes]`）
+/// は呼び出し元（`ops.rs`）が
+/// [`fandhe_ai_tensor_core::one_hot_out_shape`] で検査済みで渡す。
+/// `index` の値は `[0, num_classes)` を独立検査し、範囲外は
+/// `ShapeError::IndexOutOfRange`（`dim` は末尾軸の位置。呼び出し元
+/// `Var::one_hot` の検査と重複するが `gather`／`scatter` と同じ
+/// 「`Var` を経由しない直接呼び出しからの誤書き込み・panic を防ぐ」
+/// 独立検査の方針。モジュール doc・`.claude/rules/security.md` A08）。
+///
+/// 各出力位置は `out[row, c] = (index[row] == c) ? 1.0 : 0.0`
+/// で独立に決まるため（`gather` と同様）決定的集約順序の契約は不要。
+/// `num_classes == 0` は呼び出し元の `one_hot_out_shape` が構造的に
+/// `Err` を返すため本関数へは到達しない前提だが、直接呼び出しからの
+/// 縦深防御として空出力を返す（`0..0` のループが自然に空になるため
+/// 特別扱い不要）。
+pub fn one_hot(
+    index: &Tensor<i32>,
+    num_classes: usize,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, ShapeError> {
+    let index_shape = if out_shape.is_empty() {
+        &[][..]
+    } else {
+        &out_shape[..out_shape.len() - 1]
+    };
+    let row_numel = checked_numel(index_shape)?;
+    let numel = checked_numel(out_shape)?;
+    let mut out = Vec::with_capacity(numel);
+    for row in 0..row_numel {
+        let coords = unravel(row, index_shape);
+        let dim_idx_raw = index.get(&coords);
+        debug_assert!(
+            dim_idx_raw.is_some(),
+            "one_hot: index の走査ロジックにバグがあり範囲外になった（契約違反）"
+        );
+        let dim_idx_raw = dim_idx_raw.unwrap_or(0);
+        if dim_idx_raw < 0 || (dim_idx_raw as usize) >= num_classes {
+            return Err(ShapeError::IndexOutOfRange {
+                dim: index_shape.len(),
+                index: dim_idx_raw as i64,
+                dim_size: num_classes,
+            });
+        }
+        let dim_idx = dim_idx_raw as usize;
+        for c in 0..num_classes {
+            out.push(if c == dim_idx { 1.0 } else { 0.0 });
+        }
+    }
+    Tensor::new(out, out_shape)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +544,91 @@ mod tests {
         let input = Tensor::<f32>::new(vec![0.0; 6], &[3usize, 2usize]).unwrap();
         let err = scatter(&input, 0, &index, &src, ScatterReduce::Overwrite).unwrap_err();
         assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    // --- one_hot ---
+
+    #[test]
+    fn one_hot_basic_2d() {
+        let index = Tensor::<i32>::new(vec![0, 2, 1, 1], &[2, 2]).unwrap();
+        let out_shape = vec![2, 2, 3];
+        let out = one_hot(&index, 3, &out_shape).unwrap();
+        assert_eq!(
+            out.contiguous().as_slice().unwrap(),
+            &[
+                1.0, 0.0, 0.0, // index=0
+                0.0, 0.0, 1.0, // index=2
+                0.0, 1.0, 0.0, // index=1
+                0.0, 1.0, 0.0, // index=1
+            ]
+        );
+    }
+
+    #[test]
+    fn one_hot_1d_index() {
+        let index = Tensor::<i32>::new(vec![1, 0], &[2]).unwrap();
+        let out_shape = vec![2, 2];
+        let out = one_hot(&index, 2, &out_shape).unwrap();
+        assert_eq!(out.contiguous().as_slice().unwrap(), &[0.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn one_hot_strided_index() {
+        // 転置済み（非 contiguous）の index からも `Tensor::get`
+        // 経由で正しく読めることを確認する（モジュール doc の
+        // strided 入力対応方針）。
+        let base = Tensor::<i32>::new(vec![0, 1, 2, 1], &[2, 2]).unwrap();
+        let index = base.transpose(0, 1).unwrap();
+        assert_eq!(index.shape(), &[2, 2]);
+        // transpose 後の論理値: [[0, 2], [1, 1]]
+        let out_shape = vec![2, 2, 3];
+        let out = one_hot(&index, 3, &out_shape).unwrap();
+        assert_eq!(
+            out.contiguous().as_slice().unwrap(),
+            &[
+                1.0, 0.0, 0.0, // index=0
+                0.0, 0.0, 1.0, // index=2
+                0.0, 1.0, 0.0, // index=1
+                0.0, 1.0, 0.0, // index=1
+            ]
+        );
+    }
+
+    #[test]
+    fn one_hot_index_out_of_range() {
+        let index = Tensor::<i32>::new(vec![0, 3], &[2]).unwrap();
+        let out_shape = vec![2, 3];
+        let err = one_hot(&index, 3, &out_shape).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 1,
+                index: 3,
+                dim_size: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn one_hot_negative_index_out_of_range() {
+        let index = Tensor::<i32>::new(vec![-1], &[1]).unwrap();
+        let out_shape = vec![1, 3];
+        let err = one_hot(&index, 3, &out_shape).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 1,
+                index: -1,
+                dim_size: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn one_hot_empty_index() {
+        let index = Tensor::<i32>::new(Vec::new(), &[0]).unwrap();
+        let out_shape = vec![0, 3];
+        let out = one_hot(&index, 3, &out_shape).unwrap();
+        assert_eq!(out.numel(), 0);
     }
 }

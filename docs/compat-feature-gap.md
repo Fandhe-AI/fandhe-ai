@@ -1027,3 +1027,17 @@ bool 引数との直接合成も #1613 待ち）。VJP は両入力とも常に�
 （比較演算は局所的に階段関数のため微分不可能）。CUDA／Metal 実機での
 facade parity 実測は本エージェント実行環境に実機がないため未実施の
 まま申し送る。
+
+#1755 で `one_hot`（`torch.nn.functional.one_hot`／`tf.one_hot` 相当。
+**非微分演算**）が実装済みになった（`Var::one_hot`・`Op::OneHot`。
+VJP は明示ゼロ〈`Gradients::get` で観測可能な形で入力へゼロ勾配を流す。
+寄与なしではない〉）。CPU（`backend-cpu::gather_scatter::one_hot`）・
+CUDA（`kernels_gather_scatter::ONE_HOT_F32`。座標展開・ストライドを
+使わない `row = idx / num_classes`・`c = idx % num_classes` の単純な
+整数除算・剰余のみ）・Metal（`shaders/gather_scatter.metal::
+one_hot_f32`。CUDA 版と同型の設計）の 3 バックエンドとも専用カーネルを
+実装済み（既定 `Unsupported` フォールバックのホスト参照実装
+`eval::one_hot` も整備済み）。facade 新規公開面はない（既存 `Var` 再
+エクスポート経由）。CUDA・Metal 実機での facade parity 実測（`#[ignore]`
+分離済み）は本エージェント実行環境に実機がないため未実施のまま
+申し送る。

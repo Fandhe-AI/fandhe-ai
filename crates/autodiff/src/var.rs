@@ -19,14 +19,14 @@ use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
     ShapeError, Tensor, broadcast_shape, concat_out_shape, gather_out_shape, matmul_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    one_hot_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
-    concat_with_fallback, gather_with_fallback, scalar_binary_with_fallback,
+    concat_with_fallback, gather_with_fallback, one_hot_with_fallback, scalar_binary_with_fallback,
     scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
@@ -2356,6 +2356,84 @@ impl<'t> Var<'t> {
             value,
         );
         Ok((Var::from_raw(self.tape, id), index))
+    }
+
+    /// クラス id 列を one-hot 行列へ展開する（`torch.nn.functional.
+    /// one_hot`／`tf.one_hot` 相当。**非微分演算**。イシュー #1755）。
+    /// `self` はクラス id を f32 値として保持する追跡 `Var`（専用の
+    /// integer `Var` 型は無いため、整数値を f32 で表現する既存方針を
+    /// 踏襲。`Var::gather` の `index` 引数と異なり、本メソッドは
+    /// `self` 自身がクラス id を保持する——「勾配計算グラフ上の入力」
+    /// であることを明示するため `Op::OneHot` に `input: NodeId` として
+    /// 記録し、VJP でゼロ勾配を流す対象にする）。出力 shape は
+    /// `self.shape() ++ [num_classes]`
+    /// （[`fandhe_ai_tensor_core::one_hot_out_shape`]）。
+    ///
+    /// 検査順序: ①`num_classes >= 1`（違反は `AutodiffError::
+    /// InvalidArgument`。`num_classes == 0` 自体は
+    /// `one_hot_out_shape` が `ShapeError::IndexOutOfRange` を返すが、
+    /// 専用のわかりやすいメッセージを先に出す）→ ②
+    /// [`fandhe_ai_tensor_core::one_hot_out_shape`] で出力 shape を
+    /// 確定（違反は `AutodiffError::Shape`）→ ③`self` を層 1 実体化
+    /// → ④全要素が有限・整数値（`fract() == 0.0`）・
+    /// `0 <= v < num_classes` であることを検査（違反は
+    /// `InvalidArgument`。[`Self::gather`] の `index` 範囲検査と同じ
+    /// パターン）→ ⑤検証済み値を `Tensor<i32>`（`self.shape()` と同一
+    /// shape の contiguous）へ変換 → ⑥`one_hot_with_fallback`
+    /// （`Unsupported` のときのみホスト参照実装 `eval::one_hot` へ
+    /// フォールバック）→ ⑦戻り shape 再検証（`.claude/rules/
+    /// security.md` A08）→ ⑧`push_eager`。
+    pub fn one_hot(&self, num_classes: usize) -> Result<Var<'t>, AutodiffError> {
+        if num_classes == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "Var::one_hot: num_classes は 1 以上でなければならない".into(),
+            ));
+        }
+        let in_shape = self.shape();
+        let out_shape = one_hot_out_shape(&in_shape, num_classes).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let raw = eval::dense_vec(&input_val);
+        let mut index_data = Vec::with_capacity(raw.len());
+        for v in raw {
+            if !v.is_finite() {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Var::one_hot: 非有限値 {v} はクラス id として使えない"
+                )));
+            }
+            if v.fract() != 0.0 {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Var::one_hot: 非整数値 {v} はクラス id として使えない"
+                )));
+            }
+            // `v < 0.0` を先に検査するため、`v as usize`（f32 → usize
+            // の `as` キャストは Rust 1.45 以降 saturating で UB は
+            // 起きない）の評価に到達するのは非負値のみ（`Var::gather`
+            // の index 範囲検査と同じ短絡順序）。
+            if v < 0.0 || (v as usize) >= num_classes {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Var::one_hot: クラス id {v} が範囲 [0, {num_classes}) を外れている"
+                )));
+            }
+            index_data.push(v as i32);
+        }
+        let index = Tensor::new(index_data, &in_shape).map_err(AutodiffError::Shape)?;
+
+        let value = one_hot_with_fallback(self.tape.ops(), &index, num_classes, &out_shape)?;
+        if value.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(Op::OneHot { input: self.id }, value);
+        Ok(Var::from_raw(self.tape, id))
     }
 
     /// LSTM セル 1 step（イシュー #1647・設計 `docs/autodiff-rnn-cell-

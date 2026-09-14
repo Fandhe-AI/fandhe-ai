@@ -417,6 +417,41 @@ pub fn row_softmax_layout(
     Ok(Some((rows, cols)))
 }
 
+/// `one_hot`（`Var::one_hot`。PyTorch `F.one_hot`／TF `tf.one_hot` 相当。
+/// イシュー #1755）の出力 shape を検査・計算する。非微分演算（VJP は
+/// ゼロ扱い。`crates/autodiff/src/grad.rs::vjp` の `Op::OneHot` 分岐）
+/// であり、本関数は `index_shape`（クラス id を保持する整数値
+/// テンソルの shape）へ末尾軸として `num_classes` を付加した shape を
+/// 返す。`gather_out_shape` と異なり `index_shape` と `input_shape` を
+/// 突き合わせる対象が無いため rank 検査は不要。
+///
+/// - `num_classes == 0` の場合、付加される軸のサイズが 0 になり
+///   如何なる添字も範囲外になる（“0 個のクラスに 1 つを立てる”操作が
+///   意味を持たない）ため、新規 `ShapeError` variant を追加せず
+///   `ShapeError::IndexOutOfRange { dim: index_shape.len(), index: 0,
+///   dim_size: 0 }` を返す（`dim` は付加される軸の位置。既存
+///   `IndexOutOfRange` の「範囲外添字」という意味論を「`num_classes`
+///   軸そのものが空」というケースへ拡張する解釈）。
+/// - 出力 shape `index_shape ++ [num_classes]` の要素数積のオーバー
+///   フローは `checked_numel` で検査し `ShapeError::ElementCountOverflow`
+///   を返す（`matmul_out_shape` 等と同型）。
+pub fn one_hot_out_shape(
+    index_shape: &[usize],
+    num_classes: usize,
+) -> Result<Vec<usize>, ShapeError> {
+    if num_classes == 0 {
+        return Err(ShapeError::IndexOutOfRange {
+            dim: index_shape.len(),
+            index: 0,
+            dim_size: 0,
+        });
+    }
+    let mut out = index_shape.to_vec();
+    out.push(num_classes);
+    checked_numel(&out)?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,5 +1041,38 @@ mod tests {
     fn topk_out_shape_k_zero() {
         let out = topk_out_shape(&[3, 4], 1, 0).unwrap();
         assert_eq!(out, vec![3, 0]);
+    }
+
+    // --- one_hot_out_shape ---
+
+    #[test]
+    fn one_hot_out_shape_basic() {
+        let out = one_hot_out_shape(&[2, 2], 3).unwrap();
+        assert_eq!(out, vec![2, 2, 3]);
+    }
+
+    #[test]
+    fn one_hot_out_shape_1d_index() {
+        let out = one_hot_out_shape(&[4], 5).unwrap();
+        assert_eq!(out, vec![4, 5]);
+    }
+
+    #[test]
+    fn one_hot_out_shape_num_classes_zero() {
+        let err = one_hot_out_shape(&[2, 2], 0).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 2,
+                index: 0,
+                dim_size: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn one_hot_out_shape_element_count_overflow() {
+        let err = one_hot_out_shape(&[usize::MAX], 2).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
     }
 }

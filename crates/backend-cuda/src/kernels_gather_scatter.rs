@@ -2,7 +2,7 @@
 //! 相当）の CUDA C カーネルソース（NVRTC 実行時コンパイル用の静的文字列。
 //! イシュー #1777・親イシュー #1638）。
 //!
-//! `gather_scatter.rs`（呼び出し元）は本モジュールの 3 定数を `nvrtc::
+//! `gather_scatter.rs`（呼び出し元）は本モジュールの 4 定数を `nvrtc::
 //! compile_ptx` に渡し `CudaFunction` を得る。`kernels_reduce.rs`・
 //! `kernels_scalar_op.rs` と同じ理由でソースを `nvcc` 事前コンパイルせず
 //! 文字列のまま埋め込む（ビルド時に nvcc/CUDA ヘッダを一切要求しない。
@@ -16,7 +16,7 @@
 //! 一過性のスカラー変数（`rem`／`index_base`／`dim_coord`）だけで処理し、
 //! 座標配列を一切保持しない（rank に上限を設けない設計）。
 //!
-//! # 3 カーネルの共通構造
+//! # 3 カーネルの共通構造（座標展開が必要な gather／scatter 系）
 //!
 //! いずれも「出力位置 1 個 = 1 スレッド」で、`idx`（出力 flat 添字）を
 //! `out_shape`（行優先の各軸サイズ配列。`rank` 要素）で末尾軸から
@@ -50,13 +50,19 @@
 //!   決定的集約契約。CPU 側の row-major 走査順と一致する根拠は
 //!   `gather_scatter.rs` モジュール doc を参照）。
 //!
+//! [`ONE_HOT_F32`]（`one_hot_f32`。**非微分演算**。イシュー #1755）は
+//! 上記 3 カーネルと異なり座標展開・ストライドを一切使わない: 出力の
+//! 末尾軸が常に連続 `num_classes` 個の one-hot 行であるため、`row =
+//! idx / num_classes`・`c = idx % num_classes` の整数除算・剰余だけで
+//! 読み書き位置が決まる。
+//!
 //! # REQ-8（カーネル境界検査規約）
 //!
 //! 全カーネルで `idx < numel` を維持する（グリッドがちょうど割り切れない
 //! 場合の末尾ブロック対策）。ベクトル化ロード等の最適化は本イシューでは
 //! 適用しない（`.claude/rules/coding-rust.md`）。
 
-/// 1 スレッドブロックあたりのスレッド数（3 カーネル共通。
+/// 1 スレッドブロックあたりのスレッド数（4 カーネル共通。
 /// `kernels_reduce::REDUCE_BLOCK_DIM`・`kernels_elementwise::EW_BLOCK_DIM`
 /// と同じ値・同じ理由）。
 pub const GATHER_SCATTER_BLOCK_DIM: u32 = 256;
@@ -201,6 +207,35 @@ extern "C" __global__ void scatter_add_f32(
 }
 "#;
 
+/// `torch.nn.functional.one_hot`／`tf.one_hot` 相当（**非微分演算**。
+/// イシュー #1755）。出力 flat 添字 `idx` から `row = idx / num_classes`・
+/// `c = idx % num_classes` を導出し（座標展開・ストライド計算が不要な
+/// 単純な整数除算・剰余のみで済む——`gather`／`scatter` と異なり出力の
+/// 末尾軸が常に連続 `num_classes` 個の one-hot 行であるため）、
+/// `out[idx] = (index[row] == c) ? 1.0f : 0.0f` を書く。`index` の値が
+/// `[0, num_classes)` 範囲内であることは呼び出し元（`ops.rs`）がホスト
+/// 側で検査済みだが、REQ-8 の縦深防御としてカーネル内でも範囲外添字を
+/// 検査し、範囲外なら該当行を全て `0.0f` にする（該当行内のどの `c` に
+/// も一致しないため実質的に等価だが、明示的な安全策として記述する）。
+pub const ONE_HOT_F32: &str = r#"
+extern "C" __global__ void one_hot_f32(
+    const int* __restrict__ index,
+    float* __restrict__ out,
+    int num_classes,
+    int numel)
+{
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numel) {
+        long long row = idx / num_classes;
+        long long c = idx % num_classes;
+        int index_val = index[row];
+        out[idx] = (index_val >= 0 && index_val < num_classes && (long long)index_val == c)
+            ? 1.0f
+            : 0.0f;
+    }
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,7 +245,12 @@ mod tests {
     /// 同型の文字列テスト）。
     #[test]
     fn all_kernels_include_bounds_check() {
-        for src in [GATHER_F32, SCATTER_OVERWRITE_F32, SCATTER_ADD_F32] {
+        for src in [
+            GATHER_F32,
+            SCATTER_OVERWRITE_F32,
+            SCATTER_ADD_F32,
+            ONE_HOT_F32,
+        ] {
             assert!(
                 src.contains("if (idx < numel)"),
                 "kernel source must retain the idx < numel bounds check: {src}"
@@ -229,6 +269,7 @@ mod tests {
         // のため `double` を使わない。
         assert!(!SCATTER_OVERWRITE_F32.contains("double"));
         assert!(!GATHER_F32.contains("double"));
+        assert!(!ONE_HOT_F32.contains("double"));
     }
 
     /// gather は範囲外 index 値を（REQ-8 の縦深防御として）安全側の
@@ -252,7 +293,12 @@ mod tests {
     /// イシュー #1675 の教訓を踏襲）。
     #[test]
     fn all_kernels_use_long_long_for_flat_index_arithmetic() {
-        for src in [GATHER_F32, SCATTER_OVERWRITE_F32, SCATTER_ADD_F32] {
+        for src in [
+            GATHER_F32,
+            SCATTER_OVERWRITE_F32,
+            SCATTER_ADD_F32,
+            ONE_HOT_F32,
+        ] {
             assert!(src.contains("long long idx"));
         }
     }
