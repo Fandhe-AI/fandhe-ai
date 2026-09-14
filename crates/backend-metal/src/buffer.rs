@@ -270,7 +270,9 @@ impl MetalBuffer {
     /// 呼び出し元は `read_to_vec`（直後に `to_vec()` してスライスを
     /// 破棄）と `with_host_view`（借用をクロージャ内に閉じ込め、GPU
     /// dispatch を渡さない契約。同メソッドのドキュメンテーションコメント
-    /// 参照）の 2 箇所のみ）。
+    /// 参照）の 2 箇所に加え、`#[cfg(test)]` 限定の診断専用呼び出し元
+    /// （[`Self::read_into_slice`]。イシュー #1695）が本番ビルドの
+    /// コンパイル対象外で存在する）。
     ///
     /// # Safety 境界（`unsafe` 使用箇所 2/4。イシュー #1335 で
     /// `read_to_vec` から本メソッドへ移設）
@@ -315,6 +317,38 @@ impl MetalBuffer {
         // 評価が終わるまでの間のみ生存する一時値であり、その間に
         // 新規 GPU dispatch を挟む経路は存在しない（単一式内で完結）。
         unsafe { self.as_host_slice() }.to_vec()
+    }
+
+    /// バッファの内容を既存の `dest` へコピーする（確保を伴わない
+    /// memcpy。`read_to_vec` の「新規 `Vec` を確保して返す」のに対し、
+    /// 本メソッドは呼び出し元が既に確保済みの宛先を再利用する版）。
+    ///
+    /// イシュー #1695（Metal 版 readout 4 腕診断ハーネス。CUDA 側
+    /// `readout_regression_diag_tests_1436.rs::ReadoutArm::
+    /// PretouchedReusedDest` 腕の `stream.memcpy_dtoh(&view, &mut dest)`
+    /// に対応する既存宛先版 readback）専用の `#[cfg(test)]` 限定ヘルパ。
+    /// 本番経路（`memory.rs`／`ops.rs`）はこの API を使わない
+    /// （`read_to_vec` のまま不変）。
+    ///
+    /// 呼び出し元は `dest.len() == self.len` を満たす必要がある。
+    /// `write_slice_at` の隣接メソッドが `debug_assert!` ＋呼び出し元側
+    /// の事前検証（本番ホットパス）で境界を守るのに対し、本メソッドは
+    /// テスト専用でホットパスではないため、検査を常時有効な
+    /// `assert_eq!` にしている（REQ-8「手動境界チェックを省略しない」を
+    /// テスト専用コードでも緩めない）。
+    #[cfg(test)]
+    pub(crate) fn read_into_slice(&self, dest: &mut [f32]) {
+        assert_eq!(
+            dest.len(),
+            self.len,
+            "read_into_slice: dest.len() must equal the buffer's logical length"
+        );
+        // SAFETY: `as_host_slice()` の Safety 契約 2 点を満たす（`read_to_vec`
+        // と同じ理由）: (1) 呼び出し元（診断テスト）が `MetalContext::
+        // synchronize` 済みの `MetalBuffer` を渡す契約（`read_to_vec` と
+        // 同一）。(2) 返す借用は `copy_from_slice` 呼び出しの単一式内で
+        // のみ生存し、その間に新規 GPU dispatch を挟む経路は存在しない。
+        dest.copy_from_slice(unsafe { self.as_host_slice() });
     }
 
     /// バッファの内容を全要素 0 で上書きする。
