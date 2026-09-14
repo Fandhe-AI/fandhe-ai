@@ -3018,9 +3018,13 @@ impl<'t> Var<'t> {
     /// **数値規約**: `std` は `f64` の分散から `f64` で `sqrt` した
     /// 値を 1 回だけ `f32` へ downcast する（`var == 0` の場合
     /// `std == 0`）。勾配（`Op::Std` の VJP）は `std == 0`（縮約対象
-    /// が全て同値の定数列）の要素で `0.0 / 0.0 = NaN` を伝播する。
-    /// これは PyTorch `torch.std` backward が定数入力で `NaN` を
-    /// 返す挙動と一致する意図的な仕様（`grad::std_vjp` doc 参照）。
+    /// が全て同値の定数列）の要素でゼロ勾配へ明示的にマスクする
+    /// （`0.0 / 0.0` の `NaN` は伝播しない）。これは PyTorch
+    /// `torch.std` backward（`std_backward`。`FunctionsManual.cpp`）が
+    /// `masked_fill_(result == 0, 0)` で行うマスクと一致する規約
+    /// （`grad::std_vjp` doc 参照）。**`Var::var(..).sqrt()`（新規
+    /// `Op` を追加しない合成）とは異なる**点に注意——その合成では
+    /// `Var::sqrt` の `y == 0` 規約により `0.0 / 0.0 = NaN` を返す。
     ///
     /// **エラー契約**: [`Var::var`] と同じ（縮約対象の要素数 `n` が
     /// `0` または `n <= correction` の場合は

@@ -2727,10 +2727,15 @@ fn var_vjp(
 /// 有限でも、途中の `var` の勾配項は無限大になりうるため。
 /// codex-review P2 指摘）。本関数は `(x_i − mean)` と `denom · std` の
 /// 除算を最後まで `f64` に保つことでこれを回避する。`std == 0`
-/// （縮約対象が全て同値の定数列）の要素は `0.0 / 0.0` となり `NaN`
-/// を伝播する（`Var::std` の doc「数値規約」・`Var::sqrt` の
-/// `y == 0` 規約と同じ意図的な挙動——PyTorch `torch.std` backward が
-/// 定数入力で `NaN` を返す挙動とも一致する）。
+/// （縮約対象が全て同値の定数列）の要素は PyTorch `std_backward`
+/// （`FunctionsManual.cpp`）の
+/// `masked_fill_(result == 0, 0)` と同じ規約でゼロ勾配へ明示的に
+/// マスクする（`0.0 / 0.0` の `NaN` を伝播させない。判定は forward
+/// が実際に返す `f32` 丸め後の値と同じ丸めで行う）。これは
+/// `Var::var(..).sqrt()`（新規 `Op` を追加しない合成）を使った場合の
+/// 挙動——`Var::sqrt` の `y == 0` 規約により `0.0 / 0.0 = NaN` を
+/// 返す——とは意図的に異なる（`Var::std` の doc「数値規約」参照。
+/// codex-review 指摘。PR #1826 レビュー是正）。
 fn std_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
@@ -2766,6 +2771,14 @@ fn std_vjp(
                 sq_acc += d * d;
             }
             let std = (sq_acc / denom).sqrt();
+            // PyTorch `std_backward`（FunctionsManual.cpp）は forward の
+            // `f32` 出力 `result` が 0 の要素を `masked_fill_(result == 0,
+            // 0)` で明示的にゼロ勾配へ落としてから `var_backward` へ渡す
+            // （`0 / 0` の NaN 伝播を避ける）。ここでは `std` を 1 回
+            // `f32` へ downcast した値（forward が実際に返す `result` と
+            // 同じ丸め）で判定し、同じ規約に揃える（codex-review 指摘。
+            // PR #1826 レビュー是正）。
+            let std_is_zero = (std as f32) == 0.0;
             let out_idx = o * inner + i;
             let g_val = g_data.get(out_idx).copied().unwrap_or_else(|| {
                 debug_assert!(
@@ -2777,6 +2790,10 @@ fn std_vjp(
             let denom_std = denom * std;
             for a in 0..axis_len {
                 let src = (o * axis_len + a) * inner + i;
+                if std_is_zero {
+                    out[src] = 0.0;
+                    continue;
+                }
                 let d = data[src] as f64 - mean;
                 out[src] = (g_val * d / denom_std) as f32;
             }

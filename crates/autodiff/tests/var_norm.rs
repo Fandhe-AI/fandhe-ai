@@ -315,6 +315,53 @@ fn var_constant_input_gradient_is_zero() {
 }
 
 #[test]
+fn std_constant_input_gradient_is_zero_not_nan() {
+    // 定数入力（std == 0）の勾配は PyTorch `torch.std` backward の
+    // `masked_fill_(result == 0, 0)` と同じ規約でゼロへ明示的に
+    // マスクされる（`0.0 / 0.0 = NaN` を伝播しない。codex-review
+    // 指摘・PR #1826 レビュー是正）。`dim=None`／`Some` の両方と
+    // `correction` 0／1 の両方で確認する。
+    for correction in [0usize, 1usize] {
+        // dim=None（全体縮約）。
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![4.0, 4.0, 4.0, 4.0], &[4]));
+        let loss = x.std(None, correction).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+        for i in 0..4 {
+            let v = dx.get(&[i]).unwrap();
+            assert!(
+                v == 0.0 && !v.is_nan(),
+                "correction={correction} dim=None: dx[{i}]={v} は 0.0 であるべき"
+            );
+        }
+
+        // dim=Some（軸縮約。1 行のみ定数・もう 1 行は非定数）。
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 4.0, 4.0], &[2, 3]));
+        let loss = x.std(Some(1), correction).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+        // 行 1（定数列 [4,4,4]）の勾配はすべて 0（NaN ではない）。
+        for j in 0..3 {
+            let v = dx.get(&[1, j]).unwrap();
+            assert!(
+                v == 0.0 && !v.is_nan(),
+                "correction={correction} dim=Some(1) row1: dx[1,{j}]={v} は 0.0 であるべき"
+            );
+        }
+        // 行 0（非定数列）の勾配は有限。
+        for j in 0..3 {
+            let v = dx.get(&[0, j]).unwrap();
+            assert!(
+                v.is_finite(),
+                "correction={correction} dim=Some(1) row0: dx[0,{j}]={v} は有限であるべき"
+            );
+        }
+    }
+}
+
+#[test]
 fn norm_l2_zero_vector_gradient_is_zero() {
     // ‖0‖ = 0 の点では L2 ノルムの勾配は定義上 0（`matrix_norm_vjp` の
     // ゼロノルム分岐と同じ規約）。
