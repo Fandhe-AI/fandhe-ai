@@ -817,6 +817,22 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 取る facade API）は引き続き未接続で、本表の「未実装（欠落側）」列の評価
 （`Var` レベルの mixed precision）は変わらない。
 
+## #1636（#1707〜#1709）の追補
+
+Metal バックエンドの `ScalarOp`（`ScalarUnaryOp`／`ScalarBinaryOp`。
+`tensor-core::scalar_op`）カーネルが CUDA（#1700〜#1702）と同等の範囲まで
+実装済みになった。#1707（算術系 `Sub`／`Div`／`Pow`／`Sqrt`）・#1708
+（超越関数系 `Neg`／`Abs`／`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`）に
+加え、#1709 で比較演算 6 種（`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`）＋`Clamp`
+（初のペイロード付き unary kind）を実装し、親イシュー #1636 の対象 kind
+をすべて実装完了した（`crates/backend-metal/src/scalar_op_source.rs`。
+MSL テンプレート生成＋`context_cache` のプロセス内キャッシュ）。
+facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_binary`
+の実装追加のみ）。`Var` 公開メソッド・facade 配線は引き続き #1593／#1595
+の担当。M4 Max 実機での parity・キャッシュ非分裂テスト（`#[ignore]`）は
+本イシューの実行環境に Apple Silicon 実機がないため未実施のまま Mac
+セッションへ申し送り。
+
 ## #1652 の追補（ONNX import の facade 公開可否の設計判断）
 
 §1.9・347 行目「ONNX import」のスナップショット本文（`onnx-interop::onnx::interp`
@@ -836,11 +852,34 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 - #1775（ONNX export の facade 公開）・#1754（safetensors save／load の facade
   再公開）は同じ publish 前提を共有するため blocked のまま close しない
   （`docs/facade-onnx-import-exposure-decision.md` §6.2）。
-
 ## #1705 の追補
 
 `float64`／`float16` 行（319〜320 行目）のスナップショット本文は不変のまま、Metal バックエンド限定で以下が確定した（イシュー #1705・`docs/backend-dtype-dispatch-design.md` §14）。
 
 - **`float64`**: Metal は `TypedOps<f64>` を実装せず（accessor `typed_ops_f64()` は既定 `None` のまま）、恒久 `Unsupported` として確定した。MSL に `double` 型が存在せず GEMM 全体を `f64` 精度で動かす手段が構造的にないため（CUDA・CPU のような「実装したうえで `Unsupported` を返す」形ではなく、accessor 自体を `None` のまま維持する capability 不在の明示）
 - **`float16`**: Metal バックエンド限定で `TypedOps<half::f16>` が実装され、`Tensor<f16>` の `gemm`（既存 `MetalGemm::dispatch_f16_auto_unverified` への内部結線）・`add`／`mul`／`relu`／`exp`／`tanh` が Metal 経由で到達可能になった（`crates/backend-metal/src/typed_f16.rs`）。`sum`／`max` は Metal f32 reduction カーネル自体が未実装のため `Unsupported` を継承する（f32 版が実装されれば自動的に有効化される設計）
-- CUDA `TypedOps<f64>`／`TypedOps<f16>`（#1703）・bf16（#1706 未着手）は本イシューでは触れていない。`Var`／`Tape`／VJP・facade 公開面は引き続き未接続で、本表の「未実装（欠落側）」列の評価は変わらない
+- CUDA `TypedOps<f64>`／`TypedOps<f16>`（#1703）・bf16（#1706）は本イシューでは触れていない。`Var`／`Tape`／VJP・facade 公開面は引き続き未接続で、本表の「未実装（欠落側）」列の評価は変わらない
+
+## #1706 の追補
+
+`float64`／`float16`／`bfloat16` 行（319〜320 行目）のスナップショット本文
+は不変のまま、Metal バックエンド限定で `TypedOps<half::bf16>` が実装され
+`Tensor<bf16>` の `gemm`／`add`／`mul`／`relu`／`exp`／`tanh` が Metal 経由で
+到達可能になった（`sum`／`max` は Metal f32 `BackendOps` が GPU カーネル
+未実装のため `Unsupported` のまま。`crates/backend-metal/src/
+typed_bf16.rs`。イシュー #1706・`docs/backend-dtype-dispatch-design.md`
+§15）。
+
+- (a) `TypedOps<bf16>` の実装可否と (b) MSL `bfloat`／`simdgroup_bfloat8x8`
+  の実機可用性は独立の問題であることが判明し、(a) はホスト側変換＋既存
+  f32 経路委譲方式（CUDA #1704・CPU #1699 と同型）で MSL `bfloat` の
+  可用性に依存せず実装できた。(b)（デバイス常駐ネイティブ bf16 経路の
+  実現可能性）はコンパイルプローブ（`crate::typed_bf16_probe_diag_tests`。
+  全 `#[ignore]`・非 gating）へ切り出し、本エージェント実行環境に
+  Apple Silicon 実機がないため未実測のまま Mac セッションへ申し送る。
+- CPU bf16 は #1699・CUDA bf16 は #1704 で実装済み・origin/main マージ
+  済み。3 バックエンドとも bf16 の主要 6 演算（`gemm`／`add`／`mul`／
+  `relu`／`exp`／`tanh`）に到達可能になった。
+- facade 公開面への新規追加はない。`Var`／`Tape`／VJP は引き続き未接続で、
+  本表の「未実装（欠落側）」列の評価（`Var` レベルの mixed precision）は
+  変わらない。
