@@ -232,8 +232,8 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `sum(dim)` | `tf.reduce_sum` | あり（`Var::sum`。単一 dim または全体のみ、複数軸指定不可） | 複数軸・`keepdim` 対応への拡張 | S〜M |
 | `mean(dim)` | `tf.reduce_mean` | なし（`mse_loss` 内部にのみ mean 縮約あり。汎用 `Var::mean` はない） | `sum` を分母で割るラッパー、または専用 Op | S |
 | `max(dim)`/`min(dim)` | `tf.reduce_max`/`min` | 部分（`Var::max` あり・`min` なし・`argmax`/`argmin` なし・`amax`/`amin` の均等分配は明示的スコープ外） | `min`/`argmax`/`argmin` の新規 Op | M |
-| `var`/`std` | `tf.math.reduce_variance`/`reduce_std` | なし（rmsnorm の内部計算にのみ二乗和はある） | 縮約 Op（二乗和ベース。f64/scale-ssq アキュムレータ契約に従う） | M |
-| `norm`（L1/L2） | `tf.norm` | 部分（`clip_grad_norm`/`global_grad_norm` に L2 ノルム計算はあるが `Var` 演算としては非公開） | `Var::norm` の新設 | S〜M |
+| `var`/`std` | `tf.math.reduce_variance`/`reduce_std` | **実装済み**（`Var::var`／`std`。イシュー #1723。`Op::Var`〈専用 Op。`sum`／`max` と同じ `dim: Option<usize>` シグネチャ＋`correction`〉・`f64` 二段計算〈平均→二乗和〉・`BackendOps::var` 既定 `Unsupported` のホストフォールバック契約） | — | — |
+| `norm`（L1/L2） | `tf.norm` | **実装済み**（`Var::norm_l1`／`norm_l2`。イシュー #1723。`Op::VectorNorm`〈専用 Op。`VectorNormOrd::L1`／`L2`〉・`f64` 累積・`BackendOps::vector_norm` 既定 `Unsupported` のホストフォールバック契約。汎用 `norm(ord, dim)` の facade 公開〈`VectorNormOrd` 再エクスポート〉は Tier 1 未列挙のため見送り） | — | — |
 
 ### 2.6 線形代数
 
@@ -1042,6 +1042,42 @@ bool 引数との直接合成も #1613 待ち）。VJP は両入力とも常に�
 facade parity 実測は本エージェント実行環境に実機がないため未実施の
 まま申し送る。
 
+
+#1723 で §2.5「縮約」`var`／`std`・`norm`（L1/L2）行を実装済み化
+（`Var::var`／`std`／`norm_l1`／`norm_l2`。既存 `sum`／`max` と同じ
+`dim: Option<usize>` シグネチャ〈`var`／`std` は `correction` 引数を
+追加〉。当初は `Op::Var`／`Op::VectorNorm` の 2 新規 Op・`BackendOps::
+var`／`vector_norm`〈既定 `Unsupported`〉・CPU 参照実装〈`backend-cpu::
+reduction`〉・ホストフォールバック〈`eval::var_along`／
+`vector_norm_along`〉のみで `std` を `Var::var(..).sqrt()`（新規 `Op`
+を追加しない合成）として実装していたが、`Op::Var` の forward 値が
+分散を `f32` へ downcast してから `Op::Sqrt` に渡すため、真の分散が
+`f32` の範囲を超える極端な入力（例 `[-1e20, 1e20]`）で `std` 自体は
+`f32` で表現可能なはずが `inf` になる問題があったため（codex-review
+P2 指摘。PR #1826 レビュー是正）、専用の `Op::Std` ノードを追加し
+forward・backward とも `f64` の分散を経由してから最後に 1 回だけ
+`sqrt` を計算する方式へ変更した（`eval::std_along`／`grad::std_vjp`。
+現在は `Op::Var`／`Op::VectorNorm`／`Op::Std` の計 3 新規 Op。
+`BackendOps::std` は設けず常にホストフォールバックを使う——`var`／
+`vector_norm` とは異なり `BackendOps` 対応メソッドの非破壊拡張余地を
+残したまま、現時点ではホスト参照実装のみに限定する判断）。数値契約は
+`.claude/rules/coding-rust.md`「正規化統計は要素を先に `f64` へ昇格
+してから二乗し、最後に 1 回だけ `f32` へ downcast する」契約に従う
+（`var` は平均→二乗和の 2 段計算・`norm_l2` は二乗和→`sqrt`）。`std`
+の勾配（`Op::Std` の VJP）は縮約対象が全て同値の定数列（`std == 0`）
+の要素でゼロ勾配へ明示的にマスクする——PyTorch `torch.std`
+backward（`std_backward`。`FunctionsManual.cpp`）の
+`masked_fill_(result == 0, 0)` と一致する規約であり、`var==0` から
+単純に `0.0 / 0.0 = NaN` が伝播する `Var::var(..).sqrt()` 合成とは
+意図的に異なる（PR #1826 レビュー是正。`crates/autodiff/src/var.rs`
+`Var::std` doc「数値規約」参照）。CUDA／Metal
+専用カーネルは本 issue のスコープ外で既定 `Unsupported` のまま
+ホストフォールバック経由のみ（後続 issue 候補・多軸／`keepdim` 版・
+`norm(ord, dim)` の facade 公開〈Tier 1 未列挙〉も同様にスコープ外。
+facade 新規公開面なし——既存 `Var` 再エクスポート経由。CUDA／Metal
+実機での facade parity 実測は本エージェント実行環境に実機がないため
+未実施のまま申し送る）。
+
 ## #1755 の追補
 
 #1755 で `one_hot`（`torch.nn.functional.one_hot`／`tf.one_hot` 相当。
@@ -1074,6 +1110,7 @@ GB10・Apple Silicon）は本実装環境に到達手段がなく `#[ignore]`
 `unique_consecutive`・GPU 側 prefix-sum 圧縮は対象外のまま
 （decision doc §5／§6）。facade 新規公開面なし（既存 `Var`
 再エクスポート経由）。
+
 
 ## #1713 の追補
 

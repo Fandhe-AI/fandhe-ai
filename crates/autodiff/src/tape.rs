@@ -153,6 +153,55 @@ pub(crate) enum Op {
     Sum { input: NodeId, dim: Option<usize> },
     /// 非 elementwise。常に実体化済み。
     Max { input: NodeId, dim: Option<usize> },
+
+    /// 分散（`Var::var`。`torch.var(dim, correction)` 相当。イシュー
+    /// #1723）。`sum`／`max` と同じ `dim: Option<usize>` シグネチャに
+    /// `correction`（自由度補正）を加えたもの。eager（`push_eager`。
+    /// `BackendOps::var` は `linalg_matrix_norm` 等と同じ既定
+    /// `Unsupported` パターンのため `Var::var` はフォールバック契約を
+    /// 持つ——`Op::MatrixNorm` と同型）。
+    Var {
+        input: NodeId,
+        dim: Option<usize>,
+        correction: usize,
+    },
+    /// ベクトルノルム（`Var::norm_l1`／`norm_l2`。`torch.norm`／
+    /// `tf.norm` の L1／L2 相当。イシュー #1723）。`ord` は
+    /// [`fandhe_ai_tensor_core::VectorNormOrd`]（`#[non_exhaustive]`）。
+    /// `Op::Var` と同じ eager・フォールバック契約。
+    VectorNorm {
+        input: NodeId,
+        ord: fandhe_ai_tensor_core::VectorNormOrd,
+        dim: Option<usize>,
+    },
+    /// 標準偏差（`Var::std`。`torch.std(dim, correction)` 相当。
+    /// イシュー #1723 レビュー是正）。当初 `Var::var(..).sqrt()` の
+    /// 合成（新規 `Op` なし）として実装していたが、`Op::Var` が forward
+    /// 値を `f32` へ downcast してから `Op::Sqrt` へ渡すため、分散が
+    /// `f32` の範囲を超える極端な入力（例 `[-1e20, 1e20]`）で `Op::Var`
+    /// の出力自体が `inf` へ overflow し、実際の標準偏差が `f32` で
+    /// 表現可能でも `std` が `inf`／勾配が破綻する問題があった
+    /// （codex-review P2 指摘）。`Op::Std` は forward・backward とも
+    /// `f64` の分散を経由してから最後に 1 回だけ `sqrt` を `f64` で
+    /// 計算し `f32` へ downcast する（`var_vjp` と同じ「forward の丸め
+    /// 誤差を backward へ持ち込まない」内部精度契約。
+    /// `.claude/rules/coding-rust.md`）専用ノードとして分離した。
+    /// `Op::Var`／`Op::VectorNorm` と同じ eager・実体化演算だが、
+    /// フォールバック契約は異なる——`Op::Var`／`Op::VectorNorm` は
+    /// `BackendOps::var`／`vector_norm`（既定 `Unsupported`）へまず
+    /// dispatch し `Unsupported` のときのみホスト参照実装へ切り替える
+    /// のに対し、`Op::Std` は対応する `BackendOps` メソッドを設けず
+    /// 常に `eval::std_along`（ホスト参照実装）を使う——`var`／
+    /// `vector_norm` とは異なり、現時点ではデバイス側カーネルの
+    /// 非破壊拡張余地を残したままホスト参照実装のみに限定する判断
+    /// （将来デバイス側カーネルが必要になれば `BackendOps::std`
+    /// 〈既定 `Unsupported`〉を非破壊で追加できる）。
+    Std {
+        input: NodeId,
+        dim: Option<usize>,
+        correction: usize,
+    },
+
     /// 非 elementwise。常に実体化済み。`Max` と対称（イシュー #1720。
     /// `Var::min`）。VJP は `Max` と共有ヘルパー
     /// （`grad::extremum_first_match_vjp`）を使う——forward 記録値
@@ -173,6 +222,7 @@ pub(crate) enum Op {
     /// と bit 同一の値を再現する。`Op::Sum`／`Op::Max` と同じく非
     /// elementwise のため常に実体化済み（`push_eager`）。
     Mean { input: NodeId, dim: Option<usize> },
+
     /// 平均二乗誤差。`BackendOps` に対応メソッドがないため融合対象外
     /// とし常に実体化済み（`push_eager`）。`reduction` は #190
     /// （TASK-9.1c 相当・`nn::loss`）で mean/sum の両縮約に対応するため
@@ -1047,6 +1097,13 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （非網羅 match 是正で新規 variant 追加時に強制される）。
             Op::Gather { .. } | Op::Scatter { .. } => false,
+            // `Op::Var`／`Op::VectorNorm`（イシュー #1723）・
+            // `Op::Std`（同イシュー・レビュー是正で追加）は
+            // `Op::ScalarUnary`／`Op::ScalarBinary` と同じく eager
+            // 実体化演算だが `recompute_value` に再計算分岐を持たない
+            // ため非適格（最小・安全側の判断。将来 `true` 化する場合は
+            // `Op::Sum`／`Op::Max` 型の再計算分岐を追加する）。
+            Op::Var { .. } | Op::VectorNorm { .. } | Op::Std { .. } => false,
             // `Op::Cumsum`／`Op::Cumprod`（イシュー #1731）は eager
             // 実体化演算で `recompute_value` に再計算経路を持たない
             // ため非適格（非網羅 match 是正で新規 variant 追加時に
@@ -1091,6 +1148,9 @@ impl Op {
             Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) | Op::Sigmoid(a) => f(*a),
             Op::Sum { input, .. }
             | Op::Max { input, .. }
+            | Op::Var { input, .. }
+            | Op::VectorNorm { input, .. }
+            | Op::Std { input, .. }
             | Op::Min { input, .. }
             | Op::Mean { input, .. }
             | Op::Reshape { input }
