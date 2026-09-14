@@ -1619,10 +1619,14 @@ pub(crate) fn topk_with_fallback(
 /// 以外のエラーは伝播する（判定迂回経路を作らない）。バックエンドが
 /// 返した出力に [`BackendOps::unique`] doc の出力不変条件（rank 1・
 /// `len <= numel`・totalOrder で非減少・隣接に `==` な要素がない）を
-/// 事後検査し、違反は `AutodiffError::Backend(BackendError::
-/// ShapeMismatch(..))` として拒否する（3 バックエンド実装が独立に
-/// 契約を守っているかを呼び出し元でも検証する二重検査方針。
-/// `.claude/rules/security.md` A08）。
+/// 事後検査し、違反は shape 自体の不正（rank／len）は
+/// `AutodiffError::Backend(BackendError::ShapeMismatch(..))`、順序の
+/// 不正（totalOrder 非減少・隣接重複なし）は
+/// `AutodiffError::InvalidArgument(..)` として区別して拒否する
+/// （両者は異なる契約違反であり同一 variant では誤解を招くため。
+/// review 指摘）。3 バックエンド実装が独立に契約を守っているかを
+/// 呼び出し元でも検証する二重検査方針（`.claude/rules/security.md`
+/// A08）。
 pub(crate) fn unique_with_fallback(
     ops: &dyn BackendOps,
     x: &Tensor<f32>,
@@ -1645,20 +1649,33 @@ pub(crate) fn unique_with_fallback(
 /// 「非減少 ＋ 隣接 `==` なし」が正しい述語である点に注意——同一 bit の
 /// NaN が隣接して現れうる）ことを検査する。
 fn validate_unique_output(v: &Tensor<f32>, numel: usize) -> Result<(), AutodiffError> {
-    let shape_ok = v.shape().len() == 1 && v.shape()[0] <= numel;
+    // shape 違反（rank != 1 または len > numel）は真に shape の契約
+    // 違反のため `ShapeMismatch` のまま報告する。一方 totalOrder 順序
+    // 違反（rank・len 自体は正しいのに非減少でない／隣接 `==` が
+    // 混入した）は shape 不一致ではないため `ShapeMismatch` を流用
+    // すると誤解を招く（review 指摘）。`AutodiffError::InvalidArgument`
+    // （`error.rs` doc: 既存 `ShapeError` variant に意味的に適合しない
+    // 契約違反の集約先）で区別して報告する。
+    if v.shape().len() != 1 || v.shape()[0] > numel {
+        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+            ShapeError::ShapeMismatch {
+                lhs: v.shape().to_vec(),
+                rhs: vec![numel],
+            },
+        )));
+    }
     let data = dense_vec(v);
     let order_ok = data.windows(2).all(|w| {
         let (a, b) = (w[0], w[1]);
         a.total_cmp(&b) != std::cmp::Ordering::Greater && a != b
     });
-    if shape_ok && order_ok {
+    if order_ok {
         Ok(())
     } else {
-        Err(AutodiffError::Backend(BackendError::ShapeMismatch(
-            ShapeError::ShapeMismatch {
-                lhs: v.shape().to_vec(),
-                rhs: vec![numel],
-            },
+        Err(AutodiffError::InvalidArgument(format!(
+            "BackendOps::unique の出力が totalOrder で非減少・隣接 `==` \
+             なしという不変条件に違反している（shape={:?}）",
+            v.shape()
         )))
     }
 }

@@ -24,7 +24,7 @@
 //! （`docs/backend-metal-command-batching-design.md`）。
 //! `memoryBarrierWithScope` の明示挿入は serial encoder では
 //! 「許可されるが無視される」（objc2-metal 生成コードの doc comment
-//! 参照）ため厳密には無load-bearingだが、将来 concurrent encoder へ
+//! 参照）ため厳密には意味を持たないが、将来 concurrent encoder へ
 //! 変更された場合の安全側の防御として残す。
 
 use objc2::runtime::ProtocolObject;

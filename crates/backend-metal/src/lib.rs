@@ -489,13 +489,6 @@ pub mod layout;
 #[cfg(target_os = "macos")]
 pub mod memory;
 #[cfg(target_os = "macos")]
-pub mod unique;
-// `shaders/unique.metal::bitonic_step_u32` のホスト側逐語モデル
-// （イシュー #1734）。`gather_scatter_model`・`crates/backend-cuda/src/
-// unique_model.rs` と同じ設計判断で `objc2` 系 FFI に触れないため
-// `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）でも
-// 単体テストが回る。
-#[cfg(target_os = "macos")]
 pub mod mse;
 #[cfg(target_os = "macos")]
 pub mod ops;
@@ -503,6 +496,13 @@ pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod rnn_cell;
 pub mod soft_f64;
+#[cfg(target_os = "macos")]
+pub mod unique;
+// `shaders/unique.metal::bitonic_step_u32` のホスト側逐語モデル
+// （イシュー #1734）。`gather_scatter_model`・`crates/backend-cuda/src/
+// unique_model.rs` と同じ設計判断で `objc2` 系 FFI に触れないため
+// `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）でも
+// 単体テストが回る。
 pub mod unique_model;
 // `crate::buffer::MetalBuffer::alloc_zeroed_pooled`／`alloc_uninit_pooled`
 // からのみ到達する `pub(crate)` 面（イシュー #1021）。`tensor-core` の

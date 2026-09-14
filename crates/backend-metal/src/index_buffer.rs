@@ -23,7 +23,7 @@ use crate::error::MetalError;
 pub(crate) type MtlBuffer = ProtocolObject<dyn MTLBuffer>;
 
 /// `i32`／`u32` の入力専用 Metal バッファ（[`crate::buffer::MetalBuffer`]
-/// の整数版）。`len`（要素数）は `unique.rs::CudaUnique` 相当の
+/// の整数版）。`len`（要素数）は `unique.rs::MetalUnique` 相当の
 /// readback（[`Self::read_to_vec_u32`]）のために保持する。
 #[derive(Debug)]
 pub struct MetalIndexBuffer {
