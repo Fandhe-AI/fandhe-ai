@@ -185,7 +185,13 @@
 //! `dispatch_backend_auto`（真の production 自動経路）へは統合していない
 //! （#799 の実機検証完了後、別イシューで統合可否を判断する）。`tensor-core`
 //! 決定表（`select_gemm_kernel`）・`dispatch_backend_auto` の f16 拡張は
-//! 本イシューのスコープ外のまま残す。
+//! 本イシューのスコープ外のまま残す。**#1705 で `crate::typed_f16`
+//! （`TypedOps<f16>::gemm`）から `dispatch_f16_auto_unverified` への
+//! 内部結線のみ追加した——`Tensor<f16>` という型でのみ到達する経路であり、
+//! `ops::MetalBackendOps`（f32 `BackendOps::gemm`）・
+//! `dispatch_backend_auto`（真の production 自動経路）からは引き続き
+//! 不到達のまま。`_unverified` suffix・`#[doc(hidden)]` は #1651 の
+//! 承認事項（§7-4）が未承認のため維持する。**
 //!
 //! イシュー #930 で `context_cache` モジュールを追加し、`ops::MetalBackendOps`
 //! が演算メソッド呼び出しごとに都度構築していた `MetalContext`／
@@ -427,7 +433,31 @@ mod gemm_mpp_diag_tests;
 pub mod gather_scatter;
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_hfrag_diag_tests;
+// readout legacy 後退（イシュー #1520。`docs/perf/metal-gemm-candle-
+// gate-remeasurement.md` §17）の 4 腕診断ハーネス（イシュー #1695。
+// CUDA 側 `readout_regression_diag_tests_1436.rs`〈イシュー #1436〉と
+// 同型）。腕定義・純関数ヘルパ本体（`ReadoutArm`・`checksum_f64` 等）は
+// `objc2` 系 FFI に触れないため `gather_scatter_model`／`soft_f64` と
+// 同じ判断で `cfg(target_os = "macos")` を付けず Linux（本実装環境・CI）
+// でも単体テストが回る。非 test ビルドで `dead_code` にならないよう
+// `#[cfg(test)]` を付ける（本モジュールの利用箇所はいずれもテスト
+// コードのみ）。
+#[cfg(test)]
+mod readout_regression_diag_arms;
+// 上記ハーネスの実機依存テスト本体。`context_cache::{cached_context,
+// cached_gemm}`・`gemm::MetalGemm::diag_encode_tiled_nn`（いずれも
+// `#[cfg(test)] pub(crate)`）・`buffer::MetalBuffer::read_into_slice`
+// （`#[cfg(test)] pub(crate)`。本イシューで追加）へ到達するため、
+// 既存診断テスト群と同じ理由でクレートルートの兄弟モジュールとして
+// 配置する。`objc2` 系 FFI 型に触れるため同じ
+// `cfg(all(test, target_os = "macos"))` を付ける。プロダクションコード
+// （`gemm.rs`／`ops.rs`〈`dispatch_auto` 系〉／`memory.rs`／
+// `context.rs`／`pool.rs`）は無変更（`buffer.rs` は新規 `#[cfg(test)]`
+// 限定ヘルパ `read_into_slice` の追加のみ）。実機実測・機構記録は
+// 兄弟イシュー #1696 が担う。
 pub(crate) mod generic_cache;
+#[cfg(all(test, target_os = "macos"))]
+mod readout_regression_diag_tests_1695;
 // `gather_scatter.metal`（`gather_f32`／`scatter_overwrite_f32`／
 // `scatter_add_f32`）のホスト側逐語モデル（イシュー #1778）。`soft_f64`・
 // `layout`／`pad` と同じ設計判断で `objc2` 系 FFI に触れないため
@@ -511,6 +541,14 @@ pub(crate) mod spec_source;
 // 環境・CI）でも `AtomicBool` の単体テストが回るようにしてある。
 pub mod split_k_runtime;
 pub mod tile;
+// `TypedOps<half::f16>` 実装（イシュー #1705・親 #1651・
+// `docs/backend-dtype-dispatch-design.md` §14）。`ops::MetalBackendOps`
+// （`cfg(target_os = "macos")` 限定）へ `impl` するため同じ cfg を付ける。
+// `TypedOps<f64>` はここでは実装しない（`typed_ops_f64` accessor は
+// 既定 `None` のまま。`crate::typed_f16` モジュール doc「恒久
+// `Unsupported`」参照）。
+#[cfg(target_os = "macos")]
+pub(crate) mod typed_f16;
 // `TypedOps<half::bf16>`（イシュー #1706・親 #1651）。`upcast_bf16`／
 // `downcast_f32` は `pad`／`tile` と同じ設計判断で `objc2` 系 FFI に
 // 触れないため `cfg(target_os = "macos")` を付けず、Linux（本実装

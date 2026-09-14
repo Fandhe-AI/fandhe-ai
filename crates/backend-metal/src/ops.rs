@@ -30,6 +30,10 @@
 //! `objc2-metal` と同じ cfg 境界。`.claude/rules/deps-policy.md`）。
 //! 非 macOS 環境ではこのファイル自体がコンパイル対象に入らない
 //! （`lib.rs` の cfg 境界と整合。`device.rs` と同方針）。
+//!
+//! `f16` の [`fandhe_ai_tensor_core::TypedOps<half::f16>`] 実装は
+//! `crate::typed_f16` に置く（イシュー #1705。`typed_ops_f16` accessor
+//! はこのファイルで結線する）。
 
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
@@ -347,8 +351,9 @@ impl MetalBackendOps {
     }
 
     /// [`BackendOps::scalar_unary`] の Metal ディスパッチ（イシュー
-    /// #1707。CUDA 側 `CudaBackendOps::scalar_unary_dispatch`〈#1700〉の
-    /// Metal 対応版）。`crate::scalar_op_source` が対応する kind のみ
+    /// #1707・#1708・#1709〈`Clamp` 追加〉。CUDA 側
+    /// `CudaBackendOps::scalar_unary_dispatch`〈#1700〉の Metal
+    /// 対応版）。`crate::scalar_op_source` が対応する kind のみ
     /// パイプラインを生成・キャッシュして起動し、未対応 kind は
     /// `BackendError::Unsupported` を返す（呼び出し元
     /// `fandhe_ai_autodiff::grad::scalar_unary_with_fallback` がホスト
@@ -369,7 +374,7 @@ impl MetalBackendOps {
         if crate::scalar_op_source::unary_kernel_source(op).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "scalar_unary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (いずれの sub issue にも含まれない kind。ホスト参照実装へフォールバック)"
             )));
         }
 
@@ -387,18 +392,22 @@ impl MetalBackendOps {
         let Some(pipeline) = pipeline else {
             return Err(BackendError::Unsupported(format!(
                 "scalar_unary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (いずれの sub issue にも含まれない kind。ホスト参照実装へフォールバック)"
             )));
         };
+        // `Clamp` 等（イシュー #1709）のペイロード（`min`／`max`）を
+        // 起動引数として渡す（`crate::scalar_op_source` モジュール doc
+        // 「ペイロード seam」参照。ペイロードなし kind は空スライス）。
+        let payload = crate::scalar_op_source::unary_payload(op);
         let out = ew
-            .run_scalar_unary_f32(&ctx, &pipeline, a_slice)
+            .run_scalar_unary_f32(&ctx, &pipeline, a_slice, payload.as_slice())
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// [`Self::scalar_unary_dispatch`] の 2 項版（イシュー #1707）。
-    /// ブロードキャストは `elementwise_binary`（`add`／`mul`）と同じ
-    /// `Tensor::broadcast_with`。
+    /// [`Self::scalar_unary_dispatch`] の 2 項版（イシュー #1707・
+    /// #1708・#1709〈比較演算 6 種追加〉）。ブロードキャストは
+    /// `elementwise_binary`（`add`／`mul`）と同じ `Tensor::broadcast_with`。
     fn scalar_binary_dispatch(
         &self,
         op: ScalarBinaryOp,
@@ -408,7 +417,7 @@ impl MetalBackendOps {
         if crate::scalar_op_source::binary_kernel_source(op).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "scalar_binary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (いずれの sub issue にも含まれない kind。ホスト参照実装へフォールバック)"
             )));
         }
 
@@ -431,7 +440,7 @@ impl MetalBackendOps {
         let Some(pipeline) = pipeline else {
             return Err(BackendError::Unsupported(format!(
                 "scalar_binary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (いずれの sub issue にも含まれない kind。ホスト参照実装へフォールバック)"
             )));
         };
         let out = ew
@@ -1028,6 +1037,15 @@ impl BackendOps for MetalBackendOps {
     /// `None`（`memory_ops` のデフォルト契約と同じ fail-safe）。
     fn memory_ops(&self) -> Option<&dyn MemoryOps> {
         static_metal_memory().ok().map(|m| m as &dyn MemoryOps)
+    }
+
+    /// `crate::typed_f16::MetalBackendOps`（`impl TypedOps<f16>`）への
+    /// capability accessor（イシュー #1705）。`typed_ops_f64` は
+    /// オーバーライドせず既定 `None`（恒久 `Unsupported`。MSL に
+    /// `double` 型が存在せず構造的に不可。`docs/backend-dtype-
+    /// dispatch-design.md` §5・§14）のまま残す。
+    fn typed_ops_f16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::f16>> {
+        Some(self)
     }
 
     /// `crate::typed_bf16::impl TypedOps<half::bf16> for MetalBackendOps`

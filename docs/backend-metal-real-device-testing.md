@@ -64,6 +64,8 @@ macOS 側の型検査は Linux CI でも成立させている（後述の「Linu
 | `tests/elementwise_gemm_bias_act_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | イシュー #605 | `elementwise.metal` 5 カーネルの実在・REQ-8 手動境界チェック・precise math 使用検査、`gemm.metal::gemm_tiled_bias_act` の実在・REQ-8 境界チェック・bias/activation epilogue の文字列証跡検査 |
 | `tests/shader_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | TASK-11.3（#70） | `gemm.metal` の行列演算ユニット命令（`simdgroup_matrix` API）実在検査・REQ-8 境界チェック維持検査 |
 | `tests/rmsnorm_softmax_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | イシュー #604 | `rmsnorm.metal`／`softmax.metal` のアルゴリズム契約（5 段 butterfly reduction・`simdgroup_barrier` のみ使用・`exp2` のみ使用・有限負値境界マスク・REQ-8 手動境界チェック・FMA 契約）の文字列証跡検査 |
+| `tests/typed_ops_f16_parity.rs` | 3 | イシュー #1705 | `TypedOps<half::f16>`（`crate::typed_f16`）の `gemm`（`dispatch_f16_auto_unverified` との bit 一致）・CPU 参照実装との REQ-2 複合判定・零次元形状のデバイス到達確認（`#[cfg(target_os = "macos")]`。非 `#[ignore]` 部は accessor・shape 検証） |
+| `tests/typed_ops_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | イシュー #1705 | `typed_ops_f64` が恒久 `Unsupported`（accessor 非オーバーライド・`TypedOps<f64>` 非実装）であること・`typed_ops_f16` accessor の結線・`dispatch_f16_auto_unverified` 呼び出し証跡・暗黙 f32 フォールバック不在の文字列証跡検査 |
 
 判定は数値一致系ファイル共通で `backend_cpu::parity::{compare, assert_parity}`（REQ-2 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の唯一の実体）を使う。**閾値の独自定義・緩和はしない**（`.claude/rules/security.md`・`.claude/rules/coding-rust.md`）。入力生成は `bench_harness::rng::Xorshift64Star`（決定的シード）で固定する。
 
