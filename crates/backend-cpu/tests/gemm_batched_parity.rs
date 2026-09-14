@@ -254,6 +254,32 @@ fn gemm_batched_huge_batch_output_bytes_overflow_is_shape_mismatch_not_panic() {
     assert!(matches!(err, BackendError::ShapeMismatch(_)));
 }
 
+/// 出力要素数が 0（`m == 0` または `n == 0`）の巨大なバッチ次元は、
+/// no-op GEMM を `batch_len` 回繰り返してハングするのではなく直ちに
+/// 空テンソルを返す（PR #1810 Cursor Bugbot Medium 是正の回帰テスト）。
+///
+/// `[B, 0, 0]` × `[B, 0, 1]`（`m = 0`）と `[B, 1, 0]` × `[B, 0, 0]`
+/// （`n = 0`）はいずれも要素数積 0 で実データを確保せずに構築でき、
+/// 出力要素数も 0 なので確保前検証を通過する。是正前はここで
+/// `B ≈ 2^61` 回のループに入っていた。
+#[test]
+fn gemm_batched_huge_batch_with_empty_output_returns_immediately() {
+    let huge_batch = isize::MAX as usize / 4 + 1;
+    let ops = CpuBackendOps::new();
+
+    let a = tensor(Vec::new(), &[huge_batch, 0, 0]);
+    let b = tensor(Vec::new(), &[huge_batch, 0, 1]);
+    let out = ops.gemm_batched(&a, &b).unwrap();
+    assert_eq!(out.shape(), &[huge_batch, 0, 1]);
+    assert_eq!(out.numel(), 0);
+
+    let a = tensor(Vec::new(), &[huge_batch, 1, 0]);
+    let b = tensor(Vec::new(), &[huge_batch, 0, 0]);
+    let out = ops.gemm_batched_fp32_strict(&a, &b).unwrap();
+    assert_eq!(out.shape(), &[huge_batch, 1, 0]);
+    assert_eq!(out.numel(), 0);
+}
+
 /// `gemm_batched_fp32_strict` は CPU（TF32 の概念を持たない）では
 /// `gemm_batched` と bit 同一。
 #[test]

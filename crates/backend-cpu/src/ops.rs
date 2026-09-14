@@ -652,6 +652,13 @@ impl BackendOps for CpuBackendOps {
             .map_err(BackendError::ShapeMismatch)?;
         let total = fandhe_ai_tensor_core::checked_gemm_batched_output_len(batch_len, m, n)
             .map_err(BackendError::ShapeMismatch)?;
+        // 出力要素数が 0（`m == 0` または `n == 0`）なら結果は空テンソルで
+        // 確定するため、バッチループへ入らずに返す（巨大な `batch_len` と
+        // 空軸の組合せで no-op GEMM を `batch_len` 回繰り返すハングの
+        // 回避。PR #1810 Cursor Bugbot Medium 是正・既定合成実装と同型）。
+        if total == 0 {
+            return Tensor::new(Vec::new(), &plan.out_shape()).map_err(BackendError::ShapeMismatch);
+        }
         let mut out = zeroed_output(total);
 
         for i in 0..batch_len {

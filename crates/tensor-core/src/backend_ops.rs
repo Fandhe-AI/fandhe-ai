@@ -2085,7 +2085,7 @@ pub trait BackendOps {
     }
 }
 
-/// [`default_gemm_batched`]（CUDA／Metal が経由する既定合成実装）と
+/// `default_gemm_batched`（CUDA／Metal が経由する既定合成実装）と
 /// `crates/backend-cpu::CpuBackendOps::gemm_batched`（専用オーバーライド
 /// 実装）が共有する、バッチ GEMM 出力バッファの要素数を確保前に検証する
 /// ヘルパー（PR #1810 codex-review P1 是正・イシュー #1715）。
@@ -2196,6 +2196,14 @@ fn default_gemm_batched<T: BackendOps + ?Sized>(
     // 単一情報源とする）。
     let total =
         checked_gemm_batched_output_len(batch_len, m, n).map_err(BackendError::ShapeMismatch)?;
+    // 出力要素数が 0（`m == 0` または `n == 0`）なら結果は空テンソルで
+    // 確定するため、バッチループへ入らずに返す。空の `k`／`m` 軸を持つ
+    // 入力は実データなしで巨大な `batch_len`（例: `isize::MAX / 4 + 1`）
+    // を構成できるので、no-op GEMM を `batch_len` 回繰り返すと実質
+    // ハングする（PR #1810 Cursor Bugbot Medium 是正）。
+    if total == 0 {
+        return Tensor::new(Vec::new(), &plan.out_shape()).map_err(BackendError::ShapeMismatch);
+    }
     let mut out_data: Vec<f32> = Vec::with_capacity(total);
     for i in 0..batch_len {
         let a_i = a_norm
