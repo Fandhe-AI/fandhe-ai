@@ -63,6 +63,7 @@ mod rmsprop;
 pub mod amp;
 pub mod clip;
 pub mod lr_scheduler;
+pub mod reduce_lr_on_plateau;
 
 pub use adagrad::{Adagrad, AdagradConfig};
 pub use adam::{Adam, AdamConfig};
@@ -75,6 +76,9 @@ pub use clip::{ClipGradResult, clip_grad_norm, clip_grad_value, global_grad_norm
 pub use lamb::{Lamb, LambConfig};
 pub use lr_scheduler::{
     ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, StepLr,
+};
+pub use reduce_lr_on_plateau::{
+    PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, ThresholdMode,
 };
 pub use rmsprop::{RmsProp, RmsPropConfig};
 
@@ -146,3 +150,15 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // 完了済み（純再エクスポート。`crates/facade/src/optim.rs` 参照）。
 // 状態保持型の `ReduceLROnPlateau`／`OneCycleLR` は対象外（兄弟
 // イシュー #1746／#1747 が担当）。
+//
+// イシュー #1746（親 #1611）: 検証指標の停滞を検知して学習率を下げる
+// 状態保持型スケジューラ（`ReduceLrOnPlateau`）を追加した。既存
+// `ConstantLr`／`StepLr`（stateless 純関数）とは異なり、内部に
+// patience／best／cooldown カウンタを持つ唯一の例外である
+// （詳細は `reduce_lr_on_plateau` モジュール冒頭 doc）。`LrScheduler`
+// は実装するが、状態を進める入口は `ReduceLrOnPlateau::step(metric)`
+// のみで `lr_at` は現在値を返すだけ（`ConstantLr` と同型）。新規
+// `Op`／`BackendOps`／`Var` メソッド／VJP は追加していない
+// （`Tape`／`Var` に一切依存しない値型・純関数）。facade
+// （`fandhe_ai::optim`）への公開は `crates/facade/src/optim.rs` の
+// 素の再エクスポート。
