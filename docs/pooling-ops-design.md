@@ -171,6 +171,37 @@
     `H=0`／`W=0` かつ `padding=0` の場合は従来どおり負分子ゲートでも
     拒否できるが、本検査を一律適用することで `padding` の値に依存しない
     単一の判定にする）。
+- **`dilation` による空窓（有効入力を含まない窓）を `ShapeError` で拒否
+  する**: `H ≥ 1` かつ `padding ≤ floor(kernel/2)`（上記 2 検査を通過
+  済み）でも、`kernel=2, dilation ≥ 2` かつ `H = dilation − 1` の構成
+  （必然的に `out_len = 1` の単一窓）では、窓のタップ位置が
+  `−1` と `H`（= `dilation − 1`）となり、両方とも走査範囲外
+  （左右の padding／範囲外）で有効入力を一切含まない。例:
+  `in=1, kernel=2, stride=1, padding=1, dilation=2`（タップ `−1, 1`）・
+  `in=1, kernel=2, stride=2, padding=1, dilation=2`（同じくタップ
+  `−1, 1`）。導出（証明のスケッチ）: 最初のタップ `o·s − p` が
+  `≥ 0` なら `padding ≤ floor(kernel/2)` の下で必ず `< H` になり空窓は
+  起きない（`o·s − p ≥ H` は `(out_len−1)·s ≥ H + p` を要求し §4 の
+  出力長式と矛盾する）。最初のタップが `< 0` なら、非負になる最小の
+  タップは `padding ≤ (kernel−1)·dilation` の下で `[0, dilation−1]`
+  に収まるため、`dilation ≤ H` であれば常に `< H` で有効。したがって
+  空窓が起こりうるのは `dilation > H` の場合に限られ、上記 2 検査の下で
+  唯一到達可能な構成は `kernel=2`（`padding` の上限が `1` に固定される
+  ため）かつ `H = dilation − 1`（`H < dilation` かつ `H ≥ dilation − 1`
+  を要求する境界）のみである。よって本検査は
+  **`kernel = 2` かつ `dilation > H` の構成のみを対象**とし
+  （`kernel = 1` は `dilation` が実質無効なため対象外・`kernel ≥ 3` は
+  上記導出により空窓が起こり得ない）、これを `ShapeError` で拒否する。
+  Avg は `dilation = 1` 固定のため本検査は実質的に発火しない。**PyTorch
+  との意図的な非互換**: PyTorch の実カーネル（`hstart` を `dilation`
+  刻みで非負へ整列してから走査する実装）はこの構成でも空窓のまま
+  `hstart ≥ hend` の縮退した走査区間を許容し、AvgPool
+  `count_include_pad=false` では 0 除算・MaxPool では未定義の勝者
+  索引を生じさせる（2026-09-14 時点の `pytorch/pytorch` main ソース
+  読解による確認）。本設計は §5 の「索引は常に有効」契約・§6 の
+  `scatter_add` VJP 契約を維持するため、この縮退構成を入口で拒否する
+  （sentinel 索引・無勾配 VJP 等の特殊扱いは §5／§6 の契約を複雑化する
+  ため採らない）。
 - `ceil_mode`: **v1 は `false` のみサポート**。`true` を渡した場合は
   `InvalidArgument` で拒否する。PyTorch の「最後の窓は入力または左
   padding 内で始まらなければならない」規則は将来対応の参考として §11 へ
@@ -263,7 +294,10 @@ VJP 手順:
 
 padding 位置は §5 の索引契約上勝者になり得ないため索引は常に `[0, H·W)`
 の範囲に収まる（forward 側で保証）。VJP 側でも `debug_assert!` と安全側
-スキップ（境界外索引を無視する）を設ける。
+スキップ（境界外索引を無視する）を設ける。この保証は §3 の
+`dilation` による空窓拒否検査（`kernel=2` かつ `dilation > H` の構成を
+`ShapeError` で拒否）が「すべての窓が少なくとも 1 つの有効入力を含む」
+ことを前提として成立している。
 
 ## 7. AvgPool／AdaptiveAvgPool forward
 
@@ -397,6 +431,12 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
   確認する。非 adaptive 側は `padding=0`（負分子ゲート経由）と
   `padding>0`（`in=0, k=2, s=2, p=1, d=1` のように負分子ゲートを素通り
   しうる構成。§3）の両方を回帰テストとして固定する。
+- `dilation` による空窓拒否（§3）: `in=1, kernel=2, stride=1, padding=1,
+  dilation=2` および `in=1, kernel=2, stride=2, padding=1, dilation=2`
+  が `ShapeError` で拒否されること・境界の反例として
+  `in=2, kernel=2, stride=1, padding=1, dilation=2`（`H = dilation` で
+  検査対象外）は許可され、索引が `[0, H·W)` の範囲に収まることを確認
+  する。
 - タイ先勝ち: 全要素同値の窓で索引が窓先頭になること。
 - NaN 伝播と最初の NaN 索引・padding 非勝者（索引が常に `[0, H·W)`）。
 - 重なり窓（`stride < kernel`）の重複添字 VJP が `scatter_add` 契約と一致
