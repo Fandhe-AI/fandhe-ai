@@ -19,8 +19,11 @@ use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarUnaryOp, Tensor};
 use super::{build_tensor, dense_vec};
 
 /// [`ScalarUnaryOp`] の forward（shape 不変の要素ごとの map）。
-/// 呼び出し元 `grad::scalar_unary_with_fallback`（イシュー #1711 で
-/// `Var::log` 等から到達可能。`tape::Op::ScalarUnary` doc 参照）。
+///
+/// 呼び出し元 `grad::scalar_unary_with_fallback` は #1710 で公開
+/// メソッド（`Var::sqrt` 等）から、#1711 で `Var::log` 等からも
+/// 到達可能になったため `#[allow(dead_code)]` は撤去済み
+/// （`tape::Op::ScalarUnary` doc 参照）。
 pub(crate) fn unary(input: &Tensor<f32>, op: ScalarUnaryOp) -> Tensor<f32> {
     let shape = input.shape().to_vec();
     let data = dense_vec(input);
@@ -32,8 +35,7 @@ pub(crate) fn unary(input: &Tensor<f32>, op: ScalarUnaryOp) -> Tensor<f32> {
 /// は呼び出し元が済ませている前提。`super::broadcast_binary` と同じ
 /// 契約）。
 ///
-/// `#[allow(dead_code)]`: [`unary`] と同じ理由・同じ撤去条件。
-#[allow(dead_code)]
+/// [`unary`] と同じ経緯で `#[allow(dead_code)]` は撤去済み（#1710）。
 pub(crate) fn binary(lhs: &Tensor<f32>, rhs: &Tensor<f32>, op: ScalarBinaryOp) -> Tensor<f32> {
     super::broadcast_binary(lhs, rhs, move |a, b| op.apply(a, b))
 }
