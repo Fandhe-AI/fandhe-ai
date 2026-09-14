@@ -54,7 +54,7 @@ use crate::error::ShapeError;
 use crate::fusion::FusionPlan;
 use crate::pool_core::PoolStats;
 use crate::scalar_op::{ScalarBinaryOp, ScalarUnaryOp};
-use crate::tensor::checked_numel;
+use crate::tensor::{checked_numel, checked_numel_for};
 use crate::typed_ops::TypedOps;
 use half::{bf16, f16};
 
@@ -2047,6 +2047,19 @@ fn default_gemm_batched<T: BackendOps + ?Sized>(
     let n = plan.n();
     let batch_len: usize = plan.batch_shape().iter().product();
 
+    // 出力バッファ（`out_data`）を確保する前に、出力全体の shape
+    // （`plan.out_shape()` == `batch_shape ++ [m, n]`）が
+    // `Vec::<f32>::with_capacity` の allocation 上限（バイトサイズが
+    // `isize::MAX` 以内）に収まるか検査する（PR #1810 codex-review
+    // P1 是正）。`plan` 構築時の `checked_numel`（`ops_shape.rs`）は
+    // 要素数積が `usize` の範囲に収まるかしか見ないため、要素数積は
+    // 収まるがバイトサイズは超える shape（例えば batch 次元が
+    // `isize::MAX as usize / 4 + 1` で m = n = 1）を通過させてしまい、
+    // 後続の `Vec::with_capacity(batch_len * m * n)` が capacity
+    // overflow で panic する（本番経路 panic 禁止方針
+    // `.claude/rules/coding-rust.md` に反する）。
+    checked_numel_for::<f32>(&plan.out_shape()).map_err(BackendError::ShapeMismatch)?;
+
     // 各オペランドを `[B, m, k]`／`[B, k, n]` の contiguous 3 次元へ
     // 正規化する（`docs/compat-api-scope.md` §1.2 実装記録・イシュー
     // #1715 実装計画 §2.2 の「正規化規則」）。
@@ -2136,15 +2149,31 @@ pub fn normalize_batched_operand(
     let flat_len = checked_numel(out_batch_shape).map_err(BackendError::ShapeMismatch)?;
     let mut flat_shape = Vec::with_capacity(out_batch_shape.len() + 2);
 
+    // 実体化後の完全な形状（`out_batch_shape ++ [rows, cols]`）を
+    // `checked_numel_for::<f32>` で事前検査する（PR #1810 codex-review
+    // P1 是正）。上記の `checked_numel` は要素数積が `usize` の範囲に
+    // 収まるかしか見ないため、要素数積は収まるがバイトサイズ
+    // （`numel * size_of::<f32>()`）が `Vec` の allocation 上限
+    // （`isize::MAX` バイト）を超える shape（例えば
+    // `out_batch_shape = [isize::MAX as usize / 4 + 1]`・
+    // `rows = cols = 1`）を通過させてしまい、下記の `contiguous()`／
+    // `broadcast_to().contiguous()` が内部の `Vec::with_capacity` で
+    // capacity overflow により panic する（本番経路 panic 禁止方針
+    // `.claude/rules/coding-rust.md` に反する）。`operand` 自身は既に
+    // 検証済みの `Tensor` のため equal 分岐（`operand.contiguous()`）
+    // 自体は安全だが、broadcast 分岐との分岐前に一括で検査すること
+    // で分岐間の重複を避ける。
+    let mut full_shape = Vec::with_capacity(out_batch_shape.len() + 2);
+    full_shape.extend_from_slice(out_batch_shape);
+    full_shape.push(rows);
+    full_shape.push(cols);
+    checked_numel_for::<f32>(&full_shape).map_err(BackendError::ShapeMismatch)?;
+
     let normalized = if operand_batch_shape == out_batch_shape {
         operand.contiguous()
     } else {
-        let mut target = Vec::with_capacity(out_batch_shape.len() + 2);
-        target.extend_from_slice(out_batch_shape);
-        target.push(rows);
-        target.push(cols);
         operand
-            .broadcast_to(&target)
+            .broadcast_to(&full_shape)
             .map_err(BackendError::ShapeMismatch)?
             .contiguous()
     };
@@ -3227,6 +3256,26 @@ mod tests {
         // `Err(ShapeError::ElementCountOverflow)` を返すことを確認する。
         let operand = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
         let err = normalize_batched_operand(&operand, &[usize::MAX, 2], 2, 2).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn normalize_batched_operand_rejects_byte_size_overflow_without_element_count_overflow() {
+        // PR #1810 codex-review P1 指摘: `out_batch_shape =
+        // [isize::MAX as usize / 4 + 1]`・rows = cols = 1 は、要素数積
+        // （`checked_numel`。`usize` の範囲）自体はオーバーフローしない
+        // が、f32 としてのバイトサイズ（`numel * 4`）は `isize::MAX` を
+        // 超えるため `Vec::<f32>::with_capacity` が capacity overflow
+        // で panic しうる。`checked_numel_for::<f32>` による事前検査で
+        // panic せず `Err(ShapeError::ElementCountOverflow)` を返す
+        // ことを確認する（broadcast 分岐に到達する rank≥2 operand で
+        // 再現）。
+        let huge = isize::MAX as usize / 4 + 1;
+        let operand = Tensor::new(vec![1.0f32], &[1, 1]).unwrap();
+        let err = normalize_batched_operand(&operand, &[huge], 1, 1).unwrap_err();
         assert!(matches!(
             err,
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
