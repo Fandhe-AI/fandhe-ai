@@ -1414,7 +1414,15 @@ pub(crate) fn vjp(
             let rank = input_shape.len();
             let spatial_start = rank - size.len();
             let out_shape = upstream.shape().to_vec();
-            let outer: usize = input_shape[..spatial_start].iter().product();
+            // `outer`（先頭の残り軸——batch 等——の積）も `sp_in_numel`／
+            // `sp_out_numel`（下記）と同じ理由で無検査 `.iter().product()`
+            // のままにしない（呼び出し元が構築時点で検査済みという
+            // 不変条件に暗黙に依存しない・Cursor Bugbot 指摘と同型の
+            // 懸念への一貫した対処。PR #1834 レビュー）。
+            let outer: usize = input_shape[..spatial_start]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
 
             // `outer == 0`（先頭の残り軸——batch 等——が空）の場合、
             // `d_input` の全要素数は `outer * sp_in_numel == 0` で
