@@ -430,10 +430,9 @@ impl<'t> Var<'t> {
     }
 
     /// `ScalarUnaryOp` 汎用 dispatch の `Var` 入口（イシュー #1634）。
-    /// `pub(crate)`: 公開 API 面（`sub`／`div`／`pow`／活性化等の個別
-    /// メソッド）は #1593／#1595 が `facade` の compat 公開面
-    /// （`docs/compat-api-scope.md` §5）拡張として別途ユーザー承認を
-    /// 得たうえで追加する。本メソッドはそれらが呼ぶ共通実装。
+    /// `pub(crate)`: 個別公開メソッド（[`Var::sqrt`] 等。本ファイル
+    /// 下方）が呼ぶ共通実装（イシュー #1710）。残る活性化系の個別公開
+    /// メソッドは #1595 が別途追加する。
     ///
     /// `where_cond`（`crate::grad::where_cond_with_fallback` 経由）と
     /// 同じ eager 実体化契約: ①入力値を層 1（[`materialize_fallible`]）
@@ -441,10 +440,6 @@ impl<'t> Var<'t> {
     /// （バックエンド実装 → `Unsupported` のときのみホスト参照実装
     /// フォールバック）→ ③`push_eager`。遅延融合（`push_lazy`）は
     /// 使わない（`Op::ScalarUnary` doc「eager」参照）。
-    ///
-    /// `#[allow(dead_code)]`: `Op::ScalarUnary` doc と同じ理由（公開 API
-    /// 面の配線は #1593／#1595）・同じ撤去条件。
-    #[allow(dead_code)]
     pub(crate) fn scalar_unary(&self, op: ScalarUnaryOp) -> Result<Var<'t>, AutodiffError> {
         let input_val = {
             let nodes = self.tape.nodes.borrow();
@@ -460,11 +455,9 @@ impl<'t> Var<'t> {
     /// `ScalarBinaryOp` 汎用 dispatch の `Var` 入口（イシュー #1634）。
     /// [`Var::scalar_unary`] の 2 項版で設計方針は同一
     /// （`pub(crate)`・eager・フォールバック契約）。`add`／`mul` と同じ
-    /// NumPy 互換ブロードキャスト（`broadcast_shape`）。
-    ///
-    /// `#[allow(dead_code)]`: [`Var::scalar_unary`] と同じ理由・同じ
-    /// 撤去条件。
-    #[allow(dead_code)]
+    /// NumPy 互換ブロードキャスト（`broadcast_shape`）。個別公開メソッド
+    /// （[`Var::sub`]／[`Var::div`]／[`Var::pow`]。本ファイル下方）が
+    /// 呼ぶ共通実装（イシュー #1710）。
     pub(crate) fn scalar_binary(
         &self,
         other: &Var<'t>,
@@ -489,6 +482,62 @@ impl<'t> Var<'t> {
             value,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// ブロードキャスト付き要素ごとの減算（`self − other`。PyTorch
+    /// `torch.sub`／`-` 演算子相当）。イシュー #1710（親 #1593）。
+    ///
+    /// `Var::scalar_binary`（[`ScalarBinaryOp::Sub`]）への薄い委譲
+    /// （`add`／`mul` と同じ NumPy 互換ブロードキャスト・eager 実体化
+    /// 契約。`docs/scalar-op-dispatch-design.md` §7）。`facade` は
+    /// `crates/autodiff::Var` を再エクスポートするのみで新規公開面は
+    /// 追加しない（`docs/compat-api-scope.md` §5「Tier 1／Tier 2 列挙
+    /// 済み機能は再適用不要」）。
+    pub fn sub(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Sub)
+    }
+
+    /// ブロードキャスト付き要素ごとの除算（`self ÷ other`。PyTorch
+    /// `torch.div`／`/` 演算子相当）。イシュー #1710（親 #1593）。
+    ///
+    /// `Var::scalar_binary`（[`ScalarBinaryOp::Div`]）への薄い委譲。
+    /// **数値規約（設計 §7 を変更せず踏襲）**: IEEE 754 のまま
+    /// （0 除算は `inf`／`NaN` を返し panic しない）。`db =
+    /// -(a/b)/b` の 0 除算・overflow・underflow 耐性は #1634／#1686
+    /// の是正済みホスト参照実装（`eval::scalar::binary_partials`）に
+    /// 従う。
+    pub fn div(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Div)
+    }
+
+    /// ブロードキャスト付き要素ごとの冪乗（`self.powf(other)`。PyTorch
+    /// `torch.pow`／`**` 演算子相当。Var × Var の 2 項演算のみで、
+    /// スカラー指数版〈`ScalarUnaryOp::PowScalar`〉は CUDA／Metal
+    /// カーネル未実装のため本メソッドの対象外）。イシュー #1710
+    /// （親 #1593）。
+    ///
+    /// `Var::scalar_binary`（[`ScalarBinaryOp::Pow`]）への薄い委譲。
+    /// **数値規約（設計 §7）**: `da = b·a^(b−1)`・`db = y·ln(a)`
+    /// （`a == 0` または `b == 0` は #1686 是正によりマスクされ勾配 0。
+    /// `a < 0` かつ `b` が非整数のとき forward は IEEE `NaN` を返す
+    /// PyTorch 同様の定義域規約）。
+    pub fn pow(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Pow)
+    }
+
+    /// 要素ごとの平方根（PyTorch `torch.sqrt` 相当）。イシュー #1710
+    /// （親 #1593）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Sqrt`]）への薄い委譲
+    /// （`relu`／`exp`／`tanh` と異なり `Result` を返す——`scalar_unary`
+    /// の eager 実体化契約〈①層 1 実体化 → ②バックエンド dispatch →
+    /// ③`push_eager`〉が型付きエラーを返しうるため。`where_cond`／
+    /// `softmax`／`add`／`mul` と同型）。**数値規約（設計 §7）**: 定義域
+    /// 外（`x < 0`）は IEEE `NaN` を返し panic しない（PyTorch
+    /// `torch.sqrt` と同じ）。導関数は `0.5 / y`（`eval::scalar::
+    /// unary_grad_factor`）。
+    pub fn sqrt(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Sqrt)
     }
 
     /// `dim` に沿った縮約和。`dim: None` は全軸縮約（スカラー）。
