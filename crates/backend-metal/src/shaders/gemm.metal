@@ -2723,3 +2723,322 @@ kernel void gemm_bias_grad_reduce_f32(
     }
     out[gid] = as_type<float>(bias_f64_narrow(acc));
 }
+
+// thread_elements() 方式 BlockMMA 候補カーネル（イシュー #1693・親 #1586）:
+// candle・MLX steel（`mlx/backend/metal/kernels/steel/gemm/mma.h::
+// BaseMMAFrag<T,8,8>`）が採用する「`simdgroup_float8x8::thread_elements()`
+// （MSL 標準 API）でレーンごとにフラグメント要素を直接読み書きする」
+// BlockMMA 方式を、本番 `gemm_simdgroup_tiled`（上方。`simdgroup_load`/
+// `simdgroup_store` がレーン→要素対応を隠蔽する）に対する opt-in 候補と
+// して追加する。本番へは一切結線しない（`crate::tile::MMA_FRAG_LOAD` の
+// 既定 `SimdgroupLoad` では `crate::gemm::MetalGemm::pipeline_for_tile`
+// が本カーネルへ到達しない。`crate::gemm::MetalGemm::
+// new_with_mma_frag_load(_, ThreadElements)` 経由でのみ、`pipeline_for_tile`
+// の `mma_frag_load == ThreadElements` 分岐から参照される）。
+//
+// **スコープ境界（本カーネルが実装しない事項）**: direct-load
+// （`USE_TGP_STAGING=false`）経路・`TILE_CLASS`（タイルクラス分割）・
+// `SPLIT_K_ENABLED`（split-K）・`FRAG_LOAD_DEVICE_HOISTED`/
+// `FRAG_LOAD_KSTEPS`（フラグメントロード方式候補）・`COOP_LOAD_LAYOUT`
+// 以外の協調ロードレイアウト・`UNROLL_ACC_ENABLED`/`FINE_BARRIER_ENABLED`。
+// これらの function constant は本カーネル本体から一切参照しない
+// （`crate::gemm::MetalGemm::pipeline_for_tile` の `ThreadElements`
+// 分岐が非 staged 候補・`TileClass::Edge`/`Interior` を fail-closed で
+// 拒否する契約と対応）。
+// `region`/`sk` 引数はシグネチャを `gemm_simdgroup_tiled` と完全一致させ
+// `crate::gemm::encode_dispatch_tiled`（既存の記録・ディスパッチ関数）を
+// 無変更で再利用するために残すが、本体では一切参照しない（`(void)` で
+// 明示）。
+//
+// **レーン座標**: `crate::tile::thread_elements_coord`（Rust 側モデル・
+// 全単射を単体テストで固定）と同じ式（MLX `BaseMMAFrag<T,8,8>::
+// get_coord` 一次情報）。各レーンは 8×8 フラグメントの同一行の連続 2 要素
+// `(fm, fn)`・`(fm, fn+1)` を担当する。
+//
+// **協調ロード・境界チェック（REQ-8）**: 本番 staged 経路（上方
+// `gemm_simdgroup_tiled` の `if (staging_active) { ... }` ブロック）と
+// 逐語同一（float4 ベクトルロード・9 境界ヘルパによる要素単位 0 埋め
+// フォールバックを一切変更しない）。フラグメント構築・MMA 発行・
+// エピローグのみ `thread_elements()` 方式に置き換える。
+//
+// **数値契約**: 正式な受け入れ判定は REQ-2 統一複合判定（parity
+// self-test。`tests/gemm_te_parity.rs`）。演算オペランド列（r/c_ 昇順・
+// kk 昇順の `simdgroup_multiply_accumulate` 発行順）・共有メモリへ格納
+// する値は本番 staged 経路と完全に同一のため、レーン→要素レイアウトが
+// 実機で `thread_elements_coord` モデルと一致する限り出力は本番と bit
+// 同一になる見込みだが、レーン→要素対応自体は MSL 仕様上
+// implementation-defined（`docs/backend-metal-morton-mapping-decision.md`）
+// のため実機検証（レイアウト probe。本ファイル末尾
+// `simdgroup_thread_elements_layout_probe`）で確認する。
+//
+// **性能実測・本番結線・split-K 対応等は行わない**（兄弟イシュー #1694
+// のスコープ。`docs/perf/metal-gemm-thread-elements-candidate.md`）。
+kernel void gemm_simdgroup_tiled_te(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* c [[buffer(2)]],
+    constant Dims& dims [[buffer(3)]],
+    constant GemmStrides& st [[buffer(4)]],
+    constant TileClassRegion& region [[buffer(5)]],
+    constant SplitKParams& sk [[buffer(6)]],
+    threadgroup float* shared_mem [[threadgroup(0)]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    // 本候補は TileClass 分割・split-K 経路のいずれも実装しない
+    // （上方カーネル説明コメント「スコープ境界」参照）。シグネチャ一致の
+    // ための引数だが本体では未参照。
+    (void)region;
+    (void)sk;
+
+    constexpr uint SWIZZLE_LOG = 2;
+    constexpr uint SWIZZLE_TILE = 1u << SWIZZLE_LOG;
+    uint tid_y = SWIZZLE_ENABLED ? ((tgid.y << SWIZZLE_LOG) + (tgid.x & (SWIZZLE_TILE - 1))) : tgid.y;
+    uint tid_x = SWIZZLE_ENABLED ? (tgid.x >> SWIZZLE_LOG) : tgid.x;
+
+    uint row0 = tid_y * BM;
+    uint col0 = tid_x * BN;
+    if (tiled_block_out_of_range(row0, col0, dims)) {
+        return;
+    }
+
+    uint wm_idx = simd_id / WN;
+    uint wn_idx = simd_id % WN;
+    uint sub_bm = BM / WM;
+    uint sub_bn = BN / WN;
+    uint sub_row0 = row0 + wm_idx * sub_bm;
+    uint sub_col0 = col0 + wn_idx * sub_bn;
+
+    // レーン座標（`crate::tile::thread_elements_coord` と同一式。
+    // カーネル冒頭コメント「レーン座標」参照）: t（K タイル）ループ・
+    // r/c_ 走査に依らず simd_lane のみで決まるため 1 回だけ計算する。
+    uint qid = simd_lane / 4;
+    uint fm = (qid & 4) + ((simd_lane / 2) % 4);
+    uint fn = (qid & 2) * 2 + (simd_lane % 2) * 2;
+
+    constexpr uint MAX_ACC = 8;
+    uint acc_rows = sub_bm / 8;
+    uint acc_cols = sub_bn / 8;
+    simdgroup_float8x8 acc[MAX_ACC][MAX_ACC];
+    for (uint r = 0; r < acc_rows; r++) {
+        for (uint c_ = 0; c_ < acc_cols; c_++) {
+            acc[r][c_] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    uint lda = BK + TGP_PAD;
+    uint ldb = BN + TGP_PAD;
+    if (TRANS_A) {
+        lda = BM + TGP_PAD;
+    }
+    if (TRANS_B) {
+        ldb = BK + TGP_PAD;
+    }
+    uint a_tile_rows = TRANS_A ? BK : BM;
+    threadgroup float* tile_a = shared_mem;
+    threadgroup float* tile_b = shared_mem + (size_t)a_tile_rows * (size_t)lda;
+
+    uint k_full_tiles = dims.k / BK;
+    uint k_tail = dims.k - k_full_tiles * BK;
+    uint k_tile_count = k_full_tiles + (k_tail > 0 ? 1 : 0);
+
+    for (uint t = 0; t < k_tile_count; t++) {
+        uint p0 = t * BK;
+        uint bk_eff = min(BK, dims.k - p0);
+
+        // 協調ロード（`gemm_simdgroup_tiled` 本番 staged 経路の逐語
+        // コピー。REQ-8 境界チェック・0 埋めフォールバックを一切変更
+        // しない。上方カーネルの同名ブロックのコメント参照）。
+        uint local_tid = simd_id * 32 + simd_lane;
+        uint threads_total = WM * WN * 32;
+
+        uint a_vecs = (BM * BK) / 4;
+        if (TRANS_A) {
+            for (uint vi = local_tid; vi < a_vecs; vi += threads_total) {
+                uint idx = coop_load_flat_index(vi, BK, BM);
+                uint kk = idx / BM;
+                uint r = idx % BM;
+                uint dst_idx = kk * lda + r;
+                uint global_row = row0 + r;
+                uint global_k = p0 + kk;
+                bool group_in_bounds = tiled_at_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
+                if (group_in_bounds) {
+                    device const float4* src = reinterpret_cast<device const float4*>(
+                        a + (size_t)global_k * (size_t)st.lda + (size_t)global_row);
+                    threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + dst_idx);
+                    *dst = *src;
+                } else {
+                    for (uint e = 0; e < 4; e++) {
+                        uint global_row_e = global_row + e;
+                        tile_a[dst_idx + e] = tiled_at_elem_in_bounds(kk, bk_eff, global_row_e, global_k, dims)
+                            ? a[(size_t)global_k * (size_t)st.lda + (size_t)global_row_e]
+                            : 0.0f;
+                    }
+                }
+            }
+        } else {
+            for (uint vi = local_tid; vi < a_vecs; vi += threads_total) {
+                uint idx = coop_load_flat_index(vi, BM, BK);
+                uint r = idx / BK;
+                uint kk = idx % BK;
+                uint dst_idx = r * lda + kk;
+                uint global_row = row0 + r;
+                uint global_k = p0 + kk;
+                bool group_in_bounds = tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
+                if (group_in_bounds) {
+                    device const float4* src = reinterpret_cast<device const float4*>(
+                        a + (size_t)global_row * (size_t)st.lda + (size_t)global_k);
+                    threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + dst_idx);
+                    *dst = *src;
+                } else {
+                    for (uint e = 0; e < 4; e++) {
+                        uint kk_e = kk + e;
+                        uint global_k_e = global_k + e;
+                        tile_a[dst_idx + e] = tiled_a_elem_in_bounds(kk_e, bk_eff, global_row, global_k_e, dims)
+                            ? a[(size_t)global_row * (size_t)st.lda + (size_t)global_k_e]
+                            : 0.0f;
+                    }
+                }
+            }
+        }
+
+        uint b_vecs = (BK * BN) / 4;
+        if (TRANS_B) {
+            for (uint vi = local_tid; vi < b_vecs; vi += threads_total) {
+                uint idx = coop_load_flat_index(vi, BN, BK);
+                uint c_ = idx / BK;
+                uint kk = idx % BK;
+                uint dst_idx = c_ * ldb + kk;
+                uint global_k = p0 + kk;
+                uint global_col = col0 + c_;
+                bool group_in_bounds = tiled_bt_group_in_bounds(kk, bk_eff, global_col, global_k, 4, dims);
+                if (group_in_bounds) {
+                    device const float4* src = reinterpret_cast<device const float4*>(
+                        b + (size_t)global_col * (size_t)st.ldb + (size_t)global_k);
+                    threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + dst_idx);
+                    *dst = *src;
+                } else {
+                    for (uint e = 0; e < 4; e++) {
+                        uint kk_e = kk + e;
+                        uint global_k_e = global_k + e;
+                        tile_b[dst_idx + e] = tiled_bt_elem_in_bounds(kk_e, bk_eff, global_col, global_k_e, dims)
+                            ? b[(size_t)global_col * (size_t)st.ldb + (size_t)global_k_e]
+                            : 0.0f;
+                    }
+                }
+            }
+        } else {
+            for (uint vi = local_tid; vi < b_vecs; vi += threads_total) {
+                uint idx = coop_load_flat_index(vi, BK, BN);
+                uint kk = idx / BN;
+                uint c_ = idx % BN;
+                uint dst_idx = kk * ldb + c_;
+                uint global_k = p0 + kk;
+                uint global_col = col0 + c_;
+                bool group_in_bounds = tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, 4, dims);
+                if (group_in_bounds) {
+                    device const float4* src = reinterpret_cast<device const float4*>(
+                        b + (size_t)global_k * (size_t)st.ldb + (size_t)global_col);
+                    threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + dst_idx);
+                    *dst = *src;
+                } else {
+                    for (uint e = 0; e < 4; e++) {
+                        uint c_e = c_ + e;
+                        uint global_col_e = global_col + e;
+                        tile_b[dst_idx + e] = tiled_b_elem_in_bounds(kk, bk_eff, global_k, global_col_e, dims)
+                            ? b[(size_t)global_k * (size_t)st.ldb + (size_t)global_col_e]
+                            : 0.0f;
+                    }
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // thread_elements() 方式 kk ループ（本カーネルの核心。イシュー
+        // #1693）: `simdgroup_load` の代わりに MSL 標準 API
+        // `simdgroup_float8x8::thread_elements()` で各レーンがフラグメント
+        // 要素 2 個を直接読み書きする。オペランド列（r/c_ 昇順・kk 昇順の
+        // `simdgroup_multiply_accumulate` 発行順）は本番 staged 経路と同一。
+        for (uint kk = 0; kk < BK; kk += 8) {
+            simdgroup_float8x8 a_frag[MAX_ACC];
+            simdgroup_float8x8 b_frag[MAX_ACC];
+            for (uint r = 0; r < acc_rows; r++) {
+                uint ar0 = wm_idx * sub_bm + r * 8;
+                float v0;
+                float v1;
+                if (TRANS_A) {
+                    v0 = tile_a[(size_t)(kk + fn) * (size_t)lda + (size_t)(ar0 + fm)];
+                    v1 = tile_a[(size_t)(kk + fn + 1) * (size_t)lda + (size_t)(ar0 + fm)];
+                } else {
+                    v0 = tile_a[(size_t)(ar0 + fm) * (size_t)lda + (size_t)(kk + fn)];
+                    v1 = tile_a[(size_t)(ar0 + fm) * (size_t)lda + (size_t)(kk + fn + 1)];
+                }
+                a_frag[r].thread_elements()[0] = v0;
+                a_frag[r].thread_elements()[1] = v1;
+            }
+            for (uint c_ = 0; c_ < acc_cols; c_++) {
+                uint bc0 = wn_idx * sub_bn + c_ * 8;
+                float v0;
+                float v1;
+                if (TRANS_B) {
+                    v0 = tile_b[(size_t)(bc0 + fn) * (size_t)ldb + (size_t)(kk + fm)];
+                    v1 = tile_b[(size_t)(bc0 + fn + 1) * (size_t)ldb + (size_t)(kk + fm)];
+                } else {
+                    v0 = tile_b[(size_t)(kk + fm) * (size_t)ldb + (size_t)(bc0 + fn)];
+                    v1 = tile_b[(size_t)(kk + fm) * (size_t)ldb + (size_t)(bc0 + fn + 1)];
+                }
+                b_frag[c_].thread_elements()[0] = v0;
+                b_frag[c_].thread_elements()[1] = v1;
+            }
+            for (uint r = 0; r < acc_rows; r++) {
+                for (uint c_ = 0; c_ < acc_cols; c_++) {
+                    simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // エピローグ: `thread_elements()` で要素単位に読み出し、本番 staged
+    // 経路と同じ手動境界チェック（REQ-8。最適化を理由に省略しない）で
+    // c へストアする（`row < dims.m && col < dims.n` の要素単位判定）。
+    for (uint r = 0; r < acc_rows; r++) {
+        uint out_row = sub_row0 + r * 8 + fm;
+        for (uint c_ = 0; c_ < acc_cols; c_++) {
+            uint out_col = sub_col0 + c_ * 8 + fn;
+            if (out_row < dims.m && out_col < dims.n) {
+                c[(size_t)out_row * (size_t)dims.n + (size_t)out_col] = acc[r][c_].thread_elements()[0];
+            }
+            if (out_row < dims.m && out_col + 1 < dims.n) {
+                c[(size_t)out_row * (size_t)dims.n + (size_t)out_col + (size_t)1] = acc[r][c_].thread_elements()[1];
+            }
+        }
+    }
+}
+
+// thread_elements() レイアウト probe カーネル（イシュー #1693）: 実機の
+// レーン→要素対応が `crate::tile::thread_elements_coord`（MLX
+// `BaseMMAFrag<T,8,8>::get_coord` と同じ式）と一致するかを単独で検証する
+// 診断専用カーネル。`crate::gemm::MetalGemm::diag_probe_thread_elements_
+// layout`（`#[cfg(test)]` 限定）からのみ参照する。src は 0..63 の行優先
+// 8×8 行列（`simdgroup_load` で読み込み）で、各レーンが担当する 2 要素を
+// `out[lane*2]`/`out[lane*2+1]` へ書く。実機 `#[ignore]`
+// `te_layout_probe_matches_model` が `out[lane*2+e] == fm*8+fn+e` を
+// 検証する（不一致はレーン対応の実機仕様差異を示す。緩和目的の判定では
+// ない）。
+kernel void simdgroup_thread_elements_layout_probe(
+    device const float* src [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& out_len [[buffer(2)]],
+    uint simd_lane [[thread_index_in_simdgroup]]
+) {
+    simdgroup_float8x8 m;
+    simdgroup_load(m, src, 8);
+    if (simd_lane < 32 && simd_lane * 2 + 1 < out_len) {
+        out[simd_lane * 2] = m.thread_elements()[0];
+        out[simd_lane * 2 + 1] = m.thread_elements()[1];
+    }
+}

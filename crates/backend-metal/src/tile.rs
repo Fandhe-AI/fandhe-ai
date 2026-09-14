@@ -1802,6 +1802,80 @@ pub enum TileClassMode {
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const TILE_CLASS_MODE: TileClassMode = TileClassMode::Legacy;
 
+/// `simdgroup_matrix::thread_elements()` 方式 BlockMMA 候補カーネル
+/// （`gemm_simdgroup_tiled_te`。イシュー #1693・親 #1586）の instance
+/// ゲート。`crate::gemm::MetalGemm::new_with_mma_frag_load` が受け取る。
+///
+/// 本番 `gemm_simdgroup_tiled`（`simdgroup_load`/`simdgroup_store` が
+/// レーン→要素対応を隠蔽する。`docs/backend-metal-morton-mapping-decision.md`）
+/// に対し、候補カーネルは MLX steel（`mlx/backend/metal/kernels/steel/
+/// gemm/mma.h::BaseMMAFrag<T,8,8>`）・candle と同様に
+/// `simdgroup_float8x8::thread_elements()`（MSL 標準 API）でレーンごとの
+/// フラグメント要素（2 個。`thread_elements_coord` が返す `(fm, fn)`・
+/// `(fm, fn+1)`）を直接読み書きする方式を試す。`SimdgroupLoad`（本番既定）
+/// では `crate::gemm::MetalGemm::pipeline_for_tile` が `gemm_simdgroup_tiled`
+/// を選ぶため既定挙動は不変。`ThreadElements` は `crate::gemm::MetalGemm::
+/// pipeline_for_tile`（`mma_frag_load == ThreadElements` 分岐。staged
+/// 経路・`TileClass::Legacy` のみ適格とし split-K 専用キャッシュ
+/// （`pipeline_for_tile_split_k`）は経由しない）が `gemm_simdgroup_tiled_te`
+/// へ切り替える。性能実測・
+/// `tile::select`／`dispatch_auto` への組み込み判断は行わない（兄弟イシュー
+/// #1694 のスコープ。`docs/perf/metal-gemm-thread-elements-candidate.md`）。
+///
+/// `pub`（[`FragLoadKSteps`] doc comment と同じ理由）: `pub(crate)` のまま
+/// `#[cfg(test)]` を付けない場合、他クレートからの通常の依存ビルドで
+/// 「crate 内に呼び出し元が無い」dead_code 検査に抵触する
+/// （`new_with_mma_frag_load` と同型の設計判断）。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MmaFragLoad {
+    /// 本番既定。`simdgroup_load`/`simdgroup_store` でフラグメントを
+    /// ロード・ストアする（`gemm_simdgroup_tiled`）。
+    SimdgroupLoad,
+    /// `thread_elements()` でレーンごとにフラグメント要素を直接読み書き
+    /// する候補（`gemm_simdgroup_tiled_te`。イシュー #1693）。
+    ThreadElements,
+}
+
+/// [`MmaFragLoad::SimdgroupLoad`] を本番既定として公開する定数
+/// （`SWIZZLE_ENABLED` 等と同型の設計。`crate::gemm::MetalGemm::new` が
+/// 本定数を渡す）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const MMA_FRAG_LOAD: MmaFragLoad = MmaFragLoad::SimdgroupLoad;
+
+/// `thread_elements()` 方式候補カーネル（イシュー #1693）のレーン→
+/// フラグメント座標対応の純関数モデル。MLX steel `mma.h`
+/// （`BaseMMAFrag<T,8,8>::get_coord`）と同じ式:
+/// `qid = lane/4; fm = (qid & 4) + ((lane/2) % 4); fn = (qid & 2)*2 +
+/// (lane % 2)*2;`。各レーンは 8×8 フラグメントの同一行の連続 2 要素
+/// `(fm, fn)`・`(fm, fn+1)` を担当する（`vec<T,2>` 相当。
+/// `simdgroup_float8x8::thread_elements()` は 2 要素配列を返す MSL 標準
+/// API）。
+///
+/// 32 レーン × 2 要素で 8×8=64 要素をちょうど 1 回ずつ被覆する全単射で
+/// あることを [`tests::thread_elements_coord_is_bijection`] が固定する
+/// （実機非依存。`gemm_simdgroup_tiled_te`（`shaders/gemm.metal`）の
+/// レーン座標式・[`crate::gemm::MetalGemm::diag_probe_thread_elements_layout`]
+/// の期待値の両方がこの式と一致することを実機 `#[ignore]` テスト
+/// （`te_layout_probe_matches_model`）が検証する契約）。
+///
+/// `#[cfg(test)]` 限定（`MmaFragLoad`/`MMA_FRAG_LOAD` と異なり
+/// `#[cfg(any(test, target_os = "macos"))]` ではない）: 本関数は
+/// カーネル選択ロジック（`crate::gemm::MetalGemm::pipeline_for_tile`）
+/// からは一切参照されない純粋な検証用モデル（MSL カーネル側は同じ式を
+/// 独立に埋め込む。`shaders/gemm.metal::gemm_simdgroup_tiled_te` 参照）
+/// のため、macOS 非テストビルドでも参照箇所がなく dead_code 判定に
+/// 抵触する。呼び出し元は `tile::tests`（本モジュール）と
+/// `crate::gemm::tests::te_layout_probe_matches_model`（いずれも
+/// `#[cfg(test)]`）のみ。
+#[cfg(test)]
+pub(crate) fn thread_elements_coord(lane: u32) -> (u32, u32) {
+    let qid = lane / 4;
+    let fm = (qid & 4) + ((lane / 2) % 4);
+    let fn_ = (qid & 2) * 2 + (lane % 2) * 2;
+    (fm, fn_)
+}
+
 /// `shaders/gemm.metal` の `TILE_CLASS` function constant（index 15）が
 /// 取る 3 値（イシュー #1327）。`crate::pipeline::GemmGateConstants::
 /// tile_class`／`crate::spec_source::SpecializationParams::tile_class`
@@ -6086,6 +6160,69 @@ mod tests {
                 assert!(plan.k_per_partition >= plan.tile.bk);
                 assert!(plan.k_per_partition % plan.tile.bk == 0);
             }
+        }
+    }
+
+    // --- thread_elements() 方式候補（イシュー #1693）: MMA_FRAG_LOAD /
+    // thread_elements_coord のドリフトガード・全単射・既知値スポット
+    // チェック。実機非依存（GPU 不要）。
+
+    #[test]
+    fn mma_frag_load_default_is_simdgroup_load() {
+        // 本番既定（`MetalGemm::new`）が候補カーネルへ切り替わっていない
+        // ことをドリフト検出する（`SWIZZLE_ENABLED` 等の既定値ガードと
+        // 同型）。
+        assert_eq!(MMA_FRAG_LOAD, MmaFragLoad::SimdgroupLoad);
+    }
+
+    #[test]
+    fn thread_elements_coord_is_bijection_over_8x8() {
+        // 32 レーン × 2 要素（`(fm, fn)`・`(fm, fn+1)`）が 8×8=64 要素を
+        // 過不足なく 1 回ずつ被覆することを確認する（MLX
+        // `BaseMMAFrag<T,8,8>` の前提。`gemm_simdgroup_tiled_te` の
+        // エピローグ・kk ループのフラグメント読み書きがこの全単射に
+        // 依拠する）。
+        let mut seen = [false; 64];
+        for lane in 0..32u32 {
+            let (fm, fn0) = thread_elements_coord(lane);
+            assert!(fm < 8, "fm out of range for lane {lane}: {fm}");
+            assert!(fn0 < 8, "fn out of range for lane {lane}: {fn0}");
+            assert!(fn0 + 1 < 8, "fn+1 out of range for lane {lane}: {fn0}");
+            for e in 0..2u32 {
+                let idx = (fm * 8 + fn0 + e) as usize;
+                assert!(
+                    !seen[idx],
+                    "element {idx} covered twice (lane {lane}, e {e})"
+                );
+                seen[idx] = true;
+            }
+        }
+        assert!(
+            seen.iter().all(|&s| s),
+            "thread_elements_coord does not cover all 64 elements"
+        );
+    }
+
+    #[test]
+    fn thread_elements_coord_matches_mlx_known_values() {
+        // MLX steel `mma.h::BaseMMAFrag<T,8,8>::get_coord` の既知値
+        // スポットチェック（一次情報: `ml-explore/mlx` リポジトリの同関数。
+        // qid=lane/4; fm=(qid&4)+((lane/2)%4); fn=(qid&2)*2+(lane%2)*2）。
+        let cases: &[(u32, (u32, u32))] = &[
+            (0, (0, 0)),
+            (1, (0, 2)),
+            (2, (1, 0)),
+            (4, (2, 0)),
+            (8, (0, 4)),
+            (16, (4, 0)),
+            (31, (7, 6)),
+        ];
+        for &(lane, expected) in cases {
+            assert_eq!(
+                thread_elements_coord(lane),
+                expected,
+                "lane {lane} coord mismatch"
+            );
         }
     }
 }
