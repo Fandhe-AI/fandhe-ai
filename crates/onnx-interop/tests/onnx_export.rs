@@ -5,7 +5,8 @@
 //! 意味論（内部 op -> `NodeProto` の属性マッピング）は #1773 のスコープであり、
 //! ここでは対象にしない（`onnx::export` モジュール冒頭コメント参照）。
 //! import -> export -> import の構造一致 roundtrip テスト・未対応 op の
-//! fail-closed 確認という総合テストは #1774 のスコープ。ここでは
+//! fail-closed 確認という総合テストは `tests/onnx_export_roundtrip.rs`
+//! （#1774）が担う。ここでは
 //! (a) 既存 fixture（`model.onnx`）を decode -> build_graph -> export -> 再 decode
 //! -> build_graph した結果が元の `Graph` と一致すること、(b) `encode_tensor`／
 //! `decode_tensor` の dtype 網羅往復、(c) エラーパス、(d) 出力の決定性、を
