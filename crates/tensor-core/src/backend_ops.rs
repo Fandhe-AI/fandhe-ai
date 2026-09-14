@@ -2175,12 +2175,6 @@ fn default_gemm_batched<T: BackendOps + ?Sized>(
     // `.claude/rules/coding-rust.md` に反する）。
     checked_numel_for::<f32>(&plan.out_shape()).map_err(BackendError::ShapeMismatch)?;
 
-    // 各オペランドを `[B, m, k]`／`[B, k, n]` の contiguous 3 次元へ
-    // 正規化する（`docs/compat-api-scope.md` §1.2 実装記録・イシュー
-    // #1715 実装計画 §2.2 の「正規化規則」）。
-    let a_norm = normalize_batched_operand(a, plan.batch_shape(), m, k)?;
-    let b_norm = normalize_batched_operand(b, plan.batch_shape(), k, n)?;
-
     // 出力要素数を確保前に検証する（PR #1810 codex-review P1 是正）。
     // 以前は `Vec::with_capacity(batch_len * m * n)` を素朴な乗算で
     // 呼んでいたため、`batch_len * m * n` が `usize` の範囲を超える
@@ -2201,9 +2195,20 @@ fn default_gemm_batched<T: BackendOps + ?Sized>(
     // 入力は実データなしで巨大な `batch_len`（例: `isize::MAX / 4 + 1`）
     // を構成できるので、no-op GEMM を `batch_len` 回繰り返すと実質
     // ハングする（PR #1810 Cursor Bugbot Medium 是正）。
+    // 出力要素数の検査と 0 判定はオペランドの正規化（broadcast の
+    // 実体化）より前に置く（PR #1810 codex-review P2 是正）。空の結果
+    // に対して巨大な入力コピー（例: a = [1, 1, 1]・b = [B, 1, 0] で
+    // a を B 要素へ実体化）を行わないため。
     if total == 0 {
         return Tensor::new(Vec::new(), &plan.out_shape()).map_err(BackendError::ShapeMismatch);
     }
+
+    // 各オペランドを `[B, m, k]`／`[B, k, n]` の contiguous 3 次元へ
+    // 正規化する（`docs/compat-api-scope.md` §1.2 実装記録・イシュー
+    // #1715 実装計画 §2.2 の「正規化規則」）。
+    let a_norm = normalize_batched_operand(a, plan.batch_shape(), m, k)?;
+    let b_norm = normalize_batched_operand(b, plan.batch_shape(), k, n)?;
+
     let mut out_data: Vec<f32> = Vec::with_capacity(total);
     for i in 0..batch_len {
         let a_i = a_norm
@@ -2276,6 +2281,24 @@ pub fn normalize_batched_operand(
         }));
     }
     let operand_batch_shape = &operand.shape()[..operand_rank - 2];
+
+    // 末尾 2 軸（`[rows, cols]`）が要求と一致することを実体化前に検証
+    // する（PR #1810 codex-review P1 是正）。本関数は `pub` 公開面の
+    // ため呼び出し元の `plan` との整合を前提にできない。不一致のまま
+    // 下記の `contiguous()` へ進むと、`full_shape` のバイトサイズ検査
+    // （`out_batch_shape ++ [rows, cols]`）が実際の `operand.shape()`
+    // を見ていないため、例えば 1 要素を `[H, 1, 1]`（H = isize::MAX /
+    // 4 + 1）へ broadcast した view に `rows = cols = 0` を渡すと検査
+    // を通過し、`contiguous()` が H 個の f32 を確保しようとして
+    // capacity overflow で panic する（本番経路 panic 禁止方針
+    // `.claude/rules/coding-rust.md` に反する）。
+    let operand_tail = &operand.shape()[operand_rank - 2..];
+    if operand_tail != [rows, cols] {
+        return Err(BackendError::ShapeMismatch(ShapeError::MatmulDimMismatch {
+            lhs: operand.shape().to_vec(),
+            rhs: vec![rows, cols],
+        }));
+    }
 
     // `out_batch_shape` の要素数積を `checked_numel`（`tensor.rs` と共有）で
     // 検査する（PR #1810 codex-review 指摘。本関数は `pub` 公開面のため、
@@ -3441,6 +3464,25 @@ mod tests {
         assert!(matches!(
             err,
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn normalize_batched_operand_rejects_trailing_dims_mismatch_before_materialization() {
+        // PR #1810 codex-review P1 指摘: 1 要素を `[H, 1, 1]`
+        // （H = isize::MAX / 4 + 1）へ broadcast した view（実データは
+        // 1 要素のまま）に `rows = cols = 0` を渡すと、`full_shape =
+        // [H, 0, 0]` のバイトサイズ検査は通過するが、末尾 2 軸が一致
+        // しないまま `contiguous()` へ進むと H 個の f32 を確保しようと
+        // して panic する。末尾 2 軸の不一致を実体化前に
+        // `MatmulDimMismatch` として拒否することを確認する。
+        let huge = isize::MAX as usize / 4 + 1;
+        let one = Tensor::new(vec![1.0f32], &[1, 1, 1]).unwrap();
+        let view = one.broadcast_to(&[huge, 1, 1]).unwrap();
+        let err = normalize_batched_operand(&view, &[huge], 0, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::MatmulDimMismatch { .. })
         ));
     }
 

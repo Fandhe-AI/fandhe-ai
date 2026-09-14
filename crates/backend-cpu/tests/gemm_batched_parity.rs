@@ -280,6 +280,23 @@ fn gemm_batched_huge_batch_with_empty_output_returns_immediately() {
     assert_eq!(out.numel(), 0);
 }
 
+/// 空出力の早期 return はオペランドの broadcast 実体化より前に行う
+/// （PR #1810 codex-review P2 是正の回帰テスト）。`a = [1, 1, 1]`
+/// （1 要素）と `b = [B, 1, 0]`（空）の結果は `[B, 1, 0]` で確定する
+/// ため、`a` を `B` 要素へ実体化してはならない（是正前は
+/// `B = isize::MAX / 4 + 1` で `ShapeMismatch`、より小さい `B` でも
+/// 不要な大量確保が発生していた）。
+#[test]
+fn gemm_batched_empty_output_skips_broadcast_materialization() {
+    let huge_batch = isize::MAX as usize / 4 + 1;
+    let ops = CpuBackendOps::new();
+    let a = tensor(vec![1.0], &[1, 1, 1]);
+    let b = tensor(Vec::new(), &[huge_batch, 1, 0]);
+    let out = ops.gemm_batched(&a, &b).unwrap();
+    assert_eq!(out.shape(), &[huge_batch, 1, 0]);
+    assert_eq!(out.numel(), 0);
+}
+
 /// `gemm_batched_fp32_strict` は CPU（TF32 の概念を持たない）では
 /// `gemm_batched` と bit 同一。
 #[test]

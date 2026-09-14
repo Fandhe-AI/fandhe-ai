@@ -637,9 +637,6 @@ impl BackendOps for CpuBackendOps {
         let (m, k, n) = (plan.m(), plan.k(), plan.n());
         let batch_len: usize = plan.batch_shape().iter().product();
 
-        let a_norm = fandhe_ai_tensor_core::normalize_batched_operand(a, plan.batch_shape(), m, k)?;
-        let b_norm = fandhe_ai_tensor_core::normalize_batched_operand(b, plan.batch_shape(), k, n)?;
-
         // `mn`（バッチ 1 件あたりの要素数）はスライス幅としてループ内で
         // 直接使うため、共有ヘルパーの内部計算とは別に checked_mul で
         // 求めておく（`total / batch_len` によるスライス幅復元は
@@ -656,9 +653,16 @@ impl BackendOps for CpuBackendOps {
         // 確定するため、バッチループへ入らずに返す（巨大な `batch_len` と
         // 空軸の組合せで no-op GEMM を `batch_len` 回繰り返すハングの
         // 回避。PR #1810 Cursor Bugbot Medium 是正・既定合成実装と同型）。
+        // 0 判定はオペランドの正規化（broadcast の実体化）より前に置き、
+        // 空の結果に対して巨大な入力コピーを行わない（PR #1810
+        // codex-review P2 是正）。
         if total == 0 {
             return Tensor::new(Vec::new(), &plan.out_shape()).map_err(BackendError::ShapeMismatch);
         }
+
+        let a_norm = fandhe_ai_tensor_core::normalize_batched_operand(a, plan.batch_shape(), m, k)?;
+        let b_norm = fandhe_ai_tensor_core::normalize_batched_operand(b, plan.batch_shape(), k, n)?;
+
         let mut out = zeroed_output(total);
 
         for i in 0..batch_len {
