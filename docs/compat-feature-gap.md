@@ -865,7 +865,9 @@ opt-in（`Tf32`／`Tf32x3`）時は新設した薄い公開ラッパー
 （#1042／#1355）は不変。facade 新規公開面なし・`Op`／`Var`／VJP の追加
 なし（#1715 で既に実装済み）。GB10 実機での bit 同一・REQ-2 parity 実測
 は未実施のまま申し送り（`crates/backend-cuda/tests/gemm_batched_parity.rs`）。
-Metal は引き続き既定合成実装のまま（#1717）。
+Metal は既定合成実装ではなく、上記のとおり encode-only バッチループ
+方式（`MetalBackendOps::gemm_batched` オーバーライド）を実装済み
+（#1717）。
 
 ## #1636（#1707〜#1709）の追補
 

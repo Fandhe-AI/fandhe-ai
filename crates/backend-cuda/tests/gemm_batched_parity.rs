@@ -50,6 +50,16 @@ fn contiguous_slice(t: &Tensor<f32>) -> Vec<f32> {
     t.contiguous().as_slice().unwrap().to_vec()
 }
 
+/// byte 単位の完全一致判定用（PR #1841 codex-review 指摘対応）。
+/// `assert_eq!(Vec<f32>, ...)` は `f32` の `PartialEq` を経由するため
+/// `+0.0` と `-0.0` を同一視してしまい、文書で謳う bit 完全一致
+/// （`docs/perf/logs/cuda-gemm-batched-1716/README.md`「数値契約」）を
+/// 検証できない。`f32::to_bits` へ変換してから比較することで符号ビット
+/// を含む厳密な byte 単位比較にする。
+fn bits_vec(v: &[f32]) -> Vec<u32> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
 /// 事前登録した形状網羅セット（`docs/perf/logs/cuda-gemm-batched-1716/
 /// README.md`「事前登録判定規則」の「全 9 形状」。整列〈N=K=1024 の
 /// 128×64 スロット到達条件を含む〉・非整列・broadcast（lhs／rhs／
@@ -170,8 +180,8 @@ fn gemm_batched_fp32_strict_matches_default_per_batch_composition_bit_exact_on_r
 
         assert_eq!(batched.shape(), via_per_batch.shape());
         assert_eq!(
-            contiguous_slice(&batched),
-            contiguous_slice(&via_per_batch),
+            bits_vec(&contiguous_slice(&batched)),
+            bits_vec(&contiguous_slice(&via_per_batch)),
             "run_tiled_f32_batched must be bit-exact with the default per-batch composition \
              for a={a_shape:?}, b={b_shape:?}"
         );
@@ -181,8 +191,8 @@ fn gemm_batched_fp32_strict_matches_default_per_batch_composition_bit_exact_on_r
             .gemm_batched_fp32_strict(&a, &b)
             .expect("second invocation must also succeed");
         assert_eq!(
-            contiguous_slice(&batched),
-            contiguous_slice(&batched2),
+            bits_vec(&contiguous_slice(&batched)),
+            bits_vec(&contiguous_slice(&batched2)),
             "run-to-run must be bit-exact for a={a_shape:?}, b={b_shape:?}"
         );
     }

@@ -3152,6 +3152,11 @@ impl CudaGemm {
             // できないため。以降のループはこの単一の可変ビューから
             // バッチごとの部分ビューを都度切り出す）。
             let mut c_full = c_dev.as_view_mut();
+            // 途中の起動失敗でも先行バッチの完了を必ず待ってから
+            // エラーを伝播するため、`?` でその場から抜けずループ内で
+            // `Result` を保持し `break` する（PR #1841 Cursor Bugbot
+            // 指摘対応）。
+            let mut launch_result: Result<(), CudaError> = Ok(());
             for i in 0..batch {
                 let a_view = CudaArg::View(a_dev.slice(i * mk..(i + 1) * mk));
                 let b_view = CudaArg::View(b_dev.slice(i * kn..(i + 1) * kn));
@@ -3160,17 +3165,37 @@ impl CudaGemm {
                 // からの要素オフセット。`launch_tiled_f32_resident` の
                 // 唯一の他の呼び出し元（`ops.rs::gemm_resident_lhs`）と
                 // 同じ契約で `i * mk` をそのまま渡す。
-                self.launch_tiled_f32_resident(&a_view, i * mk, &b_view, &mut c_view, m, n, k)?;
+                launch_result =
+                    self.launch_tiled_f32_resident(&a_view, i * mk, &b_view, &mut c_view, m, n, k);
+                if launch_result.is_err() {
+                    break;
+                }
             }
             // `c_full`（`c_dev` の可変借用）はループ内の最後の使用
-            // （最終バッチの `slice_mut` 呼び出し）で NLL により借用が
-            // 終わるため、以降の `c_dev.as_view()`（不変借用）と両立
-            // する。明示 `drop` は `CudaViewMut` が `Drop` を実装しない
-            // ため `clippy::drop_non_drop` に抵触し不要（コンパイラの
-            // NLL に委ねる）。
+            // （最終バッチの `slice_mut` 呼び出し、または早期 `break`
+            // 直前の使用）で NLL により借用が終わるため、以降の
+            // `c_dev.as_view()`（不変借用）と両立する。明示 `drop` は
+            // `CudaViewMut` が `Drop` を実装しないため
+            // `clippy::drop_non_drop` に抵触し不要（コンパイラの NLL に
+            // 委ねる）。
 
-            // 同期点は readback ヘルパーへ集約する（バッチ全体で 1 回。
-            // #1013 と同じ設計）。
+            // 設計判断 A（`launch_tiled_f32_nt_into` 等の doc comment
+            // 参照）と同じ根拠: `a_dev`／`b_dev`（`CudaSlice`）・`c_dev`
+            // （`PooledCudaHandle`。`Drop` はストリーム順序保証を持たず
+            // 即座にプールへ返却される）は、起動失敗で早期 `break` した
+            // 場合でも先行バッチのカーネルがまだ書き込み中（非同期
+            // 起動）でありうる。`?` で即座に関数を抜けてクロージャの
+            // スコープ終了に伴い `a_dev`／`b_dev`／`c_dev` を drop させる
+            // と、in-flight のカーネルが書き込み中のメモリを後続の
+            // 別確保が再利用しうる（use-after-free／race）。そのため
+            // 成功・失敗いずれの経路でも drop 前に必ず同期し、同期
+            // 自体が失敗した場合はそちらを優先してエラーとして返す。
+            self.stream.synchronize()?;
+            launch_result?;
+
+            // 同期点は上記で確保済みのため、以降の readback は既に
+            // 完了しているバッファへのアクセスであり安全（#1013 と
+            // 同じ設計）。
             crate::memory::readback(&self.stream, &c_dev.as_view())
         })
     }
