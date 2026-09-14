@@ -35,7 +35,7 @@
 use fandhe_ai::compat::{Sequential, array};
 use fandhe_ai_autodiff::Tape;
 use fandhe_ai_autodiff::nn::Linear;
-use fandhe_ai_autodiff::nn::activation::Sigmoid;
+use fandhe_ai_autodiff::nn::activation::{Elu, Hardswish, LeakyRelu, Sigmoid, Silu};
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_backend_cpu::parity::assert_parity;
 use fandhe_ai_tensor_core::Tensor;
@@ -200,6 +200,64 @@ fn sequential_forward_on_external_tape_reaches_backward() {
         .unwrap()
         .expect("入力ノードは loss に寄与している");
     assert_eq!(input_grad.shape(), input_tensor.shape());
+}
+
+/// `add_silu`／`add_hardswish`／`add_leaky_relu`／`add_elu`（イシュー
+/// #1714）を含む `Sequential::predict` が、同一シード・同一層構成を
+/// `nn::Linear`／`nn::activation` で直接組んだ手動 forward とビット
+/// 一致すること（`sequential_forward_matches_manual_nn_forward_bit_exact`
+/// と同型の公開 API 経由確認。tape 経路〈`forward`〉と tape 不要経路
+/// 〈`predict`〉の両方で検証する）。
+#[test]
+fn sequential_predict_matches_manual_forward_with_1714_layers() {
+    let linear1 = Linear::new(4, 6, true, SEED1).unwrap();
+    let linear2 = Linear::new(6, 5, true, SEED2).unwrap();
+    let linear3 = Linear::new(5, 3, true, SEED1 + SEED2).unwrap();
+
+    let input_tensor = array(vec![vec![0.1_f32, 0.2, 0.3, 0.4], vec![0.5, 0.6, 0.7, 0.8]]).unwrap();
+
+    // 手動経路（`fandhe_ai::Tape` と `fandhe_ai_autodiff::Tape` の使い分けは
+    // 本ファイル冒頭 doc 参照。ops 構成は fandhe_ai::tape() と同一）。
+    let manual_tape = raw_facade_equivalent_tape();
+    let manual_input = manual_tape.var(&input_tensor);
+    let h = linear1.bind(&manual_tape).forward(&manual_input).unwrap();
+    let h = Silu.forward(&h).unwrap();
+    let h = linear2.bind(&manual_tape).forward(&h).unwrap();
+    let h = Hardswish.forward(&h).unwrap();
+    let h = LeakyRelu::new(0.2).forward(&h).unwrap();
+    let h = linear3.bind(&manual_tape).forward(&h).unwrap();
+    let manual_output = Elu::new(1.3).forward(&h).unwrap();
+
+    // Sequential 経路（別インスタンスだが同一シードのため同一パラメータ）。
+    let model = Sequential::new()
+        .add_linear(4, 6, SEED1)
+        .unwrap()
+        .add_silu()
+        .add_linear(6, 5, SEED2)
+        .unwrap()
+        .add_hardswish()
+        .add_leaky_relu(0.2)
+        .add_linear(5, 3, SEED1 + SEED2)
+        .unwrap()
+        .add_elu(1.3);
+
+    // tape 経路（`forward`）。
+    let seq_tape = fandhe_ai::tape();
+    let seq_input = seq_tape.var(&input_tensor);
+    let seq_output = model.forward(&seq_tape, &seq_input).unwrap();
+    assert_eq!(
+        output_dense(&manual_output.to_tensor()),
+        output_dense(&seq_output.to_tensor()),
+        "forward（tape 経路）は手動 forward とビット一致するはず"
+    );
+
+    // tape 不要経路（`predict`）。
+    let via_predict = model.predict(&input_tensor).unwrap();
+    assert_eq!(
+        output_dense(&manual_output.to_tensor()),
+        output_dense(&via_predict),
+        "predict（tape 不要経路）は手動 forward とビット一致するはず"
+    );
 }
 
 /// `array` の jagged 入力エラーは `Sequential` 側の構築失敗と混同されず、

@@ -1,11 +1,13 @@
 //! Keras `Sequential` 慣習のレイヤー積み上げビルダー（TASK-9.2a・
 //! #95。TASK-9.4・#411 で `fandhe_ai_autodiff::compat` から本クレートへ移設）。
 //! 数値ロジックは一切持たず、`fandhe_ai_autodiff::nn::Module` 実装
-//! （`Linear`・`Relu`・`Sigmoid`・`Tanh`）をメソッドチェーンで積み上げ、
+//! （`Linear`・`Relu`・`Sigmoid`・`Tanh`・`Silu`・`Hardswish`・
+//! `LeakyRelu`・`Elu`〈イシュー #1714〉）をメソッドチェーンで積み上げ、
 //! `forward`/`predict` で `nn::Module::forward` へ委譲するだけの薄い
 //! ビルダー（REQ-9）。対象レイヤーは `docs/compat-api-scope.md` §1 の
-//! 3 種限定（Linear・ReLU/Sigmoid/Tanh。Softmax・GELU・Conv 等は範囲
-//! 拡張の手続き〈同 §5〉を経ずに追加しない）。
+//! 範囲拡張手続き（同 §5）を経て追加された集合限定（Linear・
+//! ReLU/Sigmoid/Tanh・Silu/Hardswish/LeakyRelu/Elu。GELU／Softplus は
+//! #1713、Conv 等は未実施のまま同手続きを経ずに追加しない）。
 //!
 //! **学習（勾配取得・パラメータ更新。#294 で対応済み）**: [`Sequential::bind`]
 //! が返す [`SequentialVars`] を経由して `LinearVars`（勾配取得の入口。
@@ -84,7 +86,7 @@ use crate::{
     AutodiffError, BackendError, DeviceParamStore, Gradients, LinearVars, ResidentLeaf, Tape,
     Tensor, Var,
 };
-use fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid, Tanh};
+use fandhe_ai_autodiff::nn::activation::{Elu, Hardswish, LeakyRelu, Relu, Sigmoid, Silu, Tanh};
 use fandhe_ai_autodiff::nn::{Linear, Module};
 use fandhe_ai_tensor_core::{Activation, BackendOps};
 
@@ -140,6 +142,38 @@ impl Sequential {
     /// 双曲線正接層を追加する（`nn::activation::Tanh`）。
     pub fn add_tanh(mut self) -> Self {
         self.layers.push(Box::new(Tanh));
+        self
+    }
+
+    /// SiLU／Swish 層を追加する（`nn::activation::Silu`。イシュー
+    /// #1714）。`Sigmoid`／`Tanh` と同様 `Linear` との epilogue 融合は
+    /// 行わない（`Module::as_relu` は既定 `false` のまま）。shape 不変
+    /// の演算のため構造的に失敗しえず `Result` を返さない。
+    pub fn add_silu(mut self) -> Self {
+        self.layers.push(Box::new(Silu));
+        self
+    }
+
+    /// Hardswish 層を追加する（`nn::activation::Hardswish`。イシュー
+    /// #1714）。[`Sequential::add_silu`] と同様融合対象外。
+    pub fn add_hardswish(mut self) -> Self {
+        self.layers.push(Box::new(Hardswish));
+        self
+    }
+
+    /// Leaky ReLU 層を追加する（`nn::activation::LeakyRelu`。イシュー
+    /// #1714）。`negative_slope`（負領域の傾き）は検証せず IEEE の
+    /// まま伝播する。[`Sequential::add_silu`] と同様融合対象外。
+    pub fn add_leaky_relu(mut self, negative_slope: f32) -> Self {
+        self.layers.push(Box::new(LeakyRelu::new(negative_slope)));
+        self
+    }
+
+    /// ELU 層を追加する（`nn::activation::Elu`。イシュー #1714）。
+    /// `alpha` は検証せず IEEE のまま伝播する。[`Sequential::add_silu`]
+    /// と同様融合対象外。
+    pub fn add_elu(mut self, alpha: f32) -> Self {
+        self.layers.push(Box::new(Elu::new(alpha)));
         self
     }
 
@@ -1007,6 +1041,48 @@ mod tests {
                     Box::new(Sigmoid),
                     Box::new(Linear::new(12, 4, true, SEED1 + SEED2).unwrap()),
                     Box::new(Tanh),
+                ],
+            };
+            let input_data: Vec<f32> = (0..batch * 8).map(|i| (i as f32) * 0.05 - 0.3).collect();
+            let input = Tensor::new(input_data, &[batch, 8]).unwrap();
+
+            let via_tape_fast = model.predict(&input).unwrap();
+            let via_tape_slow = model.predict_via_tape(&input).unwrap();
+
+            assert_eq!(
+                via_tape_fast.shape(),
+                via_tape_slow.shape(),
+                "batch={batch}"
+            );
+            assert_eq!(
+                dense_vec(&via_tape_fast),
+                dense_vec(&via_tape_slow),
+                "predict（tape 不要経路）は predict_via_tape（旧経路）と \
+                 bit 完全一致するはず（batch={batch}）"
+            );
+        }
+    }
+
+    /// [`Sequential::predict`]（tape 不要経路）が [`Silu`]／
+    /// [`Hardswish`]／[`LeakyRelu`]／[`Elu`]（イシュー #1714）を含む層
+    /// 構成でも旧経路（`predict_via_tape`）と bit 完全一致すること
+    /// （`sequential_predict_tape_free_matches_via_tape_bit_exact` の
+    /// 対象層を拡張する。4 層とも `Module::forward_host` が
+    /// `Var::scalar_unary` と同じ `grad::scalar_unary_with_fallback` を
+    /// 呼ぶため bit-exactness が構造的に成立する）。
+    #[test]
+    fn sequential_predict_tape_free_matches_via_tape_bit_exact_with_1714_layers() {
+        for batch in [1usize, 3] {
+            let model = Sequential {
+                layers: vec![
+                    Box::new(Linear::new(8, 16, true, SEED1).unwrap()),
+                    Box::new(Silu),
+                    Box::new(Linear::new(16, 12, false, SEED2).unwrap()),
+                    Box::new(Hardswish),
+                    Box::new(Linear::new(12, 8, true, SEED1 + SEED2).unwrap()),
+                    Box::new(LeakyRelu::new(0.2)),
+                    Box::new(Linear::new(8, 4, true, SEED2 + 1).unwrap()),
+                    Box::new(Elu::new(1.3)),
                 ],
             };
             let input_data: Vec<f32> = (0..batch * 8).map(|i| (i as f32) * 0.05 - 0.3).collect();
