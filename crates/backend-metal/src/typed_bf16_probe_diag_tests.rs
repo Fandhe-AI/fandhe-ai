@@ -287,6 +287,14 @@ fn p4_probe_inputs() -> Vec<f32> {
 /// 持つ。P1 が不可ならこのテストもコンパイル失敗として同じ理由で
 /// 失敗する）。ホスト `half::bf16::from_f32` と bit 単位で突き合わせ、
 /// 一致件数・不一致件数を `println!` する（非 gating）。
+///
+/// P1〜P3 は本番既定言語版・`Version3_1` 明示のいずれかが成功すれば
+/// bfloat 利用可能と判定する（`probe_compile_both_lang_conditions`）ため、
+/// 本テストも同じ 2 条件フォールバック（既定 → 失敗時のみ `Version3_1`）
+/// でコンパイルする。既定が失敗し `Version3_1` のみ成功する環境で
+/// 早期 return すると (b) roundtrip 数値データが収集されず Mac
+/// セッションへ引き継がれないため（Cursor Bugbot 指摘・イシュー #1706
+/// PR #1803 レビュー）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn p4_bfloat_roundtrip_numeric_smoke() {
@@ -295,13 +303,29 @@ fn p4_bfloat_roundtrip_numeric_smoke() {
 
     let library = match compile_probe_source(device, P4_ROUNDTRIP_SRC, None) {
         Ok(lib) => lib,
-        Err(e) => {
-            println!(
-                "bf16_probe label=p4_bfloat_roundtrip compile_result=error message={e:?} \
-                 (P1 が不可の場合はこの失敗も想定内。p1_bfloat_scalar_compile_probe の \
-                 結果を先に確認すること)"
-            );
-            return;
+        Err(default_err) => {
+            match compile_probe_source(
+                device,
+                P4_ROUNDTRIP_SRC,
+                Some(MTLLanguageVersion::Version3_1),
+            ) {
+                Ok(lib) => {
+                    println!(
+                        "bf16_probe label=p4_bfloat_roundtrip lang=default compile_result=error \
+                         message={default_err:?} lang=3.1 compile_result=ok"
+                    );
+                    lib
+                }
+                Err(v31_err) => {
+                    println!(
+                        "bf16_probe label=p4_bfloat_roundtrip lang=default compile_result=error \
+                         message={default_err:?} lang=3.1 compile_result=error message={v31_err:?} \
+                         (P1 が不可の場合はこの失敗も想定内。p1_bfloat_scalar_compile_probe の \
+                         結果を先に確認すること)"
+                    );
+                    return;
+                }
+            }
         }
     };
     let pipeline = make_pipeline(device, &library, "p4_bfloat_roundtrip_probe")
