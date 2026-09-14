@@ -36,6 +36,26 @@ SHAPE_RE = re.compile(
     r"speedup=(?P<speedup>[0-9.]+)x"
 )
 
+# `crates/backend-cuda/tests/gemm_transposed_perf.rs` の
+# `nt_transposed_entry_vs_contiguous_across_shapes`／
+# `tn_transposed_entry_vs_contiguous_across_shapes` が対象とする形状
+# （各 4 形状 × NT/TN の 2 パターン = 8 形状。1 プロセス起動につき各
+# 形状はちょうど 1 回だけ出力される）。正式な 5 プロセス起動中央値
+# 集計の入力検証に使う（codex-review 指摘・PR #1812）。
+EXPECTED_SHAPES: frozenset[tuple[str, int, int, int]] = frozenset(
+    {
+        ("NT", 64, 784, 256),
+        ("NT", 64, 256, 10),
+        ("NT", 1024, 1024, 1024),
+        ("NT", 2048, 2048, 2048),
+        ("TN", 64, 784, 256),
+        ("TN", 64, 256, 10),
+        ("TN", 1024, 1024, 1024),
+        ("TN", 2048, 2048, 2048),
+    }
+)
+EXPECTED_RUNS = 5
+
 
 def parse_log(text: str) -> list[dict]:
     """1 プロセス起動分のログ本文から形状行をすべて抽出する。"""
@@ -89,6 +109,57 @@ def aggregate(run_texts: list[str]) -> list[dict]:
     return out
 
 
+class ValidationError(ValueError):
+    """`validate_run_texts` が不完全・重複入力を検出した場合に送出する。"""
+
+
+def validate_run_texts(
+    run_texts: list[str], expected_runs: int = EXPECTED_RUNS
+) -> None:
+    """正式な 5 プロセス起動中央値集計としての完全性を検証する
+    （codex-review 指摘・PR #1812）。中断ログ（形状行が 8 件未満）・
+    重複指定（同一ログの二重読み込み・同一形状が同一起動内で複数回
+    出現）から不完全な中央値を正式集計として出力しないよう、以下を
+    fail-closed で検査する:
+
+    - 起動数（入力ログ数）が `expected_runs` と一致すること
+    - 各起動（各ログ）が `EXPECTED_SHAPES` の 8 形状をちょうど 1 件ずつ
+      含むこと（不足・重複・未知形状のいずれも許容しない）
+
+    違反時は `ValidationError` を送出する（呼び出し側で非 0 終了させる）。
+    """
+    if len(run_texts) != expected_runs:
+        raise ValidationError(
+            f"入力ログ数が {expected_runs} 件ではない（実際: {len(run_texts)} 件）。"
+            "正式な 5 プロセス起動中央値集計には gemm_transposed_perf_run{1..5}.log の"
+            "ちょうど 5 件を指定すること（中断・重複指定を検出するための検査）。"
+        )
+    for run_idx, text in enumerate(run_texts, start=1):
+        rows = parse_log(text)
+        seen: dict[tuple[str, int, int, int], int] = {}
+        for row in rows:
+            key = (row["pattern"], row["m"], row["k"], row["n"])
+            seen[key] = seen.get(key, 0) + 1
+        duplicates = {k: c for k, c in seen.items() if c > 1}
+        if duplicates:
+            raise ValidationError(
+                f"run{run_idx}: 同一形状が複数回出現している（重複指定・ログ二重連結の"
+                f"疑い）: {sorted(duplicates)}"
+            )
+        missing = EXPECTED_SHAPES - set(seen)
+        if missing:
+            raise ValidationError(
+                f"run{run_idx}: 期待する 8 形状のうち {len(missing)} 件が不足している"
+                f"（中断ログの疑い）: {sorted(missing)}"
+            )
+        unknown = set(seen) - EXPECTED_SHAPES
+        if unknown:
+            raise ValidationError(
+                f"run{run_idx}: 未知の形状が含まれている"
+                f"（`gemm_transposed_perf.rs` の形状定義とズレている疑い）: {sorted(unknown)}"
+            )
+
+
 def render_markdown(rows: list[dict]) -> str:
     lines = [
         "| パターン | m | k | n | before 中央値 (s) | after 中央値 (s) | 倍率中央値 | n_runs |",
@@ -99,6 +170,26 @@ def render_markdown(rows: list[dict]) -> str:
             "| {pattern} | {m} | {k} | {n} | {before_median_s:.6f} | "
             "{after_median_s:.6f} | {speedup_median:.3f}x | {n_runs} |".format(**row)
         )
+    return "\n".join(lines) + "\n"
+
+
+def _full_run_fixture(run_i: int) -> str:
+    """`EXPECTED_SHAPES` の 8 形状すべてを含む 1 起動分のログ断片を
+    生成する（`validate_run_texts` の正常系フィクスチャ）。"""
+    lines = ["running 8 tests"]
+    first = True
+    for pattern, m, k, n in sorted(EXPECTED_SHAPES):
+        prefix = (
+            f"test {pattern.lower()}_transposed_entry_vs_contiguous_across_shapes ... "
+            if first
+            else ""
+        )
+        first = False
+        lines.append(
+            f"{prefix}{pattern} m={m} k={k} n={n} "
+            f"before_median_s=0.000439 after_median_s=0.000079 speedup=5.5{run_i}3x"
+        )
+    lines.append("ok")
     return "\n".join(lines) + "\n"
 
 
@@ -126,6 +217,41 @@ def _self_test() -> int:
     assert abs(row["speedup_median"] - statistics.median(expected_speedups)) < 1e-9
     md = render_markdown(rows)
     assert "NT" in md and "5.523x" in md
+
+    # `validate_run_texts` の検査（codex-review 指摘・PR #1812）。
+    # 正常系: 8 形状 × 5 run が揃っていれば例外を送出しない。
+    full_runs = [_full_run_fixture(i) for i in range(5)]
+    validate_run_texts(full_runs)
+
+    # 異常系 1: 起動数が 5 でない（中断・過不足）。
+    try:
+        validate_run_texts(full_runs[:4])
+        raise AssertionError("expected ValidationError for run-count mismatch")
+    except ValidationError:
+        pass
+
+    # 異常系 2: 1 run の形状が 1 件欠落している（中断ログの疑い）。
+    truncated_runs = list(full_runs)
+    truncated_lines = truncated_runs[0].splitlines()
+    truncated_runs[0] = "\n".join(
+        line for line in truncated_lines if "m=2048 k=2048 n=2048" not in line
+    )
+    try:
+        validate_run_texts(truncated_runs)
+        raise AssertionError("expected ValidationError for missing shape")
+    except ValidationError:
+        pass
+
+    # 異常系 3: 1 run 内で同一形状が重複している（重複指定・二重連結の
+    # 疑い）。
+    duplicated_runs = list(full_runs)
+    duplicated_runs[0] = duplicated_runs[0] + duplicated_runs[0]
+    try:
+        validate_run_texts(duplicated_runs)
+        raise AssertionError("expected ValidationError for duplicated shape")
+    except ValidationError:
+        pass
+
     print("self-test OK")
     return 0
 
@@ -136,6 +262,20 @@ def main(argv: list[str]) -> int:
         "logs", nargs="*", type=Path, help="gemm_transposed_perf_run*.log のパス"
     )
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--expect-runs",
+        type=int,
+        default=EXPECTED_RUNS,
+        help=f"正式集計として要求する起動数（既定 {EXPECTED_RUNS}）",
+    )
+    parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help=(
+            "起動数・8 形状完全性の検査を無効化する（診断・部分ログの"
+            "確認専用。正式な §3.2 補助 A/B 表の生成には使わないこと）"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -147,6 +287,14 @@ def main(argv: list[str]) -> int:
     run_texts = []
     for path in args.logs:
         run_texts.append(path.read_text(encoding="utf-8"))
+
+    if not args.skip_validation:
+        try:
+            validate_run_texts(run_texts, expected_runs=args.expect_runs)
+        except ValidationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
     rows = aggregate(run_texts)
     if not rows:
         print("warning: 形状行が 1 件も抽出できなかった", file=sys.stderr)

@@ -72,7 +72,16 @@ exact` 等、#1214 当時になかった新しいフラグに対応するため�
 - **専有ゲート（既定 ON。#1560／#1689 と同型）**: 1 分 load average < 1.0
   かつ `utilization.gpu == 0 %` を 30 秒間隔 3 サンプル連続で通過。最大
   20 サンプル不成立なら `verdict=undetermined` を 1 回記録して終了
-  （`AB_LOAD_GATE_MODE=record_only` はユーザー明示指示時のみ）
+  （`AB_LOAD_GATE_MODE=record_only` はユーザー明示指示時のみ）。
+  `run_ab_vjp_transposed_cuda.sh` は before／after 両腕のリリースビルド
+  （数分規模の CPU 負荷を伴う）完了後・計測ループ（5 round）開始直前に
+  **同一条件のゲートを再実行する**（`gate-postbuild-<label>.log`。
+  ビルド中の負荷変動でオーケストレータの事前ゲート確認が計測開始時点
+  では成立しなくなっている可能性を排除するため。イシュー #1590 PR
+  #1812 codex-review 指摘）。再ゲートが不成立の場合は計測を実行せず
+  `verdict=undetermined` を記録して終了する（`AB_LOAD_GATE_MODE` は
+  `orchestrate.sh` から環境変数として引き継がれ、同じ opt-out 判断を
+  尊重する）
 - **R1（HEAD tree の `#[ignore]` 非後退）**: 下記「対象テスト」参照
 - **verdict**: ADOPT（Tier 1 両セル成立・R1 green）／REJECT（Tier 1 で
   `ratio>1.00` または checksum 不一致、または R1 で #1214 起因の fail）／
@@ -83,7 +92,7 @@ exact` 等、#1214 当時になかった新しいフラグに対応するため�
 | パス | 内容 |
 |------|------|
 | `orchestrate.sh` | 専有ゲート → `run_ab_vjp_transposed_cuda.sh` の実行ラッパー（`--dry-run` あり） |
-| `run_ignored_tests.sh` | R1（対象 `#[ignore]` テスト群）を個別プロセス実行しログを保存する |
+| `run_ignored_tests.sh` | R1（対象 `#[ignore]` テスト群）を HEAD（`REPO_ROOT`）で個別プロセス実行しログを保存する。`AUX_TREE=<after ツリー絶対パス>` を指定すると §3.2 正式補助 A/B（`gemm_transposed_perf` 5 起動）も **after ツリー内で** 続けて実行する（未指定時は aux/ をスキップし fail-closed。PR #1812 Cursor Bugbot 指摘: R1 の一部は post-#1214 API 依存のため HEAD 限定・aux はコンタミ防止のため after ツリー限定で、両者を同一 `REPO_ROOT` に一本化できない） |
 | `aggregate_aux_ab.py` | `gemm_transposed_perf` の 5 プロセス起動ログから形状ごとの speedup 中央値表を生成する（`--self-test` あり） |
 | `env_info.txt` | 実行環境・sha・バイナリ sha256・判定結果の記入欄（未実測のため未記入） |
 | `ab/` | `run_ab_vjp_transposed_cuda.sh` の出力回収先（JSONL・compare md・sha・tree・uptime・skipped。未生成） |
@@ -116,11 +125,25 @@ exact` 等、#1214 当時になかった新しいフラグに対応するため�
    （`.env*`／`settings.local.json`／`.local.md` 除外）に従う。各ツリーに
    `git rev-parse <sha> > .rev-stamp` を書いておく（展開ツリーは `.git`
    を持たないため版確認は `.rev-stamp` のみ）
-2. R1: 本ブランチ HEAD（このリポジトリの worktree）で
-   `docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/run_ignored_
-   tests.sh` を実行
-3. 正式補助 A/B（§3.2）: after ツリーで `gemm_transposed_perf` を 5 回
-   個別プロセス起動し、`aggregate_aux_ab.py` で集計する
+2. R1（本ブランチ HEAD 限定）＋正式補助 A/B（§3.2・after ツリー限定）を
+   まとめて実行する:
+
+   ```sh
+   AUX_TREE=/absolute/path/to/after \
+     docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/run_ignored_tests.sh
+   ```
+
+   `run_ignored_tests.sh` は R1 の各テストを本ブランチ HEAD（`REPO_ROOT`。
+   `gemm_fp32_strict_into_parity` 等 #1214 より後発の API に依存するため
+   HEAD 限定）で実行し、`gemm_transposed_perf` の 5 プロセス起動のみを
+   `AUX_TREE`（after ツリー。手順 1 で用意した `ab0b77d0` 展開先）へ
+   `cd` してから実行する（post-#1214 の CUDA 変更が正式補助 A/B の数値
+   へ混入するのを防ぐため。REPO_ROOT 自体を after ツリーへ向ける方式は
+   R1 の後発ケースが存在せずビルド不能になるため採らない）。`AUX_TREE`
+   を省略すると `aux/` は fail-closed でスキップされる（`aux/SKIPPED.txt`
+   に理由を記録。R1 のみを先に確認したい場合に使う）
+3. `aggregate_aux_ab.py` で `aux/gemm_transposed_perf_run{1..5}.log` を
+   集計する
 4. Tier 1 A/B:
 
    ```sh

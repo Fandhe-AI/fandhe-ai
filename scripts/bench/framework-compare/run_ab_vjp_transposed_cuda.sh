@@ -156,6 +156,56 @@ cat "$OUT"/tree-*-"${LABEL}".txt
 BIN_BEFORE="$OUT/bench-fandhe-before-${LABEL}"
 BIN_AFTER="$OUT/bench-fandhe-after-${LABEL}"
 
+# codex-review 指摘（イシュー #1590 PR #1812）: 両腕のリリースビルド
+# （上記 `build_arm` 2 回）は数分規模の CPU 負荷を伴い、`orchestrate.sh`
+# が計測開始「前」に確認した専有ゲート（1 分 load average < 1.0 かつ
+# `utilization.gpu == 0 %`）の前提を、計測ループ開始時点では保証しない
+# （ビルド自体の CPU 負荷・ビルド所要時間中の他プロセス起動の余地）。
+# そのためビルド完了後・計測ループ（下記 `for run_i in ...`）直前に、
+# `orchestrate.sh` と同一のゲート条件を再実行する（`AB_LOAD_GATE_MODE`
+# はオーケストレータ経由で環境変数として引き継がれるため同一の
+# opt-out 判断を尊重する）。
+POST_BUILD_GATE_LOG="$OUT/gate-postbuild-${LABEL}.log"
+POST_BUILD_GATE_MODE="${AB_LOAD_GATE_MODE:-gated}"
+if [[ "$POST_BUILD_GATE_MODE" == "record_only" ]]; then
+  {
+    echo "post-build gate protocol: record_only（専有ゲート opt-out。ユーザー明示指示）"
+    echo "start: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    uptime
+  } >"$POST_BUILD_GATE_LOG"
+else
+  PB_MAX_SAMPLES=20
+  PB_NEED_CONSEC=3
+  PB_INTERVAL=30
+  PB_LOAD_MAX="1.0"
+  {
+    echo "post-build gate protocol: load1 < ${PB_LOAD_MAX} && util.gpu == 0% for ${PB_NEED_CONSEC} consecutive samples (interval ${PB_INTERVAL}s, max ${PB_MAX_SAMPLES})"
+    echo "start: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } >"$POST_BUILD_GATE_LOG"
+  pb_consec=0
+  pb_passed=0
+  for pb_i in $(seq 1 "$PB_MAX_SAMPLES"); do
+    pb_load1=$(cut -d' ' -f1 /proc/loadavg)
+    pb_util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+    pb_apps=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')
+    pb_ok=0
+    if awk -v l="$pb_load1" -v m="$PB_LOAD_MAX" 'BEGIN{exit !(l<m)}' && [[ "$pb_util" == "0" ]]; then pb_ok=1; fi
+    echo "sample=$pb_i ts=$(date -u +%H:%M:%SZ) load1=$pb_load1 util_gpu=${pb_util}% compute_apps=$pb_apps gate_ok=$pb_ok" >>"$POST_BUILD_GATE_LOG"
+    if [[ "$pb_ok" == "1" ]]; then pb_consec=$((pb_consec+1)); else pb_consec=0; fi
+    if [[ "$pb_consec" -ge "$PB_NEED_CONSEC" ]]; then pb_passed=1; break; fi
+    sleep "$PB_INTERVAL"
+  done
+  if [[ "$pb_passed" != "1" ]]; then
+    echo "verdict=undetermined (post-build gate not satisfied within ${PB_MAX_SAMPLES} samples)" >>"$POST_BUILD_GATE_LOG"
+    echo "done. verdict=undetermined" >>"$POST_BUILD_GATE_LOG"
+    echo "post-build gate not satisfied; see $POST_BUILD_GATE_LOG" >>"$SKIP"
+    echo "post-build gate not satisfied (verdict=undetermined); see $POST_BUILD_GATE_LOG" >&2
+    exit 0
+  fi
+  echo "post-build gate passed at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$POST_BUILD_GATE_LOG"
+  uptime >>"$POST_BUILD_GATE_LOG"
+fi
+
 run_train() { # run_train <arm> <mode> [--phases]
   local arm=$1 mode=$2 extra=${3:-} suffix=train bin
   [[ -n "$extra" ]] && suffix=phases
