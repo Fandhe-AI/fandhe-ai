@@ -42,7 +42,10 @@
 //! 既存 `Var` 演算（`matmul`／`reshape`／`permute`／`masked_fill`／
 //! `softmax`）の合成として実装している。`Module` trait は self-attention
 //! （`q=k=v=input`）として実装する（`attention.rs` モジュール doc
-//! 参照）。
+//! 参照）。イシュー #1738（親 #1609）で `NllLoss`（`Var::nll_loss` の
+//! ラッパー。PyTorch `nn.NLLLoss` 相当）・`KlDivLoss`（`Var::kl_div_loss`／
+//! `kl_div_loss_with_log_target` のラッパー。PyTorch `nn.KLDivLoss`
+//! 相当。同じく [`loss`]）を追加した。
 
 mod attention;
 mod embedding;

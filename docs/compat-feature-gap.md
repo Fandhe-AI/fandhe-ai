@@ -1486,3 +1486,11 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `Module` trait は実装した（`forward` は self-attention `q=k=v=input`・mask なし・非 causal として定義）。`compat::Sequential` 用の `as_linear`／`as_relu` フックはいずれも trait 既定のままオーバーライドしない（Embedding〈#1604〉と異なり `Module::forward` 自体は実装するが、学習可能パラメータの自動収集対象には含めない）。
 - facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
 - CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/mha_backend_parity.rs` の `#[ignore]` テストを参照）。
+
+§2.8「損失関数」の `NLLLoss` 行（`なし。cross_entropy_loss が事実上兼ねる設計`）はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（イシュー #1738・親 #1609）。`KLDivLoss` はスナップショット当時の同節に未掲載のため新規行として追記する。
+
+- `Var::nll_loss(targets, class_dim, reduction)`（`self` = log 確率。`targets` は `Var::cross_entropy_loss` と同じ非追跡 `Tensor<i32>`）・`Var::kl_div_loss(target, reduction)`（`Probabilities`。`input`／`target` とも追跡対象）・`Var::kl_div_loss_with_log_target(target, reduction)`（`LogProbabilities`）を追加した（`crates/autodiff/src/var.rs`）。`log_softmax(x).nll_loss(t)` の forward 値が `cross_entropy_loss(x, t)` と一致することを統合テストで確認済み（`crates/autodiff/tests/nn_nll_kl_div_loss.rs`）。
+- `tape::Op::NllLoss`／`Op::KlDivLoss`・`fandhe_ai_tensor_core::KlDivTarget`（`#[non_exhaustive]`。`Probabilities`／`LogProbabilities`）・`BackendOps::nll_loss`／`nll_loss_backward`・`kl_div_loss`／`kl_div_loss_backward`（`MseReduction` を共用・既定 `Unsupported`）を追加した。CPU／CUDA／Metal 3 バックエンドとも融合カーネル（forward 2 段 reduction・backward 1 段。`MseLoss`〈#1045〉・`BceLoss`〈#1737〉と同型構成）を実装済み。
+- `nn::loss::NllLoss`／`KlDivLoss`（薄いラッパー。`Default` は PyTorch 既定 `class_dim=1`／`reduction='mean'`／`log_target=false` と一致）を追加した。
+- facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
+- CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/nll_kl_div_backend_parity.rs`・`crates/backend-cuda/tests/{nll,kl_div}_parity.rs`・`crates/backend-metal/tests/{nll,kl_div}_parity.rs` の `#[ignore]` テストを参照）。

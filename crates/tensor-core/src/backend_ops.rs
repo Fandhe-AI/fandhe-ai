@@ -168,6 +168,28 @@ pub enum MseReduction {
     Sum,
 }
 
+/// [`BackendOps::kl_div_loss`]／[`BackendOps::kl_div_loss_backward`] の
+/// `target` 種別（イシュー #1738。親イシュー #1609「損失関数の拡張」）。
+///
+/// PyTorch `nn.KLDivLoss` は既定で `target` を確率（`Probabilities`）
+/// として扱うが、`log_target=True` の場合は `target` を対数確率
+/// （`LogProbabilities`）として受け取る（`Var::kl_div_loss_with_log_target`
+/// 経由）。要素式・backward の `dInput`／`dTarget` 式が異なるため、
+/// [`MseReduction`] とは独立にこの種別で分岐する（縮約種別自体は
+/// [`MseReduction`] を共用する。`Mean`／`Sum` の意味論は KLDiv でも同一
+/// のため）。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`MseReduction` と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KlDivTarget {
+    /// `target` は確率（PyTorch `log_target=False`。既定）。
+    Probabilities,
+    /// `target` は対数確率（PyTorch `log_target=True`）。
+    LogProbabilities,
+}
+
 /// [`BackendOps::scatter`] が行う縮約種別（イシュー #1776）。
 /// `torch.scatter`（`Overwrite`）と `torch.scatter_add`（`Add`）の
 /// 差異を 1 メソッドへ集約する（`Var::scatter`／`Var::scatter_add` は
@@ -1127,6 +1149,125 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "mse_loss_backward: default fail-safe (no fused MSE backward kernel available)".into(),
+        ))
+    }
+
+    /// 負対数尤度損失（`NLLLoss`。`input` は log 確率・`targets` は正解
+    /// クラス添字）の forward を 1 個の融合カーネルで計算する（イシュー
+    /// #1738・親イシュー #1609「損失関数の拡張」）。
+    ///
+    /// `input` は shape `[..., C, ...]`（`class_dim` がクラス軸）、
+    /// `targets` は shape `[crate::ops_shape::reduce_out_shape(input.shape(),
+    /// Some(class_dim))]` の `i32`（呼び出し元
+    /// `fandhe_ai_autodiff::var::Var::nll_loss` が shape 一致・
+    /// `0 <= t < C` 範囲を検証済み。本メソッド自身は範囲検査を行わない。
+    /// `.claude/rules/security.md` A03 の観点はホスト側検査で満たす）。
+    /// 戻り値は shape `[]`（スカラー）。`targets.numel() == 0` は
+    /// `Mean`／`Sum` とも `0.0`（[`Self::mse_loss`] と同じ空縮約契約）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、
+    /// `Var::nll_loss` は `Unsupported` のときのみホスト参照実装
+    /// （`eval::nll_loss`）へフォールバックする（それ以外のエラーは伝播
+    /// する。判定迂回経路を作らない）。
+    fn nll_loss(
+        &self,
+        _input: &Tensor<f32>,
+        _targets: &Tensor<i32>,
+        _class_dim: usize,
+        _reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "nll_loss: default fail-safe (no fused NLL forward kernel available)".into(),
+        ))
+    }
+
+    /// 負対数尤度損失の backward（`dInput`）を 1 個の融合カーネルで計算
+    /// する（イシュー #1738）。`targets` は非追跡（`fandhe_ai_autodiff::
+    /// tape::Op::CrossEntropyLoss` の `targets` と同型）のため、本
+    /// メソッドは `dInput` の 1 テンソルのみを返す契約とする。
+    ///
+    /// `dInput[(o·C + c)·inner + i] = −scale·1{c == t_s}`（`t_s` は
+    /// サンプル `s = o·inner + i` の正解クラス添字）。`scale` は
+    /// 呼び出し元（`fandhe_ai_autodiff::grad::vjp` の `Op::NllLoss`
+    /// 分岐）が上流勾配 `g`（スカラー）と `reduction` から事前計算して
+    /// 渡す（`Mean` は `g/N`、`Sum` は `g`。`N` はサンプル数）。戻り値は
+    /// shape `input_shape`。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::nll_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とする。
+    fn nll_loss_backward(
+        &self,
+        _input_shape: &[usize],
+        _targets: &Tensor<i32>,
+        _class_dim: usize,
+        _scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "nll_loss_backward: default fail-safe (no fused NLL backward kernel available)".into(),
+        ))
+    }
+
+    /// Kullback-Leibler ダイバージェンス損失（`KLDivLoss`。[`KlDivTarget`]
+    /// で分岐）の forward を 1 個の融合カーネルで計算する（イシュー
+    /// #1738）。
+    ///
+    /// `input`（log 確率）／`target`（[`KlDivTarget`] に応じ確率または
+    /// 対数確率）は同一 shape（呼び出し元が [`crate::ops_shape::
+    /// require_same_shape`] で検証済み）。戻り値は shape `[]`（スカラー）。
+    /// `numel == 0` は `Mean`／`Sum` とも `0.0`（[`Self::mse_loss`] と
+    /// 同じ空縮約契約）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、
+    /// `Var::kl_div_loss`／`kl_div_loss_with_log_target` は `Unsupported`
+    /// のときのみホスト参照実装（`eval::kl_div_loss`）へフォールバック
+    /// する（それ以外のエラーは伝播する。判定迂回経路を作らない）。
+    fn kl_div_loss(
+        &self,
+        _input: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _kind: KlDivTarget,
+        _reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "kl_div_loss: default fail-safe (no fused KLDiv forward kernel available)".into(),
+        ))
+    }
+
+    /// KLDiv 損失の backward（`dInput`）を 1 個の融合カーネルで計算する
+    /// （イシュー #1738）。
+    ///
+    /// [`Self::mse_loss_backward`] と異なり `dTarget = −dInput` という
+    /// 単純な符号反転関係が成り立たない（`dInput`／`dTarget` の式が
+    /// 非対称）ため、本メソッドは `dInput` のみを返し、`dTarget` は
+    /// 呼び出し元（`grad::vjp`）がホスト側で要素ごとに計算する（新規
+    /// GPU カーネル起動・D2H を増やさないための設計判断。
+    /// `mse_loss_backward` の dTarget 省略と同じ動機）。
+    ///
+    /// `scale` は呼び出し元が上流勾配 `g`（スカラー）と `reduction` から
+    /// 事前計算して渡す（`Mean` は `g/n`、`Sum` は `g`）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::kl_div_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とする。
+    fn kl_div_loss_backward(
+        &self,
+        _input: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _kind: KlDivTarget,
+        _scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "kl_div_loss_backward: default fail-safe (no fused KLDiv backward kernel available)"
+                .into(),
         ))
     }
 
@@ -3277,6 +3418,45 @@ mod tests {
 
         let forward = ops.mse_loss(&pred, &target, MseReduction::Mean);
         let backward = ops.mse_loss_backward(&pred, &target, 1.0);
+
+        assert!(matches!(forward, Err(BackendError::Unsupported(_))));
+        assert!(matches!(backward, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::nll_loss`]／[`BackendOps::nll_loss_backward`] の
+    /// 既定実装が両方とも fail-safe（[`BackendError::Unsupported`]）を
+    /// 返すことを確認する（イシュー #1738。
+    /// `mse_loss_default_is_unsupported` と同型のガード）。
+    #[test]
+    fn nll_loss_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![-0.1, -2.0, -0.5, -1.0], &[2, 2]).unwrap();
+        let targets = Tensor::new(vec![0, 1], &[2]).unwrap();
+
+        let forward = ops.nll_loss(&input, &targets, 1, MseReduction::Mean);
+        let backward = ops.nll_loss_backward(&[2, 2], &targets, 1, 1.0);
+
+        assert!(matches!(forward, Err(BackendError::Unsupported(_))));
+        assert!(matches!(backward, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::kl_div_loss`]／[`BackendOps::kl_div_loss_backward`]
+    /// の既定実装が両方とも fail-safe（[`BackendError::Unsupported`]）を
+    /// 返すことを確認する（イシュー #1738。
+    /// `mse_loss_default_is_unsupported` と同型のガード）。
+    #[test]
+    fn kl_div_loss_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![-0.1, -2.0], &[2]).unwrap();
+        let target = Tensor::new(vec![0.3, 0.7], &[2]).unwrap();
+
+        let forward = ops.kl_div_loss(
+            &input,
+            &target,
+            KlDivTarget::Probabilities,
+            MseReduction::Mean,
+        );
+        let backward = ops.kl_div_loss_backward(&input, &target, KlDivTarget::Probabilities, 1.0);
 
         assert!(matches!(forward, Err(BackendError::Unsupported(_))));
         assert!(matches!(backward, Err(BackendError::Unsupported(_))));

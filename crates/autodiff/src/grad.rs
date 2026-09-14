@@ -30,8 +30,8 @@
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError,
-    Tensor, VectorNormOrd, row_norm_layout,
+    Activation, BackendError, BackendOps, KlDivTarget, ScalarBinaryOp, ScalarUnaryOp,
+    ScatterReduce, ShapeError, Tensor, VectorNormOrd, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -464,6 +464,92 @@ pub(crate) fn vjp(
             // 寄与を返すのは `logits` の 1 系統のみ（`tape::Op::
             // CrossEntropyLoss` doc 参照）。
             vec![(logits, dlogits)]
+        }
+        Op::NllLoss {
+            input,
+            targets,
+            class_dim,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let n = targets.numel();
+            let dinput = if n == 0 {
+                // `mse_loss` の `Op::MseLoss` 分岐と同じゼロ除算回避
+                // （`scale` 計算前に早期 return）。
+                build_tensor(vec![0f32; 0], input_val.shape())
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = nll_loss_scale(g_value, n, reduction);
+                match ops.nll_loss_backward(input_val.shape(), &targets, class_dim, scale) {
+                    Ok(dinput) => {
+                        if dinput.shape() != input_val.shape() {
+                            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                    lhs: dinput.shape().to_vec(),
+                                    rhs: input_val.shape().to_vec(),
+                                },
+                            )));
+                        }
+                        dinput
+                    }
+                    Err(BackendError::Unsupported(_)) => {
+                        nll_loss_vjp(input_val, &targets, class_dim, reduction, upstream)
+                    }
+                    Err(other) => return Err(AutodiffError::Backend(other)),
+                }
+            };
+            // `targets` は非追跡（`Var`/`NodeId` を持たない）ため勾配
+            // 寄与を返すのは `input` の 1 系統のみ（`tape::Op::NllLoss`
+            // doc 参照）。
+            vec![(input, dinput)]
+        }
+        Op::KlDivLoss {
+            input,
+            target,
+            kind,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = input_val.numel();
+            let (dinput, dtarget) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], input_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = kl_div_loss_scale(g_value, n, reduction);
+                match ops.kl_div_loss_backward(input_val, target_val, kind, scale) {
+                    Ok(dinput) => {
+                        if dinput.shape() != input_val.shape() {
+                            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                    lhs: dinput.shape().to_vec(),
+                                    rhs: input_val.shape().to_vec(),
+                                },
+                            )));
+                        }
+                        // `dTarget` は `dInput` と対称な単純合成（符号
+                        // 反転）ではないため、`BackendOps::
+                        // kl_div_loss_backward` の doc 契約どおりホスト
+                        // 側の逐次 map で求める（新規 GPU カーネル起動・
+                        // D2H を増やさない）。
+                        let input_data = dense_vec(input_val);
+                        let target_data = dense_vec(target_val);
+                        let dtarget_data: Vec<f32> = input_data
+                            .iter()
+                            .zip(target_data.iter())
+                            .map(|(&x, &t)| scale * eval::kl_div_elem_grad_target(x, t, kind))
+                            .collect();
+                        let dtarget = build_tensor(dtarget_data, dinput.shape());
+                        (dinput, dtarget)
+                    }
+                    Err(BackendError::Unsupported(_)) => {
+                        kl_div_loss_vjp(input_val, target_val, kind, upstream, reduction)
+                    }
+                    Err(other) => return Err(AutodiffError::Backend(other)),
+                }
+            };
+            vec![(input, dinput), (target, dtarget)]
         }
         // デバイス常駐パラメータの葉（イシュー #1022）。`Op::Leaf` と同じく
         // 入力を持たないため寄与なし（`tape::Op::ResidentLeaf` doc 参照）。
@@ -3955,6 +4041,116 @@ fn cross_entropy_loss_vjp(
     build_tensor(scaled, &shape)
 }
 
+/// `nll_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の
+/// `Op::NllLoss` 分岐。イシュー #1738）の双方が使う `scale` 算出の
+/// 共有ロジック: `dInput = −scale·1{c == t_s}`（`Mean` は `g/n`、`Sum`
+/// は `g`。`mse_loss_scale` の `2` 倍係数〈二乗誤差由来〉は NLL には
+/// 現れないため異なる式）。`BackendOps::nll_loss_backward` の呼び出し元
+/// がこのスケールを事前計算して渡す契約（`backend_ops.rs` doc 参照）。
+fn nll_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
+    match reduction {
+        Reduction::Mean => g_value / n as f32,
+        Reduction::Sum => g_value,
+    }
+}
+
+/// `NllLoss{input, targets, class_dim, reduction}` のホスト参照 VJP
+/// （`ops.nll_loss_backward` が `Unsupported` のときのみ呼ばれる。
+/// イシュー #1738）。`eval::nll_loss`（forward 要素式の正）の
+/// `dInput[(o·C + c)·inner + i] = −scale·1{c == t_s}` を直接構成する
+/// （`cross_entropy_loss_vjp` の softmax 減算方式とは異なり、NLL の
+/// 入力は既に log 確率であるため softmax の再計算は不要）。`targets` は
+/// 非追跡のため戻り値は `input` 側の勾配のみ（呼び出し元 `vjp()` の
+/// `NllLoss` 分岐参照）。
+fn nll_loss_vjp(
+    input: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: Reduction,
+    upstream: &Tensor<f32>,
+) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+    let n = outer * inner;
+
+    let mut grad = vec![0f32; input.numel()];
+    let target_data = eval::dense_vec_i32(targets);
+
+    let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+    let scale = nll_loss_scale(g_value, n, reduction);
+
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            // forward（`Var::nll_loss`）が事前検査済みの前提
+            // （`0 <= t < axis_len`）。範囲外は契約違反であり
+            // `debug_assert!` で検知しつつ寄与をスキップする安全側
+            // フォールバック（`eval::nll_loss` と同型の契約違反対応）。
+            if t >= 0 && (t as usize) < axis_len {
+                let idx = (o * axis_len + t as usize) * inner + i;
+                grad[idx] = -scale;
+            } else {
+                debug_assert!(false, "nll_loss_vjp: target 添字が範囲外（契約違反）");
+            }
+        }
+    }
+    build_tensor(grad, &shape)
+}
+
+/// `kl_div_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の
+/// `Op::KlDivLoss` 分岐。イシュー #1738）の双方が使う `scale` 算出の
+/// 共有ロジック: `dInput = scale·kl_div_elem_grad_input(..)`（`Mean` は
+/// `g/n`、`Sum` は `g`。`bce_loss_scale`〈PR #1848・イシュー #1737〉と
+/// 同型・同式）。`BackendOps::kl_div_loss_backward` の呼び出し元が
+/// このスケールを事前計算して渡す契約（`backend_ops.rs` doc 参照）。
+fn kl_div_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
+    match reduction {
+        Reduction::Mean => g_value / n as f32,
+        Reduction::Sum => g_value,
+    }
+}
+
+/// `KlDivLoss{input, target, kind, reduction}` のホスト参照 VJP
+/// （`ops.kl_div_loss_backward` が `Unsupported` のときのみ呼ばれる。
+/// イシュー #1738）。`eval::kl_div_elem_grad_input`／
+/// `kl_div_elem_grad_target`（forward 要素式 `eval::kl_div_elem_loss`
+/// と対をなす意味論の正）に `kl_div_loss_scale` を乗じて `dInput`／
+/// `dTarget` を構成する。`n == 0` は `mse_loss_vjp` と同じくゼロ除算を
+/// 避け zeros を返す。
+fn kl_div_loss_vjp(
+    input: &Tensor<f32>,
+    target: &Tensor<f32>,
+    kind: KlDivTarget,
+    g: &Tensor<f32>,
+    reduction: Reduction,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let shape = input.shape().to_vec();
+    let n = input.numel();
+    if n == 0 {
+        let zeros = build_tensor(vec![0f32; 0], &shape);
+        return (zeros.clone(), zeros);
+    }
+    let g_value = dense_vec(g).first().copied().unwrap_or(0.0);
+    let input_data = dense_vec(input);
+    let target_data = dense_vec(target);
+    let scale = kl_div_loss_scale(g_value, n, reduction);
+    let dinput_data: Vec<f32> = input_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&x, &t)| scale * eval::kl_div_elem_grad_input(x, t, kind))
+        .collect();
+    let dtarget_data: Vec<f32> = input_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&x, &t)| scale * eval::kl_div_elem_grad_target(x, t, kind))
+        .collect();
+    let dinput = build_tensor(dinput_data, &shape);
+    let dtarget = build_tensor(dtarget_data, &shape);
+    (dinput, dtarget)
+}
+
 #[cfg(test)]
 mod tests {
     //! 受け入れ条件「各演算の解析勾配が数値微分と一致する」の直接検証。
@@ -5721,6 +5917,172 @@ release ビルドでも検知できるよう `assert!` を使う）"
         });
 
         assert_grad_close("cross_entropy_loss(sum) dLogits", &dlogits, &num_dlogits);
+    }
+
+    // --- NllLoss（input 勾配のみ。イシュー #1738）---
+
+    #[test]
+    fn nll_loss_grad_mean_matches_numeric() {
+        let input = t(&[-0.1, -2.0, -1.5, -0.3], &[2, 2]);
+        let targets = fandhe_ai_tensor_core::Tensor::new(vec![0i32, 1], &[2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let dinput = nll_loss_vjp(&input, &targets, 1, Reduction::Mean, &g);
+        let num_dinput = numeric_grad_unary(&input, &s, |x| {
+            eval::nll_loss(x, &targets, 1, Reduction::Mean)
+        });
+
+        assert_grad_close("nll_loss(mean) dInput", &dinput, &num_dinput);
+    }
+
+    #[test]
+    fn nll_loss_grad_sum_matches_numeric() {
+        let input = t(&[-0.1, -2.0, -1.5, -0.3], &[2, 2]);
+        let targets = fandhe_ai_tensor_core::Tensor::new(vec![0i32, 1], &[2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let dinput = nll_loss_vjp(&input, &targets, 1, Reduction::Sum, &g);
+        let num_dinput = numeric_grad_unary(&input, &s, |x| {
+            eval::nll_loss(x, &targets, 1, Reduction::Sum)
+        });
+
+        assert_grad_close("nll_loss(sum) dInput", &dinput, &num_dinput);
+    }
+
+    /// `log_softmax(x).nll_loss(t) ≡ cross_entropy_loss(x, t)`（forward
+    /// 値の等価性。計画 §3「動作確認の錨」）を確認する。`nll_loss` 自身
+    /// の `dInput`（`nll_loss_vjp`）は入力が log 確率であることを前提に
+    /// ターゲット位置のみへ勾配を流す疎な式であり、`log_softmax` 演算
+    /// 自身の VJP（`softmax(x) − onehot(t)` を生む別演算）と合成して
+    /// 初めて `cross_entropy_loss_vjp` と一致する連鎖律の結果になる
+    /// （`eval.rs`／`grad.rs` レベルでの合成は本テストの対象外——`Var`／
+    /// `Tape` を介した完全な合成勾配一致は `tests/nn_nll_kl_div_loss.rs`
+    /// で検証する）。ここでは forward 値の等価性のみを直接計算で確認
+    /// する。
+    #[test]
+    fn nll_loss_of_log_softmax_forward_matches_cross_entropy_forward() {
+        let logits = t(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let targets = fandhe_ai_tensor_core::Tensor::new(vec![2i32, 0], &[2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+
+        for reduction in [Reduction::Mean, Reduction::Sum] {
+            let log_probs = eval::log_softmax_along(&logits, 1);
+            let via_nll = eval::nll_loss(&log_probs, &targets, 1, reduction);
+            let via_ce = eval::cross_entropy_loss(&logits, &targets, 1, reduction);
+            // `log_softmax_along`（シフト→exp→ln 正規化）と
+            // `cross_entropy_loss`（log-sum-exp を直接計算）は同じ値を
+            // 別の計算経路で求めるため、f32 丸め誤差の範囲でのみ一致する
+            // （`assert_grad_close` と同じ絶対誤差許容 `ABS_TOL`。厳密
+            // bit 一致は要求しない）。
+            let a = dense_vec(&via_nll)[0];
+            let b = dense_vec(&via_ce)[0];
+            assert!(
+                (a - b).abs() <= ABS_TOL,
+                "log_softmax(x).nll_loss(t) と cross_entropy_loss(x, t) の forward 値が \
+                 reduction={reduction:?} で一致しない: nll={a} ce={b}"
+            );
+        }
+    }
+
+    // --- KlDivLoss（input/target 両勾配。イシュー #1738）---
+
+    #[test]
+    fn kl_div_loss_grad_mean_matches_numeric() {
+        let input = t(&[-2.0, -0.5, -1.2, -0.1], &[2, 2]);
+        let target = t(&[0.2, 0.8, 0.5, 0.5], &[2, 2]);
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let (dinput, dtarget) = kl_div_loss_vjp(
+            &input,
+            &target,
+            KlDivTarget::Probabilities,
+            &g,
+            Reduction::Mean,
+        );
+        let num_dinput = numeric_grad_unary(&input, &s, |x| {
+            eval::kl_div_loss(x, &target, KlDivTarget::Probabilities, Reduction::Mean)
+        });
+        let num_dtarget = numeric_grad_unary(&target, &s, |x| {
+            eval::kl_div_loss(&input, x, KlDivTarget::Probabilities, Reduction::Mean)
+        });
+
+        assert_grad_close("kl_div_loss(mean) dInput", &dinput, &num_dinput);
+        assert_grad_close("kl_div_loss(mean) dTarget", &dtarget, &num_dtarget);
+    }
+
+    #[test]
+    fn kl_div_loss_grad_sum_matches_numeric() {
+        let input = t(&[-2.0, -0.5, -1.2, -0.1], &[2, 2]);
+        let target = t(&[0.2, 0.8, 0.5, 0.5], &[2, 2]);
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let (dinput, dtarget) = kl_div_loss_vjp(
+            &input,
+            &target,
+            KlDivTarget::Probabilities,
+            &g,
+            Reduction::Sum,
+        );
+        let num_dinput = numeric_grad_unary(&input, &s, |x| {
+            eval::kl_div_loss(x, &target, KlDivTarget::Probabilities, Reduction::Sum)
+        });
+        let num_dtarget = numeric_grad_unary(&target, &s, |x| {
+            eval::kl_div_loss(&input, x, KlDivTarget::Probabilities, Reduction::Sum)
+        });
+
+        assert_grad_close("kl_div_loss(sum) dInput", &dinput, &num_dinput);
+        assert_grad_close("kl_div_loss(sum) dTarget", &dtarget, &num_dtarget);
+    }
+
+    /// `log_target = true`（`KlDivTarget::LogProbabilities`）の勾配を
+    /// 数値微分と突合する（イシュー #1738）。
+    #[test]
+    fn kl_div_loss_grad_log_target_matches_numeric() {
+        let input = t(&[-2.0, -0.5, -1.2, -0.1], &[2, 2]);
+        let target = t(&[-1.6, -0.2, -0.7, -0.7], &[2, 2]);
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let (dinput, dtarget) = kl_div_loss_vjp(
+            &input,
+            &target,
+            KlDivTarget::LogProbabilities,
+            &g,
+            Reduction::Mean,
+        );
+        let num_dinput = numeric_grad_unary(&input, &s, |x| {
+            eval::kl_div_loss(x, &target, KlDivTarget::LogProbabilities, Reduction::Mean)
+        });
+        let num_dtarget = numeric_grad_unary(&target, &s, |x| {
+            eval::kl_div_loss(&input, x, KlDivTarget::LogProbabilities, Reduction::Mean)
+        });
+
+        assert_grad_close("kl_div_loss(log_target) dInput", &dinput, &num_dinput);
+        assert_grad_close("kl_div_loss(log_target) dTarget", &dtarget, &num_dtarget);
+    }
+
+    #[test]
+    fn kl_div_loss_grad_n_zero_is_zero() {
+        // `numel() == 0` はゼロ除算を避け zeros を返す（`mse_loss_grad_
+        // n_zero_is_zero` と同型のガード条件直接検証）。
+        let input = build_tensor(Vec::new(), &[0]);
+        let target = build_tensor(Vec::new(), &[0]);
+        let g = t(&[1.0], &[]);
+        let (dinput, dtarget) = kl_div_loss_vjp(
+            &input,
+            &target,
+            KlDivTarget::Probabilities,
+            &g,
+            Reduction::Mean,
+        );
+        assert!(dense_vec(&dinput).is_empty());
+        assert!(dense_vec(&dtarget).is_empty());
     }
 
     // --- reduce_to_shape（中間軸縮約。ランク同一で先頭・末尾以外の

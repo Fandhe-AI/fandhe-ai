@@ -17,18 +17,21 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan, GemmChecksum,
-    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    VectorNormOrd, gather_out_shape, one_hot_out_shape, pad_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    GruBackwardOutput, GruPointwiseOutput, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd,
+    MseReduction, QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor,
+    UnaryElementwiseOp, VectorNormOrd, gather_out_shape, one_hot_out_shape, pad_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 
 use crate::gemm_blis::{
     gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt, gemm_blis_parallel_tn,
 };
+use crate::kl_div;
 use crate::layer_norm;
 use crate::linalg::{self, LinalgError};
 use crate::memory::{CpuBufferHandle, CpuMemory};
+use crate::nll::{self, NllLayout};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::scan;
 use crate::softmax::{self, match_softmax_plan};
@@ -1486,6 +1489,140 @@ impl BackendOps for CpuBackendOps {
         let mut dpred = vec![0.0f32; pred_slice.len()];
         mse::mse_loss_backward_f32(pred_slice, target_slice, scale, &mut dpred)?;
         Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::nll_loss`] の CPU 実装
+    /// （イシュー #1738）。`input.shape()` と `class_dim` から
+    /// `NllLayout`（`outer`/`num_classes`/`inner`）を導出し
+    /// `nll::nll_sum_f32` へ委譲する（`mse_loss` と同じ「`ops.rs` は
+    /// shape 分解と reduction 変換のみを担う」薄い委譲層方針）。
+    fn nll_loss(
+        &self,
+        input: &Tensor<f32>,
+        targets: &Tensor<i32>,
+        class_dim: usize,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let shape = input.shape();
+        if class_dim >= shape.len() {
+            return Err(BackendError::ShapeMismatch(ShapeError::AxisOutOfRange {
+                axis: class_dim,
+                rank: shape.len(),
+            }));
+        }
+        let layout = NllLayout {
+            outer: shape[..class_dim].iter().product(),
+            num_classes: shape[class_dim],
+            inner: shape[class_dim + 1..].iter().product(),
+        };
+        let input_c = input.contiguous();
+        let targets_c = targets.contiguous();
+        let input_slice = input_c.as_slice().unwrap_or(&[]);
+        let targets_slice = targets_c.as_slice().unwrap_or(&[]);
+        let n = layout.outer * layout.inner;
+        let sum = nll::nll_sum_f32(input_slice, targets_slice, layout)?;
+        let value = match reduction {
+            MseReduction::Mean => {
+                if n == 0 {
+                    0.0
+                } else {
+                    sum / n as f32
+                }
+            }
+            MseReduction::Sum => sum,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "nll_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::nll_loss_backward`] の CPU
+    /// 実装（イシュー #1738）。`targets` は非追跡のため `dInput` のみを
+    /// 返す契約（`backend_ops.rs::BackendOps::nll_loss_backward` doc
+    /// 参照）。
+    fn nll_loss_backward(
+        &self,
+        input_shape: &[usize],
+        targets: &Tensor<i32>,
+        class_dim: usize,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if class_dim >= input_shape.len() {
+            return Err(BackendError::ShapeMismatch(ShapeError::AxisOutOfRange {
+                axis: class_dim,
+                rank: input_shape.len(),
+            }));
+        }
+        let layout = NllLayout {
+            outer: input_shape[..class_dim].iter().product(),
+            num_classes: input_shape[class_dim],
+            inner: input_shape[class_dim + 1..].iter().product(),
+        };
+        let numel: usize = input_shape.iter().product();
+        let targets_c = targets.contiguous();
+        let targets_slice = targets_c.as_slice().unwrap_or(&[]);
+        let mut dinput = vec![0.0f32; numel];
+        nll::nll_backward_f32(targets_slice, layout, scale, &mut dinput)?;
+        Tensor::new(dinput, input_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::kl_div_loss`] の CPU 実装
+    /// （イシュー #1738）。`kl_div::kl_div_sum_f32` へ委譲する
+    /// （`mse_loss` と同じ薄い委譲層方針）。
+    fn kl_div_loss(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: KlDivTarget,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_c = input.contiguous();
+        let target_c = target.contiguous();
+        let input_slice = input_c.as_slice().unwrap_or(&[]);
+        let target_slice = target_c.as_slice().unwrap_or(&[]);
+        let numel = input_slice.len();
+        let sum = kl_div::kl_div_sum_f32(input_slice, target_slice, kind)?;
+        let value = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    0.0
+                } else {
+                    sum / numel as f32
+                }
+            }
+            MseReduction::Sum => sum,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "kl_div_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::kl_div_loss_backward`] の
+    /// CPU 実装（イシュー #1738）。`dTarget = −dInput` のような単純
+    /// 合成が成り立たないため `dInput` のみを計算して返す契約
+    /// （`backend_ops.rs::BackendOps::kl_div_loss_backward` doc 参照）。
+    fn kl_div_loss_backward(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: KlDivTarget,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_c = input.contiguous();
+        let target_c = target.contiguous();
+        let input_slice = input_c.as_slice().unwrap_or(&[]);
+        let target_slice = target_c.as_slice().unwrap_or(&[]);
+        let mut dinput = vec![0.0f32; input_slice.len()];
+        kl_div::kl_div_loss_backward_f32(input_slice, target_slice, kind, scale, &mut dinput)?;
+        Tensor::new(dinput, input.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::rmsnorm`] の CPU 実装

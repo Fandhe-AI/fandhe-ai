@@ -208,6 +208,27 @@ pub(crate) fn cached_mse(ctx: &Arc<MetalContext>) -> Result<Arc<crate::mse::Meta
     get_or_build(cache, on_poison, || crate::mse::MetalMse::new(ctx))
 }
 
+/// [`crate::nll::MetalNll`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1738。`cached_mse` と同型）。`ops::MetalBackendOps::
+/// nll_loss`／`nll_loss_backward` の唯一の呼び出し先。
+pub(crate) fn cached_nll(ctx: &Arc<MetalContext>) -> Result<Arc<crate::nll::MetalNll>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::nll::MetalNll>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::nll::MetalNll::new(ctx))
+}
+
+/// [`crate::kl_div::MetalKlDiv`] スイートをプロセス内キャッシュから
+/// 取得する（イシュー #1738。`cached_mse` と同型）。`ops::
+/// MetalBackendOps::kl_div_loss`／`kl_div_loss_backward` の唯一の呼び
+/// 出し先。
+pub(crate) fn cached_kl_div(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::kl_div::MetalKlDiv>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::kl_div::MetalKlDiv>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::kl_div::MetalKlDiv::new(ctx))
+}
+
 /// [`crate::rnn_cell::MetalRnnCell`] スイートをプロセス内キャッシュから
 /// 取得する（イシュー #1647）。`ops::MetalBackendOps::{lstm_pointwise,
 /// lstm_hidden_backward, lstm_cell_backward, gru_pointwise, gru_backward}`

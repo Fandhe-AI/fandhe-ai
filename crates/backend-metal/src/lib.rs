@@ -495,12 +495,16 @@ pub mod half_buffer;
 #[cfg(target_os = "macos")]
 pub mod index_buffer;
 #[cfg(target_os = "macos")]
+pub mod kl_div;
+#[cfg(target_os = "macos")]
 pub mod layer_norm;
 pub mod layout;
 #[cfg(target_os = "macos")]
 pub mod memory;
 #[cfg(target_os = "macos")]
 pub mod mse;
+#[cfg(target_os = "macos")]
+pub mod nll;
 #[cfg(target_os = "macos")]
 pub mod ops;
 pub mod pad;
@@ -639,11 +643,15 @@ pub use gemm::{GemmVariant, MetalGemm, SplitKFallbackReason, SplitKRoute};
 #[cfg(target_os = "macos")]
 pub use half_buffer::MetalHalfBuffer;
 #[cfg(target_os = "macos")]
+pub use kl_div::MetalKlDiv;
+#[cfg(target_os = "macos")]
 pub use layer_norm::MetalLayerNorm;
 #[cfg(target_os = "macos")]
 pub use memory::MetalMemory;
 #[cfg(target_os = "macos")]
 pub use mse::MetalMse;
+#[cfg(target_os = "macos")]
+pub use nll::{MetalNll, NllLayout};
 #[cfg(target_os = "macos")]
 pub use ops::MetalBackendOps;
 #[cfg(target_os = "macos")]
