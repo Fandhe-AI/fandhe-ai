@@ -1486,3 +1486,4 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `Module` trait は実装した（`forward` は self-attention `q=k=v=input`・mask なし・非 causal として定義）。`compat::Sequential` 用の `as_linear`／`as_relu` フックはいずれも trait 既定のままオーバーライドしない（Embedding〈#1604〉と異なり `Module::forward` 自体は実装するが、学習可能パラメータの自動収集対象には含めない）。
 - facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
 - CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/mha_backend_parity.rs` の `#[ignore]` テストを参照）。
+#1764 で追補を追記（`Var::conv2d`（im2col＋GEMM。cross-correlation。NCHW 固定。groups は `gemm_batched` の broadcast で吸収）実装済み化。`BackendOps::im2col`／`col2im`／`conv2d`〈既定 `Unsupported`〉・`Op::Conv2d`・CPU 実装〈`backend-cpu::im2col`〉まで実装済み・facade 新規公開面なし・CUDA／Metal 専用カーネルは #1643／#1644・`nn::Conv2d` 層は #1645 へ引き継ぎ）。

@@ -16,11 +16,12 @@ use std::sync::OnceLock;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan, GemmChecksum,
-    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    VectorNormOrd, gather_out_shape, one_hot_out_shape, pad_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, Conv2dParams, DType, FusionPlan,
+    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd,
+    MseReduction, QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor,
+    UnaryElementwiseOp, VectorNormOrd, gather_out_shape, im2col_out_shape, one_hot_out_shape,
+    pad_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -1325,6 +1326,33 @@ impl BackendOps for CpuBackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         let out_shape = pad_out_shape(input.shape(), pads).map_err(BackendError::ShapeMismatch)?;
         constant_pad::pad(input, pads, value, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::im2col` の CPU 実装（イシュー #1764）。
+    /// [`im2col_out_shape`] で `input.shape()`／`params` を再検査してから
+    /// `im2col::im2col` へ委譲する（`pad` と同じ二重検査方針。
+    /// `.claude/rules/security.md` A08）。
+    fn im2col(
+        &self,
+        input: &Tensor<f32>,
+        params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            im2col_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        crate::im2col::im2col(input, params, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::col2im` の CPU 実装（イシュー #1764）。
+    /// `crate::im2col::col2im` へ委譲する（`d_col`／`input_shape`／
+    /// `params` の再検査は `crate::im2col::col2im` 内部の
+    /// `checked_numel`／`conv_out_len` が担う）。
+    fn col2im(
+        &self,
+        d_col: &Tensor<f32>,
+        input_shape: &[usize],
+        params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        crate::im2col::col2im(d_col, input_shape, params).map_err(BackendError::ShapeMismatch)
     }
 
     /// `BackendOps::scatter` の CPU 実装（イシュー #1776）。

@@ -96,6 +96,108 @@ pub struct SgdStepConfig {
     pub is_first_step: bool,
 }
 
+/// Conv2d（`BackendOps::im2col`／`col2im`／`conv2d`）のパラメータ記述子
+/// （イシュー #1764・設計 `docs/conv-ops-design.md` §8）。
+///
+/// `#[non_exhaustive]` はガードレール条件（`.claude/rules/security.md`
+/// A08。公開 API 非破壊）を保ちながら将来フィールド追加を可能にする
+/// ため（`GemmChecksum`・`ScatterReduce` と同方針）。フィールドは
+/// コンストラクタ [`Conv2dParams::new`] 経由のみで設定し、各 getter
+/// でアクセスする。
+///
+/// `kernel_size` を保持する理由: [`BackendOps::im2col`]／
+/// [`BackendOps::col2im`] は `weight` を引数に取らない契約のため、
+/// `kernel_size` を本構造体経由で渡さない限りカーネル寸法を知る手段が
+/// ない（`Var::conv2d` が `weight.shape()[2..4]` から導出して構築する。
+/// 公開 `Var::conv2d` シグネチャ自体には `kernel_size` 引数を追加しない。
+/// 設計 doc §2 参照）。
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conv2dParams {
+    kernel_size: [usize; 2],
+    stride: [usize; 2],
+    padding: [usize; 2],
+    dilation: [usize; 2],
+    groups: usize,
+}
+
+impl Conv2dParams {
+    /// `kernel_size`／`stride`／`dilation`／`groups` の 0 を
+    /// [`BackendError::InvalidArgument`] で拒否する（PyTorch
+    /// `check_shape_forward` の non-positive stride／dilation／groups
+    /// 拒否相当。設計 doc §3）。`padding` は上限なし（Conv は
+    /// pooling と異なり `padding <= floor(kernel/2)` の制約を持たない。
+    /// 設計 doc §0.2／§3 の意図的な差異）が、`2 * padding` の
+    /// `usize` オーバーフローは `checked_mul` で拒否する。
+    pub fn new(
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+        groups: usize,
+    ) -> Result<Self, BackendError> {
+        if kernel_size[0] == 0 || kernel_size[1] == 0 {
+            return Err(BackendError::InvalidArgument(
+                "Conv2dParams::new: kernel_size の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        if stride[0] == 0 || stride[1] == 0 {
+            return Err(BackendError::InvalidArgument(
+                "Conv2dParams::new: stride の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        if dilation[0] == 0 || dilation[1] == 0 {
+            return Err(BackendError::InvalidArgument(
+                "Conv2dParams::new: dilation の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        if groups == 0 {
+            return Err(BackendError::InvalidArgument(
+                "Conv2dParams::new: groups は 1 以上である必要がある".into(),
+            ));
+        }
+        for &p in &padding {
+            p.checked_mul(2).ok_or_else(|| {
+                BackendError::InvalidArgument(
+                    "Conv2dParams::new: 2 * padding が usize の範囲でオーバーフローする".into(),
+                )
+            })?;
+        }
+        Ok(Self {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+        })
+    }
+
+    /// カーネル空間サイズ `[kH, kW]`。
+    pub fn kernel_size(&self) -> [usize; 2] {
+        self.kernel_size
+    }
+
+    /// ストライド `[sH, sW]`。
+    pub fn stride(&self) -> [usize; 2] {
+        self.stride
+    }
+
+    /// パディング `[pH, pW]`（各軸の前後同一幅）。
+    pub fn padding(&self) -> [usize; 2] {
+        self.padding
+    }
+
+    /// dilation `[dH, dW]`。
+    pub fn dilation(&self) -> [usize; 2] {
+        self.dilation
+    }
+
+    /// グループ数。
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+}
+
 /// GEMM epilogue で適用する activation 種別（TASK-12.1f・#203）。
 ///
 /// [`BackendOps::gemm_bias_act`] の第 4 引数として渡す。CUTLASS 系実測
@@ -1393,6 +1495,99 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "pad: default fail-safe (no fused pad kernel available)".into(),
+        ))
+    }
+
+    /// Conv2d の im2col（`torch.nn.functional.unfold` の grouped 版相当。
+    /// イシュー #1764・設計 `docs/conv-ops-design.md` §5／§8）。
+    ///
+    /// `input: [N, Cin, H, W]` を `[N, G, Cin_g·kH·kW, Hout·Wout]`
+    /// （`K_g` 軸は `(c_in_g, kh, kw)` の row-major・`P` 軸は
+    /// `(oh, ow)` の row-major）へ展開する。padding 位置には `0.0` を
+    /// 書く（padded 入力を実体化しない。境界は手動検査。REQ-8）。出力
+    /// shape は [`crate::ops_shape::im2col_out_shape`] が定める。
+    ///
+    /// 数値契約: 算術を含まない純粋なコピー演算のため **bit 完全
+    /// 一致**（`.claude/rules/coding-rust.md` 数値契約節・[`Self::pad`]
+    /// と同型）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::pad`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、
+    /// `fandhe_ai_autodiff::grad::im2col_with_fallback` は `Unsupported`
+    /// のときのみホスト参照実装（`fandhe_ai_autodiff::eval::im2col`）へ
+    /// フォールバックする（それ以外のエラーは伝播する。判定迂回経路を
+    /// 作らない。`.claude/rules/security.md` A08）。実装側でも
+    /// `input.shape()` と `params` を [`crate::ops_shape::im2col_out_shape`]
+    /// で再検査し、不一致は [`BackendError::ShapeMismatch`] を返すこと
+    /// （fail-closed）。
+    fn im2col(
+        &self,
+        _input: &Tensor<f32>,
+        _params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "im2col: default fail-safe (no fused im2col kernel available)".into(),
+        ))
+    }
+
+    /// Conv2d の col2im（[`Self::im2col`] の随伴＝転置畳み込みの fold。
+    /// イシュー #1764・設計 `docs/conv-ops-design.md` §6.2／§8）。
+    ///
+    /// `d_col: [N, G, Cin_g·kH·kW, Hout·Wout]` を `input_shape:
+    /// [N, Cin, H, W]` へ畳み戻す。入力位置定常（1 出力要素＝1 入力
+    /// 位置）の走査で `(kh, kw)` を row-major に加算し、重なり窓
+    /// （`stride < dilation·(kernel−1)+1`）は **`f64` アキュムレータへ
+    /// 逐次加算・最後に 1 回 `f32` へ downcast**する（`.claude/rules/
+    /// coding-rust.md` の勾配の長軸縮約規約。CUDA は `double`・Metal は
+    /// `soft_f64`。3 バックエンド **bit 完全一致**）。座標
+    /// `(h + p_h) − kh·d_h` 等は `checked_sub` で符号安全に計算し、
+    /// アンダーフロー（＝この `(kh, kw)` は寄与なし）は `usize` の
+    /// 通常減算で panic／ラップアラウンドさせず早期スキップする
+    /// （設計 doc §6.2「訂正 2」）。padding 領域への書き込みは行わない。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::im2col`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、
+    /// `fandhe_ai_autodiff::grad::col2im_with_fallback` は `Unsupported`
+    /// のときのみホスト参照実装（`fandhe_ai_autodiff::eval::col2im`）へ
+    /// フォールバックする。実装側でも `d_col.shape()`／`input_shape`／
+    /// `params` を再検査し、不一致は [`BackendError::ShapeMismatch`]
+    /// を返すこと（fail-closed）。
+    fn col2im(
+        &self,
+        _d_col: &Tensor<f32>,
+        _input_shape: &[usize],
+        _params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "col2im: default fail-safe (no fused col2im kernel available)".into(),
+        ))
+    }
+
+    /// Conv2d の直接融合カーネル入口（`torch.nn.functional.conv2d`
+    /// 相当。イシュー #1764・設計 `docs/conv-ops-design.md` §5.3／§8）。
+    ///
+    /// **既定 `Unsupported` の純粋な override フック**
+    /// （[`Self::linear_forward_device`] と同じ fail-safe 型）。v1 では
+    /// 3 バックエンドとも override せず、
+    /// `fandhe_ai_autodiff::grad::conv2d_with_fallback`（`ops.conv2d` →
+    /// `Unsupported` のときのみ [`Self::im2col`] → [`Self::gemm_batched`]
+    /// → `ops.add`〈bias〉の段階的合成）を経由する（CPU 参照実装は
+    /// この合成経路そのもの）。将来 GPU が direct／fused カーネルで
+    /// override する場合は CPU 参照実装に対し REQ-2 複合判定を満たす
+    /// こと。
+    fn conv2d(
+        &self,
+        _input: &Tensor<f32>,
+        _weight: &Tensor<f32>,
+        _bias: Option<&Tensor<f32>>,
+        _params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "conv2d: default fail-safe (no fused conv2d kernel available)".into(),
         ))
     }
 

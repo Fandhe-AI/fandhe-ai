@@ -694,3 +694,60 @@ issue で追跡。本 doc では起票しない）
 #1642（CPU）・#1643（CUDA）・#1644（Metal）・#1645（`nn` 層・parity・
 実機実測）の各 issue で本節へ追記する（または各 issue 側の doc へ記録し
 本節から forward pointer を張る）。
+
+### #1764（CPU 実装）
+
+CPU 分（本 doc の実装対象 `#1642` に相当する範囲。イシュー番号は
+#1764）を実装済み:
+
+- **`tensor-core`**: `ops_shape::{conv_out_len, conv2d_out_shape,
+  im2col_out_shape}`（`crates/tensor-core/src/ops_shape.rs`）・
+  `backend_ops::Conv2dParams`（コンストラクタ検査付き）・
+  `BackendOps::{im2col, col2im, conv2d}`（既定 `Unsupported`。
+  `crates/tensor-core/src/backend_ops.rs`）。
+- **`backend-cpu`**: `im2col::{im2col, col2im}`（単一スレッド逐次参照
+  実装・`checked_*` による符号安全な座標計算・`f64` アキュムレータ。
+  `crates/backend-cpu/src/im2col.rs`）を `CpuBackendOps::im2col`／
+  `col2im` へ override 結線（`ops.rs`）。`conv2d` 自身は override せず
+  段階的合成経路（`gemm_batched`〈BLIS〉）を使う。
+- **`autodiff`**: `Op::Conv2d { input, weight, bias, params }`
+  （`tape.rs`。非融合・`push_eager`・`is_checkpoint_eligible = false`）・
+  `eval::{im2col, col2im, conv2d, conv2d_direct}`（ホスト参照実装。
+  `conv2d_direct` はテストオラクル専用）・`grad::{im2col_with_fallback,
+  col2im_with_fallback, conv2d_with_fallback}`（段階的フォールバック
+  ヘルパ）・`Op::Conv2d` の VJP（d_input＝col2im・d_weight＝
+  `reduce_batch_axes_f64` による N 軸 `f64` 縮約・d_bias＝
+  `eval::reduce_bias_grad_rows` の `f64` 行縮約）・`Var::conv2d`
+  （公開シグネチャ。`crates/autodiff/src/var.rs`）。
+- **N チャンク分割（設計 §10）は本実装では行わない**（forward は
+  per-sample GEMM の独立性によりチャンク分割数に依らず bit 同一と
+  設計されており正しさには影響しない純粋なピークメモリ削減の最適化の
+  ため。大規模入力でのメモリ上限は out-of-scope-tracking.md に従い
+  別 issue で追跡する）。
+- **テスト**: CPU bit 一致 3 点（`conv2d_direct` ≡ `eval::conv2d` ≡
+  `conv2d_with_fallback(TestOps)`。`grad.rs` 内 `#[cfg(test)]`）・
+  padding タップ非スキップの NaN／inf 回帰・フォールバック階層
+  （`gemm_batched` がバックエンド経由で呼ばれることのカウンタ固定）・
+  d_bias の `f64` アキュムレータ固定（`[1e8, 1.0, -1e8]` 相殺列）・
+  `crates/backend-cpu/src/im2col.rs` 内 `#[cfg(test)]`（im2col／col2im
+  の単体テスト 7 件）・`crates/autodiff/tests/conv2d.rs`（出力 shape
+  表・`N=0` 受理・数値微分突合〈input／weight／bias・groups＋
+  dilation・重なり窓〉・shape／引数検査の境界・groups の per-group
+  `narrow` 合成との bit 一致・bias 軸回帰）・`crates/facade/tests/
+  conv2d_backend_parity.rs`（CPU〈`CpuBackendOps`〉vs `NaiveOps` の
+  forward／backward bit 一致・groups／depthwise。`#[ignore]`: Metal／
+  CUDA を CPU と `assert_parity`〈REQ-2 複合判定〉で比較——ホスト
+  im2col → GPU GEMM 経路のため。実機未実測のまま記入欄を残す）。
+- **`eval::conv2d_direct` の bias 加算順序（codex-review 相当の自己
+  是正）**: 当初実装は `acc` を `bias` で初期化してから `mul_add`
+  連鎖を回していたが、これは im2col＋GEMM 側（GEMM 結果へ bias を
+  独立した加算パスとして後から加える）と丸め順序が食い違い 1 ULP の
+  bit 不一致を生んだ。`acc = 0.0` から `mul_add` 連鎖を計算し、最後に
+  1 回 bias を加算する形へ修正し bit 完全一致を確認した（設計 doc §7
+  の記述どおりの実装へ是正）。
+- **facade 公開面**: 新規 `pub use`／`pub fn` は追加していない
+  （`Var::conv2d` は既存 `Var` 再エクスポート経由で到達。
+  `Conv2dParams` は facade へ再エクスポートしない）。
+- **引き継ぎ**: CUDA カーネル（#1643）・Metal カーネル（#1644）・
+  `Var::conv1d`（#1765）・`nn::Conv2d`／`as_conv2d`／
+  `compat::Sequential::add_conv*`／GPU 実機実測（#1645）。

@@ -22,6 +22,7 @@
 //! caaf3c0 でマージ済みとなったため本イシュー（#22・TASK-1.6b）で
 //! `broadcast_shape` への委譲へ差し替える。
 
+use crate::backend_ops::Conv2dParams;
 use crate::broadcast::broadcast_shape;
 use crate::error::ShapeError;
 use crate::tensor::{checked_numel, checked_numel_for};
@@ -712,6 +713,198 @@ pub fn one_hot_out_shape(
     out.push(num_classes);
     checked_numel_for::<f32>(&out)?;
     Ok(out)
+}
+
+/// Conv2d の出力空間長を計算する（PyTorch `ConvUtils.h::
+/// _conv_output_size` と同式。イシュー #1764・設計 `docs/conv-ops-
+/// design.md` §3／§4）:
+///
+/// ```text
+/// conv_out_len(in, k, s, p, d) = floor((in + 2p − d(k−1) − 1) / s) + 1
+/// ```
+///
+/// `pool_out_len`（pooling 用。未実装）と同式だが検査規則（padding
+/// 上限の有無）が異なるため別関数として定義し共有しない（設計 doc
+/// §4）。
+///
+/// - `s == 0` または `k == 0` は呼び出し元（[`Conv2dParams::new`]）が
+///   構築時点で拒否する契約だが、本関数は `Conv2dParams` を経由しない
+///   直接呼び出しでも panic しないよう独立に検査し
+///   [`ShapeError::ElementCountOverflow`] を返す。
+/// - 分子 `in + 2p − d(k−1) − 1` が負になる（カーネルの実効受容野が
+///   パディング済み入力を超える）場合は `checked_sub` で検出し
+///   [`ShapeError::ShapeMismatch`]（`lhs`＝パディング済み入力長・
+///   `rhs`＝実効受容野長）を返す（負分子拒否ゲート。設計 doc §3）。
+///   非負なら整数除算＝floor。
+/// - `2p`・`in + 2p`・`d(k−1)` の `usize` オーバーフローは
+///   `checked_mul`／`checked_add` で検査し
+///   [`ShapeError::ElementCountOverflow`] を返す。
+pub fn conv_out_len(
+    in_len: usize,
+    k: usize,
+    s: usize,
+    p: usize,
+    d: usize,
+) -> Result<usize, ShapeError> {
+    if s == 0 || k == 0 {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+    let two_p = p.checked_mul(2).ok_or(ShapeError::ElementCountOverflow)?;
+    let in_plus_2p = in_len
+        .checked_add(two_p)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let k_minus_1 = k - 1;
+    let dk = d
+        .checked_mul(k_minus_1)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    match in_plus_2p.checked_sub(dk).and_then(|v| v.checked_sub(1)) {
+        Some(numerator) => Ok(numerator / s + 1),
+        None => Err(ShapeError::ShapeMismatch {
+            lhs: vec![in_plus_2p],
+            rhs: vec![dk.saturating_add(1)],
+        }),
+    }
+}
+
+/// Conv2d（`BackendOps::conv2d`）の出力 shape を検査・計算する
+/// （イシュー #1764・設計 `docs/conv-ops-design.md` §3／§4）。
+///
+/// `input_shape: [N, Cin, H, W]`・`weight_shape: [Cout, Cin/groups,
+/// kH, kW]`（`params.kernel_size` ではなく `weight_shape[2..4]` を
+/// カーネル空間サイズとして用いる——`Var::conv2d` は `weight` から
+/// `kernel_size` を導出して `Conv2dParams` を構築するため、両者は
+/// 呼び出し元の契約により常に一致する）。
+///
+/// 検査順序（PyTorch `check_shape_forward` 相当。設計 doc §3）:
+/// rank（input／weight とも 4）→ `Cin % groups == 0` →
+/// `weight_shape[1] * groups == Cin` → `Cout % groups == 0` →
+/// `Cout >= groups`（`Cout_g >= 1`）→ 空間軸 `H`／`W == 0` 拒否
+/// （`N == 0` は受理）→ [`conv_out_len`]（負分子拒否ゲート）→
+/// 出力要素数積オーバーフロー（`checked_numel_for`。`f32` 確保時の
+/// バイトサイズ上限検査を含む。`crate::tensor` 内非公開）。
+pub fn conv2d_out_shape(
+    input_shape: &[usize],
+    weight_shape: &[usize],
+    params: &Conv2dParams,
+) -> Result<Vec<usize>, ShapeError> {
+    if input_shape.len() != 4 {
+        return Err(ShapeError::RankMismatch {
+            expected: 4,
+            actual: input_shape.len(),
+        });
+    }
+    if weight_shape.len() != 4 {
+        return Err(ShapeError::RankMismatch {
+            expected: 4,
+            actual: weight_shape.len(),
+        });
+    }
+    let (n, cin, h, w) = (
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+    );
+    let (cout, cin_g, kh, kw) = (
+        weight_shape[0],
+        weight_shape[1],
+        weight_shape[2],
+        weight_shape[3],
+    );
+    let groups = params.groups();
+    if !cin.is_multiple_of(groups) {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cin],
+            rhs: vec![groups],
+        });
+    }
+    let expected_cin_g = cin / groups;
+    if cin_g != expected_cin_g {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cin_g],
+            rhs: vec![expected_cin_g],
+        });
+    }
+    if !cout.is_multiple_of(groups) {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cout],
+            rhs: vec![groups],
+        });
+    }
+    if cout < groups {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cout],
+            rhs: vec![groups],
+        });
+    }
+    if h == 0 || w == 0 {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![h, w],
+            rhs: vec![1, 1],
+        });
+    }
+    let [sh, sw] = params.stride();
+    let [ph, pw] = params.padding();
+    let [dh, dw] = params.dilation();
+    let hout = conv_out_len(h, kh, sh, ph, dh)?;
+    let wout = conv_out_len(w, kw, sw, pw, dw)?;
+    let out_shape = vec![n, cout, hout, wout];
+    checked_numel_for::<f32>(&out_shape)?;
+    Ok(out_shape)
+}
+
+/// Conv2d の im2col（[`crate::backend_ops::BackendOps::im2col`]）の
+/// 出力 shape を検査・計算する（イシュー #1764・設計 `docs/conv-ops-
+/// design.md` §4／§8）。`input_shape: [N, Cin, H, W]` を
+/// `[N, G, Cin_g·kH·kW, Hout·Wout]` へ展開する（`K_g` 軸は
+/// `(c_in_g, kh, kw)` の row-major・`P` 軸は `(oh, ow)` の
+/// row-major）。
+pub fn im2col_out_shape(
+    input_shape: &[usize],
+    params: &Conv2dParams,
+) -> Result<Vec<usize>, ShapeError> {
+    if input_shape.len() != 4 {
+        return Err(ShapeError::RankMismatch {
+            expected: 4,
+            actual: input_shape.len(),
+        });
+    }
+    let (n, cin, h, w) = (
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+    );
+    let groups = params.groups();
+    if !cin.is_multiple_of(groups) {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cin],
+            rhs: vec![groups],
+        });
+    }
+    if h == 0 || w == 0 {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![h, w],
+            rhs: vec![1, 1],
+        });
+    }
+    let cin_g = cin / groups;
+    let [kh, kw] = params.kernel_size();
+    let [sh, sw] = params.stride();
+    let [ph, pw] = params.padding();
+    let [dh, dw] = params.dilation();
+    let hout = conv_out_len(h, kh, sh, ph, dh)?;
+    let wout = conv_out_len(w, kw, sw, pw, dw)?;
+    let k_g = cin_g
+        .checked_mul(kh)
+        .and_then(|v| v.checked_mul(kw))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let p = hout
+        .checked_mul(wout)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let out_shape = vec![n, groups, k_g, p];
+    checked_numel_for::<f32>(&out_shape)?;
+    Ok(out_shape)
 }
 
 #[cfg(test)]
@@ -1579,5 +1772,182 @@ mod tests {
     fn one_hot_out_shape_byte_size_overflow_without_element_count_overflow() {
         let err = one_hot_out_shape(&[1], usize::MAX).unwrap_err();
         assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    // --- conv_out_len / conv2d_out_shape / im2col_out_shape ---
+
+    fn conv_params(
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+        groups: usize,
+    ) -> Conv2dParams {
+        Conv2dParams::new(kernel_size, stride, padding, dilation, groups).unwrap()
+    }
+
+    #[test]
+    fn conv_out_len_basic_no_pad_no_dilation() {
+        // PyTorch `_conv_output_size` 参照値: in=4, k=3, s=1, p=0, d=1 -> 2
+        assert_eq!(conv_out_len(4, 3, 1, 0, 1).unwrap(), 2);
+    }
+
+    #[test]
+    fn conv_out_len_with_padding_preserves_size() {
+        // 'same' 相当（k=3, p=1, s=1, d=1）
+        assert_eq!(conv_out_len(5, 3, 1, 1, 1).unwrap(), 5);
+    }
+
+    #[test]
+    fn conv_out_len_with_stride() {
+        assert_eq!(conv_out_len(7, 3, 2, 0, 1).unwrap(), 3);
+    }
+
+    #[test]
+    fn conv_out_len_with_dilation() {
+        // 実効カーネル幅 = d*(k-1)+1 = 2*2+1 = 5
+        assert_eq!(conv_out_len(5, 3, 1, 0, 2).unwrap(), 1);
+    }
+
+    #[test]
+    fn conv_out_len_negative_numerator_rejected() {
+        // in=1, k=3, p=0, d=1 -> 分子 1 - 2 - 1 = -2 < 0
+        let err = conv_out_len(1, 3, 1, 0, 1).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn conv_out_len_zero_input_with_padding_only_window() {
+        // H=W=1, kernel=1, padding=1 は「有効入力を含まない窓」を許容
+        // する（設計 doc §3「訂正」）。in=1 なので H=0 拒否ゲートには
+        // 掛からない。
+        assert_eq!(conv_out_len(1, 1, 1, 1, 1).unwrap(), 3);
+    }
+
+    #[test]
+    fn conv_out_len_rejects_zero_stride() {
+        let err = conv_out_len(4, 3, 0, 0, 1).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn conv_out_len_rejects_zero_kernel() {
+        let err = conv_out_len(4, 0, 1, 0, 1).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn conv2d_out_shape_basic() {
+        let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 1);
+        let out = conv2d_out_shape(&[2, 3, 8, 8], &[4, 3, 3, 3], &params).unwrap();
+        assert_eq!(out, vec![2, 4, 6, 6]);
+    }
+
+    #[test]
+    fn conv2d_out_shape_groups() {
+        let params = conv_params([3, 3], [1, 1], [1, 1], [1, 1], 2);
+        // groups=2: Cin=4 -> Cin_g=2, Cout=6 -> Cout_g=3
+        let out = conv2d_out_shape(&[1, 4, 5, 5], &[6, 2, 3, 3], &params).unwrap();
+        assert_eq!(out, vec![1, 6, 5, 5]);
+    }
+
+    #[test]
+    fn conv2d_out_shape_depthwise_groups_eq_cin() {
+        let params = conv_params([3, 3], [1, 1], [1, 1], [1, 1], 4);
+        let out = conv2d_out_shape(&[1, 4, 5, 5], &[4, 1, 3, 3], &params).unwrap();
+        assert_eq!(out, vec![1, 4, 5, 5]);
+    }
+
+    #[test]
+    fn conv2d_out_shape_n_zero_is_accepted() {
+        let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 1);
+        let out = conv2d_out_shape(&[0, 3, 8, 8], &[4, 3, 3, 3], &params).unwrap();
+        assert_eq!(out, vec![0, 4, 6, 6]);
+    }
+
+    #[test]
+    fn conv2d_out_shape_h_zero_is_rejected() {
+        let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 1);
+        let err = conv2d_out_shape(&[1, 3, 0, 8], &[4, 3, 3, 3], &params).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn conv2d_out_shape_padding_greater_than_half_kernel_is_accepted() {
+        // pooling と異なり Conv は padding 上限を持たない（設計 doc
+        // §0.2／§3 の意図的な差異の回帰）。
+        let params = conv_params([3, 3], [1, 1], [5, 5], [1, 1], 1);
+        let out = conv2d_out_shape(&[1, 1, 4, 4], &[1, 1, 3, 3], &params).unwrap();
+        assert_eq!(out, vec![1, 1, 12, 12]);
+    }
+
+    #[test]
+    fn conv2d_out_shape_rank_mismatch_input() {
+        let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 1);
+        let err = conv2d_out_shape(&[3, 8, 8], &[4, 3, 3, 3], &params).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 4,
+                actual: 3
+            }
+        );
+    }
+
+    #[test]
+    fn conv2d_out_shape_cin_not_divisible_by_groups() {
+        let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 2);
+        let err = conv2d_out_shape(&[1, 3, 8, 8], &[4, 2, 3, 3], &params).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn conv2d_out_shape_weight_cin_mismatch() {
+        let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 1);
+        let err = conv2d_out_shape(&[1, 3, 8, 8], &[4, 2, 3, 3], &params).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn conv2d_out_shape_cout_not_divisible_by_groups() {
+        let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 2);
+        let err = conv2d_out_shape(&[1, 4, 8, 8], &[5, 2, 3, 3], &params).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn im2col_out_shape_basic() {
+        let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 1);
+        let out = im2col_out_shape(&[2, 3, 8, 8], &params).unwrap();
+        // K_g = 3*3*3 = 27, P = 6*6 = 36
+        assert_eq!(out, vec![2, 1, 27, 36]);
+    }
+
+    #[test]
+    fn im2col_out_shape_groups() {
+        let params = conv_params([3, 3], [1, 1], [1, 1], [1, 1], 2);
+        let out = im2col_out_shape(&[1, 4, 5, 5], &params).unwrap();
+        // Cin_g=2, K_g=2*3*3=18, P=5*5=25
+        assert_eq!(out, vec![1, 2, 18, 25]);
+    }
+
+    #[test]
+    fn im2col_out_shape_rejects_rank_mismatch() {
+        let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 1);
+        let err = im2col_out_shape(&[3, 8, 8], &params).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 4,
+                actual: 3
+            }
+        );
+    }
+
+    #[test]
+    fn im2col_out_shape_w_zero_is_rejected() {
+        let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 1);
+        let err = im2col_out_shape(&[1, 3, 8, 0], &params).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
     }
 }
