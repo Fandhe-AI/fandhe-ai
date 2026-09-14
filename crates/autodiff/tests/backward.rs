@@ -1944,3 +1944,500 @@ fn one_hot_class_id_at_i32_max_plus_one_boundary_is_rejected() {
     let err = x.one_hot(3_000_000_000).unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }
+
+// --- cumsum／cumprod（イシュー #1731） ---
+
+/// ①forward: `cumsum` が各軸で累積和を返す（2 次元テンソルの両軸で
+/// 確認）。
+#[test]
+fn cumsum_forward_along_each_axis() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let along_rows = x.cumsum(0).unwrap();
+    assert_eq!(
+        dense_vec(&along_rows.to_tensor()),
+        vec![1.0, 2.0, 3.0, 5.0, 7.0, 9.0]
+    );
+
+    let along_cols = x.cumsum(1).unwrap();
+    assert_eq!(
+        dense_vec(&along_cols.to_tensor()),
+        vec![1.0, 3.0, 6.0, 4.0, 9.0, 15.0]
+    );
+}
+
+/// ②`cumsum` が `f64` アキュムレータを保持する契約を直接確認する
+/// （`[1e8, 1.0, -1e8]` は f32 逐次アキュムレータなら末尾が `0.0` に
+/// 丸まるが、f64 アキュムレータでは `1.0` が厳密に残る）。
+#[test]
+fn cumsum_uses_persistent_f64_accumulator() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1e8, 1.0, -1e8], &[3]));
+    let out = x.cumsum(0).unwrap();
+    assert_eq!(dense_vec(&out.to_tensor()), vec![1e8, 1e8, 1.0]);
+}
+
+/// ③`cumsum` の backward を中央差分・解析式（`dx[i] = Σ_{j>=i} w[j]`）
+/// の双方と突合する（`loss = sum(cumsum(x) ⊙ w)`）。
+#[test]
+fn cumsum_backward_matches_numeric() {
+    let x0 = t(vec![0.5, -1.5, 2.0, 0.25], &[4]);
+    let w = t(vec![1.0, -2.0, 0.5, 3.0], &[4]);
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let wv = tape.var(&w);
+        let out = xv.cumsum(0).unwrap();
+        scalar(&out.mul(&wv).unwrap().sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumsum(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close("cumsum dX", dx, &num_dx);
+
+    // 解析式 dx[i] = Σ_{j>=i} w[j] との突合（厳密一致）。
+    let w_data = dense_vec(&w);
+    let expected: Vec<f32> = (0..w_data.len())
+        .map(|i| w_data[i..].iter().sum())
+        .collect();
+    assert_eq!(dense_vec(dx), expected);
+}
+
+/// ④`cumprod` が各軸で累積積を返す。
+#[test]
+fn cumprod_forward_along_each_axis() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let along_rows = x.cumprod(0).unwrap();
+    assert_eq!(
+        dense_vec(&along_rows.to_tensor()),
+        vec![1.0, 2.0, 3.0, 4.0, 10.0, 18.0]
+    );
+
+    let along_cols = x.cumprod(1).unwrap();
+    assert_eq!(
+        dense_vec(&along_cols.to_tensor()),
+        vec![1.0, 2.0, 6.0, 4.0, 20.0, 120.0]
+    );
+}
+
+/// ⑤`cumprod` の `f64` アキュムレータ契約: `[1e-30, 1e-30, 1e30]` は
+/// `out[1] = 1e-60` が `f32` では underflow して `0.0` になるが、
+/// `out[2]`（`1e-60 * 1e30 = 1e-30` 相当）は f64 アキュムレータでは
+/// 非零有限値のまま残る（f32 逐次アキュムレータなら `out[1]` が
+/// `0.0` になった時点で以降も `0.0` のまま）。判別は `out[2]` の
+/// 非零性・有限性のみで行う（`f32` 入力は `1e-30`／`1e30` に厳密で
+/// はないため、リテラル比較はしない）。
+#[test]
+fn cumprod_underflow_recovers_via_f64_accumulator() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1e-30, 1e-30, 1e30], &[3]));
+    let out = dense_vec(&x.cumprod(0).unwrap().to_tensor());
+    assert_eq!(out[1], 0.0, "f32 では 1e-60 相当が underflow するはず");
+    assert_ne!(
+        out[2], 0.0,
+        "f64 アキュムレータにより 1e-60*1e30 相当が非零で残るはず"
+    );
+    assert!(out[2].is_finite());
+}
+
+/// ⑥〜⑧`cumprod` の backward（厳密形 `d_x[i] = L[i]·S[i]`）を中央差分
+/// と突合する。零要素の個数（0／1／2 個）を分けて検証し、最初の零
+/// 要素より後ろの入力勾配が厳密に `0.0` になる解析的性質も確認する
+/// （`L[i] = 0` となるため。最初の零要素自身の勾配は一般に非零）。
+/// `dim` を指定できるようにして、`inner > 1`（縮約軸より後ろに別軸が
+/// あり `idx_next = (o*axis_len+(a+1))*inner+i` のような lane 添字計算を
+/// 経由する）多次元ケースも同一関数で検証できるようにしている
+/// （レビュー指摘: rank-1 限定だったカバレッジの拡張）。
+fn cumprod_backward_case_along(
+    x0: Tensor<f32>,
+    w: Tensor<f32>,
+    dim: usize,
+    label: &str,
+    first_zero_along_axis: Option<usize>,
+) {
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let wv = tape.var(&w);
+        let out = xv.cumprod(dim).unwrap();
+        scalar(&out.mul(&wv).unwrap().sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumprod(dim).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close(label, dx, &num_dx);
+
+    if let Some(fz) = first_zero_along_axis {
+        // shape 全体を走査し、縮約軸（dim）上のインデックスが fz より
+        // 後ろの要素はすべて勾配 0 になることを検証する（多次元でも
+        // L[a] = 0 の性質は縮約軸方向にのみ依存するため）。
+        let shape = dx.shape().to_vec();
+        let numel: usize = shape.iter().product();
+        let mut index = vec![0usize; shape.len()];
+        for _ in 0..numel {
+            if index[dim] > fz {
+                let v = dx.get(&index).unwrap_or(0.0);
+                assert_eq!(
+                    v, 0.0,
+                    "{label}: index {index:?} の勾配は 0 のはず（L[{fz}]=0 が dim={dim} 方向へ伝播）"
+                );
+            }
+            for axis in (0..shape.len()).rev() {
+                index[axis] += 1;
+                if index[axis] < shape[axis] {
+                    break;
+                }
+                index[axis] = 0;
+            }
+        }
+    }
+}
+
+fn cumprod_backward_case(x0: Tensor<f32>, w: Tensor<f32>, label: &str, first_zero: Option<usize>) {
+    cumprod_backward_case_along(x0, w, 0, label, first_zero);
+}
+
+#[test]
+fn cumprod_backward_matches_numeric_without_zeros() {
+    cumprod_backward_case(
+        t(vec![0.5, -1.5, 2.0, 0.25], &[4]),
+        t(vec![1.0, -2.0, 0.5, 3.0], &[4]),
+        "cumprod dX (no zero)",
+        None,
+    );
+}
+
+#[test]
+fn cumprod_backward_matches_numeric_with_single_zero() {
+    cumprod_backward_case(
+        t(vec![0.5, 0.0, 2.0, -0.25], &[4]),
+        t(vec![1.0, -2.0, 0.5, 3.0], &[4]),
+        "cumprod dX (single zero)",
+        Some(1),
+    );
+}
+
+#[test]
+fn cumprod_backward_matches_numeric_with_two_zeros() {
+    cumprod_backward_case(
+        t(vec![0.5, 0.0, 2.0, 0.0, -0.25], &[5]),
+        t(vec![1.0, -2.0, 0.5, 3.0, -1.0], &[5]),
+        "cumprod dX (two zeros)",
+        Some(1),
+    );
+}
+
+/// ⑨`cumprod` backward の 3 次元・中間軸（`inner > 1`）ケース。shape
+/// `[2, 4, 3]` で軸 1（`outer=2`・`axis_len=4`・`inner=3`）を縮約軸に取り、
+/// `backend-cpu::scan` の lane 添字計算
+/// `idx_next = (o*axis_len+(a+1))*inner+i` を実際に経由する経路を
+/// 中央差分と突合する（レビュー指摘: rank-1 限定だったカバレッジの
+/// 拡張）。全 lane（`outer × inner` の各組）の軸 1 = 0 位置を零要素に
+/// 揃えることで、どの lane でも `L[a]=0 (a>=1)` が成り立ち、縮約軸方向
+/// の勾配ゼロ伝播（`first_zero_along_axis = 0`）を全 lane 一律で検証
+/// できるようにしている。
+#[test]
+fn cumprod_backward_matches_numeric_with_inner_axis() {
+    #[rustfmt::skip]
+    let x0 = t(
+        vec![
+            // outer=0
+            0.0, 0.0, 0.0,
+            1.5, 0.5, -0.5,
+            -0.5, 2.0, 1.0,
+            -2.0, 0.25, 3.0,
+            // outer=1
+            0.0, 0.0, 0.0,
+            2.0, -1.5, 0.25,
+            0.5, 0.5, -1.0,
+            1.0, -0.25, 2.0,
+        ],
+        &[2, 4, 3],
+    );
+    #[rustfmt::skip]
+    let w = t(
+        vec![
+            1.0, -2.0, 0.5,
+            3.0, -1.0, 2.0,
+            0.5, 1.0, -1.5,
+            -2.0, 0.25, 1.0,
+            2.0, 0.5, -1.0,
+            -1.0, 1.5, 0.5,
+            0.25, -2.0, 1.0,
+            1.0, 0.5, -0.5,
+        ],
+        &[2, 4, 3],
+    );
+    cumprod_backward_case_along(x0, w, 1, "cumprod dX (3d inner axis)", Some(0));
+}
+
+/// ⑨.5 `cumprod` backward のオーバーフロー×零遮断の相互作用回帰テスト
+/// （codex-review 指摘・PR #1819）。長い軸（`axis_len = 40`）の先頭を
+/// 零要素、以降を `1e30`（`f32` 表現域には収まるが、`f64` でも十数個の連続積で表現域
+/// `1.8e308` を突破する規模）で埋める。素朴な浮動小数点乗算のままだと
+/// `S`（Horner 型再帰の後方累積）が零要素より後ろの区間で `inf` へ
+/// 発散し、`L[a] = 0`（零要素を跨いだ排他的 prefix 積）との積
+/// `0.0 * inf` が `NaN` を生む。零要素を跨いだ位置（`index >= 1`）の
+/// 真の勾配は理論上つねに厳密な `0.0`（`d(y[b])/d(x[a])` の積が零要素
+/// で遮断されるため）であるはずで、`NaN` に汚染されてはならない。
+/// 零要素自身（`index == 0`）は `S[0]` 自体が発散しうるため `inf` は
+/// 許容するが `NaN` は許容しない。中央差分（オーバーフロー環境では
+/// 数値的に破綻するため）は使わず、解析勾配の有限性・零遮断の厳密性
+/// のみを検証する。
+#[test]
+fn cumprod_backward_no_nan_when_zero_blocks_overflowing_suffix() {
+    const AXIS_LEN: usize = 40;
+    let mut data = vec![1e30f32; AXIS_LEN];
+    data[0] = 0.0;
+    let x0 = t(data, &[AXIS_LEN]);
+    let w = t(vec![1.0; AXIS_LEN], &[AXIS_LEN]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumprod(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    for a in 0..AXIS_LEN {
+        let v = dx.get(&[a]).unwrap_or(0.0);
+        assert!(
+            !v.is_nan(),
+            "cumprod backward (overflow×zero): index {a} の勾配が NaN になってはならない（実際: {v}）"
+        );
+        if a >= 1 {
+            assert_eq!(
+                v, 0.0,
+                "cumprod backward (overflow×zero): index {a} は L[{a}]=0 のため勾配は厳密に 0 のはず（実際: {v}）"
+            );
+        }
+    }
+}
+
+/// ⑨.6 同上のオーバーフロー×零遮断の相互作用を、複数の零要素を含む
+/// 長い軸で再確認する（codex-review 指摘の「複数零を含む回帰テスト」
+/// 要求への対応）。`axis_len = 50` に零要素を 2 箇所（先頭付近と中間）
+/// 配置し、両方の零要素より後ろで一貫して勾配が厳密 `0.0`・かつ
+/// `NaN` が出現しないことを検証する。
+#[test]
+fn cumprod_backward_no_nan_with_multiple_zeros_and_overflow() {
+    const AXIS_LEN: usize = 50;
+    const FIRST_ZERO: usize = 2;
+    const SECOND_ZERO: usize = 25;
+    let mut data = vec![1e30f32; AXIS_LEN];
+    data[FIRST_ZERO] = 0.0;
+    data[SECOND_ZERO] = 0.0;
+    let x0 = t(data, &[AXIS_LEN]);
+    let w = t(vec![1.0; AXIS_LEN], &[AXIS_LEN]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumprod(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    for a in 0..AXIS_LEN {
+        let v = dx.get(&[a]).unwrap_or(0.0);
+        assert!(
+            !v.is_nan(),
+            "cumprod backward (multi-zero×overflow): index {a} の勾配が NaN になってはならない（実際: {v}）"
+        );
+        if a > FIRST_ZERO {
+            assert_eq!(
+                v, 0.0,
+                "cumprod backward (multi-zero×overflow): index {a} は最初の零要素（{FIRST_ZERO}）より後ろなので勾配は厳密に 0 のはず（実際: {v}）"
+            );
+        }
+    }
+}
+
+/// ⑨.7 `cumprod` backward の suffix 積自体がオーバーフローする反例
+/// （codex-review P1 指摘・PR #1819）。`x = [0] + [2^-100]×11 +
+/// [2^100]×11`（`axis_len = 23`）・`w = 1`（`loss = sum(cumprod(x))`）
+/// では、forward は全要素 `0.0`（先頭が零のため）だが、`S`（Horner
+/// 型後方再帰）を素朴な `f64` で計算すると軸後半の `2^100` の連続積で
+/// `f64` 表現域（約 `1.8e308`）を超えて `inf` に発散し、その後軸前半の
+/// `2^-100` を掛けても復元できず `dx[0]` が誤って `inf` になっていた
+/// （零遮断ガードは「掛け算の一方が厳密に `0.0`」のケースのみを救う
+/// ため、この「非零だが極端に大きい／小さい係数」の反例には対応でき
+/// ない）。解析的には `dx[0] = S[0] = 1 + 2^100·(1 + 2^100·(…))`
+/// のうち、`2^-100` の 11 個は `S` の対応する加算段では `2^100` 側の
+/// 桁に対し無視できるほど小さく（53bit 仮数の丸めで消える）、隣接する
+/// `2^-100·2^100 = 1` の相殺だけが効くため、厳密に `S[0] = 2.0`
+/// （`f32` に厳密に丸まる）になる。`a >= 1` はいずれも `L[a] = 0`
+/// （`x[0] = 0` を跨ぐため）で勾配は厳密に `0.0`。中央差分は
+/// オーバーフロー環境では意味を持たないため使わず、解析的な厳密値
+/// との `assert_eq!` で検証する。
+#[test]
+fn cumprod_backward_no_overflow_when_suffix_product_diverges() {
+    const AXIS_LEN: usize = 23;
+    let mut data = vec![0f32; AXIS_LEN];
+    data[0] = 0.0;
+    for v in data.iter_mut().skip(1).take(11) {
+        *v = 2f32.powi(-100);
+    }
+    for v in data.iter_mut().skip(12).take(11) {
+        *v = 2f32.powi(100);
+    }
+    let x0 = t(data, &[AXIS_LEN]);
+    let w = t(vec![1.0; AXIS_LEN], &[AXIS_LEN]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumprod(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    for a in 0..AXIS_LEN {
+        let v = dx.get(&[a]).unwrap_or(0.0);
+        assert!(
+            !v.is_nan(),
+            "cumprod backward (suffix overflow): index {a} の勾配が NaN になってはならない（実際: {v}）"
+        );
+        assert!(
+            v.is_finite(),
+            "cumprod backward (suffix overflow): index {a} の勾配が有限であるはず（実際: {v}）"
+        );
+        if a == 0 {
+            assert_eq!(
+                v, 2.0,
+                "cumprod backward (suffix overflow): dx[0] は厳密に 2.0 のはず（実際: {v}）"
+            );
+        } else {
+            assert_eq!(
+                v, 0.0,
+                "cumprod backward (suffix overflow): index {a} は L[{a}]=0 のため勾配は厳密に 0 のはず（実際: {v}）"
+            );
+        }
+    }
+}
+
+/// ⑨.8 上記と対称なケース: 軸前半が極端に大きい `2^100`、後半が
+/// 極端に小さい `2^-100`（`axis_len = 22`・零要素なし）で、`w` を
+/// 末尾のみ `1`（他は `0`）の one-hot にする。`旧実装`（素朴な `f64`
+/// アキュムレータ）はこのケースを 2 通りの経路で壊していた:
+/// `L`（先頭からの累積積。前半 11 個の `2^100` 連続積）が `f64`
+/// 表現域を超えて `inf` へ発散し、`S`（後半の `2^-100` 連続積からの
+/// 後方累積）は逆に `f64` 表現域の下限（アンダーフロー）を割って
+/// `0.0` に潰れ、両者の積が `inf * 0 = NaN` あるいは意図せぬ `0.0` に
+/// なりうる。解析的には `y[axis_len-1] = Π x[i]`（`2^100` を 11 回・
+/// `2^-100` を 11 回掛けた積で厳密に `1.0`）に対し、`w` が末尾のみ
+/// `1` なので `dx[a] = y[axis_len-1] / x[a] = 1 / x[a]`——前半
+/// （`a <= 10`）は `2^-100`、後半（`a >= 11`）は `2^100` で、いずれも
+/// `f32` に厳密に表現可能な値になる（`x[a]` はすべて厳密に 2 の
+/// べき乗のため `1/x[a]` も厳密に 2 のべき乗）。
+#[test]
+fn cumprod_backward_no_overflow_symmetric_large_then_small() {
+    const AXIS_LEN: usize = 22;
+    let mut data = vec![0f32; AXIS_LEN];
+    for v in data.iter_mut().take(11) {
+        *v = 2f32.powi(100);
+    }
+    for v in data.iter_mut().skip(11).take(11) {
+        *v = 2f32.powi(-100);
+    }
+    let x0 = t(data, &[AXIS_LEN]);
+    let mut w_data = vec![0f32; AXIS_LEN];
+    w_data[AXIS_LEN - 1] = 1.0;
+    let w = t(w_data, &[AXIS_LEN]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumprod(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let x_data = dense_vec(&x0);
+    for (a, &x_a) in x_data.iter().enumerate().take(AXIS_LEN) {
+        let v = dx.get(&[a]).unwrap_or(0.0);
+        assert!(
+            !v.is_nan(),
+            "cumprod backward (symmetric overflow/underflow): index {a} の勾配が NaN になってはならない（実際: {v}）"
+        );
+        let expected = 1.0f32 / x_a;
+        assert_eq!(
+            v, expected,
+            "cumprod backward (symmetric overflow/underflow): index {a} は 1/x[{a}]={expected} のはず（実際: {v}）"
+        );
+    }
+}
+
+/// エラー経路: `cumsum`／`cumprod` の `dim` が範囲外なら
+/// `AutodiffError::Shape(AxisOutOfRange)` を返す。
+#[test]
+fn cumsum_axis_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let err = x.cumsum(1).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+}
+
+#[test]
+fn cumprod_axis_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let err = x.cumprod(1).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+}
+
+/// 空 shape（`[0, 3]`）に対する `cumsum` は空出力を返す（部分積
+/// オーバーフロー回避の早期 return を確認）。
+#[test]
+fn cumsum_on_empty_tensor_returns_empty() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(Vec::new(), &[0, 3]));
+    let out = x.cumsum(0).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[0, 3]);
+    assert_eq!(dense_vec(&out.to_tensor()), Vec::<f32>::new());
+}
+
+/// strided（transpose view）入力でも `cumsum` が contiguous 入力と
+/// 同じ結果を返す（`x.contiguous()` 経由で正しく読める契約）。
+#[test]
+fn cumsum_on_transposed_view_matches_contiguous() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+    let tr = x.transpose(0, 1).unwrap(); // shape [3, 2]
+    let out_view = tr.cumsum(0).unwrap();
+
+    let x_t = t(vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0], &[3, 2]);
+    let tape2 = Tape::new_with_ops(common::naive_ops());
+    let x2 = tape2.var(&x_t);
+    let out_contig = x2.cumsum(0).unwrap();
+
+    assert_eq!(
+        dense_vec(&out_view.to_tensor()),
+        dense_vec(&out_contig.to_tensor())
+    );
+}

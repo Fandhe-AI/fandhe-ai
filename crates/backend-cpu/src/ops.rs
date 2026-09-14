@@ -30,6 +30,7 @@ use crate::layer_norm;
 use crate::linalg::{self, LinalgError};
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
+use crate::scan;
 use crate::softmax::{self, match_softmax_plan};
 use crate::{
     elementwise, fused_elementwise, gather_scatter, mse, reduction, rnn_cell, scalar_elementwise,
@@ -1691,6 +1692,20 @@ impl BackendOps for CpuBackendOps {
         let out = softmax::run_softmax_f32(x_slice, rows, cols)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::cumsum` の CPU 実装（イシュー #1731）。
+    /// `scan::cumsum`（クレート非公開）へ委譲する（`dim` の再検査は
+    /// 同モジュール内で独立に行う契約。`gather`／`scatter` と同じ
+    /// 二重検査方針）。
+    fn cumsum(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        scan::cumsum(x, dim).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::cumprod` の CPU 実装（イシュー #1731）。
+    /// `scan::cumprod`（クレート非公開）へ委譲する。
+    fn cumprod(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        scan::cumprod(x, dim).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::log_softmax`] の CPU 実装
