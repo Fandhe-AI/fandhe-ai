@@ -59,6 +59,7 @@ gate` の出力）が見つからない場合は、前提ゲート未確認と�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import statistics
@@ -116,6 +117,59 @@ def parse_log(text: str) -> RunData:
             )
         )
     return run
+
+
+def detect_duplicate_logs(paths: list[str], contents: list[str]) -> list[str]:
+    """同一計測の二重カウントを検出する（codex-review 指摘。イシュー
+    #1694 PR レビュー是正）。
+
+    引数を「同じログパスを 5 回指定する」「同一内容のログを別名で 5 個
+    用意する」等で誤って渡すと、実際には 1 回しか計測していないのに
+    `check_completeness` は各エントリを独立した完全な run として扱って
+    しまい、「5/5 run 符号一貫」を満たして誤って ADOPT／REJECT を確定
+    しうる。これを 2 段で検出する:
+
+    1. パス正規化（`os.path.realpath`）後の重複（同一ファイルを異なる
+       相対パス表記・シンボリックリンク経由で複数回指定した場合を含む）
+    2. 生ログ内容のハッシュ重複（別ファイル名でも中身が完全一致する
+       コピーは同一計測の可能性が高い。ログ内に run を一意に識別する
+       フィールドが無いため、内容そのものの同一性を run 識別情報の
+       代替として検証する）
+
+    戻り値が非空なら `main()` は集計を行わず fail-closed にエラー終了
+    する（誤った ADOPT／REJECT レポートを出力しない）。
+    """
+    violations: list[str] = []
+    path_duplicate_runs: set[int] = set()
+    seen_paths: dict[str, int] = {}
+    for i, p in enumerate(paths, start=1):
+        real = os.path.realpath(p)
+        if real in seen_paths:
+            other = seen_paths[real]
+            violations.append(
+                f"{paths[i - 1]}（run{i}）は {paths[other - 1]}（run{other}）と"
+                "正規化後の実パスが同一（同じログの重複指定）"
+            )
+            path_duplicate_runs.add(i)
+        else:
+            seen_paths[real] = i
+    # パス重複として既に報告済みの run は同じ組がハッシュ重複としても
+    # 二重に報告されるため、未報告の run に限りハッシュ重複を検査する。
+    seen_hashes: dict[str, int] = {}
+    for i, c in enumerate(contents, start=1):
+        if i in path_duplicate_runs:
+            continue
+        digest = hashlib.sha256(c.encode("utf-8")).hexdigest()
+        if digest in seen_hashes:
+            other = seen_hashes[digest]
+            violations.append(
+                f"{paths[i - 1]}（run{i}）は {paths[other - 1]}（run{other}）と"
+                "ログ内容が完全一致（別名ファイルへのコピーによる同一計測の"
+                "重複カウントの可能性）"
+            )
+        else:
+            seen_hashes[digest] = i
+    return violations
 
 
 def check_completeness(runs: list[RunData]) -> list[str]:
@@ -329,6 +383,34 @@ def render_report(runs: list[RunData], gate_dir: str | None = None) -> str:
             lines.append(f"  - {note}")
     lines.append("")
 
+    # 規則 1 最優先評価（codex-review 指摘。イシュー #1694 PR レビュー
+    # 是正）: R0/R1 FAIL は「性能 A/B 非実施」が正常な帰結であるため、
+    # 性能ログの完全性検査（run 数不足・N 欠落等）より **先に** 評価
+    # して REJECT を確定する。完全性検査を先に評価してしまうと、R0/R1
+    # が FAIL したことで性能 A/B が実施されず（正常な運用）ログが
+    # 不完全なだけのケースまで undetermined に落ちてしまい、規則 1
+    # 「R0/R1 FAIL は REJECT 確定」に反する。
+    if gate.r0_r1_status == "fail":
+        lines.append(
+            "## R0/R1 ゲート不成立（性能 A/B の実施有無に関わらず REJECT 確定）"
+        )
+        lines.append("")
+        lines.append(
+            "（R0/R1 FAIL 時は性能 A/B 非実施が正常な運用のため、"
+            "性能ログの完全性検査は行わない。§7.1 規則 1）"
+        )
+        lines.append("")
+        lines.append(
+            "総合判定: **REJECT（R0/R1 ゲート不成立につき正しさ不成立。"
+            "§7.1 規則 1）**"
+        )
+        lines.append("")
+        lines.append(
+            "（本番結線〈`tile::select`／`dispatch_auto` 既定化〉はいずれの"
+            "判定でも本イシューの対象外。別イシューでユーザー承認を要する）"
+        )
+        return "\n".join(lines) + "\n"
+
     completeness_violations = check_completeness(runs)
     if len(runs) != MIN_FORMAL_RUNS:
         completeness_violations.insert(
@@ -372,14 +454,14 @@ def render_report(runs: list[RunData], gate_dir: str | None = None) -> str:
     lines.append("")
 
     # 規則 1: 前提ゲート（R0〜R3）の充足状況を総合判定へ反映する。
-    # R0/R1 が fail/unknown、または R2/R3 が pass 以外（fail/unknown）
-    # の場合は、N ごとの表がどう出ようと総合判定を REJECT／undetermined
-    # へ強制する（表自体は診断のため常に出力する。codex-review 指摘:
-    # 集計が前提ゲート成否を反映せず README 上 undetermined とすべき
-    # 場面で ADOPT を出しうる点の是正。イシュー #1694 PR レビュー是正）。
-    if gate.r0_r1_status == "fail":
-        verdict_str = "REJECT（R0/R1 ゲート不成立につき正しさ不成立。§7.1 規則 1）"
-    elif gate.r0_r1_status == "unknown":
+    # R0/R1 が fail の場合は本関数冒頭で既に REJECT 確定・early return
+    # 済みのためここには到達しない。R0/R1 が unknown、または R2/R3 が
+    # pass 以外（fail/unknown）の場合は、N ごとの表がどう出ようと総合
+    # 判定を undetermined へ強制する（表自体は診断のため常に出力する。
+    # codex-review 指摘: 集計が前提ゲート成否を反映せず README 上
+    # undetermined とすべき場面で ADOPT を出しうる点の是正。イシュー
+    # #1694 PR レビュー是正）。
+    if gate.r0_r1_status == "unknown":
         verdict_str = (
             "undetermined（R0/R1 ゲート結果を確認できない。"
             "--gate-dir で前提ゲートログを渡すこと）"
@@ -532,6 +614,65 @@ def _self_test() -> None:
         report = render_report(adopt_runs, gate_dir=gate_r2r3_bad)
     assert "総合判定: **undetermined（R2/R3" in report, report
 
+    # ケース 11（codex-review 指摘の是正確認。イシュー #1694 PR レビュー
+    # 是正）: R0/R1 FAIL 時は性能 A/B が実施されない（run が 0 件・不完全）
+    # のが正常な運用であり、その場合でも総合判定は undetermined へ後退
+    # せず REJECT を確定する（完全性検査より R0/R1 判定を優先する順序
+    # 修正の確認）。
+    with tempfile.TemporaryDirectory() as gate_bad_no_runs:
+        write_gate_dir(gate_bad_no_runs, r0_r1_ok=False)
+        report_no_runs = render_report([], gate_dir=gate_bad_no_runs)
+    assert "総合判定: **REJECT（R0/R1 ゲート不成立" in report_no_runs, report_no_runs
+    assert "完全性検査 FAIL" not in report_no_runs, report_no_runs
+
+    with tempfile.TemporaryDirectory() as gate_bad_incomplete:
+        write_gate_dir(gate_bad_incomplete, r0_r1_ok=False)
+        report_incomplete = render_report(adopt_runs[:2], gate_dir=gate_bad_incomplete)
+    assert (
+        "総合判定: **REJECT（R0/R1 ゲート不成立" in report_incomplete
+    ), report_incomplete
+
+    # ケース 12（codex-review 指摘の是正確認。イシュー #1694 PR レビュー
+    # 是正）: 同じログパスを複数回指定すると `detect_duplicate_logs` が
+    # 正規化後の実パス重複を検出する（`main()` はこれを検出したら集計
+    # せず fail-closed に終了する。ここでは検出関数自体を直接検証する）。
+    with tempfile.TemporaryDirectory() as dup_dir:
+        log_path = os.path.join(dup_dir, "kernel_gpu_te_ab_run1.log")
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(make_log({512: 0.9, 1024: 0.85, 2048: 0.8, 4096: 0.75}))
+        same_path_5x = [log_path] * 5
+        contents_5x = [open(p, encoding="utf-8").read() for p in same_path_5x]
+        violations = detect_duplicate_logs(same_path_5x, contents_5x)
+    assert len(violations) == 4, violations  # run2〜run5 が run1 と重複
+    assert all("正規化後の実パスが同一" in v for v in violations), violations
+
+    # ケース 13: パスは異なるが内容が完全一致するコピー（同一計測を
+    # 別ファイル名で複製したケース）もハッシュ重複として検出する。
+    with tempfile.TemporaryDirectory() as dup_dir2:
+        base_content = make_log({512: 0.9, 1024: 0.85, 2048: 0.8, 4096: 0.75})
+        paths = []
+        for i in range(1, 6):
+            p = os.path.join(dup_dir2, f"kernel_gpu_te_ab_run{i}.log")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(base_content)
+            paths.append(p)
+        contents_copy = [open(p, encoding="utf-8").read() for p in paths]
+        violations2 = detect_duplicate_logs(paths, contents_copy)
+    assert len(violations2) == 4, violations2
+    assert all("ログ内容が完全一致" in v for v in violations2), violations2
+
+    # ケース 14: 正規のケース（内容が異なる 5 run）では重複検出されない。
+    with tempfile.TemporaryDirectory() as ok_dir:
+        distinct_paths = []
+        for i, ratio in enumerate((0.90, 0.91, 0.92, 0.93, 0.94), start=1):
+            p = os.path.join(ok_dir, f"kernel_gpu_te_ab_run{i}.log")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(make_log({512: ratio, 1024: 0.85, 2048: 0.8, 4096: 0.75}))
+            distinct_paths.append(p)
+        distinct_contents = [open(p, encoding="utf-8").read() for p in distinct_paths]
+        violations3 = detect_duplicate_logs(distinct_paths, distinct_contents)
+    assert violations3 == [], violations3
+
     print("self-test: OK", file=sys.stderr)
 
 
@@ -560,10 +701,24 @@ def main() -> None:
     if not args.logs:
         parser.error("ログファイルを 1 つ以上指定する（または --self-test）")
 
-    runs: list[RunData] = []
+    contents: list[str] = []
     for path in args.logs:
         with open(path, encoding="utf-8") as f:
-            runs.append(parse_log(f.read()))
+            contents.append(f.read())
+
+    duplicate_violations = detect_duplicate_logs(args.logs, contents)
+    if duplicate_violations:
+        for v in duplicate_violations:
+            print(f"error: {v}", file=sys.stderr)
+        print(
+            "error: 重複したログ入力が検出された（同一計測の二重カウントを"
+            "防ぐため集計を中止する。正しい 5 つの独立した run ログを"
+            "指定すること）",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    runs = [parse_log(c) for c in contents]
 
     print(render_report(runs, gate_dir=args.gate_dir), end="")
 

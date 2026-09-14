@@ -79,8 +79,9 @@ run_gate() {
         echo "[dry-run]     cargo test -p fandhe-ai-backend-metal --release --test gemm_te_parity -- --ignored --nocapture --test-threads=1 --skip te_rejects_non_staged_candidate --skip te_bit_match_with_production_dispatch_auto"
         echo "[dry-run]   R1 (all_staged_candidates)   -> $GATE_LOG_DIR/all_staged_candidates_run.log"
         echo "[dry-run]     cargo test -p fandhe-ai-backend-metal --release --lib gemm::tests::all_staged_candidates_match_te_cpu_reference_512_nn -- --ignored --nocapture --test-threads=1"
-        echo "[dry-run]   R2 (非 staged 拒否・R3 に含めて外部テスト側で実行済み)"
-        echo "[dry-run]   R3 (bit 一致)                -> $GATE_LOG_DIR/bit_match_run.log"
+        echo "[dry-run]   R2 (非 staged 拒否)          -> $GATE_LOG_DIR/parity_run.log（追記）"
+        echo "[dry-run]     cargo test -p fandhe-ai-backend-metal --release --test gemm_te_parity te_rejects_non_staged_candidate -- --ignored --nocapture --test-threads=1"
+        echo "[dry-run]   R3 (本番との bit 一致)        -> $GATE_LOG_DIR/bit_match_run.log"
         echo "[dry-run]     cargo test -p fandhe-ai-backend-metal --release --test gemm_te_parity te_bit_match_with_production_dispatch_auto -- --ignored --nocapture --test-threads=1"
         return 0
     fi
