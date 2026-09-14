@@ -938,3 +938,32 @@ fn forward_zero_seq_len_does_not_panic() {
     let out2 = vars.forward(&q, &k_empty, &v_empty, None, false);
     assert!(out2.is_ok(), "S=0 は panic せず動作するはず: {out2:?}");
 }
+
+/// codex-review（P2）・Cursor Bugbot 指摘の回帰テスト（PR #1846）:
+/// `L == 0`（query が空系列）でも `attn_mask` の broadcast 形状検証を
+/// 省略してはならない。`forward_rejects_mask_broadcast_incompatible_
+/// shape`（非空系列）と対をなし、空系列側でも同じ契約が保たれることを
+/// 公開 API（`MultiheadAttentionVars::forward`）経由で確認する。
+#[test]
+fn forward_rejects_mask_broadcast_incompatible_shape_with_zero_seq_len() {
+    let mha = setup(71);
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let vars = mha.bind(&tape);
+
+    // L=0: query が空（scores shape は [B, num_heads, 0, S]）。
+    let q_empty = tape.var(&t(Vec::new(), &[B, 0, E]));
+    let k = tape.var(&key_fixture());
+    let v = tape.var(&value_fixture());
+
+    // S+1 は scores の S 軸へ broadcast 不能（`forward_rejects_mask_
+    // broadcast_incompatible_shape` と同一の不正形状）。
+    let mask = Tensor::new(vec![true; L * (S + 1)], &[L, S + 1]).unwrap();
+
+    let err = vars
+        .forward(&q_empty, &k, &v, Some(&mask), false)
+        .unwrap_err();
+    assert!(
+        matches!(err, AutodiffError::Shape(_)),
+        "broadcast 不能な attn_mask は L==0 でも Shape エラーになるべき（実際: {err:?}）"
+    );
+}

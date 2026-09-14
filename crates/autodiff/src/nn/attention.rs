@@ -720,18 +720,36 @@ fn sdpa_compose<'t>(
     let l = scores_shape[rank - 2];
     let s = scores_shape[rank - 1];
 
-    // L == 0 または S == 0 は空テンソル契約。masking／全 masked 行検査
-    // は「行」自体が存在しないため意味をなさず、そのまま softmax／
-    // 後続 matmul の 0 サイズ契約へ委ねる（#1639 と同一方針）。
-    let scores = if l > 0 && s > 0 {
-        if is_causal {
+    // L == 0 または S == 0 は空テンソル契約。「全 masked 行」の値検査
+    // （`reject_fully_masked_rows`）は行自体が存在しないため意味を
+    // なさず省略するが、`attn_mask` の broadcast 形状検証（不能形状の
+    // `ShapeError` 化）は 0 サイズでも常に実施する（codex-review・
+    // Cursor Bugbot 指摘の是正: L==0/S==0 で検証を丸ごとスキップすると
+    // broadcast 不能な `attn_mask`（例: query=[2,0,4]・key/value=
+    // [2,4,4] に mask=[3,5]）を渡しても受理されてしまい、`forward` が
+    // 文書化する broadcast 不能時のエラー契約・`Var::
+    // scaled_dot_product_attention`〈`crate::attention::
+    // scaled_dot_product_attention`。同一指摘を PR #1845 codex-review
+    // で是正済み〉との挙動整合が崩れる）。
+    let scores = if is_causal {
+        if l > 0 && s > 0 {
             let blocked = causal_blocked_mask(l, s)?;
             reject_fully_masked_rows(&blocked)?;
             // `masked_fill` 自身が `[l, s]` を `scores_shape` へ
             // broadcast する（`Var::masked_fill` doc 参照）。
             scores.masked_fill(&blocked, f32::NEG_INFINITY)?
-        } else if let Some(mask) = attn_mask {
-            let blocked = negate_broadcast_mask(mask, &scores_shape)?;
+        } else {
+            // causal の block パターンは `l`／`s` のみから決定的に
+            // 導出され外部形状を持たないため、0 サイズでは検証すべき
+            // 追加形状が存在しない。
+            scores
+        }
+    } else if let Some(mask) = attn_mask {
+        // `negate_broadcast_mask` が `broadcast_to` による形状検証を
+        // 行う（0 サイズでも常に呼ぶ）。値検査（全 masked 行）と実際の
+        // `masked_fill` 適用は非空の場合のみ行う。
+        let blocked = negate_broadcast_mask(mask, &scores_shape)?;
+        if l > 0 && s > 0 {
             reject_fully_masked_rows(&blocked)?;
             scores.masked_fill(&blocked, f32::NEG_INFINITY)?
         } else {
@@ -826,6 +844,51 @@ mod tests {
         let blocked = negate_broadcast_mask(&mask, &[2, 2]).unwrap();
         assert_eq!(blocked.shape(), &[2, 2]);
         assert_eq!(blocked.as_slice().unwrap(), &[false, true, false, true]);
+    }
+
+    /// codex-review（P2）・Cursor Bugbot 指摘の回帰テスト（PR #1846）:
+    /// `sdpa_compose` は `l == 0`（空系列）でも `attn_mask` の
+    /// broadcast 形状検証を省略してはならない。query=[2,0,4]・
+    /// key/value=[2,4,4]（scores shape は [2,0,4]）に対し、
+    /// broadcast 不能な mask=[3,5] を渡すと `AutodiffError::Shape` を
+    /// 返すことを確認する（`crate::attention::
+    /// scaled_dot_product_attention` の同一契約と整合。全 masked 行の
+    /// 値検査のみを省略し、形状検証自体は常に行う）。
+    #[test]
+    fn sdpa_compose_rejects_mask_not_broadcastable_even_with_zero_l() {
+        let q = Tensor::new(Vec::<f32>::new(), &[2, 0, 4]).unwrap();
+        let k = Tensor::new(vec![0.0_f32; 2 * 4 * 4], &[2, 4, 4]).unwrap();
+        let v = Tensor::new(vec![0.0_f32; 2 * 4 * 4], &[2, 4, 4]).unwrap();
+        let mask = Tensor::new(vec![true; 3 * 5], &[3, 5]).unwrap();
+
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let (qv, kv, vv) = (tape.var(&q), tape.var(&k), tape.var(&v));
+
+        let err = sdpa_compose(&qv, &kv, &vv, Some(&mask), false, 0.5).unwrap_err();
+        assert!(
+            matches!(err, AutodiffError::Shape(_)),
+            "broadcast 不能な attn_mask は L==0 でも Shape エラーになるべき（実際: {err:?}）"
+        );
+    }
+
+    /// 空系列（`l == 0`）で broadcast 可能な `attn_mask` は受理され、
+    /// 値検査（全 masked 行）は省略されたまま空テンソルを返すことを
+    /// 確認する（上記回帰テストの対照: 形状検証は必ず行うが、
+    /// 妥当な形状なら空系列自体は従来どおり成功する）。
+    #[test]
+    fn sdpa_compose_zero_l_with_valid_attn_mask_returns_empty_tensor_without_panic() {
+        let q = Tensor::new(Vec::<f32>::new(), &[2, 0, 4]).unwrap();
+        let k = Tensor::new(vec![0.0_f32; 2 * 4 * 4], &[2, 4, 4]).unwrap();
+        let v = Tensor::new(vec![0.0_f32; 2 * 4 * 4], &[2, 4, 4]).unwrap();
+        // [1, 4] -> [2, 0, 4] へ broadcast 可能（全 true でも空系列なら
+        // 全 masked 行検査自体が発生しない）。
+        let mask = Tensor::new(vec![true; 4], &[1, 4]).unwrap();
+
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let (qv, kv, vv) = (tape.var(&q), tape.var(&k), tape.var(&v));
+
+        let out = sdpa_compose(&qv, &kv, &vv, Some(&mask), false, 0.5).unwrap();
+        assert_eq!(out.shape(), &[2, 0, 4]);
     }
 
     #[test]
