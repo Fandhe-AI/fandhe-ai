@@ -1502,11 +1502,152 @@ pub(crate) fn scatter(
     }
 }
 
+/// `interpolate`（[`fandhe_ai_tensor_core::InterpolateMode::Nearest`]。`Var::interpolate`・
+/// `grad::nearest_src_index_map` 双方が使う）の 1 軸単位の添字ヘルパー
+/// （イシュー #1757）。**単一情報源**: forward のホスト参照実装
+/// （下記 [`interpolate_nearest`]）と backward の VJP index 構築
+/// （`grad::nearest_src_index_map`）が本関数を共有することで、両者が
+/// 別々に添字式を書いて乖離するのを防ぐ（別々に書くと CPU
+/// `ForceEvalFallback` テストでは forward／backward の乖離を検出
+/// できないため。実装計画「設計判断」§3.2 参照）。
+///
+/// 添字式 `src = (dst * in_size) / out_size`（整数除算＝床）。
+/// `dst < out_size` より数学的に `src < in_size` が自動的に成立するが、
+/// REQ-8 の縦深防御として `min(src, in_size - 1)` を明示的に取る
+/// （`.claude/rules/coding-rust.md`「境界検査を省略しない」）。
+/// `out_size == 0` の場合は呼び出されない契約（呼び出し元が
+/// `interpolate_out_shape` で事前に拒否済み）だが、防御的に `0` を
+/// 返す（ゼロ除算 panic を避ける）。
+///
+/// 中間積 `dst * in_size` は `usize`（64bit 環境で最大約 1.8e19）を
+/// 素朴な乗算で計算すると overflow しうる（例: `[1]` を
+/// `broadcast_to` で `[1usize << 63]` へ拡張した view を `[3]` へ
+/// 縮小する interpolate では `dst=2` の `dst * in_size` が `2^63 * 2`
+/// を超える。backend-cpu クレートの `interpolate::nearest_src_coord`
+/// と同型の overflow）。`u128`（最大 2^128 - 1）へ昇格して積・除算を
+/// 行うことで、`dst`・`in_size` とも `usize::MAX` の場合でも `u128`
+/// の範囲に収まり overflow しない（本関数は `grad::
+/// nearest_src_index_map`〈backward の index 構築〉から forward
+/// バックエンドの成否に関わらず常に呼ばれるため、本番経路 panic
+/// 禁止規約に直結する。イシュー #1834 codex-review P1 是正）。
+pub(crate) fn nearest_src_coord(dst: usize, in_size: usize, out_size: usize) -> usize {
+    if out_size == 0 || in_size == 0 {
+        return 0;
+    }
+    let src = (dst as u128 * in_size as u128) / out_size as u128;
+    // `src < in_size <= usize::MAX` が `u128` 除算の結果として保証
+    // されるため（`dst < out_size` より `src < in_size`）、`as usize`
+    // への縮小は安全（真の値が `usize` の範囲を超えることはない）。
+    (src as usize).min(in_size - 1)
+}
+
+/// `interpolate`（`torch.nn.functional.interpolate(mode='nearest')`
+/// 相当）のホスト参照実装（イシュー #1757）。`BackendOps::interpolate`
+/// が `Unsupported` を返したときのみ
+/// `grad::interpolate_with_fallback` から呼ばれる。
+///
+/// `size` は末尾空間軸の出力サイズ（[`fandhe_ai_tensor_core::
+/// interpolate_out_shape`] と同じ「末尾 `size.len()` 軸」規約。
+/// `Var::interpolate` が事前に検査・確定済み）。出力 shape は
+/// `input.shape()` の先頭軸をそのまま・末尾 `size.len()` 軸を `size`
+/// で置き換えた形。
+///
+/// **算術を含まない純粋なコピー演算**のため、forward は 3 バックエンド
+/// 間で構造的に **bit 完全一致**する（[`fandhe_ai_tensor_core::InterpolateMode::Nearest`]
+/// doc 参照）。`input` は strided view でよい（`dense_vec_ref` で行
+/// 優先稠密化してから読む）。座標ごとの src 添字導出は
+/// [`nearest_src_coord`]（forward／backward の単一情報源）を使う。
+pub(crate) fn interpolate_nearest(
+    input: &Tensor<f32>,
+    size: &[usize],
+) -> Result<Tensor<f32>, ShapeError> {
+    let in_shape = input.shape().to_vec();
+    let rank = in_shape.len();
+    let spatial_start = rank - size.len();
+    let mut out_shape = in_shape.clone();
+    out_shape[spatial_start..].copy_from_slice(size);
+
+    // `interpolate_out_shape`（呼び出し元 `Var::interpolate_impl` が
+    // 事前検査済み）は出力 shape のバイトサイズしか検査しないため、
+    // 入力側（`dense_vec_ref` が非 contiguous な `input` を稠密化する
+    // 際に `Vec::with_capacity` 相当を呼ぶ）を別途検査する必要がある。
+    // 巨大な `broadcast_to` view（例: `[1]` を `[1usize << 63]` へ
+    // 拡張した view）を小さい `size` へ縮小する interpolate では、
+    // 出力は小さくても入力の稠密化が `f32` 換算で `isize::MAX` バイト
+    // を超え capacity overflow panic しうる（本番経路 panic 禁止規約
+    // `.claude/rules/coding-rust.md`。イシュー #1834 Cursor Bugbot
+    // 指摘）。`Tensor::full`／`checked_numel_for::<f32>`
+    // （`tensor-core` 側。`pub(crate)` のためここでは同型を独立複製）
+    // と同じ検査を `dense_vec_ref` 呼び出し前に行う。
+    let in_numel = in_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let in_bytes = in_numel
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if in_bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+
+    let numel: usize = out_shape.iter().product();
+    if numel == 0 {
+        return Ok(build_tensor(Vec::new(), &out_shape));
+    }
+
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&in_shape);
+
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let coords = unravel(flat, &out_shape);
+        let mut pos = 0usize;
+        for (axis, &stride) in input_strides.iter().enumerate() {
+            let coord = if axis >= spatial_start {
+                nearest_src_coord(coords[axis], in_shape[axis], out_shape[axis])
+            } else {
+                coords[axis]
+            };
+            pos += coord * stride;
+        }
+        *out_val = input_data[pos];
+    }
+    Ok(build_tensor(out, &out_shape))
+}
+
+#[cfg(test)]
+mod interpolate_nearest_host_fallback_tests {
+    use super::*;
+
+    /// Cursor Bugbot 指摘（イシュー #1834・PR レビュー）の回帰テスト。
+    /// `[1]` を `broadcast_to([1usize << 63])` した巨大な非 contiguous
+    /// view を小さい `size=[3]` へ縮小するホスト参照実装（`Var::
+    /// interpolate` が `BackendOps::interpolate` の `Unsupported`
+    /// フォールバックとして呼ぶ経路）は、出力側のバイトサイズは
+    /// 小さいため呼び出し元 `interpolate_out_shape` の検査を通過する
+    /// が、`dense_vec_ref`（内部で `Vec::with_capacity` 相当を呼ぶ）が
+    /// 入力側の巨大な要素数で capacity overflow panic しうる（是正
+    /// 前）。`dense_vec_ref` 呼び出し前の確保前検査（本関数冒頭）に
+    /// より、パニックせず型付きエラーを返すことを確認する。
+    #[test]
+    fn rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32], &[1usize]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 63]).unwrap();
+        assert_eq!(huge.shape(), &[1usize << 63]);
+
+        let err = interpolate_nearest(&huge, &[3])
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+}
+
 /// `i32` 版 `build_tensor`（上記）。sort／topk（下記）の `index` 出力
 /// 構築に使う（`build_tensor` と同じ「shape 検査済みのはずのデータ長
 /// 不一致は契約違反として `debug_assert!` で検知しつつ安全側
-/// フォールバックする」infallible 契約）。
-fn build_index_tensor(data: Vec<i32>, shape: &[usize]) -> Tensor<i32> {
+/// フォールバックする」infallible 契約）。`pub(crate)`: `grad.rs::
+/// nearest_src_index_map`（イシュー #1757。`interpolate` VJP の
+/// scatter_add index 構築）からも同じ契約で使う。
+pub(crate) fn build_index_tensor(data: Vec<i32>, shape: &[usize]) -> Tensor<i32> {
     debug_assert_eq!(
         data.len(),
         shape.iter().product::<usize>(),
@@ -2447,6 +2588,24 @@ mod concat_empty_out_shape_overflow_tests {
         let out = concat(&[], 0, &out_shape);
         assert_eq!(out.shape(), &out_shape);
         assert_eq!(out.numel(), 0);
+    }
+
+    // イシュー #1834 codex-review P1 是正: `nearest_src_coord`（`grad::
+    // nearest_src_index_map`〈backward の index 構築。forward の
+    // バックエンド成否に関わらず常に呼ばれる〉と `interpolate_nearest`
+    // 〈forward のホスト参照実装〉の単一情報源）の中間積 `dst *
+    // in_size` が `usize` を overflow しないことの回帰テスト。
+    #[test]
+    fn nearest_src_coord_does_not_overflow_for_huge_in_size() {
+        // `dst=2`・`in_size=2^63`・`out_size=3` は素朴な `usize` 乗算
+        // （`dst * in_size = 2^64`）が overflow する組み合わせ（debug
+        // ビルドでは overflow panic・release ビルドでは wrap して誤った
+        // 添字を返す）。backend-cpu クレートの `interpolate::nearest_src_coord` と同型の overflow・同型の是正。
+        let in_size = 1usize << 63;
+        let src = nearest_src_coord(2, in_size, 3);
+        let expected = ((2u128 * in_size as u128) / 3) as usize;
+        assert_eq!(src, expected);
+        assert!(src < in_size);
     }
 }
 

@@ -1315,6 +1315,37 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
 
 `amax`／`amin` 勾配分配方式（先勝ち決定的 対 均等分配）の設計判断を確定した。上記 #1719／#1720 追補が「#1718 が均等分配へ確定した場合はヘルパー 1 箇所の差し替えで反映される」と記していた前提は**採用しない**ことが確定した——`Var::max`／`min`／`max_dims`（`max(dim)`／`min(dim)` 族の意味論）は crates.io 公開全版で出荷済みの先勝ち決定的挙動を**維持**し、`grad::extremum_first_match_vjp` は差し替えない。PyTorch `torch.amax`／`amin` 相当の均等分配は、実装する場合は別 `Op`（`Op::Amax`／`Op::Amin`）・別 VJP ヘルパーとして独立に追加する方針とする（未実装・後続 issue 提案のまま。本イシューはコード変更を伴わない設計判断の確定のみ）。詳細・根拠は `docs/autodiff-amax-grad-distribution-decision.md` を参照。
 
+## 追補（イシュー #1757）
+
+`interpolate`（`torch.nn.functional.interpolate`／`tf.image.resize`
+相当。nearest モードのみ）を実装済み化。
+
+- `tensor-core::InterpolateMode`（`#[non_exhaustive]`。現状 `Nearest`
+  のみ）・`BackendOps::interpolate`（既定 `Unsupported`。非破壊拡張）・
+  `ops_shape::interpolate_out_shape`（shape 検査。空間軸＝末尾
+  `size.len()` 軸・先頭の残り軸は素通し）を追加。
+- `autodiff::Op::Interpolate`（非融合・常実体化）・`eval::
+  interpolate_nearest`（ホスト参照実装）・`Var::interpolate`（`pub
+  fn`）まで実装済み。添字式は `src = (dst * in_size) / out_size`
+  （整数除算＝床。float を使わないため forward は 3 バックエンド間で
+  構造的に bit 完全一致）。PyTorch `mode='nearest'` は `floor(dst *
+  (in/out))` を `f32` で計算するため極端な形状で 1 要素ずれうる差異が
+  ある（`nearest-exact` は対象外・別演算として扱う）。
+- VJP は各出力要素の勾配を対応する単一入力要素へ加算する scatter_add
+  型（`grad::nearest_src_index_map` が forward と同じ添字式
+  〈`eval::nearest_src_coord`〉を共有する単一情報源・`scatter_with_
+  fallback` へ委譲）。
+- CPU／CUDA／Metal 3 バックエンドとも専用カーネル実装済み（算術を
+  含まない純粋なコピー演算のため bit 完全一致契約）。CUDA／Metal
+  実機（DGX Spark GB10／Apple Silicon）での parity テストは未実測の
+  まま Mac／GB10 セッションへ申し送り。
+- facade は `InterpolateMode` の新規 `pub use`（`Var::interpolate` の
+  `mode` 引数型のため。`Var::interpolate` 自体は既存 `Var` 再
+  エクスポート経由）。
+- 対象外（`docs/compat-api-scope.md` §1 の Tier 列挙・実装計画
+  「スコープ外」節）: `scale_factor` 引数・`nearest-exact`・
+  `align_corners`・bilinear（後続 #1762）・`reflect` 系・VJP 専用 pull
+  型 GPU カーネル（現状は既存 scatter_add の汎用カーネルを再利用）。
 ## 追補（イシュー #1722）
 
 AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記）」）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
