@@ -121,6 +121,20 @@
 //! （親 #192 の統合判断待ち。`docs/facade-optimizer-promotion-decision.md`
 //! §4.3）。将来統一する場合は破壊的変更になる。
 //!
+//! # RMSprop／Adagrad（イシュー #1743・親 #1610）
+//!
+//! [`crate::optim::RmsProp`]／[`crate::optim::RmsPropConfig`]・
+//! [`crate::optim::Adagrad`]／[`crate::optim::AdagradConfig`] を
+//! `fandhe_ai_autodiff::nn::optim`（`adamw.rs` を鏡写しにした別実装
+//! `rmsprop.rs`／`adagrad.rs`）から同じく素の再エクスポートで公開
+//! する。`AdamW`・[`crate::optim::Sgd`] と同じく `Tape`／`Var`／
+//! `BackendOps` に一切依存しない値型・純関数であり、新規 `Op`／
+//! `BackendOps` メソッド／`Var` メソッド／VJP は追加していない
+//! （カーネルなし）。位置対応契約（「呼び出し文脈」節）はそのまま
+//! 適用される。**`crate::DeviceParamStore` には未結線**（「デバイス
+//! 常駐更新との違い」節参照。RMSprop・Adagrad とも本 issue では対応
+//! する `BackendOps` メソッドを追加していないため非対応）。
+//!
 //! # デバイス常駐更新との違い（誤認防止）
 //!
 //! 本モジュールの再エクスポートはホスト側 `Tensor<f32>` を介した
@@ -153,12 +167,14 @@
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。`tests/api_surface.rs`
 // が `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査する
 // 契約に合わせる。`src/lib.rs` 冒頭コメントと同じ理由）。
+pub use fandhe_ai_autodiff::nn::optim::{Adagrad, AdagradConfig};
 pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig};
 pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_value};
 pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
 pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
+pub use fandhe_ai_autodiff::nn::optim::{RmsProp, RmsPropConfig};
 pub use fandhe_ai_autodiff::nn::optim::{clip_grad_norm, global_grad_norm};
 pub use fandhe_ai_autodiff::nn::optim::{has_non_finite, scale_grads, scale_loss, unscale_grads};
 pub use fandhe_ai_autodiff::optim::{Sgd, SgdConfig};

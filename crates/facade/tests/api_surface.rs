@@ -24,6 +24,8 @@
 //! モジュールだが再エクスポートは `nn::optim` 経由）を期待集合へ追加した。
 //! イシュー #1742 で Adam（coupled L2 weight decay。`Adam`／`AdamConfig`。
 //! 実体は `fandhe_ai_autodiff::nn::optim::adam` モジュール）を期待集合へ
+//! 追加した。イシュー #1743（親 #1610）で RMSprop（`RmsProp`／
+//! `RmsPropConfig`）・Adagrad（`Adagrad`／`AdagradConfig`）を期待集合へ
 //! 追加した。イシュー #1744 で LAMB（`Lamb`／`LambConfig`。実体は
 //! `fandhe_ai_autodiff::nn::optim::lamb` モジュール）を期待集合へ追加した。
 //!
@@ -287,6 +289,8 @@ fn optim_module_reexports_exactly_expected_surface() {
     );
 
     let expected: std::collections::BTreeSet<String> = [
+        "Adagrad",
+        "AdagradConfig",
         "Adam",
         "AdamConfig",
         "AdamW",
@@ -300,6 +304,8 @@ fn optim_module_reexports_exactly_expected_surface() {
         "ConstantLr",
         "LrScheduler",
         "StepLr",
+        "RmsProp",
+        "RmsPropConfig",
         "Sgd",
         "SgdConfig",
         "GradScaler",
@@ -606,6 +612,28 @@ fn optim_types_are_reachable_via_facade_only() {
     let mut adam = fandhe_ai::optim::Adam::new(adam_config)
         .unwrap_or_else(|e| panic!("test fixture: Adam::new が失敗した: {e}"));
     let _ = &mut adam;
+
+    // RMSprop／Adagrad（イシュー #1743・親 #1610）が facade のみを
+    // 通じて到達可能であることの固定＋既定値ドリフトガード
+    // （`torch.optim.RMSprop`／`torch.optim.Adagrad` の既定値と一致する
+    // ことを `nn::optim::rmsprop`／`adagrad` doc と合わせて固定する）。
+    let rmsprop_config = fandhe_ai::optim::RmsPropConfig::default();
+    assert_eq!(
+        rmsprop_config.alpha, 0.99,
+        "test fixture: RmsPropConfig の既定 alpha は torch.optim.RMSprop と同じ 0.99"
+    );
+    let mut rmsprop = fandhe_ai::optim::RmsProp::new(rmsprop_config)
+        .unwrap_or_else(|e| panic!("test fixture: RmsProp::new が失敗した: {e}"));
+    let _ = &mut rmsprop;
+
+    let adagrad_config = fandhe_ai::optim::AdagradConfig::default();
+    assert_eq!(
+        adagrad_config.eps, 1e-10,
+        "test fixture: AdagradConfig の既定 eps は torch.optim.Adagrad と同じ 1e-10"
+    );
+    let mut adagrad = fandhe_ai::optim::Adagrad::new(adagrad_config)
+        .unwrap_or_else(|e| panic!("test fixture: Adagrad::new が失敗した: {e}"));
+    let _ = &mut adagrad;
 
     // LAMB（イシュー #1744）の facade 到達性固定。既定値ドリフトガード
     // （`eps=1e-6` は AdamW／Adam の `1e-8` と異なる・`weight_decay=0.0`。

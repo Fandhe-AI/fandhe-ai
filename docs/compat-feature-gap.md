@@ -1606,6 +1606,15 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `dInput`（`Probabilities` kind は分母をクランプした勾配 `(p − y) / max(p·(1−p), 1e−12)`。forward のクランプ済み式の厳密な導関数ではない点に注意。厳密な導関数となるのは `dTarget` 側）のみをカーネルが返し、`dTarget` は呼び出し元がホスト側の逐次 map で計算する契約（`MseLoss` の `dTarget = -dPred` という単純合成が成り立たないため）。
 - facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.2）。CUDA／Metal 実機での facade parity テスト・性能実測は未実施のまま Mac／GB10 セッションへ申し送る。
 
+## #1743 の追補（`RmsProp`／`Adagrad`）
+
+- `torch.optim.RMSprop`／`torch.optim.Adagrad` 相当の欠落（`Sgd`・`AdamW` の 2 種のみだった optimizer 面）を解消した。`crates/autodiff/src/nn/optim/{rmsprop,adagrad}.rs` に `AdamW`（#194）を鏡写しにした別実装として追加した（内部ループの共通化は行わない。統一複合判定では共通化による bit ドリフトを検出できないため）。
+- いずれも `Tape`／`Var`／`BackendOps` に一切依存しない値型・純関数（`(param, grad)` の参照列を受け取り更新後 `Tensor<f32>` の列を返す）であり、新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は追加していない（カーネルなし）。
+- RMSprop の更新則は `torch.optim.rmsprop._single_tensor_rmsprop`（torch 2.14.0+cpu で確認）と同一演算順（`square_avg` 更新 → `centered` 時は `grad_avg` の lerp と分散差 → `sqrt` の後に `eps` 加算 → `momentum>0` 時は momentum buffer 経由の更新、それ以外は直接更新）。Adagrad の更新則は `torch.optim.adagrad._single_tensor_adagrad` と同一演算順（`clr` の逐次計算・`state_sum` 累積・`std` 加算後の除算）。
+- 正しさの検証は VJP・parity テストの字義どおりの適用ができないため、実 PyTorch 2.14.0+cpu 実行値 fixture（`tests/fixtures/{rmsprop,adagrad}-pytorch-reference/`）との統一複合判定（`.claude/rules/coding-rust.md` 既存 tolerance。緩和なし）・閉形式（t=1）一致・決定性（bit 完全一致）で行う（`tests/nn_optim_{rmsprop,adagrad}.rs`）。
+- facade は `fandhe_ai::optim::{RmsProp, RmsPropConfig, Adagrad, AdagradConfig}` の素の再エクスポートのみ（`docs/facade-optimizer-promotion-decision.md` §4 案 A。`crates/facade/src/optim.rs`）。`crate::DeviceParamStore` へは未結線（対応する `BackendOps` メソッドを本 issue では追加していないため非対応）。
+- Adam（coupled L2 weight decay）は #1742 で実装済み・LAMB は #1744 の追補（次節）で実装済み。
+
 ## #1744 の追補（LAMB。coupled trust ratio optimizer）
 
 §2.9 の LAMB 行（「PyTorch 側にも `torch.optim` 直下の対応物なし」）はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（親 #1610）。
