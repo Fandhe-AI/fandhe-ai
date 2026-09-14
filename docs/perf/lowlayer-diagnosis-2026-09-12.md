@@ -138,6 +138,12 @@ iter_total 2.470 → 2.677 ms。後退は GPU 待ち＋ダウンロードを含�
 区間に閉じており、host_copy 削減では埋まらない。原因は未特定（CUDA
 #1436 と同型の「borrowed＋ダミー確保・解放」腕が次の切り分け候補）。
 
+4 腕診断ハーネス自体はイシュー #1695 で実装済み（`crates/backend-metal/
+src/readout_regression_diag_arms.rs`・`readout_regression_diag_tests_
+1695.rs`）。実測プロトコル・事前登録判定規則は
+`docs/perf/metal-readout-legacy-regression-four-arm-diag.md`（イシュー
+#1696）を参照。
+
 ## 6. 証拠等級と限界
 
 - 本記録は**診断・方向づけ用**であり、ADOPT／REJECT の正式判定を含まない。
