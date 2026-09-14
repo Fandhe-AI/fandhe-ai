@@ -610,10 +610,8 @@ mod tests {
 
         // grad_avg を大きく育てる（centered なし相当の準備 step 群）。
         let big_grad = t(vec![1.0e8], &[1]);
-        for _ in 0..1 {
-            let out = opt.step(&[(&param, &big_grad)]).unwrap();
-            param = out.into_iter().next().unwrap();
-        }
+        let out = opt.step(&[(&param, &big_grad)]).unwrap();
+        param = out.into_iter().next().unwrap();
 
         // `alpha=0` なので `weight = 1-alpha = 1.0`（`weight.abs() >=
         // 0.5` の分岐）。ここで勾配を 1.0 へ急変させる。数学的には
@@ -626,16 +624,36 @@ mod tests {
         let small_grad = t(vec![1.0], &[1]);
         opt.step(&[(&param, &small_grad)]).unwrap();
 
-        // 内部状態は非公開のため、次の step で `avg`（＝
-        // `sqrt(square_avg - grad_avg^2)`）を経由した更新値から
-        // `grad_avg` が `1.0` に正しく収束していることを間接的に
-        // 検証する: 3 回目以降も `grad=1.0` を与え続けると `grad_avg`
-        // は `1.0` で不動点になるはずなので、`square_avg - grad_avg^2`
-        // が発散せず有限のまま安定することを確認する（終点基準の
-        // 展開式なら厳密に `grad_avg=1.0` へ一致し `square_avg` も
-        // `1.0` へ収束するため `avg` は有限のまま。始点基準のみの
-        // 実装が桁落ちで `grad_avg` を誤ると `square_avg -
-        // grad_avg^2` が負に振れ `sqrt` が NaN を返しうる）。
+        // `states` は `RmsProp` と同一ファイル内（親モジュール）に
+        // 定義された private フィールドであり、この `tests` モジュール
+        // はその子モジュールのため直接参照できる。内部状態を有限性の
+        // 間接確認に留めず直接読み、`grad_avg` が数学的な厳密解 `1.0`
+        // に一致することを確認する（codex-review 指摘: 旧来の有限性
+        // のみの回帰テストでは、始点基準の展開式のみへ戻す回帰を
+        // 検出できない）。
+        //
+        // `rustc -O` による実測（`/tmp/float_test.rs`。本テスト末尾の
+        // コメント参照不要な検証用の使い捨てスクリプト）で、
+        // `start=1e8, end=1.0, weight=1.0`（本ケースと同一の値）
+        // のとき始点基準の展開式 `start + weight*(end-start)` は
+        // `0.0`（`1.0` から絶対誤差 `1.0` のかい離）を返す一方、
+        // 終点基準の展開式 `end - (end-start)*alpha`（`alpha=0.0`
+        // 完全精度）は厳密に `1.0` を返すことを確認済み。よって
+        // `1e-3` という緩い許容誤差でも旧式への回帰を確実に検出する。
+        let grad_avg = opt.states[0].grad_avg[0];
+        assert!(
+            (grad_avg - 1.0).abs() < 1e-3,
+            "centered lerp が桁落ちする始点基準の展開式へ回帰した疑い: \
+             grad_avg={grad_avg} (expected ≈ 1.0)"
+        );
+
+        // 上記の直接検証に加え、`grad_avg=1.0` へ正しく収束した状態で
+        // `avg`（`sqrt(square_avg - grad_avg^2)`）を経由した更新が
+        // 発散しない（NaN を生まない）ことも確認する（終点基準の
+        // 展開式なら `square_avg` も `1.0` へ収束するため `avg` は
+        // 有限のまま。始点基準のみの実装が桁落ちで `grad_avg` を誤ると
+        // `square_avg - grad_avg^2` が負に振れ `sqrt` が NaN を
+        // 返しうる）。
         let cfg2 = RmsPropConfig { lr: 0.01, ..cfg };
         let mut opt2 = RmsProp::new(cfg2).unwrap();
         let mut p2 = t(vec![0.0], &[1]);
@@ -648,6 +666,11 @@ mod tests {
             assert!(v.is_finite(), "centered lerp が NaN/inf を生んだ: {v}");
             p2 = out.into_iter().next().unwrap();
         }
+        assert!(
+            (opt2.states[0].grad_avg[0] - 1.0).abs() < 1e-3,
+            "5 step 後も grad_avg は 1.0 の不動点に収束しているはず: {}",
+            opt2.states[0].grad_avg[0]
+        );
     }
 }
 
