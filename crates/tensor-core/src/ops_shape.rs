@@ -699,6 +699,46 @@ pub fn row_softmax_layout(
 ///   `ElementCountOverflow` を返す（本番経路 panic 禁止規約
 ///   `.claude/rules/coding-rust.md` に反する capacity overflow
 ///   panic の防止。イシュー #1834 codex-review P1 是正）。
+/// - 上記の `checked_numel_for::<f32>(&out)` は出力 shape**全体**の
+///   積（先頭軸のいずれかが `0` なら必ず `0`）しか検査しない。
+///   このため入力 `shape=[0, 3, 4]`・`size=[usize::MAX, 2]` のように
+///   **先頭の残り軸が `0` で空間軸（`size`）側が巨大な多軸**の組合せは
+///   出力 shape 全体の積が `0` に短絡し通過してしまう
+///   （`checked_mul` は `0 * x` を正確に `0` と評価でき overflow しない
+///   ため——PoC-v2-1 起源の `checked_numel` 自体は正しい。「飽和」では
+///   なく数学的に正しいゼロ）。しかし各バックエンド・ホスト参照実装が
+///   出力**全体**の要素数ではなく空間軸のみ・先頭軸を除いた部分の
+///   積（例: 行優先ストライドの再計算・空間平面サイズ）を個別に
+///   計算する経路を将来追加した場合、その部分積は `0` を含まないため
+///   `usize::MAX * 2` のように**真に `usize` 乗算がオーバーフロー**
+///   しうる（本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`
+///   に反する DoS 経路。`concat_out_shape`／`softmax_along` 等で既に
+///   発生した「先頭軸の `0` が部分積の overflow 検査を素通りさせる」
+///   bug と同型。`crates/autodiff/src/eval.rs` の
+///   `concat_empty_out_shape_overflow_tests`・
+///   `softmax_empty_tensor_overflow_tests` 参照）。よって単一情報源
+///   である本関数で**出力 shape のうち `0` でない次元のみを集めた
+///   列**に対しても `checked_numel`（`usize` 乗算オーバーフロー検査
+///   のみ）を追加適用し、あらゆる部分積（`0` を含む部分積は自明に
+///   `0` で安全）が `usize` 乗算として成立することまで検査する。
+///   `0` でない次元はすべて `1` 以上のため、それらの任意の部分列の積
+///   は全体（フィルタ後）の積以下になり、全体（フィルタ後）の積が
+///   `usize` に収まれば任意の部分積も必ず収まる（Cursor Bugbot 指摘。
+///   イシュー #1834）。
+///
+///   **`checked_numel_for::<f32>` ではなく `checked_numel` を使う
+///   理由**: バイトサイズ上限（`isize::MAX` バイト）検査は、その
+///   shape 丸ごとのバッファが実際に確保される場合にのみ意味を持つ。
+///   `out` 全体の要素数が `0`（先頭軸に `0` を含む）の場合は、
+///   `checked_numel_for::<f32>(&out)` が既に判定したとおり実際の
+///   バッファは確保されない（各バックエンド・ホスト参照実装は
+///   `numel == 0` で空 `Vec` を早期 return する契約）。よって単一の
+///   巨大な空間軸（例: `shape=[0, 1]` を `size=[usize::MAX]` へ
+///   interpolate。`crates/autodiff/tests/backward.rs::
+///   interpolate_nearest_backward_empty_leading_axis_with_huge_size_
+///   does_not_panic` が確立済みの契約）まで拒否するのは過剰であり、
+///   `nonzero_dims` 側は「`usize` 乗算として成立するか」のみを検査
+///   し、バイトサイズ上限は課さない。
 pub fn interpolate_out_shape(shape: &[usize], size: &[usize]) -> Result<Vec<usize>, ShapeError> {
     let rank = shape.len();
     if size.is_empty() {
@@ -726,6 +766,14 @@ pub fn interpolate_out_shape(shape: &[usize], size: &[usize]) -> Result<Vec<usiz
     let mut out = shape.to_vec();
     out[spatial_start..].copy_from_slice(size);
     checked_numel_for::<f32>(&out)?;
+    // 上記の全体積検査だけでは `0` を含む出力 shape の任意の部分積
+    // （空間軸のみ等）の `usize` 乗算オーバーフローを検出できない
+    // （doc comment 参照）。`0` 次元を除いた列に対して `checked_numel`
+    // （バイトサイズ上限は課さない。`checked_numel_for` と使い分ける
+    // 理由も doc comment 参照）を適用し、その部分積以下になるあらゆる
+    // 部分積が `usize` 乗算として成立することを保証する。
+    let nonzero_dims: Vec<usize> = out.iter().copied().filter(|&d| d != 0).collect();
+    checked_numel(&nonzero_dims)?;
     Ok(out)
 }
 
@@ -1703,6 +1751,43 @@ mod tests {
         // 防ぐ）。
         let err = interpolate_out_shape(&[1], &[usize::MAX]).unwrap_err();
         assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_empty_leading_axis_with_huge_multi_axis_size() {
+        // Cursor Bugbot 指摘（イシュー #1834・PR #1834 レビュー）の
+        // 回帰テスト。先頭の残り軸（batch）が `0` の空入力に対して
+        // 空間軸（`size`）側を巨大な多軸にした場合、出力 shape
+        // `[0, usize::MAX, 2]` **全体**の要素数積は先頭の `0` に短絡し
+        // `0` になる（`checked_numel_for::<f32>(&out)` 単体は通過する）。
+        // しかし `0` 次元を除いた部分積（`usize::MAX * 2`）は overflow
+        // するため、新設した `nonzero_dims` 検査が
+        // `ElementCountOverflow` を返すことを確認する。
+        let err = interpolate_out_shape(&[0, 3, 4], &[usize::MAX, 2]).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_middle_zero_axis_with_huge_multi_axis_size() {
+        // 上記と同型だが、`0` 次元が先頭（axis 0）ではなく非空間軸の
+        // 中間（axis 1）にあるケース。空間軸自体（axis 2・3）はいずれも
+        // 非ゼロのため既存のゼロ検査（`shape[axis] == 0` の判定）を
+        // 素通りし、出力 shape `[2, 0, usize::MAX, 2]` 全体の積も
+        // 先頭でない `0` を経由して `0` に短絡する。`nonzero_dims`
+        // 検査（`[2, usize::MAX, 2]` の部分積）が overflow を検出する
+        // ことを確認する。
+        let err = interpolate_out_shape(&[2, 0, 3, 4], &[usize::MAX, 2]).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn interpolate_out_shape_allows_empty_leading_axis_with_safe_multi_axis_size() {
+        // 上記 2 件との対比: 先頭軸が `0` でも空間軸側が小さく
+        // `nonzero_dims` の部分積が overflow しない場合は従来どおり
+        // 成功する（`interpolate_out_shape_allows_empty_leading_axis`
+        // の 2 空間軸版）。
+        let out = interpolate_out_shape(&[0, 3, 4], &[8, 8]).unwrap();
+        assert_eq!(out, vec![0, 8, 8]);
     }
 
     // --- one_hot_out_shape ---

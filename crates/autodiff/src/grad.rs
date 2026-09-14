@@ -1429,22 +1429,38 @@ pub(crate) fn vjp(
             // 自明にゼロ勾配となる。`interpolate_out_shape` の契約
             // （forward はこの場合も出力の先頭軸が 0 になる空 shape
             // で成功する。`ops_shape.rs::interpolate_out_shape` doc
-            // 参照）により forward 自体は `size` にどれだけ大きい
-            // 値を指定しても success する。空間軸の積（`sp_in_numel`／
+            // 参照）により、`outer==0` のときは forward が `size` に
+            // **単一の**巨大な値を指定しても success する（出力全体の
+            // 要素数積が先頭の `0` に短絡し `checked_numel_for::<f32>`
+            // のバイトサイズ検査が実際のバッファ非確保ゆえ問題にならない
+            // ため。`outer != 0` の場合はこの短絡が起きず、単一軸でも
+            // `checked_numel_for::<f32>` のバイトサイズ上限で拒否され
+            // うる——`ops_shape.rs::
+            // interpolate_out_shape_rejects_byte_size_overflow_without_
+            // numel_overflow` 参照）。ただし `size` が**複数軸**かつ
+            // 非ゼロ次元同士の部分積が `usize` を overflow する組合せ
+            // （例: `size=[usize::MAX, 2]`）は、`outer==0` でも
+            // `interpolate_out_shape` 自身が単一情報源として事前拒否
+            // する（`ops_shape.rs::interpolate_out_shape` の `nonzero_
+            // dims` 検査。イシュー #1834 Cursor Bugbot 指摘・是正）ため
+            // 本関数へは到達しない。空間軸の積（`sp_in_numel`／
             // `sp_out_numel`）自体の計算を `outer == 0` 判定より前に
             // 行うと、`out_shape` の空間軸に `usize::MAX` 級の値が
-            // 入りうる（`outer==0` のときは forward が `size` へどれ
-            // だけ大きい値を指定しても成功するため）ケースで積計算
-            // 自体が overflow する（debug は panic・release は wrap。
-            // 本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`。
-            // Cursor Bugbot 指摘）。`nearest_src_index_map` も `outer`
-            // に依存せず空間軸の全出力位置（`sp_out_numel` 個）分の
-            // index 行を無条件に確保するため、`outer==0` のまま呼ぶと
-            // `size=[usize::MAX]` 等で capacity overflow で panic
-            // しうる（イシュー #1834 codex-review P1 是正）。よって
-            // `sp_in_numel`／`sp_out_numel` の計算・index 構築より前に
-            // `outer` のみで early return し、この不要な大量確保・
-            // 走査・積 overflow を通常の大きな size で同時に避ける。
+            // 単一軸で入りうる（`outer==0` のときは forward が単一軸の
+            // 巨大 `size` を受理するため）ケースで積計算自体が
+            // overflow する（debug は panic・release は wrap。本番経路
+            // panic 禁止規約 `.claude/rules/coding-rust.md`。Cursor
+            // Bugbot 指摘）。
+            // `nearest_src_index_map` も `outer` に依存せず空間軸の
+            // 全出力位置（`sp_out_numel` 個）分の index 行を無条件に
+            // 確保するため、`outer==0` のまま呼ぶと `size=[usize::MAX]`
+            // 等で capacity overflow で panic しうる（イシュー #1834
+            // codex-review P1 是正）。よって `sp_in_numel`／
+            // `sp_out_numel` の計算・index 構築より前に `outer` のみで
+            // early return し、この不要な大量確保・走査・積 overflow
+            // を通常の大きな size で同時に避ける（多層防御。`interpolate_
+            // out_shape` 側の拒否をすり抜ける経路が万一あっても本関数
+            // 自身が独立に安全側へ倒れる）。
             if outer == 0 {
                 let d_input = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
                 return Ok(vec![(input, d_input)]);
@@ -7973,14 +7989,23 @@ release ビルドでも検知できるよう `assert!` を使う）"
     /// を使い、是正前のコード（`outer == 0` の早期 return より前に
     /// `out_shape[spatial_start..].iter().product()` を計算していた）
     /// では `usize::MAX * 2` が `usize` の範囲を超え overflow panic
-    /// （debug ビルド）していたことを再現する。forward は `outer == 0`
-    /// のため `size` にどれだけ大きい値を指定しても
-    /// `interpolate_out_shape` の契約どおり成功する（先頭軸が 0 の
-    /// ため `checked_numel_for::<f32>` の `try_fold` が早期に `0` で
-    /// 飽和し overflow しない）が、VJP 側の `sp_out_numel`／
-    /// `sp_in_numel` は空間軸のみの積のため飽和せず overflow しうる。
-    /// 是正後は `outer == 0` の早期 return が積計算そのものより前に
-    /// 位置するため、この組み合わせでも panic せずゼロ勾配を返す。
+    /// （debug ビルド）していたことを再現する。**本テストは `vjp()`
+    /// を `Var::interpolate`（`interpolate_out_shape` による事前検査を
+    /// 経由する通常経路）ではなく直接呼び出す**ため、`interpolate_
+    /// out_shape` 側の検査を経由しない。この入力・`size` の組合せ
+    /// （`shape=[0, usize::MAX, 2]`・`size=[usize::MAX, 2]`）は
+    /// `ops_shape.rs::interpolate_out_shape` 自身が現在は事前拒否する
+    /// （`nonzero_dims` 検査。イシュー #1834 Cursor Bugbot 指摘・是正）
+    /// ため、`Var::interpolate` 経由では forward の時点で
+    /// `ElementCountOverflow` となり本テストが再現する `vjp()` 単体
+    /// 呼び出しの状況（forward 成功後に VJP だけが呼ばれる状況）には
+    /// 到達しない。それでも本テストを維持するのは、`vjp()` 自身が
+    /// 「呼び出し元が検査済み」という不変条件に暗黙に依存せず独立に
+    /// 安全側へ倒れることを担保するため（多層防御。上記
+    /// `interpolate_vjp_nonempty_leading_axis_with_overflowing_spatial_
+    /// product_returns_error` と同じ設計判断）。是正後は `outer == 0`
+    /// の早期 return が積計算そのものより前に位置するため、この
+    /// 組み合わせでも panic せずゼロ勾配を返す。
     #[test]
     fn interpolate_vjp_empty_leading_axis_with_overflowing_spatial_product_does_not_panic() {
         let input_shape = vec![0usize, usize::MAX, 2];
