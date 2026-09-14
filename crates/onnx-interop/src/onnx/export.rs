@@ -11,7 +11,12 @@
 //! ## スコープ境界（兄弟イシューとの切り分け）
 //!
 //! - 内部 op（Rust ネイティブの属性表現）-> `NodeProto`（op_type・属性）という
-//!   意味論的な逆マッピングは #1773 のスコープ。
+//!   意味論的な逆マッピングは #1773 のスコープ（`export_ops` モジュール）。
+//!   `build_model_proto` は `export_ops::check_exportable` で
+//!   `graph.nodes`（decode 由来・または #1773 以降に手組みされた `NodeProto`）が
+//!   `interp.rs` 対応 22 op の allowlist（`export_ops::SUPPORTED_OP_TYPES`）・
+//!   既定 opset（`domain` が空文字列）に収まっているかを fail-closed に検査して
+//!   から組み立てる（詳細対応表は `docs/onnx-export-op-mapping.md`）。
 //! - import -> export -> import の構造一致 roundtrip テスト・未対応 op の
 //!   fail-closed 確認は #1774 のスコープ。
 //! - facade 公開は #1775（#1652 の判断待ち）。本モジュールは `onnx-interop`
@@ -41,9 +46,16 @@
 //! のみを使う方針を維持）、`Vec<u8>` へのバイト直列化という通常の Rust コードに
 //! 留められる。
 
+use super::export_ops;
 use super::graph::{self, Graph, RawTensor};
 use super::proto::{GraphProto, ModelProto, OperatorSetIdProto, TensorProto, ValueInfoProto};
 use std::fmt;
+
+// `export_ops`（イシュー #1773。内部 op -> `NodeProto` の意味論的マッピング）の
+// 公開面を本モジュールから再エクスポートする（`onnx::export_ops::X` ではなく
+// `onnx::export::X` として利用可能にする。呼び出し元は #1773 以降のテスト・
+// 将来の codegen・#1775 の facade 結線判断）。
+pub use export_ops::{ConstantAttr, ExportNode, ExportOp, SUPPORTED_OP_TYPES, to_node_proto};
 
 /// export 処理で発生しうるエラー。本番経路で `unwrap()` / `expect()` を使わない
 /// 方針（`coding-rust.md`）に従い、不正な `Graph`（#1773 以降で手組みされる
@@ -61,6 +73,38 @@ pub enum ExportError {
         tensor_name: String,
         expected_elements: usize,
         actual_elements: usize,
+    },
+    /// `op_type` が `export_ops::SUPPORTED_OP_TYPES`（`interp.rs` 対応 22 op）に
+    /// 含まれない、または `domain` が既定 opset（空文字列）以外
+    /// （`export_ops::check_exportable`。イシュー #1773 の層 B）。
+    UnsupportedOp {
+        node_name: String,
+        op_type: String,
+        domain: String,
+    },
+    /// 必須入力の個数が op ごとの arity 範囲外
+    /// （`export_ops::to_node_proto`。イシュー #1773）。
+    InputArityMismatch {
+        node_name: String,
+        op_type: &'static str,
+        expected: String,
+        actual: usize,
+    },
+    /// 出力の個数が 1 以外（本モジュールが対応する全 op は単一出力。
+    /// `interp.rs::require_single_output` と対称）。
+    OutputArityMismatch {
+        node_name: String,
+        op_type: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    /// 必須入力（省略不可の位置）が空文字列
+    /// （`interp.rs` の `node.input.get(N)` が `Some(name) if !name.is_empty()`
+    /// で判定する慣習と対称。省略可入力〈末尾のみ〉は空文字列を許容する）。
+    EmptyRequiredInput {
+        node_name: String,
+        op_type: &'static str,
+        index: usize,
     },
 }
 
@@ -83,6 +127,40 @@ impl fmt::Display for ExportError {
             } => write!(
                 f,
                 "データ長不整合（tensor={tensor_name}）: shape から期待される要素数={expected_elements} 実データ要素数={actual_elements}"
+            ),
+            ExportError::UnsupportedOp {
+                node_name,
+                op_type,
+                domain,
+            } => write!(
+                f,
+                "export 未対応の op（node={node_name}）: op_type={op_type} domain={domain:?}"
+            ),
+            ExportError::InputArityMismatch {
+                node_name,
+                op_type,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "入力個数不整合（node={node_name}・op_type={op_type}）: 期待={expected} 実際={actual}"
+            ),
+            ExportError::OutputArityMismatch {
+                node_name,
+                op_type,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "出力個数不整合（node={node_name}・op_type={op_type}）: 期待={expected} 実際={actual}"
+            ),
+            ExportError::EmptyRequiredInput {
+                node_name,
+                op_type,
+                index,
+            } => write!(
+                f,
+                "必須入力が空（node={node_name}・op_type={op_type}）: index={index}"
             ),
         }
     }
@@ -238,14 +316,18 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
 /// `Graph` から `ModelProto` を構築する（`build_graph` の逆方向）。
 ///
 /// 呼び出し元は #1773 以降（内部 op -> `NodeProto` マッピング後の export
-/// パイプライン全体）・将来の codegen。本関数自体は `graph.nodes`（既に
-/// `NodeProto` として確定済み）を素通しするのみで、op_type の意味論には
-/// 一切関与しない（モジュール冒頭コメント参照。未対応 op の検査は #1773／#1774
-/// のスコープ）。
+/// パイプライン全体）・将来の codegen。組み立て自体（`graph.nodes` を
+/// `GraphProto.node` へ詰める処理）は機械的な素通しのみで、op_type の意味論
+/// には関与しないが、組み立てに先立ち `export_ops::check_exportable`
+/// （イシュー #1773 の層 B）で `graph.nodes` が `interp.rs` 対応 22 op の
+/// allowlist・既定 opset（`domain` が空文字列）に収まっているかを fail-closed
+/// に検査する（無言 skip はしない。`security.md` A03）。
 pub fn build_model_proto(
     graph: &Graph,
     options: &ExportOptions,
 ) -> Result<ModelProto, ExportError> {
+    export_ops::check_exportable(graph)?;
+
     // `graph.initializers` は `HashMap` のため走査順が保証されない。同じ
     // `Graph` から呼び出すたびに異なるバイト列が生成されるのを避けるため、
     // テンソル名でソートしてから `encode_tensor` を適用する（決定的な出力。

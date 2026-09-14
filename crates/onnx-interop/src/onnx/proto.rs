@@ -162,3 +162,18 @@ pub mod data_type {
     pub const BOOL: i32 = 9;
     pub const FLOAT16: i32 = 10;
 }
+
+/// onnx.proto3 `AttributeProto.AttributeType`（本クレートが書き出す値のみ抜粋）。
+/// 出典は本モジュール冒頭コメントと同じ `onnx==1.22.0` 同梱の `onnx/onnx.proto`。
+/// `onnx::export`（イシュー #1773）が `AttributeProto.r#type` を設定する際に使う。
+/// 既存テスト（`tests/onnx_decode.rs`・`tests/onnx_interp.rs`）はこの追加以前から
+/// 同値のローカル定数を使っており、ここでの追加はそれらの重複定義を置き換える
+/// ものではない（`r#type` を export が正しく設定することを新規テストで固定する）。
+pub mod attribute_type {
+    pub const FLOAT: i32 = 1;
+    pub const INT: i32 = 2;
+    pub const STRING: i32 = 3;
+    pub const TENSOR: i32 = 4;
+    pub const FLOATS: i32 = 6;
+    pub const INTS: i32 = 7;
+}
