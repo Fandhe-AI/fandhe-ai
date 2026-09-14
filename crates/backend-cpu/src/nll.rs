@@ -34,10 +34,55 @@ pub(crate) struct NllLayout {
 }
 
 impl NllLayout {
-    /// サンプル数（`outer * inner`。`targets.numel()` と一致する契約）。
-    fn n(&self) -> usize {
-        self.outer * self.inner
+    /// サンプル数（`outer * inner`。`targets.numel()` と一致する契約）を
+    /// `checked_mul` で求める（`backend-cuda::nll::NllLayout::
+    /// checked_n_samples` と同型。`outer`／`inner` は呼び出し元
+    /// （`ops.rs`）が実shapeから導出するため通常オーバーフローしないが、
+    /// 公開 `BackendOps` を直接呼ぶ経路〈`Var::nll_loss` の事前検証を
+    /// 経由しない〉に備え、本関数自身も `usize` オーバーフロー時は
+    /// `None`（呼び出し元が型付きエラーへ変換）を返す。PR #1850
+    /// codex-review P1 是正）。
+    fn checked_n(&self) -> Option<usize> {
+        self.outer.checked_mul(self.inner)
     }
+
+    /// `outer * num_classes * inner`（`backend-cuda::nll::NllLayout::
+    /// checked_numel` と同型。[`checked_n`](Self::checked_n) と同じ
+    /// 理由で `checked_mul` を使う）。
+    fn checked_numel(&self) -> Option<usize> {
+        self.outer
+            .checked_mul(self.num_classes)
+            .and_then(|v| v.checked_mul(self.inner))
+    }
+}
+
+/// 寸法積のオーバーフロー（`usize` 範囲超過）を型付きエラーへ変換する
+/// （`ops.rs::checked_shape_product` と同じ `ShapeError::
+/// ElementCountOverflow` を使い、エラー種別を統一する）。
+fn overflow_err() -> BackendError {
+    BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+}
+
+/// `targets` の全添字が `0 <= t < num_classes` を満たすことを検証する
+/// （`backend-cuda::nll::validate_nll_buffers`／`backend-metal::nll` の
+/// 同型関数と同じ理由: `Var::nll_loss` の事前検証は公開 `BackendOps`
+/// を直接呼ぶ経路には及ばないため、この委譲層自身が検証しない限り
+/// 範囲外添字による境界外アクセスを防げない。範囲外検出時は寄与を
+/// 無視する安全側フォールバックではなく型付きエラーで拒否する
+/// — `.claude/rules/coding-rust.md` 本番経路 panic 禁止方針。
+/// PR #1850 codex-review P1 是正: 従来の `debug_assert!` は release
+/// ビルドで契約違反を黙って無視し、debug ビルドでは本番経路の
+/// panic を招いていた）。
+fn validate_targets(targets: &[i32], num_classes: usize) -> Result<(), BackendError> {
+    if let Some(&bad) = targets
+        .iter()
+        .find(|&&t| t < 0 || (t as usize) >= num_classes)
+    {
+        return Err(BackendError::InvalidArgument(format!(
+            "nll_loss: target index {bad} out of range [0, {num_classes})"
+        )));
+    }
+    Ok(())
 }
 
 /// forward: `Σ_s −input[(o·C+t_s)·inner+i]`（サンプル `s = o·inner+i`）。
@@ -47,16 +92,20 @@ impl NllLayout {
 ///
 /// `targets` は `0 <= t < num_classes` を呼び出し元
 /// （`fandhe_ai_autodiff::var::Var::nll_loss`）が実体化前に検証済みの
-/// 契約だが、本関数自身も `debug_assert!` で契約違反を検知しつつ
-/// 安全側（寄与 0）へフォールバックする（`.claude/rules/coding-rust.md`
-/// 本番経路 panic 禁止方針。`fandhe_ai_autodiff::eval::nll_loss` と同型
-/// の縦深防御）。
+/// 契約だが、公開 `BackendOps` を直接呼ぶ経路にはその事前検証が
+/// 及ばないため、本関数自身も [`validate_targets`] で契約違反を
+/// 型付きエラーとして拒否する（`.claude/rules/coding-rust.md` 本番
+/// 経路 panic 禁止方針。`backend-cuda`／`backend-metal` の同型検証と
+/// 同じ縦深防御。PR #1850 codex-review P1 是正: 従来の
+/// `debug_assert!` を安全側フォールバックとして残す設計は release
+/// ビルドで契約違反を黙って無視し、debug ビルドでは本番経路の panic
+/// を招いていた）。
 pub(crate) fn nll_sum_f32(
     input: &[f32],
     targets: &[i32],
     layout: NllLayout,
 ) -> Result<f32, BackendError> {
-    let expected_input_len = layout.outer * layout.num_classes * layout.inner;
+    let expected_input_len = layout.checked_numel().ok_or_else(overflow_err)?;
     if input.len() != expected_input_len {
         return Err(BackendError::ShapeMismatch(
             ShapeError::ElementCountMismatch {
@@ -65,7 +114,7 @@ pub(crate) fn nll_sum_f32(
             },
         ));
     }
-    let n = layout.n();
+    let n = layout.checked_n().ok_or_else(overflow_err)?;
     if targets.len() != n {
         return Err(BackendError::ShapeMismatch(
             ShapeError::ElementCountMismatch {
@@ -77,9 +126,15 @@ pub(crate) fn nll_sum_f32(
     if n == 0 {
         return Ok(0.0);
     }
+    validate_targets(targets, layout.num_classes)?;
     let NllLayout {
         num_classes, inner, ..
     } = layout;
+    // `validate_targets` により全 `t` が `0 <= t < num_classes` を満たす
+    // ことが検証済みのため、以下のループは `debug_assert!` 相当の
+    // else 分岐を持たない（`idx` は `expected_input_len` の検証を経た
+    // `checked_numel` により `input` の範囲内であることが構造的に
+    // 保証される）。
     let sum = targets
         .par_chunks(CHUNK)
         .enumerate()
@@ -90,12 +145,8 @@ pub(crate) fn nll_sum_f32(
                 let flat = base + offset;
                 let o = flat / inner;
                 let i = flat % inner;
-                if t >= 0 && (t as usize) < num_classes {
-                    let idx = (o * num_classes + t as usize) * inner + i;
-                    acc -= input[idx];
-                } else {
-                    debug_assert!(false, "nll_sum_f32: target 添字が範囲外（契約違反）");
-                }
+                let idx = (o * num_classes + t as usize) * inner + i;
+                acc -= input[idx];
             }
             acc
         })
@@ -118,7 +169,7 @@ pub(crate) fn nll_backward_f32(
     scale: f32,
     dinput: &mut [f32],
 ) -> Result<(), BackendError> {
-    let expected_input_len = layout.outer * layout.num_classes * layout.inner;
+    let expected_input_len = layout.checked_numel().ok_or_else(overflow_err)?;
     if dinput.len() != expected_input_len {
         return Err(BackendError::ShapeMismatch(
             ShapeError::ElementCountMismatch {
@@ -127,7 +178,7 @@ pub(crate) fn nll_backward_f32(
             },
         ));
     }
-    let n = layout.n();
+    let n = layout.checked_n().ok_or_else(overflow_err)?;
     if targets.len() != n {
         return Err(BackendError::ShapeMismatch(
             ShapeError::ElementCountMismatch {
@@ -136,6 +187,10 @@ pub(crate) fn nll_backward_f32(
             },
         ));
     }
+    // `nll_sum_f32` と同じ理由（PR #1850 codex-review P1 是正）:
+    // 公開 `BackendOps` を直接呼ぶ経路には `Var::nll_loss` の事前検証が
+    // 及ばないため、本関数自身も型付きエラーで範囲外添字を拒否する。
+    validate_targets(targets, layout.num_classes)?;
     let NllLayout {
         num_classes, inner, ..
     } = layout;
@@ -149,22 +204,15 @@ pub(crate) fn nll_backward_f32(
     // 中間軸のとき `inner` 間隔での分割が必要）なため、`unsafe` を
     // 増やさず素直な逐次ループとする（`.claude/rules/coding-rust.md`
     // 「`unsafe` は FFI 境界等の必要最小限に限る」方針）。
+    // `validate_targets` により全 `t` が範囲内であることが検証済みの
+    // ため、`idx` は `expected_input_len` の検証を経た `checked_numel`
+    // により `dinput` の範囲内であることが構造的に保証される
+    // （`debug_assert!` else 分岐は不要）。
     for (flat, &t) in targets.iter().enumerate() {
         let o = flat / inner;
         let i = flat % inner;
-        if t >= 0 && (t as usize) < num_classes {
-            let idx = (o * num_classes + t as usize) * inner + i;
-            if let Some(slot) = dinput.get_mut(idx) {
-                *slot = -scale;
-            } else {
-                debug_assert!(
-                    false,
-                    "nll_backward_f32: idx が dinput の範囲外（契約違反）"
-                );
-            }
-        } else {
-            debug_assert!(false, "nll_backward_f32: target 添字が範囲外（契約違反）");
-        }
+        let idx = (o * num_classes + t as usize) * inner + i;
+        dinput[idx] = -scale;
     }
     Ok(())
 }
@@ -196,5 +244,77 @@ mod tests {
             inner: 1,
         };
         assert_eq!(nll_sum_f32(&[], &[], layout).unwrap(), 0.0);
+    }
+
+    /// PR #1850 codex-review P1 是正の回帰: 範囲外 `target` を
+    /// `debug_assert!` による本番経路 panic ではなく型付きエラー
+    /// （`BackendError::InvalidArgument`）で拒否することを確認する
+    /// （公開 `BackendOps` を直接呼ぶ経路には `Var::nll_loss` の事前
+    /// 検証が及ばないため、この委譲層自身の検証が必須）。
+    #[test]
+    fn nll_sum_f32_rejects_out_of_range_target() {
+        let input = vec![-0.1, -2.0];
+        let targets = vec![-1i32];
+        let layout = NllLayout {
+            outer: 1,
+            num_classes: 2,
+            inner: 1,
+        };
+        let err = nll_sum_f32(&input, &targets, layout).unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)), "{err:?}");
+    }
+
+    #[test]
+    fn nll_backward_f32_rejects_out_of_range_target() {
+        let targets = vec![5i32];
+        let layout = NllLayout {
+            outer: 1,
+            num_classes: 2,
+            inner: 1,
+        };
+        let mut dinput = vec![0.0f32; 2];
+        let err = nll_backward_f32(&targets, layout, 1.0, &mut dinput).unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)), "{err:?}");
+    }
+
+    /// PR #1850 codex-review P1 是正の回帰: `input_shape=[usize::MAX,
+    /// 0, 2]` 相当（`outer=usize::MAX`・`num_classes=0`・`inner=2`）の
+    /// `layout.checked_n()`（`outer * inner`）オーバーフローを、debug
+    /// ビルドの乗算 panic ではなく `ShapeError::ElementCountOverflow`
+    /// として返すことを確認する（元の再現条件: `nll_loss_backward` の
+    /// `layout.n()` が `usize::MAX * 2` を計算していた）。
+    #[test]
+    fn nll_backward_f32_rejects_n_overflow() {
+        let layout = NllLayout {
+            outer: usize::MAX,
+            num_classes: 0,
+            inner: 2,
+        };
+        let mut dinput: Vec<f32> = Vec::new();
+        let err = nll_backward_f32(&[], layout, 1.0, &mut dinput).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn nll_sum_f32_rejects_numel_overflow() {
+        let layout = NllLayout {
+            outer: usize::MAX,
+            num_classes: 2,
+            inner: 2,
+        };
+        let err = nll_sum_f32(&[], &[], layout).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+            ),
+            "{err:?}"
+        );
     }
 }
