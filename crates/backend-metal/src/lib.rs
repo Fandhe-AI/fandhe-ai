@@ -427,7 +427,31 @@ mod gemm_mpp_diag_tests;
 pub mod gather_scatter;
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_hfrag_diag_tests;
+// readout legacy 後退（イシュー #1520。`docs/perf/metal-gemm-candle-
+// gate-remeasurement.md` §17）の 4 腕診断ハーネス（イシュー #1695。
+// CUDA 側 `readout_regression_diag_tests_1436.rs`〈イシュー #1436〉と
+// 同型）。腕定義・純関数ヘルパ本体（`ReadoutArm`・`checksum_f64` 等）は
+// `objc2` 系 FFI に触れないため `gather_scatter_model`／`soft_f64` と
+// 同じ判断で `cfg(target_os = "macos")` を付けず Linux（本実装環境・CI）
+// でも単体テストが回る。非 test ビルドで `dead_code` にならないよう
+// `#[cfg(test)]` を付ける（本モジュールの利用箇所はいずれもテスト
+// コードのみ）。
+#[cfg(test)]
+mod readout_regression_diag_arms;
+// 上記ハーネスの実機依存テスト本体。`context_cache::{cached_context,
+// cached_gemm}`・`gemm::MetalGemm::diag_encode_tiled_nn`（いずれも
+// `#[cfg(test)] pub(crate)`）・`buffer::MetalBuffer::read_into_slice`
+// （`#[cfg(test)] pub(crate)`。本イシューで追加）へ到達するため、
+// 既存診断テスト群と同じ理由でクレートルートの兄弟モジュールとして
+// 配置する。`objc2` 系 FFI 型に触れるため同じ
+// `cfg(all(test, target_os = "macos"))` を付ける。プロダクションコード
+// （`gemm.rs`／`ops.rs`〈`dispatch_auto` 系〉／`memory.rs`／
+// `context.rs`／`pool.rs`）は無変更（`buffer.rs` は新規 `#[cfg(test)]`
+// 限定ヘルパ `read_into_slice` の追加のみ）。実機実測・機構記録は
+// 兄弟イシュー #1696 が担う。
 pub(crate) mod generic_cache;
+#[cfg(all(test, target_os = "macos"))]
+mod readout_regression_diag_tests_1695;
 // `gather_scatter.metal`（`gather_f32`／`scatter_overwrite_f32`／
 // `scatter_add_f32`）のホスト側逐語モデル（イシュー #1778）。`soft_f64`・
 // `layout`／`pad` と同じ設計判断で `objc2` 系 FFI に触れないため

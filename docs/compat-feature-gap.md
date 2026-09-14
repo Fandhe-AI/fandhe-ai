@@ -830,3 +830,23 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 既定合成実装のまま（機能的に到達可能・専用バッチカーネルは #1716／
 #1717）。`einsum`（rank≥3 matmul を伴う batch 添字縮約。#1600 が未実装
 としていた対象）は本イシューでは対象外のまま残る。
+
+## #1652 の追補（ONNX import の facade 公開可否の設計判断）
+
+§1.9・347 行目「ONNX import」のスナップショット本文（`onnx-interop::onnx::interp`
+が facade から到達不可であること）は不変のまま、facade 公開の可否を設計判断として
+記録した（`docs/facade-onnx-import-exposure-decision.md`。イシュー #1652）。
+
+- 判断: facade へ公開する方針は「薄いラッパー型」（案 B。`prost`／`half::f16` を
+  公開面に出さない専用型）として推奨する。DDP（#1628）・量子化（#1627）と異なり、
+  ONNX import 公開は正本 spec の除外事項に従属していない。
+- ただし facade は crates.io 公開クレートであり非公開クレートへの通常依存を
+  持てないため、「facade から公開する」は `onnx-interop` 自体を 7 クレート目として
+  crates.io へ公開することと構造的に等価になる。この publish 承認（命名確定・
+  `release-all.yml` の `RELEASE_CRATES` 変更を含む）は 2026-09-12 の facade 公開面
+  拡張の承認範囲には含まれない別個の事項であり、現時点では未取得。
+- 現状（本追補時点）は非公開・未実装のまま変わらない。実装（facade ラッパー・
+  `api_surface.rs` 拡張）は publish 承認取得後の別 issue へ引き継ぐ。
+- #1775（ONNX export の facade 公開）・#1754（safetensors save／load の facade
+  再公開）は同じ publish 前提を共有するため blocked のまま close しない
+  （`docs/facade-onnx-import-exposure-decision.md` §6.2）。
