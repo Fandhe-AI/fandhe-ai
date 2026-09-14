@@ -16,7 +16,9 @@
 //! TASK-9.1a（#91）で第 1 分割として `Linear`（全結合層）を実装した。
 //! TASK-9.1b（#92）で活性化関数（[`activation`]）を追加した。#190
 //! （親 #189）で MSE 損失（[`loss`]）を追加し、#191 で CrossEntropy
-//! 損失（同じく [`loss`]）を追加した。#194（親 #192）で optimizer の
+//! 損失（同じく [`loss`]）を追加した。#1737（親 #1609）で二値交差
+//! エントロピー損失（`loss::BceLoss`／`loss::BceWithLogitsLoss`）を
+//! 追加した。#194（親 #192）で optimizer の
 //! 第 1 弾として AdamW（[`optim::AdamW`]）を追加した。#195（親 #192）で
 //! gradient clipping・LR スケジューラ最小セット（[`optim::clip`]・
 //! [`optim::lr_scheduler`]）を追加した。SGD 本体は `crate::optim`

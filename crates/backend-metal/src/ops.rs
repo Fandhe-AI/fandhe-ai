@@ -38,7 +38,7 @@
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
+    Activation, BackendOps, BceKind, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, LstmPointwiseOutput,
     MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
     ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, gather_out_shape, interpolate_out_shape,
@@ -3227,6 +3227,81 @@ impl BackendOps for MetalBackendOps {
             .run_huber_backward_f32(&ctx, pred_slice, target_slice, kind, delta, scale)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::bce_loss`] の Metal 実装
+    /// （イシュー #1737。`mse_loss` と同型の委譲構成）。
+    fn bce_loss(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: BceKind,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_owned = input.contiguous();
+        let target_owned = target.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss: input not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss: target not contiguous".into())
+        })?;
+        let numel = input_slice.len();
+        let factor = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    1.0
+                } else {
+                    1.0 / numel as f32
+                }
+            }
+            MseReduction::Sum => 1.0,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "bce_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let bce = context_cache::cached_bce(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let value = bce
+            .run_bce_loss_f32(&ctx, input_slice, target_slice, kind, factor)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::bce_loss_backward`] の Metal
+    /// 実装（イシュー #1737）。`dTarget` は呼び出し元
+    /// （`fandhe_ai_autodiff::grad::vjp`）がホスト側の逐次 map で計算
+    /// する契約のため、本メソッドは `dInput` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::bce_loss_backward` doc 参照）。
+    fn bce_loss_backward(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: BceKind,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_owned = input.contiguous();
+        let target_owned = target.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss_backward: input not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss_backward: target not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let bce = context_cache::cached_bce(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = bce
+            .run_bce_backward_f32(&ctx, input_slice, target_slice, kind, scale)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, input.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::rmsnorm`] の Metal 実装
