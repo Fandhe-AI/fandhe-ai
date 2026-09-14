@@ -1340,3 +1340,34 @@ init.rs::normal_init`。Box–Muller・`Linear::new` と同じくグローバル
 スコープ外として別 issue へ引き継ぐ）。facade 新規公開面なし（既存の
 `Var`／`nn` 再エクスポート経由）。CUDA／Metal 実機での facade parity
 テストは未実測のまま Mac／GB10 セッションへ申し送る。
+
+## 追補（イシュー #1756）
+
+`Var::pad`（`torch.nn.functional.pad(mode='constant')` 相当。定数
+パディング）を実装済み化。`pads: &[(usize, usize)]` は先頭次元から
+順に対応する（PyTorch `F.pad` の「末尾次元から逆順の平坦リスト」とは
+意図的に異なる設計）。負パディング（クロップ）は非対応（`Var::narrow`
+を使う）・`reflect`／`replicate` モードは対象外（本イシューのスコープ
+外）。
+
+- `BackendOps::pad`（既定 `Unsupported`。`Var::pad` は `Unsupported`
+  のときのみホスト参照実装 `eval::pad` へフォールバック）・`Op::Pad`・
+  CPU（`backend-cpu::constant_pad`）・CUDA（`backend-cuda::
+  constant_pad`。NVRTC カーネル）・Metal（`backend-metal::
+  constant_pad`。実行時コンパイルカーネル）の 3 バックエンド専用実装を
+  本 issue で新規実装済み。
+- VJP は新規カーネルを作らず、既存の `Tensor::narrow`（#1598 で確立した
+  zero-copy view 基盤）を各軸へ連鎖適用してパディング領域を落とす
+  （pad の forward ⟷ narrow の VJP・pad の VJP ⟷ narrow の forward
+  という `Op::Concat`⟷`Op::Narrow` の双対性と同型の設計）。
+- 出力は「入力要素のコピー」と「定数」のみで算術を含まないため、3
+  バックエンド間は REQ-2 複合判定ではなく **bit 完全一致**（`value` が
+  NaN の場合のみクラス一致）。
+- facade 新規公開面なし（既存 `Var` 再エクスポート経由。`compat-api-
+  scope.md` §5 の範囲拡張手続きは #1598／#1637／#1733 と同じ理由で
+  再適用不要と判断）。
+- CUDA／Metal 実機（GB10／M4 Max）での parity テストは、本実装
+  エージェントの実行環境に実機への到達手段がないため未実測のまま
+  Mac／GB10 セッションへ申し送る（`crates/backend-cuda/tests/
+  constant_pad_parity.rs`・`crates/backend-metal/tests/
+  constant_pad_parity.rs` の `#[ignore]` テストを参照）。

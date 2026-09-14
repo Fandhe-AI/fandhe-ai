@@ -1227,6 +1227,26 @@ pub(crate) fn vjp(
             let d_input = masked_fill_vjp(&mask, upstream);
             vec![(input, d_input)]
         }
+        // `Var::pad`（イシュー #1756）。「pad の forward ⟷ narrow の
+        // VJP・pad の VJP ⟷ narrow の forward」という双対性
+        // （`Op::Concat`⟷`Op::Narrow` の双対性と同型）に基づき、`Op::
+        // Narrow` の forward と全く同じ `narrow` 呼び出しを各軸へ
+        // 連鎖適用してパディング領域を落とす（zero-copy view チェーン。
+        // `value` は forward 記録値に焼き込まれ VJP には不要なため
+        // `Op::Pad` は保持しない）。`narrow` の失敗は forward 側で
+        // 検査済みの shape 契約違反を意味するため `Op::Narrow` の VJP
+        // と同じ `?` 経由の `AutodiffError` 化で扱う。
+        Op::Pad { input, pads } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let mut d_input = upstream.clone();
+            for (axis, &(before, _after)) in pads.iter().enumerate() {
+                let len = input_shape[axis];
+                d_input = d_input
+                    .narrow(axis, before, len)
+                    .map_err(AutodiffError::Shape)?;
+            }
+            vec![(input, d_input)]
+        }
         // `Var::gather`（`Var::index_select` も同一 Op へ委譲。イシュー
         // #1776）。「Gather の VJP は scatter_add」の原則
         // （`Op::Concat`⟷`Op::Narrow` の双対性と同型）: 入力 shape の
@@ -1582,6 +1602,37 @@ pub(crate) fn masked_fill_with_fallback(
             Ok(v)
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::masked_fill(x, mask, value)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Pad`] の forward（`Var::pad`）が使う「バックエンド実装 →
+/// フォールバック」ヘルパー（イシュー #1756）。[`masked_fill_with_fallback`]
+/// と同型: `ops.pad` → `Unsupported` のときのみ `eval::pad` へ
+/// フォールバックし、それ以外のエラーは伝播する（判定迂回経路を
+/// 作らない）。バックエンド実装が返した出力 shape を `out_shape` と
+/// 照合し、不一致は `AutodiffError::Backend(BackendError::
+/// ShapeMismatch(..))` を返す。
+pub(crate) fn pad_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    pads: &[(usize, usize)],
+    value: f32,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.pad(input, pads, value) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::pad(input, pads, value, out_shape)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }

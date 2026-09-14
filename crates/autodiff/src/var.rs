@@ -19,15 +19,15 @@ use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
     ShapeError, Tensor, VectorNormOrd, broadcast_shape, concat_out_shape, gather_out_shape,
-    gemm_out_shape, matmul_out_shape, one_hot_out_shape, reduce_out_shape, require_same_shape,
-    row_norm_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    gemm_out_shape, matmul_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
     ArgExtremum, argext_with_fallback, concat_with_fallback, gather_with_fallback,
-    min_with_fallback, one_hot_with_fallback, scalar_binary_with_fallback,
+    min_with_fallback, one_hot_with_fallback, pad_with_fallback, scalar_binary_with_fallback,
     scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
     unique_with_fallback,
 };
@@ -2185,6 +2185,53 @@ impl<'t> Var<'t> {
                 len,
             },
             out_shape,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 各軸を定数値 `value` で拡張する（`torch.nn.functional.pad
+    /// (mode='constant')` 相当。イシュー #1756）。`pads[i] = (before,
+    /// after)` は先頭次元から順に対応する（PyTorch `F.pad` の「末尾
+    /// 次元から逆順の平坦リスト」とは異なる意図的な設計。負パディング
+    /// （クロップ）は非対応——[`Self::narrow`] を使うこと。`reflect`／
+    /// `replicate` モードも対象外。`docs/compat-feature-gap.md`
+    /// 追補参照）。
+    ///
+    /// 検査順序: ①[`fandhe_ai_tensor_core::pad_out_shape`]（`pads.len()
+    /// == rank`・各軸の `before`／`after` 加算オーバーフロー・
+    /// 出力要素数積オーバーフローを検査し `out_shape` を確定。違反は
+    /// `AutodiffError::Shape`）→ ②`self` を層 1 で実体化（`RefCell`
+    /// 借用を閉じてから push。`Var::gather` と同じ「実体化してから
+    /// フォールバックへ渡す」方針）→ ③`pad_with_fallback`
+    /// （`ops.pad` → `Unsupported` のときのみホスト参照実装
+    /// `eval::pad` へフォールバック）→ ④戻り shape 検証
+    /// （`.claude/rules/security.md` A08）→ ⑤`push_eager`
+    /// （非融合・常実体化。`value` は forward 記録値へ焼き込み済みの
+    /// ため `Op::Pad` 自身は保持しない）。
+    pub fn pad(&self, pads: &[(usize, usize)], value: f32) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape = pad_out_shape(&in_shape, pads).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let value_out = pad_with_fallback(self.tape.ops(), &input_val, pads, value, &out_shape)?;
+        if value_out.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value_out.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Pad {
+                input: self.id,
+                pads: pads.to_vec(),
+            },
+            value_out,
         );
         Ok(Var::from_raw(self.tape, id))
     }

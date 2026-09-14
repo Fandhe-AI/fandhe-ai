@@ -431,6 +431,12 @@ mod gemm_mpp_diag_tests;
 // metal-gemm-hfrag-candidate.md` §9 側で判断する）。
 #[cfg(target_os = "macos")]
 pub mod gather_scatter;
+// イシュー #1756: pad（`torch.nn.functional.pad(mode='constant')`
+// 相当）起動 API。`gather_scatter.rs` と同じ「カーネル起動は macOS
+// 限定・ホストモデルは Linux 実行可能」の 2 ファイル構成
+// （`constant_pad_model.rs` は下記の `cfg` なしブロックで宣言）。
+#[cfg(target_os = "macos")]
+pub mod constant_pad;
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_hfrag_diag_tests;
 // thread_elements() 方式 BlockMMA 候補（イシュー #1693）の純カーネル
@@ -479,6 +485,11 @@ mod readout_regression_diag_tests_1695;
 // `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）でも
 // 単体テストが回る。
 pub mod gather_scatter_model;
+// `constant_pad.metal::constant_pad_f32` のホスト側逐語モデル（イシュー
+// #1756）。`gather_scatter_model` と同じ設計判断で `objc2` 系 FFI に
+// 触れないため `cfg(target_os = "macos")` を付けず、Linux（本実装環境・
+// CI）でも単体テストが回る。
+pub mod constant_pad_model;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
 #[cfg(target_os = "macos")]
