@@ -271,13 +271,14 @@ fn p4_probe_inputs() -> Vec<f32> {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
-        let bits = (state >> 40) as u32;
-        let v = f32::from_bits(bits) * 1000.0 - 500.0;
-        if v.is_finite() {
-            inputs.push(v);
-        } else {
-            inputs.push(0.0);
-        }
+        // 上位 32bit を符号なし整数として取り出し `u32::MAX` で正規化する
+        // （`f32::from_bits` へ直接投げると指数部が偏り極小値に潰れる。
+        // レビュー指摘: 旧実装は `state >> 40` で 24bit しか残らず
+        // 全反復で同一の極小値近傍〈= -500.0〉に収束していた）。
+        let raw = (state >> 32) as u32;
+        let unit = raw as f32 / u32::MAX as f32; // [0.0, 1.0]
+        let v = unit * 1000.0 - 500.0; // [-500.0, 500.0]
+        inputs.push(v);
     }
     inputs
 }

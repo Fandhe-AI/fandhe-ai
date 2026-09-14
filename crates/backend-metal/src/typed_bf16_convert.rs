@@ -4,7 +4,7 @@
 //!
 //! # cfg を付けない理由
 //!
-//! [`crate::typed_bf16`]（`impl TypedOps<half::bf16> for MetalBackendOps`）
+//! `crate::typed_bf16`（`impl TypedOps<half::bf16> for MetalBackendOps`）
 //! は `objc2` 系 FFI に触れるため `cfg(target_os = "macos")` 限定だが、
 //! 本モジュールは `half`／`fandhe_ai_tensor_core` のみに依存し `objc2`
 //! 系には一切触れない。[`crate::pad`]／[`crate::layout`] と同じ判断で
@@ -18,7 +18,7 @@
 //! と同じ扱い）。
 //!
 //! # 方針: bf16⇔f32 のホスト側変換のみ（既存 f32 カーネルへの委譲は
-//! [`crate::typed_bf16`] 側が行う）
+//! `crate::typed_bf16` 側が行う）
 //!
 //! - [`upcast_bf16`]: bf16→f32 は完全表現可能・損失なし
 //!   （`bf16::to_f32()`）
