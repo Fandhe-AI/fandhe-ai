@@ -836,3 +836,11 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 - #1775（ONNX export の facade 公開）・#1754（safetensors save／load の facade
   再公開）は同じ publish 前提を共有するため blocked のまま close しない
   （`docs/facade-onnx-import-exposure-decision.md` §6.2）。
+
+**#1773 追記（ONNX export の op 逆マッピング）**: `onnx-interop` 内部
+（`crate::onnx::export_ops`）に `interp.rs` 対応 22 op すべての逆マッピング
+（`ExportOp` -> `NodeProto`。op_type・入力順・属性 name/type/既定値）を実装した
+（`docs/onnx-export-op-mapping.md`）。`build_model_proto` は組み立て前に
+`check_exportable`（layer B。allowlist・既定 opset の fail-closed 検査）を
+経由するよう変更済み。`onnx-interop` は crates.io 非公開クレートであり facade
+新規公開面はなし（#1775 の判断は本追補の対象外のまま変わらない）。
