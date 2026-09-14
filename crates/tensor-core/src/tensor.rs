@@ -108,6 +108,37 @@ pub(crate) fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
         .ok_or(ShapeError::ElementCountOverflow)
 }
 
+/// `checked_numel` に加え、要素型 `T` でアロケーションした場合の
+/// バイトサイズが `Vec` の allocation 上限（`isize::MAX` バイト。
+/// `Vec::with_capacity`／`Iterator::collect` が capacity overflow で
+/// panic する境界）に収まるかも検査する。
+///
+/// `checked_numel` 単体は要素数積が `usize` の範囲に収まるかしか
+/// 見ないため、要素サイズが 1 バイトを超える型（`f32`/`i32` 等）では
+/// `shape = &[usize::MAX]` のように要素数自体は `usize` 積として
+/// オーバーフローしない shape でも通過してしまい、後続の
+/// `Vec::with_capacity(numel)` が `numel * size_of::<T>() >
+/// isize::MAX` で capacity overflow パニックする（本番経路 panic 禁止
+/// 規約 `.claude/rules/coding-rust.md` に反する DoS 経路。イシュー
+/// #1725・PR #1815 codex-review P1 是正）。乱数テンソル生成
+/// （`randn`/`rand`/`randint`。本ファイルではなく `rng.rs`）が
+/// `with_global_rng` でロックを取得する前に本関数で事前検査すること
+/// で、確保不能な shape に対して乱数を一切消費せず型付きエラー
+/// （既存の `ShapeError::ElementCountOverflow`）を返せる。
+pub(crate) fn checked_numel_for<T>(shape: &[usize]) -> Result<usize, ShapeError> {
+    let numel = checked_numel(shape)?;
+    let elem_size = std::mem::size_of::<T>();
+    if elem_size > 0 {
+        let bytes = numel
+            .checked_mul(elem_size)
+            .ok_or(ShapeError::ElementCountOverflow)?;
+        if bytes > isize::MAX as usize {
+            return Err(ShapeError::ElementCountOverflow);
+        }
+    }
+    Ok(numel)
+}
+
 impl<T: Element> Tensor<T> {
     /// 実行時 shape 検査を行うコンストラクタ（PoC-v2-1 で確定した方式）。
     /// `data.len()` が `shape` の要素数積と一致しない場合 `ShapeError` を

@@ -57,7 +57,10 @@ backward 内訳は 5 起動。詳細は §6）。
 - `has_async_alloc()` = `true`（`docs/backend-cuda-async-execution-design.md`
   I4 の未実測を解消）。TMA は cluster／cta 両 variant が `compute_121`／
   `121a`／`121f` でコンパイル・実行 bit 一致。#1214 NT／TN 入口は parity
-  5/5・N=1024/2048 で 2.8〜5.9 倍（train A/B は未実施。§7 参照）。
+  5/5・N=1024/2048 で 2.8〜5.9 倍（train A/B は未実施。§7 参照。→ #1590
+  で正式記録先〈`docs/perf/cuda-gemm-vjp-transposed-entry.md` §3.1／
+  §3.2〉へ転記済み・train A/B スキャフォールドを整備。数値は本節から
+  変更なし）。
   async ordering 3/3 pass。
 - GB10 CPU gemm（fresh）は candle・burn・PyTorch 2.14・TF 2.21・SciPy の
   全てに勝つ（N=256〜4096）。reuse 判定比は 256 0.697・512 0.850・
@@ -134,6 +137,12 @@ N=1024 Metal reuse を legacy／borrowed で 5 回 interleave: matmul 区間
 iter_total 2.470 → 2.677 ms。後退は GPU 待ち＋ダウンロードを含む matmul
 区間に閉じており、host_copy 削減では埋まらない。原因は未特定（CUDA
 #1436 と同型の「borrowed＋ダミー確保・解放」腕が次の切り分け候補）。
+
+4 腕診断ハーネス自体はイシュー #1695 で実装済み（`crates/backend-metal/
+src/readout_regression_diag_arms.rs`・`readout_regression_diag_tests_
+1695.rs`）。実測プロトコル・事前登録判定規則は
+`docs/perf/metal-readout-legacy-regression-four-arm-diag.md`（イシュー
+#1696）を参照。
 
 ## 6. 証拠等級と限界
 
