@@ -18,6 +18,14 @@
 //! `docs/spec/04-requirements.md:211-212`。実装リポ #984／#986）で、
 //! `tape()`系・`compat` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
 //!
+//! **AMP（損失スケーリング。イシュー #1625・#1721・本イシュー #1722）**:
+//! [`crate::optim::GradScaler`]／[`crate::optim::GradScalerConfig`]／
+//! [`crate::optim::UnscaleResult`]／[`crate::optim::scale_loss`]／
+//! [`crate::optim::scale_grads`]／[`crate::optim::unscale_grads`]／
+//! [`crate::optim::has_non_finite`] を
+//! `fandhe_ai_autodiff::nn::optim`（実体は `nn::optim::amp` モジュール）から
+//! 同じく素の再エクスポートで公開する。「# 適用順序契約」節を参照。
+//!
 //! # 呼び出し文脈（`compat::Sequential` との位置対応契約）
 //!
 //! [`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`] が受け取る `params`／`grads` の順序は、
@@ -29,14 +37,52 @@
 //!
 //! # 適用順序契約
 //!
-//! 1 学習ステップは必ず
-//! `backward → (AMP 導入後の unscale) → clip → optimizer step`
-//! の順で実行する（`fandhe_ai_autodiff::nn::optim` モジュール doc から転記）。
-//! 損失スケーリング（AMP）は現時点で未実装のため unscale ステップは
-//! 存在しないが、将来 AMP を導入する際も「clip は unscale 後の生勾配に
-//! 対してのみ適用する」契約を崩さない（clip 前に scale が残っていると
-//! `max_norm` の意味が変わり、意図しない過剰クリップ・過小クリップを
-//! 招くため）。
+//! ## AMP を使わない場合（既存経路。無変更で動作する）
+//!
+//! 1 学習ステップは
+//! `backward → clip → optimizer step`
+//! の順で実行する。
+//!
+//! ## AMP（[`crate::optim::GradScaler`]）を使う場合
+//!
+//! 1 学習ステップは必ず次の順で実行する（`fandhe_ai_autodiff::nn::optim::amp`
+//! モジュール doc から転記）:
+//!
+//! 1. [`crate::optim::GradScaler::scale_loss`] で loss をスケールする
+//! 2. `Tape::backward` でスケール済み loss を逆伝播する
+//! 3. [`crate::optim::GradScaler::unscale`]（内部で [`crate::optim::unscale_grads`]
+//!    を呼ぶ）で勾配をスケールで割り戻しつつ非有限値の有無を検出する
+//! 4. [`crate::optim::UnscaleResult::should_skip_step`] が `true` の場合、
+//!    この step の clip・optimizer step を**両方**スキップする
+//!    （`clip_grad_norm` は非有限勾配で `Err` を返す fail-closed 契約の
+//!    ため、非有限検出より前に clip を呼ぶと学習ループ全体が失敗する）
+//! 5. `false` の場合のみ `clip_grad_norm` → optimizer step の順に進める
+//!    （「clip は unscale 後の生勾配に対してのみ適用する」契約は不変。
+//!    clip 前にスケールが残っていると `max_norm` の意味が変わり、意図
+//!    しない過剰クリップ・過小クリップを招くため）
+//! 6. スキップした step でも必ず最後に
+//!    [`crate::optim::GradScaler::update`] を呼びスケールを更新する
+//!    （backoff のため）
+//!
+//! AMP を使わない既存ループはこの節の変更の影響を受けず、そのまま
+//! `backward → clip → optimizer step` で動作し続ける。
+//!
+//! # AMP の適用範囲（対象外の明記）
+//!
+//! - **真の混合精度（f16 forward・f32 master weight）は対象外**。
+//!   `Var`／`Tape` の dtype 一般化は
+//!   `docs/backend-dtype-dispatch-design.md` §8 で明示的にスコープ外と
+//!   されている別軸の変更であり、本モジュールが提供するのは **ホスト
+//!   `Tensor<f32>` へ実体化済みの勾配**に対するスケーリング／unscale／
+//!   非有限検出のみである
+//! - **デバイス常駐更新経路（[`crate::DeviceParamStore`]／
+//!   [`crate::Tape::step_device_param_store`]）には unscale／非有限検出が
+//!   結線されていない**。AMP はホスト `Tensor<f32>` 勾配（`Gradients::get`／
+//!   [`crate::compat::SequentialVars::trainable_grads`]／
+//!   `Tape::param_grads_to_host` 経由）にのみ適用できる
+//! - [`crate::optim::scale_loss`] は呼び出しごとにスカラー葉を 1 個
+//!   tape へ登録する（`Tape::leaf_count` に影響。`Tape::reset` をまたいで
+//!   蓄積しない契約は `nn::optim::amp::scale_loss` doc を参照）
 //!
 //! # REQ-12 との整合（`Tape`／`BackendOps` 非依存）
 //!
@@ -48,7 +94,10 @@
 //! 生じないため（`crate::Tape` のように `new_with_ops` を隠す必要がない。
 //! `docs/facade-optimizer-promotion-decision.md` §4.2）。この構造は
 //! `tests/api_surface.rs` の optim 固有検査（純再エクスポートであること・
-//! 昇格元公開面と 1 対 1 であること）で機械的に固定する。
+//! 昇格元公開面と 1 対 1 であること）で機械的に固定する。**AMP の
+//! [`crate::optim::GradScaler::scale_loss`] のみ `&Var` を受け取るが、これは既存
+//! [`crate::Var::mul`] の合成のみで実装され（`nn::optim::amp` モジュール
+//! doc）、新規 `Op`／`BackendOps` メソッド／VJP を追加しない**。
 //!
 //! # 内部配置の不統一・シグネチャ差異について
 //!
@@ -72,7 +121,8 @@
 //! `docs/device-resident-update-design.md`）。`DeviceParamStore` は
 //! `Tape` を引数に取る状態機械であり本モジュールの値型群とは性質が
 //! 異なるため、意図的に本モジュールへは含めない（root 再エクスポート
-//! のまま）。
+//! のまま）。AMP（[`crate::optim::GradScaler`]）もこの経路へは未結線（上記「AMP の
+//! 適用範囲」節参照）。
 
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。`tests/api_surface.rs`
 // が `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査する
@@ -80,5 +130,7 @@
 pub use fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig};
 pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_value};
 pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
+pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
 pub use fandhe_ai_autodiff::nn::optim::{clip_grad_norm, global_grad_norm};
+pub use fandhe_ai_autodiff::nn::optim::{has_non_finite, scale_grads, scale_loss, unscale_grads};
 pub use fandhe_ai_autodiff::optim::{Sgd, SgdConfig};

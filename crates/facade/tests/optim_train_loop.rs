@@ -13,8 +13,10 @@
 //!
 //! **適用順序契約**: 1 学習ステップは
 //! `backward → clip → optimizer step`（`fandhe_ai::optim` モジュール doc
-//! 「適用順序契約」節を参照。AMP 未導入のため unscale ステップは存在
-//! しない）。
+//! 「適用順序契約」節「AMP を使わない場合」を参照。本ファイルは AMP
+//! 非使用の既存経路（無変更で動作する契約）を固定する。AMP 使用時の
+//! 順序は `crates/facade/tests/optim_amp_train_loop.rs`（イシュー #1722）
+//! を参照）。
 //!
 //! **決定的シード**: モデル・データ・シードは
 //! `crates/facade/tests/compat_sequential_train.rs` と同一
