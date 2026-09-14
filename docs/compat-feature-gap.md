@@ -748,7 +748,7 @@ gather／scatter／scatter_add（#1637 で where／masked_fill を実装済み�
 - `MetalBackendOps::gather`／`scatter`（`crates/backend-metal/src/
   gather_scatter.rs`・`shaders/gather_scatter.metal`）を新設し、
   `BackendOps::gather`／`scatter` の Metal 実装として結線済み
-  （CUDA 側は #1777 が引き続き対象）。
+  （CUDA 側は #1777 で実装済み）。
 - 数値契約: gather・scatter(Overwrite) は丸めを伴わない純粋コピー・
   上書きのため CPU 参照実装（`backend-cpu::gather_scatter`）と bit
   完全一致。scatter(Add) は `.claude/rules/coding-rust.md`「勾配の

@@ -15,12 +15,15 @@
 //! 本モジュールを呼ぶが、[`MetalGatherScatter::run_gather_f32`]／
 //! [`MetalGatherScatter::run_scatter_f32`] は `pub` であり `ops.rs` を
 //! 経由せず直接呼び出せるため、呼び出し元の検査結果を信頼せず本モジュール
-//! 自身でも独立に同じ検査（[`fandhe_ai_tensor_core::gather_out_shape`]／
-//! [`fandhe_ai_tensor_core::scatter_out_shape`] の再利用による rank 一致・
-//! `dim` が rank 範囲内・非 `dim` 軸の `in_shape`／`out_shape` と
-//! `index_shape` の整合〈gather は完全一致・scatter は
-//! `index_shape[axis] <= out_shape[axis]`〉・shape 各次元の `u32`
-//! 収容・`index` の値域・**各スライス〈`input`／`index`／`src`〉の実長
+//! 自身でも独立に同じ検査（[`crate::gather_scatter_model::
+//! validate_gather_launch`]／[`crate::gather_scatter_model::
+//! validate_scatter_launch`] に切り出し済み: [`fandhe_ai_tensor_core::
+//! gather_out_shape`]／[`fandhe_ai_tensor_core::scatter_out_shape`] の
+//! 再利用による rank 一致・`dim` が rank 範囲内・非 `dim` 軸の
+//! `in_shape`／`out_shape` と `index_shape` の整合〈gather は完全一致・
+//! scatter は `index_shape[axis] <= out_shape[axis]`〉・shape 各次元の
+//! `u32` 収容・`numel`（形状次元の積）が `u32` カーネル引数へ収まる
+//! こと・`index` の値域・**各スライス〈`input`／`index`／`src`〉の実長
 //! が対応する shape の要素数積と一致すること**）を行う（判定迂回経路を
 //! 作らないための多層防御。`.claude/rules/security.md` A08。`crates/
 //! backend-cpu/src/gather_scatter.rs` と同じ二重検査方針。codex-review
@@ -34,11 +37,12 @@
 //! 実長が食い違う入力（`MetalBuffer`／`MetalIndexBuffer` は渡された
 //! スライスの実長でバッファを確保する）で、カーネルが `shapes`／
 //! `numel` から導出した添字でバッファ範囲外を読む GPU 側 OOB になりうる。
-//! これに加え、`numel`（形状次元の積）が `u32` カーネル引数へ収まるかの
-//! 検査（`validate_gather_scatter_len`。private 関数のためコードスパン
-//! 表記とする）はカーネル引数の型制約に固有であり呼び出し元検査でも
-//! 担保されないため本モジュール側で行う（`crate::elementwise::
-//! validate_elementwise_len` と同じ理由）。
+//! `validate_gather_launch`／`validate_scatter_launch` は `objc2` FFI に
+//! 一切触れない純関数のため Linux（本実装環境・CI）でも回帰テストできる
+//! （`crate::gather_scatter_model` の単体テスト。イシュー #1799
+//! レビュー指摘: 従来は macOS 実機限定〈`#[ignore]`〉の
+//! `tests/gather_scatter_parity.rs` でしか検証できておらず、Linux で
+//! 走る CI では実質未検証だった）。
 
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLDevice, MTLSize};
@@ -48,7 +52,7 @@ use fandhe_ai_tensor_core::{ScatterReduce, ShapeError};
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
-use crate::gather_scatter_model::{checked_numel, validate_index_range, validate_shapes_fit_u32};
+use crate::gather_scatter_model::{ScatterLaunch, validate_gather_launch, validate_scatter_launch};
 use crate::index_buffer::MetalIndexBuffer;
 use crate::pipeline::{self, MtlPipeline};
 
@@ -107,9 +111,12 @@ impl MetalGatherScatter {
     ///
     /// `ops.rs` を経由しない直接呼び出しでも安全なよう、本関数自身が
     /// 独立に shape・rank・`dim`・`index` 値域を検査する（モジュール
-    /// 冒頭コメント参照）。`index_shape` の要素数積（＝出力要素数）が
-    /// 0 の場合は空配列を返す（`MetalBuffer` は 0 バイト確保を拒否する
-    /// ため、デバイス確保前に早期リターンする）。
+    /// 冒頭コメント参照。実体は [`crate::gather_scatter_model::
+    /// validate_gather_launch`] へ切り出し済み——`objc2` FFI に触れない
+    /// 純関数のため Linux（本実装環境・CI）でも回帰テストできる。
+    /// イシュー #1799 レビュー指摘）。`index_shape` の要素数積
+    /// （＝出力要素数）が 0 の場合は空配列を返す（`MetalBuffer` は
+    /// 0 バイト確保を拒否するため、デバイス確保前に早期リターンする）。
     pub fn run_gather_f32(
         &self,
         ctx: &MetalContext,
@@ -119,49 +126,12 @@ impl MetalGatherScatter {
         index_shape: &[usize],
         dim: usize,
     ) -> Result<Vec<f32>, MetalError> {
-        validate_shapes_fit_u32(&[in_shape, index_shape]).map_err(shape_err_to_metal)?;
-        // `gather_out_shape` は rank 一致・`dim` 範囲に加え、非 `dim`
-        // 軸の `in_shape`／`index_shape` が完全一致することも検査する
-        // （`ops.rs::MetalBackendOps::gather` が同じ関数で検査している
-        // ものと同一の一次情報源。手書きの rank／dim 検査だけでは
-        // 「rank・dim は正しいが非 dim 軸の次元が食い違う」入力
-        // 〈例: in_shape=[2,3]・index_shape=[5,3]・dim=1〉を見逃し、
-        // カーネル側の `gs_ravel(coords, in_shape, rank)` が `in_shape`
-        // より大きい `index_shape` の非 dim 軸座標から `input` の
-        // 実バッファ長を超えるオフセットを計算しうる。advisor 指摘）。
-        fandhe_ai_tensor_core::gather_out_shape(in_shape, index_shape, dim)
+        let numel = validate_gather_launch(input, in_shape, index, index_shape, dim)
             .map_err(shape_err_to_metal)?;
-        let rank = in_shape.len();
-
-        let numel = checked_numel(index_shape).map_err(shape_err_to_metal)?;
         if numel == 0 {
             return Ok(Vec::new());
         }
-        validate_gather_scatter_len(numel)?;
-
-        let dim_size = in_shape[dim];
-        validate_index_range(index, dim, dim_size).map_err(shape_err_to_metal)?;
-
-        // `input`／`index` の実スライス長が `in_shape`／`index_shape` の
-        // 要素数積と一致することを検証する（codex-review P0 指摘:
-        // shape 引数とスライス長は独立したパラメータのため、両者が
-        // 食い違う直接呼び出しでは `MetalBuffer::new_with_data`／
-        // `MetalIndexBuffer::new_with_i32` が実スライス長でバッファを
-        // 確保する一方、カーネルは `shapes`／`numel` から導出した
-        // 添字で読むため GPU 側バッファ範囲外読み出しになりうる）。
-        let in_numel = checked_numel(in_shape).map_err(shape_err_to_metal)?;
-        if input.len() != in_numel {
-            return Err(shape_err_to_metal(ShapeError::ElementCountMismatch {
-                expected: in_numel,
-                actual: input.len(),
-            }));
-        }
-        if index.len() != numel {
-            return Err(shape_err_to_metal(ShapeError::ElementCountMismatch {
-                expected: numel,
-                actual: index.len(),
-            }));
-        }
+        let rank = in_shape.len();
 
         let mut shapes: Vec<u32> = Vec::with_capacity(rank * 2);
         shapes.extend(in_shape.iter().map(|&d| d as u32));
@@ -196,7 +166,9 @@ impl MetalGatherScatter {
     /// `scatter_overwrite_f32`／`scatter_add_f32` カーネルを起動する
     /// （`torch.scatter`／`torch.scatter_add` 相当。`reduce` で選択）。
     ///
-    /// 独立検査の方針は [`Self::run_gather_f32`] と同じ。`out_shape`
+    /// 独立検査の方針は [`Self::run_gather_f32`] と同じ（実体は
+    /// [`crate::gather_scatter_model::validate_scatter_launch`] へ
+    /// 切り出し済み。イシュー #1799 レビュー指摘）。`out_shape`
     /// （＝`input.shape()`）の要素数積が 0 の場合は空配列を返す。
     /// `index_shape`（＝`src.shape()`）の要素数積が 0（`out_shape` は
     /// 非空）の場合は、`scatter_out_shape` が非 `dim` 軸で
@@ -219,63 +191,18 @@ impl MetalGatherScatter {
         dim: usize,
         reduce: ScatterReduce,
     ) -> Result<Vec<f32>, MetalError> {
-        validate_shapes_fit_u32(&[out_shape, index_shape]).map_err(shape_err_to_metal)?;
-        // `scatter_out_shape` は rank 一致・`dim` 範囲に加え、非 `dim`
-        // 軸で `index_shape[axis] <= out_shape[axis]` であることも検査
-        // する（[`Self::run_gather_f32`] と同じ理由。第 3 引数
-        // `src_shape` には本関数の `index_shape` パラメータをそのまま
-        // 渡す——`index`／`src` は同一 shape の契約〈本モジュール冒頭
-        // コメント・`shaders/gather_scatter.metal` 冒頭コメント〉のため
-        // 自明に等しく、実際の `src` スライスとの一致は下記のスライス
-        // 実長検査で別途担保する）。
-        fandhe_ai_tensor_core::scatter_out_shape(out_shape, index_shape, index_shape, dim)
+        let ScatterLaunch {
+            numel_out,
+            idx_numel,
+        } = validate_scatter_launch(input, out_shape, index, index_shape, src, dim)
             .map_err(shape_err_to_metal)?;
-        let rank = out_shape.len();
-
-        let numel_out = checked_numel(out_shape).map_err(shape_err_to_metal)?;
         if numel_out == 0 {
             return Ok(Vec::new());
         }
-        validate_gather_scatter_len(numel_out)?;
-
-        let dim_size = out_shape[dim];
-        validate_index_range(index, dim, dim_size).map_err(shape_err_to_metal)?;
-
-        // `input` の実スライス長が `out_shape` の要素数積と一致することを
-        // 検証する（codex-review P0 指摘。`run_gather_f32` と同じ理由。
-        // `numel_out == 0`〈上の早期 return〉の場合は `input` を一切
-        // 読まないためここでは不要）。この検証は `idx_numel == 0` の
-        // パススルー〈直下〉が `input` をそのまま返す前提でもあり、
-        // 誤長の `input` を「正しい」パススルー結果として返さないため
-        // にも必要。
-        if input.len() != numel_out {
-            return Err(shape_err_to_metal(ShapeError::ElementCountMismatch {
-                expected: numel_out,
-                actual: input.len(),
-            }));
-        }
-
-        let idx_numel = checked_numel(index_shape).map_err(shape_err_to_metal)?;
         if idx_numel == 0 {
             return Ok(input.to_vec());
         }
-
-        // `index`／`src` の実スライス長が `index_shape` の要素数積と
-        // 一致することを検証する（`run_gather_f32` と同じ理由。
-        // `idx_numel == 0` の場合は上のパススルーで `index`／`src` を
-        // 一切読まないためここでは不要）。
-        if index.len() != idx_numel {
-            return Err(shape_err_to_metal(ShapeError::ElementCountMismatch {
-                expected: idx_numel,
-                actual: index.len(),
-            }));
-        }
-        if src.len() != idx_numel {
-            return Err(shape_err_to_metal(ShapeError::ElementCountMismatch {
-                expected: idx_numel,
-                actual: src.len(),
-            }));
-        }
+        let rank = out_shape.len();
 
         let mut shapes: Vec<u32> = Vec::with_capacity(rank * 2);
         shapes.extend(out_shape.iter().map(|&d| d as u32));
@@ -432,28 +359,6 @@ fn encode_scatter_dispatch(
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
 }
 
-/// gather／scatter カーネル引数 `constant uint& numel`（`shaders/
-/// gather_scatter.metal`）は 32bit のため、`numel as u32` キャストを
-/// 検証なしに行うと `numel`（`index_shape`／`out_shape` の要素数積）が
-/// `u32::MAX` を超える形状で切り詰まり、`gs_dispatch_sizes` が実際の
-/// 要素数より少ないスレッドグループしかディスパッチしなくなる。結果と
-/// して `alloc_uninit_pooled` で確保した出力バッファの一部が未初期化
-/// のまま `read_to_vec()` でホストへ返る（`crate::elementwise::
-/// validate_elementwise_len` と同じ理由・同じ対策。呼び出し元の
-/// `gather_scatter_model::validate_shapes_fit_u32` は各 shape 次元が
-/// `u32::MAX` 以下であることのみを検査し、積である numel 自体は検査し
-/// ないため本関数が必要。OWASP A03。`.claude/rules/security.md`）。
-fn validate_gather_scatter_len(len: usize) -> Result<(), MetalError> {
-    if len > u32::MAX as usize {
-        return Err(MetalError::InvalidElementwiseShape {
-            detail: format!(
-                "gather/scatter numel must fit in u32 (kernel argument type): numel={len}"
-            ),
-        });
-    }
-    Ok(())
-}
-
 /// `numel` に対する grid/threadgroup サイズを構築する（`crate::
 /// elementwise::ew_dispatch_sizes` と同一構成。`div_ceil` による末尾
 /// ブロックの余剰スレッドはカーネル内境界チェックに委ねる契約。REQ-8）。
@@ -470,25 +375,4 @@ fn gs_dispatch_sizes(numel: u32) -> (MTLSize, MTLSize) {
         depth: 1,
     };
     (threadgroups, threads_per_tg)
-}
-
-/// `validate_gather_scatter_len` は純関数（Metal ランタイム非依存）
-/// のため Linux 実行可能。`elementwise.rs::tests::
-/// validate_elementwise_len_*` と同型の境界値検査（review 指摘の
-/// 回帰防止。イシュー #1778 レビュー指摘）。
-#[cfg(test)]
-mod validate_len_tests {
-    use super::*;
-
-    #[test]
-    fn accepts_len_at_u32_max() {
-        assert!(validate_gather_scatter_len(u32::MAX as usize).is_ok());
-    }
-
-    #[test]
-    fn rejects_len_exceeding_u32_max() {
-        let err = validate_gather_scatter_len(u32::MAX as usize + 1)
-            .expect_err("u32::MAX を超える numel は拒否されるべき");
-        assert!(matches!(err, MetalError::InvalidElementwiseShape { .. }));
-    }
 }

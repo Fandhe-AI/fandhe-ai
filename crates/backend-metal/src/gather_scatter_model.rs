@@ -117,6 +117,152 @@ pub(crate) fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
         .ok_or(ShapeError::ElementCountOverflow)
 }
 
+/// `numel`（`index_shape`／`out_shape` の要素数積）がカーネル引数
+/// `constant uint&`（32bit）へ収まることを検証する（`crate::
+/// gather_scatter::validate_gather_scatter_len` の純関数版・同一契約。
+/// `numel` が `u32::MAX` を超える形状は `gs_dispatch_sizes` が実際の
+/// 要素数より少ないスレッドグループしかディスパッチせず、確保した出力
+/// バッファの一部が未初期化のままホストへ返る。`checked_numel` 自体は
+/// `usize` オーバーフローのみを検査し `u32` 収容は検査しないため、
+/// 両者は独立の検査軸として両方必要。`crate::elementwise::
+/// validate_elementwise_len` と同じ理由。OWASP A03）。
+pub(crate) fn validate_launch_len(numel: usize) -> Result<(), ShapeError> {
+    if numel > u32::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+    Ok(())
+}
+
+/// `MetalGatherScatter::run_gather_f32`（`crate::gather_scatter`）の
+/// 起動前検査をカーネル本体から切り離した純関数版（`objc2` FFI に
+/// 触れないため Linux 実行可能。イシュー #1799 レビュー指摘: P0 の
+/// スライス長検証・非 dim 軸 shape 整合検査は macOS 実機限定
+/// （`#[ignore]`）の `tests/gather_scatter_parity.rs` でしか回帰確認
+/// できておらず、Linux で走る CI では実質未検証だった）。
+///
+/// 検査順序・内容は `run_gather_f32` 本体と同一（`validate_shapes_fit_u32`
+/// → [`fandhe_ai_tensor_core::gather_out_shape`]〈rank・非 `dim` 軸整合・
+/// `dim` 範囲〉→ `checked_numel` による出力要素数計算〈0 なら早期
+/// `Ok(0)`〉→ `validate_launch_len`〈`pub(crate)` のためコードスパン
+/// 表記とする〉→ [`validate_index_range`] →
+/// `input`／`index` の実スライス長検証）。戻り値は出力要素数
+/// （`numel`。0 の場合はカーネル起動不要を呼び出し元へ伝える）。
+pub fn validate_gather_launch(
+    input: &[f32],
+    in_shape: &[usize],
+    index: &[i32],
+    index_shape: &[usize],
+    dim: usize,
+) -> Result<usize, ShapeError> {
+    validate_shapes_fit_u32(&[in_shape, index_shape])?;
+    fandhe_ai_tensor_core::gather_out_shape(in_shape, index_shape, dim)?;
+
+    let numel = checked_numel(index_shape)?;
+    if numel == 0 {
+        return Ok(0);
+    }
+    validate_launch_len(numel)?;
+
+    let dim_size = in_shape[dim];
+    validate_index_range(index, dim, dim_size)?;
+
+    let in_numel = checked_numel(in_shape)?;
+    if input.len() != in_numel {
+        return Err(ShapeError::ElementCountMismatch {
+            expected: in_numel,
+            actual: input.len(),
+        });
+    }
+    if index.len() != numel {
+        return Err(ShapeError::ElementCountMismatch {
+            expected: numel,
+            actual: index.len(),
+        });
+    }
+    Ok(numel)
+}
+
+/// [`validate_gather_launch`] の戻り値（scatter は gather と異なり
+/// 出力要素数〈`numel_out`〉と `index`／`src` 側要素数〈`idx_numel`〉の
+/// 2 値が必要なため、gather のような単一 `usize` 戻り値では表現できない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScatterLaunch {
+    /// 出力（＝`out_shape`）の要素数積。0 の場合は空配列を返す契約。
+    pub numel_out: usize,
+    /// `index`／`src`（＝`index_shape`）の要素数積。0（`numel_out` は
+    /// 非 0）の場合は `input` の完全なパススルーを返す契約
+    /// （`scatter_out_shape` の非 `dim` 軸契約に基づく。`crate::
+    /// gather_scatter::run_scatter_f32` 冒頭コメント参照）。
+    pub idx_numel: usize,
+}
+
+/// `MetalGatherScatter::run_scatter_f32`（`crate::gather_scatter`）の
+/// 起動前検査をカーネル本体から切り離した純関数版（[`validate_gather_launch`]
+/// と同じ理由で Linux 実行可能。イシュー #1799 レビュー指摘）。
+///
+/// 検査順序・内容は `run_scatter_f32` 本体と同一。`numel_out == 0` の
+/// 場合は早期 `Ok(ScatterLaunch { numel_out: 0, idx_numel: 0 })`
+/// （呼び出し元は空配列を返す）。`idx_numel == 0`（`numel_out` は非 0）
+/// の場合は `index`／`src` の値検査・長さ検証を行わずに返す（呼び出し
+/// 元は `input` の完全なパススルーを返す。Cursor Bugbot・codex-review
+/// P2 指摘）。
+pub fn validate_scatter_launch(
+    input: &[f32],
+    out_shape: &[usize],
+    index: &[i32],
+    index_shape: &[usize],
+    src: &[f32],
+    dim: usize,
+) -> Result<ScatterLaunch, ShapeError> {
+    validate_shapes_fit_u32(&[out_shape, index_shape])?;
+    fandhe_ai_tensor_core::scatter_out_shape(out_shape, index_shape, index_shape, dim)?;
+
+    let numel_out = checked_numel(out_shape)?;
+    if numel_out == 0 {
+        return Ok(ScatterLaunch {
+            numel_out: 0,
+            idx_numel: 0,
+        });
+    }
+    validate_launch_len(numel_out)?;
+
+    let dim_size = out_shape[dim];
+    validate_index_range(index, dim, dim_size)?;
+
+    if input.len() != numel_out {
+        return Err(ShapeError::ElementCountMismatch {
+            expected: numel_out,
+            actual: input.len(),
+        });
+    }
+
+    let idx_numel = checked_numel(index_shape)?;
+    if idx_numel == 0 {
+        return Ok(ScatterLaunch {
+            numel_out,
+            idx_numel: 0,
+        });
+    }
+
+    if index.len() != idx_numel {
+        return Err(ShapeError::ElementCountMismatch {
+            expected: idx_numel,
+            actual: index.len(),
+        });
+    }
+    if src.len() != idx_numel {
+        return Err(ShapeError::ElementCountMismatch {
+            expected: idx_numel,
+            actual: src.len(),
+        });
+    }
+
+    Ok(ScatterLaunch {
+        numel_out,
+        idx_numel,
+    })
+}
+
 /// `gather_f32` カーネルのホスト側逐語モデル（イシュー #1778）。
 ///
 /// 呼び出し元（`gather_scatter.rs`）が shape 検査
@@ -525,5 +671,143 @@ mod tests {
     #[test]
     fn validate_shapes_fit_u32_accepts_small_shapes() {
         assert!(validate_shapes_fit_u32(&[&[2, 3], &[4]]).is_ok());
+    }
+
+    // 以下、イシュー #1799 レビュー指摘（P0／P1／P2）の Linux 実行可能な
+    // 回帰テスト。`validate_gather_launch`／`validate_scatter_launch`・
+    // `validate_launch_len` は `objc2` FFI に触れない純関数のため、
+    // 従来 macOS 実機限定（`#[ignore]`）の `tests/gather_scatter_parity.rs`
+    // でしか検証できていなかった検査ロジックをここで直接検証する。
+
+    #[test]
+    fn validate_launch_len_accepts_len_at_u32_max() {
+        assert!(validate_launch_len(u32::MAX as usize).is_ok());
+    }
+
+    #[test]
+    fn validate_launch_len_rejects_len_exceeding_u32_max() {
+        let err = validate_launch_len(u32::MAX as usize + 1)
+            .expect_err("u32::MAX を超える numel は拒否されるべき");
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    /// codex-review P0 指摘の再現ケース: `input=[1.0]`・`in_shape=[1]`・
+    /// `index=[-1]`・`index_shape=[1]`・`dim=0`。範囲外（負）の `index`
+    /// が `validate_index_range` で拒否されることを確認する
+    /// （`MetalGatherScatter::run_gather_f32` を `ops.rs` 経由せず直接
+    /// 呼んだ場合の防御。PR #1799 レビュースレッド）。
+    #[test]
+    fn validate_gather_launch_rejects_negative_index() {
+        let err = validate_gather_launch(&[1.0], &[1], &[-1], &[1], 0).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 0,
+                index: -1,
+                dim_size: 1
+            }
+        );
+    }
+
+    /// codex-review P0 指摘: `shape` 引数とスライスの実長が食い違う
+    /// 直接呼び出し（`input` が `in_shape` の要素数積より短い）を拒否する。
+    #[test]
+    fn validate_gather_launch_rejects_input_len_mismatch() {
+        let err = validate_gather_launch(&[1.0], &[2], &[0, 0], &[2], 0).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::ElementCountMismatch {
+                expected: 2,
+                actual: 1
+            }
+        );
+    }
+
+    /// codex-review P0 指摘（advisor 追補分。#4e982e74 相当）:
+    /// rank・`dim` 自体は正しいが非 `dim` 軸の次元が食い違う入力
+    /// （`in_shape=[2,3]`・`index_shape=[5,3]`・`dim=1`）を
+    /// `gather_out_shape` 経由で拒否する（手書きの rank／dim 検査のみ
+    /// では見逃していたケース）。
+    #[test]
+    fn validate_gather_launch_rejects_non_dim_axis_mismatch() {
+        let input = vec![0.0f32; 6];
+        let index = vec![0i32; 15];
+        let err = validate_gather_launch(&input, &[2, 3], &index, &[5, 3], 1).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::ShapeMismatch {
+                lhs: vec![2, 3],
+                rhs: vec![5, 3],
+            }
+        );
+    }
+
+    /// codex-review P1 指摘の再現ケース: `shape=[0, u32::MAX, u32::MAX, 2]`・
+    /// `dim=1`。空出力（`numel == 0`）の早期 return が `row_major_strides`
+    /// 呼び出しより前に効き、`2 * u32::MAX * u32::MAX` の `usize`
+    /// オーバーフロー panic（debug ビルドの overflow-checks 有効時）を
+    /// 起こさず `Ok(0)` を返すことを確認する。
+    #[test]
+    fn validate_gather_launch_empty_output_skips_stride_overflow() {
+        let big = u32::MAX as usize;
+        let index_shape = [0usize, big, big, 2];
+        let numel = validate_gather_launch(&[], &[0, big, big, 2], &[], &index_shape, 1).unwrap();
+        assert_eq!(numel, 0);
+    }
+
+    /// codex-review P2 指摘の再現ケース: `input` の shape=[3]・
+    /// `index`／`src` の shape=[0]・`dim=0`。`index_shape` の要素数積が
+    /// 0（`out_shape` は非空）の scatter は `input` の完全な
+    /// パススルーとして扱われるべきで、`idx_numel == 0` を呼び出し元へ
+    /// 伝える。
+    #[test]
+    fn validate_scatter_launch_reports_empty_index_as_passthrough() {
+        let input = vec![1.0f32, 2.0, 3.0];
+        let launch =
+            validate_scatter_launch(&input, &[3], &[], &[0], &[], 0).expect("有効な入力のはず");
+        assert_eq!(
+            launch,
+            ScatterLaunch {
+                numel_out: 3,
+                idx_numel: 0,
+            }
+        );
+    }
+
+    /// codex-review P1 指摘の scatter 版: `out_shape=[0, u32::MAX,
+    /// u32::MAX, 2]`・`dim=1`。空出力の早期 return が
+    /// `row_major_strides(index_shape)` より前に効き overflow panic
+    /// しないことを確認する。
+    #[test]
+    fn validate_scatter_launch_empty_output_skips_stride_overflow() {
+        let big = u32::MAX as usize;
+        let out_shape = [0usize, big, big, 2];
+        let launch = validate_scatter_launch(&[], &out_shape, &[], &out_shape, &[], 1).unwrap();
+        assert_eq!(
+            launch,
+            ScatterLaunch {
+                numel_out: 0,
+                idx_numel: 0,
+            }
+        );
+    }
+
+    /// `validate_scatter_launch` も `validate_gather_launch` と同様、
+    /// rank・`dim` は正しいが非 `dim` 軸の次元が `out_shape` を超える
+    /// （`scatter_out_shape` の `index_shape[axis] <= out_shape[axis]`
+    /// 契約に反する）入力を拒否する。
+    #[test]
+    fn validate_scatter_launch_rejects_non_dim_axis_exceeding_out_shape() {
+        let input = vec![0.0f32; 12];
+        let index = vec![0i32; 15];
+        let src = vec![0.0f32; 15];
+        let err = validate_scatter_launch(&input, &[4, 3], &index, &[5, 3], &src, 1).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::ShapeMismatch {
+                lhs: vec![4, 3],
+                rhs: vec![5, 3],
+            }
+        );
     }
 }
