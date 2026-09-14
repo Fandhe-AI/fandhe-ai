@@ -231,6 +231,25 @@ fn gemm_splitk_reduce_kernel_body() -> &'static str {
     &GEMM_METAL_SOURCE[kernel_start..]
 }
 
+/// `gemm_simdgroup_tiled_te`（`thread_elements()` 方式 BlockMMA 候補
+/// カーネル。イシュー #1693）カーネル本体（`kernel void
+/// gemm_simdgroup_tiled_te(` 署名開始位置から、直後に定義される
+/// レイアウト probe カーネルの説明コメント冒頭直前まで）を切り出す
+/// （`gemm_simdgroup_tiled_hfrag_kernel_body` と同じ理由: 直前の説明
+/// コメント自体はカーネル本体のスコープ外語句〈`TILE_CLASS`／
+/// `SPLIT_K_ENABLED` 等〉を含むため、開始位置をコメントの直後
+/// 〈カーネル署名〉に取ることで負needle 検査の誤検知を避ける）。
+fn gemm_simdgroup_tiled_te_kernel_body() -> &'static str {
+    let kernel_start = GEMM_METAL_SOURCE
+        .find("kernel void gemm_simdgroup_tiled_te(")
+        .expect("gemm_simdgroup_tiled_te カーネル本体が見つかりません");
+    let next_kernel_comment_start = GEMM_METAL_SOURCE[kernel_start..]
+        .find("// thread_elements() レイアウト probe カーネル")
+        .map(|offset| kernel_start + offset)
+        .expect("simdgroup_thread_elements_layout_probe の説明コメントが見つかりません");
+    &GEMM_METAL_SOURCE[kernel_start..next_kernel_comment_start]
+}
+
 /// REQ-11・イシュー #796 の証跡: `gemm_simdgroup_tiled_f16` が半精度
 /// simdgroup 行列型（`MM_T`＝`simdgroup_half8x8`）・f32 累算
 /// （`ACC_T`＝`simdgroup_float8x8`）・行列演算ユニット命令
@@ -1581,4 +1600,125 @@ fn f16_and_hfrag_kernels_do_not_reference_split_k() {
             "gemm_simdgroup_tiled_hfrag が `{needle}` を参照しています（split-K は f32 tiled 限定のスコープ外）"
         );
     }
+}
+
+/// イシュー #1693 の証跡: `gemm_simdgroup_tiled_te`（`thread_elements()`
+/// 方式候補カーネル）が MSL 標準 API `thread_elements()`・
+/// `simdgroup_multiply_accumulate`・レーン座標 3 式（`crate::tile::
+/// thread_elements_coord` と同一式）・9 境界ヘルパ呼び出し・エピローグの
+/// 要素単位境界チェック・float4 ベクトルロード・転置分岐（`TRANS_A`/
+/// `TRANS_B`）・シグネチャ 7 引数を実際に含んでいることをロックする。
+#[test]
+fn gemm_simdgroup_tiled_te_source_uses_thread_elements_and_matrix_unit_instructions() {
+    let kernel_body = gemm_simdgroup_tiled_te_kernel_body();
+    for needle in [
+        "kernel void gemm_simdgroup_tiled_te(",
+        "device const float* a [[buffer(0)]],",
+        "device const float* b [[buffer(1)]],",
+        "device float* c [[buffer(2)]],",
+        "constant Dims& dims [[buffer(3)]],",
+        "constant GemmStrides& st [[buffer(4)]],",
+        "constant TileClassRegion& region [[buffer(5)]],",
+        "constant SplitKParams& sk [[buffer(6)]],",
+        "uint3 tgid [[threadgroup_position_in_grid]],",
+        "(void)region;",
+        "(void)sk;",
+        "uint qid = simd_lane / 4;",
+        "uint fm = (qid & 4) + ((simd_lane / 2) % 4);",
+        "uint fn = (qid & 2) * 2 + (simd_lane % 2) * 2;",
+        "thread_elements()",
+        "simdgroup_multiply_accumulate",
+        "tiled_block_out_of_range(row0, col0, dims)",
+        "tiled_a_group_in_bounds",
+        "tiled_a_elem_in_bounds",
+        "tiled_at_group_in_bounds",
+        "tiled_at_elem_in_bounds",
+        "tiled_b_group_in_bounds",
+        "tiled_b_elem_in_bounds",
+        "tiled_bt_group_in_bounds",
+        "tiled_bt_elem_in_bounds",
+        "coop_load_flat_index",
+        "if (TRANS_A) {",
+        "if (TRANS_B) {",
+        "reinterpret_cast<device const float4*>",
+        "out_row < dims.m && out_col < dims.n",
+        "out_row < dims.m && out_col + 1 < dims.n",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_te に `{needle}`（イシュー #1693）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1693 の証跡: `gemm_simdgroup_tiled_te` は本番専用の
+/// function constant・direct-load 経路・split-K・タイルクラス分割を
+/// 一切参照しない（カーネル冒頭コメント「スコープ境界」参照。
+/// `crate::gemm::MetalGemm::pipeline_for_tile` の te ガードが非 staged
+/// 候補・非 Legacy を拒否する契約と対応）。
+#[test]
+fn gemm_simdgroup_tiled_te_source_does_not_reference_out_of_scope_gates() {
+    let kernel_body = gemm_simdgroup_tiled_te_kernel_body();
+    for needle in [
+        "simdgroup_load(",
+        "simdgroup_store(",
+        "USE_TGP_STAGING",
+        "FINE_BARRIER_ENABLED",
+        "UNROLL_ACC_ENABLED",
+        "FRAG_LOAD_DEVICE_HOISTED",
+        "FRAG_LOAD_KSTEPS",
+        "COOP_LOAD_LAYOUT",
+        "TILE_CLASS",
+        "SPLIT_K_ENABLED",
+        "sk.partitions",
+        "c_out",
+        "atomic",
+    ] {
+        assert!(
+            !kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_te が `{needle}` を参照しています（イシュー #1693 のスコープ境界外）"
+        );
+    }
+}
+
+/// イシュー #1693 の証跡: レイアウト probe カーネル
+/// `simdgroup_thread_elements_layout_probe`（`crate::gemm::MetalGemm::
+/// diag_probe_thread_elements_layout` からのみ参照される診断専用カーネル）
+/// が実在し、レーン数ガード（`simd_lane < 32`）・出力長ガードを含むことを
+/// ロックする。
+#[test]
+fn gemm_metal_source_declares_thread_elements_layout_probe_kernel() {
+    for needle in [
+        "kernel void simdgroup_thread_elements_layout_probe(",
+        "device const float* src [[buffer(0)]],",
+        "device float* out [[buffer(1)]],",
+        "constant uint& out_len [[buffer(2)]],",
+        "simd_lane < 32",
+        "simd_lane * 2 + 1 < out_len",
+        "m.thread_elements()[0]",
+        "m.thread_elements()[1]",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(needle),
+            "gemm.metal に simdgroup_thread_elements_layout_probe の `{needle}`（イシュー #1693）が見つかりません"
+        );
+    }
+}
+
+/// イシュー #1693 の証跡（AC-4 相当）: `gemm_splitk_reduce`（縮約パス 2）
+/// が引き続き `atomic` 系 API を一切参照しない（本 PR の追記〈bias 勾配
+/// 縮約カーネル・te 候補カーネル・probe カーネル〉がこの既存契約を壊して
+/// いないことを非後退確認する。`gemm_splitk_reduce_source_uses_no_atomics`
+/// と同じ検査を te 追加後の状態で再確認する）。
+#[test]
+fn gemm_splitk_reduce_source_still_uses_no_atomics_after_te_addition() {
+    let kernel_body = gemm_splitk_reduce_kernel_body();
+    let code_only = kernel_body
+        .find("kernel void gemm_splitk_reduce(")
+        .map(|offset| &kernel_body[offset..])
+        .expect("gemm_splitk_reduce カーネル署名が見つかりません");
+    assert!(
+        !code_only.contains("atomic"),
+        "gemm_splitk_reduce が atomic 系 API を参照しています（イシュー #1693 追加後の非後退確認）"
+    );
 }

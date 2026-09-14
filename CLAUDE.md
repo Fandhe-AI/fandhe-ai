@@ -125,6 +125,8 @@ fandhe-ai/
     │   ├── performance-floor-decision.md # REQ-8 段階的下限の確定判断・追補記録（#158・#386・#393・#577）
     │   ├── gemm-optimization-baseline.md # REQ-8 GEMM 5 行の分母・分子（対象カーネル・実機・PyTorch 版・出典）の突合基準（#481）
     │   ├── oss-gemm-comparison-baseline.md # OSS 直接比較の再現手順・計測境界・ベースライン・再計測キャンペーン表（#755）
+    │   ├── metal-gemm-thread-elements-candidate.md # `thread_elements()` 方式 BlockMMA 候補カーネル（`gemm_simdgroup_tiled_te`。candle・MLX steel と同型のレーン単位フラグメント直接読み書き）の opt-in 実装記録（`crate::tile::MmaFragLoad`／`MetalGemm::new_with_mma_frag_load`。`pipeline_for_tile` 自身がカーネル関数名を切り替えるため既存本番入口〈`dispatch_auto`／`dispatch_variant`／`dispatch_strided_tiled_prepared` 等〉がそのまま到達する設計。本番未結線・既定不変・Linux 自己検証〈parity self-test 整備・shader_source_evidence 4 件追加〉のみ完了・実機〈Apple Silicon〉未実測。性能実測・結線可否判断は兄弟イシュー #1694 のスコープ。イシュー #1693・親 #1586）
+    │   ├── logs/metal-gemm-thread-elements-1693/ # 上記の実機実測ログ置き場（probe〈R0〉・parity〈R1〉・非 staged 拒否〈R2〉・本番との bit 一致〈R3〉。本エージェント実行環境に Apple Silicon 実機がないため未生成。README に保存すべきファイル一覧・実行コマンドのみ記載。イシュー #1693）
     │   ├── cuda-parity-baseline.md # CUDA Tensor Core 経路 parity 非後退契約のベースライン記録（#491。#1158 で f16 MatrixUnit 経路 mma 優先化の GB10 非後退確認 §12 を追記。#1162 で specialized_mma_f16 の切り分け・再割り当て・最終 sweep 記録 §13 を追記）
     │   ├── sm121-device-attributes.md # sm_121（DGX Spark GB10）デバイス属性・L1/L2 実効帯域の実測記録（#482）
     │   ├── cuda-gemm-bottleneck-diagnosis.md # CUDA GEMM M=N=K=4096 データ再利用崩壊の定量診断（#486）
