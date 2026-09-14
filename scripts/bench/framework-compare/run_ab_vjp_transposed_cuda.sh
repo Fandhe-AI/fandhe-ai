@@ -99,6 +99,20 @@ SKIP="$OUT/skipped-dgx-vjp-transposed-ab-${LABEL}.log"
 : > "$SKIP"
 ANY_FAILED=0
 
+# codex-review 指摘（イシュー #1590 PR #1812）: 同一 LABEL で再実行した
+# 場合、上記 JSONL（`results-*-${LABEL}-*.jsonl`）は毎回初期化される一方、
+# 最終判定レポート `compare-train-${LABEL}-{fresh,reuse}.md` は末尾の
+# `compare_gemm_ab.py` 呼び出し成功時にしか書き換わらない。そのため
+# ビルド失敗（`build_arm` の exit 1）や専有ゲート未成立（下記
+# `POST_BUILD_GATE_MODE` 分岐の exit 0）等で計測前に打ち切った場合、
+# 「今回は未完了の計測」であるにもかかわらず過去に成功した回のレポート
+# が成果物として残ってしまう。計測開始時点でこれらのレポート（および
+# 付随する `.err`）を削除し、未完了時に古いレポートが誤って現在の
+# 結果として残らないようにする。
+for _reset_mode in fresh reuse; do
+  rm -f "$SELF_DIR/compare-train-${LABEL}-${_reset_mode}.md" "$SELF_DIR/compare-train-${LABEL}-${_reset_mode}.err"
+done
+
 # `run_train` の出力先（bench-common が `OpenOptions::append(true)` で
 # 書き込む）を実行開始時に必ず空へ初期化する（既存 run_ab_*.sh と同じ
 # 理由。中断後の再実行での過去計測行の残存を防ぐ）。

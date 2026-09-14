@@ -94,6 +94,16 @@ else
   if [[ "$passed" != "1" ]]; then
     echo "verdict=undetermined (gate not satisfied within ${MAX_SAMPLES} samples)" >>"$GATE_LOG"
     echo "done. verdict=undetermined" >>"$GATE_LOG"
+    # codex-review 指摘（イシュー #1590 PR #1812）: 本ゲートが未成立の
+    # まま `run_ab_vjp_transposed_cuda.sh` を一度も呼び出さずに終了する
+    # ため、同スクリプト側の起動時リセット（compare-train レポートの
+    # 削除）も実行されない。同一 LABEL の過去成功回のレポートが
+    # `$WORK_DIR/compare-train-${LABEL}-{fresh,reuse}.md` に残ったまま
+    # だと、今回（verdict=undetermined＝未計測）の成果物と誤認しうる
+    # ため、ここでも同じ削除を行う。
+    for _reset_mode in fresh reuse; do
+      rm -f "$WORK_DIR/compare-train-${LABEL}-${_reset_mode}.md" "$WORK_DIR/compare-train-${LABEL}-${_reset_mode}.err"
+    done
     exit 0
   fi
   echo "gate passed at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GATE_LOG"
