@@ -1265,6 +1265,35 @@ pub(crate) fn vjp(
             )?;
             vec![(input, d_input)]
         }
+        // `Var::embedding`（`nn::Embedding`。イシュー #1604）。
+        // `Op::Gather` と同じ「Gather の VJP は scatter_add」の原則で
+        // `weight` shape のゼロテンソルへ `upstream` を `index` の
+        // 位置へ加算し、`padding_idx` が `Some(p)` の場合のみ行 `p`
+        // をゼロで上書きする（forward は当該行の現在値をそのまま
+        // 返すが、勾配は流さないという PyTorch `nn.Embedding
+        // (padding_idx=..)` の意味論。`with_row_zeroed` 参照）。
+        Op::Embedding {
+            weight,
+            index,
+            padding_idx,
+        } => {
+            let weight_shape = nodes[weight.0].shape.clone();
+            let zeros = Tensor::zeros(&weight_shape).map_err(AutodiffError::Shape)?;
+            let scattered = scatter_with_fallback(
+                ops,
+                &zeros,
+                0,
+                &index,
+                upstream,
+                ScatterReduce::Add,
+                &weight_shape,
+            )?;
+            let d_weight = match padding_idx {
+                Some(p) => with_row_zeroed(&scattered, p, weight_shape[1])?,
+                None => scattered,
+            };
+            vec![(weight, d_weight)]
+        }
         // `Var::scatter`／`Var::scatter_add`（イシュー #1776）。
         // `d_src` は `upstream`（shape=`input_shape`）を `index`
         // （shape=`src_shape`）で gather して求める。`scatter_out_shape`
@@ -1671,6 +1700,26 @@ pub(crate) fn scatter_with_fallback(
         Err(BackendError::Unsupported(_)) => Ok(eval::scatter(input, dim, index, src, reduce)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
+}
+
+/// [`Op::Embedding`] の VJP（`padding_idx` 行のゼロ上書き）が使う
+/// ヘルパー（イシュー #1604）。`Tensor<f32>` に可変スライス API が
+/// ないため、`host_slice()`（strided／owned のいずれでも密な `Vec`
+/// を返す）で値を取り出し、行 `row`（`[row*cols, (row+1)*cols)` の
+/// 半開区間。`row < t.shape()[0]` は呼び出し元（`vjp` の
+/// `Op::Embedding` 分岐）が forward 時点で検証済みの `padding_idx`
+/// をそのまま渡す契約——`Var::embedding` の入口検査を `.claude/
+/// rules/coding-rust.md` の「境界検査を省略しない」方針に従い
+/// 再度ここで信頼する）を 0.0 で上書きしてから新しい `Tensor` を
+/// 構築して返す。
+fn with_row_zeroed(t: &Tensor<f32>, row: usize, cols: usize) -> Result<Tensor<f32>, AutodiffError> {
+    let mut data = t.host_slice().into_owned();
+    let start = row * cols;
+    let end = start + cols;
+    for v in &mut data[start..end] {
+        *v = 0.0;
+    }
+    Tensor::new(data, t.shape()).map_err(AutodiffError::Shape)
 }
 
 /// [`Op::Sort`] の forward（`Var::sort`／`argsort` 経由）が使う
