@@ -18,7 +18,10 @@
 //! （`fandhe_ai_autodiff::optim`／`fandhe_ai_autodiff::nn::optim`）と 1 対 1 で
 //! 対応し、facade 独自の型・関数を持ち込まない純再エクスポートである
 //! ことを固定する（`optim_module_reexports_exactly_expected_surface`／
-//! `optim_module_is_pure_reexport`）。
+//! `optim_module_is_pure_reexport`）。イシュー #1722 で AMP（`GradScaler`／
+//! `GradScalerConfig`／`UnscaleResult`／`scale_loss`／`scale_grads`／
+//! `unscale_grads`／`has_non_finite`。実体は `fandhe_ai_autodiff::nn::optim::amp`
+//! モジュールだが再エクスポートは `nn::optim` 経由）を期待集合へ追加した。
 //!
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
 //! （`Cargo.toml`・`src/`）以外は走査しない固定パスのみを対象とし、
@@ -290,6 +293,13 @@ fn optim_module_reexports_exactly_expected_surface() {
         "StepLr",
         "Sgd",
         "SgdConfig",
+        "GradScaler",
+        "GradScalerConfig",
+        "UnscaleResult",
+        "has_non_finite",
+        "scale_grads",
+        "scale_loss",
+        "unscale_grads",
     ]
     .into_iter()
     .map(str::to_string)
@@ -593,6 +603,58 @@ fn optim_types_are_reachable_via_facade_only() {
     let global_norm = fandhe_ai::optim::global_grad_norm(&[])
         .unwrap_or_else(|e| panic!("test fixture: global_grad_norm が失敗した: {e}"));
     assert_eq!(global_norm, 0.0, "test fixture: 空スライスの norm は 0");
+
+    // AMP（イシュー #1722）: `GradScalerConfig::default()` が PyTorch
+    // `torch.cuda.amp.GradScaler` の既定 `init_scale=2**16` と一致することの
+    // ドリフトガード（`nn::optim::amp::GradScalerConfig` doc 参照）。
+    let config = fandhe_ai::optim::GradScalerConfig::default();
+    assert_eq!(
+        config.init_scale, 65536.0,
+        "test fixture: GradScalerConfig の既定 init_scale は PyTorch と同じ 2**16"
+    );
+
+    let scaler = fandhe_ai::optim::GradScaler::new(config)
+        .unwrap_or_else(|e| panic!("test fixture: GradScaler::new が失敗した: {e}"));
+    assert_eq!(
+        scaler.scale(),
+        65536.0,
+        "test fixture: 構築直後の scale は init_scale と一致するはず"
+    );
+
+    let scaled = fandhe_ai::optim::scale_grads(&[], 1.0)
+        .unwrap_or_else(|e| panic!("test fixture: scale_grads が失敗した: {e}"));
+    assert!(scaled.is_empty(), "test fixture: 空スライスは空 Vec を返す");
+
+    let unscale_result: fandhe_ai::optim::UnscaleResult = fandhe_ai::optim::unscale_grads(&[], 1.0)
+        .unwrap_or_else(|e| panic!("test fixture: unscale_grads が失敗した: {e}"));
+    assert!(
+        !unscale_result.found_non_finite,
+        "test fixture: 空スライスに非有限値は含まれない"
+    );
+    assert!(
+        !unscale_result.should_skip_step(),
+        "test fixture: 空スライスの unscale 結果は step をスキップしない"
+    );
+
+    assert!(
+        !fandhe_ai::optim::has_non_finite(&[]),
+        "test fixture: 空スライスに非有限値は含まれない"
+    );
+
+    // `scale_loss` は `&Var` を受け取る唯一の AMP 関数（`crate::Var::mul` の
+    // 合成のみで実装。`optim.rs` モジュール doc「REQ-12 との整合」節参照）。
+    let tape = fandhe_ai::tape();
+    let loss = tape.var(&fandhe_ai::Tensor::scalar(1.0_f32));
+    let scaled_loss = fandhe_ai::optim::scale_loss(&loss, 2.0)
+        .unwrap_or_else(|e| panic!("test fixture: scale_loss が失敗した: {e}"));
+    let scaled_value = scaled_loss
+        .to_tensor()
+        .get(&[])
+        .unwrap_or_else(|| panic!("test fixture: スカラー shape [] のはず"));
+    assert_eq!(
+        scaled_value, 2.0,
+        "test fixture: scale_loss(1.0, 2.0) は 2.0 のはず"
+    );
 }
 
 /// デバイスメモリプール（イシュー #1021）の公開面固定（受入基準
@@ -676,6 +738,22 @@ fn rng_tensor_generators_are_reachable_via_facade() {
     let _n: Result<fandhe_ai::Tensor<f32>, _> = fandhe_ai::randn(&[2, 3]);
     let _u: Result<fandhe_ai::Tensor<f32>, _> = fandhe_ai::rand(&[2, 3]);
     let _i: Result<fandhe_ai::Tensor<i32>, fandhe_ai::RngError> = fandhe_ai::randint(0, 10, &[4]);
+}
+
+/// `fandhe_ai::{arange, linspace, eye, zeros_like, ones_like}`（イシュー
+/// #1726）が facade から呼び出し可能な `pub fn` として型検査できることを
+/// 固定する（コンパイル時裏付け。[`rng_tensor_generators_are_reachable_via_facade`]
+/// と同型）。
+#[test]
+fn creation_tensor_generators_are_reachable_via_facade() {
+    let _a: Result<fandhe_ai::Tensor<f32>, fandhe_ai::CreationError> =
+        fandhe_ai::arange(0.0, 5.0, 1.0);
+    let _l: Result<fandhe_ai::Tensor<f32>, fandhe_ai::CreationError> =
+        fandhe_ai::linspace(0.0, 1.0, 3);
+    let _e: Result<fandhe_ai::Tensor<f32>, fandhe_ai::ShapeError> = fandhe_ai::eye(3);
+    let like = fandhe_ai::Tensor::<f32>::zeros(&[2, 3]).unwrap();
+    let _z: Result<fandhe_ai::Tensor<f32>, fandhe_ai::ShapeError> = fandhe_ai::zeros_like(&like);
+    let _o: Result<fandhe_ai::Tensor<f32>, fandhe_ai::ShapeError> = fandhe_ai::ones_like(&like);
 }
 
 /// `fandhe_ai::src/` の公開面に、プロセスグローバル RNG の内部実装型
