@@ -26,8 +26,9 @@ use fandhe_ai_tensor_core::{
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
-    concat_with_fallback, gather_with_fallback, scalar_binary_with_fallback,
-    scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
+    ArgExtremum, argext_with_fallback, concat_with_fallback, gather_with_fallback,
+    min_with_fallback, scalar_binary_with_fallback, scalar_unary_with_fallback,
+    scatter_with_fallback, sort_with_fallback, topk_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -783,6 +784,75 @@ impl<'t> Var<'t> {
             value,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `dim` に沿った縮約最小値（`torch.min(dim).values` 相当。
+    /// イシュー #1720）。`dim: None` は全軸縮約（スカラー）。[`Var::max`]
+    /// と対称だが、`BackendOps::min` はデフォルトメソッド
+    /// （既定 `Unsupported`）のため [`min_with_fallback`] 経由で
+    /// ホスト参照実装（`eval::min`）へフォールバックする
+    /// （`Var::sort`／`argsort` と同じ非破壊拡張方針）。空縮約
+    /// （要素数 0）は単位元を持たないため `AutodiffError::
+    /// InvalidArgument` を返す（`min_with_fallback` doc 参照）。
+    /// `keepdim`／多軸縮約は非対応（別イシューの対象。#1719 の
+    /// `max_dims` と同型の `min_dims` は本メソッドの対象外）。
+    pub fn min(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        let out_shape = reduce_out_shape(&shape, dim)?;
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = min_with_fallback(self.tape.ops(), &input_val, dim, &out_shape)?;
+        let id = self.tape.push_eager(
+            Op::Min {
+                input: self.id,
+                dim,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `dim` に沿った最大値の添字（`torch.argmax(dim)` 相当。イシュー
+    /// #1720）。**非微分演算**でテープにノードを追加しない
+    /// （[`Var::argsort`] と同じ扱い）。戻り値は `Tensor<i32>`
+    /// （shape は `min`／`max` と同じ縮約 shape）。タイは最初の添字・
+    /// NaN は無視（[`fandhe_ai_tensor_core::BackendOps::argmax`] doc
+    /// 参照）。空縮約はエラー。
+    pub fn argmax(&self, dim: Option<usize>) -> Result<Tensor<i32>, AutodiffError> {
+        let shape = self.shape();
+        let out_shape = reduce_out_shape(&shape, dim)?;
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        argext_with_fallback(
+            self.tape.ops(),
+            &input_val,
+            dim,
+            &out_shape,
+            ArgExtremum::Max,
+        )
+    }
+
+    /// `dim` に沿った最小値の添字（`torch.argmin(dim)` 相当。イシュー
+    /// #1720）。[`Var::argmax`] の最小値版で、非微分・空縮約エラー等の
+    /// 契約は同一（NaN 規約は [`Var::min`] と整合）。
+    pub fn argmin(&self, dim: Option<usize>) -> Result<Tensor<i32>, AutodiffError> {
+        let shape = self.shape();
+        let out_shape = reduce_out_shape(&shape, dim)?;
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        argext_with_fallback(
+            self.tape.ops(),
+            &input_val,
+            dim,
+            &out_shape,
+            ArgExtremum::Min,
+        )
     }
 
     /// 平均二乗誤差（`self` = 予測値、`target` = 正解値。全要素平均・
