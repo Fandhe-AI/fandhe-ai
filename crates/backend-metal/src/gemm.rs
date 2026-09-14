@@ -1437,8 +1437,23 @@ impl MetalGemm {
             }
         }
 
-        Err(last_err.unwrap_or(MetalError::PipelineCreation {
-            message: "no tile configuration in fallback chain was accepted".to_string(),
+        Err(last_err.unwrap_or_else(|| {
+            // イシュー #1693 codex-review 指摘: `mma_frag_load ==
+            // ThreadElements` で fallback chain が非適格候補（非 staged・
+            // 非 Legacy）のみを残して尽きた場合（例:
+            // `TileConfig::SINGLE_SIMDGROUP_8X8` 単独要求）、上記ガードで
+            // 一度もパイプライン構築を試みないため `last_err` は `None` の
+            // まま本分岐に落ちる。汎用メッセージのみでは te 固有の拒否理由
+            // が失われテスト（`gemm_te_parity.rs::
+            // te_rejects_non_staged_candidate`）の期待文言 `"(te)"` と
+            // 食い違うため、`mma_frag_load` に応じてメッセージへ te の言及
+            // を付加する。
+            let message = if self.mma_frag_load == tile::MmaFragLoad::ThreadElements {
+                "no tile configuration in fallback chain was accepted (te)".to_string()
+            } else {
+                "no tile configuration in fallback chain was accepted".to_string()
+            };
+            MetalError::PipelineCreation { message }
         }))
     }
 

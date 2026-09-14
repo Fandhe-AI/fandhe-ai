@@ -2733,8 +2733,8 @@ kernel void gemm_bias_grad_reduce_f32(
 // して追加する。本番へは一切結線しない（`crate::tile::MMA_FRAG_LOAD` の
 // 既定 `SimdgroupLoad` では `crate::gemm::MetalGemm::pipeline_for_tile`
 // が本カーネルへ到達しない。`crate::gemm::MetalGemm::
-// new_with_mma_frag_load(_, ThreadElements)` 経由でのみ構築される
-// `pipeline_for_tile_te` からのみ参照される）。
+// new_with_mma_frag_load(_, ThreadElements)` 経由でのみ、`pipeline_for_tile`
+// の `mma_frag_load == ThreadElements` 分岐から参照される）。
 //
 // **スコープ境界（本カーネルが実装しない事項）**: direct-load
 // （`USE_TGP_STAGING=false`）経路・`TILE_CLASS`（タイルクラス分割）・
@@ -2742,8 +2742,9 @@ kernel void gemm_bias_grad_reduce_f32(
 // `FRAG_LOAD_KSTEPS`（フラグメントロード方式候補）・`COOP_LOAD_LAYOUT`
 // 以外の協調ロードレイアウト・`UNROLL_ACC_ENABLED`/`FINE_BARRIER_ENABLED`。
 // これらの function constant は本カーネル本体から一切参照しない
-// （`crate::gemm::MetalGemm::pipeline_for_tile_te` が非 staged 候補・
-// `TileClass::Edge`/`Interior` を fail-closed で拒否する契約と対応）。
+// （`crate::gemm::MetalGemm::pipeline_for_tile` の `ThreadElements`
+// 分岐が非 staged 候補・`TileClass::Edge`/`Interior` を fail-closed で
+// 拒否する契約と対応）。
 // `region`/`sk` 引数はシグネチャを `gemm_simdgroup_tiled` と完全一致させ
 // `crate::gemm::encode_dispatch_tiled`（既存の記録・ディスパッチ関数）を
 // 無変更で再利用するために残すが、本体では一切参照しない（`(void)` で

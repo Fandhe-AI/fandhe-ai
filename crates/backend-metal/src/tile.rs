@@ -1815,8 +1815,10 @@ pub(crate) const TILE_CLASS_MODE: TileClassMode = TileClassMode::Legacy;
 /// `(fm, fn+1)`）を直接読み書きする方式を試す。`SimdgroupLoad`（本番既定）
 /// では `crate::gemm::MetalGemm::pipeline_for_tile` が `gemm_simdgroup_tiled`
 /// を選ぶため既定挙動は不変。`ThreadElements` は `crate::gemm::MetalGemm::
-/// pipeline_for_tile_te`（staged 経路のみ・`split_k_auto_enabled=false`
-/// 固定）が `gemm_simdgroup_tiled_te` へ切り替える。性能実測・
+/// pipeline_for_tile`（`mma_frag_load == ThreadElements` 分岐。staged
+/// 経路・`TileClass::Legacy` のみ適格とし split-K 専用キャッシュ
+/// （`pipeline_for_tile_split_k`）は経由しない）が `gemm_simdgroup_tiled_te`
+/// へ切り替える。性能実測・
 /// `tile::select`／`dispatch_auto` への組み込み判断は行わない（兄弟イシュー
 /// #1694 のスコープ。`docs/perf/metal-gemm-thread-elements-candidate.md`）。
 ///
