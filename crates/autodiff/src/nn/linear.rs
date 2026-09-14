@@ -14,7 +14,7 @@
 //! `LinearVars` を作り直し、`forward` を呼ぶ。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, ShapeError, Tensor, broadcast_shape, matmul_out_shape,
+    Activation, BackendOps, ShapeError, Tensor, broadcast_shape, gemm_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -92,7 +92,7 @@ impl Linear {
                 actual: weight.rank(),
             }));
         }
-        // `weight.shape()[0]`（in_features）が 0 の場合、`tensor-core::ops_shape::matmul_out_shape`
+        // `weight.shape()[0]`（in_features）が 0 の場合、`tensor-core::ops_shape::gemm_out_shape`
         // は `lhs[1]==rhs[0]==0` を zero-K パスとして妥当な shape 扱いで許容してしまうため、
         // forward はエラーにならず全要素 0.0 の出力を静かに返す（review 指摘 #91）。
         // `Linear::new` が同条件を `AutodiffError::InvalidArgument` で明示的に拒否しているのに
@@ -145,7 +145,7 @@ impl Linear {
     }
 
     /// [`crate::nn::module::Module::forward_host`]（`Linear` 実装。
-    /// `matmul_out_shape` → `ops.gemm` → `ops.add` の非融合合成。
+    /// `gemm_out_shape` → `ops.gemm` → `ops.add` の非融合合成。
     /// `nn/module.rs` 参照）の epilogue 融合版（イシュー #1218・
     /// `docs/perf/cpu-infer-predict-profile.md`）。[`LinearVars::
     /// forward_with_activation`]（tape 経路。`Var::linear_act` 経由）と
@@ -169,7 +169,7 @@ impl Linear {
     ///
     /// **エラー型の一致契約**: `forward_host` と同じ理由（同ファイル
     /// `forward_host` doc 参照）で、`ops.gemm_bias_act` の `?` に検査を
-    /// 任せず `matmul_out_shape`／`broadcast_shape` を先に呼び、shape
+    /// 任せず `gemm_out_shape`／`broadcast_shape` を先に呼び、shape
     /// 不整合を `forward_host` と同じ `AutodiffError::Shape` として返す
     /// （`AutodiffError::Backend` へ variant が変わらないようにする）。
     pub fn forward_host_with_activation(
@@ -178,7 +178,7 @@ impl Linear {
         input: &Tensor<f32>,
         act: Activation,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        let out_shape = matmul_out_shape(input.shape(), self.weight.shape())?;
+        let out_shape = gemm_out_shape(input.shape(), self.weight.shape())?;
         if let Some(ref bias) = self.bias {
             broadcast_shape(&out_shape, bias.shape())?;
         }
@@ -198,12 +198,22 @@ pub struct LinearVars<'t> {
 
 impl<'t> LinearVars<'t> {
     /// `y = input.matmul(weight) (+ bias)`。`input` は `[batch,
-    /// in_features]`（2 次元。`Var::matmul` の rank 制約に従う）を
-    /// 想定し、出力は `[batch, out_features]`。bias 加算は
-    /// `Var::add` の broadcast（`[batch, out_features]` + `[out_features]`）
-    /// に委ねるため、bias 勾配の batch 軸縮約は既存の `reduce_to_shape`
-    /// 機構（`grad.rs`）でそのまま成立する（TASK-9.1a 計画 §2 参照）。
+    /// in_features]`（2 次元）を想定し、出力は `[batch, out_features]`。
+    /// bias 加算は `Var::add` の broadcast（`[batch, out_features]` +
+    /// `[out_features]`）に委ねるため、bias 勾配の batch 軸縮約は既存の
+    /// `reduce_to_shape` 機構（`grad.rs`）でそのまま成立する（TASK-9.1a
+    /// 計画 §2 参照）。
+    ///
+    /// **rank≥3 は対象外（イシュー #1715）**: `Var::matmul` 自体は
+    /// イシュー #1715 でバッチ次元（rank≥3）を受理するよう拡張された
+    /// が、`nn::Linear`（PyTorch 互換の rank≥3 入力〈`[*, in_features]`
+    /// の任意の先頭次元〉対応）は本イシューのスコープ外（実装計画
+    /// §8）。本メソッドは `gemm_out_shape`（2 次元厳密版）で明示検査
+    /// することで、その挙動変更を `Var::matmul` 側の拡張から独立に
+    /// 固定する（`input.matmul(&self.weight)?` が rank≥3 を暗黙に
+    /// 受理してしまうのを防ぐ fail-closed な境界）。
     pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        gemm_out_shape(&input.shape(), &self.weight.shape())?;
         let y = input.matmul(&self.weight)?;
         match &self.bias {
             Some(bias) => y.add(bias),
@@ -360,7 +370,7 @@ mod tests {
     fn forward_host_with_activation_rejects_matmul_shape_mismatch_as_shape_error() {
         // `forward_host` と同じエラー variant 一致契約（`nn/module.rs`
         // doc 参照）: `ops.gemm_bias_act` の `?` に検査を任せず
-        // `matmul_out_shape` を先に呼ぶため、shape 不整合は
+        // `gemm_out_shape` を先に呼ぶため、shape 不整合は
         // `AutodiffError::Shape` として返る（`AutodiffError::Backend`
         // ではない）。
         let ops = ComputingMockOps;

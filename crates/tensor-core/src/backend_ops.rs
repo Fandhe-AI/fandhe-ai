@@ -50,9 +50,11 @@ use crate::Tensor;
 use crate::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use crate::device::{BackendError, Device};
 use crate::dispatch_failure::DispatchFailureCell;
+use crate::error::ShapeError;
 use crate::fusion::FusionPlan;
 use crate::pool_core::PoolStats;
 use crate::scalar_op::{ScalarBinaryOp, ScalarUnaryOp};
+use crate::tensor::{checked_numel, checked_numel_for};
 use crate::typed_ops::TypedOps;
 use half::{bf16, f16};
 
@@ -670,6 +672,55 @@ pub trait BackendOps {
         self.gemm(a, b)
     }
 
+    /// バッチ行列積（rank≥2。バッチ次元は NumPy 互換ブロードキャスト）を
+    /// 計算する（イシュー #1715。spec REQ-9 2026-09-12 追記 Tier 1
+    /// 「バッチ行列積」・`docs/compat-api-scope.md` §1.2）。
+    ///
+    /// `fandhe_ai_autodiff::Var::matmul`（rank≥3 を含む場合の分岐先）から
+    /// 呼ばれる。shape 検査は [`crate::matmul_out_shape`] に委譲する
+    /// （rank・内部次元・バッチブロードキャストの不整合は
+    /// [`BackendError::ShapeMismatch`]）。
+    ///
+    /// # デフォルト実装（既定合成。非破壊拡張）
+    ///
+    /// rank 2 同士は [`Self::gemm`] へ直接委譲する（同一カーネル呼び出しで
+    /// bit 同一を構造的に保証。`crates/backend-cpu` の `gemm_batched_parity`
+    /// テストが検証する）。rank≥3 を含む場合は、各オペランドを
+    /// `[batch..., m, k]`／`[batch..., k, n]` の contiguous 3 次元
+    /// `[B, m, k]`／`[B, k, n]` へ正規化（バッチ shape が出力と異なる
+    /// 〈broadcast が必要〉場合は `broadcast_to` → `contiguous()` →
+    /// `reshape`、等しい場合は `contiguous()` → `reshape`。中間軸の
+    /// broadcast〈stride 0〉を `reshape` へ直接渡すと
+    /// `ShapeError::NonContiguousReshape` になるため、必ず `broadcast_to`
+    /// で実体化してから `reshape` する）したうえで、出力バッチ `i` ごとに
+    /// `narrow(0, i, 1).reshape([m, k])`（`Tensor::as_slice` は `offset`
+    /// 起点で `numel` 分の窓を返す offset-aware 実装のため、narrow 後の
+    /// view をそのまま [`Self::gemm`] へ渡せる）で [`Self::gemm`] を呼び、
+    /// 結果を `[batch..., m, n]` の contiguous 出力へ順に書き込む
+    /// （per-batch 2 次元 `gemm` と同一カーネル・同一累積順序のため
+    /// bit 同一）。専用バッチカーネル（CUDA／Metal）へのオーバーライドは
+    /// 後続イシュー（#1716／#1717）が担う。
+    fn gemm_batched(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        default_gemm_batched(self, a, b, BatchedGemmKind::Standard)
+    }
+
+    /// [`Self::gemm_batched`] と同じバッチ行列積だが、各バッチの計算に
+    /// [`Self::gemm_fp32_strict`] を使う（CUDA の TF32 opt-in フラグに
+    /// 追従しない厳密 FP32 経路。イシュー #1715）。
+    ///
+    /// # デフォルト実装（既定合成。非破壊拡張）
+    /// [`Self::gemm_batched`] と同一の正規化・バッチループ構成で、各
+    /// バッチの計算のみ [`Self::gemm_fp32_strict`] に差し替える。
+    /// TF32 の概念を持たない CPU・Metal では [`Self::gemm_batched`] と
+    /// 同一結果になる。
+    fn gemm_batched_fp32_strict(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        default_gemm_batched(self, a, b, BatchedGemmKind::Fp32Strict)
+    }
+
     /// [`Self::gemm_fp32_strict`] と同じ行列積 `C = A @ B` を計算するが、
     /// 結果をホストへ戻さず**呼び出し元が渡す既存の [`DeviceBuffer<f32>`]
     /// の指定オフセットへ直接書き込む**（イシュー #1212・`docs/
@@ -1015,6 +1066,66 @@ pub trait BackendOps {
     fn softmax(&self, _x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "softmax: default fail-safe (no fused softmax kernel available)".into(),
+        ))
+    }
+
+    /// `dim` 軸に沿った累積和（`torch.cumsum` 相当。イシュー #1731）。
+    /// `dim` 以外の軸の組（lane）ごとに `dim` の添字昇順で
+    /// `out[i] = Σ_{j<=i} x[j]` を逐次計算する。出力 shape は入力と
+    /// 恒等（累積演算は shape を変えない）。`dim` は呼び出し元
+    /// （`fandhe_ai_autodiff::var::Var::cumsum`）が
+    /// [`crate::reduce_out_shape`] で範囲検査済み。
+    ///
+    /// **数値契約**: lane 全体で `f64` アキュムレータを保持し、各
+    /// ステップで `acc = acc + (x[i] as f64)` を計算したうえで、
+    /// 出力要素 `out[i]` はその時点の `acc` を `f32` へ downcast した
+    /// スナップショットとする（次ステップは downcast 後の `f32` を
+    /// 読み戻さない。PyTorch CPU の `acc_type<float> = double` と同じ
+    /// 読み方。`.claude/rules/coding-rust.md` の f64 アキュムレータ
+    /// 方針を forward の scan へ拡張したもの）。この契約により
+    /// `cumsum([1e8, 1.0, -1e8], 0) == [1e8, 1e8, 1.0]` となる（f32
+    /// 逐次アキュムレータなら末尾が `0.0` になり丸め誤差が蓄積する）。
+    /// NaN／inf は IEEE 754 のまま伝播する。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::softmax`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::cumsum` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::cumsum_along`）へフォールバックする
+    /// （それ以外のエラーは伝播する。判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。**後続 GPU 実装（CUDA／
+    /// Metal）への受け入れ契約**: 本 CPU 参照実装と bit 完全一致
+    /// （REQ-2 の tolerance は使わない）。CUDA は native `double` の
+    /// lane 逐次カーネル、Metal は `double` 非対応のため
+    /// `crates/backend-metal/src/soft_f64.rs` と同型の binary64 逐次
+    /// エミュレーションで達成できる。VJP はホスト側（`grad.rs`）に
+    /// 留めるため、GPU 実装は forward のみでよい。
+    fn cumsum(&self, _x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "cumsum: default fail-safe (no fused cumsum kernel available)".into(),
+        ))
+    }
+
+    /// `dim` 軸に沿った累積積（`torch.cumprod` 相当。イシュー #1731）。
+    /// [`Self::cumsum`] と同じ lane 構造・非破壊拡張・フォールバック
+    /// 規律に従うが、アキュムレータは `1.0` から開始し各ステップで
+    /// `acc = acc * (x[i] as f64)` を計算する。`f64` アキュムレータに
+    /// より `f32` では即座に underflow する極小値の積も、途中の
+    /// アキュムレータが有限のまま追跡され続ける（例:
+    /// `cumprod([1e-30, 1e-30, 1e30], 0)` の `out[2]` は f32 逐次なら
+    /// `0.0` になるが、f64 アキュムレータでは非零有限値になる）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::cumsum`] と同じ非破壊拡張・fail-safe・GPU 受け入れ契約。
+    /// 既定は [`BackendError::Unsupported`] を返し、`Var::cumprod` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::cumprod_along`）へフォールバック
+    /// する。
+    fn cumprod(&self, _x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "cumprod: default fail-safe (no fused cumprod kernel available)".into(),
         ))
     }
 
@@ -2080,6 +2191,268 @@ pub trait BackendOps {
     }
 }
 
+/// `default_gemm_batched`（CUDA／Metal が経由する既定合成実装）と
+/// `crates/backend-cpu::CpuBackendOps::gemm_batched`（専用オーバーライド
+/// 実装）が共有する、バッチ GEMM 出力バッファの要素数を確保前に検証する
+/// ヘルパー（PR #1810 codex-review P1 是正・イシュー #1715）。
+///
+/// `batch_len * m * n` の素朴な乗算は、結果が `usize` の範囲を超える
+/// 巨大なバッチ次元では debug ビルドで overflow-checks によりパニック
+/// し、release ビルドでは静かにラップして誤ったバッファサイズを生む
+/// （本番経路 panic／未定義挙動禁止規約 `.claude/rules/coding-rust.md`
+/// に反する）。加えて要素数が `usize` の範囲に収まっても `f32` 要素込み
+/// のバイトサイズが `Vec` の allocation 上限（`isize::MAX` バイト）を
+/// 超えると `Vec::with_capacity` が capacity overflow でパニックする
+/// （`crate::tensor::checked_numel_for` と同じ理由だが、同関数は
+/// `pub(crate)` でクレート外〈`backend-cpu` 等〉から呼べないため、本関数
+/// を新設して両者が共有する単一情報源とする）。`ShapeError::
+/// ElementCountOverflow` は両方のケースを表す型付きエラーとして
+/// `checked_numel_for` と同じ規約で再利用する。
+pub fn checked_gemm_batched_output_len(
+    batch_len: usize,
+    m: usize,
+    n: usize,
+) -> Result<usize, ShapeError> {
+    let mn = m.checked_mul(n).ok_or(ShapeError::ElementCountOverflow)?;
+    let total = batch_len
+        .checked_mul(mn)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let bytes = total
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+    Ok(total)
+}
+
+/// [`BackendOps::gemm_batched`]／[`BackendOps::gemm_batched_fp32_strict`]
+/// の既定合成実装が各バッチにどちらの 2 次元カーネルへ委譲するかを表す
+/// （イシュー #1715）。
+enum BatchedGemmKind {
+    /// [`BackendOps::gemm`] へ委譲する。
+    Standard,
+    /// [`BackendOps::gemm_fp32_strict`] へ委譲する。
+    Fp32Strict,
+}
+
+/// [`BackendOps::gemm_batched`]／[`BackendOps::gemm_batched_fp32_strict`]
+/// の既定合成実装本体（イシュー #1715）。`ops` の 2 次元カーネル
+/// （`kind` で選択）をバッチループで呼び出す形で汎用にバッチ行列積を
+/// 実現する。CUDA／Metal の専用バッチカーネル（後続イシュー）は
+/// このデフォルトメソッドをオーバーライドして本関数を経由しなくなる。
+fn default_gemm_batched<T: BackendOps + ?Sized>(
+    ops: &T,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    kind: BatchedGemmKind,
+) -> Result<Tensor<f32>, BackendError> {
+    let plan = crate::ops_shape::batched_matmul_plan(a.shape(), b.shape())
+        .map_err(BackendError::ShapeMismatch)?;
+
+    let dispatch = |x: &Tensor<f32>, y: &Tensor<f32>| match kind {
+        BatchedGemmKind::Standard => ops.gemm(x, y),
+        BatchedGemmKind::Fp32Strict => ops.gemm_fp32_strict(x, y),
+    };
+
+    // rank 2 同士（`plan.batch_shape` が空）は 2 次元カーネルへ直接
+    // 委譲する。バッチをほどく正規化・ループを経由しないため、
+    // rank 2 入力に対しては `gemm`/`gemm_fp32_strict` 単体呼び出しと
+    // bit 完全一致することが構造的に保証される。
+    if plan.batch_shape().is_empty() {
+        return dispatch(a, b);
+    }
+
+    let m = plan.m();
+    let k = plan.k();
+    let n = plan.n();
+    let batch_len: usize = plan.batch_shape().iter().product();
+
+    // 出力バッファ（`out_data`）を確保する前に、出力全体の shape
+    // （`plan.out_shape()` == `batch_shape ++ [m, n]`）が
+    // `Vec::<f32>::with_capacity` の allocation 上限（バイトサイズが
+    // `isize::MAX` 以内）に収まるか検査する（PR #1810 codex-review
+    // P1 是正）。`plan` 構築時の `checked_numel`（`ops_shape.rs`）は
+    // 要素数積が `usize` の範囲に収まるかしか見ないため、要素数積は
+    // 収まるがバイトサイズは超える shape（例えば batch 次元が
+    // `isize::MAX as usize / 4 + 1` で m = n = 1）を通過させてしまい、
+    // 後続の `Vec::with_capacity(batch_len * m * n)` が capacity
+    // overflow で panic する（本番経路 panic 禁止方針
+    // `.claude/rules/coding-rust.md` に反する）。
+    checked_numel_for::<f32>(&plan.out_shape()).map_err(BackendError::ShapeMismatch)?;
+
+    // 出力要素数を確保前に検証する（PR #1810 codex-review P1 是正）。
+    // 以前は `Vec::with_capacity(batch_len * m * n)` を素朴な乗算で
+    // 呼んでいたため、`batch_len * m * n` が `usize` の範囲を超える
+    // 巨大なバッチ次元では debug ビルドで overflow-checks によりパニック
+    // し、release ビルドでは静かにラップして誤ったバッファサイズを生む
+    // （本番経路 panic／未定義挙動禁止規約 `.claude/rules/coding-rust.md`
+    // に反する）。加えて要素数が `usize` の範囲に収まっても `f32` 要素
+    // 込みのバイトサイズが `Vec` の allocation 上限（`isize::MAX`
+    // バイト）を超えると `Vec::with_capacity` が capacity overflow で
+    // パニックする（`crate::tensor::checked_numel_for` と同じ理由。
+    // 同関数は `pub(crate)` でクレート外〈`backend-cpu` 等〉から呼べない
+    // ため、[`checked_gemm_batched_output_len`] を新設して両者が共有する
+    // 単一情報源とする）。
+    let total =
+        checked_gemm_batched_output_len(batch_len, m, n).map_err(BackendError::ShapeMismatch)?;
+    // 出力要素数が 0（`m == 0` または `n == 0`）なら結果は空テンソルで
+    // 確定するため、バッチループへ入らずに返す。空の `k`／`m` 軸を持つ
+    // 入力は実データなしで巨大な `batch_len`（例: `isize::MAX / 4 + 1`）
+    // を構成できるので、no-op GEMM を `batch_len` 回繰り返すと実質
+    // ハングする（PR #1810 Cursor Bugbot Medium 是正）。
+    // 出力要素数の検査と 0 判定はオペランドの正規化（broadcast の
+    // 実体化）より前に置く（PR #1810 codex-review P2 是正）。空の結果
+    // に対して巨大な入力コピー（例: a = [1, 1, 1]・b = [B, 1, 0] で
+    // a を B 要素へ実体化）を行わないため。
+    if total == 0 {
+        return Tensor::new(Vec::new(), &plan.out_shape()).map_err(BackendError::ShapeMismatch);
+    }
+
+    // 各オペランドを `[B, m, k]`／`[B, k, n]` の contiguous 3 次元へ
+    // 正規化する（`docs/compat-api-scope.md` §1.2 実装記録・イシュー
+    // #1715 実装計画 §2.2 の「正規化規則」）。
+    let a_norm = normalize_batched_operand(a, plan.batch_shape(), m, k)?;
+    let b_norm = normalize_batched_operand(b, plan.batch_shape(), k, n)?;
+
+    let mut out_data: Vec<f32> = Vec::with_capacity(total);
+    for i in 0..batch_len {
+        let a_i = a_norm
+            .narrow(0, i, 1)
+            .and_then(|t| t.reshape(&[m, k]))
+            .map_err(BackendError::ShapeMismatch)?;
+        let b_i = b_norm
+            .narrow(0, i, 1)
+            .and_then(|t| t.reshape(&[k, n]))
+            .map_err(BackendError::ShapeMismatch)?;
+        let c_i = dispatch(&a_i, &b_i)?;
+        // `gemm`/`gemm_fp32_strict` は shape `[m, n]` の新規確保
+        // テンソルを返す契約（既存 2 次元カーネル入口の契約そのもの）
+        // であり、常に contiguous のため `as_slice` は必ず `Some` を
+        // 返す。`None`（契約違反）は fail-closed で拒否する。
+        let c_slice = c_i.as_slice().ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "gemm_batched: per-batch gemm returned a non-contiguous tensor \
+                 (contract violation)"
+                    .into(),
+            )
+        })?;
+        out_data.extend_from_slice(c_slice);
+    }
+
+    let out_shape = plan.out_shape();
+    Tensor::new(out_data, &out_shape).map_err(BackendError::ShapeMismatch)
+}
+
+/// `default_gemm_batched` が呼ぶ、オペランドをバッチ次元付き
+/// contiguous 3 次元 `[B, rows, cols]` へ正規化するヘルパー
+/// （イシュー #1715）。`pub` にして `crates/backend-cpu` の
+/// `CpuBackendOps::gemm_batched` オーバーライドからも再利用できるように
+/// する（既定合成実装と同じ正規化規則を 2 重管理しない）。呼び出し元
+/// （同上）はいずれも `batched_matmul_plan`（`ops_shape.rs`）が
+/// 検査済みの rank≥2 shape から `[m, k]`/`[k, n]` を渡すが、本関数は
+/// `pub` 公開面であり呼び出し元の契約に依存せず自前で rank を検証する
+/// （PR #1810 codex-review 指摘。rank<2 のテンソルを渡すと
+/// `operand_rank - 2` が `usize` 減算アンダーフローし、デバッグビルドでは
+/// panic・リリースビルドでは範囲外スライス参照になる。
+/// `.claude/rules/coding-rust.md` の本番経路 panic 禁止方針）。
+///
+/// - `operand` の rank が 2 未満の場合 `BackendError::ShapeMismatch`
+///   （`ShapeError::RankMismatch { expected: 2, actual }`）を返す。
+/// - `out_batch_shape` の要素数積が `usize` の範囲でオーバーフローする
+///   場合も同様に `BackendError::ShapeMismatch`
+///   （`ShapeError::ElementCountOverflow`）を返す（`checked_numel` 経由。
+///   PR #1810 codex-review 指摘。呼び出し元の契約に依存せず自前で検証
+///   する理由は上記 rank 検証と同じ）。
+///
+/// `operand` 自身のバッチ shape（先頭 rank−2 軸）が出力バッチ shape
+/// `out_batch_shape` と**異なる**場合（broadcast が必要。中間軸の
+/// broadcast を含む）は `broadcast_to(out_batch_shape ++ [rows, cols])`
+/// で実体化してから `contiguous()` → `reshape` する。中間軸の
+/// broadcast（stride 0）を `reshape` へ直接渡すと
+/// `ShapeError::NonContiguousReshape` になるため、必ずこの順序で行う。
+/// **等しい**場合は `contiguous()`（既に contiguous なら `Arc` 共有で
+/// コピーなし）→ `reshape` のみで足りる。
+pub fn normalize_batched_operand(
+    operand: &Tensor<f32>,
+    out_batch_shape: &[usize],
+    rows: usize,
+    cols: usize,
+) -> Result<Tensor<f32>, BackendError> {
+    let operand_rank = operand.shape().len();
+    if operand_rank < 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: operand_rank,
+        }));
+    }
+    let operand_batch_shape = &operand.shape()[..operand_rank - 2];
+
+    // 末尾 2 軸（`[rows, cols]`）が要求と一致することを実体化前に検証
+    // する（PR #1810 codex-review P1 是正）。本関数は `pub` 公開面の
+    // ため呼び出し元の `plan` との整合を前提にできない。不一致のまま
+    // 下記の `contiguous()` へ進むと、`full_shape` のバイトサイズ検査
+    // （`out_batch_shape ++ [rows, cols]`）が実際の `operand.shape()`
+    // を見ていないため、例えば 1 要素を `[H, 1, 1]`（H = isize::MAX /
+    // 4 + 1）へ broadcast した view に `rows = cols = 0` を渡すと検査
+    // を通過し、`contiguous()` が H 個の f32 を確保しようとして
+    // capacity overflow で panic する（本番経路 panic 禁止方針
+    // `.claude/rules/coding-rust.md` に反する）。
+    let operand_tail = &operand.shape()[operand_rank - 2..];
+    if operand_tail != [rows, cols] {
+        return Err(BackendError::ShapeMismatch(ShapeError::MatmulDimMismatch {
+            lhs: operand.shape().to_vec(),
+            rhs: vec![rows, cols],
+        }));
+    }
+
+    // `out_batch_shape` の要素数積を `checked_numel`（`tensor.rs` と共有）で
+    // 検査する（PR #1810 codex-review 指摘。本関数は `pub` 公開面のため、
+    // 呼び出し元が渡す `out_batch_shape` の健全性を前提にせず自前で
+    // オーバーフローを検査する。未検証の `iter().product()` のままだと
+    // 例えば `[usize::MAX, 2]` のような値でオーバーフローチェック有効
+    // ビルドで乗算が panic し `.claude/rules/coding-rust.md` の本番経路
+    // panic 禁止方針に反する）。
+    let flat_len = checked_numel(out_batch_shape).map_err(BackendError::ShapeMismatch)?;
+    let mut flat_shape = Vec::with_capacity(out_batch_shape.len() + 2);
+
+    // 実体化後の完全な形状（`out_batch_shape ++ [rows, cols]`）を
+    // `checked_numel_for::<f32>` で事前検査する（PR #1810 codex-review
+    // P1 是正）。上記の `checked_numel` は要素数積が `usize` の範囲に
+    // 収まるかしか見ないため、要素数積は収まるがバイトサイズ
+    // （`numel * size_of::<f32>()`）が `Vec` の allocation 上限
+    // （`isize::MAX` バイト）を超える shape（例えば
+    // `out_batch_shape = [isize::MAX as usize / 4 + 1]`・
+    // `rows = cols = 1`）を通過させてしまい、下記の `contiguous()`／
+    // `broadcast_to().contiguous()` が内部の `Vec::with_capacity` で
+    // capacity overflow により panic する（本番経路 panic 禁止方針
+    // `.claude/rules/coding-rust.md` に反する）。`operand` 自身は既に
+    // 検証済みの `Tensor` のため equal 分岐（`operand.contiguous()`）
+    // 自体は安全だが、broadcast 分岐との分岐前に一括で検査すること
+    // で分岐間の重複を避ける。
+    let mut full_shape = Vec::with_capacity(out_batch_shape.len() + 2);
+    full_shape.extend_from_slice(out_batch_shape);
+    full_shape.push(rows);
+    full_shape.push(cols);
+    checked_numel_for::<f32>(&full_shape).map_err(BackendError::ShapeMismatch)?;
+
+    let normalized = if operand_batch_shape == out_batch_shape {
+        operand.contiguous()
+    } else {
+        operand
+            .broadcast_to(&full_shape)
+            .map_err(BackendError::ShapeMismatch)?
+            .contiguous()
+    };
+
+    flat_shape.push(flat_len);
+    flat_shape.push(rows);
+    flat_shape.push(cols);
+    normalized
+        .reshape(&flat_shape)
+        .map_err(BackendError::ShapeMismatch)
+}
+
 /// [`BackendOps::lstm_pointwise`] の戻り値（イシュー #1647）。
 ///
 /// `gates` は活性化後の `i,f,g,o`（`[B, 4H]`。`Op::LstmCell`／
@@ -2138,7 +2511,6 @@ pub fn ops_for<'a>(
 mod tests {
     use super::*;
     use crate::buffer::BufferHandle;
-    use crate::error::ShapeError;
     use std::any::Any;
 
     /// テスト専用のモック `BackendOps`。実バックエンドに依存せず
@@ -2666,6 +3038,30 @@ mod tests {
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
 
+    /// [`BackendOps::cumsum`] の既定実装が fail-safe を返すことを確認
+    /// する（イシュー #1731。`softmax_default_is_unsupported` と同型）。
+    #[test]
+    fn cumsum_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+
+        let result = ops.cumsum(&x, 0);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::cumprod`] の既定実装が fail-safe を返すことを確認
+    /// する（イシュー #1731）。
+    #[test]
+    fn cumprod_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+
+        let result = ops.cumprod(&x, 0);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
     /// [`BackendOps::log_softmax`] の既定実装が fail-safe を返すことを
     /// 確認する（イシュー #1594）。
     #[test]
@@ -2993,5 +3389,278 @@ mod tests {
             .expect("typed_ops_f64 should be Some for OpsWithTypedF64")
             .gemm(&a, &b);
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// `gemm_batched`／`gemm_batched_fp32_strict` の既定合成実装
+    /// （イシュー #1715）を検証するための、実際に 2 次元 GEMM を計算する
+    /// テスト用 `BackendOps`。`MockOps` は `gemm` が常に `Unsupported` を
+    /// 返すため既定合成の per-batch 委譲を検証できず、本構造体を別途
+    /// 用意する（naive 三重ループ。`f32::mul_add` で CPU 参照実装の FMA
+    /// 契約〈`.claude/rules/coding-rust.md`〉に揃える）。
+    struct NaiveMockOps;
+
+    impl NaiveMockOps {
+        fn naive_gemm_2d(a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            let out_shape = crate::ops_shape::gemm_out_shape(a.shape(), b.shape())
+                .map_err(BackendError::ShapeMismatch)?;
+            let (m, k, n) = (a.shape()[0], a.shape()[1], b.shape()[1]);
+            let a_s = a.as_slice().expect("gemm input must be contiguous in test");
+            let b_s = b.as_slice().expect("gemm input must be contiguous in test");
+            let mut out = vec![0.0f32; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = 0.0f32;
+                    for kk in 0..k {
+                        acc = a_s[i * k + kk].mul_add(b_s[kk * n + j], acc);
+                    }
+                    out[i * n + j] = acc;
+                }
+            }
+            Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+        }
+    }
+
+    impl BackendOps for NaiveMockOps {
+        fn device(&self) -> Device {
+            Device::Cpu
+        }
+
+        fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Self::naive_gemm_2d(a, b)
+        }
+
+        fn add(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("naive mock: add".into()))
+        }
+
+        fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("naive mock: mul".into()))
+        }
+
+        fn relu(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("naive mock: relu".into()))
+        }
+
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("naive mock: exp".into()))
+        }
+
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("naive mock: tanh".into()))
+        }
+
+        fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("naive mock: sum".into()))
+        }
+
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("naive mock: max".into()))
+        }
+    }
+
+    #[test]
+    fn gemm_batched_rank2_delegates_to_gemm() {
+        let ops = NaiveMockOps;
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let b = Tensor::new((1..=12).map(|x| x as f32).collect(), &[3, 4]).unwrap();
+        let batched = ops.gemm_batched(&a, &b).unwrap();
+        let direct = ops.gemm(&a, &b).unwrap();
+        assert_eq!(batched.shape(), direct.shape());
+        assert_eq!(batched.as_slice().unwrap(), direct.as_slice().unwrap());
+    }
+
+    #[test]
+    fn gemm_batched_matches_per_batch_gemm() {
+        // B=2・m=2・k=3・n=2 のバッチ行列積が、各バッチを個別に
+        // `gemm`（2 次元）へ渡した結果と要素単位で完全一致することを
+        // 検証する（既定合成実装の bit 同一契約）。
+        let ops = NaiveMockOps;
+        let a = Tensor::new((0..12).map(|x| x as f32).collect(), &[2, 2, 3]).unwrap();
+        let b = Tensor::new((0..12).map(|x| x as f32).collect(), &[2, 3, 2]).unwrap();
+
+        let batched = ops.gemm_batched(&a, &b).unwrap();
+        assert_eq!(batched.shape(), &[2, 2, 2]);
+
+        for i in 0..2 {
+            let a_i = a.narrow(0, i, 1).unwrap().reshape(&[2, 3]).unwrap();
+            let b_i = b.narrow(0, i, 1).unwrap().reshape(&[3, 2]).unwrap();
+            let expected = ops.gemm(&a_i, &b_i).unwrap();
+            let got = batched.narrow(0, i, 1).unwrap().reshape(&[2, 2]).unwrap();
+            assert_eq!(got.as_slice().unwrap(), expected.as_slice().unwrap());
+        }
+    }
+
+    #[test]
+    fn gemm_batched_broadcasts_lhs_batch() {
+        // lhs=[1,2,3]（バッチ 1）・rhs=[2,3,2]（バッチ 2）。
+        // lhs はバッチ 0 の内容が両方の出力バッチへ繰り返し使われる。
+        let ops = NaiveMockOps;
+        let a = Tensor::new(vec![1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0], &[1, 2, 3]).unwrap();
+        let b = Tensor::new((0..12).map(|x| x as f32).collect(), &[2, 3, 2]).unwrap();
+
+        let batched = ops.gemm_batched(&a, &b).unwrap();
+        assert_eq!(batched.shape(), &[2, 2, 2]);
+
+        let a_2d = a.reshape(&[2, 3]).unwrap();
+        for i in 0..2 {
+            let b_i = b.narrow(0, i, 1).unwrap().reshape(&[3, 2]).unwrap();
+            let expected = ops.gemm(&a_2d, &b_i).unwrap();
+            let got = batched.narrow(0, i, 1).unwrap().reshape(&[2, 2]).unwrap();
+            assert_eq!(got.as_slice().unwrap(), expected.as_slice().unwrap());
+        }
+    }
+
+    #[test]
+    fn gemm_batched_shape_mismatch_is_shape_mismatch_error() {
+        let ops = NaiveMockOps;
+        let a = Tensor::new((0..12).map(|x| x as f32).collect(), &[2, 2, 3]).unwrap();
+        let b = Tensor::new((0..16).map(|x| x as f32).collect(), &[2, 4, 2]).unwrap();
+        let err = ops.gemm_batched(&a, &b).unwrap_err();
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    #[test]
+    fn gemm_batched_zero_batch_returns_empty_output() {
+        let ops = NaiveMockOps;
+        let a = Tensor::new(Vec::<f32>::new(), &[0, 2, 3]).unwrap();
+        let b = Tensor::new(Vec::<f32>::new(), &[0, 3, 2]).unwrap();
+        let out = ops.gemm_batched(&a, &b).unwrap();
+        assert_eq!(out.shape(), &[0, 2, 2]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    #[test]
+    fn gemm_batched_fp32_strict_matches_gemm_batched_for_backend_without_tf32() {
+        // TF32 の概念を持たない CPU 相当のバックエンドでは
+        // `gemm_batched_fp32_strict` は `gemm_batched` と同一結果になる
+        // （既定 `gemm_fp32_strict` が `gemm` へ委譲するため）。
+        let ops = NaiveMockOps;
+        let a = Tensor::new((0..12).map(|x| x as f32).collect(), &[2, 2, 3]).unwrap();
+        let b = Tensor::new((0..12).map(|x| x as f32).collect(), &[2, 3, 2]).unwrap();
+        let standard = ops.gemm_batched(&a, &b).unwrap();
+        let strict = ops.gemm_batched_fp32_strict(&a, &b).unwrap();
+        assert_eq!(standard.as_slice().unwrap(), strict.as_slice().unwrap());
+    }
+
+    #[test]
+    fn normalize_batched_operand_rejects_rank_below_2() {
+        // PR #1810 codex-review 指摘: `pub` 公開面である
+        // `normalize_batched_operand` は呼び出し元の契約（rank≥2 の shape
+        // のみ渡す）に依存せず、rank 0（スカラー）・rank 1 の入力を自前で
+        // 検出して `Err` を返さなければならない（`operand_rank - 2` の
+        // `usize` 減算アンダーフローによる panic・範囲外スライス参照を
+        // 防ぐため）。
+        let scalar = Tensor::new(vec![1.0f32], &[]).unwrap();
+        let err = normalize_batched_operand(&scalar, &[2], 3, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: 0
+            })
+        ));
+
+        let rank1 = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        let err = normalize_batched_operand(&rank1, &[2], 3, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn normalize_batched_operand_rejects_batch_shape_element_count_overflow() {
+        // PR #1810 codex-review 指摘: `out_batch_shape` の要素数積を
+        // 未検証の `iter().product()` で計算すると、正常な rank≥2 の
+        // `operand` を渡していても `out_batch_shape` に
+        // `[usize::MAX, 2]` のような値が混入した場合、オーバーフロー
+        // チェック有効ビルドでは `broadcast_to`／`reshape` へ到達する
+        // 前に乗算自体が panic する。`checked_numel` 経由の事前検査で
+        // `Err(ShapeError::ElementCountOverflow)` を返すことを確認する。
+        let operand = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let err = normalize_batched_operand(&operand, &[usize::MAX, 2], 2, 2).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn normalize_batched_operand_rejects_byte_size_overflow_without_element_count_overflow() {
+        // PR #1810 codex-review P1 指摘: `out_batch_shape =
+        // [isize::MAX as usize / 4 + 1]`・rows = cols = 1 は、要素数積
+        // （`checked_numel`。`usize` の範囲）自体はオーバーフローしない
+        // が、f32 としてのバイトサイズ（`numel * 4`）は `isize::MAX` を
+        // 超えるため `Vec::<f32>::with_capacity` が capacity overflow
+        // で panic しうる。`checked_numel_for::<f32>` による事前検査で
+        // panic せず `Err(ShapeError::ElementCountOverflow)` を返す
+        // ことを確認する（broadcast 分岐に到達する rank≥2 operand で
+        // 再現）。
+        let huge = isize::MAX as usize / 4 + 1;
+        let operand = Tensor::new(vec![1.0f32], &[1, 1]).unwrap();
+        let err = normalize_batched_operand(&operand, &[huge], 1, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn normalize_batched_operand_rejects_trailing_dims_mismatch_before_materialization() {
+        // PR #1810 codex-review P1 指摘: 1 要素を `[H, 1, 1]`
+        // （H = isize::MAX / 4 + 1）へ broadcast した view（実データは
+        // 1 要素のまま）に `rows = cols = 0` を渡すと、`full_shape =
+        // [H, 0, 0]` のバイトサイズ検査は通過するが、末尾 2 軸が一致
+        // しないまま `contiguous()` へ進むと H 個の f32 を確保しようと
+        // して panic する。末尾 2 軸の不一致を実体化前に
+        // `MatmulDimMismatch` として拒否することを確認する。
+        let huge = isize::MAX as usize / 4 + 1;
+        let one = Tensor::new(vec![1.0f32], &[1, 1, 1]).unwrap();
+        let view = one.broadcast_to(&[huge, 1, 1]).unwrap();
+        let err = normalize_batched_operand(&view, &[huge], 0, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::MatmulDimMismatch { .. })
+        ));
+    }
+
+    /// [`checked_gemm_batched_output_len`] 単体の境界値検証（PR #1810
+    /// codex-review P1 是正）。`batch_len * m * n` 自体は `usize` の
+    /// 範囲に収まっても、`f32` 要素込みのバイトサイズが `Vec` の
+    /// allocation 上限（`isize::MAX` バイト）を超える場合は
+    /// `ElementCountOverflow` を返す（実際の確保を試みない）。
+    #[test]
+    fn checked_gemm_batched_output_len_rejects_byte_size_overflow() {
+        let huge_batch = isize::MAX as usize / 4 + 1;
+        let err = checked_gemm_batched_output_len(huge_batch, 1, 1).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn checked_gemm_batched_output_len_rejects_usize_overflow() {
+        let err = checked_gemm_batched_output_len(usize::MAX, 2, 2).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn checked_gemm_batched_output_len_accepts_in_range_size() {
+        assert_eq!(checked_gemm_batched_output_len(3, 4, 5).unwrap(), 60);
+    }
+
+    /// [`default_gemm_batched`]（CUDA／Metal が経由する既定合成実装）
+    /// 経由でも、出力バイトサイズが `isize::MAX` を超える巨大なバッチ
+    /// 次元は実際の確保を試みずに `BackendError::ShapeMismatch` を
+    /// 返す（`k = 0` の shape でテスト自体は実データを確保しない）。
+    #[test]
+    fn gemm_batched_huge_batch_output_bytes_overflow_is_shape_mismatch_not_panic() {
+        let huge_batch = isize::MAX as usize / 4 + 1;
+        let ops = NaiveMockOps;
+        let a = Tensor::new(Vec::<f32>::new(), &[huge_batch, 1, 0]).unwrap();
+        let b = Tensor::new(Vec::<f32>::new(), &[huge_batch, 0, 1]).unwrap();
+        let err = ops.gemm_batched(&a, &b).unwrap_err();
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
     }
 }

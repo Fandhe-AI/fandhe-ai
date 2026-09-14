@@ -49,7 +49,7 @@
 use half::f16;
 
 use fandhe_ai_tensor_core::device::BackendError;
-use fandhe_ai_tensor_core::{BackendOps, Tensor, TypedOps, matmul_out_shape};
+use fandhe_ai_tensor_core::{BackendOps, Tensor, TypedOps, gemm_out_shape};
 
 use crate::context_cache;
 use crate::ops::CudaBackendOps;
@@ -93,7 +93,7 @@ impl TypedOps<f16> for CudaBackendOps {
     /// 契約。`self.with_driver_call` の外側で完結する）。
     fn gemm(&self, a: &Tensor<f16>, b: &Tensor<f16>) -> Result<Tensor<f16>, BackendError> {
         let out_shape =
-            matmul_out_shape(a.shape(), b.shape()).map_err(BackendError::ShapeMismatch)?;
+            gemm_out_shape(a.shape(), b.shape()).map_err(BackendError::ShapeMismatch)?;
 
         let m = u32::try_from(a.shape()[0]).map_err(|_| {
             BackendError::KernelLaunchFailed("gemm: m exceeds u32 range".to_string())

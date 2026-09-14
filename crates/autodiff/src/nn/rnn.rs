@@ -27,7 +27,7 @@
 //! （tape 不要）はテープを介さないため、本モジュール内で `Tensor` を
 //! 直接連結し `[T,B,H]` を返せる（`stack_host_tensors`）。
 
-use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor, matmul_out_shape, require_same_shape};
+use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor, gemm_out_shape, require_same_shape};
 
 use crate::error::AutodiffError;
 use crate::nn::init::{
@@ -368,9 +368,9 @@ fn validate_cell_host_shapes(
             rhs: h_shape.to_vec(),
         }));
     }
-    let out_ih = matmul_out_shape(x_shape, w_ih_shape)
+    let out_ih = gemm_out_shape(x_shape, w_ih_shape)
         .map_err(|_| AutodiffError::InvalidArgument(format!("{op_name}: x * w_ih が不整合")))?;
-    let out_hh = matmul_out_shape(h_shape, w_hh_shape).map_err(|_| {
+    let out_hh = gemm_out_shape(h_shape, w_hh_shape).map_err(|_| {
         AutodiffError::InvalidArgument(format!("{op_name}: h_prev * w_hh が不整合"))
     })?;
     require_same_shape(&out_ih, &out_hh)?;
