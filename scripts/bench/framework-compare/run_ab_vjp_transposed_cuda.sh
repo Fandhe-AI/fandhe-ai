@@ -86,8 +86,12 @@ validate_tree() {
 }
 validate_tree AB_BEFORE_TREE "${AB_BEFORE_TREE:-}"
 validate_tree AB_AFTER_TREE "${AB_AFTER_TREE:-}"
-BEFORE_TREE="$AB_BEFORE_TREE"
-AFTER_TREE="$AB_AFTER_TREE"
+# Cursor Bugbot 指摘（イシュー #1590 PR #1812）: 末尾スラッシュを含む絶対パスを
+# そのまま使うと、後段の `cargo tree` ハードゲート（`${tree}/crates/facade`
+# パターン）が二重スラッシュを要求してしまい、`fandhe-ai` が実際には正しく
+# 解決できているのに不一致で誤って中断しうる。ここで正規化しておく。
+BEFORE_TREE="${AB_BEFORE_TREE%/}"
+AFTER_TREE="${AB_AFTER_TREE%/}"
 
 OUT="$SELF_DIR/results/raw"
 mkdir -p "$OUT"
@@ -127,14 +131,23 @@ build_arm() { # build_arm <arm> <tree>
     echo "error: build $arm: exe not found (tree=$tree)" >&2
     exit 1
   fi
-  cp "$exe" "$OUT/bench-fandhe-${arm}-${LABEL}"
+  if ! cp "$exe" "$OUT/bench-fandhe-${arm}-${LABEL}"; then
+    echo "error: build $arm: failed to copy built binary from $exe to $OUT/bench-fandhe-${arm}-${LABEL} (tree=$tree)" >&2
+    exit 1
+  fi
   # #1166 事故対応と同型のハードゲート: `cargo tree` で `fandhe-ai` が
   # このツリー自身の path-patched facade へ実際に解決されていることを
   # 確認する（別ツリーの facade を誤って参照していないことの検証）。
-  local tree_output
+  # codex-review／Bugbot 指摘（イシュー #1590 PR #1812）: `$tree` は
+  # 未信頼な絶対パス（正規表現メタ文字・末尾スラッシュを含みうる）の
+  # ため、そのまま `grep -E` パターンへ埋め込まず ERE メタ文字を
+  # エスケープしてリテラル一致させる（誤って不一致になり、正しく解決
+  # できているのに計測前に fail-closed で中断してしまうのを防ぐ）。
+  local tree_escaped tree_output
+  tree_escaped="$(printf '%s' "$tree" | sed -e 's/[.[\^$(){}+*?|]/\\&/g')"
   tree_output="$( cd "${tree}/scripts/bench/framework-compare" && \
     cargo tree -p bench-fandhe --depth 1 --config "$patch_config" 2>&1 )"
-  if ! echo "$tree_output" | grep -qE "fandhe-ai v[0-9.]+ \(${tree}/crates/facade\)"; then
+  if ! echo "$tree_output" | grep -qE "fandhe-ai v[0-9.]+ \(${tree_escaped}/crates/facade\)"; then
     echo "error: fandhe-ai did not resolve to the path-patched crates/facade within its own tree ($arm, tree=$tree); cargo tree:" >&2
     echo "$tree_output" >&2
     exit 1
