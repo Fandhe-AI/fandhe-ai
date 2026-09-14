@@ -157,11 +157,16 @@ pub(crate) fn merge_for_reduction<'t>(
     plan: &ReducePlan,
 ) -> Result<(Var<'t>, Option<usize>), AutodiffError> {
     let rank = plan.kept_axes.len() + plan.reduced_axes.len();
-    if plan.reduced_axes.len() == rank {
-        return Ok((v, None));
-    }
+    // 単一軸判定を全軸判定より先に評価する（rank=1 のとき両条件が
+    // 同時に成立しうるため）。公開 API 契約「`sum_dims(&[d], false)`
+    // は `sum(Some(d))` と bit 同一」を守るには単一軸経路を優先する
+    // 必要がある（全軸経路 `sum(None)` は CPU 実装上 4096 要素単位の
+    // 部分和結合を行うため、逐次加算の単一軸経路と数値的に異なりうる）。
     if plan.reduced_axes.len() == 1 {
         return Ok((v, Some(plan.reduced_axes[0])));
+    }
+    if plan.reduced_axes.len() == rank {
+        return Ok((v, None));
     }
     let perm: Vec<usize> = plan
         .kept_axes

@@ -214,6 +214,70 @@ fn max_dims_single_axis_is_bit_identical_to_max() {
     assert_eq!(dense(&via_dims), dense(&via_single));
 }
 
+#[test]
+fn sum_dims_rank_one_is_bit_identical_to_sum_not_full_reduction() {
+    // 回帰テスト（codex-review／Cursor Bugbot 指摘。イシュー #1719
+    // PR #1829）: `merge_for_reduction` が全軸判定（`reduced_axes.len()
+    // == rank`）を単一軸判定より先に評価すると、rank=1 の
+    // `sum_dims(&[0], false)` が `sum(Some(0))`（単一軸・逐次加算）
+    // ではなく `sum(None)`（全軸・CPU 実装は 4096 要素単位の部分和を
+    // 結合する）へ委譲されてしまい、bit 同一契約に違反する。
+    // 長さ 4098（CHUNK=4096 境界をまたぐ）・index 0 = 1e20・
+    // index 4096 = -1e20・index 4097 = 1.0（他ゼロ）という、全軸経路
+    // （部分和結合）と単一軸経路（逐次加算）とで結果が異なる（0.0 対
+    // 1.0）具体例で bit 同一を検証する。
+    let mut data = vec![0.0f32; 4098];
+    data[0] = 1e20;
+    data[4096] = -1e20;
+    data[4097] = 1.0;
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = t(data, &[4098]);
+    let xv = tape.var(&x);
+    let via_dims = xv.sum_dims(&[0], false).unwrap().to_tensor();
+    let via_single = xv.sum(Some(0)).unwrap().to_tensor();
+    assert_eq!(dense(&via_dims), dense(&via_single));
+    assert_eq!(via_dims.shape(), via_single.shape());
+    // 単一軸経路（逐次加算）は index 順に加算するため
+    // 1e20 + (-1e20) が先に相殺されて 0.0 になり、その後 1.0 が
+    // そのまま残る（1e20 は f32 の丸めにより 1e20 + 1.0 == 1e20 と
+    // なり得るため、加算順序がこの値になる根拠）。
+    assert_eq!(scalar(&via_single), 1.0);
+}
+
+#[test]
+fn mean_dims_rank_one_is_bit_identical_to_mean_not_full_reduction() {
+    // 上記 `sum_dims_rank_one_is_bit_identical_to_sum_not_full_reduction`
+    // の `mean_dims` 版（`mean_dims` は `sum_dims` と同じ
+    // `merge_for_reduction` を経由するため同じバグが伝播する）。
+    let mut data = vec![0.0f32; 4098];
+    data[0] = 1e20;
+    data[4096] = -1e20;
+    data[4097] = 1.0;
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = t(data, &[4098]);
+    let xv = tape.var(&x);
+    let via_dims = xv.mean_dims(&[0], false).unwrap().to_tensor();
+    let via_single = xv.mean(Some(0)).unwrap().to_tensor();
+    assert_eq!(dense(&via_dims), dense(&via_single));
+    assert_eq!(via_dims.shape(), via_single.shape());
+}
+
+#[test]
+fn max_dims_rank_one_is_bit_identical_to_max_not_full_reduction() {
+    // `max_dims` 版。全軸経路と単一軸経路は `max` 自体の値は同じに
+    // なりうるが、経路（`Op::Max` の `dim` 引数）が異なれば勾配
+    // （`max_vjp` の分配 shape）が変わりうるため、rank=1 でも単一軸
+    // 経路を通ることを shape・値の両方で確認する。
+    let data: Vec<f32> = (0..24).map(|v| ((v * 7) % 13) as f32).collect();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = t(data, &[24]);
+    let xv = tape.var(&x);
+    let via_dims = xv.max_dims(&[0], false).unwrap().to_tensor();
+    let via_single = xv.max(Some(0)).unwrap().to_tensor();
+    assert_eq!(dense(&via_dims), dense(&via_single));
+    assert_eq!(via_dims.shape(), via_single.shape());
+}
+
 // --- 3. 非連続 dims が permute／contiguous を経由すること ---
 
 #[test]
