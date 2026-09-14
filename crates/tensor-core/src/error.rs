@@ -104,6 +104,22 @@ pub enum ShapeError {
         index: i64,
         dim_size: usize,
     },
+
+    /// `sort`／`topk`（イシュー #1733）が出力添字（`Tensor<i32>`）へ
+    /// 書き戻す元の `usize` 添字が `i32` の表現範囲（`i32::MAX`）を
+    /// 超える。
+    ///
+    /// `backend-cpu::sort_topk`（`BackendOps::sort`／`topk` の CPU
+    /// 実装本体）・`fandhe_ai_autodiff::eval::sort`／`eval::topk`
+    /// （`BackendOps` が `Unsupported` を返したときのみ使われる
+    /// ホスト参照実装。CUDA／Metal は #1741 未実装のため現状は
+    /// こちらが実行される）はいずれも `orig_idx as i32` のような
+    /// 無検査キャストではなく `i32::try_from(orig_idx)` で検査し、
+    /// 失敗時に本 variant を返す（codex-review 指摘・PR #1818。
+    /// `.claude/rules/security.md` A08 の「判定迂回経路を作らない」
+    /// に基づき、両実装で同一の添字契約を満たす）。`dim` 軸のサイズが
+    /// `i32::MAX` を超える巨大テンソルでのみ構築されうる。
+    IndexRangeOverflow { index: usize },
 }
 
 impl fmt::Display for ShapeError {
@@ -160,6 +176,10 @@ impl fmt::Display for ShapeError {
             } => write!(
                 f,
                 "index {index} out of range [0, {dim_size}) for dim {dim}"
+            ),
+            ShapeError::IndexRangeOverflow { index } => write!(
+                f,
+                "index {index} exceeds i32::MAX and cannot be represented in an i32 index tensor"
             ),
         }
     }
