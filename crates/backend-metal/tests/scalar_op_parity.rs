@@ -1,7 +1,8 @@
-//! イシュー #1707/#1708: `BackendOps::scalar_unary`／`scalar_binary`
-//! （`Sqrt`／`Sub`／`Div`／`Pow`・`Neg`／`Abs`／`Log`／`Log2`／`Log10`／
-//! `Sin`／`Cos`／`Tan`）の CPU-Metal 数値一致検証（CUDA 側
-//! `backend-cuda::tests::scalar_op_parity`〈#1700/#1701〉の Metal
+//! イシュー #1707/#1708/#1709: `BackendOps::scalar_unary`／
+//! `scalar_binary`（`Sqrt`／`Sub`／`Div`／`Pow`・`Neg`／`Abs`／`Log`／
+//! `Log2`／`Log10`／`Sin`／`Cos`／`Tan`・比較演算 6 種〈`Gt`／`Ge`／
+//! `Lt`／`Le`／`Eq`／`Ne`〉／`Clamp`）の CPU-Metal 数値一致検証（CUDA 側
+//! `backend-cuda::tests::scalar_op_parity`〈#1700/#1701/#1702〉の Metal
 //! 対応版）。
 //!
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する
@@ -18,10 +19,12 @@
 //! 754 丸めとなりホスト `f32` 演算と bit 同一になる想定（`crate::
 //! scalar_op_source` モジュール doc「コンパイルオプションと数値契約」
 //! 参照）のため、`assert_parity`（REQ-2 複合判定）に加え bit 同一
-//! （より強い検証。`NaN` はクラス一致）も併記する。`Pow`・超越関数系
-//! （`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`。`metal::precise::` の
-//! ulp 誤差がホスト側 libm と一致する保証がない）は `assert_parity`
-//! のみで検証する（既存 `exp`／`tanh` と同じ扱い）。
+//! （より強い検証。`NaN` はクラス一致）も併記する。比較演算 6 種・
+//! `Clamp`（イシュー #1709）も算術を含まない純粋な比較・選択のため
+//! 同様に bit 同一で検証する。`Pow`・超越関数系（`Log`／`Log2`／
+//! `Log10`／`Sin`／`Cos`／`Tan`。`metal::precise::` の ulp 誤差が
+//! ホスト側 libm と一致する保証がない）は `assert_parity` のみで検証
+//! する（既存 `exp`／`tanh` と同じ扱い）。
 //!
 //! Linux CI での型検査（実機なしでもコンパイル可能性を担保）:
 //!
@@ -184,11 +187,94 @@ fn assert_binary_broadcast_parity(op: ScalarBinaryOp, seed_a: u64, seed_b: u64) 
     );
 }
 
+/// 比較演算（`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`）用の `(a, b)` ペアを
+/// 生成する（CUDA 側 `backend-cuda/tests/scalar_op_parity.rs::
+/// comparison_pair_data` と同型）。独立乱数 2 本では `Eq` が全 `0.0`・
+/// `Ne` が全 `1.0` になり検証にならないため、`a` から意図的に等値・
+/// やや大きい値・やや小さい値を混在させて派生させる（イシュー #1709）。
+fn comparison_pair_data(seed: u64, len: usize) -> (Vec<f32>, Vec<f32>) {
+    let a = positive_data(&mut Xorshift64Star::new(seed), len);
+    let b = a
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| match i % 3 {
+            0 => v,        // 等値ケース
+            1 => v + 0.25, // a < b
+            _ => v - 0.25, // a > b
+        })
+        .collect();
+    (a, b)
+}
+
+/// 比較演算 [`ScalarBinaryOp`]（`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`）の
+/// CPU-Metal parity を bit 同一（0.0/1.0 リテラルの純粋な比較演算の
+/// ため。モジュール doc 参照）で検証する。
+fn assert_comparison_parity(op: ScalarBinaryOp, seed: u64, shape: &[usize]) {
+    let numel: usize = shape.iter().product();
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+
+    let (a_data, b_data) = comparison_pair_data(seed, numel);
+    let a = Tensor::new(a_data, shape).expect("valid tensor");
+    let b = Tensor::new(b_data, shape).expect("valid tensor");
+
+    let cpu_result = cpu
+        .scalar_binary(op, &a, &b)
+        .expect("cpu scalar_binary always succeeds for implemented kinds");
+    let metal_result = metal
+        .scalar_binary(op, &a, &b)
+        .expect("metal scalar_binary must succeed on Metal-equipped test runner");
+
+    let cpu_slice = cpu_result.as_slice().expect("contiguous");
+    let metal_slice = metal_result.as_slice().expect("contiguous");
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("scalar_binary({op:?}) cpu-metal parity shape={shape:?}"),
+        metal_slice,
+        cpu_slice,
+    );
+    assert_eq!(
+        metal_slice, cpu_slice,
+        "scalar_binary({op:?}): 比較演算は 0.0/1.0 の純粋な比較のため bit 同一のはず（shape={shape:?}）"
+    );
+}
+
+/// [`ScalarUnaryOp::Clamp`] の CPU-Metal parity を bit 同一（算術を含ま
+/// ない純粋な選択演算のため）で検証する。
+fn assert_clamp_parity(min: f32, max: f32, seed: u64, shape: &[usize]) {
+    let numel: usize = shape.iter().product();
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+    let op = ScalarUnaryOp::Clamp { min, max };
+
+    let a = Tensor::new(positive_data(&mut Xorshift64Star::new(seed), numel), shape)
+        .expect("valid tensor");
+
+    let cpu_result = cpu
+        .scalar_unary(op, &a)
+        .expect("cpu scalar_unary always succeeds for implemented kinds");
+    let metal_result = metal
+        .scalar_unary(op, &a)
+        .expect("metal scalar_unary must succeed on Metal-equipped test runner");
+
+    let cpu_slice = cpu_result.as_slice().expect("contiguous");
+    let metal_slice = metal_result.as_slice().expect("contiguous");
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("scalar_unary(Clamp{{min={min},max={max}}}) cpu-metal parity shape={shape:?}"),
+        metal_slice,
+        cpu_slice,
+    );
+    assert_eq!(
+        metal_slice, cpu_slice,
+        "scalar_unary(Clamp{{min={min},max={max}}}): 純粋な選択演算のため bit 同一のはず（shape={shape:?}）"
+    );
+}
+
 /// 実機必須の形状網羅（受け入れ条件の本体）。`Sqrt`（unary）・
 /// `Sub`／`Div`（bit 同一）・`Pow`（REQ-2 のみ）に加え、超越関数系 8
 /// kind（`Neg`／`Abs` は bit 同一、`Log`／`Log2`／`Log10`／`Sin`／
-/// `Cos`／`Tan` は REQ-2 のみ）を、`PARALLEL_THRESHOLD`（CPU 側 rayon
-/// 閾値）境界前後を含む形状で検証する。
+/// `Cos`／`Tan` は REQ-2 のみ）・比較演算 6 種＋`Clamp`（イシュー
+/// #1709。bit 同一）を、`PARALLEL_THRESHOLD`（CPU 側 rayon 閾値）
+/// 境界前後を含む形状で検証する。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn scalar_op_matches_cpu_across_shapes() {
@@ -229,6 +315,19 @@ fn scalar_op_matches_cpu_across_shapes() {
         assert_unary_parity(ScalarUnaryOp::Sin, Domain::Signed, seed + 7, shape, false);
         assert_unary_parity(ScalarUnaryOp::Cos, Domain::Signed, seed + 8, shape, false);
         assert_unary_parity(ScalarUnaryOp::Tan, Domain::Signed, seed + 9, shape, false);
+
+        // 比較演算 6 種・Clamp（イシュー #1709）。
+        for op in [
+            ScalarBinaryOp::Gt,
+            ScalarBinaryOp::Ge,
+            ScalarBinaryOp::Lt,
+            ScalarBinaryOp::Le,
+            ScalarBinaryOp::Eq,
+            ScalarBinaryOp::Ne,
+        ] {
+            assert_comparison_parity(op, seed + 12, shape);
+        }
+        assert_clamp_parity(0.5, 1.5, seed + 13, shape);
     }
 }
 
@@ -239,6 +338,8 @@ fn scalar_binary_broadcast_matches_cpu() {
     assert_binary_broadcast_parity(ScalarBinaryOp::Sub, 12_001, 12_002);
     assert_binary_broadcast_parity(ScalarBinaryOp::Div, 12_003, 12_004);
     assert_binary_broadcast_parity(ScalarBinaryOp::Pow, 12_005, 12_006);
+    assert_binary_broadcast_parity(ScalarBinaryOp::Gt, 12_007, 12_008);
+    assert_binary_broadcast_parity(ScalarBinaryOp::Eq, 12_009, 12_010);
 }
 
 /// `0.0`／`inf`／`NaN` 混入時の通過（クラス一致で比較。`NaN` の payload
@@ -348,6 +449,21 @@ fn scalar_op_empty_shape_returns_empty() {
     let out = metal
         .scalar_unary(ScalarUnaryOp::Log, &a)
         .expect("metal succeeds on empty input");
+    assert_eq!(out.as_slice().unwrap().len(), 0);
+
+    // #1709 の対象 kind（`Clamp`。ペイロードあり unary kind）も空 shape
+    // で空を返すことを確認する（payload 配線が numel==0 早期 return と
+    // 干渉しないことの追加確認）。
+    let out = metal
+        .scalar_unary(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }, &a)
+        .expect("metal succeeds on empty input (Clamp)");
+    assert_eq!(out.as_slice().unwrap().len(), 0);
+
+    // #1709 の対象 kind（`Gt`。比較演算）も空 shape で空を返すことを
+    // 確認する。
+    let out = metal
+        .scalar_binary(ScalarBinaryOp::Gt, &a, &b)
+        .expect("metal succeeds on empty input (Gt)");
     assert_eq!(out.as_slice().unwrap().len(), 0);
 }
 
@@ -485,12 +601,116 @@ fn transcendental_scalar_op_edge_cases() {
     }
 }
 
+/// #1709 の対象 7 kind（比較演算 6 種＋`Clamp`）: 特殊値
+/// （`NaN`／`-0.0`／`inf`／`-inf`）の伝播確認。純粋な比較・選択のため
+/// bit 同一で検証する（CUDA 側 `scalar_op_parity.rs` の同名セクション
+/// と同型。イシュー #1709）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn comparison_and_clamp_edge_cases() {
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+
+    // 比較演算エッジ: `NaN`／`-0.0`／`inf` を含む。`Eq(NaN, NaN) == 0.0`
+    // ／`Ne(NaN, NaN) == 1.0`（NaN は自身とも等しくない。IEEE 754）・
+    // `Eq(-0.0, 0.0) == 1.0`（符号付きゼロは数値として等しい）を CPU
+    // と bit 同一で確認する。
+    let a = Tensor::new(vec![f32::NAN, -0.0, f32::INFINITY, 1.0, f32::NAN], &[5])
+        .expect("valid tensor");
+    let b = Tensor::new(vec![f32::NAN, 0.0, f32::INFINITY, 2.0, 1.0], &[5]).expect("valid tensor");
+    for op in [
+        ScalarBinaryOp::Gt,
+        ScalarBinaryOp::Ge,
+        ScalarBinaryOp::Lt,
+        ScalarBinaryOp::Le,
+        ScalarBinaryOp::Eq,
+        ScalarBinaryOp::Ne,
+    ] {
+        let cpu_result = cpu.scalar_binary(op, &a, &b).expect("cpu succeeds");
+        let metal_result = metal.scalar_binary(op, &a, &b).expect("metal succeeds");
+        let cpu_slice = cpu_result.as_slice().expect("contiguous");
+        let metal_slice = metal_result.as_slice().expect("contiguous");
+        assert_eq!(
+            metal_slice, cpu_slice,
+            "scalar_binary({op:?}) edge case (NaN/-0.0/inf) cpu/metal bit mismatch"
+        );
+    }
+    assert_eq!(
+        cpu.scalar_binary(ScalarBinaryOp::Eq, &a, &b)
+            .expect("cpu succeeds")
+            .as_slice()
+            .expect("contiguous")[0],
+        0.0,
+        "Eq(NaN, NaN) must be 0.0 per IEEE 754"
+    );
+    assert_eq!(
+        cpu.scalar_binary(ScalarBinaryOp::Ne, &a, &b)
+            .expect("cpu succeeds")
+            .as_slice()
+            .expect("contiguous")[0],
+        1.0,
+        "Ne(NaN, NaN) must be 1.0 per IEEE 754"
+    );
+    assert_eq!(
+        cpu.scalar_binary(ScalarBinaryOp::Eq, &a, &b)
+            .expect("cpu succeeds")
+            .as_slice()
+            .expect("contiguous")[1],
+        1.0,
+        "Eq(-0.0, 0.0) must be 1.0 (signed zeros compare equal)"
+    );
+
+    // Clamp エッジ: `NaN`／`inf`／`-inf`／`-0.0` を含む入力・通常の
+    // `Clamp{-1,1}` と `min > max`（常に `max` を返す。§3.4 数値規約）の
+    // `Clamp{5.0, 1.0}` の両方を確認する。
+    let clamp_input = Tensor::new(
+        vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.0, 0.0],
+        &[5],
+    )
+    .expect("valid tensor");
+    for (min, max) in [(-1.0f32, 1.0f32), (5.0f32, 1.0f32), (0.0f32, 1.0f32)] {
+        let op = ScalarUnaryOp::Clamp { min, max };
+        let cpu_result = cpu.scalar_unary(op, &clamp_input).expect("cpu succeeds");
+        let metal_result = metal
+            .scalar_unary(op, &clamp_input)
+            .expect("metal succeeds");
+        let cpu_slice = cpu_result.as_slice().expect("contiguous");
+        let metal_slice = metal_result.as_slice().expect("contiguous");
+        for (i, (&c, &g)) in cpu_slice.iter().zip(metal_slice.iter()).enumerate() {
+            if c.is_nan() {
+                assert!(
+                    g.is_nan(),
+                    "Clamp{{min={min},max={max}}} NaN propagation mismatch at index {i}"
+                );
+            } else {
+                assert_eq!(
+                    c.to_bits(),
+                    g.to_bits(),
+                    "Clamp{{min={min},max={max}}} cpu/metal bit mismatch at index {i}"
+                );
+            }
+        }
+    }
+    // `-0.0` の保持（`Clamp{0.0, 1.0}` は `x < min` の比較で `-0.0 < 0.0`
+    // は false のため `-0.0` がそのまま通過する。IEEE 754 の符号付き
+    // ゼロ比較規約どおり）を bit で確認する。
+    let clamp_zero_result = cpu
+        .scalar_unary(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }, &clamp_input)
+        .expect("cpu succeeds");
+    assert_eq!(
+        clamp_zero_result.as_slice().expect("contiguous")[3].to_bits(),
+        (-0.0f32).to_bits(),
+        "Clamp{{0.0,1.0}} must preserve -0.0 sign bit"
+    );
+}
+
 /// 未実装 kind（`Relu`〈活性化系。いずれの sub issue にも含まれない〉・
-/// `Clamp`〈#1709 スコープ〉・`Add`／`Maximum`〈いずれの sub issue にも
-/// 含まれない〉）は `BackendError::Unsupported` を返し、パニックしない
-/// ことの回帰ガード（`crate::scalar_op_source` モジュール doc
-/// 「スコープ」参照。`Log`〈超越関数系〉は #1708 で実装済みになった
-/// ため番兵から外した）。
+/// `PowScalar`〈他のペイロードあり unary kind〉・`Add`／`Maximum`
+/// 〈いずれの sub issue にも含まれない〉）は `BackendError::Unsupported`
+/// を返し、パニックしないことの回帰ガード（`crate::scalar_op_source`
+/// モジュール doc「スコープ」参照。`Log`〈超越関数系〉は #1708・
+/// `Clamp`〈比較演算 6 種とともに #1709〉は実装済みになったため番兵から
+/// 外した）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn unimplemented_kinds_return_unsupported() {
@@ -498,26 +718,27 @@ fn unimplemented_kinds_return_unsupported() {
     let a = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).expect("valid tensor");
     let b = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).expect("valid tensor");
 
-    // `Log` は #1708 で実装済みになったため、番兵 kind をいずれの sub
-    // issue にも含まれない `Relu`（活性化系）へ付け替える。
+    // `Log` は #1708・`Clamp` は #1709 で実装済みになったため、番兵
+    // kind をいずれの sub issue にも含まれない `Relu`（活性化系）・
+    // `PowScalar`（他のペイロードあり unary kind）へ付け替える。
     let err = metal
         .scalar_unary(ScalarUnaryOp::Relu, &a)
-        .expect_err("Relu is not implemented by #1707/#1708");
+        .expect_err("Relu is not implemented by #1707/#1708/#1709");
     assert!(matches!(err, BackendError::Unsupported(_)));
 
     let err = metal
-        .scalar_unary(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }, &a)
-        .expect_err("Clamp is not implemented by #1709 yet");
+        .scalar_unary(ScalarUnaryOp::PowScalar { exponent: 2.0 }, &a)
+        .expect_err("PowScalar is not implemented by #1707/#1708/#1709");
     assert!(matches!(err, BackendError::Unsupported(_)));
 
     let err = metal
         .scalar_binary(ScalarBinaryOp::Add, &a, &b)
-        .expect_err("Add is not implemented by #1707/#1708");
+        .expect_err("Add is not implemented by #1707/#1708/#1709");
     assert!(matches!(err, BackendError::Unsupported(_)));
 
     let err = metal
         .scalar_binary(ScalarBinaryOp::Maximum, &a, &b)
-        .expect_err("Maximum is not implemented by #1707/#1708");
+        .expect_err("Maximum is not implemented by #1707/#1708/#1709");
     assert!(matches!(err, BackendError::Unsupported(_)));
 }
 
