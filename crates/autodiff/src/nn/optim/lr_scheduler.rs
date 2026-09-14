@@ -463,6 +463,30 @@ impl OneCycleLr {
         let initial_lr = max_lr_f64 / div_factor_f64;
         let min_lr = initial_lr / final_div_factor_f64;
 
+        // 導出値（`initial_lr`／`min_lr`）は `f64` では有限でも、
+        // `lr_at` が最終的に返す `f32` へ変換した時点で overflow
+        // （`max_lr` が極端に大きく `div_factor` が極端に小さい等）
+        // して `infinity` になったり、underflow して `0.0` に丸め
+        // られたりしうる（codex-review 指摘）。ここで `f32` 表現
+        // 可能性を検証し、表現不能な設定は構築時点で fail-closed に
+        // 拒否する（`step` ごとに `infinity`／`0.0` を返す壊れた
+        // `lr_at` を後から観測させない）。
+        let initial_lr_f32 = initial_lr as f32;
+        if !initial_lr_f32.is_finite() || initial_lr_f32 <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "initial_lr(=max_lr/div_factor={initial_lr}) が f32 として表現不能\
+                 （変換結果 {initial_lr_f32}）: max_lr={max_lr} div_factor={div_factor}"
+            )));
+        }
+        let min_lr_f32 = min_lr as f32;
+        if !min_lr_f32.is_finite() || min_lr_f32 <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "min_lr(=initial_lr/final_div_factor={min_lr}) が f32 として表現不能\
+                 （変換結果 {min_lr_f32}）: max_lr={max_lr} div_factor={div_factor} \
+                 final_div_factor={final_div_factor}"
+            )));
+        }
+
         let phases = if three_phase {
             vec![
                 OneCyclePhase {
@@ -541,6 +565,24 @@ impl LrScheduler for OneCycleLr {
                 // `new` でフェーズ境界の狭義単調増加を検証済みのため
                 // `span > 0.0`（ゼロ除算にならない）。
                 let p = (step - start_step) / span;
+                // 区間の両端（`p<=0.0`／`p>=1.0`）では補間式を経由せず
+                // `start_lr`／`end_lr` を直接返す（codex-review 指摘）。
+                // `(end_lr-start_lr)*p+start_lr` 等の補間式は、
+                // `start_lr`／`end_lr` の大きさが極端に異なる設定
+                // （`final_div_factor` が非常に大きい等）では `end_lr`
+                // が `start_lr` の桁に埋もれて減算時に丸め落ちし、
+                // `p==1.0` でも厳密に `end_lr` を再現しない場合がある
+                // （例: `end_lr - start_lr` が `f64` の丸めで
+                // `-start_lr` に一致してしまい、結果が `0.0` になる）。
+                // 直接返すことで「最終ステップ以降は `min_lr`（最終
+                // フェーズの `end_lr`）を返し続ける」契約（`new` doc
+                // 「`step >= total_steps` の扱い」節）を厳密に満たす。
+                if p <= 0.0 {
+                    return phase.start_lr as f32;
+                }
+                if p >= 1.0 {
+                    return phase.end_lr as f32;
+                }
                 let value = match self.anneal_strategy {
                     OneCycleAnneal::Cos => {
                         let cos_p = (std::f64::consts::PI * p).cos();

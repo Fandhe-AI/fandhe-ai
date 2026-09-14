@@ -530,6 +530,91 @@ fn one_cycle_lr_rejects_invalid_arguments() {
 }
 
 #[test]
+fn one_cycle_lr_rejects_configs_whose_derived_lr_is_not_f32_representable() {
+    // codex-review 指摘: `initial_lr`／`min_lr` は `f64` では有限でも
+    // `f32` へ変換した時点で overflow（`infinity`）・underflow
+    // （`0.0`）しうる。構築時点で検出し fail-closed に拒否する
+    // （`OneCycleLr::new` doc「導出値の `f32` 表現可能性」検証節）。
+
+    // overflow: max_lr=3e38・div_factor=0.5 → initial_lr=6e38 は f64
+    // では有限だが f32 では infinity に丸められる。
+    let mut cfg = OneCycleLrConfig::new(3e38, 10);
+    cfg.div_factor = 0.5;
+    assert!(
+        OneCycleLr::new(cfg).is_err(),
+        "initial_lr が f32 overflow する設定は拒否されるべき"
+    );
+
+    // underflow: initial_lr（=1.0/1e23）は f32 として表現可能な範囲
+    // だが、div_factor・final_div_factor がともに極端に大きく
+    // min_lr（=initial_lr/1e23≈1e-46）が f32 の最小正規化数
+    // （約 1.4e-45）をも下回り 0.0 に丸められる設定
+    // （`final_div_factor` は f32 フィールドのため `f32::MAX`
+    // 〈約 3.4e38〉以内に収める必要がある）。
+    let mut cfg = OneCycleLrConfig::new(1.0, 10);
+    cfg.div_factor = 1e23;
+    cfg.final_div_factor = 1e23;
+    assert!(
+        OneCycleLr::new(cfg).is_err(),
+        "min_lr が f32 underflow して 0.0 になる設定は拒否されるべき"
+    );
+
+    // 対照: 通常範囲の設定は引き続き受理される。
+    assert!(
+        OneCycleLr::new(OneCycleLrConfig::new(1.0, 10)).is_ok(),
+        "通常範囲の設定は許容されるべき"
+    );
+}
+
+#[test]
+fn one_cycle_lr_returns_exact_min_lr_at_and_beyond_final_step_despite_cancellation() {
+    // codex-review 指摘: 線形補間の終端（`p==1.0`）で
+    // `(end_lr-start_lr)*p+start_lr` を経由すると、`start_lr` と
+    // `end_lr` の大きさが極端に異なる設定（`final_div_factor` が
+    // 非常に大きい）では減算時に `end_lr` が丸め落ち、結果が
+    // 厳密な `min_lr` を再現しない場合がある（`0.0` になりうる）。
+    // `lr_at` は終端で `end_lr` を直接返すため、この桁落ちが起きず
+    // 「最終ステップ以降は `min_lr` を返し続ける」契約
+    // （`OneCycleLr::new` doc「`step >= total_steps` の扱い」節）を
+    // 厳密に満たすことを固定する。
+    let mut cfg = OneCycleLrConfig::new(1.0, 10);
+    cfg.final_div_factor = 1e20;
+    cfg.anneal_strategy = OneCycleAnneal::Linear;
+    let sched = OneCycleLr::new(cfg).unwrap();
+
+    // 期待値: min_lr = (max_lr/div_factor) / final_div_factor
+    //        = (1.0/25.0) / 1e20 ≈ 4e-22（f32 で表現可能）。
+    // `cfg.final_div_factor` は f32 フィールドのため、内部実装
+    // （`new` 内の `final_div_factor as f64`）と同じく、ここでも
+    // `1e20_f32 as f64` を経由して丸め誤差込みで一致させる
+    // （`1e20_f64` を直接使うと f32 往復丸めの分だけ実際の内部計算
+    // 結果と食い違う）。
+    let expected_min_lr = ((1.0_f64 / 25.0) / (1e20_f32 as f64)) as f32;
+    assert!(
+        expected_min_lr.is_finite() && expected_min_lr > 0.0,
+        "テスト前提が崩れている: expected_min_lr={expected_min_lr}"
+    );
+
+    let at_last = sched.lr_at(9);
+    assert_eq!(
+        at_last, expected_min_lr,
+        "lr_at(total_steps-1) は桁落ちなく min_lr と厳密一致するはず: \
+         at_last={at_last} expected={expected_min_lr}"
+    );
+    assert_ne!(
+        at_last, 0.0,
+        "桁落ちにより 0.0 が返ってはならない（min_lr={expected_min_lr}）"
+    );
+
+    // clamp 経由（`step >= total_steps`）でも同じ値を返し続ける。
+    let at_clamped = sched.lr_at(100);
+    assert_eq!(
+        at_clamped, expected_min_lr,
+        "step を total_steps 超過させても min_lr を返し続けるはず"
+    );
+}
+
+#[test]
 fn one_cycle_lr_is_object_safe_and_reachable_via_dyn_lr_scheduler() {
     let sched = OneCycleLr::new(OneCycleLrConfig::new(0.1, 4)).unwrap();
     let boxed: Box<dyn LrScheduler> = Box::new(sched);
