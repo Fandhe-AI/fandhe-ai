@@ -8,10 +8,13 @@
 本ファイルを `--task infer` 専用の自己完結ツールとして新設する。
 
 fail-closed 方針（security.md A08。`compare_gemm_gate.py` 等と同方針）:
-- 空行以外で JSON として解析できない行が 1 件でもあれば、その行を
-  黙って除外して判定を継続せず、行番号付きのエラーとして判定全体を
-  「判定不能」（終了コード 2）へ倒す（`--rounds` 件数チェックのすり
-  抜け防止。codex-review P0 指摘対応）
+- 空行以外で JSON として解析できない行、または解析には成功したが
+  トップレベルが JSON object でない行（`null`／`[]`／数値等）が
+  1 件でもあれば、その行を黙って除外して判定を継続せず、行番号付きの
+  エラーとして判定全体を「判定不能」（終了コード 2）へ倒す
+  （`--rounds` 件数チェックのすり抜け防止・非 dict 行での
+  `obj.get(...)` 未捕捉 `AttributeError` の防止。codex-review P0／P2
+  指摘対応）
 - `framework != "fandhe-ai"` の行・`device != "metal"` の行・`task !=
   "infer"` の行は判定対象から除外する
 - 各セル（`mode` ごと）が before/after とも「ちょうど `--rounds`（既定 5）
@@ -48,11 +51,16 @@ import sys
 
 
 class MalformedJsonlError(Exception):
-    """`_load_rows` が空行以外の JSON 解析失敗を検出したときに送出する
-    例外（codex-review P0 指摘対応）。従来は `json.JSONDecodeError` を
+    """`_load_rows` が空行以外で「使えない行」を検出したときに送出する
+    例外（codex-review P0／P2 指摘対応）。2 種類の原因を扱う:
+    (1) `json.JSONDecodeError`（構文的に JSON として解析できない行。
+    途中で切れた計測行等）、(2) デコードには成功したがトップレベルが
+    JSON object でない行（`null`／`[]`／数値等。この場合 `json.loads`
+    自体は成功するため、後続で `obj.get(...)` へそのまま進むと
+    `AttributeError` で未捕捉のまま異常終了しうる）。従来は (1) のみを
     握りつぶして当該行を黙って除外していたため、途中で切れた計測行が
     混在していても他の正常な reuse 行が「ちょうど `--rounds` 件」残って
-    さえいれば ADOPT・終了コード 0 になり得た。解析できない行は対象外の
+    さえいれば ADOPT・終了コード 0 になり得た。使えない行は対象外の
     計測なのか入力破損なのか判別できず、fail-closed（security.md A08）
     の観点で「ちょうど N 件」という完全性検査をすり抜けさせてはならない
     ため、行番号付きのエラーとして `main` まで伝播させ、判定全体を
@@ -76,6 +84,18 @@ def _load_rows(path):
                 obj = json.loads(stripped)
             except json.JSONDecodeError as e:
                 raise MalformedJsonlError(path, lineno, e) from e
+            # codex-review 指摘対応: JSONL の行が構文的には正しい JSON
+            # （`null`／`[]`／数値等のトップレベル非オブジェクト値）でも
+            # `json.loads` 自体は成功する。その場合に後続の `obj.get(...)`
+            # へそのまま進むと `AttributeError`（`None`／`list`／`int` は
+            # `.get` を持たない）で未捕捉のまま異常終了し、fail-closed
+            # 契約（判定全体を undetermined・終了コード 2・行番号付き
+            # 理由で報告する）を満たせない。デコード直後に dict 型を
+            # 検証し、不一致であれば同じ `MalformedJsonlError` 経路へ倒す。
+            if not isinstance(obj, dict):
+                raise MalformedJsonlError(
+                    path, lineno, f"expected a JSON object, got {type(obj).__name__}"
+                )
             if obj.get("framework") != "fandhe-ai":
                 continue
             if obj.get("device") != "metal":

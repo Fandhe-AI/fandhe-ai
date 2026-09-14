@@ -16,9 +16,11 @@ tempfile への合成 JSONL 書き出し）。CI（`ci.yml` の `deps-forbidden`
 - `mode=fresh`（対照）の後退は終了コードへ影響しない。
 - `framework != "fandhe-ai"`／`device != "metal"`／`task != "infer"` の行は
   判定対象から除外する。
-- 空行以外の JSON 解析失敗（破損した計測行）が 1 件でも混在すれば、
-  正常な行が `--rounds` 件残っていても判定全体が undetermined・終了
-  コード 2 になる（空行のみは従来どおり読み飛ばして許容する）。
+- 空行以外の JSON 解析失敗（破損した計測行）、またはデコードには
+  成功したがトップレベルが JSON object でない行（`null`／`[]`／数値等）
+  が 1 件でも混在すれば、正常な行が `--rounds` 件残っていても判定全体が
+  undetermined・終了コード 2 になる（空行のみは従来どおり読み飛ばして
+  許容する）。
 """
 
 import importlib.util
@@ -328,6 +330,52 @@ class JudgeInferAbTest(unittest.TestCase):
                 )
             self.assertEqual(code, 0, buf.getvalue())
             self.assertIn("ADOPT", buf.getvalue())
+
+    def _run_with_appended_raw_line(self, raw_line):
+        """codex-review P2 指摘: JSONL の行が構文的には正しい JSON
+        （`json.loads` 自体は成功する）でも、トップレベルが `null`／
+        `[]`／数値等の非オブジェクト値だと、後続の `obj.get(...)` が
+        `AttributeError` で未捕捉のまま異常終了しうる。以下の共通
+        ヘルパーは、正常な reuse 行 5 件の末尾に `raw_line` を
+        そのまま追記した before.jsonl で `main` を実行し、
+        `(code, output)` を返す。"""
+        with tempfile.TemporaryDirectory() as tdir:
+            before_path = os.path.join(tdir, "before.jsonl")
+            after_path = os.path.join(tdir, "after.jsonl")
+            before_rows = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
+            after_rows = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
+            _write_jsonl(before_path, before_rows)
+            _write_jsonl(after_path, after_rows)
+            with open(before_path, "a", encoding="utf-8") as f:
+                f.write(raw_line + "\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = judge_infer_ab.main(
+                    ["--before", before_path, "--after", after_path]
+                )
+            return code, buf.getvalue(), before_path
+
+    def test_undetermined_when_null_line_mixed_in(self):
+        code, out, before_path = self._run_with_appended_raw_line("null")
+        self.assertEqual(code, 2, out)
+        self.assertIn("undetermined", out)
+        self.assertIn(f"{before_path}:6", out)
+        self.assertIn("NoneType", out)
+
+    def test_undetermined_when_empty_array_line_mixed_in(self):
+        code, out, before_path = self._run_with_appended_raw_line("[]")
+        self.assertEqual(code, 2, out)
+        self.assertIn("undetermined", out)
+        self.assertIn(f"{before_path}:6", out)
+        self.assertIn("list", out)
+
+    def test_undetermined_when_numeric_line_mixed_in(self):
+        code, out, before_path = self._run_with_appended_raw_line("42")
+        self.assertEqual(code, 2, out)
+        self.assertIn("undetermined", out)
+        self.assertIn(f"{before_path}:6", out)
+        self.assertIn("int", out)
+
 
 if __name__ == "__main__":
     unittest.main()
