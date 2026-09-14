@@ -998,6 +998,7 @@ impl CudaBackendOps {
                 let value = self.with_driver_call(&[], map_reduce_error, || match kind {
                     ReduceKind::Sum => reduce.run_sum_all_f32(a_slice),
                     ReduceKind::Max => reduce.run_max_all_f32(a_slice),
+                    ReduceKind::Min => reduce.run_min_all_f32(a_slice),
                 })?;
                 vec![value]
             }
@@ -1008,6 +1009,7 @@ impl CudaBackendOps {
                 self.with_driver_call(&[], map_reduce_error, || match kind {
                     ReduceKind::Sum => reduce.run_sum_axis_f32(a_slice, outer, axis_len, inner),
                     ReduceKind::Max => reduce.run_max_axis_f32(a_slice, outer, axis_len, inner),
+                    ReduceKind::Min => reduce.run_min_axis_f32(a_slice, outer, axis_len, inner),
                 })?
             }
         };
@@ -1242,6 +1244,8 @@ fn static_cuda_memory(
 enum ReduceKind {
     Sum,
     Max,
+    /// イシュー #1720（`BackendOps::min` の CUDA 実装）で追加。
+    Min,
 }
 
 /// `reduce::CudaReduce`／`reduce::reduce_axis_layout` が返す `CudaError`
@@ -3160,6 +3164,40 @@ impl BackendOps for CudaBackendOps {
         self.reduce_dispatch(a, dim, ReduceKind::Max)
     }
 
+    /// [`Self::max`] と同じ委譲構造（`run_min_all_f32`／
+    /// `run_min_axis_f32`。イシュー #1720）。`fminf` による厳密選択
+    /// （丸めなし・NaN 非伝播）で、空縮約は
+    /// `BackendError::KernelLaunchFailed("empty reduction for op \"min\"")`
+    /// （`backend-cpu::reduction::min` と同一文言）を返す。
+    fn min(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        self.reduce_dispatch(a, dim, ReduceKind::Min)
+    }
+
+    /// `argmax`／`argmin` の CUDA ネイティブカーネルは本イシュー
+    /// （#1720）のスコープ外（フォローアップ候補・PR 本文に記録）。
+    /// デフォルト実装（`Unsupported`）へ委ねると driver 初期化を経由
+    /// してから `Unsupported` を返すことになり無駄なため、`linalg_inv`
+    /// 等と同じ方針で明示的にオーバーライドし driver に触れず即座に
+    /// `Unsupported` を返す。`Var::argmax` はこれを検出してホスト
+    /// フォールバック（`eval::argmax`）へ迂回する。
+    fn argmax(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "CudaBackendOps::argmax: GPU argmax カーネル未実装（#1720 スコープ外・\
+             フォローアップ）。ホスト参照実装へフォールバックする。"
+                .into(),
+        ))
+    }
+
+    /// [`Self::argmax`] と同じ理由・同じ方針（イシュー #1720 スコープ
+    /// 外）。
+    fn argmin(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "CudaBackendOps::argmin: GPU argmin カーネル未実装（#1720 スコープ外・\
+             フォローアップ）。ホスト参照実装へフォールバックする。"
+                .into(),
+        ))
+    }
+
     /// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）は
     /// GPU カーネル未実装（設計文書「スコープ外」節: GPU カーネル実装は
     /// 本イシューのスコープ外・別イシューへ引き継ぐ）。既定
@@ -3761,6 +3799,25 @@ impl BackendOps for CudaBackendOps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CudaBackendOps::argmax`／`argmin`（イシュー #1720）が driver を
+    /// 一切経由せず即座に `Unsupported` を返すことを確認する
+    /// （`CudaBackendOps::new` 自体は driver 初期化を伴わない遅延構築の
+    /// ため、CUDA 実機がない CI でも実行可能）。
+    #[test]
+    fn argmax_and_argmin_are_explicitly_unsupported_without_touching_driver() {
+        let ops = CudaBackendOps::new(0);
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+
+        assert!(matches!(
+            ops.argmax(&a, None),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.argmin(&a, None),
+            Err(BackendError::Unsupported(_))
+        ));
+    }
 
     /// [`map_fused_kernel_init_error`]: `DriverUnavailable`／
     /// `NvrtcUnavailable` は環境不在として `BackendError::CudaUnavailable`
