@@ -62,12 +62,27 @@
 //! されるため、検証段階で明示的に拒否する（`.claude/rules/security.md`
 //! A08）。
 //!
+//! **`norm_x`／`norm_t`／`f` の検査だけでは不十分な経路がある**
+//! （codex-review 指摘・PR #1856）: 勾配 `g` 自体は有限でも
+//! `g*g`（`v` 更新の一部）が f32 の表現域を超えて `v` が非有限（Inf）
+//! になりうる。この非有限な `v` は `denom = sqrt(v)/... + eps` を
+//! 経て `s`／`t` をゼロへ押しつぶすことがあり、その場合 `norm_t` は
+//! 有限（ゼロ）に収まって上記の norm 検査を通過してしまう
+//! （trust ratio はゼロ除算を通らない `norm_t==0` フォールバック
+//! 経路に入る）。これを放置すると非有限な `v` がそのままコミット
+//! フェーズで `self.states` へ保存され、以後 `grad` が有限値へ戻っても
+//! `v = beta2*Inf + ...` は Inf のまま回復せず当該要素の更新が恒久的に
+//! 停止する。このため `m`／`v` そのものの有限性も、状態へコミットする
+//! 前の計算フェーズで直接検証する（`step()` 内 `if !m.is_finite() ||
+//! !v.is_finite()` 分岐）。
+//!
 //! `step()` は検証（状態変更なし）→ 計算（状態変更なし。ここで
-//! 非有限 norm を検出する）→ コミット（ここで初めて状態を変更する）
-//! の 3 フェーズで構成する。どのフェーズで失敗しても `step_count`／
-//! `beta*_pow_t`／`m`／`v`（初回呼び出しの場合は `self.states` 自体）
-//! は一切変更されない（`crates/autodiff/tests/nn_optim_lamb.rs`・本
-//! ファイル末尾のユニットテストで固定する）。
+//! `m`／`v`・非有限 norm を検出する）→ コミット（ここで初めて状態を
+//! 変更する）の 3 フェーズで構成する。どのフェーズで失敗しても
+//! `step_count`／`beta*_pow_t`／`m`／`v`（初回呼び出しの場合は
+//! `self.states` 自体）は一切変更されない
+//! （`crates/autodiff/tests/nn_optim_lamb.rs`・本ファイル末尾の
+//! ユニットテストで固定する）。
 //!
 //! # `DeviceParamStore` 非対応
 //!
@@ -276,6 +291,30 @@ impl Lamb {
                 let prev_v = existing.map(|s| s.v[i]).unwrap_or(0.0);
                 let m = f32::mul_add(self.config.beta1, prev_m, (1.0 - self.config.beta1) * g);
                 let v = f32::mul_add(self.config.beta2, prev_v, (1.0 - self.config.beta2) * g * g);
+                // codex-review 指摘（PR #1856）: `g` 自体は有限でも
+                // `g*g` が f32 の表現域を超えて `v` が非有限（Inf）に
+                // なりうる（例: `g=1e30` → `g*g=1e60` は overflow）。
+                // 後続の `denom`／`s`／`t` の計算で偶然 `t=0` になり
+                // `norm_t` が有限（ゼロ）へ収まってしまうと、モジュール
+                // doc「非有限 norm の扱い」節の `norm_x`／`norm_t`／`f`
+                // の有限性検査だけではこの非有限な `v`（`m` も同様）を
+                // 検出できず、後段のコミットフェーズで `slot.v` へ Inf
+                // がそのまま保存されてしまう。以後 `grad` が有限値へ
+                // 戻っても `v = beta2*Inf + ...` は Inf のまま回復せず
+                // 当該要素の更新が恒久的に停止する（trust ratio は
+                // ゼロ除算を通らないため既存の `norm_t==0` フォール
+                // バック経路では検出できない）。状態（`m`／`v`）そのもの
+                // の有限性を計算フェーズで直接検証し、非有限なら状態を
+                // 一切変更せず `Err` を返す（モジュール doc「非有限
+                // norm の扱い（fail-closed）」節と同じ 3 フェーズ契約
+                // に従う）。
+                if !m.is_finite() || !v.is_finite() {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Lamb::step: slot {idx}: non-finite second moment estimate \
+                         (m={m}, v={v}) at element {i}; refusing to commit state that \
+                         would become unrecoverable (see module doc \"非有限 norm の扱い\")"
+                    )));
+                }
                 new_m.push(m);
                 new_v.push(v);
 
@@ -486,6 +525,52 @@ mod tests {
         let result_inf = opt.step(&[(&param, &grad_inf)]);
         assert!(matches!(result_inf, Err(AutodiffError::InvalidArgument(_))));
         assert_eq!(opt.step_count(), 0);
+    }
+
+    /// codex-review 指摘（PR #1856）の回帰テスト: 勾配自体は有限
+    /// （`g=1e30`）でも `v = beta2*prev_v + (1-beta2)*g*g` の `g*g`
+    /// が f32 の表現域を超えて非有限（Inf）になりうる。この非有限な
+    /// `v` は `denom = sqrt(v)/... + eps` を経て `s = step_size*m/denom`
+    /// をゼロへ押しつぶすため `t=0` となり、`norm_t` は有限（ゼロ）に
+    /// 収まってしまう——モジュール doc「非有限 norm の扱い」節の
+    /// `norm_x`／`norm_t`／`f` の有限性検査だけでは検出できない
+    /// （trust ratio はゼロ除算を通らない `norm_t==0` フォールバック
+    /// 経路に入るため）。本テストは `m`／`v` 自体の有限性検査
+    /// （上記コメント参照）がこの経路を正しく検出し、非有限な `v` が
+    /// `self.states` へコミットされないこと、および直後に有限な勾配で
+    /// 再試行した際に更新が恒久的に停止しない（フレッシュな状態から
+    /// 正常に 1 step 進む）ことを確認する。
+    #[test]
+    fn non_finite_second_moment_from_extreme_finite_grad_is_rejected_without_state_corruption() {
+        let mut opt = Lamb::new(LambConfig::default()).unwrap();
+        let param = t(vec![1.0], &[1]);
+        let grad_extreme = t(vec![1e30_f32], &[1]);
+
+        let result = opt.step(&[(&param, &grad_extreme)]);
+        assert!(
+            matches!(result, Err(AutodiffError::InvalidArgument(_))),
+            "非有限な二次モーメント（v）は状態未変更のまま拒否されるはず: {result:?}"
+        );
+        assert_eq!(
+            opt.step_count(),
+            0,
+            "非有限な二次モーメント検出時に step_count が更新されてはならない"
+        );
+
+        // 直後に有限な勾配で再試行すると、フレッシュな初回呼び出しと
+        // して正常に成功する（＝拒否された呼び出しの Inf が
+        // `self.states` へ残って以後の更新を停止させていないことの
+        // 直接証拠）。
+        let grad_normal = t(vec![0.1_f32], &[1]);
+        let updated = opt
+            .step(&[(&param, &grad_normal)])
+            .unwrap_or_else(|e| panic!("非有限 v 拒否直後の有限勾配での再試行が失敗: {e}"));
+        assert_eq!(updated.len(), 1);
+        assert_eq!(opt.step_count(), 1);
+        assert!(
+            updated[0].get(&[0]).unwrap().is_finite(),
+            "状態破損がなければ更新後の値は有限のはず"
+        );
     }
 
     /// codex-review（P2）・Cursor Bugbot 指摘（PR #1852）と同型の回帰
