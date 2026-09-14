@@ -179,6 +179,7 @@ mod gemm_reuse_phase_diag_tests;
 // がクレート全体をスキップせず正常終了する）。
 #[cfg(all(test, target_arch = "aarch64"))]
 mod gemm_prefetch_bandwidth_diag_tests;
+mod huber;
 pub mod layer_norm;
 pub mod linalg;
 pub mod memory;

@@ -440,6 +440,20 @@ pub(crate) fn cached_mse(device: &CudaDevice) -> Result<Arc<crate::mse::CudaMse>
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::huber::CudaHuber`]
+/// スイートをプロセス内キャッシュから取得する（イシュー #1739。キーは
+/// [`ContextKey`]。`cached_mse` と同型）。
+/// `ops::CudaBackendOps::huber_loss`／`huber_loss_backward` の唯一の
+/// 呼び出し先。
+pub(crate) fn cached_huber(device: &CudaDevice) -> Result<Arc<crate::huber::CudaHuber>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::huber::CudaHuber>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::huber::CudaHuber::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`crate::bce::CudaBce`] スイート
 /// をプロセス内キャッシュから取得する（イシュー #1737。キーは
 /// [`ContextKey`]。`cached_mse` と同型）。`ops::CudaBackendOps::
