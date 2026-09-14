@@ -1037,13 +1037,23 @@ reduction`〉・ホストフォールバック〈`eval::var_along`／
 `vector_norm_along`〉まで実装済み。数値契約は `.claude/rules/
 coding-rust.md`「正規化統計は要素を先に `f64` へ昇格してから二乗し、
 最後に 1 回だけ `f32` へ downcast する」契約に従う（`var` は平均→二乗和
-の 2 段計算・`norm_l2` は二乗和→`sqrt`）。`std` は `var` の平方根への
-薄い委譲で新規 Op は追加しない。CUDA／Metal 専用カーネルは本 issue の
-スコープ外で既定 `Unsupported` のままホストフォールバック経由のみ
-（後続 issue 候補・多軸／`keepdim` 版・`norm(ord, dim)` の facade
-公開〈Tier 1 未列挙〉も同様にスコープ外。facade 新規公開面なし——
-既存 `Var` 再エクスポート経由。CUDA／Metal 実機での facade parity
-実測は本エージェント実行環境に実機がないため未実施のまま申し送る）。
+の 2 段計算・`norm_l2` は二乗和→`sqrt`）。`std` は当初 `Var::var(..)
+.sqrt()`（新規 `Op` を追加しない合成）として実装していたが、真の分散が
+`f32` の範囲を超える極端な入力（例 `[-1e20, 1e20]`）で `Op::Var` の
+forward 値（`f32` downcast 済み分散）が overflow し `std` 自体は `f32`
+で表現可能なはずが `inf` になる問題があったため（codex-review P2
+指摘。PR #1826 レビュー是正）、専用の `Op::Std` ノードを追加し
+forward・backward とも `f64` の分散を経由してから最後に 1 回だけ
+`sqrt` を計算する方式へ変更した（`eval::std_along`／`grad::std_vjp`。
+`BackendOps::std` は設けず常にホストフォールバックを使う——`var`／
+`vector_norm` とは異なり `BackendOps` 対応メソッドの非破壊拡張余地を
+残したまま、現時点ではホスト参照実装のみに限定する判断）。CUDA／Metal
+専用カーネルは本 issue のスコープ外で既定 `Unsupported` のまま
+ホストフォールバック経由のみ（後続 issue 候補・多軸／`keepdim` 版・
+`norm(ord, dim)` の facade 公開〈Tier 1 未列挙〉も同様にスコープ外。
+facade 新規公開面なし——既存 `Var` 再エクスポート経由。CUDA／Metal
+実機での facade parity 実測は本エージェント実行環境に実機がないため
+未実施のまま申し送る）。
 ## #1713 の追補
 
 `Var::gelu`／`gelu_tanh`／`softplus`（GELU 誤差関数版・tanh 近似版・

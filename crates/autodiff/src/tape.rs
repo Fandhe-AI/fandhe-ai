@@ -184,11 +184,16 @@ pub(crate) enum Op {
     /// 計算し `f32` へ downcast する（`var_vjp` と同じ「forward の丸め
     /// 誤差を backward へ持ち込まない」内部精度契約。
     /// `.claude/rules/coding-rust.md`）専用ノードとして分離した。
-    /// `Op::Var`／`Op::VectorNorm` と同じ eager・フォールバック契約
-    /// （`BackendOps::std` は設けず、常に `eval::std_along` を使う——
-    /// `docs/compat-api-scope.md` §5 の対象を `var`／`std`（スカラー
-    /// 合成のみ）に限る想定と整合。将来デバイス側カーネルが必要になれば
-    /// `BackendOps::std`（既定 `Unsupported`）を非破壊で追加できる）。
+    /// `Op::Var`／`Op::VectorNorm` と同じ eager・実体化演算だが、
+    /// フォールバック契約は異なる——`Op::Var`／`Op::VectorNorm` は
+    /// `BackendOps::var`／`vector_norm`（既定 `Unsupported`）へまず
+    /// dispatch し `Unsupported` のときのみホスト参照実装へ切り替える
+    /// のに対し、`Op::Std` は対応する `BackendOps` メソッドを設けず
+    /// 常に `eval::std_along`（ホスト参照実装）を使う——`var`／
+    /// `vector_norm` とは異なり、現時点ではデバイス側カーネルの
+    /// 非破壊拡張余地を残したままホスト参照実装のみに限定する判断
+    /// （将来デバイス側カーネルが必要になれば `BackendOps::std`
+    /// 〈既定 `Unsupported`〉を非破壊で追加できる）。
     Std {
         input: NodeId,
         dim: Option<usize>,
