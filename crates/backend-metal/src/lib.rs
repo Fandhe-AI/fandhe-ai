@@ -185,7 +185,13 @@
 //! `dispatch_backend_auto`（真の production 自動経路）へは統合していない
 //! （#799 の実機検証完了後、別イシューで統合可否を判断する）。`tensor-core`
 //! 決定表（`select_gemm_kernel`）・`dispatch_backend_auto` の f16 拡張は
-//! 本イシューのスコープ外のまま残す。
+//! 本イシューのスコープ外のまま残す。**#1705 で `crate::typed_f16`
+//! （`TypedOps<f16>::gemm`）から `dispatch_f16_auto_unverified` への
+//! 内部結線のみ追加した——`Tensor<f16>` という型でのみ到達する経路であり、
+//! `ops::MetalBackendOps`（f32 `BackendOps::gemm`）・
+//! `dispatch_backend_auto`（真の production 自動経路）からは引き続き
+//! 不到達のまま。`_unverified` suffix・`#[doc(hidden)]` は #1651 の
+//! 承認事項（§7-4）が未承認のため維持する。**
 //!
 //! イシュー #930 で `context_cache` モジュールを追加し、`ops::MetalBackendOps`
 //! が演算メソッド呼び出しごとに都度構築していた `MetalContext`／
@@ -535,6 +541,30 @@ pub(crate) mod spec_source;
 // 環境・CI）でも `AtomicBool` の単体テストが回るようにしてある。
 pub mod split_k_runtime;
 pub mod tile;
+// `TypedOps<half::f16>` 実装（イシュー #1705・親 #1651・
+// `docs/backend-dtype-dispatch-design.md` §14）。`ops::MetalBackendOps`
+// （`cfg(target_os = "macos")` 限定）へ `impl` するため同じ cfg を付ける。
+// `TypedOps<f64>` はここでは実装しない（`typed_ops_f64` accessor は
+// 既定 `None` のまま。`crate::typed_f16` モジュール doc「恒久
+// `Unsupported`」参照）。
+#[cfg(target_os = "macos")]
+pub(crate) mod typed_f16;
+// `TypedOps<half::bf16>`（イシュー #1706・親 #1651）。`upcast_bf16`／
+// `downcast_f32` は `pad`／`tile` と同じ設計判断で `objc2` 系 FFI に
+// 触れないため `cfg(target_os = "macos")` を付けず、Linux（本実装
+// 環境・CI）でも丸め契約の単体テストが回るようにしてある
+// （`typed_bf16_convert.rs` モジュール冒頭「cfg を付けない理由」参照）。
+pub mod typed_bf16_convert;
+// `impl TypedOps<half::bf16> for MetalBackendOps` 本体（`ops.rs` と同じく
+// `objc2` 系 FFI・`MetalBackendOps` 型に触れるため macOS 限定）。
+#[cfg(target_os = "macos")]
+mod typed_bf16;
+// MSL `bfloat`／`simdgroup_bfloat8x8` の可用性コンパイルプローブ
+// （イシュー #1706・調査専用。本番結線なし。`gemm_mpp_diag_tests` と
+// 同じ配置理由: `crate::pipeline::compile_options` 等 `pub(crate)` 面へ
+// 到達するため `lib.rs` の兄弟モジュールとして置く）。
+#[cfg(all(test, target_os = "macos"))]
+mod typed_bf16_probe_diag_tests;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
 // バイナリでのみ確実にデバイスを返す（プレーンな CLI バイナリ ―― 本クレートの
