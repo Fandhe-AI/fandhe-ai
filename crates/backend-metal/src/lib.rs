@@ -483,6 +483,14 @@ pub(crate) mod sgd;
 // `#[cfg(test)]` を個別付与している（macOS/aarch64 ローカル clippy 実測。
 // PR「fix(backend): macOS/aarch64 ローカル clippy エラーを解消」）。
 pub(crate) mod row_kernel;
+// `ScalarUnaryOp`／`ScalarBinaryOp` の MSL カーネルソース生成（イシュー
+// #1707。CUDA 側 `backend-cuda::kernels_scalar_op` の Metal 対応版）。
+// `generic_cache`／`row_kernel` と同じ設計判断で `objc2` 系 FFI に
+// 触れないため `cfg(target_os = "macos")` を付けず、Linux（本実装環境・
+// CI）でも `cargo test -p fandhe-ai-backend-metal` で生成ロジックの
+// 単体テストが回るようにしてある（`scalar_op_source.rs` モジュール冒頭
+// 「cfg 方針」参照）。
+pub(crate) mod scalar_op_source;
 #[cfg(target_os = "macos")]
 pub mod softmax;
 // `gemm_simdgroup_tiled` のソーステキスト特殊化経路（イシュー #1288。

@@ -66,15 +66,19 @@
 //! 「毎回フレッシュ構築」に戻り受け入れ条件 1〈2 回目以降が構築費を
 //! 支払わない〉自体が崩れるため）。
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+
+use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 
 use crate::context::MetalContext;
 use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
 use crate::gather_scatter::MetalGatherScatter;
 use crate::gemm::MetalGemm;
-use crate::generic_cache::get_or_build;
+use crate::generic_cache::{get_or_build, get_or_build_keyed};
 use crate::layer_norm::MetalLayerNorm;
+use crate::pipeline::{self, MtlPipeline};
 use crate::pool::MetalAllocator;
 use crate::rmsnorm::MetalRmsNorm;
 use crate::sgd::MetalSgd;
@@ -107,6 +111,15 @@ const _: fn() = || {
     assert_send_sync::<MetalSoftmax>();
     assert_send_sync::<MetalAllocator>();
     assert_send_sync::<MetalGatherScatter>();
+    // イシュー #1707: `cached_scalar_unary_pipeline`／
+    // `cached_scalar_binary_pipeline` が `Mutex<HashMap<&'static str,
+    // Retained<MtlPipeline>>>` として直接キャッシュする値の Send/Sync
+    // をコンパイル時に固定する（既存エントリと同じ意図。CUDA 側
+    // `context_cache.rs` の `CudaFunction` アサーションと同型。
+    // `MtlPipeline`＝`ProtocolObject<dyn MTLComputePipelineState>` は
+    // 非 `Sized` のため `Retained<MtlPipeline>`〈参照カウントハンドル。
+    // キャッシュが実際に保持する値の型〉で検査する）。
+    assert_send_sync::<objc2::rc::Retained<MtlPipeline>>();
 };
 
 /// システムデフォルトの Metal デバイスに対応する [`MetalContext`] を
@@ -240,6 +253,72 @@ pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAlloc
     })
 }
 
+/// `ctx` のデバイス上で `op`（[`ScalarUnaryOp`]）のテンプレート生成
+/// パイプラインをプロセス内キャッシュから取得する（イシュー #1707。
+/// CUDA 側 `context_cache::cached_scalar_unary_kernel`〈イシュー #1700〉
+/// の Metal 対応版）。
+///
+/// Metal はシステムデフォルトデバイス 1 台のみを扱う前提（本モジュール
+/// 冒頭コメント）のため、CUDA 側と異なりキーは `op.kind_name()`
+/// （[`ScalarOpKind::kind_name`]。ペイロード値を含まない安定文字列）
+/// のみを使う（`ContextKey` 相当の区別は不要）。`f32` ペイロード
+/// （将来 `Clamp` 等が追加する場合。`crate::scalar_op_source` モジュール
+/// doc「ペイロード seam」参照）はキャッシュキーに含めない契約は CUDA 側
+/// と同一。
+///
+/// [`crate::scalar_op_source::unary_kernel_source`] が `None`（未実装
+/// kind）を返す場合はキャッシュへ触れずに `Ok(None)` を返す（呼び出し元
+/// `ops::MetalBackendOps::scalar_unary_dispatch` が `BackendError::
+/// Unsupported` へ変換しホスト参照実装へフォールバックする）。
+pub(crate) fn cached_scalar_unary_pipeline(
+    ctx: &Arc<MetalContext>,
+    op: ScalarUnaryOp,
+) -> Result<Option<objc2::rc::Retained<MtlPipeline>>, MetalError> {
+    let Some(source) = crate::scalar_op_source::unary_kernel_source(op) else {
+        return Ok(None);
+    };
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, objc2::rc::Retained<MtlPipeline>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = op.kind_name();
+    let built = get_or_build_keyed(cache, key, on_poison, || {
+        let library = pipeline::compile_source(ctx.device(), &source)?;
+        let name = crate::scalar_op_source::unary_function_name(op);
+        // `name` は `format!` が返す `String`（`kind_name()` から動的生成）
+        // だが `pipeline::make_pipeline` は `function_name: &'static str`
+        // を要求する。`Box::leak`（プロセス生存期間中に有限個〈kind 数〉
+        // だけ発生するプロセスワイドキャッシュのため許容するリーク。
+        // `ops::MetalBackendOps` の他キャッシュと同じ生存期間契約
+        // 〈モジュール冒頭「生存期間」〉）で `'static` へ変換する。
+        let name: &'static str = Box::leak(name.into_boxed_str());
+        pipeline::make_pipeline(ctx.device(), &library, name)
+    })?;
+    Ok(Some(built))
+}
+
+/// [`cached_scalar_unary_pipeline`] の 2 項版（[`ScalarBinaryOp`]。
+/// イシュー #1707）。
+pub(crate) fn cached_scalar_binary_pipeline(
+    ctx: &Arc<MetalContext>,
+    op: ScalarBinaryOp,
+) -> Result<Option<objc2::rc::Retained<MtlPipeline>>, MetalError> {
+    let Some(source) = crate::scalar_op_source::binary_kernel_source(op) else {
+        return Ok(None);
+    };
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, objc2::rc::Retained<MtlPipeline>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = op.kind_name();
+    let built = get_or_build_keyed(cache, key, on_poison, || {
+        let library = pipeline::compile_source(ctx.device(), &source)?;
+        let name = crate::scalar_op_source::binary_function_name(op);
+        // `cached_scalar_unary_pipeline` と同じ理由で `'static` 化する。
+        let name: &'static str = Box::leak(name.into_boxed_str());
+        pipeline::make_pipeline(ctx.device(), &library, name)
+    })?;
+    Ok(Some(built))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +363,36 @@ mod tests {
         assert!(
             Arc::ptr_eq(&first, &second),
             "2 回目の呼び出しは同一 Arc<MetalGemm> を返すはず"
+        );
+    }
+
+    /// [`cached_scalar_unary_pipeline`] を超越関数系 kind（`Log`。イシュー
+    /// #1708 で実装した 8 kind のうち代表 1 つ）で 2 回呼ぶと同一
+    /// パイプラインを返す（CUDA 側
+    /// `scalar_op_cache_wiring_tests::
+    /// cached_scalar_unary_kernel_second_call_reuses_cache_for_transcendental_kind`
+    /// と同型。キャッシュ機構が kind 非依存の汎用機構であることの
+    /// 追加確認）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn cached_scalar_unary_pipeline_second_call_reuses_cache_for_transcendental_kind() {
+        let ctx = cached_context().expect("Metal context available on test host");
+        let first = cached_scalar_unary_pipeline(&ctx, ScalarUnaryOp::Log)
+            .expect("Log is implemented")
+            .expect("Log must return Some(pipeline)");
+        let second = cached_scalar_unary_pipeline(&ctx, ScalarUnaryOp::Log)
+            .expect("2nd call must succeed given the 1st succeeded")
+            .expect("Log must return Some(pipeline)");
+        // `Retained<MtlPipeline>` は `ptr_eq` を持たないため
+        // `Retained::as_ptr`（生ポインタ抽出。所有権は移動しない）で
+        // 比較する（`cached_context_returns_same_instance_across_calls`
+        // の `Arc::ptr_eq` と同じ意図の Retained 版）。
+        assert!(
+            std::ptr::eq(
+                objc2::rc::Retained::as_ptr(&first),
+                objc2::rc::Retained::as_ptr(&second)
+            ),
+            "2 回目の cached_scalar_unary_pipeline(Log) 呼び出しは同一パイプラインを返すはず"
         );
     }
 }
