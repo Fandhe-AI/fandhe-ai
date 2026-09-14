@@ -352,4 +352,34 @@ mod tests {
             "2 回目の呼び出しは同一 Arc<MetalGemm> を返すはず"
         );
     }
+
+    /// [`cached_scalar_unary_pipeline`] を超越関数系 kind（`Log`。イシュー
+    /// #1708 で実装した 8 kind のうち代表 1 つ）で 2 回呼ぶと同一
+    /// パイプラインを返す（CUDA 側
+    /// `scalar_op_cache_wiring_tests::
+    /// cached_scalar_unary_kernel_second_call_reuses_cache_for_transcendental_kind`
+    /// と同型。キャッシュ機構が kind 非依存の汎用機構であることの
+    /// 追加確認）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn cached_scalar_unary_pipeline_second_call_reuses_cache_for_transcendental_kind() {
+        let ctx = cached_context().expect("Metal context available on test host");
+        let first = cached_scalar_unary_pipeline(&ctx, ScalarUnaryOp::Log)
+            .expect("Log is implemented")
+            .expect("Log must return Some(pipeline)");
+        let second = cached_scalar_unary_pipeline(&ctx, ScalarUnaryOp::Log)
+            .expect("2nd call must succeed given the 1st succeeded")
+            .expect("Log must return Some(pipeline)");
+        // `Retained<MtlPipeline>` は `ptr_eq` を持たないため
+        // `Retained::as_ptr`（生ポインタ抽出。所有権は移動しない）で
+        // 比較する（`cached_context_returns_same_instance_across_calls`
+        // の `Arc::ptr_eq` と同じ意図の Retained 版）。
+        assert!(
+            std::ptr::eq(
+                objc2::rc::Retained::as_ptr(&first),
+                objc2::rc::Retained::as_ptr(&second)
+            ),
+            "2 回目の cached_scalar_unary_pipeline(Log) 呼び出しは同一パイプラインを返すはず"
+        );
+    }
 }
