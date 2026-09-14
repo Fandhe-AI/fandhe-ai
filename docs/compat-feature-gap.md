@@ -1323,6 +1323,15 @@ AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「�
 - 新規 `Op`／`BackendOps` メソッド／VJP は追加していない（`scale_loss` は既存 `Var::mul` の合成のみ）。
 - 対象外事項の明記: (a) 真の混合精度（f16 forward・f32 master weight）は `docs/backend-dtype-dispatch-design.md` §8 のとおり対象外。(b) デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）には unscale／非有限検出が結線されておらず、AMP はホスト `Tensor<f32>` 勾配（`Gradients::get`／`SequentialVars::trainable_grads`／`Tape::param_grads_to_host` 経由）にのみ適用できる。
 - facade のみ import する統合テスト（`crates/facade/tests/optim_amp_train_loop.rs`）で、収束・1 step の勾配 bit 完全一致（scale_loss→backward→unscale と非スケール backward の勾配が `f32::to_bits()` で一致すること。CPU バックエンド）・非有限勾配時の skip／backoff を固定した。
+## 追補（イシュー #1740）
+
+上記「追補（イシュー #1731）」で「本イシューのスコープ外」としていた CUDA／Metal 専用カーネルを実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- CUDA（`backend-cuda::scan::CudaScan`。`kernels_scan.rs` の NVRTC カーネル `cumsum_f32`／`cumprod_f32`）・Metal（`backend-metal::scan::MetalScan`。`shaders/scan.metal` の `cumsum_f32`／`cumprod_f32`）とも `CudaBackendOps::cumsum`／`cumprod`・`MetalBackendOps::cumsum`／`cumprod` を実装済み（`Unsupported` フォールバックだった経路を置換）。
+- 数値契約は #1731 の forward 契約（lane ごとの逐次スキャン・`f64` 相当アキュムレータ）を維持したまま GPU 側へ拡張: CUDA は `double` ネイティブ、Metal は MSL が `double` 非対応のため `crate::soft_f64` と同型の binary64 逐次加算・乗算を 64bit 整数でソフトウェアエミュレーションし、いずれも CPU 参照実装（`backend-cpu::scan`）と **bit 完全一致**する（NaN のみ payload がハードウェア依存のためクラス一致）。
+- サイズ上限とエラー写像（PR #1849 codex-review／Cursor Bugbot 指摘の是正）: (1) 要素数積が `usize` オーバーフローする形状は CUDA／Metal とも `run_scan` 冒頭の検査（`checked_shape_numel`／`gather_scatter_model::checked_numel`）で `BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)` として**拒否**し、ホストフォールバックには入らない。(2) カーネル引数の上限超過は両バックエンドとも**バックエンド固有上限として `BackendError::Unsupported` へ写像**し、`Var::cumsum`／`cumprod` のホストフォールバック（`eval::cumsum_along`／`cumprod_along`）へ委譲する——CUDA は `lanes = outer * inner`／`axis_len`／`inner`／`numel` が `int` 引数の範囲（`i32::MAX`）を超えると `CudaError::ScanSizeLimitExceeded`（`ops.rs::map_scan_error` がこの variant のみ `Unsupported` へ）、Metal は `lanes`／`axis_len`／`inner` が `uint` 引数の範囲（`u32::MAX`）を超えると `scan_model::plan_scan` が `dispatch_sync` 前に `ScanPrepareError::SizeLimitExceeded` を返し `ops.rs::map_scan_prepare_error` が `Unsupported` へ写像する（Metal `sort`／`unique` の事前検査と同型。Linux 実行可能な単体テスト付き）。(3) 内部契約違反（CUDA `InvalidScanShape` → `ShapeMismatch(ElementCountOverflow)`・Metal `scan.rs` 内の二重検査失敗 → `KernelLaunchFailed`）・driver／起動失敗はフォールバックで覆い隠さない（`.claude/rules/security.md` A08）。
+- facade 新規公開面なし（#1731 と同じく既存 `Var` 再エクスポート経由でそのまま到達可能）。
+- CUDA／Metal 実機（DGX Spark GB10・Apple Silicon）での parity 実測は本エージェント実行環境に到達不能のため未実施のまま GB10／Mac セッションへ申し送る（Linux 実行可能なソース証跡テスト・環境適応スモーク・型検査〈`cargo check --target aarch64-apple-darwin`〉は完了済み）。
 
 ## #1627 の追補（int8 量子化の段階 0 設計判断）
 
