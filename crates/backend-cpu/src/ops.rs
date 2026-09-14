@@ -34,7 +34,7 @@ use crate::scan;
 use crate::softmax::{self, match_softmax_plan};
 use crate::{
     elementwise, fused_elementwise, gather_scatter, mse, reduction, rnn_cell, scalar_elementwise,
-    sort_topk,
+    sort_topk, unique,
 };
 
 /// `CpuBackendOps` が `MemoryOps` を実装するための、プロセスワイドに共有
@@ -1357,6 +1357,13 @@ impl BackendOps for CpuBackendOps {
         let out_shape =
             topk_out_shape(input.shape(), dim, k).map_err(BackendError::ShapeMismatch)?;
         sort_topk::topk(input, dim, k, largest, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::unique` の CPU 実装（イシュー #1734）。
+    /// `unique::unique` へ委譲する（shape 検査は不要——入力 shape に
+    /// 制約はなく、出力 shape `[m]` は実行結果から一意に定まる）。
+    fn unique(&self, x: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        unique::unique(x).map_err(BackendError::ShapeMismatch)
     }
 
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {

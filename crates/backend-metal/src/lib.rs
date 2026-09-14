@@ -496,6 +496,14 @@ pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod rnn_cell;
 pub mod soft_f64;
+#[cfg(target_os = "macos")]
+pub mod unique;
+// `shaders/unique.metal::bitonic_step_u32` のホスト側逐語モデル
+// （イシュー #1734）。`gather_scatter_model`・`crates/backend-cuda/src/
+// unique_model.rs` と同じ設計判断で `objc2` 系 FFI に触れないため
+// `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）でも
+// 単体テストが回る。
+pub mod unique_model;
 // `crate::buffer::MetalBuffer::alloc_zeroed_pooled`／`alloc_uninit_pooled`
 // からのみ到達する `pub(crate)` 面（イシュー #1021）。`tensor-core` の
 // どの公開 trait にも属さない低水準アロケータ実装のため非公開のまま。
@@ -628,6 +636,8 @@ pub use rnn_cell::MetalRnnCell;
 pub use softmax::MetalSoftmax;
 pub use tile::TileConfig;
 pub use tile::{GemmRoute, SplitKParams, SplitKPlan, select_route_for_device, should_split_k};
+#[cfg(target_os = "macos")]
+pub use unique::MetalUnique;
 
 /// テスト・診断専用: プロセスワイド singleton `MetalContext`
 /// （`context_cache::cached_context`。`ops::MetalBackendOps` の全演算
