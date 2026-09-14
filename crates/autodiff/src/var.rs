@@ -516,6 +516,57 @@ impl<'t> Var<'t> {
         self.scalar_unary(ScalarUnaryOp::Neg)
     }
 
+    /// SiLU／Swish（`x * sigmoid(x)`。PyTorch `torch.nn.functional.silu`
+    /// 相当）。イシュー #1714（親 #1595）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Silu`]）への薄い委譲
+    /// （`sqrt`／`log` と同型——eager 実体化契約により `Result` を返す）。
+    /// 導関数は `fandhe_ai_tensor_core::scalar_op::silu_grad`
+    /// （`eval::scalar::unary_grad_factor`）。CUDA／Metal は超越関数
+    /// （`exp`）を含むため REQ-2 統一複合判定（bit 同一は主張しない）。
+    pub fn silu(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Silu)
+    }
+
+    /// Hardswish（`x * clamp(x + 3, 0, 6) / 6`。PyTorch
+    /// `torch.nn.functional.hardswish` 相当）。イシュー #1714
+    /// （親 #1595）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Hardswish`]）への薄い委譲。
+    /// 選択・算術のみのため CUDA／Metal ともホスト `f32` 演算と bit
+    /// 同一になる想定（`kernels_scalar_op.rs`／`scalar_op_source.rs`
+    /// モジュール doc 参照）。導関数は
+    /// `fandhe_ai_tensor_core::scalar_op::hardswish_grad`。
+    pub fn hardswish(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Hardswish)
+    }
+
+    /// Leaky ReLU（`x >= 0` なら `x`、それ以外は `negative_slope * x`。
+    /// PyTorch `torch.nn.functional.leaky_relu` 相当）。イシュー #1714
+    /// （親 #1595）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::LeakyRelu`]）への薄い委譲。
+    /// `negative_slope` は検証せず IEEE のまま伝播する（`NaN` を渡せば
+    /// `NaN` が出る。PyTorch と同様）。選択・乗算のみのため bit 同一に
+    /// なる想定。導関数は `x >= 0` で `1`、それ以外は `negative_slope`。
+    pub fn leaky_relu(&self, negative_slope: f32) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::LeakyRelu { negative_slope })
+    }
+
+    /// ELU（`x > 0` なら `x`、それ以外は `alpha * (exp(x) - 1)`。
+    /// PyTorch `torch.nn.functional.elu` 相当）。イシュー #1714
+    /// （親 #1595）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Elu`]）への薄い委譲。
+    /// `alpha` は検証せず IEEE のまま伝播する。CUDA／Metal は超越関数
+    /// （`expm1f`／`metal::precise::exp`）を含むため REQ-2 統一複合
+    /// 判定のみ（Metal の `expm1` 非対応・数値誤差は
+    /// `scalar_op_source.rs` モジュール doc「`Elu` の `expm1` 非対応」
+    /// 参照）。導関数は `x > 0` で `1`、それ以外は `alpha * exp(x)`。
+    pub fn elu(&self, alpha: f32) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Elu { alpha })
+    }
+
     /// ブロードキャスト付き要素ごとの減算（`self − other`。PyTorch
     /// `torch.sub`／`-` 演算子相当）。イシュー #1710（親 #1593）。
     ///
