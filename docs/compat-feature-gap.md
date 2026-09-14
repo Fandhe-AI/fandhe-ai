@@ -928,3 +928,35 @@ typed_bf16.rs`。イシュー #1706・`docs/backend-dtype-dispatch-design.md`
 - facade 公開面への新規追加はない。`Var`／`Tape`／VJP は引き続き未接続で、
   本表の「未実装（欠落側）」列の評価（`Var` レベルの mixed precision）は
   変わらない。
+
+## #1711 の追補
+
+§2.4 の「`sin`/`cos`/`tan`」「`log`/`log2`/`log10`」行（221・223 行目）の
+スナップショット本文は不変のまま、以下が実装済みになった（イシュー
+#1711）。
+
+- `Var::log`／`log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg` の 8 個の
+  `pub fn` を `crates/autodiff/src/var.rs` に追加し、いずれも既存の
+  `Var::scalar_unary`（`ScalarUnaryOp` 汎用 dispatch。#1634 で実装済み）
+  への薄い委譲とした。3 バックエンド（CPU／CUDA／Metal）のカーネル・
+  VJP 係数・CPU 参照実装は #1634／#1635／#1636（#1707〜#1709）で既に
+  実装済みのため、本 issue の新規実装は `Var` 公開メソッドと facade
+  到達経路の配線のみ（新規カーネル・`Op` 追加なし）。
+- facade（`crates/facade/src/lib.rs`）への新規 `pub use`／`pub fn` は
+  追加していない。既存の `pub use fandhe_ai_autodiff::Var` 再エクスポート
+  経由でそのまま到達可能になる。
+- `abs`／`neg` は §2.4 表に専用行がないが、`docs/compat-api-scope.md`
+  §1.2「要素演算」行の実装 issue（#1592・#1593）の分解対象に含まれる
+  ため同行の範囲として扱った（レビューで異論があれば分離して除外できる
+  独立テスト単位で実装済み）。
+- テストは `crates/autodiff/src/grad.rs`（Tape 経由 forward／backward・
+  `log` の非正定義域〈`-inf`／`NaN`〉・`abs` の劣勾配・`neg` の `-0.0`
+  符号ビット反転）と `crates/facade/tests/
+  scalar_unary_transcendental_backend_parity.rs`（CPU vs NaiveOps の
+  REQ-2 複合判定・`matmul → log → sum` 合成勾配・`#[ignore]` の
+  Metal／CUDA 実機比較）に追加した。CUDA（DGX Spark GB10）・Metal
+  （Apple Silicon）実機での facade parity テストは、本実装エージェント
+  の実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッション
+  へ申し送る。
+- `sub`／`div`／`pow`／`sqrt`（#1710）・`clamp`／比較演算（#1712）は本
+  issue の対象外のまま。

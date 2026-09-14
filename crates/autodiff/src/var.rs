@@ -404,10 +404,10 @@ impl<'t> Var<'t> {
     }
 
     /// `ScalarUnaryOp` 汎用 dispatch の `Var` 入口（イシュー #1634）。
-    /// `pub(crate)`: 公開 API 面（`sub`／`div`／`pow`／活性化等の個別
-    /// メソッド）は #1593／#1595 が `facade` の compat 公開面
-    /// （`docs/compat-api-scope.md` §5）拡張として別途ユーザー承認を
-    /// 得たうえで追加する。本メソッドはそれらが呼ぶ共通実装。
+    /// `pub(crate)`: `log`／`log2`／`log10`／`sin`／`cos`／`tan`／
+    /// `abs`／`neg`（イシュー #1711）が薄い委譲で公開する。`sub`／
+    /// `div`／`pow`／`sqrt` 等の残りの個別メソッドは #1593 の分担で
+    /// 別途追加する。本メソッドはそれらが呼ぶ共通実装。
     ///
     /// `where_cond`（`crate::grad::where_cond_with_fallback` 経由）と
     /// 同じ eager 実体化契約: ①入力値を層 1（[`materialize_fallible`]）
@@ -415,10 +415,6 @@ impl<'t> Var<'t> {
     /// （バックエンド実装 → `Unsupported` のときのみホスト参照実装
     /// フォールバック）→ ③`push_eager`。遅延融合（`push_lazy`）は
     /// 使わない（`Op::ScalarUnary` doc「eager」参照）。
-    ///
-    /// `#[allow(dead_code)]`: `Op::ScalarUnary` doc と同じ理由（公開 API
-    /// 面の配線は #1593／#1595）・同じ撤去条件。
-    #[allow(dead_code)]
     pub(crate) fn scalar_unary(&self, op: ScalarUnaryOp) -> Result<Var<'t>, AutodiffError> {
         let input_val = {
             let nodes = self.tape.nodes.borrow();
@@ -463,6 +459,58 @@ impl<'t> Var<'t> {
             value,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 自然対数 `ln(x)`。`ScalarUnaryOp::Log` への薄い委譲
+    /// （`Var::scalar_unary` 参照。イシュー #1711・親 #1593・#1592）。
+    /// 定義域外（`x <= 0`）は IEEE のまま（`x == 0` は `-inf`・
+    /// `x < 0` は `NaN`。panic しない）。導関数は `1/x`
+    /// （`eval::scalar::unary_grad_factor`）。
+    pub fn log(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Log)
+    }
+
+    /// 底 2 の対数 `log2(x)`。数値規約は [`Var::log`] と同じ
+    /// （定義域外は IEEE のまま）。導関数は `1/(x·ln2)`。
+    pub fn log2(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Log2)
+    }
+
+    /// 底 10 の対数 `log10(x)`。数値規約は [`Var::log`] と同じ
+    /// （定義域外は IEEE のまま）。導関数は `1/(x·ln10)`。
+    pub fn log10(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Log10)
+    }
+
+    /// 正弦 `sin(x)`。`ScalarUnaryOp::Sin` への薄い委譲。導関数は
+    /// `cos(x)`（`eval::scalar::unary_grad_factor`）。
+    pub fn sin(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Sin)
+    }
+
+    /// 余弦 `cos(x)`。導関数は `-sin(x)`。
+    pub fn cos(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Cos)
+    }
+
+    /// 正接 `tan(x)`。極（`x = π/2 + kπ` 近傍）でのマスクは行わず
+    /// IEEE のまま（`inf`／`NaN` が伝播しうる）。導関数は
+    /// `1/cos(x)^2`。
+    pub fn tan(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Tan)
+    }
+
+    /// 絶対値 `|x|`。劣勾配は `x == 0` で `0`（`sign(0) = 0`。
+    /// `ScalarUnaryOp::Abs` doc・`eval::scalar::unary_grad_factor`
+    /// 参照）。
+    pub fn abs(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Abs)
+    }
+
+    /// 符号反転 `-x`。`-0.0` の符号ビット反転を含め IEEE のまま。
+    /// 導関数は定数 `-1`。
+    pub fn neg(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Neg)
     }
 
     /// `dim` に沿った縮約和。`dim: None` は全軸縮約（スカラー）。

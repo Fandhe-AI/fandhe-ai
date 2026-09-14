@@ -124,18 +124,9 @@ pub(crate) enum Op {
     /// unary_grad_factor` が返す係数を `upstream` に乗じる
     /// （`grad.rs::vjp_scalar_unary`）。
     ///
-    /// `#[allow(dead_code)]`: 本イシュー（#1634）は enum・dispatch・
-    /// CPU 参照実装・VJP のみを実装し、`Var::scalar_unary`（`pub(crate)`。
-    /// 本 variant を構築する唯一の経路）を呼ぶ公開 API 面の配線は
-    /// #1593／#1595 が別途ユーザー承認を得て追加する（`docs/scalar-op-
-    /// dispatch-design.md` §3.5・親 #1592 の分担）。そのため現時点では
-    /// `#[cfg(test)]` 経由（`crate::grad::tests`）以外から構築されず
-    /// `-D warnings` 下で dead_code 警告になる。`crates/tensor-core/
-    /// src/fusion/mod.rs`（`crates/backend-cuda/src/kernels_wmma_opt.rs`
-    /// 由来）と同じ「結線待ちコードへの理由付き `#[allow(dead_code)]`」
-    /// プラクティスに従う（#1593／#1595 が `Var` 公開メソッドを追加し
-    /// 本 variant が到達可能になった時点で撤去する）。
-    #[allow(dead_code)]
+    /// 到達経路（イシュー #1711）: `Var::log`／`log2`／`log10`／`sin`／
+    /// `cos`／`tan`／`abs`／`neg` → `Var::scalar_unary`（`pub(crate)`。
+    /// 本 variant を構築する唯一の経路）。
     ScalarUnary { op: ScalarUnaryOp, input: NodeId },
     /// スカラー 2 項演算（`ScalarBinaryOp`。イシュー #1634）。
     /// [`Op::ScalarUnary`] の 2 項版で設計方針は同一（eager・非
