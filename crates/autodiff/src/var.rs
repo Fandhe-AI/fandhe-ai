@@ -28,6 +28,7 @@ use crate::eval;
 use crate::grad::{
     concat_with_fallback, gather_with_fallback, scalar_binary_with_fallback,
     scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
+    unique_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -2460,6 +2461,27 @@ impl<'t> Var<'t> {
             .broadcast_to(&out_shape)
             .map_err(AutodiffError::Shape)?;
         self.gather(dim, &index_bc)
+    }
+
+    /// 一意値集合を返す（`torch.unique(input, sorted=True)` の values
+    /// のみ。イシュー #1734・契約は
+    /// [`fandhe_ai_tensor_core::BackendOps::unique`] doc を正とする）。
+    ///
+    /// **非微分演算**: unique は勾配を持たない（出力の各要素がどの
+    /// 入力位置に由来するかは一意に定まらず、出力形状も入力値に
+    /// 依存して動的に決まるため既存の `Var`〈tape ノード・静的
+    /// shape〉には乗らない）。そのため本メソッドは新規 `Op` を tape に
+    /// 記録せず（`push_eager` を呼ばない）、`self` を
+    /// `materialize_fallible`（クレート内部ヘルパー）で実体化した値に
+    /// 対して `unique_with_fallback` を適用した **detached な
+    /// `Tensor<f32>`** を返す（`Var` ではない。
+    /// `docs/unique-facade-exposure-decision.md` 参照）。
+    pub fn unique(&self) -> Result<Tensor<f32>, AutodiffError> {
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        unique_with_fallback(self.tape.ops(), &input_val)
     }
 
     /// `mask` が真の位置を上書きする（`torch.scatter` 相当。イシュー

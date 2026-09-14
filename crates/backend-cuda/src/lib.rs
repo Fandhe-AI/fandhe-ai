@@ -420,6 +420,9 @@ mod reduce;
 // 文字列の責務分離）。
 mod gather_scatter;
 mod kernels_gather_scatter;
+mod kernels_unique;
+mod unique;
+mod unique_model;
 // イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線
 // （`gemm.rs::CudaGemm::new`）を実機で検証する `#[ignore]` テスト。
 // `context_cache`（非公開 `mod`）へ到達する必要があるため
