@@ -1,12 +1,12 @@
 //! `sort`／`topk`（イシュー #1741）の GPU 非依存な純関数群（キー設計・
 //! ライン分解・起動前検証・ホストモデル）。
 //!
-//! [`crate::shaders`]（`sort.metal`。実行時コンパイルされる MSL ソース）は本モジュールの
-//! [`value_key`]／[`composite_key`]／[`line_layout`] と同一のアルゴリズム
+//! `shaders/sort.metal`（実行時コンパイルされる MSL ソース）は本モジュールの
+//! `value_key`／`composite_key`／[`line_layout`] と同一のアルゴリズム
 //! を GPU 側で逐語的に再実装したものであり、本モジュールの
-//! `#[cfg(test)]` ホストモデル（[`build_keys_host`]／
-//! [`bitonic_step_u64_host`]／[`finalize_host`]／
-//! [`sort_lines_host_model`]）が両者の一致を検証する足場になる
+//! `#[cfg(test)]` ホストモデル（`build_keys_host`／
+//! `bitonic_step_u64_host`／`finalize_host`／
+//! `sort_lines_host_model`）が両者の一致を検証する足場になる
 //! （`crates/backend-cuda/src/sort_model.rs`・`unique_model.rs` と同じ
 //! 「意図的複製・ホストモデルによる検証」方針。`objc2` 系 FFI に触れ
 //! ないため `cfg(target_os = "macos")` を付けず Linux（本実装環境・
@@ -20,7 +20,7 @@
 //! - `lo`: ライン内の元添字（`u32`）。ライン内で一意なので、非安定
 //!   ソートでも `key` 自体がライン内で一意になり、同値（ties）が
 //!   あっても最終順序が構造的に一意に定まる（非決定性の余地がない）。
-//! - `hi`: [`value_key`] で得た「NaN を最大・±0 を同値化」した
+//! - `hi`: `value_key` で得た「NaN を最大・±0 を同値化」した
 //!   totalOrder 風キー（[`crate::unique_model::total_order_key`] を
 //!   出発点に契約用へ正規化したもの。本モジュール独自実装——クレート
 //!   境界を跨いで `pub(crate)` 関数を共有できないため意図的に複製
