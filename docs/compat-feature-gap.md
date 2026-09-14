@@ -866,6 +866,15 @@ facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_bi
 - #1775（ONNX export の facade 公開）・#1754（safetensors save／load の facade
   再公開）は同じ publish 前提を共有するため blocked のまま close しない
   （`docs/facade-onnx-import-exposure-decision.md` §6.2）。
+
+**#1773 追記（ONNX export の op 逆マッピング）**: `onnx-interop` 内部
+（`crate::onnx::export_ops`）に `interp.rs` 対応 22 op すべての逆マッピング
+（`ExportOp` -> `NodeProto`。op_type・入力順・属性 name/type/既定値）を実装した
+（`docs/onnx-export-op-mapping.md`）。`build_model_proto` は組み立て前に
+`check_exportable`（layer B。allowlist・既定 opset の fail-closed 検査）を
+経由するよう変更済み。`onnx-interop` は crates.io 非公開クレートであり facade
+新規公開面はなし（#1775 の判断は本追補の対象外のまま変わらない）。
+
 ## #1705 の追補
 
 `float64`／`float16` 行（319〜320 行目）のスナップショット本文は不変のまま、Metal バックエンド限定で以下が確定した（イシュー #1705・`docs/backend-dtype-dispatch-design.md` §14）。
