@@ -25,6 +25,7 @@ use std::borrow::Cow;
 
 use fandhe_ai_tensor_core::{
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, ShapeError, Tensor,
+    VectorNormOrd,
 };
 
 use crate::layout;
@@ -505,6 +506,152 @@ pub(crate) fn max(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) 
     }
 }
 
+/// `outer`／`axis_len`／`inner` を `dim` から決定する（`Var::var`／
+/// `Var::norm_l1`／`norm_l2` 共通のヘルパ。イシュー #1723）。`dim=None`
+/// は「テンソル全体を単一の縮約軸として扱う」（`outer=1`・
+/// `axis_len=numel`・`inner=1`）ことで、[`var_along`]／
+/// [`vector_norm_along`] を軸指定・全縮約の両方で共通のループへ
+/// 統一する（`softmax_vjp_along` 等〈`grad.rs`〉の 3 段走査と同型の
+/// 分解だが、`dim=None` の場合分けをここへ集約する点が異なる）。
+fn reduce_outer_axis_inner(shape: &[usize], dim: Option<usize>) -> (usize, usize, usize) {
+    match dim {
+        None => (1, shape.iter().product(), 1),
+        Some(axis) => {
+            let outer: usize = shape[..axis].iter().product();
+            let axis_len = shape[axis];
+            let inner: usize = shape[axis + 1..].iter().product();
+            (outer, axis_len, inner)
+        }
+    }
+}
+
+/// `Op::Var`／`Op::Std` 共通の `f64` 分散計算コア（イシュー #1723
+/// レビュー是正で `var_along`／`std_along` の重複を統合）。出力要素
+/// ごとに ①`f64` で平均 ②`f64` で二乗和 の 2 パスを計算し、`f64` の
+/// まま分散を返す（`f32` へ downcast しない——呼び出し元が `var_along`
+/// のように分散をそのまま返すか、`std_along` のように `sqrt` してから
+/// 返すかを選べるようにするため。`n == 0`／`n <= correction` の検査は
+/// 呼び出し元〈`Var::var`／`Var::std`〉が事前に済ませている前提——本
+/// 関数は shape が既に整合していることを前提とする契約〈モジュール
+/// 冒頭コメント〉に従い検査しない）。戻り値は `outer * inner` 要素の
+/// `f64` ベクタ（`out_shape` への詰め直しは呼び出し元が行う）。
+fn var_f64_along(input: &Tensor<f32>, dim: Option<usize>, correction: usize) -> Vec<f64> {
+    let shape = input.shape();
+    let (outer, axis_len, inner) = reduce_outer_axis_inner(shape, dim);
+    let data = dense_vec(input);
+    let n = axis_len as f64;
+    let denom = n - correction as f64;
+    let mut out = vec![0f64; outer * inner];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut mean_acc = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                mean_acc += data[src] as f64;
+            }
+            let mean = mean_acc / n;
+            let mut sq_acc = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                let d = data[src] as f64 - mean;
+                sq_acc += d * d;
+            }
+            out[o * inner + i] = sq_acc / denom;
+        }
+    }
+    out
+}
+
+/// `Op::Var`（`Var::var`）のホスト参照実装（`BackendOps::var` が
+/// `Unsupported` を返した場合のフォールバック。イシュー #1723）。
+/// [`var_f64_along`]（`f64` 分散）を計算し、最後に 1 回だけ `f32` へ
+/// downcast する（`.claude/rules/coding-rust.md`「正規化統計は要素を
+/// 先に `f64` へ昇格してから二乗し、最後に 1 回だけ `f32` へ downcast
+/// する」契約）。
+pub(crate) fn var_along(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    correction: usize,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let out: Vec<f32> = var_f64_along(input, dim, correction)
+        .into_iter()
+        .map(|v| v as f32)
+        .collect();
+    build_tensor(out, out_shape)
+}
+
+/// `Op::Std`（`Var::std`）のホスト参照実装（イシュー #1723 レビュー
+/// 是正。codex-review P2 指摘: 当初 `Var::var(..).sqrt()` の合成
+/// （`Op::Var` なし）で実装していたため、`Op::Var` が分散を `f32` へ
+/// downcast してから `Op::Sqrt` へ渡しており、真の分散が `f32` の
+/// 範囲（有限最大値 約 `3.4e38`）を超える極端な入力（例
+/// `[-1e20, 1e20]`。分散 `≈1e40` が overflow）で `std` 自体は `f32`
+/// で表現可能（`≈1.41e20`）にもかかわらず `inf` になる問題があった）。
+/// 本関数は [`var_f64_along`] が返す `f64` 分散に対し `sqrt` も `f64`
+/// で計算してから、最後に 1 回だけ `f32` へ downcast する——`sqrt` を
+/// 挟むことで分散段階の overflow を回避できる（`std` は分散よりも
+/// 小さい値域に収まるため）。
+pub(crate) fn std_along(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    correction: usize,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let out: Vec<f32> = var_f64_along(input, dim, correction)
+        .into_iter()
+        .map(|v| v.sqrt() as f32)
+        .collect();
+    build_tensor(out, out_shape)
+}
+
+/// `Op::VectorNorm`（`Var::norm_l1`／`norm_l2`）のホスト参照実装
+/// （`BackendOps::vector_norm` が `Unsupported` を返した場合の
+/// フォールバック。イシュー #1723）。[`var_along`] と同じ
+/// `outer`／`axis_len`／`inner` 分解で、出力要素ごとに `f64` 累積し
+/// L2 のみ最後に `sqrt` してから 1 回だけ `f32` へ downcast する
+/// （`n == 0` の検査は呼び出し元 `Var::norm_l1`／`norm_l2` が済ませて
+/// いる前提）。
+pub(crate) fn vector_norm_along(
+    input: &Tensor<f32>,
+    ord: VectorNormOrd,
+    dim: Option<usize>,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let shape = input.shape();
+    let (outer, axis_len, inner) = reduce_outer_axis_inner(shape, dim);
+    let data = dense_vec(input);
+    let mut out = vec![0f32; outer * inner];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut acc = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                let v = data[src] as f64;
+                acc += match ord {
+                    VectorNormOrd::L1 => v.abs(),
+                    VectorNormOrd::L2 => v * v,
+                    // `VectorNormOrd` は `#[non_exhaustive]`
+                    // （`tensor-core`）のため将来 variant に備えた
+                    // `_` 分岐を持つ（`eval::linalg::matrix_norm` の
+                    // `MatrixNormOrd` 拒否と同方針）。呼び出し元
+                    // `Var::norm`（`var.rs`）が `norm_l1`／`norm_l2`
+                    // 限定の `pub` 入口からのみ本関数を呼ぶ現状の
+                    // 契約上、未知 variant は到達しない想定だが、
+                    // 安全側フォールバックとして `0.0`（寄与なし）を
+                    // 返す。
+                    _ => 0.0,
+                };
+            }
+            out[o * inner + i] = match ord {
+                VectorNormOrd::L1 => acc as f32,
+                VectorNormOrd::L2 => acc.sqrt() as f32,
+                _ => 0.0,
+            };
+        }
+    }
+    build_tensor(out, out_shape)
+}
 /// `min(dim)`。`dim: None` は全要素中の最小値をスカラー（shape `[]`）で
 /// 返す。[`max`] と異なり **NaN 非伝播**（`f32::min`。`fminf` と同じ）
 /// を用いる——`BackendOps::min`（`crate::backend_ops` 経由）の CPU

@@ -373,6 +373,23 @@ pub enum MatrixNormOrd {
     Spectral,
 }
 
+/// [`BackendOps::vector_norm`] が計算するベクトルノルムの種類
+/// （イシュー #1723。`torch.norm`／`tf.norm` の L1／L2 相当。
+/// [`MatrixNormOrd`] と対をなすがこちらは軸方向縮約〈`dim:
+/// Option<usize>`〉を持つ点が異なるため別 enum とする）。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`MatrixNormOrd` と同方針）。
+/// 将来 `Lp`（任意次数）を追加しうる（実装計画 §8「スコープ外」節）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorNormOrd {
+    /// L1 ノルム（`Σ |x_i|`）。
+    L1,
+    /// L2 ノルム（`√Σ x_i²`）。
+    L2,
+}
+
 /// [`BackendOps::gru_backward`] の戻り値型エイリアス（イシュー #1647）。
 /// `(d_pre_i, d_pre_h, dh_prev_direct)`（順に `[B, 3H]`・`[B, 3H]`・
 /// `[B, H]`）。`clippy::type_complexity` 回避のための命名（doc は
@@ -2355,6 +2372,65 @@ pub trait BackendOps {
                 .into(),
         ))
     }
+
+    /// 分散（`Var: [.., dim_len, ..] → reduce_out_shape(dim)`。イシュー
+    /// #1723。`torch.var(dim, correction)`／`tf.math.reduce_variance`
+    /// 相当）。`dim=None` は全要素縮約（スカラー出力）。`correction`
+    /// （`0` = 母分散・`1` = 不偏分散。`torch.var` の `correction`
+    /// 引数と同じ意味）。
+    ///
+    /// # 数値契約
+    /// [`Self::sum`]（`.claude/rules/coding-rust.md`「正規化統計・勾配の
+    /// 長軸縮約は `f64` アキュムレータで統一する」契約）と同じく、
+    /// 縮約対象の各要素を `f64` へ昇格してから平均・二乗和を計算し、
+    /// **最後に 1 回だけ** `f32` へ downcast する。
+    ///
+    /// # エラー契約
+    /// 縮約対象の要素数 `n`（`dim=Some(axis)` は `shape[axis]`・
+    /// `dim=None` は全要素数）が `0` の場合、または `n <= correction`
+    /// （自由度が非正になり `NaN`／`inf` を黙って返してしまう。PyTorch
+    /// は `NaN`／`inf` をそのまま返す点と意図的に異なる安全側の判断）
+    /// の場合は [`BackendError::InvalidArgument`] を返す。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    fn var(
+        &self,
+        _a: &Tensor<f32>,
+        _dim: Option<usize>,
+        _correction: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "var: default fail-safe (no device-side reduction kernel available)".into(),
+        ))
+    }
+
+    /// ベクトルノルム（`ord` は [`VectorNormOrd`]。イシュー #1723。
+    /// `torch.norm`／`tf.norm` の L1／L2 相当）。`dim=None` は全要素
+    /// 縮約（スカラー出力）。
+    ///
+    /// # 数値契約
+    /// [`Self::var`] と同じ `f64` 二段計算契約（要素を `f64` へ昇格して
+    /// から縮約し、最後に 1 回だけ `f32` へ downcast する）。
+    ///
+    /// # エラー契約
+    /// 縮約対象の要素数が `0` の場合は [`BackendError::InvalidArgument`]
+    /// を返す（`L1`／`L2` いずれも空縮約は数学的には単位元 `0.0` を
+    /// 持つが、[`Self::var`] と対称な「空縮約は明示エラー」の方針を
+    /// 揃える。実装計画 §3.3）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    fn vector_norm(
+        &self,
+        _a: &Tensor<f32>,
+        _ord: VectorNormOrd,
+        _dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "vector_norm: default fail-safe (no device-side reduction kernel available)".into(),
+        ))
+    }
 }
 
 /// `default_gemm_batched`（CUDA／Metal が経由する既定合成実装）と
@@ -3570,6 +3646,29 @@ mod tests {
         ));
         assert!(matches!(
             ops.linalg_matrix_norm(&a, MatrixNormOrd::Fro),
+            Err(BackendError::Unsupported(_))
+        ));
+    }
+
+    /// [`BackendOps::var`]／[`BackendOps::vector_norm`] の既定実装が
+    /// いずれも fail-safe（[`BackendError::Unsupported`]）を返すことを
+    /// 確認する（イシュー #1723。`linalg_defaults_are_unsupported` と
+    /// 同型の回帰ガード）。
+    #[test]
+    fn var_vector_norm_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+
+        assert!(matches!(
+            ops.var(&a, None, 1),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.vector_norm(&a, VectorNormOrd::L1, None),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.vector_norm(&a, VectorNormOrd::L2, Some(0)),
             Err(BackendError::Unsupported(_))
         ));
     }

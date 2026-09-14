@@ -76,7 +76,7 @@
 
 use std::fmt;
 
-use fandhe_ai_tensor_core::{ShapeError, Tensor, reduce_out_shape};
+use fandhe_ai_tensor_core::{ShapeError, Tensor, VectorNormOrd, reduce_out_shape};
 use rayon::prelude::*;
 
 /// 全縮約（`dim=None`）の決定的チャンク結合に用いる固定チャンクサイズ。
@@ -95,12 +95,24 @@ pub enum ReduceError {
     /// 失敗をそのまま透過する）。
     Shape(ShapeError),
     /// 縮約対象の要素数が 0（`max`・`mean` は単位元を持たないためエラーとする。
-    /// `op` は失敗した演算名 `"max"`/`"mean"`/`"min"`/`"argmax"`/`"argmin"`。
+    /// `op` は失敗した演算名 `"max"`/`"mean"`/`"min"`/`"argmax"`/`"argmin"`／`"var"`/`"norm"`。
     /// `min`／`argmax`／`argmin` はイシュー #1720 で追加）。`argmax`／
     /// `argmin` の添字が `i32::MAX` を超える場合は
     /// `Shape(ShapeError::IndexRangeOverflow { .. })`
     /// （`sort_topk.rs`／`gather_scatter.rs` と同じ契約）を使う。
     EmptyReduction { op: &'static str },
+    /// `var` の自由度不足（`n <= correction`。イシュー #1723）。`n` は
+    /// 縮約対象の要素数（`dim=Some(axis)` は `shape[axis]`・`dim=None`
+    /// は全要素数）、`correction` は呼び出し元が指定した自由度補正
+    /// （`torch.var` の `correction` 引数と同じ意味）。`NaN`／`inf` を
+    /// 黙って返さない安全側の判断（`fandhe_ai_tensor_core::BackendOps::
+    /// var` doc「エラー契約」参照）。
+    InsufficientDegreesOfFreedom { n: usize, correction: usize },
+    /// `vector_norm` へ未知の [`VectorNormOrd`] variant（同型は
+    /// `#[non_exhaustive]`。`crates/backend-cpu/src/linalg.rs::
+    /// matrix_norm` が `MatrixNormOrd` に対して行う fail-closed 拒否と
+    /// 同方針。イシュー #1723）が渡された。
+    UnsupportedOrd(String),
 }
 
 impl fmt::Display for ReduceError {
@@ -109,6 +121,14 @@ impl fmt::Display for ReduceError {
             ReduceError::Shape(err) => write!(f, "reduction shape error: {err}"),
             ReduceError::EmptyReduction { op } => {
                 write!(f, "cannot compute {op} of an empty reduction")
+            }
+            ReduceError::InsufficientDegreesOfFreedom { n, correction } => write!(
+                f,
+                "cannot compute var: n ({n}) <= correction ({correction}) (degrees of freedom \
+                 would be non-positive)"
+            ),
+            ReduceError::UnsupportedOrd(desc) => {
+                write!(f, "unsupported VectorNormOrd variant: {desc}")
             }
         }
     }
@@ -174,13 +194,21 @@ fn gather_elements(a: &Tensor<f32>) -> Vec<f32> {
 /// 各要素の畳み込み精度のみであり、REQ-2 の許容誤差（統一複合判定）を
 /// 緩和するものではない。イシュー #1675 codex-review 指摘）。
 fn sum_slice(data: &[f32]) -> f32 {
-    let total: f64 = data
-        .par_chunks(CHUNK)
+    sum_slice_f64(data) as f32
+}
+
+/// [`sum_slice`] の `f64` 版（downcast 前の値をそのまま返す）。
+/// `var`（[`var_slice`]）が平均を `f64` のまま使う（`sum_slice` を経由
+/// すると 1 回余計に `f32` へ downcast してしまい `.claude/rules/
+/// coding-rust.md` の「最後に 1 回だけ downcast する」契約に反する）
+/// ため、チャンク分割・結合ロジックそのものを共有する目的で切り出した
+/// （イシュー #1723。`sum_slice` の挙動・決定性契約は不変）。
+fn sum_slice_f64(data: &[f32]) -> f64 {
+    data.par_chunks(CHUNK)
         .map(|chunk| chunk.iter().fold(0.0f64, |acc, &v| acc + v as f64))
         .collect::<Vec<f64>>()
         .into_iter()
-        .fold(0.0f64, |acc, v| acc + v);
-    total as f32
+        .fold(0.0f64, |acc, v| acc + v)
 }
 
 /// `data` を [`CHUNK`] 単位に分割し、決定性契約（モジュール doc 参照）に
@@ -327,6 +355,261 @@ fn axis_reduce_sum(a: &Tensor<f32>, axis: usize) -> Vec<f32> {
     };
 
     (0..total_out).into_par_iter().map(compute).collect()
+}
+
+/// `data`（`dim=None` の全縮約対象。空でないこと・`n > correction` は
+/// 呼び出し元 [`var`] が事前検査済みの前提）から分散を計算する。
+/// [`sum_slice_f64`] と同じチャンク並列・決定性契約（モジュール doc
+/// 参照）で ①平均 ②二乗和 の 2 パスを `f64` で計算し、最後に 1 回だけ
+/// `f32` へ downcast する（`.claude/rules/coding-rust.md`「正規化統計は
+/// 要素を先に `f64` へ昇格してから二乗し、最後に 1 回だけ `f32` へ
+/// downcast する」契約。イシュー #1723）。
+fn var_slice(data: &[f32], correction: usize) -> f32 {
+    let n = data.len() as f64;
+    let mean = sum_slice_f64(data) / n;
+    let sq_sum: f64 = data
+        .par_chunks(CHUNK)
+        .map(|chunk| {
+            chunk.iter().fold(0.0f64, |acc, &v| {
+                let d = v as f64 - mean;
+                acc + d * d
+            })
+        })
+        .collect::<Vec<f64>>()
+        .into_iter()
+        .fold(0.0f64, |acc, v| acc + v);
+    (sq_sum / (n - correction as f64)) as f32
+}
+
+/// [`var_slice`] の軸指定（`dim=Some(axis)`）版。`axis_reduce_sum` と
+/// 同じ「出力側 rayon 並列・各要素内は縮約軸を昇順に逐次」決定性契約
+/// （モジュール doc 参照）で、出力要素ごとに ①平均 ②二乗和 の 2 パスを
+/// `f64` で計算する。`axis_len > correction` は呼び出し元 [`var`] が
+/// 事前検査済みの前提。
+fn axis_reduce_var(a: &Tensor<f32>, axis: usize, correction: usize) -> Vec<f32> {
+    let shape = a.shape();
+    let outer_dims = &shape[..axis];
+    let inner_dims = &shape[axis + 1..];
+    let axis_len = shape[axis];
+    let outer: usize = outer_dims.iter().product();
+    let inner: usize = inner_dims.iter().product();
+    let total_out = outer * inner;
+    let n = axis_len as f64;
+    let denom = n - correction as f64;
+
+    // `axis_reduce_sum` と同じ契約（クロージャは `flat in 0..total_out`
+    // のみで呼ばれ、`inner` によるゼロ除算は発生しない）。
+    let compute = |flat: usize| -> f32 {
+        let (o, i) = (flat / inner, flat % inner);
+        let outer_idx = unravel(o, outer_dims);
+        let inner_idx = unravel(i, inner_dims);
+        let mut full_idx = Vec::with_capacity(shape.len());
+        full_idx.extend_from_slice(&outer_idx);
+        full_idx.push(0);
+        full_idx.extend_from_slice(&inner_idx);
+        let mut mean_acc = 0.0f64;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let value = a.get(&full_idx);
+            debug_assert!(
+                value.is_some(),
+                "axis_reduce_var: 走査ロジックのバグにより index {full_idx:?} が範囲外になった"
+            );
+            mean_acc += value.unwrap_or(0.0) as f64;
+        }
+        let mean = mean_acc / n;
+        let mut sq_acc = 0.0f64;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let value = a.get(&full_idx).unwrap_or(0.0) as f64;
+            let d = value - mean;
+            sq_acc += d * d;
+        }
+        (sq_acc / denom) as f32
+    };
+
+    (0..total_out).into_par_iter().map(compute).collect()
+}
+
+/// [`VectorNormOrd`] を検査済みの内部表現へ変換したもの。`VectorNormOrd`
+/// は `#[non_exhaustive]`（`tensor-core`）のため、これを直接 match する
+/// 箇所（[`vector_norm_slice`]／[`axis_reduce_vector_norm`] 双方）は
+/// 将来 variant に備えた `_` 分岐を必要とする。変換点を [`vector_norm`]
+/// の入口 1 箇所へ集約し、それ以外の内部関数は本 2 variant の閉じた
+/// enum（fail-closed 検査済み）だけを扱えばよいようにする（`crates/
+/// backend-cpu/src/linalg.rs::matrix_norm` の `MatrixNormOrd` 拒否と
+/// 同方針。イシュー #1723）。
+#[derive(Clone, Copy)]
+enum NormKind {
+    L1,
+    L2,
+}
+
+impl NormKind {
+    fn from_ord(ord: VectorNormOrd) -> Result<Self, ReduceError> {
+        match ord {
+            VectorNormOrd::L1 => Ok(NormKind::L1),
+            VectorNormOrd::L2 => Ok(NormKind::L2),
+            _ => Err(ReduceError::UnsupportedOrd(format!("{ord:?}"))),
+        }
+    }
+}
+
+/// `data`（`dim=None` の全縮約対象。空でないことは呼び出し元 [`vector_norm`]
+/// が事前検査済みの前提）から L1／L2 ノルムを計算する。[`sum_slice_f64`]
+/// と同じチャンク並列・決定性契約で `f64` 累積し、L2 のみ最後に `sqrt`
+/// してから 1 回だけ `f32` へ downcast する（イシュー #1723）。
+fn vector_norm_slice(data: &[f32], kind: NormKind) -> f32 {
+    let acc: f64 = data
+        .par_chunks(CHUNK)
+        .map(|chunk| {
+            chunk.iter().fold(0.0f64, |acc, &v| {
+                let v = v as f64;
+                match kind {
+                    NormKind::L1 => acc + v.abs(),
+                    NormKind::L2 => acc + v * v,
+                }
+            })
+        })
+        .collect::<Vec<f64>>()
+        .into_iter()
+        .fold(0.0f64, |acc, v| acc + v);
+    match kind {
+        NormKind::L1 => acc as f32,
+        NormKind::L2 => acc.sqrt() as f32,
+    }
+}
+
+/// [`vector_norm_slice`] の軸指定（`dim=Some(axis)`）版。`axis_reduce_sum`
+/// と同じ決定性契約で、出力要素ごとに `f64` 累積後 L2 のみ `sqrt` して
+/// 1 回だけ `f32` へ downcast する。
+fn axis_reduce_vector_norm(a: &Tensor<f32>, axis: usize, kind: NormKind) -> Vec<f32> {
+    let shape = a.shape();
+    let outer_dims = &shape[..axis];
+    let inner_dims = &shape[axis + 1..];
+    let axis_len = shape[axis];
+    let outer: usize = outer_dims.iter().product();
+    let inner: usize = inner_dims.iter().product();
+    let total_out = outer * inner;
+
+    let compute = |flat: usize| -> f32 {
+        let (o, i) = (flat / inner, flat % inner);
+        let outer_idx = unravel(o, outer_dims);
+        let inner_idx = unravel(i, inner_dims);
+        let mut full_idx = Vec::with_capacity(shape.len());
+        full_idx.extend_from_slice(&outer_idx);
+        full_idx.push(0);
+        full_idx.extend_from_slice(&inner_idx);
+        let mut acc = 0.0f64;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let value = a.get(&full_idx);
+            debug_assert!(
+                value.is_some(),
+                "axis_reduce_vector_norm: 走査ロジックのバグにより index {full_idx:?} が範囲外に\
+                 なった"
+            );
+            let v = value.unwrap_or(0.0) as f64;
+            acc += match kind {
+                NormKind::L1 => v.abs(),
+                NormKind::L2 => v * v,
+            };
+        }
+        match kind {
+            NormKind::L1 => acc as f32,
+            NormKind::L2 => acc.sqrt() as f32,
+        }
+    };
+
+    (0..total_out).into_par_iter().map(compute).collect()
+}
+
+/// 軸指定・全縮約いずれにも対応する `var`（`torch.var(dim, correction)`
+/// 相当。イシュー #1723）。`dim=None` は rank 0（スカラー）テンソルを
+/// 返す。数値契約は [`fandhe_ai_tensor_core::BackendOps::var`] doc を
+/// 正とする。
+///
+/// 縮約対象の要素数 `n`（`dim=Some(axis)` は `shape[axis]`・`dim=None`
+/// は全要素数）が `0` の場合は [`ReduceError::EmptyReduction`]、
+/// `n <= correction` の場合は [`ReduceError::InsufficientDegreesOfFreedom`]
+/// を返す。
+pub fn var(
+    a: &Tensor<f32>,
+    dim: Option<usize>,
+    correction: usize,
+) -> Result<Tensor<f32>, ReduceError> {
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(ReduceError::Shape)?;
+    let n = match dim {
+        None => a.numel(),
+        Some(axis) => a.shape()[axis],
+    };
+    if n == 0 {
+        return Err(ReduceError::EmptyReduction { op: "var" });
+    }
+    if n <= correction {
+        return Err(ReduceError::InsufficientDegreesOfFreedom { n, correction });
+    }
+    let data = match dim {
+        None => {
+            let total = match a.as_slice() {
+                Some(slice) => var_slice(slice, correction),
+                None => var_slice(&gather_elements(a), correction),
+            };
+            vec![total]
+        }
+        Some(axis) => {
+            let shape = a.shape();
+            let outer = checked_product(&shape[..axis])?;
+            let inner = checked_product(&shape[axis + 1..])?;
+            outer
+                .checked_mul(inner)
+                .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            axis_reduce_var(a, axis, correction)
+        }
+    };
+    Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
+}
+
+/// 軸指定・全縮約いずれにも対応する `vector_norm`（`torch.norm`／
+/// `tf.norm` の L1／L2 相当。イシュー #1723）。`dim=None` は rank 0
+/// （スカラー）テンソルを返す。数値契約は
+/// [`fandhe_ai_tensor_core::BackendOps::vector_norm`] doc を正とする。
+///
+/// 縮約対象の要素数が `0` の場合は [`ReduceError::EmptyReduction`] を
+/// 返す（`var` と対称な「空縮約は明示エラー」の方針）。
+pub fn vector_norm(
+    a: &Tensor<f32>,
+    ord: VectorNormOrd,
+    dim: Option<usize>,
+) -> Result<Tensor<f32>, ReduceError> {
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(ReduceError::Shape)?;
+    let kind = NormKind::from_ord(ord)?;
+    let n = match dim {
+        None => a.numel(),
+        Some(axis) => a.shape()[axis],
+    };
+    if n == 0 {
+        return Err(ReduceError::EmptyReduction { op: "norm" });
+    }
+    let data = match dim {
+        None => {
+            let total = match a.as_slice() {
+                Some(slice) => vector_norm_slice(slice, kind),
+                None => vector_norm_slice(&gather_elements(a), kind),
+            };
+            vec![total]
+        }
+        Some(axis) => {
+            let shape = a.shape();
+            let outer = checked_product(&shape[..axis])?;
+            let inner = checked_product(&shape[axis + 1..])?;
+            outer
+                .checked_mul(inner)
+                .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            axis_reduce_vector_norm(a, axis, kind)
+        }
+    };
+    Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
 }
 
 /// 軸指定・全縮約いずれにも対応する `sum`。
@@ -1075,6 +1358,132 @@ mod tests {
                      でスレッド数間に不一致（i={i}）"
                 );
             }
+        }
+    }
+
+    /// `var(dim=None, correction=1)`（不偏分散）が既知値と一致することを
+    /// 確認する（イシュー #1723）。`[1,2,3,4]` の不偏分散は 5/3。
+    #[test]
+    fn var_full_matches_known_value() {
+        let t = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let out = var(&t, None, 1).unwrap();
+        assert_eq!(out.shape(), &[] as &[usize]);
+        let expected = 5.0 / 3.0;
+        assert!((out.get(&[]).unwrap() - expected).abs() < 1e-6);
+    }
+
+    /// `var(dim=None, correction=0)`（母分散）が既知値と一致することを
+    /// 確認する。`[1,2,3,4]` の母分散は 1.25。
+    #[test]
+    fn var_full_correction_zero_matches_known_value() {
+        let t = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let out = var(&t, None, 0).unwrap();
+        let expected = 1.25;
+        assert!((out.get(&[]).unwrap() - expected).abs() < 1e-6);
+    }
+
+    /// `var(dim=Some(axis))` が軸ごとに独立して計算されることを確認する。
+    #[test]
+    fn var_axis_matches_expected() {
+        // shape [2, 3]: [[1,2,3],[4,4,4]]（行 1 は定数 = 分散 0）
+        let t = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0, 4.0, 4.0], &[2, 3]).unwrap();
+        let out = var(&t, Some(1), 0).unwrap();
+        assert_eq!(out.shape(), &[2]);
+        // 母分散: [1,2,3] の平均 2・二乗和 (1+0+1)=2・/3 = 2/3
+        assert!((out.get(&[0]).unwrap() - (2.0 / 3.0)).abs() < 1e-6);
+        assert!((out.get(&[1]).unwrap() - 0.0).abs() < 1e-6);
+    }
+
+    /// `n == 0`（空縮約）が `EmptyReduction` を返すことを確認する。
+    #[test]
+    fn var_empty_reduction_is_error() {
+        let t = Tensor::<f32>::new(Vec::<f32>::new(), &[0]).unwrap();
+        let err = var(&t, None, 1).unwrap_err();
+        assert!(matches!(err, ReduceError::EmptyReduction { op: "var" }));
+    }
+
+    /// `n <= correction`（自由度不足）が `InsufficientDegreesOfFreedom` を
+    /// 返すことを確認する（`n=1, correction=1` の境界値）。
+    #[test]
+    fn var_insufficient_degrees_of_freedom_is_error() {
+        let t = Tensor::<f32>::new(vec![1.0], &[1]).unwrap();
+        let err = var(&t, None, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            ReduceError::InsufficientDegreesOfFreedom {
+                n: 1,
+                correction: 1
+            }
+        ));
+    }
+
+    /// `vector_norm(L1)` が既知値と一致することを確認する。
+    #[test]
+    fn vector_norm_l1_full_matches_known_value() {
+        let t = Tensor::<f32>::new(vec![-1.0, 2.0, -3.0, 4.0], &[4]).unwrap();
+        let out = vector_norm(&t, VectorNormOrd::L1, None).unwrap();
+        assert!((out.get(&[]).unwrap() - 10.0).abs() < 1e-6);
+    }
+
+    /// `vector_norm(L2)` が既知値と一致することを確認する（3-4-5 の直角三角形）。
+    #[test]
+    fn vector_norm_l2_full_matches_known_value() {
+        let t = Tensor::<f32>::new(vec![3.0, 4.0], &[2]).unwrap();
+        let out = vector_norm(&t, VectorNormOrd::L2, None).unwrap();
+        assert!((out.get(&[]).unwrap() - 5.0).abs() < 1e-6);
+    }
+
+    /// `vector_norm(dim=Some(axis))` が軸ごとに独立して計算されることを
+    /// 確認する。
+    #[test]
+    fn vector_norm_axis_matches_expected() {
+        // shape [2, 2]: [[3,4],[-1,-1]]
+        let t = Tensor::<f32>::new(vec![3.0, 4.0, -1.0, -1.0], &[2, 2]).unwrap();
+        let out_l2 = vector_norm(&t, VectorNormOrd::L2, Some(1)).unwrap();
+        assert!((out_l2.get(&[0]).unwrap() - 5.0).abs() < 1e-6);
+        assert!((out_l2.get(&[1]).unwrap() - 2.0f32.sqrt()).abs() < 1e-6);
+
+        let out_l1 = vector_norm(&t, VectorNormOrd::L1, Some(1)).unwrap();
+        assert!((out_l1.get(&[0]).unwrap() - 7.0).abs() < 1e-6);
+        assert!((out_l1.get(&[1]).unwrap() - 2.0).abs() < 1e-6);
+    }
+
+    /// `vector_norm` の空縮約が `EmptyReduction` を返すことを確認する。
+    #[test]
+    fn vector_norm_empty_reduction_is_error() {
+        let t = Tensor::<f32>::new(Vec::<f32>::new(), &[0]).unwrap();
+        let err = vector_norm(&t, VectorNormOrd::L1, None).unwrap_err();
+        assert!(matches!(err, ReduceError::EmptyReduction { op: "norm" }));
+    }
+
+    /// `var`（軸指定）が single/multi スレッドで bit 完全一致する
+    /// （決定性契約。既存 `chunk_boundary_deterministic_sum` と同型）。
+    #[test]
+    fn var_axis_deterministic_across_thread_counts() {
+        let single = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("failed to build 1-thread rayon pool for determinism test");
+        let multi = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("failed to build 4-thread rayon pool for determinism test");
+
+        let outer = 5usize;
+        let axis_len = 37usize;
+        let data: Vec<f32> = (0..outer * axis_len)
+            .map(|i| ((i % 53) as f32) * 0.37 - 9.0)
+            .collect();
+        let t = Tensor::<f32>::new(data, &[outer, axis_len]).unwrap();
+
+        let a = single.install(|| var(&t, Some(1), 1).unwrap());
+        let b = multi.install(|| var(&t, Some(1), 1).unwrap());
+        for i in 0..outer {
+            assert_eq!(
+                a.get(&[i]).unwrap().to_bits(),
+                b.get(&[i]).unwrap().to_bits(),
+                "var axis がスレッド数間に不一致（i={i}）"
+            );
         }
     }
 }
