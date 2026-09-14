@@ -433,6 +433,21 @@ mod gemm_mpp_diag_tests;
 pub mod gather_scatter;
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_hfrag_diag_tests;
+// thread_elements() 方式 BlockMMA 候補（イシュー #1693）の純カーネル
+// 専有時間を本番選択構成（`tile::select_for_device`）と M4 Max 実機で
+// A/B 比較する診断テスト群（イシュー #1694）。`gemm::MetalGemm::{new,
+// new_with_mma_frag_load, mma_frag_load}`（`new_with_mma_frag_load`／
+// `mma_frag_load` は #1693 で追加）・`gemm_reuse_phase_diag_tests::
+// {measure_one_phase_trial, WARMUP_TRIALS, MEASURED_TRIALS,
+// gen_square_ab, median_of}`・`tile::select_for_device` へ到達する
+// ため、既存診断テスト群と同じ理由でクレートルートの兄弟モジュールと
+// して配置する。`objc2` 系 FFI 型に触れるため同じ
+// `cfg(all(test, target_os = "macos"))` を付ける。プロダクションコード
+// （`tile.rs`／`gemm.rs`／`shaders/gemm.metal`）は無変更（診断テスト
+// 追加のみ。組み込み可否は `docs/perf/metal-gemm-thread-elements-
+// candidate.md` §7 側で判断する）。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_te_diag_tests;
 // readout legacy 後退（イシュー #1520。`docs/perf/metal-gemm-candle-
 // gate-remeasurement.md` §17）の 4 腕診断ハーネス（イシュー #1695。
 // CUDA 側 `readout_regression_diag_tests_1436.rs`〈イシュー #1436〉と
