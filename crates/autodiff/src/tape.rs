@@ -237,6 +237,21 @@ pub(crate) enum Op {
         target: NodeId,
         reduction: crate::var::Reduction,
     },
+    /// 二値交差エントロピー損失（`BCELoss`／`BCEWithLogitsLoss`。`kind`
+    /// で分岐。イシュー #1737・親イシュー #1609）。`MseLoss` と同じ
+    /// 融合パターン（`BackendOps::bce_loss`／`bce_loss_backward` 優先・
+    /// `Unsupported` のときのみホスト参照実装〈`eval::bce_loss`〉へ
+    /// フォールバック）で、`BackendOps` に対応メソッドがない場合の
+    /// フォールバック先を含め融合対象外とし常に実体化済み
+    /// （`push_eager`）。`target` は `MseLoss` と同じく**追跡対象 `Var`**
+    /// （`CrossEntropyLoss::targets` の非追跡 `Tensor<i32>` 方式ではない）
+    /// で、`input`／`target` の両方に勾配が流れる。
+    BceLoss {
+        input: NodeId,
+        target: NodeId,
+        kind: fandhe_ai_tensor_core::BceKind,
+        reduction: crate::var::Reduction,
+    },
     /// CrossEntropy 損失（log-sum-exp 安定化・クラス次元指定。#191・
     /// 親イシュー #189）。`BackendOps` に対応メソッドがないため融合対象外
     /// とし常に実体化済み（`push_eager`）。log-softmax → NLL を個別オペ
@@ -1100,7 +1115,8 @@ impl Op {
             // `SvdU`／`SvdS`／`SvdVh`。兄弟出力が `Op` payload に直接
             // 値を保持するため単純な入力再計算では閉じない）、resident
             // 経路（`ResidentResolver` 前提の `LinearResident`）、その他
-            // 未対応の forward 経路（`LinearAct`／`MseLoss`／
+            // 未対応の forward 経路（`LinearAct`／`MseLoss`／`BceLoss`
+            // （イシュー #1737。`MseLoss` と同型の理由で非適格）／
             // `CrossEntropyLoss`／`RnnCell`／`Inv`／`Solve`／`Det`／
             // `Cholesky`／`MatrixNorm`／`Softmax`／`LogSoftmax`／
             // `RmsNorm`／`LayerNorm`。merge 時に非網羅 match 是正で追加）は
@@ -1111,6 +1127,7 @@ impl Op {
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
             | Op::MseLoss { .. }
+            | Op::BceLoss { .. }
             | Op::CrossEntropyLoss { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
@@ -1257,6 +1274,10 @@ impl Op {
             Op::OneHot { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);
+                f(*target);
+            }
+            Op::BceLoss { input, target, .. } => {
+                f(*input);
                 f(*target);
             }
             Op::LinearResident {

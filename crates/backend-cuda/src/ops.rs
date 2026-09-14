@@ -33,7 +33,7 @@ use std::sync::Arc;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BinaryElementwiseOp, DType, DispatchFailureCell, FusionPlan,
+    Activation, BackendOps, BceKind, BinaryElementwiseOp, DType, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
     MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey,
     SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
@@ -3883,6 +3883,95 @@ impl BackendOps for CudaBackendOps {
             || mse.run_mse_backward_f32(pred_slice, target_slice, scale),
         )?;
         Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::bce_loss`] の CUDA 実装
+    /// （イシュー #1737。`mse_loss` と同型の委譲構成）。
+    fn bce_loss(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: BceKind,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_owned = input.contiguous();
+        let target_owned = target.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss: input not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss: target not contiguous".into())
+        })?;
+        let numel = input_slice.len();
+        let factor = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    1.0
+                } else {
+                    1.0 / numel as f32
+                }
+            }
+            MseReduction::Sum => 1.0,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "bce_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+
+        let bce = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_bce(&device)
+            },
+        )?;
+        let value = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || bce.run_bce_loss_f32(input_slice, target_slice, kind, factor),
+        )?;
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::bce_loss_backward`] の CUDA
+    /// 実装（イシュー #1737）。`dTarget` は呼び出し元
+    /// （`fandhe_ai_autodiff::grad::vjp`）がホスト側の逐次 map で計算
+    /// する契約のため、本メソッドは `dInput` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::bce_loss_backward` doc 参照）。
+    fn bce_loss_backward(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: BceKind,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_owned = input.contiguous();
+        let target_owned = target.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss_backward: input not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss_backward: target not contiguous".into())
+        })?;
+
+        let bce = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_bce(&device)
+            },
+        )?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || bce.run_bce_backward_f32(input_slice, target_slice, kind, scale),
+        )?;
+        Tensor::new(out, input.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::rmsnorm`] の CUDA 実装

@@ -168,6 +168,34 @@ pub enum MseReduction {
     Sum,
 }
 
+/// [`BackendOps::bce_loss`]／[`BackendOps::bce_loss_backward`] の入力種別
+/// （イシュー #1737。親イシュー #1609「損失関数の拡張」）。
+///
+/// `BCELoss`（PyTorch）は `input` を確率（`[0, 1]`）として扱うのに対し、
+/// `BCEWithLogitsLoss` は `input` を未正規化の logits として受け取り
+/// カーネル内で sigmoid を適用する（`log(sigmoid(x))` を素朴に
+/// `ln(1/(1+exp(-x)))` で計算すると `x` が大きい負値のとき桁落ち・
+/// overflow するため、数値安定な合成式（`x>=0`: `(1-y)·x + ln(1+exp(-x))`、
+/// `x<0`: `-y·x + ln(1+exp(x))`。`max(x,0) - x·y + ln(1+exp(-|x|))` と
+/// 数式として等価だが `x - x·y` の桁落ちを避けるため乗算のみで書く）
+/// を使う。`docs/compat-api-scope.md` §1.2 損失行参照）。両者は forward
+/// の要素式・backward の `dInput` 式が異なるため、[`MseReduction`] とは
+/// 独立にこの入力種別で分岐する（縮約種別自体は [`MseReduction`] を
+/// 共用する。`Mean`／`Sum` の意味論は BCE 系でも同一のため）。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`Activation`／`MseReduction`
+/// と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BceKind {
+    /// `input` は確率（`[0, 1]`）。`BCELoss` 相当。
+    Probabilities,
+    /// `input` は logits（範囲制約なし）。`BCEWithLogitsLoss` 相当
+    /// （sigmoid をカーネル内に内包し数値安定な合成式で計算する）。
+    Logits,
+}
+
 /// [`BackendOps::scatter`] が行う縮約種別（イシュー #1776）。
 /// `torch.scatter`（`Overwrite`）と `torch.scatter_add`（`Add`）の
 /// 差異を 1 メソッドへ集約する（`Var::scatter`／`Var::scatter_add` は
@@ -1149,6 +1177,72 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "mse_loss_backward: default fail-safe (no fused MSE backward kernel available)".into(),
+        ))
+    }
+
+    /// 二値交差エントロピー損失（`BCELoss`／`BCEWithLogitsLoss`。
+    /// [`BceKind`] で分岐）の forward を 1 個の融合カーネルで計算する
+    /// （イシュー #1737・親イシュー #1609）。
+    ///
+    /// `input`／`target` は同一 shape（呼び出し元が
+    /// [`crate::ops_shape::require_same_shape`] で検証済み）。戻り値は
+    /// shape `[]`（スカラー）。`numel == 0` は `Mean`／`Sum` とも `0.0`
+    /// （[`Self::mse_loss`] と同じ空縮約契約）。
+    ///
+    /// `input ∈ [0, 1]`（[`BceKind::Probabilities`] のときのみ）の範囲
+    /// 検査は呼び出し元（`fandhe_ai_autodiff::var::Var::bce_loss`）が
+    /// 本メソッド呼び出し前にホスト側で行う契約であり、本メソッド自身は
+    /// 範囲検査を行わない（カーネル内での分岐・エラー伝播コストを避ける
+    /// ため。`.claude/rules/security.md` A03 の観点はホスト側検査で
+    /// 満たす）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、
+    /// `Var::bce_loss`／`bce_with_logits_loss` は `Unsupported` の
+    /// ときのみホスト参照実装（`eval::bce_loss`）へフォールバックする
+    /// （それ以外のエラーは伝播する。判定迂回経路を作らない）。
+    fn bce_loss(
+        &self,
+        _input: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _kind: BceKind,
+        _reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "bce_loss: default fail-safe (no fused BCE forward kernel available)".into(),
+        ))
+    }
+
+    /// 二値交差エントロピー損失の backward（`dInput`）を 1 個の融合
+    /// カーネルで計算する（イシュー #1737）。
+    ///
+    /// [`Self::mse_loss_backward`] と異なり `dTarget = -dInput` という
+    /// 単純な符号反転関係が成り立たない（`dInput`／`dTarget` の式が
+    /// 非対称。`docs/compat-api-scope.md` §1.2 参照）ため、本メソッドは
+    /// `dInput` のみを返し、`dTarget` は呼び出し元（`grad::vjp`）が
+    /// ホスト側で要素ごとに計算する（新規 GPU カーネル起動・D2H を
+    /// 増やさないための設計判断。`mse_loss_backward` の dTarget 省略と
+    /// 同じ動機）。
+    ///
+    /// `scale` は呼び出し元が上流勾配 `g`（スカラー）と `reduction` から
+    /// 事前計算して渡す（`Mean` は `g/n`、`Sum` は `g`。二乗誤差の
+    /// `2` 倍係数を持つ `mse_loss_backward` の `scale` とは異なる）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::bce_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とする。
+    fn bce_loss_backward(
+        &self,
+        _input: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _kind: BceKind,
+        _scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "bce_loss_backward: default fail-safe (no fused BCE backward kernel available)".into(),
         ))
     }
 
@@ -3333,6 +3427,23 @@ mod tests {
 
         let forward = ops.mse_loss(&pred, &target, MseReduction::Mean);
         let backward = ops.mse_loss_backward(&pred, &target, 1.0);
+
+        assert!(matches!(forward, Err(BackendError::Unsupported(_))));
+        assert!(matches!(backward, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::bce_loss`]／[`BackendOps::bce_loss_backward`] の
+    /// 既定実装が両方とも fail-safe（[`BackendError::Unsupported`]）を
+    /// 返すことを確認する（イシュー #1737。
+    /// `mse_loss_default_is_unsupported` と同型のガード）。
+    #[test]
+    fn bce_loss_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![0.3, 0.7], &[2]).unwrap();
+        let target = Tensor::new(vec![0.0, 1.0], &[2]).unwrap();
+
+        let forward = ops.bce_loss(&input, &target, BceKind::Probabilities, MseReduction::Mean);
+        let backward = ops.bce_loss_backward(&input, &target, BceKind::Probabilities, 1.0);
 
         assert!(matches!(forward, Err(BackendError::Unsupported(_))));
         assert!(matches!(backward, Err(BackendError::Unsupported(_))));
