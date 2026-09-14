@@ -163,7 +163,9 @@ pub use fandhe_ai_tensor_core::QrFactors;
 pub use fandhe_ai_tensor_core::SvdFactors;
 // `InterpolateMode`（イシュー #1757・`Var::interpolate` の `mode`
 // 引数型）も 1 文 1 行で再エクスポートする（上記コメント「1 文 1 行を
-// 維持する」と同じ理由）。
+// 維持する」と同じ理由）。`Bilinear { align_corners }` variant
+// （イシュー #1762）追加時も新規公開アイテムは発生しない
+// （`InterpolateMode` 自体の再エクスポートのみで完結する）。
 pub use fandhe_ai_tensor_core::InterpolateMode;
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の

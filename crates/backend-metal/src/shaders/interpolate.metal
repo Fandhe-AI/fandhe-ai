@@ -103,3 +103,128 @@ kernel void interpolate_nearest_f32(
     }
     out[gid] = input[in_flat];
 }
+
+// バイリニアリサンプリング（`torch.nn.functional.interpolate
+// (mode='bilinear', align_corners=…)` 相当。イシュー #1762。CPU
+// 参照実装 `crates/backend-cpu/src/interpolate.rs::
+// interpolate_bilinear` の Metal 対応版）。
+//
+// `crate::interpolate::MetalInterpolate`（`interpolate.rs`）から実行時
+// コンパイルされ、`ops.rs::MetalBackendOps::interpolate` から呼ばれる。
+//
+// `interpolate_nearest_f32` と異なり空間軸は**ちょうど 2 軸**
+// （末尾 2 軸 = `rank-2`〈H〉・`rank-1`〈W〉限定。
+// `InterpolateMode::Bilinear` doc・`interpolate_out_shape_for_mode`
+// 参照）で算術（4 近傍の線形重み付け合成）を含むため、受入契約は
+// REQ-2 統一複合判定（`assert_parity`）——`Nearest` のような bit
+// 完全一致は前提としない。
+//
+// **ホスト側の逐語モデル**: `crates/backend-metal/src/
+// interpolate_model.rs::interpolate_bilinear_model` が本カーネルの
+// 添字・ブレンド計算のホスト側逐語再現（`fma` を `f32::mul_add` で
+// 再現）。`scale_h`／`scale_w` はホスト側（`fandhe_ai_tensor_core::
+// bilinear_scale`。forward の他バックエンド・ホスト参照実装と共有
+// する単一情報源）で 1 回だけ計算しカーネル引数として渡す。
+//
+// `shapes`（buffer 2）は `interpolate_nearest_f32` と同一レイアウト
+// （`out_shape[rank] ++ in_shape[rank] ++ in_strides[rank]`）を共有
+// する。
+
+// `input(0)`／`out(1)`／`shapes(2)`／`constant uint& rank(3)`／
+// `constant uint& align_corners(4, 0 または 1)`／
+// `constant uint& numel(5)`／`constant float& scale_h(6)`／
+// `constant float& scale_w(7)`。
+kernel void interpolate_bilinear_f32(
+    device const float* input [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint* shapes [[buffer(2)]],
+    constant uint& rank [[buffer(3)]],
+    constant uint& align_corners [[buffer(4)]],
+    constant uint& numel [[buffer(5)]],
+    constant float& scale_h [[buffer(6)]],
+    constant float& scale_w [[buffer(7)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    // REQ-8: grid は `ceil(numel/W)` threadgroup のため端で `numel` を
+    // はみ出しうる（手動境界チェックを省略しない）。
+    if (gid >= numel) {
+        return;
+    }
+    constant uint* out_shape = shapes;
+    constant uint* in_shape = shapes + rank;
+    constant uint* in_strides = shapes + 2u * rank;
+
+    ulong rem = (ulong)gid;
+    ulong base_flat = 0;
+    ulong cy = 0;
+    ulong cx = 0;
+    for (int a = (int)rank - 1; a >= 0; a--) {
+        ulong axis_size = (ulong)out_shape[a];
+        ulong c = rem % axis_size;
+        rem /= axis_size;
+        if ((uint)a == rank - 1) {
+            cx = c;
+        } else if ((uint)a == rank - 2) {
+            cy = c;
+        } else {
+            base_flat += c * (ulong)in_strides[a];
+        }
+    }
+
+    ulong in_h = (ulong)in_shape[rank - 2];
+    ulong in_w = (ulong)in_shape[rank - 1];
+    ulong stride_h = (ulong)in_strides[rank - 2];
+    ulong stride_w = (ulong)in_strides[rank - 1];
+
+    float srcy;
+    float srcx;
+    if (align_corners != 0u) {
+        srcy = (float)cy * scale_h;
+        srcx = (float)cx * scale_w;
+    } else {
+        srcy = fma((float)cy + 0.5f, scale_h, -0.5f);
+        if (srcy < 0.0f) {
+            srcy = 0.0f;
+        }
+        srcx = fma((float)cx + 0.5f, scale_w, -0.5f);
+        if (srcx < 0.0f) {
+            srcx = 0.0f;
+        }
+    }
+
+    long i0y = (long)floor(srcy);
+    if (i0y > (long)in_h - 1) {
+        i0y = (long)in_h - 1;
+    }
+    long i1y = i0y + 1;
+    if (i1y > (long)in_h - 1) {
+        i1y = (long)in_h - 1;
+    }
+    float l1y = srcy - (float)i0y;
+    float l0y = 1.0f - l1y;
+
+    long i0x = (long)floor(srcx);
+    if (i0x > (long)in_w - 1) {
+        i0x = (long)in_w - 1;
+    }
+    long i1x = i0x + 1;
+    if (i1x > (long)in_w - 1) {
+        i1x = (long)in_w - 1;
+    }
+    float l1x = srcx - (float)i0x;
+    float l0x = 1.0f - l1x;
+
+    ulong u_i0y = (ulong)i0y;
+    ulong u_i1y = (ulong)i1y;
+    ulong u_i0x = (ulong)i0x;
+    ulong u_i1x = (ulong)i1x;
+
+    float v00 = input[base_flat + u_i0y * stride_h + u_i0x * stride_w];
+    float v01 = input[base_flat + u_i0y * stride_h + u_i1x * stride_w];
+    float v10 = input[base_flat + u_i1y * stride_h + u_i0x * stride_w];
+    float v11 = input[base_flat + u_i1y * stride_h + u_i1x * stride_w];
+
+    float row0 = fma(l1x, v01, l0x * v00);
+    float row1 = fma(l1x, v11, l0x * v10);
+    out[gid] = fma(l1y, row1, l0y * row0);
+}

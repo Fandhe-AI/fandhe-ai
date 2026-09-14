@@ -18,7 +18,9 @@
 //! （`.claude/rules/coding-rust.md`）。非 contiguous な `input`
 //! （strided view）も `Tensor::get` で正しく読める。
 
-use fandhe_ai_tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{
+    ShapeError, Tensor, bilinear_blend, bilinear_scale, bilinear_src_coord,
+};
 
 /// 線形添字（行優先）を `shape` の多次元添字へ展開する
 /// （`gather_scatter.rs::unravel`／`constant_pad.rs::unravel` と同型の
@@ -108,6 +110,67 @@ pub fn interpolate_nearest(
              （契約違反。src_coords は各軸 [0, in_shape[axis]) を検査済み）"
         );
         out.push(v.unwrap_or(0.0));
+    }
+    Tensor::new(out, out_shape)
+}
+
+/// [`fandhe_ai_tensor_core::BackendOps::interpolate`]（`Bilinear`）の
+/// CPU 実装本体（イシュー #1762）。`out_shape` は呼び出し元
+/// （`ops.rs`）が [`fandhe_ai_tensor_core::interpolate_out_shape_for_mode`]
+/// で検査・確定済みの出力 shape をそのまま渡す（`size.len() == 2` が
+/// 保証済み）。座標・重みは `fandhe_ai_tensor_core::interpolate`
+/// （`bilinear_scale`／`bilinear_src_coord`／`bilinear_blend`）の単一
+/// 情報源を使う（`autodiff::eval::interpolate_bilinear` と同じ式）。
+pub fn interpolate_bilinear(
+    input: &Tensor<f32>,
+    spatial_start: usize,
+    out_shape: &[usize],
+    align_corners: bool,
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_numel = checked_numel(out_shape)?;
+    if out_numel == 0 {
+        return Tensor::new(Vec::new(), out_shape);
+    }
+    let in_shape = input.shape();
+    let h_axis = spatial_start;
+    let w_axis = spatial_start + 1;
+    let in_h = in_shape[h_axis];
+    let in_w = in_shape[w_axis];
+    let out_h = out_shape[h_axis];
+    let out_w = out_shape[w_axis];
+    let scale_h = bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = bilinear_scale(in_w, out_w, align_corners);
+
+    let mut out = Vec::with_capacity(out_numel);
+    for flat in 0..out_numel {
+        let coords = unravel(flat, out_shape);
+        let cy = bilinear_src_coord(coords[h_axis], in_h, scale_h, align_corners);
+        let cx = bilinear_src_coord(coords[w_axis], in_w, scale_w, align_corners);
+
+        let mut base_coords = coords.clone();
+        base_coords[h_axis] = cy.i0;
+        base_coords[w_axis] = cx.i0;
+        let v00 = input.get(&base_coords);
+        base_coords[w_axis] = cx.i1;
+        let v01 = input.get(&base_coords);
+        base_coords[h_axis] = cy.i1;
+        let v11 = input.get(&base_coords);
+        base_coords[w_axis] = cx.i0;
+        let v10 = input.get(&base_coords);
+
+        debug_assert!(
+            v00.is_some() && v01.is_some() && v10.is_some() && v11.is_some(),
+            "interpolate_bilinear: 走査ロジックにバグがあり範囲外になった \
+             （契約違反。各 corner 座標は各軸 [0, in_shape[axis]) を検査済み）"
+        );
+        out.push(bilinear_blend(
+            v00.unwrap_or(0.0),
+            v01.unwrap_or(0.0),
+            v10.unwrap_or(0.0),
+            v11.unwrap_or(0.0),
+            cx.lambda1,
+            cy.lambda1,
+        ));
     }
     Tensor::new(out, out_shape)
 }
@@ -222,5 +285,102 @@ mod tests {
         let out = interpolate_nearest(&x, 0, &out_shape).unwrap();
         // 入力は全要素 7.0（broadcast）のため、出力もすべて 7.0。
         assert_eq!(out.contiguous().as_slice().unwrap(), &[7.0, 7.0, 7.0]);
+    }
+
+    fn out_shape_for_mode(
+        in_shape: &[usize],
+        size: &[usize],
+        mode: fandhe_ai_tensor_core::InterpolateMode,
+    ) -> Vec<usize> {
+        fandhe_ai_tensor_core::interpolate_out_shape_for_mode(in_shape, size, mode)
+            .expect("test fixture: 有効な shape")
+    }
+
+    #[test]
+    fn interpolate_bilinear_2x2_to_4x4_matches_hand_computed_values() {
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+            align_corners: false,
+        };
+        let out_shape = out_shape_for_mode(&[2, 2], &[4, 4], mode);
+        let out = interpolate_bilinear(&x, 0, &out_shape, false).unwrap();
+        let expected = [
+            1.0, 1.25, 1.75, 2.0, //
+            1.5, 1.75, 2.25, 2.5, //
+            2.5, 2.75, 3.25, 3.5, //
+            3.0, 3.25, 3.75, 4.0,
+        ];
+        let got = out.contiguous();
+        let got_slice = got.as_slice().unwrap();
+        for (g, e) in got_slice.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-6, "got={g} expected={e}");
+        }
+    }
+
+    #[test]
+    fn interpolate_bilinear_align_corners_true_matches_input_corners() {
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+            align_corners: true,
+        };
+        let out_shape = out_shape_for_mode(&[2, 2], &[3, 3], mode);
+        let out = interpolate_bilinear(&x, 0, &out_shape, true).unwrap();
+        let got = out.contiguous();
+        let s = got.as_slice().unwrap();
+        assert_eq!(s[0], 1.0);
+        assert_eq!(s[2], 2.0);
+        assert_eq!(s[6], 3.0);
+        assert_eq!(s[8], 4.0);
+    }
+
+    #[test]
+    fn interpolate_bilinear_leading_batch_axis_is_independent() {
+        // batch=2, spatial=2x2 -> spatial=3x3。各 batch は独立に補間
+        // される（batch=1 の値がすべて 10 倍された関係）。
+        let x = Tensor::new(
+            vec![1.0f32, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0],
+            &[2, 2, 2],
+        )
+        .unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+            align_corners: true,
+        };
+        let out_shape = out_shape_for_mode(&[2, 2, 2], &[3, 3], mode);
+        let out = interpolate_bilinear(&x, 1, &out_shape, true).unwrap();
+        let got = out.contiguous();
+        let s = got.as_slice().unwrap();
+        for i in 0..9 {
+            assert!((s[9 + i] - s[i] * 10.0).abs() < 1e-4, "index {i}");
+        }
+    }
+
+    #[test]
+    fn interpolate_bilinear_empty_leading_axis_returns_empty() {
+        let x = Tensor::new(Vec::<f32>::new(), &[0, 2, 2]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+            align_corners: false,
+        };
+        let out_shape = out_shape_for_mode(&[0, 2, 2], &[4, 4], mode);
+        let out = interpolate_bilinear(&x, 1, &out_shape, false).unwrap();
+        assert_eq!(out.shape(), &[0, 4, 4]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    #[test]
+    fn interpolate_bilinear_degenerate_in_size_one_uses_single_source() {
+        // in_h=1: 全出力行が同じ単一入力行を参照するため出力は
+        // 各列方向にのみ補間された同一パターンの複製になる。
+        let x = Tensor::new(vec![1.0f32, 5.0], &[1, 2]).unwrap();
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+            align_corners: false,
+        };
+        let out_shape = out_shape_for_mode(&[1, 2], &[3, 2], mode);
+        let out = interpolate_bilinear(&x, 0, &out_shape, false).unwrap();
+        let got = out.contiguous();
+        let s = got.as_slice().unwrap();
+        // 3 行とも同一（h 方向は degenerate のため h の重みに依らず
+        // 常に唯一の入力行を参照する）。
+        assert_eq!(&s[0..2], &s[2..4]);
+        assert_eq!(&s[2..4], &s[4..6]);
     }
 }

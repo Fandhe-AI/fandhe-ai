@@ -20,8 +20,8 @@ use fandhe_ai_tensor_core::{
     GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScatterReduce, SgdStepConfig,
     ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, VectorNormOrd, gather_out_shape,
-    interpolate_out_shape, one_hot_out_shape, pad_out_shape, require_same_shape, row_norm_layout,
-    row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -1345,12 +1345,13 @@ impl BackendOps for CpuBackendOps {
         gather_scatter::scatter(input, dim, index, src, reduce).map_err(BackendError::ShapeMismatch)
     }
 
-    /// `BackendOps::interpolate` の CPU 実装（イシュー #1757）。
-    /// [`interpolate_out_shape`] で `input`／`size` の shape を
-    /// 再検査してから `interpolate::interpolate_nearest` へ委譲する
-    /// （`gather`／`scatter` と同じ二重検査方針。`.claude/rules/
-    /// security.md` A08）。`mode` の未知 variant（`InterpolateMode` は
-    /// `#[non_exhaustive]`。将来の bilinear〈#1762〉等）は
+    /// `BackendOps::interpolate` の CPU 実装（イシュー #1757・
+    /// bilinear は #1762）。[`interpolate_out_shape_for_mode`] で
+    /// `input`／`size` の shape を `mode` 別に再検査してから
+    /// `interpolate::interpolate_nearest`／`interpolate_bilinear` へ
+    /// 委譲する（`gather`／`scatter` と同じ二重検査方針。
+    /// `.claude/rules/security.md` A08）。`mode` の未知 variant
+    /// （`InterpolateMode` は `#[non_exhaustive]`）は
     /// `BackendError::Unsupported` を返す fail-safe（`ops.rs` 内
     /// 他メソッドの未知 variant 分岐と同型）。
     fn interpolate(
@@ -1360,18 +1361,29 @@ impl BackendOps for CpuBackendOps {
         mode: InterpolateMode,
     ) -> Result<Tensor<f32>, BackendError> {
         match mode {
-            InterpolateMode::Nearest => {}
+            InterpolateMode::Nearest | InterpolateMode::Bilinear { .. } => {}
             _ => {
                 return Err(BackendError::Unsupported(format!(
                     "CpuBackendOps::interpolate: 未対応の InterpolateMode variant {mode:?}"
                 )));
             }
         }
-        let out_shape =
-            interpolate_out_shape(input.shape(), size).map_err(BackendError::ShapeMismatch)?;
+        let out_shape = interpolate_out_shape_for_mode(input.shape(), size, mode)
+            .map_err(BackendError::ShapeMismatch)?;
         let spatial_start = out_shape.len() - size.len();
-        interpolate::interpolate_nearest(input, spatial_start, &out_shape)
-            .map_err(BackendError::ShapeMismatch)
+        match mode {
+            InterpolateMode::Nearest => {
+                interpolate::interpolate_nearest(input, spatial_start, &out_shape)
+                    .map_err(BackendError::ShapeMismatch)
+            }
+            InterpolateMode::Bilinear { align_corners } => {
+                interpolate::interpolate_bilinear(input, spatial_start, &out_shape, align_corners)
+                    .map_err(BackendError::ShapeMismatch)
+            }
+            _ => Err(BackendError::Unsupported(format!(
+                "CpuBackendOps::interpolate: 未対応の InterpolateMode variant {mode:?}"
+            ))),
+        }
     }
 
     /// `BackendOps::sort` の CPU 実装（イシュー #1733）。

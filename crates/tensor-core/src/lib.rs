@@ -134,6 +134,7 @@ mod dispatch_failure;
 mod element;
 mod error;
 mod fusion;
+pub mod interpolate;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pool;
@@ -178,12 +179,13 @@ pub use fusion::{
     FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError, MAX_FUSED_CHAIN_LEN,
     MAX_FUSED_SEGMENT_NODES, RowFusionMeta,
 };
+pub use interpolate::{BilinearCoord, bilinear_blend, bilinear_scale, bilinear_src_coord};
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     BatchedMatmulPlan, batched_matmul_plan, concat_out_shape, elementwise_out_shape,
-    gather_out_shape, gemm_out_shape, interpolate_out_shape, matmul_out_shape, one_hot_out_shape,
-    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    gather_out_shape, gemm_out_shape, interpolate_out_shape, interpolate_out_shape_for_mode,
+    matmul_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
 // `pool_core::SizeClassPoolConfig` は `pool::PoolConfig`（crates.io 0.4.0

@@ -125,12 +125,95 @@ fn cpu_interpolate_backward_matches_naive_reference() {
     );
 }
 
+// --- interpolate（bilinear。イシュー #1762。属性なし: CPU vs NaiveOps） ---
+//
+// bilinear は算術を含むため受入契約は REQ-2 統一複合判定
+// （`assert_parity`）——ただし CPU（`BackendOps::interpolate`）と
+// NaiveOps（`eval::interpolate_bilinear`）はいずれも `fandhe_ai_
+// tensor_core::interpolate` の単一情報源（`bilinear_scale`／
+// `bilinear_src_coord`／`bilinear_blend`）を呼ぶため実際には bit
+// 完全一致する。
+
+/// `interpolate`（bilinear）forward の CPU と NaiveOps の parity。
+#[test]
+fn cpu_interpolate_bilinear_forward_matches_naive_reference() {
+    let shape = [2usize, 2];
+    let mode = InterpolateMode::Bilinear {
+        align_corners: false,
+    };
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&leaf(3, &shape));
+    let out_cpu = x_cpu
+        .interpolate(&[5, 5], mode)
+        .expect("interpolate: 常に成功する")
+        .to_tensor();
+
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+    let x_naive = naive_tape.make_var(&leaf(3, &shape));
+    let out_naive = x_naive
+        .interpolate(&[5, 5], mode)
+        .expect("interpolate: 常に成功する")
+        .to_tensor();
+
+    let cpu_slice = contiguous_slice(&out_cpu);
+    let naive_slice = contiguous_slice(&out_naive);
+    assert_parity(
+        "fandhe_ai::tape()（CpuBackendOps::interpolate bilinear）vs NaiveOps",
+        &cpu_slice,
+        &naive_slice,
+    );
+}
+
+/// `interpolate`（bilinear）backward の CPU と NaiveOps の parity。
+#[test]
+fn cpu_interpolate_bilinear_backward_matches_naive_reference() {
+    let shape = [2usize, 2];
+    let mode = InterpolateMode::Bilinear {
+        align_corners: true,
+    };
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&leaf(4, &shape));
+    let out_cpu = x_cpu.interpolate(&[5, 5], mode).unwrap();
+    let loss_cpu = out_cpu.sum(None).unwrap();
+    let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+    let dx_cpu = grads_cpu.get(&x_cpu).unwrap().expect("到達する");
+
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+    let x_naive = naive_tape.make_var(&leaf(4, &shape));
+    let out_naive = x_naive.interpolate(&[5, 5], mode).unwrap();
+    let loss_naive = out_naive.sum(None).unwrap();
+    let grads_naive = naive_tape.backward(&loss_naive).unwrap();
+    let dx_naive = grads_naive.get(&x_naive).unwrap().expect("到達する");
+
+    let dx_cpu_slice = contiguous_slice(dx_cpu);
+    let dx_naive_slice = contiguous_slice(dx_naive);
+    assert_parity(
+        "interpolate bilinear backward（dx）: CpuBackendOps vs NaiveOps",
+        &dx_cpu_slice,
+        &dx_naive_slice,
+    );
+}
+
 // --- 実機横断（`#[ignore]`。Metal／CUDA） ---
 
 fn interpolate_forward_on(device: Device) -> Tensor<f32> {
     let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
     let x = tape.make_var(&leaf(1, &[3]));
     x.interpolate(&[7], InterpolateMode::Nearest)
+        .expect("interpolate: 常に成功する")
+        .to_tensor()
+}
+
+/// bilinear 版 [`interpolate_forward_on`]（イシュー #1762）。
+fn interpolate_bilinear_forward_on(device: Device) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x = tape.make_var(&leaf(1, &[2, 2]));
+    let mode = InterpolateMode::Bilinear {
+        align_corners: false,
+    };
+    x.interpolate(&[5, 5], mode)
         .expect("interpolate: 常に成功する")
         .to_tensor()
 }
@@ -175,5 +258,41 @@ fn cuda_interpolate_forward_matches_cpu() {
     assert_eq!(
         cuda_slice, cpu_slice,
         "interpolate: 算術を含まない純粋なコピー演算のため bit 同一のはず"
+    );
+}
+
+// --- bilinear 実機横断（`#[ignore]`。Metal／CUDA。イシュー #1762） ---
+//
+// bilinear は算術を含むため REQ-2 統一複合判定（`assert_parity`）で
+// 検証する（`Nearest` の bit 完全一致契約とは異なる）。
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_interpolate_bilinear_forward_matches_cpu() {
+    let metal_out = interpolate_bilinear_forward_on(Device::Metal);
+    let cpu_out = interpolate_bilinear_forward_on(Device::Cpu);
+
+    let metal_slice = contiguous_slice(&metal_out);
+    let cpu_slice = contiguous_slice(&cpu_out);
+    assert_parity(
+        "interpolate bilinear forward: Metal tape_for vs CPU tape_for",
+        &metal_slice,
+        &cpu_slice,
+    );
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_interpolate_bilinear_forward_matches_cpu() {
+    let cuda_out = interpolate_bilinear_forward_on(Device::Cuda(0));
+    let cpu_out = interpolate_bilinear_forward_on(Device::Cpu);
+
+    let cuda_slice = contiguous_slice(&cuda_out);
+    let cpu_slice = contiguous_slice(&cpu_out);
+    assert_parity(
+        "interpolate bilinear forward: CUDA tape_for vs CPU tape_for",
+        &cuda_slice,
+        &cpu_slice,
     );
 }

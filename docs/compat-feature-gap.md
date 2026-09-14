@@ -1346,6 +1346,55 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
   「スコープ外」節）: `scale_factor` 引数・`nearest-exact`・
   `align_corners`・bilinear（後続 #1762）・`reflect` 系・VJP 専用 pull
   型 GPU カーネル（現状は既存 scatter_add の汎用カーネルを再利用）。
+
+## 追補（イシュー #1762）
+
+`interpolate`（bilinear モード）を実装済み化した（`Nearest` は #1757 で
+実装済み）。
+
+- `InterpolateMode::Bilinear { align_corners: bool }`（`#[non_exhaustive]`
+  variant 追加。公開 API 非破壊）。空間軸は**ちょうど 2 軸**
+  （`size.len() == 2`。末尾 2 軸 = `(H, W)`）限定——`ops_shape::
+  interpolate_out_shape_for_mode`（新規）が rank 違反を
+  `ShapeError::RankMismatch` で fail-closed に拒否する（`Nearest` は
+  従来どおり `interpolate_out_shape` のまま）。
+- 座標・重みの計算は新設モジュール `tensor-core::interpolate`
+  （`bilinear_scale`／`bilinear_src_coord`／`bilinear_blend`）を
+  単一情報源とし、`autodiff::eval::interpolate_bilinear`（forward
+  ホスト参照実装）・`backend-cpu::interpolate::interpolate_bilinear`
+  （CPU ネイティブ）・`backend-metal::interpolate_model::
+  interpolate_bilinear_model`（Metal ホスト逐語モデル）がいずれも
+  この関数を直接呼ぶ（`Nearest` の「クレートごとに添字式を独立実装」
+  方式とは異なる設計——bilinear は算術を含み乖離の実害が大きいため）。
+- 座標式は PyTorch `F.interpolate(mode='bilinear', align_corners=…)`
+  相当（`align_corners=false`: half-pixel 変換 `src=(dst+0.5)*scale
+  -0.5`〈負値は 0 へクランプ〉・`align_corners=true`:
+  `src=dst*scale`）。ブレンドは `fma` を用いる固定式順序
+  （`lerp(lerp(v00,v01,l1x), lerp(v10,v11,l1x), l1y)`）で 3 バックエンド
+  間の丸えを可能な限り揃えるが、**受入契約は REQ-2 統一複合判定**
+  （`assert_parity`）であり `Nearest` のような bit 完全一致は前提と
+  しない（NVRTC の `fmad` 既定契約により GPU 側が Rust ホスト参照
+  実装と丸めが完全一致する保証がないため。ただし CPU ネイティブ ⟷
+  ホスト参照・Metal 逐語モデル ⟷ CPU は同一 Rust 関数呼び出しのため
+  実際には bit 完全一致し、テストもそれを検証する）。
+- VJP は 4 近傍（`(y0,x0)`／`(y0,x1)`／`(y1,x0)`／`(y1,x1)`）への
+  重み付き scatter_add（`grad::bilinear_src_index_and_weight_map`が
+  forward と同じ座標式を共有する単一情報源。`ScatterReduce::Add`
+  の決定的集約契約〈出力位置 major・コーナー minor の固定順序逐次和〉
+  に従う。重複コーナー〈境界・`in_size==1`〉はそのまま複数回加算
+  され、forward の重みの和が 1 のまま保たれることと対応する）。
+- CPU／CUDA／Metal 3 バックエンドとも専用カーネル実装済み。CUDA／
+  Metal 実機（DGX Spark GB10／Apple Silicon）での parity 実測は
+  未実施のまま Mac／GB10 セッションへ申し送り。
+- facade 新規公開面なし（`InterpolateMode` 自体の再エクスポートは
+  #1757 で完了済み。`Bilinear` variant 追加のみで新規アイテムは
+  発生しない）。
+- 対象外（引き続き）: `scale_factor`／`recompute_scale_factor` 引数・
+  `antialias`・`linear`（1 次元）／`trilinear`（3 次元）／`bicubic`・
+  `nearest-exact`・VJP 専用 pull 型 GPU カーネル（既存 scatter_add
+  汎用カーネルを再利用したまま。CUDA scatter_add の O(out×index)
+  コストは #1834 が既知として記録済み）。
+
 ## 追補（イシュー #1722）
 
 AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記）」）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
