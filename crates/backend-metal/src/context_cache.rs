@@ -261,14 +261,11 @@ pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAlloc
 /// Metal はシステムデフォルトデバイス 1 台のみを扱う前提（本モジュール
 /// 冒頭コメント）のため、CUDA 側と異なりキーは `op.kind_name()`
 /// （[`ScalarOpKind::kind_name`]。ペイロード値を含まない安定文字列）
-/// のみを使う（`ContextKey` 相当の区別は不要）。`Clamp`（イシュー
-/// #1709 で実装済み）の `f32` ペイロード（`min`／`max`）はこのキーにも
-/// `Box::leak` する関数名にも含めない契約は CUDA 側と同一: 含めると
-/// `(min, max)` の組ごとに `Box::leak` が無限に増える（プロセス寿命中の
-/// メモリ増大）ため、`kind_name()` 限定は本モジュールの契約として
-/// 維持する（`crate::scalar_op_source` モジュール doc「ペイロード」
-/// 参照。単体テスト
-/// `cached_scalar_unary_pipeline_clamp_payload_does_not_split_cache`）。
+/// のみを使う（`ContextKey` 相当の区別は不要）。`f32` ペイロード
+/// （[`ScalarUnaryOp::Clamp`]。イシュー #1709 実装済み。`crate::
+/// scalar_op_source` モジュール doc「ペイロード seam」参照）はキャッシュ
+/// キーに含めない契約は CUDA 側と同一（`cached_scalar_unary_pipeline_
+/// second_call_reuses_cache_for_clamp_regardless_of_payload` 参照）。
 ///
 /// [`crate::scalar_op_source::unary_kernel_source`] が `None`（未実装
 /// kind）を返す場合はキャッシュへ触れずに `Ok(None)` を返す（呼び出し元
@@ -400,15 +397,15 @@ mod tests {
         );
     }
 
-    /// `Clamp` の `f32` ペイロード（`min`／`max`）がキャッシュキーに
-    /// 含まれないこと（`kind_name()` 限定）を、異なる payload 値の 2 回
-    /// 呼び出しが同一パイプラインを返すことで確認する（イシュー
-    /// #1709。CUDA 側
-    /// `scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_clamp_payload_does_not_split_cache`
-    /// の Metal 版）。
+    /// [`cached_scalar_unary_pipeline`] を [`ScalarUnaryOp::Clamp`]
+    /// （イシュー #1709。初のペイロードあり unary kind）で異なる
+    /// `min`／`max` 値により 2 回呼んでも同一パイプラインを返す
+    /// ことを確認する（キャッシュキーが `kind_name()` のみに依存し
+    /// payload 非依存であることの直接検証。モジュール doc「ペイロード
+    /// seam」参照）。
     #[test]
     #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
-    fn cached_scalar_unary_pipeline_clamp_payload_does_not_split_cache() {
+    fn cached_scalar_unary_pipeline_second_call_reuses_cache_for_clamp_regardless_of_payload() {
         let ctx = cached_context().expect("Metal context available on test host");
         let first = cached_scalar_unary_pipeline(&ctx, ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 })
             .expect("Clamp is implemented")
@@ -427,7 +424,7 @@ mod tests {
                 objc2::rc::Retained::as_ptr(&first),
                 objc2::rc::Retained::as_ptr(&second)
             ),
-            "異なる payload 値でも同一パイプラインを返すはず（kind_name() 限定キー）"
+            "異なる payload 値でも 2 回目の cached_scalar_unary_pipeline(Clamp) 呼び出しは同一パイプラインを返すはず"
         );
     }
 }

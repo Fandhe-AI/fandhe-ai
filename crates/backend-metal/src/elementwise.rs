@@ -272,14 +272,12 @@ impl MetalElementwise {
     }
 
     /// 単項演算共通の起動手続き。[`Self::run_binary`] と同一構造。
-    ///
-    /// `payload`: `numel`（buffer index 2）の後ろへ index 3／4 として
-    /// 順序どおり `setBytes_length_atIndex` する `f32` スカラー
-    /// （イシュー #1709。`crate::scalar_op_source::UnaryPayload::
-    /// as_slice` 参照）。既存呼び出し（`run_relu_f32`／`run_exp_f32`／
-    /// `run_tanh_f32`・`run_scalar_unary_f32` のペイロードなし kind）は
-    /// 空スライス `&[]` を渡すためエンコード列は変更前と不変（bit
-    /// 同一。CUDA 側 `elementwise.rs::run_unary` と同型の設計）。
+    /// `payload` はイシュー #1709 で追加した `ScalarUnaryOp::Clamp` 等
+    /// ペイロードあり kind 向けの追加起動引数（`numel` の後ろへ
+    /// `p0`／`p1` として渡す。`crate::scalar_op_source` モジュール doc
+    /// 「ペイロード seam」参照）。既存呼び出し（`run_relu_f32` 等）は
+    /// 空スライスを渡すため、エンコード列は変更前と不変＝bit 同一
+    /// （非後退契約）。
     fn run_unary(
         &self,
         ctx: &MetalContext,
@@ -361,10 +359,10 @@ impl MetalElementwise {
     /// つながる（CUDA 側 `elementwise.rs::run_scalar_unary_f32`／
     /// `run_scalar_binary_f32` も同型の理由で `pub(crate)`）。
     ///
-    /// `payload`: `Clamp` 等ペイロードあり kind の起動引数（イシュー
-    /// #1709。`crate::scalar_op_source::unary_payload` が返す値をその
-    /// まま渡す。呼び出し元 `ops.rs::scalar_unary_dispatch` 参照）。
-    /// ペイロードなし kind（`Sqrt` 等）は空スライスを渡す。
+    /// `payload`（イシュー #1709 追加）は [`ScalarUnaryOp::Clamp`] 等
+    /// ペイロードあり kind の追加起動引数（`crate::scalar_op_source::
+    /// unary_payload` が返す値をそのまま渡す。ペイロードなし kind は
+    /// 空スライス）。
     pub(crate) fn run_scalar_unary_f32(
         &self,
         ctx: &MetalContext,
@@ -490,6 +488,9 @@ impl MetalElementwise {
             return Ok(());
         }
         let pipeline = self.pipeline_for_unary(op)?;
+        // `UnaryElementwiseOp`（`Relu`／`Exp`／`Tanh`）はいずれもペイロード
+        // を持たないため空スライス（イシュー #1709 の payload 配線とは
+        // 無関係。エンコード列は変更前と不変）。
         ctx.dispatch_sync(|encoder| {
             encode_unary_dispatch(encoder, pipeline, a, out, numel as u32, &[]);
         })
@@ -561,14 +562,13 @@ fn encode_binary_dispatch(
 /// （`shaders/elementwise.metal` の `ew_relu_f32`／`ew_exp_f32`／
 /// `ew_tanh_f32` のバッファ宣言と一致させる）。
 ///
-/// `payload`: `numel`（index 2）の後ろへ index 3／4 として順序どおり
-/// `setBytes_length_atIndex` する `f32` スカラー（イシュー #1709。
-/// `crate::scalar_op_source::unary_kernel_source` がペイロードあり
-/// kind〈`Clamp` 等〉の場合のみ `constant float& p0 [[buffer(3)]]`／
-/// `p1 [[buffer(4)]]` を宣言する。空スライスは既存カーネル〈`Relu`／
-/// `Exp`／`Tanh`・ペイロードなし `ScalarUnaryOp`〉向けで追加バッファ
-/// なし＝エンコード列は変更前と bit 同一）。`encode_binary_scalar_
-/// dispatch` の `value` 渡しと同型の設計。
+/// `payload`（イシュー #1709 追加）は `numel`（index 2）の後ろへ
+/// `constant float& p0 [[buffer(3)]]`／`p1 [[buffer(4)]]` として順に
+/// 結線する（`crate::scalar_op_source::unary_kernel_source` が生成する
+/// ペイロードあり kind〈`Clamp`〉の宣言と一致させる）。空スライス
+/// （既存 `run_relu_f32`／`run_exp_f32`／`run_tanh_f32`・
+/// `dispatch_unary_resident` の呼び出し）はこのループが 0 回になり
+/// エンコード列は変更前と完全に不変＝bit 同一（非後退契約）。
 fn encode_unary_dispatch(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &MtlPipeline,
@@ -594,19 +594,13 @@ fn encode_unary_dispatch(
         );
     }
 
-    // SAFETY: `payload` の各要素はこの関数呼び出し中のみ生存すれば
-    // よいローカル参照であり（呼び出し元 `run_unary` の一時変数に由来。
-    // encode は同期的にコマンドバッファへ即時 `setBytes` するため、
-    // ポインタが必要なのはこの呼び出しの間だけ）、長さは
-    // `size_of::<f32>()`（MSL 側 `constant float& p0`／`p1` 宣言と型が
-    // 一致）。index は `numel`（2）の直後（3・4）へ順序どおり結線し、
-    // `crate::scalar_op_source::unary_kernel_source` が宣言する
-    // パラメータ数と一致する（`payload_buffer_count_matches_source_
-    // for_all_implemented_unary_kinds` で機械検証）。スカラー値渡しの
-    // ためデバイスメモリの境界外アクセスとは無関係（`encode_binary_
-    // scalar_dispatch` の `value` と同一の根拠）。
-    unsafe {
-        for (i, p) in payload.iter().enumerate() {
+    // SAFETY: `p` はループ内のローカル参照でありポインタは
+    // `setBytes_length_atIndex` 呼び出し中生存し、長さは
+    // `size_of::<f32>()` と一致する（`encode_binary_scalar_dispatch` の
+    // `value` と同一の根拠。`unary_kernel_source` が宣言する
+    // `constant float& p0`／`p1` と型を揃える）。
+    for (i, p) in payload.iter().enumerate() {
+        unsafe {
             encoder.setBytes_length_atIndex(
                 std::ptr::NonNull::from(p).cast(),
                 std::mem::size_of::<f32>(),

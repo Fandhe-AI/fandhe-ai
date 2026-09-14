@@ -159,15 +159,13 @@ code-comment-style.md` が禁じる「同一クレート内の陳腐化しやす
 - CUDA／Metal の `ScalarOp` カーネル（#1635／#1636）。CUDA は #1700〜
   #1702（算術・超越関数・比較演算＋`Clamp`）で実装済み。Metal は #1707
   （算術系 `Sub`／`Div`／`Pow`／`Sqrt`）＋#1708（超越関数系 `Neg`／
-  `Abs`／`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`）＋#1709（比較
-  演算 6 種〈`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`〉＋`Clamp`。初の
-  ペイロード付き unary kind）で実装済み（親 #1636 の対象 kind を
-  すべて実装完了）。ペイロード渡し方式は CUDA（カーネル起動引数への
-  追加。`kernels_scalar_op.rs::UnaryPayload`）と Metal（`setBytes_
-  length_atIndex` によるバッファ結線。`scalar_op_source.rs::
-  UnaryPayload`）で機構が異なるが、いずれもソース文字列・キャッシュ
-  キー・関数名には値を埋め込まず `kind_name()` のみに依存する契約は
-  共通。
+  `Abs`／`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`）＋#1709（比較演算
+  6 種〈`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`〉＋`Clamp`。ペイロードあり
+  unary kind 向け起動引数配線〈`crates/backend-metal/src/
+  scalar_op_source.rs::UnaryPayload`〉を新設）で実装済み。両バックエンド
+  とも残 kind（`Add`／`Mul`／`Maximum`／`Minimum`・活性化系・
+  `LeakyRelu`／`Elu`／`Softplus`／`PowScalar`）はいずれの sub issue にも
+  含まれず対象外（`.claude/rules/out-of-scope-tracking.md` 対象）。
 - `Var` 公開メソッド（`sub`／`div`／`pow`／活性化等）・facade 範囲拡張
   （#1593／#1595）。
 - `DeviceBuffer` 常駐版 `ScalarOp` dispatch（`binary_elementwise_device`
