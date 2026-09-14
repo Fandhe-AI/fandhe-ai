@@ -155,7 +155,16 @@ pub fn linspace(start: f32, end: f32, steps: usize) -> Result<Tensor<f32>, Creat
     let half = numel / 2;
     let data: Vec<f32> = (0..numel)
         .map(|i| {
-            if i < half {
+            // 端点（i == 0 / i == numel - 1）は算術式を経由せず start／end を
+            // そのまま返す。算術式（例: start + 0 * step）は符号付きゼロを
+            // 保持しない（-0.0 + 0.0 == +0.0）ため、端点が符号付きゼロの
+            // ときドキュメント契約（先頭が start・末尾が end と bit 一致）
+            // を破る（codex-review 指摘・イシュー #1726 PR #1832）。
+            if i == 0 {
+                start
+            } else if i == numel - 1 {
+                end
+            } else if i < half {
                 (start_f64 + i as f64 * step_f64) as f32
             } else {
                 (end_f64 - (numel - 1 - i) as f64 * step_f64) as f32
@@ -313,6 +322,21 @@ mod tests {
             };
             assert_eq!(t.get(&[i]).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn linspace_negative_zero_endpoint_preserves_sign() {
+        // codex-review 指摘（イシュー #1726 PR #1832）: 端点を算術式
+        // （start + 0*step 等）で生成すると符号付きゼロ（-0.0）が
+        // +0.0 になり、ドキュメント契約（先頭/末尾が入力と bit 一致）
+        // に反する。to_bits() で符号込みの bit 一致を検証する。
+        let t = linspace(-0.0f32, 1.0, 2).unwrap();
+        assert_eq!(t.get(&[0]).unwrap().to_bits(), (-0.0f32).to_bits());
+        assert_eq!(t.get(&[1]).unwrap().to_bits(), 1.0f32.to_bits());
+
+        let t2 = linspace(1.0f32, -0.0, 2).unwrap();
+        assert_eq!(t2.get(&[0]).unwrap().to_bits(), 1.0f32.to_bits());
+        assert_eq!(t2.get(&[1]).unwrap().to_bits(), (-0.0f32).to_bits());
     }
 
     #[test]
