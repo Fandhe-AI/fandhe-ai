@@ -30,6 +30,7 @@ use fandhe_ai_tensor_core::{
 };
 
 use crate::error::AutodiffError;
+use crate::var::matmul_forward;
 
 /// テープの識別子。プロセス全体で単調増加するカウンタから発行する。
 ///
@@ -2381,11 +2382,13 @@ fn recompute_value(
                         base.transpose(*dim0, *dim1)?
                     }
                     Op::MatMul(a, b) => {
-                        // `Var::matmul` と同じ `ops.gemm` 呼び出し
-                        // （`var.rs` `Var::matmul` doc 参照）。
+                        // `Var::matmul` と同じ分岐（`matmul_forward`。
+                        // rank 2 は `ops.gemm`・rank≥3 を含む場合は
+                        // `ops.gemm_batched`。`var.rs` `Var::matmul` doc
+                        // 参照。イシュー #1715）。
                         let a_val = recompute_memo_get(memo, a.0)?;
                         let b_val = recompute_memo_get(memo, b.0)?;
-                        ops.gemm(&a_val, &b_val)?
+                        matmul_forward(ops, &a_val, &b_val)?
                     }
                     Op::Sigmoid(a) => {
                         // `Var::sigmoid` と同じ `eval::sigmoid` 呼び出し

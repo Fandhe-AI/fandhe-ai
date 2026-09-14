@@ -2010,15 +2010,139 @@ fn matmul_vjp(
     b: &Tensor<f32>,
     g: &Tensor<f32>,
 ) -> Result<(Tensor<f32>, Tensor<f32>), AutodiffError> {
-    let b_t = transpose2d(b);
-    let a_t = transpose2d(a);
-    let da = ops
-        .gemm_fp32_strict(g, &b_t)
+    if a.shape().len() == 2 && b.shape().len() == 2 {
+        let b_t = transpose2d(b);
+        let a_t = transpose2d(a);
+        let da = ops
+            .gemm_fp32_strict(g, &b_t)
+            .map_err(AutodiffError::Backend)?;
+        let db = ops
+            .gemm_fp32_strict(&a_t, g)
+            .map_err(AutodiffError::Backend)?;
+        return Ok((da, db));
+    }
+
+    // rank≥3（バッチ次元を含む）の matmul VJP（イシュー #1715）。
+    // `transpose_last2`（末尾 2 軸のみ転置する zero-copy view。バッチ軸
+    // は不変）で転置オペランドを作り、`gemm_batched_fp32_strict`
+    // （`gemm_fp32_strict` のバッチ版。TF32 opt-in に追従しない）で
+    // フル（broadcast 後）バッチ形状の勾配を計算したのち、
+    // `reduce_batch_axes_f64` で `a`／`b` それぞれの元のバッチ形状
+    // （broadcast されていた軸）へ `f64` アキュムレータで縮約する
+    // （`.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
+    // アキュムレータで統一する」）。バッチ形状が forward と同一
+    // （broadcast なし）の場合は縮約が恒等になり per-batch 2 次元 VJP
+    // と bit 一致する。
+    let b_t = transpose_last2(b);
+    let a_t = transpose_last2(a);
+    let da_full = ops
+        .gemm_batched_fp32_strict(g, &b_t)
         .map_err(AutodiffError::Backend)?;
-    let db = ops
-        .gemm_fp32_strict(&a_t, g)
+    let db_full = ops
+        .gemm_batched_fp32_strict(&a_t, g)
         .map_err(AutodiffError::Backend)?;
+    let da = reduce_batch_axes_f64(&da_full, a.shape())?;
+    let db = reduce_batch_axes_f64(&db_full, b.shape())?;
     Ok((da, db))
+}
+
+/// [`matmul_vjp`] の rank≥3 経路が使う、末尾 2 軸のみを転置する
+/// zero-copy view（イシュー #1715）。バッチ軸（先頭 rank−2 軸）は
+/// 不変のまま、行列積の m/k・k/n に相当する末尾 2 軸だけを入れ替える
+/// （`transpose2d` の 2 次元専用版をバッチ次元へ一般化したもの）。
+/// `tensor.shape().len() < 2` は forward（`Var::matmul` →
+/// `matmul_out_shape`）が rank≥2 を保証済みのため構造的に到達しない
+/// （`transpose2d` と同じ `debug_assert!` + フォールバック方針）。
+fn transpose_last2(tensor: &Tensor<f32>) -> Tensor<f32> {
+    let rank = tensor.shape().len();
+    if rank < 2 {
+        debug_assert!(
+            false,
+            "transpose_last2: matmul VJP の rank≥2 前提が崩れた（forward 側の契約違反）"
+        );
+        return tensor.clone();
+    }
+    match tensor.transpose(rank - 2, rank - 1) {
+        Ok(t) => t,
+        Err(_) => {
+            debug_assert!(
+                false,
+                "transpose_last2: transpose が失敗した（forward 側の契約違反）"
+            );
+            tensor.clone()
+        }
+    }
+}
+
+/// [`matmul_vjp`] のバッチ軸縮約専用ヘルパー（イシュー #1715）。
+///
+/// `g`（`ops.gemm_batched_fp32_strict` が返す broadcast 後フル
+/// バッチ形状の勾配）を、`target_shape`（`a`／`b` 自身の broadcast 前
+/// バッチ形状）へ、先頭のバッチ軸（末尾 2 軸＝行列積の m/k・k/n に
+/// 相当する軸は broadcast されない契約のため対象外）についてのみ和を
+/// 取って縮約する。`reduce_to_shape`（`f32` 逐次和。bias 縮約以外の
+/// 一般 broadcast 用）とはアキュムレータの数値方式が異なる別関数と
+/// して独立に保つ: 本関数は要素を直接 `f64` へ昇格して縮約全体を
+/// `f64` で行い、最後に 1 回だけ `f32` へ downcast する
+/// （`.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
+/// アキュムレータで統一する」方針をバッチ軸縮約にも適用する）。
+///
+/// 空の勾配から `target_shape` のゼロテンソルを復元する経路は、`g` が
+/// 空でも `target_shape` 自体は確保可能とは限らない（例: 1 要素を
+/// `[1, H, 1]`〈H = isize::MAX / 4 + 1〉へ broadcast した `a` と空の
+/// `b = [0, 1, 1]` では `da_full = [0, H, 1]` は空だが縮約先は H 個の
+/// f32）ため、`Tensor::zeros` の確保前検証（バイトサイズ ≤ isize::MAX）
+/// を型付きエラーとして伝播する（PR #1810 codex-review P1 是正）。
+fn reduce_batch_axes_f64(
+    g: &Tensor<f32>,
+    target_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    let g_shape = g.shape().to_vec();
+    if g_shape == target_shape {
+        return Ok(g.clone());
+    }
+    debug_assert!(
+        g_shape.len() >= target_shape.len(),
+        "reduce_batch_axes_f64: broadcast 後 shape の rank は入力 rank 以上のはず（契約違反）"
+    );
+    let rank_diff = g_shape.len() - target_shape.len();
+    let mut padded_target = vec![1usize; rank_diff];
+    padded_target.extend_from_slice(target_shape);
+
+    // 勾配が空（いずれかの軸が 0 サイズ）なら縮約結果は `target_shape`
+    // のゼロテンソルで確定するため、軸ごとの縮約ループへ入らずに返す
+    // （PR #1810 codex-review P2 是正）。空の `k`／`m` 軸を持つ入力は
+    // 実データなしで巨大なバッチ軸（例: `a = [1, 0, 1]`・
+    // `b = [2^40, 1, 0]`）を構成でき、`inner == 0` でも `axis_len`
+    // 回の空ループを回すと最適化なしビルドで実質停止する。
+    if g.numel() == 0 {
+        return Tensor::zeros(target_shape)
+            .map_err(|err| AutodiffError::Backend(BackendError::ShapeMismatch(err)));
+    }
+
+    let data = dense_vec(g);
+    let mut acc: Vec<f64> = data.iter().map(|&x| x as f64).collect();
+    let mut cur_shape = g_shape;
+    for axis in 0..cur_shape.len() {
+        if padded_target[axis] == 1 && cur_shape[axis] != 1 {
+            let outer: usize = cur_shape[..axis].iter().product();
+            let axis_len = cur_shape[axis];
+            let inner: usize = cur_shape[axis + 1..].iter().product();
+            let mut reduced = vec![0f64; outer * inner];
+            for o in 0..outer {
+                for a in 0..axis_len {
+                    for i in 0..inner {
+                        let src = (o * axis_len + a) * inner + i;
+                        reduced[o * inner + i] += acc[src];
+                    }
+                }
+            }
+            acc = reduced;
+            cur_shape[axis] = 1;
+        }
+    }
+    let out: Vec<f32> = acc.iter().map(|&x| x as f32).collect();
+    Ok(build_tensor(out, target_shape))
 }
 
 /// ブロードキャストの逆演算。`add`/`mul` の VJP が返す勾配は forward
