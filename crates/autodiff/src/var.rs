@@ -18,9 +18,9 @@ use std::cell::Ref;
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
-    ShapeError, Tensor, broadcast_shape, concat_out_shape, gather_out_shape, matmul_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    ShapeError, Tensor, broadcast_shape, concat_out_shape, gather_out_shape, gemm_out_shape,
+    matmul_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -63,6 +63,26 @@ impl From<Reduction> for MseReduction {
             Reduction::Mean => MseReduction::Mean,
             Reduction::Sum => MseReduction::Sum,
         }
+    }
+}
+
+/// `Op::MatMul` の forward 値計算（イシュー #1715）。`Var::matmul`・
+/// `Tape::checkpoint` の再計算（`tape.rs` の `recompute_value`）が
+/// 共有する単一の分岐点であり、rank 2 同士は [`BackendOps::gemm`]
+/// （既存の bit 一致契約を保つため直接委譲）、rank≥3 を含む場合は
+/// [`BackendOps::gemm_batched`]（NumPy 互換バッチブロードキャスト）へ
+/// 分岐する。`ops` は `dyn BackendOps` として渡され、CPU／CUDA／Metal
+/// いずれのバックエンドでも同一コードパスから呼び分けられる
+/// （`tensor-core::backend_ops` の設計方針を踏襲）。
+pub(crate) fn matmul_forward(
+    ops: &dyn BackendOps,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    if a.shape().len() == 2 && b.shape().len() == 2 {
+        ops.gemm(a, b)
+    } else {
+        ops.gemm_batched(a, b)
     }
 }
 
@@ -211,11 +231,17 @@ impl<'t> Var<'t> {
         self.tape.epoch()
     }
 
-    /// 2 次元 `matmul`（`docs/public-api-design.md` §3.2）。
+    /// `matmul`（rank≥2。バッチ次元は NumPy 互換ブロードキャスト。
+    /// `docs/public-api-design.md` §3.2・spec REQ-9 2026-09-12 追記
+    /// Tier 1「バッチ行列積」・`docs/compat-api-scope.md` §1.2。
+    /// イシュー #1715 でバッチ次元対応へ拡張。rank 2 同士は従来どおり
+    /// `ops.gemm` を呼ぶため既存の bit 一致契約〈`tape_matmul_cpu_bit_exact.rs`・
+    /// repack カウンタテスト〉は不変）。
     ///
     /// **TASK-12.1d（#164）**: 非 elementwise のため常に実体化済みで
     /// 返る（`push_eager`）。実行は `eval.rs` 直接呼び出しから
-    /// `self.tape.ops().gemm`（`BackendOps` 経由）へ置き換えた
+    /// `matmul_forward`（`BackendOps` 経由。rank 2 は `ops.gemm`・
+    /// rank≥3 を含む場合は `ops.gemm_batched` へ分岐）へ置き換えた
     /// （TASK-1.9「backend 経由実行への置き換え」・設計書 §3.5.2）。
     /// 入力が elementwise の遅延グラフであった場合は
     /// `materialize_fallible`（層 1）で自身の実行の一部として実体化
@@ -231,7 +257,7 @@ impl<'t> Var<'t> {
             let rhs_val = materialize_fallible(&nodes, self.tape.ops(), other.id)?.clone();
             (lhs_val, rhs_val)
         };
-        let value = self.tape.ops().gemm(&lhs_val, &rhs_val)?;
+        let value = matmul_forward(self.tape.ops(), &lhs_val, &rhs_val)?;
         let id = self.tape.push_eager(Op::MatMul(self.id, other.id), value);
         Ok(Var::from_raw(self.tape, id))
     }
@@ -266,7 +292,7 @@ impl<'t> Var<'t> {
         self.check_same_tape(other)?;
         let lhs_shape = self.shape();
         let rhs_shape = other.shape();
-        matmul_out_shape(&lhs_shape, &rhs_shape)?;
+        gemm_out_shape(&lhs_shape, &rhs_shape)?;
         let (lhs_val, rhs_val) = {
             let nodes = self.tape.nodes.borrow();
             let lhs_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
@@ -312,7 +338,7 @@ impl<'t> Var<'t> {
         }
         let lhs_shape = self.shape();
         let rhs_shape = weight.shape();
-        let out_shape = matmul_out_shape(&lhs_shape, &rhs_shape)?;
+        let out_shape = gemm_out_shape(&lhs_shape, &rhs_shape)?;
         if let Some(b) = bias {
             broadcast_shape(&out_shape, &b.shape())?;
         }
@@ -1498,8 +1524,8 @@ impl<'t> Var<'t> {
         let hidden = h_shape[1];
         require_positive_dims(x_shape[1], hidden, "rnn_cell")?;
 
-        let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
-        let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
+        let out_ih = gemm_out_shape(&x_shape, &w_ih_shape)?;
+        let out_hh = gemm_out_shape(&h_shape, &w_hh_shape)?;
         require_same_shape(&out_ih, &out_hh)?;
         if out_ih[1] != hidden {
             return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
@@ -2507,8 +2533,8 @@ impl<'t> Var<'t> {
         let hidden = h_shape[1];
         require_positive_dims(x_shape[1], hidden, "lstm_cell")?;
 
-        let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
-        let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
+        let out_ih = gemm_out_shape(&x_shape, &w_ih_shape)?;
+        let out_hh = gemm_out_shape(&h_shape, &w_hh_shape)?;
         require_same_shape(&out_ih, &out_hh)?;
         let gate_width_4h = checked_gate_width(4, hidden)?;
         if out_ih[1] != gate_width_4h {
@@ -2627,8 +2653,8 @@ impl<'t> Var<'t> {
         let hidden = h_shape[1];
         require_positive_dims(x_shape[1], hidden, "gru_cell")?;
 
-        let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
-        let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
+        let out_ih = gemm_out_shape(&x_shape, &w_ih_shape)?;
+        let out_hh = gemm_out_shape(&h_shape, &w_hh_shape)?;
         require_same_shape(&out_ih, &out_hh)?;
         let gate_width_3h = checked_gate_width(3, hidden)?;
         if out_ih[1] != gate_width_3h {
