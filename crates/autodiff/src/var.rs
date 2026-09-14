@@ -18,8 +18,8 @@ use std::cell::Ref;
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
-    ShapeError, Tensor, broadcast_shape, concat_out_shape, gather_out_shape, matmul_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
+    ShapeError, Tensor, VectorNormOrd, broadcast_shape, concat_out_shape, gather_out_shape,
+    matmul_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -2717,6 +2717,147 @@ impl<'t> Var<'t> {
             Op::MatrixNorm {
                 input: self.id,
                 ord,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 分散（`dim` に沿った縮約。`dim: None` は全軸縮約〈スカラー〉。
+    /// `torch.var(dim, correction)` 相当。`correction`: `1` が不偏分散
+    /// （既定相当）・`0` が母分散（`tf.math.reduce_variance` 相当）。
+    /// イシュー #1723）。
+    ///
+    /// `sum`／`max`（`BackendOps` 必須メソッド）とは異なり
+    /// `BackendOps::var` は既定 `Unsupported`（`matrix_norm` と同じ
+    /// フォールバック契約）——バックエンド未実装のときのみ
+    /// `eval::var_along`（ホスト参照実装）へ切り替える。
+    ///
+    /// **数値契約**: `f64` 二段計算（`.claude/rules/coding-rust.md`）。
+    /// **エラー契約**: 縮約対象の要素数 `n`（`dim=Some(axis)` は
+    /// `shape[axis]`・`dim=None` は全要素数）が `0` または
+    /// `n <= correction` の場合は [`AutodiffError::InvalidArgument`]
+    /// （`NaN`／`inf` を黙って返さない安全側の判断。PyTorch の
+    /// `NaN`／`inf` 返却とは意図的に異なる。`docs/spec/` の対象外の
+    /// 独自安全策）。
+    pub fn var(&self, dim: Option<usize>, correction: usize) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        let out_shape = reduce_out_shape(&shape, dim)?;
+        let n = match dim {
+            None => shape.iter().product(),
+            Some(axis) => shape[axis],
+        };
+        if n == 0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::var: 縮約対象の要素数が 0（dim={dim:?}）"
+            )));
+        }
+        if n <= correction {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::var: 自由度不足（n={n} <= correction={correction}）"
+            )));
+        }
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().var(&input_val, dim, correction) {
+            Ok(v) => {
+                verify_shape(v.shape(), &out_shape)?;
+                v
+            }
+            Err(BackendError::Unsupported(_)) => {
+                eval::var_along(&input_val, dim, correction, &out_shape)
+            }
+            Err(other) => return Err(unify_backend_error(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::Var {
+                input: self.id,
+                dim,
+                correction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 標準偏差（`dim` に沿った縮約。`torch.std(dim, correction)`
+    /// 相当。イシュー #1723）。[`Var::var`]（`correction` の意味も同じ）
+    /// の平方根への薄い委譲（新規 `Op` は設けない）。
+    ///
+    /// **数値規約**: `var` が有限の非負値を返す限り `sqrt` も有限
+    /// （`var == 0` の場合 `std == 0`。勾配は `Var::sqrt` の規約に従い
+    /// `0.5 / y` — `y == 0` の入力〈定数テンソルの `var`〉では
+    /// `Var::sqrt` の既存挙動どおり `NaN`／`inf` になりうる。これは
+    /// PyTorch `torch.std` backward が定数入力で `NaN` を返す挙動と
+    /// 一致する）。
+    pub fn std(&self, dim: Option<usize>, correction: usize) -> Result<Var<'t>, AutodiffError> {
+        self.var(dim, correction)?.sqrt()
+    }
+
+    /// L1 ノルム（`Σ|x_i|`・`dim` に沿った縮約。`torch.norm(p=1)`
+    /// 相当。イシュー #1723）。[`Var::norm`]（`pub(crate)`）への薄い
+    /// 委譲。
+    pub fn norm_l1(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        self.norm(VectorNormOrd::L1, dim)
+    }
+
+    /// L2 ノルム（`√Σx_i²`・`dim` に沿った縮約。`torch.norm(p=2)`
+    /// 相当。イシュー #1723）。[`Var::norm`]（`pub(crate)`）への薄い
+    /// 委譲。
+    pub fn norm_l2(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        self.norm(VectorNormOrd::L2, dim)
+    }
+
+    /// [`Var::norm_l1`]／[`Var::norm_l2`] の共通実装（イシュー #1723）。
+    /// `pub(crate)` 限定とする理由: `VectorNormOrd` を引数に取る汎用版
+    /// （`norm(ord, dim)`）は spec `docs/compat-api-scope.md` §5「Tier 1
+    /// 列挙済み機能は再適用不要」の対象が `var`／`std` に限られ `norm`
+    /// は未列挙のため、facade への `VectorNormOrd` 型の新規公開面
+    /// （enum 再エクスポート）を避け、`norm_l1`／`norm_l2` の 2 つの
+    /// `pub fn`（enum を露出しない）のみを公開する（実装計画 §0「facade
+    /// 公開面」参照）。
+    ///
+    /// `Var::var` と同じフォールバック契約
+    /// （`BackendOps::vector_norm` → `Unsupported` のときのみ
+    /// `eval::vector_norm_along`）。空縮約（`n == 0`）は
+    /// [`AutodiffError::InvalidArgument`]。
+    pub(crate) fn norm(
+        &self,
+        ord: VectorNormOrd,
+        dim: Option<usize>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        let out_shape = reduce_out_shape(&shape, dim)?;
+        let n = match dim {
+            None => shape.iter().product(),
+            Some(axis) => shape[axis],
+        };
+        if n == 0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::norm: 縮約対象の要素数が 0（dim={dim:?}）"
+            )));
+        }
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().vector_norm(&input_val, ord, dim) {
+            Ok(v) => {
+                verify_shape(v.shape(), &out_shape)?;
+                v
+            }
+            Err(BackendError::Unsupported(_)) => {
+                eval::vector_norm_along(&input_val, ord, dim, &out_shape)
+            }
+            Err(other) => return Err(unify_backend_error(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::VectorNorm {
+                input: self.id,
+                ord,
+                dim,
             },
             value,
         );

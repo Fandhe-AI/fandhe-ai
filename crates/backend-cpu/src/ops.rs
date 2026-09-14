@@ -19,7 +19,8 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan, GemmChecksum,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    gather_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    VectorNormOrd, gather_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    scatter_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -1703,6 +1704,31 @@ impl BackendOps for CpuBackendOps {
         require_rank2(a.shape())?;
         linalg::matrix_norm(a, ord).map_err(linalg_error_to_backend_error)
     }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::var`] の CPU 実装（イシュー
+    /// #1723）。`reduction::var` へそのまま委譲し、エラーは
+    /// `reduce_error_to_backend_error` で `BackendError` へ写像する
+    /// （`sum`／`max` と同型）。
+    fn var(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+        correction: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        reduction::var(a, dim, correction).map_err(reduce_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::vector_norm`] の CPU 実装
+    /// （イシュー #1723）。`reduction::vector_norm` へそのまま委譲する
+    /// （`var` と同型）。
+    fn vector_norm(
+        &self,
+        a: &Tensor<f32>,
+        ord: VectorNormOrd,
+        dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        reduction::vector_norm(a, ord, dim).map_err(reduce_error_to_backend_error)
+    }
 }
 
 /// `linalg_*` の公開エントリ（`BackendOps` トレイトメソッド。呼び出し元は
@@ -1857,17 +1883,31 @@ fn linalg_error_to_backend_error(err: LinalgError) -> BackendError {
     BackendError::InvalidArgument(err.to_string())
 }
 
-/// `reduction::ReduceError`（`Shape`／`EmptyReduction` の 2 variant）を
-/// `BackendError` へ写像する。`EmptyReduction` は shape 由来ではない
-/// 実行時失敗のため `KernelLaunchFailed` に寄せる（`BackendError` に
-/// reduction 専用 variant は設けない。§4.4 の 5 variant + TASK-1.9a/1.9c
-/// 拡張の範囲に収める）。
+/// `reduction::ReduceError`（`Shape`／`EmptyReduction`／
+/// `InsufficientDegreesOfFreedom`／`UnsupportedOrd` の 4 variant。
+/// イシュー #1723 で後半 2 つを追加）を `BackendError` へ写像する。
+/// `EmptyReduction` は shape 由来ではない実行時失敗のため
+/// `KernelLaunchFailed` に寄せる（`BackendError` に reduction 専用
+/// variant は設けない。§4.4 の 5 variant + TASK-1.9a/1.9c 拡張の範囲に
+/// 収める）。`InsufficientDegreesOfFreedom`／`UnsupportedOrd` は
+/// 呼び出し元（`fandhe_ai_tensor_core::BackendOps::var`／
+/// `vector_norm` doc「エラー契約」）の想定どおり `InvalidArgument`
+/// （`linalg_error_to_backend_error` と同じ「引数の組み合わせが不正」
+/// 分類）に寄せる。
 pub(crate) fn reduce_error_to_backend_error(err: reduction::ReduceError) -> BackendError {
     match err {
         reduction::ReduceError::Shape(shape_err) => BackendError::ShapeMismatch(shape_err),
         reduction::ReduceError::EmptyReduction { op } => {
             BackendError::KernelLaunchFailed(format!("empty reduction for op \"{op}\""))
         }
+        reduction::ReduceError::InsufficientDegreesOfFreedom { n, correction } => {
+            BackendError::InvalidArgument(format!(
+                "var: insufficient degrees of freedom (n={n}, correction={correction})"
+            ))
+        }
+        reduction::ReduceError::UnsupportedOrd(desc) => BackendError::InvalidArgument(format!(
+            "vector_norm: unsupported VectorNormOrd variant ({desc})"
+        )),
     }
 }
 

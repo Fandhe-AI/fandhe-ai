@@ -152,6 +152,26 @@ pub(crate) enum Op {
     Sum { input: NodeId, dim: Option<usize> },
     /// 非 elementwise。常に実体化済み。
     Max { input: NodeId, dim: Option<usize> },
+    /// 分散（`Var::var`。`torch.var(dim, correction)` 相当。イシュー
+    /// #1723）。`sum`／`max` と同じ `dim: Option<usize>` シグネチャに
+    /// `correction`（自由度補正）を加えたもの。eager（`push_eager`。
+    /// `BackendOps::var` は `linalg_matrix_norm` 等と同じ既定
+    /// `Unsupported` パターンのため `Var::var` はフォールバック契約を
+    /// 持つ——`Op::MatrixNorm` と同型）。
+    Var {
+        input: NodeId,
+        dim: Option<usize>,
+        correction: usize,
+    },
+    /// ベクトルノルム（`Var::norm_l1`／`norm_l2`。`torch.norm`／
+    /// `tf.norm` の L1／L2 相当。イシュー #1723）。`ord` は
+    /// [`fandhe_ai_tensor_core::VectorNormOrd`]（`#[non_exhaustive]`）。
+    /// `Op::Var` と同じ eager・フォールバック契約。
+    VectorNorm {
+        input: NodeId,
+        ord: fandhe_ai_tensor_core::VectorNormOrd,
+        dim: Option<usize>,
+    },
     /// 平均二乗誤差。`BackendOps` に対応メソッドがないため融合対象外
     /// とし常に実体化済み（`push_eager`）。`reduction` は #190
     /// （TASK-9.1c 相当・`nn::loss`）で mean/sum の両縮約に対応するため
@@ -924,6 +944,12 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （非網羅 match 是正で新規 variant 追加時に強制される）。
             Op::Gather { .. } | Op::Scatter { .. } => false,
+            // `Op::Var`／`Op::VectorNorm`（イシュー #1723）は
+            // `Op::ScalarUnary`／`Op::ScalarBinary` と同じく eager
+            // 実体化演算だが `recompute_value` に再計算分岐を持たない
+            // ため非適格（最小・安全側の判断。将来 `true` 化する場合は
+            // `Op::Sum`／`Op::Max` 型の再計算分岐を追加する）。
+            Op::Var { .. } | Op::VectorNorm { .. } => false,
         }
     }
 
@@ -947,6 +973,8 @@ impl Op {
             Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) | Op::Sigmoid(a) => f(*a),
             Op::Sum { input, .. }
             | Op::Max { input, .. }
+            | Op::Var { input, .. }
+            | Op::VectorNorm { input, .. }
             | Op::Reshape { input }
             | Op::Transpose { input, .. }
             | Op::Inv { input }
