@@ -278,7 +278,9 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
     させるため。0 節・4.2 節参照）。`Sequential::predict` は既定バック
     エンド（`fandhe_ai::tape()`。TASK-2.5 ユーザー承認済み）へ透過的に
     結線される
-  - sparse／complex テンソル（非対応の明文化は #1633）
+  - sparse／complex テンソル（非対応の明文化は #1633 で完了。決定記録
+    `docs/tensor-core-sparse-complex-decision.md`。除外事項には従属しない
+    対象外項目で、再開は 5 節手続きを要する）
   - `torch.fx`／TorchScript／`torch.jit`・分散 RPC・モバイル／エッジ
     向け変換
   - 汎用グラフ JIT（`torch.compile`／`tf.function` 相当）: 範囲整理は
@@ -469,6 +471,8 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 
 **#1628 の設計記録は `docs/facade-multi-gpu-ddp-decision.md` として完了した。**
 
+**#1633（sparse／complex テンソルの非対応の明文化）の設計記録は `docs/tensor-core-sparse-complex-decision.md` として完了した。** 量子化／DDP と異なり除外事項「分散学習・量子化の網羅対応」には従属しない（sparse／complex は REQ-9 の「引き続き対象外」列挙にのみ現れ、格上げ条件表を持つ Won't 項目ではない）。コード変更なし。再開には本節の範囲拡張手続き（経路 1 または経路 2）を要する（同 doc §3・§9）。
+
 **#1652（ONNX import 公開可否）の設計記録は `docs/facade-onnx-import-exposure-decision.md` として完了した。** DDP／量子化と異なり本項目は正本 spec の除外事項（上記）に従属しない——facade へ公開する方針自体は案 B（薄いラッパー型）として推奨されるが、facade は crates.io 公開クレートであり非公開クレートへの通常依存を持てないため、「facade から公開する」は `onnx-interop` 自体を crates.io へ公開することと構造的に等価になる。この publish 承認（命名確定・`RELEASE_CRATES` 変更を含む）は 2026-09-12 の facade 公開面拡張の承認範囲には含まれない別個の事項であり、承認が得られるまでは非公開のまま段階 0（現状維持）とする。#1775（ONNX export の facade 公開）・#1754（safetensors save／load の facade 再公開）はいずれも同じ publish 前提を共有するため blocked のまま close しない（同 doc §6.2）。
 
 **#1775（ONNX export の facade 公開）の設計記録は `docs/facade-onnx-export-exposure-decision.md` として完了した。** #1652 と同じ publish 前提（上記段落）を共有するため段階 0・blocked のまま close しない。本 issue では facade（`crates/facade/src/**`・`Cargo.toml`）へのコード追加は一切行わず、代わりに「facade（crates.io 公開クレート）が非公開クレート `onnx-interop` へ通常依存しない」ことを固定する負の guard テスト（`crates/facade/tests/api_surface.rs::facade_does_not_depend_on_unpublished_onnx_interop`／`facade_sources_do_not_reference_onnx_interop`）を追加した——CI が `cargo publish --dry-run` を実行しないため、公開クレートの `Cargo.toml` へ非公開クレートへの path 依存を誤って追加しても通常の `cargo build`／`cargo test` は成功してしまい、次回リリース（`release-all.yml`）まで壊れに気づけないという盲点を機械的に前倒しする。`onnx-interop` の crates.io 公開承認取得後は、本テストを削除ではなく「承認済み依存形状の検査」へ差し替える（同 doc §6）。
@@ -509,6 +513,8 @@ facade 側から `BackendOps` へ直接到達する手段がない。既存の
 | `docs/compat-feature-gap.md` | fandhe-ai 公開面の実装状況スナップショット（対象 HEAD 固定。§3 の「compat-api-scope.md の位置づけ」列は本改定前の状態を記述したまま） |
 | 実装リポ #1627 | Tier 2 量子化。除外事項「分散学習・量子化の網羅対応」に従属し実装着手不可。設計記録は `docs/backend-int8-quantization-decision.md`（段階 0・blocked のまま close しない） |
 | 実装リポ #1628 | Tier 2 複数 GPU／DDP。同上に従属し設計記録のみ |
+| 実装リポ #1633 | sparse／complex テンソルの非対応の明文化。除外事項に従属しない対象外項目。設計記録は `docs/tensor-core-sparse-complex-decision.md` |
+| `docs/spec/04-requirements.md:233` | REQ-9「引き続き対象外」列挙（sparse／complex テンソルを含む） |
 | `docs/spec/05-tasks.md:299-311` | TASK-9.1（基本 NN モジュール）・TASK-9.2（compat 再実装・対象範囲明文化） |
 | `docs/spec/03-poc/poc-v2-6-interop/code/rust/src/mlp.rs` | `Mlp::from_safetensors`（自作コア上の薄い互換層の v2 実例） |
 | `docs/public-api-design.md:6,13,556` | compat 層と自作コア素の公開 API の境界記述 |
