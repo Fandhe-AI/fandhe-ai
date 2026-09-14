@@ -205,6 +205,27 @@ fn matmul_batched_backward_with_empty_grad_and_huge_batch_returns_immediately() 
     assert_eq!(db.numel(), 0);
 }
 
+/// 空の勾配から復元する縮約先（`target_shape`）が確保不能な巨大形状
+/// でも panic せず型付きエラーを返す（PR #1810 codex-review P1 是正の
+/// 回帰テスト）。1 要素を `[1, H, 1]`（H = isize::MAX / 4 + 1）へ
+/// broadcast した `a` と空の `b = [0, 1, 1]` では forward 出力と
+/// `da_full = [0, H, 1]` は空テンソルとして成立するが、縮約先 `[1, H, 1]`
+/// は H 個の f32 でバイトサイズが `isize::MAX` を超える。
+#[test]
+fn matmul_batched_backward_with_unallocatable_reduction_target_is_error_not_panic() {
+    let huge = isize::MAX as usize / 4 + 1;
+    let a = t(vec![1.0], &[1, 1, 1])
+        .broadcast_to(&[1, huge, 1])
+        .unwrap();
+    let bb = t(Vec::new(), &[0, 1, 1]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let av = tape.var(&a);
+    let bv = tape.var(&bb);
+    let loss = av.matmul(&bv).unwrap().sum(None).unwrap();
+    assert!(tape.backward(&loss).is_err());
+}
+
 #[test]
 fn matmul_batched_backward_matches_numeric_grad_broadcast_lhs() {
     let (b, m, k, n) = (3usize, 2usize, 2usize, 2usize);

@@ -2025,8 +2025,8 @@ fn matmul_vjp(
     let db_full = ops
         .gemm_batched_fp32_strict(&a_t, g)
         .map_err(AutodiffError::Backend)?;
-    let da = reduce_batch_axes_f64(&da_full, a.shape());
-    let db = reduce_batch_axes_f64(&db_full, b.shape());
+    let da = reduce_batch_axes_f64(&da_full, a.shape())?;
+    let db = reduce_batch_axes_f64(&db_full, b.shape())?;
     Ok((da, db))
 }
 
@@ -2070,10 +2070,20 @@ fn transpose_last2(tensor: &Tensor<f32>) -> Tensor<f32> {
 /// `f64` で行い、最後に 1 回だけ `f32` へ downcast する
 /// （`.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
 /// アキュムレータで統一する」方針をバッチ軸縮約にも適用する）。
-fn reduce_batch_axes_f64(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32> {
+///
+/// 空の勾配から `target_shape` のゼロテンソルを復元する経路は、`g` が
+/// 空でも `target_shape` 自体は確保可能とは限らない（例: 1 要素を
+/// `[1, H, 1]`〈H = isize::MAX / 4 + 1〉へ broadcast した `a` と空の
+/// `b = [0, 1, 1]` では `da_full = [0, H, 1]` は空だが縮約先は H 個の
+/// f32）ため、`Tensor::zeros` の確保前検証（バイトサイズ ≤ isize::MAX）
+/// を型付きエラーとして伝播する（PR #1810 codex-review P1 是正）。
+fn reduce_batch_axes_f64(
+    g: &Tensor<f32>,
+    target_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
     let g_shape = g.shape().to_vec();
     if g_shape == target_shape {
-        return g.clone();
+        return Ok(g.clone());
     }
     debug_assert!(
         g_shape.len() >= target_shape.len(),
@@ -2090,8 +2100,8 @@ fn reduce_batch_axes_f64(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32>
     // `b = [2^40, 1, 0]`）を構成でき、`inner == 0` でも `axis_len`
     // 回の空ループを回すと最適化なしビルドで実質停止する。
     if g.numel() == 0 {
-        let target_numel: usize = target_shape.iter().product();
-        return build_tensor(vec![0f32; target_numel], target_shape);
+        return Tensor::zeros(target_shape)
+            .map_err(|err| AutodiffError::Backend(BackendError::ShapeMismatch(err)));
     }
 
     let data = dense_vec(g);
@@ -2116,7 +2126,7 @@ fn reduce_batch_axes_f64(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32>
         }
     }
     let out: Vec<f32> = acc.iter().map(|&x| x as f32).collect();
-    build_tensor(out, target_shape)
+    Ok(build_tensor(out, target_shape))
 }
 
 /// ブロードキャストの逆演算。`add`/`mul` の VJP が返す勾配は forward
