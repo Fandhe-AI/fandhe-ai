@@ -1614,3 +1614,15 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - 正しさの検証は VJP・parity テストの字義どおりの適用ができないため、実 PyTorch 2.14.0+cpu 実行値 fixture（`tests/fixtures/{rmsprop,adagrad}-pytorch-reference/`）との統一複合判定（`.claude/rules/coding-rust.md` 既存 tolerance。緩和なし）・閉形式（t=1）一致・決定性（bit 完全一致）で行う（`tests/nn_optim_{rmsprop,adagrad}.rs`）。
 - facade は `fandhe_ai::optim::{RmsProp, RmsPropConfig, Adagrad, AdagradConfig}` の素の再エクスポートのみ（`docs/facade-optimizer-promotion-decision.md` §4 案 A。`crates/facade/src/optim.rs`）。`crate::DeviceParamStore` へは未結線（対応する `BackendOps` メソッドを本 issue では追加していないため非対応）。
 - Adam（coupled L2 weight decay）は #1742・LAMB は #1744 が残対象のまま。
+
+## 追補（イシュー #1745）
+
+§2.10 の `CosineAnnealingLR`・`ExponentialLR` 行を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `CosineAnnealingLr`・`ExponentialLr`・`LinearWarmupLr`（`crates/autodiff/src/nn/optim/lr_scheduler.rs`）を `ConstantLr`／`StepLr` と同じ `LrScheduler` trait 実装として追加した。いずれも `lr_at(step) -> f32` のみを持つ stateless 純関数で、新規 `Op`／`BackendOps`／`Var` は拡張していない。
+- `CosineAnnealingLr` は PyTorch `CosineAnnealingLR._get_closed_form_lr` 準拠の閉形式（`eta_min + (base_lr - eta_min) * (1 + cos(π * step / t_max)) / 2`）を採用し、`step > t_max` では TensorFlow `CosineDecay` のように clamp せず周期的に振る舞う（PyTorch 準拠）。
+- `ExponentialLr` は `lr(step) = base_lr * gamma^step`（PyTorch `ExponentialLR` と同一）。
+- `LinearWarmupLr` は PyTorch に同名クラスがないため、`LinearLR` の `end_factor = 1.0` 固定形として定義した独自スケジューラ。
+- いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する（`cos`／`powf` の libm 差による ULP 揺れを抑える精度方針。bit 同一契約は主張しない）。
+- facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
+- 状態保持型の `ReduceLROnPlateau`・`OneCycleLR` は本 issue の対象外のまま残る（兄弟イシュー #1746／#1747 が担当）。

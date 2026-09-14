@@ -21,6 +21,15 @@
 //! `weight_decay > 0` のとき異なる更新値を生む点は `nn::optim::adam`
 //! モジュール doc・`docs/compat-feature-gap.md` §2.9 を参照。
 //!
+//! **LR スケジューラ拡充（式ベース 3 種。イシュー #1745・親 #1611）**:
+//! [`crate::optim::CosineAnnealingLr`]／[`crate::optim::ExponentialLr`]／
+//! [`crate::optim::LinearWarmupLr`] を [`crate::optim::ConstantLr`]／
+//! [`crate::optim::StepLr`] と同じく `fandhe_ai_autodiff::nn::optim`
+//! （実体は `nn::optim::lr_scheduler` モジュール）から素の再エクスポート
+//! で公開する。いずれも [`crate::optim::LrScheduler::lr_at`] のみを持つ
+//! stateless な純関数であり、状態保持型の `ReduceLROnPlateau`／
+//! `OneCycleLR` は対象外（兄弟イシュー #1746／#1747 が担当）。
+//!
 //! `fandhe_ai::optim` は REQ-9 の 2026-08-29 追記（正本 spec
 //! `docs/spec/04-requirements.md:211-212`。実装リポ #984／#986）で、
 //! `tape()`系・`compat` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
@@ -159,6 +168,7 @@ pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig};
 pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_value};
 pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
+pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, LinearWarmupLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
 pub use fandhe_ai_autodiff::nn::optim::{RmsProp, RmsPropConfig};
 pub use fandhe_ai_autodiff::nn::optim::{clip_grad_norm, global_grad_norm};

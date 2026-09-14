@@ -51,7 +51,8 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
   3. **`fandhe_ai::optim`**（`crates/facade/src/optim.rs`。イシュー #961・
      親 #960・PR #972）: `Sgd`／`SgdConfig`／`AdamW`／`AdamWConfig`／
      `clip_grad_norm`／`global_grad_norm`／`ClipGradResult`／`LrScheduler`／
-     `ConstantLr`／`StepLr` の素の再エクスポート（`docs/facade-optimizer-
+     `ConstantLr`／`StepLr`／`CosineAnnealingLr`／`ExponentialLr`／
+     `LinearWarmupLr`〈#1745〉の素の再エクスポート（`docs/facade-optimizer-
      promotion-decision.md` §4 案 A）。値型・純関数のみで構成され
      `BackendOps` 系の型・注入経路を含まないため REQ-12（利用者向け融合
      制御 API を設けない・任意 `BackendOps` 実装を注入できる公開 API を
@@ -224,7 +225,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | Pooling | #1607（設計記録 #1727。`docs/pooling-ops-design.md`。実装は #1728〈CPU〉・#1729〈CUDA〉・#1730〈Metal〉） |
 | 損失（BCE／NLL／Huber／KLDiv） | #1609（Huber／SmoothL1 は #1739 で実装済み: `Var::huber_loss`／`smooth_l1_loss`・`nn::loss::HuberLoss`／`SmoothL1Loss`。`BackendOps::huber_loss`／`huber_loss_backward`〈`HuberKind::{Huber, SmoothL1}`。既定 `Unsupported`〉・CPU／CUDA／Metal 3 バックエンド専用融合カーネル〈`MseLoss` と同型の 2 段 reduction・`dTarget = −dPred` 契約〉・VJP は `grad::huber_loss_vjp`〈`Unsupported` のときのみ〉。#1737 で BCE／BCEWithLogits も実装済み: `Var::bce_loss`／`bce_with_logits_loss`・`nn::loss::BceLoss`／`BceWithLogitsLoss`・3 バックエンド融合カーネル。facade 到達経路はいずれも既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない。NLL／KLDiv は #1738 が残対象。CUDA／Metal 実機 parity は未実測のまま Mac／GB10 セッションへ申し送り） |
 | optimizer（Adam／RMSprop／Adagrad／LAMB） | #1610（#1742 で Adam〈coupled L2 weight decay〉実装済み。`fandhe_ai_autodiff::nn::optim::adam` モジュール〈`AdamW` を鏡写しにした別実装・decay を勾配へ加算する分岐のみが差分〉。facade は `pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};` の 1 行追加のみ〈`optim.rs`〉。`weight_decay==0` で `AdamW` と bit 完全一致・`weight_decay>0` は `torch.optim.Adam` の `_single_tensor_adam` 定義に基づく恒等式で検証（`crates/autodiff/tests/nn_optim_adam.rs`）。新規 `Op`／`BackendOps`／`Var` メソッド／VJP は追加していない・`DeviceParamStore` 未結線（`Sgd` 専用のまま）。RMSprop／Adagrad は #1743 で実装済み: `RmsProp`／`RmsPropConfig`・`Adagrad`／`AdagradConfig`〈`crates/autodiff/src/nn/optim/{rmsprop,adagrad}.rs`。`AdamW`〈#194〉を鏡写しにした別実装〉。`Tape`／`Var`／`BackendOps` に一切依存しない値型・純関数のため新規 `Op`／`BackendOps` メソッド／VJP なし。正しさは実 PyTorch 2.14.0+cpu 実行値 fixture との統一複合判定〈`.claude/rules/coding-rust.md` 既存 tolerance〉・閉形式（t=1）一致・決定性（bit 完全一致）で検証（`tests/nn_optim_{rmsprop,adagrad}.rs`）。facade は `fandhe_ai::optim::{RmsProp, RmsPropConfig, Adagrad, AdagradConfig}` の素の再エクスポートのみ（`docs/facade-optimizer-promotion-decision.md` §4 案 A）。`crate::DeviceParamStore` は非対応（対応する `BackendOps` メソッド未追加）。LAMB は #1744 が残対象） |
-| scheduler（Cosine／Exponential／Plateau／OneCycle） | #1611 |
+| scheduler（Cosine／Exponential／Plateau／OneCycle） | #1611（#1745 で式ベース 3 種を実装済み: `CosineAnnealingLr`／`ExponentialLr`／`LinearWarmupLr`。いずれも `LrScheduler::lr_at(step) -> f32` のみを持つ stateless 純関数で `Op`／`BackendOps`／`Var` を新規拡張しない。`CosineAnnealingLr` は PyTorch `CosineAnnealingLR._get_closed_form_lr` 準拠の周期的閉形式〈`step>t_max` で clamp しない〉、`LinearWarmupLr` は PyTorch に同名クラスがないため `LinearLR` の `end_factor=1.0` 固定形として定義。facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ。状態保持型の `ReduceLROnPlateau`／`OneCycleLR` は対象外のまま〈兄弟 #1746／#1747 が担当〉） |
 | autograd 制御（no_grad／detach／retain_graph） | #1612 |
 | cast | #1613 |
 | デバイス転送と列挙 | #1614 |
