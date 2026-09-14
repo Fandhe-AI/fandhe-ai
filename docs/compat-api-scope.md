@@ -204,7 +204,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 
 | Tier 1 機能 | 実装 issue |
 |---|---|
-| 要素演算（sub／div／pow／sqrt／log／三角関数／比較） | #1592・#1593（#1710 で算術系〈`Var::sub`／`div`／`pow`／`sqrt`〉実装済み。`ScalarBinaryOp`／`ScalarUnaryOp`〈#1634〉への薄い委譲・facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` は facade へ追加していない〉。log／三角関数／abs／neg は #1711、clamp／比較演算は #1712 が対象） |
+| 要素演算（sub／div／pow／sqrt／log／三角関数／比較） | #1592・#1593（#1710 で算術系〈`Var::sub`／`div`／`pow`／`sqrt`〉実装済み。#1711 で `log`／`log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg` 実装済み。いずれも `ScalarUnaryOp`／`ScalarBinaryOp`〈#1634〉への薄い委譲・facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない。CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッションへ申し送り）。clamp／比較演算は #1712 が対象 |
 | softmax／log_softmax | #1594（実装済み。`Var::softmax`／`log_softmax`・`nn::activation::Softmax`／`LogSoftmax`。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` は facade へ追加しない〉） |
 | GELU／SiLU 等の活性化 | #1595 |
 | LayerNorm／RMSNorm／BatchNorm | #1596（実装済み。`fandhe_ai_autodiff::Var::rms_norm`／`layer_norm`・`nn::RmsNorm`／`LayerNorm`。facade 到達経路は既存 `Var` 再エクスポート経由——新規 `pub use`／`pub fn` は facade へ追加しない。`docs/norm-ops-design.md`）・#1608（BatchNorm） |

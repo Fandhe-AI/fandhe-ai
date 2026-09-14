@@ -1386,8 +1386,9 @@ pub(crate) fn where_cond_with_fallback(
 /// （単項のため shape は不変契約）。
 ///
 /// 呼び出し元 `Var::scalar_unary` は #1710 で公開メソッド（`Var::sqrt`
-/// 等）から到達可能になったため `#[allow(dead_code)]` は撤去済み
-/// （`tape::Op::ScalarUnary` doc と同じ経緯）。
+/// 等）から、#1711 で `Var::log` 等からも到達可能になったため
+/// `#[allow(dead_code)]` は撤去済み（`tape::Op::ScalarUnary` doc と
+/// 同じ経緯）。
 pub(crate) fn scalar_unary_with_fallback(
     ops: &dyn BackendOps,
     op: ScalarUnaryOp,
@@ -2837,6 +2838,7 @@ mod tests {
         let positive = vec![0.4_f32, 1.1, 2.7, 5.0];
         vec![
             (ScalarUnaryOp::Neg, general.clone()),
+            (ScalarUnaryOp::Abs, vec![-1.7, -0.6, 0.9, 2.3]), // 0 を避ける（kink）
             (ScalarUnaryOp::Sqrt, positive.clone()),
             (ScalarUnaryOp::Log, positive.clone()),
             (ScalarUnaryOp::Log2, positive.clone()),
@@ -3127,6 +3129,127 @@ mod tests {
         for i in 0..3 {
             assert_eq!(da.get(&[i]).unwrap(), 1.0);
             assert_eq!(db.get(&[i]).unwrap(), 1.0);
+        }
+    }
+
+    // --- Var::log／log2／log10／sin／cos／tan／abs／neg（イシュー #1711）
+    // Tape 経由エンドツーエンド ---
+
+    #[test]
+    fn var_log_family_forward_and_backward_matches_manual_grad() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let xs = [1.0_f32, 2.0, 4.0, 10.0];
+        let x = tape.var(&t(&xs, &[4]));
+        let y_ln = x.log().unwrap();
+        let y_log2 = x.log2().unwrap();
+        let y_log10 = x.log10().unwrap();
+        for (i, &xv) in xs.iter().enumerate() {
+            assert!((y_ln.value().get(&[i]).unwrap() - xv.ln()).abs() < 1e-5);
+            assert!((y_log2.value().get(&[i]).unwrap() - xv.log2()).abs() < 1e-5);
+            assert!((y_log10.value().get(&[i]).unwrap() - xv.log10()).abs() < 1e-5);
+        }
+
+        let loss = y_ln.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        for (i, &xv) in xs.iter().enumerate() {
+            assert!(
+                (dx.get(&[i]).unwrap() - 1.0 / xv).abs() < 1e-5,
+                "d(ln)/dx[{i}] は 1/x に一致すべき"
+            );
+        }
+    }
+
+    #[test]
+    fn var_log_nonpositive_input_yields_inf_or_nan_without_panic() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[0.0, -1.0], &[2]));
+        let y = x.log().unwrap();
+        assert_eq!(y.value().get(&[0]).unwrap(), f32::NEG_INFINITY);
+        assert!(y.value().get(&[1]).unwrap().is_nan());
+    }
+
+    #[test]
+    fn var_sin_cos_tan_backward_matches_manual_grad() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let xs = [-0.7_f32, 0.3, 0.8];
+        let x_sin = tape.var(&t(&xs, &[3]));
+        let y_sin = x_sin.sin().unwrap();
+        let loss_sin = y_sin.sum(None).unwrap();
+        let grads_sin = tape.backward(&loss_sin).unwrap();
+        let dx_sin = grads_sin.get(&x_sin).unwrap().unwrap();
+
+        let x_cos = tape.var(&t(&xs, &[3]));
+        let y_cos = x_cos.cos().unwrap();
+        let loss_cos = y_cos.sum(None).unwrap();
+        let grads_cos = tape.backward(&loss_cos).unwrap();
+        let dx_cos = grads_cos.get(&x_cos).unwrap().unwrap();
+
+        let x_tan = tape.var(&t(&xs, &[3]));
+        let y_tan = x_tan.tan().unwrap();
+        let loss_tan = y_tan.sum(None).unwrap();
+        let grads_tan = tape.backward(&loss_tan).unwrap();
+        let dx_tan = grads_tan.get(&x_tan).unwrap().unwrap();
+
+        for (i, &xv) in xs.iter().enumerate() {
+            assert!((y_sin.value().get(&[i]).unwrap() - xv.sin()).abs() < 1e-5);
+            assert!(
+                (dx_sin.get(&[i]).unwrap() - xv.cos()).abs() < 1e-5,
+                "d(sin)/dx"
+            );
+            assert!((y_cos.value().get(&[i]).unwrap() - xv.cos()).abs() < 1e-5);
+            assert!(
+                (dx_cos.get(&[i]).unwrap() - (-xv.sin())).abs() < 1e-5,
+                "d(cos)/dx"
+            );
+            assert!((y_tan.value().get(&[i]).unwrap() - xv.tan()).abs() < 1e-4);
+            let expected_dtan = 1.0 / (xv.cos() * xv.cos());
+            assert!(
+                (dx_tan.get(&[i]).unwrap() - expected_dtan).abs() < 1e-3,
+                "d(tan)/dx"
+            );
+        }
+    }
+
+    /// `abs`（劣勾配）の forward・backward を検証する。`neg` とは分離
+    /// 可能な独立テスト単位とする（`docs/compat-api-scope.md` §1.2 の
+    /// 範囲判断参照）。
+    #[test]
+    fn var_abs_backward_subgradient_sign() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[-2.0, 0.0, 3.0], &[3]));
+        let y = x.abs().unwrap();
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_eq!(y.value().get(&[0]).unwrap(), 2.0);
+        assert_eq!(y.value().get(&[1]).unwrap(), 0.0);
+        assert_eq!(y.value().get(&[2]).unwrap(), 3.0);
+        assert_eq!(dx.get(&[0]).unwrap(), -1.0);
+        assert_eq!(dx.get(&[1]).unwrap(), 0.0, "劣勾配は x==0 で 0");
+        assert_eq!(dx.get(&[2]).unwrap(), 1.0);
+    }
+
+    /// `neg` の forward（`-0.0` の符号ビット反転を含む）・backward を
+    /// 検証する（`abs` とは分離可能な独立テスト単位）。
+    #[test]
+    fn var_neg_forward_and_backward() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[1.5, -0.0, -2.0], &[3]));
+        let y = x.neg().unwrap();
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_eq!(y.value().get(&[0]).unwrap(), -1.5);
+        let neg_zero = y.value().get(&[1]).unwrap();
+        assert_eq!(neg_zero, 0.0);
+        assert!(
+            neg_zero.is_sign_positive(),
+            "neg(-0.0) は符号ビット反転で +0.0 になるべき"
+        );
+        assert_eq!(y.value().get(&[2]).unwrap(), 2.0);
+        for i in 0..3 {
+            assert_eq!(dx.get(&[i]).unwrap(), -1.0, "d(neg)/dx は定数 -1");
         }
     }
 
