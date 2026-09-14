@@ -54,12 +54,15 @@
 //! trait の定義は本イシューでは行わない（並行実装される #193/#194 と
 //! 一方的に API を固定しないため。親 #192 の統合時に判断する）。
 
+mod adagrad;
 mod adamw;
+mod rmsprop;
 
 pub mod amp;
 pub mod clip;
 pub mod lr_scheduler;
 
+pub use adagrad::{Adagrad, AdagradConfig};
 pub use adamw::{AdamW, AdamWConfig};
 pub use amp::{
     GradScaler, GradScalerConfig, UnscaleResult, has_non_finite, scale_grads, scale_loss,
@@ -67,6 +70,7 @@ pub use amp::{
 };
 pub use clip::{ClipGradResult, clip_grad_norm, clip_grad_value, global_grad_norm};
 pub use lr_scheduler::{ConstantLr, LrScheduler, StepLr};
+pub use rmsprop::{RmsProp, RmsPropConfig};
 
 // イシュー #1721: 損失スケーリング（`amp::scale_loss`/`amp::GradScaler::
 // scale_loss`）・unscale＋非有限検出（`amp::unscale_grads`/
@@ -79,3 +83,18 @@ pub use lr_scheduler::{ConstantLr, LrScheduler, StepLr};
 // 完了済み（純再エクスポート。`crates/facade/src/optim.rs` 参照）。
 // 真の混合精度（f16 forward／f32 master weight）は対象外
 // （`docs/backend-dtype-dispatch-design.md` §8）。
+
+// イシュー #1743（親 #1610「optimizer（Adam／RMSprop／Adagrad／
+// LAMB）」）: RMSprop（[`RmsProp`]）・Adagrad（[`Adagrad`]）を追加した。
+// `AdamW`（#194）・`crate::optim::Sgd`（#193）と同じく `Tape`／`Var`／
+// `BackendOps` に一切依存しない値型・純関数の optimizer であり、新規
+// `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は追加していない
+// （カーネルなし。詳細は `rmsprop.rs`／`adagrad.rs` の冒頭 doc）。
+// facade（`fandhe_ai::optim`）への公開は `crates/facade/src/optim.rs`
+// の素の再エクスポート（純再エクスポート契約は
+// `docs/facade-optimizer-promotion-decision.md` §4 案 A）。
+// `crate::optim::device_store::DeviceParamStore::step` は
+// `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、
+// 本イシューでは対応する `BackendOps` メソッドを追加していないため
+// RMSprop・Adagrad とも **`DeviceParamStore` 非対応**。LAMB は #1744
+// が対象のまま。
