@@ -26,7 +26,7 @@
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
-use crate::nn::init::{WEIGHT_SEED_SALT, derive_seed, normal_init};
+use crate::nn::init::{WEIGHT_SEED_SALT, derive_seed, try_normal_init};
 use crate::tape::Tape;
 use crate::var::Var;
 
@@ -39,7 +39,7 @@ pub struct Embedding {
 
 impl Embedding {
     /// 決定的シードで `N(0, 1)`（標準正規分布。PyTorch `nn.Embedding`
-    /// 既定初期化）で初期化する（`nn/init.rs::normal_init` 参照。
+    /// 既定初期化）で初期化する（`nn/init.rs::try_normal_init` 参照。
     /// `Linear::new` と同じくグローバル `manual_seed` 状態から独立）。
     /// `padding_idx` を渡すと当該行を全ゼロで初期化する（PyTorch
     /// `nn.Embedding(padding_idx=..)` の既定挙動）。
@@ -53,6 +53,20 @@ impl Embedding {
     /// `out_features == 0` 許容と対称。この非対称は本 doc の契約と
     /// して固定する）。`padding_idx >= num_embeddings` は
     /// `AutodiffError::InvalidArgument` で拒否する。
+    ///
+    /// `num_embeddings * embedding_dim`（重み要素数）は `checked_mul`
+    /// で検証してから初期化する。未検査で乗算すると大きな
+    /// `num_embeddings`／`embedding_dim`（例:
+    /// `Embedding::new(usize::MAX / 2 + 1, 2, ..)`）で overflow し、
+    /// `Tensor::new` の検証に到達する前に panic しうる（本番経路
+    /// panic 禁止。`.claude/rules/coding-rust.md`。`nn::rnn::
+    /// build_gate_params` と同型の対応。codex-review P1 指摘）。続く
+    /// 重み確保自体も `try_normal_init`（`Vec::try_reserve_exact` 使用）
+    /// で行い、要素数乗算が overflow しなくても確保バイト数が
+    /// `isize::MAX` を超える場合（例:
+    /// `Embedding::new(1, isize::MAX as usize, ..)`）に panic せず
+    /// `AutodiffError::InvalidArgument` を返す（codex-review P1
+    /// 指摘）。
     pub fn new(
         num_embeddings: usize,
         embedding_dim: usize,
@@ -71,8 +85,27 @@ impl Embedding {
                 "Embedding::new: padding_idx {p} が範囲 [0, {num_embeddings}) を外れている"
             )));
         }
+        // `num_embeddings * embedding_dim` の要素数乗算を `checked_mul`
+        // で検証する（`nn::rnn::build_gate_params` と同型。イシュー
+        // #1604 codex-review P1 指摘: 未検査乗算は大きな入力で
+        // overflow し `Tensor::new` の検証に到達する前に panic する）。
+        let weight_len = num_embeddings.checked_mul(embedding_dim).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "Embedding::new: num_embeddings (={num_embeddings}) * embedding_dim (={embedding_dim}) \
+                 overflowed usize"
+            ))
+        })?;
         let weight_seed = derive_seed(seed, WEIGHT_SEED_SALT);
-        let mut weight_data = normal_init(num_embeddings * embedding_dim, weight_seed);
+        // `try_normal_init` は `Vec::try_reserve_exact` で確保可否を
+        // 先に検証するため、`weight_len` の乗算自体は overflow しなく
+        // ても確保バイト数が `isize::MAX` を超える場合に panic せず
+        // `Err` を返す（イシュー #1604 codex-review P1 指摘）。
+        let mut weight_data = try_normal_init(weight_len, weight_seed).map_err(|err| {
+            AutodiffError::InvalidArgument(format!(
+                "Embedding::new: weight (num_embeddings={num_embeddings}, embedding_dim={embedding_dim}, \
+                 len={weight_len}) 分のバッファを確保できません: {err}"
+            ))
+        })?;
         if let Some(p) = padding_idx {
             let start = p * embedding_dim;
             let end = start + embedding_dim;
@@ -137,18 +170,23 @@ impl Embedding {
         }
     }
 
+    /// 現在の重み（`[num_embeddings, embedding_dim]`）への参照を返す。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
     }
 
+    /// `Embedding::new`／`from_parameters` に渡した `padding_idx` を
+    /// そのまま返す。
     pub fn padding_idx(&self) -> Option<usize> {
         self.padding_idx
     }
 
+    /// 埋め込みテーブルの行数（`weight.shape()[0]`）を返す。
     pub fn num_embeddings(&self) -> usize {
         self.weight.shape()[0]
     }
 
+    /// 埋め込みベクトルの次元数（`weight.shape()[1]`）を返す。
     pub fn embedding_dim(&self) -> usize {
         self.weight.shape()[1]
     }
@@ -215,6 +253,29 @@ mod tests {
     fn new_rejects_padding_idx_out_of_range() {
         let Err(err) = Embedding::new(4, 3, Some(4), 1) else {
             panic!("padding_idx 範囲外は Err を返すはず")
+        };
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    // codex-review P1 指摘（イシュー #1604）の回帰テスト: 要素数乗算
+    // オーバーフローを `checked_mul` で検査せずに `Tensor::new` へ
+    // 到達すると panic していた（本番経路 panic 禁止）。
+    #[test]
+    fn new_rejects_element_count_overflow_without_panicking() {
+        let Err(err) = Embedding::new(usize::MAX / 2 + 1, 2, Some(0), 42) else {
+            panic!("num_embeddings * embedding_dim の overflow は Err を返すはず")
+        };
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    // codex-review P1 指摘（イシュー #1604）の回帰テスト: 要素数乗算が
+    // overflow しなくても `Vec::with_capacity` 相当の確保が
+    // `isize::MAX` バイトを超えると capacity overflow で panic して
+    // いた。`try_reserve_exact` で確保失敗を型付きエラーへ変換する。
+    #[test]
+    fn new_rejects_allocation_too_large_without_panicking() {
+        let Err(err) = Embedding::new(1, isize::MAX as usize, None, 42) else {
+            panic!("確保不能なほど大きい weight は Err を返すはず")
         };
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }

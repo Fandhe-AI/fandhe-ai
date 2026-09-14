@@ -51,45 +51,6 @@ use fandhe_ai_tensor_core::rng::Xorshift64Star;
 /// `in_features == 0` は呼び出し元（`Linear::new`）が構築前の引数検証
 /// （`AutodiffError::InvalidArgument`。`error.rs` 参照）で事前に弾く契約
 /// とし、本関数は `bound` が有限の正値であることのみを前提とする。
-/// `Embedding::new`（`nn/embedding.rs`）から呼ばれる重み初期化本体
-/// （イシュー #1604）。PyTorch `nn.Embedding` の既定初期化
-/// （`N(0, 1)`。標準正規分布）に整合させる。Box–Muller 変換
-/// （`f64` 中間計算）を使う点は [`fandhe_ai_tensor_core::rng::randn`]
-/// と同一の変換式だが、本関数はプロセスグローバルな
-/// [`fandhe_ai_tensor_core::rng::with_global_rng`] を経由せず、
-/// [`uniform_init`] と同じく呼び出しごとに新規構築した一時的な
-/// `Xorshift64Star` を使う（`nn::Linear::new` と同じ「グローバル
-/// `manual_seed` 状態から独立」契約。モジュール冒頭コメント参照）。
-///
-/// 決定性の範囲は `randn` と同じ「同一プロセス・同一プラットフォーム
-/// 内での再現」に限る（`ln`／`sin`／`cos` を経由するため。
-/// `docs/rng-global-contract-design.md`）。`len == 0` は空 `Vec` を
-/// 返す（`randn(&[0, D])` と同じ扱い。呼び出し元での境界検査は
-/// 不要）。
-pub(crate) fn normal_init(len: usize, seed: u64) -> Vec<f32> {
-    let mut rng = Xorshift64Star::new(seed);
-    let mut out = Vec::with_capacity(len);
-    let mut remaining = len;
-    while remaining > 0 {
-        // `randn`（`tensor-core::rng`）と同じ Box–Muller 変換。`u1` は
-        // `(0, 1]` に補正して `ln(0)`（負の無限大）を避ける。
-        let u1 = 1.0 - rng.next_unit_f64();
-        let u2 = rng.next_unit_f64();
-        let r = (-2.0 * u1.ln()).sqrt();
-        let theta = std::f64::consts::TAU * u2;
-        let z0 = (r * theta.cos()) as f32;
-        out.push(z0);
-        remaining -= 1;
-        if remaining == 0 {
-            break;
-        }
-        let z1 = (r * theta.sin()) as f32;
-        out.push(z1);
-        remaining -= 1;
-    }
-    out
-}
-
 pub(crate) fn uniform_init(len: usize, bound: f32, seed: u64) -> Vec<f32> {
     let mut rng = Xorshift64Star::new(seed);
     (0..len).map(|_| rng.next_f32() * bound).collect()
@@ -119,6 +80,59 @@ pub(crate) fn try_uniform_init(
         values.push(rng.next_f32() * bound);
     }
     Ok(values)
+}
+
+/// `Embedding::new`（`nn/embedding.rs`）から呼ばれる重み初期化本体
+/// （イシュー #1604）。PyTorch `nn.Embedding` の既定初期化
+/// （`N(0, 1)`。標準正規分布）に整合させる。Box–Muller 変換
+/// （`f64` 中間計算）を使う点は [`fandhe_ai_tensor_core::rng::randn`]
+/// と同一の変換式だが、本関数はプロセスグローバルな
+/// [`fandhe_ai_tensor_core::rng::with_global_rng`] を経由せず、
+/// [`uniform_init`] と同じく呼び出しごとに新規構築した一時的な
+/// `Xorshift64Star` を使う（`nn::Linear::new` と同じ「グローバル
+/// `manual_seed` 状態から独立」契約。モジュール冒頭コメント参照）。
+///
+/// 決定性の範囲は `randn` と同じ「同一プロセス・同一プラットフォーム
+/// 内での再現」に限る（`ln`／`sin`／`cos` を経由するため。
+/// `docs/rng-global-contract-design.md`）。`len == 0` は空 `Vec` を
+/// 返す（`randn(&[0, D])` と同じ扱い。呼び出し元での境界検査は
+/// 不要）。
+///
+/// `try_uniform_init` と同じ理由でフォールブルにする:
+/// `Vec::with_capacity(len)` は総バイト数 `isize::MAX` を超えると
+/// capacity overflow で panic するため、`try_reserve_exact` で確保
+/// 可否を先に検証し、確保不能時は panic させず `Err` を返す（本番
+/// 経路 panic 禁止。`.claude/rules/coding-rust.md`。イシュー #1604
+/// codex-review P1 指摘: `Embedding::new` が `num_embeddings *
+/// embedding_dim` の大きな `len` を渡しうる）。呼び出し元
+/// （`nn::embedding::Embedding::new`）が `AutodiffError::
+/// InvalidArgument` へ変換する。
+pub(crate) fn try_normal_init(
+    len: usize,
+    seed: u64,
+) -> Result<Vec<f32>, std::collections::TryReserveError> {
+    let mut rng = Xorshift64Star::new(seed);
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)?;
+    let mut remaining = len;
+    while remaining > 0 {
+        // Box–Muller 変換。`u1` は `(0, 1]` に
+        // 補正して `ln(0)`（負の無限大）を避ける。
+        let u1 = 1.0 - rng.next_unit_f64();
+        let u2 = rng.next_unit_f64();
+        let r = (-2.0 * u1.ln()).sqrt();
+        let theta = std::f64::consts::TAU * u2;
+        let z0 = (r * theta.cos()) as f32;
+        out.push(z0);
+        remaining -= 1;
+        if remaining == 0 {
+            break;
+        }
+        let z1 = (r * theta.sin()) as f32;
+        out.push(z1);
+        remaining -= 1;
+    }
+    Ok(out)
 }
 
 /// `Linear::new` の呼び出しシード 1 個から weight・bias 用の独立した
@@ -210,30 +224,30 @@ mod tests {
         assert_ne!(rng.next_u64(), 0);
     }
 
-    // `normal_init`（イシュー #1604）の単体テスト。
+    // `try_normal_init`（イシュー #1604）の単体テスト。
     #[test]
     fn normal_init_same_seed_reproducible_within_process() {
-        let a = normal_init(64, 42);
-        let b = normal_init(64, 42);
+        let a = try_normal_init(64, 42).unwrap();
+        let b = try_normal_init(64, 42).unwrap();
         assert_eq!(a, b);
     }
 
     #[test]
     fn normal_init_different_seed_diverges() {
-        let a = normal_init(64, 1);
-        let b = normal_init(64, 2);
+        let a = try_normal_init(64, 1).unwrap();
+        let b = try_normal_init(64, 2).unwrap();
         assert_ne!(a, b);
     }
 
     #[test]
     fn normal_init_zero_len_returns_empty() {
-        let values = normal_init(0, 42);
+        let values = try_normal_init(0, 42).unwrap();
         assert!(values.is_empty());
     }
 
     #[test]
     fn normal_init_odd_len_has_correct_length() {
-        let values = normal_init(7, 42);
+        let values = try_normal_init(7, 42).unwrap();
         assert_eq!(values.len(), 7);
     }
 
@@ -242,7 +256,7 @@ mod tests {
         // `randn` の同名テスト（`tensor-core::rng`）と同じ粗い検査:
         // 大標本で平均・分散が N(0, 1) から大きく外れないことのみ確認
         // する（厳密な統計検定ではない。決定的シードで再現可能）。
-        let values = normal_init(20_000, 7);
+        let values = try_normal_init(20_000, 7).unwrap();
         let n = values.len() as f64;
         let mean: f64 = values.iter().map(|&v| v as f64).sum::<f64>() / n;
         let var: f64 = values

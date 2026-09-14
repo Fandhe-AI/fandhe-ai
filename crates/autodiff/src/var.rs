@@ -2605,7 +2605,7 @@ impl<'t> Var<'t> {
     /// `reshape([N, 1])` → `broadcast_to([N, D])` → `contiguous()`。
     /// いずれも [`Self::index_select`] と同じ zero-copy な view 拡張
     /// 手順の最終段のみ実体化する）→ ⑤`self`（weight）を層 1
-    /// （[`materialize_fallible`]）で実体化 → ⑥[`gather_with_fallback`]
+    /// （`materialize_fallible`）で実体化 → ⑥`gather_with_fallback`
     /// → ⑦戻り shape 検証 → ⑧`push_eager` →
     /// ⑨`index.rank() != 1` のときのみ、ノード shape（常に `[N, D]`）を
     /// `index.shape() ++ [D]` へ [`Self::reshape`] する（1-D ids は
