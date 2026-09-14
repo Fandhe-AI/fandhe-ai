@@ -20,7 +20,11 @@
 //! 契約のため、本モジュールは `run_gather_f32` を直接呼び出す経路でも
 //! 安全なよう、`lanes`／`numel` の `u32` 収容・スライス実長の整合を
 //! 独立に検証する（`unique.rs::MetalUnique::run_unique_f32` と同じ
-//! 「呼び出し元の検査結果を信頼しない」二重検査方針。既存の
+//! 「呼び出し元の検査結果を信頼しない」二重検査方針。`u32` 上限超過を
+//! `Unsupported`（ホストフォールバック）として扱う正規の判定は
+//! 呼び出し元 `ops.rs` が `scan_model::plan_scan` で本モジュールに
+//! 入る前に行うため、ここでの失敗は内部契約違反の扱いとなる
+//! 〈PR #1849 Cursor Bugbot 指摘の是正〉。既存の
 //! [`crate::error::MetalError::InvalidGatherScatterShape`] を再利用する
 //! ——`unique.rs` も同じ variant を shape 検証エラーの汎用表現として
 //! 再利用しており、本モジュール専用の新 variant を追加しない最小差分

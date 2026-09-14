@@ -124,6 +124,96 @@ fn scan_over_shape(
     out
 }
 
+/// scan（累積和／累積積）カーネルの `uint` 引数（`lanes`／`axis_len`／
+/// `inner`）が収まるバックエンド固有上限（`u32::MAX`）。CUDA 側
+/// （`backend-cuda::scan::validate_i32_bound`。`int` 引数のため
+/// `i32::MAX`）と対になる Metal 側の定数。
+pub const SCAN_KERNEL_ARG_LIMIT: usize = u32::MAX as usize;
+
+/// [`plan_scan`] の失敗理由。`sort_model::SortPrepareError` と同型の
+/// ホスト側純関数エラー（`objc2` 非依存。Linux でも単体テスト可能）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanPrepareError {
+    /// `lanes = outer * inner`／`axis_len`／`inner` のいずれか（`what`）
+    /// がカーネル `uint` 引数の範囲（[`SCAN_KERNEL_ARG_LIMIT`]）を
+    /// 超えた、または lane 分解の中間積が `usize` をオーバーフロー
+    /// した（`value == usize::MAX` で表す）。`ops.rs::
+    /// map_scan_prepare_error` は本 variant を `BackendError::
+    /// Unsupported` へ写像し、`Var::cumsum`／`cumprod` のホスト
+    /// フォールバック（`eval::cumsum_along`／`cumprod_along`）へ委ねる
+    /// （CUDA `CudaError::ScanSizeLimitExceeded` → `Unsupported` と同じ
+    /// 設計判断。PR #1849 Cursor Bugbot 指摘の是正）。
+    SizeLimitExceeded {
+        what: &'static str,
+        value: usize,
+        limit: usize,
+    },
+}
+
+impl std::fmt::Display for ScanPrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScanPrepareError::SizeLimitExceeded { what, value, limit } => write!(
+                f,
+                "cumsum/cumprod size limit exceeded: {what}={value} exceeds limit={limit}"
+            ),
+        }
+    }
+}
+
+/// `shape`／`dim` から導出した lane 分解（`backend-cpu::scan` と同一の
+/// `outer`／`axis_len`／`inner`）と派生量 `lanes`。`ops.rs::
+/// MetalBackendOps::run_scan` が `dispatch_sync` へ入る前にホスト側で
+/// 完結させる検証の結果（`sort_model::SortPlan` と同型）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanPlan {
+    pub outer: usize,
+    pub axis_len: usize,
+    pub inner: usize,
+    pub lanes: usize,
+}
+
+/// `shape`／`dim` から [`ScanPlan`] を構築し、カーネル `uint` 引数
+/// （`lanes`／`axis_len`／`inner`）が [`SCAN_KERNEL_ARG_LIMIT`] に
+/// 収まることを検証する。超過時は [`ScanPrepareError::SizeLimitExceeded`]
+/// を返し、呼び出し元 `ops.rs` が `Unsupported`（ホストフォールバック）
+/// へ写像する（`plan_sort`／`unique` の `padded` 検証と同じ「サイズ上限
+/// 超過のみ `Unsupported`、それ以外は伝播」方針）。
+///
+/// `dim >= shape.len()`（軸範囲外）・lane 分解の中間積 `usize`
+/// オーバーフローは `sort_model::line_layout` が `None` を返すため
+/// panic せず `SizeLimitExceeded { value: usize::MAX, .. }` へ写像する
+/// （`plan_sort` と同じ防御。呼び出し元は `reduce_out_shape`／
+/// `checked_numel` で事前検査済みの契約のため実質到達しない）。
+/// 要素数積そのものの `usize` オーバーフローは本関数の責務ではなく、
+/// 呼び出し元が `gather_scatter_model::checked_numel` で
+/// `ShapeMismatch` として先に拒否する（フォールバック対象外）。
+pub fn plan_scan(shape: &[usize], dim: usize) -> Result<ScanPlan, ScanPrepareError> {
+    let overflow = |what: &'static str| ScanPrepareError::SizeLimitExceeded {
+        what,
+        value: usize::MAX,
+        limit: SCAN_KERNEL_ARG_LIMIT,
+    };
+    let (outer, axis_len, inner) =
+        crate::sort_model::line_layout(shape, dim).ok_or(overflow("lane layout"))?;
+    let lanes = outer.checked_mul(inner).ok_or(overflow("lanes"))?;
+    for (what, value) in [("lanes", lanes), ("axis_len", axis_len), ("inner", inner)] {
+        if value > SCAN_KERNEL_ARG_LIMIT {
+            return Err(ScanPrepareError::SizeLimitExceeded {
+                what,
+                value,
+                limit: SCAN_KERNEL_ARG_LIMIT,
+            });
+        }
+    }
+    Ok(ScanPlan {
+        outer,
+        axis_len,
+        inner,
+        lanes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +368,85 @@ mod tests {
         // 列ごとに cumsum: col0 [1,4]->[1,5]、col1 [2,5]->[2,7]、
         // col2 [3,6]->[3,9]。
         assert_eq!(out_dim0, vec![1.0, 2.0, 3.0, 5.0, 7.0, 9.0]);
+    }
+
+    /// [`plan_scan`] の正常系: lane 分解が `backend-cpu::scan` と同一。
+    #[test]
+    fn plan_scan_small_shape_ok() {
+        let plan = plan_scan(&[2, 3, 4], 1).unwrap();
+        assert_eq!(
+            plan,
+            ScanPlan {
+                outer: 2,
+                axis_len: 3,
+                inner: 4,
+                lanes: 8,
+            }
+        );
+        assert_eq!(plan_scan(&[5], 0).unwrap().lanes, 1);
+    }
+
+    /// `dim` 範囲外は panic せず `SizeLimitExceeded { value: usize::MAX }`
+    /// へ写像する（`plan_sort` と同じ防御）。
+    #[test]
+    fn plan_scan_dim_out_of_range_is_size_limit_error() {
+        let err = plan_scan(&[2, 3], 2).unwrap_err();
+        assert!(matches!(
+            err,
+            ScanPrepareError::SizeLimitExceeded {
+                value: usize::MAX,
+                ..
+            }
+        ));
+    }
+
+    /// `lanes`／`axis_len`／`inner` が `u32::MAX` を超える形状は
+    /// `SizeLimitExceeded`（`ops.rs` で `Unsupported` → ホスト
+    /// フォールバック）。境界値ちょうど（`u32::MAX`）は許容する。
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn plan_scan_u32_limit_boundary() {
+        let over = SCAN_KERNEL_ARG_LIMIT + 1;
+        // axis_len 超過。
+        assert!(matches!(
+            plan_scan(&[1, over], 1),
+            Err(ScanPrepareError::SizeLimitExceeded {
+                what: "axis_len",
+                ..
+            })
+        ));
+        // inner 超過（lanes も同時に超過するが lanes を先に報告する）。
+        assert!(matches!(
+            plan_scan(&[2, over], 0),
+            Err(ScanPrepareError::SizeLimitExceeded { what: "lanes", .. })
+        ));
+        // outer 側で lanes 超過。
+        assert!(matches!(
+            plan_scan(&[over, 2], 1),
+            Err(ScanPrepareError::SizeLimitExceeded { what: "lanes", .. })
+        ));
+        // inner 単独超過（outer=1）。
+        assert!(matches!(
+            plan_scan(&[1, 1, over], 1),
+            Err(ScanPrepareError::SizeLimitExceeded { what: "lanes", .. })
+        ));
+        // 境界値ちょうどは許容。
+        assert!(plan_scan(&[1, SCAN_KERNEL_ARG_LIMIT], 1).is_ok());
+        assert!(plan_scan(&[SCAN_KERNEL_ARG_LIMIT, 1], 1).is_ok());
+    }
+
+    /// lane 分解の中間積が `usize` をオーバーフローしても panic せず
+    /// `SizeLimitExceeded` を返す。
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn plan_scan_usize_overflow_is_size_limit_error() {
+        let big = usize::MAX / 2 + 1;
+        assert!(matches!(
+            plan_scan(&[big, 2, 2], 2),
+            Err(ScanPrepareError::SizeLimitExceeded {
+                value: usize::MAX,
+                ..
+            })
+        ));
     }
 }

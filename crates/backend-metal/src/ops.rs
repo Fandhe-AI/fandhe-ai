@@ -67,6 +67,25 @@ use crate::row_kernel::{self, plan_dtype_is_f32};
 /// `i32::try_from` 失敗）で返す variant と食い違っていた。CUDA 側
 /// `ops.rs::map_sort_error`／`CudaError::SortDimSizeTooLarge` も同型に
 /// 是正済み）。
+/// `scan_model::plan_scan`（Metal `cumsum`／`cumprod` の起動前ホスト側
+/// 検証。イシュー #1740・PR #1849 Cursor Bugbot 指摘の是正）のエラーを
+/// `BackendOps::cumsum`／`cumprod` の戻り値へ変換する。唯一の variant
+/// `SizeLimitExceeded`（`lanes`／`axis_len`／`inner` がカーネル `uint`
+/// 引数の範囲〈`u32::MAX`〉を超過）を `BackendError::Unsupported` へ
+/// 写像し、`Var::cumsum`／`cumprod` のホストフォールバック（`eval::
+/// cumsum_along`／`cumprod_along`）へ委ねる（CUDA `ops.rs::
+/// map_scan_error` の `ScanSizeLimitExceeded` → `Unsupported`・Metal
+/// `map_sort_prepare_error` と同型）。要素数積の `usize` オーバー
+/// フローは本関数の対象外で、`run_scan` が `checked_numel` で
+/// `ShapeMismatch` として先に拒否する。
+fn map_scan_prepare_error(err: crate::scan_model::ScanPrepareError) -> BackendError {
+    match err {
+        crate::scan_model::ScanPrepareError::SizeLimitExceeded { .. } => {
+            BackendError::Unsupported(err.to_string())
+        }
+    }
+}
+
 fn map_sort_prepare_error(err: crate::sort_model::SortPrepareError) -> BackendError {
     match err {
         crate::sort_model::SortPrepareError::SizeLimitExceeded { .. } => {
@@ -785,7 +804,10 @@ impl MetalBackendOps {
     /// 乗算を呼ぶ）より前に要素数積のオーバーフローを検査
     /// （`gather_scatter_model::checked_numel` 適用方針。`unique` と
     /// 同型）してから `outer`／`axis_len`／`inner`（`backend-cpu::scan`
-    /// と同一の lane 分解）を導出し `scan::MetalScan` へ委譲する。
+    /// と同一の lane 分解）を `scan_model::plan_scan` で導出し
+    /// （カーネル `uint` 引数の上限超過はここで `Unsupported` →
+    /// ホストフォールバックへ写像。`map_scan_prepare_error` 参照）
+    /// `scan::MetalScan` へ委譲する。
     /// `shape` の要素数が 0（いずれかの軸が 0）の場合は GPU 起動なしで
     /// 空テンソルを返す（`checked_numel` は 0 を含む shape でも中間積
     /// オーバーフローの恐れがあるため、この早期リターンを先に行う。
@@ -802,9 +824,16 @@ impl MetalBackendOps {
             return Tensor::new(Vec::new(), &shape).map_err(BackendError::ShapeMismatch);
         }
         crate::gather_scatter_model::checked_numel(&shape).map_err(BackendError::ShapeMismatch)?;
-        let outer: usize = shape[..dim].iter().product();
-        let axis_len = shape[dim];
-        let inner: usize = shape[dim + 1..].iter().product();
+        // カーネル `uint` 引数（`lanes`／`axis_len`／`inner`）の上限超過を
+        // `dispatch_sync` に入る前に先出しし、`Unsupported`（ホスト
+        // フォールバック）へ写像する（`map_scan_prepare_error` 参照。
+        // `Self::sort` の `plan_sort` 先出し・CUDA `ScanSizeLimitExceeded`
+        // と同型。PR #1849 Cursor Bugbot 指摘の是正）。`scan.rs::
+        // MetalScan::run_scan` 内の同じ `u32` 検査は「呼び出し元を信頼
+        // しない」二重検査として残し、そこで失敗した場合は内部契約違反
+        // として `KernelLaunchFailed` のまま伝播する。
+        let plan = crate::scan_model::plan_scan(&shape, dim).map_err(map_scan_prepare_error)?;
+        let (outer, axis_len, inner) = (plan.outer, plan.axis_len, plan.inner);
 
         let x_owned = x.contiguous();
         let x_slice = x_owned.as_slice().ok_or_else(|| {
