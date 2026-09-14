@@ -265,20 +265,16 @@ pub fn validate_scatter_launch(
 
 /// `gather_f32` カーネルのホスト側逐語モデル（イシュー #1778）。
 ///
-/// 呼び出し元（`gather_scatter.rs`）が shape 検査
-/// （[`fandhe_ai_tensor_core::gather_out_shape`]）・[`validate_shapes_fit_u32`]・
-/// [`validate_index_range`] を済ませてから渡す契約のため、本関数自身は
-/// 値検査を行わない（カーネル同様に、範囲外添字は呼び出し元が事前に
-/// 拒否している前提。防御的ガードはカーネル側にのみ持たせ、ホスト
-/// モデルはカーネルの「正常系」の逐語再現に専念する）。
-///
-/// `index_shape` の要素数積は `checked_numel`（`pub(crate)`。public
-/// docs からは private 相当のためコードスパン表記とする）で検査してから求める
-/// （無検査の `.iter().product()` は大きな shape で `usize` オーバー
-/// フローし、本番経路で panic しうる。`.claude/rules/coding-rust.md`。
-/// codex-review 指摘）。本関数は `pub`（`crate::gather_scatter_model`
-/// はクレート公開モジュール）のため、テスト以外からの呼び出しでも
-/// 同じ理由で頑健性が必要。
+/// 本関数は `pub`（`crate::gather_scatter_model` はクレート公開
+/// モジュール）かつ `#[cfg(test)]` の外にあるため、テスト以外からの
+/// 直接呼び出しでも配列アクセスで panic しないよう、[`validate_gather_launch`]
+/// （[`fandhe_ai_tensor_core::gather_out_shape`] による shape・rank・
+/// `dim` 検査・`u32` 収容・`index` 値域・スライス長一致まで一括で行う。
+/// `crate::gather_scatter::MetalGatherScatter::run_gather_f32` と同じ
+/// 検査を共有する）を入口で呼ぶ（codex-review 指摘。イシュー #1799。
+/// 以前は「呼び出し元が検査済みで渡す契約」としていたが、契約を
+/// コメントで示すだけでは `.claude/rules/coding-rust.md`「本番経路で
+/// panic 禁止」を満たさないと判断し、実際に検証する形へ変更した）。
 pub fn gather_model(
     input: &[f32],
     in_shape: &[usize],
@@ -286,7 +282,7 @@ pub fn gather_model(
     index_shape: &[usize],
     dim: usize,
 ) -> Result<Vec<f32>, ShapeError> {
-    let numel = checked_numel(index_shape)?;
+    let numel = validate_gather_launch(input, in_shape, index, index_shape, dim)?;
     if numel == 0 {
         return Ok(Vec::new());
     }
@@ -306,16 +302,18 @@ pub fn gather_model(
 /// モデル（イシュー #1778）。出力定常方式（`shaders/gather_scatter.metal`
 /// 冒頭コメント「CPU 参照実装との順序等価性」）を Rust で再現する。
 ///
-/// `out_shape`（＝`input.shape()`）・`index_shape`（＝`src.shape()`）は
-/// 呼び出し元が shape 検査（[`fandhe_ai_tensor_core::scatter_out_shape`]）・
-/// [`validate_shapes_fit_u32`]・[`validate_index_range`] 済みで渡す契約。
-///
-/// `numel_out` が 0（`out_shape` のいずれかの軸が 0）の早期 return を
-/// `row_major_strides(index_shape)` の**前**に行う（無検査の `*`
-/// 乗算チェーンを含む `row_major_strides` を、出力が空で本来不要な
-/// 計算のためだけに大きな `index_shape` に対して呼び、`usize`
-/// オーバーフローで panic するのを防ぐ。`.claude/rules/
-/// coding-rust.md`「本番経路で panic 禁止」。codex-review 指摘）。
+/// 本関数は `pub` かつ `#[cfg(test)]` の外にあるため、[`gather_model`]
+/// と同じ理由で入口に [`validate_scatter_launch`]（`crate::
+/// gather_scatter::MetalGatherScatter::run_scatter_f32` と同じ検査を
+/// 共有する）を呼び、配列アクセスで panic しないようにする
+/// （codex-review 指摘。イシュー #1799）。`numel_out == 0` は空配列を
+/// 返す。`idx_numel == 0`（`index`／`src` が空）の場合は
+/// `validate_scatter_launch` が `index`／`src` の値・長さを検証しない
+/// ため以降の計算ループへそのまま入るが、下の集約ループ自体が
+/// `index_shape[axis] == 0` を非 `in_range`（＝`input` パススルー）
+/// として、または `index_shape[dim] == 0` を空ループとして自然に扱う
+/// ため追加の早期 return は不要（`ScatterLaunch::idx_numel` はここでは
+/// 使わない）。
 pub fn scatter_model(
     input: &[f32],
     out_shape: &[usize],
@@ -326,7 +324,8 @@ pub fn scatter_model(
     reduce: ScatterReduce,
 ) -> Result<Vec<f32>, ShapeError> {
     let rank = out_shape.len();
-    let numel_out = checked_numel(out_shape)?;
+    let ScatterLaunch { numel_out, .. } =
+        validate_scatter_launch(input, out_shape, index, index_shape, src, dim)?;
     if numel_out == 0 {
         return Ok(Vec::new());
     }
@@ -807,6 +806,46 @@ mod tests {
             ShapeError::ShapeMismatch {
                 lhs: vec![4, 3],
                 rhs: vec![5, 3],
+            }
+        );
+    }
+
+    // 以下、イシュー #1799 の追加 codex-review 指摘（新規 P1: 公開ホスト
+    // モデル gather_model／scatter_model 自体が入力検証をせず配列へ
+    // アクセスして panic しうる）の再現ケースをそのまま単体テスト化する。
+    // 検証ロジック自体は validate_gather_launch／validate_scatter_launch
+    // へ既に切り出し済みだが、`gather_model`／`scatter_model` が実際に
+    // それらを入口で呼び Err を返すことをここで直接確認する（呼び出し元
+    // 〈本モジュールの他テスト〉は正しい入力のみを渡すため、この経路は
+    // 従来のテストでは通らない）。
+
+    /// codex-review 指摘の再現ケースそのもの: `gather_model(&[1.0],
+    /// &[1], &[-1], &[1], 0)` は、検証前は `input[src_off]` で範囲外
+    /// 添字アクセスにより panic していた。
+    #[test]
+    fn gather_model_rejects_negative_index_instead_of_panicking() {
+        let err = gather_model(&[1.0], &[1], &[-1], &[1], 0).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 0,
+                index: -1,
+                dim_size: 1
+            }
+        );
+    }
+
+    /// codex-review 指摘の再現ケースそのもの: `scatter_model(&[], &[1],
+    /// &[0], &[1], &[1.0], 0, ScatterReduce::Add)` は、検証前は
+    /// `input[gid]`（空スライスへの添字アクセス）で panic していた。
+    #[test]
+    fn scatter_model_rejects_input_len_mismatch_instead_of_panicking() {
+        let err = scatter_model(&[], &[1], &[0], &[1], &[1.0], 0, ScatterReduce::Add).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::ElementCountMismatch {
+                expected: 1,
+                actual: 0
             }
         );
     }
