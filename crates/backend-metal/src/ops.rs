@@ -41,8 +41,9 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, gather_out_shape, one_hot_out_shape, reduce_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape,
+    UnaryElementwiseOp, gather_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -53,6 +54,29 @@ use crate::gather_scatter_model::{GS_MAX_RANK, validate_index_range, validate_sh
 use crate::layout::{self, MatrixLayout};
 use crate::memory::{MetalBufferHandle, MetalMemory, map_metal_error};
 use crate::row_kernel::{self, plan_dtype_is_f32};
+
+/// `sort_model::SortPrepareError` を `BackendError` へ写像する
+/// （`ops.rs::sort`／`topk` から呼ばれる。CUDA 側 `ops.rs::
+/// map_sort_error` と同型の判断: `SizeLimitExceeded`〈合成キー配列長が
+/// バックエンド固有上限を超過〉のみ `Unsupported` としてホスト
+/// フォールバックへ委ねる。`DimSizeTooLarge`〈`dim_size` が
+/// カーネル引数型の範囲〈`i32::MAX`〉を超える〉は `ShapeMismatch
+/// (ShapeError::IndexRangeOverflow)` へ写像する——PR #1844 codex-review
+/// 指摘の是正: 当初は `ElementCountOverflow` へ写像していたが、CPU
+/// 参照実装（`backend-cpu::sort_topk`）が同じ状況（軸内添字の
+/// `i32::try_from` 失敗）で返す variant と食い違っていた。CUDA 側
+/// `ops.rs::map_sort_error`／`CudaError::SortDimSizeTooLarge` も同型に
+/// 是正済み）。
+fn map_sort_prepare_error(err: crate::sort_model::SortPrepareError) -> BackendError {
+    match err {
+        crate::sort_model::SortPrepareError::SizeLimitExceeded { .. } => {
+            BackendError::Unsupported(err.to_string())
+        }
+        crate::sort_model::SortPrepareError::DimSizeTooLarge { dim_size } => {
+            BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { index: dim_size })
+        }
+    }
+}
 
 std::thread_local! {
     /// [`MetalBackendOps::gemm_resident_lhs`]／[`MetalBackendOps::
@@ -1237,6 +1261,247 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`BackendOps::gemm_batched`] の Metal オーバーライド（イシュー
+    /// #1717・親 #1600・spec REQ-9 2026-09-12 追記 Tier 1「バッチ行列積」・
+    /// `docs/compat-api-scope.md` §1.2）。
+    ///
+    /// 既定合成実装（`fandhe_ai_tensor_core::backend_ops::
+    /// default_gemm_batched`。バッチをほどいて `batch_len` 回
+    /// `self.gemm` を呼ぶ——各呼び出しが独自に upload・
+    /// `dispatch_auto`〈内部 `ctx.synchronize()`〉・download する）が
+    /// `batch_len` 回の GPU 同期・H2D／D2H を発生させるのに対し、本
+    /// オーバーライドは **(a)** 正規化済みオペランド `a_norm`／`b_norm`
+    /// （`[B, m, k]`／`[B, k, n]` の contiguous 3 次元。
+    /// [`fandhe_ai_tensor_core::normalize_batched_operand`] が
+    /// broadcast・`contiguous()` 化まで済ませる）を **1 回ずつ** upload
+    /// し、**(b)** バッチごとの GEMM を
+    /// `gemm::MetalGemm::encode_strided_bias_act_prepared_with_c_offset`
+    /// （`gemm_fp32_strict_into`〈#1555〉・`linear_forward_device`
+    /// 〈#1216〉・`gemm_resident_lhs`〈#1040〉が確立した encode-only
+    /// パターン。`gemm.rs`／`shaders/gemm.metal` 自体は無変更）で
+    /// **1 つのコマンドバッチへ encode するだけ**（待たない）で積み、
+    /// **(c)** 最後の `download` 1 回だけが GPU 完了を待つ「バッチ
+    /// ループ方式」にする。
+    ///
+    /// # 経路（`gemm.rs`・shader 無変更）
+    ///
+    /// 各バッチ `i` は NN レイアウト
+    /// （`MatrixLayout { rows: m, cols: k, ld: k, transposed: false }`／
+    /// `{ rows: k, cols: n, ld: n, transposed: false }`）で、オフセットは
+    /// `a: i*m*k`・`b: i*k*n`・`c: i*m*n`（要素単位）。
+    /// `a_norm.numel() == batch_len*m*k` 等は `normalize_batched_operand`
+    /// が返す形状で構造的に保証されるため（`[B, rows, cols]` へ
+    /// `reshape` 済み）、`i < batch_len` のオフセット積は
+    /// `usize` オーバーフローしない。カーネル起動前の範囲検査自体は
+    /// `gemm::validate_strided_dims_impl` が `a_buf.len()`／
+    /// `b_buf.len()` に対するオフセット＋スパン、`c_offset + m*n <=
+    /// c_len` を **バッチごとに** 行う（REQ-8「シェーダ・カーネル側の
+    /// 手動境界チェックを省略しない」・OWASP A03）。
+    ///
+    /// # 数値契約
+    ///
+    /// rank 2 同士（`plan.batch_shape().is_empty()`）は [`Self::gemm`]
+    /// へ直接委譲し bit 同一（既定合成実装・CPU オーバーライドと同じ
+    /// 契約）。rank≥3 は classic strided カーネル
+    /// （`gemm_tiled_bias_act`）を通るため、per-batch
+    /// `MetalBackendOps::gemm`（`dispatch_auto` =
+    /// `gemm_simdgroup_tiled`／split-K）とは **bit 同一を主張しない**
+    /// （`gemm_strided_nt_tn`〈#1215〉・`gemm_collapsed_lhs`〈#1040〉と
+    /// 同じ契約）。受け入れ判定は REQ-2 統一複合判定（相対誤差 1e-3
+    /// 未満 または 絶対誤差 1e-5 未満）。
+    ///
+    /// 本経路は `dispatch_auto`／`crate::tile::select_route_for_device`
+    /// を一切経由しないため、split-K 実行時トグル
+    /// （`crate::split_k_runtime::split_k_enabled()`。既定 `true`。
+    /// イシュー #1544・#1547）の状態に依存せず常に同一結果を返す
+    /// （`tests/gemm_batched_parity.rs` の split-K トグル非干渉テストが
+    /// 固定する）。
+    ///
+    /// # fail-closed（`DispatchFailureCell`）
+    ///
+    /// `sgd_step_device_tracked`／`gemm_fp32_strict_into_tracked` と
+    /// 同様、GPU dispatch の失敗は encode 時点では判明せず
+    /// `download` の同期点まで遅延する。本メソッドはローカルに
+    /// `DispatchFailureCell` を作って各バッチの encode へ渡し、
+    /// `download` 復帰後に `token.is_set()` を確認してから成功を
+    /// 返す——共有 `MetalContext` を使う別スレッドが本メソッドより
+    /// 先に `synchronize()` して失敗バッチを回収してしまっても、
+    /// 本メソッドが誤って成功として返らないようにするための
+    /// fail-closed 契約（`linear_forward_device` doc「同期契約」と
+    /// 同型の懸念への対処）。
+    ///
+    /// # 退化形状（`m`／`n`／`k` が 0）
+    ///
+    /// `dispatch_auto` 経路の `validate_dims` は `m`／`n`／`k` が 0 の
+    /// 形状を `MetalError::ZeroDimension` で拒否する契約だが（`Self::
+    /// gemm_strided_nt_tn` doc 参照）、`encode_strided_bias_act_
+    /// prepared_with_c_offset` が経由する `validate_strided_dims_impl`
+    /// 自体はゼロ次元を拒否しない。本メソッドはゼロサイズの GPU
+    /// dispatch を実際に発行することを避け、他バックエンド（CPU
+    /// `gemm_batched`〈#1715〉・`gemm_collapsed_lhs`〈#1040〉）と挙動を
+    /// 揃えるため、正規化（`normalize_batched_operand`。broadcast の
+    /// 実体化を伴いうる）より前にホスト側で明示的に処理する
+    /// （PR #1810 codex-review P2「空結果に対して broadcast を実体化
+    /// しない」と同じ判断）: 出力要素数が 0（`batch_len == 0`／
+    /// `m == 0`／`n == 0`）は空テンソルを、`k == 0`（`m, n > 0`）は
+    /// GPU 起動なしの全 0 テンソルを返す。
+    fn gemm_batched(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        let plan = fandhe_ai_tensor_core::batched_matmul_plan(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+
+        if plan.batch_shape().is_empty() {
+            return self.gemm(a, b);
+        }
+
+        let (m, k, n) = (plan.m(), plan.k(), plan.n());
+        let batch_len: usize = plan.batch_shape().iter().product();
+
+        let mn = m
+            .checked_mul(n)
+            .ok_or(ShapeError::ElementCountOverflow)
+            .map_err(BackendError::ShapeMismatch)?;
+        let total = fandhe_ai_tensor_core::checked_gemm_batched_output_len(batch_len, m, n)
+            .map_err(BackendError::ShapeMismatch)?;
+
+        // 出力要素数 0（`batch_len == 0`／`m == 0`／`n == 0`）は
+        // 正規化（broadcast 実体化）へ入らず即座に空テンソルを返す
+        // （CPU `gemm_batched`〈#1715〉と同じ判断。上記 doc「退化形状」
+        // 参照）。
+        if total == 0 {
+            return Tensor::new(Vec::new(), &plan.out_shape()).map_err(BackendError::ShapeMismatch);
+        }
+
+        if k == 0 {
+            // `m, n > 0` かつ `k == 0`: 内積の項が 0 個のため結果は
+            // 恒等的に 0。GPU dispatch を発行せずホスト側で直接構築する
+            // （上記 doc「退化形状」参照。他バックエンドとのゼロ次元
+            // 挙動整合が目的で、`validate_strided_dims_impl` 自体は
+            // ゼロ次元を拒否しない）。
+            return Tensor::from_shape_fill(&plan.out_shape(), |_| 0.0f32)
+                .map_err(BackendError::ShapeMismatch);
+        }
+
+        // ホスト側再パックが発生するか（`Self::gemm` の NN/TT・分類
+        // 不能形状と同じ計上規則。`normalize_batched_operand` は
+        // `operand` が元から `[out_batch_shape, rows, cols]` と同一
+        // shape で contiguous なら `Arc` 共有のみで実コピーを伴わない）。
+        if !a.is_contiguous() {
+            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+        }
+        if !b.is_contiguous() {
+            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+        }
+
+        let a_norm = fandhe_ai_tensor_core::normalize_batched_operand(a, plan.batch_shape(), m, k)?;
+        let b_norm = fandhe_ai_tensor_core::normalize_batched_operand(b, plan.batch_shape(), k, n)?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mem = MetalMemory::from_shared(ctx.clone());
+
+        let a_dev_buf = mem.upload(&a_norm)?;
+        let a_handle = a_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_batched: lhs buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let b_dev_buf = mem.upload(&b_norm)?;
+        let b_handle = b_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(b_buf) = b_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_batched: rhs buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let c_dev_buf = mem.alloc_zeroed(&[batch_len, m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_buf) = c_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_batched: out buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let a_layout = MatrixLayout {
+            rows: m,
+            cols: k,
+            ld: k,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: k,
+            cols: n,
+            ld: n,
+            transposed: false,
+        };
+
+        // fail-closed トークン（上記 doc 参照）。本メソッド専用の
+        // ローカルインスタンスで、`download` 復帰後に検査してから
+        // 成功を返す。
+        let token = DispatchFailureCell::new();
+        for i in 0..batch_len {
+            gemm.encode_strided_bias_act_prepared_with_c_offset(
+                &ctx,
+                a_buf,
+                i * m * k,
+                a_layout,
+                b_buf,
+                i * k * n,
+                b_layout,
+                None,
+                false,
+                c_buf,
+                i * mn,
+                m,
+                n,
+                k,
+                Some(&token),
+            )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        }
+
+        let out = mem.download(&c_dev_buf)?;
+        if token.is_set() {
+            return Err(BackendError::KernelLaunchFailed(
+                "gemm_batched: GPU dispatch failed for one or more batches".into(),
+            ));
+        }
+        out.reshape(&plan.out_shape())
+            .map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`Self::gemm_batched`] と同じバッチ行列積だが、各バッチの計算を
+    /// [`Self::gemm_batched`] へそのまま委譲する（イシュー #1717）。
+    ///
+    /// trait doc（`fandhe_ai_tensor_core::backend_ops::BackendOps::
+    /// gemm_batched_fp32_strict`）のとおり Metal は TF32 の概念を持た
+    /// ず、rank 2 の `gemm_fp32_strict` は既定で `gemm` へ委譲される
+    /// （`Self` は `gemm_fp32_strict` をオーバーライドしていない）。
+    /// 本オーバーライドを置かない場合、`gemm_batched_fp32_strict` は
+    /// 既定合成実装（バッチをほどいて `batch_len` 回 `gemm_fp32_strict`
+    /// を呼ぶ）へ落ち、`autodiff::grad::matmul_vjp` の rank≥3 経路
+    /// （`ops.gemm_batched_fp32_strict(...)` を呼ぶ）が forward
+    /// （`Self::gemm_batched`）と異なるカーネル・per-batch 同期の経路を
+    /// 通ってしまう（`docs/perf/train-backward-gemm-wiring.md` と同種の
+    /// 「VJP がホスト scalar 経由に落ちる」問題を防ぐための明示的な
+    /// 委譲）。
+    fn gemm_batched_fp32_strict(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.gemm_batched(a, b)
+    }
+
     /// [`BackendOps::gemm_fp32_strict_into`] の Metal 実装（イシュー
     /// #1555・`docs/device-resident-update-design.md` 追補）。`Self::gemm`
     /// （イシュー #1215）の NT/TN 判定条件（`layout::classify_2d` が両方
@@ -2346,6 +2611,61 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::pad` の Metal 実装（イシュー #1756）。[`pad_out_shape`]
+    /// で `input.shape()`／`pads` を再検査し、shape 要素の `u32` 収容
+    /// （カーネル引数 `constant uint*` は 32bit のため）をカーネル起動前
+    /// に fail-closed 検査してから `crate::constant_pad::
+    /// MetalConstantPad::run_pad_f32` へ委譲する（`gather` と同じ二重
+    /// 検査方針。`.claude/rules/security.md` A08）。pad は `dim` 軸限定の
+    /// gather／scatter と異なりカーネル側が固定長スタック配列
+    /// （`GS_MAX_RANK`）を使わない設計（`shaders/constant_pad.metal`
+    /// モジュール doc 参照）のため rank 上限は存在しない。**この u32
+    /// 収容検査には gather／scatter 専用の [`validate_shapes_fit_u32`]
+    /// を使わない**（同関数は `GS_MAX_RANK`〈8〉の rank 上限も併せて
+    /// 課すため、rank 9 以上の pad 入力を `BackendError::ShapeMismatch`
+    /// として fail し、`Unsupported` でないためホストフォールバックへ
+    /// 切り替わらず CPU／CUDA〈rank 上限なし〉と非対称になっていた
+    /// ——Cursor Bugbot 指摘）。
+    fn pad(
+        &self,
+        input: &Tensor<f32>,
+        pads: &[(usize, usize)],
+        value: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = pad_out_shape(input.shape(), pads).map_err(BackendError::ShapeMismatch)?;
+        let in_shape = input.shape().to_vec();
+        for &d in in_shape.iter().chain(out_shape.iter()) {
+            if d > u32::MAX as usize {
+                return Err(BackendError::ShapeMismatch(
+                    ShapeError::ElementCountOverflow,
+                ));
+            }
+        }
+
+        // `input` が空でも出力は非空になりうる（全要素 `value`）ため、
+        // その場合は `input` を実体化・GPU 転送せずに埋める
+        // （`constant_pad.rs::MetalConstantPad::run_pad_f32` 内の同型
+        // 早期リターンと対称。ここで先に判定することで `.contiguous()`
+        // 呼び出し自体を回避する）。
+        if in_shape.contains(&0) {
+            return Tensor::new(vec![value; out_shape.iter().product()], &out_shape)
+                .map_err(BackendError::ShapeMismatch);
+        }
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("pad: input not contiguous".into()))?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let cp = context_cache::cached_constant_pad(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = cp
+            .run_pad_f32(&ctx, input_slice, &in_shape, pads, &out_shape, value)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// `BackendOps::scatter` の Metal 実装（イシュー #1778）。
     /// [`scatter_out_shape`] で `input`／`index`／`src` の shape を
     /// 再検査し、[`Self::gather`] と同じ二重検査方針
@@ -2510,6 +2830,100 @@ impl BackendOps for MetalBackendOps {
     /// を起動する。
     fn cumprod(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
         self.run_scan(x, dim, ScanOpKind::Prod)
+    }
+
+    /// `BackendOps::sort` の Metal 実装（イシュー #1741）。
+    /// `x.contiguous()` で稠密化してから `sort.rs::MetalSort::
+    /// run_sort_f32`（64bit 合成キー・ビットニックソート方式。
+    /// `crate::sort_model` モジュール doc 参照）へ委譲する。契約
+    /// （安定ソート相当の順序契約・NaN／±0 正規化・決定性）は
+    /// `fandhe_ai_tensor_core::BackendOps::sort` doc を正とする。
+    ///
+    /// 合成キー配列長がカーネル引数の範囲（`i32::MAX` 相当）を超える
+    /// 場合は `Self::unique` の `padded` 超過と同じ設計判断で
+    /// `BackendError::Unsupported` を返し、呼び出し元 `Var::sort` の
+    /// ホストフォールバックへ委ねる。
+    fn sort(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        descending: bool,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape = sort_out_shape(input.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Ok((
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+            ));
+        }
+        // `x.numel()`（無検査の `.iter().product()`）を呼ぶ前に要素数積
+        // のオーバーフローを検査する（`Self::unique` と同一の PR #1828
+        // codex-review 是正パターン）。
+        crate::gather_scatter_model::checked_numel(input.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        // `sort.rs::MetalSort::run_sort_f32` 内部の `plan_sort` 検証を
+        // `dispatch_sync` に入る前に先出しし、失敗理由（形状不正／
+        // バックエンド固有上限超過）を区別してから写像する（`map_sort_error`
+        // 参照。CUDA 側 `ops.rs::map_sort_error` と同型の判断）。
+        crate::sort_model::plan_sort(input.shape(), dim).map_err(map_sort_prepare_error)?;
+        let dim_size = input.shape()[dim];
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("sort: input not contiguous".into()))?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let s = context_cache::cached_sort(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (values, index) = s
+            .run_sort_f32(&ctx, input_slice, input.shape(), dim, descending, dim_size)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Ok((
+            Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(index, &out_shape).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// `BackendOps::topk` の Metal 実装（イシュー #1741）。`Self::sort`
+    /// と同一の `sort.rs::MetalSort::run_sort_f32` へ `out_len = k`・
+    /// `descending = largest` として委譲する（`largest=false` の
+    /// upside-down 契約は `fandhe_ai_tensor_core::BackendOps::topk` doc
+    /// を正とする）。
+    fn topk(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        k: usize,
+        largest: bool,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape =
+            topk_out_shape(input.shape(), dim, k).map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Ok((
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+            ));
+        }
+        crate::gather_scatter_model::checked_numel(input.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        crate::sort_model::plan_sort(input.shape(), dim).map_err(map_sort_prepare_error)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("topk: input not contiguous".into()))?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let s = context_cache::cached_sort(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (values, index) = s
+            .run_sort_f32(&ctx, input_slice, input.shape(), dim, largest, k)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Ok((
+            Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(index, &out_shape).map_err(BackendError::ShapeMismatch)?,
+        ))
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::mse_loss`] の Metal 実装
@@ -3315,6 +3729,46 @@ mod tests {
         assert!(
             matches!(err, BackendError::Unsupported(_)),
             "rank={rank}（GS_MAX_RANK={GS_MAX_RANK} 超過）は Unsupported を返すべき: {err:?}"
+        );
+    }
+
+    /// `pad` は `gather`／`scatter` と異なりカーネル側に rank 上限が
+    /// 存在しない（`shaders/constant_pad.metal` モジュール doc 参照）
+    /// ため、`GS_MAX_RANK`（8）を超える rank でも
+    /// `BackendError::ShapeMismatch` を誤って返さないことを確認する
+    /// （Cursor Bugbot 指摘の是正確認）。この shape 要素数積は
+    /// `u32::MAX` 未満に収まるため、`Metal コンテキスト取得
+    /// （`context_cache::cached_context()`）へ到達する前で誤検出される
+    /// ことはないが、後続の GPU 起動自体は実機必須のためここでは検査
+    /// しない。ここでは代わりに `u32::MAX` を超える shape 要素で早期
+    /// return する回帰（`context_cache` へ到達する前に fail-closed
+    /// で拒否される）を実機不要で確認する。
+    #[test]
+    fn pad_rejects_dim_exceeding_u32_before_touching_metal_context() {
+        // rank 9 以上（`GS_MAX_RANK` 超過）でも受理されること自体は GPU
+        // 起動が必要なため実機不要のここでは検証できない。代わりに
+        // shape 要素が `u32::MAX` を超える場合に `ElementCountOverflow`
+        // へ fail-closed で拒否され、`context_cache::cached_context()`
+        // （実機必須）へ到達しないことを確認する（`validate_shapes_
+        // fit_u32` 除去後も u32 収容検査自体は維持されていることの
+        // 回帰）。他方の軸を 0 にして要素数積を 0 に保つことで、巨大な
+        // `Vec<f32>` を確保せずに `Tensor::new` を成立させる（`unique_
+        // rejects_transposed_shape_with_overflowing_intermediate_
+        // product` と同じ発想）。
+        let rank = GS_MAX_RANK + 1;
+        let mut shape = vec![0usize; rank];
+        shape[0] = (u32::MAX as usize) + 1;
+        let input = Tensor::new(Vec::<f32>::new(), &shape).unwrap();
+        let pads = vec![(0usize, 0usize); rank];
+
+        let ops = MetalBackendOps::new();
+        let err = ops.pad(&input, &pads, 0.0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+            ),
+            "rank={rank}・shape[0] が u32::MAX 超過は ElementCountOverflow を返すべき: {err:?}"
         );
     }
 

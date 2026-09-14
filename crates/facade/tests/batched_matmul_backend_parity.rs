@@ -11,12 +11,21 @@
 //!   突き合わせる。
 //! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
 //!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の同経路を CPU tape
-//!   と `assert_parity` で比較する（CUDA／Metal は本イシュー時点で
-//!   `gemm_batched` を専用オーバーライドせず既定合成実装〈per-batch
-//!   `gemm`〉のまま。専用バッチカーネルは後続イシュー #1716／#1717。
-//!   GEMM カーネルが異なるため bit 同一は主張しない）。実機実測は
-//!   本エージェント実行環境に CUDA／Apple Silicon 実機がないため
-//!   未実施のまま該当セッションへ申し送る。
+//!   と `assert_parity` で比較する。CUDA は #1716 で
+//!   `CudaBackendOps::gemm_batched`／`gemm_batched_fp32_strict`
+//!   専用オーバーライド（デバイス常駐バッチループ経路
+//!   `CudaGemm::run_tiled_f32_batched`）を実装済み（forward・backward
+//!   （rank≥3 `matmul_vjp` が呼ぶ `gemm_batched_fp32_strict` 経由）
+//!   とも本ファイルの `#[ignore]` テストで検証する。数値契約・追加の
+//!   形状網羅は `crates/backend-cuda/tests/gemm_batched_parity.rs`
+//!   を参照）。Metal も #1717 で
+//!   `MetalBackendOps::gemm_batched`／`gemm_batched_fp32_strict`
+//!   専用オーバーライド（encode-only バッチループ・1 回同期）が
+//!   入ったため、forward に加え backward（VJP の転置 view 入力経由）
+//!   も検証する。CUDA・Metal いずれも GEMM カーネルが per-batch 経路
+//!   と異なるため bit 同一は主張しない（REQ-2 統一複合判定）。
+//!   実機実測は本エージェント実行環境に CUDA／Apple Silicon 実機が
+//!   ないため未実施のまま該当セッションへ申し送る。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Device;
@@ -190,6 +199,53 @@ fn metal_batched_matmul_forward_matches_cpu() {
     );
 }
 
+/// `MetalBackendOps::gemm_batched_fp32_strict`（イシュー #1717）が
+/// `autodiff::grad::matmul_vjp` の rank≥3 経路（`transpose_last2` に
+/// よる転置 view 入力）を通って backward まで正しく結線されている
+/// ことを確認する。CPU tape（`CpuBackendOps::gemm_batched`）を基準と
+/// し、REQ-2 統一複合判定（`gemm_batched` doc「数値契約」参照。Metal
+/// は classic strided カーネルを経由するため bit 同一は主張しない）で
+/// `dA`／`dB` を突き合わせる。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_batched_matmul_backward_matches_cpu() {
+    let a_shape = [2usize, 3, 4];
+    let b_shape = [2usize, 4, 3];
+    let target_shape = [2usize, 3, 3];
+
+    let metal_tape = fandhe_ai::tape_for(Device::Metal).expect("Metal 実機が利用可能な前提");
+    let a_metal = metal_tape.make_var(&leaf(5, &a_shape));
+    let b_metal = metal_tape.make_var(&leaf(6, &b_shape));
+    let t_metal = metal_tape.make_var(&leaf(7, &target_shape));
+    let y_metal = a_metal.matmul(&b_metal).unwrap();
+    let loss_metal = y_metal.mse_loss(&t_metal).unwrap();
+    let grads_metal = metal_tape.backward(&loss_metal).unwrap();
+    let da_metal = grads_metal.get(&a_metal).unwrap().expect("到達する");
+    let db_metal = grads_metal.get(&b_metal).unwrap().expect("到達する");
+
+    let cpu_tape = fandhe_ai::tape();
+    let a_cpu = cpu_tape.make_var(&leaf(5, &a_shape));
+    let b_cpu = cpu_tape.make_var(&leaf(6, &b_shape));
+    let t_cpu = cpu_tape.make_var(&leaf(7, &target_shape));
+    let y_cpu = a_cpu.matmul(&b_cpu).unwrap();
+    let loss_cpu = y_cpu.mse_loss(&t_cpu).unwrap();
+    let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+    let da_cpu = grads_cpu.get(&a_cpu).unwrap().expect("到達する");
+    let db_cpu = grads_cpu.get(&b_cpu).unwrap().expect("到達する");
+
+    assert_parity(
+        "batched matmul backward dA: Metal tape_for vs CPU tape_for",
+        &contiguous_slice(da_metal),
+        &contiguous_slice(da_cpu),
+    );
+    assert_parity(
+        "batched matmul backward dB: Metal tape_for vs CPU tape_for",
+        &contiguous_slice(db_metal),
+        &contiguous_slice(db_cpu),
+    );
+}
+
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn cuda_batched_matmul_forward_matches_cpu() {
@@ -200,5 +256,50 @@ fn cuda_batched_matmul_forward_matches_cpu() {
         "batched matmul forward: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&cuda_out),
         &contiguous_slice(&cpu_out),
+    );
+}
+
+/// バッチ `matmul` backward（`dA`／`dB`）の CUDA `tape_for` と CPU
+/// `tape_for` の parity（イシュー #1716。`cpu_batched_matmul_backward_matches_naive_reference`
+/// の実機横断版）。CUDA 側 backward は `matmul_vjp` の rank≥3 分岐が
+/// 呼ぶ `CudaBackendOps::gemm_batched_fp32_strict`（#1716 で新設した
+/// デバイス常駐バッチループ経路）を経由する。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_batched_matmul_backward_matches_cpu() {
+    let a_shape = [2usize, 3, 4];
+    let b_shape = [2usize, 4, 3];
+    let target_shape = [2usize, 3, 3];
+
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+    let a_cuda = cuda_tape.make_var(&leaf(5, &a_shape));
+    let b_cuda = cuda_tape.make_var(&leaf(6, &b_shape));
+    let t_cuda = cuda_tape.make_var(&leaf(7, &target_shape));
+    let y_cuda = a_cuda.matmul(&b_cuda).unwrap();
+    let loss_cuda = y_cuda.mse_loss(&t_cuda).unwrap();
+    let grads_cuda = cuda_tape.backward(&loss_cuda).unwrap();
+    let da_cuda = grads_cuda.get(&a_cuda).unwrap().expect("到達する");
+    let db_cuda = grads_cuda.get(&b_cuda).unwrap().expect("到達する");
+
+    let cpu_tape = fandhe_ai::tape();
+    let a_cpu = cpu_tape.make_var(&leaf(5, &a_shape));
+    let b_cpu = cpu_tape.make_var(&leaf(6, &b_shape));
+    let t_cpu = cpu_tape.make_var(&leaf(7, &target_shape));
+    let y_cpu = a_cpu.matmul(&b_cpu).unwrap();
+    let loss_cpu = y_cpu.mse_loss(&t_cpu).unwrap();
+    let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+    let da_cpu = grads_cpu.get(&a_cpu).unwrap().expect("到達する");
+    let db_cpu = grads_cpu.get(&b_cpu).unwrap().expect("到達する");
+
+    assert_parity(
+        "batched matmul backward dA: CUDA tape_for vs CPU tape_for",
+        &contiguous_slice(da_cuda),
+        &contiguous_slice(da_cpu),
+    );
+    assert_parity(
+        "batched matmul backward dB: CUDA tape_for vs CPU tape_for",
+        &contiguous_slice(db_cuda),
+        &contiguous_slice(db_cpu),
     );
 }

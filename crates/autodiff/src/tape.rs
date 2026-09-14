@@ -206,9 +206,11 @@ pub(crate) enum Op {
     /// `Var::min`）。VJP は `Max` と共有ヘルパー
     /// （`grad::extremum_first_match_vjp`）を使う——forward 記録値
     /// `out_value` と `==` 一致する最初の位置へ上流勾配を置くだけの
-    /// 実装で最大／最小に依存しないため（#1718 が均等分配へ確定した
-    /// 場合はそのヘルパー 1 箇所の差し替えで `Max`／`Min` 両方へ
-    /// 反映される）。
+    /// 実装で最大／最小に依存しない。イシュー #1718 で先勝ち決定的
+    /// 方式を維持する設計判断が確定し（`docs/autodiff-
+    /// amax-grad-distribution-decision.md`）、このヘルパーは今後も
+    /// 差し替えない——PyTorch `amax`／`amin` 相当の均等分配は独立の
+    /// `Op`／VJP として実装する方針とした。
     Min { input: NodeId, dim: Option<usize> },
     /// `dim` に沿った縮約平均（イシュー #1719・親 #1601「Phase 2
     /// （Tier 1）」）。`BackendOps` に対応メソッドがないため、forward
@@ -678,6 +680,36 @@ pub(crate) enum Op {
         src: NodeId,
         reduce: ScatterReduce,
     },
+    /// `Var::embedding`（`nn::Embedding` の forward 本体。`torch.nn.
+    /// Embedding` 相当。イシュー #1604）。`weight`（`[V, D]`）から
+    /// `index`（`[N, D]` へ broadcast・contiguous 済みの非追跡
+    /// `Tensor<i32>`。`Var::embedding` が `ids.contiguous()` →
+    /// `reshape([N, 1])` → `broadcast_to([N, D])` → `contiguous()` で
+    /// 1 回だけ構築し、forward の gather と backward の scatter_add で
+    /// 共用する——`Op::Gather` の `index` と同じ「`Op` payload に直接
+    /// 埋め込む」設計）で行を抽出する。`padding_idx` は forward では
+    /// 使わない（当該行の現在値をそのまま返す。PyTorch 準拠）が、
+    /// VJP が当該行の勾配をゼロ上書きするために保持する。`BackendOps::
+    /// gather` に対応メソッドがあるため非融合対象（`push_eager` で
+    /// 常に実体化。`Op::Gather` と同型）・checkpoint 非適格
+    /// （`is_checkpoint_eligible` 参照）。
+    ///
+    /// ノード shape は常に `[N, D]`（`N = index.numel()`。1-D ids 以外
+    /// は `Var::embedding` が呼び出し側の `ids.shape() ++ [D]` へ
+    /// 別途 `Var::reshape` する——`Op::Reshape` が別ノードとして記録
+    /// されるため、本 `Op` 自身は `[N, D]` の外を扱わない）。
+    ///
+    /// VJP（`grad.rs`）: `d_weight = scatter_add(zeros_like(weight), 0,
+    /// index, upstream)`（`Op::Gather` の VJP と同じ「Gather の VJP は
+    /// scatter_add」の原則・`ScatterReduce::Add` の決定的集約契約）の
+    /// のち、`padding_idx` が `Some(p)` の場合のみ行 `p` をゼロで
+    /// 上書きする（forward が当該行の現在値を使う一方、勾配は流さない
+    /// という PyTorch `nn.Embedding(padding_idx=..)` の意味論）。
+    Embedding {
+        weight: NodeId,
+        index: Tensor<i32>,
+        padding_idx: Option<usize>,
+    },
     /// `dim` 軸に沿った累積和（`Var::cumsum`。`torch.cumsum` 相当。
     /// イシュー #1731）。`BackendOps::cumsum` に対応メソッドがあり
     /// （`Softmax`／`Gather` と同様）非融合対象——`Op::
@@ -737,6 +769,22 @@ pub(crate) enum Op {
         input: NodeId,
         dim: usize,
         index: Tensor<i32>,
+    },
+    /// `Var::pad`（`torch.nn.functional.pad(mode='constant')` 相当。
+    /// イシュー #1756）。各軸を `(before, after)` だけ定数値で拡張
+    /// する。`value` は forward 記録値へ焼き込み済みのため保持しない
+    /// （`Op::MaskedFill`／`Op::Sort` と同じ最小保持方針）。
+    /// `BackendOps::pad` に対応メソッドがあるため非融合対象
+    /// （`push_eager` で常に実体化。`Op::Gather`／`Scatter` と同型）。
+    ///
+    /// VJP（`grad.rs`）: pad の forward ⟷ narrow の VJP・pad の VJP
+    /// ⟷ narrow の forward という双対性（`Op::Concat`⟷`Op::Narrow`
+    /// の双対性と同型）に基づき、`d_input` は各軸を
+    /// `upstream.narrow(dim, before, input.shape()[dim])` で連鎖的に
+    /// 切り出す zero-copy view として求める。
+    Pad {
+        input: NodeId,
+        pads: Vec<(usize, usize)>,
     },
     /// `Var::one_hot`（`torch.nn.functional.one_hot`／`tf.one_hot`
     /// 相当。**非微分演算**。イシュー #1755）。`input` は整数クラス id
@@ -1081,6 +1129,12 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （非網羅 match 是正で新規 variant 追加時に強制される）。
             Op::Gather { .. } | Op::Scatter { .. } => false,
+            // `Op::Embedding`（イシュー #1604）は `Op::Gather` と同じく
+            // `index`（`padding_idx` も）を `Op` 自身が保持する eager
+            // 実体化演算で、`recompute_value` に再計算経路を持たない
+            // ため解放しない（非網羅 match 是正で新規 variant 追加時に
+            // 強制される）。
+            Op::Embedding { .. } => false,
             // `Op::Var`／`Op::VectorNorm`（イシュー #1723）・
             // `Op::Std`（同イシュー・レビュー是正で追加）は
             // `Op::ScalarUnary`／`Op::ScalarBinary` と同じく eager
@@ -1098,6 +1152,11 @@ impl Op {
             // 同じく `index` を `Op` 自身が保持する eager 実体化演算で、
             // `recompute_value` に再計算経路を持たないため解放しない。
             Op::Sort { .. } | Op::Topk { .. } => false,
+            // `Op::Pad`（イシュー #1756）は `Op::Sort`／`Op::Topk` と
+            // 同じく非追跡データ（`pads`）を `Op` 自身が保持する eager
+            // 実体化演算で、`recompute_value` に再計算経路を持たない
+            // ため解放しない。
+            Op::Pad { .. } => false,
             // `Op::OneHot`（イシュー #1755）は `Op::Gather`／`Sort` と
             // 同じく eager 実体化演算で `recompute_value` に再計算経路
             // を持たないため解放しない（非微分演算であることとは独立の
@@ -1167,7 +1226,9 @@ impl Op {
                 f(*input);
                 f(*src);
             }
+            Op::Embedding { weight, .. } => f(*weight),
             Op::Sort { input, .. } | Op::Topk { input, .. } => f(*input),
+            Op::Pad { input, .. } => f(*input),
             Op::OneHot { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);

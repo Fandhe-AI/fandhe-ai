@@ -1360,6 +1360,42 @@ pub trait BackendOps {
         ))
     }
 
+    /// 各軸を `(before, after)` だけ定数値 `value` で拡張する
+    /// （`torch.nn.functional.pad(mode='constant')` 相当。イシュー
+    /// #1756）。出力の各要素は「`input` 内部位置ならそのままコピー・
+    /// パディング領域なら `value`」の 2 分岐のみで決まる純粋なコピー
+    /// 演算（算術を含まない）であり、`f64` アキュムレータ契約は非該当。
+    /// バックエンド間数値一致は REQ-2 複合判定ではなく **bit 完全
+    /// 一致**（`value` が NaN の場合のみクラス一致。`.claude/rules/
+    /// coding-rust.md` 数値契約節参照）。
+    ///
+    /// `pads` は先頭次元から順に対応する（PyTorch `F.pad` の「末尾次元
+    /// から逆順の平坦リスト」とは異なる意図的な設計。
+    /// `docs/compat-feature-gap.md` 追補参照）。出力 shape は
+    /// [`crate::ops_shape::pad_out_shape`] が定める。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::gather`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::pad` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::pad`）へフォールバックする（それ
+    /// 以外のエラーは伝播する。判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。実装側でも `input.shape()`
+    /// と `pads` を [`crate::ops_shape::pad_out_shape`] で再検査し、
+    /// 不一致は [`BackendError::ShapeMismatch`] を返すこと
+    /// （fail-closed）。
+    fn pad(
+        &self,
+        _input: &Tensor<f32>,
+        _pads: &[(usize, usize)],
+        _value: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "pad: default fail-safe (no fused pad kernel available)".into(),
+        ))
+    }
+
     /// `dim` 軸に沿って `index` が指す位置へ `src` の値を書き込む
     /// （`torch.scatter`／`torch.scatter_add` 相当。`reduce` で選択。
     /// イシュー #1776）。出力 shape は `input.shape()` と恒等
@@ -2412,6 +2448,41 @@ pub fn checked_gemm_batched_output_len(
     Ok(total)
 }
 
+/// [`BackendOps::gemm_batched`] の既定合成実装（`default_gemm_batched`
+/// を `BatchedGemmKind::Standard` で呼ぶ薄いラッパー）を、
+/// [`BackendOps::gemm_batched`] をオーバーライド済みのバックエンドから
+/// でも明示的に呼べるようにする公開入口（イシュー #1716）。
+///
+/// `default_gemm_batched`・`BatchedGemmKind` 自体は private のため、
+/// `crates/backend-cuda` のように精度モード（TF32 opt-in）ごとに経路を
+/// 分岐する必要があるオーバーライドは、この関数を経由して「既定合成
+/// （per-batch `T::gemm` 呼び出し）」へ明示的に戻す。**一般利用の公開
+/// API ではない**（バックエンドオーバーライド実装、および実機 bit 同一
+/// テストのオラクルからの利用を想定した internal-facing な公開関数。
+/// `docs/compat-api-scope.md` の対象外）。
+///
+/// 挙動は [`BackendOps::gemm_batched`] の既定実装のドキュメンテーション
+/// コメントと同一（rank 2 は `T::gemm` へ直接委譲・rank≥3 は正規化＋
+/// バッチループ）。
+pub fn gemm_batched_via_per_batch_gemm<T: BackendOps + ?Sized>(
+    ops: &T,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    default_gemm_batched(ops, a, b, BatchedGemmKind::Standard)
+}
+
+/// [`gemm_batched_via_per_batch_gemm`] の `T::gemm_fp32_strict` 版
+/// （[`BackendOps::gemm_batched_fp32_strict`] の既定合成実装。イシュー
+/// #1716）。位置づけ・公開範囲の注意は上記と同一。
+pub fn gemm_batched_via_per_batch_gemm_fp32_strict<T: BackendOps + ?Sized>(
+    ops: &T,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    default_gemm_batched(ops, a, b, BatchedGemmKind::Fp32Strict)
+}
+
 /// [`BackendOps::gemm_batched`]／[`BackendOps::gemm_batched_fp32_strict`]
 /// の既定合成実装が各バッチにどちらの 2 次元カーネルへ委譲するかを表す
 /// （イシュー #1715）。
@@ -3309,6 +3380,18 @@ mod tests {
         let index = Tensor::<i32>::new(vec![0, 0, 1, 0], &[2, 2]).unwrap();
 
         let result = ops.gather(&input, 1, &index);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::pad`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1756）。
+    #[test]
+    fn pad_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+
+        let result = ops.pad(&input, &[(1, 0), (0, 1)], 0.0);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

@@ -71,6 +71,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 
+use crate::constant_pad::MetalConstantPad;
 use crate::context::MetalContext;
 use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
@@ -111,6 +112,7 @@ const _: fn() = || {
     assert_send_sync::<MetalSoftmax>();
     assert_send_sync::<MetalAllocator>();
     assert_send_sync::<MetalGatherScatter>();
+    assert_send_sync::<MetalConstantPad>();
     // イシュー #1707: `cached_scalar_unary_pipeline`／
     // `cached_scalar_binary_pipeline` が `Mutex<HashMap<&'static str,
     // Retained<MtlPipeline>>>` として直接キャッシュする値の Send/Sync
@@ -245,6 +247,17 @@ pub(crate) fn cached_gather_scatter(
     get_or_build(cache, on_poison, || MetalGatherScatter::new(ctx))
 }
 
+/// [`MetalConstantPad`] をプロセス内キャッシュから取得する（イシュー
+/// #1756）。`ops::MetalBackendOps::pad` の唯一の呼び出し先
+/// （`cached_gather_scatter` と同型）。
+pub(crate) fn cached_constant_pad(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<MetalConstantPad>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<MetalConstantPad>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || MetalConstantPad::new(ctx))
+}
+
 /// `unique` カーネル（`unique.rs::MetalUnique`）のコンパイル済み
 /// パイプラインをプロセス内キャッシュから取得する（イシュー #1734。
 /// `cached_gather_scatter` と同型）。
@@ -265,6 +278,17 @@ pub(crate) fn cached_scan(
     static CACHE: OnceLock<Mutex<Option<Arc<crate::scan::MetalScan>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || crate::scan::MetalScan::new(ctx))
+}
+
+/// `sort`／`topk` カーネル（`sort.rs::MetalSort`）のコンパイル済み
+/// パイプラインをプロセス内キャッシュから取得する（イシュー #1741。
+/// `cached_unique` と同型）。
+pub(crate) fn cached_sort(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::sort::MetalSort>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::sort::MetalSort>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::sort::MetalSort::new(ctx))
 }
 
 pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAllocator>, MetalError> {

@@ -82,6 +82,59 @@ pub(crate) fn try_uniform_init(
     Ok(values)
 }
 
+/// `Embedding::new`（`nn/embedding.rs`）から呼ばれる重み初期化本体
+/// （イシュー #1604）。PyTorch `nn.Embedding` の既定初期化
+/// （`N(0, 1)`。標準正規分布）に整合させる。Box–Muller 変換
+/// （`f64` 中間計算）を使う点は [`fandhe_ai_tensor_core::rng::randn`]
+/// と同一の変換式だが、本関数はプロセスグローバルな
+/// [`fandhe_ai_tensor_core::rng::with_global_rng`] を経由せず、
+/// [`uniform_init`] と同じく呼び出しごとに新規構築した一時的な
+/// `Xorshift64Star` を使う（`nn::Linear::new` と同じ「グローバル
+/// `manual_seed` 状態から独立」契約。モジュール冒頭コメント参照）。
+///
+/// 決定性の範囲は `randn` と同じ「同一プロセス・同一プラットフォーム
+/// 内での再現」に限る（`ln`／`sin`／`cos` を経由するため。
+/// `docs/rng-global-contract-design.md`）。`len == 0` は空 `Vec` を
+/// 返す（`randn(&[0, D])` と同じ扱い。呼び出し元での境界検査は
+/// 不要）。
+///
+/// `try_uniform_init` と同じ理由でフォールブルにする:
+/// `Vec::with_capacity(len)` は総バイト数 `isize::MAX` を超えると
+/// capacity overflow で panic するため、`try_reserve_exact` で確保
+/// 可否を先に検証し、確保不能時は panic させず `Err` を返す（本番
+/// 経路 panic 禁止。`.claude/rules/coding-rust.md`。イシュー #1604
+/// codex-review P1 指摘: `Embedding::new` が `num_embeddings *
+/// embedding_dim` の大きな `len` を渡しうる）。呼び出し元
+/// （`nn::embedding::Embedding::new`）が `AutodiffError::
+/// InvalidArgument` へ変換する。
+pub(crate) fn try_normal_init(
+    len: usize,
+    seed: u64,
+) -> Result<Vec<f32>, std::collections::TryReserveError> {
+    let mut rng = Xorshift64Star::new(seed);
+    let mut out = Vec::new();
+    out.try_reserve_exact(len)?;
+    let mut remaining = len;
+    while remaining > 0 {
+        // Box–Muller 変換。`u1` は `(0, 1]` に
+        // 補正して `ln(0)`（負の無限大）を避ける。
+        let u1 = 1.0 - rng.next_unit_f64();
+        let u2 = rng.next_unit_f64();
+        let r = (-2.0 * u1.ln()).sqrt();
+        let theta = std::f64::consts::TAU * u2;
+        let z0 = (r * theta.cos()) as f32;
+        out.push(z0);
+        remaining -= 1;
+        if remaining == 0 {
+            break;
+        }
+        let z1 = (r * theta.sin()) as f32;
+        out.push(z1);
+        remaining -= 1;
+    }
+    Ok(out)
+}
+
 /// `Linear::new` の呼び出しシード 1 個から weight・bias 用の独立した
 /// シードを導出する（SplitMix64 の finalizer 相当のビットミキシング。
 /// 参照実装: <https://prng.di.unimi.it/splitmix64.c> のアルゴリズムを
@@ -100,6 +153,18 @@ pub(crate) const BIAS_SEED_SALT: u64 = 1;
 pub(crate) const WEIGHT_HH_SEED_SALT: u64 = 2;
 /// `nn::rnn` の `bias_hh` 導出用ソルト（上記参照）。
 pub(crate) const BIAS_HH_SEED_SALT: u64 = 3;
+/// `nn::attention`（イシュー #1640。`MultiheadAttention`）の
+/// `q_proj`／`k_proj`／`v_proj`／`out_proj` 導出用ソルト。既存の
+/// `WEIGHT_SEED_SALT`〜`BIAS_HH_SEED_SALT`（0..=3）と衝突しない値
+/// （4..=7）を割り当て、`MultiheadAttention::new` が単一の呼び出し
+/// シードから 4 個の独立した `Linear::new` 呼び出しシードを導出できる
+/// ようにする（`Linear::new` 自身がさらに weight／bias の 2 系統へ
+/// `WEIGHT_SEED_SALT`／`BIAS_SEED_SALT` を再適用するため、2 段の
+/// `derive_seed` 合成になる）。
+pub(crate) const ATTN_Q_SEED_SALT: u64 = 4;
+pub(crate) const ATTN_K_SEED_SALT: u64 = 5;
+pub(crate) const ATTN_V_SEED_SALT: u64 = 6;
+pub(crate) const ATTN_OUT_SEED_SALT: u64 = 7;
 
 pub(crate) fn derive_seed(seed: u64, salt: u64) -> u64 {
     let mut z = seed.wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15));
@@ -169,5 +234,52 @@ mod tests {
         // （0 シードでも不動点に陥らない）。
         let mut rng = Xorshift64Star::new(0);
         assert_ne!(rng.next_u64(), 0);
+    }
+
+    // `try_normal_init`（イシュー #1604）の単体テスト。
+    #[test]
+    fn normal_init_same_seed_reproducible_within_process() {
+        let a = try_normal_init(64, 42).unwrap();
+        let b = try_normal_init(64, 42).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn normal_init_different_seed_diverges() {
+        let a = try_normal_init(64, 1).unwrap();
+        let b = try_normal_init(64, 2).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn normal_init_zero_len_returns_empty() {
+        let values = try_normal_init(0, 42).unwrap();
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn normal_init_odd_len_has_correct_length() {
+        let values = try_normal_init(7, 42).unwrap();
+        assert_eq!(values.len(), 7);
+    }
+
+    #[test]
+    fn normal_init_large_sample_has_roughly_standard_normal_statistics() {
+        // `randn` の同名テスト（`tensor-core::rng`）と同じ粗い検査:
+        // 大標本で平均・分散が N(0, 1) から大きく外れないことのみ確認
+        // する（厳密な統計検定ではない。決定的シードで再現可能）。
+        let values = try_normal_init(20_000, 7).unwrap();
+        let n = values.len() as f64;
+        let mean: f64 = values.iter().map(|&v| v as f64).sum::<f64>() / n;
+        let var: f64 = values
+            .iter()
+            .map(|&v| {
+                let d = v as f64 - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n;
+        assert!(mean.abs() < 0.05, "mean out of range: {mean}");
+        assert!((var - 1.0).abs() < 0.1, "var out of range: {var}");
     }
 }

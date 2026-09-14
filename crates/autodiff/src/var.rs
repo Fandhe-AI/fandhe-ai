@@ -19,15 +19,15 @@ use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
     ShapeError, Tensor, VectorNormOrd, broadcast_shape, concat_out_shape, gather_out_shape,
-    gemm_out_shape, matmul_out_shape, one_hot_out_shape, reduce_out_shape, require_same_shape,
-    row_norm_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    gemm_out_shape, matmul_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
     ArgExtremum, argext_with_fallback, concat_with_fallback, gather_with_fallback,
-    min_with_fallback, one_hot_with_fallback, scalar_binary_with_fallback,
+    min_with_fallback, one_hot_with_fallback, pad_with_fallback, scalar_binary_with_fallback,
     scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
     unique_with_fallback,
 };
@@ -979,14 +979,17 @@ impl<'t> Var<'t> {
         self.reduce_dims_with(dims, keepdim, |v, axis| v.sum(axis))
     }
 
-    /// 複数軸の縮約最大値（`torch.amax(dim=[...], keepdim=)` 相当。
-    /// イシュー #1719）。`sum_dims` と同じ併合方式（`crate::
-    /// reduce_dims`）を使うため、同値タイは縮約対象全要素を**1 回の
-    /// `max_vjp` 呼び出し**で見る（併合順「kept 軸〈元の順序〉→
-    /// reduced 軸〈昇順〉」で最初に現れる要素が先勝ちする。`grad.rs::
-    /// max_vjp` の「先勝ち決定的」規約——イシュー #1718（amax 勾配
-    /// 分配方式の確定）は本イシュー時点で未決着のため、規約は変更
-    /// しない）。`dims`／`keepdim` の契約は `sum_dims` と同一。
+    /// 複数軸の縮約最大値（forward 値は `torch.amax(dim=[...],
+    /// keepdim=)` と同一。イシュー #1719）。`sum_dims` と同じ併合方式
+    /// （`crate::reduce_dims`）を使うため、同値タイは縮約対象全要素を
+    /// **1 回の `max_vjp` 呼び出し**で見る（併合順「kept 軸〈元の
+    /// 順序〉→ reduced 軸〈昇順〉」で最初に現れる要素が先勝ちする。
+    /// `grad.rs::max_vjp`（`extremum_first_match_vjp`）の「先勝ち
+    /// 決定的」規約は、イシュー #1718 の確定により本メソッドも含めて
+    /// **維持される**（`torch.amax` の均等分配とは勾配が異なる点は
+    /// 意図的な設計判断。`docs/autodiff-amax-grad-distribution-
+    /// decision.md` 参照）。`dims`／`keepdim` の契約は `sum_dims` と
+    /// 同一。
     pub fn max_dims(&self, dims: &[usize], keepdim: bool) -> Result<Var<'t>, AutodiffError> {
         self.reduce_dims_with(dims, keepdim, |v, axis| v.max(axis))
     }
@@ -1756,6 +1759,49 @@ impl<'t> Var<'t> {
         crate::einsum::einsum(spec, operands)
     }
 
+    /// PyTorch `torch.nn.functional.scaled_dot_product_attention` 相当
+    /// （イシュー #1639。親 #1605「MultiheadAttention」の sub-issue
+    /// (a)。設計・対象外事項は `crate::attention`〈非公開モジュール〉の
+    /// doc 参照）。
+    ///
+    /// `query: [..., L, E]`・`key: [..., S, E]`・`value: [..., S, Ev]`
+    /// （バッチ次元 `...` は NumPy 互換ブロードキャスト。`Var::matmul`
+    /// と同じ契約）を受け取り `[..., L, Ev]` を返す。
+    ///
+    /// `attn_mask`（`true` = attend。PyTorch bool mask 規約。`[..., L,
+    /// S]` へ broadcast 可能な形状）と `is_causal`（top-left aligned の
+    /// `j <= i` causal mask）は同時指定不可（[`AutodiffError::
+    /// InvalidArgument`]）。`scale` は `None` のとき `1/sqrt(E)`
+    /// （`E == 0` かつ `scale == None` は [`AutodiffError::
+    /// InvalidArgument`]）。
+    ///
+    /// **対象外**: `dropout_p`（#1603 未実装）・`enable_gqa`・attention
+    /// weights の返却・f16／bf16（#1626）。既存カーネルの合成のみで
+    /// 実装しており、新規 `Op`／`BackendOps` メソッドは追加していない
+    /// （CUDA／Metal 専用の融合 attention カーネルは対象外。
+    /// `docs/kernel-fusion.md`）。
+    ///
+    /// # Errors
+    ///
+    /// `query`／`key` が rank < 2、`attn_mask` と `is_causal` の同時
+    /// 指定、`attn_mask` が `[..., L, S]` へ broadcast 不能、いずれかの
+    /// 行が全 key を masked にしてしまう、`scale`（既定値含む）が非
+    /// 有限・0 以下、のいずれかで型付きエラーを返す。`E`／`S` の不一致・
+    /// バッチ broadcast 不能・テープ不一致は内部で呼ぶ `matmul`／
+    /// `transpose` の既存検査へ委譲する。
+    pub fn scaled_dot_product_attention(
+        query: &Var<'t>,
+        key: &Var<'t>,
+        value: &Var<'t>,
+        attn_mask: Option<&fandhe_ai_tensor_core::Tensor<bool>>,
+        is_causal: bool,
+        scale: Option<f32>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::attention::scaled_dot_product_attention(
+            query, key, value, attn_mask, is_causal, scale,
+        )
+    }
+
     /// RNN（tanh 版）セル 1 step（イシュー #1647・設計 `docs/autodiff-
     /// rnn-cell-tape-design.md` 決定 1・4・5）。
     /// `h_t = tanh(x·W_ih + b_ih + h_{t-1}·W_hh + b_hh)`。
@@ -2186,6 +2232,53 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// 各軸を定数値 `value` で拡張する（`torch.nn.functional.pad
+    /// (mode='constant')` 相当。イシュー #1756）。`pads[i] = (before,
+    /// after)` は先頭次元から順に対応する（PyTorch `F.pad` の「末尾
+    /// 次元から逆順の平坦リスト」とは異なる意図的な設計。負パディング
+    /// （クロップ）は非対応——[`Self::narrow`] を使うこと。`reflect`／
+    /// `replicate` モードも対象外。`docs/compat-feature-gap.md`
+    /// 追補参照）。
+    ///
+    /// 検査順序: ①[`fandhe_ai_tensor_core::pad_out_shape`]（`pads.len()
+    /// == rank`・各軸の `before`／`after` 加算オーバーフロー・
+    /// 出力要素数積オーバーフローを検査し `out_shape` を確定。違反は
+    /// `AutodiffError::Shape`）→ ②`self` を層 1 で実体化（`RefCell`
+    /// 借用を閉じてから push。`Var::gather` と同じ「実体化してから
+    /// フォールバックへ渡す」方針）→ ③`pad_with_fallback`
+    /// （`ops.pad` → `Unsupported` のときのみホスト参照実装
+    /// `eval::pad` へフォールバック）→ ④戻り shape 検証
+    /// （`.claude/rules/security.md` A08）→ ⑤`push_eager`
+    /// （非融合・常実体化。`value` は forward 記録値へ焼き込み済みの
+    /// ため `Op::Pad` 自身は保持しない）。
+    pub fn pad(&self, pads: &[(usize, usize)], value: f32) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape = pad_out_shape(&in_shape, pads).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let value_out = pad_with_fallback(self.tape.ops(), &input_val, pads, value, &out_shape)?;
+        if value_out.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value_out.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Pad {
+                input: self.id,
+                pads: pads.to_vec(),
+            },
+            value_out,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// 指定した各長さ（`sizes`）で `dim` 軸を分割する（`torch.split`
     /// の list 形式相当。イシュー #1598）。各出力は [`Self::narrow`]
     /// （zero-copy view）。
@@ -2531,6 +2624,107 @@ impl<'t> Var<'t> {
             .broadcast_to(&out_shape)
             .map_err(AutodiffError::Shape)?;
         self.gather(dim, &index_bc)
+    }
+
+    /// embedding テーブル（`self`。`[num_embeddings, embedding_dim]`）
+    /// から `index` が指す行を抽出する（`nn::Embedding` の forward
+    /// 本体。`torch.nn.functional.embedding` 相当。イシュー #1604）。
+    /// `index` は非追跡データ（[`Self::gather`] の `index` と同じ
+    /// 「`Op` payload に直接埋め込む」設計。勾配は `index` 側には
+    /// 流れない）で、任意 rank（0 次元＝単一 id も含む）を受理する。
+    /// `padding_idx`（`Some(p)`）を渡すと forward は行 `p` の現在値を
+    /// そのまま返すが、勾配は本メソッドの `Op::Embedding` VJP（
+    /// `grad.rs`）が行 `p` をゼロ上書きするため流れない（PyTorch
+    /// `nn.Embedding(padding_idx=..)` の意味論）。
+    ///
+    /// 検査順序: ①`self.shape().len() == 2`（違反は
+    /// `AutodiffError::Shape(ShapeError::RankMismatch)`）→
+    /// ②`padding_idx < num_embeddings`（違反は
+    /// `AutodiffError::InvalidArgument`）→ ③`index` 全添字が
+    /// `0 <= id < num_embeddings`（違反は `AutodiffError::
+    /// InvalidArgument`。[`Self::gather`] と同じ「バックエンド呼び出し
+    /// 前に検査する」契約。`.claude/rules/security.md` A03）→ ④`index`
+    /// を `[N, D]`（`N = index.numel()`）へ実体化（`contiguous()` →
+    /// `reshape([N, 1])` → `broadcast_to([N, D])` → `contiguous()`。
+    /// いずれも [`Self::index_select`] と同じ zero-copy な view 拡張
+    /// 手順の最終段のみ実体化する）→ ⑤`self`（weight）を層 1
+    /// （`materialize_fallible`）で実体化 → ⑥`gather_with_fallback`
+    /// → ⑦戻り shape 検証 → ⑧`push_eager` →
+    /// ⑨`index.rank() != 1` のときのみ、ノード shape（常に `[N, D]`）を
+    /// `index.shape() ++ [D]` へ [`Self::reshape`] する（1-D ids は
+    /// `[N] ++ [D] == [N, D]` で既に一致するため省略。rank-0 ids は
+    /// `N == 1` から `[1, D]` を `[D]` へ縮める）。
+    pub fn embedding(
+        &self,
+        index: &Tensor<i32>,
+        padding_idx: Option<usize>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let weight_shape = self.shape();
+        if weight_shape.len() != 2 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 2,
+                actual: weight_shape.len(),
+            }));
+        }
+        let num_embeddings = weight_shape[0];
+        let embedding_dim = weight_shape[1];
+
+        if let Some(p) = padding_idx
+            && p >= num_embeddings
+        {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::embedding: padding_idx {p} が範囲 [0, {num_embeddings}) を外れている"
+            )));
+        }
+
+        for v in eval::dense_vec_i32(index) {
+            if v < 0 || (v as usize) >= num_embeddings {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Var::embedding: index 添字 {v} が範囲 [0, {num_embeddings}) を外れている"
+                )));
+            }
+        }
+
+        let ids_rank = index.rank();
+        let n = index.numel();
+        let index_c = index.contiguous();
+        let index_2d = index_c.reshape(&[n, 1]).map_err(AutodiffError::Shape)?;
+        let index_nd = index_2d
+            .broadcast_to(&[n, embedding_dim])
+            .map_err(AutodiffError::Shape)?
+            .contiguous();
+
+        let weight_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let out_shape = vec![n, embedding_dim];
+        let value = gather_with_fallback(self.tape.ops(), &weight_val, 0, &index_nd, &out_shape)?;
+        if value.shape() != out_shape.as_slice() {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Embedding {
+                weight: self.id,
+                index: index_nd,
+                padding_idx,
+            },
+            value,
+        );
+        let out = Var::from_raw(self.tape, id);
+        if ids_rank == 1 {
+            Ok(out)
+        } else {
+            let mut final_shape = index.shape().to_vec();
+            final_shape.push(embedding_dim);
+            out.reshape(&final_shape)
+        }
     }
 
     /// 一意値集合を返す（`torch.unique(input, sorted=True)` の values

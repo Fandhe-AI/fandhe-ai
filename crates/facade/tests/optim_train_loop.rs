@@ -13,8 +13,10 @@
 //!
 //! **適用順序契約**: 1 学習ステップは
 //! `backward → clip → optimizer step`（`fandhe_ai::optim` モジュール doc
-//! 「適用順序契約」節を参照。AMP 未導入のため unscale ステップは存在
-//! しない）。
+//! 「適用順序契約」節「AMP を使わない場合」を参照。本ファイルは AMP
+//! 非使用の既存経路（無変更で動作する契約）を固定する。AMP 使用時の
+//! 順序は `crates/facade/tests/optim_amp_train_loop.rs`（イシュー #1722）
+//! を参照）。
 //!
 //! **決定的シード**: モデル・データ・シードは
 //! `crates/facade/tests/compat_sequential_train.rs` と同一
@@ -32,6 +34,7 @@ use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::optim::{
     AdamW, AdamWConfig, ConstantLr, LrScheduler, Sgd, SgdConfig, StepLr, clip_grad_norm,
+    clip_grad_value,
 };
 
 const BATCH: usize = 4;
@@ -392,4 +395,83 @@ fn lr_scheduler_drives_sgd_config_via_facade_only() {
         .unwrap_or_else(|e| panic!("test fixture: ConstantLr::new が失敗した: {e}"));
     assert_eq!(constant.lr_at(0), BASE_LR);
     assert_eq!(constant.lr_at(100), BASE_LR);
+}
+
+// =====================================================================
+// Sgd + clip_grad_value（イシュー #1753・親 #1631）
+// =====================================================================
+
+/// `Sequential::bind` → forward → `Var::mse_loss` → `Tape::backward` →
+/// `SequentialVars::trainable_grads` → `clip_grad_value` → `Sgd::step` →
+/// `Sequential::apply_parameters` の 1 ステップを `steps` 回繰り返す
+/// （`train_with_sgd_and_clip` の value 方式版。適用順序契約
+/// `backward → clip → optimizer step` は norm 方式と同一）。
+fn train_with_sgd_and_clip_value(
+    model: &mut Sequential,
+    steps: usize,
+    lr: f32,
+    clip_value: f32,
+) -> Vec<f32> {
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let mut sgd = Sgd::new(SgdConfig::new(lr))
+        .unwrap_or_else(|e| panic!("test fixture: Sgd::new が失敗した: {e}"));
+    let mut log = Vec::with_capacity(steps);
+
+    for _ in 0..steps {
+        let updated = {
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+
+            let pred = bound
+                .forward(&tape, &x)
+                .unwrap_or_else(|e| panic!("test fixture: forward が失敗した: {e}"));
+            let loss = pred
+                .mse_loss(&y)
+                .unwrap_or_else(|e| panic!("test fixture: mse_loss が失敗した: {e}"));
+            log.push(scalar(&loss.to_tensor()));
+
+            let grads = tape
+                .backward(&loss)
+                .unwrap_or_else(|e| panic!("test fixture: backward が失敗した: {e}"));
+            let grad_refs = bound
+                .trainable_grads(&grads)
+                .unwrap_or_else(|e| panic!("test fixture: trainable_grads が失敗した: {e}"));
+            // 適用順序契約: backward → clip → optimizer step。
+            let clipped = clip_grad_value(&grad_refs, clip_value)
+                .unwrap_or_else(|e| panic!("test fixture: clip_grad_value が失敗した: {e}"));
+            let clipped_grad_refs: Vec<&Tensor<f32>> = clipped.iter().collect();
+            let param_refs = model.trainable_parameters();
+            sgd.step(&param_refs, &clipped_grad_refs)
+                .unwrap_or_else(|e| panic!("test fixture: Sgd::step が失敗した: {e}"))
+        };
+        model
+            .apply_parameters(updated)
+            .unwrap_or_else(|e| panic!("test fixture: apply_parameters が失敗した: {e}"));
+    }
+
+    log
+}
+
+/// `fandhe_ai::optim::{Sgd, clip_grad_value}` のみを使った学習ループで
+/// loss が減少すること（受入基準 3。`clip_grad_norm` 版と対になる value
+/// 方式の facade-only 収束確認）。
+#[test]
+fn sgd_with_clip_value_converges_via_facade_only() {
+    const STEPS: usize = 100;
+    const LR: f32 = 0.05;
+    const CLIP_VALUE: f32 = 1.0;
+
+    let mut model = build_model();
+    let log = train_with_sgd_and_clip_value(&mut model, STEPS, LR, CLIP_VALUE);
+
+    assert_eq!(log.len(), STEPS);
+    let initial = log[0];
+    let final_loss = *log.last().unwrap_or_else(|| unreachable!("log は空でない"));
+    assert!(final_loss.is_finite(), "final loss が非有限: {final_loss}");
+    assert!(
+        final_loss < 0.5 * initial,
+        "loss did not converge sufficiently: initial={initial} final={final_loss}"
+    );
 }

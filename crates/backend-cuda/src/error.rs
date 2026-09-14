@@ -164,6 +164,46 @@ pub enum CudaError {
     /// （`UniqueSizeLimitExceeded` と同じ設計判断）。
     ScanSizeLimitExceeded { detail: String },
 
+    /// `sort`／`topk`（`sort.rs::CudaSort`）の起動前検証（ホスト側検証）
+    /// が拒否した入力（イシュー #1741）。`InvalidUniqueShape` と同じ
+    /// 理由で独立 variant に分離する。カーネル引数への `i64` 変換失敗・
+    /// `out_len > dim_size`・`input.len()` 不一致等の内部契約違反を表す
+    /// （`ops.rs` は本 variant を `BackendError::ShapeMismatch(ShapeError::
+    /// ElementCountOverflow)` へ写像する——ホスト側検証の失敗であり
+    /// `SortSizeLimitExceeded` とは異なりバックエンド固有上限の超過では
+    /// ないため）。**`dim_size` が `i32::MAX` を超える場合**は本 variant
+    /// ではなく [`CudaError::SortDimSizeTooLarge`] を使う（PR #1844
+    /// codex-review 指摘の是正: 両者を `InvalidSortShape` へ一括で畳み
+    /// 込むと `ops.rs` 側で `ShapeError::ElementCountOverflow` へ一律
+    /// 写像され、CPU 参照実装（`backend-cpu::sort_topk`）が同じ状況
+    /// （`i32::try_from` 失敗）で返す `ShapeError::IndexRangeOverflow`
+    /// とバックエンド間でエラー variant が食い違う）。
+    InvalidSortShape { detail: String },
+
+    /// `sort`／`topk`（`sort.rs::CudaSort`）の起動前検証で `dim_size`
+    /// （ソート対象軸の長さ）がカーネル引数型の範囲（`i32::MAX`）を
+    /// 超えた（イシュー #1741・PR #1844 codex-review 指摘の是正）。
+    /// `crate::sort_model::SortPrepareError::DimSizeTooLarge` と同一の
+    /// 意味論を独立 variant として保持する（`InvalidSortShape` へ畳み
+    /// 込まない）。CPU 参照実装（`backend-cpu::sort_topk`）が同じ状況
+    /// （軸内添字を `i32` へ変換する際の `i32::try_from` 失敗）で返す
+    /// `fandhe_ai_tensor_core::ShapeError::IndexRangeOverflow` と一致
+    /// させるため、`ops.rs` は本 variant のみ
+    /// `BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { .. })`
+    /// へ写像する（`InvalidSortShape` の `ElementCountOverflow` 写像とは
+    /// 区別する）。
+    SortDimSizeTooLarge { dim_size: usize },
+
+    /// `sort`／`topk` の合成キー配列長（`lines * padded`）がバックエンド
+    /// 固有上限（本実装ではビットニックソートに必要な `padded`〈次の
+    /// 2 のべき乗〉を含む `lines * padded` がカーネル引数型の範囲
+    /// 〈`i32::MAX`〉を超える場合）を超過した（イシュー #1741）。
+    /// `ops.rs::CudaBackendOps::sort`／`topk` は本 variant のみを
+    /// [`fandhe_ai_tensor_core::device::BackendError::Unsupported`] へ
+    /// 写像し `Var::sort`／`Var::topk` のホストフォールバック
+    /// （`eval::sort`／`eval::topk`）へ委ねる。
+    SortSizeLimitExceeded { total: usize, limit: usize },
+
     /// f16 WMMA GEMM（`gemm_wmma.rs::CudaWmmaGemm`）が、Tensor Core（WMMA）
     /// の要件を満たさないデバイス上で要求された。
     ///
@@ -457,6 +497,16 @@ pub enum CudaError {
     /// 内で `BackendError` variant ごとの再試行可否を区別する呼び出し元が
     /// 現状存在しないため、型を素通しせず detail 文字列へ畳み込む）。
     CaptureExclusionRejected { detail: String },
+
+    /// pad 起動 API（`constant_pad.rs::CudaConstantPad`）のホスト側検証
+    /// （`checked_numel` の要素数積オーバーフロー・`i32::MAX` 上限・
+    /// `input` の長さが `in_shape` から導出した期待長と一致しないこと）
+    /// が拒否した入力（イシュー #1756）。`InvalidGatherScatterShape` と
+    /// 同じ理由で独立 variant に分離する。`input.shape()`／`pads` の
+    /// rank 整合（`pad_out_shape`）は呼び出し元 `ops.rs` が事前検査済み
+    /// の契約のため、本 variant は主に長さ・オーバーフローに関する
+    /// 起動前検証の失敗を表す。
+    InvalidConstantPadShape { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -510,6 +560,21 @@ impl fmt::Display for CudaError {
             }
             CudaError::ScanSizeLimitExceeded { detail } => {
                 write!(f, "scan size limit exceeded: {detail}")
+            }
+            CudaError::InvalidSortShape { detail } => {
+                write!(f, "invalid sort/topk shape: {detail}")
+            }
+            CudaError::SortDimSizeTooLarge { dim_size } => {
+                write!(
+                    f,
+                    "sort/topk dim_size too large for kernel argument: {dim_size}"
+                )
+            }
+            CudaError::SortSizeLimitExceeded { total, limit } => {
+                write!(
+                    f,
+                    "sort/topk size limit exceeded: total={total} exceeds limit={limit}"
+                )
             }
             CudaError::TensorCoreUnsupported { detail } => {
                 write!(f, "tensor core (WMMA) unsupported on this device: {detail}")
@@ -579,6 +644,9 @@ impl fmt::Display for CudaError {
                     f,
                     "cuda graph capture exclusion rejected the call: {detail}"
                 )
+            }
+            CudaError::InvalidConstantPadShape { detail } => {
+                write!(f, "invalid pad shape: {detail}")
             }
         }
     }

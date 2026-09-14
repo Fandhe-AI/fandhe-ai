@@ -102,6 +102,7 @@ jagged 2-D 入力は事前検証で拒否。`crates/facade/src/compat/array.rs:9
 | `Sgd`/`SgdConfig`（momentum・dampening・weight_decay・nesterov） | `crates/autodiff/src/optim/sgd.rs:32-224` |
 | `AdamW`/`AdamWConfig` | `crates/autodiff/src/nn/optim/adamw.rs:23-160` |
 | `clip_grad_norm`/`global_grad_norm`/`ClipGradResult` | `crates/autodiff/src/nn/optim/clip.rs` |
+| `clip_grad_value`（#1753・親 #1631。要素ごと `[-clip_value, clip_value]` クランプ） | `crates/autodiff/src/nn/optim/clip.rs` |
 | `ConstantLr`/`StepLr`/`LrScheduler` | `crates/autodiff/src/nn/optim/lr_scheduler.rs` |
 
 ### 1.5 `Var` の演算メソッド一覧（`crates/autodiff/src/var.rs`）
@@ -187,6 +188,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `torch.arange`/`linspace` | `tf.range`/`linspace` | なし | `Tensor` 生成関数 1 個追加 | S |
 | `torch.randn`/`rand`（乱数テンソル） | `tf.random.normal` 等 | なし（`Linear::new` 内部の重み初期化にシードベース乱数はあるが公開 API なし） | 汎用乱数テンソル生成 API（RNG 契約含む） | S〜M |
 | `torch.eye` | `tf.eye` | なし | 生成関数 1 個 | S |
+| `torch.sparse_coo_tensor`／`to_sparse()` | `tf.sparse.SparseTensor` | **なし（非対応。`Tensor<T>` は dense のみ。決定記録 `docs/tensor-core-sparse-complex-decision.md`〈#1633〉）** | 対象外（REQ-9 `docs/spec/04-requirements.md:233`） | - |
 
 ### 2.2 index/slice/gather/scatter
 
@@ -265,7 +267,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `nn.Embedding` | `layers.Embedding` | **なし** | gather 系 Op が前提（2.2 節）＋embedding テーブル管理 | L |
 | `nn.MultiheadAttention` | `layers.MultiHeadAttention` | **なし** | softmax・batched matmul・(optional) causal mask・reshape/transpose の組合せ実装。前提演算が軒並み未実装 | XL |
 | RNN/LSTM/GRU | `layers.SimpleRNN`/`LSTM`/`GRU` | 内部クレート `fandhe_ai_autodiff::nn::rnn`（`RnnCell`/`LstmCell`/`GruCell`・`Rnn`/`Lstm`/`Gru`）に実装済み（3 バックエンド〈CPU・CUDA・Metal〉数値一致。Metal は実機実測完了・CUDA は本エージェント実行環境に実機なしのため未実測明記）。**facade（`fandhe_ai`）未公開**（`docs/compat-api-scope.md` §5 の範囲拡張手続きのうちユーザー承認が未取得のため。決定 10）。`forward_seq`（tape 経路）の出力は `Var::stack`〈#1598〉未実装のため `[T,B,H]` ではなく `Vec<Var>`（per-step）。設計: `docs/autodiff-rnn-cell-tape-design.md`（#1646）・実装記録: 同文書 §8（#1647） | XL（設計・内部実装は完了。facade 公開のみ残作業） |
-| Pooling（Max/AvgPool） | `layers.MaxPooling2D` 等 | **なし** | Conv 同様の空間走査カーネル＋VJP（max は argmax 経路の逆伝播） | L |
+| Pooling（Max/AvgPool） | `layers.MaxPooling2D` 等 | **なし** | Conv 同様の空間走査カーネル＋VJP（max は argmax 経路の逆伝播）。設計: `docs/pooling-ops-design.md`（#1727） | L |
 
 ### 2.8 損失
 
@@ -321,6 +323,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `int32`/`int64`/`bool` | 同左 | 部分（`Tensor<T>` 生成のみ。CrossEntropy の `targets: Tensor<i32>` のように限定的に内部使用） | 汎用整数演算・型変換 API | L |
 | `.to(dtype)`（型変換） | `tf.cast` | なし | dtype 変換 Op（勾配は型により打ち切り／恒等など個別設計） | M |
 | AMP（自動混合精度） | `tf.keras.mixed_precision` | なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記） | 損失スケーリング・unscale ステップの追加（`optim.rs` の適用順序契約に定義済みの拡張点） | L |
+| `complex64`／`complex128`（`torch.fft` 含む） | `tf.complex64`／`tf.signal.fft` | **なし（非対応。`Scalar` は実数 4 型に封印。ONNX COMPLEX は `UnknownDataType` で拒否。決定記録 同上）** | 対象外（同上） | - |
 
 ### 2.13 device
 
@@ -827,10 +830,44 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 への合成。非破壊拡張のデフォルトメソッド）を追加し、`backend-cpu` が
 専用オーバーライド（`CpuBackendOps::gemm_batched`。既存 2 次元
 `gemm`/`gemm_into_slice` と bit 同一）を持つ。facade 新規公開面なし
-（既存 `Var` 再エクスポート経由でそのまま到達可能）。CUDA／Metal は
-既定合成実装のまま（機能的に到達可能・専用バッチカーネルは #1716／
-#1717）。`einsum`（rank≥3 matmul を伴う batch 添字縮約。#1600 が未実装
-としていた対象）は本イシューでは対象外のまま残る。
+（既存 `Var` 再エクスポート経由でそのまま到達可能）。CUDA は既定合成
+実装のまま（機能的に到達可能・専用バッチカーネルは #1716）。
+`einsum`（rank≥3 matmul を伴う batch 添字縮約。#1600 が未実装として
+いた対象）は本イシューでは対象外のまま残る。
+
+**追補（イシュー #1717）**: Metal に専用オーバーライド
+（`MetalBackendOps::gemm_batched`／`gemm_batched_fp32_strict`）が
+実装済みになった。既定合成実装（バッチをほどいて `batch_len` 回
+`self.gemm` を呼ぶ——各呼び出しが独自に upload・`dispatch_auto`〈内部
+同期〉・download する）と異なり、正規化済みオペランドを 1 回ずつ
+upload し、バッチごとの GEMM を `gemm::MetalGemm::
+encode_strided_bias_act_prepared_with_c_offset`（`gemm_fp32_strict_
+into`〈#1555〉・`linear_forward_device`〈#1216〉が確立した encode-only
+パターン。`gemm.rs`／shader 自体は無変更）で 1 つのコマンドバッチへ
+encode するだけで積み、`download` 1 回だけが GPU 完了を待つ「バッチ
+ループ方式」にする。rank≥3 は classic strided カーネル
+（`gemm_tiled_bias_act`）を経由するため per-batch `gemm`
+（`dispatch_auto` = `gemm_simdgroup_tiled`／split-K）とは bit 同一を
+主張せず、REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差
+1e-5 未満）を受け入れ契約とする。本経路は `dispatch_auto`／
+`tile::select_route_for_device` を経由しないため split-K 実行時
+トグル（`crate::split_k_runtime`。既定 `true`）の状態に依存しない。
+facade 新規公開面なし。M4 Max 実機実測は本エージェント実行環境に
+Apple Silicon 実機がないため未実施のまま Mac セッションへ申し送る。
+
+**追補（イシュー #1716）**: `CudaBackendOps::gemm_batched`／
+`gemm_batched_fp32_strict` 専用オーバーライド（デバイス常駐バッチループ
+経路 `CudaGemm::run_tiled_f32_batched`。既定合成実装〈per-batch
+`gemm_fp32_strict_impl` 呼び出し〉と bit 完全一致）を実装済み。TF32
+opt-in（`Tf32`／`Tf32x3`）時は新設した薄い公開ラッパー
+`fandhe_ai_tensor_core::gemm_batched_via_per_batch_gemm` 経由で per-batch
+`gemm` 合成へフォールバックし、既存 TF32 系カウンタ・fail-closed 挙動
+（#1042／#1355）は不変。facade 新規公開面なし・`Op`／`Var`／VJP の追加
+なし（#1715 で既に実装済み）。GB10 実機での bit 同一・REQ-2 parity 実測
+は未実施のまま申し送り（`crates/backend-cuda/tests/gemm_batched_parity.rs`）。
+Metal は既定合成実装ではなく、上記のとおり encode-only バッチループ
+方式（`MetalBackendOps::gemm_batched` オーバーライド）を実装済み
+（#1717）。
 
 ## #1636（#1707〜#1709）の追補
 
@@ -1274,6 +1311,18 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
 - CUDA／Metal 専用カーネルは本イシューのスコープ外（既定 `Unsupported` フォールバックのまま）で後続イシューへ引き継ぐ。
 - facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.3）。
 
+## 追補（イシュー #1718）
+
+`amax`／`amin` 勾配分配方式（先勝ち決定的 対 均等分配）の設計判断を確定した。上記 #1719／#1720 追補が「#1718 が均等分配へ確定した場合はヘルパー 1 箇所の差し替えで反映される」と記していた前提は**採用しない**ことが確定した——`Var::max`／`min`／`max_dims`（`max(dim)`／`min(dim)` 族の意味論）は crates.io 公開全版で出荷済みの先勝ち決定的挙動を**維持**し、`grad::extremum_first_match_vjp` は差し替えない。PyTorch `torch.amax`／`amin` 相当の均等分配は、実装する場合は別 `Op`（`Op::Amax`／`Op::Amin`）・別 VJP ヘルパーとして独立に追加する方針とする（未実装・後続 issue 提案のまま。本イシューはコード変更を伴わない設計判断の確定のみ）。詳細・根拠は `docs/autodiff-amax-grad-distribution-decision.md` を参照。
+
+## 追補（イシュー #1722）
+
+AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記）」）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `fandhe_ai_autodiff::nn::optim::amp`（#1721 で実装済み。`GradScaler`／`GradScalerConfig`／`UnscaleResult`／`scale_loss`／`scale_grads`／`unscale_grads`／`has_non_finite`）を `fandhe_ai::optim` から素の再エクスポート（案 A。`docs/facade-optimizer-promotion-decision.md` §4）で公開した。`crates/facade/src/optim.rs` の適用順序契約 doc を「AMP を使わない場合」（既存の `backward → clip → optimizer step`。無変更）と「AMP を使う場合」（`scale_loss → backward → unscale＋非有限検出 → 非有限なら clip・optimizer step を両方スキップ → clip → optimizer step → 必ず `GradScaler::update`）の 2 節へ更新した。
+- 新規 `Op`／`BackendOps` メソッド／VJP は追加していない（`scale_loss` は既存 `Var::mul` の合成のみ）。
+- 対象外事項の明記: (a) 真の混合精度（f16 forward・f32 master weight）は `docs/backend-dtype-dispatch-design.md` §8 のとおり対象外。(b) デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）には unscale／非有限検出が結線されておらず、AMP はホスト `Tensor<f32>` 勾配（`Gradients::get`／`SequentialVars::trainable_grads`／`Tape::param_grads_to_host` 経由）にのみ適用できる。
+- facade のみ import する統合テスト（`crates/facade/tests/optim_amp_train_loop.rs`）で、収束・1 step の勾配 bit 完全一致（scale_loss→backward→unscale と非スケール backward の勾配が `f32::to_bits()` で一致すること。CPU バックエンド）・非有限勾配時の skip／backoff を固定した。
 ## 追補（イシュー #1740）
 
 上記「追補（イシュー #1731）」で「本イシューのスコープ外」としていた CUDA／Metal 専用カーネルを実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
@@ -1292,3 +1341,157 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
 - 本イシューでは `Op`／`BackendOps`／`Var`／facade のコード実装を行わず、格上げ条件（a〜e）の充足状況の棚卸しと再開条件を `docs/backend-int8-quantization-decision.md` として記録した（#1628・#1652・#1775 と同型の段階 0）。格上げ条件のうち (a)（REQ-2 複合判定の改定）は実質充足と読めるが、(b)〜(e)（実機 MMA プローブ・Transformer 複合 WL ベースライン・量子化専用許容基準・依存追加なし設計の実装確認）は未達のまま（同 doc §2.1）。
 - issue 上の承認コメント（`unsafe asm!`〈SME〉・`BackendOps` trait 拡張・facade 公開面拡張の技術的許可）は実装着手前の技術的許可事項に限られ、spec 側の除外事項ゲート自体を解除する文言ではないと整理した（同 doc §0.1）。
 - facade 新規公開面なし（コード変更を伴わないため）。実装着手は本追補のスコープ外のまま引き続き #1627 として open・blocked で追跡する。
+
+## #1741 追補
+
+- `Var::sort`／`argsort`／`topk`（#1733 実装済み）の CUDA／Metal 専用カーネルを実装した（前段落「CUDA／Metal 専用カーネルは既定 `Unsupported`（ホストフォールバックで機能する）のまま #1741 へ引き継ぐ」の残対象を解消）。
+- 両バックエンドとも 64bit 合成キー（`hi`：値を「NaN は最大・NaN 同士は同値・±0 は同値」へ正規化した `u32` totalOrder 風キー・`descending` のときのみ反転／`lo`：ライン内の元添字。`lo` を反転しないことで非安定ソートでも `key` 自体がライン内で一意になり、`docs/spec` の順序契約（同値タイブレークは `descending` に関わらず元添字昇順）が構造的に成立する）によるビットニックソート方式で実装した（CUDA: `crates/backend-cuda/src/{sort_model.rs,kernels_sort.rs,sort.rs}`。Metal: `crates/backend-metal/src/{sort_model.rs,shaders/sort.metal,sort.rs}`）。
+- CPU 参照実装（`backend-cpu::sort_topk`）との bit 完全一致（`values`・`index` とも）を、実機なしで Linux 上検証できるホストモデル（`sort_model.rs::sort_lines_host_model` が実カーネルと同一アルゴリズムを意図的に複製）で網羅的に確認済み（12 形状 × `descending` × 複数 `out_len`）。
+- `facade/tests/sort_topk_backend_parity.rs`（CPU vs NaiveOps の forward・backward parity。scatter ベース VJP を含め bit 完全一致確認済み）・`backend-cuda/tests/sort_topk_parity.rs`・`backend-metal/tests/{sort_topk_parity.rs,sort_topk_source_evidence.rs}` を追加した。CUDA・Metal 実機での `#[ignore]` テスト実行（形状網羅・非 contiguous 入力・`k` 網羅）は本エージェント実行環境に両実機への到達手段がないため未実施のまま GB10／Mac セッションへ申し送り。
+- facade 新規公開面なし（既存の `Var` 再エクスポート経由のまま）。`sorted=False` の topk・負 `dim`・`k` の `Var` 化は引き続き対象外。
+## #1753 の追補（親 #1631）
+
+`clip_grad_value`（PyTorch `torch.nn.utils.clip_grad_value_` 相当。各
+勾配要素を独立に `[-clip_value, clip_value]` へクランプする value 方式
+gradient clipping）を実装済み化した。`fandhe_ai_autodiff::nn::optim::
+clip::clip_grad_value`（既存 `clip_grad_norm` と同型の純関数。
+`Gradients`／`Var` に非依存）・facade 到達経路は `crates/facade/src/
+optim.rs` への `pub use` 1 行追加（`fandhe_ai::optim::clip_grad_value`）
+のみで、新規 `Op`／`BackendOps`／VJP は追加していない（勾配マテリアラ
+イズ後のホスト側後処理のため）。
+
+`clip_grad_norm`（global L2 norm 方式）と異なりテンソル間の相関を見ず
+各要素を独立にクランプするためスケーリングを伴わず、範囲内の要素は
+bit 同一のまま返る。非有限（NaN／±Inf）の `clip_value` および勾配要素
+はいずれも `AutodiffError::InvalidArgument` で拒否する fail-closed 契約
+（`f32::clamp` の NaN 境界 panic を避けるため `max`/`min` 合成で実装し、
+クランプ前に全要素の有限性を検査して NaN/Inf の静かな正規化による
+隠蔽を防ぐ）。3 バックエンド専用カーネルは対象外（ホスト
+`Tensor<f32>` のみを操作するため）。
+
+## 追補（イシュー #1604）
+
+§2.7 の `nn.Embedding` 欠落記述（「なし（gather 系 Op が前提＋embedding
+テーブル管理）」）はスナップショット不変のまま、`Var::embedding`
+（`tape::Op::Embedding`）・`nn::Embedding`／`EmbeddingVars` を実装済み
+化したことをここに追補する。forward は `BackendOps::gather`（dim=0）、
+backward は `BackendOps::scatter`（`ScatterReduce::Add` の決定的集約
+契約）へ委譲する合成のみで、`BackendOps` 自体は非拡張（#1776 で 3
+バックエンドとも実装済みの gather／scatter カーネルをそのまま再利用）。
+`padding_idx` は forward では特別扱いせず当該行の現在値をそのまま
+返し（PyTorch 準拠）、backward のみ `Op::Embedding` の VJP が当該行を
+明示ゼロへ上書きする。`Embedding::new` は `N(0, 1)` 初期化（`nn/
+init.rs::normal_init`。Box–Muller・`Linear::new` と同じくグローバル
+`manual_seed` 状態から独立）で `padding_idx` 行をゼロ初期化し、
+`Embedding::from_parameters` は与えられた値をそのまま保持する
+（safetensors ロード相当の入口）。**`Module` trait は実装しない**（id
+入力〈`Tensor<i32>`〉が `Module::forward` の f32 `Var` 契約と不一致な
+うえ、`compat::Sequential` の学習可能パラメータ収集が `as_linear`
+フック限定のため、実装すると `Sequential` に積んだ `Embedding` が
+黙って学習されない罠になる。`Module`／`Sequential` 統合は本 issue の
+スコープ外として別 issue へ引き継ぐ）。facade 新規公開面なし（既存の
+`Var`／`nn` 再エクスポート経由）。CUDA／Metal 実機での facade parity
+テストは未実測のまま Mac／GB10 セッションへ申し送る。
+
+## 追補（イシュー #1756）
+
+`Var::pad`（`torch.nn.functional.pad(mode='constant')` 相当。定数
+パディング）を実装済み化。`pads: &[(usize, usize)]` は先頭次元から
+順に対応する（PyTorch `F.pad` の「末尾次元から逆順の平坦リスト」とは
+意図的に異なる設計）。負パディング（クロップ）は非対応（`Var::narrow`
+を使う）・`reflect`／`replicate` モードは対象外（本イシューのスコープ
+外）。
+
+- `BackendOps::pad`（既定 `Unsupported`。`Var::pad` は `Unsupported`
+  のときのみホスト参照実装 `eval::pad` へフォールバック）・`Op::Pad`・
+  CPU（`backend-cpu::constant_pad`）・CUDA（`backend-cuda::
+  constant_pad`。NVRTC カーネル）・Metal（`backend-metal::
+  constant_pad`。実行時コンパイルカーネル）の 3 バックエンド専用実装を
+  本 issue で新規実装済み。
+- VJP は新規カーネルを作らず、既存の `Tensor::narrow`（#1598 で確立した
+  zero-copy view 基盤）を各軸へ連鎖適用してパディング領域を落とす
+  （pad の forward ⟷ narrow の VJP・pad の VJP ⟷ narrow の forward
+  という `Op::Concat`⟷`Op::Narrow` の双対性と同型の設計）。
+- 出力は「入力要素のコピー」と「定数」のみで算術を含まないため、3
+  バックエンド間は REQ-2 複合判定ではなく **bit 完全一致**（`value` が
+  NaN の場合のみクラス一致）。
+- facade 新規公開面なし（既存 `Var` 再エクスポート経由。`compat-api-
+  scope.md` §5 の範囲拡張手続きは #1598／#1637／#1733 と同じ理由で
+  再適用不要と判断）。
+- CUDA／Metal 実機（GB10／M4 Max）での parity テストは、本実装
+  エージェントの実行環境に実機への到達手段がないため未実測のまま
+  Mac／GB10 セッションへ申し送る（`crates/backend-cuda/tests/
+  constant_pad_parity.rs`・`crates/backend-metal/tests/
+  constant_pad_parity.rs` の `#[ignore]` テストを参照）。
+
+## #1633 の追補（sparse／complex テンソルの非対応を明文化）
+
+§2.1「テンソル生成」・§2.12「dtype」に上記 2 行（sparse・complex）を追加した。決定記録は `docs/tensor-core-sparse-complex-decision.md`（#1633）。
+
+- 段階 0（現時点非対応の明文化）。`Op`／`BackendOps`／`Var`／facade のコード実装・依存追加は行わない。
+- spec REQ-9 の「引き続き対象外」判断（`docs/spec/04-requirements.md:233,432`）と整合しており、spec への新規提案は不要（同 doc §3）。
+- ONNX complex dtype（`COMPLEX64`/`COMPLEX128`）は `GraphError::UnknownDataType` で fail-closed 拒否される一方、`GraphProto.sparse_initializer`（未宣言フィールド）は prost の仕様どおり無言でスキップされる非対称な挙動を事実として記録した（同 doc §2・§9(a)。是正は本イシューのスコープ外で、ユーザー承認を得たうえで別イシューへ引き継ぐ）。
+- facade 新規公開面なし。
+
+## 追補（イシュー #1639）
+
+§2.7 の `nn.MultiheadAttention` 行（268 行目）・§9 相当欄
+（374〜386 行目）のスナップショット本文は不変のまま、親 #1605 の
+sub-issue (a)（scaled dot product attention 関数）が実装済みになった。
+
+- `Var::scaled_dot_product_attention`（`crates/autodiff/src/
+  attention.rs`。`query`／`key`／`value`／`attn_mask`／`is_causal`／
+  `scale` を受け取る関連関数）を追加した。`QK^T`（バッチ行列積）→
+  scale → （任意の）causal／padding mask → softmax → `V` との
+  バッチ行列積、という計算を既存の `Var::matmul`（rank≥2。#1715）・
+  `transpose`（zero-copy view）・`mul`（`nn::optim::amp::scale_loss`
+  と同じスカラー Leaf パターン）・`masked_fill`（#1637）・`softmax`
+  （#1594）への分解のみで実装し、新規 `Op`／`BackendOps` メソッド／
+  カーネルは追加していない（`crate::einsum` と同型の設計方針）。
+- VJP は各構成演算の既存 VJP 合成として自動的に成立する
+  （`grad.rs` へ専用 VJP を追加していない）。
+- causal マスクは PyTorch 参照実装（`torch.ones(L, S).tril(diagonal=0)`
+  の否定）と同一規約（top-left aligned。`j <= i` のみ attend 許可・
+  `L != S` の非正方形状も対応）。`attn_mask`（`true` = attend。
+  PyTorch bool mask 規約）と `is_causal` は同時指定不可
+  （`AutodiffError::InvalidArgument`）。
+- 全 masked 行（softmax がバックエンド依存の不定値を生みうる）・
+  非有限／非正の `scale`（既定値 `1/sqrt(E)` 含む）・`E == 0` かつ
+  `scale == None` はいずれも演算グラフへ記録する前に型付きエラーで
+  拒否する（fail-closed）。`E`／`S` 不一致・バッチ broadcast 不能・
+  クロステープは内部で呼ぶ `matmul`／`transpose` の既存検査へ委譲する。
+  `L == 0`／`S == 0`／`Ev == 0` は panic せず既存演算の 0 サイズ契約
+  （`gemm_batched`／`softmax`）へ委ねる。
+- facade（`crates/facade/src/lib.rs`）への新規 `pub use`／`pub fn` は
+  追加していない。既存の `pub use fandhe_ai_autodiff::Var` 再エクス
+  ポート経由でそのまま到達可能になる。
+- テストは `crates/autodiff/src/attention.rs`（`#[cfg(test)]`。causal
+  マスク生成・全 masked 行検出・`scale` 検証の単体テスト）・
+  `crates/autodiff/tests/attention.rs`（ブルートフォース `f64` 参照
+  実装との forward 突合〈rank 2／rank 4／バッチ broadcast／causal／
+  明示 mask〉・手動合成との forward bit 完全一致・中央差分による
+  backward 突合〈mask なし／causal／明示 mask／self-attention〉・
+  拒否系〈rank・shape・mask 同時指定・全 masked 行・scale・テープ
+  不一致〉・0 サイズ・大入力での有限値確認）・`crates/facade/tests/
+  attention_backend_parity.rs`（CPU vs NaiveOps の REQ-2 複合判定・
+  facade 到達確認・`#[ignore]` の Metal／CUDA 実機比較）に追加した。
+  CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機での facade
+  parity テストは、本実装エージェントの実行環境に実機への到達手段が
+  ないため未実測のまま Mac／GB10 セッションへ申し送る。
+- 対象外（既存 issue で追跡可能）: `dropout_p`（Dropout 未実装。
+  #1603）・`enable_gqa`・attention weights の返却・f16／bf16 経路
+  （#1626）・CUDA／Metal 専用の融合 attention カーネル（性能最適化。
+  `docs/kernel-fusion.md` の方針と整合）・`MultiheadAttention` Module
+  自体（in/out projection・head 分割。親 #1605 の sub-issue (b)・
+  #1640）。
+
+## #1640 の追補（`nn::MultiheadAttention` Module）
+
+§2.7 の `nn.MultiheadAttention`／`layers.MultiHeadAttention` 行はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（親 #1605 sub-issue (b)）。
+
+- `nn::MultiheadAttention`（パラメータ本体。q/k/v/out の 4 `nn::Linear`）・`nn::MultiheadAttentionVars`（テープ登録済み。`forward(query, key, value, attn_mask, is_causal)`）を追加した（`crates/autodiff/src/nn/attention.rs`）。新規 `Op`／`BackendOps` メソッドは一切追加せず、既存の `Var::matmul`（rank≥3 バッチ。#1715）・`transpose`（zero-copy view）・`mul`（scale）・`masked_fill`（#1637）・`softmax`（#1594）と `nn::Linear`（4 層）の合成のみで実装した——分解先の演算はいずれも CPU／CUDA／Metal 全てに実装済みのため、「対応する Op／`BackendOps`／VJP を追加する」という受入要件は合成によって自動的に充足される（`crate::einsum`・#1639 と同型の論法）。
+- 前提 sub-issue #1639（`Var::scaled_dot_product_attention`）は本 issue の着手時点で未マージ（PR #1845 OPEN）だったため、attention 本体（scale・causal／`attn_mask`・softmax）は private ヘルパー `sdpa_compose` として #1639（PR #1845）と数式・mask 極性（`true`=attend。PyTorch bool mask 規約）・causal 規約（top-left aligned `j<=i`。非正方対応）を完全に一致させて複製した。#1639 マージ後、`sdpa_compose` は `Var::scaled_dot_product_attention` 呼び出しへ置き換える対象として残る（別 PR）。
+- 入出力契約は rank-3・batch_first 固定（`query: [B,L,E]`・`key`/`value: [B,S,E]` → `[B,L,E]`）。unbatched 入力・`batch_first=false`・`kdim`/`vdim`・`key_padding_mask` 引数・`dropout_p`（#1603 未実装）・`need_weights`／attention weights 返却・`add_bias_kv`／`add_zero_attn`・packed `in_proj_weight`（#1616）は対象外のまま。
+- `Module` trait は実装した（`forward` は self-attention `q=k=v=input`・mask なし・非 causal として定義）。`compat::Sequential` 用の `as_linear`／`as_relu` フックはいずれも trait 既定のままオーバーライドしない（Embedding〈#1604〉と異なり `Module::forward` 自体は実装するが、学習可能パラメータの自動収集対象には含めない）。
+- facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
+- CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/mha_backend_parity.rs` の `#[ignore]` テストを参照）。

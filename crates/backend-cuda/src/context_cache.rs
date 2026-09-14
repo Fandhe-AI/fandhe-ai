@@ -503,6 +503,21 @@ pub(crate) fn cached_gather_scatter(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::constant_pad::
+/// CudaConstantPad`] をプロセス内キャッシュから取得する（イシュー
+/// #1756。キーは [`ContextKey`]。`cached_gather_scatter` と同型）。
+/// `ops::CudaBackendOps::pad` の唯一の呼び出し先。
+pub(crate) fn cached_constant_pad(
+    device: &CudaDevice,
+) -> Result<Arc<crate::constant_pad::CudaConstantPad>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::constant_pad::CudaConstantPad>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::constant_pad::CudaConstantPad::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する `unique` カーネル
 /// （`unique.rs::CudaUnique`）のコンパイル済みハンドルをプロセス内
 /// キャッシュから取得する（イシュー #1734。`cached_gather_scatter` と
@@ -527,6 +542,17 @@ pub(crate) fn cached_scan(device: &CudaDevice) -> Result<Arc<crate::scan::CudaSc
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ContextKey::from_device(device), || {
         crate::scan::CudaScan::new(device)
+    })
+}
+
+/// `device` の `CudaContext` に対応する `sort`／`topk` カーネル
+/// （`sort.rs::CudaSort`）のコンパイル済みハンドルをプロセス内
+/// キャッシュから取得する（イシュー #1741。`cached_unique` と同型）。
+pub(crate) fn cached_sort(device: &CudaDevice) -> Result<Arc<crate::sort::CudaSort>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::sort::CudaSort>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::sort::CudaSort::new(device)
     })
 }
 

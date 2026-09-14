@@ -1227,6 +1227,26 @@ pub(crate) fn vjp(
             let d_input = masked_fill_vjp(&mask, upstream);
             vec![(input, d_input)]
         }
+        // `Var::pad`（イシュー #1756）。「pad の forward ⟷ narrow の
+        // VJP・pad の VJP ⟷ narrow の forward」という双対性
+        // （`Op::Concat`⟷`Op::Narrow` の双対性と同型）に基づき、`Op::
+        // Narrow` の forward と全く同じ `narrow` 呼び出しを各軸へ
+        // 連鎖適用してパディング領域を落とす（zero-copy view チェーン。
+        // `value` は forward 記録値に焼き込まれ VJP には不要なため
+        // `Op::Pad` は保持しない）。`narrow` の失敗は forward 側で
+        // 検査済みの shape 契約違反を意味するため `Op::Narrow` の VJP
+        // と同じ `?` 経由の `AutodiffError` 化で扱う。
+        Op::Pad { input, pads } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let mut d_input = upstream.clone();
+            for (axis, &(before, _after)) in pads.iter().enumerate() {
+                let len = input_shape[axis];
+                d_input = d_input
+                    .narrow(axis, before, len)
+                    .map_err(AutodiffError::Shape)?;
+            }
+            vec![(input, d_input)]
+        }
         // `Var::gather`（`Var::index_select` も同一 Op へ委譲。イシュー
         // #1776）。「Gather の VJP は scatter_add」の原則
         // （`Op::Concat`⟷`Op::Narrow` の双対性と同型）: 入力 shape の
@@ -1244,6 +1264,35 @@ pub(crate) fn vjp(
                 &input_shape,
             )?;
             vec![(input, d_input)]
+        }
+        // `Var::embedding`（`nn::Embedding`。イシュー #1604）。
+        // `Op::Gather` と同じ「Gather の VJP は scatter_add」の原則で
+        // `weight` shape のゼロテンソルへ `upstream` を `index` の
+        // 位置へ加算し、`padding_idx` が `Some(p)` の場合のみ行 `p`
+        // をゼロで上書きする（forward は当該行の現在値をそのまま
+        // 返すが、勾配は流さないという PyTorch `nn.Embedding
+        // (padding_idx=..)` の意味論。`with_row_zeroed` 参照）。
+        Op::Embedding {
+            weight,
+            index,
+            padding_idx,
+        } => {
+            let weight_shape = nodes[weight.0].shape.clone();
+            let zeros = Tensor::zeros(&weight_shape).map_err(AutodiffError::Shape)?;
+            let scattered = scatter_with_fallback(
+                ops,
+                &zeros,
+                0,
+                &index,
+                upstream,
+                ScatterReduce::Add,
+                &weight_shape,
+            )?;
+            let d_weight = match padding_idx {
+                Some(p) => with_row_zeroed(&scattered, p, weight_shape[1])?,
+                None => scattered,
+            };
+            vec![(weight, d_weight)]
         }
         // `Var::scatter`／`Var::scatter_add`（イシュー #1776）。
         // `d_src` は `upstream`（shape=`input_shape`）を `index`
@@ -1557,6 +1606,37 @@ pub(crate) fn masked_fill_with_fallback(
     }
 }
 
+/// [`Op::Pad`] の forward（`Var::pad`）が使う「バックエンド実装 →
+/// フォールバック」ヘルパー（イシュー #1756）。[`masked_fill_with_fallback`]
+/// と同型: `ops.pad` → `Unsupported` のときのみ `eval::pad` へ
+/// フォールバックし、それ以外のエラーは伝播する（判定迂回経路を
+/// 作らない）。バックエンド実装が返した出力 shape を `out_shape` と
+/// 照合し、不一致は `AutodiffError::Backend(BackendError::
+/// ShapeMismatch(..))` を返す。
+pub(crate) fn pad_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    pads: &[(usize, usize)],
+    value: f32,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.pad(input, pads, value) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::pad(input, pads, value, out_shape)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
 /// [`Op::Gather`] の forward（`Var::gather`／`Var::index_select` 経由）
 /// および [`Op::Gather`] の VJP（`Op::Scatter { reduce: Add }` を
 /// 経由せず直接 [`Op::Gather`] を再利用する `d_src` 計算）が使う
@@ -1620,6 +1700,26 @@ pub(crate) fn scatter_with_fallback(
         Err(BackendError::Unsupported(_)) => Ok(eval::scatter(input, dim, index, src, reduce)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
+}
+
+/// [`Op::Embedding`] の VJP（`padding_idx` 行のゼロ上書き）が使う
+/// ヘルパー（イシュー #1604）。`Tensor<f32>` に可変スライス API が
+/// ないため、`host_slice()`（strided／owned のいずれでも密な `Vec`
+/// を返す）で値を取り出し、行 `row`（`[row*cols, (row+1)*cols)` の
+/// 半開区間。`row < t.shape()[0]` は呼び出し元（`vjp` の
+/// `Op::Embedding` 分岐）が forward 時点で検証済みの `padding_idx`
+/// をそのまま渡す契約——`Var::embedding` の入口検査を `.claude/
+/// rules/coding-rust.md` の「境界検査を省略しない」方針に従い
+/// 再度ここで信頼する）を 0.0 で上書きしてから新しい `Tensor` を
+/// 構築して返す。
+fn with_row_zeroed(t: &Tensor<f32>, row: usize, cols: usize) -> Result<Tensor<f32>, AutodiffError> {
+    let mut data = t.host_slice().into_owned();
+    let start = row * cols;
+    let end = start + cols;
+    for v in &mut data[start..end] {
+        *v = 0.0;
+    }
+    Tensor::new(data, t.shape()).map_err(AutodiffError::Shape)
 }
 
 /// [`Op::Sort`] の forward（`Var::sort`／`argsort` 経由）が使う
@@ -3421,24 +3521,28 @@ fn mean_vjp(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>) -> Tenso
 ///
 /// Issue #224（先勝ち挙動の再確認。compat 層〈REQ-9〉実装時に要再確認
 /// としていた事項）の結論: **本挙動を維持する（変更なし）**。
-/// compat 層（TASK-9.2a・#95 で実装。TASK-9.4・#411 で `fandhe_ai::compat`
-/// へ移設済み）の公開面は `array()`／`Sequential`（Linear・ReLU・
-/// Sigmoid・Tanh）に限定され（`docs/compat-api-scope.md` §1〜2）、
-/// `max`/`amax` 相当 API が存在しないため PyTorch 互換を要求する利用者
-/// 向け経路が現時点でない。均等分配へ変更すると勾配値そのものが変わり
-/// 上記の決定性方針と衝突するため、先勝ちを維持する。再検討条件:
-/// `fandhe_ai::compat`（REQ-9 追記・#52）の公開面に `amax` 相当の縮約 API を
-/// 追加する段階になった場合にのみ PyTorch 互換の要否を改めて判断する
-/// （`docs/compat-api-scope.md` にも記録）。
+///
+/// **イシュー #1718（amax／amin 勾配分配方式の確定）で最終確定**:
+/// `Var::max`／`min`／`max_dims`（`max(dim)`／`min(dim)` 族の意味論）は
+/// 本先勝ち決定的方式を**維持**する。根拠は 2 点——(a) 本方式は
+/// crates.io 公開全版（v0.3.0〜）で出荷済みの勾配値であり、均等分配へ
+/// 変更すると勾配値そのものが変わる破壊的変更になる、(b) PyTorch
+/// 自身も `torch.max(input, dim)`／`min(dim)`（添字を返す族）は均等
+/// 分配ではなく返した添字 1 箇所のみへ勾配を伝播する仕様であり、本
+/// リポの `argmax`／`argmin`「タイは最初の添字」契約（`eval::
+/// arg_extremum`）と内部整合する。PyTorch `torch.amax`／`amin`
+/// （添字を返さない縮約）相当の均等分配 API を追加する場合は、本
+/// ヘルパーを差し替えず独立の `Op`／VJP として実装する方針とした
+/// （`docs/autodiff-amax-grad-distribution-decision.md` 参照。未実装・
+/// 後続 issue 提案のまま）。
 ///
 /// **`Op::Min` との共有（イシュー #1720）**: 本関数の実体は
 /// 「`out_value` と `==` 一致する最初の位置へ `g` を置く」だけで
 /// 最大／最小どちらの縮約かに依存しない。そのため実体を
 /// [`extremum_first_match_vjp`] へ改称し、本関数は既存呼び出し元
 /// （テスト・`Op::Max` アーム）の名前を変えないための薄いラッパーと
-/// して残す。#1718（amax／amin 勾配分配方式の確定）が均等分配へ
-/// 変更する場合は [`extremum_first_match_vjp`] 1 箇所の差し替えで
-/// `Max`／`Min` 両方へ反映される。
+/// して残す（#1718 の確定により、このヘルパーは今後も `Max`／`Min`
+/// 共有のまま先勝ち決定的方式に固定される）。
 fn max_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
