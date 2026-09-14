@@ -19,8 +19,8 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan, GemmChecksum,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    gather_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    gather_out_shape, one_hot_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -1357,6 +1357,21 @@ impl BackendOps for CpuBackendOps {
         let out_shape =
             topk_out_shape(input.shape(), dim, k).map_err(BackendError::ShapeMismatch)?;
         sort_topk::topk(input, dim, k, largest, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::one_hot` の CPU 実装（**非微分演算**。イシュー
+    /// #1755）。[`one_hot_out_shape`] で `index.shape()`／`num_classes`
+    /// を再検査してから `gather_scatter::one_hot` へ委譲する
+    /// （`gather`／`scatter`／`sort`／`topk` と同じ二重検査方針。
+    /// `.claude/rules/security.md` A08）。
+    fn one_hot(
+        &self,
+        index: &Tensor<i32>,
+        num_classes: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            one_hot_out_shape(index.shape(), num_classes).map_err(BackendError::ShapeMismatch)?;
+        gather_scatter::one_hot(index, num_classes, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// `BackendOps::unique` の CPU 実装（イシュー #1734）。

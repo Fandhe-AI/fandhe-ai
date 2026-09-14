@@ -1,28 +1,29 @@
 //! `where_cond`／`masked_fill`（イシュー #1637）・`narrow`（#1598／
 //! #1680 で実装済みだが 3 バックエンド parity テストが `crates/facade/
-//! tests/` に存在しなかった分の受入補完）の facade 到達経路（既存
-//! `Var` 再エクスポート経由。新規 `pub use`／`pub fn` は追加していない）
-//! の受け入れ条件対応テスト（`shape_ops_backend_parity.rs`・
-//! `softmax_backend_parity.rs` と同型）。
+//! tests/` に存在しなかった分の受入補完）・`one_hot`（**非微分演算**。
+//! イシュー #1755）の facade 到達経路（既存 `Var` 再エクスポート経由。
+//! 新規 `pub use`／`pub fn` は追加していない）の受け入れ条件対応テスト
+//! （`shape_ops_backend_parity.rs`・`softmax_backend_parity.rs` と同型）。
 //!
-//! `where_cond`／`masked_fill` 自体は `BackendOps` を経由する非融合
-//! ノード（`Op::Where`／`Op::MaskedFill`。`push_eager`）のため、CPU／
-//! CUDA／Metal の 3 バックエンドとも直接カーネルの parity を検証する。
-//! `narrow` はホスト view（`Tensor::narrow` の stride 再解釈。
-//! `BackendOps` を経由しない）のため、下流演算（`matmul`／`add`）が
-//! view を正しく消費することを検証する（`narrow` 自体の 3 バックエンド
-//! parity 受入条件はこれで担保する。実装計画 §3 参照）。
+//! `where_cond`／`masked_fill`／`one_hot` 自体は `BackendOps` を経由する
+//! 非融合ノード（`Op::Where`／`Op::MaskedFill`／`Op::OneHot`。
+//! `push_eager`）のため、CPU／CUDA／Metal の 3 バックエンドとも直接
+//! カーネルの parity を検証する。`narrow` はホスト view（`Tensor::
+//! narrow` の stride 再解釈。`BackendOps` を経由しない）のため、下流
+//! 演算（`matmul`／`add`）が view を正しく消費することを検証する
+//! （`narrow` 自体の 3 バックエンド parity 受入条件はこれで担保する。
+//! 実装計画 §3 参照）。
 //!
 //! - 属性なし: `fandhe_ai::tape()`（`CpuBackendOps`）と
 //!   `fandhe_ai_autodiff::Tape::new()`（`NaiveOps`）で forward／
 //!   backward を REQ-2 統一複合判定で突き合わせる。選択演算
-//!   （`where_cond`／`masked_fill`）は丸めを伴わないため bit 同一も
-//!   併記する。
+//!   （`where_cond`／`masked_fill`）・非微分演算（`one_hot`）は丸めを
+//!   伴わないため bit 同一も併記する。
 //! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
 //!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の同経路を CPU tape
 //!   と比較する（`narrow → matmul` は GEMM カーネルが異なるため
-//!   `assert_parity` のみ・`where_cond`／`masked_fill` は bit 同一も
-//!   併記する）。
+//!   `assert_parity` のみ・`where_cond`／`masked_fill`／`one_hot` は
+//!   bit 同一も併記する）。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Device;
@@ -271,6 +272,88 @@ fn cpu_narrow_add_matches_naive_reference() {
     );
 }
 
+// --- one_hot（非微分演算。イシュー #1755。属性なし: CPU vs NaiveOps） ---
+
+/// クラス id 列（`[0, num_classes)` の一様乱数を整数値 f32 として保持
+/// する `Tensor`）を決定的シードで作る（`Var::one_hot` の入力用）。
+fn class_id_leaf(seed: u64, shape: &[usize], num_classes: usize) -> Tensor<f32> {
+    let numel: usize = shape.iter().product();
+    let data: Vec<f32> = Xorshift64Star::new(seed)
+        .fill_vec(numel)
+        .into_iter()
+        .map(|v| {
+            let unit = (v + 1.0) / 2.0;
+            let idx = (unit * num_classes as f32) as usize;
+            idx.min(num_classes.saturating_sub(1)) as f32
+        })
+        .collect();
+    Tensor::new(data, shape).expect("class_id_leaf: shape 一致")
+}
+
+/// `one_hot` forward の CPU（`BackendOps::one_hot`）と NaiveOps
+/// （ホスト `eval::one_hot` 参照実装）の parity。非微分演算は丸めを
+/// 伴わないため bit 同一も確認する。
+#[test]
+fn cpu_one_hot_forward_matches_naive_reference() {
+    let shape = [2usize, 3];
+    let num_classes = 4usize;
+    let x_data = class_id_leaf(10, &shape, num_classes);
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&x_data);
+    let out_cpu = x_cpu.one_hot(num_classes).unwrap();
+
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+    let x_naive = naive_tape.make_var(&x_data);
+    let out_naive = x_naive.one_hot(num_classes).unwrap();
+
+    let cpu_slice = contiguous_slice(&out_cpu.to_tensor());
+    let naive_slice = contiguous_slice(&out_naive.to_tensor());
+    assert_parity(
+        "one_hot forward: CpuBackendOps vs NaiveOps",
+        &cpu_slice,
+        &naive_slice,
+    );
+    assert_eq!(
+        cpu_slice, naive_slice,
+        "one_hot forward: 非微分演算は丸めを伴わないため bit 同一のはず"
+    );
+}
+
+/// `one_hot` の VJP は明示ゼロ（`Op::OneHot` doc 参照）。CPU と NaiveOps
+/// のいずれも `Gradients::get` が `Some(全ゼロ)` を返すことを確認する。
+#[test]
+fn cpu_one_hot_backward_is_explicit_zero_on_both_paths() {
+    let shape = [3usize];
+    let num_classes = 3usize;
+    let x_data = class_id_leaf(11, &shape, num_classes);
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&x_data);
+    let out_cpu = x_cpu.one_hot(num_classes).unwrap();
+    let loss_cpu = out_cpu.sum(None).unwrap();
+    let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+    let dx_cpu = grads_cpu
+        .get(&x_cpu)
+        .unwrap()
+        .expect("勾配は明示ゼロとして流れる");
+
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+    let x_naive = naive_tape.make_var(&x_data);
+    let out_naive = x_naive.one_hot(num_classes).unwrap();
+    let loss_naive = out_naive.sum(None).unwrap();
+    let grads_naive = naive_tape.backward(&loss_naive).unwrap();
+    let dx_naive = grads_naive
+        .get(&x_naive)
+        .unwrap()
+        .expect("勾配は明示ゼロとして流れる");
+
+    let cpu_slice = contiguous_slice(dx_cpu);
+    let naive_slice = contiguous_slice(dx_naive);
+    assert_eq!(cpu_slice, vec![0.0; 3]);
+    assert_eq!(naive_slice, vec![0.0; 3]);
+}
+
 // --- 実機横断（`#[ignore]`。Metal／CUDA） ---
 
 fn where_cond_forward_on(device: Device, cond: &Tensor<bool>) -> Tensor<f32> {
@@ -411,5 +494,55 @@ fn cuda_narrow_matmul_forward_matches_cpu() {
         "narrow→matmul forward: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&cuda_out),
         &contiguous_slice(&cpu_out),
+    );
+}
+
+fn one_hot_forward_on(device: Device, x: &Tensor<f32>, num_classes: usize) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x_var = tape.make_var(x);
+    x_var
+        .one_hot(num_classes)
+        .expect("one_hot: 値域検査済みの入力のため常に成功する")
+        .to_tensor()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_one_hot_forward_matches_cpu() {
+    let x = class_id_leaf(20, &[2, 3], 4);
+    let metal_out = one_hot_forward_on(Device::Metal, &x, 4);
+    let cpu_out = one_hot_forward_on(Device::Cpu, &x, 4);
+
+    let metal_slice = contiguous_slice(&metal_out);
+    let cpu_slice = contiguous_slice(&cpu_out);
+    assert_parity(
+        "one_hot forward: Metal tape_for vs CPU tape_for",
+        &metal_slice,
+        &cpu_slice,
+    );
+    assert_eq!(
+        metal_slice, cpu_slice,
+        "one_hot: 非微分演算は丸めを伴わないため bit 同一のはず"
+    );
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_one_hot_forward_matches_cpu() {
+    let x = class_id_leaf(21, &[2, 3], 4);
+    let cuda_out = one_hot_forward_on(Device::Cuda(0), &x, 4);
+    let cpu_out = one_hot_forward_on(Device::Cpu, &x, 4);
+
+    let cuda_slice = contiguous_slice(&cuda_out);
+    let cpu_slice = contiguous_slice(&cpu_out);
+    assert_parity(
+        "one_hot forward: CUDA tape_for vs CPU tape_for",
+        &cuda_slice,
+        &cpu_slice,
+    );
+    assert_eq!(
+        cuda_slice, cpu_slice,
+        "one_hot: 非微分演算は丸めを伴わないため bit 同一のはず"
     );
 }

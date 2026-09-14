@@ -63,10 +63,19 @@ fn kernel_names_and_buffer_order_are_declared() {
         GATHER_SCATTER_METAL_SOURCE.contains("kernel void scatter_add_f32("),
         "scatter_add_f32 カーネルの宣言が見つかりません"
     );
+    assert!(
+        GATHER_SCATTER_METAL_SOURCE.contains("kernel void one_hot_f32("),
+        "one_hot_f32 カーネルの宣言が見つかりません（イシュー #1755）"
+    );
     // バッファ index の宣言順（`gather_scatter.rs` のエンコード関数と
     // 一致させる契約。冒頭コメント「バッファ配置」参照）。
     assert!(GATHER_SCATTER_METAL_SOURCE.contains("device const float* input [[buffer(0)]]"));
     assert!(GATHER_SCATTER_METAL_SOURCE.contains("device const int* index [[buffer(1)]]"));
+    // `one_hot_f32` は `input` を持たず `index` がバッファ 0（`gather`／
+    // `scatter` 系とは異なる独自の宣言順。`gather_scatter.rs::
+    // encode_one_hot_dispatch` と一致させる契約）。
+    assert!(GATHER_SCATTER_METAL_SOURCE.contains("device const int* index [[buffer(0)]]"));
+    assert!(GATHER_SCATTER_METAL_SOURCE.contains("device float* out [[buffer(1)]]"));
 }
 
 /// `scatter_add_f32` のみが soft-f64 ヘルパ（`gs_f64_widen`／
@@ -79,6 +88,7 @@ fn only_scatter_add_uses_soft_f64_helpers() {
     let mut checked_gather = false;
     let mut checked_overwrite = false;
     let mut checked_add = false;
+    let mut checked_one_hot = false;
     for (name, body) in kernels {
         let uses_soft_f64 = body.contains("gs_f64_widen")
             || body.contains("gs_f64_add(")
@@ -105,12 +115,21 @@ fn only_scatter_add_uses_soft_f64_helpers() {
                 );
                 checked_add = true;
             }
+            "one_hot_f32" => {
+                // one_hot は丸めを伴わない 0.0/1.0 の単純代入のため
+                // soft-f64 を使わない（イシュー #1755）。
+                assert!(
+                    !uses_soft_f64,
+                    "one_hot_f32 は soft-f64 ヘルパを使うべきではありません"
+                );
+                checked_one_hot = true;
+            }
             _ => {}
         }
     }
     assert!(
-        checked_gather && checked_overwrite && checked_add,
-        "3 カーネルすべてを検査できていません"
+        checked_gather && checked_overwrite && checked_add && checked_one_hot,
+        "4 カーネルすべてを検査できていません"
     );
 }
 
@@ -140,7 +159,7 @@ fn gs_f64_constants_match_host_model_constants() {
     assert!(GATHER_SCATTER_METAL_SOURCE.contains("#define GS_F32_INF       0x7F800000u"));
 }
 
-/// REQ-8 境界検査: 3 カーネルすべてが `gid >= numel`（または
+/// REQ-8 境界検査: 4 カーネルすべてが `gid >= numel`（または
 /// `numel_out`）の早期 return を持つ（末尾ブロックの余剰スレッド対策。
 /// 手動境界チェックを省略しない）。
 #[test]
@@ -152,8 +171,8 @@ fn all_kernels_have_grid_boundary_guard() {
         .matches("if (gid >= numel_out) {")
         .count();
     assert_eq!(
-        occurrences_numel, 1,
-        "gather_f32 の `gid >= numel` 境界検査が想定数と異なります"
+        occurrences_numel, 2,
+        "gather_f32／one_hot_f32 の `gid >= numel` 境界検査が想定数と異なります"
     );
     assert_eq!(
         occurrences_numel_out, 2,
