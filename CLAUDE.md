@@ -120,11 +120,14 @@ fandhe-ai/
     ├── matmul-vjp-zero-copy-decision.md # matmul VJP の転置ゼロコピー化（`eval::matmul` の stride 対応）・CPU BLIS／CUDA／Metal gemm 結線を別イシューへ引き継ぐスコープ判断・実測記入欄（#1043 ツリー・#1046）
     ├── norm-ops-design.md # LayerNorm 新設・RMSNorm 既存カーネル接続の設計（最終軸限定契約・`eps` 検査・0 サイズ契約・VJP 式・バックエンド別実装形〈CPU スカラー／CUDA 1 warp=1 行 2 パス／Metal persistent simdgroup + Neumaier/scale-ssq〉・facade 到達経路〈既存 `Var` 再エクスポート経由〉・GPU backward 未結線の対象外整理。M4 Max 実機実測完了・DGX Spark GB10 未実測。イシュー #1596）
     ├── metal-grad-reduction-parity-judgment-decision.md # 勾配の長軸縮約（dw 行方向蓄積・bias 勾配の行方向縮約）の Metal 実装形の決定記録。当初は f32 のみの Neumaier 補償和 + 2 の冪 scale で「`f64` 相当」を狙い、事前判定可能な Tier A/B 2 層契約（PR #1666 codex-review 複数回の P1／P2 指摘を経て改訂）を検討したが、binary64 逐次加算の 64bit 整数ソフトウェアエミュレーションでホスト `f64` 逐次和と bit 完全一致させる方式へ転換し不採用（検討経緯のみ本文に残す）。**契約確定・実装済み（PR #1659〈イシュー #1566〉2026-09-12 マージ。§6 に実装記録〈ファイル・関数名・M4 Max 実機 bit 一致テスト pass〉を追記済み）**
+    ├── onnx-export-op-mapping.md # ONNX export の内部 op 逆マッピング（`onnx-interop::onnx::export_ops`。`ExportOp` -> `NodeProto`）の対応表・契約（属性常時書き出し・`Transpose::perm` 省略時の例外・allowlist による層 B fail-closed 検査・対象外事項。facade 非公開のまま。イシュー #1773）
     ├── oss-comparison-harness-decision.md # OSS 直接比較ハーネス（matrixmultiply・gemm crate・MLX・PyTorch）の恒久化・本体 workspace 外配置の設計判断・matrixmultiply/gemm の許容依存第 9 区分〈ベンチ比較対象〉としての条件付きユーザー承認記録（#755）
     ├── perf/                # 性能実測・下限確定の記録群（`performance-floor-decision.md` ほか。GEMM 最適化ツリー #479 の実測記録を含む）
     │   ├── performance-floor-decision.md # REQ-8 段階的下限の確定判断・追補記録（#158・#386・#393・#577）
     │   ├── gemm-optimization-baseline.md # REQ-8 GEMM 5 行の分母・分子（対象カーネル・実機・PyTorch 版・出典）の突合基準（#481）
     │   ├── oss-gemm-comparison-baseline.md # OSS 直接比較の再現手順・計測境界・ベースライン・再計測キャンペーン表（#755）
+    │   ├── metal-gemm-thread-elements-candidate.md # `thread_elements()` 方式 BlockMMA 候補カーネル（`gemm_simdgroup_tiled_te`。candle・MLX steel と同型のレーン単位フラグメント直接読み書き）の opt-in 実装記録（`crate::tile::MmaFragLoad`／`MetalGemm::new_with_mma_frag_load`。`pipeline_for_tile` 自身がカーネル関数名を切り替えるため既存本番入口〈`dispatch_auto`／`dispatch_variant`／`dispatch_strided_tiled_prepared` 等〉がそのまま到達する設計。本番未結線・既定不変・Linux 自己検証〈parity self-test 整備・shader_source_evidence 4 件追加〉のみ完了・実機〈Apple Silicon〉未実測。性能実測・結線可否判断は兄弟イシュー #1694 のスコープ。イシュー #1693・親 #1586）
+    │   ├── logs/metal-gemm-thread-elements-1693/ # 上記の実機実測ログ置き場（probe〈R0〉・parity〈R1〉・非 staged 拒否〈R2〉・本番との bit 一致〈R3〉。本エージェント実行環境に Apple Silicon 実機がないため未生成。README に保存すべきファイル一覧・実行コマンドのみ記載。イシュー #1693）
     │   ├── cuda-parity-baseline.md # CUDA Tensor Core 経路 parity 非後退契約のベースライン記録（#491。#1158 で f16 MatrixUnit 経路 mma 優先化の GB10 非後退確認 §12 を追記。#1162 で specialized_mma_f16 の切り分け・再割り当て・最終 sweep 記録 §13 を追記）
     │   ├── sm121-device-attributes.md # sm_121（DGX Spark GB10）デバイス属性・L1/L2 実効帯域の実測記録（#482）
     │   ├── cuda-gemm-bottleneck-diagnosis.md # CUDA GEMM M=N=K=4096 データ再利用崩壊の定量診断（#486）

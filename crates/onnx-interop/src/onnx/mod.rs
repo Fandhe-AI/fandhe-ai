@@ -5,9 +5,11 @@
 //! - `interp`: グラフ実行インタープリタ（`Graph` のノード列を `ops::*` へディスパッチ。
 //!   TASK-7.2b・イシュー #78）
 //! - `export`: 内部グラフ表現 `Graph` -> `GraphProto`／`ModelProto` への降下
-//!   （`graph` の逆方向。イシュー #1772）。op ごとの属性マッピング（内部 op ->
-//!   `NodeProto`）は #1773 のスコープで、本モジュールは node の意味論には
-//!   関与しない。
+//!   （`graph` の逆方向。イシュー #1772）。`build_model_proto` は `export_ops`
+//!   （内部 op -> `NodeProto` の意味論的マッピング。#1773）の
+//!   `check_exportable` を経由してから組み立てる。
+//! - `export_ops`: `interp` が対応する 22 op の逆マッピング（`ExportOp` ->
+//!   `NodeProto`。イシュー #1773）。`export` から `pub use` で再エクスポートする。
 //!
 //! 8 オペ実装は #79（`crate::ops`）、PoC 数値突合テストは #80
 //! （`tests/onnx_poc_v2_6_match.rs`・`tests/onnx_slice_dynamic_bounds.rs`）で追加済み。
@@ -15,6 +17,7 @@
 //! 冒頭コメント参照）。
 
 pub mod export;
+pub mod export_ops;
 pub mod graph;
 pub mod interp;
 pub mod proto;
