@@ -261,10 +261,14 @@ pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAlloc
 /// Metal はシステムデフォルトデバイス 1 台のみを扱う前提（本モジュール
 /// 冒頭コメント）のため、CUDA 側と異なりキーは `op.kind_name()`
 /// （[`ScalarOpKind::kind_name`]。ペイロード値を含まない安定文字列）
-/// のみを使う（`ContextKey` 相当の区別は不要）。`f32` ペイロード
-/// （将来 `Clamp` 等が追加する場合。`crate::scalar_op_source` モジュール
-/// doc「ペイロード seam」参照）はキャッシュキーに含めない契約は CUDA 側
-/// と同一。
+/// のみを使う（`ContextKey` 相当の区別は不要）。`Clamp`（イシュー
+/// #1709 で実装済み）の `f32` ペイロード（`min`／`max`）はこのキーにも
+/// `Box::leak` する関数名にも含めない契約は CUDA 側と同一: 含めると
+/// `(min, max)` の組ごとに `Box::leak` が無限に増える（プロセス寿命中の
+/// メモリ増大）ため、`kind_name()` 限定は本モジュールの契約として
+/// 維持する（`crate::scalar_op_source` モジュール doc「ペイロード」
+/// 参照。単体テスト
+/// `cached_scalar_unary_pipeline_clamp_payload_does_not_split_cache`）。
 ///
 /// [`crate::scalar_op_source::unary_kernel_source`] が `None`（未実装
 /// kind）を返す場合はキャッシュへ触れずに `Ok(None)` を返す（呼び出し元
@@ -393,6 +397,37 @@ mod tests {
                 objc2::rc::Retained::as_ptr(&second)
             ),
             "2 回目の cached_scalar_unary_pipeline(Log) 呼び出しは同一パイプラインを返すはず"
+        );
+    }
+
+    /// `Clamp` の `f32` ペイロード（`min`／`max`）がキャッシュキーに
+    /// 含まれないこと（`kind_name()` 限定）を、異なる payload 値の 2 回
+    /// 呼び出しが同一パイプラインを返すことで確認する（イシュー
+    /// #1709。CUDA 側
+    /// `scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_clamp_payload_does_not_split_cache`
+    /// の Metal 版）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn cached_scalar_unary_pipeline_clamp_payload_does_not_split_cache() {
+        let ctx = cached_context().expect("Metal context available on test host");
+        let first = cached_scalar_unary_pipeline(&ctx, ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 })
+            .expect("Clamp is implemented")
+            .expect("Clamp must return Some(pipeline)");
+        let second = cached_scalar_unary_pipeline(
+            &ctx,
+            ScalarUnaryOp::Clamp {
+                min: -5.0,
+                max: 5.0,
+            },
+        )
+        .expect("2nd call must succeed given the 1st succeeded")
+        .expect("Clamp must return Some(pipeline)");
+        assert!(
+            std::ptr::eq(
+                objc2::rc::Retained::as_ptr(&first),
+                objc2::rc::Retained::as_ptr(&second)
+            ),
+            "異なる payload 値でも同一パイプラインを返すはず（kind_name() 限定キー）"
         );
     }
 }

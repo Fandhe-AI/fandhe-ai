@@ -347,10 +347,10 @@ impl MetalBackendOps {
     }
 
     /// [`BackendOps::scalar_unary`] の Metal ディスパッチ（イシュー
-    /// #1707。CUDA 側 `CudaBackendOps::scalar_unary_dispatch`〈#1700〉の
-    /// Metal 対応版）。`crate::scalar_op_source` が対応する kind のみ
-    /// パイプラインを生成・キャッシュして起動し、未対応 kind は
-    /// `BackendError::Unsupported` を返す（呼び出し元
+    /// #1707〜#1709。CUDA 側 `CudaBackendOps::scalar_unary_dispatch`
+    /// 〈#1700・#1702〉の Metal 対応版）。`crate::scalar_op_source` が
+    /// 対応する kind のみパイプラインを生成・キャッシュして起動し、
+    /// 未対応 kind は `BackendError::Unsupported` を返す（呼び出し元
     /// `fandhe_ai_autodiff::grad::scalar_unary_with_fallback` がホスト
     /// 参照実装へフォールバックする既存契約。`BackendOps::scalar_unary`
     /// の既定トレイト実装と同じエラー種別を返すことで判定迂回経路を
@@ -369,7 +369,7 @@ impl MetalBackendOps {
         if crate::scalar_op_source::unary_kernel_source(op).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "scalar_unary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (活性化系など sub issue の対象外 kind。ホスト参照実装へフォールバックする)"
             )));
         }
 
@@ -387,18 +387,23 @@ impl MetalBackendOps {
         let Some(pipeline) = pipeline else {
             return Err(BackendError::Unsupported(format!(
                 "scalar_unary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (活性化系など sub issue の対象外 kind。ホスト参照実装へフォールバックする)"
             )));
         };
+        // `Clamp` 等ペイロードあり kind の起動引数（イシュー #1709。
+        // `crate::scalar_op_source::unary_payload` 参照）。ペイロード
+        // なし kind は空スライス（`run_scalar_unary_f32` 経由でエンコード
+        // 列は変更前と bit 同一）。
+        let payload = crate::scalar_op_source::unary_payload(op);
         let out = ew
-            .run_scalar_unary_f32(&ctx, &pipeline, a_slice)
+            .run_scalar_unary_f32(&ctx, &pipeline, a_slice, payload.as_slice())
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// [`Self::scalar_unary_dispatch`] の 2 項版（イシュー #1707）。
-    /// ブロードキャストは `elementwise_binary`（`add`／`mul`）と同じ
-    /// `Tensor::broadcast_with`。
+    /// [`Self::scalar_unary_dispatch`] の 2 項版（イシュー #1707〜
+    /// #1709。比較 6 種〈`Gt` 等〉も同じ経路で扱う）。ブロードキャストは
+    /// `elementwise_binary`（`add`／`mul`）と同じ `Tensor::broadcast_with`。
     fn scalar_binary_dispatch(
         &self,
         op: ScalarBinaryOp,
@@ -408,7 +413,7 @@ impl MetalBackendOps {
         if crate::scalar_op_source::binary_kernel_source(op).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "scalar_binary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (Add／Maximum／Minimum 等いずれの sub issue の対象外 kind。ホスト参照実装へフォールバックする)"
             )));
         }
 
@@ -431,7 +436,7 @@ impl MetalBackendOps {
         let Some(pipeline) = pipeline else {
             return Err(BackendError::Unsupported(format!(
                 "scalar_binary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (Add／Maximum／Minimum 等いずれの sub issue の対象外 kind。ホスト参照実装へフォールバックする)"
             )));
         };
         let out = ew
@@ -2053,11 +2058,12 @@ impl BackendOps for MetalBackendOps {
         })
     }
 
-    /// `BackendOps::scalar_unary` の Metal 実装（イシュー #1707・#1708）。
-    /// `Sqrt`（#1707）＋超越関数系 8 kind（`Neg`／`Abs`／`Log`／`Log2`／
-    /// `Log10`／`Sin`／`Cos`／`Tan`。#1708）実装済み（`crate::
-    /// scalar_op_source` モジュール doc「スコープ」参照。他 kind は既定
-    /// `Unsupported` のまま）。
+    /// `BackendOps::scalar_unary` の Metal 実装（イシュー #1707〜
+    /// #1709）。`Sqrt`（#1707）＋超越関数系 8 kind（`Neg`／`Abs`／
+    /// `Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`。#1708）＋`Clamp`
+    /// （初のペイロード付き unary kind。#1709）実装済み（`crate::
+    /// scalar_op_source` モジュール doc「スコープ」参照。活性化系等
+    /// 残り kind は既定 `Unsupported` のまま）。
     fn scalar_unary(
         &self,
         op: ScalarUnaryOp,
@@ -2066,8 +2072,9 @@ impl BackendOps for MetalBackendOps {
         self.scalar_unary_dispatch(op, a)
     }
 
-    /// `BackendOps::scalar_binary` の Metal 実装（イシュー #1707）。
-    /// `Sub`／`Div`／`Pow` のみ実装済み。
+    /// `BackendOps::scalar_binary` の Metal 実装（イシュー #1707〜
+    /// #1709）。`Sub`／`Div`／`Pow`（#1707）＋比較 6 種（`Gt`／`Ge`／
+    /// `Lt`／`Le`／`Eq`／`Ne`。#1709）実装済み。
     fn scalar_binary(
         &self,
         op: ScalarBinaryOp,
