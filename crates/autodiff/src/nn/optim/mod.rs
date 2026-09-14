@@ -57,6 +57,7 @@
 mod adagrad;
 mod adam;
 mod adamw;
+mod lamb;
 mod rmsprop;
 
 pub mod amp;
@@ -71,6 +72,7 @@ pub use amp::{
     unscale_grads,
 };
 pub use clip::{ClipGradResult, clip_grad_norm, clip_grad_value, global_grad_norm};
+pub use lamb::{Lamb, LambConfig};
 pub use lr_scheduler::{
     ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, StepLr,
 };
@@ -117,6 +119,22 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // 済み（`Adam`／`AdamConfig` の純再エクスポート。`crates/facade/src/
 // optim.rs` 参照）。`DeviceParamStore` への結線は非対応のまま
 // （`adam` モジュール doc「`DeviceParamStore` 非対応」節）。
+
+// イシュー #1744（親 #1610）: LAMB（layer-wise adaptive trust ratio。
+// You et al., 2019）を追加した（`lamb` モジュール doc 参照）。`AdamW`・
+// `Adam` と同じく `(param, grad)` の参照列を受け取り更新後
+// `Tensor<f32>` の列を返す値型・純関数。weight decay は paper 定義
+// どおり更新方向 `u` へ coupled で織り込む（`AdamW` の decoupled 乗算
+// 減衰とは構造が異なる）。新規 `Op`／`BackendOps`／`Var` メソッド／
+// VJP は追加していない。facade（`fandhe_ai::optim`）への公開・
+// `crates/facade/tests/api_surface.rs` の期待集合更新・
+// `docs/compat-api-scope.md` §1.3 optimizer 行の更新も本イシューで完了
+// 済み（`Lamb`／`LambConfig` の純再エクスポート。`crates/facade/src/
+// optim.rs` 参照）。`DeviceParamStore` への結線は非対応のまま
+// （`lamb` モジュール doc「`DeviceParamStore` 非対応」節。テンソル
+// ごとの L2 norm reduction カーネルが未実装のため）。#1610 配下の
+// optimizer sub-issue のうち LAMB（本イシュー）で Adam〈#1742〉に
+// 続き完了する（RMSprop／Adagrad は #1743 が別途対応）。
 
 // イシュー #1745（親 #1611）: CosineAnnealingLr／ExponentialLr／
 // LinearWarmupLr（式ベース・stateless 純関数の LR スケジューラ 3 種）を

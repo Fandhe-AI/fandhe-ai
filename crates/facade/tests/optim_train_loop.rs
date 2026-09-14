@@ -34,8 +34,8 @@ use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::optim::{
     Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, ConstantLr, CosineAnnealingLr,
-    ExponentialLr, LinearWarmupLr, LrScheduler, RmsProp, RmsPropConfig, Sgd, SgdConfig, StepLr,
-    clip_grad_norm, clip_grad_value,
+    ExponentialLr, Lamb, LambConfig, LinearWarmupLr, LrScheduler, RmsProp, RmsPropConfig, Sgd,
+    SgdConfig, StepLr, clip_grad_norm, clip_grad_value,
 };
 
 const BATCH: usize = 4;
@@ -465,6 +465,85 @@ fn adagrad_with_clip_converges_via_facade_only() {
 
     let mut model = build_model();
     let log = train_with_adagrad_and_clip(&mut model, STEPS, LR, MAX_NORM);
+
+    assert_eq!(log.len(), STEPS);
+    let initial = log[0];
+    let final_loss = *log.last().unwrap_or_else(|| unreachable!("log は空でない"));
+    assert!(final_loss.is_finite(), "final loss が非有限: {final_loss}");
+    assert!(
+        final_loss < 0.5 * initial,
+        "loss did not converge sufficiently: initial={initial} final={final_loss}"
+    );
+}
+
+// =====================================================================
+// LAMB（layer-wise trust ratio。イシュー #1744）+ clip
+// =====================================================================
+
+/// `train_with_adamw_and_clip` と同型（`AdamW::step` を `Lamb::step` へ
+/// 差し替えただけ）。trust ratio により実効ステップが縮むため、`AdamW`
+/// 用 lr（既定 `1e-3`）のままでは 100 step で収束しない（実測で確認
+/// 済み）ため lr を大きくしている（`crates/autodiff/tests/
+/// nn_optim_lamb.rs::mlp_converges_with_lamb` と同じ lr）。
+fn train_with_lamb_and_clip(model: &mut Sequential, steps: usize, max_norm: f32) -> Vec<f32> {
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let cfg = LambConfig {
+        lr: 0.02,
+        ..LambConfig::default()
+    };
+    let mut lamb =
+        Lamb::new(cfg).unwrap_or_else(|e| panic!("test fixture: Lamb::new が失敗した: {e}"));
+    let mut log = Vec::with_capacity(steps);
+
+    for _ in 0..steps {
+        let updated = {
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+
+            let pred = bound
+                .forward(&tape, &x)
+                .unwrap_or_else(|e| panic!("test fixture: forward が失敗した: {e}"));
+            let loss = pred
+                .mse_loss(&y)
+                .unwrap_or_else(|e| panic!("test fixture: mse_loss が失敗した: {e}"));
+            log.push(scalar(&loss.to_tensor()));
+
+            let grads = tape
+                .backward(&loss)
+                .unwrap_or_else(|e| panic!("test fixture: backward が失敗した: {e}"));
+            let grad_refs = bound
+                .trainable_grads(&grads)
+                .unwrap_or_else(|e| panic!("test fixture: trainable_grads が失敗した: {e}"));
+            // 適用順序契約: backward → clip → optimizer step。
+            let clip_result = clip_grad_norm(&grad_refs, max_norm)
+                .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));
+            let param_refs = model.trainable_parameters();
+            let params_and_grads: Vec<(&Tensor<f32>, &Tensor<f32>)> = param_refs
+                .into_iter()
+                .zip(clip_result.grads.iter())
+                .collect();
+            lamb.step(&params_and_grads)
+                .unwrap_or_else(|e| panic!("test fixture: Lamb::step が失敗した: {e}"))
+        };
+        model
+            .apply_parameters(updated)
+            .unwrap_or_else(|e| panic!("test fixture: apply_parameters が失敗した: {e}"));
+    }
+
+    log
+}
+
+/// `fandhe_ai::optim::{Lamb, clip_grad_norm}` のみを使った学習ループで
+/// loss が減少すること（受入基準 3。`AdamW` 版と同型の収束テスト）。
+#[test]
+fn lamb_with_clip_converges_via_facade_only() {
+    const STEPS: usize = 100;
+    const MAX_NORM: f32 = 10.0;
+
+    let mut model = build_model();
+    let log = train_with_lamb_and_clip(&mut model, STEPS, MAX_NORM);
 
     assert_eq!(log.len(), STEPS);
     let initial = log[0];
