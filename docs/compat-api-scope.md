@@ -55,7 +55,10 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
      promotion-decision.md` §4 案 A）。値型・純関数のみで構成され
      `BackendOps` 系の型・注入経路を含まないため REQ-12（利用者向け融合
      制御 API を設けない・任意 `BackendOps` 実装を注入できる公開 API を
-     設けない）と矛盾しない（出典: `docs/spec/04-requirements.md:240`）
+     設けない）と矛盾しない（出典: `docs/spec/04-requirements.md:240`。
+     `clip_grad_value`〈#1753・親 #1631〉が実装済みで追加された
+     identifier だが、同 spec 出典自体はまだ追従しておらず古いまま
+     （`docs/spec/` は編集しない。§1.3 の #1631 行に実装記録を追記済み）
   4. **デバイス常駐更新経路 `fandhe_ai::DeviceParamStore`／
      `Tape::step_device_param_store`**（`Tape::sync_device_param_store_to_host`・
      `Tape::backward_device_param_store`〈#1022 で追加。`Op::LinearResident`
@@ -249,7 +252,7 @@ Phase 3（親 #1573）の各 issue へ対応付ける。
 | **複数 GPU／DDP** | #1628（同上に従属。設計判断の記録〈docs のみ〉に留め、実装・通信層の依存追加は行わない。5 節参照） |
 | ONNX import 公開／export | #1629（#1652 で import 側の設計判断を記録・#1775 で export 側の設計判断を記録。案 B〈薄いラッパー型〉を方針として推奨するが、facade は crates.io 公開クレートのため公開には `onnx-interop` 自体の crates.io 公開という別個のユーザー承認が必要——2026-09-12 の facade 公開面拡張の承認範囲には含まれない。現状は import・export とも非公開のまま段階 0。`docs/facade-onnx-import-exposure-decision.md`・`docs/facade-onnx-export-exposure-decision.md`） |
 | topk／sort／cumsum | #1733 で sort／argsort／topk 実装済み（`Var::sort`／`argsort`／`topk`。CPU 参照実装〈`backend-cpu::sort_topk`〉・scatter ベース VJP〈`Op::Sort`／`Op::Topk`〉・facade 新規公開面なし〈既存 `Var` 再エクスポート経由〉。CUDA／Metal カーネルは #1741 が残対象）。#1731 で cumsum／cumprod 実装済み（`Var::cumsum`／`cumprod`・`Op::Cumsum`／`Op::Cumprod`。CPU 参照実装先行・GPU〈CUDA／Metal〉は既定 `Unsupported` フォールバック・VJP はホスト側のみ〈厳密形・除算なし〉・facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉）。unique（`torch.unique` の values のみ）は #1734 で実装済み（`Var::unique`。非微分演算・detached な `Tensor<f32>` を返し `Op` を tape に記録しない。3 バックエンド〈CPU 参照実装・CUDA／Metal ビットニックソート方式〉とも bit 完全一致契約。facade 新規公開面なし〈既存 `Var` 再エクスポート経由〉。`return_inverse`／`return_counts`／`dim` 指定・`sorted=false`・`unique_consecutive` は対象外。`docs/unique-facade-exposure-decision.md`）。`docs/compat-feature-gap.md` §2.2 追補参照 |
-| `nn.functional` の残り（pad／interpolate／one_hot 等） | #1631（#1755 で one_hot 実装済み。`Var::one_hot`〈**非微分演算**。VJP は明示ゼロ〉・`Op::OneHot`・CPU／CUDA／Metal 3 バックエンドカーネル・facade 新規公開面なし〈既存 `Var` 再エクスポート経由〉。イシュー #1757 で interpolate（nearest）実装済み〈`Var::interpolate`・`Op::Interpolate`・`InterpolateMode`〈`tensor-core::backend_ops`。`#[non_exhaustive]`〉。3 バックエンド専用カーネル・scatter_add ベース VJP・facade へ `InterpolateMode` を再エクスポート〈承認記録は #1631 コメント 2026-09-12〉。CUDA／Metal 実機は未実測のまま申し送り〉。pad／clip_grad_value は未実装のまま残対象。`docs/compat-feature-gap.md` 追補参照） |
+| `nn.functional` の残り（pad／interpolate／one_hot 等） | #1631（#1755 で one_hot 実装済み。`Var::one_hot`〈**非微分演算**。VJP は明示ゼロ〉・`Op::OneHot`・CPU／CUDA／Metal 3 バックエンドカーネル・facade 新規公開面なし〈既存 `Var` 再エクスポート経由〉。#1753 で clip_grad_value 実装済み（`fandhe_ai_autodiff::nn::optim::clip::clip_grad_value`。`clip_grad_norm` と同型の純関数・`Gradients`／`Var` 非依存・`Op`／`BackendOps`／VJP 非拡張。facade 到達経路は `crates/facade/src/optim.rs` の `pub use`〈`fandhe_ai::optim::clip_grad_value`〉）。イシュー #1757 で interpolate（nearest）実装済み〈`Var::interpolate`・`Op::Interpolate`・`InterpolateMode`〈`tensor-core::backend_ops`。`#[non_exhaustive]`〉。3 バックエンド専用カーネル・scatter_add ベース VJP・facade へ `InterpolateMode` を再エクスポート〈承認記録は #1631 コメント 2026-09-12〉。CUDA／Metal 実機は未実測のまま申し送り〉。pad は未実装のまま残対象。`docs/compat-feature-gap.md` 追補参照） |
 
 1.2／1.3 共通の注記: 各機能の追加は薄いラッパー原則（3 節）・完全自作
 コア（REQ-1）を維持し、バックエンド間数値一致は REQ-2 統一複合判定・
