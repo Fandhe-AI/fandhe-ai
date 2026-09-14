@@ -152,15 +152,47 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
             right: b.len(),
         });
     }
+    Ok(compare_pairs(
+        a.len(),
+        a.iter().zip(b).map(|(&x, &y)| (x as f64, y as f64)),
+    ))
+}
 
-    let mut abs_diffs: Vec<f64> = Vec::with_capacity(a.len());
-    let mut rel_errs: Vec<f64> = Vec::with_capacity(a.len());
+/// [`compare`] の f64 版（イシュー #1697。`TypedOps<f64>` の各演算 8 種の
+/// 出力を parity 検証するために追加）。`RELATIVE_TOLERANCE`／
+/// `ABSOLUTE_RESCUE_THRESHOLD` は f32 版と完全に共有し、値は変更しない
+/// （`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの
+/// 許容誤差を単独で緩和しない」・ユーザー承認範囲外）。判定ロジック本体
+/// （`compare_pairs`）は f32 版と共通化しており、`x as f64` への昇格を
+/// 経ない分、f64 入力はより高い精度のまま比較される。
+pub fn compare_f64(a: &[f64], b: &[f64]) -> Result<CompareReport, ParityError> {
+    if a.len() != b.len() {
+        return Err(ParityError::LengthMismatch {
+            left: a.len(),
+            right: b.len(),
+        });
+    }
+    Ok(compare_pairs(
+        a.len(),
+        a.iter().zip(b).map(|(&x, &y)| (x, y)),
+    ))
+}
+
+/// [`compare`]／[`compare_f64`] 共通の判定コア。長さ一致検査は呼び出し元
+/// （型ごとに異なるスライス型を受け取る）が済ませ、本関数へは
+/// `(actual, expected)` の `f64` ペア列と要素数（`ExactSizeIterator` の
+/// `len()` を使わず引数で受け取るのは、呼び出し元がイテレータ生成前に
+/// 検査済みの値をそのまま渡せば二重計算を避けられるため）を渡す。
+/// 判定ロジック自体（合格条件・非有限 diff のセンチネル退避・分布統計）は
+/// [`compare`] の従来実装から一切変更していない（`x as f64` への昇格が
+/// f32 版では呼び出し元で、f64 版では恒等写像で行われる差異のみ）。
+fn compare_pairs(total: usize, pairs: impl Iterator<Item = (f64, f64)>) -> CompareReport {
+    let mut abs_diffs: Vec<f64> = Vec::with_capacity(total);
+    let mut rel_errs: Vec<f64> = Vec::with_capacity(total);
     let mut fail_count = 0usize;
     let mut max_fail_abs_diff = 0.0f64;
 
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        let xf = x as f64;
-        let yf = y as f64;
+    for (xf, yf) in pairs {
         let diff = (xf - yf).abs();
         // 真値 0 近傍での相対誤差の跳ね上がりを避けるため、分母を 1e-12 で
         // 下支えする（PoC-v2-1 `verify_against_rust.py` と同じ方式）。
@@ -197,7 +229,6 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
         rel_errs.push(rel);
     }
 
-    let total = a.len();
     let max_abs_diff = max_nonfinite_aware(&abs_diffs);
     let mean_abs_diff = abs_diffs.iter().sum::<f64>() / total as f64;
     let max_rel_err = max_nonfinite_aware(&rel_errs);
@@ -209,7 +240,7 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
     let p99_abs_diff = percentile(&sorted, 0.99);
     let p999_abs_diff = percentile(&sorted, 0.999);
 
-    Ok(CompareReport {
+    CompareReport {
         total,
         fail_count,
         max_abs_diff,
@@ -220,7 +251,7 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
         p99_abs_diff,
         p999_abs_diff,
         max_fail_abs_diff,
-    })
+    }
 }
 
 /// テスト支援 API: [`compare`] を呼び、複合判定が FAIL の場合は
@@ -238,6 +269,36 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
 #[track_caller]
 pub fn assert_parity(context: &str, actual: &[f32], expected: &[f32]) {
     let report = match compare(actual, expected) {
+        Ok(report) => report,
+        Err(err) => panic!("{context}: {err}"),
+    };
+    assert!(
+        report.passes(),
+        "{context}: 複合判定 FAIL（fail_count={}/{}, max_abs_diff={:.3e}, \
+         max_rel_err={:.3e}, mean_abs_diff={:.3e}, mean_rel_err={:.3e}, \
+         p50_abs_diff={:.3e}, p99_abs_diff={:.3e}, p999_abs_diff={:.3e}）",
+        report.fail_count,
+        report.total,
+        report.max_abs_diff,
+        report.max_rel_err,
+        report.mean_abs_diff,
+        report.mean_rel_err,
+        report.p50_abs_diff,
+        report.p99_abs_diff,
+        report.p999_abs_diff,
+    );
+}
+
+/// [`assert_parity`] の f64 版（イシュー #1697）。[`compare_f64`] を呼び、
+/// 判定・panic メッセージ形式は f32 版と同一。
+///
+/// # Panics
+///
+/// - `actual`・`expected` の長さが一致しない場合
+/// - 複合判定が FAIL（`fail_count > 0`）の場合
+#[track_caller]
+pub fn assert_parity_f64(context: &str, actual: &[f64], expected: &[f64]) {
+    let report = match compare_f64(actual, expected) {
         Ok(report) => report,
         Err(err) => panic!("{context}: {err}"),
     };
@@ -295,6 +356,55 @@ pub fn matmul_reference_fma(
     k: usize,
 ) -> Result<(), GemmError> {
     crate::gemm::validate_dims(a, b, c, m, n, k)?;
+
+    for i in 0..m {
+        let a_row = &a[i * k..i * k + k];
+        let c_row = &mut c[i * n..i * n + n];
+        for (p, &a_ip) in a_row.iter().enumerate() {
+            let b_row = &b[p * n..p * n + n];
+            for j in 0..n {
+                c_row[j] = a_ip.mul_add(b_row[j], c_row[j]);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`matmul_reference_fma`] の f64 版（イシュー #1697。`crate::typed_f64` の
+/// `gemm_f64` が bit 一致を検証する参照点）。形状検証は `gemm::GemmError` の
+/// 既存 variant（`ALenMismatch`／`BLenMismatch`／`CLenMismatch`／
+/// `DimProductOverflow`）をそのまま再利用する（`gemm::validate_dims` は
+/// `&[f32]` 固定のため呼べず、本関数内で同じ検査を f64 スライス向けに
+/// 複製する。検証ロジックの意味は完全に同一）。
+pub fn matmul_reference_fma_f64(
+    a: &[f64],
+    b: &[f64],
+    c: &mut [f64],
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<(), GemmError> {
+    let mk = m.checked_mul(k).ok_or(GemmError::DimProductOverflow)?;
+    let kn = k.checked_mul(n).ok_or(GemmError::DimProductOverflow)?;
+    let mn = m.checked_mul(n).ok_or(GemmError::DimProductOverflow)?;
+    if a.len() != mk {
+        return Err(GemmError::ALenMismatch {
+            expected: mk,
+            actual: a.len(),
+        });
+    }
+    if b.len() != kn {
+        return Err(GemmError::BLenMismatch {
+            expected: kn,
+            actual: b.len(),
+        });
+    }
+    if c.len() != mn {
+        return Err(GemmError::CLenMismatch {
+            expected: mn,
+            actual: c.len(),
+        });
+    }
 
     for i in 0..m {
         let a_row = &a[i * k..i * k + k];

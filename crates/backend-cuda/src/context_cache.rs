@@ -487,6 +487,22 @@ pub(crate) fn cached_reduce(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::gather_scatter::
+/// CudaGatherScatter`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1777。キーは [`ContextKey`]。`cached_reduce` と同型）。
+/// `ops::CudaBackendOps::gather`／`scatter` の唯一の呼び出し先。
+pub(crate) fn cached_gather_scatter(
+    device: &CudaDevice,
+) -> Result<Arc<crate::gather_scatter::CudaGatherScatter>, CudaError> {
+    static CACHE: OnceLock<
+        SingleFlightCache<ContextKey, crate::gather_scatter::CudaGatherScatter>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::gather_scatter::CudaGatherScatter::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する `op`（[`ScalarUnaryOp`]）の
 /// テンプレート生成カーネルをプロセス内キャッシュから取得する
 /// （イシュー #1700。キーは [`ContextKey`]。`cached_gemm` 冒頭コメント
@@ -494,10 +510,12 @@ pub(crate) fn cached_reduce(
 ///
 /// キーは `(ContextKey, op.kind_name())`（[`ScalarOpKind::kind_name`]。
 /// ペイロード値〈`f32`〉はキャッシュキーに含めない — `tensor-core::
-/// scalar_op` モジュール doc「#1635 への申し送り」の契約どおり。本
-/// イシュー（#1700）が対象とする kind はいずれもペイロードなしのため、
-/// この区別は将来 #1701／#1702 がペイロードあり kind を追加する際にも
-/// 同じキー方式のまま拡張できるようにするための設計）。
+/// scalar_op` モジュール doc「#1635 への申し送り」の契約どおり。#1700
+/// が対象とする kind はいずれもペイロードなしだが、#1702 が追加した
+/// `ScalarUnaryOp::Clamp`（`min`／`max` の 2 引数ペイロード）は同じキー
+/// 方式のまま拡張できている（`kernels_scalar_op::unary_payload` がキー
+/// に触れずカーネル起動引数として payload を渡す設計。同モジュール doc
+/// 「スコープ」参照）。
 ///
 /// [`crate::kernels_scalar_op::unary_kernel_source`] が `None`（未実装
 /// kind）を返す場合はキャッシュへ触れずに `Ok(None)` を返す（呼び出し元

@@ -169,3 +169,5 @@ plan 構築不能（`Sigmoid`／`Tanh` 混在・leaves 件数不一致）、ま�
 - **`docs/perf/metal-infer-chain-single-sync.md`**: 実装記録表（#1688 への帰属）・事前登録規則の転記・M4 Max 実機記入欄
 
 M4 Max 実機での実測自体は本エージェント実行環境に Apple Silicon 実機への到達手段がないため未実施のまま記入欄を残し、Mac セッションへ引き継ぐ。
+
+**#1689 の実装記録**: 上記スコープ外事項に対する GB10 実機実測スキャフォールドを整備した（`crates/facade/tests/predict_device_chain_cuda_bit_identity.rs`〈小形状 2 種＋ bench 形状での chain／旧経路 bit 完全一致・run-to-run bit 同一・CPU `Sequential::predict` との REQ-2 複合判定・cross-tree bit ダンプ〉・`scripts/bench/framework-compare/run_ab_infer_chain_cuda.sh`〈`--task infer` A/B。`compare_gemm_ab.py` の `--task infer` 対応込み〉・`docs/perf/infer-chain-single-sync-cuda-ab.md`〈事前登録規則・記入欄〉・`docs/perf/logs/infer-chain-single-sync-cuda-1689/`）。本番コード（`crates/*/src`）は変更していない。本エージェント実行環境に DGX Spark GB10 実機への到達手段がなく実測は未実施のまま記入欄を残す（verdict=undetermined）。CUDA には Metal の `dispatch_count` 契約のような同期回数診断カウンタが存在しないため、決定 5（ストリーム順序契約）＋bit 同一＋A/B の性能実測で代替する方針を維持し、新設はしていない

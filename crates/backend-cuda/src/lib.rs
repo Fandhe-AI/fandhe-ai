@@ -411,6 +411,12 @@ mod rnn_cell;
 // （起動 API／NVRTC カーネル文字列の責務分離）。
 mod kernels_reduce;
 mod reduce;
+// イシュー #1777: gather／scatter（`torch.gather`／`torch.scatter`／
+// `torch.scatter_add` 相当）起動 API・カーネルソース。`reduce.rs`／
+// `kernels_reduce.rs` と同じ 2 ファイル構成（起動 API／NVRTC カーネル
+// 文字列の責務分離）。
+mod gather_scatter;
+mod kernels_gather_scatter;
 // イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線
 // （`gemm.rs::CudaGemm::new`）を実機で検証する `#[ignore]` テスト。
 // `context_cache`（非公開 `mod`）へ到達する必要があるため
@@ -435,6 +441,11 @@ mod sgd;
 mod softmax;
 mod swizzle;
 mod transpose;
+// イシュー #1704: `TypedOps<half::bf16>` の CUDA 実装（ホスト側 bf16⇔f32
+// 変換＋既存 f32 `BackendOps` カーネルへの委譲。cudarc 0.19.8 の
+// `DeviceRepr for half::bf16` 可用性調査結果は `typed_bf16.rs` 冒頭
+// コメント・`docs/backend-dtype-dispatch-design.md` §5／§12 参照）。
+mod typed_bf16;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use elementwise::CudaElementwise;

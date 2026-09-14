@@ -445,6 +445,32 @@ impl BackendOps for CpuBackendOps {
         Some(self)
     }
 
+    /// `TypedOps<f64>` の CPU 実装（`crate::typed_f64`。イシュー #1697・
+    /// 親 #1649）への capability accessor。`CpuBackendOps` 自身が
+    /// `impl TypedOps<f64> for CpuBackendOps`（`typed_f64.rs`）を実装する
+    /// ため、`memory_ops` と同じパターンで `self` をそのまま返す。
+    /// f16（#1698）・bf16（#1699）とも下記アクセサでオーバーライド済み。
+    fn typed_ops_f64(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<f64>> {
+        Some(self)
+    }
+
+    /// `BackendOps::typed_ops_f16` の CPU 実装（イシュー #1698・親 #1649）。
+    /// `CpuBackendOps` 自身が [`fandhe_ai_tensor_core::TypedOps<half::f16>`]
+    /// を実装する（`crate::typed_f16` 参照。f16 をソフトウェア変換で f32
+    /// へ昇格し既存 f32 カーネルへ委譲するラッパー）ため、`memory_ops`
+    /// と同じく `self` をそのまま返す。
+    fn typed_ops_f16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::f16>> {
+        Some(self)
+    }
+
+    /// `crate::typed_bf16`（イシュー #1699）が `CpuBackendOps` へ
+    /// `impl TypedOps<half::bf16>` を実装しているため、`memory_ops` と
+    /// 同じ「`Some(self)` を返す capability accessor オーバーライド」
+    /// パターンで結線する。
+    fn typed_ops_bf16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::bf16>> {
+        Some(self)
+    }
+
     /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
     /// `docs/device-resident-update-design.md` §3.2・§5.2）。CPU は
     /// 「デバイス」がホストメモリそのものであるため、`downcast_handle_mut`
@@ -1836,7 +1862,7 @@ fn linalg_error_to_backend_error(err: LinalgError) -> BackendError {
 /// 実行時失敗のため `KernelLaunchFailed` に寄せる（`BackendError` に
 /// reduction 専用 variant は設けない。§4.4 の 5 variant + TASK-1.9a/1.9c
 /// 拡張の範囲に収める）。
-fn reduce_error_to_backend_error(err: reduction::ReduceError) -> BackendError {
+pub(crate) fn reduce_error_to_backend_error(err: reduction::ReduceError) -> BackendError {
     match err {
         reduction::ReduceError::Shape(shape_err) => BackendError::ShapeMismatch(shape_err),
         reduction::ReduceError::EmptyReduction { op } => {

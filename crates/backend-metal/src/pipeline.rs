@@ -126,7 +126,16 @@ pub(crate) fn compile_gemm_library(device: &MtlDevice) -> Result<Retained<MtlLib
 /// `MathFloatingPointFunctions::Precise`。本ファイル冒頭コメント参照）を
 /// 2 経路で確実に同一適用する（ここが分岐すると丸め方針が経路依存になり
 /// REQ-2 の複合判定が黙って壊れるため、単一の関数へ集約する設計判断）。
-fn compile_source(device: &MtlDevice, src: &str) -> Result<Retained<MtlLibrary>, MetalError> {
+///
+/// `pub(crate)`（イシュー #1707）: `crate::scalar_op_source` が生成する
+/// kind ごとの単発コンパイル単位ソースも本関数を経由させることで、
+/// 上記の「2 経路で確実に同一適用」を 3 経路目（ScalarOp テンプレート
+/// 経路）でも維持する（`context_cache::cached_scalar_unary_pipeline`／
+/// `cached_scalar_binary_pipeline` の唯一の呼び出し先）。
+pub(crate) fn compile_source(
+    device: &MtlDevice,
+    src: &str,
+) -> Result<Retained<MtlLibrary>, MetalError> {
     let ns_src = NSString::from_str(src);
     let options = compile_options();
 

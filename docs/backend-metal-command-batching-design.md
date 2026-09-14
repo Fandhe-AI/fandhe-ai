@@ -1186,6 +1186,13 @@ src/gemm.rs`・`crates/autodiff/src/grad.rs` の resident 経路は本
 
 #### 7.5.4 実測記入欄（Mac セッション。#1691 へ引き継ぎ）
 
+イシュー #1691 で事前登録判定規則・記録文書
+（`docs/perf/metal-mse-backward-encode-only-ab.md`）・実行スクリプト
+一式（`docs/perf/logs/metal-mse-backward-1691/`。`orchestrate.sh`・
+`aggregate.py`〈`--self-test` 付き〉・`README.md`）を用意した。本 PR の
+実行環境（Linux）に Apple Silicon 実機への到達手段がないため、以下は
+依然として未実測のまま Mac セッションへ申し送る。
+
 ```
 bit 同一（既存 `#[ignore]` テスト mse_parity.rs 等）: 未実測
 カウンタ（mnist_scale_train_reuse_metal_batch_counters）:
@@ -1193,6 +1200,9 @@ bit 同一（既存 `#[ignore]` テスト mse_parity.rs 等）: 未実測
   after（#1690）: encode= command_buffer= wait=
 env_info（内部ホスト名は含めない）: 未実測
 ```
+
+実測は `docs/perf/logs/metal-mse-backward-1691/orchestrate.sh` へ記録
+（README・事前登録判定規則を参照）。本 PR 時点では未実測。
 
 ## 8. 実装記録（#1099。§4.2・§4.4・§4.5・§3.4・§3.5 の追記）
 

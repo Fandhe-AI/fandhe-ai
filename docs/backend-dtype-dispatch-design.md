@@ -129,7 +129,7 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 |---|---|---|---|
 | f64 | 実装可（`f64::mul_add` 参照実装。並列 BLIS 化は任意） | SIMT カーネル実装可能だが性能目的なし。既定 `Unsupported` から開始 | **構造的に不可**（MSL に `double` 型が存在しない。`soft_f64.rs` の 64bit 整数エミュレーションは bias 勾配縮約というスカラー累算専用に作られたものであり、GEMM 全体を `f64` 精度で動かす手段ではない）→ 恒久 `Unsupported`（fail-closed） |
 | f16 | `half` によるソフトウェア変換で f32 累算（aarch64 fp16 intrinsics は `unsafe` を伴うため実装時に別途 security-auditor 承認が必要。既定はソフトウェア変換） | 既存 `CudaGemmAuto::run_f16`（mma.sync 優先→WMMA）を結線。parity は REQ-2 形状別判定方式の既存 baseline 範囲内（新規 baseline 追加は行わない） | 既存 `dispatch_f16_auto_unverified` を結線。`_unverified`／`#[doc(hidden)]` の解除可否は #1651 の承認事項（§7-4） |
-| bf16 | `half::bf16` で f32 累算（依存追加なし。`half =2.7.1` に同梱） | cudarc 0.19.8 に `bf16` 向け `DeviceRepr` 実装があるかは本設計の調査範囲（ローカルソース grep）では確認できていない。外部レジストリ参照が必要なため **未検証**と明記し #1650 の調査事項とする | **未検証**（MSL の `bfloat` 型可用性・`simdgroup_matrix` 対応をコンパイルプローブで確認する必要がある。`crates/backend-metal` の `.metal` シェーダに `bfloat` の使用例は現時点で存在しない。手法は `docs/perf/logs/metal-gemm-mpp-tensor-1326/` のコンパイルプローブ方式を踏襲する） |
+| bf16 | `half::bf16` で f32 累算（依存追加なし。`half =2.7.1` に同梱） | **可**（イシュー #1704 で確定。`cudarc-0.19.8/src/driver/safe/core.rs:990,1038` に `unsafe impl ValidAsZeroBits`／`DeviceRepr for half::bf16` が `#[cfg(feature = "f16")]` 配下で存在し、workspace `Cargo.toml:112-118` の `cudarc` 依存は `f16` feature を既に有効化済み。依存・feature 変更なしで `TypedOps<bf16>` 実装済み。§12 参照） | **未検証**（MSL の `bfloat` 型可用性・`simdgroup_matrix` 対応をコンパイルプローブで確認する必要がある。`crates/backend-metal` の `.metal` シェーダに `bfloat` の使用例は現時点で存在しない。手法は `docs/perf/logs/metal-gemm-mpp-tensor-1326/` のコンパイルプローブ方式を踏襲する） |
 
 ## 6. 数値契約（tolerance／baseline 不変）
 
@@ -146,6 +146,37 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 5. CPU f16／bf16 経路で `unsafe` intrinsics（aarch64 fp16 等）を使う場合の承認（既定はソフトウェア変換で `unsafe` 非導入。#1649）
 6. 最小演算集合（§4.2）と、#1649〜#1651 の受け入れ条件の再スコープ（`Var`／`Tape`／VJP は本段階の対象外。§8 参照）
 7. facade（`crates/facade`）公開面への昇格は本設計の対象外。`docs/compat-api-scope.md` §5 に定める昇格手続きを別途要する
+
+## 7.5 実装記録（#1698・CPU `TypedOps<f16>`）
+
+親 #1649 コメント（2026-09-12 ユーザー承認。§7-1〜7-2 の承認事項に対応）を受け、
+`crates/backend-cpu` に `impl TypedOps<half::f16> for CpuBackendOps`（§4.2 最小
+集合 8 演算：`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`）を実装した。
+
+- **設計**: §5 の実現可否表どおり `half` によるソフトウェア変換（aarch64 fp16
+  intrinsics 等の `unsafe` は使わない。承認事項 5 の既定側）。各演算は
+  「f16 → f32 昇格（`crate::typed_f16::upcast_f16`）→ 既存 f32
+  `BackendOps` カーネルへ委譲 → f32 → f16 へ 1 回丸め
+  （`crate::typed_f16::downcast_f32`）」の 3 段構成で実装し、`elementwise.rs`／
+  `gemm.rs`／`gemm_blis/**`／`reduction.rs`／`parity.rs`（f32 経路本体）は
+  一切変更しない
+- **ファイル**: `crates/backend-cpu/src/typed_f16.rs`（新規）・`ops.rs`
+  （`typed_ops_f16(&self) -> Option<&dyn TypedOps<half::f16>>` accessor を
+  `Some(self)` へ結線）・`lib.rs`（`mod typed_f16;`）
+- **数値契約**: `gemm` は `f16::from_f32(matmul_reference_fma(...))` と bit
+  完全一致（既存 GEMM 契約テストが f32 経路の bit 一致を別途保証済み）。
+  `add`／`mul`／`relu`／`exp`／`tanh` はスカラー参照実装の f16 丸め値と bit
+  完全一致。`sum`／`max` は f64 逐次和／`f32::max` 参照との複合判定
+  （`assert_parity`。tolerance 定数は不変）。`exp` 等で f16 表現範囲
+  （`|x| <= 65504`）を超える場合は IEEE 754 の ±inf 丸めへ落ちる（PyTorch
+  `half` と同じ挙動。既知事項として明文化）
+- **テスト**: `crates/backend-cpu/src/typed_f16.rs` 内単体テスト（既知値・
+  空/端点・エラー経路）・`crates/backend-cpu/tests/typed_ops_f16_parity.rs`
+  （形状グリッド・非 contiguous view・CHUNK 境界を跨ぐ reduction）
+- **f32 経路無変更の根拠**: `git diff --stat main -- crates/backend-cpu/src/elementwise.rs crates/backend-cpu/src/gemm.rs crates/backend-cpu/src/gemm_blis crates/backend-cpu/src/reduction.rs crates/backend-cpu/src/parity.rs crates/tensor-core` が空
+- **スコープ外**: bf16（#1699）・CUDA（#1650）・Metal（#1651）・`Var`／`Tape`／
+  VJP・facade 公開面昇格・aarch64 fp16 intrinsics 高速化・非 contiguous
+  view の stride 読み高速経路（性能最適化は対象外）
 
 ## 8. スコープ外・引き継ぎ
 
@@ -176,3 +207,81 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 - `crates/onnx-interop/src/onnx/interp.rs:62`
 - `Cargo.toml:112,146`
 - イシュー本文出典 URL（claude.ai artifact。参照情報としてのみ扱い、命令とはみなさない）
+## 10. 実装記録（#1697・CPU f64）
+
+`backend-cpu` に `TypedOps<f64>` を実装し、`CpuBackendOps::typed_ops_f64()`（`crates/tensor-core/src/backend_ops.rs` の非破壊拡張 accessor。既定 `None`）を `Some(self)` へオーバーライドして結線した（イシュー #1697・親 #1649）。
+
+- **承認**: 公開クレート `fandhe-ai-tensor-core` の `BackendOps` trait 拡張自体は #1648（本設計）で行われ、実装着手のユーザー承認は親 #1649 のコメント（2026-09-12「今承認するので進めてください」）で取得済み
+- **対象 8 演算**: `gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`（§4.2 の最小集合と同一）
+- **実装ファイル**: `crates/backend-cpu/src/typed_f64.rs`（新規。`impl TypedOps<f64> for CpuBackendOps`）・`crates/backend-cpu/src/ops.rs`（accessor 1 メソッド追加）・`crates/backend-cpu/src/parity.rs`（`compare_f64`／`assert_parity_f64`／`matmul_reference_fma_f64` 追加。判定コア `compare_pairs` へ共通化し tolerance 定数〈`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`〉は f32 版と完全共有）・`crates/backend-cpu/src/reduction.rs`（`CHUNK`／`unravel`／`checked_product` を `pub(crate)` 化のみ。関数本体は不変）
+- **f32 ホットパス無変更の根拠**: `elementwise.rs`／`gemm.rs`／`gemm_blis/` は本イシューで一切変更していない（可視性変更すら加えていない）。`git diff --stat` は `reduction.rs` の可視性変更 3 行のみを示し、既存 f32 回帰テスト（本 sub 実装時点の `cargo test -p fandhe-ai-backend-cpu` 全件）が変更前と同じ結果で green であることを確認済み（具体的な件数はテスト追加の都度変わるため本節では固定値を書かない。#1697 の origin/main への追従〈#1786 の gather/scatter parity 追加等を取り込んだ rebase〉後も `cargo test -p fandhe-ai-backend-cpu` 全件 green・`cargo clippy --workspace --all-targets --all-features -- -D warnings` clean を再確認済み）
+- **数値契約**: `gemm` は `f64::mul_add`・C の行（i）単位のみを rayon 並列化（BLIS packing・NT/TN fast path は対象外）。`sum`（全縮約）は `CHUNK`（4096）単位の `par_chunks` によるチャンク内逐次・チャンク間固定順序結合（アキュムレータは出力 dtype と同一の f64 のため downcast なし）。軸指定 reduction は出力要素側のみ並列・縮約軸は昇順逐次。`max` の単位元は `f64::NEG_INFINITY`・`f64::max`（NaN 非伝播は f32 版と同じ既知事項）。elementwise は f32 版と同型の 2 層構成（contiguous fast path → 非負 stride 読み `ReadOperandF64` → `Tensor::get` フォールバック）
+- **parity ヘルパー**: `compare_f64`／`assert_parity_f64` は f32 版と同一の判定ロジック（`compare_pairs` 共通コア）・同一定数。`matmul_reference_fma_f64` は `gemm_f64` の bit 一致参照点（形状検証は `gemm::GemmError` の既存 variant を再利用）
+- **テスト**: クレート内単体テスト 13 件（`typed_f64.rs` 手計算値中心）・統合テスト 8 件（`tests/typed_ops_f64_parity.rs`。決定的乱数入力・`PARALLEL_THRESHOLD` 超サイズでの並列経路・非 contiguous view・空縮約・shape エラー・f32 版との REQ-2 複合判定〈`cross_dtype_f64_vs_f32_composite_parity`〉）。`RAYON_NUM_THREADS=1` と既定並列度の両条件で bit 一致を確認済み
+- **スコープ外**: f64 gemm の NT/TN 転置 fast path・BLIS 型 packing／2D 動的分配の f64 化（性能目的がないため参照実装のまま）・`elementwise.rs`／`reduction.rs` の `T: Element` 汎用化（#1698／#1699 完了後に共通化候補として検討）・`max` の NaN 非伝播セマンティクス（f32 版と同じ既知事項）・`Var`／`Tape`／VJP・facade 公開面への昇格（§7-7・§8。`docs/compat-api-scope.md` §5 手続き要）・f16／bf16（#1698／#1699）・CUDA（#1650）・Metal（#1651）
+## 11. 実装記録（#1699・CPU `TypedOps<bf16>`）
+
+- `impl Element for half::bf16`（受け入れ条件の一部）は #1687（PR #1784）で既に追加済みであり、本イシューでは追加不要（`crates/tensor-core/src/element.rs:90`・`Scalar` 実装は同ファイル 186〜189 行目）と確認したうえで着手した。
+- 対象 8 演算（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`。§4.2 の最小集合）を `crates/backend-cpu/src/typed_bf16.rs`（新規）に実装し、`CpuBackendOps::typed_ops_bf16()` を `Some(self)` へオーバーライドした（`crates/backend-cpu/src/ops.rs`。`memory_ops` と同型の capability accessor パターン）。
+- **実装方式**: bf16 専用カーネルは書かず、`promote`（`Tensor<bf16>` → `Tensor<f32>`。bf16→f32 は損失なし）→ 既存 f32 カーネル（`ops::CpuBackendOps` 経由の本番 GEMM・`elementwise::{add,mul,relu,exp,tanh}`・`reduction::{sum,max}`）→ `round_to_bf16`（`bf16::from_f32` による最近接偶数丸め。演算全体を通じて 1 回のみ）の 3 段ラッパーとした。これにより `crates/backend-cpu/src/{elementwise,gemm,reduction,parity}.rs`・`gemm_blis/`・`crates/tensor-core/**` は無変更（`git diff --stat main` で空を確認済み）。
+- `sum` は f32 カーネル（`reduction::sum`）内部の f64 アキュムレータ契約（`.claude/rules/coding-rust.md`）にそのまま乗る「方式 (a)」を採用した。`reduction::CHUNK` 等を可視化して f64 中間値へ直接アクセスする「方式 (b)」は不要な可視性拡張を伴うため採らなかった。
+- **判定契約**: bf16 は仮数 8 bit（1 ulp ≈ 2^-8）で `parity::RELATIVE_TOLERANCE`（1e-3）より粗いため、「参照値も出力 dtype（bf16）へ丸めてから比較する」契約を単体テストで固定した（`add_one_plus_two_pow_neg_eight_rounds_to_one_via_bf16_tie_to_even`）。異なる累積順序の f32 経路を乱数入力で両側 bf16 丸めして比較する検証は行っていない（丸め境界を跨いで 1 bf16 ulp ずれうるため）。`gemm` は本番 BLIS 経路と `parity::matmul_reference_fma` が bit 完全一致する既存契約（`tests/gemm_blis_parity.rs`）があるため、この問題を踏まずに済む。
+- `reduce_error_to_backend_error`（`crates/backend-cpu/src/ops.rs`）を `pub(crate)` 化し、`typed_bf16` から再利用した（重複実装を避ける）。tolerance 定数・baseline は不変。
+- テストは `typed_bf16.rs` 内 `#[cfg(test)]`（19 件。手計算値・空縮約・shape エラー・非 contiguous・NaN／±inf のクラス一致・accessor 経由 dispatch・小整数入力での f32 `BackendOps` との bit 一致を含む）で完結し、専用の統合テストファイルは追加していない（8 演算とも `CpuBackendOps` 単体で完結し、クレート境界を跨ぐ検証が不要だったため）。
+- `cargo fmt --all --check`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`・`cargo test -p fandhe-ai-backend-cpu --all-features`（440 passed）・`cargo test --workspace --all-features` は green（ワークスペース全体実行時に観測した `fandhe-ai --doc` の 1 件の失敗は、並行実行中の他セッションと共有 target ディレクトリ間のビルドキャッシュ競合〈E0460〉によるもので、本変更とは無関係であることを単独再実行で確認済み）。
+- `Var`／`Tape`／VJP・facade 公開面昇格・`MemoryOps`／resident 系・カーネル融合・bf16 専用 SIMD は対象外のまま（§8）。f16（#1698）・CUDA bf16（#1704）・Metal bf16（#1706）は本イシューでは触れない。
+
+
+## 12. 調査・実装記録（#1704・CUDA `TypedOps<bf16>`）
+
+`backend-cuda` に `TypedOps<half::bf16>` を実装し、`CudaBackendOps::typed_ops_bf16()`（`crates/tensor-core/src/backend_ops.rs` の非破壊拡張 accessor。既定 `None`）を `Some(self)` へオーバーライドして結線した（イシュー #1704・親 #1650）。
+
+### 12.1 調査結果（R1）: cudarc `DeviceRepr` 可用性は「可」
+
+§5 の「bf16 × CUDA」セルは当初「cudarc 0.19.8 に bf16 向け `DeviceRepr` 実装があるか未検証」だったが、本イシューで次のとおり確定した（依存・feature の追加変更は不要でユーザー承認不要）。
+
+| 事実 | 出典 |
+|---|---|
+| `unsafe impl DeviceRepr for half::bf16 {}` | `~/.cargo/registry/src/index.crates.io-*/cudarc-0.19.8/src/driver/safe/core.rs:1038`（`#[cfg(feature = "f16")]` 配下） |
+| `unsafe impl ValidAsZeroBits for half::bf16 {}` | 同 `core.rs:990`（`#[cfg(feature = "f16")]` 配下） |
+| workspace の `cudarc` は `features = ["driver", "nvrtc", "dynamic-loading", "cuda-13000", "f16"]` で `f16` feature 有効 | ルート `Cargo.toml:112-118`・`.claude/rules/deps-policy.md` CUDA 区分 |
+| `clone_htod`／`clone_dtoh`／`alloc_zeros` は bf16 でそのまま使える | 同 `core.rs:1559,1592,1630` の `T: DeviceRepr`（＋ `ValidAsZeroBits`）境界 |
+
+### 12.2 実装方式: ホスト側 bf16⇔f32 変換＋既存 f32 `BackendOps` カーネルへの委譲
+
+`crates/backend-cpu/src/typed_f16.rs`（#1698）と同型の 3 段構成（昇格 → 既存 f32 経路への委譲 → 丸め）を採る。bf16 デバイス常駐で widen/narrow する専用カーネルは追加せず（性能最適化はスコープ外）、`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の 8 演算とも既存 CUDA f32 経路（H2D・NVRTC カーネル・D2H を含む）へホスト側変換の後に委譲する。
+
+- **`gemm` は `gemm_fp32_strict` へ委譲する（`gemm` ではない）**: CUDA の `BackendOps::gemm` は `crate::precision::gemm_precision()`（TF32／TF32x3 opt-in モード）で暗黙に精度が変わりうる。§6 の f32 厳密累算契約を保証するため、opt-in フラグを一切参照しない `gemm_fp32_strict`（CUDA オーバーライドは `ops.rs:1700` 付近）を使う。CPU 版が `gemm`（無印）を使っているのは CPU に TF32 の概念がなく `gemm`＝常に f32 厳密経路のためであり、CUDA ではそのまま踏襲しない
+- **accessor `typed_ops_bf16` は無条件に `Some(self)` を返す**: `memory_ops` は `CudaMemory` 構築のため `device_handle()`（driver 初期化）を経由する必要があり driver 不在時に `None` へ縮退するが、`TypedOps<bf16>` の実体は `self` 自身で driver に一切触れる必要がない。実行時の CUDA 不在は各演算メソッド内部が `BackendError::CudaUnavailable` を返す形で伝える
+
+### 12.3 実装ファイル
+
+- `crates/backend-cuda/src/typed_bf16.rs`（新規。`upcast_bf16`／`downcast_f32`・`impl TypedOps<bf16> for CudaBackendOps`）
+- `crates/backend-cuda/src/ops.rs`（`typed_ops_bf16` accessor 1 メソッド追加。**`TypedOps` を top-level `use` しない**——`self.add`／`self.relu` 等の f32 専用内部呼び出しが `impl TypedOps<bf16>` の同名メソッドと衝突し「multiple applicable items in scope」で解決不能になるため、戻り値型でのみ `fandhe_ai_tensor_core::TypedOps<bf16>` を完全修飾参照する。CPU 側 `ops.rs` が `TypedOps<f64>`／`TypedOps<f16>` を top-level `use` せず戻り値型でのみ完全修飾しているのと同じ回避策）
+- `crates/backend-cuda/src/lib.rs`（`mod typed_bf16;` の追加）
+- `crates/backend-cuda/tests/typed_ops_bf16_parity.rs`（新規。環境適応スモーク・層 1〈同一バックエンド内の構造的不変条件・run-to-run 決定性〉・層 2〈CPU f32 参照実装を bf16 丸めした値とのクロスバックエンド判定〉）
+
+### 12.4 f32 経路無変更の根拠
+
+`git diff --stat` は `crates/backend-cuda/src/{typed_bf16.rs,lib.rs,ops.rs}` と `tests/typed_ops_bf16_parity.rs` のみを示し、`kernels_*.rs`／`elementwise.rs`／`gemm*.rs`／`reduce.rs`／`memory.rs`／`precision.rs` は無変更（`ops.rs` の差分も `typed_ops_bf16` メソッド 1 つと import 1 行のみ）。既存 f32 回帰テスト（`cargo test -p fandhe-ai-backend-cuda --all-features`。lib 787 件・統合テスト群）が全 green であることを確認済み。
+
+### 12.5 parity テストの設計（tolerance 不変で成立させるための構成）
+
+参照値を bf16 へ丸めてから比較する方式は、丸め前の f32 値が両者で bit 一致している場合にのみ健全である（bf16 の 1 ulp は相対 2^-8 ≈ 0.0039 で `RELATIVE_TOLERANCE`＝1e-3 を超え、丸め境界をまたぐと不合格になりうる。§6 参照）。tolerance 変更は禁止のため、テストを二層で構成する。
+
+- **層 1（主判定）**: 同一バックエンド内の構造的不変条件 `TypedOps::<bf16>::op(x) == bf16::from_f32(BackendOps::op_f32(f32(x)))` を bit 完全一致で検証し、run-to-run 決定性も確認する
+- **層 2（クロスバックエンド）**: CPU の既存 f32 `BackendOps` をホスト側で bf16 丸めした値を参照とし、小整数（`[-8, 8]`）・小 K（16 以下）の入力に限定することで丸め境界またぎが構造的に起きない条件下で `fandhe_ai_backend_cpu::assert_parity`（複合判定 1e-3/1e-5・変更なし）を適用する。`exp`／`tanh` はこの技法（層 2）が使えないため層 2 の対象外とし、層 1（構造的不変条件の bit 完全一致）で検証する
+- **注記**: CPU 側 `TypedOps<bf16>` はイシュー #1699・PR #1794 で実装済み・origin/main マージ済み（§11）。層 2 の参照値は本ファイル作成時点の実装同様 CPU の既存 f32 `BackendOps` をホスト側で丸めた値を使っており、`TypedOps::<bf16>::op` 同士の比較への差し替えは本イシューのスコープ外のまま残す（後続イシューへ引き継ぐ）
+- **是正（PR レビュー指摘）**: 当初の `run_layer1_structural_checks`（`tests/typed_ops_bf16_parity.rs`）は `gemm`／`add`／`mul`／`relu`／`sum`／`max` のみを検証し `exp`／`tanh` を含んでいなかった（本節「層 1 のみで検証する」という記述と実装が不一致だった）。層 1 は同一バックエンド内比較のため丸め境界またぎの問題がなく `exp`／`tanh` の追加は技術的に容易であり、`run_layer1_structural_checks` へ両演算のチェックを追加して是正済み
+
+### 12.6 GB10 実機実測
+
+本エージェント実行環境に DGX Spark GB10 実機への到達手段がないため、`#[ignore]` テスト（`typed_ops_bf16_matches_across_shapes`・`typed_bf16.rs::tests` の `#[cfg(test)]` コンパイル時検査は Linux で実行済み）は未実測のまま記入欄を残す。実行コマンド:
+
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --test typed_ops_bf16_parity -- --ignored --nocapture
+```
+
+### 12.7 スコープ外
+
+bf16 デバイス常駐経路（bf16 のまま H2D し device 側で widen/narrow する 2 カーネル方式）・bf16 `mma.sync` GEMM カーネル（cc ≥ 8.0。§8「#1650 の実装事項」）・CUDA `TypedOps<f64>`／`TypedOps<f16>`（#1703）・Metal（#1651）・`Var`／`Tape`／VJP の dtype 一般化・facade 公開面への昇格・GB10 実機実測（§12.6）。CPU bf16 は #1699・PR #1794 で実装済み・origin/main マージ済み（§11）

@@ -120,6 +120,24 @@
 //! cpu-gemm-2d-dynamic-partition-ab.md`「#1313 追記」節）、framework-compare
 //! gemm cpu の before/after（両実機・全 12 セル非後退）で ADOPT を確定した
 //! （`docs/perf/cpu-gemm-candle-gate-remeasurement.md` §20）。
+//!
+//! イシュー #1697（親 #1649）で `typed_f64` モジュール（`TypedOps<f64>`
+//! の CPU 実装。`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の
+//! 最小集合 8 演算）を追加し、`ops::CpuBackendOps::typed_ops_f64()`
+//! accessor（`fandhe_ai_tensor_core::BackendOps` の非破壊拡張。既定 `None`）を
+//! `Some(self)` へオーバーライドして結線した。f32 の `elementwise`／
+//! `reduction`／`gemm` 本体は変更せず（`typed_f64` モジュール冒頭コメント
+//! 参照）、f16／bf16 は #1698／#1699 が引き続き担当する
+//! （`docs/backend-dtype-dispatch-design.md` §10）。
+//!
+//! イシュー #1698（親 #1649）で `typed_f16` モジュール
+//! （`impl fandhe_ai_tensor_core::TypedOps<half::f16> for CpuBackendOps`）
+//! を追加し、`BackendOps::typed_ops_f16()` を `Some(self)` へ結線した。
+//! f16 をソフトウェア変換（`half` クレート）で f32 へ昇格し既存 f32
+//! カーネル（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`）
+//! へ委譲してから f16 へ 1 回丸めるラッパーであり、f32 経路本体
+//! （`elementwise`／`gemm`／`gemm_blis`／`reduction`／`parity`）は変更
+//! しない。bf16（#1699）は別イシューで担当する。
 
 mod device;
 mod elementwise;
@@ -166,6 +184,7 @@ pub mod reduction;
 pub mod rmsnorm;
 mod rnn_cell;
 mod small_shape_thread_cap;
+mod typed_f16;
 // イシュー #1587: Arm SME（Scalable Matrix Extension）の実行時検出
 // （fail-closed。macOS sysctl／Linux /proc/cpuinfo・rdsvl による SVL 確認）。
 // `gemm_blis::microkernel::SmeKernel::try_new` から呼ばれる。診断専用の
@@ -174,6 +193,18 @@ mod small_shape_thread_cap;
 mod sme_detect;
 pub mod softmax;
 mod thread_limit;
+// イシュー #1697（親 #1649）: `TypedOps<f64>` の CPU 実装。f32 の
+// `elementwise`／`reduction`／`gemm` 本体とは自己完結（モジュール冒頭
+// コメント参照）で、`ops::CpuBackendOps::typed_ops_f64()` accessor から
+// のみ到達する。
+mod typed_f64;
+// イシュー #1699（親 #1649）: `fandhe_ai_tensor_core::TypedOps<half::bf16>`
+// の CPU 実装。既存 f32 カーネル（`elementwise`/`gemm`/`gemm_blis`/
+// `reduction`）を変更せず、bf16⇄f32 昇格・丸めの薄いラッパーとして
+// `crate::ops::CpuBackendOps` へ `impl TypedOps<bf16>` する
+// （`crate::ops` の `pub(crate) fn reduce_error_to_backend_error` へ
+// 到達するためクレートルートの兄弟モジュールとして配置する）。
+mod typed_bf16;
 
 pub use device::CpuDeviceProvider;
 pub use elementwise::{
@@ -194,7 +225,7 @@ pub use memory::CpuMemory;
 pub use ops::CpuBackendOps;
 pub use parity::{
     ABSOLUTE_RESCUE_THRESHOLD, CompareReport, ParityError, RELATIVE_TOLERANCE, assert_parity,
-    compare, matmul_reference_fma,
+    assert_parity_f64, compare, compare_f64, matmul_reference_fma, matmul_reference_fma_f64,
 };
 pub use rmsnorm::{RmsNormError, run_rmsnorm_f32};
 pub use small_shape_thread_cap::{SmallShapeCapReport, small_shape_cap_report};

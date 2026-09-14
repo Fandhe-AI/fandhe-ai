@@ -710,3 +710,74 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
 - facade 新規公開面: `pub fn manual_seed`（新規）。内部型・アクセサは
   facade へ露出させない（`crates/facade/tests/api_surface.rs::
   facade_does_not_expose_rng_internal_types` で機械検査）。
+
+## 追補（イシュー #1777）
+
+gather／scatter／scatter_add（#1637 で where／masked_fill を実装済みへ
+更新した「index 系」欄。#1776 で Op 定義・CPU 参照実装・VJP を実装済み）
+の CUDA ネイティブカーネル（`CudaBackendOps::gather`／`scatter`。
+`crates/backend-cuda/src/gather_scatter.rs`・`kernels_gather_scatter.rs`）
+を実装した。
+
+- **数値契約**: bit 同一（run-to-run 完全一致・CPU 参照実装と bit 完全
+  一致）。`scatter_add` は `fandhe_ai_tensor_core::ScatterReduce` doc の
+  決定的集約契約（row-major 走査順・`f64` アキュムレータ・最後に 1 回
+  だけ `f32` downcast）を CUDA カーネル内で再現する。
+- **fail-closed 検査**: `input`／`index`／`src` の shape 再検査
+  （`gather_out_shape`／`scatter_out_shape`）・`index` 値の範囲検査は
+  ホスト側でデバイス初期化より前に行い、CPU 実装と同一の
+  `BackendError::ShapeMismatch(ShapeError::IndexOutOfRange)` を返す。
+- **性能最適化は対象外**（`O(numel_out × index_shape[dim])` 走査。並列化
+  方式の高度化は別イシューのスコープ）。
+- **GB10 実機実測は未実施**（本エージェント実行環境に CUDA 実機なし。
+  実行コマンドは `crates/backend-cuda/tests/gather_scatter_parity.rs`
+  冒頭コメント参照）。
+- facade 新規公開面なし（既存 `Var::gather`／`scatter`／`scatter_add`／
+  `index_select` の再エクスポート経由でそのまま CUDA バックエンドへ
+  到達する）。Metal 専用カーネルは #1778 が残対象。
+#### #1697 の追補（`backend-cpu` の `TypedOps<f64>` 実装）
+
+- 319 行目の `float64` 行の「部分」記載は本イシューにより CPU バックエンド限定で解消: `crates/backend-cpu` が `TypedOps<f64>`（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の 8 演算）を実装し、`CpuBackendOps::typed_ops_f64()` accessor 経由で到達可能になった（`docs/backend-dtype-dispatch-design.md` §10）
+- `Var`／`Tape`／facade は本イシューの対象外のまま不変（表本体の「XL」見積り自体は #1650／#1651〈CUDA／Metal〉・`Var`／`Tape` 昇格の残作業を含むため据え置く）。CUDA（#1650）・Metal（#1651）は未実装のまま
+
+#### #1698 の追補
+
+`float16` 行（319〜320 行目）のスナップショット本文は不変のまま、CPU
+バックエンド限定で `TypedOps<half::f16>` が実装され `Tensor<f16>` の
+`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` が CPU 経由で到達
+可能になった（`crates/backend-cpu/src/typed_f16.rs`。イシュー #1698）。
+CUDA（#1650）・Metal（#1651）は未実装のまま。`Var`／`Tape`／VJP・facade
+公開面（`Tensor<f16>` を受け取る facade API）は引き続き未接続で、本表の
+「未実装（欠落側）」列の評価（`Var` レベルの mixed precision）は変わらない。
+
+#### #1699 の追補
+
+`§2.12`（float64／float16・bfloat16。320 行目）の bfloat16 行に関して、
+CPU バックエンド限定で `fandhe_ai_tensor_core::TypedOps<half::bf16>` が
+`CpuBackendOps` に実装され、`BackendOps::typed_ops_bf16()` accessor
+経由で bf16 の 8 演算（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／
+`sum`／`max`）が CPU 上で実行可能になった（`crates/backend-cpu/src/
+typed_bf16.rs`。設計 `docs/backend-dtype-dispatch-design.md` §11）。
+
+- 実装方式は既存 f32 カーネルの再利用（bf16→f32 昇格 → f32 カーネル
+  → f32→bf16 丸め）であり、新規カーネルは追加していない。
+- `facade`（唯一の公開 API 面）への新規公開面はない。`Var`／`Tape`／
+  VJP・resident 系・カーネル融合は対象外のまま。
+- f16（#1698）・CUDA bf16（#1704）・Metal bf16（#1706）は本イシューで
+  は触れていない。表本体のスナップショット（対象 HEAD `097bff19`）・
+  必要工数見積り（XL）は変更しない（本追補は snapshot 後の部分実装差分
+  の記録）。
+
+## #1704 の追補
+
+`float64`／`float16`／`bfloat16` 行（319〜320 行目）のスナップショット本文
+は不変のまま、CUDA バックエンド限定で `TypedOps<half::bf16>` が実装され
+`Tensor<bf16>` の `gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`
+が CUDA 経由で到達可能になった（`crates/backend-cuda/src/typed_bf16.rs`。
+cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
+していることを確認したうえでの実装。イシュー #1704・
+`docs/backend-dtype-dispatch-design.md` §12）。CUDA `TypedOps<f64>`／
+`TypedOps<f16>`（#1703）・Metal bf16（#1651）は未実装のまま（CPU bf16 は
+#1699・PR #1794 で実装済み・origin/main マージ済み。上記「#1699 の追補」参照）。`Var`／`Tape`／VJP・facade 公開面（`Tensor<bf16>` を受け
+取る facade API）は引き続き未接続で、本表の「未実装（欠落側）」列の評価
+（`Var` レベルの mixed precision）は変わらない。

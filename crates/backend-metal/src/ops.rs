@@ -36,8 +36,8 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, require_same_shape,
-    row_norm_layout, row_softmax_layout,
+    QrFactors, ScalarBinaryOp, ScalarUnaryOp, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
+    require_same_shape, row_norm_layout, row_softmax_layout,
 };
 
 use crate::context::MetalContext;
@@ -340,6 +340,100 @@ impl MetalBackendOps {
         let ew = context_cache::cached_elementwise(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let out = run(&ew, &ctx, x_slice, mask_slice, value)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`BackendOps::scalar_unary`] の Metal ディスパッチ（イシュー
+    /// #1707。CUDA 側 `CudaBackendOps::scalar_unary_dispatch`〈#1700〉の
+    /// Metal 対応版）。`crate::scalar_op_source` が対応する kind のみ
+    /// パイプラインを生成・キャッシュして起動し、未対応 kind は
+    /// `BackendError::Unsupported` を返す（呼び出し元
+    /// `fandhe_ai_autodiff::grad::scalar_unary_with_fallback` がホスト
+    /// 参照実装へフォールバックする既存契約。`BackendOps::scalar_unary`
+    /// の既定トレイト実装と同じエラー種別を返すことで判定迂回経路を
+    /// 作らない。`.claude/rules/security.md` A08）。
+    ///
+    /// 対応 kind 判定を `context_cache::cached_context()`（Metal デバイス
+    /// 取得）より前に行う（CUDA 側と同じ理由。codex-review 指摘・
+    /// PR #1781: 先に判定しないと、Metal 利用不可環境で未対応 kind に
+    /// 対し本来返すべき `Unsupported` ではなく `DeviceUnavailable` を
+    /// 返してしまい、フォールバック契約が後退する）。
+    fn scalar_unary_dispatch(
+        &self,
+        op: ScalarUnaryOp,
+        a: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if crate::scalar_op_source::unary_kernel_source(op).is_none() {
+            return Err(BackendError::Unsupported(format!(
+                "scalar_unary: Metal template kernel not implemented for {op:?} \
+                 (#1709 が担当するスコープ外の可能性あり)"
+            )));
+        }
+
+        let out_shape = a.shape().to_vec();
+        let a_owned = a.contiguous();
+        let a_slice = a_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scalar_unary: input not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let ew = context_cache::cached_elementwise(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let pipeline = context_cache::cached_scalar_unary_pipeline(&ctx, op)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let Some(pipeline) = pipeline else {
+            return Err(BackendError::Unsupported(format!(
+                "scalar_unary: Metal template kernel not implemented for {op:?} \
+                 (#1709 が担当するスコープ外の可能性あり)"
+            )));
+        };
+        let out = ew
+            .run_scalar_unary_f32(&ctx, &pipeline, a_slice)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`Self::scalar_unary_dispatch`] の 2 項版（イシュー #1707）。
+    /// ブロードキャストは `elementwise_binary`（`add`／`mul`）と同じ
+    /// `Tensor::broadcast_with`。
+    fn scalar_binary_dispatch(
+        &self,
+        op: ScalarBinaryOp,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if crate::scalar_op_source::binary_kernel_source(op).is_none() {
+            return Err(BackendError::Unsupported(format!(
+                "scalar_binary: Metal template kernel not implemented for {op:?} \
+                 (#1709 が担当するスコープ外の可能性あり)"
+            )));
+        }
+
+        let (a_bc, b_bc) = a.broadcast_with(b).map_err(BackendError::ShapeMismatch)?;
+        let out_shape = a_bc.shape().to_vec();
+        let a_owned = a_bc.contiguous();
+        let b_owned = b_bc.contiguous();
+        let a_slice = a_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scalar_binary: lhs not contiguous".into())
+        })?;
+        let b_slice = b_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("scalar_binary: rhs not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let ew = context_cache::cached_elementwise(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let pipeline = context_cache::cached_scalar_binary_pipeline(&ctx, op)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let Some(pipeline) = pipeline else {
+            return Err(BackendError::Unsupported(format!(
+                "scalar_binary: Metal template kernel not implemented for {op:?} \
+                 (#1709 が担当するスコープ外の可能性あり)"
+            )));
+        };
+        let out = ew
+            .run_scalar_binary_f32(&ctx, &pipeline, a_slice, b_slice)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
@@ -1955,6 +2049,30 @@ impl BackendOps for MetalBackendOps {
         self.elementwise_binary_scalar(x, mask, value, |ew, ctx, x_s, mask_s, v| {
             ew.run_masked_fill_f32(ctx, x_s, mask_s, v)
         })
+    }
+
+    /// `BackendOps::scalar_unary` の Metal 実装（イシュー #1707・#1708）。
+    /// `Sqrt`（#1707）＋超越関数系 8 kind（`Neg`／`Abs`／`Log`／`Log2`／
+    /// `Log10`／`Sin`／`Cos`／`Tan`。#1708）実装済み（`crate::
+    /// scalar_op_source` モジュール doc「スコープ」参照。他 kind は既定
+    /// `Unsupported` のまま）。
+    fn scalar_unary(
+        &self,
+        op: ScalarUnaryOp,
+        a: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.scalar_unary_dispatch(op, a)
+    }
+
+    /// `BackendOps::scalar_binary` の Metal 実装（イシュー #1707）。
+    /// `Sub`／`Div`／`Pow` のみ実装済み。
+    fn scalar_binary(
+        &self,
+        op: ScalarBinaryOp,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.scalar_binary_dispatch(op, a, b)
     }
 
     fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
