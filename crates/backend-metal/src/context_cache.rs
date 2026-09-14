@@ -210,6 +210,18 @@ pub(crate) fn cached_mse(ctx: &Arc<MetalContext>) -> Result<Arc<crate::mse::Meta
     get_or_build(cache, on_poison, || crate::mse::MetalMse::new(ctx))
 }
 
+/// [`crate::huber::MetalHuber`] スイートをプロセス内キャッシュから取得
+/// する（イシュー #1739。`cached_mse` と同型）。
+/// `ops::MetalBackendOps::huber_loss`／`huber_loss_backward` の唯一の
+/// 呼び出し先。
+pub(crate) fn cached_huber(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::huber::MetalHuber>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::huber::MetalHuber>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::huber::MetalHuber::new(ctx))
+}
+
 /// [`crate::rnn_cell::MetalRnnCell`] スイートをプロセス内キャッシュから
 /// 取得する（イシュー #1647）。`ops::MetalBackendOps::{lstm_pointwise,
 /// lstm_hidden_backward, lstm_cell_backward, gru_pointwise, gru_backward}`

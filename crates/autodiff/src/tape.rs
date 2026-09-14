@@ -237,6 +237,24 @@ pub(crate) enum Op {
         target: NodeId,
         reduction: crate::var::Reduction,
     },
+    /// Huber／SmoothL1 損失（イシュー #1739）。`MseLoss` と同じ理由
+    /// （`BackendOps` に対応メソッドはあるが、CPU／CUDA／Metal 3
+    /// バックエンドどれも `Op` を経由せず `BackendOps::huber_loss`／
+    /// `huber_loss_backward` を直接呼ぶ融合演算のため `Op::Add`／
+    /// `Op::Mul` 系の遅延融合対象ではない）で融合対象外とし常に
+    /// 実体化済み（`push_eager`）。`kind`（`Huber`／`SmoothL1`）・
+    /// `delta`（`SmoothL1` では `beta` と呼ぶが同じスロット）は
+    /// `Var::huber_loss_impl` がホスト側で有限・正であることを検証済み
+    /// の値を payload として保持する（`Op` は `#[derive(Debug, Clone)]`
+    /// のみのため `f32` payload は `RmsNorm`／`LayerNorm` の `eps` と
+    /// 同じ扱い）。
+    HuberLoss {
+        pred: NodeId,
+        target: NodeId,
+        kind: fandhe_ai_tensor_core::HuberKind,
+        delta: f32,
+        reduction: crate::var::Reduction,
+    },
     /// CrossEntropy 損失（log-sum-exp 安定化・クラス次元指定。#191・
     /// 親イシュー #189）。`BackendOps` に対応メソッドがないため融合対象外
     /// とし常に実体化済み（`push_eager`）。log-softmax → NLL を個別オペ
@@ -1111,6 +1129,7 @@ impl Op {
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
             | Op::MseLoss { .. }
+            | Op::HuberLoss { .. }
             | Op::CrossEntropyLoss { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
@@ -1256,6 +1275,10 @@ impl Op {
             Op::Pad { input, .. } => f(*input),
             Op::OneHot { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
+                f(*pred);
+                f(*target);
+            }
+            Op::HuberLoss { pred, target, .. } => {
                 f(*pred);
                 f(*target);
             }
