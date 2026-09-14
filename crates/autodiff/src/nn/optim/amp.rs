@@ -17,9 +17,10 @@
 //!
 //! `nn/optim/mod.rs` の適用順序契約（backward → unscale → clip →
 //! optimizer step）における「unscale」ステップの実体がこのモジュール
-//! （[`unscale_grads`]／[`GradScaler`]）である。facade（`fandhe_ai`）
-//! への公開・識別子の再エクスポートは別イシュー（#1722）のスコープで
-//! あり、本モジュールはクレート内実装（`crate::nn::optim` 経由）に留める。
+//! （[`unscale_grads`]／[`GradScaler`]）である。facade（`fandhe_ai::optim`）
+//! への公開・識別子の再エクスポートはイシュー #1722 で完了済み（純
+//! 再エクスポート。`crates/facade/src/optim.rs` 参照）。本モジュールは
+//! クレート内実装（`crate::nn::optim` 経由）に留まる。
 
 use fandhe_ai_tensor_core::Tensor;
 

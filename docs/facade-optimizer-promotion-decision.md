@@ -281,3 +281,15 @@ numpy/Keras 慣習のラッパーではなく、**facade 素の公開契約（`t
 | イシュー #192（親。#193/#194/#195 の統合判断待ち） | 共通 `Optimizer` trait 導入・SGD/AdamW モジュール配置統一の判断元 |
 | イシュー #294・#426 | `Sequential::trainable_parameters`/`apply_parameters` 位置対応契約 |
 | PR #915 | フレームワーク横並びベンチ（`scripts/bench/framework-compare/`）導入 |
+
+## 追補（イシュー #1722）
+
+#1721 で `fandhe_ai_autodiff::nn::optim` へ AMP コア関数群
+（`GradScaler`／`GradScalerConfig`／`UnscaleResult`／`scale_loss`／
+`scale_grads`／`unscale_grads`／`has_non_finite`）が追加されたことで、
+`src/optim.rs`（イシュー #961）の「昇格元公開面と 1 対 1 対応する」
+契約が一時的に破れていた。本イシューで `crates/facade/src/optim.rs`
+へ同 7 識別子を §4 案 A「素の再エクスポート」のまま追加し、
+`crates/facade/tests/api_surface.rs::optim_module_reexports_exactly_expected_surface`
+の期待集合を更新して 1 対 1 対応を回復した。既存の設計判断（案 A の
+採用理由・REQ-12 との整合・§4.3 のシグネチャ統一非対応）は変更しない。
