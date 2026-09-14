@@ -300,6 +300,10 @@ fn encode_finalize_dispatch(
         encoder.setBuffer_offset_atIndex(Some(partial_buf.raw()), 0, 0);
         encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
     }
+    // SAFETY: `encode_partial_dispatch` の `setBytes_length_atIndex` と同じ根拠。
+    // `num_partials`／`factor` はローカル変数でポインタは本呼び出し中生存し、
+    // 長さは `constant uint&`／`constant float&` 宣言の型と揃えている
+    // （`shaders/bce.metal::bce_finalize_f32` 参照）。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&num_partials).cast(),
@@ -340,6 +344,10 @@ fn encode_backward_dispatch(
         encoder.setBuffer_offset_atIndex(Some(target_buf.raw()), 0, 1);
         encoder.setBuffer_offset_atIndex(Some(dinput_buf.raw()), 0, 2);
     }
+    // SAFETY: `encode_partial_dispatch` の `setBytes_length_atIndex` と同じ根拠。
+    // `numel`／`kind`／`scale` はローカル変数でポインタは本呼び出し中生存し、
+    // 長さは `constant uint&`／`constant float&` 宣言の型と揃えている
+    // （`shaders/bce.metal` 参照）。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&numel).cast(),
