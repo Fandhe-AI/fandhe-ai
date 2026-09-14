@@ -204,7 +204,7 @@ impl CudaBackendOps {
         a: &Tensor<f32>,
         b: &Tensor<f32>,
     ) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
         let n = b.shape()[1] as u32;
@@ -372,7 +372,7 @@ impl CudaBackendOps {
         if out.device() != Device::Cuda(self.ordinal) {
             return Err(BackendError::DeviceMismatch);
         }
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -1703,7 +1703,7 @@ impl BackendOps for CudaBackendOps {
             return self.gemm_fp32_strict_impl(a, b);
         }
 
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
         let n = b.shape()[1] as u32;
@@ -1901,7 +1901,7 @@ impl BackendOps for CudaBackendOps {
         bias: Option<&Tensor<f32>>,
         act: Activation,
     ) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
         let n = b.shape()[1] as u32;

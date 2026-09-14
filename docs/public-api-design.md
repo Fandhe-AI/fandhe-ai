@@ -508,6 +508,18 @@ rank≥3 `matmul`〈#1600〉未実装のため対象外）・分解アルゴリ�
 は `crate::einsum` モジュール doc・`docs/compat-feature-gap.md` §2.6
 追補を参照。
 
+**イシュー #1715 追加**: `matmul` は rank≥2（バッチ次元は NumPy 互換
+ブロードキャスト）へ拡張された。2 次元厳密な shape 検査（各バックエンド
+の GEMM カーネル入口が要求する契約。`error.rs` の `RankMismatch` doc
+参照）は `ops_shape::gemm_out_shape` として分離し、`ops_shape::
+matmul_out_shape`（`Var::matmul` が使う一般化版）と役割を明確に区別
+した。`BackendOps` に `gemm_batched`／`gemm_batched_fp32_strict`
+（既定は per-batch `gemm`/`gemm_fp32_strict` への合成。非破壊拡張の
+デフォルトメソッド）を追加し、`backend-cpu` が専用オーバーライドを
+持つ（bit 同一契約）。`einsum`（上記段落）の batch 添字を伴う縮約は
+本イシューでも対象外のまま残る（rank≥3 `matmul` 自体は受理される
+ようになったが、`einsum` 側の分解経路の再設計は別イシュー）。
+
 ## 4. backend 入口公開 API
 
 ### 4.1 デバイス選択

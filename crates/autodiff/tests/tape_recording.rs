@@ -824,6 +824,29 @@ fn gather_and_scatter_record_single_eager_node() {
     assert_eq!(added.to_tensor().shape(), &[2, 3]);
 }
 
+/// `Var::cumsum`／`cumprod` が単一の eager ノード（`Op::Cumsum`／
+/// `Op::Cumprod`）のみを記録することを確認する（イシュー #1731。
+/// `gather_and_scatter_record_single_eager_node` と同型）。
+#[test]
+fn cumsum_and_cumprod_record_single_eager_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let before = tape.len();
+    let cs = x.cumsum(1).unwrap();
+    assert_eq!(tape.len(), before + 1, "cumsum は 1 ノードのみ追加するはず");
+    assert_eq!(cs.to_tensor().shape(), &[2, 3]);
+
+    let before2 = tape.len();
+    let cp = x.cumprod(1).unwrap();
+    assert_eq!(
+        tape.len(),
+        before2 + 1,
+        "cumprod は 1 ノードのみ追加するはず"
+    );
+    assert_eq!(cp.to_tensor().shape(), &[2, 3]);
+}
+
 /// 32. `sort`／`topk`（イシュー #1733）が 1 ノードのみ追加する
 ///     `push_eager`（実体化済み）ノードとして記録され、`argsort` は
 ///     **ノードを追加しない**（非微分演算。`Op::Sort` を経由しない）
