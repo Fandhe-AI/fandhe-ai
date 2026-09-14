@@ -348,14 +348,22 @@ impl CudaMmaGemm {
 
         // SM 数が実測できた場合のみ swizzle 変種を追加コンパイルする。
         // swizzle はあくまで L2 再利用の性能最適化であり base カーネルの
-        // 可用性とは独立であるべきため、ソース生成・コンパイルいずれの
-        // 失敗も本関数全体の `Err` へ波及させず fail-soft に
+        // 可用性とは独立であるべきため、対応外 capability・NVRTC コンパ
+        // イル失敗・operation-local な `CudaError::Driver`
+        // （`context_cache::is_sticky_driver_error` が `false` を返す
+        // もの）は本関数全体の `Err` へ波及させず fail-soft に
         // `(mma_f16_swizzle: None, swizzle_group_width: None)` へ縮退する
         // （`gemm_wmma.rs::CudaWmmaGemm::new` の `wmma_f16_opt` 分岐と同型
         // の判断。構造体ドキュメンテーションコメント「mma_f16_swizzle」
         // 節参照）。失敗理由は [`swizzle_unavailable_reason`
         // ](Self::swizzle_unavailable_reason) 経由でテストから参照できる
-        // ようにする。
+        // ようにする。**一方、`load_module`/`load_function` 経由の sticky
+        // な `CudaError::Driver` のみはフォールバック対象外**であり
+        // `Self::new` 自体の `Err` として呼び出し元（`gemm_auto.rs::
+        // CudaGemmAuto::new`）へ伝播する（codex-review P0 指摘・
+        // PR #1797。base カーネル `mma_f16` の構築失敗〈上の `?` 経由〉と
+        // 同じ扱いへ揃え、swizzle 版だけ sticky エラーを吸収して
+        // `with_driver_call` が観測できないまま先へ進む抜け道を塞ぐ）。
         let (mma_f16_swizzle, swizzle_group_width, swizzle_compile_error) =
             match device.multiprocessor_count() {
                 Some(num_sms) => {
@@ -369,6 +377,9 @@ impl CudaMmaGemm {
                     {
                         Ok((_swizzle_stream, swizzle_func)) => {
                             (Some(swizzle_func), Some(group_width), None)
+                        }
+                        Err(CudaError::Driver(e)) if context_cache::is_sticky_driver_error(&e) => {
+                            return Err(CudaError::Driver(e));
                         }
                         Err(err) => (None, None, Some(err.to_string())),
                     }

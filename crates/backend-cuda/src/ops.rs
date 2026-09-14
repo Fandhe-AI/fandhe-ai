@@ -597,7 +597,12 @@ impl CudaBackendOps {
     /// 呼ぶことで、`CudaDevice::new`（キャッシュミス時の driver 初期化）
     /// 自体も poison 検査・sticky エラー観測の対象に含める
     /// （codex-review P0 指摘・PR #1064 追補）。
-    fn device_handle_raw(&self) -> Result<Arc<CudaDevice>, CudaError> {
+    ///
+    /// イシュー #1703 で `pub(crate)` へ緩和した（`crate::typed_f16`
+    /// の `TypedOps<f16>::gemm` が `Self::with_driver_call` の外側で
+    /// `context_cache::cached_gemm_auto` を構築するために呼ぶ。本ファイル
+    /// 内の他の呼び出し元・可視性の意味論は変更しない）。
+    pub(crate) fn device_handle_raw(&self) -> Result<Arc<CudaDevice>, CudaError> {
         context_cache::cached_device(self.ordinal)
     }
 
@@ -636,7 +641,10 @@ impl CudaBackendOps {
     /// 同じ値を渡し（`begin_driver_call` は世代不一致以外の目的では
     /// 副作用を持たないため二重に渡しても安全）、構築用のトークンと
     /// 実行用のトークンは別個に取得・解放する。
-    fn with_driver_call<T>(
+    ///
+    /// イシュー #1703 で `pub(crate)` へ緩和した（`crate::typed_f64`／
+    /// `crate::typed_f16` が同じ driver 呼び出し境界を再利用するため）。
+    pub(crate) fn with_driver_call<T>(
         &self,
         resource_generations: &[u64],
         map: impl FnOnce(CudaError) -> BackendError,
@@ -1312,6 +1320,26 @@ impl BackendOps for CudaBackendOps {
         static_cuda_memory(self.ordinal, &device)
             .ok()
             .map(|m| m as &dyn MemoryOps)
+    }
+
+    /// `BackendOps::typed_ops_f64` の CUDA 実装（イシュー #1703・親
+    /// #1650）。`CudaBackendOps` 自身が
+    /// [`fandhe_ai_tensor_core::TypedOps<f64>`] を実装する
+    /// （`crate::typed_f64` 参照。8 演算すべて driver 非接触の
+    /// `Unsupported`）ため、`memory_ops` と同じく `self` をそのまま
+    /// 返す。
+    fn typed_ops_f64(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<f64>> {
+        Some(self)
+    }
+
+    /// `BackendOps::typed_ops_f16` の CUDA 実装（イシュー #1703・親
+    /// #1650）。`CudaBackendOps` 自身が
+    /// [`fandhe_ai_tensor_core::TypedOps<half::f16>`] を実装する
+    /// （`crate::typed_f16` 参照。`gemm` は `CudaGemmAuto::run_f16` へ
+    /// 結線・残り 7 演算は f32 昇格→既存 CUDA カーネル→1 回丸め）
+    /// ため、`memory_ops` と同じく `self` をそのまま返す。
+    fn typed_ops_f16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::f16>> {
+        Some(self)
     }
 
     /// `TypedOps<half::bf16>` の CUDA 実装を公開する（イシュー #1704。
@@ -4440,6 +4468,40 @@ mod tests {
         assert!(
             matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
             "poison 済み ordinal では add（elementwise_binary 経由。mul も同一経路）は             device_handle_raw() が試行される前に拒否されるはず: {result:?}"
+        );
+    }
+
+    /// イシュー #1703: `TypedOps<half::f16>::gemm`（`crate::typed_f16`）も
+    /// 他の公開演算エントリと同じ `with_driver_call` ゲートを経由する
+    /// ため、poison 済み ordinal では `context_cache::cached_gemm_auto`
+    /// （driver 呼び出しを伴う構築）へ一切入らず即座に
+    /// `DeviceContextPoisoned` を返すことを確認する（GPU 不要・CI 常時
+    /// 実行。`poison_ordinal`／`unique_test_ordinal` は上記既存テストと
+    /// 共用する）。
+    #[test]
+    fn typed_f16_gemm_rejects_on_poisoned_ordinal_before_device_handle_is_attempted() {
+        use fandhe_ai_tensor_core::TypedOps;
+
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = Tensor::new(
+            vec![half::f16::from_f32(1.0), half::f16::from_f32(2.0)],
+            &[1, 2],
+        )
+        .expect("valid tensor");
+        let b = Tensor::new(
+            vec![half::f16::from_f32(1.0), half::f16::from_f32(2.0)],
+            &[2, 1],
+        )
+        .expect("valid tensor");
+
+        let result = TypedOps::<half::f16>::gemm(&cuda, &a, &b);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では typed f16 gemm も device_handle_raw() が \
+             試行される前に拒否されるはず: {result:?}"
         );
     }
 

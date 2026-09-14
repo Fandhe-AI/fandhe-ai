@@ -119,8 +119,11 @@
 //! TASK-1.9c（#46）で `ops` モジュール（[`ops::CudaBackendOps`]）を追加した。
 //! `fandhe_ai_tensor_core::backend_ops::BackendOps` の CUDA 実装であり、`gemm` は
 //! [`CudaGemm::run_tiled_f32`] へ委譲する（既定カーネル変種の選択は保守的に
-//! tiled 固定とし、`CudaGemmAuto` を介した Tensor Core 経路の自動選択への
-//! 切替は別スコープ）。イシュー #599 で elementwise 5 演算（`add`／`mul`／
+//! tiled 固定であり不変。イシュー #1703 で `TypedOps<half::f16>::gemm`
+//! （`crate::typed_f16`。`BackendOps::typed_ops_f16()` accessor 経由）が
+//! `CudaGemmAuto::run_f16` への到達経路として追加されたが、`f32` 側
+//! `BackendOps::gemm` の tiled 固定選択自体には一切影響しない）。
+//! イシュー #599 で elementwise 5 演算（`add`／`mul`／
 //! `relu`／`exp`／`tanh`。[`elementwise::CudaElementwise`]）を実装し、
 //! `gemm_bias_act` を GEMM epilogue 融合カーネル
 //! （[`CudaGemm::run_tiled_bias_act_f32`]）で実融合化した（`bias`
@@ -446,6 +449,8 @@ mod transpose;
 // `DeviceRepr for half::bf16` 可用性調査結果は `typed_bf16.rs` 冒頭
 // コメント・`docs/backend-dtype-dispatch-design.md` §5／§12 参照）。
 mod typed_bf16;
+mod typed_f16;
+mod typed_f64;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use elementwise::CudaElementwise;
