@@ -153,6 +153,7 @@ pub(crate) enum Op {
     Sum { input: NodeId, dim: Option<usize> },
     /// 非 elementwise。常に実体化済み。
     Max { input: NodeId, dim: Option<usize> },
+
     /// 分散（`Var::var`。`torch.var(dim, correction)` 相当。イシュー
     /// #1723）。`sum`／`max` と同じ `dim: Option<usize>` シグネチャに
     /// `correction`（自由度補正）を加えたもの。eager（`push_eager`。
@@ -200,6 +201,20 @@ pub(crate) enum Op {
         dim: Option<usize>,
         correction: usize,
     },
+
+    /// `dim` に沿った縮約平均（イシュー #1719・親 #1601「Phase 2
+    /// （Tier 1）」）。`BackendOps` に対応メソッドがないため、forward
+    /// （`Var::mean`）は `self.tape.ops().sum` の結果をホスト側で
+    /// 要素数 `n` により **1 回だけ除算**する合成実装（CPU バックエンド
+    /// 側の参照実装〈`reduction::mean`〉と同じ「sum の後に 1 回だけ
+    /// 除算する」丸め規律）。`n == 0`（縮約対象の要素数が 0）
+    /// は forward 側で `AutodiffError::InvalidArgument` により事前に
+    /// 拒否されるため、本 variant の checkpoint 再計算
+    /// （`recompute_value`）は同じ式（`ops.sum` → 同一除算）で forward
+    /// と bit 同一の値を再現する。`Op::Sum`／`Op::Max` と同じく非
+    /// elementwise のため常に実体化済み（`push_eager`）。
+    Mean { input: NodeId, dim: Option<usize> },
+
     /// 平均二乗誤差。`BackendOps` に対応メソッドがないため融合対象外
     /// とし常に実体化済み（`push_eager`）。`reduction` は #190
     /// （TASK-9.1c 相当・`nn::loss`）で mean/sum の両縮約に対応するため
@@ -942,9 +957,16 @@ impl Op {
     pub(crate) fn is_checkpoint_eligible(&self) -> bool {
         match self {
             // 入力のみから決定論的に再計算できる（`Var::matmul`／
-            // `sigmoid`／`sum`／`max` と同じ `ops`／`eval` 呼び出しを
-            // `recompute_fallible` が再現するため forward と bit 同一）。
-            Op::MatMul(..) | Op::Sigmoid(..) | Op::Sum { .. } | Op::Max { .. } => true,
+            // `sigmoid`／`sum`／`max`／`mean` と同じ `ops`／`eval`
+            // 呼び出しを `recompute_fallible` が再現するため forward と
+            // bit 同一）。`Op::Mean`（イシュー #1719）は `ops.sum` の
+            // 後に forward と同一の除算を行うだけの合成のため `Op::Sum`
+            // と同列。
+            Op::MatMul(..)
+            | Op::Sigmoid(..)
+            | Op::Sum { .. }
+            | Op::Max { .. }
+            | Op::Mean { .. } => true,
             // view（既存 `push_view`／再導出契約の一般化）。キャッシュ
             // 済み view 値は基底バッファへの `Arc` を握るため、解放しな
             // いと基底側を解放しても実メモリが減らない。`Op::Permute`／
@@ -1075,6 +1097,7 @@ impl Op {
             | Op::Var { input, .. }
             | Op::VectorNorm { input, .. }
             | Op::Std { input, .. }
+            | Op::Mean { input, .. }
             | Op::Reshape { input }
             | Op::Transpose { input, .. }
             | Op::Inv { input }
@@ -2389,6 +2412,7 @@ fn recompute_value(
                     | Op::Sigmoid(input)
                     | Op::Sum { input, .. }
                     | Op::Max { input, .. }
+                    | Op::Mean { input, .. }
                     | Op::Permute { input, .. }
                     | Op::BroadcastTo { input }
                     | Op::Narrow { input, .. } => {
@@ -2461,6 +2485,31 @@ fn recompute_value(
                     Op::Max { input, dim } => {
                         let input_val = recompute_memo_get(memo, input.0)?;
                         ops.max(&input_val, *dim)?
+                    }
+                    Op::Mean { input, dim } => {
+                        // `Var::mean` と同じ「`ops.sum` の後にホスト側で
+                        // 1 回だけ除算する」合成（`tape::Op::Mean` doc
+                        // 参照）。forward が `n == 0` を事前拒否している
+                        // ため、ここでの `n == 0` 到達は契約違反
+                        // （`.claude/rules/coding-rust.md` 本番経路
+                        // panic 禁止方針に従い `debug_assert!` で検知
+                        // しつつ安全側のゼロ埋めへフォールバックする）。
+                        let input_val = recompute_memo_get(memo, input.0)?;
+                        let sum_val = ops.sum(&input_val, *dim)?;
+                        let n: usize = match dim {
+                            None => input_val.shape().iter().product(),
+                            Some(axis) => input_val.shape()[*axis],
+                        };
+                        if n == 0 {
+                            debug_assert!(false, "recompute_value: Op::Mean の n が 0（契約違反）");
+                            safe_zeros(&node.shape)
+                        } else {
+                            let data: Vec<f32> = crate::eval::dense_vec(&sum_val)
+                                .into_iter()
+                                .map(|v| v / n as f32)
+                                .collect();
+                            crate::eval::build_tensor(data, sum_val.shape())
+                        }
                     }
                     Op::Permute { input, perm } => {
                         // イシュー #1597 で `push_view` 経由の view 系

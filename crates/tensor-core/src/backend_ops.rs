@@ -1406,6 +1406,52 @@ pub trait BackendOps {
         ))
     }
 
+    /// 入力を平坦化しソートしたうえで重複を除去した一意値集合を返す
+    /// （`torch.unique(input, sorted=True)` の values のみ。
+    /// `return_inverse`／`return_counts`／`dim` 指定は対象外。イシュー
+    /// #1734・`docs/unique-facade-exposure-decision.md`）。
+    ///
+    /// # 契約
+    ///
+    /// - **意味論**: 入力を row-major で平坦化 → ソート → 隣接重複除去
+    ///   → rank 1・contiguous な `Tensor<f32>`（shape `[m]`、
+    ///   `0 <= m <= numel`）を返す。空入力（`numel == 0`）は shape `[0]`。
+    /// - **順序キー**: IEEE 754 totalOrder（Rust `f32::total_cmp`）。
+    ///   `-NaN < -inf < … < -0.0 < +0.0 < … < +inf < +NaN`。NaN 同士は
+    ///   符号・payload の bit 順で一意に順序が定まる。
+    /// - **重複判定述語**: `a == b`（IEEE 比較。PyTorch 互換）。
+    ///   `-0.0` と `+0.0` は同一とみなされ 1 要素へ集約され、totalOrder
+    ///   の先頭側である **`-0.0` が代表として残る**。NaN は
+    ///   `NaN != NaN` のため **すべて保持**される（bit パターンが同一でも
+    ///   集約しない）。
+    /// - **出力不変条件**（呼び出し元が事後検査に使う）: (1) rank 1、
+    ///   (2) `len <= numel`、(3) 隣接ペア `(a, b)` すべてについて
+    ///   `a.total_cmp(&b) != Ordering::Greater` かつ `!(a == b)`
+    ///   （同一 bit の NaN が隣接しうるため「厳密増加」ではなく
+    ///   「非減少 ＋ 隣接 `==` なし」）。
+    /// - **数値契約**: 選択演算（丸めなし）。3 バックエンドの出力は
+    ///   互いに bit 完全一致（NaN payload 含む）。REQ-2 複合判定は
+    ///   用いない。
+    /// - 入力は strided view（非 contiguous）でもよく、各実装が
+    ///   `Tensor::contiguous()`／`host_slice()` で稠密化してから処理
+    ///   する契約とする。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::gather`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::unique`（`autodiff`）
+    /// は `Unsupported` のときのみホスト参照実装（`eval::unique`）へ
+    /// フォールバックする。出力は非微分（勾配なし）のため `Op` を
+    /// tape に記録せず、`Var::unique` は detached な `Tensor<f32>` を
+    /// 返す（出力形状が入力値に依存して動的に決まるため、静的 shape
+    /// 前提の `Var`／`DeviceBuffer` 常駐チェーンには乗らない設計判断。
+    /// `docs/unique-facade-exposure-decision.md` 参照）。
+    fn unique(&self, _x: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "unique: default fail-safe (no fused unique kernel available)".into(),
+        ))
+    }
+
     /// GEMM の epilogue（bias 加算・activation）を融合した
     /// `act(A @ B + bias)` を計算する（TASK-12.1f・#203）。
     ///
@@ -3192,6 +3238,17 @@ mod tests {
 
         let result = ops.topk(&input, 1, 1, true);
 
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::unique`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1734）。
+    #[test]
+    fn unique_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![3.0, 1.0, 2.0, 1.0], &[2, 2]).unwrap();
+
+        let result = ops.unique(&input);
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
 

@@ -147,6 +147,7 @@ pub mod gemm;
 pub mod gemm_blis;
 mod scalar_elementwise;
 mod scan;
+mod unique;
 // イシュー #1576: GB10（DGX Spark GB10）小形状 GEMM の大コア OS
 // affinity 自機判定（`crate::thread_limit`〈スレッド数制限のみ・
 // #1364 REJECT 確定〉とは独立の別系統機構。既定 OFF）。
