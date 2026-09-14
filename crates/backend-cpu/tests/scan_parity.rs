@@ -209,6 +209,47 @@ fn backend_ops_cumsum_and_cumprod_reject_axis_out_of_range() {
     ));
 }
 
+/// 3 次元・中間軸縮約（`outer > 1` かつ `inner > 1` が同時に成立する
+/// shape `[2, 3, 4]`・`dim=1`）でも `cumsum`／`cumprod` の CPU ネイティブ
+/// 実装が `eval::` フォールバックと bit 完全一致することを確認する
+/// （レビュー指摘: 既存の他テストは rank ≤ 2 の形状に限られ、outer/
+/// inner が両方 1 より大きいケースを直接検証していなかった。イシュー
+/// #1731）。
+#[test]
+fn cumsum_and_cumprod_native_matches_eval_fallback_bit_exact_3d_middle_axis() {
+    let x = t(
+        vec![
+            0.7, -1.3, 2.2, -0.4, 3.1, -2.5, 0.9, -0.1, 1.8, -3.3, 0.05, -0.6, 2.9, -1.1, 0.4, 1.6,
+            -2.2, 0.3, -0.8, 2.4, 1.1, -0.2, 0.6, -1.9,
+        ],
+        &[2, 3, 4],
+    );
+    let dim = 1;
+
+    let native_tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let native_x = native_tape.var(&x);
+    let native_cumsum = native_x.cumsum(dim).unwrap();
+    let native_cumprod = native_x.cumprod(dim).unwrap();
+
+    let fallback_tape = Tape::new_with_ops(Box::new(ForceEvalFallback {
+        inner: CpuBackendOps::new(),
+    }));
+    let fallback_x = fallback_tape.var(&x);
+    let fallback_cumsum = fallback_x.cumsum(dim).unwrap();
+    let fallback_cumprod = fallback_x.cumprod(dim).unwrap();
+
+    assert_bit_exact(
+        "cumsum 3d middle axis",
+        &native_cumsum.to_tensor(),
+        &fallback_cumsum.to_tensor(),
+    );
+    assert_bit_exact(
+        "cumprod 3d middle axis",
+        &native_cumprod.to_tensor(),
+        &fallback_cumprod.to_tensor(),
+    );
+}
+
 /// 空 shape（`[0, 3]`・`[2, 0]`）に対して `cumsum` が空出力を返す
 /// ことを確認する（部分積オーバーフロー回避の早期 return）。
 #[test]

@@ -2422,9 +2422,9 @@ fn log_softmax_vjp_along(
 /// 「外側（outer）× 走査軸（axis_len）× 内側（inner）」の 3 段走査
 /// だが、走査は `dim` の添字降順（末尾から先頭へ）で行う。forward と
 /// 同じ f64 アキュムレータ契約（`.claude/rules/coding-rust.md`）で
-/// lane ごとに `f64` の和を保持し、各ステップで直前までの和を書き
-/// 出してから加算する（末尾要素の勾配は `g[n-1]` そのもの、以降は
-/// 逆順に累積していく）。
+/// lane ごとに `f64` の和を保持し、各ステップで直前の要素を加算して
+/// から、その時点の和を書き出す（末尾要素の勾配は `g[n-1]` そのもの、
+/// 以降は逆順に累積していく）。
 fn cumsum_vjp_along(upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
     let shape = upstream.shape().to_vec();
     // `softmax_vjp_along` と同じ早期 return（部分積オーバーフロー

@@ -2,10 +2,12 @@
 //! イシュー #1731）。
 //!
 //! [`fandhe_ai_tensor_core::BackendOps::cumsum`]／[`BackendOps::cumprod`]
-//! （`ops.rs`）の CPU 実装本体。呼び出し元（`ops.rs`）が `dim` を
-//! [`fandhe_ai_tensor_core::reduce_out_shape`] で再検査してから本モジュール
-//! へ委譲する契約のため、本モジュール自身も同じ検査を独立に行う
-//! （fail-closed 境界の二重化。`.claude/rules/security.md` A08。
+//! （`ops.rs`）の CPU 実装本体。`ops.rs::cumsum`／`cumprod` は本モジュール
+//! （`scan::cumsum`／`scan::cumprod`）へ直接委譲するのみで `dim` の
+//! 再検査は行わないため、本モジュール自身が
+//! [`fandhe_ai_tensor_core::reduce_out_shape`] による検査を独立に行う
+//! （fail-closed 境界の二重化は呼び出し元がさらに上流の `Var::cumsum`／
+//! `cumprod` で行う検査との組で成立する。`.claude/rules/security.md` A08。
 //! `gather_scatter.rs` と同じ設計判断: `Var` を経由せず本モジュールを
 //! 直接呼ぶ経路でも範囲外 `dim` による誤動作・panic を防ぐ）。
 //!
