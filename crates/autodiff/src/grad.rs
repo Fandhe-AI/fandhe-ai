@@ -292,17 +292,33 @@ pub(crate) fn vjp(
             // 元の `a`/`b` shape へ縮約する（§3.5 設計方針）。
             let a_val = materialize_fallible(nodes, ops, a)?;
             let b_val = materialize_fallible(nodes, ops, b)?;
-            let (factor_a, factor_b) =
-                eval::scalar::binary_grad_factors(a_val, b_val, out_value, sop);
-            let da = reduce_bias_grad(
-                &vjp_elementwise_mul(ops, upstream, &factor_a)?,
-                a_val.shape(),
-            );
-            let db = reduce_bias_grad(
-                &vjp_elementwise_mul(ops, upstream, &factor_b)?,
-                b_val.shape(),
-            );
-            vec![(a, da), (b, db)]
+            if sop.is_comparison() {
+                // 比較演算（`gt`／`ge`／`lt`／`le`／`eq`／`ne`）は区分
+                // 定数で両入力の勾配が恒等的にゼロ（`binary_partials`
+                // が常に `(0.0, 0.0)` を返す設計）。ここで
+                // `vjp_elementwise_mul(upstream, 0 係数)` を経由すると
+                // `upstream` が `inf`／`NaN` を含む場合（例:
+                // `sum(x * x.gt(c))` の直通経路が生む `inf`）に
+                // `0.0 * inf = NaN` へ汚染されてしまう（codex-review
+                // 指摘・PR #1823）。乗算を経由せず各入力 shape の
+                // ゼロテンソルを直接返し、upstream の値に関わらず
+                // 常に有限のゼロ勾配を保証する。
+                let da = build_tensor(vec![0.0f32; a_val.numel()], a_val.shape());
+                let db = build_tensor(vec![0.0f32; b_val.numel()], b_val.shape());
+                vec![(a, da), (b, db)]
+            } else {
+                let (factor_a, factor_b) =
+                    eval::scalar::binary_grad_factors(a_val, b_val, out_value, sop);
+                let da = reduce_bias_grad(
+                    &vjp_elementwise_mul(ops, upstream, &factor_a)?,
+                    a_val.shape(),
+                );
+                let db = reduce_bias_grad(
+                    &vjp_elementwise_mul(ops, upstream, &factor_b)?,
+                    b_val.shape(),
+                );
+                vec![(a, da), (b, db)]
+            }
         }
         Op::Softmax { input, dim } => {
             // d/dx softmax(x) = y ⊙ (g − Σ_dim(g ⊙ y))（`y` = forward
@@ -3402,6 +3418,39 @@ mod tests {
         let dx = grads.get(&x).unwrap().unwrap();
         // dy/dx = mask（gt 側の勾配は寄与せずゼロ）。
         assert_eq!(dense_vec(dx), vec![0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn var_comparison_backward_does_not_propagate_upstream_inf_nan() {
+        // codex-review 指摘（PR #1823）: 比較演算の VJP が upstream への
+        // 乗算（`0.0 * 係数`）経由でゼロ勾配化していると、その比較演算
+        // ノード自体への upstream（＝下流から流入する勾配）が `inf`／
+        // `NaN` を含む場合に `0.0 * inf = NaN` へ汚染される。
+        //
+        // `y = x * x.gt(c)`（`x = inf, c = 0`）で loss = sum(y) を取ると、
+        // `Op::Mul` の VJP により mask（`x.gt(c)`）自身への upstream は
+        // `x = inf` になる（`db = upstream(=1) * x_val(=inf)`）。この
+        // `inf` が `mask` ノードの `Op::ScalarBinary(Gt)` 分岐へ upstream
+        // として渡されたとき、修正前は `0.0 係数 * inf = NaN` が
+        // `x`／`c` の最終勾配へ混入していた。修正後は乗算を経由せず
+        // 直接ゼロテンソルを返すため、`x` の最終勾配は `mul` 側の寄与
+        // （`mask_val = 1.0`）のみが残り有限値のまま、`c` の最終勾配は
+        // 有限のゼロのままになる。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[f32::INFINITY], &[1]));
+        let c = tape.var(&t(&[0.0], &[1]));
+        let mask = x.gt(&c).unwrap(); // [1.0]（inf > 0）
+        let y = x.mul(&mask).unwrap(); // [inf]
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = dense_vec(grads.get(&x).unwrap().unwrap());
+        let dc = dense_vec(grads.get(&c).unwrap().unwrap());
+        // `mul` 側の寄与（mask_val = 1.0）のみが残り、`gt` 側の寄与は
+        // 有限のゼロ（修正前は NaN で全体を汚染していた）。
+        assert!(dx[0].is_finite(), "dx が NaN 化した: {dx:?}");
+        assert_eq!(dx, vec![1.0]);
+        assert!(dc[0].is_finite(), "dc が NaN 化した: {dc:?}");
+        assert_eq!(dc, vec![0.0]);
     }
 
     #[test]
