@@ -706,7 +706,8 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
   linear_new_is_unaffected_by_global_manual_seed_state` で機構的に固定）。
 - 実際の乱数テンソル生成（`randn`／`rand`／`randint`）自体は #1725 で
   実装済み（下記「追補（イシュー #1725）」参照）。`arange`／`linspace`／
-  `eye`／`zeros_like`／`ones_like` は未実装のまま（#1726 のスコープ）。
+  `eye`／`zeros_like`／`ones_like` も #1726 で実装済み（下記「追補
+  （イシュー #1726）」参照）。
 - facade 新規公開面: `pub fn manual_seed`（新規）。内部型・アクセサは
   facade へ露出させない（`crates/facade/tests/api_surface.rs::
   facade_does_not_expose_rng_internal_types` で機械検査）。
@@ -889,10 +890,37 @@ facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_bi
   facade へ露出させない（`facade_does_not_expose_rng_internal_types` で
   機械検査）。
 - 対象外: `arange`／`linspace`／`eye`／`zeros_like`／`ones_like`
-  （#1726）・`randn_like`／`rand_like`／`normal`／`uniform_`／
-  `bernoulli`／`multinomial`／`randperm`・非グローバル RNG（`torch.
-  Generator` 相当）・CUDA／Metal デバイス側乱数カーネル・`nn::Dropout`
-  （#1603）・`randint` の int64 版。
+  （#1726 で実装済み。下記「追補（イシュー #1726）」参照）・
+  `randn_like`／`rand_like`／`normal`／`uniform_`／`bernoulli`／
+  `multinomial`／`randperm`・非グローバル RNG（`torch.Generator` 相当）・
+  CUDA／Metal デバイス側乱数カーネル・`nn::Dropout`（#1603）・
+  `randint` の int64 版。
+
+## 追補（イシュー #1726）
+
+上記「追補（イシュー #1725）」が対象外としていた決定的テンソル生成
+（`arange`／`linspace`／`eye`／`zeros_like`／`ones_like`。`§2.1`「乱数
+生成と RNG 契約」の残対象）を実装した。設計・実装記録は
+`docs/rng-global-contract-design.md` §11。
+
+- 実装した API: `fandhe_ai::{arange(start, end, step), linspace(start,
+  end, steps), eye(n), zeros_like(like), ones_like(like)}`（実体は
+  `tensor-core::creation`。`autodiff` は素通しのみ）。`randn`／`rand`／
+  `randint` と同じくホスト側だけで完結し `BackendOps` を経由しない。
+- `Op`／`BackendOps`／VJP は追加していない（生成結果は微分不能な葉値
+  であり `torch.arange` 等にも勾配は無いため。受け入れ条件テンプレの
+  「Op／BackendOps／VJP」項は本イシューでも非適用。#1725 と同じ根拠）。
+- `arange`／`linspace` の数値契約（`f64` 中間計算・PyTorch 2 分割方式）
+  はプラットフォーム横断で bit 同一（`docs/rng-global-contract-design.md`
+  §11 参照）。
+- facade 新規公開面: `pub fn arange`／`linspace`／`eye`／`zeros_like`／
+  `ones_like`（新規）・`pub use ...::CreationError`（`arange`／
+  `linspace` の戻り値型。1 行の再エクスポート）。
+- 対象外: 1 引数／2 引数の `arange` 便宜版・i32／i64 版 `arange`・
+  長方形 `eye(rows, cols)`・`full_like`／`empty_like`／`randn_like`／
+  `rand_like`・`logspace`・`Var::zeros_like` 等の `Var` 側メソッド・
+  CUDA／Metal デバイス側の生成カーネル・`compat::array`／`Sequential`
+  の変更。
 
 **#1773 追記（ONNX export の op 逆マッピング）**: `onnx-interop` 内部
 （`crate::onnx::export_ops`）に `interp.rs` 対応 22 op すべての逆マッピング
@@ -1245,3 +1273,21 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
 - forward は lane（縮約軸以外の全軸の組）ごとに `f64` アキュムレータを保持する逐次スキャン契約（`.claude/rules/coding-rust.md` の f64 アキュムレータ方針を forward の scan へ拡張）。VJP はホスト側のみ（`grad.rs::cumsum_vjp_along`／`cumprod_vjp_along`）で、`cumprod` は除算を用いない厳密形（排他的 prefix 積 `L` と後ろ向き Horner 型再帰 `S` の積）のため零要素を含む入力でも成り立つ。
 - CUDA／Metal 専用カーネルは本イシューのスコープ外（既定 `Unsupported` フォールバックのまま）で後続イシューへ引き継ぐ。
 - facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.3）。
+
+## 追補（イシュー #1722）
+
+AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記）」）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `fandhe_ai_autodiff::nn::optim::amp`（#1721 で実装済み。`GradScaler`／`GradScalerConfig`／`UnscaleResult`／`scale_loss`／`scale_grads`／`unscale_grads`／`has_non_finite`）を `fandhe_ai::optim` から素の再エクスポート（案 A。`docs/facade-optimizer-promotion-decision.md` §4）で公開した。`crates/facade/src/optim.rs` の適用順序契約 doc を「AMP を使わない場合」（既存の `backward → clip → optimizer step`。無変更）と「AMP を使う場合」（`scale_loss → backward → unscale＋非有限検出 → 非有限なら clip・optimizer step を両方スキップ → clip → optimizer step → 必ず `GradScaler::update`）の 2 節へ更新した。
+- 新規 `Op`／`BackendOps` メソッド／VJP は追加していない（`scale_loss` は既存 `Var::mul` の合成のみ）。
+- 対象外事項の明記: (a) 真の混合精度（f16 forward・f32 master weight）は `docs/backend-dtype-dispatch-design.md` §8 のとおり対象外。(b) デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）には unscale／非有限検出が結線されておらず、AMP はホスト `Tensor<f32>` 勾配（`Gradients::get`／`SequentialVars::trainable_grads`／`Tape::param_grads_to_host` 経由）にのみ適用できる。
+- facade のみ import する統合テスト（`crates/facade/tests/optim_amp_train_loop.rs`）で、収束・1 step の勾配 bit 完全一致（scale_loss→backward→unscale と非スケール backward の勾配が `f32::to_bits()` で一致すること。CPU バックエンド）・非有限勾配時の skip／backoff を固定した。
+
+## #1627 の追補（int8 量子化の段階 0 設計判断）
+
+スナップショット本体（対象 HEAD `097bff19`）の 354 行目「量子化（int8 等）」行（`なし・量子化 dtype・演算対応・難度 XL`）は不変のまま、以下を追記する。
+
+- 正本 spec の除外事項「分散学習・量子化の網羅対応」（Won't・条件付き〈量子化 GEMM〉）は「spec 側で REQ として承認されるまで実装リポは量子化カーネルを起票・実装しない」と定めており、この判断は変わっていない（`docs/spec/04-requirements.md:356-364`）。
+- 本イシューでは `Op`／`BackendOps`／`Var`／facade のコード実装を行わず、格上げ条件（a〜e）の充足状況の棚卸しと再開条件を `docs/backend-int8-quantization-decision.md` として記録した（#1628・#1652・#1775 と同型の段階 0）。格上げ条件のうち (a)（REQ-2 複合判定の改定）は実質充足と読めるが、(b)〜(e)（実機 MMA プローブ・Transformer 複合 WL ベースライン・量子化専用許容基準・依存追加なし設計の実装確認）は未達のまま（同 doc §2.1）。
+- issue 上の承認コメント（`unsafe asm!`〈SME〉・`BackendOps` trait 拡張・facade 公開面拡張の技術的許可）は実装着手前の技術的許可事項に限られ、spec 側の除外事項ゲート自体を解除する文言ではないと整理した（同 doc §0.1）。
+- facade 新規公開面なし（コード変更を伴わないため）。実装着手は本追補のスコープ外のまま引き続き #1627 として open・blocked で追跡する。
