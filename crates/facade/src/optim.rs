@@ -123,7 +123,8 @@
 //! （親 #192 の並行実装）により不統一だが、本モジュールでは単一の
 //! `fandhe_ai::optim` 入口へ吸収し利用者からは意識させない。一方で
 //! [`crate::optim::Sgd::step`] は `&[&Tensor<f32>]` 2 本（`params`・`grads`）を、
-//! [`crate::optim::AdamW::step`]／[`crate::optim::Adam::step`] は
+//! [`crate::optim::AdamW::step`]／[`crate::optim::Adam::step`]／
+//! [`crate::optim::Lamb::step`] は
 //! `&[(&Tensor<f32>, &Tensor<f32>)]`（tuple 列）を
 //! 引数に取るというシグネチャ形の相違は**本モジュールでは統一しない**
 //! （親 #192 の統合判断待ち。`docs/facade-optimizer-promotion-decision.md`
@@ -177,7 +178,19 @@
 //! イシュー #1742）も同様に `DeviceParamStore` へは未結線であり、本
 //! モジュールの他の optimizer と同じくホスト `Tensor<f32>` を介した
 //! optimizer step のみを提供する（`nn::optim::adam` モジュール doc
-//! 「`DeviceParamStore` 非対応」節）。
+//! 「`DeviceParamStore` 非対応」節）。[`crate::optim::Lamb`]（layer-wise
+//! trust ratio。イシュー #1744）も同様に `DeviceParamStore` へは未結線
+//! （パラメータテンソルごとの L2 norm reduction カーネルが未実装の
+//! ため。`nn::optim::lamb` モジュール doc「`DeviceParamStore` 非対応」節）。
+//!
+//! **LAMB（イシュー #1744・親 #1610）**: [`crate::optim::Lamb`]／
+//! [`crate::optim::LambConfig`] を `fandhe_ai_autodiff::nn::optim`
+//! （実体は `nn::optim::lamb` モジュール）から素の再エクスポートで
+//! 公開する。weight decay は paper 定義どおり更新方向 `u` へ coupled
+//! で織り込む（`AdamW` の decoupled 乗算減衰とは構造が異なる。
+//! `nn::optim::lamb` モジュール doc 参照）。`step()` シグネチャは
+//! `AdamW::step`／`Adam::step` と同一（`&[(&Tensor<f32>, &Tensor<f32>)]`
+//! を受け取り更新後 `Tensor<f32>` の列を返す）。
 
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。`tests/api_surface.rs`
 // が `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査する
@@ -189,6 +202,7 @@ pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_value};
 pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
 pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, LinearWarmupLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
+pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
 pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};
 pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};
 pub use fandhe_ai_autodiff::nn::optim::{RmsProp, RmsPropConfig};
