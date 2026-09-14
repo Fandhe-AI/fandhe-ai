@@ -404,12 +404,12 @@ impl<'t> Var<'t> {
     }
 
     /// `ScalarUnaryOp` 汎用 dispatch の `Var` 入口（イシュー #1634）。
-    /// `pub(crate)`: 個別公開メソッド（[`Var::sqrt`]・`log`／`log2`／
-    /// `log10`／`sin`／`cos`／`tan`／`abs`／`neg`（イシュー #1710・
-    /// #1711）・`gelu`／`gelu_tanh`／`softplus`（イシュー #1713）等。
-    /// 本ファイル下方）が薄い委譲で公開する共通実装。残る活性化系
-    /// （SiLU／LeakyReLU／ELU／Hardswish 等）の個別公開メソッドは
-    /// #1714 が別途追加する。
+    /// `pub(crate)`: 個別公開メソッド（[`Var::sqrt`]・[`Var::clamp`]・
+    /// `log`／`log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg`
+    /// （イシュー #1710・#1711・#1712）・`gelu`／`gelu_tanh`／
+    /// `softplus`（イシュー #1713）等。本ファイル下方）が薄い委譲で
+    /// 公開する共通実装。残る活性化系（SiLU／LeakyReLU／ELU／
+    /// Hardswish 等）の個別公開メソッドは #1714 が別途追加する。
     ///
     /// `where_cond`（`crate::grad::where_cond_with_fallback` 経由）と
     /// 同じ eager 実体化契約: ①入力値を層 1（[`materialize_fallible`]）
@@ -433,8 +433,9 @@ impl<'t> Var<'t> {
     /// [`Var::scalar_unary`] の 2 項版で設計方針は同一
     /// （`pub(crate)`・eager・フォールバック契約）。`add`／`mul` と同じ
     /// NumPy 互換ブロードキャスト（`broadcast_shape`）。個別公開メソッド
-    /// （[`Var::sub`]／[`Var::div`]／[`Var::pow`]。本ファイル下方）が
-    /// 呼ぶ共通実装（イシュー #1710）。
+    /// （[`Var::sub`]／[`Var::div`]／[`Var::pow`]／[`Var::gt`] 等 6 種の
+    /// 比較演算。本ファイル下方）が呼ぶ共通実装（イシュー #1710・
+    /// #1712）。
     pub(crate) fn scalar_binary(
         &self,
         other: &Var<'t>,
@@ -567,6 +568,70 @@ impl<'t> Var<'t> {
     /// unary_grad_factor`）。
     pub fn sqrt(&self) -> Result<Var<'t>, AutodiffError> {
         self.scalar_unary(ScalarUnaryOp::Sqrt)
+    }
+
+    /// 要素ごとの範囲制限（PyTorch `torch.clamp` 相当）。イシュー #1712
+    /// （親 #1593）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Clamp`]）への薄い委譲。
+    /// **数値規約（`eval::scalar::unary_grad_factor` を変更せず踏襲）**:
+    /// 範囲内（境界値を含む）は勾配係数 1・範囲外は 0。`NaN` 入力は
+    /// forward がそのまま `NaN` を伝播し勾配は 0。`min > max` は
+    /// （PyTorch と同じく）常に `max` を返す定数関数として扱われ、
+    /// 勾配は常に 0（panic しない）。
+    pub fn clamp(&self, min: f32, max: f32) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Clamp { min, max })
+    }
+
+    /// ブロードキャスト付き要素ごとの大なり比較（`self > other`。
+    /// PyTorch `torch.gt`／`>` 演算子相当）。イシュー #1712（親 #1593）。
+    ///
+    /// 比較演算 6 種（`gt`／`ge`／`lt`／`le`／`eq`／`ne`）は共通の出力・
+    /// 勾配規約を持つ: 出力は f32 の `0.0`／`1.0`（bool dtype 出力は
+    /// #1613 の対象で本メソッドの対象外。`docs/scalar-op-dispatch-design.md`
+    /// §3.2）。IEEE 754 準拠の比較（`NaN` を含む比較は `eq` を含め常に
+    /// 偽・`ne` のみ真）。VJP は両入力とも常にゼロ勾配（比較演算は
+    /// 局所的に階段関数のため微分不可能。`eval::scalar::binary_partials`
+    /// が `(0.0, 0.0)` を返す設計を `grad.rs::vjp` がそのまま `Some`
+    /// として伝播——寄与を省略しない）。`add`／`mul` と同じ NumPy
+    /// 互換ブロードキャスト。
+    pub fn gt(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Gt)
+    }
+
+    /// ブロードキャスト付き要素ごとの以上比較（`self >= other`。
+    /// PyTorch `torch.ge` 相当）。数値規約は [`Var::gt`] を参照。
+    /// イシュー #1712（親 #1593）。
+    pub fn ge(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Ge)
+    }
+
+    /// ブロードキャスト付き要素ごとの小なり比較（`self < other`。
+    /// PyTorch `torch.lt` 相当）。数値規約は [`Var::gt`] を参照。
+    /// イシュー #1712（親 #1593）。
+    pub fn lt(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Lt)
+    }
+
+    /// ブロードキャスト付き要素ごとの以下比較（`self <= other`。
+    /// PyTorch `torch.le` 相当）。数値規約は [`Var::gt`] を参照。
+    /// イシュー #1712（親 #1593）。
+    pub fn le(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Le)
+    }
+
+    /// ブロードキャスト付き要素ごとの等価比較（`self == other`。
+    /// PyTorch `torch.eq` 相当）。数値規約は [`Var::gt`] を参照（`NaN`
+    /// 同士は偽）。イシュー #1712（親 #1593）。
+    pub fn eq(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Eq)
+    }
+
+    /// ブロードキャスト付き要素ごとの非等価比較（`self != other`。
+    /// PyTorch `torch.ne` 相当）。数値規約は [`Var::gt`] を参照（`NaN`
+    /// が絡む比較は常に真）。イシュー #1712（親 #1593）。
+    pub fn ne(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Ne)
     }
 
     /// GELU（誤差関数版。PyTorch `F.gelu(x, approximate='none')`
