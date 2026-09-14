@@ -183,7 +183,10 @@ code-comment-style.md` が禁じる「同一クレート内の陳腐化しやす
   `erf`／`log1p` を自作ヘルパ `scalar_erf_f32`／`scalar_log1p_f32`
   〈`unary_prelude` 機構。既存 kind は空文字列で生成ソース不変〉として
   実装）＋#1714（`Silu`／`Hardswish`／`LeakyRelu`／`Elu`。`Elu` は MSL
-  に `expm1` 相当が存在しないため `exp(x) - 1.0f` で代替——
+  に `expm1` 相当が存在しないため、`exp`／`log` から桁落ちなく再構成
+  する自作ヘルパー `fai_expm1_f32`〈単純な `exp(x) - 1.0f` はゼロ近傍・
+  大 `alpha` 入力で桁落ちし REQ-2 統一複合判定を満たさなかったため
+  不採用。PR #1825 codex-review P1 是正〉を使う——
   `scalar_op_source.rs` モジュール doc「`Elu` の `expm1` 非対応」
   参照。`unary_preamble` 機構〈`unary_prelude` とは別関数で共存〉）で
   実装済み。両バックエンドとも残 kind（`Add`／`Mul`／`Maximum`／

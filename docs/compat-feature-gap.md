@@ -1060,9 +1060,15 @@ Hardswish, LeakyRelu, Elu}`（`Module` 実装込み）・
 〈`exp`〉を含むため REQ-2 統一複合判定のみ）。`LeakyRelu`／`Elu` は本
 実装で初めて 1 引数ペイロード（CUDA／Metal 双方に
 `UnaryPayload::One`）を持つ unary kind として追加した。Metal の `Elu`
-は MSL に `expm1` 相当が存在しないため `exp(x) - 1.0f` で代替し、ホスト
-`f32::exp_m1`（桁落ち回避）と異なる数値経路になる（誤差は REQ-2 複合
-判定の絶対誤差救済項の範囲内。`scalar_op_source.rs` モジュール doc
+は MSL に `expm1` 相当が存在しないため、`exp`／`log` から桁落ちなく
+再構成する自作ヘルパー `fai_expm1_f32`（`u = exp(x)` を計算し
+`u == 1.0` なら `expm1(x) ≈ x`、`u == 0.0`〈underflow〉なら `-1.0f`、
+それ以外は `(u - 1) * x / log(u)` で再構成）を使う。単純な
+`exp(x) - 1.0f` による代替は `x=-1e-8, alpha=1e8` のようなゼロ近傍・
+大 `alpha` の入力で桁落ちし REQ-2 統一複合判定を満たさなかったため
+不採用（PR #1825 codex-review P1 是正）。ホスト `f32::exp_m1`（正確な
+libm 実装）とは一般に bit 同一にならず、超越関数系と同じく REQ-2
+統一複合判定のみで検証する（`scalar_op_source.rs` モジュール doc
 「`Elu` の `expm1` 非対応」参照）。facade `compat::Sequential::add_*` 4
 件の新規公開面は親 #1595 コメント（2026-09-12 ユーザー承認）に基づく
 `docs/compat-api-scope.md` §5 経路 2 の適用。CUDA（DGX Spark GB10）・
