@@ -1089,3 +1089,12 @@ libm 実装）とは一般に bit 同一にならず、超越関数系と同じ�
 Metal（Apple Silicon）実機での parity テストは、本実装エージェントの
 実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ
 申し送る。
+
+## 追補（イシュー #1731）
+
+`Var::cumsum`／`cumprod`（`torch.cumsum`／`torch.cumprod` 相当）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `tensor-core::BackendOps::cumsum`／`cumprod`（既定 `Unsupported`）・`autodiff::Op::Cumsum`／`Op::Cumprod`・CPU 参照実装（`backend-cpu::scan`）・ホストフォールバック（`eval::cumsum_along`／`cumprod_along`）まで実装済み。
+- forward は lane（縮約軸以外の全軸の組）ごとに `f64` アキュムレータを保持する逐次スキャン契約（`.claude/rules/coding-rust.md` の f64 アキュムレータ方針を forward の scan へ拡張）。VJP はホスト側のみ（`grad.rs::cumsum_vjp_along`／`cumprod_vjp_along`）で、`cumprod` は除算を用いない厳密形（排他的 prefix 積 `L` と後ろ向き Horner 型再帰 `S` の積）のため零要素を含む入力でも成り立つ。
+- CUDA／Metal 専用カーネルは本イシューのスコープ外（既定 `Unsupported` フォールバックのまま）で後続イシューへ引き継ぐ。
+- facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.3）。
