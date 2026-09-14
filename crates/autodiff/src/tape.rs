@@ -610,6 +610,44 @@ pub(crate) enum Op {
         src: NodeId,
         reduce: ScatterReduce,
     },
+    /// `Var::sort`（`torch.sort` 相当。`Var::argsort` は本 variant を
+    /// 記録せず forward の `index` 出力のみを返す非微分演算。イシュー
+    /// #1733）。`index`（非追跡データ・`Op::Gather` と同じ「`Op`
+    /// payload に直接 `Tensor<i32>` を埋め込む」設計）は forward
+    /// （`Var::sort`）が確定した並べ替え添字（[`BackendOps::sort`] の
+    /// 順序契約 1〜4 に従う）。`descending`／`k`／`largest` は forward
+    /// 値へ焼き込み済みのため保持しない（`Op::MaskedFill` の最小
+    /// 保持方針と同じ）。`BackendOps::sort` に対応メソッドがあるため
+    /// 非融合対象（`push_eager` で常に実体化。`Op::Gather`／`Scatter`
+    /// と同型）。
+    ///
+    /// VJP（`grad.rs`）: `values = gather(input, dim, index)` と数学的
+    /// に同一のため、`Op::Gather` と同じ式
+    /// `d_input = scatter_add(zeros_like(input), dim, index, upstream)`
+    /// を使う。
+    Sort {
+        input: NodeId,
+        dim: usize,
+        index: Tensor<i32>,
+    },
+    /// `Var::topk`（`torch.topk` 相当・`sorted=True` 固定。イシュー
+    /// #1733）。`index` は [`Op::Sort`] と同じ非追跡データ埋め込み
+    /// （[`BackendOps::topk`] の順序契約に従う）。`k`／`largest` は
+    /// forward 値・`index` の shape（`dim` 軸長 = `k`）へ焼き込み済み
+    /// のため保持しない。`BackendOps::topk` に対応メソッドがあるため
+    /// 非融合対象（`push_eager` で常に実体化）。
+    ///
+    /// VJP（`grad.rs`）: [`Op::Sort`] と同じ scatter ベース
+    /// （`values = gather(input, dim, index)` と数学的に同一。
+    /// `scatter_out_shape` は `index.shape()[dim] (=k) <=
+    /// input.shape()[dim]` を要求しないため — `dim` 軸は無制約 —
+    /// `k <= input.shape()[dim]`（`topk_out_shape` が forward 時点で
+    /// 保証済み）の下で常に成立する）。
+    Topk {
+        input: NodeId,
+        dim: usize,
+        index: Tensor<i32>,
+    },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
@@ -927,6 +965,10 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （非網羅 match 是正で新規 variant 追加時に強制される）。
             Op::Gather { .. } | Op::Scatter { .. } => false,
+            // `Op::Sort`／`Op::Topk`（イシュー #1733）は `Op::Gather` と
+            // 同じく `index` を `Op` 自身が保持する eager 実体化演算で、
+            // `recompute_value` に再計算経路を持たないため解放しない。
+            Op::Sort { .. } | Op::Topk { .. } => false,
         }
     }
 
@@ -983,6 +1025,7 @@ impl Op {
                 f(*input);
                 f(*src);
             }
+            Op::Sort { input, .. } | Op::Topk { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);
                 f(*target);

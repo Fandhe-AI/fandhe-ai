@@ -1522,3 +1522,269 @@ fn scatter_index_out_of_range_is_rejected() {
     let err = x.scatter(1, &index, &src).unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }
+
+// --- Sort／Argsort／Topk（イシュー #1733） ---
+
+/// `i32` 版 `dense_vec`（上記）。`sort`／`argsort`／`topk` の `index`
+/// 出力を検証するテスト専用ヘルパー。
+fn dense_vec_i32(tensor: &Tensor<i32>) -> Vec<i32> {
+    tensor
+        .contiguous()
+        .as_slice()
+        .expect("test fixture: contiguous() 後は必ず as_slice() が Some")
+        .to_vec()
+}
+
+/// ①forward 値（解析）: 昇順 sort。同値なし・NaN なしの基本ケース。
+#[test]
+fn sort_ascending_forward() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3.0, 1.0, 4.0, 1.5], &[1, 4]));
+    let (out, index) = x.sort(1, false).unwrap();
+    assert_eq!(dense_vec(&out.to_tensor()), vec![1.0, 1.5, 3.0, 4.0]);
+    assert_eq!(dense_vec_i32(&index), vec![1, 3, 0, 2]);
+}
+
+/// ①forward 値（解析）: 降順 sort。
+#[test]
+fn sort_descending_forward() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3.0, 1.0, 4.0, 1.5], &[1, 4]));
+    let (out, index) = x.sort(1, true).unwrap();
+    assert_eq!(dense_vec(&out.to_tensor()), vec![4.0, 3.0, 1.5, 1.0]);
+    assert_eq!(dense_vec_i32(&index), vec![2, 0, 3, 1]);
+}
+
+/// 同値（ties）の順序契約: `descending` の値に関わらず、同値要素は
+/// 元インデックス昇順で並ぶ（`BackendOps::sort` doc 契約 1）。
+#[test]
+fn sort_ties_preserve_index_ascending_order_both_directions() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![2.0, 1.0, 1.0, 2.0], &[1, 4]));
+
+    let (asc, asc_index) = x.sort(1, false).unwrap();
+    assert_eq!(dense_vec(&asc.to_tensor()), vec![1.0, 1.0, 2.0, 2.0]);
+    // 値 1.0 の元添字は {1, 2}・値 2.0 の元添字は {0, 3}。
+    // いずれも昇順ソート結果内で元添字昇順のまま。
+    assert_eq!(dense_vec_i32(&asc_index), vec![1, 2, 0, 3]);
+
+    let (desc, desc_index) = x.sort(1, true).unwrap();
+    assert_eq!(dense_vec(&desc.to_tensor()), vec![2.0, 2.0, 1.0, 1.0]);
+    // 降順でも同値グループ内は元添字昇順のまま（単純な reverse() なら
+    // {3, 0} になってしまうところを {0, 3} で確認する）。
+    assert_eq!(dense_vec_i32(&desc_index), vec![0, 3, 1, 2]);
+}
+
+/// NaN の順序契約: NaN は任意の非 NaN より大きい・NaN 同士は同値
+/// （元添字昇順）として扱う（`BackendOps::sort` doc 契約 2）。
+#[test]
+fn sort_nan_treated_as_largest_and_ties_among_nan() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![f32::NAN, 1.0, f32::NAN, 0.0], &[1, 4]));
+    let (asc, asc_index) = x.sort(1, false).unwrap();
+    let asc_vals = dense_vec(&asc.to_tensor());
+    assert_eq!(&asc_vals[..2], &[0.0, 1.0]);
+    assert!(asc_vals[2].is_nan() && asc_vals[3].is_nan());
+    // NaN 2 個（元添字 0・2）は同値扱いで元添字昇順のまま末尾に来る。
+    assert_eq!(dense_vec_i32(&asc_index), vec![3, 1, 0, 2]);
+}
+
+/// ±0 の順序契約: `-0.0` と `0.0` は同値（`partial_cmp` が `Equal`）
+/// として扱われ、元添字昇順で並ぶ（`BackendOps::sort` doc 契約 3）。
+#[test]
+fn sort_negative_and_positive_zero_are_tied() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, -0.0, 0.0], &[1, 3]));
+    let (out, index) = x.sort(1, false).unwrap();
+    assert_eq!(dense_vec(&out.to_tensor()), vec![-0.0, 0.0, 1.0]);
+    assert_eq!(dense_vec_i32(&index), vec![1, 2, 0]);
+}
+
+/// ②`sort` の backward を中央差分と突合する（tie-free 入力・dim=1・
+/// 降順）。`Op::Sort` の VJP は `values = gather(input, dim, index)`
+/// と数学的に同一のため gather と同じ scatter_add 式を使う。
+#[test]
+fn sort_backward_matches_numeric_tie_free_descending() {
+    let x0 = t(vec![3.0, 1.0, 4.0, 1.5], &[1, 4]);
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let (out, _index) = xv.sort(1, true).unwrap();
+        scalar(&out.mul(&out).unwrap().sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let (out, _index) = xv.sort(1, true).unwrap();
+    let loss = out.mul(&out).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close("sort dX (tie-free, descending)", dx, &num_dx);
+}
+
+/// argsort は `sort` と同じ `index` を返し、テープへノードを追加
+/// しない（非微分演算。実装計画「設計判断」§2.1 参照）。
+#[test]
+fn argsort_matches_sort_index_and_adds_no_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3.0, 1.0, 4.0, 1.5], &[1, 4]));
+
+    let before = tape.len();
+    let index = x.argsort(1, false).unwrap();
+    assert_eq!(
+        tape.len(),
+        before,
+        "argsort はテープへノードを追加しないはず"
+    );
+    assert_eq!(dense_vec_i32(&index), vec![1, 3, 0, 2]);
+}
+
+/// ③エラー経路: `dim` が rank 範囲外なら `AutodiffError::Shape`
+/// （`AxisOutOfRange`）を返す（`sort`／`argsort` 共通）。
+#[test]
+fn sort_axis_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let err = x.sort(1, false).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange {
+            axis: 1,
+            rank: 1
+        })
+    ));
+    let err = x.argsort(1, false).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange {
+            axis: 1,
+            rank: 1
+        })
+    ));
+}
+
+/// `dim` 軸長 0 の sort は空出力で成功する。
+#[test]
+fn sort_empty_dim_returns_empty_output() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(Vec::new(), &[1, 0]));
+    let (out, index) = x.sort(1, false).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[1, 0]);
+    assert_eq!(dense_vec(&out.to_tensor()), Vec::<f32>::new());
+    assert_eq!(dense_vec_i32(&index), Vec::<i32>::new());
+}
+
+/// ①forward 値（解析）: `topk`（`largest=true`）は降順 sort の
+/// 先頭 `k` に等しい。
+#[test]
+fn topk_largest_forward() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3.0, 1.0, 4.0, 1.5], &[1, 4]));
+    let (out, index) = x.topk(2, 1, true).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[1, 2]);
+    assert_eq!(dense_vec(&out.to_tensor()), vec![4.0, 3.0]);
+    assert_eq!(dense_vec_i32(&index), vec![2, 0]);
+}
+
+/// ①forward 値（解析）: `topk`（`largest=false`）は昇順 sort の
+/// 先頭 `k` に等しい。
+#[test]
+fn topk_smallest_forward() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3.0, 1.0, 4.0, 1.5], &[1, 4]));
+    let (out, index) = x.topk(2, 1, false).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[1, 2]);
+    assert_eq!(dense_vec(&out.to_tensor()), vec![1.0, 1.5]);
+    assert_eq!(dense_vec_i32(&index), vec![1, 3]);
+}
+
+/// `k == n`（対象軸のサイズと等しい）は sort と同一の結果になる。
+#[test]
+fn topk_k_equals_dim_size_matches_sort() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3.0, 1.0, 4.0, 1.5], &[1, 4]));
+    let (topk_out, topk_index) = x.topk(4, 1, true).unwrap();
+    let (sort_out, sort_index) = x.sort(1, true).unwrap();
+    assert_eq!(
+        dense_vec(&topk_out.to_tensor()),
+        dense_vec(&sort_out.to_tensor())
+    );
+    assert_eq!(dense_vec_i32(&topk_index), dense_vec_i32(&sort_index));
+}
+
+/// `k == 0` は空出力で成功する。
+#[test]
+fn topk_k_zero_returns_empty_output() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3.0, 1.0, 4.0, 1.5], &[1, 4]));
+    let (out, index) = x.topk(0, 1, true).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[1, 0]);
+    assert_eq!(dense_vec(&out.to_tensor()), Vec::<f32>::new());
+    assert_eq!(dense_vec_i32(&index), Vec::<i32>::new());
+}
+
+/// ②`topk` の backward を中央差分と突合する（tie-free 入力・
+/// `largest=true`・`k < n`）。非選択要素の勾配は 0 になる。
+#[test]
+fn topk_backward_matches_numeric_and_zeroes_unselected() {
+    let x0 = t(vec![3.0, 1.0, 4.0, 1.5], &[1, 4]);
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let (out, _index) = xv.topk(2, 1, true).unwrap();
+        scalar(&out.mul(&out).unwrap().sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let (out, _index) = xv.topk(2, 1, true).unwrap();
+    let loss = out.mul(&out).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close("topk dX (tie-free, largest, k<n)", dx, &num_dx);
+    // 選択されたのは値 3.0（index 0）・4.0（index 2）のみ。
+    // 非選択（index 1・3）の勾配は 0。
+    let dx_vec = dense_vec(dx);
+    assert_eq!(dx_vec[1], 0.0);
+    assert_eq!(dx_vec[3], 0.0);
+}
+
+/// ③エラー経路: `dim` が rank 範囲外なら `AutodiffError::Shape`
+/// （`AxisOutOfRange`）を返す。
+#[test]
+fn topk_axis_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let err = x.topk(1, 1, true).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange {
+            axis: 1,
+            rank: 1
+        })
+    ));
+}
+
+/// エラー経路: `k > shape[dim]` は `AutodiffError::Shape`
+/// （`NarrowOutOfBounds`）を返す。
+#[test]
+fn topk_k_exceeds_dim_size_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
+    let err = x.topk(5, 1, true).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::NarrowOutOfBounds {
+            dim: 1,
+            start: 0,
+            len: 5,
+            dim_size: 3,
+        })
+    ));
+}

@@ -1251,6 +1251,31 @@ pub(crate) fn vjp(
             };
             vec![(input, d_input), (src, d_src)]
         }
+        // `Var::sort`／`Var::topk`（`Var::argsort` はノードを記録しない
+        // ため到達しない。イシュー #1733）。forward が
+        // `values = gather(input, dim, index)` と数学的に同一
+        // （並べ替え・選択は算術演算を含まない要素の並べ替えのみ）で
+        // あるため、VJP は `Op::Gather` と同じ「scatter_add で零テンソル
+        // へ upstream を index の位置へ加算する」式を使う。同一出力
+        // 位置（`index` 内）に重複する添字は存在しない（sort／topk は
+        // 各出力位置ごとに `input` の異なる要素を選ぶ全単射・部分
+        // 単射のため）ので `ScatterReduce::Add` と `Overwrite` は同値
+        // だが、`Op::Gather` VJP と実装を揃え `Add`（`f64` 経路も
+        // `0.0 + x` で bit 一致）を使う。
+        Op::Sort { input, dim, index } | Op::Topk { input, dim, index } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let zeros = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+            let d_input = scatter_with_fallback(
+                ops,
+                &zeros,
+                dim,
+                &index,
+                upstream,
+                ScatterReduce::Add,
+                &input_shape,
+            )?;
+            vec![(input, d_input)]
+        }
         // `Var::contiguous` が記録するノード（イシュー #1620。
         // `crate::einsum` の permute 後 reshape 前の明示実体化）。
         // メモリレイアウトのみが変わり値は変わらないため、VJP は
@@ -1506,6 +1531,67 @@ pub(crate) fn scatter_with_fallback(
             Ok(v)
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::scatter(input, dim, index, src, reduce)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Sort`] の forward（`Var::sort`／`argsort` 経由）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1733）。
+/// [`gather_with_fallback`] と同型: `ops.sort` → `Unsupported` の
+/// ときのみ `eval::sort`（[`fandhe_ai_tensor_core::BackendOps::sort`]
+/// の順序契約に厳密に従う）へフォールバックし、それ以外のエラーは
+/// 伝播する（判定迂回経路を作らない）。バックエンド実装が返した
+/// `values`／`index` の shape を `out_shape` と照合し、不一致は
+/// `AutodiffError::Backend(BackendError::ShapeMismatch(..))` を返す。
+pub(crate) fn sort_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    dim: usize,
+    descending: bool,
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), AutodiffError> {
+    match ops.sort(input, dim, descending) {
+        Ok((values, index)) => {
+            if values.shape() != out_shape || index.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: values.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok((values, index))
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::sort(input, dim, descending)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Topk`] の forward（`Var::topk` 経由）が使う「バックエンド
+/// 実装 → フォールバック」ヘルパー（イシュー #1733）。
+/// [`sort_with_fallback`] と同型: `ops.topk` → `Unsupported` の
+/// ときのみ `eval::topk` へフォールバックする。
+pub(crate) fn topk_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    dim: usize,
+    k: usize,
+    largest: bool,
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), AutodiffError> {
+    match ops.topk(input, dim, k, largest) {
+        Ok((values, index)) => {
+            if values.shape() != out_shape || index.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: values.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok((values, index))
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::topk(input, dim, k, largest, out_shape)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }

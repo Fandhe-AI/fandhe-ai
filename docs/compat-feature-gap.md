@@ -883,3 +883,24 @@ typed_bf16.rs`。イシュー #1706・`docs/backend-dtype-dispatch-design.md`
 - facade 公開面への新規追加はない。`Var`／`Tape`／VJP は引き続き未接続で、
   本表の「未実装（欠落側）」列の評価（`Var` レベルの mixed precision）は
   変わらない。
+
+## 追補（イシュー #1733）
+
+§2.2「`torch.topk`/`sort`」行はスナップショット時点の記述（「なし」）の
+まま不変とし、以下を追記する: `Var::sort`／`argsort`／`topk`（`torch.sort`／
+`torch.argsort`／`torch.topk` 相当）を実装済み化した（`tape::Op::Sort`／
+`Op::Topk`〈`push_eager` の非融合 eager 演算・`Op::Gather` と同型の最小
+保持方針〉・CPU 参照実装〈`backend-cpu::sort_topk`〉・ホスト参照実装
+〈`fandhe_ai_autodiff::eval::sort`／`topk`〉・scatter ベース VJP〈`values
+= gather(input, dim, index)` と数学的に同一のため `Op::Gather` と同じ
+`scatter_add` 式を再利用〉）。同値（ties）は `descending` の値に関わらず
+元インデックス昇順・NaN は任意の非 NaN より大きい・±0 は同値、という
+順序契約（`fandhe_ai_tensor_core::BackendOps::sort` doc）を CPU 参照実装・
+ホストフォールバックの両方で固定し、`crates/backend-cpu/tests/
+sort_topk_parity.rs` で bit 完全一致を回帰確認した。`Var::argsort` は
+`Op::Sort` を記録せず（非微分演算）、`sort` と同じ検査・フォールバック
+経路を通した `index` のみを返す。CUDA／Metal 専用カーネルは既定
+`Unsupported`（ホストフォールバックで機能する）のまま #1741 へ引き継ぐ。
+facade 新規公開面なし（既存の `Var` 再エクスポート経由）。`sorted=False`
+の topk・負 `dim`・非安定ソート（本実装の同値タイブレークとは異なる
+意味論）・`k` の `Var` 化は対象外のまま。
