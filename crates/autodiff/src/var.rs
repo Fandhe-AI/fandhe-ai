@@ -16,12 +16,12 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
-    InterpolateMode, LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp,
-    ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd, broadcast_shape,
-    concat_out_shape, gather_out_shape, gemm_out_shape, interpolate_out_shape, matmul_out_shape,
-    one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    Activation, BackendError, BackendOps, BceKind, ChecksumReadout, GemmChecksum,
+    GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
+    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
+    broadcast_shape, concat_out_shape, gather_out_shape, gemm_out_shape, interpolate_out_shape,
+    matmul_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape,
+    row_norm_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -1071,6 +1071,117 @@ impl<'t> Var<'t> {
             Op::MseLoss {
                 pred: self.id,
                 target: target.id,
+                reduction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 二値交差エントロピー損失（`self` = 予測確率 `[0, 1]`、`target` =
+    /// 正解ラベル。全要素平均・PyTorch `nn.BCELoss` 相当）。
+    /// `bce_loss_impl(target, BceKind::Probabilities, reduction)` への
+    /// 委譲（#1737。親イシュー #1609「損失関数の拡張」）。`nn::loss::
+    /// BceLoss`（`nn/loss.rs`）はこのメソッドを呼ぶだけの薄いラッパー
+    /// （REQ-9）。
+    pub fn bce_loss(
+        &self,
+        target: &Var<'t>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.bce_loss_impl(target, BceKind::Probabilities, reduction)
+    }
+
+    /// 二値交差エントロピー損失（logits 入力版。`self` = 未正規化の
+    /// logits、`target` = 正解ラベル。PyTorch `nn.BCEWithLogitsLoss`
+    /// 相当）。sigmoid をカーネル内に内包した数値安定な合成式で計算
+    /// する（`docs/compat-api-scope.md` §1.2 参照）。
+    /// `bce_loss_impl(target, BceKind::Logits, reduction)` への委譲
+    /// （#1737）。`self`（logits）は `[0, 1]` 範囲制約を受けない
+    /// （[`Self::bce_loss`] と異なり範囲検査を行わない）。`nn::loss::
+    /// BceWithLogitsLoss`（`nn/loss.rs`）はこのメソッドを呼ぶだけの
+    /// 薄いラッパー（REQ-9）。
+    pub fn bce_with_logits_loss(
+        &self,
+        target: &Var<'t>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.bce_loss_impl(target, BceKind::Logits, reduction)
+    }
+
+    /// [`Self::bce_loss`]／[`Self::bce_with_logits_loss`] 共通実装
+    /// （#1737）。`mse_loss_with` と同じ演算メソッド規律（層 1
+    /// 実体化 → `self.tape.ops()` の融合カーネルを試み `Unsupported`
+    /// のときのみホスト参照実装 `eval::bce_loss` へフォールバック。
+    /// それ以外のエラーは伝播し判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）に加え、[`BceKind::
+    /// Probabilities`] のときのみ `input`／`target` 双方の値が
+    /// `[0, 1]` 範囲内（NaN は範囲外として拒否）であることを
+    /// 実体化直後・バックエンド呼び出し前にホスト側で検査する
+    /// （`Self::cross_entropy_loss` の targets 範囲検査と同じ配置・
+    /// 同じ `AutodiffError::InvalidArgument` 文言様式。`.claude/rules/
+    /// security.md` A03）。
+    fn bce_loss_impl(
+        &self,
+        target: &Var<'t>,
+        kind: BceKind,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(target)?;
+        let lhs_shape = self.shape();
+        let rhs_shape = target.shape();
+        require_same_shape(&lhs_shape, &rhs_shape)?;
+        let (input_val, target_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let input_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let target_val = materialize_fallible(&nodes, self.tape.ops(), target.id)?.clone();
+            (input_val, target_val)
+        };
+        if matches!(kind, BceKind::Probabilities) {
+            for &v in eval::dense_vec(&input_val).iter() {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "bce_loss: input 値 {v} が範囲 [0, 1] を外れている"
+                    )));
+                }
+            }
+            for &v in eval::dense_vec(&target_val).iter() {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "bce_loss: target 値 {v} が範囲 [0, 1] を外れている"
+                    )));
+                }
+            }
+        }
+        let value = match self
+            .tape
+            .ops()
+            .bce_loss(&input_val, &target_val, kind, reduction.into())
+        {
+            Ok(v) => {
+                // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                // bce_loss` doc「戻り値は shape `[]`」）を検証する
+                // （実装バグの黙認防止。`.claude/rules/security.md` A08）。
+                if !v.shape().is_empty() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: Vec::new(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => {
+                eval::bce_loss(&input_val, &target_val, kind, reduction)
+            }
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::BceLoss {
+                input: self.id,
+                target: target.id,
+                kind,
                 reduction,
             },
             value,
