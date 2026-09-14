@@ -24,7 +24,7 @@
 
 use crate::broadcast::broadcast_shape;
 use crate::error::ShapeError;
-use crate::tensor::checked_numel;
+use crate::tensor::{checked_numel, checked_numel_for};
 
 /// matmul（2 次元前提。`docs/public-api-design.md` §3.2）の出力 shape を
 /// 検査・計算する。
@@ -433,8 +433,21 @@ pub fn row_softmax_layout(
 ///   `IndexOutOfRange` の「範囲外添字」という意味論を「`num_classes`
 ///   軸そのものが空」というケースへ拡張する解釈）。
 /// - 出力 shape `index_shape ++ [num_classes]` の要素数積のオーバー
-///   フローは `checked_numel` で検査し `ShapeError::ElementCountOverflow`
-///   を返す（`matmul_out_shape` 等と同型）。
+///   フローは `checked_numel_for::<f32>` で検査し
+///   `ShapeError::ElementCountOverflow` を返す（`matmul_out_shape` 等の
+///   `checked_numel` 単体とは異なり、出力の実体が常に `Tensor<f32>`
+///   （`eval::one_hot`・CPU／CUDA／Metal 実装いずれも `f32` 出力）で
+///   あることを踏まえ、要素数積が `usize` に収まっても確保バイト数が
+///   `Vec` の allocation 上限（`isize::MAX` バイト）を超えるケース
+///   （例: `index_shape = [1]`・`num_classes = usize::MAX` は要素数積
+///   としては overflow しないが `f32` 4 バイト換算で必ず超過する）まで
+///   ここで一括検査する。`one_hot_out_shape` の戻り値は `Var::one_hot`・
+///   CPU（`gather_scatter.rs::one_hot`）・CUDA／Metal 各実装が
+///   「呼び出し元で検査済み」の前提で `Vec::with_capacity`／
+///   `vec![0f32; numel]` へそのまま渡す単一情報源のため、ここで
+///   バイトサイズまで検査しないと下流の確保が capacity overflow で
+///   panic しうる（本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`
+///   に反する DoS 経路。イシュー #1755・codex-review P1 是正）。
 pub fn one_hot_out_shape(
     index_shape: &[usize],
     num_classes: usize,
@@ -448,7 +461,7 @@ pub fn one_hot_out_shape(
     }
     let mut out = index_shape.to_vec();
     out.push(num_classes);
-    checked_numel(&out)?;
+    checked_numel_for::<f32>(&out)?;
     Ok(out)
 }
 
@@ -1073,6 +1086,21 @@ mod tests {
     #[test]
     fn one_hot_out_shape_element_count_overflow() {
         let err = one_hot_out_shape(&[usize::MAX], 2).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    // codex-review P1 是正（イシュー #1755）の回帰: `index_shape = [1]`・
+    // `num_classes = usize::MAX` は要素数積（`1 * usize::MAX`）としては
+    // `usize` オーバーフローしない（`checked_numel` 単体では通過する）が、
+    // `f32` 4 バイト換算の確保バイト数は `isize::MAX` を大幅に超える。
+    // `checked_numel_for::<f32>` による検査でここが拒否されることを
+    // 確認し、下流（`Var::one_hot`・`eval::one_hot`・CPU
+    // `gather_scatter::one_hot` 等）の `Vec::with_capacity`／
+    // `vec![0f32; numel]` が capacity overflow で panic する経路を
+    // 塞げていることを担保する。
+    #[test]
+    fn one_hot_out_shape_byte_size_overflow_without_element_count_overflow() {
+        let err = one_hot_out_shape(&[1], usize::MAX).unwrap_err();
         assert_eq!(err, ShapeError::ElementCountOverflow);
     }
 }

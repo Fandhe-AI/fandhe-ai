@@ -1913,3 +1913,17 @@ fn one_hot_empty_index_returns_empty_output() {
     let out = x.one_hot(3).unwrap();
     assert_eq!(out.to_tensor().shape(), &[0, 3]);
 }
+
+/// ⑩エラー経路（codex-review P2 是正。イシュー #1755）: `i32::MAX`
+/// を超えるクラス id は `[0, num_classes)` の範囲検査（`usize` 同士の
+/// 比較）自体は通過しうる（`num_classes` も `i32::MAX` を超える場合）
+/// が、`index` テンソルの要素型 `i32` へ収まらないため `v as i32` の
+/// saturating キャストで値が破壊される前に `AutodiffError::
+/// InvalidArgument` として拒否されることを確認する。
+#[test]
+fn one_hot_class_id_exceeding_i32_max_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3_500_000_000.0], &[1]));
+    let err = x.one_hot(4_000_000_000).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}

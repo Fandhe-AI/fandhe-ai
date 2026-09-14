@@ -282,7 +282,7 @@ pub fn validate_scatter_launch(
 /// 理由で Linux 実行可能。イシュー #1755）。`gather`／`scatter` と
 /// 異なり `one_hot_f32` カーネルは座標展開・ストライド配列（`shapes`
 /// バッファ）を一切使わないため、[`validate_shapes_fit_u32`] は呼ばず
-/// [`checked_numel`]／[`validate_launch_len`]（出力要素数の `u32`
+/// `checked_numel`／`validate_launch_len`〈`pub(crate)` のためコードスパン表記とする〉（出力要素数の `u32`
 /// 収容）・[`validate_index_range`]（`index` 値域）のみで検証する。
 ///
 /// 検査順序: [`fandhe_ai_tensor_core::one_hot_out_shape`]（`num_classes

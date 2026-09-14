@@ -2478,6 +2478,21 @@ impl<'t> Var<'t> {
                     "Var::one_hot: クラス id {v} が範囲 [0, {num_classes}) を外れている"
                 )));
             }
+            // `v as i32` は `v` が `i32::MAX` を超える場合 saturating
+            // キャストで `i32::MAX` へ丸まり（Rust 1.45 以降 UB は
+            // 起きないが）値を破壊する。直前の範囲検査（`v < num_classes`）
+            // は `num_classes: usize` が `i32::MAX` を超えうる（`usize`
+            // は 64bit）ため、この破壊を防げない（例: `num_classes =
+            // 4_000_000_000`・`v = 3_500_000_000.0` は範囲検査を通過
+            // するが `i32` へは収まらない）。`index` テンソルの要素型が
+            // `i32`（`gather`／`scatter` と共有する index 表現）である
+            // 契約上、表現不能な値はキャスト前に明示的に拒否する
+            // （codex-review 指摘。イシュー #1755）。
+            if v > i32::MAX as f32 {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Var::one_hot: クラス id {v} が i32 で表現できない"
+                )));
+            }
             index_data.push(v as i32);
         }
         let index = Tensor::new(index_data, &in_shape).map_err(AutodiffError::Shape)?;
