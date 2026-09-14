@@ -262,9 +262,10 @@ pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAlloc
 /// 冒頭コメント）のため、CUDA 側と異なりキーは `op.kind_name()`
 /// （[`ScalarOpKind::kind_name`]。ペイロード値を含まない安定文字列）
 /// のみを使う（`ContextKey` 相当の区別は不要）。`f32` ペイロード
-/// （将来 `Clamp` 等が追加する場合。`crate::scalar_op_source` モジュール
-/// doc「ペイロード seam」参照）はキャッシュキーに含めない契約は CUDA 側
-/// と同一。
+/// （[`ScalarUnaryOp::Clamp`]。イシュー #1709 実装済み。`crate::
+/// scalar_op_source` モジュール doc「ペイロード seam」参照）はキャッシュ
+/// キーに含めない契約は CUDA 側と同一（`cached_scalar_unary_pipeline_
+/// second_call_reuses_cache_for_clamp_regardless_of_payload` 参照）。
 ///
 /// [`crate::scalar_op_source::unary_kernel_source`] が `None`（未実装
 /// kind）を返す場合はキャッシュへ触れずに `Ok(None)` を返す（呼び出し元
@@ -393,6 +394,37 @@ mod tests {
                 objc2::rc::Retained::as_ptr(&second)
             ),
             "2 回目の cached_scalar_unary_pipeline(Log) 呼び出しは同一パイプラインを返すはず"
+        );
+    }
+
+    /// [`cached_scalar_unary_pipeline`] を [`ScalarUnaryOp::Clamp`]
+    /// （イシュー #1709。初のペイロードあり unary kind）で異なる
+    /// `min`／`max` 値により 2 回呼んでも同一パイプラインを返す
+    /// ことを確認する（キャッシュキーが `kind_name()` のみに依存し
+    /// payload 非依存であることの直接検証。モジュール doc「ペイロード
+    /// seam」参照）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn cached_scalar_unary_pipeline_second_call_reuses_cache_for_clamp_regardless_of_payload() {
+        let ctx = cached_context().expect("Metal context available on test host");
+        let first = cached_scalar_unary_pipeline(&ctx, ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 })
+            .expect("Clamp is implemented")
+            .expect("Clamp must return Some(pipeline)");
+        let second = cached_scalar_unary_pipeline(
+            &ctx,
+            ScalarUnaryOp::Clamp {
+                min: -5.0,
+                max: 5.0,
+            },
+        )
+        .expect("2nd call must succeed given the 1st succeeded")
+        .expect("Clamp must return Some(pipeline)");
+        assert!(
+            std::ptr::eq(
+                objc2::rc::Retained::as_ptr(&first),
+                objc2::rc::Retained::as_ptr(&second)
+            ),
+            "異なる payload 値でも 2 回目の cached_scalar_unary_pipeline(Clamp) 呼び出しは同一パイプラインを返すはず"
         );
     }
 }

@@ -59,31 +59,45 @@
 //! tolerance 定数の変更ではない（`.claude/rules/coding-rust.md` の
 //! 許容誤差はユーザー承認必須のポリシー除外対象）。
 //!
-//! # ペイロード seam（#1709 `Clamp` 向け申し送り。本イシューでは実装しない）
+//! # ペイロード seam（#1709 で実装済み）
 //!
 //! CUDA 側 `kernels_scalar_op::UnaryPayload`（`Clamp` の `min`/`max` を
-//! カーネル起動引数として渡す設計）と同型の拡張余地を残す:
-//! ペイロードを追加する場合は `masked_fill`（`elementwise.rs::
-//! run_binary_scalar`・`shaders/elementwise.metal::ew_masked_fill_f32`）
-//! と同様に `numel` の後ろへ `setBytes_length_atIndex` で渡し（`constant
-//! float& p0 [[buffer(3)]]` 等）、ソース文字列・キャッシュキー・関数名
-//! には値を埋め込まない。本イシュー（#1707）が対象とする 4 kind
-//! （`Sub`／`Div`／`Pow`／`Sqrt`）はいずれもペイロードを持たないため、
-//! この seam は未使用のまま将来（#1709）へ引き継ぐ。
+//! カーネル起動引数として渡す設計）と同型の拡張を [`UnaryPayload`]／
+//! [`unary_payload`] として実装した。ペイロードは `masked_fill`
+//! （`elementwise.rs::run_binary_scalar`・`shaders/elementwise.metal::
+//! ew_masked_fill_f32`）と同様に `numel` の後ろへ `setBytes_length_atIndex`
+//! で渡し（`constant float& p0 [[buffer(3)]]`／`p1 [[buffer(4)]]`）、
+//! ソース文字列・キャッシュキー・関数名には値を埋め込まない（現状
+//! ペイロードを持つ unary kind は [`ScalarUnaryOp::Clamp`] のみ。#1707
+//! が対象とした 4 kind（`Sub`／`Div`／`Pow`／`Sqrt`）はいずれもペイロード
+//! を持たないため、生成ソースは payload なしのまま不変＝bit 同一
+//! 〈非後退契約〉）。
 //!
 //! # スコープ
 //!
 //! [`ScalarBinaryOp::Sub`]／[`ScalarBinaryOp::Div`]／[`ScalarBinaryOp::Pow`]
-//! ・[`ScalarUnaryOp::Sqrt`]（#1707）に加え、[`ScalarUnaryOp::Neg`]／
+//! ・[`ScalarUnaryOp::Sqrt`]（#1707）、[`ScalarUnaryOp::Neg`]／
 //! [`ScalarUnaryOp::Abs`]／[`ScalarUnaryOp::Log`]／[`ScalarUnaryOp::Log2`]／
 //! [`ScalarUnaryOp::Log10`]／[`ScalarUnaryOp::Sin`]／[`ScalarUnaryOp::Cos`]／
-//! [`ScalarUnaryOp::Tan`]（超越関数系 8 kind。#1708）を実装する。
-//! 比較 6 種＋`Clamp`（ペイロード実装）は #1709 の担当。他 kind は
-//! `None`（未実装。呼び出し元 `ops::MetalBackendOps::scalar_unary`／
-//! `scalar_binary` が `BackendError::Unsupported` を返しホスト参照実装
-//! （`ScalarUnaryOp::apply`／`ScalarBinaryOp::apply`）へフォールバックする
-//! 既存契約。`fandhe_ai_autodiff::grad::scalar_unary_with_fallback`／
-//! `scalar_binary_with_fallback` 参照）。
+//! [`ScalarUnaryOp::Tan`]（超越関数系 8 kind。#1708）に加え、比較演算
+//! 6 種（[`ScalarBinaryOp::Gt`]／[`Ge`](ScalarBinaryOp::Ge)／
+//! [`Lt`](ScalarBinaryOp::Lt)／[`Le`](ScalarBinaryOp::Le)／
+//! [`Eq`](ScalarBinaryOp::Eq)／[`Ne`](ScalarBinaryOp::Ne)）と
+//! [`ScalarUnaryOp::Clamp`]（#1709）を実装する。比較 6 種・`Clamp` は
+//! 算術を含まない純粋な比較・選択のみのため、ホスト `f32` 演算と bit
+//! 同一になる想定（`NaN` は payload が処理系依存のためクラス一致で
+//! 検証する。CUDA 側 `kernels_scalar_op.rs` モジュール doc「NVRTC 既定
+//! オプションと数値契約」と同型の扱い）。
+//!
+//! 残 kind（`Add`／`Mul`／`Maximum`／`Minimum`・活性化系〈`Relu`／
+//! `Exp`／`Tanh`／`Sigmoid`／`Gelu`／`GeluTanh`／`Silu`／`Hardswish`〉・
+//! `LeakyRelu`／`Elu`／`Softplus`／`PowScalar`）はいずれの sub issue にも
+//! 含まれず `None`（未実装のまま。呼び出し元 `ops::MetalBackendOps::
+//! scalar_unary`／`scalar_binary` が `BackendError::Unsupported` を返し
+//! ホスト参照実装（`ScalarUnaryOp::apply`／`ScalarBinaryOp::apply`）へ
+//! フォールバックする既存契約。`fandhe_ai_autodiff::grad::
+//! scalar_unary_with_fallback`／`scalar_binary_with_fallback` 参照）。
+//! `.claude/rules/out-of-scope-tracking.md` の追跡対象。
 //!
 //! # cfg 方針
 //!
@@ -132,12 +146,26 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         ScalarUnaryOp::Sin => Some("metal::precise::sin(x)"),
         ScalarUnaryOp::Cos => Some("metal::precise::cos(x)"),
         ScalarUnaryOp::Tan => Some("metal::precise::tan(x)"),
+        // `ScalarUnaryOp::apply` の `Clamp` 分岐（`scalar_op.rs`）を
+        // CUDA 側 `kernels_scalar_op.rs::unary_expr` と同一の式で逐語
+        // 複製する（`isnan(x)` → NaN を伝播 / `p0 > p1`（min > max）→
+        // 常に `p1`（max）/ `x < p0` → `p0` / `x > p1` → `p1` /
+        // それ以外 → `x`）。`metal::clamp`／`fmin`／`fmax`（IEEE
+        // minNum/maxNum は非 NaN 側を優先し明示 `isnan` 分岐と異なる）
+        // は使わない（モジュール doc「forward 数式の正」参照）。
+        // `isnan` は `metal_stdlib`（`using namespace metal;` 下）の
+        // 関数でそのまま呼べる。
+        ScalarUnaryOp::Clamp { .. } => {
+            Some("isnan(x) ? x : (p0 > p1 ? p1 : (x < p0 ? p0 : (x > p1 ? p1 : x)))")
+        }
         _ => None,
     }
 }
 
-/// [`ScalarBinaryOp`] の MSL 式（変数名は `a_v`／`b_v`）。未実装 kind は
-/// `None`。
+/// [`ScalarBinaryOp`] の MSL 式（変数名は `a_v`／`b_v`）。比較演算は
+/// `bool_to_f32`（`scalar_op.rs`）と同じ `0.0f`／`1.0f` を返す（`docs/
+/// scalar-op-dispatch-design.md` §3.2「bool 出力」契約）。未実装 kind
+/// は `None`。
 fn binary_expr(op: ScalarBinaryOp) -> Option<&'static str> {
     match op {
         ScalarBinaryOp::Sub => Some("a_v - b_v"),
@@ -146,7 +174,46 @@ fn binary_expr(op: ScalarBinaryOp) -> Option<&'static str> {
         // rounded を保証しない）。REQ-2 複合判定のみで検証する
         // （モジュール doc「コンパイルオプションと数値契約」参照）。
         ScalarBinaryOp::Pow => Some("metal::precise::pow(a_v, b_v)"),
+        ScalarBinaryOp::Gt => Some("(a_v > b_v) ? 1.0f : 0.0f"),
+        ScalarBinaryOp::Ge => Some("(a_v >= b_v) ? 1.0f : 0.0f"),
+        ScalarBinaryOp::Lt => Some("(a_v < b_v) ? 1.0f : 0.0f"),
+        ScalarBinaryOp::Le => Some("(a_v <= b_v) ? 1.0f : 0.0f"),
+        ScalarBinaryOp::Eq => Some("(a_v == b_v) ? 1.0f : 0.0f"),
+        ScalarBinaryOp::Ne => Some("(a_v != b_v) ? 1.0f : 0.0f"),
         _ => None,
+    }
+}
+
+/// [`ScalarUnaryOp`] のカーネル起動引数として渡す `f32` ペイロード
+/// （ソース文字列へは埋め込まない。モジュール doc「ペイロード seam」
+/// 参照）。`None` はペイロードなし kind（起動引数列は既存 `numel`
+/// までで不変＝bit 同一）、`Two([p0, p1])` は 2 引数ペイロード kind
+/// （現状 `Clamp` のみ。CUDA 側 `kernels_scalar_op::UnaryPayload` と
+/// 同型）。
+pub(crate) enum UnaryPayload {
+    None,
+    Two([f32; 2]),
+}
+
+impl UnaryPayload {
+    /// カーネル起動引数として `numel` の後ろへ渡す順序どおりのスライス
+    /// （空スライスは追加引数なし＝既存 kind と同じ起動引数列）。
+    pub(crate) fn as_slice(&self) -> &[f32] {
+        match self {
+            Self::None => &[],
+            Self::Two(v) => v,
+        }
+    }
+}
+
+/// `op` のカーネル起動ペイロードを返す（[`unary_kernel_source`] が
+/// 宣言する `p0`／`p1` パラメータへ対応する値。呼び出し順は
+/// `elementwise.rs::run_scalar_unary_f32` → `run_unary` が
+/// `as_slice()` の順序で `numel` の後ろへ追加起動引数として渡す）。
+pub(crate) fn unary_payload(op: ScalarUnaryOp) -> UnaryPayload {
+    match op {
+        ScalarUnaryOp::Clamp { min, max } => UnaryPayload::Two([min, max]),
+        _ => UnaryPayload::None,
     }
 }
 
@@ -176,6 +243,22 @@ pub(crate) fn binary_function_name(op: ScalarBinaryOp) -> String {
 pub(crate) fn unary_kernel_source(op: ScalarUnaryOp) -> Option<String> {
     let expr = unary_expr(op)?;
     let name = unary_function_name(op);
+    // ペイロードあり kind（`Clamp` 等）は `numel` の後ろへ `constant
+    // float& p0 [[buffer(3)]]`／`p1 [[buffer(4)]]` を追加宣言する
+    // （モジュール doc「ペイロード seam」参照。`elementwise.metal::
+    // ew_masked_fill_f32` の `constant float& value` と同じ渡し方）。
+    // ペイロード値自体はここへ埋め込まず、常に固定パラメータ名
+    // （`p0`／`p1`）のみを使うため、`kind_name()` が同じ限り payload
+    // 値が異なってもソース文字列は完全一致する（キャッシュキーが
+    // payload 非依存であることの根拠。単体テスト
+    // `clamp_source_declares_payload_params_and_omits_values` 参照）。
+    let payload_params = match unary_payload(op) {
+        UnaryPayload::None => String::new(),
+        UnaryPayload::Two(_) => {
+            ",\n    constant float& p0 [[buffer(3)]],\n    constant float& p1 [[buffer(4)]]"
+                .to_string()
+        }
+    };
     Some(format!(
         r#"#include <metal_stdlib>
 using namespace metal;
@@ -183,7 +266,7 @@ using namespace metal;
 kernel void {name}(
     device const float* a [[buffer(0)]],
     device float* out [[buffer(1)]],
-    constant uint& numel [[buffer(2)]],
+    constant uint& numel [[buffer(2)]]{payload_params},
     uint idx [[thread_position_in_grid]]
 ) {{
     if (idx < numel) {{
@@ -284,14 +367,21 @@ mod tests {
     #[test]
     fn unimplemented_unary_kinds_return_none() {
         // `Sqrt`（#1707）・超越関数系 8 kind（`Neg`／`Abs`／`Log`／
-        // `Log2`／`Log10`／`Sin`／`Cos`／`Tan`。#1708）は実装済みになった
-        // ため、番兵 kind を未実装のまま残る kind（`Relu`〈活性化系。
-        // いずれの sub issue にも含まれない〉・`Clamp`〈#1709 が担当〉）
-        // へ付け替える（残すと未実装 kind への `None` フォールバック
-        // 契約の検証が消えてしまう）。
+        // `Log2`／`Log10`／`Sin`／`Cos`／`Tan`。#1708）・`Clamp`（#1709）
+        // は実装済みになったため、番兵 kind を未実装のまま残る kind
+        // （`Relu`〈活性化系〉・`PowScalar`／`LeakyRelu`〈他のペイロード
+        // あり unary kind〉。いずれも sub issue に含まれない）へ付け替
+        // える（残すと未実装 kind への `None` フォールバック契約の検証
+        // が消えてしまう）。
         assert!(unary_kernel_source(ScalarUnaryOp::Relu).is_none());
         assert!(unary_kernel_source(ScalarUnaryOp::Sigmoid).is_none());
-        assert!(unary_kernel_source(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }).is_none());
+        assert!(unary_kernel_source(ScalarUnaryOp::PowScalar { exponent: 2.0 }).is_none());
+        assert!(
+            unary_kernel_source(ScalarUnaryOp::LeakyRelu {
+                negative_slope: 0.01
+            })
+            .is_none()
+        );
     }
 
     /// 超越関数系 8 kind すべてが REQ-8 境界チェック・buffer index
@@ -374,9 +464,11 @@ mod tests {
 
     #[test]
     fn unimplemented_binary_kinds_return_none() {
+        // `Gt` は #1709 で実装済みになったため番兵を `Mul` へ付け替える
+        // （`Add`／`Maximum` は維持）。
         assert!(binary_kernel_source(ScalarBinaryOp::Add).is_none());
         assert!(binary_kernel_source(ScalarBinaryOp::Maximum).is_none());
-        assert!(binary_kernel_source(ScalarBinaryOp::Gt).is_none());
+        assert!(binary_kernel_source(ScalarBinaryOp::Mul).is_none());
     }
 
     #[test]
@@ -411,10 +503,20 @@ mod tests {
         assert_eq!(unary_function_name(ScalarUnaryOp::Sin), "scalar_unary_sin");
         assert_eq!(unary_function_name(ScalarUnaryOp::Cos), "scalar_unary_cos");
         assert_eq!(unary_function_name(ScalarUnaryOp::Tan), "scalar_unary_tan");
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }),
+            "scalar_unary_clamp"
+        );
+        assert_eq!(binary_function_name(ScalarBinaryOp::Gt), "scalar_binary_gt");
+        assert_eq!(binary_function_name(ScalarBinaryOp::Ge), "scalar_binary_ge");
+        assert_eq!(binary_function_name(ScalarBinaryOp::Lt), "scalar_binary_lt");
+        assert_eq!(binary_function_name(ScalarBinaryOp::Le), "scalar_binary_le");
+        assert_eq!(binary_function_name(ScalarBinaryOp::Eq), "scalar_binary_eq");
+        assert_eq!(binary_function_name(ScalarBinaryOp::Ne), "scalar_binary_ne");
     }
 
     /// 生成ソースが payload 値を一切含まないこと（モジュール doc
-    /// 「ペイロード seam」の前提: 本イシューの対象 4 kind はいずれも
+    /// 「ペイロード seam」の前提: #1707 の対象 4 kind はいずれも
     /// ペイロードを持たないため、`unary_kernel_source`／
     /// `binary_kernel_source` の戻り値は `op` に依存しないはず）。
     #[test]
@@ -422,5 +524,125 @@ mod tests {
         let src_a = unary_kernel_source(ScalarUnaryOp::Sqrt).expect("Sqrt implemented");
         let src_b = unary_kernel_source(ScalarUnaryOp::Sqrt).expect("Sqrt implemented");
         assert_eq!(src_a, src_b);
+    }
+
+    /// 比較 6 種のソースが REQ-8 境界チェック・関数名を満たし、
+    /// `1.0f`／`0.0f` リテラルを含むこと（CUDA 側
+    /// `kernels_scalar_op.rs::comparison_ops_return_zero_or_one_literals`
+    /// と同型）。
+    #[test]
+    fn comparison_kinds_include_bounds_check_and_zero_one_literals() {
+        for op in [
+            ScalarBinaryOp::Gt,
+            ScalarBinaryOp::Ge,
+            ScalarBinaryOp::Lt,
+            ScalarBinaryOp::Le,
+            ScalarBinaryOp::Eq,
+            ScalarBinaryOp::Ne,
+        ] {
+            let src = binary_kernel_source(op).expect("must be implemented");
+            assert!(src.contains("if (idx < numel)"));
+            assert!(src.contains(&format!("kernel void {}(", binary_function_name(op))));
+            assert!(src.contains("[[buffer(0)]]"));
+            assert!(src.contains("[[buffer(1)]]"));
+            assert!(src.contains("[[buffer(2)]]"));
+            assert!(src.contains("[[buffer(3)]]"));
+            assert!(src.contains("1.0f"), "{op:?} source must contain 1.0f");
+            assert!(src.contains("0.0f"), "{op:?} source must contain 0.0f");
+        }
+    }
+
+    /// `Clamp` ソースが `numel` の後ろへ `p0`／`p1` を
+    /// `constant float&` として宣言し、payload 値自体は埋め込まず、
+    /// 異なる payload 値でも生成ソースが完全一致すること（キャッシュ
+    /// キーが `kind_name()` のみに依存する契約の根拠）を固定する。
+    #[test]
+    fn clamp_source_declares_payload_params_and_omits_values() {
+        let src = unary_kernel_source(ScalarUnaryOp::Clamp {
+            min: 0.123,
+            max: 4.567,
+        })
+        .expect("Clamp must be implemented");
+        assert!(src.contains("constant float& p0 [[buffer(3)]]"));
+        assert!(src.contains("constant float& p1 [[buffer(4)]]"));
+        assert!(!src.contains("0.123"));
+        assert!(!src.contains("4.567"));
+        assert!(src.contains("if (idx < numel)"));
+        assert!(src.contains("kernel void scalar_unary_clamp("));
+    }
+
+    #[test]
+    fn clamp_source_is_payload_value_independent() {
+        let src_a = unary_kernel_source(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 })
+            .expect("Clamp must be implemented");
+        let src_b = unary_kernel_source(ScalarUnaryOp::Clamp {
+            min: -5.0,
+            max: 5.0,
+        })
+        .expect("Clamp must be implemented");
+        assert_eq!(src_a, src_b);
+    }
+
+    /// `metal::clamp`／`fmin`／`fmax`（IEEE minNum/maxNum は非 NaN 側を
+    /// 優先し `ScalarUnaryOp::apply` の明示 `is_nan` 分岐と数値契約が
+    /// 異なる）は使わない（CUDA 側
+    /// `clamp_source_does_not_use_fminf_fmaxf` と同型）。
+    ///
+    /// 関数名 `scalar_unary_clamp(` 自体が部分文字列 `"clamp("` を含む
+    /// ため、`!contains("clamp(")` は書けない。`transcendental_*`
+    /// テストと同じ「先頭スペース付きパターン」で `metal::clamp(` の
+    /// 裸呼び出しがないことを確認する。
+    #[test]
+    fn clamp_source_does_not_use_fmin_fmax_or_metal_clamp() {
+        let src = unary_kernel_source(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 })
+            .expect("Clamp must be implemented");
+        assert!(!src.contains("fmin("));
+        assert!(!src.contains("fmax("));
+        assert!(!src.contains(" clamp("));
+        assert!(!src.contains("metal::clamp("));
+    }
+
+    /// 実装済み unary kind すべてについて、ソース中の宣言済み
+    /// `constant float&` パラメータ数（`p0`／`p1`）が
+    /// `unary_payload(op).as_slice().len()` と一致することを固定する
+    /// （引数個数の不一致はカーネル起動時にしか露見しないため事前に
+    /// ホスト側で検出する。CUDA 側
+    /// `payload_param_count_matches_source_for_all_implemented_unary_kinds`
+    /// と同型）。
+    #[test]
+    fn payload_param_count_matches_source_for_all_implemented_unary_kinds() {
+        for op in [
+            ScalarUnaryOp::Sqrt,
+            ScalarUnaryOp::Neg,
+            ScalarUnaryOp::Abs,
+            ScalarUnaryOp::Log,
+            ScalarUnaryOp::Log2,
+            ScalarUnaryOp::Log10,
+            ScalarUnaryOp::Sin,
+            ScalarUnaryOp::Cos,
+            ScalarUnaryOp::Tan,
+            ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 },
+        ] {
+            let src = unary_kernel_source(op).expect("must be implemented");
+            let declared = src.matches("constant float&").count();
+            let expected = unary_payload(op).as_slice().len();
+            assert_eq!(
+                declared, expected,
+                "{op:?}: declared payload params ({declared}) != unary_payload len ({expected})"
+            );
+        }
+    }
+
+    /// 比較演算・`Clamp` を含む [`unary_kernel_source`]／
+    /// [`binary_kernel_source`] が `#1709` 追加後もそれぞれ番兵 kind と
+    /// 混同なく識別できることの回帰（`function_names_are_kind_name_
+    /// derived_and_stable` と重複しない追加確認: 番兵付け替えの安全性
+    /// テスト）。
+    #[test]
+    fn unimplemented_kinds_remain_none_after_1709_additions() {
+        assert!(unary_kernel_source(ScalarUnaryOp::Relu).is_none());
+        assert!(binary_kernel_source(ScalarBinaryOp::Add).is_none());
+        assert!(binary_kernel_source(ScalarBinaryOp::Maximum).is_none());
+        assert!(binary_kernel_source(ScalarBinaryOp::Minimum).is_none());
     }
 }
