@@ -122,6 +122,20 @@ guarded store で何も書かない）。C を読む（累積する）分岐は�
 `launch_tiled_f32_resident_nt` が共有する内部ヘルパー）は
 `alloc_uninit_f32`（前利用データをゼロクリアしない）を使う。
 
+### 4.3 バッチ GEMM `run_tiled_f32_batched`（イシュー #1716）適用確認
+
+`gemm.rs::CudaGemm::run_tiled_f32_batched`（バッチ行列積のデバイス常駐
+バッチループ経路）が確保する出力バッファ（`self.allocator.alloc_uninit_f32(batch * m * n)`）
+は、`0..batch` の各バッチについて `launch_tiled_f32_resident` を
+`[i*m*n, (i+1)*m*n)` の部分ビューへ起動する。この起動は既存の
+`run_f32_kernel`／`launch_tiled_f32_resident`（本節冒頭の `alloc_uninit_f32`
+適用済みカーネル）と同一の書き込みガード（`if (row < m && col < n)`）を
+持つカーネルへ委譲するため、各バッチのビュー内で全 `m*n` 要素が過不足
+なく 1 回ずつ書き込まれる。バッチ間のビューは `[i*mn, (i+1)*mn)` で
+重複・欠落なく出力バッファ全体を分割するため、確保直後の未初期化領域は
+起動完了までにすべて上書きされ露出しない。よって `alloc_uninit_f32` を
+使う。
+
 ## 5. 既存 `PooledMemory`（`crate::pool`）との関係
 
 変更しない（非推奨化もしない）。`arc_with_non_send_sync` の allow も据え置く。`crate::pool_core`

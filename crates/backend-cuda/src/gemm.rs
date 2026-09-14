@@ -557,6 +557,72 @@ pub(crate) fn validate_tiled_k_bound(k: u32) -> Result<(), CudaError> {
     Ok(())
 }
 
+/// バッチ GEMM（[`CudaGemm::run_tiled_f32_batched`]）専用のホスト側形状
+/// 検証（イシュー #1716）。driver 非接触の純関数（GPU 不要。`gemm.rs`
+/// 内 `#[cfg(test)]` で単体検査する）。
+///
+/// [`validate_gemm_dims`] は単一（`batch=1` 相当）の `a_len`/`b_len` が
+/// `m*k`/`k*n` と一致するかしか見ないため、本関数はまず per-batch の
+/// `m*k`/`k*n`/`m*n`（`i32` 上限を含む）検証を [`validate_gemm_dims`] へ
+/// 委譲したうえで、`a`/`b`/`c` 各バッファの**総**要素数が
+/// `batch * (per-batch 要素数)` と一致すること（`checked_mul`。`usize`
+/// オーバーフローは `CudaError::InvalidShape` で拒否）を追加で検証する
+/// （REQ-8「シェーダ・カーネル側の手動境界チェックを省略しない」・
+/// OWASP A03。`.claude/rules/security.md`）。
+pub(crate) fn validate_batched_gemm_dims(
+    batch: usize,
+    a_len: usize,
+    b_len: usize,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<(), CudaError> {
+    let (m_usize, n_usize, k_usize) = (m as usize, n as usize, k as usize);
+    let mk = m_usize
+        .checked_mul(k_usize)
+        .ok_or_else(|| CudaError::InvalidShape {
+            detail: format!("m*k overflows usize: m={m}, k={k}"),
+        })?;
+    let kn = k_usize
+        .checked_mul(n_usize)
+        .ok_or_else(|| CudaError::InvalidShape {
+            detail: format!("k*n overflows usize: k={k}, n={n}"),
+        })?;
+
+    // per-batch の形状（`m/n/k` の i32 上限を含む）を単一 GEMM 相当として
+    // 検証する。`a_len`/`b_len` はここでは per-batch 長として渡し、実際の
+    // 総バッファ長との整合は下記の `batch * mk`/`batch * kn` 検査で行う。
+    validate_gemm_dims(mk, kn, m, n, k)?;
+
+    let expected_a_len = batch
+        .checked_mul(mk)
+        .ok_or_else(|| CudaError::InvalidShape {
+            detail: format!("batch*m*k overflows usize: batch={batch}, m={m}, k={k}"),
+        })?;
+    let expected_b_len = batch
+        .checked_mul(kn)
+        .ok_or_else(|| CudaError::InvalidShape {
+            detail: format!("batch*k*n overflows usize: batch={batch}, k={k}, n={n}"),
+        })?;
+    if a_len != expected_a_len {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "batched a length mismatch: expected {expected_a_len} (batch*m*k), \
+                 actual {a_len}"
+            ),
+        });
+    }
+    if b_len != expected_b_len {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "batched b length mismatch: expected {expected_b_len} (batch*k*n), \
+                 actual {b_len}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// WMMA TF32 カーネル固有の `k` 追加上限検証。
 ///
 /// `kernels::WMMA_TF32_F32` は各 K タイル反復で `t * WMMA_TF32_K_TILE +
@@ -2982,6 +3048,108 @@ impl CudaGemm {
         validate_tiled_k_bound(k)?;
         let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
         self.run_f32_kernel(func, a, b, m, n, k, cfg)
+    }
+
+    /// バッチ GEMM（`ops.rs::CudaBackendOps::gemm_batched_fp32_strict_impl`
+    /// が呼ぶ本体。イシュー #1716）: `a`（`batch * m * k` 要素・行優先の
+    /// `[batch, m, k]` 連結バッファ）・`b`（`batch * k * n` 要素・
+    /// `[batch, k, n]`）から、各バッチ `i` について `C_i = A_i @ B_i` を
+    /// 計算し `[batch, m, n]` の連結出力を返す「バッチループ方式」
+    /// （`gridDim.z` によるバッチ化カーネルではない。#1716 実装計画 §8
+    /// スコープ外）。
+    ///
+    /// # 数値契約（bit 同一）
+    ///
+    /// A・B を [`Self::upload_h2d_new`] で 1 回ずつ H2D し、出力を
+    /// [`crate::pool::CudaAllocator::alloc_uninit_f32`] で 1 本だけ確保
+    /// したうえで、各バッチを [`Self::launch_tiled_f32_resident`]
+    /// （既存の検証済み起動・カーネル選択をそのまま再利用。新規
+    /// `unsafe` は追加しない）で起動する。[`select_tiled_f32_kernel`]
+    /// の cp.async パイプライン版選択は `a_offset % 4 == 0`（本メソッドの
+    /// 呼び出しパターンでは `a_offset = i * m * k`）と
+    /// `n % 4 == 0 && k % 4 == 0`（`tiled_pipeline_alignment_ok`）の両方
+    /// を要求する。後者が成立する形状では `k % 4 == 0` から
+    /// `i * m * k` も `i * k * n` も 4 の倍数になる（`n` 側の条件には
+    /// 依存しない）ため、整列形状では全バッチが per-batch（offset 0）と
+    /// 同じパイプライン版、非整列形状では全バッチが classic 版を選び、
+    /// per-batch 呼び出し（[`Self::run_tiled_f32`] をバッチ回数分呼ぶ
+    /// 既定合成実装。`fandhe_ai_tensor_core::gemm_batched_via_per_batch_gemm_fp32_strict`
+    /// が経由する経路）と**同一カーネル・同一累積順序**になる。これは
+    /// `gemm.rs` 内 `#[cfg(test)]`
+    /// （`tiled_f32_kernel_kind_is_uniform_across_batch_offsets_when_aligned`
+    /// 等）が固定する。
+    ///
+    /// # `alloc_uninit_f32` の適用根拠
+    ///
+    /// 各バッチの起動は出力ビュー `[i*mn, (i+1)*mn)` の全 `m*n` 要素を
+    /// カーネル内の書き込みガード（`kernels.rs`／`kernels_tiled_pipeline*.rs`
+    /// の `if (row < m && col < n)` 相当。REQ-8）内で必ず書き切り、
+    /// バッチ間でビューが重複・欠落なくバッファを分割するため、確保直後
+    /// の未初期化領域は起動完了までに全て上書きされ露出しない
+    /// （`docs/backend-cuda-pool-allocator-decision.md` §「`alloc_uninit`
+    /// の適用」の確認済みケースに準じる。`run_f32_kernel` の同種コメント
+    /// 参照）。
+    ///
+    /// 早期 return（driver 非接触。[`Self::run_f32_kernel`] の `m==0 ||
+    /// n==0`／`k==0` 契約とバッチ版として揃える）: `batch == 0 || m == 0
+    /// || n == 0` は空ベクタ、`k == 0` は `batch*m*n` 要素の全 0 ベクタを
+    /// 返す。
+    pub(crate) fn run_tiled_f32_batched(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        batch: usize,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        validate_batched_gemm_dims(batch, a.len(), b.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+
+        if batch == 0 || m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        // `validate_batched_gemm_dims` が `batch*m*n` の usize/バイト
+        // サイズオーバーフローを既に拒否済みのため、ここでの `mn`／
+        // `batch*mn` の乗算は安全に行える。
+        let mn = (m as usize) * (n as usize);
+        if k == 0 {
+            return Ok(vec![0.0f32; batch * mn]);
+        }
+        let mk = (m as usize) * (k as usize);
+        let kn = (k as usize) * (n as usize);
+
+        self.with_driver_call(|| {
+            let a_dev = self.upload_h2d_new(a)?;
+            let b_dev = self.upload_h2d_new(b)?;
+            let mut c_dev = self.allocator.alloc_uninit_f32(batch * mn)?;
+
+            // `c_full` を 1 回だけ束縛する（一時値 `CudaViewMut` から
+            // 直接 `slice_mut` するとその場限りの借用になりコンパイル
+            // できないため。以降のループはこの単一の可変ビューから
+            // バッチごとの部分ビューを都度切り出す）。
+            let mut c_full = c_dev.as_view_mut();
+            for i in 0..batch {
+                let a_view = CudaArg::View(a_dev.slice(i * mk..(i + 1) * mk));
+                let b_view = CudaArg::View(b_dev.slice(i * kn..(i + 1) * kn));
+                let mut c_view = CudaArgMut::View(c_full.slice_mut(i * mn..(i + 1) * mn));
+                // `a_offset`（cp.async 整列判定用）は連結バッファ先頭
+                // からの要素オフセット。`launch_tiled_f32_resident` の
+                // 唯一の他の呼び出し元（`ops.rs::gemm_resident_lhs`）と
+                // 同じ契約で `i * mk` をそのまま渡す。
+                self.launch_tiled_f32_resident(&a_view, i * mk, &b_view, &mut c_view, m, n, k)?;
+            }
+            // `c_full`（`c_dev` の可変借用）はループ内の最後の使用
+            // （最終バッチの `slice_mut` 呼び出し）で NLL により借用が
+            // 終わるため、以降の `c_dev.as_view()`（不変借用）と両立
+            // する。明示 `drop` は `CudaViewMut` が `Drop` を実装しない
+            // ため `clippy::drop_non_drop` に抵触し不要（コンパイラの
+            // NLL に委ねる）。
+
+            // 同期点は readback ヘルパーへ集約する（バッチ全体で 1 回。
+            // #1013 と同じ設計）。
+            crate::memory::readback(&self.stream, &c_dev.as_view())
+        })
     }
 
     /// [`Self::run_tiled_f32`] と同じ選択（`select_tiled_f32_kernel`）
@@ -6838,6 +7006,101 @@ mod tests {
     #[test]
     fn validate_gemm_dims_accepts_matching_lengths() {
         assert!(validate_gemm_dims(2 * 3, 3 * 4, 2, 4, 3).is_ok());
+    }
+
+    /// [`validate_batched_gemm_dims`]（イシュー #1716）の受理・拒否を
+    /// 検査する（GPU 不要の純関数）。
+    #[test]
+    fn validate_batched_gemm_dims_accepts_matching_lengths() {
+        // batch=3・m=2, k=3, n=4 → a_len=3*6=18, b_len=3*12=36。
+        assert!(validate_batched_gemm_dims(3, 18, 36, 2, 4, 3).is_ok());
+    }
+
+    #[test]
+    fn validate_batched_gemm_dims_rejects_a_len_mismatch() {
+        let err = validate_batched_gemm_dims(3, 17, 36, 2, 4, 3).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    #[test]
+    fn validate_batched_gemm_dims_rejects_b_len_mismatch() {
+        let err = validate_batched_gemm_dims(3, 18, 35, 2, 4, 3).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    #[test]
+    fn validate_batched_gemm_dims_delegates_i32_bound_check_to_validate_gemm_dims() {
+        // per-batch の m*k・k*n・m*n いずれかが i32::MAX を超える形状は
+        // `validate_gemm_dims` の既存 i32 積ガードにより batch=1 でも
+        // 拒否される（`validate_gemm_dims_rejects_mk_product_exceeding_i32_max`
+        // と同型のケースを batch 経由で再検査）。
+        let m: u32 = 1 << 16;
+        let k: u32 = (1 << 15) + 1;
+        let a_len = (m as usize) * (k as usize);
+        let err = validate_batched_gemm_dims(1, a_len, k as usize, m, 1, k).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    #[test]
+    fn validate_batched_gemm_dims_rejects_batch_mul_mk_overflow() {
+        // per-batch の m*k（=2*1=2）自体は usize に収まるが、
+        // batch=usize::MAX を掛けると usize でオーバーフローするケース。
+        // `a_len`/`b_len` の実値は `checked_mul` のオーバーフロー検査が
+        // 先に発火するため任意でよい。
+        let err =
+            validate_batched_gemm_dims(usize::MAX, usize::MAX, usize::MAX, 2, 1, 1).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    /// [`select_tiled_f32_kernel`]（`tiled_f32_kernel_kind` 経由）の
+    /// 選択結果が、[`CudaGemm::run_tiled_f32_batched`] が渡す
+    /// `a_offset = i * m * k`（バッチインデックス `i` ごとに変化する）
+    /// に依らず、per-batch（`a_offset = 0`）と一致することを検査する
+    /// （イシュー #1716。`run_tiled_f32_batched` doc コメント「数値契約
+    /// （bit 同一）」節の機械的固定）。
+    ///
+    /// 整列形状（`n % 4 == 0 && k % 4 == 0`）では `k % 4 == 0` から
+    /// `i * m * k` が常に 4 要素の倍数になるため（`n` 側の条件には
+    /// 依存しない）全バッチで `Pipeline` が選ばれ、非整列形状では
+    /// `tiled_pipeline_alignment_ok` 自体が false のため `a_offset` に
+    /// 関わらず常に `Classic` になる。
+    #[test]
+    fn tiled_f32_kernel_kind_is_uniform_across_batch_offsets_when_aligned() {
+        let (n, k) = (256u32, 256u32);
+        let baseline = tiled_f32_kernel_kind(true, 0, n, k);
+        assert_eq!(baseline, TiledF32Kernel::Pipeline);
+        for m in [1usize, 3, 7, 64] {
+            for i in 0..8usize {
+                let a_offset = i * m * (k as usize);
+                assert_eq!(
+                    a_offset % 4,
+                    0,
+                    "k%4==0 の整列形状では m/i に依らず a_offset は常に 4 要素の倍数のはず \
+                     (m={m}, i={i})"
+                );
+                assert_eq!(
+                    tiled_f32_kernel_kind(true, a_offset, n, k),
+                    baseline,
+                    "整列形状でのバッチオフセットはカーネル選択を変えないはず \
+                     (m={m}, i={i}, a_offset={a_offset})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tiled_f32_kernel_kind_is_uniform_across_batch_offsets_when_unaligned() {
+        // n=257（4 の倍数でない）→ pipeline_available/a_offset に依らず
+        // 常に Classic（tiled_pipeline_alignment_ok が false のため）。
+        let (n, k) = (257u32, 256u32);
+        let baseline = tiled_f32_kernel_kind(true, 0, n, k);
+        assert_eq!(baseline, TiledF32Kernel::Classic);
+        for m in [1usize, 3, 7] {
+            for i in 0..8usize {
+                let a_offset = i * m * (k as usize);
+                assert_eq!(tiled_f32_kernel_kind(true, a_offset, n, k), baseline);
+            }
+        }
     }
 
     #[test]
