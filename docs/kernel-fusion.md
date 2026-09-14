@@ -345,6 +345,10 @@ fusion-graph-design.md` §1・§6.2「transpose 混在連鎖のメタデータ�
 
 ## 6. 将来拡張・スコープ外
 
+`torch.compile`／`tf.function` 相当のグラフ最適化範囲の整理（実装済み
+／延長候補／非目標の 3 区分・対応表）は
+`docs/autodiff-graph-optimization-scope-decision.md`（#1632）を参照。
+
 - **reduction を含めた手動完全融合**: REQ-12 受け入れ基準は「性能クリ
   ティカルな箇所では、CubeCL カスタムカーネルによる手動融合（reduction
   を含めた完全融合）を組込み演算として提供する選択肢を将来検討課題と
