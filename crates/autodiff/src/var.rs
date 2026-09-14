@@ -787,6 +787,33 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// `sum_dims`／`max_dims`／`mean_dims` 共通の骨格（`crate::
+    /// reduce_dims::plan_reduce_dims` で検証・算出した計画に従って
+    /// `merge_for_reduction` で単軸縮約可能な形へ整形し、`reduce`
+    /// （呼び出し元が渡す `sum`／`max`／`mean` いずれかの単軸縮約）を
+    /// 適用してから `keepdim: true` のときだけ `reshape` する）。単軸
+    /// 縮約メソッドが 1 種類だけ異なる 3 メソッドの重複を避けるための
+    /// private ヘルパ（イシュー #1719 レビュー指摘）。
+    fn reduce_dims_with<F>(
+        &self,
+        dims: &[usize],
+        keepdim: bool,
+        reduce: F,
+    ) -> Result<Var<'t>, AutodiffError>
+    where
+        F: FnOnce(Var<'t>, Option<usize>) -> Result<Var<'t>, AutodiffError>,
+    {
+        let shape = self.shape();
+        let plan = crate::reduce_dims::plan_reduce_dims(&shape, dims)?;
+        let (merged, axis) = crate::reduce_dims::merge_for_reduction(*self, &plan)?;
+        let reduced = reduce(merged, axis)?;
+        if keepdim {
+            reduced.reshape(&plan.keepdim_shape)
+        } else {
+            Ok(reduced)
+        }
+    }
+
     /// 複数軸の縮約和（`torch.sum(dim=[...], keepdim=)` 相当。イシュー
     /// #1719）。単一軸なら `sum(Some(d))` と**bit 同一**（`crate::
     /// reduce_dims::merge_for_reduction` が単一軸・全軸を無加工で
@@ -801,15 +828,7 @@ impl<'t> Var<'t> {
     /// 検査）で拒否する。`keepdim: true` は縮約軸をサイズ 1 のまま
     /// 元の rank を保持する（PyTorch `keepdim=True` 相当）。
     pub fn sum_dims(&self, dims: &[usize], keepdim: bool) -> Result<Var<'t>, AutodiffError> {
-        let shape = self.shape();
-        let plan = crate::reduce_dims::plan_reduce_dims(&shape, dims, keepdim)?;
-        let (merged, axis) = crate::reduce_dims::merge_for_reduction(*self, &plan)?;
-        let reduced = merged.sum(axis)?;
-        if keepdim {
-            reduced.reshape(&plan.keepdim_shape)
-        } else {
-            Ok(reduced)
-        }
+        self.reduce_dims_with(dims, keepdim, |v, axis| v.sum(axis))
     }
 
     /// 複数軸の縮約最大値（`torch.amax(dim=[...], keepdim=)` 相当。
@@ -821,15 +840,7 @@ impl<'t> Var<'t> {
     /// 分配方式の確定）は本イシュー時点で未決着のため、規約は変更
     /// しない）。`dims`／`keepdim` の契約は `sum_dims` と同一。
     pub fn max_dims(&self, dims: &[usize], keepdim: bool) -> Result<Var<'t>, AutodiffError> {
-        let shape = self.shape();
-        let plan = crate::reduce_dims::plan_reduce_dims(&shape, dims, keepdim)?;
-        let (merged, axis) = crate::reduce_dims::merge_for_reduction(*self, &plan)?;
-        let reduced = merged.max(axis)?;
-        if keepdim {
-            reduced.reshape(&plan.keepdim_shape)
-        } else {
-            Ok(reduced)
-        }
+        self.reduce_dims_with(dims, keepdim, |v, axis| v.max(axis))
     }
 
     /// 複数軸の縮約平均（`torch.mean(dim=[...], keepdim=)` 相当。
@@ -837,15 +848,7 @@ impl<'t> Var<'t> {
     /// の結果へ `Var::mean` を適用するだけの合成（新規 Op は追加しない）。
     /// `dims`／`keepdim` の契約・`n == 0` 拒否は `mean`／`sum_dims` と同一。
     pub fn mean_dims(&self, dims: &[usize], keepdim: bool) -> Result<Var<'t>, AutodiffError> {
-        let shape = self.shape();
-        let plan = crate::reduce_dims::plan_reduce_dims(&shape, dims, keepdim)?;
-        let (merged, axis) = crate::reduce_dims::merge_for_reduction(*self, &plan)?;
-        let reduced = merged.mean(axis)?;
-        if keepdim {
-            reduced.reshape(&plan.keepdim_shape)
-        } else {
-            Ok(reduced)
-        }
+        self.reduce_dims_with(dims, keepdim, |v, axis| v.mean(axis))
     }
 
     /// 平均二乗誤差（`self` = 予測値、`target` = 正解値。全要素平均・

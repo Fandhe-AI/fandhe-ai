@@ -64,7 +64,6 @@ pub(crate) struct ReducePlan {
 pub(crate) fn plan_reduce_dims(
     shape: &[usize],
     dims: &[usize],
-    _keepdim: bool,
 ) -> Result<ReducePlan, AutodiffError> {
     let rank = shape.len();
     if dims.is_empty() {
@@ -186,13 +185,13 @@ mod tests {
 
     #[test]
     fn plan_rejects_empty_dims() {
-        let err = plan_reduce_dims(&[2, 3, 4], &[], false).unwrap_err();
+        let err = plan_reduce_dims(&[2, 3, 4], &[]).unwrap_err();
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 
     #[test]
     fn plan_rejects_out_of_range_axis() {
-        let err = plan_reduce_dims(&[2, 3, 4], &[3], false).unwrap_err();
+        let err = plan_reduce_dims(&[2, 3, 4], &[3]).unwrap_err();
         assert!(matches!(
             err,
             AutodiffError::Shape(ShapeError::AxisOutOfRange { axis: 3, rank: 3 })
@@ -201,13 +200,13 @@ mod tests {
 
     #[test]
     fn plan_rejects_duplicate_axis() {
-        let err = plan_reduce_dims(&[2, 3, 4], &[1, 1], false).unwrap_err();
+        let err = plan_reduce_dims(&[2, 3, 4], &[1, 1]).unwrap_err();
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 
     #[test]
     fn plan_rejects_overflowing_count() {
-        let err = plan_reduce_dims(&[usize::MAX, 2], &[0, 1], false).unwrap_err();
+        let err = plan_reduce_dims(&[usize::MAX, 2], &[0, 1]).unwrap_err();
         assert!(matches!(
             err,
             AutodiffError::Shape(ShapeError::ElementCountOverflow)
@@ -216,7 +215,7 @@ mod tests {
 
     #[test]
     fn plan_single_axis_has_no_merged_shape() {
-        let plan = plan_reduce_dims(&[2, 3, 4], &[1], false).unwrap();
+        let plan = plan_reduce_dims(&[2, 3, 4], &[1]).unwrap();
         assert_eq!(plan.reduced_axes, vec![1]);
         assert_eq!(plan.kept_axes, vec![0, 2]);
         assert!(plan.merged_shape.is_empty());
@@ -225,7 +224,7 @@ mod tests {
 
     #[test]
     fn plan_full_axes_has_no_merged_shape() {
-        let plan = plan_reduce_dims(&[2, 3], &[0, 1], false).unwrap();
+        let plan = plan_reduce_dims(&[2, 3], &[0, 1]).unwrap();
         assert_eq!(plan.reduced_axes, vec![0, 1]);
         assert!(plan.kept_axes.is_empty());
         assert!(plan.merged_shape.is_empty());
@@ -237,7 +236,7 @@ mod tests {
         // dims=[1,2] は shape=[2,3,4,5] の kept=[0,3] が縮約軸の前後を
         // 挟む典型ケースで、kept ++ reduced = [0,3,1,2] は恒等順列
         // ではないため perm が必要。
-        let plan = plan_reduce_dims(&[2, 3, 4, 5], &[1, 2], false).unwrap();
+        let plan = plan_reduce_dims(&[2, 3, 4, 5], &[1, 2]).unwrap();
         assert_eq!(plan.kept_axes, vec![0, 3]);
         assert_eq!(plan.reduced_axes, vec![1, 2]);
         assert!(plan.perm_needed);
@@ -248,7 +247,7 @@ mod tests {
     fn plan_true_trailing_dims_no_perm_needed() {
         // dims が本当に末尾（kept=[0,1] がそのまま先頭）なら
         // kept ++ reduced == 恒等順列で perm 不要。
-        let plan = plan_reduce_dims(&[2, 3, 4, 5], &[2, 3], false).unwrap();
+        let plan = plan_reduce_dims(&[2, 3, 4, 5], &[2, 3]).unwrap();
         assert_eq!(plan.kept_axes, vec![0, 1]);
         assert_eq!(plan.reduced_axes, vec![2, 3]);
         assert!(!plan.perm_needed);
@@ -257,7 +256,7 @@ mod tests {
 
     #[test]
     fn plan_keepdim_shape_preserves_rank_with_ones() {
-        let plan = plan_reduce_dims(&[2, 3, 4], &[0, 2], true).unwrap();
+        let plan = plan_reduce_dims(&[2, 3, 4], &[0, 2]).unwrap();
         assert_eq!(plan.keepdim_shape, vec![1, 3, 1]);
         assert_eq!(plan.kept_axes, vec![1]);
         assert_eq!(plan.reduced_axes, vec![0, 2]);
@@ -265,8 +264,8 @@ mod tests {
 
     #[test]
     fn plan_dims_order_does_not_matter() {
-        let a = plan_reduce_dims(&[2, 3, 4], &[2, 0], false).unwrap();
-        let b = plan_reduce_dims(&[2, 3, 4], &[0, 2], false).unwrap();
+        let a = plan_reduce_dims(&[2, 3, 4], &[2, 0]).unwrap();
+        let b = plan_reduce_dims(&[2, 3, 4], &[0, 2]).unwrap();
         assert_eq!(a, b);
     }
 }
