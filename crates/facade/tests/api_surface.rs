@@ -678,6 +678,22 @@ fn rng_tensor_generators_are_reachable_via_facade() {
     let _i: Result<fandhe_ai::Tensor<i32>, fandhe_ai::RngError> = fandhe_ai::randint(0, 10, &[4]);
 }
 
+/// `fandhe_ai::{arange, linspace, eye, zeros_like, ones_like}`（イシュー
+/// #1726）が facade から呼び出し可能な `pub fn` として型検査できることを
+/// 固定する（コンパイル時裏付け。[`rng_tensor_generators_are_reachable_via_facade`]
+/// と同型）。
+#[test]
+fn creation_tensor_generators_are_reachable_via_facade() {
+    let _a: Result<fandhe_ai::Tensor<f32>, fandhe_ai::CreationError> =
+        fandhe_ai::arange(0.0, 5.0, 1.0);
+    let _l: Result<fandhe_ai::Tensor<f32>, fandhe_ai::CreationError> =
+        fandhe_ai::linspace(0.0, 1.0, 3);
+    let _e: Result<fandhe_ai::Tensor<f32>, fandhe_ai::ShapeError> = fandhe_ai::eye(3);
+    let like = fandhe_ai::Tensor::<f32>::zeros(&[2, 3]).unwrap();
+    let _z: Result<fandhe_ai::Tensor<f32>, fandhe_ai::ShapeError> = fandhe_ai::zeros_like(&like);
+    let _o: Result<fandhe_ai::Tensor<f32>, fandhe_ai::ShapeError> = fandhe_ai::ones_like(&like);
+}
+
 /// `fandhe_ai::src/` の公開面に、プロセスグローバル RNG の内部実装型
 /// （`Xorshift64Star`・内部アクセサ `with_global_rng`）が一切露出して
 /// いないことを固定する（`manual_seed`／`randn`／`rand`／`randint`〈#1725〉

@@ -114,10 +114,20 @@
 //! [`rng::randint`]・[`rng::RngError`]）をホスト側だけで完結する形
 //! （`BackendOps` 非経由。生成後は既存のアップロード経路がデバイスへ
 //! 反映する）で実装済み（設計判断は `docs/rng-global-contract-design.md`）。
+//!
+//! `creation`（イシュー #1726。親 #1602）は `rng` の非乱数版カウンター
+//! パートとして PyTorch `torch.arange`／`torch.linspace`／`torch.eye`／
+//! `torch.zeros_like`／`torch.ones_like` 相当の決定的生成 API
+//! （[`creation::arange`]／[`creation::linspace`]／[`creation::eye`]／
+//! [`creation::zeros_like`]／[`creation::ones_like`]・
+//! [`creation::CreationError`]）を提供する。同じくホスト側だけで完結し
+//! `BackendOps`／`Op`／VJP を経由しない（設計判断は
+//! `docs/rng-global-contract-design.md` §11）。
 
 mod backend_ops;
 mod broadcast;
 pub mod buffer;
+pub mod creation;
 pub mod device;
 pub mod dispatch;
 mod dispatch_failure;
@@ -149,6 +159,7 @@ pub use backend_ops::{
 };
 pub use broadcast::broadcast_shape;
 pub use buffer::{BufferHandle, DeviceBuffer, DeviceBufferView, MemoryOps};
+pub use creation::{CreationError, arange, eye, linspace, ones_like, zeros_like};
 pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all, select_from};
 pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
 pub use dispatch_failure::DispatchFailureCell;

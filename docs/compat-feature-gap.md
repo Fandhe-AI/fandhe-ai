@@ -706,7 +706,8 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
   linear_new_is_unaffected_by_global_manual_seed_state` で機構的に固定）。
 - 実際の乱数テンソル生成（`randn`／`rand`／`randint`）自体は #1725 で
   実装済み（下記「追補（イシュー #1725）」参照）。`arange`／`linspace`／
-  `eye`／`zeros_like`／`ones_like` は未実装のまま（#1726 のスコープ）。
+  `eye`／`zeros_like`／`ones_like` も #1726 で実装済み（下記「追補
+  （イシュー #1726）」参照）。
 - facade 新規公開面: `pub fn manual_seed`（新規）。内部型・アクセサは
   facade へ露出させない（`crates/facade/tests/api_surface.rs::
   facade_does_not_expose_rng_internal_types` で機械検査）。
@@ -889,10 +890,37 @@ facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_bi
   facade へ露出させない（`facade_does_not_expose_rng_internal_types` で
   機械検査）。
 - 対象外: `arange`／`linspace`／`eye`／`zeros_like`／`ones_like`
-  （#1726）・`randn_like`／`rand_like`／`normal`／`uniform_`／
-  `bernoulli`／`multinomial`／`randperm`・非グローバル RNG（`torch.
-  Generator` 相当）・CUDA／Metal デバイス側乱数カーネル・`nn::Dropout`
-  （#1603）・`randint` の int64 版。
+  （#1726 で実装済み。下記「追補（イシュー #1726）」参照）・
+  `randn_like`／`rand_like`／`normal`／`uniform_`／`bernoulli`／
+  `multinomial`／`randperm`・非グローバル RNG（`torch.Generator` 相当）・
+  CUDA／Metal デバイス側乱数カーネル・`nn::Dropout`（#1603）・
+  `randint` の int64 版。
+
+## 追補（イシュー #1726）
+
+上記「追補（イシュー #1725）」が対象外としていた決定的テンソル生成
+（`arange`／`linspace`／`eye`／`zeros_like`／`ones_like`。`§2.1`「乱数
+生成と RNG 契約」の残対象）を実装した。設計・実装記録は
+`docs/rng-global-contract-design.md` §11。
+
+- 実装した API: `fandhe_ai::{arange(start, end, step), linspace(start,
+  end, steps), eye(n), zeros_like(like), ones_like(like)}`（実体は
+  `tensor-core::creation`。`autodiff` は素通しのみ）。`randn`／`rand`／
+  `randint` と同じくホスト側だけで完結し `BackendOps` を経由しない。
+- `Op`／`BackendOps`／VJP は追加していない（生成結果は微分不能な葉値
+  であり `torch.arange` 等にも勾配は無いため。受け入れ条件テンプレの
+  「Op／BackendOps／VJP」項は本イシューでも非適用。#1725 と同じ根拠）。
+- `arange`／`linspace` の数値契約（`f64` 中間計算・PyTorch 2 分割方式）
+  はプラットフォーム横断で bit 同一（`docs/rng-global-contract-design.md`
+  §11 参照）。
+- facade 新規公開面: `pub fn arange`／`linspace`／`eye`／`zeros_like`／
+  `ones_like`（新規）・`pub use ...::CreationError`（`arange`／
+  `linspace` の戻り値型。1 行の再エクスポート）。
+- 対象外: 1 引数／2 引数の `arange` 便宜版・i32／i64 版 `arange`・
+  長方形 `eye(rows, cols)`・`full_like`／`empty_like`／`randn_like`／
+  `rand_like`・`logspace`・`Var::zeros_like` 等の `Var` 側メソッド・
+  CUDA／Metal デバイス側の生成カーネル・`compat::array`／`Sequential`
+  の変更。
 
 **#1773 追記（ONNX export の op 逆マッピング）**: `onnx-interop` 内部
 （`crate::onnx::export_ops`）に `interp.rs` 対応 22 op すべての逆マッピング
