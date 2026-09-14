@@ -2416,6 +2416,13 @@ impl MetalGemm {
     /// 実機検証結果をこの経路へ反映し `tests/gemm_f16_auto_parity.rs` が
     /// green になった時点で、suffix・`#[doc(hidden)]` の解除を別イシューで
     /// 検討する（[`Self::dispatch_f16_unverified`] と同型の解除条件）。
+    ///
+    /// **#1705 で `crate::typed_f16`（`TypedOps<half::f16>::gemm`）から
+    /// 内部結線した**。`typed_f16::gemm` へは `Tensor<f16>` を構築した
+    /// 呼び出し元からのみ到達し、`f32` production 経路
+    /// （`ops::MetalBackendOps::gemm`／`dispatch_backend_auto`）からは
+    /// 引き続き不到達のまま。suffix・`#[doc(hidden)]` の解除は #1651 の
+    /// 承認事項（§7-4。本イシュー時点で未承認）のため維持する。
     #[doc(hidden)]
     pub fn dispatch_f16_auto_unverified(
         &self,

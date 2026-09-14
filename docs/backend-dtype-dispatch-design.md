@@ -296,3 +296,49 @@ cargo test -p fandhe-ai-backend-cuda --release --test typed_ops_bf16_parity -- -
 ### 12.7 スコープ外
 
 bf16 デバイス常駐経路（bf16 のまま H2D し device 側で widen/narrow する 2 カーネル方式）・bf16 `mma.sync` GEMM カーネル（cc ≥ 8.0。§8「#1650 の実装事項」）・CUDA `TypedOps<f64>`／`TypedOps<f16>`（#1703）・Metal（#1651）・`Var`／`Tape`／VJP の dtype 一般化・facade 公開面への昇格・GB10 実機実測（§12.6）。CPU bf16 は #1699・PR #1794 で実装済み・origin/main マージ済み（§11）
+
+## 14. 実装記録（#1705・Metal `TypedOps<f64>`〈恒久 `Unsupported`〉／`TypedOps<f16>`〈`dispatch_f16_auto_unverified` 結線〉）
+
+`backend-metal` に `TypedOps<half::f16>` を実装し、`MetalBackendOps::typed_ops_f16()`（`crates/tensor-core/src/backend_ops.rs` の非破壊拡張 accessor。既定 `None`）を `Some(self)` へオーバーライドして結線した（イシュー #1705・親 #1651）。承認根拠は #1697／#1703 と同じ親 #1649／#1651 コメント（2026-09-12 ユーザー承認）であり、Metal 固有の追加承認事項はない。
+
+### 14.1 `TypedOps<f64>` は恒久 `Unsupported`・accessor `None` のまま（実装なし）
+
+§5 の実現可否表のとおり、MSL には `double` 型が存在せず GEMM 全体を `f64` 精度で動かす手段が構造的にない（`soft_f64.rs` の 64bit 整数エミュレーションは bias 勾配縮約というスカラー累算専用であり GEMM の代替にならない）。CUDA `typed_f64.rs`（`Some(self)` を返しつつ 8 演算すべて `Unsupported` で明示応答する方式）とは異なり、**Metal は `impl TypedOps<f64> for MetalBackendOps` 自体を追加せず、`typed_ops_f64()` accessor もオーバーライドしない**（trait 既定の `None` のまま）。理由は、CUDA の f64 が「driver 非接触の設計上の選択」（性能上の目的がないため実装しないだけで実装自体は可能）であるのに対し、Metal の f64 は「MSL の型システム上そもそも構築不能」という異なる性質のブロッカーであり、accessor `None`（capability 不在の明示）の方が「実装したが何もできない」より実情に忠実なため。呼び出し側は `typed_ops_f64().is_none()` を見て fail-closed に扱える（`memory_ops` 等の既存 capability accessor と同型の契約）。この判断は本イシュー着手前に設計 §5 で既に固定されていたものを実装で追認したものであり、実装フェーズでの新規判断ではない。
+
+### 14.2 `TypedOps<f16>::gemm`: `dispatch_f16_auto_unverified` への内部結線
+
+`crate::gemm::MetalGemm::dispatch_f16_auto_unverified`（動的タイル選択の f16 自動経路。イシュー #798・`_unverified` suffix・`#[doc(hidden)]` を維持）は、REQ-2 統一複合判定の検証を担う `tests/gemm_f16_auto_parity.rs`（`#[ignore]`。#799 実機セッションで M4 Max 実機 8/8 PASS 記録済み。`docs/perf/metal-f16-vs-mps-f16.md:378`）を持ちながら、本イシュー以前は `facade`／`ops::MetalBackendOps`（f32 `BackendOps::gemm`）／`dispatch_backend_auto`（真の production 自動経路）のいずれからも到達不能だった。
+
+`crates/backend-metal/src/typed_f16.rs::gemm` は `context_cache::cached_context`／`cached_gemm`（プロセス内キャッシュ。イシュー #930）経由で `MetalGemm` を取得し `dispatch_f16_auto_unverified` へそのまま委譲する薄いパススルーであり、`tile::select_for_device` のタイル選択ロジック自体は一切複製しない。到達経路は `Tensor<f16>` という型でのみ決まる（`TypedOps<f16>::gemm` を呼ぶには `Tensor<f16>` を構築する必要がある。REQ-11 整合）ため、`f32` 側 `BackendOps::gemm`（`dispatch_auto`／`dispatch_strided_bias_act_prepared` 経由）から `dispatch_f16_auto_unverified` へ暗黙に迂回する経路は存在しない（fail-closed）。`_unverified` suffix・`#[doc(hidden)]` の解除は #1651 の承認事項 §7-4 が本イシューでは未承認のため維持し、`gemm.rs` の doc comment にその旨を追記した（本体・シグネチャ・属性は不変）。
+
+### 14.3 残り 7 演算: f32 昇格 → 既存 Metal `BackendOps` カーネル → 1 回丸め
+
+`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` は CPU（#1698）・CUDA（#1703）と同じ 3 段構成（`Tensor::host_slice` で昇格 → 既存 `<MetalBackendOps as BackendOps>` の f32 カーネルへ委譲 → `f16::from_f32` で 1 回丸め）を採る。各メソッドは構造的に `f16::from_f32(BackendOps::op(upcast(x)))`（要素ごと bit 一致）という不変条件を満たす。
+
+**`sum`／`max` は `Unsupported` を継承する**: `ops::MetalBackendOps::sum`／`max`（f32）は reduction カーネル未実装のため常に `BackendError::Unsupported` を返す。`typed_f16.rs::sum`／`max` は上記 3 段構成をそのまま適用するだけで、委譲先が常に `Unsupported` を返すため構造的に同じ結果になる——ホスト側で reduction を計算して `Unsupported` を偽装しない（バックエンド内部で CPU 計算を隠す silent fallback を避ける方針。レイヤリング上、ホストフォールバックは `autodiff` 側の責務）。Metal f32 reduction カーネルが将来実装されれば、`typed_f16.rs` は変更なしでそのまま有効になる。
+
+### 14.4 実装ファイル
+
+- `crates/backend-metal/src/typed_f16.rs`（新規。`upcast_f16`／`downcast_f32`・`impl TypedOps<f16> for MetalBackendOps`・`#[cfg(test)]` 5 件）
+- `crates/backend-metal/src/lib.rs`（`#[cfg(target_os = "macos")] pub(crate) mod typed_f16;` の追加・モジュール doc 2 箇所への追補）
+- `crates/backend-metal/src/ops.rs`（`typed_ops_f16` accessor 1 メソッド追加。**`TypedOps` を top-level `use` しない**——`self.add`／`self.relu` 等の f32 内部呼び出しが `impl TypedOps<f16>` の同名メソッドと衝突するため、戻り値型でのみ `fandhe_ai_tensor_core::TypedOps<half::f16>` を完全修飾参照する。CPU／CUDA 側 `ops.rs` と同じ回避策）
+- `crates/backend-metal/src/gemm.rs`（`dispatch_f16_auto_unverified` の doc comment のみ追記。関数本体・シグネチャ・属性は不変）
+- `crates/backend-metal/tests/typed_ops_f16_parity.rs`（新規。`#![cfg(target_os = "macos")]`。実機非依存の accessor／shape 検証・`#[ignore]` 実機依存の L1 gemm bit 一致・L2 gemm／elementwise vs CPU 参照・零次元形状のデバイス到達確認）
+- `crates/backend-metal/tests/typed_ops_source_evidence.rs`（新規。cfg なし・Linux CI 常時実行。`typed_ops_f64` 非オーバーライド・`TypedOps<f64>` 非実装・`typed_ops_f16` accessor 結線・`dispatch_f16_auto_unverified` 呼び出し証跡・暗黙 f32 フォールバック不在を文字列検査で固定。doc comment 中の言及による誤検出を避けるため `//` コメント行を除去してから検査する）
+
+### 14.5 f32 経路無変更の根拠
+
+`git diff --stat` は `crates/backend-metal/src/{typed_f16.rs（新規）,lib.rs,ops.rs}` と `gemm.rs`（doc comment のみ）・`tests/typed_ops_f16_parity.rs`（新規）・`tests/typed_ops_source_evidence.rs`（新規）のみを示し、`shaders/`・`elementwise.rs`・`context_cache.rs`・`crates/tensor-core/**` は無変更（`ops.rs` の差分も `typed_ops_f16` accessor 1 メソッド＋ doc 1 文、`gemm.rs` の差分も doc comment 追記のみ）。既存 f32 回帰テスト（`cargo test -p fandhe-ai-backend-metal --all-features`。Linux 実行可能な単体・統合テストがすべて green）・`cargo fmt --all --check`／`cargo clippy -p fandhe-ai-backend-metal --all-targets`（backend-metal 由来の警告・エラーは 0 件。`fandhe-ai-backend-cuda` 側の pre-existing dead-code エラー〈本 PR 変更対象外・stash 比較で main 上でも再現することを確認済み〉が `--all-features` 経由でビルドグラフに混入し `cargo clippy` 全体を止めるが、backend-metal 由来の指摘は 0 件）・`make check-cross-metal-tests` 相当（`cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`。green）・`RUSTDOCFLAGS="-D warnings" cargo doc`（workspace 全体・backend-metal／backend-cpu の aarch64-apple-darwin クロスとも green）で非後退を確認済み。
+
+### 14.6 テスト構成・実機実測の記入欄
+
+- `typed_f16.rs::tests`（accessor 契約・shape 検証・`sum`／`max` の `Unsupported` 継承・upcast/downcast 往復）5 件・`tests/typed_ops_f16_parity.rs` の非 `#[ignore]` 部（accessor・shape 検証・零次元形状は `#[ignore]` 側）はいずれも `cfg(target_os = "macos")`／`#![cfg(target_os = "macos")]` 限定のため、本エージェント実行環境（ネイティブ Linux）ではコンパイル対象に入らずテスト実行・pass 確認はできない。本エージェント環境で実施できたのは `cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`（クロス型検査。green）に留まり、実行・pass 確認は Mac セッションへ申し送る。`tests/typed_ops_source_evidence.rs` 5 件は cfg なしのため Linux CI で実際に実行され green（`cargo test -p fandhe-ai-backend-metal --test typed_ops_source_evidence` で確認済み）
+- `#[ignore]`（Apple Silicon 実機依存）: `tests/typed_ops_f16_parity.rs` の L1 gemm bit 一致・L2 gemm／elementwise vs CPU 参照 rounded・零次元形状のデバイス到達確認。本エージェント実行環境に Apple Silicon 実機への到達手段がなく未実施のまま記入欄を残す（Mac セッションへ申し送り）。実行コマンド:
+
+```sh
+cargo test -p fandhe-ai-backend-metal --release --test typed_ops_f16_parity -- --ignored --nocapture
+```
+
+### 14.7 スコープ外
+
+Metal `half` 専用 elementwise／reduction カーネル（H2D 転送量削減の性能最適化）・f16 NT/TN strided 入口（非 contiguous view の性能最適化）・`_unverified`／`#[doc(hidden)]` の解除（§7-4 の別途承認事項）・Metal f32 `sum`／`max` reduction カーネル自体の実装（実装されれば f16 版は自動的に有効化される。out-of-scope-tracking.md 対象。後続イシュー起票の要否はユーザー承認後に判断）・bf16（#1706）・`Var`／`Tape`／VJP・facade 公開面への昇格・`MemoryOps`／`DeviceBuffer<f16>` 常駐経路（段階 B）・M4 Max 実機実測（§14.6）。
