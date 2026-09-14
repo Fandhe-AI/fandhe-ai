@@ -101,18 +101,31 @@ fn load_fixture() -> Fixture {
 }
 
 /// 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」
-/// （`.claude/rules/coding-rust.md`）。既存 tolerance の値を変更せず
-/// そのまま使う。
+/// （`.claude/rules/coding-rust.md`）。判定式は独自実装せず
+/// `common::req2_close`（`fandhe_ai_backend_cpu::parity::compare` と
+/// 判定式・分母定義を揃えた共通実装）へ委譲する。分母を `expected` の
+/// みで取るローカル実装は `expected == 0.0` かつ `actual` が小さくない
+/// 値（例: 1e-4）のケースで絶対誤差を相対誤差として比較してしまい、
+/// 統一複合判定より緩く誤判定しうるため使わない。
 fn assert_close(actual: f32, expected: f32, context: &str) {
-    let abs_err = (actual - expected).abs();
-    let rel_err = if expected != 0.0 {
-        abs_err / expected.abs()
-    } else {
-        abs_err
-    };
     assert!(
-        rel_err < 1e-3 || abs_err < 1e-5,
-        "{context}: actual={actual} expected={expected} (abs_err={abs_err}, rel_err={rel_err})"
+        common::req2_close(actual as f64, expected as f64),
+        "{context}: actual={actual} expected={expected}"
+    );
+}
+
+/// bit 完全一致の判定（`.to_bits()` 比較）。`assert_eq!(f32, f32)` は
+/// `PartialEq` の IEEE 754 比較（`+0.0 == -0.0` が true）を使うため
+/// 符号違いの `+0.0`/`-0.0` を見逃す。受け入れ段 2・3・
+/// `adam_step_is_deterministic` が謳う「bit 完全一致」を文字通り検証する
+/// ため、本ファイルの数値ベクタ比較はすべて本関数を経由する。
+fn assert_bit_eq(actual: f32, expected: f32, context: &str) {
+    assert_eq!(
+        actual.to_bits(),
+        expected.to_bits(),
+        "{context}: actual={actual} ({:#010x}) expected={expected} ({:#010x})",
+        actual.to_bits(),
+        expected.to_bits(),
     );
 }
 
@@ -250,18 +263,22 @@ fn adam_wd_zero_bit_matches_adamw_wd_zero() {
 
             for i in 0..fixture.init_a.len() {
                 let idx = index_of(&fixture.param_a_shape, i);
-                assert_eq!(
+                assert_bit_eq(
                     param_a_adam.get(&idx).unwrap(),
                     param_a_adamw.get(&idx).unwrap(),
-                    "case={case_name} step={step} param_a[{i}]: weight_decay=0 で Adam と AdamW は bit 一致するはず"
+                    &format!(
+                        "case={case_name} step={step} param_a[{i}]: weight_decay=0 で Adam と AdamW は bit 一致するはず"
+                    ),
                 );
             }
             for i in 0..fixture.init_b.len() {
                 let idx = index_of(&fixture.param_b_shape, i);
-                assert_eq!(
+                assert_bit_eq(
                     param_b_adam.get(&idx).unwrap(),
                     param_b_adamw.get(&idx).unwrap(),
-                    "case={case_name} step={step} param_b[{i}]: weight_decay=0 で Adam と AdamW は bit 一致するはず"
+                    &format!(
+                        "case={case_name} step={step} param_b[{i}]: weight_decay=0 で Adam と AdamW は bit 一致するはず"
+                    ),
                 );
             }
         }
@@ -325,10 +342,12 @@ fn adam_coupled_l2_bit_matches_adamw_on_shifted_grads() {
         param_adamw = updated_adamw.into_iter().next().unwrap();
 
         for i in 0..4 {
-            assert_eq!(
+            assert_bit_eq(
                 param_adam.get(&[i]).unwrap(),
                 param_adamw.get(&[i]).unwrap(),
-                "step={step} index={i}: coupled Adam と shifted-grad AdamW(wd=0) は bit 一致するはず"
+                &format!(
+                    "step={step} index={i}: coupled Adam と shifted-grad AdamW(wd=0) は bit 一致するはず"
+                ),
             );
         }
     }
@@ -356,7 +375,18 @@ fn adam_step_is_deterministic() {
 
     let run1 = run();
     let run2 = run();
-    assert_eq!(run1, run2, "同一入力で Adam::step の結果が一致しない");
+    assert_eq!(
+        run1.len(),
+        run2.len(),
+        "同一入力で Adam::step の出力長が一致しない"
+    );
+    for (i, (a, b)) in run1.iter().zip(run2.iter()).enumerate() {
+        assert_bit_eq(
+            *a,
+            *b,
+            &format!("index={i}: 同一入力で Adam::step の結果が一致しない"),
+        );
+    }
 }
 
 /// Adam（`lr=0.01, weight_decay=1e-4`）が `Linear`+`Relu`+`MseLoss` の
@@ -432,4 +462,36 @@ fn mlp_converges_with_adam() {
         final_loss < 0.5 * initial_loss,
         "Adam での収束が不十分: initial={initial_loss} final={final_loss}"
     );
+}
+
+/// codex-review 指摘（PR #1852）対応の回帰テスト: 初回 `step()` 呼び出しで
+/// grad shape が不正な場合、`self.states`（`m`/`v` の遅延初期化）を
+/// 一切変更しないこと。もし旧実装のように param shape から先に
+/// `self.states` を確定してしまうと、この回帰テストは実質的に検知できない
+/// （2 回目の呼び出しは同じ shape の param を渡すため slot.shape 検証は
+/// 通ってしまう）ため、本テストは 1 回目の失敗直後に
+/// `step_count()`（`self.states` と同じ「状態変更フェーズ」でのみ
+/// 更新される値）が 0 のままであることを直接検証する。
+#[test]
+fn adam_step_rejects_bad_grad_shape_without_mutating_state_on_first_call() {
+    let mut opt = Adam::new(AdamConfig::default()).unwrap();
+    let param = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+    let bad_grad = Tensor::new(vec![0.1, 0.2], &[2]).unwrap();
+
+    let err = opt.step(&[(&param, &bad_grad)]);
+    assert!(err.is_err(), "grad shape 不一致は Err を返すはず");
+    assert_eq!(
+        opt.step_count(),
+        0,
+        "grad shape エラー時に step_count が更新されてはならない（状態変更フェーズ未到達の証跡）"
+    );
+
+    // 正しい shape の grad で再試行すれば新規呼び出しとして成功する
+    // （エラー時に `self.states` が誤って確定していないことの直接証跡）。
+    let good_grad = Tensor::new(vec![0.1, 0.2, 0.3], &[3]).unwrap();
+    let updated = opt
+        .step(&[(&param, &good_grad)])
+        .unwrap_or_else(|e| panic!("正しい shape での再試行が失敗: {e}"));
+    assert_eq!(updated.len(), 1);
+    assert_eq!(opt.step_count(), 1);
 }

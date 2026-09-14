@@ -55,10 +55,18 @@ use crate::eval::dense_vec_ref;
 /// でドリフトを固定する）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AdamConfig {
+    /// 学習率。有限かつ `>= 0.0`（`Adam::new` が検証する）。
     pub lr: f32,
+    /// 1 次モーメント（`m`）の指数移動平均係数。`[0.0, 1.0)`。
     pub beta1: f32,
+    /// 2 次モーメント（`v`）の指数移動平均係数。`[0.0, 1.0)`。
     pub beta2: f32,
+    /// 分母のゼロ除算防止項。有限かつ `> 0.0`。
     pub eps: f32,
+    /// coupled L2 weight decay 係数（モジュール doc 参照。`AdamW` の
+    /// decoupled decay とは適用箇所が異なる）。有限かつ `>= 0.0`。
+    /// `0.0` のときは decay 項の演算自体を skip する
+    /// （`weight_decay == 0.0` で `AdamW(wd=0)` と bit 一致する根拠）。
     pub weight_decay: f32,
 }
 
@@ -142,6 +150,7 @@ impl Adam {
         })
     }
 
+    /// 構築時に確定したハイパーパラメータへの参照。
     pub fn config(&self) -> &AdamConfig {
         &self.config
     }
@@ -156,11 +165,33 @@ impl Adam {
     /// `AdamW::step` と同一の遅延初期化・検証専用フェーズ／状態変更
     /// フェーズの分離契約（形状エラー発生時に `step_count`／
     /// `beta*_pow_t`／`m`／`v` を部分更新しない fail-closed 契約）を
-    /// そのまま踏襲する。
+    /// そのまま踏襲する。**`AdamW::step` との差分**（codex-review 指摘
+    /// 対応）: `grad.shape() == param.shape()` の検証は `self.states` の
+    /// 遅延初期化より先に行う。`AdamW::step` の実装順（状態確定 →
+    /// `slot.shape` 経由での grad 検証）では、初回呼び出しで grad
+    /// shape が不正な場合でも「param shape から states を確定する」副
+    /// 作用自体は grad 検証の前に実行済みになってしまい、以後の
+    /// `step()` 呼び出しの挙動が初回呼び出し時点の `param` shape に
+    /// 固定される（エラーになった呼び出しの副作用が残ることと機能的に
+    /// 等価であり、`AdamW::step` と同じ「状態変更前に全検証を終える」
+    /// という設計意図に反する）。`Adam::step` はこの検証を状態変更を
+    /// 一切伴わない形へ並べ替えることで解消する。
     pub fn step(
         &mut self,
         params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        // 検証専用フェーズ 1: `grad.shape() == param.shape()` は
+        // `self.states` を一切参照せず判定できるため、状態を読み書き
+        // する前に全ペアを検証しきる（初回呼び出しでも安全）。
+        for (param, grad) in params_and_grads.iter() {
+            if grad.shape() != param.shape() {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: grad.shape().to_vec(),
+                    rhs: param.shape().to_vec(),
+                }));
+            }
+        }
+
         if self.states.is_empty() && !params_and_grads.is_empty() {
             self.states = params_and_grads
                 .iter()
@@ -182,19 +213,13 @@ impl Adam {
             )));
         }
 
-        // 検証専用フェーズ（状態変更前に全スロットの shape を確認しきる。
-        // `AdamW::step` と同じ Bugbot 是正契約）。
-        for (slot, (param, grad)) in self.states.iter().zip(params_and_grads.iter()) {
+        // 検証専用フェーズ 2（状態変更前に全スロットの param shape を
+        // 確認しきる。grad shape は上のフェーズ 1 で検証済み）。
+        for (slot, (param, _grad)) in self.states.iter().zip(params_and_grads.iter()) {
             if param.shape() != slot.shape.as_slice() {
                 return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
                     lhs: param.shape().to_vec(),
                     rhs: slot.shape.clone(),
-                }));
-            }
-            if grad.shape() != param.shape() {
-                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
-                    lhs: grad.shape().to_vec(),
-                    rhs: param.shape().to_vec(),
                 }));
             }
         }
