@@ -1522,3 +1522,226 @@ fn scatter_index_out_of_range_is_rejected() {
     let err = x.scatter(1, &index, &src).unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }
+
+// --- cumsum／cumprod（イシュー #1731） ---
+
+/// ①forward: `cumsum` が各軸で累積和を返す（2 次元テンソルの両軸で
+/// 確認）。
+#[test]
+fn cumsum_forward_along_each_axis() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let along_rows = x.cumsum(0).unwrap();
+    assert_eq!(
+        dense_vec(&along_rows.to_tensor()),
+        vec![1.0, 2.0, 3.0, 5.0, 7.0, 9.0]
+    );
+
+    let along_cols = x.cumsum(1).unwrap();
+    assert_eq!(
+        dense_vec(&along_cols.to_tensor()),
+        vec![1.0, 3.0, 6.0, 4.0, 9.0, 15.0]
+    );
+}
+
+/// ②`cumsum` が `f64` アキュムレータを保持する契約を直接確認する
+/// （`[1e8, 1.0, -1e8]` は f32 逐次アキュムレータなら末尾が `0.0` に
+/// 丸まるが、f64 アキュムレータでは `1.0` が厳密に残る）。
+#[test]
+fn cumsum_uses_persistent_f64_accumulator() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1e8, 1.0, -1e8], &[3]));
+    let out = x.cumsum(0).unwrap();
+    assert_eq!(dense_vec(&out.to_tensor()), vec![1e8, 1e8, 1.0]);
+}
+
+/// ③`cumsum` の backward を中央差分・解析式（`dx[i] = Σ_{j>=i} w[j]`）
+/// の双方と突合する（`loss = sum(cumsum(x) ⊙ w)`）。
+#[test]
+fn cumsum_backward_matches_numeric() {
+    let x0 = t(vec![0.5, -1.5, 2.0, 0.25], &[4]);
+    let w = t(vec![1.0, -2.0, 0.5, 3.0], &[4]);
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let wv = tape.var(&w);
+        let out = xv.cumsum(0).unwrap();
+        scalar(&out.mul(&wv).unwrap().sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumsum(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close("cumsum dX", dx, &num_dx);
+
+    // 解析式 dx[i] = Σ_{j>=i} w[j] との突合（厳密一致）。
+    let w_data = dense_vec(&w);
+    let expected: Vec<f32> = (0..w_data.len())
+        .map(|i| w_data[i..].iter().sum())
+        .collect();
+    assert_eq!(dense_vec(dx), expected);
+}
+
+/// ④`cumprod` が各軸で累積積を返す。
+#[test]
+fn cumprod_forward_along_each_axis() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+
+    let along_rows = x.cumprod(0).unwrap();
+    assert_eq!(
+        dense_vec(&along_rows.to_tensor()),
+        vec![1.0, 2.0, 3.0, 4.0, 10.0, 18.0]
+    );
+
+    let along_cols = x.cumprod(1).unwrap();
+    assert_eq!(
+        dense_vec(&along_cols.to_tensor()),
+        vec![1.0, 2.0, 6.0, 4.0, 20.0, 120.0]
+    );
+}
+
+/// ⑤`cumprod` の `f64` アキュムレータ契約: `[1e-30, 1e-30, 1e30]` は
+/// `out[1] = 1e-60` が `f32` では underflow して `0.0` になるが、
+/// `out[2]`（`1e-60 * 1e30 = 1e-30` 相当）は f64 アキュムレータでは
+/// 非零有限値のまま残る（f32 逐次アキュムレータなら `out[1]` が
+/// `0.0` になった時点で以降も `0.0` のまま）。判別は `out[2]` の
+/// 非零性・有限性のみで行う（`f32` 入力は `1e-30`／`1e30` に厳密で
+/// はないため、リテラル比較はしない）。
+#[test]
+fn cumprod_underflow_recovers_via_f64_accumulator() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1e-30, 1e-30, 1e30], &[3]));
+    let out = dense_vec(&x.cumprod(0).unwrap().to_tensor());
+    assert_eq!(out[1], 0.0, "f32 では 1e-60 相当が underflow するはず");
+    assert_ne!(
+        out[2], 0.0,
+        "f64 アキュムレータにより 1e-60*1e30 相当が非零で残るはず"
+    );
+    assert!(out[2].is_finite());
+}
+
+/// ⑥〜⑧`cumprod` の backward（厳密形 `d_x[i] = L[i]·S[i]`）を中央差分
+/// と突合する。零要素の個数（0／1／2 個）を分けて検証し、最初の零
+/// 要素より後ろの入力勾配が厳密に `0.0` になる解析的性質も確認する
+/// （`L[i] = 0` となるため。最初の零要素自身の勾配は一般に非零）。
+fn cumprod_backward_case(x0: Tensor<f32>, w: Tensor<f32>, label: &str, first_zero: Option<usize>) {
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let wv = tape.var(&w);
+        let out = xv.cumprod(0).unwrap();
+        scalar(&out.mul(&wv).unwrap().sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumprod(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close(label, dx, &num_dx);
+
+    if let Some(fz) = first_zero {
+        let dx_data = dense_vec(dx);
+        for (i, &v) in dx_data.iter().enumerate().skip(fz + 1) {
+            assert_eq!(v, 0.0, "{label}: index {i} の勾配は 0 のはず（L[{i}]=0）");
+        }
+    }
+}
+
+#[test]
+fn cumprod_backward_matches_numeric_without_zeros() {
+    cumprod_backward_case(
+        t(vec![0.5, -1.5, 2.0, 0.25], &[4]),
+        t(vec![1.0, -2.0, 0.5, 3.0], &[4]),
+        "cumprod dX (no zero)",
+        None,
+    );
+}
+
+#[test]
+fn cumprod_backward_matches_numeric_with_single_zero() {
+    cumprod_backward_case(
+        t(vec![0.5, 0.0, 2.0, -0.25], &[4]),
+        t(vec![1.0, -2.0, 0.5, 3.0], &[4]),
+        "cumprod dX (single zero)",
+        Some(1),
+    );
+}
+
+#[test]
+fn cumprod_backward_matches_numeric_with_two_zeros() {
+    cumprod_backward_case(
+        t(vec![0.5, 0.0, 2.0, 0.0, -0.25], &[5]),
+        t(vec![1.0, -2.0, 0.5, 3.0, -1.0], &[5]),
+        "cumprod dX (two zeros)",
+        Some(1),
+    );
+}
+
+/// エラー経路: `cumsum`／`cumprod` の `dim` が範囲外なら
+/// `AutodiffError::Shape(AxisOutOfRange)` を返す。
+#[test]
+fn cumsum_axis_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let err = x.cumsum(1).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+}
+
+#[test]
+fn cumprod_axis_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let err = x.cumprod(1).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::AxisOutOfRange { .. })
+    ));
+}
+
+/// 空 shape（`[0, 3]`）に対する `cumsum` は空出力を返す（部分積
+/// オーバーフロー回避の早期 return を確認）。
+#[test]
+fn cumsum_on_empty_tensor_returns_empty() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(Vec::new(), &[0, 3]));
+    let out = x.cumsum(0).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[0, 3]);
+    assert_eq!(dense_vec(&out.to_tensor()), Vec::<f32>::new());
+}
+
+/// strided（transpose view）入力でも `cumsum` が contiguous 入力と
+/// 同じ結果を返す（`x.contiguous()` 経由で正しく読める契約）。
+#[test]
+fn cumsum_on_transposed_view_matches_contiguous() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+    let tr = x.transpose(0, 1).unwrap(); // shape [3, 2]
+    let out_view = tr.cumsum(0).unwrap();
+
+    let x_t = t(vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0], &[3, 2]);
+    let tape2 = Tape::new_with_ops(common::naive_ops());
+    let x2 = tape2.var(&x_t);
+    let out_contig = x2.cumsum(0).unwrap();
+
+    assert_eq!(
+        dense_vec(&out_view.to_tensor()),
+        dense_vec(&out_contig.to_tensor())
+    );
+}

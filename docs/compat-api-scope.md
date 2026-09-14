@@ -247,7 +247,7 @@ Phase 3（親 #1573）の各 issue へ対応付ける。
 | **量子化** | #1627（除外事項「分散学習・量子化の網羅対応」〈Won't・条件付き〉に従属。実装着手は同除外事項の格上げ条件充足と Phase 4 要件見直しでの新 REQ 追加のユーザー承認まで不可。5 節参照） |
 | **複数 GPU／DDP** | #1628（同上に従属。設計判断の記録〈docs のみ〉に留め、実装・通信層の依存追加は行わない。5 節参照） |
 | ONNX import 公開／export | #1629（#1652 で設計判断を記録。案 B〈薄いラッパー型〉を方針として推奨するが、facade は crates.io 公開クレートのため公開には `onnx-interop` 自体の crates.io 公開という別個のユーザー承認が必要——2026-09-12 の facade 公開面拡張の承認範囲には含まれない。現状は非公開のまま段階 0。`docs/facade-onnx-import-exposure-decision.md`） |
-| topk／sort／cumsum | #1630 |
+| topk／sort／cumsum | #1630（cumsum／cumprod は #1731 で実装済み。`Var::cumsum`／`cumprod`・`Op::Cumsum`／`Op::Cumprod`。CPU 参照実装先行・GPU〈CUDA／Metal〉は既定 `Unsupported` フォールバック・VJP はホスト側のみ〈厳密形・除算なし〉・facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉。topk／sort／argsort／unique は #1630 配下の後続 sub） |
 | `nn.functional` の残り（pad／interpolate／one_hot 等） | #1631 |
 
 1.2／1.3 共通の注記: 各機能の追加は薄いラッパー原則（3 節）・完全自作

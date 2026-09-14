@@ -321,6 +321,22 @@ pub(crate) fn vjp(
             let da = log_softmax_vjp_along(out_value, upstream, dim);
             vec![(input, da)]
         }
+        Op::Cumsum { input, dim } => {
+            // d_x[i] = Σ_{j>=i} g[j]（`dim` 方向の逆順累積和。イシュー
+            // #1731）。`out_value` は使わない（`cumsum` の VJP は
+            // upstream のみから決まる線形演算のため）。
+            let da = cumsum_vjp_along(upstream, dim);
+            vec![(input, da)]
+        }
+        Op::Cumprod { input, dim } => {
+            // 除算を用いない厳密形（`cumprod_vjp_along` doc 参照。
+            // イシュー #1731）。forward 記録値 `out_value` ではなく
+            // 入力 `x` 自体が必要なため `Op::Max` と同型に
+            // `materialize_fallible` で取得する。
+            let x_val = materialize_fallible(nodes, ops, input)?;
+            let da = cumprod_vjp_along(x_val, upstream, dim);
+            vec![(input, da)]
+        }
         Op::Sum { input, dim } => {
             let input_shape = &nodes[input.0].shape;
             let da = unreduce_broadcast(upstream, input_shape, dim);
@@ -2395,6 +2411,101 @@ fn log_softmax_vjp_along(
                 let idx = (o * axis_len + a) * inner + i;
                 let d = g[idx] as f64 - (y[idx].exp() as f64) * sum_acc;
                 out[idx] = d as f32;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::Cumsum` の VJP 本体: `d_x[i] = Σ_{j>=i} g[j]`（`dim` 方向の
+/// 逆順累積和。イシュー #1731）。`eval::cumsum_along` と同じ
+/// 「外側（outer）× 走査軸（axis_len）× 内側（inner）」の 3 段走査
+/// だが、走査は `dim` の添字降順（末尾から先頭へ）で行う。forward と
+/// 同じ f64 アキュムレータ契約（`.claude/rules/coding-rust.md`）で
+/// lane ごとに `f64` の和を保持し、各ステップで直前までの和を書き
+/// 出してから加算する（末尾要素の勾配は `g[n-1]` そのもの、以降は
+/// 逆順に累積していく）。
+fn cumsum_vjp_along(upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+    let shape = upstream.shape().to_vec();
+    // `softmax_vjp_along` と同じ早期 return（部分積オーバーフロー
+    // 回避）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let g = dense_vec(upstream);
+    let mut out = vec![0f32; g.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut acc: f64 = 0.0;
+            // `dim` の添字降順（`axis_len - 1` から `0` へ）に走査し、
+            // `out[a] = Σ_{j>=a} g[j]` を逐次構築する。
+            for a in (0..axis_len).rev() {
+                let idx = (o * axis_len + a) * inner + i;
+                acc += g[idx] as f64;
+                out[idx] = acc as f32;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::Cumprod` の VJP 本体（イシュー #1731）。除算を用いない
+/// 厳密形 `d_x[a] = L[a] · S[a]` を計算する:
+/// - `L[a] = Π_{k<a} x[k]`（排他的 prefix 積。`L[0] = 1`）。先頭から
+///   末尾へ順に累積する。
+/// - `S[axis_len-1] = g[axis_len-1]`・
+///   `S[a] = g[a] + x[a+1]·S[a+1]`（後ろ向き Horner 型再帰）。末尾から
+///   先頭へ逆順に累積する。
+///
+/// `S` は `dim` の降順、`L`（および最終的な `out = L · S`）は昇順で
+/// 走査する必要があるため、まず `S` を全 `a` について 1 パスで
+/// 計算してから（lane あたり `axis_len` 個の `f64` を一時保持）、
+/// 2 パス目で `L` を累積しながら `out[a] = L[a] · S[a]` を書き出す
+/// （`axis_len` は参照実装が想定する規模〈小〜中程度の軸長〉では
+/// 許容できる追加メモリ）。`L`／`S`／その積はすべて `f64` で保持し、
+/// 最終書き出しで 1 回だけ `f32` へ downcast する（`.claude/rules/
+/// coding-rust.md` の f64 アキュムレータ方針）。零要素が 0 個・1 個・
+/// 2 個以上のいずれの場合でも同一式で厳密に成り立つ（PyTorch の
+/// 「零なしなら除算形」高速経路は意図的に不採用。計画立案時に中央
+/// 差分との数値突合で 0/1/2 零ケースを確認済み）。O(axis_len) per
+/// lane。
+fn cumprod_vjp_along(input: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let x = dense_vec(input);
+    let g = dense_vec(upstream);
+    let mut out = vec![0f32; x.len()];
+    let mut s_values = vec![0f64; axis_len];
+    for o in 0..outer {
+        for i in 0..inner {
+            // 1 パス目: `S[a]` を末尾（`axis_len - 1`）から先頭（`0`）
+            // へ逆順に構築する。
+            let mut s_running: f64 = 0.0;
+            for a in (0..axis_len).rev() {
+                let idx = (o * axis_len + a) * inner + i;
+                s_running = if a + 1 == axis_len {
+                    g[idx] as f64
+                } else {
+                    let idx_next = (o * axis_len + (a + 1)) * inner + i;
+                    g[idx] as f64 + (x[idx_next] as f64) * s_running
+                };
+                s_values[a] = s_running;
+            }
+            // 2 パス目: `L[a]`（排他的 prefix 積）を先頭から末尾へ順に
+            // 累積しながら `out[a] = L[a] · S[a]` を書き出す。
+            let mut l_acc: f64 = 1.0;
+            for (a, &s_a) in s_values.iter().enumerate() {
+                let idx = (o * axis_len + a) * inner + i;
+                out[idx] = (l_acc * s_a) as f32;
+                l_acc *= x[idx] as f64;
             }
         }
     }

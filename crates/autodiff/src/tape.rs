@@ -610,6 +610,28 @@ pub(crate) enum Op {
         src: NodeId,
         reduce: ScatterReduce,
     },
+    /// `dim` 軸に沿った累積和（`Var::cumsum`。`torch.cumsum` 相当。
+    /// イシュー #1731）。`BackendOps::cumsum` に対応メソッドがあり
+    /// （`Softmax`／`Gather` と同様）非融合対象——`Op::
+    /// is_lazy_elementwise` の elementwise 5 演算には含めない・
+    /// `push_eager` で常に実体化する。`dim` は forward（`Var::cumsum`）
+    /// が [`fandhe_ai_tensor_core::reduce_out_shape`] で範囲検査済み。
+    ///
+    /// VJP（`grad.rs`）: `d_x[i] = Σ_{j>=i} g[j]`（`dim` 方向の逆順
+    /// 累積和。ホスト側のみ・GPU 経路を持たない。`docs/spec` REQ-9
+    /// Tier 2「topk／sort／cumsum」・イシュー #1731）。
+    Cumsum { input: NodeId, dim: usize },
+    /// `dim` 軸に沿った累積積（`Var::cumprod`。`torch.cumprod` 相当。
+    /// イシュー #1731）。[`Op::Cumsum`] と同じ非融合・常実体化・
+    /// `dim` 事前検査済みの契約。
+    ///
+    /// VJP（`grad.rs`）: 除算を用いない厳密形（排他的 prefix 積 `L` と
+    /// 後ろ向き Horner 型再帰 `S` の積）。forward 記録値 `out_value`
+    /// （= cumprod(x)）ではなく入力 `x` 自体を使う（`Op::Max` と同型の
+    /// `materialize_fallible` 経由。零要素を含む場合でも厳密に成り立つ
+    /// ため零位置での場合分けを持たない。`grad.rs::cumprod_vjp_along`
+    /// doc 参照）。
+    Cumprod { input: NodeId, dim: usize },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
@@ -927,6 +949,12 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （非網羅 match 是正で新規 variant 追加時に強制される）。
             Op::Gather { .. } | Op::Scatter { .. } => false,
+            // `Op::Cumsum`／`Op::Cumprod`（イシュー #1731）は eager
+            // 実体化演算で `recompute_value` に再計算経路を持たない
+            // ため非適格（非網羅 match 是正で新規 variant 追加時に
+            // 強制される。`Op::ScalarUnary`／`Op::ScalarBinary` と同型
+            // の「最小・安全側の判断」）。
+            Op::Cumsum { .. } | Op::Cumprod { .. } => false,
         }
     }
 
@@ -967,6 +995,8 @@ impl Op {
             | Op::Contiguous { input }
             | Op::Softmax { input, .. }
             | Op::LogSoftmax { input, .. }
+            | Op::Cumsum { input, .. }
+            | Op::Cumprod { input, .. }
             | Op::CrossEntropyLoss { logits: input, .. } => f(*input),
             Op::Where { a, b, .. } => {
                 f(*a);

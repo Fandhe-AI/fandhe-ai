@@ -833,6 +833,82 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// `dim` 軸に沿った累積和（`torch.cumsum` 相当。イシュー #1731）。
+    /// [`Self::softmax`] と同じ `dim` 検査・フォールバック規律
+    /// （`BackendOps::cumsum` → `Unsupported` のときのみ `eval::
+    /// cumsum_along` へフォールバック）。出力 shape は `self` と恒等
+    /// （累積演算は shape を変えない）。
+    pub fn cumsum(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        reduce_out_shape(&shape, Some(dim))?;
+        let x_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().cumsum(&x_val, dim) {
+            Ok(v) => {
+                // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                // cumsum` doc「戻り値 shape は入力と恒等」）を検証する
+                // （実装バグの黙認防止。`.claude/rules/security.md` A08）。
+                if v.shape() != x_val.shape() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: x_val.shape().to_vec(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::cumsum_along(&x_val, dim),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::Cumsum {
+                input: self.id,
+                dim,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `dim` 軸に沿った累積積（`torch.cumprod` 相当。イシュー #1731）。
+    /// [`Self::cumsum`] と同じ `dim` 検査・フォールバック規律
+    /// （`BackendOps::cumprod` → `Unsupported` のときのみ `eval::
+    /// cumprod_along` へフォールバック）。
+    pub fn cumprod(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        reduce_out_shape(&shape, Some(dim))?;
+        let x_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().cumprod(&x_val, dim) {
+            Ok(v) => {
+                if v.shape() != x_val.shape() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: x_val.shape().to_vec(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::cumprod_along(&x_val, dim),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::Cumprod {
+                input: self.id,
+                dim,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// CrossEntropy 損失（log-sum-exp 安定化・クラス次元指定。#191・
     /// 親イシュー #189）。`self` = logits（追跡対象）、`targets` = 正解
     /// クラス添字（非追跡・`Tensor<i32>`。勾配は定義されないため
