@@ -148,7 +148,7 @@ pub fn with_global_rng<R>(f: impl FnOnce(&mut Xorshift64Star) -> R) -> R {
 /// [`randint`] 専用のエラー型。`shape` 起因の不整合（要素数オーバー
 /// フロー等）は `Tensor::zeros` 等と同じ [`ShapeError`] へ委譲し
 /// （[`From<ShapeError>`] 実装）、`low >= high` という範囲自体の不正は
-/// `ShapeError` の対象外（shape 不整合限定。`crates/autodiff/src/error.rs`
+/// `ShapeError` の対象外（shape 不整合限定。`crates/tensor-core/src/error.rs`
 /// の `ShapeError` variant 一覧参照）であるため本型で新設する
 /// （イシュー #1725）。
 ///
