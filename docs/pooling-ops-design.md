@@ -108,15 +108,20 @@
 
 - rank 一致（2d は 4、1d 併合後も 4）。
 - `kernel ≥ 1`・`stride ≥ 1`・`dilation ≥ 1`。
-- `padding ≤ ((kernel − 1) · dilation + 1) / 2`（整数除算は floor。PyTorch
-  `pool2d_shape_check` の検査規則に合わせる。`(kernel − 1) · dilation / 2`
-  という単純な floor 式は誤り: 例えば `kernel=2, dilation=1, padding=1`
-  （PyTorch は許可）を誤って拒否する一方、`kernel=3, dilation=2, padding=2`
-  （PyTorch は拒否）を誤って許可してしまう。Max／Avg 双方の検査に本式を
-  適用する。境界値の受入例:
-  - `kernel=2, dilation=1, padding=1` → 上限 `((2−1)·1+1)/2 = 1` で許可。
-  - `kernel=3, dilation=2, padding=2` → 上限 `((3−1)·2+1)/2 = 2`。
-    `padding=2` は上限と等しいため許可、`padding=3` は拒否。
+- `padding ≤ effective_kernel_size(kernel, dilation) / 2`（`
+  effective_kernel_size(k, d) = (k − 1) · d + 1`・整数除算は floor）。
+  PyTorch `aten/src/ATen/native/Pool.h::pooling_output_shape` の
+  `TORCH_CHECK(pad <= effective_kernel_size(kernelSize, dilation) / 2, …)`
+  を直接の出典として確認済み（2026-09-14 時点の `pytorch/pytorch` main
+  ブランチのソースを参照）。`(kernel − 1) · dilation / 2` という単純な
+  floor 式は誤り: 例えば `kernel=2, dilation=1, padding=1`（PyTorch は
+  許可。単純式では上限 `0` となり誤って拒否する）を誤判定する。Max／Avg
+  双方の検査に本式を適用する。境界値の受入例:
+  - `kernel=2, dilation=1, padding=1` → `effective_kernel_size=(2−1)·1+1=2`。
+    上限 `2/2=1` で `padding=1` は上限と等しいため許可。
+  - `kernel=3, dilation=2, padding=2` → `effective_kernel_size=(3−1)·2+1=5`。
+    上限 `5/2=2`（floor）。`padding=2` は上限と等しいため許可、
+    `padding=3` は上限超過のため拒否。
 - 出力長 `≥ 1`。
 - 要素数積は `checked_mul` で計算する（`reduction::max` の
   `ElementCountOverflow` パターンを踏襲）。
@@ -124,20 +129,33 @@
   `Op::Topk` と同じ制約）。
 - adaptive の `output_size ≥ 1`。`output_size ≤ 入力長` は要求しない
   （PyTorch 準拠。窓は §4 の式で自然に定義され拡大側も成立する）。
-- **adaptive の空間軸（`H`／`W`。1d 併合後は `H=1` 固定側を除く `W` 軸）は
-  `≥ 1` を要求し、`0` を `ShapeError` で拒否する**。`start = floor(o *
-  in / out)`・`end = ceil((o + 1) * in / out)`（§4）は `in = 0` のとき
-  常に `start = end = 0` となり `divisor = (end − start) = 0` の 0 除算
-  （`f64` 昇格後の `0.0 / 0.0` で `NaN`。AvgAdaptivePool forward・VJP 双方
-  で発生しうる）を招くため、`Var`／`BackendOps` 両入口で検査する（既存の
-  rank 検査・非 adaptive 系の `kernel ≥ 1`／`stride ≥ 1` 検査と同じ位置に
-  置く）。**バッチ軸 `N=0`・チャンネル軸 `C=0` は本検査の対象外**（空
-  バッチ・空チャンネルは出力も空になるだけで 0 除算を起こさないため拒否
-  しない。区別する理由は、`N`／`C` は縮約対象ではなく縮約窓の外側の走査
-  軸であるのに対し、`H`／`W` は `divisor` の直接の入力である点にある）。
-  非 adaptive の Max／AvgPool（`kernel_size` 固定）も `H=0`／`W=0` では
-  §4 の `pool_out_len` が負分子ゲート（本節上記）で自然に `ShapeError` と
-  なるため、adaptive 専用の追加検査で足りる。
+- **空間軸（`H`／`W`。1d 併合後は `H=1` 固定側を除く `W` 軸）は
+  `≥ 1` を要求し、`0` を `ShapeError` で拒否する。Max／Avg／Adaptive の
+  全 pooling 種別へ一律適用する**（`out_h`／`out_w` を計算する前段で
+  rank 検査の直後に置く）。PyTorch
+  `aten/src/ATen/native/AdaptiveAveragePooling.cpp` の
+  `for (const auto i : {-2, -1}) { TORCH_CHECK(input.size(i) > 0, "…
+  Expected input to have non-zero size for non-batch dimensions …"); }`
+  を出典として確認済み（`H`／`W`〈末尾 2 軸〉のみを検査し `C` は対象外。
+  2026-09-14 時点の `pytorch/pytorch` main ブランチのソースを参照）。
+  **バッチ軸 `N=0`・チャンネル軸 `C=0` は本検査の対象外**（空バッチ・空
+  チャンネルは出力も空になるだけで 0 除算を起こさないため拒否しない。
+  区別する理由は、`N`／`C` は縮約対象ではなく縮約窓の外側の走査軸である
+  のに対し、`H`／`W` は adaptive の `divisor = end − start` の直接の
+  入力である点にある）。
+  - adaptive 側の動機: `start = floor(o * in / out)`・
+    `end = ceil((o + 1) * in / out)`（§4）は `in = 0` のとき常に
+    `start = end = 0` となり `divisor = 0` の 0 除算（`f64` 昇格後の
+    `0.0 / 0.0` で `NaN`。forward・VJP 双方で発生しうる）を招く。
+  - **非 adaptive 側は `padding > 0` のとき §4 の負分子ゲートだけでは
+    不十分**であり本検査が必須: 例えば `in=0, k=2, s=2, p=1, d=1`
+    （`padding` 上限は `effective_kernel_size(2,1)/2=1` で `p=1` は
+    許可される構成）では分子 `0 + 2·1 − 1·(2−1) − 1 = 0` となり負分子
+    ゲートを素通りして `pool_out_len = 0+1 = 1` を返してしまう
+    （padding のみで構成された窓を「有効な出力」として通過させる誤り。
+    `H=0`／`W=0` かつ `padding=0` の場合は従来どおり負分子ゲートでも
+    拒否できるが、本検査を一律適用することで `padding` の値に依存しない
+    単一の判定にする）。
 - `ceil_mode`: **v1 は `false` のみサポート**。`true` を渡した場合は
   `InvalidArgument` で拒否する。PyTorch の「最後の窓は入力または左
   padding 内で始まらなければならない」規則は将来対応の参考として §11 へ
@@ -356,9 +374,12 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
 - 出力長 floor 除算（§4）の負分子拒否: `in=1, k=2, s=2, p=0, d=1` が
   `ShapeError`（出力長 0）として拒否され、ゼロ方向丸めによる誤った出力長
   1 を返さないことを確認する。
-- adaptive の空間軸ゼロ長拒否（§3）: `[N,C,0,W]`／`[N,C,H,0]` が
-  `ShapeError` で拒否されること・`[0,C,H,W]`（空バッチ）は拒否されず
-  出力形状 `[0,C,out_h,out_w]` が得られることを区別して確認する。
+- 空間軸ゼロ長拒否（§3。Max／Avg／Adaptive 一律）: `[N,C,0,W]`／
+  `[N,C,H,0]` が `ShapeError` で拒否されること・`[0,C,H,W]`（空バッチ）
+  は拒否されず出力形状 `[0,C,out_h,out_w]` が得られることを区別して
+  確認する。非 adaptive 側は `padding=0`（負分子ゲート経由）と
+  `padding>0`（`in=0, k=2, s=2, p=1, d=1` のように負分子ゲートを素通り
+  しうる構成。§3）の両方を回帰テストとして固定する。
 - タイ先勝ち: 全要素同値の窓で索引が窓先頭になること。
 - NaN 伝播と最初の NaN 索引・padding 非勝者（索引が常に `[0, H·W)`）。
 - 重なり窓（`stride < kernel`）の重複添字 VJP が `scatter_add` 契約と一致
