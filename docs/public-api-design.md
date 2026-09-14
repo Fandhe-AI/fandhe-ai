@@ -386,6 +386,8 @@ impl Gradients {
 
 `no_grad` 相当（勾配追跡を一時的に止める）は、専用フラグ API を設けず「`Tensor<T>` のまま演算する」ことで表現する。`Tensor<T>` と `Var` は別型であるため、追跡なしの経路を選ぶことはコンパイル時に強制される。
 
+**追補（イシュー #1748）**: 上記は「演算自体をテープに載せない」（PyTorch `torch.no_grad()` コンテキスト相当）ための方針であり、`Var` 自体の型分離方式として不変のまま維持する。これとは別に、「テープに載せたノードを勾配経路から外す」ための機構として `Tape::var_no_grad`（`requires_grad=false` の葉として登録する `Tape::var` の亜種）・`Var::detach`（既存 `Var` を `requires_grad=false` の葉へ変換する）を追加した。両者は独立の軸であり、`no_grad` の意味論は `Tensor<T>` のまま演算する既存方式が引き続き担う。設計・契約の詳細は `docs/autodiff-nograd-leaf-dinput-skip-decision.md` §5「案 B」を参照。
+
 ### 3.1.1 学習ループにおける Tape のライフサイクル（イシュー #1048 で確定）
 
 動的テープ式（Wengert list）では `Tape::var()` を呼ぶたびにノードが
@@ -409,7 +411,9 @@ impl Gradients {
 葉ノードのみを保持したままノード列を切り詰める。`Tape::leaf_count()`
 （保持される葉の個数）・`Tape::leaf(index)`（保持された葉 `index`
 番目を `Var` として再取得。O(1)・コピーなし）と組み合わせ、同一
-`Tape` を毎ステップ使い回せる:
+`Tape` を毎ステップ使い回せる（`Tape::var_no_grad`／`Var::detach`
+〈#1748〉で登録した葉の `requires_grad` フラグも他の葉と同様に
+`reset()` を跨いで保持される）:
 
 1. ステップの外でパラメータ・入力用の `Tape` を 1 回だけ構築し、
    パラメータを `tape.var(&param)` で葉として登録する（この時点では
