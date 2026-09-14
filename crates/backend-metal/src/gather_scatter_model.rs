@@ -200,12 +200,25 @@ pub struct ScatterLaunch {
 /// 起動前検査をカーネル本体から切り離した純関数版（[`validate_gather_launch`]
 /// と同じ理由で Linux 実行可能。イシュー #1799 レビュー指摘）。
 ///
-/// 検査順序・内容は `run_scatter_f32` 本体と同一。`numel_out == 0` の
-/// 場合は早期 `Ok(ScatterLaunch { numel_out: 0, idx_numel: 0 })`
+/// 検査順序・内容は `run_scatter_f32` 本体と同一。`index` の値域検査
+/// （[`validate_index_range`]）は `numel_out == 0` の早期 return
+/// **より前**に行う（`out_shape[dim]` の取得自体は `scatter_out_shape`
+/// が既に `dim < rank` を検査済みのため `numel_out` の値に関わらず
+/// 安全。`validate_index_range` 自体は `index` の実要素を単純走査する
+/// だけで `row_major_strides` 等のストライド計算を伴わないため、
+/// P1〈`numel_out == 0` での `usize` オーバーフロー回避〉の対象外——
+/// P1 が守っている「大きな `index_shape` に対する無検査ストライド積」
+/// は本関数内で一切計算しない。この順序変更前は
+/// `scatter_model(&[], &[0], &[0], &[1], &[1.0], 0, Add)` のように
+/// `numel_out == 0`（空出力）だが `index` に範囲外添字が混じる入力を
+/// 「成功」として受理していた——CPU 参照実装・`BackendOps` 契約
+/// （範囲外添字は常に `IndexOutOfRange`）と不整合だった。Cursor
+/// Bugbot・codex-review P2 指摘。イシュー #1799）。`numel_out == 0`
+/// の場合は早期 `Ok(ScatterLaunch { numel_out: 0, idx_numel: 0 })`
 /// （呼び出し元は空配列を返す）。`idx_numel == 0`（`numel_out` は非 0）
-/// の場合は `index`／`src` の値検査・長さ検証を行わずに返す（呼び出し
-/// 元は `input` の完全なパススルーを返す。Cursor Bugbot・codex-review
-/// P2 指摘）。
+/// の場合は `index`／`src` の長さ検証を行わずに返す（呼び出し元は
+/// `input` の完全なパススルーを返す。Cursor Bugbot・codex-review P2
+/// 指摘〈別件・イシュー #1799 初回レビュー〉）。
 pub fn validate_scatter_launch(
     input: &[f32],
     out_shape: &[usize],
@@ -217,6 +230,9 @@ pub fn validate_scatter_launch(
     validate_shapes_fit_u32(&[out_shape, index_shape])?;
     fandhe_ai_tensor_core::scatter_out_shape(out_shape, index_shape, index_shape, dim)?;
 
+    let dim_size = out_shape[dim];
+    validate_index_range(index, dim, dim_size)?;
+
     let numel_out = checked_numel(out_shape)?;
     if numel_out == 0 {
         return Ok(ScatterLaunch {
@@ -225,9 +241,6 @@ pub fn validate_scatter_launch(
         });
     }
     validate_launch_len(numel_out)?;
-
-    let dim_size = out_shape[dim];
-    validate_index_range(index, dim, dim_size)?;
 
     if input.len() != numel_out {
         return Err(ShapeError::ElementCountMismatch {
@@ -846,6 +859,43 @@ mod tests {
             ShapeError::ElementCountMismatch {
                 expected: 1,
                 actual: 0
+            }
+        );
+    }
+
+    /// codex-review 新規指摘（P2・イシュー #1799 2 回目レビュー）の
+    /// 再現ケースそのもの: `scatter_model(&[], &[0], &[0], &[1], &[1.0],
+    /// 0, ScatterReduce::Add)` は `out_shape=[0]`（空出力）だが
+    /// `index=[0]` が `dim_size=out_shape[0]=0` に対し範囲外
+    /// （`[0, 0)` は空区間なので `0` すら不正）という入力。是正前は
+    /// `numel_out == 0` の早期 return が `validate_index_range` より前に
+    /// あったため、この範囲外添字を検証せず空配列成功として受理して
+    /// いた。是正後は `IndexOutOfRange` を返す（CPU 参照実装・
+    /// `BackendOps` 契約と一致）。
+    #[test]
+    fn scatter_model_validates_index_range_even_for_empty_output() {
+        let err = scatter_model(&[], &[0], &[0], &[1], &[1.0], 0, ScatterReduce::Add).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 0,
+                index: 0,
+                dim_size: 0
+            }
+        );
+    }
+
+    /// [`validate_scatter_launch`] 単体でも同じ挙動になることを確認する
+    /// （`run_scatter_f32` の直接呼び出しも同じ検査を共有するため）。
+    #[test]
+    fn validate_scatter_launch_validates_index_range_even_for_empty_output() {
+        let err = validate_scatter_launch(&[], &[0], &[0], &[1], &[1.0], 0).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 0,
+                index: 0,
+                dim_size: 0
             }
         );
     }

@@ -45,7 +45,7 @@ use crate::context::MetalContext;
 use crate::context_cache;
 use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
-use crate::gather_scatter_model::{validate_index_range, validate_shapes_fit_u32};
+use crate::gather_scatter_model::{GS_MAX_RANK, validate_index_range, validate_shapes_fit_u32};
 use crate::layout::{self, MatrixLayout};
 use crate::memory::{MetalBufferHandle, MetalMemory, map_metal_error};
 use crate::row_kernel::{self, plan_dtype_is_f32};
@@ -2185,6 +2185,26 @@ impl BackendOps for MetalBackendOps {
             .map_err(BackendError::ShapeMismatch)?;
         let in_shape = input.shape().to_vec();
         let index_shape = index.shape().to_vec();
+        // `gather_out_shape` はテンソルとして有効な shape（rank 一致・
+        // 非 dim 軸整合）であることまでしか検査しないため、rank が
+        // カーネルのスタック配列上限（`GS_MAX_RANK`）を超える有効な
+        // テンソルもここまで到達しうる。以前は `validate_shapes_fit_u32`
+        // の `RankMismatch` をそのまま `ShapeMismatch` へ変換していた
+        // ため、shape=[1; 9] のような有効な高階テンソルの gather も
+        // 「shape が不正」として autodiff まで伝播していた（変更前は
+        // ホスト実装〈`Var` 側フォールバック〉へ委譲できていたのに
+        // 委譲できなくなる後退。codex-review 指摘。イシュー #1799）。
+        // カーネル固有の対応上限は入力形状の不正と区別し、`Unsupported`
+        // で返す（呼び出し元がホストフォールバックへ切り替えられる
+        // ようにする）。
+        if in_shape.len() > GS_MAX_RANK || index_shape.len() > GS_MAX_RANK {
+            return Err(BackendError::Unsupported(format!(
+                "gather: rank exceeds Metal kernel limit (GS_MAX_RANK={GS_MAX_RANK}): \
+                 in_shape rank={}, index_shape rank={}",
+                in_shape.len(),
+                index_shape.len()
+            )));
+        }
         validate_shapes_fit_u32(&[&in_shape, &index_shape]).map_err(BackendError::ShapeMismatch)?;
 
         let input_owned = input.contiguous();
@@ -2227,6 +2247,17 @@ impl BackendOps for MetalBackendOps {
         let out_shape = scatter_out_shape(input.shape(), index.shape(), src.shape(), dim)
             .map_err(BackendError::ShapeMismatch)?;
         let index_shape = index.shape().to_vec();
+        // `Self::gather` と同じ理由（カーネル固有の rank 上限は入力形状
+        // の不正と区別し `Unsupported` を返す。codex-review 指摘。
+        // イシュー #1799）。
+        if out_shape.len() > GS_MAX_RANK || index_shape.len() > GS_MAX_RANK {
+            return Err(BackendError::Unsupported(format!(
+                "scatter: rank exceeds Metal kernel limit (GS_MAX_RANK={GS_MAX_RANK}): \
+                 out_shape rank={}, index_shape rank={}",
+                out_shape.len(),
+                index_shape.len()
+            )));
+        }
         validate_shapes_fit_u32(&[&out_shape, &index_shape])
             .map_err(BackendError::ShapeMismatch)?;
 
@@ -3022,6 +3053,51 @@ mod tests {
         assert_eq!(
             gemm_bias_act_route(Some(&[4]), 8),
             GemmBiasActRoute::ComposedFallback
+        );
+    }
+
+    // --- gather／scatter の rank 上限フォールバック（イシュー #1778・
+    // レビュー指摘の是正。イシュー #1799）。ops.rs 内の rank 検査は
+    // Metal コンテキスト取得（`context_cache::cached_context()`）より
+    // 前で早期 return するため、実機（Apple Silicon）非依存で検証
+    // できる（`#[ignore]` 不要）。 ---
+
+    #[test]
+    fn gather_returns_unsupported_for_rank_exceeding_kernel_limit() {
+        // `GS_MAX_RANK + 1` 階のテンソル（例: shape=[1; 9]）は
+        // `gather_out_shape` 自体は受理する有効な shape だが、カーネルの
+        // `thread ulong coords[GS_MAX_RANK]` 上限を超える。`ShapeMismatch`
+        // ではなく `Unsupported` を返し、呼び出し元（`autodiff::grad::
+        // gather_with_fallback`）がホスト参照実装へフォールバックできる
+        // ことを確認する（codex-review 指摘）。
+        let rank = GS_MAX_RANK + 1;
+        let shape = vec![1usize; rank];
+        let input = Tensor::new(vec![1.0f32], &shape).unwrap();
+        let index = Tensor::<i32>::new(vec![0i32], &shape).unwrap();
+
+        let ops = MetalBackendOps::new();
+        let err = ops.gather(&input, 0, &index).unwrap_err();
+        assert!(
+            matches!(err, BackendError::Unsupported(_)),
+            "rank={rank}（GS_MAX_RANK={GS_MAX_RANK} 超過）は Unsupported を返すべき: {err:?}"
+        );
+    }
+
+    #[test]
+    fn scatter_returns_unsupported_for_rank_exceeding_kernel_limit() {
+        let rank = GS_MAX_RANK + 1;
+        let shape = vec![1usize; rank];
+        let input = Tensor::new(vec![1.0f32], &shape).unwrap();
+        let index = Tensor::<i32>::new(vec![0i32], &shape).unwrap();
+        let src = Tensor::new(vec![1.0f32], &shape).unwrap();
+
+        let ops = MetalBackendOps::new();
+        let err = ops
+            .scatter(&input, 0, &index, &src, ScatterReduce::Overwrite)
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::Unsupported(_)),
+            "rank={rank}（GS_MAX_RANK={GS_MAX_RANK} 超過）は Unsupported を返すべき: {err:?}"
         );
     }
 

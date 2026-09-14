@@ -81,6 +81,16 @@
 // そのまま=呼び出し前に確保したバッファの初期値。呼び出し元がゼロ
 // 初期化する〉・scatter=当該要素スキップ）。
 
+#include <metal_stdlib>
+using namespace metal;
+
+// `MetalGatherScatter::new`（`crate::gather_scatter`）が本ファイルを
+// そのまま `newLibraryWithSource_options_error` へ渡して実行時
+// コンパイルするため、`clz`／`as_type` 等の標準ライブラリ関数を
+// 名前空間修飾なしで使うには上記 2 行が必須（`gemm.metal` と同じ
+// 構成。欠落すると全経路が `LibraryCompilation` エラーになる。
+// codex-review 指摘。イシュー #1799）。
+
 // ---- IEEE 754 binary64 逐次加算のソフトウェアエミュレーション ----
 // `crates/backend-metal/src/soft_f64.rs` の逐語移植（`gemm.metal::
 // bias_f64_*` と同一構造。`u64`→`ulong`・`u32`→`uint`・

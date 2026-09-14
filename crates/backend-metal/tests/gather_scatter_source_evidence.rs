@@ -18,6 +18,37 @@ const GATHER_SCATTER_METAL_SOURCE: &str = include_str!("../src/shaders/gather_sc
 /// ドリフト検出に使う）。
 const SOFT_F64_SOURCE: &str = include_str!("../src/soft_f64.rs");
 
+/// `MetalGatherScatter::new`（`crate::gather_scatter`）はソース全文を
+/// そのまま `newLibraryWithSource_options_error` へ渡して実行時
+/// コンパイルするため、`#include <metal_stdlib>`／`using namespace
+/// metal;` の宣言が欠けていると `clz`／`as_type` 等の標準ライブラリ
+/// 関数が名前空間解決できず全経路が `LibraryCompilation` エラーになる
+/// （`gemm.metal` と同じ構成が必須。codex-review 指摘。イシュー #1799）。
+#[test]
+fn source_includes_metal_stdlib_and_namespace() {
+    assert!(
+        GATHER_SCATTER_METAL_SOURCE.contains("#include <metal_stdlib>"),
+        "gather_scatter.metal に `#include <metal_stdlib>` が見つかりません"
+    );
+    assert!(
+        GATHER_SCATTER_METAL_SOURCE.contains("using namespace metal;"),
+        "gather_scatter.metal に `using namespace metal;` が見つかりません"
+    );
+    // `#include` は名前空間宣言より前になければならない（`using
+    // namespace metal;` 単体では `clz`/`as_type` の宣言自体が読み込まれ
+    // ないため）。
+    let include_pos = GATHER_SCATTER_METAL_SOURCE
+        .find("#include <metal_stdlib>")
+        .unwrap();
+    let using_pos = GATHER_SCATTER_METAL_SOURCE
+        .find("using namespace metal;")
+        .unwrap();
+    assert!(
+        include_pos < using_pos,
+        "`#include <metal_stdlib>` は `using namespace metal;` より前に置く"
+    );
+}
+
 #[test]
 fn kernel_names_and_buffer_order_are_declared() {
     assert!(
