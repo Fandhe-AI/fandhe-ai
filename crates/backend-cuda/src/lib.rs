@@ -425,6 +425,9 @@ mod kernels_gather_scatter;
 // `kernels_gather_scatter.rs` と同じ 2 ファイル構成。
 mod constant_pad;
 mod kernels_constant_pad;
+mod kernels_unique;
+mod unique;
+mod unique_model;
 // イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線
 // （`gemm.rs::CudaGemm::new`）を実機で検証する `#[ignore]` テスト。
 // `context_cache`（非公開 `mod`）へ到達する必要があるため

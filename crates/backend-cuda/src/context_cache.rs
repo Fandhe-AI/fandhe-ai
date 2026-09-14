@@ -518,6 +518,21 @@ pub(crate) fn cached_constant_pad(
     })
 }
 
+/// `device` の `CudaContext` に対応する `unique` カーネル
+/// （`unique.rs::CudaUnique`）のコンパイル済みハンドルをプロセス内
+/// キャッシュから取得する（イシュー #1734。`cached_gather_scatter` と
+/// 同型）。
+pub(crate) fn cached_unique(
+    device: &CudaDevice,
+) -> Result<Arc<crate::unique::CudaUnique>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::unique::CudaUnique>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::unique::CudaUnique::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する `op`（[`ScalarUnaryOp`]）の
 /// テンプレート生成カーネルをプロセス内キャッシュから取得する
 /// （イシュー #1700。キーは [`ContextKey`]。`cached_gemm` 冒頭コメント

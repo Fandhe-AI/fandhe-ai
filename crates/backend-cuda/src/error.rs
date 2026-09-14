@@ -124,6 +124,28 @@ pub enum CudaError {
     /// オーバーフローに関する起動前検証の失敗を表す。
     InvalidGatherScatterShape { detail: String },
 
+    /// `unique`（`unique.rs::CudaUnique`）の起動前検証（ホスト側
+    /// 検証）が拒否した入力（イシュー #1734）。`InvalidGatherScatterShape`
+    /// と同じ理由で独立 variant に分離する。要素数が 0 または 1 の
+    /// 自明ケース（早期 return）以外で、`padded`（次の 2 のべき乗）が
+    /// `i32::MAX` を超える、またはホストスライス長が期待長と一致しない
+    /// といった内部契約違反を表す（`ops.rs` は本 variant を
+    /// `BackendError::KernelLaunchFailed` へ写像する——ホスト側検証の
+    /// 失敗であり `UniqueSizeLimitExceeded` とは異なりバックエンド固有
+    /// 上限の超過ではないため）。
+    InvalidUniqueShape { detail: String },
+
+    /// `unique` の対象サイズがバックエンド固有の上限（本実装では
+    /// ビットニックソートに必要な `padded`〈次の 2 のべき乗〉が
+    /// カーネル引数型 `int` の範囲〈`i32::MAX`〉を超える場合）を
+    /// 超過した（イシュー #1734）。`ops.rs::CudaBackendOps::unique` は
+    /// 本 variant のみを [`fandhe_ai_tensor_core::device::BackendError::
+    /// Unsupported`] へ写像し `Var::unique` のホストフォールバック
+    /// （`eval::unique`）へ委ねる（`InvalidUniqueShape`〈内部契約違反〉
+    /// はホストフォールバックへ流さず伝播させる方針との対比。
+    /// `docs/unique-facade-exposure-decision.md` §3.1 参照）。
+    UniqueSizeLimitExceeded { n: usize, limit: usize },
+
     /// f16 WMMA GEMM（`gemm_wmma.rs::CudaWmmaGemm`）が、Tensor Core（WMMA）
     /// の要件を満たさないデバイス上で要求された。
     ///
@@ -468,6 +490,12 @@ impl fmt::Display for CudaError {
             }
             CudaError::InvalidGatherScatterShape { detail } => {
                 write!(f, "invalid gather/scatter shape: {detail}")
+            }
+            CudaError::InvalidUniqueShape { detail } => {
+                write!(f, "invalid unique shape: {detail}")
+            }
+            CudaError::UniqueSizeLimitExceeded { n, limit } => {
+                write!(f, "unique size limit exceeded: n={n} exceeds limit={limit}")
             }
             CudaError::TensorCoreUnsupported { detail } => {
                 write!(f, "tensor core (WMMA) unsupported on this device: {detail}")

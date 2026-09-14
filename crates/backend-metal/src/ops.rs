@@ -2373,6 +2373,48 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::unique` の Metal 実装（イシュー #1734）。
+    /// `x.contiguous()` で稠密化してから `unique.rs::MetalUnique::
+    /// run_unique_f32`（ビットニックソート方式）へ委譲する。契約
+    /// （totalOrder ソート・`==` による重複判定）は
+    /// `fandhe_ai_tensor_core::BackendOps::unique` doc を正とする。
+    ///
+    /// `padded`（次の 2 のべき乗）がカーネル引数の範囲を超える場合は
+    /// `Self::gather`／`scatter` の `GS_MAX_RANK` 超過と同じ設計判断で
+    /// `BackendError::Unsupported` を返す（呼び出し元 `Var::unique` の
+    /// ホストフォールバックへ委ねる。入力形状の不正〈`ShapeMismatch`〉
+    /// とバックエンド固有上限〈`Unsupported`〉を区別する。イシュー
+    /// #1799 レビュー指摘と同型の判断）。
+    fn unique(&self, x: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        // `x.numel()`（内部で無検査の `.iter().product()` を使い
+        // `overflow-checks` 有効ビルドで panic しうる）を呼ぶ前に
+        // 要素数積のオーバーフローを検査する（PR #1828 codex-review
+        // P1 是正。`gather`／`scatter` が使う
+        // `gather_scatter_model::checked_numel` と同一の検査を再利用）。
+        crate::gather_scatter_model::checked_numel(x.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let n = x.numel();
+        if n >= 2 {
+            if let Err(e) = crate::unique_model::checked_padded_len(n) {
+                return Err(BackendError::Unsupported(e.to_string()));
+            }
+        }
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("unique: input not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let u = context_cache::cached_unique(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = u
+            .run_unique_f32(&ctx, x_slice)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let m = out.len();
+        Tensor::new(out, &[m]).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::mse_loss`] の Metal 実装
     /// （イシュー #1045）。`Self::sum`／`Self::max`（汎用 reduction）とは
     /// 独立した専用融合カーネル（`crate::mse::MetalMse`）へのディスパッチ
@@ -3177,6 +3219,30 @@ mod tests {
             matches!(err, BackendError::Unsupported(_)),
             "rank={rank}（GS_MAX_RANK={GS_MAX_RANK} 超過）は Unsupported を返すべき: {err:?}"
         );
+    }
+
+    /// [`MetalBackendOps::unique`] の回帰テスト（PR #1828 codex-review
+    /// P1 是正確認・イシュー #1734）。`gather_returns_unsupported_for_
+    /// rank_exceeding_kernel_limit` 系と同じ「実機に触れる前に早期
+    /// return する」性質を利用し、`[0, 2, usize::MAX]` を
+    /// `transpose(0, 2)` して得た `[usize::MAX, 2, 0]`（中間積
+    /// `usize::MAX * 2` が `usize` の範囲を超えるが最終的な要素数は 0）
+    /// を渡すと、`x.numel()`（内部で無検査の `.iter().product()` を
+    /// 使う）を呼ぶ前に `checked_numel` で拒否し `overflow-checks`
+    /// 有効ビルドでも panic せず型付きエラーを返すことを確認する
+    /// （実機不要・CI Linux でも実行できる）。
+    #[test]
+    fn unique_rejects_transposed_shape_with_overflowing_intermediate_product() {
+        let input_base = Tensor::<f32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let input = input_base.transpose(0, 2).unwrap();
+        assert_eq!(input.shape(), &[usize::MAX, 2, 0]);
+
+        let ops = MetalBackendOps::new();
+        let err = ops.unique(&input).expect_err("overflow must be rejected");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
     }
 
     // --- gemm_resident_lhs／gemm_resident_rhs zero-repack 経路（イシュー

@@ -258,6 +258,17 @@ pub(crate) fn cached_constant_pad(
     get_or_build(cache, on_poison, || MetalConstantPad::new(ctx))
 }
 
+/// `unique` カーネル（`unique.rs::MetalUnique`）のコンパイル済み
+/// パイプラインをプロセス内キャッシュから取得する（イシュー #1734。
+/// `cached_gather_scatter` と同型）。
+pub(crate) fn cached_unique(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::unique::MetalUnique>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::unique::MetalUnique>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::unique::MetalUnique::new(ctx))
+}
+
 pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAllocator>, MetalError> {
     static CACHE: OnceLock<Mutex<Option<Arc<MetalAllocator>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));

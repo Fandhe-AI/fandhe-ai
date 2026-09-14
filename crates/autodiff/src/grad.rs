@@ -363,6 +363,15 @@ pub(crate) fn vjp(
             let da = max_vjp(input_val, dim, out_value, upstream);
             vec![(input, da)]
         }
+        Op::Mean { input, dim } => {
+            // `d(mean)/d(x_i) = 1/n`（`n` は forward〈`Var::mean`〉と
+            // 同じ縮約対象要素数）。`Sum` の VJP（複製）を `n` で割った
+            // ものに等しいため `unreduce_broadcast` を再利用する
+            // （`mean_vjp` 参照）。
+            let input_shape = &nodes[input.0].shape;
+            let da = mean_vjp(upstream, input_shape, dim);
+            vec![(input, da)]
+        }
         Op::MseLoss {
             pred,
             target,
@@ -1677,6 +1686,90 @@ pub(crate) fn topk_with_fallback(
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::topk(input, dim, k, largest, out_shape)?),
         Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Var::unique`] が使う「バックエンド実装 → フォールバック」ヘルパー
+/// （イシュー #1734）。[`gather_with_fallback`] と同型: `ops.unique` →
+/// `Unsupported` のときのみ `eval::unique` へフォールバックし、それ
+/// 以外のエラーは伝播する（判定迂回経路を作らない）。バックエンドが
+/// 返した出力に [`BackendOps::unique`] doc の出力不変条件（rank 1・
+/// `len <= numel`・totalOrder で非減少・隣接に `==` な要素がない）を
+/// 事後検査し、違反は shape 自体の不正（rank／len）は
+/// `AutodiffError::Backend(BackendError::ShapeMismatch(..))`、順序の
+/// 不正（totalOrder 非減少・隣接重複なし）は
+/// `AutodiffError::InvalidArgument(..)` として区別して拒否する
+/// （両者は異なる契約違反であり同一 variant では誤解を招くため。
+/// review 指摘）。3 バックエンド実装が独立に契約を守っているかを
+/// 呼び出し元でも検証する二重検査方針（`.claude/rules/security.md`
+/// A08）。
+pub(crate) fn unique_with_fallback(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    // `x.numel()`（内部で無検査の `.iter().product()` を使い
+    // `overflow-checks` 有効ビルドで panic しうる）・`ops.unique`
+    // （バックエンド実装が内部で `numel()`/`contiguous()` を呼ぶ）を
+    // 呼ぶ前に要素数積のオーバーフローを検査する（PR #1828
+    // codex-review P1 是正: `transpose` 済みの非 contiguous view
+    // （例: `[0, 2, usize::MAX]` → `transpose(0, 2)` → `[usize::MAX,
+    // 2, 0]`）は `Tensor::new`/`transpose` 単体では要素数積を
+    // 再検査しないため到達しうる。`Var::broadcast_to` と同じ自前
+    // `checked_mul` 実装。`tensor-core` は `checked_numel` を非公開に
+    // している）。
+    if x.shape()
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .is_none()
+    {
+        return Err(AutodiffError::Shape(ShapeError::ElementCountOverflow));
+    }
+    let numel = x.numel();
+    let v = match ops.unique(x) {
+        Ok(v) => v,
+        Err(BackendError::Unsupported(_)) => eval::unique(x),
+        Err(other) => return Err(AutodiffError::Backend(other)),
+    };
+    validate_unique_output(&v, numel)?;
+    Ok(v)
+}
+
+/// [`unique_with_fallback`] の出力不変条件検査（[`BackendOps::unique`]
+/// doc の契約を正とする）。rank 1・`len <= numel` に加え、隣接ペアが
+/// totalOrder で非減少（`Ordering::Greater` でない）かつ `==` でない
+/// （NaN は `total_cmp` で `Equal` と判定されても IEEE `==` では
+/// `false` になりうるため両者を併用する。「厳密増加」ではなく
+/// 「非減少 ＋ 隣接 `==` なし」が正しい述語である点に注意——同一 bit の
+/// NaN が隣接して現れうる）ことを検査する。
+fn validate_unique_output(v: &Tensor<f32>, numel: usize) -> Result<(), AutodiffError> {
+    // shape 違反（rank != 1 または len > numel）は真に shape の契約
+    // 違反のため `ShapeMismatch` のまま報告する。一方 totalOrder 順序
+    // 違反（rank・len 自体は正しいのに非減少でない／隣接 `==` が
+    // 混入した）は shape 不一致ではないため `ShapeMismatch` を流用
+    // すると誤解を招く（review 指摘）。`AutodiffError::InvalidArgument`
+    // （`error.rs` doc: 既存 `ShapeError` variant に意味的に適合しない
+    // 契約違反の集約先）で区別して報告する。
+    if v.shape().len() != 1 || v.shape()[0] > numel {
+        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+            ShapeError::ShapeMismatch {
+                lhs: v.shape().to_vec(),
+                rhs: vec![numel],
+            },
+        )));
+    }
+    let data = dense_vec(v);
+    let order_ok = data.windows(2).all(|w| {
+        let (a, b) = (w[0], w[1]);
+        a.total_cmp(&b) != std::cmp::Ordering::Greater && a != b
+    });
+    if order_ok {
+        Ok(())
+    } else {
+        Err(AutodiffError::InvalidArgument(format!(
+            "BackendOps::unique の出力が totalOrder で非減少・隣接 `==` \
+             なしという不変条件に違反している（shape={:?}）",
+            v.shape()
+        )))
     }
 }
 
@@ -3154,6 +3247,31 @@ fn unreduce_broadcast(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>
             }
         }
     }
+}
+
+/// `Mean{input, dim}` の VJP（イシュー #1719）。`d(mean)/d(x_i) = 1/n`
+/// （`n` は forward〈`Var::mean`〉と同じ縮約対象要素数）で、連鎖律
+/// により上流勾配 `g` の各要素を `n` で割ってから
+/// [`unreduce_broadcast`]（`Sum` の VJP＝複製）へ渡せば良い（`Sum` の
+/// VJP を `1/n` でスケールしたものが `Mean` の VJP と一致するため、
+/// 別実装を持たず合成する）。`n == 0` は forward（`Var::mean`）が
+/// 事前に `AutodiffError::InvalidArgument` で拒否しているため
+/// backward 側へは到達しない契約——到達した場合は 0 除算
+/// （`v / 0 == NaN`）を避け `g` を無加工のまま複製する安全側
+/// フォールバックとする（`unreduce_broadcast` 自身の契約違反
+/// フォールバック方針と同じ）。
+fn mean_vjp(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>) -> Tensor<f32> {
+    let n: usize = match dim {
+        None => input_shape.iter().product(),
+        Some(axis) => input_shape.get(axis).copied().unwrap_or(0),
+    };
+    if n == 0 {
+        debug_assert!(false, "mean_vjp: n が 0（契約違反）");
+        return unreduce_broadcast(g, input_shape, dim);
+    }
+    let scaled_data: Vec<f32> = dense_vec(g).into_iter().map(|v| v / n as f32).collect();
+    let scaled = build_tensor(scaled_data, g.shape());
+    unreduce_broadcast(&scaled, input_shape, dim)
 }
 
 /// `Max` の VJP: 出力側勾配 `g` を、縮約軸に沿った最大値の位置のみへ
@@ -6007,6 +6125,37 @@ release ビルドでも検知できるよう `assert!` を使う）"
         }
     }
 
+    /// [`unique_with_fallback`] の回帰テスト（PR #1828 codex-review
+    /// P1 是正確認・イシュー #1734）。`backend-cpu::unique`／
+    /// `backend-cuda::ops::unique`／`backend-metal::ops::unique` の
+    /// 同型回帰テストと同じ手法: `[0, 2, usize::MAX]` を
+    /// `transpose(0, 2)` すると `[usize::MAX, 2, 0]` になり、最終的な
+    /// 要素数は 0 だが中間積 `usize::MAX * 2` が `usize` の範囲を
+    /// 超える。`unique_with_fallback` が `x.numel()`（内部で無検査の
+    /// `.iter().product()` を使う）／`ops.unique(x)`（バックエンド
+    /// 実装が内部で `numel()`/`contiguous()` を呼ぶ）を呼ぶ前に
+    /// 要素数積のオーバーフローを検査し、`overflow-checks` 有効
+    /// ビルドでも panic せず `AutodiffError::Shape(ShapeError::
+    /// ElementCountOverflow)` を返すことを確認する。チェックは
+    /// `ops.unique` 呼び出し前に完了するため `MockOps` の `unique`
+    /// （既定実装。到達しない）には依存しない。
+    #[test]
+    fn unique_with_fallback_rejects_transposed_shape_with_overflowing_intermediate_product() {
+        let input_base = Tensor::<f32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let input = input_base.transpose(0, 2).unwrap();
+        assert_eq!(input.shape(), &[usize::MAX, 2, 0]);
+
+        let mock = MockOps {
+            mul_result: None,
+            add_result: None,
+        };
+        let err = unique_with_fallback(&mock, &input).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
     #[test]
     fn vjp_elementwise_mul_via_false_uses_eval_reference() {
         let g = t(&[1.0, 2.0, 3.0, -4.0], &[2, 2]);
@@ -6698,6 +6847,66 @@ release ビルドでも検知できるよう `assert!` を使う）"
         let dx = masked_fill_vjp(&mask, &g);
 
         assert_eq!(dense_vec(&dx), vec![0.0, 2.0, 0.0, 4.0]);
+    }
+
+    // --- イシュー #1734 review 指摘: `validate_unique_output` の 2
+    // 分岐（`ShapeMismatch`／`InvalidArgument`）を直接検証する。
+    // 3 バックエンドとも契約を守るため通常経路では到達しないが、
+    // 事後検査自体が正しく機能することを踏まえ、バックエンド実装を
+    // 経由せず不変条件検査関数を直接叩いて両分岐を踏む。
+
+    /// rank != 1（2 次元）の出力は shape 自体の契約違反として
+    /// `AutodiffError::Backend(BackendError::ShapeMismatch(..))` を
+    /// 返すことを確認する。
+    #[test]
+    fn validate_unique_output_rejects_wrong_rank() {
+        let v = t(&[1.0, 2.0], &[1, 2]);
+        let err = validate_unique_output(&v, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    /// `len > numel`（入力要素数を超える出力長）も同じく
+    /// `ShapeMismatch` として拒否されることを確認する。
+    #[test]
+    fn validate_unique_output_rejects_len_exceeding_numel() {
+        let v = t(&[1.0, 2.0, 3.0], &[3]);
+        let err = validate_unique_output(&v, 2).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    /// rank・len 自体は正しいが totalOrder で非減少でない（降順が
+    /// 混入した）出力は、shape 違反ではなく
+    /// `AutodiffError::InvalidArgument` として区別して拒否されること
+    /// を確認する。
+    #[test]
+    fn validate_unique_output_rejects_non_monotonic_order() {
+        let v = t(&[3.0, 1.0, 2.0], &[3]);
+        let err = validate_unique_output(&v, 3).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// 非減少ではあるが隣接に `==`（重複）が残る出力も
+    /// `InvalidArgument` として拒否されることを確認する（`unique` は
+    /// 重複除去済みでなければならない）。
+    #[test]
+    fn validate_unique_output_rejects_adjacent_duplicate() {
+        let v = t(&[1.0, 2.0, 2.0, 3.0], &[4]);
+        let err = validate_unique_output(&v, 4).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// 契約を満たす出力（非減少・重複なし・len <= numel）は
+    /// 受理されることを確認する（両分岐が誤検出しないことの対照）。
+    #[test]
+    fn validate_unique_output_accepts_valid_output() {
+        let v = t(&[1.0, 2.0, 3.0], &[3]);
+        assert!(validate_unique_output(&v, 5).is_ok());
     }
 
     // --- WideFloat（cumprod VJP のオーバーフロー安全アキュムレータ。

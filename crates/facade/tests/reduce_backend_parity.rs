@@ -11,6 +11,19 @@
 //! ```sh
 //! cargo test -p fandhe-ai --release --test reduce_backend_parity -- --ignored --nocapture
 //! ```
+//!
+//! イシュー #1719（親 #1601「Phase 2（Tier 1）」）で `Var::mean`／
+//! `sum_dims`／`max_dims`／`mean_dims`（複数軸・`keepdim` 対応の縮約）
+//! を追加した際、本ファイルへ以下を追補した:
+//! - (f) `Var::mean` が `fandhe_ai_backend_cpu::reduction::mean` と
+//!   **bit 一致**すること（forward 側の「`sum` の結果を 1 回だけ除算
+//!   する」丸め規律が合成実装〈`tape::Op::Mean`〉と参照実装の両方で
+//!   同一であることの直接確認）。
+//! - (g) `sum_dims`／`max_dims`／`mean_dims` の CPU 解析値突合
+//!   （複数軸・`keepdim`）。
+//! - (h) `#[ignore]` CUDA 実機 parity（`sum_dims`／`max_dims`／
+//!   `mean_dims`。Metal は `sum`／`max` 自体が `Unsupported`
+//!   〈TASK-1.9c スコープ外〉のため対象外のまま）。
 
 use fandhe_ai::{Device, Tensor, tape_for};
 
@@ -90,6 +103,82 @@ fn cpu_max_axis_forward_and_backward_match_analytic_values() {
     assert_eq!(dense_vec(da), vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
 }
 
+/// (f) `Var::mean`（全軸・単一軸）が `fandhe_ai_backend_cpu::
+/// reduction::mean`（参照実装）と**bit 一致**することを確認する
+/// （イシュー #1719）。forward（`tape::Op::Mean`）は「`sum` の結果を
+/// ホスト側で 1 回だけ除算する」合成実装であり、`reduction::mean` も
+/// 同じ丸め規律（`sum` の後に 1 回だけ除算）のため理論上 bit 一致する。
+#[test]
+fn cpu_mean_matches_reduction_mean_bit_exact() {
+    let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let shape = [2usize, 3];
+    for dim in [None, Some(0usize), Some(1usize)] {
+        let tape = tape_for(Device::Cpu).unwrap();
+        let a = tape.var(&tensor(data.clone(), &shape));
+        let got = a.mean(dim).unwrap().to_tensor();
+
+        let reference =
+            fandhe_ai_backend_cpu::reduction::mean(&tensor(data.clone(), &shape), dim).unwrap();
+        assert_eq!(
+            dense_vec(&got),
+            dense_vec(&reference),
+            "mean(dim={dim:?}) が reduction::mean と bit 一致しない"
+        );
+    }
+}
+
+/// (g) `sum_dims`／`max_dims`／`mean_dims`（複数軸・`keepdim`）の CPU
+/// 解析値突合（イシュー #1719）。shape `[2, 3, 4]` の `dims=[0, 2]` は
+/// kept 軸 `[1]` が縮約軸の間に挟まる非連続ケース（`permute` 必須）。
+#[test]
+fn cpu_sum_max_mean_dims_match_analytic_values() {
+    let data: Vec<f32> = (0..24).map(|v| v as f32).collect();
+    let shape = [2usize, 3, 4];
+    let dims = [0usize, 2usize];
+
+    // dims=[0,2] を手計算した解析値（kept 軸 1 の各要素につき、
+    // 軸 0（サイズ 2）× 軸 2（サイズ 4）＝8 要素を縮約）。
+    // 総和は `Σ_{i,k} data[i,j,k]`（j 固定）。
+    let expected_sum = [
+        // j=0: index (i,0,k) for i in 0..2, k in 0..4
+        // i=0: 0,1,2,3 / i=1: 12,13,14,15 → sum=60
+        60.0, // j=1: i=0: 4,5,6,7 / i=1: 16,17,18,19 → sum=92
+        92.0, // j=2: i=0: 8,9,10,11 / i=1: 20,21,22,23 → sum=124
+        124.0,
+    ];
+
+    let tape = tape_for(Device::Cpu).unwrap();
+    let a = tape.var(&tensor(data.clone(), &shape));
+
+    let sum_squeezed = a.sum_dims(&dims, false).unwrap();
+    assert_eq!(sum_squeezed.to_tensor().shape(), &[3]);
+    assert_eq!(dense_vec(&sum_squeezed.to_tensor()), expected_sum);
+
+    let a2 = tape.var(&tensor(data.clone(), &shape));
+    let sum_keepdim = a2.sum_dims(&dims, true).unwrap();
+    assert_eq!(sum_keepdim.to_tensor().shape(), &[1, 3, 1]);
+    assert_eq!(dense_vec(&sum_keepdim.to_tensor()), expected_sum);
+
+    let a3 = tape.var(&tensor(data.clone(), &shape));
+    let max_squeezed = a3.max_dims(&dims, false).unwrap();
+    // j=0: max(0,1,2,3,12,13,14,15)=15 / j=1: max(...)=19 / j=2: max(...)=23
+    assert_eq!(dense_vec(&max_squeezed.to_tensor()), vec![15.0, 19.0, 23.0]);
+
+    let a4 = tape.var(&tensor(data, &shape));
+    let mean_squeezed = a4.mean_dims(&dims, false).unwrap();
+    let count = (2 * 4) as f32;
+    let expected_mean: Vec<f32> = expected_sum.iter().map(|v| v / count).collect();
+    assert_eq!(dense_vec(&mean_squeezed.to_tensor()), expected_mean);
+
+    // 勾配経路も壊れていないことを確認する（合計 loss へ集約し backward）。
+    let a5 = tape.var(&tensor((0..24).map(|v| v as f32).collect(), &shape));
+    let loss = a5.sum_dims(&dims, false).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let da = grads.get(&a5).unwrap().expect("a5 は loss に到達する");
+    // sum_dims の勾配は縮約対象軸全体へ 1 を複製するだけ（sum の VJP と同じ）。
+    assert_eq!(dense_vec(da), vec![1.0; 24]);
+}
+
 /// (e) `tape_for(Device::Cuda(0))` の `Var::sum`／`Var::max`（全軸・単一
 /// 軸）forward／backward が CPU tape と REQ-2 統一複合判定で一致する
 /// ことを確認する（実機必須）。
@@ -163,6 +252,124 @@ fn cuda_sum_and_max_forward_and_backward_match_cpu_tape_on_real_device() {
             .unwrap()
             .expect("a は loss に到達する");
         assert_parity_tensors(cuda_da, cpu_da, &format!("max backward: dim={dim:?}"));
+    }
+}
+
+/// (h) `tape_for(Device::Cuda(0))` の `sum_dims`／`max_dims`／
+/// `mean_dims`（複数軸・非連続 `dims`）forward／backward が CPU tape
+/// と REQ-2 統一複合判定で一致することを確認する（実機必須。イシュー
+/// #1719）。`merge_for_reduction`（`crate::reduce_dims`）が経由する
+/// `permute`／`contiguous`／`reshape` は 3 バックエンドとも既存実装
+/// （イシュー #1597／#1598／#1620）のため、本テストは主に併合後の単一
+/// 軸 `sum`／`max` 呼び出しが CUDA 実機でも一致することの確認になる。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_sum_max_mean_dims_forward_and_backward_match_cpu_tape_on_real_device() {
+    let data = {
+        // (e) と同じ決定的疑似乱数（Xorshift64Star。U[-0.5, 0.5)）。
+        let mut state = 0x0fed_cba9_8765_4321u64;
+        (0..24)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                ((state >> 11) as f64 / (1u64 << 53) as f64) as f32 - 0.5
+            })
+            .collect::<Vec<f32>>()
+    };
+    let shape = [2usize, 3, 4];
+    let dims = [0usize, 2usize]; // kept=[1]（非連続。permute 必須）
+
+    for keepdim in [false, true] {
+        let cpu_tape = tape_for(Device::Cpu).unwrap();
+        let cpu_a = cpu_tape.var(&tensor(data.clone(), &shape));
+        let cuda_tape = tape_for(Device::Cuda(0))
+            .expect("CUDA device 0 must be available on ignored test runner");
+        let cuda_a = cuda_tape.var(&tensor(data.clone(), &shape));
+
+        // sum_dims
+        let cpu_sum = cpu_a.sum_dims(&dims, keepdim).unwrap();
+        let cuda_sum = cuda_a.sum_dims(&dims, keepdim).unwrap();
+        assert_parity_tensors(
+            &cuda_sum.to_tensor(),
+            &cpu_sum.to_tensor(),
+            &format!("sum_dims forward: keepdim={keepdim}"),
+        );
+        let cpu_grads = cpu_tape.backward(&cpu_sum).unwrap();
+        let cuda_grads = cuda_tape.backward(&cuda_sum).unwrap();
+        let cpu_da = cpu_grads
+            .get(&cpu_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+        let cuda_da = cuda_grads
+            .get(&cuda_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+        assert_parity_tensors(
+            cuda_da,
+            cpu_da,
+            &format!("sum_dims backward: keepdim={keepdim}"),
+        );
+
+        // max_dims
+        let cpu_tape = tape_for(Device::Cpu).unwrap();
+        let cpu_a = cpu_tape.var(&tensor(data.clone(), &shape));
+        let cuda_tape = tape_for(Device::Cuda(0))
+            .expect("CUDA device 0 must be available on ignored test runner");
+        let cuda_a = cuda_tape.var(&tensor(data.clone(), &shape));
+
+        let cpu_max = cpu_a.max_dims(&dims, keepdim).unwrap();
+        let cuda_max = cuda_a.max_dims(&dims, keepdim).unwrap();
+        assert_parity_tensors(
+            &cuda_max.to_tensor(),
+            &cpu_max.to_tensor(),
+            &format!("max_dims forward: keepdim={keepdim}"),
+        );
+        let cpu_grads = cpu_tape.backward(&cpu_max).unwrap();
+        let cuda_grads = cuda_tape.backward(&cuda_max).unwrap();
+        let cpu_da = cpu_grads
+            .get(&cpu_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+        let cuda_da = cuda_grads
+            .get(&cuda_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+        assert_parity_tensors(
+            cuda_da,
+            cpu_da,
+            &format!("max_dims backward: keepdim={keepdim}"),
+        );
+
+        // mean_dims
+        let cpu_tape = tape_for(Device::Cpu).unwrap();
+        let cpu_a = cpu_tape.var(&tensor(data.clone(), &shape));
+        let cuda_tape = tape_for(Device::Cuda(0))
+            .expect("CUDA device 0 must be available on ignored test runner");
+        let cuda_a = cuda_tape.var(&tensor(data.clone(), &shape));
+
+        let cpu_mean = cpu_a.mean_dims(&dims, keepdim).unwrap();
+        let cuda_mean = cuda_a.mean_dims(&dims, keepdim).unwrap();
+        assert_parity_tensors(
+            &cuda_mean.to_tensor(),
+            &cpu_mean.to_tensor(),
+            &format!("mean_dims forward: keepdim={keepdim}"),
+        );
+        let cpu_grads = cpu_tape.backward(&cpu_mean).unwrap();
+        let cuda_grads = cuda_tape.backward(&cuda_mean).unwrap();
+        let cpu_da = cpu_grads
+            .get(&cpu_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+        let cuda_da = cuda_grads
+            .get(&cuda_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+        assert_parity_tensors(
+            cuda_da,
+            cpu_da,
+            &format!("mean_dims backward: keepdim={keepdim}"),
+        );
     }
 }
 

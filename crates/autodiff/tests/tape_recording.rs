@@ -875,7 +875,69 @@ fn sort_topk_record_single_node_and_argsort_records_none() {
     );
 }
 
-/// 33. `pad`（イシュー #1756）が 1 ノードのみ追加する `push_eager`
+/// 32. `unique`（イシュー #1734）が新規ノードを一切 tape に記録
+///     しないこと（非微分・detached な `Tensor<f32>` を返す契約。
+///     `docs/unique-facade-exposure-decision.md`）を検証する。
+///     `gather`／`scatter` が「1 ノード追加」であるのに対し
+///     `unique` は「0 ノード追加」であることを明示的に確認する。
+#[test]
+fn unique_does_not_record_a_tape_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3.0, 1.0, 2.0, 1.0, -0.0, 0.0], &[6]));
+
+    let before = tape.len();
+    let out = x.unique().unwrap();
+    assert_eq!(
+        tape.len(),
+        before,
+        "unique は非微分演算のため tape ノードを追加しないはず"
+    );
+    // totalOrder ソート・隣接重複除去（`-0.0`/`+0.0` は同一視され
+    // 先頭側の `-0.0` が代表として残る）: [-0.0, 1.0, 2.0, 3.0]
+    assert_eq!(out.shape(), &[4]);
+    let data = out.as_slice().expect("unique の出力は contiguous のはず");
+    assert_eq!(data[0].to_bits(), (-0.0f32).to_bits());
+    assert_eq!(data[1], 1.0);
+    assert_eq!(data[2], 2.0);
+    assert_eq!(data[3], 3.0);
+}
+
+/// `unique` の NaN 保持契約（`NaN != NaN` のためすべて保持される。
+/// `f32::total_cmp` による決定的な順序）を検証する。
+#[test]
+fn unique_preserves_all_nan_bit_patterns() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let nan1 = f32::NAN;
+    let nan2 = f32::from_bits(f32::NAN.to_bits() | 1);
+    let x = tape.var(&t(vec![nan1, 1.0, nan2, -nan1], &[4]));
+
+    let out = x.unique().unwrap();
+    assert_eq!(out.shape(), &[4]);
+    let data = out.as_slice().expect("unique の出力は contiguous のはず");
+    // totalOrder: -NaN 系（符号 bit 1）が先頭、+NaN 系（符号 bit 0）が
+    // 末尾。1.0 はその中間。4 要素すべて重複除去されず残る。
+    assert_eq!(data.len(), 4);
+    let mut sorted_bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
+    let mut expected_bits: Vec<u32> = [nan1, nan2, 1.0, -nan1]
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
+    sorted_bits.sort_unstable();
+    expected_bits.sort_unstable();
+    assert_eq!(sorted_bits, expected_bits);
+}
+
+/// `unique` の空入力契約（`numel == 0` → shape `[0]`）を検証する。
+#[test]
+fn unique_empty_input_returns_shape_zero() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(Vec::<f32>::new(), &[2, 0]));
+
+    let out = x.unique().unwrap();
+    assert_eq!(out.shape(), &[0]);
+}
+
+/// 35. `pad`（イシュー #1756）が 1 ノードのみ追加する `push_eager`
 ///     （実体化済み）ノードとして記録されることを検証する
 ///     （`Op::Gather`／`Op::Scatter` と同型。view ノードではない）。
 #[test]
