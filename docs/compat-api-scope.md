@@ -218,7 +218,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | Embedding | #1604 |
 | MultiheadAttention | #1605 |
 | Conv1d／Conv2d | #1606 |
-| Pooling | #1607 |
+| Pooling | #1607（設計記録 #1727。`docs/pooling-ops-design.md`。実装は #1728〈CPU〉・#1729〈CUDA〉・#1730〈Metal〉） |
 | 損失（BCE／NLL／Huber／KLDiv） | #1609 |
 | optimizer（Adam／RMSprop／Adagrad／LAMB） | #1610 |
 | scheduler（Cosine／Exponential／Plateau／OneCycle） | #1611 |
