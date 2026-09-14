@@ -491,6 +491,57 @@ pub fn scatter_out_shape(
     Ok(input_shape.to_vec())
 }
 
+/// `pad`（`Var::pad`。`torch.nn.functional.pad(mode='constant')` 相当。
+/// イシュー #1756）の出力 shape を検査・計算する。各軸を
+/// `(before, after)` だけ定数値で拡張する（負パディング・
+/// `reflect`／`replicate` モードは対象外。`docs/compat-feature-gap.md`
+/// 追補参照）。
+///
+/// - `pads.len() != shape` の rank の場合 `ShapeError::RankMismatch`
+///   （`expected`=`shape` の rank・`actual`=`pads.len()`）。rank 0
+///   （`shape` が空・`pads` も空）は恒等（空 `Vec` を返す）。
+/// - 各軸で `shape[axis] + before + after` を `checked_add` で 2 回
+///   検査し、オーバーフローする場合 `ShapeError::ElementCountOverflow`。
+/// - 最後に `checked_numel_for::<f32>`（`crate::tensor`。`randn`/`rand`
+///   等が使う単一情報源と同じ検査）で出力要素数積の `usize`
+///   オーバーフローに加え、`f32` で確保した場合のバイトサイズが
+///   `Vec` の allocation 上限（`isize::MAX` バイト）に収まるかも
+///   検査する。全バックエンド（CPU／CUDA／Metal／`autodiff::eval`）は
+///   `Tensor<f32>` を確保するため出力バッファは常に `f32` 単位であり、
+///   `checked_numel` 単体（`usize` 要素数積のみの検査）では
+///   `shape=[1]`・`pads=[(0, usize::MAX-1)]` のように要素数自体は
+///   オーバーフローしない shape を通過させてしまい、後続の
+///   `Vec::with_capacity(numel)` が `numel * size_of::<f32>() >
+///   isize::MAX` で capacity overflow パニックする（本番経路 panic
+///   禁止規約 `.claude/rules/coding-rust.md` に反する DoS 経路。
+///   `checked_numel_for` の doc と同じ理由。イシュー #1756・
+///   PR #1831 codex-review P1 是正）。
+///
+/// `pads` の各要素は先頭次元から順に対応する（PyTorch `F.pad` の
+/// 「末尾次元から逆順の平坦リスト」とは異なる意図的な設計。
+/// `docs/compat-feature-gap.md` 追補参照）。
+pub fn pad_out_shape(shape: &[usize], pads: &[(usize, usize)]) -> Result<Vec<usize>, ShapeError> {
+    let rank = shape.len();
+    if pads.len() != rank {
+        return Err(ShapeError::RankMismatch {
+            expected: rank,
+            actual: pads.len(),
+        });
+    }
+    let mut out = Vec::with_capacity(rank);
+    for (&s, &(before, after)) in shape.iter().zip(pads.iter()) {
+        let with_before = s
+            .checked_add(before)
+            .ok_or(ShapeError::ElementCountOverflow)?;
+        let total = with_before
+            .checked_add(after)
+            .ok_or(ShapeError::ElementCountOverflow)?;
+        out.push(total);
+    }
+    checked_numel_for::<f32>(&out)?;
+    Ok(out)
+}
+
 /// `sort`（`Var::sort`／`argsort`。`torch.sort` 相当。イシュー #1733）の
 /// 出力 shape を検査する。sort は `dim` 軸のみを並べ替える純粋な
 /// 並べ替えであり、出力 shape は `shape` と恒等（`gather` と異なり
@@ -1353,6 +1404,72 @@ mod tests {
         // dim 以外の軸で index が input より小さいのは許容（PyTorch の
         // `index.size(d) <= input.size(d)` 契約と整合）。
         let out = scatter_out_shape(&[3, 4], &[2, 2], &[2, 2], 1).unwrap();
+        assert_eq!(out, vec![3, 4]);
+    }
+
+    // --- pad_out_shape ---
+
+    #[test]
+    fn pad_out_shape_1d_basic() {
+        let out = pad_out_shape(&[3], &[(1, 2)]).unwrap();
+        assert_eq!(out, vec![6]);
+    }
+
+    #[test]
+    fn pad_out_shape_2d_both_axes() {
+        let out = pad_out_shape(&[3, 4], &[(1, 1), (2, 0)]).unwrap();
+        assert_eq!(out, vec![5, 6]);
+    }
+
+    #[test]
+    fn pad_out_shape_rank_mismatch() {
+        let err = pad_out_shape(&[3, 4], &[(1, 1)]).unwrap_err();
+        match err {
+            ShapeError::RankMismatch { expected, actual } => {
+                assert_eq!(expected, 2);
+                assert_eq!(actual, 1);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pad_out_shape_before_overflow() {
+        let err = pad_out_shape(&[usize::MAX], &[(1, 0)]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    #[test]
+    fn pad_out_shape_after_overflow() {
+        // before 側は加算できるが after 側の加算でオーバーフローする
+        // ケースを個別に検証する（2 回の checked_add の両方を通す）。
+        let err = pad_out_shape(&[usize::MAX - 1], &[(1, 1)]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    #[test]
+    fn pad_out_shape_rank_zero_identity() {
+        let out = pad_out_shape(&[], &[]).unwrap();
+        assert_eq!(out, Vec::<usize>::new());
+    }
+
+    #[test]
+    fn pad_out_shape_rejects_byte_size_overflow_without_numel_overflow() {
+        // `shape=[1]`・`pads=[(0, usize::MAX-1)]` は `usize` の要素数積
+        // （`checked_numel`）としてはオーバーフローしない
+        // （`1 + (usize::MAX-1) = usize::MAX`）が、`f32`（4 バイト）で
+        // 確保すると `numel * 4` が `isize::MAX` バイトを大幅に超える。
+        // `checked_numel_for::<f32>` によるバイトサイズ検査がなければ
+        // ここを通過し、後続の `Vec::with_capacity` が capacity
+        // overflow で panic する（PR #1831 codex-review P1 是正の
+        // 回帰テスト）。
+        let err = pad_out_shape(&[1], &[(0, usize::MAX - 1)]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    #[test]
+    fn pad_out_shape_all_zero_pads_is_identity() {
+        let out = pad_out_shape(&[3, 4], &[(0, 0), (0, 0)]).unwrap();
         assert_eq!(out, vec![3, 4]);
     }
 
