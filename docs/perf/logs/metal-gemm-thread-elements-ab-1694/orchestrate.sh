@@ -75,8 +75,8 @@ run_gate() {
         echo "[dry-run] gate: R0 -> R1 -> R2 -> R3（失敗したら打ち切り）"
         echo "[dry-run]   R0 (probe)                  -> $GATE_LOG_DIR/probe_run.log"
         echo "[dry-run]     cargo test -p fandhe-ai-backend-metal --release --lib gemm::tests::te_layout_probe_matches_model -- --ignored --nocapture --test-threads=1"
-        echo "[dry-run]   R1 (parity, 外部テスト)      -> $GATE_LOG_DIR/parity_run.log"
-        echo "[dry-run]     cargo test -p fandhe-ai-backend-metal --release --test gemm_te_parity -- --ignored --nocapture --test-threads=1"
+        echo "[dry-run]   R1 (parity, 外部テスト。R2/R3 は --skip で除外) -> $GATE_LOG_DIR/parity_run.log"
+        echo "[dry-run]     cargo test -p fandhe-ai-backend-metal --release --test gemm_te_parity -- --ignored --nocapture --test-threads=1 --skip te_rejects_non_staged_candidate --skip te_bit_match_with_production_dispatch_auto"
         echo "[dry-run]   R1 (all_staged_candidates)   -> $GATE_LOG_DIR/all_staged_candidates_run.log"
         echo "[dry-run]     cargo test -p fandhe-ai-backend-metal --release --lib gemm::tests::all_staged_candidates_match_te_cpu_reference_512_nn -- --ignored --nocapture --test-threads=1"
         echo "[dry-run]   R2 (非 staged 拒否・R3 に含めて外部テスト側で実行済み)"
@@ -99,8 +99,18 @@ run_gate() {
     }
 
     echo "gate: R1 (parity, 外部テスト) を実行する"
+    # R2（te_rejects_non_staged_candidate）・R3（
+    # te_bit_match_with_production_dispatch_auto）は同じ `gemm_te_parity`
+    # バイナリに同居するが、事前登録判定規則（§7.1 規則 1）は R1 FAIL と
+    # R2/R3 FAIL を区別して扱う（R1 FAIL は REJECT 確定・R2/R3 FAIL は
+    # 機構契約の不成立として記録し性能 A/B は参考値扱い）ため、`--skip`
+    # で明示的に除外し R1 相当のテストのみを対象にする（codex-review・
+    # Cursor Bugbot 指摘。イシュー #1694 PR レビュー是正）。R2/R3 は本関数
+    # 後段で個別に実行する。
     cargo test -p fandhe-ai-backend-metal --release --test gemm_te_parity \
         -- --ignored --nocapture --test-threads=1 \
+        --skip te_rejects_non_staged_candidate \
+        --skip te_bit_match_with_production_dispatch_auto \
         > "$GATE_LOG_DIR/parity_run.log" 2>&1 || {
         STATUS=$?
         echo "gate: R1 (parity) が失敗した（status=${STATUS}）。${GATE_LOG_DIR}/parity_run.log を確認する。R1 FAIL のため後続（R2〜R3）は実行しない" >&2

@@ -85,10 +85,13 @@
    `orchestrate.sh` は計測開始前に当該 run 番号の既存成果物を検出すると
    何も書かずに非ゼロ終了する（同番号の同時実行もロックで拒否する）。
 
-4. 集計する:
+4. 集計する（`--gate-dir` は手順 2 で `orchestrate.sh gate` が残した
+   R0〜R3 ログのディレクトリを指す。省略・不在の場合は前提ゲート未確認
+   として総合判定が必ず undetermined になる）:
 
    ```sh
-   python3 aggregate.py kernel_gpu_te_ab_run1.log kernel_gpu_te_ab_run2.log \
+   python3 aggregate.py --gate-dir ../metal-gemm-thread-elements-1693 \
+     kernel_gpu_te_ab_run1.log kernel_gpu_te_ab_run2.log \
      kernel_gpu_te_ab_run3.log kernel_gpu_te_ab_run4.log \
      kernel_gpu_te_ab_run5.log > aggregate.md
    ```
