@@ -1,0 +1,32 @@
+# イシュー #1590 実測記入欄（GB10 実機セッションが埋める）
+#
+# 本 PR 時点では未実測（本エージェント実行環境に DGX Spark GB10 実機への
+# 到達手段がないため）。値を捏造しない。README.md「GB10 実機での実行
+# 手順」に従って実測したセッションが下記を埋めること。
+
+before_sha: 82058501
+after_sha: ab0b77d0
+head_sha:
+
+# R1（#[ignore] 群非後退。README「対象テスト」節）
+r1_result:
+
+# 正式補助 A/B（gemm_transposed_perf・5 プロセス起動・after ツリー）
+aux_ab_5launch_nt_m64_k784_n256:
+aux_ab_5launch_nt_m64_k256_n10:
+aux_ab_5launch_nt_m1024_k1024_n1024:
+aux_ab_5launch_nt_m2048_k2048_n2048:
+aux_ab_5launch_tn_m64_k784_n256:
+aux_ab_5launch_tn_m64_k256_n10:
+aux_ab_5launch_tn_m1024_k1024_n1024:
+aux_ab_5launch_tn_m2048_k2048_n2048:
+
+# Tier 1（train size=64。fresh／reuse 両方が判定対象）
+tier1_load_gate_mode:
+tier1_ratio_fresh_step_total:
+tier1_ratio_reuse_step_total:
+checksum_exact_match_fresh:
+checksum_exact_match_reuse:
+
+# 総合判定
+ab_verdict:

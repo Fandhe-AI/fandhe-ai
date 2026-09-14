@@ -704,9 +704,9 @@ dispatch-design.md`）。表の各行自体は変更しない（本イシュー�
   した別機構であり、本イシューはそれらのシグネチャ・挙動を変更していな
   い（独立性は `crates/autodiff/src/nn/linear.rs::tests::
   linear_new_is_unaffected_by_global_manual_seed_state` で機構的に固定）。
-- **実際の乱数テンソル生成（`randn`／`rand`／`randint`）自体は未実装の
-  まま**（#1725 のスコープ）。`arange`／`linspace`／`eye`／`zeros_like`／
-  `ones_like` も未実装のまま（#1726 のスコープ）。
+- 実際の乱数テンソル生成（`randn`／`rand`／`randint`）自体は #1725 で
+  実装済み（下記「追補（イシュー #1725）」参照）。`arange`／`linspace`／
+  `eye`／`zeros_like`／`ones_like` は未実装のまま（#1726 のスコープ）。
 - facade 新規公開面: `pub fn manual_seed`（新規）。内部型・アクセサは
   facade へ露出させない（`crates/facade/tests/api_surface.rs::
   facade_does_not_expose_rng_internal_types` で機械検査）。
@@ -867,6 +867,33 @@ facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_bi
   再公開）は同じ publish 前提を共有するため blocked のまま close しない
   （`docs/facade-onnx-import-exposure-decision.md` §6.2）。
 
+## 追補（イシュー #1725）
+
+上記「追補（イシュー #1724）」が未実装のまま残していた実際の乱数テンソル
+生成（`randn`／`rand`／`randint`。`§2.1`「乱数生成と RNG 契約」の残対象）
+を実装した。設計・実装記録は `docs/rng-global-contract-design.md` §10。
+
+- 実装した API: `fandhe_ai::{randn(shape), rand(shape), randint(low,
+  high, shape)}`（実体は `tensor-core::rng`。`autodiff` は素通しのみ）。
+  `manual_seed` が設定したプロセスグローバル決定的 RNG をホスト側だけで
+  消費し（`BackendOps` 非経由）、返る `Tensor` は既存の `Tape::var` で
+  任意デバイスへアップロードする（#1602 本文の設計方針どおり）。
+- `Op`／`BackendOps`／VJP は追加していない（乱数生成は微分不能な葉値
+  であり `torch.randn` にも勾配は無いため。受け入れ条件テンプレの
+  「Op／BackendOps／VJP」項は本イシューでは非適用）。
+- `randint` の dtype は `i32`（PyTorch 既定の int64 とは異なる意図的な
+  差異。index／targets 型契約に合わせた）。
+- facade 新規公開面: `pub fn randn`／`rand`／`randint`（新規）・
+  `pub use ...::RngError`（`randint` の戻り値型。1 行の再エクスポート）。
+  内部型・アクセサ（`Xorshift64Star`・`with_global_rng`）は引き続き
+  facade へ露出させない（`facade_does_not_expose_rng_internal_types` で
+  機械検査）。
+- 対象外: `arange`／`linspace`／`eye`／`zeros_like`／`ones_like`
+  （#1726）・`randn_like`／`rand_like`／`normal`／`uniform_`／
+  `bernoulli`／`multinomial`／`randperm`・非グローバル RNG（`torch.
+  Generator` 相当）・CUDA／Metal デバイス側乱数カーネル・`nn::Dropout`
+  （#1603）・`randint` の int64 版。
+
 **#1773 追記（ONNX export の op 逆マッピング）**: `onnx-interop` 内部
 （`crate::onnx::export_ops`）に `interp.rs` 対応 22 op すべての逆マッピング
 （`ExportOp` -> `NodeProto`。op_type・入力順・属性 name/type/既定値）を実装した
@@ -874,6 +901,15 @@ facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_bi
 `check_exportable`（layer B。allowlist・既定 opset の fail-closed 検査）を
 経由するよう変更済み。`onnx-interop` は crates.io 非公開クレートであり facade
 新規公開面はなし（#1775 の判断は本追補の対象外のまま変わらない）。
+
+**#1774 追記（ONNX import→export→import の roundtrip 構造一致テスト）**:
+`crates/onnx-interop/tests/onnx_export_roundtrip.rs` に、import -> export ->
+import の総合 roundtrip（構造一致・bit 同一）・`interp::run` 結果の bit 同一・
+未対応 op を含むモデルの fail-closed（`ExportError::UnsupportedOp`）を固定する
+テストを追加した（`docs/onnx-export-op-mapping.md` §6）。テスト追加のみで
+`onnx-interop` 本番コード（`export.rs`／`export_ops.rs`／`graph.rs`／
+`interp.rs`）は無変更・facade 新規公開面はなし（#1775 の判断は本追補の対象外の
+まま変わらない）。
 
 ## #1705 の追補
 
