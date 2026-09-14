@@ -38,8 +38,15 @@
 //! 追加した。`Module` trait は実装しない（`embedding.rs` モジュール
 //! doc 参照。id 入力の型が `Module::forward` の f32 `Var` 契約と
 //! 一致しないうえ、`compat::Sequential` の学習可能パラメータ収集が
-//! `as_linear` フック限定のため）。
+//! `as_linear` フック限定のため）。イシュー #1640 で `MultiheadAttention`
+//! Module（`attention` モジュール）を追加した。新規 `Op`／`BackendOps`
+//! メソッドは追加せず、`nn::Linear` 4 層（q/k/v/out projection）と
+//! 既存 `Var` 演算（`matmul`／`reshape`／`permute`／`masked_fill`／
+//! `softmax`）の合成として実装している。`Module` trait は self-attention
+//! （`q=k=v=input`）として実装する（`attention.rs` モジュール doc
+//! 参照）。
 
+mod attention;
 mod embedding;
 mod init;
 mod linear;
@@ -51,6 +58,7 @@ pub mod activation;
 pub mod loss;
 pub mod optim;
 
+pub use attention::{MultiheadAttention, MultiheadAttentionVars};
 pub use embedding::{Embedding, EmbeddingVars};
 pub use linear::{Linear, LinearVars};
 pub use module::Module;
