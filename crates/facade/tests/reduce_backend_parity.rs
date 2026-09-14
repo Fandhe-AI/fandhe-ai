@@ -1,12 +1,16 @@
 //! `Var::sum`／`Var::max`（`fandhe_ai_autodiff::var`）の forward／backward
 //! を facade 横断で検証する（イシュー #1584・親イシュー #1571）。
+//! `Var::min`／`argmax`／`argmin`（イシュー #1720）も本ファイルへ追加
+//! 済み（`argmax`／`argmin` は非微分演算のため forward 解析値の比較
+//! のみ・CUDA 実機比較は #1720 スコープ外〈`CudaBackendOps::argmax`／
+//! `argmin` は未実装のまま既定 `Unsupported`〉）。
 //!
 //! 属性なしのテストは CPU（`fandhe_ai::tape_for(Device::Cpu)`）のみを
 //! 対象とし、既知の解析値との一致を確認する（CI で常時実行）。
 //! `#[ignore]` テストは `tape_for(Device::Cuda(0))` の forward／backward
 //! を CPU tape と REQ-2 統一複合判定（[`fandhe_ai_backend_cpu::
 //! assert_parity`]）で突き合わせる（実機必須。Metal は本イシュー時点で
-//! `sum`／`max` 未実装のため対象外）。
+//! `sum`／`max`／`min` 未実装のため対象外）。
 //!
 //! ```sh
 //! cargo test -p fandhe-ai --release --test reduce_backend_parity -- --ignored --nocapture
@@ -90,6 +94,62 @@ fn cpu_max_axis_forward_and_backward_match_analytic_values() {
     assert_eq!(dense_vec(da), vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
 }
 
+/// (f) CPU tape 上で `Var::min(None)`（全軸）の forward／backward が
+/// 既知の解析値と一致することを確認する（イシュー #1720。`Var::max`
+/// と対称・`min` は `BackendOps::min`〈CPU 実装済み〉経由）。
+#[test]
+fn cpu_min_all_forward_and_backward_match_analytic_values() {
+    let tape = tape_for(Device::Cpu).unwrap();
+    // 最小値 1.0 は唯一（index 0）。
+    let a = tape.var(&tensor(vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0], &[2, 3]));
+
+    let loss = a.min(None).unwrap();
+    assert_eq!(dense_vec(&loss.to_tensor()), vec![1.0]);
+
+    let grads = tape.backward(&loss).unwrap();
+    let da = grads.get(&a).unwrap().expect("a は loss に到達する");
+    assert_eq!(dense_vec(da), vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+}
+
+/// (g) CPU tape 上で `Var::min(Some(axis))`（単一軸）の forward／backward
+/// が既知の解析値と一致することを確認する（イシュー #1720）。
+#[test]
+fn cpu_min_axis_forward_and_backward_match_analytic_values() {
+    let tape = tape_for(Device::Cpu).unwrap();
+    // shape [2, 3]、axis=0 の各列で最小値の行を確認する。
+    // col0: min(1,4)=1 (row0) col1: min(5,2)=2 (row1) col2: min(3,6)=3 (row0)
+    let a = tape.var(&tensor(vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0], &[2, 3]));
+
+    let loss = a.min(Some(0)).unwrap();
+    assert_eq!(dense_vec(&loss.to_tensor()), vec![1.0, 2.0, 3.0]);
+
+    let grads = tape.backward(&loss).unwrap();
+    let da = grads.get(&a).unwrap().expect("a は loss に到達する");
+    assert_eq!(dense_vec(da), vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+}
+
+/// (h) CPU tape 上で `Var::argmax`／`Var::argmin`（全軸・単一軸）が
+/// 既知の解析値と一致することを確認する（イシュー #1720。非微分演算
+/// のため `to_tensor()`／`backward` は関与しない）。
+#[test]
+fn cpu_argmax_and_argmin_match_analytic_values() {
+    let tape = tape_for(Device::Cpu).unwrap();
+    let a = tape.var(&tensor(vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0], &[2, 3]));
+
+    let argmax_all = a.argmax(None).unwrap();
+    assert_eq!(argmax_all.contiguous().as_slice().unwrap(), &[5]);
+    let argmin_all = a.argmin(None).unwrap();
+    assert_eq!(argmin_all.contiguous().as_slice().unwrap(), &[0]);
+
+    // axis=0: col0 argmax=row1(idx1) argmin=row0(idx0)
+    //         col1 argmax=row0(idx0) argmin=row1(idx1)
+    //         col2 argmax=row1(idx1) argmin=row0(idx0)
+    let argmax_axis0 = a.argmax(Some(0)).unwrap();
+    assert_eq!(argmax_axis0.contiguous().as_slice().unwrap(), &[1, 0, 1]);
+    let argmin_axis0 = a.argmin(Some(0)).unwrap();
+    assert_eq!(argmin_axis0.contiguous().as_slice().unwrap(), &[0, 1, 0]);
+}
+
 /// (e) `tape_for(Device::Cuda(0))` の `Var::sum`／`Var::max`（全軸・単一
 /// 軸）forward／backward が CPU tape と REQ-2 統一複合判定で一致する
 /// ことを確認する（実機必須）。
@@ -163,6 +223,32 @@ fn cuda_sum_and_max_forward_and_backward_match_cpu_tape_on_real_device() {
             .unwrap()
             .expect("a は loss に到達する");
         assert_parity_tensors(cuda_da, cpu_da, &format!("max backward: dim={dim:?}"));
+
+        // min（イシュー #1720。CUDA は `CudaBackendOps::min` 実装済み）
+        let cpu_tape = tape_for(Device::Cpu).unwrap();
+        let cpu_a = cpu_tape.var(&tensor(data.clone(), &shape));
+        let cuda_tape = tape_for(Device::Cuda(0))
+            .expect("CUDA device 0 must be available on ignored test runner");
+        let cuda_a = cuda_tape.var(&tensor(data.clone(), &shape));
+
+        let cpu_min = cpu_a.min(dim).unwrap();
+        let cuda_min = cuda_a.min(dim).unwrap();
+        assert_parity_tensors(
+            &cuda_min.to_tensor(),
+            &cpu_min.to_tensor(),
+            &format!("min forward: dim={dim:?}"),
+        );
+        let cpu_grads = cpu_tape.backward(&cpu_min).unwrap();
+        let cuda_grads = cuda_tape.backward(&cuda_min).unwrap();
+        let cpu_da = cpu_grads
+            .get(&cpu_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+        let cuda_da = cuda_grads
+            .get(&cuda_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+        assert_parity_tensors(cuda_da, cpu_da, &format!("min backward: dim={dim:?}"));
     }
 }
 
