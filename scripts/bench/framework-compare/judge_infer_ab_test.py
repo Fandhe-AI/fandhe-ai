@@ -138,7 +138,7 @@ class JudgeInferAbTest(unittest.TestCase):
         after = [_rec("reuse", 0.008, checksum=None) for _ in range(5)]
         code, out = self._run(before, after)
         self.assertEqual(code, 2, out)
-        self.assertIn("missing or non-numeric checksum", out)
+        self.assertIn("missing, non-numeric, or non-finite checksum", out)
 
     def test_undetermined_when_checksum_key_absent(self):
         before_rows = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
@@ -147,7 +147,7 @@ class JudgeInferAbTest(unittest.TestCase):
             del r["checksum"]
         code, out = self._run(before_rows, after_rows)
         self.assertEqual(code, 2, out)
-        self.assertIn("missing or non-numeric checksum", out)
+        self.assertIn("missing, non-numeric, or non-finite checksum", out)
 
     def test_undetermined_when_median_s_missing(self):
         before = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
@@ -224,6 +224,60 @@ class JudgeInferAbTest(unittest.TestCase):
         after = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
         code, out = self._run(before, after)
         self.assertEqual(code, 2, out)
+
+    def test_undetermined_when_checksum_is_infinite_on_both_sides(self):
+        """codex-review 指摘: checksum が両腕とも `Infinity` で埋まって
+        いると、数値型検査だけでは一致（`inf == inf`）とみなされ、
+        時間比が閾値以下なら ADOPT へ倒れてしまう。`math.isfinite` に
+        より非有限値を undetermined へ倒す。"""
+        before = [_rec("reuse", 0.010, checksum=float("inf")) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=float("inf")) for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+        self.assertIn("checksum", out)
+
+    def test_undetermined_when_checksum_is_negative_infinite_on_both_sides(self):
+        before = [_rec("reuse", 0.010, checksum=float("-inf")) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=float("-inf")) for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+
+    def test_undetermined_when_checksum_is_nan_on_both_sides(self):
+        """`nan != nan` のため一致判定自体は元々成立しないが、fail-closed
+        方針上は非有限値そのものを判定不能として明示的に拒否する。"""
+        before = [_rec("reuse", 0.010, checksum=float("nan")) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=float("nan")) for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+
+    def test_undetermined_when_checksum_is_out_of_range_literal_on_both_sides(self):
+        """codex-review 指摘: `json.loads` は `1e400` のような float の
+        表現範囲を超える数値リテラルを `inf` として受理するため、この
+        経路からも非有限 checksum に到達しうる。JSONL へ直接書き込んで
+        `json.dumps` を経由せず `1e400` リテラルを再現する。"""
+        with tempfile.TemporaryDirectory() as tdir:
+            before_path = os.path.join(tdir, "before.jsonl")
+            after_path = os.path.join(tdir, "after.jsonl")
+            base_rows = [_rec("reuse", 0.010) for _ in range(5)]
+            with open(before_path, "w", encoding="utf-8") as f:
+                for r in base_rows:
+                    r = dict(r)
+                    r["checksum"] = None  # placeholder; overwritten below via string replace
+                    line = json.dumps(r).replace("null", "1e400", 1)
+                    f.write(line + "\n")
+            with open(after_path, "w", encoding="utf-8") as f:
+                for r in base_rows:
+                    r = dict(r)
+                    r["checksum"] = None
+                    line = json.dumps(r).replace("null", "1e400", 1)
+                    f.write(line + "\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = judge_infer_ab.main(
+                    ["--before", before_path, "--after", after_path]
+                )
+            self.assertEqual(code, 2, buf.getvalue())
+            self.assertIn("checksum", buf.getvalue())
 
 
 if __name__ == "__main__":

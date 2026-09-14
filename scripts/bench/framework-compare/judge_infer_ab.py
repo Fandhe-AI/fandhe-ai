@@ -19,8 +19,10 @@ fail-closed 方針（security.md A08。`compare_gemm_gate.py` 等と同方針）
   しなければ「判定不能」
 - セル内のいずれかの行で `median_s` が欠落・非数値（bool を含む）・
   非有限（`inf`/`-inf`/`nan`）・非正値、または `checksum` が欠落・
-  非数値（bool・文字列・配列等を含む）であれば「判定不能」（欠落を
-  「一致」として扱わない。codex-review 指摘対応）
+  非数値（bool・文字列・配列等を含む）・非有限（`inf`/`-inf`/`nan`。
+  `json.loads` は `Infinity`／範囲外の `1e400` 等を受理するため）で
+  あれば「判定不能」（欠落を「一致」として扱わない。codex-review
+  指摘対応）
 
 事前登録判定規則（イシュー #1580 計画）:
 - 判定セル: `mode == "reuse"`。対照（非判定・参考記録のみ）: `mode ==
@@ -74,11 +76,14 @@ def _judge_cell(before_rows, after_rows, rounds, threshold):
     fail-closed 方針（codex-review 指摘対応。security.md A08 と同方針）:
     `warmup`／`iters`／`median_s`／`checksum` のいずれかが欠落・不正な型
     （bool を含む）・規定範囲外（`warmup < 0`／`iters <= 0`／`median_s`
-    が非有限〈`inf`/`-inf`/`nan`〉または非正値）の行が 1 件でもあれば、
-    それだけで "undetermined" とする。とくに `checksum`／`warmup`／
-    `iters` が両腕とも欠落している場合に `None == None` や `{None} ==
-    {None}` で「完全一致」と誤判定しないことを保証する（欠落は「一致が
-    確認できていない」であって「一致」ではない）
+    が非有限〈`inf`/`-inf`/`nan`〉または非正値／`checksum` が非有限
+    〈`inf`/`-inf`/`nan`〉）の行が 1 件でもあれば、それだけで
+    "undetermined" とする。とくに `checksum`／`warmup`／`iters` が両腕
+    とも欠落している場合に `None == None` や `{None} == {None}` で
+    「完全一致」と誤判定しないこと、両腕とも `Infinity` 等の非有限値
+    （`json.loads` が受理する）で埋まっている場合に「一致」と誤判定
+    しないことを保証する（欠落・非有限は「一致が確認できていない」で
+    あって「一致」ではない）
     """
     if len(before_rows) != rounds or len(after_rows) != rounds:
         return "undetermined", {
@@ -113,9 +118,10 @@ def _judge_cell(before_rows, after_rows, rounds, threshold):
             checksum is None
             or isinstance(checksum, bool)
             or not isinstance(checksum, (int, float))
+            or not math.isfinite(checksum)
         ):
             return "undetermined", {
-                "reason": f"missing or non-numeric checksum: {checksum!r}"
+                "reason": f"missing, non-numeric, or non-finite checksum: {checksum!r}"
             }
 
     before_warmup = {r["warmup"] for r in before_rows}
