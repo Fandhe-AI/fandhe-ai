@@ -138,6 +138,14 @@ pub fn validate_interpolate_launch(
 /// [`crate::gather_scatter_model::gather_model`] と同じ理由で入口に
 /// [`validate_interpolate_launch`] を呼ぶ（本番経路で panic させない
 /// 方針。`.claude/rules/coding-rust.md`）。
+///
+/// 添字の蓄積（`in_flat`）は `u64` で行い、`shaders/interpolate.metal`
+/// の `ulong` 演算契約と一致させる（イシュー #1834 codex-review P0
+/// 是正。以前は `i64` を使っており、この符号付き／符号なしの差自体は
+/// `usize`〈通常 64bit〉が実務上オーバーフローしないホスト環境では
+/// 表面化しないが、カーネル側の整数契約〈`ulong` 採用の理由は
+/// `interpolate.metal` 冒頭コメント参照〉とモデル側の整数契約を
+/// 一致させることを本モジュール doc が要求しているため揃える）。
 pub fn interpolate_nearest_model(
     input: &[f32],
     in_shape: &[usize],
@@ -155,7 +163,7 @@ pub fn interpolate_nearest_model(
     let mut out = vec![0.0f32; numel];
     for (gid, out_slot) in out.iter_mut().enumerate() {
         let mut rem = gid;
-        let mut in_flat: i64 = 0;
+        let mut in_flat: u64 = 0;
         for a in (0..rank).rev() {
             let axis_size = out_shape[a];
             let c = rem % axis_size;
@@ -165,7 +173,7 @@ pub fn interpolate_nearest_model(
             } else {
                 c
             };
-            in_flat += src_c as i64 * in_strides[a] as i64;
+            in_flat += src_c as u64 * in_strides[a] as u64;
         }
         *out_slot = input[in_flat as usize];
     }

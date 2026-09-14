@@ -7,8 +7,9 @@
 //! `.claude/rules/coding-rust.md`「REQ-8: 性能下限・最適化の達成を理由に
 //! 手動境界チェックを省略しない」の機械検証と、`crates/backend-metal/
 //! src/shaders/interpolate.metal` 冒頭コメントが明記するアルゴリズム
-//! 契約（座標配列を保持しない末尾軸剥がし方式・添字計算は `long`）の
-//! ロックを兼ねる。
+//! 契約（座標配列を保持しない末尾軸剥がし方式・添字計算は `ulong`〈イシュー
+//! #1834 codex-review P0 是正で `long` から変更。u32 収容の 2 軸積が
+//! `i64::MAX` を超えうるため〉）のロックを兼ねる。
 
 /// `crates/backend-metal/src/shaders/interpolate.metal` のソース全文。
 const INTERPOLATE_METAL_SOURCE: &str = include_str!("../src/shaders/interpolate.metal");
@@ -66,12 +67,13 @@ fn kernel_has_grid_boundary_guard() {
     );
 }
 
-/// 添字計算に `long`（64bit 符号付き）を使うことをロックする
-/// （REQ-8）。
+/// 添字計算に `ulong`（64bit 符号なし）を使うことをロックする
+/// （REQ-8・イシュー #1834 codex-review P0 是正: u32 収容の 2 軸積
+/// `c * in_size` が `i64::MAX` を超えうるため `long` から変更した）。
 #[test]
-fn stride_arithmetic_uses_signed_64bit() {
-    assert!(INTERPOLATE_METAL_SOURCE.contains("long rem = (long)gid;"));
-    assert!(INTERPOLATE_METAL_SOURCE.contains("long src_c;"));
+fn stride_arithmetic_uses_unsigned_64bit() {
+    assert!(INTERPOLATE_METAL_SOURCE.contains("ulong rem = (ulong)gid;"));
+    assert!(INTERPOLATE_METAL_SOURCE.contains("ulong src_c;"));
 }
 
 /// 空間軸の src 添字は縦深防御クランプ（`min(src_c, in_shape[a]-1)`

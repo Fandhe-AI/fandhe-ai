@@ -28,12 +28,26 @@
 //
 // **添字計算・境界検査（REQ-8）**: shape 配列（`out_shape`／
 // `in_shape`／`in_strides`）はすべて `constant uint*` で渡し、添字
-// 計算は `long`（64bit 符号付き）で行う。`gid >= numel` の早期 return
-// （REQ-8「手動境界チェックを省略しない」）を必ず持つ。空間軸
-// （`a >= spatial_start`）の src 添字は整数除算 `(c * in_shape[a]) /
-// out_shape[a]` の後、数学的に `[0, in_shape[a])` の範囲内が保証
-// されるが縦深防御として `min(src_c, in_shape[a]-1)` へ明示的に
-// クランプする。
+// 計算は `ulong`（64bit 符号なし）で行う。`gid >= numel` の早期 return
+// （REQ-8「手動境界チェックを省略しない」）を必ず持つ。
+//
+// **符号なし採用の理由（イシュー #1834 codex-review P0 是正）**:
+// 起動前検証（`interpolate_model.rs::validate_interpolate_launch`）は
+// 各軸を `u32::MAX` まで許容するため、空間軸の座標積 `c * in_shape[a]`
+// は最大 `(2^32-1)^2 ≈ 1.8447e19` に達しうる。これは `i64::MAX
+// ≈ 9.2234e18` を超えるが `u64::MAX ≈ 1.8447e19` には収まるため、
+// 符号付き `long` では中間積が負値へオーバーフロー（UB）し、下限
+// クランプを持たないと `input[in_flat]` への範囲外読み出しにつながる
+// （上限のみの `min(src_c, in_shape[a]-1)` クランプは負値化した
+// `src_c` を防げない）。`ulong` 採用によりこの積は自然に安全域へ収まる。
+// 空間軸の src 添字は整数除算 `(c * in_shape[a]) / out_shape[a]` の後、
+// 数学的に `[0, in_shape[a])` の範囲内が保証されるが縦深防御として
+// `min(src_c, in_shape[a]-1)` へ明示的にクランプする。
+//
+// ホスト側逐語モデル（`interpolate_model.rs::interpolate_nearest_model`）
+// も本ファイルと同じ `u64` 整数契約へ揃えている（`usize`〈通常 64bit〉
+// はこの符号付きオーバーフローをそもそも再現しないため、モデル側の
+// 蓄積変数を明示的に `u64` とし kernel の演算意味論と一致させる）。
 
 #include <metal_stdlib>
 using namespace metal;
@@ -63,24 +77,29 @@ kernel void interpolate_nearest_f32(
     // 設計。カーネル内で毎スレッド再計算しない）。
     constant uint* in_strides = shapes + 2u * rank;
 
-    long rem = (long)gid;
-    long in_flat = 0;
+    ulong rem = (ulong)gid;
+    ulong in_flat = 0;
     for (int a = (int)rank - 1; a >= 0; a--) {
-        long axis_size = (long)out_shape[a];
-        long c = rem % axis_size;
+        ulong axis_size = (ulong)out_shape[a];
+        ulong c = rem % axis_size;
         rem /= axis_size;
-        long src_c;
+        ulong src_c;
         if ((uint)a >= spatial_start) {
-            long in_size = (long)in_shape[a];
+            ulong in_size = (ulong)in_shape[a];
+            // `c` と `in_size` はいずれも最大 `u32::MAX` のため積は
+            // 最大 `(2^32-1)^2 ≈ 1.8447e19` で `ulong`（`u64::MAX
+            // ≈ 1.8447e19`）に収まる（上記モジュール冒頭コメント
+            // 参照。符号付き `long` ではここが `i64::MAX` を超え
+            // オーバーフローする）。
             src_c = (c * in_size) / axis_size;
-            long max_c = in_size - 1;
+            ulong max_c = in_size - 1;
             if (src_c > max_c) {
                 src_c = max_c;
             }
         } else {
             src_c = c;
         }
-        in_flat += src_c * (long)in_strides[a];
+        in_flat += src_c * (ulong)in_strides[a];
     }
     out[gid] = input[in_flat];
 }

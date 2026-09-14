@@ -1289,9 +1289,20 @@ fn map_gather_scatter_error(err: CudaError) -> BackendError {
 /// `interpolate.rs::CudaInterpolate::run_nearest_f32` のエラーを
 /// `BackendOps::interpolate` の戻り値へ変換する（イシュー #1757）。
 /// `map_gather_scatter_error` と同型の変換方針。
+///
+/// `run_nearest_f32` は shape・ストライドの `i32` 収容検査を
+/// `gather_scatter.rs::{shape_to_i32, row_major_strides_i32}`
+/// （`CudaError::InvalidGatherScatterShape` を返す）へ委譲しているため
+/// （`interpolate.rs` モジュール doc 参照）、`InvalidInterpolateShape`
+/// だけでなく `InvalidGatherScatterShape` も同じ `ShapeMismatch` へ
+/// 変換する。この分岐が無いと dim／stride が `i32::MAX` を超える
+/// 入力が汎用 `map_cuda_error` 経由で `KernelLaunchFailed`（gather／
+/// scatter 由来の内部メッセージ付き）になり、呼び出し元の shape
+/// overflow ハンドリング（`ShapeMismatch` 判定）から漏れる
+/// （イシュー #1834 Cursor Bugbot 指摘の是正）。
 fn map_interpolate_error(err: CudaError) -> BackendError {
     match err {
-        CudaError::InvalidInterpolateShape { .. } => {
+        CudaError::InvalidInterpolateShape { .. } | CudaError::InvalidGatherScatterShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
         other => map_cuda_error(other),
@@ -4017,6 +4028,26 @@ mod tests {
         assert!(matches!(
             err,
             BackendError::KernelLaunchFailed(msg) if msg.contains("negative SM count")
+        ));
+    }
+
+    /// [`map_interpolate_error`]: `run_nearest_f32` が
+    /// `gather_scatter.rs::{shape_to_i32, row_major_strides_i32}` から
+    /// 受け取る `CudaError::InvalidGatherScatterShape`（dim／stride が
+    /// `i32::MAX` を超える場合）も `InvalidInterpolateShape` と同じ
+    /// `BackendError::ShapeMismatch(ElementCountOverflow)` へ変換される
+    /// ことを固定する（イシュー #1834 Cursor Bugbot 指摘の回帰テスト。
+    /// 是正前はこの分岐が無く汎用 `map_cuda_error` 経由で
+    /// `KernelLaunchFailed` になり、呼び出し元の shape overflow
+    /// ハンドリングから漏れていた）。
+    #[test]
+    fn map_interpolate_error_treats_gather_scatter_shape_overflow_as_shape_mismatch() {
+        let err = map_interpolate_error(CudaError::InvalidGatherScatterShape {
+            detail: "row_major_strides_i32: stride overflow".into(),
+        });
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         ));
     }
 
