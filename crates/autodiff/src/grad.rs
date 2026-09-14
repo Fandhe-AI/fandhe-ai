@@ -3421,24 +3421,28 @@ fn mean_vjp(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>) -> Tenso
 ///
 /// Issue #224（先勝ち挙動の再確認。compat 層〈REQ-9〉実装時に要再確認
 /// としていた事項）の結論: **本挙動を維持する（変更なし）**。
-/// compat 層（TASK-9.2a・#95 で実装。TASK-9.4・#411 で `fandhe_ai::compat`
-/// へ移設済み）の公開面は `array()`／`Sequential`（Linear・ReLU・
-/// Sigmoid・Tanh）に限定され（`docs/compat-api-scope.md` §1〜2）、
-/// `max`/`amax` 相当 API が存在しないため PyTorch 互換を要求する利用者
-/// 向け経路が現時点でない。均等分配へ変更すると勾配値そのものが変わり
-/// 上記の決定性方針と衝突するため、先勝ちを維持する。再検討条件:
-/// `fandhe_ai::compat`（REQ-9 追記・#52）の公開面に `amax` 相当の縮約 API を
-/// 追加する段階になった場合にのみ PyTorch 互換の要否を改めて判断する
-/// （`docs/compat-api-scope.md` にも記録）。
+///
+/// **イシュー #1718（amax／amin 勾配分配方式の確定）で最終確定**:
+/// `Var::max`／`min`／`max_dims`（`max(dim)`／`min(dim)` 族の意味論）は
+/// 本先勝ち決定的方式を**維持**する。根拠は 2 点——(a) 本方式は
+/// crates.io 公開全版（v0.3.0〜）で出荷済みの勾配値であり、均等分配へ
+/// 変更すると勾配値そのものが変わる破壊的変更になる、(b) PyTorch
+/// 自身も `torch.max(input, dim)`／`min(dim)`（添字を返す族）は均等
+/// 分配ではなく返した添字 1 箇所のみへ勾配を伝播する仕様であり、本
+/// リポの `argmax`／`argmin`「タイは最初の添字」契約（`eval::
+/// arg_extremum`）と内部整合する。PyTorch `torch.amax`／`amin`
+/// （添字を返さない縮約）相当の均等分配 API を追加する場合は、本
+/// ヘルパーを差し替えず独立の `Op`／VJP として実装する方針とした
+/// （`docs/autodiff-amax-grad-distribution-decision.md` 参照。未実装・
+/// 後続 issue 提案のまま）。
 ///
 /// **`Op::Min` との共有（イシュー #1720）**: 本関数の実体は
 /// 「`out_value` と `==` 一致する最初の位置へ `g` を置く」だけで
 /// 最大／最小どちらの縮約かに依存しない。そのため実体を
 /// [`extremum_first_match_vjp`] へ改称し、本関数は既存呼び出し元
 /// （テスト・`Op::Max` アーム）の名前を変えないための薄いラッパーと
-/// して残す。#1718（amax／amin 勾配分配方式の確定）が均等分配へ
-/// 変更する場合は [`extremum_first_match_vjp`] 1 箇所の差し替えで
-/// `Max`／`Min` 両方へ反映される。
+/// して残す（#1718 の確定により、このヘルパーは今後も `Max`／`Min`
+/// 共有のまま先勝ち決定的方式に固定される）。
 fn max_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
