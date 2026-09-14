@@ -279,9 +279,20 @@ fn te_kernel_gpu_ab_vs_production_select() {
             q_head.q1 * 1e3,
             q_head.q3 * 1e3
         );
+        // 機械判定用の比は丸めずに記録する（codex-review 指摘・イシュー
+        // #1694 PR レビュー是正）。`{ratio:.6}` のように小数 6 桁へ丸めて
+        // しまうと、実際の比が 1.0000004 のような境界値でも「1.000000」
+        // へ丸められ、`aggregate.py::judge_size` の `r <= 1.00` 判定が
+        // 本来 REJECT／undetermined となるべき計測を ADOPT-as-opt-in-
+        // candidate と誤判定しうる（`docs/perf/logs/
+        // metal-gemm-thread-elements-ab-1694/aggregate.py` §7.1 の事前
+        // 登録判定規則を保持するため）。表示用の丸めは集計表描画時
+        // （`aggregate.py` の `.4f` 整形）にのみ行い、ここでは Rust の
+        // `f64` デフォルト `Display`（最短の往復可能表現）で全精度を
+        // 出力する。
         let ratio = q_head.median / q_base.median;
         println!(
-            "N={n} head_over_base_kernel_gpu={ratio:.6} base_checksum={checksum_base:e} \
+            "N={n} head_over_base_kernel_gpu={ratio} base_checksum={checksum_base:e} \
              head_checksum={checksum_head:e} bit_identical={identical}"
         );
     }
