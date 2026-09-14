@@ -1515,7 +1515,6 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
   `docs/kernel-fusion.md` の方針と整合）・`MultiheadAttention` Module
   自体（in/out projection・head 分割。親 #1605 の sub-issue (b)・
   #1640）。
-
 ## #1640 の追補（`nn::MultiheadAttention` Module）
 
 §2.7 の `nn.MultiheadAttention`／`layers.MultiHeadAttention` 行はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（親 #1605 sub-issue (b)）。
@@ -1527,6 +1526,17 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
 - CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/mha_backend_parity.rs` の `#[ignore]` テストを参照）。
 
+## 追補（イシュー #1737）
+
+`Var::bce_loss`（PyTorch `nn.BCELoss` 相当・確率入力）・`Var::bce_with_logits_loss`（`nn.BCEWithLogitsLoss` 相当・logits 入力。sigmoid をカーネル内に内包した数値安定な合成式）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `tensor-core::BceKind`（`Probabilities`／`Logits`。`#[non_exhaustive]`）・`BackendOps::bce_loss`／`bce_loss_backward`（既定 `Unsupported`。`MseReduction` を共用）・`autodiff::Op::BceLoss`・CPU／CUDA／Metal 3 バックエンドの融合カーネル（`backend-cpu::bce`・`backend-cuda::bce`／`kernels_bce`・`backend-metal::bce`／`shaders/bce.metal`）・ホストフォールバック（`eval::bce_loss`・`grad::bce_loss_vjp`）まで実装済み。
+- `nn::loss::BceLoss`／`BceWithLogitsLoss`（`MseLoss` と同型の薄いラッパー）を追加した。
+- `Probabilities` kind のみ `input`／`target` の `[0, 1]` 範囲検査（NaN 含む）を実体化直後・バックエンド呼び出し前にホスト側で行い、違反は `AutodiffError::InvalidArgument`（`cross_entropy_loss` の targets 範囲検査と同配置）。`Logits` kind は範囲制約なし。
+- `dInput`（`Probabilities` kind は分母をクランプした勾配 `(p − y) / max(p·(1−p), 1e−12)`。forward のクランプ済み式の厳密な導関数ではない点に注意。厳密な導関数となるのは `dTarget` 側）のみをカーネルが返し、`dTarget` は呼び出し元がホスト側の逐次 map で計算する契約（`MseLoss` の `dTarget = -dPred` という単純合成が成り立たないため）。
+- facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.2）。CUDA／Metal 実機での facade parity テスト・性能実測は未実施のまま Mac／GB10 セッションへ申し送る。
+
+## #1738 の追補（NLLLoss／KLDivLoss）
 §2.8「損失関数」の `NLLLoss` 行（`なし。cross_entropy_loss が事実上兼ねる設計`）はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（イシュー #1738・親 #1609）。`KLDivLoss` はスナップショット当時の同節に未掲載のため新規行として追記する。
 
 - `Var::nll_loss(targets, class_dim, reduction)`（`self` = log 確率。`targets` は `Var::cross_entropy_loss` と同じ非追跡 `Tensor<i32>`）・`Var::kl_div_loss(target, reduction)`（`Probabilities`。`input`／`target` とも追跡対象）・`Var::kl_div_loss_with_log_target(target, reduction)`（`LogProbabilities`）を追加した（`crates/autodiff/src/var.rs`）。`log_softmax(x).nll_loss(t)` の forward 値が `cross_entropy_loss(x, t)` と一致することを統合テストで確認済み（`crates/autodiff/tests/nn_nll_kl_div_loss.rs`）。

@@ -467,6 +467,18 @@ pub(crate) fn cached_kl_div(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::bce::CudaBce`] スイート
+/// をプロセス内キャッシュから取得する（イシュー #1737。キーは
+/// [`ContextKey`]。`cached_mse` と同型）。`ops::CudaBackendOps::
+/// bce_loss`／`bce_loss_backward` の唯一の呼び出し先。
+pub(crate) fn cached_bce(device: &CudaDevice) -> Result<Arc<crate::bce::CudaBce>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::bce::CudaBce>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::bce::CudaBce::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`crate::layer_norm::
 /// CudaLayerNorm`] スイートをプロセス内キャッシュから取得する
 /// （イシュー #1596。キーは [`ContextKey`]。`cached_gemm` 冒頭コメント

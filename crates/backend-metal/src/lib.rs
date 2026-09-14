@@ -257,6 +257,8 @@ pub(crate) mod batch_state;
 // "macos")` を付けず、Linux（本実装環境・CI）でも単体テストが回る
 // ようにする（`pool_pending.rs` モジュール冒頭コメント参照）。
 #[cfg(target_os = "macos")]
+pub mod bce;
+#[cfg(target_os = "macos")]
 pub mod buffer;
 #[cfg(target_os = "macos")]
 pub mod context;
@@ -646,6 +648,8 @@ mod typed_bf16_probe_diag_tests;
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {}
 
+#[cfg(target_os = "macos")]
+pub use bce::MetalBce;
 #[cfg(target_os = "macos")]
 pub use buffer::MetalBuffer;
 #[cfg(target_os = "macos")]
