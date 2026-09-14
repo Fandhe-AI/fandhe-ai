@@ -137,3 +137,11 @@ Phase D の他手段（#530 配下の兄弟イシュー。#540 の `tgid` スウ
   既決事項の引用元）
 - `docs/backend-metal-mlx-classic-nax-decision.md`（#549。標準 API 経路の前提確認）
 - イシュー #544（本 spike）・#540（`tgid` スウィズル。OPEN・切り分け先）・親 #530・ルート #479
+
+**追記（イシュー #1693）**: 本記録が不可と判断したのは「レーン→要素対応
+を任意に *制御* すること」（Morton 順配置指定等）であり、`thread_elements()`
+（MSL 標準 API。`simdgroup_matrix` が公開する既定のレーン割当を素直に
+*読み書きする*機能）は本判断の対象外で矛盾しない。candle・MLX steel
+方式の `thread_elements()` 直接読み書きを試す opt-in 候補カーネル
+（`gemm_simdgroup_tiled_te`）を追加した記録は
+`docs/perf/metal-gemm-thread-elements-candidate.md` を参照。
