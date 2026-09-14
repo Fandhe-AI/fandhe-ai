@@ -133,6 +133,24 @@ impl CudaConstantPad {
             return Ok(Vec::new());
         }
 
+        if rank == 0 {
+            // rank 0（スカラー）は `pads` も空のため恒等コピー（Metal
+            // `run_pad_f32`・CPU `constant_pad::pad`・`eval::pad` の同型
+            // 早期分岐と対称）。`out_shape_i32`／`in_shape_i32`／
+            // `before_i32`／`in_strides_i32` がすべて空になり、cudarc の
+            // `clone_htod` は空スライスに対して 0 バイト確保を試みて
+            // ドライバエラーを返しうる（`Unsupported` ではないため
+            // `Var::pad` のホストフォールバックへ切り替わらず失敗が
+            // 表面化する。Cursor Bugbot 指摘）。カーネル起動を伴わず
+            // ホスト側で返す。
+            if input.len() != 1 {
+                return Err(CudaError::InvalidConstantPadShape {
+                    detail: format!("pad: rank-0 input.len()={} must be 1", input.len()),
+                });
+            }
+            return Ok(input.to_vec());
+        }
+
         // `numel_out` が非ゼロでも `input`（`in_shape`）が空の場合が
         // ありうる（pad は「入力が空でも出力は非空になりうる」演算。
         // `constant_pad.rs`〈CPU〉モジュール doc と同じ契約）。このとき
