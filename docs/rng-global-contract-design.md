@@ -7,6 +7,9 @@
 `manual_seed` のみ**を対象とする。乱数テンソル生成本体（`randn` 等）は
 #1725、形状ユーティリティ（`arange` 等）は #1726 が別途対応する。
 
+**#1725 で乱数テンソル生成本体（`randn`／`rand`／`randint`）を実装済み**
+（§10「実装記録（#1725）」参照）。
+
 ## 1. 背景・要件
 
 `docs/compat-api-scope.md` §1.2（Tier 1・2026-09-12 改定）は「乱数生成と
@@ -138,8 +141,8 @@ pub fn manual_seed(seed: u64) {
 
 ## 8. 対象外（out-of-scope）
 
-- `randn`／`rand`／`randint` の実際の生成関数（#1725 が担当。
-  `with_global_rng` を消費する側）。
+- ~~`randn`／`rand`／`randint` の実際の生成関数（#1725 が担当。
+  `with_global_rng` を消費する側）~~ → **#1725 で実装済み（§10）**。
 - `arange`／`linspace`／`eye`／`zeros_like`／`ones_like`（#1726 が担当。
   RNG 契約は不要）。
 - `nn::Dropout`（#1603）等、将来グローバル RNG を利用する確率的演算。
@@ -156,3 +159,53 @@ pub fn manual_seed(seed: u64) {
 
 - 依存: なし（#1602 本文どおり）。
 - 被依存: #1725・#1726（本イシュー完了後に着手可能）。
+
+## 10. 実装記録（#1725）
+
+`tensor-core::rng`（`randn`／`rand`／`randint`・`RngError`）を実装し、
+`autodiff`（素通し）→ `facade`（`fandhe_ai::{randn, rand, randint,
+RngError}`。委譲）まで結線した。`Tensor::zeros`／`ones`／`full` と同じ
+「ホスト側だけで完結する生成系」レイヤーに属し、`Op`／`BackendOps`／
+VJP は追加していない（生成結果は微分不能な葉値であり、`torch.randn` に
+勾配が無いのと同じ）。
+
+- **配置**: `crates/tensor-core/src/rng.rs`（`Xorshift64Star::next_unit_f32`
+  ／`next_unit_f64` 補助メソッド新設・`RngError`〈`#[non_exhaustive]`〉
+  ・`randn`／`rand`／`randint` 本体）。`crates/autodiff/src/lib.rs`・
+  `crates/facade/src/lib.rs` は素通し／薄い委譲のみ。
+- **アルゴリズム**:
+  - `rand(shape)`: 24bit 整数演算のみ（`next_unit_f32`）で `[0, 1)` を
+    生成。プラットフォーム横断で bit 同一の決定性を持つ（ゴールデン値
+    回帰テストあり）。
+  - `randn(shape)`: Box–Muller 変換（`f64` 中間計算。`u1 = 1.0 -
+    next_unit_f64()` で `ln(0)` を回避）で 2 値ずつ生成。`numel` が奇数
+    の場合は最後の組の 2 値目を**生成せずに**切り捨てる（1 組につき
+    `u1`／`u2` の抽選は必ず行うため `randn(&[5])` と `randn(&[6])` は
+    同数の抽選を消費し、抽選後のグローバル RNG 状態は一致する）。
+    `ln`／`sin`／`cos`（libm 経由）を使うため、決定性の契約は「同一
+    プロセス・同一プラットフォーム内での再現」に限り、クロス
+    プラットフォームでの最下位 bit 一致は主張しない（ゴールデン定数
+    テストは置かない）。
+  - `randint(low, high, shape)`: `range = (high as i64 - low as i64) as
+    u64` で `i32::MIN..i32::MAX` の最大区間でもオーバーフローしない。
+    rejection sampling（`zone = range.wrapping_mul(u64::MAX / range)`
+    未満の値のみ採用）で剰余バイアスを排除。`low >= high` は
+    `RngError::InvalidRange` を返す（`shape` 起因の検査より先に判定し、
+    範囲不正時は乱数を一切消費しない）。
+- **dtype**: `randint` の出力は `i32`（PyTorch 既定の int64 とは異なる
+  意図的な差異。本リポの index／targets 型契約——`Var::gather`／
+  `index_select`／`cross_entropy` 等——に合わせた）。
+- **`shape` の要素数オーバーフロー検査**: `checked_numel`（`tensor.rs`
+  の `pub(crate)` 関数）を**グローバル RNG のロック取得前**に呼ぶため、
+  オーバーフロー shape は乱数を一切消費せず `Err` を返す。
+- **承認の扱い**: `docs/compat-api-scope.md` §5 は「Tier 1／Tier 2 に
+  列挙済みの機能の実装は本節の再適用を要しない」と規定しており、本イ
+  シューの対象（乱数生成と RNG 契約）は §1.2 Tier 1 に列挙済みのため、
+  #1724 と同じ根拠で追加承認手続きなく着手した。
+- **対象外**（変更なし・#1726 等へ引き継ぎ）: `arange`／`linspace`／
+  `eye`／`zeros_like`／`ones_like`（#1726）・`randn_like`／`rand_like`／
+  `normal(mean, std)`／`uniform_(a, b)`／`bernoulli`／`multinomial`／
+  `randperm`・`torch.Generator` 相当の非グローバル RNG・CUDA／Metal
+  デバイス側乱数カーネル・`nn::Dropout`（#1603）・`randint` の int64
+  版・`ShapeError` の facade 再エクスポート（`Tensor::zeros` 等と同じ
+  既存のギャップで本イシュー以前から存在）。

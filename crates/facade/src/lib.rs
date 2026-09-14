@@ -79,6 +79,12 @@
 
 use fandhe_ai_tensor_core::device::select_from;
 use fandhe_ai_tensor_core::{BackendOps, DeviceProvider};
+// `ShapeError` は `randn`／`rand`（イシュー #1725）の戻り値型として使う
+// private import（`Tensor::zeros` 等の既存メソッドも同型を返しており、
+// facade 自体が再エクスポートしていない点は本イシュー以前からの既存の
+// ギャップ——`Tensor` の再エクスポート経由で間接的に既に到達可能。
+// `docs/rng-global-contract-design.md`）。
+use fandhe_ai_tensor_core::ShapeError;
 
 /// numpy/Keras 慣習の互換 API 層（compat 公開面。TASK-9.4・#411）。
 /// [`compat::array`]・[`compat::Sequential`] を提供する（詳細はモジュール
@@ -125,6 +131,12 @@ pub use fandhe_ai_autodiff::VarHostView;
 pub use fandhe_ai_autodiff::QrVars;
 pub use fandhe_ai_autodiff::SvdVars;
 pub use fandhe_ai_tensor_core::{BackendError, Device, PoolStats, Tensor};
+// `RngError`（イシュー #1725）: `randint` の戻り値型（`low >= high` の
+// 範囲不正を表す）。`Tape`／`BackendOps` を含まない単純なエラー型のため
+// 1 行の `pub use` で足りる（`api_surface.rs::facade_does_not_reexport_tape_or_backend_ops`
+// は行単位で `Tape`／`BackendOps`／`new_with_ops` を検査するのみで抵触
+// しない）。
+pub use fandhe_ai_tensor_core::RngError;
 // `ChecksumReadout`／`GemmChecksum`（イシュー #1339・`Var::matmul_checksum`
 // の戻り値・引数型）も 1 文 1 行で再エクスポートする（上記コメント
 // 「1 文 1 行を維持する」と同じ理由）。
@@ -300,10 +312,9 @@ pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
 }
 
 /// PyTorch `torch.manual_seed` 相当。プロセス全体で共有されるグローバル
-/// 決定的 RNG（将来の [`Var`] 乱数テンソル生成 API・イシュー #1725 の
-/// `randn`／`rand`／`randint` が消費する。#1602 本文の設計方針どおり
-/// ホスト生成のみで `BackendOps` は経由しない）の状態を `seed` から
-/// やり直す（イシュー #1724）。
+/// 決定的 RNG（[`randn`]／[`rand`]／[`randint`] が消費する。#1602 本文の
+/// 設計方針どおりホスト生成のみで `BackendOps` は経由しない）の状態を
+/// `seed` からやり直す（イシュー #1724）。
 ///
 /// `fandhe_ai_autodiff::manual_seed`（実体は `fandhe_ai_tensor_core::rng`）
 /// への薄い委譲（composition root。`docs/compat-api-scope.md` §0 の確定
@@ -312,6 +323,37 @@ pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
 /// （設計判断・スレッド安全性の範囲は `docs/rng-global-contract-design.md`）。
 pub fn manual_seed(seed: u64) {
     fandhe_ai_autodiff::manual_seed(seed);
+}
+
+/// 標準正規分布 `N(0, 1)` に従う乱数テンソルを生成する（PyTorch
+/// `torch.randn` 相当。イシュー #1725）。[`manual_seed`] が設定した
+/// プロセスグローバル決定的 RNG をホスト側だけで消費し（`BackendOps` を
+/// 経由しない。#1602 本文の設計方針）、返る [`Tensor`] は [`Tape::var`]
+/// で任意のデバイスへアップロードできる。
+///
+/// `fandhe_ai_autodiff::randn`（実体は `fandhe_ai_tensor_core::rng::randn`）
+/// への薄い委譲（composition root）。決定性の範囲（同一プロセス・同一
+/// プラットフォーム限定）・アルゴリズムは `docs/rng-global-contract-design.md`
+/// を参照。
+pub fn randn(shape: &[usize]) -> Result<Tensor<f32>, ShapeError> {
+    fandhe_ai_autodiff::randn(shape)
+}
+
+/// `[0, 1)` の一様分布に従う乱数テンソルを生成する（PyTorch `torch.rand`
+/// 相当。イシュー #1725）。設計・到達経路は [`randn`] と同じ。整数演算
+/// のみで構成されるためプラットフォーム横断で bit 同一の決定性を持つ
+/// （`fandhe_ai_tensor_core::rng` モジュール doc 参照）。
+pub fn rand(shape: &[usize]) -> Result<Tensor<f32>, ShapeError> {
+    fandhe_ai_autodiff::rand(shape)
+}
+
+/// `[low, high)` の一様分布に従う整数乱数テンソルを生成する（PyTorch
+/// `torch.randint` 相当。イシュー #1725）。dtype は `i32`
+/// （本リポの index／targets 型契約に合わせた意図的な差異。
+/// `docs/rng-global-contract-design.md`）。`low >= high` は
+/// [`RngError::InvalidRange`] を返す。
+pub fn randint(low: i32, high: i32, shape: &[usize]) -> Result<Tensor<i32>, RngError> {
+    fandhe_ai_autodiff::randint(low, high, shape)
 }
 
 /// `device` に対応する具体 `BackendOps` を解決する（非公開）。

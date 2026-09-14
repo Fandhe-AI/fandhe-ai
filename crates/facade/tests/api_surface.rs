@@ -666,11 +666,23 @@ fn manual_seed_is_reachable_via_facade() {
     fandhe_ai::manual_seed(42);
 }
 
+/// `fandhe_ai::{randn, rand, randint}`（イシュー #1725）が facade から
+/// 呼び出し可能な `pub fn` として型検査できることを固定する（コンパイル
+/// 時裏付け）。グローバル RNG 状態を変更するため値の検証は行わず、呼べ
+/// て `Result` を受け取れることだけを確認する（決定性・アルゴリズムの
+/// 単体テストは `crates/tensor-core/src/rng.rs` 側に整備済み）。
+#[test]
+fn rng_tensor_generators_are_reachable_via_facade() {
+    let _n: Result<fandhe_ai::Tensor<f32>, _> = fandhe_ai::randn(&[2, 3]);
+    let _u: Result<fandhe_ai::Tensor<f32>, _> = fandhe_ai::rand(&[2, 3]);
+    let _i: Result<fandhe_ai::Tensor<i32>, fandhe_ai::RngError> = fandhe_ai::randint(0, 10, &[4]);
+}
+
 /// `fandhe_ai::src/` の公開面に、プロセスグローバル RNG の内部実装型
 /// （`Xorshift64Star`・内部アクセサ `with_global_rng`）が一切露出して
-/// いないことを固定する（`manual_seed` のみを公開面とし、将来の
-/// `randn`／`rand`／`randint`〈#1725〉が消費する内部アクセサはサポート
-/// 対象外に留める設計。`docs/rng-global-contract-design.md`）。
+/// いないことを固定する（`manual_seed`／`randn`／`rand`／`randint`〈#1725〉
+/// のみを公開面とし、それらが内部で使う抽選アクセサはサポート対象外に
+/// 留める設計。`docs/rng-global-contract-design.md`）。
 #[test]
 fn facade_does_not_expose_rng_internal_types() {
     let src_dir = facade_crate_root().join("src");
