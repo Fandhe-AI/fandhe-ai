@@ -219,7 +219,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | 乱数生成と RNG 契約 | #1602（#1724 実装済み: グローバル RNG 契約〈manual_seed〉。#1725 実装済み: 乱数テンソル生成本体〈randn／rand／randint〉。#1726 実装済み: 決定的生成系〈arange／linspace／eye／zeros_like／ones_like〉。`fandhe_ai::{manual_seed, randn, rand, randint, arange, linspace, eye, zeros_like, ones_like}`。facade 到達経路は新規 `pub fn`（`RngError`／`CreationError` は 1 行の `pub use`）。`docs/rng-global-contract-design.md`） |
 | Dropout | #1603 |
 | Embedding | #1604 |
-| MultiheadAttention | #1605 |
+| MultiheadAttention | #1605（sub-issue (a): #1639 で実装済み。`Var::scaled_dot_product_attention`——既存の `matmul`〈rank≥2〉／`transpose`／`mul`／`masked_fill`／`softmax` への分解のみで実装し `Op`／`BackendOps` を新規拡張しない（`crate::einsum` と同型）。causal（top-left aligned）／明示 `attn_mask`〈PyTorch bool 規約〉・`scale` 既定値〈`1/sqrt(E)`〉に対応。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない。`dropout_p`／`enable_gqa`／attention weights 返却／f16・bf16 は対象外。CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッションへ申し送り。sub-issue (b)`MultiheadAttention` Module〈in/out projection・head 分割〉は #1640 が残対象） |
 | Conv1d／Conv2d | #1606 |
 | Pooling | #1607（設計記録 #1727。`docs/pooling-ops-design.md`。実装は #1728〈CPU〉・#1729〈CUDA〉・#1730〈Metal〉） |
 | 損失（BCE／NLL／Huber／KLDiv） | #1609 |

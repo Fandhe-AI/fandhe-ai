@@ -149,6 +149,7 @@
 //! 〈#1600〉未実装のため拒否等）・分解アルゴリズムは `einsum` モジュール
 //! doc を参照。
 
+mod attention;
 mod backward;
 pub mod compat;
 mod default_ops;
