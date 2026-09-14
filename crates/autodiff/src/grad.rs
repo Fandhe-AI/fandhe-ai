@@ -6047,4 +6047,64 @@ release ビルドでも検知できるよう `assert!` を使う）"
 
         assert_eq!(dense_vec(&dx), vec![0.0, 2.0, 0.0, 4.0]);
     }
+
+    // --- イシュー #1734 review 指摘: `validate_unique_output` の 2
+    // 分岐（`ShapeMismatch`／`InvalidArgument`）を直接検証する。
+    // 3 バックエンドとも契約を守るため通常経路では到達しないが、
+    // 事後検査自体が正しく機能することを踏まえ、バックエンド実装を
+    // 経由せず不変条件検査関数を直接叩いて両分岐を踏む。
+
+    /// rank != 1（2 次元）の出力は shape 自体の契約違反として
+    /// `AutodiffError::Backend(BackendError::ShapeMismatch(..))` を
+    /// 返すことを確認する。
+    #[test]
+    fn validate_unique_output_rejects_wrong_rank() {
+        let v = t(&[1.0, 2.0], &[1, 2]);
+        let err = validate_unique_output(&v, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    /// `len > numel`（入力要素数を超える出力長）も同じく
+    /// `ShapeMismatch` として拒否されることを確認する。
+    #[test]
+    fn validate_unique_output_rejects_len_exceeding_numel() {
+        let v = t(&[1.0, 2.0, 3.0], &[3]);
+        let err = validate_unique_output(&v, 2).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    /// rank・len 自体は正しいが totalOrder で非減少でない（降順が
+    /// 混入した）出力は、shape 違反ではなく
+    /// `AutodiffError::InvalidArgument` として区別して拒否されること
+    /// を確認する。
+    #[test]
+    fn validate_unique_output_rejects_non_monotonic_order() {
+        let v = t(&[3.0, 1.0, 2.0], &[3]);
+        let err = validate_unique_output(&v, 3).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// 非減少ではあるが隣接に `==`（重複）が残る出力も
+    /// `InvalidArgument` として拒否されることを確認する（`unique` は
+    /// 重複除去済みでなければならない）。
+    #[test]
+    fn validate_unique_output_rejects_adjacent_duplicate() {
+        let v = t(&[1.0, 2.0, 2.0, 3.0], &[4]);
+        let err = validate_unique_output(&v, 4).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// 契約を満たす出力（非減少・重複なし・len <= numel）は
+    /// 受理されることを確認する（両分岐が誤検出しないことの対照）。
+    #[test]
+    fn validate_unique_output_accepts_valid_output() {
+        let v = t(&[1.0, 2.0, 3.0], &[3]);
+        assert!(validate_unique_output(&v, 5).is_ok());
+    }
 }
