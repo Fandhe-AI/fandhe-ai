@@ -1293,3 +1293,12 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
 - forward は lane（縮約軸以外の全軸の組）ごとに `f64` アキュムレータを保持する逐次スキャン契約（`.claude/rules/coding-rust.md` の f64 アキュムレータ方針を forward の scan へ拡張）。VJP はホスト側のみ（`grad.rs::cumsum_vjp_along`／`cumprod_vjp_along`）で、`cumprod` は除算を用いない厳密形（排他的 prefix 積 `L` と後ろ向き Horner 型再帰 `S` の積）のため零要素を含む入力でも成り立つ。
 - CUDA／Metal 専用カーネルは本イシューのスコープ外（既定 `Unsupported` フォールバックのまま）で後続イシューへ引き継ぐ。
 - facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.3）。
+
+## #1627 の追補（int8 量子化の段階 0 設計判断）
+
+スナップショット本体（対象 HEAD `097bff19`）の 354 行目「量子化（int8 等）」行（`なし・量子化 dtype・演算対応・難度 XL`）は不変のまま、以下を追記する。
+
+- 正本 spec の除外事項「分散学習・量子化の網羅対応」（Won't・条件付き〈量子化 GEMM〉）は「spec 側で REQ として承認されるまで実装リポは量子化カーネルを起票・実装しない」と定めており、この判断は変わっていない（`docs/spec/04-requirements.md:356-364`）。
+- 本イシューでは `Op`／`BackendOps`／`Var`／facade のコード実装を行わず、格上げ条件（a〜e）の充足状況の棚卸しと再開条件を `docs/backend-int8-quantization-decision.md` として記録した（#1628・#1652・#1775 と同型の段階 0）。格上げ条件のうち (a)（REQ-2 複合判定の改定）は実質充足と読めるが、(b)〜(e)（実機 MMA プローブ・Transformer 複合 WL ベースライン・量子化専用許容基準・依存追加なし設計の実装確認）は未達のまま（同 doc §2.1）。
+- issue 上の承認コメント（`unsafe asm!`〈SME〉・`BackendOps` trait 拡張・facade 公開面拡張の技術的許可）は実装着手前の技術的許可事項に限られ、spec 側の除外事項ゲート自体を解除する文言ではないと整理した（同 doc §0.1）。
+- facade 新規公開面なし（コード変更を伴わないため）。実装着手は本追補のスコープ外のまま引き続き #1627 として open・blocked で追跡する。
