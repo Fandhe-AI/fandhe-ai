@@ -817,6 +817,20 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 取る facade API）は引き続き未接続で、本表の「未実装（欠落側）」列の評価
 （`Var` レベルの mixed precision）は変わらない。
 
+**追補（イシュー #1715）**: 上記スナップショット時点で「bmm」（#2.6）と
+記載されていた rank≥3 の行列積（PyTorch `torch.matmul`／`bmm` 相当）が
+実装済みへ更新された。`Var::matmul` が rank≥2（先頭 rank−2 軸を NumPy
+互換ブロードキャストするバッチ次元）を受理するようになり、
+`fandhe_ai_tensor_core::BackendOps` に `gemm_batched`／
+`gemm_batched_fp32_strict`（既定は per-batch `gemm`/`gemm_fp32_strict`
+への合成。非破壊拡張のデフォルトメソッド）を追加し、`backend-cpu` が
+専用オーバーライド（`CpuBackendOps::gemm_batched`。既存 2 次元
+`gemm`/`gemm_into_slice` と bit 同一）を持つ。facade 新規公開面なし
+（既存 `Var` 再エクスポート経由でそのまま到達可能）。CUDA／Metal は
+既定合成実装のまま（機能的に到達可能・専用バッチカーネルは #1716／
+#1717）。`einsum`（rank≥3 matmul を伴う batch 添字縮約。#1600 が未実装
+としていた対象）は本イシューでは対象外のまま残る。
+
 ## #1636（#1707〜#1709）の追補
 
 Metal バックエンドの `ScalarOp`（`ScalarUnaryOp`／`ScalarBinaryOp`。
@@ -1027,6 +1041,7 @@ bool 引数との直接合成も #1613 待ち）。VJP は両入力とも常に�
 （比較演算は局所的に階段関数のため微分不可能）。CUDA／Metal 実機での
 facade parity 実測は本エージェント実行環境に実機がないため未実施の
 まま申し送る。
+
 ## #1713 の追補
 
 `Var::gelu`／`gelu_tanh`／`softplus`（GELU 誤差関数版・tanh 近似版・
@@ -1044,6 +1059,45 @@ builder はユーザー承認待ちで対象外のまま。CUDA／Metal 実機�
 parity テストは本実装エージェントの実行環境に実機への到達手段がない
 ため未実測のまま Mac／GB10 セッションへ申し送る。
 
+**#1714 追補（SiLU・LeakyReLU・ELU・Hardswish）**: 本調査時点で §2.4／
+§2.7 が欠落と判定した ReLU 系派生活性化のうち、SiLU／LeakyReLU／ELU／
+Hardswish を実装済み化した（GELU／Softplus は #1713 で別途実装済み。
+上記「#1713 の追補」参照）。
+`Var::silu`／`leaky_relu`／`elu`／`hardswish`（`ScalarUnaryOp::Silu`／
+`LeakyRelu`／`Elu`／`Hardswish` への薄い委譲。`#1592`／`#1634` が敷いた
+`ScalarUnaryOp` 汎用 dispatch 基盤の上）・`nn::activation::{Silu,
+Hardswish, LeakyRelu, Elu}`（`Module` 実装込み）・
+`compat::Sequential::add_silu`／`add_hardswish`／`add_leaky_relu`／
+`add_elu`を追加した。CUDA（`kernels_scalar_op.rs`）・Metal
+（`scalar_op_source.rs`）の専用カーネルも実装済み（`LeakyRelu`／
+`Hardswish` は選択・算術のみで bit 同一想定、`Silu`／`Elu` は超越関数
+〈`exp`〉を含むため REQ-2 統一複合判定のみ）。`LeakyRelu`／`Elu` は本
+実装で初めて 1 引数ペイロード（CUDA／Metal 双方に
+`UnaryPayload::One`）を持つ unary kind として追加した。Metal の `Elu`
+は MSL に `expm1` 相当が存在しないため、`exp`／`log` から桁落ちなく
+再構成する自作ヘルパー `fai_expm1_f32`（`u = exp(x)` を計算し
+`u == 1.0` なら `expm1(x) ≈ x`、`u == 0.0`〈underflow〉なら `-1.0f`、
+それ以外は `(u - 1) * x / log(u)` で再構成）を使う。単純な
+`exp(x) - 1.0f` による代替は `x=-1e-8, alpha=1e8` のようなゼロ近傍・
+大 `alpha` の入力で桁落ちし REQ-2 統一複合判定を満たさなかったため
+不採用（PR #1825 codex-review P1 是正）。ホスト `f32::exp_m1`（正確な
+libm 実装）とは一般に bit 同一にならず、超越関数系と同じく REQ-2
+統一複合判定のみで検証する（`scalar_op_source.rs` モジュール doc
+「`Elu` の `expm1` 非対応」参照）。facade `compat::Sequential::add_*` 4
+件の新規公開面は親 #1595 コメント（2026-09-12 ユーザー承認）に基づく
+`docs/compat-api-scope.md` §5 経路 2 の適用。CUDA（DGX Spark GB10）・
+Metal（Apple Silicon）実機での parity テストは、本実装エージェントの
+実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ
+申し送る。
+
+## 追補（イシュー #1731）
+
+`Var::cumsum`／`cumprod`（`torch.cumsum`／`torch.cumprod` 相当）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `tensor-core::BackendOps::cumsum`／`cumprod`（既定 `Unsupported`）・`autodiff::Op::Cumsum`／`Op::Cumprod`・CPU 参照実装（`backend-cpu::scan`）・ホストフォールバック（`eval::cumsum_along`／`cumprod_along`）まで実装済み。
+- forward は lane（縮約軸以外の全軸の組）ごとに `f64` アキュムレータを保持する逐次スキャン契約（`.claude/rules/coding-rust.md` の f64 アキュムレータ方針を forward の scan へ拡張）。VJP はホスト側のみ（`grad.rs::cumsum_vjp_along`／`cumprod_vjp_along`）で、`cumprod` は除算を用いない厳密形（排他的 prefix 積 `L` と後ろ向き Horner 型再帰 `S` の積）のため零要素を含む入力でも成り立つ。
+- CUDA／Metal 専用カーネルは本イシューのスコープ外（既定 `Unsupported` フォールバックのまま）で後続イシューへ引き継ぐ。
+- facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.3）。
 ## 追補（イシュー #1756）
 
 `Var::pad`（`torch.nn.functional.pad(mode='constant')` 相当。定数

@@ -21,13 +21,16 @@
 
 use crate::error::AutodiffError;
 use crate::eval;
-use crate::nn::activation::{Gelu, GeluTanh, LogSoftmax, Relu, Sigmoid, Softmax, Softplus, Tanh};
+use crate::nn::activation::{
+    Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
+    Tanh,
+};
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, ShapeError, Tensor, broadcast_shape, matmul_out_shape,
+    BackendError, BackendOps, ShapeError, Tensor, broadcast_shape, gemm_out_shape,
     reduce_out_shape, require_same_shape, row_norm_layout,
 };
 
@@ -52,9 +55,10 @@ pub trait Module {
     /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
     /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
     /// ない）とする。既定は [`BackendError::Unsupported`] を返す
-    /// fail-safe（本クレート内 11 実装〈`Linear`・`Relu`・`Sigmoid`・
+    /// fail-safe（本クレート内 15 実装〈`Linear`・`Relu`・`Sigmoid`・
     /// `Tanh`・`RmsNorm`・`LayerNorm`・`Softmax`・`LogSoftmax`・`Gelu`・
-    /// `GeluTanh`・`Softplus`〉はいずれも
+    /// `GeluTanh`・`Softplus`・`Silu`・`Hardswish`・`LeakyRelu`・`Elu`
+    /// （イシュー #1714）〉はいずれも
     /// このデフォルトを
     /// オーバーライドする。呼び出し元
     /// が独自の `Module` 実装をこの経路で使う場合、`Unsupported` を
@@ -145,7 +149,7 @@ impl Module for Linear {
     /// 自体は汎用バックエンド向けのまま変更しない。
     ///
     /// **エラー型の一致契約（review 指摘）**: `Var::matmul`/`add`（tape
-    /// 経路。`var.rs`）は shape 不整合を `matmul_out_shape`/
+    /// 経路。`var.rs`）は shape 不整合を `gemm_out_shape`/
     /// `broadcast_shape` で `ops.gemm`/`ops.add` 呼び出し**前**に検査し
     /// `AutodiffError::Shape` として返す。本メソッド（tape 不要経路）が
     /// この事前検査を省いて `ops.gemm`/`ops.add` の `?` に任せると、同じ
@@ -160,7 +164,7 @@ impl Module for Linear {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        matmul_out_shape(input.shape(), self.weight().shape())?;
+        gemm_out_shape(input.shape(), self.weight().shape())?;
         let y = ops.gemm(input, self.weight())?;
         match self.bias() {
             Some(bias) => {
@@ -303,6 +307,78 @@ impl Module for Softplus {
             },
             input,
         )
+    }
+}
+
+/// `Silu::forward` への委譲（イシュー #1714）。`Softmax` と異なり
+/// `forward` 自体は shape 検査で失敗しないが、`Var::scalar_unary` の
+/// eager 実体化契約（バックエンド dispatch が型付きエラーを返しうる）
+/// により戻り値は `Result`（`Softmax`／`RmsNorm` と同じく `?` ではなく
+/// そのまま返す）。
+impl Module for Silu {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Silu::forward(self, input)
+    }
+
+    /// `Var::silu()`（`var.rs`）と同じディスパッチ（`grad::
+    /// scalar_unary_with_fallback`）を `tape` 不要経路で再現する
+    /// （`Var::scalar_unary` が呼ぶのと同一関数のため bit-exactness が
+    /// 構造的に成立する。`.claude/rules/security.md` A08「判定迂回経路
+    /// を作らない」規律）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
+    }
+}
+
+/// `Hardswish::forward` への委譲（イシュー #1714）。[`Silu`] と同じ
+/// `forward_host` ディスパッチ規律。
+impl Module for Hardswish {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Hardswish::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
+    }
+}
+
+/// `LeakyRelu::forward` への委譲（イシュー #1714）。[`Silu`] と同じ
+/// `forward_host` ディスパッチ規律。
+impl Module for LeakyRelu {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        LeakyRelu::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
+    }
+}
+
+/// `Elu::forward` への委譲（イシュー #1714）。[`Silu`] と同じ
+/// `forward_host` ディスパッチ規律。
+impl Module for Elu {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Elu::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
     }
 }
 
@@ -702,5 +778,71 @@ mod tests {
             result,
             Err(AutodiffError::Backend(BackendError::ShapeMismatch(_)))
         ));
+    }
+
+    /// `Silu`／`Hardswish`／`LeakyRelu`／`Elu` の `forward_host`（tape
+    /// 不要経路）が `Module::forward`（tape 経路）と bit 完全一致する
+    /// ことを検証する（イシュー #1714。`softmax_forward_host_matches_
+    /// tape_forward` と同型——両経路とも同一の `grad::
+    /// scalar_unary_with_fallback` を呼ぶため構造的に bit-exactness が
+    /// 成立する）。
+    #[test]
+    fn silu_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-1.0, 2.0], &[2]).unwrap();
+        let silu = Silu;
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Silu as Module>::forward(&silu, &tape, &xv).unwrap();
+        let via_host = silu.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn hardswish_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-4.0, 4.0], &[2]).unwrap();
+        let hardswish = Hardswish;
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Hardswish as Module>::forward(&hardswish, &tape, &xv).unwrap();
+        let via_host = hardswish.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn leaky_relu_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-1.0, 2.0], &[2]).unwrap();
+        let leaky_relu = LeakyRelu::new(0.2);
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <LeakyRelu as Module>::forward(&leaky_relu, &tape, &xv).unwrap();
+        let via_host = leaky_relu.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn elu_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-1.0, 2.0], &[2]).unwrap();
+        let elu = Elu::new(1.3);
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Elu as Module>::forward(&elu, &tape, &xv).unwrap();
+        let via_host = elu.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
     }
 }

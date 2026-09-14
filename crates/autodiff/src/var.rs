@@ -18,9 +18,9 @@ use std::cell::Ref;
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
-    ShapeError, Tensor, broadcast_shape, concat_out_shape, gather_out_shape, matmul_out_shape,
-    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    ShapeError, Tensor, broadcast_shape, concat_out_shape, gather_out_shape, gemm_out_shape,
+    matmul_out_shape, pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -63,6 +63,26 @@ impl From<Reduction> for MseReduction {
             Reduction::Mean => MseReduction::Mean,
             Reduction::Sum => MseReduction::Sum,
         }
+    }
+}
+
+/// `Op::MatMul` の forward 値計算（イシュー #1715）。`Var::matmul`・
+/// `Tape::checkpoint` の再計算（`tape.rs` の `recompute_value`）が
+/// 共有する単一の分岐点であり、rank 2 同士は [`BackendOps::gemm`]
+/// （既存の bit 一致契約を保つため直接委譲）、rank≥3 を含む場合は
+/// [`BackendOps::gemm_batched`]（NumPy 互換バッチブロードキャスト）へ
+/// 分岐する。`ops` は `dyn BackendOps` として渡され、CPU／CUDA／Metal
+/// いずれのバックエンドでも同一コードパスから呼び分けられる
+/// （`tensor-core::backend_ops` の設計方針を踏襲）。
+pub(crate) fn matmul_forward(
+    ops: &dyn BackendOps,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    if a.shape().len() == 2 && b.shape().len() == 2 {
+        ops.gemm(a, b)
+    } else {
+        ops.gemm_batched(a, b)
     }
 }
 
@@ -211,11 +231,17 @@ impl<'t> Var<'t> {
         self.tape.epoch()
     }
 
-    /// 2 次元 `matmul`（`docs/public-api-design.md` §3.2）。
+    /// `matmul`（rank≥2。バッチ次元は NumPy 互換ブロードキャスト。
+    /// `docs/public-api-design.md` §3.2・spec REQ-9 2026-09-12 追記
+    /// Tier 1「バッチ行列積」・`docs/compat-api-scope.md` §1.2。
+    /// イシュー #1715 でバッチ次元対応へ拡張。rank 2 同士は従来どおり
+    /// `ops.gemm` を呼ぶため既存の bit 一致契約〈`tape_matmul_cpu_bit_exact.rs`・
+    /// repack カウンタテスト〉は不変）。
     ///
     /// **TASK-12.1d（#164）**: 非 elementwise のため常に実体化済みで
     /// 返る（`push_eager`）。実行は `eval.rs` 直接呼び出しから
-    /// `self.tape.ops().gemm`（`BackendOps` 経由）へ置き換えた
+    /// `matmul_forward`（`BackendOps` 経由。rank 2 は `ops.gemm`・
+    /// rank≥3 を含む場合は `ops.gemm_batched` へ分岐）へ置き換えた
     /// （TASK-1.9「backend 経由実行への置き換え」・設計書 §3.5.2）。
     /// 入力が elementwise の遅延グラフであった場合は
     /// `materialize_fallible`（層 1）で自身の実行の一部として実体化
@@ -231,7 +257,7 @@ impl<'t> Var<'t> {
             let rhs_val = materialize_fallible(&nodes, self.tape.ops(), other.id)?.clone();
             (lhs_val, rhs_val)
         };
-        let value = self.tape.ops().gemm(&lhs_val, &rhs_val)?;
+        let value = matmul_forward(self.tape.ops(), &lhs_val, &rhs_val)?;
         let id = self.tape.push_eager(Op::MatMul(self.id, other.id), value);
         Ok(Var::from_raw(self.tape, id))
     }
@@ -266,7 +292,7 @@ impl<'t> Var<'t> {
         self.check_same_tape(other)?;
         let lhs_shape = self.shape();
         let rhs_shape = other.shape();
-        matmul_out_shape(&lhs_shape, &rhs_shape)?;
+        gemm_out_shape(&lhs_shape, &rhs_shape)?;
         let (lhs_val, rhs_val) = {
             let nodes = self.tape.nodes.borrow();
             let lhs_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
@@ -312,7 +338,7 @@ impl<'t> Var<'t> {
         }
         let lhs_shape = self.shape();
         let rhs_shape = weight.shape();
-        let out_shape = matmul_out_shape(&lhs_shape, &rhs_shape)?;
+        let out_shape = gemm_out_shape(&lhs_shape, &rhs_shape)?;
         if let Some(b) = bias {
             broadcast_shape(&out_shape, &b.shape())?;
         }
@@ -513,6 +539,57 @@ impl<'t> Var<'t> {
     /// 導関数は定数 `-1`。
     pub fn neg(&self) -> Result<Var<'t>, AutodiffError> {
         self.scalar_unary(ScalarUnaryOp::Neg)
+    }
+
+    /// SiLU／Swish（`x * sigmoid(x)`。PyTorch `torch.nn.functional.silu`
+    /// 相当）。イシュー #1714（親 #1595）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Silu`]）への薄い委譲
+    /// （`sqrt`／`log` と同型——eager 実体化契約により `Result` を返す）。
+    /// 導関数は `fandhe_ai_tensor_core::scalar_op::silu_grad`
+    /// （`eval::scalar::unary_grad_factor`）。CUDA／Metal は超越関数
+    /// （`exp`）を含むため REQ-2 統一複合判定（bit 同一は主張しない）。
+    pub fn silu(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Silu)
+    }
+
+    /// Hardswish（`x * clamp(x + 3, 0, 6) / 6`。PyTorch
+    /// `torch.nn.functional.hardswish` 相当）。イシュー #1714
+    /// （親 #1595）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Hardswish`]）への薄い委譲。
+    /// 選択・算術のみのため CUDA／Metal ともホスト `f32` 演算と bit
+    /// 同一になる想定（`kernels_scalar_op.rs`／`scalar_op_source.rs`
+    /// モジュール doc 参照）。導関数は
+    /// `fandhe_ai_tensor_core::scalar_op::hardswish_grad`。
+    pub fn hardswish(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Hardswish)
+    }
+
+    /// Leaky ReLU（`x >= 0` なら `x`、それ以外は `negative_slope * x`。
+    /// PyTorch `torch.nn.functional.leaky_relu` 相当）。イシュー #1714
+    /// （親 #1595）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::LeakyRelu`]）への薄い委譲。
+    /// `negative_slope` は検証せず IEEE のまま伝播する（`NaN` を渡せば
+    /// `NaN` が出る。PyTorch と同様）。選択・乗算のみのため bit 同一に
+    /// なる想定。導関数は `x >= 0` で `1`、それ以外は `negative_slope`。
+    pub fn leaky_relu(&self, negative_slope: f32) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::LeakyRelu { negative_slope })
+    }
+
+    /// ELU（`x > 0` なら `x`、それ以外は `alpha * (exp(x) - 1)`。
+    /// PyTorch `torch.nn.functional.elu` 相当）。イシュー #1714
+    /// （親 #1595）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Elu`]）への薄い委譲。
+    /// `alpha` は検証せず IEEE のまま伝播する。CUDA／Metal は超越関数
+    /// （`expm1f`／`metal::precise::exp`）を含むため REQ-2 統一複合
+    /// 判定のみ（Metal の `expm1` 非対応・数値誤差は
+    /// `scalar_op_source.rs` モジュール doc「`Elu` の `expm1` 非対応」
+    /// 参照）。導関数は `x > 0` で `1`、それ以外は `alpha * exp(x)`。
+    pub fn elu(&self, alpha: f32) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Elu { alpha })
     }
 
     /// ブロードキャスト付き要素ごとの減算（`self − other`。PyTorch
@@ -1061,6 +1138,82 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// `dim` 軸に沿った累積和（`torch.cumsum` 相当。イシュー #1731）。
+    /// [`Self::softmax`] と同じ `dim` 検査・フォールバック規律
+    /// （`BackendOps::cumsum` → `Unsupported` のときのみ `eval::
+    /// cumsum_along` へフォールバック）。出力 shape は `self` と恒等
+    /// （累積演算は shape を変えない）。
+    pub fn cumsum(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        reduce_out_shape(&shape, Some(dim))?;
+        let x_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().cumsum(&x_val, dim) {
+            Ok(v) => {
+                // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                // cumsum` doc「戻り値 shape は入力と恒等」）を検証する
+                // （実装バグの黙認防止。`.claude/rules/security.md` A08）。
+                if v.shape() != x_val.shape() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: x_val.shape().to_vec(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::cumsum_along(&x_val, dim),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::Cumsum {
+                input: self.id,
+                dim,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `dim` 軸に沿った累積積（`torch.cumprod` 相当。イシュー #1731）。
+    /// [`Self::cumsum`] と同じ `dim` 検査・フォールバック規律
+    /// （`BackendOps::cumprod` → `Unsupported` のときのみ `eval::
+    /// cumprod_along` へフォールバック）。
+    pub fn cumprod(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        reduce_out_shape(&shape, Some(dim))?;
+        let x_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self.tape.ops().cumprod(&x_val, dim) {
+            Ok(v) => {
+                if v.shape() != x_val.shape() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: x_val.shape().to_vec(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => eval::cumprod_along(&x_val, dim),
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::Cumprod {
+                input: self.id,
+                dim,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// CrossEntropy 損失（log-sum-exp 安定化・クラス次元指定。#191・
     /// 親イシュー #189）。`self` = logits（追跡対象）、`targets` = 正解
     /// クラス添字（非追跡・`Tensor<i32>`。勾配は定義されないため
@@ -1447,8 +1600,8 @@ impl<'t> Var<'t> {
         let hidden = h_shape[1];
         require_positive_dims(x_shape[1], hidden, "rnn_cell")?;
 
-        let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
-        let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
+        let out_ih = gemm_out_shape(&x_shape, &w_ih_shape)?;
+        let out_hh = gemm_out_shape(&h_shape, &w_hh_shape)?;
         require_same_shape(&out_ih, &out_hh)?;
         if out_ih[1] != hidden {
             return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
@@ -2503,8 +2656,8 @@ impl<'t> Var<'t> {
         let hidden = h_shape[1];
         require_positive_dims(x_shape[1], hidden, "lstm_cell")?;
 
-        let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
-        let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
+        let out_ih = gemm_out_shape(&x_shape, &w_ih_shape)?;
+        let out_hh = gemm_out_shape(&h_shape, &w_hh_shape)?;
         require_same_shape(&out_ih, &out_hh)?;
         let gate_width_4h = checked_gate_width(4, hidden)?;
         if out_ih[1] != gate_width_4h {
@@ -2623,8 +2776,8 @@ impl<'t> Var<'t> {
         let hidden = h_shape[1];
         require_positive_dims(x_shape[1], hidden, "gru_cell")?;
 
-        let out_ih = matmul_out_shape(&x_shape, &w_ih_shape)?;
-        let out_hh = matmul_out_shape(&h_shape, &w_hh_shape)?;
+        let out_ih = gemm_out_shape(&x_shape, &w_ih_shape)?;
+        let out_hh = gemm_out_shape(&h_shape, &w_hh_shape)?;
         require_same_shape(&out_ih, &out_hh)?;
         let gate_width_3h = checked_gate_width(3, hidden)?;
         if out_ih[1] != gate_width_3h {

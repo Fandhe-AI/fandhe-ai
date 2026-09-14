@@ -13,7 +13,7 @@
 
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::startup::{PROBE_SCHEMA_VERSION, ProbeReport, StartupBackend};
-use fandhe_ai_tensor_core::{BackendOps, Tensor, matmul_out_shape};
+use fandhe_ai_tensor_core::{BackendOps, Tensor, gemm_out_shape};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -137,7 +137,7 @@ fn run_cuda(
         .map_err(|e| format!("CudaDevice::new 失敗: {e}"))?;
     let device_init_secs = process_start.elapsed().as_secs_f64();
 
-    let out_shape = matmul_out_shape(a.shape(), b.shape())
+    let out_shape = gemm_out_shape(a.shape(), b.shape())
         .map_err(|e| format!("GEMM 出力形状の算出失敗: {e:?}"))?;
     let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
     let n = b.shape()[1] as u32;

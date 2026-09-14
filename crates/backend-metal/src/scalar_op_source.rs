@@ -94,15 +94,59 @@
 //! `scalar_log1p_f32`〈自作〉／`metal::precise::exp`）のため bit 同一
 //! を主張せず REQ-2 複合判定のみで検証する（`unary_prelude` 参照）。
 //!
+//! [`ScalarUnaryOp::Silu`]／[`ScalarUnaryOp::Hardswish`]／
+//! [`ScalarUnaryOp::LeakyRelu`]／[`ScalarUnaryOp::Elu`]（イシュー
+//! #1714）も実装する。`LeakyRelu`／`Elu` は本モジュールで初めて 1
+//! 引数ペイロード（[`UnaryPayload::One`]）を持つ unary kind（`Clamp` の
+//! [`UnaryPayload::Two`] と同型の拡張）。`Elu` は MSL に `expm1`
+//! 相当が存在しないため、`exp`／`log` から桁落ちなく再構成する
+//! `fai_expm1_f32` ヘルパー関数（下記「`Elu` の `expm1` 非対応」節
+//! 参照）を [`unary_preamble`] で kernel 本体の前に挿入して使う
+//! （PR #1825 codex-review P1 是正: 単純な `exp(x) - 1.0f` は
+//! `x=-1e-8, alpha=1e8` のようなゼロ近傍・大 `alpha` の入力で
+//! `exp(x)` が `1.0` へ丸まり桁落ちし、CPU/CUDA の `expm1` 相当と
+//! REQ-2 統一複合判定を満たさなかった）。
+//!
 //! 残 kind（`Add`／`Mul`／`Maximum`／`Minimum`・活性化系〈`Relu`／
-//! `Exp`／`Tanh`／`Sigmoid`／`Silu`／`Hardswish`〉・`LeakyRelu`／`Elu`／
-//! `PowScalar`）はいずれの sub issue にも含まれず `None`（未実装のまま。
+//! `Exp`／`Tanh`／`Sigmoid`〉・`PowScalar`）はいずれの sub issue にも
+//! 含まれず `None`（未実装のまま。
 //! 呼び出し元 `ops::MetalBackendOps::scalar_unary`／`scalar_binary` が
 //! `BackendError::Unsupported` を返しホスト参照実装
 //! （`ScalarUnaryOp::apply`／`ScalarBinaryOp::apply`）へフォールバック
 //! する既存契約。`fandhe_ai_autodiff::grad::scalar_unary_with_fallback`／
 //! `scalar_binary_with_fallback` 参照）。
 //! `.claude/rules/out-of-scope-tracking.md` の追跡対象。
+//!
+//! # `Elu` の `expm1` 非対応（イシュー #1714・PR #1825 codex-review P1 是正）
+//!
+//! ホスト参照実装（`scalar_op.rs::ScalarUnaryOp::apply` の `Elu` 分岐）
+//! は `f32::exp_m1`（`exp(x) - 1` を `x` が `0` に近くても桁落ちなく
+//! 計算する標準ライブラリ関数）を使うが、MSL には `expm1` 相当の
+//! 組み込み関数が存在しない（`.claude/skills/apple-silicon/references/
+//! msl/` に該当なしを確認済み）。当初は `metal::precise::exp(x) -
+//! 1.0f` で代替していたが、`|x|` が `0` に近く `alpha` が大きい入力
+//! （例: `x=-1e-8, alpha=1e8`）で `exp(x)` が `1.0f` へ丸まって
+//! `expm1(x)` が `0.0` になり（正しくは `x` 自身にほぼ等しい
+//! `-1e-8`）、`alpha` 倍された結果が CPU/CUDA の `expm1` 相当と
+//! REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5
+//! 未満）を満たさなかった（`tensor-core::scalar_op` の
+//! `elu_tiny_negative_x_with_large_alpha_avoids_exp_cancellation` が
+//! 同じ入力で CPU 側の桁落ちを既に回帰検査済み）。
+//!
+//! 本モジュールは Kahan/Goldberg の再構成式（`u = exp(x)` を計算した
+//! うえで `u == 1.0` なら `expm1(x) ≈ x` を返し、それ以外は
+//! `(u - 1) * x / log(u)` で桁落ちなく再構成する）を [`unary_preamble`]
+//! が返す `fai_expm1_f32` ヘルパー関数として `unary_kernel_source` の
+//! kernel 本体前へ挿入し、`Elu` の `expr`（[`unary_expr`]）から呼ぶ。
+//! `x` が十分小さく `exp(x)` が `f32` の最小非正規化数未満へ
+//! underflow して `u == 0.0` になる領域（`x` がおよそ `-104` 未満）は
+//! 上記の式だと `log(0) = -inf` で `(u-1)*x/log(u)` が `0`（正しくは
+//! `expm1(x) ≈ -1`）に潰れるため、`u == 0.0` を追加で分岐し `-1.0f`
+//! を直接返す。近似ではなく `exp`／`log` の 2 回呼び出しへ分解した
+//! 再構成のため、ホストの `f32::exp_m1`（正確な libm 実装）とは
+//! 一般に bit 同一にならず、超越関数系と同じく REQ-2 統一複合判定の
+//! みで検証する（tolerance 定数自体は不変。`.claude/rules/
+//! coding-rust.md`）。
 //!
 //! # cfg 方針
 //!
@@ -163,6 +207,31 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         ScalarUnaryOp::Clamp { .. } => {
             Some("isnan(x) ? x : (p0 > p1 ? p1 : (x < p0 ? p0 : (x > p1 ? p1 : x)))")
         }
+        // `ScalarUnaryOp::apply` の `LeakyRelu` 分岐（`scalar_op.rs`）を
+        // CUDA 側 `kernels_scalar_op.rs::unary_expr` と同一の式で逐語
+        // 複製する（選択と乗算のみでホスト `f32` 演算と bit 同一になる
+        // 想定。モジュール doc「コンパイルオプションと数値契約」参照）。
+        ScalarUnaryOp::LeakyRelu { .. } => Some("(x >= 0.0f) ? x : (p0 * x)"),
+        // `ScalarUnaryOp::apply` の `Hardswish` 分岐を CUDA 側と同一の
+        // 演算順序（`relu6(x + 3.0) / 6.0` を先に評価してから `x` へ
+        // 乗算する）で複製する。`fmin`／`fmax`／`clamp`（IEEE
+        // minNum/maxNum は非 NaN 側を優先し `is_nan` 明示分岐と異なる）
+        // は使わない。
+        ScalarUnaryOp::Hardswish => {
+            Some("x * ((x + 3.0f < 0.0f) ? 0.0f : ((x + 3.0f > 6.0f) ? 6.0f : (x + 3.0f)) / 6.0f)")
+        }
+        // `ScalarUnaryOp::apply` の `Silu` 分岐（`x * sigmoid_stable(x)`）
+        // を `metal::precise::exp` で複製する（`fast::exp` は使わない。
+        // 超越関数のため REQ-2 複合判定のみで検証する）。
+        ScalarUnaryOp::Silu => Some(
+            "(x >= 0.0f) ? (x * (1.0f / (1.0f + metal::precise::exp(-x)))) : (x * \
+             (metal::precise::exp(x) / (1.0f + metal::precise::exp(x))))",
+        ),
+        // `ScalarUnaryOp::apply` の `Elu` 分岐。`fai_expm1_f32`
+        // （[`unary_preamble`] が kernel 本体の前へ挿入するヘルパー
+        // 関数。モジュール doc「`Elu` の `expm1` 非対応」参照）を使い
+        // ゼロ近傍の桁落ちを避ける。REQ-2 複合判定のみで検証する。
+        ScalarUnaryOp::Elu { .. } => Some("(x > 0.0f) ? x : (p0 * fai_expm1_f32(x))"),
         // GELU（誤差関数版）: MSL には `erf` が存在しないため
         // `unary_prelude` が定義する自作ヘルパ `scalar_erf_f32`
         // （A-S 7.1.26 近似・`float` 計算）を呼ぶ（超越関数のため
@@ -183,6 +252,34 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
             Some("(x * p0 > p1) ? x : (scalar_log1p_f32(metal::precise::exp(p0 * x)) / p0)")
         }
         _ => None,
+    }
+}
+
+/// `op` の [`unary_expr`] が参照する device 側ヘルパー関数の宣言（kernel
+/// 本体より前に挿入する。既存 kind との後方互換のため既定は空文字列＝
+/// 挿入なし＝生成ソース不変）。`Elu` のみが `fai_expm1_f32`
+/// （モジュール doc「`Elu` の `expm1` 非対応」参照。PR #1825
+/// codex-review P1 是正）を必要とする。
+///
+/// `static inline` を使うのは `elementwise.metal` に既存のヘルパー
+/// 関数（`ew_*` の前段に置かれるものはないが、MSL の関数はデフォルトで
+/// 内部リンケージのため `static` は必須ではない。`shaders/` 系との
+/// 記法統一のため明示する）。
+fn unary_preamble(op: ScalarUnaryOp) -> &'static str {
+    match op {
+        // `expm1(x) = exp(x) - 1` を桁落ちなく計算する Kahan/Goldberg
+        // の再構成式。`u == 1.0f`（`x` が `0` に非常に近く `exp(x)` が
+        // `1.0` へ丸まる領域）では `expm1(x) ≈ x` を直接返す。
+        // `u == 0.0f`（`exp(x)` が最小非正規化数未満へ underflow する
+        // 領域。`x` がおよそ `-104` 未満）では `log(u) = -inf` になり
+        // 一般式が `0` に潰れてしまう（正しくは `expm1(x) ≈ -1`）ため
+        // 追加で分岐し `-1.0f` を直接返す。それ以外は
+        // `(u - 1) * x / log(u)` で再構成する（`log(u) ≈ x` となる
+        // ため桁落ちしない）。
+        ScalarUnaryOp::Elu { .. } => {
+            "static inline float fai_expm1_f32(float x) {\n    float u = metal::precise::exp(x);\n    if (u == 1.0f) {\n        return x;\n    }\n    if (u == 0.0f) {\n        return -1.0f;\n    }\n    return (u - 1.0f) * x / metal::precise::log(u);\n}\n\n"
+        }
+        _ => "",
     }
 }
 
@@ -274,6 +371,10 @@ fn binary_expr(op: ScalarBinaryOp) -> Option<&'static str> {
 /// 同型）。
 pub(crate) enum UnaryPayload {
     None,
+    /// 1 引数ペイロード（`LeakyRelu { negative_slope }`／
+    /// `Elu { alpha }`。イシュー #1714。CUDA 側
+    /// `kernels_scalar_op::UnaryPayload::One` と同型）。
+    One([f32; 1]),
     Two([f32; 2]),
 }
 
@@ -283,6 +384,7 @@ impl UnaryPayload {
     pub(crate) fn as_slice(&self) -> &[f32] {
         match self {
             Self::None => &[],
+            Self::One(v) => v,
             Self::Two(v) => v,
         }
     }
@@ -295,6 +397,8 @@ impl UnaryPayload {
 pub(crate) fn unary_payload(op: ScalarUnaryOp) -> UnaryPayload {
     match op {
         ScalarUnaryOp::Clamp { min, max } => UnaryPayload::Two([min, max]),
+        ScalarUnaryOp::LeakyRelu { negative_slope } => UnaryPayload::One([negative_slope]),
+        ScalarUnaryOp::Elu { alpha } => UnaryPayload::One([alpha]),
         ScalarUnaryOp::Softplus { beta, threshold } => UnaryPayload::Two([beta, threshold]),
         _ => UnaryPayload::None,
     }
@@ -337,21 +441,25 @@ pub(crate) fn unary_kernel_source(op: ScalarUnaryOp) -> Option<String> {
     // `clamp_source_declares_payload_params_and_omits_values` 参照）。
     let payload_params = match unary_payload(op) {
         UnaryPayload::None => String::new(),
+        UnaryPayload::One(_) => ",\n    constant float& p0 [[buffer(3)]]".to_string(),
         UnaryPayload::Two(_) => {
             ",\n    constant float& p0 [[buffer(3)]],\n    constant float& p1 [[buffer(4)]]"
                 .to_string()
         }
     };
-    // 既存 kind は `unary_prelude` が空文字列を返すため、この挿入は
-    // 既存生成ソースを不変に保つ（`sqrt_source_is_payload_independent`
-    // 等の bit 同一契約に抵触しない。モジュール doc「ペイロード seam」
-    // と同じ非後退方針。イシュー #1713）。
+    // 既存 kind（`preamble == "" && prelude == ""`）は挿入前と生成
+    // ソース完全一致（`kind_name()` 依存のキャッシュキー契約を壊さない。
+    // `sqrt_source_is_payload_independent` 等の bit 同一契約に抵触しない。
+    // `Elu` は `unary_preamble` が、`Gelu`／`GeluTanh`／`Softplus` は
+    // `unary_prelude` が非空文字列を返す（互いに排他的な kind 集合の
+    // ためどちらか一方のみ非空。イシュー #1713／#1714）。
+    let preamble = unary_preamble(op);
     let prelude = unary_prelude(op);
     Some(format!(
         r#"#include <metal_stdlib>
 using namespace metal;
 
-{prelude}kernel void {name}(
+{preamble}{prelude}kernel void {name}(
     device const float* a [[buffer(0)]],
     device float* out [[buffer(1)]],
     constant uint& numel [[buffer(2)]]{payload_params},
@@ -455,21 +563,15 @@ mod tests {
     #[test]
     fn unimplemented_unary_kinds_return_none() {
         // `Sqrt`（#1707）・超越関数系 8 kind（`Neg`／`Abs`／`Log`／
-        // `Log2`／`Log10`／`Sin`／`Cos`／`Tan`。#1708）・`Clamp`（#1709）
-        // は実装済みになったため、番兵 kind を未実装のまま残る kind
-        // （`Relu`〈活性化系〉・`PowScalar`／`LeakyRelu`〈他のペイロード
-        // あり unary kind〉。いずれも sub issue に含まれない）へ付け替
-        // える（残すと未実装 kind への `None` フォールバック契約の検証
-        // が消えてしまう）。
+        // `Log2`／`Log10`／`Sin`／`Cos`／`Tan`。#1708）・`Clamp`（#1709）・
+        // `Silu`／`Hardswish`／`LeakyRelu`／`Elu`（#1714）は実装済みに
+        // なったため、番兵 kind を未実装のまま残る kind（`Relu`〈活性化
+        // 系〉・`PowScalar`〈他のペイロードあり unary kind〉。いずれも
+        // sub issue に含まれない）へ付け替える（残すと未実装 kind への
+        // `None` フォールバック契約の検証が消えてしまう）。
         assert!(unary_kernel_source(ScalarUnaryOp::Relu).is_none());
         assert!(unary_kernel_source(ScalarUnaryOp::Sigmoid).is_none());
         assert!(unary_kernel_source(ScalarUnaryOp::PowScalar { exponent: 2.0 }).is_none());
-        assert!(
-            unary_kernel_source(ScalarUnaryOp::LeakyRelu {
-                negative_slope: 0.01
-            })
-            .is_none()
-        );
     }
 
     /// 超越関数系 8 kind すべてが REQ-8 境界チェック・buffer index
@@ -725,6 +827,10 @@ mod tests {
             ScalarUnaryOp::Cos,
             ScalarUnaryOp::Tan,
             ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 },
+            ScalarUnaryOp::LeakyRelu {
+                negative_slope: 0.1,
+            },
+            ScalarUnaryOp::Elu { alpha: 1.0 },
             ScalarUnaryOp::Gelu,
             ScalarUnaryOp::GeluTanh,
             ScalarUnaryOp::Softplus {
@@ -753,6 +859,193 @@ mod tests {
         assert!(binary_kernel_source(ScalarBinaryOp::Add).is_none());
         assert!(binary_kernel_source(ScalarBinaryOp::Maximum).is_none());
         assert!(binary_kernel_source(ScalarBinaryOp::Minimum).is_none());
+    }
+
+    /// イシュー #1714 の対象 4 kind（`Silu`／`Hardswish`／`LeakyRelu`／
+    /// `Elu`）が REQ-8 境界チェック・関数名・buffer index 契約を含む
+    /// ことを固定する（CUDA 側「静的ソース内容検査」の方針を踏襲）。
+    #[test]
+    fn silu_hardswish_leaky_relu_elu_include_bounds_check_and_buffer_indices() {
+        let no_payload_kinds = [ScalarUnaryOp::Silu, ScalarUnaryOp::Hardswish];
+        for op in no_payload_kinds {
+            let src = unary_kernel_source(op)
+                .unwrap_or_else(|| panic!("{op:?} must be implemented by #1714"));
+            assert!(src.contains("if (idx < numel)"));
+            assert!(src.contains(&format!("kernel void {}(", unary_function_name(op))));
+            assert!(src.contains("[[buffer(0)]]"));
+            assert!(src.contains("[[buffer(1)]]"));
+            assert!(src.contains("[[buffer(2)]]"));
+            assert!(!src.contains("[[buffer(3)]]"));
+        }
+
+        let payload_kinds = [
+            ScalarUnaryOp::LeakyRelu {
+                negative_slope: 0.1,
+            },
+            ScalarUnaryOp::Elu { alpha: 1.0 },
+        ];
+        for op in payload_kinds {
+            let src = unary_kernel_source(op)
+                .unwrap_or_else(|| panic!("{op:?} must be implemented by #1714"));
+            assert!(src.contains("if (idx < numel)"));
+            assert!(src.contains(&format!("kernel void {}(", unary_function_name(op))));
+            assert!(src.contains("[[buffer(3)]]"));
+            assert!(!src.contains("[[buffer(4)]]"));
+        }
+    }
+
+    /// `LeakyRelu`／`Elu` はペイロード値をソース文字列へ埋め込まない
+    /// （キャッシュキーが `kind_name()` のみに依存する契約。
+    /// `clamp_source_is_payload_value_independent` と同型）。
+    #[test]
+    fn leaky_relu_and_elu_sources_are_payload_value_independent() {
+        let lr_a = unary_kernel_source(ScalarUnaryOp::LeakyRelu {
+            negative_slope: 0.01,
+        })
+        .expect("LeakyRelu must be implemented");
+        let lr_b = unary_kernel_source(ScalarUnaryOp::LeakyRelu {
+            negative_slope: 0.5,
+        })
+        .expect("LeakyRelu must be implemented");
+        assert_eq!(lr_a, lr_b);
+        assert!(!lr_a.contains("0.01"));
+        assert!(!lr_a.contains("0.5"));
+
+        let elu_a = unary_kernel_source(ScalarUnaryOp::Elu { alpha: 1.0 })
+            .expect("Elu must be implemented");
+        let elu_b = unary_kernel_source(ScalarUnaryOp::Elu { alpha: 2.5 })
+            .expect("Elu must be implemented");
+        assert_eq!(elu_a, elu_b);
+        assert!(!elu_a.contains("2.5"));
+    }
+
+    /// `Silu`／`Elu` は `metal::precise::exp` のみを使い `fast::exp` を
+    /// 使わない（超越関数系テストと同方針）。
+    #[test]
+    fn silu_and_elu_use_precise_exp_only() {
+        let silu_src = unary_kernel_source(ScalarUnaryOp::Silu).expect("Silu must be implemented");
+        assert!(silu_src.contains("metal::precise::exp("));
+        assert!(!silu_src.contains("fast::exp("));
+
+        let elu_src = unary_kernel_source(ScalarUnaryOp::Elu { alpha: 1.0 })
+            .expect("Elu must be implemented");
+        assert!(elu_src.contains("metal::precise::exp("));
+        assert!(!elu_src.contains("fast::exp("));
+    }
+
+    /// PR #1825 codex-review P1 是正の回帰テスト: `Elu` の生成ソースが
+    /// `metal::precise::exp(x) - 1.0f` という単純差分（ゼロ近傍で
+    /// 桁落ちする式。`x=-1e-8, alpha=1e8` で `0.0` を返し CPU/CUDA の
+    /// `expm1` 相当〈約 `-1`〉と REQ-2 統一複合判定を満たさなかった）
+    /// を含まないこと、代わりに `fai_expm1_f32` ヘルパー（[`unary_
+    /// preamble`]）を kernel 本体より前で宣言し `Elu` の式から呼ぶ
+    /// ことを固定する。
+    #[test]
+    fn elu_source_uses_expm1_helper_not_naive_exp_minus_one() {
+        let elu_src = unary_kernel_source(ScalarUnaryOp::Elu { alpha: 1.0 })
+            .expect("Elu must be implemented");
+        assert!(
+            !elu_src.contains("metal::precise::exp(x) - 1.0f"),
+            "ゼロ近傍で桁落ちする単純差分が残っている: {elu_src}"
+        );
+        assert!(elu_src.contains("fai_expm1_f32"));
+        assert!(elu_src.contains("float fai_expm1_f32(float x)"));
+        // ヘルパー宣言は kernel 本体（`kernel void`）より前に来ること。
+        let helper_pos = elu_src
+            .find("float fai_expm1_f32(float x)")
+            .expect("helper must be declared");
+        let kernel_pos = elu_src.find("kernel void").expect("kernel must exist");
+        assert!(helper_pos < kernel_pos);
+        // underflow（`u == 0.0f`）・ゼロ近傍（`u == 1.0f`）双方の分岐を
+        // 含むこと（モジュール doc「`Elu` の `expm1` 非対応」参照）。
+        assert!(elu_src.contains("u == 1.0f"));
+        assert!(elu_src.contains("u == 0.0f"));
+    }
+
+    /// 他 kind（`Silu` 等ペイロードなし）は `unary_preamble` が空文字列
+    /// を返すため、preamble 挿入前後でソースが完全不変である
+    /// （既存キャッシュキー契約〈`kind_name()` のみへ依存〉を壊さない
+    /// ことの回帰確認）。
+    #[test]
+    fn preamble_is_empty_for_kinds_without_expm1_helper() {
+        let silu_src = unary_kernel_source(ScalarUnaryOp::Silu).expect("Silu must be implemented");
+        assert!(!silu_src.contains("fai_expm1_f32"));
+        assert!(silu_src.trim_start().starts_with("#include <metal_stdlib>"));
+
+        let hs_src =
+            unary_kernel_source(ScalarUnaryOp::Hardswish).expect("Hardswish must be implemented");
+        assert!(!hs_src.contains("fai_expm1_f32"));
+    }
+
+    /// `fai_expm1_f32` の再構成式（`u == 1.0 ? x : (u == 0.0 ? -1.0 :
+    /// (u - 1) * x / log(u))`）をホスト側 `f64` で忠実に再現し、
+    /// codex-review 指摘の入力（`x=-1e-8`）・underflow 域
+    /// （`x=-150.0`）・通常域（`x=-1.0`）で `f32::exp_m1` 相当の
+    /// 正しい `expm1(x)` に近い値を返すことを検証する（Metal 実機
+    /// なしで式そのものの正しさを Linux 上で確認する diagnostic）。
+    #[test]
+    fn expm1_reconstruction_formula_matches_exp_m1_reference() {
+        fn expm1_reconstruction(x: f32) -> f32 {
+            let u = x.exp();
+            if u == 1.0 {
+                x
+            } else if u == 0.0 {
+                -1.0
+            } else {
+                (u - 1.0) * x / u.ln()
+            }
+        }
+
+        // codex-review 指摘の入力: ゼロ近傍・大 alpha で顕在化した
+        // ケース。単純差分は `0.0` を返すが正しくは `x` にほぼ等しい。
+        let x = -1e-8_f32;
+        let got = expm1_reconstruction(x);
+        let want = x.exp_m1();
+        assert!(
+            (got - want).abs() < 1e-5,
+            "got={got}, want={want} (naive exp(x)-1 would give 0.0)"
+        );
+        assert_ne!(got, 0.0, "expm1(-1e-8) が 0.0 に桁落ちしてはならない");
+
+        // underflow 域（`exp(x)` が `f32` 最小非正規化数未満）: 単純式
+        // だけでなく `log(0)=-inf` 経路も `-1.0` へ正しく落ちること。
+        let x = -150.0_f32;
+        let got = expm1_reconstruction(x);
+        let want = x.exp_m1();
+        assert!(
+            (got - want).abs() < 1e-5,
+            "got={got}, want={want} (underflow branch)"
+        );
+
+        // 通常域（桁落ちが問題にならない典型値）。
+        let x = -1.0_f32;
+        let got = expm1_reconstruction(x);
+        let want = x.exp_m1();
+        assert!(
+            (got - want).abs() < 1e-5,
+            "got={got}, want={want} (normal range)"
+        );
+    }
+
+    /// `Hardswish`／`LeakyRelu` は選択・算術のみで `fmin`／`fmax`／
+    /// `metal::clamp`（`ScalarUnaryOp::apply` の明示分岐と数値契約が
+    /// 異なる）を使わない（`clamp_source_does_not_use_fmin_fmax_or_
+    /// metal_clamp` と同方針）。
+    #[test]
+    fn hardswish_and_leaky_relu_do_not_use_fmin_fmax_or_metal_clamp() {
+        let hs_src =
+            unary_kernel_source(ScalarUnaryOp::Hardswish).expect("Hardswish must be implemented");
+        assert!(!hs_src.contains("fmin("));
+        assert!(!hs_src.contains("fmax("));
+        assert!(!hs_src.contains("metal::clamp("));
+
+        let lr_src = unary_kernel_source(ScalarUnaryOp::LeakyRelu {
+            negative_slope: 0.1,
+        })
+        .expect("LeakyRelu must be implemented");
+        assert!(!lr_src.contains("fmin("));
+        assert!(!lr_src.contains("fmax("));
+        assert!(!lr_src.contains("metal::clamp("));
     }
 
     /// GELU（誤差関数版）のソースが REQ-8 境界チェック・prelude ヘルパ

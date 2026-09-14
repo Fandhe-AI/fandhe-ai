@@ -21,11 +21,15 @@
 //! [`LogSoftmax`] を追加した（`CrossEntropyLoss` の内部 log-softmax
 //! 〈`eval::softmax_along`〉はこれとは別実装のまま不変）。イシュー
 //! #1713 で [`Gelu`]／[`GeluTanh`]／[`Softplus`] を追加した（`Var::gelu`／
-//! `gelu_tanh`／`softplus` の薄いラッパー）。残る追加活性化（SiLU／
-//! LeakyReLU／ELU／Hardswish 等。#1714）は後続イシューに委ねる。
+//! `gelu_tanh`／`softplus` の薄いラッパー）。イシュー #1714 で
+//! [`Silu`]／[`Hardswish`]／[`LeakyRelu`]／[`Elu`]（いずれも
+//! `crate::var::Var` の `ScalarUnaryOp` 汎用 dispatch。#1592／#1634 が
+//! 敷いた基盤への薄いラッパー）を追加した。さらなる追加活性化は必要に
+//! なった時点の後続イシューに委ねる。
 
 use crate::error::AutodiffError;
 use crate::var::Var;
+use fandhe_ai_tensor_core::ScalarUnaryOp;
 
 /// ReLU（`max(x, 0)`）。`Var::relu` の薄いラッパー。
 #[derive(Debug, Default, Clone, Copy)]
@@ -136,6 +140,124 @@ impl Default for Softplus {
             beta: 1.0,
             threshold: 20.0,
         }
+    }
+}
+
+/// SiLU／Swish（`x * sigmoid(x)`）。`Var::silu` の薄いラッパー
+/// （イシュー #1714）。`Relu`/`Sigmoid`/`Tanh` と異なり `forward` は
+/// `Result` を返す（`Var::scalar_unary` の eager 実体化契約により
+/// 構造的に失敗しうるため。`Softmax`／`Sqrt` 系と同型）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Silu;
+
+impl Silu {
+    /// `input` に SiLU（`x * sigmoid(x)`）を適用する。`Var::silu` への
+    /// 薄い委譲（バックエンド dispatch は同メソッドの契約に従う）。
+    /// `input` と同じ shape・dtype の `Var` を返す。CPU／CUDA／Metal
+    /// 専用カーネル未到達時はホスト参照実装（`ScalarUnaryOp::apply`）
+    /// への eager フォールバックが走りうるため、その実体化に失敗した
+    /// 場合に限り `Err` を返す（`Softmax`／`Sqrt` 系と同型の契約）。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.silu()
+    }
+
+    /// `nn/module.rs::Module::forward_host` が `scalar_unary_with_
+    /// fallback` へ渡す kind を読み出すためのクレート内アクセサ
+    /// （`Softmax::dim` と同型の理由）。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::Silu
+    }
+}
+
+/// Hardswish（`x * clamp(x + 3, 0, 6) / 6`）。`Var::hardswish` の薄い
+/// ラッパー（イシュー #1714）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Hardswish;
+
+impl Hardswish {
+    /// `input` に Hardswish（`x * clamp(x + 3, 0, 6) / 6`）を適用する。
+    /// `Var::hardswish` への薄い委譲。[`Silu::forward`] と同じ shape・
+    /// エラー契約（eager フォールバック実体化に失敗した場合のみ
+    /// `Err`）。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.hardswish()
+    }
+
+    /// [`Silu::op`] と同じ理由のクレート内アクセサ。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::Hardswish
+    }
+}
+
+/// Leaky ReLU（`x >= 0` なら `x`、それ以外は `negative_slope * x`）。
+/// `Var::leaky_relu` の薄いラッパー（イシュー #1714）。`Softmax`／
+/// `LogSoftmax` と同じく `negative_slope` を保持するフィールドを持つ。
+#[derive(Debug, Clone, Copy)]
+pub struct LeakyRelu {
+    negative_slope: f32,
+}
+
+impl LeakyRelu {
+    /// `negative_slope`（負領域の傾き）を指定して構築する。
+    pub fn new(negative_slope: f32) -> Self {
+        Self { negative_slope }
+    }
+
+    /// `input` に Leaky ReLU（`x >= 0` なら `x`、それ以外は
+    /// `self.negative_slope * x`）を適用する。`Var::leaky_relu` への
+    /// 薄い委譲。[`Silu::forward`] と同じ shape・エラー契約（eager
+    /// フォールバック実体化に失敗した場合のみ `Err`）。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.leaky_relu(self.negative_slope)
+    }
+
+    /// [`Silu::op`] と同じ理由のクレート内アクセサ。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::LeakyRelu {
+            negative_slope: self.negative_slope,
+        }
+    }
+}
+
+impl Default for LeakyRelu {
+    /// PyTorch `torch.nn.LeakyReLU` の既定 `negative_slope=0.01` と揃える。
+    fn default() -> Self {
+        Self::new(0.01)
+    }
+}
+
+/// ELU（`x > 0` なら `x`、それ以外は `alpha * (exp(x) - 1)`）。
+/// `Var::elu` の薄いラッパー（イシュー #1714）。[`LeakyRelu`] と同じ
+/// フィールド保持・`Default` 契約。
+#[derive(Debug, Clone, Copy)]
+pub struct Elu {
+    alpha: f32,
+}
+
+impl Elu {
+    /// `alpha` を指定して構築する。
+    pub fn new(alpha: f32) -> Self {
+        Self { alpha }
+    }
+
+    /// `input` に ELU（`x > 0` なら `x`、それ以外は
+    /// `self.alpha * (exp(x) - 1)` 相当）を適用する。`Var::elu` への
+    /// 薄い委譲。[`Silu::forward`] と同じ shape・エラー契約（eager
+    /// フォールバック実体化に失敗した場合のみ `Err`）。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.elu(self.alpha)
+    }
+
+    /// [`Silu::op`] と同じ理由のクレート内アクセサ。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::Elu { alpha: self.alpha }
+    }
+}
+
+impl Default for Elu {
+    /// PyTorch `torch.nn.ELU` の既定 `alpha=1.0` と揃える。
+    fn default() -> Self {
+        Self::new(1.0)
     }
 }
 
@@ -415,5 +537,95 @@ mod tests {
             dense_vec(&via_module.to_tensor()),
             dense_vec(&via_var.to_tensor())
         );
+    }
+
+    #[test]
+    fn silu_forward_matches_var_silu() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
+        let before = tape.len();
+
+        let via_module = Silu.forward(&x).unwrap();
+        let via_var = x.silu().unwrap();
+
+        assert_eq!(
+            tape.len(),
+            before + 2,
+            "forward 呼び出しごとに 1 ノード追記"
+        );
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    #[test]
+    fn hardswish_forward_matches_var_hardswish() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![-4.0, 4.0], &[2]).unwrap());
+        let before = tape.len();
+
+        let via_module = Hardswish.forward(&x).unwrap();
+        let via_var = x.hardswish().unwrap();
+
+        assert_eq!(
+            tape.len(),
+            before + 2,
+            "forward 呼び出しごとに 1 ノード追記"
+        );
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    #[test]
+    fn leaky_relu_forward_matches_var_leaky_relu() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
+        let before = tape.len();
+
+        let via_module = LeakyRelu::new(0.2).forward(&x).unwrap();
+        let via_var = x.leaky_relu(0.2).unwrap();
+
+        assert_eq!(
+            tape.len(),
+            before + 2,
+            "forward 呼び出しごとに 1 ノード追記"
+        );
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    #[test]
+    fn leaky_relu_default_matches_pytorch_negative_slope() {
+        assert_eq!(LeakyRelu::default().negative_slope, 0.01);
+    }
+
+    #[test]
+    fn elu_forward_matches_var_elu() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
+        let before = tape.len();
+
+        let via_module = Elu::new(1.3).forward(&x).unwrap();
+        let via_var = x.elu(1.3).unwrap();
+
+        assert_eq!(
+            tape.len(),
+            before + 2,
+            "forward 呼び出しごとに 1 ノード追記"
+        );
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    #[test]
+    fn elu_default_matches_pytorch_alpha() {
+        assert_eq!(Elu::default().alpha, 1.0);
     }
 }
