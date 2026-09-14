@@ -80,7 +80,7 @@ CUDA 版の 5 腕目 `PretouchedFreshDest`（CUDA 本番の是正
 |----|------|------------------|
 | M1（主） | keep-alive により `read_to_vec` の宛先が毎回 first-touch ページとなり memcpy 中のページ確保が `readback` に乗る（legacy は free-and-reuse で既タッチページを再利用する） | `BorrowedKeepAlive` の `readback` が `LegacyToVec` より遅く、`PretouchedReusedDest` で回復する。`BorrowedWithDummyAllocFree` の挙動で「free 副作用」と「宛先の既タッチ性」を分離できる |
 | M2 | GPU 書き込み後の CPU 初回読み出しにおけるキャッシュ／コヒーレンス状態 | 増分が `host_read` に出て `readback` は不変 |
-| M3 | 後退がハーネスの計測範囲外（encode／`synchronize`／`alloc_uninit_pooled`）にある | 4 腕とも `readback`＋`host_read` の差が §1 の Δ≈0.47 ms（`matmul` 区間差）を説明しない |
+| M3 | 後退がハーネスの計測範囲外（encode／`synchronize`／`alloc_uninit_pooled`）にある | 4 腕とも `readback`（`matmul` 区間に対応する内訳。規則 4 参照）の差が §1 の Δ≈0.47 ms（`matmul` 区間差）を説明しない |
 | M4 | 共有負荷ノイズ（#1548 で N=1024 差分がノイズ帯だった前例がある） | 腕差が起動間 spread（ノイズ床）以下 |
 
 「glibc `M_MMAP_THRESHOLD` 動的適応」は glibc 固有の機構であり、macOS
@@ -129,11 +129,18 @@ README.md` を正とする。
    との差で状態引き継ぎの有無を記録する（判定には使わない・§7 の記入欄）。
 3. ノイズ床: 腕ごとの 5 起動 `readback` 中央値の (max−min)。腕差が
    いずれかの腕のノイズ床未満なら「判定不能（ノイズ帯）」と記す。
-4. 規模照合: N=1024 で `BorrowedKeepAlive − LegacyToVec` の `readback`＋
-   `host_read` 差が §1 の Δ≈0.47 ms（`matmul` 区間差）と同オーダー（目安
-   0.5〜2 倍）か確認する。同オーダーなら M1 系の切り分けへ進み、ほぼ 0
-   なら M3（ハーネス計測範囲外）の可能性を示すと解釈し、無理に機構を
-   帰属させない。
+4. 規模照合: N=1024 で `BorrowedKeepAlive − LegacyToVec` の **`readback`
+   のみ**の差（§2 の対応表のとおり `readback` が本番 `matmul` 区間の
+   GPU 待ち＋ホストへの読み出しに対応する内訳であり、`host_read` は
+   legacy の 2 本目確保・コピー等 `matmul` 区間の外側で発生する追加
+   コストのため合算しない）を §1 の Δ≈0.47 ms（`matmul` 区間差）と
+   同オーダー（目安 0.5〜2 倍）か確認する。同オーダーなら M1 系の切り
+   分けへ進み、ほぼ 0 なら M3（ハーネス計測範囲外）の可能性を示すと
+   解釈し、無理に機構を帰属させない。`host_read` の差は参考情報として
+   別途報告するに留め、規模照合の判定には用いない。全起動で checksum
+   が参照値と一致した run のみを対象とする（規則 5。不一致の起動は
+   規模照合からも除外し、有効な run が 5 件揃わない場合は「判定不能」
+   とする）。
 5. 全腕・全起動で checksum が参照値（腕間で共通に求めた
    `reference_checksum`）と一致すること（ハーネスの `assert!`。REQ-2 とは
    無関係の sanity）。不一致があれば当該起動は無効として記録する。

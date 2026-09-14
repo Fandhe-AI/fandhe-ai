@@ -56,6 +56,14 @@ class ParseError(RuntimeError):
     pass
 
 
+def checksum_matches(checksum: float, reference: float) -> bool:
+    """checksum が参照値と一致すると見なせるか（sanity 判定。REQ-2 とは
+    無関係）。主表の checksum 一致列・腕差算出時の起動除外の両方で使う
+    単一の許容規則（codex-review 指摘: 腕差側は主表と別のロジックで
+    checksum 不一致を見逃していた。同一関数へ集約し重複判定を防ぐ）。"""
+    return abs(checksum - reference) <= abs(reference) * 1e-9 + 1e-6
+
+
 def parse_log_text(
     text: str,
     *,
@@ -180,9 +188,7 @@ def render_markdown(results: dict) -> str:
             median_host_read = statistics.median(host_reads)
             noise_floor = max(readbacks) - min(readbacks)
             ref = reference_checksums.setdefault(n, checksums[0])
-            checksum_ok = all(
-                abs(c - ref) <= abs(ref) * 1e-9 + 1e-6 for c in checksums
-            )
+            checksum_ok = all(checksum_matches(c, ref) for c in checksums)
             lines.append(
                 f"| {n} | {label} | {median_readback:.4f} ms | "
                 f"{noise_floor:.4f} ms | {median_host_read:.4f} ms | "
@@ -193,38 +199,66 @@ def render_markdown(results: dict) -> str:
     lines.append("## 腕差（規則 4: 規模照合）")
     lines.append("")
     lines.append(
-        "N=1024 の `BorrowedKeepAlive - LegacyToVec`（readback + host_read "
-        "合計）を、`lowlayer-diagnosis-2026-09-12.md` §5 の Δ≈0.47 ms "
-        "（matmul 区間差）と比較する。"
+        "N=1024 の `BorrowedKeepAlive - LegacyToVec` の **`readback` 差**"
+        "（`matmul` 区間の GPU 待ち＋ホストへの読み出しに対応する内訳。"
+        "`docs/perf/metal-readout-legacy-regression-four-arm-diag.md` §2）を"
+        "`lowlayer-diagnosis-2026-09-12.md` §5 の Δ≈0.47 ms（matmul 区間差）"
+        "と比較する。`host_read`（legacy の 2 本目確保・コピー等、`matmul` "
+        "区間の外側で発生する追加コスト）は規模照合の対象に含めず、参考情報"
+        "として別掲する。checksum が参照値と一致しない起動は当該起動を"
+        "無効として除外する（規則 5）。"
     )
     lines.append("")
     for n in SIZES:
-        legacy = results.get((n, "legacy_to_vec"), [])
-        borrowed = results.get((n, "borrowed_keep_alive"), [])
-        # 腕差も同様に、両腕とも 5 起動が揃って初めて中央値差を報告する
-        # （揃わない場合の残存件数のみでの算出を避ける。上の主表と同じ
-        # 規則）。
+        legacy_all = results.get((n, "legacy_to_vec"), [])
+        borrowed_all = results.get((n, "borrowed_keep_alive"), [])
+        ref = reference_checksums.get(n)
+        # 主表と同じ参照 checksum（腕間で共通に求めた reference_checksum）
+        # を用い、腕差の算出前に不一致起動を除外する（codex-review 指摘:
+        # 主表で checksum が NG になっても腕差側は件数しか見ておらず、
+        # 不一致起動のデータがそのまま比較値へ混入していた）。参照値が
+        # 未確立（当該 N でどの腕も RUNS 件に到達しなかった）場合は
+        # フィルタできないため、安全側に倒して全件無効として扱う。
+        if ref is None:
+            legacy = []
+            borrowed = []
+        else:
+            legacy = [r for r in legacy_all if checksum_matches(r["checksum"], ref)]
+            borrowed = [
+                r for r in borrowed_all if checksum_matches(r["checksum"], ref)
+            ]
+        # 腕差も主表と同じ規則で、両腕とも有効な（checksum 一致・パース
+        # 成功の）5 起動が揃って初めて中央値差を報告する（揃わない場合の
+        # 残存件数のみでの算出を避ける）。
         if len(legacy) < RUNS or len(borrowed) < RUNS:
-            if not legacy and not borrowed:
+            if not legacy_all and not borrowed_all:
                 lines.append(f"- N={n}: 未実測")
             else:
                 lines.append(
-                    f"- N={n}: 欠損／判定不能（"
-                    f"legacy_to_vec={len(legacy)}/{RUNS} run, "
-                    f"borrowed_keep_alive={len(borrowed)}/{RUNS} run）"
+                    f"- N={n}: 欠損／判定不能（有効起動 "
+                    f"legacy_to_vec={len(legacy)}/{RUNS} run "
+                    f"(総 {len(legacy_all)} 件のうち checksum 一致分), "
+                    f"borrowed_keep_alive={len(borrowed)}/{RUNS} run "
+                    f"(総 {len(borrowed_all)} 件のうち checksum 一致分)）"
                 )
             continue
-        legacy_total = statistics.median(
-            [r["readback_ms"] + r["host_read_ms"] for r in legacy]
+        legacy_readback = statistics.median([r["readback_ms"] for r in legacy])
+        borrowed_readback = statistics.median([r["readback_ms"] for r in borrowed])
+        readback_diff = borrowed_readback - legacy_readback
+        legacy_host_read = statistics.median([r["host_read_ms"] for r in legacy])
+        borrowed_host_read = statistics.median(
+            [r["host_read_ms"] for r in borrowed]
         )
-        borrowed_total = statistics.median(
-            [r["readback_ms"] + r["host_read_ms"] for r in borrowed]
-        )
-        diff = borrowed_total - legacy_total
+        host_read_diff = borrowed_host_read - legacy_host_read
         lines.append(
-            f"- N={n}: LegacyToVec={legacy_total:.4f} ms, "
-            f"BorrowedKeepAlive={borrowed_total:.4f} ms, "
-            f"差={diff:.4f} ms"
+            f"- N={n}: readback 差（規模照合対象） "
+            f"LegacyToVec={legacy_readback:.4f} ms, "
+            f"BorrowedKeepAlive={borrowed_readback:.4f} ms, "
+            f"差={readback_diff:.4f} ms / "
+            f"host_read 差（参考。規模照合対象外） "
+            f"LegacyToVec={legacy_host_read:.4f} ms, "
+            f"BorrowedKeepAlive={borrowed_host_read:.4f} ms, "
+            f"差={host_read_diff:.4f} ms"
         )
 
     lines.append("")
@@ -345,6 +379,61 @@ def self_test() -> None:
         assert len(results[(1024, "legacy_to_vec")]) == 4
         md = render_markdown(results)
         assert "欠損／判定不能" in md
+
+    # 7) 腕差算出は checksum が参照値と不一致な起動を除外すること
+    #    （codex-review 指摘: 主表で checksum が NG になっても、腕差の
+    #    処理は件数しか確認せず不一致起動のデータをそのまま比較値へ
+    #    混入させていた）。legacy 側 1 件の checksum を意図的にずらし、
+    #    有効起動が 4/5 に落ちて「欠損／判定不能」になることを確認する。
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp)
+        for i, rb in enumerate([1.0, 1.1, 1.2, 1.05, 0.95], start=1):
+            # run3 だけ checksum を参照値（42.0）からずらす（不一致起動）。
+            checksum = 99.0 if i == 3 else 42.0
+            p = log_dir / f"layerB-n1024-legacy_to_vec-run{i}.log"
+            p.write_text(
+                _make_fixture_text(1024, "LegacyToVec", checksum, rb, 0.1),
+                encoding="utf-8",
+            )
+        for i, rb in enumerate([2.0, 2.1, 2.2, 2.05, 1.95], start=1):
+            p = log_dir / f"layerB-n1024-borrowed_keep_alive-run{i}.log"
+            p.write_text(
+                _make_fixture_text(1024, "BorrowedKeepAlive", 42.0, rb, 0.1),
+                encoding="utf-8",
+            )
+        results = collect(log_dir)
+        # collect() 自体は 5 件とも記録する（parse は成功している。
+        # checksum 不一致の除外は render_markdown() 側の責務）。
+        assert len(results[(1024, "legacy_to_vec")]) == 5
+        md = render_markdown(results)
+        assert "欠損／判定不能" in md
+        assert "legacy_to_vec=4/5 run" in md, md
+
+    # 8) 全起動の checksum が一致する通常ケースでは、腕差の出力が
+    #    readback 差（規模照合対象）と host_read 差（参考・対象外）を
+    #    分離して報告すること（codex-review 指摘: readback + host_read
+    #    合算では `matmul` 区間の Δ と比較対象がずれる）。
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp)
+        for i, rb in enumerate([1.0, 1.1, 1.2, 1.05, 0.95], start=1):
+            p = log_dir / f"layerB-n1024-legacy_to_vec-run{i}.log"
+            p.write_text(
+                _make_fixture_text(1024, "LegacyToVec", 42.0, rb, 0.1),
+                encoding="utf-8",
+            )
+        for i, rb in enumerate([2.0, 2.1, 2.2, 2.05, 1.95], start=1):
+            p = log_dir / f"layerB-n1024-borrowed_keep_alive-run{i}.log"
+            p.write_text(
+                _make_fixture_text(1024, "BorrowedKeepAlive", 42.0, rb, 0.3),
+                encoding="utf-8",
+            )
+        results = collect(log_dir)
+        md = render_markdown(results)
+        assert "readback 差（規模照合対象）" in md, md
+        assert "host_read 差（参考。規模照合対象外）" in md, md
+        # readback 中央値差 = 2.1 - 1.1 = 1.0、host_read 中央値差 = 0.3 - 0.1 = 0.2。
+        assert "差=1.0000 ms" in md, md
+        assert "差=0.2000 ms" in md, md
 
     print("self-test: OK", file=sys.stderr)
 
