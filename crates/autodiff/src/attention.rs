@@ -33,7 +33,7 @@
 //! 融合を性能目標の前提にしない」方針と整合）・`MultiheadAttention`
 //! Module 自体（in/out projection・head 分割。#1640）。
 
-use fandhe_ai_tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{ShapeError, Tensor, broadcast_shape};
 
 use crate::error::AutodiffError;
 use crate::var::Var;
@@ -214,7 +214,41 @@ pub(crate) fn scaled_dot_product_attention<'t>(
             scores
         }
     } else if let Some(mask) = attn_mask {
-        let blocked = negate_broadcast_mask(mask, &scores_shape)?;
+        // mask の broadcast 先は scores 自身のバッチ形状（query／key
+        // 由来）だけでなく、最終的に `weights.matmul(value)` で
+        // 合成される value 側のバッチ形状とも共通化する必要がある。
+        // mask の broadcast 先を scores 自身のバッチ形状のみに限定
+        // すると、value 側のみバッチが大きいケース（例: query/key
+        // バッチ=1・value バッチ=5・mask がそのバッチ 5 を明示する
+        // 場合）で本来妥当な mask を誤って拒否してしまう（PR #1845
+        // codex-review 指摘）。value の rank<2 は後続の
+        // `weights.matmul(value)` が検査する契約（§2.4）を崩さない
+        // よう、value の rank が妥当な場合に限りバッチ共通化を試みる
+        // （rank<2 の場合は scores 自身の形状のまま従来どおり進み、
+        // 最終 matmul が適切な `ShapeError` を返す）。
+        let value_shape = value.shape();
+        let mask_target_shape: Vec<usize> = if value_shape.len() >= 2 {
+            let value_batch_shape = &value_shape[..value_shape.len() - 2];
+            let scores_batch_shape = &scores_shape[..rank - 2];
+            let combined_batch_shape = broadcast_shape(scores_batch_shape, value_batch_shape)
+                .map_err(AutodiffError::Shape)?;
+            let mut full_shape = combined_batch_shape;
+            full_shape.push(l);
+            full_shape.push(s);
+            full_shape
+        } else {
+            scores_shape.clone()
+        };
+        // scores 自身のバッチ形状が共通形状より小さい場合のみ実体化を
+        // 伴う broadcast（`Var::broadcast_to`）を挟む。等しい場合
+        // （典型的には value 側のバッチが scores 以下の通常経路）は
+        // 恒等 view のため余分なノードを増やさない。
+        let scores = if mask_target_shape != scores_shape {
+            scores.broadcast_to(&mask_target_shape)?
+        } else {
+            scores
+        };
+        let blocked = negate_broadcast_mask(mask, &mask_target_shape)?;
         if l > 0 && s > 0 {
             reject_fully_masked_rows(&blocked)?;
         }
@@ -224,8 +258,13 @@ pub(crate) fn scaled_dot_product_attention<'t>(
     };
 
     // 最終軸（S）方向の softmax（CPU／CUDA／Metal いずれも行カーネルへ
-    // 到達する契約。イシュー #1594）。
-    let weights = scores.softmax(rank - 1)?;
+    // 到達する契約。イシュー #1594）。`scores` は `attn_mask` 分岐で
+    // value 側バッチを含む形状へ broadcast されている場合があるため、
+    // 軸番号は元の `rank` ではなく broadcast 後の実際の rank から
+    // 算出する（`rank - 1` を使うと value 側バッチ拡張時に軸番号が
+    // ずれる。PR #1845 codex-review 指摘の是正に伴う整合修正）。
+    let softmax_axis = scores.shape().len() - 1;
+    let weights = scores.softmax(softmax_axis)?;
 
     // `[..., L, S] @ [..., S, Ev] -> [..., L, Ev]`。S 不一致
     // （`key[-2] != value[-2]`）はここで `Var::matmul` が検査する

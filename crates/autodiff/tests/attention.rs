@@ -312,6 +312,66 @@ fn sdpa_forward_explicit_attn_mask_matches_brute_reference() {
     req2_assert("explicit attn_mask", &dense(&out), &expected);
 }
 
+#[test]
+fn sdpa_forward_explicit_attn_mask_broadcasts_against_value_only_batch() {
+    // PR #1845 codex-review 指摘（§P2）: mask の broadcast 先を
+    // scores 自身のバッチ形状（query／key 由来）のみから決めると、
+    // value 側だけバッチが大きく mask がそのバッチを明示するケース
+    // （query=[1,2,3]・key=[1,4,3]・value=[5,4,2]・mask=[5,2,4]。
+    // 出力 [5,2,2]）で本来妥当な mask が誤って拒否される。
+    // query／key のバッチ=1・value のバッチ=5・mask がバッチ 5 を
+    // 明示する場合でも受理され、value のバッチへ正しく broadcast
+    // されることを確認する。
+    let (bv, l, s, e, ev) = (5usize, 2usize, 4usize, 3usize, 2usize);
+    let q = t(seq(130, l * e), &[1, l, e]);
+    let k = t(seq(140, s * e), &[1, s, e]);
+    let v = t(seq(150, bv * s * ev), &[bv, s, ev]);
+    // バッチごとに異なる padding（mask はバッチ次元を潰さず [bv, l, s]
+    // をそのまま持つ）: バッチ 0・1 は最後の key 列のみ padding、
+    // バッチ 2 以降は padding なし。
+    let mask_allowed: Vec<bool> = (0..bv * l * s)
+        .map(|idx| {
+            let b = idx / (l * s);
+            let j = idx % s;
+            !(b < 2 && j == s - 1)
+        })
+        .collect();
+    let mask = Tensor::new(mask_allowed.clone(), &[bv, l, s]).unwrap();
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let qv = tape.var(&q);
+    let kv = tape.var(&k);
+    let vv = tape.var(&v);
+    let out = Var::scaled_dot_product_attention(&qv, &kv, &vv, Some(&mask), false, None)
+        .unwrap()
+        .to_tensor();
+    assert_eq!(out.shape(), &[bv, l, ev]);
+
+    // ブルートフォース側は q/k をバッチ 5 回複製して等バッチとして
+    // 評価する（mask はバッチごとに既に異なる値を持つ）。
+    let q_bc: Vec<f32> = (0..bv).flat_map(|_| dense(&q)).collect();
+    let k_bc: Vec<f32> = (0..bv).flat_map(|_| dense(&k)).collect();
+    let blocked: Vec<bool> = mask_allowed.iter().map(|&a| !a).collect();
+    let scale = 1.0 / (e as f64).sqrt();
+    let expected = brute_sdpa(BruteSdpaArgs {
+        batch: bv,
+        l,
+        s,
+        e,
+        ev,
+        q: &q_bc,
+        k: &k_bc,
+        v: &dense(&v),
+        blocked: Some(&blocked),
+        scale,
+    });
+    req2_assert(
+        "value-only batch broadcast attn_mask",
+        &dense(&out),
+        &expected,
+    );
+}
+
 // --- 2. 合成一致: 手動合成との bit 完全一致 ---
 
 #[test]
