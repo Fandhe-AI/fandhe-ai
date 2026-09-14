@@ -476,6 +476,27 @@ pub struct MetalGemm {
     /// （`docs/perf/metal-gemm-hfrag-candidate.md` §2）。
     tiled_hfrag_cache:
         Mutex<HashMap<(TileConfig, TransposePattern), objc2::rc::Retained<MtlPipeline>>>,
+    /// `gemm_simdgroup_tiled` の `SimdgroupTiled` 経路（[`Self::
+    /// pipeline_for_tile`]）で使うフラグメントロード実装方式（イシュー
+    /// #1693。`swizzle_enabled` 等と同じ instance ゲート方式）。本番既定
+    /// （`MetalGemm::new`）は `tile::MMA_FRAG_LOAD`（`SimdgroupLoad`）を
+    /// 渡すため既定挙動は不変。`ThreadElements`（[`Self::
+    /// new_with_mma_frag_load`] からのみ指定できる）は [`Self::
+    /// pipeline_for_tile`] 自身が参照するカーネル関数名を
+    /// `"gemm_simdgroup_tiled"` から `"gemm_simdgroup_tiled_te"`
+    /// （`thread_elements()` 方式候補カーネル）へ切り替える（`source_
+    /// specialized` 等と同じ「フィールドが構築ロジックの分岐そのものを
+    /// 決める」instance ゲート方式。`tiled_cache`／`tiled_spec_cache` は
+    /// そのまま共有する——`MetalGemm` インスタンス自体が base/head で
+    /// 分かれるため、キャッシュ取り違えは起こらない）。これにより
+    /// `dispatch_auto`／`dispatch_tiled_prepared`／
+    /// `dispatch_strided_tiled_prepared`／`dispatch_variant` 等の既存入口が
+    /// `ThreadElements` インスタンスではそのまま候補カーネルへ到達する
+    /// （`docs/perf/metal-gemm-thread-elements-candidate.md`）。本候補は
+    /// staged 経路・`TileClass::Legacy` のみを実装するため、非適格な候補
+    /// （非 staged・非 Legacy）は [`Self::pipeline_for_tile`] のフォール
+    /// バック chain 内で拒否する（fail-closed）。
+    mma_frag_load: tile::MmaFragLoad,
     /// threadgroup ID スウィズル（イシュー #540）をこのインスタンスの
     /// `SimdgroupTiled` 経路（[`Self::pipeline_for_tile`]・
     /// `encode_dispatch_tiled`）で有効化するかどうか。イシュー #746 で
@@ -771,6 +792,7 @@ impl MetalGemm {
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
+            tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
         )
     }
 
@@ -811,6 +833,7 @@ impl MetalGemm {
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
+            tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
         )
     }
 
@@ -847,6 +870,7 @@ impl MetalGemm {
             coop_load,
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
+            tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
         )
     }
 
@@ -891,6 +915,7 @@ impl MetalGemm {
             tile::COOP_LOAD_CONFIG,
             tile_class_mode,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
+            tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
         )
     }
 
@@ -929,6 +954,7 @@ impl MetalGemm {
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
+            tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
         )
     }
 
@@ -957,6 +983,7 @@ impl MetalGemm {
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
+            tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
         )
     }
 
@@ -984,6 +1011,7 @@ impl MetalGemm {
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
+            tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
         )
     }
 
@@ -1026,7 +1054,126 @@ impl MetalGemm {
             tile::COOP_LOAD_CONFIG,
             tile::TILE_CLASS_MODE,
             split_k_auto_enabled,
+            tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
         )
+    }
+
+    /// [`Self::new`] と同じ構築を行うが、`gemm_simdgroup_tiled` の
+    /// `thread_elements()` 方式 BlockMMA 候補カーネル（`gemm_simdgroup_
+    /// tiled_te`。イシュー #1693・親 #1586）を明示的な `mma_frag_load`
+    /// 引数で指定する。実機 `#[ignore]` parity／bit 一致自己検証テスト・
+    /// 兄弟イシュー #1694 の A/B 計測専用の入口: 同一プロセス内で base
+    /// （`tile::MMA_FRAG_LOAD`＝`SimdgroupLoad`。既定）/head
+    /// （`MmaFragLoad::ThreadElements`）の 2 インスタンスを構築して比較
+    /// する（[`Self::new_with_tile_class`] と同型の設計）。他 8 フラグ
+    /// （threadgroup ID スウィズル・simdgroup 細粒度同期・条件付き loop
+    /// unroll・ソーステキスト特殊化・フラグメントロード方式候補・協調
+    /// ロードレイアウト候補・タイルクラス分割・split-K 自動結線）は本番
+    /// 既定のまま据え置く。本番経路（[`Self::new`]）は常に
+    /// `tile::MMA_FRAG_LOAD`（`SimdgroupLoad`）を渡すため、本関数の追加
+    /// 自体は既定挙動を変えない。`ThreadElements` では [`Self::
+    /// pipeline_for_tile`] 自身がカーネル関数名を `"gemm_simdgroup_tiled_te"`
+    /// へ切り替えるため、head インスタンスでは `dispatch_auto`／
+    /// `dispatch_tiled_prepared`／`dispatch_strided_tiled_prepared`／
+    /// `dispatch_variant` 等の既存入口がそのまま候補カーネルへ到達する
+    /// （`mma_frag_load` フィールドのドキュメンテーションコメント参照）。
+    /// 性能実測・`tile::select`／`dispatch_auto` への組み込み判断は行わない
+    /// （兄弟イシュー #1694 のスコープ。`docs/perf/
+    /// metal-gemm-thread-elements-candidate.md`）。
+    ///
+    /// `pub` にする理由は [`Self::new_with_tile_class`] doc comment と同じ
+    /// （`tile::MmaFragLoad` を `pub` にしている以上、本関数も少なくとも
+    /// 同じ可視性が必要。`pub(crate)` のまま `#[cfg(test)]` を付けない
+    /// 場合の dead_code 検査抵触も同型）。
+    pub fn new_with_mma_frag_load(
+        ctx: &MetalContext,
+        mma_frag_load: tile::MmaFragLoad,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_gates(
+            ctx,
+            tile::SWIZZLE_ENABLED,
+            tile::FINE_BARRIER_ENABLED,
+            tile::UNROLL_ACC_ENABLED,
+            tile::SOURCE_SPECIALIZATION_ENABLED,
+            tile::FRAG_LOAD_CONFIG,
+            tile::COOP_LOAD_CONFIG,
+            tile::TILE_CLASS_MODE,
+            // `gemm_simdgroup_tiled_te` は `SPLIT_K_ENABLED` を一切参照
+            // しない（カーネル冒頭コメント「スコープ境界」参照）ため
+            // `split_k_auto_enabled` の値自体は無害だが、`ThreadElements`
+            // では split-K 自動結線を明示的に無効化しておく（誤って
+            // split-K 経路の状態と混同しないための防御的な選択。
+            // `pipeline_for_tile` の te 分岐ガード自体は本フィールドを
+            // 参照しない）。
+            match mma_frag_load {
+                tile::MmaFragLoad::SimdgroupLoad => crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED,
+                tile::MmaFragLoad::ThreadElements => false,
+            },
+            mma_frag_load,
+        )
+    }
+
+    /// テスト専用: このインスタンスが保持する [`tile::MmaFragLoad`] を
+    /// 取得する（実機 `#[ignore]` テストが base/head インスタンスの構成を
+    /// 突き合わせる用途。イシュー #1693）。
+    #[cfg(test)]
+    pub(crate) fn mma_frag_load(&self) -> tile::MmaFragLoad {
+        self.mma_frag_load
+    }
+
+    /// テスト専用（イシュー #1693）: `simdgroup_thread_elements_layout_probe`
+    /// （`shaders/gemm.metal` 末尾）を 1 回ディスパッチし、各レーンが
+    /// `thread_elements()` で読み出した 2 要素を `out[lane*2]`/
+    /// `out[lane*2+1]`（lane 0..31）として返す。`src`（buffer 0）は 0..63
+    /// の行優先 8×8 行列を `simdgroup_load` する。実機
+    /// `te_layout_probe_matches_model`（`tests/gemm_te_parity.rs`）が
+    /// `crate::tile::thread_elements_coord` モデルとの一致を検証する
+    /// （R0 前提ゲート。`docs/perf/metal-gemm-thread-elements-candidate.md`
+    /// §5）。関数定数を持たない単発カーネルのため、キャッシュを持たず
+    /// 呼び出しごとに [`pipeline::make_pipeline`] で構築する（診断専用・
+    /// 高頻度呼び出しを想定しないため遅延キャッシュ化しない）。
+    #[cfg(test)]
+    pub(crate) fn diag_probe_thread_elements_layout(
+        &self,
+        ctx: &MetalContext,
+    ) -> Result<Vec<f32>, MetalError> {
+        let probe_pipeline = pipeline::make_pipeline(
+            ctx.device(),
+            &self.library,
+            "simdgroup_thread_elements_layout_probe",
+        )?;
+        let src: Vec<f32> = (0..64u32).map(|i| i as f32).collect();
+        let src_buf = MetalBuffer::new_with_data(ctx, &src)?;
+        let out_buf = MetalBuffer::new_zeroed(ctx, 64)?;
+        let out_len: u32 = 64;
+        ctx.dispatch_sync(|encoder| {
+            encoder.setComputePipelineState(&probe_pipeline);
+            // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 1/2・
+            // 2/2）と同一の契約。`src_buf`/`out_buf` は `dispatch_sync` の
+            // 同期完了まで呼び出し元スタックフレームで生存し、`out_len`
+            // はローカル変数で長さは `size_of::<u32>()` と一致する。
+            unsafe {
+                encoder.setBuffer_offset_atIndex(Some(src_buf.raw()), 0, 0);
+                encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
+                encoder.setBytes_length_atIndex(
+                    std::ptr::NonNull::from(&out_len).cast(),
+                    std::mem::size_of::<u32>(),
+                    2,
+                );
+            }
+            let threads_per_tg = MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            };
+            let threadgroups = MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            };
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+        })?;
+        Ok(out_buf.read_to_vec())
     }
 
     /// [`Self::new_with_swizzle`]・[`Self::new_with_fine_barrier`]・
@@ -1055,6 +1202,7 @@ impl MetalGemm {
         coop_load: tile::CoopLoadConfig,
         tile_class_mode: tile::TileClassMode,
         split_k_auto_enabled: bool,
+        mma_frag_load: tile::MmaFragLoad,
     ) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
@@ -1093,6 +1241,7 @@ impl MetalGemm {
             tiled_cache: Mutex::new(HashMap::new()),
             tiled_f16_cache: Mutex::new(HashMap::new()),
             tiled_hfrag_cache: Mutex::new(HashMap::new()),
+            mma_frag_load,
             swizzle_enabled,
             fine_barrier_enabled,
             unroll_acc_enabled,
@@ -1167,6 +1316,21 @@ impl MetalGemm {
         };
 
         for candidate in tile::fallback_chain(cfg) {
+            // イシュー #1693: `thread_elements()` 方式候補カーネル
+            // （`gemm_simdgroup_tiled_te`）は staged 経路・`TileClass::
+            // Legacy` のみを実装する（`TileClass` 分割・split-K のいずれも
+            // 未対応。`shaders/gemm.metal::gemm_simdgroup_tiled_te` 冒頭
+            // コメント「スコープ境界」参照）。非適格な候補は
+            // `SimdgroupLoad`（本番既定）と同じフォールバック chain を
+            // そのまま巡回して次候補へ進む（最終的に非 staged な
+            // `SINGLE_SIMDGROUP_8X8` しか残らない場合は fail-closed に
+            // 構成失敗として扱う）。
+            if self.mma_frag_load == tile::MmaFragLoad::ThreadElements
+                && (!candidate.staged || tile_class != tile::TileClass::Legacy)
+            {
+                continue;
+            }
+
             if let Some(pipeline) = lock_tile_cache(cache)?.get(&(candidate, pattern, tile_class)) {
                 return Ok((Retained::clone(pipeline), candidate));
             }
@@ -1224,7 +1388,20 @@ impl MetalGemm {
                 // `pipeline_for_tile_split_k`（別キャッシュ）が構築する。
                 split_k_enabled: false,
             };
-            let function_name = GemmVariant::SimdgroupTiled(candidate).function_name();
+            // イシュー #1693: `mma_frag_load` に応じてカーネル関数名を
+            // 切り替える（`GemmVariant::SimdgroupTiled` の本番関数名
+            // `"gemm_simdgroup_tiled"` はそのまま。`ThreadElements` の
+            // 場合のみ候補カーネル `"gemm_simdgroup_tiled_te"` へ切り替わる。
+            // 上記ガードにより本分岐へ来る時点で `candidate.staged` かつ
+            // `tile_class == Legacy` が成立している）。既定値
+            // （`SimdgroupLoad`）では本番既定経路と完全にバイト同一
+            // （`tile::MMA_FRAG_LOAD` を参照する箇所はここのみ）。
+            let function_name = match self.mma_frag_load {
+                tile::MmaFragLoad::SimdgroupLoad => {
+                    GemmVariant::SimdgroupTiled(candidate).function_name()
+                }
+                tile::MmaFragLoad::ThreadElements => "gemm_simdgroup_tiled_te",
+            };
             let build_result = if self.source_specialized {
                 pipeline::make_pipeline_source_specialized(
                     ctx.device(),
@@ -1260,8 +1437,23 @@ impl MetalGemm {
             }
         }
 
-        Err(last_err.unwrap_or(MetalError::PipelineCreation {
-            message: "no tile configuration in fallback chain was accepted".to_string(),
+        Err(last_err.unwrap_or_else(|| {
+            // イシュー #1693 codex-review 指摘: `mma_frag_load ==
+            // ThreadElements` で fallback chain が非適格候補（非 staged・
+            // 非 Legacy）のみを残して尽きた場合（例:
+            // `TileConfig::SINGLE_SIMDGROUP_8X8` 単独要求）、上記ガードで
+            // 一度もパイプライン構築を試みないため `last_err` は `None` の
+            // まま本分岐に落ちる。汎用メッセージのみでは te 固有の拒否理由
+            // が失われテスト（`gemm_te_parity.rs::
+            // te_rejects_non_staged_candidate`）の期待文言 `"(te)"` と
+            // 食い違うため、`mma_frag_load` に応じてメッセージへ te の言及
+            // を付加する。
+            let message = if self.mma_frag_load == tile::MmaFragLoad::ThreadElements {
+                "no tile configuration in fallback chain was accepted (te)".to_string()
+            } else {
+                "no tile configuration in fallback chain was accepted".to_string()
+            };
+            MetalError::PipelineCreation { message }
         }))
     }
 
@@ -7536,6 +7728,128 @@ mod tests {
 
             assert_parity(
                 &format!("metal hfrag SimdgroupTiled({cfg:?}) gemm m={m} n={n} k={k}"),
+                &out,
+                &expected,
+            );
+        }
+    }
+
+    // --- thread_elements() 方式候補（イシュー #1693）実機 `#[ignore]` テスト ---
+    // 全形状 × 転置 4 パターンの網羅・本番との bit 一致・非 staged 拒否は
+    // `tests/gemm_te_parity.rs`（別コンパイル単位）が担う。ここでは
+    // `pub(crate)` API（`diag_probe_thread_elements_layout`・
+    // `tile::CANDIDATES`）を使うためクレート境界の外から呼べないテストのみ
+    // 置く（`all_staged_candidates_match_hfrag_cpu_reference_512_nn` と同じ
+    // 設計判断）。
+
+    /// [`MetalGemm::mma_frag_load`]（テスト専用アクセサ。`coop_load`／
+    /// `tile_class_mode` と同型）が `new`／`new_with_mma_frag_load` の
+    /// 引数を正しく反映することを確認する（base/head インスタンスの
+    /// 構成を突き合わせる用途は #1694 の実機 A/B が使う）。`MetalGemm`
+    /// の構築自体が `MetalContext::new`（実機依存）を要求するため実機
+    /// `#[ignore]` として置く。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn mma_frag_load_accessor_reflects_constructor_argument() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base = MetalGemm::new(&ctx).expect("base GEMM パイプラインの構築に失敗した");
+        assert_eq!(base.mma_frag_load(), tile::MmaFragLoad::SimdgroupLoad);
+        let head = MetalGemm::new_with_mma_frag_load(&ctx, tile::MmaFragLoad::ThreadElements)
+            .expect("head GEMM パイプラインの構築に失敗した");
+        assert_eq!(head.mma_frag_load(), tile::MmaFragLoad::ThreadElements);
+    }
+
+    /// R0 前提ゲート（`docs/perf/metal-gemm-thread-elements-candidate.md`
+    /// §5）: `simdgroup_thread_elements_layout_probe` が実機で返す
+    /// レーン→要素対応が `crate::tile::thread_elements_coord` モデルと
+    /// 一致することを確認する。不一致はレーン対応の実機仕様差異を示す
+    /// （緩和目的の判定ではない。カーネル冒頭コメント「数値契約」参照）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn te_layout_probe_matches_model() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        let out = gemm
+            .diag_probe_thread_elements_layout(&ctx)
+            .expect("diag_probe_thread_elements_layout に失敗した（実機でのみ実行する前提）");
+        assert_eq!(out.len(), 64);
+
+        for lane in 0..32u32 {
+            let (fm, fn0) = tile::thread_elements_coord(lane);
+            for e in 0..2u32 {
+                let expected = (fm * 8 + fn0 + e) as f32;
+                let actual = out[(lane * 2 + e) as usize];
+                assert_eq!(
+                    actual, expected,
+                    "lane {lane} 要素 {e}: thread_elements() レイアウトが \
+                     thread_elements_coord モデルと不一致（実機 {actual} \
+                     対 モデル {expected}）"
+                );
+            }
+        }
+    }
+
+    /// `tile::CANDIDATES` を全て（`staged=true` のみ）、
+    /// `gemm_simdgroup_tiled_te`（イシュー #1693）で 512³ NN 巡回し、
+    /// CPU 参照実装（f32・丸めなし）との REQ-2 統一複合判定 PASS・
+    /// フォールバック非経由を確認する（`all_staged_candidates_match_
+    /// hfrag_cpu_reference_512_nn` と同じ設計判断。本カーネルは f32 経路
+    /// のため厳密ゼロ fail を期待するが、正式ゲートは REQ-2 複合判定
+    /// のまま緩和しない）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_staged_candidates_match_te_cpu_reference_512_nn() {
+        use bench_harness::rng::Xorshift64Star;
+        use fandhe_ai_backend_cpu::parity::assert_parity;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = MetalGemm::new_with_mma_frag_load(&ctx, tile::MmaFragLoad::ThreadElements)
+            .expect("GEMM パイプラインの構築に失敗した");
+
+        let (m, n, k) = (512usize, 512usize, 512usize);
+        for (i, &cfg) in tile::CANDIDATES.iter().enumerate() {
+            if !cfg.staged {
+                // te は staged 経路のみ実装する契約
+                // （`pipeline_for_tile` の te ガードが非 staged 候補を拒否する）
+                // ため対象外。
+                continue;
+            }
+
+            let mut rng_a = Xorshift64Star::new(0x1693_a000 + i as u64);
+            let mut rng_b = Xorshift64Star::new(0x1693_b000 + i as u64);
+            let a: Vec<f32> = rng_a.fill_vec(m * k);
+            let b: Vec<f32> = rng_b.fill_vec(k * n);
+
+            // フォールバック非経由の確認は `resolve_tile_config`
+            // （`pipeline_for_tile` 経由。`mma_frag_load == ThreadElements`
+            // のためこの `gemm` インスタンスでは `gemm_simdgroup_tiled_te`
+            // が解決される）で行い、実際の出力は本番入口 `dispatch_variant`
+            // （`GemmVariant::SimdgroupTiled`）で取得する（本番既定経路と
+            // 完全に同じコードパスを通ることを保証する。`dispatch_variant`
+            // 自体は resolved cfg を返さない設計のため）。
+            let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+                panic!("候補 {cfg:?}（te）のパイプライン構築に失敗した: {err}")
+            });
+            assert_eq!(
+                resolved, cfg,
+                "候補 {cfg:?}（te）が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+                 （構成失敗を検知できていない）"
+            );
+
+            let out = gemm
+                .dispatch_variant(&ctx, GemmVariant::SimdgroupTiled(cfg), &a, &b, m, n, k)
+                .unwrap_or_else(|err| panic!("候補 {cfg:?}（te）のディスパッチに失敗した: {err}"));
+
+            let mut expected = vec![0.0f32; m * n];
+            fandhe_ai_backend_cpu::parity::matmul_reference_fma(&a, &b, &mut expected, m, n, k)
+                .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+            assert_parity(
+                &format!("metal te SimdgroupTiled({cfg:?}) gemm m={m} n={n} k={k}"),
                 &out,
                 &expected,
             );
