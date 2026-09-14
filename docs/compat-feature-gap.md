@@ -830,10 +830,30 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 への合成。非破壊拡張のデフォルトメソッド）を追加し、`backend-cpu` が
 専用オーバーライド（`CpuBackendOps::gemm_batched`。既存 2 次元
 `gemm`/`gemm_into_slice` と bit 同一）を持つ。facade 新規公開面なし
-（既存 `Var` 再エクスポート経由でそのまま到達可能）。CUDA／Metal は
-既定合成実装のまま（機能的に到達可能・専用バッチカーネルは #1716／
-#1717）。`einsum`（rank≥3 matmul を伴う batch 添字縮約。#1600 が未実装
-としていた対象）は本イシューでは対象外のまま残る。
+（既存 `Var` 再エクスポート経由でそのまま到達可能）。CUDA は既定合成
+実装のまま（機能的に到達可能・専用バッチカーネルは #1716）。
+`einsum`（rank≥3 matmul を伴う batch 添字縮約。#1600 が未実装として
+いた対象）は本イシューでは対象外のまま残る。
+
+**追補（イシュー #1717）**: Metal に専用オーバーライド
+（`MetalBackendOps::gemm_batched`／`gemm_batched_fp32_strict`）が
+実装済みになった。既定合成実装（バッチをほどいて `batch_len` 回
+`self.gemm` を呼ぶ——各呼び出しが独自に upload・`dispatch_auto`〈内部
+同期〉・download する）と異なり、正規化済みオペランドを 1 回ずつ
+upload し、バッチごとの GEMM を `gemm::MetalGemm::
+encode_strided_bias_act_prepared_with_c_offset`（`gemm_fp32_strict_
+into`〈#1555〉・`linear_forward_device`〈#1216〉が確立した encode-only
+パターン。`gemm.rs`／shader 自体は無変更）で 1 つのコマンドバッチへ
+encode するだけで積み、`download` 1 回だけが GPU 完了を待つ「バッチ
+ループ方式」にする。rank≥3 は classic strided カーネル
+（`gemm_tiled_bias_act`）を経由するため per-batch `gemm`
+（`dispatch_auto` = `gemm_simdgroup_tiled`／split-K）とは bit 同一を
+主張せず、REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差
+1e-5 未満）を受け入れ契約とする。本経路は `dispatch_auto`／
+`tile::select_route_for_device` を経由しないため split-K 実行時
+トグル（`crate::split_k_runtime`。既定 `true`）の状態に依存しない。
+facade 新規公開面なし。M4 Max 実機実測は本エージェント実行環境に
+Apple Silicon 実機がないため未実施のまま Mac セッションへ申し送る。
 
 ## #1636（#1707〜#1709）の追補
 

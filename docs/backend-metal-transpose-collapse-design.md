@@ -137,6 +137,14 @@ entry.md`・`docs/matmul-vjp-zero-copy-decision.md` §4.4）。
 （公開 API 変更を伴う）は #1215 でも未消化のまま別イシュー行きである
 （未起票。ユーザー承認が必要）。
 
+**#1717 での消化状況（追補）**: §4「`BackendOps` trait へのバッチ
+matmul／転置指定メソッド追加」は、バッチ matmul 側が #1715（trait・
+CPU オーバーライド）・本イシュー #1717（Metal オーバーライド。
+`MetalBackendOps::gemm_batched`／`gemm_batched_fp32_strict`）で消化
+済み（`gemm_collapsed_lhs`〈inherent メソッド。本ファイル §3.4〉は
+不変のまま残り、バッチ matmul とは独立の別経路）。転置指定メソッド
+（NT/TN 以外の一般 stride 入口）は本イシューの対象外のまま残る。
+
 ## 5. 実機実測
 
 イシュー #1039（M4 Max 実機セッション）で以下を実行し、全 0 fail を確認した:
