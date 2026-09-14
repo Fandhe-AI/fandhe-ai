@@ -272,11 +272,18 @@ impl MetalElementwise {
     }
 
     /// 単項演算共通の起動手続き。[`Self::run_binary`] と同一構造。
+    /// `payload` はイシュー #1709 で追加した `ScalarUnaryOp::Clamp` 等
+    /// ペイロードあり kind 向けの追加起動引数（`numel` の後ろへ
+    /// `p0`／`p1` として渡す。`crate::scalar_op_source` モジュール doc
+    /// 「ペイロード seam」参照）。既存呼び出し（`run_relu_f32` 等）は
+    /// 空スライスを渡すため、エンコード列は変更前と不変＝bit 同一
+    /// （非後退契約）。
     fn run_unary(
         &self,
         ctx: &MetalContext,
         pipeline: &MtlPipeline,
         a: &[f32],
+        payload: &[f32],
     ) -> Result<Vec<f32>, MetalError> {
         validate_elementwise_len(a.len())?;
         let numel = a.len();
@@ -291,7 +298,7 @@ impl MetalElementwise {
         let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, numel)?;
 
         ctx.dispatch_sync(|encoder| {
-            encode_unary_dispatch(encoder, pipeline, &a_buf, &out_buf, numel as u32);
+            encode_unary_dispatch(encoder, pipeline, &a_buf, &out_buf, numel as u32, payload);
         })?;
 
         Ok(out_buf.read_to_vec())
@@ -319,17 +326,17 @@ impl MetalElementwise {
 
     /// `out[i] = max(a[i], 0)`（f32）。
     pub fn run_relu_f32(&self, ctx: &MetalContext, a: &[f32]) -> Result<Vec<f32>, MetalError> {
-        self.run_unary(ctx, &self.relu_f32, a)
+        self.run_unary(ctx, &self.relu_f32, a, &[])
     }
 
     /// `out[i] = exp(a[i])`（f32、`metal::precise::exp`）。
     pub fn run_exp_f32(&self, ctx: &MetalContext, a: &[f32]) -> Result<Vec<f32>, MetalError> {
-        self.run_unary(ctx, &self.exp_f32, a)
+        self.run_unary(ctx, &self.exp_f32, a, &[])
     }
 
     /// `out[i] = tanh(a[i])`（f32、`metal::precise::tanh`）。
     pub fn run_tanh_f32(&self, ctx: &MetalContext, a: &[f32]) -> Result<Vec<f32>, MetalError> {
-        self.run_unary(ctx, &self.tanh_f32, a)
+        self.run_unary(ctx, &self.tanh_f32, a, &[])
     }
 
     /// テンプレート生成された [`fandhe_ai_tensor_core::ScalarUnaryOp`]
@@ -351,13 +358,19 @@ impl MetalElementwise {
     /// カーネルでは境界外アクセスやプールの未初期化内容の返却に
     /// つながる（CUDA 側 `elementwise.rs::run_scalar_unary_f32`／
     /// `run_scalar_binary_f32` も同型の理由で `pub(crate)`）。
+    ///
+    /// `payload`（イシュー #1709 追加）は [`ScalarUnaryOp::Clamp`] 等
+    /// ペイロードあり kind の追加起動引数（`crate::scalar_op_source::
+    /// unary_payload` が返す値をそのまま渡す。ペイロードなし kind は
+    /// 空スライス）。
     pub(crate) fn run_scalar_unary_f32(
         &self,
         ctx: &MetalContext,
         pipeline: &MtlPipeline,
         a: &[f32],
+        payload: &[f32],
     ) -> Result<Vec<f32>, MetalError> {
-        self.run_unary(ctx, pipeline, a)
+        self.run_unary(ctx, pipeline, a, payload)
     }
 
     /// [`Self::run_scalar_unary_f32`] の 2 項版
@@ -475,8 +488,11 @@ impl MetalElementwise {
             return Ok(());
         }
         let pipeline = self.pipeline_for_unary(op)?;
+        // `UnaryElementwiseOp`（`Relu`／`Exp`／`Tanh`）はいずれもペイロード
+        // を持たないため空スライス（イシュー #1709 の payload 配線とは
+        // 無関係。エンコード列は変更前と不変）。
         ctx.dispatch_sync(|encoder| {
-            encode_unary_dispatch(encoder, pipeline, a, out, numel as u32);
+            encode_unary_dispatch(encoder, pipeline, a, out, numel as u32, &[]);
         })
     }
 }
@@ -545,12 +561,21 @@ fn encode_binary_dispatch(
 /// バッファ引数が 1 つ少ないため index が 1 つずつ前へずれる
 /// （`shaders/elementwise.metal` の `ew_relu_f32`／`ew_exp_f32`／
 /// `ew_tanh_f32` のバッファ宣言と一致させる）。
+///
+/// `payload`（イシュー #1709 追加）は `numel`（index 2）の後ろへ
+/// `constant float& p0 [[buffer(3)]]`／`p1 [[buffer(4)]]` として順に
+/// 結線する（`crate::scalar_op_source::unary_kernel_source` が生成する
+/// ペイロードあり kind〈`Clamp`〉の宣言と一致させる）。空スライス
+/// （既存 `run_relu_f32`／`run_exp_f32`／`run_tanh_f32`・
+/// `dispatch_unary_resident` の呼び出し）はこのループが 0 回になり
+/// エンコード列は変更前と完全に不変＝bit 同一（非後退契約）。
 fn encode_unary_dispatch(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &MtlPipeline,
     a_buf: &MetalBuffer,
     out_buf: &MetalBuffer,
     numel: u32,
+    payload: &[f32],
 ) {
     encoder.setComputePipelineState(pipeline);
 
@@ -567,6 +592,21 @@ fn encode_unary_dispatch(
             std::mem::size_of::<u32>(),
             2,
         );
+    }
+
+    // SAFETY: `p` はループ内のローカル参照でありポインタは
+    // `setBytes_length_atIndex` 呼び出し中生存し、長さは
+    // `size_of::<f32>()` と一致する（`encode_binary_scalar_dispatch` の
+    // `value` と同一の根拠。`unary_kernel_source` が宣言する
+    // `constant float& p0`／`p1` と型を揃える）。
+    for (i, p) in payload.iter().enumerate() {
+        unsafe {
+            encoder.setBytes_length_atIndex(
+                std::ptr::NonNull::from(p).cast(),
+                std::mem::size_of::<f32>(),
+                3 + i,
+            );
+        }
     }
 
     let (threadgroups, threads_per_tg) = ew_dispatch_sizes(numel);

@@ -351,8 +351,9 @@ impl MetalBackendOps {
     }
 
     /// [`BackendOps::scalar_unary`] の Metal ディスパッチ（イシュー
-    /// #1707。CUDA 側 `CudaBackendOps::scalar_unary_dispatch`〈#1700〉の
-    /// Metal 対応版）。`crate::scalar_op_source` が対応する kind のみ
+    /// #1707・#1708・#1709〈`Clamp` 追加〉。CUDA 側
+    /// `CudaBackendOps::scalar_unary_dispatch`〈#1700〉の Metal
+    /// 対応版）。`crate::scalar_op_source` が対応する kind のみ
     /// パイプラインを生成・キャッシュして起動し、未対応 kind は
     /// `BackendError::Unsupported` を返す（呼び出し元
     /// `fandhe_ai_autodiff::grad::scalar_unary_with_fallback` がホスト
@@ -373,7 +374,7 @@ impl MetalBackendOps {
         if crate::scalar_op_source::unary_kernel_source(op).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "scalar_unary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (いずれの sub issue にも含まれない kind。ホスト参照実装へフォールバック)"
             )));
         }
 
@@ -391,18 +392,22 @@ impl MetalBackendOps {
         let Some(pipeline) = pipeline else {
             return Err(BackendError::Unsupported(format!(
                 "scalar_unary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (いずれの sub issue にも含まれない kind。ホスト参照実装へフォールバック)"
             )));
         };
+        // `Clamp` 等（イシュー #1709）のペイロード（`min`／`max`）を
+        // 起動引数として渡す（`crate::scalar_op_source` モジュール doc
+        // 「ペイロード seam」参照。ペイロードなし kind は空スライス）。
+        let payload = crate::scalar_op_source::unary_payload(op);
         let out = ew
-            .run_scalar_unary_f32(&ctx, &pipeline, a_slice)
+            .run_scalar_unary_f32(&ctx, &pipeline, a_slice, payload.as_slice())
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// [`Self::scalar_unary_dispatch`] の 2 項版（イシュー #1707）。
-    /// ブロードキャストは `elementwise_binary`（`add`／`mul`）と同じ
-    /// `Tensor::broadcast_with`。
+    /// [`Self::scalar_unary_dispatch`] の 2 項版（イシュー #1707・
+    /// #1708・#1709〈比較演算 6 種追加〉）。ブロードキャストは
+    /// `elementwise_binary`（`add`／`mul`）と同じ `Tensor::broadcast_with`。
     fn scalar_binary_dispatch(
         &self,
         op: ScalarBinaryOp,
@@ -412,7 +417,7 @@ impl MetalBackendOps {
         if crate::scalar_op_source::binary_kernel_source(op).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "scalar_binary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (いずれの sub issue にも含まれない kind。ホスト参照実装へフォールバック)"
             )));
         }
 
@@ -435,7 +440,7 @@ impl MetalBackendOps {
         let Some(pipeline) = pipeline else {
             return Err(BackendError::Unsupported(format!(
                 "scalar_binary: Metal template kernel not implemented for {op:?} \
-                 (#1709 が担当するスコープ外の可能性あり)"
+                 (いずれの sub issue にも含まれない kind。ホスト参照実装へフォールバック)"
             )));
         };
         let out = ew
