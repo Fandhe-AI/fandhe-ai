@@ -573,9 +573,9 @@ fn cosine_annealing_lr_scheduler_drives_sgd_config_via_facade_only() {
 
     for step in 0..STEPS {
         let lr = scheduler.lr_at(step);
-        // lr_at は非負を返しうるが SGD の学習率検査は正のみ受理する
-        // （`ConstantLr`／`StepLr` と同じ制約）。ここでは t_max 到達前
-        // （lr>0）の範囲のみ使うため常に正。
+        // lr_at は非負を返しうる。`SgdConfig::validate` は lr<0.0 のみ
+        // 拒否し lr==0.0 は受理するため、非負であれば常に Sgd::new は
+        // 成功する（`ConstantLr`／`StepLr` と同じ制約）。
         let mut sgd = Sgd::new(SgdConfig::new(lr))
             .unwrap_or_else(|e| panic!("test fixture: Sgd::new が失敗した: {e}"));
 
