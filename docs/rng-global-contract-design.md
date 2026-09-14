@@ -195,9 +195,16 @@ VJP は追加していない（生成結果は微分不能な葉値であり、`
 - **dtype**: `randint` の出力は `i32`（PyTorch 既定の int64 とは異なる
   意図的な差異。本リポの index／targets 型契約——`Var::gather`／
   `index_select`／`cross_entropy` 等——に合わせた）。
-- **`shape` の要素数オーバーフロー検査**: `checked_numel`（`tensor.rs`
-  の `pub(crate)` 関数）を**グローバル RNG のロック取得前**に呼ぶため、
-  オーバーフロー shape は乱数を一切消費せず `Err` を返す。
+- **`shape` の要素数オーバーフロー・アロケーション不能検査**:
+  `checked_numel_for::<T>`（`tensor.rs` の `pub(crate)` 関数。要素数積の
+  `usize` オーバーフローに加え、`T` 換算のバイトサイズが `Vec` の
+  allocation 上限〈`isize::MAX` バイト〉を超えないかも検査する。当初は
+  要素数積のみを見る `checked_numel` を使っていたが、`shape =
+  &[usize::MAX]` のような shape では要素数積自体は `usize::MAX` の
+  ままオーバーフローせず後続の `Vec::with_capacity` が capacity
+  overflow で panic しうると PR #1815 の codex-review で指摘され是正
+  した）を**グローバル RNG のロック取得前**に呼ぶため、確保不能な
+  shape は乱数を一切消費せず `Err` を返す。
 - **承認の扱い**: `docs/compat-api-scope.md` §5 は「Tier 1／Tier 2 に
   列挙済みの機能の実装は本節の再適用を要しない」と規定しており、本イ
   シューの対象（乱数生成と RNG 契約）は §1.2 Tier 1 に列挙済みのため、
@@ -207,5 +214,7 @@ VJP は追加していない（生成結果は微分不能な葉値であり、`
   `normal(mean, std)`／`uniform_(a, b)`／`bernoulli`／`multinomial`／
   `randperm`・`torch.Generator` 相当の非グローバル RNG・CUDA／Metal
   デバイス側乱数カーネル・`nn::Dropout`（#1603）・`randint` の int64
-  版・`ShapeError` の facade 再エクスポート（`Tensor::zeros` 等と同じ
-  既存のギャップで本イシュー以前から存在）。
+  版。`ShapeError` の facade 再エクスポートは本イシューで実装済み
+  （`crates/facade/src/lib.rs::ShapeError` 再エクスポート。旧版の本節が
+  「対象外」と誤記していた点を PR #1815 codex-review 指摘〈P2〉により
+  是正）。

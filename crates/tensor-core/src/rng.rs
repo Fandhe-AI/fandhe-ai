@@ -44,7 +44,7 @@ use std::fmt;
 use std::sync::{Mutex, OnceLock};
 
 use crate::error::ShapeError;
-use crate::tensor::{Tensor, checked_numel};
+use crate::tensor::{Tensor, checked_numel_for};
 
 /// xorshift64* 状態。`autodiff::nn::init::Xorshift64Star`（旧実装）・
 /// `bench-harness::rng::Xorshift64Star` と同一アルゴリズム
@@ -209,7 +209,7 @@ impl std::error::Error for RngError {}
 /// xorshift64* は暗号学的に安全な PRNG ではない（モジュール冒頭
 /// コメント参照。OWASP A02）。
 pub fn randn(shape: &[usize]) -> Result<Tensor<f32>, ShapeError> {
-    let numel = checked_numel(shape)?;
+    let numel = checked_numel_for::<f32>(shape)?;
     let data = with_global_rng(|rng| {
         let mut out = Vec::with_capacity(numel);
         let mut remaining = numel;
@@ -240,7 +240,7 @@ pub fn randn(shape: &[usize]) -> Result<Tensor<f32>, ShapeError> {
 /// 構成されるため、プラットフォーム横断で bit 同一の決定性を持つ
 /// （[`randn`] と異なりゴールデン値による回帰が可能。`tests` 参照）。
 pub fn rand(shape: &[usize]) -> Result<Tensor<f32>, ShapeError> {
-    let numel = checked_numel(shape)?;
+    let numel = checked_numel_for::<f32>(shape)?;
     let data = with_global_rng(|rng| (0..numel).map(|_| rng.next_unit_f32()).collect());
     Tensor::new(data, shape)
 }
@@ -254,15 +254,17 @@ pub fn rand(shape: &[usize]) -> Result<Tensor<f32>, ShapeError> {
 ///
 /// `low >= high`（空・逆転区間）は [`RngError::InvalidRange`] を返す。
 /// 剰余バイアスを避けるため rejection sampling（`zone` 未満の値のみ
-/// 採用）で一様性を保証する。`shape` の要素数オーバーフローは乱数を
-/// 一切消費せず [`RngError::Shape`] を返す（クレート内共通の要素数積
-/// 検査関数によるロック取得前の事前検査。OWASP A03/A04 相当の入力
-/// 検証）。
+/// 採用）で一様性を保証する。`shape` の要素数積オーバーフロー・
+/// アロケーション不能なバイトサイズ（`i32` 換算で `Vec` の allocation
+/// 上限を超える shape）は乱数を一切消費せず [`RngError::Shape`] を
+/// 返す（クレート内共通の `checked_numel_for` によるロック取得前の
+/// 事前検査。OWASP A03/A04 相当の入力検証。イシュー #1725・PR #1815
+/// codex-review P1 是正）。
 pub fn randint(low: i32, high: i32, shape: &[usize]) -> Result<Tensor<i32>, RngError> {
     if low >= high {
         return Err(RngError::InvalidRange { low, high });
     }
-    let numel = checked_numel(shape)?;
+    let numel = checked_numel_for::<i32>(shape)?;
     // `range` は `i64` 経由で計算する: `high - low` が `u64` として
     // 求まればよく、`i32::MIN..i32::MAX` の最大区間でもオーバーフロー
     // しない（`i32` 同士の減算だと `i32::MAX - i32::MIN` は overflow
@@ -445,6 +447,30 @@ mod tests {
         assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 
+    /// `shape = &[usize::MAX]` は要素数積（`usize` 積）としては
+    /// `usize::MAX` そのものでオーバーフローしないが、`f32`（4 バイト）
+    /// 換算では `numel * 4` が `Vec` の allocation 上限（`isize::MAX`
+    /// バイト）を超えるため、`Vec::with_capacity`／`collect` に到達すると
+    /// capacity overflow で panic する。事前の `checked_numel_for` が
+    /// バイトサイズ側も検査し、乱数を一切消費せず型付きエラーで拒否する
+    /// ことを確認する（イシュー #1725・PR #1815 codex-review P1 是正。
+    /// panic しないこと自体が本テストの主眼であり、そのままパニックすれば
+    /// `cargo test` がテストプロセスごと落ちて失敗として検出される）。
+    #[test]
+    fn rand_rejects_capacity_overflow_without_consuming_rng() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        manual_seed(11);
+        let before = with_global_rng(|r| r.next_u64());
+        manual_seed(11);
+        let err = rand(&[usize::MAX]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+        let after = with_global_rng(|r| r.next_u64());
+        assert_eq!(before, after, "確保不能な shape は乱数を消費しないはず");
+    }
+
     #[test]
     fn randn_produces_correct_shape_and_finite_values() {
         let _guard = global_rng_test_lock()
@@ -460,6 +486,25 @@ mod tests {
                 assert!(v.is_finite(), "randn produced non-finite value: {v}");
             }
         }
+    }
+
+    /// `rand_rejects_capacity_overflow_without_consuming_rng` と同じ理由
+    /// （`f32` 4 バイト換算のバイトサイズ超過）で `randn` も
+    /// `shape = &[usize::MAX]` を型付きエラーで拒否し、`Box–Muller` の
+    /// `ln`／`sin`／`cos` に到達する前に乱数消費なしで弾くことを確認する。
+    #[test]
+    fn randn_rejects_capacity_overflow_without_consuming_rng() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        manual_seed(12);
+        let before = with_global_rng(|r| r.next_u64());
+        manual_seed(12);
+        let err = randn(&[usize::MAX]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+        let after = with_global_rng(|r| r.next_u64());
+        assert_eq!(before, after, "確保不能な shape は乱数を消費しないはず");
     }
 
     #[test]
@@ -623,6 +668,27 @@ mod tests {
         let before = with_global_rng(|r| r.next_u64());
         manual_seed(9);
         let err = randint(0, 10, &[usize::MAX, 2]).unwrap_err();
+        assert!(matches!(
+            err,
+            RngError::Shape(ShapeError::ElementCountOverflow)
+        ));
+        let after = with_global_rng(|r| r.next_u64());
+        assert_eq!(before, after);
+    }
+
+    /// `rand_rejects_capacity_overflow_without_consuming_rng` と同じ理由
+    /// （`i32` 4 バイト換算のバイトサイズ超過）で `randint` も
+    /// `shape = &[usize::MAX]` を型付きエラーで拒否することを確認する。
+    #[test]
+    fn randint_rejects_capacity_overflow_without_consuming_rng() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        manual_seed(13);
+        let before = with_global_rng(|r| r.next_u64());
+        manual_seed(13);
+        let err = randint(0, 10, &[usize::MAX]).unwrap_err();
         assert!(matches!(
             err,
             RngError::Shape(ShapeError::ElementCountOverflow)
