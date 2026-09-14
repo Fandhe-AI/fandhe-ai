@@ -1282,3 +1282,12 @@ AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「�
 - 新規 `Op`／`BackendOps` メソッド／VJP は追加していない（`scale_loss` は既存 `Var::mul` の合成のみ）。
 - 対象外事項の明記: (a) 真の混合精度（f16 forward・f32 master weight）は `docs/backend-dtype-dispatch-design.md` §8 のとおり対象外。(b) デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）には unscale／非有限検出が結線されておらず、AMP はホスト `Tensor<f32>` 勾配（`Gradients::get`／`SequentialVars::trainable_grads`／`Tape::param_grads_to_host` 経由）にのみ適用できる。
 - facade のみ import する統合テスト（`crates/facade/tests/optim_amp_train_loop.rs`）で、収束・1 step の勾配 bit 完全一致（scale_loss→backward→unscale と非スケール backward の勾配が `f32::to_bits()` で一致すること。CPU バックエンド）・非有限勾配時の skip／backoff を固定した。
+
+## #1627 の追補（int8 量子化の段階 0 設計判断）
+
+スナップショット本体（対象 HEAD `097bff19`）の 354 行目「量子化（int8 等）」行（`なし・量子化 dtype・演算対応・難度 XL`）は不変のまま、以下を追記する。
+
+- 正本 spec の除外事項「分散学習・量子化の網羅対応」（Won't・条件付き〈量子化 GEMM〉）は「spec 側で REQ として承認されるまで実装リポは量子化カーネルを起票・実装しない」と定めており、この判断は変わっていない（`docs/spec/04-requirements.md:356-364`）。
+- 本イシューでは `Op`／`BackendOps`／`Var`／facade のコード実装を行わず、格上げ条件（a〜e）の充足状況の棚卸しと再開条件を `docs/backend-int8-quantization-decision.md` として記録した（#1628・#1652・#1775 と同型の段階 0）。格上げ条件のうち (a)（REQ-2 複合判定の改定）は実質充足と読めるが、(b)〜(e)（実機 MMA プローブ・Transformer 複合 WL ベースライン・量子化専用許容基準・依存追加なし設計の実装確認）は未達のまま（同 doc §2.1）。
+- issue 上の承認コメント（`unsafe asm!`〈SME〉・`BackendOps` trait 拡張・facade 公開面拡張の技術的許可）は実装着手前の技術的許可事項に限られ、spec 側の除外事項ゲート自体を解除する文言ではないと整理した（同 doc §0.1）。
+- facade 新規公開面なし（コード変更を伴わないため）。実装着手は本追補のスコープ外のまま引き続き #1627 として open・blocked で追跡する。
