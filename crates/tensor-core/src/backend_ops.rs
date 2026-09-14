@@ -1086,6 +1086,66 @@ pub trait BackendOps {
         ))
     }
 
+    /// `dim` 軸に沿った累積和（`torch.cumsum` 相当。イシュー #1731）。
+    /// `dim` 以外の軸の組（lane）ごとに `dim` の添字昇順で
+    /// `out[i] = Σ_{j<=i} x[j]` を逐次計算する。出力 shape は入力と
+    /// 恒等（累積演算は shape を変えない）。`dim` は呼び出し元
+    /// （`fandhe_ai_autodiff::var::Var::cumsum`）が
+    /// [`crate::reduce_out_shape`] で範囲検査済み。
+    ///
+    /// **数値契約**: lane 全体で `f64` アキュムレータを保持し、各
+    /// ステップで `acc = acc + (x[i] as f64)` を計算したうえで、
+    /// 出力要素 `out[i]` はその時点の `acc` を `f32` へ downcast した
+    /// スナップショットとする（次ステップは downcast 後の `f32` を
+    /// 読み戻さない。PyTorch CPU の `acc_type<float> = double` と同じ
+    /// 読み方。`.claude/rules/coding-rust.md` の f64 アキュムレータ
+    /// 方針を forward の scan へ拡張したもの）。この契約により
+    /// `cumsum([1e8, 1.0, -1e8], 0) == [1e8, 1e8, 1.0]` となる（f32
+    /// 逐次アキュムレータなら末尾が `0.0` になり丸め誤差が蓄積する）。
+    /// NaN／inf は IEEE 754 のまま伝播する。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::softmax`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::cumsum` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::cumsum_along`）へフォールバックする
+    /// （それ以外のエラーは伝播する。判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。**後続 GPU 実装（CUDA／
+    /// Metal）への受け入れ契約**: 本 CPU 参照実装と bit 完全一致
+    /// （REQ-2 の tolerance は使わない）。CUDA は native `double` の
+    /// lane 逐次カーネル、Metal は `double` 非対応のため
+    /// `crates/backend-metal/src/soft_f64.rs` と同型の binary64 逐次
+    /// エミュレーションで達成できる。VJP はホスト側（`grad.rs`）に
+    /// 留めるため、GPU 実装は forward のみでよい。
+    fn cumsum(&self, _x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "cumsum: default fail-safe (no fused cumsum kernel available)".into(),
+        ))
+    }
+
+    /// `dim` 軸に沿った累積積（`torch.cumprod` 相当。イシュー #1731）。
+    /// [`Self::cumsum`] と同じ lane 構造・非破壊拡張・フォールバック
+    /// 規律に従うが、アキュムレータは `1.0` から開始し各ステップで
+    /// `acc = acc * (x[i] as f64)` を計算する。`f64` アキュムレータに
+    /// より `f32` では即座に underflow する極小値の積も、途中の
+    /// アキュムレータが有限のまま追跡され続ける（例:
+    /// `cumprod([1e-30, 1e-30, 1e30], 0)` の `out[2]` は f32 逐次なら
+    /// `0.0` になるが、f64 アキュムレータでは非零有限値になる）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::cumsum`] と同じ非破壊拡張・fail-safe・GPU 受け入れ契約。
+    /// 既定は [`BackendError::Unsupported`] を返し、`Var::cumprod` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::cumprod_along`）へフォールバック
+    /// する。
+    fn cumprod(&self, _x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "cumprod: default fail-safe (no fused cumprod kernel available)".into(),
+        ))
+    }
+
     /// 行方向 log_softmax（`x − m − ln(Σ exp(x − m))`。`m` は行 max）の
     /// 独立エントリ（イシュー #1594）。[`Self::softmax`] と同じ最終軸
     /// 限定契約・非破壊拡張・フォールバック規律に従う
@@ -3004,6 +3064,30 @@ mod tests {
         let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
 
         let result = ops.softmax(&x, 0);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::cumsum`] の既定実装が fail-safe を返すことを確認
+    /// する（イシュー #1731。`softmax_default_is_unsupported` と同型）。
+    #[test]
+    fn cumsum_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+
+        let result = ops.cumsum(&x, 0);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::cumprod`] の既定実装が fail-safe を返すことを確認
+    /// する（イシュー #1731）。
+    #[test]
+    fn cumprod_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+
+        let result = ops.cumprod(&x, 0);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

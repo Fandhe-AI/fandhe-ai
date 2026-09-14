@@ -981,6 +981,76 @@ pub(crate) fn log_softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32>
     build_tensor(out, &shape)
 }
 
+/// `axis` に沿った累積和のホスト参照実装（`torch.cumsum` 相当。
+/// イシュー #1731）。`softmax_along`／`log_softmax_along` と同じ
+/// 「外側（outer）× 走査軸（axis_len）× 内側（inner）」の 3 段走査
+/// だが、走査軸方向は独立な行ごとの縮約ではなく `dim` の添字昇順の
+/// **逐次スキャン**（各ステップの出力が直前までの累積値に依存する）
+/// である点が異なる。`BackendOps::cumsum` が `Unsupported` を返した
+/// ときのみ `Var::cumsum` から呼ばれる（softmax と同じ「バックエンド
+/// 実装 → フォールバック」の二段構成）。
+///
+/// **数値契約**（[`fandhe_ai_tensor_core::BackendOps::cumsum`] doc
+/// と同一）: lane（`o`・`i` の組）ごとに `f64` アキュムレータを保持し、
+/// `acc = acc + (x[idx] as f64)` を計算するたびにその時点の `acc` を
+/// `f32` へ downcast したスナップショットを `out[idx]` に書き出す
+/// （次ステップは downcast 後の `f32` を読み戻さない。`.claude/rules/
+/// coding-rust.md` の f64 アキュムレータ方針を forward の scan へ
+/// 拡張したもの。`backend-cpu::scan::cumsum` と同一アルゴリズムであり
+/// 出力は `to_bits` で完全一致する契約）。
+pub(crate) fn cumsum_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    // `softmax_along` 冒頭と同じ早期 return（部分積オーバーフロー回避。
+    // `shape` のいずれかの次元が 0 なら空出力を返す）。
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let data = dense_vec(input);
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut acc: f64 = 0.0;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                acc += data[idx] as f64;
+                out[idx] = acc as f32;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `axis` に沿った累積積のホスト参照実装（`torch.cumprod` 相当。
+/// イシュー #1731）。[`cumsum_along`] と同じ lane 構造・早期 return
+/// だが、アキュムレータは `1.0` から開始し `acc = acc * (x[idx] as
+/// f64)` を計算する（`BackendOps::cumprod` doc と同一契約。
+/// `backend-cpu::scan::cumprod` と bit 完全一致する）。
+pub(crate) fn cumprod_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    if shape.contains(&0) {
+        return build_tensor(Vec::new(), &shape);
+    }
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let data = dense_vec(input);
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut acc: f64 = 1.0;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                acc *= data[idx] as f64;
+                out[idx] = acc as f32;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
 /// `inputs` を `dim` 軸で連結するホスト参照実装（`torch.cat` 相当。
 /// イシュー #1598）。`BackendOps::concat` が `Unsupported` を返した
 /// ときのみ `grad::concat_with_fallback` から呼ばれる（`softmax_along`
