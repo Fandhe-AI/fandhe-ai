@@ -1,6 +1,6 @@
 # CUDA Tensor Core（WMMA/mma）カーネル設計メモ
 
-- 対応イシュー: #60（TASK-11.1a、親 #59 TASK-11.1 の再分解サブタスク先頭）／#485（GEMM 性能改善ツリー Phase A・親 #480 の A-5。11 節を追記）／#483（GEMM 性能改善ツリー Phase A・親 #480 の A-3。TMA sm_121 プローブ spike。12 節を追記）／#484（GEMM 性能改善ツリー Phase A・親 #480 の A-4。setmaxnreg プローブ spike。13 節を追記）
+- 対応イシュー: #60（TASK-11.1a、親 #59 TASK-11.1 の再分解サブタスク先頭）／#485（GEMM 性能改善ツリー Phase A・親 #480 の A-5。11 節を追記）／#483（GEMM 性能改善ツリー Phase A・親 #480 の A-3。TMA sm_121 プローブ spike。12 節を追記）／#484（GEMM 性能改善ツリー Phase A・親 #480 の A-4。setmaxnreg プローブ spike。13 節を追記）／#1589（GEMM 性能改善ツリー Phase B・親 #490 配下。#483 プローブが #1574 で GB10 実機実測を完了したことを受け、12 節の記録表・結論欄を実測値へ更新。TMA ロード経路の設計本体は `docs/backend-cuda-tma-gemm-load-design.md` を参照）
 - 位置づけ: 本文書は**設計メモのみ**であり、実行可能なカーネル実装は含まない。受け入れ条件は「命令選定・タイル構成・根拠」の 3 要素が記録されていることの 1 点（#60 本文）。
 - 対象外（後続サブタスクのスコープ。重複実装を避けるため明記する）:
   - #61（11.1b）: f16 WMMA GEMM の実装
@@ -26,7 +26,7 @@
   - TF32 入力: `m16n16k8`（compute capability 8.0 以降で対応、sm_121 は満たす）
   - 5th-Gen Tensor Core（Blackwell 系譜共通）は FP8（E4M3）・FP6・FP4（NVFP4）にも対応するが（[NVIDIA Blackwell Architecture](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)）、本イシュー（11.1a〜d）のスコープは PoC-v2-3 が既に f32/f16 で実測している範囲に合わせ f16・TF32・f32 累算に限定する。FP8/FP4 経路の採否は本設計では判断せず、将来検討事項として「6. 後続サブタスク」節に記録する。
 - **NVRTC が `compute_121` を受理するか**: 未検証。PoC-v2-3 の `CudaGemm` は `CudaContext` から取得した compute capability を `--gpu-architecture=compute_XY` に反映する構成（ハードコードした sm 番号への依存を避ける設計、`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md` 実施内容 2 節）であり、この機構が `compute_121` に対しても正しく動作するかは実機での NVRTC コンパイル実行でのみ確認できる。本イシューでは実機プローブを見送った（3 節参照）。**未検証事項として #61 の着手初期に確認する。**
-- **TMA（`cp.async.bulk.tensor`）が sm_121 で使えるか**: GEMM 性能改善ロードマップ（#479／#480）の Phase B 起票要否を判断するための独立プローブを #483 で実施した。詳細・記録表は 12 節「TMA（cp.async.bulk.tensor）sm_121 プローブ（#483）」を参照（未検証のまま本イシュー時点では記録待ち）。
+- **TMA（`cp.async.bulk.tensor`）が sm_121 で使えるか**: GEMM 性能改善ロードマップ（#479／#480）の Phase B 起票要否を判断するための独立プローブを #483 で実施した。詳細・記録表は 12 節「TMA（cp.async.bulk.tensor）sm_121 プローブ（#483）」を参照。**2026-09-12 に #1574 で GB10 実機実測が完了し、cluster・cta 両 variant がコンパイル・実行とも成功（bit 一致）したことを確認済み**（12 節参照。設計確定は #1589・`docs/backend-cuda-tma-gemm-load-design.md`）。
 
 ## 3. 命令選定と根拠
 
@@ -119,7 +119,7 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 - 計画（Step 2）は DGX Spark への到達可能性に応じたベストエフォートの実機 NVRTC コンパイル検証プローブを許容していた。本イシューの実行環境（サンドボックス化された git worktree、ネットワーク到達性は SSH エイリアス `local-server` 経由の実機接続を含め未確認・未実施）では実機プローブを実施しなかった。
 - 未検証事項は 8 節の一覧に記録した。#61（f16 WMMA GEMM 実装）の着手初期に実機検証を行う方針は #187 本文の「NVRTC での sm_121 挙動は実装初期に実機検証する」と整合する。
 - 接続情報（SSH エイリアス実体・ホスト名等）は本メモに一切記載していない（PoC-v2-3 の「接続情報は非記載」方針を踏襲、`.claude/rules/security.md`）。
-- **TMA プローブ（#483）も同型の到達不能ベストエフォート**: 本節と同じ理由（サンドボックス化された git worktree からの実機到達性未確認）により、12 節「TMA（cp.async.bulk.tensor）sm_121 プローブ」の記録表は実行待ちのまま残している。
+- **TMA プローブ（#483）も同型の到達不能ベストエフォートだった（2026-08 時点）**: 本節と同じ理由（サンドボックス化された git worktree からの実機到達性未確認）により、12 節「TMA（cp.async.bulk.tensor）sm_121 プローブ」の記録表は当時実行待ちのまま残していた。**2026-09-12 に #1574 で GB10 実機実測が完了し、12 節の記録表・結論欄は実測値へ更新済み**（#1589）。
 
 ## 10. スコープ外・将来の unsafe 境界
 
@@ -166,22 +166,26 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 - **判定条件（記録表の読み方）**: 実行成否は variant（cluster／cta）ごとに独立して評価する。コンパイル成功 arch が複数あっても実行は「その variant で最初にコンパイル成功した 1 arch」のみで行うため、実行しなかった arch の実行成否列は「対象外（未選択 arch）」と記録する。cluster と cta は完全に独立した命令列（本節冒頭「CUTLASS 側の根拠」参照）のため、一方の失敗が他方の成否を意味しない。
 - **実行環境（本イシューの実行結果）**: 実装セッションはサンドボックス化された git worktree であり、DGX Spark 実機への到達性（SSH 接続を含む）を確認できなかった（9 節と同型の制約）。よって以下の記録表は**実行待ち**のまま残す。**結論（B-12〜B-14 起票要否）は推測で埋めない**（実装計画 §3 Step 3「安全側フォールバック」の方針どおり）。
 - **再実行セッション（2026-08-15、PR #634 の main 追従・完遂タスク）**: `docs/real-hardware-verification-env.local.md`（実ホスト名の正）・`~/.ssh/config` の該当エントリともに本セッションの worktree 環境には存在せず、実機（DGX Spark GB10）への到達性を確認できなかった（上記と同型の制約が継続）。記録表・結論欄は引き続き実行待ちのまま維持する。実機実行は到達可能な環境からの後続作業とする。
+- **実機実測完了（2026-09-12、低レイヤー診断 #1574・親トラッキング #1589）**: `docs/perf/lowlayer-diagnosis-2026-09-12.md`（DGX Spark GB10 実機・専有）の一環として `cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture tma` を実行し、以下の記録表・結論欄を実測値で確定した。実行ログ全文は `docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx/tma_probe_real_device.log`（内部ホスト名は含めない。環境行 `NVIDIA GB10 compute_capability=(12, 1)`）。設計確定は #1589・`docs/backend-cuda-tma-gemm-load-design.md` を参照。
 
-### 記録表（実行待ち）
+### 記録表（2026-09-12 実機実測・#1574／#1589）
 
 | arch | variant | コンパイル成否 | エラーメッセージ要旨 | 実行成否 |
 |------|---------|--------------|----------------------|----------|
-| `compute_121` | cluster | 未実行 | — | 未実行 |
-| `compute_121a` | cluster | 未実行 | — | 対象外（未選択 arch） |
-| `compute_121f` | cluster | 未実行 | — | 対象外（未選択 arch） |
-| `compute_121` | cta | 未実行 | — | 未実行 |
-| `compute_121a` | cta | 未実行 | — | 対象外（未選択 arch） |
-| `compute_121f` | cta | 未実行 | — | 対象外（未選択 arch） |
+| `compute_121` | cluster | success（bit 一致） | — | success（`tile=16x16 global=64x64 bitwise_match=true`） |
+| `compute_121a` | cluster | success | — | 対象外（未選択 arch。`compute_121` を選択して実行） |
+| `compute_121f` | cluster | success | — | 対象外（未選択 arch） |
+| `compute_121` | cta | success（bit 一致） | — | success（`tile=16x16 global=64x64 bitwise_match=true`） |
+| `compute_121a` | cta | success | — | 対象外（未選択 arch。`compute_121` を選択して実行） |
+| `compute_121f` | cta | success | — | 対象外（未選択 arch） |
 
-### 結論欄（実行待ち）
+### 結論欄（2026-09-12 実測で確定）
 
-- B-12〜B-14 の起票要否: **未確定**。実機での `cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture tma` 実行後、上記記録表を実測値で更新する。判定基準は variant 別に以下のとおりとする（推測で埋めず、実測後にこの基準を機械的に適用する）。
-  - **一次トリアージ（機械判定の前提）**: 「全 arch でコンパイルまたは実行が失敗」を確認した場合、下記の機械判定を適用する前に、記録したエラーメッセージ全文を (a) opcode／arch 非対応を示すもの（例: `unsupported`・`invalid instruction`・対象 opcode 名を含む NVRTC/ptxas エラー）か、(b) 本プローブ自身の構文・オペランドエラー（例: オペランド数不一致・レジスタ制約違反・`ptxas` の一般的な構文エラーで opcode 名を伴わないもの）かを目視で切り分ける。本プローブの inline PTX・`cuTensorMapEncodeTiled` 呼び出し（`&tensor_map` の `"l"` 制約渡しを含む）は本 PR 時点で実機コンパイル・実行を一度も通過しておらず（ファイル冒頭コメント参照）、構文・オペランド誤りの可能性が残るため、この切り分けを省略しない。(b) と判定される場合はプローブ自体を修正のうえ再実行し、(a) と判定できるまで「起票不要」を確定させない。
+- B-12〜B-14 の起票要否: **起票要**。cluster・cta とも全 3 arch でコンパイル成功、両 variant とも `compute_121` を選択した実行プローブで 16×16 タイル転送が bit 一致（`bitwise_match=true`）した。一次トリアージ（全失敗時のみ適用する下記手順）は本結果には該当せず不要。
+  - B-12（TMA producer/consumer パイプライン設計）相当は **#1589 で設計確定済み**（`docs/backend-cuda-tma-gemm-load-design.md`）。
+  - B-13（試作カーネル接続）・B-14（A/B 計測と本番採否）相当は、#1589 の承認事項に従いユーザー承認後に別途起票する（本節・#1589 のいずれでも起票していない）。
+- 参考: 実測前に定めていた判定基準（一次トリアージ・機械判定）は以下のとおりだったが、全 arch 成功のため適用対象外に終わった。
+  - **一次トリアージ（機械判定の前提。全失敗時のみ適用）**: 「全 arch でコンパイルまたは実行が失敗」を確認した場合、下記の機械判定を適用する前に、記録したエラーメッセージ全文を (a) opcode／arch 非対応を示すもの（例: `unsupported`・`invalid instruction`・対象 opcode 名を含む NVRTC/ptxas エラー）か、(b) 本プローブ自身の構文・オペランドエラー（例: オペランド数不一致・レジスタ制約違反・`ptxas` の一般的な構文エラーで opcode 名を伴わないもの）かを目視で切り分ける。(b) と判定される場合はプローブ自体を修正のうえ再実行し、(a) と判定できるまで「起票不要」を確定させない。
   - cluster・cta のいずれか一方でもコンパイル・実行が成功: 起票要（起票自体は `out-of-scope-tracking.md` に従いユーザー承認のうえ別途実施）。本ファイル冒頭コメント「CUTLASS 側の根拠」のとおり sm_120/121 では `CUTE_ARCH_TMA_SM120_ENABLED` パスが `shared::cta` opcode を発行する設計のため、**cta 単独の成功でも cluster の失敗は非ブロッキングとして扱う**（cta 成功のみで起票要と判定してよい）。
   - cluster・cta のいずれも全 arch でコンパイルまたは実行が失敗、かつ上記一次トリアージで全失敗理由が (a) opcode／arch 非対応と判定できた場合のみ: 起票不要。(b) プローブ自体のバグに起因する失敗が一件でも含まれる場合は「起票不要」と確定せず、プローブ修正・再実行後に再判定する。
 - 実機実行手順は `docs/real-hardware-verification-env.md`（接続情報・実ホスト名は同ドキュメントの `*.local.md` 参照方式に従い本節には記載しない）。
