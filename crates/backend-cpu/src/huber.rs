@@ -85,6 +85,16 @@ fn elem_loss(d: f32, kind: HuberKind, delta: f32) -> f32 {
 /// | `SmoothL1` | `d/delta` | `copysign(1, d)` |
 #[inline]
 fn elem_grad(d: f32, kind: HuberKind, delta: f32) -> f32 {
+    // `d` が NaN（`pred`／`target` のいずれかが NaN）のとき、
+    // `abs_d < delta` は NaN 比較の規約により常に false となり
+    // else 分岐（`copysign` 系）へ落ちて有限な勾配（±1／±delta）を
+    // 返してしまう。forward（`elem_loss`）は同じ分岐構造でも
+    // else 分岐の結果が `NaN - 0.5*delta = NaN` となり自然に NaN を
+    // 返すため、forward と backward で NaN 伝播の有無が食い違う
+    // （イシュー #1739 レビュー指摘）。ここで明示的に NaN を伝播する。
+    if d.is_nan() {
+        return d;
+    }
     let abs_d = d.abs();
     match kind {
         HuberKind::SmoothL1 => {

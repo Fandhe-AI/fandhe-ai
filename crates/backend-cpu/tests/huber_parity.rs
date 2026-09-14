@@ -209,6 +209,27 @@ fn huber_loss_backward_bit_matches_naive() {
     }
 }
 
+/// `pred`／`target` の一方が NaN のとき backward が NaN を伝播する
+/// ことを確認する（イシュー #1739 レビュー指摘。`elem_grad` の
+/// `abs_d < delta` は NaN 比較で常に false のため、明示チェックが
+/// ないと `copysign` 系の有限勾配〈±1／±delta〉を返してしまう）。
+#[test]
+fn huber_loss_backward_propagates_nan() {
+    let ops = CpuBackendOps::new();
+    let pred = Tensor::new(vec![f32::NAN], &[1]).unwrap();
+    let target = Tensor::new(vec![0.0], &[1]).unwrap();
+    for (kind, delta) in kinds_and_deltas() {
+        let got = ops
+            .huber_loss_backward(&pred, &target, kind, delta, 1.0)
+            .unwrap();
+        let got_slice = got.as_slice().unwrap();
+        assert!(
+            got_slice[0].is_nan(),
+            "kind={kind:?} delta={delta}: NaN 入力は NaN 勾配を返すべき"
+        );
+    }
+}
+
 #[test]
 fn huber_loss_rejects_shape_mismatch() {
     use fandhe_ai_tensor_core::device::BackendError;

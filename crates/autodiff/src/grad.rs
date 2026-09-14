@@ -6581,6 +6581,32 @@ release ビルドでも検知できるよう `assert!` を使う）"
         assert_eq!(dense_vec(&dtarget), Vec::<f32>::new());
     }
 
+    /// `pred`／`target` の一方が NaN のとき、forward（`eval::huber_loss`
+    /// の `else` 分岐は `NaN − 0.5·delta = NaN`）と backward
+    /// （`eval::huber_elem_grad`）で NaN 伝播の有無が食い違わないことを
+    /// 確認する（イシュー #1739 レビュー指摘。`abs_d < delta` は NaN
+    /// 比較で常に false のため、明示チェックなしでは backward が
+    /// `copysign` 系の有限値〈±1／±delta〉を返してしまう）。
+    #[test]
+    fn huber_loss_grad_propagates_nan() {
+        let pred = t(&[f32::NAN], &[1]);
+        let target = t(&[0.0], &[1]);
+        let g = t(&[1.0], &[]);
+        for kind in [HuberKind::Huber, HuberKind::SmoothL1] {
+            for reduction in [Reduction::Mean, Reduction::Sum] {
+                let (dpred, dtarget) = huber_loss_vjp(&pred, &target, &g, kind, 1.0, reduction);
+                assert!(
+                    dense_vec(&dpred)[0].is_nan(),
+                    "kind={kind:?} reduction={reduction:?}: dPred は NaN を伝播すべき"
+                );
+                assert!(
+                    dense_vec(&dtarget)[0].is_nan(),
+                    "kind={kind:?} reduction={reduction:?}: dTarget は NaN を伝播すべき"
+                );
+            }
+        }
+    }
+
     /// Huber／SmoothL1 の解析的 VJP（`huber_loss_vjp`）を中央差分
     /// （`numeric_grad_unary`）と突合する（イシュー #1739）。損失は
     /// `d = pred − target` のみの区分関数（`eval::huber_elem_loss`）で

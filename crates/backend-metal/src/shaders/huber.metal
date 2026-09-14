@@ -75,6 +75,18 @@ inline float huber_elem_loss(float d, uint kind, float delta) {
 
 /// [`huber_elem_loss`] の `pred` に対する要素勾配。
 inline float huber_elem_grad(float d, uint kind, float delta) {
+    // d が NaN（pred／target のいずれかが NaN）のとき、abs_d < delta は
+    // NaN 比較の規約により常に false となり else 側（copysign 系）へ
+    // 落ちて有限な勾配（±1／±delta）を返してしまう。forward
+    // （huber_elem_loss）は同じ分岐構造でも else 側の結果が
+    // NaN - 0.5*delta = NaN となり自然に NaN を返すため、forward と
+    // backward で NaN 伝播の有無が食い違う（イシュー #1739 レビュー
+    // 指摘）。ここで明示的に NaN を伝播する（backend-cpu::huber::
+    // elem_grad・autodiff::eval::huber_elem_grad・CUDA
+    // kernels_huber.rs と同じ方針で揃える）。
+    if (isnan(d)) {
+        return d;
+    }
     float abs_d = fabs(d);
     if (kind == 1u) {
         // SmoothL1
