@@ -38,6 +38,29 @@ impl VarSource for fandhe_ai_autodiff::Tape {
     }
 }
 
+/// bit 完全一致（NaN 同士はクラス一致）の判定ヘルパー。pad は算術を
+/// 含まない純粋なコピー演算のため契約は bit 完全一致だが、`assert_eq!`
+/// による f32 スライス比較では `+0.0`/`-0.0`（`==` では等価）の相違を
+/// 検出できない。`to_bits()` 比較へ統一する（codex-review 指摘。
+/// PR #1831 スレッド）。
+fn assert_bits_eq(label: &str, actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len(), "{label}: 要素数が一致しない");
+    for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+        if a.is_nan() || e.is_nan() {
+            assert!(
+                a.is_nan() && e.is_nan(),
+                "{label}: 要素 {i} が NaN クラス一致しない（actual={a}, expected={e}）"
+            );
+        } else {
+            assert_eq!(
+                a.to_bits(),
+                e.to_bits(),
+                "{label}: 要素 {i} が bit 一致しない（actual={a:?}, expected={e:?}）"
+            );
+        }
+    }
+}
+
 fn leaf(seed: u64, shape: &[usize]) -> Tensor<f32> {
     let numel: usize = shape.iter().product();
     let data = Xorshift64Star::new(seed).fill_vec(numel);
@@ -82,9 +105,42 @@ fn cpu_pad_forward_matches_naive_reference() {
         &cpu_slice,
         &naive_slice,
     );
-    assert_eq!(
-        cpu_slice, naive_slice,
-        "pad: 算術を含まない純粋なコピー演算のため bit 同一のはず"
+    assert_bits_eq(
+        "fandhe_ai::tape()（CpuBackendOps::pad）vs NaiveOps",
+        &cpu_slice,
+        &naive_slice,
+    );
+}
+
+/// -0.0 を入力・`value` 双方に含む pad forward の CPU と NaiveOps の
+/// parity（codex-review 指摘。`assert_eq!` の数値比較では `+0.0 ==
+/// -0.0` のため `to_bits()` 比較以前は見逃されていた）。
+#[test]
+fn cpu_pad_forward_matches_naive_reference_with_negative_zero() {
+    let shape = [2usize, 2];
+    let pads = [(1usize, 0usize), (0usize, 1usize)];
+    let data = vec![-0.0f32, 1.0, 0.0, -2.0];
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&Tensor::new(data.clone(), &shape).expect("valid tensor"));
+    let out_cpu = x_cpu
+        .pad(&pads, -0.0)
+        .expect("pad: 常に成功する")
+        .to_tensor();
+
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+    let x_naive = naive_tape.make_var(&Tensor::new(data, &shape).expect("valid tensor"));
+    let out_naive = x_naive
+        .pad(&pads, -0.0)
+        .expect("pad: 常に成功する")
+        .to_tensor();
+
+    let cpu_slice = contiguous_slice(&out_cpu);
+    let naive_slice = contiguous_slice(&out_naive);
+    assert_bits_eq(
+        "pad(-0.0 input and pad value): CpuBackendOps vs NaiveOps",
+        &cpu_slice,
+        &naive_slice,
     );
 }
 
@@ -115,9 +171,10 @@ fn cpu_pad_backward_matches_naive_reference() {
         &dx_cpu_slice,
         &dx_naive_slice,
     );
-    assert_eq!(
-        dx_cpu_slice, dx_naive_slice,
-        "pad backward: narrow view 連鎖のため bit 同一のはず"
+    assert_bits_eq(
+        "pad backward（dx）: CpuBackendOps vs NaiveOps",
+        &dx_cpu_slice,
+        &dx_naive_slice,
     );
 }
 
@@ -149,9 +206,10 @@ fn metal_pad_forward_matches_cpu() {
         &metal_slice,
         &cpu_slice,
     );
-    assert_eq!(
-        metal_slice, cpu_slice,
-        "pad: 算術を含まない純粋なコピー演算のため bit 同一のはず"
+    assert_bits_eq(
+        "pad forward: Metal tape_for vs CPU tape_for",
+        &metal_slice,
+        &cpu_slice,
     );
 }
 
@@ -168,8 +226,9 @@ fn cuda_pad_forward_matches_cpu() {
         &cuda_slice,
         &cpu_slice,
     );
-    assert_eq!(
-        cuda_slice, cpu_slice,
-        "pad: 算術を含まない純粋なコピー演算のため bit 同一のはず"
+    assert_bits_eq(
+        "pad forward: CUDA tape_for vs CPU tape_for",
+        &cuda_slice,
+        &cpu_slice,
     );
 }

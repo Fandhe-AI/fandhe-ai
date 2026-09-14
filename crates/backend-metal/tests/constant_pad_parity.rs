@@ -32,6 +32,29 @@ use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_backend_metal::MetalBackendOps;
 use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor};
 
+/// bit 完全一致（`value` が NaN の場合のみクラス一致）の判定ヘルパー。
+/// pad は算術を含まない純粋なコピー演算のため契約は bit 完全一致だが、
+/// `assert_eq!` による f32 スライス比較では `+0.0`/`-0.0`（`==` では
+/// 等価）の相違を検出できない。`to_bits()` 比較へ統一する
+/// （codex-review 指摘。PR #1831 スレッド）。
+fn assert_bits_eq(label: &str, actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len(), "{label}: 要素数が一致しない");
+    for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+        if a.is_nan() || e.is_nan() {
+            assert!(
+                a.is_nan() && e.is_nan(),
+                "{label}: 要素 {i} が NaN クラス一致しない（actual={a}, expected={e}）"
+            );
+        } else {
+            assert_eq!(
+                a.to_bits(),
+                e.to_bits(),
+                "{label}: 要素 {i} が bit 一致しない（actual={a:?}, expected={e:?}）"
+            );
+        }
+    }
+}
+
 fn assert_pad_parity(seed: u64, in_shape: &[usize], pads: &[(usize, usize)], value: f32) {
     let cpu = CpuBackendOps::new();
     let metal = MetalBackendOps::new();
@@ -46,17 +69,18 @@ fn assert_pad_parity(seed: u64, in_shape: &[usize], pads: &[(usize, usize)], val
     assert_eq!(cpu_out.shape(), metal_out.shape());
     let cpu_slice = cpu_out.as_slice().expect("contiguous");
     let metal_slice = metal_out.as_slice().expect("contiguous");
-    assert_eq!(
-        cpu_slice, metal_slice,
-        "pad(in_shape={in_shape:?}, pads={pads:?}, value={value}): CPU と Metal は bit 完全一致のはず"
+    assert_bits_eq(
+        &format!("pad(in_shape={in_shape:?}, pads={pads:?}, value={value}): CPU と Metal"),
+        cpu_slice,
+        metal_slice,
     );
 
     // run-to-run で bit 同一（決定的カーネル）。
     let metal_out2 = metal.pad(&input, pads, value).expect("metal pad rerun");
-    assert_eq!(
+    assert_bits_eq(
+        "pad: run-to-run",
         metal_out2.as_slice().expect("contiguous"),
         metal_slice,
-        "pad: run-to-run で bit 同一のはず"
     );
 }
 
@@ -90,9 +114,10 @@ fn pad_matches_cpu_across_shapes() {
     let pads = [(1usize, 0usize), (0usize, 1usize)];
     let cpu_out = cpu.pad(&transposed, &pads, 0.0).expect("cpu pad");
     let metal_out = metal.pad(&transposed, &pads, 0.0).expect("metal pad");
-    assert_eq!(
+    assert_bits_eq(
+        "pad(transposed input)",
         metal_out.as_slice().expect("contiguous"),
-        cpu_out.as_slice().expect("contiguous")
+        cpu_out.as_slice().expect("contiguous"),
     );
 
     // NaN／±inf の通過（入力）・`value` に NaN を使うクラス一致確認。
@@ -110,13 +135,27 @@ fn pad_matches_cpu_across_shapes() {
         .expect("metal pad");
     let cpu_special_slice = cpu_special.as_slice().expect("contiguous");
     let metal_special_slice = metal_special.as_slice().expect("contiguous");
-    for (c, g) in cpu_special_slice.iter().zip(metal_special_slice.iter()) {
-        if c.is_nan() {
-            assert!(g.is_nan(), "NaN must remain NaN through pad");
-        } else {
-            assert_eq!(c, g);
-        }
-    }
+    assert_bits_eq(
+        "pad(NaN/inf special values)",
+        metal_special_slice,
+        cpu_special_slice,
+    );
+
+    // -0.0 を入力・`value` 双方に含むケース（codex-review 指摘。
+    // `assert_eq!` の数値比較では `+0.0 == -0.0` のため見逃されていた）。
+    let input_neg_zero = Tensor::new(vec![-0.0f32, 1.0, 0.0, -2.0], &[2, 2]).expect("valid tensor");
+    let pads_neg_zero = [(1usize, 0usize), (0usize, 1usize)];
+    let cpu_neg_zero = cpu
+        .pad(&input_neg_zero, &pads_neg_zero, -0.0)
+        .expect("cpu pad");
+    let metal_neg_zero = metal
+        .pad(&input_neg_zero, &pads_neg_zero, -0.0)
+        .expect("metal pad");
+    assert_bits_eq(
+        "pad(-0.0 input and pad value)",
+        metal_neg_zero.as_slice().expect("contiguous"),
+        cpu_neg_zero.as_slice().expect("contiguous"),
+    );
 }
 
 /// 空入力 → 非空出力（value で埋まる）が CPU と Metal で一致する。
@@ -132,9 +171,10 @@ fn pad_empty_input_matches_cpu() {
     let metal_out = metal
         .pad(&empty_input, &[(2, 0), (0, 0)], 5.0)
         .expect("metal pad on empty input");
-    assert_eq!(
+    assert_bits_eq(
+        "pad(empty input)",
         metal_out.as_slice().expect("contiguous"),
-        cpu_out.as_slice().expect("contiguous")
+        cpu_out.as_slice().expect("contiguous"),
     );
 }
 
@@ -152,7 +192,8 @@ fn pad_rank_zero_matches_cpu() {
     let cpu_out = cpu.pad(&scalar, &[], 0.0).expect("cpu pad rank-0");
     let metal_out = metal.pad(&scalar, &[], 0.0).expect("metal pad rank-0");
     assert_eq!(metal_out.shape(), cpu_out.shape());
-    assert_eq!(
+    assert_bits_eq(
+        "pad(rank-0)",
         metal_out.as_slice().expect("contiguous"),
         cpu_out.as_slice().expect("contiguous"),
     );
@@ -194,10 +235,10 @@ fn pad_backward_matches_cpu_tape() {
     // 同型の対処。codex-review 指摘）。
     let cpu_dx = cpu_dx.contiguous();
     let metal_dx = metal_dx.contiguous();
-    assert_eq!(
+    assert_bits_eq(
+        "pad backward: CPU と Metal",
         cpu_dx.as_slice().expect("contiguous"),
         metal_dx.as_slice().expect("contiguous"),
-        "pad backward: CPU と Metal は bit 完全一致のはず"
     );
 }
 
