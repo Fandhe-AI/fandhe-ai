@@ -42,7 +42,7 @@ use fandhe_ai_tensor_core::{
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
     UnaryElementwiseOp, gather_out_shape, one_hot_out_shape, pad_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape,
+    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -53,6 +53,29 @@ use crate::gather_scatter_model::{GS_MAX_RANK, validate_index_range, validate_sh
 use crate::layout::{self, MatrixLayout};
 use crate::memory::{MetalBufferHandle, MetalMemory, map_metal_error};
 use crate::row_kernel::{self, plan_dtype_is_f32};
+
+/// `sort_model::SortPrepareError` を `BackendError` へ写像する
+/// （`ops.rs::sort`／`topk` から呼ばれる。CUDA 側 `ops.rs::
+/// map_sort_error` と同型の判断: `SizeLimitExceeded`〈合成キー配列長が
+/// バックエンド固有上限を超過〉のみ `Unsupported` としてホスト
+/// フォールバックへ委ねる。`DimSizeTooLarge`〈`dim_size` が
+/// カーネル引数型の範囲〈`i32::MAX`〉を超える〉は `ShapeMismatch
+/// (ShapeError::IndexRangeOverflow)` へ写像する——PR #1844 codex-review
+/// 指摘の是正: 当初は `ElementCountOverflow` へ写像していたが、CPU
+/// 参照実装（`backend-cpu::sort_topk`）が同じ状況（軸内添字の
+/// `i32::try_from` 失敗）で返す variant と食い違っていた。CUDA 側
+/// `ops.rs::map_sort_error`／`CudaError::SortDimSizeTooLarge` も同型に
+/// 是正済み）。
+fn map_sort_prepare_error(err: crate::sort_model::SortPrepareError) -> BackendError {
+    match err {
+        crate::sort_model::SortPrepareError::SizeLimitExceeded { .. } => {
+            BackendError::Unsupported(err.to_string())
+        }
+        crate::sort_model::SortPrepareError::DimSizeTooLarge { dim_size } => {
+            BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { index: dim_size })
+        }
+    }
+}
 
 std::thread_local! {
     /// [`MetalBackendOps::gemm_resident_lhs`]／[`MetalBackendOps::
@@ -2733,6 +2756,100 @@ impl BackendOps for MetalBackendOps {
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let m = out.len();
         Tensor::new(out, &[m]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::sort` の Metal 実装（イシュー #1741）。
+    /// `x.contiguous()` で稠密化してから `sort.rs::MetalSort::
+    /// run_sort_f32`（64bit 合成キー・ビットニックソート方式。
+    /// `crate::sort_model` モジュール doc 参照）へ委譲する。契約
+    /// （安定ソート相当の順序契約・NaN／±0 正規化・決定性）は
+    /// `fandhe_ai_tensor_core::BackendOps::sort` doc を正とする。
+    ///
+    /// 合成キー配列長がカーネル引数の範囲（`i32::MAX` 相当）を超える
+    /// 場合は `Self::unique` の `padded` 超過と同じ設計判断で
+    /// `BackendError::Unsupported` を返し、呼び出し元 `Var::sort` の
+    /// ホストフォールバックへ委ねる。
+    fn sort(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        descending: bool,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape = sort_out_shape(input.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Ok((
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+            ));
+        }
+        // `x.numel()`（無検査の `.iter().product()`）を呼ぶ前に要素数積
+        // のオーバーフローを検査する（`Self::unique` と同一の PR #1828
+        // codex-review 是正パターン）。
+        crate::gather_scatter_model::checked_numel(input.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        // `sort.rs::MetalSort::run_sort_f32` 内部の `plan_sort` 検証を
+        // `dispatch_sync` に入る前に先出しし、失敗理由（形状不正／
+        // バックエンド固有上限超過）を区別してから写像する（`map_sort_error`
+        // 参照。CUDA 側 `ops.rs::map_sort_error` と同型の判断）。
+        crate::sort_model::plan_sort(input.shape(), dim).map_err(map_sort_prepare_error)?;
+        let dim_size = input.shape()[dim];
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("sort: input not contiguous".into()))?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let s = context_cache::cached_sort(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (values, index) = s
+            .run_sort_f32(&ctx, input_slice, input.shape(), dim, descending, dim_size)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Ok((
+            Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(index, &out_shape).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// `BackendOps::topk` の Metal 実装（イシュー #1741）。`Self::sort`
+    /// と同一の `sort.rs::MetalSort::run_sort_f32` へ `out_len = k`・
+    /// `descending = largest` として委譲する（`largest=false` の
+    /// upside-down 契約は `fandhe_ai_tensor_core::BackendOps::topk` doc
+    /// を正とする）。
+    fn topk(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        k: usize,
+        largest: bool,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape =
+            topk_out_shape(input.shape(), dim, k).map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Ok((
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+            ));
+        }
+        crate::gather_scatter_model::checked_numel(input.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        crate::sort_model::plan_sort(input.shape(), dim).map_err(map_sort_prepare_error)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("topk: input not contiguous".into()))?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let s = context_cache::cached_sort(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (values, index) = s
+            .run_sort_f32(&ctx, input_slice, input.shape(), dim, largest, k)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Ok((
+            Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(index, &out_shape).map_err(BackendError::ShapeMismatch)?,
+        ))
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::mse_loss`] の Metal 実装

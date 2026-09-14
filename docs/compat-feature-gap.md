@@ -1333,6 +1333,13 @@ AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「�
 - issue 上の承認コメント（`unsafe asm!`〈SME〉・`BackendOps` trait 拡張・facade 公開面拡張の技術的許可）は実装着手前の技術的許可事項に限られ、spec 側の除外事項ゲート自体を解除する文言ではないと整理した（同 doc §0.1）。
 - facade 新規公開面なし（コード変更を伴わないため）。実装着手は本追補のスコープ外のまま引き続き #1627 として open・blocked で追跡する。
 
+## #1741 追補
+
+- `Var::sort`／`argsort`／`topk`（#1733 実装済み）の CUDA／Metal 専用カーネルを実装した（前段落「CUDA／Metal 専用カーネルは既定 `Unsupported`（ホストフォールバックで機能する）のまま #1741 へ引き継ぐ」の残対象を解消）。
+- 両バックエンドとも 64bit 合成キー（`hi`：値を「NaN は最大・NaN 同士は同値・±0 は同値」へ正規化した `u32` totalOrder 風キー・`descending` のときのみ反転／`lo`：ライン内の元添字。`lo` を反転しないことで非安定ソートでも `key` 自体がライン内で一意になり、`docs/spec` の順序契約（同値タイブレークは `descending` に関わらず元添字昇順）が構造的に成立する）によるビットニックソート方式で実装した（CUDA: `crates/backend-cuda/src/{sort_model.rs,kernels_sort.rs,sort.rs}`。Metal: `crates/backend-metal/src/{sort_model.rs,shaders/sort.metal,sort.rs}`）。
+- CPU 参照実装（`backend-cpu::sort_topk`）との bit 完全一致（`values`・`index` とも）を、実機なしで Linux 上検証できるホストモデル（`sort_model.rs::sort_lines_host_model` が実カーネルと同一アルゴリズムを意図的に複製）で網羅的に確認済み（12 形状 × `descending` × 複数 `out_len`）。
+- `facade/tests/sort_topk_backend_parity.rs`（CPU vs NaiveOps の forward・backward parity。scatter ベース VJP を含め bit 完全一致確認済み）・`backend-cuda/tests/sort_topk_parity.rs`・`backend-metal/tests/{sort_topk_parity.rs,sort_topk_source_evidence.rs}` を追加した。CUDA・Metal 実機での `#[ignore]` テスト実行（形状網羅・非 contiguous 入力・`k` 網羅）は本エージェント実行環境に両実機への到達手段がないため未実施のまま GB10／Mac セッションへ申し送り。
+- facade 新規公開面なし（既存の `Var` 再エクスポート経由のまま）。`sorted=False` の topk・負 `dim`・`k` の `Var` 化は引き続き対象外。
 ## #1753 の追補（親 #1631）
 
 `clip_grad_value`（PyTorch `torch.nn.utils.clip_grad_value_` 相当。各
