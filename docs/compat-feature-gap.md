@@ -817,6 +817,22 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 取る facade API）は引き続き未接続で、本表の「未実装（欠落側）」列の評価
 （`Var` レベルの mixed precision）は変わらない。
 
+## #1636（#1707〜#1709）の追補
+
+Metal バックエンドの `ScalarOp`（`ScalarUnaryOp`／`ScalarBinaryOp`。
+`tensor-core::scalar_op`）カーネルが CUDA（#1700〜#1702）と同等の範囲まで
+実装済みになった。#1707（算術系 `Sub`／`Div`／`Pow`／`Sqrt`）・#1708
+（超越関数系 `Neg`／`Abs`／`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`）に
+加え、#1709 で比較演算 6 種（`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`）＋`Clamp`
+（初のペイロード付き unary kind）を実装し、親イシュー #1636 の対象 kind
+をすべて実装完了した（`crates/backend-metal/src/scalar_op_source.rs`。
+MSL テンプレート生成＋`context_cache` のプロセス内キャッシュ）。
+facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_binary`
+の実装追加のみ）。`Var` 公開メソッド・facade 配線は引き続き #1593／#1595
+の担当。M4 Max 実機での parity・キャッシュ非分裂テスト（`#[ignore]`）は
+本イシューの実行環境に Apple Silicon 実機がないため未実施のまま Mac
+セッションへ申し送り。
+
 ## #1652 の追補（ONNX import の facade 公開可否の設計判断）
 
 §1.9・347 行目「ONNX import」のスナップショット本文（`onnx-interop::onnx::interp`
