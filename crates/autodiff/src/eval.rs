@@ -1305,6 +1305,30 @@ pub(crate) fn topk(
     ))
 }
 
+/// 平坦化・totalOrder ソート・隣接重複除去のホスト参照実装
+/// （`torch.unique(input, sorted=True)` の values のみ。イシュー
+/// #1734）。`BackendOps::unique` が `Unsupported` を返したときのみ
+/// `grad::unique_with_fallback` から呼ばれる。`backend-cpu::unique`
+/// と意図的に同一アルゴリズムを複製する（`eval` と CPU 実装の
+/// 意図的複製方針。gather／scatter の先例に倣う）。
+///
+/// **順序キー**: `f32::total_cmp`（IEEE 754 totalOrder）。**重複判定**:
+/// `==`（IEEE 比較。`-0.0`／`+0.0` は同一視され totalOrder で先頭側の
+/// `-0.0` が代表として残り、`NaN` は `NaN != NaN` のためすべて保持
+/// される）。`sort_unstable_by` は totalOrder で `Equal` と判定される
+/// 要素同士が bit 単位で同一であることを前提に安定性を要求しない
+/// （totalOrder は全順序でありタイは bit 同一の場合のみ発生する）。
+pub(crate) fn unique(input: &Tensor<f32>) -> Tensor<f32> {
+    if input.numel() == 0 {
+        return build_tensor(Vec::new(), &[0]);
+    }
+    let mut v = dense_vec(input);
+    v.sort_unstable_by(f32::total_cmp);
+    v.dedup_by(|cur, prev| *cur == *prev);
+    let m = v.len();
+    build_tensor(v, &[m])
+}
+
 /// CrossEntropy 損失（log-sum-exp 安定化。クラス次元 `class_dim` 指定。
 /// #191・親イシュー #189）。shape 検査（`class_dim` 範囲・targets
 /// shape 一致・targets 添字範囲）は呼び出し元（`var.rs::

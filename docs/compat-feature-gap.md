@@ -1027,3 +1027,20 @@ bool 引数との直接合成も #1613 待ち）。VJP は両入力とも常に�
 （比較演算は局所的に階段関数のため微分不可能）。CUDA／Metal 実機での
 facade parity 実測は本エージェント実行環境に実機がないため未実施の
 まま申し送る。
+
+## #1734 の追補
+
+`torch.unique(input, sorted=True)` の values のみを実装済み化した
+（`Var::unique`。イシュー #1734・`docs/unique-facade-exposure-decision.md`）。
+他の Var 演算と異なり非微分演算（勾配を持たない）であり、出力形状が
+入力値に依存して動的に決まるため `Var`（tape ノード・静的 shape）では
+なく **detached な `Tensor<f32>`** を返す（`Op` を tape に記録しない）。
+CPU（参照実装）・CUDA／Metal（ビットニックソート方式。整数
+compare/swap のみで浮動小数点演算を含まないため決定的）の 3
+バックエンドとも bit 完全一致契約。CUDA／Metal 実機（DGX Spark
+GB10・Apple Silicon）は本実装環境に到達手段がなく `#[ignore]`
+テストとして未実測のまま GB10／Mac セッションへ申し送る。
+`return_inverse`／`return_counts`／`dim` 指定・`sorted=false`・
+`unique_consecutive`・GPU 側 prefix-sum 圧縮は対象外のまま
+（decision doc §5／§6）。facade 新規公開面なし（既存 `Var`
+再エクスポート経由）。

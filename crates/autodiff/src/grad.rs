@@ -1613,6 +1613,56 @@ pub(crate) fn topk_with_fallback(
     }
 }
 
+/// [`Var::unique`] が使う「バックエンド実装 → フォールバック」ヘルパー
+/// （イシュー #1734）。[`gather_with_fallback`] と同型: `ops.unique` →
+/// `Unsupported` のときのみ `eval::unique` へフォールバックし、それ
+/// 以外のエラーは伝播する（判定迂回経路を作らない）。バックエンドが
+/// 返した出力に [`BackendOps::unique`] doc の出力不変条件（rank 1・
+/// `len <= numel`・totalOrder で非減少・隣接に `==` な要素がない）を
+/// 事後検査し、違反は `AutodiffError::Backend(BackendError::
+/// ShapeMismatch(..))` として拒否する（3 バックエンド実装が独立に
+/// 契約を守っているかを呼び出し元でも検証する二重検査方針。
+/// `.claude/rules/security.md` A08）。
+pub(crate) fn unique_with_fallback(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let numel = x.numel();
+    let v = match ops.unique(x) {
+        Ok(v) => v,
+        Err(BackendError::Unsupported(_)) => eval::unique(x),
+        Err(other) => return Err(AutodiffError::Backend(other)),
+    };
+    validate_unique_output(&v, numel)?;
+    Ok(v)
+}
+
+/// [`unique_with_fallback`] の出力不変条件検査（[`BackendOps::unique`]
+/// doc の契約を正とする）。rank 1・`len <= numel` に加え、隣接ペアが
+/// totalOrder で非減少（`Ordering::Greater` でない）かつ `==` でない
+/// （NaN は `total_cmp` で `Equal` と判定されても IEEE `==` では
+/// `false` になりうるため両者を併用する。「厳密増加」ではなく
+/// 「非減少 ＋ 隣接 `==` なし」が正しい述語である点に注意——同一 bit の
+/// NaN が隣接して現れうる）ことを検査する。
+fn validate_unique_output(v: &Tensor<f32>, numel: usize) -> Result<(), AutodiffError> {
+    let shape_ok = v.shape().len() == 1 && v.shape()[0] <= numel;
+    let data = dense_vec(v);
+    let order_ok = data.windows(2).all(|w| {
+        let (a, b) = (w[0], w[1]);
+        a.total_cmp(&b) != std::cmp::Ordering::Greater && a != b
+    });
+    if shape_ok && order_ok {
+        Ok(())
+    } else {
+        Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+            ShapeError::ShapeMismatch {
+                lhs: v.shape().to_vec(),
+                rhs: vec![numel],
+            },
+        )))
+    }
+}
+
 /// [`Op::Scatter`]（`reduce = Overwrite`）の VJP 補助（イシュー
 /// #1776・codex-review 指摘）。forward の決定的集約契約
 /// （`ScatterReduce::Overwrite` doc: `index`／`src` を行優先で走査し、

@@ -1281,6 +1281,28 @@ fn map_gather_scatter_error(err: CudaError) -> BackendError {
     }
 }
 
+/// `unique.rs::CudaUnique::run_unique_f32` のエラーを `BackendOps::
+/// unique` の戻り値へ変換する（イシュー #1734）。
+/// [`CudaError::UniqueSizeLimitExceeded`]（対象サイズがバックエンド
+/// 固有上限を超過）**のみ** [`BackendError::Unsupported`] へ写像し、
+/// `Var::unique` のホストフォールバック（`eval::unique`）へ委ねる。
+/// [`CudaError::InvalidUniqueShape`]（内部契約違反。呼び出し元の事前
+/// 検証を通過した入力からは実質到達しない防御的経路）は
+/// `ShapeError::ElementCountOverflow` へ、それ以外（driver 不在等）は
+/// 既存 [`map_cuda_error`] へ委譲する——`Unsupported` へ写像するのは
+/// サイズ上限超過の専用 variant のみとし、内部契約違反・driver 失敗を
+/// ホストフォールバックで覆い隠さない（`.claude/rules/security.md`
+/// A08）。
+fn map_unique_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::UniqueSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        CudaError::InvalidUniqueShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
+}
+
 /// shape の要素数積を `checked_mul` の畳み込みで検査する（PR #1795
 /// codex-review 指摘の是正・イシュー #1777）。`Tensor::contiguous()`
 /// は内部で `is_contiguous()` → `numel()`（`shape.iter().product()`。
@@ -2936,6 +2958,30 @@ impl BackendOps for CudaBackendOps {
             )
         })?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::unique` の CUDA 実装（イシュー #1734）。
+    /// `x.contiguous()` で稠密化してから `unique.rs::CudaUnique::
+    /// run_unique_f32`（ビットニックソート方式）へ委譲する。契約
+    /// （totalOrder ソート・`==` による重複判定）は
+    /// `fandhe_ai_tensor_core::BackendOps::unique` doc を正とする。
+    fn unique(&self, x: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("unique: input not contiguous".into())
+        })?;
+
+        let u = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_unique(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_unique_error, || u.run_unique_f32(x_slice))?;
+        let m = out.len();
+        Tensor::new(out, &[m]).map_err(BackendError::ShapeMismatch)
     }
 
     /// `BackendOps::scalar_unary` の CUDA 実装（イシュー #1700・#1702）。
