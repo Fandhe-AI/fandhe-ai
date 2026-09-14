@@ -1605,3 +1605,15 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `Probabilities` kind のみ `input`／`target` の `[0, 1]` 範囲検査（NaN 含む）を実体化直後・バックエンド呼び出し前にホスト側で行い、違反は `AutodiffError::InvalidArgument`（`cross_entropy_loss` の targets 範囲検査と同配置）。`Logits` kind は範囲制約なし。
 - `dInput`（`Probabilities` kind は分母をクランプした勾配 `(p − y) / max(p·(1−p), 1e−12)`。forward のクランプ済み式の厳密な導関数ではない点に注意。厳密な導関数となるのは `dTarget` 側）のみをカーネルが返し、`dTarget` は呼び出し元がホスト側の逐次 map で計算する契約（`MseLoss` の `dTarget = -dPred` という単純合成が成り立たないため）。
 - facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.2）。CUDA／Metal 実機での facade parity テスト・性能実測は未実施のまま Mac／GB10 セッションへ申し送る。
+
+## 追補（イシュー #1745）
+
+§2.10 の `CosineAnnealingLR`・`ExponentialLR` 行を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `CosineAnnealingLr`・`ExponentialLr`・`LinearWarmupLr`（`crates/autodiff/src/nn/optim/lr_scheduler.rs`）を `ConstantLr`／`StepLr` と同じ `LrScheduler` trait 実装として追加した。いずれも `lr_at(step) -> f32` のみを持つ stateless 純関数で、新規 `Op`／`BackendOps`／`Var` は拡張していない。
+- `CosineAnnealingLr` は PyTorch `CosineAnnealingLR._get_closed_form_lr` 準拠の閉形式（`eta_min + (base_lr - eta_min) * (1 + cos(π * step / t_max)) / 2`）を採用し、`step > t_max` では TensorFlow `CosineDecay` のように clamp せず周期的に振る舞う（PyTorch 準拠）。
+- `ExponentialLr` は `lr(step) = base_lr * gamma^step`（PyTorch `ExponentialLR` と同一）。
+- `LinearWarmupLr` は PyTorch に同名クラスがないため、`LinearLR` の `end_factor = 1.0` 固定形として定義した独自スケジューラ。
+- いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する（`cos`／`powf` の libm 差による ULP 揺れを抑える精度方針。bit 同一契約は主張しない）。
+- facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
+- 状態保持型の `ReduceLROnPlateau`・`OneCycleLR` は本 issue の対象外のまま残る（兄弟イシュー #1746／#1747 が担当）。
