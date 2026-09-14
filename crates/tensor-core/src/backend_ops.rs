@@ -277,6 +277,48 @@ pub enum InterpolateMode {
     /// **構造的に bit 完全一致**する。`nearest-exact`〈`floor((dst+0.5)
     /// *in/out)`〉は対象外・別 variant として扱う）。
     Nearest,
+    /// バイリニア（`torch.nn.functional.interpolate(mode='bilinear',
+    /// align_corners=…)`／`tf.image.resize(method='bilinear')` 相当。
+    /// イシュー #1762）。空間軸は**ちょうど 2 軸**（`size.len() == 2`。
+    /// 末尾 2 軸 = `(H, W)`）限定——1 次元 `linear`／3 次元
+    /// `trilinear`／`bicubic` は対象外（[`crate::ops_shape::
+    /// interpolate_out_shape_for_mode`] が rank 違反を
+    /// `ShapeError::RankMismatch` で拒否する）。
+    ///
+    /// 各出力位置は 4 個の入力近傍（`(y0,x0)`／`(y0,x1)`／`(y1,x0)`／
+    /// `(y1,x1)`）を線形重み付けして合成する（`Nearest` と異なり
+    /// 算術を含む）。座標・重みの単一情報源は
+    /// [`crate::interpolate::bilinear_src_coord`]（`autodiff::eval`・
+    /// `backend-cpu`・`backend-metal::interpolate_model` が共有する）。
+    ///
+    /// `scale = align_corners ? (in-1)/(out-1) : in/out`（`out<=1` の
+    /// `align_corners=true` は `scale=0`。PyTorch
+    /// `area_pixel_compute_scale` 相当）:
+    /// - `align_corners=false`: `src = (dst + 0.5) * scale - 0.5`
+    ///   （`src < 0` は `0` へクランプ）
+    /// - `align_corners=true`: `src = dst * scale`
+    ///
+    /// `i0 = min(floor(src), in_size-1)`・`i1 = min(i0+1, in_size-1)`・
+    /// `lambda1 = src - i0`（`src` をクランプした後の差。境界・
+    /// `in_size==1` では `lambda1=0`）。ブレンドは
+    /// `out = lerp(lerp(v00,v01,l1x), lerp(v10,v11,l1x), l1y)` を
+    /// `fma` で構成する固定式順序（[`crate::interpolate`] doc 参照）。
+    ///
+    /// **受入契約は REQ-2 統一複合判定**（相対誤差 1e-3 未満 または
+    /// 絶対誤差 1e-5 未満。`fandhe_ai_backend_cpu::parity::
+    /// assert_parity`）であり `Nearest` のような bit 完全一致は
+    /// 断言しない——NVRTC の `fmad` 既定契約（上書き禁止。
+    /// `.claude/rules/coding-rust.md`）により GPU 側カーネルの丸めが
+    /// Rust ホスト参照実装と一致しない可能性があるため。Rust 実装
+    /// 同士（CPU ネイティブ ⟷ ホスト参照・Metal 逐語モデル ⟷ CPU）は
+    /// 引き続き bit 完全一致を検証する。
+    Bilinear {
+        /// `true` なら入力・出力の四隅を一致させる（PyTorch
+        /// `align_corners=True` 相当）。`false`（既定的に使われる値。
+        /// PyTorch のデフォルトと同じ）はピクセル中心を基準にする
+        /// half-pixel 変換を使う。
+        align_corners: bool,
+    },
 }
 
 /// [`BackendOps::captured_segment_key`]／[`BackendOps::run_captured_sgd_step_segment`]

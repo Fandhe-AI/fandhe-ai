@@ -1616,6 +1616,85 @@ pub(crate) fn vjp(
                         .map_err(AutodiffError::Shape)?;
                     vec![(input, d_input)]
                 }
+                // `Var::interpolate`（`Bilinear`。イシュー #1762）。
+                // 各出力位置は 4 個の入力近傍への重み付き寄与を持つため
+                // （`Nearest` の 1 対 1 対応とは異なる）、scatter_add の
+                // index／src を「出力位置 × 4 コーナー」の平坦化 2 階
+                // テンソル（shape `[outer, sp_out * 4]`）として構築する。
+                // コーナー順は forward と共有する単一情報源
+                // （`bilinear_src_index_and_weight_map`。`tensor-core::
+                // interpolate::bilinear_src_coord` を呼ぶ）が固定する
+                // `(y0,x0),(y0,x1),(y1,x0),(y1,x1)` で、scatter_add は
+                // 出力位置 major・コーナー minor の逐次和として決定的に
+                // 集約する（`ScatterReduce::Add` の決定的集約契約。
+                // `.claude/rules/coding-rust.md`）。重複コーナー
+                // （境界・`in_size==1`）はそのまま複数回加算される
+                // （forward の重みの和が 1 のまま保たれるのと対）。
+                fandhe_ai_tensor_core::InterpolateMode::Bilinear { align_corners } => {
+                    if sp_in_numel > i32::MAX as usize {
+                        return Err(AutodiffError::InvalidArgument(format!(
+                            "Op::Interpolate の VJP: 空間軸要素数 {sp_in_numel} が \
+                             i32::MAX を超え scatter_add の index dtype (i32) に \
+                             収まらない"
+                        )));
+                    }
+                    // `sp_out_numel * 4`（各出力位置あたり 4 コーナー）・
+                    // `outer * (sp_out_numel * 4)`（`index`／`src` の
+                    // 実際の確保長）は `nearest_src_index_map` と同じ
+                    // 理由で `checked_mul` により独立に検査する（巨大な
+                    // `size` に対する capacity overflow panic 防止。
+                    // `.claude/rules/coding-rust.md`）。
+                    let sp_out_x4 = sp_out_numel
+                        .checked_mul(4)
+                        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+                    outer
+                        .checked_mul(sp_out_x4)
+                        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+
+                    let (index_row, weight_row) = bilinear_src_index_and_weight_map(
+                        &input_shape,
+                        &out_shape,
+                        spatial_start,
+                        align_corners,
+                    );
+
+                    let upstream2d = upstream
+                        .contiguous()
+                        .reshape(&[outer, sp_out_numel])
+                        .map_err(AutodiffError::Shape)?;
+                    let upstream_data = eval::dense_vec(&upstream2d);
+
+                    let mut index_data = Vec::with_capacity(outer * sp_out_x4);
+                    let mut src_data = Vec::with_capacity(outer * sp_out_x4);
+                    for o in 0..outer {
+                        index_data.extend_from_slice(&index_row);
+                        let row_base = o * sp_out_numel;
+                        for p in 0..sp_out_numel {
+                            let u = upstream_data[row_base + p];
+                            for k in 0..4 {
+                                src_data.push(u * weight_row[p * 4 + k]);
+                            }
+                        }
+                    }
+                    let index = eval::build_index_tensor(index_data, &[outer, sp_out_x4]);
+                    let src2d =
+                        Tensor::new(src_data, &[outer, sp_out_x4]).map_err(AutodiffError::Shape)?;
+                    let zeros2d =
+                        Tensor::zeros(&[outer, sp_in_numel]).map_err(AutodiffError::Shape)?;
+                    let d_input2d = scatter_with_fallback(
+                        ops,
+                        &zeros2d,
+                        1,
+                        &index,
+                        &src2d,
+                        ScatterReduce::Add,
+                        &[outer, sp_in_numel],
+                    )?;
+                    let d_input = d_input2d
+                        .reshape(&input_shape)
+                        .map_err(AutodiffError::Shape)?;
+                    vec![(input, d_input)]
+                }
                 // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
                 // 側で将来 variant を追加しうる。`Op::Scatter` VJP の
                 // 未知 `ScatterReduce` variant 分岐と同型の fail-closed
@@ -2268,6 +2347,9 @@ pub(crate) fn interpolate_with_fallback(
             fandhe_ai_tensor_core::InterpolateMode::Nearest => {
                 eval::interpolate_nearest(input, size).map_err(AutodiffError::Shape)
             }
+            fandhe_ai_tensor_core::InterpolateMode::Bilinear { align_corners } => {
+                eval::interpolate_bilinear(input, size, align_corners).map_err(AutodiffError::Shape)
+            }
             // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
             // 側で将来 variant を追加しうる。`ScatterReduce` の
             // `Op::Scatter` VJP 未知 variant 分岐と同型）。
@@ -2329,6 +2411,81 @@ pub(crate) fn nearest_src_index_map(
         data.extend_from_slice(&row);
     }
     eval::build_index_tensor(data, &[outer, sp_out_numel])
+}
+
+/// [`Op::Interpolate`]（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Bilinear`]）の VJP が使う scatter_add index／重み構築（イシュー
+/// #1762）。forward のホスト参照実装（`eval::interpolate_bilinear`）と
+/// **同じ座標式**（`fandhe_ai_tensor_core::interpolate::
+/// bilinear_src_coord`。単一情報源）を使い、出力の各空間位置に対応する
+/// 4 個の入力近傍（flat 添字。`sp_in` 軸内）とその補間重みを求める。
+///
+/// 戻り値は「出力位置 1 個あたり 4 コーナー」を平坦化した行
+/// （長さ `sp_out * 4`。コーナー順は `(y0,x0),(y0,x1),(y1,x0),(y1,x1)`
+/// 固定——`nearest_src_index_map` と同様、全 `outer` 行が同一パターン
+/// を持つため呼び出し元がこの行を複製して 2 階テンソルを構築する）:
+/// - `.0`（`index_row: Vec<i32>`）: `sp_in` 内の flat 添字
+/// - `.1`（`weight_row: Vec<f32>`）: 対応する補間重み（`upstream` との
+///   乗算は呼び出し元が行う——本関数は `outer` に依存しないため）
+///
+/// `in_shape`／`out_shape` の空間軸は `spatial_start..` の**ちょうど 2
+/// 軸**（`(H, W)`。呼び出し元 `vjp` の `Op::Interpolate` 腕が
+/// `interpolate_out_shape_for_mode` 経由で事前保証済み——`Var::
+/// interpolate` が forward 時点で拒否するため `Bilinear` の `Op` は
+/// 必ず 2 空間軸を持つ）。
+pub(crate) fn bilinear_src_index_and_weight_map(
+    in_shape: &[usize],
+    out_shape: &[usize],
+    spatial_start: usize,
+    align_corners: bool,
+) -> (Vec<i32>, Vec<f32>) {
+    debug_assert_eq!(
+        out_shape.len() - spatial_start,
+        2,
+        "bilinear_src_index_and_weight_map: caller must guarantee exactly 2 spatial axes"
+    );
+    let sp_in = &in_shape[spatial_start..];
+    let sp_out = &out_shape[spatial_start..];
+    let sp_out_numel: usize = sp_out.iter().product();
+    let sp_in_strides = eval::row_major_strides(sp_in);
+    let stride_h = sp_in_strides[0];
+    let stride_w = sp_in_strides[1];
+    let (in_h, in_w) = (sp_in[0], sp_in[1]);
+    let (out_h, out_w) = (sp_out[0], sp_out[1]);
+    let scale_h = fandhe_ai_tensor_core::bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = fandhe_ai_tensor_core::bilinear_scale(in_w, out_w, align_corners);
+
+    let mut index_row = vec![0i32; sp_out_numel * 4];
+    let mut weight_row = vec![0f32; sp_out_numel * 4];
+    for p in 0..sp_out_numel {
+        // `sp_out` はちょうど 2 軸のため flat 添字は `(y, x)` へ直接
+        // 分解できる（`eval::unravel` の 2 軸特殊化——ここでは
+        // `p / out_w`／`p % out_w` で十分）。
+        let y = p / out_w;
+        let x = p % out_w;
+        let cy = fandhe_ai_tensor_core::bilinear_src_coord(y, in_h, scale_h, align_corners);
+        let cx = fandhe_ai_tensor_core::bilinear_src_coord(x, in_w, scale_w, align_corners);
+        let l0x = 1.0 - cx.lambda1;
+        let l0y = 1.0 - cy.lambda1;
+        // コーナー順固定: (y0,x0),(y0,x1),(y1,x0),(y1,x1)（forward の
+        // 添字読み出し順・`bilinear_blend` の引数順と一致させる）。
+        let corners = [
+            (cy.i0, cx.i0, l0y * l0x),
+            (cy.i0, cx.i1, l0y * cx.lambda1),
+            (cy.i1, cx.i0, cy.lambda1 * l0x),
+            (cy.i1, cx.i1, cy.lambda1 * cx.lambda1),
+        ];
+        for (k, &(iy, ix, w)) in corners.iter().enumerate() {
+            let pos = iy * stride_h + ix * stride_w;
+            // `pos` は `sp_in` 内の flat 添字。`i32` への切り詰めは
+            // 呼び出し元（`vjp` の `Op::Interpolate` Bilinear 分岐）が
+            // 事前に `sp_in_numel <= i32::MAX` を検査済みのため安全
+            // （`nearest_src_index_map` の同種コメントと同じ契約）。
+            index_row[p * 4 + k] = pos as i32;
+            weight_row[p * 4 + k] = w;
+        }
+    }
+    (index_row, weight_row)
 }
 
 /// [`Op::Scatter`]（`reduce = Overwrite`）の VJP 補助（イシュー
