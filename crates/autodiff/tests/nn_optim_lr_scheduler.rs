@@ -6,9 +6,17 @@
 //! を追加した。参照値は本環境で PyTorch を実行できないため、閉形式の
 //! 式（`lr_scheduler.rs` の各 `impl LrScheduler::lr_at` doc 参照）から
 //! 手計算した値を用いる。
+//!
+//! #1747（親 #1611）: OneCycleLr（PyTorch `OneCycleLR` 相当）の参照
+//! 系列・境界値・`step` clamp・入力検証テストを追加した（§5）。参照
+//! 系列は `OneCycleLr::new`／`lr_at` のアルゴリズム（`lr_scheduler.rs`
+//! doc 参照）を python3 で忠実に再現し手計算した値を用いる
+//! （max_lr=1.0・total_steps=10・既定値 or 明示値。#1855 の
+//! `CosineAnnealingLr` 等と同じ「閉形式手計算」方針）。
 
 use fandhe_ai_autodiff::nn::optim::{
-    ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, StepLr,
+    ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, OneCycleAnneal,
+    OneCycleLr, OneCycleLrConfig, StepLr,
 };
 
 #[test]
@@ -229,6 +237,7 @@ fn schedulers_are_deterministic_for_same_step() {
     let cosine = CosineAnnealingLr::new(0.1, 4, 0.0).unwrap();
     let exponential = ExponentialLr::new(0.1, 0.5).unwrap();
     let warmup = LinearWarmupLr::new(0.1, 4, 0.25).unwrap();
+    let one_cycle = OneCycleLr::new(OneCycleLrConfig::new(0.1, 10)).unwrap();
     for step in [0usize, 1, 3, 4, 10] {
         assert_eq!(cosine.lr_at(step), cosine.lr_at(step), "cosine step={step}");
         assert_eq!(
@@ -237,6 +246,11 @@ fn schedulers_are_deterministic_for_same_step() {
             "exponential step={step}"
         );
         assert_eq!(warmup.lr_at(step), warmup.lr_at(step), "warmup step={step}");
+        assert_eq!(
+            one_cycle.lr_at(step),
+            one_cycle.lr_at(step),
+            "one_cycle step={step}"
+        );
     }
 }
 
@@ -248,9 +262,277 @@ fn schedulers_are_object_safe_via_dyn_lr_scheduler() {
         Box::new(CosineAnnealingLr::new(0.1, 4, 0.0).unwrap()),
         Box::new(ExponentialLr::new(0.1, 0.5).unwrap()),
         Box::new(LinearWarmupLr::new(0.1, 4, 0.25).unwrap()),
+        Box::new(OneCycleLr::new(OneCycleLrConfig::new(0.1, 10)).unwrap()),
     ];
     for sched in &schedulers {
         let lr = sched.lr_at(0);
         assert!(lr.is_finite(), "lr_at(0) が非有限: {lr}");
     }
+}
+// ---------------------------------------------------------------------
+// §5: OneCycleLr（イシュー #1747）
+// ---------------------------------------------------------------------
+
+#[test]
+fn one_cycle_lr_matches_pytorch_two_phase_cos_reference_sequence() {
+    // max_lr=1.0, total_steps=10, 既定値（pct_start=0.3・Cos・
+    // div_factor=25.0・final_div_factor=1e4・three_phase=false）の
+    // `OneCycleLr::new`／`lr_at` アルゴリズムを python3 で忠実に再現し
+    // 手計算した参照系列（モジュール冒頭 doc 参照）。
+    let sched = OneCycleLr::new(OneCycleLrConfig::new(1.0, 10)).unwrap();
+    let expected = [
+        0.04f32,
+        0.52,
+        1.0,
+        0.950_484_63,
+        0.811_745_64,
+        0.611_262,
+        0.388_741_97,
+        0.188_258_35,
+        0.049_519_368,
+        0.000_004,
+    ];
+    for (step, &want) in expected.iter().enumerate() {
+        let got = sched.lr_at(step);
+        assert!(
+            (got - want).abs() < 1e-6,
+            "cos step={step} got={got} want={want}"
+        );
+    }
+}
+
+#[test]
+fn one_cycle_lr_matches_pytorch_linear_reference_sequence() {
+    let config = OneCycleLrConfig {
+        anneal_strategy: OneCycleAnneal::Linear,
+        ..OneCycleLrConfig::new(1.0, 10)
+    };
+    let sched = OneCycleLr::new(config).unwrap();
+    let expected = [
+        0.04f32,
+        0.52,
+        1.0,
+        0.857_143_4,
+        0.714_286_86,
+        0.571_430_27,
+        0.428_573_73,
+        0.285_717_13,
+        0.142_860_58,
+        0.000_004,
+    ];
+    for (step, &want) in expected.iter().enumerate() {
+        let got = sched.lr_at(step);
+        assert!(
+            (got - want).abs() < 1e-6,
+            "linear step={step} got={got} want={want}"
+        );
+    }
+}
+
+#[test]
+fn one_cycle_lr_matches_pytorch_three_phase_reference_sequence() {
+    let config = OneCycleLrConfig {
+        three_phase: true,
+        ..OneCycleLrConfig::new(1.0, 10)
+    };
+    let sched = OneCycleLr::new(config).unwrap();
+    let expected = [
+        0.04f32,
+        0.52,
+        1.0,
+        0.52,
+        0.04,
+        0.036_180_72,
+        0.026_181_722,
+        0.013_822_278,
+        0.003_823_278,
+        0.000_004,
+    ];
+    for (step, &want) in expected.iter().enumerate() {
+        let got = sched.lr_at(step);
+        assert!(
+            (got - want).abs() < 1e-6,
+            "three_phase step={step} got={got} want={want}"
+        );
+    }
+}
+
+#[test]
+fn one_cycle_lr_hits_initial_peak_and_min() {
+    // max_lr=1.0, total_steps=10, 既定値: initial_lr=max_lr/25=0.04・
+    // 位相境界 step=2 で max_lr・末尾 step=9 で min_lr
+    // (=initial_lr/1e4=4e-6) に達する（§2.2 系列参照）。
+    let sched = OneCycleLr::new(OneCycleLrConfig::new(1.0, 10)).unwrap();
+    assert!(
+        (sched.lr_at(0) - 0.04).abs() < 1e-6,
+        "lr_at(0) は initial_lr のはず: {}",
+        sched.lr_at(0)
+    );
+    assert!(
+        (sched.lr_at(2) - 1.0).abs() < 1e-6,
+        "lr_at(2) は max_lr のはず（位相境界）: {}",
+        sched.lr_at(2)
+    );
+    assert!(
+        (sched.lr_at(9) - 0.000_004).abs() < 1e-6,
+        "lr_at(9) は min_lr のはず: {}",
+        sched.lr_at(9)
+    );
+}
+
+#[test]
+fn one_cycle_lr_is_increasing_then_non_increasing() {
+    // 上昇フェーズ（step 0..=2）は単調増加、以降（step 2..=9）は
+    // 単調非増加であることを固定する。
+    let sched = OneCycleLr::new(OneCycleLrConfig::new(1.0, 10)).unwrap();
+    let mut prev = sched.lr_at(0);
+    for step in 1..=2usize {
+        let cur = sched.lr_at(step);
+        assert!(
+            cur >= prev - 1e-6,
+            "step={step} cur={cur} prev={prev} が上昇フェーズで単調増加でない"
+        );
+        prev = cur;
+    }
+    for step in 3..=9usize {
+        let cur = sched.lr_at(step);
+        assert!(
+            cur <= prev + 1e-6,
+            "step={step} cur={cur} prev={prev} が下降フェーズで単調非増加でない"
+        );
+        prev = cur;
+    }
+}
+
+#[test]
+fn one_cycle_lr_clamps_step_beyond_total_steps() {
+    // PyTorch は `step > total_steps` で ValueError を送出するが、
+    // `lr_at` は Result を返せない契約のため `total_steps - 1` へ
+    // clamp し続ける（`OneCycleLr::new` doc「`step >= total_steps` の
+    // 扱い」節参照）。panic せず・非有限にならないことも併せて固定。
+    let sched = OneCycleLr::new(OneCycleLrConfig::new(1.0, 10)).unwrap();
+    let at_last = sched.lr_at(9);
+    let at_total = sched.lr_at(10);
+    let at_far = sched.lr_at(10 * 10);
+    assert!(
+        (at_total - at_last).abs() < 1e-6,
+        "lr_at(total_steps) は lr_at(total_steps-1) と一致するはず: \
+         at_total={at_total} at_last={at_last}"
+    );
+    assert!(
+        (at_far - at_last).abs() < 1e-6,
+        "lr_at(10*total_steps) も lr_at(total_steps-1) と一致するはず: \
+         at_far={at_far} at_last={at_last}"
+    );
+    assert!(at_total.is_finite(), "at_total が非有限: {at_total}");
+    assert!(at_far.is_finite(), "at_far が非有限: {at_far}");
+}
+
+#[test]
+fn one_cycle_lr_config_new_uses_pytorch_defaults() {
+    let config = OneCycleLrConfig::new(0.1, 100);
+    assert_eq!(config.max_lr, 0.1);
+    assert_eq!(config.total_steps, 100);
+    assert_eq!(config.pct_start, 0.3);
+    assert_eq!(config.anneal_strategy, OneCycleAnneal::Cos);
+    assert_eq!(config.div_factor, 25.0);
+    assert_eq!(config.final_div_factor, 1e4);
+    assert!(!config.three_phase);
+}
+
+#[test]
+fn one_cycle_lr_rejects_invalid_arguments() {
+    let base = OneCycleLrConfig::new(1.0, 10);
+
+    let mut cfg = base;
+    cfg.max_lr = 0.0;
+    assert!(OneCycleLr::new(cfg).is_err(), "max_lr=0");
+    let mut cfg = base;
+    cfg.max_lr = -1.0;
+    assert!(OneCycleLr::new(cfg).is_err(), "max_lr<0");
+    let mut cfg = base;
+    cfg.max_lr = f32::NAN;
+    assert!(OneCycleLr::new(cfg).is_err(), "max_lr=NaN");
+    let mut cfg = base;
+    cfg.max_lr = f32::INFINITY;
+    assert!(OneCycleLr::new(cfg).is_err(), "max_lr=Inf");
+
+    let mut cfg = base;
+    cfg.total_steps = 0;
+    assert!(OneCycleLr::new(cfg).is_err(), "total_steps=0");
+
+    let mut cfg = base;
+    cfg.pct_start = 0.0;
+    assert!(OneCycleLr::new(cfg).is_err(), "pct_start=0");
+    let mut cfg = base;
+    cfg.pct_start = 1.0;
+    assert!(OneCycleLr::new(cfg).is_err(), "pct_start=1");
+    let mut cfg = base;
+    cfg.pct_start = -0.1;
+    assert!(OneCycleLr::new(cfg).is_err(), "pct_start<0");
+    let mut cfg = base;
+    cfg.pct_start = 1.1;
+    assert!(OneCycleLr::new(cfg).is_err(), "pct_start>1");
+    let mut cfg = base;
+    cfg.pct_start = f32::NAN;
+    assert!(OneCycleLr::new(cfg).is_err(), "pct_start=NaN");
+
+    let mut cfg = base;
+    cfg.div_factor = 0.0;
+    assert!(OneCycleLr::new(cfg).is_err(), "div_factor=0");
+    let mut cfg = base;
+    cfg.div_factor = -1.0;
+    assert!(OneCycleLr::new(cfg).is_err(), "div_factor<0");
+    let mut cfg = base;
+    cfg.div_factor = f32::NAN;
+    assert!(OneCycleLr::new(cfg).is_err(), "div_factor=NaN");
+    // div_factor < 1.0 は PyTorch 自身が拒否しないため、ここでも拒否
+    // しない（`new` doc 参照）。
+    let mut cfg = base;
+    cfg.div_factor = 0.5;
+    assert!(OneCycleLr::new(cfg).is_ok(), "div_factor<1.0 は許容");
+
+    let mut cfg = base;
+    cfg.final_div_factor = 0.0;
+    assert!(OneCycleLr::new(cfg).is_err(), "final_div_factor=0");
+    let mut cfg = base;
+    cfg.final_div_factor = -1.0;
+    assert!(OneCycleLr::new(cfg).is_err(), "final_div_factor<0");
+    let mut cfg = base;
+    cfg.final_div_factor = f32::NAN;
+    assert!(OneCycleLr::new(cfg).is_err(), "final_div_factor=NaN");
+
+    // pct_start が中間値であれば受理する（境界値のみ拒否）。
+    let mut cfg = base;
+    cfg.pct_start = 0.5;
+    assert!(OneCycleLr::new(cfg).is_ok(), "pct_start=0.5 は許容");
+
+    // 退化フェーズ境界: total_steps=3・pct_start=0.3 では
+    // `pct*total-1 = -0.1 <= 0` となり最初のフェーズ境界が単調増加の
+    // 前提を満たさない。
+    let mut cfg = base;
+    cfg.total_steps = 3;
+    assert!(
+        OneCycleLr::new(cfg).is_err(),
+        "total_steps=3 は最初のフェーズ境界が退化する"
+    );
+
+    // 3 フェーズ形式の退化境界: pct_start=0.6・total_steps=10 では
+    // フェーズ 2 の end_step(=2*0.6*10-2=10.0) がフェーズ 3 の
+    // end_step(=total_steps-1=9.0) を超える。
+    let mut cfg = base;
+    cfg.pct_start = 0.6;
+    cfg.three_phase = true;
+    assert!(
+        OneCycleLr::new(cfg).is_err(),
+        "three_phase で pct_start=0.6・total_steps=10 は境界が単調増加でない"
+    );
+}
+
+#[test]
+fn one_cycle_lr_is_object_safe_and_reachable_via_dyn_lr_scheduler() {
+    let sched = OneCycleLr::new(OneCycleLrConfig::new(0.1, 4)).unwrap();
+    let boxed: Box<dyn LrScheduler> = Box::new(sched);
+    let lr = boxed.lr_at(0);
+    assert!(lr.is_finite(), "lr_at(0) が非有限: {lr}");
 }

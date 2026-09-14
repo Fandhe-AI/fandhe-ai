@@ -303,6 +303,9 @@ fn optim_module_reexports_exactly_expected_surface() {
         "ExponentialLr",
         "LinearWarmupLr",
         "LrScheduler",
+        "OneCycleAnneal",
+        "OneCycleLr",
+        "OneCycleLrConfig",
         "StepLr",
         "RmsProp",
         "RmsPropConfig",
@@ -654,6 +657,37 @@ fn optim_types_are_reachable_via_facade_only() {
     let _: &dyn fandhe_ai::optim::LrScheduler = &cosine_lr;
     let _: &dyn fandhe_ai::optim::LrScheduler = &exponential_lr;
     let _: &dyn fandhe_ai::optim::LrScheduler = &linear_warmup_lr;
+
+    // イシュー #1747: OneCycleLr が facade のみ import で構築でき、
+    // 既存スケジューラと同じ `&dyn LrScheduler` へ coercion できる
+    // ことを固定する。`OneCycleLrConfig::new` の既定値が PyTorch
+    // `OneCycleLR` の既定値と一致することも併せて固定する
+    // （`RmsPropConfig::default().alpha` 等と同型のドリフトガード）。
+    let one_cycle_config = fandhe_ai::optim::OneCycleLrConfig::new(0.1, 10);
+    assert_eq!(
+        one_cycle_config.pct_start, 0.3,
+        "test fixture: OneCycleLrConfig::new の既定 pct_start は PyTorch と同じ 0.3"
+    );
+    assert_eq!(
+        one_cycle_config.anneal_strategy,
+        fandhe_ai::optim::OneCycleAnneal::Cos,
+        "test fixture: OneCycleLrConfig::new の既定 anneal_strategy は PyTorch と同じ 'cos'"
+    );
+    assert_eq!(
+        one_cycle_config.div_factor, 25.0,
+        "test fixture: OneCycleLrConfig::new の既定 div_factor は PyTorch と同じ 25.0"
+    );
+    assert_eq!(
+        one_cycle_config.final_div_factor, 1e4,
+        "test fixture: OneCycleLrConfig::new の既定 final_div_factor は PyTorch と同じ 1e4"
+    );
+    assert!(
+        !one_cycle_config.three_phase,
+        "test fixture: OneCycleLrConfig::new の既定 three_phase は PyTorch と同じ false"
+    );
+    let one_cycle_lr = fandhe_ai::optim::OneCycleLr::new(one_cycle_config)
+        .unwrap_or_else(|e| panic!("test fixture: OneCycleLr::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &one_cycle_lr;
 
     let result: fandhe_ai::optim::ClipGradResult = fandhe_ai::optim::clip_grad_norm(&[], 1.0)
         .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));
