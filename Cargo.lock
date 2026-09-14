@@ -323,6 +323,7 @@ name = "fandhe-ai-backend-metal"
 version = "0.8.0"
 dependencies = [
  "bench-harness",
+ "fandhe-ai-autodiff",
  "fandhe-ai-backend-cpu",
  "fandhe-ai-tensor-core",
  "half",

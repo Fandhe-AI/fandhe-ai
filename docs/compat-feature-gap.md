@@ -740,6 +740,35 @@ gather／scatter／scatter_add（#1637 で where／masked_fill を実装済み�
 - 319 行目の `float64` 行の「部分」記載は本イシューにより CPU バックエンド限定で解消: `crates/backend-cpu` が `TypedOps<f64>`（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の 8 演算）を実装し、`CpuBackendOps::typed_ops_f64()` accessor 経由で到達可能になった（`docs/backend-dtype-dispatch-design.md` §10）
 - `Var`／`Tape`／facade は本イシューの対象外のまま不変（表本体の「XL」見積り自体は #1650／#1651〈CUDA／Metal〉・`Var`／`Tape` 昇格の残作業を含むため据え置く）。CUDA（#1650）・Metal（#1651）は未実装のまま
 
+## 追補（イシュー #1778）
+
+イシュー #1776 の追補で「CUDA／Metal 専用カーネルは #1777／#1778 が対象」
+としていた Metal 側を実装した。
+
+- `MetalBackendOps::gather`／`scatter`（`crates/backend-metal/src/
+  gather_scatter.rs`・`shaders/gather_scatter.metal`）を新設し、
+  `BackendOps::gather`／`scatter` の Metal 実装として結線済み
+  （CUDA 側は #1777 で実装済み）。
+- 数値契約: gather・scatter(Overwrite) は丸めを伴わない純粋コピー・
+  上書きのため CPU 参照実装（`backend-cpu::gather_scatter`）と bit
+  完全一致。scatter(Add) は `.claude/rules/coding-rust.md`「勾配の
+  長軸縮約」節と同じ精度規律（binary64 逐次加算の 64bit 整数ソフト
+  ウェアエミュレーション。`gemm.metal::bias_f64_*`／`layer_norm.metal::
+  ln_f64_*` と同型の意図的複製）で CPU 参照実装と bit 完全一致（NaN
+  のみクラス一致）。
+- 出力定常（output-stationary）方式のカーネル（1 スレッド = 1 出力
+  位置）を採用し、CPU の行優先（row-major）全走査と同じ集約順序に
+  なることをホスト側逐語モデル（`gather_scatter_model.rs`）で
+  Linux 実行可能に検証した。
+- facade 新規公開面なし（#1776 と同じく `Var` 再エクスポート経由で
+  到達）。性能最適化（並列縮約木・専用形状特化等）は対象外のまま
+  （`.claude/rules/out-of-scope-tracking.md` 対象）。
+- 実機（Apple M4 Max）での `tests/gather_scatter_parity.rs`
+  （`#[ignore]`）実行は本エージェント実行環境に Apple Silicon 実機
+  がないため未実施のまま Mac セッションへ申し送る（Linux 実行可能な
+  ホスト逐語モデル bit 一致テスト・ソース証跡テスト・
+  `aarch64-apple-darwin` クロス型検査は本 PR で完了済み）。
+
 #### #1703 の追補（`backend-cuda` の `TypedOps<f64>`／`TypedOps<f16>` 実装）
 
 - 319 行目の `float64` 行: CUDA バックエンドは本イシューでも `Unsupported` のまま（8 演算すべて driver 非接触の fail-closed。性能上の目的がないため実装対象外。`docs/backend-dtype-dispatch-design.md` §11）。CPU 限定の解消（#1697）は不変

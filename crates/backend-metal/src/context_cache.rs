@@ -74,6 +74,7 @@ use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 use crate::context::MetalContext;
 use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
+use crate::gather_scatter::MetalGatherScatter;
 use crate::gemm::MetalGemm;
 use crate::generic_cache::{get_or_build, get_or_build_keyed};
 use crate::layer_norm::MetalLayerNorm;
@@ -109,6 +110,7 @@ const _: fn() = || {
     assert_send_sync::<MetalLayerNorm>();
     assert_send_sync::<MetalSoftmax>();
     assert_send_sync::<MetalAllocator>();
+    assert_send_sync::<MetalGatherScatter>();
     // イシュー #1707: `cached_scalar_unary_pipeline`／
     // `cached_scalar_binary_pipeline` が `Mutex<HashMap<&'static str,
     // Retained<MtlPipeline>>>` として直接キャッシュする値の Send/Sync
@@ -232,6 +234,17 @@ pub(crate) fn cached_rnn_cell(
 /// `alloc_uninit_pooled`・`crate::ops::MetalBackendOps::
 /// release_cached_device_memory`／`device_memory_pool_stats` の唯一の
 /// 呼び出し先。
+/// [`MetalGatherScatter`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1778）。`ops::MetalBackendOps::gather`／`scatter` の
+/// 唯一の呼び出し先。
+pub(crate) fn cached_gather_scatter(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<MetalGatherScatter>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<MetalGatherScatter>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || MetalGatherScatter::new(ctx))
+}
+
 pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAllocator>, MetalError> {
     static CACHE: OnceLock<Mutex<Option<Arc<MetalAllocator>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
