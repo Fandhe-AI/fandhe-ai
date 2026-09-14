@@ -941,5 +941,23 @@ CPU／CUDA／Metal 3 バックエンドの `BackendOps::scalar_unary`／
 （`docs/scalar-op-dispatch-design.md`）。facade 新規公開面はない（既存
 `Var` 再エクスポート経由）。CUDA／Metal 実機での facade parity 実測は
 本エージェント実行環境に実機がないため未実施のまま申し送る。
-`pow_scalar`（スカラー指数版）・`log`／三角関数／`abs`／`neg`（#1711）・
-`clamp`／比較演算（#1712）は対象外のまま。
+`pow_scalar`（スカラー指数版）・`log`／三角関数／`abs`／`neg`（#1711）は
+対象外のまま。
+
+## #1712 の追補
+
+Var 演算欠落リストの `clamp`／比較演算（`gt`／`ge`／`lt`／`le`／`eq`／
+`ne`）行（スナップショット本文は不変）が実装済みになった。いずれも
+#1634 の汎用 dispatch 機構（`Var::scalar_unary`／`scalar_binary`）への
+薄い委譲として実装され、CPU／CUDA／Metal 3 バックエンドの
+`BackendOps::scalar_unary`／`scalar_binary`（`ScalarUnaryOp::Clamp`・
+`ScalarBinaryOp::{Gt,Ge,Lt,Le,Eq,Ne}`。#1634／#1635／#1636 で既に実装
+済み）経由で到達する。facade 新規公開面はない（既存 `Var` 再
+エクスポート経由）。
+
+出力は f32 の `0.0`／`1.0`（bool dtype 出力・`Tensor<bool>` は #1613
+〈OPEN〉の対象で本イシューの範囲外。`where_cond`／`masked_fill` の
+bool 引数との直接合成も #1613 待ち）。VJP は両入力とも常にゼロ勾配
+（比較演算は局所的に階段関数のため微分不可能）。CUDA／Metal 実機での
+facade parity 実測は本エージェント実行環境に実機がないため未実施の
+まま申し送る。
