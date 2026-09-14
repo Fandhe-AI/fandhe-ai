@@ -2462,29 +2462,37 @@ fn cumsum_vjp_along(upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
 ///
 /// `S` は `dim` の降順、`L`（および最終的な `out = L · S`）は昇順で
 /// 走査する必要があるため、まず `S` を全 `a` について 1 パスで
-/// 計算してから（lane あたり `axis_len` 個の `f64` を一時保持）、
+/// 計算してから（lane あたり `axis_len` 個のアキュムレータを一時保持）、
 /// 2 パス目で `L` を累積しながら `out[a] = L[a] · S[a]` を書き出す
 /// （`axis_len` は参照実装が想定する規模〈小〜中程度の軸長〉では
-/// 許容できる追加メモリ）。`L`／`S`／その積はすべて `f64` で保持し、
-/// 最終書き出しで 1 回だけ `f32` へ downcast する（`.claude/rules/
-/// coding-rust.md` の f64 アキュムレータ方針）。零要素が 0 個・1 個・
-/// 2 個以上のいずれの場合でも同一式で厳密に成り立つ（PyTorch の
-/// 「零なしなら除算形」高速経路は意図的に不採用。計画立案時に中央
-/// 差分との数値突合で 0/1/2 零ケースを確認済み）。O(axis_len) per
-/// lane。
+/// 許容できる追加メモリ）。零要素が 0 個・1 個・2 個以上のいずれの
+/// 場合でも同一式で厳密に成り立つ（PyTorch の「零なしなら除算形」
+/// 高速経路は意図的に不採用。計画立案時に中央差分との数値突合で
+/// 0/1/2 零ケースを確認済み）。O(axis_len) per lane。
 ///
-/// **零遮断とオーバーフローの相互作用（codex-review 指摘・PR #1819）**:
-/// `S`（Horner 型再帰）は掛け続ける `x` が大きいと、数学的には有限の
-/// 値でも `f64` 表現域（約 `1.8e308`）を超えて `inf` になりうる。一方
-/// `L[a]` はある軸上で零要素を跨いだ時点で厳密に `0.0` になり、その
-/// 位置より後ろの真の勾配は理論上つねに `0.0`（零要素が
-/// `d(y[b])/d(x[a])` の積を遮断するため）。ここで `l_acc * s_a` や
-/// `x_next * s_running` を素朴な浮動小数点乗算に任せると、
-/// `0.0 * inf = NaN`（IEEE 754 の不定形）となり、本来 `0.0` になるべき
-/// 勾配が `NaN` へ汚染される。そのため乗算の一方が厳密に `0.0` の場合は
-/// 明示的に `0.0` を返すガードを設け、`inf`／`NaN` を生成しうる汎用乗算
-/// を回避する（zero-dominates 規約。零要素による遮断は掛け算の相手が
-/// 何であっても結果を `0.0` に固定する）。
+/// **中間積のオーバーフロー対策（codex-review 指摘・PR #1819。
+/// [`WideFloat`] 導入）**: `L`／`S` の各アキュムレータは素朴な `f64`
+/// ではなく [`WideFloat`]（仮数・指数分離の拡張レンジ浮動小数点数）
+/// で保持する。当初 `f64` アキュムレータで実装していたところ、軸上に
+/// 極端に大きい要素（例: `2^100`）が連続する区間で `S`（Horner 型
+/// 再帰）の中間値が `f64` 表現域（約 `1.8e308`）を超えて `inf` に
+/// 発散し、その後段で小さい要素（例: `2^-100`）を掛けても `inf *
+/// 有限非零 = inf` のため復元できず、真に有限であるはずの勾配
+/// （`入力 = [0] + [2^-100]×11 + [2^100]×11` の `dx[0]` 等）が誤って
+/// `inf`／`NaN` になる反例が見つかった（当初の「乗算の一方が厳密に
+/// `0.0` の場合のみ明示的に `0.0` を返す」零遮断ガードは、この
+/// 「suffix 積自体が発散する」ケースを救えなかった）。[`WideFloat`]
+/// は仮数を常に `[0.5, 1.0)` へ正規化し指数を `i32` の加算・比較の
+/// みで扱うため、真の数学的な値が有限である限り乗算・加算いずれの
+/// 中間結果も表現域を超えない。最終的に [`WideFloat::to_f64`] で
+/// 1 回だけ実数値へ変換し `f32` へ downcast する段階でのみ、真に
+/// 表現域外（`f32` にも `f64` にも収まらない）の場合に限り `inf` を
+/// 返す——これは正しい IEEE 754 の意味論であり、本関数が解消する
+/// 「中間発散による誤 `inf`／`NaN`」とは区別される。零要素の遮断
+/// （`L[a] = 0` 以降の勾配が厳密に `0.0`）も、[`WideFloat::mul`] が
+/// 零オペランドを明示的に検査して常に厳密な `WideFloat::ZERO` を
+/// 返す設計により、特別扱いのガード無しで自動的に成り立つ
+/// （零 × 有限は `f64` 表現域内かどうかによらず厳密に零）。
 fn cumprod_vjp_along(input: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
     let shape = input.shape().to_vec();
     if shape.contains(&0) {
@@ -2496,54 +2504,254 @@ fn cumprod_vjp_along(input: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -
     let x = dense_vec(input);
     let g = dense_vec(upstream);
     let mut out = vec![0f32; x.len()];
-    let mut s_values = vec![0f64; axis_len];
+    let mut s_values = vec![WideFloat::ZERO; axis_len];
     for o in 0..outer {
         for i in 0..inner {
             // 1 パス目: `S[a]` を末尾（`axis_len - 1`）から先頭（`0`）
-            // へ逆順に構築する。
-            let mut s_running: f64 = 0.0;
+            // へ逆順に構築する（[`WideFloat`] アキュムレータ。零遮断・
+            // オーバーフロー耐性はいずれも `WideFloat::mul`／`add` の
+            // 内部実装が担保する）。
+            let mut s_running = WideFloat::ZERO;
             for a in (0..axis_len).rev() {
                 let idx = (o * axis_len + a) * inner + i;
                 s_running = if a + 1 == axis_len {
-                    g[idx] as f64
+                    WideFloat::from_f64(g[idx] as f64)
                 } else {
                     let idx_next = (o * axis_len + (a + 1)) * inner + i;
-                    let x_next = x[idx_next] as f64;
-                    // `x_next == 0.0` のとき、`s_running`（前段までの累積）が
-                    // すでに `inf`／`NaN` へ発散していても寄与項は厳密に
-                    // `0.0` として扱う（`0.0 * inf = NaN` を踏まない
-                    // zero-dominates ガード。doc 冒頭の相互作用の説明参照）。
-                    let term = if x_next == 0.0 {
-                        0.0
-                    } else {
-                        x_next * s_running
-                    };
-                    g[idx] as f64 + term
+                    let x_next = WideFloat::from_f64(x[idx_next] as f64);
+                    let term = x_next.mul(s_running);
+                    WideFloat::from_f64(g[idx] as f64).add(term)
                 };
                 s_values[a] = s_running;
             }
             // 2 パス目: `L[a]`（排他的 prefix 積）を先頭から末尾へ順に
             // 累積しながら `out[a] = L[a] · S[a]` を書き出す。
-            let mut l_acc: f64 = 1.0;
+            let mut l_acc = WideFloat::from_f64(1.0);
             for (a, &s_a) in s_values.iter().enumerate() {
                 let idx = (o * axis_len + a) * inner + i;
-                // `l_acc == 0.0`（軸上で零要素を跨いだ後）なら `s_a` が
-                // `inf`／`NaN` に発散していても出力は厳密に `0.0` を書く
-                // （`0.0 * inf = NaN` ガード。L[a]=0 の位置の真の勾配は
-                // 常に 0 のため安全に固定できる）。
-                out[idx] = if l_acc == 0.0 {
-                    0.0
-                } else {
-                    (l_acc * s_a) as f32
-                };
-                let x_a = x[idx] as f64;
-                // `x_a == 0.0` なら `l_acc` がすでに `inf`／`NaN` でも
-                // 以降は厳密に `0.0` へ固定する（同上ガード）。
-                l_acc = if x_a == 0.0 { 0.0 } else { l_acc * x_a };
+                out[idx] = l_acc.mul(s_a).to_f64() as f32;
+                let x_a = WideFloat::from_f64(x[idx] as f64);
+                l_acc = l_acc.mul(x_a);
             }
         }
     }
     build_tensor(out, &shape)
+}
+
+/// 拡張レンジ浮動小数点数（仮数 `mantissa: f64`〈絶対値 `[0.5, 1.0)`
+/// または厳密ゼロ〉・指数 `exponent: i32` の組で `value = mantissa ·
+/// 2^exponent` を表す）。[`cumprod_vjp_along`] の `S`（Horner 型後方
+/// 再帰）・`L`（排他的 prefix 積）専用のオーバーフロー安全アキュムレ
+/// ータ（codex-review 指摘・PR #1819）。詳細な動機は
+/// [`cumprod_vjp_along`] doc の「中間積のオーバーフロー対策」節を
+/// 参照。`Copy` な軽量値型（`f64` 1 個 + `i32` 1 個）で、`cumprod_vjp_
+/// along` の 2 パス走査（`O(axis_len)` per lane）へそのまま組み込める。
+///
+/// `cumprod_vjp_along` 以外から使われる想定はない（`pub` にしない。
+/// `compat-api-scope.md` §5 の公開面拡張手続きの対象外に保つ）。
+#[derive(Clone, Copy, Debug)]
+struct WideFloat {
+    mantissa: f64,
+    exponent: i32,
+}
+
+impl WideFloat {
+    const ZERO: WideFloat = WideFloat {
+        mantissa: 0.0,
+        exponent: 0,
+    };
+
+    /// `f64` から構築する。有限の非零値は [`frexp`] で `[0.5, 1.0)`
+    /// へ正規化し、`0.0`・非有限値（`cumprod_vjp_along` の入力契約上
+    /// 想定していないが、伝播のみ安全に行えるよう保険で扱う）は
+    /// `mantissa` にそのまま保持する（`is_non_finite`／`is_zero` が
+    /// この 2 状態を区別する）。
+    fn from_f64(v: f64) -> WideFloat {
+        if v == 0.0 || !v.is_finite() {
+            return WideFloat {
+                mantissa: v,
+                exponent: 0,
+            };
+        }
+        let (mantissa, exponent) = frexp(v);
+        WideFloat { mantissa, exponent }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.mantissa == 0.0
+    }
+
+    /// `NaN`／`inf` を保持しているかどうか。保持していれば `mantissa`
+    /// が生のスカラー値そのものであり `exponent` は意味を持たない
+    /// （[`Self::from_f64`] の非有限分岐参照）。
+    fn is_non_finite(&self) -> bool {
+        !self.mantissa.is_finite()
+    }
+
+    /// `mantissa · 2^exponent` を実数値へ変換する（1 回だけの最終
+    /// downcast 対象）。真の値が `f64` の表現域を超える場合は IEEE 754
+    /// の意味論どおり `inf`（極端に絶対値が小さい場合は `0.0`）を
+    /// 返す——これは [`WideFloat`] が防ぐ「中間発散による誤 `inf`」
+    /// とは異なり、最終結果自体が真に表現域外である場合の正しい挙動
+    /// である。
+    fn to_f64(self) -> f64 {
+        if self.is_non_finite() {
+            return self.mantissa;
+        }
+        if self.is_zero() {
+            return 0.0;
+        }
+        ldexp(self.mantissa, self.exponent)
+    }
+
+    fn mul(self, other: WideFloat) -> WideFloat {
+        if self.is_non_finite() || other.is_non_finite() {
+            return WideFloat::from_f64(self.to_f64() * other.to_f64());
+        }
+        // 零オペランドは厳密に `WideFloat::ZERO` を返す（相手がどれほど
+        // 大きな指数を保持していても、`0 * 有限 = 0` を表現域と無関係に
+        // 厳密に成り立たせる。旧実装の零遮断ガードが担っていた役割を
+        // ここで代替する）。
+        if self.is_zero() || other.is_zero() {
+            return WideFloat::ZERO;
+        }
+        // 仮数の絶対値はいずれも `[0.5, 1.0)` のため積は `(0.25, 1.0)`
+        // に収まり、この乗算自体が `f64` の表現域を超えることはない
+        // （指数は `i32` の加算のみで、こちらも現実的な `axis_len` では
+        // 桁あふれしない）。
+        let mantissa = self.mantissa * other.mantissa;
+        let exponent = self.exponent + other.exponent;
+        normalize(mantissa, exponent)
+    }
+
+    fn add(self, other: WideFloat) -> WideFloat {
+        if self.is_non_finite() || other.is_non_finite() {
+            return WideFloat::from_f64(self.to_f64() + other.to_f64());
+        }
+        if self.is_zero() {
+            return other;
+        }
+        if other.is_zero() {
+            return self;
+        }
+        let (hi, lo) = if self.exponent >= other.exponent {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let diff = lo.exponent - hi.exponent; // <= 0
+        // `diff` が極端に小さい（指数差が大きすぎる）場合、`lo` の
+        // 寄与は `hi` に対して丸めで消える桁のため `0.0` として扱う
+        // （2 進指数差 1100 は `f64` の全表現域〈約 2^-1074〜2^1024〉
+        // より広く、早期 return は最適化であって正しさの条件では
+        // ない。`pow2` 自体も極端に負の指数では正しく underflow
+        // して `0.0` を返すため、この分岐がなくても結果は変わらない）。
+        let scaled_lo = if diff < -1100 {
+            0.0
+        } else {
+            lo.mantissa * pow2(diff)
+        };
+        // `hi.mantissa` の絶対値は `[0.5, 1.0)`、`scaled_lo` の絶対値は
+        // `<= 1.0`（`diff <= 0` のため）なので、和は `(-2.0, 2.0)` に
+        // 収まり `f64` の表現域を超えない。
+        let mantissa = hi.mantissa + scaled_lo;
+        normalize(mantissa, hi.exponent)
+    }
+}
+
+/// `mantissa`（絶対値が `2.0` 未満の任意の有限値。ゼロを含む）を
+/// `[0.5, 1.0)` へ正規化しつつ `exponent` を調整する
+/// （[`WideFloat::mul`]／[`WideFloat::add`] の後処理として使う）。
+fn normalize(mantissa: f64, exponent: i32) -> WideFloat {
+    if mantissa == 0.0 {
+        return WideFloat::ZERO;
+    }
+    let (m, e) = frexp(mantissa);
+    WideFloat {
+        mantissa: m,
+        exponent: exponent + e,
+    }
+}
+
+/// `value`（有限・非零）を `value == mantissa * 2^exponent`
+/// （`mantissa` の絶対値は `[0.5, 1.0)`）へ分解する（C 標準ライブラリ
+/// `frexp` 相当）。Rust 標準ライブラリに同等 API がなく、`libm` は
+/// 許容依存 9 区分（`deps-policy.md`）に含まれないため、IEEE 754
+/// binary64 のビットレイアウトから手動で計算する（`unsafe` 不使用。
+/// `to_bits`/`from_bits` はいずれも安全 API）。
+fn frexp(value: f64) -> (f64, i32) {
+    debug_assert!(value.is_finite() && value != 0.0);
+    const MANTISSA_MASK: u64 = 0x000f_ffff_ffff_ffff;
+    const SIGN_MASK: u64 = 0x8000_0000_0000_0000;
+    let bits = value.to_bits();
+    let sign = bits & SIGN_MASK;
+    let biased_exp = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa_bits = bits & MANTISSA_MASK;
+
+    if biased_exp == 0 {
+        if mantissa_bits == 0 {
+            // `value == ±0.0`（呼び出し前提で除外済みだが、万一到達
+            // しても安全に `0.0` を返す）。
+            return (0.0, 0);
+        }
+        // 非正規化数（絶対値 `< 2^-1022`）: 仮数ビットの先頭ゼロ数
+        // から正規化に必要なシフト量を直接求める（ループ不要）。
+        // `mantissa_bits` は 52bit フィールドに収まる非零値のため
+        // `leading_zeros()`（64bit 幅基準）は `12..=63`。
+        let leading_zeros = mantissa_bits.leading_zeros();
+        let shift = leading_zeros - 11; // 1..=52
+        let normalized_mantissa_bits = (mantissa_bits << shift) & MANTISSA_MASK;
+        let exponent = -1010 - leading_zeros as i32;
+        let new_bits = sign | (1022u64 << 52) | normalized_mantissa_bits;
+        return (f64::from_bits(new_bits), exponent);
+    }
+
+    // 正規化数: 指数フィールドを `1022`（`value ∈ [0.5, 1.0)` に対応
+    // する biased exponent）へ置き換えるだけで、仮数ビットはそのまま
+    // 使える。
+    let exponent = biased_exp - 1022;
+    let new_bits = sign | (1022u64 << 52) | mantissa_bits;
+    (f64::from_bits(new_bits), exponent)
+}
+
+/// `2^exponent` を計算する。`exponent ∈ [-1022, 1023]`（`f64` の
+/// 正規化数として厳密に表現できる範囲）は `f64::from_bits` による
+/// ビット構成で誤差なく求める。範囲外（オーバーフロー・アンダー
+/// フロー）は 2 分割した半分ずつの掛け算で段階的に構成し、IEEE 754
+/// の飽和（`inf`）・下限丸め（`0.0`）へ正しく帰着させる（[`ldexp`]
+/// の内部で呼ばれる。範囲外の結果はどのみち [`WideFloat`] が防ぐ
+/// 「中間発散」ではなく最終値自体の真の表現域外を意味するため実害
+/// はない）。
+fn pow2(exponent: i32) -> f64 {
+    if (-1022..=1023).contains(&exponent) {
+        let biased = (exponent + 1023) as u64;
+        return f64::from_bits(biased << 52);
+    }
+    let half = exponent / 2;
+    pow2_saturating(half) * pow2_saturating(exponent - half)
+}
+
+/// [`pow2`] の範囲外分岐専用ヘルパ。ビット構成できない指数
+/// （`(-1022..=1023)` の外）を、`inf`／`0.0` への飽和へ直接倒す
+/// （半分に分割してもなお範囲外になりうる極端な `exponent` に対する
+/// 終端条件）。
+fn pow2_saturating(exponent: i32) -> f64 {
+    if (-1022..=1023).contains(&exponent) {
+        let biased = (exponent + 1023) as u64;
+        return f64::from_bits(biased << 52);
+    }
+    if exponent > 1023 { f64::INFINITY } else { 0.0 }
+}
+
+/// `mantissa * 2^exponent` を計算する（C 標準ライブラリ `ldexp`
+/// 相当）。指数を半分ずつ 2 回に分けて乗算することで、`f64` 表現域
+/// の境界付近（`exponent` が `f64::MAX_EXP` 近傍）でも早期の
+/// オーバーフロー・アンダーフローを避け、真に表現域内の値をより正確
+/// に復元する（[`WideFloat::to_f64`] からのみ呼ばれる最終変換）。
+fn ldexp(mantissa: f64, exponent: i32) -> f64 {
+    let e1 = exponent / 2;
+    let e2 = exponent - e1;
+    mantissa * pow2(e1) * pow2(e2)
 }
 
 /// `Sum` の VJP: 出力側勾配 `g` を入力 shape へブロードキャストして
@@ -5717,5 +5925,127 @@ release ビルドでも検知できるよう `assert!` を使う）"
         let dx = masked_fill_vjp(&mask, &g);
 
         assert_eq!(dense_vec(&dx), vec![0.0, 2.0, 0.0, 4.0]);
+    }
+
+    // --- WideFloat（cumprod VJP のオーバーフロー安全アキュムレータ。
+    //     codex-review 指摘・PR #1819） ---
+
+    /// `frexp` のラウンドトリップ性質（`mantissa * 2^exponent == v`・
+    /// `mantissa` の絶対値が `[0.5, 1.0)`）を、正規化数・非正規化数
+    /// （絶対値の上限・下限付近）・負値・2 のべき乗ちょうどの値の
+    /// 各ケースで確認する。
+    #[test]
+    fn frexp_roundtrips_and_normalizes_mantissa() {
+        let cases: &[f64] = &[
+            1.0,
+            2.0,
+            0.5,
+            3.0,
+            -3.0,
+            1e300,
+            1e-300,
+            f64::MIN_POSITIVE,       // 最小の正規化数（2^-1022）
+            f64::MIN_POSITIVE / 2.0, // 非正規化数
+            f64::MIN_POSITIVE * 1.5, // 正規化数の下限付近
+            5e-324,                  // 最小の非正規化数（1 ULP）
+            -5e-324,
+            f64::MAX,
+            -f64::MAX,
+            2f64.powi(100),
+            2f64.powi(-100),
+        ];
+        for &v in cases {
+            let (m, e) = frexp(v);
+            assert!(
+                m.abs() >= 0.5 && m.abs() < 1.0,
+                "frexp({v}): mantissa {m} が [0.5, 1.0) の範囲外"
+            );
+            // 検証には（ネイティブ `f64::powi` 経由の素朴な再構成では
+            // なく）本モジュール自身の `ldexp` を使う。`f64::powi` は
+            // `2^-1073` のような極端な非正規化数境界で `0.0` へ潰れて
+            // しまい（`frexp` が解消しようとしている精度問題そのもの
+            // が再構成側に混入する）、意図した回帰検出にならない。
+            let reconstructed = ldexp(m, e);
+            assert_eq!(
+                reconstructed, v,
+                "frexp({v}) のラウンドトリップが不一致（mantissa={m}, exponent={e}）"
+            );
+            assert_eq!(
+                m.is_sign_negative(),
+                v.is_sign_negative(),
+                "frexp({v}): 符号不一致"
+            );
+        }
+    }
+
+    /// [`WideFloat`] の乗算・加算が、オーバーフローしない通常範囲では
+    /// ネイティブ `f64` 演算と一致することを確認する（回帰: `WideFloat`
+    /// 導入が既存の精度を劣化させていないことの直接検証）。
+    #[test]
+    fn wide_float_mul_add_match_native_f64_in_normal_range() {
+        let pairs: &[(f64, f64)] = &[
+            (1.5, 2.5),
+            (-3.0, 7.0),
+            (0.1, 0.2),
+            (123456.789, -0.0001234),
+            (1e10, 1e-5),
+        ];
+        for &(a, b) in pairs {
+            let wa = WideFloat::from_f64(a);
+            let wb = WideFloat::from_f64(b);
+            assert_eq!(
+                wa.mul(wb).to_f64(),
+                a * b,
+                "WideFloat::mul({a}, {b}) が f64 と不一致"
+            );
+            assert_eq!(
+                wa.add(wb).to_f64(),
+                a + b,
+                "WideFloat::add({a}, {b}) が f64 と不一致"
+            );
+        }
+    }
+
+    /// [`WideFloat`] は零オペランドとの乗算を、相手がどれほど大きな
+    /// 指数を持っていても厳密に `WideFloat::ZERO` に固定する（cumprod
+    /// VJP の零遮断規約。`f64` ネイティブなら `0.0 * inf = NaN` に
+    /// なる状況でも `NaN` を生まないことを確認する）。
+    #[test]
+    fn wide_float_zero_dominates_even_with_extreme_exponent() {
+        // `2^1000` 自体は `f64` の表現域内（最大 `≈ 1.8e308 ≈ 2^1024`）
+        // だが、それを `WideFloat::mul` で自乗すると真の値は `2^2000`
+        // となり `f64` 表現域を超える。`WideFloat` は指数を `i32` の
+        // 加算として保持するのみで、この乗算自体は内部でオーバー
+        // フローしない（`to_f64()` した時点で初めて inf になる）。
+        let big = WideFloat::from_f64(2f64.powi(1000));
+        let huge = big.mul(big);
+        assert!(huge.to_f64().is_infinite());
+        let zero = WideFloat::ZERO;
+        let product = zero.mul(huge);
+        assert!(product.is_zero());
+        assert_eq!(product.to_f64(), 0.0);
+    }
+
+    /// [`WideFloat`] は中間積が `f64` 表現域を大きく超えても内部では
+    /// オーバーフローしない（真の値が最終的に有限へ戻るケースで、
+    /// 素朴な `f64` 乗算なら `inf` のまま復元できない状況を再現する）。
+    #[test]
+    fn wide_float_survives_intermediate_overflow_and_recovers() {
+        let big = WideFloat::from_f64(2f64.powi(600));
+        // 素朴な `f64` ならここで `big_squared` は inf になる
+        // （`2^600 * 2^600 = 2^1200` は `f64` 表現域〈約 `2^1024`〉超）。
+        assert!((big.to_f64() * big.to_f64()).is_infinite());
+        let big_squared = big.mul(big);
+        // `WideFloat` は指数を分離して保持するため、この時点でも
+        // 有限（`to_f64()` すると真に表現域外なので inf になるのは
+        // 正しい——ここで確認したいのは、続けて小さい係数を掛けたとき
+        // に「inf のまま戻らない」現象が起きないこと）。
+        let small = WideFloat::from_f64(2f64.powi(-600));
+        let recovered = big_squared.mul(small);
+        assert_eq!(
+            recovered.to_f64(),
+            2f64.powi(600),
+            "big^2 * small = 2^600 へ有限で復元できるはず"
+        );
     }
 }

@@ -1850,6 +1850,121 @@ fn cumprod_backward_no_nan_with_multiple_zeros_and_overflow() {
     }
 }
 
+/// ⑨.7 `cumprod` backward の suffix 積自体がオーバーフローする反例
+/// （codex-review P1 指摘・PR #1819）。`x = [0] + [2^-100]×11 +
+/// [2^100]×11`（`axis_len = 23`）・`w = 1`（`loss = sum(cumprod(x))`）
+/// では、forward は全要素 `0.0`（先頭が零のため）だが、`S`（Horner
+/// 型後方再帰）を素朴な `f64` で計算すると軸後半の `2^100` の連続積で
+/// `f64` 表現域（約 `1.8e308`）を超えて `inf` に発散し、その後軸前半の
+/// `2^-100` を掛けても復元できず `dx[0]` が誤って `inf` になっていた
+/// （零遮断ガードは「掛け算の一方が厳密に `0.0`」のケースのみを救う
+/// ため、この「非零だが極端に大きい／小さい係数」の反例には対応でき
+/// ない）。解析的には `dx[0] = S[0] = 1 + 2^100·(1 + 2^100·(…))`
+/// のうち、`2^-100` の 11 個は `S` の対応する加算段では `2^100` 側の
+/// 桁に対し無視できるほど小さく（53bit 仮数の丸めで消える）、隣接する
+/// `2^-100·2^100 = 1` の相殺だけが効くため、厳密に `S[0] = 2.0`
+/// （`f32` に厳密に丸まる）になる。`a >= 1` はいずれも `L[a] = 0`
+/// （`x[0] = 0` を跨ぐため）で勾配は厳密に `0.0`。中央差分は
+/// オーバーフロー環境では意味を持たないため使わず、解析的な厳密値
+/// との `assert_eq!` で検証する。
+#[test]
+fn cumprod_backward_no_overflow_when_suffix_product_diverges() {
+    const AXIS_LEN: usize = 23;
+    let mut data = vec![0f32; AXIS_LEN];
+    data[0] = 0.0;
+    for v in data.iter_mut().skip(1).take(11) {
+        *v = 2f32.powi(-100);
+    }
+    for v in data.iter_mut().skip(12).take(11) {
+        *v = 2f32.powi(100);
+    }
+    let x0 = t(data, &[AXIS_LEN]);
+    let w = t(vec![1.0; AXIS_LEN], &[AXIS_LEN]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumprod(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    for a in 0..AXIS_LEN {
+        let v = dx.get(&[a]).unwrap_or(0.0);
+        assert!(
+            !v.is_nan(),
+            "cumprod backward (suffix overflow): index {a} の勾配が NaN になってはならない（実際: {v}）"
+        );
+        assert!(
+            v.is_finite(),
+            "cumprod backward (suffix overflow): index {a} の勾配が有限であるはず（実際: {v}）"
+        );
+        if a == 0 {
+            assert_eq!(
+                v, 2.0,
+                "cumprod backward (suffix overflow): dx[0] は厳密に 2.0 のはず（実際: {v}）"
+            );
+        } else {
+            assert_eq!(
+                v, 0.0,
+                "cumprod backward (suffix overflow): index {a} は L[{a}]=0 のため勾配は厳密に 0 のはず（実際: {v}）"
+            );
+        }
+    }
+}
+
+/// ⑨.8 上記と対称なケース: 軸前半が極端に大きい `2^100`、後半が
+/// 極端に小さい `2^-100`（`axis_len = 22`・零要素なし）で、`w` を
+/// 末尾のみ `1`（他は `0`）の one-hot にする。`旧実装`（素朴な `f64`
+/// アキュムレータ）はこのケースを 2 通りの経路で壊していた:
+/// `L`（先頭からの累積積。前半 11 個の `2^100` 連続積）が `f64`
+/// 表現域を超えて `inf` へ発散し、`S`（後半の `2^-100` 連続積からの
+/// 後方累積）は逆に `f64` 表現域の下限（アンダーフロー）を割って
+/// `0.0` に潰れ、両者の積が `inf * 0 = NaN` あるいは意図せぬ `0.0` に
+/// なりうる。解析的には `y[axis_len-1] = Π x[i]`（`2^100` を 11 回・
+/// `2^-100` を 11 回掛けた積で厳密に `1.0`）に対し、`w` が末尾のみ
+/// `1` なので `dx[a] = y[axis_len-1] / x[a] = 1 / x[a]`——前半
+/// （`a <= 10`）は `2^-100`、後半（`a >= 11`）は `2^100` で、いずれも
+/// `f32` に厳密に表現可能な値になる（`x[a]` はすべて厳密に 2 の
+/// べき乗のため `1/x[a]` も厳密に 2 のべき乗）。
+#[test]
+fn cumprod_backward_no_overflow_symmetric_large_then_small() {
+    const AXIS_LEN: usize = 22;
+    let mut data = vec![0f32; AXIS_LEN];
+    for v in data.iter_mut().take(11) {
+        *v = 2f32.powi(100);
+    }
+    for v in data.iter_mut().skip(11).take(11) {
+        *v = 2f32.powi(-100);
+    }
+    let x0 = t(data, &[AXIS_LEN]);
+    let mut w_data = vec![0f32; AXIS_LEN];
+    w_data[AXIS_LEN - 1] = 1.0;
+    let w = t(w_data, &[AXIS_LEN]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumprod(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let x_data = dense_vec(&x0);
+    for a in 0..AXIS_LEN {
+        let v = dx.get(&[a]).unwrap_or(0.0);
+        assert!(
+            !v.is_nan(),
+            "cumprod backward (symmetric overflow/underflow): index {a} の勾配が NaN になってはならない（実際: {v}）"
+        );
+        let expected = 1.0f32 / x_data[a];
+        assert_eq!(
+            v, expected,
+            "cumprod backward (symmetric overflow/underflow): index {a} は 1/x[{a}]={expected} のはず（実際: {v}）"
+        );
+    }
+}
+
 /// エラー経路: `cumsum`／`cumprod` の `dim` が範囲外なら
 /// `AutodiffError::Shape(AxisOutOfRange)` を返す。
 #[test]
