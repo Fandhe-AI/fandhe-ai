@@ -149,6 +149,34 @@ fn require_rank2_cell(shape: &[usize]) -> Result<(), BackendError> {
     Ok(())
 }
 
+/// `.contiguous()`（内部で無検査の `Vec::with_capacity(numel)` を
+/// 呼ぶ）を呼び出す前に、`f32` 換算のバイトサイズが `Vec` の
+/// allocation 上限（`isize::MAX` バイト）に収まるか検査する
+/// （`fandhe_ai_tensor_core::tensor::checked_numel_for::<f32>` と
+/// 同型の独立複製。同関数は `pub(crate)` でクレートを跨いで共有
+/// できないため。`interpolate` は巨大な `broadcast_to` view を
+/// 小さい `size` へ縮小できてしまう（forward 契約は出力 shape のみを
+/// 検査する）ため、要素数積が `usize` の範囲に収まっても
+/// `numel * size_of::<f32>() > isize::MAX` となるケースがあり、
+/// `.contiguous()` がそこで capacity overflow panic する。本番経路
+/// panic 禁止規約 `.claude/rules/coding-rust.md` に反するため、
+/// `.contiguous()` 呼び出し直前に本関数で確保前検査する
+/// （`interpolate` 限定の追加検査。イシュー #1834 Cursor Bugbot
+/// 指摘）。
+fn checked_f32_bytes(shape: &[usize]) -> Result<(), ShapeError> {
+    let numel = shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let bytes = numel
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+    Ok(())
+}
+
 /// RNN／LSTM／GRU 系エントリが形状比較の前に必要とする `gates * hidden`
 /// （ゲート幅）を `checked_mul` で検証する（`backend-cpu::ops::
 /// checked_gate_width`／`backend-cuda::ops::checked_gate_width` と
@@ -2397,6 +2425,13 @@ impl BackendOps for MetalBackendOps {
             return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
         }
 
+        // `.contiguous()` より前に、`f32` 換算バイト数が `Vec` の
+        // 確保上限に収まるか検査する（巨大な `broadcast_to` view を
+        // 小さい `size` へ縮小するケースの capacity overflow panic
+        // 防止。`checked_f32_bytes` doc 参照。イシュー #1834 Cursor
+        // Bugbot 指摘）。
+        checked_f32_bytes(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
         let input_owned = input.contiguous();
         let input_slice = input_owned.as_slice().ok_or_else(|| {
             BackendError::KernelLaunchFailed("interpolate: input not contiguous".into())
@@ -3313,6 +3348,33 @@ mod tests {
 
         let ops = MetalBackendOps::new();
         let err = ops.unique(&input).expect_err("overflow must be rejected");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    /// Cursor Bugbot 指摘（イシュー #1834・PR レビュー）の回帰テスト。
+    /// `[1]` を `broadcast_to([1usize << 63])` した巨大な非 contiguous
+    /// view を小さい `size=[3]` へ縮小する `interpolate` は、
+    /// `interpolate_out_shape` が検査する**出力**側のバイトサイズは
+    /// 小さいため通過するが、`.contiguous()`（内部で無検査の
+    /// `Vec::with_capacity(numel)` を呼ぶ）が**入力**側の巨大な要素数
+    /// （`f32` 換算で `isize::MAX` バイトを超える）で capacity
+    /// overflow panic しうる（是正前）。`checked_f32_bytes` による
+    /// `.contiguous()` 呼び出し前の確保前検査は Metal コンテキスト
+    /// 取得前に完了するため、実機非依存の通常テストとして Linux CI
+    /// でも実行できる。
+    #[test]
+    fn interpolate_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32], &[1usize]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 63]).unwrap();
+        assert_eq!(huge.shape(), &[1usize << 63]);
+
+        let ops = MetalBackendOps::new();
+        let err = ops
+            .interpolate(&huge, &[3], InterpolateMode::Nearest)
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
         assert!(matches!(
             err,
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)

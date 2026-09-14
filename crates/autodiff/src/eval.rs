@@ -1492,16 +1492,42 @@ pub(crate) fn nearest_src_coord(dst: usize, in_size: usize, out_size: usize) -> 
 /// doc 参照）。`input` は strided view でよい（`dense_vec_ref` で行
 /// 優先稠密化してから読む）。座標ごとの src 添字導出は
 /// [`nearest_src_coord`]（forward／backward の単一情報源）を使う。
-pub(crate) fn interpolate_nearest(input: &Tensor<f32>, size: &[usize]) -> Tensor<f32> {
+pub(crate) fn interpolate_nearest(
+    input: &Tensor<f32>,
+    size: &[usize],
+) -> Result<Tensor<f32>, ShapeError> {
     let in_shape = input.shape().to_vec();
     let rank = in_shape.len();
     let spatial_start = rank - size.len();
     let mut out_shape = in_shape.clone();
     out_shape[spatial_start..].copy_from_slice(size);
 
+    // `interpolate_out_shape`（呼び出し元 `Var::interpolate_impl` が
+    // 事前検査済み）は出力 shape のバイトサイズしか検査しないため、
+    // 入力側（`dense_vec_ref` が非 contiguous な `input` を稠密化する
+    // 際に `Vec::with_capacity` 相当を呼ぶ）を別途検査する必要がある。
+    // 巨大な `broadcast_to` view（例: `[1]` を `[1usize << 63]` へ
+    // 拡張した view）を小さい `size` へ縮小する interpolate では、
+    // 出力は小さくても入力の稠密化が `f32` 換算で `isize::MAX` バイト
+    // を超え capacity overflow panic しうる（本番経路 panic 禁止規約
+    // `.claude/rules/coding-rust.md`。イシュー #1834 Cursor Bugbot
+    // 指摘）。`Tensor::full`／`checked_numel_for::<f32>`
+    // （`tensor-core` 側。`pub(crate)` のためここでは同型を独立複製）
+    // と同じ検査を `dense_vec_ref` 呼び出し前に行う。
+    let in_numel = in_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let in_bytes = in_numel
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if in_bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+
     let numel: usize = out_shape.iter().product();
     if numel == 0 {
-        return build_tensor(Vec::new(), &out_shape);
+        return Ok(build_tensor(Vec::new(), &out_shape));
     }
 
     let input_data = dense_vec_ref(input);
@@ -1521,7 +1547,33 @@ pub(crate) fn interpolate_nearest(input: &Tensor<f32>, size: &[usize]) -> Tensor
         }
         *out_val = input_data[pos];
     }
-    build_tensor(out, &out_shape)
+    Ok(build_tensor(out, &out_shape))
+}
+
+#[cfg(test)]
+mod interpolate_nearest_host_fallback_tests {
+    use super::*;
+
+    /// Cursor Bugbot 指摘（イシュー #1834・PR レビュー）の回帰テスト。
+    /// `[1]` を `broadcast_to([1usize << 63])` した巨大な非 contiguous
+    /// view を小さい `size=[3]` へ縮小するホスト参照実装（`Var::
+    /// interpolate` が `BackendOps::interpolate` の `Unsupported`
+    /// フォールバックとして呼ぶ経路）は、出力側のバイトサイズは
+    /// 小さいため呼び出し元 `interpolate_out_shape` の検査を通過する
+    /// が、`dense_vec_ref`（内部で `Vec::with_capacity` 相当を呼ぶ）が
+    /// 入力側の巨大な要素数で capacity overflow panic しうる（是正
+    /// 前）。`dense_vec_ref` 呼び出し前の確保前検査（本関数冒頭）に
+    /// より、パニックせず型付きエラーを返すことを確認する。
+    #[test]
+    fn rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32], &[1usize]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 63]).unwrap();
+        assert_eq!(huge.shape(), &[1usize << 63]);
+
+        let err = interpolate_nearest(&huge, &[3])
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
 }
 
 /// `i32` 版 `build_tensor`（上記）。sort／topk（下記）の `index` 出力

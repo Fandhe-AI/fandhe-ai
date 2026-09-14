@@ -1366,8 +1366,6 @@ pub(crate) fn vjp(
             let spatial_start = rank - size.len();
             let out_shape = upstream.shape().to_vec();
             let outer: usize = input_shape[..spatial_start].iter().product();
-            let sp_in_numel: usize = input_shape[spatial_start..].iter().product();
-            let sp_out_numel: usize = out_shape[spatial_start..].iter().product();
 
             // `outer == 0`（先頭の残り軸——batch 等——が空）の場合、
             // `d_input` の全要素数は `outer * sp_in_numel == 0` で
@@ -1375,19 +1373,28 @@ pub(crate) fn vjp(
             // （forward はこの場合も出力の先頭軸が 0 になる空 shape
             // で成功する。`ops_shape.rs::interpolate_out_shape` doc
             // 参照）により forward 自体は `size` にどれだけ大きい
-            // 値を指定しても success する。`nearest_src_index_map`
-            // は `outer` に依存せず空間軸の全出力位置（`sp_out_numel`
-            // 個）分の index 行を無条件に確保するため、`outer==0` の
-            // まま呼ぶと `size=[usize::MAX]` 等で `sp_out_numel` が
-            // 巨大になり capacity overflow で panic しうる（本番経路
-            // panic 禁止規約 `.claude/rules/coding-rust.md`。イシュー
-            // #1834 codex-review P1 是正）。空間軸積計算・index 構築
-            // より前に early return し、この不要な大量確保・走査も
-            // 通常の大きな size で同時に避ける。
+            // 値を指定しても success する。空間軸の積（`sp_in_numel`／
+            // `sp_out_numel`）自体の計算を `outer == 0` 判定より前に
+            // 行うと、`out_shape` の空間軸に `usize::MAX` 級の値が
+            // 入りうる（`outer==0` のときは forward が `size` へどれ
+            // だけ大きい値を指定しても成功するため）ケースで積計算
+            // 自体が overflow する（debug は panic・release は wrap。
+            // 本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`。
+            // Cursor Bugbot 指摘）。`nearest_src_index_map` も `outer`
+            // に依存せず空間軸の全出力位置（`sp_out_numel` 個）分の
+            // index 行を無条件に確保するため、`outer==0` のまま呼ぶと
+            // `size=[usize::MAX]` 等で capacity overflow で panic
+            // しうる（イシュー #1834 codex-review P1 是正）。よって
+            // `sp_in_numel`／`sp_out_numel` の計算・index 構築より前に
+            // `outer` のみで early return し、この不要な大量確保・
+            // 走査・積 overflow を通常の大きな size で同時に避ける。
             if outer == 0 {
                 let d_input = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
                 return Ok(vec![(input, d_input)]);
             }
+
+            let sp_in_numel: usize = input_shape[spatial_start..].iter().product();
+            let sp_out_numel: usize = out_shape[spatial_start..].iter().product();
 
             match mode {
                 fandhe_ai_tensor_core::InterpolateMode::Nearest => {
@@ -2024,7 +2031,7 @@ pub(crate) fn interpolate_with_fallback(
         }
         Err(BackendError::Unsupported(_)) => match mode {
             fandhe_ai_tensor_core::InterpolateMode::Nearest => {
-                Ok(eval::interpolate_nearest(input, size))
+                eval::interpolate_nearest(input, size).map_err(AutodiffError::Shape)
             }
             // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
             // 側で将来 variant を追加しうる。`ScatterReduce` の
@@ -7826,6 +7833,53 @@ release ビルドでも検知できるよう `assert!` を使う）"
             0,
         )
         .expect("outer==0 の場合 panic せず成功するはず");
+        assert_eq!(contributions.len(), 1);
+        let (node, d_input) = &contributions[0];
+        assert_eq!(*node, NodeId(0));
+        assert_eq!(d_input.shape(), &input_shape);
+        assert_eq!(d_input.numel(), 0);
+    }
+
+    /// Cursor Bugbot 指摘（イシュー #1834・PR レビュー）の回帰テスト。
+    /// `interpolate_vjp_empty_leading_axis_with_huge_size_does_not_panic`
+    /// （上記）は空間軸が 1 軸のみのため `sp_out_numel` の計算が単一
+    /// 値の読み取りに留まり overflow を経由しない。本テストは空間軸
+    /// **2 軸**（`usize::MAX` と `2`）を持つ入力 `[0, usize::MAX, 2]`
+    /// を使い、是正前のコード（`outer == 0` の早期 return より前に
+    /// `out_shape[spatial_start..].iter().product()` を計算していた）
+    /// では `usize::MAX * 2` が `usize` の範囲を超え overflow panic
+    /// （debug ビルド）していたことを再現する。forward は `outer == 0`
+    /// のため `size` にどれだけ大きい値を指定しても
+    /// `interpolate_out_shape` の契約どおり成功する（先頭軸が 0 の
+    /// ため `checked_numel_for::<f32>` の `try_fold` が早期に `0` で
+    /// 飽和し overflow しない）が、VJP 側の `sp_out_numel`／
+    /// `sp_in_numel` は空間軸のみの積のため飽和せず overflow しうる。
+    /// 是正後は `outer == 0` の早期 return が積計算そのものより前に
+    /// 位置するため、この組み合わせでも panic せずゼロ勾配を返す。
+    #[test]
+    fn interpolate_vjp_empty_leading_axis_with_overflowing_spatial_product_does_not_panic() {
+        let input_shape = vec![0usize, usize::MAX, 2];
+        let input = build_tensor(Vec::new(), &input_shape);
+        let nodes = vec![leaf_node(input)];
+        let op = Op::Interpolate {
+            input: NodeId(0),
+            size: vec![usize::MAX, 2],
+            mode: fandhe_ai_tensor_core::InterpolateMode::Nearest,
+        };
+        let out_value = build_tensor(Vec::new(), &input_shape);
+        let upstream = build_tensor(Vec::new(), &input_shape);
+
+        let contributions = vjp(
+            &op,
+            &out_value,
+            &upstream,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .expect("outer==0 の場合、空間軸積が overflow する組み合わせでも panic せず成功するはず");
         assert_eq!(contributions.len(), 1);
         let (node, d_input) = &contributions[0];
         assert_eq!(*node, NodeId(0));
