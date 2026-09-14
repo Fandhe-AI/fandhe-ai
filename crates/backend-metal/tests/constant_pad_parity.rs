@@ -186,6 +186,14 @@ fn pad_backward_matches_cpu_tape() {
         .expect("grad exists")
         .expect("reaches loss");
 
+    // pad の VJP は narrow の連鎖（zero-copy view）を返すため、この形状
+    // （[3, 3] から [2, 2] を stride [3, 1] で切り出す）では非
+    // contiguous になり `as_slice()` は `None` を返す（`Tensor::
+    // is_contiguous`）。比較前に `contiguous()` で実体化する
+    // （`crates/backend-cpu/tests/constant_pad_parity.rs::dense_vec` と
+    // 同型の対処。codex-review 指摘）。
+    let cpu_dx = cpu_dx.contiguous();
+    let metal_dx = metal_dx.contiguous();
     assert_eq!(
         cpu_dx.as_slice().expect("contiguous"),
         metal_dx.as_slice().expect("contiguous"),
