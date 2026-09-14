@@ -302,6 +302,9 @@ fn optim_module_reexports_exactly_expected_surface() {
         "clip_grad_value",
         "global_grad_norm",
         "ConstantLr",
+        "CosineAnnealingLr",
+        "ExponentialLr",
+        "LinearWarmupLr",
         "LrScheduler",
         "StepLr",
         "RmsProp",
@@ -645,6 +648,19 @@ fn optim_types_are_reachable_via_facade_only() {
         .unwrap_or_else(|e| panic!("test fixture: StepLr::new が失敗した: {e}"));
     let _: &dyn fandhe_ai::optim::LrScheduler = &constant_lr;
     let _: &dyn fandhe_ai::optim::LrScheduler = &step_lr;
+
+    // イシュー #1745: CosineAnnealingLr／ExponentialLr／LinearWarmupLr
+    // が facade のみ import で構築でき、既存 2 型と同じ `&dyn
+    // LrScheduler` へ coercion できることを固定する。
+    let cosine_lr = fandhe_ai::optim::CosineAnnealingLr::new(0.1, 4, 0.0)
+        .unwrap_or_else(|e| panic!("test fixture: CosineAnnealingLr::new が失敗した: {e}"));
+    let exponential_lr = fandhe_ai::optim::ExponentialLr::new(0.1, 0.5)
+        .unwrap_or_else(|e| panic!("test fixture: ExponentialLr::new が失敗した: {e}"));
+    let linear_warmup_lr = fandhe_ai::optim::LinearWarmupLr::new(0.1, 4, 0.25)
+        .unwrap_or_else(|e| panic!("test fixture: LinearWarmupLr::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &cosine_lr;
+    let _: &dyn fandhe_ai::optim::LrScheduler = &exponential_lr;
+    let _: &dyn fandhe_ai::optim::LrScheduler = &linear_warmup_lr;
 
     let result: fandhe_ai::optim::ClipGradResult = fandhe_ai::optim::clip_grad_norm(&[], 1.0)
         .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));

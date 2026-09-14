@@ -1615,6 +1615,18 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - facade は `fandhe_ai::optim::{RmsProp, RmsPropConfig, Adagrad, AdagradConfig}` の素の再エクスポートのみ（`docs/facade-optimizer-promotion-decision.md` §4 案 A。`crates/facade/src/optim.rs`）。`crate::DeviceParamStore` へは未結線（対応する `BackendOps` メソッドを本 issue では追加していないため非対応）。
 - Adam（coupled L2 weight decay）は #1742・LAMB は #1744 が残対象のまま。
 
+## 追補（イシュー #1745）
+
+§2.10 の `CosineAnnealingLR`・`ExponentialLR` 行を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `CosineAnnealingLr`・`ExponentialLr`・`LinearWarmupLr`（`crates/autodiff/src/nn/optim/lr_scheduler.rs`）を `ConstantLr`／`StepLr` と同じ `LrScheduler` trait 実装として追加した。いずれも `lr_at(step) -> f32` のみを持つ stateless 純関数で、新規 `Op`／`BackendOps`／`Var` は拡張していない。
+- `CosineAnnealingLr` は PyTorch `CosineAnnealingLR._get_closed_form_lr` 準拠の閉形式（`eta_min + (base_lr - eta_min) * (1 + cos(π * step / t_max)) / 2`）を採用し、`step > t_max` では TensorFlow `CosineDecay` のように clamp せず周期的に振る舞う（PyTorch 準拠）。
+- `ExponentialLr` は `lr(step) = base_lr * gamma^step`（PyTorch `ExponentialLR` と同一）。
+- `LinearWarmupLr` は PyTorch に同名クラスがないため、`LinearLR` の `end_factor = 1.0` 固定形として定義した独自スケジューラ。
+- いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する（`cos`／`powf` の libm 差による ULP 揺れを抑える精度方針。bit 同一契約は主張しない）。
+- facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
+- 状態保持型の `ReduceLROnPlateau`・`OneCycleLR` は本 issue の対象外のまま残る（兄弟イシュー #1746／#1747 が担当）。
+
 ## #1746 の追補（`ReduceLrOnPlateau`）
 
 PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`ConstantLr`／`StepLr` の 2 種のみだった stateless scheduler 面）を解消した（親 #1611）。
@@ -1628,4 +1640,4 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - facade（`crates/facade/src/optim.rs`）は `pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};` と `pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};` の 2 行のみ追加（純再エクスポート）。`crates/facade/tests/api_surface.rs` の期待集合・到達性検査、`crates/facade/tests/optim_reduce_lr_on_plateau.rs`（facade のみに依存する学習ループ統合テスト。`backward → clip → optimizer step` の適用順序契約を踏襲し、`ReduceLrOnPlateau::step(loss)` の返り値で毎 step `SgdConfig` を作り直す）も追加済み。
 - Issue 本文の「`Op`／`BackendOps`／`Var` メソッド追加」「VJP 追加」「parity テスト」という受け入れ条件は、`Var`／`Tape`／`BackendOps` に一切依存しないホスト側純データ構造（`clip.rs`／`amp.rs` と同カテゴリ）である本機能には該当しないため、上記の参照系列テスト・fail-closed 検証テスト・facade 統合テスト・`api_surface.rs` 機械検査で代替した。
 - `DeviceParamStore` は非対応（対応する `BackendOps` メソッドを本 issue では追加していないため。他の scheduler・optimizer と同様に無関係）。
-- Cosine／Exponential／OneCycle は本 issue の対象外のまま（親 #1611 の残対象）。
+- OneCycle は本 issue の対象外のまま（親 #1611 の残対象。Cosine／Exponential／LinearWarmup は #1745 で実装済み）。

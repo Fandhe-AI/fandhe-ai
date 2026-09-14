@@ -72,7 +72,9 @@ pub use amp::{
     unscale_grads,
 };
 pub use clip::{ClipGradResult, clip_grad_norm, clip_grad_value, global_grad_norm};
-pub use lr_scheduler::{ConstantLr, LrScheduler, StepLr};
+pub use lr_scheduler::{
+    ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, StepLr,
+};
 pub use reduce_lr_on_plateau::{
     PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, ThresholdMode,
 };
@@ -120,6 +122,17 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // optim.rs` 参照）。`DeviceParamStore` への結線は非対応のまま
 // （`adam` モジュール doc「`DeviceParamStore` 非対応」節）。
 
+// イシュー #1745（親 #1611）: CosineAnnealingLr／ExponentialLr／
+// LinearWarmupLr（式ベース・stateless 純関数の LR スケジューラ 3 種）を
+// 追加した（`lr_scheduler` モジュール doc 参照）。新規 `Op`／
+// `BackendOps` メソッド／`Var`／VJP は追加していない（テンソル演算では
+// なくホスト側 `f32` 純関数のため）。facade（`fandhe_ai::optim`）への
+// 公開・`crates/facade/tests/api_surface.rs` の期待集合更新・
+// `docs/compat-api-scope.md` §1.2 scheduler 行の更新も本イシューで
+// 完了済み（純再エクスポート。`crates/facade/src/optim.rs` 参照）。
+// 状態保持型の `ReduceLROnPlateau`／`OneCycleLR` は対象外（兄弟
+// イシュー #1746／#1747 が担当）。
+//
 // イシュー #1746（親 #1611）: 検証指標の停滞を検知して学習率を下げる
 // 状態保持型スケジューラ（`ReduceLrOnPlateau`）を追加した。既存
 // `ConstantLr`／`StepLr`（stateless 純関数）とは異なり、内部に
