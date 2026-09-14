@@ -1664,3 +1664,13 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - momentum cycling（`cycle_momentum`／`base_momentum`／`max_momentum`）・`epochs`／`steps_per_epoch` からの `total_steps` 自動導出・param group ごとの `max_lr` は対象外のまま。新規 `Op`／`BackendOps`／`Var`／VJP は拡張していない（テンソル演算ではなくホスト側 `f32` 純関数のため）。
 - facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
 - 状態保持型（Plateau／OneCycle）・式ベース型（Cosine／Exponential／LinearWarmup）とも実装済みとなり、本節の対象外事項はなくなった。
+
+## 追補（イシュー #1750）
+
+§2.12 の `.to(dtype)`（型変換）行「なし」を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `CastDType`（`#[non_exhaustive]`。`f32`／`f64`／`i32`／`i64`／`bool` の 5 dtype タグ）・`CastElement`（sealed trait。要素単位の変換規則の単一情報源）・`BackendOps::cast_ops` capability accessor・`CastOps`（8 方向。既定 `Unsupported`）・ホスト参照実装（`fandhe_ai_tensor_core::cast::{cast_from_f32, cast_to_f32}`）を `tensor-core` に新設した。
+- CPU 実装（`backend-cpu::cast`）は 8 方向すべてをホスト参照実装へ委譲する。CUDA／Metal のネイティブカーネル（accessor は現状 `None` のためホストフォールバックのみ機能する）は #1751 が担当する。
+- `Var::cast<T: CastElement>() -> Result<Tensor<T>, AutodiffError>`（**非微分演算**。VJP は明示的な打ち切り——`Var::argmax`／`unique` と同型に tape ノードを記録しない）・`Var::to_f32() -> Var<'t>`（f32 系の恒等射。勾配は通常どおり伝播）・`Tape::var_from<T: CastElement>(&Tensor<T>) -> Result<Var<'_>, AutodiffError>`（非 f32 dtype から葉ノードを直接登録）を実装した。
+- facade は `CastDType`／`CastElement` の純再エクスポート（1 行）と `facade::Tape::var_from` の委譲メソッド追加のみ。`CastOps`（動的ディスパッチ面）は facade へ再エクスポートしない（`crates/facade/tests/api_surface.rs::facade_does_not_reexport_cast_ops` が機械的に固定）。
+- 数値契約（NaN→0 の飽和整数変換・`v != 0.0` の bool 変換等）・API 配置案の比較は `docs/tensor-core-cast-design.md` を正とする。CUDA／Metal 実機での facade parity テストは未実測のまま GB10／Mac セッションへ申し送り。

@@ -16,7 +16,7 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, BceKind, ChecksumReadout, GemmChecksum,
+    Activation, BackendError, BackendOps, BceKind, CastElement, ChecksumReadout, GemmChecksum,
     GruPointwiseOutput, HuberKind, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
     MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
     broadcast_shape, concat_out_shape, gather_out_shape, gemm_out_shape,
@@ -28,10 +28,10 @@ use fandhe_ai_tensor_core::{
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
-    ArgExtremum, argext_with_fallback, concat_with_fallback, gather_with_fallback,
-    interpolate_with_fallback, min_with_fallback, one_hot_with_fallback, pad_with_fallback,
-    scalar_binary_with_fallback, scalar_unary_with_fallback, scatter_with_fallback,
-    sort_with_fallback, topk_with_fallback, unique_with_fallback,
+    ArgExtremum, argext_with_fallback, cast_from_f32_with_fallback, concat_with_fallback,
+    gather_with_fallback, interpolate_with_fallback, min_with_fallback, one_hot_with_fallback,
+    pad_with_fallback, scalar_binary_with_fallback, scalar_unary_with_fallback,
+    scatter_with_fallback, sort_with_fallback, topk_with_fallback, unique_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -3014,6 +3014,38 @@ impl<'t> Var<'t> {
             materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
         };
         unique_with_fallback(self.tape.ops(), &input_val)
+    }
+
+    /// `self` を `Tensor<T>` へ変換する（`torch.Tensor.to(dtype)` 相当
+    /// の一方向。イシュー #1750。dtype 変換基盤の契約・数値表は
+    /// `docs/tensor-core-cast-design.md` を正とする）。
+    ///
+    /// **非微分演算**: 出力が f32 以外の dtype への cast は勾配を
+    /// 持たない（`Var::argmax`／`Var::unique` と同型の理由——`Tensor<T>`
+    /// は `Var` の tape 表現に乗らない）ため、本メソッドは新規 `Op` を
+    /// tape に記録せず（`push_eager` を呼ばない）、`self` を
+    /// `materialize_fallible` で実体化した値に対して
+    /// `cast_from_f32_with_fallback` を適用した **detached な
+    /// `Tensor<T>`** を返す。
+    ///
+    /// `T = f32` を指定した場合も本メソッドは detached なコピーを
+    /// 返すだけであり勾配は伝播しない——勾配を保ったまま f32 系の
+    /// 恒等射を得たい場合は [`Var::to_f32`] を使うこと。
+    pub fn cast<T: CastElement>(&self) -> Result<Tensor<T>, AutodiffError> {
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        cast_from_f32_with_fallback(self.tape.ops(), &input_val)
+    }
+
+    /// f32 系の恒等射（イシュー #1750）。`self` は既に `Tensor<f32>`
+    /// を表す `Var` であるため、`Var: Copy` により `self` をそのまま
+    /// 返すだけで済み、勾配は通常どおり `self` の tape ノードへ伝播
+    /// する（[`Var::cast`]`::<f32>()` が detached なコピーを返し勾配を
+    /// 打ち切るのとは対照的）。
+    pub fn to_f32(&self) -> Var<'t> {
+        *self
     }
 
     /// `mask` が真の位置を上書きする（`torch.scatter` 相当。イシュー

@@ -475,6 +475,13 @@ impl BackendOps for CpuBackendOps {
         Some(self)
     }
 
+    /// `crate::cast`（イシュー #1750）が `CpuBackendOps` へ
+    /// `impl CastOps` を実装しているため、`typed_ops_bf16` と同じ
+    /// `Some(self)` パターンで結線する。
+    fn cast_ops(&self) -> Option<&dyn fandhe_ai_tensor_core::CastOps> {
+        Some(self)
+    }
+
     /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
     /// `docs/device-resident-update-design.md` §3.2・§5.2）。CPU は
     /// 「デバイス」がホストメモリそのものであるため、`downcast_handle_mut`

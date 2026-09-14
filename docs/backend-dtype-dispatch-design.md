@@ -50,7 +50,7 @@
 
 ## 3. 関連 issue との境界
 
-- **#1613（cast `.to(dtype)`）**: f32 ⇔ 他 dtype の変換 API は #1613 側の責務。本設計は変換後の「dtype ごとの演算実行」経路のみを扱う
+- **#1613（cast `.to(dtype)`）**: f32 ⇔ 他 dtype の変換 API は #1613 側の責務。本設計は変換後の「dtype ごとの演算実行」経路のみを扱う（#1750 で `CastDType`／`CastElement`／`BackendOps::cast_ops`／`CastOps`・`Var::cast`／`to_f32`／`Tape::var_from` を実装済み。設計・数値契約は `docs/tensor-core-cast-design.md`）
 - **#1625（AMP: automatic mixed precision）**: 本 dtype 多重化を前提として損失スケーリングを実装する。本設計には AMP のスケーリング契約を含めない
 - **#1627（量子化）**: spec 除外事項に従属し着手不可。本設計の対象外
 
@@ -182,7 +182,7 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 
 - **`Var`／`Tape` の dtype 一般化**: `Tape.ops: Box<dyn BackendOps + Send>`（`crates/autodiff/src/tape.rs:775`）は本段階では `f32` のまま不変。dtype ジェネリックな `Var<T>`・VJP・`FusionPlan` の対応は別イシュー
 - **AMP（損失スケーリング）連携**: #1625 側の責務
-- **cast（`.to(dtype)`）**: #1613 側の責務
+- **cast（`.to(dtype)`）**: #1613 側の責務（#1750 で実装済み。`docs/tensor-core-cast-design.md`）
 - **`MemoryOps`／`DeviceBuffer<T>` 常駐経路の dtype 多重化**（段階 B）: `linear_forward_device` 系のデバイス常駐チェーンへの dtype 拡張は本設計に含めない
 - **fusion（カーネル融合機構）の dtype 対応**: `kernel-fusion.md` の対象範囲は f32 のまま
 - **Metal bf16 可用性の実機コンパイルプローブ**: #1651 の調査事項

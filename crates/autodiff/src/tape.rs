@@ -25,11 +25,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, DType, DeviceBufferView, FusedOpKind, FusionPlan,
-    InterpolateMode, MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, Tensor,
+    Activation, BackendError, BackendOps, CastElement, DType, DeviceBufferView, FusedOpKind,
+    FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
+    Tensor,
 };
 
 use crate::error::AutodiffError;
+use crate::grad::cast_to_f32_with_fallback;
 use crate::var::matmul_forward;
 
 /// テープの識別子。プロセス全体で単調増加するカウンタから発行する。
@@ -1648,6 +1650,22 @@ impl Tape {
     pub fn var(&self, tensor: &Tensor<f32>) -> crate::var::Var<'_> {
         let id = self.push_eager(Op::Leaf, tensor.clone());
         crate::var::Var::from_raw(self, id)
+    }
+
+    /// 非 f32 dtype の `Tensor<T>` を f32 へ変換したうえでテープ上の
+    /// 葉ノードとして登録する（[`Self::var`] の dtype 変換版。イシュー
+    /// #1750）。`T` へのキャストは `crate::grad::cast_to_f32_with_
+    /// fallback`（`BackendOps::cast_ops` accessor → ホスト参照実装
+    /// フォールバックの 2 段構成。`docs/tensor-core-cast-design.md`
+    /// 参照）を経由し、変換後の値を [`Self::var`] と同じく葉 1 ノード
+    /// として登録する——変換元 `tensor` へは勾配は流れない（`Var::cast`
+    /// の逆方向であり同じ非微分境界を持つ）。
+    pub fn var_from<T: CastElement>(
+        &self,
+        tensor: &Tensor<T>,
+    ) -> Result<crate::var::Var<'_>, AutodiffError> {
+        let f32_val = cast_to_f32_with_fallback(self.ops(), tensor)?;
+        Ok(self.var(&f32_val))
     }
 
     /// 現在記録済みのノード数を返す。受け入れ条件（forward 実行時に
