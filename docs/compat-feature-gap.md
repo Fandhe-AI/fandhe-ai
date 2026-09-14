@@ -1278,6 +1278,15 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
 
 `amax`／`amin` 勾配分配方式（先勝ち決定的 対 均等分配）の設計判断を確定した。上記 #1719／#1720 追補が「#1718 が均等分配へ確定した場合はヘルパー 1 箇所の差し替えで反映される」と記していた前提は**採用しない**ことが確定した——`Var::max`／`min`／`max_dims`（`max(dim)`／`min(dim)` 族の意味論）は crates.io 公開全版で出荷済みの先勝ち決定的挙動を**維持**し、`grad::extremum_first_match_vjp` は差し替えない。PyTorch `torch.amax`／`amin` 相当の均等分配は、実装する場合は別 `Op`（`Op::Amax`／`Op::Amin`）・別 VJP ヘルパーとして独立に追加する方針とする（未実装・後続 issue 提案のまま。本イシューはコード変更を伴わない設計判断の確定のみ）。詳細・根拠は `docs/autodiff-amax-grad-distribution-decision.md` を参照。
 
+## 追補（イシュー #1722）
+
+AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記）」）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `fandhe_ai_autodiff::nn::optim::amp`（#1721 で実装済み。`GradScaler`／`GradScalerConfig`／`UnscaleResult`／`scale_loss`／`scale_grads`／`unscale_grads`／`has_non_finite`）を `fandhe_ai::optim` から素の再エクスポート（案 A。`docs/facade-optimizer-promotion-decision.md` §4）で公開した。`crates/facade/src/optim.rs` の適用順序契約 doc を「AMP を使わない場合」（既存の `backward → clip → optimizer step`。無変更）と「AMP を使う場合」（`scale_loss → backward → unscale＋非有限検出 → 非有限なら clip・optimizer step を両方スキップ → clip → optimizer step → 必ず `GradScaler::update`）の 2 節へ更新した。
+- 新規 `Op`／`BackendOps` メソッド／VJP は追加していない（`scale_loss` は既存 `Var::mul` の合成のみ）。
+- 対象外事項の明記: (a) 真の混合精度（f16 forward・f32 master weight）は `docs/backend-dtype-dispatch-design.md` §8 のとおり対象外。(b) デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）には unscale／非有限検出が結線されておらず、AMP はホスト `Tensor<f32>` 勾配（`Gradients::get`／`SequentialVars::trainable_grads`／`Tape::param_grads_to_host` 経由）にのみ適用できる。
+- facade のみ import する統合テスト（`crates/facade/tests/optim_amp_train_loop.rs`）で、収束・1 step の勾配 bit 完全一致（scale_loss→backward→unscale と非スケール backward の勾配が `f32::to_bits()` で一致すること。CPU バックエンド）・非有限勾配時の skip／backoff を固定した。
+
 ## #1627 の追補（int8 量子化の段階 0 設計判断）
 
 スナップショット本体（対象 HEAD `097bff19`）の 354 行目「量子化（int8 等）」行（`なし・量子化 dtype・演算対応・難度 XL`）は不変のまま、以下を追記する。

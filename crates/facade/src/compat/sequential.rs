@@ -19,7 +19,10 @@
 //! API 面であり（`docs/compat-api-scope.md` §0）、利用者は内部クレート
 //! `fandhe_ai_autodiff` へ直接依存する必要はない。適用順序契約
 //! （`backward → clip → optimizer step`）の正は [`crate::optim`]
-//! モジュール doc とする（イシュー #963）。
+//! モジュール doc とする（イシュー #963）。AMP（[`crate::optim::GradScaler`]）
+//! 使用時の順序（`scale_loss → backward → unscale → 非有限なら skip →
+//! clip → step → update`）も同じく [`crate::optim`] モジュール doc「適用
+//! 順序契約」節を正とする（イシュー #1722）。
 //!
 //! ```
 //! use fandhe_ai::Tensor;
