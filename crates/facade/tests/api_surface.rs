@@ -699,3 +699,154 @@ fn facade_does_not_expose_rng_internal_types() {
         "facade の公開面が RNG 内部実装型・内部アクセサを含んでいる: {offending:?}"
     );
 }
+
+/// facade（crates.io 公開クレート `fandhe-ai`）が非公開クレート
+/// `onnx-interop`（`publish = false`。#1775・
+/// `docs/facade-onnx-export-exposure-decision.md`）へ通常依存を持たない
+/// ことを固定する。
+///
+/// `docs/crates-io-publishing-order.md` §6 は「公開 6 クレートの
+/// `[dependencies]` に非公開クレートが現れない」ことを実測確認済みの
+/// 前提としているが、CI は `cargo publish --dry-run` を実行しないため、
+/// 誰かが `[dependencies]` へ `onnx-interop = { path = "../onnx-interop" }`
+/// を追加しても通常の `cargo build`／`cargo test` は成功してしまい、
+/// 壊れるのは次回リリース（`release-all.yml`）実行時になる。本テストは
+/// この盲点を CI 時点の失敗へ前倒しする（ホストクレート `Cargo.toml`
+/// のみを対象とする固定パス走査で、外部入力を受け取らない。
+/// `.claude/rules/security.md` A08）。
+///
+/// **段階 0 の間の負のガードである**: `onnx-interop` の crates.io 公開
+/// 承認（`docs/facade-onnx-import-exposure-decision.md` §6.1）とラッパー
+/// API 実装 issue（`docs/facade-onnx-export-exposure-decision.md` §6）
+/// が完了したら、本テストは削除ではなく「承認済み依存形状
+/// （`version = "=x.y.z"` 併記等）の検査」へ差し替える。
+///
+/// `[dev-dependencies]` は対象外（公開クレートの `Cargo.toml` に残っても
+/// `cargo publish` を壊さない。`bench-harness` 等の既存 dev-dependency と
+/// 同じ扱い）。`[dependencies]`・`[build-dependencies]`・
+/// `[target.'cfg(...)'.dependencies]`・`[dependencies.<name>]` 形の
+/// ヘッダ・`package = "..."` によるリネーム迂回はいずれも検出する。
+#[test]
+fn facade_does_not_depend_on_unpublished_onnx_interop() {
+    const FORBIDDEN_ONNX_NAMES: [&str; 3] = [
+        "onnx-interop",
+        "fandhe-ai-onnx-interop",
+        "fandhe-ai-interop",
+    ];
+
+    fn is_dev_dependencies_section(section: &str) -> bool {
+        section.contains("dev-dependencies")
+    }
+
+    fn is_relevant_dependency_section(section: &str) -> bool {
+        section.contains("dependencies") && !is_dev_dependencies_section(section)
+    }
+
+    let cargo_toml_path = facade_crate_root().join("Cargo.toml");
+    let content = read_to_string_or_panic(&cargo_toml_path);
+
+    let mut current_section = String::new();
+    let mut offending = Vec::new();
+    // 空虚 pass 防止の自己検証: 少なくとも 1 行、既知の依存
+    // （`fandhe-ai-tensor-core` 等）を対象セクション内で実際に走査した
+    // ことを確認する。
+    let mut saw_known_dependency_line = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            current_section = trimmed.to_string();
+            if is_relevant_dependency_section(&current_section) {
+                for name in FORBIDDEN_ONNX_NAMES {
+                    if current_section.contains(name) {
+                        offending.push(format!(
+                            "section header `{current_section}` が `{name}` を含む"
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+        if !is_relevant_dependency_section(&current_section) {
+            continue;
+        }
+        // コメント除去（`#` 以降）。TOML の文字列値に `#` を含む既存行は
+        // 本ファイルには存在しないため、この単純化で安全に判定できる。
+        let code_part = trimmed
+            .split_once('#')
+            .map(|(a, _)| a)
+            .unwrap_or(trimmed)
+            .trim();
+        if code_part.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = code_part.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_matches('"');
+        if FORBIDDEN_ONNX_NAMES.contains(&key) {
+            offending.push(format!(
+                "`{current_section}` に依存 `{key}` を検出: `{trimmed}`"
+            ));
+        }
+        // `package = "onnx-interop"` によるクレート名リネーム迂回も検出する。
+        for name in FORBIDDEN_ONNX_NAMES {
+            if value.contains(name) {
+                offending.push(format!(
+                    "`{current_section}` の行 `{trimmed}` の値に `{name}` を検出\
+                     （package リネーム等での迂回を含む）"
+                ));
+            }
+        }
+        if key == "fandhe-ai-tensor-core" || key == "fandhe-ai-autodiff" {
+            saw_known_dependency_line = true;
+        }
+    }
+
+    assert!(
+        saw_known_dependency_line,
+        "自己検証: 既知の依存行（fandhe-ai-tensor-core／fandhe-ai-autodiff）が\
+         依存セクション内で検出されなかった。走査ロジックが空虚に pass して\
+         いる可能性がある（{cargo_toml_path:?} を確認）"
+    );
+    assert!(
+        offending.is_empty(),
+        "facade（crates.io 公開クレート）が非公開クレート onnx-interop へ\
+         通常依存している（docs/crates-io-publishing-order.md §6 違反。\
+         cargo publish が次回リリースで壊れる）: {offending:?}"
+    );
+}
+
+/// facade の `src/` が `onnx-interop`（クレート名を Rust 識別子化した
+/// `onnx_interop`）を `use`／型パス等で一切参照していないことを固定する
+/// （上記 Cargo.toml 側ガードの対を成す src 側チェック。#1775）。
+#[test]
+fn facade_sources_do_not_reference_onnx_interop() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for forbidden in [
+                "onnx_interop",
+                "fandhe_ai_onnx_interop",
+                "fandhe_ai_interop",
+            ] {
+                if line.contains(forbidden) {
+                    offending.push(format!(
+                        "{}: `{trimmed}` が {forbidden} を含む",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の src/ が onnx-interop を参照している\
+         （facade は非公開クレートへ依存しない設計。#1775）: {offending:?}"
+    );
+}
