@@ -259,8 +259,27 @@ R2_R3_GATE_TESTS: dict[str, list[str]] = {
 # `cargo test ... --nocapture` が出力する `test <name> ... ok`／
 # `test <name> ... FAILED` 行（行頭アンカーなし。モジュールパス付きの
 # 完全修飾名で出力されるため呼び出し側で短縮名との一致を判定する）。
+#
+# `orchestrate.sh` は `--nocapture --test-threads=1` で実行するため、
+# assert 失敗時は「test <name> ... 」の直後に panic 診断（`thread '...'
+# panicked at ...`・`note: run with \`RUST_BACKTRACE=1\`...` 等、2>&1 で
+# 混在する複数行）が挟まり、結果トークン（`ok`／`FAILED`）はその後ろの
+# 独立した行として出力される。素朴に「`\.\.\.\s+` の直後」だけを見る
+# 正規表現ではこの形式に一致せず R0/R1 の FAILED を検出できない
+# （codex-review 指摘。イシュー #1694 PR レビュー是正）。
+#
+# `--test-threads=1`（直列実行）により、あるテストの「test <name> ... 」
+# と結果トークンの間には当該テスト自身の出力しか現れない（他テストの
+# 「test <name> ... 」が割り込むことはない）ため、非貪欲マッチで
+# 「次に `test <name> ... ` が始まる手前まで」の任意文字（改行を含む）
+# を許容しつつ、結果トークンは行末（`\s*$`。MULTILINE で行単位）に
+# 単独で現れるものに限定して panic メッセージ中の偶発的な "ok" 等の
+# 部分文字列に誤爆しないようにする。
 _TEST_RESULT_LINE_RE = re.compile(
-    r"test\s+(?P<name>\S+)\s+\.\.\.\s+(?P<result>ok|FAILED)"
+    r"^test\s+(?P<name>\S+)\s+\.\.\.\s+"
+    r"(?:(?!^test\s+\S+\s+\.\.\.).)*?"
+    r"(?P<result>ok|FAILED)\s*$",
+    re.DOTALL | re.MULTILINE,
 )
 
 
@@ -632,6 +651,90 @@ def _self_test() -> None:
         "総合判定: **REJECT（R0/R1 ゲート不成立" in report_incomplete
     ), report_incomplete
 
+    # ケース 11a（codex-review 指摘の是正確認。イシュー #1694 PR レビュー
+    # 是正・discussion_r4002218883）: `orchestrate.sh` は
+    # `--nocapture --test-threads=1` で `cargo test` を実行するため、
+    # assert 失敗時は「test <name> ... 」の直後に panic 診断（`thread
+    # '...' panicked at ...`・`note: run with \`RUST_BACKTRACE=1\`
+    # ...` 等、2>&1 で混在する複数行）が挟まり、結果トークン（`FAILED`）
+    # はその後ろの独立した行に現れる。素朴な「`\.\.\.\s+` の直後」正規
+    # 表現ではこの形式に一致せず R0/R1 の FAILED が unknown 扱いになり、
+    # 規則 1（R0/R1 FAIL で REJECT 確定）を実現できない不具合の再現・
+    # 是正確認。
+    interleaved_failed_log = (
+        "running 1 test\n"
+        "test tests::te_layout_probe_matches_model ... "
+        "thread 'tests::te_layout_probe_matches_model' panicked at "
+        "crates/backend-metal/src/gemm.rs:123:5:\n"
+        "assertion `left == right` failed\n"
+        "  left: 1\n"
+        " right: 2\n"
+        "note: run with `RUST_BACKTRACE=1` environment variable to "
+        "display a backtrace\n"
+        "FAILED\n"
+        "\n"
+        "failures:\n"
+    )
+    assert (
+        _test_result_in_text(
+            interleaved_failed_log, "te_layout_probe_matches_model"
+        )
+        is False
+    ), interleaved_failed_log
+    with tempfile.TemporaryDirectory() as gate_interleaved:
+        with open(
+            os.path.join(gate_interleaved, "probe_run.log"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write(interleaved_failed_log)
+        # R0/R1 の残りのテストは通常形式（1 行完結）で ok を出力する。
+        with open(
+            os.path.join(gate_interleaved, "parity_run.log"),
+            "a",
+            encoding="utf-8",
+        ) as f:
+            for name in R0_R1_GATE_TESTS["parity_run.log"]:
+                f.write(f"test {name} ... ok\n")
+        with open(
+            os.path.join(gate_interleaved, "all_staged_candidates_run.log"),
+            "a",
+            encoding="utf-8",
+        ) as f:
+            for name in R0_R1_GATE_TESTS["all_staged_candidates_run.log"]:
+                f.write(f"test {name} ... ok\n")
+        for filename, names in R2_R3_GATE_TESTS.items():
+            with open(
+                os.path.join(gate_interleaved, filename), "a", encoding="utf-8"
+            ) as f:
+                for name in names:
+                    f.write(f"test {name} ... ok\n")
+        report_interleaved = render_report(adopt_runs, gate_dir=gate_interleaved)
+    assert (
+        "総合判定: **REJECT（R0/R1 ゲート不成立" in report_interleaved
+    ), report_interleaved
+
+    # ケース 11b（codex-review 指摘の是正確認。イシュー #1694 PR レビュー
+    # 是正・discussion_r4002218889）: R0/R1 FAIL 時は性能 A/B 非実施
+    # （ログ引数 0 件）が正常な運用であり、`main()` はログ引数なしでも
+    # `--gate-dir` さえ指定されていれば `parser.error` で即終了せず
+    # `render_report([], gate_dir=...)` の REJECT 判定へ到達できる
+    # ことを確認する（`main()` 自体の呼び出しは argparse の都合上
+    # ここでは検証できないため、ガード条件そのものを直接検証する）。
+    parser_for_case11b = argparse.ArgumentParser()
+    parser_for_case11b.add_argument("logs", nargs="*")
+    parser_for_case11b.add_argument("--gate-dir", default=None)
+    args_gate_only = parser_for_case11b.parse_args(
+        ["--gate-dir", "dummy-gate-dir"]
+    )
+    assert not (
+        not args_gate_only.logs and args_gate_only.gate_dir is None
+    ), "--gate-dir 指定時はログ 0 件でも main() の早期エラーに倒れてはならない"
+    args_truly_empty = parser_for_case11b.parse_args([])
+    assert (
+        not args_truly_empty.logs and args_truly_empty.gate_dir is None
+    ), "ログ・--gate-dir とも未指定の場合は従来どおり誤用として拒否する"
+
     # ケース 12（codex-review 指摘の是正確認。イシュー #1694 PR レビュー
     # 是正）: 同じログパスを複数回指定すると `detect_duplicate_logs` が
     # 正規化後の実パス重複を検出する（`main()` はこれを検出したら集計
@@ -698,8 +801,18 @@ def main() -> None:
         _self_test()
         return
 
-    if not args.logs:
-        parser.error("ログファイルを 1 つ以上指定する（または --self-test）")
+    # ログを 1 件も指定しない呼び出しは、R0/R1 ゲート FAIL につき性能 A/B
+    # が正常に実施されなかった場合（規則 1）の正当な用法である。この
+    # ケースを `--gate-dir` 併用時にまで一律 `parser.error` で弾くと、
+    # `render_report([], gate_dir=...)` が実装済みの REJECT 判定
+    # （ケース 11 参照）へ到達できない（codex-review 指摘。イシュー
+    # #1694 PR レビュー是正）。`--gate-dir` も省略した「本当に無入力」の
+    # 呼び出しのみを誤用として拒否する。
+    if not args.logs and args.gate_dir is None:
+        parser.error(
+            "ログファイルを 1 つ以上指定するか、--gate-dir を指定する"
+            "（または --self-test）"
+        )
 
     contents: list[str] = []
     for path in args.logs:
