@@ -1633,19 +1633,29 @@ fn cumprod_underflow_recovers_via_f64_accumulator() {
 /// と突合する。零要素の個数（0／1／2 個）を分けて検証し、最初の零
 /// 要素より後ろの入力勾配が厳密に `0.0` になる解析的性質も確認する
 /// （`L[i] = 0` となるため。最初の零要素自身の勾配は一般に非零）。
-fn cumprod_backward_case(x0: Tensor<f32>, w: Tensor<f32>, label: &str, first_zero: Option<usize>) {
+/// `dim` を指定できるようにして、`inner > 1`（縮約軸より後ろに別軸が
+/// あり `idx_next = (o*axis_len+(a+1))*inner+i` のような lane 添字計算を
+/// 経由する）多次元ケースも同一関数で検証できるようにしている
+/// （レビュー指摘: rank-1 限定だったカバレッジの拡張）。
+fn cumprod_backward_case_along(
+    x0: Tensor<f32>,
+    w: Tensor<f32>,
+    dim: usize,
+    label: &str,
+    first_zero_along_axis: Option<usize>,
+) {
     let forward = |x: Tensor<f32>| -> f32 {
         let tape = Tape::new_with_ops(common::naive_ops());
         let xv = tape.var(&x);
         let wv = tape.var(&w);
-        let out = xv.cumprod(0).unwrap();
+        let out = xv.cumprod(dim).unwrap();
         scalar(&out.mul(&wv).unwrap().sum(None).unwrap().to_tensor())
     };
 
     let tape = Tape::new_with_ops(common::naive_ops());
     let xv = tape.var(&x0);
     let wv = tape.var(&w);
-    let out = xv.cumprod(0).unwrap();
+    let out = xv.cumprod(dim).unwrap();
     let loss = out.mul(&wv).unwrap().sum(None).unwrap();
     let grads = tape.backward(&loss).unwrap();
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
@@ -1653,12 +1663,34 @@ fn cumprod_backward_case(x0: Tensor<f32>, w: Tensor<f32>, label: &str, first_zer
     let num_dx = numeric_grad(&x0, forward);
     assert_grad_close(label, dx, &num_dx);
 
-    if let Some(fz) = first_zero {
-        let dx_data = dense_vec(dx);
-        for (i, &v) in dx_data.iter().enumerate().skip(fz + 1) {
-            assert_eq!(v, 0.0, "{label}: index {i} の勾配は 0 のはず（L[{i}]=0）");
+    if let Some(fz) = first_zero_along_axis {
+        // shape 全体を走査し、縮約軸（dim）上のインデックスが fz より
+        // 後ろの要素はすべて勾配 0 になることを検証する（多次元でも
+        // L[a] = 0 の性質は縮約軸方向にのみ依存するため）。
+        let shape = dx.shape().to_vec();
+        let numel: usize = shape.iter().product();
+        let mut index = vec![0usize; shape.len()];
+        for _ in 0..numel {
+            if index[dim] > fz {
+                let v = dx.get(&index).unwrap_or(0.0);
+                assert_eq!(
+                    v, 0.0,
+                    "{label}: index {index:?} の勾配は 0 のはず（L[{fz}]=0 が dim={dim} 方向へ伝播）"
+                );
+            }
+            for axis in (0..shape.len()).rev() {
+                index[axis] += 1;
+                if index[axis] < shape[axis] {
+                    break;
+                }
+                index[axis] = 0;
+            }
         }
     }
+}
+
+fn cumprod_backward_case(x0: Tensor<f32>, w: Tensor<f32>, label: &str, first_zero: Option<usize>) {
+    cumprod_backward_case_along(x0, w, 0, label, first_zero);
 }
 
 #[test]
@@ -1689,6 +1721,50 @@ fn cumprod_backward_matches_numeric_with_two_zeros() {
         "cumprod dX (two zeros)",
         Some(1),
     );
+}
+
+/// ⑨`cumprod` backward の 3 次元・中間軸（`inner > 1`）ケース。shape
+/// `[2, 4, 3]` で軸 1（`outer=2`・`axis_len=4`・`inner=3`）を縮約軸に取り、
+/// `backend-cpu::scan` の lane 添字計算
+/// `idx_next = (o*axis_len+(a+1))*inner+i` を実際に経由する経路を
+/// 中央差分と突合する（レビュー指摘: rank-1 限定だったカバレッジの
+/// 拡張）。全 lane（`outer × inner` の各組）の軸 1 = 0 位置を零要素に
+/// 揃えることで、どの lane でも `L[a]=0 (a>=1)` が成り立ち、縮約軸方向
+/// の勾配ゼロ伝播（`first_zero_along_axis = 0`）を全 lane 一律で検証
+/// できるようにしている。
+#[test]
+fn cumprod_backward_matches_numeric_with_inner_axis() {
+    #[rustfmt::skip]
+    let x0 = t(
+        vec![
+            // outer=0
+            0.0, 0.0, 0.0,
+            1.5, 0.5, -0.5,
+            -0.5, 2.0, 1.0,
+            -2.0, 0.25, 3.0,
+            // outer=1
+            0.0, 0.0, 0.0,
+            2.0, -1.5, 0.25,
+            0.5, 0.5, -1.0,
+            1.0, -0.25, 2.0,
+        ],
+        &[2, 4, 3],
+    );
+    #[rustfmt::skip]
+    let w = t(
+        vec![
+            1.0, -2.0, 0.5,
+            3.0, -1.0, 2.0,
+            0.5, 1.0, -1.5,
+            -2.0, 0.25, 1.0,
+            2.0, 0.5, -1.0,
+            -1.0, 1.5, 0.5,
+            0.25, -2.0, 1.0,
+            1.0, 0.5, -0.5,
+        ],
+        &[2, 4, 3],
+    );
+    cumprod_backward_case_along(x0, w, 1, "cumprod dX (3d inner axis)", Some(0));
 }
 
 /// エラー経路: `cumsum`／`cumprod` の `dim` が範囲外なら
