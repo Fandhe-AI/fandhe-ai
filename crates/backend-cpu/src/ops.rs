@@ -30,6 +30,7 @@ use crate::layer_norm;
 use crate::linalg::{self, LinalgError};
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
+use crate::scan;
 use crate::softmax::{self, match_softmax_plan};
 use crate::{
     elementwise, fused_elementwise, gather_scatter, mse, reduction, rnn_cell, scalar_elementwise,
@@ -589,12 +590,96 @@ impl BackendOps for CpuBackendOps {
     /// カーネル呼び出し契約・累積セマンティクスは不変（`gemm` 自体は
     /// 変更なし）。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
         let mut out = zeroed_output(m * n);
         gemm_into_slice(a, b, &mut out, m, n, k, "gemm")?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_batched`] の CPU
+    /// オーバーライド（イシュー #1715）。既定合成実装（バッチごとに
+    /// `Tensor` を新規確保して `self.gemm` を呼ぶ）と数値上は bit 同一
+    /// だが、出力バッファを 1 本だけ確保して各バッチを直接
+    /// `gemm_into_slice`（NT/TN 転置入口・`GEMM_HOST_REPACK_COUNT`
+    /// 計上込み。#1213）へ書き込むことでバッチ数ぶんの `Tensor` 確保・
+    /// `Vec` コピーを避ける（性能最適化はスコープ外。#1715 実装計画
+    /// §8。本オーバーライドは正しさのみを目的とし bit 同一契約を維持
+    /// する）。
+    ///
+    /// rank 2 同士（`plan.batch_shape` が空）は [`Self::gemm`] へ直接
+    /// 委譲する（既定合成実装と同じ「委譲時は同一カーネル呼び出しで
+    /// bit 同一」契約）。オペランドの正規化（broadcast・contiguous 化・
+    /// `[B, rows, cols]` への reshape）は既定合成実装
+    /// （`fandhe_ai_tensor_core::backend_ops::default_gemm_batched`）と
+    /// 同じ規則を持つ [`fandhe_ai_tensor_core::normalize_batched_operand`]
+    /// を再利用し、正規化ロジックを 2 重管理しない。
+    ///
+    /// 出力要素数の検証は
+    /// [`fandhe_ai_tensor_core::checked_gemm_batched_output_len`]
+    /// （`default_gemm_batched` と共有する単一情報源。PR #1810
+    /// codex-review P1 是正）へ委譲する。以前は `usize` オーバーフロー
+    /// のみを検査していたため、要素数が `usize` の範囲に収まっても
+    /// `f32` 要素込みのバイトサイズが `Vec` の allocation 上限
+    /// （`isize::MAX` バイト）を超える巨大なバッチ次元では
+    /// `zeroed_output` 内の `Vec` 確保が capacity overflow でパニック
+    /// していた（本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`
+    /// に反する）。
+    fn gemm_batched(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        let plan = fandhe_ai_tensor_core::batched_matmul_plan(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+
+        if plan.batch_shape().is_empty() {
+            return self.gemm(a, b);
+        }
+
+        let (m, k, n) = (plan.m(), plan.k(), plan.n());
+        let batch_len: usize = plan.batch_shape().iter().product();
+
+        // `mn`（バッチ 1 件あたりの要素数）はスライス幅としてループ内で
+        // 直接使うため、共有ヘルパーの内部計算とは別に checked_mul で
+        // 求めておく（`total / batch_len` によるスライス幅復元は
+        // `batch_len == 0`〈`plan.batch_shape` が非空でもいずれかの
+        // バッチ軸が 0 サイズなら成立しうる〉で 0 除算パニックになる
+        // ため避ける）。
+        let mn = m
+            .checked_mul(n)
+            .ok_or(ShapeError::ElementCountOverflow)
+            .map_err(BackendError::ShapeMismatch)?;
+        let total = fandhe_ai_tensor_core::checked_gemm_batched_output_len(batch_len, m, n)
+            .map_err(BackendError::ShapeMismatch)?;
+        // 出力要素数が 0（`m == 0` または `n == 0`）なら結果は空テンソルで
+        // 確定するため、バッチループへ入らずに返す（巨大な `batch_len` と
+        // 空軸の組合せで no-op GEMM を `batch_len` 回繰り返すハングの
+        // 回避。PR #1810 Cursor Bugbot Medium 是正・既定合成実装と同型）。
+        // 0 判定はオペランドの正規化（broadcast の実体化）より前に置き、
+        // 空の結果に対して巨大な入力コピーを行わない（PR #1810
+        // codex-review P2 是正）。
+        if total == 0 {
+            return Tensor::new(Vec::new(), &plan.out_shape()).map_err(BackendError::ShapeMismatch);
+        }
+
+        let a_norm = fandhe_ai_tensor_core::normalize_batched_operand(a, plan.batch_shape(), m, k)?;
+        let b_norm = fandhe_ai_tensor_core::normalize_batched_operand(b, plan.batch_shape(), k, n)?;
+
+        let mut out = zeroed_output(total);
+
+        for i in 0..batch_len {
+            let a_i = a_norm
+                .narrow(0, i, 1)
+                .and_then(|t| t.reshape(&[m, k]))
+                .map_err(BackendError::ShapeMismatch)?;
+            let b_i = b_norm
+                .narrow(0, i, 1)
+                .and_then(|t| t.reshape(&[k, n]))
+                .map_err(BackendError::ShapeMismatch)?;
+            let dst = &mut out[i * mn..(i + 1) * mn];
+            gemm_into_slice(&a_i, &b_i, dst, m, n, k, "gemm_batched")?;
+        }
+
+        let out_shape = plan.out_shape();
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -617,7 +702,7 @@ impl BackendOps for CpuBackendOps {
         b: &Tensor<f32>,
         readout: ChecksumReadout,
     ) -> Result<GemmChecksum, BackendError> {
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -667,7 +752,7 @@ impl BackendOps for CpuBackendOps {
         if out.device() != Device::Cpu {
             return Err(BackendError::DeviceMismatch);
         }
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -703,7 +788,7 @@ impl BackendOps for CpuBackendOps {
         // （codex-review P2・PR #1224）。
         dst.fill(0.0);
         gemm_into_slice(a, b, dst, m, n, k, "gemm_fp32_strict_into")?;
-        let _ = out_shape; // shape 検証のみに使用（`matmul_out_shape` の失敗検出）
+        let _ = out_shape; // shape 検証のみに使用（`gemm_out_shape` の失敗検出）
         Ok(())
     }
 
@@ -740,7 +825,7 @@ impl BackendOps for CpuBackendOps {
         bias: Option<&Tensor<f32>>,
         act: Activation,
     ) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -1592,6 +1677,20 @@ impl BackendOps for CpuBackendOps {
         let out = softmax::run_softmax_f32(x_slice, rows, cols)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::cumsum` の CPU 実装（イシュー #1731）。
+    /// `scan::cumsum`（クレート非公開）へ委譲する（`dim` の再検査は
+    /// 同モジュール内で独立に行う契約。`gather`／`scatter` と同じ
+    /// 二重検査方針）。
+    fn cumsum(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        scan::cumsum(x, dim).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::cumprod` の CPU 実装（イシュー #1731）。
+    /// `scan::cumprod`（クレート非公開）へ委譲する。
+    fn cumprod(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        scan::cumprod(x, dim).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::log_softmax`] の CPU 実装

@@ -41,7 +41,7 @@
 //! `docs/public-api-design.md` §4.1「承認済み内容と結線の実装場所」）。
 
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, Device, Tensor, broadcast_shape, matmul_out_shape,
+    BackendError, BackendOps, Device, Tensor, broadcast_shape, gemm_out_shape,
 };
 
 /// `eval.rs` の naive 参照実装へ委譲する compat 用 `BackendOps`。
@@ -64,9 +64,14 @@ impl BackendOps for NaiveOps {
     // `CpuBackendOps`（`backend-cpu`）もこれを満たす。`NaiveOps` を trait
     // 経由で直接呼ぶ将来の呼び出し元とも contract を揃えるため、ここでも
     // 同じ検証を行ってから委譲する（codex-review 第 19〜21 波の P1 是正の
-    // 副次確認として advisor 指摘・2026-08-08 追記）。
+    // 副次確認として advisor 指摘・2026-08-08 追記）。`gemm` 自体は
+    // 2 次元カーネル入口のため `gemm_out_shape`（2 次元厳密版）で検証
+    // する（イシュー #1715。rank≥3 のバッチ入力は `BackendOps::
+    // gemm_batched` の既定合成実装がバッチをほどいて 2 次元ずつ本メソッド
+    // を呼ぶため、`NaiveOps` は自動的にバッチ対応になる＝facade parity
+    // の参照側として機能する）。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        matmul_out_shape(a.shape(), b.shape()).map_err(BackendError::ShapeMismatch)?;
+        gemm_out_shape(a.shape(), b.shape()).map_err(BackendError::ShapeMismatch)?;
         Ok(crate::eval::matmul(a, b))
     }
 

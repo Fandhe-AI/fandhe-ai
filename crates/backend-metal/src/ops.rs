@@ -560,7 +560,7 @@ impl MetalBackendOps {
         if out.device() != Device::Metal {
             return Err(BackendError::DeviceMismatch);
         }
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -1131,7 +1131,7 @@ impl BackendOps for MetalBackendOps {
     /// `assert_eq!` によるビット一致は要求しない
     /// （`docs/matmul-vjp-zero-copy-decision.md` §4.4 参照）。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -1237,7 +1237,7 @@ impl BackendOps for MetalBackendOps {
     /// 等）もその同期点まで遅延して表面化する（`linear_forward_device`
     /// doc「同期契約」と同一の契約）。
     ///
-    /// **境界検査の順序**: `out.device()` → shape（`matmul_out_shape`）→
+    /// **境界検査の順序**: `out.device()` → shape（`gemm_out_shape`）→
     /// `out_offset + m*n <= out.numel()`（REQ-8・OWASP A03）→ NT/TN 判定、
     /// の順に検査する。範囲外オフセットは NN 等の非対応形状であっても
     /// 常に `InvalidArgument`（`Unsupported` へ静かに丸めない。
@@ -1343,7 +1343,7 @@ impl BackendOps for MetalBackendOps {
         if out.device() != Device::Metal {
             return Err(BackendError::DeviceMismatch);
         }
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -1512,7 +1512,7 @@ impl BackendOps for MetalBackendOps {
         bias: Option<&Tensor<f32>>,
         act: Activation,
     ) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];

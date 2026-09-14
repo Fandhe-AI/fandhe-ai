@@ -15,7 +15,7 @@
 
 #![cfg(test)]
 
-use fandhe_ai_tensor_core::{BackendError, BackendOps, Device, Tensor};
+use fandhe_ai_tensor_core::{BackendError, BackendOps, Device, Tensor, gemm_out_shape};
 
 /// `eval.rs` の naive 参照実装へ委譲するテスト専用 `BackendOps`。
 /// `gemm`/`add`/`mul`/`relu`/`exp`/`tanh`/`sum`/`max` はいずれも
@@ -29,6 +29,11 @@ impl BackendOps for TestOps {
     }
 
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        // `gemm` は 2 次元カーネル入口のため `gemm_out_shape`（2 次元
+        // 厳密版）で検査する（イシュー #1715。バッチ対応は
+        // `BackendOps::gemm_batched` の既定合成実装が本メソッドを
+        // 2 次元ずつ呼ぶことで自動的に得られる）。
+        gemm_out_shape(a.shape(), b.shape()).map_err(BackendError::ShapeMismatch)?;
         Ok(crate::eval::matmul(a, b))
     }
 
