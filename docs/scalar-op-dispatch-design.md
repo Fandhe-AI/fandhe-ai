@@ -149,8 +149,13 @@ map 演算であり、演算順序（逐次／`rayon` 並列のどちらで処�
   公開面なし・既存 `Var` 再エクスポート経由で到達）。**#1712 で
   `clamp`／比較演算 6 種（`gt`／`ge`／`lt`／`le`／`eq`／`ne`）の
   `pub fn` を追加済み**（同型の薄い委譲。出力は f32 の 0/1 マスク・
-  `Tensor<bool>` は #1613 対象で未実装のまま）。活性化系は #1595 が
-  担う）。
+  `Tensor<bool>` は #1613 対象で未実装のまま）。**#1713 で `gelu`／
+  `gelu_tanh`／`softplus`（活性化系の一部）の `pub fn` を追加済み**
+  （同じ `scalar_unary` への薄い委譲。`softplus` のみ dispatch 前に
+  `beta`（有限かつ `>0`）／`threshold`（有限）を検査し違反時は
+  `AutodiffError::InvalidArgument` を返す。対応する
+  `nn::activation::Gelu`／`GeluTanh`／`Softplus`〈`Module` 実装込み〉
+  も追加済み。残る SiLU／LeakyReLU／ELU／Hardswish は #1714 が担う）。
 
 ## 9. `tensor-core` → `autodiff` の依存方向による意図的複製
 
@@ -165,28 +170,36 @@ code-comment-style.md` が禁じる「同一クレート内の陳腐化しやす
 ## 10. 未実装・スコープ外
 
 - CUDA／Metal の `ScalarOp` カーネル（#1635／#1636）。CUDA は #1700〜
-  #1702（算術・超越関数・比較演算＋`Clamp`）＋#1714（`Silu`／
-  `Hardswish`／`LeakyRelu`／`Elu`。`LeakyRelu`／`Elu` は本実装で初めて
-  1 引数ペイロード〈`UnaryPayload::One`〉を持つ unary kind）で実装済み。
-  Metal は #1707（算術系 `Sub`／`Div`／`Pow`／`Sqrt`）＋#1708（超越関数系
-  `Neg`／`Abs`／`Log`／`Log2`／`Log10`／`Sin`／`Cos`／`Tan`）＋#1709
-  （比較演算 6 種〈`Gt`／`Ge`／`Lt`／`Le`／`Eq`／`Ne`〉＋`Clamp`。
-  ペイロードあり unary kind 向け起動引数配線〈`crates/backend-metal/src/
-  scalar_op_source.rs::UnaryPayload`〉を新設）＋#1714（`Silu`／
-  `Hardswish`／`LeakyRelu`／`Elu`。`Elu` は MSL に `expm1` 相当が存在
-  しないため `exp(x) - 1.0f` で代替——`scalar_op_source.rs` モジュール
-  doc「`Elu` の `expm1` 非対応」参照）で実装済み。両バックエンドとも
-  残 kind（`Add`／`Mul`／`Maximum`／`Minimum`・`Relu`／`Exp`／`Tanh`／
-  `Sigmoid`／`Gelu`／`GeluTanh`〈残る活性化系〉・`Softplus`／
+  #1702（算術・超越関数・比較演算＋`Clamp`）＋#1713（`Gelu`／
+  `GeluTanh`／`Softplus`。`erff`／`tanhf`／`log1pf`／`expf`）＋#1714
+  （`Silu`／`Hardswish`／`LeakyRelu`／`Elu`。`LeakyRelu`／`Elu` は本
+  実装で初めて 1 引数ペイロード〈`UnaryPayload::One`〉を持つ unary
+  kind）で実装済み。Metal は #1707（算術系 `Sub`／`Div`／`Pow`／
+  `Sqrt`）＋#1708（超越関数系 `Neg`／`Abs`／`Log`／`Log2`／`Log10`／
+  `Sin`／`Cos`／`Tan`）＋#1709（比較演算 6 種〈`Gt`／`Ge`／`Lt`／`Le`／
+  `Eq`／`Ne`〉＋`Clamp`。ペイロードあり unary kind 向け起動引数配線
+  〈`crates/backend-metal/src/scalar_op_source.rs::UnaryPayload`〉を
+  新設）＋#1713（`Gelu`／`GeluTanh`／`Softplus`。MSL に存在しない
+  `erf`／`log1p` を自作ヘルパ `scalar_erf_f32`／`scalar_log1p_f32`
+  〈`unary_prelude` 機構。既存 kind は空文字列で生成ソース不変〉として
+  実装）＋#1714（`Silu`／`Hardswish`／`LeakyRelu`／`Elu`。`Elu` は MSL
+  に `expm1` 相当が存在しないため `exp(x) - 1.0f` で代替——
+  `scalar_op_source.rs` モジュール doc「`Elu` の `expm1` 非対応」
+  参照。`unary_preamble` 機構〈`unary_prelude` とは別関数で共存〉）で
+  実装済み。両バックエンドとも残 kind（`Add`／`Mul`／`Maximum`／
+  `Minimum`・`Relu`／`Exp`／`Tanh`／`Sigmoid`〈残る活性化系〉・
   `PowScalar`）はいずれの sub issue にも含まれず対象外
   （`.claude/rules/out-of-scope-tracking.md` 対象）。
 - `Var` 公開メソッド（`sub`／`div`／`pow`／`sqrt` は #1710、`log`／
-  `log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg` は #1711 で実装済み。
-  `pub(crate)` 入口自体は不変・facade 新規公開面なし）・facade 範囲拡張
-  （#1593／#1595）。`clamp`／比較演算は #1712、`silu`／`hardswish`／
-  `leaky_relu`／`elu` は #1714 で実装済み（`Var` 公開メソッド・
-  `nn::activation` 4 構造体・`compat::Sequential::add_*` 4 件。GELU／
-  Softplus は #1713）。
+  `log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg` は #1711、
+  `clamp`／比較演算 6 種は #1712、`gelu`／`gelu_tanh`／`softplus` は
+  #1713、`silu`／`hardswish`／`leaky_relu`／`elu` は #1714 で実装済み
+  （`Var` 公開メソッド・`nn::activation` 該当構造体・
+  `compat::Sequential::add_silu`／`add_hardswish`／`add_leaky_relu`／
+  `add_elu`〈#1714。親 #1595 コメントのユーザー承認済み §5 経路 2
+  適用〉。`add_gelu` 等 GELU 系 builder はユーザー承認待ちで #1713
+  では追加していない）。`pub(crate)` 入口自体は不変・facade 新規
+  公開面（`Var` 経路以外）なし）・facade 範囲拡張（#1593／#1595）。
 - `DeviceBuffer` 常駐版 `ScalarOp` dispatch（`binary_elementwise_device`
   ／`unary_elementwise_device` と同型の常駐版）。
 - checkpoint 再計算適格化（`is_checkpoint_eligible == true`）。

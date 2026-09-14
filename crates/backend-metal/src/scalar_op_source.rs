@@ -87,7 +87,12 @@
 //! 算術を含まない純粋な比較・選択のみのため、ホスト `f32` 演算と bit
 //! 同一になる想定（`NaN` は payload が処理系依存のためクラス一致で
 //! 検証する。CUDA 側 `kernels_scalar_op.rs` モジュール doc「NVRTC 既定
-//! オプションと数値契約」と同型の扱い）。
+//! オプションと数値契約」と同型の扱い）。[`ScalarUnaryOp::Gelu`]／
+//! [`GeluTanh`](ScalarUnaryOp::GeluTanh)／
+//! [`Softplus`](ScalarUnaryOp::Softplus)（イシュー #1713）は超越関数
+//! （`scalar_erf_f32`〈自作〉／`metal::precise::tanh`／
+//! `scalar_log1p_f32`〈自作〉／`metal::precise::exp`）のため bit 同一
+//! を主張せず REQ-2 複合判定のみで検証する（`unary_prelude` 参照）。
 //!
 //! [`ScalarUnaryOp::Silu`]／[`ScalarUnaryOp::Hardswish`]／
 //! [`ScalarUnaryOp::LeakyRelu`]／[`ScalarUnaryOp::Elu`]（イシュー
@@ -103,8 +108,8 @@
 //! REQ-2 統一複合判定を満たさなかった）。
 //!
 //! 残 kind（`Add`／`Mul`／`Maximum`／`Minimum`・活性化系〈`Relu`／
-//! `Exp`／`Tanh`／`Sigmoid`／`Gelu`／`GeluTanh`〉・`Softplus`／
-//! `PowScalar`）はいずれの sub issue にも含まれず `None`（未実装のまま。
+//! `Exp`／`Tanh`／`Sigmoid`〉・`PowScalar`）はいずれの sub issue にも
+//! 含まれず `None`（未実装のまま。
 //! 呼び出し元 `ops::MetalBackendOps::scalar_unary`／`scalar_binary` が
 //! `BackendError::Unsupported` を返しホスト参照実装
 //! （`ScalarUnaryOp::apply`／`ScalarBinaryOp::apply`）へフォールバック
@@ -227,6 +232,25 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         // 関数。モジュール doc「`Elu` の `expm1` 非対応」参照）を使い
         // ゼロ近傍の桁落ちを避ける。REQ-2 複合判定のみで検証する。
         ScalarUnaryOp::Elu { .. } => Some("(x > 0.0f) ? x : (p0 * fai_expm1_f32(x))"),
+        // GELU（誤差関数版）: MSL には `erf` が存在しないため
+        // `unary_prelude` が定義する自作ヘルパ `scalar_erf_f32`
+        // （A-S 7.1.26 近似・`float` 計算）を呼ぶ（超越関数のため
+        // bit 同一は主張しない。モジュール doc「forward 数式の正」
+        // 参照）。
+        ScalarUnaryOp::Gelu => Some("0.5f * x * (1.0f + scalar_erf_f32(x * 0.70710678f))"),
+        // GELU（tanh 近似版）: CUDA 側 `tanhf` に対応する
+        // `metal::precise::tanh` を使う（既存 kind と同じ `precise::`
+        // 方針）。
+        ScalarUnaryOp::GeluTanh => Some(
+            "0.5f * x * (1.0f + metal::precise::tanh(0.7978846f * (x + 0.044715f * x * x * x)))",
+        ),
+        // Softplus: MSL には `log1p` が存在しないため `unary_prelude`
+        // が定義する自作ヘルパ `scalar_log1p_f32`（Kahan の補正式）を
+        // 呼ぶ。`p0`＝`beta`・`p1`＝`threshold`（CUDA 側 `unary_expr`
+        // の `Softplus` 分岐と同一構造）。
+        ScalarUnaryOp::Softplus { .. } => {
+            Some("(x * p0 > p1) ? x : (scalar_log1p_f32(metal::precise::exp(p0 * x)) / p0)")
+        }
         _ => None,
     }
 }
@@ -254,6 +278,64 @@ fn unary_preamble(op: ScalarUnaryOp) -> &'static str {
         // ため桁落ちしない）。
         ScalarUnaryOp::Elu { .. } => {
             "static inline float fai_expm1_f32(float x) {\n    float u = metal::precise::exp(x);\n    if (u == 1.0f) {\n        return x;\n    }\n    if (u == 0.0f) {\n        return -1.0f;\n    }\n    return (u - 1.0f) * x / metal::precise::log(u);\n}\n\n"
+        }
+        _ => "",
+    }
+}
+
+/// unary kind 別の MSL ヘルパ関数 prelude（`using namespace metal;` と
+/// `kernel void` の間に挿入する文字列。既存 kind は空文字列のため生成
+/// ソースは不変＝bit 同一の非後退契約を保つ。イシュー #1713）。
+///
+/// MSL には `erf`／`log1p` が存在しない（`.claude/skills/apple-silicon/
+/// references/msl/math-functions.md` に記載なし）ため、[`ScalarUnaryOp::
+/// Gelu`]（誤差関数版 GELU）・[`Softplus`](ScalarUnaryOp::Softplus) は
+/// ここで自作する。ヘルパ引数はすべて `float` 値渡しとする（`constant
+/// float&` ではないため `payload_param_count_matches_source_for_all_
+/// implemented_unary_kinds` の「`p0`/`p1` 宣言数＝payload 数」検査を
+/// 阻害しない）。
+fn unary_prelude(op: ScalarUnaryOp) -> &'static str {
+    match op {
+        // `tensor-core::scalar_op::erf_f64`（Abramowitz–Stegun 7.1.26。
+        // 最大絶対誤差 `1.5e-7`）と同一の多項式係数を `float` 精度で
+        // 計算する（crate 境界〈Rust／MSL〉による意図的複製。設計 §9
+        // と同型。ホストは `f64` 中間計算・本ヘルパは `float` のみの
+        // ため厳密には別実装だが、超越関数として REQ-2 複合判定のみを
+        // 主張するため許容する）。
+        ScalarUnaryOp::Gelu => {
+            "inline float scalar_erf_f32(float x) {\n\
+             \x20   float sign = (x < 0.0f) ? -1.0f : 1.0f;\n\
+             \x20   float ax = metal::precise::fabs(x);\n\
+             \x20   float t = 1.0f / (1.0f + 0.3275911f * ax);\n\
+             \x20   float poly = ((((1.061405429f * t + -1.453152027f) * t + \
+             1.421413741f) * t + -0.284496736f) * t + 0.254829592f) * t;\n\
+             \x20   float y = 1.0f - poly * metal::precise::exp(-ax * ax);\n\
+             \x20   return sign * y;\n\
+             }\n\n"
+        }
+        // `log1p(y) = ln(1+y)` を桁落ちなく計算する Kahan の補正式
+        // （`u == 1.0` すなわち `y` が `f32` の ulp 未満のときは `y`
+        // 自体を返す。`ScalarUnaryOp::apply` の `Softplus` 分岐が使う
+        // ホスト `f32::ln_1p` の意図的複製）。`y` は
+        // `metal::precise::exp(p0 * x)` の結果で非負だが、`x` が
+        // `f32::exp` の飽和域（約 88.7 超）でも `x*beta <= threshold`
+        // となりうるため `y` 自体が `+inf` を取りうる（CPU/CUDA の
+        // `ln_1p`/`log1pf` は `log1p(inf) = inf` を返す）。この場合
+        // `u = 1+y` も `+inf` になり補正式が `inf/inf` を計算して
+        // `NaN` になってしまうため、先頭で明示的に `+inf` を伝播する。
+        // 有限入力側も `log(u) * y` を先に評価すると（`y` が大きい
+        // ほど）`f32` 上限を超えて誤って `inf` になりうるため、桁落ち
+        // しない比 `y / (u - 1.0f)`（`u` が大きいほど 1 に近づき
+        // オーバーフローしない）を先に評価してから `log(u)` を掛ける
+        // 順序へ変更する（積の評価順序のみの変更で数式・契約は不変）。
+        ScalarUnaryOp::Softplus { .. } => {
+            "inline float scalar_log1p_f32(float y) {\n\
+             \x20   if (isinf(y)) {\n\
+             \x20       return y;\n\
+             \x20   }\n\
+             \x20   float u = 1.0f + y;\n\
+             \x20   return (u == 1.0f) ? y : metal::precise::log(u) * (y / (u - 1.0f));\n\
+             }\n\n"
         }
         _ => "",
     }
@@ -317,6 +399,7 @@ pub(crate) fn unary_payload(op: ScalarUnaryOp) -> UnaryPayload {
         ScalarUnaryOp::Clamp { min, max } => UnaryPayload::Two([min, max]),
         ScalarUnaryOp::LeakyRelu { negative_slope } => UnaryPayload::One([negative_slope]),
         ScalarUnaryOp::Elu { alpha } => UnaryPayload::One([alpha]),
+        ScalarUnaryOp::Softplus { beta, threshold } => UnaryPayload::Two([beta, threshold]),
         _ => UnaryPayload::None,
     }
 }
@@ -364,14 +447,19 @@ pub(crate) fn unary_kernel_source(op: ScalarUnaryOp) -> Option<String> {
                 .to_string()
         }
     };
-    // 既存 kind（`preamble == ""`）は挿入前と生成ソース完全一致
-    // （`kind_name()` 依存のキャッシュキー契約を壊さない）。
+    // 既存 kind（`preamble == "" && prelude == ""`）は挿入前と生成
+    // ソース完全一致（`kind_name()` 依存のキャッシュキー契約を壊さない。
+    // `sqrt_source_is_payload_independent` 等の bit 同一契約に抵触しない。
+    // `Elu` は `unary_preamble` が、`Gelu`／`GeluTanh`／`Softplus` は
+    // `unary_prelude` が非空文字列を返す（互いに排他的な kind 集合の
+    // ためどちらか一方のみ非空。イシュー #1713／#1714）。
     let preamble = unary_preamble(op);
+    let prelude = unary_prelude(op);
     Some(format!(
         r#"#include <metal_stdlib>
 using namespace metal;
 
-{preamble}kernel void {name}(
+{preamble}{prelude}kernel void {name}(
     device const float* a [[buffer(0)]],
     device float* out [[buffer(1)]],
     constant uint& numel [[buffer(2)]]{payload_params},
@@ -609,6 +697,21 @@ mod tests {
             unary_function_name(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }),
             "scalar_unary_clamp"
         );
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::Gelu),
+            "scalar_unary_gelu"
+        );
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::GeluTanh),
+            "scalar_unary_gelu_tanh"
+        );
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::Softplus {
+                beta: 1.0,
+                threshold: 20.0
+            }),
+            "scalar_unary_softplus"
+        );
         assert_eq!(binary_function_name(ScalarBinaryOp::Gt), "scalar_binary_gt");
         assert_eq!(binary_function_name(ScalarBinaryOp::Ge), "scalar_binary_ge");
         assert_eq!(binary_function_name(ScalarBinaryOp::Lt), "scalar_binary_lt");
@@ -728,6 +831,12 @@ mod tests {
                 negative_slope: 0.1,
             },
             ScalarUnaryOp::Elu { alpha: 1.0 },
+            ScalarUnaryOp::Gelu,
+            ScalarUnaryOp::GeluTanh,
+            ScalarUnaryOp::Softplus {
+                beta: 1.0,
+                threshold: 20.0,
+            },
         ] {
             let src = unary_kernel_source(op).expect("must be implemented");
             let declared = src.matches("constant float&").count();
@@ -937,5 +1046,95 @@ mod tests {
         assert!(!lr_src.contains("fmin("));
         assert!(!lr_src.contains("fmax("));
         assert!(!lr_src.contains("metal::clamp("));
+    }
+
+    /// GELU（誤差関数版）のソースが REQ-8 境界チェック・prelude ヘルパ
+    /// （`scalar_erf_f32`）を含み、`metal::precise::` のみを使うことを
+    /// 固定する（イシュー #1713）。
+    #[test]
+    fn gelu_source_includes_bounds_check_and_erf_prelude() {
+        let src = unary_kernel_source(ScalarUnaryOp::Gelu).expect("Gelu must be implemented");
+        assert!(src.contains("if (idx < numel)"));
+        assert!(src.contains("kernel void scalar_unary_gelu("));
+        assert!(src.contains("inline float scalar_erf_f32("));
+        assert!(src.contains("scalar_erf_f32(x * 0.70710678f)"));
+        assert!(src.contains("metal::precise::exp("));
+        assert!(!src.contains("fast::"));
+    }
+
+    /// GELU（tanh 近似版）のソースが REQ-8 境界チェック・
+    /// `metal::precise::tanh` を含み、prelude ヘルパを持たない（helper
+    /// 不要）ことを固定する。
+    #[test]
+    fn gelu_tanh_source_includes_bounds_check_and_precise_tanh_without_prelude() {
+        let src =
+            unary_kernel_source(ScalarUnaryOp::GeluTanh).expect("GeluTanh must be implemented");
+        assert!(src.contains("if (idx < numel)"));
+        assert!(src.contains("kernel void scalar_unary_gelu_tanh("));
+        assert!(src.contains("metal::precise::tanh("));
+        assert!(!src.contains("inline float"));
+    }
+
+    /// GELU 2 kind はペイロードを持たないため `op` に依存しない
+    /// （`sqrt_source_is_payload_independent` と同型）。
+    #[test]
+    fn gelu_sources_are_payload_independent() {
+        assert_eq!(
+            unary_kernel_source(ScalarUnaryOp::Gelu),
+            unary_kernel_source(ScalarUnaryOp::Gelu)
+        );
+        assert_eq!(
+            unary_kernel_source(ScalarUnaryOp::GeluTanh),
+            unary_kernel_source(ScalarUnaryOp::GeluTanh)
+        );
+    }
+
+    /// Softplus のソースが REQ-8 境界チェック・`p0`／`p1` payload
+    /// 宣言（値は埋め込まない）・prelude ヘルパ（`scalar_log1p_f32`）を
+    /// 含むことを固定する（`clamp_source_declares_payload_params_and_
+    /// omits_values` と同型）。
+    #[test]
+    fn softplus_source_declares_payload_params_and_log1p_prelude() {
+        let src = unary_kernel_source(ScalarUnaryOp::Softplus {
+            beta: 0.123,
+            threshold: 4.567,
+        })
+        .expect("Softplus must be implemented");
+        assert!(src.contains("constant float& p0 [[buffer(3)]]"));
+        assert!(src.contains("constant float& p1 [[buffer(4)]]"));
+        assert!(!src.contains("0.123"));
+        assert!(!src.contains("4.567"));
+        assert!(src.contains("if (idx < numel)"));
+        assert!(src.contains("kernel void scalar_unary_softplus("));
+        assert!(src.contains("inline float scalar_log1p_f32("));
+        assert!(src.contains("metal::precise::exp("));
+    }
+
+    #[test]
+    fn softplus_source_is_payload_value_independent() {
+        let src_a = unary_kernel_source(ScalarUnaryOp::Softplus {
+            beta: 1.0,
+            threshold: 20.0,
+        })
+        .expect("Softplus must be implemented");
+        let src_b = unary_kernel_source(ScalarUnaryOp::Softplus {
+            beta: 2.0,
+            threshold: 1.0,
+        })
+        .expect("Softplus must be implemented");
+        assert_eq!(src_a, src_b);
+    }
+
+    /// prelude は該当 kind 限定で挿入され、既存 kind（`Sqrt`）の生成
+    /// ソースには prelude ヘルパが一切含まれない（既存生成ソース不変＝
+    /// bit 同一の非後退契約。モジュール doc「ペイロード seam」と同型）
+    /// ことを固定する。
+    #[test]
+    fn prelude_is_empty_for_kinds_that_do_not_need_it() {
+        let sqrt_src = unary_kernel_source(ScalarUnaryOp::Sqrt).expect("Sqrt implemented");
+        assert!(!sqrt_src.contains("inline float"));
+        let clamp_src = unary_kernel_source(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 })
+            .expect("Clamp implemented");
+        assert!(!clamp_src.contains("inline float"));
     }
 }

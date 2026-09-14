@@ -22,7 +22,8 @@
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::nn::activation::{
-    Elu, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Tanh,
+    Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
+    Tanh,
 };
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
@@ -54,9 +55,10 @@ pub trait Module {
     /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
     /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
     /// ない）とする。既定は [`BackendError::Unsupported`] を返す
-    /// fail-safe（本クレート内 12 実装〈`Linear`・`Relu`・`Sigmoid`・
-    /// `Tanh`・`RmsNorm`・`LayerNorm`・`Softmax`・`LogSoftmax`・`Silu`・
-    /// `Hardswish`・`LeakyRelu`・`Elu`（イシュー #1714）〉はいずれも
+    /// fail-safe（本クレート内 15 実装〈`Linear`・`Relu`・`Sigmoid`・
+    /// `Tanh`・`RmsNorm`・`LayerNorm`・`Softmax`・`LogSoftmax`・`Gelu`・
+    /// `GeluTanh`・`Softplus`・`Silu`・`Hardswish`・`LeakyRelu`・`Elu`
+    /// （イシュー #1714）〉はいずれも
     /// このデフォルトを
     /// オーバーライドする。呼び出し元
     /// が独自の `Module` 実装をこの経路で使う場合、`Unsupported` を
@@ -231,6 +233,80 @@ impl Module for Tanh {
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         Ok(eval::tanh(input))
+    }
+}
+
+/// `Gelu::forward` への委譲（イシュー #1713）。`Relu` と異なり `Var::gelu`
+/// の eager dispatch 契約が型付きエラーを返しうるため `Softmax` と同じ
+/// fallible 契約。
+impl Module for Gelu {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Gelu::forward(self, input)
+    }
+
+    /// `Var::gelu()`（`scalar_unary` 経由）と同一のディスパッチ規律
+    /// （`grad::scalar_unary_with_fallback`: バックエンド実装 →
+    /// `Unsupported` のときのみホスト参照実装へフォールバック・戻り値
+    /// shape 検証）を tape 不要経路で再現する。`Var::scalar_unary` が
+    /// 呼ぶ同一関数をそのまま呼ぶため bit-exactness・判定迂回なしが
+    /// 機構的に保証される。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(
+            ops,
+            fandhe_ai_tensor_core::ScalarUnaryOp::Gelu,
+            input,
+        )
+    }
+}
+
+/// `GeluTanh::forward` への委譲（イシュー #1713）。[`Gelu`] と同じ
+/// fallible 契約・`forward_host` ディスパッチ規律。
+impl Module for GeluTanh {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        GeluTanh::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(
+            ops,
+            fandhe_ai_tensor_core::ScalarUnaryOp::GeluTanh,
+            input,
+        )
+    }
+}
+
+/// `Softplus::forward` への委譲（イシュー #1713）。`beta`／`threshold`
+/// の検査は [`Softplus::new`] が構築時に済ませているため、`forward`／
+/// `forward_host` 自体は形状不整合以外では失敗しない。
+impl Module for Softplus {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Softplus::forward(self, input)
+    }
+
+    /// [`Gelu::forward_host`] と同じディスパッチ規律。`self.beta()`／
+    /// `self.threshold()`（クレート内アクセサ。`nn/activation.rs`
+    /// 参照）で構築済みの検査済み値を読み出す。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(
+            ops,
+            fandhe_ai_tensor_core::ScalarUnaryOp::Softplus {
+                beta: self.beta(),
+                threshold: self.threshold(),
+            },
+            input,
+        )
     }
 }
 

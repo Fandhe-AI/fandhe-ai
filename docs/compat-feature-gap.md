@@ -1028,9 +1028,27 @@ bool 引数との直接合成も #1613 待ち）。VJP は両入力とも常に�
 facade parity 実測は本エージェント実行環境に実機がないため未実施の
 まま申し送る。
 
+## #1713 の追補
+
+`Var::gelu`／`gelu_tanh`／`softplus`（GELU 誤差関数版・tanh 近似版・
+Softplus）を実装済み化した。`ScalarUnaryOp::Gelu`／`GeluTanh`／
+`Softplus`（#1634 で enum・dispatch・CPU 参照実装・VJP まで実装済み）
+への薄い委譲。CUDA（`erff`／`tanhf`／`log1pf`／`expf`）・Metal（自作
+`scalar_erf_f32`〈A-S 7.1.26 の `float` 精度複製〉・
+`metal::precise::tanh`・自作 `scalar_log1p_f32`〈Kahan 補正式〉・
+`metal::precise::exp`）のカーネル実装まで本 issue で追加した（超越関数
+のため REQ-2 統一複合判定のみで検証・bit 同一は主張しない）。
+`nn::activation::Gelu`／`GeluTanh`／`Softplus`（`Module` 実装込み）も
+追加。facade 新規公開面なし（既存 `Var` 再エクスポート経由のみ）。
+`compat::Sequential::add_gelu`／`add_gelu_tanh`／`add_softplus` 等の
+builder はユーザー承認待ちで対象外のまま。CUDA／Metal 実機での facade
+parity テストは本実装エージェントの実行環境に実機への到達手段がない
+ため未実測のまま Mac／GB10 セッションへ申し送る。
+
 **#1714 追補（SiLU・LeakyReLU・ELU・Hardswish）**: 本調査時点で §2.4／
 §2.7 が欠落と判定した ReLU 系派生活性化のうち、SiLU／LeakyReLU／ELU／
-Hardswish を実装済み化した（GELU／Softplus は #1713 が別途対応）。
+Hardswish を実装済み化した（GELU／Softplus は #1713 で別途実装済み。
+上記「#1713 の追補」参照）。
 `Var::silu`／`leaky_relu`／`elu`／`hardswish`（`ScalarUnaryOp::Silu`／
 `LeakyRelu`／`Elu`／`Hardswish` への薄い委譲。`#1592`／`#1634` が敷いた
 `ScalarUnaryOp` 汎用 dispatch 基盤の上）・`nn::activation::{Silu,

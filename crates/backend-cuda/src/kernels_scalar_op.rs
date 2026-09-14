@@ -55,12 +55,24 @@
 //! `BackendError::Unsupported` を返しホスト参照実装（`ScalarUnaryOp::apply`／
 //! `ScalarBinaryOp::apply`）へフォールバックする既存契約。
 //! `fandhe_ai_autodiff::grad::scalar_unary_with_fallback`／
-//! `scalar_binary_with_fallback` 参照）。`Softplus`／`PowScalar`
-//! （残るペイロードあり unary kind）・`Relu`／`Exp`／`Tanh`／`Sigmoid`／
-//! `Gelu`／`GeluTanh`（残る活性化 unary kind）・`Add`／`Mul`／`Maximum`／
-//! `Minimum`（比較・算術以外の残り binary kind）はいずれの sub issue にも
-//! 含まれず対象外のまま残る（`.claude/rules/out-of-scope-tracking.md`
-//! 対象。必要なら別イシューで追跡）。
+//! `scalar_binary_with_fallback` 参照）。[`ScalarUnaryOp::Gelu`]／
+//! [`GeluTanh`](ScalarUnaryOp::GeluTanh)／[`Softplus`](ScalarUnaryOp::Softplus)
+//! はイシュー #1713 で、[`ScalarUnaryOp::Silu`]／[`ScalarUnaryOp::Hardswish`]／
+//! [`ScalarUnaryOp::LeakyRelu`]／[`ScalarUnaryOp::Elu`] はイシュー #1714 で
+//! それぞれ実装済み。`PowScalar`（残るペイロードあり unary kind）・
+//! `Relu`／`Exp`／`Tanh`／`Sigmoid`（残る活性化 unary kind）・
+//! `Add`／`Mul`／`Maximum`／`Minimum`（比較・算術以外の残り binary
+//! kind）はいずれの sub issue にも含まれず対象外のまま残る
+//! （`.claude/rules/out-of-scope-tracking.md` 対象。必要なら別イシューで
+//! 追跡）。
+//!
+//! イシュー #1713 で GELU（誤差関数版・tanh 近似版）・Softplus を実装
+//! した。`Gelu`／`GeluTanh` は超越関数（`erff`／`tanhf`）のためホスト
+//! `f32` 演算・NVRTC 単精度 libm いずれも bit 同一は主張せず REQ-2
+//! 複合判定のみで検証する（`Pow`／`Log` 系と同じ扱い）。`Softplus` は
+//! `Clamp` と同型の 2 引数ペイロード（`beta`・`threshold`）を持つ最初の
+//! 超越関数系 kind で、ホスト `ScalarUnaryOp::apply` の `ln_1p`
+//! （桁落ち回避）形を CUDA C の `log1pf`／`expf` へ逐語で写す。
 //!
 //! `Clamp` は本モジュールで初めて `f32` ペイロードを持つ unary kind
 //! （[`UnaryPayload`] 参照）。モジュール doc冒頭「#1635 への申し送り」の
@@ -129,6 +141,24 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         // は `p0 * expm1f(x)`。ホスト `f32::exp_m1` に対応する
         // `expm1f`）。超越関数のため REQ-2 複合判定のみで検証する。
         ScalarUnaryOp::Elu { .. } => Some("(x > 0.0f) ? x : (p0 * expm1f(x))"),
+        // GELU（誤差関数版）: `ScalarUnaryOp::apply` の `Gelu` 分岐
+        // （`gelu_erf` → `apply` が `f64` 精度の自作 `erf_f64` 近似を
+        // 呼ぶ）とは異なり、CUDA 側は組み込み単精度 intrinsic `erff`
+        // を使う（モジュール doc「forward 数式の正」参照。超越関数の
+        // ため bit 同一は主張しない）。`1/sqrt(2)` は定数畳み込み。
+        ScalarUnaryOp::Gelu => Some("0.5f * x * (1.0f + erff(x * 0.70710678118654752f))"),
+        // GELU（tanh 近似版）: `gelu_tanh_approx`（`scalar_op.rs`）と
+        // 同じ演算順序（`x + 0.044715*x^3` → `0.7978846*(...)` →
+        // `tanhf` → `0.5*x*(1+...)`）を単精度 `tanhf` で逐語再現する。
+        ScalarUnaryOp::GeluTanh => {
+            Some("0.5f * x * (1.0f + tanhf(0.7978846f * (x + 0.044715f * x * x * x)))")
+        }
+        // Softplus: `ScalarUnaryOp::apply` の `Softplus` 分岐
+        // （`x*beta > threshold` で恒等・それ以外は `ln_1p(exp(beta*x))
+        // / beta`）を `log1pf`／`expf` で逐語再現する（`f32::ln_1p` の
+        // 桁落ち回避特性〈PR #1686 是正〉を維持）。`p0`＝`beta`・
+        // `p1`＝`threshold`（`unary_payload` 参照）。
+        ScalarUnaryOp::Softplus { .. } => Some("(x * p0 > p1) ? x : (log1pf(expf(p0 * x)) / p0)"),
         _ => None,
     }
 }
@@ -186,6 +216,7 @@ pub(crate) fn unary_payload(op: ScalarUnaryOp) -> UnaryPayload {
         ScalarUnaryOp::Clamp { min, max } => UnaryPayload::Two([min, max]),
         ScalarUnaryOp::LeakyRelu { negative_slope } => UnaryPayload::One([negative_slope]),
         ScalarUnaryOp::Elu { alpha } => UnaryPayload::One([alpha]),
+        ScalarUnaryOp::Softplus { beta, threshold } => UnaryPayload::Two([beta, threshold]),
         _ => UnaryPayload::None,
     }
 }
@@ -412,6 +443,12 @@ mod tests {
                 negative_slope: 0.1,
             },
             ScalarUnaryOp::Elu { alpha: 1.0 },
+            ScalarUnaryOp::Gelu,
+            ScalarUnaryOp::GeluTanh,
+            ScalarUnaryOp::Softplus {
+                beta: 1.0,
+                threshold: 20.0,
+            },
         ] {
             let src = unary_kernel_source(op).expect("must be implemented");
             let declared = src.matches("float p").count();
@@ -459,6 +496,21 @@ mod tests {
         assert_eq!(
             unary_function_name(ScalarUnaryOp::Clamp { min: 0.0, max: 1.0 }),
             "scalar_unary_clamp"
+        );
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::Gelu),
+            "scalar_unary_gelu"
+        );
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::GeluTanh),
+            "scalar_unary_gelu_tanh"
+        );
+        assert_eq!(
+            unary_function_name(ScalarUnaryOp::Softplus {
+                beta: 1.0,
+                threshold: 20.0
+            }),
+            "scalar_unary_softplus"
         );
         assert_eq!(
             binary_function_name(ScalarBinaryOp::Sub),
@@ -582,5 +634,68 @@ mod tests {
         .expect("LeakyRelu must be implemented");
         assert!(!lr_src.contains("fminf("));
         assert!(!lr_src.contains("fmaxf("));
+    }
+
+    /// GELU（誤差関数版・tanh 近似版）のソースが REQ-8 境界チェックを
+    /// 含み、単精度 intrinsic（`erff`／`tanhf`）のみを使うことを固定
+    /// する（イシュー #1713）。
+    #[test]
+    fn gelu_kinds_include_bounds_check_and_use_single_precision_intrinsics() {
+        let erf_src = unary_kernel_source(ScalarUnaryOp::Gelu).expect("Gelu must be implemented");
+        assert!(erf_src.contains("if (idx < numel)"));
+        assert!(erf_src.contains("scalar_unary_gelu("));
+        assert!(erf_src.contains("erff("));
+        assert!(!erf_src.contains("erf("));
+
+        let tanh_src =
+            unary_kernel_source(ScalarUnaryOp::GeluTanh).expect("GeluTanh must be implemented");
+        assert!(tanh_src.contains("if (idx < numel)"));
+        assert!(tanh_src.contains("scalar_unary_gelu_tanh("));
+        assert!(tanh_src.contains("tanhf("));
+    }
+
+    /// GELU 2 kind はペイロードを持たないため生成ソースは `op` に
+    /// 依存しない（`sqrt_source_is_payload_independent` と同型）。
+    #[test]
+    fn gelu_sources_are_payload_independent() {
+        let a = unary_kernel_source(ScalarUnaryOp::Gelu).expect("Gelu implemented");
+        let b = unary_kernel_source(ScalarUnaryOp::Gelu).expect("Gelu implemented");
+        assert_eq!(a, b);
+        assert!(!a.contains("float p"));
+    }
+
+    /// Softplus のソースが REQ-8 境界チェック・`p0`／`p1` ペイロード
+    /// 宣言（値は埋め込まない）・`log1pf`／`expf` を含むことを固定する
+    /// （`clamp_source_declares_payload_params_and_omits_values` と同型。
+    /// イシュー #1713）。
+    #[test]
+    fn softplus_source_declares_payload_params_and_uses_log1pf_expf() {
+        let src = unary_kernel_source(ScalarUnaryOp::Softplus {
+            beta: 0.123,
+            threshold: 4.567,
+        })
+        .expect("Softplus must be implemented");
+        assert!(src.contains("float p0, float p1"));
+        assert!(!src.contains("0.123"));
+        assert!(!src.contains("4.567"));
+        assert!(src.contains("if (idx < numel)"));
+        assert!(src.contains("scalar_unary_softplus("));
+        assert!(src.contains("log1pf("));
+        assert!(src.contains("expf("));
+    }
+
+    #[test]
+    fn softplus_source_is_payload_value_independent() {
+        let src_a = unary_kernel_source(ScalarUnaryOp::Softplus {
+            beta: 1.0,
+            threshold: 20.0,
+        })
+        .expect("Softplus must be implemented");
+        let src_b = unary_kernel_source(ScalarUnaryOp::Softplus {
+            beta: 2.0,
+            threshold: 1.0,
+        })
+        .expect("Softplus must be implemented");
+        assert_eq!(src_a, src_b);
     }
 }

@@ -1,9 +1,9 @@
-//! イシュー #1707/#1708/#1709: `BackendOps::scalar_unary`／
+//! イシュー #1707/#1708/#1709/#1713: `BackendOps::scalar_unary`／
 //! `scalar_binary`（`Sqrt`／`Sub`／`Div`／`Pow`・`Neg`／`Abs`／`Log`／
 //! `Log2`／`Log10`／`Sin`／`Cos`／`Tan`・比較演算 6 種〈`Gt`／`Ge`／
-//! `Lt`／`Le`／`Eq`／`Ne`〉／`Clamp`）の CPU-Metal 数値一致検証（CUDA 側
-//! `backend-cuda::tests::scalar_op_parity`〈#1700/#1701/#1702〉の Metal
-//! 対応版）。
+//! `Lt`／`Le`／`Eq`／`Ne`〉／`Clamp`・`Gelu`／`GeluTanh`／`Softplus`）の
+//! CPU-Metal 数値一致検証（CUDA 側 `backend-cuda::tests::
+//! scalar_op_parity`〈#1700/#1701/#1702/#1713〉の Metal 対応版）。
 //!
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する
 //! （`where_masked_fill_parity.rs`〈#1637〉と同方針。`#![cfg(target_os =
@@ -24,7 +24,10 @@
 //! 同様に bit 同一で検証する。`Pow`・超越関数系（`Log`／`Log2`／
 //! `Log10`／`Sin`／`Cos`／`Tan`。`metal::precise::` の ulp 誤差が
 //! ホスト側 libm と一致する保証がない）は `assert_parity` のみで検証
-//! する（既存 `exp`／`tanh` と同じ扱い）。
+//! する（既存 `exp`／`tanh` と同じ扱い）。`Gelu`／`GeluTanh`（自作
+//! `scalar_erf_f32`／`metal::precise::tanh`）・`Softplus`（自作
+//! `scalar_log1p_f32`／`metal::precise::exp`）も超越関数のため
+//! `assert_parity` のみで検証する（イシュー #1713）。
 //!
 //! Linux CI での型検査（実機なしでもコンパイル可能性を担保）:
 //!
@@ -269,6 +272,37 @@ fn assert_clamp_parity(min: f32, max: f32, seed: u64, shape: &[usize]) {
     );
 }
 
+/// [`ScalarUnaryOp::Softplus`] の CPU-Metal parity を REQ-2 複合判定
+/// （超越関数〈`scalar_log1p_f32`／`metal::precise::exp`〉のため bit
+/// 同一は主張しない）で検証する（イシュー #1713）。
+fn assert_softplus_parity(beta: f32, threshold: f32, seed: u64, shape: &[usize]) {
+    let numel: usize = shape.iter().product();
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+    let op = ScalarUnaryOp::Softplus { beta, threshold };
+
+    let a = Tensor::new(signed_data(&mut Xorshift64Star::new(seed), numel), shape)
+        .expect("valid tensor");
+
+    let cpu_result = cpu
+        .scalar_unary(op, &a)
+        .expect("cpu scalar_unary always succeeds for implemented kinds");
+    let metal_result = metal
+        .scalar_unary(op, &a)
+        .expect("metal scalar_unary must succeed on Metal-equipped test runner");
+
+    let cpu_slice = cpu_result.as_slice().expect("contiguous");
+    let metal_slice = metal_result.as_slice().expect("contiguous");
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!(
+            "scalar_unary(Softplus{{beta={beta},threshold={threshold}}}) cpu-metal parity \
+             shape={shape:?}"
+        ),
+        metal_slice,
+        cpu_slice,
+    );
+}
+
 /// 実機必須の形状網羅（受け入れ条件の本体）。`Sqrt`（unary）・
 /// `Sub`／`Div`（bit 同一）・`Pow`（REQ-2 のみ）に加え、超越関数系 8
 /// kind（`Neg`／`Abs` は bit 同一、`Log`／`Log2`／`Log10`／`Sin`／
@@ -289,9 +323,10 @@ fn scalar_op_matches_cpu_across_shapes() {
     ];
     let mut seed = 11_000u64;
     for &shape in shapes {
-        // イシュー #1714 で offset 14〜17 を追加したため、増分を
-        // CUDA 側と同じ理由（次イテレーションの base seed が前
-        // イテレーションの追加 offset と衝突しないように）で拡張する。
+        // イシュー #1713 で offset 14〜17、#1714 で offset 18〜21 を
+        // 追加したため、増分を CUDA 側と同じ理由（次イテレーションの
+        // base seed が前イテレーションの追加 offset と衝突しないよう
+        // に）で拡張する。
         seed += 24;
         assert_unary_parity(ScalarUnaryOp::Sqrt, Domain::Positive, seed, shape, true);
         assert_binary_parity(ScalarBinaryOp::Sub, seed, seed + 1, shape, true);
@@ -332,12 +367,26 @@ fn scalar_op_matches_cpu_across_shapes() {
         }
         assert_clamp_parity(0.5, 1.5, seed + 13, shape);
 
-        // Silu／Hardswish／LeakyRelu／Elu（イシュー #1714）。
-        assert_unary_parity(ScalarUnaryOp::Silu, Domain::Signed, seed + 14, shape, false);
+        // GELU（誤差関数版・tanh 近似版）・Softplus（イシュー #1713）。
+        assert_unary_parity(ScalarUnaryOp::Gelu, Domain::Signed, seed + 14, shape, false);
+        assert_unary_parity(
+            ScalarUnaryOp::GeluTanh,
+            Domain::Signed,
+            seed + 15,
+            shape,
+            false,
+        );
+        assert_softplus_parity(1.0, 20.0, seed + 16, shape);
+        assert_softplus_parity(2.0, 1.0, seed + 17, shape);
+
+        // Silu／Hardswish／LeakyRelu／Elu（イシュー #1714）。offset は
+        // #1713 が使う 14〜17 と重複しないよう 18〜21 を使う（CUDA 側
+        // `scalar_op_parity.rs` と同じ理由）。
+        assert_unary_parity(ScalarUnaryOp::Silu, Domain::Signed, seed + 18, shape, false);
         assert_unary_parity(
             ScalarUnaryOp::Hardswish,
             Domain::Signed,
-            seed + 15,
+            seed + 19,
             shape,
             true,
         );
@@ -346,14 +395,14 @@ fn scalar_op_matches_cpu_across_shapes() {
                 negative_slope: 0.1,
             },
             Domain::Signed,
-            seed + 16,
+            seed + 20,
             shape,
             true,
         );
         assert_unary_parity(
             ScalarUnaryOp::Elu { alpha: 1.3 },
             Domain::Signed,
-            seed + 17,
+            seed + 21,
             shape,
             false,
         );
