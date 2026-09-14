@@ -363,6 +363,139 @@ extern "C" __global__ void reduce_max_lastaxis_f32(
 }
 "#;
 
+/// min 全軸縮約 1 段目（イシュー #1720）。`REDUCE_MAX_ALL_PARTIAL_F32`
+/// の逐語ミラー（`fmaxf`→`fminf`・単位元 `-INFINITY`→`+INFINITY`。
+/// `max` と同じ「厳密選択のため `float` のまま・丸めなし」方針）。
+pub const REDUCE_MIN_ALL_PARTIAL_F32: &str = r#"
+extern "C" __global__ void reduce_min_all_partial_f32(
+    const float* __restrict__ in,
+    float* __restrict__ partial,
+    int numel)
+{
+    __shared__ float warp_mins[8];
+    int lane = threadIdx.x % 32;
+    int warp_id = threadIdx.x / 32;
+
+    float acc = INFINITY;
+    long long stride = (long long)gridDim.x * blockDim.x;
+    for (long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x; idx < numel; idx += stride) {
+        acc = fminf(acc, in[idx]);
+    }
+
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc = fminf(acc, __shfl_xor_sync(0xffffffff, acc, offset));
+    }
+    if (lane == 0) {
+        warp_mins[warp_id] = acc;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float block_min = (lane < 8) ? warp_mins[lane] : INFINITY;
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            block_min = fminf(block_min, __shfl_xor_sync(0xffffffff, block_min, offset));
+        }
+        if (lane == 0) {
+            partial[blockIdx.x] = block_min;
+        }
+    }
+}
+"#;
+
+/// min 全軸縮約 2 段目（イシュー #1720）。
+/// `REDUCE_MAX_ALL_FINALIZE_F32` の逐語ミラー。
+pub const REDUCE_MIN_ALL_FINALIZE_F32: &str = r#"
+extern "C" __global__ void reduce_min_all_finalize_f32(
+    const float* __restrict__ partial,
+    float* __restrict__ out,
+    int num_partials)
+{
+    __shared__ float warp_mins[8];
+    int lane = threadIdx.x % 32;
+    int warp_id = threadIdx.x / 32;
+
+    float acc = INFINITY;
+    for (int idx = threadIdx.x; idx < num_partials; idx += blockDim.x) {
+        acc = fminf(acc, partial[idx]);
+    }
+
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc = fminf(acc, __shfl_xor_sync(0xffffffff, acc, offset));
+    }
+    if (lane == 0) {
+        warp_mins[warp_id] = acc;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float block_min = (lane < 8) ? warp_mins[lane] : INFINITY;
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            block_min = fminf(block_min, __shfl_xor_sync(0xffffffff, block_min, offset));
+        }
+        if (lane == 0) {
+            out[0] = block_min;
+        }
+    }
+}
+"#;
+
+/// min 単一軸縮約（汎用版。`inner != 1`。イシュー #1720）。
+/// `REDUCE_MAX_AXIS_F32` の逐語ミラー。
+pub const REDUCE_MIN_AXIS_F32: &str = r#"
+extern "C" __global__ void reduce_min_axis_f32(
+    const float* __restrict__ in,
+    float* __restrict__ out,
+    int outer,
+    int axis_len,
+    int inner)
+{
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)outer * (long long)inner;
+    if (idx < total) {
+        long long o = idx / inner;
+        long long i = idx % inner;
+        float acc = INFINITY;
+        for (long long a = 0; a < axis_len; a++) {
+            long long src = (o * (long long)axis_len + a) * (long long)inner + i;
+            acc = fminf(acc, in[src]);
+        }
+        out[idx] = acc;
+    }
+}
+"#;
+
+/// min 単一軸縮約（`inner == 1`。最終軸縮約の coalesced 版。イシュー
+/// #1720）。`REDUCE_MAX_LASTAXIS_F32` の逐語ミラー。
+pub const REDUCE_MIN_LASTAXIS_F32: &str = r#"
+extern "C" __global__ void reduce_min_lastaxis_f32(
+    const float* __restrict__ in,
+    float* __restrict__ out,
+    int rows,
+    int cols)
+{
+    int lane = threadIdx.x;
+    long long row_stride = (long long)gridDim.x;
+    for (long long row = (long long)blockIdx.x; row < rows; row += row_stride) {
+        float acc = INFINITY;
+        for (long long c = lane; c < cols; c += 32) {
+            long long src = row * (long long)cols + c;
+            acc = fminf(acc, in[src]);
+        }
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            acc = fminf(acc, __shfl_xor_sync(0xffffffff, acc, offset));
+        }
+        if (lane == 0) {
+            out[row] = acc;
+        }
+    }
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,7 +506,11 @@ mod tests {
     /// できる）。
     #[test]
     fn reduce_all_partial_kernels_have_grid_stride_bound_check_and_no_atomics() {
-        for src in [REDUCE_SUM_ALL_PARTIAL_F32, REDUCE_MAX_ALL_PARTIAL_F32] {
+        for src in [
+            REDUCE_SUM_ALL_PARTIAL_F32,
+            REDUCE_MAX_ALL_PARTIAL_F32,
+            REDUCE_MIN_ALL_PARTIAL_F32,
+        ] {
             assert!(src.contains("idx < numel"));
             assert!(!src.contains("atomicAdd"));
             assert!(!src.contains("atomicMax"));
@@ -386,7 +523,11 @@ mod tests {
 
     #[test]
     fn reduce_all_finalize_kernels_have_bound_check_and_no_atomics() {
-        for src in [REDUCE_SUM_ALL_FINALIZE_F32, REDUCE_MAX_ALL_FINALIZE_F32] {
+        for src in [
+            REDUCE_SUM_ALL_FINALIZE_F32,
+            REDUCE_MAX_ALL_FINALIZE_F32,
+            REDUCE_MIN_ALL_FINALIZE_F32,
+        ] {
             assert!(src.contains("idx < num_partials"));
             assert!(!src.contains("atomicAdd"));
             assert!(!src.contains("atomicMax"));
@@ -395,7 +536,11 @@ mod tests {
 
     #[test]
     fn reduce_axis_kernels_have_bound_check_and_long_long_indices() {
-        for src in [REDUCE_SUM_AXIS_F32, REDUCE_MAX_AXIS_F32] {
+        for src in [
+            REDUCE_SUM_AXIS_F32,
+            REDUCE_MAX_AXIS_F32,
+            REDUCE_MIN_AXIS_F32,
+        ] {
             assert!(src.contains("idx < total"));
             assert!(src.contains("long long total = (long long)outer * (long long)inner;"));
             assert!(!src.contains("atomicAdd"));
@@ -405,7 +550,11 @@ mod tests {
 
     #[test]
     fn reduce_lastaxis_kernels_have_row_bound_check() {
-        for src in [REDUCE_SUM_LASTAXIS_F32, REDUCE_MAX_LASTAXIS_F32] {
+        for src in [
+            REDUCE_SUM_LASTAXIS_F32,
+            REDUCE_MAX_LASTAXIS_F32,
+            REDUCE_MIN_LASTAXIS_F32,
+        ] {
             assert!(src.contains("row < rows"));
             assert!(!src.contains("atomicAdd"));
             assert!(!src.contains("atomicMax"));
@@ -437,6 +586,32 @@ mod tests {
             assert!(
                 !src.contains("double"),
                 "max カーネルに double が混入: {src}"
+            );
+        }
+    }
+
+    /// min カーネル（イシュー #1720）が `fminf`・単位元 `+INFINITY`・
+    /// `double` 非混入という `max` と対称の契約を満たすことを固定する
+    /// （`max_kernels_use_float_fmaxf_and_neg_infinity_identity` と
+    /// 同型）。`+INFINITY` は無符号なので単純な文字列検査で足りる
+    /// （`-INFINITY` と誤って一致しないことを別途確認する）。
+    #[test]
+    fn min_kernels_use_float_fminf_and_pos_infinity_identity() {
+        for src in [
+            REDUCE_MIN_ALL_PARTIAL_F32,
+            REDUCE_MIN_ALL_FINALIZE_F32,
+            REDUCE_MIN_AXIS_F32,
+            REDUCE_MIN_LASTAXIS_F32,
+        ] {
+            assert!(src.contains("fminf"));
+            assert!(src.contains("INFINITY"));
+            assert!(
+                !src.contains("-INFINITY"),
+                "min カーネルの単位元は +INFINITY のはず: {src}"
+            );
+            assert!(
+                !src.contains("double"),
+                "min カーネルに double が混入: {src}"
             );
         }
     }
