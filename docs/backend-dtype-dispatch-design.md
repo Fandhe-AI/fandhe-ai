@@ -129,7 +129,7 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 |---|---|---|---|
 | f64 | 実装可（`f64::mul_add` 参照実装。並列 BLIS 化は任意） | SIMT カーネル実装可能だが性能目的なし。既定 `Unsupported` から開始 | **構造的に不可**（MSL に `double` 型が存在しない。`soft_f64.rs` の 64bit 整数エミュレーションは bias 勾配縮約というスカラー累算専用に作られたものであり、GEMM 全体を `f64` 精度で動かす手段ではない）→ 恒久 `Unsupported`（fail-closed） |
 | f16 | `half` によるソフトウェア変換で f32 累算（aarch64 fp16 intrinsics は `unsafe` を伴うため実装時に別途 security-auditor 承認が必要。既定はソフトウェア変換） | 既存 `CudaGemmAuto::run_f16`（mma.sync 優先→WMMA）を結線。parity は REQ-2 形状別判定方式の既存 baseline 範囲内（新規 baseline 追加は行わない） | 既存 `dispatch_f16_auto_unverified` を結線。`_unverified`／`#[doc(hidden)]` の解除可否は #1651 の承認事項（§7-4） |
-| bf16 | `half::bf16` で f32 累算（依存追加なし。`half =2.7.1` に同梱） | **可**（イシュー #1704 で確定。`cudarc-0.19.8/src/driver/safe/core.rs:990,1038` に `unsafe impl ValidAsZeroBits`／`DeviceRepr for half::bf16` が `#[cfg(feature = "f16")]` 配下で存在し、workspace `Cargo.toml:112-118` の `cudarc` 依存は `f16` feature を既に有効化済み。依存・feature 変更なしで `TypedOps<bf16>` 実装済み。§12 参照） | **未検証**（MSL の `bfloat` 型可用性・`simdgroup_matrix` 対応をコンパイルプローブで確認する必要がある。`crates/backend-metal` の `.metal` シェーダに `bfloat` の使用例は現時点で存在しない。手法は `docs/perf/logs/metal-gemm-mpp-tensor-1326/` のコンパイルプローブ方式を踏襲する） |
+| bf16 | `half::bf16` で f32 累算（依存追加なし。`half =2.7.1` に同梱） | **可**（イシュー #1704 で確定。`cudarc-0.19.8/src/driver/safe/core.rs:990,1038` に `unsafe impl ValidAsZeroBits`／`DeviceRepr for half::bf16` が `#[cfg(feature = "f16")]` 配下で存在し、workspace `Cargo.toml:112-118` の `cudarc` 依存は `f16` feature を既に有効化済み。依存・feature 変更なしで `TypedOps<bf16>` 実装済み。§12 参照） | **可**（イシュー #1706 で実装済み。ホスト側 bf16⇔f32 変換＋既存 f32 `BackendOps` カーネルへの委譲方式は MSL `bfloat` 型の可用性に依存しないため、(b) ネイティブ bf16 経路の可否とは独立に (a) `TypedOps<bf16>` を実装できることが判明した。§14 参照。MSL `bfloat`／`simdgroup_bfloat8x8` の実機可用性は `crate::typed_bf16_probe_diag_tests` のコンパイルプローブへ切り出し・M4 Max 実機未実測のまま Mac セッションへ申し送り） |
 
 ## 6. 数値契約（tolerance／baseline 不変）
 
@@ -339,6 +339,58 @@ bf16 デバイス常駐経路（bf16 のまま H2D し device 側で widen/narro
 cargo test -p fandhe-ai-backend-metal --release --test typed_ops_f16_parity -- --ignored --nocapture
 ```
 
+## 15. 調査・実装記録（#1706・Metal `TypedOps<bf16>`）
+
+`backend-metal` に `TypedOps<half::bf16>` を実装し、`MetalBackendOps::typed_ops_bf16()`（既定 `None`）を `Some(self)` へオーバーライドして結線した（イシュー #1706・親 #1651）。
+
+### 15.1 (a) と (b) の分離（本イシューの核心）
+
+§5「bf16 × Metal」は当初「未検証（MSL `bfloat` 型・`simdgroup_matrix` 対応をコンパイルプローブで確認する必要がある）」としていたが、これは 2 つの独立した事実を混同していた。
+
+- **(a) `TypedOps<bf16>` の実装可否**: 兄弟イシュー #1704（CUDA bf16）・#1699（CPU bf16）はいずれもホスト側 bf16⇔f32 変換＋既存 f32 `BackendOps` カーネルへの委譲で実装しており、これは MSL `bfloat` 型の可用性に**依存しない**。§6 の数値契約（f16／bf16 は f32 昇格・f32 累算・最後に 1 回丸め）自体が最適化ではなく契約であるため、Metal も同じ 3 段ラッパー方式で **実装済み**（本イシューで解決）
+- **(b) MSL `bfloat`／`simdgroup_bfloat8x8` の実機可用性**: これが決めるのは将来のデバイス常駐ネイティブ bf16 経路（bf16 のまま H2D・`simdgroup_bfloat8x8` GEMM 等）の実現可能性であり、`crate::typed_bf16_probe_diag_tests` のコンパイルプローブへ切り出す（**未実測**。本段階のスコープ外）
+
+`TypedOps<bf16>` の accessor が `None` から `Some(self)` へ変わる分岐は (b) の結果に依存しない。
+
+### 15.2 実装方式: ホスト側 bf16⇔f32 変換＋既存 f32 `BackendOps` カーネルへの委譲
+
+`crates/backend-cuda/src/typed_bf16.rs`（#1704）・`crates/backend-cpu/src/typed_bf16.rs`（#1699）と同型の 3 段構成（昇格 → 既存 f32 経路への委譲 → 丸め）を採る。bf16 デバイス常駐で widen/narrow する専用 MSL カーネルは追加しない（性能最適化はスコープ外）。`gemm`／`add`／`mul`／`relu`／`exp`／`tanh` の 6 演算は既存 Metal f32 経路（`gemm.rs`／`elementwise.rs`）へ委譲し、`sum`／`max` は Metal f32 `BackendOps` が GPU カーネル未実装で常に `Unsupported` を返すためそのまま伝播する（f32 版より高機能にしない）。
+
+- **`gemm` は `gemm_fp32_strict` へ委譲する（`gemm` ではない）**: Metal の `BackendOps::gemm` は `gemm::MetalGemm::dispatch_auto`（split-K opt-in 経路。既定 ON）へ委譲する。`gemm_fp32_strict` の Metal オーバーライドは既定実装（`self.gemm(a, b)` へ委譲）のままのため、現時点では両者の呼び出しは実質同一経路だが、CUDA 版（TF32 opt-in を明示的に避ける）との対称性・「opt-in 精度モードを参照しない」意図を明示するため `gemm_fp32_strict` を選ぶ
+- **accessor `typed_ops_bf16` は無条件に `Some(self)` を返す**: `TypedOps<bf16>` の実体は `self`（ZST）自身でありデバイス初期化に一切触れない。実行時の Metal 実機不在・演算失敗は各演算メソッド内部（`BackendOps::add` 等・`gemm_fp32_strict`）が型付きエラーで返す
+
+### 15.3 実装ファイル
+
+- `crates/backend-metal/src/typed_bf16_convert.rs`（新規。cfg なし。`upcast_bf16`／`downcast_f32`。Linux で単体テスト実行可能）
+- `crates/backend-metal/src/typed_bf16.rs`（新規。macOS 限定。`impl TypedOps<bf16> for MetalBackendOps` 8 演算）
+- `crates/backend-metal/src/typed_bf16_probe_diag_tests.rs`（新規。cfg(all(test, macos))・全 `#[ignore]`・非 gating。(b) の調査専用。P0 デバイス属性／P1 bfloat スカラー／P2 `simdgroup_bfloat8x8` MMA／P3 `simdgroup_store` bfloat のコンパイルプローブ＋P4 roundtrip 数値スモーク）
+- `crates/backend-metal/src/ops.rs`（`typed_ops_bf16` accessor 1 メソッド追加）
+- `crates/backend-metal/src/lib.rs`（3 モジュールの登録）
+- `crates/backend-metal/tests/typed_ops_bf16_parity.rs`（新規。層 1〈同一バックエンド内の構造的不変条件・run-to-run 決定性〉・層 2〈CPU f32 参照実装を bf16 丸めした値とのクロスバックエンド判定〉。`#![cfg(target_os = "macos")]` + `#[ignore]`）
+
+### 15.4 f32 経路無変更の根拠
+
+`git diff --stat` は上記新規ファイルと `ops.rs`／`lib.rs` の追記行のみを示し、`gemm.rs`／`elementwise.rs`／`shaders/**`／`pipeline.rs`／`tensor-core/**` は無変更。
+
+### 15.5 parity テストの設計
+
+CUDA §13.5 と同じ理由（bf16 の 1 ulp は相対誤差 `RELATIVE_TOLERANCE`＝1e-3 を超えうる）で、tolerance を変更せず二層構成とする。
+
+- **層 1（主判定）**: 同一バックエンド内の構造的不変条件 `TypedOps::<bf16>::op(x) == bf16::from_f32(BackendOps::op_f32(f32(x)))` を bit 完全一致で検証（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`。`sum`／`max` は `Unsupported` のため対象外）。run-to-run 決定性も確認する
+- **層 2（クロスバックエンド）**: CPU の既存 f32 `BackendOps` をホスト側で bf16 丸めした値を参照とし、小整数（`[-8, 8]`）・小 K（16 以下）の入力に限定して `fandhe_ai_backend_cpu::assert_parity`（複合判定 1e-3/1e-5・変更なし）を適用する（`gemm`／`add`／`mul`／`relu`）。`exp`／`tanh` はこの技法が使えないため層 2 の対象外とし層 1 で検証する
+
+### 15.6 M4 Max 実機実測
+
+本エージェント実行環境に Apple Silicon 実機への到達手段がないため、`#[ignore]` テスト（`typed_ops_bf16_matches_across_shapes`・`typed_ops_bf16_gemm_shape_mismatch_returns_typed_error`。`typed_bf16_probe_diag_tests` の P0〜P4）は未実測のまま記入欄を残す。実行コマンド・保存先は `docs/perf/logs/metal-typed-bf16-probe-1706/README.md` を参照。
+
+```sh
+cargo test -p fandhe-ai-backend-metal --release --test typed_ops_bf16_parity -- --ignored --nocapture
+```
+
 ### 14.7 スコープ外
 
 Metal `half` 専用 elementwise／reduction カーネル（H2D 転送量削減の性能最適化）・f16 NT/TN strided 入口（非 contiguous view の性能最適化）・`_unverified`／`#[doc(hidden)]` の解除（§7-4 の別途承認事項）・Metal f32 `sum`／`max` reduction カーネル自体の実装（実装されれば f16 版は自動的に有効化される。out-of-scope-tracking.md 対象。後続イシュー起票の要否はユーザー承認後に判断）・bf16（#1706）・`Var`／`Tape`／VJP・facade 公開面への昇格・`MemoryOps`／`DeviceBuffer<f16>` 常駐経路（段階 B）・M4 Max 実機実測（§14.6）。
+
+### 15.7 スコープ外
+
+MSL `bfloat`／`simdgroup_bfloat8x8` を用いるデバイス常駐ネイティブ bf16 経路（(b) の実測が可の場合の後続候補）・Metal f32 `sum`／`max` reduction カーネル自体（未実装）・Metal `TypedOps<f64>`（恒久 `Unsupported`）／`TypedOps<f16>`（#1705）・`Var`／`Tape`／VJP・facade 公開面への昇格・M4 Max 実機実測（§15.6）。CPU bf16 は #1699・CUDA bf16 は #1704 で実装済み・origin/main マージ済み。
