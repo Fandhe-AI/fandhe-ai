@@ -177,6 +177,36 @@ fn checked_f32_bytes(shape: &[usize]) -> Result<(), ShapeError> {
     Ok(())
 }
 
+/// `interpolate.rs::MetalInterpolate::run_nearest_f32` のエラーを
+/// `BackendOps::interpolate` の戻り値へ変換する（イシュー #1757・
+/// PR #1834 codex-review／Cursor Bugbot 指摘の是正）。
+///
+/// `run_nearest_f32` は自身の独立検査
+/// （`interpolate_model::validate_interpolate_launch`。モジュール doc
+/// 参照）に失敗すると `MetalError::InvalidInterpolateShape` を返すが、
+/// 是正前はこの分岐も他の起動失敗と区別せず一律
+/// `BackendError::KernelLaunchFailed` へ変換していた。これでは
+/// `gather`／`scatter`／`pad`（`ops.rs` 内の同種カーネル）や
+/// `backend-cuda::ops::map_interpolate_error`（同一イシューの CUDA 側
+/// 実装）と異なり、呼び出し元が「形状不正」を `BackendError::
+/// ShapeMismatch` として識別できず、`Var` 側のホストフォールバック
+/// 判定（`Unsupported`／`ShapeMismatch` 分岐）を素通りしてしまう
+/// （`u32::MAX` 超過等の入力は `size=[u32::MAX as usize + 1]` のように
+/// `interpolate_out_shape` の共通形状検証は通過しうる。指摘の再現形状）。
+/// `InvalidInterpolateShape` のみ `ShapeError::ElementCountOverflow`
+/// 経由の `ShapeMismatch` へ、それ以外（デバイス・パイプライン起動
+/// 失敗等）は従来どおり `KernelLaunchFailed` へ変換する
+/// （`backend-cuda::ops::map_gather_scatter_error`／
+/// `map_interpolate_error` と同型の変換方針）。
+fn map_interpolate_error(err: MetalError) -> BackendError {
+    match err {
+        MetalError::InvalidInterpolateShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => BackendError::KernelLaunchFailed(other.to_string()),
+    }
+}
+
 /// RNN／LSTM／GRU 系エントリが形状比較の前に必要とする `gates * hidden`
 /// （ゲート幅）を `checked_mul` で検証する（`backend-cpu::ops::
 /// checked_gate_width`／`backend-cuda::ops::checked_gate_width` と
@@ -2738,7 +2768,7 @@ impl BackendOps for MetalBackendOps {
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let out = ip
             .run_nearest_f32(&ctx, input_slice, &in_shape, size, &out_shape)
-            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+            .map_err(map_interpolate_error)?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -3715,6 +3745,45 @@ mod tests {
             err,
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         ));
+    }
+
+    /// [`map_interpolate_error`] の回帰テスト（PR #1834 codex-review・
+    /// Cursor Bugbot 指摘の是正確認）。`MetalError::
+    /// InvalidInterpolateShape`（`interpolate.rs::MetalInterpolate::
+    /// run_nearest_f32` が内部の独立検査
+    /// `interpolate_model::validate_interpolate_launch` の失敗時に
+    /// 返す）が `BackendError::ShapeMismatch(ElementCountOverflow)` へ
+    /// 変換されることを固定する。是正前はこの分岐が無く一律
+    /// `BackendError::KernelLaunchFailed`（`interpolate.rs::
+    /// MetalInterpolate::run_nearest_f32` 呼び出し箇所の汎用
+    /// `.map_err(|e: MetalError| BackendError::KernelLaunchFailed(...))`
+    /// 経由）になり、`in_shape=[1]`／`size=[u32::MAX as usize + 1]`
+    /// のように共通形状検証（`interpolate_out_shape`）は通過するが
+    /// `u32` 収容検査で拒否される入力（指摘の再現形状）が
+    /// `ShapeMismatch` 判定を素通りしていた（`CudaBackendOps::
+    /// interpolate` の `map_interpolate_error` とは非対称だった）。
+    /// GPU 非依存: `MetalError` を直接構築して検証する（実機不要）。
+    #[test]
+    fn map_interpolate_error_treats_invalid_interpolate_shape_as_shape_mismatch() {
+        let err = map_interpolate_error(MetalError::InvalidInterpolateShape {
+            detail: "validate_interpolate_launch: dim exceeds u32::MAX".into(),
+        });
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    /// [`map_interpolate_error`]: `InvalidInterpolateShape` 以外の
+    /// `MetalError`（デバイス・パイプライン起動失敗等）は従来どおり
+    /// `BackendError::KernelLaunchFailed` へ変換されることを固定する
+    /// （上記テストと対で「形状エラーのみを区別する」契約を検証する）。
+    #[test]
+    fn map_interpolate_error_falls_back_to_kernel_launch_failed_for_other_errors() {
+        let err = map_interpolate_error(MetalError::LibraryCompilation {
+            message: "boom".into(),
+        });
+        assert!(matches!(err, BackendError::KernelLaunchFailed(_)));
     }
 
     // --- gemm_resident_lhs／gemm_resident_rhs zero-repack 経路（イシュー
