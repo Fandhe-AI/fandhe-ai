@@ -827,7 +827,14 @@ pub(crate) fn huber_elem_loss(d: f32, kind: HuberKind, delta: f32) -> f32 {
     match kind {
         HuberKind::SmoothL1 => {
             if abs_d < delta {
-                0.5 * d * d / delta
+                // `d*d` を先に計算すると delta・d が巨大な有限値の
+                // ときに中間積が overflow しうる。`abs_d < delta`
+                // 分岐内では `|d/delta| < 1` が保証されるため、先に
+                // delta で割ってから d を掛けることで中間値を `|d|`
+                // 以下に抑える（`backend-cpu::huber::elem_loss`・
+                // CUDA `kernels_huber.rs`・Metal `shaders/huber.metal`
+                // と同じ演算順序で揃える）。
+                0.5 * (d / delta) * d
             } else {
                 abs_d - 0.5 * delta
             }

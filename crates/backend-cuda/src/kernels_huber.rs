@@ -69,7 +69,14 @@ pub const HUBER_PARTIAL_F32: &str = concat!(
     float abs_d = fabsf(d);
     if (kind == 1) {
         if (abs_d < delta) {
-            return 0.5f * d * d / delta;
+            // d*d を先に計算すると delta・d が巨大な有限値のとき
+            // 中間積が overflow しうる。abs_d < delta 分岐内では
+            // |d/delta| < 1 が保証されるため、先に delta で割って
+            // から d を掛けることで中間値を |d| 以下に抑える
+            // （backend-cpu::huber::elem_loss・autodiff::eval::
+            // huber_elem_loss・Metal shaders/huber.metal と同じ
+            // 演算順序で揃える）。
+            return 0.5f * (d / delta) * d;
         }
         return abs_d - 0.5f * delta;
     }

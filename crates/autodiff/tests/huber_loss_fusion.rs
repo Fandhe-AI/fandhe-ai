@@ -24,7 +24,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use fandhe_ai_autodiff::{AutodiffError, Reduction, Tape};
 use fandhe_ai_tensor_core::{BackendError, BackendOps, Device, HuberKind, MseReduction, Tensor};
 
-/// 統一複合判定（`mse_loss_fusion.rs::assert_close` と同一実装）。
+/// 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
+/// `.claude/rules/coding-rust.md`）。`fandhe_ai_backend_cpu::parity::
+/// assert_parity`（正本の判定式・定数）を dev-dependency 追加なしに
+/// 再利用できないため（`autodiff` は具体バックエンドクレートへ
+/// 依存しない設計上の不変条件があり、`architecture_boundaries.rs`
+/// が `backend-cpu` の dev-dependency 追加も含めて機械的に禁止する。
+/// `docs/fusion-graph-design.md` §3.4）、同一判定式・同一定数値を
+/// テストローカルに再実装する（`mse_loss_fusion.rs::assert_close`・
+/// `sgd_device_parity.rs::assert_close` と同一実装・同方針。閾値を
+/// 緩和したものではない）。
 fn assert_close(actual: f32, expected: f32, ctx: &str) {
     let abs_diff = (actual - expected).abs();
     let rel_diff = abs_diff / expected.abs().max(1e-12);

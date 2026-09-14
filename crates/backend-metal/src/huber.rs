@@ -394,6 +394,13 @@ fn encode_finalize_dispatch(
         encoder.setBuffer_offset_atIndex(Some(partial_buf.raw()), 0, 0);
         encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
     }
+
+    // SAFETY: `encode_partial_dispatch` の 2 個目の SAFETY コメントと
+    // 同じ根拠。`setBytes_length_atIndex` は指定ポインタから指定バイト
+    // 数を即座に複製するため呼び出し後の生存は不要。`num_partials`／
+    // `factor` はいずれもローカル変数でありポインタは本呼び出し中
+    // 生存し、長さは `shaders/huber.metal::huber_finalize_f32` の
+    // `constant uint&`／`constant float&` 引数型と揃えている。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&num_partials).cast(),
@@ -435,6 +442,14 @@ fn encode_backward_dispatch(
         encoder.setBuffer_offset_atIndex(Some(target_buf.raw()), 0, 1);
         encoder.setBuffer_offset_atIndex(Some(dpred_buf.raw()), 0, 2);
     }
+
+    // SAFETY: `encode_partial_dispatch` の 2 個目の SAFETY コメントと
+    // 同じ根拠。`setBytes_length_atIndex` は指定ポインタから指定バイト
+    // 数を即座に複製するため呼び出し後の生存は不要。`numel`／`kind`／
+    // `delta`／`scale` はいずれもローカル変数（引数）でありポインタは
+    // 本呼び出し中生存し、長さは `shaders/huber.metal::
+    // huber_backward_f32` の `constant uint&`／`constant float&` 引数型
+    // と揃えている。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&numel).cast(),

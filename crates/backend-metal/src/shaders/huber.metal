@@ -55,7 +55,14 @@ inline float huber_elem_loss(float d, uint kind, float delta) {
     if (kind == 1u) {
         // SmoothL1
         if (abs_d < delta) {
-            return 0.5f * d * d / delta;
+            // d*d を先に計算すると delta・d が巨大な有限値のとき
+            // 中間積が overflow しうる。abs_d < delta 分岐内では
+            // |d/delta| < 1 が保証されるため、先に delta で割って
+            // から d を掛けることで中間値を |d| 以下に抑える
+            // （backend-cpu::huber::elem_loss・autodiff::eval::
+            // huber_elem_loss・CUDA kernels_huber.rs と同じ演算順序
+            // で揃える）。
+            return 0.5f * (d / delta) * d;
         }
         return abs_d - 0.5f * delta;
     }
