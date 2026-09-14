@@ -1636,7 +1636,22 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `LinearWarmupLr` は PyTorch に同名クラスがないため、`LinearLR` の `end_factor = 1.0` 固定形として定義した独自スケジューラ。
 - いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する（`cos`／`powf` の libm 差による ULP 揺れを抑える精度方針。bit 同一契約は主張しない）。
 - facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
-- 状態保持型の `ReduceLROnPlateau` は本 issue の対象外のまま残る（兄弟イシュー #1746 が担当。`OneCycleLR` は下記 #1747 の追補で実装済み化した）。
+- 状態保持型の `ReduceLROnPlateau`・`OneCycleLR` は #1746／#1747 の追補（下記）でいずれも実装済み化した。
+
+## #1746 の追補（`ReduceLrOnPlateau`）
+
+PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`ConstantLr`／`StepLr` の 2 種のみだった stateless scheduler 面）を解消した（親 #1611）。
+
+- `crates/autodiff/src/nn/optim/reduce_lr_on_plateau.rs` に `ReduceLrOnPlateau`／`ReduceLrOnPlateauConfig`／`PlateauMode`／`ThresholdMode` を新規追加した。既存 `ConstantLr`／`StepLr`（`lr_scheduler.rs` モジュール doc が明記する stateless 純関数契約）とは異なり、検証指標の観測に応じて内部可変状態（`best`・`num_bad_epochs`・`cooldown_counter`）を進める **唯一の状態保持型スケジューラ**である。
+- `LrScheduler` trait は実装するが、`lr_at(_step)` は引数を無視して現在の学習率を返すだけ（`ConstantLr::lr_at` と同型）で、状態を進める入口は `ReduceLrOnPlateau::step(metric)`（検証指標を受け取る）に限定される。`&dyn LrScheduler` 経由で `lr_at` のみを呼んでも状態は変化しない。
+- 意味論は `torch/optim/lr_scheduler.py::ReduceLROnPlateau` に準拠: `is_better` の 4 分岐（`mode`×`threshold_mode`）・`num_bad_epochs > patience`（厳密に大なり）での発火・`new_lr = max(lr*factor, min_lr)`・`eps` ガード（`lr - new_lr <= eps` のとき据え置くが、その場合でも `cooldown_counter`／`num_bad_epochs` はリセットする）・cooldown 中は `num_bad_epochs` をクリアする、という手順を実装済み。`Default` は PyTorch 既定値（`mode=min, factor=0.1, patience=10, threshold=1e-4, threshold_mode=rel, cooldown=0, min_lr=0, eps=1e-8`）と一致する。
+- **fail-closed 逸脱**: PyTorch は `metric` が NaN でも黙って「悪化」として処理を継続するが、本実装は `.claude/rules/coding-rust.md`（本番経路で `unwrap`/`expect` を使わない）・既存 `clip_grad_norm` 等の契約に合わせ、`metric` が非有限（NaN／±inf）のとき `AutodiffError::InvalidArgument` を返し状態を変更しない。
+- 新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は一切追加していない（`Tape`／`Var`／`BackendOps` に一切依存しない値型・純関数。`ConstantLr`／`StepLr` と同じ性質）。
+- 受入検証（`crates/autodiff/tests/nn_optim_reduce_lr_on_plateau.rs`）: PyTorch の `is_better`／発火手順の定義から導出した参照系列テスト（既定設定・`patience=0`・Max モード・Abs threshold 境界・cooldown・`min_lr` フロア・`eps` ガード時のカウンタリセット・`lr_at` の状態非依存性）11 件、および fail-closed 入力検証テスト（`base_lr`／`factor`／`threshold`／`min_lr`／`eps` の不正値・`min_lr > base_lr`・非有限 `metric`）で担保する。
+- facade（`crates/facade/src/optim.rs`）は `pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};` と `pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};` の 2 行のみ追加（純再エクスポート）。`crates/facade/tests/api_surface.rs` の期待集合・到達性検査、`crates/facade/tests/optim_reduce_lr_on_plateau.rs`（facade のみに依存する学習ループ統合テスト。`backward → clip → optimizer step` の適用順序契約を踏襲し、`ReduceLrOnPlateau::step(loss)` の返り値で毎 step `SgdConfig` を作り直す）も追加済み。
+- Issue 本文の「`Op`／`BackendOps`／`Var` メソッド追加」「VJP 追加」「parity テスト」という受け入れ条件は、`Var`／`Tape`／`BackendOps` に一切依存しないホスト側純データ構造（`clip.rs`／`amp.rs` と同カテゴリ）である本機能には該当しないため、上記の参照系列テスト・fail-closed 検証テスト・facade 統合テスト・`api_surface.rs` 機械検査で代替した。
+- `DeviceParamStore` は非対応（対応する `BackendOps` メソッドを本 issue では追加していないため。他の scheduler・optimizer と同様に無関係）。
+- OneCycle は下記 #1747 の追補で実装済み化した。
 
 ## 追補（イシュー #1747）
 
@@ -1648,4 +1663,4 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `OneCycleLrConfig::new(max_lr, total_steps)` が `pct_start=0.3`・`anneal_strategy=Cos`・`div_factor=25.0`・`final_div_factor=1e4`・`three_phase=false` という PyTorch の既定値を埋める（`AdamWConfig` 等と同じ Config 構造体方式。7 引数 positional `new` を避ける）。
 - momentum cycling（`cycle_momentum`／`base_momentum`／`max_momentum`）・`epochs`／`steps_per_epoch` からの `total_steps` 自動導出・param group ごとの `max_lr` は対象外のまま。新規 `Op`／`BackendOps`／`Var`／VJP は拡張していない（テンソル演算ではなくホスト側 `f32` 純関数のため）。
 - facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
-- 状態保持型で残る対象外は `ReduceLROnPlateau`（兄弟イシュー #1746）のみとなった。
+- 状態保持型（Plateau／OneCycle）・式ベース型（Cosine／Exponential／LinearWarmup）とも実装済みとなり、本節の対象外事項はなくなった。

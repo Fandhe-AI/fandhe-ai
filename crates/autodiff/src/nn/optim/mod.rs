@@ -63,6 +63,7 @@ mod rmsprop;
 pub mod amp;
 pub mod clip;
 pub mod lr_scheduler;
+pub mod reduce_lr_on_plateau;
 
 pub use adagrad::{Adagrad, AdagradConfig};
 pub use adam::{Adam, AdamConfig};
@@ -76,6 +77,9 @@ pub use lamb::{Lamb, LambConfig};
 pub use lr_scheduler::{
     ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, OneCycleAnneal,
     OneCycleLr, OneCycleLrConfig, StepLr,
+};
+pub use reduce_lr_on_plateau::{
+    PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, ThresholdMode,
 };
 pub use rmsprop::{RmsProp, RmsPropConfig};
 
@@ -145,8 +149,17 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // 公開・`crates/facade/tests/api_surface.rs` の期待集合更新・
 // `docs/compat-api-scope.md` §1.2 scheduler 行の更新も本イシューで
 // 完了済み（純再エクスポート。`crates/facade/src/optim.rs` 参照）。
-// 状態保持型の `ReduceLROnPlateau` は対象外（兄弟イシュー #1746 が
-// 担当）。
+// イシュー #1746（親 #1611）: 検証指標の停滞を検知して学習率を下げる
+// 状態保持型スケジューラ（`ReduceLrOnPlateau`）を追加した。既存
+// `ConstantLr`／`StepLr`（stateless 純関数）とは異なり、内部に
+// patience／best／cooldown カウンタを持つ唯一の例外である
+// （詳細は `reduce_lr_on_plateau` モジュール冒頭 doc）。`LrScheduler`
+// は実装するが、状態を進める入口は `ReduceLrOnPlateau::step(metric)`
+// のみで `lr_at` は現在値を返すだけ（`ConstantLr` と同型）。新規
+// `Op`／`BackendOps`／`Var` メソッド／VJP は追加していない
+// （`Tape`／`Var` に一切依存しない値型・純関数）。facade
+// （`fandhe_ai::optim`）への公開は `crates/facade/src/optim.rs` の
+// 素の再エクスポート。
 
 // イシュー #1747（親 #1611）: OneCycleLr／OneCycleLrConfig／
 // OneCycleAnneal（PyTorch `torch.optim.lr_scheduler.OneCycleLR` 相当）を
@@ -160,5 +173,5 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // の期待集合更新・`docs/compat-api-scope.md` §1.2 scheduler 行の更新
 // も本イシューで完了済み（純再エクスポート。`crates/facade/src/
 // optim.rs` 参照）。これにより「scheduler（Cosine／Exponential／
-// Plateau／OneCycle）」行のうち `OneCycleLR` も実装済みとなり、
-// 状態保持型で残るのは `ReduceLROnPlateau`（兄弟イシュー #1746）のみ。
+// Plateau／OneCycle）」行のうち `ReduceLROnPlateau`／`OneCycleLR` も
+// 実装済みとなり、状態保持型のスケジューラは 2 種とも出揃った。
