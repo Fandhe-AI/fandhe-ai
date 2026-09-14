@@ -432,7 +432,7 @@ fn var_no_grad_participates_in_forward_and_is_readable() {
     let x = tape.var_no_grad(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
     let y = x.relu().exp();
     assert_eq!(y.to_tensor().shape(), &[2usize, 2]);
-    let expected: Vec<f32> = vec![1.0f32, 2.0, 3.0, 4.0]
+    let expected: Vec<f32> = [1.0f32, 2.0, 3.0, 4.0]
         .iter()
         .map(|v| v.max(0.0).exp())
         .collect();
