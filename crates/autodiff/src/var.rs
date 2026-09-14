@@ -2488,7 +2488,17 @@ impl<'t> Var<'t> {
             // `i32`（`gather`／`scatter` と共有する index 表現）である
             // 契約上、表現不能な値はキャスト前に明示的に拒否する
             // （codex-review 指摘。イシュー #1755）。
-            if v > i32::MAX as f32 {
+            //
+            // `v > i32::MAX as f32` は誤り: `i32::MAX`（2147483647）は
+            // f32（23bit 仮数部）で正確に表現できず最近接偶数丸めで
+            // `2147483648.0`（2^31）へ切り上がる。このため `v ==
+            // 2147483648.0` は等号非成立で検査を素通りし、続く
+            // `v as i32` が `i32::MAX` へ saturating キャストされて
+            // 別クラスを指してしまう（codex-review／Cursor Bugbot 再指摘。
+            // イシュー #1755 PR #1827）。`f64`（52bit 仮数部）は
+            // `i32::MAX` を含め全 f32 有限値・全 i32 値を正確に表現
+            // できるため、比較前に `f64` へ昇格して丸め誤差なく判定する。
+            if v as f64 > i32::MAX as f64 {
                 return Err(AutodiffError::InvalidArgument(format!(
                     "Var::one_hot: クラス id {v} が i32 で表現できない"
                 )));

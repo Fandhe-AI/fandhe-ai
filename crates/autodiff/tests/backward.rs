@@ -1927,3 +1927,20 @@ fn one_hot_class_id_exceeding_i32_max_is_rejected() {
     let err = x.one_hot(4_000_000_000).unwrap_err();
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }
+
+/// ⑪エラー経路（境界値回帰。codex-review P2／Cursor Bugbot 再指摘。
+/// イシュー #1755 PR #1827）: `v == 2_147_483_648.0`（2^31。
+/// `i32::MAX + 1`）は f32 として正確に表現できる値であり、`i32::MAX
+/// as f32` が同じ `2_147_483_648.0` へ丸め上がるため、`v > i32::MAX
+/// as f32` という f32 のままの比較では等号非成立で検査を素通りして
+/// しまう（是正前は `v as i32` が `i32::MAX` へ saturating キャスト
+/// され誤ったクラスをエンコードしていた）。`f64` 昇格後の比較
+/// （`v as f64 > i32::MAX as f64`）であれば `2_147_483_648.0 >
+/// 2_147_483_647.0` が正しく成立し拒否されることを確認する。
+#[test]
+fn one_hot_class_id_at_i32_max_plus_one_boundary_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![2_147_483_648.0], &[1]));
+    let err = x.one_hot(3_000_000_000).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
