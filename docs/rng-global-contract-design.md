@@ -8,7 +8,9 @@
 #1725、形状ユーティリティ（`arange` 等）は #1726 が別途対応する。
 
 **#1725 で乱数テンソル生成本体（`randn`／`rand`／`randint`）を実装済み**
-（§10「実装記録（#1725）」参照）。
+（§10「実装記録（#1725）」参照）。**#1726 で決定的生成系（`arange`／
+`linspace`／`eye`／`zeros_like`／`ones_like`）を実装済み**（§11「実装
+記録（#1726）」参照）。
 
 ## 1. 背景・要件
 
@@ -143,8 +145,8 @@ pub fn manual_seed(seed: u64) {
 
 - ~~`randn`／`rand`／`randint` の実際の生成関数（#1725 が担当。
   `with_global_rng` を消費する側）~~ → **#1725 で実装済み（§10）**。
-- `arange`／`linspace`／`eye`／`zeros_like`／`ones_like`（#1726 が担当。
-  RNG 契約は不要）。
+- ~~`arange`／`linspace`／`eye`／`zeros_like`／`ones_like`（#1726 が担当。
+  RNG 契約は不要）~~ → **#1726 で実装済み（§11）**。
 - `nn::Dropout`（#1603）等、将来グローバル RNG を利用する確率的演算。
 - `Linear::new`／`RnnCell::new` 等、既存の個別シード API のシグネチャ・
   挙動そのものの変更（本イシューは独立性の確認のみ）。
@@ -210,11 +212,74 @@ VJP は追加していない（生成結果は微分不能な葉値であり、`
   シューの対象（乱数生成と RNG 契約）は §1.2 Tier 1 に列挙済みのため、
   #1724 と同じ根拠で追加承認手続きなく着手した。
 - **対象外**（変更なし・#1726 等へ引き継ぎ）: `arange`／`linspace`／
-  `eye`／`zeros_like`／`ones_like`（#1726）・`randn_like`／`rand_like`／
-  `normal(mean, std)`／`uniform_(a, b)`／`bernoulli`／`multinomial`／
-  `randperm`・`torch.Generator` 相当の非グローバル RNG・CUDA／Metal
-  デバイス側乱数カーネル・`nn::Dropout`（#1603）・`randint` の int64
-  版。`ShapeError` の facade 再エクスポートは本イシューで実装済み
-  （`crates/facade/src/lib.rs::ShapeError` 再エクスポート。旧版の本節が
-  「対象外」と誤記していた点を PR #1815 codex-review 指摘〈P2〉により
-  是正）。
+  `eye`／`zeros_like`／`ones_like`（#1726 で実装済み。§11）・
+  `randn_like`／`rand_like`／`normal(mean, std)`／`uniform_(a, b)`／
+  `bernoulli`／`multinomial`／`randperm`・`torch.Generator` 相当の非
+  グローバル RNG・CUDA／Metal デバイス側乱数カーネル・`nn::Dropout`
+  （#1603）・`randint` の int64 版。`ShapeError` の facade 再エクスポート
+  は本イシューで実装済み（`crates/facade/src/lib.rs::ShapeError` 再
+  エクスポート。旧版の本節が「対象外」と誤記していた点を PR #1815
+  codex-review 指摘〈P2〉により是正）。
+
+## 11. 実装記録（#1726）
+
+`tensor-core::creation`（`arange`／`linspace`／`eye`／`zeros_like`／
+`ones_like`・`CreationError`）を実装し、`autodiff`（素通し）→ `facade`
+（`fandhe_ai::{arange, linspace, eye, zeros_like, ones_like,
+CreationError}`。委譲）まで結線した。`rng`（§10）の非乱数版カウンター
+パートであり、同じく「ホスト側だけで完結する生成系」レイヤーに属する
+（`Op`／`BackendOps`／VJP は追加しない。生成結果は微分不能な葉値のため）。
+
+- **配置**: `crates/tensor-core/src/creation.rs`（`CreationError`
+  〈`#[non_exhaustive]`〉・5 関数本体）。`crates/autodiff/src/lib.rs`・
+  `crates/facade/src/lib.rs` は素通し／薄い委譲のみ（`eye`／
+  `zeros_like`／`ones_like` は `tensor-core` 側でジェネリック
+  〈`T: Element`〉だが、facade 公開面は他の生成系トップレベル関数と
+  同じく `f32` 固定に薄く委譲する）。
+- **受入基準テンプレートの非適用**: `#1602` 系列の他イシューが前提と
+  する「`Op` 追加・`BackendOps` メソッド追加・`Var` メソッド追加・VJP
+  実装・バックエンド間 parity テスト」という受入基準テンプレートは、
+  `rng`（§10）と同じ理由で本モジュールには適用しない。「parity」は
+  「ホスト生成 → CPU `Tape::var` アップロードの bit 完全一致」＋
+  CUDA／Metal `#[ignore]` round-trip（`crates/facade/tests/
+  creation_tensor_generation.rs`）で満たす——バックエンド別カーネルが
+  存在しないため REQ-2 複合判定の対象自体が無い。
+- **数値契約**:
+  - `arange(start, end, step)`: 長さを `ceil((end − start) / step)` を
+    `f64` で計算（PyTorch CPU の `accscalar_t = double` と同じ方式）。
+    各要素は `(start as f64 + i as f64 * step as f64) as f32`。IEEE
+    基本演算＋`ceil` のみで構成されるため、プラットフォーム横断で bit
+    同一（`rand` と同じくゴールデン値テストで固定）。`start`／`end`
+    の大小関係が `step` の符号と矛盾する場合は空テンソルを返す
+    （`n <= 0` 判定）。`step == 0` または非有限値は `CreationError::
+    InvalidStep` を返す。
+  - `linspace(start, end, steps)`: PyTorch の 2 分割方式（前半
+    `start + i·step`・後半 `end − (steps − 1 − i)·step`。`step =
+    (end − start) / (steps − 1)` を `f64` で計算）を用い、先頭が
+    `start`・末尾が `end` と bit 一致することを契約する。`steps == 0`
+    は空、`steps == 1` は `[start]`。
+  - `eye::<T>(n)`: `i / n == i % n` を満たす対角要素のみ `T::one()`、
+    他は `T::zero()`。長方形版（`eye(rows, cols)`）は対象外。
+  - `zeros_like`／`ones_like`: `like` の shape のみを引き継ぎ、strides
+    （転置・broadcast view 由来の stride 0 等）は一切保存しない新規
+    contiguous バッファを返す。broadcast view は shape の要素数が
+    ストレージより大きくなりうるため infallible にはできず、`like.
+    shape()` の要素数がアロケーション不能な場合は `ShapeError::
+    ElementCountOverflow` を返す。
+- **`shape` の要素数オーバーフロー・アロケーション不能検査**: `rng`
+  （§10）と同じく `checked_numel_for::<T>` をアロケーション前に呼ぶ。
+  `arange` は `f64` 中間計算で求めた長さが `usize` の範囲を超える場合
+  `usize::MAX` へ丸めてから `checked_numel_for` へ渡し、必ず
+  `ElementCountOverflow` として確保前に拒否する。
+- **承認の扱い**: `docs/compat-api-scope.md` §5「Tier 1／Tier 2 に
+  列挙済みの機能の実装は本節の再適用を要しない」＋ §1.2「乱数生成と
+  RNG 契約」行が本イシューを名指しで列挙済み＋ #1602 コメント
+  （2026-09-12 ユーザー承認）により、#1724／#1725 と同じ根拠で追加
+  承認手続きなく着手した。
+- **対象外**: 1 引数／2 引数の `arange(end)`／`arange(start, end)`
+  便宜版・i32／i64 版 `arange`・長方形 `eye(rows, cols)`・`full_like`／
+  `empty_like`／`randn_like`／`rand_like`・`logspace`・`Var::zeros_like`
+  等の `Var` 側メソッド（`tape.var(&zeros_like(&v.to_tensor()))` で
+  到達可能）・CUDA／Metal デバイス側の生成カーネル（#1602 のホスト
+  生成→アップロード方針どおり）・`compat::array`／`Sequential` の
+  変更・`torch.arange` の dtype 推論（整数引数→int64）との完全互換。

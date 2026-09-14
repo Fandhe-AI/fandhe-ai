@@ -52,9 +52,10 @@ pub enum ShapeError {
     /// 要素型込みのバイトサイズが `Vec` の allocation 上限
     /// （`isize::MAX` バイト）を超えアロケーション不能な shape
     /// （`zeros`/`ones`/`full`/`Tensor::new`/`from_slice` がアロケーション
-    /// 前に検査する。`randn`/`rand`/`randint`〈`rng.rs`〉は
-    /// `checked_numel_for` 経由でバイトサイズ側も検査する。
-    /// イシュー #1725・PR #1815 codex-review P1 是正）。
+    /// 前に検査する。`randn`/`rand`/`randint`〈`rng.rs`〉・
+    /// `arange`/`linspace`/`eye`/`zeros_like`/`ones_like`〈`creation.rs`。
+    /// イシュー #1726〉は `checked_numel_for` 経由でバイトサイズ側も
+    /// 検査する。イシュー #1725・PR #1815 codex-review P1 是正）。
     ElementCountOverflow,
 
     /// 非 contiguous なテンソルに対して `reshape` が呼ばれた。
