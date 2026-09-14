@@ -19,8 +19,9 @@
 //!    内部クレート）は `docs/compat-api-scope.md` を参照。
 //!
 //! 3. **optim 公開面**（[`optim`]。イシュー #961・親 #960。Adam〈coupled
-//!    L2 weight decay〉は #1742）: SGD・AdamW・Adam・gradient clipping・
-//!    LR スケジューラを `fandhe_ai::optim` の単一入口へ再エクスポートする。
+//!    L2 weight decay〉は #1742・RMSprop／Adagrad は #1743・親 #1610）:
+//!    SGD・AdamW・Adam・RMSprop・Adagrad・gradient clipping・LR
+//!    スケジューラを `fandhe_ai::optim` の単一入口へ再エクスポートする。
 //!    値型・純関数のみのため REQ-12 と矛盾しない（詳細は [`optim`]
 //!    モジュール doc）。
 //!
@@ -86,8 +87,9 @@ use fandhe_ai_tensor_core::{BackendOps, DeviceProvider};
 /// doc・`docs/compat-api-scope.md` 参照）。
 pub mod compat;
 
-/// optimizer 公開面（イシュー #961・親 #960。Adam は #1742）。SGD・AdamW・
-/// Adam・gradient clipping・LR スケジューラを再エクスポートする（詳細・
+/// optimizer 公開面（イシュー #961・親 #960。Adam は #1742・RMSprop／
+/// Adagrad は #1743・親 #1610）。SGD・AdamW・Adam・RMSprop・Adagrad・
+/// gradient clipping・LR スケジューラを再エクスポートする（詳細・
 /// 適用順序契約はモジュール doc 参照）。
 pub mod optim;
 
