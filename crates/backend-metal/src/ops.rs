@@ -1048,6 +1048,23 @@ impl BackendOps for MetalBackendOps {
         Some(self)
     }
 
+    /// `crate::typed_bf16::impl TypedOps<half::bf16> for MetalBackendOps`
+    /// （イシュー #1706）への accessor。`memory_ops`（上記）と異なり
+    /// `TypedOps<bf16>` の実体は `self`（ZST）自身でありデバイス初期化に
+    /// 一切触れないため、常に `Some(self)` を返す（`crate::typed_bf16`
+    /// モジュール doc「accessor `typed_ops_bf16` は無条件に `Some(self)`
+    /// を返す」参照。実行時の Metal 実機不在は各演算メソッド内部が型付き
+    /// エラーで返す）。
+    ///
+    /// **`TypedOps` を top-level `use` しない**: `self.add`／`self.relu`
+    /// 等の f32 専用内部呼び出しが `impl TypedOps<bf16>` の同名メソッド
+    /// と衝突し「multiple applicable items in scope」で解決不能になる
+    /// ため、戻り値型でのみ `fandhe_ai_tensor_core::TypedOps<half::bf16>`
+    /// を完全修飾参照する（CPU／CUDA 側 `ops.rs` と同じ回避策）。
+    fn typed_ops_bf16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::bf16>> {
+        Some(self)
+    }
+
     /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
     /// `docs/device-resident-update-design.md` §3.2・§5.2）。
     /// `context_cache::cached_sgd`（プロセス内 MSL コンパイル済みパイプ
