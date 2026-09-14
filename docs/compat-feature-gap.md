@@ -1075,3 +1075,29 @@ libm 実装）とは一般に bit 同一にならず、超越関数系と同じ�
 Metal（Apple Silicon）実機での parity テストは、本実装エージェントの
 実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ
 申し送る。
+
+## 追補（イシュー #1720）
+
+§2.5「Var 演算」の `min`／`argmax`／`argmin` 欠落行はスナップショット
+不変のまま、`Var::min`／`argmax`／`argmin` を実装済み化したことを
+ここに追補する。`min` は `dim: Option<usize>` を取る `torch.min(dim)`
+相当（`BackendOps::min`。`sum`／`max` と異なりデフォルトメソッド。
+既定 `Unsupported`）、`argmax`／`argmin` は `torch.argmax`／`argmin`
+相当で非微分演算（`Tensor<i32>` を返しテープにノードを追加しない。
+`Var::argsort` と同じ扱い）。CPU（`backend-cpu::reduction::min`／
+`argmax`／`argmin`）はネイティブ実装済み。CUDA は `min`（`reduce::
+CudaReduce::run_min_all_f32`／`run_min_axis_f32`。`fminf`・単位元
+`+INFINITY`）を実装済みだが `argmax`／`argmin` は GPU カーネル未実装
+（明示 `Unsupported`。`CudaBackendOps::argmax`／`argmin` が driver 非
+接触で即座に返す）。Metal は `min`／`argmax`／`argmin` の 3 演算とも
+明示 `Unsupported`。いずれも `Unsupported` の場合は `Var::min`／
+`argmax`／`argmin` がホスト参照実装（`fandhe_ai_autodiff::eval::min`／
+`argmax`／`argmin`）へフォールバックするため forward は全バックエンド
+で動作する。`min` の VJP（`Op::Min`）は `Op::Max` と共有するヘルパー
+`grad::extremum_first_match_vjp`（forward 記録値と `==` 一致する最初の
+位置へ勾配を伝播する先勝ち決定的方式。旧 `max_vjp` を改称し `max_vjp`
+自体は既存呼び出し元を壊さない薄いラッパーとして維持）を使う——#1718
+（amax／amin 勾配分配方式の確定）が均等分配へ変更する場合はこのヘル
+パー 1 箇所の差し替えで `Max`／`Min` 両方へ反映される。facade 新規
+公開面なし（既存の `Var` 再エクスポート経由）。CUDA／Metal 実機での
+facade parity テストは未実測のまま Mac／GB10 セッションへ申し送る。
