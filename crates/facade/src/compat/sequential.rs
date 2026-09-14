@@ -14,7 +14,8 @@
 //! `Tape::backward` 後に `Gradients::get(&vars.weight)` する経路）へ
 //! アクセスできる。[`Sequential::trainable_parameters`]/
 //! [`Sequential::apply_parameters`] と組み合わせ、[`crate::optim::Sgd`]・
-//! [`crate::optim::AdamW`]（`fandhe_ai::optim`。facade 公開面。イシュー #961）
+//! [`crate::optim::AdamW`]／[`crate::optim::Adam`]（`fandhe_ai::optim`。
+//! facade 公開面。イシュー #961・#1742）
 //! の位置対応契約にそのまま渡せる。`facade` が唯一のサポートされる公開
 //! API 面であり（`docs/compat-api-scope.md` §0）、利用者は内部クレート
 //! `fandhe_ai_autodiff` へ直接依存する必要はない。適用順序契約
@@ -369,7 +370,8 @@ impl Sequential {
 
     /// 学習可能パラメータ（`Linear` 層の `weight`/`bias`）への参照列を
     /// 層の追加順・各層内は weight → bias（`Some` の場合のみ）の順で
-    /// 返す。[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]
+    /// 返す。[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]／
+    /// [`crate::optim::Adam::step`]
     /// の位置対応契約にそのまま渡せる。この順序契約は
     /// [`SequentialVars::trainable_vars`]/[`SequentialVars::trainable_grads`]/
     /// [`Sequential::apply_parameters`] と共通（#294 の設計不変条件）。
@@ -386,7 +388,8 @@ impl Sequential {
         out
     }
 
-    /// optimizer（[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]）
+    /// optimizer（[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]／
+    /// [`crate::optim::Adam::step`]）
     /// が返した更新後テンソル列を
     /// [`Sequential::trainable_parameters`] と同じ順序契約で各 `Linear`
     /// 層へ書き戻す。内部で `Linear::from_parameters`（`fandhe_ai_autodiff::nn::linear`）
@@ -880,7 +883,8 @@ impl<'m, 't> SequentialVars<'m, 't> {
     /// `Ok(None)` を返す場合）は黙って除外せず `InvalidArgument` にする
     /// （fail-closed）: 除外してしまうと戻り値の件数が
     /// `trainable_parameters()` の件数より少なくなり、
-    /// [`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`] の
+    /// [`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]／
+    /// [`crate::optim::Adam::step`] の
     /// 位置対応契約（`params[i]` ↔ `grads[i]`）
     /// が呼び出し元の意図と無関係にずれて、誤ったパラメータへ誤った
     /// 勾配を適用しかねないため（`.claude/rules/security.md` A03）。

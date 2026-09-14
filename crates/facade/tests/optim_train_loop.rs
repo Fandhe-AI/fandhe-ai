@@ -33,8 +33,8 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::optim::{
-    Adagrad, AdagradConfig, AdamW, AdamWConfig, ConstantLr, LrScheduler, RmsProp, RmsPropConfig,
-    Sgd, SgdConfig, StepLr, clip_grad_norm, clip_grad_value,
+    Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, ConstantLr, LrScheduler, RmsProp,
+    RmsPropConfig, Sgd, SgdConfig, StepLr, clip_grad_norm, clip_grad_value,
 };
 
 const BATCH: usize = 4;
@@ -218,6 +218,82 @@ fn adamw_with_clip_converges_via_facade_only() {
 
     let mut model = build_model();
     let log = train_with_adamw_and_clip(&mut model, STEPS, MAX_NORM);
+
+    assert_eq!(log.len(), STEPS);
+    let initial = log[0];
+    let final_loss = *log.last().unwrap_or_else(|| unreachable!("log は空でない"));
+    assert!(final_loss.is_finite(), "final loss が非有限: {final_loss}");
+    assert!(
+        final_loss < 0.5 * initial,
+        "loss did not converge sufficiently: initial={initial} final={final_loss}"
+    );
+}
+
+// =====================================================================
+// Adam（coupled L2 weight decay。イシュー #1742）+ clip
+// =====================================================================
+
+/// `train_with_adamw_and_clip` と同型（`AdamW::step` を `Adam::step` へ
+/// 差し替えただけ）。`wd>0` を指定し coupled 経路を実際に通す
+/// （`optim.rs` モジュール doc「Adam（coupled L2 weight decay）」節）。
+fn train_with_adam_and_clip(model: &mut Sequential, steps: usize, max_norm: f32) -> Vec<f32> {
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let cfg = AdamConfig {
+        weight_decay: 1e-4,
+        ..AdamConfig::default()
+    };
+    let mut adam =
+        Adam::new(cfg).unwrap_or_else(|e| panic!("test fixture: Adam::new が失敗した: {e}"));
+    let mut log = Vec::with_capacity(steps);
+
+    for _ in 0..steps {
+        let updated = {
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+
+            let pred = bound
+                .forward(&tape, &x)
+                .unwrap_or_else(|e| panic!("test fixture: forward が失敗した: {e}"));
+            let loss = pred
+                .mse_loss(&y)
+                .unwrap_or_else(|e| panic!("test fixture: mse_loss が失敗した: {e}"));
+            log.push(scalar(&loss.to_tensor()));
+
+            let grads = tape
+                .backward(&loss)
+                .unwrap_or_else(|e| panic!("test fixture: backward が失敗した: {e}"));
+            let grad_refs = bound
+                .trainable_grads(&grads)
+                .unwrap_or_else(|e| panic!("test fixture: trainable_grads が失敗した: {e}"));
+            let clip_result = clip_grad_norm(&grad_refs, max_norm)
+                .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));
+            let param_refs = model.trainable_parameters();
+            let params_and_grads: Vec<(&Tensor<f32>, &Tensor<f32>)> = param_refs
+                .into_iter()
+                .zip(clip_result.grads.iter())
+                .collect();
+            adam.step(&params_and_grads)
+                .unwrap_or_else(|e| panic!("test fixture: Adam::step が失敗した: {e}"))
+        };
+        model
+            .apply_parameters(updated)
+            .unwrap_or_else(|e| panic!("test fixture: apply_parameters が失敗した: {e}"));
+    }
+
+    log
+}
+
+/// `fandhe_ai::optim::{Adam, clip_grad_norm}` のみを使った学習ループで
+/// loss が減少すること（受入基準 3。`AdamW` 版と同型の収束テスト）。
+#[test]
+fn adam_with_clip_converges_via_facade_only() {
+    const STEPS: usize = 100;
+    const MAX_NORM: f32 = 10.0;
+
+    let mut model = build_model();
+    let log = train_with_adam_and_clip(&mut model, STEPS, MAX_NORM);
 
     assert_eq!(log.len(), STEPS);
     let initial = log[0];

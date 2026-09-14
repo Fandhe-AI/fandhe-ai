@@ -55,6 +55,7 @@
 //! 一方的に API を固定しないため。親 #192 の統合時に判断する）。
 
 mod adagrad;
+mod adam;
 mod adamw;
 mod rmsprop;
 
@@ -63,6 +64,7 @@ pub mod clip;
 pub mod lr_scheduler;
 
 pub use adagrad::{Adagrad, AdagradConfig};
+pub use adam::{Adam, AdamConfig};
 pub use adamw::{AdamW, AdamWConfig};
 pub use amp::{
     GradScaler, GradScalerConfig, UnscaleResult, has_non_finite, scale_grads, scale_loss,
@@ -98,3 +100,18 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // 本イシューでは対応する `BackendOps` メソッドを追加していないため
 // RMSprop・Adagrad とも **`DeviceParamStore` 非対応**。LAMB は #1744
 // が対象のまま。
+//
+// イシュー #1742（親 #1610）: Adam（coupled L2 weight decay。PyTorch
+// `torch.optim.Adam(weight_decay>0)` 相当）を追加した（`adam` モジュール
+// doc 参照）。`AdamW`（decoupled）とはハイパーパラメータの構造・
+// `step()` シグネチャは同一だが、decay を勾配へ加算するか（coupled・
+// `Adam`）パラメータへ直接乗算するか（decoupled・`AdamW`）が異なる。
+// `weight_decay == 0` では両者は bit 完全一致する
+// （`crates/autodiff/tests/nn_optim_adam.rs::
+// adam_wd_zero_bit_matches_adamw_wd_zero`）。新規 `Op`／`BackendOps`
+// メソッド／VJP は追加していない。facade（`fandhe_ai::optim`）への
+// 公開・`crates/facade/tests/api_surface.rs` の期待集合更新・
+// `docs/compat-api-scope.md` §1.3 optimizer 行の更新も本イシューで完了
+// 済み（`Adam`／`AdamConfig` の純再エクスポート。`crates/facade/src/
+// optim.rs` 参照）。`DeviceParamStore` への結線は非対応のまま
+// （`adam` モジュール doc「`DeviceParamStore` 非対応」節）。

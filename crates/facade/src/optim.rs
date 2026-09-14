@@ -14,6 +14,13 @@
 //! clipping）を `fandhe_ai::optim`
 //! という単一の入口へ吸収する。
 //!
+//! **Adam（coupled L2 weight decay。イシュー #1742・親 #1610）**:
+//! [`crate::optim::Adam`]／[`crate::optim::AdamConfig`] を
+//! `fandhe_ai_autodiff::nn::optim`（実体は `nn::optim::adam` モジュール）
+//! から同じく素の再エクスポートで公開する。`AdamW`（decoupled）と
+//! `weight_decay > 0` のとき異なる更新値を生む点は `nn::optim::adam`
+//! モジュール doc・`docs/compat-feature-gap.md` §2.9 を参照。
+//!
 //! `fandhe_ai::optim` は REQ-9 の 2026-08-29 追記（正本 spec
 //! `docs/spec/04-requirements.md:211-212`。実装リポ #984／#986）で、
 //! `tape()`系・`compat` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
@@ -28,7 +35,8 @@
 //!
 //! # 呼び出し文脈（`compat::Sequential` との位置対応契約）
 //!
-//! [`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`] が受け取る `params`／`grads` の順序は、
+//! [`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]／
+//! [`crate::optim::Adam::step`] が受け取る `params`／`grads` の順序は、
 //! [`crate::compat::Sequential::trainable_parameters`]（更新前パラメータ
 //! 列）と [`crate::compat::SequentialVars::trainable_grads`]（対応する
 //! 勾配列）が返す列の位置に対応させる契約になっている（`Sequential` 側の
@@ -106,7 +114,8 @@
 //! （親 #192 の並行実装）により不統一だが、本モジュールでは単一の
 //! `fandhe_ai::optim` 入口へ吸収し利用者からは意識させない。一方で
 //! [`crate::optim::Sgd::step`] は `&[&Tensor<f32>]` 2 本（`params`・`grads`）を、
-//! [`crate::optim::AdamW::step`] は `&[(&Tensor<f32>, &Tensor<f32>)]`（tuple 列）を
+//! [`crate::optim::AdamW::step`]／[`crate::optim::Adam::step`] は
+//! `&[(&Tensor<f32>, &Tensor<f32>)]`（tuple 列）を
 //! 引数に取るというシグネチャ形の相違は**本モジュールでは統一しない**
 //! （親 #192 の統合判断待ち。`docs/facade-optimizer-promotion-decision.md`
 //! §4.3）。将来統一する場合は破壊的変更になる。
@@ -136,12 +145,17 @@
 //! `Tape` を引数に取る状態機械であり本モジュールの値型群とは性質が
 //! 異なるため、意図的に本モジュールへは含めない（root 再エクスポート
 //! のまま）。AMP（[`crate::optim::GradScaler`]）もこの経路へは未結線（上記「AMP の
-//! 適用範囲」節参照）。
+//! 適用範囲」節参照）。[`crate::optim::Adam`]（coupled L2 weight decay。
+//! イシュー #1742）も同様に `DeviceParamStore` へは未結線であり、本
+//! モジュールの他の optimizer と同じくホスト `Tensor<f32>` を介した
+//! optimizer step のみを提供する（`nn::optim::adam` モジュール doc
+//! 「`DeviceParamStore` 非対応」節）。
 
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。`tests/api_surface.rs`
 // が `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査する
 // 契約に合わせる。`src/lib.rs` 冒頭コメントと同じ理由）。
 pub use fandhe_ai_autodiff::nn::optim::{Adagrad, AdagradConfig};
+pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig};
 pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_value};
 pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
