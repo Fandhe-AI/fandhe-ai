@@ -108,8 +108,15 @@
 
 - rank 一致（2d は 4、1d 併合後も 4）。
 - `kernel ≥ 1`・`stride ≥ 1`・`dilation ≥ 1`。
-- `padding ≤ (kernel − 1) · dilation / 2`（PyTorch 準拠。padding が窓に
-  収まらない構成を拒否）。
+- `padding ≤ ((kernel − 1) · dilation + 1) / 2`（整数除算は floor。PyTorch
+  `pool2d_shape_check` の検査規則に合わせる。`(kernel − 1) · dilation / 2`
+  という単純な floor 式は誤り: 例えば `kernel=2, dilation=1, padding=1`
+  （PyTorch は許可）を誤って拒否する一方、`kernel=3, dilation=2, padding=2`
+  （PyTorch は拒否）を誤って許可してしまう。Max／Avg 双方の検査に本式を
+  適用する。境界値の受入例:
+  - `kernel=2, dilation=1, padding=1` → 上限 `((2−1)·1+1)/2 = 1` で許可。
+  - `kernel=3, dilation=2, padding=2` → 上限 `((3−1)·2+1)/2 = 2`。
+    `padding=2` は上限と等しいため許可、`padding=3` は拒否。
 - 出力長 `≥ 1`。
 - 要素数積は `checked_mul` で計算する（`reduction::max` の
   `ElementCountOverflow` パターンを踏襲）。
@@ -117,6 +124,20 @@
   `Op::Topk` と同じ制約）。
 - adaptive の `output_size ≥ 1`。`output_size ≤ 入力長` は要求しない
   （PyTorch 準拠。窓は §4 の式で自然に定義され拡大側も成立する）。
+- **adaptive の空間軸（`H`／`W`。1d 併合後は `H=1` 固定側を除く `W` 軸）は
+  `≥ 1` を要求し、`0` を `ShapeError` で拒否する**。`start = floor(o *
+  in / out)`・`end = ceil((o + 1) * in / out)`（§4）は `in = 0` のとき
+  常に `start = end = 0` となり `divisor = (end − start) = 0` の 0 除算
+  （`f64` 昇格後の `0.0 / 0.0` で `NaN`。AvgAdaptivePool forward・VJP 双方
+  で発生しうる）を招くため、`Var`／`BackendOps` 両入口で検査する（既存の
+  rank 検査・非 adaptive 系の `kernel ≥ 1`／`stride ≥ 1` 検査と同じ位置に
+  置く）。**バッチ軸 `N=0`・チャンネル軸 `C=0` は本検査の対象外**（空
+  バッチ・空チャンネルは出力も空になるだけで 0 除算を起こさないため拒否
+  しない。区別する理由は、`N`／`C` は縮約対象ではなく縮約窓の外側の走査
+  軸であるのに対し、`H`／`W` は `divisor` の直接の入力である点にある）。
+  非 adaptive の Max／AvgPool（`kernel_size` 固定）も `H=0`／`W=0` では
+  §4 の `pool_out_len` が負分子ゲート（本節上記）で自然に `ShapeError` と
+  なるため、adaptive 専用の追加検査で足りる。
 - `ceil_mode`: **v1 は `false` のみサポート**。`true` を渡した場合は
   `InvalidArgument` で拒否する。PyTorch の「最後の窓は入力または左
   padding 内で始まらなければならない」規則は将来対応の参考として §11 へ
@@ -125,10 +146,22 @@
 ## 4. 出力 shape 関数（`tensor-core::ops_shape` へ新設予定。設計のみ）
 
 ```text
-pool_out_len(in, k, s, p, d) = (in + 2p − d(k−1) − 1) / s + 1
+pool_out_len(in, k, s, p, d) = floor((in + 2p − d(k−1) − 1) / s) + 1
 ```
 
-整数除算。結果が 0 以下になる場合は `ShapeError`。
+除算は明示的に **floor**（数学的な意味での floor）と契約する。Rust の
+符号付き整数 `/` は **ゼロ方向丸め**であり、分子が負のとき floor と
+一致しない。例えば `in=1, k=2, s=2, p=0, d=1`（§3 の padding 上限
+`((2−1)·1+1)/2=1` により `padding=0` は許可される構成）では分子
+`1 + 0 − 1·(2−1) − 1 = −1` となり、floor 除算では `floor(−1/2) = −1` で
+出力長 `−1+1 = 0` となり `ShapeError` で正しく拒否されるべきところ、Rust
+の `/` をそのまま使うと `−1 / 2 = 0`（ゼロ方向丸め）となり出力長
+`0+1 = 1` が誤って通過してしまう。**実装契約**: 分子（`in + 2p −
+d(k−1) − 1`）を `checked_sub` 等で計算したうえで **負の場合は floor
+除算を行わず直ちに `ShapeError`** とする（非負の分子同士では floor と
+ゼロ方向丸めが一致するため、分子が非負であることを確認した後は通常の
+整数除算でよい）。この負分子拒否ゲートを floor 契約の実装手段として
+必須とする。結果（`+1` 後）が 0 以下になる場合も同様に `ShapeError`。
 
 - `pool2d_out_shape(shape, kernel, stride, padding, dilation)`
 - `adaptive_pool2d_out_shape(shape, output_size)`
@@ -317,6 +350,15 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
 - shape／引数検査: 境界値（`kernel=1`・`stride=1`・`padding` 上限）・
   overflow（`checked_mul`）・`ceil_mode=true` 拒否・`padding` 上限超過の
   拒否。
+- `padding` 上限式（§3）の境界例: `kernel=2, dilation=1, padding=1`
+  （許可）・`kernel=3, dilation=2, padding=2`（許可）／`padding=3`
+  （拒否）を回帰テストとして固定する。
+- 出力長 floor 除算（§4）の負分子拒否: `in=1, k=2, s=2, p=0, d=1` が
+  `ShapeError`（出力長 0）として拒否され、ゼロ方向丸めによる誤った出力長
+  1 を返さないことを確認する。
+- adaptive の空間軸ゼロ長拒否（§3）: `[N,C,0,W]`／`[N,C,H,0]` が
+  `ShapeError` で拒否されること・`[0,C,H,W]`（空バッチ）は拒否されず
+  出力形状 `[0,C,out_h,out_w]` が得られることを区別して確認する。
 - タイ先勝ち: 全要素同値の窓で索引が窓先頭になること。
 - NaN 伝播と最初の NaN 索引・padding 非勝者（索引が常に `[0, H·W)`）。
 - 重なり窓（`stride < kernel`）の重複添字 VJP が `scatter_add` 契約と一致
