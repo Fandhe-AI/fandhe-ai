@@ -108,7 +108,15 @@ build_arm() { # build_arm <arm> <facade_path> <target_dir>
     echo "error: build $arm: exe not found" >&2
     exit 1
   fi
-  cp "$exe" "$OUT/bench-fandhe-${arm}-${LABEL}"
+  # codex-review 指摘: `set -u` のみでは `cp` の終了コードを検査しない
+  # ため、同一ラベルで再実行して既存バイナリへの上書きコピーに失敗
+  # した場合でも処理が継続し、後続の cargo tree・実行対象が古いバイナリ
+  # のまま計測が続行しうる。計測対象の同一性を保証するため終了コードを
+  # 明示検査して非 0 で中止する。
+  if ! cp "$exe" "$OUT/bench-fandhe-${arm}-${LABEL}"; then
+    echo "error: cp failed ($arm): $exe -> $OUT/bench-fandhe-${arm}-${LABEL}" >&2
+    exit 1
+  fi
   # #1166 事故対応と同型のハードゲート: `cargo tree` で `fandhe-ai` が
   # 実際に path 解決されていることを確認する。
   local tree_output

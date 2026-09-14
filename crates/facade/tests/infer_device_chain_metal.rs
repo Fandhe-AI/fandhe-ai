@@ -38,6 +38,21 @@ use fandhe_ai::{Device, DeviceParamStore, Tensor};
 use fandhe_ai_backend_metal::MetalBackendOps;
 use fandhe_ai_tensor_core::Activation;
 
+/// `Tensor<f32>` を [`f32::to_bits`] のビット列へ変換する（cursor 指摘
+/// 対応: `assert_eq!` による `&[f32]` 比較は IEEE 754 の `+0.0 == -0.0`
+/// で符号付きゼロを区別できず、`NaN` は payload 不問で「等しくない」
+/// 判定になるため、本ファイルが主張する「bit 完全一致」の検証として
+/// 不十分。`predict_device_chain_cpu_bit_exact.rs`／
+/// `predict_device_chain_cuda_bit_identity.rs` の `bits_vec` と同型）。
+fn bits_vec(t: &Tensor<f32>) -> Vec<u32> {
+    t.contiguous()
+        .as_slice()
+        .expect("contiguous() 直後は必ず as_slice() が Some を返す")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect()
+}
+
 /// `MetalContext` はプロセス単位のシングルトン（`fandhe_ai_backend_metal::
 /// __diagnostic_batch_counters_snapshot` が読む `encode_calls`／
 /// `wait_until_completed` カウンタもプロセス全体で共有）であり、本ファイル
@@ -132,11 +147,9 @@ fn predict_resident_device_chain_matches_manual_per_layer_chain_bit_exact_metal(
     let via_old = manual_predict_via_public_api(&store, &input);
 
     assert_eq!(via_new.shape(), via_old.shape());
-    let a = via_new.contiguous();
-    let b = via_old.contiguous();
     assert_eq!(
-        a.as_slice().unwrap(),
-        b.as_slice().unwrap(),
+        bits_vec(&via_new),
+        bits_vec(&via_old),
         "predict_resident（単一同期チェーン優先）が手動 per-op チェーンと bit 完全一致しない"
     );
 }
@@ -155,11 +168,12 @@ fn predict_resident_device_chain_is_run_to_run_bit_identical_metal() {
     let input = build_input();
 
     let first = model.predict_resident(&store, &input).unwrap();
+    let first_bits = bits_vec(&first);
     for i in 0..4 {
         let repeat = model.predict_resident(&store, &input).unwrap();
         assert_eq!(
-            first.contiguous().as_slice().unwrap(),
-            repeat.contiguous().as_slice().unwrap(),
+            first_bits,
+            bits_vec(&repeat),
             "predict_resident の出力が run {i} で run 0 と bit 同一でない"
         );
     }

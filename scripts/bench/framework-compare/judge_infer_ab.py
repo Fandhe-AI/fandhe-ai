@@ -12,10 +12,15 @@ fail-closed 方針（security.md A08。`compare_gemm_gate.py` 等と同方針）
   "infer"` の行は判定対象から除外する
 - 各セル（`mode` ごと）が before/after とも「ちょうど `--rounds`（既定 5）
   件」でなければ「判定不能」
-- `warmup`/`iters` が before/after で不一致なら「判定不能」
-- セル内のいずれかの行で `median_s` が欠落・非数値・非正値、または
-  `checksum` が欠落していれば「判定不能」（欠落を「一致」として扱わない。
-  codex-review 指摘対応）
+- `warmup`/`iters` が before/after で「欠落」または「非 int（bool を含む）」
+  なら「判定不能」（両腕とも欠落すると `{None} == {None}` で一致扱いに
+  なってしまう誤りを防ぐ。codex-review 指摘対応）。存在する場合は
+  `warmup >= 0`・`iters > 0` を要求し、before/after 間で値集合が一致
+  しなければ「判定不能」
+- セル内のいずれかの行で `median_s` が欠落・非数値（bool を含む）・
+  非有限（`inf`/`-inf`/`nan`）・非正値、または `checksum` が欠落・
+  非数値（bool・文字列・配列等を含む）であれば「判定不能」（欠落を
+  「一致」として扱わない。codex-review 指摘対応）
 
 事前登録判定規則（イシュー #1580 計画）:
 - 判定セル: `mode == "reuse"`。対照（非判定・参考記録のみ）: `mode ==
@@ -31,6 +36,7 @@ fail-closed 方針（security.md A08。`compare_gemm_gate.py` 等と同方針）
 
 import argparse
 import json
+import math
 import statistics
 import sys
 
@@ -66,35 +72,60 @@ def _judge_cell(before_rows, after_rows, rounds, threshold):
     `verdict` は "ADOPT"／"REJECT"／"undetermined" のいずれか。
 
     fail-closed 方針（codex-review 指摘対応。security.md A08 と同方針）:
-    `median_s`／`checksum` が欠落・非数値・（`median_s` のみ）非正値の行が
-    1 件でもあれば、それだけで "undetermined" とする。とくに `checksum`
-    が両腕とも欠落している場合に `None == None` で「完全一致」と誤判定
-    しないことを保証する（欠落は「一致が確認できていない」であって
-    「一致」ではない）
+    `warmup`／`iters`／`median_s`／`checksum` のいずれかが欠落・不正な型
+    （bool を含む）・規定範囲外（`warmup < 0`／`iters <= 0`／`median_s`
+    が非有限〈`inf`/`-inf`/`nan`〉または非正値）の行が 1 件でもあれば、
+    それだけで "undetermined" とする。とくに `checksum`／`warmup`／
+    `iters` が両腕とも欠落している場合に `None == None` や `{None} ==
+    {None}` で「完全一致」と誤判定しないことを保証する（欠落は「一致が
+    確認できていない」であって「一致」ではない）
     """
     if len(before_rows) != rounds or len(after_rows) != rounds:
         return "undetermined", {
             "reason": f"expected exactly {rounds} rows each (before={len(before_rows)}, "
             f"after={len(after_rows)})"
         }
-    before_warmup = {r.get("warmup") for r in before_rows}
-    after_warmup = {r.get("warmup") for r in after_rows}
-    before_iters = {r.get("iters") for r in before_rows}
-    after_iters = {r.get("iters") for r in after_rows}
+
+    all_rows = before_rows + after_rows
+    for r in all_rows:
+        warmup = r.get("warmup")
+        if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < 0:
+            return "undetermined", {
+                "reason": f"missing or invalid warmup (expected non-negative int): {warmup!r}"
+            }
+        iters = r.get("iters")
+        if not isinstance(iters, int) or isinstance(iters, bool) or iters <= 0:
+            return "undetermined", {
+                "reason": f"missing or invalid iters (expected positive int): {iters!r}"
+            }
+        median_s = r.get("median_s")
+        if (
+            not isinstance(median_s, (int, float))
+            or isinstance(median_s, bool)
+            or not math.isfinite(median_s)
+            or median_s <= 0
+        ):
+            return "undetermined", {
+                "reason": f"missing, non-finite, or non-positive median_s: {median_s!r}"
+            }
+        checksum = r.get("checksum")
+        if (
+            checksum is None
+            or isinstance(checksum, bool)
+            or not isinstance(checksum, (int, float))
+        ):
+            return "undetermined", {
+                "reason": f"missing or non-numeric checksum: {checksum!r}"
+            }
+
+    before_warmup = {r["warmup"] for r in before_rows}
+    after_warmup = {r["warmup"] for r in after_rows}
+    before_iters = {r["iters"] for r in before_rows}
+    after_iters = {r["iters"] for r in after_rows}
     if len(before_warmup) != 1 or len(after_warmup) != 1 or before_warmup != after_warmup:
         return "undetermined", {"reason": "warmup mismatch between before/after"}
     if len(before_iters) != 1 or len(after_iters) != 1 or before_iters != after_iters:
         return "undetermined", {"reason": "iters mismatch between before/after"}
-
-    all_rows = before_rows + after_rows
-    for r in all_rows:
-        median_s = r.get("median_s")
-        if not isinstance(median_s, (int, float)) or isinstance(median_s, bool) or median_s <= 0:
-            return "undetermined", {
-                "reason": f"missing or non-positive median_s: {median_s!r}"
-            }
-        if "checksum" not in r or r.get("checksum") is None:
-            return "undetermined", {"reason": "missing checksum"}
 
     before_medians = [r["median_s"] for r in before_rows]
     after_medians = [r["median_s"] for r in after_rows]

@@ -138,7 +138,7 @@ class JudgeInferAbTest(unittest.TestCase):
         after = [_rec("reuse", 0.008, checksum=None) for _ in range(5)]
         code, out = self._run(before, after)
         self.assertEqual(code, 2, out)
-        self.assertIn("missing checksum", out)
+        self.assertIn("missing or non-numeric checksum", out)
 
     def test_undetermined_when_checksum_key_absent(self):
         before_rows = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
@@ -147,7 +147,7 @@ class JudgeInferAbTest(unittest.TestCase):
             del r["checksum"]
         code, out = self._run(before_rows, after_rows)
         self.assertEqual(code, 2, out)
-        self.assertIn("missing checksum", out)
+        self.assertIn("missing or non-numeric checksum", out)
 
     def test_undetermined_when_median_s_missing(self):
         before = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
@@ -160,6 +160,68 @@ class JudgeInferAbTest(unittest.TestCase):
     def test_undetermined_when_median_s_non_positive(self):
         before = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
         after = [_rec("reuse", 0.0, checksum=1.5) for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+
+    def test_undetermined_when_median_s_is_infinite(self):
+        """codex-review 指摘: `median_s` が +Infinity のとき ratio=0 に
+        より非後退が成立してしまい ADOPT へ誤って倒れるのを防ぐ。"""
+        before = [_rec("reuse", float("inf"), checksum=1.5) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+        self.assertIn("median_s", out)
+
+    def test_undetermined_when_median_s_is_nan(self):
+        before = [_rec("reuse", float("nan"), checksum=1.5) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+
+    def test_undetermined_when_checksum_is_string(self):
+        """codex-review 指摘: `checksum` が None 以外の非数値（文字列・
+        空配列等）でも「一致」として ADOPT に採用されてしまうのを防ぐ。"""
+        before = [_rec("reuse", 0.010, checksum="1.5") for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum="1.5") for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+        self.assertIn("checksum", out)
+
+    def test_undetermined_when_checksum_is_empty_list(self):
+        before = [_rec("reuse", 0.010, checksum=[]) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=[]) for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+
+    def test_undetermined_when_warmup_missing_on_both_sides(self):
+        """codex-review 指摘: `warmup` が両腕とも欠落（`None`）のとき
+        `{None} == {None}` を「一致」と誤判定せず undetermined に倒す。"""
+        before = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
+        for r in before + after:
+            r["warmup"] = None
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+        self.assertIn("warmup", out)
+
+    def test_undetermined_when_iters_missing_on_both_sides(self):
+        before = [_rec("reuse", 0.010, checksum=1.5) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
+        for r in before + after:
+            del r["iters"]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+        self.assertIn("iters", out)
+
+    def test_undetermined_when_warmup_negative(self):
+        before = [_rec("reuse", 0.010, checksum=1.5, warmup=-1) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
+        code, out = self._run(before, after)
+        self.assertEqual(code, 2, out)
+
+    def test_undetermined_when_iters_non_positive(self):
+        before = [_rec("reuse", 0.010, checksum=1.5, iters=0) for _ in range(5)]
+        after = [_rec("reuse", 0.008, checksum=1.5) for _ in range(5)]
         code, out = self._run(before, after)
         self.assertEqual(code, 2, out)
 

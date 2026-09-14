@@ -20,6 +20,21 @@ fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).unwrap()
 }
 
+/// `Tensor<f32>` を [`f32::to_bits`] のビット列へ変換する（cursor 指摘
+/// 対応: `assert_eq!` による `&[f32]` 比較は IEEE 754 の `+0.0 == -0.0`
+/// で符号付きゼロを区別できず「bit 完全一致」の検証にならないため、
+/// `linear_forward_device_tracked_matches_linear_forward_device_and_
+/// leaves_token_unset` の判定に用いる。`predict_device_chain_cpu_bit_
+/// exact.rs` の `bits_vec` と同型）。
+fn bits_vec(t: &Tensor<f32>) -> Vec<u32> {
+    t.contiguous()
+        .as_slice()
+        .expect("contiguous() 直後は必ず as_slice() が Some を返す")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect()
+}
+
 /// テンソル同士の統一複合判定（codex-review・イシュー #1216 指摘対応）。
 /// 独自の `f32` 分母固定 `assert_close` ではなく、REQ-2 の唯一の実体である
 /// [`fandhe_ai_backend_cpu::assert_parity`]（`f64` で差を計算し両値の
@@ -448,8 +463,8 @@ fn linear_forward_device_tracked_matches_linear_forward_device_and_leaves_token_
                 );
 
                 assert_eq!(
-                    actual.contiguous().as_slice().unwrap(),
-                    expected.contiguous().as_slice().unwrap(),
+                    bits_vec(&actual),
+                    bits_vec(&expected),
                     "linear_forward_device_tracked は linear_forward_device と bit 完全一致 \
                      するはず: m={m} k={k} n={n} has_bias={has_bias} act={act:?}"
                 );
