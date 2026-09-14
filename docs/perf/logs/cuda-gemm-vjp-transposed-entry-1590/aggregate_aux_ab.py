@@ -24,10 +24,12 @@ gemm_transposed_perf.log` で実測確認済み）:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import re
 import statistics
 import sys
+import tempfile
 from pathlib import Path
 
 SHAPE_RE = re.compile(
@@ -110,7 +112,44 @@ def aggregate(run_texts: list[str]) -> list[dict]:
 
 
 class ValidationError(ValueError):
-    """`validate_run_texts` が不完全・重複入力を検出した場合に送出する。"""
+    """`validate_run_texts`／`validate_no_duplicate_logs` が不完全・重複入力を
+    検出した場合に送出する。"""
+
+
+def validate_no_duplicate_logs(paths: list[Path]) -> None:
+    """同一ログファイルの重複指定を検出する（codex-review 指摘・PR #1812）。
+
+    `docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux/
+    gemm_transposed_perf_run{1..5}.log` を 5 回とも異なる起動のログとして
+    指定する必要があるが、`validate_run_texts` の起動数・形状検査だけでは
+    同一の完全なログファイルを 5 回指定しても（各ログはそれぞれ 8 形状を
+    ちょうど 1 件ずつ含むため）通過してしまい、実質 1 起動分の計測を
+    `n_runs=5` の正式表として出力できてしまう。
+
+    実体パス（`Path.resolve()` によるシンボリックリンク解決込みの絶対
+    パス）の重複と、内容（SHA-256 ハッシュ）の重複の両方を fail-closed で
+    検出する。前者は同一パスの literal な再指定（同一ファイルを異なる
+    表記で複数回指定した場合を含む）を、後者はコピーによる複製ファイルを
+    別々に指定した場合を捕捉する。違反時は `ValidationError` を送出する。
+    """
+    seen_paths: dict[Path, int] = {}
+    seen_hashes: dict[str, int] = {}
+    for idx, path in enumerate(paths, start=1):
+        resolved = path.resolve()
+        if resolved in seen_paths:
+            raise ValidationError(
+                f"run{idx}: run{seen_paths[resolved]} と同一の実体パスが指定されて"
+                f"いる（重複指定の疑い）: {resolved}"
+            )
+        seen_paths[resolved] = idx
+
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest in seen_hashes:
+            raise ValidationError(
+                f"run{idx}: run{seen_hashes[digest]} と内容が完全に一致する"
+                f"（コピーによる重複指定の疑い。sha256={digest}）: {path}"
+            )
+        seen_hashes[digest] = idx
 
 
 def validate_run_texts(
@@ -252,6 +291,50 @@ def _self_test() -> int:
     except ValidationError:
         pass
 
+    # `validate_no_duplicate_logs` の検査（同一ログの重複指定検出。
+    # codex-review 指摘・PR #1812）。実ファイルを一時ディレクトリへ書き
+    # 出して検証する（`Path.resolve()`・sha256 の実挙動を確認するため）。
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        run_a = tmp / "run1.log"
+        run_b = tmp / "run2.log"
+        run_a.write_text(full_runs[0], encoding="utf-8")
+        run_b.write_text(full_runs[1], encoding="utf-8")
+
+        # 正常系: 異なるパス・異なる内容なら例外を送出しない。
+        validate_no_duplicate_logs([run_a, run_b])
+
+        # 異常系 1: 同一パスを複数回指定（同じ完全なログファイルを 5 回
+        # 指定した場合の最小再現）。
+        try:
+            validate_no_duplicate_logs([run_a, run_a])
+            raise AssertionError("expected ValidationError for same path twice")
+        except ValidationError:
+            pass
+
+        # 異常系 2: 別名だが実体パスが同一（symlink 経由の重複指定）。
+        link = tmp / "run1_alias.log"
+        try:
+            link.symlink_to(run_a)
+            try:
+                validate_no_duplicate_logs([run_a, link])
+                raise AssertionError("expected ValidationError for symlink alias")
+            except ValidationError:
+                pass
+        except OSError:
+            # symlink 権限がない実行環境（一部 CI サンドボックス）では
+            # このサブケースのみ許容してスキップする。
+            pass
+
+        # 異常系 3: パスは異なるが内容が完全に一致するコピーファイル。
+        run_a_copy = tmp / "run1_copy.log"
+        run_a_copy.write_text(full_runs[0], encoding="utf-8")
+        try:
+            validate_no_duplicate_logs([run_a, run_a_copy])
+            raise AssertionError("expected ValidationError for duplicated content")
+        except ValidationError:
+            pass
+
     print("self-test OK")
     return 0
 
@@ -283,6 +366,13 @@ def main(argv: list[str]) -> int:
 
     if not args.logs:
         parser.error("少なくとも 1 つのログファイルを指定するか --self-test を使うこと")
+
+    if not args.skip_validation:
+        try:
+            validate_no_duplicate_logs(args.logs)
+        except ValidationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     run_texts = []
     for path in args.logs:

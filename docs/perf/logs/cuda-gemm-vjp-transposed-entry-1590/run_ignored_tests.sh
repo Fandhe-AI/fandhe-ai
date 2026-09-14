@@ -32,6 +32,14 @@ SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT_DIR="${SELF_DIR}/ignored"
 AUX_DIR="${SELF_DIR}/aux"
 mkdir -p "$OUT_DIR" "$AUX_DIR"
+# 再実行時に前回の aux/ ログを残さない（codex-review 指摘・PR #1812）。
+# `AUX_TREE` 未指定で再実行すると SKIPPED.txt と過去の完全な 5 ログが
+# 共存し、`aggregate_aux_ab.py` の起動数・8 形状検査だけではそれが
+# 「今回の実行結果」なのか「前回の生き残り」なのか区別できない。実行の
+# たびに aux/ を空にしてから開始することで、この回の実行が完走したかどうか
+# だけで判定できる状態を保証する（実行途中で中断された場合も、次回実行
+# 開始時に必ず一掃されるため古いログとの混在は起きない）。
+rm -f "$AUX_DIR"/gemm_transposed_perf_run*.log "$AUX_DIR/SKIPPED.txt"
 REPO_ROOT="${REPO_ROOT:-$(cd "$SELF_DIR/../../../.." && pwd)}"
 cd "$REPO_ROOT" || exit 1
 
