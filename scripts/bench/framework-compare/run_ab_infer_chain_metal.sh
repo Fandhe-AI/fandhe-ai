@@ -4,12 +4,31 @@
 # upload・各層は encode-only・チェーン末尾で 1 回だけ download」へ
 # 置き換えた変更の framework-compare 実践規模 A/B。
 #
-# before = 本ブランチのベース（origin/main。#1580 適用前）、after = 本
-# ブランチ（`crates/*/src` は評価対象コミットと同一）を、それぞれ別
-# ツリーへ展開した `crates/facade` への `[patch.crates-io.fandhe-ai]`
-# path patch で 2 本の `bench-fandhe` バイナリとしてビルドし、5 round・
-# run 単位で起動順を反転しながら交互実行する（`run_ab_dinput_sync_
-# metal.sh` の `--task infer` 版）。
+# codex-review 指摘対応: 単一同期チェーン実装（`DeviceParamStore::
+# predict_device_chain`・`Sequential::predict_resident` の chain 経路
+# 優先化）は本 PR（#1580）ではなく #1688（PR #1788・コミット
+# `87b1e338`）で main へ着地済みであり、本 PR は実機テスト・A/B
+# スキャフォールド・perf doc の追加のみで `crates/*/src` を変更しない
+# （`docs/perf/metal-infer-chain-single-sync.md` §1）。そのため before
+# を単純に「本ブランチのベース（origin/main）」とすると、main が既に
+# チェーン実装を含むため両腕とも新経路になり、旧経路（層境界ごとに
+# D2H→H2D）との比較にならない。
+#
+# before = #1688 導入前の具体的コミット `edb85c43`（`87b1e338`＝#1688の
+# 直前の親コミット。`git log --oneline 87b1e338~1 -1` で確認可能。旧
+# 経路: `predict_resident` が層境界ごとに D2H→H2D する）
+# after  = 本ブランチ head（`87b1e338` 以降。新経路: 入力を 1 回だけ
+# upload・各層は encode-only・チェーン末尾で 1 回だけ download）
+#
+# それぞれ別ツリーへ展開した `crates/facade` への
+# `[patch.crates-io.fandhe-ai]` path patch で 2 本の `bench-fandhe`
+# バイナリとしてビルドし、5 round・run 単位で起動順を反転しながら
+# 交互実行する（`run_ab_dinput_sync_metal.sh` の `--task infer` 版）。
+# 実測時は `build_arm` が両腕の facade path の `git rev-parse HEAD` を
+# `$OUT/git-sha-{before,after}-<label>.txt` へ記録するため、実測ログに
+# 両腕の SHA を必ず残すこと（このコメントが記す `edb85c43`／`87b1e338`
+# 以降という意図どおりのツリーを指しているかを事後に確認できるように
+# するため）。
 #
 # `--task infer` は `compare_gemm_ab.py` が `--task train` 限定でしか
 # `--phases` を受け付けないため（同スクリプトの既存ガード。他イシューと
@@ -28,6 +47,9 @@
 #   AB_BEFORE_FACADE_PATH=/home/<user>/work/rust-ai-library-run-1580-before/crates/facade \
 #   AB_AFTER_FACADE_PATH=/home/<user>/work/rust-ai-library-run-1580-after/crates/facade \
 #     bash run_ab_infer_chain_metal.sh 1580
+#
+# （AB_BEFORE_FACADE_PATH は `git checkout edb85c43` 済みのツリー、
+#  AB_AFTER_FACADE_PATH は本ブランチ head 済みのツリーを指すこと）
 #
 # 出力は他の run_ab_*.sh と同じ「失敗を捏造しない」方針（skipped ログへ
 # 記録・非 0 終了。security.md A08）。専有ゲートは設けず record_only
@@ -132,6 +154,15 @@ build_arm() { # build_arm <arm> <facade_path> <target_dir>
   else
     shasum -a 256 "$OUT/bench-fandhe-${arm}-${LABEL}" >"$OUT/sha-${arm}-${LABEL}.txt"
   fi
+  # codex-review 指摘対応: before/after が意図どおりの旧経路／新経路の
+  # ツリーを指しているかを実測ログのみから事後確認できるよう、各腕の
+  # facade path の git commit SHA を記録する（`run_ab_gemm_metal.sh` の
+  # `AFTER_SOURCE_HEAD_SHA` 記録と同型のパターン）。git 管理下にない
+  # ツリー（tarball 展開等）でも実行を止めないよう非 0 終了は許容する。
+  local facade_git_sha
+  facade_git_sha="$(git -C "$facade" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "$facade_git_sha" >"$OUT/git-sha-${arm}-${LABEL}.txt"
+  echo "== facade git sha ($arm): $facade_git_sha =="
 }
 
 echo "== build before ==(facade=$BEFORE_FACADE)"
@@ -139,6 +170,18 @@ build_arm before "$BEFORE_FACADE" "target-ab-infer-chain-${LABEL}-before"
 echo "== build after  ==(facade=$AFTER_FACADE)"
 build_arm after "$AFTER_FACADE" "target-ab-infer-chain-${LABEL}-after"
 cat "$OUT"/tree-*-"${LABEL}".txt
+
+# codex-review 指摘対応: before/after が誤って同一コミットのツリーを
+# 指していると、両腕とも新経路（またはどちらも旧経路）のまま計測が
+# 進んでしまい、旧経路 vs 新経路の比較として成立しないまま ADOPT/REJECT
+# が確定しうる。両腕の facade git SHA が判明していて（`unknown` でなく）
+# かつ一致する場合は fail-closed に中止する。
+BEFORE_GIT_SHA="$(cat "$OUT/git-sha-before-${LABEL}.txt")"
+AFTER_GIT_SHA="$(cat "$OUT/git-sha-after-${LABEL}.txt")"
+if [[ "$BEFORE_GIT_SHA" != "unknown" && "$AFTER_GIT_SHA" != "unknown" && "$BEFORE_GIT_SHA" == "$AFTER_GIT_SHA" ]]; then
+  echo "error: before/after の facade が同一コミット ($BEFORE_GIT_SHA) を指している。before は #1688（コミット 87b1e338）導入前の edb85c43 相当、after は本ブランチ head を指すこと" >&2
+  exit 1
+fi
 
 BIN_BEFORE="$OUT/bench-fandhe-before-${LABEL}"
 BIN_AFTER="$OUT/bench-fandhe-after-${LABEL}"

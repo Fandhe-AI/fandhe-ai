@@ -68,12 +68,34 @@ cargo test -p fandhe-ai --release --test infer_device_chain_metal -- --ignored -
 
 ### 3.2 framework-compare A/B（`run_ab_infer_chain_metal.sh`）
 
+**codex-review 指摘対応（2026-09-14）**: コア実装（単一同期チェーン。
+§1 参照）は本 PR（#1580）ではなく #1688（PR #1788・コミット
+`87b1e338`）で main へ既に着地済みである。before を単純に「本ブランチの
+ベース（`origin/main`）」とすると main が既にチェーン実装を含むため
+両腕とも新経路になり、旧経路（層境界ごとに D2H→H2D）との比較として
+成立しない。したがって実測時は以下の 2 本のツリーを用意すること:
+
+- `AB_BEFORE_FACADE_PATH`: `edb85c43`（`87b1e338`＝#1688 の直前の親
+  コミット。`git log --oneline 87b1e338~1 -1` で確認可能。旧経路）
+  を `git checkout` した `crates/facade`
+- `AB_AFTER_FACADE_PATH`: 本ブランチ head（`87b1e338` 以降。新経路）
+  の `crates/facade`
+
 ```sh
-AB_BEFORE_FACADE_PATH=/absolute/path/to/before/crates/facade \
-AB_AFTER_FACADE_PATH=/absolute/path/to/after/crates/facade \
+AB_BEFORE_FACADE_PATH=/absolute/path/to/edb85c43-checkout/crates/facade \
+AB_AFTER_FACADE_PATH=/absolute/path/to/head-checkout/crates/facade \
   bash scripts/bench/framework-compare/run_ab_infer_chain_metal.sh 1580
 ```
 
+`run_ab_infer_chain_metal.sh` はビルド時に両腕の facade path の
+`git rev-parse HEAD` を `results/raw/git-sha-{before,after}-1580.txt`
+へ記録し、両腕が同一コミットを指す場合は fail-closed に中止する
+（codex-review 指摘対応）。実測記録には必ずこの 2 ファイルの内容
+（両腕の commit SHA）を転記すること。
+
+- `before` facade git SHA（期待値 `edb85c43` 相当）: 記入欄
+- `after` facade git SHA（期待値: 実測時点の本ブランチ head。都度
+  `git rev-parse HEAD` で確認し、この記入欄へ実際の SHA を転記する）: 記入欄
 - `mode=reuse`（判定対象）: `before_median_s` / `after_median_s` / `ratio` / `checksum_exact_match` — 記入欄
 - `mode=fresh`（対照）: 同上（参考記録） — 記入欄
 - 総合判定（ADOPT／REJECT／undetermined）: 記入欄
