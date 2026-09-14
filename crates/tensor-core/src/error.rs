@@ -110,21 +110,15 @@ pub enum ShapeError {
     /// 超える。
     ///
     /// `backend-cpu::sort_topk`（`BackendOps::sort`／`topk` の CPU
-    /// 実装本体）は `orig_idx as i32` のような無検査キャストを行うと
-    /// `i32::MAX` 超の添字が負数へ折り返り、呼び出し側が不正な添字を
-    /// 正当な結果として受け取ってしまう（codex-review 指摘。
-    /// `.claude/rules/security.md` A08 の「判定迂回経路を作らない」に
-    /// 基づき `i32::try_from` で検査してから返す）。`dim` 軸のサイズが
+    /// 実装本体）・`fandhe_ai_autodiff::eval::sort`／`eval::topk`
+    /// （`BackendOps` が `Unsupported` を返したときのみ使われる
+    /// ホスト参照実装。CUDA／Metal は #1741 未実装のため現状は
+    /// こちらが実行される）はいずれも `orig_idx as i32` のような
+    /// 無検査キャストではなく `i32::try_from(orig_idx)` で検査し、
+    /// 失敗時に本 variant を返す（codex-review 指摘・PR #1818。
+    /// `.claude/rules/security.md` A08 の「判定迂回経路を作らない」
+    /// に基づき、両実装で同一の添字契約を満たす）。`dim` 軸のサイズが
     /// `i32::MAX` を超える巨大テンソルでのみ構築されうる。
-    ///
-    /// `fandhe_ai_autodiff::eval::sort`／`eval::topk`（`BackendOps` が
-    /// `Unsupported` を返したときのみ使われるホスト参照実装。CUDA／
-    /// Metal は #1741 未実装のため現状はこちらが実行される）は同型の
-    /// `orig_idx as i32` を持つが、当該モジュールは「shape が既に
-    /// 整合していることを前提とし `ShapeError` を返さない」契約
-    /// （`eval.rs` モジュール doc）のため本 variant を返す経路には
-    /// 含めていない。同型箇所として存在は把握しているが、契約変更を
-    /// 伴う本件のスコープ外として別イシューへ引き継ぐ。
     IndexRangeOverflow { index: usize },
 }
 
