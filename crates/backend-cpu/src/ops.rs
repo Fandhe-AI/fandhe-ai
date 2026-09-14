@@ -615,6 +615,17 @@ impl BackendOps for CpuBackendOps {
     /// （`fandhe_ai_tensor_core::backend_ops::default_gemm_batched`）と
     /// 同じ規則を持つ [`fandhe_ai_tensor_core::normalize_batched_operand`]
     /// を再利用し、正規化ロジックを 2 重管理しない。
+    ///
+    /// 出力要素数の検証は
+    /// [`fandhe_ai_tensor_core::checked_gemm_batched_output_len`]
+    /// （`default_gemm_batched` と共有する単一情報源。PR #1810
+    /// codex-review P1 是正）へ委譲する。以前は `usize` オーバーフロー
+    /// のみを検査していたため、要素数が `usize` の範囲に収まっても
+    /// `f32` 要素込みのバイトサイズが `Vec` の allocation 上限
+    /// （`isize::MAX` バイト）を超える巨大なバッチ次元では
+    /// `zeroed_output` 内の `Vec` 確保が capacity overflow でパニック
+    /// していた（本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`
+    /// に反する）。
     fn gemm_batched(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         let plan = fandhe_ai_tensor_core::batched_matmul_plan(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
@@ -629,12 +640,18 @@ impl BackendOps for CpuBackendOps {
         let a_norm = fandhe_ai_tensor_core::normalize_batched_operand(a, plan.batch_shape(), m, k)?;
         let b_norm = fandhe_ai_tensor_core::normalize_batched_operand(b, plan.batch_shape(), k, n)?;
 
-        let mn = m.checked_mul(n).ok_or_else(|| {
-            BackendError::InvalidArgument("gemm_batched: m * n overflowed usize".into())
-        })?;
-        let total = batch_len.checked_mul(mn).ok_or_else(|| {
-            BackendError::InvalidArgument("gemm_batched: batch_len * m * n overflowed usize".into())
-        })?;
+        // `mn`（バッチ 1 件あたりの要素数）はスライス幅としてループ内で
+        // 直接使うため、共有ヘルパーの内部計算とは別に checked_mul で
+        // 求めておく（`total / batch_len` によるスライス幅復元は
+        // `batch_len == 0`〈`plan.batch_shape` が非空でもいずれかの
+        // バッチ軸が 0 サイズなら成立しうる〉で 0 除算パニックになる
+        // ため避ける）。
+        let mn = m
+            .checked_mul(n)
+            .ok_or(ShapeError::ElementCountOverflow)
+            .map_err(BackendError::ShapeMismatch)?;
+        let total = fandhe_ai_tensor_core::checked_gemm_batched_output_len(batch_len, m, n)
+            .map_err(BackendError::ShapeMismatch)?;
         let mut out = zeroed_output(total);
 
         for i in 0..batch_len {

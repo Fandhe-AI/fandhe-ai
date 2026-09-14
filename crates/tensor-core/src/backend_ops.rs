@@ -2085,6 +2085,41 @@ pub trait BackendOps {
     }
 }
 
+/// [`default_gemm_batched`]（CUDA／Metal が経由する既定合成実装）と
+/// `crates/backend-cpu::CpuBackendOps::gemm_batched`（専用オーバーライド
+/// 実装）が共有する、バッチ GEMM 出力バッファの要素数を確保前に検証する
+/// ヘルパー（PR #1810 codex-review P1 是正・イシュー #1715）。
+///
+/// `batch_len * m * n` の素朴な乗算は、結果が `usize` の範囲を超える
+/// 巨大なバッチ次元では debug ビルドで overflow-checks によりパニック
+/// し、release ビルドでは静かにラップして誤ったバッファサイズを生む
+/// （本番経路 panic／未定義挙動禁止規約 `.claude/rules/coding-rust.md`
+/// に反する）。加えて要素数が `usize` の範囲に収まっても `f32` 要素込み
+/// のバイトサイズが `Vec` の allocation 上限（`isize::MAX` バイト）を
+/// 超えると `Vec::with_capacity` が capacity overflow でパニックする
+/// （`crate::tensor::checked_numel_for` と同じ理由だが、同関数は
+/// `pub(crate)` でクレート外〈`backend-cpu` 等〉から呼べないため、本関数
+/// を新設して両者が共有する単一情報源とする）。`ShapeError::
+/// ElementCountOverflow` は両方のケースを表す型付きエラーとして
+/// `checked_numel_for` と同じ規約で再利用する。
+pub fn checked_gemm_batched_output_len(
+    batch_len: usize,
+    m: usize,
+    n: usize,
+) -> Result<usize, ShapeError> {
+    let mn = m.checked_mul(n).ok_or(ShapeError::ElementCountOverflow)?;
+    let total = batch_len
+        .checked_mul(mn)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let bytes = total
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+    Ok(total)
+}
+
 /// [`BackendOps::gemm_batched`]／[`BackendOps::gemm_batched_fp32_strict`]
 /// の既定合成実装が各バッチにどちらの 2 次元カーネルへ委譲するかを表す
 /// （イシュー #1715）。
@@ -2146,7 +2181,22 @@ fn default_gemm_batched<T: BackendOps + ?Sized>(
     let a_norm = normalize_batched_operand(a, plan.batch_shape(), m, k)?;
     let b_norm = normalize_batched_operand(b, plan.batch_shape(), k, n)?;
 
-    let mut out_data: Vec<f32> = Vec::with_capacity(batch_len * m * n);
+    // 出力要素数を確保前に検証する（PR #1810 codex-review P1 是正）。
+    // 以前は `Vec::with_capacity(batch_len * m * n)` を素朴な乗算で
+    // 呼んでいたため、`batch_len * m * n` が `usize` の範囲を超える
+    // 巨大なバッチ次元では debug ビルドで overflow-checks によりパニック
+    // し、release ビルドでは静かにラップして誤ったバッファサイズを生む
+    // （本番経路 panic／未定義挙動禁止規約 `.claude/rules/coding-rust.md`
+    // に反する）。加えて要素数が `usize` の範囲に収まっても `f32` 要素
+    // 込みのバイトサイズが `Vec` の allocation 上限（`isize::MAX`
+    // バイト）を超えると `Vec::with_capacity` が capacity overflow で
+    // パニックする（`crate::tensor::checked_numel_for` と同じ理由。
+    // 同関数は `pub(crate)` でクレート外〈`backend-cpu` 等〉から呼べない
+    // ため、[`checked_gemm_batched_output_len`] を新設して両者が共有する
+    // 単一情報源とする）。
+    let total =
+        checked_gemm_batched_output_len(batch_len, m, n).map_err(BackendError::ShapeMismatch)?;
+    let mut out_data: Vec<f32> = Vec::with_capacity(total);
     for i in 0..batch_len {
         let a_i = a_norm
             .narrow(0, i, 1)
@@ -3384,5 +3434,42 @@ mod tests {
             err,
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         ));
+    }
+
+    /// [`checked_gemm_batched_output_len`] 単体の境界値検証（PR #1810
+    /// codex-review P1 是正）。`batch_len * m * n` 自体は `usize` の
+    /// 範囲に収まっても、`f32` 要素込みのバイトサイズが `Vec` の
+    /// allocation 上限（`isize::MAX` バイト）を超える場合は
+    /// `ElementCountOverflow` を返す（実際の確保を試みない）。
+    #[test]
+    fn checked_gemm_batched_output_len_rejects_byte_size_overflow() {
+        let huge_batch = isize::MAX as usize / 4 + 1;
+        let err = checked_gemm_batched_output_len(huge_batch, 1, 1).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn checked_gemm_batched_output_len_rejects_usize_overflow() {
+        let err = checked_gemm_batched_output_len(usize::MAX, 2, 2).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn checked_gemm_batched_output_len_accepts_in_range_size() {
+        assert_eq!(checked_gemm_batched_output_len(3, 4, 5).unwrap(), 60);
+    }
+
+    /// [`default_gemm_batched`]（CUDA／Metal が経由する既定合成実装）
+    /// 経由でも、出力バイトサイズが `isize::MAX` を超える巨大なバッチ
+    /// 次元は実際の確保を試みずに `BackendError::ShapeMismatch` を
+    /// 返す（`k = 0` の shape でテスト自体は実データを確保しない）。
+    #[test]
+    fn gemm_batched_huge_batch_output_bytes_overflow_is_shape_mismatch_not_panic() {
+        let huge_batch = isize::MAX as usize / 4 + 1;
+        let ops = NaiveMockOps;
+        let a = Tensor::new(Vec::<f32>::new(), &[huge_batch, 1, 0]).unwrap();
+        let b = Tensor::new(Vec::<f32>::new(), &[huge_batch, 0, 1]).unwrap();
+        let err = ops.gemm_batched(&a, &b).unwrap_err();
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
     }
 }

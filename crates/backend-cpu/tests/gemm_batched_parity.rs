@@ -228,6 +228,32 @@ fn gemm_batched_zero_batch_returns_empty_output() {
     assert_eq!(out.numel(), 0);
 }
 
+/// 出力要素数のバイトサイズが `Vec` の allocation 上限（`isize::MAX`
+/// バイト）を超える巨大なバッチ次元は、実際に確保を試みてパニックする
+/// のではなく `BackendError::ShapeMismatch` を返す（PR #1810
+/// codex-review P1 是正の回帰テスト）。
+///
+/// `B = isize::MAX as usize / 4 + 1` を選ぶと `B * size_of::<f32>()`
+/// （`m = n = 1` なので出力要素数は `B` に一致）がちょうど
+/// `isize::MAX` を 1 バイト超える。入力オペランドは `k = 0`（内部次元
+/// 0）の shape `[B, 1, 0]`／`[B, 0, 1]` を用いることで、要素数積が
+/// 0（`B * 1 * 0 = 0`）になり `Tensor::new` 自体は巨大な `B` でも
+/// 実データを 1 バイトも確保せずに構築できる（テスト自体がメモリを
+/// 消費しないことを保証する）。
+#[test]
+fn gemm_batched_huge_batch_output_bytes_overflow_is_shape_mismatch_not_panic() {
+    let huge_batch = isize::MAX as usize / 4 + 1;
+    let ops = CpuBackendOps::new();
+    let a = tensor(Vec::new(), &[huge_batch, 1, 0]);
+    let b = tensor(Vec::new(), &[huge_batch, 0, 1]);
+
+    let err = ops.gemm_batched(&a, &b).unwrap_err();
+    assert!(matches!(err, BackendError::ShapeMismatch(_)));
+
+    let err = ops.gemm_batched_fp32_strict(&a, &b).unwrap_err();
+    assert!(matches!(err, BackendError::ShapeMismatch(_)));
+}
+
 /// `gemm_batched_fp32_strict` は CPU（TF32 の概念を持たない）では
 /// `gemm_batched` と bit 同一。
 #[test]
