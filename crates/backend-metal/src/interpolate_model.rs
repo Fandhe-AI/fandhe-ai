@@ -75,8 +75,20 @@ fn nearest_src_coord(dst: usize, in_size: usize, out_size: usize) -> usize {
 /// ②[`fandhe_ai_tensor_core::interpolate_out_shape`]（rank・空間軸
 /// サイズ・出力要素数オーバーフロー検査）→ ③出力要素数が 0 なら
 /// 早期 `Ok(0)` → ④出力要素数が `u32` へ収まること → ⑤`input` の
-/// 実スライス長が `in_shape` の要素数積と一致すること。戻り値は出力
-/// 要素数（`numel`。0 の場合はカーネル起動不要を呼び出し元へ伝える）。
+/// 実スライス長が `in_shape` の要素数積と一致すること → ⑥`in_shape`
+/// の行優先ストライド（`crate::interpolate::row_major_strides_u32` が
+/// カーネル引数 `constant uint*` へ渡す値と同じ計算）が各軸とも `u32`
+/// へ収まること。
+///
+/// ⑥は①（各次元単体の `u32` 収容）だけでは保証されない: 例えば
+/// `in_shape=[2,65536,65536]` は各次元とも `u32::MAX` 未満だが、先頭軸
+/// のストライド（`65536 * 65536 = 4294967296 = 2^32`）は `u32` に収まらず
+/// `as u32` で `0` へ切り詰まる。切り詰まったストライドをカーネルへ
+/// 渡すとバックエンド間数値一致契約（`.claude/rules/coding-rust.md`）
+/// に反する誤読（2 番目以降の batch が先頭 batch を読み直す等）を
+/// 引き起こすため、切り詰め前にここで検出し型付きエラーを返す
+/// （イシュー #1834 codex-review P1 是正）。戻り値は出力要素数
+/// （`numel`。0 の場合はカーネル起動不要を呼び出し元へ伝える）。
 pub fn validate_interpolate_launch(
     input: &[f32],
     in_shape: &[usize],
@@ -109,6 +121,13 @@ pub fn validate_interpolate_launch(
             actual: input.len(),
         });
     }
+
+    for &stride in row_major_strides(in_shape).iter() {
+        if stride > u32::MAX as usize {
+            return Err(ShapeError::ElementCountOverflow);
+        }
+    }
+
     Ok(numel)
 }
 
@@ -272,6 +291,24 @@ mod tests {
     fn validate_interpolate_launch_rejects_rank_mismatch() {
         let err = validate_interpolate_launch(&[1.0, 2.0], &[2], &[3, 3], &[3, 3]).unwrap_err();
         assert!(matches!(err, ShapeError::RankMismatch { .. }));
+    }
+
+    // イシュー #1834 codex-review P1 是正の回帰テスト。
+
+    #[test]
+    fn row_major_strides_axis0_overflows_u32_for_review_example_shape() {
+        // レビュー指摘の再現形状: `in_shape=[2,65536,65536]` は各次元
+        // とも `u32::MAX` 未満だが、先頭軸のストライド
+        // `65536 * 65536 = 2^32` は `u32` に収まらず `as u32` で `0`
+        // へ切り詰まる（`validate_interpolate_launch` が是正前に
+        // 見逃していたケース）。総要素数（約 172 億バイト）を実際に
+        // 確保するテストは非現実的なため、ストライド計算自体
+        // （`row_major_strides`。純粋関数・アロケーションなし）を
+        // 直接検証する。
+        let strides = row_major_strides(&[2, 65536, 65536]);
+        assert_eq!(strides, vec![65536usize * 65536, 65536, 1]);
+        assert!(strides[0] > u32::MAX as usize);
+        assert_eq!(strides[0] as u32, 0, "u32 へ切り詰めると 0 になる");
     }
 
     #[test]

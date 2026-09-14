@@ -2569,6 +2569,34 @@ fn interpolate_nearest_2d_leading_batch_axis_is_independent() {
     assert_eq!(dense_vec(dx), vec![2.0, 2.0, 2.0, 2.0]);
 }
 
+/// ⑤b 空の先頭軸（batch=0）を持つ入力を極端に大きい `size` へ
+/// interpolate する場合、forward・backward とも panic せず空勾配を
+/// 返すことを確認する（イシュー #1834 codex-review P1 是正:
+/// `grad::nearest_src_index_map` が `outer` に関わらず `sp_out_numel`
+/// 分の index 行を無条件確保していたため、`outer==0` のまま
+/// `size=[usize::MAX]` を渡すと capacity overflow で panic して
+/// いた）。`size` が大きいほど本来の不具合を再現しやすいが、テスト
+/// 実行時間を抑えるため `usize::MAX` 自体を使う（backward が
+/// `outer==0` で早期 return するため実際には走査されない）。
+#[test]
+fn interpolate_nearest_backward_empty_leading_axis_with_huge_size_does_not_panic() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&Tensor::<f32>::new(Vec::new(), &[0, 1]).unwrap());
+    let out = x
+        .interpolate(
+            &[usize::MAX],
+            fandhe_ai_tensor_core::InterpolateMode::Nearest,
+        )
+        .unwrap();
+    assert_eq!(out.to_tensor().shape(), &[0, usize::MAX]);
+
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[0, 1]);
+    assert!(dense_vec(dx).is_empty());
+}
+
 /// ⑥エラー経路: `size` が空（0 軸指定）だと `AutodiffError::Shape`
 /// （`RankMismatch { expected: 1, actual: 0 }`）を返す。
 #[test]

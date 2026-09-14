@@ -1453,12 +1453,27 @@ pub(crate) fn scatter(
 /// `out_size == 0` の場合は呼び出されない契約（呼び出し元が
 /// `interpolate_out_shape` で事前に拒否済み）だが、防御的に `0` を
 /// 返す（ゼロ除算 panic を避ける）。
+///
+/// 中間積 `dst * in_size` は `usize`（64bit 環境で最大約 1.8e19）を
+/// 素朴な乗算で計算すると overflow しうる（例: `[1]` を
+/// `broadcast_to` で `[1usize << 63]` へ拡張した view を `[3]` へ
+/// 縮小する interpolate では `dst=2` の `dst * in_size` が `2^63 * 2`
+/// を超える。backend-cpu クレートの `interpolate::nearest_src_coord`
+/// と同型の overflow）。`u128`（最大 2^128 - 1）へ昇格して積・除算を
+/// 行うことで、`dst`・`in_size` とも `usize::MAX` の場合でも `u128`
+/// の範囲に収まり overflow しない（本関数は `grad::
+/// nearest_src_index_map`〈backward の index 構築〉から forward
+/// バックエンドの成否に関わらず常に呼ばれるため、本番経路 panic
+/// 禁止規約に直結する。イシュー #1834 codex-review P1 是正）。
 pub(crate) fn nearest_src_coord(dst: usize, in_size: usize, out_size: usize) -> usize {
     if out_size == 0 || in_size == 0 {
         return 0;
     }
-    let src = (dst * in_size) / out_size;
-    src.min(in_size - 1)
+    let src = (dst as u128 * in_size as u128) / out_size as u128;
+    // `src < in_size <= usize::MAX` が `u128` 除算の結果として保証
+    // されるため（`dst < out_size` より `src < in_size`）、`as usize`
+    // への縮小は安全（真の値が `usize` の範囲を超えることはない）。
+    (src as usize).min(in_size - 1)
 }
 
 /// `interpolate`（`torch.nn.functional.interpolate(mode='nearest')`
@@ -2456,5 +2471,23 @@ mod concat_empty_out_shape_overflow_tests {
         let out = concat(&[], 0, &out_shape);
         assert_eq!(out.shape(), &out_shape);
         assert_eq!(out.numel(), 0);
+    }
+
+    // イシュー #1834 codex-review P1 是正: `nearest_src_coord`（`grad::
+    // nearest_src_index_map`〈backward の index 構築。forward の
+    // バックエンド成否に関わらず常に呼ばれる〉と `interpolate_nearest`
+    // 〈forward のホスト参照実装〉の単一情報源）の中間積 `dst *
+    // in_size` が `usize` を overflow しないことの回帰テスト。
+    #[test]
+    fn nearest_src_coord_does_not_overflow_for_huge_in_size() {
+        // `dst=2`・`in_size=2^63`・`out_size=3` は素朴な `usize` 乗算
+        // （`dst * in_size = 2^64`）が overflow する組み合わせ（debug
+        // ビルドでは overflow panic・release ビルドでは wrap して誤った
+        // 添字を返す）。backend-cpu クレートの `interpolate::nearest_src_coord` と同型の overflow・同型の是正。
+        let in_size = 1usize << 63;
+        let src = nearest_src_coord(2, in_size, 3);
+        let expected = ((2u128 * in_size as u128) / 3) as usize;
+        assert_eq!(src, expected);
+        assert!(src < in_size);
     }
 }

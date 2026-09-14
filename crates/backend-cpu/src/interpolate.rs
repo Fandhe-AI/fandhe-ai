@@ -53,12 +53,24 @@ fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
 /// 重複実装する。`.claude/rules/coding-rust.md`）。`dst < out_size` より
 /// 数学的に `src < in_size` が自動的に成立するが、REQ-8 の縦深防御
 /// として `min(src, in_size - 1)` を明示的に取る。
+///
+/// 中間積 `dst * in_size` は `usize`（64bit 環境で最大約 1.8e19）を
+/// 素朴な乗算で計算すると overflow しうる（例: `[1]` を
+/// `broadcast_to` で `[1usize << 63]` へ拡張した view を `[3]` へ
+/// 縮小する interpolate では `dst=2` の `dst * in_size` が `2^63 * 2`
+/// を超える）。`u128`（最大 2^128 - 1）へ昇格して積・除算を行うこと
+/// で、`dst`・`in_size` とも `usize::MAX` の場合でも `u128` の範囲に
+/// 収まり overflow しない（本番経路 panic 禁止規約。イシュー #1834
+/// codex-review P1 是正）。
 fn nearest_src_coord(dst: usize, in_size: usize, out_size: usize) -> usize {
     if out_size == 0 || in_size == 0 {
         return 0;
     }
-    let src = (dst * in_size) / out_size;
-    src.min(in_size - 1)
+    let src = (dst as u128 * in_size as u128) / out_size as u128;
+    // `src < in_size <= usize::MAX` が `u128` 除算の結果として保証
+    // されるため（`dst < out_size` より `src < in_size`）、`as usize`
+    // への縮小は安全（真の値が `usize` の範囲を超えることはない）。
+    (src as usize).min(in_size - 1)
 }
 
 /// [`fandhe_ai_tensor_core::BackendOps::interpolate`]（`Nearest`）の
@@ -178,5 +190,37 @@ mod tests {
         let out = interpolate_nearest(&x, 1, &out_shape).unwrap();
         assert_eq!(out.shape(), &[0, 6]);
         assert_eq!(out.numel(), 0);
+    }
+
+    // イシュー #1834 codex-review P1 是正: `dst * in_size` の中間積が
+    // `usize` を overflow しないことの回帰テスト。
+
+    #[test]
+    fn nearest_src_coord_does_not_overflow_for_huge_in_size() {
+        // `dst=2`・`in_size=2^63`・`out_size=3` は素朴な `usize` 乗算
+        // （`dst * in_size = 2^64`）が overflow する組み合わせ（debug
+        // ビルドでは overflow panic・release ビルドでは wrap して誤った
+        // 添字を返す）。`u128` 昇格により overflow せず、数学的に正しい
+        // `floor(2 * 2^63 / 3)` を返すことを確認する。
+        let in_size = 1usize << 63;
+        let src = nearest_src_coord(2, in_size, 3);
+        let expected = ((2u128 * in_size as u128) / 3) as usize;
+        assert_eq!(src, expected);
+        assert!(src < in_size);
+    }
+
+    #[test]
+    fn interpolate_nearest_broadcast_view_with_huge_in_size_does_not_overflow() {
+        // 入力 `[1]` を `broadcast_to` で `[1usize << 63]` へ拡張した
+        // stride 0 view を `[3]` へ縮小する（レビュー指摘のとおりの
+        // 再現条件）。`Tensor::broadcast_to` 自体はデータを複製しない
+        // ため、この巨大 in_shape でもテストは軽量に実行できる。
+        let base = Tensor::new(vec![7.0f32], &[1]).unwrap();
+        let huge_in_shape = 1usize << 63;
+        let x = base.broadcast_to(&[huge_in_shape]).unwrap();
+        let out_shape = out_shape_for(&[huge_in_shape], &[3]);
+        let out = interpolate_nearest(&x, 0, &out_shape).unwrap();
+        // 入力は全要素 7.0（broadcast）のため、出力もすべて 7.0。
+        assert_eq!(out.contiguous().as_slice().unwrap(), &[7.0, 7.0, 7.0]);
     }
 }

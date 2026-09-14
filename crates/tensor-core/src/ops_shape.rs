@@ -637,10 +637,17 @@ pub fn row_softmax_layout(
 ///   以外）が 0 の空入力は許容する**（この場合出力も先頭軸が 0 の
 ///   空 shape になるだけで、空間軸の走査自体が発生しないため）。
 /// - 出力 shape は `shape[..shape.len()-size.len()]`（先頭の残り軸を
-///   そのまま）に `size`（空間軸）を連結した形。要素数積オーバー
-///   フローは `checked_numel`（`crate::tensor`。`Tensor::new` 等が
-///   使う単一情報源と同じ検査）で検査
-///   する。
+///   そのまま）に `size`（空間軸）を連結した形。要素数積のオーバー
+///   フローに加え、出力実体（`eval::interpolate_nearest`・CPU／CUDA／
+///   Metal 実装いずれも `f32` 出力）を確保した際のバイトサイズが
+///   `Vec` の allocation 上限（`isize::MAX` バイト）を超えないかも
+///   `checked_numel_for::<f32>`（`one_hot_out_shape` と同じ単一情報源）
+///   で検査する。要素数積が `usize` に収まっても、例えば入力
+///   `shape=[1]` を `size=[usize::MAX]` へ interpolate する場合の
+///   ように出力バイトサイズが超過する shape を確保前に拒否し、
+///   `ElementCountOverflow` を返す（本番経路 panic 禁止規約
+///   `.claude/rules/coding-rust.md` に反する capacity overflow
+///   panic の防止。イシュー #1834 codex-review P1 是正）。
 pub fn interpolate_out_shape(shape: &[usize], size: &[usize]) -> Result<Vec<usize>, ShapeError> {
     let rank = shape.len();
     if size.is_empty() {
@@ -667,7 +674,7 @@ pub fn interpolate_out_shape(shape: &[usize], size: &[usize]) -> Result<Vec<usiz
     }
     let mut out = shape.to_vec();
     out[spatial_start..].copy_from_slice(size);
-    checked_numel(&out)?;
+    checked_numel_for::<f32>(&out)?;
     Ok(out)
 }
 
@@ -1564,6 +1571,20 @@ mod tests {
     fn interpolate_out_shape_element_count_overflow() {
         // `out = [2, usize::MAX]` の要素数積が overflow する。
         let err = interpolate_out_shape(&[2, usize::MAX], &[usize::MAX]).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_byte_size_overflow_without_numel_overflow() {
+        // 入力 shape=[1] を size=[usize::MAX] へ interpolate する場合、
+        // 出力の要素数積 `1 * usize::MAX = usize::MAX` は `usize` の乗算
+        // オーバーフローとしては検出されない（`checked_numel` 単体では
+        // 通過する）が、`f32`（4 バイト）換算のバイトサイズは必ず
+        // `isize::MAX` を超えるため `checked_numel_for::<f32>` が
+        // `ElementCountOverflow` を返す（イシュー #1834 codex-review
+        // P1 是正: `Vec::with_capacity` の capacity overflow panic を
+        // 防ぐ）。
+        let err = interpolate_out_shape(&[1], &[usize::MAX]).unwrap_err();
         assert_eq!(err, ShapeError::ElementCountOverflow);
     }
 

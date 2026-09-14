@@ -1369,6 +1369,26 @@ pub(crate) fn vjp(
             let sp_in_numel: usize = input_shape[spatial_start..].iter().product();
             let sp_out_numel: usize = out_shape[spatial_start..].iter().product();
 
+            // `outer == 0`（先頭の残り軸——batch 等——が空）の場合、
+            // `d_input` の全要素数は `outer * sp_in_numel == 0` で
+            // 自明にゼロ勾配となる。`interpolate_out_shape` の契約
+            // （forward はこの場合も出力の先頭軸が 0 になる空 shape
+            // で成功する。`ops_shape.rs::interpolate_out_shape` doc
+            // 参照）により forward 自体は `size` にどれだけ大きい
+            // 値を指定しても success する。`nearest_src_index_map`
+            // は `outer` に依存せず空間軸の全出力位置（`sp_out_numel`
+            // 個）分の index 行を無条件に確保するため、`outer==0` の
+            // まま呼ぶと `size=[usize::MAX]` 等で `sp_out_numel` が
+            // 巨大になり capacity overflow で panic しうる（本番経路
+            // panic 禁止規約 `.claude/rules/coding-rust.md`。イシュー
+            // #1834 codex-review P1 是正）。空間軸積計算・index 構築
+            // より前に early return し、この不要な大量確保・走査も
+            // 通常の大きな size で同時に避ける。
+            if outer == 0 {
+                let d_input = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+                return Ok(vec![(input, d_input)]);
+            }
+
             match mode {
                 fandhe_ai_tensor_core::InterpolateMode::Nearest => {
                     // scatter_add の index dtype は `i32`（`Tensor<i32>`）
@@ -7744,5 +7764,68 @@ release ビルドでも検知できるよう `assert!` を使う）"
             "dx[0] は真に f64 表現域外へ発散するため符号付き inf のはず（実際: {}）",
             dx_values[0]
         );
+    }
+
+    // イシュー #1834 codex-review P1 是正の回帰テスト（2 件）。
+
+    #[test]
+    fn nearest_src_index_map_does_not_overflow_with_huge_in_shape_and_small_out() {
+        // `outer=1`（空でない先頭軸）・空間軸の入力サイズが巨大
+        // （`2^63`）・出力サイズは小さい（`3`）組み合わせ。`row` の
+        // 確保自体は `sp_out_numel=3` で軽量だが、内部で呼ぶ
+        // `eval::nearest_src_coord` の中間積 `dst * in_size` が
+        // `usize` を overflow しうる（backend-cpu クレートの `interpolate::nearest_src_coord` と同型の bug。是正後は
+        // `u128` 昇格により正しい添字を返す）。
+        // `in_size` 自体は `i32::MAX` を超えるため、本関数が返す `i32`
+        // 添字（`pos as i32`）は `usize` の `pos` を正しく計算した上での
+        // 意図的な切り詰めであり、値そのものが `i32` の範囲へ収まる
+        // ことは呼び出し元〈VJP `Op::Interpolate` 分岐〉が事前に
+        // `sp_in_numel <= i32::MAX` を検査する契約の範囲外（本テストは
+        // その契約を満たさない `in_size` を意図的に渡す）。ここで
+        // 検証したいのは `usize` の中間積 `dst * in_size` 自体が
+        // overflow せず（是正前は debug ビルドで overflow panic して
+        // いた）、`pos as i32` へ到達する前に panic しないことのみ。
+        let in_size = 1usize << 63;
+        let index = nearest_src_index_map(&[1, in_size], &[1, 3], 1, 1);
+        assert_eq!(index.shape(), &[1, 3]);
+        let data = eval::dense_vec_i32(&index);
+        assert_eq!(data.len(), 3);
+    }
+
+    #[test]
+    fn interpolate_vjp_empty_leading_axis_with_huge_size_does_not_panic() {
+        // `Op::Interpolate` VJP の `outer == 0` 早期 return 経路
+        // （`grad.rs` 本体の `Op::Interpolate` 分岐）を `vjp` 経由で
+        // 直接検証する。`outer == 0` のまま `nearest_src_index_map` を
+        // 呼ぶと `size=[usize::MAX]` 等で `sp_out_numel` が巨大になり
+        // capacity overflow panic しうる（本テストが是正前に再現した
+        // 不具合の直接検証）。
+        let input_shape = vec![0usize, 1];
+        let input = build_tensor(Vec::new(), &input_shape);
+        let nodes = vec![leaf_node(input)];
+        let op = Op::Interpolate {
+            input: NodeId(0),
+            size: vec![usize::MAX],
+            mode: fandhe_ai_tensor_core::InterpolateMode::Nearest,
+        };
+        let out_value = build_tensor(Vec::new(), &[0, usize::MAX]);
+        let upstream = build_tensor(Vec::new(), &[0, usize::MAX]);
+
+        let contributions = vjp(
+            &op,
+            &out_value,
+            &upstream,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .expect("outer==0 の場合 panic せず成功するはず");
+        assert_eq!(contributions.len(), 1);
+        let (node, d_input) = &contributions[0];
+        assert_eq!(*node, NodeId(0));
+        assert_eq!(d_input.shape(), &input_shape);
+        assert_eq!(d_input.numel(), 0);
     }
 }
