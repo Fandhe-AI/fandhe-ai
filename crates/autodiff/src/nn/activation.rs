@@ -68,6 +68,12 @@ impl Tanh {
 pub struct Silu;
 
 impl Silu {
+    /// `input` に SiLU（`x * sigmoid(x)`）を適用する。`Var::silu` への
+    /// 薄い委譲（バックエンド dispatch は同メソッドの契約に従う）。
+    /// `input` と同じ shape・dtype の `Var` を返す。CPU／CUDA／Metal
+    /// 専用カーネル未到達時はホスト参照実装（`ScalarUnaryOp::apply`）
+    /// への eager フォールバックが走りうるため、その実体化に失敗した
+    /// 場合に限り `Err` を返す（`Softmax`／`Sqrt` 系と同型の契約）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.silu()
     }
@@ -86,6 +92,10 @@ impl Silu {
 pub struct Hardswish;
 
 impl Hardswish {
+    /// `input` に Hardswish（`x * clamp(x + 3, 0, 6) / 6`）を適用する。
+    /// `Var::hardswish` への薄い委譲。[`Silu::forward`] と同じ shape・
+    /// エラー契約（eager フォールバック実体化に失敗した場合のみ
+    /// `Err`）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.hardswish()
     }
@@ -110,6 +120,10 @@ impl LeakyRelu {
         Self { negative_slope }
     }
 
+    /// `input` に Leaky ReLU（`x >= 0` なら `x`、それ以外は
+    /// `self.negative_slope * x`）を適用する。`Var::leaky_relu` への
+    /// 薄い委譲。[`Silu::forward`] と同じ shape・エラー契約（eager
+    /// フォールバック実体化に失敗した場合のみ `Err`）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.leaky_relu(self.negative_slope)
     }
@@ -143,6 +157,10 @@ impl Elu {
         Self { alpha }
     }
 
+    /// `input` に ELU（`x > 0` なら `x`、それ以外は
+    /// `self.alpha * (exp(x) - 1)` 相当）を適用する。`Var::elu` への
+    /// 薄い委譲。[`Silu::forward`] と同じ shape・エラー契約（eager
+    /// フォールバック実体化に失敗した場合のみ `Err`）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.elu(self.alpha)
     }
