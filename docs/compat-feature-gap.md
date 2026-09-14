@@ -1043,3 +1043,54 @@ Softplus）を実装済み化した。`ScalarUnaryOp::Gelu`／`GeluTanh`／
 builder はユーザー承認待ちで対象外のまま。CUDA／Metal 実機での facade
 parity テストは本実装エージェントの実行環境に実機への到達手段がない
 ため未実測のまま Mac／GB10 セッションへ申し送る。
+
+## #1719 の追補
+
+§2.5「縮約」の `sum(dim)`／`mean(dim)`／`max(dim)`/`min(dim)` 行
+（スナップショット本文は不変）のうち、複数軸対応・`keepdim` 対応・
+`mean` 新設部分が実装済みになった。
+
+- `Var::sum_dims(&dims, keepdim)`／`max_dims(&dims, keepdim)`（複数軸・
+  `keepdim` 対応。PyTorch `sum(dim=[...], keepdim=)`／`amax(dim=[...],
+  keepdim=)` 相当）・`Var::mean(dim)`／`mean_dims(&dims, keepdim)`（新設。
+  PyTorch `mean(dim, keepdim)` 相当）を追加した。
+- 実現方式（`crates/autodiff/src/reduce_dims.rs`。新規 `pub(crate)`
+  モジュール）: 縮約対象軸が単一・全軸のいずれかなら既存
+  `Var::sum(Option<usize>)`／`max(Option<usize>)` へ無加工で直接委譲
+  する（`sum_dims(&[d], false)` が `sum(Some(d))` と bit 同一になる
+  契約はこの分岐が担う）。複数軸・非全軸の場合は `Var::permute`
+  （kept 軸 → reduced 軸の順。恒等順列なら省略）→ `Var::contiguous`
+  （非 contiguous のときのみ実体化）→ `Var::reshape`（reduced 軸を 1 軸
+  へ併合）で単一軸縮約へ帰着させる（逐次〈軸ごと〉縮約にしない理由は
+  同モジュール doc 参照。f64 アキュムレータの 1 パス蓄積・`max_dims`
+  の同値タイ決定性を軸をまたいで維持するため）。新規カーネルは追加せず
+  `BackendOps` も非拡張——既存 `sum`／`max`（CPU／CUDA。Metal は
+  TASK-1.9c スコープ外の `Unsupported` を継承）カーネルをそのまま
+  再利用する分解方式（`Var::einsum`〈#1620〉と同じ設計方針）。
+- `Var::mean`（単一軸／全軸）は新 `Op::Mean`（`tape::Op`）として追加した。
+  `BackendOps` に対応メソッドを持たず、forward は `self.tape.ops().sum`
+  の結果をホスト側で縮約対象要素数 `n` により**1 回だけ除算**する合成
+  （CPU バックエンド参照実装の「sum の後に 1 回だけ除算する」丸め規律
+  と同じ）。`n == 0` は `AutodiffError::InvalidArgument` で fail-closed
+  に拒否する（PyTorch は `NaN` を返すが安全側を採用）。VJP（`grad.rs::
+  mean_vjp`）は `Sum` の VJP（複製）を `1/n` でスケールしたものに帰着
+  する。checkpoint（`Op::is_checkpoint_eligible`）にも対応し、
+  `recompute_value` が forward と同一の `ops.sum` → 同一除算で再導出
+  するため checkpoint 有無で backward の値が bit 同一であることを
+  統合テストで確認済み。
+- `max_dims` の同値タイは `grad.rs::max_vjp` の既存「先勝ち決定的」
+  規約（軸をまたいだ場合も「kept 軸〈元の順序〉→ reduced 軸〈昇順〉」
+  の併合順で最初に現れる要素）をそのまま維持する。`amax`／`max` の
+  勾配分配方式（先勝ち決定的 対 均等分配）を確定する #1718 は本
+  イシュー時点（2026-09-14）で未解決の OPEN のまま・決定 doc も
+  `docs/` に存在しないため、安全側として `max_vjp` は無変更（先勝ち
+  維持）とした。#1718 が均等分配へ確定した場合は `max_dims` の期待値
+  も追従して更新する必要がある。
+- facade 新規公開面なし（既存 `Var` 再エクスポート経由のみ）。CUDA
+  （DGX Spark GB10）実機での facade parity テスト（`crates/facade/tests/
+  reduce_backend_parity.rs` の `#[ignore]` テスト）は本実装エージェント
+  の実行環境に実機への到達手段がないため未実測のまま GB10 セッション
+  へ申し送る。Metal は `sum`／`max` 自体が `Unsupported`（TASK-1.9c
+  スコープ外）のため合成実装もその挙動を継承し対象外のまま。
+- `min`／`argmax`／`argmin`（#1720）・`var`／`std`／`norm`（#1723）は
+  本 issue の対象外のまま。
