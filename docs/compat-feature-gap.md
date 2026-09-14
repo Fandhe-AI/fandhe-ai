@@ -1672,3 +1672,13 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - 算術を伴わない機構のため CPU 本番 ops と naive 参照実装の勾配が bit 完全一致。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り。
 - `torch.no_grad()` コンテキスト（演算そのものをテープに載せない）は引き続き `Tensor<f32>` のまま演算する既存の型分離方式（`docs/public-api-design.md` §3.1）が担う。本 issue が追加したのは「テープに載せたノードを勾配経路から外す」機構であり、両者は独立。
 - `retain_graph`（複数回 backward の勾配蓄積契約）は兄弟イシュー #1749 の対象のまま。
+
+## 追補（イシュー #1750）
+
+§2.12 の `.to(dtype)`（型変換）行「なし」を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `CastDType`（`#[non_exhaustive]`。`f32`／`f64`／`i32`／`i64`／`bool` の 5 dtype タグ）・`CastElement`（sealed trait。要素単位の変換規則の単一情報源）・`BackendOps::cast_ops` capability accessor・`CastOps`（8 方向。既定 `Unsupported`）・ホスト参照実装（`fandhe_ai_tensor_core::cast::{cast_from_f32, cast_to_f32}`）を `tensor-core` に新設した。
+- CPU 実装（`backend-cpu::cast`）は 8 方向すべてをホスト参照実装へ委譲する。CUDA／Metal のネイティブカーネル（accessor は現状 `None` のためホストフォールバックのみ機能する）は #1751 が担当する。
+- `Var::cast<T: CastElement>() -> Result<Tensor<T>, AutodiffError>`（**非微分演算**。VJP は明示的な打ち切り——`Var::argmax`／`unique` と同型に tape ノードを記録しない）・`Var::to_f32() -> Var<'t>`（f32 系の恒等射。勾配は通常どおり伝播）・`Tape::var_from<T: CastElement>(&Tensor<T>) -> Result<Var<'_>, AutodiffError>`（非 f32 dtype から葉ノードを直接登録）を実装した。
+- facade は `CastDType`／`CastElement` の純再エクスポート（1 行）と `facade::Tape::var_from` の委譲メソッド追加のみ。`CastOps`（動的ディスパッチ面）は facade へ再エクスポートしない（`crates/facade/tests/api_surface.rs::facade_does_not_reexport_cast_ops` が機械的に固定）。
+- 数値契約（NaN→0 の飽和整数変換・`v != 0.0` の bool 変換等）・API 配置案の比較は `docs/tensor-core-cast-design.md` を正とする。CUDA／Metal 実機での facade parity テストは未実測のまま GB10／Mac セッションへ申し送り。

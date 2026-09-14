@@ -168,6 +168,14 @@ pub use fandhe_ai_tensor_core::SvdFactors;
 // （イシュー #1762）追加時も新規公開アイテムは発生しない
 // （`InterpolateMode` 自体の再エクスポートのみで完結する）。
 pub use fandhe_ai_tensor_core::InterpolateMode;
+// `CastDType`／`CastElement`（イシュー #1750。`Var::cast`／`Tape::
+// var_from` の型境界・dtype タグ）も 1 文 1 行で再エクスポートする
+// （上記コメント「1 文 1 行を維持する」と同じ理由）。`CastOps`（動的
+// ディスパッチ面）は再エクスポートしない——利用者は `Var::cast`／
+// `Tape::var_from` 経由で到達し、`CastOps` 自体を直接構築・実装する
+// 経路は facade の公開契約に含めない（`docs/tensor-core-cast-design.md`
+// 参照）。
+pub use fandhe_ai_tensor_core::{CastDType, CastElement};
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の
 /// newtype ラッパー（codex-review PR #424 P1 是正）。
@@ -197,6 +205,13 @@ impl Tape {
     /// （`fandhe_ai_autodiff::Tape::var` への委譲）。
     pub fn var(&self, tensor: &Tensor<f32>) -> Var<'_> {
         self.0.var(tensor)
+    }
+
+    /// 非 f32 dtype の入力テンソルを f32 へ変換したうえでテープ上の
+    /// 葉ノード `Var` として登録する（[`Self::var`] の dtype 変換版。
+    /// イシュー #1750・`fandhe_ai_autodiff::Tape::var_from` への委譲）。
+    pub fn var_from<T: CastElement>(&self, tensor: &Tensor<T>) -> Result<Var<'_>, AutodiffError> {
+        self.0.var_from(tensor)
     }
 
     /// 入力テンソルを `requires_grad == false` の葉ノードとして

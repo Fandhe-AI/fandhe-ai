@@ -127,6 +127,7 @@
 mod backend_ops;
 mod broadcast;
 pub mod buffer;
+pub mod cast;
 pub mod creation;
 pub mod device;
 pub mod dispatch;
@@ -162,6 +163,7 @@ pub use backend_ops::{
 };
 pub use broadcast::broadcast_shape;
 pub use buffer::{BufferHandle, DeviceBuffer, DeviceBufferView, MemoryOps};
+pub use cast::{CastDType, CastElement, CastOps, cast_from_f32, cast_to_f32};
 pub use creation::{CreationError, arange, eye, linspace, ones_like, zeros_like};
 pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all, select_from};
 pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};

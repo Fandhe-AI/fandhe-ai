@@ -48,6 +48,7 @@
 
 use crate::Tensor;
 use crate::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
+use crate::cast::CastOps;
 use crate::device::{BackendError, Device};
 use crate::dispatch_failure::DispatchFailureCell;
 use crate::error::ShapeError;
@@ -551,6 +552,21 @@ pub trait BackendOps {
     /// `half::bf16` 演算本体（[`TypedOps<bf16>`]）への capability
     /// accessor。同上のデフォルト（`None`）。CPU 実装は #1699 が担当する。
     fn typed_ops_bf16(&self) -> Option<&dyn TypedOps<bf16>> {
+        None
+    }
+
+    /// dtype 変換カーネル（[`CastOps`]）への capability accessor
+    /// （イシュー #1750・`docs/tensor-core-cast-design.md`）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は `None`（cast 未対応。`crate::cast::cast_from_f32`／
+    /// `cast_to_f32`〈ホスト参照実装〉へフォールバックする契約は
+    /// `autodiff` 側のヘルパーが担う）。`typed_ops_f64` 等と同じ
+    /// 非破壊拡張パターンで、`BackendOps` を実装する外部クレートは
+    /// 何もしなくても既存実装のままコンパイルが通る。CPU 実装は
+    /// 本イシューが `Some(self)` へオーバーライドする
+    /// （`backend-cpu::cast::CastOps` 実装参照）。
+    fn cast_ops(&self) -> Option<&dyn CastOps> {
         None
     }
 
@@ -4032,6 +4048,86 @@ mod tests {
         assert!(ops.typed_ops_f64().is_none());
         assert!(ops.typed_ops_f16().is_none());
         assert!(ops.typed_ops_bf16().is_none());
+    }
+
+    /// `cast_ops` accessor が既定で `None`（dtype 変換未対応）を返す
+    /// ことを確認する（イシュー #1750・非破壊拡張の fail-closed 既定値
+    /// 回帰ガード。`typed_ops_accessors_default_to_none` と同型）。
+    #[test]
+    fn cast_ops_accessor_defaults_to_none() {
+        let ops = MockOps(Device::Cpu);
+        assert!(ops.cast_ops().is_none());
+    }
+
+    /// [`CastOps`] の positive-path テスト用スタブ（イシュー #1750）。
+    /// 全メソッドを既定実装（`Unsupported`）のまま使う——`TypedF64StubOps`
+    /// と異なり `CastOps` は全メソッドに既定実装を持つため、空の impl
+    /// ブロックだけで `&Self → &dyn CastOps` の coercion・dyn 呼び出し
+    /// が実際に機能することを検証できる。
+    struct CastOpsStub;
+    impl CastOps for CastOpsStub {}
+
+    /// `cast_ops` を `Some(self.0)` へオーバーライドする `BackendOps`
+    /// 実装（イシュー #1750）。`&dyn BackendOps` 経由で `CastOps` の
+    /// 具象実装へ実際に到達できることを検証する
+    /// （`OpsWithTypedF64` と同型のオーバーライドパターン）。
+    struct OpsWithCastOps(CastOpsStub);
+
+    impl BackendOps for OpsWithCastOps {
+        fn device(&self) -> Device {
+            Device::Cpu
+        }
+
+        fn cast_ops(&self) -> Option<&dyn CastOps> {
+            Some(&self.0)
+        }
+
+        fn gemm(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: gemm".into()))
+        }
+
+        fn add(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: add".into()))
+        }
+
+        fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: mul".into()))
+        }
+
+        fn relu(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: relu".into()))
+        }
+
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: exp".into()))
+        }
+
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: tanh".into()))
+        }
+
+        fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: sum".into()))
+        }
+
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: max".into()))
+        }
+    }
+
+    /// `cast_ops` accessor が `&dyn BackendOps` 経由で具象 `CastOps`
+    /// 実装まで到達することを検証する（イシュー #1750）。
+    #[test]
+    fn cast_ops_accessor_reaches_concrete_impl_through_dyn_backend_ops() {
+        let stub = OpsWithCastOps(CastOpsStub);
+        let ops: &dyn BackendOps = &stub;
+
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let result = ops
+            .cast_ops()
+            .expect("cast_ops should be Some for OpsWithCastOps")
+            .cast_f32_to_f64(&a);
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
 
     /// `Box<dyn BackendOps + Send>` が成立し続けることを直接検証する

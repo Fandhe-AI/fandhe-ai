@@ -1153,3 +1153,57 @@ fn facade_sources_do_not_reference_onnx_interop() {
          （facade は非公開クレートへ依存しない設計。#1775）: {offending:?}"
     );
 }
+
+/// `fandhe_ai::{CastDType, CastElement}`（イシュー #1750）が facade から
+/// 到達可能であること・`Var::cast`／`Tape::var_from` が facade 経由でも
+/// 型検査できることを固定する（コンパイル時裏付け。
+/// `rng_tensor_generators_are_reachable_via_facade` と同型）。`CastDType`
+/// は `#[non_exhaustive]` のためワイルドカード腕で網羅する。
+#[test]
+fn cast_types_are_reachable_via_facade() {
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&fandhe_ai::Tensor::<f32>::zeros(&[3]).unwrap());
+    let casted: fandhe_ai::Tensor<i32> = x.cast().unwrap();
+    assert_eq!(casted.shape(), &[3]);
+
+    let bool_in = fandhe_ai::Tensor::<bool>::new(vec![true, false], &[2]).unwrap();
+    let y = tape.var_from(&bool_in).unwrap();
+    assert_eq!(y.to_tensor().shape(), &[2]);
+
+    let dtype: fandhe_ai::CastDType = <i32 as fandhe_ai::CastElement>::CAST_DTYPE;
+    let _label = match dtype {
+        fandhe_ai::CastDType::F32 => "f32",
+        fandhe_ai::CastDType::F64 => "f64",
+        fandhe_ai::CastDType::I32 => "i32",
+        fandhe_ai::CastDType::I64 => "i64",
+        fandhe_ai::CastDType::Bool => "bool",
+        _ => "unknown",
+    };
+}
+
+/// `crates/facade/src/` の `pub use` が `CastOps`（dtype 変換の動的
+/// ディスパッチ面）を再エクスポートしていないことを固定する
+/// （`docs/tensor-core-cast-design.md`「facade は `CastOps` を
+/// 再エクスポートしない」設計判断。`facade_does_not_reexport_tape_
+/// or_backend_ops` と同型の走査）。
+#[test]
+fn facade_does_not_reexport_cast_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            if trimmed.contains("CastOps") {
+                offending.push(format!("{}: `{trimmed}` が CastOps を含む", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が CastOps を再エクスポートしている\
+         （動的ディスパッチ面は非公開の設計判断に違反）: {offending:?}"
+    );
+}
