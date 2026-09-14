@@ -180,6 +180,134 @@ pub fn interpolate_nearest_model(
     Ok(out)
 }
 
+/// `MetalInterpolate::run_bilinear_f32`（`crate::interpolate`）の
+/// 起動前検査（イシュー #1762。[`validate_interpolate_launch`] の
+/// bilinear 版）。`nearest` 版と異なり [`fandhe_ai_tensor_core::
+/// interpolate_out_shape_for_mode`]（`Bilinear` mode）で
+/// `size.len() == 2` の追加検査を経由する。
+///
+/// 検査順序: ①各 shape 要素が `u32` に収まること → ②`interpolate_
+/// out_shape_for_mode`（rank・空間軸サイズ・出力要素数オーバーフロー・
+/// `size.len()==2` を検査）→ ③出力要素数が 0 なら早期 `Ok(0)` →
+/// ④出力要素数が `u32` へ収まること → ⑤`input` の実スライス長が
+/// `in_shape` の要素数積と一致すること → ⑥`in_shape` の行優先
+/// ストライドが各軸とも `u32` へ収まること（[`validate_interpolate_
+/// launch`] の同種検査と同じ理由。イシュー #1834 codex-review P1
+/// 是正の踏襲）。
+pub fn validate_interpolate_bilinear_launch(
+    input: &[f32],
+    in_shape: &[usize],
+    size: &[usize],
+    out_shape: &[usize],
+) -> Result<usize, ShapeError> {
+    for &d in in_shape.iter().chain(out_shape.iter()) {
+        if d > u32::MAX as usize {
+            return Err(ShapeError::ElementCountOverflow);
+        }
+    }
+    let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+        align_corners: false, // shape 検査は align_corners に依存しない。
+    };
+    let expected_out_shape =
+        fandhe_ai_tensor_core::interpolate_out_shape_for_mode(in_shape, size, mode)?;
+    if expected_out_shape != out_shape {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: expected_out_shape,
+            rhs: out_shape.to_vec(),
+        });
+    }
+
+    let numel = checked_numel(out_shape)?;
+    if numel == 0 {
+        return Ok(0);
+    }
+    validate_launch_len(numel)?;
+
+    let in_numel = checked_numel(in_shape)?;
+    if input.len() != in_numel {
+        return Err(ShapeError::ElementCountMismatch {
+            expected: in_numel,
+            actual: input.len(),
+        });
+    }
+
+    for &stride in row_major_strides(in_shape).iter() {
+        if stride > u32::MAX as usize {
+            return Err(ShapeError::ElementCountOverflow);
+        }
+    }
+
+    Ok(numel)
+}
+
+/// `shaders/interpolate.metal::interpolate_bilinear_f32` のホスト側
+/// 逐語モデル（イシュー #1762）。`fma` を [`f32::mul_add`] で再現する
+/// （カーネルの `fma(...)` と一致させる）。座標・重みは
+/// `fandhe_ai_tensor_core::interpolate`（`bilinear_scale`／
+/// `bilinear_src_coord`）の単一情報源を使う（forward のホスト参照
+/// 実装・CPU ネイティブ実装と同じ式）。
+pub fn interpolate_bilinear_model(
+    input: &[f32],
+    in_shape: &[usize],
+    size: &[usize],
+    out_shape: &[usize],
+    align_corners: bool,
+) -> Result<Vec<f32>, ShapeError> {
+    let numel = validate_interpolate_bilinear_launch(input, in_shape, size, out_shape)?;
+    if numel == 0 {
+        return Ok(Vec::new());
+    }
+    let rank = out_shape.len();
+    let h_axis = rank - 2;
+    let w_axis = rank - 1;
+    let in_strides = row_major_strides(in_shape);
+    let stride_h = in_strides[h_axis];
+    let stride_w = in_strides[w_axis];
+    let in_h = in_shape[h_axis];
+    let in_w = in_shape[w_axis];
+    let out_h = out_shape[h_axis];
+    let out_w = out_shape[w_axis];
+    let scale_h = fandhe_ai_tensor_core::bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = fandhe_ai_tensor_core::bilinear_scale(in_w, out_w, align_corners);
+
+    let mut out = vec![0.0f32; numel];
+    for (gid, out_slot) in out.iter_mut().enumerate() {
+        let mut rem = gid;
+        let mut base_flat: u64 = 0;
+        let mut cy = 0usize;
+        let mut cx = 0usize;
+        for a in (0..rank).rev() {
+            let axis_size = out_shape[a];
+            let c = rem % axis_size;
+            rem /= axis_size;
+            if a == w_axis {
+                cx = c;
+            } else if a == h_axis {
+                cy = c;
+            } else {
+                base_flat += c as u64 * in_strides[a] as u64;
+            }
+        }
+        let cyc = fandhe_ai_tensor_core::bilinear_src_coord(cy, in_h, scale_h, align_corners);
+        let cxc = fandhe_ai_tensor_core::bilinear_src_coord(cx, in_w, scale_w, align_corners);
+        let v00 = input[(base_flat
+            + cyc.i0 as u64 * stride_h as u64
+            + cxc.i0 as u64 * stride_w as u64) as usize];
+        let v01 = input[(base_flat
+            + cyc.i0 as u64 * stride_h as u64
+            + cxc.i1 as u64 * stride_w as u64) as usize];
+        let v10 = input[(base_flat
+            + cyc.i1 as u64 * stride_h as u64
+            + cxc.i0 as u64 * stride_w as u64) as usize];
+        let v11 = input[(base_flat
+            + cyc.i1 as u64 * stride_h as u64
+            + cxc.i1 as u64 * stride_w as u64) as usize];
+        *out_slot =
+            fandhe_ai_tensor_core::bilinear_blend(v00, v01, v10, v11, cxc.lambda1, cyc.lambda1);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +319,22 @@ mod tests {
         let out = ops
             .interpolate(input, size, InterpolateMode::Nearest)
             .expect("cpu interpolate succeeds");
+        out.contiguous()
+            .as_slice()
+            .map(|s| s.to_vec())
+            .unwrap_or_default()
+    }
+
+    fn cpu_interpolate_bilinear(
+        input: &Tensor<f32>,
+        size: &[usize],
+        align_corners: bool,
+    ) -> Vec<f32> {
+        let ops = CpuBackendOps::new();
+        let mode = InterpolateMode::Bilinear { align_corners };
+        let out = ops
+            .interpolate(input, size, mode)
+            .expect("cpu interpolate bilinear succeeds");
         out.contiguous()
             .as_slice()
             .map(|s| s.to_vec())
@@ -293,6 +437,116 @@ mod tests {
                 assert_eq!(a.to_bits(), b.to_bits());
             }
         }
+    }
+
+    // --- bilinear（イシュー #1762） ---
+
+    #[test]
+    fn interpolate_bilinear_model_matches_cpu_upsample_align_corners_false() {
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let size = [5usize, 5];
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+            align_corners: false,
+        };
+        let out_shape =
+            fandhe_ai_tensor_core::interpolate_out_shape_for_mode(x.shape(), &size, mode).unwrap();
+        let model_out = interpolate_bilinear_model(
+            x.contiguous().as_slice().unwrap(),
+            x.shape(),
+            &size,
+            &out_shape,
+            false,
+        )
+        .unwrap();
+        let cpu_out = cpu_interpolate_bilinear(&x, &size, false);
+        assert_bit_exact("interpolate_bilinear_upsample", &model_out, &cpu_out);
+    }
+
+    #[test]
+    fn interpolate_bilinear_model_matches_cpu_downsample_align_corners_true() {
+        let x = Tensor::new((1..=25).map(|v| v as f32 * 0.37).collect(), &[5, 5]).unwrap();
+        let size = [2usize, 3];
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+            align_corners: true,
+        };
+        let out_shape =
+            fandhe_ai_tensor_core::interpolate_out_shape_for_mode(x.shape(), &size, mode).unwrap();
+        let model_out = interpolate_bilinear_model(
+            x.contiguous().as_slice().unwrap(),
+            x.shape(),
+            &size,
+            &out_shape,
+            true,
+        )
+        .unwrap();
+        let cpu_out = cpu_interpolate_bilinear(&x, &size, true);
+        assert_bit_exact("interpolate_bilinear_downsample", &model_out, &cpu_out);
+    }
+
+    #[test]
+    fn interpolate_bilinear_model_matches_cpu_leading_batch_axis() {
+        let x = Tensor::new((1..=24).map(|v| v as f32 * 0.1).collect(), &[2, 3, 4]).unwrap();
+        let size = [6usize, 5];
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+            align_corners: false,
+        };
+        let out_shape =
+            fandhe_ai_tensor_core::interpolate_out_shape_for_mode(x.shape(), &size, mode).unwrap();
+        let model_out = interpolate_bilinear_model(
+            x.contiguous().as_slice().unwrap(),
+            x.shape(),
+            &size,
+            &out_shape,
+            false,
+        )
+        .unwrap();
+        let cpu_out = cpu_interpolate_bilinear(&x, &size, false);
+        assert_bit_exact(
+            "interpolate_bilinear_leading_batch_axis",
+            &model_out,
+            &cpu_out,
+        );
+    }
+
+    #[test]
+    fn interpolate_bilinear_model_degenerate_in_size_one_matches_cpu() {
+        let x = Tensor::new(vec![1.0f32, 5.0], &[1, 2]).unwrap();
+        let size = [3usize, 2];
+        let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+            align_corners: false,
+        };
+        let out_shape =
+            fandhe_ai_tensor_core::interpolate_out_shape_for_mode(x.shape(), &size, mode).unwrap();
+        let model_out = interpolate_bilinear_model(
+            x.contiguous().as_slice().unwrap(),
+            x.shape(),
+            &size,
+            &out_shape,
+            false,
+        )
+        .unwrap();
+        let cpu_out = cpu_interpolate_bilinear(&x, &size, false);
+        assert_bit_exact("interpolate_bilinear_degenerate", &model_out, &cpu_out);
+    }
+
+    #[test]
+    fn validate_interpolate_bilinear_launch_rejects_size_len_other_than_two() {
+        let err = validate_interpolate_bilinear_launch(&[1.0, 2.0, 3.0, 4.0], &[2, 2], &[4], &[4])
+            .unwrap_err();
+        assert!(matches!(err, ShapeError::RankMismatch { .. }));
+    }
+
+    #[test]
+    fn validate_interpolate_bilinear_launch_rejects_input_len_mismatch() {
+        let err =
+            validate_interpolate_bilinear_launch(&[1.0], &[2, 2], &[4, 4], &[4, 4]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::ElementCountMismatch {
+                expected: 4,
+                actual: 1
+            }
+        );
     }
 
     #[test]
