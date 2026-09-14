@@ -740,6 +740,22 @@ pub(crate) enum Op {
         dim: usize,
         index: Tensor<i32>,
     },
+    /// `Var::pad`（`torch.nn.functional.pad(mode='constant')` 相当。
+    /// イシュー #1756）。各軸を `(before, after)` だけ定数値で拡張
+    /// する。`value` は forward 記録値へ焼き込み済みのため保持しない
+    /// （`Op::MaskedFill`／`Op::Sort` と同じ最小保持方針）。
+    /// `BackendOps::pad` に対応メソッドがあるため非融合対象
+    /// （`push_eager` で常に実体化。`Op::Gather`／`Scatter` と同型）。
+    ///
+    /// VJP（`grad.rs`）: pad の forward ⟷ narrow の VJP・pad の VJP
+    /// ⟷ narrow の forward という双対性（`Op::Concat`⟷`Op::Narrow`
+    /// の双対性と同型）に基づき、`d_input` は各軸を
+    /// `upstream.narrow(dim, before, input.shape()[dim])` で連鎖的に
+    /// 切り出す zero-copy view として求める。
+    Pad {
+        input: NodeId,
+        pads: Vec<(usize, usize)>,
+    },
     /// `Var::one_hot`（`torch.nn.functional.one_hot`／`tf.one_hot`
     /// 相当。**非微分演算**。イシュー #1755）。`input` は整数クラス id
     /// を f32 値として保持する追跡 `Var`（`Op::Gather`／`Sort`／`Topk`
@@ -1100,6 +1116,11 @@ impl Op {
             // 同じく `index` を `Op` 自身が保持する eager 実体化演算で、
             // `recompute_value` に再計算経路を持たないため解放しない。
             Op::Sort { .. } | Op::Topk { .. } => false,
+            // `Op::Pad`（イシュー #1756）は `Op::Sort`／`Op::Topk` と
+            // 同じく非追跡データ（`pads`）を `Op` 自身が保持する eager
+            // 実体化演算で、`recompute_value` に再計算経路を持たない
+            // ため解放しない。
+            Op::Pad { .. } => false,
             // `Op::OneHot`（イシュー #1755）は `Op::Gather`／`Sort` と
             // 同じく eager 実体化演算で `recompute_value` に再計算経路
             // を持たないため解放しない（非微分演算であることとは独立の
@@ -1170,6 +1191,7 @@ impl Op {
                 f(*src);
             }
             Op::Sort { input, .. } | Op::Topk { input, .. } => f(*input),
+            Op::Pad { input, .. } => f(*input),
             Op::OneHot { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);

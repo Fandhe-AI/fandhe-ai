@@ -1789,6 +1789,138 @@ fn topk_k_exceeds_dim_size_is_rejected() {
     ));
 }
 
+// --- pad（イシュー #1756） ---
+
+/// (a) `pad` → `sum` の backward は解析的に「内部＝1・パディング
+/// 領域＝勾配なし（narrow view の範囲外）」となる。`grads.get` は
+/// 入力 shape（パディング前）の勾配のみを返す契約のため、内部が
+/// すべて 1 であることを確認する。
+#[test]
+fn pad_backward_analytic_ones_on_interior() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let padded = x.pad(&[(1, 2)], 0.0).unwrap();
+    assert_eq!(
+        dense_vec(&padded.to_tensor()),
+        vec![0.0, 1.0, 2.0, 3.0, 0.0, 0.0]
+    );
+
+    let loss = padded.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    // sum の勾配は全要素 1 のため、内部（パディング前の shape）の
+    // 勾配はすべて 1（narrow view で入力 shape へ戻すだけなので
+    // パディング領域の値は入力へは伝播しない）。
+    assert_eq!(dense_vec(dx), vec![1.0, 1.0, 1.0]);
+}
+
+/// (b) 重み付き損失 `(pad(x, .., v) * w).sum()` を中央差分（数値微分）
+/// と突合する（`H`・許容誤差は本ファイル冒頭の grad-check 契約
+/// を再利用）。
+#[test]
+fn pad_backward_matches_numeric_grad_with_weight() {
+    let x = t(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]);
+    let w = t(
+        vec![0.3, -0.7, 1.1, 0.2, 0.4, -0.5, 0.9, -0.1, -0.2],
+        &[3, 3],
+    );
+    let pads = [(1usize, 0usize), (0usize, 1usize)];
+
+    let forward = |xv: &Tensor<f32>, wv: &Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xt = tape.var(xv);
+        let wt = tape.var(wv);
+        let padded = xt.pad(&pads, -0.5).unwrap();
+        let loss = padded.mul(&wt).unwrap().sum(None).unwrap();
+        scalar(&loss.to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x);
+    let wv = tape.var(&w);
+    let padded = xv.pad(&pads, -0.5).unwrap();
+    let loss = padded.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let numeric_dx = numeric_grad(&x, |perturbed| forward(&perturbed, &w));
+
+    assert_grad_close(
+        "pad_backward_matches_numeric_grad_with_weight",
+        dx,
+        &numeric_dx,
+    );
+}
+
+/// (c) `pad` → `narrow`（同じ幅）往復は forward が bit 同一・
+/// backward が全 1（`sum` の入力）であることを確認する
+/// （`split_then_cat_roundtrip_matches_original_bit_exact_and_backward_
+/// is_ones` と同型）。
+#[test]
+fn pad_then_narrow_roundtrip_matches_original_bit_exact_and_backward_is_ones() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[4]));
+    let padded = x.pad(&[(2, 3)], 0.0).unwrap();
+    let restored = padded.narrow(0, 2, 4).unwrap();
+    assert_eq!(dense_vec(&restored.to_tensor()), dense_vec(&x.to_tensor()));
+
+    let loss = restored.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dense_vec(dx), vec![1.0; 4]);
+}
+
+/// (d) 2 軸パディング＋`value != 0`: 定数部分の勾配が入力へ混入
+/// しないことを確認する（`narrow_backward_zeros_unselected_region`
+/// と同型の「未選択・パディング領域は入力の勾配に現れない」検証）。
+#[test]
+fn pad_2d_both_axes_nonzero_value_does_not_leak_into_input_grad() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let padded = x.pad(&[(1, 0), (0, 1)], 5.0).unwrap();
+    assert_eq!(padded.to_tensor().shape(), &[3, 3]);
+    assert_eq!(
+        dense_vec(&padded.to_tensor()),
+        vec![5.0, 5.0, 5.0, 1.0, 2.0, 5.0, 3.0, 4.0, 5.0]
+    );
+
+    let loss = padded.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    // 入力 shape [2, 2] へ narrow view で戻すため、定数 5.0 の
+    // パディング領域は入力の勾配計算には一切関与しない
+    // （sum の勾配が全要素 1 のため、内部の 4 要素はすべて 1）。
+    assert_eq!(dense_vec(dx), vec![1.0, 1.0, 1.0, 1.0]);
+}
+
+/// (e-1) エラー経路: `pads.len() != rank` は `AutodiffError::Shape`
+/// （`RankMismatch`）を返す。
+#[test]
+fn pad_rank_mismatch_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let err = x.pad(&[(1, 0)], 0.0).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::RankMismatch {
+            expected: 2,
+            actual: 1,
+        })
+    ));
+}
+
+/// (e-2) エラー経路: 出力要素数積のオーバーフローは
+/// `AutodiffError::Shape`（`ElementCountOverflow`）を返す。
+#[test]
+fn pad_element_count_overflow_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0], &[1]));
+    let err = x.pad(&[(usize::MAX, 0)], 0.0).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)
+    ));
+}
 // --- one_hot（非微分演算。イシュー #1755） ---
 
 /// ①forward 解析値: index `[[0,2],[1,1]]`・`num_classes=3` →
