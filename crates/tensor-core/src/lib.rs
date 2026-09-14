@@ -155,8 +155,9 @@ pub use backend_ops::{
     Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, GemmChecksum, GruBackwardOutput,
     GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScatterReduce, SegmentKey, SegmentResource, SegmentRun, SgdStepConfig, SvdFactors,
-    UnaryElementwiseOp, VectorNormOrd, checked_gemm_batched_output_len, normalize_batched_operand,
-    ops_for,
+    UnaryElementwiseOp, VectorNormOrd, checked_gemm_batched_output_len,
+    gemm_batched_via_per_batch_gemm, gemm_batched_via_per_batch_gemm_fp32_strict,
+    normalize_batched_operand, ops_for,
 };
 pub use broadcast::broadcast_shape;
 pub use buffer::{BufferHandle, DeviceBuffer, DeviceBufferView, MemoryOps};

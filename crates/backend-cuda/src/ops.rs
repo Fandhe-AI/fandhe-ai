@@ -310,6 +310,101 @@ impl CudaBackendOps {
         )
     }
 
+    /// [`BackendOps::gemm_batched_fp32_strict`] の CUDA 実体（イシュー
+    /// #1716）。常に FP32 厳密（`crate::precision::gemm_precision()` を
+    /// 一切参照しない。`gemm_fp32_strict_impl` と同じ契約）で計算する。
+    ///
+    /// rank 2 同士（`plan.batch_shape()` が空）は
+    /// [`Self::gemm_fp32_strict_impl`] へ直接委譲する（既定合成実装と
+    /// 同じ「rank 2 入力は 2 次元入口と bit 同一」契約）。rank≥3 は
+    /// [`fandhe_ai_tensor_core::normalize_batched_operand`]（既定合成
+    /// 実装・CPU オーバーライドと共有する単一情報源）でオペランドを
+    /// `[B, m, k]`／`[B, k, n]` contiguous へ正規化したうえで
+    /// [`crate::gemm::CudaGemm::run_tiled_f32_batched`]（H2D 2 回・出力
+    /// 確保 1 回・バッチループ起動・D2H 1 回の「バッチループ方式」）
+    /// を呼ぶ。
+    ///
+    /// 正規化された `a_norm`／`b_norm` は常に contiguous（バッチ 1 件
+    /// あたり `m*k`／`k*n` 要素）のため、正規化そのもの（`contiguous()`
+    /// が noop の場合を含む）で発生した再パックは
+    /// [`GEMM_HOST_REPACK_COUNT`] へ計上しない——per-batch 委譲
+    /// （既定合成実装・`gemm_fp32_strict_impl` のバッチループ版）でも
+    /// 各バッチの `a_i`／`b_i` は常に contiguous であり同カウンタを
+    /// 発火させないため、精度モード・バックエンド間で可観測性を揃える
+    /// （`gemm_batched` オーバーライドの doc コメントも同じ注記を持つ）。
+    fn gemm_batched_fp32_strict_impl(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let plan = fandhe_ai_tensor_core::batched_matmul_plan(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+
+        if plan.batch_shape().is_empty() {
+            return self.gemm_fp32_strict_impl(a, b);
+        }
+
+        let (m, k, n) = (plan.m(), plan.k(), plan.n());
+        let batch_len: usize = plan.batch_shape().iter().product();
+
+        let total = fandhe_ai_tensor_core::checked_gemm_batched_output_len(batch_len, m, n)
+            .map_err(BackendError::ShapeMismatch)?;
+        // 出力要素数が 0 なら空テンソルで確定するため、H2D・カーネル
+        // 起動を回避する（既定合成実装・CPU オーバーライドと同じ早期
+        // return。巨大な `batch_len` と空軸の組合せによるハング回避）。
+        if total == 0 {
+            return Tensor::new(Vec::new(), &plan.out_shape()).map_err(BackendError::ShapeMismatch);
+        }
+
+        let a_norm = fandhe_ai_tensor_core::normalize_batched_operand(a, plan.batch_shape(), m, k)?;
+        let b_norm = fandhe_ai_tensor_core::normalize_batched_operand(b, plan.batch_shape(), k, n)?;
+        let a_slice = a_norm.as_slice().ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "gemm_batched_fp32_strict: normalized lhs is not contiguous (contract violation)"
+                    .into(),
+            )
+        })?;
+        let b_slice = b_norm.as_slice().ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "gemm_batched_fp32_strict: normalized rhs is not contiguous (contract violation)"
+                    .into(),
+            )
+        })?;
+
+        let (m_u32, n_u32, k_u32) = (
+            u32::try_from(m).map_err(|_| {
+                BackendError::InvalidArgument(format!(
+                    "gemm_batched_fp32_strict: m={m} exceeds u32"
+                ))
+            })?,
+            u32::try_from(n).map_err(|_| {
+                BackendError::InvalidArgument(format!(
+                    "gemm_batched_fp32_strict: n={n} exceeds u32"
+                ))
+            })?,
+            u32::try_from(k).map_err(|_| {
+                BackendError::InvalidArgument(format!(
+                    "gemm_batched_fp32_strict: k={k} exceeds u32"
+                ))
+            })?,
+        );
+
+        let gemm = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_gemm(&device)
+            },
+        )?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || gemm.run_tiled_f32_batched(a_slice, b_slice, batch_len, m_u32, n_u32, k_u32),
+        )?;
+        Tensor::new(out, &plan.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`BackendOps::gemm_fp32_strict_into`]／[`BackendOps::
     /// gemm_fp32_strict_into_tracked`] 共通の検証・ディスパッチ本体
     /// （イシュー #1559。`backend-metal::ops::
@@ -1890,6 +1985,49 @@ impl BackendOps for CudaBackendOps {
         b: &Tensor<f32>,
     ) -> Result<Tensor<f32>, BackendError> {
         self.gemm_fp32_strict_impl(a, b)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_batched`] の CUDA
+    /// オーバーライド（イシュー #1716）。
+    ///
+    /// `crate::precision::gemm_precision()` が
+    /// [`crate::precision::CudaGemmPrecision::Fp32Strict`]（既定）の
+    /// 場合のみ、`gemm_batched_fp32_strict_impl`（H2D 2 回・
+    /// 出力確保 1 回・バッチループ起動・D2H 1 回のデバイス常駐バッチ
+    /// ループ経路。`gemm_fp32_strict` オーバーライドと bit 同一の
+    /// カーネル選択）へ委譲する。`Tf32`／`Tf32x3` opt-in 時は
+    /// [`fandhe_ai_tensor_core::gemm_batched_via_per_batch_gemm`]（既定
+    /// 合成実装への明示的な回帰。各バッチで [`Self::gemm`] を呼ぶため
+    /// TF32 系カーネル・カウンタ（`TF32_OPTIN_GEMM_LAUNCH_COUNT`／
+    /// `TF32X3_OPTIN_GEMM_LAUNCH_COUNT`）・fail-closed 挙動は #1042／
+    /// #1355 のまま不変）を使う——本オーバーライドは `Fp32Strict`
+    /// 専用の新設カーネル入口（`run_tiled_f32_batched`）しか持たない
+    /// ため、opt-in モードでバッチ版 TF32 カーネルを新設しない限り
+    /// per-batch 合成に頼るほかない（#1716 実装計画 §8 スコープ外）。
+    fn gemm_batched(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        match crate::precision::gemm_precision() {
+            crate::precision::CudaGemmPrecision::Fp32Strict => {
+                self.gemm_batched_fp32_strict_impl(a, b)
+            }
+            crate::precision::CudaGemmPrecision::Tf32
+            | crate::precision::CudaGemmPrecision::Tf32x3 => {
+                fandhe_ai_tensor_core::gemm_batched_via_per_batch_gemm(self, a, b)
+            }
+        }
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_batched_fp32_strict`] の
+    /// CUDA オーバーライド（イシュー #1716）。`gemm_fp32_strict` と同じ
+    /// 理由（`autodiff::grad::matmul_vjp` の rank≥3 分岐が `dyn
+    /// BackendOps` 経由で呼ぶ）で `crate::precision::gemm_precision()`
+    /// を一切見ず、常に `gemm_batched_fp32_strict_impl` へ直結
+    /// する。
+    fn gemm_batched_fp32_strict(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.gemm_batched_fp32_strict_impl(a, b)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_fp32_strict_into`] の
@@ -4361,6 +4499,145 @@ mod tests {
              であるべきだが、TF32 opt-in 経路のカウンタが増加した（学習経路の \
              FP32 契約違反の疑い）: before={before}, after={after}"
         );
+    }
+
+    /// `gemm_batched_fp32_strict`（`BackendOps` トレイト経由。rank≥3 の
+    /// `matmul_vjp` が呼ぶ入口。イシュー #1716）は、TF32 opt-in フラグを
+    /// **有効化した状態でも** TF32 経路
+    /// （[`crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT`]）へ一切到達しない
+    /// ことを検証する（`gemm_fp32_strict_ignores_tf32_optin_flag_even_when_enabled_env_adaptive`
+    /// のバッチ版）。
+    #[test]
+    fn gemm_batched_fp32_strict_ignores_tf32_optin_flag_even_when_enabled_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        crate::precision::set_tf32_gemm_enabled(true);
+
+        let cuda = CudaBackendOps::new(0);
+        // rank 3（バッチ 2）: [2,2,2] x [2,2,2]。
+        let a = Tensor::new((1..=8).map(|v| v as f32).collect(), &[2, 2, 2]).expect("valid tensor");
+        let b = Tensor::new((1..=8).map(|v| v as f32).collect(), &[2, 2, 2]).expect("valid tensor");
+
+        let before = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        let _ = cuda.gemm_batched_fp32_strict(&a, &b);
+        let after = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        assert_eq!(
+            before, after,
+            "TF32 opt-in フラグが有効でも gemm_batched_fp32_strict は FP32 厳密経路の \
+             ままであるべきだが、TF32 opt-in 経路のカウンタが増加した（学習経路の \
+             FP32 契約違反の疑い）: before={before}, after={after}"
+        );
+    }
+
+    /// `gemm_batched`（`BackendOps` トレイト経由。イシュー #1716）は、
+    /// TF32 opt-in フラグが有効な間、per-batch の `TF32_OPTIN_GEMM_LAUNCH_COUNT`
+    /// へ**バッチ数ぶん**到達する（既定合成実装
+    /// `fandhe_ai_tensor_core::gemm_batched_via_per_batch_gemm` への
+    /// フォールバック経由で `self.gemm` を各バッチ呼ぶため）ことを検証
+    /// する。CUDA 非搭載環境・カーネル使用不能環境では型のみ確認する
+    /// （`gemm_routes_to_tf32_path_when_optin_flag_is_enabled_env_adaptive`
+    /// と同じ分岐パターン）。
+    #[test]
+    fn gemm_batched_routes_to_per_batch_tf32_when_optin_flag_is_enabled_env_adaptive() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let _guard = Tf32FlagGuard::acquire();
+        crate::precision::set_tf32_gemm_enabled(true);
+
+        let cuda = CudaBackendOps::new(0);
+        let batch = 3usize;
+        let a = Tensor::new(vec![1.0f32; batch * 2 * 2], &[batch, 2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![1.0f32; batch * 2 * 2], &[batch, 2, 2]).expect("valid tensor");
+
+        let before = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+        match cuda.gemm_batched(&a, &b) {
+            Ok(_) => {
+                let after = crate::gemm::TF32_OPTIN_GEMM_LAUNCH_COUNT.with(|c| c.get());
+                assert_eq!(
+                    after - before,
+                    batch as u64,
+                    "opt-in 時の gemm_batched は per-batch 合成（既定合成実装）へ \
+                     フォールバックしバッチ数ぶん TF32 経路を起動するはず: \
+                     before={before}, after={after}, batch={batch}"
+                );
+            }
+            Err(BackendError::CudaUnavailable(msg)) => {
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(BackendError::KernelLaunchFailed(msg)) => {
+                assert!(!msg.is_empty(), "error detail message must not be empty");
+            }
+            Err(other) => panic!("unexpected error variant for tf32 opt-in gemm_batched: {other}"),
+        }
+    }
+
+    /// `gemm_batched`／`gemm_batched_fp32_strict`（イシュー #1716）が、
+    /// driver に一切触れない shape 検証段階（`batched_matmul_plan`）で
+    /// 不正な形状を `BackendError::ShapeMismatch` として拒否すること
+    /// （GPU なし環境でも `CudaUnavailable` にならず検証できること）を
+    /// 確認する。
+    #[test]
+    fn gemm_batched_rejects_invalid_shapes_before_touching_driver() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let cuda = CudaBackendOps::new(0);
+
+        // rank<2（`batched_matmul_plan` が rank 検査で拒否）。
+        let rank1 = Tensor::new(vec![1.0, 2.0], &[2]).expect("valid tensor");
+        let rank2 = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+        assert!(matches!(
+            cuda.gemm_batched(&rank1, &rank2),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            cuda.gemm_batched_fp32_strict(&rank1, &rank2),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+
+        // 内部次元不一致（[2,3] x [2,3]。k=3 と k=2 が食い違う）。
+        let a = Tensor::new((1..=6).map(|v| v as f32).collect(), &[2, 3]).expect("valid tensor");
+        let b = Tensor::new((1..=6).map(|v| v as f32).collect(), &[2, 3]).expect("valid tensor");
+        assert!(matches!(
+            cuda.gemm_batched(&a, &b),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+
+        // batch broadcast 不整合（[2,2,2] x [3,2,2]。バッチ軸 2 と 3 は
+        // broadcast 不可）。
+        let a3 =
+            Tensor::new((1..=8).map(|v| v as f32).collect(), &[2, 2, 2]).expect("valid tensor");
+        let b3 =
+            Tensor::new((1..=12).map(|v| v as f32).collect(), &[3, 2, 2]).expect("valid tensor");
+        assert!(matches!(
+            cuda.gemm_batched(&a3, &b3),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            cuda.gemm_batched_fp32_strict(&a3, &b3),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    /// `gemm_batched_fp32_strict`（rank≥3・`m==0` を含む形状）が driver に
+    /// 触れずホスト側で空テンソルを直接返すこと（`total == 0` 早期
+    /// return。既定合成実装・CPU オーバーライドと同じ契約）を検証する
+    /// （GPU なし環境でも成功する）。
+    #[test]
+    fn gemm_batched_fp32_strict_returns_empty_tensor_for_zero_output_without_driver() {
+        use fandhe_ai_tensor_core::Tensor;
+
+        let cuda = CudaBackendOps::new(0);
+        // [2, 0, 3] x [2, 3, 4] → 出力 [2, 0, 4]（m=0 のため要素数 0）。
+        let a = Tensor::new(Vec::<f32>::new(), &[2, 0, 3]).expect("valid tensor");
+        let b =
+            Tensor::new((1..=24).map(|v| v as f32).collect(), &[2, 3, 4]).expect("valid tensor");
+
+        let out = cuda
+            .gemm_batched_fp32_strict(&a, &b)
+            .expect("m==0 な batched gemm は driver に触れずホスト側で空テンソルを返すはず");
+        assert_eq!(out.shape(), &[2, 0, 4]);
+        assert_eq!(out.numel(), 0);
     }
 
     /// opt-in（`true`）時、CUDA 実機が利用可能で TF32 カーネルが使用可能な
