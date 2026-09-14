@@ -31,7 +31,14 @@
 //! カーネル（`backend-cpu`／`backend-cuda`／`backend-metal` の
 //! `rmsnorm.rs`）を `BackendOps::rmsnorm` 経由で・LayerNorm を新設
 //! カーネル経由でそれぞれ接続した（`docs/norm-ops-design.md`）。
+//! イシュー #1604 で Embedding 層（`embedding` モジュール。
+//! `Var::embedding` を薄くラップする `nn::Embedding`／`EmbeddingVars`）を
+//! 追加した。`Module` trait は実装しない（`embedding.rs` モジュール
+//! doc 参照。id 入力の型が `Module::forward` の f32 `Var` 契約と
+//! 一致しないうえ、`compat::Sequential` の学習可能パラメータ収集が
+//! `as_linear` フック限定のため）。
 
+mod embedding;
 mod init;
 mod linear;
 mod module;
@@ -42,6 +49,7 @@ pub mod activation;
 pub mod loss;
 pub mod optim;
 
+pub use embedding::{Embedding, EmbeddingVars};
 pub use linear::{Linear, LinearVars};
 pub use module::Module;
 pub use norm::{

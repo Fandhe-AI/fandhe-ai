@@ -1370,6 +1370,30 @@ bit 同一のまま返る。非有限（NaN／±Inf）の `clip_value` および
 隠蔽を防ぐ）。3 バックエンド専用カーネルは対象外（ホスト
 `Tensor<f32>` のみを操作するため）。
 
+## 追補（イシュー #1604）
+
+§2.7 の `nn.Embedding` 欠落記述（「なし（gather 系 Op が前提＋embedding
+テーブル管理）」）はスナップショット不変のまま、`Var::embedding`
+（`tape::Op::Embedding`）・`nn::Embedding`／`EmbeddingVars` を実装済み
+化したことをここに追補する。forward は `BackendOps::gather`（dim=0）、
+backward は `BackendOps::scatter`（`ScatterReduce::Add` の決定的集約
+契約）へ委譲する合成のみで、`BackendOps` 自体は非拡張（#1776 で 3
+バックエンドとも実装済みの gather／scatter カーネルをそのまま再利用）。
+`padding_idx` は forward では特別扱いせず当該行の現在値をそのまま
+返し（PyTorch 準拠）、backward のみ `Op::Embedding` の VJP が当該行を
+明示ゼロへ上書きする。`Embedding::new` は `N(0, 1)` 初期化（`nn/
+init.rs::normal_init`。Box–Muller・`Linear::new` と同じくグローバル
+`manual_seed` 状態から独立）で `padding_idx` 行をゼロ初期化し、
+`Embedding::from_parameters` は与えられた値をそのまま保持する
+（safetensors ロード相当の入口）。**`Module` trait は実装しない**（id
+入力〈`Tensor<i32>`〉が `Module::forward` の f32 `Var` 契約と不一致な
+うえ、`compat::Sequential` の学習可能パラメータ収集が `as_linear`
+フック限定のため、実装すると `Sequential` に積んだ `Embedding` が
+黙って学習されない罠になる。`Module`／`Sequential` 統合は本 issue の
+スコープ外として別 issue へ引き継ぐ）。facade 新規公開面なし（既存の
+`Var`／`nn` 再エクスポート経由）。CUDA／Metal 実機での facade parity
+テストは未実測のまま Mac／GB10 セッションへ申し送る。
+
 ## 追補（イシュー #1756）
 
 `Var::pad`（`torch.nn.functional.pad(mode='constant')` 相当。定数
