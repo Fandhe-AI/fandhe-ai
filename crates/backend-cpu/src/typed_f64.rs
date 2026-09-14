@@ -50,8 +50,7 @@ use rayon::prelude::*;
 
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{
-    Element, ShapeError, Tensor, TypedOps, elementwise_out_shape, matmul_out_shape,
-    reduce_out_shape,
+    Element, ShapeError, Tensor, TypedOps, elementwise_out_shape, gemm_out_shape, reduce_out_shape,
 };
 
 use crate::elementwise::{PARALLEL_THRESHOLD, increment_index};
@@ -137,7 +136,7 @@ fn gemm_row_parallel_f64(a: &[f64], b: &[f64], c: &mut [f64], n: usize, k: usize
 
 /// 行列積（`m×k` × `k×n` → `m×n`）の f64 版（[`TypedOps::gemm`]）。
 pub(crate) fn gemm_f64(a: &Tensor<f64>, b: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
-    let out_shape = matmul_out_shape(a.shape(), b.shape()).map_err(BackendError::ShapeMismatch)?;
+    let out_shape = gemm_out_shape(a.shape(), b.shape()).map_err(BackendError::ShapeMismatch)?;
     let a_c = a.contiguous();
     let b_c = b.contiguous();
     let a_slice = a_c
