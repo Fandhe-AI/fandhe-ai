@@ -183,6 +183,16 @@ impl<'t> Var<'t> {
         self.tape.id
     }
 
+    /// この `Var` が属する `Tape` そのものへの参照（イシュー #1721）。
+    /// `nn::optim::amp::scale_loss` が `loss` の値から新たなスカラー葉
+    /// （`Tape::var(&Tensor::scalar(scale))`）を同じ `Tape` 上へ登録する
+    /// のに使う（`amp` モジュールは `var.rs` の外にあり `tape` フィールド
+    /// （private）へ直接触れられないため、`tape_id`/`tape_epoch` と同じ
+    /// `pub(crate)` アクセサ方針でクレート内限定公開する）。
+    pub(crate) fn tape(&self) -> &'t Tape {
+        self.tape
+    }
+
     /// この `Var` が指すテープ内ノードの識別子。`backward.rs` が
     /// `Gradients` から当該ノードの勾配を引くための添字として使う
     /// （`tape_id()` と同じくクレート内限定公開）。

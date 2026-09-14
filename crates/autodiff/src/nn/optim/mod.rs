@@ -19,15 +19,30 @@
 //! （本モジュール）とはモジュールの置き場所が異なる。統合は親 #192
 //! 完了時に判断する。
 //!
-//! **適用順序契約**: 1 学習ステップは必ず
-//! `backward → (AMP 導入後の unscale) → clip → optimizer step`
-//! の順で実行する。損失スケーリング（AMP）は現時点で未実装のため
-//! unscale ステップは存在しないが、将来 AMP を導入する際も
-//! 「clip は unscale 後の生勾配に対してのみ適用する」契約を崩さない
-//! （clip 前に scale が残っていると `max_norm` の意味が変わり、
-//! 意図しない過剰クリップ・過小クリップを招くため。仕様突合
+//! **適用順序契約**（#1721 で AMP 損失スケーリングのコア関数
+//! （[`amp`]）を追加したため更新）: 1 学習ステップは必ず
+//! `scale_loss（AMP 使用時）→ backward → unscale＋非有限検出
+//! （AMP 使用時）→ 非有限なら clip・optimizer step の両方をスキップ
+//! → 非有限でなければ clip → optimizer step → GradScaler::update
+//! （AMP 使用時）` の順で実行する。
+//!
+//! 非有限検出（[`amp::UnscaleResult::should_skip_step`]）が **clip より
+//! 先** に判定される理由: [`clip::clip_grad_norm`]／
+//! [`clip::global_grad_norm`] は非有限勾配に対し `Err` を返す契約
+//! （fail-closed）であり、非有限検出前に clip を呼ぶと overflow が
+//! 起きただけで学習ループ全体が失敗してしまう（AMP では overflow に
+//! よる非有限勾配の出現自体は正常な運用パスであり、その step を
+//! スキップして `GradScaler` 側のスケールを backoff させるのが正しい
+//! 扱い）。また「clip は unscale 後の生勾配に対してのみ適用する」
+//! 契約も崩さない（clip 前に scale が残っていると `max_norm` の意味が
+//! 変わり、意図しない過剰クリップ・過小クリップを招くため。仕様突合
 //! 2026-08-06・#192 本文）。本モジュールはこの契約を doc として固定し、
 //! [`clip`] にテスト（`nn_optim_clip.rs`）で正順・逆順の不一致を回帰化する。
+//!
+//! AMP（損失スケーリング・unscale・inf/nan 検出）を使わない既存の
+//! 学習ループは、`scale_loss`／`unscale`／`GradScaler` を一切呼ばずに
+//! `backward → clip → optimizer step` のまま変更なしで動作する
+//! （[`amp`] は既存経路に割り込まない独立モジュール）。
 //!
 //! gradient clipping・LR スケジューラ（本イシュー・#195）を追加した。
 //! [`clip::clip_grad_norm`]／[`lr_scheduler::LrScheduler`] は
@@ -40,9 +55,26 @@
 
 mod adamw;
 
+pub mod amp;
 pub mod clip;
 pub mod lr_scheduler;
 
 pub use adamw::{AdamW, AdamWConfig};
+pub use amp::{
+    GradScaler, GradScalerConfig, UnscaleResult, has_non_finite, scale_grads, scale_loss,
+    unscale_grads,
+};
 pub use clip::{ClipGradResult, clip_grad_norm, global_grad_norm};
 pub use lr_scheduler::{ConstantLr, LrScheduler, StepLr};
+
+// イシュー #1721: 損失スケーリング（`amp::scale_loss`/`amp::GradScaler::
+// scale_loss`）・unscale＋非有限検出（`amp::unscale_grads`/
+// `amp::GradScaler::unscale`）・スケール更新契約（`amp::GradScaler::
+// update`）のコア関数を追加した。新規 `Op`／`BackendOps` メソッド／VJP
+// は追加していない（`amp` モジュール冒頭 doc 参照。`scale_loss` は
+// 既存 `Var::mul` の合成のみ）。facade（`fandhe_ai::optim`）への公開・
+// `crates/facade/tests/api_surface.rs` の期待集合更新・
+// `docs/compat-api-scope.md` §1.3 AMP 行の更新は別イシュー（#1722）へ
+// 引き継ぐ（ユーザー承認前に facade 公開面を拡大しないため）。真の
+// 混合精度（f16 forward／f32 master weight）は対象外
+// （`docs/backend-dtype-dispatch-design.md` §8）。
