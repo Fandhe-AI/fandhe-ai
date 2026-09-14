@@ -278,9 +278,10 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   - sparse／complex テンソル（非対応の明文化は #1633）
   - `torch.fx`／TorchScript／`torch.jit`・分散 RPC・モバイル／エッジ
     向け変換
-  - 汎用グラフ JIT（`torch.compile`／`tf.function` 相当）: 新規 JIT を
-    作らず、既存の融合・CUDA Graph capture の延長で扱う範囲を #1632 で
-    整理する
+  - 汎用グラフ JIT（`torch.compile`／`tf.function` 相当）: 範囲整理は
+    `docs/autodiff-graph-optimization-scope-decision.md`（#1632）で確定
+    済み（実装済み／延長候補／非目標の 3 区分）。汎用 JIT 自体は引き続き
+    対象外・延長候補（区分 B）は承認事項付きの別 issue へ引き継ぐ
 - **未定義（Tier 列挙にも「引き続き対象外」にも該当しない残余。5 節手続き
   の対象）**: numpy の ufunc 長尾・ファンシーインデックス・ブロード
   キャスト以外の高度な配列操作のうち、1.2 節の要素演算・index 系（#1592・

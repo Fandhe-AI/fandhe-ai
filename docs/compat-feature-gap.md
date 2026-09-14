@@ -350,7 +350,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 
 | PyTorch | TF/Keras | fandhe-ai | 実装に必要なもの | 難度 |
 |---|---|---|---|---|
-| `torch.compile`（グラフ最適化 JIT） | `tf.function`（AutoGraph・XLA） | 部分（`run_fused`＝elementwise カーネル融合・CUDA Graph capture opt-in はあるが、汎用グラフ JIT コンパイラではない） | 既存インフラの延長線上で拡張可能（新規 JIT は不要） | - |
+| `torch.compile`（グラフ最適化 JIT） | `tf.function`（AutoGraph・XLA） | 部分（`run_fused`＝elementwise カーネル融合・CUDA Graph capture opt-in はあるが、汎用グラフ JIT コンパイラではない） | 既存インフラの延長線上で拡張可能（新規 JIT は不要）。設計: `docs/autodiff-graph-optimization-scope-decision.md`（#1632） | - |
 | 量子化（int8 等） | `tf.lite` 量子化 | なし | 量子化 dtype・演算対応（2.12 節の dtype 拡張が前提） | XL |
 | 乱数シード固定（`manual_seed`） | `tf.random.set_seed` | 部分（`Linear::new(.., seed: u64)` など個別 API にシード引数はあるが、グローバル RNG 状態を握る `manual_seed` 相当はない） | グローバル RNG 契約の設計（Dropout 等 今後追加する確率的演算との整合が前提） | M |
 
