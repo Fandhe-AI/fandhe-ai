@@ -50,6 +50,53 @@ fn contiguous_slice(t: &Tensor<f32>) -> Vec<f32> {
     t.contiguous().as_slice().unwrap().to_vec()
 }
 
+/// 事前登録した形状網羅セット（`docs/perf/logs/cuda-gemm-batched-1716/
+/// README.md`「事前登録判定規則」の「全 9 形状」。整列〈N=K=1024 の
+/// 128×64 スロット到達条件を含む〉・非整列・broadcast（lhs／rhs／
+/// 中間軸）・rank 4・退化形状〈k==0／m==0〉）を、bit 同一テスト
+/// （`gemm_batched_fp32_strict_matches_default_per_batch_composition_bit_exact_on_real_device`）
+/// と CPU 参照実装 parity テスト（`gemm_batched_matches_cpu_reference_on_real_device`）
+/// の両方から共有する（PR #1841 codex-review 指摘: 両テストの形状
+/// セットが乖離していると N=K=1024 のような別カーネル選択経路に
+/// 到達する形状で CPU 参照実装との数値誤差を検出できない）。
+///
+/// `seed_offset` はテストごとに異なる乱数系列を使うための基準値
+/// （各ケースは `seed_offset + 2*index`／`seed_offset + 2*index + 1`
+/// を a／b の seed に使う）。形状セット自体は共通で、テスト間の
+/// 独立性のため seed のみを分ける。
+fn nine_shape_cases(seed_offset: u64) -> Vec<(u64, u64, Vec<usize>, Vec<usize>)> {
+    let shapes: Vec<(Vec<usize>, Vec<usize>)> = vec![
+        // 整列形状（n%4==0 && k%4==0。128×64 スロット到達条件〈N≥1024
+        // かつ K≥1024〉も含む）。
+        (vec![3, 64, 256], vec![3, 256, 256]),
+        (vec![2, 1024, 1024], vec![2, 1024, 1024]),
+        // 非整列形状（classic 経路）。
+        (vec![3, 17, 65], vec![3, 65, 33]),
+        // broadcast（lhs バッチ次元 1）。
+        (vec![1, 5, 6], vec![4, 6, 7]),
+        // broadcast（rhs バッチ次元 1）。
+        (vec![4, 5, 6], vec![1, 6, 7]),
+        // broadcast（中間軸）。rank 4。
+        (vec![2, 1, 5, 6], vec![1, 3, 6, 7]),
+        // rank 4（broadcast なし）。
+        (vec![2, 3, 8, 9], vec![2, 3, 9, 10]),
+        // 退化形状: k==0（全 0 出力）。
+        (vec![2, 5, 0], vec![2, 0, 6]),
+        // 退化形状: m==0（空出力）。
+        (vec![2, 0, 5], vec![2, 5, 6]),
+    ];
+
+    shapes
+        .into_iter()
+        .enumerate()
+        .map(|(i, (a_shape, b_shape))| {
+            let seed_a = seed_offset + 2 * i as u64;
+            let seed_b = seed_offset + 2 * i as u64 + 1;
+            (seed_a, seed_b, a_shape, b_shape)
+        })
+        .collect()
+}
+
 /// 環境適応スモーク（属性なし。通常 CI で実行）。CUDA 不在なら
 /// `BackendError::CudaUnavailable` を確認して早期 return する
 /// （`gather_scatter_parity.rs::gather_scatter_parity_smoke_env_adaptive`
@@ -104,26 +151,7 @@ fn gemm_batched_fp32_strict_matches_default_per_batch_composition_bit_exact_on_r
         CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
     let cuda = CudaBackendOps::new(device.ordinal());
 
-    let cases: Vec<(u64, u64, Vec<usize>, Vec<usize>)> = vec![
-        // 整列形状（n%4==0 && k%4==0。128×64 スロット到達条件〈N≥1024
-        // かつ K≥1024〉も含む）。
-        (10, 11, vec![3, 64, 256], vec![3, 256, 256]),
-        (12, 13, vec![2, 1024, 1024], vec![2, 1024, 1024]),
-        // 非整列形状（classic 経路）。
-        (14, 15, vec![3, 17, 65], vec![3, 65, 33]),
-        // broadcast（lhs バッチ次元 1）。
-        (16, 17, vec![1, 5, 6], vec![4, 6, 7]),
-        // broadcast（rhs バッチ次元 1）。
-        (18, 19, vec![4, 5, 6], vec![1, 6, 7]),
-        // broadcast（中間軸）。rank 4。
-        (20, 21, vec![2, 1, 5, 6], vec![1, 3, 6, 7]),
-        // rank 4（broadcast なし）。
-        (22, 23, vec![2, 3, 8, 9], vec![2, 3, 9, 10]),
-        // 退化形状: k==0（全 0 出力）。
-        (24, 25, vec![2, 5, 0], vec![2, 0, 6]),
-        // 退化形状: m==0（空出力）。
-        (26, 27, vec![2, 0, 5], vec![2, 5, 6]),
-    ];
+    let cases = nine_shape_cases(10);
 
     for (seed_a, seed_b, a_shape, b_shape) in cases {
         let a = tensor(seed_a, &a_shape);
@@ -160,9 +188,12 @@ fn gemm_batched_fp32_strict_matches_default_per_batch_composition_bit_exact_on_r
     }
 }
 
-/// 上記と同じ形状セットで CPU 参照実装との REQ-2 統一複合判定
-/// （tolerance 不変。CPU BLIS の累積順序は CUDA と異なりうるため bit
-/// 同一は約束しない）を確認する。
+/// 上記と同じ形状セット（`nine_shape_cases`。事前登録した全 9 形状。
+/// N=K=1024 の別カーネル選択経路〈128×64 スロット到達条件〉を含む）
+/// で CPU 参照実装との REQ-2 統一複合判定（tolerance 不変。CPU BLIS の
+/// 累積順序は CUDA と異なりうるため bit 同一は約束しない）を確認する
+/// （PR #1841 codex-review 指摘対応: 従来は 4 形状のみで N=K=1024 が
+/// 未網羅だった）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn gemm_batched_matches_cpu_reference_on_real_device() {
@@ -171,12 +202,7 @@ fn gemm_batched_matches_cpu_reference_on_real_device() {
     let cuda = CudaBackendOps::new(device.ordinal());
     let cpu = CpuBackendOps::new();
 
-    let cases: Vec<(u64, u64, Vec<usize>, Vec<usize>)> = vec![
-        (30, 31, vec![3, 64, 256], vec![3, 256, 256]),
-        (32, 33, vec![3, 17, 65], vec![3, 65, 33]),
-        (34, 35, vec![1, 5, 6], vec![4, 6, 7]),
-        (36, 37, vec![2, 1, 5, 6], vec![1, 3, 6, 7]),
-    ];
+    let cases = nine_shape_cases(30);
 
     for (seed_a, seed_b, a_shape, b_shape) in cases {
         let a = tensor(seed_a, &a_shape);
