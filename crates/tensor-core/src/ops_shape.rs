@@ -24,7 +24,7 @@
 
 use crate::broadcast::broadcast_shape;
 use crate::error::ShapeError;
-use crate::tensor::checked_numel;
+use crate::tensor::{checked_numel, checked_numel_for};
 
 /// matmul の 2 次元厳密版（`docs/public-api-design.md` §3.2）の出力 shape
 /// を検査・計算する。
@@ -613,6 +613,54 @@ pub fn row_softmax_layout(
     let numel = checked_numel(shape)?;
     let rows = numel.checked_div(cols).unwrap_or(0);
     Ok(Some((rows, cols)))
+}
+
+/// `one_hot`（`Var::one_hot`。PyTorch `F.one_hot`／TF `tf.one_hot` 相当。
+/// イシュー #1755）の出力 shape を検査・計算する。非微分演算（VJP は
+/// ゼロ扱い。`crates/autodiff/src/grad.rs::vjp` の `Op::OneHot` 分岐）
+/// であり、本関数は `index_shape`（クラス id を保持する整数値
+/// テンソルの shape）へ末尾軸として `num_classes` を付加した shape を
+/// 返す。`gather_out_shape` と異なり `index_shape` と `input_shape` を
+/// 突き合わせる対象が無いため rank 検査は不要。
+///
+/// - `num_classes == 0` の場合、付加される軸のサイズが 0 になり
+///   如何なる添字も範囲外になる（“0 個のクラスに 1 つを立てる”操作が
+///   意味を持たない）ため、新規 `ShapeError` variant を追加せず
+///   `ShapeError::IndexOutOfRange { dim: index_shape.len(), index: 0,
+///   dim_size: 0 }` を返す（`dim` は付加される軸の位置。既存
+///   `IndexOutOfRange` の「範囲外添字」という意味論を「`num_classes`
+///   軸そのものが空」というケースへ拡張する解釈）。
+/// - 出力 shape `index_shape ++ [num_classes]` の要素数積のオーバー
+///   フローは `checked_numel_for::<f32>` で検査し
+///   `ShapeError::ElementCountOverflow` を返す（`matmul_out_shape` 等の
+///   `checked_numel` 単体とは異なり、出力の実体が常に `Tensor<f32>`
+///   （`eval::one_hot`・CPU／CUDA／Metal 実装いずれも `f32` 出力）で
+///   あることを踏まえ、要素数積が `usize` に収まっても確保バイト数が
+///   `Vec` の allocation 上限（`isize::MAX` バイト）を超えるケース
+///   （例: `index_shape = [1]`・`num_classes = usize::MAX` は要素数積
+///   としては overflow しないが `f32` 4 バイト換算で必ず超過する）まで
+///   ここで一括検査する。`one_hot_out_shape` の戻り値は `Var::one_hot`・
+///   CPU（`gather_scatter.rs::one_hot`）・CUDA／Metal 各実装が
+///   「呼び出し元で検査済み」の前提で `Vec::with_capacity`／
+///   `vec![0f32; numel]` へそのまま渡す単一情報源のため、ここで
+///   バイトサイズまで検査しないと下流の確保が capacity overflow で
+///   panic しうる（本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`
+///   に反する DoS 経路。イシュー #1755・codex-review P1 是正）。
+pub fn one_hot_out_shape(
+    index_shape: &[usize],
+    num_classes: usize,
+) -> Result<Vec<usize>, ShapeError> {
+    if num_classes == 0 {
+        return Err(ShapeError::IndexOutOfRange {
+            dim: index_shape.len(),
+            index: 0,
+            dim_size: 0,
+        });
+    }
+    let mut out = index_shape.to_vec();
+    out.push(num_classes);
+    checked_numel_for::<f32>(&out)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1366,5 +1414,53 @@ mod tests {
     fn topk_out_shape_k_zero() {
         let out = topk_out_shape(&[3, 4], 1, 0).unwrap();
         assert_eq!(out, vec![3, 0]);
+    }
+
+    // --- one_hot_out_shape ---
+
+    #[test]
+    fn one_hot_out_shape_basic() {
+        let out = one_hot_out_shape(&[2, 2], 3).unwrap();
+        assert_eq!(out, vec![2, 2, 3]);
+    }
+
+    #[test]
+    fn one_hot_out_shape_1d_index() {
+        let out = one_hot_out_shape(&[4], 5).unwrap();
+        assert_eq!(out, vec![4, 5]);
+    }
+
+    #[test]
+    fn one_hot_out_shape_num_classes_zero() {
+        let err = one_hot_out_shape(&[2, 2], 0).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::IndexOutOfRange {
+                dim: 2,
+                index: 0,
+                dim_size: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn one_hot_out_shape_element_count_overflow() {
+        let err = one_hot_out_shape(&[usize::MAX], 2).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    // codex-review P1 是正（イシュー #1755）の回帰: `index_shape = [1]`・
+    // `num_classes = usize::MAX` は要素数積（`1 * usize::MAX`）としては
+    // `usize` オーバーフローしない（`checked_numel` 単体では通過する）が、
+    // `f32` 4 バイト換算の確保バイト数は `isize::MAX` を大幅に超える。
+    // `checked_numel_for::<f32>` による検査でここが拒否されることを
+    // 確認し、下流（`Var::one_hot`・`eval::one_hot`・CPU
+    // `gather_scatter::one_hot` 等）の `Vec::with_capacity`／
+    // `vec![0f32; numel]` が capacity overflow で panic する経路を
+    // 塞げていることを担保する。
+    #[test]
+    fn one_hot_out_shape_byte_size_overflow_without_element_count_overflow() {
+        let err = one_hot_out_shape(&[1], usize::MAX).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
     }
 }

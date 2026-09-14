@@ -41,8 +41,8 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, gather_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape,
+    UnaryElementwiseOp, gather_out_shape, one_hot_out_shape, require_same_shape, row_norm_layout,
+    row_softmax_layout, scatter_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -2326,6 +2326,42 @@ impl BackendOps for MetalBackendOps {
                 dim,
                 reduce,
             )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::one_hot` の Metal 実装（**非微分演算**。イシュー
+    /// #1755）。[`one_hot_out_shape`] で `index.shape()`／`num_classes`
+    /// を再検査し、[`validate_index_range`]（`index` の値域）でカーネル
+    /// 起動前の fail-closed 検査を行ってから `crate::gather_scatter::
+    /// MetalGatherScatter::run_one_hot_f32` へ委譲する（[`Self::
+    /// gather`] と同じ二重検査方針）。`gather`／`scatter` と異なり
+    /// カーネルが座標展開・ストライド（`shapes` バッファ）を一切
+    /// 使わないため、[`Self::gather`]／[`Self::scatter`] が行う
+    /// `GS_MAX_RANK`／[`validate_shapes_fit_u32`] 検査は不要
+    /// （`shaders/gather_scatter.metal::one_hot_f32` 参照）。
+    fn one_hot(
+        &self,
+        index: &Tensor<i32>,
+        num_classes: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            one_hot_out_shape(index.shape(), num_classes).map_err(BackendError::ShapeMismatch)?;
+        let index_shape = index.shape().to_vec();
+
+        let index_owned = index.contiguous();
+        let index_slice = index_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("one_hot: index not contiguous".into())
+        })?;
+
+        validate_index_range(index_slice, index_shape.len(), num_classes)
+            .map_err(BackendError::ShapeMismatch)?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let gs = context_cache::cached_gather_scatter(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = gs
+            .run_one_hot_f32(&ctx, index_slice, &index_shape, num_classes)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
