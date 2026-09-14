@@ -1760,6 +1760,49 @@ impl<'t> Var<'t> {
         crate::einsum::einsum(spec, operands)
     }
 
+    /// PyTorch `torch.nn.functional.scaled_dot_product_attention` 相当
+    /// （イシュー #1639。親 #1605「MultiheadAttention」の sub-issue
+    /// (a)。設計・対象外事項は `crate::attention`〈非公開モジュール〉の
+    /// doc 参照）。
+    ///
+    /// `query: [..., L, E]`・`key: [..., S, E]`・`value: [..., S, Ev]`
+    /// （バッチ次元 `...` は NumPy 互換ブロードキャスト。`Var::matmul`
+    /// と同じ契約）を受け取り `[..., L, Ev]` を返す。
+    ///
+    /// `attn_mask`（`true` = attend。PyTorch bool mask 規約。`[..., L,
+    /// S]` へ broadcast 可能な形状）と `is_causal`（top-left aligned の
+    /// `j <= i` causal mask）は同時指定不可（[`AutodiffError::
+    /// InvalidArgument`]）。`scale` は `None` のとき `1/sqrt(E)`
+    /// （`E == 0` かつ `scale == None` は [`AutodiffError::
+    /// InvalidArgument`]）。
+    ///
+    /// **対象外**: `dropout_p`（#1603 未実装）・`enable_gqa`・attention
+    /// weights の返却・f16／bf16（#1626）。既存カーネルの合成のみで
+    /// 実装しており、新規 `Op`／`BackendOps` メソッドは追加していない
+    /// （CUDA／Metal 専用の融合 attention カーネルは対象外。
+    /// `docs/kernel-fusion.md`）。
+    ///
+    /// # Errors
+    ///
+    /// `query`／`key` が rank < 2、`attn_mask` と `is_causal` の同時
+    /// 指定、`attn_mask` が `[..., L, S]` へ broadcast 不能、いずれかの
+    /// 行が全 key を masked にしてしまう、`scale`（既定値含む）が非
+    /// 有限・0 以下、のいずれかで型付きエラーを返す。`E`／`S` の不一致・
+    /// バッチ broadcast 不能・テープ不一致は内部で呼ぶ `matmul`／
+    /// `transpose` の既存検査へ委譲する。
+    pub fn scaled_dot_product_attention(
+        query: &Var<'t>,
+        key: &Var<'t>,
+        value: &Var<'t>,
+        attn_mask: Option<&fandhe_ai_tensor_core::Tensor<bool>>,
+        is_causal: bool,
+        scale: Option<f32>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::attention::scaled_dot_product_attention(
+            query, key, value, attn_mask, is_causal, scale,
+        )
+    }
+
     /// RNN（tanh 版）セル 1 step（イシュー #1647・設計 `docs/autodiff-
     /// rnn-cell-tape-design.md` 決定 1・4・5）。
     /// `h_t = tanh(x·W_ih + b_ih + h_{t-1}·W_hh + b_hh)`。

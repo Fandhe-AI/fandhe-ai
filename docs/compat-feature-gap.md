@@ -1454,3 +1454,55 @@ init.rs::normal_init`。Box–Muller・`Linear::new` と同じくグローバル
 - spec REQ-9 の「引き続き対象外」判断（`docs/spec/04-requirements.md:233,432`）と整合しており、spec への新規提案は不要（同 doc §3）。
 - ONNX complex dtype（`COMPLEX64`/`COMPLEX128`）は `GraphError::UnknownDataType` で fail-closed 拒否される一方、`GraphProto.sparse_initializer`（未宣言フィールド）は prost の仕様どおり無言でスキップされる非対称な挙動を事実として記録した（同 doc §2・§9(a)。是正は本イシューのスコープ外で、ユーザー承認を得たうえで別イシューへ引き継ぐ）。
 - facade 新規公開面なし。
+
+## 追補（イシュー #1639）
+
+§2.7 の `nn.MultiheadAttention` 行（268 行目）・§9 相当欄
+（374〜386 行目）のスナップショット本文は不変のまま、親 #1605 の
+sub-issue (a)（scaled dot product attention 関数）が実装済みになった。
+
+- `Var::scaled_dot_product_attention`（`crates/autodiff/src/
+  attention.rs`。`query`／`key`／`value`／`attn_mask`／`is_causal`／
+  `scale` を受け取る関連関数）を追加した。`QK^T`（バッチ行列積）→
+  scale → （任意の）causal／padding mask → softmax → `V` との
+  バッチ行列積、という計算を既存の `Var::matmul`（rank≥2。#1715）・
+  `transpose`（zero-copy view）・`mul`（`nn::optim::amp::scale_loss`
+  と同じスカラー Leaf パターン）・`masked_fill`（#1637）・`softmax`
+  （#1594）への分解のみで実装し、新規 `Op`／`BackendOps` メソッド／
+  カーネルは追加していない（`crate::einsum` と同型の設計方針）。
+- VJP は各構成演算の既存 VJP 合成として自動的に成立する
+  （`grad.rs` へ専用 VJP を追加していない）。
+- causal マスクは PyTorch 参照実装（`torch.ones(L, S).tril(diagonal=0)`
+  の否定）と同一規約（top-left aligned。`j <= i` のみ attend 許可・
+  `L != S` の非正方形状も対応）。`attn_mask`（`true` = attend。
+  PyTorch bool mask 規約）と `is_causal` は同時指定不可
+  （`AutodiffError::InvalidArgument`）。
+- 全 masked 行（softmax がバックエンド依存の不定値を生みうる）・
+  非有限／非正の `scale`（既定値 `1/sqrt(E)` 含む）・`E == 0` かつ
+  `scale == None` はいずれも演算グラフへ記録する前に型付きエラーで
+  拒否する（fail-closed）。`E`／`S` 不一致・バッチ broadcast 不能・
+  クロステープは内部で呼ぶ `matmul`／`transpose` の既存検査へ委譲する。
+  `L == 0`／`S == 0`／`Ev == 0` は panic せず既存演算の 0 サイズ契約
+  （`gemm_batched`／`softmax`）へ委ねる。
+- facade（`crates/facade/src/lib.rs`）への新規 `pub use`／`pub fn` は
+  追加していない。既存の `pub use fandhe_ai_autodiff::Var` 再エクス
+  ポート経由でそのまま到達可能になる。
+- テストは `crates/autodiff/src/attention.rs`（`#[cfg(test)]`。causal
+  マスク生成・全 masked 行検出・`scale` 検証の単体テスト）・
+  `crates/autodiff/tests/attention.rs`（ブルートフォース `f64` 参照
+  実装との forward 突合〈rank 2／rank 4／バッチ broadcast／causal／
+  明示 mask〉・手動合成との forward bit 完全一致・中央差分による
+  backward 突合〈mask なし／causal／明示 mask／self-attention〉・
+  拒否系〈rank・shape・mask 同時指定・全 masked 行・scale・テープ
+  不一致〉・0 サイズ・大入力での有限値確認）・`crates/facade/tests/
+  attention_backend_parity.rs`（CPU vs NaiveOps の REQ-2 複合判定・
+  facade 到達確認・`#[ignore]` の Metal／CUDA 実機比較）に追加した。
+  CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機での facade
+  parity テストは、本実装エージェントの実行環境に実機への到達手段が
+  ないため未実測のまま Mac／GB10 セッションへ申し送る。
+- 対象外（既存 issue で追跡可能）: `dropout_p`（Dropout 未実装。
+  #1603）・`enable_gqa`・attention weights の返却・f16／bf16 経路
+  （#1626）・CUDA／Metal 専用の融合 attention カーネル（性能最適化。
+  `docs/kernel-fusion.md` の方針と整合）・`MultiheadAttention` Module
+  自体（in/out projection・head 分割。親 #1605 の sub-issue (b)・
+  #1640）。
