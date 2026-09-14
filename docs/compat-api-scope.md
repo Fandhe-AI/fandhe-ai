@@ -220,7 +220,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | Dropout | #1603 |
 | Embedding | #1604（実装済み。`Var::embedding`〈`tape::Op::Embedding`。gather を forward・`scatter_add`〈`ScatterReduce::Add` の決定的集約契約〉を backward に使う合成。`BackendOps` 非拡張〉・`nn::Embedding`／`EmbeddingVars`〈`padding_idx` 対応。forward は当該行を素通し・backward のみゼロ上書き〉。`Module` trait は非実装（id 入力が f32 `Var` 契約と不一致・`compat::Sequential` の学習可能パラメータ収集は `as_linear` フック限定のため、実装すると黙って学習されない罠になる。詳細は `crates/autodiff/src/nn/embedding.rs` モジュール doc）。facade 到達経路は既存 `Var`／`nn` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない。CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッションへ申し送り） |
 | MultiheadAttention | #1605 |
-| Conv1d／Conv2d | #1606 |
+| Conv1d／Conv2d | #1606（設計記録 #1641。`docs/conv-ops-design.md`。実装は #1642〈CPU〉・#1643〈CUDA〉・#1644〈Metal〉・#1645〈nn 層・parity・実機実測〉） |
 | Pooling | #1607（設計記録 #1727。`docs/pooling-ops-design.md`。実装は #1728〈CPU〉・#1729〈CUDA〉・#1730〈Metal〉） |
 | 損失（BCE／NLL／Huber／KLDiv） | #1609 |
 | optimizer（Adam／RMSprop／Adagrad／LAMB） | #1610 |
