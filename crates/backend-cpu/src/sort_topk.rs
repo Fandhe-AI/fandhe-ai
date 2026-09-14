@@ -171,7 +171,8 @@ pub fn sort(
             coords[dim] = out_pos;
             let flat_out = ravel(&coords, &strides);
             out_vals[flat_out] = val;
-            out_idx[flat_out] = orig_idx as i32;
+            out_idx[flat_out] = i32::try_from(orig_idx)
+                .map_err(|_| ShapeError::IndexRangeOverflow { index: orig_idx })?;
         }
         // clippy: `line` は明示的にドロップしなくても scope 終了で解放
         // されるが、次イテレーションの再確保を避けるためここでは特に
@@ -221,7 +222,8 @@ pub fn topk(
             coords[dim] = out_pos;
             let flat_out = ravel(&coords, &out_strides);
             out_vals[flat_out] = val;
-            out_idx[flat_out] = orig_idx as i32;
+            out_idx[flat_out] = i32::try_from(orig_idx)
+                .map_err(|_| ShapeError::IndexRangeOverflow { index: orig_idx })?;
         }
     }
     Ok((
