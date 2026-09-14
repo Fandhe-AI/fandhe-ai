@@ -19,14 +19,15 @@ use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
     ShapeError, Tensor, broadcast_shape, concat_out_shape, gather_out_shape, matmul_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
     concat_with_fallback, gather_with_fallback, scalar_binary_with_fallback,
-    scalar_unary_with_fallback, scatter_with_fallback,
+    scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -2295,6 +2296,125 @@ impl<'t> Var<'t> {
             value,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `dim` 軸に沿って並べ替える（`torch.sort` 相当。イシュー
+    /// #1733）。戻り値は `(values, index)` で、`values`（追跡対象。
+    /// `Var`）は並べ替え後の値、`index`（非追跡・`Tensor<i32>`）は
+    /// 元の `dim` 軸上の添字。同値（ties）・NaN・±0 の順序契約は
+    /// [`fandhe_ai_tensor_core::BackendOps::sort`] doc の 1〜4 を正と
+    /// する。
+    ///
+    /// 検査順序: ①[`fandhe_ai_tensor_core::sort_out_shape`]（`dim`
+    /// 範囲を検査。違反は `AutodiffError::Shape`）→ ②`self` を層 1 で
+    /// 実体化 → ③`ops.sort` → `Unsupported` のときのみホスト参照
+    /// 実装（`eval::sort`）へフォールバック → ④戻り shape 検証
+    /// （`.claude/rules/security.md` A08）→ ⑤`push_eager`。
+    pub fn sort(
+        &self,
+        dim: usize,
+        descending: bool,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape = sort_out_shape(&in_shape, dim).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let (value, index) =
+            sort_with_fallback(self.tape.ops(), &input_val, dim, descending, &out_shape)?;
+        if value.shape() != out_shape || index.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Sort {
+                input: self.id,
+                dim,
+                index: index.clone(),
+            },
+            value,
+        );
+        Ok((Var::from_raw(self.tape, id), index))
+    }
+
+    /// `dim` 軸に沿って並べ替えた際の元添字のみを返す（`torch.argsort`
+    /// 相当。イシュー #1733）。[`Self::sort`] と異なりテープへノードを
+    /// **追加しない**（非微分演算。`index` は forward 値のみで勾配は
+    /// 流れない）。`self` を実体化して [`Self::sort`] と同じ検査・
+    /// フォールバック経路（`sort_out_shape` → `sort_with_fallback`）を
+    /// 通し、`index` 出力のみを返す。
+    pub fn argsort(&self, dim: usize, descending: bool) -> Result<Tensor<i32>, AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape = sort_out_shape(&in_shape, dim).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let (_value, index) =
+            sort_with_fallback(self.tape.ops(), &input_val, dim, descending, &out_shape)?;
+        if index.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: index.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        Ok(index)
+    }
+
+    /// `dim` 軸に沿って上位（`largest=true`）／下位（`largest=false`）
+    /// `k` 個を選ぶ（`torch.topk` 相当・`sorted=True` 固定。イシュー
+    /// #1733）。戻り値は [`Self::sort`] と同じ `(values, index)` の形。
+    ///
+    /// 検査順序: ①[`fandhe_ai_tensor_core::topk_out_shape`]（`dim`
+    /// 範囲・`k <= self.shape()[dim]` を検査。`k > dim_size` は
+    /// `ShapeError::NarrowOutOfBounds`）→ ②`self` を層 1 で実体化 →
+    /// ③`ops.topk` → `Unsupported` のときのみホスト参照実装
+    /// （`eval::topk`）へフォールバック → ④戻り shape 検証 →
+    /// ⑤`push_eager`。
+    pub fn topk(
+        &self,
+        k: usize,
+        dim: usize,
+        largest: bool,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape = topk_out_shape(&in_shape, dim, k).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let (value, index) =
+            topk_with_fallback(self.tape.ops(), &input_val, dim, k, largest, &out_shape)?;
+        if value.shape() != out_shape || index.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Topk {
+                input: self.id,
+                dim,
+                index: index.clone(),
+            },
+            value,
+        );
+        Ok((Var::from_raw(self.tape, id), index))
     }
 
     /// LSTM セル 1 step（イシュー #1647・設計 `docs/autodiff-rnn-cell-
