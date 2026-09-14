@@ -1442,8 +1442,25 @@ pub(crate) fn vjp(
                 return Ok(vec![(input, d_input)]);
             }
 
-            let sp_in_numel: usize = input_shape[spatial_start..].iter().product();
-            let sp_out_numel: usize = out_shape[spatial_start..].iter().product();
+            // `outer != 0` に絞ったこの時点でも、`input_shape`／
+            // `out_shape` の空間軸だけを取り出した部分積は無検査
+            // `.iter().product()` のままでは overflow しうる
+            // （Cursor Bugbot 指摘・PR #1834 レビュー）。`outer` を
+            // 含む全軸の積（テンソル全体の要素数）は生成時点
+            // （`Tensor::broadcast_to`／`Var::broadcast_to` 等）で
+            // `checked_numel` 相当により overflow しないことを検査
+            // 済みという不変条件に暗黙に依存せず、ここでも自前で
+            // `checked_mul` を用い明示的に検査する（`.claude/rules/
+            // security.md` A03 の fail-closed 方針・本ファイル既存の
+            // `checked_numel_for` 系ヘルパーと同型）。
+            let sp_in_numel: usize = input_shape[spatial_start..]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let sp_out_numel: usize = out_shape[spatial_start..]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
 
             match mode {
                 fandhe_ai_tensor_core::InterpolateMode::Nearest => {
@@ -7985,5 +8002,70 @@ release ビルドでも検知できるよう `assert!` を使う）"
         assert_eq!(*node, NodeId(0));
         assert_eq!(d_input.shape(), &input_shape);
         assert_eq!(d_input.numel(), 0);
+    }
+
+    /// Cursor Bugbot 指摘（PR #1834 レビュー）の回帰テスト。上記 2 件は
+    /// いずれも `outer == 0`（先頭軸が空）の経路のみを検証しており、
+    /// `outer == 0` ガードを通過した**後**の `sp_in_numel`／
+    /// `sp_out_numel` 計算自体が無検査 `.iter().product()` のままでは
+    /// overflow しうる、という指摘の経路（`outer != 0`）は未検証
+    /// だった。
+    ///
+    /// `Var::interpolate`／`Tensor::broadcast_to` を経由する通常の
+    /// 構築経路では、テンソル全軸の積オーバーフロー検査
+    /// （`checked_numel` 相当）が `outer` を含む shape 全体に対して
+    /// 事前に行われるため、`outer != 0` のとき空間軸だけの部分積が
+    /// 単独で overflow する状態は実際には構築不能（本ファイル冒頭の
+    /// 是正コメント参照）。本テストはその不変条件を迂回し、`vjp()`
+    /// 自身が「呼び出し元が正しく検査済みである」という前提に暗黙に
+    /// 依存せず自前でも overflow を検査することを直接確認する
+    /// （`TapeNode` を `leaf_node`／`build_tensor` を介さず直接構築し、
+    /// `shape` フィールドにのみ検査を経ていない巨大値を注入する。
+    /// `Op::Interpolate` の VJP 分岐は `nodes[input.0].value` を参照
+    /// せず `.shape` のみを読むため、`value` 自体は shape と無関係な
+    /// 軽量なダミーで構わない）。
+    #[test]
+    fn interpolate_vjp_nonempty_leading_axis_with_overflowing_spatial_product_returns_error() {
+        // 空間軸 2 本の積 `(1<<32) * (1<<32) == 1<<64` は 64bit `usize`
+        // の範囲（`usize::MAX == (1<<64) - 1`）をちょうど 1 超え
+        // overflow する。先頭軸は `1`（`outer == 1` で非ゼロ）。
+        let input_shape = vec![1usize, 1usize << 32, 1usize << 32];
+        let dummy_value = Tensor::scalar(0.0f32);
+        let node = TapeNode {
+            op: Op::Leaf,
+            shape: input_shape.clone(),
+            value: std::cell::OnceCell::from(dummy_value),
+            lazy_chain_size: 0,
+            recompute: false,
+            recompute_failed: std::cell::Cell::new(false),
+        };
+        let nodes = vec![node];
+        let op = Op::Interpolate {
+            input: NodeId(0),
+            size: vec![3, 3],
+            mode: fandhe_ai_tensor_core::InterpolateMode::Nearest,
+        };
+        let out_shape = vec![1usize, 3, 3];
+        let out_value = build_tensor(vec![0.0f32; 9], &out_shape);
+        let upstream = build_tensor(vec![0.0f32; 9], &out_shape);
+
+        let err = vjp(
+            &op,
+            &out_value,
+            &upstream,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .expect_err(
+            "outer != 0 でも空間軸の部分積 overflow は panic ではなく \
+             型付きエラーを返すはず",
+        );
+        assert!(
+            matches!(err, AutodiffError::Shape(ShapeError::ElementCountOverflow)),
+            "sp_in_numel の checked_mul overflow は ElementCountOverflow を返すはず（実際: {err:?}）"
+        );
     }
 }
