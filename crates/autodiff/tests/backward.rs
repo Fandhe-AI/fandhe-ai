@@ -2573,3 +2573,192 @@ fn cumsum_on_transposed_view_matches_contiguous() {
         dense_vec(&out_contig.to_tensor())
     );
 }
+
+// --- interpolate（nearest。イシュー #1757） ---
+
+/// ①forward 値（解析）: 1-D 整数倍アップサンプル（×2）。添字式
+/// `src = (dst * in) / out`（整数除算＝床）どおり、各出力は
+/// `[x0,x0,x1,x1,x2,x2]` となる。
+#[test]
+fn interpolate_nearest_forward_upsample_1d() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let out = x
+        .interpolate(&[6], fandhe_ai_tensor_core::InterpolateMode::Nearest)
+        .unwrap();
+    assert_eq!(
+        dense_vec(&out.to_tensor()),
+        vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]
+    );
+}
+
+/// ②backward（解析＋数値微分突合）: 1-D 整数倍アップサンプル
+/// （×2）では各入力要素がちょうど 2 個の出力から参照されるため、
+/// 一様勾配（sum loss）に対する `d_input` は `[2,2,2]`。
+#[test]
+fn interpolate_nearest_backward_upsample_matches_numeric() {
+    let x0 = t(vec![1.0, 2.0, 3.0], &[3]);
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let out = xv
+            .interpolate(&[6], fandhe_ai_tensor_core::InterpolateMode::Nearest)
+            .unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let out = xv
+        .interpolate(&[6], fandhe_ai_tensor_core::InterpolateMode::Nearest)
+        .unwrap();
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close("interpolate nearest upsample dX", dx, &num_dx);
+    assert_eq!(dense_vec(dx), vec![2.0, 2.0, 2.0]);
+}
+
+/// ③backward（解析）: 非整数比ダウンサンプル（8→3）では参照されない
+/// 入力要素の勾配が厳密に 0 になる（添字式どおり参照集合は
+/// `{0, 2, 5}` のみ）。
+#[test]
+fn interpolate_nearest_backward_downsample_unreferenced_is_exact_zero() {
+    let x0 = t((1..=8).map(|v| v as f32).collect(), &[8]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let out = xv
+        .interpolate(&[3], fandhe_ai_tensor_core::InterpolateMode::Nearest)
+        .unwrap();
+    // src = (dst*8)/3: dst=0->0, dst=1->2, dst=2->5。
+    assert_eq!(dense_vec(&out.to_tensor()), vec![1.0, 3.0, 6.0]);
+
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+    assert_eq!(dense_vec(dx), vec![1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let out = xv
+            .interpolate(&[3], fandhe_ai_tensor_core::InterpolateMode::Nearest)
+            .unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close("interpolate nearest downsample dX", dx, &num_dx);
+}
+
+/// ④恒等サイズ（`size == 入力の空間軸`）では forward が入力の
+/// コピー・backward の勾配が upstream と bit 完全一致することを
+/// 確認する（算術を含まない純粋なコピー演算のため。src=dst の
+/// 全単射で重複書き込みが発生しない）。
+#[test]
+fn interpolate_nearest_identity_size_is_bit_exact_passthrough() {
+    let x0 = t(vec![1.0, 2.0, 3.0, 4.0], &[4]);
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let out = xv
+        .interpolate(&[4], fandhe_ai_tensor_core::InterpolateMode::Nearest)
+        .unwrap();
+    assert_eq!(dense_vec(&out.to_tensor()), dense_vec(&x0));
+
+    let upstream = t(vec![10.0, 20.0, 30.0, 40.0], &[4]);
+    let uv = tape.var(&upstream);
+    let loss = out.mul(&uv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+    // `d(sum(out * upstream))/d(input) = upstream`（恒等写像のため
+    // reduction を経ない bit 完全一致）。
+    assert_eq!(dense_vec(dx), dense_vec(&upstream));
+}
+
+/// ⑤2-D（先頭 batch 軸付き）: 末尾 1 軸のみが空間軸で、batch 軸は
+/// 素通しされ各行が独立にリサンプリングされることを確認する。
+#[test]
+fn interpolate_nearest_2d_leading_batch_axis_is_independent() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // batch=2, spatial=2 -> spatial=4（各行 ×2 アップサンプル）。
+    let x = tape.var(&t(vec![1.0, 2.0, 10.0, 20.0], &[2, 2]));
+    let out = x
+        .interpolate(&[4], fandhe_ai_tensor_core::InterpolateMode::Nearest)
+        .unwrap();
+    assert_eq!(out.to_tensor().shape(), &[2, 4]);
+    assert_eq!(
+        dense_vec(&out.to_tensor()),
+        vec![1.0, 1.0, 2.0, 2.0, 10.0, 10.0, 20.0, 20.0]
+    );
+
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[2, 2]);
+    assert_eq!(dense_vec(dx), vec![2.0, 2.0, 2.0, 2.0]);
+}
+
+/// ⑤b 空の先頭軸（batch=0）を持つ入力を極端に大きい `size` へ
+/// interpolate する場合、forward・backward とも panic せず空勾配を
+/// 返すことを確認する（イシュー #1834 codex-review P1 是正:
+/// `grad::nearest_src_index_map` が `outer` に関わらず `sp_out_numel`
+/// 分の index 行を無条件確保していたため、`outer==0` のまま
+/// `size=[usize::MAX]` を渡すと capacity overflow で panic して
+/// いた）。`size` が大きいほど本来の不具合を再現しやすいが、テスト
+/// 実行時間を抑えるため `usize::MAX` 自体を使う（backward が
+/// `outer==0` で早期 return するため実際には走査されない）。
+#[test]
+fn interpolate_nearest_backward_empty_leading_axis_with_huge_size_does_not_panic() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&Tensor::<f32>::new(Vec::new(), &[0, 1]).unwrap());
+    let out = x
+        .interpolate(
+            &[usize::MAX],
+            fandhe_ai_tensor_core::InterpolateMode::Nearest,
+        )
+        .unwrap();
+    assert_eq!(out.to_tensor().shape(), &[0, usize::MAX]);
+
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[0, 1]);
+    assert!(dense_vec(dx).is_empty());
+}
+
+/// ⑥エラー経路: `size` が空（0 軸指定）だと `AutodiffError::Shape`
+/// （`RankMismatch { expected: 1, actual: 0 }`）を返す。
+#[test]
+fn interpolate_rejects_empty_size() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+    let err = x
+        .interpolate(&[], fandhe_ai_tensor_core::InterpolateMode::Nearest)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::RankMismatch {
+            expected: 1,
+            actual: 0
+        })
+    ));
+}
+
+/// ⑦エラー経路: 出力側の空間軸サイズが 0 だと
+/// `AutodiffError::Shape`（`ShapeMismatch`）を返す（ゼロ除算回避の
+/// 事前拒否）。
+#[test]
+fn interpolate_rejects_zero_output_spatial_axis() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let err = x
+        .interpolate(&[0], fandhe_ai_tensor_core::InterpolateMode::Nearest)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ShapeMismatch { .. })
+    ));
+}

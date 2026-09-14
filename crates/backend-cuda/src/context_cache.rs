@@ -533,6 +533,33 @@ pub(crate) fn cached_unique(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::interpolate::
+/// CudaInterpolate`] をプロセス内キャッシュから取得する（イシュー
+/// #1757。キーは [`ContextKey`]。`cached_gather_scatter` と同型）。
+/// `ops::CudaBackendOps::interpolate` の唯一の呼び出し先。
+pub(crate) fn cached_interpolate(
+    device: &CudaDevice,
+) -> Result<Arc<crate::interpolate::CudaInterpolate>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::interpolate::CudaInterpolate>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::interpolate::CudaInterpolate::new(device)
+    })
+}
+
+/// `device` の `CudaContext` に対応する scan（累積和／累積積）カーネル
+/// スイート（`scan.rs::CudaScan`）のコンパイル済みハンドルをプロセス内
+/// キャッシュから取得する（イシュー #1740。`cached_gather_scatter` と
+/// 同型）。`ops::CudaBackendOps::cumsum`／`cumprod` の唯一の呼び出し先。
+pub(crate) fn cached_scan(device: &CudaDevice) -> Result<Arc<crate::scan::CudaScan>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::scan::CudaScan>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::scan::CudaScan::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する `sort`／`topk` カーネル
 /// （`sort.rs::CudaSort`）のコンパイル済みハンドルをプロセス内
 /// キャッシュから取得する（イシュー #1741。`cached_unique` と同型）。

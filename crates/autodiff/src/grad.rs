@@ -1486,6 +1486,139 @@ pub(crate) fn vjp(
             )?;
             vec![(input, d_input)]
         }
+        // `Var::interpolate`（イシュー #1757）。「各出力要素が単一の
+        // 入力要素を参照する演算（gather／sort／topk と同型）の VJP
+        // は scatter_add」の原則を、空間軸のみを対象に適用する:
+        // `input`／`upstream` を `[outer, sp]`（`outer` = 先頭の残り
+        // 軸の積・`sp` = 空間軸の積）へ reshape してから
+        // `nearest_src_index_map`（forward と同じ添字式を共有する
+        // 単一情報源）で構築した index を使い `scatter_with_fallback`
+        // （`dim=1`・`ScatterReduce::Add`）で入力空間位置へ加算し、
+        // 最後に `input_shape` へ reshape し直す。
+        Op::Interpolate { input, size, mode } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let rank = input_shape.len();
+            let spatial_start = rank - size.len();
+            let out_shape = upstream.shape().to_vec();
+            // `outer`（先頭の残り軸——batch 等——の積）も `sp_in_numel`／
+            // `sp_out_numel`（下記）と同じ理由で無検査 `.iter().product()`
+            // のままにしない（呼び出し元が構築時点で検査済みという
+            // 不変条件に暗黙に依存しない・Cursor Bugbot 指摘と同型の
+            // 懸念への一貫した対処。PR #1834 レビュー）。
+            let outer: usize = input_shape[..spatial_start]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+
+            // `outer == 0`（先頭の残り軸——batch 等——が空）の場合、
+            // `d_input` の全要素数は `outer * sp_in_numel == 0` で
+            // 自明にゼロ勾配となる。`interpolate_out_shape` の契約
+            // （forward はこの場合も出力の先頭軸が 0 になる空 shape
+            // で成功する。`ops_shape.rs::interpolate_out_shape` doc
+            // 参照）により、`outer==0` のときは forward が `size` に
+            // **単一の**巨大な値を指定しても success する（出力全体の
+            // 要素数積が先頭の `0` に短絡し `checked_numel_for::<f32>`
+            // のバイトサイズ検査が実際のバッファ非確保ゆえ問題にならない
+            // ため。`outer != 0` の場合はこの短絡が起きず、単一軸でも
+            // `checked_numel_for::<f32>` のバイトサイズ上限で拒否され
+            // うる——`ops_shape.rs::
+            // interpolate_out_shape_rejects_byte_size_overflow_without_
+            // numel_overflow` 参照）。ただし `size` が**複数軸**かつ
+            // 非ゼロ次元同士の部分積が `usize` を overflow する組合せ
+            // （例: `size=[usize::MAX, 2]`）は、`outer==0` でも
+            // `interpolate_out_shape` 自身が単一情報源として事前拒否
+            // する（`ops_shape.rs::interpolate_out_shape` の `nonzero_
+            // dims` 検査。イシュー #1834 Cursor Bugbot 指摘・是正）ため
+            // 本関数へは到達しない。空間軸の積（`sp_in_numel`／
+            // `sp_out_numel`）自体の計算を `outer == 0` 判定より前に
+            // 行うと、`out_shape` の空間軸に `usize::MAX` 級の値が
+            // 単一軸で入りうる（`outer==0` のときは forward が単一軸の
+            // 巨大 `size` を受理するため）ケースで積計算自体が
+            // overflow する（debug は panic・release は wrap。本番経路
+            // panic 禁止規約 `.claude/rules/coding-rust.md`。Cursor
+            // Bugbot 指摘）。
+            // `nearest_src_index_map` も `outer` に依存せず空間軸の
+            // 全出力位置（`sp_out_numel` 個）分の index 行を無条件に
+            // 確保するため、`outer==0` のまま呼ぶと `size=[usize::MAX]`
+            // 等で capacity overflow で panic しうる（イシュー #1834
+            // codex-review P1 是正）。よって `sp_in_numel`／
+            // `sp_out_numel` の計算・index 構築より前に `outer` のみで
+            // early return し、この不要な大量確保・走査・積 overflow
+            // を通常の大きな size で同時に避ける（多層防御。`interpolate_
+            // out_shape` 側の拒否をすり抜ける経路が万一あっても本関数
+            // 自身が独立に安全側へ倒れる）。
+            if outer == 0 {
+                let d_input = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
+                return Ok(vec![(input, d_input)]);
+            }
+
+            // `outer != 0` に絞ったこの時点でも、`input_shape`／
+            // `out_shape` の空間軸だけを取り出した部分積は無検査
+            // `.iter().product()` のままでは overflow しうる
+            // （Cursor Bugbot 指摘・PR #1834 レビュー）。`outer` を
+            // 含む全軸の積（テンソル全体の要素数）は生成時点
+            // （`Tensor::broadcast_to`／`Var::broadcast_to` 等）で
+            // `checked_numel` 相当により overflow しないことを検査
+            // 済みという不変条件に暗黙に依存せず、ここでも自前で
+            // `checked_mul` を用い明示的に検査する（`.claude/rules/
+            // security.md` A03 の fail-closed 方針・本ファイル既存の
+            // `checked_numel_for` 系ヘルパーと同型）。
+            let sp_in_numel: usize = input_shape[spatial_start..]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let sp_out_numel: usize = out_shape[spatial_start..]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+
+            match mode {
+                fandhe_ai_tensor_core::InterpolateMode::Nearest => {
+                    // scatter_add の index dtype は `i32`（`Tensor<i32>`）
+                    // のため、空間軸の要素数が `i32::MAX` を超える場合は
+                    // 添字が表現できない（REQ-8 の縦深防御。`Var::
+                    // gather`／`scatter` の `IndexRangeOverflow` 契約と
+                    // 同種の事前検査）。
+                    if sp_in_numel > i32::MAX as usize {
+                        return Err(AutodiffError::InvalidArgument(format!(
+                            "Op::Interpolate の VJP: 空間軸要素数 {sp_in_numel} が \
+                             i32::MAX を超え scatter_add の index dtype (i32) に \
+                             収まらない"
+                        )));
+                    }
+                    let index =
+                        nearest_src_index_map(&input_shape, &out_shape, spatial_start, outer);
+                    let upstream2d = upstream
+                        .contiguous()
+                        .reshape(&[outer, sp_out_numel])
+                        .map_err(AutodiffError::Shape)?;
+                    let zeros2d =
+                        Tensor::zeros(&[outer, sp_in_numel]).map_err(AutodiffError::Shape)?;
+                    let d_input2d = scatter_with_fallback(
+                        ops,
+                        &zeros2d,
+                        1,
+                        &index,
+                        &upstream2d,
+                        ScatterReduce::Add,
+                        &[outer, sp_in_numel],
+                    )?;
+                    let d_input = d_input2d
+                        .reshape(&input_shape)
+                        .map_err(AutodiffError::Shape)?;
+                    vec![(input, d_input)]
+                }
+                // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
+                // 側で将来 variant を追加しうる。`Op::Scatter` VJP の
+                // 未知 `ScatterReduce` variant 分岐と同型の fail-closed
+                // 処理）。
+                _ => {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Op::Interpolate の VJP: 未知の InterpolateMode variant {mode:?}"
+                    )));
+                }
+            }
+        }
         // `Var::contiguous` が記録するノード（イシュー #1620。
         // `crate::einsum` の permute 後 reshape 前の明示実体化）。
         // メモリレイアウトのみが変わり値は変わらないため、VJP は
@@ -2234,6 +2367,100 @@ fn validate_unique_output(v: &Tensor<f32>, numel: usize) -> Result<(), AutodiffE
             v.shape()
         )))
     }
+}
+
+/// [`Var::interpolate`] が使う「バックエンド実装 → フォールバック」
+/// ヘルパー（イシュー #1757）。[`gather_with_fallback`] と同型:
+/// `ops.interpolate` → `Unsupported` のときのみホスト参照実装
+/// （`eval::interpolate_nearest`。`mode` の未知 variant——将来の
+/// bilinear〈#1762〉等——は `eval` 側に対応する再計算経路がないため
+/// `AutodiffError::InvalidArgument` を返す）へフォールバックし、
+/// それ以外のエラーは伝播する（判定迂回経路を作らない。
+/// `.claude/rules/security.md` A08）。
+pub(crate) fn interpolate_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    size: &[usize],
+    mode: fandhe_ai_tensor_core::InterpolateMode,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.interpolate(input, size, mode) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => match mode {
+            fandhe_ai_tensor_core::InterpolateMode::Nearest => {
+                eval::interpolate_nearest(input, size).map_err(AutodiffError::Shape)
+            }
+            // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
+            // 側で将来 variant を追加しうる。`ScatterReduce` の
+            // `Op::Scatter` VJP 未知 variant 分岐と同型）。
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "Var::interpolate の Unsupported フォールバック: 未知の \
+                 InterpolateMode variant {mode:?} に対応するホスト参照実装がない"
+            ))),
+        },
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Interpolate`]（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Nearest`]）の VJP が使う scatter_add index 構築（イシュー #1757）。
+/// forward のホスト参照実装（`eval::interpolate_nearest`）と**同じ
+/// 添字式**（`eval::nearest_src_coord`。単一情報源）を使い、出力の
+/// 各空間位置が対応する入力の空間位置（flat 添字。`sp_in` 軸内）を
+/// 求める。
+///
+/// 戻り値は `input`／`upstream` を `[outer, sp]`（`outer` = 先頭の
+/// 残り軸の積・`sp` = 空間軸の積）へ reshape した後の 2 階テンソルに
+/// 対する `scatter_with_fallback` の `index` 引数として使える形
+/// （shape `[outer, sp_out]`。全 `outer` 行が同一の空間添字パターンを
+/// 持つ——`outer` 軸〈batch／channel 等〉は素通しで src/dst の対応が
+/// 変わらないため）。
+pub(crate) fn nearest_src_index_map(
+    in_shape: &[usize],
+    out_shape: &[usize],
+    spatial_start: usize,
+    outer: usize,
+) -> Tensor<i32> {
+    let sp_in = &in_shape[spatial_start..];
+    let sp_out = &out_shape[spatial_start..];
+    let sp_out_numel: usize = sp_out.iter().product();
+    let sp_in_strides = eval::row_major_strides(sp_in);
+
+    let mut row = vec![0i32; sp_out_numel];
+    for (flat, slot) in row.iter_mut().enumerate() {
+        let coords = eval::unravel(flat, sp_out);
+        let mut pos = 0usize;
+        for (axis, &stride) in sp_in_strides.iter().enumerate() {
+            let src_c = eval::nearest_src_coord(coords[axis], sp_in[axis], sp_out[axis]);
+            pos += src_c * stride;
+        }
+        // `pos` は `sp_in` 内の flat 添字（`< sp_in.iter().product()`）。
+        // `Var::interpolate` の forward 検査（`interpolate_out_shape`
+        // 経由の `checked_numel`）により `sp_in` 全体の要素数は
+        // `usize` の範囲でオーバーフローしないことが保証されているが、
+        // `i32` への切り詰め自体は独立に検証する（REQ-8 の縦深防御。
+        // `nearest_src_index_map` 呼び出し元 `vjp` の `Op::Interpolate`
+        // 腕が事前に `sp_in_numel <= i32::MAX` を検査する契約——
+        // 超過時は `AutodiffError::InvalidArgument` を返し本関数へは
+        // 到達しない）。
+        *slot = pos as i32;
+    }
+
+    let mut data = Vec::with_capacity(outer * sp_out_numel);
+    for _ in 0..outer {
+        data.extend_from_slice(&row);
+    }
+    eval::build_index_tensor(data, &[outer, sp_out_numel])
 }
 
 /// [`Op::Scatter`]（`reduce = Overwrite`）の VJP 補助（イシュー
@@ -8140,6 +8367,189 @@ release ビルドでも検知できるよう `assert!` を使う）"
             dense_vec(d_bias),
             vec![f64_sum],
             "d_bias は f64 逐次和（1.0）のはずで f32 逐次和（0.0）ではない"
+        );
+    }
+    // イシュー #1834 codex-review P1 是正の回帰テスト（2 件）。
+
+    #[test]
+    fn nearest_src_index_map_does_not_overflow_with_huge_in_shape_and_small_out() {
+        // `outer=1`（空でない先頭軸）・空間軸の入力サイズが巨大
+        // （`2^63`）・出力サイズは小さい（`3`）組み合わせ。`row` の
+        // 確保自体は `sp_out_numel=3` で軽量だが、内部で呼ぶ
+        // `eval::nearest_src_coord` の中間積 `dst * in_size` が
+        // `usize` を overflow しうる（backend-cpu クレートの `interpolate::nearest_src_coord` と同型の bug。是正後は
+        // `u128` 昇格により正しい添字を返す）。
+        // `in_size` 自体は `i32::MAX` を超えるため、本関数が返す `i32`
+        // 添字（`pos as i32`）は `usize` の `pos` を正しく計算した上での
+        // 意図的な切り詰めであり、値そのものが `i32` の範囲へ収まる
+        // ことは呼び出し元〈VJP `Op::Interpolate` 分岐〉が事前に
+        // `sp_in_numel <= i32::MAX` を検査する契約の範囲外（本テストは
+        // その契約を満たさない `in_size` を意図的に渡す）。ここで
+        // 検証したいのは `usize` の中間積 `dst * in_size` 自体が
+        // overflow せず（是正前は debug ビルドで overflow panic して
+        // いた）、`pos as i32` へ到達する前に panic しないことのみ。
+        let in_size = 1usize << 63;
+        let index = nearest_src_index_map(&[1, in_size], &[1, 3], 1, 1);
+        assert_eq!(index.shape(), &[1, 3]);
+        let data = eval::dense_vec_i32(&index);
+        assert_eq!(data.len(), 3);
+    }
+
+    #[test]
+    fn interpolate_vjp_empty_leading_axis_with_huge_size_does_not_panic() {
+        // `Op::Interpolate` VJP の `outer == 0` 早期 return 経路
+        // （`grad.rs` 本体の `Op::Interpolate` 分岐）を `vjp` 経由で
+        // 直接検証する。`outer == 0` のまま `nearest_src_index_map` を
+        // 呼ぶと `size=[usize::MAX]` 等で `sp_out_numel` が巨大になり
+        // capacity overflow panic しうる（本テストが是正前に再現した
+        // 不具合の直接検証）。
+        let input_shape = vec![0usize, 1];
+        let input = build_tensor(Vec::new(), &input_shape);
+        let nodes = vec![leaf_node(input)];
+        let op = Op::Interpolate {
+            input: NodeId(0),
+            size: vec![usize::MAX],
+            mode: fandhe_ai_tensor_core::InterpolateMode::Nearest,
+        };
+        let out_value = build_tensor(Vec::new(), &[0, usize::MAX]);
+        let upstream = build_tensor(Vec::new(), &[0, usize::MAX]);
+
+        let contributions = vjp(
+            &op,
+            &out_value,
+            &upstream,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .expect("outer==0 の場合 panic せず成功するはず");
+        assert_eq!(contributions.len(), 1);
+        let (node, d_input) = &contributions[0];
+        assert_eq!(*node, NodeId(0));
+        assert_eq!(d_input.shape(), &input_shape);
+        assert_eq!(d_input.numel(), 0);
+    }
+
+    /// Cursor Bugbot 指摘（イシュー #1834・PR レビュー）の回帰テスト。
+    /// `interpolate_vjp_empty_leading_axis_with_huge_size_does_not_panic`
+    /// （上記）は空間軸が 1 軸のみのため `sp_out_numel` の計算が単一
+    /// 値の読み取りに留まり overflow を経由しない。本テストは空間軸
+    /// **2 軸**（`usize::MAX` と `2`）を持つ入力 `[0, usize::MAX, 2]`
+    /// を使い、是正前のコード（`outer == 0` の早期 return より前に
+    /// `out_shape[spatial_start..].iter().product()` を計算していた）
+    /// では `usize::MAX * 2` が `usize` の範囲を超え overflow panic
+    /// （debug ビルド）していたことを再現する。**本テストは `vjp()`
+    /// を `Var::interpolate`（`interpolate_out_shape` による事前検査を
+    /// 経由する通常経路）ではなく直接呼び出す**ため、`interpolate_
+    /// out_shape` 側の検査を経由しない。この入力・`size` の組合せ
+    /// （`shape=[0, usize::MAX, 2]`・`size=[usize::MAX, 2]`）は
+    /// `ops_shape.rs::interpolate_out_shape` 自身が現在は事前拒否する
+    /// （`nonzero_dims` 検査。イシュー #1834 Cursor Bugbot 指摘・是正）
+    /// ため、`Var::interpolate` 経由では forward の時点で
+    /// `ElementCountOverflow` となり本テストが再現する `vjp()` 単体
+    /// 呼び出しの状況（forward 成功後に VJP だけが呼ばれる状況）には
+    /// 到達しない。それでも本テストを維持するのは、`vjp()` 自身が
+    /// 「呼び出し元が検査済み」という不変条件に暗黙に依存せず独立に
+    /// 安全側へ倒れることを担保するため（多層防御。上記
+    /// `interpolate_vjp_nonempty_leading_axis_with_overflowing_spatial_
+    /// product_returns_error` と同じ設計判断）。是正後は `outer == 0`
+    /// の早期 return が積計算そのものより前に位置するため、この
+    /// 組み合わせでも panic せずゼロ勾配を返す。
+    #[test]
+    fn interpolate_vjp_empty_leading_axis_with_overflowing_spatial_product_does_not_panic() {
+        let input_shape = vec![0usize, usize::MAX, 2];
+        let input = build_tensor(Vec::new(), &input_shape);
+        let nodes = vec![leaf_node(input)];
+        let op = Op::Interpolate {
+            input: NodeId(0),
+            size: vec![usize::MAX, 2],
+            mode: fandhe_ai_tensor_core::InterpolateMode::Nearest,
+        };
+        let out_value = build_tensor(Vec::new(), &input_shape);
+        let upstream = build_tensor(Vec::new(), &input_shape);
+
+        let contributions = vjp(
+            &op,
+            &out_value,
+            &upstream,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .expect("outer==0 の場合、空間軸積が overflow する組み合わせでも panic せず成功するはず");
+        assert_eq!(contributions.len(), 1);
+        let (node, d_input) = &contributions[0];
+        assert_eq!(*node, NodeId(0));
+        assert_eq!(d_input.shape(), &input_shape);
+        assert_eq!(d_input.numel(), 0);
+    }
+
+    /// Cursor Bugbot 指摘（PR #1834 レビュー）の回帰テスト。上記 2 件は
+    /// いずれも `outer == 0`（先頭軸が空）の経路のみを検証しており、
+    /// `outer == 0` ガードを通過した**後**の `sp_in_numel`／
+    /// `sp_out_numel` 計算自体が無検査 `.iter().product()` のままでは
+    /// overflow しうる、という指摘の経路（`outer != 0`）は未検証
+    /// だった。
+    ///
+    /// `Var::interpolate`／`Tensor::broadcast_to` を経由する通常の
+    /// 構築経路では、テンソル全軸の積オーバーフロー検査
+    /// （`checked_numel` 相当）が `outer` を含む shape 全体に対して
+    /// 事前に行われるため、`outer != 0` のとき空間軸だけの部分積が
+    /// 単独で overflow する状態は実際には構築不能（本ファイル冒頭の
+    /// 是正コメント参照）。本テストはその不変条件を迂回し、`vjp()`
+    /// 自身が「呼び出し元が正しく検査済みである」という前提に暗黙に
+    /// 依存せず自前でも overflow を検査することを直接確認する
+    /// （`TapeNode` を `leaf_node`／`build_tensor` を介さず直接構築し、
+    /// `shape` フィールドにのみ検査を経ていない巨大値を注入する。
+    /// `Op::Interpolate` の VJP 分岐は `nodes[input.0].value` を参照
+    /// せず `.shape` のみを読むため、`value` 自体は shape と無関係な
+    /// 軽量なダミーで構わない）。
+    #[test]
+    fn interpolate_vjp_nonempty_leading_axis_with_overflowing_spatial_product_returns_error() {
+        // 空間軸 2 本の積 `(1<<32) * (1<<32) == 1<<64` は 64bit `usize`
+        // の範囲（`usize::MAX == (1<<64) - 1`）をちょうど 1 超え
+        // overflow する。先頭軸は `1`（`outer == 1` で非ゼロ）。
+        let input_shape = vec![1usize, 1usize << 32, 1usize << 32];
+        let dummy_value = Tensor::scalar(0.0f32);
+        let node = TapeNode {
+            op: Op::Leaf,
+            shape: input_shape.clone(),
+            value: std::cell::OnceCell::from(dummy_value),
+            lazy_chain_size: 0,
+            recompute: false,
+            recompute_failed: std::cell::Cell::new(false),
+        };
+        let nodes = vec![node];
+        let op = Op::Interpolate {
+            input: NodeId(0),
+            size: vec![3, 3],
+            mode: fandhe_ai_tensor_core::InterpolateMode::Nearest,
+        };
+        let out_shape = vec![1usize, 3, 3];
+        let out_value = build_tensor(vec![0.0f32; 9], &out_shape);
+        let upstream = build_tensor(vec![0.0f32; 9], &out_shape);
+
+        let err = vjp(
+            &op,
+            &out_value,
+            &upstream,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .expect_err(
+            "outer != 0 でも空間軸の部分積 overflow は panic ではなく \
+             型付きエラーを返すはず",
+        );
+        assert!(
+            matches!(err, AutodiffError::Shape(ShapeError::ElementCountOverflow)),
+            "sp_in_numel の checked_mul overflow は ElementCountOverflow を返すはず（実際: {err:?}）"
         );
     }
 }

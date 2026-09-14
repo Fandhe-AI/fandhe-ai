@@ -667,6 +667,117 @@ pub fn row_softmax_layout(
     Ok(Some((rows, cols)))
 }
 
+/// `interpolate`（`Var::interpolate`。`torch.nn.functional.interpolate`
+/// 相当。イシュー #1757）の出力 shape を検査・計算する。空間軸は
+/// **末尾 `size.len()` 軸**（先頭の残り軸——batch／channel 等——は
+/// 素通しで shape のまま残る。`BackendOps::interpolate` doc 参照）。
+///
+/// - `size.is_empty()` の場合 `ShapeError::RankMismatch { expected: 1,
+///   actual: 0 }`（空間軸は最低 1 軸必要。[`row_norm_layout`] の
+///   rank-0 拒否と同じ「最小必要軸数」の表現方針を踏襲）。
+/// - `size.len() > shape.len()` の場合 `ShapeError::RankMismatch
+///   { expected: shape.len(), actual: size.len() }`（空間軸数が入力の
+///   rank を超えられない）。
+/// - 空間軸のいずれかで `shape[axis] == 0` または `size[i] == 0` の
+///   場合 `ShapeError::ShapeMismatch { lhs: shape.to_vec(), rhs:
+///   size.to_vec() }` を返す（新規 variant を追加せず既存の最も近い
+///   variant を流用する方針。`sort_out_shape`／`topk_out_shape` が
+///   `NarrowOutOfBounds` を流用するのと同じ判断）。添字式
+///   `src = (dst * in) / out`（整数除算）はゼロ除算を避けるため
+///   `out == 0` を、対応する `src` 座標が存在しないことを避けるため
+///   `in == 0` を、それぞれ事前に拒否する。**先頭の残り軸（空間軸
+///   以外）が 0 の空入力は許容する**（この場合出力も先頭軸が 0 の
+///   空 shape になるだけで、空間軸の走査自体が発生しないため）。
+/// - 出力 shape は `shape[..shape.len()-size.len()]`（先頭の残り軸を
+///   そのまま）に `size`（空間軸）を連結した形。要素数積のオーバー
+///   フローに加え、出力実体（`eval::interpolate_nearest`・CPU／CUDA／
+///   Metal 実装いずれも `f32` 出力）を確保した際のバイトサイズが
+///   `Vec` の allocation 上限（`isize::MAX` バイト）を超えないかも
+///   `checked_numel_for::<f32>`（`one_hot_out_shape` と同じ単一情報源）
+///   で検査する。要素数積が `usize` に収まっても、例えば入力
+///   `shape=[1]` を `size=[usize::MAX]` へ interpolate する場合の
+///   ように出力バイトサイズが超過する shape を確保前に拒否し、
+///   `ElementCountOverflow` を返す（本番経路 panic 禁止規約
+///   `.claude/rules/coding-rust.md` に反する capacity overflow
+///   panic の防止。イシュー #1834 codex-review P1 是正）。
+/// - 上記の `checked_numel_for::<f32>(&out)` は出力 shape**全体**の
+///   積（先頭軸のいずれかが `0` なら必ず `0`）しか検査しない。
+///   このため入力 `shape=[0, 3, 4]`・`size=[usize::MAX, 2]` のように
+///   **先頭の残り軸が `0` で空間軸（`size`）側が巨大な多軸**の組合せは
+///   出力 shape 全体の積が `0` に短絡し通過してしまう
+///   （`checked_mul` は `0 * x` を正確に `0` と評価でき overflow しない
+///   ため——PoC-v2-1 起源の `checked_numel` 自体は正しい。「飽和」では
+///   なく数学的に正しいゼロ）。しかし各バックエンド・ホスト参照実装が
+///   出力**全体**の要素数ではなく空間軸のみ・先頭軸を除いた部分の
+///   積（例: 行優先ストライドの再計算・空間平面サイズ）を個別に
+///   計算する経路を将来追加した場合、その部分積は `0` を含まないため
+///   `usize::MAX * 2` のように**真に `usize` 乗算がオーバーフロー**
+///   しうる（本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`
+///   に反する DoS 経路。`concat_out_shape`／`softmax_along` 等で既に
+///   発生した「先頭軸の `0` が部分積の overflow 検査を素通りさせる」
+///   bug と同型。`crates/autodiff/src/eval.rs` の
+///   `concat_empty_out_shape_overflow_tests`・
+///   `softmax_empty_tensor_overflow_tests` 参照）。よって単一情報源
+///   である本関数で**出力 shape のうち `0` でない次元のみを集めた
+///   列**に対しても `checked_numel`（`usize` 乗算オーバーフロー検査
+///   のみ）を追加適用し、あらゆる部分積（`0` を含む部分積は自明に
+///   `0` で安全）が `usize` 乗算として成立することまで検査する。
+///   `0` でない次元はすべて `1` 以上のため、それらの任意の部分列の積
+///   は全体（フィルタ後）の積以下になり、全体（フィルタ後）の積が
+///   `usize` に収まれば任意の部分積も必ず収まる（Cursor Bugbot 指摘。
+///   イシュー #1834）。
+///
+///   **`checked_numel_for::<f32>` ではなく `checked_numel` を使う
+///   理由**: バイトサイズ上限（`isize::MAX` バイト）検査は、その
+///   shape 丸ごとのバッファが実際に確保される場合にのみ意味を持つ。
+///   `out` 全体の要素数が `0`（先頭軸に `0` を含む）の場合は、
+///   `checked_numel_for::<f32>(&out)` が既に判定したとおり実際の
+///   バッファは確保されない（各バックエンド・ホスト参照実装は
+///   `numel == 0` で空 `Vec` を早期 return する契約）。よって単一の
+///   巨大な空間軸（例: `shape=[0, 1]` を `size=[usize::MAX]` へ
+///   interpolate。`crates/autodiff/tests/backward.rs::
+///   interpolate_nearest_backward_empty_leading_axis_with_huge_size_
+///   does_not_panic` が確立済みの契約）まで拒否するのは過剰であり、
+///   `nonzero_dims` 側は「`usize` 乗算として成立するか」のみを検査
+///   し、バイトサイズ上限は課さない。
+pub fn interpolate_out_shape(shape: &[usize], size: &[usize]) -> Result<Vec<usize>, ShapeError> {
+    let rank = shape.len();
+    if size.is_empty() {
+        return Err(ShapeError::RankMismatch {
+            expected: 1,
+            actual: 0,
+        });
+    }
+    if size.len() > rank {
+        return Err(ShapeError::RankMismatch {
+            expected: rank,
+            actual: size.len(),
+        });
+    }
+    let spatial_start = rank - size.len();
+    for (i, &out_sp) in size.iter().enumerate() {
+        let axis = spatial_start + i;
+        if shape[axis] == 0 || out_sp == 0 {
+            return Err(ShapeError::ShapeMismatch {
+                lhs: shape.to_vec(),
+                rhs: size.to_vec(),
+            });
+        }
+    }
+    let mut out = shape.to_vec();
+    out[spatial_start..].copy_from_slice(size);
+    checked_numel_for::<f32>(&out)?;
+    // 上記の全体積検査だけでは `0` を含む出力 shape の任意の部分積
+    // （空間軸のみ等）の `usize` 乗算オーバーフローを検出できない
+    // （doc comment 参照）。`0` 次元を除いた列に対して `checked_numel`
+    // （バイトサイズ上限は課さない。`checked_numel_for` と使い分ける
+    // 理由も doc comment 参照）を適用し、その部分積以下になるあらゆる
+    // 部分積が `usize` 乗算として成立することを保証する。
+    let nonzero_dims: Vec<usize> = out.iter().copied().filter(|&d| d != 0).collect();
+    checked_numel(&nonzero_dims)?;
+    Ok(out)
+}
+
 /// `one_hot`（`Var::one_hot`。PyTorch `F.one_hot`／TF `tf.one_hot` 相当。
 /// イシュー #1755）の出力 shape を検査・計算する。非微分演算（VJP は
 /// ゼロ扱い。`crates/autodiff/src/grad.rs::vjp` の `Op::OneHot` 分岐）
@@ -1724,6 +1835,152 @@ mod tests {
     fn topk_out_shape_k_zero() {
         let out = topk_out_shape(&[3, 4], 1, 0).unwrap();
         assert_eq!(out, vec![3, 0]);
+    }
+
+    // --- interpolate_out_shape ---
+
+    #[test]
+    fn interpolate_out_shape_1d_all_axes_spatial() {
+        let out = interpolate_out_shape(&[3], &[6]).unwrap();
+        assert_eq!(out, vec![6]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_2d_trailing_axis_only() {
+        // batch 軸（先頭）は素通し、末尾 1 軸のみ空間軸。
+        let out = interpolate_out_shape(&[2, 3], &[5]).unwrap();
+        assert_eq!(out, vec![2, 5]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_3d_two_spatial_axes() {
+        let out = interpolate_out_shape(&[2, 4, 4], &[8, 8]).unwrap();
+        assert_eq!(out, vec![2, 8, 8]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_downsample() {
+        let out = interpolate_out_shape(&[1, 8], &[3]).unwrap();
+        assert_eq!(out, vec![1, 3]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_identity_size() {
+        let out = interpolate_out_shape(&[2, 3], &[2, 3]).unwrap();
+        assert_eq!(out, vec![2, 3]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_empty_size() {
+        let err = interpolate_out_shape(&[2, 3], &[]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 1,
+                actual: 0
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_size_longer_than_rank() {
+        let err = interpolate_out_shape(&[3], &[3, 3]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 1,
+                actual: 2
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_zero_output_spatial_axis() {
+        let err = interpolate_out_shape(&[2, 3], &[0]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::ShapeMismatch {
+                lhs: vec![2, 3],
+                rhs: vec![0],
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_zero_input_spatial_axis() {
+        let err = interpolate_out_shape(&[2, 0], &[4]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::ShapeMismatch {
+                lhs: vec![2, 0],
+                rhs: vec![4],
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_out_shape_allows_empty_leading_axis() {
+        // 空間軸ではない先頭軸（batch）が 0 の空入力は許容する。
+        let out = interpolate_out_shape(&[0, 3], &[6]).unwrap();
+        assert_eq!(out, vec![0, 6]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_element_count_overflow() {
+        // `out = [2, usize::MAX]` の要素数積が overflow する。
+        let err = interpolate_out_shape(&[2, usize::MAX], &[usize::MAX]).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_byte_size_overflow_without_numel_overflow() {
+        // 入力 shape=[1] を size=[usize::MAX] へ interpolate する場合、
+        // 出力の要素数積 `1 * usize::MAX = usize::MAX` は `usize` の乗算
+        // オーバーフローとしては検出されない（`checked_numel` 単体では
+        // 通過する）が、`f32`（4 バイト）換算のバイトサイズは必ず
+        // `isize::MAX` を超えるため `checked_numel_for::<f32>` が
+        // `ElementCountOverflow` を返す（イシュー #1834 codex-review
+        // P1 是正: `Vec::with_capacity` の capacity overflow panic を
+        // 防ぐ）。
+        let err = interpolate_out_shape(&[1], &[usize::MAX]).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_empty_leading_axis_with_huge_multi_axis_size() {
+        // Cursor Bugbot 指摘（イシュー #1834・PR #1834 レビュー）の
+        // 回帰テスト。先頭の残り軸（batch）が `0` の空入力に対して
+        // 空間軸（`size`）側を巨大な多軸にした場合、出力 shape
+        // `[0, usize::MAX, 2]` **全体**の要素数積は先頭の `0` に短絡し
+        // `0` になる（`checked_numel_for::<f32>(&out)` 単体は通過する）。
+        // しかし `0` 次元を除いた部分積（`usize::MAX * 2`）は overflow
+        // するため、新設した `nonzero_dims` 検査が
+        // `ElementCountOverflow` を返すことを確認する。
+        let err = interpolate_out_shape(&[0, 3, 4], &[usize::MAX, 2]).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_middle_zero_axis_with_huge_multi_axis_size() {
+        // 上記と同型だが、`0` 次元が先頭（axis 0）ではなく非空間軸の
+        // 中間（axis 1）にあるケース。空間軸自体（axis 2・3）はいずれも
+        // 非ゼロのため既存のゼロ検査（`shape[axis] == 0` の判定）を
+        // 素通りし、出力 shape `[2, 0, usize::MAX, 2]` 全体の積も
+        // 先頭でない `0` を経由して `0` に短絡する。`nonzero_dims`
+        // 検査（`[2, usize::MAX, 2]` の部分積）が overflow を検出する
+        // ことを確認する。
+        let err = interpolate_out_shape(&[2, 0, 3, 4], &[usize::MAX, 2]).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
+    }
+
+    #[test]
+    fn interpolate_out_shape_allows_empty_leading_axis_with_safe_multi_axis_size() {
+        // 上記 2 件との対比: 先頭軸が `0` でも空間軸側が小さく
+        // `nonzero_dims` の部分積が overflow しない場合は従来どおり
+        // 成功する（`interpolate_out_shape_allows_empty_leading_axis`
+        // の 2 空間軸版）。
+        let out = interpolate_out_shape(&[0, 3, 4], &[8, 8]).unwrap();
+        assert_eq!(out, vec![0, 8, 8]);
     }
 
     // --- one_hot_out_shape ---

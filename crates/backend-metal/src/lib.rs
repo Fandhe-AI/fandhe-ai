@@ -431,6 +431,11 @@ mod gemm_mpp_diag_tests;
 // metal-gemm-hfrag-candidate.md` §9 側で判断する）。
 #[cfg(target_os = "macos")]
 pub mod gather_scatter;
+// イシュー #1757: interpolate（`torch.nn.functional.interpolate
+// (mode='nearest')` 相当）起動 API。`gather_scatter.rs` と同じ
+// 「カーネル起動は macOS 限定・ホストモデルは Linux 実行可能」の
+// 2 ファイル構成（`interpolate_model.rs` は下記の `cfg` なし
+// ブロックで宣言）。
 // イシュー #1756: pad（`torch.nn.functional.pad(mode='constant')`
 // 相当）起動 API。`gather_scatter.rs` と同じ「カーネル起動は macOS
 // 限定・ホストモデルは Linux 実行可能」の 2 ファイル構成
@@ -439,6 +444,8 @@ pub mod gather_scatter;
 pub mod constant_pad;
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_hfrag_diag_tests;
+#[cfg(target_os = "macos")]
+pub mod interpolate;
 // thread_elements() 方式 BlockMMA 候補（イシュー #1693）の純カーネル
 // 専有時間を本番選択構成（`tile::select_for_device`）と M4 Max 実機で
 // A/B 比較する診断テスト群（イシュー #1694）。`gemm::MetalGemm::{new,
@@ -485,6 +492,10 @@ mod readout_regression_diag_tests_1695;
 // `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）でも
 // 単体テストが回る。
 pub mod gather_scatter_model;
+// `interpolate.metal::interpolate_nearest_f32` のホスト側逐語モデル
+// （イシュー #1757）。`gather_scatter_model` と同じ設計判断で `objc2`
+// 系 FFI に触れないため `cfg(target_os = "macos")` を付けず、
+// Linux（本実装環境・CI）でも単体テストが回る。
 // `constant_pad.metal::constant_pad_f32` のホスト側逐語モデル（イシュー
 // #1756）。`gather_scatter_model` と同じ設計判断で `objc2` 系 FFI に
 // 触れないため `cfg(target_os = "macos")` を付けず、Linux（本実装環境・
@@ -494,6 +505,7 @@ pub mod constant_pad_model;
 pub mod half_buffer;
 #[cfg(target_os = "macos")]
 pub mod index_buffer;
+pub mod interpolate_model;
 #[cfg(target_os = "macos")]
 pub mod layer_norm;
 pub mod layout;
@@ -506,6 +518,16 @@ pub mod ops;
 pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod rnn_cell;
+// 累積和／累積積（`torch.cumsum`／`torch.cumprod` 相当。イシュー
+// #1740・親イシュー #1731）の起動 API（実行時コンパイル・パイプライン
+// 保持・実行）。`unique.rs` と同じ設計方針。
+#[cfg(target_os = "macos")]
+pub mod scan;
+// `shaders/scan.metal::cumsum_f32`／`cumprod_f32` のホスト側逐語モデル
+// （イシュー #1740）。`unique_model`・`gather_scatter_model` と同じ
+// 設計判断で `objc2` 系 FFI に触れないため `cfg(target_os = "macos")`
+// を付けず、Linux（本実装環境・CI）でも単体テストが回る。
+pub mod scan_model;
 pub mod soft_f64;
 #[cfg(target_os = "macos")]
 pub mod unique;

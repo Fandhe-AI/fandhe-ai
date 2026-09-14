@@ -17,11 +17,11 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, Conv2dParams, DType, FusionPlan,
-    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd,
-    MseReduction, QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, VectorNormOrd, gather_out_shape, im2col_out_shape, one_hot_out_shape,
-    pad_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput,
+    MatrixNormOrd, MseReduction, QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors,
+    Tensor, UnaryElementwiseOp, VectorNormOrd, gather_out_shape, im2col_out_shape,
+    interpolate_out_shape, one_hot_out_shape, pad_out_shape, require_same_shape, row_norm_layout,
+    row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -34,8 +34,8 @@ use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::scan;
 use crate::softmax::{self, match_softmax_plan};
 use crate::{
-    constant_pad, elementwise, fused_elementwise, gather_scatter, mse, reduction, rnn_cell,
-    scalar_elementwise, sort_topk, unique,
+    constant_pad, elementwise, fused_elementwise, gather_scatter, interpolate, mse, reduction,
+    rnn_cell, scalar_elementwise, sort_topk, unique,
 };
 
 /// `CpuBackendOps` が `MemoryOps` を実装するための、プロセスワイドに共有
@@ -1370,6 +1370,35 @@ impl BackendOps for CpuBackendOps {
         scatter_out_shape(input.shape(), index.shape(), src.shape(), dim)
             .map_err(BackendError::ShapeMismatch)?;
         gather_scatter::scatter(input, dim, index, src, reduce).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::interpolate` の CPU 実装（イシュー #1757）。
+    /// [`interpolate_out_shape`] で `input`／`size` の shape を
+    /// 再検査してから `interpolate::interpolate_nearest` へ委譲する
+    /// （`gather`／`scatter` と同じ二重検査方針。`.claude/rules/
+    /// security.md` A08）。`mode` の未知 variant（`InterpolateMode` は
+    /// `#[non_exhaustive]`。将来の bilinear〈#1762〉等）は
+    /// `BackendError::Unsupported` を返す fail-safe（`ops.rs` 内
+    /// 他メソッドの未知 variant 分岐と同型）。
+    fn interpolate(
+        &self,
+        input: &Tensor<f32>,
+        size: &[usize],
+        mode: InterpolateMode,
+    ) -> Result<Tensor<f32>, BackendError> {
+        match mode {
+            InterpolateMode::Nearest => {}
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "CpuBackendOps::interpolate: 未対応の InterpolateMode variant {mode:?}"
+                )));
+            }
+        }
+        let out_shape =
+            interpolate_out_shape(input.shape(), size).map_err(BackendError::ShapeMismatch)?;
+        let spatial_start = out_shape.len() - size.len();
+        interpolate::interpolate_nearest(input, spatial_start, &out_shape)
+            .map_err(BackendError::ShapeMismatch)
     }
 
     /// `BackendOps::sort` の CPU 実装（イシュー #1733）。

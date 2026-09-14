@@ -159,6 +159,10 @@ pub use fandhe_ai_tensor_core::{ChecksumReadout, GemmChecksum};
 pub use fandhe_ai_tensor_core::MatrixNormOrd;
 pub use fandhe_ai_tensor_core::QrFactors;
 pub use fandhe_ai_tensor_core::SvdFactors;
+// `InterpolateMode`（イシュー #1757・`Var::interpolate` の `mode`
+// 引数型）も 1 文 1 行で再エクスポートする（上記コメント「1 文 1 行を
+// 維持する」と同じ理由）。
+pub use fandhe_ai_tensor_core::InterpolateMode;
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の
 /// newtype ラッパー（codex-review PR #424 P1 是正）。

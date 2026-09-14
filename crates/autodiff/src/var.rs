@@ -17,20 +17,20 @@ use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, Conv2dParams, GemmChecksum,
-    GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp,
-    ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd, broadcast_shape,
-    concat_out_shape, conv2d_out_shape, gather_out_shape, gemm_out_shape, matmul_out_shape,
-    one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
+    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
+    broadcast_shape, concat_out_shape, conv2d_out_shape, gather_out_shape, gemm_out_shape,
+    interpolate_out_shape, matmul_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
     ArgExtremum, argext_with_fallback, concat_with_fallback, conv2d_with_fallback,
-    gather_with_fallback, min_with_fallback, one_hot_with_fallback, pad_with_fallback,
-    scalar_binary_with_fallback, scalar_unary_with_fallback, scatter_with_fallback,
-    sort_with_fallback, topk_with_fallback, unique_with_fallback,
+    gather_with_fallback, interpolate_with_fallback, min_with_fallback, one_hot_with_fallback,
+    pad_with_fallback, scalar_binary_with_fallback, scalar_unary_with_fallback,
+    scatter_with_fallback, sort_with_fallback, topk_with_fallback, unique_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -2678,6 +2678,56 @@ impl<'t> Var<'t> {
                 input: self.id,
                 dim,
                 index: index_c,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 空間軸（末尾 `size.len()` 軸）を `size` へリサンプリングする
+    /// （`torch.nn.functional.interpolate`／`tf.image.resize` 相当。
+    /// イシュー #1757）。先頭の残り軸（batch／channel 等）は素通し。
+    /// `mode` の意味論・数値契約は
+    /// [`fandhe_ai_tensor_core::InterpolateMode`] doc を正とする
+    /// （現状 [`fandhe_ai_tensor_core::InterpolateMode::Nearest`] の
+    /// み。算術を含まない純粋なコピー演算のため forward は 3
+    /// バックエンド間で構造的に bit 完全一致する）。
+    ///
+    /// 検査順序: ①[`fandhe_ai_tensor_core::interpolate_out_shape`]
+    /// （`size` の rank・空間軸の 0 サイズ・要素数オーバーフローを
+    /// 検査し `out_shape` を確定。違反は `AutodiffError::Shape`）→
+    /// ②`self` を層 1 で実体化 → ③`ops.interpolate` →
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`eval::interpolate_nearest`）へフォールバック（それ以外の
+    /// エラーは伝播する。判定迂回経路を作らない）→ ④戻り shape 検証
+    /// （`.claude/rules/security.md` A08）→ ⑤`push_eager`。
+    pub fn interpolate(
+        &self,
+        size: &[usize],
+        mode: InterpolateMode,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape = interpolate_out_shape(&in_shape, size).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let value = interpolate_with_fallback(self.tape.ops(), &input_val, size, mode, &out_shape)?;
+        if value.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Interpolate {
+                input: self.id,
+                size: size.to_vec(),
+                mode,
             },
             value,
         );

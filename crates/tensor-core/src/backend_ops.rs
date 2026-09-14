@@ -308,6 +308,28 @@ pub enum ScatterReduce {
     Add,
 }
 
+/// [`BackendOps::interpolate`] が適用するリサンプリング方式（イシュー
+/// #1757）。現時点では `Nearest`（最近傍）のみ持つが、後続 #1762
+/// （bilinear）が同じ足場（`Op::Interpolate`／`BackendOps::interpolate`）
+/// を共有できるよう enum で受ける設計とする。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`ScatterReduce`／
+/// `Activation` と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InterpolateMode {
+    /// 最近傍（`torch.nn.functional.interpolate(mode='nearest')`／
+    /// `tf.image.resize(method='nearest')` 相当）。添字式は
+    /// `src = (dst * in_size) / out_size`（整数除算＝床。PyTorch
+    /// `mode='nearest'` は `floor(dst * (in/out))` を `f32` で計算する
+    /// ため極端な形状で 1 要素ずれうる差異がある——本 variant は
+    /// float を一切使わない整数演算のみで、3 バックエンド間で
+    /// **構造的に bit 完全一致**する。`nearest-exact`〈`floor((dst+0.5)
+    /// *in/out)`〉は対象外・別 variant として扱う）。
+    Nearest,
+}
+
 /// [`BackendOps::captured_segment_key`]／[`BackendOps::run_captured_sgd_step_segment`]
 /// が扱う 1 個のデバイスバッファの識別子（イシュー #1349・親 #1348・
 /// ルート #1341 → #1269）。
@@ -1626,6 +1648,40 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "scatter: default fail-safe (no fused scatter kernel available)".into(),
+        ))
+    }
+
+    /// 空間軸（末尾 `size.len()` 軸）を `size` へリサンプリングする
+    /// （`torch.nn.functional.interpolate`／`tf.image.resize` 相当。
+    /// イシュー #1757）。先頭の残り軸（batch／channel 等）は素通し。
+    /// 出力 shape は [`crate::ops_shape::interpolate_out_shape`] が
+    /// 検査・確定する（`shape[..rank-k]` に `size` を連結した形）。
+    ///
+    /// [`InterpolateMode::Nearest`] の添字式・数値契約は同 variant の
+    /// doc を正とする——float を使わない整数演算のみのため forward は
+    /// **3 バックエンド間で構造的に bit 完全一致**する（`mode` の
+    /// 未知 variant〈将来 #1762 の bilinear 追加等〉は実装側が
+    /// [`BackendError::Unsupported`] を返す契約とする）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::scatter`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::interpolate` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::interpolate_nearest`）へ
+    /// フォールバックする（それ以外のエラーは伝播する。判定迂回経路を
+    /// 作らない。`.claude/rules/security.md` A08）。実装側でも
+    /// `input`／`size` を [`crate::ops_shape::interpolate_out_shape`]
+    /// で再検査し、不一致は [`BackendError::ShapeMismatch`] を返す
+    /// こと（fail-closed）。
+    fn interpolate(
+        &self,
+        _input: &Tensor<f32>,
+        _size: &[usize],
+        _mode: InterpolateMode,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "interpolate: default fail-safe (no fused interpolate kernel available)".into(),
         ))
     }
 
@@ -3601,6 +3657,18 @@ mod tests {
         let src = Tensor::new(vec![9.0, 9.0, 9.0, 9.0], &[2, 2]).unwrap();
 
         let result = ops.scatter(&input, 1, &index, &src, ScatterReduce::Overwrite);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::interpolate`] の既定実装が非破壊拡張の fail-safe
+    /// 契約（`Unsupported`）を満たすことを確認する（イシュー #1757）。
+    #[test]
+    fn interpolate_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+
+        let result = ops.interpolate(&input, &[4, 4], InterpolateMode::Nearest);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

@@ -152,6 +152,7 @@ pub mod gemm_blis;
 // せず（既定 `Unsupported`）、`autodiff::conv2d_with_fallback` の
 // 段階的合成（`im2col` → `gemm_batched`〈BLIS〉→ `add`）を使う。
 mod im2col;
+mod interpolate;
 mod scalar_elementwise;
 mod scan;
 mod unique;

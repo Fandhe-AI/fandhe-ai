@@ -419,7 +419,9 @@ mod reduce;
 // `kernels_reduce.rs` と同じ 2 ファイル構成（起動 API／NVRTC カーネル
 // 文字列の責務分離）。
 mod gather_scatter;
+mod interpolate;
 mod kernels_gather_scatter;
+mod kernels_interpolate;
 mod kernels_sort;
 // イシュー #1756: pad（`torch.nn.functional.pad(mode='constant')`
 // 相当）起動 API・カーネルソース。`gather_scatter.rs`／
@@ -431,6 +433,12 @@ mod sort;
 mod sort_model;
 mod unique;
 mod unique_model;
+// イシュー #1740: 累積和／累積積（`torch.cumsum`／`torch.cumprod`
+// 相当）起動 API・カーネルソース。`gather_scatter.rs`／
+// `kernels_gather_scatter.rs` と同じ 2 ファイル構成（起動 API／NVRTC
+// カーネル文字列の責務分離）。
+mod kernels_scan;
+mod scan;
 // イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線
 // （`gemm.rs::CudaGemm::new`）を実機で検証する `#[ignore]` テスト。
 // `context_cache`（非公開 `mod`）へ到達する必要があるため

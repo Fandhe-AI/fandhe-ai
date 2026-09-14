@@ -39,10 +39,11 @@ use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
-    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, gather_out_shape, one_hot_out_shape, pad_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
+    MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors,
+    Tensor, UnaryElementwiseOp, gather_out_shape, interpolate_out_shape, one_hot_out_shape,
+    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -66,6 +67,25 @@ use crate::row_kernel::{self, plan_dtype_is_f32};
 /// `i32::try_from` 失敗）で返す variant と食い違っていた。CUDA 側
 /// `ops.rs::map_sort_error`／`CudaError::SortDimSizeTooLarge` も同型に
 /// 是正済み）。
+/// `scan_model::plan_scan`（Metal `cumsum`／`cumprod` の起動前ホスト側
+/// 検証。イシュー #1740・PR #1849 Cursor Bugbot 指摘の是正）のエラーを
+/// `BackendOps::cumsum`／`cumprod` の戻り値へ変換する。唯一の variant
+/// `SizeLimitExceeded`（`lanes`／`axis_len`／`inner` がカーネル `uint`
+/// 引数の範囲〈`u32::MAX`〉を超過）を `BackendError::Unsupported` へ
+/// 写像し、`Var::cumsum`／`cumprod` のホストフォールバック（`eval::
+/// cumsum_along`／`cumprod_along`）へ委ねる（CUDA `ops.rs::
+/// map_scan_error` の `ScanSizeLimitExceeded` → `Unsupported`・Metal
+/// `map_sort_prepare_error` と同型）。要素数積の `usize` オーバー
+/// フローは本関数の対象外で、`run_scan` が `checked_numel` で
+/// `ShapeMismatch` として先に拒否する。
+fn map_scan_prepare_error(err: crate::scan_model::ScanPrepareError) -> BackendError {
+    match err {
+        crate::scan_model::ScanPrepareError::SizeLimitExceeded { .. } => {
+            BackendError::Unsupported(err.to_string())
+        }
+    }
+}
+
 fn map_sort_prepare_error(err: crate::sort_model::SortPrepareError) -> BackendError {
     match err {
         crate::sort_model::SortPrepareError::SizeLimitExceeded { .. } => {
@@ -170,6 +190,64 @@ fn require_rank2_cell(shape: &[usize]) -> Result<(), BackendError> {
         }));
     }
     Ok(())
+}
+
+/// `.contiguous()`（内部で無検査の `Vec::with_capacity(numel)` を
+/// 呼ぶ）を呼び出す前に、`f32` 換算のバイトサイズが `Vec` の
+/// allocation 上限（`isize::MAX` バイト）に収まるか検査する
+/// （`fandhe_ai_tensor_core::tensor::checked_numel_for::<f32>` と
+/// 同型の独立複製。同関数は `pub(crate)` でクレートを跨いで共有
+/// できないため。`interpolate` は巨大な `broadcast_to` view を
+/// 小さい `size` へ縮小できてしまう（forward 契約は出力 shape のみを
+/// 検査する）ため、要素数積が `usize` の範囲に収まっても
+/// `numel * size_of::<f32>() > isize::MAX` となるケースがあり、
+/// `.contiguous()` がそこで capacity overflow panic する。本番経路
+/// panic 禁止規約 `.claude/rules/coding-rust.md` に反するため、
+/// `.contiguous()` 呼び出し直前に本関数で確保前検査する
+/// （`interpolate` 限定の追加検査。イシュー #1834 Cursor Bugbot
+/// 指摘）。
+fn checked_f32_bytes(shape: &[usize]) -> Result<(), ShapeError> {
+    let numel = shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let bytes = numel
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+    Ok(())
+}
+
+/// `interpolate.rs::MetalInterpolate::run_nearest_f32` のエラーを
+/// `BackendOps::interpolate` の戻り値へ変換する（イシュー #1757・
+/// PR #1834 codex-review／Cursor Bugbot 指摘の是正）。
+///
+/// `run_nearest_f32` は自身の独立検査
+/// （`interpolate_model::validate_interpolate_launch`。モジュール doc
+/// 参照）に失敗すると `MetalError::InvalidInterpolateShape` を返すが、
+/// 是正前はこの分岐も他の起動失敗と区別せず一律
+/// `BackendError::KernelLaunchFailed` へ変換していた。これでは
+/// `gather`／`scatter`／`pad`（`ops.rs` 内の同種カーネル）や
+/// `backend-cuda::ops::map_interpolate_error`（同一イシューの CUDA 側
+/// 実装）と異なり、呼び出し元が「形状不正」を `BackendError::
+/// ShapeMismatch` として識別できず、`Var` 側のホストフォールバック
+/// 判定（`Unsupported`／`ShapeMismatch` 分岐）を素通りしてしまう
+/// （`u32::MAX` 超過等の入力は `size=[u32::MAX as usize + 1]` のように
+/// `interpolate_out_shape` の共通形状検証は通過しうる。指摘の再現形状）。
+/// `InvalidInterpolateShape` のみ `ShapeError::ElementCountOverflow`
+/// 経由の `ShapeMismatch` へ、それ以外（デバイス・パイプライン起動
+/// 失敗等）は従来どおり `KernelLaunchFailed` へ変換する
+/// （`backend-cuda::ops::map_gather_scatter_error`／
+/// `map_interpolate_error` と同型の変換方針）。
+fn map_interpolate_error(err: MetalError) -> BackendError {
+    match err {
+        MetalError::InvalidInterpolateShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => BackendError::KernelLaunchFailed(other.to_string()),
+    }
 }
 
 /// RNN／LSTM／GRU 系エントリが形状比較の前に必要とする `gates * hidden`
@@ -768,7 +846,69 @@ fn static_metal_memory() -> Result<&'static MetalMemory, BackendError> {
     Ok(mem)
 }
 
+/// [`MetalBackendOps::run_scan`] が `cumsum`／`cumprod` のいずれを
+/// 起動するかを選択するための内部列挙（イシュー #1740。`backend-cuda::
+/// ops::ScanOpKind` と同一設計だがクレートをまたいだ共有はしない
+/// ——各バックエンドの `run_scan` はそれぞれの `*Scan` 型に閉じた
+/// private ディスパッチのため）。
+enum ScanOpKind {
+    Sum,
+    Prod,
+}
+
 impl MetalBackendOps {
+    /// `Self::cumsum`／`cumprod`（イシュー #1740）の共通骨格。`dim` を
+    /// [`reduce_out_shape`] で再検査し、`x.numel()`（内部で無検査の
+    /// 乗算を呼ぶ）より前に要素数積のオーバーフローを検査
+    /// （`gather_scatter_model::checked_numel` 適用方針。`unique` と
+    /// 同型）してから `outer`／`axis_len`／`inner`（`backend-cpu::scan`
+    /// と同一の lane 分解）を `scan_model::plan_scan` で導出し
+    /// （カーネル `uint` 引数の上限超過はここで `Unsupported` →
+    /// ホストフォールバックへ写像。`map_scan_prepare_error` 参照）
+    /// `scan::MetalScan` へ委譲する。
+    /// `shape` の要素数が 0（いずれかの軸が 0）の場合は GPU 起動なしで
+    /// 空テンソルを返す（`checked_numel` は 0 を含む shape でも中間積
+    /// オーバーフローの恐れがあるため、この早期リターンを先に行う。
+    /// `backend-cpu::scan::cumsum`／`cumprod` と同じ順序）。
+    fn run_scan(
+        &self,
+        x: &Tensor<f32>,
+        dim: usize,
+        kind: ScanOpKind,
+    ) -> Result<Tensor<f32>, BackendError> {
+        reduce_out_shape(x.shape(), Some(dim)).map_err(BackendError::ShapeMismatch)?;
+        let shape = x.shape().to_vec();
+        if shape.contains(&0) {
+            return Tensor::new(Vec::new(), &shape).map_err(BackendError::ShapeMismatch);
+        }
+        crate::gather_scatter_model::checked_numel(&shape).map_err(BackendError::ShapeMismatch)?;
+        // カーネル `uint` 引数（`lanes`／`axis_len`／`inner`）の上限超過を
+        // `dispatch_sync` に入る前に先出しし、`Unsupported`（ホスト
+        // フォールバック）へ写像する（`map_scan_prepare_error` 参照。
+        // `Self::sort` の `plan_sort` 先出し・CUDA `ScanSizeLimitExceeded`
+        // と同型。PR #1849 Cursor Bugbot 指摘の是正）。`scan.rs::
+        // MetalScan::run_scan` 内の同じ `u32` 検査は「呼び出し元を信頼
+        // しない」二重検査として残し、そこで失敗した場合は内部契約違反
+        // として `KernelLaunchFailed` のまま伝播する。
+        let plan = crate::scan_model::plan_scan(&shape, dim).map_err(map_scan_prepare_error)?;
+        let (outer, axis_len, inner) = (plan.outer, plan.axis_len, plan.inner);
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("cumsum/cumprod: input not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let s = context_cache::cached_scan(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = match kind {
+            ScanOpKind::Sum => s.run_cumsum_f32(&ctx, x_slice, outer, axis_len, inner),
+            ScanOpKind::Prod => s.run_cumprod_f32(&ctx, x_slice, outer, axis_len, inner),
+        }
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`BackendOps::sgd_step_device`]／
     /// [`BackendOps::sgd_step_device_tracked`] 共通の検証・ディスパッチ
     /// 本体（イシュー #1017 でトークン引数を追加する際に二重化を避ける
@@ -2680,6 +2820,63 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::interpolate` の Metal 実装（イシュー #1757）。
+    /// [`interpolate_out_shape`] で `input`／`size` の shape を再検査
+    /// してから `interpolate.rs::MetalInterpolate::run_nearest_f32`
+    /// へ委譲する（`gather`／`scatter` と同じ二重検査方針）。
+    /// interpolate カーネルは gather／scatter と異なり座標配列を
+    /// 保持しないため `GS_MAX_RANK` の rank 上限は課さない
+    /// （`shaders/interpolate.metal` 冒頭コメント参照）。`mode` の
+    /// 未知 variant（`InterpolateMode` は `#[non_exhaustive]`。将来の
+    /// bilinear〈#1762〉等）は `BackendError::Unsupported` を返す
+    /// fail-safe（`ops.rs` 内他メソッドの未知 variant 分岐と同型）。
+    fn interpolate(
+        &self,
+        input: &Tensor<f32>,
+        size: &[usize],
+        mode: InterpolateMode,
+    ) -> Result<Tensor<f32>, BackendError> {
+        match mode {
+            InterpolateMode::Nearest => {}
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "MetalBackendOps::interpolate: 未対応の InterpolateMode variant {mode:?}"
+                )));
+            }
+        }
+        let out_shape =
+            interpolate_out_shape(input.shape(), size).map_err(BackendError::ShapeMismatch)?;
+        let in_shape = input.shape().to_vec();
+
+        // 出力が空なら `input` の shape に依らず結果は必ず空
+        // （`gather`／`scatter` の同型早期リターンと同じ理由。空間軸は
+        // `interpolate_out_shape` により非 0 が保証されるため、ここで
+        // 0 を含みうるのは先頭の残り軸のみ）。
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+
+        // `.contiguous()` より前に、`f32` 換算バイト数が `Vec` の
+        // 確保上限に収まるか検査する（巨大な `broadcast_to` view を
+        // 小さい `size` へ縮小するケースの capacity overflow panic
+        // 防止。`checked_f32_bytes` doc 参照。イシュー #1834 Cursor
+        // Bugbot 指摘）。
+        checked_f32_bytes(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("interpolate: input not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let ip = context_cache::cached_interpolate(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = ip
+            .run_nearest_f32(&ctx, input_slice, &in_shape, size, &out_shape)
+            .map_err(map_interpolate_error)?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// `BackendOps::one_hot` の Metal 実装（**非微分演算**。イシュー
     /// #1755）。[`one_hot_out_shape`] で `index.shape()`／`num_classes`
     /// を再検査し、[`validate_index_range`]（`index` の値域）でカーネル
@@ -2756,6 +2953,27 @@ impl BackendOps for MetalBackendOps {
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let m = out.len();
         Tensor::new(out, &[m]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::cumsum` の Metal 実装（イシュー #1740）。数値契約
+    /// （lane ごとの binary64 ソフトウェアエミュレーションアキュムレータ
+    /// 逐次計算・CPU 参照実装と bit 完全一致）は `shaders/scan.metal`
+    /// 冒頭コメント・`fandhe_ai_tensor_core::BackendOps::cumsum` doc が
+    /// 正。`dim` を [`reduce_out_shape`] で再検査してから
+    /// `x.numel()`（内部で無検査の `.iter().product()` を使い
+    /// `overflow-checks` 有効ビルドで panic しうる）を呼ぶ前に要素数積
+    /// のオーバーフローを検査する（`unique` と同じ `gather_scatter_
+    /// model::checked_numel` 適用方針。PR #1828 codex-review P1 の
+    /// 教訓と同型）。
+    fn cumsum(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        self.run_scan(x, dim, ScanOpKind::Sum)
+    }
+
+    /// `BackendOps::cumprod` の Metal 実装（イシュー #1740）。[`Self::
+    /// cumsum`] と同じ検査・委譲構造だが `MetalScan::run_cumprod_f32`
+    /// を起動する。
+    fn cumprod(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        self.run_scan(x, dim, ScanOpKind::Prod)
     }
 
     /// `BackendOps::sort` の Metal 実装（イシュー #1741）。
@@ -3720,6 +3938,72 @@ mod tests {
             err,
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         ));
+    }
+
+    /// Cursor Bugbot 指摘（イシュー #1834・PR レビュー）の回帰テスト。
+    /// `[1]` を `broadcast_to([1usize << 63])` した巨大な非 contiguous
+    /// view を小さい `size=[3]` へ縮小する `interpolate` は、
+    /// `interpolate_out_shape` が検査する**出力**側のバイトサイズは
+    /// 小さいため通過するが、`.contiguous()`（内部で無検査の
+    /// `Vec::with_capacity(numel)` を呼ぶ）が**入力**側の巨大な要素数
+    /// （`f32` 換算で `isize::MAX` バイトを超える）で capacity
+    /// overflow panic しうる（是正前）。`checked_f32_bytes` による
+    /// `.contiguous()` 呼び出し前の確保前検査は Metal コンテキスト
+    /// 取得前に完了するため、実機非依存の通常テストとして Linux CI
+    /// でも実行できる。
+    #[test]
+    fn interpolate_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32], &[1usize]).unwrap();
+        let huge = base.broadcast_to(&[1usize << 63]).unwrap();
+        assert_eq!(huge.shape(), &[1usize << 63]);
+
+        let ops = MetalBackendOps::new();
+        let err = ops
+            .interpolate(&huge, &[3], InterpolateMode::Nearest)
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    /// [`map_interpolate_error`] の回帰テスト（PR #1834 codex-review・
+    /// Cursor Bugbot 指摘の是正確認）。`MetalError::
+    /// InvalidInterpolateShape`（`interpolate.rs::MetalInterpolate::
+    /// run_nearest_f32` が内部の独立検査
+    /// `interpolate_model::validate_interpolate_launch` の失敗時に
+    /// 返す）が `BackendError::ShapeMismatch(ElementCountOverflow)` へ
+    /// 変換されることを固定する。是正前はこの分岐が無く一律
+    /// `BackendError::KernelLaunchFailed`（`interpolate.rs::
+    /// MetalInterpolate::run_nearest_f32` 呼び出し箇所の汎用
+    /// `.map_err(|e: MetalError| BackendError::KernelLaunchFailed(...))`
+    /// 経由）になり、`in_shape=[1]`／`size=[u32::MAX as usize + 1]`
+    /// のように共通形状検証（`interpolate_out_shape`）は通過するが
+    /// `u32` 収容検査で拒否される入力（指摘の再現形状）が
+    /// `ShapeMismatch` 判定を素通りしていた（`CudaBackendOps::
+    /// interpolate` の `map_interpolate_error` とは非対称だった）。
+    /// GPU 非依存: `MetalError` を直接構築して検証する（実機不要）。
+    #[test]
+    fn map_interpolate_error_treats_invalid_interpolate_shape_as_shape_mismatch() {
+        let err = map_interpolate_error(MetalError::InvalidInterpolateShape {
+            detail: "validate_interpolate_launch: dim exceeds u32::MAX".into(),
+        });
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    /// [`map_interpolate_error`]: `InvalidInterpolateShape` 以外の
+    /// `MetalError`（デバイス・パイプライン起動失敗等）は従来どおり
+    /// `BackendError::KernelLaunchFailed` へ変換されることを固定する
+    /// （上記テストと対で「形状エラーのみを区別する」契約を検証する）。
+    #[test]
+    fn map_interpolate_error_falls_back_to_kernel_launch_failed_for_other_errors() {
+        let err = map_interpolate_error(MetalError::LibraryCompilation {
+            message: "boom".into(),
+        });
+        assert!(matches!(err, BackendError::KernelLaunchFailed(_)));
     }
 
     // --- gemm_resident_lhs／gemm_resident_rhs zero-repack 経路（イシュー
