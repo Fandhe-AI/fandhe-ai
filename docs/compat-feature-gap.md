@@ -1273,3 +1273,13 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
 - forward は lane（縮約軸以外の全軸の組）ごとに `f64` アキュムレータを保持する逐次スキャン契約（`.claude/rules/coding-rust.md` の f64 アキュムレータ方針を forward の scan へ拡張）。VJP はホスト側のみ（`grad.rs::cumsum_vjp_along`／`cumprod_vjp_along`）で、`cumprod` は除算を用いない厳密形（排他的 prefix 積 `L` と後ろ向き Horner 型再帰 `S` の積）のため零要素を含む入力でも成り立つ。
 - CUDA／Metal 専用カーネルは本イシューのスコープ外（既定 `Unsupported` フォールバックのまま）で後続イシューへ引き継ぐ。
 - facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.3）。
+
+## 追補（イシュー #1740）
+
+上記「追補（イシュー #1731）」で「本イシューのスコープ外」としていた CUDA／Metal 専用カーネルを実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- CUDA（`backend-cuda::scan::CudaScan`。`kernels_scan.rs` の NVRTC カーネル `cumsum_f32`／`cumprod_f32`）・Metal（`backend-metal::scan::MetalScan`。`shaders/scan.metal` の `cumsum_f32`／`cumprod_f32`）とも `CudaBackendOps::cumsum`／`cumprod`・`MetalBackendOps::cumsum`／`cumprod` を実装済み（`Unsupported` フォールバックだった経路を置換）。
+- 数値契約は #1731 の forward 契約（lane ごとの逐次スキャン・`f64` 相当アキュムレータ）を維持したまま GPU 側へ拡張: CUDA は `double` ネイティブ、Metal は MSL が `double` 非対応のため `crate::soft_f64` と同型の binary64 逐次加算・乗算を 64bit 整数でソフトウェアエミュレーションし、いずれも CPU 参照実装（`backend-cpu::scan`）と **bit 完全一致**する（NaN のみ payload がハードウェア依存のためクラス一致）。
+- `lanes = outer * inner`／`axis_len` がカーネル引数の `i32`（CUDA）上限、または要素数積が `usize` オーバーフローする形状は `BackendError::Unsupported` へ写像しホストフォールバック（`eval::cumsum_along`／`cumprod_along`）へ委譲する（内部契約違反・driver 失敗はこのフォールバックで覆い隠さない。`.claude/rules/security.md` A08）。
+- facade 新規公開面なし（#1731 と同じく既存 `Var` 再エクスポート経由でそのまま到達可能）。
+- CUDA／Metal 実機（DGX Spark GB10・Apple Silicon）での parity 実測は本エージェント実行環境に到達不能のため未実施のまま GB10／Mac セッションへ申し送る（Linux 実行可能なソース証跡テスト・環境適応スモーク・型検査〈`cargo check --target aarch64-apple-darwin`〉は完了済み）。

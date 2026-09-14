@@ -41,8 +41,8 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, gather_out_shape, one_hot_out_shape, require_same_shape, row_norm_layout,
-    row_softmax_layout, scatter_out_shape,
+    UnaryElementwiseOp, gather_out_shape, one_hot_out_shape, reduce_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout, scatter_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -745,7 +745,59 @@ fn static_metal_memory() -> Result<&'static MetalMemory, BackendError> {
     Ok(mem)
 }
 
+/// [`MetalBackendOps::run_scan`] が `cumsum`／`cumprod` のいずれを
+/// 起動するかを選択するための内部列挙（イシュー #1740。`backend-cuda::
+/// ops::ScanOpKind` と同一設計だがクレートをまたいだ共有はしない
+/// ——各バックエンドの `run_scan` はそれぞれの `*Scan` 型に閉じた
+/// private ディスパッチのため）。
+enum ScanOpKind {
+    Sum,
+    Prod,
+}
+
 impl MetalBackendOps {
+    /// `Self::cumsum`／`cumprod`（イシュー #1740）の共通骨格。`dim` を
+    /// [`reduce_out_shape`] で再検査し、`x.numel()`（内部で無検査の
+    /// 乗算を呼ぶ）より前に要素数積のオーバーフローを検査
+    /// （`gather_scatter_model::checked_numel` 適用方針。`unique` と
+    /// 同型）してから `outer`／`axis_len`／`inner`（`backend-cpu::scan`
+    /// と同一の lane 分解）を導出し `scan::MetalScan` へ委譲する。
+    /// `shape` の要素数が 0（いずれかの軸が 0）の場合は GPU 起動なしで
+    /// 空テンソルを返す（`checked_numel` は 0 を含む shape でも中間積
+    /// オーバーフローの恐れがあるため、この早期リターンを先に行う。
+    /// `backend-cpu::scan::cumsum`／`cumprod` と同じ順序）。
+    fn run_scan(
+        &self,
+        x: &Tensor<f32>,
+        dim: usize,
+        kind: ScanOpKind,
+    ) -> Result<Tensor<f32>, BackendError> {
+        reduce_out_shape(x.shape(), Some(dim)).map_err(BackendError::ShapeMismatch)?;
+        let shape = x.shape().to_vec();
+        if shape.contains(&0) {
+            return Tensor::new(Vec::new(), &shape).map_err(BackendError::ShapeMismatch);
+        }
+        crate::gather_scatter_model::checked_numel(&shape).map_err(BackendError::ShapeMismatch)?;
+        let outer: usize = shape[..dim].iter().product();
+        let axis_len = shape[dim];
+        let inner: usize = shape[dim + 1..].iter().product();
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("cumsum/cumprod: input not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let s = context_cache::cached_scan(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = match kind {
+            ScanOpKind::Sum => s.run_cumsum_f32(&ctx, x_slice, outer, axis_len, inner),
+            ScanOpKind::Prod => s.run_cumprod_f32(&ctx, x_slice, outer, axis_len, inner),
+        }
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`BackendOps::sgd_step_device`]／
     /// [`BackendOps::sgd_step_device_tracked`] 共通の検証・ディスパッチ
     /// 本体（イシュー #1017 でトークン引数を追加する際に二重化を避ける
@@ -2437,6 +2489,27 @@ impl BackendOps for MetalBackendOps {
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let m = out.len();
         Tensor::new(out, &[m]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::cumsum` の Metal 実装（イシュー #1740）。数値契約
+    /// （lane ごとの binary64 ソフトウェアエミュレーションアキュムレータ
+    /// 逐次計算・CPU 参照実装と bit 完全一致）は `shaders/scan.metal`
+    /// 冒頭コメント・`fandhe_ai_tensor_core::BackendOps::cumsum` doc が
+    /// 正。`dim` を [`reduce_out_shape`] で再検査してから
+    /// `x.numel()`（内部で無検査の `.iter().product()` を使い
+    /// `overflow-checks` 有効ビルドで panic しうる）を呼ぶ前に要素数積
+    /// のオーバーフローを検査する（`unique` と同じ `gather_scatter_
+    /// model::checked_numel` 適用方針。PR #1828 codex-review P1 の
+    /// 教訓と同型）。
+    fn cumsum(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        self.run_scan(x, dim, ScanOpKind::Sum)
+    }
+
+    /// `BackendOps::cumprod` の Metal 実装（イシュー #1740）。[`Self::
+    /// cumsum`] と同じ検査・委譲構造だが `MetalScan::run_cumprod_f32`
+    /// を起動する。
+    fn cumprod(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        self.run_scan(x, dim, ScanOpKind::Prod)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::mse_loss`] の Metal 実装
