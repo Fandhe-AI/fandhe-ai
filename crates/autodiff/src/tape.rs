@@ -206,9 +206,11 @@ pub(crate) enum Op {
     /// `Var::min`）。VJP は `Max` と共有ヘルパー
     /// （`grad::extremum_first_match_vjp`）を使う——forward 記録値
     /// `out_value` と `==` 一致する最初の位置へ上流勾配を置くだけの
-    /// 実装で最大／最小に依存しないため（#1718 が均等分配へ確定した
-    /// 場合はそのヘルパー 1 箇所の差し替えで `Max`／`Min` 両方へ
-    /// 反映される）。
+    /// 実装で最大／最小に依存しない。イシュー #1718 で先勝ち決定的
+    /// 方式を維持する設計判断が確定し（`docs/autodiff-
+    /// amax-grad-distribution-decision.md`）、このヘルパーは今後も
+    /// 差し替えない——PyTorch `amax`／`amin` 相当の均等分配は独立の
+    /// `Op`／VJP として実装する方針とした。
     Min { input: NodeId, dim: Option<usize> },
     /// `dim` に沿った縮約平均（イシュー #1719・親 #1601「Phase 2
     /// （Tier 1）」）。`BackendOps` に対応メソッドがないため、forward

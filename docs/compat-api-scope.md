@@ -212,13 +212,13 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | 形状操作（permute／squeeze／expand／cat／stack／split） | #1597（実装済み: permute／squeeze／unsqueeze／expand〈broadcast_to〉／flatten。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉）・#1598（実装済み: `Var::cat`／`stack`／`narrow`／`split`／`split_with_sizes`／`chunk`。§5 は Tier 1 列挙済み機能につき再適用不要と判断し facade へ新規 `pub use`／`pub fn` を追加していない。narrow は本 issue で `#1599` 側の対象から解消済み） |
 | index 系（narrow／where／gather／scatter） | #1599（narrow は #1598 で実装済み・where／masked_fill は #1637 で実装済み〈`Var::where_cond`／`masked_fill`。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない〉のため対象外。gather／scatter／scatter_add／index_select は #1638（→ #1776 で Op 定義・CPU 参照実装・VJP 実装済み。`Var::gather`／`index_select`／`scatter`／`scatter_add`。facade 到達経路は既存 `Var` 再エクスポート経由で同様に新規公開面なし。CUDA は #1777・Metal は #1778 でそれぞれ実装済み〈`CudaBackendOps`／`MetalBackendOps` の `gather`／`scatter`。facade 新規公開面なし〉）のため対象外） |
 | バッチ行列積 | #1600（#1715 で実装済み: `Var::matmul` の rank≥3 受理・バッチ次元 NumPy 互換ブロードキャスト・`BackendOps::gemm_batched`／`gemm_batched_fp32_strict`〈既定は per-batch `gemm`/`gemm_fp32_strict` への合成〉・`CpuBackendOps::gemm_batched` オーバーライド〈bit 同一〉。§5 は Tier 1 列挙済み機能につき再適用不要と判断し facade へ新規 `pub use`／`pub fn` を追加していない。CUDA／Metal 専用バッチカーネルは #1716／#1717） |
-| 縮約（mean／min／argmax／var／std／複数軸） | #1601（`amax`／`max` の勾配分配方式はこの issue で設計判断を記録して確定。`04-requirements.md:234`。2 節参照）。#1719 で mean・複数軸・keepdim 部分を実装済み: `Var::mean`〈単一軸／全軸。`tape::Op::Mean`。`BackendOps` は非拡張で `sum` の結果をホスト側で 1 回だけ除算〉・`sum_dims`／`max_dims`／`mean_dims`〈複数軸・`keepdim`。`crate::reduce_dims` が permute／contiguous／reshape で単一軸縮約へ併合。単一軸は `sum(Some(d))` と bit 同一に直接委譲〉。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉。CUDA 実機 parity は未実測のまま GB10 セッションへ申し送り。#1720 で `min`／`argmax`／`argmin` 実装済み（`Var::min`／`argmax`／`argmin`。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない。`min` の VJP は #1718〈amax／amin 勾配分配方式の確定。本追記時点で OPEN〉未確定につき現行 `Var::max` の先勝ち決定的方式と共有するヘルパー `grad::extremum_first_match_vjp`〈旧 `max_vjp` を改称・`max_vjp` 自体は薄いラッパーとして維持〉を適用。CPU は `min`／`argmax`／`argmin` すべて実装済み。CUDA は `min` カーネル実装済み・`argmax`／`argmin` は明示 `Unsupported`（ホストフォールバック）。Metal は 3 演算とも明示 `Unsupported`（ホストフォールバック）。GB10／M4 Max 実機 parity は未実測のまま申し送り）。var／std は #1723 で実装済み: `Var::var`／`std`〈既存 `sum`／`max` と同じ `dim: Option<usize>` シグネチャ＋`correction`。`Op::Var` 専用 Op・`BackendOps::var` 既定 `Unsupported` のホストフォールバック契約。§5「Tier 1 列挙済み機能は再適用不要」の対象。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` なし。多軸・`keepdim` は本 issue 対象外のまま〉。`docs/compat-feature-gap.md` §2.5 追補参照。`amax`／`max` の勾配分配方式〈先勝ち決定的 対 均等分配〉は #1718 が未確定〈2026-09-14 時点 OPEN〉のため `sum_dims`／`max_dims` とも既存の先勝ち決定的規約を無変更で維持） |
+| 縮約（mean／min／argmax／var／std／複数軸） | #1601（`amax`／`max` の勾配分配方式はこの issue で設計判断を記録して確定。`04-requirements.md:234`。2 節参照）。#1719 で mean・複数軸・keepdim 部分を実装済み: `Var::mean`〈単一軸／全軸。`tape::Op::Mean`。`BackendOps` は非拡張で `sum` の結果をホスト側で 1 回だけ除算〉・`sum_dims`／`max_dims`／`mean_dims`〈複数軸・`keepdim`。`crate::reduce_dims` が permute／contiguous／reshape で単一軸縮約へ併合。単一軸は `sum(Some(d))` と bit 同一に直接委譲〉。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉。CUDA 実機 parity は未実測のまま GB10 セッションへ申し送り。#1720 で `min`／`argmax`／`argmin` 実装済み（`Var::min`／`argmax`／`argmin`。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない。`min` の VJP は #1718〈amax／amin 勾配分配方式の確定。本追記時点で OPEN〉未確定につき現行 `Var::max` の先勝ち決定的方式と共有するヘルパー `grad::extremum_first_match_vjp`〈旧 `max_vjp` を改称・`max_vjp` 自体は薄いラッパーとして維持〉を適用。CPU は `min`／`argmax`／`argmin` すべて実装済み。CUDA は `min` カーネル実装済み・`argmax`／`argmin` は明示 `Unsupported`（ホストフォールバック）。Metal は 3 演算とも明示 `Unsupported`（ホストフォールバック）。GB10／M4 Max 実機 parity は未実測のまま申し送り）。var／std は #1723 で実装済み: `Var::var`／`std`〈既存 `sum`／`max` と同じ `dim: Option<usize>` シグネチャ＋`correction`。`Op::Var` 専用 Op・`BackendOps::var` 既定 `Unsupported` のホストフォールバック契約。§5「Tier 1 列挙済み機能は再適用不要」の対象。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` なし。多軸・`keepdim` は本 issue 対象外のまま〉。`docs/compat-feature-gap.md` §2.5 追補参照。`amax`／`max` の勾配分配方式〈先勝ち決定的 対 均等分配〉は #1718 で確定（既存 `Var::max`／`min`／`max_dims`〈`max(dim)`／`min(dim)` 族の意味論〉は先勝ち決定的を維持・PyTorch `torch.amax`／`amin` 相当の均等分配は別 `Op`／別ヘルパーとして後続 issue で実装する方針。`docs/autodiff-amax-grad-distribution-decision.md` 参照）のため `sum_dims`／`max_dims` とも既存の先勝ち決定的規約を無変更で維持） |
 | 乱数生成と RNG 契約 | #1602（#1724 実装済み: グローバル RNG 契約〈manual_seed〉。#1725 実装済み: 乱数テンソル生成本体〈randn／rand／randint〉。#1726 実装済み: 決定的生成系〈arange／linspace／eye／zeros_like／ones_like〉。`fandhe_ai::{manual_seed, randn, rand, randint, arange, linspace, eye, zeros_like, ones_like}`。facade 到達経路は新規 `pub fn`（`RngError`／`CreationError` は 1 行の `pub use`）。`docs/rng-global-contract-design.md`） |
 | Dropout | #1603 |
 | Embedding | #1604 |
 | MultiheadAttention | #1605 |
 | Conv1d／Conv2d | #1606 |
-| Pooling | #1607 |
+| Pooling | #1607（設計記録 #1727。`docs/pooling-ops-design.md`。実装は #1728〈CPU〉・#1729〈CUDA〉・#1730〈Metal〉） |
 | 損失（BCE／NLL／Huber／KLDiv） | #1609 |
 | optimizer（Adam／RMSprop／Adagrad／LAMB） | #1610 |
 | scheduler（Cosine／Exponential／Plateau／OneCycle） | #1611 |
@@ -289,12 +289,15 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   なった時点で 5 節の手続きに従い判断する
 - **`amax`/`max` 縮約 API**（PyTorch `torch.amax` 相当）: 縮約 API 自体は
   Tier 1（1.2 節・#1601）で対象範囲となった。`crates/autodiff/src/grad.rs`
-  の `max_vjp` は現状、同値タイ発生時「最初に現れる最大要素 1 箇所のみ」
-  へ勾配を伝播する先勝ち決定的挙動を採用しており（PoC-v2-2 のビット一致
+  の `max_vjp` は同値タイ発生時「最初に現れる最大要素 1 箇所のみ」へ
+  勾配を伝播する先勝ち決定的挙動を採用しており（PoC-v2-2 のビット一致
   決定性方針との整合を優先した設計判断。#224 で再確認済み）、PyTorch
   `amax` の均等分配とは異なる。この勾配分配方式（先勝ち決定的 対 均等
-  分配）は #1601 で設計判断を記録したうえで確定する
-  （`04-requirements.md:234`。撤去ではなく Tier 1 issue への引き継ぎ）
+  分配）は #1718 で**確定済み**（既存 `Var::max`／`min`／`max_dims`
+  〈`max(dim)`／`min(dim)` 族の意味論〉は先勝ち決定的を維持し、PyTorch
+  `torch.amax`／`amin` 相当の均等分配は別 `Op`／別ヘルパーとして後続
+  issue で実装する方針。`docs/autodiff-amax-grad-distribution-decision.md`
+  参照。`04-requirements.md:234`）
 - 対象外要望が生じた場合の受け皿は 2 通り。
   - 実装リポ側で追跡が完結する事項: `.claude/rules/out-of-scope-tracking.md`
     の規約に沿って Issue で追跡する
