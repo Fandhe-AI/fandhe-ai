@@ -80,20 +80,22 @@ pub fn bitonic_sort_host(keys: &mut [u32]) {
 /// 契約。`gather_scatter_model::validate_gather_launch` と同じ
 /// 「エンコード関数へ渡す前にホスト側で完結させる」方針）。
 ///
-/// `n == 0`／`n == 1` は呼び出し元が GPU 起動なしで早期処理する契約
-/// のため、本関数は `n >= 2` を前提とする（`n < 2` で呼ばれた場合は
-/// `debug_assert!` で契約違反を検知しつつ安全側の `padded = n` を
-/// 返す）。
+/// `n == 0`／`n == 1` は呼び出し元（`unique.rs::MetalUnique::
+/// run_unique_f32`）が GPU 起動なしで早期処理する契約のため、本関数は
+/// 通常 `n >= 2` でのみ呼ばれる。ただし本関数自身は `pub fn`（`pub mod
+/// unique_model`）であり、クレート外の利用者が `n < 2` を直接渡して
+/// 呼ぶことも構文上可能なため、`debug_assert!` による契約違反検知
+/// （debug ビルドでの panic）は行わない（本番経路の panic 禁止・
+/// AGENTS.md。codex-review 指摘・PR #1828 是正）。`n < 2` でも
+/// `checked_next_power_of_two`（`0`／`1` いずれも `Some(1)`）がそのまま
+/// 有効な `padded` を返すため、明示的な早期分岐は不要で常に正常値
+/// （またはサイズ超過時の型付きエラー）を返す。
 ///
 /// 戻り値: `padded`（次の 2 のべき乗）。`i32::MAX` を超える場合は
 /// `Err(UniquePrepareError::SizeLimitExceeded)`（呼び出し元 `ops.rs`
 /// が `BackendError::Unsupported` へ写像し、ホストフォールバックへ
 /// 委ねる。`GS_MAX_RANK` 超過時の `Unsupported` 返却と同じ設計判断）。
 pub fn checked_padded_len(n: usize) -> Result<usize, UniquePrepareError> {
-    debug_assert!(
-        n >= 2,
-        "checked_padded_len: caller must handle n<2 without GPU dispatch"
-    );
     let padded = n
         .checked_next_power_of_two()
         .ok_or(UniquePrepareError::SizeLimitExceeded {
@@ -197,5 +199,17 @@ mod tests {
     fn checked_padded_len_accepts_small_sizes() {
         assert_eq!(checked_padded_len(5).unwrap(), 8);
         assert_eq!(checked_padded_len(1000).unwrap(), 1024);
+    }
+
+    /// `checked_padded_len` は `pub fn`（`pub mod unique_model`）で
+    /// あり、通常の呼び出し元（`unique.rs::MetalUnique::
+    /// run_unique_f32`）は `n >= 2` のみで呼ぶ契約だが、クレート外の
+    /// 利用者が `n < 2` を直接渡して呼ぶことも構文上可能である。
+    /// debug ビルドでも panic せず正常値を返すことを確認する回帰
+    /// テスト（codex-review 指摘・PR #1828 是正）。
+    #[test]
+    fn checked_padded_len_does_not_panic_on_small_input() {
+        assert_eq!(checked_padded_len(0).unwrap(), 1);
+        assert_eq!(checked_padded_len(1).unwrap(), 1);
     }
 }
