@@ -855,6 +855,20 @@ encode するだけで積み、`download` 1 回だけが GPU 完了を待つ「�
 facade 新規公開面なし。M4 Max 実機実測は本エージェント実行環境に
 Apple Silicon 実機がないため未実施のまま Mac セッションへ申し送る。
 
+**追補（イシュー #1716）**: `CudaBackendOps::gemm_batched`／
+`gemm_batched_fp32_strict` 専用オーバーライド（デバイス常駐バッチループ
+経路 `CudaGemm::run_tiled_f32_batched`。既定合成実装〈per-batch
+`gemm_fp32_strict_impl` 呼び出し〉と bit 完全一致）を実装済み。TF32
+opt-in（`Tf32`／`Tf32x3`）時は新設した薄い公開ラッパー
+`fandhe_ai_tensor_core::gemm_batched_via_per_batch_gemm` 経由で per-batch
+`gemm` 合成へフォールバックし、既存 TF32 系カウンタ・fail-closed 挙動
+（#1042／#1355）は不変。facade 新規公開面なし・`Op`／`Var`／VJP の追加
+なし（#1715 で既に実装済み）。GB10 実機での bit 同一・REQ-2 parity 実測
+は未実施のまま申し送り（`crates/backend-cuda/tests/gemm_batched_parity.rs`）。
+Metal は既定合成実装ではなく、上記のとおり encode-only バッチループ
+方式（`MetalBackendOps::gemm_batched` オーバーライド）を実装済み
+（#1717）。
+
 ## #1636（#1707〜#1709）の追補
 
 Metal バックエンドの `ScalarOp`（`ScalarUnaryOp`／`ScalarBinaryOp`。
