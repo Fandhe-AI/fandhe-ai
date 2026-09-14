@@ -1425,6 +1425,44 @@ pub trait BackendOps {
         ))
     }
 
+    /// クラス id 列（整数値の `index`）を one-hot 行列へ展開する
+    /// （`torch.nn.functional.one_hot`／`tf.one_hot` 相当。**非微分演算**。
+    /// イシュー #1755）。出力 shape は `index.shape()` へ末尾軸として
+    /// `num_classes` を付加した形（[`crate::ops_shape::one_hot_out_shape`]
+    /// 参照）で、`out[.., c] = 1.0 if index[..] == c else 0.0`。
+    ///
+    /// `index` の値は `[0, num_classes)` の範囲内であることを呼び出し元
+    /// （`fandhe_ai_autodiff::var::Var::one_hot`）が forward 時点で検査
+    /// 済み（本メソッドは値検査を行わない前提だが、[`Self::gather`] 等と
+    /// 同様に実装側でも独立に値域を再検査し縦深防御とすることが望ましい。
+    /// `.claude/rules/security.md` A08）。
+    ///
+    /// **非微分演算の契約**: `one_hot` は整数クラス id から離散的な
+    /// 0/1 行列を作るため勾配を持たない。`fandhe_ai_autodiff::Op::OneHot`
+    /// の VJP（`crates/autodiff/src/grad.rs::vjp`）は入力へ明示的にゼロ
+    /// 勾配を返す（寄与なしではなく「ゼロ勾配が流れる」ことを
+    /// `Gradients::get` で観測可能にするため）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::gather`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::one_hot` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::one_hot`）へフォールバックする
+    /// （それ以外のエラーは伝播する。判定迂回経路を作らない）。実装側
+    /// でも戻り shape を [`crate::ops_shape::one_hot_out_shape`] で
+    /// 再検査し、不一致は [`BackendError::ShapeMismatch`] を返すこと
+    /// （fail-closed）。
+    fn one_hot(
+        &self,
+        _index: &Tensor<i32>,
+        _num_classes: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "one_hot: default fail-safe (no fused one_hot kernel available)".into(),
+        ))
+    }
+
     /// 入力を平坦化しソートしたうえで重複を除去した一意値集合を返す
     /// （`torch.unique(input, sorted=True)` の values のみ。
     /// `return_inverse`／`return_counts`／`dim` 指定は対象外。イシュー
@@ -3209,6 +3247,18 @@ mod tests {
         let input = Tensor::new(vec![3.0, 1.0, 2.0, 4.0], &[2, 2]).unwrap();
 
         let result = ops.topk(&input, 1, 1, true);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::one_hot`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1755）。
+    #[test]
+    fn one_hot_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let index = Tensor::<i32>::new(vec![0, 2, 1, 1], &[2, 2]).unwrap();
+
+        let result = ops.one_hot(&index, 3);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

@@ -1440,6 +1440,34 @@ pub(crate) fn topk(
     ))
 }
 
+/// `Var::one_hot` のホスト参照実装（`torch.nn.functional.one_hot`／
+/// `tf.one_hot` 相当。イシュー #1755）。`BackendOps::one_hot` が
+/// `Unsupported` を返したときのみ `grad::one_hot_with_fallback` から
+/// 呼ばれる。`index`（値は `[0, num_classes)` の範囲内であることを
+/// `Var::one_hot` が forward 時点で検査済み）の各要素 `c` に対し、
+/// 出力の末尾軸（サイズ `num_classes`）へ `c` 番目だけ `1.0`・残りを
+/// `0.0` とする one-hot 行を書く。出力 shape は `index.shape() ++
+/// [num_classes]`（[`fandhe_ai_tensor_core::one_hot_out_shape`]
+/// 参照）で、各出力位置は互いに独立（データ競合の心配がない単純な
+/// 走査で bit 決定的）。
+pub(crate) fn one_hot(index: &Tensor<i32>, num_classes: usize, out_shape: &[usize]) -> Tensor<f32> {
+    if out_shape.contains(&0) {
+        return build_tensor(Vec::new(), out_shape);
+    }
+    let index_data = dense_vec_i32(index);
+    let numel: usize = out_shape.iter().product();
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let row = flat / num_classes;
+        let c = flat % num_classes;
+        let dim_idx = index_data[row];
+        if dim_idx >= 0 && (dim_idx as usize) == c {
+            *out_val = 1.0;
+        }
+    }
+    build_tensor(out, out_shape)
+}
+
 /// 平坦化・totalOrder ソート・隣接重複除去のホスト参照実装
 /// （`torch.unique(input, sorted=True)` の values のみ。イシュー
 /// #1734）。`BackendOps::unique` が `Unsupported` を返したときのみ

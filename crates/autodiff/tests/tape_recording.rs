@@ -875,6 +875,24 @@ fn sort_topk_record_single_node_and_argsort_records_none() {
     );
 }
 
+/// 33. `one_hot`（**非微分演算**。イシュー #1755）が 1 ノードのみ
+///     追加する `push_eager`（実体化済み）ノードとして記録される
+///     ことを検証する（`Op::Gather`／`Sort`／`Topk` と同型）。
+#[test]
+fn one_hot_records_single_eager_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0, 2.0, 1.0], &[3]));
+
+    let before = tape.len();
+    let out = x.one_hot(3).unwrap();
+    assert_eq!(
+        tape.len(),
+        before + 1,
+        "one_hot は 1 ノードのみ追加するはず"
+    );
+    assert_eq!(out.to_tensor().shape(), &[3, 3]);
+}
+
 /// 32. `unique`（イシュー #1734）が新規ノードを一切 tape に記録
 ///     しないこと（非微分・detached な `Tensor<f32>` を返す契約。
 ///     `docs/unique-facade-exposure-decision.md`）を検証する。

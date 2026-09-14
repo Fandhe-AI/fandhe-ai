@@ -1,10 +1,19 @@
-// gather／scatter／scatter_add カーネル（`torch.gather`／`torch.scatter`／
-// `torch.scatter_add` 相当。イシュー #1778。CPU 参照実装
-// `crates/backend-cpu/src/gather_scatter.rs` の Metal 対応版）。
+// gather／scatter／scatter_add／one_hot カーネル（`torch.gather`／
+// `torch.scatter`／`torch.scatter_add`／`torch.nn.functional.one_hot`
+// 相当。gather／scatter／scatter_add はイシュー #1778、one_hot は
+// イシュー #1755。CPU 参照実装 `crates/backend-cpu/src/gather_scatter.rs`
+// の Metal 対応版）。
 //
 // `crate::gather_scatter::MetalGatherScatter`（`gather_scatter.rs`）から
-// 実行時コンパイルされ、`ops.rs::MetalBackendOps::gather`／`scatter` から
-// 呼ばれる。
+// 実行時コンパイルされ、`ops.rs::MetalBackendOps::gather`／`scatter`／
+// `one_hot` から呼ばれる。
+//
+// ---- one_hot（`one_hot_f32`。**非微分演算**）----
+//
+// 座標展開・ストライドが不要な単純な整数除算・剰余のみで読み書き位置が
+// 決まる（`kernels_gather_scatter.rs::ONE_HOT_F32`〈CUDA 版〉と同型の
+// 設計）: `row = gid / num_classes`・`c = gid % num_classes`、
+// `out[gid] = (index[row] == c) ? 1.0 : 0.0`。
 //
 // ---- gather（`gather_f32`）----
 //
@@ -469,4 +478,29 @@ kernel void scatter_add_f32(
         }
     }
     out[gid] = as_type<float>(gs_f64_narrow(acc));
+}
+
+// one_hot（**非微分演算**）: `index(0)`／`out(1)`／`num_classes(2)`／
+// `numel(3)`（出力要素数＝`index.numel() * num_classes`）。
+kernel void one_hot_f32(
+    device const int* index [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& num_classes [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    // REQ-8: grid は `ceil(numel/W)` threadgroup のため端で `numel` を
+    // はみ出しうる（手動境界チェックを省略しない）。
+    if (gid >= numel) {
+        return;
+    }
+    uint row = gid / num_classes;
+    uint c = gid % num_classes;
+    int index_val = index[row];
+    // 範囲外添字（呼び出し元 `ops.rs` が起動前にホスト側で検査済みの
+    // ため通常到達しない。REQ-8 の縦深防御として境界外読み出しを回避し
+    // 安全側の値を書く。CUDA 版 `ONE_HOT_F32` と同じ方針）。
+    out[gid] = (index_val >= 0 && (uint)index_val < num_classes && (uint)index_val == c)
+        ? 1.0f
+        : 0.0f;
 }

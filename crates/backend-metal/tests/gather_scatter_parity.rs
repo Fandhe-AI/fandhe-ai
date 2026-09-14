@@ -492,3 +492,114 @@ fn gather_scatter_direct_call_empty_index_scatter_passes_through_input() {
         );
     }
 }
+
+// --- one_hot（非微分演算。イシュー #1755） ---
+
+fn assert_one_hot_parity(index_shape: &[usize], num_classes: usize, seed: u64) {
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+
+    let idx_numel: usize = index_shape.iter().product();
+    let index = Tensor::<i32>::new(i32_index(seed, idx_numel, num_classes), index_shape)
+        .expect("valid index tensor");
+
+    let cpu_out = cpu
+        .one_hot(&index, num_classes)
+        .expect("cpu one_hot succeeds");
+    let metal_out = metal
+        .one_hot(&index, num_classes)
+        .expect("metal one_hot must succeed on Metal-equipped test runner");
+
+    assert_eq!(cpu_out.shape(), metal_out.shape());
+    for (a, b) in cpu_out
+        .as_slice()
+        .expect("contiguous")
+        .iter()
+        .zip(metal_out.as_slice().expect("contiguous").iter())
+    {
+        assert_eq!(a.to_bits(), b.to_bits(), "one_hot: CPU/Metal bit 不一致");
+    }
+}
+
+#[test]
+#[ignore = "Apple Silicon 実機（Metal）が必要"]
+fn one_hot_parity_1d() {
+    assert_one_hot_parity(&[4], 3, 5001);
+}
+
+#[test]
+#[ignore = "Apple Silicon 実機（Metal）が必要"]
+fn one_hot_parity_2d() {
+    assert_one_hot_parity(&[2, 3], 5, 5002);
+}
+
+#[test]
+#[ignore = "Apple Silicon 実機（Metal）が必要"]
+fn one_hot_parity_3d() {
+    assert_one_hot_parity(&[2, 2, 2], 4, 5003);
+}
+
+/// `MetalGatherScatter::run_one_hot_f32` のホストモデル（`gather_scatter_
+/// model::one_hot_model`）との bit 一致を実機で直接確認する（`ops.rs`
+/// を経由しない直接呼び出し経路）。
+#[test]
+#[ignore = "Apple Silicon 実機（Metal）が必要"]
+fn one_hot_direct_call_matches_host_model() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gs = MetalGatherScatter::new(&ctx).expect("gather/scatter カーネルのコンパイルに失敗した");
+
+    let index_shape = [2usize, 2usize];
+    let index = i32_index(6001, 4, 3);
+    let num_classes = 3usize;
+
+    let metal_out = gs
+        .run_one_hot_f32(&ctx, &index, &index_shape, num_classes)
+        .expect("metal one_hot must succeed on Metal-equipped test runner");
+    let model_out = fandhe_ai_backend_metal::gather_scatter_model::one_hot_model(
+        &index,
+        &index_shape,
+        num_classes,
+    )
+    .expect("host model must succeed");
+
+    assert_eq!(metal_out.len(), model_out.len());
+    for (a, b) in metal_out.iter().zip(model_out.iter()) {
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "one_hot: Metal/host model bit 不一致"
+        );
+    }
+}
+
+/// 範囲外クラス id は `BackendError::ShapeMismatch(ShapeError::
+/// IndexOutOfRange)` を返す（CPU と同一 variant・フィールド。`gather`／
+/// `scatter` の `gather_scatter_error_paths_reach_native_kernel` と同型
+/// の検証）。
+#[test]
+#[ignore = "Apple Silicon 実機（Metal）が必要"]
+fn one_hot_error_path_reaches_native_kernel() {
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+
+    let bad_index = Tensor::<i32>::new(vec![0, 9, 2, 1], &[2, 2]).expect("valid tensor");
+    let cpu_err = match cpu
+        .one_hot(&bad_index, 3)
+        .expect_err("cpu must reject out-of-range class id")
+    {
+        BackendError::ShapeMismatch(inner) => inner,
+        other => panic!("expected ShapeMismatch, got {other}"),
+    };
+    let metal_err = match metal
+        .one_hot(&bad_index, 3)
+        .expect_err("metal must reject out-of-range class id")
+    {
+        BackendError::ShapeMismatch(inner) => inner,
+        other => panic!("expected ShapeMismatch, got {other}"),
+    };
+    assert_eq!(
+        cpu_err, metal_err,
+        "CPU と Metal は同一の IndexOutOfRange を返す契約"
+    );
+    assert!(matches!(cpu_err, ShapeError::IndexOutOfRange { .. }));
+}

@@ -1921,6 +1921,162 @@ fn pad_element_count_overflow_is_rejected() {
         AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)
     ));
 }
+// --- one_hot（非微分演算。イシュー #1755） ---
+
+/// ①forward 解析値: index `[[0,2],[1,1]]`・`num_classes=3` →
+/// shape `[2,2,3]` の期待どおりの one-hot 行列。
+#[test]
+fn one_hot_forward_matches_expected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0, 2.0, 1.0, 1.0], &[2, 2]));
+    let out = x.one_hot(3).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[2, 2, 3]);
+    assert_eq!(
+        dense_vec(&out.to_tensor()),
+        vec![
+            1.0, 0.0, 0.0, // 0
+            0.0, 0.0, 1.0, // 2
+            0.0, 1.0, 0.0, // 1
+            0.0, 1.0, 0.0, // 1
+        ]
+    );
+}
+
+/// ②`one_hot` のみに流れる葉の勾配が `Some(全ゼロ)`（非微分演算の
+/// 明示ゼロ勾配契約。`Op::OneHot` doc 参照）。
+#[test]
+fn one_hot_only_leaf_gradient_is_explicit_zero() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0, 1.0, 2.0], &[3]));
+    let out = x.one_hot(3).unwrap();
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("勾配は明示ゼロとして流れる");
+    assert_eq!(dense_vec(dx), vec![0.0, 0.0, 0.0]);
+}
+
+/// ③`x` を `one_hot` と `mul` の両方へ流したとき、`one_hot` 経路の
+/// 寄与がゼロのため勾配が `mul` 単独の勾配と bit 同一になる。
+#[test]
+fn one_hot_contributes_zero_gradient_alongside_mul() {
+    let x0 = t(vec![0.0, 1.0, 2.0], &[3]);
+
+    // mul 単独: loss = sum(x * x) → dx = 2x
+    let tape_mul_only = Tape::new_with_ops(common::naive_ops());
+    let x_mul_only = tape_mul_only.var(&x0);
+    let y_only = x_mul_only.mul(&x_mul_only).unwrap();
+    let loss_only = y_only.sum(None).unwrap();
+    let grads_only = tape_mul_only.backward(&loss_only).unwrap();
+    let dx_only = grads_only
+        .get(&x_mul_only)
+        .unwrap()
+        .expect("mul 単独でも loss に到達する")
+        .clone();
+
+    // mul + one_hot 併用: loss = sum(x * x) + sum(one_hot(x, 3))
+    let tape_combined = Tape::new_with_ops(common::naive_ops());
+    let x_combined = tape_combined.var(&x0);
+    let y = x_combined.mul(&x_combined).unwrap();
+    let oh = x_combined.one_hot(3).unwrap();
+    let loss = y.sum(None).unwrap().add(&oh.sum(None).unwrap()).unwrap();
+    let grads = tape_combined.backward(&loss).unwrap();
+    let dx = grads
+        .get(&x_combined)
+        .unwrap()
+        .expect("併用時も loss に到達する");
+
+    assert_eq!(dense_vec(dx), dense_vec(&dx_only));
+}
+
+/// ④エラー経路: 負のクラス id は `AutodiffError::InvalidArgument`。
+#[test]
+fn one_hot_negative_index_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![-1.0], &[1]));
+    let err = x.one_hot(3).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// ⑤エラー経路: `num_classes` 以上のクラス id は
+/// `AutodiffError::InvalidArgument`。
+#[test]
+fn one_hot_index_out_of_range_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3.0], &[1]));
+    let err = x.one_hot(3).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// ⑥エラー経路: 非整数値（`fract() != 0.0`）は
+/// `AutodiffError::InvalidArgument`。
+#[test]
+fn one_hot_non_integer_value_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.5], &[1]));
+    let err = x.one_hot(3).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// ⑦エラー経路: 非有限値（`NaN`）は `AutodiffError::InvalidArgument`。
+#[test]
+fn one_hot_non_finite_value_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![f32::NAN], &[1]));
+    let err = x.one_hot(3).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// ⑧エラー経路: `num_classes == 0` は `AutodiffError::InvalidArgument`
+/// （`Var::one_hot` 専用の早期検査。`one_hot_out_shape` 自体が返す
+/// `ShapeError::IndexOutOfRange` より先に弾く設計）。
+#[test]
+fn one_hot_num_classes_zero_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0], &[1]));
+    let err = x.one_hot(0).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// ⑨空 index（`[0]`）は空出力（`[0, 3]`）を返す。
+#[test]
+fn one_hot_empty_index_returns_empty_output() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(Vec::new(), &[0]));
+    let out = x.one_hot(3).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[0, 3]);
+}
+
+/// ⑩エラー経路（codex-review P2 是正。イシュー #1755）: `i32::MAX`
+/// を超えるクラス id は `[0, num_classes)` の範囲検査（`usize` 同士の
+/// 比較）自体は通過しうる（`num_classes` も `i32::MAX` を超える場合）
+/// が、`index` テンソルの要素型 `i32` へ収まらないため `v as i32` の
+/// saturating キャストで値が破壊される前に `AutodiffError::
+/// InvalidArgument` として拒否されることを確認する。
+#[test]
+fn one_hot_class_id_exceeding_i32_max_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![3_500_000_000.0], &[1]));
+    let err = x.one_hot(4_000_000_000).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// ⑪エラー経路（境界値回帰。codex-review P2／Cursor Bugbot 再指摘。
+/// イシュー #1755 PR #1827）: `v == 2_147_483_648.0`（2^31。
+/// `i32::MAX + 1`）は f32 として正確に表現できる値であり、`i32::MAX
+/// as f32` が同じ `2_147_483_648.0` へ丸め上がるため、`v > i32::MAX
+/// as f32` という f32 のままの比較では等号非成立で検査を素通りして
+/// しまう（是正前は `v as i32` が `i32::MAX` へ saturating キャスト
+/// され誤ったクラスをエンコードしていた）。`f64` 昇格後の比較
+/// （`v as f64 > i32::MAX as f64`）であれば `2_147_483_648.0 >
+/// 2_147_483_647.0` が正しく成立し拒否されることを確認する。
+#[test]
+fn one_hot_class_id_at_i32_max_plus_one_boundary_is_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![2_147_483_648.0], &[1]));
+    let err = x.one_hot(3_000_000_000).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
 // --- cumsum／cumprod（イシュー #1731） ---
 
 /// ①forward: `cumsum` が各軸で累積和を返す（2 次元テンソルの両軸で

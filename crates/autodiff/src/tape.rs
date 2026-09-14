@@ -696,6 +696,24 @@ pub(crate) enum Op {
         input: NodeId,
         pads: Vec<(usize, usize)>,
     },
+    /// `Var::one_hot`（`torch.nn.functional.one_hot`／`tf.one_hot`
+    /// 相当。**非微分演算**。イシュー #1755）。`input` は整数クラス id
+    /// を f32 値として保持する追跡 `Var`（`Op::Gather`／`Sort`／`Topk`
+    /// の `index` と異なり、本 variant は non-tracked `Tensor<i32>`
+    /// payload を持たない——値域検査済みの整数値は forward
+    /// （`Var::one_hot`）で `Tensor<i32>` へ変換して即座に
+    /// `BackendOps::one_hot`／ホスト参照実装（`eval::one_hot`）へ渡し、
+    /// テープには残さない）。`num_classes` は出力 shape の末尾軸
+    /// （`nodes[id].shape` から導出可能）へ焼き込み済みのため保持しない
+    /// （`Op::Sort`／`Op::Topk` の `k`／`largest` 非保持方針と同型）。
+    /// `BackendOps::one_hot` に対応メソッドがあるため非融合対象
+    /// （`push_eager` で常に実体化）。
+    ///
+    /// VJP（`grad.rs`）: `d_input = zeros_like(input)`（**明示ゼロ**。
+    /// クラス id という離散値から生成される 0/1 行列は入力に対し
+    /// 微分不能なため、寄与なし〈`vec![]`〉ではなく「ゼロ勾配が流れる」
+    /// ことを `Gradients::get` で観測可能にする）。
+    OneHot { input: NodeId },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
@@ -1035,6 +1053,12 @@ impl Op {
             // 実体化演算で、`recompute_value` に再計算経路を持たない
             // ため解放しない。
             Op::Pad { .. } => false,
+            // `Op::OneHot`（イシュー #1755）は `Op::Gather`／`Sort` と
+            // 同じく eager 実体化演算で `recompute_value` に再計算経路
+            // を持たないため解放しない（非微分演算であることとは独立の
+            // 判断——checkpoint 解放の可否は「再計算できるか」のみで
+            // 決まる）。
+            Op::OneHot { .. } => false,
         }
     }
 
@@ -1096,6 +1120,7 @@ impl Op {
             }
             Op::Sort { input, .. } | Op::Topk { input, .. } => f(*input),
             Op::Pad { input, .. } => f(*input),
+            Op::OneHot { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);
                 f(*target);
