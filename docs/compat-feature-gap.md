@@ -102,6 +102,7 @@ jagged 2-D 入力は事前検証で拒否。`crates/facade/src/compat/array.rs:9
 | `Sgd`/`SgdConfig`（momentum・dampening・weight_decay・nesterov） | `crates/autodiff/src/optim/sgd.rs:32-224` |
 | `AdamW`/`AdamWConfig` | `crates/autodiff/src/nn/optim/adamw.rs:23-160` |
 | `clip_grad_norm`/`global_grad_norm`/`ClipGradResult` | `crates/autodiff/src/nn/optim/clip.rs` |
+| `clip_grad_value`（#1753・親 #1631。要素ごと `[-clip_value, clip_value]` クランプ） | `crates/autodiff/src/nn/optim/clip.rs` |
 | `ConstantLr`/`StepLr`/`LrScheduler` | `crates/autodiff/src/nn/optim/lr_scheduler.rs` |
 
 ### 1.5 `Var` の演算メソッド一覧（`crates/autodiff/src/var.rs`）
@@ -1315,3 +1316,23 @@ AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「�
 - 本イシューでは `Op`／`BackendOps`／`Var`／facade のコード実装を行わず、格上げ条件（a〜e）の充足状況の棚卸しと再開条件を `docs/backend-int8-quantization-decision.md` として記録した（#1628・#1652・#1775 と同型の段階 0）。格上げ条件のうち (a)（REQ-2 複合判定の改定）は実質充足と読めるが、(b)〜(e)（実機 MMA プローブ・Transformer 複合 WL ベースライン・量子化専用許容基準・依存追加なし設計の実装確認）は未達のまま（同 doc §2.1）。
 - issue 上の承認コメント（`unsafe asm!`〈SME〉・`BackendOps` trait 拡張・facade 公開面拡張の技術的許可）は実装着手前の技術的許可事項に限られ、spec 側の除外事項ゲート自体を解除する文言ではないと整理した（同 doc §0.1）。
 - facade 新規公開面なし（コード変更を伴わないため）。実装着手は本追補のスコープ外のまま引き続き #1627 として open・blocked で追跡する。
+
+## #1753 の追補（親 #1631）
+
+`clip_grad_value`（PyTorch `torch.nn.utils.clip_grad_value_` 相当。各
+勾配要素を独立に `[-clip_value, clip_value]` へクランプする value 方式
+gradient clipping）を実装済み化した。`fandhe_ai_autodiff::nn::optim::
+clip::clip_grad_value`（既存 `clip_grad_norm` と同型の純関数。
+`Gradients`／`Var` に非依存）・facade 到達経路は `crates/facade/src/
+optim.rs` への `pub use` 1 行追加（`fandhe_ai::optim::clip_grad_value`）
+のみで、新規 `Op`／`BackendOps`／VJP は追加していない（勾配マテリアラ
+イズ後のホスト側後処理のため）。
+
+`clip_grad_norm`（global L2 norm 方式）と異なりテンソル間の相関を見ず
+各要素を独立にクランプするためスケーリングを伴わず、範囲内の要素は
+bit 同一のまま返る。非有限（NaN／±Inf）の `clip_value` および勾配要素
+はいずれも `AutodiffError::InvalidArgument` で拒否する fail-closed 契約
+（`f32::clamp` の NaN 境界 panic を避けるため `max`/`min` 合成で実装し、
+クランプ前に全要素の有限性を検査して NaN/Inf の静かな正規化による
+隠蔽を防ぐ）。3 バックエンド専用カーネルは対象外（ホスト
+`Tensor<f32>` のみを操作するため）。
