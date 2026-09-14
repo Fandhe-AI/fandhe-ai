@@ -134,10 +134,12 @@ scalar 参照実装を上回るリスクを事前に想定していたが（本�
   1.323×・reuse 1.109×。この結果は #1215 単体の ADOPT 根拠であり、
   #1211 自体の Metal 寄与を示すものではない）
 - **CUDA**: 本セッションには CUDA 実機がないため未実測。#1214 で CUDA
-  GEMM の NT/TN 転置入口自体の実装・GPU 非依存テストは完了したが、同
-  セッションにも CUDA 実機がなく GB10 実測は未実施のまま
-  `docs/perf/cuda-gemm-vjp-transposed-entry.md` に記入欄を残した
-  （実施は別途の DGX Spark GB10 セッション）
+  GEMM の NT/TN 転置入口自体の実装・GPU 非依存テストは完了。補助 A/B・
+  parity は #1574（低レイヤー診断・2026-09-12・GB10 実機）で診断系列
+  として実測済み（8/8 形状 ≥1.0 倍・parity 5/5 pass）だが、train
+  fresh/reuse A/B は #1590 でスキャフォールド整備のみ完了し実測は
+  未実施のまま `docs/perf/cuda-gemm-vjp-transposed-entry.md` §3.3 に
+  記入欄を残した（実施は別途の DGX Spark GB10 セッション）
 
 ## 7. 後続イシューへの引き継ぎ
 
@@ -148,8 +150,9 @@ scalar 参照実装を上回るリスクを事前に想定していたが（本�
   zero-copy-decision.md` §4.2 追補）
 - #1214: CUDA GEMM の NT/TN 転置入口 → 実装・GPU 非依存テストは完了
   （`docs/perf/cuda-gemm-vjp-transposed-entry.md`・`docs/matmul-vjp-
-  zero-copy-decision.md` §4.3 追補）。GB10 実機実測・本変更の CUDA
-  実測は同 doc §3〜§4 に記入欄を残したまま未実施
+  zero-copy-decision.md` §4.3 追補）。parity・補助 A/B は #1574 で診断
+  系列として実測済み。train fresh/reuse A/B は #1590 でスキャフォールド
+  整備済みだが実測は同 doc §3.3〜§4 に記入欄を残したまま未実施
 - #1215: Metal GEMM の NT/TN strided 結線 → 完了（`docs/perf/metal-gemm-
   vjp-transposed-entry.md`・`docs/matmul-vjp-zero-copy-decision.md`
   §4.4 追補。M4 Max 実機実測で ADOPT 確定）

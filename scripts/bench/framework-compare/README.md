@@ -1015,6 +1015,44 @@ A/B。`run_ab_resident_grad_cuda.sh`〈#1560〉と同じ「before／after 2 本�
   `docs/perf/infer-chain-single-sync-cuda-ab.md` を参照（本 PR 時点では
   実機到達手段がなく未実測のままスキャフォールドのみ）
 
+### CUDA GEMM VJP NT／TN 転置入口 train A/B（イシュー #1590）
+
+#1214（PR #1226・マージコミット `ab0b77d0`）の train fresh／reuse A/B。
+`run_ab_resident_grad_cuda.sh`〈#1560〉／`run_ab_infer_chain_cuda.sh`
+〈#1689〉の「本ブランチ HEAD への facade path patch」方式は、本ブランチ
+HEAD の `bench-fandhe` ハーネスが #1214 マージ直前の facade に存在しない
+API を呼ぶためビルド不能であり採用しない。代わりに **before（#1214
+マージ直前の main。`82058501`）／after（#1214 マージコミット自身。
+`ab0b77d0`）をそれぞれ丸ごと展開したツリー**を受け取り、各ツリー**自身
+の** `scripts/bench/framework-compare/` で `cargo build` する（ハーネス
+と facade が常に同一ツリー由来のため、`--config 'patch.crates-io.
+fandhe-ai.path="<同一ツリー内の crates/facade>"'` を適用してもバージョン
+不整合が起きない）。
+
+- **`run_ab_vjp_transposed_cuda.sh <label>`**: `AB_BEFORE_TREE`／
+  `AB_AFTER_TREE`（いずれも絶対パス必須・`"` や改行を含まないこと・
+  `crates/facade/Cargo.toml` の `name = "fandhe-ai"` 検証・
+  `scripts/bench/framework-compare/Cargo.toml` 存在検証込み）が指す
+  2 つの**リポジトリ丸ごとのツリー**それぞれの中へ `cd` して `cargo
+  build`／`cargo tree`（path patch はそのツリー自身の `crates/facade`
+  を指す）を実行し、`--task train --device cuda --size 64 --mode
+  {fresh,reuse}` を 5 round・run 単位で起動順を反転しながら交互実行する。
+  **本スクリプト自身（呼び出し元。このリポジトリ）の framework-compare
+  では一切 cargo を実行しない**ため `bench_fandhe_lock_restore.sh` は
+  source しない（各ツリーの `Cargo.lock` はそのツリー内で完結して
+  書き換わり、このリポジトリの承認済みピンには触れない）
+- 判定は `compare_gemm_ab.py --device cuda --task train --threshold 1.00
+  --per-run --modes {fresh,reuse} --require-checksum-exact --phases`
+  を mode ごとに 2 回実行し `compare-train-<label>-{fresh,reuse}.md` を
+  出力する（`run_ab_resident_grad_cuda.sh`／`run_ab_infer_chain_cuda.sh`
+  と異なり **fresh／reuse の両方**を判定対象とする。`matmul_vjp`
+  〈`g @ bᵀ` NT・`aᵀ @ g` TN〉が fresh 経路でも NT／TN 入口へ到達する
+  ため）
+- 実測記録・事前登録判定規則・GB10 実機での実行手順は
+  `docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/README.md`・
+  `docs/perf/cuda-gemm-vjp-transposed-entry.md` §3.3 を参照（本 PR 時点
+  では実機到達手段がなく未実測のままスキャフォールドのみ）
+
 ### `--metal-split-k <on|off>`（イシュー #1545。Metal GEMM split-K opt-in 経路の runtime トグル A/B）
 
 Metal GEMM split-K opt-in 経路（`crates/backend-metal`。イシュー #1516 で
