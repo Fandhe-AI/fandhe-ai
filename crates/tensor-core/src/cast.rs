@@ -343,7 +343,19 @@ impl CastElement for bool {
 /// バイト量が `Vec` のアロケーション上限を超えうるため、`T` 基準で
 /// 改めて要素数積を検査する（`unique.rs` の transpose 済み view 対策
 /// と同種の防御。PR #1828 の教訓）。
+///
+/// これに加え、`x` が非 contiguous view（`broadcast_to` 等）の場合は
+/// [`Tensor::host_slice`] が内部で `contiguous()` を呼び、*宛先* `T`
+/// ではなく *元* dtype（`f32`）基準で `Vec::with_capacity(numel)` を
+/// 確保する（`contiguous()` 自体はバイトサイズ検査を行わない）。
+/// `T` が f32 より小さい型（`bool`）の場合、`T` 基準の検査だけでは
+/// この f32 側確保が `isize::MAX` バイトを超える shape を通して
+/// しまう（`Vec` の capacity overflow panic による DoS。本番経路
+/// panic 禁止規約 `.claude/rules/coding-rust.md` に反する）ため、
+/// f32（元 dtype）基準の検査も併せて行う（Cursor Bugbot 指摘・
+/// PR #1860 是正）。
 pub fn cast_from_f32<T: CastElement>(x: &Tensor<f32>) -> Result<Tensor<T>, ShapeError> {
+    checked_numel_for::<f32>(x.shape())?;
     checked_numel_for::<T>(x.shape())?;
     let slice = x.host_slice();
     let data: Vec<T> = slice.iter().map(|&v| T::from_f32(v)).collect();
@@ -358,7 +370,16 @@ pub fn cast_from_f32<T: CastElement>(x: &Tensor<f32>) -> Result<Tensor<T>, Shape
 /// 行わない（Rust の `bool` 0／1 妥当性不変条件を破らない。
 /// `docs/tensor-core-cast-design.md` の GPU 実装注記〈`u8` 経由
 /// 実体化〉と対になる契約）。
+///
+/// [`cast_from_f32`] と対称に、`x` が非 contiguous view の場合は
+/// [`Tensor::host_slice`] が *元* dtype `T`（宛先の f32 ではない）
+/// 基準で `Vec::with_capacity(numel)` を確保する。`T` が f32 より
+/// 大きい型（`f64`／`i64`）の場合、f32 基準の検査だけではこの
+/// `T` 側確保が `isize::MAX` バイトを超える shape を通してしまう
+/// ため、`T`（元 dtype）基準の検査も併せて行う（Cursor Bugbot
+/// 指摘・PR #1860 是正）。
 pub fn cast_to_f32<T: CastElement>(x: &Tensor<T>) -> Result<Tensor<f32>, ShapeError> {
+    checked_numel_for::<T>(x.shape())?;
     checked_numel_for::<f32>(x.shape())?;
     let slice = x.host_slice();
     let data: Vec<f32> = slice.iter().map(|&v| v.into_f32()).collect();
@@ -583,6 +604,45 @@ mod tests {
             via_method.host_slice().into_owned(),
             via_fn.host_slice().into_owned()
         );
+    }
+
+    // --- 非 contiguous view の元 dtype 側バイトサイズ検査
+    // （Cursor Bugbot 指摘・PR #1860 是正の回帰確認） ---
+
+    /// `cast_from_f32::<bool>` は宛先 `bool`（1 バイト）基準の検査だけ
+    /// では見逃す、非 contiguous な元 `f32`（4 バイト）側の
+    /// `host_slice()` 内部確保（`Vec::with_capacity`）のオーバーフロー
+    /// を型付きエラーとして拒否する（capacity overflow panic による
+    /// DoS を防ぐ。`checked_numel_for::<f32>` が `checked_numel_for::<bool>`
+    /// より先に拒否することを確認する）。
+    #[test]
+    fn cast_from_f32_rejects_source_side_byte_overflow_for_smaller_dest() {
+        // N * 1（bool 側）は isize::MAX を大きく下回るが、
+        // N * 4（f32 側。host_slice() が内部で確保する量）は超える N を選ぶ。
+        let n = (isize::MAX as usize) / 4 + 10;
+        let base = Tensor::<f32>::zeros(&[1]).expect("zeros(&[1]) は常に成功する");
+        let broadcasted = base
+            .broadcast_to(&[n])
+            .expect("stride 0 の broadcast は checked_numel の usize 範囲内で成功する");
+        let err = cast_from_f32::<bool>(&broadcasted).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    /// [`cast_from_f32_rejects_source_side_byte_overflow_for_smaller_dest`]
+    /// と対称に、`cast_to_f32::<i64>` は宛先 `f32`（4 バイト）基準の
+    /// 検査だけでは見逃す、非 contiguous な元 `i64`（8 バイト）側の
+    /// `host_slice()` 内部確保のオーバーフローを拒否する。
+    #[test]
+    fn cast_to_f32_rejects_source_side_byte_overflow_for_smaller_dest() {
+        // N * 4（f32 側）は isize::MAX を下回るが、
+        // N * 8（i64 側。host_slice() が内部で確保する量）は超える N を選ぶ。
+        let n = (isize::MAX as usize) / 8 + 10;
+        let base = Tensor::<i64>::zeros(&[1]).expect("zeros(&[1]) は常に成功する");
+        let broadcasted = base
+            .broadcast_to(&[n])
+            .expect("stride 0 の broadcast は checked_numel の usize 範囲内で成功する");
+        let err = cast_to_f32::<i64>(&broadcasted).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 
     // --- CastOps 既定実装（Unsupported fail-safe） ---
