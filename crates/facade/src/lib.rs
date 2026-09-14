@@ -199,6 +199,15 @@ impl Tape {
         self.0.var(tensor)
     }
 
+    /// 入力テンソルを `requires_grad == false` の葉ノードとして
+    /// テープ上へ登録する（イシュー #1748・PyTorch
+    /// `requires_grad=False` 相当。`fandhe_ai_autodiff::Tape::
+    /// var_no_grad` への委譲。`Var::detach`〈既存 `Var` 再エクスポート
+    /// 経由で到達〉と対になる no_grad 側の入口）。
+    pub fn var_no_grad(&self, tensor: &Tensor<f32>) -> Var<'_> {
+        self.0.var_no_grad(tensor)
+    }
+
     /// `loss` から逆伝播し勾配を計算する（`fandhe_ai_autodiff::Tape::backward`
     /// への委譲）。
     pub fn backward(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError> {

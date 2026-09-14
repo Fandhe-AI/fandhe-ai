@@ -6419,6 +6419,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             lazy_chain_size: 0,
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
+            requires_grad: true,
         }
     }
 
@@ -7969,6 +7970,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
                 lazy_chain_size: 0,
                 recompute: false,
                 recompute_failed: std::cell::Cell::new(false),
+                requires_grad: true,
             };
             vec![
                 leaf_node(x.clone()),
@@ -8574,6 +8576,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             lazy_chain_size: 0,
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
+            requires_grad: true,
         };
         let nodes = vec![node];
         let op = Op::Interpolate {

@@ -1637,3 +1637,11 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する（`cos`／`powf` の libm 差による ULP 揺れを抑える精度方針。bit 同一契約は主張しない）。
 - facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
 - 状態保持型の `ReduceLROnPlateau`・`OneCycleLR` は本 issue の対象外のまま残る（兄弟イシュー #1746／#1747 が担当）。
+
+## 追補（イシュー #1748）
+
+- `Tape::var_no_grad`（追跡なし葉。`requires_grad=false` の `Op::Leaf`）・`Var::detach`（既存 `Var` を追跡なし葉へ変換）を実装済み化。`TapeNode::requires_grad` の前方伝播・`Tape::backward` の起点／蓄積スキップ・`Gradients::get` の型付きエラー（`AutodiffError::GradientTrackingDisabled`）で構成する（設計は `docs/autodiff-nograd-leaf-dinput-skip-decision.md` §5「案 B」）。
+- facade 新規公開面: `Tape::var_no_grad`（薄いラッパー 1 メソッド）のみ。`Var::detach` は既存 `Var` 再エクスポート経由で新規公開面なし。
+- 算術を伴わない機構のため CPU 本番 ops と naive 参照実装の勾配が bit 完全一致。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り。
+- `torch.no_grad()` コンテキスト（演算そのものをテープに載せない）は引き続き `Tensor<f32>` のまま演算する既存の型分離方式（`docs/public-api-design.md` §3.1）が担う。本 issue が追加したのは「テープに載せたノードを勾配経路から外す」機構であり、両者は独立。
+- `retain_graph`（複数回 backward の勾配蓄積契約）は兄弟イシュー #1749 の対象のまま。

@@ -79,6 +79,14 @@ impl Gradients {
         if var.tape_epoch() != self.epoch {
             return Err(AutodiffError::TapeMismatch);
         }
+        // イシュー #1748: 対象ノードが `requires_grad == false`
+        // （`Tape::var_no_grad` の葉・`Var::detach` の葉・それらのみを
+        // 祖先に持つ非葉ノード）なら `Err(GradientTrackingDisabled)`。
+        // 「loss から未到達」（`Ok(None)`。下の分岐）とは型で区別する
+        // ——こちらは「そもそも構造的に勾配を持ちえない」ことを表す。
+        if !var.requires_grad() {
+            return Err(AutodiffError::GradientTrackingDisabled);
+        }
         Ok(self.grads.get(var.node_id().0).and_then(|g| g.as_ref()))
     }
 
@@ -136,6 +144,20 @@ impl Tape {
     ) -> Result<Gradients, AutodiffError> {
         if loss.tape_id() != self.id {
             return Err(AutodiffError::TapeMismatch);
+        }
+        // イシュー #1748: `loss` 自身が `requires_grad == false`
+        // （`Tape::var_no_grad`／`Var::detach` の葉、またはそれらのみを
+        // 祖先に持つノード）なら、逆伝播できる追跡対象の祖先を持たない
+        // ため即座に `Err` とする。`materialize_fallible`（次のブロック。
+        // 未実体化なら実体化が走る）より**前**に検査することで、
+        // 追跡なし loss の拒否のために不要な実体化を走らせない
+        // （`TapeNode::requires_grad` doc 参照）。
+        if !loss.requires_grad() {
+            return Err(AutodiffError::Backward(
+                "loss は勾配追跡対象の祖先を持たない（起点ノードの requires_grad が false。\
+                 var_no_grad／detach の葉のみで構成されている）"
+                    .into(),
+            ));
         }
 
         // `backward` はノードを追加しないため、`n` は事前に確定して
@@ -237,8 +259,24 @@ impl Tape {
                     self.epoch(),
                 )?
             };
-            for (target, contribution) in contributions {
-                accumulate(self.ops(), &mut grads, target, contribution)?;
+            // イシュー #1748: `requires_grad == false` のノードへの寄与は
+            // `accumulate` へ渡さず捨てる（PyTorch が `requires_grad=False`
+            // の葉へ勾配を蓄積しないのと同じ意味論）。`grads[target]` は
+            // `None` のまま残るため、`target` を主ループが処理する反復
+            // （`for id in (0..n).rev()`）では `let Some(upstream) = ..
+            // else { ...; continue; }` に乗って VJP 自体もスキップされ、
+            // checkpoint 帳簿（`release_checkpoints_ending_at`）は既存の
+            // 未到達分岐がそのまま処理する。`nodes` を再借用する
+            // （直前のブロックで `Ref` は既に drop 済みのため二重借用に
+            // ならない）。
+            {
+                let nodes = self.nodes.borrow();
+                for (target, contribution) in contributions {
+                    if !nodes[target.0].requires_grad {
+                        continue;
+                    }
+                    accumulate(self.ops(), &mut grads, target, contribution)?;
+                }
             }
             // activation checkpointing（イシュー #1624）の再解放:
             // 上のブロックで `nodes`（`Ref`）は既に drop 済みのため、
