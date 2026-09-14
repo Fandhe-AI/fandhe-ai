@@ -4,6 +4,7 @@
 //! `amp` は `Tensor<f32>` へ実体化済みの勾配に対する後処理のみを扱う
 //! 純関数・純データ構造の集合（`amp.rs` doc 参照）。新規 `Op`／VJP を
 //! 追加しないため数値微分突合は対象外で、代わりに
+//! 以下を固定する:
 //! - スケール往復（`scale_grads`/`unscale_grads`）の解析的検証
 //! - `scale_loss` → `Tape::backward` → `unscale_grads` の bit 完全一致
 //!   （非スケール backward との比較）
@@ -11,7 +12,6 @@
 //! - 引数検証（fail-closed）
 //! - `GradScaler` のスケール更新契約（backoff／growth）
 //! - 適用順序契約（非有限検出は clip より先に判定する）
-//! を固定する。
 
 mod common;
 
