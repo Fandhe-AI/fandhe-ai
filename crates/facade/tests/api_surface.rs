@@ -26,7 +26,8 @@
 //! 実体は `fandhe_ai_autodiff::nn::optim::adam` モジュール）を期待集合へ
 //! 追加した。イシュー #1743（親 #1610）で RMSprop（`RmsProp`／
 //! `RmsPropConfig`）・Adagrad（`Adagrad`／`AdagradConfig`）を期待集合へ
-//! 追加した。
+//! 追加した。イシュー #1744 で LAMB（`Lamb`／`LambConfig`。実体は
+//! `fandhe_ai_autodiff::nn::optim::lamb` モジュール）を期待集合へ追加した。
 //!
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
 //! （`Cargo.toml`・`src/`）以外は走査しない固定パスのみを対象とし、
@@ -294,6 +295,8 @@ fn optim_module_reexports_exactly_expected_surface() {
         "AdamConfig",
         "AdamW",
         "AdamWConfig",
+        "Lamb",
+        "LambConfig",
         "ClipGradResult",
         "clip_grad_norm",
         "clip_grad_value",
@@ -637,6 +640,22 @@ fn optim_types_are_reachable_via_facade_only() {
     let mut adagrad = fandhe_ai::optim::Adagrad::new(adagrad_config)
         .unwrap_or_else(|e| panic!("test fixture: Adagrad::new が失敗した: {e}"));
     let _ = &mut adagrad;
+
+    // LAMB（イシュー #1744）の facade 到達性固定。既定値ドリフトガード
+    // （`eps=1e-6` は AdamW／Adam の `1e-8` と異なる・`weight_decay=0.0`。
+    // `nn::optim::lamb` モジュール doc 参照）。
+    let lamb_config = fandhe_ai::optim::LambConfig::default();
+    assert_eq!(
+        lamb_config.eps, 1e-6,
+        "test fixture: LambConfig の既定 eps は paper／apex／torch_optimizer 共通の 1e-6"
+    );
+    assert_eq!(
+        lamb_config.weight_decay, 0.0,
+        "test fixture: LambConfig の既定 weight_decay は 0.0"
+    );
+    let mut lamb = fandhe_ai::optim::Lamb::new(lamb_config)
+        .unwrap_or_else(|e| panic!("test fixture: Lamb::new が失敗した: {e}"));
+    let _ = &mut lamb;
 
     let constant_lr = fandhe_ai::optim::ConstantLr::new(0.1)
         .unwrap_or_else(|e| panic!("test fixture: ConstantLr::new が失敗した: {e}"));

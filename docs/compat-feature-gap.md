@@ -1613,7 +1613,18 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - RMSprop の更新則は `torch.optim.rmsprop._single_tensor_rmsprop`（torch 2.14.0+cpu で確認）と同一演算順（`square_avg` 更新 → `centered` 時は `grad_avg` の lerp と分散差 → `sqrt` の後に `eps` 加算 → `momentum>0` 時は momentum buffer 経由の更新、それ以外は直接更新）。Adagrad の更新則は `torch.optim.adagrad._single_tensor_adagrad` と同一演算順（`clr` の逐次計算・`state_sum` 累積・`std` 加算後の除算）。
 - 正しさの検証は VJP・parity テストの字義どおりの適用ができないため、実 PyTorch 2.14.0+cpu 実行値 fixture（`tests/fixtures/{rmsprop,adagrad}-pytorch-reference/`）との統一複合判定（`.claude/rules/coding-rust.md` 既存 tolerance。緩和なし）・閉形式（t=1）一致・決定性（bit 完全一致）で行う（`tests/nn_optim_{rmsprop,adagrad}.rs`）。
 - facade は `fandhe_ai::optim::{RmsProp, RmsPropConfig, Adagrad, AdagradConfig}` の素の再エクスポートのみ（`docs/facade-optimizer-promotion-decision.md` §4 案 A。`crates/facade/src/optim.rs`）。`crate::DeviceParamStore` へは未結線（対応する `BackendOps` メソッドを本 issue では追加していないため非対応）。
-- Adam（coupled L2 weight decay）は #1742・LAMB は #1744 が残対象のまま。
+- Adam（coupled L2 weight decay）は #1742 で実装済み・LAMB は #1744 の追補（次節）で実装済み。
+
+## #1744 の追補（LAMB。coupled trust ratio optimizer）
+
+§2.9 の LAMB 行（「PyTorch 側にも `torch.optim` 直下の対応物なし」）はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（親 #1610）。
+
+- `fandhe_ai_autodiff::nn::optim::lamb`（`Lamb`・`LambConfig`）を追加した（`crates/autodiff/src/nn/optim/lamb.rs`）。You et al., 2019, arXiv:1904.00962 Algorithm 2（bias correction 込み）をそのまま再現し、φ（trust ratio のスケーリング関数）は恒等写像固定（`torch_optimizer.Lamb` の `‖x‖` clamp・apex の `max_grad_norm`／NVLAMB 除外は非採用）。moment（`m`／`v`）更新は `AdamW` と同一の演算列（`step_size = lr/bias_correction1`・`denom = sqrt(v)/sqrt(bias_correction2) + eps`）を使うが、weight decay は paper 定義どおり更新方向 `u` へ coupled で織り込む（`u = r + weight_decay*x`）点が `AdamW`（decoupled 乗算減衰）と異なる。trust ratio はパラメータテンソル（1 スロット＝1 layer）ごとに独立計算し、`step()` へ渡した複数 `(param, grad)` ペア間で norm を合算しない。
+- `norm_x`／`norm_t`（trust ratio の分子・分母）は f64 アキュムレータの逐次和→f64 で `sqrt`→f64 のまま係数を計算し 1 回だけ `f32` へ downcast する（`.claude/rules/coding-rust.md` の勾配長軸縮約 f64 契約に沿う独立実装）。**非有限 norm（NaN／Inf）検出時は `Err(InvalidArgument)` を返す fail-closed 契約**を新設した（`AdamW`／`Adam` が非有限勾配を黙って伝播させるのとは意図的に異なる。trust ratio は 1 テンソル全体で共有するスカラー係数のため）。`step()` は検証（状態変更なし）→計算（状態変更なし。ここで非有限を検出）→コミット（ここで初めて状態を変更する）の 3 フェーズ構成。
+- PyTorch `torch.optim` 本体・実行環境の `torch_optimizer` いずれにも LAMB 実装がないため、新規 PyTorch 参照値 fixture は追加しない。代わりに (1) テストファイル内に独立に書いた f64 参照実装（paper Algorithm 2 そのまま。本体の「lr を先に折り込んだ」実装形とは異なる演算列）との統一複合判定突合、(2) 解析的恒等式 3 件（zero-grad かつ `wd>0` での結果が `wd` 非依存・`wd=0` での更新量が独立算出した trust ratio 込みで `AdamW(wd=0)` の更新量と一致・`wd=0` での 2 の冪スケール不変性は bit 完全一致）、(3) 再現性（run-to-run bit 同一）・MLP 収束テストの 3 段で受け入れを担保する（`crates/autodiff/tests/nn_optim_lamb.rs`）。
+- facade（`crates/facade/src/optim.rs`）は `pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};` の 1 行のみ追加（純再エクスポート）。`crates/facade/tests/api_surface.rs` の期待集合・到達性検査（既定値 `eps=1e-6`・`weight_decay=0.0` のドリフトガード込み）、`crates/facade/tests/optim_train_loop.rs` の facade-only 学習ループ収束テスト（`lamb_with_clip_converges_via_facade_only`。trust ratio により実効ステップが縮むため `AdamW` 用 lr のままでは収束せず、lr=0.02 へ調整）も追加済み。
+- **`DeviceParamStore` 非対応**: `crate::optim::device_store::DeviceParamStore::step` は `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、`Lamb` は結線されていない（`AdamW`／`Adam` も同様）。LAMB のデバイス常駐化にはパラメータテンソルごとの L2 norm reduction カーネルと trust ratio 適用カーネル（3 バックエンド）が必要で本イシューの対象外。
+- 新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は一切追加していない（`AdamW`／`Adam` と同じく `Tape`／`Var`／`BackendOps` に依存しない値型・純関数）。
 
 ## 追補（イシュー #1745）
 
