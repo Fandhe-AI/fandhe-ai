@@ -883,3 +883,18 @@ typed_bf16.rs`。イシュー #1706・`docs/backend-dtype-dispatch-design.md`
 - facade 公開面への新規追加はない。`Var`／`Tape`／VJP は引き続き未接続で、
   本表の「未実装（欠落側）」列の評価（`Var` レベルの mixed precision）は
   変わらない。
+
+## #1710 の追補
+
+Var 演算欠落リストの `sub`／`div`／`pow`／`sqrt` 行（スナップショット本文
+は不変）が実装済みになった。`Var::sub`／`div`／`pow`（`ScalarBinaryOp`。
+`add`／`mul` と同じ NumPy 互換ブロードキャスト）・`Var::sqrt`
+（`ScalarUnaryOp::Sqrt`）は #1634 の汎用 dispatch 機構（`crates/autodiff/
+src/var.rs::scalar_unary`／`scalar_binary`）への薄い委譲として実装され、
+CPU／CUDA／Metal 3 バックエンドの `BackendOps::scalar_unary`／
+`scalar_binary`（既に #1700・#1707 等で実装済み）経由で到達する
+（`docs/scalar-op-dispatch-design.md`）。facade 新規公開面はない（既存
+`Var` 再エクスポート経由）。CUDA／Metal 実機での facade parity 実測は
+本エージェント実行環境に実機がないため未実施のまま申し送る。
+`pow_scalar`（スカラー指数版）・`log`／三角関数／`abs`／`neg`（#1711）・
+`clamp`／比較演算（#1712）は対象外のまま。
