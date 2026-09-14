@@ -992,6 +992,78 @@ pub trait BackendOps {
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError>;
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError>;
 
+    /// `dim` 軸に沿った縮約最小値（`torch.min(dim)` 相当。イシュー
+    /// #1720）。`dim: None` は全軸縮約（スカラー）。[`Self::max`] と
+    /// 対称の意味論だが、`max` が必須メソッドなのに対し本メソッドは
+    /// **デフォルトメソッド**として非破壊拡張する（`fandhe-ai-tensor-core`
+    /// は crates.io 公開済みのため、既存の全 `BackendOps` 実装者
+    /// 〈テスト用モック等〉を壊さない `sort`／`topk` と同じ拡張方針。
+    /// 詳細は下記「デフォルト実装」節）。
+    ///
+    /// **数値契約**:
+    /// - **NaN 非伝播**: `f32::min`（`fminf` と同じ）を用いる。
+    ///   `+0.0`／`-0.0` は `partial_cmp` が `Equal` とみなすため実装
+    ///   依存の一方が採用される。
+    /// - **空縮約**: 縮約対象の要素数が 0 の場合は単位元を持たないため
+    ///   エラーとする（`Self::max` の CPU 参照実装
+    ///   〈`backend-cpu::reduction::max`〉と同じ `EmptyReduction`
+    ///   方針。実装側は [`crate::ops_shape::reduce_out_shape`] で
+    ///   `dim` を再検査したうえで空縮約を検出すること）。
+    fn min(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "min: default fail-safe (no min reduction kernel available for this backend; \
+             fall back to fandhe_ai_autodiff::eval::min)"
+                .into(),
+        ))
+    }
+
+    /// `dim` 軸に沿った最大値の添字（`torch.argmax(dim)` 相当。イシュー
+    /// #1720）。戻り値は `Tensor<i32>`（[`Self::sort`] の `index` と同型）
+    /// で shape は [`crate::ops_shape::reduce_out_shape`]（`min`／`max`
+    /// と同じ縮約 shape）。**非微分演算**（テープにノードを追加しない。
+    /// `Var::argsort` と同じ扱い）。
+    ///
+    /// **走査契約**（実装側が必ず守ること）:
+    /// 1. **タイ**: 同値（`==`）の場合は `dim` 軸上の**最初の**添字を
+    ///    返す（`v > best` のときのみ更新する昇順走査）。
+    /// 2. **NaN**: [`Self::max`] の NaN 非伝播規約と整合させる——
+    ///    `best` が NaN なら次の非 NaN 値で置換し、`v` が NaN なら
+    ///    無視する（全要素 NaN の場合は添字 0）。
+    /// 3. **決定性**: 逐次走査（縮約軸内は逐次・出力要素側のみ並列可）
+    ///    で run-to-run bit 同一の添字を返す。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::sort`]／[`Self::topk`] と同じ非破壊拡張・fail-safe。
+    /// 既定は [`BackendError::Unsupported`] を返し、`Var::argmax` は
+    /// `Unsupported` のときのみホスト参照実装（`fandhe_ai_autodiff::
+    /// eval::argmax`）へフォールバックする（それ以外のエラーは伝播
+    /// する。判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+    /// 実装側でも `dim` を [`crate::ops_shape::reduce_out_shape`] で
+    /// 再検査し、範囲外は [`BackendError::ShapeMismatch`] を返すこと
+    /// （fail-closed）。空縮約は [`Self::min`] と同じくエラーとする。
+    fn argmax(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "argmax: default fail-safe (no argmax kernel available for this backend; fall \
+             back to fandhe_ai_autodiff::eval::argmax)"
+                .into(),
+        ))
+    }
+
+    /// `dim` 軸に沿った最小値の添字（`torch.argmin(dim)` 相当。イシュー
+    /// #1720）。[`Self::argmax`] の最小値版で、走査契約・空縮約の扱い
+    /// （エラー）・デフォルト実装方針（既定 `Unsupported`・`Var::argmin`
+    /// が `fandhe_ai_autodiff::eval::argmin` へフォールバック）は
+    /// [`Self::argmax`] と対称（NaN 規約は [`Self::min`] と整合させ、
+    /// `v < best` のときのみ更新する）。
+    fn argmin(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "argmin: default fail-safe (no argmin kernel available for this backend; fall \
+             back to fandhe_ai_autodiff::eval::argmin)"
+                .into(),
+        ))
+    }
+
     /// 平均二乗誤差 `reduction(Σ(pred−target)²)` の forward を 1 個の
     /// 融合カーネルで計算する（イシュー #1045・親イシュー #1043）。
     ///
@@ -1403,6 +1475,44 @@ pub trait BackendOps {
     ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
         Err(BackendError::Unsupported(
             "topk: default fail-safe (no fused topk kernel available)".into(),
+        ))
+    }
+
+    /// クラス id 列（整数値の `index`）を one-hot 行列へ展開する
+    /// （`torch.nn.functional.one_hot`／`tf.one_hot` 相当。**非微分演算**。
+    /// イシュー #1755）。出力 shape は `index.shape()` へ末尾軸として
+    /// `num_classes` を付加した形（[`crate::ops_shape::one_hot_out_shape`]
+    /// 参照）で、`out[.., c] = 1.0 if index[..] == c else 0.0`。
+    ///
+    /// `index` の値は `[0, num_classes)` の範囲内であることを呼び出し元
+    /// （`fandhe_ai_autodiff::var::Var::one_hot`）が forward 時点で検査
+    /// 済み（本メソッドは値検査を行わない前提だが、[`Self::gather`] 等と
+    /// 同様に実装側でも独立に値域を再検査し縦深防御とすることが望ましい。
+    /// `.claude/rules/security.md` A08）。
+    ///
+    /// **非微分演算の契約**: `one_hot` は整数クラス id から離散的な
+    /// 0/1 行列を作るため勾配を持たない。`fandhe_ai_autodiff::Op::OneHot`
+    /// の VJP（`crates/autodiff/src/grad.rs::vjp`）は入力へ明示的にゼロ
+    /// 勾配を返す（寄与なしではなく「ゼロ勾配が流れる」ことを
+    /// `Gradients::get` で観測可能にするため）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::gather`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::one_hot` は
+    /// `Unsupported` のときのみホスト参照実装
+    /// （`fandhe_ai_autodiff::eval::one_hot`）へフォールバックする
+    /// （それ以外のエラーは伝播する。判定迂回経路を作らない）。実装側
+    /// でも戻り shape を [`crate::ops_shape::one_hot_out_shape`] で
+    /// 再検査し、不一致は [`BackendError::ShapeMismatch`] を返すこと
+    /// （fail-closed）。
+    fn one_hot(
+        &self,
+        _index: &Tensor<i32>,
+        _num_classes: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "one_hot: default fail-safe (no fused one_hot kernel available)".into(),
         ))
     }
 
@@ -3237,6 +3347,54 @@ mod tests {
         let input = Tensor::new(vec![3.0, 1.0, 2.0, 4.0], &[2, 2]).unwrap();
 
         let result = ops.topk(&input, 1, 1, true);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::min`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1720）。
+    #[test]
+    fn min_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![3.0, 1.0, 2.0, 4.0], &[2, 2]).unwrap();
+
+        let result = ops.min(&input, Some(1));
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::argmax`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1720）。
+    #[test]
+    fn argmax_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![3.0, 1.0, 2.0, 4.0], &[2, 2]).unwrap();
+
+        let result = ops.argmax(&input, Some(1));
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::argmin`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1720）。
+    #[test]
+    fn argmin_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![3.0, 1.0, 2.0, 4.0], &[2, 2]).unwrap();
+
+        let result = ops.argmin(&input, Some(1));
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::one_hot`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1755）。
+    #[test]
+    fn one_hot_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let index = Tensor::<i32>::new(vec![0, 2, 1, 1], &[2, 2]).unwrap();
+
+        let result = ops.one_hot(&index, 3);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

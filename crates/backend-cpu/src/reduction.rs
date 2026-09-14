@@ -95,7 +95,11 @@ pub enum ReduceError {
     /// 失敗をそのまま透過する）。
     Shape(ShapeError),
     /// 縮約対象の要素数が 0（`max`・`mean` は単位元を持たないためエラーとする。
-    /// `op` は失敗した演算名 `"max"`/`"mean"`/`"var"`/`"norm"`）。
+    /// `op` は失敗した演算名 `"max"`/`"mean"`/`"min"`/`"argmax"`/`"argmin"`／`"var"`/`"norm"`。
+    /// `min`／`argmax`／`argmin` はイシュー #1720 で追加）。`argmax`／
+    /// `argmin` の添字が `i32::MAX` を超える場合は
+    /// `Shape(ShapeError::IndexRangeOverflow { .. })`
+    /// （`sort_topk.rs`／`gather_scatter.rs` と同じ契約）を使う。
     EmptyReduction { op: &'static str },
     /// `var` の自由度不足（`n <= correction`。イシュー #1723）。`n` は
     /// 縮約対象の要素数（`dim=Some(axis)` は `shape[axis]`・`dim=None`
@@ -228,6 +232,24 @@ fn max_slice(data: &[f32]) -> Option<f32> {
         .collect::<Vec<f32>>()
         .into_iter()
         .fold(f32::NEG_INFINITY, f32::max);
+    Some(result)
+}
+
+/// [`max_slice`] の最小値版（イシュー #1720）。単位元は
+/// `f32::INFINITY`。**NaN 非伝播**（`f32::min`。`fminf` と同じ）で、
+/// [`max_slice`] の `f32::max` と対称の意味論とする（`autodiff::eval::
+/// min` の意図的複製先——`crate::backend_ops::BackendOps::min` doc
+/// 参照）。
+fn min_slice(data: &[f32]) -> Option<f32> {
+    if data.is_empty() {
+        return None;
+    }
+    let result = data
+        .par_chunks(CHUNK)
+        .map(|chunk| chunk.iter().copied().fold(f32::INFINITY, f32::min))
+        .collect::<Vec<f32>>()
+        .into_iter()
+        .fold(f32::INFINITY, f32::min);
     Some(result)
 }
 
@@ -656,6 +678,197 @@ pub fn max(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, ReduceErr
     Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
 }
 
+/// 軸指定・全縮約いずれにも対応する `min`（イシュー #1720）。[`max`]
+/// と対称だが単位元 `f32::INFINITY`・`f32::min`（NaN 非伝播）を使う。
+/// 縮約対象の要素数が 0 の場合は [`ReduceError::EmptyReduction`] を
+/// 返す（単位元を持たないため。モジュール doc「空縮約の意味論」参照）。
+pub fn min(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, ReduceError> {
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(ReduceError::Shape)?;
+    let data = match dim {
+        None => {
+            let result = match a.as_slice() {
+                Some(slice) => min_slice(slice),
+                None => min_slice(&gather_elements(a)),
+            };
+            match result {
+                Some(v) => vec![v],
+                None => return Err(ReduceError::EmptyReduction { op: "min" }),
+            }
+        }
+        Some(axis) => {
+            let shape = a.shape();
+            let axis_len = shape[axis];
+            let outer = checked_product(&shape[..axis])?;
+            let inner = checked_product(&shape[axis + 1..])?;
+            let total_out = outer
+                .checked_mul(inner)
+                .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            if axis_len == 0 && total_out > 0 {
+                return Err(ReduceError::EmptyReduction { op: "min" });
+            }
+            axis_reduce(a, axis, f32::INFINITY, f32::min)
+        }
+    };
+    Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
+}
+
+/// `dim` 軸に沿った添字を線形走査で求める `argmax`／`argmin` 共通の
+/// 出力要素ごとの畳み込み（イシュー #1720）。[`axis_reduce`] と異なり
+/// 添字（`usize`）を返し、`better(v, best)` が `true` のときのみ更新
+/// する（[`fandhe_ai_tensor_core::BackendOps::argmax`] doc の走査契約
+/// 1〜2 と同型。呼び出し元〈本モジュール〉は決定性契約を保つため
+/// [`axis_reduce`] と同じ出力要素側のみ並列化する構造を踏襲する）。
+fn axis_arg_reduce(
+    a: &Tensor<f32>,
+    axis: usize,
+    better: impl Fn(f32, f32) -> bool + Sync,
+) -> Vec<usize> {
+    let shape = a.shape();
+    let outer_dims = &shape[..axis];
+    let inner_dims = &shape[axis + 1..];
+    let axis_len = shape[axis];
+    let outer: usize = outer_dims.iter().product();
+    let inner: usize = inner_dims.iter().product();
+    let total_out = outer * inner;
+
+    // `axis_reduce` と同じ契約（クロージャは `flat in 0..total_out` の
+    // みで呼ばれ、`inner` によるゼロ除算は発生しない）。
+    let compute = |flat: usize| -> usize {
+        let (o, i) = (flat / inner, flat % inner);
+        let outer_idx = unravel(o, outer_dims);
+        let inner_idx = unravel(i, inner_dims);
+        let mut full_idx = Vec::with_capacity(shape.len());
+        full_idx.extend_from_slice(&outer_idx);
+        full_idx.push(0);
+        full_idx.extend_from_slice(&inner_idx);
+        let mut best_idx = 0usize;
+        let mut best_val = f32::NAN;
+        for k in 0..axis_len {
+            full_idx[axis] = k;
+            let value = a.get(&full_idx);
+            debug_assert!(
+                value.is_some(),
+                "axis_arg_reduce: 走査ロジックのバグにより index {full_idx:?} が範囲外になった"
+            );
+            let v = value.unwrap_or(f32::NAN);
+            if v.is_nan() {
+                continue;
+            }
+            if best_val.is_nan() || better(v, best_val) {
+                best_val = v;
+                best_idx = k;
+            }
+        }
+        best_idx
+    };
+
+    (0..total_out).into_par_iter().map(compute).collect()
+}
+
+/// `data`（全縮約対象。`gather_elements` 済みまたは `as_slice()` の
+/// 借用）から [`axis_arg_reduce`] と同じ走査契約で単一の添字を求める
+/// （`dim: None` の `argmax`／`argmin` が使う。空入力は `None`）。
+fn arg_slice(data: &[f32], better: impl Fn(f32, f32) -> bool) -> Option<usize> {
+    if data.is_empty() {
+        return None;
+    }
+    let mut best_idx = 0usize;
+    let mut best_val = f32::NAN;
+    for (idx, &v) in data.iter().enumerate() {
+        if v.is_nan() {
+            continue;
+        }
+        if best_val.is_nan() || better(v, best_val) {
+            best_val = v;
+            best_idx = idx;
+        }
+    }
+    Some(best_idx)
+}
+
+/// 添字（`Vec<usize>`）を `i32` の `Tensor` へ変換する（`argmax`／
+/// `argmin` 共通。`i32::MAX` を超える添字は `sort_topk.rs`／
+/// `gather_scatter.rs` と同じ契約で
+/// `ShapeError::IndexRangeOverflow` を返す）。
+fn build_index_tensor(
+    indices: Vec<usize>,
+    out_shape: &[usize],
+) -> Result<Tensor<i32>, ReduceError> {
+    let mut out = Vec::with_capacity(indices.len());
+    for idx in indices {
+        out.push(
+            i32::try_from(idx)
+                .map_err(|_| ReduceError::Shape(ShapeError::IndexRangeOverflow { index: idx }))?,
+        );
+    }
+    Tensor::new(out, out_shape).map_err(ReduceError::Shape)
+}
+
+/// 軸指定・全縮約いずれにも対応する `argmax`（イシュー #1720）。
+/// 縮約対象の要素数が 0 の場合は [`ReduceError::EmptyReduction`] を
+/// 返す（`min`／`max` と同じ方針。単位元を持たないため）。
+pub fn argmax(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, ReduceError> {
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(ReduceError::Shape)?;
+    let indices = match dim {
+        None => {
+            let result = match a.as_slice() {
+                Some(slice) => arg_slice(slice, |v, best| v > best),
+                None => arg_slice(&gather_elements(a), |v, best| v > best),
+            };
+            match result {
+                Some(idx) => vec![idx],
+                None => return Err(ReduceError::EmptyReduction { op: "argmax" }),
+            }
+        }
+        Some(axis) => {
+            let shape = a.shape();
+            let axis_len = shape[axis];
+            let outer = checked_product(&shape[..axis])?;
+            let inner = checked_product(&shape[axis + 1..])?;
+            let total_out = outer
+                .checked_mul(inner)
+                .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            if axis_len == 0 && total_out > 0 {
+                return Err(ReduceError::EmptyReduction { op: "argmax" });
+            }
+            axis_arg_reduce(a, axis, |v, best| v > best)
+        }
+    };
+    build_index_tensor(indices, &out_shape)
+}
+
+/// [`argmax`] の最小値版（イシュー #1720）。走査・空縮約・オーバー
+/// フロー契約は [`argmax`] と対称（`v < best` のときのみ更新）。
+pub fn argmin(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, ReduceError> {
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(ReduceError::Shape)?;
+    let indices = match dim {
+        None => {
+            let result = match a.as_slice() {
+                Some(slice) => arg_slice(slice, |v, best| v < best),
+                None => arg_slice(&gather_elements(a), |v, best| v < best),
+            };
+            match result {
+                Some(idx) => vec![idx],
+                None => return Err(ReduceError::EmptyReduction { op: "argmin" }),
+            }
+        }
+        Some(axis) => {
+            let shape = a.shape();
+            let axis_len = shape[axis];
+            let outer = checked_product(&shape[..axis])?;
+            let inner = checked_product(&shape[axis + 1..])?;
+            let total_out = outer
+                .checked_mul(inner)
+                .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            if axis_len == 0 && total_out > 0 {
+                return Err(ReduceError::EmptyReduction { op: "argmin" });
+            }
+            axis_arg_reduce(a, axis, |v, best| v < best)
+        }
+    };
+    build_index_tensor(indices, &out_shape)
+}
+
 /// 軸指定・全縮約いずれにも対応する `mean`。`sum` の結果を要素数で **1 回
 /// だけ除算**する（丸め 1 回で決定性を維持する契約）。
 ///
@@ -734,6 +947,126 @@ mod tests {
         let out = max(&t, Some(1)).unwrap();
         assert_eq!(out.get(&[0]).unwrap(), 5.0);
         assert_eq!(out.get(&[1]).unwrap(), 9.0);
+    }
+
+    // --- min／argmax／argmin（イシュー #1720） ---
+
+    #[test]
+    fn min_axis_matches_expected() {
+        let t = Tensor::<f32>::new(vec![1.0, 5.0, 3.0, 9.0, 2.0, 0.0], &[2, 3]).unwrap();
+        let out = min(&t, Some(1)).unwrap();
+        assert_eq!(out.get(&[0]).unwrap(), 1.0);
+        assert_eq!(out.get(&[1]).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn min_full_matches_naive() {
+        let t = Tensor::<f32>::new(vec![3.0, -1.0, 5.0, -7.0, 2.0], &[5]).unwrap();
+        let out = min(&t, None).unwrap();
+        assert_eq!(out.get(&[]).unwrap(), -7.0);
+    }
+
+    #[test]
+    fn min_empty_is_error() {
+        let t = Tensor::<f32>::zeros(&[0]).unwrap();
+        assert!(matches!(
+            min(&t, None).unwrap_err(),
+            ReduceError::EmptyReduction { op: "min" }
+        ));
+    }
+
+    #[test]
+    fn min_nan_is_non_propagating() {
+        // `f32::min` は NaN 非伝播（`max` の `f32::max` と同じ流儀。
+        // `reduction` モジュール doc・`BackendOps::min` doc の契約）。
+        let t = Tensor::<f32>::new(vec![f32::NAN, 3.0, -1.0], &[3]).unwrap();
+        let out = min(&t, None).unwrap();
+        assert_eq!(out.get(&[]).unwrap(), -1.0);
+    }
+
+    #[test]
+    fn argmax_and_argmin_full_and_axis_match_expected() {
+        let t = Tensor::<f32>::new(vec![1.0, 5.0, 3.0, 9.0, 2.0, 0.0], &[2, 3]).unwrap();
+
+        let amax_all = argmax(&t, None).unwrap();
+        assert_eq!(amax_all.get(&[]).unwrap(), 3); // 9.0 at flat index 3
+        let amin_all = argmin(&t, None).unwrap();
+        assert_eq!(amin_all.get(&[]).unwrap(), 5); // 0.0 at flat index 5
+
+        let amax_axis1 = argmax(&t, Some(1)).unwrap();
+        assert_eq!(amax_axis1.get(&[0]).unwrap(), 1); // row0 max=5.0 at col1
+        assert_eq!(amax_axis1.get(&[1]).unwrap(), 0); // row1 max=9.0 at col0
+        let amin_axis1 = argmin(&t, Some(1)).unwrap();
+        assert_eq!(amin_axis1.get(&[0]).unwrap(), 0); // row0 min=1.0 at col0
+        assert_eq!(amin_axis1.get(&[1]).unwrap(), 2); // row1 min=0.0 at col2
+    }
+
+    #[test]
+    fn argmax_tie_returns_first_index() {
+        let t = Tensor::<f32>::new(vec![1.0, 5.0, 3.0, 5.0], &[4]).unwrap();
+        let amax = argmax(&t, None).unwrap();
+        assert_eq!(amax.get(&[]).unwrap(), 1, "同値タイは最初の添字を返す");
+    }
+
+    #[test]
+    fn argmin_tie_returns_first_index() {
+        let t = Tensor::<f32>::new(vec![3.0, -2.0, 1.0, -2.0], &[4]).unwrap();
+        let amin = argmin(&t, None).unwrap();
+        assert_eq!(amin.get(&[]).unwrap(), 1, "同値タイは最初の添字を返す");
+    }
+
+    #[test]
+    fn argmax_ignores_nan_and_picks_valid_max() {
+        // 先頭 NaN は無視し、後続の非 NaN 値のうち最大を選ぶ
+        // （`BackendOps::argmax` doc の NaN 規約）。
+        let t = Tensor::<f32>::new(vec![f32::NAN, 2.0, f32::NAN, 7.0, 1.0], &[5]).unwrap();
+        let amax = argmax(&t, None).unwrap();
+        assert_eq!(amax.get(&[]).unwrap(), 3);
+    }
+
+    #[test]
+    fn argmax_all_nan_returns_index_zero() {
+        let t = Tensor::<f32>::new(vec![f32::NAN, f32::NAN, f32::NAN], &[3]).unwrap();
+        let amax = argmax(&t, None).unwrap();
+        assert_eq!(amax.get(&[]).unwrap(), 0);
+    }
+
+    #[test]
+    fn argmax_and_argmin_empty_are_errors() {
+        let t = Tensor::<f32>::zeros(&[0]).unwrap();
+        assert!(matches!(
+            argmax(&t, None).unwrap_err(),
+            ReduceError::EmptyReduction { op: "argmax" }
+        ));
+        assert!(matches!(
+            argmin(&t, None).unwrap_err(),
+            ReduceError::EmptyReduction { op: "argmin" }
+        ));
+    }
+
+    #[test]
+    fn min_chunk_boundary_deterministic() {
+        let single = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("failed to build single-thread rayon pool for determinism test");
+        let multi = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("failed to build 4-thread rayon pool for determinism test");
+
+        for n in [CHUNK - 1, CHUNK, CHUNK + 1, CHUNK * 2 + 1] {
+            let data: Vec<f32> = (0..n).map(|i| ((i % 97) as f32) * 0.5 - 3.0).collect();
+            let t = Tensor::<f32>::new(data, &[n]).unwrap();
+
+            let min_a = single.install(|| min(&t, None).unwrap());
+            let min_b = multi.install(|| min(&t, None).unwrap());
+            assert_eq!(
+                min_a.get(&[]).unwrap().to_bits(),
+                min_b.get(&[]).unwrap().to_bits(),
+                "min が n={n} でスレッド数間に不一致"
+            );
+        }
     }
 
     #[test]
