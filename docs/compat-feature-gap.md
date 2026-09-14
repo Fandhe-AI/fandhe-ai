@@ -850,3 +850,11 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 - #1775（ONNX export の facade 公開）・#1754（safetensors save／load の facade
   再公開）は同じ publish 前提を共有するため blocked のまま close しない
   （`docs/facade-onnx-import-exposure-decision.md` §6.2）。
+
+## #1705 の追補
+
+`float64`／`float16` 行（319〜320 行目）のスナップショット本文は不変のまま、Metal バックエンド限定で以下が確定した（イシュー #1705・`docs/backend-dtype-dispatch-design.md` §14）。
+
+- **`float64`**: Metal は `TypedOps<f64>` を実装せず（accessor `typed_ops_f64()` は既定 `None` のまま）、恒久 `Unsupported` として確定した。MSL に `double` 型が存在せず GEMM 全体を `f64` 精度で動かす手段が構造的にないため（CUDA・CPU のような「実装したうえで `Unsupported` を返す」形ではなく、accessor 自体を `None` のまま維持する capability 不在の明示）
+- **`float16`**: Metal バックエンド限定で `TypedOps<half::f16>` が実装され、`Tensor<f16>` の `gemm`（既存 `MetalGemm::dispatch_f16_auto_unverified` への内部結線）・`add`／`mul`／`relu`／`exp`／`tanh` が Metal 経由で到達可能になった（`crates/backend-metal/src/typed_f16.rs`）。`sum`／`max` は Metal f32 reduction カーネル自体が未実装のため `Unsupported` を継承する（f32 版が実装されれば自動的に有効化される設計）
+- CUDA `TypedOps<f64>`／`TypedOps<f16>`（#1703）・bf16（#1706 未着手）は本イシューでは触れていない。`Var`／`Tape`／VJP・facade 公開面は引き続き未接続で、本表の「未実装（欠落側）」列の評価は変わらない
