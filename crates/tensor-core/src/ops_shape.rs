@@ -491,6 +491,54 @@ pub fn scatter_out_shape(
     Ok(input_shape.to_vec())
 }
 
+/// `sort`（`Var::sort`／`argsort`。`torch.sort` 相当。イシュー #1733）の
+/// 出力 shape を検査する。sort は `dim` 軸のみを並べ替える純粋な
+/// 並べ替えであり、出力 shape は `shape` と恒等（`gather` と異なり
+/// index 側の shape も常に `shape` と一致するため、本関数は
+/// [`gather_out_shape`] のような index shape 引数を取らない）。
+///
+/// - `dim >= shape` の rank の場合 `ShapeError::AxisOutOfRange` を返す
+///   （[`reduce_out_shape`] と同じ判定）。
+pub fn sort_out_shape(shape: &[usize], dim: usize) -> Result<Vec<usize>, ShapeError> {
+    let rank = shape.len();
+    if dim >= rank {
+        return Err(ShapeError::AxisOutOfRange { axis: dim, rank });
+    }
+    Ok(shape.to_vec())
+}
+
+/// `topk`（`Var::topk`。`torch.topk` 相当。イシュー #1733）の出力
+/// shape を検査・計算する。`topk` は `dim` 軸を `k` 個へ narrow した
+/// 形（`Tensor::narrow(dim, 0, k)` と同じ範囲意味論）を返すため、
+/// `k` の範囲検査は新規 variant を追加せず既存の
+/// [`ShapeError::NarrowOutOfBounds`] を流用する（`narrow` と topk は
+/// いずれも「`dim` 軸を `[0, k)` の範囲へ切り詰める」操作として同一
+/// エラー分類が妥当と判断したため）。
+///
+/// - `dim >= shape` の rank の場合 `ShapeError::AxisOutOfRange`。
+/// - `k > shape[dim]` の場合 `ShapeError::NarrowOutOfBounds`
+///   （`start: 0`・`len: k`・`dim_size: shape[dim]`）。`k == 0` は
+///   出力の `dim` 軸が 0 要素になるだけで許容する（`Tensor::narrow`
+///   の `len == 0` と同じ扱い）。
+pub fn topk_out_shape(shape: &[usize], dim: usize, k: usize) -> Result<Vec<usize>, ShapeError> {
+    let rank = shape.len();
+    if dim >= rank {
+        return Err(ShapeError::AxisOutOfRange { axis: dim, rank });
+    }
+    let dim_size = shape[dim];
+    if k > dim_size {
+        return Err(ShapeError::NarrowOutOfBounds {
+            dim,
+            start: 0,
+            len: k,
+            dim_size,
+        });
+    }
+    let mut out = shape.to_vec();
+    out[dim] = k;
+    Ok(out)
+}
+
 /// LayerNorm／RMSNorm（イシュー #1596。`BackendOps::layer_norm`／
 /// `rmsnorm` の共通入口）が起動前に `(rows, hidden)` を導出するための
 /// shape 検査。CPU／CUDA／Metal の各 `BackendOps` 実装が本関数の結果を
@@ -1258,5 +1306,65 @@ mod tests {
         // `index.size(d) <= input.size(d)` 契約と整合）。
         let out = scatter_out_shape(&[3, 4], &[2, 2], &[2, 2], 1).unwrap();
         assert_eq!(out, vec![3, 4]);
+    }
+
+    // --- sort_out_shape ---
+
+    #[test]
+    fn sort_out_shape_basic() {
+        let out = sort_out_shape(&[3, 4], 1).unwrap();
+        assert_eq!(out, vec![3, 4]);
+    }
+
+    #[test]
+    fn sort_out_shape_axis_out_of_range() {
+        let err = sort_out_shape(&[3, 4], 2).unwrap_err();
+        assert_eq!(err, ShapeError::AxisOutOfRange { axis: 2, rank: 2 });
+    }
+
+    #[test]
+    fn sort_out_shape_empty_dim() {
+        let out = sort_out_shape(&[3, 0], 1).unwrap();
+        assert_eq!(out, vec![3, 0]);
+    }
+
+    // --- topk_out_shape ---
+
+    #[test]
+    fn topk_out_shape_basic() {
+        let out = topk_out_shape(&[3, 4], 1, 2).unwrap();
+        assert_eq!(out, vec![3, 2]);
+    }
+
+    #[test]
+    fn topk_out_shape_axis_out_of_range() {
+        let err = topk_out_shape(&[3, 4], 2, 2).unwrap_err();
+        assert_eq!(err, ShapeError::AxisOutOfRange { axis: 2, rank: 2 });
+    }
+
+    #[test]
+    fn topk_out_shape_k_exceeds_dim_size() {
+        let err = topk_out_shape(&[3, 4], 1, 5).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::NarrowOutOfBounds {
+                dim: 1,
+                start: 0,
+                len: 5,
+                dim_size: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn topk_out_shape_k_equals_dim_size() {
+        let out = topk_out_shape(&[3, 4], 1, 4).unwrap();
+        assert_eq!(out, vec![3, 4]);
+    }
+
+    #[test]
+    fn topk_out_shape_k_zero() {
+        let out = topk_out_shape(&[3, 4], 1, 0).unwrap();
+        assert_eq!(out, vec![3, 0]);
     }
 }

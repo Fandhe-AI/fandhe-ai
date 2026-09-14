@@ -20,6 +20,7 @@ use fandhe_ai_tensor_core::{
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
     gather_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -32,6 +33,7 @@ use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::softmax::{self, match_softmax_plan};
 use crate::{
     elementwise, fused_elementwise, gather_scatter, mse, reduction, rnn_cell, scalar_elementwise,
+    sort_topk,
 };
 
 /// `CpuBackendOps` が `MemoryOps` を実装するための、プロセスワイドに共有
@@ -1297,6 +1299,35 @@ impl BackendOps for CpuBackendOps {
         scatter_out_shape(input.shape(), index.shape(), src.shape(), dim)
             .map_err(BackendError::ShapeMismatch)?;
         gather_scatter::scatter(input, dim, index, src, reduce).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::sort` の CPU 実装（イシュー #1733）。
+    /// [`sort_out_shape`] で `dim` を再検査してから `sort_topk::sort`
+    /// へ委譲する（`gather`／`scatter` と同じ二重検査方針。
+    /// `.claude/rules/security.md` A08）。
+    fn sort(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        descending: bool,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        sort_out_shape(input.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        sort_topk::sort(input, dim, descending).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::topk` の CPU 実装（イシュー #1733）。
+    /// [`topk_out_shape`] で `dim`／`k` を再検査してから
+    /// `sort_topk::topk` へ委譲する（`sort` と同じ二重検査方針）。
+    fn topk(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        k: usize,
+        largest: bool,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape =
+            topk_out_shape(input.shape(), dim, k).map_err(BackendError::ShapeMismatch)?;
+        sort_topk::topk(input, dim, k, largest, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {

@@ -1249,6 +1249,86 @@ pub trait BackendOps {
         ))
     }
 
+    /// `dim` 軸に沿って `input` を並べ替える（`torch.sort` 相当。
+    /// イシュー #1733）。戻り値は `(values, index)` で、`values` は
+    /// 並べ替え後の値、`index` は元の（`dim` 軸上の）添字（PyTorch の
+    /// `torch.sort` の第 2 戻り値と同じ意味論。`values[.., i, ..] ==
+    /// input[.., index[.., i, ..], ..]`）。出力 shape は両方とも
+    /// `input.shape()` と恒等（[`crate::ops_shape::sort_out_shape`]
+    /// 参照）。
+    ///
+    /// **順序契約（実装側が必ず守ること。後続 GPU 実装〈イシュー
+    /// #1741〉の bit 一致契約の正）**:
+    /// 1. **安定性**: 同値（ties）は `descending` の値に関わらず元の
+    ///    `dim` 軸上の添字の昇順で並ぶ（`descending` でも「値の降順・
+    ///    同値内は添字昇順」——単純な昇順ソート結果の `reverse()` は
+    ///    同値の添字順を反転させてしまうため禁止）。
+    /// 2. **NaN**: `f32::partial_cmp` が `None` を返す比較は
+    ///    「NaN は任意の非 NaN より大きい・NaN 同士は同値（1 の安定性
+    ///    契約に従う）」として扱う（PyTorch `torch.sort` と同じ）。
+    /// 3. **±0**: `partial_cmp` は `-0.0` と `0.0` を `Equal` とみなす
+    ///    ため、1 の安定性契約により同値扱い（添字順）となる。
+    /// 4. **決定性**: 単一スレッド逐次実装とし run-to-run で bit
+    ///    同一の出力を返す（並列化する場合も本契約の観測結果を
+    ///    不変に保つこと。`.claude/rules/out-of-scope-tracking.md`
+    ///    対象・並列化自体は本イシューのスコープ外）。
+    ///
+    /// `values` は算術演算を含まない `input` の要素の並べ替え（`gather`
+    /// と数学的に同一）であるため、FMA 契約・`f64` アキュムレータ契約
+    /// は非該当。CPU vs GPU の数値一致判定は REQ-2 複合判定ではなく
+    /// 「上記 1〜3 の index 契約の完全再現＋`values` の bit 一致」で
+    /// 行う。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::scatter`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::sort`／`argsort` は
+    /// `Unsupported` のときのみホスト参照実装（`fandhe_ai_autodiff::
+    /// eval::sort`）へフォールバックする（それ以外のエラーは伝播する。
+    /// 判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+    /// 実装側でも `dim` を [`crate::ops_shape::sort_out_shape`] で
+    /// 再検査し、範囲外は [`BackendError::ShapeMismatch`] を返すこと
+    /// （fail-closed）。
+    fn sort(
+        &self,
+        _input: &Tensor<f32>,
+        _dim: usize,
+        _descending: bool,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "sort: default fail-safe (no fused sort kernel available)".into(),
+        ))
+    }
+
+    /// `dim` 軸に沿って上位（または下位）`k` 個を選ぶ（`torch.topk`
+    /// 相当。`sorted=True` 固定。イシュー #1733）。戻り値は
+    /// [`Self::sort`] と同じ `(values, index)` の形で、`largest=true`
+    /// なら降順 sort の先頭 `k`、`largest=false` なら昇順 sort の
+    /// 先頭 `k` に等しい（同値・NaN の扱いは [`Self::sort`] の順序
+    /// 契約 1〜4 にそのまま従う）。出力 shape は `dim` 軸のみ `k` に
+    /// 置換した shape（[`crate::ops_shape::topk_out_shape`] 参照）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::sort`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::topk` は
+    /// `Unsupported` のときのみホスト参照実装（`fandhe_ai_autodiff::
+    /// eval::topk`）へフォールバックする。実装側でも `dim`／`k` を
+    /// [`crate::ops_shape::topk_out_shape`] で再検査し、`k` が対象軸
+    /// のサイズを超える場合は [`BackendError::ShapeMismatch`] を
+    /// 返すこと（fail-closed）。
+    fn topk(
+        &self,
+        _input: &Tensor<f32>,
+        _dim: usize,
+        _k: usize,
+        _largest: bool,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "topk: default fail-safe (no fused topk kernel available)".into(),
+        ))
+    }
+
     /// GEMM の epilogue（bias 加算・activation）を融合した
     /// `act(A @ B + bias)` を計算する（TASK-12.1f・#203）。
     ///
@@ -2846,6 +2926,30 @@ mod tests {
         let src = Tensor::new(vec![9.0, 9.0, 9.0, 9.0], &[2, 2]).unwrap();
 
         let result = ops.scatter(&input, 1, &index, &src, ScatterReduce::Overwrite);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::sort`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1733）。
+    #[test]
+    fn sort_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![3.0, 1.0, 2.0, 4.0], &[2, 2]).unwrap();
+
+        let result = ops.sort(&input, 1, false);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::topk`] の既定実装が非破壊拡張の fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #1733）。
+    #[test]
+    fn topk_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![3.0, 1.0, 2.0, 4.0], &[2, 2]).unwrap();
+
+        let result = ops.topk(&input, 1, 1, true);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

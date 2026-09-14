@@ -20,13 +20,14 @@ use fandhe_ai_tensor_core::{
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
     ShapeError, Tensor, broadcast_shape, concat_out_shape, gather_out_shape, gemm_out_shape,
     matmul_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
     concat_with_fallback, gather_with_fallback, scalar_binary_with_fallback,
-    scalar_unary_with_fallback, scatter_with_fallback,
+    scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -430,9 +431,11 @@ impl<'t> Var<'t> {
     }
 
     /// `ScalarUnaryOp` 汎用 dispatch の `Var` 入口（イシュー #1634）。
-    /// `pub(crate)`: 個別公開メソッド（[`Var::sqrt`] 等。本ファイル
-    /// 下方）が呼ぶ共通実装（イシュー #1710）。残る活性化系の個別公開
-    /// メソッドは #1595 が別途追加する。
+    /// `pub(crate)`: 個別公開メソッド（[`Var::sqrt`]・[`Var::clamp`]・
+    /// `log`／`log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg`
+    /// （イシュー #1710・#1711・#1712）等。本ファイル下方）が薄い
+    /// 委譲で公開する共通実装。残る
+    /// 活性化系の個別公開メソッドは #1595 が別途追加する。
     ///
     /// `where_cond`（`crate::grad::where_cond_with_fallback` 経由）と
     /// 同じ eager 実体化契約: ①入力値を層 1（[`materialize_fallible`]）
@@ -456,8 +459,9 @@ impl<'t> Var<'t> {
     /// [`Var::scalar_unary`] の 2 項版で設計方針は同一
     /// （`pub(crate)`・eager・フォールバック契約）。`add`／`mul` と同じ
     /// NumPy 互換ブロードキャスト（`broadcast_shape`）。個別公開メソッド
-    /// （[`Var::sub`]／[`Var::div`]／[`Var::pow`]。本ファイル下方）が
-    /// 呼ぶ共通実装（イシュー #1710）。
+    /// （[`Var::sub`]／[`Var::div`]／[`Var::pow`]／[`Var::gt`] 等 6 種の
+    /// 比較演算。本ファイル下方）が呼ぶ共通実装（イシュー #1710・
+    /// #1712）。
     pub(crate) fn scalar_binary(
         &self,
         other: &Var<'t>,
@@ -482,6 +486,58 @@ impl<'t> Var<'t> {
             value,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 自然対数 `ln(x)`。`ScalarUnaryOp::Log` への薄い委譲
+    /// （`Var::scalar_unary` 参照。イシュー #1711・親 #1593・#1592）。
+    /// 定義域外（`x <= 0`）は IEEE のまま（`x == 0` は `-inf`・
+    /// `x < 0` は `NaN`。panic しない）。導関数は `1/x`
+    /// （`eval::scalar::unary_grad_factor`）。
+    pub fn log(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Log)
+    }
+
+    /// 底 2 の対数 `log2(x)`。数値規約は [`Var::log`] と同じ
+    /// （定義域外は IEEE のまま）。導関数は `1/(x·ln2)`。
+    pub fn log2(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Log2)
+    }
+
+    /// 底 10 の対数 `log10(x)`。数値規約は [`Var::log`] と同じ
+    /// （定義域外は IEEE のまま）。導関数は `1/(x·ln10)`。
+    pub fn log10(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Log10)
+    }
+
+    /// 正弦 `sin(x)`。`ScalarUnaryOp::Sin` への薄い委譲。導関数は
+    /// `cos(x)`（`eval::scalar::unary_grad_factor`）。
+    pub fn sin(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Sin)
+    }
+
+    /// 余弦 `cos(x)`。導関数は `-sin(x)`。
+    pub fn cos(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Cos)
+    }
+
+    /// 正接 `tan(x)`。極（`x = π/2 + kπ` 近傍）でのマスクは行わず
+    /// IEEE のまま（`inf`／`NaN` が伝播しうる）。導関数は
+    /// `1/cos(x)^2`。
+    pub fn tan(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Tan)
+    }
+
+    /// 絶対値 `|x|`。劣勾配は `x == 0` で `0`（`sign(0) = 0`。
+    /// `ScalarUnaryOp::Abs` doc・`eval::scalar::unary_grad_factor`
+    /// 参照）。
+    pub fn abs(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Abs)
+    }
+
+    /// 符号反転 `-x`。`-0.0` の符号ビット反転を含め IEEE のまま。
+    /// 導関数は定数 `-1`。
+    pub fn neg(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Neg)
     }
 
     /// ブロードキャスト付き要素ごとの減算（`self − other`。PyTorch
@@ -538,6 +594,70 @@ impl<'t> Var<'t> {
     /// unary_grad_factor`）。
     pub fn sqrt(&self) -> Result<Var<'t>, AutodiffError> {
         self.scalar_unary(ScalarUnaryOp::Sqrt)
+    }
+
+    /// 要素ごとの範囲制限（PyTorch `torch.clamp` 相当）。イシュー #1712
+    /// （親 #1593）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Clamp`]）への薄い委譲。
+    /// **数値規約（`eval::scalar::unary_grad_factor` を変更せず踏襲）**:
+    /// 範囲内（境界値を含む）は勾配係数 1・範囲外は 0。`NaN` 入力は
+    /// forward がそのまま `NaN` を伝播し勾配は 0。`min > max` は
+    /// （PyTorch と同じく）常に `max` を返す定数関数として扱われ、
+    /// 勾配は常に 0（panic しない）。
+    pub fn clamp(&self, min: f32, max: f32) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Clamp { min, max })
+    }
+
+    /// ブロードキャスト付き要素ごとの大なり比較（`self > other`。
+    /// PyTorch `torch.gt`／`>` 演算子相当）。イシュー #1712（親 #1593）。
+    ///
+    /// 比較演算 6 種（`gt`／`ge`／`lt`／`le`／`eq`／`ne`）は共通の出力・
+    /// 勾配規約を持つ: 出力は f32 の `0.0`／`1.0`（bool dtype 出力は
+    /// #1613 の対象で本メソッドの対象外。`docs/scalar-op-dispatch-design.md`
+    /// §3.2）。IEEE 754 準拠の比較（`NaN` を含む比較は `eq` を含め常に
+    /// 偽・`ne` のみ真）。VJP は両入力とも常にゼロ勾配（比較演算は
+    /// 局所的に階段関数のため微分不可能。`eval::scalar::binary_partials`
+    /// が `(0.0, 0.0)` を返す設計を `grad.rs::vjp` がそのまま `Some`
+    /// として伝播——寄与を省略しない）。`add`／`mul` と同じ NumPy
+    /// 互換ブロードキャスト。
+    pub fn gt(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Gt)
+    }
+
+    /// ブロードキャスト付き要素ごとの以上比較（`self >= other`。
+    /// PyTorch `torch.ge` 相当）。数値規約は [`Var::gt`] を参照。
+    /// イシュー #1712（親 #1593）。
+    pub fn ge(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Ge)
+    }
+
+    /// ブロードキャスト付き要素ごとの小なり比較（`self < other`。
+    /// PyTorch `torch.lt` 相当）。数値規約は [`Var::gt`] を参照。
+    /// イシュー #1712（親 #1593）。
+    pub fn lt(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Lt)
+    }
+
+    /// ブロードキャスト付き要素ごとの以下比較（`self <= other`。
+    /// PyTorch `torch.le` 相当）。数値規約は [`Var::gt`] を参照。
+    /// イシュー #1712（親 #1593）。
+    pub fn le(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Le)
+    }
+
+    /// ブロードキャスト付き要素ごとの等価比較（`self == other`。
+    /// PyTorch `torch.eq` 相当）。数値規約は [`Var::gt`] を参照（`NaN`
+    /// 同士は偽）。イシュー #1712（親 #1593）。
+    pub fn eq(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Eq)
+    }
+
+    /// ブロードキャスト付き要素ごとの非等価比較（`self != other`。
+    /// PyTorch `torch.ne` 相当）。数値規約は [`Var::gt`] を参照（`NaN`
+    /// が絡む比較は常に真）。イシュー #1712（親 #1593）。
+    pub fn ne(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_binary(other, ScalarBinaryOp::Ne)
     }
 
     /// `dim` に沿った縮約和。`dim: None` は全軸縮約（スカラー）。
@@ -2143,6 +2263,125 @@ impl<'t> Var<'t> {
             value,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `dim` 軸に沿って並べ替える（`torch.sort` 相当。イシュー
+    /// #1733）。戻り値は `(values, index)` で、`values`（追跡対象。
+    /// `Var`）は並べ替え後の値、`index`（非追跡・`Tensor<i32>`）は
+    /// 元の `dim` 軸上の添字。同値（ties）・NaN・±0 の順序契約は
+    /// [`fandhe_ai_tensor_core::BackendOps::sort`] doc の 1〜4 を正と
+    /// する。
+    ///
+    /// 検査順序: ①[`fandhe_ai_tensor_core::sort_out_shape`]（`dim`
+    /// 範囲を検査。違反は `AutodiffError::Shape`）→ ②`self` を層 1 で
+    /// 実体化 → ③`ops.sort` → `Unsupported` のときのみホスト参照
+    /// 実装（`eval::sort`）へフォールバック → ④戻り shape 検証
+    /// （`.claude/rules/security.md` A08）→ ⑤`push_eager`。
+    pub fn sort(
+        &self,
+        dim: usize,
+        descending: bool,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape = sort_out_shape(&in_shape, dim).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let (value, index) =
+            sort_with_fallback(self.tape.ops(), &input_val, dim, descending, &out_shape)?;
+        if value.shape() != out_shape || index.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Sort {
+                input: self.id,
+                dim,
+                index: index.clone(),
+            },
+            value,
+        );
+        Ok((Var::from_raw(self.tape, id), index))
+    }
+
+    /// `dim` 軸に沿って並べ替えた際の元添字のみを返す（`torch.argsort`
+    /// 相当。イシュー #1733）。[`Self::sort`] と異なりテープへノードを
+    /// **追加しない**（非微分演算。`index` は forward 値のみで勾配は
+    /// 流れない）。`self` を実体化して [`Self::sort`] と同じ検査・
+    /// フォールバック経路（`sort_out_shape` → `sort_with_fallback`）を
+    /// 通し、`index` 出力のみを返す。
+    pub fn argsort(&self, dim: usize, descending: bool) -> Result<Tensor<i32>, AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape = sort_out_shape(&in_shape, dim).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let (_value, index) =
+            sort_with_fallback(self.tape.ops(), &input_val, dim, descending, &out_shape)?;
+        if index.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: index.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        Ok(index)
+    }
+
+    /// `dim` 軸に沿って上位（`largest=true`）／下位（`largest=false`）
+    /// `k` 個を選ぶ（`torch.topk` 相当・`sorted=True` 固定。イシュー
+    /// #1733）。戻り値は [`Self::sort`] と同じ `(values, index)` の形。
+    ///
+    /// 検査順序: ①[`fandhe_ai_tensor_core::topk_out_shape`]（`dim`
+    /// 範囲・`k <= self.shape()[dim]` を検査。`k > dim_size` は
+    /// `ShapeError::NarrowOutOfBounds`）→ ②`self` を層 1 で実体化 →
+    /// ③`ops.topk` → `Unsupported` のときのみホスト参照実装
+    /// （`eval::topk`）へフォールバック → ④戻り shape 検証 →
+    /// ⑤`push_eager`。
+    pub fn topk(
+        &self,
+        k: usize,
+        dim: usize,
+        largest: bool,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape = topk_out_shape(&in_shape, dim, k).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let (value, index) =
+            topk_with_fallback(self.tape.ops(), &input_val, dim, k, largest, &out_shape)?;
+        if value.shape() != out_shape || index.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Topk {
+                input: self.id,
+                dim,
+                index: index.clone(),
+            },
+            value,
+        );
+        Ok((Var::from_raw(self.tape, id), index))
     }
 
     /// LSTM セル 1 step（イシュー #1647・設計 `docs/autodiff-rnn-cell-

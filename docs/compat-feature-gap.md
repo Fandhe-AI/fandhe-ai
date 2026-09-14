@@ -911,6 +911,19 @@ import の総合 roundtrip（構造一致・bit 同一）・`interp::run` 結果
 `interp.rs`）は無変更・facade 新規公開面はなし（#1775 の判断は本追補の対象外の
 まま変わらない）。
 
+**#1775 追記（ONNX export の facade 公開）**: 設計判断を
+`docs/facade-onnx-export-exposure-decision.md` として記録した。#1652（ONNX
+import 公開可否）と同じ publish 前提（`onnx-interop` の crates.io 公開という
+ユーザー承認未取得の別個の事項）を共有するため、上記「ONNX export」行
+（346 行目）のスナップショット本文は不変のまま、facade 公開は段階 0・
+blocked のまま close しない（`docs/facade-onnx-import-exposure-decision.md`
+§6.2）。本 issue の唯一のコード変更は
+`crates/facade/tests/api_surface.rs` への負の guard テスト 2 件
+（`facade_does_not_depend_on_unpublished_onnx_interop`／
+`facade_sources_do_not_reference_onnx_interop`。facade が非公開クレート
+`onnx-interop` へ依存しないことの機械的固定）であり、facade 新規公開面は
+なし。
+
 ## #1705 の追補
 
 `float64`／`float16` 行（319〜320 行目）のスナップショット本文は不変のまま、Metal バックエンド限定で以下が確定した（イシュー #1705・`docs/backend-dtype-dispatch-design.md` §14）。
@@ -943,6 +956,27 @@ typed_bf16.rs`。イシュー #1706・`docs/backend-dtype-dispatch-design.md`
   本表の「未実装（欠落側）」列の評価（`Var` レベルの mixed precision）は
   変わらない。
 
+## 追補（イシュー #1733）
+
+§2.2「`torch.topk`/`sort`」行はスナップショット時点の記述（「なし」）の
+まま不変とし、以下を追記する: `Var::sort`／`argsort`／`topk`（`torch.sort`／
+`torch.argsort`／`torch.topk` 相当）を実装済み化した（`tape::Op::Sort`／
+`Op::Topk`〈`push_eager` の非融合 eager 演算・`Op::Gather` と同型の最小
+保持方針〉・CPU 参照実装〈`backend-cpu::sort_topk`〉・ホスト参照実装
+〈`fandhe_ai_autodiff::eval::sort`／`topk`〉・scatter ベース VJP〈`values
+= gather(input, dim, index)` と数学的に同一のため `Op::Gather` と同じ
+`scatter_add` 式を再利用〉）。同値（ties）は `descending` の値に関わらず
+元インデックス昇順・NaN は任意の非 NaN より大きい・±0 は同値、という
+順序契約（`fandhe_ai_tensor_core::BackendOps::sort` doc）を CPU 参照実装・
+ホストフォールバックの両方で固定し、`crates/backend-cpu/tests/
+sort_topk_parity.rs` で bit 完全一致を回帰確認した。`Var::argsort` は
+`Op::Sort` を記録せず（非微分演算）、`sort` と同じ検査・フォールバック
+経路を通した `index` のみを返す。CUDA／Metal 専用カーネルは既定
+`Unsupported`（ホストフォールバックで機能する）のまま #1741 へ引き継ぐ。
+facade 新規公開面なし（既存の `Var` 再エクスポート経由）。`sorted=False`
+の topk・負 `dim`・非安定ソート（本実装の同値タイブレークとは異なる
+意味論）・`k` の `Var` 化は対象外のまま。
+
 ## #1710 の追補
 
 Var 演算欠落リストの `sub`／`div`／`pow`／`sqrt` 行（スナップショット本文
@@ -955,5 +989,55 @@ CPU／CUDA／Metal 3 バックエンドの `BackendOps::scalar_unary`／
 （`docs/scalar-op-dispatch-design.md`）。facade 新規公開面はない（既存
 `Var` 再エクスポート経由）。CUDA／Metal 実機での facade parity 実測は
 本エージェント実行環境に実機がないため未実施のまま申し送る。
-`pow_scalar`（スカラー指数版）・`log`／三角関数／`abs`／`neg`（#1711）・
-`clamp`／比較演算（#1712）は対象外のまま。
+`pow_scalar`（スカラー指数版）は対象外のまま（`log`／三角関数／`abs`／
+`neg` は #1711、`clamp`／比較演算は #1712 で実装済み。下記参照）。
+
+## #1711 の追補
+
+§2.4 の「`sin`/`cos`/`tan`」「`log`/`log2`/`log10`」行（221・223 行目）の
+スナップショット本文は不変のまま、以下が実装済みになった（イシュー
+#1711）。
+
+- `Var::log`／`log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg` の 8 個の
+  `pub fn` を `crates/autodiff/src/var.rs` に追加し、いずれも既存の
+  `Var::scalar_unary`（`ScalarUnaryOp` 汎用 dispatch。#1634 で実装済み）
+  への薄い委譲とした。3 バックエンド（CPU／CUDA／Metal）のカーネル・
+  VJP 係数・CPU 参照実装は #1634／#1635／#1636（#1707〜#1709）で既に
+  実装済みのため、本 issue の新規実装は `Var` 公開メソッドと facade
+  到達経路の配線のみ（新規カーネル・`Op` 追加なし）。
+- facade（`crates/facade/src/lib.rs`）への新規 `pub use`／`pub fn` は
+  追加していない。既存の `pub use fandhe_ai_autodiff::Var` 再エクスポート
+  経由でそのまま到達可能になる。
+- `abs`／`neg` は §2.4 表に専用行がないが、`docs/compat-api-scope.md`
+  §1.2「要素演算」行の実装 issue（#1592・#1593）の分解対象に含まれる
+  ため同行の範囲として扱った（レビューで異論があれば分離して除外できる
+  独立テスト単位で実装済み）。
+- テストは `crates/autodiff/src/grad.rs`（Tape 経由 forward／backward・
+  `log` の非正定義域〈`-inf`／`NaN`〉・`abs` の劣勾配・`neg` の `-0.0`
+  符号ビット反転）と `crates/facade/tests/
+  scalar_unary_transcendental_backend_parity.rs`（CPU vs NaiveOps の
+  REQ-2 複合判定・`matmul → log → sum` 合成勾配・`#[ignore]` の
+  Metal／CUDA 実機比較）に追加した。CUDA（DGX Spark GB10）・Metal
+  （Apple Silicon）実機での facade parity テストは、本実装エージェント
+  の実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッション
+  へ申し送る。
+- `sub`／`div`／`pow`／`sqrt`（#1710）・`clamp`／比較演算（#1712）は本
+  issue の対象外のまま。
+
+## #1712 の追補
+
+Var 演算欠落リストの `clamp`／比較演算（`gt`／`ge`／`lt`／`le`／`eq`／
+`ne`）行（スナップショット本文は不変）が実装済みになった。いずれも
+#1634 の汎用 dispatch 機構（`Var::scalar_unary`／`scalar_binary`）への
+薄い委譲として実装され、CPU／CUDA／Metal 3 バックエンドの
+`BackendOps::scalar_unary`／`scalar_binary`（`ScalarUnaryOp::Clamp`・
+`ScalarBinaryOp::{Gt,Ge,Lt,Le,Eq,Ne}`。#1634／#1635／#1636 で既に実装
+済み）経由で到達する。facade 新規公開面はない（既存 `Var` 再
+エクスポート経由）。
+
+出力は f32 の `0.0`／`1.0`（bool dtype 出力・`Tensor<bool>` は #1613
+〈OPEN〉の対象で本イシューの範囲外。`where_cond`／`masked_fill` の
+bool 引数との直接合成も #1613 待ち）。VJP は両入力とも常にゼロ勾配
+（比較演算は局所的に階段関数のため微分不可能）。CUDA／Metal 実機での
+facade parity 実測は本エージェント実行環境に実機がないため未実施の
+まま申し送る。
