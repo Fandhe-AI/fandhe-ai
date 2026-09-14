@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, DType, DeviceBufferView, FusedOpKind, FusionPlan,
-    MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, Tensor,
+    InterpolateMode, MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, Tensor,
 };
 
 use crate::error::AutodiffError;
@@ -680,6 +680,24 @@ pub(crate) enum Op {
         dim: usize,
         index: Tensor<i32>,
     },
+    /// `Var::interpolate`（`torch.nn.functional.interpolate`
+    /// 相当。イシュー #1757）。空間軸（末尾 `size.len()` 軸）を
+    /// `size` へリサンプリングする。`mode` で方式を選択（現状
+    /// `InterpolateMode::Nearest` のみ）。`BackendOps::interpolate`
+    /// に対応メソッドがあるため非融合対象（`push_eager` で常に
+    /// 実体化。`Op::Gather`／`Op::Pad` と同型）。
+    ///
+    /// VJP（`grad.rs`）: 各出力要素の勾配を対応する単一入力要素へ
+    /// 加算する scatter_add 型（`d_input = scatter_add(zeros_like
+    /// (input), 1, index, upstream)`。`index` は forward と同じ
+    /// 添字式〈`eval::nearest_src_coord`〉から VJP 側で構築する。
+    /// 「Interpolate（各出力が単一入力を参照する演算）の VJP は
+    /// scatter_add」の原則——`Op::Gather` と同型）。
+    Interpolate {
+        input: NodeId,
+        size: Vec<usize>,
+        mode: InterpolateMode,
+    },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
@@ -1014,6 +1032,12 @@ impl Op {
             // 同じく `index` を `Op` 自身が保持する eager 実体化演算で、
             // `recompute_value` に再計算経路を持たないため解放しない。
             Op::Sort { .. } | Op::Topk { .. } => false,
+            // `Op::Interpolate`（イシュー #1757）は `Op::Gather`／
+            // `Op::Pad` と同じく `size`／`mode` を `Op` 自身が保持する
+            // eager 実体化演算で、`recompute_value` に再計算経路を
+            // 持たないため解放しない（非網羅 match 是正で新規 variant
+            // 追加時に強制される）。
+            Op::Interpolate { .. } => false,
         }
     }
 
@@ -1074,6 +1098,7 @@ impl Op {
                 f(*src);
             }
             Op::Sort { input, .. } | Op::Topk { input, .. } => f(*input),
+            Op::Interpolate { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);
                 f(*target);

@@ -145,6 +145,7 @@ pub mod fused_elementwise;
 mod gather_scatter;
 pub mod gemm;
 pub mod gemm_blis;
+mod interpolate;
 mod scalar_elementwise;
 mod scan;
 mod unique;

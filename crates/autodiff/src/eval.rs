@@ -1180,11 +1180,85 @@ pub(crate) fn scatter(
     }
 }
 
+/// `interpolate`（[`fandhe_ai_tensor_core::InterpolateMode::Nearest`]。`Var::interpolate`・
+/// `grad::nearest_src_index_map` 双方が使う）の 1 軸単位の添字ヘルパー
+/// （イシュー #1757）。**単一情報源**: forward のホスト参照実装
+/// （下記 [`interpolate_nearest`]）と backward の VJP index 構築
+/// （`grad::nearest_src_index_map`）が本関数を共有することで、両者が
+/// 別々に添字式を書いて乖離するのを防ぐ（別々に書くと CPU
+/// `ForceEvalFallback` テストでは forward／backward の乖離を検出
+/// できないため。実装計画「設計判断」§3.2 参照）。
+///
+/// 添字式 `src = (dst * in_size) / out_size`（整数除算＝床）。
+/// `dst < out_size` より数学的に `src < in_size` が自動的に成立するが、
+/// REQ-8 の縦深防御として `min(src, in_size - 1)` を明示的に取る
+/// （`.claude/rules/coding-rust.md`「境界検査を省略しない」）。
+/// `out_size == 0` の場合は呼び出されない契約（呼び出し元が
+/// `interpolate_out_shape` で事前に拒否済み）だが、防御的に `0` を
+/// 返す（ゼロ除算 panic を避ける）。
+pub(crate) fn nearest_src_coord(dst: usize, in_size: usize, out_size: usize) -> usize {
+    if out_size == 0 || in_size == 0 {
+        return 0;
+    }
+    let src = (dst * in_size) / out_size;
+    src.min(in_size - 1)
+}
+
+/// `interpolate`（`torch.nn.functional.interpolate(mode='nearest')`
+/// 相当）のホスト参照実装（イシュー #1757）。`BackendOps::interpolate`
+/// が `Unsupported` を返したときのみ
+/// `grad::interpolate_with_fallback` から呼ばれる。
+///
+/// `size` は末尾空間軸の出力サイズ（[`fandhe_ai_tensor_core::
+/// interpolate_out_shape`] と同じ「末尾 `size.len()` 軸」規約。
+/// `Var::interpolate` が事前に検査・確定済み）。出力 shape は
+/// `input.shape()` の先頭軸をそのまま・末尾 `size.len()` 軸を `size`
+/// で置き換えた形。
+///
+/// **算術を含まない純粋なコピー演算**のため、forward は 3 バックエンド
+/// 間で構造的に **bit 完全一致**する（[`fandhe_ai_tensor_core::InterpolateMode::Nearest`]
+/// doc 参照）。`input` は strided view でよい（`dense_vec_ref` で行
+/// 優先稠密化してから読む）。座標ごとの src 添字導出は
+/// [`nearest_src_coord`]（forward／backward の単一情報源）を使う。
+pub(crate) fn interpolate_nearest(input: &Tensor<f32>, size: &[usize]) -> Tensor<f32> {
+    let in_shape = input.shape().to_vec();
+    let rank = in_shape.len();
+    let spatial_start = rank - size.len();
+    let mut out_shape = in_shape.clone();
+    out_shape[spatial_start..].copy_from_slice(size);
+
+    let numel: usize = out_shape.iter().product();
+    if numel == 0 {
+        return build_tensor(Vec::new(), &out_shape);
+    }
+
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&in_shape);
+
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let coords = unravel(flat, &out_shape);
+        let mut pos = 0usize;
+        for (axis, &stride) in input_strides.iter().enumerate() {
+            let coord = if axis >= spatial_start {
+                nearest_src_coord(coords[axis], in_shape[axis], out_shape[axis])
+            } else {
+                coords[axis]
+            };
+            pos += coord * stride;
+        }
+        *out_val = input_data[pos];
+    }
+    build_tensor(out, &out_shape)
+}
+
 /// `i32` 版 `build_tensor`（上記）。sort／topk（下記）の `index` 出力
 /// 構築に使う（`build_tensor` と同じ「shape 検査済みのはずのデータ長
 /// 不一致は契約違反として `debug_assert!` で検知しつつ安全側
-/// フォールバックする」infallible 契約）。
-fn build_index_tensor(data: Vec<i32>, shape: &[usize]) -> Tensor<i32> {
+/// フォールバックする」infallible 契約）。`pub(crate)`: `grad.rs::
+/// nearest_src_index_map`（イシュー #1757。`interpolate` VJP の
+/// scatter_add index 構築）からも同じ契約で使う。
+pub(crate) fn build_index_tensor(data: Vec<i32>, shape: &[usize]) -> Tensor<i32> {
     debug_assert_eq!(
         data.len(),
         shape.iter().product::<usize>(),

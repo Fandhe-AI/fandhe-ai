@@ -39,10 +39,10 @@ use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
-    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, gather_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape,
+    GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
+    MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors,
+    Tensor, UnaryElementwiseOp, gather_out_shape, interpolate_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout, scatter_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -2326,6 +2326,56 @@ impl BackendOps for MetalBackendOps {
                 dim,
                 reduce,
             )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::interpolate` の Metal 実装（イシュー #1757）。
+    /// [`interpolate_out_shape`] で `input`／`size` の shape を再検査
+    /// してから `interpolate.rs::MetalInterpolate::run_nearest_f32`
+    /// へ委譲する（`gather`／`scatter` と同じ二重検査方針）。
+    /// interpolate カーネルは gather／scatter と異なり座標配列を
+    /// 保持しないため `GS_MAX_RANK` の rank 上限は課さない
+    /// （`shaders/interpolate.metal` 冒頭コメント参照）。`mode` の
+    /// 未知 variant（`InterpolateMode` は `#[non_exhaustive]`。将来の
+    /// bilinear〈#1762〉等）は `BackendError::Unsupported` を返す
+    /// fail-safe（`ops.rs` 内他メソッドの未知 variant 分岐と同型）。
+    fn interpolate(
+        &self,
+        input: &Tensor<f32>,
+        size: &[usize],
+        mode: InterpolateMode,
+    ) -> Result<Tensor<f32>, BackendError> {
+        match mode {
+            InterpolateMode::Nearest => {}
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "MetalBackendOps::interpolate: 未対応の InterpolateMode variant {mode:?}"
+                )));
+            }
+        }
+        let out_shape =
+            interpolate_out_shape(input.shape(), size).map_err(BackendError::ShapeMismatch)?;
+        let in_shape = input.shape().to_vec();
+
+        // 出力が空なら `input` の shape に依らず結果は必ず空
+        // （`gather`／`scatter` の同型早期リターンと同じ理由。空間軸は
+        // `interpolate_out_shape` により非 0 が保証されるため、ここで
+        // 0 を含みうるのは先頭の残り軸のみ）。
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("interpolate: input not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let ip = context_cache::cached_interpolate(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = ip
+            .run_nearest_f32(&ctx, input_slice, &in_shape, size, &out_shape)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }

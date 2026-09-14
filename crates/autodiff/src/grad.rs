@@ -1317,6 +1317,71 @@ pub(crate) fn vjp(
             )?;
             vec![(input, d_input)]
         }
+        // `Var::interpolate`（イシュー #1757）。「各出力要素が単一の
+        // 入力要素を参照する演算（gather／sort／topk と同型）の VJP
+        // は scatter_add」の原則を、空間軸のみを対象に適用する:
+        // `input`／`upstream` を `[outer, sp]`（`outer` = 先頭の残り
+        // 軸の積・`sp` = 空間軸の積）へ reshape してから
+        // `nearest_src_index_map`（forward と同じ添字式を共有する
+        // 単一情報源）で構築した index を使い `scatter_with_fallback`
+        // （`dim=1`・`ScatterReduce::Add`）で入力空間位置へ加算し、
+        // 最後に `input_shape` へ reshape し直す。
+        Op::Interpolate { input, size, mode } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let rank = input_shape.len();
+            let spatial_start = rank - size.len();
+            let out_shape = upstream.shape().to_vec();
+            let outer: usize = input_shape[..spatial_start].iter().product();
+            let sp_in_numel: usize = input_shape[spatial_start..].iter().product();
+            let sp_out_numel: usize = out_shape[spatial_start..].iter().product();
+
+            match mode {
+                fandhe_ai_tensor_core::InterpolateMode::Nearest => {
+                    // scatter_add の index dtype は `i32`（`Tensor<i32>`）
+                    // のため、空間軸の要素数が `i32::MAX` を超える場合は
+                    // 添字が表現できない（REQ-8 の縦深防御。`Var::
+                    // gather`／`scatter` の `IndexRangeOverflow` 契約と
+                    // 同種の事前検査）。
+                    if sp_in_numel > i32::MAX as usize {
+                        return Err(AutodiffError::InvalidArgument(format!(
+                            "Op::Interpolate の VJP: 空間軸要素数 {sp_in_numel} が \
+                             i32::MAX を超え scatter_add の index dtype (i32) に \
+                             収まらない"
+                        )));
+                    }
+                    let index =
+                        nearest_src_index_map(&input_shape, &out_shape, spatial_start, outer);
+                    let upstream2d = upstream
+                        .contiguous()
+                        .reshape(&[outer, sp_out_numel])
+                        .map_err(AutodiffError::Shape)?;
+                    let zeros2d =
+                        Tensor::zeros(&[outer, sp_in_numel]).map_err(AutodiffError::Shape)?;
+                    let d_input2d = scatter_with_fallback(
+                        ops,
+                        &zeros2d,
+                        1,
+                        &index,
+                        &upstream2d,
+                        ScatterReduce::Add,
+                        &[outer, sp_in_numel],
+                    )?;
+                    let d_input = d_input2d
+                        .reshape(&input_shape)
+                        .map_err(AutodiffError::Shape)?;
+                    vec![(input, d_input)]
+                }
+                // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
+                // 側で将来 variant を追加しうる。`Op::Scatter` VJP の
+                // 未知 `ScatterReduce` variant 分岐と同型の fail-closed
+                // 処理）。
+                _ => {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Op::Interpolate の VJP: 未知の InterpolateMode variant {mode:?}"
+                    )));
+                }
+            }
+        }
         // `Var::contiguous` が記録するノード（イシュー #1620。
         // `crate::einsum` の permute 後 reshape 前の明示実体化）。
         // メモリレイアウトのみが変わり値は変わらないため、VJP は
@@ -1720,6 +1785,100 @@ fn validate_unique_output(v: &Tensor<f32>, numel: usize) -> Result<(), AutodiffE
             v.shape()
         )))
     }
+}
+
+/// [`Var::interpolate`] が使う「バックエンド実装 → フォールバック」
+/// ヘルパー（イシュー #1757）。[`gather_with_fallback`] と同型:
+/// `ops.interpolate` → `Unsupported` のときのみホスト参照実装
+/// （`eval::interpolate_nearest`。`mode` の未知 variant——将来の
+/// bilinear〈#1762〉等——は `eval` 側に対応する再計算経路がないため
+/// `AutodiffError::InvalidArgument` を返す）へフォールバックし、
+/// それ以外のエラーは伝播する（判定迂回経路を作らない。
+/// `.claude/rules/security.md` A08）。
+pub(crate) fn interpolate_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    size: &[usize],
+    mode: fandhe_ai_tensor_core::InterpolateMode,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.interpolate(input, size, mode) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => match mode {
+            fandhe_ai_tensor_core::InterpolateMode::Nearest => {
+                Ok(eval::interpolate_nearest(input, size))
+            }
+            // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
+            // 側で将来 variant を追加しうる。`ScatterReduce` の
+            // `Op::Scatter` VJP 未知 variant 分岐と同型）。
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "Var::interpolate の Unsupported フォールバック: 未知の \
+                 InterpolateMode variant {mode:?} に対応するホスト参照実装がない"
+            ))),
+        },
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Interpolate`]（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Nearest`]）の VJP が使う scatter_add index 構築（イシュー #1757）。
+/// forward のホスト参照実装（`eval::interpolate_nearest`）と**同じ
+/// 添字式**（`eval::nearest_src_coord`。単一情報源）を使い、出力の
+/// 各空間位置が対応する入力の空間位置（flat 添字。`sp_in` 軸内）を
+/// 求める。
+///
+/// 戻り値は `input`／`upstream` を `[outer, sp]`（`outer` = 先頭の
+/// 残り軸の積・`sp` = 空間軸の積）へ reshape した後の 2 階テンソルに
+/// 対する `scatter_with_fallback` の `index` 引数として使える形
+/// （shape `[outer, sp_out]`。全 `outer` 行が同一の空間添字パターンを
+/// 持つ——`outer` 軸〈batch／channel 等〉は素通しで src/dst の対応が
+/// 変わらないため）。
+pub(crate) fn nearest_src_index_map(
+    in_shape: &[usize],
+    out_shape: &[usize],
+    spatial_start: usize,
+    outer: usize,
+) -> Tensor<i32> {
+    let sp_in = &in_shape[spatial_start..];
+    let sp_out = &out_shape[spatial_start..];
+    let sp_out_numel: usize = sp_out.iter().product();
+    let sp_in_strides = eval::row_major_strides(sp_in);
+
+    let mut row = vec![0i32; sp_out_numel];
+    for (flat, slot) in row.iter_mut().enumerate() {
+        let coords = eval::unravel(flat, sp_out);
+        let mut pos = 0usize;
+        for (axis, &stride) in sp_in_strides.iter().enumerate() {
+            let src_c = eval::nearest_src_coord(coords[axis], sp_in[axis], sp_out[axis]);
+            pos += src_c * stride;
+        }
+        // `pos` は `sp_in` 内の flat 添字（`< sp_in.iter().product()`）。
+        // `Var::interpolate` の forward 検査（`interpolate_out_shape`
+        // 経由の `checked_numel`）により `sp_in` 全体の要素数は
+        // `usize` の範囲でオーバーフローしないことが保証されているが、
+        // `i32` への切り詰め自体は独立に検証する（REQ-8 の縦深防御。
+        // `nearest_src_index_map` 呼び出し元 `vjp` の `Op::Interpolate`
+        // 腕が事前に `sp_in_numel <= i32::MAX` を検査する契約——
+        // 超過時は `AutodiffError::InvalidArgument` を返し本関数へは
+        // 到達しない）。
+        *slot = pos as i32;
+    }
+
+    let mut data = Vec::with_capacity(outer * sp_out_numel);
+    for _ in 0..outer {
+        data.extend_from_slice(&row);
+    }
+    eval::build_index_tensor(data, &[outer, sp_out_numel])
 }
 
 /// [`Op::Scatter`]（`reduce = Overwrite`）の VJP 補助（イシュー

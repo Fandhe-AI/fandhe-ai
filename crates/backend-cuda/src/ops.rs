@@ -34,10 +34,11 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DType, DispatchFailureCell, FusionPlan,
-    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey, SegmentResource,
-    SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, gather_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
+    MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey,
+    SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
+    gather_out_shape, interpolate_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
+    row_softmax_layout, scatter_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -1275,6 +1276,18 @@ fn map_reduce_error(err: CudaError) -> BackendError {
 fn map_gather_scatter_error(err: CudaError) -> BackendError {
     match err {
         CudaError::InvalidGatherScatterShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
+}
+
+/// `interpolate.rs::CudaInterpolate::run_nearest_f32` のエラーを
+/// `BackendOps::interpolate` の戻り値へ変換する（イシュー #1757）。
+/// `map_gather_scatter_error` と同型の変換方針。
+fn map_interpolate_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::InvalidInterpolateShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
         other => map_cuda_error(other),
@@ -2956,6 +2969,62 @@ impl BackendOps for CudaBackendOps {
                 dim,
                 reduce,
             )
+        })?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::interpolate` の CUDA 実装（イシュー #1757）。
+    /// [`interpolate_out_shape`] で `input`／`size` の shape を再検査
+    /// してから `interpolate.rs::CudaInterpolate::run_nearest_f32` へ
+    /// 委譲する（`gather`／`scatter` と同じ二重検査方針）。`mode` の
+    /// 未知 variant（`InterpolateMode` は `#[non_exhaustive]`。将来の
+    /// bilinear〈#1762〉等）は `BackendError::Unsupported` を返す
+    /// fail-safe（`ops.rs` 内他メソッドの未知 variant 分岐と同型）。
+    fn interpolate(
+        &self,
+        input: &Tensor<f32>,
+        size: &[usize],
+        mode: InterpolateMode,
+    ) -> Result<Tensor<f32>, BackendError> {
+        match mode {
+            InterpolateMode::Nearest => {}
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "CudaBackendOps::interpolate: 未対応の InterpolateMode variant {mode:?}"
+                )));
+            }
+        }
+        let out_shape =
+            interpolate_out_shape(input.shape(), size).map_err(BackendError::ShapeMismatch)?;
+
+        // 出力が空なら `input` の shape に依らず結果は必ず空
+        // （`gather`／`scatter` の同型早期リターンと同じ理由）。
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+
+        // `.contiguous()`（内部で `numel()` の無検査乗算を呼ぶ）より前に
+        // 要素数積をオーバーフロー検査する（`gather`／`scatter` と
+        // 同じ理由）。
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("interpolate: input not contiguous".into())
+        })?;
+
+        let spatial_start = out_shape.len() - size.len();
+
+        let ip = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_interpolate(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_interpolate_error, || {
+            ip.run_nearest_f32(input_slice, input.shape(), &out_shape, spatial_start)
         })?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }

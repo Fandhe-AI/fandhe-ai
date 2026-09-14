@@ -615,6 +615,62 @@ pub fn row_softmax_layout(
     Ok(Some((rows, cols)))
 }
 
+/// `interpolate`（`Var::interpolate`。`torch.nn.functional.interpolate`
+/// 相当。イシュー #1757）の出力 shape を検査・計算する。空間軸は
+/// **末尾 `size.len()` 軸**（先頭の残り軸——batch／channel 等——は
+/// 素通しで shape のまま残る。`BackendOps::interpolate` doc 参照）。
+///
+/// - `size.is_empty()` の場合 `ShapeError::RankMismatch { expected: 1,
+///   actual: 0 }`（空間軸は最低 1 軸必要。[`row_norm_layout`] の
+///   rank-0 拒否と同じ「最小必要軸数」の表現方針を踏襲）。
+/// - `size.len() > shape.len()` の場合 `ShapeError::RankMismatch
+///   { expected: shape.len(), actual: size.len() }`（空間軸数が入力の
+///   rank を超えられない）。
+/// - 空間軸のいずれかで `shape[axis] == 0` または `size[i] == 0` の
+///   場合 `ShapeError::ShapeMismatch { lhs: shape.to_vec(), rhs:
+///   size.to_vec() }` を返す（新規 variant を追加せず既存の最も近い
+///   variant を流用する方針。`sort_out_shape`／`topk_out_shape` が
+///   `NarrowOutOfBounds` を流用するのと同じ判断）。添字式
+///   `src = (dst * in) / out`（整数除算）はゼロ除算を避けるため
+///   `out == 0` を、対応する `src` 座標が存在しないことを避けるため
+///   `in == 0` を、それぞれ事前に拒否する。**先頭の残り軸（空間軸
+///   以外）が 0 の空入力は許容する**（この場合出力も先頭軸が 0 の
+///   空 shape になるだけで、空間軸の走査自体が発生しないため）。
+/// - 出力 shape は `shape[..shape.len()-size.len()]`（先頭の残り軸を
+///   そのまま）に `size`（空間軸）を連結した形。要素数積オーバー
+///   フローは `checked_numel`（`crate::tensor`。`Tensor::new` 等が
+///   使う単一情報源と同じ検査）で検査
+///   する。
+pub fn interpolate_out_shape(shape: &[usize], size: &[usize]) -> Result<Vec<usize>, ShapeError> {
+    let rank = shape.len();
+    if size.is_empty() {
+        return Err(ShapeError::RankMismatch {
+            expected: 1,
+            actual: 0,
+        });
+    }
+    if size.len() > rank {
+        return Err(ShapeError::RankMismatch {
+            expected: rank,
+            actual: size.len(),
+        });
+    }
+    let spatial_start = rank - size.len();
+    for (i, &out_sp) in size.iter().enumerate() {
+        let axis = spatial_start + i;
+        if shape[axis] == 0 || out_sp == 0 {
+            return Err(ShapeError::ShapeMismatch {
+                lhs: shape.to_vec(),
+                rhs: size.to_vec(),
+            });
+        }
+    }
+    let mut out = shape.to_vec();
+    out[spatial_start..].copy_from_slice(size);
+    checked_numel(&out)?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1366,5 +1422,100 @@ mod tests {
     fn topk_out_shape_k_zero() {
         let out = topk_out_shape(&[3, 4], 1, 0).unwrap();
         assert_eq!(out, vec![3, 0]);
+    }
+
+    // --- interpolate_out_shape ---
+
+    #[test]
+    fn interpolate_out_shape_1d_all_axes_spatial() {
+        let out = interpolate_out_shape(&[3], &[6]).unwrap();
+        assert_eq!(out, vec![6]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_2d_trailing_axis_only() {
+        // batch 軸（先頭）は素通し、末尾 1 軸のみ空間軸。
+        let out = interpolate_out_shape(&[2, 3], &[5]).unwrap();
+        assert_eq!(out, vec![2, 5]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_3d_two_spatial_axes() {
+        let out = interpolate_out_shape(&[2, 4, 4], &[8, 8]).unwrap();
+        assert_eq!(out, vec![2, 8, 8]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_downsample() {
+        let out = interpolate_out_shape(&[1, 8], &[3]).unwrap();
+        assert_eq!(out, vec![1, 3]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_identity_size() {
+        let out = interpolate_out_shape(&[2, 3], &[2, 3]).unwrap();
+        assert_eq!(out, vec![2, 3]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_empty_size() {
+        let err = interpolate_out_shape(&[2, 3], &[]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 1,
+                actual: 0
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_size_longer_than_rank() {
+        let err = interpolate_out_shape(&[3], &[3, 3]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 1,
+                actual: 2
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_zero_output_spatial_axis() {
+        let err = interpolate_out_shape(&[2, 3], &[0]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::ShapeMismatch {
+                lhs: vec![2, 3],
+                rhs: vec![0],
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_out_shape_rejects_zero_input_spatial_axis() {
+        let err = interpolate_out_shape(&[2, 0], &[4]).unwrap_err();
+        assert_eq!(
+            err,
+            ShapeError::ShapeMismatch {
+                lhs: vec![2, 0],
+                rhs: vec![4],
+            }
+        );
+    }
+
+    #[test]
+    fn interpolate_out_shape_allows_empty_leading_axis() {
+        // 空間軸ではない先頭軸（batch）が 0 の空入力は許容する。
+        let out = interpolate_out_shape(&[0, 3], &[6]).unwrap();
+        assert_eq!(out, vec![0, 6]);
+    }
+
+    #[test]
+    fn interpolate_out_shape_element_count_overflow() {
+        // `out = [2, usize::MAX]` の要素数積が overflow する。
+        let err = interpolate_out_shape(&[2, usize::MAX], &[usize::MAX]).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
     }
 }

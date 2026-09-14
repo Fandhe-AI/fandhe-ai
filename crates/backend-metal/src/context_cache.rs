@@ -77,6 +77,7 @@ use crate::error::MetalError;
 use crate::gather_scatter::MetalGatherScatter;
 use crate::gemm::MetalGemm;
 use crate::generic_cache::{get_or_build, get_or_build_keyed};
+use crate::interpolate::MetalInterpolate;
 use crate::layer_norm::MetalLayerNorm;
 use crate::pipeline::{self, MtlPipeline};
 use crate::pool::MetalAllocator;
@@ -111,6 +112,7 @@ const _: fn() = || {
     assert_send_sync::<MetalSoftmax>();
     assert_send_sync::<MetalAllocator>();
     assert_send_sync::<MetalGatherScatter>();
+    assert_send_sync::<MetalInterpolate>();
     // イシュー #1707: `cached_scalar_unary_pipeline`／
     // `cached_scalar_binary_pipeline` が `Mutex<HashMap<&'static str,
     // Retained<MtlPipeline>>>` として直接キャッシュする値の Send/Sync
@@ -254,6 +256,20 @@ pub(crate) fn cached_unique(
     static CACHE: OnceLock<Mutex<Option<Arc<crate::unique::MetalUnique>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || crate::unique::MetalUnique::new(ctx))
+}
+
+/// [`crate::interpolate::MetalInterpolate`] をプロセス内キャッシュから
+/// 取得する（イシュー #1757）。`ops::MetalBackendOps::interpolate` の
+/// 唯一の呼び出し先（`cached_gather_scatter` と同型）。
+pub(crate) fn cached_interpolate(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::interpolate::MetalInterpolate>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::interpolate::MetalInterpolate>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || {
+        crate::interpolate::MetalInterpolate::new(ctx)
+    })
 }
 
 pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAllocator>, MetalError> {
