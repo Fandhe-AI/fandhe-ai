@@ -1044,3 +1044,20 @@ GB10・Apple Silicon）は本実装環境に到達手段がなく `#[ignore]`
 `unique_consecutive`・GPU 側 prefix-sum 圧縮は対象外のまま
 （decision doc §5／§6）。facade 新規公開面なし（既存 `Var`
 再エクスポート経由）。
+
+## #1713 の追補
+
+`Var::gelu`／`gelu_tanh`／`softplus`（GELU 誤差関数版・tanh 近似版・
+Softplus）を実装済み化した。`ScalarUnaryOp::Gelu`／`GeluTanh`／
+`Softplus`（#1634 で enum・dispatch・CPU 参照実装・VJP まで実装済み）
+への薄い委譲。CUDA（`erff`／`tanhf`／`log1pf`／`expf`）・Metal（自作
+`scalar_erf_f32`〈A-S 7.1.26 の `float` 精度複製〉・
+`metal::precise::tanh`・自作 `scalar_log1p_f32`〈Kahan 補正式〉・
+`metal::precise::exp`）のカーネル実装まで本 issue で追加した（超越関数
+のため REQ-2 統一複合判定のみで検証・bit 同一は主張しない）。
+`nn::activation::Gelu`／`GeluTanh`／`Softplus`（`Module` 実装込み）も
+追加。facade 新規公開面なし（既存 `Var` 再エクスポート経由のみ）。
+`compat::Sequential::add_gelu`／`add_gelu_tanh`／`add_softplus` 等の
+builder はユーザー承認待ちで対象外のまま。CUDA／Metal 実機での facade
+parity テストは本実装エージェントの実行環境に実機への到達手段がない
+ため未実測のまま Mac／GB10 セッションへ申し送る。
