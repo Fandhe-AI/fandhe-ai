@@ -1631,6 +1631,23 @@ pub(crate) fn unique_with_fallback(
     ops: &dyn BackendOps,
     x: &Tensor<f32>,
 ) -> Result<Tensor<f32>, AutodiffError> {
+    // `x.numel()`（内部で無検査の `.iter().product()` を使い
+    // `overflow-checks` 有効ビルドで panic しうる）・`ops.unique`
+    // （バックエンド実装が内部で `numel()`/`contiguous()` を呼ぶ）を
+    // 呼ぶ前に要素数積のオーバーフローを検査する（PR #1828
+    // codex-review P1 是正: `transpose` 済みの非 contiguous view
+    // （例: `[0, 2, usize::MAX]` → `transpose(0, 2)` → `[usize::MAX,
+    // 2, 0]`）は `Tensor::new`/`transpose` 単体では要素数積を
+    // 再検査しないため到達しうる。`Var::broadcast_to` と同じ自前
+    // `checked_mul` 実装。`tensor-core` は `checked_numel` を非公開に
+    // している）。
+    if x.shape()
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .is_none()
+    {
+        return Err(AutodiffError::Shape(ShapeError::ElementCountOverflow));
+    }
     let numel = x.numel();
     let v = match ops.unique(x) {
         Ok(v) => v,
@@ -5466,6 +5483,37 @@ release ビルドでも検知できるよう `assert!` を使う）"
             BackendError::ShapeMismatch(err) => BackendError::ShapeMismatch(err.clone()),
             other => panic!("clone_backend_error: 未対応の variant {other:?}"),
         }
+    }
+
+    /// [`unique_with_fallback`] の回帰テスト（PR #1828 codex-review
+    /// P1 是正確認・イシュー #1734）。`backend-cpu::unique`／
+    /// `backend-cuda::ops::unique`／`backend-metal::ops::unique` の
+    /// 同型回帰テストと同じ手法: `[0, 2, usize::MAX]` を
+    /// `transpose(0, 2)` すると `[usize::MAX, 2, 0]` になり、最終的な
+    /// 要素数は 0 だが中間積 `usize::MAX * 2` が `usize` の範囲を
+    /// 超える。`unique_with_fallback` が `x.numel()`（内部で無検査の
+    /// `.iter().product()` を使う）／`ops.unique(x)`（バックエンド
+    /// 実装が内部で `numel()`/`contiguous()` を呼ぶ）を呼ぶ前に
+    /// 要素数積のオーバーフローを検査し、`overflow-checks` 有効
+    /// ビルドでも panic せず `AutodiffError::Shape(ShapeError::
+    /// ElementCountOverflow)` を返すことを確認する。チェックは
+    /// `ops.unique` 呼び出し前に完了するため `MockOps` の `unique`
+    /// （既定実装。到達しない）には依存しない。
+    #[test]
+    fn unique_with_fallback_rejects_transposed_shape_with_overflowing_intermediate_product() {
+        let input_base = Tensor::<f32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let input = input_base.transpose(0, 2).unwrap();
+        assert_eq!(input.shape(), &[usize::MAX, 2, 0]);
+
+        let mock = MockOps {
+            mul_result: None,
+            add_result: None,
+        };
+        let err = unique_with_fallback(&mock, &input).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
     }
 
     #[test]

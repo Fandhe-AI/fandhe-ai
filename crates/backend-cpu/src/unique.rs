@@ -20,12 +20,32 @@
 
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
+/// shape の要素数積を `checked_mul` の畳み込みで検査する
+/// （`gather_scatter.rs::checked_numel` と同型の独立実装。
+/// `pub(crate)` でクレートを跨いで共有できないため複製する。
+/// PR #1828 codex-review P1 是正: `transpose` 済みの非 contiguous
+/// view は `x.shape()` の各軸積が `usize` 範囲を超えないことを
+/// `Tensor::new`/`transpose` 単体では保証しないため（`shape.swap`
+/// は要素数積を再検査しない）、`x.numel()`（内部で `.product()`
+/// を使い overflow-checks 有効時に panic しうる）を呼ぶ前に本関数で
+/// 事前検査し、型付きエラーとして返す。
+fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or(ShapeError::ElementCountOverflow)
+}
+
 /// [`fandhe_ai_tensor_core::BackendOps::unique`] の CPU 実装本体。
 ///
 /// 空入力（`numel == 0`）は shape `[0]` を返す。それ以外は
 /// `host_slice()` で稠密化 → `f32::total_cmp`（IEEE 754 totalOrder）
 /// でソート → `==`（IEEE 比較）で隣接重複を除去する。
 pub fn unique(x: &Tensor<f32>) -> Result<Tensor<f32>, ShapeError> {
+    // `x.numel()`／`x.host_slice()`（非 contiguous 時は `contiguous()`
+    // 経由で `numel()` を再度使う）を呼ぶ前に要素数積のオーバーフロー
+    // を検査する（PR #1828 codex-review P1 是正）。
+    checked_numel(x.shape())?;
     if x.numel() == 0 {
         return Tensor::new(Vec::new(), &[0]);
     }
@@ -98,5 +118,25 @@ mod tests {
         let out = unique(&x).unwrap();
         assert_eq!(out.shape(), &[1]);
         assert_eq!(out.host_slice().into_owned(), vec![7.0]);
+    }
+
+    /// PR #1828 codex-review P1 是正の回帰テスト:
+    /// `Tensor::new(Vec::new(), &[0, 2, usize::MAX])` は要素数積が
+    /// `0` のため構築に成功するが、`transpose(0, 2)` で軸順を
+    /// `[usize::MAX, 2, 0]` へ入れ替えると `x.numel()` 内部の
+    /// `.product()` の評価順序が変わり `usize::MAX * 2` が先に評価
+    /// される。`unique` が `x.numel()`/`contiguous()` を呼ぶ前に
+    /// 要素数積のオーバーフローを検査し、`panic!` ではなく
+    /// `ShapeError::ElementCountOverflow` を返すことを確認する。
+    #[test]
+    fn transposed_zero_element_shape_does_not_overflow_panic() {
+        let x = Tensor::new(Vec::<f32>::new(), &[0, 2, usize::MAX])
+            .expect("要素数積は 0 のため構築は成功する契約");
+        let transposed = x
+            .transpose(0, 2)
+            .expect("rank 3 の transpose(0, 2) は常に妥当");
+        assert_eq!(transposed.shape(), &[usize::MAX, 2, 0]);
+        let err = unique(&transposed).unwrap_err();
+        assert_eq!(err, ShapeError::ElementCountOverflow);
     }
 }

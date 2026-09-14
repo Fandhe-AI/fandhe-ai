@@ -1318,7 +1318,29 @@ pub(crate) fn topk(
 /// される）。`sort_unstable_by` は totalOrder で `Equal` と判定される
 /// 要素同士が bit 単位で同一であることを前提に安定性を要求しない
 /// （totalOrder は全順序でありタイは bit 同一の場合のみ発生する）。
+///
+/// **契約（PR #1828 codex-review P1 是正）**: 呼び出し元
+/// `grad::unique_with_fallback` は本関数を呼ぶ前に要素数積のオーバー
+/// フロー検査を済ませているため、本関数が実際にオーバーフロー形状で
+/// 呼ばれることは契約上ない（`build_tensor` と同じ「呼び出し元が
+/// 事前検査済み」契約・`docs/fusion-graph-design.md` §3.5.3 (iii)）。
+/// それでも `input.numel()`（内部で無検査の `.iter().product()` を
+/// 使い `overflow-checks` 有効ビルドで panic しうる）を直接呼ばず、
+/// 事前に `checked_mul` で再検査してから読む（契約違反を `panic!` で
+/// はなく `debug_assert!` で検知しつつ空集合へ安全側フォールバックする
+/// 二重防御。本番経路 panic 禁止・`.claude/rules/coding-rust.md`）。
 pub(crate) fn unique(input: &Tensor<f32>) -> Tensor<f32> {
+    let checked_numel = input
+        .shape()
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d));
+    if checked_numel.is_none() {
+        debug_assert!(
+            false,
+            "eval::unique: 呼び出し元が要素数積オーバーフローを事前検査済みのはずが違反した（契約違反）"
+        );
+        return build_tensor(Vec::new(), &[0]);
+    }
     if input.numel() == 0 {
         return build_tensor(Vec::new(), &[0]);
     }

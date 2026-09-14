@@ -2966,6 +2966,13 @@ impl BackendOps for CudaBackendOps {
     /// （totalOrder ソート・`==` による重複判定）は
     /// `fandhe_ai_tensor_core::BackendOps::unique` doc を正とする。
     fn unique(&self, x: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        // `x.contiguous()`（非 contiguous 時は内部で `numel()` を使い
+        // `Vec::with_capacity` を確保する）を呼ぶ前に要素数積の
+        // オーバーフローを検査する（`gather`／`scatter` と同じ
+        // `checked_shape_numel` 適用方針。PR #1828 codex-review P1
+        // 是正: `checked_shape_numel` doc の `[usize::MAX, 2, 0]` 例と
+        // 同型の transpose 済み view が `unique` 経由でも到達しうる）。
+        checked_shape_numel(x.shape()).map_err(BackendError::ShapeMismatch)?;
         let x_owned = x.contiguous();
         let x_slice = x_owned.as_slice().ok_or_else(|| {
             BackendError::KernelLaunchFailed("unique: input not contiguous".into())
@@ -3795,6 +3802,29 @@ mod tests {
             .expect("empty gather must succeed");
         assert_eq!(out.shape(), &[3, 2, 0]);
         assert_eq!(out.numel(), 0);
+    }
+
+    /// [`CudaBackendOps::unique`] の回帰テスト（PR #1828 codex-review
+    /// P1 是正確認・イシュー #1734）。`gather_returns_empty_for_dim_
+    /// axis_large_input_with_zero_sized_other_axis` と同じ `[0, 2,
+    /// usize::MAX]` → `transpose(0, 2)` → `[usize::MAX, 2, 0]` の再現
+    /// 手法で、`unique` が `x.contiguous()`（内部で `numel()` を使う）
+    /// を呼ぶ前に `checked_shape_numel` で拒否し、`overflow-checks`
+    /// 有効ビルドでも panic せず型付きエラーを返すことを確認する。
+    /// チェックは `with_driver_call` 呼び出し前に完了するため、GPU
+    /// 非依存の通常テストとして Linux CI でも実行できる。
+    #[test]
+    fn unique_rejects_transposed_shape_with_overflowing_intermediate_product() {
+        let input_base = Tensor::<f32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let input = input_base.transpose(0, 2).unwrap();
+        assert_eq!(input.shape(), &[usize::MAX, 2, 0]);
+
+        let ops = CudaBackendOps::new(0);
+        let err = ops.unique(&input).expect_err("overflow must be rejected");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
     }
 
     #[test]
