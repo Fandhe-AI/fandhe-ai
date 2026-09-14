@@ -19,8 +19,8 @@
   構築します（詳細は [Getting Started](/getting-started/)
   のバックエンド切替節）
 - `fandhe_ai::compat::{array, Sequential}`: numpy/Keras 慣習の互換 API 層
-- `fandhe_ai::optim`: `Sgd`／`AdamW`／`clip_grad_norm`／`LrScheduler` 等の
-  optimizer 群の再エクスポート
+- `fandhe_ai::optim`: `Sgd`／`AdamW`／`clip_grad_norm`／`LrScheduler`／
+  `GradScaler`（AMP 損失スケーリング）等の optimizer 群の再エクスポート
 - `fandhe_ai::DeviceParamStore` / `Tape::step_device_param_store`:
   学習ループのパラメータ更新をデバイス上に常駐させる経路
 

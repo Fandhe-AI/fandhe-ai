@@ -176,4 +176,11 @@ pub use tape::{NodeId, Tape, TapeId};
 // `facade` がさらにこれを再委譲する（composition root。
 // `docs/rng-global-contract-design.md`）。
 pub use fandhe_ai_tensor_core::rng::{RngError, manual_seed, rand, randint, randn};
+// `arange`／`linspace`／`eye`／`zeros_like`／`ones_like`（イシュー
+// #1726）: PyTorch 相当の決定的テンソル生成 API。`rng` と同じく実体は
+// `tensor-core::creation` にあり、本クレートは素通しするのみ（`facade`
+// がさらに再委譲する。`docs/rng-global-contract-design.md` §11）。
+pub use fandhe_ai_tensor_core::creation::{
+    CreationError, arange, eye, linspace, ones_like, zeros_like,
+};
 pub use var::{GateParams, QrVars, Reduction, SvdVars, Var, VarHostView};

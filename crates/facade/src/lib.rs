@@ -141,6 +141,11 @@ pub use fandhe_ai_tensor_core::RngError;
 // `RngError` コメントと同じ理由で `api_surface.rs` の走査にも抵触
 // しない）。
 pub use fandhe_ai_tensor_core::ShapeError;
+// `CreationError`（イシュー #1726）: `arange`／`linspace`（本ファイルで
+// 新設したトップレベル `pub fn`）の戻り値型（`step` 不正・非有限値を
+// 表す）。`RngError`／`ShapeError` と同じ理由で 1 行の `pub use` で
+// 再エクスポートする（`api_surface.rs` の走査にも抵触しない）。
+pub use fandhe_ai_tensor_core::CreationError;
 // `ChecksumReadout`／`GemmChecksum`（イシュー #1339・`Var::matmul_checksum`
 // の戻り値・引数型）も 1 文 1 行で再エクスポートする（上記コメント
 // 「1 文 1 行を維持する」と同じ理由）。
@@ -362,6 +367,51 @@ pub fn rand(shape: &[usize]) -> Result<Tensor<f32>, ShapeError> {
 /// [`RngError::InvalidRange`] を返す。
 pub fn randint(low: i32, high: i32, shape: &[usize]) -> Result<Tensor<i32>, RngError> {
     fandhe_ai_autodiff::randint(low, high, shape)
+}
+
+/// `[start, end)` を `step` 刻みで並べたテンソルを生成する（PyTorch
+/// `torch.arange` 相当。イシュー #1726）。[`randn`]／[`rand`]／
+/// [`randint`] と同じくホスト側だけで完結し `BackendOps` を経由しない
+/// （`Op`／VJP も追加しない。微分不能な葉値のため）。数値契約
+/// （プラットフォーム横断で bit 同一）は
+/// `fandhe_ai_tensor_core::creation` モジュール doc 参照。
+///
+/// `fandhe_ai_autodiff::arange`（実体は
+/// `fandhe_ai_tensor_core::creation::arange`）への薄い委譲
+/// （composition root）。
+pub fn arange(start: f32, end: f32, step: f32) -> Result<Tensor<f32>, CreationError> {
+    fandhe_ai_autodiff::arange(start, end, step)
+}
+
+/// `[start, end]`（両端を含む）を `steps` 個の等間隔値で埋めたテンソルを
+/// 生成する（PyTorch `torch.linspace` 相当。イシュー #1726）。設計・
+/// 到達経路は [`arange`] と同じ。
+pub fn linspace(start: f32, end: f32, steps: usize) -> Result<Tensor<f32>, CreationError> {
+    fandhe_ai_autodiff::linspace(start, end, steps)
+}
+
+/// `n x n` の単位行列を生成する（PyTorch `torch.eye` 相当。長方形版は
+/// 対象外。イシュー #1726）。dtype は `f32` 固定（facade 公開面は他の
+/// 生成系トップレベル関数と同じく `f32` 限定。汎用版は
+/// `fandhe_ai_tensor_core::creation::eye::<T>` を参照）。
+pub fn eye(n: usize) -> Result<Tensor<f32>, ShapeError> {
+    fandhe_ai_autodiff::eye::<f32>(n)
+}
+
+/// `like` と同じ shape・全要素 `0.0` の新規テンソルを生成する（PyTorch
+/// `torch.zeros_like` 相当。イシュー #1726）。`like` が転置・broadcast
+/// 由来の非 contiguous view であっても shape のみを引き継ぎ、strides
+/// は保存しない新規 contiguous バッファを返す
+/// （`fandhe_ai_tensor_core::creation` モジュール doc 参照）。
+pub fn zeros_like(like: &Tensor<f32>) -> Result<Tensor<f32>, ShapeError> {
+    fandhe_ai_autodiff::zeros_like(like)
+}
+
+/// `like` と同じ shape・全要素 `1.0` の新規テンソルを生成する（PyTorch
+/// `torch.ones_like` 相当。イシュー #1726）。契約は [`zeros_like`] と
+/// 同じ。
+pub fn ones_like(like: &Tensor<f32>) -> Result<Tensor<f32>, ShapeError> {
+    fandhe_ai_autodiff::ones_like(like)
 }
 
 /// `device` に対応する具体 `BackendOps` を解決する（非公開）。

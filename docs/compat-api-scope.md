@@ -213,7 +213,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | index 系（narrow／where／gather／scatter） | #1599（narrow は #1598 で実装済み・where／masked_fill は #1637 で実装済み〈`Var::where_cond`／`masked_fill`。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない〉のため対象外。gather／scatter／scatter_add／index_select は #1638（→ #1776 で Op 定義・CPU 参照実装・VJP 実装済み。`Var::gather`／`index_select`／`scatter`／`scatter_add`。facade 到達経路は既存 `Var` 再エクスポート経由で同様に新規公開面なし。CUDA は #1777・Metal は #1778 でそれぞれ実装済み〈`CudaBackendOps`／`MetalBackendOps` の `gather`／`scatter`。facade 新規公開面なし〉）のため対象外） |
 | バッチ行列積 | #1600（#1715 で実装済み: `Var::matmul` の rank≥3 受理・バッチ次元 NumPy 互換ブロードキャスト・`BackendOps::gemm_batched`／`gemm_batched_fp32_strict`〈既定は per-batch `gemm`/`gemm_fp32_strict` への合成〉・`CpuBackendOps::gemm_batched` オーバーライド〈bit 同一〉。§5 は Tier 1 列挙済み機能につき再適用不要と判断し facade へ新規 `pub use`／`pub fn` を追加していない。CUDA／Metal 専用バッチカーネルは #1716／#1717） |
 | 縮約（mean／min／argmax／var／std／複数軸） | #1601（`amax`／`max` の勾配分配方式はこの issue で設計判断を記録して確定。`04-requirements.md:234`。2 節参照）。#1719 で mean・複数軸・keepdim 部分を実装済み: `Var::mean`〈単一軸／全軸。`tape::Op::Mean`。`BackendOps` は非拡張で `sum` の結果をホスト側で 1 回だけ除算〉・`sum_dims`／`max_dims`／`mean_dims`〈複数軸・`keepdim`。`crate::reduce_dims` が permute／contiguous／reshape で単一軸縮約へ併合。単一軸は `sum(Some(d))` と bit 同一に直接委譲〉。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉。CUDA 実機 parity は未実測のまま GB10 セッションへ申し送り。#1720 で `min`／`argmax`／`argmin` 実装済み（`Var::min`／`argmax`／`argmin`。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない。`min` の VJP は #1718〈amax／amin 勾配分配方式の確定。本追記時点で OPEN〉未確定につき現行 `Var::max` の先勝ち決定的方式と共有するヘルパー `grad::extremum_first_match_vjp`〈旧 `max_vjp` を改称・`max_vjp` 自体は薄いラッパーとして維持〉を適用。CPU は `min`／`argmax`／`argmin` すべて実装済み。CUDA は `min` カーネル実装済み・`argmax`／`argmin` は明示 `Unsupported`（ホストフォールバック）。Metal は 3 演算とも明示 `Unsupported`（ホストフォールバック）。GB10／M4 Max 実機 parity は未実測のまま申し送り）。var／std は #1723 で実装済み: `Var::var`／`std`〈既存 `sum`／`max` と同じ `dim: Option<usize>` シグネチャ＋`correction`。`Op::Var` 専用 Op・`BackendOps::var` 既定 `Unsupported` のホストフォールバック契約。§5「Tier 1 列挙済み機能は再適用不要」の対象。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` なし。多軸・`keepdim` は本 issue 対象外のまま〉。`docs/compat-feature-gap.md` §2.5 追補参照。`amax`／`max` の勾配分配方式〈先勝ち決定的 対 均等分配〉は #1718 が未確定〈2026-09-14 時点 OPEN〉のため `sum_dims`／`max_dims` とも既存の先勝ち決定的規約を無変更で維持） |
-| 乱数生成と RNG 契約 | #1602（#1724 実装済み: グローバル RNG 契約〈manual_seed〉。#1725 実装済み: 乱数テンソル生成本体〈randn／rand／randint〉。`fandhe_ai::{manual_seed, randn, rand, randint}`。facade 到達経路は新規 `pub fn`（`RngError` は 1 行の `pub use`）。`docs/rng-global-contract-design.md`。arange／linspace／eye／zeros_like／ones_like は #1726 で別途対応） |
+| 乱数生成と RNG 契約 | #1602（#1724 実装済み: グローバル RNG 契約〈manual_seed〉。#1725 実装済み: 乱数テンソル生成本体〈randn／rand／randint〉。#1726 実装済み: 決定的生成系〈arange／linspace／eye／zeros_like／ones_like〉。`fandhe_ai::{manual_seed, randn, rand, randint, arange, linspace, eye, zeros_like, ones_like}`。facade 到達経路は新規 `pub fn`（`RngError`／`CreationError` は 1 行の `pub use`）。`docs/rng-global-contract-design.md`） |
 | Dropout | #1603 |
 | Embedding | #1604 |
 | MultiheadAttention | #1605 |
@@ -243,7 +243,7 @@ Phase 3（親 #1573）の各 issue へ対応付ける。
 | 高階微分 | #1622（設計記録。`docs/autodiff-higher-order-grad-decision.md`） |
 | custom autograd Function | #1623（設計記録。`docs/autodiff-custom-function-decision.md`） |
 | activation checkpointing | #1624（実装済み。`Var::checkpoint_from`／内部クレート `Tape::checkpoint`。対象 Op は `MatMul`／`Sigmoid`／`Sum`／`Max`・view 系〈`Reshape`／`Transpose`〉限定〈`Op::is_checkpoint_eligible()`〉。facade `Tape` passthrough は承認未取得のため未追加——facade からは既存の `Var` 再エクスポート経由〈`Var::checkpoint_from`〉で到達可能。`docs/autodiff-checkpoint-design.md`） |
-| AMP | #1625 |
+| AMP | #1625（#1721 でコア関数を実装・#1722 で facade 公開済み。`fandhe_ai::optim::{GradScaler, GradScalerConfig, UnscaleResult, scale_loss, scale_grads, unscale_grads, has_non_finite}` の純再エクスポート〈案 A〉。ホスト `Tensor<f32>` 勾配限定・真の混合精度〈f16 forward／f32 master weight〉は `docs/backend-dtype-dispatch-design.md` §8 のとおり対象外・デバイス常駐更新経路〈`DeviceParamStore`〉への unscale／非有限検出は未結線。承認記録は #1625 コメント〈2026-09-12〉） |
 | f64／f16／bf16 演算 | #1626 |
 | **量子化** | #1627（除外事項「分散学習・量子化の網羅対応」〈Won't・条件付き〉に従属。実装着手は同除外事項の格上げ条件充足と Phase 4 要件見直しでの新 REQ 追加のユーザー承認まで不可。5 節参照） |
 | **複数 GPU／DDP** | #1628（同上に従属。設計判断の記録〈docs のみ〉に留め、実装・通信層の依存追加は行わない。5 節参照） |
@@ -278,9 +278,10 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   - sparse／complex テンソル（非対応の明文化は #1633）
   - `torch.fx`／TorchScript／`torch.jit`・分散 RPC・モバイル／エッジ
     向け変換
-  - 汎用グラフ JIT（`torch.compile`／`tf.function` 相当）: 新規 JIT を
-    作らず、既存の融合・CUDA Graph capture の延長で扱う範囲を #1632 で
-    整理する
+  - 汎用グラフ JIT（`torch.compile`／`tf.function` 相当）: 範囲整理は
+    `docs/autodiff-graph-optimization-scope-decision.md`（#1632）で確定
+    済み（実装済み／延長候補／非目標の 3 区分）。汎用 JIT 自体は引き続き
+    対象外・延長候補（区分 B）は承認事項付きの別 issue へ引き継ぐ
 - **未定義（Tier 列挙にも「引き続き対象外」にも該当しない残余。5 節手続き
   の対象）**: numpy の ufunc 長尾・ファンシーインデックス・ブロード
   キャスト以外の高度な配列操作のうち、1.2 節の要素演算・index 系（#1592・
@@ -458,6 +459,8 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 依存追加は行わない**。implement-issue-tree で Phase 3（親 #1573）を
 消化する際は、#1627 を skip／blocked 扱いとする。
 
+**#1627（量子化）の設計記録は `docs/backend-int8-quantization-decision.md` として完了した。** 除外事項の格上げ条件（a〜e）充足と Phase 4 新 REQ 承認まで段階 0・blocked のまま close しない。コード変更なし（`crates/**`・依存・tolerance／baseline は不変）。issue 上の承認コメント（`unsafe asm!`〈SME〉・`BackendOps` trait 拡張・facade 公開面拡張の技術的許可）は実装着手前の先取り記録であり、正本 spec の除外事項ゲート自体を解除するものではないと整理した（同 doc §0.1）。
+
 **#1628 の設計記録は `docs/facade-multi-gpu-ddp-decision.md` として完了した。**
 
 **#1652（ONNX import 公開可否）の設計記録は `docs/facade-onnx-import-exposure-decision.md` として完了した。** DDP／量子化と異なり本項目は正本 spec の除外事項（上記）に従属しない——facade へ公開する方針自体は案 B（薄いラッパー型）として推奨されるが、facade は crates.io 公開クレートであり非公開クレートへの通常依存を持てないため、「facade から公開する」は `onnx-interop` 自体を crates.io へ公開することと構造的に等価になる。この publish 承認（命名確定・`RELEASE_CRATES` 変更を含む）は 2026-09-12 の facade 公開面拡張の承認範囲には含まれない別個の事項であり、承認が得られるまでは非公開のまま段階 0（現状維持）とする。#1775（ONNX export の facade 公開）・#1754（safetensors save／load の facade 再公開）はいずれも同じ publish 前提を共有するため blocked のまま close しない（同 doc §6.2）。
@@ -498,7 +501,7 @@ facade 側から `BackendOps` へ直接到達する手段がない。既存の
 | 実装リポ #1656 | `docs/spec` submodule ポインタ更新（spec PR #69 反映） |
 | 実装リポ #1591（本イシュー） | 本文書 §1／§2／§5 の更新 |
 | `docs/compat-feature-gap.md` | fandhe-ai 公開面の実装状況スナップショット（対象 HEAD 固定。§3 の「compat-api-scope.md の位置づけ」列は本改定前の状態を記述したまま） |
-| 実装リポ #1627 | Tier 2 量子化。除外事項「分散学習・量子化の網羅対応」に従属し実装着手不可 |
+| 実装リポ #1627 | Tier 2 量子化。除外事項「分散学習・量子化の網羅対応」に従属し実装着手不可。設計記録は `docs/backend-int8-quantization-decision.md`（段階 0・blocked のまま close しない） |
 | 実装リポ #1628 | Tier 2 複数 GPU／DDP。同上に従属し設計記録のみ |
 | `docs/spec/05-tasks.md:299-311` | TASK-9.1（基本 NN モジュール）・TASK-9.2（compat 再実装・対象範囲明文化） |
 | `docs/spec/03-poc/poc-v2-6-interop/code/rust/src/mlp.rs` | `Mlp::from_safetensors`（自作コア上の薄い互換層の v2 実例） |
