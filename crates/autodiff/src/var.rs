@@ -406,8 +406,10 @@ impl<'t> Var<'t> {
     /// `ScalarUnaryOp` 汎用 dispatch の `Var` 入口（イシュー #1634）。
     /// `pub(crate)`: 個別公開メソッド（[`Var::sqrt`]・`log`／`log2`／
     /// `log10`／`sin`／`cos`／`tan`／`abs`／`neg`（イシュー #1710・
-    /// #1711）等。本ファイル下方）が薄い委譲で公開する共通実装。残る
-    /// 活性化系の個別公開メソッドは #1595 が別途追加する。
+    /// #1711）・`gelu`／`gelu_tanh`／`softplus`（イシュー #1713）等。
+    /// 本ファイル下方）が薄い委譲で公開する共通実装。残る活性化系
+    /// （SiLU／LeakyReLU／ELU／Hardswish 等）の個別公開メソッドは
+    /// #1714 が別途追加する。
     ///
     /// `where_cond`（`crate::grad::where_cond_with_fallback` 経由）と
     /// 同じ eager 実体化契約: ①入力値を層 1（[`materialize_fallible`]）
@@ -565,6 +567,64 @@ impl<'t> Var<'t> {
     /// unary_grad_factor`）。
     pub fn sqrt(&self) -> Result<Var<'t>, AutodiffError> {
         self.scalar_unary(ScalarUnaryOp::Sqrt)
+    }
+
+    /// GELU（誤差関数版。PyTorch `F.gelu(x, approximate='none')`
+    /// 相当）: `0.5 * x * (1 + erf(x / sqrt(2)))`。イシュー #1713
+    /// （親 #1595）。
+    ///
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Gelu`]）への薄い委譲
+    /// （`sqrt` と同型）。**数値規約**: `erf` は依存追加不可
+    /// （`.claude/rules/deps-policy.md`）のため `f64` 精度の自作近似
+    /// （Abramowitz–Stegun 7.1.26。`scalar_op.rs::erf_f64`）を使う。
+    /// 導関数は `Φ(x) + x·φ(x)`（`eval::scalar::unary_grad_factor`・
+    /// `scalar_op::gelu_erf_grad`）。CUDA（`erff`）・Metal（自作
+    /// `scalar_erf_f32` prelude）はいずれも超越関数のため REQ-2 統一
+    /// 複合判定のみで検証する（bit 同一は主張しない）。`facade` は
+    /// `crates/autodiff::Var` を再エクスポートするのみで新規公開面は
+    /// 追加しない（`docs/compat-api-scope.md` §5）。
+    pub fn gelu(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::Gelu)
+    }
+
+    /// GELU（tanh 近似版。PyTorch `F.gelu(x, approximate='tanh')`
+    /// 相当）:
+    /// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`。
+    /// イシュー #1713（親 #1595）。
+    ///
+    /// [`Var::gelu`] と同じ委譲・公開面方針。導関数は
+    /// `scalar_op::gelu_tanh_grad`（huge magnitude 入力でも `NaN` を
+    /// 生まない是正済み実装。`scalar_op.rs` 参照）。
+    pub fn gelu_tanh(&self) -> Result<Var<'t>, AutodiffError> {
+        self.scalar_unary(ScalarUnaryOp::GeluTanh)
+    }
+
+    /// Softplus（PyTorch `F.softplus(x, beta, threshold)` 相当）:
+    /// `x * beta > threshold` なら恒等（`x`）、それ以外は
+    /// `(1 / beta) * ln(1 + exp(beta * x))`。イシュー #1713
+    /// （親 #1595）。
+    ///
+    /// `beta`（有限かつ `> 0`。`apply` が `/ beta` を含むため
+    /// `beta == 0` は `inf`／`NaN` を生む）・`threshold`（有限）を
+    /// dispatch 前に検査し、違反時は `AutodiffError::InvalidArgument`
+    /// を返す（`nn/norm.rs::validate_eps` と同じ fail-closed 規律）。
+    /// 導関数は `sigmoid(beta * x)`（恒等領域では `1.0`。
+    /// `eval::scalar::unary_grad_factor`）。CUDA／Metal は超越関数の
+    /// ため REQ-2 統一複合判定のみで検証する。`facade` は
+    /// `crates/autodiff::Var` を再エクスポートするのみで新規公開面は
+    /// 追加しない（`docs/compat-api-scope.md` §5）。
+    pub fn softplus(&self, beta: f32, threshold: f32) -> Result<Var<'t>, AutodiffError> {
+        if !beta.is_finite() || beta <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::softplus: beta must be finite and positive, got {beta}"
+            )));
+        }
+        if !threshold.is_finite() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::softplus: threshold must be finite, got {threshold}"
+            )));
+        }
+        self.scalar_unary(ScalarUnaryOp::Softplus { beta, threshold })
     }
 
     /// `dim` に沿った縮約和。`dim: None` は全軸縮約（スカラー）。
