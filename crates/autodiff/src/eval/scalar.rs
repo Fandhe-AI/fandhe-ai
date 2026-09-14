@@ -21,8 +21,9 @@ use super::{build_tensor, dense_vec};
 /// [`ScalarUnaryOp`] の forward（shape 不変の要素ごとの map）。
 ///
 /// 呼び出し元 `grad::scalar_unary_with_fallback` は #1710 で公開
-/// メソッド（`Var::sqrt` 等）から到達可能になったため
-/// `#[allow(dead_code)]` は撤去済み（`tape::Op::ScalarUnary` doc 参照）。
+/// メソッド（`Var::sqrt` 等）から、#1711 で `Var::log` 等からも
+/// 到達可能になったため `#[allow(dead_code)]` は撤去済み
+/// （`tape::Op::ScalarUnary` doc 参照）。
 pub(crate) fn unary(input: &Tensor<f32>, op: ScalarUnaryOp) -> Tensor<f32> {
     let shape = input.shape().to_vec();
     let data = dense_vec(input);
