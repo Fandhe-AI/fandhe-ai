@@ -3405,6 +3405,119 @@ mod tests {
     }
 
     #[test]
+    fn var_gelu_forward_and_backward_matches_manual_grad() {
+        // GELU（誤差関数版）: y = 0.5*x*(1+erf(x/sqrt(2)))。
+        // x=0 で y=0・dy/dx=0.5（Φ(0)=0.5・φ(0)=1/sqrt(2π)≈0.3989 より
+        // dy/dx = Φ(0) + 0*φ(0) = 0.5）。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[0.0, 1.0], &[2]));
+        let y = x.gelu().unwrap();
+        let out = dense_vec(&y.to_tensor());
+        assert!((out[0] - 0.0).abs() < 1e-6, "gelu(0) = {}", out[0]);
+        assert!((out[1] - 0.841_344_7).abs() < 1e-5, "gelu(1) = {}", out[1]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_grad_close(
+            "gelu dx",
+            dx,
+            &t(
+                &[0.5, fandhe_ai_tensor_core::scalar_op::gelu_erf_grad(1.0)],
+                &[2],
+            ),
+        );
+    }
+
+    #[test]
+    fn var_gelu_tanh_forward_and_backward_matches_manual_grad() {
+        // GELU（tanh 近似版）: x=0 で y=0（奇関数なので tanh(0)=0）。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[0.0, 1.0], &[2]));
+        let y = x.gelu_tanh().unwrap();
+        let out = dense_vec(&y.to_tensor());
+        assert!((out[0] - 0.0).abs() < 1e-6, "gelu_tanh(0) = {}", out[0]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_grad_close(
+            "gelu_tanh dx",
+            dx,
+            &t(
+                &[
+                    fandhe_ai_tensor_core::scalar_op::gelu_tanh_grad(0.0),
+                    fandhe_ai_tensor_core::scalar_op::gelu_tanh_grad(1.0),
+                ],
+                &[2],
+            ),
+        );
+    }
+
+    #[test]
+    fn var_softplus_forward_and_backward_matches_manual_grad() {
+        // softplus(0) = ln(2)（既定 beta=1・threshold=20 では恒等分岐
+        // 〈x*beta > threshold〉に入らない）。dy/dx = sigmoid(beta*x)。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[0.0, 1.0], &[2]));
+        let y = x.softplus(1.0, 20.0).unwrap();
+        let out = dense_vec(&y.to_tensor());
+        assert!(
+            (out[0] - std::f32::consts::LN_2).abs() < 1e-5,
+            "softplus(0) = {}",
+            out[0]
+        );
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        let sigmoid = |v: f32| 1.0 / (1.0 + (-v).exp());
+        assert_grad_close("softplus dx", dx, &t(&[sigmoid(0.0), sigmoid(1.0)], &[2]));
+    }
+
+    #[test]
+    fn var_softplus_identity_branch_gradient_is_one() {
+        // beta=2.0・threshold=1.0 では x=1.0 のとき x*beta=2.0 > 1.0 で
+        // 恒等分岐（y=x・dy/dx=1.0）に入る。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[1.0], &[1]));
+        let y = x.softplus(2.0, 1.0).unwrap();
+        assert_eq!(dense_vec(&y.to_tensor()), vec![1.0]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_grad_close("softplus identity-branch dx", dx, &t(&[1.0], &[1]));
+    }
+
+    #[test]
+    fn var_softplus_rejects_non_positive_or_non_finite_beta_and_non_finite_threshold() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[1.0], &[1]));
+        assert!(matches!(
+            x.softplus(0.0, 20.0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            x.softplus(-1.0, 20.0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            x.softplus(f32::NAN, 20.0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            x.softplus(f32::INFINITY, 20.0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            x.softplus(1.0, f32::NAN),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            x.softplus(1.0, f32::INFINITY),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(x.softplus(1.0, 20.0).is_ok());
+    }
+
+    #[test]
     fn var_sub_div_pow_reject_cross_tape_and_non_broadcastable_shape() {
         // cross-tape は fail-closed（`check_same_tape`）。
         let tape_a = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
