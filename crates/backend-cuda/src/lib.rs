@@ -373,9 +373,11 @@ mod init_cost_diag_tests;
 // 分解する診断テスト。`context_cache`・`launch_tiled_f32_pooled` へ
 // 到達する必要があるため `gemm_reuse_phase_diag_tests` と同じ理由で
 // クレートルートの兄弟モジュールとして配置する。
+mod huber;
 mod kernels;
 mod kernels_bce;
 mod kernels_elementwise;
+mod kernels_huber;
 mod kernels_layer_norm;
 mod kernels_mma;
 mod kernels_mma_tf32;
@@ -492,6 +494,7 @@ pub use gemm::CudaGemm;
 pub use bce::CudaBce;
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::TiledF32Kernel;
+pub use huber::CudaHuber;
 pub use mse::CudaMse;
 pub use rnn_cell::CudaRnnCell;
 // イシュー #1584: 汎用 reduction（`sum`／`max`）の実機 `#[ignore]`

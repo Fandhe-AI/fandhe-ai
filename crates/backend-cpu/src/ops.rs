@@ -17,11 +17,11 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BceKind, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan,
-    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput,
-    MatrixNormOrd, MseReduction, QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors,
-    Tensor, UnaryElementwiseOp, VectorNormOrd, gather_out_shape, interpolate_out_shape_for_mode,
-    one_hot_out_shape, pad_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScatterReduce, SgdStepConfig,
+    ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, VectorNormOrd, gather_out_shape,
+    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -34,8 +34,8 @@ use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::scan;
 use crate::softmax::{self, match_softmax_plan};
 use crate::{
-    bce, constant_pad, elementwise, fused_elementwise, gather_scatter, interpolate, mse, reduction,
-    rnn_cell, scalar_elementwise, sort_topk, unique,
+    bce, constant_pad, elementwise, fused_elementwise, gather_scatter, huber, interpolate, mse,
+    reduction, rnn_cell, scalar_elementwise, sort_topk, unique,
 };
 
 /// `CpuBackendOps` が `MemoryOps` を実装するための、プロセスワイドに共有
@@ -1527,6 +1527,69 @@ impl BackendOps for CpuBackendOps {
         let target_slice = target_c.as_slice().unwrap_or(&[]);
         let mut dpred = vec![0.0f32; pred_slice.len()];
         mse::mse_loss_backward_f32(pred_slice, target_slice, scale, &mut dpred)?;
+        Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::huber_loss`] の CPU 実装
+    /// （イシュー #1739）。[`Self::mse_loss`] と同じ構成（shape 検証・
+    /// contiguous 化・`huber::huber_sum_f32` への委譲・`reduction` に
+    /// 応じた最終変換〈`Mean`/`Sum`〉・スカラー `Tensor` への詰め直し）。
+    /// `reduction` 分岐をここで解決する理由も `mse_loss` と同一
+    /// （`MseReduction` は `#[non_exhaustive]`）。
+    fn huber_loss(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: HuberKind,
+        delta: f32,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_c = pred.contiguous();
+        let target_c = target.contiguous();
+        let pred_slice = pred_c.as_slice().unwrap_or(&[]);
+        let target_slice = target_c.as_slice().unwrap_or(&[]);
+        let numel = pred_slice.len();
+        let sum = huber::huber_sum_f32(pred_slice, target_slice, kind, delta)?;
+        let value = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    0.0
+                } else {
+                    sum / numel as f32
+                }
+            }
+            MseReduction::Sum => sum,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "huber_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::huber_loss_backward`] の CPU
+    /// 実装（イシュー #1739）。`dTarget = −dPred` は呼び出し元
+    /// （`fandhe_ai_autodiff::grad::vjp`）がホスト側で符号反転して得る
+    /// 契約のため、本メソッドは `dPred` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::huber_loss_backward` doc 参照。
+    /// [`Self::mse_loss_backward`] と同型）。
+    fn huber_loss_backward(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: HuberKind,
+        delta: f32,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_c = pred.contiguous();
+        let target_c = target.contiguous();
+        let pred_slice = pred_c.as_slice().unwrap_or(&[]);
+        let target_slice = target_c.as_slice().unwrap_or(&[]);
+        let mut dpred = vec![0.0f32; pred_slice.len()];
+        huber::huber_loss_backward_f32(pred_slice, target_slice, kind, delta, scale, &mut dpred)?;
         Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
     }
 

@@ -24,8 +24,8 @@
 use std::borrow::Cow;
 
 use fandhe_ai_tensor_core::{
-    BceKind, GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, ShapeError,
-    Tensor, VectorNormOrd, bilinear_blend, bilinear_scale, bilinear_src_coord,
+    BceKind, GruBackwardOutput, GruPointwiseOutput, HuberKind, LstmPointwiseOutput, ScatterReduce,
+    ShapeError, Tensor, VectorNormOrd, bilinear_blend, bilinear_scale, bilinear_src_coord,
 };
 
 use crate::layout;
@@ -797,6 +797,64 @@ pub(crate) fn mse_loss(
     build_tensor(vec![out], &[])
 }
 
+/// [`huber_loss`]（ホストフォールバック）が縮約に使う固定チャンク
+/// サイズ（イシュー #1739）。`backend-cpu::mse::CHUNK`（融合カーネル
+/// 側）と同値とし、フォールバック経路が融合カーネル経路と異なる
+/// 加算順序で丸め誤差を蓄積し REQ-2 判定を超えて乖離することを避ける
+/// （フォールバックは `BackendOps::huber_loss` が `Unsupported` を
+/// 返したときのみ経由する`.claude/rules/coding-rust.md`「バックエンド間
+/// 数値一致は統一複合判定」の趣旨を先回りして踏襲）。
+const HUBER_HOST_FALLBACK_CHUNK: usize = 4096;
+
+/// Huber／SmoothL1 の要素損失 `l(d)`（`d = pred − target`。イシュー
+/// #1739）。PyTorch `nn.HuberLoss(delta)`／`nn.SmoothL1Loss(beta)` の
+/// 意味論の正（`grad.rs::huber_loss_vjp`・CPU 融合カーネルの CPU 参照
+/// 実装〈parity テスト〉双方がこの定義に一致することを検証する）。
+///
+/// | kind | `\|d\| < delta` | それ以外 |
+/// |---|---|---|
+/// | `Huber` | `0.5·d²` | `delta·(\|d\| − 0.5·delta)` |
+/// | `SmoothL1` | `0.5·d²/delta` | `\|d\| − 0.5·delta` |
+///
+/// 二次分岐の判定は PyTorch と同じ `<`（等号は線形分岐。両分岐は
+/// 境界 `\|d\| == delta` で連続）。`delta` は呼び出し元
+/// （`Var::huber_loss_impl`）が有限かつ `> 0` を検証済みの値。
+/// `#[non_exhaustive]` な `HuberKind` の未知 variant は `Huber` 意味論へ
+/// 安全側フォールバックする（`debug_assert!` でテスト時のみ検知。
+/// `bce_elem_loss` と同型の判断）。
+pub(crate) fn huber_elem_loss(d: f32, kind: HuberKind, delta: f32) -> f32 {
+    let abs_d = d.abs();
+    match kind {
+        HuberKind::SmoothL1 => {
+            if abs_d < delta {
+                // `d*d` を先に計算すると delta・d が巨大な有限値の
+                // ときに中間積が overflow しうる。`abs_d < delta`
+                // 分岐内では `|d/delta| < 1` が保証されるため、先に
+                // delta で割ってから d を掛けることで中間値を `|d|`
+                // 以下に抑える（`backend-cpu::huber::elem_loss`・
+                // CUDA `kernels_huber.rs`・Metal `shaders/huber.metal`
+                // と同じ演算順序で揃える）。
+                0.5 * (d / delta) * d
+            } else {
+                abs_d - 0.5 * delta
+            }
+        }
+        // `Huber`。未知 variant はここへ安全側フォールバック。
+        _ => {
+            debug_assert!(
+                matches!(kind, HuberKind::Huber),
+                "huber_elem_loss: unknown HuberKind variant {kind:?}; falling back to Huber \
+                 semantics"
+            );
+            if abs_d < delta {
+                0.5 * d * d
+            } else {
+                delta * (abs_d - 0.5 * delta)
+            }
+        }
+    }
+}
+
 /// ログクランプ下限（PyTorch `BCELoss` の実装と同じ `-100`。`p` が
 /// `0`／`1` に極めて近い場合の `ln` の `-inf` 発散を避ける）。
 const BCE_LOG_CLAMP_MIN: f32 = -100.0;
@@ -842,6 +900,49 @@ pub(crate) fn bce_elem_loss(input: f32, target: f32, kind: BceKind) -> f32 {
     }
 }
 
+/// [`huber_elem_loss`] の `pred` に対する要素勾配 `∂l/∂pred`（`scale`
+/// 乗算前。イシュー #1739）。`sign(d)` は 3 バックエンドとも
+/// `copysign`（本関数は `f32::copysign`）で統一する
+/// （`.claude/rules/coding-rust.md` の丸め方針統一と同じ理由で
+/// `±0`／符号の扱いをバックエンド間で一致させる）。
+///
+/// | kind | `\|d\| < delta` | それ以外 |
+/// |---|---|---|
+/// | `Huber` | `d` | `copysign(delta, d)` |
+/// | `SmoothL1` | `d/delta` | `copysign(1, d)` |
+pub(crate) fn huber_elem_grad(d: f32, kind: HuberKind, delta: f32) -> f32 {
+    // `d` が NaN（`pred`／`target` のいずれかが NaN）のとき、
+    // `abs_d < delta` は NaN 比較の規約により常に false となり
+    // else 分岐（`copysign` 系）へ落ちて有限な勾配（±1／±delta）を
+    // 返してしまう。forward（`huber_elem_loss`）は同じ分岐構造でも
+    // else 分岐の結果が `NaN - 0.5*delta = NaN` となり自然に NaN を
+    // 返すため、forward と backward で NaN 伝播の有無が食い違う
+    // （イシュー #1739 レビュー指摘）。ここで明示的に NaN を伝播する
+    // （`backend-cpu::huber::elem_grad`・CUDA `kernels_huber.rs`・
+    // Metal `shaders/huber.metal` と同じ方針で揃える）。
+    if d.is_nan() {
+        return d;
+    }
+    let abs_d = d.abs();
+    match kind {
+        HuberKind::SmoothL1 => {
+            if abs_d < delta {
+                d / delta
+            } else {
+                1.0f32.copysign(d)
+            }
+        }
+        _ => {
+            debug_assert!(
+                matches!(kind, HuberKind::Huber),
+                "huber_elem_grad: unknown HuberKind variant {kind:?}; falling back to Huber \
+                 semantics"
+            );
+            if abs_d < delta { d } else { delta.copysign(d) }
+        }
+    }
+}
+
 /// `bce_elem_loss` の `dInput`（`scale` を乗じる前の要素勾配。`grad.rs`
 /// が上流勾配由来の `scale` を別途掛ける）。
 ///
@@ -863,6 +964,52 @@ pub(crate) fn bce_elem_grad_input(input: f32, target: f32, kind: BceKind) -> f32
             sigmoid_scalar(input) - target
         }
     }
+}
+
+/// Huber／SmoothL1 損失の縮約（スカラー出力）のホスト参照実装
+/// （イシュー #1739）。`BackendOps::huber_loss` が `Unsupported` を
+/// 返したときのみ `Var::huber_loss_impl`（`var.rs`）から呼ばれる。
+/// shape 一致検査は呼び出し元が済ませている前提。`numel == 0` は
+/// [`mse_loss`] と同じく mean・sum とも `0.0` を返す。
+///
+/// **縮約方式**: [`HUBER_HOST_FALLBACK_CHUNK`] 固定チャンクで分割し、
+/// チャンク内は逐次加算・チャンク間はチャンク番号順に結合する
+/// （`backend-cpu::mse::mse_sum_sq_f32` と同じ決定的縮約方式のホスト側
+/// ミラー。素朴な先頭からの逐次和のみだと大規模入力で融合カーネル
+/// 経路と加算順序が乖離しうるため）。
+pub(crate) fn huber_loss(
+    pred: &Tensor<f32>,
+    target: &Tensor<f32>,
+    kind: HuberKind,
+    delta: f32,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let pred_data = dense_vec(pred);
+    let target_data = dense_vec(target);
+    let numel = pred_data.len();
+    let sum: f32 = pred_data
+        .chunks(HUBER_HOST_FALLBACK_CHUNK)
+        .zip(target_data.chunks(HUBER_HOST_FALLBACK_CHUNK))
+        .map(|(p_chunk, t_chunk)| {
+            p_chunk
+                .iter()
+                .zip(t_chunk.iter())
+                .fold(0.0f32, |acc, (&p, &t)| {
+                    acc + huber_elem_loss(p - t, kind, delta)
+                })
+        })
+        .fold(0.0f32, |acc, v| acc + v);
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                sum / numel as f32
+            }
+        }
+        crate::var::Reduction::Sum => sum,
+    };
+    build_tensor(vec![out], &[])
 }
 
 /// `bce_elem_loss` の `dTarget`（`scale` を乗じる前）。

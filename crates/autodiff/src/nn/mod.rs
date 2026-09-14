@@ -44,7 +44,11 @@
 //! 既存 `Var` 演算（`matmul`／`reshape`／`permute`／`masked_fill`／
 //! `softmax`）の合成として実装している。`Module` trait は self-attention
 //! （`q=k=v=input`）として実装する（`attention.rs` モジュール doc
-//! 参照）。
+//! 参照）。イシュー #1739 で Huber／SmoothL1 損失（[`loss::HuberLoss`]／
+//! [`loss::SmoothL1Loss`]）を追加した。`MseLoss`／`CrossEntropyLoss` と
+//! 同じ「`BackendOps` の専用融合カーネルを優先し `Unsupported` のとき
+//! のみホスト参照実装へフォールバックする」設計を踏襲する
+//! （`loss.rs` モジュール doc 参照）。
 
 mod attention;
 mod embedding;

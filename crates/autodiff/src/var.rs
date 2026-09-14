@@ -17,8 +17,8 @@ use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, BceKind, ChecksumReadout, GemmChecksum,
-    GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
+    GruPointwiseOutput, HuberKind, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
+    MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
     broadcast_shape, concat_out_shape, gather_out_shape, gemm_out_shape,
     interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape, pad_out_shape,
     reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape,
@@ -1079,6 +1079,111 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// Huber 損失（`self` = 予測値、`target` = 正解値。PyTorch
+    /// `nn.HuberLoss(delta)` 相当。イシュー #1739）。`|d| < delta`
+    /// （`d = pred − target`）で二次（`0.5·d²`）、それ以外で線形
+    /// （`delta·(|d| − 0.5·delta)`）となる区分的損失（`eval::
+    /// huber_elem_loss` が意味論の正）。`delta` は有限かつ `> 0` を
+    /// 要求する（PyTorch の `delta` 引数と同じ制約）。
+    /// `huber_loss_impl(target, HuberKind::Huber, delta, reduction)`
+    /// への委譲。
+    pub fn huber_loss(
+        &self,
+        target: &Var<'t>,
+        delta: f32,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.huber_loss_impl(target, HuberKind::Huber, delta, reduction)
+    }
+
+    /// SmoothL1 損失（`self` = 予測値、`target` = 正解値。PyTorch
+    /// `nn.SmoothL1Loss(beta)` 相当。イシュー #1739）。[`Self::huber_loss`]
+    /// と同じ折れ点構造だが二次分岐が `0.5·d²/beta` に `beta` で
+    /// スケールされる点のみ異なる（`beta = 1.0` のとき両者は一致する）。
+    /// `beta = 0`（PyTorch では `nn.L1Loss` 相当に退化する特殊値）は
+    /// 本メソッドの対象外——他の `delta`／`beta` 値と同じ「有限かつ
+    /// `> 0`」検査により `AutodiffError::InvalidArgument` で拒否する。
+    /// `huber_loss_impl(target, HuberKind::SmoothL1, beta, reduction)`
+    /// への委譲。
+    pub fn smooth_l1_loss(
+        &self,
+        target: &Var<'t>,
+        beta: f32,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.huber_loss_impl(target, HuberKind::SmoothL1, beta, reduction)
+    }
+
+    /// [`Self::huber_loss`]／[`Self::smooth_l1_loss`] の共通実装
+    /// （イシュー #1739）。`mse_loss_with` と同じ演算メソッド規律
+    /// （フォールバックは `Unsupported` のときのみ・それ以外のエラーは
+    /// 伝播・バックエンド戻り値の shape 契約検証）に、`delta`
+    /// （`SmoothL1` では `beta` と呼ぶが同じ引数）の検査を追加する
+    /// 検査順序: ①`check_same_tape` → ②shape 一致
+    /// （`require_same_shape`）→ ③`delta` が有限かつ `> 0`（違反は
+    /// `AutodiffError::InvalidArgument`。`rms_norm` の `eps` 検査と同型）
+    /// → ④実体化（層 1）→ ⑤`BackendOps::huber_loss` 試行 →
+    /// ⑥バックエンド契約検証（戻り値 shape `[]`）→ ⑦ノード記録。
+    fn huber_loss_impl(
+        &self,
+        target: &Var<'t>,
+        kind: HuberKind,
+        delta: f32,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(target)?;
+        let lhs_shape = self.shape();
+        let rhs_shape = target.shape();
+        require_same_shape(&lhs_shape, &rhs_shape)?;
+        if !delta.is_finite() || delta <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::huber_loss_impl: delta must be finite and positive, got {delta}"
+            )));
+        }
+        let (pred_val, target_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let pred_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let target_val = materialize_fallible(&nodes, self.tape.ops(), target.id)?.clone();
+            (pred_val, target_val)
+        };
+        let value =
+            match self
+                .tape
+                .ops()
+                .huber_loss(&pred_val, &target_val, kind, delta, reduction.into())
+            {
+                Ok(v) => {
+                    // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                    // huber_loss` doc「戻り値は shape `[]`」）を検証する
+                    // （`mse_loss_with` と同じ理由）。
+                    if !v.shape().is_empty() {
+                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                lhs: v.shape().to_vec(),
+                                rhs: Vec::new(),
+                            },
+                        )));
+                    }
+                    v
+                }
+                Err(BackendError::Unsupported(_)) => {
+                    eval::huber_loss(&pred_val, &target_val, kind, delta, reduction)
+                }
+                Err(other) => return Err(AutodiffError::Backend(other)),
+            };
+        let id = self.tape.push_eager(
+            Op::HuberLoss {
+                pred: self.id,
+                target: target.id,
+                kind,
+                delta,
+                reduction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// 二値交差エントロピー損失（`self` = 予測確率 `[0, 1]`、`target` =
     /// 正解ラベル。全要素平均・PyTorch `nn.BCELoss` 相当）。
     /// `bce_loss_impl(target, BceKind::Probabilities, reduction)` への
@@ -1189,7 +1294,6 @@ impl<'t> Var<'t> {
         );
         Ok(Var::from_raw(self.tape, id))
     }
-
     /// 行方向 RMSNorm（`x · rsqrt(mean(x²) + eps) · w`。`w` が `None`
     /// の場合は乗算をスキップ。イシュー #1596）。正規化軸は常に
     /// 最終軸（[`row_norm_layout`] が `(rows, hidden)` を導出する）。

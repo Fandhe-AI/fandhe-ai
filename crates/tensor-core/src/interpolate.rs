@@ -56,7 +56,17 @@ pub fn bilinear_scale(in_size: usize, out_size: usize, align_corners: bool) -> f
     }
     if align_corners {
         if out_size > 1 {
-            (in_size as f32 - 1.0) / (out_size as f32 - 1.0)
+            // 整数側で `-1` してから `f32` へ変換する（先に `f32` へ
+            // 変換してから `1.0` を引くと、大きい `in_size`
+            // （例: 16,777,217 = 2^24+1。f32 の仮数部が表現できる
+            // 整数の上限 2^24 を超える）で `in_size as f32` が既に
+            // 丸められ、四隅一致契約〈`dst=out_size-1` が
+            // `src=in_size-1` へ一致する〉が整数丸めにより破れる。
+            // `in_size==0`（呼び出し元が事前に拒否する契約——
+            // `interpolate_out_shape` が空間軸 0 を検査済み——だが
+            // 縦深防御として本関数でも扱う）は `saturating_sub` で
+            // `usize` 減算 underflow を回避し `0` として扱う）。
+            (in_size.saturating_sub(1) as f32) / ((out_size - 1) as f32)
         } else {
             0.0
         }
@@ -155,6 +165,30 @@ mod tests {
     fn bilinear_scale_align_corners_true_single_output_is_zero() {
         assert_eq!(bilinear_scale(4, 1, true), 0.0);
         assert_eq!(bilinear_scale(4, 0, true), 0.0);
+    }
+
+    #[test]
+    fn bilinear_scale_align_corners_true_large_in_size_preserves_corner_match() {
+        // in_size=16,777,217（2^24+1）は f32 の仮数部が正確に表現できる
+        // 整数の上限（2^24）を超えるため、`in_size as f32` へ先に変換
+        // してから `1.0` を引くと丸めで `in_size-1` と一致しなくなる。
+        // 整数側で `-1` してから変換すれば `dst=out_size-1` が
+        // `src=in_size-1` へ厳密に一致する（四隅一致契約）ことを固定する。
+        let in_size = 16_777_217usize;
+        let out_size = in_size;
+        let scale = bilinear_scale(in_size, out_size, true);
+        let c_last = bilinear_src_coord(out_size - 1, in_size, scale, true);
+        assert_eq!(c_last.i0, in_size - 1);
+        assert_eq!(c_last.i1, in_size - 1);
+        assert_eq!(c_last.lambda1, 0.0);
+    }
+
+    #[test]
+    fn bilinear_scale_align_corners_true_in_size_zero_no_underflow_panic() {
+        // `in_size==0` は呼び出し元（`interpolate_out_shape`）が事前に
+        // 拒否する契約だが、`saturating_sub` により `usize` 減算
+        // underflow で panic しないことを縦深防御として固定する。
+        assert_eq!(bilinear_scale(0, 4, true), 0.0);
     }
 
     #[test]
