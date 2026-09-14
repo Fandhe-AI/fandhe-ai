@@ -27,8 +27,19 @@
 //! [`crate::optim::StepLr`] と同じく `fandhe_ai_autodiff::nn::optim`
 //! （実体は `nn::optim::lr_scheduler` モジュール）から素の再エクスポート
 //! で公開する。いずれも [`crate::optim::LrScheduler::lr_at`] のみを持つ
-//! stateless な純関数であり、状態保持型の `ReduceLROnPlateau`／
-//! `OneCycleLR` は対象外（兄弟イシュー #1746／#1747 が担当）。
+//! stateless な純関数であり、状態保持型の `ReduceLROnPlateau` は対象外
+//! （兄弟イシュー #1746 が担当）。
+//!
+//! **OneCycleLr（PyTorch `OneCycleLR` 相当。イシュー #1747・親 #1611）**:
+//! [`crate::optim::OneCycleLr`]／[`crate::optim::OneCycleLrConfig`]／
+//! [`crate::optim::OneCycleAnneal`] を同じく `fandhe_ai_autodiff::nn::optim`
+//! （実体は `nn::optim::lr_scheduler` モジュール）から素の再エクスポート
+//! で公開する。`new` 構築時にフェーズ境界を事前計算して保持することで
+//! `lr_at` 自体は参照のみの stateless 純関数として実装されており（`nn::
+//! optim::lr_scheduler::OneCycleLr` doc 参照）、他のスケジューラと同じ
+//! [`crate::optim::LrScheduler`] trait を実装する。momentum cycling
+//! （`cycle_momentum` 等）は対象外。状態保持型で残る対象外は
+//! `ReduceLROnPlateau`（兄弟イシュー #1746）のみ。
 //!
 //! `fandhe_ai::optim` は REQ-9 の 2026-08-29 追記（正本 spec
 //! `docs/spec/04-requirements.md:211-212`。実装リポ #984／#986）で、
@@ -203,6 +214,7 @@ pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
 pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, LinearWarmupLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
 pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
+pub use fandhe_ai_autodiff::nn::optim::{OneCycleAnneal, OneCycleLr, OneCycleLrConfig};
 pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};
 pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};
 pub use fandhe_ai_autodiff::nn::optim::{RmsProp, RmsPropConfig};

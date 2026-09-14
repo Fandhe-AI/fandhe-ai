@@ -34,8 +34,9 @@ use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::optim::{
     Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, ConstantLr, CosineAnnealingLr,
-    ExponentialLr, Lamb, LambConfig, LinearWarmupLr, LrScheduler, RmsProp, RmsPropConfig, Sgd,
-    SgdConfig, StepLr, clip_grad_norm, clip_grad_value,
+    ExponentialLr, Lamb, LambConfig, LinearWarmupLr, LrScheduler, OneCycleAnneal, OneCycleLr,
+    OneCycleLrConfig, RmsProp, RmsPropConfig, Sgd, SgdConfig, StepLr, clip_grad_norm,
+    clip_grad_value,
 };
 
 const BATCH: usize = 4;
@@ -876,4 +877,79 @@ fn cosine_annealing_lr_scheduler_drives_sgd_config_via_facade_only() {
         .unwrap_or_else(|e| panic!("test fixture: LinearWarmupLr::new が失敗した: {e}"));
     assert!((exponential.lr_at(0) - BASE_LR).abs() < 1e-6);
     assert!((warmup.lr_at(T_MAX) - BASE_LR).abs() < 1e-6);
+}
+/// イシュー #1747（親 #1611）: `OneCycleLr` が facade のみを通じて
+/// SGD の学習ループを駆動できることを固定する（`cosine_annealing_lr_
+/// scheduler_drives_sgd_config_via_facade_only` の鏡写し）。
+#[test]
+fn one_cycle_lr_scheduler_drives_sgd_config_via_facade_only() {
+    const STEPS: usize = 6;
+    const MAX_LR: f32 = 0.1;
+    const TOTAL_STEPS: usize = STEPS;
+
+    let scheduler = OneCycleLr::new(OneCycleLrConfig::new(MAX_LR, TOTAL_STEPS))
+        .unwrap_or_else(|e| panic!("test fixture: OneCycleLr::new が失敗した: {e}"));
+
+    let mut model = build_model();
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let mut log = Vec::with_capacity(STEPS);
+
+    for step in 0..STEPS {
+        let lr = scheduler.lr_at(step);
+        // `OneCycleLr::lr_at` は常に正の値を返す（`initial_lr`〜
+        // `max_lr` の範囲内。`min_lr` も `> 0`）ため `Sgd::new` は
+        // 常に成功する（`CosineAnnealingLr` テストと異なり lr==0.0 に
+        // なることはない）。
+        let mut sgd = Sgd::new(SgdConfig::new(lr))
+            .unwrap_or_else(|e| panic!("test fixture: Sgd::new が失敗した: {e}"));
+
+        let updated = {
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+
+            let pred = bound
+                .forward(&tape, &x)
+                .unwrap_or_else(|e| panic!("test fixture: forward が失敗した: {e}"));
+            let loss = pred
+                .mse_loss(&y)
+                .unwrap_or_else(|e| panic!("test fixture: mse_loss が失敗した: {e}"));
+            log.push(scalar(&loss.to_tensor()));
+
+            let grads = tape
+                .backward(&loss)
+                .unwrap_or_else(|e| panic!("test fixture: backward が失敗した: {e}"));
+            let grad_refs = bound
+                .trainable_grads(&grads)
+                .unwrap_or_else(|e| panic!("test fixture: trainable_grads が失敗した: {e}"));
+            let param_refs = model.trainable_parameters();
+            sgd.step(&param_refs, &grad_refs)
+                .unwrap_or_else(|e| panic!("test fixture: Sgd::step が失敗した: {e}"))
+        };
+        model
+            .apply_parameters(updated)
+            .unwrap_or_else(|e| panic!("test fixture: apply_parameters が失敗した: {e}"));
+    }
+
+    assert_eq!(log.len(), STEPS);
+    let initial = log[0];
+    let final_loss = *log.last().unwrap_or_else(|| unreachable!("log は空でない"));
+    assert!(final_loss.is_finite(), "final loss が非有限: {final_loss}");
+    assert!(
+        final_loss < initial,
+        "loss did not decrease: initial={initial} final={final_loss}"
+    );
+
+    // `OneCycleAnneal::Linear` 指定でも同モジュールから到達可能で
+    // あることを併せて確認する（facade のみ依存で `optim::
+    // {OneCycleAnneal, OneCycleLr, OneCycleLrConfig}` を使える裏付け）。
+    let linear_config = OneCycleLrConfig {
+        anneal_strategy: OneCycleAnneal::Linear,
+        ..OneCycleLrConfig::new(MAX_LR, TOTAL_STEPS)
+    };
+    let linear_scheduler = OneCycleLr::new(linear_config)
+        .unwrap_or_else(|e| panic!("test fixture: OneCycleLr::new(Linear) が失敗した: {e}"));
+    assert!((linear_scheduler.lr_at(0) - MAX_LR / 25.0).abs() < 1e-6);
+    assert!((linear_scheduler.lr_at(TOTAL_STEPS - 1) - MAX_LR / 25.0 / 1e4).abs() < 1e-6);
 }
