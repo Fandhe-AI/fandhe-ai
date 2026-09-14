@@ -587,12 +587,68 @@ impl BackendOps for CpuBackendOps {
     /// カーネル呼び出し契約・累積セマンティクスは不変（`gemm` 自体は
     /// 変更なし）。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
         let mut out = zeroed_output(m * n);
         gemm_into_slice(a, b, &mut out, m, n, k, "gemm")?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_batched`] の CPU
+    /// オーバーライド（イシュー #1715）。既定合成実装（バッチごとに
+    /// `Tensor` を新規確保して `self.gemm` を呼ぶ）と数値上は bit 同一
+    /// だが、出力バッファを 1 本だけ確保して各バッチを直接
+    /// `gemm_into_slice`（NT/TN 転置入口・`GEMM_HOST_REPACK_COUNT`
+    /// 計上込み。#1213）へ書き込むことでバッチ数ぶんの `Tensor` 確保・
+    /// `Vec` コピーを避ける（性能最適化はスコープ外。#1715 実装計画
+    /// §8。本オーバーライドは正しさのみを目的とし bit 同一契約を維持
+    /// する）。
+    ///
+    /// rank 2 同士（`plan.batch_shape` が空）は [`Self::gemm`] へ直接
+    /// 委譲する（既定合成実装と同じ「委譲時は同一カーネル呼び出しで
+    /// bit 同一」契約）。オペランドの正規化（broadcast・contiguous 化・
+    /// `[B, rows, cols]` への reshape）は既定合成実装
+    /// （`fandhe_ai_tensor_core::backend_ops::default_gemm_batched`）と
+    /// 同じ規則を持つ [`fandhe_ai_tensor_core::normalize_batched_operand`]
+    /// を再利用し、正規化ロジックを 2 重管理しない。
+    fn gemm_batched(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        let plan = fandhe_ai_tensor_core::batched_matmul_plan(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+
+        if plan.batch_shape.is_empty() {
+            return self.gemm(a, b);
+        }
+
+        let (m, k, n) = (plan.m, plan.k, plan.n);
+        let batch_len: usize = plan.batch_shape.iter().product();
+
+        let a_norm = fandhe_ai_tensor_core::normalize_batched_operand(a, &plan.batch_shape, m, k)?;
+        let b_norm = fandhe_ai_tensor_core::normalize_batched_operand(b, &plan.batch_shape, k, n)?;
+
+        let mn = m.checked_mul(n).ok_or_else(|| {
+            BackendError::InvalidArgument("gemm_batched: m * n overflowed usize".into())
+        })?;
+        let total = batch_len.checked_mul(mn).ok_or_else(|| {
+            BackendError::InvalidArgument("gemm_batched: batch_len * m * n overflowed usize".into())
+        })?;
+        let mut out = zeroed_output(total);
+
+        for i in 0..batch_len {
+            let a_i = a_norm
+                .narrow(0, i, 1)
+                .and_then(|t| t.reshape(&[m, k]))
+                .map_err(BackendError::ShapeMismatch)?;
+            let b_i = b_norm
+                .narrow(0, i, 1)
+                .and_then(|t| t.reshape(&[k, n]))
+                .map_err(BackendError::ShapeMismatch)?;
+            let dst = &mut out[i * mn..(i + 1) * mn];
+            gemm_into_slice(&a_i, &b_i, dst, m, n, k, "gemm_batched")?;
+        }
+
+        let out_shape = plan.out_shape();
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -615,7 +671,7 @@ impl BackendOps for CpuBackendOps {
         b: &Tensor<f32>,
         readout: ChecksumReadout,
     ) -> Result<GemmChecksum, BackendError> {
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -665,7 +721,7 @@ impl BackendOps for CpuBackendOps {
         if out.device() != Device::Cpu {
             return Err(BackendError::DeviceMismatch);
         }
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -701,7 +757,7 @@ impl BackendOps for CpuBackendOps {
         // （codex-review P2・PR #1224）。
         dst.fill(0.0);
         gemm_into_slice(a, b, dst, m, n, k, "gemm_fp32_strict_into")?;
-        let _ = out_shape; // shape 検証のみに使用（`matmul_out_shape` の失敗検出）
+        let _ = out_shape; // shape 検証のみに使用（`gemm_out_shape` の失敗検出）
         Ok(())
     }
 
@@ -738,7 +794,7 @@ impl BackendOps for CpuBackendOps {
         bias: Option<&Tensor<f32>>,
         act: Activation,
     ) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];

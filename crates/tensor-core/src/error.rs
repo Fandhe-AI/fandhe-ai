@@ -20,9 +20,11 @@ pub enum ShapeError {
     /// 要求される次元数（rank）と実際の次元数が一致しない。
     ///
     /// TASK-1.4a（#11）では型定義のみを提供し構築しなかった。本 variant は
-    /// `ops_shape::matmul_out_shape`（TASK-1.4c・#13）が rank ≠ 2 の
-    /// 入力を検出した際に初めて構築する（`docs/public-api-design.md`
-    /// §3.2 の matmul は 2 次元前提）。
+    /// `ops_shape::gemm_out_shape`（TASK-1.4c・#13。2 次元カーネル入口用）
+    /// が rank ≠ 2 の入力を検出した際、または `ops_shape::matmul_out_shape`
+    /// （イシュー #1715 でバッチ次元対応へ一般化。`docs/public-api-design.md`
+    /// §3.2・`docs/compat-api-scope.md` §1.2）が rank < 2 の入力を検出した
+    /// 際に構築する。
     RankMismatch { expected: usize, actual: usize },
 
     /// shape の要素数積とデータ長が一致しない
