@@ -227,3 +227,99 @@ fn bce_loss_rejects_shape_mismatch() {
     let backward = ops.bce_loss_backward(&input, &target, BceKind::Probabilities, 1.0);
     assert!(matches!(backward, Err(BackendError::ShapeMismatch(_))));
 }
+
+/// [`crate::bce::CHUNK`]（4096）と同値。`autodiff::eval::bce_loss`
+/// （ホストフォールバック。`BCE_HOST_FALLBACK_CHUNK`）が同じチャンクサイズ・
+/// 同じ縮約順序を使うことを、逆方向（本クレート側から見た固定チャンク
+/// 逐次縮約の意図的複製）で突合する（`autodiff` は `backend-cpu` へ
+/// 依存できない設計上の不変条件のため cross-crate 呼び出しはしない。
+/// PR #1848 codex-review 指摘の再発防止・イシュー #1737）。
+const HOST_FALLBACK_REFERENCE_CHUNK: usize = 4096;
+
+/// `eval::bce_elem_loss`（`crates/autodiff/src/eval.rs`）と数式的に同一
+/// の要素式（`bce.rs::bce_elem_loss` の意図的複製の複製。モジュール doc
+/// 「eval と CPU 実装の意図的複製」節と同型）。本ファイル冒頭の
+/// `naive_bce_elem_loss` は Logits 側が旧式（桁落ちしうる）ままのため、
+/// ここでは `Unsupported` フォールバック側と同じ現行の数値安定式を使う。
+fn stable_bce_elem_loss(input: f32, target: f32, kind: BceKind) -> f32 {
+    match kind {
+        BceKind::Probabilities => {
+            let log_p = input.ln().max(-100.0);
+            let log_1mp = (1.0 - input).ln().max(-100.0);
+            -(target * log_p + (1.0 - target) * log_1mp)
+        }
+        _ => {
+            if input >= 0.0 {
+                (1.0 - target) * input + (-input).exp().ln_1p()
+            } else {
+                -target * input + input.exp().ln_1p()
+            }
+        }
+    }
+}
+
+fn host_fallback_reference_sum(input: &[f32], target: &[f32], kind: BceKind) -> f32 {
+    input
+        .chunks(HOST_FALLBACK_REFERENCE_CHUNK)
+        .zip(target.chunks(HOST_FALLBACK_REFERENCE_CHUNK))
+        .map(|(i_chunk, t_chunk)| {
+            i_chunk
+                .iter()
+                .zip(t_chunk.iter())
+                .fold(0.0f32, |acc, (&p, &y)| {
+                    acc + stable_bce_elem_loss(p, y, kind)
+                })
+        })
+        .fold(0.0f32, |acc, v| acc + v)
+}
+
+/// codex-review 指摘（PR #1848）の再発防止回帰テスト: 本クレートの
+/// CPU 融合カーネル（`CpuBackendOps::bce_loss` → `bce::bce_sum_f32`）が
+/// `HOST_FALLBACK_REFERENCE_CHUNK`（= `bce::CHUNK`／`eval::
+/// BCE_HOST_FALLBACK_CHUNK` と同値）の固定チャンク縮約と bit 完全一致
+/// することを、チャンク境界を跨ぐ複数の `n`（`CHUNK-1`・`CHUNK`・
+/// `2*CHUNK+1`・大入力 `1<<20`）で検証する。
+#[test]
+fn bce_loss_forward_matches_host_fallback_reduction_bit_exact() {
+    let shapes = [
+        HOST_FALLBACK_REFERENCE_CHUNK - 1,
+        HOST_FALLBACK_REFERENCE_CHUNK,
+        2 * HOST_FALLBACK_REFERENCE_CHUNK + 1,
+        1usize << 20,
+    ];
+    for &n in &shapes {
+        for kind in [BceKind::Probabilities, BceKind::Logits] {
+            let (input_data, target_data): (Vec<f32>, Vec<f32>) = match kind {
+                BceKind::Probabilities => (vec![0.5f32; n], vec![0.0f32; n]),
+                _ => (vec![0.0f32; n], vec![0.0f32; n]),
+            };
+            let input = Tensor::new(input_data.clone(), &[n]).unwrap();
+            let target = Tensor::new(target_data.clone(), &[n]).unwrap();
+            for reduction in [MseReduction::Mean, MseReduction::Sum] {
+                let ops = CpuBackendOps::new();
+                let got = ops.bce_loss(&input, &target, kind, reduction).unwrap();
+                let actual = got.get(&[]).unwrap();
+
+                let sum = host_fallback_reference_sum(&input_data, &target_data, kind);
+                let numel = input_data.len();
+                let expected = match reduction {
+                    MseReduction::Mean => {
+                        if numel == 0 {
+                            0.0
+                        } else {
+                            sum / numel as f32
+                        }
+                    }
+                    MseReduction::Sum => sum,
+                    _ => sum,
+                };
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "bce_loss forward CPU fusion (n={n}, kind={kind:?}, reduction={reduction:?}): \
+                     actual={actual} expected={expected} bit 完全一致しない"
+                );
+            }
+        }
+    }
+}

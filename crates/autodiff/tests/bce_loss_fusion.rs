@@ -437,3 +437,101 @@ fn fused_bce_loss_backward_error_other_than_unsupported_propagates() {
         "expected KernelLaunchFailed to propagate without fallback, got {result:?}"
     );
 }
+
+/// CPU 融合カーネル（`backend-cpu::bce::bce_sum_f32`。`CHUNK = 4096`
+/// 固定チャンク・チャンク内逐次 `f32` 加算・チャンク間をチャンク番号順に
+/// 逐次結合）の縮約アルゴリズムの意図的複製（`autodiff` は
+/// `backend-cpu` へ依存できない設計上の不変条件〈本ファイル冒頭コメント〉
+/// のため、cross-crate 呼び出しではなく同一アルゴリズムの複製で突合する。
+/// `bce_elem_loss`〈本ファイル上部〉は `bce.rs`／`eval.rs` と数式的に
+/// 同一〈ゼロ入力では旧式・新式とも同一ビットに帰着する〉）。
+const CHUNKED_REFERENCE_CHUNK: usize = 4096;
+
+fn chunked_reference_sum(input: &[f32], target: &[f32], kind: BceKind) -> f32 {
+    input
+        .chunks(CHUNKED_REFERENCE_CHUNK)
+        .zip(target.chunks(CHUNKED_REFERENCE_CHUNK))
+        .map(|(i_chunk, t_chunk)| {
+            i_chunk
+                .iter()
+                .zip(t_chunk.iter())
+                .fold(0.0f32, |acc, (&p, &y)| acc + bce_elem_loss(p, y, kind))
+        })
+        .fold(0.0f32, |acc, v| acc + v)
+}
+
+fn chunked_reference_reduce(
+    input: &[f32],
+    target: &[f32],
+    kind: BceKind,
+    reduction: Reduction,
+) -> f32 {
+    let numel = input.len();
+    let sum = chunked_reference_sum(input, target, kind);
+    match reduction {
+        Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                sum / numel as f32
+            }
+        }
+        Reduction::Sum => sum,
+        // `Reduction` は `#[non_exhaustive]`（`var.rs` doc 参照）。未知
+        // variant は `Sum`（縮約なし）へ安全側フォールバックする
+        // （`eval::bce_loss` 本体の `match` は網羅的だが、本テスト
+        // ヘルパはライブラリ外のテストコードのため `non_exhaustive` の
+        // 影響を受ける）。
+        _ => sum,
+    }
+}
+
+/// codex-review 指摘（PR #1848。`crates/autodiff/src/eval.rs` L928
+/// 付近）の再発防止回帰テスト: `eval::bce_loss`（`AlwaysUnsupportedBceOps`
+/// でフォールバックを強制）が `CHUNKED_REFERENCE_CHUNK`（=
+/// `backend-cpu::bce::CHUNK`／`eval::BCE_HOST_FALLBACK_CHUNK` と同値）の
+/// 固定チャンク縮約と bit 完全一致することを、チャンク境界を跨ぐ
+/// 複数の `n`（`CHUNK-1`・`CHUNK`・`2*CHUNK+1`・大入力 `1<<20`）で検証
+/// する。`1<<20`・`Logits`・全要素 `logits=0`／`target=0` は指摘コメント
+/// が挙げた実測差分（相対差 約 0.00648・絶対差 約 0.00449）の再現条件と
+/// 一致する。
+#[test]
+fn bce_loss_fallback_reduction_matches_chunked_reference_bit_exact() {
+    let shapes = [
+        CHUNKED_REFERENCE_CHUNK - 1,
+        CHUNKED_REFERENCE_CHUNK,
+        2 * CHUNKED_REFERENCE_CHUNK + 1,
+        1usize << 20,
+    ];
+    for &n in &shapes {
+        for kind in [BceKind::Probabilities, BceKind::Logits] {
+            // `Probabilities` は `(0, 1)` 定義域制約があるため `0.5`／
+            // `0.0` を使い、`Logits` は指摘コメントの再現条件どおり
+            // `0.0`／`0.0` を使う。
+            let (input_data, target_data): (Vec<f32>, Vec<f32>) = match kind {
+                BceKind::Probabilities => (vec![0.5f32; n], vec![0.0f32; n]),
+                _ => (vec![0.0f32; n], vec![0.0f32; n]),
+            };
+            for reduction in [Reduction::Mean, Reduction::Sum] {
+                let ops = AlwaysUnsupportedBceOps {
+                    inner: common::naive_ops(),
+                };
+                let tape = Tape::new_with_ops(Box::new(ops));
+                let input = tape.var(&t(input_data.clone(), &[n]));
+                let target = tape.var(&t(target_data.clone(), &[n]));
+                let loss = match kind {
+                    BceKind::Probabilities => input.bce_loss(&target, reduction).unwrap(),
+                    _ => input.bce_with_logits_loss(&target, reduction).unwrap(),
+                };
+                let actual = scalar(&loss.to_tensor());
+                let expected = chunked_reference_reduce(&input_data, &target_data, kind, reduction);
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "bce_loss fallback (n={n}, kind={kind:?}, reduction={reduction:?}): \
+                     actual={actual} expected={expected} bit 完全一致しない"
+                );
+            }
+        }
+    }
+}
