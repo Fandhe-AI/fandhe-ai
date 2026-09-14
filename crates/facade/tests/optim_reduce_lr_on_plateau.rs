@@ -121,13 +121,17 @@ fn reduce_lr_on_plateau_drives_sgd_config_via_facade_only() {
                 .unwrap_or_else(|e| panic!("test fixture: trainable_grads が失敗した: {e}"));
 
             // 適用順序契約: backward → clip → optimizer step。
+            // `clip_grad_norm` は `grad_refs` を変更せず、クリップ後の
+            // 勾配は戻り値 `ClipGradResult::grads` に入る
+            // （`optim_train_loop.rs` と同じ契約）ため、`Sgd::step` には
+            // 必ず `clip_result.grads` から作った参照列を渡す。
             let clip_result = clip_grad_norm(&grad_refs, MAX_NORM)
                 .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));
-            let _ = clip_result;
+            let clipped_grad_refs: Vec<&Tensor<f32>> = clip_result.grads.iter().collect();
 
             let param_refs = model.trainable_parameters();
             let updated = sgd
-                .step(&param_refs, &grad_refs)
+                .step(&param_refs, &clipped_grad_refs)
                 .unwrap_or_else(|e| panic!("test fixture: Sgd::step が失敗した: {e}"));
             drop(bound);
             (updated, loss_value)
