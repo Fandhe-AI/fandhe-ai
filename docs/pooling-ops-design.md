@@ -108,20 +108,35 @@
 
 - rank 一致（2d は 4、1d 併合後も 4）。
 - `kernel ≥ 1`・`stride ≥ 1`・`dilation ≥ 1`。
-- `padding ≤ effective_kernel_size(kernel, dilation) / 2`（`
-  effective_kernel_size(k, d) = (k − 1) · d + 1`・整数除算は floor）。
-  PyTorch `aten/src/ATen/native/Pool.h::pooling_output_shape` の
-  `TORCH_CHECK(pad <= effective_kernel_size(kernelSize, dilation) / 2, …)`
-  を直接の出典として確認済み（2026-09-14 時点の `pytorch/pytorch` main
-  ブランチのソースを参照）。`(kernel − 1) · dilation / 2` という単純な
-  floor 式は誤り: 例えば `kernel=2, dilation=1, padding=1`（PyTorch は
-  許可。単純式では上限 `0` となり誤って拒否する）を誤判定する。Max／Avg
-  双方の検査に本式を適用する。境界値の受入例:
-  - `kernel=2, dilation=1, padding=1` → `effective_kernel_size=(2−1)·1+1=2`。
-    上限 `2/2=1` で `padding=1` は上限と等しいため許可。
-  - `kernel=3, dilation=2, padding=2` → `effective_kernel_size=(3−1)·2+1=5`。
-    上限 `5/2=2`（floor）。`padding=2` は上限と等しいため許可、
-    `padding=3` は上限超過のため拒否。
+- `padding ≤ floor(kernel / 2)`（**dilation に依存しない**）。PyTorch は
+  2 段の独立した検査を通過して初めて構成を受理する（`aten/src/ATen/
+  native/PoolingChecks.h::pool2d_shape_check` の
+  `TORCH_CHECK(kW/2 >= padW && kH/2 >= padH, "pad should be smaller than
+  or equal to half of kernel size", …)`〈dilation 非依存〉と、`aten/src/
+  ATen/native/Pool.h::pooling_output_shape` の `TORCH_CHECK(pad <=
+  effective_kernel_size(kernelSize, dilation) / 2, …)`〈`
+  effective_kernel_size(k, d) = (k − 1) · d + 1`。dilation 依存〉の両方。
+  いずれも curl で直接取得した `pytorch/pytorch` main ブランチのソース
+  〈2026-09-14 時点〉で確認済み）。`effective_kernel_size(k, d) ≥ k`
+  （`d ≥ 1` のとき等号は `d=1`）が常に成り立つため
+  `floor(effective_kernel_size(k,d)/2) ≥ floor(k/2)` となり、**`kW/2 ≥
+  padW` 側が常により厳しい（binding な）制約になる**。結果として両検査
+  の積集合は dilation に依存しない `padding ≤ floor(kernel/2)` に帰着
+  する。`((kernel − 1) · dilation + 1) / 2`（`effective_kernel_size`
+  のみを見た式）は `d > 1` のとき本来の上限より緩く、誤って許可してしまう
+  （下記の境界例を参照）。`(kernel − 1) · dilation / 2`（dilation 依存の
+  単純な floor 式）も `d=1` のとき `floor((k−1)/2) ≠ floor(k/2)` となる
+  ため誤って拒否しうる（例: `kernel=2, dilation=1` で `(2−1)·1/2=0` だが
+  真の上限は `floor(2/2)=1`）。Max／Avg 双方の検査に `floor(kernel/2)`
+  を適用する（Avg は `dilation=1` 固定のため、この式は Avg の実質的な
+  上限とも一致する）。境界値の受入例:
+  - `kernel=2, dilation=1, padding=1` → 上限 `floor(2/2)=1` で許可
+    （`padding=2` は上限超過のため拒否）。
+  - `kernel=3, dilation=2, padding=1` → 上限 `floor(3/2)=1` で許可。
+    `padding=2` は `effective_kernel_size` 側の検査（上限
+    `floor(5/2)=2`）だけを見ると許可されるように見えるが、`kW/2 ≥ padW`
+    側の検査（上限 `floor(3/2)=1`）で拒否される。dilation を増やしても
+    `floor(kernel/2)` 自体は変わらないため、この構成は拒否が正しい。
 - 出力長 `≥ 1`。
 - 要素数積は `checked_mul` で計算する（`reduction::max` の
   `ElementCountOverflow` パターンを踏襲）。
@@ -149,8 +164,8 @@
     `0.0 / 0.0` で `NaN`。forward・VJP 双方で発生しうる）を招く。
   - **非 adaptive 側は `padding > 0` のとき §4 の負分子ゲートだけでは
     不十分**であり本検査が必須: 例えば `in=0, k=2, s=2, p=1, d=1`
-    （`padding` 上限は `effective_kernel_size(2,1)/2=1` で `p=1` は
-    許可される構成）では分子 `0 + 2·1 − 1·(2−1) − 1 = 0` となり負分子
+    （`padding=1` は §3 の上限 `floor(2/2)=1` 以下のため許可される
+    構成）では分子 `0 + 2·1 − 1·(2−1) − 1 = 0` となり負分子
     ゲートを素通りして `pool_out_len = 0+1 = 1` を返してしまう
     （padding のみで構成された窓を「有効な出力」として通過させる誤り。
     `H=0`／`W=0` かつ `padding=0` の場合は従来どおり負分子ゲートでも
@@ -169,8 +184,8 @@ pool_out_len(in, k, s, p, d) = floor((in + 2p − d(k−1) − 1) / s) + 1
 
 除算は明示的に **floor**（数学的な意味での floor）と契約する。Rust の
 符号付き整数 `/` は **ゼロ方向丸め**であり、分子が負のとき floor と
-一致しない。例えば `in=1, k=2, s=2, p=0, d=1`（§3 の padding 上限
-`((2−1)·1+1)/2=1` により `padding=0` は許可される構成）では分子
+一致しない。例えば `in=1, k=2, s=2, p=0, d=1`（`padding=0` は §3 の
+上限 `floor(2/2)=1` 以下のため許可される構成）では分子
 `1 + 0 − 1·(2−1) − 1 = −1` となり、floor 除算では `floor(−1/2) = −1` で
 出力長 `−1+1 = 0` となり `ShapeError` で正しく拒否されるべきところ、Rust
 の `/` をそのまま使うと `−1 / 2 = 0`（ゼロ方向丸め）となり出力長
@@ -369,8 +384,10 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
   overflow（`checked_mul`）・`ceil_mode=true` 拒否・`padding` 上限超過の
   拒否。
 - `padding` 上限式（§3）の境界例: `kernel=2, dilation=1, padding=1`
-  （許可）・`kernel=3, dilation=2, padding=2`（許可）／`padding=3`
-  （拒否）を回帰テストとして固定する。
+  （許可）／`padding=2`（拒否）・`kernel=3, dilation=2, padding=1`
+  （許可）／`padding=2`（拒否。`effective_kernel_size` 側の検査だけでは
+  許可されてしまうため `kW/2 ≥ padW` 側の検査が効いていることを検証する
+  回帰）を固定する。
 - 出力長 floor 除算（§4）の負分子拒否: `in=1, k=2, s=2, p=0, d=1` が
   `ShapeError`（出力長 0）として拒否され、ゼロ方向丸めによる誤った出力長
   1 を返さないことを確認する。
