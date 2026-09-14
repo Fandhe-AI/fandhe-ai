@@ -1767,6 +1767,89 @@ fn cumprod_backward_matches_numeric_with_inner_axis() {
     cumprod_backward_case_along(x0, w, 1, "cumprod dX (3d inner axis)", Some(0));
 }
 
+/// ⑨.5 `cumprod` backward のオーバーフロー×零遮断の相互作用回帰テスト
+/// （codex-review 指摘・PR #1819）。長い軸（`axis_len = 40`）の先頭を
+/// 零要素、以降を `1e30`（`f32` 表現域には収まるが、`f64` でも十数個の連続積で表現域
+/// `1.8e308` を突破する規模）で埋める。素朴な浮動小数点乗算のままだと
+/// `S`（Horner 型再帰の後方累積）が零要素より後ろの区間で `inf` へ
+/// 発散し、`L[a] = 0`（零要素を跨いだ排他的 prefix 積）との積
+/// `0.0 * inf` が `NaN` を生む。零要素を跨いだ位置（`index >= 1`）の
+/// 真の勾配は理論上つねに厳密な `0.0`（`d(y[b])/d(x[a])` の積が零要素
+/// で遮断されるため）であるはずで、`NaN` に汚染されてはならない。
+/// 零要素自身（`index == 0`）は `S[0]` 自体が発散しうるため `inf` は
+/// 許容するが `NaN` は許容しない。中央差分（オーバーフロー環境では
+/// 数値的に破綻するため）は使わず、解析勾配の有限性・零遮断の厳密性
+/// のみを検証する。
+#[test]
+fn cumprod_backward_no_nan_when_zero_blocks_overflowing_suffix() {
+    const AXIS_LEN: usize = 40;
+    let mut data = vec![1e30f32; AXIS_LEN];
+    data[0] = 0.0;
+    let x0 = t(data, &[AXIS_LEN]);
+    let w = t(vec![1.0; AXIS_LEN], &[AXIS_LEN]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumprod(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    for a in 0..AXIS_LEN {
+        let v = dx.get(&[a]).unwrap_or(0.0);
+        assert!(
+            !v.is_nan(),
+            "cumprod backward (overflow×zero): index {a} の勾配が NaN になってはならない（実際: {v}）"
+        );
+        if a >= 1 {
+            assert_eq!(
+                v, 0.0,
+                "cumprod backward (overflow×zero): index {a} は L[{a}]=0 のため勾配は厳密に 0 のはず（実際: {v}）"
+            );
+        }
+    }
+}
+
+/// ⑨.6 同上のオーバーフロー×零遮断の相互作用を、複数の零要素を含む
+/// 長い軸で再確認する（codex-review 指摘の「複数零を含む回帰テスト」
+/// 要求への対応）。`axis_len = 50` に零要素を 2 箇所（先頭付近と中間）
+/// 配置し、両方の零要素より後ろで一貫して勾配が厳密 `0.0`・かつ
+/// `NaN` が出現しないことを検証する。
+#[test]
+fn cumprod_backward_no_nan_with_multiple_zeros_and_overflow() {
+    const AXIS_LEN: usize = 50;
+    const FIRST_ZERO: usize = 2;
+    const SECOND_ZERO: usize = 25;
+    let mut data = vec![1e30f32; AXIS_LEN];
+    data[FIRST_ZERO] = 0.0;
+    data[SECOND_ZERO] = 0.0;
+    let x0 = t(data, &[AXIS_LEN]);
+    let w = t(vec![1.0; AXIS_LEN], &[AXIS_LEN]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let wv = tape.var(&w);
+    let out = xv.cumprod(0).unwrap();
+    let loss = out.mul(&wv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    for a in 0..AXIS_LEN {
+        let v = dx.get(&[a]).unwrap_or(0.0);
+        assert!(
+            !v.is_nan(),
+            "cumprod backward (multi-zero×overflow): index {a} の勾配が NaN になってはならない（実際: {v}）"
+        );
+        if a > FIRST_ZERO {
+            assert_eq!(
+                v, 0.0,
+                "cumprod backward (multi-zero×overflow): index {a} は最初の零要素（{FIRST_ZERO}）より後ろなので勾配は厳密に 0 のはず（実際: {v}）"
+            );
+        }
+    }
+}
+
 /// エラー経路: `cumsum`／`cumprod` の `dim` が範囲外なら
 /// `AutodiffError::Shape(AxisOutOfRange)` を返す。
 #[test]

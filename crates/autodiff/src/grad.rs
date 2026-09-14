@@ -2472,6 +2472,19 @@ fn cumsum_vjp_along(upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
 /// 「零なしなら除算形」高速経路は意図的に不採用。計画立案時に中央
 /// 差分との数値突合で 0/1/2 零ケースを確認済み）。O(axis_len) per
 /// lane。
+///
+/// **零遮断とオーバーフローの相互作用（codex-review 指摘・PR #1819）**:
+/// `S`（Horner 型再帰）は掛け続ける `x` が大きいと、数学的には有限の
+/// 値でも `f64` 表現域（約 `1.8e308`）を超えて `inf` になりうる。一方
+/// `L[a]` はある軸上で零要素を跨いだ時点で厳密に `0.0` になり、その
+/// 位置より後ろの真の勾配は理論上つねに `0.0`（零要素が
+/// `d(y[b])/d(x[a])` の積を遮断するため）。ここで `l_acc * s_a` や
+/// `x_next * s_running` を素朴な浮動小数点乗算に任せると、
+/// `0.0 * inf = NaN`（IEEE 754 の不定形）となり、本来 `0.0` になるべき
+/// 勾配が `NaN` へ汚染される。そのため乗算の一方が厳密に `0.0` の場合は
+/// 明示的に `0.0` を返すガードを設け、`inf`／`NaN` を生成しうる汎用乗算
+/// を回避する（zero-dominates 規約。零要素による遮断は掛け算の相手が
+/// 何であっても結果を `0.0` に固定する）。
 fn cumprod_vjp_along(input: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
     let shape = input.shape().to_vec();
     if shape.contains(&0) {
@@ -2495,7 +2508,17 @@ fn cumprod_vjp_along(input: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -
                     g[idx] as f64
                 } else {
                     let idx_next = (o * axis_len + (a + 1)) * inner + i;
-                    g[idx] as f64 + (x[idx_next] as f64) * s_running
+                    let x_next = x[idx_next] as f64;
+                    // `x_next == 0.0` のとき、`s_running`（前段までの累積）が
+                    // すでに `inf`／`NaN` へ発散していても寄与項は厳密に
+                    // `0.0` として扱う（`0.0 * inf = NaN` を踏まない
+                    // zero-dominates ガード。doc 冒頭の相互作用の説明参照）。
+                    let term = if x_next == 0.0 {
+                        0.0
+                    } else {
+                        x_next * s_running
+                    };
+                    g[idx] as f64 + term
                 };
                 s_values[a] = s_running;
             }
@@ -2504,8 +2527,19 @@ fn cumprod_vjp_along(input: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -
             let mut l_acc: f64 = 1.0;
             for (a, &s_a) in s_values.iter().enumerate() {
                 let idx = (o * axis_len + a) * inner + i;
-                out[idx] = (l_acc * s_a) as f32;
-                l_acc *= x[idx] as f64;
+                // `l_acc == 0.0`（軸上で零要素を跨いだ後）なら `s_a` が
+                // `inf`／`NaN` に発散していても出力は厳密に `0.0` を書く
+                // （`0.0 * inf = NaN` ガード。L[a]=0 の位置の真の勾配は
+                // 常に 0 のため安全に固定できる）。
+                out[idx] = if l_acc == 0.0 {
+                    0.0
+                } else {
+                    (l_acc * s_a) as f32
+                };
+                let x_a = x[idx] as f64;
+                // `x_a == 0.0` なら `l_acc` がすでに `inf`／`NaN` でも
+                // 以降は厳密に `0.0` へ固定する（同上ガード）。
+                l_acc = if x_a == 0.0 { 0.0 } else { l_acc * x_a };
             }
         }
     }
