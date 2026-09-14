@@ -29,10 +29,26 @@ use crate::eval::dense_vec_ref;
 /// `torch.optim.Adagrad` と同一の既定値。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AdagradConfig {
+    /// 学習率（`lr`）。有限かつ `>= 0.0` を [`Adagrad::new`] が検証する。
     pub lr: f32,
+    /// 学習率の逓減係数（`clr = lr / (1 + (step-1) * lr_decay)`）。
+    /// 有限かつ `>= 0.0` を [`Adagrad::new`] が検証する。
     pub lr_decay: f32,
+    /// L2 正則化係数。PyTorch Adagrad と同じ coupled 方式（勾配へ
+    /// `weight_decay * param` を加算してから以降の更新式へ渡す。
+    /// `RmsProp::step` と同じ）。有限かつ `>= 0.0` を [`Adagrad::new`]
+    /// が検証する。
     pub weight_decay: f32,
+    /// `state_sum`（累積二乗和）の初期値。PyTorch は
+    /// `torch.full_like(param, initial_accumulator_value)` で初期化
+    /// する（0 スタートではない）。有限かつ `>= 0.0` を
+    /// [`Adagrad::new`] が検証する。
     pub initial_accumulator_value: f32,
+    /// ゼロ除算防止項（`eps`）。`std = sqrt(state_sum) + eps` の
+    /// `sqrt` の**後**に加算する（PyTorch と同順）。有限かつ `> 0.0`
+    /// を [`Adagrad::new`] が検証する（PyTorch は `eps >= 0` を許すが
+    /// 0 は初回 step でゼロ除算になるため `RmsProp::new` と同様に
+    /// 構築不可能な引数として弾く意図的な差異）。
     pub eps: f32,
 }
 
@@ -112,6 +128,7 @@ impl Adagrad {
         })
     }
 
+    /// 構築時に検証済みの現在のハイパーパラメータへの参照を返す。
     pub fn config(&self) -> &AdagradConfig {
         &self.config
     }
@@ -133,6 +150,51 @@ impl Adagrad {
         &mut self,
         params_and_grads: &[(&Tensor<f32>, &Tensor<f32>)],
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        // 副作用（`self.states` の初期化を含む）を一切加えない検証専用
+        // フェーズ。初回 step（`self.states` が空）でもここで
+        // `self.states` を書き換えてはならない——検証がここで失敗した
+        // 場合に `self.states` が非空のまま残ると、以降の呼び出しが
+        // 「初回 step 前」ではなく「失敗した初回 step で確定した
+        // （誤った）shape の 2 回目以降」として扱われ、shape を正しく
+        // 修正した再試行まで誤って拒否されてしまう（codex-review 指摘:
+        // 初回 step が形状検証より前に状態を確定させる契約違反。
+        // `rmsprop.rs::RmsProp::step` と同じ是正）。
+        if self.states.is_empty() {
+            for (param, grad) in params_and_grads {
+                if grad.shape() != param.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: grad.shape().to_vec(),
+                        rhs: param.shape().to_vec(),
+                    }));
+                }
+            }
+        } else {
+            if params_and_grads.len() != self.states.len() {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Adagrad::step: slot count changed across calls (expected {}, got {}); \
+                     Adagrad state (state_sum) is keyed by call-order slot index and cannot \
+                     be resized after the first step()",
+                    self.states.len(),
+                    params_and_grads.len()
+                )));
+            }
+
+            for (slot, (param, grad)) in self.states.iter().zip(params_and_grads.iter()) {
+                if param.shape() != slot.shape.as_slice() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: param.shape().to_vec(),
+                        rhs: slot.shape.clone(),
+                    }));
+                }
+                if grad.shape() != param.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: grad.shape().to_vec(),
+                        rhs: param.shape().to_vec(),
+                    }));
+                }
+            }
+        }
+
         if self.states.is_empty() && !params_and_grads.is_empty() {
             self.states = params_and_grads
                 .iter()
@@ -141,31 +203,6 @@ impl Adagrad {
                     state_sum: vec![self.config.initial_accumulator_value; param.numel()],
                 })
                 .collect();
-        }
-
-        if params_and_grads.len() != self.states.len() {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "Adagrad::step: slot count changed across calls (expected {}, got {}); \
-                 Adagrad state (state_sum) is keyed by call-order slot index and cannot \
-                 be resized after the first step()",
-                self.states.len(),
-                params_and_grads.len()
-            )));
-        }
-
-        for (slot, (param, grad)) in self.states.iter().zip(params_and_grads.iter()) {
-            if param.shape() != slot.shape.as_slice() {
-                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
-                    lhs: param.shape().to_vec(),
-                    rhs: slot.shape.clone(),
-                }));
-            }
-            if grad.shape() != param.shape() {
-                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
-                    lhs: grad.shape().to_vec(),
-                    rhs: param.shape().to_vec(),
-                }));
-            }
         }
 
         self.step_count += 1;
@@ -437,6 +474,40 @@ mod tests {
         assert!(
             (actual - expected).abs() < 1e-6,
             "閉形式との不一致: actual={actual} expected={expected}"
+        );
+    }
+
+    /// codex-review 指摘の回帰テスト（`rmsprop.rs` と同型）: 初回
+    /// `step()` が shape 不一致で失敗しても `self.states` が確定
+    /// してはならない。失敗した最初の呼び出しとは異なる shape（別
+    /// スロット数）で改めて呼び出した場合でも「本当の初回 step」
+    /// として成功しなければならない。
+    #[test]
+    fn failed_first_step_does_not_poison_state_for_different_shape_retry() {
+        let mut opt = Adagrad::new(AdagradConfig::default()).unwrap();
+
+        // 1 回目: 1 スロット・grad の shape が param と不一致で失敗。
+        let bad_param = t(vec![1.0, 2.0], &[2]);
+        let bad_grad = t(vec![1.0, 2.0, 3.0], &[3]);
+        let first = opt.step(&[(&bad_param, &bad_grad)]);
+        assert!(matches!(first, Err(AutodiffError::Shape(_))));
+
+        // 2 回目: 1 回目とは異なるスロット数（2 スロット）・異なる
+        // shape で呼び出す。`self.states` が汚染されていなければ
+        // これは「本当の初回 step」として成功するはず。
+        let param_a = t(vec![1.0], &[1]);
+        let grad_a = t(vec![0.1], &[1]);
+        let param_b = t(vec![1.0, 2.0, 3.0], &[3]);
+        let grad_b = t(vec![0.1, 0.1, 0.1], &[3]);
+        let second = opt.step(&[(&param_a, &grad_a), (&param_b, &grad_b)]);
+        assert!(
+            second.is_ok(),
+            "1 回目の失敗が state を汚染し 2 回目が誤って拒否された: {second:?}"
+        );
+        assert_eq!(
+            opt.step_count(),
+            1,
+            "成功した step のみ step_count が進むべき"
         );
     }
 }

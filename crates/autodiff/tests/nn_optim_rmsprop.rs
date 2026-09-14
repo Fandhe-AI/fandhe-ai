@@ -91,18 +91,17 @@ fn load_fixture() -> Fixture {
 }
 
 /// 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」
-/// （`.claude/rules/coding-rust.md`）。既存 tolerance の値を変更せず
-/// そのまま使う。
+/// （`.claude/rules/coding-rust.md`）。閾値・判定式は `common::req2_close`
+/// （`fandhe_ai_backend_cpu::parity::{RELATIVE_TOLERANCE,
+/// ABSOLUTE_RESCUE_THRESHOLD}` と揃えた単一真実源。`autodiff` は具体
+/// バックエンドクレートへ依存しない設計制約のため直接 import できず
+/// `tests/common/mod.rs` へ集約済み）へ委譲し、本ファイルで閾値を
+/// 再定義しない（codex-review 指摘対応: 閾値の分散定義は AGENTS.md
+/// 「ハードコード回避」の単一真実源維持規約違反）。
 fn assert_close(actual: f32, expected: f32, context: &str) {
-    let abs_err = (actual - expected).abs();
-    let rel_err = if expected != 0.0 {
-        abs_err / expected.abs()
-    } else {
-        abs_err
-    };
     assert!(
-        rel_err < 1e-3 || abs_err < 1e-5,
-        "{context}: actual={actual} expected={expected} (abs_err={abs_err}, rel_err={rel_err})"
+        common::req2_close(actual as f64, expected as f64),
+        "{context}: actual={actual} expected={expected}"
     );
 }
 
