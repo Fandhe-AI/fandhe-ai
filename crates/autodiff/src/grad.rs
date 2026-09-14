@@ -31,7 +31,7 @@
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError,
-    Tensor, row_norm_layout,
+    Tensor, VectorNormOrd, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -363,6 +363,30 @@ pub(crate) fn vjp(
             let da = max_vjp(input_val, dim, out_value, upstream);
             vec![(input, da)]
         }
+
+        Op::Var {
+            input,
+            dim,
+            correction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = var_vjp(input_val, dim, correction, upstream);
+            vec![(input, da)]
+        }
+        Op::VectorNorm { input, ord, dim } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = vector_norm_vjp(input_val, ord, dim, upstream);
+            vec![(input, da)]
+        }
+        Op::Std {
+            input,
+            dim,
+            correction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = std_vjp(input_val, dim, correction, upstream);
+            vec![(input, da)]
+        }
         Op::Min { input, dim } => {
             // `extremum_first_match_vjp`（`Op::Max` の `max_vjp` と
             // 共有する実体）を直接呼ぶ: forward 記録値 `out_value` と
@@ -379,6 +403,7 @@ pub(crate) fn vjp(
             // （`mean_vjp` 参照）。
             let input_shape = &nodes[input.0].shape;
             let da = mean_vjp(upstream, input_shape, dim);
+
             vec![(input, da)]
         }
         Op::MseLoss {
@@ -3491,6 +3516,235 @@ fn extremum_first_match_vjp(
         }
     }
     build_tensor(grad, &in_shape)
+}
+
+/// `Op::Var`（`Var::var`）の VJP: `da_i = g · 2(x_i − mean) / (n −
+/// correction)`（イシュー #1723）。`mean` は `out_value`（forward の
+/// `f32` downcast 済み記録値）を再利用せず `input` から改めて `f64` で
+/// 計算する——`matrix_norm_vjp`（`eval/linalg.rs`）と同じ理由（forward
+/// の丸め誤差を backward へ持ち込まない。`.claude/rules/coding-rust.md`
+/// の内部精度契約）。`softmax_vjp_along` と同じ「外側（outer）×走査軸
+/// （axis_len）×内側（inner）」の 3 段走査（`dim=None` は
+/// `outer=inner=1`）。`2(x_i − mean)` の計算・`g` との乗算・
+/// `(n − correction)` による除算はすべて `f64` のまま保持し、最後に
+/// 1 回だけ `f32` へ downcast する（縮約値を先に `f32` へ戻すと、
+/// 有限の `f32` 入力でも乗算結果が overflow しうるため）。
+fn var_vjp(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    correction: usize,
+    g: &Tensor<f32>,
+) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let (outer, axis_len, inner) = match dim {
+        None => (1usize, input.numel(), 1usize),
+        Some(axis) => (
+            shape[..axis].iter().product(),
+            shape[axis],
+            shape[axis + 1..].iter().product(),
+        ),
+    };
+    let data = dense_vec(input);
+    let g_data = dense_vec(g);
+    let n = axis_len as f64;
+    let denom = n - correction as f64;
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut mean_acc = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                mean_acc += data[src] as f64;
+            }
+            let mean = mean_acc / n;
+            let out_idx = o * inner + i;
+            let g_val = g_data.get(out_idx).copied().unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "var_vjp: g の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                );
+                0.0
+            }) as f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                let d = data[src] as f64 - mean;
+                out[src] = (g_val * 2.0 * d / denom) as f32;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::Std`（`Var::std`）の VJP: `da_i = g · (x_i − mean) / ((n −
+/// correction) · std)`（イシュー #1723 レビュー是正）。[`var_vjp`] と
+/// 同じ「`input` から改めて `f64` で計算する」方針だが、`std`
+/// （forward の `f32` downcast 済み記録値 `out_value`）も再利用せず
+/// `mean`／`sq_acc` から `f64` で改めて `sqrt` する——`var_vjp` の
+/// `2(x_i − mean) / denom` を `f32` へ downcast してから `0.5 / std`
+/// （`Var::sqrt` の VJP）を掛ける合成では、`2(x_i − mean) / denom`
+/// 自体が `f32` の範囲を超えて overflow しうる（`std` は最終的に
+/// 有限でも、途中の `var` の勾配項は無限大になりうるため。
+/// codex-review P2 指摘）。本関数は `(x_i − mean)` と `denom · std` の
+/// 除算を最後まで `f64` に保つことでこれを回避する。`std == 0`
+/// （縮約対象が全て同値の定数列）の要素は PyTorch `std_backward`
+/// （`FunctionsManual.cpp`）の
+/// `masked_fill_(result == 0, 0)` と同じ規約でゼロ勾配へ明示的に
+/// マスクする（`0.0 / 0.0` の `NaN` を伝播させない。判定は forward
+/// が実際に返す `f32` 丸め後の値と同じ丸めで行う）。これは
+/// `Var::var(..).sqrt()`（新規 `Op` を追加しない合成）を使った場合の
+/// 挙動——`Var::sqrt` の `y == 0` 規約により `0.0 / 0.0 = NaN` を
+/// 返す——とは意図的に異なる（`Var::std` の doc「数値規約」参照。
+/// codex-review 指摘。PR #1826 レビュー是正）。
+fn std_vjp(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    correction: usize,
+    g: &Tensor<f32>,
+) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let (outer, axis_len, inner) = match dim {
+        None => (1usize, input.numel(), 1usize),
+        Some(axis) => (
+            shape[..axis].iter().product(),
+            shape[axis],
+            shape[axis + 1..].iter().product(),
+        ),
+    };
+    let data = dense_vec(input);
+    let g_data = dense_vec(g);
+    let n = axis_len as f64;
+    let denom = n - correction as f64;
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut mean_acc = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                mean_acc += data[src] as f64;
+            }
+            let mean = mean_acc / n;
+            let mut sq_acc = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                let d = data[src] as f64 - mean;
+                sq_acc += d * d;
+            }
+            let std = (sq_acc / denom).sqrt();
+            // PyTorch `std_backward`（FunctionsManual.cpp）は forward の
+            // `f32` 出力 `result` が 0 の要素を `masked_fill_(result == 0,
+            // 0)` で明示的にゼロ勾配へ落としてから `var_backward` へ渡す
+            // （`0 / 0` の NaN 伝播を避ける）。ここでは `std` を 1 回
+            // `f32` へ downcast した値（forward が実際に返す `result` と
+            // 同じ丸め）で判定し、同じ規約に揃える（codex-review 指摘。
+            // PR #1826 レビュー是正）。
+            let std_is_zero = (std as f32) == 0.0;
+            let out_idx = o * inner + i;
+            let g_val = g_data.get(out_idx).copied().unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "std_vjp: g の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                );
+                0.0
+            }) as f64;
+            let denom_std = denom * std;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                if std_is_zero {
+                    out[src] = 0.0;
+                    continue;
+                }
+                let d = data[src] as f64 - mean;
+                out[src] = (g_val * d / denom_std) as f32;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::VectorNorm`（`Var::norm_l1`／`norm_l2`）の VJP（イシュー
+/// #1723）。[`var_vjp`] と同じ 3 段走査。
+///
+/// - `L1`: `da_i = g · sign(x_i)`（`sign(0) = 0`。`ScalarUnaryOp::Abs`
+///   の劣勾配規約〈`eval::scalar`〉と同じ）。総和のみのため `f64`
+///   縮約は不要。
+/// - `L2`: `‖x‖` を `input` から改めて `f64` で再計算し
+///   （`matrix_norm_vjp` の Fro ノルムと同じ理由）、`da_i = g · x_i /
+///   ‖x‖`。`‖x‖ == 0` の出力要素は勾配 0、`‖x‖` が `NaN`（入力に `NaN`
+///   を含む）の場合は明示的に `NaN` を伝播する（`matrix_norm_vjp` の
+///   NaN／ゼロ分岐構造を踏襲。`norm > 0.0` は NaN に対して常に偽になる
+///   ため、この分岐がないと NaN が黙って 0 として扱われ数値異常が
+///   隠れる）。
+fn vector_norm_vjp(
+    input: &Tensor<f32>,
+    ord: VectorNormOrd,
+    dim: Option<usize>,
+    g: &Tensor<f32>,
+) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let (outer, axis_len, inner) = match dim {
+        None => (1usize, input.numel(), 1usize),
+        Some(axis) => (
+            shape[..axis].iter().product(),
+            shape[axis],
+            shape[axis + 1..].iter().product(),
+        ),
+    };
+    let data = dense_vec(input);
+    let g_data = dense_vec(g);
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let out_idx = o * inner + i;
+            let g_val = g_data.get(out_idx).copied().unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "vector_norm_vjp: g の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                );
+                0.0
+            });
+            match ord {
+                VectorNormOrd::L1 => {
+                    for a in 0..axis_len {
+                        let src = (o * axis_len + a) * inner + i;
+                        let v = data[src];
+                        let sign = if v > 0.0 {
+                            1.0
+                        } else if v < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        };
+                        out[src] = g_val * sign;
+                    }
+                }
+                VectorNormOrd::L2 => {
+                    let mut sq_acc = 0.0f64;
+                    for a in 0..axis_len {
+                        let src = (o * axis_len + a) * inner + i;
+                        let v = data[src] as f64;
+                        sq_acc += v * v;
+                    }
+                    let norm = sq_acc.sqrt();
+                    for a in 0..axis_len {
+                        let src = (o * axis_len + a) * inner + i;
+                        let v = data[src] as f64;
+                        out[src] = if norm.is_nan() {
+                            f32::NAN
+                        } else if norm > 0.0 {
+                            (g_val as f64 * v / norm) as f32
+                        } else {
+                            0.0
+                        };
+                    }
+                }
+                // `VectorNormOrd` は `#[non_exhaustive]`。`eval::
+                // vector_norm_along` と同じ安全側フォールバック
+                // （寄与なし。到達しない想定）。
+                _ => {}
+            }
+        }
+    }
+    build_tensor(out, &shape)
 }
 
 /// `MseLoss{pred, target, reduction}` の VJP: `dPred = g · 2(pred −
