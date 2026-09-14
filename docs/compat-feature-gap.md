@@ -1027,6 +1027,7 @@ bool 引数との直接合成も #1613 待ち）。VJP は両入力とも常に�
 （比較演算は局所的に階段関数のため微分不可能）。CUDA／Metal 実機での
 facade parity 実測は本エージェント実行環境に実機がないため未実施の
 まま申し送る。
+
 ## #1713 の追補
 
 `Var::gelu`／`gelu_tanh`／`softplus`（GELU 誤差関数版・tanh 近似版・
@@ -1043,6 +1044,37 @@ Softplus）を実装済み化した。`ScalarUnaryOp::Gelu`／`GeluTanh`／
 builder はユーザー承認待ちで対象外のまま。CUDA／Metal 実機での facade
 parity テストは本実装エージェントの実行環境に実機への到達手段がない
 ため未実測のまま Mac／GB10 セッションへ申し送る。
+
+**#1714 追補（SiLU・LeakyReLU・ELU・Hardswish）**: 本調査時点で §2.4／
+§2.7 が欠落と判定した ReLU 系派生活性化のうち、SiLU／LeakyReLU／ELU／
+Hardswish を実装済み化した（GELU／Softplus は #1713 で別途実装済み。
+上記「#1713 の追補」参照）。
+`Var::silu`／`leaky_relu`／`elu`／`hardswish`（`ScalarUnaryOp::Silu`／
+`LeakyRelu`／`Elu`／`Hardswish` への薄い委譲。`#1592`／`#1634` が敷いた
+`ScalarUnaryOp` 汎用 dispatch 基盤の上）・`nn::activation::{Silu,
+Hardswish, LeakyRelu, Elu}`（`Module` 実装込み）・
+`compat::Sequential::add_silu`／`add_hardswish`／`add_leaky_relu`／
+`add_elu`を追加した。CUDA（`kernels_scalar_op.rs`）・Metal
+（`scalar_op_source.rs`）の専用カーネルも実装済み（`LeakyRelu`／
+`Hardswish` は選択・算術のみで bit 同一想定、`Silu`／`Elu` は超越関数
+〈`exp`〉を含むため REQ-2 統一複合判定のみ）。`LeakyRelu`／`Elu` は本
+実装で初めて 1 引数ペイロード（CUDA／Metal 双方に
+`UnaryPayload::One`）を持つ unary kind として追加した。Metal の `Elu`
+は MSL に `expm1` 相当が存在しないため、`exp`／`log` から桁落ちなく
+再構成する自作ヘルパー `fai_expm1_f32`（`u = exp(x)` を計算し
+`u == 1.0` なら `expm1(x) ≈ x`、`u == 0.0`〈underflow〉なら `-1.0f`、
+それ以外は `(u - 1) * x / log(u)` で再構成）を使う。単純な
+`exp(x) - 1.0f` による代替は `x=-1e-8, alpha=1e8` のようなゼロ近傍・
+大 `alpha` の入力で桁落ちし REQ-2 統一複合判定を満たさなかったため
+不採用（PR #1825 codex-review P1 是正）。ホスト `f32::exp_m1`（正確な
+libm 実装）とは一般に bit 同一にならず、超越関数系と同じく REQ-2
+統一複合判定のみで検証する（`scalar_op_source.rs` モジュール doc
+「`Elu` の `expm1` 非対応」参照）。facade `compat::Sequential::add_*` 4
+件の新規公開面は親 #1595 コメント（2026-09-12 ユーザー承認）に基づく
+`docs/compat-api-scope.md` §5 経路 2 の適用。CUDA（DGX Spark GB10）・
+Metal（Apple Silicon）実機での parity テストは、本実装エージェントの
+実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ
+申し送る。
 
 ## 追補（イシュー #1731）
 
