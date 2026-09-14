@@ -621,3 +621,59 @@ fn one_cycle_lr_is_object_safe_and_reachable_via_dyn_lr_scheduler() {
     let lr = boxed.lr_at(0);
     assert!(lr.is_finite(), "lr_at(0) が非有限: {lr}");
 }
+
+#[test]
+fn one_cycle_lr_cos_interior_point_stays_positive_despite_magnitude_mismatch() {
+    // codex-review 指摘（PR #1858）: `max_lr=1.0`・`total_steps=
+    // 1_000_000_000`・`div_factor=1e20`（他は既定値）では
+    // `initial_lr≈1e-20`・`min_lr≈1e-24` はともに正の `f32` として
+    // 表現可能（構築は成功する）が、区間内部（端点ではない）の
+    // `lr_at(1)` で旧コサイン補間式
+    // `end_lr + (start_lr-end_lr)/2*(cos_p+1)` を評価すると、
+    // `start_lr - end_lr` の減算で `start_lr`（1e-20）が `end_lr`
+    // （1.0）の桁に完全に埋もれて丸め落ちし、本来 `initial_lr` に
+    // 近い正の値を返すべきところが `0.0` になっていた
+    // （`Sgd::new` は非正の学習率を拒否するため、この `0.0` は
+    // 呼び出し側で fail-closed に拒否されてしまう）。
+    // 端点直接返却（`p<=0.0`/`p>=1.0`）だけでは区間内部を保護
+    // できないため、桁落ち耐性のある `sin²`／`cos²` 重み付き和へ
+    // 補間式を変更した（`lr_at` 実装コメント参照）。本テストは
+    // その是正を固定する。
+    let mut cfg = OneCycleLrConfig::new(1.0, 1_000_000_000);
+    cfg.div_factor = 1e20;
+    // `anneal_strategy` は既定 `Cos`（codex 指摘の再現に必須）。
+    let sched = OneCycleLr::new(cfg).unwrap();
+
+    let lr_at_1 = sched.lr_at(1);
+    assert!(
+        lr_at_1.is_finite() && lr_at_1 > 0.0,
+        "区間内部（step=1）の学習率は有限かつ正であるべき（桁落ちで 0.0 に \
+         なってはならない）: lr_at(1)={lr_at_1}"
+    );
+
+    // `Sgd::new` の非正学習率拒否契約（`crates/autodiff/src/optim/
+    // sgd.rs`）を実際に満たすことも固定する（codex 指摘の再現条件
+    // 「得られた学習率を `Sgd::new` に渡すと拒否される」の解消確認）。
+    let sgd_cfg = fandhe_ai_autodiff::optim::SgdConfig::new(lr_at_1);
+    assert!(
+        fandhe_ai_autodiff::optim::Sgd::new(sgd_cfg).is_ok(),
+        "lr_at(1)={lr_at_1} は Sgd::new に正の学習率として受理されるはず"
+    );
+
+    // 区間内部の他の複数点でも有限・正であることを広く確認する
+    // （境界付近だけでなく区間中央〜終端近傍も含める）。
+    let phase1_end = (0.3_f64 * 1_000_000_000.0 - 1.0) as usize;
+    for step in [
+        2usize,
+        10,
+        1_000,
+        phase1_end / 2,
+        phase1_end.saturating_sub(1),
+    ] {
+        let lr = sched.lr_at(step);
+        assert!(
+            lr.is_finite() && lr > 0.0,
+            "step={step} の学習率は有限かつ正であるべき: lr_at({step})={lr}"
+        );
+    }
+}

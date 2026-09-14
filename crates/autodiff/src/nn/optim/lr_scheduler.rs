@@ -381,7 +381,9 @@ struct OneCyclePhase {
 /// `[pct_start*total_steps-1, total_steps-1]`（`max_lr → min_lr`）の
 /// 2 区間、3 フェーズ形式では `max_lr → initial_lr → min_lr` の
 /// 3 区間を作る。各区間内は `anneal_strategy` に従い
-/// コサイン（`end + (start-end)/2*(cos(π*p)+1)`）または線形
+/// コサイン（`start*cos²(πp/2) + end*sin²(πp/2)`。`start`／`end` の
+/// 大きさが極端に異なる設定でも符号付き差分を経由しない桁落ち耐性の
+/// ある重み付き和で補間する。`lr_at` 実装コメント参照）または線形
 /// （`(end-start)*p+start`）で補間する（`p` は区間内の進捗 `[0,1]`）。
 ///
 /// # `step >= total_steps` の扱い（PyTorch との意図的な相違）
@@ -593,8 +595,25 @@ impl LrScheduler for OneCycleLr {
                 }
                 let value = match self.anneal_strategy {
                     OneCycleAnneal::Cos => {
-                        let cos_p = (std::f64::consts::PI * p).cos();
-                        phase.end_lr + (phase.start_lr - phase.end_lr) / 2.0 * (cos_p + 1.0)
+                        // codex-review 指摘: `end_lr + (start_lr-end_lr)/2
+                        // *(cos_p+1)` は `start_lr`／`end_lr` の大きさが
+                        // 極端に異なる設定（例: `div_factor=1e20`）では
+                        // `start_lr - end_lr` の減算段階で小さい方が
+                        // 完全に丸め落ち、区間内部（`p` が 0 側でも）で
+                        // 本来 `start_lr` に近いはずの値が `end_lr` の
+                        // 桁に埋もれて誤った値（極端な場合 `0.0`）を返す
+                        // （端点は既に上の `p<=0.0`/`p>=1.0` 早期 return
+                        // で回避済みだが、区間内部はこの式のままでは
+                        // 保護されない）。`(1+cos θ)/2 = cos²(θ/2)`・
+                        // `(1-cos θ)/2 = sin²(θ/2)` の倍角恒等式を使い、
+                        // 符号付き差分を経由しない非負の重み付き和
+                        // （`start_lr*w_start + end_lr*w_end`）へ書き
+                        // 換えることで、どちらの重みが優勢でも他方の
+                        // 値を完全には失わない補間にする。
+                        let half_theta = std::f64::consts::PI * p / 2.0;
+                        let w_end = half_theta.sin().powi(2);
+                        let w_start = half_theta.cos().powi(2);
+                        phase.start_lr * w_start + phase.end_lr * w_end
                     }
                     OneCycleAnneal::Linear => (phase.end_lr - phase.start_lr) * p + phase.start_lr,
                 };
