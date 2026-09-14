@@ -363,6 +363,15 @@ pub(crate) fn vjp(
             let da = max_vjp(input_val, dim, out_value, upstream);
             vec![(input, da)]
         }
+        Op::Mean { input, dim } => {
+            // `d(mean)/d(x_i) = 1/n`（`n` は forward〈`Var::mean`〉と
+            // 同じ縮約対象要素数）。`Sum` の VJP（複製）を `n` で割った
+            // ものに等しいため `unreduce_broadcast` を再利用する
+            // （`mean_vjp` 参照）。
+            let input_shape = &nodes[input.0].shape;
+            let da = mean_vjp(upstream, input_shape, dim);
+            vec![(input, da)]
+        }
         Op::MseLoss {
             pred,
             target,
@@ -3103,6 +3112,31 @@ fn unreduce_broadcast(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>
             }
         }
     }
+}
+
+/// `Mean{input, dim}` の VJP（イシュー #1719）。`d(mean)/d(x_i) = 1/n`
+/// （`n` は forward〈`Var::mean`〉と同じ縮約対象要素数）で、連鎖律
+/// により上流勾配 `g` の各要素を `n` で割ってから
+/// [`unreduce_broadcast`]（`Sum` の VJP＝複製）へ渡せば良い（`Sum` の
+/// VJP を `1/n` でスケールしたものが `Mean` の VJP と一致するため、
+/// 別実装を持たず合成する）。`n == 0` は forward（`Var::mean`）が
+/// 事前に `AutodiffError::InvalidArgument` で拒否しているため
+/// backward 側へは到達しない契約——到達した場合は 0 除算
+/// （`v / 0 == NaN`）を避け `g` を無加工のまま複製する安全側
+/// フォールバックとする（`unreduce_broadcast` 自身の契約違反
+/// フォールバック方針と同じ）。
+fn mean_vjp(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>) -> Tensor<f32> {
+    let n: usize = match dim {
+        None => input_shape.iter().product(),
+        Some(axis) => input_shape.get(axis).copied().unwrap_or(0),
+    };
+    if n == 0 {
+        debug_assert!(false, "mean_vjp: n が 0（契約違反）");
+        return unreduce_broadcast(g, input_shape, dim);
+    }
+    let scaled_data: Vec<f32> = dense_vec(g).into_iter().map(|v| v / n as f32).collect();
+    let scaled = build_tensor(scaled_data, g.shape());
+    unreduce_broadcast(&scaled, input_shape, dim)
 }
 
 /// `Max` の VJP: 出力側勾配 `g` を、縮約軸に沿った最大値の位置のみへ
