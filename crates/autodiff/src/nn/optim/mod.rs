@@ -74,7 +74,7 @@ pub use lr_scheduler::{ConstantLr, LrScheduler, StepLr};
 // は追加していない（`amp` モジュール冒頭 doc 参照。`scale_loss` は
 // 既存 `Var::mul` の合成のみ）。facade（`fandhe_ai::optim`）への公開・
 // `crates/facade/tests/api_surface.rs` の期待集合更新・
-// `docs/compat-api-scope.md` §1.3 AMP 行の更新は別イシュー（#1722）へ
-// 引き継ぐ（ユーザー承認前に facade 公開面を拡大しないため）。真の
-// 混合精度（f16 forward／f32 master weight）は対象外
+// `docs/compat-api-scope.md` §1.3 AMP 行の更新はイシュー #1722 で
+// 完了済み（純再エクスポート。`crates/facade/src/optim.rs` 参照）。
+// 真の混合精度（f16 forward／f32 master weight）は対象外
 // （`docs/backend-dtype-dispatch-design.md` §8）。
