@@ -30,6 +30,10 @@
 //! `objc2-metal` と同じ cfg 境界。`.claude/rules/deps-policy.md`）。
 //! 非 macOS 環境ではこのファイル自体がコンパイル対象に入らない
 //! （`lib.rs` の cfg 境界と整合。`device.rs` と同方針）。
+//!
+//! `f16` の [`fandhe_ai_tensor_core::TypedOps<half::f16>`] 実装は
+//! `crate::typed_f16` に置く（イシュー #1705。`typed_ops_f16` accessor
+//! はこのファイルで結線する）。
 
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
@@ -1028,6 +1032,15 @@ impl BackendOps for MetalBackendOps {
     /// `None`（`memory_ops` のデフォルト契約と同じ fail-safe）。
     fn memory_ops(&self) -> Option<&dyn MemoryOps> {
         static_metal_memory().ok().map(|m| m as &dyn MemoryOps)
+    }
+
+    /// `crate::typed_f16::MetalBackendOps`（`impl TypedOps<f16>`）への
+    /// capability accessor（イシュー #1705）。`typed_ops_f64` は
+    /// オーバーライドせず既定 `None`（恒久 `Unsupported`。MSL に
+    /// `double` 型が存在せず構造的に不可。`docs/backend-dtype-
+    /// dispatch-design.md` §5・§14）のまま残す。
+    fn typed_ops_f16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::f16>> {
+        Some(self)
     }
 
     /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
