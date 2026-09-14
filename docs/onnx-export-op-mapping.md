@@ -73,6 +73,15 @@ import 側（`decode_tensor`）がエラーメッセージにしか使わない�
 `ExportError::InputArityMismatch`／`OutputArityMismatch`／
 `EmptyRequiredInput` で拒否する。
 
+「最小個数」判定と「必須入力の空文字列拒否」判定は別軸である
+（`check_arity` の `min_inputs`／`all_variadic_required` 引数）。`Slice` は
+`ends`（第 3 入力）が必須のため `min_inputs=3`（`data, starts, ends` の 3 個
+未満は arity 違反・`axes`/`steps` の 2 個は省略可入力として空文字列を許容）。
+`Concat` は可変長入力の全要素が必須（ONNX 仕様上どの要素も省略できない）
+のため、`min_inputs=1`（1 個以上の arity 検査）とは独立に
+`all_variadic_required=true` を渡し、実際に渡された全入力位置の空文字列を
+拒否する。
+
 ## 5. 対象外事項
 
 - autodiff `Op`／`Tape`／`Sequential` -> `ExportOp` の橋渡し・facade 公開

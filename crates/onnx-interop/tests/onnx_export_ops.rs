@@ -776,6 +776,71 @@ fn concat_accepts_arbitrary_input_count_but_rejects_zero() {
     assert!(to_node_proto(&many).is_ok());
 }
 
+#[test]
+fn concat_rejects_empty_string_at_any_variadic_position() {
+    // `Concat` は可変長入力の全要素が必須（ONNX 仕様上どの要素も省略でき
+    // ない）。`min_inputs=1` を満たす個数でも、2 番目以降が空文字列なら
+    // `compute_concat` が実行時に失敗するため export 側で拒否する
+    // （回帰: 以前は `i < min_inputs` のみの検査で 2 番目以降の空文字列を
+    // 見逃していた）。
+    let node = ExportNode {
+        name: "concat_empty_second".to_string(),
+        op: ExportOp::Concat { axis: 0 },
+        inputs: vec!["a".to_string(), String::new(), "c".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+    assert!(matches!(
+        to_node_proto(&node),
+        Err(ExportError::EmptyRequiredInput { index: 1, .. })
+    ));
+}
+
+#[test]
+fn slice_requires_ends_input_and_rejects_missing_or_empty() {
+    // ONNX `Slice`（opset>=13 形）は `ends`（第 3 入力）が必須。
+    // `compute_slice` は `input_name(node, 2)`（必須扱い）で読むため、
+    // `data, starts` のみ（2 入力）や `ends` が空文字列のノードを export
+    // すると再実行不能なモデルになる（回帰: 以前は `min_inputs=2` で
+    // `ends` 欠落・空文字列ともに通過してしまっていた）。
+    let missing_ends = ExportNode {
+        name: "slice_missing_ends".to_string(),
+        op: ExportOp::Slice,
+        inputs: vec!["data".to_string(), "starts".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+    assert!(matches!(
+        to_node_proto(&missing_ends),
+        Err(ExportError::InputArityMismatch { actual: 2, .. })
+    ));
+
+    let empty_ends = ExportNode {
+        name: "slice_empty_ends".to_string(),
+        op: ExportOp::Slice,
+        inputs: vec!["data".to_string(), "starts".to_string(), String::new()],
+        outputs: vec!["y".to_string()],
+    };
+    assert!(matches!(
+        to_node_proto(&empty_ends),
+        Err(ExportError::EmptyRequiredInput { index: 2, .. })
+    ));
+
+    // `axes`／`steps`（index 3, 4）は引き続き省略可入力として空文字列を
+    // 許容する（`ends` までの 3 入力は必須のまま）。
+    let optional_axes_steps_empty = ExportNode {
+        name: "slice_optional_empty".to_string(),
+        op: ExportOp::Slice,
+        inputs: vec![
+            "data".to_string(),
+            "starts".to_string(),
+            "ends".to_string(),
+            String::new(),
+            String::new(),
+        ],
+        outputs: vec!["y".to_string()],
+    };
+    assert!(to_node_proto(&optional_axes_steps_empty).is_ok());
+}
+
 // ---- 層 B: check_exportable（allowlist・domain 検査） ----
 
 #[test]

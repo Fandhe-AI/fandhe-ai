@@ -245,9 +245,16 @@ fn attr_tensor(
 /// 入力個数・`require_single_output` と対称）。`min_inputs..=max_inputs`
 /// （`max_inputs = usize::MAX` は上限なし＝可変長。`Concat` 専用）の範囲外は
 /// [`ExportError::InputArityMismatch`]、出力が 1 個以外は
-/// [`ExportError::OutputArityMismatch`] を返す。`min_inputs` 未満の位置（必須
-/// 入力）が空文字列の場合は [`ExportError::EmptyRequiredInput`]（省略可入力
-/// 〈`min_inputs` 以降〉は空文字列を許容する。`interp.rs` の
+/// [`ExportError::OutputArityMismatch`] を返す。
+///
+/// 「最小個数」判定（`min_inputs..=max_inputs`）と「必須入力の空文字列拒否」
+/// 判定は別軸である（`min_inputs` を満たしていても、それより手前の位置が
+/// 空文字列で省略される ONNX の慣習があるため）。`all_variadic_required`
+/// が `false` の場合は `min_inputs` 未満の位置のみ必須（`min_inputs` 以降は
+/// 省略可入力として空文字列を許容する）。`true` の場合（`Concat` 専用）は
+/// 可変長入力の全要素が必須のため、実際に渡された `inputs` の全位置を検査
+/// する（可変長入力は ONNX 仕様上どの要素も省略できない）。空文字列の必須
+/// 入力は [`ExportError::EmptyRequiredInput`] を返す（`interp.rs` の
 /// `node.input.get(N)` が `Some(name) if !name.is_empty()` で判定する慣習と対称）。
 fn check_arity(
     node_name: &str,
@@ -256,6 +263,7 @@ fn check_arity(
     outputs: &[String],
     min_inputs: usize,
     max_inputs: usize,
+    all_variadic_required: bool,
 ) -> Result<(), ExportError> {
     if outputs.len() != 1 {
         return Err(ExportError::OutputArityMismatch {
@@ -281,7 +289,7 @@ fn check_arity(
         });
     }
     for (i, name) in inputs.iter().enumerate() {
-        if i < min_inputs && name.is_empty() {
+        if (all_variadic_required || i < min_inputs) && name.is_empty() {
             return Err(ExportError::EmptyRequiredInput {
                 node_name: node_name.to_string(),
                 op_type,
@@ -317,7 +325,15 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
     let op_type = node.op.op_type();
     match &node.op {
         ExportOp::Gemm(attrs) => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 2, 3)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                2,
+                3,
+                false,
+            )?;
             let attribute = vec![
                 attr_float("alpha", attrs.alpha),
                 attr_float("beta", attrs.beta),
@@ -327,11 +343,27 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
             Ok(build_node(node, op_type, attribute))
         }
         ExportOp::MatMul | ExportOp::Add | ExportOp::Mul | ExportOp::Div => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 2, 2)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                2,
+                2,
+                false,
+            )?;
             Ok(build_node(node, op_type, Vec::new()))
         }
         ExportOp::Mod { fmod } => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 2, 2)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                2,
+                2,
+                false,
+            )?;
             Ok(build_node(
                 node,
                 op_type,
@@ -339,15 +371,39 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
             ))
         }
         ExportOp::Sqrt | ExportOp::Relu | ExportOp::Sigmoid | ExportOp::Erf => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 1, 1)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                1,
+                1,
+                false,
+            )?;
             Ok(build_node(node, op_type, Vec::new()))
         }
         ExportOp::Softmax { axis } => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 1, 1)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                1,
+                1,
+                false,
+            )?;
             Ok(build_node(node, op_type, vec![attr_int("axis", *axis)]))
         }
         ExportOp::Reshape { allowzero } => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 2, 2)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                2,
+                2,
+                false,
+            )?;
             Ok(build_node(
                 node,
                 op_type,
@@ -355,19 +411,51 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
             ))
         }
         ExportOp::Shape => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 1, 1)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                1,
+                1,
+                false,
+            )?;
             Ok(build_node(node, op_type, Vec::new()))
         }
         ExportOp::Gather { axis } => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 2, 2)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                2,
+                2,
+                false,
+            )?;
             Ok(build_node(node, op_type, vec![attr_int("axis", *axis)]))
         }
         ExportOp::Unsqueeze => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 2, 2)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                2,
+                2,
+                false,
+            )?;
             Ok(build_node(node, op_type, Vec::new()))
         }
         ExportOp::Squeeze => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 1, 2)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                1,
+                2,
+                false,
+            )?;
             Ok(build_node(node, op_type, Vec::new()))
         }
         ExportOp::Concat { axis } => {
@@ -378,15 +466,32 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
                 &node.outputs,
                 1,
                 usize::MAX,
+                true,
             )?;
             Ok(build_node(node, op_type, vec![attr_int("axis", *axis)]))
         }
         ExportOp::Slice => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 2, 5)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                3,
+                5,
+                false,
+            )?;
             Ok(build_node(node, op_type, Vec::new()))
         }
         ExportOp::Transpose { perm } => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 1, 1)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                1,
+                1,
+                false,
+            )?;
             let attribute = match perm {
                 Some(p) => vec![attr_ints("perm", p)],
                 None => Vec::new(),
@@ -394,11 +499,27 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
             Ok(build_node(node, op_type, attribute))
         }
         ExportOp::Cast { to } => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 1, 1)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                1,
+                1,
+                false,
+            )?;
             Ok(build_node(node, op_type, vec![attr_int("to", *to)]))
         }
         ExportOp::Constant(attr) => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 0, 0)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                0,
+                0,
+                false,
+            )?;
             let attribute = match attr {
                 ConstantAttr::Tensor(raw) => {
                     let out_name = node.outputs[0].clone();
@@ -412,7 +533,15 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
             Ok(build_node(node, op_type, attribute))
         }
         ExportOp::LayerNormalization(attrs) => {
-            check_arity(&node.name, op_type, &node.inputs, &node.outputs, 2, 3)?;
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                2,
+                3,
+                false,
+            )?;
             Ok(build_node(
                 node,
                 op_type,
