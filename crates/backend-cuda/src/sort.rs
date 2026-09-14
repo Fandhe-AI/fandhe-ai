@@ -141,6 +141,23 @@ impl CudaSort {
             ..
         } = plan;
 
+        // `out_len` はキー配列（`lines * padded` 長）から `values`／
+        // `index` を復元するための読み出し本数を決める。本メソッドの
+        // doc は「呼び出し元 `ops.rs` が事前検査済みの契約」と記すが、
+        // 本メソッド自体は `pub` で crate 内から直接到達しうるため
+        // ここでも独立に検証する（Metal 側 `sort.rs::MetalSort::
+        // run_sort_f32` に対する PR #1844 codex-review P0 是正の同型
+        // 適用）。`out_len > dim_size` を確保・乗算前に拒否しないと、
+        // `kernels_sort.rs::SORT_FINALIZE_F32` が `keys[line * padded +
+        // o]`（`o < out_len`）で `padded` 境界を超えて読み出しうる
+        // （`dim_size <= padded` は常に成り立つため `out_len <=
+        // dim_size` の検証で `o < padded` も保証される）。
+        if out_len > dim_size {
+            return Err(CudaError::InvalidSortShape {
+                detail: format!("out_len {out_len} exceeds dim_size {dim_size}"),
+            });
+        }
+
         let numel_in = checked_i64(input.len(), "numel_in")?;
         let numel_out = checked_i64(lines * out_len, "numel_out")?;
         let lines_i = checked_i64(lines, "lines")?;

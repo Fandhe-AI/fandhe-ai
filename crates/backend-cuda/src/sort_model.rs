@@ -92,9 +92,15 @@ pub const PADDING_KEY: u64 = u64::MAX;
 /// `dim` 軸に沿ったライン分解（モジュール doc「ライン分解」参照）。
 /// `shape` は空要素を含まないこと（呼び出し元が事前に検査する契約。
 /// `sort.rs::CudaSort::run_sort_f32` は空 shape を GPU 起動なしで
-/// 早期処理する）。
+/// 早期処理する）。`dim >= shape.len()`（軸範囲外）は panic せず
+/// `None` を返す（PR #1844 codex-review P1 是正〈Metal 側指摘の
+/// 同型・意図的複製〉: 本関数は `pub` で crate 内から直接到達しうる
+/// ため、`ops.rs::sort`／`topk` が事前に行う `sort_out_shape`／
+/// `topk_out_shape` の軸検査に頼らず自前でも防御する。呼び出し元
+/// [`plan_sort`] は既存の `SizeLimitExceeded` へ写像し型付きエラー
+/// として伝播する）。
 pub fn line_layout(shape: &[usize], dim: usize) -> Option<(usize, usize, usize)> {
-    let dim_size = shape[dim];
+    let dim_size = *shape.get(dim)?;
     let outer: usize = shape[..dim]
         .iter()
         .try_fold(1usize, |acc, &s| acc.checked_mul(s))?;
@@ -387,6 +393,24 @@ mod tests {
     fn plan_sort_rejects_dim_size_overflow() {
         let err = plan_sort(&[(i32::MAX as usize) + 1], 0).unwrap_err();
         assert!(matches!(err, SortPrepareError::DimSizeTooLarge { .. }));
+    }
+
+    /// PR #1844 codex-review P1 是正の回帰: `dim >= shape.len()`
+    /// （軸範囲外）で `line_layout` が panic せず `None` を返すこと・
+    /// `plan_sort` がそれを型付きエラーへ写像し panic しないことを
+    /// 固定する（`ops.rs::sort`／`topk` の事前検査を経由しない直接
+    /// 呼び出しでも安全である契約）。
+    #[test]
+    fn line_layout_rejects_dim_out_of_range() {
+        assert_eq!(line_layout(&[3, 4], 2), None);
+        assert_eq!(line_layout(&[1], 1), None);
+        assert_eq!(line_layout(&[], 0), None);
+    }
+
+    #[test]
+    fn plan_sort_rejects_dim_out_of_range_without_panic() {
+        let err = plan_sort(&[1], 1).unwrap_err();
+        assert!(matches!(err, SortPrepareError::SizeLimitExceeded { .. }));
     }
 
     /// [`sort_lines_host_model`] と CPU 参照実装

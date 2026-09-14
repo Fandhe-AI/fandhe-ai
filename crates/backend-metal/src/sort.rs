@@ -125,6 +125,23 @@ impl MetalSort {
                 ),
             });
         }
+        // `out_len` はキー配列（`lines * padded` 長）から `values`／
+        // `index` を復元するための読み出し本数を決める（`ops.rs` から
+        // `sort` は `dim_size`・`topk` は `k` を渡す契約）。呼び出し元
+        // `ops.rs::sort`／`topk` は `sort_out_shape`／`topk_out_shape`
+        // で `out_len <= dim_size` を事前検証済みだが、本メソッドは
+        // `pub` で crate 内から直接到達しうるためここでも独立に検証
+        // する（PR #1844 codex-review P0 是正）。`out_len > dim_size`
+        // を確保・乗算前に拒否しないと、`sort_finalize_f32`
+        // （`shaders/sort.metal`）が `keys[line * padded + o]`
+        // （`o < out_len`）で `padded` 境界を超えて読み出しうる
+        // （`dim_size <= padded` は常に成り立つため `out_len <=
+        // dim_size` の検証で `o < padded` も保証される）。
+        if out_len > dim_size {
+            return Err(MetalError::InvalidGatherScatterShape {
+                detail: format!("sort/topk: out_len {out_len} exceeds dim_size {dim_size}"),
+            });
+        }
 
         let total_keys = lines * padded;
         let total_out = lines * out_len;

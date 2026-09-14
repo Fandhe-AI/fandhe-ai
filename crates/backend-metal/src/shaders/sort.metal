@@ -131,6 +131,14 @@ kernel void sort_finalize_f32(
     }
     uint line = gid / out_len;
     uint o = gid % out_len;
+    // `keys` は `lines * padded` 長（本カーネル doc 参照）。ホスト側
+    // （`sort.rs::MetalSort::run_sort_f32`）は起動前に `out_len <=
+    // dim_size <= padded` を検証済みだが、REQ-8（カーネル境界検査
+    // 規約）に従い本カーネルでも `o < padded` を読み出し前に自前で
+    // 検査する（PR #1844 codex-review P0 是正）。
+    if (o >= padded) {
+        return;
+    }
     ulong key = keys[(ulong)line * (ulong)padded + (ulong)o];
     uint idx = (uint)(key & 0xFFFFFFFFUL);
     if (idx >= dim_size) {
