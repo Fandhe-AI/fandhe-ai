@@ -1274,6 +1274,71 @@ pub(crate) fn masked_fill(x: &Tensor<f32>, mask: &Tensor<f32>, value: f32) -> Te
     build_tensor(out, &shape)
 }
 
+/// 定数パディングのホスト参照実装（`torch.nn.functional.pad
+/// (mode='constant')` 相当。イシュー #1756）。`BackendOps::pad` が
+/// `Unsupported` を返したときのみ `grad::pad_with_fallback` から
+/// 呼ばれる。
+///
+/// `out_shape` は呼び出し元（`Var::pad`／`grad::pad_with_fallback`）が
+/// [`fandhe_ai_tensor_core::pad_out_shape`] で検査・確定済みの出力
+/// shape をそのまま渡す（本関数は shape 再検査を行わない前提）。
+/// `input` は strided view（`dense_vec_ref` で稠密化してから読む）で
+/// よい。算術を含まない純粋なコピー演算のため、`input` の要素は
+/// bit そのままパディング先へ写す（`value` も同様に bit そのまま
+/// 書き込む——バックエンド間 bit 完全一致契約。`.claude/rules/
+/// coding-rust.md` 数値契約節参照）。
+///
+/// レイアウト分解: 出力を全域 `value` で初期化した後、`input` の
+/// 各「行」（最終軸を除く多次元添字ごとの最内軸スライス）を
+/// `before` オフセット分だけ平行移動した出力位置へ `copy_from_slice`
+/// する（`concat` と同型の「最内軸は行単位でコピー」方針）。
+pub(crate) fn pad(
+    input: &Tensor<f32>,
+    pads: &[(usize, usize)],
+    value: f32,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    // `out_shape` のいずれかの次元が 0 のとき、他の次元同士の部分積
+    // （本関数は要素数積を一括計算するため対象は全体積そのものだが、
+    // `concat`／`softmax_along` と同じ理由で）が `usize` オーバーフロー
+    // しうる（例: `[0, usize::MAX, 2]` は全体積が 0 だが `usize::MAX * 2`
+    // の時点で既にオーバーフローする）ため、積を計算する前に空出力へ
+    // 早期 return する（本番経路 panic 禁止規約・`.claude/rules/
+    // coding-rust.md`）。
+    if out_shape.contains(&0) {
+        return build_tensor(Vec::new(), out_shape);
+    }
+    let rank = out_shape.len();
+    let out_numel: usize = out_shape.iter().product();
+    let mut out = vec![value; out_numel];
+    let in_shape = input.shape().to_vec();
+    if in_shape.contains(&0) {
+        // 入力が空でも出力は非空になりうる（全要素 `value`）。
+        return build_tensor(out, out_shape);
+    }
+    let data = dense_vec_ref(input);
+    if rank == 0 {
+        // rank 0（スカラー）は pads が空のため恒等コピー。
+        out[0] = data[0];
+        return build_tensor(out, out_shape);
+    }
+    let out_strides = row_major_strides(out_shape);
+    let inner = in_shape[rank - 1];
+    let front_shape = &in_shape[..rank - 1];
+    let outer: usize = front_shape.iter().product();
+    let before_inner = pads[rank - 1].0;
+    for o in 0..outer {
+        let front_idx = unravel(o, front_shape);
+        let mut out_offset = before_inner;
+        for (axis, &fi) in front_idx.iter().enumerate() {
+            out_offset += (fi + pads[axis].0) * out_strides[axis];
+        }
+        let src_start = o * inner;
+        out[out_offset..out_offset + inner].copy_from_slice(&data[src_start..src_start + inner]);
+    }
+    build_tensor(out, out_shape)
+}
+
 /// 行優先（C-order）ストライドを計算する（`Tensor::contiguous()` が
 /// 実体化する順序と同一の走査順を、`gather`／`scatter`（下記）が
 /// 独自に `input`／`index` の多次元添字から線形添字を導出するために
@@ -2541,5 +2606,116 @@ mod concat_empty_out_shape_overflow_tests {
         let expected = ((2u128 * in_size as u128) / 3) as usize;
         assert_eq!(src, expected);
         assert!(src < in_size);
+    }
+}
+
+#[cfg(test)]
+mod pad_tests {
+    use super::*;
+    use fandhe_ai_tensor_core::pad_out_shape;
+
+    #[test]
+    fn pad_1d_basic() {
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
+        let pads = [(1usize, 2usize)];
+        let out_shape = pad_out_shape(x.shape(), &pads).unwrap();
+        let out = pad(&x, &pads, 0.0, &out_shape);
+        assert_eq!(out.shape(), &[6]);
+        assert_eq!(
+            out.contiguous().as_slice().unwrap(),
+            &[0.0, 1.0, 2.0, 3.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn pad_2d_both_axes_with_nonzero_value() {
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let pads = [(1usize, 0usize), (0usize, 1usize)];
+        let out_shape = pad_out_shape(x.shape(), &pads).unwrap();
+        let out = pad(&x, &pads, -1.0, &out_shape);
+        assert_eq!(out.shape(), &[3, 3]);
+        assert_eq!(
+            out.contiguous().as_slice().unwrap(),
+            &[-1.0, -1.0, -1.0, 1.0, 2.0, -1.0, 3.0, 4.0, -1.0]
+        );
+    }
+
+    #[test]
+    fn pad_empty_input_fills_all_value() {
+        let x = Tensor::new(Vec::<f32>::new(), &[0, 3]).unwrap();
+        let pads = [(1usize, 1usize), (0usize, 0usize)];
+        let out_shape = pad_out_shape(x.shape(), &pads).unwrap();
+        let out = pad(&x, &pads, 7.0, &out_shape);
+        assert_eq!(out.shape(), &[2, 3]);
+        assert_eq!(out.contiguous().as_slice().unwrap(), &[7.0; 6]);
+    }
+
+    #[test]
+    fn pad_noncontiguous_view_input() {
+        // transpose 直後の view（非 contiguous）でも `dense_vec_ref`
+        // 経由で正しく読めることを確認する（`Var::cat` の入力契約と
+        // 同型）。
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
+            .unwrap()
+            .transpose(0, 1)
+            .unwrap();
+        // transpose 後の論理 shape は [3, 2]:
+        // [[1, 4], [2, 5], [3, 6]]
+        let pads = [(1usize, 0usize), (0usize, 0usize)];
+        let out_shape = pad_out_shape(x.shape(), &pads).unwrap();
+        let out = pad(&x, &pads, 0.0, &out_shape);
+        assert_eq!(out.shape(), &[4, 2]);
+        assert_eq!(
+            out.contiguous().as_slice().unwrap(),
+            &[0.0, 0.0, 1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn pad_value_nan_and_neg_zero_bit_preserved() {
+        let x = Tensor::new(vec![1.0f32], &[1]).unwrap();
+        let pads = [(1usize, 1usize)];
+        let out_shape = pad_out_shape(x.shape(), &pads).unwrap();
+        let out = pad(&x, &pads, f32::NAN, &out_shape);
+        let data = out.contiguous();
+        let slice = data.as_slice().unwrap();
+        assert!(slice[0].is_nan());
+        assert_eq!(slice[1], 1.0);
+        assert!(slice[2].is_nan());
+
+        let out_neg_zero = pad(&x, &pads, -0.0, &out_shape);
+        let data2 = out_neg_zero.contiguous();
+        let slice2 = data2.as_slice().unwrap();
+        assert_eq!(slice2[0].to_bits(), (-0.0f32).to_bits());
+        assert_eq!(slice2[2].to_bits(), (-0.0f32).to_bits());
+    }
+
+    // codex-review 指摘（PR #1680）の回帰検証と同型（上記
+    // `concat_empty_out_shape_with_overflow_prone_inner_does_not_panic`
+    // 参照）: `pad_out_shape` が受理しうる有効な空 `out_shape`
+    // （先頭が `0` で後続次元の部分積が overflow するケース）に対し
+    // `pad` が空軸チェックより先に `.iter().product()` を計算すると
+    // overflow する。空軸チェックを先に行うことを確認する。
+    #[test]
+    fn pad_empty_out_shape_with_overflow_prone_product_does_not_panic() {
+        let x = Tensor::new(vec![1.0f32], &[1]).unwrap();
+        let out_shape = [0usize, usize::MAX, 2];
+        let pads = [(0usize, 0usize), (0usize, usize::MAX - 1), (0usize, 0usize)];
+        let out = pad(&x, &pads, 0.0, &out_shape);
+        assert_eq!(out.shape(), &out_shape);
+        assert_eq!(out.numel(), 0);
+    }
+
+    #[test]
+    fn pad_all_zero_pads_is_identity_copy() {
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let pads = [(0usize, 0usize), (0usize, 0usize)];
+        let out_shape = pad_out_shape(x.shape(), &pads).unwrap();
+        let out = pad(&x, &pads, 0.0, &out_shape);
+        assert_eq!(out.shape(), &[2, 2]);
+        assert_eq!(
+            out.contiguous().as_slice().unwrap(),
+            x.contiguous().as_slice().unwrap()
+        );
     }
 }

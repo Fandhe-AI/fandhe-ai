@@ -20,8 +20,8 @@ use fandhe_ai_tensor_core::{
     GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
     MseReduction, QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor,
     UnaryElementwiseOp, VectorNormOrd, gather_out_shape, interpolate_out_shape, one_hot_out_shape,
-    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    pad_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -34,8 +34,8 @@ use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::scan;
 use crate::softmax::{self, match_softmax_plan};
 use crate::{
-    elementwise, fused_elementwise, gather_scatter, interpolate, mse, reduction, rnn_cell,
-    scalar_elementwise, sort_topk, unique,
+    constant_pad, elementwise, fused_elementwise, gather_scatter, interpolate, mse, reduction,
+    rnn_cell, scalar_elementwise, sort_topk, unique,
 };
 
 /// `CpuBackendOps` が `MemoryOps` を実装するための、プロセスワイドに共有
@@ -1312,6 +1312,20 @@ impl BackendOps for CpuBackendOps {
         let out_shape = gather_out_shape(input.shape(), index.shape(), dim)
             .map_err(BackendError::ShapeMismatch)?;
         gather_scatter::gather(input, dim, index, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::pad` の CPU 実装（イシュー #1756）。
+    /// [`pad_out_shape`] で `input.shape()`／`pads` を再検査してから
+    /// `constant_pad::pad` へ委譲する（`gather` と同じ二重検査方針。
+    /// `.claude/rules/security.md` A08）。
+    fn pad(
+        &self,
+        input: &Tensor<f32>,
+        pads: &[(usize, usize)],
+        value: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = pad_out_shape(input.shape(), pads).map_err(BackendError::ShapeMismatch)?;
+        constant_pad::pad(input, pads, value, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// `BackendOps::scatter` の CPU 実装（イシュー #1776）。

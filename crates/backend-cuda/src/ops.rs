@@ -37,7 +37,7 @@ use fandhe_ai_tensor_core::{
     GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
     MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey,
     SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    gather_out_shape, interpolate_out_shape, one_hot_out_shape, reduce_out_shape,
+    gather_out_shape, interpolate_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape,
     require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
@@ -1292,6 +1292,21 @@ fn map_gather_scatter_error(err: CudaError) -> BackendError {
 fn map_interpolate_error(err: CudaError) -> BackendError {
     match err {
         CudaError::InvalidInterpolateShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
+}
+
+/// [`CudaError::InvalidConstantPadShape`]（`constant_pad.rs::
+/// CudaConstantPad::run_pad_f32` のホスト側検証失敗。`ops.rs` 側の
+/// shape 検証〈`pad_out_shape`〉を通過した入力からは実質到達しない
+/// 防御的経路）は `map_gather_scatter_error` と同じ理由で
+/// `ShapeError::ElementCountOverflow` へ、それ以外は既存
+/// [`map_cuda_error`] へ委譲する。
+fn map_constant_pad_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::InvalidConstantPadShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
         other => map_cuda_error(other),
@@ -2926,6 +2941,57 @@ impl BackendOps for CudaBackendOps {
         )?;
         let out = self.with_driver_call(&[], map_gather_scatter_error, || {
             gs.run_gather_f32(input_slice, index_slice, input.shape(), index.shape(), dim)
+        })?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::pad` の CUDA 実装（イシュー #1756）。[`pad_out_shape`]
+    /// で `input.shape()`／`pads` を再検査してから
+    /// `constant_pad::run_pad_f32` へ委譲する（`gather` と同じ二重検査
+    /// 方針。`.claude/rules/security.md` A08）。
+    fn pad(
+        &self,
+        input: &Tensor<f32>,
+        pads: &[(usize, usize)],
+        value: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = pad_out_shape(input.shape(), pads).map_err(BackendError::ShapeMismatch)?;
+
+        // 出力が空なら `input` の shape に依らず結果は必ず空
+        // （`gather` の同型早期リターンと同じ理由: `input.shape()` が
+        // 非 `dim`-like 軸で巨大値を持つ病的 shape でも
+        // `checked_shape_numel`／`.contiguous()` を無条件適用せずに
+        // 済む）。
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+
+        // `.contiguous()` より前に要素数積をオーバーフロー検査する
+        // （`gather` と同じ理由）。ただし `input` 自体が空
+        // （`input.shape()` がいずれかの軸で 0）の場合は `pad` 特有の
+        // 「入力が空でも出力は非空になりうる」契約により `input` を
+        // 読まずに済むため、この検査より前に空判定して早期に埋める。
+        if input.shape().contains(&0) {
+            return Tensor::new(vec![value; out_shape.iter().product()], &out_shape)
+                .map_err(BackendError::ShapeMismatch);
+        }
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("pad: input not contiguous".into()))?;
+
+        let cp = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_constant_pad(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_constant_pad_error, || {
+            cp.run_pad_f32(input_slice, input.shape(), &out_shape, pads, value)
         })?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }

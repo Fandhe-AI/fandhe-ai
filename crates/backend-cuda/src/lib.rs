@@ -422,6 +422,11 @@ mod gather_scatter;
 mod interpolate;
 mod kernels_gather_scatter;
 mod kernels_interpolate;
+// イシュー #1756: pad（`torch.nn.functional.pad(mode='constant')`
+// 相当）起動 API・カーネルソース。`gather_scatter.rs`／
+// `kernels_gather_scatter.rs` と同じ 2 ファイル構成。
+mod constant_pad;
+mod kernels_constant_pad;
 mod kernels_unique;
 mod unique;
 mod unique_model;

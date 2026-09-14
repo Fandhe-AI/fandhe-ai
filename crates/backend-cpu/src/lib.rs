@@ -139,6 +139,7 @@
 //! （`elementwise`／`gemm`／`gemm_blis`／`reduction`／`parity`）は変更
 //! しない。bf16（#1699）は別イシューで担当する。
 
+mod constant_pad;
 mod device;
 mod elementwise;
 pub mod fused_elementwise;

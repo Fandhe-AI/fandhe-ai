@@ -974,3 +974,17 @@ fn interpolate_records_single_eager_node() {
     );
     assert_eq!(out.to_tensor().shape(), &[6]);
 }
+
+/// 35. `pad`（イシュー #1756）が 1 ノードのみ追加する `push_eager`
+///     （実体化済み）ノードとして記録されることを検証する
+///     （`Op::Gather`／`Op::Scatter` と同型。view ノードではない）。
+#[test]
+fn pad_records_single_eager_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+
+    let before = tape.len();
+    let padded = x.pad(&[(1, 0), (0, 1)], 0.0).unwrap();
+    assert_eq!(tape.len(), before + 1, "pad は 1 ノードのみ追加するはず");
+    assert_eq!(padded.to_tensor().shape(), &[3, 3]);
+}

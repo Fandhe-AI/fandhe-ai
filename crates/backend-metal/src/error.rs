@@ -180,6 +180,12 @@ pub enum MetalError {
     /// （`.claude/rules/security.md` A08）。`detail` は元の
     /// [`fandhe_ai_tensor_core::ShapeError`] の `Display` 文字列表現。
     InvalidInterpolateShape { detail: String },
+    /// `crate::constant_pad::MetalConstantPad::run_pad_f32`（イシュー
+    /// #1756）が起動前に独自検証する shape が不正だった。
+    /// `InvalidGatherScatterShape` と同じ理由で独立 variant に分離する
+    /// （`.claude/rules/security.md` A08）。`detail` は元の
+    /// [`fandhe_ai_tensor_core::ShapeError`] の `Display` 文字列表現。
+    InvalidConstantPadShape { detail: String },
 }
 
 impl fmt::Display for MetalError {
@@ -290,6 +296,9 @@ impl fmt::Display for MetalError {
             }
             MetalError::InvalidInterpolateShape { detail } => {
                 write!(f, "invalid interpolate shape: {detail}")
+            }
+            MetalError::InvalidConstantPadShape { detail } => {
+                write!(f, "invalid pad shape: {detail}")
             }
         }
     }
