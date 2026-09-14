@@ -464,14 +464,28 @@ fn mlp_converges_with_adam() {
     );
 }
 
-/// codex-review 指摘（PR #1852）対応の回帰テスト: 初回 `step()` 呼び出しで
-/// grad shape が不正な場合、`self.states`（`m`/`v` の遅延初期化）を
-/// 一切変更しないこと。もし旧実装のように param shape から先に
-/// `self.states` を確定してしまうと、この回帰テストは実質的に検知できない
-/// （2 回目の呼び出しは同じ shape の param を渡すため slot.shape 検証は
-/// 通ってしまう）ため、本テストは 1 回目の失敗直後に
-/// `step_count()`（`self.states` と同じ「状態変更フェーズ」でのみ
-/// 更新される値）が 0 のままであることを直接検証する。
+/// codex-review（P2）・Cursor Bugbot 指摘（PR #1852）対応の回帰テスト:
+/// 初回 `step()` 呼び出しで grad shape が不正な場合、`self.states`
+/// （`m`/`v` の遅延初期化）を一切変更しないこと。
+///
+/// 旧版の本テストは「失敗直後に同一 shape（`[3]`）の param で再試行
+/// すれば成功する」ことのみを検証していたが、これは
+/// `AdamW::step` の旧実装順（`grad` shape 検証より先に `self.states`
+/// を `param` shape から確定する）へ回帰しても検知できない
+/// （最初の失敗した呼び出しに使った `param` と再試行の `param` が
+/// 同一 shape `[3]` であるため、たとえ `self.states` がその失敗した
+/// 呼び出し由来の shape `[3]` で誤って確定していても、再試行の
+/// `slot.shape` 検証は偶然通ってしまう）。
+///
+/// 本テストは、失敗した 1 回目の呼び出しとは**異なる shape**（`[2]`）の
+/// `param`／`grad` で再試行することで、`self.states` が本当に空の
+/// ままであった（＝真の「初回」呼び出しとして扱われた）ことを
+/// 直接検証する。`self.states` が失敗した呼び出しの `param` shape
+/// （`[3]`）で誤って確定していれば、この再試行は
+/// `slot count changed across calls` ではなく `param.shape() !=
+/// slot.shape` の `ShapeError::ShapeMismatch`（フェーズ 2 の検証）で
+/// 拒否されるはずであり、`step_count()` が 0 のままであることと
+/// あわせて `self.states` 未変更の証跡とする。
 #[test]
 fn adam_step_rejects_bad_grad_shape_without_mutating_state_on_first_call() {
     let mut opt = Adam::new(AdamConfig::default()).unwrap();
@@ -486,12 +500,29 @@ fn adam_step_rejects_bad_grad_shape_without_mutating_state_on_first_call() {
         "grad shape エラー時に step_count が更新されてはならない（状態変更フェーズ未到達の証跡）"
     );
 
-    // 正しい shape の grad で再試行すれば新規呼び出しとして成功する
-    // （エラー時に `self.states` が誤って確定していないことの直接証跡）。
-    let good_grad = Tensor::new(vec![0.1, 0.2, 0.3], &[3]).unwrap();
+    // 失敗した 1 回目の呼び出し（`param` shape `[3]`）とは異なる
+    // shape `[2]` の param／grad で再試行する。`self.states` が
+    // 真に空のままであれば、これは「初回」呼び出しとして新規
+    // スロットを確定し成功する。もし `self.states` が失敗した
+    // 呼び出しの `param` shape（`[3]`）で誤って確定していれば、
+    // ここで `param.shape() != slot.shape` の `ShapeError` により
+    // 拒否される（フェーズ 2 検証）。
+    let other_param = Tensor::new(vec![10.0, 20.0], &[2]).unwrap();
+    let other_grad = Tensor::new(vec![0.1, 0.2], &[2]).unwrap();
     let updated = opt
-        .step(&[(&param, &good_grad)])
-        .unwrap_or_else(|e| panic!("正しい shape での再試行が失敗: {e}"));
+        .step(&[(&other_param, &other_grad)])
+        .unwrap_or_else(|e| {
+            panic!("失敗直後の異なる shape での再試行（真の初回呼び出しの証跡）が失敗: {e}")
+        });
     assert_eq!(updated.len(), 1);
     assert_eq!(opt.step_count(), 1);
+
+    // 続けて同一 shape（`[2]`）で 2 回目の呼び出しも成功することを
+    // 確認し、状態が正しく `[2]` のスロットとして確定していることを
+    // 追加で裏付ける。
+    let updated2 = opt
+        .step(&[(&updated[0].clone(), &other_grad)])
+        .unwrap_or_else(|e| panic!("2 回目の呼び出しが失敗: {e}"));
+    assert_eq!(updated2.len(), 1);
+    assert_eq!(opt.step_count(), 2);
 }
