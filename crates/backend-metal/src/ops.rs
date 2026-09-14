@@ -1202,6 +1202,247 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`BackendOps::gemm_batched`] の Metal オーバーライド（イシュー
+    /// #1717・親 #1600・spec REQ-9 2026-09-12 追記 Tier 1「バッチ行列積」・
+    /// `docs/compat-api-scope.md` §1.2）。
+    ///
+    /// 既定合成実装（`fandhe_ai_tensor_core::backend_ops::
+    /// default_gemm_batched`。バッチをほどいて `batch_len` 回
+    /// `self.gemm` を呼ぶ——各呼び出しが独自に upload・
+    /// `dispatch_auto`〈内部 `ctx.synchronize()`〉・download する）が
+    /// `batch_len` 回の GPU 同期・H2D／D2H を発生させるのに対し、本
+    /// オーバーライドは **(a)** 正規化済みオペランド `a_norm`／`b_norm`
+    /// （`[B, m, k]`／`[B, k, n]` の contiguous 3 次元。
+    /// [`fandhe_ai_tensor_core::normalize_batched_operand`] が
+    /// broadcast・`contiguous()` 化まで済ませる）を **1 回ずつ** upload
+    /// し、**(b)** バッチごとの GEMM を
+    /// `gemm::MetalGemm::encode_strided_bias_act_prepared_with_c_offset`
+    /// （`gemm_fp32_strict_into`〈#1555〉・`linear_forward_device`
+    /// 〈#1216〉・`gemm_resident_lhs`〈#1040〉が確立した encode-only
+    /// パターン。`gemm.rs`／`shaders/gemm.metal` 自体は無変更）で
+    /// **1 つのコマンドバッチへ encode するだけ**（待たない）で積み、
+    /// **(c)** 最後の `download` 1 回だけが GPU 完了を待つ「バッチ
+    /// ループ方式」にする。
+    ///
+    /// # 経路（`gemm.rs`・shader 無変更）
+    ///
+    /// 各バッチ `i` は NN レイアウト
+    /// （`MatrixLayout { rows: m, cols: k, ld: k, transposed: false }`／
+    /// `{ rows: k, cols: n, ld: n, transposed: false }`）で、オフセットは
+    /// `a: i*m*k`・`b: i*k*n`・`c: i*m*n`（要素単位）。
+    /// `a_norm.numel() == batch_len*m*k` 等は `normalize_batched_operand`
+    /// が返す形状で構造的に保証されるため（`[B, rows, cols]` へ
+    /// `reshape` 済み）、`i < batch_len` のオフセット積は
+    /// `usize` オーバーフローしない。カーネル起動前の範囲検査自体は
+    /// `gemm::validate_strided_dims_impl` が `a_buf.len()`／
+    /// `b_buf.len()` に対するオフセット＋スパン、`c_offset + m*n <=
+    /// c_len` を **バッチごとに** 行う（REQ-8「シェーダ・カーネル側の
+    /// 手動境界チェックを省略しない」・OWASP A03）。
+    ///
+    /// # 数値契約
+    ///
+    /// rank 2 同士（`plan.batch_shape().is_empty()`）は [`Self::gemm`]
+    /// へ直接委譲し bit 同一（既定合成実装・CPU オーバーライドと同じ
+    /// 契約）。rank≥3 は classic strided カーネル
+    /// （`gemm_tiled_bias_act`）を通るため、per-batch
+    /// `MetalBackendOps::gemm`（`dispatch_auto` =
+    /// `gemm_simdgroup_tiled`／split-K）とは **bit 同一を主張しない**
+    /// （`gemm_strided_nt_tn`〈#1215〉・`gemm_collapsed_lhs`〈#1040〉と
+    /// 同じ契約）。受け入れ判定は REQ-2 統一複合判定（相対誤差 1e-3
+    /// 未満 または 絶対誤差 1e-5 未満）。
+    ///
+    /// 本経路は `dispatch_auto`／`crate::tile::select_route_for_device`
+    /// を一切経由しないため、split-K 実行時トグル
+    /// （`crate::split_k_runtime::split_k_enabled()`。既定 `true`。
+    /// イシュー #1544・#1547）の状態に依存せず常に同一結果を返す
+    /// （`tests/gemm_batched_parity.rs` の split-K トグル非干渉テストが
+    /// 固定する）。
+    ///
+    /// # fail-closed（`DispatchFailureCell`）
+    ///
+    /// `sgd_step_device_tracked`／`gemm_fp32_strict_into_tracked` と
+    /// 同様、GPU dispatch の失敗は encode 時点では判明せず
+    /// `download` の同期点まで遅延する。本メソッドはローカルに
+    /// `DispatchFailureCell` を作って各バッチの encode へ渡し、
+    /// `download` 復帰後に `token.is_set()` を確認してから成功を
+    /// 返す——共有 `MetalContext` を使う別スレッドが本メソッドより
+    /// 先に `synchronize()` して失敗バッチを回収してしまっても、
+    /// 本メソッドが誤って成功として返らないようにするための
+    /// fail-closed 契約（`linear_forward_device` doc「同期契約」と
+    /// 同型の懸念への対処）。
+    ///
+    /// # 退化形状（`m`／`n`／`k` が 0）
+    ///
+    /// `dispatch_auto` 経路の `validate_dims` は `m`／`n`／`k` が 0 の
+    /// 形状を `MetalError::ZeroDimension` で拒否する契約だが（`Self::
+    /// gemm_strided_nt_tn` doc 参照）、`encode_strided_bias_act_
+    /// prepared_with_c_offset` が経由する `validate_strided_dims_impl`
+    /// 自体はゼロ次元を拒否しない。本メソッドはゼロサイズの GPU
+    /// dispatch を実際に発行することを避け、他バックエンド（CPU
+    /// `gemm_batched`〈#1715〉・`gemm_collapsed_lhs`〈#1040〉）と挙動を
+    /// 揃えるため、正規化（`normalize_batched_operand`。broadcast の
+    /// 実体化を伴いうる）より前にホスト側で明示的に処理する
+    /// （PR #1810 codex-review P2「空結果に対して broadcast を実体化
+    /// しない」と同じ判断）: 出力要素数が 0（`batch_len == 0`／
+    /// `m == 0`／`n == 0`）は空テンソルを、`k == 0`（`m, n > 0`）は
+    /// GPU 起動なしの全 0 テンソルを返す。
+    fn gemm_batched(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        let plan = fandhe_ai_tensor_core::batched_matmul_plan(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+
+        if plan.batch_shape().is_empty() {
+            return self.gemm(a, b);
+        }
+
+        let (m, k, n) = (plan.m(), plan.k(), plan.n());
+        let batch_len: usize = plan.batch_shape().iter().product();
+
+        let mn = m
+            .checked_mul(n)
+            .ok_or(ShapeError::ElementCountOverflow)
+            .map_err(BackendError::ShapeMismatch)?;
+        let total = fandhe_ai_tensor_core::checked_gemm_batched_output_len(batch_len, m, n)
+            .map_err(BackendError::ShapeMismatch)?;
+
+        // 出力要素数 0（`batch_len == 0`／`m == 0`／`n == 0`）は
+        // 正規化（broadcast 実体化）へ入らず即座に空テンソルを返す
+        // （CPU `gemm_batched`〈#1715〉と同じ判断。上記 doc「退化形状」
+        // 参照）。
+        if total == 0 {
+            return Tensor::new(Vec::new(), &plan.out_shape()).map_err(BackendError::ShapeMismatch);
+        }
+
+        if k == 0 {
+            // `m, n > 0` かつ `k == 0`: 内積の項が 0 個のため結果は
+            // 恒等的に 0。GPU dispatch を発行せずホスト側で直接構築する
+            // （上記 doc「退化形状」参照。他バックエンドとのゼロ次元
+            // 挙動整合が目的で、`validate_strided_dims_impl` 自体は
+            // ゼロ次元を拒否しない）。
+            return Tensor::from_shape_fill(&plan.out_shape(), |_| 0.0f32)
+                .map_err(BackendError::ShapeMismatch);
+        }
+
+        // ホスト側再パックが発生するか（`Self::gemm` の NN/TT・分類
+        // 不能形状と同じ計上規則。`normalize_batched_operand` は
+        // `operand` が元から `[out_batch_shape, rows, cols]` と同一
+        // shape で contiguous なら `Arc` 共有のみで実コピーを伴わない）。
+        if !a.is_contiguous() {
+            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+        }
+        if !b.is_contiguous() {
+            GEMM_HOST_REPACK_COUNT.with(|c| c.set(c.get() + 1));
+        }
+
+        let a_norm = fandhe_ai_tensor_core::normalize_batched_operand(a, plan.batch_shape(), m, k)?;
+        let b_norm = fandhe_ai_tensor_core::normalize_batched_operand(b, plan.batch_shape(), k, n)?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mem = MetalMemory::from_shared(ctx.clone());
+
+        let a_dev_buf = mem.upload(&a_norm)?;
+        let a_handle = a_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_batched: lhs buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let b_dev_buf = mem.upload(&b_norm)?;
+        let b_handle = b_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(b_buf) = b_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_batched: rhs buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let c_dev_buf = mem.alloc_zeroed(&[batch_len, m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_buf) = c_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_batched: out buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let a_layout = MatrixLayout {
+            rows: m,
+            cols: k,
+            ld: k,
+            transposed: false,
+        };
+        let b_layout = MatrixLayout {
+            rows: k,
+            cols: n,
+            ld: n,
+            transposed: false,
+        };
+
+        // fail-closed トークン（上記 doc 参照）。本メソッド専用の
+        // ローカルインスタンスで、`download` 復帰後に検査してから
+        // 成功を返す。
+        let token = DispatchFailureCell::new();
+        for i in 0..batch_len {
+            gemm.encode_strided_bias_act_prepared_with_c_offset(
+                &ctx,
+                a_buf,
+                i * m * k,
+                a_layout,
+                b_buf,
+                i * k * n,
+                b_layout,
+                None,
+                false,
+                c_buf,
+                i * mn,
+                m,
+                n,
+                k,
+                Some(&token),
+            )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        }
+
+        let out = mem.download(&c_dev_buf)?;
+        if token.is_set() {
+            return Err(BackendError::KernelLaunchFailed(
+                "gemm_batched: GPU dispatch failed for one or more batches".into(),
+            ));
+        }
+        out.reshape(&plan.out_shape())
+            .map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`Self::gemm_batched`] と同じバッチ行列積だが、各バッチの計算を
+    /// [`Self::gemm_batched`] へそのまま委譲する（イシュー #1717）。
+    ///
+    /// trait doc（`fandhe_ai_tensor_core::backend_ops::BackendOps::
+    /// gemm_batched_fp32_strict`）のとおり Metal は TF32 の概念を持た
+    /// ず、rank 2 の `gemm_fp32_strict` は既定で `gemm` へ委譲される
+    /// （`Self` は `gemm_fp32_strict` をオーバーライドしていない）。
+    /// 本オーバーライドを置かない場合、`gemm_batched_fp32_strict` は
+    /// 既定合成実装（バッチをほどいて `batch_len` 回 `gemm_fp32_strict`
+    /// を呼ぶ）へ落ち、`autodiff::grad::matmul_vjp` の rank≥3 経路
+    /// （`ops.gemm_batched_fp32_strict(...)` を呼ぶ）が forward
+    /// （`Self::gemm_batched`）と異なるカーネル・per-batch 同期の経路を
+    /// 通ってしまう（`docs/perf/train-backward-gemm-wiring.md` と同種の
+    /// 「VJP がホスト scalar 経由に落ちる」問題を防ぐための明示的な
+    /// 委譲）。
+    fn gemm_batched_fp32_strict(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.gemm_batched(a, b)
+    }
+
     /// [`BackendOps::gemm_fp32_strict_into`] の Metal 実装（イシュー
     /// #1555・`docs/device-resident-update-design.md` 追補）。`Self::gemm`
     /// （イシュー #1215）の NT/TN 判定条件（`layout::classify_2d` が両方

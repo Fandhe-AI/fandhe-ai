@@ -188,6 +188,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `torch.arange`/`linspace` | `tf.range`/`linspace` | なし | `Tensor` 生成関数 1 個追加 | S |
 | `torch.randn`/`rand`（乱数テンソル） | `tf.random.normal` 等 | なし（`Linear::new` 内部の重み初期化にシードベース乱数はあるが公開 API なし） | 汎用乱数テンソル生成 API（RNG 契約含む） | S〜M |
 | `torch.eye` | `tf.eye` | なし | 生成関数 1 個 | S |
+| `torch.sparse_coo_tensor`／`to_sparse()` | `tf.sparse.SparseTensor` | **なし（非対応。`Tensor<T>` は dense のみ。決定記録 `docs/tensor-core-sparse-complex-decision.md`〈#1633〉）** | 対象外（REQ-9 `docs/spec/04-requirements.md:233`） | - |
 
 ### 2.2 index/slice/gather/scatter
 
@@ -322,6 +323,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `int32`/`int64`/`bool` | 同左 | 部分（`Tensor<T>` 生成のみ。CrossEntropy の `targets: Tensor<i32>` のように限定的に内部使用） | 汎用整数演算・型変換 API | L |
 | `.to(dtype)`（型変換） | `tf.cast` | なし | dtype 変換 Op（勾配は型により打ち切り／恒等など個別設計） | M |
 | AMP（自動混合精度） | `tf.keras.mixed_precision` | なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記） | 損失スケーリング・unscale ステップの追加（`optim.rs` の適用順序契約に定義済みの拡張点） | L |
+| `complex64`／`complex128`（`torch.fft` 含む） | `tf.complex64`／`tf.signal.fft` | **なし（非対応。`Scalar` は実数 4 型に封印。ONNX COMPLEX は `UnknownDataType` で拒否。決定記録 同上）** | 対象外（同上） | - |
 
 ### 2.13 device
 
@@ -828,10 +830,30 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 への合成。非破壊拡張のデフォルトメソッド）を追加し、`backend-cpu` が
 専用オーバーライド（`CpuBackendOps::gemm_batched`。既存 2 次元
 `gemm`/`gemm_into_slice` と bit 同一）を持つ。facade 新規公開面なし
-（既存 `Var` 再エクスポート経由でそのまま到達可能）。CUDA／Metal は
-既定合成実装のまま（機能的に到達可能・専用バッチカーネルは #1716／
-#1717）。`einsum`（rank≥3 matmul を伴う batch 添字縮約。#1600 が未実装
-としていた対象）は本イシューでは対象外のまま残る。
+（既存 `Var` 再エクスポート経由でそのまま到達可能）。CUDA は既定合成
+実装のまま（機能的に到達可能・専用バッチカーネルは #1716）。
+`einsum`（rank≥3 matmul を伴う batch 添字縮約。#1600 が未実装として
+いた対象）は本イシューでは対象外のまま残る。
+
+**追補（イシュー #1717）**: Metal に専用オーバーライド
+（`MetalBackendOps::gemm_batched`／`gemm_batched_fp32_strict`）が
+実装済みになった。既定合成実装（バッチをほどいて `batch_len` 回
+`self.gemm` を呼ぶ——各呼び出しが独自に upload・`dispatch_auto`〈内部
+同期〉・download する）と異なり、正規化済みオペランドを 1 回ずつ
+upload し、バッチごとの GEMM を `gemm::MetalGemm::
+encode_strided_bias_act_prepared_with_c_offset`（`gemm_fp32_strict_
+into`〈#1555〉・`linear_forward_device`〈#1216〉が確立した encode-only
+パターン。`gemm.rs`／shader 自体は無変更）で 1 つのコマンドバッチへ
+encode するだけで積み、`download` 1 回だけが GPU 完了を待つ「バッチ
+ループ方式」にする。rank≥3 は classic strided カーネル
+（`gemm_tiled_bias_act`）を経由するため per-batch `gemm`
+（`dispatch_auto` = `gemm_simdgroup_tiled`／split-K）とは bit 同一を
+主張せず、REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差
+1e-5 未満）を受け入れ契約とする。本経路は `dispatch_auto`／
+`tile::select_route_for_device` を経由しないため split-K 実行時
+トグル（`crate::split_k_runtime`。既定 `true`）の状態に依存しない。
+facade 新規公開面なし。M4 Max 実機実測は本エージェント実行環境に
+Apple Silicon 実機がないため未実施のまま Mac セッションへ申し送る。
 
 ## #1636（#1707〜#1709）の追補
 
@@ -1354,3 +1376,12 @@ bit 同一のまま返る。非有限（NaN／±Inf）の `clip_value` および
   Mac／GB10 セッションへ申し送る（`crates/backend-cuda/tests/
   constant_pad_parity.rs`・`crates/backend-metal/tests/
   constant_pad_parity.rs` の `#[ignore]` テストを参照）。
+
+## #1633 の追補（sparse／complex テンソルの非対応を明文化）
+
+§2.1「テンソル生成」・§2.12「dtype」に上記 2 行（sparse・complex）を追加した。決定記録は `docs/tensor-core-sparse-complex-decision.md`（#1633）。
+
+- 段階 0（現時点非対応の明文化）。`Op`／`BackendOps`／`Var`／facade のコード実装・依存追加は行わない。
+- spec REQ-9 の「引き続き対象外」判断（`docs/spec/04-requirements.md:233,432`）と整合しており、spec への新規提案は不要（同 doc §3）。
+- ONNX complex dtype（`COMPLEX64`/`COMPLEX128`）は `GraphError::UnknownDataType` で fail-closed 拒否される一方、`GraphProto.sparse_initializer`（未宣言フィールド）は prost の仕様どおり無言でスキップされる非対称な挙動を事実として記録した（同 doc §2・§9(a)。是正は本イシューのスコープ外で、ユーザー承認を得たうえで別イシューへ引き継ぐ）。
+- facade 新規公開面なし。
