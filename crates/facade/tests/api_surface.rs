@@ -284,6 +284,7 @@ fn optim_module_reexports_exactly_expected_surface() {
         "AdamWConfig",
         "ClipGradResult",
         "clip_grad_norm",
+        "clip_grad_value",
         "global_grad_norm",
         "ConstantLr",
         "LrScheduler",
@@ -593,6 +594,15 @@ fn optim_types_are_reachable_via_facade_only() {
     let global_norm = fandhe_ai::optim::global_grad_norm(&[])
         .unwrap_or_else(|e| panic!("test fixture: global_grad_norm が失敗した: {e}"));
     assert_eq!(global_norm, 0.0, "test fixture: 空スライスの norm は 0");
+
+    // clip_grad_value（イシュー #1753・親 #1631。value 方式 gradient
+    // clipping）が facade のみを通じて到達可能であることの固定。
+    let clipped_values = fandhe_ai::optim::clip_grad_value(&[], 1.0)
+        .unwrap_or_else(|e| panic!("test fixture: clip_grad_value が失敗した: {e}"));
+    assert!(
+        clipped_values.is_empty(),
+        "test fixture: 空スライスの clip_grad_value は空 Vec"
+    );
 }
 
 /// デバイスメモリプール（イシュー #1021）の公開面固定（受入基準

@@ -28,7 +28,8 @@
 //!
 //! 非有限検出（[`amp::UnscaleResult::should_skip_step`]）が **clip より
 //! 先** に判定される理由: [`clip::clip_grad_norm`]／
-//! [`clip::global_grad_norm`] は非有限勾配に対し `Err` を返す契約
+//! [`clip::global_grad_norm`]／[`clip::clip_grad_value`]（#1753・親 #1631。
+//! value 方式も同じ fail-closed 契約）は非有限勾配に対し `Err` を返す契約
 //! （fail-closed）であり、非有限検出前に clip を呼ぶと overflow が
 //! 起きただけで学習ループ全体が失敗してしまう（AMP では overflow に
 //! よる非有限勾配の出現自体は正常な運用パスであり、その step を
@@ -64,7 +65,7 @@ pub use amp::{
     GradScaler, GradScalerConfig, UnscaleResult, has_non_finite, scale_grads, scale_loss,
     unscale_grads,
 };
-pub use clip::{ClipGradResult, clip_grad_norm, global_grad_norm};
+pub use clip::{ClipGradResult, clip_grad_norm, clip_grad_value, global_grad_norm};
 pub use lr_scheduler::{ConstantLr, LrScheduler, StepLr};
 
 // イシュー #1721: 損失スケーリング（`amp::scale_loss`/`amp::GradScaler::

@@ -9,7 +9,9 @@
 //! はその欠落を埋め、内部で配置が不統一な 2 か所
 //! （`fandhe_ai_autodiff::optim::{Sgd, SgdConfig}` と
 //! `fandhe_ai_autodiff::nn::optim::{AdamW, ClipGradResult, clip_grad_norm,
-//! global_grad_norm, ConstantLr, LrScheduler, StepLr}`）を `fandhe_ai::optim`
+//! clip_grad_value, global_grad_norm, ConstantLr, LrScheduler, StepLr}`。
+//! `clip_grad_value` は #1753・親 #1631 で追加した value 方式 gradient
+//! clipping）を `fandhe_ai::optim`
 //! という単一の入口へ吸収する。
 //!
 //! `fandhe_ai::optim` は REQ-9 の 2026-08-29 追記（正本 spec
@@ -76,6 +78,7 @@
 // が `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査する
 // 契約に合わせる。`src/lib.rs` 冒頭コメントと同じ理由）。
 pub use fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig};
-pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_norm, global_grad_norm};
+pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_value};
 pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
+pub use fandhe_ai_autodiff::nn::optim::{clip_grad_norm, global_grad_norm};
 pub use fandhe_ai_autodiff::optim::{Sgd, SgdConfig};
