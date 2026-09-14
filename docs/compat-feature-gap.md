@@ -888,6 +888,15 @@ facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_bi
 経由するよう変更済み。`onnx-interop` は crates.io 非公開クレートであり facade
 新規公開面はなし（#1775 の判断は本追補の対象外のまま変わらない）。
 
+**#1774 追記（ONNX import→export→import の roundtrip 構造一致テスト）**:
+`crates/onnx-interop/tests/onnx_export_roundtrip.rs` に、import -> export ->
+import の総合 roundtrip（構造一致・bit 同一）・`interp::run` 結果の bit 同一・
+未対応 op を含むモデルの fail-closed（`ExportError::UnsupportedOp`）を固定する
+テストを追加した（`docs/onnx-export-op-mapping.md` §6）。テスト追加のみで
+`onnx-interop` 本番コード（`export.rs`／`export_ops.rs`／`graph.rs`／
+`interp.rs`）は無変更・facade 新規公開面はなし（#1775 の判断は本追補の対象外の
+まま変わらない）。
+
 ## #1705 の追補
 
 `float64`／`float16` 行（319〜320 行目）のスナップショット本文は不変のまま、Metal バックエンド限定で以下が確定した（イシュー #1705・`docs/backend-dtype-dispatch-design.md` §14）。
@@ -919,3 +928,18 @@ typed_bf16.rs`。イシュー #1706・`docs/backend-dtype-dispatch-design.md`
 - facade 公開面への新規追加はない。`Var`／`Tape`／VJP は引き続き未接続で、
   本表の「未実装（欠落側）」列の評価（`Var` レベルの mixed precision）は
   変わらない。
+
+## #1710 の追補
+
+Var 演算欠落リストの `sub`／`div`／`pow`／`sqrt` 行（スナップショット本文
+は不変）が実装済みになった。`Var::sub`／`div`／`pow`（`ScalarBinaryOp`。
+`add`／`mul` と同じ NumPy 互換ブロードキャスト）・`Var::sqrt`
+（`ScalarUnaryOp::Sqrt`）は #1634 の汎用 dispatch 機構（`crates/autodiff/
+src/var.rs::scalar_unary`／`scalar_binary`）への薄い委譲として実装され、
+CPU／CUDA／Metal 3 バックエンドの `BackendOps::scalar_unary`／
+`scalar_binary`（既に #1700・#1707 等で実装済み）経由で到達する
+（`docs/scalar-op-dispatch-design.md`）。facade 新規公開面はない（既存
+`Var` 再エクスポート経由）。CUDA／Metal 実機での facade parity 実測は
+本エージェント実行環境に実機がないため未実施のまま申し送る。
+`pow_scalar`（スカラー指数版）・`log`／三角関数／`abs`／`neg`（#1711）・
+`clamp`／比較演算（#1712）は対象外のまま。
