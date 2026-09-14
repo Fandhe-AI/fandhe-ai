@@ -420,7 +420,10 @@ mod reduce;
 // 文字列の責務分離）。
 mod gather_scatter;
 mod kernels_gather_scatter;
+mod kernels_sort;
 mod kernels_unique;
+mod sort;
+mod sort_model;
 mod unique;
 mod unique_model;
 // イシュー #1024: `module_cache`／NVRTC ディスクキャッシュへの結線
