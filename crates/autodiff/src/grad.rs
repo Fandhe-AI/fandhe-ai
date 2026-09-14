@@ -2585,8 +2585,9 @@ fn cumsum_vjp_along(upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
 /// `inf`／`NaN` になる反例が見つかった（当初の「乗算の一方が厳密に
 /// `0.0` の場合のみ明示的に `0.0` を返す」零遮断ガードは、この
 /// 「suffix 積自体が発散する」ケースを救えなかった）。[`WideFloat`]
-/// は仮数を常に `[0.5, 1.0)` へ正規化し指数を `i32` の加算・比較の
-/// みで扱うため、真の数学的な値が有限である限り乗算・加算いずれの
+/// は仮数を常に `[0.5, 1.0)` へ正規化し指数を `i64`（`checked_add`／
+/// `checked_sub` による加算・減算・比較）のみで扱うため、真の数学的
+/// な値が有限である限り乗算・加算いずれの
 /// 中間結果も表現域を超えない。最終的に [`WideFloat::to_f64`] で
 /// 1 回だけ実数値へ変換し `f32` へ downcast する段階でのみ、真に
 /// 表現域外（`f32` にも `f64` にも収まらない）の場合に限り `inf` を
@@ -2642,20 +2643,40 @@ fn cumprod_vjp_along(input: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -
 }
 
 /// 拡張レンジ浮動小数点数（仮数 `mantissa: f64`〈絶対値 `[0.5, 1.0)`
-/// または厳密ゼロ〉・指数 `exponent: i32` の組で `value = mantissa ·
+/// または厳密ゼロ〉・指数 `exponent: i64` の組で `value = mantissa ·
 /// 2^exponent` を表す）。[`cumprod_vjp_along`] の `S`（Horner 型後方
 /// 再帰）・`L`（排他的 prefix 積）専用のオーバーフロー安全アキュムレ
 /// ータ（codex-review 指摘・PR #1819）。詳細な動機は
 /// [`cumprod_vjp_along`] doc の「中間積のオーバーフロー対策」節を
-/// 参照。`Copy` な軽量値型（`f64` 1 個 + `i32` 1 個）で、`cumprod_vjp_
+/// 参照。`Copy` な軽量値型（`f64` 1 個 + `i64` 1 個）で、`cumprod_vjp_
 /// along` の 2 パス走査（`O(axis_len)` per lane）へそのまま組み込める。
+///
+/// **指数型を `i32` ではなく `i64` にする理由（codex-review 追加指摘・
+/// PR #1819）**: `i32` は最大 `2^31 - 1 ≈ 2.15e9` までしか表現できず、
+/// 軸長 `axis_len` に上限検査がない状態で `x = [0] + [2^127] × N`
+/// （`N ≈ 17,000,000`）のような入力を与えると、suffix 積の指数が
+/// `127 * N ≈ 2.16e9` に達し `i32` の表現域を超える（overflow checks
+/// 有効時は `checked_add` なしの素朴な `+` が `debug` ビルドで
+/// panic、無効時は指数が折り返して誤った勾配を返す）。`i64` の表現域
+/// は `±9.22e18` あり、1 要素あたりの指数変化量の理論上限（`f64` の
+/// 正規化数・非正規化数を合わせた全表現域は `[-1074, 1023]`。実際に
+/// `WideFloat` の `mantissa` は正規化済みで概ね指数 1 個あたり
+/// `|Δexponent| <= 1074` に収まる）を `axis_len` 倍しても
+/// `axis_len * 1074 < 2^63`（すなわち `axis_len < 8.58e15`）が成り立つ
+/// 限り `checked_add`／`checked_sub` がオーバーフローしない。
+/// `axis_len` が `f32` テンソル 1 本として物理的に確保可能な要素数
+/// （メモリ上限で自然に抑えられる）を大きく超えない限りこの条件は
+/// 常に成立する。万一 `checked_add`／`checked_sub` がオーバーフロー
+/// した場合も、以下の実装は panic せず `i64::MAX`／`i64::MIN` へ
+/// 飽和させ、[`WideFloat::to_f64`] がそれを `±inf`／`0.0` へ正しく
+/// 変換する（本番経路で決して panic しない）。
 ///
 /// `cumprod_vjp_along` 以外から使われる想定はない（`pub` にしない。
 /// `compat-api-scope.md` §5 の公開面拡張手続きの対象外に保つ）。
 #[derive(Clone, Copy, Debug)]
 struct WideFloat {
     mantissa: f64,
-    exponent: i32,
+    exponent: i64,
 }
 
 impl WideFloat {
@@ -2676,8 +2697,14 @@ impl WideFloat {
                 exponent: 0,
             };
         }
+        // `frexp` は `f64` の表現域内に収まる指数（`i32` で十分表現
+        // できる）しか返さないため、ここでの `i64` への拡大変換は
+        // 常に無損失（`as i64` で桁あふれしない）。
         let (mantissa, exponent) = frexp(v);
-        WideFloat { mantissa, exponent }
+        WideFloat {
+            mantissa,
+            exponent: exponent as i64,
+        }
     }
 
     fn is_zero(&self) -> bool {
@@ -2704,7 +2731,27 @@ impl WideFloat {
         if self.is_zero() {
             return 0.0;
         }
-        ldexp(self.mantissa, self.exponent)
+        // `exponent`（`i64`）は `mul`／`add`／`normalize` の
+        // `checked_add`／`checked_sub` が飽和させた `i64::MAX`／
+        // `i64::MIN` を保持している可能性がある。`f64` の全表現域は
+        // 2 進指数で `[-1074, 1023]` に収まるため、それを大きく超える
+        // 指数（マージンを見て `±1100` の外）は「真の値が `f64` の
+        // 表現域を天文学的規模で超えている」ことを意味し、IEEE 754
+        // の意味論どおり `±inf`（下回る場合は `0.0`）へ飽和させる。
+        // `exponent as i32` へキャストするのは、この範囲チェックで
+        // `[-1100, 1100]` に収まることを確認した後のみであり、桁あふれ
+        // しない。
+        if self.exponent > 1100 {
+            return if self.mantissa > 0.0 {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            };
+        }
+        if self.exponent < -1100 {
+            return if self.mantissa > 0.0 { 0.0 } else { -0.0 };
+        }
+        ldexp(self.mantissa, self.exponent as i32)
     }
 
     fn mul(self, other: WideFloat) -> WideFloat {
@@ -2719,11 +2766,22 @@ impl WideFloat {
             return WideFloat::ZERO;
         }
         // 仮数の絶対値はいずれも `[0.5, 1.0)` のため積は `(0.25, 1.0)`
-        // に収まり、この乗算自体が `f64` の表現域を超えることはない
-        // （指数は `i32` の加算のみで、こちらも現実的な `axis_len` では
-        // 桁あふれしない）。
+        // に収まり、この乗算自体が `f64` の表現域を超えることはない。
+        // 指数の加算は `checked_add`（`i64`）で行い、万一オーバー
+        // フローしても panic せず `i64::MAX`／`i64::MIN` へ飽和させる
+        // （型の doc comment に根拠を記載。`to_f64` がこれを正しく
+        // `±inf`／`0.0` へ変換する）。
         let mantissa = self.mantissa * other.mantissa;
-        let exponent = self.exponent + other.exponent;
+        let exponent = match self.exponent.checked_add(other.exponent) {
+            Some(e) => e,
+            None => {
+                if self.exponent > 0 {
+                    i64::MAX
+                } else {
+                    i64::MIN
+                }
+            }
+        };
         normalize(mantissa, exponent)
     }
 
@@ -2742,17 +2800,27 @@ impl WideFloat {
         } else {
             (other, self)
         };
-        let diff = lo.exponent - hi.exponent; // <= 0
+        // 指数差の計算も `checked_sub`（`i64`）で行い、万一
+        // オーバーフロー（`hi`／`lo` いずれかが `mul` の飽和で
+        // `i64::MAX`／`i64::MIN` を保持している場合等）しても panic
+        // しない。`hi.exponent >= lo.exponent` のため理論上の差は
+        // `<= 0` だが、飽和値どうしの差は `i64` の表現域自体を超え
+        // うるためガードする（オーバーフロー時は「差が極端に大きい」
+        // 側〈`i64::MIN`〉へ倒せば、直後の `< -1100` 分岐で安全に
+        // `0.0` 扱いになる）。
+        let diff: i64 = lo.exponent.checked_sub(hi.exponent).unwrap_or(i64::MIN); // <= 0（オーバーフロー時は i64::MIN）
         // `diff` が極端に小さい（指数差が大きすぎる）場合、`lo` の
         // 寄与は `hi` に対して丸めで消える桁のため `0.0` として扱う
         // （2 進指数差 1100 は `f64` の全表現域〈約 2^-1074〜2^1024〉
         // より広く、早期 return は最適化であって正しさの条件では
         // ない。`pow2` 自体も極端に負の指数では正しく underflow
         // して `0.0` を返すため、この分岐がなくても結果は変わらない）。
+        // `diff < -1100` を満たさない場合は `i32` の表現域内に収まる
+        // ことが保証されるため `as i32` は無損失。
         let scaled_lo = if diff < -1100 {
             0.0
         } else {
-            lo.mantissa * pow2(diff)
+            lo.mantissa * pow2(diff as i32)
         };
         // `hi.mantissa` の絶対値は `[0.5, 1.0)`、`scaled_lo` の絶対値は
         // `<= 1.0`（`diff <= 0` のため）なので、和は `(-2.0, 2.0)` に
@@ -2765,14 +2833,24 @@ impl WideFloat {
 /// `mantissa`（絶対値が `2.0` 未満の任意の有限値。ゼロを含む）を
 /// `[0.5, 1.0)` へ正規化しつつ `exponent` を調整する
 /// （[`WideFloat::mul`]／[`WideFloat::add`] の後処理として使う）。
-fn normalize(mantissa: f64, exponent: i32) -> WideFloat {
+fn normalize(mantissa: f64, exponent: i64) -> WideFloat {
     if mantissa == 0.0 {
         return WideFloat::ZERO;
     }
     let (m, e) = frexp(mantissa);
+    // `e`（`frexp` が返す小さな補正量。`mantissa` の絶対値は呼び出し元
+    // の契約上 `(-2.0, 2.0)` のため `e ∈ {-1, 0, 1}` 相当）を `i64` へ
+    // 拡大してから `checked_add` する。`exponent` が `mul`／`add` の
+    // 飽和により既に `i64::MAX`／`i64::MIN` の場合でも panic せず、
+    // 同じ側へ飽和させる（`to_f64` がこれを正しく `±inf`／`0.0` へ
+    // 変換する）。
+    let widened =
+        exponent
+            .checked_add(e as i64)
+            .unwrap_or(if e >= 0 { i64::MAX } else { i64::MIN });
     WideFloat {
         mantissa: m,
-        exponent: exponent + e,
+        exponent: widened,
     }
 }
 
@@ -6534,7 +6612,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
     fn wide_float_zero_dominates_even_with_extreme_exponent() {
         // `2^1000` 自体は `f64` の表現域内（最大 `≈ 1.8e308 ≈ 2^1024`）
         // だが、それを `WideFloat::mul` で自乗すると真の値は `2^2000`
-        // となり `f64` 表現域を超える。`WideFloat` は指数を `i32` の
+        // となり `f64` 表現域を超える。`WideFloat` は指数を `i64` の
         // 加算として保持するのみで、この乗算自体は内部でオーバー
         // フローしない（`to_f64()` した時点で初めて inf になる）。
         let big = WideFloat::from_f64(2f64.powi(1000));
@@ -6566,6 +6644,94 @@ release ビルドでも検知できるよう `assert!` を使う）"
             recovered.to_f64(),
             2f64.powi(600),
             "big^2 * small = 2^600 へ有限で復元できるはず"
+        );
+    }
+
+    /// [`WideFloat`] の指数（`i64`）が旧実装（`i32`）の表現域
+    /// （`±2.147e9`）を大きく超えても panic せず正しく飽和することを
+    /// 確認する回帰テスト（codex-review 追加指摘・PR #1819）。指摘は
+    /// `x = [0] + [2^127] × 17,000,000` のような入力（約 68 MB）で
+    /// suffix 積の指数が `127 * 17e6 ≈ 2.16e9` に達し `i32` を超える
+    /// というものだったが、ここでは大量の要素を確保せずに同じ現象
+    /// （指数が `i32::MAX` を大きく超える）を「2 分累乗」で軽量に
+    /// 再現する: `2^70` を 25 回自乗すると、指数は `70 * 2^25 ≈
+    /// 2.35e9` となり `i32::MAX`（`≈ 2.147e9`）を超えるが、`i64::MAX`
+    /// （`≈ 9.22e18`）には遠く及ばない。旧 `i32` 実装なら
+    /// `overflow-checks` 有効時に `+` が panic し、無効時は指数が
+    /// 折り返して誤った（符号や桁が滅茶苦茶な）有限値を返していた
+    /// はずの状況である。
+    #[test]
+    fn wide_float_exponent_survives_i32_overflow_without_panicking() {
+        let mut acc = WideFloat::from_f64(2f64.powi(70));
+        for _ in 0..25 {
+            acc = acc.mul(acc); // 指数は毎回 2 倍（i64 の checked_add で panic しない）
+        }
+        // 真の値は `2^(70 * 2^25)` であり、これは `f64` の表現域
+        // （最大 `≈ 2^1024`）を天文学的規模で超えるため、`to_f64()`
+        // が符号付き `inf` へ飽和するのが数学的に正しい挙動。
+        let value = acc.to_f64();
+        assert!(
+            value.is_infinite() && value.is_sign_positive(),
+            "指数オーバーフロー後も符号付き inf へ正しく飽和するはず（実際: {value}）"
+        );
+
+        // 小さい係数を掛けて指数を大きく下げても、悪化前と同様に
+        // 有限へ正しく復元できる（`WideFloat::mul` の指数飽和が
+        // 以後の演算を破壊しないことの確認）。
+        let tiny = WideFloat::from_f64(2f64.powi(-70));
+        let mut shrink = acc;
+        // 24 回掛けて指数を `70 * 2^25 - 70 * 24` 程度まで下げる
+        // （それでもなお表現域外に留まる規模のため inf のまま）。
+        for _ in 0..24 {
+            shrink = shrink.mul(tiny);
+        }
+        let shrunk_value = shrink.to_f64();
+        assert!(
+            !shrunk_value.is_nan(),
+            "指数飽和後の演算が NaN を生んではならない（実際: {shrunk_value}）"
+        );
+    }
+
+    /// `cumprod_vjp_along` の統合テスト: 軸上に極端に大きい要素
+    /// （`2^127`）が数千個連続し、先頭が `0` である入力に対して、
+    /// suffix 積の指数が `i32` の表現域（`±2.147e9`）を超えて真に
+    /// `f64` 表現域外まで発散しうる状況でも backward が panic せず、
+    /// `NaN` を生まないことを確認する（codex-review 追加指摘・PR
+    /// #1819 の再現条件を、実メモリを大量消費しない小規模な軸長で
+    /// 近似したもの）。`x[0] = 0` より後段（`a >= 1`）は排他的
+    /// prefix 積 `L[a]` が厳密に `0` を含むため、`WideFloat::mul` の
+    /// 零遮断規約により勾配は厳密に `0.0` になる（真の値がどれほど
+    /// 発散していても `0 * 有限 = 0` が表現域と無関係に成り立つ）。
+    /// `dx[0]` は `S[0]`（`x[1..]` が全て `2^127` の Horner 型後方
+    /// 再帰の和）そのものであり、`2^127` の連続乗算は数要素で真に
+    /// `f64` 表現域（`最大 ≈ 2^1024`）を超えるため、符号付き `inf`
+    /// へ正しく飽和するのが数学的に正しい（`0.0` や有限値へ誤って
+    /// wrap しないことが本テストの主眼であり、「有限または 0」を
+    /// 要求するものではない）。
+    #[test]
+    fn cumprod_vjp_along_handles_large_magnitude_run_without_panicking() {
+        const AXIS_LEN: usize = 4096;
+        let mut x = vec![2f64.powi(127) as f32; AXIS_LEN];
+        x[0] = 0.0;
+        let input = build_tensor(x, &[AXIS_LEN]);
+        let upstream = build_tensor(vec![1.0f32; AXIS_LEN], &[AXIS_LEN]);
+
+        let dx = cumprod_vjp_along(&input, &upstream, 0);
+        let dx_values = dense_vec(&dx);
+        assert_eq!(dx_values.len(), AXIS_LEN);
+        for (i, &v) in dx_values.iter().enumerate() {
+            assert!(!v.is_nan(), "index {i} の勾配が NaN になってはならない");
+        }
+        for (i, &v) in dx_values.iter().enumerate().skip(1) {
+            assert_eq!(
+                v, 0.0,
+                "index {i}: 先頭の 0 を含む prefix 積により厳密に 0.0 のはず（実際: {v}）"
+            );
+        }
+        assert!(
+            dx_values[0].is_infinite() && dx_values[0].is_sign_positive(),
+            "dx[0] は真に f64 表現域外へ発散するため符号付き inf のはず（実際: {}）",
+            dx_values[0]
         );
     }
 }
