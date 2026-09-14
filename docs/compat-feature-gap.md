@@ -817,6 +817,20 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 取る facade API）は引き続き未接続で、本表の「未実装（欠落側）」列の評価
 （`Var` レベルの mixed precision）は変わらない。
 
+**追補（イシュー #1715）**: 上記スナップショット時点で「bmm」（#2.6）と
+記載されていた rank≥3 の行列積（PyTorch `torch.matmul`／`bmm` 相当）が
+実装済みへ更新された。`Var::matmul` が rank≥2（先頭 rank−2 軸を NumPy
+互換ブロードキャストするバッチ次元）を受理するようになり、
+`fandhe_ai_tensor_core::BackendOps` に `gemm_batched`／
+`gemm_batched_fp32_strict`（既定は per-batch `gemm`/`gemm_fp32_strict`
+への合成。非破壊拡張のデフォルトメソッド）を追加し、`backend-cpu` が
+専用オーバーライド（`CpuBackendOps::gemm_batched`。既存 2 次元
+`gemm`/`gemm_into_slice` と bit 同一）を持つ。facade 新規公開面なし
+（既存 `Var` 再エクスポート経由でそのまま到達可能）。CUDA／Metal は
+既定合成実装のまま（機能的に到達可能・専用バッチカーネルは #1716／
+#1717）。`einsum`（rank≥3 matmul を伴う batch 添字縮約。#1600 が未実装
+としていた対象）は本イシューでは対象外のまま残る。
+
 ## #1636（#1707〜#1709）の追補
 
 Metal バックエンドの `ScalarOp`（`ScalarUnaryOp`／`ScalarBinaryOp`。

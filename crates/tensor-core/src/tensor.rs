@@ -180,7 +180,13 @@ impl<T: Element> Tensor<T> {
 
     /// 全要素を `value` で埋めたテンソルを生成する。
     pub fn full(shape: &[usize], value: T) -> Result<Tensor<T>, ShapeError> {
-        let numel = checked_numel(shape)?;
+        // 要素数積が `usize` に収まっても `T` 込みのバイトサイズが `Vec`
+        // の allocation 上限（`isize::MAX` バイト）を超える shape は
+        // `vec![value; numel]` が capacity overflow で panic するため、
+        // `checked_numel_for::<T>` でバイトサイズまで確保前に検査する
+        // （`ShapeError::ElementCountOverflow` の doc の契約どおり。
+        // PR #1810 codex-review P1 是正）。
+        let numel = checked_numel_for::<T>(shape)?;
         let data = vec![value; numel];
         let strides = row_major_strides(shape);
         Ok(Tensor {

@@ -26,12 +26,19 @@ use crate::broadcast::broadcast_shape;
 use crate::error::ShapeError;
 use crate::tensor::{checked_numel, checked_numel_for};
 
-/// matmul（2 次元前提。`docs/public-api-design.md` §3.2）の出力 shape を
-/// 検査・計算する。
+/// matmul の 2 次元厳密版（`docs/public-api-design.md` §3.2）の出力 shape
+/// を検査・計算する。
 ///
-/// `fandhe_ai_autodiff::Var::matmul`（#15）・backend 入口の `BackendOps::matmul`
-/// （`docs/public-api-design.md` §4.2）から呼ばれ、カーネル実行前に
-/// 呼び出し元が shape 前提を確認する契約点となる。
+/// バッチ対応前（イシュー #1715 以前）の `matmul_out_shape` 本体そのもの。
+/// 各バックエンドの GEMM カーネル入口（`backend-cpu`/`backend-cuda`/
+/// `backend-metal` の `gemm`/`gemm_checksum`/`gemm_fp32_strict_into`/
+/// `gemm_bias_act` 等）はバッチ次元を持たない 2 次元スライス
+/// （`BackendOps::gemm_batched` の既定合成実装がバッチをほどいた後の
+/// 各バッチ）のみを受け取るため、rank≠2 を明示的に拒否する本関数へ
+/// 移行済み（イシュー #1715。#1600 ツリー）。`matmul_out_shape`（本モジュール
+/// 下方）はバッチ次元を許容する一般化版であり、2 次元カーネル入口を
+/// 誤って rank≥3 で呼び出し「panic せず誤った結果を返す」経路を防ぐため
+/// 両者を分離している。
 ///
 /// - `lhs`/`rhs` の rank が 2 でない場合 `ShapeError::RankMismatch`
 ///   （`expected: 2`）を返す。
@@ -40,7 +47,7 @@ use crate::tensor::{checked_numel, checked_numel_for};
 /// - 出力 shape `[lhs[0], rhs[1]]` の要素数積のオーバーフローは
 ///   `checked_numel`（`tensor.rs` と共有）で検査し
 ///   `ShapeError::ElementCountOverflow` を返す。
-pub fn matmul_out_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, ShapeError> {
+pub fn gemm_out_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, ShapeError> {
     if lhs.len() != 2 {
         return Err(ShapeError::RankMismatch {
             expected: 2,
@@ -62,6 +69,197 @@ pub fn matmul_out_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, Shap
     let out = vec![lhs[0], rhs[1]];
     checked_numel(&out)?;
     Ok(out)
+}
+
+/// matmul（rank≥2。バッチ次元は NumPy 互換ブロードキャスト。
+/// `docs/public-api-design.md` §3.2・spec REQ-9 2026-09-12 追記 Tier 1
+/// 「バッチ行列積」・`docs/compat-api-scope.md` §1.2）の出力 shape を
+/// 検査・計算する。
+///
+/// `fandhe_ai_autodiff::Var::matmul`（#15。イシュー #1715 でバッチ対応）・
+/// `BackendOps::gemm_batched`（既定合成実装。`backend_ops.rs`）から呼ばれ、
+/// カーネル実行前に呼び出し元が shape 前提を確認する契約点となる。
+/// **カーネル入口（各バックエンドの `gemm`/`gemm_checksum`/`gemm_bias_act`
+/// 等）はこの関数を呼ばない**（rank≥3 を誤って受理してしまうため）。
+/// カーネル入口は 2 次元厳密版 [`gemm_out_shape`] を使う。
+///
+/// - `lhs`/`rhs` いずれかの rank が 2 未満の場合 `ShapeError::RankMismatch`
+///   （`expected: 2`）を返す（rank 2 同士の挙動・エラーは
+///   [`gemm_out_shape`] と完全に一致する）。
+/// - 内部次元（`lhs` の最終軸と `rhs` の最後から 2 番目の軸）が一致しない
+///   場合 `ShapeError::MatmulDimMismatch` を返す。
+/// - バッチ次元（先頭の rank−2 軸）は [`crate::broadcast::broadcast_shape`]
+///   で NumPy 互換ブロードキャストする（rank が異なる場合は短い方の先頭に
+///   暗黙の軸長 1 を補完。不一致は `ShapeError::BroadcastIncompatible` を
+///   そのまま伝播する）。
+/// - 出力 shape `batch ++ [m, n]` の要素数積のオーバーフローは
+///   `checked_numel` で検査し `ShapeError::ElementCountOverflow` を返す。
+pub fn matmul_out_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, ShapeError> {
+    Ok(batched_matmul_plan(lhs, rhs)?.out_shape())
+}
+
+/// [`matmul_out_shape`] が検査済みの形状情報を保持する計画。
+///
+/// バッチ行列積の実行（`BackendOps::gemm_batched` 既定合成実装・
+/// `CpuBackendOps::gemm_batched`・`matmul_vjp` のバッチ縮約）が共有する。
+/// `lhs_batch_shape`/`rhs_batch_shape` は各オペランド自身のバッチ形状
+/// （ブロードキャスト前）であり、出力バッチ添字から各オペランドの
+/// （ブロードキャスト後）フラット添字への写像に使う。
+///
+/// 全フィールドを非公開（`pub(self)` 相当）にし、構築は
+/// [`batched_matmul_plan`]（本モジュール内で不変条件を検査したうえで
+/// 構築する唯一の経路）に限定する。読み取りは下記のアクセサ経由のみ
+/// 許可し、フィールドを個別に差し替え可能な `pub` にしない（PR #1810
+/// codex-review 指摘。全フィールド `pub` だと呼び出し側が
+/// `batch_shape.clear()` 等で `lhs_batch_shape`／`rhs_batch_shape` より
+/// rank の小さい不整合な `batch_shape` を作れてしまい、その後
+/// `operand_batch_index` を呼ぶと `flat_index` 内の `rank -
+/// operand_shape.len()` が `usize` 減算アンダーフローして panic する
+/// （`.claude/rules/coding-rust.md` の本番経路 panic 禁止方針）ため）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchedMatmulPlan {
+    /// 出力のバッチ形状（`broadcast_shape(lhs_batch, rhs_batch)`）。
+    batch_shape: Vec<usize>,
+    /// 行列積の m（`lhs` の最後から 2 番目の軸）。
+    m: usize,
+    /// 行列積の内部次元 k（`lhs` の最終軸・`rhs` の最後から 2 番目の軸）。
+    k: usize,
+    /// 行列積の n（`rhs` の最終軸）。
+    n: usize,
+    /// `lhs` 自身のバッチ形状（ブロードキャスト前。`lhs[..rank-2]`）。
+    lhs_batch_shape: Vec<usize>,
+    /// `rhs` 自身のバッチ形状（ブロードキャスト前。`rhs[..rank-2]`）。
+    rhs_batch_shape: Vec<usize>,
+}
+
+impl BatchedMatmulPlan {
+    /// 出力のバッチ形状（`broadcast_shape(lhs_batch, rhs_batch)`）。
+    pub fn batch_shape(&self) -> &[usize] {
+        &self.batch_shape
+    }
+
+    /// 行列積の m（`lhs` の最後から 2 番目の軸）。
+    pub fn m(&self) -> usize {
+        self.m
+    }
+
+    /// 行列積の内部次元 k（`lhs` の最終軸・`rhs` の最後から 2 番目の軸）。
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
+    /// 行列積の n（`rhs` の最終軸）。
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// `lhs` 自身のバッチ形状（ブロードキャスト前。`lhs[..rank-2]`）。
+    pub fn lhs_batch_shape(&self) -> &[usize] {
+        &self.lhs_batch_shape
+    }
+
+    /// `rhs` 自身のバッチ形状（ブロードキャスト前。`rhs[..rank-2]`）。
+    pub fn rhs_batch_shape(&self) -> &[usize] {
+        &self.rhs_batch_shape
+    }
+
+    /// 出力 shape（`batch_shape ++ [m, n]`）を返す。
+    pub fn out_shape(&self) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.batch_shape.len() + 2);
+        out.extend_from_slice(&self.batch_shape);
+        out.push(self.m);
+        out.push(self.n);
+        out
+    }
+
+    /// 出力バッチのフラット添字（`batch_shape` を row-major で辿った通し
+    /// 番号）から、`lhs`/`rhs` それぞれの（ブロードキャスト後）フラット
+    /// バッチ添字を計算する。
+    ///
+    /// ブロードキャストされた軸（オペランド側の軸長が 1）は常に添字 0
+    /// を指す（NumPy の broadcast read と同じ「同一要素の繰り返し読み」。
+    /// `docs/public-api-design.md` §2.1）。オペランドのバッチ rank が
+    /// 出力より短い場合は、先頭に補完された暗黙の軸長 1 分だけ
+    /// `batch_shape` の先頭軸を読み飛ばす。
+    pub fn operand_batch_index(&self, out_batch_flat: usize) -> (usize, usize) {
+        let rank = self.batch_shape.len();
+        let mut multi = vec![0usize; rank];
+        let mut rem = out_batch_flat;
+        for i in (0..rank).rev() {
+            let dim = self.batch_shape[i];
+            if dim == 0 {
+                multi[i] = 0;
+            } else {
+                multi[i] = rem % dim;
+                rem /= dim;
+            }
+        }
+        let lhs_idx = Self::flat_index(&self.lhs_batch_shape, &multi);
+        let rhs_idx = Self::flat_index(&self.rhs_batch_shape, &multi);
+        (lhs_idx, rhs_idx)
+    }
+
+    /// `operand_shape`（`out_multi` と同じ長さへ右揃えで補完・軸長 1 は
+    /// broadcast 添字 0 固定）に対する row-major フラット添字を計算する。
+    fn flat_index(operand_shape: &[usize], out_multi: &[usize]) -> usize {
+        let rank = out_multi.len();
+        let offset = rank - operand_shape.len();
+        let mut idx = 0usize;
+        for (axis, &dim) in operand_shape.iter().enumerate() {
+            let out_axis = axis + offset;
+            let coord = if dim == 1 { 0 } else { out_multi[out_axis] };
+            idx = idx * dim + coord;
+        }
+        idx
+    }
+}
+
+/// [`matmul_out_shape`] の検査本体。出力 shape だけでなく `m`/`k`/`n`・
+/// バッチ形状を含む [`BatchedMatmulPlan`] を返す（`BackendOps::gemm_batched`
+/// 既定合成実装・`CpuBackendOps::gemm_batched`・`matmul_vjp` から共有）。
+pub fn batched_matmul_plan(lhs: &[usize], rhs: &[usize]) -> Result<BatchedMatmulPlan, ShapeError> {
+    if lhs.len() < 2 {
+        return Err(ShapeError::RankMismatch {
+            expected: 2,
+            actual: lhs.len(),
+        });
+    }
+    if rhs.len() < 2 {
+        return Err(ShapeError::RankMismatch {
+            expected: 2,
+            actual: rhs.len(),
+        });
+    }
+    let lhs_rank = lhs.len();
+    let rhs_rank = rhs.len();
+    let m = lhs[lhs_rank - 2];
+    let k_lhs = lhs[lhs_rank - 1];
+    let k_rhs = rhs[rhs_rank - 2];
+    let n = rhs[rhs_rank - 1];
+    if k_lhs != k_rhs {
+        return Err(ShapeError::MatmulDimMismatch {
+            lhs: lhs.to_vec(),
+            rhs: rhs.to_vec(),
+        });
+    }
+    let lhs_batch_shape = lhs[..lhs_rank - 2].to_vec();
+    let rhs_batch_shape = rhs[..rhs_rank - 2].to_vec();
+    let batch_shape = broadcast_shape(&lhs_batch_shape, &rhs_batch_shape)?;
+
+    let mut out = Vec::with_capacity(batch_shape.len() + 2);
+    out.extend_from_slice(&batch_shape);
+    out.push(m);
+    out.push(n);
+    checked_numel(&out)?;
+
+    Ok(BatchedMatmulPlan {
+        batch_shape,
+        m,
+        k: k_lhs,
+        n,
+        lhs_batch_shape,
+        rhs_batch_shape,
+    })
 }
 
 /// elementwise 二項演算（`add`・`mul`。`docs/public-api-design.md` §3.2）の
@@ -469,17 +667,19 @@ pub fn one_hot_out_shape(
 mod tests {
     use super::*;
 
-    // --- matmul_out_shape ---
+    // --- gemm_out_shape（2 次元厳密版。カーネル入口用） ---
 
     #[test]
-    fn matmul_ok() {
-        let out = matmul_out_shape(&[2, 3], &[3, 4]).unwrap();
+    fn gemm_ok() {
+        let out = gemm_out_shape(&[2, 3], &[3, 4]).unwrap();
         assert_eq!(out, vec![2, 4]);
     }
 
     #[test]
-    fn matmul_rank_mismatch_lhs() {
-        let err = matmul_out_shape(&[2, 3, 4], &[3, 4]).unwrap_err();
+    fn gemm_rank_mismatch_lhs_rank3_rejected() {
+        // カーネル入口用の 2 次元厳密版はバッチ次元（rank 3）を拒否する
+        // （`matmul_out_shape` の一般化以前の挙動そのもの。イシュー #1715）。
+        let err = gemm_out_shape(&[2, 3, 4], &[3, 4]).unwrap_err();
         assert!(matches!(
             err,
             ShapeError::RankMismatch {
@@ -490,7 +690,107 @@ mod tests {
     }
 
     #[test]
-    fn matmul_rank_mismatch_rhs() {
+    fn gemm_rank_mismatch_rhs() {
+        let err = gemm_out_shape(&[2, 3], &[3]).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 2,
+                actual: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn gemm_dim_mismatch() {
+        let err = gemm_out_shape(&[2, 3], &[4, 5]).unwrap_err();
+        match err {
+            ShapeError::MatmulDimMismatch { lhs, rhs } => {
+                assert_eq!(lhs, vec![2, 3]);
+                assert_eq!(rhs, vec![4, 5]);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gemm_overflow() {
+        // usize::MAX に近い次元同士の積は checked_numel でオーバーフロー検出される。
+        let big = usize::MAX / 2 + 1;
+        let err = gemm_out_shape(&[big, big], &[big, big]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    #[test]
+    fn gemm_zero_size_axis() {
+        // 空テンソル（サイズ 0 軸）は形状として妥当。
+        let out = gemm_out_shape(&[0, 3], &[3, 4]).unwrap();
+        assert_eq!(out, vec![0, 4]);
+    }
+
+    // --- matmul_out_shape（rank≥2・バッチ次元 broadcast 対応） ---
+
+    #[test]
+    fn matmul_ok_rank2() {
+        // rank 2 同士は gemm_out_shape と完全に同じ挙動（結果・エラーとも）。
+        let out = matmul_out_shape(&[2, 3], &[3, 4]).unwrap();
+        assert_eq!(out, vec![2, 4]);
+    }
+
+    #[test]
+    fn matmul_batched_equal_batch_shape() {
+        let out = matmul_out_shape(&[5, 2, 3], &[5, 3, 4]).unwrap();
+        assert_eq!(out, vec![5, 2, 4]);
+    }
+
+    #[test]
+    fn matmul_batched_broadcast_leading_axis() {
+        let out = matmul_out_shape(&[1, 2, 3], &[5, 3, 4]).unwrap();
+        assert_eq!(out, vec![5, 2, 4]);
+    }
+
+    #[test]
+    fn matmul_batched_broadcast_rank_mismatch_lhs_2d() {
+        // lhs が 2 次元（暗黙のバッチ rank 0）・rhs がバッチ次元を持つ場合、
+        // lhs のバッチ次元は全ブロードキャストされる。
+        let out = matmul_out_shape(&[2, 3], &[5, 3, 4]).unwrap();
+        assert_eq!(out, vec![5, 2, 4]);
+    }
+
+    #[test]
+    fn matmul_batched_broadcast_rank_mismatch_rhs_2d() {
+        let out = matmul_out_shape(&[5, 2, 3], &[3, 4]).unwrap();
+        assert_eq!(out, vec![5, 2, 4]);
+    }
+
+    #[test]
+    fn matmul_batched_broadcast_multi_axis() {
+        // lhs バッチ [2, 1]・rhs バッチ [2, 3] → broadcast_shape で [2, 3]。
+        let out = matmul_out_shape(&[2, 1, 2, 3], &[2, 3, 3, 4]).unwrap();
+        assert_eq!(out, vec![2, 3, 2, 4]);
+    }
+
+    #[test]
+    fn matmul_batched_broadcast_incompatible() {
+        let err = matmul_out_shape(&[2, 2, 3], &[3, 3, 4]).unwrap_err();
+        assert!(matches!(err, ShapeError::BroadcastIncompatible { .. }));
+    }
+
+    #[test]
+    fn matmul_rank_below_2_rejected_lhs() {
+        // rank 1 は 2 次元厳密版と同様に拒否する（rank≥2 未満を許容しない）。
+        let err = matmul_out_shape(&[3], &[3, 4]).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 2,
+                actual: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn matmul_rank_below_2_rejected_rhs() {
         let err = matmul_out_shape(&[2, 3], &[3]).unwrap_err();
         assert!(matches!(
             err,
@@ -502,23 +802,31 @@ mod tests {
     }
 
     #[test]
-    fn matmul_dim_mismatch() {
-        let err = matmul_out_shape(&[2, 3], &[4, 5]).unwrap_err();
-        match err {
-            ShapeError::MatmulDimMismatch { lhs, rhs } => {
-                assert_eq!(lhs, vec![2, 3]);
-                assert_eq!(rhs, vec![4, 5]);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+    fn matmul_rank3_accepted_now() {
+        // バッチ対応前（#1715 以前）は rank 3 を拒否していたが、
+        // 本イシューで受理されるようになった（lhs のバッチ軸 [2] を
+        // 2 次元 rhs〈暗黙のバッチ rank 0〉へブロードキャスト）。
+        let out = matmul_out_shape(&[2, 3, 4], &[4, 5]).unwrap();
+        assert_eq!(out, vec![2, 3, 5]);
     }
 
     #[test]
-    fn matmul_overflow() {
-        // usize::MAX に近い次元同士の積は checked_numel でオーバーフロー検出される。
+    fn matmul_batched_dim_mismatch() {
+        let err = matmul_out_shape(&[5, 2, 3], &[5, 4, 4]).unwrap_err();
+        assert!(matches!(err, ShapeError::MatmulDimMismatch { .. }));
+    }
+
+    #[test]
+    fn matmul_batched_overflow() {
         let big = usize::MAX / 2 + 1;
-        let err = matmul_out_shape(&[big, big], &[big, big]).unwrap_err();
+        let err = matmul_out_shape(&[2, big, big], &[2, big, big]).unwrap_err();
         assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    #[test]
+    fn matmul_batched_zero_batch() {
+        let out = matmul_out_shape(&[0, 2, 3], &[0, 3, 4]).unwrap();
+        assert_eq!(out, vec![0, 2, 4]);
     }
 
     #[test]
@@ -526,6 +834,58 @@ mod tests {
         // 空テンソル（サイズ 0 軸）は形状として妥当。
         let out = matmul_out_shape(&[0, 3], &[3, 4]).unwrap();
         assert_eq!(out, vec![0, 4]);
+    }
+
+    // --- batched_matmul_plan / BatchedMatmulPlan ---
+
+    #[test]
+    fn batched_matmul_plan_fields() {
+        let plan = batched_matmul_plan(&[5, 2, 3], &[5, 3, 4]).unwrap();
+        assert_eq!(plan.batch_shape(), &[5]);
+        assert_eq!(plan.m(), 2);
+        assert_eq!(plan.k(), 3);
+        assert_eq!(plan.n(), 4);
+        assert_eq!(plan.lhs_batch_shape(), &[5]);
+        assert_eq!(plan.rhs_batch_shape(), &[5]);
+        assert_eq!(plan.out_shape(), vec![5, 2, 4]);
+    }
+
+    #[test]
+    fn batched_matmul_plan_operand_batch_index_broadcast() {
+        // lhs は [1, 2, 3]（バッチ 1）、rhs は [5, 3, 4]（バッチ 5）。
+        // 出力バッチ添字 i に対し lhs は常に 0、rhs は i を指す。
+        let plan = batched_matmul_plan(&[1, 2, 3], &[5, 3, 4]).unwrap();
+        assert_eq!(plan.batch_shape(), &[5]);
+        for i in 0..5 {
+            assert_eq!(plan.operand_batch_index(i), (0, i));
+        }
+    }
+
+    #[test]
+    fn batched_matmul_plan_operand_batch_index_rank_mismatch() {
+        // lhs は 2 次元（暗黙のバッチ rank 0）。rhs は [5, 3, 4]。
+        let plan = batched_matmul_plan(&[2, 3], &[5, 3, 4]).unwrap();
+        assert_eq!(plan.batch_shape(), &[5]);
+        for i in 0..5 {
+            assert_eq!(plan.operand_batch_index(i), (0, i));
+        }
+    }
+
+    #[test]
+    fn batched_matmul_plan_operand_batch_index_multi_axis() {
+        // lhs=[2,1,2,3]（バッチ [2,1]）・rhs=[3,1,3,4]（バッチ [3,1]、
+        // rhs 側は暗黙補完で先頭に 1 軸が付き [1,3,1] 相当ではなく
+        // 実際は rank 一致なので lhs_batch=[2,1]・rhs_batch=[3,1]）。
+        // 出力バッチは broadcast_shape([2,1],[3,1]) = [2,3] のはず……
+        // ではなく末尾軸比較なので [2,1] vs [3,1] は軸0: 2 vs 3 で
+        // 不一致になってしまうため、ここでは一致する形状で検証する。
+        let plan = batched_matmul_plan(&[2, 3, 2, 3], &[2, 1, 3, 4]).unwrap();
+        assert_eq!(plan.batch_shape(), &[2, 3]);
+        // out batch (0, 0) -> multi [0, 0] -> lhs idx 0*3+0=0, rhs idx 0*1+0=0
+        assert_eq!(plan.operand_batch_index(0), (0, 0));
+        // out batch flat 4 -> multi [1, 1] (row-major over [2,3]) ->
+        // lhs idx 1*3+1=4, rhs idx 1*1+0=1 (rhs 軸1 は長さ1なので broadcast)
+        assert_eq!(plan.operand_batch_index(4), (4, 1));
     }
 
     // --- elementwise_out_shape ---

@@ -30,7 +30,7 @@ use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, ShapeError, Tensor, broadcast_shape, matmul_out_shape,
+    BackendError, BackendOps, ShapeError, Tensor, broadcast_shape, gemm_out_shape,
     reduce_out_shape, require_same_shape, row_norm_layout,
 };
 
@@ -149,7 +149,7 @@ impl Module for Linear {
     /// 自体は汎用バックエンド向けのまま変更しない。
     ///
     /// **エラー型の一致契約（review 指摘）**: `Var::matmul`/`add`（tape
-    /// 経路。`var.rs`）は shape 不整合を `matmul_out_shape`/
+    /// 経路。`var.rs`）は shape 不整合を `gemm_out_shape`/
     /// `broadcast_shape` で `ops.gemm`/`ops.add` 呼び出し**前**に検査し
     /// `AutodiffError::Shape` として返す。本メソッド（tape 不要経路）が
     /// この事前検査を省いて `ops.gemm`/`ops.add` の `?` に任せると、同じ
@@ -164,7 +164,7 @@ impl Module for Linear {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        matmul_out_shape(input.shape(), self.weight().shape())?;
+        gemm_out_shape(input.shape(), self.weight().shape())?;
         let y = ops.gemm(input, self.weight())?;
         match self.bias() {
             Some(bias) => {

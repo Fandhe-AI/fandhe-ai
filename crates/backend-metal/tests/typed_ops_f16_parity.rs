@@ -23,7 +23,7 @@ use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
 use fandhe_ai_backend_metal::{MetalBackendOps, MetalContext, MetalGemm};
 use fandhe_ai_tensor_core::device::BackendError;
-use fandhe_ai_tensor_core::{BackendOps, Tensor, TypedOps};
+use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor, TypedOps};
 use half::f16;
 
 fn f16_tensor(data: &[f32], shape: &[usize]) -> Tensor<f16> {
@@ -53,6 +53,31 @@ fn gemm_rejects_shape_mismatch_before_touching_device() {
     let b = f16_tensor(&[1.0, 2.0], &[2, 1]);
     let err = TypedOps::<f16>::gemm(&ops, &a, &b).unwrap_err();
     assert!(matches!(err, BackendError::ShapeMismatch(_)));
+}
+
+#[test]
+fn gemm_rejects_batched_rank3_input_before_touching_device() {
+    // イシュー #1715 で `matmul_out_shape`（バッチ対応・rank>=3 許容）が
+    // 一般化されたことに伴い、`TypedOps<f16>::gemm`（2 次元専用の GEMM
+    // カーネル入口。`docs/backend-dtype-dispatch-design.md` 同型の他
+    // バックエンド〈CPU/CUDA〉と同じ契約）はカーネル専用の 2 次元厳密版
+    // `gemm_out_shape` で検証しなければならない（PR #1810 codex-review
+    // 指摘）。`matmul_out_shape` のまま呼ぶとバッチ入力の先頭 2 軸を
+    // 誤って m/k として使い、デバイスへ誤った行列寸法で到達しうる
+    // （境界検査の後退）。rank=3 のバッチ入力が
+    // `ShapeError::RankMismatch { expected: 2, .. }` で拒否されることを
+    // 確認し、この後退を回帰検知する。
+    let ops = MetalBackendOps::new();
+    let a = f16_tensor(&[1.0, 2.0, 3.0, 4.0], &[2, 1, 2]);
+    let b = f16_tensor(&[1.0, 2.0], &[2, 1]);
+    let err = TypedOps::<f16>::gemm(&ops, &a, &b).unwrap_err();
+    match err {
+        BackendError::ShapeMismatch(ShapeError::RankMismatch { expected, actual }) => {
+            assert_eq!(expected, 2);
+            assert_eq!(actual, 3);
+        }
+        other => panic!("RankMismatch を期待したが {other:?} だった"),
+    }
 }
 
 #[test]
@@ -86,7 +111,7 @@ fn sum_max_are_unsupported_matching_metal_f32_backend_ops() {
     }
 }
 
-/// 零次元形状（`[0,3]×[3,2]`）は `matmul_out_shape`（numel 0 は合法）を
+/// 零次元形状（`[0,3]×[3,2]`）は `gemm_out_shape`（numel 0 は合法）を
 /// 通過してデバイスへ到達したうえで `validate_dims_f16` の
 /// `ZeroDimension` により拒否される（`crate::typed_f16` 実装計画 §3
 /// 決定 4 の既知事項）。panic せず型付きエラーで返ることを確認する

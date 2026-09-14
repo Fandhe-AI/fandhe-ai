@@ -82,7 +82,7 @@
 use half::f16;
 
 use fandhe_ai_tensor_core::device::BackendError;
-use fandhe_ai_tensor_core::{BackendOps, Tensor, TypedOps, matmul_out_shape};
+use fandhe_ai_tensor_core::{BackendOps, Tensor, TypedOps, gemm_out_shape};
 
 use crate::context_cache;
 use crate::error::MetalError;
@@ -127,7 +127,7 @@ impl TypedOps<f16> for MetalBackendOps {
     /// と同じ「デバイス呼び出し前に事前検証」契約）。
     fn gemm(&self, a: &Tensor<f16>, b: &Tensor<f16>) -> Result<Tensor<f16>, BackendError> {
         let out_shape =
-            matmul_out_shape(a.shape(), b.shape()).map_err(BackendError::ShapeMismatch)?;
+            gemm_out_shape(a.shape(), b.shape()).map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
 
