@@ -219,11 +219,25 @@ fn unary_prelude(op: ScalarUnaryOp) -> &'static str {
         // `log1p(y) = ln(1+y)` を桁落ちなく計算する Kahan の補正式
         // （`u == 1.0` すなわち `y` が `f32` の ulp 未満のときは `y`
         // 自体を返す。`ScalarUnaryOp::apply` の `Softplus` 分岐が使う
-        // ホスト `f32::ln_1p` の意図的複製）。
+        // ホスト `f32::ln_1p` の意図的複製）。`y` は
+        // `metal::precise::exp(p0 * x)` の結果で非負だが、`x` が
+        // `f32::exp` の飽和域（約 88.7 超）でも `x*beta <= threshold`
+        // となりうるため `y` 自体が `+inf` を取りうる（CPU/CUDA の
+        // `ln_1p`/`log1pf` は `log1p(inf) = inf` を返す）。この場合
+        // `u = 1+y` も `+inf` になり補正式が `inf/inf` を計算して
+        // `NaN` になってしまうため、先頭で明示的に `+inf` を伝播する。
+        // 有限入力側も `log(u) * y` を先に評価すると（`y` が大きい
+        // ほど）`f32` 上限を超えて誤って `inf` になりうるため、桁落ち
+        // しない比 `y / (u - 1.0f)`（`u` が大きいほど 1 に近づき
+        // オーバーフローしない）を先に評価してから `log(u)` を掛ける
+        // 順序へ変更する（積の評価順序のみの変更で数式・契約は不変）。
         ScalarUnaryOp::Softplus { .. } => {
             "inline float scalar_log1p_f32(float y) {\n\
+             \x20   if (isinf(y)) {\n\
+             \x20       return y;\n\
+             \x20   }\n\
              \x20   float u = 1.0f + y;\n\
-             \x20   return (u == 1.0f) ? y : metal::precise::log(u) * y / (u - 1.0f);\n\
+             \x20   return (u == 1.0f) ? y : metal::precise::log(u) * (y / (u - 1.0f));\n\
              }\n\n"
         }
         _ => "",

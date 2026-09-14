@@ -128,9 +128,14 @@ impl Softplus {
 
 impl Default for Softplus {
     /// PyTorch `nn.Softplus` の既定値（`beta=1.0`・`threshold=20.0`）。
-    /// `new` の検査を通る値のみを使うため `unwrap` は panic しない。
+    /// `new` の検査（有限性・符号）を通る既知の定数のため、本番経路
+    /// panic 禁止規約（`expect`／`unwrap` を避ける）に従いフィールドを
+    /// 直接構築する。
     fn default() -> Self {
-        Self::new(1.0, 20.0).expect("Softplus 既定値 (1.0, 20.0) は常に有効")
+        Self {
+            beta: 1.0,
+            threshold: 20.0,
+        }
     }
 }
 
