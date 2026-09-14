@@ -8,8 +8,8 @@
 //! （既定値のままだと属性欠落を検出できず対称性テストが空虚に pass してしまう
 //! ため。`export_ops.rs` モジュール冒頭コメント参照）。
 //! import -> export -> import の総合 roundtrip・未対応 op 全数の fail-closed
-//! 確認は #1774 のスコープであり、本テストは op 単位の対称性・層 B の
-//! allowlist 検査・arity 検査に限定する。
+//! 確認は `tests/onnx_export_roundtrip.rs`（#1774）が担い、本テストは op 単位の
+//! 対称性・層 B の allowlist 検査・arity 検査に限定する。
 
 use std::collections::HashMap;
 

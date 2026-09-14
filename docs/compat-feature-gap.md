@@ -861,6 +861,15 @@ facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_bi
 経由するよう変更済み。`onnx-interop` は crates.io 非公開クレートであり facade
 新規公開面はなし（#1775 の判断は本追補の対象外のまま変わらない）。
 
+**#1774 追記（ONNX import→export→import の roundtrip 構造一致テスト）**:
+`crates/onnx-interop/tests/onnx_export_roundtrip.rs` に、import -> export ->
+import の総合 roundtrip（構造一致・bit 同一）・`interp::run` 結果の bit 同一・
+未対応 op を含むモデルの fail-closed（`ExportError::UnsupportedOp`）を固定する
+テストを追加した（`docs/onnx-export-op-mapping.md` §6）。テスト追加のみで
+`onnx-interop` 本番コード（`export.rs`／`export_ops.rs`／`graph.rs`／
+`interp.rs`）は無変更・facade 新規公開面はなし（#1775 の判断は本追補の対象外の
+まま変わらない）。
+
 ## #1705 の追補
 
 `float64`／`float16` 行（319〜320 行目）のスナップショット本文は不変のまま、Metal バックエンド限定で以下が確定した（イシュー #1705・`docs/backend-dtype-dispatch-design.md` §14）。
