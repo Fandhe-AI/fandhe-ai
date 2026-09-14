@@ -79,12 +79,6 @@
 
 use fandhe_ai_tensor_core::device::select_from;
 use fandhe_ai_tensor_core::{BackendOps, DeviceProvider};
-// `ShapeError` は `randn`／`rand`（イシュー #1725）の戻り値型として使う
-// private import（`Tensor::zeros` 等の既存メソッドも同型を返しており、
-// facade 自体が再エクスポートしていない点は本イシュー以前からの既存の
-// ギャップ——`Tensor` の再エクスポート経由で間接的に既に到達可能。
-// `docs/rng-global-contract-design.md`）。
-use fandhe_ai_tensor_core::ShapeError;
 
 /// numpy/Keras 慣習の互換 API 層（compat 公開面。TASK-9.4・#411）。
 /// [`compat::array`]・[`compat::Sequential`] を提供する（詳細はモジュール
@@ -137,6 +131,16 @@ pub use fandhe_ai_tensor_core::{BackendError, Device, PoolStats, Tensor};
 // は行単位で `Tape`／`BackendOps`／`new_with_ops` を検査するのみで抵触
 // しない）。
 pub use fandhe_ai_tensor_core::RngError;
+// `ShapeError`（イシュー #1725）: `randn`／`rand`（本 PR で新設したトップ
+// レベル `pub fn`）の戻り値型（形状不正を表す）。`Tensor::zeros` 等の
+// 既存メソッドも同型を返すが、それらは既存の再エクスポート型
+// （`Tensor`）のメソッドであるのに対し `randn`／`rand` は本 PR 新設の
+// トップレベル関数であり、facade が「唯一のサポートされる公開 API 面」
+// である方針（CLAUDE.md）に照らし `RngError` と同様に 1 行の
+// `pub use` で再エクスポートする（codex-review 指摘対応。上記
+// `RngError` コメントと同じ理由で `api_surface.rs` の走査にも抵触
+// しない）。
+pub use fandhe_ai_tensor_core::ShapeError;
 // `ChecksumReadout`／`GemmChecksum`（イシュー #1339・`Var::matmul_checksum`
 // の戻り値・引数型）も 1 文 1 行で再エクスポートする（上記コメント
 // 「1 文 1 行を維持する」と同じ理由）。
