@@ -1951,13 +1951,13 @@ fn cumprod_backward_no_overflow_symmetric_large_then_small() {
     let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
 
     let x_data = dense_vec(&x0);
-    for a in 0..AXIS_LEN {
+    for (a, &x_a) in x_data.iter().enumerate().take(AXIS_LEN) {
         let v = dx.get(&[a]).unwrap_or(0.0);
         assert!(
             !v.is_nan(),
             "cumprod backward (symmetric overflow/underflow): index {a} の勾配が NaN になってはならない（実際: {v}）"
         );
-        let expected = 1.0f32 / x_data[a];
+        let expected = 1.0f32 / x_a;
         assert_eq!(
             v, expected,
             "cumprod backward (symmetric overflow/underflow): index {a} は 1/x[{a}]={expected} のはず（実際: {v}）"
