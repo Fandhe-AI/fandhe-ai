@@ -57,7 +57,10 @@ backward 内訳は 5 起動。詳細は §6）。
 - `has_async_alloc()` = `true`（`docs/backend-cuda-async-execution-design.md`
   I4 の未実測を解消）。TMA は cluster／cta 両 variant が `compute_121`／
   `121a`／`121f` でコンパイル・実行 bit 一致。#1214 NT／TN 入口は parity
-  5/5・N=1024/2048 で 2.8〜5.9 倍（train A/B は未実施。§7 参照）。
+  5/5・N=1024/2048 で 2.8〜5.9 倍（train A/B は未実施。§7 参照。→ #1590
+  で正式記録先〈`docs/perf/cuda-gemm-vjp-transposed-entry.md` §3.1／
+  §3.2〉へ転記済み・train A/B スキャフォールドを整備。数値は本節から
+  変更なし）。
   async ordering 3/3 pass。
 - GB10 CPU gemm（fresh）は candle・burn・PyTorch 2.14・TF 2.21・SciPy の
   全てに勝つ（N=256〜4096）。reuse 判定比は 256 0.697・512 0.850・

@@ -139,8 +139,9 @@ A/B を追加したい場合は本ドキュメントに追記する）。
 
 - #1212: reuse 経路の grad をデバイス常駐のまま `device_update` へ直結
 - #1214: CUDA GEMM の NT/TN 転置入口 → 実装・GPU 非依存テストは完了
-  （`docs/perf/cuda-gemm-vjp-transposed-entry.md`）。GB10 実機実測は
-  未実施のまま同 doc に記入欄を残す
+  （`docs/perf/cuda-gemm-vjp-transposed-entry.md`）。parity・補助 A/B は
+  #1574 で診断系列として実測済み・train A/B は #1590 でスキャフォールド
+  整備済みだが実測は未実施のまま同 doc §3.3 に記入欄を残す
 - #1215: Metal GEMM の NT/TN strided 結線 → 完了
   （`docs/perf/metal-gemm-vjp-transposed-entry.md`）
 - TT（両方転置）・一般 stride 化: 本イシューでは対象外のまま
