@@ -807,10 +807,13 @@ const BCE_LOG_CLAMP_MIN: f32 = -100.0;
 ///
 /// - `Probabilities`: `l = −( y·max(ln p, −100) + (1−y)·max(ln(1−p),
 ///   −100) )`（PyTorch `BCELoss` と同じログクランプ）。
-/// - `Logits`: `l = max(x, 0) − x·y + ln(1+exp(−|x|))`（数値安定な
-///   合成式。`ln(sigmoid(x))` を素朴に計算すると `x` が大きい負値の
-///   ときに桁落ち・overflow するため、この形で計算する。PyTorch
-///   `BCEWithLogitsLoss` と同値）。
+/// - `Logits`: `x>=0` は `l = (1−y)·x + ln(1+exp(−x))`、`x<0` は
+///   `l = −y·x + ln(1+exp(x))`（`max(x,0) − x·y + ln(1+exp(−|x|))` と
+///   数式として等価だが、`x` が大きく `y` が 1 に近いとき `x − x·y` が
+///   桁落ちしバックエンド間 FMA 契約差で乖離しうるため、減算ではなく
+///   `(1−y)·x` の乗算のみで打ち消し量を先に求める形へ書き換えている
+///   〈codex-review 指摘・#1737 PR #1848〉。`exp` の引数は常に非正の
+///   ため overflow しない。PyTorch `BCEWithLogitsLoss` の内部式と同型）。
 pub(crate) fn bce_elem_loss(input: f32, target: f32, kind: BceKind) -> f32 {
     match kind {
         BceKind::Probabilities => {
@@ -830,7 +833,11 @@ pub(crate) fn bce_elem_loss(input: f32, target: f32, kind: BceKind) -> f32 {
                 matches!(kind, BceKind::Logits),
                 "eval::bce_elem_loss: 未知の BceKind variant へフォールバックした（契約違反）"
             );
-            input.max(0.0) - input * target + (-input.abs()).exp().ln_1p()
+            if input >= 0.0 {
+                (1.0 - target) * input + (-input).exp().ln_1p()
+            } else {
+                -target * input + input.exp().ln_1p()
+            }
         }
     }
 }

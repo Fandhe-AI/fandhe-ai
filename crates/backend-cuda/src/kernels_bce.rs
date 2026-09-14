@@ -58,7 +58,15 @@ __device__ __forceinline__ float bce_elem_loss(float input, float target, int ki
         float log_1mp = fmaxf(logf(1.0f - input), -100.0f);
         return -(target * log_p + (1.0f - target) * log_1mp);
     }
-    return fmaxf(input, 0.0f) - input * target + log1pf(expf(-fabsf(input)));
+    // `max(x,0) - x*t + log1p(exp(-|x|))` と数式として等価だが、`x` が
+    // 大きく `t` が 1 に近いとき `x - x*t` が桁落ちしホスト（別々丸め）
+    // と乖離しうるため `(1-t)*x` の乗算のみで打ち消し量を求める形へ
+    // 書き換えている（`bce_elem_loss`〈backend-cpu／eval.rs〉と同じ理由。
+    // codex-review 指摘・#1737 PR #1848）。
+    if (input >= 0.0f) {
+        return (1.0f - target) * input + log1pf(expf(-input));
+    }
+    return -target * input + log1pf(expf(input));
 }
 
 __device__ __forceinline__ float bce_elem_grad_input(float input, float target, int kind) {

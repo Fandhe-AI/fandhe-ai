@@ -175,7 +175,9 @@ pub enum MseReduction {
 /// `BCEWithLogitsLoss` は `input` を未正規化の logits として受け取り
 /// カーネル内で sigmoid を適用する（`log(sigmoid(x))` を素朴に
 /// `ln(1/(1+exp(-x)))` で計算すると `x` が大きい負値のとき桁落ち・
-/// overflow するため、数値安定な合成式 `max(x,0) - x·y + ln(1+exp(-|x|))`
+/// overflow するため、数値安定な合成式（`x>=0`: `(1-y)·x + ln(1+exp(-x))`、
+/// `x<0`: `-y·x + ln(1+exp(x))`。`max(x,0) - x·y + ln(1+exp(-|x|))` と
+/// 数式として等価だが `x - x·y` の桁落ちを避けるため乗算のみで書く）
 /// を使う。`docs/compat-api-scope.md` §1.2 損失行参照）。両者は forward
 /// の要素式・backward の `dInput` 式が異なるため、[`MseReduction`] とは
 /// 独立にこの入力種別で分岐する（縮約種別自体は [`MseReduction`] を

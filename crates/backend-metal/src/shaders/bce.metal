@@ -68,7 +68,15 @@ inline float bce_elem_loss(float input, float target, uint kind) {
         float log_1mp = max(precise::log(1.0f - input), -100.0f);
         return -(target * log_p + (1.0f - target) * log_1mp);
     }
-    return max(input, 0.0f) - input * target + bce_log1p_f32(precise::exp(-fabs(input)));
+    // `max(x,0) - x*t + log1p(exp(-|x|))` と数式として等価だが、`x` が
+    // 大きく `t` が 1 に近いとき `x - x*t` が桁落ちしホスト（別々丸め）
+    // と乖離しうるため `(1-t)*x` の乗算のみで打ち消し量を求める形へ
+    // 書き換えている（`bce_elem_loss`〈backend-cpu／eval.rs／CUDA〉と
+    // 同じ理由。codex-review 指摘・#1737 PR #1848）。
+    if (input >= 0.0f) {
+        return (1.0f - target) * input + bce_log1p_f32(precise::exp(-input));
+    }
+    return -target * input + bce_log1p_f32(precise::exp(input));
 }
 
 /// `bce_elem_loss` の `dInput`（`scale` を乗じる前。`fandhe_ai_autodiff::

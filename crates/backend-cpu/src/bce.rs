@@ -58,7 +58,20 @@ fn bce_elem_loss(input: f32, target: f32, kind: BceKind) -> f32 {
                 matches!(kind, BceKind::Logits),
                 "bce::bce_elem_loss: 未知の BceKind variant へフォールバックした（契約違反）"
             );
-            input.max(0.0) - input * target + (-input.abs()).exp().ln_1p()
+            // `max(x,0) - x*t + log1p(exp(-|x|))` は数式として等価だが、
+            // `x` が大きく `t` が 1 に近いとき `x - x*t` が桁落ちし
+            // FMA 契約（丸め方式）が異なる CUDA／Metal と乖離しうる
+            // （codex-review 指摘。#1737 PR #1848）。`(1-t)*x` の形に
+            // 書き換え、減算ではなく乗算のみで打ち消し量を先に求める
+            // ことで桁落ちを避ける（PyTorch `binary_cross_entropy_with_
+            // logits` の内部式と同型）。x>=0: (1-t)*x + log1p(exp(-x))、
+            // x<0: -t*x + log1p(exp(x))（|x| の分岐先を明示することで
+            // `exp` の引数が常に非正となり overflow しない）。
+            if input >= 0.0 {
+                (1.0 - target) * input + (-input).exp().ln_1p()
+            } else {
+                -target * input + input.exp().ln_1p()
+            }
         }
     }
 }
@@ -222,5 +235,28 @@ mod tests {
         let err =
             bce_loss_backward_f32(&input, &target, BceKind::Logits, 1.0, &mut dinput).unwrap_err();
         assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    /// codex-review 指摘（#1737 PR #1848）の再現回帰: 旧式
+    /// `max(x,0) - x*t` は `x=1e8`／`t=1-2^-24`（f32 で厳密表現可能）の
+    /// とき `x*t` が最近傍 f32 へ丸められる過程で桁落ちし `8.0` を返す
+    /// （真値は `(1-t)*x ≈ 5.9604645`）。現行式（乗算のみで打ち消し量を
+    /// 求める形）がこの桁落ちを回避することを固定する。
+    #[test]
+    fn bce_elem_loss_logits_avoids_cancellation_for_large_input_near_one_target() {
+        let input = 1.0e8_f32;
+        let target = 1.0 - 2.0_f32.powi(-24); // f32 で厳密表現可能な 1 直前の値
+        let got = bce_elem_loss(input, target, BceKind::Logits);
+        // 真値 (1-target)*input + log1p(exp(-input)) ≈ 5.9604645（log1p 項は
+        // exp(-1e8) が underflow するため 0）。旧式は 8.0 を返していた。
+        let want = 5.960_464_5_f32;
+        assert!(
+            (got - want).abs() < 1e-3,
+            "got={got} want={want}（桁落ちにより 8.0 付近になっていないか確認）"
+        );
+        assert!(
+            (got - 8.0).abs() > 1.0,
+            "got={got} は旧式の桁落ち値 8.0 に近すぎる"
+        );
     }
 }
