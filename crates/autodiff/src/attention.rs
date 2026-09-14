@@ -57,15 +57,18 @@ fn validate_scale(scale: f32) -> Result<(), AutodiffError> {
 /// 任意の `i >= 0` に対し `j = 0` は常に許可される（`0 > i` は `i >= 0`
 /// では常に偽）ため、`l > 0 && s > 0` の下では全 masked 行は構造的に
 /// 生じない。
-pub(crate) fn causal_blocked_mask(l: usize, s: usize) -> Tensor<bool> {
+pub(crate) fn causal_blocked_mask(l: usize, s: usize) -> Result<Tensor<bool>, ShapeError> {
     let mut data = Vec::with_capacity(l * s);
     for i in 0..l {
         for j in 0..s {
             data.push(j > i);
         }
     }
+    // `data.len() == l * s` は上記ループから自明に成立するが、本番経路
+    // （`is_causal=true` の公開 API から呼ばれる）で panic させないため
+    // `Tensor::new` の `Result` をそのまま呼び出し元へ伝播する
+    // （AGENTS.md「本番経路の panic 禁止」・coding-rust の明示禁止事項）。
     Tensor::new(data, &[l, s])
-        .expect("causal_blocked_mask: data.len() == l * s と shape は自明に一致する")
 }
 
 /// `blocked`（`[..., l, s]` へ broadcast 済み・`.contiguous()` 済みの
@@ -191,24 +194,31 @@ pub(crate) fn scaled_dot_product_attention<'t>(
     let s = scores_shape[rank - 1];
 
     // L == 0 または S == 0 は空テンソル契約（§2.4「0 サイズ」）。
-    // masking／全 masked 行検査は「行」自体が存在しないため意味を
-    // なさず、そのまま softmax／後続 matmul の 0 サイズ契約へ委ねる
-    // （`docs/compat-feature-gap.md` の `gemm_batched`／`softmax` 0
-    // サイズ契約を参照。本モジュールは新規に 0 サイズ処理を作らない）。
-    let scores = if l > 0 && s > 0 {
-        if is_causal {
-            let blocked = causal_blocked_mask(l, s);
+    // 「全 masked 行」の値検査は行自体が存在しないため意味をなさず
+    // 省略するが、`attn_mask` の broadcast 形状検証（不能形状の
+    // `ShapeError` 化）は 0 サイズでも常に実施する（PR #1845
+    // codex-review 指摘: L==0/S==0 で検証を丸ごとスキップすると
+    // broadcast 不能な `attn_mask` を渡しても受理されてしまう）。
+    let scores = if is_causal {
+        if l > 0 && s > 0 {
+            let blocked = causal_blocked_mask(l, s).map_err(AutodiffError::Shape)?;
             reject_fully_masked_rows(&blocked)?;
             // `masked_fill` 自身が `[l, s]` を `scores_shape` へ
             // broadcast する（`Var::masked_fill` doc 参照）。
             scores.masked_fill(&blocked, f32::NEG_INFINITY)?
-        } else if let Some(mask) = attn_mask {
-            let blocked = negate_broadcast_mask(mask, &scores_shape)?;
-            reject_fully_masked_rows(&blocked)?;
-            scores.masked_fill(&blocked, f32::NEG_INFINITY)?
         } else {
+            // causal の block パターンは `l`／`s` のみから決定的に
+            // 導出され外部形状を持たないため、0 サイズでは検証すべき
+            // 追加形状が存在しない（そのまま softmax／後続 matmul の
+            // 0 サイズ契約へ委ねる）。
             scores
         }
+    } else if let Some(mask) = attn_mask {
+        let blocked = negate_broadcast_mask(mask, &scores_shape)?;
+        if l > 0 && s > 0 {
+            reject_fully_masked_rows(&blocked)?;
+        }
+        scores.masked_fill(&blocked, f32::NEG_INFINITY)?
     } else {
         scores
     };
@@ -229,7 +239,7 @@ mod tests {
 
     #[test]
     fn causal_blocked_mask_square_is_strict_upper_triangle() {
-        let m = causal_blocked_mask(3, 3);
+        let m = causal_blocked_mask(3, 3).unwrap();
         assert_eq!(m.shape(), &[3, 3]);
         let data = m.as_slice().unwrap();
         // 行 i・列 j: blocked = j > i。
@@ -244,7 +254,7 @@ mod tests {
     #[test]
     fn causal_blocked_mask_rectangular_l_gt_s_last_rows_fully_open() {
         // L=4, S=2: i>=1 の行はすべて j<=i を満たす（j は最大でも 1）。
-        let m = causal_blocked_mask(4, 2);
+        let m = causal_blocked_mask(4, 2).unwrap();
         let data = m.as_slice().unwrap();
         assert_eq!(
             data,
@@ -255,7 +265,7 @@ mod tests {
     #[test]
     fn causal_blocked_mask_rectangular_l_lt_s_later_columns_blocked() {
         // L=2, S=4: i=0 は j=0 のみ許可、i=1 は j=0,1 のみ許可。
-        let m = causal_blocked_mask(2, 4);
+        let m = causal_blocked_mask(2, 4).unwrap();
         let data = m.as_slice().unwrap();
         assert_eq!(data, &[false, true, true, true, false, false, true, true]);
     }
@@ -264,7 +274,7 @@ mod tests {
     fn causal_blocked_mask_never_produces_fully_masked_row() {
         for l in 1..6 {
             for s in 1..6 {
-                let m = causal_blocked_mask(l, s);
+                let m = causal_blocked_mask(l, s).unwrap();
                 assert!(reject_fully_masked_rows(&m).is_ok(), "l={l} s={s}");
             }
         }

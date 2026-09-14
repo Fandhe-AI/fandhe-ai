@@ -585,6 +585,25 @@ fn sdpa_rejects_mask_not_broadcastable() {
 }
 
 #[test]
+fn sdpa_rejects_mask_not_broadcastable_even_with_zero_l() {
+    // PR #1845 codex-review 指摘（§P2）: L == 0（query の行が 0 本）でも
+    // attn_mask の broadcast 形状検証は省略してはならない。
+    // query=[0,3]・key=[4,3]・value=[4,2] のとき scores shape は
+    // [0, 4] だが、mask=[5] はそれへ broadcast 不能なため Shape
+    // エラーを返す（全 masked 行検査のみを省略し、形状検証自体は
+    // 常に行う契約）。
+    let q = t(Vec::new(), &[0, 3]);
+    let k = t(seq(515, 4 * 3), &[4, 3]);
+    let v = t(seq(525, 4 * 2), &[4, 2]);
+    let mask = Tensor::new(vec![true; 5], &[5]).unwrap();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let (qv, kv, vv) = (tape.var(&q), tape.var(&k), tape.var(&v));
+    let err =
+        Var::scaled_dot_product_attention(&qv, &kv, &vv, Some(&mask), false, None).unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+}
+
+#[test]
 fn sdpa_rejects_mask_and_causal_together() {
     let q = t(seq(540, 2 * 3), &[2, 3]);
     let k = t(seq(550, 2 * 3), &[2, 3]);
@@ -698,6 +717,47 @@ fn sdpa_zero_s_returns_empty_tensor_without_panic() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let (qv, kv, vv) = (tape.var(&q), tape.var(&k), tape.var(&v));
     let out = Var::scaled_dot_product_attention(&qv, &kv, &vv, None, false, None)
+        .unwrap()
+        .to_tensor();
+    assert_eq!(out.shape(), &[3, 4]);
+    for &value in &dense(&out) {
+        assert!(value.is_finite());
+        assert_eq!(value, 0.0);
+    }
+}
+
+#[test]
+fn sdpa_zero_l_with_valid_attn_mask_returns_empty_tensor_without_panic() {
+    // PR #1845 codex-review 指摘（§P2）是正の反例カバレッジ: L == 0 でも
+    // broadcast 可能な attn_mask（[1, 4] -> [0, 4]）は受理され、値検査
+    // （全 masked 行検査）のみが省略されて空テンソルを返すことを確認する
+    // （§P2 修正が正当な mask まで誤って拒否しないことの確認）。
+    let q = t(Vec::new(), &[0, 3]);
+    let k = t(seq(681, 4 * 3), &[4, 3]);
+    let v = t(seq(691, 4 * 2), &[4, 2]);
+    let mask = Tensor::new(vec![true, true, true, true], &[1, 4]).unwrap();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let (qv, kv, vv) = (tape.var(&q), tape.var(&k), tape.var(&v));
+    let out = Var::scaled_dot_product_attention(&qv, &kv, &vv, Some(&mask), false, None)
+        .unwrap()
+        .to_tensor();
+    assert_eq!(out.shape(), &[0, 2]);
+    assert_eq!(out.numel(), 0);
+}
+
+#[test]
+fn sdpa_zero_s_with_valid_attn_mask_returns_empty_tensor_without_panic() {
+    // S == 0（key/value・mask とも列 0 本）: broadcast 可能な attn_mask
+    // （[1, 0] -> [3, 0]）は受理され、`sdpa_zero_s_returns_empty_tensor_
+    // without_panic`（mask なし）と同じ「空集合上の和 = 0.0（有限）」に
+    // なることを確認する。
+    let q = t(seq(701, 3 * 2), &[3, 2]);
+    let k = t(Vec::new(), &[0, 2]);
+    let v = t(Vec::new(), &[0, 4]);
+    let mask = Tensor::new(Vec::new(), &[1, 0]).unwrap();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let (qv, kv, vv) = (tape.var(&q), tape.var(&k), tape.var(&v));
+    let out = Var::scaled_dot_product_attention(&qv, &kv, &vv, Some(&mask), false, None)
         .unwrap()
         .to_tensor();
     assert_eq!(out.shape(), &[3, 4]);
