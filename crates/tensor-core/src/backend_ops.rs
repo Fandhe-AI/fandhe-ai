@@ -2448,6 +2448,41 @@ pub fn checked_gemm_batched_output_len(
     Ok(total)
 }
 
+/// [`BackendOps::gemm_batched`] の既定合成実装（`default_gemm_batched`
+/// を `BatchedGemmKind::Standard` で呼ぶ薄いラッパー）を、
+/// [`BackendOps::gemm_batched`] をオーバーライド済みのバックエンドから
+/// でも明示的に呼べるようにする公開入口（イシュー #1716）。
+///
+/// `default_gemm_batched`・`BatchedGemmKind` 自体は private のため、
+/// `crates/backend-cuda` のように精度モード（TF32 opt-in）ごとに経路を
+/// 分岐する必要があるオーバーライドは、この関数を経由して「既定合成
+/// （per-batch `T::gemm` 呼び出し）」へ明示的に戻す。**一般利用の公開
+/// API ではない**（バックエンドオーバーライド実装、および実機 bit 同一
+/// テストのオラクルからの利用を想定した internal-facing な公開関数。
+/// `docs/compat-api-scope.md` の対象外）。
+///
+/// 挙動は [`BackendOps::gemm_batched`] の既定実装のドキュメンテーション
+/// コメントと同一（rank 2 は `T::gemm` へ直接委譲・rank≥3 は正規化＋
+/// バッチループ）。
+pub fn gemm_batched_via_per_batch_gemm<T: BackendOps + ?Sized>(
+    ops: &T,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    default_gemm_batched(ops, a, b, BatchedGemmKind::Standard)
+}
+
+/// [`gemm_batched_via_per_batch_gemm`] の `T::gemm_fp32_strict` 版
+/// （[`BackendOps::gemm_batched_fp32_strict`] の既定合成実装。イシュー
+/// #1716）。位置づけ・公開範囲の注意は上記と同一。
+pub fn gemm_batched_via_per_batch_gemm_fp32_strict<T: BackendOps + ?Sized>(
+    ops: &T,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    default_gemm_batched(ops, a, b, BatchedGemmKind::Fp32Strict)
+}
+
 /// [`BackendOps::gemm_batched`]／[`BackendOps::gemm_batched_fp32_strict`]
 /// の既定合成実装が各バッチにどちらの 2 次元カーネルへ委譲するかを表す
 /// （イシュー #1715）。

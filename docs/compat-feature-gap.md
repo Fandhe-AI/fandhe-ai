@@ -855,6 +855,20 @@ encode するだけで積み、`download` 1 回だけが GPU 完了を待つ「�
 facade 新規公開面なし。M4 Max 実機実測は本エージェント実行環境に
 Apple Silicon 実機がないため未実施のまま Mac セッションへ申し送る。
 
+**追補（イシュー #1716）**: `CudaBackendOps::gemm_batched`／
+`gemm_batched_fp32_strict` 専用オーバーライド（デバイス常駐バッチループ
+経路 `CudaGemm::run_tiled_f32_batched`。既定合成実装〈per-batch
+`gemm_fp32_strict_impl` 呼び出し〉と bit 完全一致）を実装済み。TF32
+opt-in（`Tf32`／`Tf32x3`）時は新設した薄い公開ラッパー
+`fandhe_ai_tensor_core::gemm_batched_via_per_batch_gemm` 経由で per-batch
+`gemm` 合成へフォールバックし、既存 TF32 系カウンタ・fail-closed 挙動
+（#1042／#1355）は不変。facade 新規公開面なし・`Op`／`Var`／VJP の追加
+なし（#1715 で既に実装済み）。GB10 実機での bit 同一・REQ-2 parity 実測
+は未実施のまま申し送り（`crates/backend-cuda/tests/gemm_batched_parity.rs`）。
+Metal は既定合成実装ではなく、上記のとおり encode-only バッチループ
+方式（`MetalBackendOps::gemm_batched` オーバーライド）を実装済み
+（#1717）。
+
 ## #1636（#1707〜#1709）の追補
 
 Metal バックエンドの `ScalarOp`（`ScalarUnaryOp`／`ScalarBinaryOp`。
@@ -1319,6 +1333,13 @@ AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「�
 - issue 上の承認コメント（`unsafe asm!`〈SME〉・`BackendOps` trait 拡張・facade 公開面拡張の技術的許可）は実装着手前の技術的許可事項に限られ、spec 側の除外事項ゲート自体を解除する文言ではないと整理した（同 doc §0.1）。
 - facade 新規公開面なし（コード変更を伴わないため）。実装着手は本追補のスコープ外のまま引き続き #1627 として open・blocked で追跡する。
 
+## #1741 追補
+
+- `Var::sort`／`argsort`／`topk`（#1733 実装済み）の CUDA／Metal 専用カーネルを実装した（前段落「CUDA／Metal 専用カーネルは既定 `Unsupported`（ホストフォールバックで機能する）のまま #1741 へ引き継ぐ」の残対象を解消）。
+- 両バックエンドとも 64bit 合成キー（`hi`：値を「NaN は最大・NaN 同士は同値・±0 は同値」へ正規化した `u32` totalOrder 風キー・`descending` のときのみ反転／`lo`：ライン内の元添字。`lo` を反転しないことで非安定ソートでも `key` 自体がライン内で一意になり、`docs/spec` の順序契約（同値タイブレークは `descending` に関わらず元添字昇順）が構造的に成立する）によるビットニックソート方式で実装した（CUDA: `crates/backend-cuda/src/{sort_model.rs,kernels_sort.rs,sort.rs}`。Metal: `crates/backend-metal/src/{sort_model.rs,shaders/sort.metal,sort.rs}`）。
+- CPU 参照実装（`backend-cpu::sort_topk`）との bit 完全一致（`values`・`index` とも）を、実機なしで Linux 上検証できるホストモデル（`sort_model.rs::sort_lines_host_model` が実カーネルと同一アルゴリズムを意図的に複製）で網羅的に確認済み（12 形状 × `descending` × 複数 `out_len`）。
+- `facade/tests/sort_topk_backend_parity.rs`（CPU vs NaiveOps の forward・backward parity。scatter ベース VJP を含め bit 完全一致確認済み）・`backend-cuda/tests/sort_topk_parity.rs`・`backend-metal/tests/{sort_topk_parity.rs,sort_topk_source_evidence.rs}` を追加した。CUDA・Metal 実機での `#[ignore]` テスト実行（形状網羅・非 contiguous 入力・`k` 網羅）は本エージェント実行環境に両実機への到達手段がないため未実施のまま GB10／Mac セッションへ申し送り。
+- facade 新規公開面なし（既存の `Var` 再エクスポート経由のまま）。`sorted=False` の topk・負 `dim`・`k` の `Var` 化は引き続き対象外。
 ## #1753 の追補（親 #1631）
 
 `clip_grad_value`（PyTorch `torch.nn.utils.clip_grad_value_` 相当。各
