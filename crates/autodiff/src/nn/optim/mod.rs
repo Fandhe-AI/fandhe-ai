@@ -75,7 +75,8 @@ pub use amp::{
 pub use clip::{ClipGradResult, clip_grad_norm, clip_grad_value, global_grad_norm};
 pub use lamb::{Lamb, LambConfig};
 pub use lr_scheduler::{
-    ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, StepLr,
+    ConstantLr, CosineAnnealingLr, ExponentialLr, LinearWarmupLr, LrScheduler, OneCycleAnneal,
+    OneCycleLr, OneCycleLrConfig, StepLr,
 };
 pub use reduce_lr_on_plateau::{
     PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, ThresholdMode,
@@ -148,9 +149,6 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // 公開・`crates/facade/tests/api_surface.rs` の期待集合更新・
 // `docs/compat-api-scope.md` §1.2 scheduler 行の更新も本イシューで
 // 完了済み（純再エクスポート。`crates/facade/src/optim.rs` 参照）。
-// 状態保持型の `ReduceLROnPlateau`／`OneCycleLR` は対象外（兄弟
-// イシュー #1746／#1747 が担当）。
-//
 // イシュー #1746（親 #1611）: 検証指標の停滞を検知して学習率を下げる
 // 状態保持型スケジューラ（`ReduceLrOnPlateau`）を追加した。既存
 // `ConstantLr`／`StepLr`（stateless 純関数）とは異なり、内部に
@@ -162,3 +160,18 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // （`Tape`／`Var` に一切依存しない値型・純関数）。facade
 // （`fandhe_ai::optim`）への公開は `crates/facade/src/optim.rs` の
 // 素の再エクスポート。
+
+// イシュー #1747（親 #1611）: OneCycleLr／OneCycleLrConfig／
+// OneCycleAnneal（PyTorch `torch.optim.lr_scheduler.OneCycleLR` 相当）を
+// 追加した（`lr_scheduler` モジュール doc・`OneCycleLr` doc 参照）。
+// `new` 構築時にフェーズ境界を事前計算して保持することで `lr_at` 自体
+// は参照のみの stateless 純関数として実装した（内部可変状態を持たない
+// ため他のスケジューラと同じ `LrScheduler` trait を実装できる）。
+// momentum cycling（`cycle_momentum` 等）は対象外。新規 `Op`／
+// `BackendOps` メソッド／`Var`／VJP は追加していない。facade
+// （`fandhe_ai::optim`）への公開・`crates/facade/tests/api_surface.rs`
+// の期待集合更新・`docs/compat-api-scope.md` §1.2 scheduler 行の更新
+// も本イシューで完了済み（純再エクスポート。`crates/facade/src/
+// optim.rs` 参照）。これにより「scheduler（Cosine／Exponential／
+// Plateau／OneCycle）」行のうち `ReduceLROnPlateau`／`OneCycleLR` も
+// 実装済みとなり、状態保持型のスケジューラは 2 種とも出揃った。

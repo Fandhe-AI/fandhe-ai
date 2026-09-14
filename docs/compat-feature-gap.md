@@ -1636,7 +1636,7 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `LinearWarmupLr` は PyTorch に同名クラスがないため、`LinearLR` の `end_factor = 1.0` 固定形として定義した独自スケジューラ。
 - いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する（`cos`／`powf` の libm 差による ULP 揺れを抑える精度方針。bit 同一契約は主張しない）。
 - facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
-- 状態保持型の `ReduceLROnPlateau`・`OneCycleLR` は本 issue の対象外のまま残る（兄弟イシュー #1746／#1747 が担当）。
+- 状態保持型の `ReduceLROnPlateau`・`OneCycleLR` は #1746／#1747 の追補（下記）でいずれも実装済み化した。
 
 ## #1746 の追補（`ReduceLrOnPlateau`）
 
@@ -1651,7 +1651,19 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - facade（`crates/facade/src/optim.rs`）は `pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};` と `pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};` の 2 行のみ追加（純再エクスポート）。`crates/facade/tests/api_surface.rs` の期待集合・到達性検査、`crates/facade/tests/optim_reduce_lr_on_plateau.rs`（facade のみに依存する学習ループ統合テスト。`backward → clip → optimizer step` の適用順序契約を踏襲し、`ReduceLrOnPlateau::step(loss)` の返り値で毎 step `SgdConfig` を作り直す）も追加済み。
 - Issue 本文の「`Op`／`BackendOps`／`Var` メソッド追加」「VJP 追加」「parity テスト」という受け入れ条件は、`Var`／`Tape`／`BackendOps` に一切依存しないホスト側純データ構造（`clip.rs`／`amp.rs` と同カテゴリ）である本機能には該当しないため、上記の参照系列テスト・fail-closed 検証テスト・facade 統合テスト・`api_surface.rs` 機械検査で代替した。
 - `DeviceParamStore` は非対応（対応する `BackendOps` メソッドを本 issue では追加していないため。他の scheduler・optimizer と同様に無関係）。
-- OneCycle は本 issue の対象外のまま（親 #1611 の残対象。Cosine／Exponential／LinearWarmup は #1745 で実装済み）。
+- OneCycle は下記 #1747 の追補で実装済み化した。
+
+## 追補（イシュー #1747）
+
+§2.10 の `OneCycleLR` 行を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `OneCycleLr`・`OneCycleLrConfig`・`OneCycleAnneal`（`crates/autodiff/src/nn/optim/lr_scheduler.rs`）を PyTorch `torch.optim.lr_scheduler.OneCycleLR` 相当として追加した。「フェーズ管理を要する」ため上記 #1745 の追補時点では状態保持型として見送っていたが、`OneCycleLr::new` 構築時にフェーズ境界（`end_step`・`start_lr`・`end_lr` の表）を事前計算して保持することで、`lr_at` 自体は参照のみで完結する stateless 純関数として表現できた（内部可変状態を持たないため他のスケジューラと同じ `LrScheduler` trait を実装できる）。
+- `initial_lr = max_lr / div_factor`・`min_lr = initial_lr / final_div_factor` から、2 フェーズ形式（既定・`three_phase=false`）では `initial_lr → max_lr → min_lr` の 2 区間、3 フェーズ形式（`three_phase=true`）では `max_lr → initial_lr` のフェーズを挟んだ 3 区間を作り、`anneal_strategy`（`Cos`〈既定〉／`Linear`）に従って各区間内を補間する。参照系列は PyTorch を実行できないため `OneCycleLr::new`／`lr_at` のアルゴリズムを python3 で忠実に再現し手計算した値で固定した（`crates/autodiff/tests/nn_optim_lr_scheduler.rs` §5）。
+- `step >= total_steps` の扱いは PyTorch（`step > total_steps` で `ValueError`）と意図的に異なる: `lr_at` は `Result` を返せない trait 契約のため、`step` を `total_steps - 1` へ clamp し最終フェーズの `end_lr`（`min_lr`）を返し続ける（panic しない安全側の挙動。`OneCycleLr::new` doc 参照）。
+- `OneCycleLrConfig::new(max_lr, total_steps)` が `pct_start=0.3`・`anneal_strategy=Cos`・`div_factor=25.0`・`final_div_factor=1e4`・`three_phase=false` という PyTorch の既定値を埋める（`AdamWConfig` 等と同じ Config 構造体方式。7 引数 positional `new` を避ける）。
+- momentum cycling（`cycle_momentum`／`base_momentum`／`max_momentum`）・`epochs`／`steps_per_epoch` からの `total_steps` 自動導出・param group ごとの `max_lr` は対象外のまま。新規 `Op`／`BackendOps`／`Var`／VJP は拡張していない（テンソル演算ではなくホスト側 `f32` 純関数のため）。
+- facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
+- 状態保持型（Plateau／OneCycle）・式ベース型（Cosine／Exponential／LinearWarmup）とも実装済みとなり、本節の対象外事項はなくなった。
 
 ## 追補（イシュー #1748）
 
