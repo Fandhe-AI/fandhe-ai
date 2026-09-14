@@ -200,6 +200,12 @@ fn validate_projection_vars<'t>(
         ));
     }
     for b in [&q.bias, &k.bias, &v.bias, &out.bias].into_iter().flatten() {
+        // weight 側（q/k/v/out）は既に `check_same_tape` で相互検査済みのため、
+        // bias は代表として q.weight とのみ検査すれば同一 Tape であることが
+        // 推移的に保証される（codex-review 指摘: weight のみの検査では
+        // 同形状の bias が別 Tape でも構築が成功し、後続の forward 内の
+        // `add` まで TapeMismatch が遅延してしまう）。
+        q.weight.check_same_tape(b)?;
         let bshape = b.shape();
         if bshape.as_slice() != [e] {
             return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
@@ -300,10 +306,14 @@ impl MultiheadAttention {
         })
     }
 
+    /// `new`／`from_parameters` に渡した埋め込み次元 `E`（q/k/v/out
+    /// 4 層とも正方 `[E, E]` であることを構築時に検証済み）。
     pub fn embed_dim(&self) -> usize {
         self.embed_dim
     }
 
+    /// `new`／`from_parameters` に渡したヘッド数 `H`（`E % H == 0`
+    /// であることを構築時に検証済み）。
     pub fn num_heads(&self) -> usize {
         self.num_heads
     }
@@ -314,18 +324,23 @@ impl MultiheadAttention {
         self.embed_dim / self.num_heads
     }
 
+    /// query projection（`nn::Linear`。`[E, E]`）への参照。
     pub fn q_proj(&self) -> &Linear {
         &self.q_proj
     }
 
+    /// key projection（`nn::Linear`。`[E, E]`）への参照。
     pub fn k_proj(&self) -> &Linear {
         &self.k_proj
     }
 
+    /// value projection（`nn::Linear`。`[E, E]`）への参照。
     pub fn v_proj(&self) -> &Linear {
         &self.v_proj
     }
 
+    /// output projection（`nn::Linear`。`[E, E]`。結合後の全ヘッド出力
+    /// を `E` 次元へ写す）への参照。
     pub fn out_proj(&self) -> &Linear {
         &self.out_proj
     }
@@ -393,14 +408,20 @@ impl<'t> MultiheadAttentionVars<'t> {
         })
     }
 
+    /// `new` に渡した埋め込み次元 `E`（q/k/v/out 4 層とも正方
+    /// `[E, E]` かつ同一 `Tape` であることを構築時に検証済み）。
     pub fn embed_dim(&self) -> usize {
         self.embed_dim
     }
 
+    /// `new` に渡したヘッド数 `H`（`E % H == 0` であることを構築時に
+    /// 検証済み）。
     pub fn num_heads(&self) -> usize {
         self.num_heads
     }
 
+    /// `embed_dim / num_heads`（`new` が `embed_dim % num_heads == 0`
+    /// を検証済みのため整数除算で正確）。
     pub fn head_dim(&self) -> usize {
         self.embed_dim / self.num_heads
     }
@@ -820,6 +841,47 @@ mod tests {
         assert!(MultiheadAttention::new(0, 2, true, 1).is_err());
         assert!(MultiheadAttention::new(4, 0, true, 1).is_err());
         assert!(MultiheadAttention::new(5, 2, true, 1).is_err());
+    }
+
+    /// codex-review 指摘（PR #1846）の回帰テスト: `MultiheadAttentionVars::
+    /// new` は weight 側（q/k/v/out）の `check_same_tape` は行っていたが
+    /// bias 側は形状のみ検査していたため、weight を tape A・同形状の bias
+    /// を tape B に登録した `LinearVars` でも構築が成功してしまい、後続の
+    /// `forward` 内の `add` まで `TapeMismatch` の検出が遅延していた。
+    /// bias にも `q.weight.check_same_tape` を適用したことで、構築時点
+    /// （`new` 自身）で `TapeMismatch` を返すことを確認する。
+    #[test]
+    fn new_rejects_bias_on_different_tape_than_weight() {
+        let e = 4;
+        let weight = Tensor::new(vec![0.0_f32; e * e], &[e, e]).unwrap();
+        let bias = Tensor::new(vec![0.0_f32; e], &[e]).unwrap();
+
+        let tape_weights = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let tape_bias = Tape::new_with_ops(crate::default_ops::naive_ops());
+
+        // q/k/v/out の weight はすべて tape_weights 上に揃える。
+        let mk_matching = || LinearVars {
+            weight: tape_weights.var(&weight),
+            bias: Some(tape_weights.var(&bias)),
+        };
+        let q = mk_matching();
+        let k = mk_matching();
+        let v = mk_matching();
+        // out だけ bias を別 tape（tape_bias）へ登録し、weight は
+        // tape_weights のまま揃える（weight 同士の `check_same_tape` は
+        // 通過するが bias が食い違うケースを再現する）。
+        let out = LinearVars {
+            weight: tape_weights.var(&weight),
+            bias: Some(tape_bias.var(&bias)),
+        };
+
+        match MultiheadAttentionVars::new(2, q, k, v, out) {
+            Err(AutodiffError::TapeMismatch) => {}
+            other => panic!(
+                "bias の Tape 不一致は構築時点で TapeMismatch として検出されるべき（is_err={}）",
+                other.is_err()
+            ),
+        }
     }
 
     #[test]
