@@ -102,6 +102,7 @@ jagged 2-D 入力は事前検証で拒否。`crates/facade/src/compat/array.rs:9
 | `Sgd`/`SgdConfig`（momentum・dampening・weight_decay・nesterov） | `crates/autodiff/src/optim/sgd.rs:32-224` |
 | `AdamW`/`AdamWConfig` | `crates/autodiff/src/nn/optim/adamw.rs:23-160` |
 | `clip_grad_norm`/`global_grad_norm`/`ClipGradResult` | `crates/autodiff/src/nn/optim/clip.rs` |
+| `clip_grad_value`（#1753・親 #1631。要素ごと `[-clip_value, clip_value]` クランプ） | `crates/autodiff/src/nn/optim/clip.rs` |
 | `ConstantLr`/`StepLr`/`LrScheduler` | `crates/autodiff/src/nn/optim/lr_scheduler.rs` |
 
 ### 1.5 `Var` の演算メソッド一覧（`crates/autodiff/src/var.rs`）
@@ -265,7 +266,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | `nn.Embedding` | `layers.Embedding` | **なし** | gather 系 Op が前提（2.2 節）＋embedding テーブル管理 | L |
 | `nn.MultiheadAttention` | `layers.MultiHeadAttention` | **なし** | softmax・batched matmul・(optional) causal mask・reshape/transpose の組合せ実装。前提演算が軒並み未実装 | XL |
 | RNN/LSTM/GRU | `layers.SimpleRNN`/`LSTM`/`GRU` | 内部クレート `fandhe_ai_autodiff::nn::rnn`（`RnnCell`/`LstmCell`/`GruCell`・`Rnn`/`Lstm`/`Gru`）に実装済み（3 バックエンド〈CPU・CUDA・Metal〉数値一致。Metal は実機実測完了・CUDA は本エージェント実行環境に実機なしのため未実測明記）。**facade（`fandhe_ai`）未公開**（`docs/compat-api-scope.md` §5 の範囲拡張手続きのうちユーザー承認が未取得のため。決定 10）。`forward_seq`（tape 経路）の出力は `Var::stack`〈#1598〉未実装のため `[T,B,H]` ではなく `Vec<Var>`（per-step）。設計: `docs/autodiff-rnn-cell-tape-design.md`（#1646）・実装記録: 同文書 §8（#1647） | XL（設計・内部実装は完了。facade 公開のみ残作業） |
-| Pooling（Max/AvgPool） | `layers.MaxPooling2D` 等 | **なし** | Conv 同様の空間走査カーネル＋VJP（max は argmax 経路の逆伝播） | L |
+| Pooling（Max/AvgPool） | `layers.MaxPooling2D` 等 | **なし** | Conv 同様の空間走査カーネル＋VJP（max は argmax 経路の逆伝播）。設計: `docs/pooling-ops-design.md`（#1727） | L |
 
 ### 2.8 損失
 
@@ -1274,6 +1275,10 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
 - CUDA／Metal 専用カーネルは本イシューのスコープ外（既定 `Unsupported` フォールバックのまま）で後続イシューへ引き継ぐ。
 - facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.3）。
 
+## 追補（イシュー #1718）
+
+`amax`／`amin` 勾配分配方式（先勝ち決定的 対 均等分配）の設計判断を確定した。上記 #1719／#1720 追補が「#1718 が均等分配へ確定した場合はヘルパー 1 箇所の差し替えで反映される」と記していた前提は**採用しない**ことが確定した——`Var::max`／`min`／`max_dims`（`max(dim)`／`min(dim)` 族の意味論）は crates.io 公開全版で出荷済みの先勝ち決定的挙動を**維持**し、`grad::extremum_first_match_vjp` は差し替えない。PyTorch `torch.amax`／`amin` 相当の均等分配は、実装する場合は別 `Op`（`Op::Amax`／`Op::Amin`）・別 VJP ヘルパーとして独立に追加する方針とする（未実装・後続 issue 提案のまま。本イシューはコード変更を伴わない設計判断の確定のみ）。詳細・根拠は `docs/autodiff-amax-grad-distribution-decision.md` を参照。
+
 ## 追補（イシュー #1722）
 
 AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「損失スケーリング（AMP）は現時点で未実装」と明記）」）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
@@ -1291,6 +1296,26 @@ AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「�
 - 本イシューでは `Op`／`BackendOps`／`Var`／facade のコード実装を行わず、格上げ条件（a〜e）の充足状況の棚卸しと再開条件を `docs/backend-int8-quantization-decision.md` として記録した（#1628・#1652・#1775 と同型の段階 0）。格上げ条件のうち (a)（REQ-2 複合判定の改定）は実質充足と読めるが、(b)〜(e)（実機 MMA プローブ・Transformer 複合 WL ベースライン・量子化専用許容基準・依存追加なし設計の実装確認）は未達のまま（同 doc §2.1）。
 - issue 上の承認コメント（`unsafe asm!`〈SME〉・`BackendOps` trait 拡張・facade 公開面拡張の技術的許可）は実装着手前の技術的許可事項に限られ、spec 側の除外事項ゲート自体を解除する文言ではないと整理した（同 doc §0.1）。
 - facade 新規公開面なし（コード変更を伴わないため）。実装着手は本追補のスコープ外のまま引き続き #1627 として open・blocked で追跡する。
+
+## #1753 の追補（親 #1631）
+
+`clip_grad_value`（PyTorch `torch.nn.utils.clip_grad_value_` 相当。各
+勾配要素を独立に `[-clip_value, clip_value]` へクランプする value 方式
+gradient clipping）を実装済み化した。`fandhe_ai_autodiff::nn::optim::
+clip::clip_grad_value`（既存 `clip_grad_norm` と同型の純関数。
+`Gradients`／`Var` に非依存）・facade 到達経路は `crates/facade/src/
+optim.rs` への `pub use` 1 行追加（`fandhe_ai::optim::clip_grad_value`）
+のみで、新規 `Op`／`BackendOps`／VJP は追加していない（勾配マテリアラ
+イズ後のホスト側後処理のため）。
+
+`clip_grad_norm`（global L2 norm 方式）と異なりテンソル間の相関を見ず
+各要素を独立にクランプするためスケーリングを伴わず、範囲内の要素は
+bit 同一のまま返る。非有限（NaN／±Inf）の `clip_value` および勾配要素
+はいずれも `AutodiffError::InvalidArgument` で拒否する fail-closed 契約
+（`f32::clamp` の NaN 境界 panic を避けるため `max`/`min` 合成で実装し、
+クランプ前に全要素の有限性を検査して NaN/Inf の静かな正規化による
+隠蔽を防ぐ）。3 バックエンド専用カーネルは対象外（ホスト
+`Tensor<f32>` のみを操作するため）。
 
 ## 追補（イシュー #1756）
 
