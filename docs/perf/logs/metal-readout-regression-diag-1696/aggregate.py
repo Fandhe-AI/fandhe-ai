@@ -181,18 +181,36 @@ def render_markdown(results: dict) -> str:
                     f"{len(records)} | — |"
                 )
                 continue
-            readbacks = [r["readback_ms"] for r in records]
-            host_reads = [r["host_read_ms"] for r in records]
+            # 参照 checksum は当該 N で最初に RUNS 件へ到達した腕の
+            # 先頭起動から確立する（腕差セクションと同じ基準を共有する
+            # ことで、両セクションの checksum 一致判定に食い違いが
+            # 生じないようにする）。
             checksums = [r["checksum"] for r in records]
+            ref = reference_checksums.setdefault(n, checksums[0])
+            # 主表の代表値（中央値・ノイズ床）は checksum が参照値と
+            # 一致した起動のみから算出する（codex-review 指摘: 従来は
+            # 5 起動すべて〈checksum 不一致を含む〉から中央値・ノイズ床
+            # を算出しており、事前登録判定規則 §5「不一致の起動は無効」
+            # に反していた。腕差算出〈後段〉と同じ `checksum_matches` で
+            # 絞り込み、有効な RUNS 件が揃わなければ代表値も「欠損／
+            # 判定不能」として報告する）。
+            valid = [r for r in records if checksum_matches(r["checksum"], ref)]
+            if len(valid) < RUNS:
+                lines.append(
+                    f"| {n} | {label} | 欠損／判定不能 | 欠損／判定不能 | "
+                    f"欠損／判定不能 | {len(records)}（有効 "
+                    f"{len(valid)}/{RUNS} run） | NG |"
+                )
+                continue
+            readbacks = [r["readback_ms"] for r in valid]
+            host_reads = [r["host_read_ms"] for r in valid]
             median_readback = statistics.median(readbacks)
             median_host_read = statistics.median(host_reads)
             noise_floor = max(readbacks) - min(readbacks)
-            ref = reference_checksums.setdefault(n, checksums[0])
-            checksum_ok = all(checksum_matches(c, ref) for c in checksums)
             lines.append(
                 f"| {n} | {label} | {median_readback:.4f} ms | "
                 f"{noise_floor:.4f} ms | {median_host_read:.4f} ms | "
-                f"{len(records)} | {'OK' if checksum_ok else 'NG'} |"
+                f"{len(records)} | OK |"
             )
 
     lines.append("")
