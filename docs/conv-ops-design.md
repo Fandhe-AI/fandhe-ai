@@ -163,10 +163,15 @@ Issue #1641 のコメント（2026-09-12・ユーザー承認）により、本�
   `[N, C, 1, L]`、weight `[Cout, Cin_g, k]` → `[Cout, Cin_g, 1, k]`、
   H 軸パラメータは `(kernel=1, stride=1, padding=0, dilation=1)` 固定。
   `BackendOps`・カーネルは 2d 版のみ新設（pooling §2 と同型）。
-- 引数命名: `kernel_size`（weight shape から導出。引数としては持たない）・
-  `stride: [usize; 2]`・`padding: [usize; 2]`・`dilation: [usize; 2]`・
-  `groups: usize`（`Var` 入口はプリミティブ引数。1d は `usize`）。
-  pooling doc と同一命名（§0.2）。
+- 引数命名: `kernel_size`（`Var::conv2d` の**公開シグネチャ**では weight
+  shape から導出し引数としては持たない）・`stride: [usize; 2]`・
+  `padding: [usize; 2]`・`dilation: [usize; 2]`・`groups: usize`（`Var`
+  入口はプリミティブ引数。1d は `usize`）。pooling doc と同一命名
+  （§0.2）。**ただし** `im2col`／`col2im`（`BackendOps` メソッド。§8）は
+  `weight` を受け取らない契約のため、`Conv2dParams`（§8）は
+  `kernel_size: [usize; 2]` を保持フィールドとして持つ（`Var::conv2d`
+  が weight から導出した値を `Conv2dParams` 構築時に埋める。公開 `Var`
+  シグネチャに `kernel_size` 引数を追加するものではない）。
 
 ## 3. パラメータと検査（A03。`Var` 入口で `AutodiffError::InvalidArgument`
 ／`Shape`、`BackendOps` 実装側でも fail-closed に再検査する）
@@ -196,10 +201,20 @@ PyTorch `aten/src/ATen/native/Convolution.cpp::check_shape_forward`
   整数除算＝floor）。
 - **空間軸 `H`／`W`（1d 併合後は `W` 軸）`= 0` は `ShapeError` で拒否**。
   PyTorch は `in=0, p≥1` で padding だけの窓を受理し出力＝bias になり
-  得るが、本設計は pooling §3 と同じく「すべての窓が少なくとも 1 つの
-  有効入力を含む」不変条件を保って col2im／im2col の境界契約を単純化
-  するため入口で拒否する（**意図的な PyTorch 非互換**として記録）。
-  `N = 0`（空バッチ）は受理（出力 `[0, Cout, Hout, Wout]`）。
+  得るが、本設計は pooling §3 と同じく `in = 0` 自体（空間軸が存在しない
+  入力）を im2col／col2im の境界契約単純化のため入口で拒否する
+  （**意図的な PyTorch 非互換**として記録）。**訂正**（codex-review
+  指摘）: 「すべての窓が少なくとも 1 つの有効入力を含む」は不変条件
+  として**成立しない**（例: `H=W=1, kernel=1, padding=1` は `in=1 ≠ 0`
+  のため本ゲートを通過するが、出力窓は padding のみで有効入力を含まな
+  い）。本設計が実際に保証するのはより弱い契約——**`in = 0` の入力を
+  作らせない**（負分子拒否ゲート・要素数 overflow 検査と合わせて
+  im2col／col2im の座標計算〈`h + p_h − kh·d_h` 等〉が `usize` 下限を
+  割らないことを保証する）——のみであり、個々の出力窓が padding のみ
+  で埋まること自体は許容する（§7 の「罠」節が示すとおり、padding
+  タップは `0.0` として im2col／`eval::conv2d_direct` の両方で明示的に
+  扱われるため、有効入力ゼロの窓でも bit 同一性は崩れない）。`N = 0`
+  （空バッチ）は受理（出力 `[0, Cout, Hout, Wout]`）。
 - 要素数積（`N·G·K_g·P`・出力要素数・im2col 要素数）は `checked_mul`
   （`ElementCountOverflow`）。
 - `padding_mode` は `zeros` のみ（reflect／replicate／circular は §11）。
@@ -254,6 +269,22 @@ groups を `gemm_batched` の broadcast で吸収する（新規バッチカー�
    後に 1 回加算」。`gemm_bias_act` の epilogue 融合は bias が列 `[n]`
    向けで行 `[Cout]` 向けの本ケースに合わないため v1 では使わず、将来
    融合する場合もこの合成と bit 同一であることを契約とする）。
+   **実装上の注意（Bugbot 指摘の是正）**: `bias` の shape は `[Cout]`
+   だが、`out`（手順 4 の結果）は `[N, Cout, Hout, Wout]` で `Cout` が
+   末尾から 2 番目の軸にある。`bias`（`[Cout]`）をそのまま
+   `ops.add(&out, &bias)` へ渡すと NumPy 互換の**右詰め**
+   ブロードキャスト（`broadcast_shape`。`backend_ops.rs` 既定実装が
+   採用する規約）により `Cout` が `out` の**末尾軸（`Wout`）**と対応
+   してしまい、`Cout ≠ Wout` の形状では shape エラーに、たまたま
+   `Cout == Wout` の形状では**誤った軸へ無言で加算**される（サイレント
+   な誤り。テストで見逃しやすい）。正しくは `bias` を
+   `Var::reshape([1, Cout, 1, 1])`（ゼロコピー view）してから
+   `out.add(&bias_reshaped)` を呼ぶ——これにより `Cout` 軸が明示的に
+   `out` の `Cout` 軸（axis 1）と揃い、残る軸（`N`／`Hout`／`Wout`）は
+   サイズ 1 として正しくブロードキャストされる。`Op::Conv2d` の VJP
+   （§6.3 d_bias）は逆に `[N, Cout, Hout, Wout]` → `[1, Cout, 1, 1]`
+   （のち `[Cout]` へ reshape）の縮約であり、この reshape 済み形状が
+   forward の bias 加算と対称であることを回帰テストで固定する（§13）。
 
 ### 5.3 合成の置き場所（決定。フォールバック階層の設計）
 
@@ -310,9 +341,23 @@ dw = reduce_batch_axes_f64(dw_full, [G, Cout_g, K_g])   // N 軸を f64 で縮�
 対応のため reshape 不要）で N 軸を `f64` アキュムレータで縮約する（勾配の
 長軸縮約規約）。これは「入力と上流勾配の相関」の定義式そのものである。
 
-注意: `dw_full` は `N·Cout·K_g` 要素を一時確保する（§10 で per-chunk
-縮約を許容: チャンクごとの部分和を `f64` に保持し最後に 1 回 downcast
-すれば逐次 `f64` 和と bit 同一）。
+注意: `dw_full` は `N·Cout·K_g` 要素を一時確保する（§10 で N を
+チャンク分割した per-chunk 実行を許容）。**チャンク境界をまたぐ `f64`
+縮約の正しさ条件（codex-review 指摘の是正）**: 「チャンクごとに独立し
+た部分和を `f64` で計算し、最後にそれらの部分和同士を加算する」方式
+は逐次 `f64` 和と bit 同一に**ならない**（`f64` 加算は結合則を満たさ
+ないため。反例: `[2^60, 0, −2^60, 1]` を 2 要素ずつ 2 チャンクに分割
+すると `(2^60 + 0) + (−2^60 + 1) = 1` だが、逐次和は
+`((2^60 + 0) + (−2^60)) + 1` も同じ `1` になる一方、丸めが発生する
+より一般の値では部分和の加算順序が逐次順と異なれば結果が乖離しう
+る）。正しい実装契約は「**単一の `f64` アキュムレータを N 軸全体で
+維持し、チャンク境界はメモリ確保の単位にすぎず縮約順序に影響しない**」
+——各チャンクの処理は、直前チャンクまでの累積値を引き継いだ同一の
+`f64` アキュムレータへ、そのチャンクが担当する n を昇順に 1 要素ずつ
+逐次加算する（チャンク単位で独立した部分和を計算してから後で合算す
+る二段階リダクションにはしない）。この契約下ではチャンク分割数に
+依らず逐次 `f64` 和と bit 同一になる（§10 の「分割数に依らず bit
+同一」という記述はこの単一アキュムレータ方式を前提とする）。
 
 ### 6.2 d_input（転置畳み込み）
 
@@ -409,8 +454,15 @@ d_input スキップは `docs/autodiff-nograd-leaf-dinput-skip-decision.md`
     実装に対し REQ-2 複合判定を満たすこと・CPU 自身が override する
     場合は合成経路と bit 同一であること）。
   - `Conv2dParams`（`#[non_exhaustive]`・コンストラクタ経由・
-    `stride`／`padding`／`dilation`／`groups`）は tensor-core 内の型で
-    facade へ再エクスポートしない。
+    `kernel_size: [usize; 2]`／`stride`／`padding`／`dilation`／
+    `groups`）は tensor-core 内の型で facade へ再エクスポートしない。
+    **`kernel_size` を保持する理由（codex-review 指摘の是正）**:
+    `im2col`／`col2im` は `weight` を引数に取らない契約（上記シグネ
+    チャ）のため、`kernel_size` を `Conv2dParams` 経由で渡さない限り
+    カーネル寸法を知る手段がない。`Var::conv2d` 呼び出し時に
+    `weight.shape()[2..4]` から導出して `Conv2dParams` を構築する
+    （公開 `Var::conv2d` シグネチャ自体には `kernel_size` 引数を追加
+    しない。§2 引数命名の注記と整合）。
 - `Op::Conv2d`（`tape.rs`）: `push_eager` で常時実体化・
   `is_checkpoint_eligible = false`（v1。`Op::MatMul` は `true` だが
   Conv は 3 入力・bias Option の再計算経路整備を後続へ）・
@@ -435,9 +487,31 @@ d_input スキップは `docs/autodiff-nograd-leaf-dinput-skip-decision.md`
   同じ有効範囲）・`derive_seed` で weight／bias を独立導出（`Linear::
   new` と同型。`linear.rs:41-72`）。`Module::forward`／`forward_host`
   （**同じ `conv2d_with_fallback` ヘルパを呼ぶ**ことで `forward` と
-  `forward_host` の bit 一致を構造的に保証）・`parameters()` フック
-  （optimizer 経由の学習）を `Linear` と同型で実装。`from_parameters`
-  で state_dict 系との接続点を残す。
+  `forward_host` の bit 一致を構造的に保証）。`from_parameters` で
+  state_dict 系との接続点を残す。
+  **学習可能パラメータの収集・更新経路への接続（codex-review 指摘の
+  是正）**: `crates/autodiff/src/nn/module.rs` の `Module::as_linear`／
+  `as_linear_mut` フックは `Linear` 専用の明示列挙方式（`docs/
+  compat-api-scope.md` §1 の閉集合維持が目的。module.rs のコメント
+  「現状 `Linear` のみ」）で、`facade::compat::Sequential::bind`／
+  `trainable_parameters`／`apply_parameters`（`crates/facade/src/
+  compat/sequential.rs`）は全箇所 `layer.as_linear()`／
+  `as_linear_mut()` でフィルタする。**`nn::Conv2d` を `Linear` と
+  同型に `parameters()` を実装するだけでは、この閉集合フィルタを
+  素通りして `Sequential` の学習経路（`bind`／`trainable_parameters`／
+  `apply_parameters`）から不可視のまま**（optimizer が weight／bias
+  を一切拾えない）になる。#1645 で本経路へ接続するには、
+  `Module` trait へ `as_conv2d`／`as_conv2d_mut`（`Linear` と同じ
+  明示フック方式。`Any` ダウンキャストは使わない。`docs/
+  compat-api-scope.md` §1 の閉集合方針に従い型を明示列挙）を追加し、
+  `Sequential::bind`／`trainable_parameters`／`apply_parameters`
+  （および `forward` の融合判定 `as_relu` 呼び出し箇所と対になる各
+  `filter_map` 系コード）を `as_linear()`／`as_conv2d()` の**両方**を
+  見るよう拡張する必要がある（`facade` 側の非破壊拡張。トップレベル
+  `Module` trait は crates.io 公開クレート `fandhe-ai-autodiff` に
+  属するためデフォルト実装 `None`／`false` を維持し既存実装を壊さな
+  い）。本設計 doc はこの接続方式を確定するのみで実装しない（実装は
+  #1645）。
 - facade: `compat::Sequential::add_conv2d`／`add_conv1d` は §5 手続きの
   承認済み（Issue #1641 コメント 2026-09-12）だが、**追加するか否かの
   最終判断と実装は #1645** に委ねる（本 doc は「承認済み・実装は
@@ -475,8 +549,12 @@ d_input スキップは `docs/autodiff-nograd-leaf-dinput-skip-decision.md`
 - col の要素数 `N·Cin·kH·kW·P` は入力の `kH·kW·(P/(H·W))` 倍（例:
   `N=64, Cin=64, k=3, 56×56` で約 462 MB）。`conv2d_with_fallback` は
   **N をチャンク分割**（チャンクの col バイト数上限を定数化。値は
-  実装 issue で決めるが per-sample GEMM の独立性により分割数に依らず
-  bit 同一）。
+  実装 issue で決める）。forward（im2col＋GEMM＋bias）は per-sample
+  GEMM の独立性によりチャンク分割数に依らず bit 同一。**backward の
+  d_weight `f64` 縮約（§6.1）はチャンク分割数に依らず bit 同一である
+  ために単一 `f64` アキュムレータを N 軸全体で維持する実装契約が必須**
+  （§6.1 の「正しさ条件」参照。チャンクごとに独立した部分和を計算して
+  後で合算する方式は不可）。
 - broadcast weight の N 倍実体化（`gemm_batched` 既定）・`dw_full` の
   一時確保は v1 受容。回避策（バッチ軸を M 軸へ畳み込む
   `[N·P, K]ᵀ` 形式等）は §11 の性能 issue へ。
@@ -511,7 +589,10 @@ issue で追跡。本 doc では起票しない）
   `weight.shape[1]·groups ≠ Cin`・`bias` shape 不一致・
   `in + 2p < d(k−1)+1`（負分子ゲート）・`H=0`／`W=0` 拒否と `N=0` 受理・
   `checked_mul` overflow・**`padding > k/2` が受理される**こと（pooling
-  との差異の回帰）。
+  との差異の回帰）・**`H=W=1, kernel=1, padding=1` 等の「有効入力を
+  含まない窓」形状が `in=0` ゲートには引っかからず受理される**こと
+  （§3 訂正後の契約の回帰。padding のみの窓でも forward／VJP が
+  `0.0` タップとして正しく処理し bit 同一を保つことを併せて確認）。
 - 出力 shape が PyTorch `_conv_output_size` と一致（複数 stride／
   padding／dilation 組合せの表）。
 - **CPU bit 一致 3 点**: `eval::conv2d_direct` ≡ `eval::conv2d`
@@ -539,6 +620,17 @@ issue で追跡。本 doc では起票しない）
   Metal source evidence）。
 - 学習収束スモーク（小さな CNN を `Sequential` 相当で 1 層
   conv → relu → flatten → linear。`nn_train_convergence.rs` の先例）。
+  **前提として `as_conv2d`／`as_conv2d_mut`（§8 是正）を実装し
+  `Sequential::bind`／`trainable_parameters`／`apply_parameters` が
+  `Conv2d` の weight／bias を実際に拾えること**を単体テストで固定して
+  から収束スモークへ進む（閉集合フィルタの素通りにより optimizer が
+  Conv パラメータを更新しない回帰を防ぐ）。
+- bias broadcast の軸回帰（§5.2 是正）: `Cout == Wout` となる形状
+  （例 `Cout=8, Wout=8`）で `bias` を `[1, Cout, 1, 1]` へ明示
+  reshape せず `[Cout]` のまま `out`（`[N, Cout, Hout, Wout]`）へ加算
+  すると誤った軸（`Wout`）へブロードキャストされることを検出する
+  回帰テスト（正しい実装は `Cout` 軸〈axis 1〉へ加算し `Wout` 軸には
+  影響しないことを直接検証）。
 
 ## 14. 出典
 
