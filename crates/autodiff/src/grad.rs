@@ -30,8 +30,8 @@
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, BceKind, KlDivTarget, ScalarBinaryOp, ScalarUnaryOp,
-    ScatterReduce, ShapeError, Tensor, VectorNormOrd, row_norm_layout,
+    Activation, BackendError, BackendOps, BceKind, HuberKind, KlDivTarget, ScalarBinaryOp,
+    ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -445,6 +445,50 @@ pub(crate) fn vjp(
                     }
                     Err(BackendError::Unsupported(_)) => {
                         mse_loss_vjp(pred_val, target_val, upstream, reduction)
+                    }
+                    Err(other) => return Err(AutodiffError::Backend(other)),
+                }
+            };
+            vec![(pred, dpred), (target, dtarget)]
+        }
+        Op::HuberLoss {
+            pred,
+            target,
+            kind,
+            delta,
+            reduction,
+        } => {
+            let pred_val = materialize_fallible(nodes, ops, pred)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = pred_val.numel();
+            let (dpred, dtarget) = if n == 0 {
+                // `huber_loss_vjp` と同じゼロ除算回避（`Op::MseLoss`
+                // 分岐と同じ理由で `scale` 計算前に早期 return）。
+                let zeros = build_tensor(vec![0f32; 0], pred_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = huber_loss_scale(g_value, n, reduction);
+                match ops.huber_loss_backward(pred_val, target_val, kind, delta, scale) {
+                    Ok(dpred) => {
+                        if dpred.shape() != pred_val.shape() {
+                            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                    lhs: dpred.shape().to_vec(),
+                                    rhs: pred_val.shape().to_vec(),
+                                },
+                            )));
+                        }
+                        // `dTarget = −dPred`（`Op::MseLoss` 分岐と同じ理由。
+                        // `backend_ops.rs::BackendOps::huber_loss_backward`
+                        // doc 参照）。
+                        let dtarget_data: Vec<f32> =
+                            dense_vec(&dpred).iter().map(|&v| -v).collect();
+                        let dtarget = build_tensor(dtarget_data, dpred.shape());
+                        (dpred, dtarget)
+                    }
+                    Err(BackendError::Unsupported(_)) => {
+                        huber_loss_vjp(pred_val, target_val, upstream, kind, delta, reduction)
                     }
                     Err(other) => return Err(AutodiffError::Backend(other)),
                 }
@@ -4263,6 +4307,53 @@ fn mse_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
     }
 }
 
+/// `HuberLoss{pred, target, kind, delta, reduction}` の VJP:
+/// `dPred = scale · grad_elem(d)`（`d = pred − target`。`grad_elem` は
+/// `eval::huber_elem_grad`）、`dTarget = −dPred`（イシュー #1739。
+/// `mse_loss_vjp` と同型）。`n == 0` は mean・sum ともゼロ除算を避け
+/// zeros を返す。
+fn huber_loss_vjp(
+    pred: &Tensor<f32>,
+    target: &Tensor<f32>,
+    g: &Tensor<f32>,
+    kind: HuberKind,
+    delta: f32,
+    reduction: Reduction,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let shape = pred.shape().to_vec();
+    let n = pred.numel();
+    if n == 0 {
+        let zeros = build_tensor(vec![0f32; 0], &shape);
+        return (zeros.clone(), zeros);
+    }
+    let g_value = dense_vec(g).first().copied().unwrap_or(0.0);
+    let pred_data = dense_vec(pred);
+    let target_data = dense_vec(target);
+    let scale = huber_loss_scale(g_value, n, reduction);
+    let dpred_data: Vec<f32> = pred_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&p, &t)| scale * eval::huber_elem_grad(p - t, kind, delta))
+        .collect();
+    let dtarget_data: Vec<f32> = dpred_data.iter().map(|&v| -v).collect();
+    let dpred = build_tensor(dpred_data, &shape);
+    let dtarget = build_tensor(dtarget_data, &shape);
+    (dpred, dtarget)
+}
+
+/// `huber_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の
+/// `Op::HuberLoss` 分岐）の双方が使う `scale` 算出の共有ロジック
+/// （`mse_loss_scale` と同型。イシュー #1739）:
+/// `dPred = scale·grad_elem(pred−target)`（`Mean` は `g/n`、`Sum` は
+/// `g`。`MseLoss` と異なり係数 2 は付かない——`grad_elem` 自体が
+/// `d(0.5·d²)/dd = d` を含むため）。
+fn huber_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
+    match reduction {
+        Reduction::Mean => g_value / n as f32,
+        Reduction::Sum => g_value,
+    }
+}
+
 /// `BceLoss{input, target, kind, reduction}` のホスト参照 VJP（`ops.
 /// bce_loss_backward` が `Unsupported` のときのみ呼ばれる。イシュー
 /// #1737）。`eval::bce_elem_grad_input`／`bce_elem_grad_target`
@@ -6863,6 +6954,159 @@ release ビルドでも検知できるよう `assert!` を使う）"
         let (expected_dpred, expected_dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Sum);
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
         assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
+    }
+
+    #[test]
+    fn vjp_dispatch_huber_loss_mean_returns_both_inputs_in_order() {
+        let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
+        let g = t(&[3.0], &[]);
+        let out_value = eval::huber_loss(&pred, &target, HuberKind::Huber, 1.0, Reduction::Mean);
+        let nodes = vec![leaf_node(pred.clone()), leaf_node(target.clone())];
+        let op = Op::HuberLoss {
+            pred: NodeId(0),
+            target: NodeId(1),
+            kind: HuberKind::Huber,
+            delta: 1.0,
+            reduction: Reduction::Mean,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        let (expected_dpred, expected_dtarget) =
+            huber_loss_vjp(&pred, &target, &g, HuberKind::Huber, 1.0, Reduction::Mean);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
+        assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
+    }
+
+    #[test]
+    fn vjp_dispatch_huber_loss_sum_returns_both_inputs_in_order() {
+        // sum 縮約（イシュー #1739）でも `Op::HuberLoss` ディスパッチが
+        // reduction を正しく `huber_loss_vjp` へ引き渡すことを確認する
+        // （`vjp_dispatch_mse_loss_sum_returns_both_inputs_in_order` と
+        // 同型）。`SmoothL1` kind で異なる `delta` も併せて検証する。
+        let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
+        let g = t(&[3.0], &[]);
+        let out_value = eval::huber_loss(&pred, &target, HuberKind::SmoothL1, 2.0, Reduction::Sum);
+        let nodes = vec![leaf_node(pred.clone()), leaf_node(target.clone())];
+        let op = Op::HuberLoss {
+            pred: NodeId(0),
+            target: NodeId(1),
+            kind: HuberKind::SmoothL1,
+            delta: 2.0,
+            reduction: Reduction::Sum,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        let (expected_dpred, expected_dtarget) =
+            huber_loss_vjp(&pred, &target, &g, HuberKind::SmoothL1, 2.0, Reduction::Sum);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
+        assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
+    }
+
+    #[test]
+    fn huber_loss_grad_n_zero_is_zero() {
+        // `n == 0`（空テンソル）は mean・sum ともゼロ除算を避け zeros を
+        // 返す（`mse_loss_vjp` の同種契約と同型。イシュー #1739）。
+        let pred = t(&[], &[0]);
+        let target = t(&[], &[0]);
+        let g = t(&[1.0], &[]);
+        let (dpred, dtarget) =
+            huber_loss_vjp(&pred, &target, &g, HuberKind::Huber, 1.0, Reduction::Mean);
+        assert_eq!(dense_vec(&dpred), Vec::<f32>::new());
+        assert_eq!(dense_vec(&dtarget), Vec::<f32>::new());
+    }
+
+    /// `pred`／`target` の一方が NaN のとき、forward（`eval::huber_loss`
+    /// の `else` 分岐は `NaN − 0.5·delta = NaN`）と backward
+    /// （`eval::huber_elem_grad`）で NaN 伝播の有無が食い違わないことを
+    /// 確認する（イシュー #1739 レビュー指摘。`abs_d < delta` は NaN
+    /// 比較で常に false のため、明示チェックなしでは backward が
+    /// `copysign` 系の有限値〈±1／±delta〉を返してしまう）。
+    #[test]
+    fn huber_loss_grad_propagates_nan() {
+        let pred = t(&[f32::NAN], &[1]);
+        let target = t(&[0.0], &[1]);
+        let g = t(&[1.0], &[]);
+        for kind in [HuberKind::Huber, HuberKind::SmoothL1] {
+            for reduction in [Reduction::Mean, Reduction::Sum] {
+                let (dpred, dtarget) = huber_loss_vjp(&pred, &target, &g, kind, 1.0, reduction);
+                assert!(
+                    dense_vec(&dpred)[0].is_nan(),
+                    "kind={kind:?} reduction={reduction:?}: dPred は NaN を伝播すべき"
+                );
+                assert!(
+                    dense_vec(&dtarget)[0].is_nan(),
+                    "kind={kind:?} reduction={reduction:?}: dTarget は NaN を伝播すべき"
+                );
+            }
+        }
+    }
+
+    /// Huber／SmoothL1 の解析的 VJP（`huber_loss_vjp`）を中央差分
+    /// （`numeric_grad_unary`）と突合する（イシュー #1739）。損失は
+    /// `d = pred − target` のみの区分関数（`eval::huber_elem_loss`）で
+    /// `C¹`（連続微分可能）だが `C²` ではないため、標本点は折れ点
+    /// `|d| == delta` から中央差分の刻み幅 `H` の数倍以上離した値を
+    /// 選ぶ（`pred`/`target` 双方に負の差分・delta≠1 のケースを含む）。
+    #[test]
+    fn huber_loss_grad_matches_numeric() {
+        let pred = t(&[1.5, -3.0, 0.25, -0.8, 2.2, 0.0], &[6]);
+        let target = t(&[0.0, 0.0, 0.0, 0.3, -1.0, 0.0], &[6]);
+        let s = t(&[1.0], &[]); // スカラー出力への射影は恒等（係数 1）。
+
+        for kind in [HuberKind::Huber, HuberKind::SmoothL1] {
+            for delta in [0.5f32, 1.0, 2.0] {
+                for reduction in [Reduction::Mean, Reduction::Sum] {
+                    let analytic_pred = numeric_grad_unary(&pred, &s, |x| {
+                        eval::huber_loss(x, &target, kind, delta, reduction)
+                    });
+                    let analytic_target = numeric_grad_unary(&target, &s, |x| {
+                        eval::huber_loss(&pred, x, kind, delta, reduction)
+                    });
+                    let (dpred, dtarget) =
+                        huber_loss_vjp(&pred, &target, &s, kind, delta, reduction);
+                    assert_grad_close(
+                        &format!("huber_loss({kind:?}, delta={delta}, {reduction:?}) dPred"),
+                        &dpred,
+                        &analytic_pred,
+                    );
+                    assert_grad_close(
+                        &format!("huber_loss({kind:?}, delta={delta}, {reduction:?}) dTarget"),
+                        &dtarget,
+                        &analytic_target,
+                    );
+                }
+            }
+        }
     }
 
     #[test]

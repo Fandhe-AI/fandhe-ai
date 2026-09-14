@@ -190,6 +190,29 @@ pub enum KlDivTarget {
     LogProbabilities,
 }
 
+/// [`BackendOps::huber_loss`]／[`BackendOps::huber_loss_backward`] が
+/// 計算する要素損失の種別（イシュー #1739）。`d = pred − target` として
+/// `Huber`（PyTorch `nn.HuberLoss(delta)`）は二次分岐に `0.5·d²`・
+/// 線形分岐に `delta·(|d| − 0.5·delta)` を使う。`SmoothL1`（PyTorch
+/// `nn.SmoothL1Loss(beta)`）は同じ折れ点構造だが二次分岐が
+/// `0.5·d²/beta` に `beta` でスケールされる点のみ異なる（`beta = 1.0`
+/// のとき両者は一致する）。1 個の `Op::HuberLoss`／1 組のカーネルで両者を
+/// 表現するための選択子（`delta`／`beta` はどちらも同じ `f32` 引数
+/// スロットで渡す。呼び出し側の意味論は `delta`／`beta` という呼称の
+/// 違いのみ）。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`Activation`／`MseReduction`
+/// と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HuberKind {
+    /// PyTorch `nn.HuberLoss(delta)` 相当（二次分岐 `0.5·d²`）。
+    Huber,
+    /// PyTorch `nn.SmoothL1Loss(beta)` 相当（二次分岐 `0.5·d²/beta`）。
+    SmoothL1,
+}
+
 /// [`BackendOps::bce_loss`]／[`BackendOps::bce_loss_backward`] の入力種別
 /// （イシュー #1737。親イシュー #1609「損失関数の拡張」）。
 ///
@@ -1199,6 +1222,80 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "mse_loss_backward: default fail-safe (no fused MSE backward kernel available)".into(),
+        ))
+    }
+
+    /// Huber／SmoothL1 損失（`d = pred − target` として `|d| < delta` で
+    /// `0.5·d²`〈`SmoothL1` は `/delta` でスケール〉・それ以外で
+    /// `delta·(|d| − 0.5·delta)`〈`SmoothL1` は `|d| − 0.5·delta`〉）の
+    /// forward を 1 個の融合カーネルで計算する（イシュー #1739）。
+    ///
+    /// `pred`／`target` は同一 shape（呼び出し元が [`crate::ops_shape::
+    /// require_same_shape`] で検証済み）。`delta` は呼び出し元
+    /// （`fandhe_ai_autodiff::var::Var::huber_loss`／`smooth_l1_loss`）が
+    /// 有限かつ `> 0` を検証済み。戻り値は shape `[]`（スカラー）。
+    /// `numel == 0` は `Mean`／`Sum` とも `0.0`（[`Self::mse_loss`] と
+    /// 同じ契約）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss`] と同じ非破壊拡張（デフォルトメソッド追加）
+    /// であり、既定は [`BackendError::Unsupported`] を返す fail-safe と
+    /// する。`Var::huber_loss_impl` は `Unsupported` のときのみ従来の
+    /// ホスト参照実装（`eval::huber_loss`）へフォールバックし、それ以外
+    /// のエラーは伝播する（判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。CPU／CUDA／Metal の各実装は
+    /// このデフォルトをカーネル内融合実装でオーバーライドする
+    /// （`backend-cpu::huber`・`backend-cuda::huber`・`backend-metal::huber`
+    /// 参照）。
+    fn huber_loss(
+        &self,
+        _pred: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _kind: HuberKind,
+        _delta: f32,
+        _reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "huber_loss: default fail-safe (no fused Huber/SmoothL1 forward kernel available)"
+                .into(),
+        ))
+    }
+
+    /// Huber／SmoothL1 損失の backward（`dPred = scale·grad_elem(d)`。
+    /// `grad_elem(d)` は `|d| < delta` で `d`〈`SmoothL1` は `/delta`〉・
+    /// それ以外で `copysign(delta, d)`〈`SmoothL1` は `copysign(1, d)`〉）
+    /// を 1 個の融合カーネルで計算する（イシュー #1739）。
+    ///
+    /// `scale` は呼び出し元（`fandhe_ai_autodiff::grad::vjp` の
+    /// `Op::HuberLoss` 分岐）が上流勾配 `g`（スカラー）と `reduction` から
+    /// 事前計算して渡す（`Mean` は `g/n`、`Sum` は `g`。[`Self::
+    /// mse_loss_backward`] と異なり係数 2 は付かない）。
+    ///
+    /// `dTarget = −dPred` は常に成り立つ（損失は `d = pred − target`
+    /// のみに依存する）ため、[`Self::mse_loss_backward`] と同じ理由で
+    /// 本メソッドは `dPred` の 1 テンソルのみを返す契約とする
+    /// （呼び出し元がホスト側で符号反転して `dTarget` を得る）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::huber_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、`Var::
+    /// huber_loss_impl` の呼び出し元（`grad::vjp`）は `Unsupported` の
+    /// ときのみ既存のホスト参照実装（`huber_loss_vjp`）へフォールバック
+    /// する。
+    fn huber_loss_backward(
+        &self,
+        _pred: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _kind: HuberKind,
+        _delta: f32,
+        _scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "huber_loss_backward: default fail-safe (no fused Huber/SmoothL1 backward kernel \
+             available)"
+                .into(),
         ))
     }
 
@@ -3568,6 +3665,23 @@ mod tests {
 
         let forward = ops.mse_loss(&pred, &target, MseReduction::Mean);
         let backward = ops.mse_loss_backward(&pred, &target, 1.0);
+
+        assert!(matches!(forward, Err(BackendError::Unsupported(_))));
+        assert!(matches!(backward, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::huber_loss`]／[`BackendOps::huber_loss_backward`] の
+    /// 既定実装が fail-safe（[`BackendError::Unsupported`]）を返すことを
+    /// 確認する（イシュー #1739。`mse_loss_default_is_unsupported` と
+    /// 同型）。
+    #[test]
+    fn huber_loss_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let pred = Tensor::new(vec![1.0, 2.0], &[2]).unwrap();
+        let target = Tensor::new(vec![0.0, 0.0], &[2]).unwrap();
+
+        let forward = ops.huber_loss(&pred, &target, HuberKind::Huber, 1.0, MseReduction::Mean);
+        let backward = ops.huber_loss_backward(&pred, &target, HuberKind::Huber, 1.0, 1.0);
 
         assert!(matches!(forward, Err(BackendError::Unsupported(_))));
         assert!(matches!(backward, Err(BackendError::Unsupported(_))));

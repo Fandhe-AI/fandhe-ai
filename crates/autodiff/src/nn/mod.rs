@@ -48,6 +48,11 @@
 //! ラッパー。PyTorch `nn.NLLLoss` 相当）・`KlDivLoss`（`Var::kl_div_loss`／
 //! `kl_div_loss_with_log_target` のラッパー。PyTorch `nn.KLDivLoss`
 //! 相当。同じく [`loss`]）を追加した。
+//! 参照）。イシュー #1739 で Huber／SmoothL1 損失（[`loss::HuberLoss`]／
+//! [`loss::SmoothL1Loss`]）を追加した。`MseLoss`／`CrossEntropyLoss` と
+//! 同じ「`BackendOps` の専用融合カーネルを優先し `Unsupported` のとき
+//! のみホスト参照実装へフォールバックする」設計を踏襲する
+//! （`loss.rs` モジュール doc 参照）。
 
 mod attention;
 mod embedding;

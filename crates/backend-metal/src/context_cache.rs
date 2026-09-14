@@ -231,6 +231,18 @@ pub(crate) fn cached_kl_div(
     get_or_build(cache, on_poison, || crate::kl_div::MetalKlDiv::new(ctx))
 }
 
+/// [`crate::huber::MetalHuber`] スイートをプロセス内キャッシュから取得
+/// する（イシュー #1739。`cached_mse` と同型）。
+/// `ops::MetalBackendOps::huber_loss`／`huber_loss_backward` の唯一の
+/// 呼び出し先。
+pub(crate) fn cached_huber(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::huber::MetalHuber>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::huber::MetalHuber>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::huber::MetalHuber::new(ctx))
+}
+
 /// [`crate::bce::MetalBce`] スイートをプロセス内キャッシュから取得する
 /// （イシュー #1737。`cached_mse` と同型）。`ops::MetalBackendOps::
 /// bce_loss`／`bce_loss_backward` の唯一の呼び出し先。

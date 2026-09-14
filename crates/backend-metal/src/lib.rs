@@ -506,6 +506,8 @@ pub mod constant_pad_model;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
 #[cfg(target_os = "macos")]
+pub mod huber;
+#[cfg(target_os = "macos")]
 pub mod index_buffer;
 pub mod interpolate_model;
 #[cfg(target_os = "macos")]
@@ -668,6 +670,8 @@ pub use gather_scatter::MetalGatherScatter;
 pub use gemm::{GemmVariant, MetalGemm, SplitKFallbackReason, SplitKRoute};
 #[cfg(target_os = "macos")]
 pub use half_buffer::MetalHalfBuffer;
+#[cfg(target_os = "macos")]
+pub use huber::MetalHuber;
 #[cfg(target_os = "macos")]
 pub use kl_div::MetalKlDiv;
 #[cfg(target_os = "macos")]

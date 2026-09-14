@@ -34,12 +34,12 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BceKind, BinaryElementwiseOp, DType, DispatchFailureCell, FusionPlan,
-    GruBackwardOutput, GruPointwiseOutput, InterpolateMode, KlDivTarget, LstmPointwiseOutput,
-    MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
-    SegmentKey, SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    gather_out_shape, interpolate_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape,
-    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp,
+    ScatterReduce, SegmentKey, SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor,
+    UnaryElementwiseOp, gather_out_shape, interpolate_out_shape, one_hot_out_shape, pad_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -3885,6 +3885,100 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::huber_loss`] の CUDA 実装
+    /// （イシュー #1739）。[`Self::mse_loss`] と同じ構成（専用融合カーネル
+    /// `crate::huber::CudaHuber` へのディスパッチ・`factor` 計算・未知
+    /// `MseReduction` variant の `Unsupported` 拒否）。
+    fn huber_loss(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: HuberKind,
+        delta: f32,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_owned = pred.contiguous();
+        let target_owned = target.contiguous();
+        let pred_slice = pred_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("huber_loss: pred not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("huber_loss: target not contiguous".into())
+        })?;
+        let numel = pred_slice.len();
+        let factor = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    1.0
+                } else {
+                    1.0 / numel as f32
+                }
+            }
+            MseReduction::Sum => 1.0,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "huber_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+
+        let huber = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_huber(&device)
+            },
+        )?;
+        let value = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || huber.run_huber_loss_f32(pred_slice, target_slice, kind, delta, factor),
+        )?;
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::huber_loss_backward`] の CUDA
+    /// 実装（イシュー #1739）。`dTarget = −dPred` は呼び出し元
+    /// （`fandhe_ai_autodiff::grad::vjp`）がホスト側で符号反転して得る
+    /// 契約のため、本メソッドは `dPred` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::huber_loss_backward` doc 参照。
+    /// [`Self::mse_loss_backward`] と同型）。
+    fn huber_loss_backward(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: HuberKind,
+        delta: f32,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_owned = pred.contiguous();
+        let target_owned = target.contiguous();
+        let pred_slice = pred_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("huber_loss_backward: pred not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("huber_loss_backward: target not contiguous".into())
+        })?;
+
+        let huber = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_huber(&device)
+            },
+        )?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || huber.run_huber_backward_f32(pred_slice, target_slice, kind, delta, scale),
+        )?;
+        Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::bce_loss`] の CUDA 実装
     /// （イシュー #1737。`mse_loss` と同型の委譲構成）。
     fn bce_loss(
@@ -5871,6 +5965,34 @@ mod tests {
         assert!(
             matches!(backward, Err(BackendError::DeviceContextPoisoned(_))),
             "poison 済み ordinal では mse_loss_backward は device_handle_raw() が試行される \
+             前に拒否されるはず: {backward:?}"
+        );
+    }
+
+    #[test]
+    fn huber_loss_rejects_on_poisoned_ordinal_before_device_handle_is_attempted() {
+        // イシュー #1739: `huber_loss`／`huber_loss_backward` は
+        // `context_cache::cached_huber` 経由の独立ディスパッチのため、
+        // `with_driver_call` ゲートが正しく結線されていることを個別に
+        // 確認する（`mse_loss_rejects_on_poisoned_ordinal...` と同型）。
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let pred = Tensor::new(vec![1.0, 2.0], &[1, 2]).expect("valid tensor");
+        let target = Tensor::new(vec![0.0, 0.0], &[1, 2]).expect("valid tensor");
+
+        let forward = cuda.huber_loss(&pred, &target, HuberKind::Huber, 1.0, MseReduction::Mean);
+        assert!(
+            matches!(forward, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では huber_loss は device_handle_raw() が試行される前に \
+             拒否されるはず: {forward:?}"
+        );
+
+        let backward = cuda.huber_loss_backward(&pred, &target, HuberKind::Huber, 1.0, 1.0);
+        assert!(
+            matches!(backward, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では huber_loss_backward は device_handle_raw() が試行される \
              前に拒否されるはず: {backward:?}"
         );
     }
