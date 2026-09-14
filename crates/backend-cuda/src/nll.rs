@@ -30,25 +30,106 @@ pub struct NllLayout {
     pub inner: usize,
 }
 
+/// オーバーフローに対する安全な `outer*num_classes*inner` 系の積を
+/// 求めるヘルパー（コーディング規約「本番経路 panic 禁止」に従い
+/// `checked_mul` で積算する。呼び出し元 `outer`/`num_classes`/`inner`
+/// は `ops.rs` が `input_shape`〈利用者から渡される任意の shape〉から
+/// 直接 `.iter().product()` するのではなく本関数系へ委譲することで、
+/// `usize` オーバーフロー時に（debug ビルドの乗算 panic ではなく）
+/// 型付きエラーを返す。PR #1850 codex-review P1 是正）。
+fn checked_product(factors: &[usize]) -> Option<usize> {
+    factors
+        .iter()
+        .try_fold(1usize, |acc, &f| acc.checked_mul(f))
+}
+
 impl NllLayout {
-    fn n_samples(&self) -> usize {
-        self.outer * self.inner
+    fn checked_n_samples(&self) -> Option<usize> {
+        self.outer.checked_mul(self.inner)
     }
 
-    fn numel(&self) -> usize {
-        self.outer * self.num_classes * self.inner
+    fn checked_numel(&self) -> Option<usize> {
+        checked_product(&[self.outer, self.num_classes, self.inner])
     }
 }
 
-/// `n_samples`／`numel` が `i32::MAX` に収まることを検証する
-/// （`mse.rs::validate_mse_len` と同じ理由）。
-pub(crate) fn validate_nll_layout(layout: NllLayout) -> Result<(), CudaError> {
-    if layout.n_samples() > i32::MAX as usize || layout.numel() > i32::MAX as usize {
+/// `n_samples`／`numel` を `outer`/`num_classes`/`inner` の `checked_mul`
+/// 積として求め、`usize` オーバーフローと `i32::MAX`（カーネル引数型）
+/// 超過の双方を型付きエラーへ変換する（`mse.rs::validate_mse_len` と
+/// 同じ理由。PR #1850 codex-review P1 是正: 従来の無検査乗算は
+/// `outer=usize::MAX` 等で debug ビルドの乗算 panic・release ビルドの
+/// 折り返し積を招いていた）。呼び出し元へ検証済みの
+/// `(n_samples, numel)` を返し、以降の再計算（無検査乗算の重複）を
+/// 避ける。
+pub(crate) fn validate_nll_layout(layout: NllLayout) -> Result<(usize, usize), CudaError> {
+    let n_samples =
+        layout
+            .checked_n_samples()
+            .ok_or_else(|| CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "nll_loss: outer={} * inner={} overflows usize",
+                    layout.outer, layout.inner
+                ),
+            })?;
+    let numel = layout
+        .checked_numel()
+        .ok_or_else(|| CudaError::InvalidElementwiseShape {
+            detail: format!(
+                "nll_loss: outer={} * num_classes={} * inner={} overflows usize",
+                layout.outer, layout.num_classes, layout.inner
+            ),
+        })?;
+    if n_samples > i32::MAX as usize || numel > i32::MAX as usize {
         return Err(CudaError::InvalidElementwiseShape {
             detail: format!(
-                "nll_loss dims must fit in i32 (kernel argument type): n_samples={}, numel={}",
-                layout.n_samples(),
-                layout.numel()
+                "nll_loss dims must fit in i32 (kernel argument type): n_samples={n_samples}, numel={numel}"
+            ),
+        });
+    }
+    Ok((n_samples, numel))
+}
+
+/// 起動直前に `input`／`targets` の実長を `layout` 由来の期待値と
+/// 突き合わせ、かつ `targets` の各値が `0 <= t < num_classes` を
+/// 満たすことを検証する（PR #1850 codex-review P0 是正 1・2:
+/// `Var::nll_loss` の検証は `CudaNll` を直接呼ぶ経路〈公開
+/// `BackendOps` 実装〉には及ばないため、この「公開起動 API」
+/// 自身がバッファ長・添字範囲を検証しない限り `targets[idx]` 経由の
+/// 範囲外読み書きを防げない。`input` が forward 専用のため `None` の
+/// ときは backward 呼び出しとして `input` 長検査を省略する）。
+fn validate_nll_buffers(
+    input: Option<&[f32]>,
+    targets: &[i32],
+    layout: NllLayout,
+    n_samples: usize,
+    numel: usize,
+) -> Result<(), CudaError> {
+    if let Some(input) = input
+        && input.len() != numel
+    {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!(
+                "nll_loss: input.len()={} must equal layout.numel()={numel}",
+                input.len()
+            ),
+        });
+    }
+    if targets.len() != n_samples {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!(
+                "nll_loss: targets.len()={} must equal layout.n_samples()={n_samples}",
+                targets.len()
+            ),
+        });
+    }
+    if let Some(&bad) = targets
+        .iter()
+        .find(|&&t| t < 0 || t as usize >= layout.num_classes)
+    {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!(
+                "nll_loss: target index {bad} out of range [0, {})",
+                layout.num_classes
             ),
         });
     }
@@ -118,8 +199,13 @@ impl CudaNll {
 
     /// forward: `reduction(Σ_s −input[(o·C+t_s)·inner+i])`（サンプル
     /// `s = o·inner+i`）。`input.len() == layout.numel()`／
-    /// `targets.len() == layout.n_samples()` は呼び出し元（`ops.rs`）が
-    /// 検証済みの契約。`n_samples == 0` はカーネル起動を回避し `0.0`
+    /// `targets.len() == layout.n_samples()`／`targets` の各値が
+    /// `0 <= t < num_classes` であることは本関数自身が起動前に検証する
+    /// （`validate_nll_buffers`。PR #1850 codex-review P0 是正 1・2:
+    /// 本関数は公開 `BackendOps` 実装〈`ops.rs`〉から呼ばれるほか、
+    /// `CudaNll` を直接保持する呼び出し元からも到達しうる「公開起動
+    /// API」であり、`Var::nll_loss` 側の事前検証だけでは不変条件を
+    /// 保証できない）。`n_samples == 0` はカーネル起動を回避し `0.0`
     /// を返す（`Mean`／`Sum` いずれも空和の契約。`backend-cpu::nll` と
     /// 同じ）。
     pub fn run_nll_loss_f32(
@@ -129,8 +215,8 @@ impl CudaNll {
         layout: NllLayout,
         factor: f32,
     ) -> Result<f32, CudaError> {
-        validate_nll_layout(layout)?;
-        let n_samples = layout.n_samples();
+        let (n_samples, numel) = validate_nll_layout(layout)?;
+        validate_nll_buffers(Some(input), targets, layout, n_samples, numel)?;
         if n_samples == 0 {
             return Ok(0.0);
         }
@@ -216,9 +302,8 @@ impl CudaNll {
         layout: NllLayout,
         scale: f32,
     ) -> Result<Vec<f32>, CudaError> {
-        validate_nll_layout(layout)?;
-        let numel = layout.numel();
-        let n_samples = layout.n_samples();
+        let (n_samples, numel) = validate_nll_layout(layout)?;
+        validate_nll_buffers(None, targets, layout, n_samples, numel)?;
 
         self.with_driver_call(|| {
             // `layout.numel() == 0` の場合も `alloc_zeroed_f32(0)` は

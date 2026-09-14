@@ -301,6 +301,12 @@ fn encode_finalize_dispatch(
         encoder.setBuffer_offset_atIndex(Some(partial_buf.raw()), 0, 0);
         encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
     }
+    // SAFETY: `setBytes_length_atIndex` はコピー元ポインタから指定
+    // バイト数を即座に複製する。`num_partials`／`factor` はいずれも
+    // 本関数のローカル変数（引数として値渡し）であり呼び出し完了まで
+    // 有効、長さは `size_of::<u32>()`／`size_of::<f32>()` で MSL 側の
+    // `constant uint&`／`constant float&` 宣言（`shaders/kl_div.metal`
+    // 参照）とバイト幅が一致する。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&num_partials).cast(),
@@ -342,6 +348,12 @@ fn encode_backward_dispatch(
         encoder.setBuffer_offset_atIndex(Some(target_buf.raw()), 0, 1);
         encoder.setBuffer_offset_atIndex(Some(dinput_buf.raw()), 0, 2);
     }
+    // SAFETY: `setBytes_length_atIndex` はコピー元ポインタから指定
+    // バイト数を即座に複製する。`numel`／`kind`／`scale` はいずれも
+    // 本関数のローカル変数（引数として値渡し）であり呼び出し完了まで
+    // 有効、長さは `size_of::<u32>()`／`size_of::<f32>()` で MSL 側の
+    // `constant uint&`／`constant float&` 宣言（`shaders/kl_div.metal
+    // ::kl_div_backward_f32` 参照）とバイト幅が一致する。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&numel).cast(),

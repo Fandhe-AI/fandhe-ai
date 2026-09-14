@@ -3902,9 +3902,10 @@ impl BackendOps for CudaBackendOps {
             }));
         }
         let layout = crate::nll::NllLayout {
-            outer: shape[..class_dim].iter().product(),
+            outer: checked_shape_numel(&shape[..class_dim]).map_err(BackendError::ShapeMismatch)?,
             num_classes: shape[class_dim],
-            inner: shape[class_dim + 1..].iter().product(),
+            inner: checked_shape_numel(&shape[class_dim + 1..])
+                .map_err(BackendError::ShapeMismatch)?,
         };
         let input_owned = input.contiguous();
         let targets_owned = targets.contiguous();
@@ -3914,7 +3915,12 @@ impl BackendOps for CudaBackendOps {
         let targets_slice = targets_owned.as_slice().ok_or_else(|| {
             BackendError::KernelLaunchFailed("nll_loss: targets not contiguous".into())
         })?;
-        let n = layout.outer * layout.inner;
+        let n = layout
+            .outer
+            .checked_mul(layout.inner)
+            .ok_or(BackendError::ShapeMismatch(
+                ShapeError::ElementCountOverflow,
+            ))?;
         let factor = match reduction {
             MseReduction::Mean => {
                 if n == 0 {
@@ -3965,9 +3971,11 @@ impl BackendOps for CudaBackendOps {
             }));
         }
         let layout = crate::nll::NllLayout {
-            outer: input_shape[..class_dim].iter().product(),
+            outer: checked_shape_numel(&input_shape[..class_dim])
+                .map_err(BackendError::ShapeMismatch)?,
             num_classes: input_shape[class_dim],
-            inner: input_shape[class_dim + 1..].iter().product(),
+            inner: checked_shape_numel(&input_shape[class_dim + 1..])
+                .map_err(BackendError::ShapeMismatch)?,
         };
         let targets_owned = targets.contiguous();
         let targets_slice = targets_owned.as_slice().ok_or_else(|| {

@@ -95,3 +95,18 @@ fn nll_metal_source_declares_int_targets_buffer() {
         "nll.metal に `device const int* targets` バッファ宣言が見つかりません"
     );
 }
+
+/// PR #1850 codex-review P0 是正 2 の証跡: `t`（`targets[idx]`）の
+/// 手動境界検査（`0 <= t < num_classes`）がシェーダソース自身に
+/// 含まれることを確認する。
+#[test]
+fn nll_metal_source_has_target_bound_checks() {
+    assert!(
+        NLL_METAL_SOURCE.contains("if (t < 0 || (uint)t >= num_classes)"),
+        "nll_partial_f32 の target 範囲検査が見つかりません"
+    );
+    assert!(
+        NLL_METAL_SOURCE.contains("if (t >= 0 && (uint)t < num_classes)"),
+        "nll_backward_f32 の target 範囲検査が見つかりません"
+    );
+}

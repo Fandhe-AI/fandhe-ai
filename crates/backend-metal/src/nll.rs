@@ -44,25 +44,99 @@ pub struct NllLayout {
     pub inner: usize,
 }
 
+/// オーバーフローに対する安全な `outer*num_classes*inner` 系の積を
+/// 求めるヘルパー（コーディング規約「本番経路 panic 禁止」に従い
+/// `checked_mul` で積算する。`backend-cuda::nll::checked_product` と
+/// 同型。PR #1850 codex-review P1 是正）。
+fn checked_product(factors: &[usize]) -> Option<usize> {
+    factors
+        .iter()
+        .try_fold(1usize, |acc, &f| acc.checked_mul(f))
+}
+
 impl NllLayout {
-    fn n_samples(&self) -> usize {
-        self.outer * self.inner
+    fn checked_n_samples(&self) -> Option<usize> {
+        self.outer.checked_mul(self.inner)
     }
 
-    fn numel(&self) -> usize {
-        self.outer * self.num_classes * self.inner
+    fn checked_numel(&self) -> Option<usize> {
+        checked_product(&[self.outer, self.num_classes, self.inner])
     }
 }
 
-/// 長さが `u32::MAX` に収まることを検証する（`mse.rs::validate_mse_len`
-/// と同じ理由）。
-pub(crate) fn validate_nll_layout(layout: NllLayout) -> Result<(), MetalError> {
-    if layout.n_samples() > u32::MAX as usize || layout.numel() > u32::MAX as usize {
+/// `n_samples`／`numel` を `outer`/`num_classes`/`inner` の `checked_mul`
+/// 積として求め、`usize` オーバーフローと `u32::MAX`（カーネル引数型）
+/// 超過の双方を型付きエラーへ変換する（`mse.rs::validate_mse_len` と
+/// 同じ理由。PR #1850 codex-review P1 是正: 従来の無検査乗算は
+/// `outer=usize::MAX` 等で debug ビルドの乗算 panic・release ビルドの
+/// 折り返し積を招いていた）。呼び出し元へ検証済みの
+/// `(n_samples, numel)` を返し、以降の再計算（無検査乗算の重複）を
+/// 避ける。
+pub(crate) fn validate_nll_layout(layout: NllLayout) -> Result<(usize, usize), MetalError> {
+    let n_samples =
+        layout
+            .checked_n_samples()
+            .ok_or_else(|| MetalError::InvalidElementwiseShape {
+                detail: format!(
+                    "nll_loss: outer={} * inner={} overflows usize",
+                    layout.outer, layout.inner
+                ),
+            })?;
+    let numel = layout
+        .checked_numel()
+        .ok_or_else(|| MetalError::InvalidElementwiseShape {
+            detail: format!(
+                "nll_loss: outer={} * num_classes={} * inner={} overflows usize",
+                layout.outer, layout.num_classes, layout.inner
+            ),
+        })?;
+    if n_samples > u32::MAX as usize || numel > u32::MAX as usize {
         return Err(MetalError::InvalidElementwiseShape {
             detail: format!(
-                "nll_loss dims must fit in u32 (kernel argument type): n_samples={}, numel={}",
-                layout.n_samples(),
-                layout.numel()
+                "nll_loss dims must fit in u32 (kernel argument type): n_samples={n_samples}, numel={numel}"
+            ),
+        });
+    }
+    Ok((n_samples, numel))
+}
+
+/// 起動直前に `input`／`targets` の実長を `layout` 由来の期待値と
+/// 突き合わせ、かつ `targets` の各値が `0 <= t < num_classes` を
+/// 満たすことを検証する（`backend-cuda::nll::validate_nll_buffers` と
+/// 同型。PR #1850 codex-review P0 是正 1・2）。
+fn validate_nll_buffers(
+    input: Option<&[f32]>,
+    targets: &[i32],
+    layout: NllLayout,
+    n_samples: usize,
+    numel: usize,
+) -> Result<(), MetalError> {
+    if let Some(input) = input
+        && input.len() != numel
+    {
+        return Err(MetalError::InvalidElementwiseShape {
+            detail: format!(
+                "nll_loss: input.len()={} must equal layout.numel()={numel}",
+                input.len()
+            ),
+        });
+    }
+    if targets.len() != n_samples {
+        return Err(MetalError::InvalidElementwiseShape {
+            detail: format!(
+                "nll_loss: targets.len()={} must equal layout.n_samples()={n_samples}",
+                targets.len()
+            ),
+        });
+    }
+    if let Some(&bad) = targets
+        .iter()
+        .find(|&&t| t < 0 || t as usize >= layout.num_classes)
+    {
+        return Err(MetalError::InvalidElementwiseShape {
+            detail: format!(
+                "nll_loss: target index {bad} out of range [0, {})",
+                layout.num_classes
             ),
         });
     }
@@ -109,8 +183,13 @@ impl MetalNll {
 
     /// forward: `reduction(Σ_s −input[(o·C+t_s)·inner+i])`（サンプル
     /// `s = o·inner+i`）。`input.len() == layout.numel()`／
-    /// `targets.len() == layout.n_samples()` は呼び出し元（`ops.rs`）が
-    /// 検証済みの契約。`n_samples == 0` はディスパッチを回避し `0.0`
+    /// `targets.len() == layout.n_samples()`／`targets` の各値が
+    /// `0 <= t < num_classes` であることは本関数自身が起動前に検証する
+    /// （`validate_nll_buffers`。PR #1850 codex-review P0 是正 1・2:
+    /// 本関数は公開 `BackendOps` 実装〈`ops.rs`〉から呼ばれるほか、
+    /// `MetalNll` を直接保持する呼び出し元からも到達しうる「公開起動
+    /// API」であり、`Var::nll_loss` 側の事前検証だけでは不変条件を
+    /// 保証できない）。`n_samples == 0` はディスパッチを回避し `0.0`
     /// を返す（`Mean`／`Sum` いずれも空和の契約。`backend-cpu::nll` と
     /// 同じ）。
     pub fn run_nll_loss_f32(
@@ -121,8 +200,8 @@ impl MetalNll {
         layout: NllLayout,
         factor: f32,
     ) -> Result<f32, MetalError> {
-        validate_nll_layout(layout)?;
-        let n_samples = layout.n_samples();
+        let (n_samples, numel) = validate_nll_layout(layout)?;
+        validate_nll_buffers(Some(input), targets, layout, n_samples, numel)?;
         if n_samples == 0 {
             return Ok(0.0);
         }
@@ -175,9 +254,8 @@ impl MetalNll {
         layout: NllLayout,
         scale: f32,
     ) -> Result<Vec<f32>, MetalError> {
-        validate_nll_layout(layout)?;
-        let numel = layout.numel();
-        let n_samples = layout.n_samples();
+        let (n_samples, numel) = validate_nll_layout(layout)?;
+        validate_nll_buffers(None, targets, layout, n_samples, numel)?;
 
         // `numel == 0` の場合も `MetalBuffer::alloc_zeroed_pooled` は
         // 0 長を拒否する（`ZeroLengthAllocation`）ため、その場合は
@@ -306,6 +384,12 @@ fn encode_finalize_dispatch(
         encoder.setBuffer_offset_atIndex(Some(partial_buf.raw()), 0, 0);
         encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
     }
+    // SAFETY: `setBytes_length_atIndex` はコピー元ポインタから指定
+    // バイト数を即座に複製する。`num_partials`／`factor` はいずれも
+    // 本関数のローカル変数（引数として値渡し）であり呼び出し完了まで
+    // 有効、長さは `size_of::<u32>()`／`size_of::<f32>()` で MSL 側の
+    // `constant uint&`／`constant float&` 宣言（`shaders/nll.metal`
+    // 参照）とバイト幅が一致する。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&num_partials).cast(),
@@ -347,6 +431,13 @@ fn encode_backward_dispatch(
     let outer = layout.outer as u32;
     let num_classes = layout.num_classes as u32;
     let inner = layout.inner as u32;
+    // SAFETY: `setBytes_length_atIndex` はコピー元ポインタから指定
+    // バイト数を即座に複製する。`outer`／`num_classes`／`inner`／
+    // `n_samples`／`scale` はいずれも本関数のローカル変数（引数として
+    // 値渡し）であり呼び出し完了まで有効、長さは `size_of::<u32>()`／
+    // `size_of::<f32>()` で MSL 側の `constant uint&`／`constant
+    // float&` 宣言（`shaders/nll.metal::nll_backward_f32` 参照）と
+    // バイト幅が一致する。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&outer).cast(),

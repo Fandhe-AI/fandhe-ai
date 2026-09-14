@@ -1540,15 +1540,20 @@ impl BackendOps for CpuBackendOps {
             }));
         }
         let layout = NllLayout {
-            outer: shape[..class_dim].iter().product(),
+            outer: checked_shape_product(&shape[..class_dim])?,
             num_classes: shape[class_dim],
-            inner: shape[class_dim + 1..].iter().product(),
+            inner: checked_shape_product(&shape[class_dim + 1..])?,
         };
         let input_c = input.contiguous();
         let targets_c = targets.contiguous();
         let input_slice = input_c.as_slice().unwrap_or(&[]);
         let targets_slice = targets_c.as_slice().unwrap_or(&[]);
-        let n = layout.outer * layout.inner;
+        let n = layout
+            .outer
+            .checked_mul(layout.inner)
+            .ok_or(BackendError::ShapeMismatch(
+                ShapeError::ElementCountOverflow,
+            ))?;
         let sum = nll::nll_sum_f32(input_slice, targets_slice, layout)?;
         let value = match reduction {
             MseReduction::Mean => {
@@ -1586,11 +1591,11 @@ impl BackendOps for CpuBackendOps {
             }));
         }
         let layout = NllLayout {
-            outer: input_shape[..class_dim].iter().product(),
+            outer: checked_shape_product(&input_shape[..class_dim])?,
             num_classes: input_shape[class_dim],
-            inner: input_shape[class_dim + 1..].iter().product(),
+            inner: checked_shape_product(&input_shape[class_dim + 1..])?,
         };
-        let numel: usize = input_shape.iter().product();
+        let numel: usize = checked_shape_product(input_shape)?;
         let targets_c = targets.contiguous();
         let targets_slice = targets_c.as_slice().unwrap_or(&[]);
         let mut dinput = vec![0.0f32; numel];
@@ -2136,6 +2141,22 @@ fn checked_gate_width(gates: usize, hidden: usize) -> Result<usize, BackendError
             actual: 0,
         },
     ))
+}
+
+/// `shape` の要素積を `checked_mul` の連鎖で求め、`usize` オーバー
+/// フロー時は（debug ビルドの `.iter().product()` 乗算 panic ではなく）
+/// `ShapeError::ElementCountOverflow` を返す（`nll_loss`／
+/// `nll_loss_backward` の `NllLayout` 構築・`numel` 算出が
+/// `input_shape`〈利用者から渡される任意の shape〉から直接
+/// `.iter().product()` していた箇所を置き換える。PR #1850
+/// codex-review P1 是正）。
+fn checked_shape_product(shape: &[usize]) -> Result<usize, BackendError> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(BackendError::ShapeMismatch(
+            ShapeError::ElementCountOverflow,
+        ))
 }
 
 impl CpuBackendOps {

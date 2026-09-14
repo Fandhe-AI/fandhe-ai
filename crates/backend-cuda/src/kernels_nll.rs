@@ -39,9 +39,15 @@
 //! （grid-stride ループの場合は `for (...; idx < n_samples; ...)`）の
 //! 手動境界チェックを維持する。`nll_finalize_f32` も `idx <
 //! num_partials` を維持する。`t`（`targets[idx]`）の範囲外検査
-//! （`0 <= t < C`）はホスト側（`fandhe_ai_autodiff::var::Var::
-//! nll_loss`）が実体化前に検証済みの契約のためカーネル内では行わない
-//! （`backend_ops.rs::BackendOps::nll_loss` doc 参照）。
+//! （`0 <= t < num_classes`）はホスト側起動 API（`nll.rs::
+//! validate_nll_buffers`）が起動前に検証し拒否する契約だが、`t` は
+//! カーネル自身も `0 <= t < num_classes` を手動検査してから
+//! `input_idx`／`dinput` の添字算出へ用いる（PR #1850 codex-review P0
+//! 是正 2: ホスト側検証を回避する経路〈将来の呼び出し口追加等〉が
+//! 生じても範囲外読み書きへ波及しない縦深防御。REQ-8 の手動境界検査
+//! 方針・`.claude/rules/coding-rust.md` unsafe 不変条件保証と同じ
+//! 理由）。範囲外 `t` は寄与ゼロ（forward はスキップ・backward は
+//! 書き込みなし）として扱う（ホスト側検証済みのため通常到達しない）。
 //!
 //! # 意味論の正
 //!
@@ -83,6 +89,12 @@ extern "C" __global__ void nll_partial_f32(
         int o = (int)(idx / inner);
         int i = (int)(idx % inner);
         int t = targets[idx];
+        // REQ-8: `t` の手動境界検査（モジュール冒頭コメント参照）。
+        // ホスト側 `validate_nll_buffers` が事前拒否する契約のため
+        // 通常到達しないが、範囲外 `t` は寄与ゼロとして安全側へ倒す。
+        if (t < 0 || t >= num_classes) {
+            continue;
+        }
         long long input_idx = ((long long)o * num_classes + t) * inner + i;
         acc -= input[input_idx];
     }
@@ -168,8 +180,15 @@ extern "C" __global__ void nll_backward_f32(
         int o = idx / inner;
         int i = idx % inner;
         int t = targets[idx];
-        long long input_idx = ((long long)o * num_classes + t) * inner + i;
-        dinput[input_idx] = -scale;
+        // REQ-8: `t` の手動境界検査（モジュール冒頭コメント参照）。
+        // ホスト側 `validate_nll_buffers` が事前拒否する契約のため
+        // 通常到達しないが、範囲外 `t` は書き込みなしとして安全側へ
+        // 倒す（`dinput` はゼロ初期化済みのため当該位置は `0.0` のまま
+        // 残る）。
+        if (t >= 0 && t < num_classes) {
+            long long input_idx = ((long long)o * num_classes + t) * inner + i;
+            dinput[input_idx] = -scale;
+        }
     }
 }
 "#;
@@ -200,5 +219,19 @@ mod tests {
     fn nll_backward_f32_has_bound_check() {
         assert!(NLL_BACKWARD_F32.contains("if (idx < n_samples)"));
         assert!(!NLL_BACKWARD_F32.contains("atomicAdd"));
+    }
+
+    /// PR #1850 codex-review P0 是正 2 の証跡: `t`（`targets[idx]`）の
+    /// 手動境界検査（`0 <= t < num_classes`）がカーネルソース自身に
+    /// 含まれることを確認する（`nll_partial_f32_has_grid_stride_bound_
+    /// check`／`nll_backward_f32_has_bound_check` と同型の文字列検査）。
+    #[test]
+    fn nll_partial_f32_has_target_bound_check() {
+        assert!(NLL_PARTIAL_F32.contains("if (t < 0 || t >= num_classes)"));
+    }
+
+    #[test]
+    fn nll_backward_f32_has_target_bound_check() {
+        assert!(NLL_BACKWARD_F32.contains("if (t >= 0 && t < num_classes)"));
     }
 }

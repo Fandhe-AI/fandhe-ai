@@ -271,6 +271,20 @@ fn checked_gate_width(gates: usize, hidden: usize) -> Result<usize, BackendError
     ))
 }
 
+/// `shape` の要素積を `checked_mul` の連鎖で求め、`usize` オーバー
+/// フロー時は `ShapeError::ElementCountOverflow` を返す
+/// （`checked_f32_bytes` 内の複製ロジックを独立関数化したもの。
+/// `nll_loss`／`nll_loss_backward` の `NllLayout` 構築が
+/// `input_shape`〈利用者から渡される任意の shape〉から直接
+/// `.iter().product()` していた箇所を置き換える。PR #1850
+/// codex-review P1 是正）。
+fn checked_shape_numel(shape: &[usize]) -> Result<usize, ShapeError> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)
+}
+
 /// Metal バックエンドの `BackendOps` 実装。`Device::Metal` は ordinal を
 /// 持たない単一 variant のため（`docs/public-api-design.md` §4.1・
 /// `device.rs::MetalDeviceProvider` と同じ位置付け）、本実装は複数 GPU の
@@ -3166,9 +3180,10 @@ impl BackendOps for MetalBackendOps {
             }));
         }
         let layout = crate::nll::NllLayout {
-            outer: shape[..class_dim].iter().product(),
+            outer: checked_shape_numel(&shape[..class_dim]).map_err(BackendError::ShapeMismatch)?,
             num_classes: shape[class_dim],
-            inner: shape[class_dim + 1..].iter().product(),
+            inner: checked_shape_numel(&shape[class_dim + 1..])
+                .map_err(BackendError::ShapeMismatch)?,
         };
         let input_owned = input.contiguous();
         let targets_owned = targets.contiguous();
@@ -3178,7 +3193,12 @@ impl BackendOps for MetalBackendOps {
         let targets_slice = targets_owned.as_slice().ok_or_else(|| {
             BackendError::KernelLaunchFailed("nll_loss: targets not contiguous".into())
         })?;
-        let n = layout.outer * layout.inner;
+        let n = layout
+            .outer
+            .checked_mul(layout.inner)
+            .ok_or(BackendError::ShapeMismatch(
+                ShapeError::ElementCountOverflow,
+            ))?;
         let factor = match reduction {
             MseReduction::Mean => {
                 if n == 0 {
@@ -3222,9 +3242,11 @@ impl BackendOps for MetalBackendOps {
             }));
         }
         let layout = crate::nll::NllLayout {
-            outer: input_shape[..class_dim].iter().product(),
+            outer: checked_shape_numel(&input_shape[..class_dim])
+                .map_err(BackendError::ShapeMismatch)?,
             num_classes: input_shape[class_dim],
-            inner: input_shape[class_dim + 1..].iter().product(),
+            inner: checked_shape_numel(&input_shape[class_dim + 1..])
+                .map_err(BackendError::ShapeMismatch)?,
         };
         let targets_owned = targets.contiguous();
         let targets_slice = targets_owned.as_slice().ok_or_else(|| {

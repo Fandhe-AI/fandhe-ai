@@ -32,9 +32,14 @@
 //
 // `nll_partial_f32`・`nll_backward_f32` は `idx < n_samples` の手動
 // 境界チェックを維持する。`nll_finalize_f32` も `idx < num_partials`
-// を維持する。`t`（`targets[idx]`）の範囲外検査（`0 <= t < C`）は
-// ホスト側が実体化前に検証済みの契約のためカーネル内では行わない
-// （`backend_ops.rs::BackendOps::nll_loss` doc 参照）。
+// を維持する。`t`（`targets[idx]`）の範囲外検査（`0 <= t < num_classes`）
+// はホスト側起動 API（`nll.rs::validate_nll_buffers`）が起動前に検証し
+// 拒否する契約だが、`t` はカーネル自身も手動検査してから
+// `input_idx`／`dinput` の添字算出へ用いる（PR #1850 codex-review P0
+// 是正 2: ホスト側検証を回避する経路が生じても範囲外読み書きへ波及
+// しない縦深防御。`kernels_nll.rs` 冒頭コメントと同じ理由）。範囲外
+// `t` は寄与ゼロ（forward はスキップ・backward は書き込みなし）として
+// 扱う（ホスト側検証済みのため通常到達しない）。
 //
 // # 意味論の正
 //
@@ -78,6 +83,11 @@ kernel void nll_partial_f32(
         uint o = (uint)(idx / inner);
         uint i = (uint)(idx % inner);
         int t = targets[idx];
+        // REQ-8: `t` の手動境界検査（ファイル冒頭コメント参照）。
+        // `t < 0` を弾かないと `(ulong)t` の符号拡張で巨大な添字になる。
+        if (t < 0 || (uint)t >= num_classes) {
+            continue;
+        }
         ulong input_idx = ((ulong)o * (ulong)num_classes + (ulong)t) * (ulong)inner + (ulong)i;
         acc -= input[input_idx];
     }
@@ -150,7 +160,11 @@ kernel void nll_backward_f32(
         uint o = idx / inner;
         uint i = idx % inner;
         int t = targets[idx];
-        ulong input_idx = ((ulong)o * (ulong)num_classes + (ulong)t) * (ulong)inner + (ulong)i;
-        dinput[input_idx] = -scale;
+        // REQ-8: `t` の手動境界検査（ファイル冒頭コメント参照）。
+        // `t < 0` を弾かないと `(ulong)t` の符号拡張で巨大な添字になる。
+        if (t >= 0 && (uint)t < num_classes) {
+            ulong input_idx = ((ulong)o * (ulong)num_classes + (ulong)t) * (ulong)inner + (ulong)i;
+            dinput[input_idx] = -scale;
+        }
     }
 }
