@@ -42,8 +42,9 @@ use fandhe_ai_tensor_core::{
     GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp,
     ScatterReduce, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, gather_out_shape,
-    interpolate_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -2834,16 +2835,17 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// `BackendOps::interpolate` の Metal 実装（イシュー #1757）。
-    /// [`interpolate_out_shape`] で `input`／`size` の shape を再検査
-    /// してから `interpolate.rs::MetalInterpolate::run_nearest_f32`
-    /// へ委譲する（`gather`／`scatter` と同じ二重検査方針）。
+    /// `BackendOps::interpolate` の Metal 実装（イシュー #1757・#1762）。
+    /// [`fandhe_ai_tensor_core::interpolate_out_shape_for_mode`] で
+    /// `input`／`size`／`mode` の shape を再検査してから
+    /// `interpolate.rs::MetalInterpolate` の各 `mode` 別カーネルへ
+    /// 委譲する（`gather`／`scatter` と同じ二重検査方針）。
     /// interpolate カーネルは gather／scatter と異なり座標配列を
     /// 保持しないため `GS_MAX_RANK` の rank 上限は課さない
     /// （`shaders/interpolate.metal` 冒頭コメント参照）。`mode` の
-    /// 未知 variant（`InterpolateMode` は `#[non_exhaustive]`。将来の
-    /// bilinear〈#1762〉等）は `BackendError::Unsupported` を返す
-    /// fail-safe（`ops.rs` 内他メソッドの未知 variant 分岐と同型）。
+    /// 未知 variant（`InterpolateMode` は `#[non_exhaustive]`）は
+    /// `BackendError::Unsupported` を返す fail-safe（`ops.rs` 内他
+    /// メソッドの未知 variant 分岐と同型）。
     fn interpolate(
         &self,
         input: &Tensor<f32>,
@@ -2851,21 +2853,21 @@ impl BackendOps for MetalBackendOps {
         mode: InterpolateMode,
     ) -> Result<Tensor<f32>, BackendError> {
         match mode {
-            InterpolateMode::Nearest => {}
+            InterpolateMode::Nearest | InterpolateMode::Bilinear { .. } => {}
             _ => {
                 return Err(BackendError::Unsupported(format!(
                     "MetalBackendOps::interpolate: 未対応の InterpolateMode variant {mode:?}"
                 )));
             }
         }
-        let out_shape =
-            interpolate_out_shape(input.shape(), size).map_err(BackendError::ShapeMismatch)?;
+        let out_shape = interpolate_out_shape_for_mode(input.shape(), size, mode)
+            .map_err(BackendError::ShapeMismatch)?;
         let in_shape = input.shape().to_vec();
 
         // 出力が空なら `input` の shape に依らず結果は必ず空
         // （`gather`／`scatter` の同型早期リターンと同じ理由。空間軸は
-        // `interpolate_out_shape` により非 0 が保証されるため、ここで
-        // 0 を含みうるのは先頭の残り軸のみ）。
+        // `interpolate_out_shape_for_mode` により非 0 が保証されるため、
+        // ここで 0 を含みうるのは先頭の残り軸のみ）。
         if out_shape.contains(&0) {
             return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
         }
@@ -2885,9 +2887,22 @@ impl BackendOps for MetalBackendOps {
         let ctx = context_cache::cached_context().map_err(map_metal_error)?;
         let ip = context_cache::cached_interpolate(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
-        let out = ip
-            .run_nearest_f32(&ctx, input_slice, &in_shape, size, &out_shape)
-            .map_err(map_interpolate_error)?;
+        let out = match mode {
+            InterpolateMode::Nearest => ip
+                .run_nearest_f32(&ctx, input_slice, &in_shape, size, &out_shape)
+                .map_err(map_interpolate_error)?,
+            InterpolateMode::Bilinear { align_corners } => ip
+                .run_bilinear_f32(
+                    &ctx,
+                    input_slice,
+                    &in_shape,
+                    size,
+                    &out_shape,
+                    align_corners,
+                )
+                .map_err(map_interpolate_error)?,
+            _ => unreachable!("checked above"),
+        };
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 

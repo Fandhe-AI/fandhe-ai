@@ -59,6 +59,55 @@ fn assert_interpolate_parity(seed: u64, in_shape: &[usize], size: &[usize]) {
     );
 }
 
+/// [`assert_interpolate_parity`] の bilinear 版（イシュー #1762）。
+/// 受入契約は REQ-2 統一複合判定（`assert_parity`）——`Nearest` と
+/// 異なり算術を含むため bit 完全一致は前提としない
+/// （`InterpolateMode::Bilinear` doc 参照）。run-to-run の bit 同一
+/// （決定的カーネル）は引き続き検証する。
+fn assert_interpolate_bilinear_parity(
+    seed: u64,
+    in_shape: &[usize],
+    size: &[usize],
+    align_corners: bool,
+) {
+    let numel_in: usize = in_shape.iter().product();
+
+    let cpu = CpuBackendOps::new();
+    let cuda = CudaBackendOps::new(0);
+    let mode = InterpolateMode::Bilinear { align_corners };
+
+    let input =
+        Tensor::new(Xorshift64Star::new(seed).fill_vec(numel_in), in_shape).expect("valid tensor");
+
+    let cpu_out = cpu
+        .interpolate(&input, size, mode)
+        .expect("cpu interpolate always succeeds for valid input");
+    let cuda_out = cuda
+        .interpolate(&input, size, mode)
+        .expect("cuda interpolate must succeed on CUDA-equipped test runner");
+
+    assert_eq!(cpu_out.shape(), cuda_out.shape());
+    let cpu_slice = cpu_out.as_slice().expect("contiguous");
+    let cuda_slice = cuda_out.as_slice().expect("contiguous");
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!(
+            "interpolate bilinear(in_shape={in_shape:?}, size={size:?}, align_corners={align_corners})"
+        ),
+        cuda_slice,
+        cpu_slice,
+    );
+
+    // run-to-run で bit 同一（決定的カーネル）。
+    let cuda_out2 = cuda
+        .interpolate(&input, size, mode)
+        .expect("cuda interpolate rerun");
+    assert_eq!(
+        cuda_out2.as_slice().expect("contiguous"),
+        cuda_slice,
+        "interpolate bilinear: run-to-run で bit 同一のはず"
+    );
+}
+
 /// 環境適応スモーク（属性なし。通常 CI で実行）。CUDA 不在なら
 /// `BackendError::CudaUnavailable` を確認して早期 return する
 /// （`gather_scatter_parity_smoke_env_adaptive` と同じ分岐パターン）。
@@ -77,6 +126,11 @@ fn interpolate_parity_smoke_env_adaptive() {
             assert_interpolate_parity(9202, &[8], &[3]); // 非整数比ダウンサンプル
             assert_interpolate_parity(9203, &[2, 4], &[4]); // 先頭 batch 軸付き
             assert_interpolate_parity(9204, &[3, 4], &[3, 4]); // 恒等サイズ
+
+            // bilinear（イシュー #1762）。
+            assert_interpolate_bilinear_parity(9210, &[2, 2], &[5, 5], false);
+            assert_interpolate_bilinear_parity(9211, &[5, 5], &[2, 2], true);
+            assert_interpolate_bilinear_parity(9212, &[3, 4, 4], &[9, 9], false); // 先頭 batch 軸付き
 
             // shape 不一致（rank 超過）は `BackendError::ShapeMismatch`
             // を返す（実装側の再検査。`.claude/rules/security.md`
@@ -134,6 +188,21 @@ fn interpolate_matches_cpu_across_shapes() {
     for &(in_shape, size) in cases {
         seed += 7;
         assert_interpolate_parity(seed, in_shape, size);
+    }
+
+    // bilinear（イシュー #1762）: 空間軸はちょうど 2 軸限定。
+    let bilinear_cases: &[(&[usize], &[usize], bool)] = &[
+        (&[2, 2], &[5, 5], false),    // アップサンプル・half-pixel
+        (&[5, 5], &[2, 2], true),     // ダウンサンプル・align_corners
+        (&[4, 4], &[4, 4], false),    // 恒等サイズ
+        (&[1, 5], &[3, 9], false),    // 縮退軸（in_h=1）
+        (&[3, 4, 4], &[9, 9], false), // 先頭 batch 軸付き
+        (&[8, 8], &[1, 1], false),    // 極端ダウンサンプル
+    ];
+    let mut bseed = 30_000u64;
+    for &(in_shape, size, align_corners) in bilinear_cases {
+        bseed += 11;
+        assert_interpolate_bilinear_parity(bseed, in_shape, size, align_corners);
     }
 
     // 非 contiguous な input（transpose view）を渡しても contiguous 化
