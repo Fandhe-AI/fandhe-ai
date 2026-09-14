@@ -56,10 +56,25 @@ class ParseError(RuntimeError):
     pass
 
 
-def parse_log_text(text: str) -> dict:
+def parse_log_text(
+    text: str,
+    *,
+    expected_n: int | None = None,
+    expected_label: str | None = None,
+) -> dict:
     """1 run のログ全文から N・腕ラベル・readback/host_read 中央値・
     checksum を抽出する。ハーネスは 1 呼び出しにつき 1 ブロックのみ
-    出力するため最初の一致のみを採用する。"""
+    出力するため最初の一致のみを採用する。
+
+    `expected_n`／`expected_label` を渡した場合、ログ本文から抽出した
+    N・腕ラベルがファイル名（`layerB-n{N}-{arm}-run{k}.log`）由来の
+    期待値と一致することを検証する。転記・配置ミス（別サイズ／別腕の
+    ログを取り違えたファイル名で保存した等）は checksum の腕内一致
+    チェックだけではすり抜けるため、ここで fail-closed に検出し
+    ParseError として扱う（呼び出し元の `collect()` はこれを欠損
+    レコードとして扱い、`render_markdown()` が「欠損／判定不能」を
+    報告する）。
+    """
     header = HEADER_RE.search(text)
     if header is None:
         raise ParseError("N=.../arm=.../checksum=... 行が見つからない")
@@ -69,9 +84,21 @@ def parse_log_text(text: str) -> dict:
     host_read = HOST_READ_RE.search(text)
     if host_read is None:
         raise ParseError("host_read: median=... 行が見つからない")
+    n = int(header.group("n"))
+    label = header.group("label")
+    if expected_n is not None and n != expected_n:
+        raise ParseError(
+            f"ファイル名由来の n={expected_n} と抽出値 n={n} が不一致"
+            "（転記・配置ミスの疑い）"
+        )
+    if expected_label is not None and label != expected_label:
+        raise ParseError(
+            f"ファイル名由来の arm 由来ラベル={expected_label} と抽出値 "
+            f"label={label} が不一致（転記・配置ミスの疑い）"
+        )
     return {
-        "n": int(header.group("n")),
-        "label": header.group("label"),
+        "n": n,
+        "label": label,
         "checksum": float(header.group("checksum")),
         "readback_ms": float(readback.group("median")),
         "host_read_ms": float(host_read.group("median")),
@@ -80,11 +107,18 @@ def parse_log_text(text: str) -> dict:
 
 def collect(log_dir: Path) -> dict:
     """`layerB-n{N}-{arm}-run{1..5}.log` を全て読み、
-    {(n, arm): [record, ...]} を返す（見つからないファイルは skip し、
-    後段で欠損として報告する）。"""
+    {(n, arm): [record, ...]} を返す（見つからないファイル・パース失敗
+    ファイルは skip し、後段（`render_markdown()`）で欠損／判定不能と
+    して報告する）。
+
+    ファイル名から期待される n・腕ラベルを `parse_log_text()` へ渡し、
+    ログ本文の抽出値と食い違う場合（転記・配置ミス）も ParseError として
+    skip する。skip の理由は標準エラーへ警告として出す（無言で握り
+    つぶさない）。"""
     results: dict = {}
     for n in SIZES:
         for arm in ARMS:
+            expected_label = ARM_LABELS[arm]
             records = []
             for run in range(1, RUNS + 1):
                 path = log_dir / f"layerB-n{n}-{arm}-run{run}.log"
@@ -92,8 +126,11 @@ def collect(log_dir: Path) -> dict:
                     continue
                 text = path.read_text(encoding="utf-8", errors="replace")
                 try:
-                    rec = parse_log_text(text)
-                except ParseError:
+                    rec = parse_log_text(
+                        text, expected_n=n, expected_label=expected_label
+                    )
+                except ParseError as exc:
+                    print(f"warning: {path}: {exc}", file=sys.stderr)
                     continue
                 records.append(rec)
             results[(n, arm)] = records
@@ -125,8 +162,16 @@ def render_markdown(results: dict) -> str:
         for arm in ARMS:
             records = results.get((n, arm), [])
             label = ARM_LABELS[arm]
-            if not records:
-                lines.append(f"| {n} | {label} | 未実測 | 未実測 | 未実測 | 0 | — |")
+            # 5 起動すべてが揃っていない場合（0 件を含む）は代表値・
+            # ノイズ床を「残存件数のみ」から算出せず、欠損／判定不能として
+            # 報告する（codex-review 指摘: 揃わない起動から算出した中央値
+            # は事前登録した 5 起動プロトコルの代表値として扱えない）。
+            if len(records) < RUNS:
+                status = "未実測" if not records else "欠損／判定不能"
+                lines.append(
+                    f"| {n} | {label} | {status} | {status} | {status} | "
+                    f"{len(records)} | — |"
+                )
                 continue
             readbacks = [r["readback_ms"] for r in records]
             host_reads = [r["host_read_ms"] for r in records]
@@ -156,8 +201,18 @@ def render_markdown(results: dict) -> str:
     for n in SIZES:
         legacy = results.get((n, "legacy_to_vec"), [])
         borrowed = results.get((n, "borrowed_keep_alive"), [])
-        if not legacy or not borrowed:
-            lines.append(f"- N={n}: 未実測")
+        # 腕差も同様に、両腕とも 5 起動が揃って初めて中央値差を報告する
+        # （揃わない場合の残存件数のみでの算出を避ける。上の主表と同じ
+        # 規則）。
+        if len(legacy) < RUNS or len(borrowed) < RUNS:
+            if not legacy and not borrowed:
+                lines.append(f"- N={n}: 未実測")
+            else:
+                lines.append(
+                    f"- N={n}: 欠損／判定不能（"
+                    f"legacy_to_vec={len(legacy)}/{RUNS} run, "
+                    f"borrowed_keep_alive={len(borrowed)}/{RUNS} run）"
+                )
             continue
         legacy_total = statistics.median(
             [r["readback_ms"] + r["host_read_ms"] for r in legacy]
@@ -243,6 +298,53 @@ def self_test() -> None:
         md = render_markdown(results)
         assert "LegacyToVec" in md
         assert "未実測" in md  # 他の (n, arm) 組は記録がないため
+
+    # 4) collect() はファイル名由来の期待値（n・腕ラベル）とログ本文の
+    #    抽出値が食い違う場合（転記・配置ミス）を ParseError として
+    #    検出し、当該レコードを欠損として扱うこと（checksum が一致
+    #    していても素通りしないことを確認する）。
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp)
+        # ファイル名は N=1024/legacy_to_vec だが、ログ本文の実体は
+        # N=2048 のもの（転記・配置ミスを模す）。
+        p = log_dir / "layerB-n1024-legacy_to_vec-run1.log"
+        p.write_text(
+            _make_fixture_text(2048, "LegacyToVec", 42.0, 1.0, 0.1),
+            encoding="utf-8",
+        )
+        results = collect(log_dir)
+        assert results[(1024, "legacy_to_vec")] == [], results[
+            (1024, "legacy_to_vec")
+        ]
+
+    # 5) 同様に、腕ラベルが食い違う場合（ファイル名は legacy_to_vec だが
+    #    本文は BorrowedKeepAlive）も欠損として検出すること。
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp)
+        p = log_dir / "layerB-n1024-legacy_to_vec-run1.log"
+        p.write_text(
+            _make_fixture_text(1024, "BorrowedKeepAlive", 42.0, 1.0, 0.1),
+            encoding="utf-8",
+        )
+        results = collect(log_dir)
+        assert results[(1024, "legacy_to_vec")] == [], results[
+            (1024, "legacy_to_vec")
+        ]
+
+    # 6) 5 起動中 4 起動しか揃わない場合、代表値を残存件数のみから算出
+    #    せず「欠損／判定不能」として報告すること。
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = Path(tmp)
+        for i, rb in enumerate([1.0, 1.1, 1.2, 1.05], start=1):
+            p = log_dir / f"layerB-n1024-legacy_to_vec-run{i}.log"
+            p.write_text(
+                _make_fixture_text(1024, "LegacyToVec", 42.0, rb, 0.1),
+                encoding="utf-8",
+            )
+        results = collect(log_dir)
+        assert len(results[(1024, "legacy_to_vec")]) == 4
+        md = render_markdown(results)
+        assert "欠損／判定不能" in md
 
     print("self-test: OK", file=sys.stderr)
 
