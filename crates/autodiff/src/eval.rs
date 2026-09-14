@@ -24,7 +24,7 @@
 use std::borrow::Cow;
 
 use fandhe_ai_tensor_core::{
-    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, Tensor,
+    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, ShapeError, Tensor,
 };
 
 use crate::layout;
@@ -1175,17 +1175,24 @@ fn sort_cmp(a: (f32, usize), b: (f32, usize), descending: bool) -> std::cmp::Ord
 /// [`fandhe_ai_tensor_core::BackendOps::sort`] doc の 1〜4 を正と
 /// する（本関数は [`sort_cmp`] で契約 1〜3 を、単一スレッド逐次
 /// 実装で契約 4〈決定性〉を満たす）。
+///
+/// 元添字（`orig_idx: usize`）は出力の `index` テンソルへ `i32` で
+/// 書き戻すため、`i32::MAX` を超える添字は `i32::try_from` の失敗を
+/// `ShapeError::IndexRangeOverflow` として伝播する（codex-review
+/// 指摘・PR #1818。`crates/backend-cpu/src/sort_topk.rs::sort` が
+/// 同条件で返す契約と一致させ、CUDA／Metal がこのホスト
+/// フォールバックを経由してもバックエンド間の添字契約を崩さない）。
 pub(crate) fn sort(
     input: &Tensor<f32>,
     dim: usize,
     descending: bool,
-) -> (Tensor<f32>, Tensor<i32>) {
+) -> Result<(Tensor<f32>, Tensor<i32>), ShapeError> {
     let shape = input.shape().to_vec();
     if shape.contains(&0) {
-        return (
+        return Ok((
             build_tensor(Vec::new(), &shape),
             build_index_tensor(Vec::new(), &shape),
-        );
+        ));
     }
     let data = dense_vec_ref(input);
     let strides = row_major_strides(&shape);
@@ -1218,13 +1225,14 @@ pub(crate) fn sort(
                 pos += coord * stride;
             }
             out_vals[pos] = val;
-            out_idx[pos] = orig_idx as i32;
+            out_idx[pos] = i32::try_from(orig_idx)
+                .map_err(|_| ShapeError::IndexRangeOverflow { index: orig_idx })?;
         }
     }
-    (
+    Ok((
         build_tensor(out_vals, &shape),
         build_index_tensor(out_idx, &shape),
-    )
+    ))
 }
 
 /// `dim` 軸に沿った上位（`largest=true`）／下位（`largest=false`）
@@ -1237,18 +1245,23 @@ pub(crate) fn sort(
 /// `out_shape` は呼び出し元（`Var::topk`）が
 /// [`fandhe_ai_tensor_core::topk_out_shape`] で検査・確定済みの
 /// 出力 shape（`dim` 軸のみ `k` に置換）をそのまま渡す。
+///
+/// [`sort`] と同じ理由で、元添字が `i32::MAX` を超える場合は
+/// `ShapeError::IndexRangeOverflow` を返す（codex-review 指摘・
+/// PR #1818。`crates/backend-cpu/src/sort_topk.rs::topk` と契約を
+/// 一致させる）。
 pub(crate) fn topk(
     input: &Tensor<f32>,
     dim: usize,
     k: usize,
     largest: bool,
     out_shape: &[usize],
-) -> (Tensor<f32>, Tensor<i32>) {
+) -> Result<(Tensor<f32>, Tensor<i32>), ShapeError> {
     if out_shape.contains(&0) {
-        return (
+        return Ok((
             build_tensor(Vec::new(), out_shape),
             build_index_tensor(Vec::new(), out_shape),
-        );
+        ));
     }
     let shape = input.shape().to_vec();
     let data = dense_vec_ref(input);
@@ -1282,13 +1295,14 @@ pub(crate) fn topk(
                 pos += coord * stride;
             }
             out_vals[pos] = val;
-            out_idx[pos] = orig_idx as i32;
+            out_idx[pos] = i32::try_from(orig_idx)
+                .map_err(|_| ShapeError::IndexRangeOverflow { index: orig_idx })?;
         }
     }
-    (
+    Ok((
         build_tensor(out_vals, out_shape),
         build_index_tensor(out_idx, out_shape),
-    )
+    ))
 }
 
 /// CrossEntropy 損失（log-sum-exp 安定化。クラス次元 `class_dim` 指定。

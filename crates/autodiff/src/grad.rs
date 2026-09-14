@@ -1562,7 +1562,7 @@ pub(crate) fn sort_with_fallback(
             }
             Ok((values, index))
         }
-        Err(BackendError::Unsupported(_)) => Ok(eval::sort(input, dim, descending)),
+        Err(BackendError::Unsupported(_)) => Ok(eval::sort(input, dim, descending)?),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }
@@ -1591,7 +1591,7 @@ pub(crate) fn topk_with_fallback(
             }
             Ok((values, index))
         }
-        Err(BackendError::Unsupported(_)) => Ok(eval::topk(input, dim, k, largest, out_shape)),
+        Err(BackendError::Unsupported(_)) => Ok(eval::topk(input, dim, k, largest, out_shape)?),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }
