@@ -33,8 +33,8 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::optim::{
-    AdamW, AdamWConfig, ConstantLr, LrScheduler, Sgd, SgdConfig, StepLr, clip_grad_norm,
-    clip_grad_value,
+    Adagrad, AdagradConfig, AdamW, AdamWConfig, ConstantLr, LrScheduler, RmsProp, RmsPropConfig,
+    Sgd, SgdConfig, StepLr, clip_grad_norm, clip_grad_value,
 };
 
 const BATCH: usize = 4;
@@ -218,6 +218,176 @@ fn adamw_with_clip_converges_via_facade_only() {
 
     let mut model = build_model();
     let log = train_with_adamw_and_clip(&mut model, STEPS, MAX_NORM);
+
+    assert_eq!(log.len(), STEPS);
+    let initial = log[0];
+    let final_loss = *log.last().unwrap_or_else(|| unreachable!("log は空でない"));
+    assert!(final_loss.is_finite(), "final loss が非有限: {final_loss}");
+    assert!(
+        final_loss < 0.5 * initial,
+        "loss did not converge sufficiently: initial={initial} final={final_loss}"
+    );
+}
+
+// =====================================================================
+// RMSprop + clip（イシュー #1743・親 #1610）
+// =====================================================================
+
+/// `train_with_adamw_and_clip` と同型（`RmsProp::step` も `AdamW::step`
+/// と同じ `&[(&Tensor<f32>, &Tensor<f32>)]` シグネチャのため差し替えの
+/// みで構成できる）。`lr` は既定 `1e-2` では小規模 MLP で発散しうる
+/// ため呼び出し元から渡す（`nn_optim_rmsprop.rs::mlp_converges_with_
+/// rmsprop` と同じ理由）。
+fn train_with_rmsprop_and_clip(
+    model: &mut Sequential,
+    steps: usize,
+    lr: f32,
+    max_norm: f32,
+) -> Vec<f32> {
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let cfg = RmsPropConfig {
+        lr,
+        ..RmsPropConfig::default()
+    };
+    let mut rmsprop =
+        RmsProp::new(cfg).unwrap_or_else(|e| panic!("test fixture: RmsProp::new が失敗した: {e}"));
+    let mut log = Vec::with_capacity(steps);
+
+    for _ in 0..steps {
+        let updated = {
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+
+            let pred = bound
+                .forward(&tape, &x)
+                .unwrap_or_else(|e| panic!("test fixture: forward が失敗した: {e}"));
+            let loss = pred
+                .mse_loss(&y)
+                .unwrap_or_else(|e| panic!("test fixture: mse_loss が失敗した: {e}"));
+            log.push(scalar(&loss.to_tensor()));
+
+            let grads = tape
+                .backward(&loss)
+                .unwrap_or_else(|e| panic!("test fixture: backward が失敗した: {e}"));
+            let grad_refs = bound
+                .trainable_grads(&grads)
+                .unwrap_or_else(|e| panic!("test fixture: trainable_grads が失敗した: {e}"));
+            let clip_result = clip_grad_norm(&grad_refs, max_norm)
+                .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));
+            let param_refs = model.trainable_parameters();
+            let params_and_grads: Vec<(&Tensor<f32>, &Tensor<f32>)> = param_refs
+                .into_iter()
+                .zip(clip_result.grads.iter())
+                .collect();
+            rmsprop
+                .step(&params_and_grads)
+                .unwrap_or_else(|e| panic!("test fixture: RmsProp::step が失敗した: {e}"))
+        };
+        model
+            .apply_parameters(updated)
+            .unwrap_or_else(|e| panic!("test fixture: apply_parameters が失敗した: {e}"));
+    }
+
+    log
+}
+
+/// `fandhe_ai::optim::{RmsProp, clip_grad_norm}` のみを使った学習
+/// ループで loss が減少すること（受入基準 3）。
+#[test]
+fn rmsprop_with_clip_converges_via_facade_only() {
+    const STEPS: usize = 100;
+    const LR: f32 = 1e-3;
+    const MAX_NORM: f32 = 10.0;
+
+    let mut model = build_model();
+    let log = train_with_rmsprop_and_clip(&mut model, STEPS, LR, MAX_NORM);
+
+    assert_eq!(log.len(), STEPS);
+    let initial = log[0];
+    let final_loss = *log.last().unwrap_or_else(|| unreachable!("log は空でない"));
+    assert!(final_loss.is_finite(), "final loss が非有限: {final_loss}");
+    assert!(
+        final_loss < 0.5 * initial,
+        "loss did not converge sufficiently: initial={initial} final={final_loss}"
+    );
+}
+
+// =====================================================================
+// Adagrad + clip（イシュー #1743・親 #1610）
+// =====================================================================
+
+/// `train_with_adamw_and_clip` と同型（`Adagrad::step` も `AdamW::step`
+/// と同じ `&[(&Tensor<f32>, &Tensor<f32>)]` シグネチャのため差し替えの
+/// みで構成できる）。`lr` は既定 `1e-2`・100 step では収束不足になり
+/// うるため呼び出し元から渡す（`nn_optim_adagrad.rs::mlp_converges_
+/// with_adagrad` と同じ理由）。
+fn train_with_adagrad_and_clip(
+    model: &mut Sequential,
+    steps: usize,
+    lr: f32,
+    max_norm: f32,
+) -> Vec<f32> {
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let cfg = AdagradConfig {
+        lr,
+        ..AdagradConfig::default()
+    };
+    let mut adagrad =
+        Adagrad::new(cfg).unwrap_or_else(|e| panic!("test fixture: Adagrad::new が失敗した: {e}"));
+    let mut log = Vec::with_capacity(steps);
+
+    for _ in 0..steps {
+        let updated = {
+            let tape = fandhe_ai::tape();
+            let bound = model.bind(&tape);
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+
+            let pred = bound
+                .forward(&tape, &x)
+                .unwrap_or_else(|e| panic!("test fixture: forward が失敗した: {e}"));
+            let loss = pred
+                .mse_loss(&y)
+                .unwrap_or_else(|e| panic!("test fixture: mse_loss が失敗した: {e}"));
+            log.push(scalar(&loss.to_tensor()));
+
+            let grads = tape
+                .backward(&loss)
+                .unwrap_or_else(|e| panic!("test fixture: backward が失敗した: {e}"));
+            let grad_refs = bound
+                .trainable_grads(&grads)
+                .unwrap_or_else(|e| panic!("test fixture: trainable_grads が失敗した: {e}"));
+            let clip_result = clip_grad_norm(&grad_refs, max_norm)
+                .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));
+            let param_refs = model.trainable_parameters();
+            let params_and_grads: Vec<(&Tensor<f32>, &Tensor<f32>)> = param_refs
+                .into_iter()
+                .zip(clip_result.grads.iter())
+                .collect();
+            adagrad
+                .step(&params_and_grads)
+                .unwrap_or_else(|e| panic!("test fixture: Adagrad::step が失敗した: {e}"))
+        };
+        model
+            .apply_parameters(updated)
+            .unwrap_or_else(|e| panic!("test fixture: apply_parameters が失敗した: {e}"));
+    }
+
+    log
+}
+
+/// `fandhe_ai::optim::{Adagrad, clip_grad_norm}` のみを使った学習
+/// ループで loss が減少すること（受入基準 3）。
+#[test]
+fn adagrad_with_clip_converges_via_facade_only() {
+    const STEPS: usize = 100;
+    const LR: f32 = 5e-2;
+    const MAX_NORM: f32 = 10.0;
+
+    let mut model = build_model();
+    let log = train_with_adagrad_and_clip(&mut model, STEPS, LR, MAX_NORM);
 
     assert_eq!(log.len(), STEPS);
     let initial = log[0];
