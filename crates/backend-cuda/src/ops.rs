@@ -37,9 +37,9 @@ use fandhe_ai_tensor_core::{
     GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
     MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey,
     SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    gather_out_shape, interpolate_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape,
-    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    gather_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -3336,15 +3336,15 @@ impl BackendOps for CudaBackendOps {
         mode: InterpolateMode,
     ) -> Result<Tensor<f32>, BackendError> {
         match mode {
-            InterpolateMode::Nearest => {}
+            InterpolateMode::Nearest | InterpolateMode::Bilinear { .. } => {}
             _ => {
                 return Err(BackendError::Unsupported(format!(
                     "CudaBackendOps::interpolate: 未対応の InterpolateMode variant {mode:?}"
                 )));
             }
         }
-        let out_shape =
-            interpolate_out_shape(input.shape(), size).map_err(BackendError::ShapeMismatch)?;
+        let out_shape = interpolate_out_shape_for_mode(input.shape(), size, mode)
+            .map_err(BackendError::ShapeMismatch)?;
 
         // 出力が空なら `input` の shape に依らず結果は必ず空
         // （`gather`／`scatter` の同型早期リターンと同じ理由）。
@@ -3367,8 +3367,6 @@ impl BackendOps for CudaBackendOps {
             BackendError::KernelLaunchFailed("interpolate: input not contiguous".into())
         })?;
 
-        let spatial_start = out_shape.len() - size.len();
-
         let ip = self.with_driver_call(
             &[],
             |e| BackendError::CudaUnavailable(e.to_string()),
@@ -3377,9 +3375,20 @@ impl BackendOps for CudaBackendOps {
                 context_cache::cached_interpolate(&device)
             },
         )?;
-        let out = self.with_driver_call(&[], map_interpolate_error, || {
-            ip.run_nearest_f32(input_slice, input.shape(), &out_shape, spatial_start)
-        })?;
+        let out = match mode {
+            InterpolateMode::Nearest => {
+                let spatial_start = out_shape.len() - size.len();
+                self.with_driver_call(&[], map_interpolate_error, || {
+                    ip.run_nearest_f32(input_slice, input.shape(), &out_shape, spatial_start)
+                })?
+            }
+            InterpolateMode::Bilinear { align_corners } => {
+                self.with_driver_call(&[], map_interpolate_error, || {
+                    ip.run_bilinear_f32(input_slice, input.shape(), &out_shape, align_corners)
+                })?
+            }
+            _ => unreachable!("checked above"),
+        };
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 

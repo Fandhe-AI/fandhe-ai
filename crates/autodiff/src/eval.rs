@@ -25,7 +25,7 @@ use std::borrow::Cow;
 
 use fandhe_ai_tensor_core::{
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, ShapeError, Tensor,
-    VectorNormOrd,
+    VectorNormOrd, bilinear_blend, bilinear_scale, bilinear_src_coord,
 };
 
 use crate::layout;
@@ -1611,6 +1611,95 @@ pub(crate) fn interpolate_nearest(
             pos += coord * stride;
         }
         *out_val = input_data[pos];
+    }
+    Ok(build_tensor(out, &out_shape))
+}
+
+/// `interpolate`（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Bilinear`]）のホスト参照実装（イシュー #1762）。
+/// `BackendOps::interpolate` が `Unsupported` を返したときのみ
+/// `grad::interpolate_with_fallback` から呼ばれる。`interpolate_nearest`
+/// と異なり算術（4 近傍の線形重み付け合成）を含むため、座標・重み・
+/// ブレンド式はいずれも [`fandhe_ai_tensor_core::interpolate`]
+/// （`bilinear_scale`／`bilinear_src_coord`／`bilinear_blend`）を単一
+/// 情報源として使う（backward の VJP index 構築
+/// `grad::bilinear_src_index_and_weight_map` も同じ関数を呼ぶ）。
+///
+/// `size` はちょうど 2 個の末尾空間軸サイズ（`(H, W)`。
+/// `Var::interpolate` が `interpolate_out_shape_for_mode` で事前検査
+/// 済み——本関数は `size.len() == 2` を前提とする。呼び出し元契約
+/// 違反は `debug_assert!` でのみ検出する）。
+pub(crate) fn interpolate_bilinear(
+    input: &Tensor<f32>,
+    size: &[usize],
+    align_corners: bool,
+) -> Result<Tensor<f32>, ShapeError> {
+    debug_assert_eq!(
+        size.len(),
+        2,
+        "interpolate_bilinear: caller must pre-validate size.len() == 2 via \
+         interpolate_out_shape_for_mode"
+    );
+    let in_shape = input.shape().to_vec();
+    let rank = in_shape.len();
+    let spatial_start = rank - size.len();
+    let mut out_shape = in_shape.clone();
+    out_shape[spatial_start..].copy_from_slice(size);
+
+    // `interpolate_nearest` と同じ理由: 出力側だけでなく入力側の
+    // 稠密化コスト（`dense_vec_ref`）も別途検査する（巨大な
+    // `broadcast_to` view からの縮小で入力の稠密化が capacity
+    // overflow panic しうるため）。
+    let in_numel = in_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let in_bytes = in_numel
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if in_bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+
+    let numel: usize = out_shape.iter().product();
+    if numel == 0 {
+        return Ok(build_tensor(Vec::new(), &out_shape));
+    }
+
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&in_shape);
+
+    let h_axis = spatial_start;
+    let w_axis = spatial_start + 1;
+    let in_h = in_shape[h_axis];
+    let in_w = in_shape[w_axis];
+    let out_h = out_shape[h_axis];
+    let out_w = out_shape[w_axis];
+    let scale_h = bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = bilinear_scale(in_w, out_w, align_corners);
+
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let coords = unravel(flat, &out_shape);
+        let cy = bilinear_src_coord(coords[h_axis], in_h, scale_h, align_corners);
+        let cx = bilinear_src_coord(coords[w_axis], in_w, scale_w, align_corners);
+
+        // 空間軸以外（batch／channel 等）の素通し添字は共通の基底
+        // オフセットへ畳み込んでおく（4 近傍の読み出しで毎回同じ計算
+        // を繰り返さないため）。
+        let mut base = 0usize;
+        for (axis, &stride) in input_strides.iter().enumerate() {
+            if axis != h_axis && axis != w_axis {
+                base += coords[axis] * stride;
+            }
+        }
+        let stride_h = input_strides[h_axis];
+        let stride_w = input_strides[w_axis];
+        let v00 = input_data[base + cy.i0 * stride_h + cx.i0 * stride_w];
+        let v01 = input_data[base + cy.i0 * stride_h + cx.i1 * stride_w];
+        let v10 = input_data[base + cy.i1 * stride_h + cx.i0 * stride_w];
+        let v11 = input_data[base + cy.i1 * stride_h + cx.i1 * stride_w];
+        *out_val = bilinear_blend(v00, v01, v10, v11, cx.lambda1, cy.lambda1);
     }
     Ok(build_tensor(out, &out_shape))
 }

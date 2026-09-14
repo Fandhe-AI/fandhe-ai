@@ -88,3 +88,48 @@ fn kernel_clamps_spatial_src_coord() {
 fn kernel_passes_through_non_spatial_axes() {
     assert!(INTERPOLATE_METAL_SOURCE.contains("src_c = c;"));
 }
+
+// --- bilinear（イシュー #1762） ---
+
+#[test]
+fn bilinear_kernel_name_and_buffer_order_are_declared() {
+    assert!(
+        INTERPOLATE_METAL_SOURCE.contains("kernel void interpolate_bilinear_f32("),
+        "interpolate_bilinear_f32 カーネルの宣言が見つかりません"
+    );
+    assert!(INTERPOLATE_METAL_SOURCE.contains("constant uint& align_corners [[buffer(4)]]"));
+    assert!(INTERPOLATE_METAL_SOURCE.contains("constant float& scale_h [[buffer(6)]]"));
+    assert!(INTERPOLATE_METAL_SOURCE.contains("constant float& scale_w [[buffer(7)]]"));
+}
+
+#[test]
+fn bilinear_kernel_has_grid_boundary_guard() {
+    let bilinear_start = INTERPOLATE_METAL_SOURCE
+        .find("kernel void interpolate_bilinear_f32(")
+        .expect("bilinear kernel must exist");
+    assert!(
+        INTERPOLATE_METAL_SOURCE[bilinear_start..].contains("if (gid >= numel) {"),
+        "interpolate_bilinear_f32 の `gid >= numel` 境界検査が見つかりません"
+    );
+}
+
+#[test]
+fn bilinear_kernel_clamps_spatial_src_coord() {
+    assert!(INTERPOLATE_METAL_SOURCE.contains("if (i0y > (long)in_h - 1) {"));
+    assert!(INTERPOLATE_METAL_SOURCE.contains("if (i1y > (long)in_h - 1) {"));
+    assert!(INTERPOLATE_METAL_SOURCE.contains("if (i0x > (long)in_w - 1) {"));
+    assert!(INTERPOLATE_METAL_SOURCE.contains("if (i1x > (long)in_w - 1) {"));
+}
+
+#[test]
+fn bilinear_kernel_uses_fma_for_blend() {
+    assert!(INTERPOLATE_METAL_SOURCE.contains("fma(l1x, v01, l0x * v00)"));
+    assert!(INTERPOLATE_METAL_SOURCE.contains("fma(l1x, v11, l0x * v10)"));
+    assert!(INTERPOLATE_METAL_SOURCE.contains("fma(l1y, row1, l0y * row0)"));
+}
+
+#[test]
+fn bilinear_kernel_takes_precomputed_scale_arguments() {
+    assert!(INTERPOLATE_METAL_SOURCE.contains("constant float& scale_h [[buffer(6)]]"));
+    assert!(INTERPOLATE_METAL_SOURCE.contains("constant float& scale_w [[buffer(7)]]"));
+}

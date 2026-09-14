@@ -19,9 +19,9 @@ use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, ChecksumReadout, GemmChecksum, GruPointwiseOutput,
     InterpolateMode, LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp,
     ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd, broadcast_shape,
-    concat_out_shape, gather_out_shape, gemm_out_shape, interpolate_out_shape, matmul_out_shape,
-    one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    concat_out_shape, gather_out_shape, gemm_out_shape, interpolate_out_shape_for_mode,
+    matmul_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape,
+    row_norm_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -2590,7 +2590,7 @@ impl<'t> Var<'t> {
     /// み。算術を含まない純粋なコピー演算のため forward は 3
     /// バックエンド間で構造的に bit 完全一致する）。
     ///
-    /// 検査順序: ①[`fandhe_ai_tensor_core::interpolate_out_shape`]
+    /// 検査順序: ①[`fandhe_ai_tensor_core::interpolate_out_shape_for_mode`]
     /// （`size` の rank・空間軸の 0 サイズ・要素数オーバーフローを
     /// 検査し `out_shape` を確定。違反は `AutodiffError::Shape`）→
     /// ②`self` を層 1 で実体化 → ③`ops.interpolate` →
@@ -2604,7 +2604,8 @@ impl<'t> Var<'t> {
         mode: InterpolateMode,
     ) -> Result<Var<'t>, AutodiffError> {
         let in_shape = self.shape();
-        let out_shape = interpolate_out_shape(&in_shape, size).map_err(AutodiffError::Shape)?;
+        let out_shape =
+            interpolate_out_shape_for_mode(&in_shape, size, mode).map_err(AutodiffError::Shape)?;
 
         let input_val = {
             let nodes = self.tape.nodes.borrow();

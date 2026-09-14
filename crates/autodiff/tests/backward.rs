@@ -2762,3 +2762,238 @@ fn interpolate_rejects_zero_output_spatial_axis() {
         AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::ShapeMismatch { .. })
     ));
 }
+
+// --- interpolate（bilinear。イシュー #1762） ---
+
+/// ①forward（解析値）: `align_corners=false` の 2×2 → 4×4 アップ
+/// サンプル。PyTorch `F.interpolate(x, size=(4,4), mode='bilinear',
+/// align_corners=False)` の手計算値と突き合わせる（`scale=0.5`・
+/// `src=(dst+0.5)*0.5-0.5`）。
+#[test]
+fn interpolate_bilinear_forward_matches_pytorch_reference_align_corners_false() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // [[1,2],[3,4]]
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+        align_corners: false,
+    };
+    let out = x.interpolate(&[4, 4], mode).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[4, 4]);
+    // PyTorch 参照値（手計算: dst 座標ごとに src=(dst+0.5)*0.5-0.5 を
+    // 0 でクランプ・i0=floor(src) を in_size-1 でクランプ）。
+    let expected = vec![
+        1.0, 1.25, 1.75, 2.0, //
+        1.5, 1.75, 2.25, 2.5, //
+        2.5, 2.75, 3.25, 3.5, //
+        3.0, 3.25, 3.75, 4.0,
+    ];
+    let got = dense_vec(&out.to_tensor());
+    for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+        assert!((g - e).abs() < 1e-6, "element {i}: got={g} expected={e}");
+    }
+}
+
+/// ②forward（解析値）: `align_corners=true` は四隅が入力の四隅と
+/// 厳密に一致する（PyTorch `align_corners=True` の定義）。
+#[test]
+fn interpolate_bilinear_forward_align_corners_true_matches_corners_exactly() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+        align_corners: true,
+    };
+    let out = x.interpolate(&[3, 3], mode).unwrap();
+    let got = dense_vec(&out.to_tensor());
+    // 3x3 grid、四隅（(0,0),(0,2),(2,0),(2,2)）は入力の四隅と一致。
+    assert_eq!(got[0], 1.0); // top-left
+    assert_eq!(got[2], 2.0); // top-right
+    assert_eq!(got[6], 3.0); // bottom-left
+    assert_eq!(got[8], 4.0); // bottom-right
+    // 中心 (1,1) は 4 値の単純平均。
+    assert!((got[4] - 2.5).abs() < 1e-6);
+}
+
+/// ③backward（数値微分突合）: アップサンプル（2×2→5×5・
+/// `align_corners=false`）。
+#[test]
+fn interpolate_bilinear_backward_upsample_matches_numeric_align_corners_false() {
+    let x0 = t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+    let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+        align_corners: false,
+    };
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let out = xv.interpolate(&[5, 5], mode).unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let out = xv.interpolate(&[5, 5], mode).unwrap();
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close(
+        "interpolate bilinear upsample dX (align_corners=false)",
+        dx,
+        &num_dx,
+    );
+}
+
+/// ④backward（数値微分突合）: ダウンサンプル（5×5→2×2・
+/// `align_corners=true`）。
+#[test]
+fn interpolate_bilinear_backward_downsample_matches_numeric_align_corners_true() {
+    let x0 = t((1..=25).map(|v| v as f32 * 0.3).collect(), &[5, 5]);
+    let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+        align_corners: true,
+    };
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let out = xv.interpolate(&[2, 2], mode).unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let out = xv.interpolate(&[2, 2], mode).unwrap();
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close(
+        "interpolate bilinear downsample dX (align_corners=true)",
+        dx,
+        &num_dx,
+    );
+}
+
+/// ⑤backward（数値微分突合）: `in_size==1` の縮退軸（重複コーナー・
+/// `i0==i1`）を含む形状。
+#[test]
+fn interpolate_bilinear_backward_degenerate_axis_matches_numeric() {
+    let x0 = t(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[1, 5]);
+    let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+        align_corners: false,
+    };
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let out = xv.interpolate(&[3, 9], mode).unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let out = xv.interpolate(&[3, 9], mode).unwrap();
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close("interpolate bilinear degenerate axis dX", dx, &num_dx);
+}
+
+/// ⑥backward（数値微分突合）: 先頭 batch 軸付き（3 階テンソル。
+/// 末尾 2 軸のみが空間軸）。
+#[test]
+fn interpolate_bilinear_backward_with_leading_batch_axis_matches_numeric() {
+    let x0 = t((1..=24).map(|v| v as f32 * 0.1).collect(), &[2, 3, 4]);
+    let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+        align_corners: false,
+    };
+
+    let forward = |x: Tensor<f32>| -> f32 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let out = xv.interpolate(&[6, 5], mode).unwrap();
+        scalar(&out.sum(None).unwrap().to_tensor())
+    };
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x0);
+    let out = xv.interpolate(&[6, 5], mode).unwrap();
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().expect("x は loss に到達する");
+
+    let num_dx = numeric_grad(&x0, forward);
+    assert_grad_close("interpolate bilinear leading batch axis dX", dx, &num_dx);
+}
+
+/// ⑦エラー経路: `Bilinear` に `size.len() != 2` を渡すと
+/// `AutodiffError::Shape`（`RankMismatch { expected: 2, .. }`）を
+/// 返す（`interpolate_out_shape_for_mode` の追加検査）。
+#[test]
+fn interpolate_bilinear_rejects_size_len_other_than_two() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+        align_corners: false,
+    };
+    let err = x.interpolate(&[4], mode).unwrap_err();
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::RankMismatch {
+            expected: 2,
+            actual: 1
+        })
+    ));
+
+    let err2 = x.interpolate(&[4, 4, 4], mode).unwrap_err();
+    assert!(matches!(
+        err2,
+        AutodiffError::Shape(fandhe_ai_tensor_core::ShapeError::RankMismatch {
+            expected: 2,
+            actual: 3
+        })
+    ));
+}
+
+/// ⑧空の先頭軸（batch=0）を持つ Bilinear interpolate は forward・
+/// backward とも panic せず空勾配を返す（`Nearest` の同型テスト
+/// `interpolate_nearest_backward_empty_leading_axis_with_huge_size_
+/// does_not_panic` と同じ理由——`outer==0` 早期 return は mode に
+/// 依らない共通コードパス）。
+#[test]
+fn interpolate_bilinear_backward_empty_leading_axis_does_not_panic() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&Tensor::<f32>::new(Vec::new(), &[0, 3, 3]).unwrap());
+    let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+        align_corners: false,
+    };
+    let out = x.interpolate(&[9, 9], mode).unwrap();
+    assert_eq!(out.to_tensor().shape(), &[0, 9, 9]);
+
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(dx.shape(), &[0, 3, 3]);
+    assert!(dense_vec(dx).is_empty());
+}
+
+/// ⑨`tape_recording`（単一ノード）: `Op::Interpolate` が bilinear
+/// 用に `size`／`mode` を正しく保持していることを間接確認する
+/// （forward 値の再確認）。
+#[test]
+fn interpolate_bilinear_single_node_forward_value() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0, 1.0], &[1, 2]));
+    let mode = fandhe_ai_tensor_core::InterpolateMode::Bilinear {
+        align_corners: true,
+    };
+    let out = x.interpolate(&[1, 4], mode).unwrap();
+    // align_corners=true, in_w=2, out_w=4: scale=(2-1)/(4-1)=1/3。
+    // dst=0: src=0 -> 0.0 / dst=3: src=1 -> 1.0。
+    let got = dense_vec(&out.to_tensor());
+    assert!((got[0] - 0.0).abs() < 1e-6);
+    assert!((got[3] - 1.0).abs() < 1e-6);
+}
