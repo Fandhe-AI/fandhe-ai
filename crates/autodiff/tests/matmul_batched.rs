@@ -182,6 +182,29 @@ fn matmul_batched_backward_matches_numeric_grad_equal_batch() {
     assert_grad_close("batched db (equal batch)", db, &num_db);
 }
 
+/// 空の勾配（`m == 0`／`n == 0`）を巨大なバッチ軸から縮約する backward
+/// が、`axis_len` 回の空ループへ入らず直ちに返る（PR #1810 codex-review
+/// P2 是正の回帰テスト）。`a = [1, 0, 1]`・`b = [B, 1, 0]`（B = 2^40）は
+/// 入力・出力・勾配のいずれも実データを持たずに構成できる。
+#[test]
+fn matmul_batched_backward_with_empty_grad_and_huge_batch_returns_immediately() {
+    let huge = 1usize << 40;
+    let a = t(Vec::new(), &[1, 0, 1]);
+    let bb = t(Vec::new(), &[huge, 1, 0]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let av = tape.var(&a);
+    let bv = tape.var(&bb);
+    let loss = av.matmul(&bv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let da = grads.get(&av).unwrap().expect("a は loss に到達する");
+    let db = grads.get(&bv).unwrap().expect("b は loss に到達する");
+    assert_eq!(da.shape(), &[1, 0, 1]);
+    assert_eq!(db.shape(), &[huge, 1, 0]);
+    assert_eq!(da.numel(), 0);
+    assert_eq!(db.numel(), 0);
+}
+
 #[test]
 fn matmul_batched_backward_matches_numeric_grad_broadcast_lhs() {
     let (b, m, k, n) = (3usize, 2usize, 2usize, 2usize);

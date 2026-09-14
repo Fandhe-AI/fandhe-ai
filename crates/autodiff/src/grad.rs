@@ -2083,6 +2083,17 @@ fn reduce_batch_axes_f64(g: &Tensor<f32>, target_shape: &[usize]) -> Tensor<f32>
     let mut padded_target = vec![1usize; rank_diff];
     padded_target.extend_from_slice(target_shape);
 
+    // 勾配が空（いずれかの軸が 0 サイズ）なら縮約結果は `target_shape`
+    // のゼロテンソルで確定するため、軸ごとの縮約ループへ入らずに返す
+    // （PR #1810 codex-review P2 是正）。空の `k`／`m` 軸を持つ入力は
+    // 実データなしで巨大なバッチ軸（例: `a = [1, 0, 1]`・
+    // `b = [2^40, 1, 0]`）を構成でき、`inner == 0` でも `axis_len`
+    // 回の空ループを回すと最適化なしビルドで実質停止する。
+    if g.numel() == 0 {
+        let target_numel: usize = target_shape.iter().product();
+        return build_tensor(vec![0f32; target_numel], target_shape);
+    }
+
     let data = dense_vec(g);
     let mut acc: Vec<f64> = data.iter().map(|&x| x as f64).collect();
     let mut cur_shape = g_shape;
