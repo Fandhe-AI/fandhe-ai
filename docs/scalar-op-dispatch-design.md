@@ -146,8 +146,11 @@ map 演算であり、演算順序（逐次／`rayon` 並列のどちらで処�
   #1711 で超越関数系 8 演算（`log`／`log2`／`log10`／`sin`／`cos`／
   `tan`／`abs`／`neg`）の `pub fn` を追加済み**（`scalar_unary`／
   `scalar_binary` への薄い委譲。`pub(crate)` 自体は維持。facade 新規
-  公開面なし・既存 `Var` 再エクスポート経由で到達。`clamp`／比較演算は
-  #1712、活性化系は #1595 が担う）。
+  公開面なし・既存 `Var` 再エクスポート経由で到達）。**#1712 で
+  `clamp`／比較演算 6 種（`gt`／`ge`／`lt`／`le`／`eq`／`ne`）の
+  `pub fn` を追加済み**（同型の薄い委譲。出力は f32 の 0/1 マスク・
+  `Tensor<bool>` は #1613 対象で未実装のまま）。活性化系は #1595 が
+  担う）。
 
 ## 9. `tensor-core` → `autodiff` の依存方向による意図的複製
 
@@ -172,9 +175,10 @@ code-comment-style.md` が禁じる「同一クレート内の陳腐化しやす
   `LeakyRelu`／`Elu`／`Softplus`／`PowScalar`）はいずれの sub issue にも
   含まれず対象外（`.claude/rules/out-of-scope-tracking.md` 対象）。
 - `Var` 公開メソッド（`sub`／`div`／`pow`／`sqrt` は #1710、`log`／
-  `log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg` は #1711 で実装済み。
-  `pub(crate)` 入口自体は不変・facade 新規公開面なし）・facade 範囲拡張
-  （#1593／#1595）。`clamp`／比較演算は #1712、活性化等は #1595 が対象。
+  `log2`／`log10`／`sin`／`cos`／`tan`／`abs`／`neg` は #1711、`clamp`／
+  比較演算 6 種は #1712 で実装済み。`pub(crate)` 入口自体は不変・
+  facade 新規公開面なし）・facade 範囲拡張（#1593／#1595）。活性化等は
+  #1595 が対象。
 - `DeviceBuffer` 常駐版 `ScalarOp` dispatch（`binary_elementwise_device`
   ／`unary_elementwise_device` と同型の常駐版）。
 - checkpoint 再計算適格化（`is_checkpoint_eligible == true`）。

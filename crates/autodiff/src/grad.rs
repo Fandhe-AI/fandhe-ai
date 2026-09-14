@@ -292,17 +292,33 @@ pub(crate) fn vjp(
             // 元の `a`/`b` shape へ縮約する（§3.5 設計方針）。
             let a_val = materialize_fallible(nodes, ops, a)?;
             let b_val = materialize_fallible(nodes, ops, b)?;
-            let (factor_a, factor_b) =
-                eval::scalar::binary_grad_factors(a_val, b_val, out_value, sop);
-            let da = reduce_bias_grad(
-                &vjp_elementwise_mul(ops, upstream, &factor_a)?,
-                a_val.shape(),
-            );
-            let db = reduce_bias_grad(
-                &vjp_elementwise_mul(ops, upstream, &factor_b)?,
-                b_val.shape(),
-            );
-            vec![(a, da), (b, db)]
+            if sop.is_comparison() {
+                // 比較演算（`gt`／`ge`／`lt`／`le`／`eq`／`ne`）は区分
+                // 定数で両入力の勾配が恒等的にゼロ（`binary_partials`
+                // が常に `(0.0, 0.0)` を返す設計）。ここで
+                // `vjp_elementwise_mul(upstream, 0 係数)` を経由すると
+                // `upstream` が `inf`／`NaN` を含む場合（例:
+                // `sum(x * x.gt(c))` の直通経路が生む `inf`）に
+                // `0.0 * inf = NaN` へ汚染されてしまう（codex-review
+                // 指摘・PR #1823）。乗算を経由せず各入力 shape の
+                // ゼロテンソルを直接返し、upstream の値に関わらず
+                // 常に有限のゼロ勾配を保証する。
+                let da = build_tensor(vec![0.0f32; a_val.numel()], a_val.shape());
+                let db = build_tensor(vec![0.0f32; b_val.numel()], b_val.shape());
+                vec![(a, da), (b, db)]
+            } else {
+                let (factor_a, factor_b) =
+                    eval::scalar::binary_grad_factors(a_val, b_val, out_value, sop);
+                let da = reduce_bias_grad(
+                    &vjp_elementwise_mul(ops, upstream, &factor_a)?,
+                    a_val.shape(),
+                );
+                let db = reduce_bias_grad(
+                    &vjp_elementwise_mul(ops, upstream, &factor_b)?,
+                    b_val.shape(),
+                );
+                vec![(a, da), (b, db)]
+            }
         }
         Op::Softmax { input, dim } => {
             // d/dx softmax(x) = y ⊙ (g − Σ_dim(g ⊙ y))（`y` = forward
@@ -3367,6 +3383,188 @@ mod tests {
         assert!(matches!(x.sub(&y).unwrap_err(), AutodiffError::Shape(_)));
         assert!(matches!(x.div(&y).unwrap_err(), AutodiffError::Shape(_)));
         assert!(matches!(x.pow(&y).unwrap_err(), AutodiffError::Shape(_)));
+    }
+
+    // --- Var::clamp／比較演算（イシュー #1712）: Tape 経由
+    //     エンドツーエンド ---
+    //
+    // 解析式・VJP 係数自体は `ScalarUnaryOp::Clamp`／`ScalarBinaryOp`
+    // 比較 6 種の中央差分突合（`tensor-core::scalar_op` の
+    // 単体テスト・`scalar_binary_maximum_minimum_tie_and_comparison_
+    // zero_grad` 等。#1634／#1686）が既に済んでいるため、ここでは
+    // `Var` 公開メソッドが `Op::ScalarUnary`／`ScalarBinary` を正しく
+    // 記録し `Tape::backward` が期待どおりの勾配（ゼロ勾配・
+    // broadcast 縮約を含む）を返すことを手計算値で検証する。
+
+    #[test]
+    fn var_clamp_forward_and_backward_matches_manual_grad() {
+        // clamp(x, -1, 1)。境界上（-1・1）は勾配 1、範囲外は 0。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[-2.0, -1.0, 0.5, 1.0, 2.0], &[5]));
+        let y = x.clamp(-1.0, 1.0).unwrap();
+        assert_eq!(dense_vec(&y.to_tensor()), vec![-1.0, -1.0, 0.5, 1.0, 1.0]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_eq!(dense_vec(dx), vec![0.0, 1.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn var_clamp_min_greater_than_max_is_constant_with_zero_grad() {
+        // min > max は PyTorch と同じく常に max を返す定数関数
+        // （panic しない）。勾配は全域でゼロ。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[-10.0, 0.0, 10.0], &[3]));
+        let y = x.clamp(5.0, 1.0).unwrap();
+        assert_eq!(dense_vec(&y.to_tensor()), vec![1.0, 1.0, 1.0]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_eq!(dense_vec(dx), vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn var_clamp_nan_propagates_with_zero_grad() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[f32::NAN], &[1]));
+        let y = x.clamp(-1.0, 1.0).unwrap();
+        assert!(dense_vec(&y.to_tensor())[0].is_nan());
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_eq!(dense_vec(dx), vec![0.0]);
+    }
+
+    #[test]
+    fn var_comparisons_forward_return_zero_or_one() {
+        // NaN・tie（a[1]==b[1] の 2.0）を含める（IEEE 754 準拠の
+        // 確認。`eq`/`ne` は NaN を含む比較で特別扱い: eq=0・ne=1）。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let a = tape.var(&t(&[1.0, 2.0, 3.0, f32::NAN], &[4]));
+        let b = tape.var(&t(&[2.0, 2.0, 1.0, 1.0], &[4]));
+        assert_eq!(
+            dense_vec(&a.gt(&b).unwrap().to_tensor()),
+            vec![0.0, 0.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            dense_vec(&a.ge(&b).unwrap().to_tensor()),
+            vec![0.0, 1.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            dense_vec(&a.lt(&b).unwrap().to_tensor()),
+            vec![1.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            dense_vec(&a.le(&b).unwrap().to_tensor()),
+            vec![1.0, 1.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            dense_vec(&a.eq(&b).unwrap().to_tensor()),
+            vec![0.0, 1.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            dense_vec(&a.ne(&b).unwrap().to_tensor()),
+            vec![1.0, 0.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn var_comparison_backward_yields_zero_grads_with_broadcast() {
+        // [2,3] gt [3]（broadcast）でも da／db は共に全ゼロ
+        // （`reduce_bias_grad` の縮約経路を通っても値がゼロのまま
+        // 一致することを固定）。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let a = tape.var(&t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+        let b = tape.var(&t(&[2.0, 2.0, 2.0], &[3]));
+        let y = a.gt(&b).unwrap();
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let da = grads.get(&a).unwrap().unwrap();
+        let db = grads.get(&b).unwrap().unwrap();
+        assert_eq!(dense_vec(da), vec![0.0; 6]);
+        assert_eq!(dense_vec(db), vec![0.0; 3]);
+    }
+
+    #[test]
+    fn var_comparison_zero_grad_does_not_block_other_paths() {
+        // y = x * (x > c) という典型的なマスク合成で、比較側の
+        // ゼロ勾配が x の他経路の勾配（マスク値との積）を妨げない
+        // ことを確認する。c は定数（tape に登録しない）ではなく
+        // 同一 tape 上の leaf とし、d(x*mask)/dx = mask + x*d(mask)/dx
+        // = mask + x*0 = mask（gt 側の勾配が常にゼロのため mask 項の
+        // みが残る）ことを固定する。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[-1.0, 2.0, 3.0], &[3]));
+        let c = tape.var(&t(&[0.0, 0.0, 0.0], &[3]));
+        let mask = x.gt(&c).unwrap(); // [0, 1, 1]
+        let y = x.mul(&mask).unwrap(); // [0, 2, 3]
+        assert_eq!(dense_vec(&y.to_tensor()), vec![0.0, 2.0, 3.0]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        // dy/dx = mask（gt 側の勾配は寄与せずゼロ）。
+        assert_eq!(dense_vec(dx), vec![0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn var_comparison_backward_does_not_propagate_upstream_inf_nan() {
+        // codex-review 指摘（PR #1823）: 比較演算の VJP が upstream への
+        // 乗算（`0.0 * 係数`）経由でゼロ勾配化していると、その比較演算
+        // ノード自体への upstream（＝下流から流入する勾配）が `inf`／
+        // `NaN` を含む場合に `0.0 * inf = NaN` へ汚染される。
+        //
+        // `y = x * x.gt(c)`（`x = inf, c = 0`）で loss = sum(y) を取ると、
+        // `Op::Mul` の VJP により mask（`x.gt(c)`）自身への upstream は
+        // `x = inf` になる（`db = upstream(=1) * x_val(=inf)`）。この
+        // `inf` が `mask` ノードの `Op::ScalarBinary(Gt)` 分岐へ upstream
+        // として渡されたとき、修正前は `0.0 係数 * inf = NaN` が
+        // `x`／`c` の最終勾配へ混入していた。修正後は乗算を経由せず
+        // 直接ゼロテンソルを返すため、`x` の最終勾配は `mul` 側の寄与
+        // （`mask_val = 1.0`）のみが残り有限値のまま、`c` の最終勾配は
+        // 有限のゼロのままになる。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[f32::INFINITY], &[1]));
+        let c = tape.var(&t(&[0.0], &[1]));
+        let mask = x.gt(&c).unwrap(); // [1.0]（inf > 0）
+        let y = x.mul(&mask).unwrap(); // [inf]
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = dense_vec(grads.get(&x).unwrap().unwrap());
+        let dc = dense_vec(grads.get(&c).unwrap().unwrap());
+        // `mul` 側の寄与（mask_val = 1.0）のみが残り、`gt` 側の寄与は
+        // 有限のゼロ（修正前は NaN で全体を汚染していた）。
+        assert!(dx[0].is_finite(), "dx が NaN 化した: {dx:?}");
+        assert_eq!(dx, vec![1.0]);
+        assert!(dc[0].is_finite(), "dc が NaN 化した: {dc:?}");
+        assert_eq!(dc, vec![0.0]);
+    }
+
+    #[test]
+    fn var_clamp_and_comparisons_reject_cross_tape_and_non_broadcastable_shape() {
+        // cross-tape は fail-closed（`check_same_tape`）。clamp は
+        // 単項のため cross-tape の概念がなく、非 broadcast 可能
+        // shape の検査対象外（比較演算のみ検証）。
+        let tape_a = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let tape_b = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let a = tape_a.var(&t(&[1.0], &[1]));
+        let b = tape_b.var(&t(&[1.0], &[1]));
+        assert!(a.gt(&b).is_err());
+        assert!(a.ge(&b).is_err());
+        assert!(a.lt(&b).is_err());
+        assert!(a.le(&b).is_err());
+        assert!(a.eq(&b).is_err());
+        assert!(a.ne(&b).is_err());
+
+        // 非 broadcast 可能 shape も fail-closed（`broadcast_shape`）。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[1.0; 6], &[2, 3]));
+        let y = tape.var(&t(&[1.0; 4], &[2, 2]));
+        assert!(matches!(x.gt(&y).unwrap_err(), AutodiffError::Shape(_)));
+        assert!(matches!(x.ge(&y).unwrap_err(), AutodiffError::Shape(_)));
+        assert!(matches!(x.lt(&y).unwrap_err(), AutodiffError::Shape(_)));
+        assert!(matches!(x.le(&y).unwrap_err(), AutodiffError::Shape(_)));
+        assert!(matches!(x.eq(&y).unwrap_err(), AutodiffError::Shape(_)));
+        assert!(matches!(x.ne(&y).unwrap_err(), AutodiffError::Shape(_)));
     }
 
     /// `Op::ScalarUnary`／`ScalarBinary` は `is_checkpoint_eligible ==
