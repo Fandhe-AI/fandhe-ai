@@ -172,6 +172,28 @@ pub(crate) enum Op {
         ord: fandhe_ai_tensor_core::VectorNormOrd,
         dim: Option<usize>,
     },
+    /// 標準偏差（`Var::std`。`torch.std(dim, correction)` 相当。
+    /// イシュー #1723 レビュー是正）。当初 `Var::var(..).sqrt()` の
+    /// 合成（新規 `Op` なし）として実装していたが、`Op::Var` が forward
+    /// 値を `f32` へ downcast してから `Op::Sqrt` へ渡すため、分散が
+    /// `f32` の範囲を超える極端な入力（例 `[-1e20, 1e20]`）で `Op::Var`
+    /// の出力自体が `inf` へ overflow し、実際の標準偏差が `f32` で
+    /// 表現可能でも `std` が `inf`／勾配が破綻する問題があった
+    /// （codex-review P2 指摘）。`Op::Std` は forward・backward とも
+    /// `f64` の分散を経由してから最後に 1 回だけ `sqrt` を `f64` で
+    /// 計算し `f32` へ downcast する（`var_vjp` と同じ「forward の丸め
+    /// 誤差を backward へ持ち込まない」内部精度契約。
+    /// `.claude/rules/coding-rust.md`）専用ノードとして分離した。
+    /// `Op::Var`／`Op::VectorNorm` と同じ eager・フォールバック契約
+    /// （`BackendOps::std` は設けず、常に `eval::std_along` を使う——
+    /// `docs/compat-api-scope.md` §5 の対象を `var`／`std`（スカラー
+    /// 合成のみ）に限る想定と整合。将来デバイス側カーネルが必要になれば
+    /// `BackendOps::std`（既定 `Unsupported`）を非破壊で追加できる）。
+    Std {
+        input: NodeId,
+        dim: Option<usize>,
+        correction: usize,
+    },
     /// 平均二乗誤差。`BackendOps` に対応メソッドがないため融合対象外
     /// とし常に実体化済み（`push_eager`）。`reduction` は #190
     /// （TASK-9.1c 相当・`nn::loss`）で mean/sum の両縮約に対応するため
@@ -982,12 +1004,13 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （非網羅 match 是正で新規 variant 追加時に強制される）。
             Op::Gather { .. } | Op::Scatter { .. } => false,
-            // `Op::Var`／`Op::VectorNorm`（イシュー #1723）は
+            // `Op::Var`／`Op::VectorNorm`（イシュー #1723）・
+            // `Op::Std`（同イシュー・レビュー是正で追加）は
             // `Op::ScalarUnary`／`Op::ScalarBinary` と同じく eager
             // 実体化演算だが `recompute_value` に再計算分岐を持たない
             // ため非適格（最小・安全側の判断。将来 `true` 化する場合は
             // `Op::Sum`／`Op::Max` 型の再計算分岐を追加する）。
-            Op::Var { .. } | Op::VectorNorm { .. } => false,
+            Op::Var { .. } | Op::VectorNorm { .. } | Op::Std { .. } => false,
             // `Op::Sort`／`Op::Topk`（イシュー #1733）は `Op::Gather` と
             // 同じく `index` を `Op` 自身が保持する eager 実体化演算で、
             // `recompute_value` に再計算経路を持たないため解放しない。
@@ -1017,6 +1040,7 @@ impl Op {
             | Op::Max { input, .. }
             | Op::Var { input, .. }
             | Op::VectorNorm { input, .. }
+            | Op::Std { input, .. }
             | Op::Reshape { input }
             | Op::Transpose { input, .. }
             | Op::Inv { input }

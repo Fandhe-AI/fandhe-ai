@@ -525,27 +525,23 @@ fn reduce_outer_axis_inner(shape: &[usize], dim: Option<usize>) -> (usize, usize
     }
 }
 
-/// `Op::Var`（`Var::var`）のホスト参照実装（`BackendOps::var` が
-/// `Unsupported` を返した場合のフォールバック。イシュー #1723）。
-/// 出力要素ごとに ①`f64` で平均 ②`f64` で二乗和 の 2 パスを計算し、
-/// 最後に 1 回だけ `f32` へ downcast する（`.claude/rules/coding-rust.md`
-/// 「正規化統計は要素を先に `f64` へ昇格してから二乗し、最後に 1 回だけ
-/// `f32` へ downcast する」契約。`n == 0`／`n <= correction` の検査は
-/// 呼び出し元 `Var::var` が事前に済ませている前提——本関数は shape が
-/// 既に整合していることを前提とする契約〈モジュール冒頭コメント〉に
-/// 従い検査しない）。
-pub(crate) fn var_along(
-    input: &Tensor<f32>,
-    dim: Option<usize>,
-    correction: usize,
-    out_shape: &[usize],
-) -> Tensor<f32> {
+/// `Op::Var`／`Op::Std` 共通の `f64` 分散計算コア（イシュー #1723
+/// レビュー是正で `var_along`／`std_along` の重複を統合）。出力要素
+/// ごとに ①`f64` で平均 ②`f64` で二乗和 の 2 パスを計算し、`f64` の
+/// まま分散を返す（`f32` へ downcast しない——呼び出し元が `var_along`
+/// のように分散をそのまま返すか、`std_along` のように `sqrt` してから
+/// 返すかを選べるようにするため。`n == 0`／`n <= correction` の検査は
+/// 呼び出し元〈`Var::var`／`Var::std`〉が事前に済ませている前提——本
+/// 関数は shape が既に整合していることを前提とする契約〈モジュール
+/// 冒頭コメント〉に従い検査しない）。戻り値は `outer * inner` 要素の
+/// `f64` ベクタ（`out_shape` への詰め直しは呼び出し元が行う）。
+fn var_f64_along(input: &Tensor<f32>, dim: Option<usize>, correction: usize) -> Vec<f64> {
     let shape = input.shape();
     let (outer, axis_len, inner) = reduce_outer_axis_inner(shape, dim);
     let data = dense_vec(input);
     let n = axis_len as f64;
     let denom = n - correction as f64;
-    let mut out = vec![0f32; outer * inner];
+    let mut out = vec![0f64; outer * inner];
     for o in 0..outer {
         for i in 0..inner {
             let mut mean_acc = 0.0f64;
@@ -560,9 +556,52 @@ pub(crate) fn var_along(
                 let d = data[src] as f64 - mean;
                 sq_acc += d * d;
             }
-            out[o * inner + i] = (sq_acc / denom) as f32;
+            out[o * inner + i] = sq_acc / denom;
         }
     }
+    out
+}
+
+/// `Op::Var`（`Var::var`）のホスト参照実装（`BackendOps::var` が
+/// `Unsupported` を返した場合のフォールバック。イシュー #1723）。
+/// [`var_f64_along`]（`f64` 分散）を計算し、最後に 1 回だけ `f32` へ
+/// downcast する（`.claude/rules/coding-rust.md`「正規化統計は要素を
+/// 先に `f64` へ昇格してから二乗し、最後に 1 回だけ `f32` へ downcast
+/// する」契約）。
+pub(crate) fn var_along(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    correction: usize,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let out: Vec<f32> = var_f64_along(input, dim, correction)
+        .into_iter()
+        .map(|v| v as f32)
+        .collect();
+    build_tensor(out, out_shape)
+}
+
+/// `Op::Std`（`Var::std`）のホスト参照実装（イシュー #1723 レビュー
+/// 是正。codex-review P2 指摘: 当初 `Var::var(..).sqrt()` の合成
+/// （`Op::Var` なし）で実装していたため、`Op::Var` が分散を `f32` へ
+/// downcast してから `Op::Sqrt` へ渡しており、真の分散が `f32` の
+/// 範囲（有限最大値 約 `3.4e38`）を超える極端な入力（例
+/// `[-1e20, 1e20]`。分散 `≈1e40` が overflow）で `std` 自体は `f32`
+/// で表現可能（`≈1.41e20`）にもかかわらず `inf` になる問題があった）。
+/// 本関数は [`var_f64_along`] が返す `f64` 分散に対し `sqrt` も `f64`
+/// で計算してから、最後に 1 回だけ `f32` へ downcast する——`sqrt` を
+/// 挟むことで分散段階の overflow を回避できる（`std` は分散よりも
+/// 小さい値域に収まるため）。
+pub(crate) fn std_along(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    correction: usize,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let out: Vec<f32> = var_f64_along(input, dim, correction)
+        .into_iter()
+        .map(|v| v.sqrt() as f32)
+        .collect();
     build_tensor(out, out_shape)
 }
 

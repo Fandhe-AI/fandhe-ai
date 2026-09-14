@@ -2921,21 +2921,7 @@ impl<'t> Var<'t> {
     /// 独自安全策）。
     pub fn var(&self, dim: Option<usize>, correction: usize) -> Result<Var<'t>, AutodiffError> {
         let shape = self.shape();
-        let out_shape = reduce_out_shape(&shape, dim)?;
-        let n = match dim {
-            None => shape.iter().product(),
-            Some(axis) => shape[axis],
-        };
-        if n == 0 {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "Var::var: 縮約対象の要素数が 0（dim={dim:?}）"
-            )));
-        }
-        if n <= correction {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "Var::var: 自由度不足（n={n} <= correction={correction}）"
-            )));
-        }
+        let out_shape = var_std_out_shape_checked(&shape, dim, correction, "Var::var")?;
         let input_val = {
             let nodes = self.tape.nodes.borrow();
             materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
@@ -2962,28 +2948,60 @@ impl<'t> Var<'t> {
     }
 
     /// 標準偏差（`dim` に沿った縮約。`torch.std(dim, correction)`
-    /// 相当。イシュー #1723）。[`Var::var`]（`correction` の意味も同じ）
-    /// の平方根への薄い委譲（新規 `Op` は設けない）。
+    /// 相当。イシュー #1723・レビュー是正）。
     ///
-    /// **数値規約**: `var` が有限の非負値を返す限り `sqrt` も有限
-    /// （`var == 0` の場合 `std == 0`。勾配は `Var::sqrt` の規約に従い
-    /// `0.5 / y` — `y == 0` の入力〈定数テンソルの `var`〉では
-    /// `Var::sqrt` の既存挙動どおり `NaN`／`inf` になりうる。これは
-    /// PyTorch `torch.std` backward が定数入力で `NaN` を返す挙動と
-    /// 一致する）。
+    /// 当初 `Var::var(dim, correction)?.sqrt()`（新規 `Op` を設けない
+    /// 合成）として実装していたが、`Op::Var` の forward 値が分散を
+    /// `f32` へ downcast してから `Op::Sqrt` に渡すため、真の分散が
+    /// `f32` の範囲（有限最大値 約 `3.4e38`）を超える極端な入力（例
+    /// `[-1e20, 1e20]`。分散 `≈1e40`）で `std` 自体は `f32` で表現
+    /// 可能（`≈1.41e20`）にもかかわらず `inf` になっていた
+    /// （codex-review P2 指摘）。本メソッドは専用の `Op::Std`
+    /// （`crate::tape::Op`）ノードを直接構築し、forward・backward
+    /// とも `f64` の分散を経由してから最後に 1 回だけ `sqrt` を計算
+    /// する（`eval::std_along`／`grad::std_vjp` 参照。`Var::var` と
+    /// 異なり `BackendOps` に対応メソッドは設けない——常に
+    /// `eval::std_along`〈ホスト参照実装〉を使う。将来デバイス側
+    /// カーネルが必要になれば非破壊で追加できる）。
+    ///
+    /// **数値規約**: `std` は `f64` の分散から `f64` で `sqrt` した
+    /// 値を 1 回だけ `f32` へ downcast する（`var == 0` の場合
+    /// `std == 0`）。勾配（`Op::Std` の VJP）は `std == 0`（縮約対象
+    /// が全て同値の定数列）の要素で `0.0 / 0.0 = NaN` を伝播する。
+    /// これは PyTorch `torch.std` backward が定数入力で `NaN` を
+    /// 返す挙動と一致する意図的な仕様（`grad::std_vjp` doc 参照）。
+    ///
+    /// **エラー契約**: [`Var::var`] と同じ（縮約対象の要素数 `n` が
+    /// `0` または `n <= correction` の場合は
+    /// [`AutodiffError::InvalidArgument`]）。
     pub fn std(&self, dim: Option<usize>, correction: usize) -> Result<Var<'t>, AutodiffError> {
-        self.var(dim, correction)?.sqrt()
+        let shape = self.shape();
+        let out_shape = var_std_out_shape_checked(&shape, dim, correction, "Var::std")?;
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = eval::std_along(&input_val, dim, correction, &out_shape);
+        let id = self.tape.push_eager(
+            Op::Std {
+                input: self.id,
+                dim,
+                correction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
     }
 
     /// L1 ノルム（`Σ|x_i|`・`dim` に沿った縮約。`torch.norm(p=1)`
-    /// 相当。イシュー #1723）。[`Var::norm`]（`pub(crate)`）への薄い
+    /// 相当。イシュー #1723）。`Var::norm`（`pub(crate)`）への薄い
     /// 委譲。
     pub fn norm_l1(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
         self.norm(VectorNormOrd::L1, dim)
     }
 
     /// L2 ノルム（`√Σx_i²`・`dim` に沿った縮約。`torch.norm(p=2)`
-    /// 相当。イシュー #1723）。[`Var::norm`]（`pub(crate)`）への薄い
+    /// 相当。イシュー #1723）。`Var::norm`（`pub(crate)`）への薄い
     /// 委譲。
     pub fn norm_l2(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
         self.norm(VectorNormOrd::L2, dim)
@@ -3215,6 +3233,39 @@ fn require_square(shape: &[usize], op_name: &str) -> Result<usize, AutodiffError
         )));
     }
     Ok(shape[0])
+}
+
+/// [`Var::var`]／[`Var::std`] 共通の出力 shape 算出・エラー検査
+/// （イシュー #1723 レビュー是正で重複を統合）。`reduce_out_shape` で
+/// 出力 shape を求めたうえで、縮約対象の要素数 `n`（`dim=Some(axis)`
+/// は `shape[axis]`・`dim=None` は全要素数）が `0` または
+/// `n <= correction` の場合は [`AutodiffError::InvalidArgument`] を
+/// 返す（`NaN`／`inf` を黙って返さない安全側の判断。PyTorch の
+/// `NaN`／`inf` 返却とは意図的に異なる。`docs/spec/` の対象外の
+/// 独自安全策）。`op_name` はエラーメッセージに埋め込む呼び出し元の
+/// 演算名（`"Var::var"`／`"Var::std"`）。
+fn var_std_out_shape_checked(
+    shape: &[usize],
+    dim: Option<usize>,
+    correction: usize,
+    op_name: &str,
+) -> Result<Vec<usize>, AutodiffError> {
+    let out_shape = reduce_out_shape(shape, dim)?;
+    let n = match dim {
+        None => shape.iter().product(),
+        Some(axis) => shape[axis],
+    };
+    if n == 0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{op_name}: 縮約対象の要素数が 0（dim={dim:?}）"
+        )));
+    }
+    if n <= correction {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{op_name}: 自由度不足（n={n} <= correction={correction}）"
+        )));
+    }
+    Ok(out_shape)
 }
 
 /// バックエンド実装（`BackendOps::linalg_*`）の戻り値 shape が契約

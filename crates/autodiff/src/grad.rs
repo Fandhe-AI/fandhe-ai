@@ -361,6 +361,15 @@ pub(crate) fn vjp(
             let da = vector_norm_vjp(input_val, ord, dim, upstream);
             vec![(input, da)]
         }
+        Op::Std {
+            input,
+            dim,
+            correction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = std_vjp(input_val, dim, correction, upstream);
+            vec![(input, da)]
+        }
         Op::MseLoss {
             pred,
             target,
@@ -2701,6 +2710,75 @@ fn var_vjp(
                 let src = (o * axis_len + a) * inner + i;
                 let d = data[src] as f64 - mean;
                 out[src] = (g_val * 2.0 * d / denom) as f32;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// `Op::Std`（`Var::std`）の VJP: `da_i = g · (x_i − mean) / ((n −
+/// correction) · std)`（イシュー #1723 レビュー是正）。[`var_vjp`] と
+/// 同じ「`input` から改めて `f64` で計算する」方針だが、`std`
+/// （forward の `f32` downcast 済み記録値 `out_value`）も再利用せず
+/// `mean`／`sq_acc` から `f64` で改めて `sqrt` する——`var_vjp` の
+/// `2(x_i − mean) / denom` を `f32` へ downcast してから `0.5 / std`
+/// （`Var::sqrt` の VJP）を掛ける合成では、`2(x_i − mean) / denom`
+/// 自体が `f32` の範囲を超えて overflow しうる（`std` は最終的に
+/// 有限でも、途中の `var` の勾配項は無限大になりうるため。
+/// codex-review P2 指摘）。本関数は `(x_i − mean)` と `denom · std` の
+/// 除算を最後まで `f64` に保つことでこれを回避する。`std == 0`
+/// （縮約対象が全て同値の定数列）の要素は `0.0 / 0.0` となり `NaN`
+/// を伝播する（`Var::std` の doc「数値規約」・`Var::sqrt` の
+/// `y == 0` 規約と同じ意図的な挙動——PyTorch `torch.std` backward が
+/// 定数入力で `NaN` を返す挙動とも一致する）。
+fn std_vjp(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    correction: usize,
+    g: &Tensor<f32>,
+) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let (outer, axis_len, inner) = match dim {
+        None => (1usize, input.numel(), 1usize),
+        Some(axis) => (
+            shape[..axis].iter().product(),
+            shape[axis],
+            shape[axis + 1..].iter().product(),
+        ),
+    };
+    let data = dense_vec(input);
+    let g_data = dense_vec(g);
+    let n = axis_len as f64;
+    let denom = n - correction as f64;
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut mean_acc = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                mean_acc += data[src] as f64;
+            }
+            let mean = mean_acc / n;
+            let mut sq_acc = 0.0f64;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                let d = data[src] as f64 - mean;
+                sq_acc += d * d;
+            }
+            let std = (sq_acc / denom).sqrt();
+            let out_idx = o * inner + i;
+            let g_val = g_data.get(out_idx).copied().unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "std_vjp: g の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                );
+                0.0
+            }) as f64;
+            let denom_std = denom * std;
+            for a in 0..axis_len {
+                let src = (o * axis_len + a) * inner + i;
+                let d = data[src] as f64 - mean;
+                out[src] = (g_val * d / denom_std) as f32;
             }
         }
     }

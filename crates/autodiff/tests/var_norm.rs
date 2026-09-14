@@ -331,3 +331,74 @@ fn norm_l2_zero_vector_gradient_is_zero() {
         assert_eq!(v, 0.0);
     }
 }
+
+// =====================================================================
+// `Op::Std` の f64 内部精度契約（codex-review P2 指摘・イシュー #1723
+// レビュー是正）。
+// =====================================================================
+
+/// `[-1e20, 1e20]` は分散 `≈1e40` が `f32` の有限最大値（約 `3.4e38`）を
+/// 超えて overflow するが、真の標準偏差 `≈1.4142e20` 自体は `f32` で
+/// 表現可能。`Var::std` が当初 `Var::var(..).sqrt()`（`Op::Var` の `f32`
+/// downcast 済み分散を経由）として実装されていた場合、この overflow に
+/// より `std` が `inf` になっていた。`Op::Std` が forward を `f64` の
+/// まま `sqrt` してから 1 回だけ downcast することを確認する。
+#[test]
+fn std_extreme_scale_input_does_not_overflow_to_inf() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![-1e20, 1e20], &[2]));
+    let s = x.std(None, 1).unwrap();
+    let result = scalar(&s.to_tensor());
+    assert!(result.is_finite(), "std は有限のはずが {result} だった");
+    // 母分散ではなく不偏分散（correction=1）: mean=0・
+    // Σ(x-mean)^2=2e40・/(2-1)=2e40 → std=sqrt(2e40)=sqrt(2)*1e20
+    let expected = (2.0f64).sqrt() * 1e20;
+    let rel_err = ((result as f64) - expected).abs() / expected;
+    assert!(rel_err < 1e-6, "rel_err={rel_err} result={result}");
+}
+
+/// 上記と対称の勾配側検証: `g=1` での `std` の勾配は理論上
+/// `(x_i - mean) / (denom * std)` で、`x = ±1e20` のとき
+/// `≈ ±0.7071`（有限）になるはず。当初の合成実装（`var_vjp` の
+/// `2(x_i-mean)/denom` を `f32` へ downcast してから `0.5/std` を
+/// 掛ける経路）では、`2(x_i-mean)/denom` の時点で `f32` の範囲を超えて
+/// overflow し、勾配が破綻していた。
+#[test]
+fn std_extreme_scale_input_gradient_is_finite_and_matches_analytic() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![-1e20, 1e20], &[2]));
+    let loss = x.std(None, 1).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().expect("x は loss に到達する");
+    let d0 = dx.get(&[0]).unwrap();
+    let d1 = dx.get(&[1]).unwrap();
+    assert!(d0.is_finite(), "dx[0] は有限のはずが {d0} だった");
+    assert!(d1.is_finite(), "dx[1] は有限のはずが {d1} だった");
+    let expected = 1.0 / (2.0f64).sqrt();
+    assert!(
+        ((d0 as f64) - (-expected)).abs() < 1e-3,
+        "d0={d0} expected={}",
+        -expected
+    );
+    assert!(
+        ((d1 as f64) - expected).abs() < 1e-3,
+        "d1={d1} expected={expected}"
+    );
+}
+
+/// `[1e-25, -1e-25]` は分散が `f32` の非正規化数域近くまで underflow
+/// する極小入力。真の標準偏差 `≈1.4142e-25` は `f32` で表現可能な範囲
+/// （最小正規化数 約 `1.18e-38`）に収まる。当初の合成実装では分散が
+/// underflow して `0` になり `std` も `0`（本来は非ゼロ）になる問題が
+/// あった。
+#[test]
+fn std_extreme_small_scale_input_matches_analytic() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1e-25, -1e-25], &[2]));
+    let s = x.std(None, 1).unwrap();
+    let result = scalar(&s.to_tensor());
+    assert!(result.is_finite() && result > 0.0, "std={result}");
+    let expected = (2.0f64).sqrt() * 1e-25;
+    let rel_err = ((result as f64) - expected).abs() / expected;
+    assert!(rel_err < 1e-3, "rel_err={rel_err} result={result}");
+}
