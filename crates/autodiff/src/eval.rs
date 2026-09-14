@@ -1476,6 +1476,7 @@ pub(crate) fn col2im(
 /// `bias` は `[Cout]` を仮定し、GEMM 結果へ 1 回加算する（`Var::add`
 /// の broadcast を経由せず直接計算するため、bias 軸誤加算の罠
 /// 〈設計 doc §5.2「実装上の注意」〉が構造的に発生しない）。
+#[cfg(test)]
 pub(crate) fn conv2d(
     input: &Tensor<f32>,
     weight: &Tensor<f32>,
@@ -1556,6 +1557,7 @@ pub(crate) fn conv2d(
 /// 直接畳み込みオラクル（`(c, kh, kw)` 昇順 `mul_add` 連鎖。padding
 /// タップは非スキップ。CPU im2col＋GEMM との bit 完全一致テストオラクル
 /// 専用。イシュー #1764・設計 `docs/conv-ops-design.md` §7）。
+#[cfg(test)]
 pub(crate) fn conv2d_direct(
     input: &Tensor<f32>,
     weight: &Tensor<f32>,
