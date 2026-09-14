@@ -332,7 +332,7 @@ bf16 デバイス常駐経路（bf16 のまま H2D し device 側で widen/narro
 
 ### 14.6 テスト構成・実機実測の記入欄
 
-- Linux 実行可能: `typed_f16.rs::tests`（accessor 契約・shape 検証・`sum`／`max` の `Unsupported` 継承・upcast/downcast 往復）5 件、`tests/typed_ops_f16_parity.rs` の非 `#[ignore]` 部（accessor・shape 検証・零次元形状は `#[ignore]` 側）、`tests/typed_ops_source_evidence.rs` 5 件（cfg なし・Linux CI 実行）——いずれも green
+- `typed_f16.rs::tests`（accessor 契約・shape 検証・`sum`／`max` の `Unsupported` 継承・upcast/downcast 往復）5 件・`tests/typed_ops_f16_parity.rs` の非 `#[ignore]` 部（accessor・shape 検証・零次元形状は `#[ignore]` 側）はいずれも `cfg(target_os = "macos")`／`#![cfg(target_os = "macos")]` 限定のため、本エージェント実行環境（ネイティブ Linux）ではコンパイル対象に入らずテスト実行・pass 確認はできない。本エージェント環境で実施できたのは `cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`（クロス型検査。green）に留まり、実行・pass 確認は Mac セッションへ申し送る。`tests/typed_ops_source_evidence.rs` 5 件は cfg なしのため Linux CI で実際に実行され green（`cargo test -p fandhe-ai-backend-metal --test typed_ops_source_evidence` で確認済み）
 - `#[ignore]`（Apple Silicon 実機依存）: `tests/typed_ops_f16_parity.rs` の L1 gemm bit 一致・L2 gemm／elementwise vs CPU 参照 rounded・零次元形状のデバイス到達確認。本エージェント実行環境に Apple Silicon 実機への到達手段がなく未実施のまま記入欄を残す（Mac セッションへ申し送り）。実行コマンド:
 
 ```sh
