@@ -1659,8 +1659,9 @@ impl CudaGemmAuto {
     /// 〈`.claude/rules/security.md` A08〉に反するため）。
     ///
     /// sticky／operation-local の判定は `context_cache::classify_cuda_result`
-    /// が使う分類テーブルを [`crate::context_cache::is_sticky_driver_error`]
-    /// 経由で再利用し、本関数側に独自の分類ロジックを重複実装しない
+    /// が使う分類テーブルを `context_cache::is_sticky_driver_error`
+    /// （クレート内部関数。`pub(crate)` のため外部公開 API からはリンク
+    /// 不可）経由で再利用し、本関数側に独自の分類ロジックを重複実装しない
     /// （Cursor Bugbot 指摘・PR #1797。全ての `CudaError::Driver` を
     /// 無条件に早期 return すると、本来 `None` としてキャッシュされる
     /// べき operation-local な構築失敗まで `Self::new` の `Err` になり、
