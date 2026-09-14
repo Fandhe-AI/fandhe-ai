@@ -152,6 +152,27 @@ impl MetalSort {
         let values_buf = crate::buffer::MetalBuffer::new_zeroed(ctx, total_out)?;
         let index_buf = MetalIndexBuffer::new_zeroed_i32(ctx, total_out)?;
 
+        // ビットニックステップの (j, k) 列を `dispatch_sync` のクロージャに
+        // 入る前に `u32` へ変換・収集する（クロージャは `Result` を返せない
+        // ため。`j`／`k` は `padded`〈`padded_u` 変換成功済み〉から導出され
+        // 常に `padded` 以下なので理論上失敗しないが、`unwrap_or(0)` に
+        // よる無言フォールバック〈誤った引数での起動〉を避け、`?` で
+        // 呼び出し元へ伝播できる形にする）。
+        let mut bitonic_steps: Vec<(u32, u32)> = Vec::new();
+        if padded > 1 {
+            let mut k = 2usize;
+            while k <= padded {
+                let mut j = k / 2;
+                while j >= 1 {
+                    let j_u = checked_u32(j, "j")?;
+                    let k_u = checked_u32(k, "k")?;
+                    bitonic_steps.push((j_u, k_u));
+                    j /= 2;
+                }
+                k *= 2;
+            }
+        }
+
         ctx.dispatch_sync(|encoder| {
             encoder.setComputePipelineState(&self.build_keys);
             encode_build_keys(
@@ -168,19 +189,9 @@ impl MetalSort {
             encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
 
             encoder.setComputePipelineState(&self.bitonic_step);
-            if padded > 1 {
-                let mut k = 2usize;
-                while k <= padded {
-                    let mut j = k / 2;
-                    while j >= 1 {
-                        let j_u = checked_u32(j, "j").unwrap_or(0);
-                        let k_u = checked_u32(k, "k").unwrap_or(0);
-                        encode_bitonic_step(encoder, &keys_buf, j_u, k_u, padded_u, lines_u);
-                        encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
-                        j /= 2;
-                    }
-                    k *= 2;
-                }
+            for &(j_u, k_u) in &bitonic_steps {
+                encode_bitonic_step(encoder, &keys_buf, j_u, k_u, padded_u, lines_u);
+                encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
             }
 
             encoder.setComputePipelineState(&self.finalize);

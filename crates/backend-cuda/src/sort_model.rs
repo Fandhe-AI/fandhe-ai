@@ -93,11 +93,15 @@ pub const PADDING_KEY: u64 = u64::MAX;
 /// `shape` は空要素を含まないこと（呼び出し元が事前に検査する契約。
 /// `sort.rs::CudaSort::run_sort_f32` は空 shape を GPU 起動なしで
 /// 早期処理する）。
-pub fn line_layout(shape: &[usize], dim: usize) -> (usize, usize, usize) {
+pub fn line_layout(shape: &[usize], dim: usize) -> Option<(usize, usize, usize)> {
     let dim_size = shape[dim];
-    let outer: usize = shape[..dim].iter().product();
-    let inner: usize = shape[dim + 1..].iter().product();
-    (outer, dim_size, inner)
+    let outer: usize = shape[..dim]
+        .iter()
+        .try_fold(1usize, |acc, &s| acc.checked_mul(s))?;
+    let inner: usize = shape[dim + 1..]
+        .iter()
+        .try_fold(1usize, |acc, &s| acc.checked_mul(s))?;
+    Some((outer, dim_size, inner))
 }
 
 /// [`plan_sort`] の失敗理由。
@@ -153,7 +157,11 @@ pub struct SortPlan {
 /// 出し元は本関数を GPU 起動・バッファ確保の前に呼び、`Result` を
 /// 評価してから初めて `unsafe` な起動処理へ入ること）。
 pub fn plan_sort(shape: &[usize], dim: usize) -> Result<SortPlan, SortPrepareError> {
-    let (outer, dim_size, inner) = line_layout(shape, dim);
+    let (outer, dim_size, inner) =
+        line_layout(shape, dim).ok_or(SortPrepareError::SizeLimitExceeded {
+            total: usize::MAX,
+            limit: i32::MAX as usize,
+        })?;
     if dim_size > i32::MAX as usize {
         return Err(SortPrepareError::DimSizeTooLarge { dim_size });
     }
