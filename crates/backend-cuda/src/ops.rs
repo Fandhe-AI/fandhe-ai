@@ -37,7 +37,8 @@ use fandhe_ai_tensor_core::{
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey, SegmentResource,
     SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, gather_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    one_hot_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    scatter_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -2960,6 +2961,58 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::one_hot` の CUDA 実装（**非微分演算**。イシュー
+    /// #1755）。[`one_hot_out_shape`] で `index.shape()`／`num_classes`
+    /// を再検査し、`index` の値が `[0, num_classes)` 範囲内であることを
+    /// ホスト側で全走査して独立検証（`gather`／`scatter` と同じ二重
+    /// 検査方針。`.claude/rules/security.md` A08）してから
+    /// `gather_scatter::run_one_hot_f32` へ委譲する。
+    fn one_hot(
+        &self,
+        index: &Tensor<i32>,
+        num_classes: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            one_hot_out_shape(index.shape(), num_classes).map_err(BackendError::ShapeMismatch)?;
+
+        // `gather` の空出力早期リターンと同じ理由: 出力が空であれば
+        // `index` の実体化（`.contiguous()`）自体が不要（`checked_shape_
+        // numel` 適用前に空を確定させ、病的 shape での誤拒否・panic を
+        // 避ける。PR #1795 の教訓）。
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+
+        checked_shape_numel(index.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let index_owned = index.contiguous();
+        let index_slice = index_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("one_hot: index not contiguous".into())
+        })?;
+        for &v in index_slice {
+            if v < 0 || (v as usize) >= num_classes {
+                return Err(BackendError::ShapeMismatch(ShapeError::IndexOutOfRange {
+                    dim: index.shape().len(),
+                    index: v as i64,
+                    dim_size: num_classes,
+                }));
+            }
+        }
+
+        let gs = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_gather_scatter(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_gather_scatter_error, || {
+            gs.run_one_hot_f32(index_slice, num_classes, &out_shape)
+        })?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// `BackendOps::unique` の CUDA 実装（イシュー #1734）。
     /// `x.contiguous()` で稠密化してから `unique.rs::CudaUnique::
     /// run_unique_f32`（ビットニックソート方式）へ委譲する。契約
@@ -3802,6 +3855,39 @@ mod tests {
             .expect("empty gather must succeed");
         assert_eq!(out.shape(), &[3, 2, 0]);
         assert_eq!(out.numel(), 0);
+    }
+
+    /// [`CudaBackendOps::one_hot`] の GPU 非依存回帰テスト（**非微分
+    /// 演算**。イシュー #1755）。空 index（`numel==0`）は `out_shape`
+    /// が末尾軸に `0` を含むため実デバイスへ触れる前
+    /// （`with_driver_call` 呼び出し前）に空出力を早期リターンする
+    /// （`gather` の空出力早期リターンと同じ理由・同じ検証構成）。
+    #[test]
+    fn one_hot_returns_empty_for_empty_index() {
+        let index = Tensor::<i32>::new(Vec::new(), &[0usize]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let out = ops.one_hot(&index, 3).expect("empty one_hot must succeed");
+        assert_eq!(out.shape(), &[0, 3]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    /// [`CudaBackendOps::one_hot`] の GPU 非依存回帰テスト: 範囲外
+    /// クラス id（`num_classes` 以上）はホスト側の全走査検査
+    /// （`with_driver_call` 呼び出し前）で `BackendError::ShapeMismatch
+    /// (IndexOutOfRange)` として拒否され、実デバイスへ触れない。
+    #[test]
+    fn one_hot_rejects_out_of_range_index_without_touching_device() {
+        let index = Tensor::<i32>::new(vec![0, 3], &[2]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops.one_hot(&index, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::IndexOutOfRange {
+                dim: 1,
+                index: 3,
+                dim_size: 3,
+            })
+        ));
     }
 
     /// [`CudaBackendOps::unique`] の回帰テスト（PR #1828 codex-review

@@ -1,13 +1,19 @@
-//! gather／scatter／scatter_add カーネルの起動 API（イシュー #1778）。
+//! gather／scatter／scatter_add／one_hot カーネルの起動 API
+//! （gather／scatter／scatter_add はイシュー #1778、one_hot（**非微分
+//! 演算**）はイシュー #1755）。
 //!
-//! [`MetalGatherScatter::new`] が `shaders/gather_scatter.metal`（3
-//! カーネル: `gather_f32`／`scatter_overwrite_f32`／`scatter_add_f32`）を
-//! 実行時コンパイルしてパイプラインを保持し、[`MetalGatherScatter::
-//! run_gather_f32`]／[`MetalGatherScatter::run_scatter_f32`] へホスト側
+//! [`MetalGatherScatter::new`] が `shaders/gather_scatter.metal`（4
+//! カーネル: `gather_f32`／`scatter_overwrite_f32`／`scatter_add_f32`／
+//! `one_hot_f32`）を実行時コンパイルしてパイプラインを保持し、
+//! [`MetalGatherScatter::run_gather_f32`]／[`MetalGatherScatter::
+//! run_scatter_f32`]／[`MetalGatherScatter::run_one_hot_f32`] へホスト側
 //! スライスを渡すだけでバッファ確保・ディスパッチ・readback を内部で
 //! 完結できる（`crate::elementwise::MetalElementwise` と同じ構成方針）。
+//! `run_one_hot_f32` は他 2 メソッドと異なり座標展開・ストライド
+//! （`shapes` バッファ）を一切使わない（`shaders/gather_scatter.metal`
+//! 冒頭コメント「one_hot」節参照）。
 //!
-//! `ops.rs::MetalBackendOps::gather`／`scatter` から呼ばれる。呼び出し元
+//! `ops.rs::MetalBackendOps::gather`／`scatter`／`one_hot` から呼ばれる。呼び出し元
 //! （`ops.rs`）は shape 検査（[`fandhe_ai_tensor_core::gather_out_shape`]／
 //! [`fandhe_ai_tensor_core::scatter_out_shape`]）・
 //! [`crate::gather_scatter_model::validate_shapes_fit_u32`]・
@@ -52,7 +58,9 @@ use fandhe_ai_tensor_core::{ScatterReduce, ShapeError};
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
-use crate::gather_scatter_model::{ScatterLaunch, validate_gather_launch, validate_scatter_launch};
+use crate::gather_scatter_model::{
+    ScatterLaunch, validate_gather_launch, validate_one_hot_launch, validate_scatter_launch,
+};
 use crate::index_buffer::MetalIndexBuffer;
 use crate::pipeline::{self, MtlPipeline};
 
@@ -80,10 +88,11 @@ pub struct MetalGatherScatter {
     gather_f32: objc2::rc::Retained<MtlPipeline>,
     scatter_overwrite_f32: objc2::rc::Retained<MtlPipeline>,
     scatter_add_f32: objc2::rc::Retained<MtlPipeline>,
+    one_hot_f32: objc2::rc::Retained<MtlPipeline>,
 }
 
 impl MetalGatherScatter {
-    /// `ctx` のデバイス上で 3 カーネルを実行時コンパイルしパイプラインを
+    /// `ctx` のデバイス上で 4 カーネルを実行時コンパイルしパイプラインを
     /// 構築する（`crate::elementwise::MetalElementwise::new` と同型）。
     pub fn new(ctx: &MetalContext) -> Result<Self, MetalError> {
         let src = objc2_foundation::NSString::from_str(GATHER_SCATTER_MSL_SRC);
@@ -99,11 +108,13 @@ impl MetalGatherScatter {
         let scatter_overwrite_f32 =
             pipeline::make_pipeline(ctx.device(), &library, "scatter_overwrite_f32")?;
         let scatter_add_f32 = pipeline::make_pipeline(ctx.device(), &library, "scatter_add_f32")?;
+        let one_hot_f32 = pipeline::make_pipeline(ctx.device(), &library, "one_hot_f32")?;
 
         Ok(Self {
             gather_f32,
             scatter_overwrite_f32,
             scatter_add_f32,
+            one_hot_f32,
         })
     }
 
@@ -251,6 +262,50 @@ impl MetalGatherScatter {
 
         Ok(out_buf.read_to_vec())
     }
+
+    /// `one_hot_f32` カーネルを起動する（`torch.nn.functional.one_hot`／
+    /// `tf.one_hot` 相当。**非微分演算**。イシュー #1755）。
+    ///
+    /// 独立検査の方針は [`Self::run_gather_f32`] と同じ（実体は
+    /// [`crate::gather_scatter_model::validate_one_hot_launch`] へ
+    /// 切り出し済み）。`gather`／`scatter` と異なり座標展開・
+    /// ストライド（`shapes` バッファ）を一切使わないため、`index`
+    /// バッファと `num_classes`／`numel` スカラーのみを渡す
+    /// （`shaders/gather_scatter.metal::one_hot_f32` 参照）。出力要素数
+    /// が 0 の場合は空配列を返す（`MetalBuffer` は 0 バイト確保を拒否
+    /// するため、デバイス確保前に早期リターンする）。
+    pub fn run_one_hot_f32(
+        &self,
+        ctx: &MetalContext,
+        index: &[i32],
+        index_shape: &[usize],
+        num_classes: usize,
+    ) -> Result<Vec<f32>, MetalError> {
+        let numel =
+            validate_one_hot_launch(index, index_shape, num_classes).map_err(shape_err_to_metal)?;
+        if numel == 0 {
+            return Ok(Vec::new());
+        }
+
+        let index_buf = MetalIndexBuffer::new_with_i32(ctx, index)?;
+        let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, numel)?;
+
+        let num_classes_u = num_classes as u32;
+        let numel_u = numel as u32;
+
+        ctx.dispatch_sync(|encoder| {
+            encode_one_hot_dispatch(
+                encoder,
+                &self.one_hot_f32,
+                &index_buf,
+                &out_buf,
+                num_classes_u,
+                numel_u,
+            );
+        })?;
+
+        Ok(out_buf.read_to_vec())
+    }
 }
 
 /// gather カーネルのエンコード（バッファ index 0〜3・スカラー index
@@ -356,6 +411,43 @@ fn encode_scatter_dispatch(
     }
 
     let (threadgroups, threads_per_tg) = gs_dispatch_sizes(numel_out);
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// one_hot カーネル（**非微分演算**）のエンコード（バッファ index
+/// 0〜1・スカラー index 2〜3・ディスパッチ）。`shaders/
+/// gather_scatter.metal::one_hot_f32` のバッファ宣言と一致させる。
+fn encode_one_hot_dispatch(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    index_buf: &MetalIndexBuffer,
+    out_buf: &MetalBuffer,
+    num_classes: u32,
+    numel: u32,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: `encode_gather_dispatch` と同一の根拠（該当コメント参照）。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(index_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
+    }
+
+    // SAFETY: `encode_gather_dispatch` と同一の根拠。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&num_classes).cast(),
+            std::mem::size_of::<u32>(),
+            2,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&numel).cast(),
+            std::mem::size_of::<u32>(),
+            3,
+        );
+    }
+
+    let (threadgroups, threads_per_tg) = gs_dispatch_sizes(numel);
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
 }
 
