@@ -16,11 +16,12 @@ use std::sync::OnceLock;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan, GemmChecksum,
-    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    VectorNormOrd, gather_out_shape, one_hot_out_shape, pad_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    Activation, BackendOps, BceKind, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan,
+    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd,
+    MseReduction, QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor,
+    UnaryElementwiseOp, VectorNormOrd, gather_out_shape, one_hot_out_shape, pad_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -33,7 +34,7 @@ use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::scan;
 use crate::softmax::{self, match_softmax_plan};
 use crate::{
-    constant_pad, elementwise, fused_elementwise, gather_scatter, mse, reduction, rnn_cell,
+    bce, constant_pad, elementwise, fused_elementwise, gather_scatter, mse, reduction, rnn_cell,
     scalar_elementwise, sort_topk, unique,
 };
 
@@ -1486,6 +1487,64 @@ impl BackendOps for CpuBackendOps {
         let mut dpred = vec![0.0f32; pred_slice.len()];
         mse::mse_loss_backward_f32(pred_slice, target_slice, scale, &mut dpred)?;
         Tensor::new(dpred, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::bce_loss`] の CPU 実装
+    /// （イシュー #1737。`mse_loss` と同型の委譲構成）。
+    fn bce_loss(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: BceKind,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_c = input.contiguous();
+        let target_c = target.contiguous();
+        // `contiguous()` の戻り値は常に `as_slice()` が `Some` を返す
+        // （`mse_loss` と同じ契約）。
+        let input_slice = input_c.as_slice().unwrap_or(&[]);
+        let target_slice = target_c.as_slice().unwrap_or(&[]);
+        let numel = input_slice.len();
+        let sum = bce::bce_sum_f32(input_slice, target_slice, kind)?;
+        let value = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    0.0
+                } else {
+                    sum / numel as f32
+                }
+            }
+            MseReduction::Sum => sum,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "bce_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::bce_loss_backward`] の CPU
+    /// 実装（イシュー #1737）。`dTarget` は呼び出し元（`fandhe_ai_
+    /// autodiff::grad::vjp`）がホスト側の逐次 map で計算する契約
+    /// のため、本メソッドは `dInput` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::bce_loss_backward` doc 参照）。
+    fn bce_loss_backward(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: BceKind,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_c = input.contiguous();
+        let target_c = target.contiguous();
+        let input_slice = input_c.as_slice().unwrap_or(&[]);
+        let target_slice = target_c.as_slice().unwrap_or(&[]);
+        let mut dinput = vec![0.0f32; input_slice.len()];
+        bce::bce_loss_backward_f32(input_slice, target_slice, kind, scale, &mut dinput)?;
+        Tensor::new(dinput, input.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::rmsnorm`] の CPU 実装

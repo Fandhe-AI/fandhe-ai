@@ -24,8 +24,8 @@
 use std::borrow::Cow;
 
 use fandhe_ai_tensor_core::{
-    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, ShapeError, Tensor,
-    VectorNormOrd,
+    BceKind, GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, ShapeError,
+    Tensor, VectorNormOrd,
 };
 
 use crate::layout;
@@ -793,6 +793,125 @@ pub(crate) fn mse_loss(
             }
         }
         crate::var::Reduction::Sum => sum_sq,
+    };
+    build_tensor(vec![out], &[])
+}
+
+/// ログクランプ下限（PyTorch `BCELoss` の実装と同じ `-100`。`p` が
+/// `0`／`1` に極めて近い場合の `ln` の `-inf` 発散を避ける）。
+const BCE_LOG_CLAMP_MIN: f32 = -100.0;
+
+/// [`BceKind::Probabilities`]／[`BceKind::Logits`] 共通の要素損失
+/// （`bce_loss`／`bce_loss_vjp`〈`grad.rs`〉の双方から呼ばれる意味論の
+/// 正。`docs/compat-api-scope.md` §1.2「損失」節参照）。
+///
+/// - `Probabilities`: `l = −( y·max(ln p, −100) + (1−y)·max(ln(1−p),
+///   −100) )`（PyTorch `BCELoss` と同じログクランプ）。
+/// - `Logits`: `l = max(x, 0) − x·y + ln(1+exp(−|x|))`（数値安定な
+///   合成式。`ln(sigmoid(x))` を素朴に計算すると `x` が大きい負値の
+///   ときに桁落ち・overflow するため、この形で計算する。PyTorch
+///   `BCEWithLogitsLoss` と同値）。
+pub(crate) fn bce_elem_loss(input: f32, target: f32, kind: BceKind) -> f32 {
+    match kind {
+        BceKind::Probabilities => {
+            let log_p = input.ln().max(BCE_LOG_CLAMP_MIN);
+            let log_1mp = (1.0 - input).ln().max(BCE_LOG_CLAMP_MIN);
+            -(target * log_p + (1.0 - target) * log_1mp)
+        }
+        // `Logits`、および `BceKind`（`#[non_exhaustive]`。`tensor-core`
+        // 側で将来 variant を追加しうる）の未知 variant は同じ
+        // `Logits` 意味論へ安全側フォールバックする（`eval::scatter`
+        // の `ScatterReduce` 未知 variant 処理と同型。本関数は
+        // infallible 契約のため `Result` を返せない。未知 variant への
+        // 到達は契約違反として `debug_assert!` で検知するのみに留める。
+        // `.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
+        kind => {
+            debug_assert!(
+                matches!(kind, BceKind::Logits),
+                "eval::bce_elem_loss: 未知の BceKind variant へフォールバックした（契約違反）"
+            );
+            input.max(0.0) - input * target + (-input.abs()).exp().ln_1p()
+        }
+    }
+}
+
+/// `bce_elem_loss` の `dInput`（`scale` を乗じる前の要素勾配。`grad.rs`
+/// が上流勾配由来の `scale` を別途掛ける）。
+///
+/// - `Probabilities`: `(p − y) / max(p·(1−p), 1e−12)`（PyTorch と同じ
+///   `eps` によるゼロ除算回避）。
+/// - `Logits`: `sigmoid(x) − y`（`sigmoid_scalar` の数値安定形を使う）。
+pub(crate) fn bce_elem_grad_input(input: f32, target: f32, kind: BceKind) -> f32 {
+    match kind {
+        BceKind::Probabilities => {
+            let denom = (input * (1.0 - input)).max(1e-12);
+            (input - target) / denom
+        }
+        // `bce_elem_loss` と同じ未知 variant フォールバック規律。
+        kind => {
+            debug_assert!(
+                matches!(kind, BceKind::Logits),
+                "eval::bce_elem_grad_input: 未知の BceKind variant へフォールバックした（契約違反）"
+            );
+            sigmoid_scalar(input) - target
+        }
+    }
+}
+
+/// `bce_elem_loss` の `dTarget`（`scale` を乗じる前）。
+///
+/// - `Probabilities`: forward のクランプ済み式の厳密な導関数
+///   `−( max(ln p, −100) − max(ln(1−p), −100) )`（`p` が
+///   `(e^−100, 1−e^−100)` の外にあるときのみクランプが効き、PyTorch の
+///   無クランプ `−logit(p)` と差が生じる。`docs/compat-api-scope.md`
+///   §1.2 参照）。
+/// - `Logits`: `−x`。
+pub(crate) fn bce_elem_grad_target(input: f32, _target: f32, kind: BceKind) -> f32 {
+    match kind {
+        BceKind::Probabilities => {
+            let log_p = input.ln().max(BCE_LOG_CLAMP_MIN);
+            let log_1mp = (1.0 - input).ln().max(BCE_LOG_CLAMP_MIN);
+            -(log_p - log_1mp)
+        }
+        // `bce_elem_loss` と同じ未知 variant フォールバック規律。
+        kind => {
+            debug_assert!(
+                matches!(kind, BceKind::Logits),
+                "eval::bce_elem_grad_target: 未知の BceKind variant へフォールバックした（契約違反）"
+            );
+            -input
+        }
+    }
+}
+
+/// 二値交差エントロピー損失のホスト参照実装（`Var::bce_loss`／
+/// `bce_with_logits_loss`〈`var.rs`〉から `BackendOps::bce_loss` が
+/// `Unsupported` のときのみ呼ばれる。イシュー #1737）。`mse_loss`
+/// （直上）と同じ「shape 一致検査は呼び出し元が済ませている・
+/// `numel == 0` は `Mean`／`Sum` とも `0.0`」契約。
+pub(crate) fn bce_loss(
+    input: &Tensor<f32>,
+    target: &Tensor<f32>,
+    kind: BceKind,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let input_data = dense_vec(input);
+    let target_data = dense_vec(target);
+    let numel = input_data.len();
+    let sum_loss: f32 = input_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&p, &y)| bce_elem_loss(p, y, kind))
+        .sum();
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                sum_loss / numel as f32
+            }
+        }
+        crate::var::Reduction::Sum => sum_loss,
     };
     build_tensor(vec![out], &[])
 }

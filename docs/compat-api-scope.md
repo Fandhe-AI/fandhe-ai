@@ -222,7 +222,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | MultiheadAttention | #1605（sub-issue (a): #1639 で実装済み。`Var::scaled_dot_product_attention`——既存の `matmul`〈rank≥2〉／`transpose`／`mul`／`masked_fill`／`softmax` への分解のみで実装し `Op`／`BackendOps` を新規拡張しない（`crate::einsum` と同型）。causal（top-left aligned）／明示 `attn_mask`〈PyTorch bool 規約〉・`scale` 既定値〈`1/sqrt(E)`〉に対応。facade 到達経路は既存 `Var` 再エクスポート経由・新規 `pub use`／`pub fn` は facade へ追加していない。`dropout_p`／`enable_gqa`／attention weights 返却／f16・bf16 は対象外。CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッションへ申し送り。sub-issue (b)`MultiheadAttention` Module〈in/out projection・head 分割〉は #1640 が残対象） |
 | Conv1d／Conv2d | #1606 |
 | Pooling | #1607（設計記録 #1727。`docs/pooling-ops-design.md`。実装は #1728〈CPU〉・#1729〈CUDA〉・#1730〈Metal〉） |
-| 損失（BCE／NLL／Huber／KLDiv） | #1609 |
+| 損失（BCE／NLL／Huber／KLDiv） | #1609（#1737 で BCE／BCEWithLogits 実装済み: `Var::bce_loss`／`bce_with_logits_loss`・`nn::loss::BceLoss`／`BceWithLogitsLoss`・3 バックエンド融合カーネル。facade 到達経路は既存 `Var` 再エクスポート経由〈新規 `pub use`／`pub fn` なし〉。CUDA／Metal 実機 parity は未実測のまま Mac／GB10 セッションへ申し送り。NLL／KLDiv は #1738・Huber は #1739 が残対象） |
 | optimizer（Adam／RMSprop／Adagrad／LAMB） | #1610 |
 | scheduler（Cosine／Exponential／Plateau／OneCycle） | #1611 |
 | autograd 制御（no_grad／detach／retain_graph） | #1612 |

@@ -208,6 +208,15 @@ pub(crate) fn cached_mse(ctx: &Arc<MetalContext>) -> Result<Arc<crate::mse::Meta
     get_or_build(cache, on_poison, || crate::mse::MetalMse::new(ctx))
 }
 
+/// [`crate::bce::MetalBce`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1737。`cached_mse` と同型）。`ops::MetalBackendOps::
+/// bce_loss`／`bce_loss_backward` の唯一の呼び出し先。
+pub(crate) fn cached_bce(ctx: &Arc<MetalContext>) -> Result<Arc<crate::bce::MetalBce>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::bce::MetalBce>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::bce::MetalBce::new(ctx))
+}
+
 /// [`crate::rnn_cell::MetalRnnCell`] スイートをプロセス内キャッシュから
 /// 取得する（イシュー #1647）。`ops::MetalBackendOps::{lstm_pointwise,
 /// lstm_hidden_backward, lstm_cell_backward, gru_pointwise, gru_backward}`

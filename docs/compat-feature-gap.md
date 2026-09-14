@@ -1475,3 +1475,12 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
   `docs/kernel-fusion.md` の方針と整合）・`MultiheadAttention` Module
   自体（in/out projection・head 分割。親 #1605 の sub-issue (b)・
   #1640）。
+## 追補（イシュー #1737）
+
+`Var::bce_loss`（PyTorch `nn.BCELoss` 相当・確率入力）・`Var::bce_with_logits_loss`（`nn.BCEWithLogitsLoss` 相当・logits 入力。sigmoid をカーネル内に内包した数値安定な合成式）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `tensor-core::BceKind`（`Probabilities`／`Logits`。`#[non_exhaustive]`）・`BackendOps::bce_loss`／`bce_loss_backward`（既定 `Unsupported`。`MseReduction` を共用）・`autodiff::Op::BceLoss`・CPU／CUDA／Metal 3 バックエンドの融合カーネル（`backend-cpu::bce`・`backend-cuda::bce`／`kernels_bce`・`backend-metal::bce`／`shaders/bce.metal`）・ホストフォールバック（`eval::bce_loss`・`grad::bce_loss_vjp`）まで実装済み。
+- `nn::loss::BceLoss`／`BceWithLogitsLoss`（`MseLoss` と同型の薄いラッパー）を追加した。
+- `Probabilities` kind のみ `input`／`target` の `[0, 1]` 範囲検査（NaN 含む）を実体化直後・バックエンド呼び出し前にホスト側で行い、違反は `AutodiffError::InvalidArgument`（`cross_entropy_loss` の targets 範囲検査と同配置）。`Logits` kind は範囲制約なし。
+- `dInput`（forward のクランプ済み式の厳密な導関数）のみをカーネルが返し、`dTarget` は呼び出し元がホスト側の逐次 map で計算する契約（`MseLoss` の `dTarget = -dPred` という単純合成が成り立たないため）。
+- facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.2）。CUDA／Metal 実機での facade parity テスト・性能実測は未実施のまま Mac／GB10 セッションへ申し送る。
