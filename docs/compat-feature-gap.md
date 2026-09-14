@@ -816,3 +816,27 @@ cudarc 0.19.8 が `half::bf16` の `DeviceRepr`／`ValidAsZeroBits` を実装
 #1699・PR #1794 で実装済み・origin/main マージ済み。上記「#1699 の追補」参照）。`Var`／`Tape`／VJP・facade 公開面（`Tensor<bf16>` を受け
 取る facade API）は引き続き未接続で、本表の「未実装（欠落側）」列の評価
 （`Var` レベルの mixed precision）は変わらない。
+
+## #1706 の追補
+
+`float64`／`float16`／`bfloat16` 行（319〜320 行目）のスナップショット本文
+は不変のまま、Metal バックエンド限定で `TypedOps<half::bf16>` が実装され
+`Tensor<bf16>` の `gemm`／`add`／`mul`／`relu`／`exp`／`tanh` が Metal 経由で
+到達可能になった（`sum`／`max` は Metal f32 `BackendOps` が GPU カーネル
+未実装のため `Unsupported` のまま。`crates/backend-metal/src/
+typed_bf16.rs`。イシュー #1706・`docs/backend-dtype-dispatch-design.md`
+§14）。
+
+- (a) `TypedOps<bf16>` の実装可否と (b) MSL `bfloat`／`simdgroup_bfloat8x8`
+  の実機可用性は独立の問題であることが判明し、(a) はホスト側変換＋既存
+  f32 経路委譲方式（CUDA #1704・CPU #1699 と同型）で MSL `bfloat` の
+  可用性に依存せず実装できた。(b)（デバイス常駐ネイティブ bf16 経路の
+  実現可能性）はコンパイルプローブ（`crate::typed_bf16_probe_diag_tests`。
+  全 `#[ignore]`・非 gating）へ切り出し、本エージェント実行環境に
+  Apple Silicon 実機がないため未実測のまま Mac セッションへ申し送る。
+- CPU bf16 は #1699・CUDA bf16 は #1704 で実装済み・origin/main マージ
+  済み。3 バックエンドとも bf16 の主要 6 演算（`gemm`／`add`／`mul`／
+  `relu`／`exp`／`tanh`）に到達可能になった。
+- facade 公開面への新規追加はない。`Var`／`Tape`／VJP は引き続き未接続で、
+  本表の「未実装（欠落側）」列の評価（`Var` レベルの mixed precision）は
+  変わらない。
