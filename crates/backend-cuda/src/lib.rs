@@ -374,6 +374,7 @@ mod init_cost_diag_tests;
 // 到達する必要があるため `gemm_reuse_phase_diag_tests` と同じ理由で
 // クレートルートの兄弟モジュールとして配置する。
 mod kernels;
+mod kernels_bce;
 mod kernels_elementwise;
 mod kernels_layer_norm;
 mod kernels_mma;
@@ -403,6 +404,7 @@ mod readout_regression_diag_tests_1436;
 // 向けの対称な opt-in staging を同モジュールへ追加した。crate 内部限定
 // （`memory.rs`／`gemm.rs`／`ops.rs` のみが参照。opt-in トグルのみ
 // `pub use` 経由で crate 外部へ公開）。
+mod bce;
 mod host_staging;
 mod layer_norm;
 pub mod memory;
@@ -487,6 +489,7 @@ pub use gemm::CudaGemm;
 // `tests/cpu_cuda_tiled_pipeline_parity.rs` は既に `required-features =
 // ["internal-diagnostics"]`〈`Cargo.toml`〉のためこのゲート化による
 // 通常 CI ジョブへの影響はない）。
+pub use bce::CudaBce;
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::TiledF32Kernel;
 pub use mse::CudaMse;

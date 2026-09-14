@@ -30,8 +30,8 @@
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError,
-    Tensor, VectorNormOrd, row_norm_layout,
+    Activation, BackendError, BackendOps, BceKind, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
+    ShapeError, Tensor, VectorNormOrd, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -450,6 +450,56 @@ pub(crate) fn vjp(
                 }
             };
             vec![(pred, dpred), (target, dtarget)]
+        }
+        Op::BceLoss {
+            input,
+            target,
+            kind,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = input_val.numel();
+            let (dinput, dtarget) = if n == 0 {
+                // `mse_loss` の `Op::MseLoss` 分岐と同じゼロ除算回避
+                // （`scale` 計算前に早期 return）。
+                let zeros = build_tensor(vec![0f32; 0], input_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = bce_loss_scale(g_value, n, reduction);
+                match ops.bce_loss_backward(input_val, target_val, kind, scale) {
+                    Ok(dinput) => {
+                        if dinput.shape() != input_val.shape() {
+                            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                    lhs: dinput.shape().to_vec(),
+                                    rhs: input_val.shape().to_vec(),
+                                },
+                            )));
+                        }
+                        // `dTarget` は `dInput` と対称な単純合成
+                        // （符号反転）ではないため、`BackendOps::
+                        // bce_loss_backward` の doc 契約どおりホスト側の
+                        // 逐次 map で求める（新規 GPU カーネル起動・
+                        // D2H を増やさない）。
+                        let input_data = dense_vec(input_val);
+                        let target_data = dense_vec(target_val);
+                        let dtarget_data: Vec<f32> = input_data
+                            .iter()
+                            .zip(target_data.iter())
+                            .map(|(&p, &y)| scale * eval::bce_elem_grad_target(p, y, kind))
+                            .collect();
+                        let dtarget = build_tensor(dtarget_data, dinput.shape());
+                        (dinput, dtarget)
+                    }
+                    Err(BackendError::Unsupported(_)) => {
+                        bce_loss_vjp(input_val, target_val, kind, upstream, reduction)
+                    }
+                    Err(other) => return Err(AutodiffError::Backend(other)),
+                }
+            };
+            vec![(input, dinput), (target, dtarget)]
         }
         Op::CrossEntropyLoss {
             logits,
@@ -4281,6 +4331,58 @@ fn mse_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
     match reduction {
         Reduction::Mean => g_value * 2.0 / n as f32,
         Reduction::Sum => g_value * 2.0,
+    }
+}
+
+/// `BceLoss{input, target, kind, reduction}` のホスト参照 VJP（`ops.
+/// bce_loss_backward` が `Unsupported` のときのみ呼ばれる。イシュー
+/// #1737）。`eval::bce_elem_grad_input`／`bce_elem_grad_target`
+/// （forward 要素式 `eval::bce_elem_loss` と対をなす意味論の正）に
+/// `bce_loss_scale` を乗じて `dInput`／`dTarget` を構成する。`n == 0`
+/// は `mse_loss_vjp` と同じくゼロ除算を避け zeros を返す。
+fn bce_loss_vjp(
+    input: &Tensor<f32>,
+    target: &Tensor<f32>,
+    kind: BceKind,
+    g: &Tensor<f32>,
+    reduction: Reduction,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let shape = input.shape().to_vec();
+    let n = input.numel();
+    if n == 0 {
+        let zeros = build_tensor(vec![0f32; 0], &shape);
+        return (zeros.clone(), zeros);
+    }
+    let g_value = dense_vec(g).first().copied().unwrap_or(0.0);
+    let input_data = dense_vec(input);
+    let target_data = dense_vec(target);
+    let scale = bce_loss_scale(g_value, n, reduction);
+    let dinput_data: Vec<f32> = input_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&p, &y)| scale * eval::bce_elem_grad_input(p, y, kind))
+        .collect();
+    let dtarget_data: Vec<f32> = input_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&p, &y)| scale * eval::bce_elem_grad_target(p, y, kind))
+        .collect();
+    let dinput = build_tensor(dinput_data, &shape);
+    let dtarget = build_tensor(dtarget_data, &shape);
+    (dinput, dtarget)
+}
+
+/// `mse_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の
+/// `Op::BceLoss` 分岐。イシュー #1737）の双方が使う `scale` 算出の
+/// 共有ロジック: `dInput = scale·bce_elem_grad_input(..)`（`Mean` は
+/// `g/n`、`Sum` は `g`。`mse_loss_scale` の `2` 倍係数〈二乗誤差由来〉
+/// は BCE には現れないため異なる式）。`BackendOps::bce_loss_backward`
+/// の呼び出し元がこのスケールを事前計算して渡す契約
+/// （`backend_ops.rs` doc 参照）。
+fn bce_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
+    match reduction {
+        Reduction::Mean => g_value / n as f32,
+        Reduction::Sum => g_value,
     }
 }
 
