@@ -203,6 +203,13 @@ fn nll_matches_cpu_across_shapes() {
             num_classes: 1000,
             inner: 1,
         }, // NLL_MAX_BLOCKS 跨ぎ
+        NllLayout {
+            outer: 300_000,
+            num_classes: 4,
+            inner: 1,
+        }, // n_samples=300_000 > NLL_BLOCK_DIM*NLL_MAX_BLOCKS=262_144
+           // （grid-stride ループが `n_samples` 全域を確実に走査することの
+           // 実機確認。PR #1850 codex-review P2 是正）
     ];
 
     for (idx, &layout) in layouts.iter().enumerate() {

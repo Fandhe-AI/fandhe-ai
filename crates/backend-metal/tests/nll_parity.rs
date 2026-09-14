@@ -153,6 +153,13 @@ fn nll_matches_cpu_across_shapes() {
             num_classes: 1000,
             inner: 1,
         },
+        NllLayout {
+            outer: 300_000,
+            num_classes: 4,
+            inner: 1,
+        }, // n_samples=300_000 > NLL_THREADGROUP_WIDTH*NLL_MAX_THREADGROUPS
+           // =262_144（grid-stride ループが `n_samples` 全域を確実に走査
+           // することの実機確認。PR #1850 codex-review P2 是正）
     ];
 
     let mut seed = 5000u64;
