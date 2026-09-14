@@ -726,36 +726,48 @@ fn facade_does_not_expose_rng_internal_types() {
 /// 同じ扱い）。`[dependencies]`・`[build-dependencies]`・
 /// `[target.'cfg(...)'.dependencies]`・`[dependencies.<name>]` 形の
 /// ヘッダ・`package = "..."` によるリネーム迂回はいずれも検出する。
-#[test]
-fn facade_does_not_depend_on_unpublished_onnx_interop() {
-    const FORBIDDEN_ONNX_NAMES: [&str; 3] = [
-        "onnx-interop",
-        "fandhe-ai-onnx-interop",
-        "fandhe-ai-interop",
-    ];
+const FORBIDDEN_ONNX_NAMES: [&str; 3] = [
+    "onnx-interop",
+    "fandhe-ai-onnx-interop",
+    "fandhe-ai-interop",
+];
 
-    fn is_dev_dependencies_section(section: &str) -> bool {
-        section.contains("dev-dependencies")
-    }
+fn is_dev_dependencies_section(section: &str) -> bool {
+    section.contains("dev-dependencies")
+}
 
-    fn is_relevant_dependency_section(section: &str) -> bool {
-        section.contains("dependencies") && !is_dev_dependencies_section(section)
-    }
+fn is_relevant_dependency_section(section: &str) -> bool {
+    section.contains("dependencies") && !is_dev_dependencies_section(section)
+}
 
-    let cargo_toml_path = facade_crate_root().join("Cargo.toml");
-    let content = read_to_string_or_panic(&cargo_toml_path);
-
+/// `facade_does_not_depend_on_unpublished_onnx_interop` の走査ロジック本体。
+/// 実 `Cargo.toml` からの呼び出しと、パース境界（コメント付きヘッダ行
+/// 等）を固定する合成入力からの呼び出しの両方から使えるよう、ファイル
+/// 読み込みと判定ロジックを分離した（#1775 PR #1821 codex-review 指摘の
+/// 回帰テスト `dependency_section_header_with_trailing_comment_is_recognized`
+/// 用）。戻り値は `(offending, saw_known_dependency_line)`。
+fn scan_onnx_dependency_offenses(content: &str) -> (Vec<String>, bool) {
     let mut current_section = String::new();
     let mut offending = Vec::new();
-    // 空虚 pass 防止の自己検証: 少なくとも 1 行、既知の依存
-    // （`fandhe-ai-tensor-core` 等）を対象セクション内で実際に走査した
-    // ことを確認する。
     let mut saw_known_dependency_line = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            current_section = trimmed.to_string();
+        // コメント除去（`#` 以降）。TOML の文字列値に `#` を含む既存行は
+        // 本ファイルには存在しないため、この単純化で安全に判定できる。
+        // ヘッダ判定（`[section]` の角カッコ）もこのコメント除去後の
+        // `code_part` に対して行う: `[build-dependencies] # export support`
+        // のようなコメント付きヘッダ行は元の `trimmed` では `]` で終わら
+        // ないため、コメント除去前に判定すると `current_section` の切替
+        // を見落とし、以降の依存走査が丸ごと読み飛ばされてしまう
+        // （codex-review 指摘。#1775 PR #1821）。
+        let code_part = trimmed
+            .split_once('#')
+            .map(|(a, _)| a)
+            .unwrap_or(trimmed)
+            .trim();
+        if code_part.starts_with('[') && code_part.ends_with(']') {
+            current_section = code_part.to_string();
             if is_relevant_dependency_section(&current_section) {
                 for name in FORBIDDEN_ONNX_NAMES {
                     if current_section.contains(name) {
@@ -770,13 +782,6 @@ fn facade_does_not_depend_on_unpublished_onnx_interop() {
         if !is_relevant_dependency_section(&current_section) {
             continue;
         }
-        // コメント除去（`#` 以降）。TOML の文字列値に `#` を含む既存行は
-        // 本ファイルには存在しないため、この単純化で安全に判定できる。
-        let code_part = trimmed
-            .split_once('#')
-            .map(|(a, _)| a)
-            .unwrap_or(trimmed)
-            .trim();
         if code_part.is_empty() {
             continue;
         }
@@ -803,6 +808,19 @@ fn facade_does_not_depend_on_unpublished_onnx_interop() {
         }
     }
 
+    (offending, saw_known_dependency_line)
+}
+
+#[test]
+fn facade_does_not_depend_on_unpublished_onnx_interop() {
+    let cargo_toml_path = facade_crate_root().join("Cargo.toml");
+    let content = read_to_string_or_panic(&cargo_toml_path);
+
+    let (offending, saw_known_dependency_line) = scan_onnx_dependency_offenses(&content);
+
+    // 空虚 pass 防止の自己検証: 少なくとも 1 行、既知の依存
+    // （`fandhe-ai-tensor-core` 等）を対象セクション内で実際に走査した
+    // ことを確認する。
     assert!(
         saw_known_dependency_line,
         "自己検証: 既知の依存行（fandhe-ai-tensor-core／fandhe-ai-autodiff）が\
@@ -814,6 +832,49 @@ fn facade_does_not_depend_on_unpublished_onnx_interop() {
         "facade（crates.io 公開クレート）が非公開クレート onnx-interop へ\
          通常依存している（docs/crates-io-publishing-order.md §6 違反。\
          cargo publish が次回リリースで壊れる）: {offending:?}"
+    );
+}
+
+/// codex-review 指摘（#1775 PR #1821）の回帰固定: 依存セクションヘッダ行
+/// に行末コメントが付く実在パターン（`[build-dependencies] # export
+/// support` 等）でも `current_section` の切替が見落とされず、ヘッダ直後
+/// の禁止依存行がすり抜けずに検出されることを確認する。コメント除去前に
+/// `]` で終わるかどうかだけを見て判定する実装だと、この形のヘッダ行は
+/// 「セクションヘッダではない普通の行」として無視され、以降の依存走査
+/// （`onnx-interop` 検出）が丸ごと読み飛ばされてしまう。
+#[test]
+fn dependency_section_header_with_trailing_comment_is_recognized() {
+    let synthetic_cargo_toml = r#"
+[package]
+name = "fandhe-ai"
+
+[dependencies]
+fandhe-ai-tensor-core = { version = "=0.9.0", path = "../tensor-core" }
+fandhe-ai-autodiff = { version = "=0.9.0", path = "../autodiff" }
+
+[build-dependencies] # export support
+onnx-interop = { path = "../onnx-interop" }
+"#;
+
+    let (offending, saw_known_dependency_line) =
+        scan_onnx_dependency_offenses(synthetic_cargo_toml);
+
+    assert!(
+        saw_known_dependency_line,
+        "自己検証: 合成入力の [dependencies] セクションが走査されなかった"
+    );
+    assert!(
+        !offending.is_empty(),
+        "コメント付きヘッダ `[build-dependencies] # export support` の直後にある\
+         禁止依存 `onnx-interop` が検出されなかった（ヘッダ切替の見落としが\
+         再発している）"
+    );
+    assert!(
+        offending
+            .iter()
+            .any(|entry| entry.contains("onnx-interop") && entry.contains("build-dependencies")),
+        "検出結果に build-dependencies セクションでの onnx-interop 依存が\
+         含まれているはず: {offending:?}"
     );
 }
 
