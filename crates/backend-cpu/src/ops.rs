@@ -1403,6 +1403,24 @@ impl BackendOps for CpuBackendOps {
         reduction::max(a, dim).map_err(reduce_error_to_backend_error)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::min`] の CPU 実装（イシュー
+    /// #1720）。`reduction::min` へ委譲する。
+    fn min(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        reduction::min(a, dim).map_err(reduce_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::argmax`] の CPU 実装
+    /// （イシュー #1720）。`reduction::argmax` へ委譲する。
+    fn argmax(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        reduction::argmax(a, dim).map_err(reduce_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::argmin`] の CPU 実装
+    /// （イシュー #1720）。`reduction::argmin` へ委譲する。
+    fn argmin(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        reduction::argmin(a, dim).map_err(reduce_error_to_backend_error)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::mse_loss`] の CPU 実装
     /// （イシュー #1045）。shape 検証・contiguous 化・`mse::
     /// mse_sum_sq_f32` への委譲・`reduction` に応じた最終変換（`Mean`/

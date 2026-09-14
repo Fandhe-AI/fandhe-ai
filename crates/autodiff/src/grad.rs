@@ -363,6 +363,15 @@ pub(crate) fn vjp(
             let da = max_vjp(input_val, dim, out_value, upstream);
             vec![(input, da)]
         }
+        Op::Min { input, dim } => {
+            // `extremum_first_match_vjp`（`Op::Max` の `max_vjp` と
+            // 共有する実体）を直接呼ぶ: forward 記録値 `out_value` と
+            // `==` 一致する最初の位置へ上流勾配を置くだけで最大／最小
+            // どちらの縮約かに依存しないため（`Op::Min` doc 参照）。
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = extremum_first_match_vjp(input_val, dim, out_value, upstream);
+            vec![(input, da)]
+        }
         Op::Mean { input, dim } => {
             // `d(mean)/d(x_i) = 1/n`（`n` は forward〈`Var::mean`〉と
             // 同じ縮約対象要素数）。`Sum` の VJP（複製）を `n` で割った
@@ -1696,6 +1705,121 @@ pub(crate) fn topk_with_fallback(
             Ok((values, index))
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::topk(input, dim, k, largest, out_shape)?),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// 縮約対象の要素数が 0 か（`min`／`argmax`／`argmin` は単位元を
+/// 持たないためエラーとする対象。`backend-cpu::reduction::max`
+/// の空縮約判定と同じ「`axis_len == 0` かつ `total_out > 0`」規則を
+/// ホストフォールバック側でも再現する。イシュー #1720）。
+fn is_empty_reduction(shape: &[usize], dim: Option<usize>) -> bool {
+    match dim {
+        None => shape.iter().product::<usize>() == 0,
+        Some(axis) => {
+            let axis_len = shape.get(axis).copied().unwrap_or(0);
+            let total_out: usize = shape
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| i != axis)
+                .map(|(_, &d)| d)
+                .product();
+            axis_len == 0 && total_out > 0
+        }
+    }
+}
+
+/// [`Op::Min`] の forward（`Var::min` 経由）が使う「バックエンド実装
+/// → フォールバック」ヘルパー（イシュー #1720）。[`sort_with_fallback`]
+/// と同型: `ops.min` → `Unsupported` のときのみ空縮約を検査してから
+/// `eval::min` へフォールバックし、それ以外のエラーは伝播する
+/// （判定迂回経路を作らない）。空縮約は
+/// `AutodiffError::InvalidArgument` を返す（`min` は単位元を持たない
+/// ため。`backend-cpu::reduction::min` の `EmptyReduction` と同じ
+/// 方針をホスト経路でも守る）。
+pub(crate) fn min_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.min(input, dim) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => {
+            if is_empty_reduction(input.shape(), dim) {
+                return Err(AutodiffError::InvalidArgument(
+                    "min: cannot compute min of an empty reduction".into(),
+                ));
+            }
+            Ok(eval::min(input, dim, out_shape))
+        }
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Var::argmax`]／[`Var::argmin`] のどちらを計算するかを区別する
+/// （イシュー #1720）。`ops.argmax`／`argmin`・`eval::argmax`／`argmin`
+/// のどちらを呼ぶかを [`argext_with_fallback`] が切り替える。
+pub(crate) enum ArgExtremum {
+    Max,
+    Min,
+}
+
+/// [`Op::Sort`]／[`Op::Topk`] と異なり `argmax`／`argmin` は非微分
+/// 演算（テープにノードを追加しない）のため対応する `Op` variant を
+/// 持たない。[`sort_with_fallback`] と同型の「バックエンド実装 →
+/// フォールバック」ヘルパー（イシュー #1720）で、`kind` に応じて
+/// `ops.argmax`／`argmin` → `Unsupported` のときのみ空縮約を検査して
+/// から `eval::argmax`／`argmin` へフォールバックする。
+pub(crate) fn argext_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    out_shape: &[usize],
+    kind: ArgExtremum,
+) -> Result<Tensor<i32>, AutodiffError> {
+    let backend_result = match kind {
+        ArgExtremum::Max => ops.argmax(input, dim),
+        ArgExtremum::Min => ops.argmin(input, dim),
+    };
+    match backend_result {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => {
+            if is_empty_reduction(input.shape(), dim) {
+                let op_name = match kind {
+                    ArgExtremum::Max => "argmax",
+                    ArgExtremum::Min => "argmin",
+                };
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "{op_name}: cannot compute {op_name} of an empty reduction"
+                )));
+            }
+            let result = match kind {
+                ArgExtremum::Max => eval::argmax(input, dim, out_shape),
+                ArgExtremum::Min => eval::argmin(input, dim, out_shape),
+            };
+            Ok(result?)
+        }
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }
@@ -3332,7 +3456,28 @@ fn mean_vjp(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>) -> Tenso
 /// `fandhe_ai::compat`（REQ-9 追記・#52）の公開面に `amax` 相当の縮約 API を
 /// 追加する段階になった場合にのみ PyTorch 互換の要否を改めて判断する
 /// （`docs/compat-api-scope.md` にも記録）。
+///
+/// **`Op::Min` との共有（イシュー #1720）**: 本関数の実体は
+/// 「`out_value` と `==` 一致する最初の位置へ `g` を置く」だけで
+/// 最大／最小どちらの縮約かに依存しない。そのため実体を
+/// [`extremum_first_match_vjp`] へ改称し、本関数は既存呼び出し元
+/// （テスト・`Op::Max` アーム）の名前を変えないための薄いラッパーと
+/// して残す。#1718（amax／amin 勾配分配方式の確定）が均等分配へ
+/// 変更する場合は [`extremum_first_match_vjp`] 1 箇所の差し替えで
+/// `Max`／`Min` 両方へ反映される。
 fn max_vjp(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    out_value: &Tensor<f32>,
+    g: &Tensor<f32>,
+) -> Tensor<f32> {
+    extremum_first_match_vjp(input, dim, out_value, g)
+}
+
+/// [`max_vjp`] doc 参照。`out_value`（縮約後の最大値または最小値）と
+/// `==` 一致する `dim` 軸上の最初の要素へ `g` を伝播する、最大／最小
+/// 非依存の VJP 実体（イシュー #1720 で `max_vjp` から改称・共有化）。
+fn extremum_first_match_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
     out_value: &Tensor<f32>,
@@ -5094,6 +5239,87 @@ release ビルドでも検知できるよう `assert!` を使う）"
             "max(dim=1) タイ行（行 0）は軸方向で最初の最大要素（列 0）のみへ伝播するはず"
         );
         // 各 (outer) スライスごとに勾配総量が上流勾配 g[outer] と一致すること。
+        assert_eq!(grad[0..3].iter().sum::<f32>(), 3.0);
+        assert_eq!(grad[3..6].iter().sum::<f32>(), 7.0);
+    }
+
+    // --- Min（dim: None / Some(0) / Some(1)。同値タイなし。イシュー
+    // #1720。`extremum_first_match_vjp` を `Max` と共有する回帰） ---
+
+    #[test]
+    fn min_grad_dim_none_matches_numeric() {
+        let a = t(&[1.0, -2.0, 5.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let s = t(&[2.0], &[]);
+
+        let out_value = eval::min(&a, None, &[]);
+        let g = s.clone();
+        let da = extremum_first_match_vjp(&a, None, &out_value, &g);
+        let num_da = numeric_grad_unary(&a, &s, |x| eval::min(x, None, &[]));
+
+        assert_grad_close("min(None) dA", &da, &num_da);
+    }
+
+    #[test]
+    fn min_grad_dim_0_matches_numeric() {
+        let a = t(&[1.0, -2.0, 5.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let s = t(&[1.0, -1.0, 2.0], &[3]);
+
+        let out_value = eval::min(&a, Some(0), &[3]);
+        let g = s.clone();
+        let da = extremum_first_match_vjp(&a, Some(0), &out_value, &g);
+        let num_da = numeric_grad_unary(&a, &s, |x| eval::min(x, Some(0), &[3]));
+
+        assert_grad_close("min(dim=0) dA", &da, &num_da);
+    }
+
+    #[test]
+    fn min_grad_dim_1_matches_numeric() {
+        let a = t(&[1.0, -2.0, 5.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let s = t(&[1.0, -1.0], &[2]);
+
+        let out_value = eval::min(&a, Some(1), &[2]);
+        let g = s.clone();
+        let da = extremum_first_match_vjp(&a, Some(1), &out_value, &g);
+        let num_da = numeric_grad_unary(&a, &s, |x| eval::min(x, Some(1), &[2]));
+
+        assert_grad_close("min(dim=1) dA", &da, &num_da);
+    }
+
+    // --- Min（同値タイ。先勝ち決定的挙動の回帰固定。`Max` と対称） ---
+
+    #[test]
+    fn min_grad_dim_none_tie_first_wins() {
+        // 最小値 -2.0 がインデックス 1・3 の 2 箇所に現れるタイケース。
+        let a = t(&[1.0, -2.0, 3.0, -2.0], &[4]);
+        let g = t(&[2.0], &[]);
+
+        let out_value = eval::min(&a, None, &[]);
+        let da = extremum_first_match_vjp(&a, None, &out_value, &g);
+        let grad = dense_vec(&da);
+
+        assert_eq!(
+            grad,
+            vec![0.0, 2.0, 0.0, 0.0],
+            "min(None) タイ時は最初に現れる最小要素（idx=1）のみへ伝播するはず"
+        );
+        assert_eq!(grad.iter().sum::<f32>(), 2.0);
+    }
+
+    #[test]
+    fn min_grad_dim_axis_tie_first_wins() {
+        // shape [2, 3]。行 0 は列 0・2 が -5.0 でタイ、行 1 はタイなし。
+        let a = t(&[-5.0, 1.0, -5.0, 1.0, -2.0, 4.0], &[2, 3]);
+        let g = t(&[3.0, 7.0], &[2]);
+
+        let out_value = eval::min(&a, Some(1), &[2]);
+        let da = extremum_first_match_vjp(&a, Some(1), &out_value, &g);
+        let grad = dense_vec(&da);
+
+        assert_eq!(
+            grad,
+            vec![3.0, 0.0, 0.0, 0.0, 7.0, 0.0],
+            "min(dim=1) タイ行（行 0）は軸方向で最初の最小要素（列 0）のみへ伝播するはず"
+        );
         assert_eq!(grad[0..3].iter().sum::<f32>(), 3.0);
         assert_eq!(grad[3..6].iter().sum::<f32>(), 7.0);
     }

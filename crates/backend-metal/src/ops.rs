@@ -2136,6 +2136,37 @@ impl BackendOps for MetalBackendOps {
         ))
     }
 
+    /// `min`（イシュー #1720）は `Self::sum`／`Self::max` と同じく
+    /// reduction カーネル未実装。`min` は `BackendOps` のデフォルト
+    /// メソッド（既定 `Unsupported`）のため本オーバーライドは機能上
+    /// 必須ではないが、`sum`／`max` と横並びで明示し「Metal は sum／
+    /// max／min いずれも未実装」という事実を観測しやすくする
+    /// （`Var::min` はホスト参照実装〈`eval::min`〉へフォールバック
+    /// するため、この非対称〈`Var::max` は既存の必須メソッド契約上
+    /// フォールバックを持たずエラーとなる〉は既知の事実として記録
+    /// する。実装計画 §7「スコープ外」参照）。
+    fn min(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "MetalBackendOps::min: reduction カーネル未実装（イシュー #1720 スコープ外）".into(),
+        ))
+    }
+
+    /// `argmax`（イシュー #1720）は GPU カーネル未実装。`Var::argmax`
+    /// はホスト参照実装（`eval::argmax`）へフォールバックする。
+    fn argmax(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "MetalBackendOps::argmax: argmax カーネル未実装（イシュー #1720 スコープ外）".into(),
+        ))
+    }
+
+    /// [`Self::argmax`] と同じ理由・同じ方針（イシュー #1720 スコープ
+    /// 外）。
+    fn argmin(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "MetalBackendOps::argmin: argmin カーネル未実装（イシュー #1720 スコープ外）".into(),
+        ))
+    }
+
     /// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）は
     /// GPU カーネル未実装（設計文書「スコープ外」節）。既定
     /// `Unsupported` を明示オーバーライドし、`device_handle()` を経由

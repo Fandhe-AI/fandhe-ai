@@ -153,6 +153,14 @@ pub(crate) enum Op {
     Sum { input: NodeId, dim: Option<usize> },
     /// 非 elementwise。常に実体化済み。
     Max { input: NodeId, dim: Option<usize> },
+    /// 非 elementwise。常に実体化済み。`Max` と対称（イシュー #1720。
+    /// `Var::min`）。VJP は `Max` と共有ヘルパー
+    /// （`grad::extremum_first_match_vjp`）を使う——forward 記録値
+    /// `out_value` と `==` 一致する最初の位置へ上流勾配を置くだけの
+    /// 実装で最大／最小に依存しないため（#1718 が均等分配へ確定した
+    /// 場合はそのヘルパー 1 箇所の差し替えで `Max`／`Min` 両方へ
+    /// 反映される）。
+    Min { input: NodeId, dim: Option<usize> },
     /// `dim` に沿った縮約平均（イシュー #1719・親 #1601「Phase 2
     /// （Tier 1）」）。`BackendOps` に対応メソッドがないため、forward
     /// （`Var::mean`）は `self.tape.ops().sum` の結果をホスト側で
@@ -945,11 +953,12 @@ impl Op {
             // 呼び出しを `recompute_fallible` が再現するため forward と
             // bit 同一）。`Op::Mean`（イシュー #1719）は `ops.sum` の
             // 後に forward と同一の除算を行うだけの合成のため `Op::Sum`
-            // と同列。
+            // と同列。`Op::Min`（イシュー #1720）は `Op::Max` と対称。
             Op::MatMul(..)
             | Op::Sigmoid(..)
             | Op::Sum { .. }
             | Op::Max { .. }
+            | Op::Min { .. }
             | Op::Mean { .. } => true,
             // view（既存 `push_view`／再導出契約の一般化）。キャッシュ
             // 済み view 値は基底バッファへの `Arc` を握るため、解放しな
@@ -1082,6 +1091,7 @@ impl Op {
             Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) | Op::Sigmoid(a) => f(*a),
             Op::Sum { input, .. }
             | Op::Max { input, .. }
+            | Op::Min { input, .. }
             | Op::Mean { input, .. }
             | Op::Reshape { input }
             | Op::Transpose { input, .. }
@@ -2399,6 +2409,7 @@ fn recompute_value(
                     | Op::Sigmoid(input)
                     | Op::Sum { input, .. }
                     | Op::Max { input, .. }
+                    | Op::Min { input, .. }
                     | Op::Mean { input, .. }
                     | Op::Permute { input, .. }
                     | Op::BroadcastTo { input }
@@ -2472,6 +2483,15 @@ fn recompute_value(
                     Op::Max { input, dim } => {
                         let input_val = recompute_memo_get(memo, input.0)?;
                         ops.max(&input_val, *dim)?
+                    }
+                    Op::Min { input, dim } => {
+                        // `Var::min` と同じフォールバック規律
+                        // （`ops.min` が `Unsupported` の場合のみ
+                        // `eval::min` へ委譲する。`grad::
+                        // min_with_fallback` doc 参照）を再計算時にも
+                        // 適用し、forward と bit 同一の値を保つ。
+                        let input_val = recompute_memo_get(memo, input.0)?;
+                        crate::grad::min_with_fallback(ops, &input_val, *dim, &node.shape)?
                     }
                     Op::Mean { input, dim } => {
                         // `Var::mean` と同じ「`ops.sum` の後にホスト側で
