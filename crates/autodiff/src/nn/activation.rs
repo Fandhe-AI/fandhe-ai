@@ -19,8 +19,10 @@
 //! 冒頭 doc 参照）。イシュー #1594 で既存の行カーネル（`BackendOps::
 //! softmax`／`log_softmax`）へ接続する独立した [`Softmax`]／
 //! [`LogSoftmax`] を追加した（`CrossEntropyLoss` の内部 log-softmax
-//! 〈`eval::softmax_along`〉はこれとは別実装のまま不変）。GELU 等の
-//! さらなる追加活性化は必要になった時点の後続イシューに委ねる。
+//! 〈`eval::softmax_along`〉はこれとは別実装のまま不変）。イシュー
+//! #1713 で [`Gelu`]／[`GeluTanh`]／[`Softplus`] を追加した（`Var::gelu`／
+//! `gelu_tanh`／`softplus` の薄いラッパー）。残る追加活性化（SiLU／
+//! LeakyReLU／ELU／Hardswish 等。#1714）は後続イシューに委ねる。
 
 use crate::error::AutodiffError;
 use crate::var::Var;
@@ -52,6 +54,88 @@ pub struct Tanh;
 impl Tanh {
     pub fn forward<'t>(&self, input: &Var<'t>) -> Var<'t> {
         input.tanh()
+    }
+}
+
+/// GELU（誤差関数版）。`Var::gelu` の薄いラッパー（イシュー #1713）。
+/// `Relu`/`Sigmoid`/`Tanh` と異なり `forward` は `Result` を返す
+/// （`Var::gelu` の eager dispatch 契約が型付きエラーを返しうるため。
+/// `Softmax`／`LogSoftmax` と同型）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Gelu;
+
+impl Gelu {
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.gelu()
+    }
+}
+
+/// GELU（tanh 近似版）。`Var::gelu_tanh` の薄いラッパー（イシュー
+/// #1713）。[`Gelu`] と同じ fallible 契約。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GeluTanh;
+
+impl GeluTanh {
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.gelu_tanh()
+    }
+}
+
+/// Softplus。`Var::softplus(beta, threshold)` の薄いラッパー（イシュー
+/// #1713）。`Softmax`/`LogSoftmax` と同じ「`dim` を保持するフィールド」
+/// の設計を踏襲し、`beta`／`threshold` を保持する。構築時に `Var::
+/// softplus` と同じ検査（有限かつ `beta > 0`・`threshold` 有限）を行う
+/// ため [`Softplus::new`] 自体が `Result` を返す（層構築の時点で早期に
+/// 弾く。`nn/norm.rs::validate_eps` と同じ規律）。
+#[derive(Debug, Clone, Copy)]
+pub struct Softplus {
+    beta: f32,
+    threshold: f32,
+}
+
+impl Softplus {
+    /// PyTorch `nn.Softplus` の既定値（`beta=1.0`・`threshold=20.0`）。
+    pub fn new(beta: f32, threshold: f32) -> Result<Self, AutodiffError> {
+        if !beta.is_finite() || beta <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Softplus::new: beta must be finite and positive, got {beta}"
+            )));
+        }
+        if !threshold.is_finite() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Softplus::new: threshold must be finite, got {threshold}"
+            )));
+        }
+        Ok(Self { beta, threshold })
+    }
+
+    /// `self.beta`／`self.threshold` を用いて `Var::softplus` へ委譲する。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.softplus(self.beta, self.threshold)
+    }
+
+    /// `nn/module.rs::Module::forward_host` の `Softplus` 実装が
+    /// `beta`／`threshold` を読み出すためのクレート内アクセサ
+    /// （[`Softmax::dim`] と同じ理由。フィールド自体は非公開のまま）。
+    pub(crate) fn beta(&self) -> f32 {
+        self.beta
+    }
+
+    pub(crate) fn threshold(&self) -> f32 {
+        self.threshold
+    }
+}
+
+impl Default for Softplus {
+    /// PyTorch `nn.Softplus` の既定値（`beta=1.0`・`threshold=20.0`）。
+    /// `new` の検査（有限性・符号）を通る既知の定数のため、本番経路
+    /// panic 禁止規約（`expect`／`unwrap` を避ける）に従いフィールドを
+    /// 直接構築する。
+    fn default() -> Self {
+        Self {
+            beta: 1.0,
+            threshold: 20.0,
+        }
     }
 }
 
@@ -196,6 +280,84 @@ mod tests {
             dense_vec(&via_module.to_tensor()),
             dense_vec(&via_var.to_tensor())
         );
+    }
+
+    #[test]
+    fn gelu_forward_matches_var_gelu() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
+        let before = tape.len();
+
+        let via_module = Gelu.forward(&x).unwrap();
+        let via_var = x.gelu().unwrap();
+
+        assert_eq!(
+            tape.len(),
+            before + 2,
+            "forward 呼び出しごとに 1 ノード追記"
+        );
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    #[test]
+    fn gelu_tanh_forward_matches_var_gelu_tanh() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
+        let before = tape.len();
+
+        let via_module = GeluTanh.forward(&x).unwrap();
+        let via_var = x.gelu_tanh().unwrap();
+
+        assert_eq!(
+            tape.len(),
+            before + 2,
+            "forward 呼び出しごとに 1 ノード追記"
+        );
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    #[test]
+    fn softplus_forward_matches_var_softplus() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
+        let before = tape.len();
+
+        let via_module = Softplus::new(1.0, 20.0).unwrap().forward(&x).unwrap();
+        let via_var = x.softplus(1.0, 20.0).unwrap();
+
+        assert_eq!(
+            tape.len(),
+            before + 2,
+            "forward 呼び出しごとに 1 ノード追記"
+        );
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    #[test]
+    fn softplus_new_rejects_non_positive_or_non_finite_beta_and_non_finite_threshold() {
+        assert!(Softplus::new(0.0, 20.0).is_err());
+        assert!(Softplus::new(-1.0, 20.0).is_err());
+        assert!(Softplus::new(f32::NAN, 20.0).is_err());
+        assert!(Softplus::new(f32::INFINITY, 20.0).is_err());
+        assert!(Softplus::new(1.0, f32::NAN).is_err());
+        assert!(Softplus::new(1.0, f32::INFINITY).is_err());
+        assert!(Softplus::new(1.0, 20.0).is_ok());
+    }
+
+    #[test]
+    fn softplus_default_matches_pytorch_defaults() {
+        let s = Softplus::default();
+        assert_eq!(s.beta(), 1.0);
+        assert_eq!(s.threshold(), 20.0);
     }
 
     #[test]
