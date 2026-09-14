@@ -56,17 +56,23 @@ use crate::row_kernel::{self, plan_dtype_is_f32};
 
 /// `sort_model::SortPrepareError` を `BackendError` へ写像する
 /// （`ops.rs::sort`／`topk` から呼ばれる。CUDA 側 `ops.rs::
-/// map_sort_error` と同型の判断: `DimSizeTooLarge`〈カーネル引数の
-/// 範囲を超える軸長〉は形状不正として `ShapeMismatch`、
-/// `SizeLimitExceeded`〈合成キー配列長がバックエンド固有上限を超過〉
-/// のみ `Unsupported` としてホストフォールバックへ委ねる）。
+/// map_sort_error` と同型の判断: `SizeLimitExceeded`〈合成キー配列長が
+/// バックエンド固有上限を超過〉のみ `Unsupported` としてホスト
+/// フォールバックへ委ねる。`DimSizeTooLarge`〈`dim_size` が
+/// カーネル引数型の範囲〈`i32::MAX`〉を超える〉は `ShapeMismatch
+/// (ShapeError::IndexRangeOverflow)` へ写像する——PR #1844 codex-review
+/// 指摘の是正: 当初は `ElementCountOverflow` へ写像していたが、CPU
+/// 参照実装（`backend-cpu::sort_topk`）が同じ状況（軸内添字の
+/// `i32::try_from` 失敗）で返す variant と食い違っていた。CUDA 側
+/// `ops.rs::map_sort_error`／`CudaError::SortDimSizeTooLarge` も同型に
+/// 是正済み）。
 fn map_sort_prepare_error(err: crate::sort_model::SortPrepareError) -> BackendError {
     match err {
         crate::sort_model::SortPrepareError::SizeLimitExceeded { .. } => {
             BackendError::Unsupported(err.to_string())
         }
-        crate::sort_model::SortPrepareError::DimSizeTooLarge { .. } => {
-            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        crate::sort_model::SortPrepareError::DimSizeTooLarge { dim_size } => {
+            BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { index: dim_size })
         }
     }
 }

@@ -125,9 +125,12 @@ impl CudaSort {
     ) -> Result<(Vec<f32>, Vec<i32>), CudaError> {
         let plan = plan_sort(shape, dim).map_err(|e| match e {
             crate::sort_model::SortPrepareError::DimSizeTooLarge { dim_size } => {
-                CudaError::InvalidSortShape {
-                    detail: format!("dim_size too large for kernel argument: {dim_size}"),
-                }
+                // PR #1844 codex-review 指摘の是正: `InvalidSortShape`
+                // （`ops.rs::map_sort_error` が `ElementCountOverflow`
+                // へ一律写像する）へ畳み込まず、CPU 参照実装と同じ
+                // `IndexRangeOverflow` へ写像される専用 variant を使う
+                // （`error.rs::CudaError::SortDimSizeTooLarge` doc 参照）。
+                CudaError::SortDimSizeTooLarge { dim_size }
             }
             crate::sort_model::SortPrepareError::SizeLimitExceeded { total, limit } => {
                 CudaError::SortSizeLimitExceeded { total, limit }

@@ -1331,10 +1331,18 @@ fn map_unique_error(err: CudaError) -> BackendError {
 /// [`CudaError::InvalidSortShape`]（内部契約違反。呼び出し元の事前
 /// 検証を通過した入力からは実質到達しない防御的経路）は
 /// `ShapeError::ElementCountOverflow` へ、それ以外（driver 不在等）は
-/// 既存 [`map_cuda_error`] へ委譲する。
+/// 既存 [`map_cuda_error`] へ委譲する。[`CudaError::SortDimSizeTooLarge`]
+/// （`dim_size` が `i32::MAX` を超える）は `InvalidSortShape` とは別に
+/// `ShapeError::IndexRangeOverflow` へ写像する（PR #1844 codex-review
+/// 指摘の是正: CPU 参照実装 `backend-cpu::sort_topk` が同じ状況
+/// （軸内添字の `i32::try_from` 失敗）で返す variant とバックエンド間で
+/// 揃える。Metal 側 `ops.rs::map_sort_prepare_error` も同型に是正済み）。
 fn map_sort_error(err: CudaError) -> BackendError {
     match err {
         CudaError::SortSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        CudaError::SortDimSizeTooLarge { dim_size } => {
+            BackendError::ShapeMismatch(ShapeError::IndexRangeOverflow { index: dim_size })
+        }
         CudaError::InvalidSortShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
