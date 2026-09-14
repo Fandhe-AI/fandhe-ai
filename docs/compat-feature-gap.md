@@ -1526,6 +1526,17 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
 - CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/mha_backend_parity.rs` の `#[ignore]` テストを参照）。
 
+## #1739 の追補（`HuberLoss`／`SmoothL1Loss`）
+
+§2.8 の `HuberLoss`/`SmoothL1Loss` 行はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する。
+
+- `Var::huber_loss(target, delta, reduction)`（PyTorch `nn.HuberLoss(delta)` 相当）・`Var::smooth_l1_loss(target, beta, reduction)`（`nn.SmoothL1Loss(beta)` 相当。`beta = 1.0` のとき `huber_loss(delta=1.0)` と一致）を追加した（共通実装 `Var::huber_loss_impl`。`crates/autodiff/src/var.rs`）。`nn::loss::HuberLoss`／`SmoothL1Loss`（`crates/autodiff/src/nn/loss.rs`）は `MseLoss`／`CrossEntropyLoss` と同型の薄いラッパー。
+- 新設 `Op::HuberLoss`（`tape.rs`）・`BackendOps::huber_loss`／`huber_loss_backward`（`tensor-core::backend_ops.rs`。既定 `Unsupported`）・`HuberKind`（`{Huber, SmoothL1}`。`#[non_exhaustive]`）を追加し、CPU（`backend-cpu::huber`）・CUDA（`backend-cuda::huber`／`kernels_huber`。forward 2 段 reduction・backward 1 段。`kernels_mse.rs` と同型構成）・Metal（`backend-metal::huber`／`shaders/huber.metal`。`ctx.encode` + `DispatchFailureCell` 方式を新規実装時点から採用）の 3 バックエンドすべてに専用融合カーネルを実装した（`MseLoss` と同型の「解析形の専用ノードであり融合 IR〈`run_fused`〉を経由しない」設計）。
+- VJP は `dPred = scale·grad_elem(pred−target)`・`dTarget = −dPred`（`grad::huber_loss_vjp`。`BackendOps::huber_loss_backward` が `Unsupported` を返したときのみホスト参照実装へフォールバック）。`sign(d)` は 3 バックエンドとも `copysign`（Rust `f32::copysign`・CUDA `copysignf`・MSL `copysign`）で統一。
+- `delta`／`beta` はホスト側（`Var::huber_loss_impl`）で有限かつ `> 0` を検証し、違反は `AutodiffError::InvalidArgument`（PyTorch の `beta = 0`〈`nn.L1Loss` 相当への退化〉は本実装の対象外）。
+- facade 到達経路は既存 `Var` 再エクスポート経由（`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）・新規 `pub use`／`pub fn` は facade へ追加していない。
+- `reduction='none'`（要素別損失出力）は対象外のまま。
+- CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/backend-cuda/tests/huber_parity.rs`・`crates/backend-metal/tests/huber_parity.rs`・`crates/facade/tests/huber_backend_parity.rs` の `#[ignore]` テストを参照）。
 ## #1742 の追補（`Adam`。coupled L2 weight decay）
 
 §2.9 の `Adam`（coupled L2 weight decay）行はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（親 #1610）。
