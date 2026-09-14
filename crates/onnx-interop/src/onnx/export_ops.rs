@@ -10,10 +10,12 @@
 //! （`interp.rs::compute_transpose` -> `ops::transpose(t, None)` が rank 依存の軸反転を
 //! 適用する）ため、`None` を静的な既定値で埋めずそのまま省略する）。
 //!
-//! autodiff の `Op`／`Tape` から本モジュールの `ExportOp` への橋渡しは親 #1653／#1775
-//! のスコープであり、本モジュールはそれには関与しない（`onnx-interop` は crates.io
-//! 非公開クレートであり facade へは一切公開しない。`export.rs` モジュール冒頭コメント
-//! 参照）。
+//! autodiff の `Op`／`Tape` から本モジュールの `ExportOp` への橋渡しは、
+//! `onnx-interop` の crates.io 公開承認（未取得。#1775・
+//! `docs/facade-onnx-export-exposure-decision.md` §6）取得後の後続 issue へ
+//! 引き継ぐ（本モジュールは現時点ではそれには関与しない）。`onnx-interop` は
+//! crates.io 非公開クレートであり facade へは一切公開しない
+//! （`export.rs` モジュール冒頭コメント参照）。
 
 use super::export::{ExportError, encode_tensor};
 use super::graph::{Graph, RawTensor};

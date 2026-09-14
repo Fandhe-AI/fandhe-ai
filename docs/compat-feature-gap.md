@@ -897,6 +897,19 @@ import の総合 roundtrip（構造一致・bit 同一）・`interp::run` 結果
 `interp.rs`）は無変更・facade 新規公開面はなし（#1775 の判断は本追補の対象外の
 まま変わらない）。
 
+**#1775 追記（ONNX export の facade 公開）**: 設計判断を
+`docs/facade-onnx-export-exposure-decision.md` として記録した。#1652（ONNX
+import 公開可否）と同じ publish 前提（`onnx-interop` の crates.io 公開という
+ユーザー承認未取得の別個の事項）を共有するため、上記「ONNX export」行
+（346 行目）のスナップショット本文は不変のまま、facade 公開は段階 0・
+blocked のまま close しない（`docs/facade-onnx-import-exposure-decision.md`
+§6.2）。本 issue の唯一のコード変更は
+`crates/facade/tests/api_surface.rs` への負の guard テスト 2 件
+（`facade_does_not_depend_on_unpublished_onnx_interop`／
+`facade_sources_do_not_reference_onnx_interop`。facade が非公開クレート
+`onnx-interop` へ依存しないことの機械的固定）であり、facade 新規公開面は
+なし。
+
 ## #1705 の追補
 
 `float64`／`float16` 行（319〜320 行目）のスナップショット本文は不変のまま、Metal バックエンド限定で以下が確定した（イシュー #1705・`docs/backend-dtype-dispatch-design.md` §14）。

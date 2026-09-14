@@ -7,8 +7,10 @@
 ## 0. スコープ境界
 
 - 本 issue の対象は「`interp.rs` が読む 22 op の逆方向（内部 op -> `NodeProto`）」
-  のみ。autodiff `Op`／`Tape` -> `ExportOp` の橋渡し・facade 公開は #1653／#1775
-  のスコープ（`docs/facade-onnx-import-exposure-decision.md`）。
+  のみ。autodiff `Op`／`Tape` -> `ExportOp` の橋渡し・facade 公開は #1653 のスコープで、
+  facade 公開可否自体は #1775 が判断済み（現状は `onnx-interop` の crates.io 公開という
+  ユーザー承認未取得の前提により非公開のまま段階 0。close はしない。
+  `docs/facade-onnx-export-exposure-decision.md`）。
 - import -> export -> import の総合 roundtrip・未対応 op を含むモデルの
   fail-closed 確認という総合テストは #1774 で実装済み（§6 参照）。本ドキュメント・
   実装の単体テストは op 単位の対称性検証に限定する。
@@ -84,8 +86,9 @@ import 側（`decode_tensor`）がエラーメッセージにしか使わない�
 
 ## 5. 対象外事項
 
-- autodiff `Op`／`Tape`／`Sequential` -> `ExportOp` の橋渡し・facade 公開
-  （#1653／#1775）
+- autodiff `Op`／`Tape`／`Sequential` -> `ExportOp` の橋渡し（#1653。橋渡しの
+  配置候補は `docs/facade-onnx-export-exposure-decision.md` §3.2）・facade 公開
+  （#1775 が判断済み。publish 承認待ちの段階 0）
 - `value_info`／`TypeProto` 非出力による外部ツール（`onnx.checker`）妥当性
   （#1772 既知事項）
 - opset<13 の attr 形（`Squeeze`/`Unsqueeze` の `axes` 属性）での export・
