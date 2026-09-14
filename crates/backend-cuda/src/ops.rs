@@ -1282,6 +1282,28 @@ fn map_gather_scatter_error(err: CudaError) -> BackendError {
     }
 }
 
+/// `unique.rs::CudaUnique::run_unique_f32` のエラーを `BackendOps::
+/// unique` の戻り値へ変換する（イシュー #1734）。
+/// [`CudaError::UniqueSizeLimitExceeded`]（対象サイズがバックエンド
+/// 固有上限を超過）**のみ** [`BackendError::Unsupported`] へ写像し、
+/// `Var::unique` のホストフォールバック（`eval::unique`）へ委ねる。
+/// [`CudaError::InvalidUniqueShape`]（内部契約違反。呼び出し元の事前
+/// 検証を通過した入力からは実質到達しない防御的経路）は
+/// `ShapeError::ElementCountOverflow` へ、それ以外（driver 不在等）は
+/// 既存 [`map_cuda_error`] へ委譲する——`Unsupported` へ写像するのは
+/// サイズ上限超過の専用 variant のみとし、内部契約違反・driver 失敗を
+/// ホストフォールバックで覆い隠さない（`.claude/rules/security.md`
+/// A08）。
+fn map_unique_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::UniqueSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        CudaError::InvalidUniqueShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
+}
+
 /// shape の要素数積を `checked_mul` の畳み込みで検査する（PR #1795
 /// codex-review 指摘の是正・イシュー #1777）。`Tensor::contiguous()`
 /// は内部で `is_contiguous()` → `numel()`（`shape.iter().product()`。
@@ -2991,6 +3013,37 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::unique` の CUDA 実装（イシュー #1734）。
+    /// `x.contiguous()` で稠密化してから `unique.rs::CudaUnique::
+    /// run_unique_f32`（ビットニックソート方式）へ委譲する。契約
+    /// （totalOrder ソート・`==` による重複判定）は
+    /// `fandhe_ai_tensor_core::BackendOps::unique` doc を正とする。
+    fn unique(&self, x: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        // `x.contiguous()`（非 contiguous 時は内部で `numel()` を使い
+        // `Vec::with_capacity` を確保する）を呼ぶ前に要素数積の
+        // オーバーフローを検査する（`gather`／`scatter` と同じ
+        // `checked_shape_numel` 適用方針。PR #1828 codex-review P1
+        // 是正: `checked_shape_numel` doc の `[usize::MAX, 2, 0]` 例と
+        // 同型の transpose 済み view が `unique` 経由でも到達しうる）。
+        checked_shape_numel(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("unique: input not contiguous".into())
+        })?;
+
+        let u = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_unique(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_unique_error, || u.run_unique_f32(x_slice))?;
+        let m = out.len();
+        Tensor::new(out, &[m]).map_err(BackendError::ShapeMismatch)
+    }
+
     /// `BackendOps::scalar_unary` の CUDA 実装（イシュー #1700・#1702）。
     /// `Sqrt`／`Clamp` のみ実装済み（`kernels_scalar_op` モジュール doc
     /// 「スコープ」参照）で、他 kind は `Unsupported` を返しホスト参照
@@ -3834,6 +3887,29 @@ mod tests {
                 index: 3,
                 dim_size: 3,
             })
+        ));
+    }
+
+    /// [`CudaBackendOps::unique`] の回帰テスト（PR #1828 codex-review
+    /// P1 是正確認・イシュー #1734）。`gather_returns_empty_for_dim_
+    /// axis_large_input_with_zero_sized_other_axis` と同じ `[0, 2,
+    /// usize::MAX]` → `transpose(0, 2)` → `[usize::MAX, 2, 0]` の再現
+    /// 手法で、`unique` が `x.contiguous()`（内部で `numel()` を使う）
+    /// を呼ぶ前に `checked_shape_numel` で拒否し、`overflow-checks`
+    /// 有効ビルドでも panic せず型付きエラーを返すことを確認する。
+    /// チェックは `with_driver_call` 呼び出し前に完了するため、GPU
+    /// 非依存の通常テストとして Linux CI でも実行できる。
+    #[test]
+    fn unique_rejects_transposed_shape_with_overflowing_intermediate_product() {
+        let input_base = Tensor::<f32>::new(Vec::new(), &[0usize, 2usize, usize::MAX]).unwrap();
+        let input = input_base.transpose(0, 2).unwrap();
+        assert_eq!(input.shape(), &[usize::MAX, 2, 0]);
+
+        let ops = CudaBackendOps::new(0);
+        let err = ops.unique(&input).expect_err("overflow must be rejected");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         ));
     }
 

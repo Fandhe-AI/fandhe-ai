@@ -1403,6 +1403,52 @@ pub(crate) fn one_hot(index: &Tensor<i32>, num_classes: usize, out_shape: &[usiz
     build_tensor(out, out_shape)
 }
 
+/// 平坦化・totalOrder ソート・隣接重複除去のホスト参照実装
+/// （`torch.unique(input, sorted=True)` の values のみ。イシュー
+/// #1734）。`BackendOps::unique` が `Unsupported` を返したときのみ
+/// `grad::unique_with_fallback` から呼ばれる。`backend-cpu::unique`
+/// と意図的に同一アルゴリズムを複製する（`eval` と CPU 実装の
+/// 意図的複製方針。gather／scatter の先例に倣う）。
+///
+/// **順序キー**: `f32::total_cmp`（IEEE 754 totalOrder）。**重複判定**:
+/// `==`（IEEE 比較。`-0.0`／`+0.0` は同一視され totalOrder で先頭側の
+/// `-0.0` が代表として残り、`NaN` は `NaN != NaN` のためすべて保持
+/// される）。`sort_unstable_by` は totalOrder で `Equal` と判定される
+/// 要素同士が bit 単位で同一であることを前提に安定性を要求しない
+/// （totalOrder は全順序でありタイは bit 同一の場合のみ発生する）。
+///
+/// **契約（PR #1828 codex-review P1 是正）**: 呼び出し元
+/// `grad::unique_with_fallback` は本関数を呼ぶ前に要素数積のオーバー
+/// フロー検査を済ませているため、本関数が実際にオーバーフロー形状で
+/// 呼ばれることは契約上ない（`build_tensor` と同じ「呼び出し元が
+/// 事前検査済み」契約・`docs/fusion-graph-design.md` §3.5.3 (iii)）。
+/// それでも `input.numel()`（内部で無検査の `.iter().product()` を
+/// 使い `overflow-checks` 有効ビルドで panic しうる）を直接呼ばず、
+/// 事前に `checked_mul` で再検査してから読む（契約違反を `panic!` で
+/// はなく `debug_assert!` で検知しつつ空集合へ安全側フォールバックする
+/// 二重防御。本番経路 panic 禁止・`.claude/rules/coding-rust.md`）。
+pub(crate) fn unique(input: &Tensor<f32>) -> Tensor<f32> {
+    let checked_numel = input
+        .shape()
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d));
+    if checked_numel.is_none() {
+        debug_assert!(
+            false,
+            "eval::unique: 呼び出し元が要素数積オーバーフローを事前検査済みのはずが違反した（契約違反）"
+        );
+        return build_tensor(Vec::new(), &[0]);
+    }
+    if input.numel() == 0 {
+        return build_tensor(Vec::new(), &[0]);
+    }
+    let mut v = dense_vec(input);
+    v.sort_unstable_by(f32::total_cmp);
+    v.dedup_by(|cur, prev| *cur == *prev);
+    let m = v.len();
+    build_tensor(v, &[m])
+}
+
 /// CrossEntropy 損失（log-sum-exp 安定化。クラス次元 `class_dim` 指定。
 /// #191・親イシュー #189）。shape 検査（`class_dim` 範囲・targets
 /// shape 一致・targets 添字範囲）は呼び出し元（`var.rs::

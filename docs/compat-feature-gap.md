@@ -1042,6 +1042,8 @@ bool 引数との直接合成も #1613 待ち）。VJP は両入力とも常に�
 facade parity 実測は本エージェント実行環境に実機がないため未実施の
 まま申し送る。
 
+## #1755 の追補
+
 #1755 で `one_hot`（`torch.nn.functional.one_hot`／`tf.one_hot` 相当。
 **非微分演算**）が実装済みになった（`Var::one_hot`・`Op::OneHot`。
 VJP は明示ゼロ〈`Gradients::get` で観測可能な形で入力へゼロ勾配を流す。
@@ -1055,6 +1057,24 @@ one_hot_f32`。CUDA 版と同型の設計）の 3 バックエンドとも専用
 エクスポート経由）。CUDA・Metal 実機での facade parity 実測（`#[ignore]`
 分離済み）は本エージェント実行環境に実機がないため未実施のまま
 申し送る。
+
+## #1734 の追補
+
+`torch.unique(input, sorted=True)` の values のみを実装済み化した
+（`Var::unique`。イシュー #1734・`docs/unique-facade-exposure-decision.md`）。
+他の Var 演算と異なり非微分演算（勾配を持たない）であり、出力形状が
+入力値に依存して動的に決まるため `Var`（tape ノード・静的 shape）では
+なく **detached な `Tensor<f32>`** を返す（`Op` を tape に記録しない）。
+CPU（参照実装）・CUDA／Metal（ビットニックソート方式。整数
+compare/swap のみで浮動小数点演算を含まないため決定的）の 3
+バックエンドとも bit 完全一致契約。CUDA／Metal 実機（DGX Spark
+GB10・Apple Silicon）は本実装環境に到達手段がなく `#[ignore]`
+テストとして未実測のまま GB10／Mac セッションへ申し送る。
+`return_inverse`／`return_counts`／`dim` 指定・`sorted=false`・
+`unique_consecutive`・GPU 側 prefix-sum 圧縮は対象外のまま
+（decision doc §5／§6）。facade 新規公開面なし（既存 `Var`
+再エクスポート経由）。
+
 ## #1713 の追補
 
 `Var::gelu`／`gelu_tanh`／`softplus`（GELU 誤差関数版・tanh 近似版・
@@ -1102,6 +1122,57 @@ libm 実装）とは一般に bit 同一にならず、超越関数系と同じ�
 Metal（Apple Silicon）実機での parity テストは、本実装エージェントの
 実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ
 申し送る。
+
+## #1719 の追補
+
+§2.5「縮約」の `sum(dim)`／`mean(dim)`／`max(dim)`/`min(dim)` 行
+（スナップショット本文は不変）のうち、複数軸対応・`keepdim` 対応・
+`mean` 新設部分が実装済みになった。
+
+- `Var::sum_dims(&dims, keepdim)`／`max_dims(&dims, keepdim)`（複数軸・
+  `keepdim` 対応。PyTorch `sum(dim=[...], keepdim=)`／`amax(dim=[...],
+  keepdim=)` 相当）・`Var::mean(dim)`／`mean_dims(&dims, keepdim)`（新設。
+  PyTorch `mean(dim, keepdim)` 相当）を追加した。
+- 実現方式（`crates/autodiff/src/reduce_dims.rs`。新規 `pub(crate)`
+  モジュール）: 縮約対象軸が単一・全軸のいずれかなら既存
+  `Var::sum(Option<usize>)`／`max(Option<usize>)` へ無加工で直接委譲
+  する（`sum_dims(&[d], false)` が `sum(Some(d))` と bit 同一になる
+  契約はこの分岐が担う）。複数軸・非全軸の場合は `Var::permute`
+  （kept 軸 → reduced 軸の順。恒等順列なら省略）→ `Var::contiguous`
+  （非 contiguous のときのみ実体化）→ `Var::reshape`（reduced 軸を 1 軸
+  へ併合）で単一軸縮約へ帰着させる（逐次〈軸ごと〉縮約にしない理由は
+  同モジュール doc 参照。f64 アキュムレータの 1 パス蓄積・`max_dims`
+  の同値タイ決定性を軸をまたいで維持するため）。新規カーネルは追加せず
+  `BackendOps` も非拡張——既存 `sum`／`max`（CPU／CUDA。Metal は
+  TASK-1.9c スコープ外の `Unsupported` を継承）カーネルをそのまま
+  再利用する分解方式（`Var::einsum`〈#1620〉と同じ設計方針）。
+- `Var::mean`（単一軸／全軸）は新 `Op::Mean`（`tape::Op`）として追加した。
+  `BackendOps` に対応メソッドを持たず、forward は `self.tape.ops().sum`
+  の結果をホスト側で縮約対象要素数 `n` により**1 回だけ除算**する合成
+  （CPU バックエンド参照実装の「sum の後に 1 回だけ除算する」丸め規律
+  と同じ）。`n == 0` は `AutodiffError::InvalidArgument` で fail-closed
+  に拒否する（PyTorch は `NaN` を返すが安全側を採用）。VJP（`grad.rs::
+  mean_vjp`）は `Sum` の VJP（複製）を `1/n` でスケールしたものに帰着
+  する。checkpoint（`Op::is_checkpoint_eligible`）にも対応し、
+  `recompute_value` が forward と同一の `ops.sum` → 同一除算で再導出
+  するため checkpoint 有無で backward の値が bit 同一であることを
+  統合テストで確認済み。
+- `max_dims` の同値タイは `grad.rs::max_vjp` の既存「先勝ち決定的」
+  規約（軸をまたいだ場合も「kept 軸〈元の順序〉→ reduced 軸〈昇順〉」
+  の併合順で最初に現れる要素）をそのまま維持する。`amax`／`max` の
+  勾配分配方式（先勝ち決定的 対 均等分配）を確定する #1718 は本
+  イシュー時点（2026-09-14）で未解決の OPEN のまま・決定 doc も
+  `docs/` に存在しないため、安全側として `max_vjp` は無変更（先勝ち
+  維持）とした。#1718 が均等分配へ確定した場合は `max_dims` の期待値
+  も追従して更新する必要がある。
+- facade 新規公開面なし（既存 `Var` 再エクスポート経由のみ）。CUDA
+  （DGX Spark GB10）実機での facade parity テスト（`crates/facade/tests/
+  reduce_backend_parity.rs` の `#[ignore]` テスト）は本実装エージェント
+  の実行環境に実機への到達手段がないため未実測のまま GB10 セッション
+  へ申し送る。Metal は `sum`／`max` 自体が `Unsupported`（TASK-1.9c
+  スコープ外）のため合成実装もその挙動を継承し対象外のまま。
+- `min`／`argmax`／`argmin`（#1720）・`var`／`std`／`norm`（#1723）は
+  本 issue の対象外のまま。
 
 ## 追補（イシュー #1731）
 

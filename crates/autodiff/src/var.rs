@@ -28,6 +28,7 @@ use crate::eval;
 use crate::grad::{
     concat_with_fallback, gather_with_fallback, one_hot_with_fallback, scalar_binary_with_fallback,
     scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
+    unique_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -809,6 +810,123 @@ impl<'t> Var<'t> {
             value,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `dim` に沿った縮約平均。`dim: None` は全軸縮約（スカラー）。
+    /// `sum`／`max` と同じ置き換え方針だが、`BackendOps` を拡張せず
+    /// `self.tape.ops().sum` の結果をホスト側で縮約対象要素数 `n` に
+    /// より **1 回だけ除算**する合成実装（CPU バックエンド側の参照
+    /// 実装〈`reduction::mean`〉の「sum の後に 1 回だけ除算する」丸め
+    /// 規律と同じ。`tape::Op::Mean` doc 参照）。
+    ///
+    /// **`n == 0`（縮約対象の要素数が 0）は
+    /// [`AutodiffError::InvalidArgument`] で拒否する**（PyTorch は
+    /// `NaN` を返すが、`.claude/rules/coding-rust.md` の本番経路
+    /// panic 禁止方針の趣旨に合わせ、値が定義されない縮約は安全側で
+    /// 明示的に拒否する。CPU バックエンド側の参照実装
+    /// `ReduceError::EmptyReduction` と同じ考え方）。
+    ///
+    /// **REQ-9 Tier 1「縮約（mean）」根拠**: イシュー #1719・親 #1601
+    /// 「Phase 2（Tier 1）」。`fandhe_ai::compat::array`／
+    /// `crates/autodiff::Var` を再エクスポートするのみで新規公開面は
+    /// 追加しない（`docs/compat-api-scope.md` §5「Tier 1 に列挙済みの
+    /// 機能の実装は本節の再適用を要しない」）。
+    pub fn mean(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        let shape = self.shape();
+        reduce_out_shape(&shape, dim)?;
+        let n: usize = match dim {
+            None => shape.iter().product(),
+            Some(axis) => shape[axis],
+        };
+        if n == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "Var::mean: 縮約対象の要素数が 0 です".to_string(),
+            ));
+        }
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let sum_value = self.tape.ops().sum(&input_val, dim)?;
+        let value = {
+            let data: Vec<f32> = eval::dense_vec(&sum_value)
+                .into_iter()
+                .map(|v| v / n as f32)
+                .collect();
+            eval::build_tensor(data, sum_value.shape())
+        };
+        let id = self.tape.push_eager(
+            Op::Mean {
+                input: self.id,
+                dim,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// `sum_dims`／`max_dims`／`mean_dims` 共通の骨格（`crate::
+    /// reduce_dims::plan_reduce_dims` で検証・算出した計画に従って
+    /// `merge_for_reduction` で単軸縮約可能な形へ整形し、`reduce`
+    /// （呼び出し元が渡す `sum`／`max`／`mean` いずれかの単軸縮約）を
+    /// 適用してから `keepdim: true` のときだけ `reshape` する）。単軸
+    /// 縮約メソッドが 1 種類だけ異なる 3 メソッドの重複を避けるための
+    /// private ヘルパ（イシュー #1719 レビュー指摘）。
+    fn reduce_dims_with<F>(
+        &self,
+        dims: &[usize],
+        keepdim: bool,
+        reduce: F,
+    ) -> Result<Var<'t>, AutodiffError>
+    where
+        F: FnOnce(Var<'t>, Option<usize>) -> Result<Var<'t>, AutodiffError>,
+    {
+        let shape = self.shape();
+        let plan = crate::reduce_dims::plan_reduce_dims(&shape, dims)?;
+        let (merged, axis) = crate::reduce_dims::merge_for_reduction(*self, &plan)?;
+        let reduced = reduce(merged, axis)?;
+        if keepdim {
+            reduced.reshape(&plan.keepdim_shape)
+        } else {
+            Ok(reduced)
+        }
+    }
+
+    /// 複数軸の縮約和（`torch.sum(dim=[...], keepdim=)` 相当。イシュー
+    /// #1719）。単一軸なら `sum(Some(d))` と**bit 同一**（`crate::
+    /// reduce_dims::merge_for_reduction` が単一軸・全軸を無加工で
+    /// 既存単軸 API へ直接委譲するため）。それ以外は `permute` →
+    /// `contiguous`（非 contiguous のときのみ）→ `reshape` で reduced
+    /// 軸を 1 軸へ併合してから単軸 `sum` を呼ぶ（`crate::reduce_dims`
+    /// モジュール doc「併合方式を選ぶ理由」参照。f64 アキュムレータの
+    /// 1 パス蓄積を軸をまたいで維持するため、軸ごとの逐次縮約にはしない）。
+    ///
+    /// `dims` は空・範囲外・重複のいずれも
+    /// [`AutodiffError`]（`crate::reduce_dims::plan_reduce_dims` が
+    /// 検査）で拒否する。`keepdim: true` は縮約軸をサイズ 1 のまま
+    /// 元の rank を保持する（PyTorch `keepdim=True` 相当）。
+    pub fn sum_dims(&self, dims: &[usize], keepdim: bool) -> Result<Var<'t>, AutodiffError> {
+        self.reduce_dims_with(dims, keepdim, |v, axis| v.sum(axis))
+    }
+
+    /// 複数軸の縮約最大値（`torch.amax(dim=[...], keepdim=)` 相当。
+    /// イシュー #1719）。`sum_dims` と同じ併合方式（`crate::
+    /// reduce_dims`）を使うため、同値タイは縮約対象全要素を**1 回の
+    /// `max_vjp` 呼び出し**で見る（併合順「kept 軸〈元の順序〉→
+    /// reduced 軸〈昇順〉」で最初に現れる要素が先勝ちする。`grad.rs::
+    /// max_vjp` の「先勝ち決定的」規約——イシュー #1718（amax 勾配
+    /// 分配方式の確定）は本イシュー時点で未決着のため、規約は変更
+    /// しない）。`dims`／`keepdim` の契約は `sum_dims` と同一。
+    pub fn max_dims(&self, dims: &[usize], keepdim: bool) -> Result<Var<'t>, AutodiffError> {
+        self.reduce_dims_with(dims, keepdim, |v, axis| v.max(axis))
+    }
+
+    /// 複数軸の縮約平均（`torch.mean(dim=[...], keepdim=)` 相当。
+    /// イシュー #1719）。`sum_dims` と同じ併合（`crate::reduce_dims`）
+    /// の結果へ `Var::mean` を適用するだけの合成（新規 Op は追加しない）。
+    /// `dims`／`keepdim` の契約・`n == 0` 拒否は `mean`／`sum_dims` と同一。
+    pub fn mean_dims(&self, dims: &[usize], keepdim: bool) -> Result<Var<'t>, AutodiffError> {
+        self.reduce_dims_with(dims, keepdim, |v, axis| v.mean(axis))
     }
 
     /// 平均二乗誤差（`self` = 予測値、`target` = 正解値。全要素平均・
@@ -2343,6 +2461,27 @@ impl<'t> Var<'t> {
             .broadcast_to(&out_shape)
             .map_err(AutodiffError::Shape)?;
         self.gather(dim, &index_bc)
+    }
+
+    /// 一意値集合を返す（`torch.unique(input, sorted=True)` の values
+    /// のみ。イシュー #1734・契約は
+    /// [`fandhe_ai_tensor_core::BackendOps::unique`] doc を正とする）。
+    ///
+    /// **非微分演算**: unique は勾配を持たない（出力の各要素がどの
+    /// 入力位置に由来するかは一意に定まらず、出力形状も入力値に
+    /// 依存して動的に決まるため既存の `Var`〈tape ノード・静的
+    /// shape〉には乗らない）。そのため本メソッドは新規 `Op` を tape に
+    /// 記録せず（`push_eager` を呼ばない）、`self` を
+    /// `materialize_fallible`（クレート内部ヘルパー）で実体化した値に
+    /// 対して `unique_with_fallback` を適用した **detached な
+    /// `Tensor<f32>`** を返す（`Var` ではない。
+    /// `docs/unique-facade-exposure-decision.md` 参照）。
+    pub fn unique(&self) -> Result<Tensor<f32>, AutodiffError> {
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        unique_with_fallback(self.tape.ops(), &input_val)
     }
 
     /// `mask` が真の位置を上書きする（`torch.scatter` 相当。イシュー

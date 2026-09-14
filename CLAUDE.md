@@ -311,6 +311,7 @@ fandhe-ai/
     ├── self-repair-candidate-isolation.md # 候補実行の OS レベル縦深防御の調査結果・採否判断（#414）
     ├── self-repair-revalidation-plan.md # TASK-3.3a 自己修復ループ再実証の実証計画・題材選定（#140）
     ├── spec-proposal-req2-candle-parity-tolerance.md # REQ-2 統一複合判定へのスケール付き絶対誤差救済項（線形 K 形式・案 1′〈√K 形式〉との相違を明記）の追加／比較対象側（candle 等）fail の「判定不能」規定を fandhe-ai-spec へ提案する draft。spec リポへそのまま起票可能な本文案を含むが、実起票はイシュー #1241 でのユーザー承認後に限る（`docs/spec/` は不変・未起票。イシュー #1240。**#1241 承認を受け 2026-09-08 に (b) 形式で Fandhe-AI/fandhe-ai-spec#64 として起票済み**）
+    ├── unique-facade-exposure-decision.md # unique（`torch.unique(input, sorted=True)` の values のみ。非微分演算・出力形状が入力値に依存して動的に決まる）の設計判断（`Var::unique` が detached な `Tensor<f32>` を返す案 A の採用理由・facade 新規公開面なしの根拠・3 バックエンド実装記録〈CPU 参照実装・CUDA／Metal ビットニックソート方式・bit 完全一致契約〉・CUDA／Metal 実機は未実測のまま GB10／Mac セッションへ申し送り。イシュー #1734）
     └── spec/                # 正本 submodule（fandhe-ai-spec。編集禁止）
         ├── 04-requirements.md  # REQ-1〜14
         ├── 05-tasks.md         # TASK 一覧（4h 粒度）

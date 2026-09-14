@@ -159,6 +159,7 @@ mod grad;
 mod layout;
 pub mod nn;
 pub mod optim;
+mod reduce_dims;
 mod tape;
 #[cfg(test)]
 mod test_support;

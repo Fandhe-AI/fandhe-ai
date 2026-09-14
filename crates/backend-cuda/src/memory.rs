@@ -670,6 +670,13 @@ impl ReadbackSentinel for half::f16 {
     const SENTINEL: half::f16 = half::f16::ONE;
 }
 
+/// `unique.rs::CudaUnique::run_unique_f32` の `u32` キー readback
+/// 用（イシュー #1734）。`0` は「事前タッチ」の意図を満たさない
+/// （トレイト doc 参照）ため非ゼロの任意値を選ぶ。
+impl ReadbackSentinel for u32 {
+    const SENTINEL: u32 = 0xDEAD_BEEF;
+}
+
 /// `numel` 要素ぶんの事前タッチ済みホストバッファを確保する
 /// （[`ReadbackDest::PretouchedFresh`] 専用ヘルパー）。`vec![T::SENTINEL;
 /// numel]` は `Vec::from_elem` 経由で全要素を明示的に書き込むため
