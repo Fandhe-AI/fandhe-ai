@@ -146,6 +146,24 @@ pub enum CudaError {
     /// `docs/unique-facade-exposure-decision.md` §3.1 参照）。
     UniqueSizeLimitExceeded { n: usize, limit: usize },
 
+    /// scan（`scan.rs::CudaScan`。累積和／累積積）起動 API のホスト側
+    /// 検証（`outer`／`axis_len`／`inner` の乗算オーバーフロー・入力
+    /// スライス長が `numel` と不一致）が拒否した入力（イシュー #1740）。
+    /// `InvalidGatherScatterShape` と同じ理由で独立 variant に分離する。
+    /// 呼び出し元 `ops.rs` が `reduce_out_shape` で `dim` を事前検査
+    /// 済みの契約のため、本 variant は主に起動前検証の防御的経路。
+    InvalidScanShape { detail: String },
+
+    /// scan の対象サイズがバックエンド固有の上限（カーネル引数 `int`
+    /// の範囲〈`i32::MAX`〉を `lanes`／`axis_len`／`inner`／`numel` の
+    /// いずれかが超過）を超過した（イシュー #1740）。`ops.rs::
+    /// CudaBackendOps::cumsum`／`cumprod` は本 variant のみを
+    /// [`fandhe_ai_tensor_core::device::BackendError::Unsupported`] へ
+    /// 写像し `Var::cumsum`／`cumprod` のホストフォールバック
+    /// （`eval::cumsum_along`／`cumprod_along`）へ委ねる
+    /// （`UniqueSizeLimitExceeded` と同じ設計判断）。
+    ScanSizeLimitExceeded { detail: String },
+
     /// `sort`／`topk`（`sort.rs::CudaSort`）の起動前検証（ホスト側検証）
     /// が拒否した入力（イシュー #1741）。`InvalidUniqueShape` と同じ
     /// 理由で独立 variant に分離する。カーネル引数への `i64` 変換失敗・
@@ -546,6 +564,12 @@ impl fmt::Display for CudaError {
             }
             CudaError::UniqueSizeLimitExceeded { n, limit } => {
                 write!(f, "unique size limit exceeded: n={n} exceeds limit={limit}")
+            }
+            CudaError::InvalidScanShape { detail } => {
+                write!(f, "invalid scan shape: {detail}")
+            }
+            CudaError::ScanSizeLimitExceeded { detail } => {
+                write!(f, "scan size limit exceeded: {detail}")
             }
             CudaError::InvalidSortShape { detail } => {
                 write!(f, "invalid sort/topk shape: {detail}")

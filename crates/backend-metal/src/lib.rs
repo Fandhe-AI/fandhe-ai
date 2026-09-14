@@ -518,6 +518,16 @@ pub mod ops;
 pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod rnn_cell;
+// 累積和／累積積（`torch.cumsum`／`torch.cumprod` 相当。イシュー
+// #1740・親イシュー #1731）の起動 API（実行時コンパイル・パイプライン
+// 保持・実行）。`unique.rs` と同じ設計方針。
+#[cfg(target_os = "macos")]
+pub mod scan;
+// `shaders/scan.metal::cumsum_f32`／`cumprod_f32` のホスト側逐語モデル
+// （イシュー #1740）。`unique_model`・`gather_scatter_model` と同じ
+// 設計判断で `objc2` 系 FFI に触れないため `cfg(target_os = "macos")`
+// を付けず、Linux（本実装環境・CI）でも単体テストが回る。
+pub mod scan_model;
 pub mod soft_f64;
 #[cfg(target_os = "macos")]
 pub mod unique;

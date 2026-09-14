@@ -703,6 +703,52 @@ impl CudaBackendOps {
         context_cache::cached_device(self.ordinal)
     }
 
+    /// `Self::cumsum`／`cumprod`（イシュー #1740）の共通骨格。`dim` を
+    /// [`reduce_out_shape`] で再検査し、`.contiguous()`（内部で
+    /// `numel()` の無検査乗算を呼ぶ）より前に要素数積のオーバーフロー
+    /// を検査（`gather`／`unique` と同じ `checked_shape_numel` 適用
+    /// 方針）してから `outer`／`axis_len`／`inner`（`backend-cpu::scan`
+    /// と同一の lane 分解）を導出し `scan::CudaScan` へ委譲する。
+    /// `shape` の要素数が 0（いずれかの軸が 0）の場合は GPU 起動なしで
+    /// 空テンソルを返す（`checked_shape_numel` は 0 を含む shape でも
+    /// 中間積オーバーフローの恐れがあるため、この早期リターンを先に
+    /// 行う。`backend-cpu::scan::cumsum`／`cumprod` と同じ順序）。
+    fn run_scan(
+        &self,
+        x: &Tensor<f32>,
+        dim: usize,
+        kind: ScanOpKind,
+    ) -> Result<Tensor<f32>, BackendError> {
+        reduce_out_shape(x.shape(), Some(dim)).map_err(BackendError::ShapeMismatch)?;
+        let shape = x.shape().to_vec();
+        if shape.contains(&0) {
+            return Tensor::new(Vec::new(), &shape).map_err(BackendError::ShapeMismatch);
+        }
+        checked_shape_numel(&shape).map_err(BackendError::ShapeMismatch)?;
+        let outer: usize = shape[..dim].iter().product();
+        let axis_len = shape[dim];
+        let inner: usize = shape[dim + 1..].iter().product();
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("cumsum/cumprod: input not contiguous".into())
+        })?;
+
+        let s = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_scan(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_scan_error, || match kind {
+            ScanOpKind::Sum => s.run_cumsum_f32(x_slice, outer, axis_len, inner),
+            ScanOpKind::Prod => s.run_cumprod_f32(x_slice, outer, axis_len, inner),
+        })?;
+        Tensor::new(out, &shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// `BackendOps` の各公開メソッドが唯一の driver 呼び出し境界として
     /// 使う共通ヘルパー（イシュー #1013 設計文書 §9 item 7・9。PR #1064
     /// の Phase C 結線。`memory.rs::CudaMemory::with_driver_call` と同じ
@@ -1436,6 +1482,36 @@ fn map_unique_error(err: CudaError) -> BackendError {
     match err {
         CudaError::UniqueSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
         CudaError::InvalidUniqueShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
+}
+
+/// `scan.rs::CudaScan::run_cumsum_f32`／`run_cumprod_f32` のエラーを
+/// `BackendOps::cumsum`／`cumprod` の戻り値へ変換する（イシュー #1740）。
+/// [`CudaError::ScanSizeLimitExceeded`]（対象サイズがバックエンド固有
+/// 上限を超過）**のみ** [`BackendError::Unsupported`] へ写像し、
+/// `Var::cumsum`／`cumprod` のホストフォールバック（`eval::
+/// cumsum_along`／`cumprod_along`）へ委ねる。[`CudaError::
+/// InvalidScanShape`]（内部契約違反。呼び出し元の事前検証を通過した
+/// 入力からは実質到達しない防御的経路）は `ShapeError::
+/// ElementCountOverflow` へ、それ以外（driver 不在等）は既存
+/// [`map_cuda_error`] へ委譲する（`map_unique_error` と同じ設計判断。
+/// `Unsupported` へ写像するのはサイズ上限超過の専用 variant のみとし、
+/// 内部契約違反・driver 失敗をホストフォールバックで覆い隠さない。
+/// `.claude/rules/security.md` A08）。
+/// [`CudaBackendOps::run_scan`] が `cumsum`／`cumprod` のいずれかを
+/// 選択するための内部列挙（イシュー #1740）。
+enum ScanOpKind {
+    Sum,
+    Prod,
+}
+
+fn map_scan_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::ScanSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        CudaError::InvalidScanShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
         other => map_cuda_error(other),
@@ -3390,6 +3466,24 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, &[m]).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::cumsum` の CUDA 実装（イシュー #1740）。数値契約
+    /// （lane ごとの `double` アキュムレータ逐次計算・CPU 参照実装と
+    /// bit 完全一致）は `fandhe_ai_tensor_core::BackendOps::cumsum` doc
+    /// が正。`dim` を [`reduce_out_shape`] で再検査してから
+    /// `.contiguous()`（内部で `numel()` の無検査乗算を呼ぶ）より前に
+    /// 要素数積のオーバーフローを検査する（`gather`／`unique` と同じ
+    /// `checked_shape_numel` 適用方針。PR #1795／#1828 の教訓と同型）。
+    fn cumsum(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        self.run_scan(x, dim, ScanOpKind::Sum)
+    }
+
+    /// `BackendOps::cumprod` の CUDA 実装（イシュー #1740）。[`Self::
+    /// cumsum`] と同じ検査・委譲構造だが `CudaScan::run_cumprod_f32`
+    /// を起動する。
+    fn cumprod(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        self.run_scan(x, dim, ScanOpKind::Prod)
+    }
+
     /// `BackendOps::sort` の CUDA 実装（イシュー #1741）。順序契約
     /// （安定性・NaN・±0・決定性）は `fandhe_ai_tensor_core::
     /// BackendOps::sort` doc の 1〜4 を正とし、`sort.rs::CudaSort::
@@ -4396,6 +4490,48 @@ mod tests {
                 dim_size: 3,
             })
         ));
+    }
+
+    /// [`CudaBackendOps::cumsum`]／[`cumprod`] の GPU 非依存回帰テスト
+    /// （イシュー #1740）: `dim` が rank 範囲外なら `reduce_out_shape`
+    /// が `with_driver_call` 呼び出し前に拒否し、実デバイスへ触れない。
+    #[test]
+    fn cumsum_rejects_out_of_range_dim_without_touching_device() {
+        let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops.cumsum(&x, 1).unwrap_err();
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    #[test]
+    fn cumprod_rejects_out_of_range_dim_without_touching_device() {
+        let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops.cumprod(&x, 1).unwrap_err();
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    /// `shape` がいずれかの軸に `0` を含む場合、`run_scan` は
+    /// `with_driver_call` 呼び出し前に空テンソルを早期リターンする
+    /// （`gather`／`one_hot` の空出力早期リターンと同じ理由・同じ
+    /// 検証構成。GPU 非依存の通常テストとして Linux CI でも実行
+    /// できる）。
+    #[test]
+    fn cumsum_returns_empty_for_zero_sized_shape_without_touching_device() {
+        let x = Tensor::<f32>::new(Vec::new(), &[3usize, 0usize, 2usize]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let out = ops.cumsum(&x, 0).expect("empty cumsum must succeed");
+        assert_eq!(out.shape(), &[3, 0, 2]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    #[test]
+    fn cumprod_returns_empty_for_zero_sized_shape_without_touching_device() {
+        let x = Tensor::<f32>::new(Vec::new(), &[3usize, 0usize, 2usize]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let out = ops.cumprod(&x, 2).expect("empty cumprod must succeed");
+        assert_eq!(out.shape(), &[3, 0, 2]);
+        assert_eq!(out.numel(), 0);
     }
 
     /// [`CudaBackendOps::unique`] の回帰テスト（PR #1828 codex-review
