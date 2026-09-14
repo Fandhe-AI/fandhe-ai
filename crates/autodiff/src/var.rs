@@ -461,7 +461,7 @@ impl<'t> Var<'t> {
     /// ブロードキャスト付き要素ごとの減算（`self − other`。PyTorch
     /// `torch.sub`／`-` 演算子相当）。イシュー #1710（親 #1593）。
     ///
-    /// [`Var::scalar_binary`]（[`ScalarBinaryOp::Sub`]）への薄い委譲
+    /// `Var::scalar_binary`（[`ScalarBinaryOp::Sub`]）への薄い委譲
     /// （`add`／`mul` と同じ NumPy 互換ブロードキャスト・eager 実体化
     /// 契約。`docs/scalar-op-dispatch-design.md` §7）。`facade` は
     /// `crates/autodiff::Var` を再エクスポートするのみで新規公開面は
@@ -474,7 +474,7 @@ impl<'t> Var<'t> {
     /// ブロードキャスト付き要素ごとの除算（`self ÷ other`。PyTorch
     /// `torch.div`／`/` 演算子相当）。イシュー #1710（親 #1593）。
     ///
-    /// [`Var::scalar_binary`]（[`ScalarBinaryOp::Div`]）への薄い委譲。
+    /// `Var::scalar_binary`（[`ScalarBinaryOp::Div`]）への薄い委譲。
     /// **数値規約（設計 §7 を変更せず踏襲）**: IEEE 754 のまま
     /// （0 除算は `inf`／`NaN` を返し panic しない）。`db =
     /// -(a/b)/b` の 0 除算・overflow・underflow 耐性は #1634／#1686
@@ -490,7 +490,7 @@ impl<'t> Var<'t> {
     /// カーネル未実装のため本メソッドの対象外）。イシュー #1710
     /// （親 #1593）。
     ///
-    /// [`Var::scalar_binary`]（[`ScalarBinaryOp::Pow`]）への薄い委譲。
+    /// `Var::scalar_binary`（[`ScalarBinaryOp::Pow`]）への薄い委譲。
     /// **数値規約（設計 §7）**: `da = b·a^(b−1)`・`db = y·ln(a)`
     /// （`a == 0` または `b == 0` は #1686 是正によりマスクされ勾配 0。
     /// `a < 0` かつ `b` が非整数のとき forward は IEEE `NaN` を返す
@@ -502,7 +502,7 @@ impl<'t> Var<'t> {
     /// 要素ごとの平方根（PyTorch `torch.sqrt` 相当）。イシュー #1710
     /// （親 #1593）。
     ///
-    /// [`Var::scalar_unary`]（[`ScalarUnaryOp::Sqrt`]）への薄い委譲
+    /// `Var::scalar_unary`（[`ScalarUnaryOp::Sqrt`]）への薄い委譲
     /// （`relu`／`exp`／`tanh` と異なり `Result` を返す——`scalar_unary`
     /// の eager 実体化契約〈①層 1 実体化 → ②バックエンド dispatch →
     /// ③`push_eager`〉が型付きエラーを返しうるため。`where_cond`／
