@@ -20,10 +20,11 @@
 //!   （`mse_loss_fusion.rs` と同じ非主張）、REQ-2 複合判定
 //!   （`assert_parity`）で検証する。
 //! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
-//!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の forward／backward
-//!   を CPU tape と REQ-2 複合判定で突き合わせる。本エージェント実行
-//!   環境に実機への到達手段がないため未実測のまま Mac／GB10 セッション
-//!   へ申し送る。
+//!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の forward・backward
+//!   （`nll_loss_backward`／`kl_div_loss_backward` の GPU 結線を含む。
+//!   PR #1850 codex-review P2 是正）を CPU tape と REQ-2 複合判定で
+//!   突き合わせる。本エージェント実行環境に実機への到達手段がないため
+//!   未実測のまま Mac／GB10 セッションへ申し送る。
 //!
 //! **facade 未再エクスポートの既存ギャップ**: `Reduction` は
 //! `fandhe_ai::` から到達不能（MSE／CrossEntropy／BCE 共通の既存
@@ -289,6 +290,46 @@ fn metal_nll_loss_matches_cpu() {
     );
 }
 
+/// `BackendOps::nll_loss_backward`（Metal。`crate::nll::MetalNll::
+/// run_nll_backward_f32`）が facade 経由で実際に到達すること・
+/// `dInput` が CPU 融合カーネルと REQ-2 複合判定で一致することを
+/// 検証する（PR #1850 codex-review P2 是正: forward のみでは今回
+/// 追加した GPU backward 結線〈`BackendOps`・`autodiff::grad::vjp`〉を
+/// 検証できない。`metal_nll_loss_matches_cpu` と同型の構成）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_nll_loss_backward_matches_cpu() {
+    let input_shape = [4usize, 3];
+    let num_classes = 3;
+    let class_dim = 1;
+    let input_val = log_prob_leaf(89, &input_shape);
+    let targets_val = targets_leaf(91, &[4], num_classes);
+
+    let cpu_tape = fandhe_ai::tape();
+    let cpu_input = cpu_tape.make_var(&input_val);
+    let cpu_loss = cpu_input
+        .nll_loss(&targets_val, class_dim, Reduction::Mean)
+        .unwrap();
+    let cpu_grads = cpu_tape.backward(&cpu_loss).unwrap();
+    let cpu_dinput = cpu_grads.get(&cpu_input).unwrap().expect("到達する");
+
+    let metal_tape =
+        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
+    let metal_input = metal_tape.make_var(&input_val);
+    let metal_loss = metal_input
+        .nll_loss(&targets_val, class_dim, Reduction::Mean)
+        .unwrap();
+    let metal_grads = metal_tape.backward(&metal_loss).unwrap();
+    let metal_dinput = metal_grads.get(&metal_input).unwrap().expect("到達する");
+
+    assert_parity(
+        "nll_loss(mean) backward dInput: cpu vs metal",
+        &contiguous_slice(metal_dinput),
+        &contiguous_slice(cpu_dinput),
+    );
+}
+
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）依存。CI では実行しない"]
 fn cuda_kl_div_loss_matches_cpu() {
@@ -315,5 +356,133 @@ fn cuda_kl_div_loss_matches_cpu() {
         "kl_div_loss(sum) forward: cpu vs cuda",
         &contiguous_slice(&out_cuda),
         &contiguous_slice(&out_cpu),
+    );
+}
+
+/// `BackendOps::kl_div_loss_backward`（CUDA。`crate::kl_div::CudaKlDiv::
+/// run_kl_div_backward_f32`）が facade 経由で実際に到達すること・
+/// `dInput`（カーネル由来）・`dTarget`（`grad::vjp` がホスト側で計算。
+/// `cpu_kl_div_loss_backward_matches_naive_reference` と同じ非対称
+/// 構造）の双方が CPU 融合カーネルと REQ-2 複合判定で一致することを
+/// 検証する（PR #1850 codex-review P2 是正。`cuda_kl_div_loss_matches_
+/// cpu` と同型の構成）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）依存。CI では実行しない"]
+fn cuda_kl_div_loss_backward_matches_cpu() {
+    let shape = [4usize, 3];
+    let input_val = log_prob_leaf(93, &shape);
+    let target_val = probability_leaf(95, &shape);
+
+    let cpu_tape = fandhe_ai::tape();
+    let cpu_input = cpu_tape.make_var(&input_val);
+    let cpu_target = cpu_tape.make_var(&target_val);
+    let cpu_loss = cpu_input.kl_div_loss(&cpu_target, Reduction::Sum).unwrap();
+    let cpu_grads = cpu_tape.backward(&cpu_loss).unwrap();
+    let cpu_dinput = cpu_grads.get(&cpu_input).unwrap().expect("到達する");
+    let cpu_dtarget = cpu_grads.get(&cpu_target).unwrap().expect("到達する");
+
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+    let cuda_input = cuda_tape.make_var(&input_val);
+    let cuda_target = cuda_tape.make_var(&target_val);
+    let cuda_loss = cuda_input
+        .kl_div_loss(&cuda_target, Reduction::Sum)
+        .unwrap();
+    let cuda_grads = cuda_tape.backward(&cuda_loss).unwrap();
+    let cuda_dinput = cuda_grads.get(&cuda_input).unwrap().expect("到達する");
+    let cuda_dtarget = cuda_grads.get(&cuda_target).unwrap().expect("到達する");
+
+    assert_parity(
+        "kl_div_loss(sum) backward dInput: cpu vs cuda",
+        &contiguous_slice(cuda_dinput),
+        &contiguous_slice(cpu_dinput),
+    );
+    assert_parity(
+        "kl_div_loss(sum) backward dTarget: cpu vs cuda",
+        &contiguous_slice(cuda_dtarget),
+        &contiguous_slice(cpu_dtarget),
+    );
+}
+
+/// `BackendOps::nll_loss_backward`（CUDA。`crate::nll::CudaNll::
+/// run_nll_backward_f32`）が facade 経由で実際に到達すること・
+/// `dInput` が CPU 融合カーネルと REQ-2 複合判定で一致することを
+/// 検証する（PR #1850 codex-review P2 是正。`metal_nll_loss_backward_
+/// matches_cpu` の CUDA 版）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）依存。CI では実行しない"]
+fn cuda_nll_loss_backward_matches_cpu() {
+    let input_shape = [4usize, 3];
+    let num_classes = 3;
+    let class_dim = 1;
+    let input_val = log_prob_leaf(97, &input_shape);
+    let targets_val = targets_leaf(99, &[4], num_classes);
+
+    let cpu_tape = fandhe_ai::tape();
+    let cpu_input = cpu_tape.make_var(&input_val);
+    let cpu_loss = cpu_input
+        .nll_loss(&targets_val, class_dim, Reduction::Mean)
+        .unwrap();
+    let cpu_grads = cpu_tape.backward(&cpu_loss).unwrap();
+    let cpu_dinput = cpu_grads.get(&cpu_input).unwrap().expect("到達する");
+
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+    let cuda_input = cuda_tape.make_var(&input_val);
+    let cuda_loss = cuda_input
+        .nll_loss(&targets_val, class_dim, Reduction::Mean)
+        .unwrap();
+    let cuda_grads = cuda_tape.backward(&cuda_loss).unwrap();
+    let cuda_dinput = cuda_grads.get(&cuda_input).unwrap().expect("到達する");
+
+    assert_parity(
+        "nll_loss(mean) backward dInput: cpu vs cuda",
+        &contiguous_slice(cuda_dinput),
+        &contiguous_slice(cpu_dinput),
+    );
+}
+
+/// `BackendOps::kl_div_loss_backward`（Metal。`crate::kl_div::
+/// MetalKlDiv::run_kl_div_backward_f32`）が facade 経由で実際に到達
+/// すること・`dInput`（カーネル由来）・`dTarget`（`grad::vjp` が
+/// ホスト側で計算）の双方が CPU 融合カーネルと REQ-2 複合判定で一致
+/// することを検証する（PR #1850 codex-review P2 是正。
+/// `cuda_kl_div_loss_backward_matches_cpu` の Metal 版）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_kl_div_loss_backward_matches_cpu() {
+    let shape = [4usize, 3];
+    let input_val = log_prob_leaf(101, &shape);
+    let target_val = probability_leaf(103, &shape);
+
+    let cpu_tape = fandhe_ai::tape();
+    let cpu_input = cpu_tape.make_var(&input_val);
+    let cpu_target = cpu_tape.make_var(&target_val);
+    let cpu_loss = cpu_input.kl_div_loss(&cpu_target, Reduction::Sum).unwrap();
+    let cpu_grads = cpu_tape.backward(&cpu_loss).unwrap();
+    let cpu_dinput = cpu_grads.get(&cpu_input).unwrap().expect("到達する");
+    let cpu_dtarget = cpu_grads.get(&cpu_target).unwrap().expect("到達する");
+
+    let metal_tape =
+        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
+    let metal_input = metal_tape.make_var(&input_val);
+    let metal_target = metal_tape.make_var(&target_val);
+    let metal_loss = metal_input
+        .kl_div_loss(&metal_target, Reduction::Sum)
+        .unwrap();
+    let metal_grads = metal_tape.backward(&metal_loss).unwrap();
+    let metal_dinput = metal_grads.get(&metal_input).unwrap().expect("到達する");
+    let metal_dtarget = metal_grads.get(&metal_target).unwrap().expect("到達する");
+
+    assert_parity(
+        "kl_div_loss(sum) backward dInput: cpu vs metal",
+        &contiguous_slice(metal_dinput),
+        &contiguous_slice(cpu_dinput),
+    );
+    assert_parity(
+        "kl_div_loss(sum) backward dTarget: cpu vs metal",
+        &contiguous_slice(metal_dtarget),
+        &contiguous_slice(cpu_dtarget),
     );
 }
