@@ -979,14 +979,17 @@ impl<'t> Var<'t> {
         self.reduce_dims_with(dims, keepdim, |v, axis| v.sum(axis))
     }
 
-    /// 複数軸の縮約最大値（`torch.amax(dim=[...], keepdim=)` 相当。
-    /// イシュー #1719）。`sum_dims` と同じ併合方式（`crate::
-    /// reduce_dims`）を使うため、同値タイは縮約対象全要素を**1 回の
-    /// `max_vjp` 呼び出し**で見る（併合順「kept 軸〈元の順序〉→
-    /// reduced 軸〈昇順〉」で最初に現れる要素が先勝ちする。`grad.rs::
-    /// max_vjp` の「先勝ち決定的」規約——イシュー #1718（amax 勾配
-    /// 分配方式の確定）は本イシュー時点で未決着のため、規約は変更
-    /// しない）。`dims`／`keepdim` の契約は `sum_dims` と同一。
+    /// 複数軸の縮約最大値（forward 値は `torch.amax(dim=[...],
+    /// keepdim=)` と同一。イシュー #1719）。`sum_dims` と同じ併合方式
+    /// （`crate::reduce_dims`）を使うため、同値タイは縮約対象全要素を
+    /// **1 回の `max_vjp` 呼び出し**で見る（併合順「kept 軸〈元の
+    /// 順序〉→ reduced 軸〈昇順〉」で最初に現れる要素が先勝ちする。
+    /// `grad.rs::max_vjp`（`extremum_first_match_vjp`）の「先勝ち
+    /// 決定的」規約は、イシュー #1718 の確定により本メソッドも含めて
+    /// **維持される**（`torch.amax` の均等分配とは勾配が異なる点は
+    /// 意図的な設計判断。`docs/autodiff-amax-grad-distribution-
+    /// decision.md` 参照）。`dims`／`keepdim` の契約は `sum_dims` と
+    /// 同一。
     pub fn max_dims(&self, dims: &[usize], keepdim: bool) -> Result<Var<'t>, AutodiffError> {
         self.reduce_dims_with(dims, keepdim, |v, axis| v.max(axis))
     }
