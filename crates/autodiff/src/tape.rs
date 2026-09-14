@@ -206,9 +206,11 @@ pub(crate) enum Op {
     /// `Var::min`）。VJP は `Max` と共有ヘルパー
     /// （`grad::extremum_first_match_vjp`）を使う——forward 記録値
     /// `out_value` と `==` 一致する最初の位置へ上流勾配を置くだけの
-    /// 実装で最大／最小に依存しないため（#1718 が均等分配へ確定した
-    /// 場合はそのヘルパー 1 箇所の差し替えで `Max`／`Min` 両方へ
-    /// 反映される）。
+    /// 実装で最大／最小に依存しない。イシュー #1718 で先勝ち決定的
+    /// 方式を維持する設計判断が確定し（`docs/autodiff-
+    /// amax-grad-distribution-decision.md`）、このヘルパーは今後も
+    /// 差し替えない——PyTorch `amax`／`amin` 相当の均等分配は独立の
+    /// `Op`／VJP として実装する方針とした。
     Min { input: NodeId, dim: Option<usize> },
     /// `dim` に沿った縮約平均（イシュー #1719・親 #1601「Phase 2
     /// （Tier 1）」）。`BackendOps` に対応メソッドがないため、forward
@@ -738,6 +740,22 @@ pub(crate) enum Op {
         dim: usize,
         index: Tensor<i32>,
     },
+    /// `Var::pad`（`torch.nn.functional.pad(mode='constant')` 相当。
+    /// イシュー #1756）。各軸を `(before, after)` だけ定数値で拡張
+    /// する。`value` は forward 記録値へ焼き込み済みのため保持しない
+    /// （`Op::MaskedFill`／`Op::Sort` と同じ最小保持方針）。
+    /// `BackendOps::pad` に対応メソッドがあるため非融合対象
+    /// （`push_eager` で常に実体化。`Op::Gather`／`Scatter` と同型）。
+    ///
+    /// VJP（`grad.rs`）: pad の forward ⟷ narrow の VJP・pad の VJP
+    /// ⟷ narrow の forward という双対性（`Op::Concat`⟷`Op::Narrow`
+    /// の双対性と同型）に基づき、`d_input` は各軸を
+    /// `upstream.narrow(dim, before, input.shape()[dim])` で連鎖的に
+    /// 切り出す zero-copy view として求める。
+    Pad {
+        input: NodeId,
+        pads: Vec<(usize, usize)>,
+    },
     /// `Var::one_hot`（`torch.nn.functional.one_hot`／`tf.one_hot`
     /// 相当。**非微分演算**。イシュー #1755）。`input` は整数クラス id
     /// を f32 値として保持する追跡 `Var`（`Op::Gather`／`Sort`／`Topk`
@@ -1098,6 +1116,11 @@ impl Op {
             // 同じく `index` を `Op` 自身が保持する eager 実体化演算で、
             // `recompute_value` に再計算経路を持たないため解放しない。
             Op::Sort { .. } | Op::Topk { .. } => false,
+            // `Op::Pad`（イシュー #1756）は `Op::Sort`／`Op::Topk` と
+            // 同じく非追跡データ（`pads`）を `Op` 自身が保持する eager
+            // 実体化演算で、`recompute_value` に再計算経路を持たない
+            // ため解放しない。
+            Op::Pad { .. } => false,
             // `Op::OneHot`（イシュー #1755）は `Op::Gather`／`Sort` と
             // 同じく eager 実体化演算で `recompute_value` に再計算経路
             // を持たないため解放しない（非微分演算であることとは独立の
@@ -1168,6 +1191,7 @@ impl Op {
                 f(*src);
             }
             Op::Sort { input, .. } | Op::Topk { input, .. } => f(*input),
+            Op::Pad { input, .. } => f(*input),
             Op::OneHot { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);

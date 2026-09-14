@@ -41,8 +41,8 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
     GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, gather_out_shape, one_hot_out_shape, require_same_shape, row_norm_layout,
-    row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    UnaryElementwiseOp, gather_out_shape, one_hot_out_shape, pad_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -2311,6 +2311,61 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::pad` の Metal 実装（イシュー #1756）。[`pad_out_shape`]
+    /// で `input.shape()`／`pads` を再検査し、shape 要素の `u32` 収容
+    /// （カーネル引数 `constant uint*` は 32bit のため）をカーネル起動前
+    /// に fail-closed 検査してから `crate::constant_pad::
+    /// MetalConstantPad::run_pad_f32` へ委譲する（`gather` と同じ二重
+    /// 検査方針。`.claude/rules/security.md` A08）。pad は `dim` 軸限定の
+    /// gather／scatter と異なりカーネル側が固定長スタック配列
+    /// （`GS_MAX_RANK`）を使わない設計（`shaders/constant_pad.metal`
+    /// モジュール doc 参照）のため rank 上限は存在しない。**この u32
+    /// 収容検査には gather／scatter 専用の [`validate_shapes_fit_u32`]
+    /// を使わない**（同関数は `GS_MAX_RANK`〈8〉の rank 上限も併せて
+    /// 課すため、rank 9 以上の pad 入力を `BackendError::ShapeMismatch`
+    /// として fail し、`Unsupported` でないためホストフォールバックへ
+    /// 切り替わらず CPU／CUDA〈rank 上限なし〉と非対称になっていた
+    /// ——Cursor Bugbot 指摘）。
+    fn pad(
+        &self,
+        input: &Tensor<f32>,
+        pads: &[(usize, usize)],
+        value: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = pad_out_shape(input.shape(), pads).map_err(BackendError::ShapeMismatch)?;
+        let in_shape = input.shape().to_vec();
+        for &d in in_shape.iter().chain(out_shape.iter()) {
+            if d > u32::MAX as usize {
+                return Err(BackendError::ShapeMismatch(
+                    ShapeError::ElementCountOverflow,
+                ));
+            }
+        }
+
+        // `input` が空でも出力は非空になりうる（全要素 `value`）ため、
+        // その場合は `input` を実体化・GPU 転送せずに埋める
+        // （`constant_pad.rs::MetalConstantPad::run_pad_f32` 内の同型
+        // 早期リターンと対称。ここで先に判定することで `.contiguous()`
+        // 呼び出し自体を回避する）。
+        if in_shape.contains(&0) {
+            return Tensor::new(vec![value; out_shape.iter().product()], &out_shape)
+                .map_err(BackendError::ShapeMismatch);
+        }
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("pad: input not contiguous".into()))?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let cp = context_cache::cached_constant_pad(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = cp
+            .run_pad_f32(&ctx, input_slice, &in_shape, pads, &out_shape, value)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// `BackendOps::scatter` の Metal 実装（イシュー #1778）。
     /// [`scatter_out_shape`] で `input`／`index`／`src` の shape を
     /// 再検査し、[`Self::gather`] と同じ二重検査方針
@@ -3353,6 +3408,46 @@ mod tests {
         assert!(
             matches!(err, BackendError::Unsupported(_)),
             "rank={rank}（GS_MAX_RANK={GS_MAX_RANK} 超過）は Unsupported を返すべき: {err:?}"
+        );
+    }
+
+    /// `pad` は `gather`／`scatter` と異なりカーネル側に rank 上限が
+    /// 存在しない（`shaders/constant_pad.metal` モジュール doc 参照）
+    /// ため、`GS_MAX_RANK`（8）を超える rank でも
+    /// `BackendError::ShapeMismatch` を誤って返さないことを確認する
+    /// （Cursor Bugbot 指摘の是正確認）。この shape 要素数積は
+    /// `u32::MAX` 未満に収まるため、`Metal コンテキスト取得
+    /// （`context_cache::cached_context()`）へ到達する前で誤検出される
+    /// ことはないが、後続の GPU 起動自体は実機必須のためここでは検査
+    /// しない。ここでは代わりに `u32::MAX` を超える shape 要素で早期
+    /// return する回帰（`context_cache` へ到達する前に fail-closed
+    /// で拒否される）を実機不要で確認する。
+    #[test]
+    fn pad_rejects_dim_exceeding_u32_before_touching_metal_context() {
+        // rank 9 以上（`GS_MAX_RANK` 超過）でも受理されること自体は GPU
+        // 起動が必要なため実機不要のここでは検証できない。代わりに
+        // shape 要素が `u32::MAX` を超える場合に `ElementCountOverflow`
+        // へ fail-closed で拒否され、`context_cache::cached_context()`
+        // （実機必須）へ到達しないことを確認する（`validate_shapes_
+        // fit_u32` 除去後も u32 収容検査自体は維持されていることの
+        // 回帰）。他方の軸を 0 にして要素数積を 0 に保つことで、巨大な
+        // `Vec<f32>` を確保せずに `Tensor::new` を成立させる（`unique_
+        // rejects_transposed_shape_with_overflowing_intermediate_
+        // product` と同じ発想）。
+        let rank = GS_MAX_RANK + 1;
+        let mut shape = vec![0usize; rank];
+        shape[0] = (u32::MAX as usize) + 1;
+        let input = Tensor::new(Vec::<f32>::new(), &shape).unwrap();
+        let pads = vec![(0usize, 0usize); rank];
+
+        let ops = MetalBackendOps::new();
+        let err = ops.pad(&input, &pads, 0.0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+            ),
+            "rank={rank}・shape[0] が u32::MAX 超過は ElementCountOverflow を返すべき: {err:?}"
         );
     }
 

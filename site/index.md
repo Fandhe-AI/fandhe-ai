@@ -21,7 +21,8 @@ autodiff・演算グラフ／カーネル融合機構・計算カーネル・バ
 
 - `fandhe_ai::tape()`／`fandhe_ai::tape_for(Device)`（composition root）
 - `fandhe_ai::compat::{array, Sequential}`（numpy/Keras 慣習の互換 API 層）
-- `fandhe_ai::optim`（`Sgd`／`AdamW`／`clip_grad_norm`／`LrScheduler` 等）
+- `fandhe_ai::optim`（`Sgd`／`AdamW`／`clip_grad_norm`／`LrScheduler`／
+  `GradScaler`〈AMP 損失スケーリング〉等）
 - `fandhe_ai::DeviceParamStore`／`Tape::step_device_param_store`（デバイス常駐更新経路）
 
 ## バックエンド

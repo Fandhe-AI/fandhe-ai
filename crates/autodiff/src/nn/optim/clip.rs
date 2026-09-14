@@ -1,9 +1,17 @@
-//! gradient clipping（global L2 norm 方式。親イシュー #192・本イシュー #195）。
+//! gradient clipping（global L2 norm 方式・要素値 clip 方式の 2 系統。
+//! 親イシュー #192・#195（norm 方式）・#1753（value 方式・親 #1631）。
 //!
-//! PyTorch `torch.nn.utils.clip_grad_norm_` と同一の定義・適用順序に揃える:
+//! **norm 方式**（[`clip_grad_norm`]）は PyTorch
+//! `torch.nn.utils.clip_grad_norm_` と同一の定義・適用順序に揃える:
 //! 複数テンソルの勾配をひとつの仮想ベクトルとみなした L2 ノルム
 //! （global norm）を計算し、`max_norm` を超えている場合のみ全テンソルへ
 //! 同一スケール係数を掛けて縮小する（方向を保存したまま大きさだけ抑える）。
+//!
+//! **value 方式**（[`clip_grad_value`]）は PyTorch
+//! `torch.nn.utils.clip_grad_value_` と同一の定義に揃える: 各勾配要素を
+//! 独立に `[-clip_value, clip_value]` へクランプする（テンソル間の相関
+//! を見ないため norm 方式と異なりスケーリングを伴わず、範囲内の要素は
+//! bit 同一のまま返る）。
 //!
 //! 本モジュールは `Gradients`/`Var`（`tape.rs`・`var.rs`）に依存しない
 //! 純関数として実装する。`optim/mod.rs` の適用順序契約
@@ -141,4 +149,64 @@ pub fn clip_grad_norm(
         total_norm,
         scaled,
     })
+}
+
+/// value 方式の gradient clipping（PyTorch `torch.nn.utils.clip_grad_value_`
+/// 相当）。各勾配要素を独立に `[-clip_value, clip_value]` へクランプする。
+///
+/// [`clip_grad_norm`] と異なりテンソル間の相関（global L2 norm）を見ず、
+/// 各要素を独立にクランプするためスケーリングを伴わない（範囲内の要素は
+/// 無変更のまま返す。丸め誤差混入が原理的に起きない）。
+///
+/// `f32::clamp`（NaN 境界で panic しうる API）は使わず `v.max(-clip_value)
+/// .min(clip_value)` で実装する（本番経路に panic 可能性を残さない方針。
+/// `clip_value` は下記の事前検査で有限かつ正であることが保証されており
+/// 到達時点で NaN 境界は発生しないが、検査ロジックとクランプロジックを
+/// 疎結合に保つため）。
+///
+/// # Errors
+///
+/// - `clip_value` が非有限または 0 以下 → `AutodiffError::InvalidArgument`
+///   （fail-closed。[`clip_grad_norm`] の `max_norm` 検査と同型。0 は
+///   「常に勾配をゼロへ潰す」設定であり、呼び出し側の誤り混入を早期に
+///   検出する）
+/// - 勾配要素に非有限（NaN/±Inf）が含まれる →
+///   `AutodiffError::InvalidArgument`。`±Inf.max(-c).min(c)` は `±c` へ、
+///   `NaN.max(-c).min(c)` は `-c` へ**静かに正規化されて壊れた勾配を
+///   隠蔽してしまう**ため、クランプ前に全要素の有限性を検査する
+///   （`.claude/rules/security.md` A08 整合性。[`global_grad_norm`] が
+///   非有限入力に対し Err を返す契約と揃える）
+pub fn clip_grad_value(
+    grads: &[&Tensor<f32>],
+    clip_value: f32,
+) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+    if !clip_value.is_finite() || clip_value <= 0.0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "clip_value は有限かつ正の値でなければならない: {clip_value}"
+        )));
+    }
+
+    let mut out_grads = Vec::with_capacity(grads.len());
+    for grad in grads {
+        let values = read_contiguous(grad)?;
+        if let Some(&non_finite) = values.iter().find(|v| !v.is_finite()) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "clip_grad_value に非有限の勾配要素が含まれる（NaN/Inf をクランプで\
+                 隠蔽しない fail-closed 判断）: {non_finite}"
+            )));
+        }
+        let clipped: Vec<f32> = values
+            .iter()
+            .map(|&v| v.max(-clip_value).min(clip_value))
+            .collect();
+        // shape は `grad.shape()` から取得しており `clipped` の要素数は
+        // `values`（= `grad` の全要素）と常に一致するため、通常は
+        // `ShapeError` にはならない。それでも `?` で型付きエラーとして
+        // 伝播し `unwrap`/`expect` は使わない
+        // （`.claude/rules/coding-rust.md`）。
+        let tensor = Tensor::from_slice(&clipped, grad.shape())?;
+        out_grads.push(tensor);
+    }
+
+    Ok(out_grads)
 }
