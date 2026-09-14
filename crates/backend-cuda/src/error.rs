@@ -498,6 +498,16 @@ pub enum CudaError {
     /// 現状存在しないため、型を素通しせず detail 文字列へ畳み込む）。
     CaptureExclusionRejected { detail: String },
 
+    /// interpolate 起動 API（`interpolate.rs::CudaInterpolate`）の
+    /// ホスト側検証（`checked_numel` の要素数積オーバーフロー・
+    /// `i32::MAX` 上限・`input` の長さが `in_shape` から導出した期待長
+    /// と一致しないこと）が拒否した入力（イシュー #1757）。
+    /// `InvalidGatherScatterShape` と同じ理由で独立 variant に分離
+    /// する。`input.shape()`／`size` の rank 整合
+    /// （`interpolate_out_shape`）は呼び出し元 `ops.rs` が事前検査
+    /// 済みの契約のため、本 variant は主に長さ・オーバーフローに
+    /// 関する起動前検証の失敗を表す。
+    InvalidInterpolateShape { detail: String },
     /// pad 起動 API（`constant_pad.rs::CudaConstantPad`）のホスト側検証
     /// （`checked_numel` の要素数積オーバーフロー・`i32::MAX` 上限・
     /// `input` の長さが `in_shape` から導出した期待長と一致しないこと）
@@ -644,6 +654,9 @@ impl fmt::Display for CudaError {
                     f,
                     "cuda graph capture exclusion rejected the call: {detail}"
                 )
+            }
+            CudaError::InvalidInterpolateShape { detail } => {
+                write!(f, "invalid interpolate shape: {detail}")
             }
             CudaError::InvalidConstantPadShape { detail } => {
                 write!(f, "invalid pad shape: {detail}")

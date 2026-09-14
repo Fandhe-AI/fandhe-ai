@@ -955,6 +955,26 @@ fn unique_empty_input_returns_shape_zero() {
     assert_eq!(out.shape(), &[0]);
 }
 
+/// `interpolate`（イシュー #1757）が 1 ノードのみ追加する
+/// `push_eager`（実体化済み）ノードとして記録されることを検証する
+/// （`Op::Gather`／`Op::Pad` と同型。view ノードではない）。
+#[test]
+fn interpolate_records_single_eager_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+
+    let before = tape.len();
+    let out = x
+        .interpolate(&[6], fandhe_ai_tensor_core::InterpolateMode::Nearest)
+        .unwrap();
+    assert_eq!(
+        tape.len(),
+        before + 1,
+        "interpolate は 1 ノードのみ追加するはず"
+    );
+    assert_eq!(out.to_tensor().shape(), &[6]);
+}
+
 /// 35. `pad`（イシュー #1756）が 1 ノードのみ追加する `push_eager`
 ///     （実体化済み）ノードとして記録されることを検証する
 ///     （`Op::Gather`／`Op::Scatter` と同型。view ノードではない）。
