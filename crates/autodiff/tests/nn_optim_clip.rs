@@ -9,7 +9,7 @@
 mod common;
 
 use fandhe_ai_autodiff::Tape;
-use fandhe_ai_autodiff::nn::optim::{clip_grad_norm, global_grad_norm};
+use fandhe_ai_autodiff::nn::optim::{clip_grad_norm, clip_grad_value, global_grad_norm};
 use fandhe_ai_tensor_core::Tensor;
 
 use bench_harness::rng::Xorshift64Star;
@@ -300,5 +300,112 @@ fn clip_applied_to_real_backward_gradients_bounds_update_norm() {
         delta_norm <= bound,
         "delta_norm={delta_norm} が上界 {bound}（lr*max_norm={} の 1% 余裕込み）を超えている",
         LR * MAX_NORM
+    );
+}
+
+// =====================================================================
+// value 方式（#1753・親 #1631）
+// =====================================================================
+
+#[test]
+fn clip_grad_value_leaves_in_range_elements_unchanged() {
+    // 範囲内の要素（-0.0 を含む）は bit 同一のまま返る（スケーリングを
+    // 伴わない value 方式の性質。clip.rs doc 参照）。
+    let g = tensor(vec![0.5, -0.5, -0.0, 0.0], &[4]);
+    let out = clip_grad_value(&[&g], 1.0).unwrap();
+    assert_eq!(out[0].as_slice().unwrap(), &[0.5, -0.5, -0.0, 0.0]);
+}
+
+#[test]
+fn clip_grad_value_boundary_values_are_unchanged() {
+    // ちょうど ±clip_value の要素は閉区間内として無変更。
+    let g = tensor(vec![1.0, -1.0], &[2]);
+    let out = clip_grad_value(&[&g], 1.0).unwrap();
+    assert_eq!(out[0].as_slice().unwrap(), &[1.0, -1.0]);
+}
+
+#[test]
+fn clip_grad_value_clamps_out_of_range_elements() {
+    let g = tensor(vec![-3.0, -1.0, 0.5, 2.5], &[4]);
+    let out = clip_grad_value(&[&g], 1.0).unwrap();
+    assert_eq!(out[0].as_slice().unwrap(), &[-1.0, -1.0, 0.5, 1.0]);
+}
+
+#[test]
+fn clip_grad_value_preserves_order_and_shape_across_multiple_tensors() {
+    let g1 = tensor(vec![-3.0, -1.0], &[2]);
+    let g2 = tensor(vec![0.5, 2.5], &[1, 2]);
+    let out = clip_grad_value(&[&g1, &g2], 1.0).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].shape(), g1.shape());
+    assert_eq!(out[1].shape(), g2.shape());
+    assert_eq!(out[0].as_slice().unwrap(), &[-1.0, -1.0]);
+    assert_eq!(out[1].as_slice().unwrap(), &[0.5, 1.0]);
+}
+
+#[test]
+fn clip_grad_value_handles_non_contiguous_input() {
+    // 非 contiguous 入力（転置 view）でも論理順どおりクランプされ、
+    // 出力 shape は view の shape と一致する（`read_contiguous` の
+    // `contiguous()` フォールバック経路の回帰）。
+    let base = tensor(vec![-3.0, 0.5, -1.0, 2.5], &[2, 2]);
+    let t = base
+        .transpose_2d()
+        .expect("test fixture: 2D テンソルの transpose_2d は失敗しない");
+    assert!(!t.is_contiguous(), "test fixture: 転置後は非 contiguous");
+
+    let out = clip_grad_value(&[&t], 1.0).unwrap();
+    assert_eq!(out[0].shape(), t.shape());
+    // t の論理値は行優先で [-3.0, -1.0, 0.5, 2.5]（base を転置した並び）。
+    assert_eq!(out[0].as_slice().unwrap(), &[-1.0, -1.0, 0.5, 1.0]);
+}
+
+#[test]
+fn clip_grad_value_empty_slice_is_empty_vec() {
+    let out = clip_grad_value(&[], 1.0).unwrap();
+    assert!(out.is_empty());
+}
+
+#[test]
+fn clip_grad_value_rejects_non_positive_clip_value() {
+    let g = tensor(vec![1.0], &[1]);
+    assert!(clip_grad_value(&[&g], 0.0).is_err());
+    assert!(clip_grad_value(&[&g], -1.0).is_err());
+    assert!(clip_grad_value(&[&g], f32::NAN).is_err());
+    assert!(clip_grad_value(&[&g], f32::INFINITY).is_err());
+}
+
+#[test]
+fn clip_grad_value_rejects_non_finite_grad_elements() {
+    // NaN/Inf をクランプで静かに正規化して隠蔽しない（fail-closed）。
+    let nan_grad = tensor(vec![f32::NAN, 1.0], &[2]);
+    assert!(clip_grad_value(&[&nan_grad], 1.0).is_err());
+
+    let inf_grad = tensor(vec![f32::INFINITY, 1.0], &[2]);
+    assert!(clip_grad_value(&[&inf_grad], 1.0).is_err());
+
+    let neg_inf_grad = tensor(vec![f32::NEG_INFINITY, 1.0], &[2]);
+    assert!(clip_grad_value(&[&neg_inf_grad], 1.0).is_err());
+}
+
+#[test]
+fn clip_grad_value_bounds_global_norm_by_analytic_upper_bound() {
+    // clip 後の各要素は |v| <= clip_value のため、global L2 norm は
+    // clip_value * sqrt(要素数) を（f32::mul_add 蓄積の数 ULP 上振れを
+    // 見込んだ小さな余裕を除き）上回らない（解析的上界。新規 tolerance
+    // 定数は設けず既存 1e-6 余裕をインラインで使う）。
+    let g1 = tensor(vec![-3.0, -1.0, 0.5, 2.5], &[4]);
+    let g2 = tensor(vec![10.0, -10.0], &[2]);
+    const CLIP_VALUE: f32 = 1.0;
+
+    let out = clip_grad_value(&[&g1, &g2], CLIP_VALUE).unwrap();
+    let refs: Vec<&Tensor<f32>> = out.iter().collect();
+    let norm = global_grad_norm(&refs).unwrap();
+
+    let total_elems = (g1.numel() + g2.numel()) as f32;
+    let bound = CLIP_VALUE * total_elems.sqrt() + 1e-6;
+    assert!(
+        norm <= bound,
+        "norm={norm} が解析的上界 {bound} を超えている"
     );
 }
