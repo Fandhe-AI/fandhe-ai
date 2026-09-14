@@ -153,6 +153,18 @@ pub(crate) const BIAS_SEED_SALT: u64 = 1;
 pub(crate) const WEIGHT_HH_SEED_SALT: u64 = 2;
 /// `nn::rnn` の `bias_hh` 導出用ソルト（上記参照）。
 pub(crate) const BIAS_HH_SEED_SALT: u64 = 3;
+/// `nn::attention`（イシュー #1640。`MultiheadAttention`）の
+/// `q_proj`／`k_proj`／`v_proj`／`out_proj` 導出用ソルト。既存の
+/// `WEIGHT_SEED_SALT`〜`BIAS_HH_SEED_SALT`（0..=3）と衝突しない値
+/// （4..=7）を割り当て、`MultiheadAttention::new` が単一の呼び出し
+/// シードから 4 個の独立した `Linear::new` 呼び出しシードを導出できる
+/// ようにする（`Linear::new` 自身がさらに weight／bias の 2 系統へ
+/// `WEIGHT_SEED_SALT`／`BIAS_SEED_SALT` を再適用するため、2 段の
+/// `derive_seed` 合成になる）。
+pub(crate) const ATTN_Q_SEED_SALT: u64 = 4;
+pub(crate) const ATTN_K_SEED_SALT: u64 = 5;
+pub(crate) const ATTN_V_SEED_SALT: u64 = 6;
+pub(crate) const ATTN_OUT_SEED_SALT: u64 = 7;
 
 pub(crate) fn derive_seed(seed: u64, salt: u64) -> u64 {
     let mut z = seed.wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15));

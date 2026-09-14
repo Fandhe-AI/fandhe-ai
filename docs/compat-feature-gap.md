@@ -1506,3 +1506,14 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
   `docs/kernel-fusion.md` の方針と整合）・`MultiheadAttention` Module
   自体（in/out projection・head 分割。親 #1605 の sub-issue (b)・
   #1640）。
+
+## #1640 の追補（`nn::MultiheadAttention` Module）
+
+§2.7 の `nn.MultiheadAttention`／`layers.MultiHeadAttention` 行はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（親 #1605 sub-issue (b)）。
+
+- `nn::MultiheadAttention`（パラメータ本体。q/k/v/out の 4 `nn::Linear`）・`nn::MultiheadAttentionVars`（テープ登録済み。`forward(query, key, value, attn_mask, is_causal)`）を追加した（`crates/autodiff/src/nn/attention.rs`）。新規 `Op`／`BackendOps` メソッドは一切追加せず、既存の `Var::matmul`（rank≥3 バッチ。#1715）・`transpose`（zero-copy view）・`mul`（scale）・`masked_fill`（#1637）・`softmax`（#1594）と `nn::Linear`（4 層）の合成のみで実装した——分解先の演算はいずれも CPU／CUDA／Metal 全てに実装済みのため、「対応する Op／`BackendOps`／VJP を追加する」という受入要件は合成によって自動的に充足される（`crate::einsum`・#1639 と同型の論法）。
+- 前提 sub-issue #1639（`Var::scaled_dot_product_attention`）は本 issue の着手時点で未マージ（PR #1845 OPEN）だったため、attention 本体（scale・causal／`attn_mask`・softmax）は private ヘルパー `sdpa_compose` として #1639（PR #1845）と数式・mask 極性（`true`=attend。PyTorch bool mask 規約）・causal 規約（top-left aligned `j<=i`。非正方対応）を完全に一致させて複製した。#1639 マージ後、`sdpa_compose` は `Var::scaled_dot_product_attention` 呼び出しへ置き換える対象として残る（別 PR）。
+- 入出力契約は rank-3・batch_first 固定（`query: [B,L,E]`・`key`/`value: [B,S,E]` → `[B,L,E]`）。unbatched 入力・`batch_first=false`・`kdim`/`vdim`・`key_padding_mask` 引数・`dropout_p`（#1603 未実装）・`need_weights`／attention weights 返却・`add_bias_kv`／`add_zero_attn`・packed `in_proj_weight`（#1616）は対象外のまま。
+- `Module` trait は実装した（`forward` は self-attention `q=k=v=input`・mask なし・非 causal として定義）。`compat::Sequential` 用の `as_linear`／`as_relu` フックはいずれも trait 既定のままオーバーライドしない（Embedding〈#1604〉と異なり `Module::forward` 自体は実装するが、学習可能パラメータの自動収集対象には含めない）。
+- facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
+- CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/mha_backend_parity.rs` の `#[ignore]` テストを参照）。
