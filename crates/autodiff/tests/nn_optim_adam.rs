@@ -24,8 +24,8 @@
 //! 使う（新設 tolerance の緩和ではない）。2・3 は bit 完全一致
 //! （`assert_eq!`）で、既存複合判定より厳しい規律である。
 //!
-//! **契約: CI（self-hosted）は `docs/spec`（submodule）を checkout
-//! しない**（`nn_optim_adamw.rs` 冒頭コメントと同じ制約）。本ファイルは
+//! **契約: CI は `docs/spec`（submodule）を checkout しない構成である**
+//! （`nn_optim_adamw.rs` 冒頭コメントと同じ制約）。本ファイルは
 //! `tests/fixtures/adamw-pytorch-reference/`（既存・複製済み）のみを
 //! 参照し、`docs/spec` 配下のいかなるファイルにも依存しない。
 
