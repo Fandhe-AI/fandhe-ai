@@ -22,6 +22,9 @@
 //! `GradScalerConfig`／`UnscaleResult`／`scale_loss`／`scale_grads`／
 //! `unscale_grads`／`has_non_finite`。実体は `fandhe_ai_autodiff::nn::optim::amp`
 //! モジュールだが再エクスポートは `nn::optim` 経由）を期待集合へ追加した。
+//! イシュー #1742 で Adam（coupled L2 weight decay。`Adam`／`AdamConfig`。
+//! 実体は `fandhe_ai_autodiff::nn::optim::adam` モジュール）を期待集合へ
+//! 追加した。
 //!
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
 //! （`Cargo.toml`・`src/`）以外は走査しない固定パスのみを対象とし、
@@ -283,6 +286,8 @@ fn optim_module_reexports_exactly_expected_surface() {
     );
 
     let expected: std::collections::BTreeSet<String> = [
+        "Adam",
+        "AdamConfig",
         "AdamW",
         "AdamWConfig",
         "ClipGradResult",
@@ -585,6 +590,19 @@ fn optim_types_are_reachable_via_facade_only() {
     let mut adamw = fandhe_ai::optim::AdamW::new(fandhe_ai::optim::AdamWConfig::default())
         .unwrap_or_else(|e| panic!("test fixture: AdamW::new が失敗した: {e}"));
     let _ = &mut adamw;
+
+    // Adam（coupled L2 weight decay。イシュー #1742）の facade 到達性固定。
+    // `AdamConfig::default().weight_decay == 0.0`（PyTorch `torch.optim.Adam`
+    // の既定値）が `AdamWConfig::default()` の `0.01` とドリフトしないこと
+    // も併せて固定する（`nn::optim::adam` モジュール doc 参照）。
+    let adam_config = fandhe_ai::optim::AdamConfig::default();
+    assert_eq!(
+        adam_config.weight_decay, 0.0,
+        "test fixture: AdamConfig の既定 weight_decay は PyTorch Adam と同じ 0.0"
+    );
+    let mut adam = fandhe_ai::optim::Adam::new(adam_config)
+        .unwrap_or_else(|e| panic!("test fixture: Adam::new が失敗した: {e}"));
+    let _ = &mut adam;
 
     let constant_lr = fandhe_ai::optim::ConstantLr::new(0.1)
         .unwrap_or_else(|e| panic!("test fixture: ConstantLr::new が失敗した: {e}"));

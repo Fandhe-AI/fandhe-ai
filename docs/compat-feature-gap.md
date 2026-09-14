@@ -1526,3 +1526,14 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `Module` trait は実装した（`forward` は self-attention `q=k=v=input`・mask なし・非 causal として定義）。`compat::Sequential` 用の `as_linear`／`as_relu` フックはいずれも trait 既定のままオーバーライドしない（Embedding〈#1604〉と異なり `Module::forward` 自体は実装するが、学習可能パラメータの自動収集対象には含めない）。
 - facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
 - CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/mha_backend_parity.rs` の `#[ignore]` テストを参照）。
+
+## #1742 の追補（`Adam`。coupled L2 weight decay）
+
+§2.9 の `Adam`（coupled L2 weight decay）行はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（親 #1610）。
+
+- `fandhe_ai_autodiff::nn::optim::adam`（`Adam`・`AdamConfig`）を追加した（`crates/autodiff/src/nn/optim/adam.rs`）。`AdamW`（decoupled。`nn/optim/adamw.rs`）を意図的に鏡写しにした別実装であり、内部ループの共通化 refactor は行っていない（`AdamW` は crates.io 出荷済み公開 API であり、既存 fixture テストの統一複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉では bit ドリフトを検出できないリスクがあるため）。差分は decay の適用箇所のみ: `Adam` は `g_eff = grad + weight_decay*param`（PyTorch `_single_tensor_adam` と同じ分岐で `weight_decay == 0.0` のときは演算自体を skip し生の `grad` を使う）で moment（`m`／`v`）を更新し、`param` 自体への decay 乗算は行わない。
+- 新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は一切追加していない（`AdamW`・AMP〈#1722〉と同じく `Tape`／`Var`／`BackendOps` に依存しない値型・純関数。`params`／`grads` を `&Tensor<f32>` 参照列として受け取り更新後 `Tensor<f32>` 列を返す `step()` シグネチャは `AdamW::step` と同一）。
+- 受入検証（`crates/autodiff/tests/nn_optim_adam.rs`）: 新規 PyTorch 参照値 fixture は追加せず、(1) `weight_decay=0` ケースでは `torch.optim.Adam` と `torch.optim.AdamW(weight_decay=0)` が定義上完全に一致するため、既存 `adamw-pytorch-reference/adamw_reference.json`（実 PyTorch 2.13.0+cpu 実行値）の `weight_decay_zero` ケースへ `Adam` を直接突合（既存統一複合判定）、(2) 全 3 ケースで `weight_decay` を 0 に強制し `Adam` と `AdamW` の bit 完全一致を固定、(3) `weight_decay>0` は PyTorch `_single_tensor_adam` の定義（`grad = grad.add(param, alpha=weight_decay)`）に基づく恒等式 `Adam(wd).step(p, g) == AdamW(wd=0).step(p, mul_add(wd, p, g))` を bit 完全一致で固定——の 3 段で担保する。
+- facade（`crates/facade/src/optim.rs`）は `pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};` の 1 行のみ追加（純再エクスポート。`docs/facade-optimizer-promotion-decision.md` §4 案 A）。`crates/facade/tests/api_surface.rs` の期待集合・到達性検査、`crates/facade/tests/optim_train_loop.rs` の facade-only 学習ループ収束テスト（`adam_with_clip_converges_via_facade_only`）も追加済み。
+- **`DeviceParamStore` 非対応**: `crate::optim::device_store::DeviceParamStore::step` は `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、`Adam` は結線されていない（`AdamW` も同様に未結線）。`Adam::step` はホスト `Tensor<f32>` を介した optimizer step のみを提供する。
+- RMSprop／Adagrad（#1743）・LAMB（#1744）は本 issue の対象外のまま残る。

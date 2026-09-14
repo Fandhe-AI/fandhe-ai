@@ -223,7 +223,7 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | Conv1d／Conv2d | #1606（設計記録 #1641。`docs/conv-ops-design.md`。実装は #1642〈CPU〉・#1643〈CUDA〉・#1644〈Metal〉・#1645〈nn 層・parity・実機実測〉） |
 | Pooling | #1607（設計記録 #1727。`docs/pooling-ops-design.md`。実装は #1728〈CPU〉・#1729〈CUDA〉・#1730〈Metal〉） |
 | 損失（BCE／NLL／Huber／KLDiv） | #1609 |
-| optimizer（Adam／RMSprop／Adagrad／LAMB） | #1610 |
+| optimizer（Adam／RMSprop／Adagrad／LAMB） | #1610（#1742 で Adam〈coupled L2 weight decay〉実装済み。`fandhe_ai_autodiff::nn::optim::adam` モジュール〈`AdamW` を鏡写しにした別実装・decay を勾配へ加算する分岐のみが差分〉。facade は `pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};` の 1 行追加のみ〈`optim.rs`〉。`weight_decay==0` で `AdamW` と bit 完全一致・`weight_decay>0` は `torch.optim.Adam` の `_single_tensor_adam` 定義に基づく恒等式で検証（`crates/autodiff/tests/nn_optim_adam.rs`）。新規 `Op`／`BackendOps`／`Var` メソッド／VJP は追加していない・`DeviceParamStore` 未結線（`Sgd` 専用のまま）。RMSprop／Adagrad は #1743・LAMB は #1744 が残対象） |
 | scheduler（Cosine／Exponential／Plateau／OneCycle） | #1611 |
 | autograd 制御（no_grad／detach／retain_graph） | #1612 |
 | cast | #1613 |
