@@ -208,12 +208,22 @@ PyTorch `aten/src/ATen/native/Convolution.cpp::check_shape_forward`
   として**成立しない**（例: `H=W=1, kernel=1, padding=1` は `in=1 ≠ 0`
   のため本ゲートを通過するが、出力窓は padding のみで有効入力を含まな
   い）。本設計が実際に保証するのはより弱い契約——**`in = 0` の入力を
-  作らせない**（負分子拒否ゲート・要素数 overflow 検査と合わせて
-  im2col／col2im の座標計算〈`h + p_h − kh·d_h` 等〉が `usize` 下限を
-  割らないことを保証する）——のみであり、個々の出力窓が padding のみ
-  で埋まること自体は許容する（§7 の「罠」節が示すとおり、padding
-  タップは `0.0` として im2col／`eval::conv2d_direct` の両方で明示的に
-  扱われるため、有効入力ゼロの窓でも bit 同一性は崩れない）。`N = 0`
+  作らせない**（負分子拒否ゲート・要素数 overflow 検査）——のみであり、
+  個々の出力窓が padding のみで埋まること自体は許容する（§7 の「罠」
+  節が示すとおり、padding タップは `0.0` として im2col／
+  `eval::conv2d_direct` の両方で明示的に扱われるため、有効入力ゼロの
+  窓でも bit 同一性は崩れない）。**訂正 2**（codex-review 指摘）: 旧稿
+  はここで「`in = 0` を拒否すれば im2col／col2im の座標計算〈`h + p_h
+  − kh·d_h` 等〉が `usize` 下限を割らないことを保証される」と記して
+  いたが、この保証自体が**誤り**であり撤回する。`in = 0` 拒否・負分子
+  拒否ゲートは出力 shape の非負性（`Hout`／`Wout` ≥ 1）しか保証せず、
+  個々の `(h, kh)` 組み合わせに対する中間座標 `h + p_h − kh·d_h` の
+  非負性は保証しない（反例: `H=3, kernel=3, padding=0, dilation=1` で
+  `h=0, kh=1` のとき `h + p_h − kh·d_h = −1`。このとき出力 shape は
+  `Hout=1 ≥ 1` で上記ゲートを通過する）。座標計算が負になること自体は
+  「この `kh` は入力位置 `h` に寄与しない」ことを表す正常なケースで
+  あり、実装契約は **§6.2 に記す `checked_sub` ベースの符号安全な
+  スキップ**とする（`usize` の通常減算で実装してはならない）。`N = 0`
   （空バッチ）は受理（出力 `[0, Cout, Hout, Wout]`）。
 - 要素数積（`N·G·K_g·P`・出力要素数・im2col 要素数）は `checked_mul`
   （`ElementCountOverflow`）。
@@ -374,9 +384,18 @@ col2im 再利用を前提に後続へ）。
 
 **col2im の縮約契約（決定）**: 入力位置定常（1 スレッド＝1 入力要素・
 atomic 不使用）。各 `(n, c, h, w)` について `(kh, kw)` を row-major に
-走査し、`h + p_h − kh·d_h` が `s_h` で割り切れ `oh ∈ [0, Hout)`
-（`ow` も同様）のときのみ `d_col[n, g, (c_g, kh, kw), (oh, ow)]` を
-**`f64` へ昇格して逐次加算**、最後に 1 回 `f32` へ downcast。CUDA は
+走査する。**座標の非負性は保証されない**（§3「訂正 2」。`h + p_h` は
+`usize` の非負和だが、`kh·d_h` を引いた `h + p_h − kh·d_h` は `kh` が
+大きいと負になりうる——これは「この `kh` は入力位置 `h` に寄与しない」
+という正常なケースであり異常ではない）。実装契約（`checked_sub` に
+よる符号安全なスキップ。`usize` の通常減算でアンダーフローさせては
+ならない）: `(h as usize + p_h).checked_sub(kh * d_h)` を計算し、
+`None`（減算が負になる＝アンダーフロー）ならこの `(kh, kw)` は寄与
+なしとして**この時点で**スキップする（割り切れ判定・範囲検査より
+前に行う）。`Some(numerator)` のときのみ `numerator` が `s_h` で
+割り切れ `oh = numerator / s_h ∈ [0, Hout)`（`w`／`kw`／`ow` も同様に
+`checked_sub` で計算）のときのみ `d_col[n, g, (c_g, kh, kw), (oh, ow)]`
+を**`f64` へ昇格して逐次加算**、最後に 1 回 `f32` へ downcast。CUDA は
 `double`・Metal は `soft_f64`（binary64 逐次加算の 64bit 整数
 ソフトウェアエミュレーション）・CPU は `f64`。重なり窓（`stride <
 d·(k−1)+1`）の加算順を固定し 3 バックエンド **bit 完全一致**
@@ -615,6 +634,13 @@ issue で追跡。本 doc では起票しない）
   相殺列で f32 逐次和と結果が異なることを固定）。
 - col2im の重なり窓での決定的順序（3 バックエンド bit 一致・
   `#[ignore]` 実機）。
+- col2im の座標アンダーフロー回帰（§6.2「訂正 2」の契約固定。
+  codex-review 指摘）: `H=3, kernel=3, padding=0, dilation=1` 等
+  `h + p_h − kh·d_h` が負になる `(h, kh)` 組み合わせが存在する形状で、
+  `usize` の通常減算では `panic`（debug）／ラップアラウンド（release）
+  するところを `checked_sub` による早期スキップが正しく寄与なしと
+  扱い、対応する出力位置が存在しないことを固定する。3 バックエンドで
+  同一形状の bit 一致も併せて確認する。
 - GPU parity: forward 全体は REQ-2 複合判定・im2col／col2im 単体は
   bit 一致・REQ-8 静的テスト（CUDA `kernel_includes_bounds_check`・
   Metal source evidence）。
