@@ -157,7 +157,7 @@ fn reduce_lr_on_plateau_drives_sgd_config_via_facade_only() {
     // する（`ReduceLrOnPlateau` は下げるだけの契約）。
     assert_eq!(lr_log.len(), STEPS);
     for pair in lr_log.windows(2) {
-        assert!(pair[1] <= pair[0], "lr は単調非増加のはず: {:?}", &lr_log);
+        assert!(pair[1] <= pair[0], "lr は単調非増加のはず: {:?}", lr_log);
     }
     assert!(
         lr_log[0] == BASE_LR,
