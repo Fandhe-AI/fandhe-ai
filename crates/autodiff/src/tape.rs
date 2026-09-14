@@ -126,10 +126,11 @@ pub(crate) enum Op {
     ///
     /// 公開 API 面（`Var::sqrt` 等）の配線はイシュー #1710（算術系。
     /// 親 #1593）・#1711（対数・三角関数系）・#1595（活性化系）が担う。
-    /// #1710 で `Var::sqrt` から到達可能になったため `#[allow(dead_code)]`
-    /// は撤去済み（旧 `crates/tensor-core/src/fusion/mod.rs` と同型の
-    /// 「結線待ちコードへの理由付き `#[allow(dead_code)]`」は不要に
-    /// なった）。
+    /// #1710 で `Var::sqrt` から、#1711 で `Var::log`／`log2`／`log10`／
+    /// `sin`／`cos`／`tan`／`abs`／`neg` から到達可能になったため
+    /// `#[allow(dead_code)]` は撤去済み（旧
+    /// `crates/tensor-core/src/fusion/mod.rs` と同型の「結線待ちコード
+    /// への理由付き `#[allow(dead_code)]`」は不要になった）。
     ScalarUnary { op: ScalarUnaryOp, input: NodeId },
     /// スカラー 2 項演算（`ScalarBinaryOp`。イシュー #1634）。
     /// [`Op::ScalarUnary`] の 2 項版で設計方針は同一（eager・非

@@ -87,7 +87,7 @@ REQ-7 の受け入れ判定式（`abs_err/(|ref|+1e-6) <= 1e-3`）は REQ-2 統�
 
 ### 6.2 依存 issue への読み替え
 
-- **#1775（ONNX export の facade 公開）**: 「公開しない」という結論ではないため close しない。§6.1 の publish 承認が得られるまで blocked として扱う。承認が却下された場合に限り close し、親 #1653 へ判断結果を記録する。
+- **#1775（ONNX export の facade 公開）**: 「公開しない」という結論ではないため close しない。§6.1 の publish 承認が得られるまで blocked として扱う。承認が却下された場合に限り close し、親 #1653 へ判断結果を記録する。export 固有の設計記録（export 元の限定・橋渡しの配置候補・facade `api_surface.rs` guard テスト等）は `docs/facade-onnx-export-exposure-decision.md`（#1775 で完了）を参照する。
 - **#1653 配下 #1773／#1774**: `onnx::export` の内部実装（`Graph -> GraphProto` の組み立て・op 属性の逆マッピング・roundtrip テスト）であり、facade 公開可否とは独立に進行できるため本判断の影響を受けない。
 - **#1754（safetensors save／load の facade 再公開）**: `onnx-interop` は ONNX と safetensors の両方を扱う同一クレートであり、safetensors 側の facade 再公開も §3.1 と同じ publish 前提を共有する。本 doc の判断を再度導出せず、**承認依頼は「onnx-interop の crates.io 公開」として 1 回にまとめることを推奨**する（`st_load`／`st_save` と `onnx` モジュールは同一クレートに同居するため）。
 

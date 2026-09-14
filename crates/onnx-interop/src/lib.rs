@@ -37,7 +37,11 @@
 //!   （内部グラフ表現 `onnx::graph::Graph` -> `GraphProto`／`ModelProto`）の
 //!   構造的な組み立てを担う（イシュー #1772）。`onnx-interop` は crates.io 非公開
 //!   クレートであり、`onnx::export` は本クレート内部 API のみで facade からの
-//!   参照・再エクスポートは行わない（facade 公開の要否は #1775 が判断する）。
+//!   参照・再エクスポートは行わない（facade 公開の要否は #1775 が判断済み:
+//!   方針としては公開を推奨するが、facade は crates.io 公開クレートのため
+//!   `onnx-interop` 自体の crates.io 公開というユーザー承認未取得の別個の
+//!   前提が要り、それまでは非公開のまま段階 0。close はしない。
+//!   `docs/facade-onnx-export-exposure-decision.md`）。
 //! - [`st_save`]: `tensor-core::Tensor<f32>` → safetensors ワイヤフォーマットへの
 //!   書き出し（TASK-7.1c・#197・REQ-7）。[`st_load`] と対称の契約（暗黙アダプタを
 //!   設けない・dtype は F32 のみ）を持つ保存経路。親イシュー #196 の
