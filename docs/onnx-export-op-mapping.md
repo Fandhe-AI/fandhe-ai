@@ -10,8 +10,8 @@
   のみ。autodiff `Op`／`Tape` -> `ExportOp` の橋渡し・facade 公開は #1653／#1775
   のスコープ（`docs/facade-onnx-import-exposure-decision.md`）。
 - import -> export -> import の総合 roundtrip・未対応 op を含むモデルの
-  fail-closed 確認という総合テストは #1774 のスコープ。本ドキュメント・実装の
-  単体テストは op 単位の対称性検証に限定する。
+  fail-closed 確認という総合テストは #1774 で実装済み（§6 参照）。本ドキュメント・
+  実装の単体テストは op 単位の対称性検証に限定する。
 
 ## 1. 契約
 
@@ -86,10 +86,52 @@ import 側（`decode_tensor`）がエラーメッセージにしか使わない�
 
 - autodiff `Op`／`Tape`／`Sequential` -> `ExportOp` の橋渡し・facade 公開
   （#1653／#1775）
-- import -> export -> import の fixture roundtrip テスト・`interp::run` bit
-  同一確認の総合テスト（#1774）
 - `value_info`／`TypeProto` 非出力による外部ツール（`onnx.checker`）妥当性
   （#1772 既知事項）
 - opset<13 の attr 形（`Squeeze`/`Unsqueeze` の `axes` 属性）での export・
   `Shape` の `start`/`end`・`LayerNormalization` の `stash_type`・`Constant`
   の `value_string(s)`／sparse（import 側も不参照）
+
+## 6. roundtrip テスト（#1774）
+
+import -> export -> import の総合 roundtrip（`decode -> build_graph ->
+build_model_proto -> encode -> decode -> build_graph`）の構造一致・数値一致・
+未対応 op の fail-closed 確認は
+`crates/onnx-interop/tests/onnx_export_roundtrip.rs` に実装済み。既存の
+`tests/onnx_export.rs`（#1772・組み立て自体の単体テスト）・
+`tests/onnx_export_ops.rs`（#1773・op 単位の対称性・`check_exportable` の
+allowlist／domain 検査）とは別ファイルで、以下を固定する:
+
+- **fixture roundtrip の構造一致（bit 同一）**: `model.onnx`・`slice_repro.onnx`
+  それぞれについて、roundtrip 後の `Graph` がフィールド単位・bit 同一
+  （`to_bits()` 一致。属性・initializer 込み）で元の `Graph` と一致すること。
+  比較が空虚でないことを fixture README の既知構造（node 数・op_type 列・
+  initializer 名と shape／値）を直接 assert して担保する。
+- **export の不動点性**: `export(G)` のバイト列と `export(import(export(G)))`
+  のバイト列が完全一致すること（`export.rs` の initializer 名ソート契約から
+  導かれる決定的な性質）。
+- **typed data -> `raw_data` 正規化の bit 保存**: `float_data`／`int64_data`
+  ベースの手組み initializer（NaN・-0.0・非正規化数込み）を import した結果と、
+  export -> 再 import した結果が bit 完全一致すること。
+- **`interp::run` の bit 同一**: 同一 feed に対し、import 元の `Graph` と
+  export 後に再 import した `Graph` の `run` 結果が bit 完全一致すること
+  （`model.onnx`・`slice_repro.onnx` の全参照入力・`transformer.onnx` の
+  1 入力）。
+- **未対応 op を含むモデルの fail-closed**: allowlist 外の op_type・既定
+  opset 以外の domain を含む decode 経由のモデルが `build_model_proto` で
+  `ExportError::UnsupportedOp` を返すこと（node_name／op_type／domain の
+  完全一致）。複数違反がある場合はトポロジカル順で最初のノードが報告される
+  ことも固定する。
+
+`transformer.onnx`（12MB・非コミット）を使うテストは `#[ignore]` で分離し、
+`tests/fixtures/README.md` と同じ運用（`ONNX_INTEROP_TRANSFORMER_ONNX` 環境
+変数でパス指定）で実行する:
+
+```bash
+ONNX_INTEROP_TRANSFORMER_ONNX=<path> \
+  cargo test -p onnx-interop --test onnx_export_roundtrip -- --ignored --nocapture
+```
+
+比較はすべて **bit 同一**の別軸契約であり、REQ-2 バックエンド間数値一致複合
+判定・REQ-7 事前固定判定式（`abs_err / (|ref| + 1e-6) <= 1e-3`）とは混同しない
+（tolerance は導入も変更もしていない）。facade への新規公開面はなし。

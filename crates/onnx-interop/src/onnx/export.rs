@@ -18,7 +18,7 @@
 //!   既定 opset（`domain` が空文字列）に収まっているかを fail-closed に検査して
 //!   から組み立てる（詳細対応表は `docs/onnx-export-op-mapping.md`）。
 //! - import -> export -> import の構造一致 roundtrip テスト・未対応 op の
-//!   fail-closed 確認は #1774 のスコープ。
+//!   fail-closed 確認は `tests/onnx_export_roundtrip.rs` で固定済み（#1774）。
 //! - facade 公開は #1775（#1652 の判断待ち）。本モジュールは `onnx-interop`
 //!   内部 API のみを提供し facade へは一切公開しない
 //!   （`onnx-interop` は crates.io 非公開クレート・`docs/compat-api-scope.md` の

@@ -1376,10 +1376,9 @@ pub(crate) fn where_cond_with_fallback(
 /// `AutodiffError::Backend(BackendError::ShapeMismatch(..))` を返す
 /// （単項のため shape は不変契約）。
 ///
-/// `#[allow(dead_code)]`: `tape::Op::ScalarUnary` doc と同じ理由
-/// （呼び出し元 `Var::scalar_unary` の公開 API 配線は #1593／#1595）・
-/// 同じ撤去条件。
-#[allow(dead_code)]
+/// 呼び出し元 `Var::scalar_unary` は #1710 で公開メソッド（`Var::sqrt`
+/// 等）から到達可能になったため `#[allow(dead_code)]` は撤去済み
+/// （`tape::Op::ScalarUnary` doc と同じ経緯）。
 pub(crate) fn scalar_unary_with_fallback(
     ops: &dyn BackendOps,
     op: ScalarUnaryOp,
@@ -1408,9 +1407,10 @@ pub(crate) fn scalar_unary_with_fallback(
 /// `out_shape`（呼び出し元が `broadcast_shape(a, b)` で事前計算）と
 /// 戻り shape を照合する。
 ///
-/// `#[allow(dead_code)]`: [`scalar_unary_with_fallback`] と同じ理由・
-/// 同じ撤去条件。
-#[allow(dead_code)]
+/// 呼び出し元 `Var::scalar_binary` は #1710 で公開メソッド
+/// （`Var::sub`／`div`／`pow`）から到達可能になったため
+/// `#[allow(dead_code)]` は撤去済み（[`scalar_unary_with_fallback`]
+/// と同じ経緯）。
 pub(crate) fn scalar_binary_with_fallback(
     ops: &dyn BackendOps,
     op: ScalarBinaryOp,
@@ -3187,6 +3187,122 @@ mod tests {
             assert_eq!(da.get(&[i]).unwrap(), 1.0);
             assert_eq!(db.get(&[i]).unwrap(), 1.0);
         }
+    }
+
+    // --- Var::sub／div／pow／sqrt（イシュー #1710）: Tape 経由
+    //     エンドツーエンド ---
+    //
+    // forward の解析式・VJP 係数自体は `scalar_unary_analytic_grad_
+    // matches_numeric_for_all_variants`／`scalar_binary_analytic_grad_
+    // matches_numeric_for_all_variants`（`Sqrt`／`Sub`／`Div`／`Pow` を
+    // 含む）が既に中央差分と突合済みのため、ここでは `Var` 公開
+    // メソッドが `Op::ScalarUnary`／`ScalarBinary` を正しく記録し
+    // `Tape::backward` が期待どおりの勾配（broadcast 縮約を含む）を
+    // 返すことを手計算値で検証する。
+
+    #[test]
+    fn var_sub_backward_matches_manual_grad_with_broadcast() {
+        // [2,3] - [3]（bias broadcast）。d(a-b)/da = 1・d(a-b)/db = -1
+        // で、db は broadcast された行方向に `reduce_bias_grad`
+        // （f64 相当アキュムレータ）で縮約される（`Op::Add` と同型）。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let a = tape.var(&t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+        let b = tape.var(&t(&[10.0, 20.0, 30.0], &[3]));
+        let y = a.sub(&b).unwrap();
+        assert_eq!(
+            dense_vec(&y.to_tensor()),
+            vec![-9.0, -18.0, -27.0, -6.0, -15.0, -24.0]
+        );
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let da = grads.get(&a).unwrap().unwrap();
+        let db = grads.get(&b).unwrap().unwrap();
+        for i in 0..6 {
+            assert_eq!(dense_vec(da)[i], 1.0, "d(a-b)/da[{i}]");
+        }
+        for i in 0..3 {
+            // 2 行分（各 1.0）を合算するため db = -2.0。
+            assert_eq!(dense_vec(db)[i], -2.0, "d(a-b)/db[{i}]");
+        }
+    }
+
+    #[test]
+    fn var_div_backward_matches_manual_grad() {
+        // d(a/b)/da = 1/b・d(a/b)/db = -a/b^2。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let a = tape.var(&t(&[6.0, 9.0], &[2]));
+        let b = tape.var(&t(&[2.0, 3.0], &[2]));
+        let y = a.div(&b).unwrap();
+        assert_eq!(dense_vec(&y.to_tensor()), vec![3.0, 3.0]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let da = grads.get(&a).unwrap().unwrap();
+        let db = grads.get(&b).unwrap().unwrap();
+        assert_grad_close("div da", da, &t(&[0.5, 1.0 / 3.0], &[2]));
+        assert_grad_close("div db", db, &t(&[-1.5, -1.0], &[2]));
+    }
+
+    #[test]
+    fn var_pow_backward_matches_manual_grad() {
+        // y = a^b（a > 0）。da = b*a^(b-1)・db = y*ln(a)。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let a = tape.var(&t(&[2.0, 3.0], &[2]));
+        let b = tape.var(&t(&[3.0, 2.0], &[2]));
+        let y = a.pow(&b).unwrap();
+        assert_eq!(dense_vec(&y.to_tensor()), vec![8.0, 9.0]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let da = grads.get(&a).unwrap().unwrap();
+        let db = grads.get(&b).unwrap().unwrap();
+        assert_grad_close("pow da", da, &t(&[12.0, 6.0], &[2]));
+        assert_grad_close(
+            "pow db",
+            db,
+            &t(&[8.0 * 2.0_f32.ln(), 9.0 * 3.0_f32.ln()], &[2]),
+        );
+    }
+
+    #[test]
+    fn var_sqrt_forward_and_backward_matches_manual_grad() {
+        // y = sqrt(x)。dy/dx = 0.5/y。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[4.0, 9.0], &[2]));
+        let y = x.sqrt().unwrap();
+        assert_eq!(dense_vec(&y.to_tensor()), vec![2.0, 3.0]);
+        let loss = y.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        assert_grad_close("sqrt dx", dx, &t(&[0.25, 1.0 / 6.0], &[2]));
+    }
+
+    #[test]
+    fn var_sqrt_negative_input_yields_nan_without_panic() {
+        // 定義域外（`x < 0`）は IEEE `NaN`（PyTorch `torch.sqrt` と同じ
+        // 規約。設計 §7）で panic しない。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[-1.0], &[1]));
+        let y = x.sqrt().unwrap();
+        assert!(dense_vec(&y.to_tensor())[0].is_nan());
+    }
+
+    #[test]
+    fn var_sub_div_pow_reject_cross_tape_and_non_broadcastable_shape() {
+        // cross-tape は fail-closed（`check_same_tape`）。
+        let tape_a = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let tape_b = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let a = tape_a.var(&t(&[1.0], &[1]));
+        let b = tape_b.var(&t(&[1.0], &[1]));
+        assert!(a.sub(&b).is_err());
+        assert!(a.div(&b).is_err());
+        assert!(a.pow(&b).is_err());
+
+        // 非 broadcast 可能 shape も fail-closed（`broadcast_shape`）。
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[1.0; 6], &[2, 3]));
+        let y = tape.var(&t(&[1.0; 4], &[2, 2]));
+        assert!(matches!(x.sub(&y).unwrap_err(), AutodiffError::Shape(_)));
+        assert!(matches!(x.div(&y).unwrap_err(), AutodiffError::Shape(_)));
+        assert!(matches!(x.pow(&y).unwrap_err(), AutodiffError::Shape(_)));
     }
 
     /// `Op::ScalarUnary`／`ScalarBinary` は `is_checkpoint_eligible ==
