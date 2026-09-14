@@ -1,7 +1,11 @@
-//! `CudaBackendOps::sum`／`max`（`reduce::CudaReduce`。イシュー #1584・
-//! 親イシュー #1571）の実機必須テスト。`linear_forward_device_real_device.rs`
-//! と同じ構成方針（`#[ignore]` 分離。CPU 参照実装との統一複合判定・
-//! 一部は bit 同一判定）。
+//! `CudaBackendOps::sum`／`max`／`min`（`reduce::CudaReduce`。イシュー
+//! #1584・親イシュー #1571。`min` はイシュー #1720）の実機必須テスト。
+//! `linear_forward_device_real_device.rs` と同じ構成方針（`#[ignore]`
+//! 分離。CPU 参照実装との統一複合判定・一部は bit 同一判定）。
+//! `argmax`／`argmin` は本イシュー（#1720）時点で GPU カーネル未実装
+//! （明示 `Unsupported`）のため本ファイルの対象外——GPU 非依存の
+//! 検証は `crates/backend-cuda/src/ops.rs::tests::argmax_and_argmin_
+//! are_explicitly_unsupported_without_touching_driver` を参照。
 //!
 //! ```sh
 //! cargo test -p fandhe-ai-backend-cuda --release --test reduce_parity -- --ignored --nocapture
@@ -115,6 +119,37 @@ fn max_matches_cpu_reference_on_real_device() {
     }
 }
 
+/// (b') `min` が CPU 参照実装（`reduction::min`）と統一複合判定内で
+/// 一致することを全対象形状で確認する（イシュー #1720。[`max_matches_
+/// cpu_reference_on_real_device`] と対称）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn min_matches_cpu_reference_on_real_device() {
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let cuda_ops = CudaBackendOps::new(device.ordinal());
+    let cpu_ops = fandhe_ai_backend_cpu::CpuBackendOps::new();
+
+    for &(shape, dim) in SHAPES {
+        let numel: usize = shape.iter().product();
+        let a = tensor(xorshift_fill(0x2468_ace0 ^ numel as u64, numel), shape);
+
+        let expected = cpu_ops.min(&a, dim).unwrap();
+        let actual = cuda_ops.min(&a, dim).unwrap();
+        assert_scalar_close(
+            &actual,
+            &expected,
+            &format!("min: shape={shape:?}, dim={dim:?}"),
+        );
+        assert_eq!(
+            bits(&actual),
+            bits(&expected),
+            "min is a strict selection (no rounding); tie-free random input should be bit \
+             exact: shape={shape:?}, dim={dim:?}"
+        );
+    }
+}
+
 /// (c) 空縮約の意味論（`sum`: 0.0／`max`: `EmptyReduction`）が CPU と
 /// 同一であることを確認する。
 #[test]
@@ -131,6 +166,10 @@ fn empty_reduction_semantics_match_cpu_on_real_device() {
     assert!(matches!(
         cuda_ops.max(&empty_all, None),
         Err(BackendError::KernelLaunchFailed(msg)) if msg.contains("empty reduction for op \"max\"")
+    ));
+    assert!(matches!(
+        cuda_ops.min(&empty_all, None),
+        Err(BackendError::KernelLaunchFailed(msg)) if msg.contains("empty reduction for op \"min\"")
     ));
 
     // 軸指定: axis_len == 0 かつ outer*inner > 0（出力は非空、縮約長が 0）。
@@ -149,6 +188,10 @@ fn empty_reduction_semantics_match_cpu_on_real_device() {
         cuda_ops.max(&empty_axis, Some(1)),
         Err(BackendError::KernelLaunchFailed(msg)) if msg.contains("empty reduction for op \"max\"")
     ));
+    assert!(matches!(
+        cuda_ops.min(&empty_axis, Some(1)),
+        Err(BackendError::KernelLaunchFailed(msg)) if msg.contains("empty reduction for op \"min\"")
+    ));
 
     // outer*inner == 0（出力自体が空）は vacuous に成功する。shape
     // [0, 5]・axis=1 は outer=0（shape[..1]）・axis_len=5・inner=1 で
@@ -161,6 +204,8 @@ fn empty_reduction_semantics_match_cpu_on_real_device() {
     assert_eq!(sum_vacuous.shape(), &[0]);
     let max_vacuous = cuda_ops.max(&vacuous, Some(1)).unwrap();
     assert_eq!(max_vacuous.shape(), &[0]);
+    let min_vacuous = cuda_ops.min(&vacuous, Some(1)).unwrap();
+    assert_eq!(min_vacuous.shape(), &[0]);
 }
 
 /// (d) NaN／±inf 入力の意味論が CPU（`f32::max` の NaN 非伝播）と一致
@@ -188,6 +233,14 @@ fn nan_and_infinity_semantics_match_cpu_on_real_device() {
             bits(&cuda_max),
             bits(&cpu_max),
             "max NaN/inf semantics must match CPU bit-exactly: data={data:?}"
+        );
+
+        let cpu_min = cpu_ops.min(&a, None).unwrap();
+        let cuda_min = cuda_ops.min(&a, None).unwrap();
+        assert_eq!(
+            bits(&cuda_min),
+            bits(&cpu_min),
+            "min NaN/inf semantics must match CPU bit-exactly: data={data:?}"
         );
 
         let cpu_sum = cpu_ops.sum(&a, None).unwrap();
@@ -225,4 +278,10 @@ fn sum_and_max_are_run_to_run_deterministic_on_real_device() {
         .collect();
     assert_eq!(max_runs[0], max_runs[1]);
     assert_eq!(max_runs[1], max_runs[2]);
+
+    let min_runs: Vec<Vec<u32>> = (0..3)
+        .map(|_| bits(&cuda_ops.min(&a, None).unwrap()))
+        .collect();
+    assert_eq!(min_runs[0], min_runs[1]);
+    assert_eq!(min_runs[1], min_runs[2]);
 }

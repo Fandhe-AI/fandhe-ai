@@ -98,6 +98,12 @@ pub struct CudaReduce {
     max_all_finalize_f32: CudaFunction,
     max_axis_f32: CudaFunction,
     max_lastaxis_f32: CudaFunction,
+    /// イシュー #1720（`BackendOps::min` の CUDA 実装）で追加した
+    /// min 4 カーネル（`max` と対称の 2 段全軸・2 種単一軸）。
+    min_all_partial_f32: CudaFunction,
+    min_all_finalize_f32: CudaFunction,
+    min_axis_f32: CudaFunction,
+    min_lastaxis_f32: CudaFunction,
 }
 
 impl CudaReduce {
@@ -141,6 +147,20 @@ impl CudaReduce {
             kernels_reduce::REDUCE_MAX_LASTAXIS_F32,
             "reduce_max_lastaxis_f32"
         );
+        let min_all_partial_f32 = compile_and_load!(
+            kernels_reduce::REDUCE_MIN_ALL_PARTIAL_F32,
+            "reduce_min_all_partial_f32"
+        );
+        let min_all_finalize_f32 = compile_and_load!(
+            kernels_reduce::REDUCE_MIN_ALL_FINALIZE_F32,
+            "reduce_min_all_finalize_f32"
+        );
+        let min_axis_f32 =
+            compile_and_load!(kernels_reduce::REDUCE_MIN_AXIS_F32, "reduce_min_axis_f32");
+        let min_lastaxis_f32 = compile_and_load!(
+            kernels_reduce::REDUCE_MIN_LASTAXIS_F32,
+            "reduce_min_lastaxis_f32"
+        );
 
         let allocator = context_cache::cached_allocator(device)?;
 
@@ -156,6 +176,10 @@ impl CudaReduce {
             max_all_finalize_f32,
             max_axis_f32,
             max_lastaxis_f32,
+            min_all_partial_f32,
+            min_all_finalize_f32,
+            min_axis_f32,
+            min_lastaxis_f32,
         })
     }
 
@@ -430,6 +454,129 @@ impl CudaReduce {
                 unsafe {
                     self.stream
                         .launch_builder(&self.max_axis_f32)
+                        .arg(&a_dev)
+                        .arg(&mut out_dev.as_view_mut())
+                        .arg(&outer_i)
+                        .arg(&axis_len_i)
+                        .arg(&inner_i)
+                        .launch(cfg)?;
+                }
+            }
+
+            readback(&self.stream, &out_dev.as_view())
+        })
+    }
+
+    /// 全軸 `min`（`fminf` 厳密選択。イシュー #1720）。[`Self::
+    /// run_max_all_f32`] の逐語ミラー（単位元 `f32::NEG_INFINITY`→
+    /// `f32::INFINITY`）。`numel == 0` は [`CudaError::EmptyReduction`]
+    /// を返す（`backend-cpu::reduction::min` と同一の意味論）。
+    pub fn run_min_all_f32(&self, a: &[f32]) -> Result<f32, CudaError> {
+        let numel = a.len();
+        validate_i32_bound(numel, "numel")?;
+        if numel == 0 {
+            return Err(CudaError::EmptyReduction { op: "min" });
+        }
+
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+
+            let num_blocks = reduce_num_blocks(numel as u32);
+            let mut partial_dev = self.allocator.alloc_uninit_f32(num_blocks as usize)?;
+
+            let numel_i = numel as i32;
+            let partial_cfg = LaunchConfig {
+                grid_dim: (num_blocks, 1, 1),
+                block_dim: (REDUCE_BLOCK_DIM, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            // SAFETY: `run_max_all_f32` と同一の根拠（`partial` は f32・
+            // `+INFINITY` 単位元で全ブロックが 1 回だけ書く）。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.min_all_partial_f32)
+                    .arg(&a_dev)
+                    .arg(&mut partial_dev.as_view_mut())
+                    .arg(&numel_i)
+                    .launch(partial_cfg)?;
+            }
+
+            let mut out_dev = self.allocator.alloc_uninit_f32(1)?;
+            let num_partials_i = num_blocks as i32;
+            let finalize_cfg = LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (REDUCE_BLOCK_DIM, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            // SAFETY: `run_max_all_f32` の finalize と同一の根拠。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.min_all_finalize_f32)
+                    .arg(&partial_dev.as_view())
+                    .arg(&mut out_dev.as_view_mut())
+                    .arg(&num_partials_i)
+                    .launch(finalize_cfg)?;
+            }
+
+            let host: Vec<f32> = readback(&self.stream, &out_dev.as_view())?;
+            Ok(host.first().copied().unwrap_or(f32::INFINITY))
+        })
+    }
+
+    /// 単一軸 `min`（イシュー #1720）。[`Self::run_max_axis_f32`] と
+    /// 同一のルーティング方針・空縮約契約（`op: "min"`）。
+    pub fn run_min_axis_f32(
+        &self,
+        a: &[f32],
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+    ) -> Result<Vec<f32>, CudaError> {
+        let total_out = validate_axis_layout(a.len(), outer, axis_len, inner)?;
+        if axis_len == 0 {
+            if total_out > 0 {
+                return Err(CudaError::EmptyReduction { op: "min" });
+            }
+            return Ok(Vec::new());
+        }
+        if total_out == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.with_driver_call(|| {
+            let a_dev = self.stream.clone_htod(a)?;
+            let mut out_dev = self.allocator.alloc_uninit_f32(total_out)?;
+
+            let (outer_i, axis_len_i, inner_i) = (outer as i32, axis_len as i32, inner as i32);
+
+            if inner == 1 {
+                let num_blocks = (outer as u32).clamp(1, REDUCE_MAX_BLOCKS);
+                let cfg = LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (REDUCE_LASTAXIS_BLOCK_DIM, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let (rows_i, cols_i) = (outer_i, axis_len_i);
+                // SAFETY: `run_max_axis_f32` の lastaxis 分岐と同一の根拠。
+                unsafe {
+                    self.stream
+                        .launch_builder(&self.min_lastaxis_f32)
+                        .arg(&a_dev)
+                        .arg(&mut out_dev.as_view_mut())
+                        .arg(&rows_i)
+                        .arg(&cols_i)
+                        .launch(cfg)?;
+                }
+            } else {
+                let cfg = LaunchConfig {
+                    grid_dim: ((total_out as u32).div_ceil(REDUCE_BLOCK_DIM), 1, 1),
+                    block_dim: (REDUCE_BLOCK_DIM, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                // SAFETY: `run_max_axis_f32` の汎用分岐と同一の根拠。
+                unsafe {
+                    self.stream
+                        .launch_builder(&self.min_axis_f32)
                         .arg(&a_dev)
                         .arg(&mut out_dev.as_view_mut())
                         .arg(&outer_i)

@@ -123,6 +123,7 @@ pub struct CudaGatherScatter {
     gather_f32: CudaFunction,
     scatter_overwrite_f32: CudaFunction,
     scatter_add_f32: CudaFunction,
+    one_hot_f32: CudaFunction,
 }
 
 impl CudaGatherScatter {
@@ -146,6 +147,7 @@ impl CudaGatherScatter {
         );
         let scatter_add_f32 =
             compile_and_load!(kernels_gather_scatter::SCATTER_ADD_F32, "scatter_add_f32");
+        let one_hot_f32 = compile_and_load!(kernels_gather_scatter::ONE_HOT_F32, "one_hot_f32");
 
         let allocator = context_cache::cached_allocator(device)?;
 
@@ -156,6 +158,7 @@ impl CudaGatherScatter {
             gather_f32,
             scatter_overwrite_f32,
             scatter_add_f32,
+            one_hot_f32,
         })
     }
 
@@ -399,6 +402,79 @@ impl CudaGatherScatter {
                     .arg(&index_strides_dev)
                     .arg(&rank_i)
                     .arg(&dim_i)
+                    .arg(&numel_i)
+                    .launch(cfg)?;
+            }
+            readback(&self.stream, &out_dev.as_view())
+        })
+    }
+
+    /// `torch.nn.functional.one_hot`／`tf.one_hot` 相当（**非微分演算**。
+    /// イシュー #1755）。`out_shape` は呼び出し元（`ops.rs`）が
+    /// [`fandhe_ai_tensor_core::one_hot_out_shape`] で検査済みの
+    /// `index_shape ++ [num_classes]`。`gather`／`scatter` と異なり
+    /// 座標展開・ストライドが不要なため、`out_shape` を渡す代わりに
+    /// `index_shape`（＝`out_shape[..out_shape.len()-1]`）の要素数
+    /// （`row_numel`）だけをホスト側で導出し `index.len()` との一致を
+    /// 検証する（`kernels_gather_scatter.rs::ONE_HOT_F32` doc 参照。
+    /// GPU 転送前の必須の独立安全策——モジュール doc「shape 検証の
+    /// 責務分担」節と同じ理由）。
+    pub fn run_one_hot_f32(
+        &self,
+        index: &[i32],
+        num_classes: usize,
+        out_shape: &[usize],
+    ) -> Result<Vec<f32>, CudaError> {
+        debug_assert!(
+            !out_shape.is_empty(),
+            "run_one_hot_f32: caller must pre-validate via one_hot_out_shape \
+             (out_shape always has a trailing num_classes axis)"
+        );
+
+        let numel_out = checked_numel(out_shape)?;
+        if numel_out == 0 {
+            // 空出力早期リターン（`run_gather_f32` の `numel_out == 0`
+            // 早期リターンと同じ理由: 出力が空であれば `index` を読む
+            // 必要が一切ない）。
+            return Ok(Vec::new());
+        }
+        let row_shape = &out_shape[..out_shape.len() - 1];
+        let row_numel = checked_numel(row_shape)?;
+        if index.len() != row_numel {
+            return Err(CudaError::InvalidGatherScatterShape {
+                detail: format!(
+                    "one_hot: index.len()={} does not match row numel={row_numel}",
+                    index.len()
+                ),
+            });
+        }
+
+        let numel_i = validate_i32_bound(numel_out, "numel_out")?;
+        let num_classes_i = validate_i32_bound(num_classes, "num_classes")?;
+
+        self.with_driver_call(|| {
+            let index_dev = self.stream.clone_htod(index)?;
+            let mut out_dev = self.allocator.alloc_uninit_f32(numel_out)?;
+
+            let cfg = LaunchConfig {
+                grid_dim: ((numel_out as u32).div_ceil(GATHER_SCATTER_BLOCK_DIM), 1, 1),
+                block_dim: (GATHER_SCATTER_BLOCK_DIM, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            // SAFETY: `index_dev` は `row_numel` 要素（直上の長さ検証で
+            // 確認済み）の H2D 済みバッファ。カーネルは各出力添字
+            // `idx` について `row = idx / num_classes < row_numel` と
+            // なることが `idx < numel_out = row_numel * num_classes`
+            // から算術的に保証されるため範囲外読み出しはない。`out_dev`
+            // は `numel_out` 要素確保済みでカーネルは `idx < numel`
+            // （REQ-8）を維持したまま各出力要素を 1 回だけ書く
+            // （`kernels_gather_scatter.rs::ONE_HOT_F32` 参照）。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.one_hot_f32)
+                    .arg(&index_dev)
+                    .arg(&mut out_dev.as_view_mut())
+                    .arg(&num_classes_i)
                     .arg(&numel_i)
                     .launch(cfg)?;
             }

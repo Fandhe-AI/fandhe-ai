@@ -505,6 +505,116 @@ pub(crate) fn max(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) 
     }
 }
 
+/// `min(dim)`。`dim: None` は全要素中の最小値をスカラー（shape `[]`）で
+/// 返す。[`max`] と異なり **NaN 非伝播**（`f32::min`。`fminf` と同じ）
+/// を用いる——`BackendOps::min`（`crate::backend_ops` 経由）の CPU
+/// 参照実装（`backend-cpu::reduction::min`）と本番フォールバック経路
+/// （[`crate::grad::min_with_fallback`]）の意味論を一致させるため
+/// （[`max`] の `nan_propagating_max` との不一致は既存の事実であり
+/// 本関数の対象外。イシュー #1720 実装計画 §7「スコープ外」）。
+/// 空縮約（要素数 0）の検査は呼び出し元（[`crate::grad::
+/// min_with_fallback`]）が行う契約で、本関数自身は `dim: None` かつ
+/// 空入力の場合 `f32::INFINITY`（`fold` の初期値のまま）を返す。
+pub(crate) fn min(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) -> Tensor<f32> {
+    match dim {
+        None => {
+            let m = dense_vec(input).into_iter().fold(f32::INFINITY, f32::min);
+            build_tensor(vec![m], out_shape)
+        }
+        Some(axis) => build_tensor(reduce_axis(input, axis, f32::INFINITY, f32::min), out_shape),
+    }
+}
+
+/// `dim` 軸に沿った最大値／最小値の添字を求める共通走査
+/// （[`argmax`]／[`argmin`] が使う。イシュー #1720）。`better(v, best)`
+/// が `true` を返したときだけ現在の best を `v` へ更新する
+/// （`argmax` は `v > best`・`argmin` は `v < best`）ため、同値
+/// （`==`）では更新されず**最初の**添字が残る（タイ先勝ち契約）。
+/// `best` が NaN の間は次に来た非 NaN 値で無条件に置換し、`v` が
+/// NaN の間は無視する（[`min`]／[`max`] の NaN 規約と整合させる。
+/// 全要素 NaN の場合は添字 0 のまま）。`i32::MAX` を超える添字は
+/// [`sort`] と同じ理由で `ShapeError::IndexRangeOverflow` を返す。
+fn arg_extremum(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    out_shape: &[usize],
+    better: impl Fn(f32, f32) -> bool,
+) -> Result<Tensor<i32>, ShapeError> {
+    let data = dense_vec(input);
+    let indices = match dim {
+        None => {
+            let mut best_idx = 0usize;
+            let mut best_val = f32::NAN;
+            for (idx, &v) in data.iter().enumerate() {
+                if v.is_nan() {
+                    continue;
+                }
+                if best_val.is_nan() || better(v, best_val) {
+                    best_val = v;
+                    best_idx = idx;
+                }
+            }
+            vec![best_idx]
+        }
+        Some(axis) => {
+            let shape = input.shape();
+            let outer: usize = shape[..axis].iter().product();
+            let axis_len = shape[axis];
+            let inner: usize = shape[axis + 1..].iter().product();
+            let mut out = vec![0usize; outer * inner];
+            for o in 0..outer {
+                for i in 0..inner {
+                    let dst = o * inner + i;
+                    let mut best_idx = 0usize;
+                    let mut best_val = f32::NAN;
+                    for a in 0..axis_len {
+                        let src = (o * axis_len + a) * inner + i;
+                        let v = data[src];
+                        if v.is_nan() {
+                            continue;
+                        }
+                        if best_val.is_nan() || better(v, best_val) {
+                            best_val = v;
+                            best_idx = a;
+                        }
+                    }
+                    out[dst] = best_idx;
+                }
+            }
+            out
+        }
+    };
+    let mut out_idx = Vec::with_capacity(indices.len());
+    for idx in indices {
+        out_idx
+            .push(i32::try_from(idx).map_err(|_| ShapeError::IndexRangeOverflow { index: idx })?);
+    }
+    Ok(build_index_tensor(out_idx, out_shape))
+}
+
+/// `dim` 軸に沿った最大値の添字のホスト参照実装（`torch.argmax(dim)`
+/// 相当。イシュー #1720）。`BackendOps::argmax` が `Unsupported` を
+/// 返したときのみ `Var::argmax`（`crate::grad::argext_with_fallback`
+/// 経由）から呼ばれる。空縮約の検査は呼び出し元の責務（[`arg_extremum`]
+/// doc 参照）。
+pub(crate) fn argmax(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    out_shape: &[usize],
+) -> Result<Tensor<i32>, ShapeError> {
+    arg_extremum(input, dim, out_shape, |v, best| v > best)
+}
+
+/// `dim` 軸に沿った最小値の添字のホスト参照実装（`torch.argmin(dim)`
+/// 相当。[`argmax`] の最小値版。イシュー #1720）。
+pub(crate) fn argmin(
+    input: &Tensor<f32>,
+    dim: Option<usize>,
+    out_shape: &[usize],
+) -> Result<Tensor<i32>, ShapeError> {
+    arg_extremum(input, dim, out_shape, |v, best| v < best)
+}
+
 /// 二乗誤差の縮約（スカラー出力）。shape 一致検査
 /// （`require_same_shape`）は呼び出し元が済ませている前提。`reduction`
 /// で mean（全要素平均）/sum（全要素総和）を切り替える（#190。
@@ -1447,6 +1557,34 @@ pub(crate) fn topk(
         build_tensor(out_vals, out_shape),
         build_index_tensor(out_idx, out_shape),
     ))
+}
+
+/// `Var::one_hot` のホスト参照実装（`torch.nn.functional.one_hot`／
+/// `tf.one_hot` 相当。イシュー #1755）。`BackendOps::one_hot` が
+/// `Unsupported` を返したときのみ `grad::one_hot_with_fallback` から
+/// 呼ばれる。`index`（値は `[0, num_classes)` の範囲内であることを
+/// `Var::one_hot` が forward 時点で検査済み）の各要素 `c` に対し、
+/// 出力の末尾軸（サイズ `num_classes`）へ `c` 番目だけ `1.0`・残りを
+/// `0.0` とする one-hot 行を書く。出力 shape は `index.shape() ++
+/// [num_classes]`（[`fandhe_ai_tensor_core::one_hot_out_shape`]
+/// 参照）で、各出力位置は互いに独立（データ競合の心配がない単純な
+/// 走査で bit 決定的）。
+pub(crate) fn one_hot(index: &Tensor<i32>, num_classes: usize, out_shape: &[usize]) -> Tensor<f32> {
+    if out_shape.contains(&0) {
+        return build_tensor(Vec::new(), out_shape);
+    }
+    let index_data = dense_vec_i32(index);
+    let numel: usize = out_shape.iter().product();
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let row = flat / num_classes;
+        let c = flat % num_classes;
+        let dim_idx = index_data[row];
+        if dim_idx >= 0 && (dim_idx as usize) == c {
+            *out_val = 1.0;
+        }
+    }
+    build_tensor(out, out_shape)
 }
 
 /// 平坦化・totalOrder ソート・隣接重複除去のホスト参照実装

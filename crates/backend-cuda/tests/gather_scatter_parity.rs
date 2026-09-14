@@ -469,3 +469,133 @@ fn scatter_matches_cpu_across_shapes_and_reduce() {
         cpu_empty.as_slice().expect("contiguous")
     );
 }
+
+// --- one_hot（非微分演算。イシュー #1755） ---
+
+/// `[0, num_classes)` の一様乱数 `i32` クラス id 列を決定的シードで作る
+/// （`index_vec` と同じ写像だが `dim_size` を `num_classes` と呼び直した
+/// だけの独立関数。呼び出し意図を明確にするため複製する）。
+fn class_id_vec(seed: u64, numel: usize, num_classes: usize) -> Vec<i32> {
+    index_vec(seed, numel, num_classes)
+}
+
+/// `CPU`（[`fandhe_ai_backend_cpu::CpuBackendOps`]）と `CUDA` の
+/// `one_hot` 出力が bit 完全一致し、run-to-run でも bit 同一
+/// （決定的）であることを確認する。
+fn assert_one_hot_parity(seed: u64, index_shape: &[usize], num_classes: usize) {
+    let numel: usize = index_shape.iter().product();
+    let index = Tensor::<i32>::new(class_id_vec(seed, numel, num_classes), index_shape)
+        .expect("valid tensor");
+
+    let cpu = CpuBackendOps::new();
+    let cuda = CudaBackendOps::new(0);
+
+    let cpu_out = cpu
+        .one_hot(&index, num_classes)
+        .expect("cpu one_hot must succeed");
+    let cuda_out = cuda
+        .one_hot(&index, num_classes)
+        .expect("cuda one_hot must succeed on CUDA-equipped test runner");
+
+    let cpu_slice = cpu_out.as_slice().expect("contiguous");
+    let cuda_slice = cuda_out.as_slice().expect("contiguous");
+    assert_eq!(
+        cuda_slice, cpu_slice,
+        "one_hot: CPU と bit 同一のはず (index_shape={index_shape:?}, num_classes={num_classes})"
+    );
+
+    let cuda_out2 = cuda
+        .one_hot(&index, num_classes)
+        .expect("cuda one_hot rerun");
+    assert_eq!(
+        cuda_out2.as_slice().expect("contiguous"),
+        cuda_slice,
+        "one_hot: run-to-run で bit 同一のはず"
+    );
+}
+
+/// 環境適応スモーク（属性なし。通常 CI で実行）。`gather_scatter_
+/// parity_smoke_env_adaptive` と同じ分岐パターン: CUDA 不在なら
+/// `BackendError::CudaUnavailable` を確認して早期 return する。範囲外
+/// クラス id 検査（`checked_shape_numel`・値域検査）はデバイス初期化
+/// より前に走るため GPU 有無に依らず検証する。
+#[test]
+fn one_hot_parity_smoke_env_adaptive() {
+    let cuda = CudaBackendOps::new(0);
+    let cpu = CpuBackendOps::new();
+
+    let index = Tensor::<i32>::new(vec![0, 2, 1, 1], &[2, 2]).expect("valid tensor");
+
+    match cuda.one_hot(&index, 3) {
+        Ok(_) => {
+            assert_one_hot_parity(20001, &[2, 2], 3);
+            assert_one_hot_parity(20002, &[5], 4);
+
+            // 範囲外クラス id は `BackendError::ShapeMismatch
+            // (ShapeError::IndexOutOfRange)` を返す（CPU と同一
+            // variant・フィールド）。
+            let bad_index = Tensor::<i32>::new(vec![0, 9, 2, 1], &[2, 2]).expect("valid tensor");
+            let cpu_err = expect_shape_mismatch(
+                cpu.one_hot(&bad_index, 3)
+                    .expect_err("cpu must reject out-of-range class id"),
+            );
+            let cuda_err = expect_shape_mismatch(
+                cuda.one_hot(&bad_index, 3)
+                    .expect_err("cuda must reject out-of-range class id"),
+            );
+            assert_eq!(
+                cpu_err, cuda_err,
+                "CPU と CUDA は同一の IndexOutOfRange を返す契約"
+            );
+        }
+        Err(BackendError::CudaUnavailable(msg)) => {
+            assert!(!msg.is_empty(), "error detail message must not be empty");
+
+            // 範囲外検査はデバイス初期化より前に走るため CUDA 非搭載
+            // 環境でも検証できる。
+            let bad_index = Tensor::<i32>::new(vec![0, 9, 2, 1], &[2, 2]).expect("valid tensor");
+            let cpu_err = expect_shape_mismatch(
+                cpu.one_hot(&bad_index, 3)
+                    .expect_err("cpu must reject out-of-range class id"),
+            );
+            let cuda_err = expect_shape_mismatch(
+                cuda.one_hot(&bad_index, 3)
+                    .expect_err("cuda must reject out-of-range class id even without CUDA device"),
+            );
+            assert_eq!(cpu_err, cuda_err);
+        }
+        Err(other) => panic!("unexpected error variant for CudaBackendOps::one_hot: {other}"),
+    }
+}
+
+/// 実機必須の形状網羅（受け入れ条件の本体）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn one_hot_matches_cpu_across_shapes() {
+    let index_shapes_classes: &[(&[usize], usize)] = &[
+        (&[4], 3),
+        (&[2, 3], 5),
+        (&[2, 3, 4], 2),
+        (&[1 << 12], 8), // ブロック境界をまたぐ大きさ
+    ];
+    let mut seed = 30_000u64;
+    for &(index_shape, num_classes) in index_shapes_classes {
+        seed += 7;
+        assert_one_hot_parity(seed, index_shape, num_classes);
+    }
+
+    // 空ケース: index が空（出力も空）。
+    let cpu = CpuBackendOps::new();
+    let cuda = CudaBackendOps::new(0);
+    let index_empty = Tensor::<i32>::new(Vec::new(), &[0]).expect("valid tensor");
+    let cpu_empty = cpu
+        .one_hot(&index_empty, 3)
+        .expect("cpu one_hot empty index");
+    let cuda_empty = cuda
+        .one_hot(&index_empty, 3)
+        .expect("cuda one_hot empty index");
+    assert_eq!(
+        cuda_empty.as_slice().expect("contiguous"),
+        cpu_empty.as_slice().expect("contiguous")
+    );
+}

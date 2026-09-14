@@ -19,8 +19,9 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, DType, FusionPlan, GemmChecksum,
     GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
     MseReduction, QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, gather_out_shape, interpolate_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    UnaryElementwiseOp, gather_out_shape, interpolate_out_shape, one_hot_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 
 use crate::gemm_blis::{
@@ -1388,6 +1389,21 @@ impl BackendOps for CpuBackendOps {
         sort_topk::topk(input, dim, k, largest, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::one_hot` の CPU 実装（**非微分演算**。イシュー
+    /// #1755）。[`one_hot_out_shape`] で `index.shape()`／`num_classes`
+    /// を再検査してから `gather_scatter::one_hot` へ委譲する
+    /// （`gather`／`scatter`／`sort`／`topk` と同じ二重検査方針。
+    /// `.claude/rules/security.md` A08）。
+    fn one_hot(
+        &self,
+        index: &Tensor<i32>,
+        num_classes: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            one_hot_out_shape(index.shape(), num_classes).map_err(BackendError::ShapeMismatch)?;
+        gather_scatter::one_hot(index, num_classes, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// `BackendOps::unique` の CPU 実装（イシュー #1734）。
     /// `unique::unique` へ委譲する（shape 検査は不要——入力 shape に
     /// 制約はなく、出力 shape `[m]` は実行結果から一意に定まる）。
@@ -1401,6 +1417,24 @@ impl BackendOps for CpuBackendOps {
 
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         reduction::max(a, dim).map_err(reduce_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::min`] の CPU 実装（イシュー
+    /// #1720）。`reduction::min` へ委譲する。
+    fn min(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        reduction::min(a, dim).map_err(reduce_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::argmax`] の CPU 実装
+    /// （イシュー #1720）。`reduction::argmax` へ委譲する。
+    fn argmax(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        reduction::argmax(a, dim).map_err(reduce_error_to_backend_error)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::argmin`] の CPU 実装
+    /// （イシュー #1720）。`reduction::argmin` へ委譲する。
+    fn argmin(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        reduction::argmin(a, dim).map_err(reduce_error_to_backend_error)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::mse_loss`] の CPU 実装

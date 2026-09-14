@@ -172,6 +172,32 @@ fn scatter_add_native_matches_eval_fallback_bit_exact() {
     );
 }
 
+/// `one_hot`（**非微分演算**。イシュー #1755）の CPU ネイティブ実装と
+/// `eval::one_hot` フォールバックが bit 完全一致することを確認する
+/// （`ForceEvalFallback` は `one_hot` を override しないため既定
+/// `Unsupported` のまま → `Var::one_hot` が自動的に `eval::one_hot`
+/// フォールバックへ迂回する。`gather`／`scatter` と同型の検証構成）。
+#[test]
+fn one_hot_native_matches_eval_fallback_bit_exact() {
+    let x = t(vec![0.0, 2.0, 1.0, 1.0], &[2, 2]);
+
+    let native_tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let native_x = native_tape.var(&x);
+    let native_out = native_x.one_hot(3).unwrap();
+
+    let fallback_tape = Tape::new_with_ops(Box::new(ForceEvalFallback {
+        inner: CpuBackendOps::new(),
+    }));
+    let fallback_x = fallback_tape.var(&x);
+    let fallback_out = fallback_x.one_hot(3).unwrap();
+
+    assert_bit_exact(
+        "one_hot",
+        &native_out.to_tensor(),
+        &fallback_out.to_tensor(),
+    );
+}
+
 /// `CpuBackendOps::gather`／`scatter` が `ops_shape::gather_out_shape`／
 /// `scatter_out_shape` による shape 再検査を実装側でも行い、
 /// 不一致を `BackendError::ShapeMismatch` として fail-closed に拒否
