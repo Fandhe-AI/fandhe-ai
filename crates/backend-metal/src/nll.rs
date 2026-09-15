@@ -470,3 +470,138 @@ fn encode_backward_dispatch(
     let (threadgroups, threads_per_tg) = nll_dispatch_sizes(groups, NLL_THREADGROUP_WIDTH);
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PR #1850 codex-review P0 是正 1 の回帰: `input`／`targets` の
+    /// 実長が `layout` 由来の期待値と一致しない場合、`MetalNll` を
+    /// 直接呼ぶ公開起動 API 自身が範囲外アクセス前に型付きエラーで
+    /// 拒否することを確認する（GPU 非依存。ホスト側検証のみ。
+    /// `backend-cuda::nll` の同名テストと同型）。
+    #[test]
+    fn validate_nll_buffers_rejects_input_length_mismatch() {
+        let layout = NllLayout {
+            outer: 2,
+            num_classes: 3,
+            inner: 1,
+        };
+        let (n_samples, numel) = validate_nll_layout(layout).unwrap();
+        let input = vec![0.0f32; numel - 1];
+        let targets = vec![0i32; n_samples];
+        let err =
+            validate_nll_buffers(Some(&input), &targets, layout, n_samples, numel).unwrap_err();
+        assert!(
+            matches!(err, MetalError::InvalidElementwiseShape { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_nll_buffers_rejects_targets_length_mismatch() {
+        let layout = NllLayout {
+            outer: 2,
+            num_classes: 3,
+            inner: 1,
+        };
+        let (n_samples, numel) = validate_nll_layout(layout).unwrap();
+        let input = vec![0.0f32; numel];
+        let targets = vec![0i32; n_samples + 1];
+        let err =
+            validate_nll_buffers(Some(&input), &targets, layout, n_samples, numel).unwrap_err();
+        assert!(
+            matches!(err, MetalError::InvalidElementwiseShape { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// PR #1850 codex-review P0 是正 2 の回帰: `targets` の値が
+    /// `[0, num_classes)` の範囲外の場合、ディスパッチ前に拒否する。
+    #[test]
+    fn validate_nll_buffers_rejects_out_of_range_target() {
+        let layout = NllLayout {
+            outer: 1,
+            num_classes: 2,
+            inner: 1,
+        };
+        let (n_samples, numel) = validate_nll_layout(layout).unwrap();
+        let input = vec![0.0f32; numel];
+        let targets = vec![5i32];
+        let err =
+            validate_nll_buffers(Some(&input), &targets, layout, n_samples, numel).unwrap_err();
+        assert!(
+            matches!(err, MetalError::InvalidElementwiseShape { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_nll_buffers_rejects_negative_target() {
+        let layout = NllLayout {
+            outer: 1,
+            num_classes: 2,
+            inner: 1,
+        };
+        let (n_samples, numel) = validate_nll_layout(layout).unwrap();
+        let input = vec![0.0f32; numel];
+        let targets = vec![-1i32];
+        let err =
+            validate_nll_buffers(Some(&input), &targets, layout, n_samples, numel).unwrap_err();
+        assert!(
+            matches!(err, MetalError::InvalidElementwiseShape { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// PR #1850 codex-review P1 是正の回帰: `outer`/`num_classes`/
+    /// `inner` の `checked_mul` 積が `usize` をオーバーフローする場合、
+    /// debug ビルドの乗算 panic ではなく型付きエラーを返す。
+    #[test]
+    fn validate_nll_layout_rejects_n_samples_overflow() {
+        let layout = NllLayout {
+            outer: usize::MAX,
+            num_classes: 2,
+            inner: 2,
+        };
+        let err = validate_nll_layout(layout).unwrap_err();
+        assert!(
+            matches!(err, MetalError::InvalidElementwiseShape { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_nll_layout_rejects_numel_overflow() {
+        // `outer * inner`（n_samples）はオーバーフローしないが
+        // `outer * num_classes * inner`（numel）がオーバーフローする
+        // 形状（`n_samples` 側の分岐ではなく `numel` 側の分岐を
+        // 確実に踏むための値）。
+        let layout = NllLayout {
+            outer: 1,
+            num_classes: 3,
+            inner: usize::MAX / 2,
+        };
+        let err = validate_nll_layout(layout).unwrap_err();
+        assert!(
+            matches!(err, MetalError::InvalidElementwiseShape { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// カーネル引数型（`u32`）の上限超過も同一エラー種別で拒否する
+    /// ことを確認する。
+    #[test]
+    fn validate_nll_layout_rejects_u32_range_exceeded() {
+        let layout = NllLayout {
+            outer: u32::MAX as usize + 1,
+            num_classes: 1,
+            inner: 1,
+        };
+        let err = validate_nll_layout(layout).unwrap_err();
+        assert!(
+            matches!(err, MetalError::InvalidElementwiseShape { .. }),
+            "{err:?}"
+        );
+    }
+}
