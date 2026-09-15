@@ -961,3 +961,101 @@ reshape してから `Var::conv2d` へ委譲する薄いラッパーで新規 `O
   Metal 専用カーネル（#1644）・`nn::Conv1d`／`compat::Sequential::
   add_conv1d`（#1770）・3 バックエンド実機 parity 実測（#1771）は
   対象外のまま。
+
+### #1768（Metal `im2col`／`col2im` 実装）
+
+- **対象**: `crates/backend-metal` に `im2col`／`col2im`（`BackendOps`
+  override）を実装した。`conv2d` 自身は §9 の方針どおり override
+  しない（forward は `conv2d_with_fallback` の段階的合成——Metal
+  `im2col` → `gemm_batched` → `add`〈bias〉——、backward は既存 VJP
+  〈`grad.rs`〉が `im2col_with_fallback`／`col2im_with_fallback` →
+  `gemm_batched_fp32_strict` ×2 → `col2im_with_fallback` の順で Metal
+  カーネルへ自動的に到達する。`autodiff` 側のコード変更は不要）。
+- **カーネル設計**（`crates/backend-metal/src/shaders/im2col.metal`）:
+  `#[repr(C)]` 構造体 `Im2colDims`（19 × `uint` = 76 バイト。
+  `crate::im2col_model::Im2colDims` とレイアウト一致）を 1 回の
+  `setBytes_length_atIndex`（buffer index 2）でまとめて渡す
+  （`gemm.metal::Dims`／`GemmStrides` と同じ「構造体丸ごと」方式。
+  CUDA 版の 19 個スカラー引数を Metal では 1 個の `constant` 参照へ
+  まとめた点が CUDA との差分）。`im2col_f32` は 1 出力要素 = 1
+  スレッドの純粋コピー（算術なし・**bit 完全一致**）。`col2im_f32`
+  は 1 入力位置 = 1 スレッドの入力位置定常走査（atomic 不使用）で、
+  寄与する `(kh, kw)` を row-major に **binary64 ソフトウェア
+  エミュレーションアキュムレータ**（`im2col_f64_widen`／
+  `im2col_f64_add`／`im2col_f64_narrow`。MSL は `double` 型非対応の
+  ため `scan.metal::scan_f64_*`〈`mul` を除く〉の逐語複製。ホスト側
+  逐語モデルは `crate::soft_f64`）へ逐次加算し最後に 1 回
+  `narrow` する。CPU 参照実装（`backend-cpu::im2col::col2im` の
+  `f64` 逐次和）と**bit 完全一致**（NaN のみクラス一致）。座標計算
+  （`h + p_h − kh·d_h` 等）は CUDA と同じ理由で `long`（符号付き
+  64bit）演算を用い、剰余を取る**前**に符号判定する（設計 §6.2
+  「訂正 2」）。
+- **ホストモデル**（`crates/backend-metal/src/im2col_model.rs`。
+  `cfg(target_os = "macos")` を付けず Linux でも単体テストが回る。
+  `scan_model.rs`／`unique_model.rs` と同じ設計判断）: `Im2colDims`
+  型定義・`derive_im2col_dims`（`backend-cuda::im2col::
+  LaunchShape::derive` の Metal 対応版。`conv_out_len` による
+  `h_out`／`w_out` 独立再計算・`P` 軸整合検査・`u32` 収容検査）・
+  `im2col_model`／`col2im_soft_f64`（両カーネル本体の逐語 Rust 移植）
+  を提供する。単体テストが `fandhe_ai_backend_cpu::CpuBackendOps`
+  （dev-dependency）の `im2col`／`col2im` と bit 完全一致で突合する
+  （形状網羅 10 件・1d 形状含む）。
+- **起動 API**（`crates/backend-metal/src/im2col.rs::MetalIm2col`）:
+  `scan.rs`／`constant_pad.rs` と同じ構成方針（実行時 MSL コンパイル・
+  `context_cache::cached_im2col` によるプロセス内シングルトン共有・
+  `ctx.dispatch_sync` による同期ディスパッチ。呼び出し元が戻り値を
+  同期消費するため encode-only 版は設けない）。`run_im2col_f32`／
+  `run_col2im_f32` は呼び出し元 `ops.rs` の検査結果を信頼せず、
+  `derive_im2col_dims` による独立した形状再検証とホストスライス
+  実長検証を行う（多層防御。`.claude/rules/security.md` A08）。
+- **エラー写像**（`error.rs::MetalError::Im2colSizeLimitExceeded`／
+  `InvalidIm2colShape`・`ops.rs::map_im2col_error`）: CUDA と同じ
+  2 段階分離——`derive_im2col_dims` の `SizeLimitExceeded`（`u32`
+  上限超過。col は入力の `kH·kW` 倍で現実的形状でも到達しうる）
+  **のみ** `BackendError::Unsupported` へ写像しホストフォールバック
+  （`eval::im2col`／`col2im`）へ委ねる。`InvalidShape`（内部契約
+  違反。呼び出し元の事前検証を通過した入力からは実質到達しない
+  防御的経路）は `ShapeMismatch(ElementCountOverflow)` へ、それ以外
+  （デバイス・パイプライン起動失敗等）は `KernelLaunchFailed` へ
+  写像する（判定迂回経路を作らない）。
+- **`ops.rs` override の二重検査**: `im2col`（`im2col_out_shape` で
+  再検査・出力が空〈`N`／`Cin` 系の軸が 0〉なら早期リターン・確保前
+  検査 `checked_bytes_for::<f32>`）・`col2im`（`im2col_out_shape` から
+  導出した期待 `d_col` 形状と実形状の完全一致検査・`input_shape`
+  〈`d_col` とは独立に指定される戻り値 shape〉自体のバイトサイズも
+  `checked_bytes_for::<f32>` で確保前検査。CUDA 版・
+  `backend-cpu::ops::CpuBackendOps::col2im` の PR #1862 codex-review
+  是正と同じ攻撃面への対処）。
+- **数値契約**: im2col は 3 バックエンド bit 完全一致（算術なし）、
+  col2im は CPU `f64` 逐次和と bit 完全一致（Metal は binary64
+  ソフトウェアエミュレーション）。conv2d 全体（GEMM 段を含む
+  forward／backward）は REQ-2 統一複合判定。tolerance・`BASELINES`
+  は不変。
+- **テスト**: `im2col_model.rs` の Linux 実行可能単体テスト（CPU
+  との bit 一致・`P` 軸不整合拒否・`u32` 上限超過拒否・1d 形状導出・
+  `Im2colDims` サイズ一致・寄与なし位置の `+0.0` 契約）・
+  `crates/backend-metal/tests/im2col_source_evidence.rs`（Linux 実行
+  可能な MSL ソース文字列証跡: `#include` 順序・両カーネル宣言・
+  `Im2colDims` 19 フィールド・REQ-8 境界検査・`im2col_f32` の算術
+  非含有・`col2im_f32` の binary64 エミュレーション使用・符号判定の
+  順序・`long` 添字演算）・`crates/backend-metal/tests/
+  im2col_col2im_parity.rs`（macOS `#[ignore]`。CUDA 版と同一形状
+  網羅・256 threadgroup 境界・NaN／±inf／−0.0・非 contiguous
+  input・N=0・run-to-run bit 同一）・`crates/facade/tests/
+  conv2d_backend_parity.rs::metal_conv2d_backward_matches_cpu`
+  （forward に加え backward〈d_input／d_weight／d_bias〉を
+  `assert_parity` で追加）。
+- **facade 公開面**: 新規 `pub use`／`pub fn` は追加していない
+  （`Var::conv2d` は既存 `Var` 再エクスポート経由で到達済み）。
+- **M4 Max 実機未実測**: 本エージェント実行環境に Apple Silicon 実機
+  への到達手段がなく、`#[ignore]` テスト群（parity・backward
+  `assert_parity`）は未実行のまま `docs/perf/logs/metal-conv2d-1768/`
+  へ申し送る。
+- **引き継ぎ**: Metal Conv1d 経路の 1d 形状専用テスト・実機検証は
+  #1769。3 バックエンド実機 parity 実測は #1771。`nn::Conv2d`
+  層・`compat::Sequential::add_conv2d` は #1645。`conv2d` の
+  融合／direct override（GEMM 段迂回等の性能最適化）・GPU im2col
+  出力のデバイス常駐化（現状はホストへ readback してから
+  `gemm_batched` へ再アップロードする往復コストが残る）・GPU 側
+  d_weight／d_bias 縮約カーネル（設計 §11）は既存 #1643／#1644
+  コメントへ追記予定のスコープ外事項（別 issue）。
