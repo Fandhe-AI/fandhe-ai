@@ -1278,3 +1278,133 @@ fn available_devices_is_reachable_via_facade() {
         "available_devices() は常に Device::Cpu を含むはず"
     );
 }
+
+/// `src/data.rs`（イシュー #1615）専用の固定パス（`optim_rs_path` と
+/// 同型）。
+fn data_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/data.rs")
+}
+
+/// `src/data.rs` の `pub use` 行から `{...}` 内の識別子を抽出し、
+/// 昇格元公開面（`fandhe_ai_tensor_core::data`）と完全一致（過不足とも
+/// fail）することを固定する（`optim_module_reexports_exactly_expected_
+/// surface` と同型の検査）。
+#[test]
+fn data_module_reexports_exactly_expected_surface() {
+    let path = data_rs_path();
+    let content = read_to_string_or_panic(&path);
+
+    let allowed_prefix = "pub use fandhe_ai_tensor_core::data::";
+
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut offending_lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("pub use") {
+            continue;
+        }
+        if !trimmed.starts_with(allowed_prefix) {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        }
+        let rest = &trimmed[allowed_prefix.len()..];
+        let Some(open) = rest.find('{') else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        let Some(close) = rest.find('}') else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        for ident in rest[open + 1..close].split(',') {
+            let ident = ident.trim();
+            if !ident.is_empty() {
+                found.insert(ident.to_string());
+            }
+        }
+    }
+
+    assert!(
+        offending_lines.is_empty(),
+        "src/data.rs の pub use が昇格元公開面（fandhe_ai_tensor_core::data）以外の\
+         接頭辞を持つか、`{{...}}` 形式でない行を含む: {offending_lines:?}"
+    );
+
+    let expected: std::collections::BTreeSet<String> = [
+        "Batches",
+        "DataError",
+        "DataLoader",
+        "DataLoaderConfig",
+        "Dataset",
+        "TensorDataset",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "src/data.rs が再エクスポートする識別子が期待集合と一致しない\
+         （過不足いずれも不可。昇格元公開面と 1 対 1 対応であることの固定）"
+    );
+}
+
+/// `src/data.rs` が facade 独自の型・関数を定義しない純再エクスポート
+/// モジュールであることを固定する（`optim_module_is_pure_reexport` と
+/// 同じ走査ロジック〈`scan_forbidden_pub_items`〉を再利用する）。
+#[test]
+fn data_module_is_pure_reexport() {
+    let path = data_rs_path();
+    let content = read_to_string_or_panic(&path);
+    let offending = scan_forbidden_pub_items(&content);
+    assert!(
+        offending.is_empty(),
+        "src/data.rs が facade 独自の型・関数・impl・pub type/const/static/mod/union 等の\
+         公開宣言を定義している（純再エクスポートモジュールの契約違反）: {offending:?}"
+    );
+}
+
+/// `fandhe_ai::data` の全再エクスポート型が facade のみを通じて到達
+/// 可能であることのコンパイル時固定（`optim_types_are_reachable_via_
+/// facade_only` と同型。`fandhe_ai_tensor_core` は import しない）。
+#[test]
+fn data_types_are_reachable_via_facade_only() {
+    let features = fandhe_ai::Tensor::<f32>::new(vec![0.0, 1.0, 2.0, 3.0], &[4, 1])
+        .unwrap_or_else(|e| panic!("test fixture: features tensor の構築に失敗: {e}"));
+    let labels = fandhe_ai::Tensor::<i32>::new(vec![0, 1, 0, 1], &[4])
+        .unwrap_or_else(|e| panic!("test fixture: labels tensor の構築に失敗: {e}"));
+
+    let dataset = (
+        fandhe_ai::data::TensorDataset::new(features)
+            .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new が失敗した: {e}")),
+        fandhe_ai::data::TensorDataset::new(labels)
+            .unwrap_or_else(|e| panic!("test fixture: TensorDataset::new が失敗した: {e}")),
+    );
+    let config = fandhe_ai::data::DataLoaderConfig::new(2)
+        .shuffle(false)
+        .drop_last(false);
+    let loader = fandhe_ai::data::DataLoader::new(dataset, config)
+        .unwrap_or_else(|e| panic!("test fixture: DataLoader::new が失敗した: {e}"));
+
+    assert_eq!(loader.len(), 2);
+    let mut total = 0usize;
+    let batches: fandhe_ai::data::Batches<'_, _> = loader.iter();
+    for batch in batches {
+        let (x, y): (fandhe_ai::Tensor<f32>, fandhe_ai::Tensor<i32>) =
+            batch.unwrap_or_else(|e: fandhe_ai::data::DataError| {
+                panic!("test fixture: batch が失敗した: {e}")
+            });
+        assert_eq!(x.shape()[0], y.shape()[0]);
+        total += x.shape()[0];
+    }
+    assert_eq!(total, 4);
+
+    // `Dataset` trait 自体も facade 経由で到達可能であることの固定
+    // （`use fandhe_ai::data::Dataset;` なしでは `.len()`／`.batch()`
+    // が呼べない）。
+    fn assert_is_dataset<D: fandhe_ai::data::Dataset>(_d: &D) {}
+    let probe = fandhe_ai::data::TensorDataset::new(fandhe_ai::Tensor::<f32>::zeros(&[2]).unwrap())
+        .unwrap();
+    assert_is_dataset(&probe);
+}
