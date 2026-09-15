@@ -543,6 +543,18 @@ pub mod nll;
 #[cfg(target_os = "macos")]
 pub mod ops;
 pub mod pad;
+// MaxPool／AvgPool／AdaptiveAvgPool（1d／2d。イシュー #1730・親
+// #1607）のホスト側検証・逐語モデル（メモリプール `pool.rs` とは
+// 無関係）。`gather_scatter_model` 等と同じ設計判断で `objc2` 系 FFI
+// に触れないため `cfg(target_os = "macos")` を付けず、
+// Linux（本実装環境・CI）でも単体テストが回る。
+pub mod pooling_model;
+// MaxPool／AvgPool／AdaptiveAvgPool 起動 API（イシュー #1730・親
+// #1607）。`im2col.rs`・`constant_pad.rs` と同じ「カーネル起動は
+// macOS 限定・ホストモデルは Linux 実行可能」の 2 ファイル構成
+// （`pooling_model.rs` は上記の cfg なしブロックで宣言）。
+#[cfg(target_os = "macos")]
+pub mod pooling;
 #[cfg(target_os = "macos")]
 pub mod rnn_cell;
 // 累積和／累積積（`torch.cumsum`／`torch.cumprod` 相当。イシュー
@@ -715,6 +727,8 @@ pub use mse::MetalMse;
 pub use nll::{MetalNll, NllLayout};
 #[cfg(target_os = "macos")]
 pub use ops::MetalBackendOps;
+#[cfg(target_os = "macos")]
+pub use pooling::MetalPooling;
 #[cfg(target_os = "macos")]
 pub use rmsnorm::MetalRmsNorm;
 #[cfg(target_os = "macos")]

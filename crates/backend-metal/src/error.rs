@@ -219,6 +219,22 @@ pub enum MetalError {
     /// 設計判断。`backend-cuda::error::CudaError::
     /// BatchNormSizeLimitExceeded` と対になる）。
     BatchNormSizeLimitExceeded { detail: String },
+    /// `crate::pooling_model::{derive_pool_dims, derive_adaptive_dims}`
+    /// （`crate::pooling::MetalPooling::run_max_pool2d_f32`／
+    /// `run_avg_pool2d_f32`／`run_adaptive_avg_pool2d_f32` が起動前に
+    /// 呼ぶ。イシュー #1730）が検知した契約違反（rank 不一致・空間軸
+    /// ゼロ長・カーネル／ストライド／dilation が 0・`ceil_mode ==
+    /// true`・padding 超過・空窓構成・出力長の分子が負・ホスト
+    /// スライス実長不一致等）。
+    InvalidPoolingShape { detail: String },
+    /// [`Self::InvalidPoolingShape`] と同じ検証が検知した「形状パラ
+    /// メータの導出値がカーネル引数の `uint`（`u32::MAX`）上限、また
+    /// は MaxPool 索引契約の `plane_in <= i32::MAX` を超過」
+    /// （`InvalidPoolingShape`〈内部契約違反〉とは区別する:
+    /// `ops.rs::map_pooling_error`〈存在する場合〉は本 variant のみ
+    /// `BackendError::Unsupported` へ写像しホストフォールバックへ
+    /// 委ねる。`Im2colSizeLimitExceeded` と同型の設計判断）。
+    PoolingSizeLimitExceeded { detail: String },
 }
 
 impl fmt::Display for MetalError {
@@ -344,6 +360,12 @@ impl fmt::Display for MetalError {
             }
             MetalError::BatchNormSizeLimitExceeded { detail } => {
                 write!(f, "batch_norm size limit exceeded: {detail}")
+            }
+            MetalError::InvalidPoolingShape { detail } => {
+                write!(f, "invalid pooling shape: {detail}")
+            }
+            MetalError::PoolingSizeLimitExceeded { detail } => {
+                write!(f, "pooling size limit exceeded: {detail}")
             }
         }
     }
