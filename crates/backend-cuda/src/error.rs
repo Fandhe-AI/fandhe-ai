@@ -539,6 +539,31 @@ pub enum CudaError {
     /// `col2im`）へ委ねる（`ScanSizeLimitExceeded`／
     /// `UniqueSizeLimitExceeded` と同じ設計判断）。
     Im2colSizeLimitExceeded { detail: String },
+
+    /// BatchNorm1d／2d 順伝播カーネル起動 API（`batch_norm.rs::
+    /// CudaBatchNorm`）のホスト側形状・数値検証が拒否した入力
+    /// （イシュー #1735）。`InvalidRmsNormShape` と同じ「専用 variant で
+    /// `Display` メッセージの誤表示を避ける」方針: `eps` が有限かつ
+    /// 非負・`n*c*spatial == x.len()`（checked 乗算）・`w`／`b`／
+    /// `mean`／`var` の長さが `c` と一致（指定時）・`c *
+    /// size_of::<f32>() <= isize::MAX`（`n=0, c=usize::MAX` のような
+    /// 退化入力での `vec![0.0f32; c]` capacity overflow panic を防ぐ。
+    /// CPU 側 `batch_norm::validate_batch_norm_launch`〈PR #1874
+    /// codex-review P1〉と同じ対策）を起動前に検証する。
+    InvalidBatchNormShape { detail: String },
+
+    /// BatchNorm1d／2d の対象サイズがバックエンド固有の上限（`n`・
+    /// `c`・`spatial`・`numel` のいずれかがカーネル引数型 `int` の範囲
+    /// 〈`i32::MAX`〉を超える場合）を超過した（イシュー #1735）。
+    /// `ops.rs::CudaBackendOps::batch_norm_train`／`batch_norm_infer`
+    /// は本 variant のみを [`fandhe_ai_tensor_core::device::
+    /// BackendError::Unsupported`] へ写像し `fandhe_ai_autodiff::
+    /// grad::batch_norm_train_with_fallback`／
+    /// `batch_norm_infer_with_fallback` のホストフォールバック
+    /// （`eval::batch_norm_train_channels`／`batch_norm_infer_channels`）
+    /// へ委ねる（`Im2colSizeLimitExceeded`／`UniqueSizeLimitExceeded`
+    /// と同じ設計判断）。
+    BatchNormSizeLimitExceeded { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -688,6 +713,12 @@ impl fmt::Display for CudaError {
             }
             CudaError::Im2colSizeLimitExceeded { detail } => {
                 write!(f, "im2col/col2im size limit exceeded: {detail}")
+            }
+            CudaError::InvalidBatchNormShape { detail } => {
+                write!(f, "invalid BatchNorm shape/argument: {detail}")
+            }
+            CudaError::BatchNormSizeLimitExceeded { detail } => {
+                write!(f, "BatchNorm size limit exceeded: {detail}")
             }
         }
     }

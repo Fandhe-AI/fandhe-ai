@@ -263,3 +263,124 @@ fn cuda_batch_norm_train_forward_matches_cpu() {
         cpu_out.as_slice().expect("contiguous"),
     );
 }
+
+/// `batch_norm_infer`（eval モード。固定 running stats）forward の
+/// CUDA（`CudaBackendOps::batch_norm_infer`。#1735 実装）と CPU
+/// （`CpuBackendOps::batch_norm_infer`）の parity（実機必須。イシュー
+/// #1735 実装計画 §2.2）。
+fn batch_norm_infer_forward_on(device: Device) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let w = tape.make_var(&weight());
+    let b = tape.make_var(&bias());
+    tape.make_var(&leaf())
+        .batch_norm_infer(Some(&w), Some(&b), &running_mean(), &running_var(), 1e-5)
+        .expect("batch_norm_infer: shape 一致")
+        .to_tensor()
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_batch_norm_infer_forward_matches_cpu() {
+    let cuda_out = batch_norm_infer_forward_on(Device::Cuda(0));
+    let cpu_out = batch_norm_infer_forward_on(Device::Cpu);
+
+    assert_parity(
+        "batch_norm infer forward: CUDA tape_for vs CPU tape_for",
+        cuda_out.as_slice().expect("contiguous"),
+        cpu_out.as_slice().expect("contiguous"),
+    );
+}
+
+/// `matmul → batch_norm(train) → mse_loss` backward（dx／dW／db）の
+/// CUDA（forward は #1735 の融合カーネル。backward はホスト VJP。
+/// `docs/batch-norm-ops-design.md` §9「VJP は追加不要」）と CPU の
+/// parity（実機必須。CUDA forward とホスト VJP の組合せを検証する）。
+fn batch_norm_train_backward_on(device: Device) -> (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
+    let w_lin = Tensor::new(
+        vec![0.5, -0.3, 0.2, 0.7, -0.6, 0.1, 0.4, -0.2, 0.3],
+        &[3, 3],
+    )
+    .expect("valid tensor");
+    let target = Tensor::new(
+        vec![
+            0.2, 0.6, 0.3, 0.4, -0.1, 0.5, -0.3, 0.2, 0.1, 0.1, -0.2, 0.3,
+        ],
+        &[4, 3],
+    )
+    .expect("valid tensor");
+
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x = tape.make_var(&leaf());
+    let w_lin_var = tape.make_var(&w_lin);
+    let w_bn = tape.make_var(&weight());
+    let b_bn = tape.make_var(&bias());
+    let t = tape.make_var(&target);
+    let y = x
+        .matmul(&w_lin_var)
+        .unwrap()
+        .batch_norm(Some(&w_bn), Some(&b_bn), 1e-5)
+        .unwrap();
+    let loss = y.mse_loss(&t).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dw = grads.get(&w_bn).unwrap().expect("到達する");
+    let db = grads.get(&b_bn).unwrap().expect("到達する");
+    let dx = grads.get(&x).unwrap().expect("到達する");
+    (dw.clone(), db.clone(), dx.clone())
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_batch_norm_train_backward_matches_cpu() {
+    let (dw_cuda, db_cuda, dx_cuda) = batch_norm_train_backward_on(Device::Cuda(0));
+    let (dw_cpu, db_cpu, dx_cpu) = batch_norm_train_backward_on(Device::Cpu);
+
+    assert_parity(
+        "batch_norm train backward dW: CUDA tape_for vs CPU tape_for",
+        dw_cuda.as_slice().expect("contiguous"),
+        dw_cpu.as_slice().expect("contiguous"),
+    );
+    assert_parity(
+        "batch_norm train backward db: CUDA tape_for vs CPU tape_for",
+        db_cuda.as_slice().expect("contiguous"),
+        db_cpu.as_slice().expect("contiguous"),
+    );
+    assert_parity(
+        "batch_norm train backward dx: CUDA tape_for vs CPU tape_for",
+        dx_cuda.as_slice().expect("contiguous"),
+        dx_cpu.as_slice().expect("contiguous"),
+    );
+}
+
+/// rank 4（`[N, C, H, W]`。BatchNorm2d）入力の train forward を CUDA・
+/// CPU 間で突合する（実機必須。rank 2／3 は `batch_norm_train_forward_on`
+/// が既にカバー済み）。
+fn batch_norm_train_forward_rank4_on(device: Device) -> Tensor<f32> {
+    let x = Tensor::new(
+        (0..24).map(|i| (i as f32 - 12.0) * 0.1).collect(),
+        &[2, 3, 2, 2],
+    )
+    .expect("valid rank 4 tensor");
+    let w = Tensor::new(vec![1.5, -0.8, 1.0], &[3]).expect("weight: shape 一致");
+    let b = Tensor::new(vec![0.1, -0.2, 0.3], &[3]).expect("bias: shape 一致");
+
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let w_var = tape.make_var(&w);
+    let b_var = tape.make_var(&b);
+    tape.make_var(&x)
+        .batch_norm(Some(&w_var), Some(&b_var), 1e-5)
+        .expect("batch_norm: weight/bias shape [3] は c=3 と一致")
+        .to_tensor()
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_batch_norm_train_forward_rank4_matches_cpu() {
+    let cuda_out = batch_norm_train_forward_rank4_on(Device::Cuda(0));
+    let cpu_out = batch_norm_train_forward_rank4_on(Device::Cpu);
+
+    assert_parity(
+        "batch_norm train forward rank4 (BatchNorm2d): CUDA tape_for vs CPU tape_for",
+        cuda_out.as_slice().expect("contiguous"),
+        cpu_out.as_slice().expect("contiguous"),
+    );
+}
