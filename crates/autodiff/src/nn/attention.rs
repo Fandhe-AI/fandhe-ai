@@ -33,7 +33,8 @@
 //! **入出力契約（rank-3・batch_first 固定）**: `query: [B, L, E]`・
 //! `key`/`value: [B, S, E]` → 出力 `[B, L, E]`。unbatched `[L, E]`・
 //! `batch_first=false`・`kdim`/`vdim`・`key_padding_mask` 引数・
-//! `dropout_p`（#1603 未実装）・`need_weights`／attention weights の
+//! `dropout_p`（MHA への結線は対象外。`Var::dropout` 自体は #1603 で
+//! 実装済み）・`need_weights`／attention weights の
 //! 返却・`add_bias_kv`／`add_zero_attn`・packed `in_proj_weight`／
 //! PyTorch `state_dict` 対応付け（#1616）は対象外
 //! （`out-of-scope-tracking.md`）。
@@ -56,7 +57,7 @@ use crate::nn::init::{
     ATTN_K_SEED_SALT, ATTN_OUT_SEED_SALT, ATTN_Q_SEED_SALT, ATTN_V_SEED_SALT, derive_seed,
 };
 use crate::nn::linear::{Linear, LinearVars};
-use crate::nn::module::{Module, prefixed};
+use crate::nn::module::{Module, prefixed, strip_child_prefix};
 use crate::tape::Tape;
 use crate::var::Var;
 
@@ -790,6 +791,29 @@ impl Module for MultiheadAttention {
         out.extend(prefixed("out_proj", self.out_proj.named_parameters()));
         out
     }
+
+    /// [`Module::set_parameter`] の実装（イシュー #1752）。
+    /// `strip_child_prefix` で `q_proj.`／`k_proj.`／`v_proj.`／
+    /// `out_proj.` のいずれかを剥がし、対応する `Linear::set_parameter`
+    /// へ委譲する（`named_parameters` の接頭辞契約〈直上参照〉の
+    /// 逆演算）。該当する接頭辞がない名前は未知名として拒否する。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        if let Some(rest) = strip_child_prefix(name, "q_proj") {
+            return Linear::set_parameter(&mut self.q_proj, rest, value);
+        }
+        if let Some(rest) = strip_child_prefix(name, "k_proj") {
+            return Linear::set_parameter(&mut self.k_proj, rest, value);
+        }
+        if let Some(rest) = strip_child_prefix(name, "v_proj") {
+            return Linear::set_parameter(&mut self.v_proj, rest, value);
+        }
+        if let Some(rest) = strip_child_prefix(name, "out_proj") {
+            return Linear::set_parameter(&mut self.out_proj, rest, value);
+        }
+        Err(AutodiffError::InvalidArgument(format!(
+            "MultiheadAttention::set_parameter: no parameter named `{name}`"
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -1035,5 +1059,38 @@ mod tests {
             .expect("4 層とも正方 [4,4]・bias 全 Some・4 % 2 == 0 のため成功するはず");
         assert_eq!(mha.embed_dim(), 4);
         assert_eq!(mha.head_dim(), 2);
+    }
+
+    // `MultiheadAttention::set_parameter`（イシュー #1752）の単体
+    // テスト。
+
+    #[test]
+    fn set_parameter_delegates_to_correct_projection() {
+        let make = |seed| Linear::new(4, 4, true, seed).unwrap();
+        let mut mha =
+            MultiheadAttention::from_parameters(2, make(1), make(2), make(3), make(4)).unwrap();
+        let new_weight = Tensor::new(vec![9.0f32; 16], &[4, 4]).unwrap();
+        mha.set_parameter("k_proj.weight", new_weight.clone())
+            .unwrap();
+        assert_eq!(
+            mha.k_proj().weight().contiguous().as_slice().unwrap(),
+            new_weight.contiguous().as_slice().unwrap()
+        );
+        // 他の projection は不変。
+        assert_ne!(
+            mha.q_proj().weight().contiguous().as_slice().unwrap(),
+            new_weight.contiguous().as_slice().unwrap()
+        );
+    }
+
+    #[test]
+    fn set_parameter_rejects_unknown_prefix() {
+        let make = |seed| Linear::new(4, 4, true, seed).unwrap();
+        let mut mha =
+            MultiheadAttention::from_parameters(2, make(1), make(2), make(3), make(4)).unwrap();
+        let err = mha
+            .set_parameter("bogus.weight", mha.q_proj().weight().clone())
+            .expect_err("未知の接頭辞は Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 }
