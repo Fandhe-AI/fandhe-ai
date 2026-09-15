@@ -334,6 +334,22 @@ impl Tape {
     /// `Err(AutodiffError::TapeMismatch)` を返す（foreign な
     /// `Var`／`NodeId` をこのテープのグラフへ誤って接続しない）。
     pub fn backward(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError>;
+
+    /// **追補（イシュー #1749）**: `loss` から逆伝播し、その結果を
+    /// 既存の `into`（同一世代の `Gradients`）へ加算する opt-in API
+    /// （PyTorch の複数回 `loss.backward()` による `.grad` 蓄積相当）。
+    /// `into` が別テープ由来・`reset` をまたいだもの・resident 勾配
+    /// 経路（`DeviceParamStore::backward`）由来の場合はそれぞれ
+    /// `TapeMismatch`／`Backward` を返し `into` は無変更のまま。
+    /// `retain_graph`（グラフを `reset`／drop まで保持し続け、同一
+    /// グラフへの複数回 `backward` を無条件で成功させる契約）自体は
+    /// 追加 API なしで常時成立している（詳細は `docs/
+    /// autodiff-retain-graph-accumulate-decision.md`）。
+    pub fn backward_accumulate(
+        &self,
+        loss: &Var<'_>,
+        into: &mut Gradients,
+    ) -> Result<(), AutodiffError>;
 }
 
 /// autodiff クレートの公開エラー型。順伝播（`Var` の演算メソッド）と
@@ -383,6 +399,13 @@ impl Gradients {
     pub fn get(&self, var: &Var) -> Result<Option<&Tensor<f32>>, AutodiffError>;
 }
 ```
+
+**追補（イシュー #1749）**: `Gradients` は既定では 1 回の `Tape::backward`
+呼び出しの結果を保持するだけの値だが、`Tape::backward_accumulate`
+（上記）を使うと利用者が明示的に指定した `Gradients` へ複数回分の
+backward 結果を蓄積できる。フィールドは private のまま・`Clone` も
+追加しておらず、蓄積は `Tape::backward_accumulate` を経由する経路
+のみに限定する。
 
 `no_grad` 相当（勾配追跡を一時的に止める）は、専用フラグ API を設けず「`Tensor<T>` のまま演算する」ことで表現する。`Tensor<T>` と `Var` は別型であるため、追跡なしの経路を選ぶことはコンパイル時に強制される。
 
