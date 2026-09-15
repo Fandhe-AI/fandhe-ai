@@ -188,6 +188,39 @@ impl Sgd {
         })
     }
 
+    /// 構築時に確定したハイパーパラメータへの参照（`AdamW::config`／
+    /// `Adam::config` と同型のアクセサ。イシュー #1763・
+    /// `crates/facade/src/compat/callbacks.rs::LrSchedule` が現在の
+    /// `lr` を読むために使う）。
+    pub fn config(&self) -> &SgdConfig {
+        &self.config
+    }
+
+    /// 学習率のみを書き換える（LR scheduler 連携用。イシュー #1763・
+    /// 親 #1618）。`momentum`／`dampening`／`weight_decay`／`nesterov`
+    /// は不変のまま保つ（`SgdConfig { lr, ..self.config }`）。
+    ///
+    /// PyTorch の `param_group["lr"] = new_lr` と同じ意味論——
+    /// `velocity`（momentum バッファ）・過去の更新値には一切触れない
+    /// （状態をリセットしない。次の `step()` から新しい `lr` が
+    /// 適用される）。
+    ///
+    /// # Errors
+    ///
+    /// `new_lr` が非有限または負値の場合は
+    /// `AutodiffError::InvalidArgument`（[`SgdConfig::validate`] の
+    /// `lr` 検査と同一基準。fail-closed）。検証失敗時は `self.config`
+    /// を変更しない。
+    pub fn set_lr(&mut self, new_lr: f32) -> Result<(), AutodiffError> {
+        let candidate = SgdConfig {
+            lr: new_lr,
+            ..self.config
+        };
+        candidate.validate()?;
+        self.config = candidate;
+        Ok(())
+    }
+
     /// `params[i]` と `grads[i]` を対応づけて更新後テンソル列を返す
     /// （`params`/`grads` 自体は変更しない。呼び出し元が
     /// `nn::Linear::from_parameters` 等で戻り値を用いて差し替える）。
@@ -222,13 +255,17 @@ impl Sgd {
 
         let use_momentum = self.config.momentum != 0.0;
         // `use_momentum` ではなく `self.velocity.is_some()` をゲートにする:
-        // 現状 `SgdConfig` は構築後不変で `velocity` は `use_momentum` の
-        // 場合のみ `Some` になるため両者は常に一致するが、下流のループが
+        // `SgdConfig` は [`Sgd::set_lr`]（#1763。学習率のみ可変化する
+        // LR scheduler 結線用 API）経由で `lr` フィールドのみ構築後に
+        // 変わりうるが、`momentum` は不変のまま（`set_lr` は
+        // `SgdConfig { lr, ..self.config }` で他フィールドを保持する）
+        // ため `velocity` は依然 `use_momentum` の場合のみ `Some` になり
+        // 両者は常に一致する。下流のループが
         // `self.velocity.as_ref().map(|v| ... v[i] ...)` で件数検証なしに
         // 添字アクセスするため、ここでの検証は velocity の有無だけで
-        // 判定し `use_momentum` の値に依存させない。将来 config が可変に
-        // なる等で両者が乖離しても、添字アクセス前に必ず件数・shape が
-        // 検証された状態を保つ（Review 指摘: #193 momentum PR）。
+        // 判定し `use_momentum` の値に依存させない（添字アクセス前に
+        // 必ず件数・shape が検証された状態を保つ。Review 指摘: #193
+        // momentum PR）。
         if let Some(velocity) = &self.velocity {
             if velocity.len() != params.len() {
                 return Err(AutodiffError::InvalidArgument(format!(
@@ -543,5 +580,67 @@ mod tests {
         assert!((out[0].get(&[0, 1]).unwrap() - (2.0 - 0.1 * 0.3)).abs() < 1e-6);
         assert!((out[0].get(&[1, 0]).unwrap() - (3.0 - 0.1 * 0.2)).abs() < 1e-6);
         assert!((out[0].get(&[1, 1]).unwrap() - (4.0 - 0.1 * 0.4)).abs() < 1e-6);
+    }
+
+    // =====================================================================
+    // set_lr（イシュー #1763。LR scheduler 結線用 API）
+    // =====================================================================
+
+    #[test]
+    fn set_lr_updates_config_lr_and_keeps_other_fields() {
+        let mut sgd = Sgd::new(
+            SgdConfig::new(0.1)
+                .with_momentum(0.9)
+                .with_weight_decay(0.01),
+        )
+        .unwrap();
+        sgd.set_lr(0.02).unwrap();
+        let cfg = sgd.config();
+        assert_eq!(cfg.lr, 0.02);
+        assert_eq!(cfg.momentum, 0.9);
+        assert_eq!(cfg.weight_decay, 0.01);
+    }
+
+    #[test]
+    fn set_lr_rejects_negative_and_non_finite() {
+        let mut sgd = Sgd::new(SgdConfig::new(0.1)).unwrap();
+        for bad in [-0.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let err = sgd.set_lr(bad).unwrap_err();
+            assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+            // 検証失敗時は既存の lr を変更しない。
+            assert_eq!(sgd.config().lr, 0.1);
+        }
+    }
+
+    #[test]
+    fn set_lr_preserves_momentum_buffer_across_steps() {
+        // `set_lr` は momentum バッファ（velocity）に触れない
+        // （PyTorch の `param_group["lr"]` 書き換えと同じ意味論）ため、
+        // 「lr=0.1 で 1 step → set_lr(0.2) → 2 step 目」の velocity は
+        // 「最初から lr=0.2 だが 1 step 目は明示的に lr=0.1 相当の grad を
+        // 与えた」ケースの velocity と一致するはず。ここでは直接、
+        // set_lr 前後で velocity が「破棄されず引き継がれている」ことを
+        // 2 step 目の出力値から検証する（momentum=0.5・weight_decay=0
+        // なら 2 step 目の b = μ・b1 + (1-τ)・g2 のうち b1 は 1 step 目の
+        // grad そのもの——lr を挟んでも b1 の値は変わらないため、2 step
+        // 目の出力は「lr を変えずに 2 step 通した場合」との差分が
+        // set_lr(new_lr) による `p - new_lr * g2` の項だけになる）。
+        let mut sgd = Sgd::new(SgdConfig::new(0.1).with_momentum(0.5)).unwrap();
+        let p0 = tensor(vec![1.0], &[1]);
+        let g1 = tensor(vec![2.0], &[1]);
+        let out1 = sgd.step(&[&p0], &[&g1]).unwrap();
+        // 1 step 目: b1 = g1 = 2.0、p1 = 1.0 - 0.1*2.0 = 0.8
+        assert!((out1[0].get(&[0]).unwrap() - 0.8).abs() < 1e-6);
+
+        sgd.set_lr(0.05).unwrap();
+        let p1 = out1.into_iter().next().unwrap();
+        let g2 = tensor(vec![4.0], &[1]);
+        let out2 = sgd.step(&[&p1], &[&g2]).unwrap();
+        // 2 step 目: b2 = 0.5*b1 + (1-0)*g2 = 0.5*2.0 + 4.0 = 5.0
+        // p2 = p1 - new_lr*b2 = 0.8 - 0.05*5.0 = 0.55
+        // （b1 = 2.0 が set_lr 前後で不変のまま引き継がれていることを
+        // この期待値が検証する: もし velocity が破棄されていれば
+        // b2 = g2 = 4.0 となり p2 = 0.8 - 0.05*4.0 = 0.6 になるはず）
+        assert!((out2[0].get(&[0]).unwrap() - 0.55).abs() < 1e-6);
     }
 }

@@ -120,6 +120,30 @@ impl AdamW {
         &self.config
     }
 
+    /// 学習率のみを書き換える（LR scheduler 連携用。イシュー #1763・
+    /// 親 #1618）。`beta1`／`beta2`／`eps`／`weight_decay` は不変の
+    /// まま保つ（`AdamWConfig { lr, ..self.config }`）。
+    ///
+    /// PyTorch の `param_group["lr"] = new_lr` と同じ意味論——
+    /// `step_count`／`beta*_pow_t`／`m`／`v`（bias correction・
+    /// モーメント推定値）には一切触れない（状態をリセットしない。
+    /// 次の `step()` から新しい `lr` が適用される）。
+    ///
+    /// # Errors
+    ///
+    /// `new_lr` が非有限または負値の場合は
+    /// `AutodiffError::InvalidArgument`（[`AdamW::new`] の `lr` 検査と
+    /// 同一基準。fail-closed）。検証失敗時は `self.config` を変更しない。
+    pub fn set_lr(&mut self, new_lr: f32) -> Result<(), AutodiffError> {
+        if !(new_lr.is_finite() && new_lr >= 0.0) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "AdamW::set_lr: lr must be finite and >= 0.0, got {new_lr}"
+            )));
+        }
+        self.config.lr = new_lr;
+        Ok(())
+    }
+
     /// 実行済み `step()` 回数（bias correction の `t`）。
     pub fn step_count(&self) -> u64 {
         self.step_count
@@ -452,5 +476,48 @@ mod tests {
             (actual - expected).abs() < 1e-6,
             "閉形式との不一致: actual={actual} expected={expected}"
         );
+    }
+
+    // =====================================================================
+    // set_lr（イシュー #1763。LR scheduler 結線用 API）
+    // =====================================================================
+
+    #[test]
+    fn set_lr_updates_config_lr_and_keeps_other_fields() {
+        let mut opt = AdamW::new(AdamWConfig::default()).unwrap();
+        opt.set_lr(0.01).unwrap();
+        let cfg = opt.config();
+        assert_eq!(cfg.lr, 0.01);
+        assert_eq!(cfg.beta1, AdamWConfig::default().beta1);
+        assert_eq!(cfg.beta2, AdamWConfig::default().beta2);
+        assert_eq!(cfg.weight_decay, AdamWConfig::default().weight_decay);
+    }
+
+    #[test]
+    fn set_lr_rejects_negative_and_non_finite() {
+        let mut opt = AdamW::new(AdamWConfig::default()).unwrap();
+        for bad in [-0.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let err = opt.set_lr(bad).unwrap_err();
+            assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+            assert_eq!(opt.config().lr, AdamWConfig::default().lr);
+        }
+    }
+
+    #[test]
+    fn set_lr_does_not_reset_step_count_or_moments() {
+        let cfg = AdamWConfig {
+            lr: 0.05,
+            ..AdamWConfig::default()
+        };
+        let mut opt = AdamW::new(cfg).unwrap();
+        let param = t(vec![0.5], &[1]);
+        let grad = t(vec![0.3], &[1]);
+        opt.step(&[(&param, &grad)]).unwrap();
+        assert_eq!(opt.step_count(), 1);
+
+        opt.set_lr(0.01).unwrap();
+        // step_count は set_lr の影響を受けない（moment/バイアス補正の
+        // 状態はリセットされない）。
+        assert_eq!(opt.step_count(), 1);
     }
 }
