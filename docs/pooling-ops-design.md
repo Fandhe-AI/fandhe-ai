@@ -542,6 +542,79 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
 - CUDA／Metal 実機実測は本エージェント実行環境に実機がないため未実施
   （既定 `Unsupported` → ホストフォールバックのため機能的には到達
   可能。専用カーネル・実機実測は #1729／#1730 へ引き継ぐ）。
+### Metal 実装（イシュー #1730）
+
+**数値方式**: Max は選択演算のみ（算術を含まない）のため CPU 参照実装
+と bit 完全一致。Avg／Adaptive は窓内の有効タップを row-major に
+soft-f64（binary64 の 64bit 整数ソフトウェアエミュレーション）
+アキュムレータへ逐次加算し `divisor`（`u32` から厳密変換した binary64
+値。`pool_f64_from_uint`）で soft-f64 除算してから 1 回だけ `f32` へ
+narrow する。加算・除算とも正しく丸められた binary64 のためハード
+ウェア `f64` と一致し、CPU `f64` 参照実装と bit 完全一致する設計
+（BatchNorm・LayerNorm のような mul／rsqrt を伴う二重丸め問題が
+Pooling には存在しないため、REQ-2 統一複合判定ではなく bit 完全一致
+を採用）。
+
+**カーネル構成**: `crates/backend-metal/src/shaders/pooling.metal`
+（`max_pool2d_f32`／`avg_pool2d_f32`／`adaptive_avg_pool2d_f32` の 3
+カーネル。1 スレッド = 1 出力位置・`PoolDims` 構造体を `setBytes` で
+渡す）。soft-f64 プリミティブ（`pool_f64_{clz64, widen, add, narrow,
+mul64_wide, normalize_mantissa, div64_wide, div}`）は
+`batch_norm.metal::bn_f64_*` の接頭辞置換による逐語複製（本演算に
+必要な最小集合のみ複製し、`sub`／`mul`〈elementwise〉／`rsqrt`／
+`add_ro`／`scale_pow2` 等は複製しない）。`pool_f64_from_uint`
+（`u32 -> binary64` の厳密変換）は本ファイル固有の追加ヘルパー。
+
+**判定契約**: 値・索引とも CPU 側ホスト逐語モデル
+（`crates/backend-metal/src/pooling_model.rs`。`cfg` なし・Linux でも
+単体テストが回る）と bit 完全一致。MaxPool のタイは先勝ち（`v > best`
+の厳密比較）・NaN は最初に出現した索引で固定される契約
+（`docs/pooling-ops-design.md` §5 のタイ規則・NaN 伝播索引契約の
+Metal 側実装）。
+
+**実装ファイル**: `crates/backend-metal/src/{pooling.rs（macOS 限定・
+起動 API・`MetalPooling`）, pooling_model.rs（cfg なし・derive_pool_dims
+／derive_adaptive_dims／ホスト逐語モデル）, shaders/pooling.metal,
+error.rs（`InvalidPoolingShape`／`PoolingSizeLimitExceeded` 追加）,
+lib.rs（モジュール配線・`pub use pooling::MetalPooling`）}`。
+
+**エラー写像**: `PoolingPrepareError::SizeLimitExceeded`（形状パラ
+メータ導出値が `u32::MAX` 超過、または MaxPool 索引契約
+`plane_in <= i32::MAX` 超過）→ `MetalError::PoolingSizeLimitExceeded`
+（Layer B 実装時にホストフォールバックへ写像される想定）・
+`InvalidShape` → `MetalError::InvalidPoolingShape`。
+
+**テスト**: `tests/pooling_source_evidence.rs`（Linux 実行可能。REQ-8
+手動境界検査・soft-f64 契約文字列・`PoolDims` フィールド順・
+`pool_f64_*` ↔ `bn_f64_*` 逐語一致ドリフトガード）・
+`tests/pooling_parity.rs`（`#![cfg(target_os = "macos")]`・全
+`#[ignore]`。ホストモデルとの bit 完全一致・特殊値契約・`N=0` 早期
+return・`PoolingSizeLimitExceeded` 型付きエラー）・
+`pooling_model.rs` 内の単体テスト（`derive_pool_dims`／
+`derive_adaptive_dims` の全ゲート境界例・独立 `f64` naive 参照との
+bit 完全一致）。
+
+**Layer B（`MetalBackendOps::{max_pool2d, avg_pool2d,
+adaptive_avg_pool2d}` への trait 結線）は本 PR 時点では未実施**:
+着手時点で `crates/tensor-core::backend_ops.rs`／`ops_shape.rs` に
+`Pool2dParams`／該当 `BackendOps` メソッドが存在しなかった（兄弟
+issue #1728〈CPU〉が並列実行中で未マージ）ため、`ops.rs` への推測
+実装は行わず `crate::pooling::MetalPooling` の起動 API を trait 非
+依存の引数（`&[f32]` + shape タプル）で完結させた。#1728 マージ後の
+結線手順: `ops.rs` に `map_pooling_error`（`PoolingSizeLimitExceeded`
+→ `BackendError::Unsupported`〈ホストフォールバック〉・
+`InvalidPoolingShape` → `BackendError::ShapeMismatch`）と
+`MetalBackendOps::{max_pool2d, avg_pool2d, adaptive_avg_pool2d}`
+（`pool2d_out_shape` で再検査 → `cached_pooling`〈`context_cache.rs`
+へ追加〉→ `run_*`）を追加する（親 #1607 を受け皿として記録。
+`.claude/rules/out-of-scope-tracking.md`）。
+
+**対象外・引き継ぎ**: GPU backward カーネル（MaxPool VJP は
+`scatter_add` 経由・Avg VJP はホスト側のみ。設計 doc §11）・
+`ceil_mode=true`・`divisor_override`・channels_last・3d・
+MaxUnpool／AdaptiveMaxPool・facade 公開面拡張（設計 doc §12）・
+M4 Max 実機実測（`docs/perf/logs/metal-pooling-1730/README.md` へ
+申し送り）。
 ### #1729（CUDA 実装）
 
 **前提の事実（2026-09-15 `main` 調査）**: 兄弟イシュー #1728（`backend-cpu`。
