@@ -375,6 +375,7 @@ mod init_cost_diag_tests;
 // クレートルートの兄弟モジュールとして配置する。
 mod huber;
 mod kernels;
+mod kernels_batch_norm;
 mod kernels_bce;
 mod kernels_elementwise;
 mod kernels_huber;
@@ -408,6 +409,7 @@ mod readout_regression_diag_tests_1436;
 // 向けの対称な opt-in staging を同モジュールへ追加した。crate 内部限定
 // （`memory.rs`／`gemm.rs`／`ops.rs` のみが参照。opt-in トグルのみ
 // `pub use` 経由で crate 外部へ公開）。
+mod batch_norm;
 mod bce;
 mod host_staging;
 mod kl_div;
@@ -635,6 +637,10 @@ pub use host_staging::HostStagingStats;
 #[cfg(feature = "internal-diagnostics")]
 pub use host_staging::HostStagingKind;
 pub use layer_norm::CudaLayerNorm;
+// イシュー #1735: BatchNorm1d／2d 順伝播カーネル起動 API（`layer_norm.rs`
+// と同型）。`crates/backend-cuda/tests/batch_norm_parity.rs` から
+// クレート外部として参照する。
+pub use batch_norm::CudaBatchNorm;
 // H2D pinned staging の opt-in スイッチ（イシュー #1585。`crate::
 // placement::{set_managed_placement_enabled, managed_placement_enabled}`
 // と同型のプロセスワイド `AtomicBool` トグル）。`internal-diagnostics`
