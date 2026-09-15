@@ -1699,3 +1699,5 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/nll_kl_div_backend_parity.rs`・`crates/backend-cuda/tests/{nll,kl_div}_parity.rs`・`crates/backend-metal/tests/{nll,kl_div}_parity.rs` の `#[ignore]` テストを参照）。
 
 #1764 で追補を追記（`Var::conv2d`（im2col＋GEMM。cross-correlation。NCHW 固定。groups は `gemm_batched` の broadcast で吸収）実装済み化。`BackendOps::im2col`／`col2im`／`conv2d`〈既定 `Unsupported`〉・`Op::Conv2d`・CPU 実装〈`backend-cpu::im2col`〉まで実装済み・facade 新規公開面なし・CUDA／Metal 専用カーネルは #1643／#1644・`nn::Conv2d` 層は #1645 へ引き継ぎ）。
+
+#1751 で追補を追記（`CastOps`〈dtype 変換。#1750〉の CUDA〈8 方向すべて〉・Metal〈f64 2 方向を除く 6 方向。MSL `double` 非対応のため既定 `Unsupported` のままホストフォールバック〉のネイティブカーネルを実装済み化。`crate::cast_ops` accessor が `None` → `Some(self)` へ切り替わったため、GPU 非搭載環境で当該 tape から `Var::cast` を呼ぶと `Unsupported` 経由の暗黙フォールバックではなく `CudaUnavailable`／`KernelLaunchFailed` が表面化する挙動変更を伴う（`Var::unique`／`matmul` と同じ既存契約であり退行ではない。`docs/tensor-core-cast-design.md` §11）。facade 新規公開面なし・CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り。

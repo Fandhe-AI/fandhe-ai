@@ -279,7 +279,10 @@ fn checked_gate_width(gates: usize, hidden: usize) -> Result<usize, BackendError
 /// `input_shape`〈利用者から渡される任意の shape〉から直接
 /// `.iter().product()` していた箇所を置き換える。PR #1850
 /// codex-review P1 是正）。
-fn checked_shape_numel(shape: &[usize]) -> Result<usize, ShapeError> {
+/// イシュー #1751 で `pub(crate)` へ緩和した（`crate::cast` が同じ
+/// 要素数積オーバーフロー検査を再利用するため。可視性の意味論・
+/// 検査内容自体は変更しない）。
+pub(crate) fn checked_shape_numel(shape: &[usize]) -> Result<usize, ShapeError> {
     shape
         .iter()
         .try_fold(1usize, |acc, &d| acc.checked_mul(d))
@@ -1240,6 +1243,17 @@ impl BackendOps for MetalBackendOps {
     /// ため、戻り値型でのみ `fandhe_ai_tensor_core::TypedOps<half::bf16>`
     /// を完全修飾参照する（CPU／CUDA 側 `ops.rs` と同じ回避策）。
     fn typed_ops_bf16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<half::bf16>> {
+        Some(self)
+    }
+
+    /// [`fandhe_ai_tensor_core::CastOps`]（dtype 変換。イシュー #1751・
+    /// 親 #1613・依存 #1750）の capability accessor。`typed_ops_bf16` と
+    /// 同じ根拠（`impl CastOps for MetalBackendOps` の実体は `self`
+    /// 自身であり、accessor 自体は Metal デバイスに一切触れない）で
+    /// 無条件に `Some(self)` を返す。f64 2 方向は MSL `double` 非対応
+    /// のため未オーバーライドのまま既定 `Unsupported` を返す
+    /// （`crate::cast` モジュール doc 参照）。
+    fn cast_ops(&self) -> Option<&dyn fandhe_ai_tensor_core::CastOps> {
         Some(self)
     }
 

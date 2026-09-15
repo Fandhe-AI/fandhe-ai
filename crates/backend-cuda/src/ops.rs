@@ -1561,7 +1561,10 @@ fn map_sort_error(err: CudaError) -> BackendError {
 /// させない方針。`.claude/rules/coding-rust.md`）。
 /// `gather_scatter::checked_numel`（`pub(crate)` ではなく private の
 /// ため crate を跨いで共有できない）と同型の検査を複製する。
-fn checked_shape_numel(shape: &[usize]) -> Result<usize, ShapeError> {
+/// イシュー #1751 で `pub(crate)` へ緩和した（`crate::cast` が同じ
+/// 要素数積オーバーフロー検査を再利用するため。可視性の意味論・
+/// 検査内容自体は変更しない）。
+pub(crate) fn checked_shape_numel(shape: &[usize]) -> Result<usize, ShapeError> {
     shape
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
@@ -1647,6 +1650,17 @@ impl BackendOps for CudaBackendOps {
     /// を呼んで poison 検査を迂回する必要がない。本ファイル冒頭の
     /// poison 検査に関する既存コメント参照）。
     fn typed_ops_bf16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<bf16>> {
+        Some(self)
+    }
+
+    /// [`fandhe_ai_tensor_core::CastOps`]（dtype 変換。イシュー #1751・
+    /// 親 #1613・依存 #1750）の capability accessor。`typed_ops_bf16` と
+    /// 同じ根拠（`impl CastOps for CudaBackendOps` の実体は `self`
+    /// 自身であり、accessor 自体は driver に一切触れない。実行時の
+    /// CUDA 不在は各 `cast_*` メソッド内部が `BackendError::
+    /// CudaUnavailable` を返す形で伝える）で無条件に `Some(self)` を
+    /// 返す。
+    fn cast_ops(&self) -> Option<&dyn fandhe_ai_tensor_core::CastOps> {
         Some(self)
     }
 
