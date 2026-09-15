@@ -23,12 +23,23 @@ verification-env.local.md`・`CUDA_NODE` 環境変数・`~/.ssh/config` の
 
 | バックエンド | コマンド |
 |---|---|
-| CUDA | `cargo test -p fandhe-ai-backend-cuda --release --test im2col_col2im_parity -- --ignored --nocapture` |
-| CUDA | `cargo test -p fandhe-ai --release --test conv2d_backend_parity -- --ignored --nocapture` |
-| CUDA | `cargo test -p fandhe-ai --release --test conv1d_backend_parity -- --ignored --nocapture` |
-| Metal | `cargo test -p fandhe-ai-backend-metal --release --test im2col_col2im_parity -- --ignored --nocapture` |
-| Metal | `cargo test -p fandhe-ai --release --test conv2d_backend_parity -- --ignored --nocapture` |
-| Metal | `cargo test -p fandhe-ai --release --test conv1d_backend_parity -- --ignored --nocapture` |
+| CUDA | `cargo test -p fandhe-ai-backend-cuda --release --test im2col_col2im_parity -- --ignored --nocapture --test-threads=1` |
+| CUDA | `cargo test -p fandhe-ai --release --test conv2d_backend_parity -- --ignored --nocapture --test-threads=1` |
+| CUDA | `cargo test -p fandhe-ai --release --test conv1d_backend_parity -- --ignored --nocapture --test-threads=1` |
+| Metal | `cargo test -p fandhe-ai-backend-metal --release --test im2col_col2im_parity -- --ignored --nocapture --test-threads=1` |
+| Metal | `cargo test -p fandhe-ai --release --test conv2d_backend_parity -- --ignored --nocapture --test-threads=1 metal_` |
+| Metal | `cargo test -p fandhe-ai --release --test conv1d_backend_parity -- --ignored --nocapture --test-threads=1 metal_` |
+
+`conv2d_backend_parity.rs`／`conv1d_backend_parity.rs` は `cuda_*`／
+`metal_*` の両テストを同一バイナリに含み、`cuda_*` 側は
+`cfg(target_os = "macos")` で除外されない（実機必須の `.expect()` で
+panic する設計のため）。Metal 実機でフィルタなしに `--ignored` を
+実行すると CUDA 実機必須テストまで拾って ANY_FAILED が水増しされる
+ため、Metal 側コマンドには `metal_` 部分一致フィルタを付ける
+（`run_ignored_tests_metal.sh` も同様。PR #1882 レビュー指摘）。
+`--test-threads=1` は事前登録判定規則 4)（run-to-run 決定性）のため
+共通で付与する（並列実行だと `bits=`／`fold_bits=` 行の出力順が
+起動ごとに変わりうる）。
 
 ### 2) イシュー #1771 で新設した nn 層（`compat::Sequential`）`#[ignore]` テスト
 
@@ -44,14 +55,16 @@ verification-env.local.md`・`CUDA_NODE` 環境変数・`~/.ssh/config` の
 - `{cuda,metal}_sequential_conv2d_sgd_steps_record_only`（新設。
   **record-only**。5 step SGD の loss・最終パラメータ比較）
 
-実行コマンド:
+実行コマンド（`--test-threads=1` は事前登録判定規則 4) のため共通で
+付与し、Metal は同一バイナリに含まれる `cuda_*` テストを除外するため
+`metal_` 部分一致フィルタを付ける。PR #1882 レビュー指摘）:
 
 ```bash
 # CUDA
-cargo test -p fandhe-ai --release --test nn_conv_backend_parity -- --ignored --nocapture
+cargo test -p fandhe-ai --release --test nn_conv_backend_parity -- --ignored --nocapture --test-threads=1
 
 # Metal
-cargo test -p fandhe-ai --release --test nn_conv_backend_parity -- --ignored --nocapture
+cargo test -p fandhe-ai --release --test nn_conv_backend_parity -- --ignored --nocapture --test-threads=1 metal_
 ```
 
 ## 実行手順

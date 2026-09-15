@@ -49,7 +49,7 @@ use fandhe_ai::compat::Sequential;
 use fandhe_ai::optim::{Sgd, SgdConfig};
 use fandhe_ai_autodiff::Tape as RawTape;
 use fandhe_ai_autodiff::nn::{Conv2d, Module};
-use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_backend_cpu::parity::{assert_parity, compare};
 use fandhe_ai_tensor_core::Tensor;
 
 fn leaf(seed: u64, shape: &[usize]) -> Tensor<f32> {
@@ -95,6 +95,38 @@ fn print_fold_bits(label: &str, t: &Tensor<f32>) {
         acc = acc.wrapping_mul(0x100000001b3);
     }
     println!("{label}.fold_bits={acc:#018x}");
+}
+
+/// **record-only** 用の REQ-2 複合判定ラッパー（イシュー #1771・
+/// PR #1882 レビュー指摘）。`{cuda,metal}_sequential_conv2d_sgd_steps_
+/// record_only`（README「事前登録判定規則」5)。ADOPT／REJECT の
+/// 判定対象にしない）は `assert_parity` で panic させると、5 step
+/// 分の loss・パラメータのうち途中で fail した時点以降の
+/// `print_fold_bits` 行が出力されず実測記録が欠落してしまう
+/// （`--ignored` 全体も失敗扱いになり後続ケースの実行が止まる）。
+/// 本関数は判定結果（PASS／FAIL と統計値）を `println!` するだけで
+/// panic しない。合否は `docs/perf/logs/conv-realdevice-1771/` の
+/// 事前登録判定規則どおり記録専用として扱う。
+fn record_parity(context: &str, actual: &[f32], expected: &[f32]) {
+    match compare(actual, expected) {
+        Ok(report) => {
+            let verdict = if report.passes() { "PASS" } else { "FAIL" };
+            println!(
+                "{context}: record-only 複合判定 {verdict}（fail_count={}/{}, \
+                 max_abs_diff={:.3e}, max_rel_err={:.3e}, mean_abs_diff={:.3e}, \
+                 mean_rel_err={:.3e}）",
+                report.fail_count,
+                report.total,
+                report.max_abs_diff,
+                report.max_rel_err,
+                report.mean_abs_diff,
+                report.mean_rel_err,
+            );
+        }
+        Err(err) => {
+            println!("{context}: record-only 複合判定 ERROR（{err}）");
+        }
+    }
 }
 
 // --- CPU: forward（compat::Sequential vs nn::Conv2d 直接） ---
@@ -729,7 +761,11 @@ fn cuda_sequential_conv2d_sgd_steps_record_only() {
         "パラメータ件数（weight/bias）が一致しない"
     );
     for (i, (c, p)) in cuda_params.iter().zip(cpu_params.iter()).enumerate() {
-        assert_parity(
+        // record-only（README「事前登録判定規則」5)）: ADOPT／REJECT の
+        // 判定対象にしないため `assert_parity` ではなく `record_parity`
+        // で判定結果のみ記録する（panic させると以降の `fold_bits` 行が
+        // 欠落する。PR #1882 レビュー指摘）。
+        record_parity(
             &format!("final_param[{i}]（record-only）: CUDA vs CPU"),
             &dense(c),
             &dense(p),
@@ -760,7 +796,11 @@ fn metal_sequential_conv2d_sgd_steps_record_only() {
         "パラメータ件数（weight/bias）が一致しない"
     );
     for (i, (m, p)) in metal_params.iter().zip(cpu_params.iter()).enumerate() {
-        assert_parity(
+        // record-only（README「事前登録判定規則」5)）: ADOPT／REJECT の
+        // 判定対象にしないため `assert_parity` ではなく `record_parity`
+        // で判定結果のみ記録する（panic させると以降の `fold_bits` 行が
+        // 欠落する。PR #1882 レビュー指摘）。
+        record_parity(
             &format!("final_param[{i}]（record-only）: Metal vs CPU"),
             &dense(m),
             &dense(p),
