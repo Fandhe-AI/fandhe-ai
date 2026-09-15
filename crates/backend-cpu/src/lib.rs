@@ -156,6 +156,9 @@ pub mod gemm_blis;
 // 段階的合成（`im2col` → `gemm_batched`〈BLIS〉→ `add`）を使う。
 mod im2col;
 mod interpolate;
+// イシュー #1728: MaxPool／AvgPool／AdaptiveAvgPool（1d／2d）の CPU
+// 参照実装（`docs/pooling-ops-design.md` §9）。
+mod pooling;
 mod scalar_elementwise;
 mod scan;
 mod unique;

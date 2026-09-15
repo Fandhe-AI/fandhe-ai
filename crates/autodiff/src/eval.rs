@@ -25,8 +25,8 @@ use std::borrow::Cow;
 
 use fandhe_ai_tensor_core::{
     BceKind, GruBackwardOutput, GruPointwiseOutput, HuberKind, KlDivTarget, LstmPointwiseOutput,
-    ScatterReduce, ShapeError, Tensor, VectorNormOrd, bilinear_blend, bilinear_scale,
-    bilinear_src_coord,
+    Pool2dParams, ScatterReduce, ShapeError, Tensor, VectorNormOrd, adaptive_window,
+    bilinear_blend, bilinear_scale, bilinear_src_coord,
 };
 
 use crate::layout;
@@ -2995,6 +2995,228 @@ pub(crate) fn one_hot(index: &Tensor<i32>, num_classes: usize, out_shape: &[usiz
         }
     }
     build_tensor(out, out_shape)
+}
+
+/// 窓添字から入力座標を符号安全に逆算する（`backend-cpu::pooling::
+/// window_input_pos`／`grad.rs::pool_window_input_pos` と同型の式。
+/// `eval` と CPU 実装の意図的複製方針〈`im2col`／`gather`／`scatter`
+/// の先例〉に倣いクレートをまたいで複製する。イシュー #1728）。
+fn pool_window_input_pos(
+    out_idx: usize,
+    stride: usize,
+    k: usize,
+    dilation: usize,
+    padding: usize,
+) -> Option<usize> {
+    let base = out_idx.checked_mul(stride)?;
+    let offset = k.checked_mul(dilation)?;
+    let sum = base.checked_add(offset)?;
+    sum.checked_sub(padding)
+}
+
+/// `Var::max_pool2d` のホスト参照実装（`torch.nn.functional.
+/// max_pool2d` 相当。イシュー #1728・設計 `docs/pooling-ops-
+/// design.md` §5）。`BackendOps::max_pool2d` が `Unsupported` を
+/// 返したときのみ `grad::max_pool2d_with_fallback` から呼ばれる。
+/// `backend-cpu::pooling::max_pool2d` と意図的に同一アルゴリズム
+/// （先勝ちタイ規則・NaN 伝播・padding 走査除外）を複製する。
+pub(crate) fn max_pool2d(
+    input: &Tensor<f32>,
+    params: &Pool2dParams,
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), ShapeError> {
+    let out_numel: usize = out_shape.iter().product();
+    if out_numel == 0 {
+        return Ok((
+            build_tensor(Vec::new(), out_shape),
+            build_index_tensor(Vec::new(), out_shape),
+        ));
+    }
+    let in_shape = input.shape();
+    let (h_in, w_in) = (in_shape[2], in_shape[3]);
+    let (n_batch, c_ch, h_out, w_out) = (out_shape[0], out_shape[1], out_shape[2], out_shape[3]);
+    let [kh, kw] = params.kernel_size();
+    let [sh, sw] = params.stride();
+    let [ph, pw] = params.padding();
+    let [dh, dw] = params.dilation();
+
+    let mut out_vals = vec![0f32; out_numel];
+    let mut out_idx = vec![0i32; out_numel];
+    for n in 0..n_batch {
+        for c in 0..c_ch {
+            for oh in 0..h_out {
+                for ow in 0..w_out {
+                    let mut best: Option<(f32, usize)> = None;
+                    for kh_ in 0..kh {
+                        let Some(h) =
+                            pool_window_input_pos(oh, sh, kh_, dh, ph).filter(|&h| h < h_in)
+                        else {
+                            continue;
+                        };
+                        for kw_ in 0..kw {
+                            let Some(w) =
+                                pool_window_input_pos(ow, sw, kw_, dw, pw).filter(|&w| w < w_in)
+                            else {
+                                continue;
+                            };
+                            let v = input.get(&[n, c, h, w]).ok_or_else(|| {
+                                ShapeError::ShapeMismatch {
+                                    lhs: vec![n, c, h, w],
+                                    rhs: in_shape.to_vec(),
+                                }
+                            })?;
+                            let flat = h * w_in + w;
+                            best = Some(match best {
+                                None => (v, flat),
+                                Some((b, bi)) => {
+                                    if v > b || (v.is_nan() && !b.is_nan()) {
+                                        (v, flat)
+                                    } else {
+                                        (b, bi)
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    let (v, idx) = best.ok_or(ShapeError::ElementCountOverflow)?;
+                    let out_pos = ((n * c_ch + c) * h_out + oh) * w_out + ow;
+                    out_vals[out_pos] = v;
+                    out_idx[out_pos] = i32::try_from(idx)
+                        .map_err(|_| ShapeError::IndexRangeOverflow { index: idx })?;
+                }
+            }
+        }
+    }
+    Ok((
+        build_tensor(out_vals, out_shape),
+        build_index_tensor(out_idx, out_shape),
+    ))
+}
+
+/// `Var::avg_pool2d` のホスト参照実装（イシュー #1728・設計 `docs/
+/// pooling-ops-design.md` §7）。`BackendOps::avg_pool2d` が
+/// `Unsupported` を返したときのみ `grad::avg_pool2d_with_fallback`
+/// から呼ばれる。窓内を row-major で `f64` へ逐次加算し最後に 1 回
+/// `f32` へ downcast する（`backend-cpu::pooling::avg_pool2d` と
+/// 意図的に同一アルゴリズムを複製）。
+pub(crate) fn avg_pool2d(
+    input: &Tensor<f32>,
+    params: &Pool2dParams,
+    count_include_pad: bool,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_numel: usize = out_shape.iter().product();
+    if out_numel == 0 {
+        return Ok(build_tensor(Vec::new(), out_shape));
+    }
+    let in_shape = input.shape();
+    let (h_in, w_in) = (in_shape[2], in_shape[3]);
+    let (n_batch, c_ch, h_out, w_out) = (out_shape[0], out_shape[1], out_shape[2], out_shape[3]);
+    let [kh, kw] = params.kernel_size();
+    let [sh, sw] = params.stride();
+    let [ph, pw] = params.padding();
+    let [dh, dw] = params.dilation();
+
+    let mut out = vec![0f32; out_numel];
+    for n in 0..n_batch {
+        for c in 0..c_ch {
+            for oh in 0..h_out {
+                for ow in 0..w_out {
+                    let mut acc: f64 = 0.0;
+                    let mut count: usize = 0;
+                    for kh_ in 0..kh {
+                        let Some(h) =
+                            pool_window_input_pos(oh, sh, kh_, dh, ph).filter(|&h| h < h_in)
+                        else {
+                            continue;
+                        };
+                        for kw_ in 0..kw {
+                            let Some(w) =
+                                pool_window_input_pos(ow, sw, kw_, dw, pw).filter(|&w| w < w_in)
+                            else {
+                                continue;
+                            };
+                            let v = input.get(&[n, c, h, w]).ok_or_else(|| {
+                                ShapeError::ShapeMismatch {
+                                    lhs: vec![n, c, h, w],
+                                    rhs: in_shape.to_vec(),
+                                }
+                            })?;
+                            acc += f64::from(v);
+                            count += 1;
+                        }
+                    }
+                    let divisor = if count_include_pad {
+                        kh.checked_mul(kw).ok_or(ShapeError::ElementCountOverflow)?
+                    } else {
+                        count
+                    };
+                    if divisor == 0 {
+                        return Err(ShapeError::ElementCountOverflow);
+                    }
+                    let v = (acc / divisor as f64) as f32;
+                    let out_pos = ((n * c_ch + c) * h_out + oh) * w_out + ow;
+                    out[out_pos] = v;
+                }
+            }
+        }
+    }
+    Ok(build_tensor(out, out_shape))
+}
+
+/// `Var::adaptive_avg_pool2d` のホスト参照実装（イシュー #1728・
+/// 設計 `docs/pooling-ops-design.md` §7）。`BackendOps::
+/// adaptive_avg_pool2d` が `Unsupported` を返したときのみ
+/// `grad::adaptive_avg_pool2d_with_fallback` から呼ばれる。窓は
+/// [`adaptive_window`]（forward／VJP 共有の単一情報源）が定める。
+/// 縮約の数値契約は [`avg_pool2d`] と同一（`backend-cpu::pooling::
+/// adaptive_avg_pool2d` と意図的に同一アルゴリズムを複製）。
+pub(crate) fn adaptive_avg_pool2d(
+    input: &Tensor<f32>,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_numel: usize = out_shape.iter().product();
+    if out_numel == 0 {
+        return Ok(build_tensor(Vec::new(), out_shape));
+    }
+    let in_shape = input.shape();
+    let (h_in, w_in) = (in_shape[2], in_shape[3]);
+    let (n_batch, c_ch, h_out, w_out) = (out_shape[0], out_shape[1], out_shape[2], out_shape[3]);
+
+    let mut out = vec![0f32; out_numel];
+    for n in 0..n_batch {
+        for c in 0..c_ch {
+            for oh in 0..h_out {
+                let (h_start, h_end) =
+                    adaptive_window(oh, h_in, h_out).ok_or(ShapeError::ElementCountOverflow)?;
+                for ow in 0..w_out {
+                    let (w_start, w_end) =
+                        adaptive_window(ow, w_in, w_out).ok_or(ShapeError::ElementCountOverflow)?;
+                    let mut acc: f64 = 0.0;
+                    let mut count: usize = 0;
+                    for h in h_start..h_end {
+                        for w in w_start..w_end {
+                            let v = input.get(&[n, c, h, w]).ok_or_else(|| {
+                                ShapeError::ShapeMismatch {
+                                    lhs: vec![n, c, h, w],
+                                    rhs: in_shape.to_vec(),
+                                }
+                            })?;
+                            acc += f64::from(v);
+                            count += 1;
+                        }
+                    }
+                    if count == 0 {
+                        return Err(ShapeError::ElementCountOverflow);
+                    }
+                    let v = (acc / count as f64) as f32;
+                    let out_pos = ((n * c_ch + c) * h_out + oh) * w_out + ow;
+                    out[out_pos] = v;
+                }
+            }
+        }
+    }
+    Ok(build_tensor(out, out_shape))
 }
 
 /// 平坦化・totalOrder ソート・隣接重複除去のホスト参照実装

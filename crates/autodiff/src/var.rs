@@ -18,23 +18,23 @@ use std::cell::Ref;
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, BatchNormTrainOutput, BceKind, CastElement,
     ChecksumReadout, Conv2dParams, Device, GemmChecksum, GruPointwiseOutput, HuberKind,
-    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp,
-    ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd, batch_norm_layout,
-    broadcast_shape, concat_out_shape, conv2d_out_shape, gather_out_shape, gemm_out_shape,
-    interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape, pad_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams,
+    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
+    adaptive_pool2d_out_shape, batch_norm_layout, broadcast_shape, concat_out_shape,
+    conv2d_out_shape, gather_out_shape, gemm_out_shape, interpolate_out_shape_for_mode,
+    matmul_out_shape, one_hot_out_shape, pad_out_shape, pool2d_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
-    ArgExtremum, argext_with_fallback, batch_norm_infer_with_fallback,
-    batch_norm_train_with_fallback, cast_from_f32_with_fallback, concat_with_fallback,
-    conv2d_with_fallback, gather_with_fallback, interpolate_with_fallback, min_with_fallback,
-    one_hot_with_fallback, pad_with_fallback, scalar_binary_with_fallback,
-    scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
-    unique_with_fallback,
+    ArgExtremum, adaptive_avg_pool2d_with_fallback, argext_with_fallback, avg_pool2d_with_fallback,
+    batch_norm_infer_with_fallback, batch_norm_train_with_fallback, cast_from_f32_with_fallback,
+    concat_with_fallback, conv2d_with_fallback, gather_with_fallback, interpolate_with_fallback,
+    max_pool2d_with_fallback, min_with_fallback, one_hot_with_fallback, pad_with_fallback,
+    scalar_binary_with_fallback, scalar_unary_with_fallback, scatter_with_fallback,
+    sort_with_fallback, topk_with_fallback, unique_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -3190,6 +3190,304 @@ impl<'t> Var<'t> {
         let w4 = weight.contiguous()?.reshape(&[cout, cin_g, 1, k])?;
         let out4 = x4.conv2d(&w4, bias, [1, stride], [0, padding], [1, dilation], groups)?;
         out4.reshape(&[n, cout, lout])
+    }
+
+    /// 2 次元 max pooling（`torch.nn.functional.max_pool2d` 相当。
+    /// NCHW 固定。イシュー #1728・設計 `docs/pooling-ops-design.md`）。
+    /// `self`（`input`）: `[N, C, H, W]`。戻り値は `(values, index)`
+    /// で、`index`（`(n,c)` 平面内 flat 添字 `h·W+w`）は `Var::topk`
+    /// と同様に追跡外の `Tensor<i32>` として公開する。
+    ///
+    /// 検査順序（設計 doc §3・§5）: ①`ceil_mode == true` を
+    /// `AutodiffError::InvalidArgument` で拒否（v1 は `false` のみ）
+    /// → ②[`Pool2dParams::new`]（`kernel_size`／`stride`／`dilation`
+    /// の 0・padding 上限〈`padding <= kernel/2`〉超過を
+    /// `BackendError::InvalidArgument` → `AutodiffError::Backend` で
+    /// 拒否）→ ③[`pool2d_out_shape`]（rank・空間軸ゼロ拒否・負分子
+    /// 拒否ゲート・空窓拒否。`AutodiffError::Shape`）→ ④
+    /// `H·W <= i32::MAX`（索引は `i32` のため。`Var::sort`／`topk`
+    /// にはない Max 固有の追加検査）→ ⑤`self` を層 1 で実体化
+    /// （`RefCell` 借用を閉じてから push）→ ⑥
+    /// `max_pool2d_with_fallback` → ⑦戻り shape 再検証
+    /// （`.claude/rules/security.md` A08）→ ⑧`push_eager`
+    /// （非融合・常実体化）。
+    pub fn max_pool2d(
+        &self,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        dilation: [usize; 2],
+        ceil_mode: bool,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        if ceil_mode {
+            return Err(AutodiffError::InvalidArgument(
+                "Var::max_pool2d: ceil_mode=true は v1 で未対応".into(),
+            ));
+        }
+        let params = Pool2dParams::new(kernel_size, stride, padding, dilation)
+            .map_err(AutodiffError::Backend)?;
+
+        let in_shape = self.shape();
+        let out_shape = pool2d_out_shape(&in_shape, &params).map_err(AutodiffError::Shape)?;
+        let hw = in_shape[2]
+            .checked_mul(in_shape[3])
+            .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+        if hw > i32::MAX as usize {
+            return Err(AutodiffError::Shape(ShapeError::IndexRangeOverflow {
+                index: hw,
+            }));
+        }
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let (value, index) =
+            max_pool2d_with_fallback(self.tape.ops(), &input_val, &params, &out_shape)?;
+        if value.shape() != out_shape || index.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::MaxPool2d {
+                input: self.id,
+                index: index.clone(),
+            },
+            value,
+        );
+        Ok((Var::from_raw(self.tape, id), index))
+    }
+
+    /// 1 次元 max pooling。[`Self::max_pool2d`] を `H` 軸固定
+    /// （`kernel=1`・`stride=1`・`padding=0`・`dilation=1`）で呼び出す
+    /// reshape 併合の薄いラッパー（[`Self::conv1d`] と同型。イシュー
+    /// #1728）。`self`（`input`）: `[N, C, L]`。索引は `H=1` のため
+    /// flat `w` そのもの。
+    pub fn max_pool1d(
+        &self,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        dilation: usize,
+        ceil_mode: bool,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        let in_shape = self.shape();
+        if in_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: in_shape.len(),
+            }));
+        }
+        let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        // 検査を reshape より前に行う（`Var::conv1d` と同じ規律。
+        // reshape 後にエラーを返すと孤立した view ノードがテープに
+        // 残るため）。`max_pool2d` 側の再検査はフェイルクローズドの
+        // 二重化として残す。
+        if ceil_mode {
+            return Err(AutodiffError::InvalidArgument(
+                "Var::max_pool1d: ceil_mode=true は v1 で未対応".into(),
+            ));
+        }
+        let params_1d = Pool2dParams::new(
+            [1, kernel_size],
+            stride.map(|s| [1, s]),
+            [0, padding],
+            [1, dilation],
+        )
+        .map_err(AutodiffError::Backend)?;
+        pool2d_out_shape(&[n, c, 1, l], &params_1d).map_err(AutodiffError::Shape)?;
+
+        let x4 = self.contiguous()?.reshape(&[n, c, 1, l])?;
+        let (out4, index) = x4.max_pool2d(
+            [1, kernel_size],
+            stride.map(|s| [1, s]),
+            [0, padding],
+            [1, dilation],
+            ceil_mode,
+        )?;
+        let out_shape4 = out4.shape();
+        let lout = out_shape4[3];
+        let out = out4.reshape(&[n, c, lout])?;
+        let index = index.reshape(&[n, c, lout]).map_err(AutodiffError::Shape)?;
+        Ok((out, index))
+    }
+
+    /// 2 次元 average pooling（`torch.nn.functional.avg_pool2d`
+    /// 相当。NCHW 固定。イシュー #1728・設計 `docs/pooling-ops-
+    /// design.md`）。`self`（`input`）: `[N, C, H, W]`。
+    ///
+    /// 検査順序: ①`ceil_mode == true` を `AutodiffError::
+    /// InvalidArgument` で拒否 → ②[`Pool2dParams::new`]（`dilation`
+    /// は常に `[1, 1]` 固定で構築する。設計 doc §2「Avg 系は
+    /// `dilation=[1,1]` 固定」）→ ③[`pool2d_out_shape`] → ④実体化 →
+    /// ⑤`avg_pool2d_with_fallback` → ⑥戻り shape 再検証 →
+    /// ⑦`push_eager`。
+    pub fn avg_pool2d(
+        &self,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        ceil_mode: bool,
+        count_include_pad: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        if ceil_mode {
+            return Err(AutodiffError::InvalidArgument(
+                "Var::avg_pool2d: ceil_mode=true は v1 で未対応".into(),
+            ));
+        }
+        let params = Pool2dParams::new(kernel_size, stride, padding, [1, 1])
+            .map_err(AutodiffError::Backend)?;
+
+        let in_shape = self.shape();
+        let out_shape = pool2d_out_shape(&in_shape, &params).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let value_out = avg_pool2d_with_fallback(
+            self.tape.ops(),
+            &input_val,
+            &params,
+            count_include_pad,
+            &out_shape,
+        )?;
+        if value_out.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value_out.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::AvgPool2d {
+                input: self.id,
+                params,
+                count_include_pad,
+            },
+            value_out,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 1 次元 average pooling。[`Self::avg_pool2d`] を `H` 軸固定で
+    /// 呼び出す reshape 併合の薄いラッパー（[`Self::max_pool1d`] と
+    /// 同型。イシュー #1728）。`self`（`input`）: `[N, C, L]`。
+    pub fn avg_pool1d(
+        &self,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        ceil_mode: bool,
+        count_include_pad: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        if in_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: in_shape.len(),
+            }));
+        }
+        let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        // 検査を reshape より前に行う（`Var::conv1d` と同じ規律。
+        // `avg_pool2d` 側の再検査はフェイルクローズドの二重化として
+        // 残す）。
+        if ceil_mode {
+            return Err(AutodiffError::InvalidArgument(
+                "Var::avg_pool1d: ceil_mode=true は v1 で未対応".into(),
+            ));
+        }
+        let params_1d = Pool2dParams::new(
+            [1, kernel_size],
+            stride.map(|s| [1, s]),
+            [0, padding],
+            [1, 1],
+        )
+        .map_err(AutodiffError::Backend)?;
+        pool2d_out_shape(&[n, c, 1, l], &params_1d).map_err(AutodiffError::Shape)?;
+
+        let x4 = self.contiguous()?.reshape(&[n, c, 1, l])?;
+        let out4 = x4.avg_pool2d(
+            [1, kernel_size],
+            stride.map(|s| [1, s]),
+            [0, padding],
+            ceil_mode,
+            count_include_pad,
+        )?;
+        let out_shape4 = out4.shape();
+        let lout = out_shape4[3];
+        out4.reshape(&[n, c, lout])
+    }
+
+    /// 2 次元 adaptive average pooling（`torch.nn.functional.
+    /// adaptive_avg_pool2d` 相当。NCHW 固定。イシュー #1728・設計
+    /// `docs/pooling-ops-design.md`）。`self`（`input`）:
+    /// `[N, C, H, W]`・`output_size: [Hout, Wout]`。
+    ///
+    /// 検査順序: ①[`adaptive_pool2d_out_shape`]（rank・空間軸ゼロ
+    /// 拒否・`output_size >= 1`）→ ②実体化 → ③
+    /// `adaptive_avg_pool2d_with_fallback` → ④戻り shape 再検証 →
+    /// ⑤`push_eager`。
+    pub fn adaptive_avg_pool2d(&self, output_size: [usize; 2]) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        let out_shape =
+            adaptive_pool2d_out_shape(&in_shape, output_size).map_err(AutodiffError::Shape)?;
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+
+        let value_out = adaptive_avg_pool2d_with_fallback(
+            self.tape.ops(),
+            &input_val,
+            output_size,
+            &out_shape,
+        )?;
+        if value_out.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value_out.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self
+            .tape
+            .push_eager(Op::AdaptiveAvgPool2d { input: self.id }, value_out);
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 1 次元 adaptive average pooling。[`Self::adaptive_avg_pool2d`]
+    /// を `H` 軸固定（`output_size[0]=1`）で呼び出す reshape 併合の
+    /// 薄いラッパー（イシュー #1728）。`self`（`input`）:
+    /// `[N, C, L]`。
+    pub fn adaptive_avg_pool1d(&self, output_size: usize) -> Result<Var<'t>, AutodiffError> {
+        let in_shape = self.shape();
+        if in_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: in_shape.len(),
+            }));
+        }
+        let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        // 検査を reshape より前に行う（`Var::conv1d` と同じ規律。
+        // `adaptive_avg_pool2d` 側の再検査はフェイルクローズドの
+        // 二重化として残す）。
+        adaptive_pool2d_out_shape(&[n, c, 1, l], [1, output_size]).map_err(AutodiffError::Shape)?;
+
+        let x4 = self.contiguous()?.reshape(&[n, c, 1, l])?;
+        let out4 = x4.adaptive_avg_pool2d([1, output_size])?;
+        let out_shape4 = out4.shape();
+        let lout = out_shape4[3];
+        out4.reshape(&[n, c, lout])
     }
 
     /// 指定した各長さ（`sizes`）で `dim` 軸を分割する（`torch.split`

@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, CastElement, Conv2dParams, DType, Device,
-    DeviceBufferView, FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN,
+    DeviceBufferView, FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, Pool2dParams,
     ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, Tensor,
 };
 
@@ -954,6 +954,42 @@ pub(crate) enum Op {
     /// 微分不能なため、寄与なし〈`vec![]`〉ではなく「ゼロ勾配が流れる」
     /// ことを `Gradients::get` で観測可能にする）。
     OneHot { input: NodeId },
+    /// `Var::max_pool2d`（`torch.nn.functional.max_pool2d` 相当。NCHW
+    /// 固定。イシュー #1728・設計 `docs/pooling-ops-design.md` §6）。
+    /// `index`（非追跡データ・`Op::Topk` と同型の「`Op` payload に
+    /// 直接 `Tensor<i32>` を埋め込む」設計）は forward（`Var::
+    /// max_pool2d`）が確定した勝者索引（`(n,c)` 平面内 flat 添字
+    /// `h·W + w`。設計 doc §5 の先勝ちタイ規則・NaN 伝播規則に従う）。
+    /// `params` は VJP（scatter_add の `dim` 軸長導出に `input`
+    /// shape のみで足りる）に不要のため保持しない（`Op::Topk` の
+    /// `k`／`largest` 非保持方針と同型）。`BackendOps::max_pool2d` に
+    /// 対応メソッドがあるため非融合対象（`push_eager` で常に実体化）。
+    ///
+    /// VJP（`grad.rs`）: `input`／`upstream`／`index` を
+    /// `[N·C, H·W]`／`[N·C, Hout·Wout]` へ reshape し
+    /// `d_input = scatter_add(zeros, dim=1, index, upstream)`（重なり
+    /// 窓は `ScatterReduce::Add` の決定的集約契約に従う）。
+    MaxPool2d { input: NodeId, index: Tensor<i32> },
+    /// `Var::avg_pool2d`（`torch.nn.functional.avg_pool2d` 相当。NCHW
+    /// 固定。イシュー #1728・設計 `docs/pooling-ops-design.md` §7）。
+    /// `params`／`count_include_pad` は VJP（各入力位置ごとに、それを
+    /// 含む窓を row-major で走査し `f64` アキュムレータへ加算する。
+    /// 設計 doc §8）に必要なため保持する（`Op::Conv2d` が `params` を
+    /// 保持する方針と同型）。`BackendOps::avg_pool2d` に対応メソッドが
+    /// あるため非融合対象（`push_eager` で常に実体化）。
+    AvgPool2d {
+        input: NodeId,
+        params: Pool2dParams,
+        count_include_pad: bool,
+    },
+    /// `Var::adaptive_avg_pool2d`（`torch.nn.functional.
+    /// adaptive_avg_pool2d` 相当。NCHW 固定。イシュー #1728・設計
+    /// `docs/pooling-ops-design.md` §7）。出力空間サイズ
+    /// `[Hout, Wout]` は `nodes[id].shape` から導出可能なため保持
+    /// しない（`Op::OneHot` の `num_classes` 非保持方針と同型）。
+    /// `BackendOps::adaptive_avg_pool2d` に対応メソッドがあるため
+    /// 非融合対象（`push_eager` で常に実体化）。
+    AdaptiveAvgPool2d { input: NodeId },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
@@ -1337,6 +1373,12 @@ impl Op {
             // 判断——checkpoint 解放の可否は「再計算できるか」のみで
             // 決まる）。
             Op::OneHot { .. } => false,
+            // `Op::MaxPool2d`（索引）／`Op::AvgPool2d`（`params`）／
+            // `Op::AdaptiveAvgPool2d`（イシュー #1728）は `Op::Conv2d`
+            // と同じく eager 実体化演算で `recompute_value` に再計算
+            // 経路を持たないため解放しない（非網羅 match 是正で新規
+            // variant 追加時に強制される）。
+            Op::MaxPool2d { .. } | Op::AvgPool2d { .. } | Op::AdaptiveAvgPool2d { .. } => false,
         }
     }
 
@@ -1423,6 +1465,9 @@ impl Op {
                 }
             }
             Op::OneHot { input, .. } => f(*input),
+            Op::MaxPool2d { input, .. }
+            | Op::AvgPool2d { input, .. }
+            | Op::AdaptiveAvgPool2d { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);
                 f(*target);
