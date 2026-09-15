@@ -79,7 +79,16 @@ fn checked_numel(shape: &[usize; 4]) -> Result<usize, CudaError> {
 /// 分子（`in + 2p − d(k−1) − 1`）が負の場合は floor 除算を行わず直ちに
 /// 拒否する（設計 doc §4「実装契約」。Rust の符号付き整数 `/` は
 /// ゼロ方向丸めのため、分子が負のまま素通しすると誤った出力長を
-/// 返しうる）。
+/// 返しうる）。全項を `usize` の `checked_*` 演算で連鎖する
+/// （`tensor_core::ops_shape::conv_out_len` と同型。呼び出し元
+/// `validate_and_shape` は本関数の呼び出し前に `validate_ge_one` で
+/// `kernel`／`stride`／`dilation` が `>= 1` であることを保証するが、
+/// `padding` は上限のみ検査され巨大な `usize` 値をそのまま受け取り
+/// うるため、生の `i64` 演算〈本関数の旧実装〉では `2 * padding` や
+/// `dilation * (kernel - 1)` が i64 乗算オーバーフローしうる。
+/// `checked_mul`／`checked_add`／`checked_sub` の連鎖により、
+/// オーバーフローは `usize` の桁あふれとして `None` に写像され
+/// `InvalidPoolingShape` へ fail-closed で変換される）。
 fn pool_out_len(
     in_len: usize,
     kernel: usize,
@@ -87,30 +96,39 @@ fn pool_out_len(
     padding: usize,
     dilation: usize,
 ) -> Result<usize, CudaError> {
-    let in_len_i = in_len as i64;
-    let kernel_i = kernel as i64;
-    let stride_i = stride as i64;
-    let padding_i = padding as i64;
-    let dilation_i = dilation as i64;
+    let overflow_err = || CudaError::InvalidPoolingShape {
+        detail: format!(
+            "pool_out_len: element count overflow (in={in_len}, kernel={kernel}, \
+             stride={stride}, padding={padding}, dilation={dilation})"
+        ),
+    };
 
-    let numerator = in_len_i + 2 * padding_i - dilation_i * (kernel_i - 1) - 1;
-    if numerator < 0 {
-        return Err(CudaError::InvalidPoolingShape {
-            detail: format!(
-                "pool_out_len: negative numerator (in={in_len}, kernel={kernel}, \
-                 stride={stride}, padding={padding}, dilation={dilation})"
-            ),
-        });
-    }
-    let out = numerator / stride_i + 1;
+    let two_p = padding.checked_mul(2).ok_or_else(overflow_err)?;
+    let in_plus_2p = in_len.checked_add(two_p).ok_or_else(overflow_err)?;
+    // `validate_ge_one` により `kernel >= 1` が呼び出し前に保証されて
+    // いるため `kernel - 1` は桁あふれしない。
+    let k_minus_1 = kernel - 1;
+    let dk = dilation.checked_mul(k_minus_1).ok_or_else(overflow_err)?;
+
+    let numerator = match in_plus_2p.checked_sub(dk).and_then(|v| v.checked_sub(1)) {
+        Some(numerator) => numerator,
+        None => {
+            return Err(CudaError::InvalidPoolingShape {
+                detail: format!(
+                    "pool_out_len: negative numerator (in={in_len}, kernel={kernel}, \
+                     stride={stride}, padding={padding}, dilation={dilation})"
+                ),
+            });
+        }
+    };
+    // `stride >= 1` は呼び出し前の `validate_ge_one` により保証済み。
+    let out = numerator / stride + 1;
     if out < 1 {
         return Err(CudaError::InvalidPoolingShape {
             detail: format!("pool_out_len: computed non-positive output length {out}"),
         });
     }
-    usize::try_from(out).map_err(|_| CudaError::InvalidPoolingShape {
-        detail: "pool_out_len: output length does not fit in usize".to_string(),
-    })
+    Ok(out)
 }
 
 /// `kernel`／`stride`／`dilation` の各成分が `>= 1` であることを検査
@@ -608,6 +626,30 @@ mod tests {
     fn pool_out_len_computes_expected_value() {
         // in=9, k=3, s=2, p=1, d=2 -> floor((9+2-2*2-1)/2)+1 = floor(6/2)+1=4.
         assert_eq!(pool_out_len(9, 3, 2, 1, 2).unwrap(), 4);
+    }
+
+    /// Review 指摘（イシュー #1729）: `pool_out_len` が生の `i64` 演算
+    /// （`2 * padding_i` 等）を使っていた旧実装では、`validate_padding`
+    /// による上限検査を経ない巨大な `padding`（`usize` としては有効な
+    /// 値）を渡すと `i64` 乗算オーバーフローで panic
+    /// （debug ビルド）／誤った出力長へサイレントにラップ
+    /// （release ビルド）しうった。`checked_mul`／`checked_add` へ
+    /// 是正した後は、同じ巨大 `padding` に対して panic せず
+    /// `InvalidPoolingShape` を fail-closed に返すことを検証する
+    /// （`tensor_core::ops_shape::conv_out_len` と同じ `checked_*`
+    /// 連鎖の複製であることの回帰）。
+    #[test]
+    fn pool_out_len_rejects_overflowing_padding_without_panicking() {
+        let err = pool_out_len(4, 3, 1, usize::MAX / 2, 1).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidPoolingShape { .. }));
+    }
+
+    /// 上記と対称に、`dilation * (kernel - 1)` 側の乗算オーバーフロー
+    /// も fail-closed に検出することを検証する。
+    #[test]
+    fn pool_out_len_rejects_overflowing_dilation_kernel_product_without_panicking() {
+        let err = pool_out_len(4, usize::MAX, 1, 0, usize::MAX / 2).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidPoolingShape { .. }));
     }
 
     /// 設計 doc §3 の空間軸ゼロ拒否（Max／Avg 一律。`N`／`C` は対象外）。
