@@ -54,15 +54,46 @@ fn infer_kernel_uses_manual_bounds_check_without_grid_stride() {
 }
 
 /// train カーネルが persistent threadgroup 方式
-/// （`for (ch = tg_id; ch < c; ch += grid_size)`）であることをロック
-/// する（`layer_norm.metal` の `for (row = tg_id; row < rows; ...)`
-/// と同じ設計）。
+/// （`for (ulong ch = (ulong)tg_id; ch < (ulong)c; ch += (ulong)grid_size)`）
+/// であることをロックする（`layer_norm.metal` の
+/// `for (row = tg_id; row < rows; ...)` と同じ設計。ループ変数を
+/// `ulong` にする理由は次のテスト
+/// `channel_and_element_loops_use_64bit_counters_to_avoid_wraparound`
+/// 参照）。
 #[test]
 fn train_kernel_uses_persistent_threadgroup_loop_over_channels() {
     assert!(
-        BATCH_NORM_METAL_SOURCE.contains("for (uint ch = tg_id; ch < c; ch += grid_size) {"),
+        BATCH_NORM_METAL_SOURCE
+            .contains("for (ulong ch = (ulong)tg_id; ch < (ulong)c; ch += (ulong)grid_size) {"),
         "train カーネルが persistent threadgroup 方式（ch += grid_size）で\
          走査していません"
+    );
+}
+
+/// train カーネルのチャネル走査ループ・要素走査ループ（パス 1〜3）は
+/// いずれもループ変数を `ulong`（64-bit）にしている（`uint` の
+/// ままだと `m`／`c` が `u32::MAX` 近傍の受理形状で
+/// `i += BATCH_NORM_SIMD_WIDTH` や `ch += grid_size` が折り返し、
+/// ループが終了しない・GPU がハングしうる。codex-review・Cursor
+/// Bugbot 指摘）。`channel_index_macro_uses_64bit_arithmetic_to_avoid_overflow`
+/// は添字計算の overflow 安全性、本テストはループ終了条件の
+/// overflow 安全性をロックする（別の懸念）。
+#[test]
+fn channel_and_element_loops_use_64bit_counters_to_avoid_wraparound() {
+    let occurrences = BATCH_NORM_METAL_SOURCE
+        .matches("for (ulong i = (ulong)lane; i < (ulong)m; i += (ulong)BATCH_NORM_SIMD_WIDTH) {")
+        .count();
+    assert_eq!(
+        occurrences, 3,
+        "train カーネルの要素走査ループ（パス 1〜3）3 箇所すべてが          ulong カウンタを使っている必要がある（実際: {occurrences} 箇所）"
+    );
+    assert!(
+        !BATCH_NORM_METAL_SOURCE.contains("for (uint i = lane; i < m;"),
+        "要素走査ループに uint カウンタの残存箇所がある（wraparound 回帰）"
+    );
+    assert!(
+        !BATCH_NORM_METAL_SOURCE.contains("for (uint ch = tg_id; ch < c;"),
+        "チャネル走査ループに uint カウンタの残存箇所がある（wraparound 回帰）"
     );
 }
 

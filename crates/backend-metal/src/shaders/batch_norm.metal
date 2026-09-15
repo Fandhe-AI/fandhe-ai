@@ -897,10 +897,10 @@ kernel void batch_norm_train_f32(
 
     ulong m_f64 = (((ulong)m_f64_hi) << 32) | (ulong)m_f64_lo;
 
-    for (uint ch = tg_id; ch < c; ch += grid_size) {
+    for (ulong ch = (ulong)tg_id; ch < (ulong)c; ch += (ulong)grid_size) {
         // パス 1: 平均（soft-f64 総和。冒頭コメント「総和の順序」参照）。
         ulong lane_sum = 0ul; // +0.0（f64）。
-        for (uint i = lane; i < m; i += BATCH_NORM_SIMD_WIDTH) {
+        for (ulong i = (ulong)lane; i < (ulong)m; i += (ulong)BATCH_NORM_SIMD_WIDTH) {
             ulong xv = bn_f64_widen(as_type<uint>(x[BN_IDX(i)]));
             lane_sum = bn_f64_add(lane_sum, xv);
         }
@@ -914,7 +914,7 @@ kernel void batch_norm_train_f32(
 
         // パス 2: 分散（二パス。`(x-mean)^2` を soft-f64 で蓄積する）。
         ulong lane_sq = 0ul;
-        for (uint i = lane; i < m; i += BATCH_NORM_SIMD_WIDTH) {
+        for (ulong i = (ulong)lane; i < (ulong)m; i += (ulong)BATCH_NORM_SIMD_WIDTH) {
             ulong xv = bn_f64_widen(as_type<uint>(x[BN_IDX(i)]));
             ulong dev = bn_f64_sub(xv, mean);
             ulong devsq = bn_f64_mul(dev, dev);
@@ -944,7 +944,7 @@ kernel void batch_norm_train_f32(
         float bv = (has_bias != 0) ? b[ch] : 0.0f;
         ulong wv64 = bn_f64_widen(as_type<uint>(wv));
         ulong bv64 = bn_f64_widen(as_type<uint>(bv));
-        for (uint i = lane; i < m; i += BATCH_NORM_SIMD_WIDTH) {
+        for (ulong i = (ulong)lane; i < (ulong)m; i += (ulong)BATCH_NORM_SIMD_WIDTH) {
             ulong idx = BN_IDX(i);
             ulong xv = bn_f64_widen(as_type<uint>(x[idx]));
             ulong dev = bn_f64_sub(xv, mean);

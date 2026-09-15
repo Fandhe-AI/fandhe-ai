@@ -368,15 +368,26 @@ assert_parity`）で CPU 参照実装と検証する。
 - `crates/backend-metal/tests/batch_norm_parity.rs`（macOS 限定・
   `#[ignore]`。形状網羅〈rank 2／3／4 相当・`M` が 32 の倍数でない・
   `M=1`〜大形状・affine 4 分岐〉の `f64` naive 参照との突合・極端な
-  値〈`2e20`〉での有限性・NaN の該当チャネル限定伝播・run-to-run
-  決定性・`MetalBackendOps` vs `CpuBackendOps` 直接突合・非 contiguous
-  入力・weight 長さ不一致拒否・空軸早期 return）
-- `crates/facade/tests/batch_norm_backend_parity.rs`（既存
-  `metal_batch_norm_train_forward_matches_cpu` に加え、
-  `metal_batch_norm_infer_forward_matches_cpu`・
-  `metal_batch_norm_train_backward_matches_cpu`（Metal forward＋
-  ホスト VJP）・`metal_batch_norm_train_forward_rank4_matches_cpu`
-  〈BatchNorm2d 相当〉を追加）
+  値〈`1e18`。内部 soft-f64 計算自体は `2e20` 級でも有限のまま完結
+  するが、`var` を最終的に `f32` へ narrow する時点で正当に `+inf`
+  になりうるため、本テストの意図〈NaN／中間 overflow の不在確認〉に
+  沿う規模へ調整済み。codex-review 指摘〉での有限性・NaN の該当
+  チャネル限定伝播・run-to-run 決定性・`MetalBackendOps` vs
+  `CpuBackendOps` 直接突合・非 contiguous 入力・weight 長さ不一致
+  拒否・空軸早期 return）
+- `crates/facade/tests/batch_norm_backend_parity.rs`（既存の
+  `metal_batch_norm_train_forward_matches_cpu` のみ。当初は
+  `metal_batch_norm_infer_forward_matches_cpu`／
+  `metal_batch_norm_train_backward_matches_cpu`／
+  `metal_batch_norm_train_forward_rank4_matches_cpu` も本 issue で
+  追加したと記載していたが、実際にこの 3 件は同ファイル内の
+  `cuda_batch_norm_infer_forward_matches_cpu`／
+  `cuda_batch_norm_train_backward_matches_cpu`／
+  `cuda_batch_norm_train_forward_rank4_matches_cpu`（CUDA 版。
+  兄弟 issue #1735 で追加）であり、Metal 版の対応テストは存在しない
+  ——記載と実装の不一致だったため訂正する。codex-review 指摘。Metal
+  側の infer／backward／rank4 テスト追加は対象外のまま §9.7 へ
+  引き継ぐ）
 
 facade 新規公開面なし（`crates/facade/src/**` 無変更。`Var::
 batch_norm*` は既存 `pub use Var` 経由）。M4 Max 実機実測は本エージェント
@@ -388,6 +399,11 @@ batch_norm*` は既存 `pub use Var` 経由）。M4 Max 実機実測は本エー
 §7 と同じ（GPU backward・性能最適化・`momentum=None`・
 `track_running_stats=false`・rank 5・channels-last 等）。加えて
 デバイス常駐入出力（`DeviceBuffer` 経由の `batch_norm`）も対象外。
+`crates/facade/tests/batch_norm_backend_parity.rs` への Metal 版
+`metal_batch_norm_infer_forward_matches_cpu`／
+`metal_batch_norm_train_backward_matches_cpu`／
+`metal_batch_norm_train_forward_rank4_matches_cpu` の追加（§9.6
+訂正参照）も本 issue のスコープ外のまま後続 issue へ引き継ぐ。
 ## 10. CUDA 実装記録（#1735）
 
 §3.1「CUDA（1 warp = 1 channel）が再現すべき契約」（`warp_reduce_f64`

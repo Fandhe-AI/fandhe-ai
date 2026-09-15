@@ -249,9 +249,17 @@ fn batch_norm_train_extreme_values_stay_finite() {
 
     let (n, c, spatial) = (2usize, 2usize, 4usize);
     // チャネル 0: 極端に大きい正負が混在。チャネル 1: 通常値。
+    // 値は内部 soft-f64（`f64` 相当）縮約が NaN／中間 overflow を
+    // 起こさないことを検証する規模に抑える（`1e18` 程度。分散は
+    // 内部的に値の二乗規模へ達するため、`var` を最終的に `f32` へ
+    // narrow した際 `f32::MAX`〈約 3.4e38〉を超えないよう選定した。
+    // これより大きい値〈例 `2e20`〉では内部 `f64` 計算自体は正しく
+    // 有限のまま完了する一方、最終 narrow が正当に `+inf` を返す
+    // ため本テストの意図〈NaN／中間 overflow の不在確認〉に合わない。
+    // codex-review 指摘参照）。
     let x = vec![
-        2e20f32, -2e20f32, 1e-4, -1e-4, 3.0, -1.0, 0.5, -0.5, // batch 0
-        1e19f32, -1e19f32, 2e-4, -2e-4, 1.0, -2.0, 0.3, -0.3, // batch 1
+        1e18f32, -1e18f32, 1e-4, -1e-4, 3.0, -1.0, 0.5, -0.5, // batch 0
+        5e17f32, -5e17f32, 2e-4, -2e-4, 1.0, -2.0, 0.3, -0.3, // batch 1
     ];
     let result = bn
         .run_batch_norm_train_f32(&ctx, &x, None, None, 1e-5, n, c, spatial)
@@ -461,8 +469,25 @@ fn batch_norm_train_and_infer_empty_axis_return_without_touching_device() {
     assert_eq!(train.mean, vec![0.0f32; 3]);
     assert_eq!(train.var, vec![0.0f32; 3]);
 
+    // `mean`／`var` は `validate_batch_norm_launch` が `n==0` の早期
+    // return より先に長さ `c` 一致を検査する契約
+    // （`backend-cpu::batch_norm::run_batch_norm_infer_f32_empty_axes_are_empty_output`
+    // と同じ設計）ため、空スライスではなく長さ `c` のダミー値を渡す。
+    let dummy_mean = vec![0.0f32; 3];
+    let dummy_var = vec![1.0f32; 3];
     let infer = bn
-        .run_batch_norm_infer_f32(&ctx, &[], &[], &[], None, None, 1e-5, 0, 3, 4)
+        .run_batch_norm_infer_f32(
+            &ctx,
+            &[],
+            &dummy_mean,
+            &dummy_var,
+            None,
+            None,
+            1e-5,
+            0,
+            3,
+            4,
+        )
         .expect("n=0 は早期 return で成功するはず");
     assert!(infer.is_empty());
 }
