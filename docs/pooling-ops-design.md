@@ -542,3 +542,64 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
 - CUDA／Metal 実機実測は本エージェント実行環境に実機がないため未実施
   （既定 `Unsupported` → ホストフォールバックのため機能的には到達
   可能。専用カーネル・実機実測は #1729／#1730 へ引き継ぐ）。
+### #1729（CUDA 実装）
+
+**前提の事実（2026-09-15 `main` 調査）**: 兄弟イシュー #1728（`backend-cpu`。
+§9 が指す共有基盤 `Pool2dParams`・`BackendOps::max_pool2d`／`avg_pool2d`／
+`adaptive_avg_pool2d`・出力 shape 関数）は本イシュー実装時点で `main` に
+未マージだった。そのため本イシューは共有基盤（`tensor-core`／`autodiff`）
+へ一切触れず、`crates/backend-cuda` クレート内に閉じた forward カーネル
+実装のみを行った（**`ops.rs::CudaBackendOps` への override 配線は含まない**。
+#1728 マージ後の小さな追従 PR へ引き継ぐ）。
+
+**実装ファイル**:
+
+- `crates/backend-cuda/src/kernels_pooling.rs`（新規）: `MAX_POOL2D_F32`・
+  `AVG_POOL2D_F32`・`ADAPTIVE_AVG_POOL2D_F32` の 3 NVRTC 静的文字列。
+  `POOLING_BLOCK_DIM = 256`。REQ-8 境界検査（`if (idx < numel)`）・
+  `long long` 添字演算の静的テストを含む。
+- `crates/backend-cuda/src/pooling.rs`（新規）: `CudaPooling`（`new`・
+  `run_max_pool2d_f32`・`run_avg_pool2d_f32`・`run_adaptive_avg_pool2d_f32`）。
+  `Pool2dParams` へ依存せずプリミティブ引数（`[usize; 2]`・`bool`）を受け、
+  §3／§4 のパラメータ検査・出力 shape 導出をクレート内で自己完結して行う
+  （`validate_and_shape`／`validate_and_shape_adaptive`／`pool_out_len`
+  ほか）。`ops.rs` 側 override が無いためモジュール全体を
+  `#![allow(dead_code)]`（配線後に撤去予定。理由はファイル doc 参照）。
+- `crates/backend-cuda/src/pooling_model.rs`（新規。`#![cfg(test)]`）:
+  `kernels_pooling.rs` 3 カーネルの逐語ホスト Rust モデル
+  （`sort_model.rs`／`unique_model.rs` と同型の意図的複製）。実機
+  `#[ignore]` テストの bit 一致オラクル。
+- `crates/backend-cuda/src/pooling_real_device_tests.rs`（新規。`pooling.rs`
+  末尾から `#[cfg(test)] #[path]` で登録。`CudaPooling` が非公開のため
+  `tests/` からは到達不可という事情は `context_cache.rs::
+  poison_recovery_real_device_tests` と同型）: 属性なし環境適応スモーク
+  （`CudaDevice::new`／`CudaPooling::new` いずれの失敗でも panic しない
+  ことを確認。libcuda はあるが libnvrtc が無い環境が実際に観測された）
+  ＋ `#[ignore]` 形状網羅（基本形・重なり窓・dilation 境界・1d 併合・256
+  ブロック境界またぎ・NaN／±inf／−0.0・run-to-run bit 同一・
+  `count_include_pad` 両値・adaptive global average／upsampling）。
+- `crates/backend-cuda/src/error.rs`：`CudaError::InvalidPoolingShape`・
+  `PoolingSizeLimitExceeded` を追加。
+- `crates/backend-cuda/src/lib.rs`：`mod kernels_pooling; mod pooling; mod
+  pooling_model;` を登録。
+
+**数値契約の実装**: MaxPool は §5 の先勝ち決定的タイ規則・NaN 伝播
+（`v > best || (isnan(v) && !isnan(best))`。`-INFINITY` 番兵ではなく最初の
+有効タップで初期化）を算術なしで実装し `pooling_model.rs` と bit 完全一致
+契約（値・索引とも）。Avg／AdaptiveAvg は §7 の `double` 逐次加算＋1 回
+`float` downcast（CUDA は `double` をハードウェアでネイティブサポートする
+ため Metal のような soft-f64 エミュレーションは不要）。
+
+**`context_cache::cached_pooling` を追加しなかった理由**: `ops.rs` に呼び
+出し元が無いため、追加しても `pub(crate)` 未使用として dead_code lint に
+より `cargo clippy --all-features -- -D warnings` が失敗する（`#[cfg(test)]`
+以外の到達経路が現時点で存在しない）。#1728 マージ後の override 配線と
+同時に追加する。
+
+**検証**: `cargo test -p fandhe-ai-backend-cuda --lib pooling` で単体テスト
+27 件（属性なし）が pass・実機 `#[ignore]` テスト 11 件は CUDA 実機必須の
+まま記録・`cargo clippy --workspace --all-targets --all-features --
+-D warnings` は本 PR の変更を含めて green（既存の未使用コード起因の
+warning はベースライン不変）。**GB10 実機実測は本エージェント実行環境に
+到達手段が無いため未実施のまま `docs/perf/logs/cuda-pooling-1729/` へ
+申し送る**。

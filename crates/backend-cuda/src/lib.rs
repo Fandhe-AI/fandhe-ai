@@ -447,6 +447,19 @@ mod kernels_constant_pad;
 mod im2col;
 mod kernels_im2col;
 mod kernels_unique;
+// イシュー #1729: MaxPool／AvgPool／AdaptiveAvgPool（2d。設計
+// `docs/pooling-ops-design.md`）の forward カーネル起動 API・
+// カーネルソース。共有基盤（`Pool2dParams`・`BackendOps` 3 メソッド）
+// を導入する兄弟イシュー #1728 が本実装時点でまだ `main` に無いため、
+// `ops.rs::CudaBackendOps` への override 配線を持たない（`pooling.rs`
+// モジュール doc 参照）。
+mod kernels_pooling;
+mod pooling;
+// `kernels_pooling.rs::MAX_POOL2D_F32` 等の逐語ホストモデル
+// （`sort_model.rs`／`unique_model.rs` と同型）。ファイル全体が
+// `#![cfg(test)]`（`pooling_model.rs` 冒頭参照）のため非 test ビルドでは
+// 存在しない。
+mod pooling_model;
 mod sort;
 mod sort_model;
 mod unique;
