@@ -808,3 +808,87 @@ CPU 分（本 doc の実装対象 `#1642` に相当する範囲。イシュー�
   `conv2d` に委譲するため、これらのカーネルが実装され次第 1d も
   自動的に恩恵を受ける）。1d 専用の高速経路（`kH=1` の im2col
   特殊化等）は設計時点で対象外のまま。
+
+### #1766（CUDA `im2col`／`col2im` 実装）
+
+- **対象**: `crates/backend-cuda` に `im2col`／`col2im`（`BackendOps`
+  override）を実装した。`conv2d` 自身は §9 の方針どおり override
+  しない（forward は `conv2d_with_fallback` の段階的合成——CUDA
+  `im2col` → `gemm_batched` → `add`〈bias〉——、backward は既存 VJP
+  〈`grad.rs`〉が `im2col_with_fallback`／`col2im_with_fallback` →
+  `gemm_batched_fp32_strict` ×2 → `col2im_with_fallback` の順で CUDA
+  カーネルへ自動的に到達する。`autodiff` 側のコード変更は不要）。
+- **カーネル設計**（`crates/backend-cuda/src/kernels_im2col.rs`）:
+  `Conv2dParams` が rank 固定 4D NCHW であることを利用し、
+  `kernels_gather_scatter.rs`／`kernels_constant_pad.rs` のような
+  rank 可変の shape 配列 H2D を行わず、すべての形状パラメータ
+  （`n_batch, cin, groups, cin_g, h_in, w_in, h_out, w_out, kh, kw,
+  sh, sw, ph, pw, dh, dw, k_g, p, numel`）をスカラー `int` カーネル
+  引数として渡す。`im2col_f32` は 1 出力要素 = 1 スレッドの純粋
+  コピー（算術なし・**bit 完全一致**）。`col2im_f32` は 1 入力位置
+  = 1 スレッドの入力位置定常走査（atomic 不使用）で、寄与する
+  `(kh, kw)` を row-major に `double` アキュムレータへ逐次加算し
+  最後に 1 回 `(float)` downcast する（`.claude/rules/coding-rust.md`
+  の勾配長軸縮約規約・CPU 参照実装 `backend-cpu::im2col::col2im` の
+  `f64` 逐次和と**bit 完全一致**。乗算を伴わない純粋な和のため FMA
+  融合の余地がなく CUDA `double` はホスト側 `f64` 加算と同一の丸め
+  結果になる）。座標計算（`h + p_h − kh·d_h` 等）は CPU の
+  `checked_sub` 相当を符号付き `long long` 演算で表現し、剰余を取る
+  **前**に符号判定する（C の負数 `%` の符号曖昧性回避。設計 §6.2
+  「訂正 2」と同じ理由）。
+- **起動 API**（`crates/backend-cuda/src/im2col.rs::CudaIm2col`）:
+  `constant_pad.rs`／`scan.rs` と同じ構成方針（NVRTC コンパイル・
+  `context_cache::cached_im2col` によるプロセス内シングルトン共有・
+  `with_driver_call` 経由の CUDA Graph capture 排他参加）。
+  `LaunchShape::derive` が `conv_out_len` で `h_out`／`w_out` を
+  独立に再計算し（`out_shape`／`d_col` の `P` 軸だけでは
+  `h_out`／`w_out` 個別の値が復元できないため）、`P` 軸との整合を
+  `InvalidIm2colShape` で fail-closed 検査する。全スカラー引数は
+  `i32` 範囲検査（超過は `Im2colSizeLimitExceeded`）済み。
+- **エラー写像**（`ops.rs::map_im2col_error`）: `map_scan_error`／
+  `map_unique_error` と同じ設計判断——
+  `Im2colSizeLimitExceeded`（形状パラメータがカーネル引数 `int`
+  上限を超過。col は入力の `kH·kW` 倍で現実的形状でも上限へ到達
+  しうるため hard fail ではなくフォールバックが妥当）**のみ**
+  `BackendError::Unsupported` へ写像し `im2col_with_fallback`／
+  `col2im_with_fallback` のホスト参照実装（`eval::im2col`／
+  `col2im`）へ委ねる。`InvalidIm2colShape`（内部契約違反。呼び出し元
+  `ops.rs` の事前検証を通過した入力からは実質到達しない防御的経路）
+  は `ShapeMismatch(ElementCountOverflow)` へ、それ以外（driver 不在
+  等）は `map_cuda_error` へ委譲する（判定迂回経路を作らない。
+  `.claude/rules/security.md` A08）。
+- **`ops.rs` override の二重検査**: `im2col`（`im2col_out_shape` で
+  再検査・出力が空〈`N`／`Cin` 系の軸が 0〉なら driver 非接触で
+  早期リターン・確保前検査 `checked_f32_bytes`）・`col2im`
+  （`im2col_out_shape` から導出した期待 `d_col` 形状と実形状の完全
+  一致検査・`input_shape`（`d_col` とは独立に指定される戻り値
+  shape）自体のバイトサイズも `checked_f32_bytes` で確保前検査。
+  `backend-cpu::ops::CpuBackendOps::col2im` の PR #1862 codex-review
+  是正と同じ攻撃面への対処）。
+- **数値契約**: im2col は 3 バックエンド bit 完全一致（算術なし）、
+  col2im は CPU `f64` 逐次和と bit 完全一致（CUDA は `double`
+  ネイティブ）。conv2d 全体（GEMM 段を含む forward／backward）は
+  REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5
+  未満）。tolerance・`BASELINES` は不変。
+- **テスト**: `kernels_im2col.rs` の静的テスト（REQ-8 境界検査・
+  `long long` 添字・col2im の `double` アキュムレータ／単一
+  downcast・im2col の算術非含有・符号判定の順序）・`im2col.rs` の
+  driver 非接触単体テスト（`validate_i32_bound`／`checked_numel`／
+  `LaunchShape::derive` の `P` 軸整合検査）・`ops.rs` の driver
+  非接触回帰テスト（rank 不整合・`N=0` 空出力早期リターン・`d_col`
+  shape 不一致）・`crates/backend-cuda/tests/im2col_col2im_parity.rs`
+  （環境適応スモーク＋GB10 実機 `#[ignore]` 形状網羅）・
+  `crates/facade/tests/conv2d_backend_parity.rs::
+  cuda_conv2d_backward_matches_cpu`（forward に加え backward
+  〈d_input／d_weight／d_bias〉を `assert_parity` で追加）。
+- **facade 公開面**: 新規 `pub use`／`pub fn` は追加していない
+  （`Var::conv2d` は既存 `Var` 再エクスポート経由で到達済み）。
+- **GB10 実機未実測**: 本エージェント実行環境に DGX Spark GB10
+  実機への到達手段がなく、`#[ignore]` テスト群（parity・backward
+  `assert_parity`）は未実行のまま `docs/perf/logs/cuda-conv2d-1766/`
+  へ申し送る。
+- **引き継ぎ**: Metal 専用カーネルは #1644。`conv2d` の融合／direct
+  override（GEMM 段迂回等の性能最適化）・GPU im2col 出力のデバイス
+  常駐化（現状はホストへ readback してから `gemm_batched` へ再
+  アップロードする往復コストが残る）は既存 #1643 コメントへ追記予定
+  のスコープ外事項（別 issue）。
