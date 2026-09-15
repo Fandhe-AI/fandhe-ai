@@ -112,6 +112,24 @@ fn validate_batch_norm_launch(
     if !eps.is_finite() || eps < 0.0 {
         return Err(BatchNormError::InvalidEps { eps });
     }
+    // `run_batch_norm_train_f32`／`run_batch_norm_eval_f32` はいずれも
+    // 本関数の検査を通過したあとチャネル数 `c` だけに依存する `Vec<f32>`
+    // （`mean`／`var`。n==0 早期 return 経路も含む）を確保する。
+    // `n*c*spatial` の `usize` 積オーバーフローを検査するだけでは、
+    // 例えば `n=0, c=usize::MAX, spatial=1` のように積自体は 0 へ
+    // 潰れて検査を通過するが `vec![0.0f32; c]` 単体が `isize::MAX` バイト
+    // 上限で capacity overflow panic する経路を防げない
+    // （`fandhe_ai_tensor_core::tensor::checked_numel_for` と同じ理由。
+    // 本番経路 panic 禁止規約 `.claude/rules/coding-rust.md` に反する。
+    // イシュー #1732・PR #1874 codex-review P1 是正）。確保前に
+    // `c * size_of::<f32>()` を `isize::MAX` 上限まで検査する。
+    if c.checked_mul(std::mem::size_of::<f32>())
+        .is_none_or(|bytes| bytes > isize::MAX as usize)
+    {
+        return Err(BatchNormError::InvalidShape {
+            detail: format!("channel count too large to allocate mean/var: c={c}"),
+        });
+    }
     let numel = n
         .checked_mul(c)
         .and_then(|v| v.checked_mul(spatial))
@@ -475,6 +493,27 @@ mod tests {
         assert!(raw.out[0].is_nan() && raw.out[1].is_nan());
         assert!(raw.mean[0].is_nan());
         assert!(!raw.mean[1].is_nan());
+    }
+
+    /// `n=0, c=usize::MAX, spatial=1` は `n*c*spatial` が `usize` 積として
+    /// は `0` に潰れて `validate_batch_norm_launch` の旧実装（オーバー
+    /// フロー検査のみ）を通過し、`n==0` 早期 return 経路の
+    /// `vec![0.0f32; c]`（`mean`／`var`）が `isize::MAX` バイト上限で
+    /// capacity overflow panic していた（本番経路 panic 禁止規約
+    /// `.claude/rules/coding-rust.md` 違反。PR #1874 codex-review P1）。
+    /// `c * size_of::<f32>()` の確保前上限検査後は型付きエラーへ収束
+    /// することを確認する（panic しないこと自体が本テストの主目的）。
+    #[test]
+    fn run_batch_norm_train_f32_rejects_huge_channel_count_without_panicking() {
+        let err = run_batch_norm_train_f32(&[], None, None, 1e-5, 0, usize::MAX, 1).unwrap_err();
+        assert!(matches!(err, BatchNormError::InvalidShape { .. }));
+    }
+
+    #[test]
+    fn validate_batch_norm_launch_rejects_huge_channel_count() {
+        let err = validate_batch_norm_launch(0, usize::MAX, 1, 0, None, None, None, None, 1e-5)
+            .unwrap_err();
+        assert!(matches!(err, BatchNormError::InvalidShape { .. }));
     }
 
     #[test]

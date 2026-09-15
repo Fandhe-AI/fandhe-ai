@@ -121,10 +121,17 @@ impl BatchNormCore {
                 "{who}: num_features must be non-zero"
             )));
         }
-        let weight = Tensor::new(vec![1.0f32; num_features], &[num_features])?;
-        let bias = Tensor::new(vec![0.0f32; num_features], &[num_features])?;
-        let running_mean = Tensor::new(vec![0.0f32; num_features], &[num_features])?;
-        let running_var = Tensor::new(vec![1.0f32; num_features], &[num_features])?;
+        // `Tensor::full` は `vec![value; numel]` を確保する前に
+        // `checked_numel_for::<f32>` でバイトサイズ上限（`isize::MAX`）
+        // まで検査する。ここを素の `vec![1.0f32; num_features]` に
+        // 置き換えると `Tensor::new` の検査へ到達する前に `vec!` 自体が
+        // capacity overflow で panic し、本番経路 panic 禁止規約
+        // （`.claude/rules/coding-rust.md`）に反する（イシュー #1732・
+        // PR #1874 codex-review P1 是正）。
+        let weight = Tensor::full(&[num_features], 1.0f32)?;
+        let bias = Tensor::full(&[num_features], 0.0f32)?;
+        let running_mean = Tensor::full(&[num_features], 0.0f32)?;
+        let running_var = Tensor::full(&[num_features], 1.0f32)?;
         Ok(Self {
             num_features,
             eps,
@@ -153,8 +160,10 @@ impl BatchNormCore {
                 "{who}: num_features must be non-zero"
             )));
         }
-        let running_mean = Tensor::new(vec![0.0f32; num_features], &[num_features])?;
-        let running_var = Tensor::new(vec![1.0f32; num_features], &[num_features])?;
+        // `new` と同じ理由で `Tensor::full` を使い `vec!` 前に確保上限を
+        // 検査する（PR #1874 codex-review P1 是正）。
+        let running_mean = Tensor::full(&[num_features], 0.0f32)?;
+        let running_var = Tensor::full(&[num_features], 1.0f32)?;
         Ok(Self {
             num_features,
             eps,
@@ -723,6 +732,48 @@ mod tests {
         let err =
             BatchNorm1d::new(0, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap_err();
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// `num_features=usize::MAX` は `Tensor::new(vec![...; num_features],
+    /// ..)` の旧実装では `Tensor::new` の検査へ到達する前に `vec!` 自体が
+    /// capacity overflow で panic していた（本番経路 panic 禁止規約
+    /// `.claude/rules/coding-rust.md` 違反。PR #1874 codex-review P1）。
+    /// `Tensor::full` 採用後は型付きエラーへ収束することを確認する
+    /// （panic しないこと自体が本テストの主目的）。
+    #[test]
+    fn batch_norm_1d_new_rejects_huge_num_features_without_panicking() {
+        let err = BatchNorm1d::new(
+            usize::MAX,
+            BATCH_NORM_DEFAULT_EPS,
+            BATCH_NORM_DEFAULT_MOMENTUM,
+        )
+        .unwrap_err();
+        assert!(matches!(err, AutodiffError::Shape(_)));
+    }
+
+    /// `without_affine`／`BatchNorm2d::new` も同じ `Tensor::full` 経路を
+    /// 通るため、同型の huge `num_features` で panic しないことを
+    /// 確認する。
+    #[test]
+    fn batch_norm_1d_without_affine_rejects_huge_num_features_without_panicking() {
+        let err = BatchNorm1d::without_affine(
+            usize::MAX,
+            BATCH_NORM_DEFAULT_EPS,
+            BATCH_NORM_DEFAULT_MOMENTUM,
+        )
+        .unwrap_err();
+        assert!(matches!(err, AutodiffError::Shape(_)));
+    }
+
+    #[test]
+    fn batch_norm_2d_new_rejects_huge_num_features_without_panicking() {
+        let err = BatchNorm2d::new(
+            usize::MAX,
+            BATCH_NORM_DEFAULT_EPS,
+            BATCH_NORM_DEFAULT_MOMENTUM,
+        )
+        .unwrap_err();
+        assert!(matches!(err, AutodiffError::Shape(_)));
     }
 
     #[test]
