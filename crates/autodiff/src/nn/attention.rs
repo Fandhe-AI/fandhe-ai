@@ -56,7 +56,7 @@ use crate::nn::init::{
     ATTN_K_SEED_SALT, ATTN_OUT_SEED_SALT, ATTN_Q_SEED_SALT, ATTN_V_SEED_SALT, derive_seed,
 };
 use crate::nn::linear::{Linear, LinearVars};
-use crate::nn::module::Module;
+use crate::nn::module::{Module, prefixed};
 use crate::tape::Tape;
 use crate::var::Var;
 
@@ -777,6 +777,18 @@ fn sdpa_compose<'t>(
 impl Module for MultiheadAttention {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.bind(tape).forward(input, input, input, None, false)
+    }
+
+    /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
+    /// `q_proj.*` → `k_proj.*` → `v_proj.*` → `out_proj.*` の順で、各
+    /// `Linear::named_parameters()`（`weight` → `bias`）に接頭辞を連結
+    /// する（`module::prefixed` ヘルパー参照）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = prefixed("q_proj", self.q_proj.named_parameters());
+        out.extend(prefixed("k_proj", self.k_proj.named_parameters()));
+        out.extend(prefixed("v_proj", self.v_proj.named_parameters()));
+        out.extend(prefixed("out_proj", self.out_proj.named_parameters()));
+        out
     }
 }
 
