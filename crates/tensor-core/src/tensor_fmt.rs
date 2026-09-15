@@ -236,12 +236,60 @@ impl<'a, T: Element> std::fmt::Debug for DataPreview<'a, T> {
     }
 }
 
+/// `shape`／`strides` フィールド表示用の打ち切り付きラッパー。
+///
+/// デフォルトの `Debug for Vec<usize>`／`Debug for Vec<isize>` は全
+/// 要素を出力するため、`Tensor::new` が rank に上限を課さないことと
+/// 合わさると、空テンソル（`data` フィールドは [`DataPreview::fmt`]
+/// が `is_empty()` で即座に打ち切る）であっても `shape`／`strides`
+/// フィールド自体は無条件に全要素を出力し、rank に比例して出力サイズ
+/// が増大する（例: 先頭軸 0・残り 100,000 軸長 1 の shape で約 30 万
+/// 文字。コードレビュー #1754 追加指摘・P2）。`data` フィールドの
+/// 打ち切り判定（[`FMT_MAX_RENDER_RANK`]・グローバル予算）とは独立に
+/// 発生する経路のため、`data` と同じ軸ごとの先頭・末尾省略
+/// （[`FMT_EDGE_ITEMS`]）を要素数のみで判定して適用し、rank に依らず
+/// 出力サイズを有界にする。
+struct SlicePreview<'a, V>(&'a [V]);
+
+impl<'a, V: std::fmt::Display> std::fmt::Debug for SlicePreview<'a, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = self.0;
+        f.write_str("[")?;
+        if s.len() > 2 * FMT_EDGE_ITEMS {
+            for (i, v) in s[..FMT_EDGE_ITEMS].iter().enumerate() {
+                if i > 0 {
+                    f.write_str(", ")?;
+                }
+                write!(f, "{v}")?;
+            }
+            f.write_str(", ..., ")?;
+            let tail = &s[s.len() - FMT_EDGE_ITEMS..];
+            for (i, v) in tail.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(", ")?;
+                }
+                write!(f, "{v}")?;
+            }
+        } else {
+            for (i, v) in s.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(", ")?;
+                }
+                write!(f, "{v}")?;
+            }
+        }
+        f.write_str("]")
+    }
+}
+
 /// `Tensor<T>` の手書き `Debug` 実装。
 ///
 /// 構造情報（`shape`/`strides`/`offset`/`storage_len`）を
 /// `f.debug_struct` で維持しつつ、`data` フィールドに打ち切り付きの
 /// 値プレビューを追加する。`{:#?}`（pretty-print）でも
-/// `f.debug_struct` 経由のため自然に整形される。
+/// `f.debug_struct` 経由のため自然に整形される。`shape`／`strides`
+/// フィールドは [`SlicePreview`] 経由で出力し、`data` の打ち切りとは
+/// 独立に rank に依らず出力サイズを有界にする（P2 是正）。
 ///
 /// `Element: Debug` は既存のトレイト境界（`crate::element::Element`）
 /// のみを使い、新規境界は追加しない（`Element` は unsealed 公開 trait
@@ -250,8 +298,8 @@ impl<'a, T: Element> std::fmt::Debug for DataPreview<'a, T> {
 impl<T: Element> std::fmt::Debug for Tensor<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tensor")
-            .field("shape", &self.shape())
-            .field("strides", &self.strides())
+            .field("shape", &SlicePreview(self.shape()))
+            .field("strides", &SlicePreview(self.strides()))
             .field("offset", &self.offset())
             .field("storage_len", &self.storage_len())
             .field("data", &DataPreview(self))
@@ -443,6 +491,29 @@ mod tests {
         assert!(s.contains("data: []"), "{s}");
         let d = format!("{}", t);
         assert_eq!(d, "tensor([], shape=[1000000000, 0])");
+    }
+
+    #[test]
+    fn debug_empty_huge_rank_shape_field_is_bounded() {
+        // コードレビュー #1754 追加指摘（P2）の再現条件: 空テンソル
+        // （先頭軸 0）で残り軸数が極端に大きい shape（本例では
+        // 100,000 軸・rank 100,001）でも、`shape`／`strides` フィールド
+        // 自体は `SlicePreview` により先頭・末尾のみへ打ち切られ、
+        // 出力サイズが rank に依らず有界であることを固定する。
+        // （`data` フィールドは `is_empty()` の早期打ち切りにより
+        // 既に `[]` へ収まる。`debug_empty_huge_leading_axis_does_not_hang`
+        // とは異なり shape フィールド自体の打ち切りを検証する）。
+        let mut shape = vec![0usize];
+        shape.extend(std::iter::repeat_n(1usize, 100_000));
+        let t: Tensor<f32> = Tensor::new(vec![], &shape).unwrap();
+        let s = format!("{:?}", t);
+        assert!(s.contains("data: []"), "{s}");
+        assert!(s.contains("..."), "{s}");
+        assert!(
+            s.len() < 2_000,
+            "shape/strides field not bounded: {} bytes",
+            s.len()
+        );
     }
 
     #[test]
