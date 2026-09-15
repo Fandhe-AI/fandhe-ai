@@ -123,16 +123,28 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
 - **ガードレール 3 分岐判定の迂回経路の追加**（自己修復ループが AI 生成変更を判定なしで
   取り込める経路。A08）: **P0**。**ガードレール閾値（guardrail.toml）・ポリシー除外
   リスト・バックエンド間数値一致テストの許容誤差（tolerance）を、人間承認の記録なしに
-  緩和・変更する差分**: **P1**
+  緩和・変更する差分**: **P1**。**（spec REQ-2 2026-09-12 追記・fandhe-ai-spec#64）**
+  第三者比較対象（candle 等）の出力が統一複合判定を外れた場合は比較データの妥当性上の
+  「判定不能」であり fandhe-ai 側の REQ-2 違反ではない。framework-compare ハーネス
+  （`bench-common::parity`・`compare_gemm_gate.py`）限定のスケール付き絶対誤差項 OR
+  追加（`bench-common::parity::PARITY_SCALED_ABS_COEFF`）は、既存定数維持・本体判定式
+  （`compare`／`assert_parity`／`ParityBaseline`）不変を条件に「単独緩和」には該当
+  しない。係数変更・本体への適用拡大は引き続きユーザー承認必須（出典:
+  `docs/candle-parity-tolerance-contract-decision.md` §8）
 - **テストの弱体化**（受け入れ基準対応テストの削除、`#[ignore]` 追加によるごまかし、
   実機非依存テストの実機依存化。実機〈DGX Spark GB10・Metal〉依存テストの `#[ignore]`
-  分離の解除を含む）: **P1**。**例外**: TF32/f16 Tensor Core 経路の parity テストで、
-  実機実測により厳密ゼロ fail 判定が成立しないと確認された形状を実測 baseline
-  非後退方式（fail_count・総要素数一致・mean_abs_diff/max_abs_diff/max_rel_err
+  分離の解除を含む）: **P1**。**例外**: 結合順序が単一の連続 K ループと異なる構造の
+  カーネル（Tensor Core 経路・Metal f32 split-K 等）の parity テストを、各カーネルの
+  決定記録が定める粒度（**形状二分方式**〈実機実測でゼロ fail 成立形状のみ厳密判定・
+  成立しない形状は baseline。CUDA Tensor Core 経路の先例〉または**全形状一律 baseline
+  方式**〈全形状を baseline 判定とする。Metal f32 split-K の先例〉のいずれか）で実測
+  baseline 非後退方式（fail_count・総要素数一致・mean_abs_diff/max_abs_diff/max_rel_err
   ceiling の fail-closed 検査）へ移行する変更は、正本仕様 `docs/spec/04-requirements.md`
-  REQ-2「2026-09-02 追記・Tensor Core 経路の受け入れ判定方式」が正式な合格条件として
-  規定する形状別判定方式に該当し、弱体化として扱わない（受け入れ基準の正は spec 側。
-  適用条件の詳細は AGENTS.md「数値契約の統一」節に同追記へ整合させて転記する）。
+  REQ-2「2026-09-02 追記・Tensor Core 経路の受け入れ判定方式」＋「2026-09-12 追記・
+  実測ベースライン非後退方式の適用対象の一般化」が正式な合格条件として規定する判定
+  方式に該当し、弱体化として扱わない（受け入れ基準の正は spec 側。上記 2 方式に該当
+  しない粒度・構造基準に合致しないカーネルへの適用は例外の対象外。適用条件の詳細は
+  AGENTS.md「数値契約の統一」節に同追記へ整合させて転記する）。
   ただしこの例外は **baseline の新規追加・更新（fail_count・ceiling の緩和を含む）に
   人間（ユーザー）の承認記録が伴う場合に限る**（実測値の有無に関わらず、承認記録の
   ない baseline 追加・緩和は従来どおりテストの弱体化として **P1** と判定する）
