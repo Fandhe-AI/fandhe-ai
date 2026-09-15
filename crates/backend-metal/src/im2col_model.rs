@@ -119,11 +119,17 @@ fn checked_u32(value: usize, what: &'static str) -> Result<u32, Im2colPrepareErr
 /// `numel` は呼び出し側が指定する起動グリッドの範囲（im2col は
 /// `col_shape` の要素数・col2im は `in_shape` の要素数）。
 ///
-/// `h_out`／`w_out` は `col_shape` の `P` 軸だけでは個別の値が復元
-/// できないため [`fandhe_ai_tensor_core::conv_out_len`] で独立に
-/// 再計算し、`h_out*w_out == P` を fail-closed 検査する（設計 doc
-/// §6.2「訂正 2」・CUDA 側と同じ理由）。全 19 値の `u32` 収容も検査
-/// する。
+/// `col_shape` は [`fandhe_ai_tensor_core::im2col_out_shape`] で
+/// `in_shape`／`params` から再計算した期待値と **4 軸すべて**（`N`・
+/// `G`・`K_g`・`P`）を fail-closed 照合する（codex-review P0 是正:
+/// 従来は `P` 軸のみを照合しており、`col_shape[0]`〈N〉が過大な場合の
+/// `im2col_model` による `input` 範囲外読み出し、`col_shape[1]`／
+/// `[2]`〈G／K_g〉が `params`／`cin` と食い違う場合の
+/// `col2im_soft_f64` による `d_col` 範囲外読み出しを検出できな
+/// かった）。`h_out`／`w_out` は照合後の `col_shape` の `P` 軸だけ
+/// では個別の値が復元できないため [`fandhe_ai_tensor_core::
+/// conv_out_len`] で独立に再計算する（設計 doc §6.2「訂正 2」・
+/// CUDA 側と同じ理由）。全 19 値の `u32` 収容も検査する。
 pub fn derive_im2col_dims(
     in_shape: &[usize],
     col_shape: &[usize],
@@ -142,9 +148,36 @@ pub fn derive_im2col_dims(
     );
 
     let (n_batch, cin, h_in, w_in) = (in_shape[0], in_shape[1], in_shape[2], in_shape[3]);
-    let groups = col_shape[1];
-    let k_g = col_shape[2];
-    let p = col_shape[3];
+
+    // `in_shape`／`params` から期待される完全な col shape（`[N, G,
+    // K_g, P]`）を独立に再計算し、呼び出し元が渡した `col_shape`
+    // 全体（N・G・K_g・P の 4 軸すべて）と照合する（codex-review
+    // P0 是正: 従来は P 軸のみを照合しており、N・G・K_g の不一致を
+    // 検出できなかった。`col_shape[0]`〈N〉が `in_shape[0]` より
+    // 大きいと `im2col_model` が `input` の範囲外を読み出し、
+    // `col_shape[1]`〈G〉／`[2]`〈K_g〉が `params.groups()`／
+    // `cin_g*kh*kw` と食い違うと `col2im_soft_f64` が `d_col` の
+    // 範囲外を読み出す——という 2 つの GPU 側範囲外読み出し経路を
+    // 同時に塞ぐ。`im2col_out_shape` 自身が `cin % groups == 0`・
+    // `h`／`w` 非ゼロ・`checked_mul` によるオーバーフロー検査を
+    // 内包するため、ここで個別に再実装しない）。
+    let expected_col_shape =
+        fandhe_ai_tensor_core::im2col_out_shape(in_shape, params).map_err(|e| {
+            Im2colPrepareError::InvalidShape {
+                detail: format!("im2col_out_shape failed: {e:?}"),
+            }
+        })?;
+    if col_shape != expected_col_shape.as_slice() {
+        return Err(Im2colPrepareError::InvalidShape {
+            detail: format!(
+                "col shape mismatch: col_shape={col_shape:?} expected={expected_col_shape:?}"
+            ),
+        });
+    }
+
+    let groups = expected_col_shape[1];
+    let k_g = expected_col_shape[2];
+    let p = expected_col_shape[3];
     let cin_g = cin / groups.max(1);
 
     let [kh, kw] = params.kernel_size();
@@ -162,14 +195,11 @@ pub fn derive_im2col_dims(
             detail: format!("conv_out_len(w) failed: {e:?}"),
         }
     })?;
-    if h_out.checked_mul(w_out) != Some(p) {
-        return Err(Im2colPrepareError::InvalidShape {
-            detail: format!(
-                "P axis mismatch: h_out*w_out={} p={p}",
-                h_out.saturating_mul(w_out)
-            ),
-        });
-    }
+    debug_assert_eq!(
+        h_out.checked_mul(w_out),
+        Some(p),
+        "derive_im2col_dims: P axis already verified equal via expected_col_shape"
+    );
 
     Ok(Im2colDims {
         n_batch: checked_u32(n_batch, "n_batch")?,
@@ -525,6 +555,35 @@ mod tests {
         // in_shape [1,1,4,4] -> h_out=w_out=3 -> P=9（kernel=2,stride=1）。
         // 誤った col_shape（P=1）を渡して不一致を起こす。
         let err = derive_im2col_dims(&[1, 1, 4, 4], &[1, 1, 4, 1], &params, 4).unwrap_err();
+        assert!(matches!(err, Im2colPrepareError::InvalidShape { .. }));
+    }
+
+    /// `derive_im2col_dims` は `N` 軸不整合（`col_shape[0]` が
+    /// `in_shape[0]` と異なる）も `InvalidShape` として拒否する
+    /// （codex-review P0 是正の回帰テスト。是正前はこの不一致が
+    /// 素通りし、`im2col_model` が `n_batch` を超える `n` で
+    /// `input` の範囲外を読み出しえた）。
+    #[test]
+    fn derive_im2col_dims_rejects_n_axis_mismatch() {
+        let params = Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        // in_shape=[1,1,1,1] -> 正しい col_shape=[1,1,1,1]。
+        // N=2 に差し替えた col_shape を渡して不一致を起こす。
+        let err = derive_im2col_dims(&[1, 1, 1, 1], &[2, 1, 1, 1], &params, 2).unwrap_err();
+        assert!(matches!(err, Im2colPrepareError::InvalidShape { .. }));
+    }
+
+    /// `derive_im2col_dims` は `G`／`K_g` 軸不整合（`groups` が
+    /// `params.groups()` と異なる・`cin_g*kh*kw` と食い違う）も
+    /// `InvalidShape` として拒否する（codex-review P0 是正の回帰
+    /// テスト。是正前は `col_shape` の生値をそのまま `groups`／
+    /// `k_g` として信頼していたため、`col2im_soft_f64` が `d_col`
+    /// の範囲外を読み出しえた）。
+    #[test]
+    fn derive_im2col_dims_rejects_groups_axis_mismatch() {
+        let params = Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 2).unwrap();
+        // in_shape=[1,2,1,1] (groups=2) -> 正しい col_shape=[1,2,1,1]。
+        // groups=1 に差し替えた col_shape を渡して不一致を起こす。
+        let err = derive_im2col_dims(&[1, 2, 1, 1], &[1, 1, 1, 1], &params, 1).unwrap_err();
         assert!(matches!(err, Im2colPrepareError::InvalidShape { .. }));
     }
 

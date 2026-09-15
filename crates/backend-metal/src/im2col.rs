@@ -58,6 +58,20 @@ const IM2COL_DIMS_SIZE: usize = std::mem::size_of::<Im2colDims>();
 /// 区別を保ったまま伝播させる——呼び出し元 `ops.rs::map_im2col_error`
 /// がこの区別を使って `Unsupported`（ホストフォールバック）／
 /// `ShapeMismatch` を振り分ける。`.claude/rules/security.md` A08）。
+/// `shape` の要素数を overflow 検査つきで計算する（`gemm.rs` の
+/// `MetalError::DimProductOverflow` 各所と同じ設計判断。
+/// codex-review P1 是正: 形状検証〈`derive_im2col_dims`〉より前に
+/// 実行する要素数計算を `usize` 素の `iter().product()`〈overflow
+/// チェック有効時は panic・無効時は積が折り返して誤って `Ok(0)` を
+/// 返しうる〉から `checked_mul` へ置き換える。`.claude/rules/
+/// coding-rust.md` の本番経路 panic 禁止・型付きエラー契約）。
+fn checked_numel(shape: &[usize]) -> Result<usize, MetalError> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(MetalError::DimProductOverflow)
+}
+
 fn map_prepare_error(err: im2col_model::Im2colPrepareError) -> MetalError {
     match err {
         im2col_model::Im2colPrepareError::SizeLimitExceeded { .. } => {
@@ -119,11 +133,11 @@ impl MetalIm2col {
         out_shape: &[usize],
         params: &Conv2dParams,
     ) -> Result<Vec<f32>, MetalError> {
-        let numel_out: usize = out_shape.iter().product();
+        let numel_out: usize = checked_numel(out_shape)?;
         if numel_out == 0 {
             return Ok(Vec::new());
         }
-        let numel_in: usize = in_shape.iter().product();
+        let numel_in: usize = checked_numel(in_shape)?;
         if input.len() != numel_in {
             return Err(MetalError::InvalidIm2colShape {
                 detail: format!(
@@ -162,11 +176,11 @@ impl MetalIm2col {
         input_shape: &[usize],
         params: &Conv2dParams,
     ) -> Result<Vec<f32>, MetalError> {
-        let numel_out: usize = input_shape.iter().product();
+        let numel_out: usize = checked_numel(input_shape)?;
         if numel_out == 0 {
             return Ok(Vec::new());
         }
-        let numel_col: usize = col_shape.iter().product();
+        let numel_col: usize = checked_numel(col_shape)?;
         if d_col.len() != numel_col {
             return Err(MetalError::InvalidIm2colShape {
                 detail: format!(
