@@ -25,9 +25,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, CastElement, DType, DeviceBufferView, FusedOpKind,
-    FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
-    Tensor,
+    Activation, BackendError, BackendOps, CastElement, Conv2dParams, DType, DeviceBufferView,
+    FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp,
+    ScatterReduce, Tensor,
 };
 
 use crate::error::AutodiffError;
@@ -872,6 +872,23 @@ pub(crate) enum Op {
         input: NodeId,
         pads: Vec<(usize, usize)>,
     },
+    /// `Var::conv2d`（im2col＋GEMM。イシュー #1764・設計 `docs/conv-ops-
+    /// design.md`）。`y = conv2d(input, weight, bias, params)`
+    /// （cross-correlation。NCHW 固定）。`bias` は `None` を許容する。
+    ///
+    /// **常に実体化済み**（`push_eager`）: 非 elementwise（GEMM を含む
+    /// 段階的合成）のため融合対象外（`Op::MatMul`／`Op::LinearAct` と
+    /// 同型）。`col`（im2col の中間結果）は保持しない——backward で
+    /// `im2col` を再計算する（設計 doc §6 冒頭。col は入力の `kH·kW`
+    /// 倍のメモリのため、決定的コピーである再計算コストは GEMM より
+    /// 小さいという `docs/autodiff-checkpoint-design.md` の「再計算で
+    /// 実メモリを減らす」方針と整合）。
+    Conv2d {
+        input: NodeId,
+        weight: NodeId,
+        bias: Option<NodeId>,
+        params: Conv2dParams,
+    },
     /// `Var::one_hot`（`torch.nn.functional.one_hot`／`tf.one_hot`
     /// 相当。**非微分演算**。イシュー #1755）。`input` は整数クラス id
     /// を f32 値として保持する追跡 `Var`（`Op::Gather`／`Sort`／`Topk`
@@ -1256,6 +1273,12 @@ impl Op {
             // 実体化演算で、`recompute_value` に再計算経路を持たない
             // ため解放しない。
             Op::Pad { .. } => false,
+            // `Op::Conv2d`（イシュー #1764）は `Op::LinearAct`／`Op::MatMul`
+            // と同じく eager 実体化演算だが `recompute_value` に
+            // 再計算経路を持たないため非適格（最小・安全側の判断。
+            // `col` を保持しない設計〈backward 再計算〉のため
+            // checkpoint 解放との組合せは対象外のまま）。
+            Op::Conv2d { .. } => false,
             // `Op::OneHot`（イシュー #1755）は `Op::Gather`／`Sort` と
             // 同じく eager 実体化演算で `recompute_value` に再計算経路
             // を持たないため解放しない（非微分演算であることとは独立の
@@ -1334,6 +1357,18 @@ impl Op {
             Op::Sort { input, .. } | Op::Topk { input, .. } => f(*input),
             Op::Interpolate { input, .. } => f(*input),
             Op::Pad { input, .. } => f(*input),
+            Op::Conv2d {
+                input,
+                weight,
+                bias,
+                ..
+            } => {
+                f(*input);
+                f(*weight);
+                if let Some(b) = bias {
+                    f(*b);
+                }
+            }
             Op::OneHot { input, .. } => f(*input),
             Op::MseLoss { pred, target, .. } => {
                 f(*pred);

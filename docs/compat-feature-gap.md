@@ -1697,3 +1697,5 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - `nn::loss::NllLoss`／`KlDivLoss`（薄いラッパー。`Default` は PyTorch 既定 `class_dim=1`／`reduction='mean'`／`log_target=false` と一致）を追加した。
 - facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
 - CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/nll_kl_div_backend_parity.rs`・`crates/backend-cuda/tests/{nll,kl_div}_parity.rs`・`crates/backend-metal/tests/{nll,kl_div}_parity.rs` の `#[ignore]` テストを参照）。
+
+#1764 で追補を追記（`Var::conv2d`（im2col＋GEMM。cross-correlation。NCHW 固定。groups は `gemm_batched` の broadcast で吸収）実装済み化。`BackendOps::im2col`／`col2im`／`conv2d`〈既定 `Unsupported`〉・`Op::Conv2d`・CPU 実装〈`backend-cpu::im2col`〉まで実装済み・facade 新規公開面なし・CUDA／Metal 専用カーネルは #1643／#1644・`nn::Conv2d` 層は #1645 へ引き継ぎ）。

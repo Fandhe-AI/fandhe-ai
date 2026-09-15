@@ -16,22 +16,23 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, BceKind, CastElement, ChecksumReadout, GemmChecksum,
-    GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget, LstmPointwiseOutput,
+    Activation, BackendError, BackendOps, BceKind, CastElement, ChecksumReadout, Conv2dParams,
+    GemmChecksum, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget, LstmPointwiseOutput,
     MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor,
-    VectorNormOrd, broadcast_shape, concat_out_shape, gather_out_shape, gemm_out_shape,
-    interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape, pad_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    VectorNormOrd, broadcast_shape, concat_out_shape, conv2d_out_shape, gather_out_shape,
+    gemm_out_shape, interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape,
+    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
     ArgExtremum, argext_with_fallback, cast_from_f32_with_fallback, concat_with_fallback,
-    gather_with_fallback, interpolate_with_fallback, min_with_fallback, one_hot_with_fallback,
-    pad_with_fallback, scalar_binary_with_fallback, scalar_unary_with_fallback,
-    scatter_with_fallback, sort_with_fallback, topk_with_fallback, unique_with_fallback,
+    conv2d_with_fallback, gather_with_fallback, interpolate_with_fallback, min_with_fallback,
+    one_hot_with_fallback, pad_with_fallback, scalar_binary_with_fallback,
+    scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
+    unique_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -2708,6 +2709,109 @@ impl<'t> Var<'t> {
             Op::Pad {
                 input: self.id,
                 pads: pads.to_vec(),
+            },
+            value_out,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 2 次元畳み込み（`torch.nn.functional.conv2d` 相当の
+    /// cross-correlation。NCHW 固定。イシュー #1764・設計 `docs/
+    /// conv-ops-design.md`）。`self`（`input`）: `[N, Cin, H, W]`・
+    /// `weight`: `[Cout, Cin/groups, kH, kW]`（PyTorch 準拠。`nn::
+    /// Linear` の `[in, out]` 格納とは異なる）・`bias`: `Some` なら
+    /// `[Cout]`。
+    ///
+    /// 検査順序（設計 doc §3）: ①`weight.shape()[2..4]` から
+    /// `kernel_size` を導出し [`Conv2dParams::new`]（`stride`／
+    /// `dilation`／`groups` の 0・`2·padding` オーバーフローを
+    /// `BackendError::InvalidArgument` → `AutodiffError::InvalidArgument`
+    /// で拒否）→ ②[`fandhe_ai_tensor_core::conv2d_out_shape`] で
+    /// `out_shape` を確定（rank・チャンネル整合・空間軸 `H`／`W = 0`
+    /// 拒否・負分子拒否ゲート。`AutodiffError::Shape`）→ ③`self`／
+    /// `weight`／`bias` を層 1 で実体化（`RefCell` 借用を閉じてから
+    /// push）→ ④`conv2d_with_fallback`（`grad` 内非公開。`ops.conv2d` → im2col →
+    /// `gemm_batched`〈常にバックエンド〉→ `add`〈bias〉の段階的合成）
+    /// → ⑤戻り shape 検証（`.claude/rules/security.md` A08）→
+    /// ⑥`push_eager`（非融合・常実体化。`col` は `Op::Conv2d` 自身に
+    /// 保持しない——backward で再計算する）。
+    pub fn conv2d(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+        groups: usize,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(weight)?;
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+
+        let weight_shape = weight.shape();
+        if weight_shape.len() != 4 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 4,
+                actual: weight_shape.len(),
+            }));
+        }
+        let kernel_size = [weight_shape[2], weight_shape[3]];
+        let params = Conv2dParams::new(kernel_size, stride, padding, dilation, groups)
+            .map_err(AutodiffError::Backend)?;
+
+        let in_shape = self.shape();
+        let out_shape =
+            conv2d_out_shape(&in_shape, &weight_shape, &params).map_err(AutodiffError::Shape)?;
+        if let Some(b) = bias {
+            let bias_shape = b.shape();
+            let cout = weight_shape[0];
+            if bias_shape != [cout] {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: bias_shape,
+                    rhs: vec![cout],
+                }));
+            }
+        }
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let weight_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), weight.id)?.clone()
+        };
+        let bias_val = match bias {
+            Some(b) => {
+                let nodes = self.tape.nodes.borrow();
+                Some(materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone())
+            }
+            None => None,
+        };
+
+        let value_out = conv2d_with_fallback(
+            self.tape.ops(),
+            &input_val,
+            &weight_val,
+            bias_val.as_ref(),
+            &params,
+            &out_shape,
+        )?;
+        if value_out.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value_out.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Conv2d {
+                input: self.id,
+                weight: weight.id,
+                bias: bias.map(|b| b.id),
+                params,
             },
             value_out,
         );

@@ -148,6 +148,12 @@ pub mod fused_elementwise;
 mod gather_scatter;
 pub mod gemm;
 pub mod gemm_blis;
+// イシュー #1764: Conv2d forward／backward（im2col＋GEMM。設計 `docs/
+// conv-ops-design.md`）の CPU 実装本体。`BackendOps::im2col`／`col2im`
+// の CPU override（`ops.rs`）から呼ばれる。`conv2d` 自身は override
+// せず（既定 `Unsupported`）、`autodiff::conv2d_with_fallback` の
+// 段階的合成（`im2col` → `gemm_batched`〈BLIS〉→ `add`）を使う。
+mod im2col;
 mod interpolate;
 mod scalar_elementwise;
 mod scan;

@@ -1873,6 +1873,352 @@ pub(crate) fn pad(
     build_tensor(out, out_shape)
 }
 
+/// Conv2d の im2col ホスト参照実装（`BackendOps::im2col` が
+/// `Unsupported` を返したときのみ `grad::im2col_with_fallback` から
+/// 呼ばれる。イシュー #1764・設計 `docs/conv-ops-design.md`）。
+///
+/// CPU 実装（`backend-cpu::im2col::im2col`）と数式・走査順が完全に
+/// 同一のホスト側複製（クレート間依存を作らないため。`constant_pad.rs`
+/// と `eval::pad` の関係と同型）。`out_shape` は呼び出し元が
+/// [`fandhe_ai_tensor_core::im2col_out_shape`] で検査・確定済みの
+/// `[N, G, Cin_g·kH·kW, Hout·Wout]` をそのまま渡す。
+pub(crate) fn im2col(
+    input: &Tensor<f32>,
+    params: &fandhe_ai_tensor_core::Conv2dParams,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let out_numel: usize = out_shape.iter().product();
+    if out_numel == 0 {
+        return build_tensor(Vec::new(), out_shape);
+    }
+    let in_shape = input.shape();
+    let (h_in, w_in) = (in_shape[2], in_shape[3]);
+    let n_batch = out_shape[0];
+    let groups = out_shape[1];
+    let k_g = out_shape[2];
+    let p = out_shape[3];
+    let cin_g = in_shape[1] / groups.max(1);
+    let [kh_k, kw_k] = params.kernel_size();
+    let [sh, sw] = params.stride();
+    let [ph, pw] = params.padding();
+    let [dh, dw] = params.dilation();
+    let w_out = conv2d_dim_out_len(w_in, kw_k, sw, pw, dw);
+
+    let mut out = vec![0f32; out_numel];
+    for n in 0..n_batch {
+        for g in 0..groups {
+            for k_idx in 0..k_g {
+                let kw_ = k_idx % kw_k;
+                let rest = k_idx / kw_k;
+                let kh_ = rest % kh_k;
+                let c_g = rest / kh_k;
+                let c = g * cin_g + c_g;
+                for p_idx in 0..p {
+                    let ow = p_idx % w_out;
+                    let oh = p_idx / w_out;
+                    let h_pos = conv2d_window_input_pos(oh, sh, kh_, dh, ph);
+                    let w_pos = conv2d_window_input_pos(ow, sw, kw_, dw, pw);
+                    let value = match (h_pos, w_pos) {
+                        (Some(h), Some(w)) if h < h_in && w < w_in => {
+                            input.get(&[n, c, h, w]).unwrap_or(0.0)
+                        }
+                        _ => 0.0,
+                    };
+                    let out_idx = ((n * groups + g) * k_g + k_idx) * p + p_idx;
+                    out[out_idx] = value;
+                }
+            }
+        }
+    }
+    build_tensor(out, out_shape)
+}
+
+/// Conv2d の col2im ホスト参照実装（`BackendOps::col2im` が
+/// `Unsupported` を返したときのみ `grad::col2im_with_fallback` から
+/// 呼ばれる。[`im2col`] の随伴（転置畳み込み）。イシュー #1764）。
+///
+/// `backend-cpu::im2col::col2im` と数式・走査順・`f64` アキュムレータ
+/// 契約が完全に同一のホスト側複製。
+pub(crate) fn col2im(
+    d_col: &Tensor<f32>,
+    input_shape: &[usize],
+    params: &fandhe_ai_tensor_core::Conv2dParams,
+) -> Tensor<f32> {
+    let out_numel: usize = input_shape.iter().product();
+    if out_numel == 0 {
+        return build_tensor(Vec::new(), input_shape);
+    }
+    let (n_batch, cin, h_in, w_in) = (
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+    );
+    let d_col_shape = d_col.shape();
+    let groups = d_col_shape[1];
+    let p = d_col_shape[3];
+    let cin_g = cin / groups.max(1);
+    let [kh_k, kw_k] = params.kernel_size();
+    let [sh, sw] = params.stride();
+    let [ph, pw] = params.padding();
+    let [dh, dw] = params.dilation();
+    let h_out = conv2d_dim_out_len(h_in, kh_k, sh, ph, dh);
+    let w_out = conv2d_dim_out_len(w_in, kw_k, sw, pw, dw);
+    debug_assert_eq!(
+        h_out.checked_mul(w_out),
+        Some(p),
+        "eval::col2im: d_col の P 軸が conv2d_dim_out_len から再計算した Hout*Wout と一致しない（契約違反）"
+    );
+
+    let mut out = vec![0f32; out_numel];
+    for n in 0..n_batch {
+        for c in 0..cin {
+            let g = c / cin_g.max(1);
+            let c_g = c % cin_g.max(1);
+            for h in 0..h_in {
+                for w in 0..w_in {
+                    let mut acc: f64 = 0.0;
+                    for kh_ in 0..kh_k {
+                        let oh = match conv2d_window_out_idx(h, ph, kh_, dh, sh, h_out) {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        for kw_ in 0..kw_k {
+                            let ow = match conv2d_window_out_idx(w, pw, kw_, dw, sw, w_out) {
+                                Some(v) => v,
+                                None => continue,
+                            };
+                            let k_idx = (c_g * kh_k + kh_) * kw_k + kw_;
+                            let p_idx = oh * w_out + ow;
+                            let v = d_col.get(&[n, g, k_idx, p_idx]).unwrap_or(0.0);
+                            acc += f64::from(v);
+                        }
+                    }
+                    let out_idx = ((n * cin + c) * h_in + h) * w_in + w;
+                    out[out_idx] = acc as f32;
+                }
+            }
+        }
+    }
+    build_tensor(out, input_shape)
+}
+
+/// Conv2d の forward ホスト参照実装（全ホスト im2col＋[`matmul`] の
+/// per-`(n, g)` 合成。イシュー #1764・設計 `docs/conv-ops-design.md`
+/// §5.3「本番フォールバックではなくテストオラクル／全ホスト参照専用」）。
+///
+/// `bias` は `[Cout]` を仮定し、GEMM 結果へ 1 回加算する（`Var::add`
+/// の broadcast を経由せず直接計算するため、bias 軸誤加算の罠
+/// 〈設計 doc §5.2「実装上の注意」〉が構造的に発生しない）。
+#[cfg(test)]
+pub(crate) fn conv2d(
+    input: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    bias: Option<&Tensor<f32>>,
+    params: &fandhe_ai_tensor_core::Conv2dParams,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let out_numel: usize = out_shape.iter().product();
+    if out_numel == 0 {
+        return build_tensor(Vec::new(), out_shape);
+    }
+    let im2col_out_shape = fandhe_ai_tensor_core::im2col_out_shape(input.shape(), params)
+        .unwrap_or_else(|_| {
+            debug_assert!(
+                false,
+                "eval::conv2d: im2col_out_shape 検査済みのはずが失敗した（契約違反）"
+            );
+            vec![0; 4]
+        });
+    let col = im2col(input, params, &im2col_out_shape);
+    let (n_batch, groups, k_g, p) = (
+        im2col_out_shape[0],
+        im2col_out_shape[1],
+        im2col_out_shape[2],
+        im2col_out_shape[3],
+    );
+    let cout = out_shape[1];
+    let cout_g = cout / groups.max(1);
+    let bias_data = bias.map(dense_vec);
+    let [kh_k, kw_k] = params.kernel_size();
+
+    let mut out = vec![0f32; out_numel];
+    for n in 0..n_batch {
+        for g in 0..groups {
+            // col の (n, g) スライス: [K_g, P]
+            let col_ng: Vec<f32> = (0..k_g * p)
+                .map(|i| {
+                    let k_idx = i / p;
+                    let p_idx = i % p;
+                    col.get(&[n, g, k_idx, p_idx]).unwrap_or(0.0)
+                })
+                .collect();
+            let col_mat = build_tensor(col_ng, &[k_g, p]);
+            // weight の (g) スライス: [Cout_g, K_g]（K_g = Cin_g*kH*kW を
+            // (c_in_g, kh, kw) の row-major で並べる。im2col と同順）。
+            let w_ng: Vec<f32> = (0..cout_g * k_g)
+                .map(|i| {
+                    let co_g = i / k_g;
+                    let k_idx = i % k_g;
+                    let co = g * cout_g + co_g;
+                    let kw_ = k_idx % kw_k;
+                    let rest = k_idx / kw_k;
+                    let kh_ = rest % kh_k;
+                    let c_g = rest / kh_k;
+                    weight.get(&[co, c_g, kh_, kw_]).unwrap_or(0.0)
+                })
+                .collect();
+            let w_mat = build_tensor(w_ng, &[cout_g, k_g]);
+            let out_ng = matmul(&w_mat, &col_mat); // [Cout_g, P]
+            for co_g in 0..cout_g {
+                let co = g * cout_g + co_g;
+                let bias_v = bias_data
+                    .as_ref()
+                    .and_then(|d| d.get(co))
+                    .copied()
+                    .unwrap_or(0.0);
+                for p_idx in 0..p {
+                    let v = out_ng.get(&[co_g, p_idx]).unwrap_or(0.0) + bias_v;
+                    let out_idx = ((n * cout + co) * p) + p_idx;
+                    out[out_idx] = v;
+                }
+            }
+        }
+    }
+    build_tensor(out, out_shape)
+}
+
+/// 直接畳み込みオラクル（`(c, kh, kw)` 昇順 `mul_add` 連鎖。padding
+/// タップは非スキップ。CPU im2col＋GEMM との bit 完全一致テストオラクル
+/// 専用。イシュー #1764・設計 `docs/conv-ops-design.md` §7）。
+#[cfg(test)]
+pub(crate) fn conv2d_direct(
+    input: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    bias: Option<&Tensor<f32>>,
+    params: &fandhe_ai_tensor_core::Conv2dParams,
+    out_shape: &[usize],
+) -> Tensor<f32> {
+    let out_numel: usize = out_shape.iter().product();
+    if out_numel == 0 {
+        return build_tensor(Vec::new(), out_shape);
+    }
+    let in_shape = input.shape();
+    let (cin, h_in, w_in) = (in_shape[1], in_shape[2], in_shape[3]);
+    let (n_batch, cout, h_out, w_out) = (out_shape[0], out_shape[1], out_shape[2], out_shape[3]);
+    let groups = params.groups();
+    let cin_g = cin / groups.max(1);
+    let cout_g = cout / groups.max(1);
+    let [kh_k, kw_k] = params.kernel_size();
+    let [sh, sw] = params.stride();
+    let [ph, pw] = params.padding();
+    let [dh, dw] = params.dilation();
+    let bias_data = bias.map(dense_vec);
+
+    let mut out = vec![0f32; out_numel];
+    for n in 0..n_batch {
+        for co in 0..cout {
+            let g = co / cout_g.max(1);
+            for oh in 0..h_out {
+                for ow in 0..w_out {
+                    // 設計 doc §7: `acc = 0.0` から (c, kh, kw) 昇順の
+                    // `mul_add` 連鎖で積和を求め、bias は連鎖に混ぜず
+                    // 最後に 1 回だけ加算する（im2col＋GEMM 側が
+                    // 「GEMM 結果へ bias を後から加算する」という
+                    // 独立した加算パスであることと一致させるため。
+                    // bias をアキュムレータの初期値にすると FMA 連鎖の
+                    // 丸め順序が変わり bit 不一致になる）。
+                    let mut acc = 0f32;
+                    for c_g in 0..cin_g {
+                        let c = g * cin_g + c_g;
+                        for kh_ in 0..kh_k {
+                            for kw_ in 0..kw_k {
+                                let h_pos = conv2d_window_input_pos(oh, sh, kh_, dh, ph);
+                                let w_pos = conv2d_window_input_pos(ow, sw, kw_, dw, pw);
+                                let x = match (h_pos, w_pos) {
+                                    (Some(h), Some(w)) if h < h_in && w < w_in => {
+                                        input.get(&[n, c, h, w]).unwrap_or(0.0)
+                                    }
+                                    _ => 0.0,
+                                };
+                                let w_v = weight.get(&[co, c_g, kh_, kw_]).unwrap_or(0.0);
+                                acc = x.mul_add(w_v, acc);
+                            }
+                        }
+                    }
+                    let bias_v = bias_data
+                        .as_ref()
+                        .and_then(|d| d.get(co))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let out_idx = ((n * cout + co) * h_out + oh) * w_out + ow;
+                    out[out_idx] = acc + bias_v;
+                }
+            }
+        }
+    }
+    build_tensor(out, out_shape)
+}
+
+/// Conv2d の出力空間長（PyTorch `_conv_output_size` 相当。`eval` 内部
+/// 用の非 fallible 複製——`fandhe_ai_tensor_core::conv_out_len` は
+/// `Result` を返すが、`eval` の呼び出し元はいずれも呼び出し元が既に
+/// shape 検査済みの契約〈モジュール doc「shape の事前検査は呼び出し元
+/// が済ませてから本モジュールを呼ぶ契約」〉のため `debug_assert!` で
+/// 契約違反を検知しつつ `0` で安全側に吸収する）。
+fn conv2d_dim_out_len(in_len: usize, k: usize, s: usize, p: usize, d: usize) -> usize {
+    match fandhe_ai_tensor_core::conv_out_len(in_len, k, s, p, d) {
+        Ok(v) => v,
+        Err(_) => {
+            debug_assert!(
+                false,
+                "conv2d_dim_out_len: 呼び出し元の shape 検査済み契約が崩れた"
+            );
+            0
+        }
+    }
+}
+
+/// im2col の走査で使う「窓添字 → 入力座標」の符号安全な逆変換
+/// （`backend-cpu::im2col::im2col_input_pos` と同型の独立実装）。
+fn conv2d_window_input_pos(
+    out_idx: usize,
+    stride: usize,
+    k: usize,
+    dilation: usize,
+    padding: usize,
+) -> Option<usize> {
+    let base = out_idx.checked_mul(stride)?;
+    let offset = k.checked_mul(dilation)?;
+    let sum = base.checked_add(offset)?;
+    sum.checked_sub(padding)
+}
+
+/// col2im の走査で使う「入力座標 → 窓添字」の符号安全な逆変換
+/// （`backend-cpu::im2col::col2im_out_idx` と同型の独立実装。設計
+/// doc §6.2）。
+fn conv2d_window_out_idx(
+    pos: usize,
+    padding: usize,
+    k: usize,
+    dilation: usize,
+    stride: usize,
+    out_len: usize,
+) -> Option<usize> {
+    let offset = k.checked_mul(dilation)?;
+    let pos_plus_p = pos.checked_add(padding)?;
+    let numerator = pos_plus_p.checked_sub(offset)?;
+    if numerator % stride != 0 {
+        return None;
+    }
+    let out_idx = numerator / stride;
+    if out_idx < out_len {
+        Some(out_idx)
+    } else {
+        None
+    }
+}
+
 /// 行優先（C-order）ストライドを計算する（`Tensor::contiguous()` が
 /// 実体化する順序と同一の走査順を、`gather`／`scatter`（下記）が
 /// 独自に `input`／`index` の多次元添字から線形添字を導出するために

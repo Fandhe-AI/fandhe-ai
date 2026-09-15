@@ -154,8 +154,8 @@ pub mod typed;
 mod typed_ops;
 
 pub use backend_ops::{
-    Activation, BackendOps, BceKind, BinaryElementwiseOp, ChecksumReadout, GemmChecksum,
-    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
+    Activation, BackendOps, BceKind, BinaryElementwiseOp, ChecksumReadout, Conv2dParams,
+    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScatterReduce, SegmentKey,
     SegmentResource, SegmentRun, SgdStepConfig, SvdFactors, UnaryElementwiseOp, VectorNormOrd,
     checked_gemm_batched_output_len, gemm_batched_via_per_batch_gemm,
@@ -184,10 +184,11 @@ pub use fusion::{
 pub use interpolate::{BilinearCoord, bilinear_blend, bilinear_scale, bilinear_src_coord};
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
-    BatchedMatmulPlan, batched_matmul_plan, concat_out_shape, elementwise_out_shape,
-    gather_out_shape, gemm_out_shape, interpolate_out_shape, interpolate_out_shape_for_mode,
-    matmul_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    BatchedMatmulPlan, batched_matmul_plan, concat_out_shape, conv_out_len, conv2d_out_shape,
+    elementwise_out_shape, gather_out_shape, gemm_out_shape, im2col_out_shape,
+    interpolate_out_shape, interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape,
+    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
 // `pool_core::SizeClassPoolConfig` は `pool::PoolConfig`（crates.io 0.4.0

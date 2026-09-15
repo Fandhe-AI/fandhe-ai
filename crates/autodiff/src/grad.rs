@@ -931,6 +931,92 @@ pub(crate) fn vjp(
             }
             contributions
         }
+        // `Var::conv2d`（im2col＋GEMM。イシュー #1764・設計 `docs/
+        // conv-ops-design.md` §6）。col は `Op::Conv2d` に保持しない
+        // ため im2col を再計算する（`Op` doc 参照）。GEMM は常に
+        // `gemm_batched_fp32_strict`（ホストフォールバックなし。
+        // `matmul_vjp` と同じ扱い）。
+        Op::Conv2d {
+            input,
+            weight,
+            bias,
+            params,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let weight_val = materialize_fallible(nodes, ops, weight)?;
+            let input_shape = input_val.shape().to_vec();
+            let weight_shape = weight_val.shape().to_vec();
+
+            let groups = params.groups();
+            let cout = weight_shape[0];
+            let cout_g = cout / groups.max(1);
+
+            let upstream_shape = upstream.shape().to_vec();
+            let n_batch = upstream_shape[0];
+            let hout = upstream_shape[2];
+            let wout = upstream_shape[3];
+            let p = hout
+                .checked_mul(wout)
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            // `upstream` は転置 view（`d_input` を返す上位層の VJP 等）で
+            // 来うるため、`reshape` の非 contiguous 拒否
+            // （`ShapeError::NonContiguousReshape`）を防ぐため
+            // `contiguous()` してから reshape する（設計 doc §6 冒頭
+            // 「`g = upstream.reshape([N, G, Cout_g, P])`」の前提）。
+            let g4 = upstream
+                .contiguous()
+                .reshape(&[n_batch, groups, cout_g, p])
+                .map_err(AutodiffError::Shape)?;
+
+            let im2col_shape = fandhe_ai_tensor_core::im2col_out_shape(&input_shape, &params)
+                .map_err(AutodiffError::Shape)?;
+            let col = im2col_with_fallback(ops, input_val, &params, &im2col_shape)?;
+            let k_g = im2col_shape[2];
+
+            // d_weight（相関）: dw_full = gemm_batched_fp32_strict(g4, colᵀ)
+            //   -> [N, G, Cout_g, K_g] -> N 軸を f64 で縮約
+            //   -> [Cout, Cin_g, kH, kW] へ reshape。
+            let col_t = transpose_last2(&col);
+            let dw_full = ops
+                .gemm_batched_fp32_strict(&g4, &col_t)
+                .map_err(AutodiffError::Backend)?;
+            let dw = reduce_batch_axes_f64(&dw_full, &[groups, cout_g, k_g])?;
+            let d_weight = dw.reshape(&weight_shape).map_err(AutodiffError::Shape)?;
+
+            // d_input（転置畳み込み）: d_col = gemm_batched_fp32_strict(w_matᵀ, g4)
+            //   -> [N, G, K_g, P] -> col2im。
+            let w_mat = weight_val
+                .contiguous()
+                .reshape(&[groups, cout_g, k_g])
+                .map_err(AutodiffError::Shape)?;
+            let w_mat_t = transpose_last2(&w_mat);
+            let d_col = ops
+                .gemm_batched_fp32_strict(&w_mat_t, &g4)
+                .map_err(AutodiffError::Backend)?;
+            let d_input = col2im_with_fallback(ops, &d_col, &input_shape, &params)?;
+
+            let mut contributions = vec![(input, d_input), (weight, d_weight)];
+            if let Some(bias_id) = bias {
+                // d_bias[c] = Σ_{n, oh, ow} upstream[n, c, oh, ow]
+                //   （設計 doc §6.3。(n, oh, ow) row-major 固定順で f64
+                //   逐次加算し 1 回 downcast。`permute([0,2,3,1])` で
+                //   Cout 軸を末尾へ動かしてから `reduce_bias_grad_rows`
+                //   の行縮約契約〈rank-2 `[m, n]` の行方向和〉を再利用
+                //   する）。
+                let cout_usize = weight_shape[0];
+                let permuted = upstream
+                    .permute(&[0, 2, 3, 1])
+                    .map_err(AutodiffError::Shape)?;
+                let rows = permuted
+                    .contiguous()
+                    .reshape(&[n_batch * p, cout_usize])
+                    .map_err(AutodiffError::Shape)?;
+                let bias_data = eval::reduce_bias_grad_rows(&rows);
+                let d_bias = build_tensor(bias_data, &nodes[bias_id.0].shape);
+                contributions.push((bias_id, d_bias));
+            }
+            contributions
+        }
         // view ノード（イシュー #1047・親 #1043「カーネル融合・autodiff
         // 実行モデルの強化」）。`Reshape`/`Transpose` は逆写像も同じ演算
         // 族（reshape は「元の shape へ戻す」・transpose は対合）で
@@ -2027,6 +2113,146 @@ pub(crate) fn pad_with_fallback(
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::pad(input, pads, value, out_shape)),
         Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// Conv2d の im2col（`Var::conv2d` の forward・[`Op::Conv2d`] の VJP
+/// 双方の再計算段）が使う「バックエンド実装 → フォールバック」ヘルパー
+/// （イシュー #1764・設計 `docs/conv-ops-design.md` §5.3／§6.4）。
+/// [`pad_with_fallback`] と同型: `ops.im2col` → `Unsupported` のとき
+/// のみ `eval::im2col` へフォールバックし、それ以外のエラーは伝播する
+/// （判定迂回経路を作らない）。
+pub(crate) fn im2col_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    params: &fandhe_ai_tensor_core::Conv2dParams,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.im2col(input, params) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::im2col(input, params, out_shape)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Conv2d`] の VJP（d_input＝転置畳み込み）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1764）。
+/// [`im2col_with_fallback`] と同型: `ops.col2im` → `Unsupported` の
+/// ときのみ `eval::col2im` へフォールバックする。
+pub(crate) fn col2im_with_fallback(
+    ops: &dyn BackendOps,
+    d_col: &Tensor<f32>,
+    input_shape: &[usize],
+    params: &fandhe_ai_tensor_core::Conv2dParams,
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.col2im(d_col, input_shape, params) {
+        Ok(v) => {
+            if v.shape() != input_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: input_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::col2im(d_col, input_shape, params)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Conv2d`] の forward（`Var::conv2d`）が使う段階的合成ヘルパー
+/// （イシュー #1764・設計 `docs/conv-ops-design.md` §5.3）。
+///
+/// 段階: ①`ops.conv2d`（override フック。`Unsupported` のときのみ次段
+/// へ）→ ②[`im2col_with_fallback`]（`ops.im2col` → `Unsupported` の
+/// ときのみ `eval::im2col`）→ ③**`ops.gemm_batched`（常にバックエンド。
+/// ホストフォールバックなし）** → ④`ops.add`（bias。`[Cout]` を
+/// `[1, Cout, 1, 1]` へ reshape してから加算し、右詰め broadcast による
+/// `Wout` 軸誤加算を回避する。設計 doc §5.2「実装上の注意」）。
+///
+/// **N チャンク分割（設計 doc §10）は本実装では行わない**（forward は
+/// per-sample GEMM の独立性によりチャンク分割数に依らず bit 同一と
+/// 設計されており、正しさには影響しない純粋なピークメモリ削減の最適化
+/// のため。大規模入力でのメモリ上限は out-of-scope-tracking.md に従い
+/// 別 issue で追跡する）。
+pub(crate) fn conv2d_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    bias: Option<&Tensor<f32>>,
+    params: &fandhe_ai_tensor_core::Conv2dParams,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.conv2d(input, weight, bias, params) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            return Ok(v);
+        }
+        Err(BackendError::Unsupported(_)) => {}
+        Err(other) => return Err(AutodiffError::Backend(other)),
+    }
+
+    let im2col_shape = fandhe_ai_tensor_core::im2col_out_shape(input.shape(), params)
+        .map_err(AutodiffError::Shape)?;
+    let col = im2col_with_fallback(ops, input, params, &im2col_shape)?;
+
+    let groups = im2col_shape[1];
+    let k_g = im2col_shape[2];
+    let weight_shape = weight.shape().to_vec();
+    let cout = weight_shape[0];
+    let cout_g = cout / groups.max(1);
+    let w_mat = weight
+        .contiguous()
+        .reshape(&[groups, cout_g, k_g])
+        .map_err(AutodiffError::Shape)?;
+    // gemm_batched の既定合成（`backend_ops.rs::default_gemm_batched`）
+    // はバッチ shape `[G]`（w_mat）と `[N, G]`（col）を NumPy 互換
+    // broadcast し `[N, G, Cout_g, P]` を返す（設計 doc §5.3「常に
+    // バックエンド GEMM。ホストフォールバックなし」）。
+    let out_mat = ops
+        .gemm_batched(&w_mat, &col)
+        .map_err(AutodiffError::Backend)?;
+    let out_no_bias = out_mat.reshape(out_shape).map_err(AutodiffError::Shape)?;
+
+    match bias {
+        Some(b) => {
+            let bias_reshaped = b
+                .contiguous()
+                .reshape(&[1, cout, 1, 1])
+                .map_err(AutodiffError::Shape)?;
+            let out = ops
+                .add(&out_no_bias, &bias_reshaped)
+                .map_err(AutodiffError::Backend)?;
+            if out.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: out.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(out)
+        }
+        None => Ok(out_no_bias),
     }
 }
 
@@ -4841,6 +5067,15 @@ mod tests {
     fn t(data: &[f32], shape: &[usize]) -> Tensor<f32> {
         Tensor::new(data.to_vec(), shape)
             .expect("test fixture: shape とデータ長は事前に一致させている")
+    }
+
+    /// 形状（各軸の長さ）から要素数を計算する。テスト内のリテラル
+    /// `1 * 2 * 5 * 5` 等の直書き乗算は clippy::identity_op（1 との
+    /// 乗算除去提案）に抵触するため、shape 配列を単一の入力として
+    /// 明示するこのヘルパーへ委譲する（`tests/conv2d.rs` の
+    /// 同名ヘルパーと同一方針）。
+    fn numel(shape: &[usize]) -> usize {
+        shape.iter().product()
     }
 
     fn assert_grad_close(label: &str, analytic: &Tensor<f32>, numeric: &Tensor<f32>) {
@@ -8855,6 +9090,231 @@ release ビルドでも検知できるよう `assert!` を使う）"
         );
     }
 
+    // --- Conv2d（イシュー #1764・設計 `docs/conv-ops-design.md`） ---
+
+    /// `conv2d_direct`（`(c, kh, kw)` 昇順 `mul_add` 連鎖・padding タップ
+    /// 非スキップ）と `eval::conv2d`（全ホスト im2col＋`matmul` 合成）と
+    /// `conv2d_with_fallback(TestOps)`（`ops.im2col`／`col2im`／`conv2d`
+    /// がすべて `Unsupported` の既定実装のため、実質
+    /// `eval::im2col` → `ops.gemm_batched`〈既定合成。`TestOps::gemm` は
+    /// `eval::matmul` に委譲〉→ `ops.add`〈`eval::add`〉の段階的合成）の
+    /// 3 経路が bit 完全一致することを確認する（設計 doc §7・§13
+    /// 「CPU bit 一致 3 点」）。
+    #[test]
+    fn conv2d_cpu_bit_match_direct_vs_im2col_vs_fallback() {
+        let params =
+            fandhe_ai_tensor_core::Conv2dParams::new([3, 3], [1, 1], [1, 1], [1, 1], 1).unwrap();
+        let x = t(
+            &(0..numel(&[1, 2, 5, 5]))
+                .map(|i| (i as f32 * 0.037).sin())
+                .collect::<Vec<f32>>(),
+            &[1, 2, 5, 5],
+        );
+        let w = t(
+            &(0..3 * 2 * 3 * 3)
+                .map(|i| (i as f32 * 0.091).cos() * 0.5)
+                .collect::<Vec<f32>>(),
+            &[3, 2, 3, 3],
+        );
+        let b = t(&[0.1, -0.2, 0.3], &[3]);
+        let out_shape =
+            fandhe_ai_tensor_core::conv2d_out_shape(x.shape(), w.shape(), &params).unwrap();
+
+        let direct = eval::conv2d_direct(&x, &w, Some(&b), &params, &out_shape);
+        let via_eval = eval::conv2d(&x, &w, Some(&b), &params, &out_shape);
+        let via_fallback =
+            conv2d_with_fallback(&test_ops(), &x, &w, Some(&b), &params, &out_shape).unwrap();
+
+        let d = dense_vec(&direct);
+        let e = dense_vec(&via_eval);
+        let f = dense_vec(&via_fallback);
+        assert_eq!(d.len(), e.len());
+        assert_eq!(d.len(), f.len());
+        for i in 0..d.len() {
+            assert_eq!(
+                d[i].to_bits(),
+                e[i].to_bits(),
+                "conv2d_direct と eval::conv2d が bit 不一致 index={i}"
+            );
+            assert_eq!(
+                d[i].to_bits(),
+                f[i].to_bits(),
+                "conv2d_direct と conv2d_with_fallback が bit 不一致 index={i}"
+            );
+        }
+    }
+
+    /// padding タップが `NaN`／`inf` weight でも im2col 経路と
+    /// bit 一致することを確認する（設計 doc §7「罠を明記」の回帰。
+    /// `conv2d_direct` は padding タップを `0.0.mul_add(w, acc)` として
+    /// 明示的に実行するため、`w` が `NaN`／`inf` でもスキップせず
+    /// im2col〈padding 位置に `0.0` を書き GEMM で積和〉と一致する）。
+    #[test]
+    fn conv2d_padding_tap_not_skipped_matches_with_nan_inf_weight() {
+        let params =
+            fandhe_ai_tensor_core::Conv2dParams::new([3, 3], [1, 1], [1, 1], [1, 1], 1).unwrap();
+        let x = t(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]);
+        // 中心タップ（kh=1,kw=1）以外を NaN／inf にする。
+        let mut w_data = vec![f32::NAN; 9];
+        w_data[4] = 1.0; // (kh=1, kw=1)
+        w_data[0] = f32::INFINITY;
+        let w = t(&w_data, &[1, 1, 3, 3]);
+        let out_shape =
+            fandhe_ai_tensor_core::conv2d_out_shape(x.shape(), w.shape(), &params).unwrap();
+
+        let direct = eval::conv2d_direct(&x, &w, None, &params, &out_shape);
+        let via_eval = eval::conv2d(&x, &w, None, &params, &out_shape);
+        let d = dense_vec(&direct);
+        let e = dense_vec(&via_eval);
+        assert_eq!(d.len(), e.len());
+        for i in 0..d.len() {
+            let (dv, ev) = (d[i], e[i]);
+            if dv.is_nan() {
+                assert!(ev.is_nan(), "index {i}: direct=NaN だが eval={ev}");
+            } else {
+                assert_eq!(dv.to_bits(), ev.to_bits(), "index {i}");
+            }
+        }
+    }
+
+    /// フォールバック階層（`im2col`／`col2im`／`conv2d` がすべて
+    /// `Unsupported` のスタブ）で、`conv2d_with_fallback` が
+    /// `gemm_batched` をバックエンド経由で呼ぶ（ホスト `eval::matmul`
+    /// へ暗黙に落ちない）ことをカウンタで固定する（設計 doc §13）。
+    #[test]
+    fn conv2d_fallback_hierarchy_uses_backend_gemm_batched() {
+        use std::cell::Cell;
+
+        struct CountingOps {
+            gemm_batched_calls: Cell<u32>,
+        }
+        impl BackendOps for CountingOps {
+            fn device(&self) -> fandhe_ai_tensor_core::Device {
+                fandhe_ai_tensor_core::Device::Cpu
+            }
+            fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Ok(eval::matmul(a, b))
+            }
+            fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Ok(eval::add(a, b))
+            }
+            fn mul(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Ok(eval::mul(a, b))
+            }
+            fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Ok(eval::relu(a))
+            }
+            fn exp(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Ok(eval::exp(a))
+            }
+            fn tanh(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Ok(eval::tanh(a))
+            }
+            fn sum(
+                &self,
+                a: &Tensor<f32>,
+                dim: Option<usize>,
+            ) -> Result<Tensor<f32>, BackendError> {
+                let shape = a.shape().to_vec();
+                let out_shape = fandhe_ai_tensor_core::reduce_out_shape(&shape, dim)
+                    .map_err(BackendError::ShapeMismatch)?;
+                Ok(eval::sum(a, dim, &out_shape))
+            }
+            fn max(
+                &self,
+                a: &Tensor<f32>,
+                dim: Option<usize>,
+            ) -> Result<Tensor<f32>, BackendError> {
+                let shape = a.shape().to_vec();
+                let out_shape = fandhe_ai_tensor_core::reduce_out_shape(&shape, dim)
+                    .map_err(BackendError::ShapeMismatch)?;
+                Ok(eval::max(a, dim, &out_shape))
+            }
+            fn gemm_batched(
+                &self,
+                a: &Tensor<f32>,
+                b: &Tensor<f32>,
+            ) -> Result<Tensor<f32>, BackendError> {
+                self.gemm_batched_calls
+                    .set(self.gemm_batched_calls.get() + 1);
+                fandhe_ai_tensor_core::gemm_batched_via_per_batch_gemm(self, a, b)
+            }
+        }
+
+        let ops = CountingOps {
+            gemm_batched_calls: Cell::new(0),
+        };
+        let params =
+            fandhe_ai_tensor_core::Conv2dParams::new([2, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let x = t(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]);
+        let w = t(&[1.0, 0.0, 0.0, 1.0], &[1, 1, 2, 2]);
+        let out_shape =
+            fandhe_ai_tensor_core::conv2d_out_shape(x.shape(), w.shape(), &params).unwrap();
+        let out = conv2d_with_fallback(&ops, &x, &w, None, &params, &out_shape).unwrap();
+        assert_eq!(out.shape(), out_shape.as_slice());
+        assert!(
+            ops.gemm_batched_calls.get() >= 1,
+            "conv2d_with_fallback は gemm_batched をバックエンド経由で呼ぶはず"
+        );
+    }
+
+    /// d_bias の `f64` 逐次加算が `f32` 逐次和と異なることを固定する
+    /// （設計 doc §6.3・`.claude/rules/coding-rust.md` の「要素積を
+    /// 伴わない単純な行方向和は `f64` へ直接昇格」規約。
+    /// `[1e8, 1.0, -1e8]` 型の相殺列で f32 和と f64 和が乖離する
+    /// 古典的なケース）。
+    #[test]
+    fn conv2d_d_bias_uses_f64_accumulator_not_f32() {
+        // upstream: [N=3, Cout=1, Hout=1, Wout=1]。行方向 (n) の和が
+        // d_bias[0] になる（`reduce_bias_grad_rows` の rank-2 契約に
+        // 合わせるため、VJP 内部で `permute([0,2,3,1])` → `reshape`
+        // した `[N, Cout]` を経由する）。
+        let upstream = t(&[1.0e8, 1.0, -1.0e8], &[3, 1, 1, 1]);
+        let params =
+            fandhe_ai_tensor_core::Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let input = t(&[0.0; 3], &[3, 1, 1, 1]);
+        let weight = t(&[0.0], &[1, 1, 1, 1]);
+        let bias = t(&[0.0], &[1]);
+        let out_value = t(&[0.0; 3], &[3, 1, 1, 1]);
+        let nodes = vec![leaf_node(input), leaf_node(weight), leaf_node(bias)];
+        let op = Op::Conv2d {
+            input: NodeId(0),
+            weight: NodeId(1),
+            bias: Some(NodeId(2)),
+            params,
+        };
+        let grads = vjp(
+            &op,
+            &out_value,
+            &upstream,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+        let d_bias = grads
+            .iter()
+            .find(|(id, _)| *id == NodeId(2))
+            .map(|(_, g)| g)
+            .expect("bias が contributions に含まれるはず");
+        let f32_sum: f32 = 1.0e8_f32 + 1.0 + (-1.0e8_f32);
+        let f64_sum: f32 = (1.0e8_f64 + 1.0 + (-1.0e8_f64)) as f32;
+        assert_eq!(
+            f32_sum, 0.0,
+            "f32 逐次和は丸めで 0.0 になる契約（テスト前提）"
+        );
+        assert_eq!(
+            f64_sum, 1.0,
+            "f64 逐次和は 1.0 を保持する契約（テスト前提）"
+        );
+        assert_eq!(
+            dense_vec(d_bias),
+            vec![f64_sum],
+            "d_bias は f64 逐次和（1.0）のはずで f32 逐次和（0.0）ではない"
+        );
+    }
     // イシュー #1834 codex-review P1 是正の回帰テスト（2 件）。
 
     #[test]
