@@ -269,6 +269,7 @@ fn cuda_sequential_conv2d_matches_cpu() {
     let cuda_out = cuda_model.forward(&cuda_tape, &xv).unwrap().to_tensor();
 
     assert_parity("CUDA vs CPU", &dense(&cuda_out), &dense(&cpu_out));
+    print_fold_bits("cuda_sequential_conv2d_matches_cpu[out]", &cuda_out);
 }
 
 // --- Metal（イシュー #1771 実行時記入欄。本 PR では #[ignore] のまま
@@ -303,6 +304,7 @@ fn metal_sequential_conv2d_matches_cpu() {
     let metal_out = metal_model.forward(&metal_tape, &xv).unwrap().to_tensor();
 
     assert_parity("Metal vs CPU", &dense(&metal_out), &dense(&cpu_out));
+    print_fold_bits("metal_sequential_conv2d_matches_cpu[out]", &metal_out);
 }
 // --- backward（イシュー #1771。既存 forward のみだった `{cuda,metal}_
 // sequential_conv2d_matches_cpu` の backward 版） ---

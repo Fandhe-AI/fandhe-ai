@@ -50,6 +50,25 @@ fn assert_bits_eq(label: &str, actual: &[f32], expected: &[f32]) {
     }
 }
 
+/// `data` の全要素の `to_bits()` を FNV-1a 相当で fold した診断用
+/// チェックサムを `<label>.fold_bits=<hex>` 形式で 1 行出力する
+/// （CUDA 版 `im2col_col2im_parity.rs::print_fold_bits` と同型。
+/// PR #1882 レビュー指摘: 実機ランブックの run-to-run 決定性チェック
+/// 〈README「事前登録判定規則」4)〉が `bits=`／`fold_bits=` 行を
+/// `grep` で抽出して 2 回起動を `diff` する設計のため、抽出対象の
+/// 行が 1 件も無いと空の抽出結果同士が自明に一致し起動間の変化を
+/// 検出できない。本関数の呼び出しにより各ケースへ必ず 1 行以上の
+/// 抽出対象を作る）。
+fn print_fold_bits(label: &str, data: &[f32]) {
+    let mut acc: u64 = 0xcbf29ce484222325; // FNV-1a 相当の固定初期値（診断専用・暗号用途ではない）
+    for &v in data.iter() {
+        let bits = v.to_bits() as u64;
+        acc ^= bits;
+        acc = acc.wrapping_mul(0x100000001b3);
+    }
+    println!("{label}.fold_bits={acc:#018x}");
+}
+
 fn params(
     kernel_size: [usize; 2],
     stride: [usize; 2],
@@ -97,6 +116,11 @@ fn assert_im2col_parity(
         metal_out2.as_slice().expect("contiguous"),
         metal_out.as_slice().expect("contiguous"),
     );
+
+    print_fold_bits(
+        &format!("im2col_col2im_parity[im2col({label})]"),
+        metal_out.as_slice().expect("contiguous"),
+    );
 }
 
 fn assert_col2im_parity(
@@ -131,6 +155,11 @@ fn assert_col2im_parity(
     assert_bits_eq(
         &format!("col2im({label}): run-to-run"),
         metal_out2.as_slice().expect("contiguous"),
+        metal_out.as_slice().expect("contiguous"),
+    );
+
+    print_fold_bits(
+        &format!("im2col_col2im_parity[col2im({label})]"),
         metal_out.as_slice().expect("contiguous"),
     );
 }

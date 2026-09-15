@@ -17,6 +17,16 @@ verification-env.local.md`・`CUDA_NODE` 環境変数・`~/.ssh/config` の
 実測は GB10（CUDA）・Mac（Metal）それぞれの実機を持つセッションへ
 申し送る。
 
+**PR #1882 レビュー指摘の是正**: `im2col_col2im_parity`（CUDA／
+Metal）・`conv2d_backend_parity`・`conv1d_backend_parity`、および
+既存の nn 層 forward テスト（`{cuda,metal}_sequential_conv2d_
+matches_cpu`）に `bits=`／`fold_bits=` 出力が無く、事前登録判定規則
+4) の run-to-run 決定性チェック（`grep` 抽出 → `diff`）が空の抽出
+結果同士の自明一致で無検出になり得た指摘を受け、該当テストすべてに
+`print_fold_bits`（FNV-1a fold チェックサム）出力を追加した。あわせ
+て「事前登録判定規則」4) の手順を、抽出行数の非空・run1/run2 間の
+一致を診断のうえ diff する `check_determinism.sh` へ差し替えた。
+
 ## 対象テスト一覧
 
 ### 1) 既存 4 イシューの `#[ignore]` テスト（変更なし・非後退確認用）
@@ -84,8 +94,14 @@ cargo test -p fandhe-ai --release --test nn_conv_backend_parity -- --ignored --n
 
 ## 保存すべきログ
 
-- `cuda/ignored/*.log`（`run_ignored_tests_cuda.sh` の出力）
-- `metal/ignored/*.log`（`run_ignored_tests_metal.sh` の出力）
+- `cuda/ignored/*.log`（`run_ignored_tests_cuda.sh` の出力。事前登録
+  判定規則 4) の run-to-run 決定性確認のため 2 回実行し、それぞれ
+  `cuda/ignored-run1`／`cuda/ignored-run2` 等の別ディレクトリへ保存
+  する）
+- `metal/ignored/*.log`（`run_ignored_tests_metal.sh` の出力。同上
+  2 回分を保存する）
+- `check_determinism.sh` の出力（上記 2 回分の run1/run2 ディレクト
+  リ対を `cuda`／`metal` それぞれで比較した結果。PASS／FAIL 行）
 - `env_info.txt`（本ディレクトリのテンプレートに実測値を記入。
   **内部ホスト名は書かない**。`hostname: masked` のまま残す）
 
@@ -116,8 +132,20 @@ cargo test -p fandhe-ai --release --test nn_conv_backend_parity -- --ignored --n
 ### 4) run-to-run 決定性
 
 - 同一入力で 2 回起動しても `bits=`／`fold_bits=` 行が完全一致する
-  こと（各 `#[ignore]` テストの `--nocapture` 出力から `grep -E
-  'bits=|fold_bits='` で抽出した行同士を `diff` する）
+  こと。**`check_determinism.sh <run1_dir> <run2_dir>` を使う**
+  （素の `grep -E 'bits=|fold_bits=' | diff` だけでは、対象テストの
+  出力に抽出対象行が 1 件も無い場合に空の抽出結果同士が自明に一致
+  してしまい起動間の変化を検出できない〈PR #1882 レビュー指摘〉。
+  本スクリプトは diff の前に (a) 各ログの抽出行数が 0 でないこと・
+  (b) 2 回の起動間で抽出行数が一致すること を検査してから diff す
+  る。`--self-test` で GPU 実機なしにロジック自体を検証できる）。
+  `run_ignored_tests_{cuda,metal}.sh` を出力先を変えて 2 回実行し
+  （1 回目の `cuda/ignored`／`metal/ignored` を `-run1` へ退避してか
+  ら 2 回目を実行し `-run2` へ退避する等）、対応するログディレクトリ
+  同士を渡す。すべての対象ログ（本 README「対象テスト一覧」1)〜2)
+  の 4〈CUDA〉／4〈Metal〉グループ）で `bits=`／`fold_bits=` 抽出行が
+  1 件以上存在することも、このチェックにより機械的に保証される
+  （新設テストのいずれかで印字漏れが再発しても FAIL で検出する）。
 
 ### 5) 学習ループ（record-only。`{cuda,metal}_sequential_conv2d_sgd_steps_record_only`）
 
