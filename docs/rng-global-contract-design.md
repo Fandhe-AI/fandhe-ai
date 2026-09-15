@@ -148,6 +148,8 @@ pub fn manual_seed(seed: u64) {
 - ~~`arange`／`linspace`／`eye`／`zeros_like`／`ones_like`（#1726 が担当。
   RNG 契約は不要）~~ → **#1726 で実装済み（§11）**。
 - `nn::Dropout`（#1603）等、将来グローバル RNG を利用する確率的演算。
+  `data::DataLoader` の shuffle は #1615 で実装済み（`with_global_rng`
+  を消費するホスト側完結の機構。`docs/dataset-dataloader-design.md`）。
 - `Linear::new`／`RnnCell::new` 等、既存の個別シード API のシグネチャ・
   挙動そのものの変更（本イシューは独立性の確認のみ）。
 - スレッドローカル RNG・`Tape` 単位の RNG（将来必要になった場合は別途

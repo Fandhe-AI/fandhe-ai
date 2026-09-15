@@ -123,12 +123,22 @@
 //! [`creation::CreationError`]）を提供する。同じくホスト側だけで完結し
 //! `BackendOps`／`Op`／VJP を経由しない（設計判断は
 //! `docs/rng-global-contract-design.md` §11）。
+//!
+//! `data`（イシュー #1615。親 #1602）は `rng`／`creation` と同じ
+//! ホスト側完結レイヤーとして、PyTorch `torch.utils.data.Dataset`／
+//! `DataLoader` 相当のバッチ供給ユーティリティ（[`data::Dataset`]・
+//! [`data::TensorDataset`]・[`data::DataLoader`]・[`data::DataLoaderConfig`]・
+//! [`data::Batches`]・[`data::DataError`]）を提供する。シャッフルは
+//! `rng::with_global_rng`（`manual_seed` 契約）を消費する。`Op`／
+//! `BackendOps`／VJP は追加しない（設計判断は
+//! `docs/dataset-dataloader-design.md`）。
 
 mod backend_ops;
 mod broadcast;
 pub mod buffer;
 pub mod cast;
 pub mod creation;
+pub mod data;
 pub mod device;
 pub mod dispatch;
 mod dispatch_failure;
