@@ -5132,6 +5132,40 @@ mod tests {
         assert_eq!(out.numel(), 0);
     }
 
+    /// イシュー #1767: `Var::conv1d` が reshape する 1d 形状
+    /// （`[N, Cin, 1, L]`・`kernel=[1, k]`）でも batch 軸が `0` なら
+    /// `im2col` は `with_driver_call` 呼び出し前に空出力を早期リターン
+    /// する（`im2col_returns_empty_for_zero_batch_without_touching_
+    /// device` の 1d 版）。
+    #[test]
+    fn im2col_returns_empty_for_zero_batch_1d_without_touching_device() {
+        let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 1, 4]).unwrap();
+        let params = Conv2dParams::new([1, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let out = ops.im2col(&x, &params).expect("empty im2col must succeed");
+        // out_shape = [N, groups, Cin_g*kh*kw, Hout*Wout] = [0, 1, 1*1*2, 1*3].
+        assert_eq!(out.shape(), &[0, 1, 2, 3]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    /// イシュー #1767: 1d 形状で `input_shape` の batch 軸が `0` なら
+    /// `col2im` は `with_driver_call` 呼び出し前に空出力を早期リターン
+    /// する（`col2im_returns_empty_for_zero_batch_without_touching_
+    /// device` の 1d 版）。
+    #[test]
+    fn col2im_returns_empty_for_zero_batch_1d_without_touching_device() {
+        let params = Conv2dParams::new([1, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let input_shape = [0usize, 1, 1, 4];
+        let expected_col_shape = im2col_out_shape(&input_shape, &params).unwrap();
+        let d_col = Tensor::<f32>::new(Vec::new(), &expected_col_shape).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let out = ops
+            .col2im(&d_col, &input_shape, &params)
+            .expect("empty col2im must succeed");
+        assert_eq!(out.shape(), &input_shape);
+        assert_eq!(out.numel(), 0);
+    }
+
     /// [`CudaBackendOps::unique`] の回帰テスト（PR #1828 codex-review
     /// P1 是正確認・イシュー #1734）。`gather_returns_empty_for_dim_
     /// axis_large_input_with_zero_sized_other_axis` と同じ `[0, 2,

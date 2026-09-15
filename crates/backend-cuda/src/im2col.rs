@@ -443,4 +443,38 @@ mod tests {
         assert_eq!(shape.w_out, 3);
         assert_eq!(shape.p, 9);
     }
+
+    /// イシュー #1767: 1d 形状（`Var::conv1d` が reshape する
+    /// `[N, Cin, 1, L]`・`kernel=[1, k]`）でも `h_out=1`（`H` 軸自体が
+    /// 1・`kh=1`・`sh=1`・`dh=1` のため `conv_out_len` は常に 1 を
+    /// 返す）・`w_out=lout`・`P=w_out` が正しく導出されることを、
+    /// stride／padding／dilation を伴う非自明な値で確認する
+    /// （driver 非接触）。
+    #[test]
+    fn launch_shape_derive_handles_1d_shape() {
+        let params = Conv2dParams::new([1, 3], [1, 2], [0, 1], [1, 2], 1).unwrap();
+        // L=9, k=3, stride=2, padding=1, dilation=2 ->
+        // lout = floor((9 + 2*1 - 2*(3-1) - 1) / 2) + 1 = floor(6/2)+1 = 4.
+        let in_shape = [1usize, 1, 1, 9];
+        let shape = LaunchShape::derive(&in_shape, 1, 3, 4, &params).unwrap();
+        assert_eq!(shape.h_out, 1);
+        assert_eq!(shape.w_out, 4);
+        assert_eq!(shape.p, 4);
+        assert_eq!(shape.h_in, 1);
+        assert_eq!(shape.kh, 1);
+        assert_eq!(shape.sh, 1);
+        assert_eq!(shape.ph, 0);
+        assert_eq!(shape.dh, 1);
+    }
+
+    /// 1d 形状でも `P` 軸不整合（`h_out*w_out != p`）は 2d と同じ経路で
+    /// 拒否される（`launch_shape_derive_rejects_p_axis_mismatch` の 1d
+    /// 版。driver 非接触）。
+    #[test]
+    fn launch_shape_derive_rejects_1d_p_axis_mismatch() {
+        let params = Conv2dParams::new([1, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        // in_shape [1,1,1,4] -> w_out=3 -> 正しい p=3 のところに 1 を渡す。
+        let err = LaunchShape::derive(&[1, 1, 1, 4], 1, 4, 1, &params).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidIm2colShape { .. }));
+    }
 }
