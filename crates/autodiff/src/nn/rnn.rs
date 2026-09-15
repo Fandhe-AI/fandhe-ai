@@ -672,6 +672,24 @@ impl Module for Rnn {
         Err(forward_not_supported("Rnn", "forward_seq"))
     }
 
+    /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
+    /// `cell.weight_ih` → `cell.weight_hh` → `cell.bias_ih`（`Some` の
+    /// 場合）→ `cell.bias_hh`（`Some` の場合）の順（`RnnCell` の
+    /// フィールド名に `cell.` を接頭辞として付ける）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![
+            ("cell.weight_ih".to_string(), self.cell.weight_ih()),
+            ("cell.weight_hh".to_string(), self.cell.weight_hh()),
+        ];
+        if let Some(b) = self.cell.bias_ih() {
+            out.push(("cell.bias_ih".to_string(), b));
+        }
+        if let Some(b) = self.cell.bias_hh() {
+            out.push(("cell.bias_hh".to_string(), b));
+        }
+        out
+    }
+
     /// 推論経路（tape 不要。決定 9）。`x: [T,B,D]` → `[T,B,H]`。
     /// [`RnnCell::forward_host`] を T step 分逐次呼び、`h0` はゼロ固定
     /// （`forward_seq` の `h0` 引数は tape 経路限定。決定 6 のスコープは
@@ -975,6 +993,22 @@ impl Module for Lstm {
         Err(forward_not_supported("Lstm", "forward_seq"))
     }
 
+    /// 命名契約は [`Rnn`] の実装と同じ（`cell.` 接頭辞。`LstmCell` の
+    /// ゲート統合済みフィールドをそのまま使う）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![
+            ("cell.weight_ih".to_string(), self.cell.weight_ih()),
+            ("cell.weight_hh".to_string(), self.cell.weight_hh()),
+        ];
+        if let Some(b) = self.cell.bias_ih() {
+            out.push(("cell.bias_ih".to_string(), b));
+        }
+        if let Some(b) = self.cell.bias_hh() {
+            out.push(("cell.bias_hh".to_string(), b));
+        }
+        out
+    }
+
     /// `x: [T,B,D]` → `[T,B,H]`（最終隠れ状態列。`c_n` は tape 不要
     /// 経路では返さない——決定 9 は推論経路の対象を隠れ状態出力のみと
     /// する）。
@@ -1244,6 +1278,22 @@ impl Gru {
 impl Module for Gru {
     fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         Err(forward_not_supported("Gru", "forward_seq"))
+    }
+
+    /// 命名契約は [`Rnn`] の実装と同じ（`cell.` 接頭辞。`GruCell` の
+    /// ゲート統合済みフィールドをそのまま使う）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![
+            ("cell.weight_ih".to_string(), self.cell.weight_ih()),
+            ("cell.weight_hh".to_string(), self.cell.weight_hh()),
+        ];
+        if let Some(b) = self.cell.bias_ih() {
+            out.push(("cell.bias_ih".to_string(), b));
+        }
+        if let Some(b) = self.cell.bias_hh() {
+            out.push(("cell.bias_hh".to_string(), b));
+        }
+        out
     }
 
     fn forward_host(

@@ -101,6 +101,13 @@ use fandhe_ai_tensor_core::{Activation, BackendOps};
 /// 活性化関数）を同じ列で扱える。
 pub struct Sequential {
     layers: Vec<Box<dyn Module>>,
+    /// train／eval モード（イシュー #1758。PyTorch `Module.training`
+    /// 相当）。**このコンテナ自身がモードの正**であり
+    /// （`nn::Module::set_training`／`training` の trait doc「モードの
+    /// 正はコンテナが保持するフラグ」契約）、[`Sequential::set_training`]
+    /// が全子層（`layers`）へ `Module::set_training` を伝播する。既定
+    /// `true`（PyTorch の初期値と揃える）。
+    training: bool,
 }
 
 impl Default for Sequential {
@@ -111,7 +118,10 @@ impl Default for Sequential {
 
 impl Sequential {
     pub fn new() -> Self {
-        Sequential { layers: Vec::new() }
+        Sequential {
+            layers: Vec::new(),
+            training: true,
+        }
     }
 
     /// 全結合層を追加する（bias あり既定。PyTorch `nn.Linear` の既定
@@ -383,6 +393,72 @@ impl Sequential {
                 if let Some(bias) = linear.bias() {
                     out.push(bias);
                 }
+            }
+        }
+        out
+    }
+
+    /// train／eval モードを切り替え（イシュー #1758。PyTorch
+    /// `Module.train()`／`Module.eval()`／`Module.training = ...` 相当）、
+    /// 自身の [`Sequential::training`] フラグを更新したうえで**全子層へ
+    /// 伝播**する（`nn::Module::set_training` を各 `layers` 要素へ順に
+    /// 呼ぶ）。
+    ///
+    /// # 借用の注意
+    ///
+    /// `&mut self` を取るため、[`Sequential::bind`] が返す
+    /// [`SequentialVars`]（`&self`／`&tape` を借用）が生きている間は
+    /// 呼べない（[`Sequential::apply_parameters`] のドキュメント冒頭
+    /// 「借用を解放してから呼ぶ」注意と同じ制約）。構築時（`add_*`
+    /// ビルダー）の後・forward の合間に呼ぶ想定。
+    ///
+    /// 本クレート内実装（`Linear`・活性化関数群等）は全てモード非依存の
+    /// ため、現時点では `layers` への伝播は数値経路に一切影響しない
+    /// （`nn::module` の trait doc「モードの正はコンテナが保持する
+    /// フラグ」契約参照）。Dropout（#1603）等のモード依存層が
+    /// `compat::Sequential` へ追加可能になった時点で、この伝播が実際の
+    /// 挙動差を生む。
+    pub fn set_training(&mut self, training: bool) {
+        self.training = training;
+        for layer in &mut self.layers {
+            layer.set_training(training);
+        }
+    }
+
+    /// `set_training(true)` の別名（PyTorch `Module.train()` 相当）。
+    pub fn train(&mut self) {
+        self.set_training(true);
+    }
+
+    /// `set_training(false)` の別名（PyTorch `Module.eval()` 相当）。
+    pub fn eval(&mut self) {
+        self.set_training(false);
+    }
+
+    /// 現在のモード（`true` = train・`false` = eval）。**コンテナ自身の
+    /// フラグ**を返す（`nn::Module::training` の既定実装〈常に
+    /// `true`〉には委譲しない。本 `Sequential` がモードの正のため）。
+    pub fn training(&self) -> bool {
+        self.training
+    }
+
+    /// 「名前, パラメータ参照」列（PyTorch `Module.named_parameters()`
+    /// 相当。イシュー #1758）を `layers` の index（活性化を含む全子の
+    /// 位置。PyTorch `nn.Sequential` と同じ規約）を接頭辞にして返す。
+    /// 各層は `nn::Module::named_parameters`（`Linear` 等）へ委譲する
+    /// ため、無状態層（活性化関数）は寄与しない。
+    ///
+    /// # 順序契約
+    ///
+    /// 平坦化した tensor 列は [`Sequential::trainable_parameters`] と
+    /// 完全に同じ順序（層順・各層内は weight → bias）になる
+    /// （`docs/compat-api-scope.md` の位置対応契約と整合。イシュー
+    /// #1758 のテストで固定）。
+    pub fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = Vec::new();
+        for (index, layer) in self.layers.iter().enumerate() {
+            for (name, tensor) in layer.named_parameters() {
+                out.push((format!("{index}.{name}"), tensor));
             }
         }
         out
@@ -978,6 +1054,7 @@ mod tests {
         // Sequential 経路: 同じ Linear インスタンスを Module として積む。
         let model = Sequential {
             layers: vec![Box::new(linear1), Box::new(Relu), Box::new(linear2)],
+            training: true,
         };
         let seq_tape = crate::tape();
         let seq_input = seq_tape.var(&input_tensor);
@@ -1049,6 +1126,7 @@ mod tests {
                     Box::new(Linear::new(12, 4, true, SEED1 + SEED2).unwrap()),
                     Box::new(Tanh),
                 ],
+                training: true,
             };
             let input_data: Vec<f32> = (0..batch * 8).map(|i| (i as f32) * 0.05 - 0.3).collect();
             let input = Tensor::new(input_data, &[batch, 8]).unwrap();
@@ -1091,6 +1169,7 @@ mod tests {
                     Box::new(Linear::new(8, 4, true, SEED2 + 1).unwrap()),
                     Box::new(Elu::new(1.3)),
                 ],
+                training: true,
             };
             let input_data: Vec<f32> = (0..batch * 8).map(|i| (i as f32) * 0.05 - 0.3).collect();
             let input = Tensor::new(input_data, &[batch, 8]).unwrap();
@@ -1163,6 +1242,7 @@ mod tests {
 
             let model = Sequential {
                 layers: vec![Box::new(l1), Box::new(Relu), Box::new(l2)],
+                training: true,
             };
             let actual = model.predict(&input).unwrap();
 
@@ -1195,6 +1275,7 @@ mod tests {
 
         let model = Sequential {
             layers: vec![Box::new(l1), Box::new(Sigmoid), Box::new(l2)],
+            training: true,
         };
         let actual = model.predict(&input).unwrap();
 
@@ -1280,6 +1361,7 @@ mod tests {
         let l2 = Linear::new(3, 2, false, SEED2).unwrap();
         let model = Sequential {
             layers: vec![Box::new(l1), Box::new(Relu), Box::new(l2)],
+            training: true,
         };
 
         let tape = crate::tape();
@@ -1307,6 +1389,7 @@ mod tests {
                 Box::new(Relu),
                 Box::new(Linear::new(16, 4, true, SEED2).unwrap()),
             ],
+            training: true,
         };
         let module_tape = crate::tape();
         let module_input = module_tape.var(&input_tensor);
@@ -1319,6 +1402,7 @@ mod tests {
                 Box::new(Relu),
                 Box::new(Linear::new(16, 4, true, SEED2).unwrap()),
             ],
+            training: true,
         };
         let train_tape = crate::tape();
         let bound = train_model.bind(&train_tape);
@@ -1434,6 +1518,7 @@ mod tests {
         let linear = Linear::new(2, 1, false, SEED1).unwrap();
         let mut model = Sequential {
             layers: vec![Box::new(linear)],
+            training: true,
         };
 
         // has_bias == false のため trainable_parameters()/apply_parameters()
@@ -1988,6 +2073,7 @@ mod tests {
         let linear_with_bias = Linear::new(8, 2, true, SEED2).unwrap();
         let model = Sequential {
             layers: vec![Box::new(linear_no_bias), Box::new(linear_with_bias)],
+            training: true,
         };
         let tape = crate::tape();
         let store = model.init_device_param_store(&tape).unwrap();
