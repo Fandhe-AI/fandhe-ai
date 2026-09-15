@@ -16,19 +16,21 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, BceKind, CastElement, ChecksumReadout, Conv2dParams,
-    Device, GemmChecksum, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
-    LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
-    ShapeError, Tensor, VectorNormOrd, broadcast_shape, concat_out_shape, conv2d_out_shape,
-    gather_out_shape, gemm_out_shape, interpolate_out_shape_for_mode, matmul_out_shape,
-    one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    Activation, BackendError, BackendOps, BatchNormTrainOutput, BceKind, CastElement,
+    ChecksumReadout, Conv2dParams, Device, GemmChecksum, GruPointwiseOutput, HuberKind,
+    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp,
+    ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd, batch_norm_layout,
+    broadcast_shape, concat_out_shape, conv2d_out_shape, gather_out_shape, gemm_out_shape,
+    interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape, pad_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
-    ArgExtremum, argext_with_fallback, cast_from_f32_with_fallback, concat_with_fallback,
+    ArgExtremum, argext_with_fallback, batch_norm_infer_with_fallback,
+    batch_norm_train_with_fallback, cast_from_f32_with_fallback, concat_with_fallback,
     conv2d_with_fallback, gather_with_fallback, interpolate_with_fallback, min_with_fallback,
     one_hot_with_fallback, pad_with_fallback, scalar_binary_with_fallback,
     scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
@@ -1593,6 +1595,185 @@ impl<'t> Var<'t> {
                 weight: weight.map(|w| w.id),
                 bias: bias.map(|b| b.id),
                 eps,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// BatchNorm1d／2d の train モード（バッチ統計。チャネル軸は常に
+    /// dim 1。イシュー #1732・親 #1608・`docs/batch-norm-ops-design.md`）。
+    /// [`Self::batch_norm_with_batch_stats`] の `.0`（output のみ）を
+    /// 返す薄いラッパー。
+    pub fn batch_norm(
+        &self,
+        weight: Option<&Var<'t>>,
+        bias: Option<&Var<'t>>,
+        eps: f32,
+    ) -> Result<Var<'t>, AutodiffError> {
+        Ok(self.batch_norm_with_batch_stats(weight, bias, eps)?.0)
+    }
+
+    /// [`Self::batch_norm`] の本体。バッチ統計（`batch_mean`／
+    /// `batch_var`。biased ÷M）も `(output, batch_mean, batch_var)`
+    /// タプルで返す——呼び出し元（`nn::BatchNorm1d`／`BatchNorm2d`）が
+    /// running stats を更新するために必要（`Var::layer_norm` と異なり
+    /// BatchNorm はバッチ統計を呼び出し元へ公開する必要がある）。
+    ///
+    /// 検査順序（[`Self::layer_norm`] と同じ演算メソッド規律）: ①
+    /// `weight`／`bias` があれば `check_same_tape` → ②`eps` が有限かつ
+    /// 非負であることを検査 → ③[`fandhe_ai_tensor_core::
+    /// batch_norm_layout`] で `(n, c, spatial)` を導出 → ④`M = n*spatial`
+    /// が 1 以下の場合 `AutodiffError::InvalidArgument`（unbiased 分散
+    /// の `M-1` 除算で 0 除算になるため。PyTorch `torch.nn.functional.
+    /// batch_norm` の `_verify_batch_size` と同じ拒否）→ ⑤`weight`／
+    /// `bias` の shape が `[c]` と厳密一致することを検査 → ⑥実体化 →
+    /// ⑦`batch_norm_train_with_fallback`（`grad.rs`。バックエンド →
+    /// `Unsupported` のときのみホスト参照実装）→ ⑧ノード記録
+    /// （`fixed_stats: None` が train モードを表す）。
+    pub fn batch_norm_with_batch_stats(
+        &self,
+        weight: Option<&Var<'t>>,
+        bias: Option<&Var<'t>>,
+        eps: f32,
+    ) -> Result<(Var<'t>, Tensor<f32>, Tensor<f32>), AutodiffError> {
+        if let Some(w) = weight {
+            self.check_same_tape(w)?;
+        }
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+        if !eps.is_finite() || eps < 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::batch_norm: eps must be finite and non-negative, got {eps}"
+            )));
+        }
+        let x_shape = self.shape();
+        let (n, c, spatial) = batch_norm_layout(&x_shape)?;
+        let m = n
+            .checked_mul(spatial)
+            .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+        if m <= 1 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::batch_norm: train モードはチャネルごとの要素数 M=n*spatial が \
+                 1 以下を許容しない（unbiased 分散の M-1 除算に必要。got n={n}, \
+                 spatial={spatial}, M={m}）"
+            )));
+        }
+        if let Some(w) = weight {
+            require_same_shape(&w.shape(), &[c])?;
+        }
+        if let Some(b) = bias {
+            require_same_shape(&b.shape(), &[c])?;
+        }
+        let (x_val, w_val, b_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let x_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let w_val = match weight {
+                Some(w) => Some(materialize_fallible(&nodes, self.tape.ops(), w.id)?.clone()),
+                None => None,
+            };
+            let b_val = match bias {
+                Some(b) => Some(materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone()),
+                None => None,
+            };
+            (x_val, w_val, b_val)
+        };
+        let BatchNormTrainOutput {
+            output,
+            batch_mean,
+            batch_var,
+        } = batch_norm_train_with_fallback(
+            self.tape.ops(),
+            &x_val,
+            w_val.as_ref(),
+            b_val.as_ref(),
+            eps,
+            n,
+            c,
+            spatial,
+        )?;
+        let id = self.tape.push_eager(
+            Op::BatchNorm {
+                input: self.id,
+                weight: weight.map(|w| w.id),
+                bias: bias.map(|b| b.id),
+                eps,
+                fixed_stats: None,
+            },
+            output,
+        );
+        Ok((Var::from_raw(self.tape, id), batch_mean, batch_var))
+    }
+
+    /// BatchNorm1d／2d の eval モード（固定統計。`running_mean`／
+    /// `running_var` は呼び出し元〈`nn::BatchNorm1d`／`BatchNorm2d`〉が
+    /// 保持する running stats。イシュー #1732・親 #1608）。
+    /// [`Self::batch_norm_with_batch_stats`] と同じ検査順序だが、`M`
+    /// を導出・検査しない（バッチから統計を計算しないため `M<=1`
+    /// 制約が不要）代わりに `running_mean`／`running_var` の shape
+    /// `[c]` を検査する。
+    pub fn batch_norm_infer(
+        &self,
+        weight: Option<&Var<'t>>,
+        bias: Option<&Var<'t>>,
+        running_mean: &Tensor<f32>,
+        running_var: &Tensor<f32>,
+        eps: f32,
+    ) -> Result<Var<'t>, AutodiffError> {
+        if let Some(w) = weight {
+            self.check_same_tape(w)?;
+        }
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+        if !eps.is_finite() || eps < 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::batch_norm_infer: eps must be finite and non-negative, got {eps}"
+            )));
+        }
+        let x_shape = self.shape();
+        let (n, c, spatial) = batch_norm_layout(&x_shape)?;
+        require_same_shape(running_mean.shape(), &[c])?;
+        require_same_shape(running_var.shape(), &[c])?;
+        if let Some(w) = weight {
+            require_same_shape(&w.shape(), &[c])?;
+        }
+        if let Some(b) = bias {
+            require_same_shape(&b.shape(), &[c])?;
+        }
+        let (x_val, w_val, b_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let x_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let w_val = match weight {
+                Some(w) => Some(materialize_fallible(&nodes, self.tape.ops(), w.id)?.clone()),
+                None => None,
+            };
+            let b_val = match bias {
+                Some(b) => Some(materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone()),
+                None => None,
+            };
+            (x_val, w_val, b_val)
+        };
+        let value = batch_norm_infer_with_fallback(
+            self.tape.ops(),
+            &x_val,
+            running_mean,
+            running_var,
+            w_val.as_ref(),
+            b_val.as_ref(),
+            eps,
+            n,
+            c,
+            spatial,
+        )?;
+        let id = self.tape.push_eager(
+            Op::BatchNorm {
+                input: self.id,
+                weight: weight.map(|w| w.id),
+                bias: bias.map(|b| b.id),
+                eps,
+                fixed_stats: Some((running_mean.clone(), running_var.clone())),
             },
             value,
         );
@@ -5008,4 +5189,71 @@ mod host_view_tests {
             &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0],
         );
     }
+}
+
+#[cfg(test)]
+mod batch_norm_empty_axis_huge_spatial_tests {
+    use super::*;
+    use crate::tape::Tape;
+
+    /// Cursor Bugbot 指摘（PR #1874・イシュー #1732 fix ループ）の回帰
+    /// テスト: rank-4 `[N=0, C, H=usize::MAX, W=2]` は `H*W` 単体では
+    /// `usize` オーバーフローするが、`N=0` により `x` 全体は要素数 0 の
+    /// 有効な空テンソルである。`batch_norm_layout`（`ops_shape.rs`）の
+    /// 修正により `ElementCountOverflow` で誤って拒否されず、
+    /// `batch_norm_infer`（eval モード）は空出力を返すことを確認する。
+    #[test]
+    fn batch_norm_infer_accepts_empty_leading_axis_with_huge_spatial() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(Vec::<f32>::new(), &[0, 3, usize::MAX, 2]).unwrap());
+        let mean = Tensor::new(vec![0.0f32; 3], &[3]).unwrap();
+        let var = Tensor::new(vec![1.0f32; 3], &[3]).unwrap();
+
+        let out = x
+            .batch_norm_infer(None, None, &mean, &var, 1e-5)
+            .expect("N=0 の空テンソルは ElementCountOverflow にならず成功するはず");
+        assert_eq!(out.shape(), &[0, 3, usize::MAX, 2]);
+        assert_eq!(out.to_tensor().as_slice().unwrap(), &[] as &[f32]);
+    }
+
+    /// `C=0` 版の同型ケース（`N`／空間軸は非ゼロかつ空間軸が巨大）。
+    #[test]
+    fn batch_norm_infer_accepts_empty_channel_axis_with_huge_spatial() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(Vec::<f32>::new(), &[5, 0, usize::MAX, 2]).unwrap());
+        let mean = Tensor::new(Vec::<f32>::new(), &[0]).unwrap();
+        let var = Tensor::new(Vec::<f32>::new(), &[0]).unwrap();
+
+        let out = x
+            .batch_norm_infer(None, None, &mean, &var, 1e-5)
+            .expect("C=0 の空テンソルは ElementCountOverflow にならず成功するはず");
+        assert_eq!(out.shape(), &[5, 0, usize::MAX, 2]);
+        assert_eq!(out.to_tensor().as_slice().unwrap(), &[] as &[f32]);
+    }
+
+    /// train モード（`batch_norm_with_batch_stats`）は同じ空テンソルに
+    /// 対し `ElementCountOverflow` ではなく、`M=n*spatial<=1`
+    /// （`n=0` の場合 `M=0`）を理由とする型付きエラーで拒否されること
+    /// を確認する（`batch_norm_layout` 修正後は `spatial=0` となり
+    /// `M<=1` 拒否経路へ正しく到達する）。
+    #[test]
+    fn batch_norm_train_rejects_empty_leading_axis_with_m_le_1_not_overflow() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(Vec::<f32>::new(), &[0, 3, usize::MAX, 2]).unwrap());
+
+        let err = x
+            .batch_norm_with_batch_stats(None, None, 1e-5)
+            .expect_err("train モードは M<=1 で拒否されるはず");
+        assert!(
+            matches!(err, AutodiffError::InvalidArgument(_)),
+            "ElementCountOverflow ではなく M<=1 の InvalidArgument であるべき: {err:?}"
+        );
+    }
+
+    // 4 軸すべてが非ゼロの場合に `ElementCountOverflow` が維持される
+    // ことの回帰は `tensor-core::ops_shape::batch_norm_layout_tests::
+    // rank4_nonempty_spatial_overflow_is_still_rejected` が担う
+    // （`Var::batch_norm_infer` レベルでは `Tensor::new` 自体が
+    // `checked_numel`〈shape 全体積〉で先に同じ `ElementCountOverflow`
+    // を返すため、この層で意味のある `Tensor` を構築できない）。
 }

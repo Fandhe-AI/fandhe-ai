@@ -27,13 +27,16 @@ use crate::nn::activation::{
     Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
     Tanh,
 };
+use crate::nn::batch_norm::{
+    BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
+};
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, ShapeError, Tensor, broadcast_shape, gemm_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout,
+    BackendError, BackendOps, ShapeError, Tensor, batch_norm_layout, broadcast_shape,
+    gemm_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
 };
 
 /// [`Module::named_parameters`] の実装が、子 `Module`（`Linear` 等）を
@@ -805,6 +808,170 @@ impl Module for LayerNorm {
     }
 }
 
+/// `BatchNorm1d`／`BatchNorm2d::forward_host`（両者共通）が呼ぶ
+/// tape 不要経路の forward 本体（イシュー #1732・親 #1608）。`nn::
+/// batch_norm::BatchNormVars::forward`（tape 経路）と同じ判定規律
+/// （バックエンド → `Unsupported` のときのみホスト参照実装）を
+/// `ops` 直接呼び出しで再現する（`RmsNorm::forward_host` と同じ
+/// 理由）。train モードは呼ぶたび必ず running stats を更新する
+/// （`BatchNormVars::forward` と同じ契約。`nn::batch_norm` モジュール
+/// doc comment「running stats 更新契約」参照）。
+fn batch_norm_forward_host(
+    core: &BatchNormCore,
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let (n, c, spatial) = batch_norm_layout(input.shape())?;
+    // `weight`／`bias` が `Some` のときは直後の `require_same_shape`
+    // が `w`／`b` の構築時 shape（`[num_features]`）経由で
+    // `c == num_features` を間接検証するが、`without_affine`
+    // （両方 `None`）構成ではその経路が無い。`core.update_running_stats`
+    // （train 分岐。長さ `num_features` の running stats と `zip` する）
+    // へ長さ `c` の batch 統計が渡る前に、ここで明示検査する
+    // （codex-review P1・Cursor Bugbot 指摘。イシュー #1732 fix
+    // ループ。`nn::batch_norm::BatchNormCore::forward_var` と同型の
+    // 検査）。
+    require_same_shape(&[c], &[core.num_features()])?;
+    if let Some(w) = core.weight() {
+        require_same_shape(w.shape(), &[c])?;
+    }
+    if let Some(b) = core.bias() {
+        require_same_shape(b.shape(), &[c])?;
+    }
+    if core.training() {
+        let m = n
+            .checked_mul(spatial)
+            .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+        if m <= 1 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "BatchNorm::forward_host: train モードはチャネルごとの要素数 \
+                 M=n*spatial が 1 以下を許容しない（got n={n}, spatial={spatial}, M={m}）"
+            )));
+        }
+        let out = crate::grad::batch_norm_train_with_fallback(
+            ops,
+            input,
+            core.weight(),
+            core.bias(),
+            core.eps(),
+            n,
+            c,
+            spatial,
+        )?;
+        core.update_running_stats(&out.batch_mean, &out.batch_var, m);
+        Ok(out.output)
+    } else {
+        let running_mean = core.running_mean_ref();
+        let running_var = core.running_var_ref();
+        crate::grad::batch_norm_infer_with_fallback(
+            ops,
+            input,
+            &running_mean,
+            &running_var,
+            core.weight(),
+            core.bias(),
+            core.eps(),
+            n,
+            c,
+            spatial,
+        )
+    }
+}
+
+/// `BatchNorm1d::bind(tape).forward(input)` への委譲（イシュー
+/// #1732・親 #1608）。本クレート内で初めて train／eval でモードにより
+/// 挙動が変わる層のため `set_training`／`training` を明示
+/// オーバーライドする（`Module::set_training` trait doc の「今後
+/// BatchNorm 等を追加する際は必ずオーバーライドすること」を実装する。
+/// `nn::batch_norm` モジュール doc comment 参照）。
+impl Module for BatchNorm1d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn set_training(&mut self, training: bool) {
+        self.core.set_training(training);
+    }
+
+    fn training(&self) -> bool {
+        self.core.training()
+    }
+
+    /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
+    /// `weight`（`Some` の場合）→ `bias`（`Some` の場合）の順。running
+    /// stats は buffer であり学習可能パラメータではないため含めない
+    /// （`nn::batch_norm` モジュール doc comment「`BatchNormCore` の
+    /// 可視性」節参照）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.core.named_parameters()
+    }
+
+    /// [`Module::set_parameter`] の実装。`BatchNormCore::set_parameter`
+    /// （`nn/batch_norm.rs`）へ委譲する（`LayerNorm::set_parameter` と
+    /// 同型。PR #1874 codex-review P1・Cursor Bugbot Medium 是正）。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        self.core.set_parameter(name, value)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let rank = input.shape().len();
+        if !BATCH_NORM_1D_RANKS.contains(&rank) {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: BATCH_NORM_1D_RANKS[0],
+                actual: rank,
+            }));
+        }
+        batch_norm_forward_host(&self.core, ops, input)
+    }
+}
+
+/// `BatchNorm2d::bind(tape).forward(input)` への委譲（イシュー
+/// #1732・親 #1608）。[`Module for BatchNorm1d`](trait.Module.html)
+/// と同じ理由・同じ構造だが rank 限定契約のみ異なる（rank 4 のみ）。
+impl Module for BatchNorm2d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn set_training(&mut self, training: bool) {
+        self.core.set_training(training);
+    }
+
+    fn training(&self) -> bool {
+        self.core.training()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.core.named_parameters()
+    }
+
+    /// [`Module::set_parameter`] の実装。
+    /// [`Module for BatchNorm1d`](trait.Module.html) と同じ理由・
+    /// 同じ委譲先。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        self.core.set_parameter(name, value)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let rank = input.shape().len();
+        if !BATCH_NORM_2D_RANKS.contains(&rank) {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: BATCH_NORM_2D_RANKS[0],
+                actual: rank,
+            }));
+        }
+        batch_norm_forward_host(&self.core, ops, input)
+    }
+}
+
 /// `Softmax::forward` への委譲（イシュー #1594）。`Relu`/`Sigmoid`/
 /// `Tanh` と異なり `forward` 自体が `dim` の軸範囲検査により失敗しうる
 /// ため（fallible）、`?` で伝播するだけの `Relu` と違い戻り値をそのまま
@@ -1172,6 +1339,31 @@ mod tests {
         assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
     }
 
+    #[test]
+    fn batch_norm_without_affine_forward_host_rejects_channel_mismatch() {
+        // `batch_norm_forward_host`（tape 不要経路）版の regression。
+        // `nn::batch_norm::BatchNormCore::forward_var`（tape 経路）と
+        // 同型の欠落——affine なし構成では `weight`／`bias` 経由の
+        // `c == num_features` 間接検証が働かないため、明示検査を
+        // `require_same_shape(&[c], &[core.num_features()])` で追加
+        // 済み（codex-review P1 指摘・イシュー #1732 fix ループ）。
+        // num_features=3 に対し c=2 の入力を渡し、panic せず型付き
+        // エラーで拒否されることを確認する。
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+        use crate::test_support::test_ops;
+
+        let bn =
+            BatchNorm1d::without_affine(3, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM)
+                .unwrap();
+        let x = Tensor::new(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]).unwrap();
+        let err = bn.forward_host(test_ops().as_ref(), &x).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ShapeMismatch { .. })
+        ));
+        assert_eq!(bn.core.num_batches_tracked(), 0);
+    }
+
     /// codex-review 指摘（PR #1875）の回帰テスト用モック: `named_parameters`
     /// はオーバーライドするが `set_parameter` は既定実装（常に `Err`）の
     /// まま残した「半分だけ実装した」外部 `Module`。`Module::set_parameter`
@@ -1256,5 +1448,166 @@ mod tests {
             .expect_err("set_parameter 既定失敗で Err のはず");
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
         assert_eq!(half.param.contiguous().as_slice().unwrap(), &[1.0f32, 2.0]);
+    }
+
+    // `BatchNorm1d`／`BatchNorm2d::set_parameter`（PR #1874 codex-review
+    // P1・Cursor Bugbot Medium 是正・イシュー #1732）の回帰テスト。
+    // `named_parameters` はオーバーライド済みだが `set_parameter` が
+    // 既定実装（常に `Err`）のままだと、affine ありの層でも自身の
+    // `state_dict()` を `load_state_dict()` へ渡すだけで失敗していた
+    // （`Module::set_parameter` doc「オーバーライド指針」違反）。
+
+    #[test]
+    fn batch_norm1d_state_dict_round_trip_updates_weight_and_bias() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut bn =
+            BatchNorm1d::new(3, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        let mut state = bn.state_dict();
+        assert_eq!(
+            state.len(),
+            2,
+            "affine あり BatchNorm1d は weight／bias の 2 キー"
+        );
+        state.insert(
+            "weight".to_string(),
+            Tensor::new(vec![2.0f32, 3.0, 4.0], &[3]).unwrap(),
+        );
+        state.insert(
+            "bias".to_string(),
+            Tensor::new(vec![0.5f32, 0.6, 0.7], &[3]).unwrap(),
+        );
+
+        bn.load_state_dict(state)
+            .expect("affine あり BatchNorm1d の state_dict 往復は成功するはず");
+
+        assert_eq!(
+            bn.weight().unwrap().contiguous().as_slice().unwrap(),
+            &[2.0f32, 3.0, 4.0]
+        );
+        assert_eq!(
+            bn.bias().unwrap().contiguous().as_slice().unwrap(),
+            &[0.5f32, 0.6, 0.7]
+        );
+    }
+
+    #[test]
+    fn batch_norm2d_state_dict_round_trip_is_no_op_for_identity_state() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut bn =
+            BatchNorm2d::new(4, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        let before_weight = bn
+            .weight()
+            .unwrap()
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .to_vec();
+        let before_bias = bn.bias().unwrap().contiguous().as_slice().unwrap().to_vec();
+
+        bn.load_state_dict(bn.state_dict())
+            .expect("自身の state_dict をそのまま load_state_dict へ渡すのは成功するはず");
+
+        assert_eq!(
+            bn.weight().unwrap().contiguous().as_slice().unwrap(),
+            before_weight.as_slice()
+        );
+        assert_eq!(
+            bn.bias().unwrap().contiguous().as_slice().unwrap(),
+            before_bias.as_slice()
+        );
+    }
+
+    #[test]
+    fn batch_norm1d_load_state_dict_rejects_shape_mismatch_and_leaves_state_unchanged() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut bn =
+            BatchNorm1d::new(3, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        let before_weight = bn
+            .weight()
+            .unwrap()
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .to_vec();
+
+        let mut state = bn.state_dict();
+        state.insert(
+            "weight".to_string(),
+            Tensor::new(vec![1.0f32, 2.0], &[2]).unwrap(),
+        );
+        let err = bn
+            .load_state_dict(state)
+            .expect_err("shape 不一致は Err のはず");
+        // `Module::load_state_dict` はパス 1（検証のみ）で shape 不一致を
+        // 検出し `AutodiffError::InvalidArgument` を返す（`set_parameter`
+        // 自体の `ShapeError::ShapeMismatch` へは到達しない。
+        // `compat_sequential_state_dict.rs::
+        // load_state_dict_rejects_shape_mismatch_and_leaves_model_unchanged`
+        // と同じ契約）。
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert_eq!(
+            bn.weight().unwrap().contiguous().as_slice().unwrap(),
+            before_weight.as_slice(),
+            "拒否後も weight が変化していない（アトミック性）"
+        );
+    }
+
+    #[test]
+    fn batch_norm1d_without_affine_load_state_dict_rejects_unknown_key() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut bn =
+            BatchNorm1d::without_affine(3, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM)
+                .unwrap();
+        assert!(
+            bn.state_dict().is_empty(),
+            "affine なしは named_parameters が空"
+        );
+
+        let mut state = HashMap::new();
+        state.insert(
+            "weight".to_string(),
+            Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap(),
+        );
+        let err = bn
+            .load_state_dict(state)
+            .expect_err("affine なし構成では `weight` は未知キーのはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// `ModuleList`（`HalfImplementedModule` の回帰テストと同じ複合層
+    /// パターン）内に `BatchNorm1d` を混在させても `state_dict`／
+    /// `load_state_dict` の往復が成功することを確認する（facade
+    /// `compat::Sequential` は現時点で `BatchNorm` 追加 API を持たない
+    /// ため、`ModuleList` を複合層の代替として使う）。
+    #[test]
+    fn module_list_with_batch_norm_state_dict_round_trip() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut list = ModuleList::new();
+        list.push(Box::new(Linear::new(3, 4, true, 21).unwrap()));
+        list.push(Box::new(
+            BatchNorm1d::new(4, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap(),
+        ));
+
+        let mut state = list.state_dict();
+        assert!(state.contains_key("1.weight"));
+        assert!(state.contains_key("1.bias"));
+        state.insert(
+            "1.weight".to_string(),
+            Tensor::new(vec![9.0f32, 9.0, 9.0, 9.0], &[4]).unwrap(),
+        );
+
+        list.load_state_dict(state)
+            .expect("Linear と BatchNorm1d 混在の ModuleList でも state_dict 往復は成功するはず");
+
+        let after = list.state_dict();
+        assert_eq!(
+            after["1.weight"].contiguous().as_slice().unwrap(),
+            &[9.0f32, 9.0, 9.0, 9.0]
+        );
     }
 }

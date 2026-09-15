@@ -11,7 +11,9 @@ mod common;
 
 use fandhe_ai_autodiff::Tape;
 use fandhe_ai_autodiff::nn::activation::{Relu, Softmax};
-use fandhe_ai_autodiff::nn::{Gru, Linear, Lstm, Module, MultiheadAttention, RmsNorm, Rnn};
+use fandhe_ai_autodiff::nn::{
+    BatchNorm1d, BatchNorm2d, Gru, Linear, Lstm, Module, MultiheadAttention, RmsNorm, Rnn,
+};
 use fandhe_ai_tensor_core::Tensor;
 
 /// 既定契約（`Module::training`／`set_training` の trait doc）: 無状態
@@ -215,4 +217,123 @@ fn set_training_does_not_change_forward_output() {
         .to_tensor();
 
     assert_eq!(out_before.as_slice(), out_after.as_slice());
+}
+
+/// BatchNorm1d／2d（イシュー #1732・親 #1608）は本クレート内で初めて
+/// train／eval でモードにより挙動が変わる層のため、`Module::
+/// set_training`／`training` の trait doc「モード依存層は必ず
+/// オーバーライドし自層のフィールドへ実際に保持すること」契約を
+/// 満たすことを確認する（無状態モジュールの既定契約とは対照的な
+/// テスト）。数値経路（forward の出力値そのもの）に触れるため
+/// CUDA／Metal 実機 parity は未実測のまま Mac／GB10 セッションへ
+/// 申し送り（`docs/batch-norm-ops-design.md`）。
+
+#[test]
+fn batch_norm_set_training_actually_changes_training() {
+    let mut bn = BatchNorm1d::new(3, 1e-5, 0.1).expect("valid ctor args");
+    assert!(
+        bn.training(),
+        "既定は train モード（PyTorch Module.training 初期値と同じ）"
+    );
+    bn.set_training(false);
+    assert!(
+        !bn.training(),
+        "BatchNorm は状態を持つため set_training(false) 後は training()==false"
+    );
+    bn.set_training(true);
+    assert!(bn.training());
+}
+
+/// `named_parameters` は `weight`／`bias` のみ列挙し、running stats
+/// （buffer）は含めない契約（`nn::batch_norm` モジュール doc
+/// comment 参照）。
+#[test]
+fn batch_norm_named_parameters_excludes_running_stats() {
+    let bn = BatchNorm1d::new(3, 1e-5, 0.1).expect("valid ctor args");
+    let params = bn.named_parameters();
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0].0, "weight");
+    assert_eq!(params[1].0, "bias");
+
+    let without_affine = BatchNorm1d::without_affine(3, 1e-5, 0.1).expect("valid ctor args");
+    assert!(without_affine.named_parameters().is_empty());
+}
+
+/// `Module::forward`（tape 経路）と `Module::forward_host`（tape 不要
+/// 経路）が同一入力・同一モードで bit 完全一致することを確認する
+/// （`RmsNorm`／`LayerNorm` と同じ構造的保証。`NaiveOps` は
+/// `batch_norm_train`／`batch_norm_infer` をオーバーライドしないため
+/// `eval::batch_norm_train_channels`／`batch_norm_infer_channels` への
+/// フォールバック経路を両方（tape 経路・tape 不要経路）で叩く）。
+#[test]
+fn batch_norm_forward_and_forward_host_are_bit_identical_train_mode() {
+    let bn = BatchNorm1d::new(2, 0.0, 0.1).expect("valid ctor args");
+    let x = Tensor::new(vec![1.0, 2.0, -1.0, 0.5, 3.0, -0.5], &[3, 2]).unwrap();
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x);
+    let via_tape = bn.bind(&tape).forward(&xv).unwrap().to_tensor();
+
+    let via_host =
+        <BatchNorm1d as Module>::forward_host(&bn, common::naive_ops().as_ref(), &x).unwrap();
+
+    assert_eq!(via_tape.as_slice(), via_host.as_slice());
+}
+
+/// eval モード版の bit 完全一致（`forward_host` は
+/// `core.training()==false` のとき running stats を固定統計として
+/// 使う）。
+#[test]
+fn batch_norm_forward_and_forward_host_are_bit_identical_eval_mode() {
+    let mut bn = BatchNorm2d::new(2, 1e-5, 0.1).expect("valid ctor args");
+    bn.set_training(false);
+    let x = Tensor::new(vec![1.0f32; 16], &[2, 2, 2, 2]).unwrap();
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x);
+    let via_tape = bn.bind(&tape).forward(&xv).unwrap().to_tensor();
+
+    let via_host =
+        <BatchNorm2d as Module>::forward_host(&bn, common::naive_ops().as_ref(), &x).unwrap();
+
+    assert_eq!(via_tape.as_slice(), via_host.as_slice());
+}
+
+/// train モードの `forward_host` は running stats を実際に更新する
+/// （`nn::batch_norm` モジュール doc comment「running stats 更新契約」）。
+#[test]
+fn batch_norm_forward_host_updates_running_stats_in_train_mode() {
+    let bn = BatchNorm1d::new(2, 0.0, 1.0).expect("valid ctor args");
+    let x = Tensor::new(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]).unwrap();
+    assert_eq!(bn.num_batches_tracked(), 0);
+    <BatchNorm1d as Module>::forward_host(&bn, common::naive_ops().as_ref(), &x).unwrap();
+    assert_eq!(bn.num_batches_tracked(), 1);
+}
+
+/// rank 限定契約: `BatchNorm1d` は rank 4 を拒否し、`BatchNorm2d` は
+/// rank 2 を拒否する（`Var::batch_norm` 自体は rank 2〜4 を一様に
+/// 受理するため、本層が forward 時に追加検査する）。
+#[test]
+fn batch_norm_module_rejects_wrong_rank_via_forward_host() {
+    let bn1d = BatchNorm1d::new(2, 1e-5, 0.1).expect("valid ctor args");
+    let x_rank4 = Tensor::new(vec![1.0f32; 8], &[1, 2, 2, 2]).unwrap();
+    let err = <BatchNorm1d as Module>::forward_host(&bn1d, common::naive_ops().as_ref(), &x_rank4)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::Shape(
+            fandhe_ai_tensor_core::ShapeError::RankMismatch { .. }
+        )
+    ));
+
+    let bn2d = BatchNorm2d::new(2, 1e-5, 0.1).expect("valid ctor args");
+    let x_rank2 = Tensor::new(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]).unwrap();
+    let err = <BatchNorm2d as Module>::forward_host(&bn2d, common::naive_ops().as_ref(), &x_rank2)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::Shape(
+            fandhe_ai_tensor_core::ShapeError::RankMismatch { .. }
+        )
+    ));
 }

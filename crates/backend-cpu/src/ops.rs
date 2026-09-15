@@ -16,15 +16,16 @@ use std::sync::OnceLock;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BceKind, BinaryElementwiseOp, ChecksumReadout, Conv2dParams, DType,
-    FusionPlan, GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode,
-    KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScatterReduce,
-    SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, VectorNormOrd,
-    gather_out_shape, im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape,
-    pad_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, ChecksumReadout,
+    Conv2dParams, DType, FusionPlan, GemmChecksum, GruBackwardOutput, GruPointwiseOutput,
+    HuberKind, InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
+    QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
+    VectorNormOrd, batch_norm_layout, gather_out_shape, im2col_out_shape,
+    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
+use crate::batch_norm;
 use crate::gemm_blis::{
     gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt, gemm_blis_parallel_tn,
 };
@@ -1933,6 +1934,94 @@ impl BackendOps for CpuBackendOps {
         };
         let out = layer_norm::run_layer_norm_f32(x_slice, w_slice, b_slice, eps, rows, hidden)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::batch_norm_train`] の CPU
+    /// 実装（イシュー #1732・親 #1608）。[`Self::layer_norm`] と同じ
+    /// `contiguous()`→`as_slice()` 取り出し・`gemm_contiguity_fail_safe`
+    /// エラー変換方針。チャネル軸の導出は `batch_norm_layout`
+    /// （`row_norm_layout` の BatchNorm 版。チャネル軸は常に dim 1）。
+    fn batch_norm_train(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<BatchNormTrainOutput, BackendError> {
+        let (n, c, spatial) = batch_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let x_owned = x.contiguous();
+        let x_slice = x_owned
+            .as_slice()
+            .ok_or_else(|| gemm_contiguity_fail_safe("batch_norm_train: input not contiguous"))?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe("batch_norm_train: weight not contiguous")
+            })?),
+            None => None,
+        };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_slice = match &b_owned {
+            Some(b) => Some(b.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe("batch_norm_train: bias not contiguous")
+            })?),
+            None => None,
+        };
+        let raw =
+            batch_norm::run_batch_norm_train_f32(x_slice, w_slice, b_slice, eps, n, c, spatial)
+                .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Ok(BatchNormTrainOutput {
+            output: Tensor::new(raw.out, x.shape()).map_err(BackendError::ShapeMismatch)?,
+            batch_mean: Tensor::new(raw.mean, &[c]).map_err(BackendError::ShapeMismatch)?,
+            batch_var: Tensor::new(raw.var, &[c]).map_err(BackendError::ShapeMismatch)?,
+        })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::batch_norm_infer`] の CPU
+    /// 実装（イシュー #1732・親 #1608）。[`Self::batch_norm_train`] と
+    /// 同じ shape 契約だが、`mean`／`var`（呼び出し元が保持する
+    /// running stats）をバッチから計算し直さずそのまま使う。
+    fn batch_norm_infer(
+        &self,
+        x: &Tensor<f32>,
+        mean: &Tensor<f32>,
+        var: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let (n, c, spatial) = batch_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let x_owned = x.contiguous();
+        let x_slice = x_owned
+            .as_slice()
+            .ok_or_else(|| gemm_contiguity_fail_safe("batch_norm_infer: input not contiguous"))?;
+        let mean_owned = mean.contiguous();
+        let mean_slice = mean_owned
+            .as_slice()
+            .ok_or_else(|| gemm_contiguity_fail_safe("batch_norm_infer: mean not contiguous"))?;
+        let var_owned = var.contiguous();
+        let var_slice = var_owned
+            .as_slice()
+            .ok_or_else(|| gemm_contiguity_fail_safe("batch_norm_infer: var not contiguous"))?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe("batch_norm_infer: weight not contiguous")
+            })?),
+            None => None,
+        };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_slice = match &b_owned {
+            Some(b) => Some(b.as_slice().ok_or_else(|| {
+                gemm_contiguity_fail_safe("batch_norm_infer: bias not contiguous")
+            })?),
+            None => None,
+        };
+        let out = batch_norm::run_batch_norm_infer_f32(
+            x_slice, mean_slice, var_slice, w_slice, b_slice, eps, n, c, spatial,
+        )
+        .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 

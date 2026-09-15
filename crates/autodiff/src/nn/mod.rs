@@ -80,6 +80,7 @@
 //! 参照）。
 
 mod attention;
+mod batch_norm;
 mod container;
 mod dropout;
 mod embedding;
@@ -94,6 +95,9 @@ pub mod loss;
 pub mod optim;
 
 pub use attention::{MultiheadAttention, MultiheadAttentionVars};
+pub use batch_norm::{
+    BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,
+};
 pub use container::{ModuleList, Sequential};
 pub use dropout::Dropout;
 pub use embedding::{Embedding, EmbeddingVars};

@@ -139,6 +139,7 @@
 //! （`elementwise`／`gemm`／`gemm_blis`／`reduction`／`parity`）は変更
 //! しない。bf16（#1699）は別イシューで担当する。
 
+mod batch_norm;
 mod bce;
 mod cast;
 mod constant_pad;
@@ -222,6 +223,7 @@ mod typed_f64;
 // 到達するためクレートルートの兄弟モジュールとして配置する）。
 mod typed_bf16;
 
+pub use batch_norm::{BatchNormError, run_batch_norm_infer_f32, run_batch_norm_train_f32};
 pub use device::CpuDeviceProvider;
 pub use elementwise::{
     add, add_slice, exp, exp_slice, mul, mul_slice, relu, relu_slice, tanh, tanh_slice,
