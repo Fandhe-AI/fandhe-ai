@@ -216,11 +216,12 @@ train モードは `M <= 1` を `AutodiffError::InvalidArgument` で拒否する
 
 ## 7. 対象外（CUDA／Metal 兄弟 issue への申し送り含む）
 
-- **Metal（#1736）カーネル**: 縮約順序契約（§3.1）は本 issue が確定
-  済み。`BackendOps::batch_norm_train`／`batch_norm_infer` は既定
-  `Unsupported` のまま本 issue では変更しない（`Var::batch_norm*` は
-  自動的にホスト参照実装へフォールバックするため既存の `#[ignore]`
-  テストに影響しない）。**CUDA は #1735 で実装済み（§9 参照）**
+- **CUDA（#1735）／Metal（#1736）カーネル**: 縮約順序契約（§3.1）は本
+  issue が確定済み。両バックエンドとも `BackendOps::batch_norm_train`／
+  `batch_norm_infer` は既定 `Unsupported` のまま本 issue では変更しない
+  （`Var::batch_norm*` は自動的にホスト参照実装へフォールバックするため
+  既存の `#[ignore]` テストに影響しない）。**CUDA は #1735、Metal は
+  #1736 でそれぞれ実装済み（§9 参照）**
 - `momentum=None`（累積移動平均）
 - `track_running_stats=false`
 - `named_buffers`／state_dict 直列化（running stats を buffer として
@@ -264,7 +265,146 @@ CUDA／Metal 実機は本 issue の対象外（`BackendOps` 既定 `Unsupported`
 よりホストフォールバックへ到達するため）。兄弟 #1735／#1736 が実機 parity
 を担う。
 
-## 9. CUDA 実装記録（#1735）
+## 9. Metal 実装記録（#1736）
+
+### 9.1 数値方式: soft-f64（issue 題名の Neumaier＋scale/ssq は不採用）
+
+issue 題名は「Neumaier 補償和＋scale/ssq 方式」を指定していたが、実装は
+**soft-f64（IEEE 754 binary64 の 64bit 整数ソフトウェアエミュレーション）
+方式**を採用した。理由: 同一の計算列（mean → 二パス var → rstd →
+affine）を持つ Metal LayerNorm（#1596）が当初 Neumaier＋scale/ssq で
+実装されていたが、PR #1671 codex-review 指摘の 2 系統の反例（行スケール
+除算での subnormal FTZ 消失・`rstd` の `f32` 丸めが affine の相殺で
+増幅される問題）により REQ-2 統一複合判定を満たせず soft-f64 へ全面
+置換された経緯がある（`crates/backend-metal/src/shaders/layer_norm.metal`
+冒頭コメント「数値方式」参照）。BatchNorm の統計計算は LayerNorm と
+同型の反例を抱えるため、実装時点から soft-f64 方式を採用した。
+`.claude/rules/coding-rust.md`「正規化統計の二乗和」節は Neumaier＋
+scale/ssq を Metal の f64 相当実装形として挙げるが禁止規定ではなく、
+soft-f64 は「f64 相当の精度を保つ」契約をより強く満たす。
+
+### 9.2 カーネル構成
+
+`crates/backend-metal/src/shaders/batch_norm.metal`（新設）に 2 カーネル
+を実装:
+
+- **`batch_norm_train_f32`**: 1 threadgroup = 1 simdgroup（32 レーン）
+  = 1 チャネル、persistent threadgroup 方式
+  （`for (ch = tg_id; ch < c; ch += grid_size)`。`layer_norm.metal` の
+  行ループをチャネルへ置換）。パス 1（平均。soft-f64 総和 + 5 段
+  butterfly reduction + `bn_f64_div`）→ パス 2（二パス分散）→ パス 3
+  （書き出し。round-to-odd 経由 affine）の 3 段走査。`mean_out`／
+  `var_out`（`BatchNormTrainOutput::batch_mean`／`batch_var` 用）は
+  lane 0 のみが書き出す
+- **`batch_norm_infer_f32`**: 統計を再計算しないため grid-stride 不要の
+  単純 elementwise（`if (gid >= numel) return;` の手動境界検査）
+- soft-f64 プリミティブ（`bn_f64_*`）は `layer_norm.metal::ln_f64_*` の
+  接頭辞置換による逐語複製（MSL は翻訳単位を共有できないため意図的な
+  重複。`tests/batch_norm_source_evidence.rs::
+  bn_f64_primitives_match_ln_f64_primitives_verbatim_modulo_prefix` が
+  ドリフトを検出する）
+- **`M`（チャネルごとの縮約要素数 `n*spatial`）の f64 表現**は
+  `layer_norm.metal` の `validate_hidden_exact_f32`（`2^24` 超を起動前
+  拒否）方式を踏襲しない——BatchNorm2d の `M` は実用形状で容易に
+  `2^24` を超えるため。代わりにホスト側（`batch_norm.rs::
+  run_batch_norm_train_f32`）が `(m as f64).to_bits()` を計算し、上位
+  ／下位 32bit の 2 引数（`m_f64_hi`／`m_f64_lo`）としてカーネルへ渡す
+
+### 9.3 判定契約
+
+CPU との bit 一致は主張しない。`batch_mean` は CPU（`warp_reduce_f64`
+逐次蓄積 → butterfly → 正しく丸めた除算）と同じ縮約順序・演算のため
+bit 一致する見込みだが、CPU の分散は `f64` FMA・ハードウェア `sqrt` で
+あるのに対し soft-f64 は `mul`+`add`（二重丸め）・Newton-Raphson
+`rsqrt` のため `var`／`rstd`／出力は bit 一致しない。よって本カーネル
+全体は REQ-2 統一複合判定（`fandhe_ai_backend_cpu::parity::
+assert_parity`）で CPU 参照実装と検証する。
+
+### 9.4 実装ファイル
+
+- `crates/backend-metal/src/shaders/batch_norm.metal`（新設）
+- `crates/backend-metal/src/batch_norm_model.rs`（新設・`cfg` なし。
+  `validate_batch_norm_launch`・`channel_index`・`m_f64_bits`・
+  ホスト側 soft-f64 逐語モデル `batch_norm_train_host_model`／
+  `batch_norm_infer_host_model`。`crate::soft_f64` の既存プリミティブ
+  を呼ぶのみで新規 soft-f64 実装は持たない）
+- `crates/backend-metal/src/batch_norm.rs`（新設・`cfg(macos)`。
+  `MetalBatchNorm::new`／`run_batch_norm_train_f32`／
+  `run_batch_norm_infer_f32`）
+- `crates/backend-metal/src/error.rs::{MetalError::
+  InvalidBatchNormShape, MetalError::BatchNormSizeLimitExceeded}`
+- `crates/backend-metal/src/context_cache.rs::cached_batch_norm`
+- `crates/backend-metal/src/ops.rs::{map_batch_norm_error,
+  MetalBackendOps::batch_norm_train, MetalBackendOps::batch_norm_infer}`
+- `crates/backend-metal/src/lib.rs`（`pub mod batch_norm_model;`・
+  `pub mod batch_norm;`〈cfg macos〉・`pub use batch_norm::
+  MetalBatchNorm;`）
+
+### 9.5 エラー写像
+
+`MetalError::BatchNormSizeLimitExceeded`（`n`／`c`／`spatial`／`m`／
+`numel` のいずれかがカーネル引数 `uint`〈`u32::MAX`〉上限を超過）
+**のみ** `BackendError::Unsupported` へ写像しホストフォールバックへ
+委ねる。`MetalError::InvalidBatchNormShape`（`weight`／`bias`／
+`mean`／`var` の長さ不一致・`eps` 検査等）は CPU 側
+`CpuBackendOps::batch_norm_train` と同じ `KernelLaunchFailed` へ揃える
+（`ops.rs::map_batch_norm_error`。`map_im2col_error` と同じ設計判断・
+`backend-cuda::ops::map_batch_norm_error` と対になる）。
+
+### 9.6 テスト
+
+- `crates/backend-metal/src/batch_norm_model.rs`（クレート内単体
+  テスト。Linux 実行可能。検証関数・`channel_index`・`m_f64_bits`・
+  ホスト soft-f64 モデルと `fandhe_ai_backend_cpu::
+  run_batch_norm_train_f32`／`run_batch_norm_infer_f32` の REQ-2 突合
+  を含む 13 件。全 green——soft-f64 モデルの正しさをデバイス非依存で
+  裏付ける）
+- `crates/backend-metal/tests/batch_norm_source_evidence.rs`
+  （Linux 実行可能。11 件。`BN_IDX` の `ulong` 演算・infer の手動
+  境界検査・train の persistent threadgroup ループ・5 段 butterfly・
+  soft-f64 widen/add/div の使用・`M` の厳密ビット渡し・round-to-odd
+  affine・`threadgroup_barrier` 不使用・predicated select・
+  `bn_f64_*` ↔ `ln_f64_*` ドリフトガードを固定）
+- `crates/backend-metal/tests/batch_norm_parity.rs`（macOS 限定・
+  `#[ignore]`。形状網羅〈rank 2／3／4 相当・`M` が 32 の倍数でない・
+  `M=1`〜大形状・affine 4 分岐〉の `f64` naive 参照との突合・極端な
+  値〈`1e18`。内部 soft-f64 計算自体は `2e20` 級でも有限のまま完結
+  するが、`var` を最終的に `f32` へ narrow する時点で正当に `+inf`
+  になりうるため、本テストの意図〈NaN／中間 overflow の不在確認〉に
+  沿う規模へ調整済み。codex-review 指摘〉での有限性・NaN の該当
+  チャネル限定伝播・run-to-run 決定性・`MetalBackendOps` vs
+  `CpuBackendOps` 直接突合・非 contiguous 入力・weight 長さ不一致
+  拒否・空軸早期 return）
+- `crates/facade/tests/batch_norm_backend_parity.rs`（既存の
+  `metal_batch_norm_train_forward_matches_cpu` のみ。当初は
+  `metal_batch_norm_infer_forward_matches_cpu`／
+  `metal_batch_norm_train_backward_matches_cpu`／
+  `metal_batch_norm_train_forward_rank4_matches_cpu` も本 issue で
+  追加したと記載していたが、実際にこの 3 件は同ファイル内の
+  `cuda_batch_norm_infer_forward_matches_cpu`／
+  `cuda_batch_norm_train_backward_matches_cpu`／
+  `cuda_batch_norm_train_forward_rank4_matches_cpu`（CUDA 版。
+  兄弟 issue #1735 で追加）であり、Metal 版の対応テストは存在しない
+  ——記載と実装の不一致だったため訂正する。codex-review 指摘。Metal
+  側の infer／backward／rank4 テスト追加は対象外のまま §9.7 へ
+  引き継ぐ）
+
+facade 新規公開面なし（`crates/facade/src/**` 無変更。`Var::
+batch_norm*` は既存 `pub use Var` 経由）。M4 Max 実機実測は本エージェント
+実行環境に Apple Silicon 実機がないため未実施のまま
+`docs/perf/logs/metal-batch-norm-1736/README.md` へ申し送る。
+
+### 9.7 対象外（本 issue でも変更しない）
+
+§7 と同じ（GPU backward・性能最適化・`momentum=None`・
+`track_running_stats=false`・rank 5・channels-last 等）。加えて
+デバイス常駐入出力（`DeviceBuffer` 経由の `batch_norm`）も対象外。
+`crates/facade/tests/batch_norm_backend_parity.rs` への Metal 版
+`metal_batch_norm_infer_forward_matches_cpu`／
+`metal_batch_norm_train_backward_matches_cpu`／
+`metal_batch_norm_train_forward_rank4_matches_cpu` の追加（§9.6
+訂正参照）も本 issue のスコープ外のまま後続 issue へ引き継ぐ。
+## 10. CUDA 実装記録（#1735）
 
 §3.1「CUDA（1 warp = 1 channel）が再現すべき契約」（`warp_reduce_f64`
 butterfly 縮約・二パス分散・`double` アキュムレータ）を逐語実装した
@@ -272,7 +412,7 @@ NVRTC カーネル 2 本（train／infer）を追加し、`CudaBackendOps::
 batch_norm_train`／`batch_norm_infer` を新設カーネル経由へオーバー
 ライドした（`Var::batch_norm*` の判定規律は不変）。
 
-### 9.1 設計判断
+### 10.1 設計判断
 
 - **カーネル分割**: train は `1 CTA = 1 warp（32 レーン）= 1 channel`・
   `grid_dim = c`（`kernels_layer_norm.rs` と同じ 1 対 1 マッピング。
@@ -298,7 +438,7 @@ batch_norm_train`／`batch_norm_infer` を新設カーネル経由へオーバ�
   （`fandhe_ai_backend_cpu::parity::assert_parity`）を正式判定とする
   （bit 一致は主張・assert しない）
 
-### 9.2 実装ファイル
+### 10.2 実装ファイル
 
 - `crates/backend-cuda/src/kernels_batch_norm.rs`（新設。
   `BATCH_NORM_TRAIN_F32`／`BATCH_NORM_INFER_F32` の NVRTC ソース文字列）
@@ -326,7 +466,7 @@ VJP の結線確認〉・`cuda_batch_norm_train_forward_rank4_matches_cpu`）。
 **facade 新規公開面なし**（`crates/facade/src/**` は無変更。`Var::
 batch_norm*` は既存再エクスポート経由）。
 
-### 9.3 対象外（本 issue のスコープ外）
+### 10.3 対象外（本 issue のスコープ外）
 
 - CUDA persistent grid／occupancy 最適化・`M` 方向並列化・`float4`
   ベクトル化（性能課題。`c` が少なく `M` が巨大な形状では 1 warp = 1

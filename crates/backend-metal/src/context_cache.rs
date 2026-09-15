@@ -71,6 +71,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 
+use crate::batch_norm::MetalBatchNorm;
 use crate::constant_pad::MetalConstantPad;
 use crate::context::MetalContext;
 use crate::elementwise::MetalElementwise;
@@ -111,6 +112,7 @@ const _: fn() = || {
     assert_send_sync::<MetalElementwise>();
     assert_send_sync::<MetalRmsNorm>();
     assert_send_sync::<MetalLayerNorm>();
+    assert_send_sync::<MetalBatchNorm>();
     assert_send_sync::<MetalSoftmax>();
     assert_send_sync::<MetalAllocator>();
     assert_send_sync::<MetalGatherScatter>();
@@ -181,6 +183,17 @@ pub(crate) fn cached_layer_norm(
     static CACHE: OnceLock<Mutex<Option<Arc<MetalLayerNorm>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || MetalLayerNorm::new(ctx))
+}
+
+/// [`MetalBatchNorm`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1736）。`ops::MetalBackendOps::batch_norm_train`／
+/// `batch_norm_infer` の唯一の呼び出し先。
+pub(crate) fn cached_batch_norm(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<MetalBatchNorm>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<MetalBatchNorm>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || MetalBatchNorm::new(ctx))
 }
 
 /// [`MetalSoftmax`] スイートをプロセス内キャッシュから取得する。
