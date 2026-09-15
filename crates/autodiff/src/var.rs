@@ -2949,9 +2949,10 @@ impl<'t> Var<'t> {
     /// #1766／#1767 で到達済み・Metal 専用 im2col／col2im カーネルも
     /// #1768 で到達済み（いずれも新規 `Op`／`BackendOps`／カーネル
     /// なしの reshape 併合のため、`conv2d` 側の CUDA／Metal override
-    /// へそのまま委譲される。Metal 経路自体の実機検証は #1769 が
-    /// 対象）。`nn::Conv1d` 層・`compat::Sequential::add_conv1d` は
-    /// 対象外（#1770 へ引き継ぐ）。
+    /// へそのまま委譲される。Metal 経路の 1d 形状テスト（model・
+    /// ops・facade bit 一致）は #1769 で追加済み。CUDA／Metal 実機
+    /// 実測は #1771 へ申し送り）。`nn::Conv1d` 層・
+    /// `compat::Sequential::add_conv1d` は対象外（#1770 へ引き継ぐ）。
     #[allow(clippy::too_many_arguments)]
     pub fn conv1d(
         &self,

@@ -27,6 +27,19 @@
 //! 通るため forward／backward とも bit 完全一致する——を実機で固定
 //! する（`crates/autodiff/tests/conv1d.rs::matches_manual_reshape_
 //! conv2d_bit_exact` の CUDA 版）。
+//!
+//! **Metal（イシュー #1769「Conv1d を Conv2d の特化として実装する」）**:
+//! Metal は #1768 で `BackendOps::im2col`／`col2im` を override 済み
+//! （bit 完全一致契約）で、`conv1d` 自身は #1765 の reshape 併合
+//! （新規 `Op`／`BackendOps`／カーネルなし）のため、Metal 経路も
+//! `conv2d_backend_parity.rs::metal_conv2d_backward_matches_cpu` と
+//! 同じく「Metal im2col（bit 一致）→ Metal GEMM（REQ-2 複合判定）→
+//! add → Metal col2im（bit 一致）」の合成としてそのまま到達する
+//! （本イシュー追記時点でコード変更はテストのみ・facade 新規公開面
+//! なし）。`metal_conv1d_matches_manual_reshape_conv2d_bit_exact` は
+//! CUDA 版と同じ「特化」契約を Metal 実機で固定する。実機（Apple
+//! Silicon）実測は本イシューでは未実施のまま
+//! `docs/perf/logs/metal-conv1d-1769/` へ申し送る。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Device;
@@ -294,17 +307,17 @@ fn cuda_conv1d_backward_matches_cpu() {
 }
 
 /// イシュー #1767「Conv1d を Conv2d の特化として実装する」の中核
-/// 契約: 同一 CUDA tape 上で `conv1d` と「手動 reshape → `conv2d` →
+/// 契約: 同一 tape 上で `conv1d` と「手動 reshape → `conv2d` →
 /// reshape」が forward／backward とも **bit 完全一致**する
 /// （`crates/autodiff/tests/conv1d.rs::matches_manual_reshape_conv2d_
-/// bit_exact` の CUDA 版。`conv1d` は新規カーネルを持たず reshape
-/// 併合のみのため、CUDA の im2col／col2im／GEMM いずれも同一形状・
+/// bit_exact` の実機横断版。`conv1d` は新規カーネルを持たず reshape
+/// 併合のみのため、GPU の im2col／col2im／GEMM いずれも同一形状・
 /// 同一カーネル呼び出しを経由し bit 同一が構造的に成立する）。
-#[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
-fn cuda_conv1d_matches_manual_reshape_conv2d_bit_exact() {
-    let tape = fandhe_ai::tape_for(Device::Cuda(0))
-        .expect("実機が利用可能な前提のテストのため成功するはず");
+/// CUDA（`cuda_conv1d_matches_manual_reshape_conv2d_bit_exact`）・
+/// Metal（`metal_conv1d_matches_manual_reshape_conv2d_bit_exact`。
+/// イシュー #1769）の両方から共用する（本体抽出。#1769）。
+fn conv1d_matches_manual_reshape_conv2d_on(device: Device) {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
 
     let n = 2usize;
     let cin = 3usize;
@@ -367,49 +380,117 @@ fn cuda_conv1d_matches_manual_reshape_conv2d_bit_exact() {
     let db2 = grads2.get(&b2).unwrap().expect("到達する").clone();
 
     assert_bits_eq(
-        "conv1d vs manual-reshape conv2d（CUDA forward）",
+        "conv1d vs manual-reshape conv2d（forward）",
         &contiguous_slice(&out1),
         &contiguous_slice(&out2),
     );
     assert_bits_eq(
-        "conv1d vs manual-reshape conv2d（CUDA d_input）",
+        "conv1d vs manual-reshape conv2d（d_input）",
         &contiguous_slice(&dx1),
         &contiguous_slice(&dx2),
     );
     assert_bits_eq(
-        "conv1d vs manual-reshape conv2d（CUDA d_weight）",
+        "conv1d vs manual-reshape conv2d（d_weight）",
         &contiguous_slice(&dw1),
         &contiguous_slice(&dw2),
     );
     assert_bits_eq(
-        "conv1d vs manual-reshape conv2d（CUDA d_bias）",
+        "conv1d vs manual-reshape conv2d（d_bias）",
         &contiguous_slice(&db1),
         &contiguous_slice(&db2),
     );
 }
 
-/// groups＋dilation を伴う 1d 形状の CUDA forward parity（イシュー
-/// #1767。`conv2d_backend_parity.rs` の groups 系ケースと同型）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_conv1d_matches_manual_reshape_conv2d_bit_exact() {
+    conv1d_matches_manual_reshape_conv2d_on(Device::Cuda(0));
+}
+
+/// groups＋dilation を伴う 1d 形状の forward（`device` 上で実行）。
+/// CUDA（`cuda_conv1d_forward_matches_cpu_groups_dilation`）・Metal
+/// （`metal_conv1d_forward_matches_cpu_groups_dilation`。イシュー
+/// #1769）の両方から共用する（本体抽出。`conv2d_backend_parity.rs`
+/// の groups 系ケースと同型）。
+fn conv1d_forward_groups_dilation_on(device: Device) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x = tape.make_var(&leaf(21, &[2, 4, 11]));
+    let w = tape.make_var(&leaf(22, &[4, 1, 3]));
+    let b = tape.make_var(&leaf(23, &[4]));
+    x.conv1d(&w, Some(&b), 1, 2, 2, 4)
+        .expect("conv1d: 常に成功する形状")
+        .to_tensor()
+}
+
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn cuda_conv1d_forward_matches_cpu_groups_dilation() {
-    fn forward_groups_dilation(device: Device) -> Tensor<f32> {
-        let tape =
-            fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
-        let x = tape.make_var(&leaf(21, &[2, 4, 11]));
-        let w = tape.make_var(&leaf(22, &[4, 1, 3]));
-        let b = tape.make_var(&leaf(23, &[4]));
-        x.conv1d(&w, Some(&b), 1, 2, 2, 4)
-            .expect("conv1d: 常に成功する形状")
-            .to_tensor()
-    }
-
-    let cuda_out = forward_groups_dilation(Device::Cuda(0));
-    let cpu_out = forward_groups_dilation(Device::Cpu);
+    let cuda_out = conv1d_forward_groups_dilation_on(Device::Cuda(0));
+    let cpu_out = conv1d_forward_groups_dilation_on(Device::Cpu);
 
     assert_parity(
         "conv1d forward（groups=4・dilation=2）: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&cuda_out),
+        &contiguous_slice(&cpu_out),
+    );
+}
+
+// --- Metal（イシュー #1769）。#1768 で Metal `im2col`／`col2im` が
+// bit 一致契約で override 済み・`conv1d` 自身は #1765 の reshape
+// 併合（新規 Op／BackendOps／カーネルなし）のため、Metal 経路も
+// 「Metal im2col（bit 一致）→ Metal GEMM（REQ-2 複合判定）→ add →
+// Metal col2im（bit 一致）」の合成としてそのまま到達する（本ファイル
+// 追記時点でコード変更はテストのみ・facade 新規公開面なし）。 ---
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_conv1d_backward_matches_cpu() {
+    let (dx_metal, dw_metal, db_metal) = conv1d_backward_on(Device::Metal);
+    let (dx_cpu, dw_cpu, db_cpu) = conv1d_backward_on(Device::Cpu);
+
+    assert_parity(
+        "conv1d backward（dx）: Metal tape_for vs CPU tape_for",
+        &contiguous_slice(&dx_metal),
+        &contiguous_slice(&dx_cpu),
+    );
+    assert_parity(
+        "conv1d backward（dw）: Metal tape_for vs CPU tape_for",
+        &contiguous_slice(&dw_metal),
+        &contiguous_slice(&dw_cpu),
+    );
+    assert_parity(
+        "conv1d backward（db）: Metal tape_for vs CPU tape_for",
+        &contiguous_slice(&db_metal),
+        &contiguous_slice(&db_cpu),
+    );
+}
+
+/// イシュー #1769 の中核契約（Metal 版）: 同一 Metal tape 上で
+/// `conv1d` と手動 reshape の `conv2d` が forward／backward とも
+/// bit 完全一致する（CUDA 版
+/// `cuda_conv1d_matches_manual_reshape_conv2d_bit_exact` と同型。
+/// `conv1d_matches_manual_reshape_conv2d_on` を共用）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_conv1d_matches_manual_reshape_conv2d_bit_exact() {
+    conv1d_matches_manual_reshape_conv2d_on(Device::Metal);
+}
+
+/// groups＋dilation を伴う 1d 形状の Metal forward parity（イシュー
+/// #1769。CUDA 版 `cuda_conv1d_forward_matches_cpu_groups_dilation`
+/// と同型）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_conv1d_forward_matches_cpu_groups_dilation() {
+    let metal_out = conv1d_forward_groups_dilation_on(Device::Metal);
+    let cpu_out = conv1d_forward_groups_dilation_on(Device::Cpu);
+
+    assert_parity(
+        "conv1d forward（groups=4・dilation=2）: Metal tape_for vs CPU tape_for",
+        &contiguous_slice(&metal_out),
         &contiguous_slice(&cpu_out),
     );
 }

@@ -14,6 +14,9 @@
 //! の `f64` 逐次和・1 回 downcast）と **bit 完全一致**
 //! （`.claude/rules/coding-rust.md` 数値契約節）。
 //!
+//! 1d 形状 6 件は #1768 で先行追加済み（`CASES` に含む）。#1769 で
+//! 1d 契約を facade 側（手動 reshape bit 一致）まで固定する。
+//!
 //! 実行コマンド（Apple Silicon 実機。`#[ignore]` テストのみ）:
 //!
 //! ```sh
@@ -434,5 +437,35 @@ fn im2col_col2im_zero_batch() {
     let metal_back = metal
         .col2im(&d_col, &[0usize, 2, 5, 5], &p)
         .expect("metal col2im(N=0) must succeed on real device");
+    assert_eq!(cpu_back.shape(), metal_back.shape());
+}
+
+/// N=0（1d 形状。`H=1`・`kh=1`）の実機確認（イシュー #1769。上記
+/// `im2col_col2im_zero_batch` の 1d 版）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn im2col_col2im_zero_batch_1d() {
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+
+    let p = params([1, 2], [1, 1], [0, 0], [1, 1], 1);
+    let input = Tensor::new(Vec::<f32>::new(), &[0usize, 1, 1, 4]).expect("valid tensor");
+    let cpu_out = cpu
+        .im2col(&input, &p)
+        .expect("cpu im2col(N=0, 1d) succeeds");
+    let metal_out = metal
+        .im2col(&input, &p)
+        .expect("metal im2col(N=0, 1d) must succeed on real device");
+    assert_eq!(cpu_out.shape(), metal_out.shape());
+    assert!(cpu_out.shape().contains(&0));
+
+    let col_shape = im2col_out_shape(&[0usize, 1, 1, 4], &p).expect("valid im2col_out_shape");
+    let d_col = Tensor::new(Vec::<f32>::new(), &col_shape).expect("valid empty d_col");
+    let cpu_back = cpu
+        .col2im(&d_col, &[0usize, 1, 1, 4], &p)
+        .expect("cpu col2im(N=0, 1d) succeeds");
+    let metal_back = metal
+        .col2im(&d_col, &[0usize, 1, 1, 4], &p)
+        .expect("metal col2im(N=0, 1d) must succeed on real device");
     assert_eq!(cpu_back.shape(), metal_back.shape());
 }
