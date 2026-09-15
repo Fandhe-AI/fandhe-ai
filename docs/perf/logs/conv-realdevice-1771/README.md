@@ -132,7 +132,7 @@ cargo test -p fandhe-ai --release --test nn_conv_backend_parity -- --ignored --n
 ### 4) run-to-run 決定性
 
 - 同一入力で 2 回起動しても `bits=`／`fold_bits=` 行が完全一致する
-  こと。**`check_determinism.sh <run1_dir> <run2_dir>` を使う**
+  こと。**`check_determinism.sh --expect-logs <name1,...> <run1_dir> <run2_dir>` を使う**
   （素の `grep -E 'bits=|fold_bits=' | diff` だけでは、対象テストの
   出力に抽出対象行が 1 件も無い場合に空の抽出結果同士が自明に一致
   してしまい起動間の変化を検出できない〈PR #1882 レビュー指摘〉。
@@ -142,10 +142,31 @@ cargo test -p fandhe-ai --release --test nn_conv_backend_parity -- --ignored --n
   `run_ignored_tests_{cuda,metal}.sh` を出力先を変えて 2 回実行し
   （1 回目の `cuda/ignored`／`metal/ignored` を `-run1` へ退避してか
   ら 2 回目を実行し `-run2` へ退避する等）、対応するログディレクトリ
-  同士を渡す。すべての対象ログ（本 README「対象テスト一覧」1)〜2)
-  の 4〈CUDA〉／4〈Metal〉グループ）で `bits=`／`fold_bits=` 抽出行が
-  1 件以上存在することも、このチェックにより機械的に保証される
-  （新設テストのいずれかで印字漏れが再発しても FAIL で検出する）。
+  同士を渡す。`--expect-logs` には本 README「対象テスト一覧」1)〜2)
+  の 4〈CUDA〉／4〈Metal〉グループのログ名（`run_ignored_tests_
+  {cuda,metal}.sh` の `run_case` 呼び出し名と同一）を渡す:
+  `im2col_col2im_parity,conv2d_backend_parity,conv1d_backend_parity,nn_conv_backend_parity`。
+  これにより次の 2 点が機械的に保証される（**PR #1882 追加レビュー
+  指摘の是正**）:
+  - 走査は run1／run2 の `*.log` の**和集合**に対して行う（旧実装は
+    run1 側の `*.log` のみを走査しており、run2 側にのみ存在する
+    ログ〈run1 側の取りこぼし等〉を一度も検査せず見逃していた）
+  - `--expect-logs` で列挙した 4 グループのログ名それぞれが run1・
+    run2 の**両方**に存在し抽出行が 1 件以上あることを検査する
+    （旧実装は「run1／run2 に実在するログ」しか把握しておらず、ある
+    期待ログが run1・run2 の**両方**から丸ごと欠落した場合〈ビルド
+    失敗・実行忘れ・出力先パスの取り違え等〉は走査対象にすら現れず
+    検出できなかった）
+
+  **既知の残存限界**: 既存ログ自体は存在し run1／run2 間の抽出行数
+  も一致するが、本来あるべき `print_fold_bits` 呼び出し 1 件が
+  run1・run2 の**両方で同一に**欠落しているケース（ログファイル単位
+  ではなくログ内の特定ケース単位の印字漏れが両起動で再現する場合）
+  は、run1 と run2 の相互比較だけでは原理的に検出できない（比較対象
+  となる「期待される行数・ラベル集合」の run1/run2 から独立した正が
+  このランブックには無いため）。対象は本番コードではなく診断専用の
+  ログ・スクリプトであることを踏まえ、ログファイル単位の欠落検出
+  （上記 2 点）に留める。
 
 ### 5) 学習ループ（record-only。`{cuda,metal}_sequential_conv2d_sgd_steps_record_only`）
 
