@@ -119,6 +119,7 @@ fandhe-ai/
     ├── facade-onnx-import-exposure-decision.md # ONNX import（`onnx-interop::onnx::interp`。推論専用グラフ解釈器・autograd 未接続）の facade 公開可否の設計判断記録（コード変更なし。DDP／量子化と異なり除外事項への従属なしと確認・「facade 公開＝onnx-interop の crates.io 公開」という構造的等価性の整理・薄いラッパー原則に基づく案 B〈`OnnxModel`／`OnnxValue`〉推奨・publish 承認未取得のため現時点は非公開のまま段階 0・#1775／#1754 への読み替え。イシュー #1652）
     ├── facade-onnx-export-exposure-decision.md # ONNX export（`onnx-interop::onnx::export`。#1772〜#1774 で本体実装完了済み）の facade 公開可否の設計判断記録（#1652 の読み替え〈close しない・publish 承認待ちの段階 0〉を踏襲。export 固有の論点として export 元の限定・`Sequential`／`nn` -> `ExportNode` 橋渡しの配置候補を整理。唯一のコード変更は `crates/facade/tests/api_surface.rs` への段階 0 固定 guard テスト 2 件〈facade が非公開クレート `onnx-interop` へ依存しないことの機械的固定〉。イシュー #1775）
     ├── facade-optimizer-promotion-decision.md # facade optimizer 公開 API 昇格の設計判断（#932）
+    ├── facade-safetensors-exposure-decision.md # safetensors save／load（`onnx-interop::st_load`／`st_save`）の facade 公開可否の設計判断記録（#1652／#1775 と同型の publish 前提〈`onnx-interop` の crates.io 公開が facade 公開面拡張の一般承認範囲外〉を踏襲。案比較（A: publish→再エクスポート／B: facade 直接 `safetensors` 依存の独立実装／C: tensor-core 配置／D: 非公開のまま path 依存／E: 段階 0）・推奨（案 B。未承認）・再開条件を整理。コード変更なし。`Tensor` の `Debug`／`Display` 実装は本 issue で別途完了済み〈`tensor-core::tensor_fmt`〉。イシュー #1754）
     ├── git-history-exposure-decision.md # git 履歴残存内部情報・個人メールアドレスの扱い判断・暫定方針（#477）
     ├── guardrail-change-policy.md    # TASK-6.2 判定器変更時フローの明文化（#149）
     ├── guardrail-self-repair-cli.md  # guardrail／self-repair CLI コマンド仕様（#183）
@@ -312,7 +313,8 @@ fandhe-ai/
     │   ├── device-checksum-readback-ab.md # checksum（全要素和）をデバイス側 f64 reduction で求め読み戻しを 8 バイトにする経路を bench-fandhe（`Var::matmul_checksum`・`device-checksum` cargo feature）と bench-candle（`sum_all().to_dtype(F64)`。Metal は F64 reduction 非対応のため f32 のまま）へ実装。`tensor-core::BackendOps::gemm_checksum`／`autodiff::Var::matmul_checksum` の公開 API 追加・`backend-cpu` 実装（`gemm` と bit 同一・checksum はホスト f64 逐次和と bit 一致）・python 集計ツール群（summarize.py 等）の `device_checksum` 除外を完了。`backend-cuda`／`backend-metal` の GPU 側 reduction カーネル実装は本イシューのスコープ外（デフォルト `Unsupported` のまま）で後続イシューへ引き継ぎ・実機 A/B 実測は未実施のまま記入欄を残す（イシュー #1339）
     │   ├── logs/metal-typed-bf16-probe-1706/ # Metal `TypedOps<bf16>`（#1706）の (b) 調査（`crate::typed_bf16_probe_diag_tests`。MSL `bfloat`／`simdgroup_bfloat8x8` のコンパイルプローブ）実行手順・保存すべきログ一覧（P0〜P4）を記載する README。本エージェント実行環境に Apple Silicon 実機への到達手段がなく実測は未実施のまま記入欄を残す（内部ホスト名は含めない。イシュー #1706）
     │   ├── logs/cuda-conv2d-1766/ # CUDA Conv2d im2col／col2im（#1766）の実行コマンド・保存すべきログ一覧・事前登録判定規則のみを記載する README。本エージェント実行環境に DGX Spark GB10 実機への到達手段がなく実測は未実施のまま記入欄を残す（内部ホスト名は含めない。イシュー #1766）
-    │   └── logs/cuda-conv1d-1767/ # CUDA Conv1d（#1767。`Var::conv1d` の #1766 CUDA `im2col`／`col2im` への reshape 併合到達検証）の実行コマンド・保存すべきログ一覧・事前登録判定規則のみを記載する README。本エージェント実行環境に DGX Spark GB10 実機への到達手段がなく実測は未実施のまま記入欄を残す（内部ホスト名は含めない。イシュー #1767）
+    │   ├── logs/cuda-conv1d-1767/ # CUDA Conv1d（#1767。`Var::conv1d` の #1766 CUDA `im2col`／`col2im` への reshape 併合到達検証）の実行コマンド・保存すべきログ一覧・事前登録判定規則のみを記載する README。本エージェント実行環境に DGX Spark GB10 実機への到達手段がなく実測は未実施のまま記入欄を残す（内部ホスト名は含めない。イシュー #1767）
+    │   └── logs/metal-conv2d-1768/ # Metal Conv2d im2col／col2im（#1768）の実行コマンド・保存すべきログ一覧・事前登録判定規則のみを記載する README。本エージェント実行環境に Apple Silicon 実機への到達手段がなく実測は未実施のまま記入欄を残す（内部ホスト名は含めない。イシュー #1768）
     ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── real-hardware-verification-env.md # 実機検証環境（Mac Metal / DGX Spark CUDA。実ホスト名はローカル管理外ファイル参照）の接続・転送・計測手順（#408・#461）

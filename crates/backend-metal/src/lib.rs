@@ -503,10 +503,22 @@ pub mod gather_scatter_model;
 // 触れないため `cfg(target_os = "macos")` を付けず、Linux（本実装環境・
 // CI）でも単体テストが回る。
 pub mod constant_pad_model;
+// `im2col.metal::im2col_f32`／`col2im_f32` のホスト側逐語モデル
+// （イシュー #1768）。`gather_scatter_model` と同じ設計判断で `objc2`
+// 系 FFI に触れないため `cfg(target_os = "macos")` を付けず、
+// Linux（本実装環境・CI）でも単体テストが回る。
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
 #[cfg(target_os = "macos")]
 pub mod huber;
+pub mod im2col_model;
+// Conv2d の im2col／col2im（`torch.nn.functional.unfold` の grouped 版
+// 相当・その随伴）起動 API（イシュー #1768・親 #1644）。`scan.rs`・
+// `constant_pad.rs` と同じ「カーネル起動は macOS 限定・ホストモデルは
+// Linux 実行可能」の 2 ファイル構成（`im2col_model.rs` は下記の `cfg`
+// なしブロックで宣言）。
+#[cfg(target_os = "macos")]
+pub mod im2col;
 #[cfg(target_os = "macos")]
 pub mod index_buffer;
 pub mod interpolate_model;

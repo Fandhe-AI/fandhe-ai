@@ -38,13 +38,13 @@
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BceKind, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
-    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
+    Activation, BackendOps, BceKind, BinaryElementwiseOp, Conv2dParams, DispatchFailureCell,
+    FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp,
     ScatterReduce, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, gather_out_shape,
-    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, reduce_out_shape,
-    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -250,6 +250,33 @@ pub(crate) fn checked_bytes_for<T>(shape: &[usize]) -> Result<(), ShapeError> {
 fn map_interpolate_error(err: MetalError) -> BackendError {
     match err {
         MetalError::InvalidInterpolateShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => BackendError::KernelLaunchFailed(other.to_string()),
+    }
+}
+
+/// `im2col.rs::MetalIm2col::run_im2col_f32`／`run_col2im_f32` のエラー
+/// を `BackendOps::im2col`／`col2im` の戻り値へ変換する（イシュー
+/// #1768）。[`MetalError::Im2colSizeLimitExceeded`]（形状パラメータが
+/// カーネル引数 `uint` 上限を超過。`im2col.rs::map_prepare_error` が
+/// [`crate::im2col_model::Im2colPrepareError::SizeLimitExceeded`] を
+/// 写像したもの）**のみ** [`BackendError::Unsupported`] へ写像し、
+/// `fandhe_ai_autodiff::grad::im2col_with_fallback`／
+/// `col2im_with_fallback` のホストフォールバック（`eval::im2col`／
+/// `col2im`）へ委ねる（col は入力の `kH·kW` 倍で現実的形状でも上限へ
+/// 到達しうるため hard fail ではなくフォールバックが妥当。
+/// `map_scan_prepare_error`・`backend-cuda::ops::map_im2col_error` と
+/// 同じ設計判断）。[`MetalError::InvalidIm2colShape`]（内部契約違反。
+/// 呼び出し元 `ops.rs` の事前検証を通過した入力からは実質到達しない
+/// 防御的経路）は `ShapeError::ElementCountOverflow` へ、それ以外
+/// （デバイス・パイプライン起動失敗等）は `KernelLaunchFailed` へ
+/// 変換する（判定迂回経路を作らない。`.claude/rules/security.md`
+/// A08）。
+fn map_im2col_error(err: MetalError) -> BackendError {
+    match err {
+        MetalError::Im2colSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        MetalError::InvalidIm2colShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
         other => BackendError::KernelLaunchFailed(other.to_string()),
@@ -2785,6 +2812,87 @@ impl BackendOps for MetalBackendOps {
             .run_pad_f32(&ctx, input_slice, &in_shape, pads, &out_shape, value)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::im2col` の Metal 実装（イシュー #1768）。
+    /// [`im2col_out_shape`] で `input.shape()`／`params` を再検査して
+    /// から `im2col::MetalIm2col::run_im2col_f32` へ委譲する（`pad` と
+    /// 同じ二重検査方針。`.claude/rules/security.md` A08）。`conv2d`
+    /// 自身は override しない（`fandhe_ai_tensor_core::backend_ops::
+    /// BackendOps::conv2d` doc・設計 `docs/conv-ops-design.md` §9）。
+    fn im2col(
+        &self,
+        input: &Tensor<f32>,
+        params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            im2col_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+
+        // 出力が空なら（`N`／`Cin` 系の軸が 0。空間軸は
+        // `im2col_out_shape` が事前に拒否する契約）`input` を読む必要
+        // が一切ない（`pad` の空出力早期リターンと同じ理由）。
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+        checked_bytes_for::<f32>(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("im2col: input not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let ic = context_cache::cached_im2col(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = ic
+            .run_im2col_f32(&ctx, input_slice, input.shape(), &out_shape, params)
+            .map_err(map_im2col_error)?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::col2im` の Metal 実装（イシュー #1768）。
+    /// [`im2col_out_shape`] で `input_shape`／`params` から期待する
+    /// `d_col` 形状（`[N, G, Cin_g·kH·kW, Hout·Wout]`）を導出し、
+    /// `d_col.shape()` との完全一致を検査したうえで `input_shape`
+    /// （＝戻り値として確保する出力 shape）自体のバイトサイズも
+    /// `checked_bytes_for::<f32>` で検査してから `im2col::MetalIm2col::
+    /// run_col2im_f32` へ委譲する（`im2col` と同じ二重検査方針。
+    /// `backend-cuda::ops::CudaBackendOps::col2im` の PR #1862
+    /// codex-review 是正と同じ理由で、`d_col` のサイズに依らず
+    /// `input_shape` 自体を確保前検査する）。
+    fn col2im(
+        &self,
+        d_col: &Tensor<f32>,
+        input_shape: &[usize],
+        params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let expected_col_shape =
+            im2col_out_shape(input_shape, params).map_err(BackendError::ShapeMismatch)?;
+        if d_col.shape() != expected_col_shape.as_slice() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: d_col.shape().to_vec(),
+                rhs: expected_col_shape,
+            }));
+        }
+        checked_bytes_for::<f32>(input_shape).map_err(BackendError::ShapeMismatch)?;
+
+        if input_shape.contains(&0) {
+            return Tensor::new(Vec::new(), input_shape).map_err(BackendError::ShapeMismatch);
+        }
+        checked_bytes_for::<f32>(d_col.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let d_col_owned = d_col.contiguous();
+        let d_col_slice = d_col_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("col2im: d_col not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let ic = context_cache::cached_im2col(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = ic
+            .run_col2im_f32(&ctx, d_col_slice, d_col.shape(), input_shape, params)
+            .map_err(map_im2col_error)?;
+        Tensor::new(out, input_shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// `BackendOps::scatter` の Metal 実装（イシュー #1778）。

@@ -48,20 +48,19 @@ struct Storage<T: Element> {
 /// 同値 view（例: 同一データを異なる `narrow` で参照した 2 つの
 /// `Tensor`）を構造的に不一致と誤判定するため。論理的な値の等価判定が
 /// 必要になった場合は要素比較の別 API として後続イシューで導入する。
-#[derive(Clone, Debug)]
+// `Debug` は手書き実装（`tensor_fmt.rs`）へ移行した。派生 `Debug` は
+// 構造体フィールド（`storage`/`offset`/`shape`/`strides`）をそのまま
+// 出力するため値が一切見えず、`Tape: Debug`（`docs/public-api-design.md`
+// §7 の公開契約）越しに多数の `Tensor` を保持する `Var`/`Op` を
+// ダンプする用途では PyTorch の `print(t)` 相当の debuggability が
+// 得られない（イシュー #1754）。手書き実装は構造情報を維持しつつ
+// 打ち切り付きの値プレビューを加える（`tensor_fmt.rs` 参照）。
+#[derive(Clone)]
 pub struct Tensor<T: Element> {
     storage: Arc<Storage<T>>,
     offset: usize,
     shape: Vec<usize>,
     strides: Vec<isize>,
-}
-
-impl<T: Element> std::fmt::Debug for Storage<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Storage")
-            .field("len", &self.data.len())
-            .finish()
-    }
 }
 
 /// shape から行優先（row-major）の strides を計算する。
@@ -278,6 +277,17 @@ impl<T: Element> Tensor<T> {
     /// storage 先頭からの要素オフセットを返す。
     pub fn offset(&self) -> usize {
         self.offset
+    }
+
+    /// 共有 `storage` の総要素数を返す（`self.numel()` とは異なり view
+    /// が指す論理サイズではなく、`Arc` 共有元バッファの物理長）。
+    ///
+    /// `tensor_fmt.rs` の `Debug` 実装が構造情報（`Storage { len }` 相当）
+    /// を維持表示するためのクレート内限定アクセサ。`Storage` 自体は
+    /// private のため `tensor_fmt.rs`（同一クレートの sibling module）
+    /// から直接フィールドへアクセスできず、この経由が必要になる。
+    pub(crate) fn storage_len(&self) -> usize {
+        self.storage.data.len()
     }
 
     /// 次元数（rank）を返す。
