@@ -723,3 +723,72 @@ fn fit_with_callbacks_alongside_shuffle_is_reproducible_under_manual_seed() {
         assert_eq!(a.to_bits(), b.to_bits());
     }
 }
+
+// =====================================================================
+// 16. EarlyStopping: `restore_best_weights` は epoch 途中のコール
+//     バックエラー（`fit_with_callbacks` の `Err` 早期 return）を
+//     またいでも適用される（イシュー #1763 PR #1883 レビュー指摘の
+//     回帰テスト。従来は `LrSchedule::advance` 等のエラーが
+//     `run_fit` 末尾の `restore_best_weights` を素通りしていたため、
+//     `EarlyStopping` が保持していた best スナップショットが失われて
+//     いた）
+// =====================================================================
+
+/// epoch 3 開始時の LR 同期でのみ `NaN` を返す（`step == 3`）。
+/// `step 0..=2` は `early_stopping_restore_best_weights_bit_exact` と
+/// 同じ発散用の固定 lr（`LR`）を返し、epoch 0〜2 は正常に完走させる。
+struct NanAtStep3 {
+    lr: f32,
+}
+impl LrScheduler for NanAtStep3 {
+    fn lr_at(&self, step: usize) -> f32 {
+        if step == 3 { f32::NAN } else { self.lr }
+    }
+}
+
+#[test]
+fn early_stopping_restore_best_weights_survives_mid_fit_error() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    // `early_stopping_restore_best_weights_bit_exact` と同じ発散用 lr
+    // （momentum なしの大きな lr で epoch 0 が常に best になる）。
+    const LR: f32 = 50.0;
+    const EPOCHS: usize = 5;
+
+    // 双子モデル（同一シード）を 1 epoch だけ fit した状態 = 期待される
+    // best スナップショット（epoch 0）。
+    let mut twin = build_model();
+    twin.compile(Optimizer::Sgd(SgdConfig::new(LR)), Loss::Mse)
+        .unwrap();
+    twin.fit(&x, &y, FitConfig::new(1, N)).unwrap();
+    let expected_best_params = twin.trainable_parameters();
+
+    let mut model = build_model();
+    model
+        .compile(Optimizer::Sgd(SgdConfig::new(LR)), Loss::Mse)
+        .unwrap();
+    let mut callbacks = [
+        Callback::LrSchedule(LrSchedule::per_epoch(NanAtStep3 { lr: LR })),
+        Callback::EarlyStopping(
+            // patience は EPOCHS 超のため発散による非改善では停止せず、
+            // epoch 3 開始時の LR 同期エラーで fit 全体が打ち切られる
+            // 経路を確実に踏む。
+            EarlyStopping::new(EPOCHS + 1)
+                .monitor(Monitor::Loss)
+                .restore_best_weights(true),
+        ),
+    ];
+    let err = model
+        .fit_with_callbacks(&x, &y, FitConfig::new(EPOCHS, N), None, &mut callbacks)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+    // 本題: エラー経路でも `restore_best_weights` が適用され、
+    // 現在のパラメータは epoch 0（best）の双子モデルと bit 一致する。
+    let restored_params = model.trainable_parameters();
+    assert!(
+        params_bit_exact(&expected_best_params, &restored_params),
+        "epoch 途中のコールバックエラーで fit が失敗しても \
+         restore_best_weights が適用されるはずが、\
+         best（epoch 0）のパラメータへ復元されていない"
+    );
+}

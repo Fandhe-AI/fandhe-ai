@@ -409,11 +409,14 @@ impl Sequential {
     /// `callbacks` 中に `restore_best_weights(true)` の
     /// [`super::callbacks::Callback::EarlyStopping`] があり、かつ
     /// best スナップショットが記録されていれば、本メソッドが返る
-    /// 直前（学習打ち切り・完走いずれの終了経路でも）に
-    /// [`Self::load_state_dict`] でそこへ復元する（Keras 3 の
-    /// `restore_best_weights=True` と同じ意味論）。複数の
-    /// `EarlyStopping` が該当する場合は `callbacks` の並び順で最後の
-    /// ものが勝つ。
+    /// 直前に [`Self::load_state_dict`] でそこへ復元する（Keras 3 の
+    /// `restore_best_weights=True` と同じ意味論）。**この復元は
+    /// 学習打ち切り・完走・下記「エラー」節のエラーによる早期終了
+    /// （`Err` を返す経路）のいずれでも必ず行われる**——PR #1883
+    /// レビュー指摘の是正（イシュー #1763）: `EarlyStopping` が既に
+    /// 保持していたベストスナップショットが、epoch 途中のエラーに
+    /// よって黙って失われることはない。複数の `EarlyStopping` が
+    /// 該当する場合は `callbacks` の並び順で最後のものが勝つ。
     ///
     /// # エラー
     ///
@@ -426,6 +429,7 @@ impl Sequential {
     ///   （train／eval モード変更前に検査するため復元は不要）
     /// - `LrSchedule::advance`／`optimizer.set_lr` が失敗した場合
     ///   （例: ユーザー定義 `LrScheduler` が非有限値を返した）→
+    ///   `restore_best_weights` を（該当すれば）適用したうえで、
     ///   その時点のエラーをそのまま返す（[`Self::fit`] と同じ
     ///   fail-closed 契約: compile 済み状態は維持したまま返す）
     pub fn fit_with_callbacks<T: FitTarget>(
@@ -550,110 +554,172 @@ impl Sequential {
         })?;
         let mut history = History { loss, val_loss, lr };
 
-        'epochs: for epoch_local in 0..config.epochs {
-            // (1) epoch 開始 LR 同期（[`Self::fit_with_callbacks`] doc
-            // 「1 epoch の処理順序」節）。`LrSchedule` が 1 つもなくても
-            // `history.lr` は常に記録する。
-            for cb in callbacks.iter() {
-                if let Callback::LrSchedule(ls) = cb {
-                    compiled.optimizer.set_lr(ls.lr_for_epoch_begin())?;
-                }
-            }
-            history.lr.push(compiled.optimizer.lr());
-
-            // (2) バッチループ（[`Self::fit`] と同一の演算列）。
-            let mut weighted_sum = 0.0f64;
-            let mut count = 0usize;
-
-            for batch in &loader {
-                let (x_batch, y_batch) = batch.map_err(|e| {
-                    AutodiffError::InvalidArgument(format!("Sequential::fit_with_callbacks: {e}"))
-                })?;
-                let n_batch = x_batch.shape().first().copied().unwrap_or(0);
-
-                let updated = {
-                    let tape = crate::tape();
-                    let bound = self.bind(&tape);
-                    let x_var = tape.var(&x_batch);
-
-                    let pred = bound.forward(&tape, &x_var)?;
-                    let loss_var = T::loss_for(compiled.loss, &tape, &pred, &y_batch)?;
-                    let loss_scalar = loss_var.to_tensor().get(&[]).ok_or_else(|| {
-                        AutodiffError::InvalidArgument(
-                            "Sequential::fit_with_callbacks: loss の shape が [] ではない\
-                             （loss 演算の契約違反）"
-                                .to_string(),
-                        )
-                    })?;
-                    weighted_sum += loss_scalar as f64 * n_batch as f64;
-                    count += n_batch;
-
-                    let grads = tape.backward(&loss_var)?;
-                    let grad_refs = bound.trainable_grads(&grads)?;
-                    let param_refs = self.trainable_parameters();
-                    compiled.optimizer.step(&param_refs, &grad_refs)?
-                };
-                self.apply_parameters(updated)?;
-            }
-
-            if count == 0 {
-                // `drop_last = true` で全バッチが落ちた場合（0 除算を
-                // 黙って NaN にしない。fail-closed）。
-                return Err(AutodiffError::InvalidArgument(
-                    "Sequential::fit_with_callbacks: この epoch で処理されたサンプルが 0 件\
-                     （drop_last により全バッチが切り捨てられた可能性がある）"
-                        .to_string(),
-                ));
-            }
-            history.loss.push((weighted_sum / count as f64) as f32);
-
-            // (3) validation（[`Self::fit_with_callbacks`] doc「1 epoch
-            // の処理順序」節）。
-            if let Some((x_val, y_val)) = validation {
-                self.set_training(false);
-                let v = self.run_evaluate::<T>(x_val, y_val, config.batch_size, compiled.loss);
-                self.set_training(true);
-                history.val_loss.push(v?);
-            }
-
-            // (4) epoch 末 callbacks（スライス順。いずれかが学習打ち切り
-            // を要求しても、当該 epoch の他 callback はすべて処理して
-            // から打ち切る）。
-            let mut stop = false;
-            for cb in callbacks.iter_mut() {
-                match cb {
-                    Callback::ModelCheckpoint(mc) => {
-                        if let Some(value) = mc.monitor_value_at(&history, epoch_local) {
-                            mc.observe(value, self);
-                        }
-                    }
-                    Callback::LrSchedule(ls) => {
-                        let value = ls.monitor_value_at(&history, epoch_local);
-                        ls.advance(value)?;
-                    }
-                    Callback::EarlyStopping(es) => {
-                        if let Some(value) = es.monitor_value_at(&history, epoch_local)
-                            && es.observe(value, epoch_local, || self.state_dict())
-                        {
-                            stop = true;
-                        }
+        // 本体は `'epochs_block` ラベル付きブロックへ包み、`?` による
+        // 早期 return を `break 'epochs_block Err(..)` に置き換える
+        // （イシュー #1763 PR #1883 レビュー指摘: 従来はここで直接
+        // `return Err(..)`／`?` していたため、epoch 途中のエラー
+        // （`LrSchedule::advance` の失敗・バリデーション失敗・
+        // `count == 0` 等）が下記「fit 終了時」の `restore_best_weights`
+        // を素通りしてしまい、`EarlyStopping` が既に保持していたベスト
+        // 重みスナップショットが失われたまま次回 `fit_with_callbacks`
+        // 呼び出しで `reset_for_fit` により消えていた）。この block 式
+        // により、正常完走・`break 'epochs`（patience 打ち切り）・
+        // エラーのいずれの経路でも必ずブロック直後の
+        // `restore_best_weights` 処理へ到達する。
+        let epoch_result: Result<(), AutodiffError> = 'epochs_block: {
+            'epochs: for epoch_local in 0..config.epochs {
+                // (1) epoch 開始 LR 同期（[`Self::fit_with_callbacks`] doc
+                // 「1 epoch の処理順序」節）。`LrSchedule` が 1 つもなくても
+                // `history.lr` は常に記録する。
+                for cb in callbacks.iter() {
+                    if let Callback::LrSchedule(ls) = cb
+                        && let Err(e) = compiled.optimizer.set_lr(ls.lr_for_epoch_begin())
+                    {
+                        break 'epochs_block Err(e);
                     }
                 }
+                history.lr.push(compiled.optimizer.lr());
+
+                // (2) バッチループ（[`Self::fit`] と同一の演算列）。
+                let mut weighted_sum = 0.0f64;
+                let mut count = 0usize;
+
+                for batch in &loader {
+                    let (x_batch, y_batch) = match batch {
+                        Ok(v) => v,
+                        Err(e) => {
+                            break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                                "Sequential::fit_with_callbacks: {e}"
+                            )));
+                        }
+                    };
+                    let n_batch = x_batch.shape().first().copied().unwrap_or(0);
+
+                    let updated = {
+                        let tape = crate::tape();
+                        let bound = self.bind(&tape);
+                        let x_var = tape.var(&x_batch);
+
+                        let pred = match bound.forward(&tape, &x_var) {
+                            Ok(v) => v,
+                            Err(e) => break 'epochs_block Err(e),
+                        };
+                        let loss_var = match T::loss_for(compiled.loss, &tape, &pred, &y_batch) {
+                            Ok(v) => v,
+                            Err(e) => break 'epochs_block Err(e),
+                        };
+                        let loss_scalar = match loss_var.to_tensor().get(&[]) {
+                            Some(v) => v,
+                            None => {
+                                break 'epochs_block Err(AutodiffError::InvalidArgument(
+                                    "Sequential::fit_with_callbacks: loss の shape が [] ではない\
+                                     （loss 演算の契約違反）"
+                                        .to_string(),
+                                ));
+                            }
+                        };
+                        weighted_sum += loss_scalar as f64 * n_batch as f64;
+                        count += n_batch;
+
+                        let grads = match tape.backward(&loss_var) {
+                            Ok(v) => v,
+                            Err(e) => break 'epochs_block Err(e),
+                        };
+                        let grad_refs = match bound.trainable_grads(&grads) {
+                            Ok(v) => v,
+                            Err(e) => break 'epochs_block Err(e),
+                        };
+                        let param_refs = self.trainable_parameters();
+                        match compiled.optimizer.step(&param_refs, &grad_refs) {
+                            Ok(v) => v,
+                            Err(e) => break 'epochs_block Err(e),
+                        }
+                    };
+                    if let Err(e) = self.apply_parameters(updated) {
+                        break 'epochs_block Err(e);
+                    }
+                }
+
+                if count == 0 {
+                    // `drop_last = true` で全バッチが落ちた場合（0 除算を
+                    // 黙って NaN にしない。fail-closed）。
+                    break 'epochs_block Err(AutodiffError::InvalidArgument(
+                        "Sequential::fit_with_callbacks: この epoch で処理されたサンプルが 0 件\
+                         （drop_last により全バッチが切り捨てられた可能性がある）"
+                            .to_string(),
+                    ));
+                }
+                history.loss.push((weighted_sum / count as f64) as f32);
+
+                // (3) validation（[`Self::fit_with_callbacks`] doc「1 epoch
+                // の処理順序」節）。
+                if let Some((x_val, y_val)) = validation {
+                    self.set_training(false);
+                    let v = self.run_evaluate::<T>(x_val, y_val, config.batch_size, compiled.loss);
+                    self.set_training(true);
+                    match v {
+                        Ok(v) => history.val_loss.push(v),
+                        Err(e) => break 'epochs_block Err(e),
+                    }
+                }
+
+                // (4) epoch 末 callbacks（スライス順。いずれかが学習打ち切り
+                // を要求しても、当該 epoch の他 callback はすべて処理して
+                // から打ち切る）。
+                let mut stop = false;
+                for cb in callbacks.iter_mut() {
+                    match cb {
+                        Callback::ModelCheckpoint(mc) => {
+                            if let Some(value) = mc.monitor_value_at(&history, epoch_local) {
+                                mc.observe(value, self);
+                            }
+                        }
+                        Callback::LrSchedule(ls) => {
+                            let value = ls.monitor_value_at(&history, epoch_local);
+                            if let Err(e) = ls.advance(value) {
+                                break 'epochs_block Err(e);
+                            }
+                        }
+                        Callback::EarlyStopping(es) => {
+                            if let Some(value) = es.monitor_value_at(&history, epoch_local)
+                                && es.observe(value, epoch_local, || self.state_dict())
+                            {
+                                stop = true;
+                            }
+                        }
+                    }
+                }
+                if stop {
+                    break 'epochs;
+                }
             }
-            if stop {
-                break 'epochs;
-            }
-        }
+            Ok(())
+        };
 
         // fit 終了時: `restore_best_weights`（[`Self::fit_with_callbacks`]
-        // doc「`restore_best_weights`」節）。学習打ち切り・完走いずれの
-        // 終了経路でもここへ到達する。
+        // doc「`restore_best_weights`」節）。学習打ち切り・完走・
+        // エラーによる早期終了（`epoch_result` が `Err`）いずれの
+        // 経路でもここへ到達する（イシュー #1763 PR #1883 レビュー
+        // 指摘の是正）。エラー経路でも `EarlyStopping` が既に保持して
+        // いたベストスナップショットをベストエフォートで適用してから
+        // 元のエラーを返す——復元自体が失敗した場合（`load_state_dict`
+        // が架構不一致等で `Err` を返す。通常は同一モデル自身の
+        // スナップショットのため発生しない）のみ、その復元エラーで
+        // `epoch_result` を上書きする（呼び出し元へ「復元にも失敗した」
+        // ことを fail-closed に伝える）。
+        let mut restore_err: Option<AutodiffError> = None;
         for cb in callbacks.iter_mut() {
             if let Callback::EarlyStopping(es) = cb
                 && let Some(state) = es.take_restore_state()
+                && let Err(e) = self.load_state_dict(state)
             {
-                self.load_state_dict(state)?;
+                restore_err = Some(e);
             }
+        }
+
+        epoch_result?;
+        if let Some(e) = restore_err {
+            return Err(e);
         }
 
         Ok(history)
