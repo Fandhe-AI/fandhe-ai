@@ -242,6 +242,67 @@ const CASES: &[Case] = &[
         dilation: [2, 3],
         groups: 2,
     },
+    // --- 1d 形状（イシュー #1767。`H=1`・`kh=1`・`sh=1`・`ph=0`・
+    // `dh=1` に固定した「Conv1d を Conv2d の特化として実装する」形状。
+    // `Var::conv1d`〈#1765〉が内部で `[N, Cin, 1, L]`／
+    // `[Cout, Cin_g, 1, k]` へ reshape してからこの CUDA `im2col`／
+    // `col2im` を呼ぶため、`H` 軸を通常の 2d 形状と同じ形状パラメータ
+    // 検査経路（`LaunchShape::derive`・`conv_out_len` 等）へそのまま
+    // 通すことを確認する）。
+    Case {
+        label: "1d basic no pad",
+        in_shape: [1, 2, 1, 9],
+        kernel: [1, 3],
+        stride: [1, 1],
+        padding: [0, 0],
+        dilation: [1, 1],
+        groups: 1,
+    },
+    Case {
+        label: "1d overlapping windows (pad)",
+        in_shape: [1, 1, 1, 6],
+        kernel: [1, 3],
+        stride: [1, 1],
+        padding: [0, 1],
+        dilation: [1, 1],
+        groups: 1,
+    },
+    Case {
+        label: "1d dilation",
+        in_shape: [1, 1, 1, 9],
+        kernel: [1, 3],
+        stride: [1, 1],
+        padding: [0, 2],
+        dilation: [1, 2],
+        groups: 1,
+    },
+    Case {
+        label: "1d groups depthwise",
+        in_shape: [1, 4, 1, 6],
+        kernel: [1, 3],
+        stride: [1, 1],
+        padding: [0, 1],
+        dilation: [1, 1],
+        groups: 4,
+    },
+    Case {
+        label: "1d groups (2 groups, batch>1)",
+        in_shape: [2, 6, 1, 5],
+        kernel: [1, 3],
+        stride: [1, 2],
+        padding: [0, 1],
+        dilation: [1, 1],
+        groups: 2,
+    },
+    Case {
+        label: "1d stride > kernel extent",
+        in_shape: [1, 1, 1, 7],
+        kernel: [1, 2],
+        stride: [1, 3],
+        padding: [0, 0],
+        dilation: [1, 1],
+        groups: 1,
+    },
 ];
 
 fn run_case(cpu: &CpuBackendOps, cuda: &CudaBackendOps, seed: u64, case: &Case) {
@@ -283,6 +344,17 @@ fn im2col_col2im_parity_smoke_env_adaptive() {
                 seed += 11;
                 run_case(&cpu, &cuda, seed, case);
             }
+
+            // 1d 形状（`H=1`・`kh=1`）代表 1 件も通常 CI で確認する
+            // （イシュー #1767。`Var::conv1d` が reshape する
+            // `[N, Cin, 1, L]`／`[Cout, Cin_g, 1, k]` 形状が im2col／
+            // col2im の shape 検査経路〈`LaunchShape::derive` 等〉を
+            // 通ることの最小確認。網羅は `#[ignore]` 側 `CASES` 全体）。
+            let case_1d = CASES
+                .iter()
+                .find(|c| c.label == "1d basic no pad")
+                .expect("1d basic no pad case must exist");
+            run_case(&cpu, &cuda, 2101, case_1d);
 
             // N=0（空入力・空出力の早期リターン経路。driver 非接触の
             // ops.rs 分岐が実際に到達することを実機で確認する）。
@@ -340,6 +412,22 @@ fn im2col_col2im_parity_smoke_env_adaptive() {
                 .expect_err("rank mismatch must be rejected even without CUDA");
             assert!(matches!(cpu_err, BackendError::ShapeMismatch(_)));
             assert!(matches!(cuda_err, BackendError::ShapeMismatch(_)));
+
+            // イシュー #1767: 1d 形状（`kh=1`）の有効な入力についても
+            // `im2col_out_shape`（`ops.rs::CudaBackendOps::im2col` が
+            // デバイス初期化より前に呼ぶ）が正しく計算され panic しない
+            // ことを、CUDA 非搭載環境でも確認する（`p_1d` は有効な形状
+            // のため、shape 検査自体は通過し、その後の
+            // `with_driver_call` 内でのみ `CudaUnavailable` になる想定
+            // ——CPU 側は最後まで成功する）。
+            let p_1d = params([1, 3], [1, 1], [0, 0], [1, 1], 1);
+            let input_1d = random_tensor(1002, &[1, 2, 1, 9]);
+            cpu.im2col(&input_1d, &p_1d)
+                .expect("cpu im2col(1d shape) always succeeds for valid input");
+            let cuda_1d_err = cuda
+                .im2col(&input_1d, &p_1d)
+                .expect_err("cuda im2col(1d shape) must still fail without a CUDA device");
+            assert!(matches!(cuda_1d_err, BackendError::CudaUnavailable(_)));
         }
         Err(other) => panic!("unexpected error variant for CudaBackendOps::im2col: {other}"),
     }

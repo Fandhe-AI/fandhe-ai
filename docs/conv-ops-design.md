@@ -892,3 +892,72 @@ CPU 分（本 doc の実装対象 `#1642` に相当する範囲。イシュー�
   常駐化（現状はホストへ readback してから `gemm_batched` へ再
   アップロードする往復コストが残る）は既存 #1643 コメントへ追記予定
   のスコープ外事項（別 issue）。
+
+### #1767（CUDA Conv1d。1d 形状の CUDA 経路検証・GB10 実機実測スキャフォールド）
+
+origin/main（#1766 マージ後）時点で、CUDA の Conv1d 経路は既に
+構造的に成立していた: `Var::conv1d`（#1765）は `[N, Cin, L]`／
+`[Cout, Cin_g, k]` を `[N, Cin, 1, L]`／`[Cout, Cin_g, 1, k]` へ
+reshape してから `Var::conv2d` へ委譲する薄いラッパーで新規 `Op`／
+`BackendOps`／VJP／カーネルを持たず、CUDA `BackendOps::im2col`／
+`col2im`（#1766）は `Conv2dParams` の全スカラーを引数に取る形状汎用
+カーネルのため `kh=1`／`sh=1`／`ph=0`／`dh=1` の 1d 形状もそのまま
+処理する。本イシューはこの「特化」（1d を 2d の特殊ケースとして
+自動的に扱う）を実機で確認するためのテスト・実測スキャフォールドの
+追加に限定し、**新規カーネル・新規 `Op`・facade 新規公開面は追加
+しない**（設計 §2「1d は 2d へ併合」・§15 #1765「1d 専用の高速経路
+（`kH=1` の im2col 特殊化等）は設計時点で対象外」の方針を維持）。
+
+- **`crates/backend-cuda/tests/im2col_col2im_parity.rs`**: `CASES`
+  に 1d 形状（`in_shape: [N, C, 1, L]`・`kernel: [1, k]`）を 6 件
+  追加（基本・重なり窓〈padding〉・dilation・groups／depthwise・
+  groups〈2 groups, batch>1〉・`stride > kernel extent`）。環境
+  適応スモーク（属性なし）は CUDA 実機あり／なし両方の分岐で 1d
+  形状を通常 CI で確認する——実機ありの分岐では 1d 代表 1 件
+  （`"1d basic no pad"`）を CPU と bit 同一まで `run_case` で通し、
+  実機なしの分岐でも `p_1d`（`kh=1`）を用いた有効な入力で
+  `im2col_out_shape` の 1d 導出がデバイス初期化前に panic せず
+  正しく完了すること（CPU 側は最後まで成功・CUDA 側は
+  `CudaUnavailable` のみで停止すること）を確認する（`#[ignore]`
+  側の全形状網羅テストは 1d 6 件を自動的に含む）。
+- **`crates/backend-cuda/src/im2col.rs`**: `LaunchShape::derive`
+  の 1d 単体テスト 2 件（driver 非接触）——非自明な
+  `stride`／`padding`／`dilation` を伴う 1d 形状で `h_out=1`・
+  `w_out`／`P` が正しく導出されること（`launch_shape_derive_
+  handles_1d_shape`）・1d でも `P` 軸不整合が拒否されること
+  （`launch_shape_derive_rejects_1d_p_axis_mismatch`）。
+- **`crates/backend-cuda/src/ops.rs`**: `im2col`／`col2im` の
+  `N=0` 空出力早期リターンを 1d 形状で確認する driver 非接触
+  テスト各 1 件（既存 2d 版と対称）。
+- **`crates/facade/tests/conv1d_backend_parity.rs`**（`#[ignore]`。
+  CUDA 実機必須）:
+  - `conv1d_backward_on(device)`（`conv2d_backend_parity.rs::
+    conv2d_backward_on` と同型）＋`cuda_conv1d_backward_matches_
+    cpu`（dx／dw／db を `assert_parity`。REQ-2 複合判定）。
+  - `cuda_conv1d_matches_manual_reshape_conv2d_bit_exact`: 本
+    イシューの中核契約——同一 CUDA tape 上で `conv1d` と「手動
+    reshape → `conv2d` → reshape」の forward・backward（dx／dw／
+    db）が **bit 完全一致**すること（`crates/autodiff/tests/
+    conv1d.rs::matches_manual_reshape_conv2d_bit_exact` の CUDA
+    版。同一カーネル・同一形状を通るため bit 同一が構造的に成立
+    する設計）。
+  - `cuda_conv1d_forward_matches_cpu_groups_dilation`: groups＋
+    dilation を伴う 1d 形状の forward `assert_parity`。
+- **`Var::conv1d` doc comment**（`crates/autodiff/src/var.rs`）:
+  「CUDA 専用 im2col／col2im カーネルは #1766／#1767 で到達済み
+  （reshape 併合のため `conv2d` 側の CUDA override へそのまま
+  委譲される）」へ更新（コード変更なし・doc のみ）。
+- **facade 公開面**: 新規 `pub use`／`pub fn` は追加していない。
+- **GB10 実機未実測**: 本エージェント実行環境に DGX Spark GB10
+  実機への到達手段がなく（`docs/real-hardware-verification-env.
+  local.md` 不在・`CUDA_NODE` 未設定・`~/.ssh/config` 不在。ローカル
+  `nvidia-smi` は NVML driver／library 不一致で初期化不能）、
+  `#[ignore]` テスト群は未実行のまま `docs/perf/logs/cuda-conv1d-
+  1767/` へ実行コマンド・保存すべきログ一覧・事前登録判定規則を
+  申し送る（実測の実施先は後続 #1771「CUDA／Metal 実機 parity・
+  実測」）。
+- **引き継ぎ**: 1d 専用高速経路（`kh=1` 特殊化カーネル・GPU im2col
+  出力のデバイス常駐化。既存 #1643 コメントの性能スコープ外事項）・
+  Metal 専用カーネル（#1644）・`nn::Conv1d`／`compat::Sequential::
+  add_conv1d`（#1770）・3 バックエンド実機 parity 実測（#1771）は
+  対象外のまま。
