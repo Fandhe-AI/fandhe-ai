@@ -199,6 +199,106 @@ impl Conv2dParams {
     }
 }
 
+/// Pooling（`BackendOps::max_pool2d`／`avg_pool2d`／
+/// `adaptive_avg_pool2d`）のパラメータ記述子（イシュー #1728・設計
+/// `docs/pooling-ops-design.md` §3）。
+///
+/// `Conv2dParams` と異なり `groups` を持たない（pooling はチャンネル
+/// 独立の空間演算）。`ceil_mode`／`count_include_pad` は本構造体に
+/// 含めない——`ceil_mode` は `Var::*_pool2d` 入口で `true` を拒否する
+/// （設計 doc §11 スコープ外）契約フラグ、`count_include_pad` は
+/// `avg_pool2d` の呼び出しごとの引数（同じ `Pool2dParams` を
+/// `count_include_pad` の異なる呼び出しで再利用できるようにするため
+/// 型に含めない）。
+///
+/// `#[non_exhaustive]` はガードレール条件（`.claude/rules/security.md`
+/// A08。公開 API 非破壊）を保ちながら将来フィールド追加を可能にする
+/// ため（`Conv2dParams` と同方針）。フィールドは
+/// コンストラクタ [`Pool2dParams::new`] 経由のみで設定し、各 getter
+/// でアクセスする。
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pool2dParams {
+    kernel_size: [usize; 2],
+    stride: [usize; 2],
+    padding: [usize; 2],
+    dilation: [usize; 2],
+}
+
+impl Pool2dParams {
+    /// `kernel_size`／`stride`／`dilation` の 0 を
+    /// [`BackendError::InvalidArgument`] で拒否する（`Conv2dParams::new`
+    /// と同方針）。`stride` が `None` の場合は `kernel_size` と同値
+    /// （PyTorch `nn.MaxPool2d`／`nn.AvgPool2d` の既定意味論）を使う。
+    ///
+    /// Conv とは異なり pooling は **`padding <= kernel_size / 2`**
+    /// （`dilation` 非依存の整数除算・floor。設計 doc §3「padding 上限
+    /// の根拠」）を要求する。`2 * padding` の `usize` オーバーフローも
+    /// `checked_mul` で拒否する。
+    pub fn new(
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> Result<Self, BackendError> {
+        if kernel_size[0] == 0 || kernel_size[1] == 0 {
+            return Err(BackendError::InvalidArgument(
+                "Pool2dParams::new: kernel_size の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        let stride = stride.unwrap_or(kernel_size);
+        if stride[0] == 0 || stride[1] == 0 {
+            return Err(BackendError::InvalidArgument(
+                "Pool2dParams::new: stride の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        if dilation[0] == 0 || dilation[1] == 0 {
+            return Err(BackendError::InvalidArgument(
+                "Pool2dParams::new: dilation の各軸は 1 以上である必要がある".into(),
+            ));
+        }
+        for i in 0..2 {
+            let two_p = padding[i].checked_mul(2).ok_or_else(|| {
+                BackendError::InvalidArgument(
+                    "Pool2dParams::new: 2 * padding が usize の範囲でオーバーフローする".into(),
+                )
+            })?;
+            if two_p > kernel_size[i] {
+                return Err(BackendError::InvalidArgument(format!(
+                    "Pool2dParams::new: padding[{i}]（{}）は kernel_size[{i}]（{}）の半分以下である必要がある",
+                    padding[i], kernel_size[i]
+                )));
+            }
+        }
+        Ok(Self {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        })
+    }
+
+    /// カーネル空間サイズ `[kH, kW]`。
+    pub fn kernel_size(&self) -> [usize; 2] {
+        self.kernel_size
+    }
+
+    /// ストライド `[sH, sW]`。
+    pub fn stride(&self) -> [usize; 2] {
+        self.stride
+    }
+
+    /// パディング `[pH, pW]`（各軸の前後同一幅）。
+    pub fn padding(&self) -> [usize; 2] {
+        self.padding
+    }
+
+    /// dilation `[dH, dW]`。
+    pub fn dilation(&self) -> [usize; 2] {
+        self.dilation
+    }
+}
+
 /// GEMM epilogue で適用する activation 種別（TASK-12.1f・#203）。
 ///
 /// [`BackendOps::gemm_bias_act`] の第 4 引数として渡す。CUTLASS 系実測
@@ -2000,6 +2100,115 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "conv2d: default fail-safe (no fused conv2d kernel available)".into(),
+        ))
+    }
+
+    /// 2 次元 max pooling（`torch.nn.functional.max_pool2d` 相当。NCHW
+    /// 固定。イシュー #1728・設計 `docs/pooling-ops-design.md`）。
+    /// `input: [N, C, H, W]`。戻り値は `(values, index)` で、`values`
+    /// の shape は [`crate::ops_shape::pool2d_out_shape`] が定める
+    /// `[N, C, Hout, Wout]`・`index` は同 shape の `Tensor<i32>` で
+    /// 各出力位置が選んだ窓内要素の `(c, n)` 平面内 flat 添字
+    /// `h·W + w`（設計 doc §5「MaxPool の索引表現」）。
+    ///
+    /// タイ規則・NaN 伝播は設計 doc §5 を正とする: 窓内を `kh` 外側・
+    /// `kw` 内側の row-major で走査し、`v > best || (v.is_nan() &&
+    /// !best.is_nan())` の条件で先勝ち更新する（同値は最初の添字が
+    /// 残り、NaN が現れたら以後 NaN 以外に更新されない・最初の NaN
+    /// の添字が残る）。padding 位置は走査対象外（設計 doc §3 の
+    /// padding 上限〈`padding <= kernel/2`〉と `dilation` の組合せに
+    /// より窓が空になる場合は [`crate::ops_shape::pool2d_out_shape`]
+    /// が事前に拒否するため、本メソッドは「窓内に有効入力が 0 件」
+    /// という状態を想定しない）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::conv2d`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::max_pool2d` は
+    /// `Unsupported` のときのみホスト参照実装（`fandhe_ai_autodiff::
+    /// eval::max_pool2d`）へフォールバックする。実装側でも
+    /// `input.shape()`／`params` を
+    /// [`crate::ops_shape::pool2d_out_shape`] で再検査し、不一致は
+    /// [`BackendError::ShapeMismatch`] を返すこと（fail-closed）。
+    fn max_pool2d(
+        &self,
+        _input: &Tensor<f32>,
+        _params: &Pool2dParams,
+    ) -> Result<(Tensor<f32>, crate::tensor::Tensor<i32>), BackendError> {
+        Err(BackendError::Unsupported(
+            "max_pool2d: default fail-safe (no fused max_pool2d kernel available)".into(),
+        ))
+    }
+
+    /// 2 次元 average pooling（`torch.nn.functional.avg_pool2d`
+    /// 相当。NCHW 固定。イシュー #1728・設計 `docs/pooling-ops-
+    /// design.md`）。`input: [N, C, H, W]`。出力 shape は
+    /// [`crate::ops_shape::pool2d_out_shape`] が定める
+    /// `[N, C, Hout, Wout]`。
+    ///
+    /// `count_include_pad`（PyTorch と同名の引数）: `true` なら
+    /// divisor は常に `kernel_size[0]·kernel_size[1]`（設計上
+    /// `ceil_mode=false` 固定のため窓が padded 境界を超えることはない
+    /// ——設計 doc §5「AvgPool の divisor」）・`false` なら padding を
+    /// 除いた有効要素数。窓内の縮約は
+    /// **`f64` アキュムレータへ row-major 逐次加算・最後に 1 回
+    /// `f32` へ downcast**する（`.claude/rules/coding-rust.md` の
+    /// 勾配の長軸縮約規約と同型の数値契約。3 バックエンド bit
+    /// 完全一致）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::max_pool2d`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Var::avg_pool2d` は
+    /// `Unsupported` のときのみホスト参照実装（`fandhe_ai_autodiff::
+    /// eval::avg_pool2d`）へフォールバックする。実装側でも
+    /// `input.shape()`／`params` を
+    /// [`crate::ops_shape::pool2d_out_shape`] で再検査し、不一致は
+    /// [`BackendError::ShapeMismatch`] を返すこと（fail-closed）。
+    fn avg_pool2d(
+        &self,
+        _input: &Tensor<f32>,
+        _params: &Pool2dParams,
+        _count_include_pad: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "avg_pool2d: default fail-safe (no fused avg_pool2d kernel available)".into(),
+        ))
+    }
+
+    /// 2 次元 adaptive average pooling（`torch.nn.functional.
+    /// adaptive_avg_pool2d` 相当。NCHW 固定。イシュー #1728・設計
+    /// `docs/pooling-ops-design.md`）。`input: [N, C, H, W]`・
+    /// `output_size: [Hout, Wout]`（`1` 以上）。出力 shape は
+    /// [`crate::ops_shape::adaptive_pool2d_out_shape`] が検査・確定
+    /// する `[N, C, Hout, Wout]`。
+    ///
+    /// 出力位置 `(oh, ow)` ごとの窓は PyTorch と同じ動的窓式
+    /// `[floor(o·in/out), ceil((o+1)·in/out))`（[`crate::
+    /// adaptive_window`] を forward／VJP 双方が単一情報源として共有
+    /// する。設計 doc §4）。縮約の数値契約は [`Self::avg_pool2d`]
+    /// （`count_include_pad=true` 相当。adaptive の divisor は常に
+    /// 実際の窓要素数）と同じ `f64` アキュムレータ方式。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::avg_pool2d`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、
+    /// `Var::adaptive_avg_pool2d` は `Unsupported` のときのみホスト
+    /// 参照実装（`fandhe_ai_autodiff::eval::adaptive_avg_pool2d`）へ
+    /// フォールバックする。実装側でも `input.shape()`／
+    /// `output_size` を
+    /// [`crate::ops_shape::adaptive_pool2d_out_shape`] で再検査し、
+    /// 不一致は [`BackendError::ShapeMismatch`] を返すこと
+    /// （fail-closed）。
+    fn adaptive_avg_pool2d(
+        &self,
+        _input: &Tensor<f32>,
+        _output_size: [usize; 2],
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "adaptive_avg_pool2d: default fail-safe (no fused adaptive_avg_pool2d kernel available)"
+                .into(),
         ))
     }
 
@@ -4243,6 +4452,64 @@ mod tests {
         let result = ops.topk(&input, 1, 1, true);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::max_pool2d`] の既定実装が非破壊拡張の fail-safe
+    /// 契約（`Unsupported`）を満たすことを確認する（イシュー #1728）。
+    #[test]
+    fn max_pool2d_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![0.0; 16], &[1, 1, 4, 4]).unwrap();
+        let params = Pool2dParams::new([2, 2], None, [0, 0], [1, 1]).unwrap();
+
+        let result = ops.max_pool2d(&input, &params);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::avg_pool2d`] の既定実装が非破壊拡張の fail-safe
+    /// 契約（`Unsupported`）を満たすことを確認する（イシュー #1728）。
+    #[test]
+    fn avg_pool2d_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![0.0; 16], &[1, 1, 4, 4]).unwrap();
+        let params = Pool2dParams::new([2, 2], None, [0, 0], [1, 1]).unwrap();
+
+        let result = ops.avg_pool2d(&input, &params, true);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::adaptive_avg_pool2d`] の既定実装が非破壊拡張の
+    /// fail-safe 契約（`Unsupported`）を満たすことを確認する
+    /// （イシュー #1728）。
+    #[test]
+    fn adaptive_avg_pool2d_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![0.0; 16], &[1, 1, 4, 4]).unwrap();
+
+        let result = ops.adaptive_avg_pool2d(&input, [2, 2]);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`Pool2dParams::new`] が padding 上限（`padding <=
+    /// kernel_size/2`）境界を正しく検査することを確認する
+    /// （イシュー #1728・設計 doc §3）。
+    #[test]
+    fn pool2d_params_padding_boundary() {
+        // k=2 の場合 2p<=2 (p<=1) が上限。p=1 は許可・p=2 は拒否。
+        assert!(Pool2dParams::new([2, 2], None, [1, 1], [1, 1]).is_ok());
+        assert!(Pool2dParams::new([2, 2], None, [2, 2], [1, 1]).is_err());
+    }
+
+    /// [`Pool2dParams::new`] の kernel_size／stride／dilation ゼロ拒否
+    /// を確認する（イシュー #1728）。
+    #[test]
+    fn pool2d_params_rejects_zero_sizes() {
+        assert!(Pool2dParams::new([0, 2], None, [0, 0], [1, 1]).is_err());
+        assert!(Pool2dParams::new([2, 2], Some([0, 1]), [0, 0], [1, 1]).is_err());
+        assert!(Pool2dParams::new([2, 2], None, [0, 0], [0, 1]).is_err());
     }
 
     /// [`BackendOps::min`] の既定実装が非破壊拡張の fail-safe 契約

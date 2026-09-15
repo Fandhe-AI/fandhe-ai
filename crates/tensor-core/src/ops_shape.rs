@@ -22,7 +22,7 @@
 //! caaf3c0 でマージ済みとなったため本イシュー（#22・TASK-1.6b）で
 //! `broadcast_shape` への委譲へ差し替える。
 
-use crate::backend_ops::Conv2dParams;
+use crate::backend_ops::{Conv2dParams, Pool2dParams};
 use crate::broadcast::broadcast_shape;
 use crate::error::ShapeError;
 use crate::tensor::{checked_numel, checked_numel_for};
@@ -1057,9 +1057,9 @@ pub fn one_hot_out_shape(
 /// conv_out_len(in, k, s, p, d) = floor((in + 2p − d(k−1) − 1) / s) + 1
 /// ```
 ///
-/// `pool_out_len`（pooling 用。未実装）と同式だが検査規則（padding
-/// 上限の有無）が異なるため別関数として定義し共有しない（設計 doc
-/// §4）。
+/// [`pool_out_len`]（pooling 用。イシュー #1728 で実装済み）と同式
+/// だが検査規則（padding 上限の有無）が異なるため別関数として定義し
+/// 共有しない（設計 doc §4）。
 ///
 /// - `s == 0` または `k == 0` は呼び出し元（[`Conv2dParams::new`]）が
 ///   構築時点で拒否する契約だが、本関数は `Conv2dParams` を経由しない
@@ -1239,6 +1239,179 @@ pub fn im2col_out_shape(
     let out_shape = vec![n, groups, k_g, p];
     checked_numel_for::<f32>(&out_shape)?;
     Ok(out_shape)
+}
+
+/// Pooling（`MaxPool2d`／`AvgPool2d`）の出力空間長を計算する
+/// （イシュー #1728・設計 `docs/pooling-ops-design.md` §4）:
+///
+/// ```text
+/// pool_out_len(in, k, s, p, d) = floor((in + 2p − d(k−1) − 1) / s) + 1
+/// ```
+///
+/// [`conv_out_len`] と同式だが検査規則（padding 上限の有無・空窓拒否
+/// 検査の要否）が異なるため呼び出し元（[`pool2d_out_shape`]）を分離
+/// し共有しない（設計 doc §4「`pool_out_len`（未実装）と同式だが検査
+/// 規則が異なるため別関数として定義し共有しない」）。
+///
+/// 本関数自体の契約は [`conv_out_len`] と同一: `s == 0`／`k == 0` は
+/// [`ShapeError::ElementCountOverflow`]・分子（`in + 2p − d(k−1) − 1`）
+/// が負になる場合は floor 契約を保つため除算せず
+/// [`ShapeError::ShapeMismatch`]（負分子拒否ゲート）・`2p`／`in + 2p`／
+/// `d(k−1)` の `usize` オーバーフローは [`ShapeError::
+/// ElementCountOverflow`] を返す。
+pub fn pool_out_len(
+    in_len: usize,
+    k: usize,
+    s: usize,
+    p: usize,
+    d: usize,
+) -> Result<usize, ShapeError> {
+    if s == 0 || k == 0 {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+    let two_p = p.checked_mul(2).ok_or(ShapeError::ElementCountOverflow)?;
+    let in_plus_2p = in_len
+        .checked_add(two_p)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let k_minus_1 = k - 1;
+    let dk = d
+        .checked_mul(k_minus_1)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    match in_plus_2p.checked_sub(dk).and_then(|v| v.checked_sub(1)) {
+        Some(numerator) => Ok(numerator / s + 1),
+        None => Err(ShapeError::ShapeMismatch {
+            lhs: vec![in_plus_2p],
+            rhs: vec![dk.saturating_add(1)],
+        }),
+    }
+}
+
+/// Pooling（`BackendOps::max_pool2d`／`avg_pool2d`）の出力 shape を
+/// 検査・計算する（イシュー #1728・設計 `docs/pooling-ops-design.md`
+/// §3／§4）。
+///
+/// `input_shape: [N, C, H, W]`。検査順序（設計 doc §3）: rank（4）→
+/// 空間軸 `H`／`W == 0` 拒否（`N`／`C == 0` は受理。padding のみで
+/// 構成された窓を出力として通過させる誤りを防ぐため、この検査は
+/// [`pool_out_len`] の負分子ゲートより前に独立して行う——設計 doc
+/// §3「非 adaptive 側は `padding > 0` のとき負分子ゲートだけでは
+/// 不十分」）→ [`pool_out_len`]（負分子拒否ゲート）→ `dilation` に
+/// よる空窓拒否（`kernel = 2` かつ `dilation > in_len` の構成のみが
+/// 到達しうる。`padding <= floor(kernel/2)` 契約〈[`crate::
+/// backend_ops::Pool2dParams::new`]〉の下で他の `kernel` では発生
+/// しないことを設計 doc §3 で導出済み）→ 出力要素数積オーバーフロー
+/// （`checked_numel_for`）。
+pub fn pool2d_out_shape(
+    input_shape: &[usize],
+    params: &Pool2dParams,
+) -> Result<Vec<usize>, ShapeError> {
+    if input_shape.len() != 4 {
+        return Err(ShapeError::RankMismatch {
+            expected: 4,
+            actual: input_shape.len(),
+        });
+    }
+    let (n, c, h, w) = (
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+    );
+    if h == 0 || w == 0 {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![h, w],
+            rhs: vec![1, 1],
+        });
+    }
+    let [kh, kw] = params.kernel_size();
+    let [sh, sw] = params.stride();
+    let [ph, pw] = params.padding();
+    let [dh, dw] = params.dilation();
+    let hout = pool_out_len(h, kh, sh, ph, dh)?;
+    let wout = pool_out_len(w, kw, sw, pw, dw)?;
+    if kh == 2 && dh > h {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![h],
+            rhs: vec![dh],
+        });
+    }
+    if kw == 2 && dw > w {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![w],
+            rhs: vec![dw],
+        });
+    }
+    let out_shape = vec![n, c, hout, wout];
+    checked_numel_for::<f32>(&out_shape)?;
+    Ok(out_shape)
+}
+
+/// Adaptive pooling（`BackendOps::adaptive_avg_pool2d`）の出力 shape
+/// を検査・計算する（イシュー #1728・設計 `docs/pooling-ops-
+/// design.md` §3／§4）。
+///
+/// `input_shape: [N, C, H, W]`・`output_size: [Hout, Wout]`。検査
+/// 順序: rank（4）→ 空間軸 `H`／`W == 0` 拒否（adaptive の
+/// `divisor = end − start` 導出が `in = 0` のとき常に `0` になり
+/// 0 除算を招くため。`N`／`C == 0` は受理。設計 doc §3「adaptive
+/// 側の動機」）→ `output_size` の両軸 `>= 1` 拒否 → 出力要素数積
+/// オーバーフロー。
+pub fn adaptive_pool2d_out_shape(
+    input_shape: &[usize],
+    output_size: [usize; 2],
+) -> Result<Vec<usize>, ShapeError> {
+    if input_shape.len() != 4 {
+        return Err(ShapeError::RankMismatch {
+            expected: 4,
+            actual: input_shape.len(),
+        });
+    }
+    let (n, c, h, w) = (
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+    );
+    if h == 0 || w == 0 {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![h, w],
+            rhs: vec![1, 1],
+        });
+    }
+    let [oh, ow] = output_size;
+    if oh == 0 || ow == 0 {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![oh, ow],
+            rhs: vec![1, 1],
+        });
+    }
+    let out_shape = vec![n, c, oh, ow];
+    checked_numel_for::<f32>(&out_shape)?;
+    Ok(out_shape)
+}
+
+/// Adaptive pooling の動的窓（PyTorch と同式・整数演算のみで決定的。
+/// イシュー #1728・設計 `docs/pooling-ops-design.md` §4）:
+///
+/// ```text
+/// start = floor(o * in_len / out_len)
+/// end   = ceil((o + 1) * in_len / out_len)
+/// ```
+///
+/// forward（`backend-cpu::pooling`）・VJP（`grad.rs`）双方が本関数を
+/// 単一情報源として共有する（`eval::nearest_src_coord` と同じ理由）。
+/// `out_len == 0` または `usize` オーバーフローは `None` を返す
+/// （呼び出し元は [`adaptive_pool2d_out_shape`] で `out_len >= 1` を
+/// 事前検査済みの前提だが、本関数単体でも panic しないよう独立に
+/// 検査する）。
+pub fn adaptive_window(o: usize, in_len: usize, out_len: usize) -> Option<(usize, usize)> {
+    if out_len == 0 {
+        return None;
+    }
+    let start = o.checked_mul(in_len)? / out_len;
+    let end_num = o.checked_add(1)?.checked_mul(in_len)?;
+    let end = end_num.checked_add(out_len - 1)?.checked_div(out_len)?;
+    Some((start, end))
 }
 
 #[cfg(test)]
@@ -2429,5 +2602,148 @@ mod tests {
         let params = conv_params([3, 3], [1, 1], [0, 0], [1, 1], 1);
         let err = im2col_out_shape(&[1, 3, 8, 0], &params).unwrap_err();
         assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    // --- pool_out_len / pool2d_out_shape / adaptive_pool2d_out_shape /
+    // adaptive_window（イシュー #1728）---
+
+    fn pool_params(
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> Pool2dParams {
+        Pool2dParams::new(kernel_size, stride, padding, dilation).unwrap()
+    }
+
+    #[test]
+    fn pool_out_len_padding_boundary_k2_p1_allowed() {
+        // k=2, d=1, p=1 は許可される padding 上限境界（floor(2/2)=1）。
+        assert_eq!(pool_out_len(4, 2, 2, 1, 1).unwrap(), 3);
+    }
+
+    #[test]
+    fn pool_out_len_padding_boundary_k3_p1_allowed() {
+        // k=3, d=2, p=1 は許可される padding 上限境界（floor(3/2)=1）。
+        // 分子 = 6 + 2*1 - 2*(3-1) - 1 = 3 -> 3/1 + 1 = 4。
+        assert_eq!(pool_out_len(6, 3, 1, 1, 2).unwrap(), 4);
+    }
+
+    #[test]
+    fn pool_out_len_negative_numerator_rejected() {
+        // in=1, k=2, s=2, p=0, d=1 -> 分子 -1（負分子拒否ゲート）。
+        let err = pool_out_len(1, 2, 2, 0, 1).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn pool_out_len_rejects_zero_stride_or_kernel() {
+        assert!(pool_out_len(4, 2, 0, 0, 1).is_err());
+        assert!(pool_out_len(4, 0, 1, 0, 1).is_err());
+    }
+
+    #[test]
+    fn pool2d_out_shape_basic() {
+        let params = pool_params([2, 2], None, [0, 0], [1, 1]);
+        let out = pool2d_out_shape(&[2, 3, 4, 4], &params).unwrap();
+        assert_eq!(out, vec![2, 3, 2, 2]);
+    }
+
+    #[test]
+    fn pool2d_out_shape_h_zero_is_rejected() {
+        let params = pool_params([2, 2], None, [0, 0], [1, 1]);
+        let err = pool2d_out_shape(&[1, 3, 0, 4], &params).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn pool2d_out_shape_n_zero_is_accepted() {
+        let params = pool_params([2, 2], None, [0, 0], [1, 1]);
+        let out = pool2d_out_shape(&[0, 3, 4, 4], &params).unwrap();
+        assert_eq!(out, vec![0, 3, 2, 2]);
+    }
+
+    #[test]
+    fn pool2d_out_shape_c_zero_is_accepted() {
+        let params = pool_params([2, 2], None, [0, 0], [1, 1]);
+        let out = pool2d_out_shape(&[1, 0, 4, 4], &params).unwrap();
+        assert_eq!(out, vec![1, 0, 2, 2]);
+    }
+
+    #[test]
+    fn pool2d_out_shape_padding_only_window_is_rejected() {
+        // in=0, k=2, s=2, p=1, d=1: 負分子ゲートは素通りするが H==0 の
+        // 事前検査で拒否される（設計 doc §3「非 adaptive 側は padding>0
+        // のとき負分子ゲートだけでは不十分」）。
+        let params = pool_params([2, 2], None, [1, 1], [1, 1]);
+        let err = pool2d_out_shape(&[1, 1, 0, 4], &params).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn pool2d_out_shape_empty_window_dilation_rejected() {
+        // in=1, kernel=2, stride=1, padding=1, dilation=2 は
+        // padding 上限を満たすが両タップとも範囲外（空窓）。
+        let params = pool_params([2, 2], Some([1, 1]), [1, 1], [2, 2]);
+        let err = pool2d_out_shape(&[1, 1, 1, 8], &params).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn pool2d_out_shape_kernel3_dilation_not_empty_window() {
+        // kernel>=3 は設計 doc §3 の導出により空窓が起こり得ない。
+        let params = pool_params([3, 1], Some([1, 1]), [1, 0], [2, 1]);
+        let out = pool2d_out_shape(&[1, 1, 3, 4], &params).unwrap();
+        assert_eq!(out[2], 1);
+    }
+
+    #[test]
+    fn adaptive_pool2d_out_shape_basic() {
+        let out = adaptive_pool2d_out_shape(&[2, 3, 8, 8], [2, 2]).unwrap();
+        assert_eq!(out, vec![2, 3, 2, 2]);
+    }
+
+    #[test]
+    fn adaptive_pool2d_out_shape_output_larger_than_input_accepted() {
+        let out = adaptive_pool2d_out_shape(&[1, 1, 2, 2], [4, 4]).unwrap();
+        assert_eq!(out, vec![1, 1, 4, 4]);
+    }
+
+    #[test]
+    fn adaptive_pool2d_out_shape_h_zero_is_rejected() {
+        let err = adaptive_pool2d_out_shape(&[1, 1, 0, 4], [2, 2]).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn adaptive_pool2d_out_shape_output_size_zero_is_rejected() {
+        let err = adaptive_pool2d_out_shape(&[1, 1, 4, 4], [0, 2]).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn adaptive_pool2d_out_shape_rank_mismatch() {
+        let err = adaptive_pool2d_out_shape(&[1, 4, 4], [2, 2]).unwrap_err();
+        assert!(matches!(err, ShapeError::RankMismatch { .. }));
+    }
+
+    #[test]
+    fn adaptive_window_basic() {
+        // in=8, out=2: 窓 [0,4)/[4,8)。
+        assert_eq!(adaptive_window(0, 8, 2), Some((0, 4)));
+        assert_eq!(adaptive_window(1, 8, 2), Some((4, 8)));
+    }
+
+    #[test]
+    fn adaptive_window_non_divisible() {
+        // in=7, out=2: start=floor(0*7/2)=0, end=ceil(7/2)=4 /
+        // start=floor(7/2)=3, end=ceil(14/2)=7。
+        assert_eq!(adaptive_window(0, 7, 2), Some((0, 4)));
+        assert_eq!(adaptive_window(1, 7, 2), Some((3, 7)));
+    }
+
+    #[test]
+    fn adaptive_window_zero_out_len_is_none() {
+        assert_eq!(adaptive_window(0, 8, 0), None);
     }
 }
