@@ -204,6 +204,21 @@ pub enum MetalError {
     /// フォールバック）へ写像する（`backend-cuda::error::
     /// CudaError::Im2colSizeLimitExceeded` と同型の設計判断）。
     Im2colSizeLimitExceeded { detail: String },
+    /// `crate::batch_norm_model::validate_batch_norm_launch`
+    /// （`crate::batch_norm::MetalBatchNorm::run_batch_norm_train_f32`／
+    /// `run_batch_norm_infer_f32` が起動前に呼ぶ。イシュー #1736）が
+    /// 検知した契約違反（`eps` 非有限・負／`n*c*spatial != x.len()`／
+    /// `w`／`b`／`mean`／`var` の長さ不一致／`c*4 > isize::MAX`）。
+    InvalidBatchNormShape { detail: String },
+    /// [`Self::InvalidBatchNormShape`] と同じ検証が検知した
+    /// 「`n`／`c`／`spatial`／`m`／`numel` のいずれかがカーネル引数の
+    /// `uint`（`u32::MAX`）上限を超過」。`InvalidBatchNormShape`
+    /// （内部契約違反）とは区別する: `ops.rs::map_batch_norm_error`
+    /// は本 variant のみ `BackendError::Unsupported`（ホスト
+    /// フォールバック）へ写像する（`Im2colSizeLimitExceeded` と同型の
+    /// 設計判断。`backend-cuda::error::CudaError::
+    /// BatchNormSizeLimitExceeded` と対になる）。
+    BatchNormSizeLimitExceeded { detail: String },
 }
 
 impl fmt::Display for MetalError {
@@ -323,6 +338,12 @@ impl fmt::Display for MetalError {
             }
             MetalError::Im2colSizeLimitExceeded { detail } => {
                 write!(f, "im2col/col2im size limit exceeded: {detail}")
+            }
+            MetalError::InvalidBatchNormShape { detail } => {
+                write!(f, "invalid batch_norm shape: {detail}")
+            }
+            MetalError::BatchNormSizeLimitExceeded { detail } => {
+                write!(f, "batch_norm size limit exceeded: {detail}")
             }
         }
     }
