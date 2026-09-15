@@ -1,8 +1,8 @@
 //! Dataset／DataLoader 公開面（イシュー #1615・親 #1602。`docs/
 //! dataset-dataloader-design.md`）。
 //!
-//! `fandhe_ai_tensor_core::data`（[`Dataset`]・[`TensorDataset`]・
-//! [`DataLoader`]・[`DataLoaderConfig`]・[`Batches`]・[`DataError`]）を
+//! `fandhe_ai_tensor_core::data`（`Dataset`・`TensorDataset`・
+//! `DataLoader`・`DataLoaderConfig`・`Batches`・`DataError`）を
 //! そのまま再エクスポートする**純再エクスポートモジュール**
 //! （`crate::optim` と同型。facade 独自の型・関数は持ち込まない）。
 //!
