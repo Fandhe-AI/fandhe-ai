@@ -6576,6 +6576,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
         let dinput = nll_loss_vjp(&input, &targets, 1, Reduction::Mean, &g);
         let num_dinput = numeric_grad_unary(&input, &s, |x| {
             eval::nll_loss(x, &targets, 1, Reduction::Mean)
+                .expect("test fixture: shape は有限（checked_mul は失敗しない）")
         });
 
         assert_grad_close("nll_loss(mean) dInput", &dinput, &num_dinput);
@@ -6592,6 +6593,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
         let dinput = nll_loss_vjp(&input, &targets, 1, Reduction::Sum, &g);
         let num_dinput = numeric_grad_unary(&input, &s, |x| {
             eval::nll_loss(x, &targets, 1, Reduction::Sum)
+                .expect("test fixture: shape は有限（checked_mul は失敗しない）")
         });
 
         assert_grad_close("nll_loss(sum) dInput", &dinput, &num_dinput);
@@ -6615,7 +6617,8 @@ release ビルドでも検知できるよう `assert!` を使う）"
 
         for reduction in [Reduction::Mean, Reduction::Sum] {
             let log_probs = eval::log_softmax_along(&logits, 1);
-            let via_nll = eval::nll_loss(&log_probs, &targets, 1, reduction);
+            let via_nll = eval::nll_loss(&log_probs, &targets, 1, reduction)
+                .expect("test fixture: shape は有限（checked_mul は失敗しない）");
             let via_ce = eval::cross_entropy_loss(&logits, &targets, 1, reduction);
             // `log_softmax_along`（シフト→exp→ln 正規化）と
             // `cross_entropy_loss`（log-sum-exp を直接計算）は同じ値を

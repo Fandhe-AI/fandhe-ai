@@ -1108,19 +1108,49 @@ pub(crate) fn bce_loss(
 /// `mse_loss`（上記）の先例に合わせ `Mean`／`Sum` とも `0.0`（PyTorch
 /// は `NaN`。差異は既存の `mse_loss`／`cross_entropy_loss` と同じ許容
 /// 方針）。
+///
+/// **`ShapeError::ElementCountOverflow` を返しうる**（PR #1850
+/// codex-review P1 是正: `outer`／`inner` を `class_dim` の前後で分割
+/// して個別に `.iter().product()` するため、`input.shape()` 全体の
+/// 要素数積は `0`（例: 先頭軸が `0`）でも、分割後の片側の部分積だけを
+/// 見ると `0` を含まず `usize` オーバーフローしうる〈例:
+/// `shape=[0,1,usize::MAX,2]`・`class_dim=1` は `outer=0` で全体は
+/// 空だが `inner`（`shape[2..]=[usize::MAX,2]`）の積は単独で
+/// オーバーフローする〉。`shape` がどこかの軸で `0` を含む場合は
+/// `outer`／`inner` を計算せずに早期リターンする（イシュー #1834 の
+/// `interpolate_nearest` 是正と同じ「全体が空要素であることが既知なら
+/// 部分積計算を回避する」考え方）。`shape` に `0` を含まない実際に
+/// 実体化済みの `Tensor` に対しては、`outer`／`inner` いずれも全体の
+/// 要素数積（`Tensor::new` 側で確保済み）以下であるため
+/// `checked_mul` が失敗することはない契約だが、本番経路 panic 禁止
+/// 方針（`.claude/rules/coding-rust.md`）に従い防御的に `checked_mul`
+/// を使う。
 pub(crate) fn nll_loss(
     input: &Tensor<f32>,
     targets: &Tensor<i32>,
     class_dim: usize,
     reduction: crate::var::Reduction,
-) -> Tensor<f32> {
+) -> Result<Tensor<f32>, ShapeError> {
     let shape = input.shape().to_vec();
-    let outer: usize = shape[..class_dim].iter().product();
+    if shape.iter().any(|&d| d == 0) {
+        // 空バッチ契約（関数冒頭 doc 参照）。`outer`／`inner` の部分積
+        // 計算そのものを回避する。
+        return Ok(build_tensor(vec![0.0], &[]));
+    }
+    let outer: usize = shape[..class_dim]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
     let axis_len = shape[class_dim];
-    let inner: usize = shape[class_dim + 1..].iter().product();
+    let inner: usize = shape[class_dim + 1..]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
     let data = dense_vec(input);
     let target_data = dense_vec_i32(targets);
-    let n = outer * inner;
+    let n = outer
+        .checked_mul(inner)
+        .ok_or(ShapeError::ElementCountOverflow)?;
 
     let mut total = 0f32;
     for o in 0..outer {
@@ -1146,7 +1176,49 @@ pub(crate) fn nll_loss(
         crate::var::Reduction::Mean => 0.0,
         crate::var::Reduction::Sum => total,
     };
-    build_tensor(vec![loss], &[])
+    Ok(build_tensor(vec![loss], &[]))
+}
+
+#[cfg(test)]
+mod nll_loss_empty_shape_overflow_tests {
+    use super::*;
+
+    // PR #1850 codex-review P1 是正の回帰: `input.shape()=[0,1,
+    // usize::MAX,2]`・`class_dim=1` は `Tensor::new`／`Var::nll_loss`
+    // の事前検査（`checked_numel`。先頭の `0` が後続の積を吸収する）を
+    // 通過するが、`nll_loss` 自身が `outer`／`inner` を `class_dim` の
+    // 前後で分割して個別に `.iter().product()` していたため、`inner`
+    // （`shape[2..]=[usize::MAX,2]`。ゼロを含まない部分積）が単独で
+    // overflow していた（`softmax_along`／`concat` と同型の bug。上記
+    // `softmax_empty_tensor_overflow_tests`／
+    // `concat_empty_out_shape_overflow_tests` 参照）。`shape` に `0`
+    // を含む場合は部分積を計算する前に早期 return し、`Mean`／`Sum`
+    // いずれも `0.0`（空バッチ契約）を返すことを確認する。
+    #[test]
+    fn nll_loss_empty_shape_with_overflow_prone_inner_does_not_panic_mean() {
+        let shape = [0usize, 1, usize::MAX, 2];
+        let input = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let targets = Tensor::<i32>::new(Vec::new(), &[0usize, usize::MAX, 2])
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let out = nll_loss(&input, &targets, 1, crate::var::Reduction::Mean)
+            .expect("空バッチは checked_mul 経路でも成功する契約");
+        assert_eq!(out.shape(), &[] as &[usize]);
+        assert_eq!(out.get(&[]).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn nll_loss_empty_shape_with_overflow_prone_inner_does_not_panic_sum() {
+        let shape = [0usize, 1, usize::MAX, 2];
+        let input = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let targets = Tensor::<i32>::new(Vec::new(), &[0usize, usize::MAX, 2])
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let out = nll_loss(&input, &targets, 1, crate::var::Reduction::Sum)
+            .expect("空バッチは checked_mul 経路でも成功する契約");
+        assert_eq!(out.shape(), &[] as &[usize]);
+        assert_eq!(out.get(&[]).unwrap(), 0.0);
+    }
 }
 
 /// `KlDivTarget::Probabilities`／`LogProbabilities` 共通の要素損失

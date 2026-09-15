@@ -1782,7 +1782,13 @@ impl<'t> Var<'t> {
                 v
             }
             Err(BackendError::Unsupported(_)) => {
+                // `eval::nll_loss` は `ShapeError::ElementCountOverflow`
+                // を返しうる（PR #1850 codex-review P1 是正: `outer`／
+                // `inner` の部分積 overflow を `checked_mul` で拒否する
+                // ようになった）。判定迂回経路を作らず伝播する
+                // （`.claude/rules/security.md` A08）。
                 eval::nll_loss(&input_val, targets, class_dim, reduction)
+                    .map_err(AutodiffError::Shape)?
             }
             Err(other) => return Err(AutodiffError::Backend(other)),
         };
