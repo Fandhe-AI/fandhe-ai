@@ -109,6 +109,36 @@ pub trait Module {
         )))
     }
 
+    /// [`Self::forward_host`] が常に [`BackendError::Unsupported`] を
+    /// 返す層かどうかを、実際には呼ばずに事前判定するフック（イシュー
+    /// #1760・Cursor Bugbot 指摘是正: `compat::Sequential::predict` の
+    /// tape 不要経路が層を順に `forward_host` していき、途中の層
+    /// （`Embedding`／`MultiheadAttention` 等）で初めて `Unsupported`
+    /// に当たって旧経路へフォールバックすると、それより手前の層で
+    /// 既に発生した副作用——`Dropout` の RNG 消費・`BatchNorm` の
+    /// running stats 更新（学習モード時。`RefCell` 越しに `&self` から
+    /// 更新される）——が旧経路の再実行で二重に発生してしまう。
+    ///
+    /// 既定は `true`（[`Self::forward_host`] のデフォルト実装が
+    /// fail-safe で `Unsupported` を返すのとは非対称だが、既定 `true`
+    /// はこのクレート内の大多数の層——`forward_host` を実装済みの
+    /// 層——の実態と一致する。`forward_host` を未実装のまま残す層
+    /// （[`Embedding`]・[`MultiheadAttention`]）のみが `false` へ
+    /// オーバーライドし、常に `Unsupported` を返すことを事前に
+    /// 申告する）。
+    ///
+    /// [`crate::compat::Sequential::predict`]（`fandhe-ai-facade`）が
+    /// 本メソッドで全層を事前判定し、1 層でも `false` を返す場合は
+    /// tape 不要経路を**一切実行せず**旧経路（`Tape` 経由）から
+    /// 開始する（部分的な副作用の発生自体を構造的に防ぐ）。動的な
+    /// 入力依存で `Unsupported` を返す層（本クレート内には存在しない）
+    /// は本メソッドの対象外——既定 `true` のまま実行時に
+    /// `Unsupported` を返した場合の副作用二重化は本イシューの
+    /// スコープ外として残る。
+    fn supports_forward_host(&self) -> bool {
+        true
+    }
+
     /// 学習可能パラメータを持つ層（現状 `Linear` のみ）への読み取り
     /// アクセスフック。既定実装は `None`（活性化関数など無状態の層は
     /// オーバーライドしない）。`std::any::Any` による動的ダウンキャスト
@@ -1288,6 +1318,15 @@ impl Module for Embedding {
 
     fn as_embedding_mut(&mut self) -> Option<&mut Embedding> {
         Some(self)
+    }
+
+    /// `forward_host` を実装しないため既定 `Unsupported` のまま
+    /// （trait doc 参照）。[`Module::supports_forward_host`] を `false`
+    /// へオーバーライドし、`compat::Sequential::predict` の tape 不要
+    /// 経路が本層で `Unsupported` に当たる前に全層を事前判定できる
+    /// ようにする（イシュー #1760・Cursor Bugbot 指摘是正）。
+    fn supports_forward_host(&self) -> bool {
+        false
     }
 
     /// 命名契約（`Module::named_parameters` doc §「命名契約」）:

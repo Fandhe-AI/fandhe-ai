@@ -459,6 +459,32 @@ impl Sequential {
     /// `nn::Dropout` モジュール doc「train／eval と `predict`／
     /// `forward_host` の整合」参照）。
     pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
+        // イシュー #1760・Cursor Bugbot 指摘是正: tape 不要経路
+        // （`predict_tape_free`）は層を先頭から順に `forward_host`
+        // していくため、`Embedding`／`MultiheadAttention`（`forward_host`
+        // 未実装で常に `Unsupported`）が途中に含まれると、それより
+        // 手前の層（`Dropout` の RNG 消費・`BatchNorm` の running
+        // stats 更新等、`forward_host` が副作用を伴う層）が実行された
+        // *後* に `Unsupported` へ到達し、下の旧経路
+        // フォールバック（`predict_via_tape`）が全層を最初から
+        // 再実行してしまう。これは同じ副作用（RNG 消費・running
+        // stats 更新）を 1 回の `predict` 呼び出しで二重に発生させる。
+        //
+        // 対策: 実際に層を 1 つも実行する前に、全層が
+        // `Module::supports_forward_host()` を満たすかを事前判定する。
+        // 1 層でも `false`（現状 `Embedding`・`MultiheadAttention` の
+        // み）なら、tape 不要経路を**一切実行せず**最初から旧経路
+        // （副作用も含め 1 回のみ実行される）を使う。全層が `true`
+        // の場合の挙動・数値結果は本是正の前後で変わらない
+        // （`Module::supports_forward_host` の trait doc も参照）。
+        if !self
+            .inner
+            .layers()
+            .iter()
+            .all(|layer| layer.supports_forward_host())
+        {
+            return self.predict_via_tape(input);
+        }
         match self.predict_tape_free(input) {
             Err(AutodiffError::Backend(BackendError::Unsupported(_))) => {
                 self.predict_via_tape(input)

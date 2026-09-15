@@ -254,3 +254,69 @@ fn add_dropout_rejects_out_of_range_p() {
         panic!("p=-0.1 は InvalidArgument で拒否されるはず");
     }
 }
+
+// --- イシュー #1760・Cursor Bugbot 指摘是正: predict の tape 不要経路
+//     フォールバックが副作用を二重発生させないことの回帰テスト ---
+
+/// `predict` の tape 不要経路（`predict_tape_free`）が
+/// `MultiheadAttention`（`forward_host` 未実装で常に `Unsupported`）に
+/// 到達する前に `Dropout`（RNG を消費する副作用付き層）を実行して
+/// しまうと、`Unsupported` を受けて全層を旧経路（`predict_via_tape`）
+/// で再実行する際に `Dropout` の RNG 消費が二重に発生し、同一 seed
+/// から `predict` を 1 回呼んだ結果が「`Dropout` を 1 回だけ適用した
+/// 場合」の期待値と食い違ってしまう（是正前は本テストが失敗する）。
+///
+/// [`Module::supports_forward_host`] による事前判定
+/// （`compat::Sequential::predict` 冒頭）で、`MultiheadAttention` を
+/// 含むモデルは tape 不要経路を一切実行せず最初から旧経路のみを使う
+/// ことにより、RNG は 1 回しか消費されない。
+#[test]
+fn predict_fallback_to_via_tape_does_not_double_apply_dropout_side_effects() {
+    let _guard = dropout_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+
+    // `Dropout` → `MultiheadAttention`。`Dropout` は shape を変えない
+    // ため、そのまま `MultiheadAttention` の `[batch, seq, embed_dim]`
+    // 契約へ連鎖できる（`multihead_attention_predict_matches_forward_bit_exact`
+    // と同じ形状・seed 方針）。
+    let model = Sequential::new()
+        .add_dropout(0.5)
+        .unwrap()
+        .add_multihead_attention(4, 2, /* seed = */ 7)
+        .unwrap();
+    assert!(
+        model.training(),
+        "既定は train モード（Dropout が作用する）"
+    );
+
+    let x = Tensor::new(
+        (0..2 * 3 * 4).map(|i| (i as f32) * 0.03 - 0.4).collect(),
+        &[2, 3, 4],
+    )
+    .unwrap();
+
+    fandhe_ai::manual_seed(2024);
+    let out_predict = model.predict(&x).unwrap();
+
+    // 「`Dropout` の RNG 消費が 1 回だけ」であることの基準値: 同じ
+    // seed から直接 `bind().forward()`（tape 経路）を 1 回呼んだ結果
+    // （`predict` が内部で `predict_via_tape` のみへ委譲する場合の
+    // 期待値と一致するはず）。
+    fandhe_ai::manual_seed(2024);
+    let out_reference = {
+        let t = tape();
+        let bound = model.bind(&t);
+        let xv = t.var(&x);
+        let pred = bound.forward(&t, &xv).unwrap();
+        pred.to_tensor()
+    };
+
+    assert_eq!(
+        out_predict.as_slice(),
+        out_reference.as_slice(),
+        "predict は Dropout の RNG 消費を 1 回だけ行うはず\
+         （tape 不要経路での部分実行 → 旧経路への全体フォールバックで\
+         二重消費してはならない）"
+    );
+}

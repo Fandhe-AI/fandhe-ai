@@ -795,6 +795,15 @@ impl Module for MultiheadAttention {
         Some(self)
     }
 
+    /// `forward_host` は trait 既定のまま（常に `Unsupported`）。
+    /// [`Module::supports_forward_host`] を `false` へオーバーライド
+    /// し、`compat::Sequential::predict` の tape 不要経路が本層で
+    /// `Unsupported` に当たる前に全層を事前判定できるようにする
+    /// （イシュー #1760・Cursor Bugbot 指摘是正: `Embedding` と同型）。
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
     /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
     /// `q_proj.*` → `k_proj.*` → `v_proj.*` → `out_proj.*` の順で、各
     /// `Linear::named_parameters()`（`weight` → `bias`）に接頭辞を連結
