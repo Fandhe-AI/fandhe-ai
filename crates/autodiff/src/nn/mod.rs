@@ -72,10 +72,16 @@
 //! の `Sequential` を `inner` として合成する薄いラッパーへ再構成した
 //! （`container.rs` モジュール doc「配置」節参照）。`ModuleList`／
 //! `Sequential` は facade から再エクスポートしない（`Module` trait
-//! 自体が非公開のため）。
+//! 自体が非公開のため）。イシュー #1603 で [`Dropout`]（`dropout`
+//! モジュール）を追加した。`Var::dropout` の薄いラッパーであると
+//! 同時に、`set_training`／`training` を実際にオーバーライドする
+//! **最初の実装**（`dropout.rs` モジュール doc・`module.rs` の trait
+//! doc「今後 Dropout・BatchNorm 等のモード依存層を追加する際は…」
+//! 参照）。
 
 mod attention;
 mod container;
+mod dropout;
 mod embedding;
 mod init;
 mod linear;
@@ -89,6 +95,7 @@ pub mod optim;
 
 pub use attention::{MultiheadAttention, MultiheadAttentionVars};
 pub use container::{ModuleList, Sequential};
+pub use dropout::Dropout;
 pub use embedding::{Embedding, EmbeddingVars};
 pub use linear::{Linear, LinearVars};
 pub use module::Module;

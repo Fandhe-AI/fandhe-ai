@@ -3,14 +3,21 @@
 //! `named_parameters`（イシュー #1758）の公開 API 契約テストを、
 //! `fandhe_ai`（facade）経由でのみ検証する。
 //!
-//! 本 issue は数値演算を追加しない（新規 `Op`／`BackendOps`／VJP／GPU
-//! カーネルはいずれも該当なし）ため、ここでの「parity」に相当する
-//! 検証は CPU 上の bit 完全一致（モード切替の前後で `predict`／
-//! `forward`／`backward` の出力・勾配が変化しないこと）に限定する。
-//! CUDA／Metal への申し送りは不要（数値経路に一切触れないため）。
+//! #1758 時点では本ファイルの検証はモード切替が数値経路に一切影響
+//! しないことの固定（Linear・活性化関数はいずれもモード非依存）
+//! だった。イシュー #1603 で [`Sequential::add_dropout`] が追加され、
+//! `Dropout` が本クレート内実装で唯一 `training` フラグを実際に
+//! 保持する層になったため、末尾に `add_dropout` 固有のモード契約
+//! テスト（eval は恒等・train は決定的・`dyn Module` 経由の伝播が
+//! `bind().forward()` にも及ぶ・`p` 範囲外は `Err`）を追加した。
+//! それ以外の検証は CPU 上の bit 完全一致に限定する（新規 `Op`／
+//! `BackendOps`／GPU カーネルは追加していないため）。CUDA／Metal への
+//! 申し送りは不要（数値経路に一切触れないため）。
+
+use std::sync::Mutex;
 
 use fandhe_ai::compat::Sequential;
-use fandhe_ai::{Tensor, tape};
+use fandhe_ai::{AutodiffError, Tensor, tape};
 
 fn build_model() -> Sequential {
     Sequential::new()
@@ -123,5 +130,127 @@ fn backward_gradients_unaffected_by_training_mode() {
     assert_eq!(grads_train.len(), grads_eval.len());
     for (a, b) in grads_train.iter().zip(grads_eval.iter()) {
         assert_eq!(a.as_slice(), b.as_slice());
+    }
+}
+
+// --- `add_dropout`（イシュー #1603）のモード契約 -------------------------
+
+/// グローバル RNG 状態を書き換えるテストを直列化する
+/// （`crates/facade/tests/rng_tensor_generation.rs` と同型）。
+fn dropout_test_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
+fn build_model_with_dropout(p: f32) -> Result<Sequential, AutodiffError> {
+    Sequential::new()
+        .add_linear(4, 8, /* seed = */ 42)
+        .unwrap()
+        .add_relu()
+        .add_dropout(p)?
+        .add_linear(8, 2, /* seed = */ 43)
+}
+
+/// (a) eval モードの `add_dropout` は恒等写像のため、`Dropout` 層なし
+/// の同重みモデル（`build_model`。`add_linear` の seed を揃えている）
+/// の `predict` と bit 完全一致する。
+#[test]
+fn dropout_model_eval_predict_matches_model_without_dropout() {
+    let mut with_dropout = build_model_with_dropout(0.5).unwrap();
+    with_dropout.eval();
+    let baseline = build_model();
+
+    let x = Tensor::new(vec![0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], &[2, 4]).unwrap();
+    let out_with_dropout = with_dropout.predict(&x).unwrap();
+    let out_baseline = baseline.predict(&x).unwrap();
+
+    assert_eq!(out_with_dropout.as_slice(), out_baseline.as_slice());
+}
+
+/// (b) train モードの `add_dropout` は `manual_seed` で同一マスクを
+/// 再現すれば run-to-run bit 完全一致し、tape 不要経路（`predict`）と
+/// tape 経路（`bind().forward()`）も bit 完全一致する（`predict_tape_free
+/// ≡ predict_via_tape` 不変条件が train モードでも成立することの確認。
+/// `nn::Dropout` モジュール doc 参照）。
+#[test]
+fn dropout_model_train_predict_is_deterministic_and_matches_tape_path() {
+    let _guard = dropout_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let model = build_model_with_dropout(0.5).unwrap();
+    assert!(model.training());
+    let x = Tensor::new(vec![0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], &[2, 4]).unwrap();
+
+    fandhe_ai::manual_seed(31415);
+    let out1 = model.predict(&x).unwrap();
+
+    fandhe_ai::manual_seed(31415);
+    let out2 = model.predict(&x).unwrap();
+    assert_eq!(
+        out1.as_slice(),
+        out2.as_slice(),
+        "同一 seed なら run-to-run bit 同一"
+    );
+
+    fandhe_ai::manual_seed(31415);
+    let via_tape = {
+        let t = tape();
+        let bound = model.bind(&t);
+        let xv = t.var(&x);
+        let pred = bound.forward(&t, &xv).unwrap();
+        pred.to_tensor()
+    };
+    assert_eq!(
+        out1.as_slice(),
+        via_tape.as_slice(),
+        "tape 不要経路〈predict〉と tape 経路〈bind().forward()〉は同一 seed で bit 一致"
+    );
+}
+
+/// (c) `set_training(false)` がコンテナ（`nn::Sequential::inner`。
+/// `dyn Module` 経由）から `Dropout` へ実際に伝播し、`predict`
+/// （tape 不要経路）だけでなく `bind().forward()`（tape 経路）でも
+/// 恒等写像へ切り替わることを確認する。
+#[test]
+fn dropout_model_set_training_false_propagates_to_bind_forward_too() {
+    let mut model = build_model_with_dropout(0.9).unwrap();
+    model.set_training(false);
+    assert!(!model.training());
+
+    let x = Tensor::new(vec![0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], &[2, 4]).unwrap();
+    let baseline = build_model();
+    let out_baseline = baseline.predict(&x).unwrap();
+
+    let via_tape = {
+        let t = tape();
+        let bound = model.bind(&t);
+        let xv = t.var(&x);
+        let pred = bound.forward(&t, &xv).unwrap();
+        pred.to_tensor()
+    };
+    assert_eq!(
+        via_tape.as_slice(),
+        out_baseline.as_slice(),
+        "set_training(false) 伝播後は Dropout なしモデルの forward と bit 一致するはず"
+    );
+}
+
+/// (d) `add_dropout` は `p` の範囲外（`[0, 1]` 外）を `Err` で拒否する
+/// （`Dropout::new` の検査を層構築時点で早期化する契約）。
+#[test]
+fn add_dropout_rejects_out_of_range_p() {
+    // `Sequential` は `Debug` を実装しない（数値ロジックを持たないビル
+    // ダーのため。`unwrap_err()`／`{:?}` での `Result` 全体表示は `Ok`
+    // 側 `T: Debug` を要求するため使えない）ので `if let` で `Err` 側の
+    // variant のみを検査する。
+    if let Err(err) = Sequential::new().add_dropout(1.5) {
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    } else {
+        panic!("p=1.5 は InvalidArgument で拒否されるはず");
+    }
+    if let Err(err) = Sequential::new().add_dropout(-0.1) {
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    } else {
+        panic!("p=-0.1 は InvalidArgument で拒否されるはず");
     }
 }
