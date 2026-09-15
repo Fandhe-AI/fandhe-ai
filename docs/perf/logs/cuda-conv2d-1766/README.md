@@ -9,6 +9,10 @@
 すべきログ一覧のみを提供し、実測は GB10 実機を持つセッションへ申し送る
 （`docs/perf/logs/cuda-gemm-batched-1716/README.md` と同型の運用）。
 
+> **実測の正式な受け皿はイシュー #1771**（`docs/perf/logs/conv-
+> realdevice-1771/`）。#1766〜#1769 4 イシューの実行手順・判定規則を
+> 統合したランブックを参照すること。
+
 ## 目的
 
 イシュー #1766「CUDA Conv2d forward／backward（im2col＋GEMM）」の実機

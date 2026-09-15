@@ -1,0 +1,39 @@
+# イシュー #1771 実機実測環境記入欄（内部ホスト名は書かない。hostname 行は masked のまま残す）
+
+## CUDA（DGX Spark GB10）
+
+hostname: masked
+GPU:
+driver:
+CUDA:
+rustc:
+sha:
+run 日時（UTC）:
+
+判定結果:
+- im2col_col2im_parity:
+- conv2d_backend_parity:
+- conv1d_backend_parity:
+- nn_conv_backend_parity:
+- run-to-run 決定性（bits=／fold_bits= diff）:
+
+verdict:
+
+## Metal（Apple Silicon）
+
+hostname: masked
+chip:
+macOS:
+Metal:
+rustc:
+sha:
+run 日時（UTC）:
+
+判定結果:
+- im2col_col2im_parity:
+- conv2d_backend_parity:
+- conv1d_backend_parity:
+- nn_conv_backend_parity:
+- run-to-run 決定性（bits=／fold_bits= diff）:
+
+verdict:
