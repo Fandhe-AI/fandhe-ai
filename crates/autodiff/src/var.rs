@@ -17,12 +17,12 @@ use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, BceKind, CastElement, ChecksumReadout, Conv2dParams,
-    GemmChecksum, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget, LstmPointwiseOutput,
-    MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor,
-    VectorNormOrd, broadcast_shape, concat_out_shape, conv2d_out_shape, gather_out_shape,
-    gemm_out_shape, interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape,
-    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    Device, GemmChecksum, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
+    ShapeError, Tensor, VectorNormOrd, broadcast_shape, concat_out_shape, conv2d_out_shape,
+    gather_out_shape, gemm_out_shape, interpolate_out_shape_for_mode, matmul_out_shape,
+    one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -277,6 +277,98 @@ impl<'t> Var<'t> {
         };
         let id = self.tape.push_leaf(value, false);
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// この `Var` が属する `Tape` のデバイス（イシュー #1614）。
+    /// `Tape::device()`（`self.tape.ops.device()` への委譲）をそのまま
+    /// 返す。
+    pub fn device(&self) -> Device {
+        self.tape.device()
+    }
+
+    /// PyTorch `Tensor.to(device)` 相当の同一デバイス検査（イシュー
+    /// #1614）。`Var` は所属する 1 つの `Tape`（＝1 デバイス）に束縛
+    /// されており（本ファイル冒頭「クロステープ安全性」）、同一テープ
+    /// 内でデバイスを差し替える演算は表現できない。そのため本メソッドは
+    /// 実際に値を転送する変換ではなく、**要求先デバイスが現在のデバイス
+    /// と一致するかを検査する fail-fast の入口**として設計している:
+    ///
+    /// - `device == self.device()` の場合: 恒等（`*self` をそのまま
+    ///   返す。`Var: Copy` のためテープへ新規ノードを追加しない）。
+    /// - 不一致の場合: [`AutodiffError::DeviceMismatch`]。黙って別
+    ///   デバイスへフォールバックしたり、暗黙にクロステープ複製（勾配
+    ///   経路が切れる）したりしない。
+    ///
+    /// 別デバイスへ実際に値を転送したい場合は [`Self::to_tape`]（もしくは
+    /// facade `Tape::transfer`）を使うこと——`to_tape` は新しい `Tape`
+    /// 上へ値を複製した葉ノードとして登録するため、テープをまたぐ
+    /// 明示的な操作であることが型シグネチャ（戻り値のライフタイムが
+    /// 変わる）からも分かる。
+    pub fn to(&self, device: Device) -> Result<Var<'t>, AutodiffError> {
+        let actual = self.device();
+        if device == actual {
+            Ok(*self)
+        } else {
+            Err(AutodiffError::DeviceMismatch {
+                requested: device,
+                actual,
+            })
+        }
+    }
+
+    /// この `Var` の値を、別の `Tape`（`target`。同一デバイスでもよい）
+    /// 上へ新しい葉ノードとして転送する（イシュー #1614。facade
+    /// `Tape::transfer` の実体）。
+    ///
+    /// **`target` が同一 `Tape` の場合は恒等**（`Var::detach` と異なり
+    /// 追跡は切り離さない——同一テープへの「転送」は no-op として
+    /// 扱う）。この判定は `self.tape.nodes` の借用（`materialize_
+    /// fallible` が要る `Ref`）より**前**に行う必要がある——後回しに
+    /// すると、同一テープの場合に不変借用が生きたまま `target.
+    /// push_leaf`（`borrow_mut`）を呼ぶことになり `RefCell` の二重
+    /// 可変借用で実行時 panic になる（早期 return により到達不能に
+    /// する）。
+    ///
+    /// 別テープの場合は `crate::tape::materialize_fallible`
+    /// （`Var::detach` と同じ層 1 の実体化経路。lazy elementwise 連鎖・
+    /// view ノードはここで確定し、checkpoint 解放済みで再計算に失敗
+    /// した poison 値は `Err` で fail-closed に拒否する）で転送元
+    /// デバイス上の値を取り出し、`Tensor<f32>` の `Arc` 共有複製
+    /// （実データコピーなし）を `target.push_leaf` で新しい葉として
+    /// 登録する。
+    ///
+    /// **数値契約**: 転送は算術を含まないホスト値の受け渡しのため、
+    /// 転送元で実体化された値と転送後の葉の値は bit 完全一致する。
+    /// **勾配契約**: 勾配はテープをまたがない（`Var::detach`／`Tape::
+    /// var_no_grad` と同じ「非微分境界」）。転送先では通常の葉として
+    /// `requires_grad()`（転送元の値を引き継ぐ）に従って勾配を受け取る
+    /// ——転送元 `Var` 自身の勾配経路には一切影響しない。**`reset`
+    /// 契約**: 転送先の `Tape` で既に非葉ノードが積まれている場合、
+    /// この葉は以後の [`crate::tape::Tape::reset`] で truncate される
+    /// （既存 `Tape::var` と同じ挙動）。
+    pub fn to_tape<'u>(&self, target: &'u Tape) -> Result<Var<'u>, AutodiffError> {
+        if target.id == self.tape.id {
+            // 早期 return: 下の `self.tape.nodes.borrow()` より前に
+            // 同一テープ判定を済ませることで、`target.push_leaf`
+            // （= `self.tape.push_leaf`）が要求する可変借用との衝突を
+            // 構造的に回避する（このブロックへ来た時点でまだ `nodes`
+            // を借用していない）。
+            //
+            // SAFETY 相当の注記ではなく型の話: `target: &'u Tape` と
+            // `self.tape: &'t Tape` が指す実体が同一であることは
+            // `TapeId` の一致で保証されるが、ライフタイム `'t`／`'u`
+            // は静的には無関係な可能性があるため、`self` から作った
+            // `Var<'t>` をそのまま `Var<'u>` として返すことはできない。
+            // `Var::from_raw(target, self.id)`（`target` 由来の
+            // ライフタイム）で組み直す。
+            return Ok(Var::from_raw(target, self.id));
+        }
+        let value = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let id = target.push_leaf(value, self.requires_grad());
+        Ok(Var::from_raw(target, id))
     }
 
     /// `matmul`（rank≥2。バッチ次元は NumPy 互換ブロードキャスト。
