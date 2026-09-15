@@ -571,6 +571,21 @@ pub(crate) fn cached_constant_pad(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::im2col::CudaIm2col`]
+/// をプロセス内キャッシュから取得する（イシュー #1766。キーは
+/// [`ContextKey`]。`cached_gather_scatter` と同型）。
+/// `ops::CudaBackendOps::im2col`／`col2im` の唯一の呼び出し先。
+pub(crate) fn cached_im2col(
+    device: &CudaDevice,
+) -> Result<Arc<crate::im2col::CudaIm2col>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::im2col::CudaIm2col>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::im2col::CudaIm2col::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する `unique` カーネル
 /// （`unique.rs::CudaUnique`）のコンパイル済みハンドルをプロセス内
 /// キャッシュから取得する（イシュー #1734。`cached_gather_scatter` と
@@ -583,6 +598,18 @@ pub(crate) fn cached_unique(
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ContextKey::from_device(device), || {
         crate::unique::CudaUnique::new(device)
+    })
+}
+
+/// `device` の `CudaContext` に対応する `cast`（`fandhe_ai_tensor_core::
+/// cast::CastOps` の CUDA 実装本体。`cast.rs::CudaCast`）のコンパイル
+/// 済みハンドルをプロセス内キャッシュから取得する（イシュー #1751。
+/// `cached_unique` と同型）。
+pub(crate) fn cached_cast(device: &CudaDevice) -> Result<Arc<crate::cast::CudaCast>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::cast::CudaCast>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::cast::CudaCast::new(device)
     })
 }
 

@@ -685,6 +685,25 @@ impl ReadbackSentinel for i32 {
     const SENTINEL: i32 = -1;
 }
 
+/// `cast.rs::CudaCast::run_f64_to_f32`／`run_f32_to_f64` の `f64`
+/// readback 用（イシュー #1751）。
+impl ReadbackSentinel for f64 {
+    const SENTINEL: f64 = 1.0;
+}
+
+/// `cast.rs::CudaCast::run_i64_to_f32`／`run_f32_to_i64` の `i64`
+/// readback 用（イシュー #1751）。`0` は「事前タッチ」の意図を満たさ
+/// ない（トレイト doc 参照）ため非ゼロの任意値を選ぶ。
+impl ReadbackSentinel for i64 {
+    const SENTINEL: i64 = -1;
+}
+
+/// `cast.rs::CudaCast::run_f32_to_bool` の `u8`（`bool` の 0／1 実体化
+/// 前の生の readback 表現）用（イシュー #1751）。
+impl ReadbackSentinel for u8 {
+    const SENTINEL: u8 = 1;
+}
+
 /// `numel` 要素ぶんの事前タッチ済みホストバッファを確保する
 /// （[`ReadbackDest::PretouchedFresh`] 専用ヘルパー）。`vec![T::SENTINEL;
 /// numel]` は `Vec::from_elem` 経由で全要素を明示的に書き込むため

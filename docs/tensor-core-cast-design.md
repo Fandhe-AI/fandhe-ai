@@ -232,7 +232,10 @@ Result<Var<'_>, AutodiffError>` を委譲追加（`var`／`backward` と同型�
 
 ## 9. スコープ外（`.claude/rules/out-of-scope-tracking.md` に従い記録）
 
-- CUDA／Metal の cast カーネル・実機実測（#1751）。
+- CUDA／Metal の cast カーネルの実機実測（#1751 で実装は完了したが、
+  DGX Spark GB10／Apple Silicon 実機は本エージェント実行環境に到達
+  手段がないため未実施のまま Mac／GB10 セッションへ申し送り。§11
+  参照）。
 - `half::f16`／`bf16` を cast 対象へ追加すること（sealed＋`#[non_exhaustive]`
   のため後続で非破壊追加可能）。
 - 非 f32 ↔ 非 f32 の直接変換（f64→i64 等。現状は f32 経由の合成となり
@@ -251,3 +254,75 @@ Result<Var<'_>, AutodiffError>` を委譲追加（`var`／`backward` と同型�
   `cargo clippy --workspace --all-targets --all-features -- -D warnings`・
   `cargo fmt --all --check` すべて green。CUDA／Metal 実機は未実測のまま
   #1751 へ申し送り。
+
+## 11. 実装記録（#1751）
+
+CUDA（8 方向すべて）・Metal（f64 2 方向を除く 6 方向）のネイティブ
+カーネルを実装し `cast_ops` accessor を `Some(self)` へオーバーライド
+した（イシュー #1751・親 #1613）。
+
+**ファイル一覧**:
+
+- CUDA: `crates/backend-cuda/src/kernels_cast.rs`（8 カーネルソース。
+  `#[cfg(test)]` 文字列テスト 6 件）・`src/cast.rs`（`CudaCast`・
+  `impl CastOps for CudaBackendOps`）・`src/context_cache.rs::cached_cast`・
+  `src/memory.rs`（`ReadbackSentinel for f64／i64／u8`）・`src/ops.rs`
+  （`cast_ops` accessor・`checked_shape_numel` を `pub(crate)` 化）・
+  `tests/cast_ops_contract.rs`（driver 非接触の常時 CI 実行テスト）・
+  `tests/cast_parity.rs`（環境適応スモーク＋`#[ignore]` 実機テスト）
+- Metal: `src/shaders/cast.metal`（6 カーネル）・`src/cast_buffer.rs`
+  （`MetalCastBuffer<T>`。`i32`／`i64`／`u8` を扱う要素型 generic な
+  バッファ。`crate::buffer::MetalBuffer`〈f32 専用〉・`crate::
+  half_buffer::MetalHalfBuffer`〈f16 専用〉と同じ設計判断で既存
+  シグネチャへ触れない独立型）・`src/cast.rs`（`MetalCast`・`impl
+  CastOps for MetalBackendOps`）・`src/context_cache.rs::cached_cast`・
+  `src/ops.rs`（同上）・`tests/cast_source_evidence.rs`（Linux 実行
+  可能な文字列証跡 9 件）・`tests/cast_parity.rs`（`#[ignore]` 実機
+  テスト）
+- facade: `crates/facade/tests/cast_backend_parity.rs`（`#[ignore]`
+  テストを 8 方向〈CUDA〉／6 方向〈Metal〉へ拡張）
+
+**カーネル記述規則**（bit 完全一致契約を満たすための共通規則。
+`kernels_cast.rs`／`shaders/cast.metal` 冒頭コメントが正）:
+
+1. NaN／非ゼロ判定は bit パターン（CUDA `__float_as_uint`／Metal
+   `as_type<uint>`）で行い、`isnan()`・通常の浮動小数点比較には
+   依存しない。
+2. f32→i32／i64 の飽和境界は単一の明示式・ヘッダ非依存のリテラル
+   定数（`INT_MAX`／`LLONG_MAX` 等のマクロは使わない）で書く。
+3. 整数→f32 は最近接偶数丸め（CUDA `__int2float_rn`／`__ll2float_rn`
+   intrinsic を明示指定・Metal は `float(int)`／`float(long)` の既定
+   丸めに委ねる）。
+4. f32↔f64（CUDA のみ）は単純なキャスト（`(double)v`／`(float)d`）。
+5. `bool` は `unsigned char`（CUDA）／`uchar`（Metal）の 0／1 として
+   転送し、ホスト側で必ず `v != 0` により `bool` を実体化する（生
+   バイトの transmute／再解釈は行わない）。
+
+**§3.3 GPU 実装への注記からの実際の逸脱**: 当初案（`cvt.rzi.sat` 系
+intrinsic への依存）ではなく、CUDA も明示 clamp 式（規則 2）で統一した
+（Metal と実装形を揃え、両バックエンドとも同一の飽和境界リテラルを
+共有できるようにするため）。
+
+**accessor 切替に伴う意図した挙動変更**: `cast_ops` を `None` →
+`Some(self)` へ切り替えたため、CUDA／Metal デバイス不在環境で
+`Device::Cuda`／`Device::Metal` の tape から `Var::cast` を呼ぶと、
+従来の暗黙ホストフォールバックではなく `CudaUnavailable`／
+`KernelLaunchFailed` 系のエラーが表面化する（`CastOps` の
+フォールバック規則は「`Unsupported` のみフォールバック」であり内部
+契約違反・driver 不在をホストフォールバックで覆い隠さないため。
+`Var::unique`／`Var::matmul` と同じ既存の挙動であり退行ではない）。
+
+**事前登録した代替案（§11 実測待ち）**: Metal `float(long)`（i64→f32）
+の最近接偶数丸めは実機未確認。M4 Max 実機実測で `cast_i64_to_f32`
+のみ bit 不一致が判明した場合は、その方向のみ Metal 側で既定
+`Unsupported`（ホストフォールバック）へ戻す（tolerance は変更しない）。
+`tests/cast_parity.rs`（Metal）の i64→f32 fixture（`2^24+1`・`2^25+1`・
+`2^25+3` 等のタイケースを含む）がこの判定材料になる。
+
+**検証**: `cargo test --workspace --all-features`・
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`・
+`cargo fmt --all --check`・`cargo check -p fandhe-ai-backend-metal
+--tests --target aarch64-apple-darwin` すべて green（Linux 実行環境）。
+CUDA／Metal 実機（DGX Spark GB10／Apple Silicon）での `#[ignore]`
+テスト実行は本エージェント実行環境に到達手段がないため未実施のまま
+申し送る。

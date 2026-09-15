@@ -313,6 +313,18 @@ pub(crate) fn cached_unique(
     get_or_build(cache, on_poison, || crate::unique::MetalUnique::new(ctx))
 }
 
+/// `cast` カーネルスイート（`fandhe_ai_tensor_core::cast::CastOps` の
+/// Metal 実装本体。`cast.rs::MetalCast`）のコンパイル済みパイプライン
+/// をプロセス内キャッシュから取得する（イシュー #1751。
+/// `cached_unique` と同型）。
+pub(crate) fn cached_cast(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::cast::MetalCast>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::cast::MetalCast>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::cast::MetalCast::new(ctx))
+}
+
 /// [`crate::interpolate::MetalInterpolate`] をプロセス内キャッシュから
 /// 取得する（イシュー #1757）。`ops::MetalBackendOps::interpolate` の
 /// 唯一の呼び出し先（`cached_gather_scatter` と同型）。

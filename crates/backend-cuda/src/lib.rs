@@ -434,8 +434,16 @@ mod kernels_sort;
 // イシュー #1756: pad（`torch.nn.functional.pad(mode='constant')`
 // 相当）起動 API・カーネルソース。`gather_scatter.rs`／
 // `kernels_gather_scatter.rs` と同じ 2 ファイル構成。
+mod cast;
 mod constant_pad;
+mod kernels_cast;
 mod kernels_constant_pad;
+// イシュー #1766: Conv2d の im2col／col2im（`torch.nn.functional.
+// unfold` の grouped 版相当・その随伴）起動 API・カーネルソース。
+// `gather_scatter.rs`／`kernels_gather_scatter.rs` と同じ 2 ファイル
+// 構成。
+mod im2col;
+mod kernels_im2col;
 mod kernels_unique;
 mod sort;
 mod sort_model;
