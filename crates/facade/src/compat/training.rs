@@ -68,6 +68,21 @@ pub struct FitConfig {
 }
 
 impl FitConfig {
+    /// `epochs`（学習を繰り返す回数）・`batch_size`（[`Self::fit`] へ
+    /// 渡す `x`／`y` を分割する 1 バッチあたりのサンプル数）を指定して
+    /// 構築する（Keras `fit(epochs=, batch_size=)` 相当）。
+    ///
+    /// 既定値: [`Self::shuffle`] は `false`（型ドキュメント冒頭の
+    /// 「`shuffle` の既定値」節を参照）・[`Self::drop_last`] も `false`
+    /// （末尾の端数バッチも切り捨てずに使う）。
+    ///
+    /// `epochs == 0`／`batch_size == 0` はここでは検査しない
+    /// （両者とも `usize` の有効値であり、この時点では「不正な引数」
+    /// ではなく「呼び出し方によっては無意味な設定」であるため）。
+    /// 実際の検査は [`Self::fit`] 呼び出し時に行う: `epochs == 0` は
+    /// `AutodiffError::InvalidArgument` を即座に返し、`batch_size == 0`
+    /// は [`fandhe_ai_tensor_core::data::DataLoaderConfig::new`] 経由で
+    /// 検査され同様に `InvalidArgument` へマッピングされる。
     pub fn new(epochs: usize, batch_size: usize) -> Self {
         FitConfig {
             epochs,
@@ -366,9 +381,21 @@ impl Sequential {
         )
         .map_err(to_invalid_arg)?;
 
-        let mut history = History {
-            loss: Vec::with_capacity(config.epochs),
-        };
+        // `Vec::with_capacity` は capacity overflow（`config.epochs`
+        // が巨大・`usize::MAX` 近辺等）で panic する（本番経路の panic
+        // 禁止。`.claude/rules/security.md` A03 の精神）。`try_reserve_exact`
+        // で失敗可能にし、確保失敗は `InvalidArgument` へマッピングして
+        // 呼び出し元（[`Self::fit`]）の既存復元経路（train／eval モード
+        // 巻き戻し・`compiled` 復元）へ返す。
+        let mut loss = Vec::new();
+        loss.try_reserve_exact(config.epochs).map_err(|e| {
+            AutodiffError::InvalidArgument(format!(
+                "Sequential::fit: History.loss 用の確保に失敗した \
+                 (epochs={}): {e}",
+                config.epochs
+            ))
+        })?;
+        let mut history = History { loss };
 
         for _ in 0..config.epochs {
             let mut weighted_sum = 0.0f64;

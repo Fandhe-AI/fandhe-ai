@@ -335,6 +335,31 @@ fn fit_rejects_zero_epochs() {
 }
 
 #[test]
+fn fit_rejects_huge_epochs_without_panicking() {
+    // codex-review 指摘（PR #1877・イシュー #1761）: `FitConfig::new(usize::MAX, ..)`
+    // のような巨大な `epochs` を渡すと、`History.loss` 用の
+    // `Vec::with_capacity` が capacity overflow で panic していた
+    // （本番経路の panic 禁止。`.claude/rules/security.md` A03 の精神）。
+    // `try_reserve_exact` への切替後は panic せず型付きエラーを返し、
+    // 呼び出し元の復元経路（compile 済み状態の維持）も機能することを
+    // 確認する。
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let mut model = build_model();
+    model
+        .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+        .unwrap();
+
+    let err = model
+        .fit(&x, &y, FitConfig::new(usize::MAX, N))
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    assert!(
+        model.is_compiled(),
+        "Err 後も compile 済み状態が維持されること"
+    );
+}
+
+#[test]
 fn fit_rejects_sample_count_mismatch() {
     let (x, _) = gen_regression_data(SEED_DATA);
     let y_wrong = Tensor::<f32>::zeros(&[N - 1, D_OUT]).unwrap();
