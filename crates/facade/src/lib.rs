@@ -25,6 +25,13 @@
 //!    値型・純関数のみのため REQ-12 と矛盾しない（詳細は [`optim`]
 //!    モジュール doc）。
 //!
+//! 4. **data 公開面**（[`data`]。イシュー #1615・親 #1602）: map-style
+//!    データセット（`Dataset`／`TensorDataset`）とミニバッチ供給
+//!    （`DataLoader`／`DataLoaderConfig`）を `fandhe_ai::data` の単一
+//!    入口へ再エクスポートする。ホスト側だけで完結し `Op`／
+//!    `BackendOps`／VJP を経由しないため REQ-12 と矛盾しない（詳細は
+//!    [`data`] モジュール doc）。
+//!
 //! # 公開面の設計（REQ-12: 任意 `BackendOps` 注入の公開 API を設けない）
 //!
 //! 利用者向けに公開するのは [`Device`] 識別子を受け取る 2 関数
@@ -92,6 +99,13 @@ pub mod compat;
 /// Adagrad・LAMB・gradient clipping・LR スケジューラを再エクスポートする（詳細・
 /// 適用順序契約はモジュール doc 参照）。
 pub mod optim;
+
+/// Dataset／DataLoader 公開面（イシュー #1615・親 #1602）。map-style
+/// データセット（[`data::Dataset`]・[`data::TensorDataset`]）とミニ
+/// バッチ供給（[`data::DataLoader`]・[`data::DataLoaderConfig`]）を
+/// 再エクスポートする（詳細はモジュール doc・`docs/dataset-dataloader-
+/// design.md` 参照）。
+pub mod data;
 
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
