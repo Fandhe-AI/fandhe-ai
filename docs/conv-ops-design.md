@@ -751,3 +751,60 @@ CPU 分（本 doc の実装対象 `#1642` に相当する範囲。イシュー�
 - **引き継ぎ**: CUDA カーネル（#1643）・Metal カーネル（#1644）・
   `Var::conv1d`（#1765）・`nn::Conv2d`／`as_conv2d`／
   `compat::Sequential::add_conv*`／GPU 実機実測（#1645）。
+
+### #1765（`Var::conv1d`。1d を 2d の reshape 併合として実装）
+
+§2「1d は 2d へ併合」・§8 の確定方針どおり、`Var::conv1d` を新規
+`Op`／`BackendOps` メソッド／VJP／バックエンドカーネルを一切追加せず
+`Var::conv2d`（#1764）への薄いラッパーとして実装済み:
+
+- **`autodiff`**: `Var::conv1d`（`crates/autodiff/src/var.rs`。
+  `conv2d` 直後）。検査順序: ①`check_same_tape`（weight／bias）→
+  ②`input`／`weight` の rank 検査（rank 3 以外は
+  `ShapeError::RankMismatch`）→ ③`Conv2dParams::new([1, k], [1,
+  stride], [0, padding], [1, dilation], groups)`（`H` 軸固定）→
+  ④合成した 4d shape に対する `conv2d_out_shape`（チャンネル整合・
+  `L = 0` 拒否・負分子拒否ゲート。純粋な shape 計算で tape 非接触）→
+  ⑤bias shape 検査 → ⑥ここで初めて `input`／`weight` を `[N, Cin,
+  1, L]`／`[Cout, Cin_g, 1, k]` へ reshape し `conv2d` を呼ぶ →
+  ⑦出力 `[N, Cout, 1, Lout]` を `[N, Cout, Lout]` へ reshape。
+  `Var::reshape` は view ノードを tape へ push するため、reshape より
+  前にすべての引数検査を完了させ `Err` 経路で孤児ノードを残さない
+  設計。
+- **contiguity の非対称解消**: `Var::reshape` は非 contiguous 入力を
+  `ShapeError::NonContiguousReshape` で拒否する契約だが、`conv2d` は
+  transpose 済み入力も `materialize_fallible` 経由で受理するため 1d
+  だけが拒否するのは非対称になる。既存 `pub(crate) fn
+  Var::contiguous`（`crate::einsum` が同じ理由で使っている非公開
+  ヘルパ。イシュー #1620）を input／weight の reshape 前段に適用して
+  契約を 2d と揃えた（`contiguous` の doc comment の消費者記述を
+  `crate::einsum`・`Var::conv1d` へ更新）。既に contiguous なら新規
+  ノードを積まない設計のため、通常経路（transpose を伴わない標準
+  `[N, C, L]` 入力）に余計なコピーは生じない。
+- **数値契約**: reshape は view（zero-copy）のため、1d と手動 reshape
+  した `[N, C, 1, L]` 2d の forward・`d_input`／`d_weight`／`d_bias`
+  すべてが **bit 完全一致**する（設計 §12 の主要件）。tolerance・
+  baseline は変更しない。
+- **テスト**: `crates/autodiff/tests/conv1d.rs`（19 件）—
+  conv1d↔手動 reshape conv2d の bit 完全一致（groups・dilation・
+  stride 重なり窓を含む 3 形状）・整数手計算オラクル（cross-
+  correlation の非対称カーネル値。padding 有無 2 件）・出力 shape 表
+  （PyTorch `_conv_output_size` 相当）・`N=0` 受理・数値微分突合
+  （基本・groups＋dilation・重なり窓）・shape／引数検査の境界（rank・
+  `stride=0`／`dilation=0`／`groups=0`・`L=0` 拒否・チャンネル不整合・
+  bias shape 不一致・負分子拒否。各 `Err` 経路で `Tape::len()` が
+  呼び出し前後で不変であることを固定し孤児ノードなしを保証）・
+  非 contiguous 入力（transpose view）が contiguous コピーと bit
+  一致することの固定。`crates/facade/tests/conv1d_backend_parity.rs`
+  （`conv2d_backend_parity.rs` と同型）— CPU（`fandhe_ai::tape()`）
+  vs `NaiveOps` の forward／backward bit 一致（groups／depthwise
+  含む）・`#[ignore]` Metal（`cfg(target_os = "macos")`）／CUDA の
+  `assert_parity`（REQ-2 複合判定）。実機未実測のまま記入欄を残す。
+- **facade 公開面**: 新規 `pub use`／`pub fn` は追加していない
+  （`Var::conv1d` は既存 `Var` 再エクスポート経由で到達）。
+- **引き継ぎ**: `nn::Conv1d`／`nn::Conv2d` 層・`as_conv*` フック・
+  `compat::Sequential::add_conv1d`・GPU 実機実測は #1645。CUDA／
+  Metal 専用 im2col／col2im カーネルは #1643／#1644（`conv1d` は
+  `conv2d` に委譲するため、これらのカーネルが実装され次第 1d も
+  自動的に恩恵を受ける）。1d 専用の高速経路（`kH=1` の im2col
+  特殊化等）は設計時点で対象外のまま。
