@@ -33,7 +33,13 @@
 //! 呼び出し時に eager に `Vec<usize>` を確定する（[`Batches`] はロックを
 //! 持たず添字を切り出すだけ）。`shuffle=false` はグローバル RNG を
 //! **一切消費しない**。空データセット（`len()==0`）はシャッフルの
-//! 有無に関わらず抽選を消費しない。
+//! 有無に関わらず抽選を消費しない。`Dataset::len()` が返す `n` に対し
+//! `checked_numel_for::<usize>(&[n])` の事前検査に失敗する場合（`n`
+//! が `Vec<usize>` の allocation 上限を超える）は、この eager 確定・
+//! RNG 消費とも一切行わず（`shuffle=true` でも RNG は消費しない）、
+//! 検査失敗を [`DataError::Shape`] として最初の [`Batches::next`]
+//! 呼び出しへ持ち越す（PR #1867 codex-review P1 是正・下記
+//! `iter`／`Batches` doc 参照）。
 //!
 //! # セキュリティ考慮（OWASP Top 10）
 //!
@@ -43,7 +49,11 @@
 //! - **A03／A04**: `batch()` はすべて `len()` に対する境界検査
 //!   （[`DataError::IndexOutOfRange`]）を経てからアクセスする。出力
 //!   要素数は `checked_numel_for` で確保前に検査し、本番経路で
-//!   `unwrap()`／`expect()` を使わない。
+//!   `unwrap()`／`expect()` を使わない。[`DataLoader::iter`] が構築
+//!   する添字順列 `Vec<usize>`（非 shuffle 時の連番・`shuffled_
+//!   indices` の順列）も同様に `checked_numel_for::<usize>` で確保前
+//!   に検査し、capacity overflow パニックを起こさず型付きエラーへ
+//!   落とす（PR #1867 codex-review P1 是正）。
 //! - **A08**: タプルデータセットの長さ不一致は [`DataLoader::new`] の
 //!   `validate()` で fail-closed に拒否し、成分間でシャッフル順がずれた
 //!   学習データが黙って供給されない（[`DataError::LengthMismatch`]）。
@@ -417,19 +427,51 @@ impl<D: Dataset> DataLoader<D> {
     /// 1 epoch 分のイテレータを返す。`shuffle=true` のときは呼び出し
     /// ごとに順列を引き直す（PyTorch の epoch ごと再シャッフルと同義。
     /// モジュール冒頭「シャッフル契約」参照）。
+    ///
+    /// `n = self.dataset.len()` から確定する添字順列 `Vec<usize>` は
+    /// `checked_numel_for::<usize>(&[n])` で確保前にバイトサイズまで
+    /// 検査してから構築する。`Dataset::len()` は実装者が任意の値を
+    /// 返せるため（例: 要素数ゼロの `Tensor::new(vec![], &[usize::MAX,
+    /// 0])` から `len() == usize::MAX` のデータセットを作れる）、検査
+    /// なしに `(0..n).collect()`／`shuffled_indices` の `Vec::with_
+    /// capacity` を呼ぶと `numel * size_of::<usize>() > isize::MAX` で
+    /// capacity overflow パニックしうる（本番経路 panic 禁止規約
+    /// `.claude/rules/coding-rust.md`。PR #1867 codex-review P1 是正）。
+    ///
+    /// この `iter()` 自体は（設計どおり）`Result` を返さない infallible
+    /// な API のまま維持する。検査に失敗した場合は `order` を空のまま
+    /// にし、`shuffle=true` でも `with_global_rng` を呼ばず（RNG を一切
+    /// 消費しない）、[`DataError::Shape`]（`ShapeError::
+    /// ElementCountOverflow`）を [`Batches`] へ持ち越して**最初の
+    /// `next()` 呼び出しで 1 回だけ** `Err` として yield し、以降は
+    /// `None` を返す（`ExactSizeIterator::len()` もこの 1 件に整合させ
+    /// る。下記 `Batches::next` 参照）。
     pub fn iter(&self) -> Batches<'_, D> {
         let n = self.dataset.len();
-        let order = if self.config.shuffle {
-            with_global_rng(|rng| shuffled_indices(n, rng))
-        } else {
-            (0..n).collect()
-        };
-        Batches {
-            dataset: &self.dataset,
-            order,
-            batch_size: self.config.batch_size,
-            drop_last: self.config.drop_last,
-            cursor: 0,
+        match checked_numel_for::<usize>(&[n]) {
+            Ok(_) => {
+                let order = if self.config.shuffle {
+                    with_global_rng(|rng| shuffled_indices(n, rng))
+                } else {
+                    (0..n).collect()
+                };
+                Batches {
+                    dataset: &self.dataset,
+                    order,
+                    batch_size: self.config.batch_size,
+                    drop_last: self.config.drop_last,
+                    cursor: 0,
+                    pending_error: None,
+                }
+            }
+            Err(err) => Batches {
+                dataset: &self.dataset,
+                order: Vec::new(),
+                batch_size: self.config.batch_size,
+                drop_last: self.config.drop_last,
+                cursor: 0,
+                pending_error: Some(DataError::from(err)),
+            },
         }
     }
 
@@ -453,17 +495,30 @@ impl<'a, D: Dataset> IntoIterator for &'a DataLoader<D> {
 /// `order`（`shuffle` の有無に応じて事前に確定した添字順列）を先頭から
 /// `batch_size` 個ずつ切り出し [`Dataset::batch`] へ渡す。`drop_last`
 /// が真の場合、末尾の端数（`batch_size` 未満）は yield しない。
+///
+/// `pending_error`: [`DataLoader::iter`] が `order` 構築前の
+/// `checked_numel_for` 検査で `Err` を得た場合に保持する（`order` は
+/// 空のまま）。`next()` はこれを最初の呼び出しで 1 回だけ `Err` として
+/// yield し（[`DataError::Shape`]）、以降は通常の枯渇イテレータとして
+/// `None` を返す（`order` が空のため `cursor >= order.len()` が常に
+/// 真になる）。
 pub struct Batches<'a, D: Dataset> {
     dataset: &'a D,
     order: Vec<usize>,
     batch_size: usize,
     drop_last: bool,
     cursor: usize,
+    pending_error: Option<DataError>,
 }
 
 impl<D: Dataset> Batches<'_, D> {
     /// 残バッチ数（`ExactSizeIterator::len` と同一の計算式）。
+    /// `pending_error` が残っている間はそれ自体が未 yield の 1 件
+    /// として数える（実際に `next()` が返す件数と一致させる）。
     fn remaining_batches(&self) -> usize {
+        if self.pending_error.is_some() {
+            return 1;
+        }
         if self.cursor >= self.order.len() {
             return 0;
         }
@@ -479,6 +534,9 @@ impl<D: Dataset> Iterator for Batches<'_, D> {
     type Item = Result<D::Batch, DataError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(err) = self.pending_error.take() {
+            return Some(Err(err));
+        }
         if self.cursor >= self.order.len() {
             return None;
         }
@@ -782,5 +840,64 @@ mod tests {
                 assert_eq!(*yv, xv * 100.0, "x={xv} y={yv} はずれた添字を指している");
             }
         }
+    }
+
+    /// `Dataset::len()` が `Vec<usize>` の allocation 上限を超える
+    /// 極端な shape（`Tensor::new(vec![], &[usize::MAX, 0])`。要素数は
+    /// ゼロのため構築自体は成功する）に対し、`iter()`（非 shuffle）が
+    /// capacity overflow で panic せず、[`DataError::Shape`]
+    /// （[`ShapeError::ElementCountOverflow`]）を最初の `next()` で
+    /// 1 回だけ yield することを確認する（PR #1867 codex-review P1
+    /// 是正の再現例）。
+    #[test]
+    fn iter_reports_overflow_instead_of_panicking_without_shuffle() {
+        let huge = Tensor::<f32>::new(vec![], &[usize::MAX, 0]).unwrap();
+        let ds = TensorDataset::new(huge).unwrap();
+        let loader = DataLoader::new(ds, DataLoaderConfig::new(1)).unwrap();
+
+        let mut it = loader.iter();
+        assert_eq!(it.len(), 1, "pending_error 分の 1 件のみ");
+        // `Tensor<f32>` は `PartialEq` 非実装のため `Result` ごとの
+        // `assert_eq!` は使えず、`Err` variant のみを直接照合する。
+        match it.next() {
+            Some(Err(DataError::Shape(ShapeError::ElementCountOverflow))) => {}
+            other => panic!("expected Some(Err(ElementCountOverflow)), got {other:?}"),
+        }
+        assert_eq!(it.len(), 0);
+        assert!(it.next().is_none(), "枯渇後は None を返し続ける");
+        assert!(it.next().is_none());
+    }
+
+    /// 上記の `shuffle=true` 版。加えてオーバーフロー検査に失敗した
+    /// 場合はグローバル RNG を一切消費しないことを確認する
+    /// （`shuffle=false` と同じ「eager 確定前に検査する」契約。
+    /// `DataLoader::iter` doc 参照）。
+    #[test]
+    fn iter_reports_overflow_instead_of_panicking_with_shuffle_and_consumes_no_rng() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        let huge = Tensor::<f32>::new(vec![], &[usize::MAX, 0]).unwrap();
+        let ds = TensorDataset::new(huge).unwrap();
+        let loader = DataLoader::new(ds, DataLoaderConfig::new(1).shuffle(true)).unwrap();
+
+        manual_seed(42);
+        let mut it = loader.iter();
+        assert_eq!(it.len(), 1);
+        match it.next() {
+            Some(Err(DataError::Shape(ShapeError::ElementCountOverflow))) => {}
+            other => panic!("expected Some(Err(ElementCountOverflow)), got {other:?}"),
+        }
+        assert!(it.next().is_none());
+        let after_overflow_iter: Vec<f32> = crate::rng::rand(&[4]).unwrap().host_slice().to_vec();
+
+        manual_seed(42);
+        let direct: Vec<f32> = crate::rng::rand(&[4]).unwrap().host_slice().to_vec();
+
+        assert_eq!(
+            after_overflow_iter, direct,
+            "overflow 検査失敗時は shuffle=true でも RNG を消費しない"
+        );
     }
 }
