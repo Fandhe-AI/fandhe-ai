@@ -28,9 +28,14 @@ Apple Silicon 実機上での REQ-2 統一複合判定・run-to-run 決定性・
 #    空軸早期 return）
 cargo test -p fandhe-ai-backend-metal --release --test batch_norm_parity -- --ignored --nocapture
 
-# 2) crates/facade の BatchNorm train／infer／backward の Metal vs CPU 突合
-#    （facade 公開面のみを import する統合テスト）
-cargo test -p fandhe-ai --release --test batch_norm_backend_parity -- --ignored --nocapture
+# 2) crates/facade の BatchNorm train forward の Metal vs CPU 突合
+#    （facade 公開面のみを import する統合テスト。既存 Metal facade
+#    検証は train forward のみ〈infer／backward・rank4 は CUDA 側の
+#    ignored テストとして同ファイルに同居するが Metal 側は未実装〉
+#    のため、テスト名で明示的にフィルタし CUDA 実機必須テストを
+#    誤って選択しないようにする——PR #1881 codex-review P2 指摘）
+cargo test -p fandhe-ai --release --test batch_norm_backend_parity \
+  metal_batch_norm_train_forward_matches_cpu -- --ignored --nocapture
 
 # 3) 既存 #[ignore] 群の非後退確認（本イシューの変更が他カーネルへ
 #    影響していないことの確認。特に layer_norm・rmsnorm・softmax 等の
@@ -40,12 +45,16 @@ make test-ignored-metal
 
 ## 事前登録判定規則
 
-- **正しさ**: `crates/backend-metal/tests/batch_norm_parity.rs`・
-  `crates/facade/tests/batch_norm_backend_parity.rs` の `#[ignore]`
-  テストが全て pass（`fandhe_ai_backend_cpu::parity::assert_parity`
-  によるREQ-2 統一複合判定。`batch_mean` の bit 一致は `--nocapture`
-  出力で報告のみに留め assert しない——`docs/batch-norm-ops-design.md`
-  §9.3「判定契約」参照）
+- **正しさ**: `crates/backend-metal/tests/batch_norm_parity.rs` の
+  `#[ignore]` テストが全て pass・`crates/facade/tests/
+  batch_norm_backend_parity.rs` の Metal 側テスト
+  （`metal_batch_norm_train_forward_matches_cpu` のみ。同ファイルの
+  `cuda_*` テストは CUDA 実機必須のため Apple Silicon 実機での対象
+  外——上記コマンド 2 のテスト名フィルタ参照）が pass
+  （`fandhe_ai_backend_cpu::parity::assert_parity` によるREQ-2 統一
+  複合判定。`batch_mean` の bit 一致は `--nocapture` 出力で報告のみに
+  留め assert しない——`docs/batch-norm-ops-design.md` §9.3「判定契約」
+  参照）
 - **決定性**: `batch_norm_train_is_deterministic_across_runs` が
   run-to-run で bit 単位一致
 - **非後退**: 本イシュー変更前から存在する `#[ignore]` テスト群

@@ -26,11 +26,22 @@
 //! 主張しない。`shaders/batch_norm.metal` 冒頭コメント「REQ-2 判定
 //! 契約」参照）。
 //!
-//! [`validate_batch_norm_launch`]・[`channel_index`]・[`m_f64_bits`]
-//! は `crate::batch_norm`（macOS 限定の起動 API）からも呼ばれる純関数
-//! （`backend-cpu::batch_norm::{validate_batch_norm_launch,
-//! channel_index}` の GPU 側複製。カーネル引数の `u32` 上限検査のみ
-//! CPU 側に無い追加検査）。
+//! [`validate_batch_norm_launch`]・[`m_f64_bits`] は `crate::batch_norm`
+//! （macOS 限定の起動 API）からも呼ばれる純関数（`backend-cpu::
+//! batch_norm::validate_batch_norm_launch` の GPU 側複製。カーネル
+//! 引数の `u32` 上限検査のみ CPU 側に無い追加検査）。`channel_index`
+//! は `backend-cpu::batch_norm::channel_index`（非公開）と同じ添字
+//! 式だが、本クレートでは [`batch_norm_train_host_model`]／
+//! [`batch_norm_infer_host_model`] 内部専用のため `pub(crate)` に
+//! 留める（クレート外への公開経路を持たない）。
+//!
+//! [`batch_norm_train_host_model`]／[`batch_norm_infer_host_model`]
+//! は `pub` な入口のため、本体処理へ入る前に必ず
+//! [`validate_batch_norm_launch`] を呼び `n`／`c`／`spatial`・
+//! スライス長の不整合を型付き `Result` で拒否する（本番経路で
+//! panic させない方針。`.claude/rules/coding-rust.md`。
+//! `im2col_model::im2col_model` と同じ設計判断。PR #1881
+//! codex-review 指摘）。
 
 use crate::soft_f64::{
     add_f64_bits, add_f64_bits_round_to_odd, div_f64_bits, mul_f64_bits, narrow_f64_bits,
@@ -220,7 +231,7 @@ pub fn validate_batch_norm_launch(
 /// データ添字へ写像する（`backend-cpu::batch_norm::channel_index`・
 /// `shaders/batch_norm.metal::BN_IDX` の GPU 側複製）。
 #[inline]
-pub fn channel_index(i: usize, ch: usize, c: usize, spatial: usize) -> usize {
+pub(crate) fn channel_index(i: usize, ch: usize, c: usize, spatial: usize) -> usize {
     let batch = i / spatial;
     let sp = i % spatial;
     batch * (c * spatial) + ch * spatial + sp
@@ -261,18 +272,22 @@ pub struct BatchNormTrainHostModel {
 }
 
 /// `shaders/batch_norm.metal::batch_norm_train_f32` の逐語モデル
-/// （縮約順序は [`warp_reduce_f64_bits`] によりカーネル側の 32 レーン
-/// ストライドアクセス + 5 段 butterfly（`simd_shuffle_xor` 幅
-/// 16/8/4/2/1）と同一の加算順序を再現する——[`warp_reduce_f64_bits`]
-/// doc comment「PR #1881 codex-review 指摘」参照: 索引順の逐次加算で
-/// 代用すると対消滅入力で REQ-2 統一複合判定を外れる実例が存在した
-/// ため、索引順への簡略化は行わない。二重丸め回避・round-to-odd
-/// affine の構造はカーネルと 1 対 1 対応する）。
+/// （縮約順序は `warp_reduce_f64_bits`（本クレート非公開関数）に
+/// よりカーネル側の 32 レーンストライドアクセス + 5 段 butterfly
+/// （`simd_shuffle_xor` 幅 16/8/4/2/1）と同一の加算順序を再現する
+/// ——`warp_reduce_f64_bits` doc comment「PR #1881 codex-review
+/// 指摘」参照: 索引順の逐次加算で代用すると対消滅入力で REQ-2
+/// 統一複合判定を外れる実例が存在したため、索引順への簡略化は行わ
+/// ない。二重丸め回避・round-to-odd affine の構造はカーネルと 1 対
+/// 1 対応する）。
 ///
-/// 呼び出し前提: [`validate_batch_norm_launch`] を通過済みの
-/// `n`／`c`／`spatial`・`x.len() == n*c*spatial`。`n == 0 || c == 0
-/// || spatial == 0` は空出力・ゼロ統計を返す（`crate::batch_norm::
-/// run_batch_norm_train_f32` と同じ早期 return 契約）。
+/// 入口で [`validate_batch_norm_launch`] を呼び `n`／`c`／`spatial`・
+/// `x.len() == n*c*spatial`・`w`／`b` の長さ不整合を型付き `Result`
+/// で拒否してから本体処理へ入る（本番経路で panic させない方針。
+/// `.claude/rules/coding-rust.md`。PR #1881 codex-review 指摘）。
+/// `n == 0 || c == 0 || spatial == 0` は検証通過後に空出力・ゼロ統計
+/// を返す（`crate::batch_norm::run_batch_norm_train_f32` と同じ早期
+/// return 契約）。
 pub fn batch_norm_train_host_model(
     x: &[f32],
     w: Option<&[f32]>,
@@ -281,13 +296,24 @@ pub fn batch_norm_train_host_model(
     n: usize,
     c: usize,
     spatial: usize,
-) -> BatchNormTrainHostModel {
+) -> Result<BatchNormTrainHostModel, BatchNormPrepareError> {
+    validate_batch_norm_launch(
+        n,
+        c,
+        spatial,
+        x.len(),
+        w.map(<[f32]>::len),
+        b.map(<[f32]>::len),
+        None,
+        None,
+        eps,
+    )?;
     if n == 0 || c == 0 || spatial == 0 {
-        return BatchNormTrainHostModel {
+        return Ok(BatchNormTrainHostModel {
             out: Vec::new(),
             mean: vec![0.0f32; c],
             var: vec![0.0f32; c],
-        };
+        });
     }
 
     let m = n * spatial;
@@ -336,21 +362,23 @@ pub fn batch_norm_train_host_model(
         }
     }
 
-    BatchNormTrainHostModel {
+    Ok(BatchNormTrainHostModel {
         out,
         mean: mean_out,
         var: var_out,
-    }
+    })
 }
 
 /// `shaders/batch_norm.metal::batch_norm_infer_f32` の逐語モデル
 /// （統計を再計算しないため縮約なし。[`batch_norm_train_host_model`]
 /// の書き出しパスと同じ soft-f64 演算列を要素ごとに適用する）。
 ///
-/// 呼び出し前提: [`validate_batch_norm_launch`] を通過済みの
-/// `n`／`c`／`spatial`・`x.len() == n*c*spatial`・
-/// `mean.len() == var.len() == c`。`n == 0 || c == 0 || spatial == 0`
-/// は空出力を返す。
+/// 入口で [`validate_batch_norm_launch`] を呼び `n`／`c`／`spatial`・
+/// `x.len() == n*c*spatial`・`mean.len() == var.len() == c`・
+/// `w`／`b` の長さ不整合を型付き `Result` で拒否してから本体処理へ
+/// 入る（本番経路で panic させない方針。`.claude/rules/coding-rust.md`。
+/// PR #1881 codex-review 指摘）。`n == 0 || c == 0 || spatial == 0`
+/// は検証通過後に空出力を返す。
 #[allow(clippy::too_many_arguments)]
 pub fn batch_norm_infer_host_model(
     x: &[f32],
@@ -362,9 +390,20 @@ pub fn batch_norm_infer_host_model(
     n: usize,
     c: usize,
     spatial: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BatchNormPrepareError> {
+    validate_batch_norm_launch(
+        n,
+        c,
+        spatial,
+        x.len(),
+        w.map(<[f32]>::len),
+        b.map(<[f32]>::len),
+        Some(mean.len()),
+        Some(var.len()),
+        eps,
+    )?;
     if n == 0 || c == 0 || spatial == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut out = vec![0.0f32; x.len()];
@@ -387,7 +426,7 @@ pub fn batch_norm_infer_host_model(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -492,7 +531,8 @@ mod tests {
         let b = vec![0.1f32, -0.2, 0.3];
         let eps = 1e-5f32;
 
-        let model = batch_norm_train_host_model(&x, Some(&w), Some(&b), eps, n, c, spatial);
+        let model = batch_norm_train_host_model(&x, Some(&w), Some(&b), eps, n, c, spatial)
+            .expect("valid shape");
         let cpu = fandhe_ai_backend_cpu::run_batch_norm_train_f32(
             &x,
             Some(&w),
@@ -538,7 +578,8 @@ mod tests {
         let eps = 1e-5f32;
 
         let model_out =
-            batch_norm_infer_host_model(&x, &mean, &var, Some(&w), Some(&b), eps, n, c, spatial);
+            batch_norm_infer_host_model(&x, &mean, &var, Some(&w), Some(&b), eps, n, c, spatial)
+                .expect("valid shape");
         let cpu_out = fandhe_ai_backend_cpu::run_batch_norm_infer_f32(
             &x,
             &mean,
@@ -561,15 +602,55 @@ mod tests {
 
     #[test]
     fn train_host_model_handles_zero_axis_early_return() {
-        let model = batch_norm_train_host_model(&[], None, None, 1e-5, 0, 3, 4);
+        let model = batch_norm_train_host_model(&[], None, None, 1e-5, 0, 3, 4)
+            .expect("n=0 early return is a valid shape");
         assert!(model.out.is_empty());
         assert_eq!(model.mean, vec![0.0f32; 3]);
         assert_eq!(model.var, vec![0.0f32; 3]);
     }
 
+    /// PR #1881 codex-review 指摘（threadId `PRRT_kwDOTuUCJc6igFKe`）の
+    /// 反例を固定する回帰テスト: `x.len()` が `n*c*spatial` と不一致
+    /// （範囲外アクセスで panic しうる入力）は [`validate_batch_norm_launch`]
+    /// が本体ループへ入る前に型付き `Err` で拒否する（本番経路で panic
+    /// させない方針）。
+    #[test]
+    fn train_host_model_rejects_x_len_mismatch_instead_of_panicking() {
+        let err = batch_norm_train_host_model(&[], None, None, 1e-5, 1, 1, 1).unwrap_err();
+        assert!(matches!(err, BatchNormPrepareError::InvalidShape { .. }));
+    }
+
+    /// 同上（threadId `PRRT_kwDOTuUCJc6igFKe`）の別インスタンス反例:
+    /// `n == 0` の早期 return であっても `c == usize::MAX` は
+    /// `mean`／`var`（長さ `c`）確保時の capacity overflow panic を
+    /// 招きうるため、早期 return 分岐へ入る前に
+    /// [`validate_batch_norm_launch`] が拒否する。
+    #[test]
+    fn train_host_model_rejects_degenerate_channel_count_instead_of_panicking() {
+        let err = batch_norm_train_host_model(&[], None, None, 1e-5, 0, usize::MAX, 1).unwrap_err();
+        assert!(matches!(err, BatchNormPrepareError::InvalidShape { .. }));
+    }
+
+    /// 同上（threadId `PRRT_kwDOTuUCJc6igFKe`）の `batch_norm_infer_host_model`
+    /// 側インスタンス: `mean`／`var` の長さ不整合を型付き `Err` で拒否する。
+    #[test]
+    fn infer_host_model_rejects_stats_len_mismatch_instead_of_panicking() {
+        let err =
+            batch_norm_infer_host_model(&[], &[], &[], None, None, 1e-5, 1, 1, 1).unwrap_err();
+        assert!(matches!(err, BatchNormPrepareError::InvalidShape { .. }));
+    }
+
     #[test]
     fn infer_host_model_handles_zero_axis_early_return() {
-        let out = batch_norm_infer_host_model(&[], &[], &[], None, None, 1e-5, 0, 3, 4);
+        // `mean`／`var` は常に長さ `c` の統計配列（`n` 軸には依存しない）
+        // であり、`n == 0` でも [`validate_batch_norm_launch`] は
+        // `mean.len() == var.len() == c` を要求する（train モデルの
+        // 早期 return が `mean`／`var` を長さ `c` のゼロ統計で返す
+        // のと同じ契約）。
+        let mean = vec![0.0f32; 3];
+        let var = vec![0.0f32; 3];
+        let out = batch_norm_infer_host_model(&[], &mean, &var, None, None, 1e-5, 0, 3, 4)
+            .expect("n=0 early return is a valid shape");
         assert!(out.is_empty());
     }
 
@@ -588,7 +669,8 @@ mod tests {
     #[test]
     fn train_host_model_reduction_order_matches_gpu_butterfly_not_sequential() {
         let x = [1e30f32, 1.0, -1e30, 1.0];
-        let model = batch_norm_train_host_model(&x, None, None, 1e-5, 1, 1, 4);
+        let model =
+            batch_norm_train_host_model(&x, None, None, 1e-5, 1, 1, 4).expect("valid shape");
 
         assert_eq!(
             model.mean[0], 0.5,
@@ -612,7 +694,8 @@ mod tests {
     #[test]
     fn train_host_model_reduction_order_matches_gpu_butterfly_cancelling_batch_axis() {
         let x = [1e20f32, 1.0, -1e20, 1.0];
-        let model = batch_norm_train_host_model(&x, None, None, 1e-5, 4, 1, 1);
+        let model =
+            batch_norm_train_host_model(&x, None, None, 1e-5, 4, 1, 1).expect("valid shape");
 
         assert_eq!(
             model.mean[0], 0.5,
