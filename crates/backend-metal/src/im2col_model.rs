@@ -239,10 +239,154 @@ pub fn derive_im2col_dims(
     })
 }
 
+/// `dims`（[`Im2colDims`]。全フィールド `pub` のため
+/// [`derive_im2col_dims`] を経由せず任意の値で直接構築されうる）が
+/// `derive_im2col_dims` が生成する値と同じ内部整合性を持つことを
+/// 独立に再検証する（[`im2col_model`]／[`col2im_soft_f64`] は `pub`
+/// かつ `#[cfg(test)]` の外にあるため、`crate::gather_scatter_model::
+/// gather_model`〈イシュー #1799〉・`crate::constant_pad_model::
+/// constant_pad_model` と同じ理由でここで検証し、0 除算・範囲外
+/// 添字アクセスで panic しないようにする。codex-review 指摘。
+/// `derive_im2col_dims` と同じ [`fandhe_ai_tensor_core::
+/// im2col_out_shape`]／[`fandhe_ai_tensor_core::conv_out_len`] で
+/// `in_shape`／`col_shape` を再構成し `dims` の各フィールドと突き
+/// 合わせる。戻り値は `(in_numel, col_numel)`（呼び出し側がスライス
+/// 長・`dims.numel` の検証に使う）。
+///
+/// `in_numel`／`col_numel` が 0 でない限り、この検証を通過した
+/// `dims` は `im2col_model`／`col2im_soft_f64` 内で使う全ての除数
+/// （`p`／`k_g`／`groups`／`kh`／`kw`／`w_out`／`cin`／`h_in`／
+/// `w_in`／`cin_g`／`sh`／`sw`）が 1 以上であることを数学的に含意
+/// する（`Conv2dParams::new` が `kernel_size`／`stride`／`dilation`／
+/// `groups` の 0 を拒否・`im2col_out_shape` が `H`／`W` の 0 と
+/// `Cin % groups != 0` を拒否・`conv_out_len` が常に `h_out`／
+/// `w_out >= 1` を返す契約による）。
+fn validate_im2col_dims_consistent(
+    dims: &Im2colDims,
+) -> Result<(usize, usize), Im2colPrepareError> {
+    let in_shape = [
+        dims.n_batch as usize,
+        dims.cin as usize,
+        dims.h_in as usize,
+        dims.w_in as usize,
+    ];
+    let params = fandhe_ai_tensor_core::Conv2dParams::new(
+        [dims.kh as usize, dims.kw as usize],
+        [dims.sh as usize, dims.sw as usize],
+        [dims.ph as usize, dims.pw as usize],
+        [dims.dh as usize, dims.dw as usize],
+        dims.groups as usize,
+    )
+    .map_err(|e| Im2colPrepareError::InvalidShape {
+        detail: format!("Conv2dParams::new failed: {e:?}"),
+    })?;
+
+    let expected_col_shape =
+        fandhe_ai_tensor_core::im2col_out_shape(&in_shape, &params).map_err(|e| {
+            Im2colPrepareError::InvalidShape {
+                detail: format!("im2col_out_shape failed: {e:?}"),
+            }
+        })?;
+    let col_shape = [
+        dims.n_batch as usize,
+        dims.groups as usize,
+        dims.k_g as usize,
+        dims.p as usize,
+    ];
+    if col_shape != expected_col_shape.as_slice() {
+        return Err(Im2colPrepareError::InvalidShape {
+            detail: format!(
+                "col shape mismatch: dims implies col_shape={col_shape:?} expected={expected_col_shape:?}"
+            ),
+        });
+    }
+
+    let cin_g = dims.cin as usize / (dims.groups as usize).max(1);
+    if cin_g != dims.cin_g as usize {
+        return Err(Im2colPrepareError::InvalidShape {
+            detail: format!("cin_g mismatch: dims.cin_g={} expected={cin_g}", dims.cin_g),
+        });
+    }
+
+    let h_out = fandhe_ai_tensor_core::conv_out_len(
+        dims.h_in as usize,
+        dims.kh as usize,
+        dims.sh as usize,
+        dims.ph as usize,
+        dims.dh as usize,
+    )
+    .map_err(|e| Im2colPrepareError::InvalidShape {
+        detail: format!("conv_out_len(h) failed: {e:?}"),
+    })?;
+    let w_out = fandhe_ai_tensor_core::conv_out_len(
+        dims.w_in as usize,
+        dims.kw as usize,
+        dims.sw as usize,
+        dims.pw as usize,
+        dims.dw as usize,
+    )
+    .map_err(|e| Im2colPrepareError::InvalidShape {
+        detail: format!("conv_out_len(w) failed: {e:?}"),
+    })?;
+    if h_out != dims.h_out as usize || w_out != dims.w_out as usize {
+        return Err(Im2colPrepareError::InvalidShape {
+            detail: format!(
+                "h_out/w_out mismatch: dims=({}, {}) expected=({h_out}, {w_out})",
+                dims.h_out, dims.w_out
+            ),
+        });
+    }
+
+    let in_numel = in_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(Im2colPrepareError::SizeLimitExceeded {
+            what: "in_numel",
+            value: usize::MAX,
+            limit: IM2COL_KERNEL_ARG_LIMIT,
+        })?;
+    let col_numel = col_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(Im2colPrepareError::SizeLimitExceeded {
+            what: "col_numel",
+            value: usize::MAX,
+            limit: IM2COL_KERNEL_ARG_LIMIT,
+        })?;
+    Ok((in_numel, col_numel))
+}
+
 /// `shaders/im2col.metal::im2col_f32` の逐語モデル（算術を含まない
 /// 純粋コピー。`input` は `[N, Cin, H, W]` の稠密スライス、戻り値は
 /// `[N, G, K_g, P]` の稠密 `Vec`）。
-pub fn im2col_model(input: &[f32], dims: &Im2colDims) -> Vec<f32> {
+///
+/// 本関数は `pub` かつ `#[cfg(test)]` の外にあるため、
+/// [`validate_im2col_dims_consistent`] を入口で呼び `dims` の内部
+/// 整合性・`dims.numel`／`input` の実長一致まで検証してから本体
+/// ループへ入る（本番経路で panic させない方針。
+/// `.claude/rules/coding-rust.md`）。
+pub fn im2col_model(input: &[f32], dims: &Im2colDims) -> Result<Vec<f32>, Im2colPrepareError> {
+    let (in_numel, col_numel) = validate_im2col_dims_consistent(dims)?;
+    if dims.numel as usize != col_numel {
+        return Err(Im2colPrepareError::InvalidShape {
+            detail: format!(
+                "im2col_model: dims.numel={} does not match derived col numel={col_numel}",
+                dims.numel
+            ),
+        });
+    }
+    if input.len() != in_numel {
+        return Err(Im2colPrepareError::InvalidShape {
+            detail: format!(
+                "im2col_model: input.len()={} does not match derived in numel={in_numel}",
+                input.len()
+            ),
+        });
+    }
+    if col_numel == 0 {
+        return Ok(Vec::new());
+    }
+
     let numel = dims.numel as usize;
     let (groups, k_g, p) = (dims.groups as usize, dims.k_g as usize, dims.p as usize);
     let (kh, kw) = (dims.kh as usize, dims.kw as usize);
@@ -283,7 +427,7 @@ pub fn im2col_model(input: &[f32], dims: &Im2colDims) -> Vec<f32> {
         };
         *slot = value;
     }
-    out
+    Ok(out)
 }
 
 /// `shaders/im2col.metal::col2im_f32` の逐語モデル（binary64
@@ -291,7 +435,34 @@ pub fn im2col_model(input: &[f32], dims: &Im2colDims) -> Vec<f32> {
 /// `(kh, kw)` row-major の逐次加算・最後に 1 回 downcast。`d_col` は
 /// `[N, G, K_g, P]` の稠密スライス、戻り値は `[N, Cin, H, W]` の稠密
 /// `Vec`）。
-pub fn col2im_soft_f64(d_col: &[f32], dims: &Im2colDims) -> Vec<f32> {
+///
+/// 本関数は `pub` かつ `#[cfg(test)]` の外にあるため、
+/// [`im2col_model`] と同じ理由で入口に
+/// [`validate_im2col_dims_consistent`] を呼び `dims` の内部整合性・
+/// `dims.numel`／`d_col` の実長一致まで検証してから本体ループへ入る
+/// （本番経路で panic させない方針。`.claude/rules/coding-rust.md`）。
+pub fn col2im_soft_f64(d_col: &[f32], dims: &Im2colDims) -> Result<Vec<f32>, Im2colPrepareError> {
+    let (in_numel, col_numel) = validate_im2col_dims_consistent(dims)?;
+    if dims.numel as usize != in_numel {
+        return Err(Im2colPrepareError::InvalidShape {
+            detail: format!(
+                "col2im_soft_f64: dims.numel={} does not match derived in numel={in_numel}",
+                dims.numel
+            ),
+        });
+    }
+    if d_col.len() != col_numel {
+        return Err(Im2colPrepareError::InvalidShape {
+            detail: format!(
+                "col2im_soft_f64: d_col.len()={} does not match derived col numel={col_numel}",
+                d_col.len()
+            ),
+        });
+    }
+    if in_numel == 0 {
+        return Ok(Vec::new());
+    }
+
     let numel = dims.numel as usize;
     let (cin, w_in, h_in) = (dims.cin as usize, dims.w_in as usize, dims.h_in as usize);
     let cin_g = dims.cin_g as usize;
@@ -350,7 +521,7 @@ pub fn col2im_soft_f64(d_col: &[f32], dims: &Im2colDims) -> Vec<f32> {
         }
         *slot = f32::from_bits(narrow_f64_bits(acc));
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -533,7 +704,7 @@ mod tests {
             let dims = derive_im2col_dims(&case.in_shape, &col_shape, &params, numel_col)
                 .unwrap_or_else(|e| panic!("{}: derive_im2col_dims failed: {e}", case.label));
 
-            let model_out = im2col_model(&input_data, &dims);
+            let model_out = im2col_model(&input_data, &dims).expect("valid dims");
             let cpu_out = cpu.im2col(&input, &params).expect("cpu im2col succeeds");
             assert_bits_eq(
                 &format!("im2col({})", case.label),
@@ -549,7 +720,7 @@ mod tests {
 
             let dims_back = derive_im2col_dims(&case.in_shape, &col_shape, &params, numel_in)
                 .unwrap_or_else(|e| panic!("{}: derive_im2col_dims(back) failed: {e}", case.label));
-            let model_back = col2im_soft_f64(&d_col_data, &dims_back);
+            let model_back = col2im_soft_f64(&d_col_data, &dims_back).expect("valid dims");
             let cpu_back = cpu
                 .col2im(&d_col, &case.in_shape, &params)
                 .expect("cpu col2im succeeds");
@@ -679,7 +850,7 @@ mod tests {
         let dims = derive_im2col_dims(&in_shape, &col_shape, &params, numel_in).unwrap();
         let numel_col: usize = col_shape.iter().product();
         let d_col = vec![1.0f32; numel_col];
-        let out = col2im_soft_f64(&d_col, &dims);
+        let out = col2im_soft_f64(&d_col, &dims).unwrap();
         // (h, w) が両方偶数の位置のみ寄与を受ける。奇数を含む位置は
         // `+0.0` のはず。
         for h in 0..4usize {
@@ -696,5 +867,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// [`im2col_model`]／[`col2im_soft_f64`] は `pub` かつ
+    /// `#[cfg(test)]` の外にあるため、`derive_im2col_dims` を経由
+    /// しない手構築の `Im2colDims`（PR #1871 codex-review 指摘の
+    /// 再現ケース: `in_shape`／`col_shape` とも `[1,1,1,1]`・
+    /// `kernel`／`stride`／`dilation` とも `[1,1]`・`padding=[0,0]`・
+    /// `groups=1`・`numel=1` という一見正常な値に、範囲外読み出しを
+    /// 誘発する空スライスを渡すケース）に対しても panic せず
+    /// `Err` を返す（is-panic-free の直接回帰。指摘の「例えば入力・
+    /// col 形状がともに `[1,1,1,1]`」を字義どおり再現）。
+    #[test]
+    fn im2col_model_rejects_empty_input_slice_without_panicking() {
+        let params = Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let dims = derive_im2col_dims(&[1, 1, 1, 1], &[1, 1, 1, 1], &params, 1).unwrap();
+        let err = im2col_model(&[], &dims).unwrap_err();
+        assert!(matches!(err, Im2colPrepareError::InvalidShape { .. }));
+    }
+
+    /// [`col2im_soft_f64`] 側の同型ケース（`d_col` 空スライス）。
+    #[test]
+    fn col2im_soft_f64_rejects_empty_d_col_slice_without_panicking() {
+        let params = Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let dims = derive_im2col_dims(&[1, 1, 1, 1], &[1, 1, 1, 1], &params, 1).unwrap();
+        let err = col2im_soft_f64(&[], &dims).unwrap_err();
+        assert!(matches!(err, Im2colPrepareError::InvalidShape { .. }));
+    }
+
+    /// `Im2colDims` の全フィールドが `pub` であることを悪用し、
+    /// `p=0`（`groups`／`k_g` は非ゼロのまま）という `derive_im2col_dims`
+    /// を経由しては到達しえない値を直接構築するケース。是正前は
+    /// `im2col_model` 内の `rem % p` で 0 除算 panic しえた
+    /// （codex-review 指摘「`Im2colDims` のフィールドも公開されている
+    /// ため、p=0 等によるゼロ除算も可能」の直接再現）。
+    #[test]
+    fn im2col_model_rejects_hand_built_dims_with_zero_p_without_panicking() {
+        let dims = Im2colDims {
+            n_batch: 1,
+            cin: 1,
+            groups: 1,
+            cin_g: 1,
+            h_in: 1,
+            w_in: 1,
+            h_out: 1,
+            w_out: 1,
+            kh: 1,
+            kw: 1,
+            sh: 1,
+            sw: 1,
+            ph: 0,
+            pw: 0,
+            dh: 1,
+            dw: 1,
+            k_g: 1,
+            p: 0,
+            numel: 1,
+        };
+        let err = im2col_model(&[0.0f32], &dims).unwrap_err();
+        assert!(matches!(err, Im2colPrepareError::InvalidShape { .. }));
     }
 }
