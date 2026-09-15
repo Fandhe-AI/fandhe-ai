@@ -144,6 +144,48 @@ impl Linear {
         self.bias.as_ref()
     }
 
+    /// [`crate::nn::module::Module::set_parameter`]（`Linear` 実装。
+    /// `module.rs` 参照）の本体。`"weight"`（常に）／`"bias"`（`Some`
+    /// の場合のみ）を受理する（`named_parameters` の命名契約と対称。
+    /// イシュー #1752）。shape 保存置換のみ（`Linear::from_parameters`
+    /// の #91 契約と同じ）。
+    pub(crate) fn set_parameter(
+        &mut self,
+        name: &str,
+        value: Tensor<f32>,
+    ) -> Result<(), AutodiffError> {
+        match name {
+            "weight" => {
+                if value.shape() != self.weight.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: self.weight.shape().to_vec(),
+                    }));
+                }
+                self.weight = value;
+                Ok(())
+            }
+            "bias" => match &mut self.bias {
+                Some(current) => {
+                    if value.shape() != current.shape() {
+                        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                            lhs: value.shape().to_vec(),
+                            rhs: current.shape().to_vec(),
+                        }));
+                    }
+                    *current = value;
+                    Ok(())
+                }
+                None => Err(AutodiffError::InvalidArgument(format!(
+                    "Linear::set_parameter: no parameter named `{name}` (this layer has no bias)"
+                ))),
+            },
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "Linear::set_parameter: no parameter named `{name}`"
+            ))),
+        }
+    }
+
     /// [`crate::nn::module::Module::forward_host`]（`Linear` 実装。
     /// `gemm_out_shape` → `ops.gemm` → `ops.add` の非融合合成。
     /// `nn/module.rs` 参照）の epilogue 融合版（イシュー #1218・
@@ -595,5 +637,66 @@ mod tests {
                 .unwrap(),
             "manual_seed(999_999) の前後で Linear::new(.., 7) の bias が変化した"
         );
+    }
+
+    // `Linear::set_parameter`（イシュー #1752・`state_dict`/
+    // `load_state_dict` の基盤）の単体テスト。
+
+    #[test]
+    fn set_parameter_replaces_weight_in_place() {
+        let mut linear = Linear::new(3, 2, true, 1).unwrap();
+        let new_weight = Tensor::new(vec![9.0f32; 6], &[3, 2]).unwrap();
+        Linear::set_parameter(&mut linear, "weight", new_weight.clone()).unwrap();
+        assert_eq!(
+            linear.weight().contiguous().as_slice().unwrap(),
+            new_weight.contiguous().as_slice().unwrap()
+        );
+    }
+
+    #[test]
+    fn set_parameter_replaces_bias_in_place() {
+        let mut linear = Linear::new(3, 2, true, 1).unwrap();
+        let new_bias = Tensor::new(vec![5.0f32, 6.0f32], &[2]).unwrap();
+        Linear::set_parameter(&mut linear, "bias", new_bias.clone()).unwrap();
+        assert_eq!(
+            linear.bias().unwrap().contiguous().as_slice().unwrap(),
+            new_bias.contiguous().as_slice().unwrap()
+        );
+    }
+
+    #[test]
+    fn set_parameter_rejects_unknown_name() {
+        let mut linear = Linear::new(3, 2, true, 1).unwrap();
+        let dummy = linear.weight().clone();
+        let err = Linear::set_parameter(&mut linear, "bogus", dummy)
+            .expect_err("未知のパラメータ名は Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn set_parameter_rejects_shape_mismatch() {
+        let mut linear = Linear::new(3, 2, true, 1).unwrap();
+        let wrong_shape = Tensor::new(vec![1.0f32; 4], &[2, 2]).unwrap();
+        let err = Linear::set_parameter(&mut linear, "weight", wrong_shape)
+            .expect_err("shape 不一致は Err を返すはず");
+        assert!(matches!(err, AutodiffError::Shape(_)));
+    }
+
+    #[test]
+    fn set_parameter_rejects_bias_when_layer_has_none() {
+        let mut linear = Linear::new(3, 2, false, 1).unwrap();
+        let new_bias = Tensor::new(vec![1.0f32, 2.0f32], &[2]).unwrap();
+        let err = Linear::set_parameter(&mut linear, "bias", new_bias)
+            .expect_err("bias を持たない層への `bias` 指定は Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn set_parameter_err_leaves_layer_unchanged() {
+        let mut linear = Linear::new(3, 2, true, 1).unwrap();
+        let before = linear.weight().contiguous().as_slice().unwrap().to_vec();
+        let wrong_shape = Tensor::new(vec![1.0f32; 4], &[2, 2]).unwrap();
+        let _ = Linear::set_parameter(&mut linear, "weight", wrong_shape);
+        assert_eq!(linear.weight().contiguous().as_slice().unwrap(), before);
     }
 }

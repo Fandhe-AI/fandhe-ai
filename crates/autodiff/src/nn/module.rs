@@ -19,6 +19,8 @@
 //! `as_linear`/`as_linear_mut` が `Sequential` から学習可能パラメータ
 //! （`Linear`）を層順に取り出すためのダウンキャストフックを提供する。
 
+use std::collections::{HashMap, HashSet};
+
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::nn::activation::{
@@ -47,6 +49,17 @@ pub(crate) fn prefixed<'a>(
         .into_iter()
         .map(|(name, tensor)| (format!("{prefix}.{name}"), tensor))
         .collect()
+}
+
+/// [`Module::set_parameter`] の実装が、子 `Module` を内包する複合層
+/// （`MultiheadAttention`・`Rnn`／`Lstm`／`Gru`・`ModuleList`）で
+/// `"{接頭辞}.{子の名前}"` から接頭辞を剥がして子へ再帰させるための
+/// 共通ヘルパー（イシュー #1752）。[`prefixed`] の逆演算。区切りが
+/// `'.'` でない、または接頭辞が一致しない場合は `None`（呼び出し元は
+/// 「対応する子がない」として扱う）。
+pub(crate) fn strip_child_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = name.strip_prefix(prefix)?;
+    rest.strip_prefix('.')
 }
 
 /// `nn` の部品（層・活性化関数）に共通の forward シグネチャ。
@@ -165,14 +178,133 @@ pub trait Module {
     /// 名前の正は PyTorch の packed 命名（`in_proj_weight`・
     /// `weight_ih_l0` 等）ではなく、**本クレートの struct フィールド名／
     /// accessor 名**とする（`docs/compat-api-scope.md` §1.2 該当行・
-    /// イシュー #1616〈state_dict〉が直列化する compat 契約の一部と
-    /// なるため、実装ごとに一貫させる）。列挙順は「登録順＝
-    /// weight → bias」（[`fandhe_ai_facade::compat::sequential::
+    /// イシュー #1752〈state_dict／load_state_dict〉が直列化する
+    /// compat 契約の一部となるため、実装ごとに一貫させる）。列挙順は
+    /// 「登録順＝ weight → bias」（[`fandhe_ai_facade::compat::sequential::
     /// Sequential::trainable_parameters`] と共通の順序契約。同 struct
     /// を参照）。`Option` パラメータは `Some` のときのみ列挙する。
     /// 既定は空 `Vec`（無状態モジュール向け）。
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
         Vec::new()
+    }
+
+    /// [`Module::named_parameters`] が返す名前に対応するパラメータを
+    /// 書き戻す（イシュー #1752・[`Module::load_state_dict`] の基盤）。
+    ///
+    /// # 契約
+    ///
+    /// - **shape 保存置換のみ**（`compat::Sequential::apply_parameters`
+    ///   の #426 契約と同じ）。既存パラメータと `value.shape()` が
+    ///   完全一致しなければ `AutodiffError::InvalidArgument`。
+    /// - `name` に該当するパラメータが存在しない場合（未知の名前、
+    ///   または対象が `Option` で現在 `None` の場合を含む）も
+    ///   `AutodiffError::InvalidArgument`（fail-closed。
+    ///   `.claude/rules/security.md` A03）。
+    /// - 非 contiguous テンソルの正規化は行わない（`apply_parameters`／
+    ///   `Linear::from_parameters`／`Tape::var` と同じくそのまま保持
+    ///   する）。
+    ///
+    /// # 既定実装
+    ///
+    /// [`Module::named_parameters`] と同じ非破壊拡張方針（デフォルト
+    /// メソッド）。既定は `Err`（無状態モジュール向けの fail-safe）。
+    ///
+    /// # オーバーライド指針
+    ///
+    /// [`Module::named_parameters`] をオーバーライドする層は、
+    /// **必ず本メソッドも対でオーバーライドすること**。片方だけだと
+    /// [`Module::load_state_dict`] が該当パラメータの名前を認識できず
+    /// `Err` になる。
+    fn set_parameter(&mut self, name: &str, _value: Tensor<f32>) -> Result<(), AutodiffError> {
+        Err(AutodiffError::InvalidArgument(format!(
+            "Module::set_parameter: no parameter named `{name}` (default fail-safe; this \
+             Module does not override set_parameter)"
+        )))
+    }
+
+    /// [`Module::named_parameters`] のキー付きビュー（PyTorch
+    /// `Module.state_dict()` 相当。イシュー #1752）。各値は `clone`
+    /// される。順序契約は持たない（`HashMap` のため。列挙順の正は
+    /// [`Module::named_parameters`] 側に残す）。
+    fn state_dict(&self) -> HashMap<String, Tensor<f32>> {
+        self.named_parameters()
+            .into_iter()
+            .map(|(name, tensor)| (name, tensor.clone()))
+            .collect()
+    }
+
+    /// [`Module::state_dict`] の逆（PyTorch
+    /// `Module.load_state_dict(state_dict, strict=True)` 相当。イシュー
+    /// #1752）。**strict 限定**（PyTorch `strict=False` に相当する
+    /// 部分ロードは未実装。必要になれば別 API として設計する）。
+    ///
+    /// # アトミック性（two-pass。`compat::Sequential::apply_parameters`
+    /// と同型。#294／#426）
+    ///
+    /// パス 1（検証のみ・無変更）で (a) `state` のキー集合と
+    /// `named_parameters()` の名前集合の**完全一致**（欠落・余剰キーを
+    /// それぞれ昇順で列挙し `AutodiffError::InvalidArgument`）、
+    /// (b) 各キーの `shape()` 完全一致を検査してから、パス 2（適用）で
+    /// [`Module::set_parameter`] を呼んで実際に書き戻す。パス 1 の
+    /// 完全一致検査を通過して初めてパス 2 へ進むため、**途中で失敗
+    /// した場合でも呼び出し前の状態が完全に維持される**（部分適用を
+    /// 残したまま `Err` を返さない。`.claude/rules/security.md` A08）。
+    ///
+    /// パス 1 は `named_parameters()`（`&self` 借用）の戻り値を
+    /// 所有権付きの `(String, Vec<usize>)`（名前・shape）列へ写し
+    /// 取ってから借用を解放する（パス 2 が `&mut self` を要するため、
+    /// `&Tensor` 借用を持ち越すと借用検査に落ちる）。
+    fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        // パス 1（検証のみ）。
+        let expected: Vec<(String, Vec<usize>)> = self
+            .named_parameters()
+            .into_iter()
+            .map(|(name, tensor)| (name, tensor.shape().to_vec()))
+            .collect();
+
+        let expected_names: HashSet<&str> =
+            expected.iter().map(|(name, _)| name.as_str()).collect();
+        let state_names: HashSet<&str> = state.keys().map(|k| k.as_str()).collect();
+
+        let mut missing: Vec<&str> = expected_names.difference(&state_names).copied().collect();
+        missing.sort_unstable();
+        if !missing.is_empty() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Module::load_state_dict: missing keys: {missing:?}"
+            )));
+        }
+        let mut unexpected: Vec<&str> = state_names.difference(&expected_names).copied().collect();
+        unexpected.sort_unstable();
+        if !unexpected.is_empty() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Module::load_state_dict: unexpected keys: {unexpected:?}"
+            )));
+        }
+        for (name, expected_shape) in &expected {
+            // 直上の集合検査でキーは必ず存在するため `state.get` は
+            // `Some` を返す（`unwrap`/`expect` は使わず `if let` で
+            // 安全にアクセスする）。
+            if let Some(tensor) = state.get(name.as_str())
+                && tensor.shape() != expected_shape.as_slice()
+            {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Module::load_state_dict: shape mismatch for `{name}`: expected \
+                     {expected_shape:?}, got {:?}",
+                    tensor.shape()
+                )));
+            }
+        }
+
+        // パス 2（適用）。パス 1 でキー集合・shape は確定済みのため
+        // 理論上失敗しないが、`set_parameter` 未対応の外部実装
+        // （既定実装のまま `Err` を返す層）向けに `?` で伝播する。
+        for (name, tensor) in state {
+            self.set_parameter(&name, tensor)?;
+        }
+        Ok(())
     }
 }
 
@@ -199,6 +331,12 @@ impl Module for Linear {
             out.push(("bias".to_string(), bias));
         }
         out
+    }
+
+    /// [`Module::set_parameter`] の実装。`Linear::set_parameter`
+    /// （`nn/linear.rs`）へ委譲する（イシュー #1752）。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        Linear::set_parameter(self, name, value)
     }
 
     /// [`Module::forward`]（`Linear::bind(tape).forward(input)`。
@@ -473,6 +611,12 @@ impl Module for RmsNorm {
             .unwrap_or_default()
     }
 
+    /// [`Module::set_parameter`] の実装。`RmsNorm::set_parameter`
+    /// （`nn/norm.rs`）へ委譲する（イシュー #1752）。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        RmsNorm::set_parameter(self, name, value)
+    }
+
     /// `Var::rms_norm`（`var.rs`）と同じディスパッチ規律を `tape` 不要
     /// 経路（`ops` を直接受け取る）で再現する: `row_norm_layout` で
     /// `hidden` を導出し `weight` の shape を検査してから `ops.rmsnorm`
@@ -532,6 +676,12 @@ impl Module for LayerNorm {
             out.push(("bias".to_string(), b));
         }
         out
+    }
+
+    /// [`Module::set_parameter`] の実装。`LayerNorm::set_parameter`
+    /// （`nn/norm.rs`）へ委譲する（イシュー #1752）。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        LayerNorm::set_parameter(self, name, value)
     }
 
     fn forward_host(

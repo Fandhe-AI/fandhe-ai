@@ -34,7 +34,7 @@ use crate::nn::init::{
     BIAS_HH_SEED_SALT, BIAS_SEED_SALT, WEIGHT_HH_SEED_SALT, WEIGHT_SEED_SALT, derive_seed,
     try_uniform_init,
 };
-use crate::nn::module::Module;
+use crate::nn::module::{Module, strip_child_prefix};
 use crate::tape::Tape;
 use crate::var::{CellWeights, GateParams, Var};
 
@@ -497,6 +497,75 @@ impl RnnCell {
         self.bias_hh.as_ref()
     }
 
+    /// [`crate::nn::module::Module::set_parameter`]（`RnnCell` を
+    /// 保持する層の `impl Module` から `"cell."` 接頭辞を剥がして
+    /// 委譲される。`nn/module.rs`・`impl Module for` 各層 参照）の本体。
+    /// `"weight_ih"`／`"weight_hh"`／`"bias_ih"`／`"bias_hh"` を受理
+    /// する（`bias_ih`／`bias_hh` は両方 `Some` か両方 `None`。`Some`
+    /// でない場合は未知名扱いで拒否。イシュー #1752）。shape 保存
+    /// 置換のみ。
+    pub(crate) fn set_parameter(
+        &mut self,
+        name: &str,
+        value: Tensor<f32>,
+    ) -> Result<(), AutodiffError> {
+        match name {
+            "weight_ih" => {
+                if value.shape() != self.weight_ih.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: self.weight_ih.shape().to_vec(),
+                    }));
+                }
+                self.weight_ih = value;
+                Ok(())
+            }
+            "weight_hh" => {
+                if value.shape() != self.weight_hh.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: self.weight_hh.shape().to_vec(),
+                    }));
+                }
+                self.weight_hh = value;
+                Ok(())
+            }
+            "bias_ih" => match &mut self.bias_ih {
+                Some(current) => {
+                    if value.shape() != current.shape() {
+                        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                            lhs: value.shape().to_vec(),
+                            rhs: current.shape().to_vec(),
+                        }));
+                    }
+                    *current = value;
+                    Ok(())
+                }
+                None => Err(AutodiffError::InvalidArgument(format!(
+                    "RnnCell::set_parameter: no parameter named `{name}` (this cell has no bias)"
+                ))),
+            },
+            "bias_hh" => match &mut self.bias_hh {
+                Some(current) => {
+                    if value.shape() != current.shape() {
+                        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                            lhs: value.shape().to_vec(),
+                            rhs: current.shape().to_vec(),
+                        }));
+                    }
+                    *current = value;
+                    Ok(())
+                }
+                None => Err(AutodiffError::InvalidArgument(format!(
+                    "RnnCell::set_parameter: no parameter named `{name}` (this cell has no bias)"
+                ))),
+            },
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "RnnCell::set_parameter: no parameter named `{name}`"
+            ))),
+        }
+    }
+
     /// このステップの `tape` へ重み・bias を葉ノードとして登録する
     /// （`Linear::bind` と同じ per-step 再登録契約。決定 3）。
     ///
@@ -690,6 +759,18 @@ impl Module for Rnn {
         out
     }
 
+    /// [`Module::set_parameter`] の実装（イシュー #1752）。`"cell."`
+    /// 接頭辞を剥がし `RnnCell`／`LstmCell`／`GruCell::set_parameter`
+    /// へ委譲する（`named_parameters` の接頭辞契約の逆演算）。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        match strip_child_prefix(name, "cell") {
+            Some(rest) => self.cell.set_parameter(rest, value),
+            None => Err(AutodiffError::InvalidArgument(format!(
+                "set_parameter: no parameter named `{name}`"
+            ))),
+        }
+    }
+
     /// 推論経路（tape 不要。決定 9）。`x: [T,B,D]` → `[T,B,H]`。
     /// [`RnnCell::forward_host`] を T step 分逐次呼び、`h0` はゼロ固定
     /// （`forward_seq` の `h0` 引数は tape 経路限定。決定 6 のスコープは
@@ -811,6 +892,75 @@ impl LstmCell {
     /// `Some`／`None`）。
     pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
         self.bias_hh.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_parameter`]（`LstmCell` を
+    /// 保持する層の `impl Module` から `"cell."` 接頭辞を剥がして
+    /// 委譲される。`nn/module.rs`・`impl Module for` 各層 参照）の本体。
+    /// `"weight_ih"`／`"weight_hh"`／`"bias_ih"`／`"bias_hh"` を受理
+    /// する（`bias_ih`／`bias_hh` は両方 `Some` か両方 `None`。`Some`
+    /// でない場合は未知名扱いで拒否。イシュー #1752）。shape 保存
+    /// 置換のみ。
+    pub(crate) fn set_parameter(
+        &mut self,
+        name: &str,
+        value: Tensor<f32>,
+    ) -> Result<(), AutodiffError> {
+        match name {
+            "weight_ih" => {
+                if value.shape() != self.weight_ih.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: self.weight_ih.shape().to_vec(),
+                    }));
+                }
+                self.weight_ih = value;
+                Ok(())
+            }
+            "weight_hh" => {
+                if value.shape() != self.weight_hh.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: self.weight_hh.shape().to_vec(),
+                    }));
+                }
+                self.weight_hh = value;
+                Ok(())
+            }
+            "bias_ih" => match &mut self.bias_ih {
+                Some(current) => {
+                    if value.shape() != current.shape() {
+                        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                            lhs: value.shape().to_vec(),
+                            rhs: current.shape().to_vec(),
+                        }));
+                    }
+                    *current = value;
+                    Ok(())
+                }
+                None => Err(AutodiffError::InvalidArgument(format!(
+                    "LstmCell::set_parameter: no parameter named `{name}` (this cell has no bias)"
+                ))),
+            },
+            "bias_hh" => match &mut self.bias_hh {
+                Some(current) => {
+                    if value.shape() != current.shape() {
+                        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                            lhs: value.shape().to_vec(),
+                            rhs: current.shape().to_vec(),
+                        }));
+                    }
+                    *current = value;
+                    Ok(())
+                }
+                None => Err(AutodiffError::InvalidArgument(format!(
+                    "LstmCell::set_parameter: no parameter named `{name}` (this cell has no bias)"
+                ))),
+            },
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "LstmCell::set_parameter: no parameter named `{name}`"
+            ))),
+        }
     }
 
     /// このステップの `tape` へ重み・bias を葉ノードとして登録する
@@ -1009,6 +1159,18 @@ impl Module for Lstm {
         out
     }
 
+    /// [`Module::set_parameter`] の実装（イシュー #1752）。`"cell."`
+    /// 接頭辞を剥がし `RnnCell`／`LstmCell`／`GruCell::set_parameter`
+    /// へ委譲する（`named_parameters` の接頭辞契約の逆演算）。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        match strip_child_prefix(name, "cell") {
+            Some(rest) => self.cell.set_parameter(rest, value),
+            None => Err(AutodiffError::InvalidArgument(format!(
+                "set_parameter: no parameter named `{name}`"
+            ))),
+        }
+    }
+
     /// `x: [T,B,D]` → `[T,B,H]`（最終隠れ状態列。`c_n` は tape 不要
     /// 経路では返さない——決定 9 は推論経路の対象を隠れ状態出力のみと
     /// する）。
@@ -1133,6 +1295,75 @@ impl GruCell {
     /// `bias_ih` と常に同時に `Some`／`None`）。
     pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
         self.bias_hh.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_parameter`]（`GruCell` を
+    /// 保持する層の `impl Module` から `"cell."` 接頭辞を剥がして
+    /// 委譲される。`nn/module.rs`・`impl Module for` 各層 参照）の本体。
+    /// `"weight_ih"`／`"weight_hh"`／`"bias_ih"`／`"bias_hh"` を受理
+    /// する（`bias_ih`／`bias_hh` は両方 `Some` か両方 `None`。`Some`
+    /// でない場合は未知名扱いで拒否。イシュー #1752）。shape 保存
+    /// 置換のみ。
+    pub(crate) fn set_parameter(
+        &mut self,
+        name: &str,
+        value: Tensor<f32>,
+    ) -> Result<(), AutodiffError> {
+        match name {
+            "weight_ih" => {
+                if value.shape() != self.weight_ih.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: self.weight_ih.shape().to_vec(),
+                    }));
+                }
+                self.weight_ih = value;
+                Ok(())
+            }
+            "weight_hh" => {
+                if value.shape() != self.weight_hh.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: self.weight_hh.shape().to_vec(),
+                    }));
+                }
+                self.weight_hh = value;
+                Ok(())
+            }
+            "bias_ih" => match &mut self.bias_ih {
+                Some(current) => {
+                    if value.shape() != current.shape() {
+                        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                            lhs: value.shape().to_vec(),
+                            rhs: current.shape().to_vec(),
+                        }));
+                    }
+                    *current = value;
+                    Ok(())
+                }
+                None => Err(AutodiffError::InvalidArgument(format!(
+                    "GruCell::set_parameter: no parameter named `{name}` (this cell has no bias)"
+                ))),
+            },
+            "bias_hh" => match &mut self.bias_hh {
+                Some(current) => {
+                    if value.shape() != current.shape() {
+                        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                            lhs: value.shape().to_vec(),
+                            rhs: current.shape().to_vec(),
+                        }));
+                    }
+                    *current = value;
+                    Ok(())
+                }
+                None => Err(AutodiffError::InvalidArgument(format!(
+                    "GruCell::set_parameter: no parameter named `{name}` (this cell has no bias)"
+                ))),
+            },
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "GruCell::set_parameter: no parameter named `{name}`"
+            ))),
+        }
     }
 
     /// このステップの `tape` へ重み・bias を葉ノードとして登録する
@@ -1296,6 +1527,18 @@ impl Module for Gru {
         out
     }
 
+    /// [`Module::set_parameter`] の実装（イシュー #1752）。`"cell."`
+    /// 接頭辞を剥がし `RnnCell`／`LstmCell`／`GruCell::set_parameter`
+    /// へ委譲する（`named_parameters` の接頭辞契約の逆演算）。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        match strip_child_prefix(name, "cell") {
+            Some(rest) => self.cell.set_parameter(rest, value),
+            None => Err(AutodiffError::InvalidArgument(format!(
+                "set_parameter: no parameter named `{name}`"
+            ))),
+        }
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -1312,5 +1555,82 @@ impl Module for Gru {
             outputs.push(h.clone());
         }
         stack_host_tensors(&outputs, b_dim, hidden)
+    }
+}
+#[cfg(test)]
+mod tests {
+    //! `Rnn`/`Lstm`/`Gru::set_parameter`（`Module` trait 実装。イシュー
+    //! #1752）の単体テスト。`RnnCell`/`LstmCell`/`GruCell::set_parameter`
+    //! 本体は 3 セルとも同一パターン（`weight_ih`/`weight_hh`/
+    //! `bias_ih`/`bias_hh`）のため代表として `Rnn` のみ厚く検証し、
+    //! `Lstm`/`Gru` は `"cell."` 接頭辞剥がしの委譲経路のみ確認する。
+
+    use super::*;
+    use crate::nn::module::Module;
+
+    #[test]
+    fn rnn_set_parameter_replaces_weight_ih_in_place() {
+        let mut rnn = Rnn::new(3, 4, true, 1).unwrap();
+        let new_weight = Tensor::new(vec![9.0f32; 12], &[3, 4]).unwrap();
+        rnn.set_parameter("cell.weight_ih", new_weight.clone())
+            .unwrap();
+        assert_eq!(
+            rnn.cell().weight_ih().contiguous().as_slice().unwrap(),
+            new_weight.contiguous().as_slice().unwrap()
+        );
+    }
+
+    #[test]
+    fn rnn_set_parameter_rejects_missing_cell_prefix() {
+        let mut rnn = Rnn::new(3, 4, true, 1).unwrap();
+        let dummy = rnn.cell().weight_ih().clone();
+        let err = rnn
+            .set_parameter("weight_ih", dummy)
+            .expect_err("`cell.` 接頭辞なしは Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn rnn_set_parameter_rejects_unknown_cell_field() {
+        let mut rnn = Rnn::new(3, 4, true, 1).unwrap();
+        let dummy = rnn.cell().weight_ih().clone();
+        let err = rnn
+            .set_parameter("cell.bogus", dummy)
+            .expect_err("未知のセルフィールド名は Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn rnn_set_parameter_rejects_bias_when_cell_has_none() {
+        let mut rnn = Rnn::new(3, 4, false, 1).unwrap();
+        let dummy = Tensor::new(vec![0.0f32; 4], &[4]).unwrap();
+        let err = rnn
+            .set_parameter("cell.bias_ih", dummy)
+            .expect_err("bias を持たないセルへの bias 指定は Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn lstm_set_parameter_delegates_via_cell_prefix() {
+        let mut lstm = Lstm::new(3, 4, true, 1).unwrap();
+        let new_weight = Tensor::new(vec![5.0f32; 48], &[3, 16]).unwrap();
+        lstm.set_parameter("cell.weight_ih", new_weight.clone())
+            .unwrap();
+        assert_eq!(
+            lstm.cell().weight_ih().contiguous().as_slice().unwrap(),
+            new_weight.contiguous().as_slice().unwrap()
+        );
+    }
+
+    #[test]
+    fn gru_set_parameter_delegates_via_cell_prefix() {
+        let mut gru = Gru::new(3, 4, true, 1).unwrap();
+        let new_weight = Tensor::new(vec![5.0f32; 36], &[3, 12]).unwrap();
+        gru.set_parameter("cell.weight_ih", new_weight.clone())
+            .unwrap();
+        assert_eq!(
+            gru.cell().weight_ih().contiguous().as_slice().unwrap(),
+            new_weight.contiguous().as_slice().unwrap()
+        );
     }
 }
