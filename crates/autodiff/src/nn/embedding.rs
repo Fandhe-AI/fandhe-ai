@@ -289,10 +289,27 @@ impl<'t> EmbeddingVars<'t> {
 
     /// `Module::forward`（f32 `Var` 契約）から embedding を呼べるように
     /// する橋渡し（イシュー #1760。モジュール doc「`Module` trait の
-    /// 実装」節参照）。`input` を [`Var::to_tensor`] で実体化し
+    /// 実装」節参照）。`input` を層 1（fallible）実体化境界
+    /// `crate::tape::materialize_fallible` で実体化し
     /// `ids_from_f32`（非公開のためコードスパン表記で参照しリンク化
     /// しない。`nn/attention.rs` の `sdpa_compose` 等と同じ規約）で
     /// 厳格に整数 id へ変換してから [`Self::forward`] へ委譲する。
+    ///
+    /// **`Var::to_tensor()`（層 2・非 fallible 境界）を使わない理由**
+    /// （codex-review P0 指摘・イシュー #1760 PR #1884 レビュー）:
+    /// `to_tensor()` は checkpoint 解放済みノードの再計算失敗
+    /// （poison）をゼロテンソルへ黙って吸収する契約
+    /// （`materialize_non_fallible` doc 「poison 契約」節参照）。
+    /// この吸収されたゼロが `ids_from_f32` の「非有限・非整数・負を
+    /// 拒否」検査は素通りし（`0.0` は有限な整数値）「有効な id 0」
+    /// として本関数がそのまま `forward` へ渡してしまい、かつ
+    /// `Tensor<i32>` へ変換した時点でテープ追跡から切り離されるため
+    /// （doc 下記「勾配経路を持たない」参照）、後続の
+    /// `Tape::backward`（層 1・`materialize_fallible` 経由で poison を
+    /// `AutodiffError` として検出する fail-closed 契約）からもこの
+    /// 汚染を検知する経路がなくなる。`materialize_fallible` を直接
+    /// 使えば、poison 発生時にここで即座に `Err` として呼び出し元へ
+    /// 伝播し、汚染されたゼロを「有効な id」として取り込む事故を防ぐ。
     ///
     /// **`input` 自身は勾配経路を持たない**: [`Var::embedding`] の
     /// `index` 引数が常に非 `Var`（生 `Tensor<i32>`）である契約と同じ
@@ -300,7 +317,11 @@ impl<'t> EmbeddingVars<'t> {
     /// 動かした場合の劣化を表す連続な勾配が定義できない）、`input` を
     /// 一度実体化してテープ追跡を切り離すのは意図的な設計。
     pub fn forward_from_var(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        let ids = ids_from_f32(&input.to_tensor())?;
+        let input_tensor = {
+            let nodes = input.tape().nodes.borrow();
+            crate::tape::materialize_fallible(&nodes, input.tape().ops(), input.node_id())?.clone()
+        };
+        let ids = ids_from_f32(&input_tensor)?;
         self.forward(&ids)
     }
 }
