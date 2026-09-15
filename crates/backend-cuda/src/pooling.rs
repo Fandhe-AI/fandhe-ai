@@ -10,38 +10,24 @@
 //! [`CudaPooling::run_adaptive_avg_pool2d_f32`]
 //! へホスト側スライスを渡すだけで GPU 実行できる。
 //!
-//! **`ops.rs::CudaBackendOps` への未配線（route B。イシュー #1729
-//! 実装時点の事実）**: 設計 doc §9 が指す共有基盤
-//! （`fandhe_ai_tensor_core::backend_ops::BackendOps::max_pool2d`／
+//! **`ops.rs::CudaBackendOps` への配線（イシュー #1729・追従イシュー。
+//! #1607 ツリー）**: イシュー #1729 実装時点（2026-09-15）では兄弟
+//! イシュー #1728（`backend-cpu`。設計 doc §9 が指す共有基盤
+//! `fandhe_ai_tensor_core::backend_ops::BackendOps::max_pool2d`／
 //! `avg_pool2d`／`adaptive_avg_pool2d`・`Pool2dParams`・出力 shape
-//! 関数）は兄弟イシュー #1728（`backend-cpu`）が導入する予定だが、
-//! 本イシュー実装時点（2026-09-15）では `main` にまだ存在しない
-//! （`kernels_pooling.rs` モジュール doc・`docs/pooling-ops-design.md`
-//! §15「実装記録（#1729）」参照）。そのため本モジュールは
+//! 関数）が `main` に未マージだったため、本モジュールは
 //! `Pool2dParams` へ依存せずプリミティブ引数（`[usize; 2]`・`bool`）
 //! で shape・パラメータを受け取り、**自己完結**で検査・出力 shape
-//! 導出を行う（`pool_out_len`／`validate_*` 関数群。設計 doc §3／§4
-//! の式をクレート内へ複製）。`ops.rs` への override 配線・
-//! `context_cache::cached_pooling` の追加は #1728 マージ後の小さな
-//! 追従 PR へ引き継ぐ（未使用の `pub(crate)` キャッシュ関数を
-//! 残すと dead_code lint で `cargo clippy -D warnings` が落ちるため、
-//! 呼び出し元が存在しない現時点ではキャッシュ層を追加しない）。
+//! 導出を行う設計（`pool_out_len`／`validate_*` 関数群。設計 doc §3／
+//! §4 の式をクレート内へ複製）を維持したまま、追従イシューで
+//! `ops.rs::CudaBackendOps::max_pool2d`／`avg_pool2d`／
+//! `adaptive_avg_pool2d`（`Pool2dParams` を受け取り [`pool2d_out_shape`]
+//! 等で shape を再検査してから本モジュールの `run_*` へ委譲する
+//! `im2col.rs` と同じ二重検査方針）・`context_cache::cached_pooling`
+//! を追加した。本モジュール自体は `Pool2dParams` に非依存のまま
+//! （`ops.rs` 側が `Pool2dParams` の getter で分解してから渡す）。
 //!
-//! shape 検証の責務（`Pool2dParams` が確立され `ops.rs` 側の override
-//! が追加された後）は `gather_scatter.rs`／`im2col.rs` と同じ二重検査
-//! 方針（`.claude/rules/security.md` A08）へ移行する想定だが、本
-//! モジュール単体では常に完全な検査を自前で行う。
-//!
-//! `#![allow(dead_code)]`（モジュール全体）について: 上記のとおり
-//! `ops.rs::CudaBackendOps` への override 配線を持たないため、
-//! `CudaPooling` 本体・`validate_*`／`pool_out_len` 等の検査関数は
-//! 現時点でクレート内テスト（`#[cfg(test)] mod tests`・
-//! `pooling_real_device_tests.rs`）からのみ到達する（非 test ビルドでは
-//! 呼び出し元が 1 つも存在しない）。`rmsnorm.rs::dw_split_row_range` の
-//! `#[allow(dead_code)]`（検証専用コードで実行経路から呼ばれない）と
-//! 同じ理由を、本モジュールはファイル全体に適用する（`ops.rs` 側の
-//! override 配線が追加され次第、本属性は不要になり撤去する）。
-#![allow(dead_code)]
+//! [`pool2d_out_shape`]: fandhe_ai_tensor_core::pool2d_out_shape
 
 use std::sync::Arc;
 

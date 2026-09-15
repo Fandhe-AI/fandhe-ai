@@ -325,6 +325,18 @@ pub(crate) fn cached_im2col(ctx: &Arc<MetalContext>) -> Result<Arc<MetalIm2col>,
     get_or_build(cache, on_poison, || MetalIm2col::new(ctx))
 }
 
+/// [`crate::pooling::MetalPooling`] をプロセス内キャッシュから取得
+/// する（イシュー #1730・追従イシュー。`cached_im2col` と同型）。
+/// `ops::MetalBackendOps::max_pool2d`／`avg_pool2d`／
+/// `adaptive_avg_pool2d` の唯一の呼び出し先。
+pub(crate) fn cached_pooling(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::pooling::MetalPooling>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::pooling::MetalPooling>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::pooling::MetalPooling::new(ctx))
+}
+
 /// `unique` カーネル（`unique.rs::MetalUnique`）のコンパイル済み
 /// パイプラインをプロセス内キャッシュから取得する（イシュー #1734。
 /// `cached_gather_scatter` と同型）。

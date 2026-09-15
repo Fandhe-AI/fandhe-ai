@@ -11,12 +11,14 @@
 //! （本モジュールは常に rank 4 の `PoolDims` を扱う）。
 //!
 //! **`ops::MetalBackendOps::{max_pool2d, avg_pool2d,
-//! adaptive_avg_pool2d}` への結線（Layer B）は本 PR 時点では未実施**
-//! （兄弟イシュー #1728〈CPU〉が `Pool2dParams`／`BackendOps` の
-//! シグネチャを確定させるまで、並列実行される本イシューが `ops.rs`
-//! へ推測実装を加えると重複実装・rebase 衝突を招くため。
-//! `docs/pooling-ops-design.md` §15「Metal 実装（イシュー #1730）」
-//! 参照）。
+//! adaptive_avg_pool2d}` への結線（Layer B）はイシュー #1730 実装時点
+//! では未実施だった**（兄弟イシュー #1728〈CPU〉が `Pool2dParams`／
+//! `BackendOps` のシグネチャを確定させるまで、並列実行される本
+//! イシューが `ops.rs` へ推測実装を加えると重複実装・rebase 衝突を
+//! 招くため）。#1728 マージ後の追従イシューで結線を完了した
+//! （`Pool2dParams` の getter で分解してから本モジュールの `run_*`
+//! へ委譲する `im2col.rs` と同じ二重検査方針。`docs/pooling-ops-
+//! design.md` §15「Metal 実装（イシュー #1730）」参照）。
 //!
 //! **shape 検証の責務分担**（`im2col.rs` モジュール doc・
 //! `.claude/rules/security.md` A08 と同じ二重検査方針）: 本モジュール

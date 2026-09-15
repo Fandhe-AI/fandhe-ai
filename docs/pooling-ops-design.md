@@ -595,19 +595,20 @@ return・`PoolingSizeLimitExceeded` 型付きエラー）・
 bit 完全一致）。
 
 **Layer B（`MetalBackendOps::{max_pool2d, avg_pool2d,
-adaptive_avg_pool2d}` への trait 結線）は本 PR 時点では未実施**:
-着手時点で `crates/tensor-core::backend_ops.rs`／`ops_shape.rs` に
-`Pool2dParams`／該当 `BackendOps` メソッドが存在しなかった（兄弟
-issue #1728〈CPU〉が並列実行中で未マージ）ため、`ops.rs` への推測
-実装は行わず `crate::pooling::MetalPooling` の起動 API を trait 非
-依存の引数（`&[f32]` + shape タプル）で完結させた。#1728 マージ後の
-結線手順: `ops.rs` に `map_pooling_error`（`PoolingSizeLimitExceeded`
-→ `BackendError::Unsupported`〈ホストフォールバック〉・
+adaptive_avg_pool2d}` への trait 結線）はイシュー #1730 時点では未実施
+だった**: 着手時点で `crates/tensor-core::backend_ops.rs`／
+`ops_shape.rs` に `Pool2dParams`／該当 `BackendOps` メソッドが存在
+しなかった（兄弟 issue #1728〈CPU〉が並列実行中で未マージ）ため、
+`ops.rs` への推測実装は行わず `crate::pooling::MetalPooling` の起動
+API を trait 非依存の引数（`&[f32]` + shape タプル）で完結させた。
+**#1728 マージ後の追従 PR（#1607 ツリー）で結線済み**: `ops.rs` に
+`map_pooling_error`（`PoolingSizeLimitExceeded` →
+`BackendError::Unsupported`〈ホストフォールバック〉・
 `InvalidPoolingShape` → `BackendError::ShapeMismatch`）と
 `MetalBackendOps::{max_pool2d, avg_pool2d, adaptive_avg_pool2d}`
 （`pool2d_out_shape` で再検査 → `cached_pooling`〈`context_cache.rs`
-へ追加〉→ `run_*`）を追加する（親 #1607 を受け皿として記録。
-`.claude/rules/out-of-scope-tracking.md`）。
+へ追加済み〉→ `run_*`）を追加した（実装記録は本節末尾「#1729／#1730
+マージ後の追従 PR」を参照）。
 
 **対象外・引き継ぎ**: GPU backward カーネル（MaxPool VJP は
 `scatter_add` 経由・Avg VJP はホスト側のみ。設計 doc §11）・
@@ -676,3 +677,57 @@ M4 Max 実機実測（`docs/perf/logs/metal-pooling-1730/README.md` へ
 warning はベースライン不変）。**GB10 実機実測は本エージェント実行環境に
 到達手段が無いため未実施のまま `docs/perf/logs/cuda-pooling-1729/` へ
 申し送る**。
+
+### #1729／#1730 マージ後の追従 PR（#1607 ツリー・Layer B 配線）
+
+CUDA・Metal とも `ops.rs::{CudaBackendOps, MetalBackendOps}` への
+override 配線を追加した（`Pool2dParams` が兄弟イシュー #1728 で
+`main` に確定した後の実装）。
+
+- `crates/backend-cuda/src/context_cache.rs::cached_pooling`（`ordinal`
+  キーのプロセス内キャッシュ。`cached_im2col` と同型）を追加。
+- `crates/backend-metal/src/context_cache.rs::cached_pooling`（同上の
+  Metal 版。`cached_im2col` と同型）を追加。
+- `ops.rs` へ `map_pooling_error`（`PoolingSizeLimitExceeded` →
+  `BackendError::Unsupported`〈ホストフォールバック〉・
+  `InvalidPoolingShape` → `BackendError::ShapeMismatch`。それ以外は
+  `map_cuda_error`／`KernelLaunchFailed`）と
+  `CudaBackendOps`／`MetalBackendOps` の `max_pool2d`／`avg_pool2d`／
+  `adaptive_avg_pool2d`（`pool2d_out_shape`／`adaptive_pool2d_out_shape`
+  で shape を再検査してから `CudaPooling`／`MetalPooling` の `run_*`
+  へ委譲する `im2col` と同じ二重検査方針）を追加。
+- `crates/backend-cuda/src/pooling.rs` の `#![allow(dead_code)]`
+  （呼び出し元が無かったための暫定属性）を撤去。
+- 回帰テスト: CUDA は `ops.rs::tests` へ rank 不一致・batch 軸 0 早期
+  リターンの driver 非接触テスト（`im2col` の同型テストと対称）を
+  追加。Metal は同ファイル自体が `cfg(target_os = "macos")` 限定
+  のため、batch 軸 0 早期リターンの同型テストを同じ `mod tests` へ
+  追加（macOS 上でのみ実行される。`aarch64-apple-darwin` ターゲット
+  への cross `cargo check`／`cargo clippy` で型検査は確認済み）。
+- CUDA／Metal 実機でのカーネル数値実測（run-to-run bit 同一・形状
+  網羅等）自体は #1729／#1730 の時点で既に実装・記録済みの
+  `pooling_real_device_tests.rs`／`tests/pooling_parity.rs` が対象で
+  あり、本追従 PR は `ops.rs` からの到達経路のみを追加した（本エージ
+  ェント実行環境に実機がないため未実施のまま申し送り）。
+- **codex-review 是正（PR #1888）**: `ops.rs::CudaBackendOps::
+  avg_pool2d` は `pool2d_out_shape` で `dilation` を織り込んだ
+  `out_shape` を計算する一方、`pooling::CudaPooling::
+  run_avg_pool2d_f32`（延いては `kernels_pooling::AVG_POOL2D_F32`）は
+  `dilation` 引数を持たない構造で常に `dilation=[1, 1]` として計算
+  する（`kernels_pooling.rs` モジュール doc「`AvgPool` の `dilation`
+  は設計 doc §3 のとおり常に `1` 固定のためカーネル引数に持たない」）
+  ため、`dilation != [1, 1]` の呼び出しで CUDA が CPU 参照実装と異なる
+  値を返しうる欠陥が指摘された（例: `[1,1,4,4]`〈値 0〜15〉・
+  `kernel=[2,2]`・`stride=[3,3]`・`padding=[0,0]`・`dilation=[2,2]` は
+  両者とも `out_shape=[1,1,1,1]` だが CPU は `5.0`・CUDA は `7.5`）。
+  `MaxPool` は `kh_ * dh` を持つ構造で既に `dilation` に対応済みのため
+  対象外・**Metal `avg_pool2d_f32` シェーダは `dims.dh`／`dims.dw` を
+  ループ内で使う構造で既に `dilation` に対応済みのため対象外**
+  （`shaders/pooling.metal::avg_pool2d_f32` 参照）。是正は CUDA
+  `ops.rs::avg_pool2d` へ `params.dilation() != [1, 1]` のときデバイス
+  非接触のまま `BackendError::Unsupported` を返すガードを追加し、
+  ホスト参照実装（`eval::avg_pool2d`）へフォールバックさせる方式を
+  採用した（カーネル側の拡張ではなく fail-closed な拒否。カーネル
+  構造を変更しない分リスクが小さいため）。回帰テストは
+  `ops::tests::avg_pool2d_rejects_non_unit_dilation_without_touching_device`
+  （上記の codex-review 例を device 非接触のまま固定）。

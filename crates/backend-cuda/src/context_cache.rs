@@ -602,6 +602,21 @@ pub(crate) fn cached_im2col(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::pooling::
+/// CudaPooling`] をプロセス内キャッシュから取得する（イシュー #1729・
+/// 追従イシュー。`cached_im2col` と同型）。`ops::CudaBackendOps::
+/// max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d` の唯一の呼び出し先。
+pub(crate) fn cached_pooling(
+    device: &CudaDevice,
+) -> Result<Arc<crate::pooling::CudaPooling>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::pooling::CudaPooling>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::pooling::CudaPooling::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する `unique` カーネル
 /// （`unique.rs::CudaUnique`）のコンパイル済みハンドルをプロセス内
 /// キャッシュから取得する（イシュー #1734。`cached_gather_scatter` と

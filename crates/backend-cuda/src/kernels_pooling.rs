@@ -10,16 +10,16 @@
 //! `cargo build --workspace` が成立する」契約を維持する。
 //! `.claude/rules/deps-policy.md`）。
 //!
-//! **本モジュールの位置づけ（イシュー #1729 実装時点の事実）**: 設計
-//! doc §9 が指す共有基盤（`fandhe_ai_tensor_core::backend_ops::
-//! BackendOps::max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`・
-//! `Pool2dParams`・出力 shape 関数）は兄弟イシュー #1728（CPU 実装）が
-//! 導入する予定だが、本イシュー実装時点（2026-09-15）でまだ `main` に
-//! 存在しない。そのため本モジュール・`pooling.rs` は `ops.rs::
-//! CudaBackendOps` への override 配線を持たない、クレート内に閉じた
-//! forward カーネル実装のみを提供する（`docs/pooling-ops-design.md`
-//! §15「実装記録（#1729）」に経緯を記録）。`ops.rs` への結線は #1728
-//! マージ後の小さな追従 PR へ引き継ぐ。
+//! **本モジュールの位置づけ**: イシュー #1729 実装時点（2026-09-15）
+//! では兄弟イシュー #1728（CPU 実装。設計 doc §9 が指す共有基盤
+//! `fandhe_ai_tensor_core::backend_ops::BackendOps::max_pool2d`／
+//! `avg_pool2d`／`adaptive_avg_pool2d`・`Pool2dParams`・出力 shape
+//! 関数）が `main` に未マージだったため、本モジュール・`pooling.rs`
+//! はクレート内に閉じた forward カーネル実装のみを提供していた
+//! （`docs/pooling-ops-design.md` §15「実装記録（#1729）」に経緯を
+//! 記録）。`ops.rs::CudaBackendOps` への override 配線は #1728
+//! マージ後の追従イシューで完了済み（`pooling.rs` モジュール doc
+//! 参照）。
 //!
 //! 1d は `[N, C, 1, L]` へ reshape して 2d カーネルへ併合する
 //! （設計 doc §2）ため本モジュールに 1d 専用カーネルは無い。

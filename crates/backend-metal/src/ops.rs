@@ -40,12 +40,12 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
     DispatchFailureCell, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
-    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors,
-    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, batch_norm_layout, gather_out_shape, im2col_out_shape,
-    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, reduce_out_shape,
-    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams,
+    QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
+    UnaryElementwiseOp, adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape,
+    im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
+    pool2d_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -305,6 +305,30 @@ fn map_im2col_error(err: MetalError) -> BackendError {
 fn map_batch_norm_error(err: MetalError) -> BackendError {
     match err {
         MetalError::BatchNormSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        other => BackendError::KernelLaunchFailed(other.to_string()),
+    }
+}
+
+/// `pooling.rs::MetalPooling::run_max_pool2d_f32`／
+/// `run_avg_pool2d_f32`／`run_adaptive_avg_pool2d_f32` のエラーを
+/// `BackendOps::max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d` の
+/// 戻り値へ変換する（イシュー #1730・追従イシュー。#1607 ツリー）。
+/// [`MetalError::PoolingSizeLimitExceeded`]（形状パラメータがカーネル
+/// 引数 `uint` 上限を超過）**のみ** [`BackendError::Unsupported`] へ
+/// 写像し、`fandhe_ai_autodiff` 側のホストフォールバック（`eval::
+/// max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`）へ委ねる
+/// （`map_im2col_error`／`map_batch_norm_error` と同じ設計判断）。
+/// [`MetalError::InvalidPoolingShape`]（内部契約違反。呼び出し元
+/// `ops.rs` の事前検証を通過した入力からは実質到達しない防御的経路）
+/// は `ShapeError::ElementCountOverflow` へ、それ以外（デバイス・
+/// パイプライン起動失敗等）は `KernelLaunchFailed` へ変換する（判定
+/// 迂回経路を作らない。`.claude/rules/security.md` A08）。
+fn map_pooling_error(err: MetalError) -> BackendError {
+    match err {
+        MetalError::PoolingSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        MetalError::InvalidPoolingShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
         other => BackendError::KernelLaunchFailed(other.to_string()),
     }
 }
@@ -3840,6 +3864,140 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::max_pool2d` の Metal 実装（イシュー #1730・
+    /// 追従イシュー。#1607 ツリー）。[`pool2d_out_shape`] で
+    /// `input.shape()`／`params` を再検査してから `pooling::
+    /// MetalPooling::run_max_pool2d_f32` へ委譲する（`im2col` と同じ
+    /// 二重検査方針。`.contiguous()` 前の `checked_bytes_for` も
+    /// `im2col`／`interpolate` と同型で適用し、非空入力の要素数積が
+    /// `isize::MAX` バイト相当を超える場合の `.contiguous()` 側
+    /// capacity overflow panic を未然に防ぐ。Cursor Bugbot 指摘の
+    /// 是正・PR #1888）。`索引` テンソルの dtype は `i32` 固定
+    /// （`crate::pooling::MetalPooling::run_max_pool2d_f32` doc 参照）。
+    fn max_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Pool2dParams,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape =
+            pool2d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Ok((
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+            ));
+        }
+        checked_bytes_for::<f32>(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("max_pool2d: input not contiguous".into())
+        })?;
+
+        let [kh, kw] = params.kernel_size();
+        let [sh, sw] = params.stride();
+        let [ph, pw] = params.padding();
+        let [dh, dw] = params.dilation();
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let pooling = context_cache::cached_pooling(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (values, indices) = pooling
+            .run_max_pool2d_f32(
+                &ctx,
+                input_slice,
+                input.shape(),
+                (kh, kw),
+                (sh, sw),
+                (ph, pw),
+                (dh, dw),
+            )
+            .map_err(map_pooling_error)?;
+        Ok((
+            Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(indices, &out_shape).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// `BackendOps::avg_pool2d` の Metal 実装（イシュー #1730・
+    /// 追従イシュー）。[`pool2d_out_shape`] で `input.shape()`／
+    /// `params` を再検査してから `pooling::MetalPooling::
+    /// run_avg_pool2d_f32` へ委譲する（`.contiguous()` 前の
+    /// `checked_bytes_for` は [`Self::max_pool2d`] と同じ理由）。
+    fn avg_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Pool2dParams,
+        count_include_pad: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            pool2d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+        checked_bytes_for::<f32>(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("avg_pool2d: input not contiguous".into())
+        })?;
+
+        let [kh, kw] = params.kernel_size();
+        let [sh, sw] = params.stride();
+        let [ph, pw] = params.padding();
+        let [dh, dw] = params.dilation();
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let pooling = context_cache::cached_pooling(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let values = pooling
+            .run_avg_pool2d_f32(
+                &ctx,
+                input_slice,
+                input.shape(),
+                (kh, kw),
+                (sh, sw),
+                (ph, pw),
+                (dh, dw),
+                count_include_pad,
+            )
+            .map_err(map_pooling_error)?;
+        Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::adaptive_avg_pool2d` の Metal 実装（イシュー
+    /// #1730・追従イシュー）。[`adaptive_pool2d_out_shape`] で
+    /// `input.shape()`／`output_size` を再検査してから `pooling::
+    /// MetalPooling::run_adaptive_avg_pool2d_f32` へ委譲する
+    /// （`.contiguous()` 前の `checked_bytes_for` は [`Self::
+    /// max_pool2d`] と同じ理由）。
+    fn adaptive_avg_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        output_size: [usize; 2],
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = adaptive_pool2d_out_shape(input.shape(), output_size)
+            .map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+        checked_bytes_for::<f32>(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("adaptive_avg_pool2d: input not contiguous".into())
+        })?;
+        let [oh, ow] = output_size;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let pooling = context_cache::cached_pooling(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let values = pooling
+            .run_adaptive_avg_pool2d_f32(&ctx, input_slice, input.shape(), (oh, ow))
+            .map_err(map_pooling_error)?;
+        Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::lstm_pointwise`] の Metal
     /// 実装（イシュー #1647）。`hidden` は `c_prev` の列数から導出する。
     fn lstm_pointwise(
@@ -4517,6 +4675,118 @@ mod tests {
         let out = ops.col2im(&d_col, &input_shape, &params).unwrap();
         assert_eq!(out.shape(), &input_shape);
         assert_eq!(out.as_slice().unwrap().len(), 0);
+    }
+
+    // --- pooling（max_pool2d／avg_pool2d／adaptive_avg_pool2d）の
+    // `BackendOps` 配線確認（イシュー #1730・追従イシュー。#1607
+    // ツリー）。親 #1730 が本体カーネル（`crate::pooling::
+    // MetalPooling`）を実装済みだったが `ops.rs` への override 配線が
+    // 漏れており本番経路が既定の `Unsupported`（ホストフォールバック）
+    // に落ちてカーネルがデッドコードになっていた事実を回帰させる
+    // （`backend-cuda::ops::tests` の同型テストと対称）。`input.shape()`
+    // の batch 軸が 0 の早期リターンは `col2im` と同じ理由で実機非依存
+    // に検証できる（`#[ignore]` 不要。ただしこのファイル自体が
+    // `cfg(target_os = "macos")` 限定のため macOS 上でのみ実行される）。
+    // 実機〈Apple Silicon〉でのカーネル実行自体（数値一致）は未実測の
+    // まま申し送る。 ---
+
+    #[test]
+    fn max_pool2d_returns_empty_for_zero_batch_without_touching_device() {
+        let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 4, 4]).unwrap();
+        let params = Pool2dParams::new([2, 2], None, [0, 0], [1, 1]).unwrap();
+        let ops = MetalBackendOps::new();
+        let (values, indices) = ops
+            .max_pool2d(&x, &params)
+            .expect("empty max_pool2d must succeed");
+        assert_eq!(values.shape(), &[0, 1, 2, 2]);
+        assert_eq!(indices.shape(), &[0, 1, 2, 2]);
+        assert_eq!(values.as_slice().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn avg_pool2d_returns_empty_for_zero_batch_without_touching_device() {
+        let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 4, 4]).unwrap();
+        let params = Pool2dParams::new([2, 2], None, [0, 0], [1, 1]).unwrap();
+        let ops = MetalBackendOps::new();
+        let out = ops
+            .avg_pool2d(&x, &params, true)
+            .expect("empty avg_pool2d must succeed");
+        assert_eq!(out.shape(), &[0, 1, 2, 2]);
+        assert_eq!(out.as_slice().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn adaptive_avg_pool2d_returns_empty_for_zero_batch_without_touching_device() {
+        let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 4, 4]).unwrap();
+        let ops = MetalBackendOps::new();
+        let out = ops
+            .adaptive_avg_pool2d(&x, [2, 2])
+            .expect("empty adaptive_avg_pool2d must succeed");
+        assert_eq!(out.shape(), &[0, 1, 2, 2]);
+        assert_eq!(out.as_slice().unwrap().len(), 0);
+    }
+
+    // --- pooling（max_pool2d／avg_pool2d／adaptive_avg_pool2d）の
+    // `.contiguous()` 呼び出し前の確保前検査（Cursor Bugbot 指摘・
+    // PR #1888）。`interpolate_rejects_huge_broadcast_view_input_
+    // without_panicking` と同型だが、pooling は出力 N／C が入力 N／C
+    // の素通しであるため、N 軸を巨大化すると出力側の
+    // `checked_numel_for`（`pool2d_out_shape`／
+    // `adaptive_pool2d_out_shape` 内）が先に overflow を検出して
+    // しまい `.contiguous()` 直前の新規ガード自体は不到達になる。
+    // そこで **H 軸**（N／C=1 のまま）を `broadcast_to` で巨大化し、
+    // max／avg は `kernel=stride=H_in` で `hout=1` へ縮約する（adaptive
+    // は `output_size` が入力 H に依存しないためそのまま `[2, 2]`
+    // で足りる）ことで出力 shape を小さく保ったまま入力側だけを
+    // 巨大にし、`checked_bytes_for::<f32>(input.shape())` が
+    // `.contiguous()`（内部で無検査の `Vec::with_capacity(numel)` を
+    // 呼ぶ）より前に拒否することを固定する。Metal コンテキスト取得前
+    // に完了するため実機非依存の通常テストとして Linux CI でも実行
+    // できる（このファイル自体が `cfg(target_os = "macos")` 限定の
+    // ため実際に実行されるのは macOS 上のみ）。 ---
+
+    #[test]
+    fn max_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
+        let huge = base.broadcast_to(&[1, 1, 1usize << 62, 4]).unwrap();
+        let params = Pool2dParams::new([1usize << 62, 1], None, [0, 0], [1, 1]).unwrap();
+        let ops = MetalBackendOps::new();
+        let err = ops
+            .max_pool2d(&huge, &params)
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn avg_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
+        let huge = base.broadcast_to(&[1, 1, 1usize << 62, 4]).unwrap();
+        let params = Pool2dParams::new([1usize << 62, 1], None, [0, 0], [1, 1]).unwrap();
+        let ops = MetalBackendOps::new();
+        let err = ops
+            .avg_pool2d(&huge, &params, true)
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn adaptive_avg_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
+        let huge = base.broadcast_to(&[1, 1, 1usize << 62, 4]).unwrap();
+        let ops = MetalBackendOps::new();
+        let err = ops
+            .adaptive_avg_pool2d(&huge, [2, 2])
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
     }
 
     /// `pad` は `gather`／`scatter` と異なりカーネル側に rank 上限が
