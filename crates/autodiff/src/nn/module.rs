@@ -30,6 +30,7 @@ use crate::nn::activation::{
 use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
+use crate::nn::conv::{Conv1d, Conv2d};
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::tape::Tape;
@@ -123,6 +124,30 @@ pub trait Module {
     /// [`Module::as_linear`] の可変版。`compat::Sequential::apply_parameters`
     /// が optimizer 更新後の `Tensor<f32>` を層へ書き戻す入口として使う。
     fn as_linear_mut(&mut self) -> Option<&mut Linear> {
+        None
+    }
+
+    /// [`Module::as_linear`] と同型の明示フック（イシュー #1770・親
+    /// #1645）。`compat::Sequential` の学習経路（`bind`／
+    /// `trainable_parameters`／`apply_parameters` 等）が `Conv2d` 層を
+    /// 認識するために使う。既定 `None`（他の層はオーバーライドしない）。
+    fn as_conv2d(&self) -> Option<&Conv2d> {
+        None
+    }
+
+    /// [`Module::as_conv2d`] の可変版（[`Module::as_linear_mut`] と同型）。
+    fn as_conv2d_mut(&mut self) -> Option<&mut Conv2d> {
+        None
+    }
+
+    /// [`Module::as_linear`] と同型の明示フック（イシュー #1770）。
+    /// `Conv1d` 層向け。既定 `None`。
+    fn as_conv1d(&self) -> Option<&Conv1d> {
+        None
+    }
+
+    /// [`Module::as_conv1d`] の可変版。
+    fn as_conv1d_mut(&mut self) -> Option<&mut Conv1d> {
         None
     }
 
@@ -469,6 +494,82 @@ impl Module for Linear {
             }
             None => Ok(y),
         }
+    }
+}
+
+/// `Conv2d::bind(tape).forward(input)`（`nn/conv.rs` 参照。イシュー
+/// #1770）。
+impl Module for Conv2d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn as_conv2d(&self) -> Option<&Conv2d> {
+        Some(self)
+    }
+
+    fn as_conv2d_mut(&mut self) -> Option<&mut Conv2d> {
+        Some(self)
+    }
+
+    /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
+    /// `weight`（常に）→ `bias`（`Some` の場合のみ）の順（`Linear` と
+    /// 同型）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![("weight".to_string(), self.weight())];
+        if let Some(bias) = self.bias() {
+            out.push(("bias".to_string(), bias));
+        }
+        out
+    }
+
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        Conv2d::set_parameter(self, name, value)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Conv2d::forward_host(self, ops, input)
+    }
+}
+
+/// `Conv1d::bind(tape).forward(input)`（`nn/conv.rs` 参照。イシュー
+/// #1770）。
+impl Module for Conv1d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn as_conv1d(&self) -> Option<&Conv1d> {
+        Some(self)
+    }
+
+    fn as_conv1d_mut(&mut self) -> Option<&mut Conv1d> {
+        Some(self)
+    }
+
+    /// 命名契約は `Conv2d` と同型（`weight` → `bias`）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![("weight".to_string(), self.weight())];
+        if let Some(bias) = self.bias() {
+            out.push(("bias".to_string(), bias));
+        }
+        out
+    }
+
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        Conv1d::set_parameter(self, name, value)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Conv1d::forward_host(self, ops, input)
     }
 }
 

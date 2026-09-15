@@ -97,7 +97,9 @@ use crate::{
     Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{Elu, Hardswish, LeakyRelu, Relu, Sigmoid, Silu, Tanh};
-use fandhe_ai_autodiff::nn::{Dropout, Linear, Module, Sequential as NnSequential};
+use fandhe_ai_autodiff::nn::{
+    Conv1d, Conv1dVars, Conv2d, Conv2dVars, Dropout, Linear, Module, Sequential as NnSequential,
+};
 use fandhe_ai_tensor_core::{Activation, BackendOps};
 
 /// Keras `Sequential` 慣習のレイヤー積み上げビルダー。`add_*` はメソッド
@@ -226,6 +228,69 @@ impl Sequential {
     pub fn add_dropout(mut self, p: f32) -> Result<Self, AutodiffError> {
         let dropout = Dropout::new(p)?;
         self.inner.push(Box::new(dropout));
+        Ok(self)
+    }
+
+    /// 2 次元畳み込み層を追加する（`nn::Conv2d`。イシュー #1770・親
+    /// #1645。`docs/compat-api-scope.md` §5 手続き・親 #1645 コメント
+    /// でユーザー承認済み）。bias あり既定（`add_linear` と同様。
+    /// PyTorch `nn.Conv2d` の既定 `bias=True` と揃える）。`Conv2d::new`
+    /// が `Result` を返す（`in_channels == 0`・groups 整合違反等を拒否。
+    /// `nn/conv.rs` 参照）ため、本メソッドも `Result<Self, AutodiffError>`
+    /// を返し `?` で連鎖できるようにする。
+    #[allow(clippy::too_many_arguments)] // PyTorch `nn.Conv2d` の全引数を受理する必要があるため（`add_linear` 系の先例と異なり dilation／groups を含むため 7 引数を超える）。
+    pub fn add_conv2d(
+        mut self,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+        groups: usize,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let conv = Conv2d::new(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+            true,
+            seed,
+        )?;
+        self.inner.push(Box::new(conv));
+        Ok(self)
+    }
+
+    /// 1 次元畳み込み層を追加する（`nn::Conv1d`。イシュー #1770）。
+    /// [`Sequential::add_conv2d`] と同様 bias あり既定。
+    #[allow(clippy::too_many_arguments)] // PyTorch `nn.Conv1d` の全引数を受理する必要があるため。
+    pub fn add_conv1d(
+        mut self,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        dilation: usize,
+        groups: usize,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let conv = Conv1d::new(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+            true,
+            seed,
+        )?;
+        self.inner.push(Box::new(conv));
         Ok(self)
     }
 
@@ -380,8 +445,14 @@ impl Sequential {
     /// スコープを抜けてから `apply_parameters` を呼ぶ運用とする。
     /// `crates/facade/tests/compat_sequential_train.rs` に実例がある）。
     pub fn bind<'m, 't>(&'m self, tape: &'t Tape) -> SequentialVars<'m, 't> {
-        // `Linear::bind` も `&fandhe_ai_autodiff::Tape` を要求する（`forward` と
-        // 同じ理由。`tape.0` 経由で取り出す）。
+        // `Linear::bind`／`Conv2d::bind`／`Conv1d::bind` はいずれも
+        // `&fandhe_ai_autodiff::Tape` を要求する（`forward` と同じ理由。
+        // `tape.0` 経由で取り出す）。3 種の学習可能層それぞれを層順
+        // フィルタで独立に収集する（`SequentialVars::forward`／
+        // `trainable_vars`／`trainable_grads` が `self.model.inner.
+        // layers()` を再度層順に辿りながら、層種別ごとに対応する
+        // カーソルから 1 件ずつ消費することで全体の層順対応を再構成
+        // する。イシュー #1770・親 #1645）。
         let linears = self
             .inner
             .layers()
@@ -389,13 +460,30 @@ impl Sequential {
             .filter_map(|layer| layer.as_linear())
             .map(|linear| linear.bind(&tape.0))
             .collect();
+        let conv2ds = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_conv2d())
+            .map(|conv| conv.bind(&tape.0))
+            .collect();
+        let conv1ds = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_conv1d())
+            .map(|conv| conv.bind(&tape.0))
+            .collect();
         SequentialVars {
             model: self,
             linears,
+            conv2ds,
+            conv1ds,
         }
     }
 
-    /// 学習可能パラメータ（`Linear` 層の `weight`/`bias`）への参照列を
+    /// 学習可能パラメータ（`Linear`／`Conv2d`／`Conv1d` 層の
+    /// `weight`/`bias`。イシュー #1770 で Conv 層を追加）への参照列を
     /// 層の追加順・各層内は weight → bias（`Some` の場合のみ）の順で
     /// 返す。[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]／
     /// [`crate::optim::Adam::step`]
@@ -410,9 +498,31 @@ impl Sequential {
                 if let Some(bias) = linear.bias() {
                     out.push(bias);
                 }
+            } else if let Some(conv) = layer.as_conv2d() {
+                out.push(conv.weight());
+                if let Some(bias) = conv.bias() {
+                    out.push(bias);
+                }
+            } else if let Some(conv) = layer.as_conv1d() {
+                out.push(conv.weight());
+                if let Some(bias) = conv.bias() {
+                    out.push(bias);
+                }
             }
         }
         out
+    }
+
+    /// `self.inner.layers()` に `Conv2d`／`Conv1d` 層が 1 つでも含まれる
+    /// かどうか（イシュー #1770）。デバイス常駐経路（[`Sequential::
+    /// init_device_param_store`]／[`Sequential::forward_resident`]／
+    /// [`Sequential::predict_resident`]）の fail-closed ガードに使う
+    /// （後述）。
+    fn contains_conv_layer(&self) -> bool {
+        self.inner
+            .layers()
+            .iter()
+            .any(|layer| layer.as_conv2d().is_some() || layer.as_conv1d().is_some())
     }
 
     /// train／eval モードを切り替え（イシュー #1758。PyTorch
@@ -565,51 +675,97 @@ impl Sequential {
     /// 状態を完全に維持する。#426 の shape 検証も同じ 1 パス目（代入前）に
     /// 置くため、この不変条件は変わらない。
     pub fn apply_parameters(&mut self, updated: Vec<Tensor<f32>>) -> Result<(), AutodiffError> {
-        // trainable_parameters() と同じ順序（層の追加順）で学習可能層への
-        // 可変参照を先に集める。まだ何も書き換えない。
-        let linears: Vec<&mut Linear> = self
-            .inner
-            .layers_mut()
-            .iter_mut()
-            .filter_map(|layer| layer.as_linear_mut())
-            .collect();
-
-        let mut updated = updated.into_iter();
-        // 1 パス目: 検証込みで新しい Linear を全層分構築する（代入は未実施）。
-        let mut rebuilt = Vec::with_capacity(linears.len());
-        for (layer_index, linear) in linears.iter().enumerate() {
-            let has_bias = linear.bias().is_some();
+        /// 検証（#426。置換前 shape との完全一致）と `updated` からの
+        /// weight／bias 取り出しを層種別（`Linear`／`Conv2d`／`Conv1d`）
+        /// 間で共通化するヘルパー（イシュー #1770）。
+        fn take_weight_bias(
+            updated: &mut impl Iterator<Item = Tensor<f32>>,
+            layer_index: usize,
+            expected_weight_shape: &[usize],
+            has_bias: bool,
+        ) -> Result<(Tensor<f32>, Option<Tensor<f32>>), AutodiffError> {
             let new_weight = updated.next().ok_or_else(|| {
-                AutodiffError::InvalidArgument(
+                AutodiffError::InvalidArgument(format!(
                     "Sequential::apply_parameters: updated has fewer elements than \
-                     trainable_parameters() (weight missing)"
-                        .to_string(),
-                )
+                     trainable_parameters() (weight missing at layer {layer_index})"
+                ))
             })?;
-            // #426: 置換前 shape との完全一致検証（層間整合を内包する設計。
-            // メソッド doc 参照）。`Linear::from_parameters` 呼び出し前に
-            // 行い、shape が変わる更新を fail-closed で拒否する。
-            let expected_shape = linear.weight().shape();
-            if new_weight.shape() != expected_shape {
+            if new_weight.shape() != expected_weight_shape {
                 return Err(AutodiffError::InvalidArgument(format!(
                     "Sequential::apply_parameters: layer {layer_index} weight shape changed \
-                     from {expected_shape:?} to {:?} (apply_parameters only supports \
+                     from {expected_weight_shape:?} to {:?} (apply_parameters only supports \
                      shape-preserving updates; #426)",
                     new_weight.shape()
                 )));
             }
             let new_bias = if has_bias {
                 Some(updated.next().ok_or_else(|| {
-                    AutodiffError::InvalidArgument(
+                    AutodiffError::InvalidArgument(format!(
                         "Sequential::apply_parameters: updated has fewer elements than \
-                         trainable_parameters() (bias missing)"
-                            .to_string(),
-                    )
+                         trainable_parameters() (bias missing at layer {layer_index})"
+                    ))
                 })?)
             } else {
                 None
             };
-            rebuilt.push(Linear::from_parameters(new_weight, new_bias)?);
+            Ok((new_weight, new_bias))
+        }
+
+        /// パス 1 で検証込みに構築した新しい層本体（代入はまだしない。
+        /// `Sequential` 自身は `Debug` を持たないため、この enum も
+        /// `Debug` を派生しない）。
+        enum Rebuilt {
+            Linear(Linear),
+            Conv2d(Conv2d),
+            Conv1d(Conv1d),
+        }
+
+        let mut updated = updated.into_iter();
+        // 1 パス目: `self.inner.layers()`（不変借用）を層順に走査し、
+        // 検証込みで新しい層本体を全件構築する（代入は未実施）。
+        let mut rebuilt: Vec<Rebuilt> = Vec::new();
+        for (layer_index, layer) in self.inner.layers().iter().enumerate() {
+            if let Some(linear) = layer.as_linear() {
+                let (new_weight, new_bias) = take_weight_bias(
+                    &mut updated,
+                    layer_index,
+                    linear.weight().shape(),
+                    linear.bias().is_some(),
+                )?;
+                rebuilt.push(Rebuilt::Linear(Linear::from_parameters(
+                    new_weight, new_bias,
+                )?));
+            } else if let Some(conv) = layer.as_conv2d() {
+                let (new_weight, new_bias) = take_weight_bias(
+                    &mut updated,
+                    layer_index,
+                    conv.weight().shape(),
+                    conv.bias().is_some(),
+                )?;
+                rebuilt.push(Rebuilt::Conv2d(Conv2d::from_parameters(
+                    new_weight,
+                    new_bias,
+                    conv.stride(),
+                    conv.padding(),
+                    conv.dilation(),
+                    conv.groups(),
+                )?));
+            } else if let Some(conv) = layer.as_conv1d() {
+                let (new_weight, new_bias) = take_weight_bias(
+                    &mut updated,
+                    layer_index,
+                    conv.weight().shape(),
+                    conv.bias().is_some(),
+                )?;
+                rebuilt.push(Rebuilt::Conv1d(Conv1d::from_parameters(
+                    new_weight,
+                    new_bias,
+                    conv.stride(),
+                    conv.padding(),
+                    conv.dilation(),
+                    conv.groups(),
+                )?));
+            }
         }
         if updated.next().is_some() {
             return Err(AutodiffError::InvalidArgument(
@@ -618,10 +774,24 @@ impl Sequential {
                     .to_string(),
             ));
         }
-        // 2 パス目: ここに到達した時点で件数・shape 検証は全件完了しているため、
-        // 代入自体は失敗し得ない。
-        for (linear, new_linear) in linears.into_iter().zip(rebuilt) {
-            *linear = new_linear;
+        // 2 パス目: `self.inner.layers_mut()` を同じ順序で再度走査し、
+        // 対応する `Rebuilt` を代入する。ここに到達した時点で件数・
+        // shape 検証は全件完了しているため、代入自体は失敗し得ない。
+        let mut rebuilt = rebuilt.into_iter();
+        for layer in self.inner.layers_mut() {
+            if let Some(linear) = layer.as_linear_mut() {
+                if let Some(Rebuilt::Linear(new_linear)) = rebuilt.next() {
+                    *linear = new_linear;
+                }
+            } else if let Some(conv) = layer.as_conv2d_mut() {
+                if let Some(Rebuilt::Conv2d(new_conv)) = rebuilt.next() {
+                    *conv = new_conv;
+                }
+            } else if let Some(conv) = layer.as_conv1d_mut()
+                && let Some(Rebuilt::Conv1d(new_conv)) = rebuilt.next()
+            {
+                *conv = new_conv;
+            }
         }
         Ok(())
     }
@@ -640,6 +810,24 @@ impl Sequential {
     /// forward_resident`]／[`Tape::step_device_param_store`] へ渡しつつ、
     /// 同じ `DeviceParamStore` インスタンスを使い回す。
     pub fn init_device_param_store(&self, tape: &Tape) -> Result<DeviceParamStore, BackendError> {
+        // イシュー #1770: `forward_from_flat_leaves`／`build_device_
+        // chain_steps` は `Linear` 層（`as_linear()`）のみを消費する
+        // 走査のため、`trainable_parameters()` が Conv 層の weight／
+        // bias を含むようになった今、Conv 層を含むモデルを黙って
+        // 通すと後段の forward（`Self::forward_resident`／
+        // `Self::predict_resident`）で「leaves の要件超過」エラーへ
+        // 迂遠に到達してしまう（`forward_from_flat_leaves` 末尾の
+        // fail-closed 検査。メソッド doc 参照）。ここで入口を明示的に
+        // 塞ぎ、原因が分かるメッセージで即座に拒否する（`.claude/rules/
+        // security.md` A04「安全でない設計」: 黙示フォールバックを
+        // 作らない）。
+        if self.contains_conv_layer() {
+            return Err(BackendError::Unsupported(
+                "Sequential::init_device_param_store: Conv 層を含む Sequential はデバイス常駐 \
+                 経路非対応（イシュー #1770）"
+                    .to_string(),
+            ));
+        }
         let params = self.trainable_parameters();
         DeviceParamStore::new(&tape.0, &params)
     }
@@ -682,6 +870,17 @@ impl Sequential {
         input: &Var<'t>,
         store: &mut DeviceParamStore,
     ) -> Result<Var<'t>, AutodiffError> {
+        // イシュー #1770: `Self::init_device_param_store` のガードと
+        // 同じ理由（`contains_conv_layer` doc 参照）。二重防御
+        // （呼び出し元が独自に構築した `store` を渡す誤用も想定した
+        // fail-closed）。
+        if self.contains_conv_layer() {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "Sequential::forward_resident: Conv 層を含む Sequential はデバイス常駐経路 \
+                 非対応（イシュー #1770）"
+                    .to_string(),
+            )));
+        }
         let leaves = store.register_resident_params(&tape.0)?;
         match self.forward_from_flat_leaves(&tape.0, input, &leaves, store) {
             Ok(output) => Ok(output),
@@ -728,6 +927,14 @@ impl Sequential {
         store: &DeviceParamStore,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        // イシュー #1770: `Self::forward_resident` と同じガード。
+        if self.contains_conv_layer() {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "Sequential::predict_resident: Conv 層を含む Sequential はデバイス常駐経路 \
+                 非対応（イシュー #1770）"
+                    .to_string(),
+            )));
+        }
         let tape = crate::tape_for(store.device())?;
         let leaves = store.snapshot_resident_params(&tape.0)?;
 
@@ -917,13 +1124,16 @@ impl Sequential {
 }
 
 /// [`Sequential::bind`] が返す、1 学習ステップ分のテープ登録済み
-/// ハンドル。`model`（`&'m Sequential`）は layer の走査順（活性化層と
-/// `Linear` 層の混在列）を再現するため、`linears`（`Linear` 層のみを
-/// 層順に抽出した `LinearVars` 列）は `Vec<Box<dyn Module>>` の添字とは
-/// 別に独立して保持する。
+/// ハンドル。`model`（`&'m Sequential`）は layer の走査順（活性化層・
+/// `Linear`・`Conv2d`／`Conv1d`〈イシュー #1770〉の混在列）を再現する
+/// ため、`linears`／`conv2ds`／`conv1ds`（層種別ごとに層順に抽出した
+/// `*Vars` 列）は `Vec<Box<dyn Module>>` の添字とは別に独立して保持
+/// する。
 pub struct SequentialVars<'m, 't> {
     model: &'m Sequential,
     linears: Vec<LinearVars<'t>>,
+    conv2ds: Vec<Conv2dVars<'t>>,
+    conv1ds: Vec<Conv1dVars<'t>>,
 }
 
 impl<'m, 't> SequentialVars<'m, 't> {
@@ -971,6 +1181,8 @@ impl<'m, 't> SequentialVars<'m, 't> {
         // `docs/inference-forward-fixed-cost-design.md` §3.1 の
         // bit-exactness 契約を学習側でも壊さない）。
         let mut linears = self.linears.iter();
+        let mut conv2ds = self.conv2ds.iter();
+        let mut conv1ds = self.conv1ds.iter();
         let layers = self.model.inner.layers();
         let mut i = 0;
         while i < layers.len() {
@@ -990,6 +1202,29 @@ impl<'m, 't> SequentialVars<'m, 't> {
                     vars.forward(&current)?
                 };
                 i += if fuse_relu { 2 } else { 1 };
+            } else if layer.as_conv2d().is_some() {
+                // イシュー #1770: Conv2d 層は Linear→ReLU のような
+                // epilogue 融合を行わない（`nn::Conv2dVars::forward` は
+                // `Var::conv2d` への薄い委譲のみ）。
+                let vars = conv2ds.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み Conv2dVars が model.layers の \
+                         Conv2d 層数より少ない（bind/forward 間の Conv2d 層数対応が崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current)?;
+                i += 1;
+            } else if layer.as_conv1d().is_some() {
+                let vars = conv1ds.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み Conv1dVars が model.layers の \
+                         Conv1d 層数より少ない（bind/forward 間の Conv1d 層数対応が崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current)?;
+                i += 1;
             } else {
                 // 活性化層は `nn::Module::forward` へ委譲する（`&fandhe_ai_autodiff::Tape`
                 // が必要。`Sequential::forward` と同じ理由で `tape.0` 経由）。
@@ -1007,13 +1242,35 @@ impl<'m, 't> SequentialVars<'m, 't> {
     }
 
     /// [`Sequential::trainable_parameters`] と同一の順序契約（層順に
-    /// weight → bias〈`Some` の場合のみ〉）で `Var` 参照列を返す。
+    /// weight → bias〈`Some` の場合のみ〉。イシュー #1770 で `Conv2d`／
+    /// `Conv1d` を含む）で `Var` 参照列を返す。
     pub fn trainable_vars(&self) -> Vec<&Var<'t>> {
         let mut out = Vec::new();
-        for vars in &self.linears {
-            out.push(&vars.weight);
-            if let Some(bias) = &vars.bias {
-                out.push(bias);
+        let mut linears = self.linears.iter();
+        let mut conv2ds = self.conv2ds.iter();
+        let mut conv1ds = self.conv1ds.iter();
+        for layer in self.model.inner.layers() {
+            if layer.as_linear().is_some() {
+                if let Some(vars) = linears.next() {
+                    out.push(&vars.weight);
+                    if let Some(bias) = &vars.bias {
+                        out.push(bias);
+                    }
+                }
+            } else if layer.as_conv2d().is_some() {
+                if let Some(vars) = conv2ds.next() {
+                    out.push(&vars.weight);
+                    if let Some(bias) = &vars.bias {
+                        out.push(bias);
+                    }
+                }
+            } else if layer.as_conv1d().is_some()
+                && let Some(vars) = conv1ds.next()
+            {
+                out.push(&vars.weight);
+                if let Some(bias) = &vars.bias {
+                    out.push(bias);
+                }
             }
         }
         out
@@ -1036,9 +1293,13 @@ impl<'m, 't> SequentialVars<'m, 't> {
         &self,
         grads: &'g Gradients,
     ) -> Result<Vec<&'g Tensor<f32>>, AutodiffError> {
-        let mut out = Vec::new();
-        for vars in &self.linears {
-            let weight_grad = grads.get(&vars.weight)?.ok_or_else(|| {
+        fn push_weight_bias<'g>(
+            out: &mut Vec<&'g Tensor<f32>>,
+            grads: &'g Gradients,
+            weight: &Var<'_>,
+            bias: Option<&Var<'_>>,
+        ) -> Result<(), AutodiffError> {
+            let weight_grad = grads.get(weight)?.ok_or_else(|| {
                 AutodiffError::InvalidArgument(
                     "SequentialVars::trainable_grads: weight に到達する勾配がない \
                      (loss へ未到達)"
@@ -1046,7 +1307,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 )
             })?;
             out.push(weight_grad);
-            if let Some(bias) = &vars.bias {
+            if let Some(bias) = bias {
                 let bias_grad = grads.get(bias)?.ok_or_else(|| {
                     AutodiffError::InvalidArgument(
                         "SequentialVars::trainable_grads: bias に到達する勾配がない \
@@ -1055,6 +1316,27 @@ impl<'m, 't> SequentialVars<'m, 't> {
                     )
                 })?;
                 out.push(bias_grad);
+            }
+            Ok(())
+        }
+
+        let mut out = Vec::new();
+        let mut linears = self.linears.iter();
+        let mut conv2ds = self.conv2ds.iter();
+        let mut conv1ds = self.conv1ds.iter();
+        for layer in self.model.inner.layers() {
+            if layer.as_linear().is_some() {
+                if let Some(vars) = linears.next() {
+                    push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
+                }
+            } else if layer.as_conv2d().is_some() {
+                if let Some(vars) = conv2ds.next() {
+                    push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
+                }
+            } else if layer.as_conv1d().is_some()
+                && let Some(vars) = conv1ds.next()
+            {
+                push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
             }
         }
         Ok(out)

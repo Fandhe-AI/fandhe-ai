@@ -77,11 +77,19 @@
 //! 同時に、`set_training`／`training` を実際にオーバーライドする
 //! **最初の実装**（`dropout.rs` モジュール doc・`module.rs` の trait
 //! doc「今後 Dropout・BatchNorm 等のモード依存層を追加する際は…」
-//! 参照）。
+//! 参照）。イシュー #1770（親 #1645）で [`Conv2d`]／[`Conv1d`]（`conv`
+//! モジュール）を追加した。`Var::conv2d`／`Var::conv1d`（#1764・#1765）
+//! を薄くラップするのみで新規 `Op`／`BackendOps`／VJP は追加しない。
+//! `Module` trait へ `as_conv2d`／`as_conv1d`（各 `_mut` 版込み）フックを
+//! 追加し、`fandhe_ai_facade::compat::sequential::Sequential` の学習
+//! 経路（`bind`／`trainable_parameters`／`apply_parameters` 等）へ
+//! 接続した（`docs/compat-api-scope.md` §5 手続き・親 #1645 コメントで
+//! ユーザー承認済み）。
 
 mod attention;
 mod batch_norm;
 mod container;
+mod conv;
 mod dropout;
 mod embedding;
 mod init;
@@ -99,6 +107,7 @@ pub use batch_norm::{
     BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,
 };
 pub use container::{ModuleList, Sequential};
+pub use conv::{Conv1d, Conv1dVars, Conv2d, Conv2dVars};
 pub use dropout::Dropout;
 pub use embedding::{Embedding, EmbeddingVars};
 pub use linear::{Linear, LinearVars};
