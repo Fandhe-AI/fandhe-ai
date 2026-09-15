@@ -47,6 +47,32 @@ const CAST_MSL_SRC: &str = include_str!("shaders/cast.metal");
 /// 同じ値・同じ判断根拠）。
 const CAST_THREADGROUP_WIDTH: usize = 256;
 
+/// `numel` がカーネル引数 `constant uint&` へ収まるかを検証する
+/// （`checked_u32_numel`〈`impl CastOps for MetalBackendOps` の入口
+/// 検査〉の `MetalError` 版）。
+///
+/// `MetalCast::run_*` は `pub` メソッドであり `impl CastOps for
+/// MetalBackendOps`（`checked_u32_numel` を経由する）を経ずに直接
+/// 呼び出せる。`u32::MAX` 超のスライスを直接渡すと、是正前は
+/// `numel as u32` が下位ビットへ切り詰められ、`MetalCastBuffer::
+/// new_zeroed`／`MetalBuffer::new_zeroed` が確保する出力バッファの
+/// 要素数（切り詰め後の `numel_u`）とカーネルへ渡す境界検査用の値
+/// （同じ切り詰め後の `numel_u`）は一致するため確保自体は成功するが、
+/// 実際にホストから渡された入力の一部だけを変換した結果を
+/// `Ok`（成功）として返してしまう（サイレントな部分変換。codex-review
+/// P2 指摘・イシュー #1751）。各 `run_*` の確保直前でこの検証を行い、
+/// 収まらない場合は確保前に拒否する（呼び出し元は形状理由の
+/// `Unsupported` を経由してホストフォールバックへ委ねる設計のため、
+/// ここでは `MetalError::ShapeMismatch` を返し `map_cast_error` に
+/// 委ねる。`impl CastOps` の `checked_u32_numel` と多重検査になるが、
+/// 公開入口〈`MetalCast::run_*` 自体〉での fail-closed 検査として
+/// 独立して機能させる）。
+fn checked_u32_numel_for_dispatch(numel: usize) -> Result<u32, MetalError> {
+    u32::try_from(numel).map_err(|_| MetalError::ShapeMismatch {
+        detail: format!("cast: numel={numel} exceeds u32::MAX (Metal kernel argument type)"),
+    })
+}
+
 /// 6 方向の cast カーネルのコンパイル済みパイプラインを保持する
 /// ハンドル。
 pub struct MetalCast {
@@ -91,9 +117,9 @@ impl MetalCast {
     /// f32→i32（ゼロ方向切り捨て・範囲外は飽和・NaN→0）。
     pub fn run_f32_to_i32(&self, ctx: &MetalContext, x: &[f32]) -> Result<Vec<i32>, MetalError> {
         let numel = x.len();
+        let numel_u = checked_u32_numel_for_dispatch(numel)?;
         let in_buf = MetalBuffer::new_with_data(ctx, x)?;
         let out_buf = MetalCastBuffer::<i32>::new_zeroed(ctx, numel)?;
-        let numel_u = numel as u32;
         ctx.dispatch_sync(|encoder| {
             encode_cast_dispatch(
                 encoder,
@@ -109,9 +135,9 @@ impl MetalCast {
     /// f32→i64（同上）。
     pub fn run_f32_to_i64(&self, ctx: &MetalContext, x: &[f32]) -> Result<Vec<i64>, MetalError> {
         let numel = x.len();
+        let numel_u = checked_u32_numel_for_dispatch(numel)?;
         let in_buf = MetalBuffer::new_with_data(ctx, x)?;
         let out_buf = MetalCastBuffer::<i64>::new_zeroed(ctx, numel)?;
-        let numel_u = numel as u32;
         ctx.dispatch_sync(|encoder| {
             encode_cast_dispatch(
                 encoder,
@@ -132,9 +158,9 @@ impl MetalCast {
         x: &[f32],
     ) -> Result<Vec<u8>, MetalError> {
         let numel = x.len();
+        let numel_u = checked_u32_numel_for_dispatch(numel)?;
         let in_buf = MetalBuffer::new_with_data(ctx, x)?;
         let out_buf = MetalCastBuffer::<u8>::new_zeroed(ctx, numel)?;
-        let numel_u = numel as u32;
         ctx.dispatch_sync(|encoder| {
             encode_cast_dispatch(
                 encoder,
@@ -150,9 +176,9 @@ impl MetalCast {
     /// i32→f32（最近接偶数丸め。`|v| > 2^24` は非可逆）。
     pub fn run_i32_to_f32(&self, ctx: &MetalContext, x: &[i32]) -> Result<Vec<f32>, MetalError> {
         let numel = x.len();
+        let numel_u = checked_u32_numel_for_dispatch(numel)?;
         let in_buf = MetalCastBuffer::<i32>::new_with_data(ctx, x)?;
         let out_buf = MetalBuffer::new_zeroed(ctx, numel)?;
-        let numel_u = numel as u32;
         ctx.dispatch_sync(|encoder| {
             encode_cast_dispatch(
                 encoder,
@@ -168,9 +194,9 @@ impl MetalCast {
     /// i64→f32（同上）。
     pub fn run_i64_to_f32(&self, ctx: &MetalContext, x: &[i64]) -> Result<Vec<f32>, MetalError> {
         let numel = x.len();
+        let numel_u = checked_u32_numel_for_dispatch(numel)?;
         let in_buf = MetalCastBuffer::<i64>::new_with_data(ctx, x)?;
         let out_buf = MetalBuffer::new_zeroed(ctx, numel)?;
-        let numel_u = numel as u32;
         ctx.dispatch_sync(|encoder| {
             encode_cast_dispatch(
                 encoder,
@@ -191,9 +217,9 @@ impl MetalCast {
         x: &[u8],
     ) -> Result<Vec<f32>, MetalError> {
         let numel = x.len();
+        let numel_u = checked_u32_numel_for_dispatch(numel)?;
         let in_buf = MetalCastBuffer::<u8>::new_with_data(ctx, x)?;
         let out_buf = MetalBuffer::new_zeroed(ctx, numel)?;
-        let numel_u = numel as u32;
         ctx.dispatch_sync(|encoder| {
             encode_cast_dispatch(
                 encoder,
@@ -258,6 +284,12 @@ fn encode_cast_dispatch(
 /// `x` を稠密化し `f32`（`ops::checked_shape_numel` に基づく共通前処理。
 /// `crates/backend-cuda/src/cast.rs::checked_contiguous` と同じ設計。
 /// 空テンソルの場合は `Ok(None)` を返す）。
+///
+/// 加えて `ops::checked_bytes_for::<T>` で要素型 `T` 換算のバイト
+/// サイズが `Vec` の allocation 上限（`isize::MAX` バイト）に収まるか
+/// も `.contiguous()` 呼び出し直前に検査する（codex-review P1 指摘・
+/// Cursor Bugbot 同一箇所指摘・イシュー #1751。`crates/backend-cuda/
+/// src/cast.rs::checked_contiguous` の是正と同じ理由・同じ判断）。
 fn checked_contiguous<T: fandhe_ai_tensor_core::Element>(
     x: &Tensor<T>,
 ) -> Result<Option<Tensor<T>>, BackendError> {
@@ -265,6 +297,7 @@ fn checked_contiguous<T: fandhe_ai_tensor_core::Element>(
     if x.shape().iter().product::<usize>() == 0 {
         return Ok(None);
     }
+    crate::ops::checked_bytes_for::<T>(x.shape()).map_err(BackendError::ShapeMismatch)?;
     Ok(Some(x.contiguous()))
 }
 
@@ -395,5 +428,30 @@ impl CastOps for MetalBackendOps {
             .run_bool_to_f32_raw(&ctx, &raw_data)
             .map_err(map_cast_error)?;
         Tensor::new(out, &shape).map_err(BackendError::ShapeMismatch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// codex-review P1 指摘・Cursor Bugbot 同一箇所指摘の回帰テスト
+    /// （イシュー #1751）。`crates/backend-cuda/src/cast.rs::tests::
+    /// checked_contiguous_rejects_huge_broadcast_view_input_without_panicking`
+    /// と同型。`checked_contiguous` は GPU driver 呼び出しより前に
+    /// 完結するため GPU 非依存の通常テストとして実行できる。
+    #[test]
+    fn checked_contiguous_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32], &[1usize]).unwrap();
+        let huge_len = (isize::MAX as usize) / std::mem::size_of::<f32>() + 10;
+        let huge = base.broadcast_to(&[huge_len]).unwrap();
+        assert_eq!(huge.shape(), &[huge_len]);
+
+        let err = checked_contiguous(&huge)
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)
+        ));
     }
 }

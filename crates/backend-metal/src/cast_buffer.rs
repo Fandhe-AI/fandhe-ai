@@ -7,10 +7,14 @@
 //! （既存 f32 専用型のシグネチャに一切触れない独立した型として新設
 //! する）を踏襲しつつ、cast が必要とする要素サイズの種類が多い
 //! （i32・i64・u8）ため、要素型ごとに構造体を複製せず [`MetalCastBuffer<T>`]
-//! を要素型 `T: Copy` で generic 化する（`T` が f32・f16・i32／u32 の
-//! いずれとも異なる新しい dtype の組を要求するのは cast モジュール
+//! を要素型 `T: CastBufferElement`（`i32`／`i64`／`u8` に限定する
+//! sealed trait。下記参照）で generic 化する（`T` が f32・f16・i32／u32
+//! のいずれとも異なる新しい dtype の組を要求するのは cast モジュール
 //! だけであり、この汎化を他モジュールへ波及させる理由がないため
-//! 独立モジュールに閉じる）。
+//! 独立モジュールに閉じる）。単なる `T: Copy` では任意のビット列が
+//! 有効値であることを保証できず `new_zeroed`／`read_to_vec` が安全
+//! API 経由で UB に到達しうるため、実際に使う 3 型のみへ封じている
+//! （codex-review P0 指摘・イシュー #1751）。
 //!
 //! `crate::cast::MetalCast` から `i32`／`long`（`i64`）／`uchar`（`u8`。
 //! `bool` の 0／1 実体化前の生表現）バッファの確保・アップロード・
@@ -28,13 +32,45 @@ use crate::error::MetalError;
 
 pub(crate) type MtlBuffer = ProtocolObject<dyn MTLBuffer>;
 
+/// [`MetalCastBuffer<T>`] の型引数 `T` を、cast カーネルが実際に扱う
+/// 「任意のビット列が有効値である」要素型（`i32`／`i64`／`u8`。`f32`
+/// 側は既存 [`crate::buffer::MetalBuffer`] を使うため本モジュールの
+/// 対象外）だけに封じる sealed trait。
+///
+/// 当初 `T: Copy` のみを境界としていたが、`Copy` は「任意のビット列が
+/// 有効値である」ことを保証しない（例: `MetalCastBuffer::
+/// <std::num::NonZeroU32>::new_zeroed` の後に `read_to_vec` を呼ぶと、
+/// `newBufferWithLength_options`〈ゼロ初期化〉のゼロを無効な
+/// `NonZeroU32` として `slice::from_raw_parts` 越しに実体化し、安全
+/// API のみの呼び出し列で未定義動作に到達する）。`crate::cast` が
+/// 実際に道具立てとして使う型は `i32`／`i64`／`u8` の 3 つのみであり
+/// （`crate::cast::MetalCast::run_*` 参照）、いずれもニッチを持たない
+/// POD〈plain old data〉として全ビットパターンが有効値であることが
+/// 確定しているため、この 3 型へ sealed trait で限定する（codex-review
+/// P0 指摘・イシュー #1751）。
+mod sealed {
+    /// 外部クレートからの実装を禁じる（sealed trait パターン）。
+    pub trait Sealed {}
+}
+
+/// [`MetalCastBuffer<T>`] の要素型境界。`i32`／`i64`／`u8` のみが
+/// 実装し、他クレートからは実装できない（`sealed::Sealed` 経由）。
+pub trait CastBufferElement: Copy + sealed::Sealed {}
+
+impl sealed::Sealed for i32 {}
+impl CastBufferElement for i32 {}
+
+impl sealed::Sealed for i64 {}
+impl CastBufferElement for i64 {}
+
+impl sealed::Sealed for u8 {}
+impl CastBufferElement for u8 {}
+
 /// 要素型 `T` を保持する Metal バッファ（[`crate::buffer::MetalBuffer`]
 /// の要素型 generic 版。cast カーネル専用）。
 ///
-/// `T: Copy` のみを要求する（`DeviceRepr` 相当の trait を新設しない。
-/// `f32`／`i32`／`i64`／`u8` はいずれも POD〈plain old data〉で
-/// FFI 越しの生バイトコピーが安全な単純値型のため、境界としては
-/// `Copy` で十分と判断した）。
+/// `T: CastBufferElement`（`i32`／`i64`／`u8` に限定。上記モジュール
+/// doc 参照）を要求する。
 pub struct MetalCastBuffer<T> {
     buffer: Retained<MtlBuffer>,
     len: usize,
@@ -52,7 +88,7 @@ fn checked_byte_len<T>(len: usize) -> Result<usize, MetalError> {
         .ok_or(MetalError::AllocationSizeOverflow { len })
 }
 
-impl<T: Copy> MetalCastBuffer<T> {
+impl<T: CastBufferElement> MetalCastBuffer<T> {
     /// `data` の内容を Metal バッファへアップロードして確保する
     /// （`crate::half_buffer::MetalHalfBuffer::new_with_data` と同型）。
     ///

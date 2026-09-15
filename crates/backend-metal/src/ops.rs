@@ -194,29 +194,34 @@ fn require_rank2_cell(shape: &[usize]) -> Result<(), BackendError> {
 }
 
 /// `.contiguous()`（内部で無検査の `Vec::with_capacity(numel)` を
-/// 呼ぶ）を呼び出す前に、`f32` 換算のバイトサイズが `Vec` の
+/// 呼ぶ）を呼び出す前に、要素型 `T` 換算のバイトサイズが `Vec` の
 /// allocation 上限（`isize::MAX` バイト）に収まるか検査する
-/// （`fandhe_ai_tensor_core::tensor::checked_numel_for::<f32>` と
+/// （`fandhe_ai_tensor_core::tensor::checked_numel_for::<T>` と
 /// 同型の独立複製。同関数は `pub(crate)` でクレートを跨いで共有
 /// できないため。`interpolate` は巨大な `broadcast_to` view を
 /// 小さい `size` へ縮小できてしまう（forward 契約は出力 shape のみを
 /// 検査する）ため、要素数積が `usize` の範囲に収まっても
-/// `numel * size_of::<f32>() > isize::MAX` となるケースがあり、
+/// `numel * size_of::<T>() > isize::MAX` となるケースがあり、
 /// `.contiguous()` がそこで capacity overflow panic する。本番経路
 /// panic 禁止規約 `.claude/rules/coding-rust.md` に反するため、
 /// `.contiguous()` 呼び出し直前に本関数で確保前検査する
-/// （`interpolate` 限定の追加検査。イシュー #1834 Cursor Bugbot
-/// 指摘）。
-fn checked_f32_bytes(shape: &[usize]) -> Result<(), ShapeError> {
+/// （当初 `interpolate` 限定〈イシュー #1834 Cursor Bugbot 指摘〉の
+/// `checked_f32_bytes` を、`cast`〈イシュー #1751〉の複数要素型
+/// 〈`f32`／`i32`／`i64`／`bool`〉に対応するため型パラメータ `T` へ
+/// 一般化した）。
+pub(crate) fn checked_bytes_for<T>(shape: &[usize]) -> Result<(), ShapeError> {
     let numel = shape
         .iter()
         .try_fold(1usize, |acc, &d| acc.checked_mul(d))
         .ok_or(ShapeError::ElementCountOverflow)?;
-    let bytes = numel
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or(ShapeError::ElementCountOverflow)?;
-    if bytes > isize::MAX as usize {
-        return Err(ShapeError::ElementCountOverflow);
+    let elem_size = std::mem::size_of::<T>();
+    if elem_size > 0 {
+        let bytes = numel
+            .checked_mul(elem_size)
+            .ok_or(ShapeError::ElementCountOverflow)?;
+        if bytes > isize::MAX as usize {
+            return Err(ShapeError::ElementCountOverflow);
+        }
     }
     Ok(())
 }
@@ -274,7 +279,7 @@ fn checked_gate_width(gates: usize, hidden: usize) -> Result<usize, BackendError
 
 /// `shape` の要素積を `checked_mul` の連鎖で求め、`usize` オーバー
 /// フロー時は `ShapeError::ElementCountOverflow` を返す
-/// （`checked_f32_bytes` 内の複製ロジックを独立関数化したもの。
+/// （`checked_bytes_for` 内の複製ロジックを独立関数化したもの。
 /// `nll_loss`／`nll_loss_backward` の `NllLayout` 構築が
 /// `input_shape`〈利用者から渡される任意の shape〉から直接
 /// `.iter().product()` していた箇所を置き換える。PR #1850
@@ -2889,9 +2894,9 @@ impl BackendOps for MetalBackendOps {
         // `.contiguous()` より前に、`f32` 換算バイト数が `Vec` の
         // 確保上限に収まるか検査する（巨大な `broadcast_to` view を
         // 小さい `size` へ縮小するケースの capacity overflow panic
-        // 防止。`checked_f32_bytes` doc 参照。イシュー #1834 Cursor
+        // 防止。`checked_bytes_for` doc 参照。イシュー #1834 Cursor
         // Bugbot 指摘）。
-        checked_f32_bytes(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_bytes_for::<f32>(input.shape()).map_err(BackendError::ShapeMismatch)?;
 
         let input_owned = input.contiguous();
         let input_slice = input_owned.as_slice().ok_or_else(|| {
@@ -4319,7 +4324,7 @@ mod tests {
     /// 小さいため通過するが、`.contiguous()`（内部で無検査の
     /// `Vec::with_capacity(numel)` を呼ぶ）が**入力**側の巨大な要素数
     /// （`f32` 換算で `isize::MAX` バイトを超える）で capacity
-    /// overflow panic しうる（是正前）。`checked_f32_bytes` による
+    /// overflow panic しうる（是正前）。`checked_bytes_for::<f32>` による
     /// `.contiguous()` 呼び出し前の確保前検査は Metal コンテキスト
     /// 取得前に完了するため、実機非依存の通常テストとして Linux CI
     /// でも実行できる。

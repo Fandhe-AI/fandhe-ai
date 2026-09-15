@@ -211,6 +211,19 @@ impl CudaCast {
 /// ため、`Tensor::contiguous()`（内部で無検査の `numel()` 乗算を呼ぶ）
 /// より前に必ず呼ぶ）。空テンソル（`numel == 0`）の場合は `Ok(None)`
 /// を返し、呼び出し元が GPU 起動なしで空 `Tensor` を構築する。
+///
+/// 加えて `ops::checked_bytes_for::<T>` で要素型 `T` 換算のバイト
+/// サイズが `Vec` の allocation 上限（`isize::MAX` バイト）に収まるか
+/// も `.contiguous()` 呼び出し直前に検査する（codex-review P1 指摘・
+/// イシュー #1751。`[1]` を `broadcast_to([(isize::MAX as usize) /
+/// size_of::<T>() + 10])` した非 contiguous な巨大 view を渡すと、
+/// `checked_shape_numel` 単体〈要素数積の usize オーバーフローのみ
+/// 検査〉は通過してしまい、後段の `checked_i32_numel`〈カーネル引数
+/// `int` 境界検査〉より前に `.contiguous()` 内部の無検査
+/// `Vec::with_capacity(numel)` が capacity overflow panic する。
+/// `interpolate`〈`ops.rs::checked_bytes_for`。旧 `checked_f32_bytes`〉
+/// と同じ判断で、本番経路 panic 禁止規約
+/// `.claude/rules/coding-rust.md` に反するため確保前検査を先に置く）。
 fn checked_contiguous<T: fandhe_ai_tensor_core::Element>(
     x: &Tensor<T>,
 ) -> Result<Option<Tensor<T>>, BackendError> {
@@ -218,6 +231,7 @@ fn checked_contiguous<T: fandhe_ai_tensor_core::Element>(
     if x.shape().iter().product::<usize>() == 0 {
         return Ok(None);
     }
+    crate::ops::checked_bytes_for::<T>(x.shape()).map_err(BackendError::ShapeMismatch)?;
     Ok(Some(x.contiguous()))
 }
 
@@ -302,5 +316,36 @@ impl CastOps for CudaBackendOps {
 
     fn cast_bool_to_f32(&self, x: &Tensor<bool>) -> Result<Tensor<f32>, BackendError> {
         dispatch_cast(self, x, CudaCast::run_bool_to_f32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// codex-review P1 指摘の回帰テスト（イシュー #1751）。`[1]` を
+    /// `broadcast_to([(isize::MAX as usize) / size_of::<f32>() + 10])`
+    /// した非 contiguous な巨大 view は `checked_shape_numel`〈要素数積
+    /// の usize オーバーフローのみ検査〉を通過してしまうが、
+    /// `checked_contiguous` 内の `.contiguous()`（内部で無検査の
+    /// `Vec::with_capacity(numel)` を呼ぶ）が `f32` 換算で
+    /// `isize::MAX` バイトを超えるため、是正前は capacity overflow
+    /// panic しうる。`checked_contiguous` は GPU driver 呼び出しより
+    /// 前に完結するため GPU 非依存の通常テストとして実行できる
+    /// （`ops.rs::interpolate_rejects_huge_broadcast_view_input_without_panicking`
+    /// と同型）。
+    #[test]
+    fn checked_contiguous_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32], &[1usize]).unwrap();
+        let huge_len = (isize::MAX as usize) / std::mem::size_of::<f32>() + 10;
+        let huge = base.broadcast_to(&[huge_len]).unwrap();
+        assert_eq!(huge.shape(), &[huge_len]);
+
+        let err = checked_contiguous(&huge)
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(fandhe_ai_tensor_core::ShapeError::ElementCountOverflow)
+        ));
     }
 }

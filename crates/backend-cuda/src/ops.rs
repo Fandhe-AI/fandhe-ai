@@ -1571,30 +1571,36 @@ pub(crate) fn checked_shape_numel(shape: &[usize]) -> Result<usize, ShapeError> 
         .ok_or(ShapeError::ElementCountOverflow)
 }
 
-/// `checked_shape_numel` の要素数積検査に加え、`f32` 換算のバイト
-/// サイズが `Vec` の allocation 上限（`isize::MAX` バイト）に収まる
-/// かも検査する（`fandhe_ai_tensor_core::tensor::checked_numel_for::
-/// <f32>` と同型の独立複製。同関数は `pub(crate)` でクレートを跨いで
-/// 共有できないため。`checked_shape_numel` 単体は要素数積が `usize`
-/// の範囲に収まるかしか見ないため、例えば `[1] を broadcast_to
-/// ([1usize << 63])` した非 contiguous な巨大 view を `interpolate`
-/// で小さい `size` へ縮小しても、`.contiguous()`（内部で無検査の
-/// `Vec::with_capacity(numel)` を呼ぶ）が `numel * size_of::<f32>() >
-/// isize::MAX` で capacity overflow panic する（`checked_shape_numel`
-/// 自体は `1usize << 63` を usize オーバーフローと判定しないため通過
-/// してしまう）。本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`
-/// に反するため、`.contiguous()` 呼び出し直前に本関数で確保前検査
-/// する（`interpolate` 限定の追加検査。イシュー #1834 Cursor Bugbot
-/// 指摘）。
-fn checked_f32_bytes(shape: &[usize]) -> Result<(), ShapeError> {
+/// `checked_shape_numel` の要素数積検査に加え、要素型 `T` 換算の
+/// バイトサイズが `Vec` の allocation 上限（`isize::MAX` バイト）に
+/// 収まるかも検査する（`fandhe_ai_tensor_core::tensor::
+/// checked_numel_for::<T>` と同型の独立複製。同関数は `pub(crate)` で
+/// クレートを跨いで共有できないため。`checked_shape_numel` 単体は
+/// 要素数積が `usize` の範囲に収まるかしか見ないため、例えば `[1] を
+/// broadcast_to([1usize << 63])` した非 contiguous な巨大 view を
+/// `interpolate` で小さい `size` へ縮小したり `cast` へそのまま渡すと、
+/// `.contiguous()`（内部で無検査の `Vec::with_capacity(numel)` を呼ぶ）
+/// が `numel * size_of::<T>() > isize::MAX` で capacity overflow panic
+/// する（`checked_shape_numel` 自体は `1usize << 63` を usize
+/// オーバーフローと判定しないため通過してしまう）。本番経路 panic
+/// 禁止規約 `.claude/rules/coding-rust.md` に反するため、
+/// `.contiguous()` 呼び出し直前に本関数で確保前検査する（当初
+/// `interpolate` 限定〈イシュー #1834 Cursor Bugbot 指摘〉の
+/// `checked_f32_bytes` を、`cast`〈イシュー #1751〉の複数要素型
+/// 〈`f32`／`f64`／`i32`／`i64`／`bool`〉に対応するため型パラメータ
+/// `T` へ一般化した）。
+pub(crate) fn checked_bytes_for<T>(shape: &[usize]) -> Result<usize, ShapeError> {
     let numel = checked_shape_numel(shape)?;
-    let bytes = numel
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or(ShapeError::ElementCountOverflow)?;
-    if bytes > isize::MAX as usize {
-        return Err(ShapeError::ElementCountOverflow);
+    let elem_size = std::mem::size_of::<T>();
+    if elem_size > 0 {
+        let bytes = numel
+            .checked_mul(elem_size)
+            .ok_or(ShapeError::ElementCountOverflow)?;
+        if bytes > isize::MAX as usize {
+            return Err(ShapeError::ElementCountOverflow);
+        }
     }
-    Ok(())
+    Ok(numel)
 }
 
 impl BackendOps for CudaBackendOps {
@@ -3373,9 +3379,9 @@ impl BackendOps for CudaBackendOps {
         // view を小さい `size` へ縮小できてしまう（forward 契約は
         // 出力 shape のみを検査する）ため、要素数積が `usize` に
         // 収まっても `f32` 換算バイト数が `Vec` の確保上限を超える
-        // ケースを `checked_f32_bytes` で追加検査する（イシュー
+        // ケースを `checked_bytes_for::<f32>` で追加検査する（イシュー
         // #1834 Cursor Bugbot 指摘）。
-        checked_f32_bytes(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_bytes_for::<f32>(input.shape()).map_err(BackendError::ShapeMismatch)?;
 
         let input_owned = input.contiguous();
         let input_slice = input_owned.as_slice().ok_or_else(|| {
@@ -5029,7 +5035,7 @@ mod tests {
     /// 小さいため通過するが、`.contiguous()`（内部で無検査の
     /// `Vec::with_capacity(numel)` を呼ぶ）が**入力**側の巨大な要素数
     /// （`f32` 換算で `isize::MAX` バイトを超える）で capacity
-    /// overflow panic しうる（是正前）。`checked_f32_bytes` による
+    /// overflow panic しうる（是正前）。`checked_bytes_for::<f32>` による
     /// `.contiguous()` 呼び出し前の確保前検査（本テストの直前に定義
     /// した `interpolate` 実装参照）は `with_driver_call` 呼び出し前に
     /// 完了するため、GPU 非依存の通常テストとして Linux CI でも
