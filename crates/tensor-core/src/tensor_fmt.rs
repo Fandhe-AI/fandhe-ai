@@ -67,9 +67,11 @@ const FMT_EDGE_ITEMS: usize = 3;
 /// `.claude/rules/security.md` A04 DoS 観点。#1681 で同種のスタック
 /// オーバーフロー対策として反復化した前例があるが、本モジュールは
 /// 再帰の深さ自体を通常利用で想定される範囲に制限する軽量な対策を
-/// 採る）。PyTorch/NumPy の実務上の rank 上限（NumPy `NPY_MAXDIMS`
-/// 系・PyTorch の実務上の次元数上限）より十分大きく、かつ default
-/// スレッドスタックでも安全な余裕を持つ値として 64 を採用する。
+/// 採る）。PyTorch/NumPy が実務上使用する次元数（NumPy
+/// `NPY_MAXDIMS` 系・PyTorch の実務上の次元数）を通常上回り、かつ
+/// default スレッドスタックでも安全な余裕を持つ値として 64 を採用する
+/// （具体的な上限値は PyTorch/NumPy のバージョンにより変わりうるため
+/// 「十分大きい」という比較の断定はしない）。
 const FMT_MAX_RENDER_RANK: usize = 64;
 
 /// 現在の走査位置（多次元インデックス）から `Tensor` の指定軸以降を
