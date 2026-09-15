@@ -279,9 +279,9 @@ impl Sequential {
     /// `x`（`[N, ...]`）・`y`（`[N, ...]`）を `config.epochs` 回学習する
     /// （Keras `model.fit(x, y, epochs=, batch_size=)` 相当）。
     ///
-    /// 1 バッチあたりの演算列は [`SequentialVars::forward`] →
+    /// 1 バッチあたりの演算列は [`crate::compat::SequentialVars::forward`] →
     /// `T::loss_for` → [`crate::Tape::backward`] →
-    /// [`SequentialVars::trainable_grads`] → optimizer `step` →
+    /// [`crate::compat::SequentialVars::trainable_grads`] → optimizer `step` →
     /// [`Self::apply_parameters`] という、`sequential.rs` モジュール
     /// doc の doctest と同一の並びである（`fandhe_ai::tape()`。既定
     /// CPU・`CpuBackendOps`・融合有効）。
@@ -423,7 +423,7 @@ impl Sequential {
     /// `model.evaluate(x, y, batch_size=)` 相当。学習は行わない）。
     ///
     /// `batch_size == x.shape()[0]`（全件 1 バッチ）のとき、
-    /// [`crate::Var::forward`] → `T::loss_for` の直接計算と bit 完全
+    /// [`Sequential::forward`] → `T::loss_for` の直接計算と bit 完全
     /// 一致する。`batch_size` を分割した場合はサンプル数重み付き平均
     /// （[`Self::fit`] の `History::loss` と同じ集計方式）。
     ///

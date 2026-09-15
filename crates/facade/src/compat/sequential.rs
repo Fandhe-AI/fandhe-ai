@@ -90,6 +90,8 @@
 //! `Gradients`・`AutodiffError`・`LinearVars`・`Tensor` は `crate::`
 //! 経由（facade の正式な再エクスポート）で参照する。
 
+use std::collections::HashMap;
+
 use crate::{
     AutodiffError, BackendError, DeviceParamStore, Gradients, LinearVars, ResidentLeaf, Tape,
     Tensor, Var,
@@ -474,6 +476,40 @@ impl Sequential {
         // への委譲）が同じ `"{index}.{name}"` 接頭辞契約で実装済みのため
         // そのまま委譲する（イシュー #1759）。
         self.inner.named_parameters()
+    }
+
+    /// [`Sequential::named_parameters`] のキー付きビュー（PyTorch
+    /// `Module.state_dict()` 相当。イシュー #1752）。`self.inner`
+    /// （`nn::Sequential`）の [`Module::state_dict`] 既定実装へ 1 行
+    /// 委譲する（薄いラッパーに徹する。REQ-9）。キーは
+    /// [`Sequential::named_parameters`] と同じ `"{index}.{name}"`
+    /// （例: `Linear→ReLU→Linear` なら `0.weight`・`0.bias`・
+    /// `2.weight`・`2.bias`）。
+    pub fn state_dict(&self) -> HashMap<String, Tensor<f32>> {
+        self.inner.state_dict()
+    }
+
+    /// [`Sequential::state_dict`] の逆（PyTorch
+    /// `Module.load_state_dict(state_dict, strict=True)` 相当。イシュー
+    /// #1752）。`self.inner` の [`Module::load_state_dict`] 既定実装
+    /// （strict・two-pass + ベストエフォート・ロールバック。アトミック
+    /// 性の正確な契約は `Module::load_state_dict` doc「アトミック性」
+    /// 節を参照）へ 1 行委譲する。
+    ///
+    /// # 注意
+    ///
+    /// - `&mut self` を要求するため、[`Sequential::bind`] が返す
+    ///   `SequentialVars` が生きている間は呼べない（`apply_parameters`
+    ///   と同じ制約。メソッド doc「`apply_parameters`（`&mut model`）を
+    ///   呼ぶ前にブロックを抜けて」節参照）。
+    /// - ロード後は事前に構築した [`DeviceParamStore`] が stale になる
+    ///   （`apply_parameters` と同じ。[`Sequential::init_device_param_store`]
+    ///   の再実行が必要）。
+    pub fn load_state_dict(
+        &mut self,
+        state: HashMap<String, Tensor<f32>>,
+    ) -> Result<(), AutodiffError> {
+        self.inner.load_state_dict(state)
     }
 
     /// optimizer（[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]／
