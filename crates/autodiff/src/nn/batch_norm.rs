@@ -209,6 +209,18 @@ impl BatchNormCore {
             }));
         }
         let num_features = running_mean.shape()[0];
+        // `new`／`without_affine` と同じ契約（チャネル数ゼロ拒否）を
+        // `from_parameters` にも課す。running_mean の shape から
+        // `num_features` を間接導出する経路であるため、ここで検査
+        // しないと `new`／`without_affine` では拒否される
+        // `num_features == 0` 構成がこのコンストラクタだけ素通りして
+        // しまい、コンストラクタ間の入力契約が不統一になる
+        // （PR #1874 codex-review P2・Cursor Bugbot Low 是正）。
+        if num_features == 0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "{who}: num_features must be non-zero"
+            )));
+        }
         if let Some(w) = &weight
             && w.shape() != running_mean.shape()
         {
@@ -807,6 +819,27 @@ mod tests {
             err,
             AutodiffError::Shape(ShapeError::ShapeMismatch { .. })
         ));
+    }
+
+    /// `from_parameters` は `running_mean`／`running_var` の shape から
+    /// `num_features` を間接導出するため、`new`／`without_affine` と
+    /// 同じ「チャネル数ゼロ拒否」契約を課さないとコンストラクタ間で
+    /// 入力契約が不統一になる（PR #1874 codex-review P2・Cursor
+    /// Bugbot Low 是正）。
+    #[test]
+    fn batch_norm_from_parameters_rejects_zero_num_features() {
+        let running_mean = Tensor::new(Vec::<f32>::new(), &[0]).unwrap();
+        let running_var = Tensor::new(Vec::<f32>::new(), &[0]).unwrap();
+        let err = BatchNorm1d::from_parameters(
+            None,
+            None,
+            running_mean,
+            running_var,
+            BATCH_NORM_DEFAULT_EPS,
+            BATCH_NORM_DEFAULT_MOMENTUM,
+        )
+        .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 
     #[test]

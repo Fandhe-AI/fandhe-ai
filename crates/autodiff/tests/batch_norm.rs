@@ -100,31 +100,86 @@ fn batch_norm_1d_rank3_train_normalizes_per_channel() {
 /// が running stats（固定統計）経路へ切り替わることを確認する
 /// （`Module::set_training` trait doc の「モードの正はコンテナが保持
 /// するフラグ」契約）。
+///
+/// 修正前（PR #1874 codex-review P2・イシュー #1732 fix ループ）は
+/// eval モードでの forward を同一入力で 2 回呼び「2 回とも bit 一致」
+/// だけを検証していたが、BatchNorm の train モード出力自体が「その
+/// バッチの統計で正規化する」決定的関数であるため、
+/// `set_training(false)` の伝播が壊れて `seq` が実質 train モードの
+/// ままでも、同一入力 `x2` を 2 回 forward すればそのつど `x2` 自身の
+/// バッチ統計で正規化され結局 2 回とも bit 一致してしまい、この
+/// テストは伝播漏れを検出できない設計だった。本テストは代わりに、
+/// train forward（`momentum=1.0` により running stats が x1 の
+/// バッチ統計そのもの — biased mean／unbiased var — へ完全に
+/// 上書きされる）で得られる**固定統計から独立に算出した期待値**と
+/// eval forward の出力を突き合わせる。伝播が壊れていれば eval
+/// forward は実際には x2 自身のバッチ統計で正規化されるため、
+/// この期待値（x1 由来の固定統計での正規化）とは一致せず検出できる。
 #[test]
 fn batch_norm_mode_propagates_through_sequential_container() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let bn = BatchNorm1d::without_affine(2, 0.0, 1.0).unwrap();
     let mut seq = Sequential::from(ModuleList::from_iter([Box::new(bn) as Box<dyn Module>]));
 
-    // 1 回 train forward してから eval へ切り替える。
-    let x = Tensor::new(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]).unwrap();
+    // 1 回 train forward してから eval へ切り替える。momentum=1.0 に
+    // より running_mean は x1 の biased channel mean、running_var は
+    // x1 の unbiased channel var（biased var · M/(M−1)）へちょうど
+    // 上書きされる（モジュール doc comment「running stats 更新契約」
+    // 参照）。
+    let x1 = Tensor::new(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]).unwrap();
+    let n = 2usize;
+    // 独立実装: x1 のチャネル方向 (dim=0) の biased mean／var を
+    // `Var::mean_dims`／`Var::var` で算出し、running_var の unbiased
+    // 補正（M/(M−1)。M = n·spatial = n = 2）を手作業で適用する
+    // （最初のテスト `batch_norm_train_output_matches_independent_
+    // mean_var_oracle` と同じオラクル方式）。
+    let running_mean;
+    let running_var_unbiased;
     {
-        let xv = tape.var(&x);
-        seq.forward(&tape, &xv).unwrap();
+        let xv1 = tape.var(&x1);
+        let mean_v = xv1.mean_dims(&[0], true).unwrap().to_tensor();
+        let var_v_biased = xv1.var(Some(0), 0).unwrap().to_tensor();
+        let m = n as f64;
+        running_var_unbiased = dense(&var_v_biased)
+            .iter()
+            .map(|&v| (v as f64 * m / (m - 1.0)) as f32)
+            .collect::<Vec<f32>>();
+        running_mean = dense(&mean_v);
+        seq.forward(&tape, &xv1).unwrap();
     }
     assert!(seq.training());
 
     seq.set_training(false);
     assert!(!seq.training());
 
-    // eval モードでは running stats（固定統計）を使うため、異なる
-    // 入力を与えても momentum=1.0 で上書きされた running stats（= 直前
-    // の batch 統計そのもの）に基づく正規化になり、running stats の
-    // 更新（num_batches_tracked の増加）は起きない。
+    // eval モードでは running stats（固定統計＝上記で算出した x1 由来
+    // の running_mean／running_var_unbiased）を使うため、x2 自身の
+    // バッチ統計は一切使われない。
     let x2 = Tensor::new(vec![100.0, 200.0, -100.0, 50.0], &[2, 2]).unwrap();
     let xv2 = tape.var(&x2);
-    let out_before = seq.forward(&tape, &xv2).unwrap().to_tensor();
-    let out_before_again = seq.forward(&tape, &xv2).unwrap().to_tensor();
-    // 同一入力・eval モード（running stats 不変）なので 2 回とも bit 一致。
-    assert_eq!(dense(&out_before), dense(&out_before_again));
+    let out = seq.forward(&tape, &xv2).unwrap().to_tensor();
+    let out_data = dense(&out);
+    let x2_data = dense(&x2);
+    let c = 2usize;
+    for row in 0..n {
+        for ch in 0..c {
+            let idx = row * c + ch;
+            let rstd = 1.0f64 / (running_var_unbiased[ch] as f64).sqrt();
+            let expected = ((x2_data[idx] as f64 - running_mean[ch] as f64) * rstd) as f32;
+            let diff = (out_data[idx] - expected).abs();
+            assert!(
+                diff < 1e-3,
+                "row={row} ch={ch} out={} expected={expected} \
+                 （eval モードで固定統計を使わず x2 自身のバッチ統計で \
+                 正規化された場合、set_training(false) の伝播漏れを \
+                 示唆する）",
+                out_data[idx]
+            );
+        }
+    }
+
+    // eval モードは running stats を更新しないため、同一入力を再度
+    // forward しても bit 一致する（決定性の追加確認）。
+    let out_again = seq.forward(&tape, &xv2).unwrap().to_tensor();
+    assert_eq!(dense(&out), dense(&out_again));
 }

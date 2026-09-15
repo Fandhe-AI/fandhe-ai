@@ -1614,9 +1614,16 @@ pub(crate) fn batch_norm_train_channels(
     let shape = x.shape().to_vec();
     let m = n * spatial;
     if n == 0 || c == 0 || spatial == 0 || m == 0 {
-        let numel: usize = shape.iter().product();
+        // `n == 0 || c == 0 || spatial == 0` はいずれも `shape` 中の
+        // いずれかの次元が 0 であることを含意する（`spatial` は
+        // `shape[2..]` の部分積）ため numel は必ず 0 だが、
+        // `shape.iter().product()` で明示計算すると `softmax_along`
+        // と同じ理由（部分積が全体積の 0 に到達する前に usize
+        // オーバーフローしうる。本番経路 panic 禁止規約）で危険。
+        // `Vec::new()` を直接使い積の計算自体を避ける（PR #1874
+        // Cursor Bugbot 是正）。
         return (
-            build_tensor(vec![0.0f32; numel], &shape),
+            build_tensor(Vec::new(), &shape),
             vec![0.0f32; c],
             vec![0.0f32; c],
         );
@@ -1663,8 +1670,10 @@ pub(crate) fn batch_norm_infer_channels(
 ) -> Tensor<f32> {
     let shape = x.shape().to_vec();
     if n == 0 || c == 0 || spatial == 0 {
-        let numel: usize = shape.iter().product();
-        return build_tensor(vec![0.0f32; numel], &shape);
+        // `batch_norm_train_channels` と同じ理由（softmax_along 型の
+        // 部分積オーバーフロー回避）で `shape.iter().product()` を
+        // 使わず `Vec::new()` を直接返す（PR #1874 Cursor Bugbot 是正）。
+        return build_tensor(Vec::new(), &shape);
     }
     let data = dense_vec(x);
     let mut out = vec![0.0f32; data.len()];
