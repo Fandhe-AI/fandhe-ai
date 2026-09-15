@@ -62,7 +62,15 @@
 - **ガードレールの完全性（P0/P1）**: 自己修復ループが AI 生成変更を取り込む際の
   ガードレール 3 分岐判定を迂回する経路の追加は P0（A08）。ガードレール閾値
   （`guardrail.toml`）・ポリシー除外リスト（`policy-exclusion.toml`）・バックエンド間
-  数値一致テストの許容誤差（tolerance）を人間承認の記録なしに緩和・変更する差分は P1
+  数値一致テストの許容誤差（tolerance）を人間承認の記録なしに緩和・変更する差分は P1。
+  **（spec REQ-2 2026-09-12 追記・fandhe-ai-spec#64）** 第三者比較対象（candle 等）の
+  出力が統一複合判定を外れた場合は比較データの妥当性上の「判定不能」であり fandhe-ai
+  側の REQ-2 違反ではない。framework-compare ハーネス（`bench-common::parity`・
+  `compare_gemm_gate.py`）限定のスケール付き絶対誤差項 OR 追加（`bench-common::
+  parity::PARITY_SCALED_ABS_COEFF`）は、既存定数維持・本体判定式（`compare`／
+  `assert_parity`／`ParityBaseline`）不変を条件に「単独緩和」には該当しない。係数
+  変更・本体への適用拡大は引き続きユーザー承認必須（出典:
+  `docs/candle-parity-tolerance-contract-decision.md` §8）
 - **`unsafe` の統制（P0/P1）**: `// SAFETY:` コメントのない `unsafe`、不変条件の根拠が
   不十分な `unsafe` は P0。`unsafe` の使用域は FFI 境界（cudarc・objc2 系）・CPU SIMD
   intrinsics 等の必要最小限に限り、正当化のない拡大は P1
@@ -112,37 +120,62 @@
   （イシュー #1566。2026-09-12 マージ）で導入済み**。契約・経緯・実装記録の正本は
   `docs/metal-grad-reduction-parity-judgment-decision.md`（§6 実装記録）。契約の片側変更（一部
   バックエンドのみ精度を上げる等）は P1
-- **TF32/f16 Tensor Core 経路の parity テスト判定方式（P1。テストの弱体化禁止の
-  例外を明記する規約。正本仕様 `docs/spec/04-requirements.md` REQ-2「2026-09-02
-  追記・Tensor Core 経路の受け入れ判定方式」〈fandhe-ai-spec PR #63〉が正式な
-  合格条件として規定する形状別判定方式の転記であり、受け入れ基準の正は spec 側）**: `wmma_tf32`／`wmma_tf32_opt`／`wmma_tf32_staged` 等の
-  Tensor Core 経路は、DGX Spark GB10（sm_121）実機実測で厳密ゼロ fail（複合判定
-  `fandhe_ai_backend_cpu::assert_parity`。全要素が相対誤差 1e-3 未満または絶対誤差
-  1e-5 未満）が成立しない形状が存在することが判明している（TF32 丸め〈f32 仮数部
-  23bit→10bit〉に由来する K 方向蓄積誤差の既知の恒常特性。opt/basic/staged
-  カーネル間で bit-identical、sm_86/GB10 世代間でも差分なし。
-  `docs/perf/cuda-tensor-core-tolerance-opt-remeasurement.md`・
-  `docs/perf/cuda-tensor-core-tolerance-gb10-scale-sweep.md`〈#995〉）。この既知
-  特性を持つ形状に厳密ゼロ fail 判定を適用すること自体がテスト設計の不整合で
-  あり、**カーネル側の数値バグとは区別する**。よって:
-  - **厳密ゼロ fail 判定**（`assert_parity`）は、GB10 実機実測でゼロ fail の成立が
-    確認された形状にのみ適用する
-  - **実測でゼロ fail が成立しないと判明した形状**は、実測 baseline 非後退方式
-    （`fail_count` が記録値以下・総要素数が記録値と完全一致・`mean_abs_diff`／
+- **結合順序が単一の連続 K ループと異なるカーネル（Tensor Core 経路・Metal f32
+  split-K 等）の parity テスト判定方式（P1。テストの弱体化禁止の例外を明記する
+  規約。正本仕様 `docs/spec/04-requirements.md` REQ-2「2026-09-02 追記・Tensor
+  Core 経路の受け入れ判定方式」〈fandhe-ai-spec PR #63〉＋「2026-09-12 追記・
+  実測ベースライン非後退方式の適用対象の一般化」〈fandhe-ai-spec PR #68〉が
+  正式な合格条件として規定する判定方式の転記であり、受け入れ基準の正は spec
+  側。旧称: TF32/f16 Tensor Core 経路の parity テスト判定方式）**: 単一の連続
+  K ループ（縮約ループ）とは異なる結合順序で部分和を求める構造を持つカーネル
+  （Tensor Core 経路を含むがそれに限らない）は、実機実測で厳密ゼロ fail（複合
+  判定 `fandhe_ai_backend_cpu::assert_parity`。全要素が相対誤差 1e-3 未満または
+  絶対誤差 1e-5 未満）が成立しない形状が存在しうる（結合順序の違いに由来する
+  丸め誤差の既知の恒常特性。カーネル側の数値バグとは区別する）。この既知特性を
+  持つ形状に厳密ゼロ fail 判定を適用すること自体がテスト設計の不整合であり、
+  よって:
+  - **形状粒度は spec が列挙する 2 方式（形状二分方式／全形状一律 baseline
+    方式）のいずれかを各カーネルの決定記録が定める**（open-ended に「委ねる」
+    のではなく、決定記録は必ずこの 2 方式のいずれかを選ぶ）:
+    - **先例 1（CUDA Tensor Core。形状二分方式）**: `wmma_tf32`／`wmma_tf32_opt`／
+      `wmma_tf32_staged` 等の TF32／f16 経路。DGX Spark GB10（sm_121）実機実測で
+      ゼロ fail の成立が確認された形状にのみ厳密ゼロ fail 判定
+      （`assert_parity`）を適用し、成立しない形状は実測 baseline 非後退方式
+      （`crates/backend-cuda/tests/common/parity_baseline.rs::ParityBaseline`／
+      `assert_no_parity_regression`）とする。TF32 丸め〈f32 仮数部 23bit→10bit〉
+      に由来する K 方向蓄積誤差が根拠（opt/basic/staged カーネル間で
+      bit-identical、sm_86/GB10 世代間でも差分なし。
+      `docs/perf/cuda-tensor-core-tolerance-opt-remeasurement.md`・
+      `docs/perf/cuda-tensor-core-tolerance-gb10-scale-sweep.md`〈#995〉。
+      `docs/cuda-tensor-core-parity-judgment-decision.md`）
+    - **先例 2（Metal f32 split-K。全形状一律方式）**: `gemm_simdgroup_tiled`
+      系の split-K 2 パス GEMM（Tensor Core を用いない f32 SIMT カーネル。K
+      方向を複数パーティションへ分割し独立に部分和を求めたうえで固定順序で
+      縮約する構造）。M4 Max 実機実測で対象 11 形状中 3 形状は厳密ゼロ fail が
+      成立するが、丸め誤差が形状だけでなく入力データ（近ゼロ要素の有無）にも
+      依存し「過去に厳密ゼロ fail だった形状」という事実だけでは任意の入力への
+      安全性を保証できないため、**全 11 形状へ一律に** baseline 方式
+      （`crates/backend-metal/tests/common/splitk_parity_baseline.rs::
+      SplitKParityBaseline`／`assert_no_split_k_parity_regression`）を適用する
+      設計を採用済み（`docs/backend-metal-splitk-parity-judgment-decision.md`
+      §1.1・§3・§7。承認済み baseline 値は `docs/perf/metal-gemm-splitk-two-pass.md`
+      §5.8 参照。baseline 表・値そのものは本ファイルへは転記しない）
+  - **baseline 非後退判定の 4 指標要件は方式・カーネルに関わらず不変**:
+    `fail_count` が記録値以下・総要素数が記録値と完全一致・`mean_abs_diff`／
     `max_abs_diff`／`max_rel_err` が記録 ceiling 以下であることを fail-closed に
     機械検査する。max 系 ceiling は fail_count 同数のまま個別要素の誤差が大幅
     悪化し平均で相殺される回帰を検出するための必須項目〈spec 同追記の規定〉。
-    `crates/backend-cuda/tests/common/parity_baseline.rs::
-    ParityBaseline`／`assert_no_parity_regression`）を正式な受け入れ判定とする。
-    baseline の新規追加・更新は必ず GB10 実機実測値を伴う（推定値の記入は禁止。
-    `docs/perf/cuda-parity-baseline.md` 「ベースライン更新規約」）
+    baseline の新規追加・更新は必ず実機実測値を伴う（推定値の記入は禁止）
   - **tolerance 定数**（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`。
     `crates/backend-cpu/src/parity.rs`）**の変更は本規約の対象外であり、引き続き
     ユーザー承認必須**（本規約は判定方式〈テスト個別の合否基準〉の使い分けを
     定めるものであり、統一複合判定の閾値自体を変更するものではない）
-  - PR #1115（イシュー #1106）で確定した「本体 `assert_parity` は green 必須の
-    まま維持し、既知の不合格分布に対する非後退監視を別テストとして併設する」
-    設計（`mma_f16_k4096_stress`／`tensor_core_parity_record`〈tf32 部分〉／
+  - **単一連続ループで縮約する経路**（f32 FMA の通常経路等）は従前どおり統一
+    複合判定をそのまま適用する（本節の対象外）
+  - CUDA 側の履歴事項（現状維持）: PR #1115（イシュー #1106）で確定した「本体
+    `assert_parity` は green 必須のまま維持し、既知の不合格分布に対する非後退
+    監視を別テストとして併設する」設計（`mma_f16_k4096_stress`／
+    `tensor_core_parity_record`〈tf32 部分〉／
     `gemm_tf32_optin_on_matches_cpu_across_shapes`・および同型で追加した
     `wmma_f16_k4096_stress`／`wmma_f16_opt_k4096_stress` の計 5 テスト）は
     **本規約が覆すものではなく、現状維持**とする。本規約が定める「対象形状を
@@ -151,10 +184,14 @@
     テストの記録元・ヒストリーに応じて個別に判断してよく、両方式の間で優劣を
     定めない）
   - 承認記録: 2026-09-02 ユーザー承認（イシュー #1106 のスコープ分割コメント。
-    #995 の GB10 世代差記録が判断根拠）。spec 側の正式化は fandhe-ai-spec PR #63
-    （2026-09-02 マージ済み）・実装リポ PR #1128（`docs/spec` submodule 前進）で
-    完了しており、本節はその転記（経緯の一次記録は
-    `docs/cuda-tensor-core-parity-judgment-decision.md`）
+    #995 の GB10 世代差記録が判断根拠。CUDA Tensor Core 経路の形状二分方式）・
+    2026-09-10 ユーザー承認（イシュー #1511・`docs/backend-metal-splitk-parity-
+    judgment-decision.md` §7。実測ベースライン非後退方式の適用対象一般化・
+    Metal split-K の全形状一律方式）。spec 側の正式化は fandhe-ai-spec PR #63
+    （2026-09-02 マージ済み）・PR #68（2026-09-12 マージ済み）・実装リポ PR #1128
+    ／PR #1656（`docs/spec` submodule 前進）で完了しており、本節はその転記
+    （経緯の一次記録は `docs/cuda-tensor-core-parity-judgment-decision.md`・
+    `docs/backend-metal-splitk-parity-judgment-decision.md`）
 - **設計文書との整合（P1/P2）**: 方式決定済みの領域（`docs/backend-metal-wgpu-decision.md`・
   `docs/dispatch-rules-design.md`・`docs/typed-shape-design.md`・
   `docs/memory-pool-design.md` 等）と矛盾する実装は、設計文書の改訂とセットでない限り
