@@ -51,8 +51,13 @@
 //
 // `if (gid >= dims.numel_out) return;` による手動境界チェックを
 // 全カーネルで維持する（`.claude/rules/coding-rust.md`。性能を理由
-// に省略しない）。座標演算は `long`（窓外を負値として自然に表現
-// するため）で行う。
+// に省略しない）。`max_pool2d_f32`／`avg_pool2d_f32` の座標演算は
+// `long`（窓外を負値として自然に表現するため。padding 分の減算が
+// 負になりうる）で行う。`adaptive_avg_pool2d_f32` は padding を
+// 持たず座標が常に非負のため `ulong` で行う（`u32` フィールド由来の
+// 値 2 つの積を符号付き 64bit で扱うと `u32::MAX` 付近の入力で
+// overflow するため。codex-review 指摘・#1885。同関数の doc comment
+// 参照）。
 
 struct PoolDims {
     uint n;
@@ -544,28 +549,38 @@ kernel void adaptive_avg_pool2d_f32(
     if (gid >= dims.numel_out) {
         return;
     }
-    long rem = (long)gid;
-    long ow = rem % (long)dims.w_out;
-    rem /= (long)dims.w_out;
-    long oh = rem % (long)dims.h_out;
-    rem /= (long)dims.h_out;
-    long ch = rem % (long)dims.c;
-    long nb = rem / (long)dims.c;
+    // adaptive 窓は padding を持たず座標が常に非負のため、`long`
+    // （符号付き 64bit）ではなく `ulong`（符号なし 64bit）で計算する。
+    // `oh`／`h_in` 等は `PoolDims`（`uint` フィールド）由来で
+    // `u32::MAX` を超えないことが `derive_adaptive_dims` の
+    // `to_u32_checked` で保証されているため、`(oh + 1) * h_in`
+    // （最大 `u32::MAX * u32::MAX` ≈ 1.8447e19）は `ulong::MAX`
+    // （≈ 1.8447e19）に収まり overflow しない（codex-review 指摘・
+    // #1885。符号付き `long` では同じ積が `long::MAX` ≈ 9.223e18 を
+    // 超えて overflow し、負値へラップした `in_idx` で境界検査なしに
+    // out-of-bounds 読み出しを起こしていた）。
+    ulong rem = (ulong)gid;
+    ulong ow = rem % (ulong)dims.w_out;
+    rem /= (ulong)dims.w_out;
+    ulong oh = rem % (ulong)dims.h_out;
+    rem /= (ulong)dims.h_out;
+    ulong ch = rem % (ulong)dims.c;
+    ulong nb = rem / (ulong)dims.c;
 
-    long h_in = (long)dims.h_in;
-    long w_in = (long)dims.w_in;
-    long h_out = (long)dims.h_out;
-    long w_out = (long)dims.w_out;
+    ulong h_in = (ulong)dims.h_in;
+    ulong w_in = (ulong)dims.w_in;
+    ulong h_out = (ulong)dims.h_out;
+    ulong w_out = (ulong)dims.w_out;
 
-    long start_h = (oh * h_in) / h_out;
-    long end_h = ((oh + 1) * h_in + h_out - 1) / h_out;
-    long start_w = (ow * w_in) / w_out;
-    long end_w = ((ow + 1) * w_in + w_out - 1) / w_out;
+    ulong start_h = (oh * h_in) / h_out;
+    ulong end_h = ((oh + 1) * h_in + h_out - 1) / h_out;
+    ulong start_w = (ow * w_in) / w_out;
+    ulong end_w = ((ow + 1) * w_in + w_out - 1) / w_out;
 
     ulong acc = 0ul;
-    for (long ih = start_h; ih < end_h; ih++) {
-        for (long iw = start_w; iw < end_w; iw++) {
-            long in_idx = ((nb * (long)dims.c + ch) * h_in + ih) * w_in + iw;
+    for (ulong ih = start_h; ih < end_h; ih++) {
+        for (ulong iw = start_w; iw < end_w; iw++) {
+            ulong in_idx = ((nb * (ulong)dims.c + ch) * h_in + ih) * w_in + iw;
             float v = x[in_idx];
             acc = pool_f64_add(acc, pool_f64_widen(as_type<uint>(v)));
         }

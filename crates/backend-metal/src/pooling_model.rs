@@ -64,7 +64,7 @@ impl std::error::Error for PoolingPrepareError {}
 
 /// `shaders/pooling.metal::struct PoolDims` とバイトレイアウトを一致
 /// させる（`#[repr(C)]`・全フィールド `u32`。`size_of` 一致を
-/// [`tests::pool_dims_size_matches_msl_struct`] が固定する）。
+/// `tests::pool_dims_size_matches_msl_struct` が固定する）。
 ///
 /// adaptive 系（[`derive_adaptive_dims`]）では `kh`〜`dw`・
 /// `count_include_pad` を `0` で埋める（`adaptive_avg_pool2d_f32`
@@ -434,6 +434,44 @@ fn validate_pool_dims_consistent(dims: &PoolDims) -> Result<(), PoolingPrepareEr
     Ok(())
 }
 
+/// 通常（非 adaptive）Pooling 専用の追加契約検査。[`derive_adaptive_
+/// dims`] が返す [`PoolDims`]（`kh == 0 && kw == 0` を adaptive の
+/// マーカーとして 0 埋めする設計。§ [`validate_pool_dims_consistent`]
+/// 参照）が [`max_pool2d_model`]／[`avg_pool2d_soft_f64`] へそのまま
+/// 渡されると、両関数はカーネルサイズ 0 の窓を空ループとして扱い、
+/// `valid == 0` から `0/0` の NaN・未初期化の `best` を成功扱いで
+/// 返してしまう（[`validate_pool_dims_consistent`] は `dims` 自身が
+/// 内部整合しているかのみを検査し、adaptive 用寸法であること自体は
+/// 許容してしまうため検出できない。codex-review 指摘・#1885
+/// line 414）。
+fn require_regular_pool_dims(dims: &PoolDims) -> Result<(), PoolingPrepareError> {
+    if dims.kh == 0 || dims.kw == 0 {
+        return Err(PoolingPrepareError::InvalidShape {
+            detail: format!(
+                "kh/kw must be non-zero for max_pool2d/avg_pool2d (got adaptive-style PoolDims: kh={}, kw={})",
+                dims.kh, dims.kw
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// [`require_regular_pool_dims`] の adaptive 版。通常 Pooling 用の
+/// `PoolDims`（`kh != 0 && kw != 0`）が [`adaptive_avg_pool2d_soft_f64`]
+/// へ渡されるのを拒否する（誤用時に「通常の窓」を無視して adaptive
+/// 窓計算が上書きしてしまう入力契約の曖昧さを排除する）。
+fn require_adaptive_pool_dims(dims: &PoolDims) -> Result<(), PoolingPrepareError> {
+    if dims.kh != 0 || dims.kw != 0 {
+        return Err(PoolingPrepareError::InvalidShape {
+            detail: format!(
+                "kh/kw must be zero for adaptive_avg_pool2d (got non-adaptive PoolDims: kh={}, kw={})",
+                dims.kh, dims.kw
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// `shaders/pooling.metal::max_pool2d_f32` の逐語移植（ホスト側参照
 /// 実装）。窓走査は `kh` 外側・`kw` 内側の row-major、最初の有効
 /// タップ（padding 除外）で `best`／`best_idx` を初期化し、以後は
@@ -448,6 +486,7 @@ pub fn max_pool2d_model(
     dims: &PoolDims,
 ) -> Result<(Vec<f32>, Vec<i32>), PoolingPrepareError> {
     validate_pool_dims_consistent(dims)?;
+    require_regular_pool_dims(dims)?;
     validate_input_len(x.len(), dims)?;
     let (n, c, h_in, w_in, h_out, w_out) = (
         dims.n as i64,
@@ -521,9 +560,10 @@ pub fn max_pool2d_model(
 /// `(divisor as f64).to_bits()` が厳密変換である——`divisor < 2^32`
 /// は常に `f64` で正確に表現できるため——ことを利用する。GPU 側は
 /// `pool_f64_from_uint` が同じ変換をビット構成で行い、両者が bit
-/// 完全一致することは [`tests`] が固定する）。
+/// 完全一致することは `tests` が固定する）。
 pub fn avg_pool2d_soft_f64(x: &[f32], dims: &PoolDims) -> Result<Vec<f32>, PoolingPrepareError> {
     validate_pool_dims_consistent(dims)?;
+    require_regular_pool_dims(dims)?;
     validate_input_len(x.len(), dims)?;
     let (n, c, h_in, w_in, h_out, w_out) = (
         dims.n as i64,
@@ -587,9 +627,24 @@ pub fn avg_pool2d_soft_f64(x: &[f32], dims: &PoolDims) -> Result<Vec<f32>, Pooli
 /// 適応窓 `[start, end)` を PyTorch `torch.nn.AdaptiveAvgPool2d` と
 /// 同じ整数演算で導出する（`start = floor(o*in/out)`・
 /// `end = ceil((o+1)*in/out)`）。
-fn adaptive_window(o: i64, in_len: i64, out_len: i64) -> (i64, i64) {
+///
+/// `o`／`in_len`／`out_len` は `PoolDims`（`u32` フィールド）由来の
+/// 値であり adaptive 窓は padding を持たず座標が常に非負のため、
+/// 符号付き `i64` ではなく符号なし `u64` で計算する（`derive_adaptive_
+/// dims` の `to_u32_checked` が各値を `u32::MAX` 以下に保証するため、
+/// 最大の中間積 `(o+1)*in_len` ≈ `u32::MAX * u32::MAX` ≈ 1.8447e19 は
+/// `u64::MAX` ≈ 1.8447e19 に収まり overflow しない。`i64::MAX` ≈
+/// 9.223e18 では overflow して panic／負値ラップにより負添字での
+/// out-of-bounds 読み出しを起こしていた。`shaders/pooling.metal::
+/// adaptive_avg_pool2d_f32` の `ulong` 版と 1 対 1 対応する
+/// codex-review 是正・#1885）。
+fn adaptive_window(o: u64, in_len: u64, out_len: u64) -> (u64, u64) {
     let start = (o * in_len) / out_len;
-    let end = ((o + 1) * in_len + out_len - 1) / out_len;
+    // `div_ceil` は `((o + 1) * in_len + out_len - 1) / out_len` と
+    // 数学的に同じ整数結果を返す（`shaders/pooling.metal::
+    // adaptive_avg_pool2d_f32` は `clippy::manual_div_ceil` の対象外
+    // の MSL のため後者の形のまま。値は一致する）。
+    let end = ((o + 1) * in_len).div_ceil(out_len);
     (start, end)
 }
 
@@ -602,14 +657,15 @@ pub fn adaptive_avg_pool2d_soft_f64(
     dims: &PoolDims,
 ) -> Result<Vec<f32>, PoolingPrepareError> {
     validate_pool_dims_consistent(dims)?;
+    require_adaptive_pool_dims(dims)?;
     validate_input_len(x.len(), dims)?;
     let (n, c, h_in, w_in, h_out, w_out) = (
-        dims.n as i64,
-        dims.c as i64,
-        dims.h_in as i64,
-        dims.w_in as i64,
-        dims.h_out as i64,
-        dims.w_out as i64,
+        dims.n as u64,
+        dims.c as u64,
+        dims.h_in as u64,
+        dims.w_in as u64,
+        dims.h_out as u64,
+        dims.w_out as u64,
     );
     let numel_out = dims.numel_out as usize;
     let mut out = vec![0.0f32; numel_out];
@@ -867,9 +923,9 @@ mod tests {
 
         // 独立な f64 naive 参照（PyTorch と同じ start/end 整数演算）。
         let mut want = vec![0.0f32; got.len()];
-        for oh in 0..3i64 {
+        for oh in 0..3u64 {
             let (sh, eh) = adaptive_window(oh, 5, 3);
-            for ow in 0..3i64 {
+            for ow in 0..3u64 {
                 let (sw, ew) = adaptive_window(ow, 5, 3);
                 let mut acc = 0.0f64;
                 for ih in sh..eh {
@@ -1004,6 +1060,68 @@ mod tests {
         // out-of-bounds を起こしうる構成）。
         dims.numel_out = 1;
         let x = vec![0.0f32; 16];
+        assert!(matches!(
+            adaptive_avg_pool2d_soft_f64(&x, &dims),
+            Err(PoolingPrepareError::InvalidShape { .. })
+        ));
+    }
+
+    /// codex-review 指摘（#1885。AdaptiveAvgPool の窓座標計算が
+    /// 整数オーバーフロー可能）の回帰: `o`／`in_len`／`out_len` が
+    /// `u32::MAX` 付近（`PoolDims` の `u32` フィールドが許容する
+    /// 上限）でも `adaptive_window` が overflow せず panic しない
+    /// （旧 `i64` 実装では `(o + 1) * in_len` が `i64::MAX` を超えて
+    /// overflow し、負値へラップした `start`／`end` を境界検査なしに
+    /// 返していた）。導出した窓が入力範囲 `[0, in_len)` に収まる
+    /// （`end` は排他的上限であり `in_len` を超えないこと）ことも
+    /// 併せて確認する。
+    #[test]
+    fn adaptive_window_no_overflow_near_u32_max() {
+        let in_len = u32::MAX as u64;
+        let out_len = u32::MAX as u64;
+        // `(o + 1) * in_len` が符号付き `i64::MAX`（約 9.223e18）を
+        // 超え始める境目付近（約 2.147e9）を狙う（指摘中の具体例
+        // `oh=2147483649` と同じオーダー）。
+        for o in [0u64, 1, 2_147_483_649, out_len - 2, out_len - 1] {
+            let (start, end) = adaptive_window(o, in_len, out_len);
+            assert!(start <= end, "start={start} end={end} for o={o}");
+            assert!(end <= in_len, "end={end} exceeds in_len={in_len} for o={o}");
+        }
+    }
+
+    /// codex-review 指摘（#1885 line 414）の回帰: `derive_adaptive_
+    /// dims` が返す adaptive 用 `PoolDims`（`kh==0 && kw==0`）を
+    /// `avg_pool2d_soft_f64`／`max_pool2d_model`（通常 Pooling 用）へ
+    /// 渡すと `InvalidShape` で拒否され、`validate_pool_dims_
+    /// consistent` だけでは検出できなかった「空ループ・0/0 NaN が
+    /// 成功扱いで返る」誤用を機構的に遮断することを固定する。
+    #[test]
+    fn regular_pool_models_reject_adaptive_style_dims() {
+        let dims = derive_adaptive_dims(&[1, 1, 4, 4], (2, 2)).unwrap();
+        assert_eq!(dims.kh, 0);
+        assert_eq!(dims.kw, 0);
+        let x = vec![1.0f32; 16];
+        assert!(matches!(
+            avg_pool2d_soft_f64(&x, &dims),
+            Err(PoolingPrepareError::InvalidShape { .. })
+        ));
+        assert!(matches!(
+            max_pool2d_model(&x, &dims),
+            Err(PoolingPrepareError::InvalidShape { .. })
+        ));
+    }
+
+    /// [`regular_pool_models_reject_adaptive_style_dims`] の逆方向:
+    /// `derive_pool_dims` が返す通常 Pooling 用 `PoolDims`
+    /// （`kh != 0 && kw != 0`）を `adaptive_avg_pool2d_soft_f64` へ
+    /// 渡すと `InvalidShape` で拒否されることを固定する。
+    #[test]
+    fn adaptive_pool_model_rejects_regular_style_dims() {
+        let dims =
+            derive_pool_dims(&[1, 1, 4, 4], (2, 2), (2, 2), (0, 0), (1, 1), false, true).unwrap();
+        assert_ne!(dims.kh, 0);
+        assert_ne!(dims.kw, 0);
+        let x = vec![1.0f32; 16];
         assert!(matches!(
             adaptive_avg_pool2d_soft_f64(&x, &dims),
             Err(PoolingPrepareError::InvalidShape { .. })
