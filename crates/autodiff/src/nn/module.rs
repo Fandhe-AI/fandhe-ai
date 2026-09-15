@@ -195,9 +195,14 @@ pub trait Module {
     ///
     /// - **shape 保存置換のみ**（`compat::Sequential::apply_parameters`
     ///   の #426 契約と同じ）。既存パラメータと `value.shape()` が
-    ///   完全一致しなければ `AutodiffError::InvalidArgument`。
+    ///   完全一致しなければ `AutodiffError::Shape`（`tensor-core::
+    ///   ShapeError::ShapeMismatch` をラップ。本クレート内実装
+    ///   〈`Linear`・`RmsNorm`・`LayerNorm`・`RnnCell`・`LstmCell`・
+    ///   `GruCell`〉はいずれもこの variant を返す。codex-review 指摘・
+    ///   PR #1875 是正: 旧 doc は誤って `InvalidArgument` と記載して
+    ///   いた）。
     /// - `name` に該当するパラメータが存在しない場合（未知の名前、
-    ///   または対象が `Option` で現在 `None` の場合を含む）も
+    ///   または対象が `Option` で現在 `None` の場合を含む）は
     ///   `AutodiffError::InvalidArgument`（fail-closed。
     ///   `.claude/rules/security.md` A03）。
     /// - 非 contiguous テンソルの正規化は行わない（`apply_parameters`／
@@ -238,35 +243,80 @@ pub trait Module {
     /// #1752）。**strict 限定**（PyTorch `strict=False` に相当する
     /// 部分ロードは未実装。必要になれば別 API として設計する）。
     ///
-    /// # アトミック性（two-pass。`compat::Sequential::apply_parameters`
-    /// と同型。#294／#426）
+    /// # アトミック性（two-pass + ベストエフォート・ロールバック。
+    /// `compat::Sequential::apply_parameters` と同型の意図・#294／#426。
+    /// codex-review 指摘・PR #1875 是正）
     ///
     /// パス 1（検証のみ・無変更）で (a) `state` のキー集合と
     /// `named_parameters()` の名前集合の**完全一致**（欠落・余剰キーを
     /// それぞれ昇順で列挙し `AutodiffError::InvalidArgument`）、
-    /// (b) 各キーの `shape()` 完全一致を検査してから、パス 2（適用）で
-    /// [`Module::set_parameter`] を呼んで実際に書き戻す。パス 1 の
-    /// 完全一致検査を通過して初めてパス 2 へ進むため、**途中で失敗
-    /// した場合でも呼び出し前の状態が完全に維持される**（部分適用を
-    /// 残したまま `Err` を返さない。`.claude/rules/security.md` A08）。
+    /// (b) 各キーの `shape()` 完全一致を検査する。ここまでは
+    /// `apply_parameters` と同じく代入前の純粋な検証で、失敗しても
+    /// 状態は一切変化しない。
     ///
-    /// パス 1 は `named_parameters()`（`&self` 借用）の戻り値を
-    /// 所有権付きの `(String, Vec<usize>)`（名前・shape）列へ写し
-    /// 取ってから借用を解放する（パス 2 が `&mut self` を要するため、
-    /// `&Tensor` 借用を持ち越すと借用検査に落ちる）。
+    /// `apply_parameters` と異なり、本メソッドはここから先を
+    /// 「置換前に全件を検証し尽くしてから代入する」形で完結**できない**:
+    /// `apply_parameters` は `Linear::from_parameters` が返す**新しい
+    /// `Linear` を丸ごと構築してから最後に代入する**ため代入自体が
+    /// 失敗し得ないが、[`Module::set_parameter`] は任意の外部 `Module`
+    /// 実装がオーバーライドしうる仮想呼び出しであり、パス 1 が検査した
+    /// `named_parameters()` の名前・shape と実際に一致した書き戻しを
+    /// 行うかは実装側の契約遵守に依存する（[`Module::set_parameter`]
+    /// doc「オーバーライド指針」）。とくに [`crate::nn::container::
+    /// ModuleList`] のような複合層に、`named_parameters` はオーバー
+    /// ライドしたが `set_parameter` を対でオーバーライドし損ねた外部
+    /// `Module`（既定実装のまま常に `Err` を返す）が混在する場合、
+    /// パス 1 は通過するのにパス 2 の途中で `Err` になりうる。
+    ///
+    /// そこでパス 2 は次の手順でベストエフォートの原子性を担保する:
+    ///
+    /// 1. パス 1 で得た `named_parameters()` の現在値を丸ごと `clone`
+    ///    して `snapshot`（ロールバック用の複製）を保持する。
+    /// 2. `state` の走査順を **キー名の昇順**へ固定してから
+    ///    [`Module::set_parameter`] を順に呼ぶ（`HashMap` の走査順の
+    ///    まま適用すると、失敗時にどこまで適用済みかが実行のたびに
+    ///    変わり再現できない）。
+    /// 3. 途中の呼び出しが `Err` を返したら、**それまでに適用済みの
+    ///    キーを逆順に** `snapshot` の値で `set_parameter` へ書き戻す
+    ///    （後勝ちの上書きを避けるため適用順の逆順で戻す）。ロール
+    ///    バックの各呼び出しは「直前に成功したのと同じ名前・同じ
+    ///    shape」を渡すだけなので通常は成功する。
+    /// 4. ロールバック自体が失敗した場合（外部実装が状態を持つ・
+    ///    非決定的に失敗する等の想定外のケース）は、それを黙って
+    ///    握り潰さず、**モデルが部分適用のまま残っている可能性**を
+    ///    明示した `AutodiffError::InvalidArgument` を返す
+    ///    （`.claude/rules/security.md` A08。fail-closed）。
+    ///
+    /// 以上により、**すべての `Module` 実装が「パス 1 で受理された
+    /// `(name, shape)` の組を渡された `set_parameter` は、直後の再呼び
+    /// 出しでも成功する」という契約に従う限り**、途中で失敗しても
+    /// 呼び出し前の状態が維持される。この契約自体を破る実装（例:
+    /// 副作用として一度きりしか成功しない `set_parameter`）に対しては
+    /// 完全な原子性を構造的に保証できない（`Self: Clone` を要求せず
+    /// 任意の `Module` トレイトオブジェクトに対応するための限界。
+    /// `apply_parameters` が `Linear` という具象型に対してのみ実現
+    /// できている「代入前に新オブジェクトを完成させる」方式は、
+    /// `dyn Module` の汎用デフォルト実装としては再現できない）。
+    ///
+    /// ピークメモリは通常の約 2 倍（`state` + `snapshot`）になるが、
+    /// [`Module::state_dict`] も同様に全パラメータを `clone` するため
+    /// 既存契約からの追加コストではない。
     fn load_state_dict(
         &mut self,
         state: HashMap<String, Tensor<f32>>,
     ) -> Result<(), AutodiffError> {
-        // パス 1（検証のみ）。
-        let expected: Vec<(String, Vec<usize>)> = self
+        // パス 1（検証のみ）。ロールバック用に shape だけでなく値
+        // そのものを丸ごと保持する（`&self` 借用の戻り値を所有権付きの
+        // `(String, Tensor<f32>)` 列へ写し取ってから借用を解放する。
+        // パス 2 が `&mut self` を要するため、`&Tensor` 借用を持ち越す
+        // と借用検査に落ちる）。
+        let snapshot: HashMap<String, Tensor<f32>> = self
             .named_parameters()
             .into_iter()
-            .map(|(name, tensor)| (name, tensor.shape().to_vec()))
+            .map(|(name, tensor)| (name, tensor.clone()))
             .collect();
 
-        let expected_names: HashSet<&str> =
-            expected.iter().map(|(name, _)| name.as_str()).collect();
+        let expected_names: HashSet<&str> = snapshot.keys().map(String::as_str).collect();
         let state_names: HashSet<&str> = state.keys().map(|k| k.as_str()).collect();
 
         let mut missing: Vec<&str> = expected_names.difference(&state_names).copied().collect();
@@ -283,26 +333,56 @@ pub trait Module {
                 "Module::load_state_dict: unexpected keys: {unexpected:?}"
             )));
         }
-        for (name, expected_shape) in &expected {
+        for (name, old_tensor) in &snapshot {
             // 直上の集合検査でキーは必ず存在するため `state.get` は
             // `Some` を返す（`unwrap`/`expect` は使わず `if let` で
             // 安全にアクセスする）。
             if let Some(tensor) = state.get(name.as_str())
-                && tensor.shape() != expected_shape.as_slice()
+                && tensor.shape() != old_tensor.shape()
             {
                 return Err(AutodiffError::InvalidArgument(format!(
                     "Module::load_state_dict: shape mismatch for `{name}`: expected \
-                     {expected_shape:?}, got {:?}",
+                     {:?}, got {:?}",
+                    old_tensor.shape(),
                     tensor.shape()
                 )));
             }
         }
 
-        // パス 2（適用）。パス 1 でキー集合・shape は確定済みのため
-        // 理論上失敗しないが、`set_parameter` 未対応の外部実装
-        // （既定実装のまま `Err` を返す層）向けに `?` で伝播する。
-        for (name, tensor) in state {
-            self.set_parameter(&name, tensor)?;
+        // パス 2（適用。ベストエフォート・ロールバック付き。メソッド
+        // doc「アトミック性」節参照）。走査順をキー名の昇順へ固定する。
+        let mut entries: Vec<(String, Tensor<f32>)> = state.into_iter().collect();
+        entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+
+        let mut applied: Vec<(String, Tensor<f32>)> = Vec::with_capacity(entries.len());
+        for (name, new_value) in entries {
+            match self.set_parameter(&name, new_value) {
+                Ok(()) => {
+                    // パス 1 の完全一致検査によりキーは必ず snapshot に
+                    // 存在する（`unwrap`/`expect` は使わず `if let` で
+                    // 安全に取り出す）。
+                    if let Some(old_value) = snapshot.get(name.as_str()) {
+                        applied.push((name, old_value.clone()));
+                    }
+                }
+                Err(err) => {
+                    // 適用済みの分を逆順（後勝ちで上書きされないよう）に
+                    // 元の値へ戻す。
+                    for (rollback_name, rollback_value) in applied.into_iter().rev() {
+                        if let Err(rollback_err) =
+                            self.set_parameter(&rollback_name, rollback_value)
+                        {
+                            return Err(AutodiffError::InvalidArgument(format!(
+                                "Module::load_state_dict: failed to apply `{name}` ({err}), \
+                                 and rollback of already-applied key `{rollback_name}` also \
+                                 failed ({rollback_err}); the module may now be left in a \
+                                 partially applied state"
+                            )));
+                        }
+                    }
+                    return Err(err);
+                }
+            }
         }
         Ok(())
     }
@@ -1090,5 +1170,91 @@ mod tests {
         let via_host = elu.forward_host(test_ops().as_ref(), &x).unwrap();
 
         assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    /// codex-review 指摘（PR #1875）の回帰テスト用モック: `named_parameters`
+    /// はオーバーライドするが `set_parameter` は既定実装（常に `Err`）の
+    /// まま残した「半分だけ実装した」外部 `Module`。`Module::set_parameter`
+    /// doc「オーバーライド指針」に反する構成だが、[`ModuleList`] 等の
+    /// 複合層に混在しうるケースとして `load_state_dict` のロールバック
+    /// 経路を検証するために使う。
+    struct HalfImplementedModule {
+        param: Tensor<f32>,
+    }
+
+    impl Module for HalfImplementedModule {
+        fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            unreachable!("本テストでは forward は呼ばれない")
+        }
+
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("param".to_string(), &self.param)]
+        }
+
+        // `set_parameter` は意図的にオーバーライドしない（既定実装の
+        // まま。常に `AutodiffError::InvalidArgument` を返す）。
+    }
+
+    use crate::nn::container::ModuleList;
+
+    #[test]
+    fn load_state_dict_rolls_back_earlier_success_when_later_key_fails() {
+        // index 0: 正常に `set_parameter` へ応答する `Linear`。
+        // index 1: `named_parameters` はあるが `set_parameter` が常に
+        // `Err` を返す「半分だけ実装した」 Module（上記）。
+        //
+        // `state` のキーはパス 2 で昇順（"0.weight" < "1.param"）に
+        // 適用されるため、index 0 が先に成功してから index 1 が失敗する
+        // ——「後発キーの失敗が先発の成功済み変更を巻き戻す」経路を
+        // 決定的に踏む。
+        let mut list = ModuleList::new();
+        list.push(Box::new(Linear::new(3, 2, true, 11).unwrap()));
+        list.push(Box::new(HalfImplementedModule {
+            param: Tensor::new(vec![1.0f32, 2.0], &[2]).unwrap(),
+        }));
+
+        let before = list.state_dict();
+        let mut state = before.clone();
+        state.insert(
+            "0.weight".to_string(),
+            Tensor::new(vec![9.0f32; 6], &[3, 2]).unwrap(),
+        );
+        state.insert(
+            "1.param".to_string(),
+            Tensor::new(vec![5.0f32, 6.0], &[2]).unwrap(),
+        );
+
+        let err = list
+            .load_state_dict(state)
+            .expect_err("HalfImplementedModule の set_parameter 既定失敗で Err のはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        let after = list.state_dict();
+        for (key, tensor) in &before {
+            assert_eq!(
+                tensor.contiguous().as_slice().unwrap(),
+                after[key].contiguous().as_slice().unwrap(),
+                "ロールバック後も key `{key}` が呼び出し前の値と異なる \
+                 （先発の `0.weight` 適用が巻き戻されていない可能性）"
+            );
+        }
+    }
+
+    #[test]
+    fn load_state_dict_fails_immediately_when_first_key_fails() {
+        // 単独の HalfImplementedModule（先発する成功例がない最小ケース）。
+        let mut half = HalfImplementedModule {
+            param: Tensor::new(vec![1.0f32, 2.0], &[2]).unwrap(),
+        };
+        let mut state = HashMap::new();
+        state.insert(
+            "param".to_string(),
+            Tensor::new(vec![9.0f32, 9.0], &[2]).unwrap(),
+        );
+        let err = half
+            .load_state_dict(state)
+            .expect_err("set_parameter 既定失敗で Err のはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert_eq!(half.param.contiguous().as_slice().unwrap(), &[1.0f32, 2.0]);
     }
 }

@@ -484,9 +484,9 @@ impl Sequential {
     /// [`Sequential::state_dict`] の逆（PyTorch
     /// `Module.load_state_dict(state_dict, strict=True)` 相当。イシュー
     /// #1752）。`self.inner` の [`Module::load_state_dict`] 既定実装
-    /// （strict・two-pass アトミック。パス 1 の検証を全通過して初めて
-    /// パス 2 で書き戻すため、途中で `Err` になっても呼び出し前の
-    /// モデル状態が完全に維持される）へ 1 行委譲する。
+    /// （strict・two-pass + ベストエフォート・ロールバック。アトミック
+    /// 性の正確な契約は `Module::load_state_dict` doc「アトミック性」
+    /// 節を参照）へ 1 行委譲する。
     ///
     /// # 注意
     ///
