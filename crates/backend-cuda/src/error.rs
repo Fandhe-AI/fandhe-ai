@@ -564,6 +564,28 @@ pub enum CudaError {
     /// へ委ねる（`Im2colSizeLimitExceeded`／`UniqueSizeLimitExceeded`
     /// と同じ設計判断）。
     BatchNormSizeLimitExceeded { detail: String },
+
+    /// MaxPool／AvgPool／AdaptiveAvgPool 起動 API（`pooling.rs::
+    /// CudaPooling`）のホスト側形状・パラメータ検査（イシュー #1729）
+    /// が拒否した入力。`InvalidIm2colShape` と同じ「専用 variant で
+    /// `Display` メッセージの誤表示を避ける」方針: `kernel/stride/
+    /// dilation >= 1`・`padding <= floor(kernel/2)`・空間軸（`H`／`W`）
+    /// 非ゼロ・`dilation` による空窓拒否・`pool_out_len` の負分子
+    /// 拒否・要素数積の overflow・ホストスライス長の不一致を起動前に
+    /// 検証する（`docs/pooling-ops-design.md` §3／§4）。**イシュー
+    /// #1729 実装時点では `ops.rs::CudaBackendOps` への override 配線
+    /// が無いため（`pooling.rs` モジュール doc の「`ops.rs::CudaBackendOps` への未配線」節参照）、本 variant は
+    /// 現時点でクレート内テストからのみ到達する**。
+    InvalidPoolingShape { detail: String },
+
+    /// MaxPool／AvgPool／AdaptiveAvgPool の対象サイズがバックエンド
+    /// 固有の上限（形状パラメータのいずれかがカーネル引数型 `int` の
+    /// 範囲〈`i32::MAX`〉を超える、または MaxPool の索引値域
+    /// `H * W` が `i32::MAX` を超える場合）を超過した（イシュー
+    /// #1729）。`Im2colSizeLimitExceeded`／`BatchNormSizeLimitExceeded`
+    /// と同じ設計判断（`ops.rs` 配線後は `BackendError::Unsupported`
+    /// へ写像しホストフォールバックへ委ねる想定）。
+    PoolingSizeLimitExceeded { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -719,6 +741,12 @@ impl fmt::Display for CudaError {
             }
             CudaError::BatchNormSizeLimitExceeded { detail } => {
                 write!(f, "BatchNorm size limit exceeded: {detail}")
+            }
+            CudaError::InvalidPoolingShape { detail } => {
+                write!(f, "invalid pooling shape/argument: {detail}")
+            }
+            CudaError::PoolingSizeLimitExceeded { detail } => {
+                write!(f, "pooling size limit exceeded: {detail}")
             }
         }
     }
