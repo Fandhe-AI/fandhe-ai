@@ -181,6 +181,33 @@ impl Module for ModuleList {
         }
         out
     }
+
+    /// [`Module::set_parameter`] の実装（イシュー #1752）。
+    /// `named_parameters` の `"{index}.{name}"` 接頭辞契約（直上参照）
+    /// の逆演算: 先頭の `"."` までを `index` として切り出し
+    /// `usize::parse` してから `self.modules[index].set_parameter`
+    /// へ委譲する。区切りなし・パース失敗・範囲外はいずれも未知名
+    /// 扱いで `InvalidArgument`（fail-closed。`.claude/rules/
+    /// security.md` A03）。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        let (index_str, rest) = name.split_once('.').ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "ModuleList::set_parameter: no parameter named `{name}` (expected `{{index}}.{{name}}`)"
+            ))
+        })?;
+        let index: usize = index_str.parse().map_err(|_| {
+            AutodiffError::InvalidArgument(format!(
+                "ModuleList::set_parameter: no parameter named `{name}` (`{index_str}` is not a valid module index)"
+            ))
+        })?;
+        match self.modules.get_mut(index) {
+            Some(module) => module.set_parameter(rest, value),
+            None => Err(AutodiffError::InvalidArgument(format!(
+                "ModuleList::set_parameter: no parameter named `{name}` (index {index} out of range; ModuleList has {} modules)",
+                self.modules.len()
+            ))),
+        }
+    }
 }
 
 /// PyTorch `nn.Sequential` 相当の汎用コンテナ: 子 `Module` を
@@ -328,6 +355,12 @@ impl Module for Sequential {
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
         self.inner.named_parameters()
     }
+
+    /// [`Module::set_parameter`] の実装（イシュー #1752）。
+    /// `self.inner`（`ModuleList`）へそのまま委譲する。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        self.inner.set_parameter(name, value)
+    }
 }
 
 #[cfg(test)]
@@ -375,5 +408,145 @@ mod tests {
         let list = ModuleList::default();
         assert!(list.is_empty());
         assert_eq!(list.len(), 0);
+    }
+
+    // `ModuleList`/`Sequential::set_parameter`・`state_dict`/
+    // `load_state_dict`（`Module` の defaulted 実装。イシュー #1752）の
+    // 単体テスト。
+
+    fn two_linear_sequential() -> Sequential {
+        Sequential::new()
+            .add(Linear::new(4, 8, true, 1).unwrap())
+            .add(Relu)
+            .add(Linear::new(8, 2, true, 2).unwrap())
+    }
+
+    #[test]
+    fn state_dict_keys_match_named_parameters() {
+        let seq = two_linear_sequential();
+        let named: std::collections::HashSet<String> = seq
+            .named_parameters()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        let dict_keys: std::collections::HashSet<String> = seq.state_dict().into_keys().collect();
+        assert_eq!(named, dict_keys);
+        assert_eq!(named.len(), 4); // 0.weight, 0.bias, 2.weight, 2.bias
+    }
+
+    #[test]
+    fn load_state_dict_round_trip_is_no_op() {
+        let mut seq = two_linear_sequential();
+        let before = seq.state_dict();
+        seq.load_state_dict(seq.state_dict()).unwrap();
+        let after = seq.state_dict();
+        for (key, tensor) in &before {
+            assert_eq!(
+                tensor.contiguous().as_slice().unwrap(),
+                after[key].contiguous().as_slice().unwrap(),
+                "key `{key}` が往復後に変化した"
+            );
+        }
+    }
+
+    #[test]
+    fn load_state_dict_actually_updates_values() {
+        let mut seq = two_linear_sequential();
+        let mut state = seq.state_dict();
+        let new_weight = Tensor::new(vec![7.0f32; 32], &[4, 8]).unwrap();
+        state.insert("0.weight".to_string(), new_weight.clone());
+        seq.load_state_dict(state).unwrap();
+        let (name, tensor) = seq
+            .named_parameters()
+            .into_iter()
+            .find(|(name, _)| name == "0.weight")
+            .unwrap();
+        assert_eq!(name, "0.weight");
+        assert_eq!(
+            tensor.contiguous().as_slice().unwrap(),
+            new_weight.contiguous().as_slice().unwrap()
+        );
+    }
+
+    #[test]
+    fn load_state_dict_rejects_missing_key() {
+        let mut seq = two_linear_sequential();
+        let mut state = seq.state_dict();
+        state.remove("0.bias");
+        let err = seq
+            .load_state_dict(state)
+            .expect_err("欠落キーは Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn load_state_dict_rejects_unexpected_key() {
+        let mut seq = two_linear_sequential();
+        let mut state = seq.state_dict();
+        state.insert(
+            "99.weight".to_string(),
+            Tensor::new(vec![0.0f32], &[1]).unwrap(),
+        );
+        let err = seq
+            .load_state_dict(state)
+            .expect_err("余剰キーは Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn load_state_dict_rejects_shape_mismatch() {
+        let mut seq = two_linear_sequential();
+        let mut state = seq.state_dict();
+        state.insert(
+            "0.weight".to_string(),
+            Tensor::new(vec![1.0f32; 6], &[2, 3]).unwrap(),
+        );
+        let err = seq
+            .load_state_dict(state)
+            .expect_err("shape 不一致は Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn load_state_dict_err_leaves_model_unchanged() {
+        let mut seq = two_linear_sequential();
+        let before = seq.state_dict();
+        let mut bad_state = seq.state_dict();
+        bad_state.remove("2.bias");
+        let _ = seq.load_state_dict(bad_state);
+        let after = seq.state_dict();
+        for (key, tensor) in &before {
+            assert_eq!(
+                tensor.contiguous().as_slice().unwrap(),
+                after[key].contiguous().as_slice().unwrap(),
+                "load_state_dict が Err を返したのに key `{key}` が変化した"
+            );
+        }
+    }
+
+    #[test]
+    fn module_list_set_parameter_dispatches_by_index_and_rejects_bad_names() {
+        let mut list = ModuleList::new();
+        list.push(Box::new(Linear::new(4, 8, true, 1).unwrap()));
+        list.push(Box::new(Relu));
+
+        let new_weight = Tensor::new(vec![3.0f32; 32], &[4, 8]).unwrap();
+        list.set_parameter("0.weight", new_weight.clone()).unwrap();
+
+        // 区切りなし。
+        assert!(matches!(
+            list.set_parameter("weight", Tensor::new(vec![0.0f32], &[1]).unwrap()),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        // パース失敗。
+        assert!(matches!(
+            list.set_parameter("x.weight", Tensor::new(vec![0.0f32], &[1]).unwrap()),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        // 範囲外。
+        assert!(matches!(
+            list.set_parameter("99.weight", Tensor::new(vec![0.0f32], &[1]).unwrap()),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
     }
 }
