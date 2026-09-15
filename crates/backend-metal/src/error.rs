@@ -186,6 +186,24 @@ pub enum MetalError {
     /// （`.claude/rules/security.md` A08）。`detail` は元の
     /// [`fandhe_ai_tensor_core::ShapeError`] の `Display` 文字列表現。
     InvalidConstantPadShape { detail: String },
+    /// `crate::im2col::MetalIm2col::run_im2col_f32`／`run_col2im_f32`
+    /// （イシュー #1768）が起動前に独自検証する形状（`Im2colDims` の
+    /// 導出・ホストスライス実長の整合）が不正だった。
+    /// `InvalidGatherScatterShape` と同じ理由で独立 variant に分離する
+    /// （`.claude/rules/security.md` A08）。`detail` は元の
+    /// [`crate::im2col_model::Im2colPrepareError`] の `Display` 文字列
+    /// 表現、またはスライス長不整合の直接メッセージ。
+    InvalidIm2colShape { detail: String },
+    /// `crate::im2col_model::derive_im2col_dims`（`crate::im2col::
+    /// MetalIm2col::run_im2col_f32`／`run_col2im_f32` が起動前に呼ぶ。
+    /// イシュー #1768）が検知した「形状パラメータがカーネル `uint`
+    /// 引数の範囲（`u32::MAX`）を超過」。`InvalidIm2colShape`
+    /// （内部契約違反）とは区別する: col は入力の `kH·kW` 倍で現実的
+    /// 形状でも上限へ到達しうるため、`ops.rs::map_im2col_error` は
+    /// 本 variant のみ `BackendError::Unsupported`（ホスト
+    /// フォールバック）へ写像する（`backend-cuda::error::
+    /// CudaError::Im2colSizeLimitExceeded` と同型の設計判断）。
+    Im2colSizeLimitExceeded { detail: String },
 }
 
 impl fmt::Display for MetalError {
@@ -299,6 +317,12 @@ impl fmt::Display for MetalError {
             }
             MetalError::InvalidConstantPadShape { detail } => {
                 write!(f, "invalid pad shape: {detail}")
+            }
+            MetalError::InvalidIm2colShape { detail } => {
+                write!(f, "invalid im2col/col2im shape: {detail}")
+            }
+            MetalError::Im2colSizeLimitExceeded { detail } => {
+                write!(f, "im2col/col2im size limit exceeded: {detail}")
             }
         }
     }

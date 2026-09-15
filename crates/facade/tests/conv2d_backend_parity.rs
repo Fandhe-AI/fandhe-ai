@@ -12,17 +12,16 @@
 //! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
 //!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の経路を CPU tape
 //!   と `assert_parity`（REQ-2 複合判定。GEMM 由来の差を許容）で比較
-//!   する。CUDA は本ファイル追記時点（イシュー #1766）で `im2col`／
-//!   `col2im` を override 済み（bit 完全一致契約は不変）だが `conv2d`
-//!   自身は override しないため「GPU im2col → GPU GEMM → GPU add」の
-//!   段階的合成のうち GEMM 段のみが CPU 参照実装と異なりうる。Metal
-//!   は `im2col`／`col2im`／`conv2d` いずれも override しない（#1644
-//!   未実装）ため「ホスト im2col → GPU GEMM → GPU add」経路となるが、
-//!   im2col／col2im 自体は算術を含まないコピー・`f64` 逐次和のいずれも
-//!   bit 完全一致契約のため、差分の発生源は両バックエンドとも GEMM 段
-//!   のみである点は変わらない（設計 doc §7「GPU parity は REQ-2 複合
-//!   判定・im2col／col2im 単体は bit 一致の 2 層構成」）。実機未実測
-//!   のまま出荷し記入欄を残す。
+//!   する。CUDA（イシュー #1766）・Metal（イシュー #1768）とも
+//!   `im2col`／`col2im` を override 済み（bit 完全一致契約は不変）だが
+//!   `conv2d` 自身は override しないため「GPU im2col → GPU GEMM →
+//!   GPU add」の段階的合成のうち GEMM 段のみが CPU 参照実装と
+//!   異なりうる。im2col／col2im 自体は算術を含まないコピー・`f64`
+//!   相当の逐次加算（Metal は binary64 ソフトウェアエミュレーション）
+//!   のいずれも bit 完全一致契約のため、差分の発生源は両バックエンド
+//!   とも GEMM 段のみである点は変わらない（設計 doc §7「GPU parity は
+//!   REQ-2 複合判定・im2col／col2im 単体は bit 一致の 2 層構成」）。
+//!   実機未実測のまま出荷し記入欄を残す。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Device;
@@ -226,10 +225,10 @@ fn metal_conv2d_forward_matches_cpu() {
     let metal_out = conv2d_forward_on(Device::Metal);
     let cpu_out = conv2d_forward_on(Device::Cpu);
 
-    // ホスト im2col（bit 一致）＋ GPU GEMM（REQ-2 複合判定）の合成の
-    // ため、im2col／col2im 単体ではなく forward 全体を REQ-2 複合判定
-    // で比較する（設計 doc §7「Conv 全体の 3 バックエンド parity 判定
-    // は REQ-2 複合判定で行う」）。
+    // GPU im2col（bit 一致。#1768）＋ GPU GEMM（REQ-2 複合判定）の
+    // 合成のため、im2col／col2im 単体ではなく forward 全体を REQ-2
+    // 複合判定で比較する（設計 doc §7「Conv 全体の 3 バックエンド
+    // parity 判定は REQ-2 複合判定で行う」）。
     assert_parity(
         "conv2d forward: Metal tape_for vs CPU tape_for",
         &contiguous_slice(&metal_out),
@@ -292,6 +291,38 @@ fn cuda_conv2d_backward_matches_cpu() {
     assert_parity(
         "conv2d backward（db）: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&db_cuda),
+        &contiguous_slice(&db_cpu),
+    );
+}
+
+/// `metal_conv2d_forward_matches_cpu` と同じ理由で `cfg(target_os =
+/// "macos")` 限定（イシュー #1768）。Metal は `im2col`／`col2im` を
+/// override 済み（bit 完全一致契約は不変）だが `conv2d` 自身は
+/// override しないため、`conv2d_with_fallback` の段階的合成のうち
+/// im2col（bit 一致）・GEMM（REQ-2）・col2im（bit 一致。d_input 側）を
+/// 経由する。d_weight／d_bias はホスト側縮約（設計 doc §6.3〜§6.4）の
+/// ため GEMM 段の差のみが REQ-2 判定対象となる（`cuda_conv2d_backward_
+/// matches_cpu` doc comment と同じ理由）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_conv2d_backward_matches_cpu() {
+    let (dx_metal, dw_metal, db_metal) = conv2d_backward_on(Device::Metal);
+    let (dx_cpu, dw_cpu, db_cpu) = conv2d_backward_on(Device::Cpu);
+
+    assert_parity(
+        "conv2d backward（dx）: Metal tape_for vs CPU tape_for",
+        &contiguous_slice(&dx_metal),
+        &contiguous_slice(&dx_cpu),
+    );
+    assert_parity(
+        "conv2d backward（dw）: Metal tape_for vs CPU tape_for",
+        &contiguous_slice(&dw_metal),
+        &contiguous_slice(&dw_cpu),
+    );
+    assert_parity(
+        "conv2d backward（db）: Metal tape_for vs CPU tape_for",
+        &contiguous_slice(&db_metal),
         &contiguous_slice(&db_cpu),
     );
 }
