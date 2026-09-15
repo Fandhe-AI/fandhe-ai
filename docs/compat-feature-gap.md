@@ -1671,7 +1671,7 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - facade 新規公開面: `Tape::var_no_grad`（薄いラッパー 1 メソッド）のみ。`Var::detach` は既存 `Var` 再エクスポート経由で新規公開面なし。
 - 算術を伴わない機構のため CPU 本番 ops と naive 参照実装の勾配が bit 完全一致。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り。
 - `torch.no_grad()` コンテキスト（演算そのものをテープに載せない）は引き続き `Tensor<f32>` のまま演算する既存の型分離方式（`docs/public-api-design.md` §3.1）が担う。本 issue が追加したのは「テープに載せたノードを勾配経路から外す」機構であり、両者は独立。
-- `retain_graph`（複数回 backward の勾配蓄積契約）は兄弟イシュー #1749 の対象のまま。
+- `retain_graph`（複数回 backward の勾配蓄積契約）は兄弟イシュー #1749 で実装済み。詳細は下記「追補（イシュー #1749）」を参照。
 
 ## 追補（イシュー #1750）
 
@@ -1682,3 +1682,9 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - `Var::cast<T: CastElement>() -> Result<Tensor<T>, AutodiffError>`（**非微分演算**。VJP は明示的な打ち切り——`Var::argmax`／`unique` と同型に tape ノードを記録しない）・`Var::to_f32() -> Var<'t>`（f32 系の恒等射。勾配は通常どおり伝播）・`Tape::var_from<T: CastElement>(&Tensor<T>) -> Result<Var<'_>, AutodiffError>`（非 f32 dtype から葉ノードを直接登録）を実装した。
 - facade は `CastDType`／`CastElement` の純再エクスポート（1 行）と `facade::Tape::var_from` の委譲メソッド追加のみ。`CastOps`（動的ディスパッチ面）は facade へ再エクスポートしない（`crates/facade/tests/api_surface.rs::facade_does_not_reexport_cast_ops` が機械的に固定）。
 - 数値契約（NaN→0 の飽和整数変換・`v != 0.0` の bool 変換等）・API 配置案の比較は `docs/tensor-core-cast-design.md` を正とする。CUDA／Metal 実機での facade parity テストは未実測のまま GB10／Mac セッションへ申し送り。
+
+## 追補（イシュー #1749）
+
+- `retain_graph`（PyTorch 相当）は追加 API なしで常時成立する契約として確定した——`Tape` は明示的に `reset`（#1048）／drop するまでグラフ（`TapeNode::value`）を保持し続けるため、同一グラフに対し `Tape::backward` を何度呼んでも成功しノードを追加しない。`retain_graph=false` 相当の「backward 後にノード値を解放するモード」は意図的に追加しない（`Var::value()` の契約〈未実体化かつ `recompute==false` なら契約違反〉と衝突するため。理由は `docs/autodiff-retain-graph-accumulate-decision.md` §2.1）。
+- `Tape::backward_accumulate(&self, loss: &Var<'_>, into: &mut Gradients) -> Result<(), AutodiffError>` を新設した。PyTorch の複数回 `loss.backward()` による `.grad` 蓄積相当の opt-in API——素の `backward` の意味論（独立 `Gradients`）は不変のまま、利用者が明示的に指定した `into` へのみ蓄積する。クロステープ／世代不一致（`reset` をまたいだ場合）は `TapeMismatch`、resident 勾配経路（`DeviceParamStore::backward`）由来の `Gradients` への蓄積は `Backward` で fail-closed に拒否する（fingerprint 契約と衝突するため）。マージは既存 fan-out 蓄積と同じ `grad::vjp_elementwise_add` を使い、全要素の加算成功後にのみ `into` へ書き戻す原子的更新（途中失敗で `into` が部分更新されない）。
+- facade は `Tape::backward_accumulate` の 1 メソッド追加のみ（新規型・`Op`／`BackendOps` 拡張なし）。CPU 本番 ops と naive 参照実装の勾配が bit 完全一致（同一 loss を 2 回蓄積した `2g` の比較）。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り。

@@ -1543,6 +1543,19 @@ pub(crate) struct TapeNode {
 /// 確定へ更新）。`reset` は結果ノードの `Tensor<f32>`（デバイスバッファ）を
 /// drop してプールへ返却するため、reuse GEMM・学習ループでのバッファ
 /// 蓄積（framework-compare reuse ベンチ・#1048 発端）を解消する。
+///
+/// **`retain_graph` 契約（イシュー #1749）**: `Tape` は明示的に `reset`／
+/// drop するまでグラフ（`TapeNode::value`）を保持し続けるため、PyTorch
+/// の `retain_graph=True` が常時成立している——`backward`／`backward_
+/// accumulate`（`backward.rs`）を同一グラフに対し何度呼んでも成功し、
+/// 呼び出しはノードを 1 つも追加しない。`retain_graph=False` 相当の
+/// 「backward 後にノード値を明示的に解放するモード」は意図的に設けない
+/// ——`Var::value()`（`materialize_non_fallible`）は未実体化かつ
+/// `recompute == false` のノードを契約違反として扱うため、内部ノードの
+/// 値だけを選択的に解放すると生存中の `Var` からの再読み出しが release
+/// ビルドで黙って `0` を返す穴になる（`docs/autodiff-retain-graph-
+/// accumulate-decision.md` §2.1）。明示的な解放手段は既存の
+/// [`Tape::reset`] のみとする。
 pub struct Tape {
     pub(crate) id: TapeId,
     pub(crate) nodes: RefCell<Vec<TapeNode>>,

@@ -229,6 +229,23 @@ impl Tape {
         self.0.backward(loss)
     }
 
+    /// `loss` から逆伝播し、その結果を既存の `into`（同一世代の
+    /// `Gradients`）へ加算する（イシュー #1749・`docs/compat-api-scope.md`
+    /// §5 経路 2〈#1612 承認〉。`fandhe_ai_autodiff::Tape::backward_
+    /// accumulate` への委譲）。PyTorch の複数回 `loss.backward()` に
+    /// よる `.grad` 蓄積相当の opt-in API。`retain_graph`（テープは
+    /// `reset`／drop まで常時グラフを保持し、同一グラフへの複数回
+    /// `backward` は無条件で成功する契約）自体は追加の API なしで
+    /// 常時成立している（`fandhe_ai_autodiff::Tape` doc「`retain_graph`
+    /// 契約」参照）。
+    pub fn backward_accumulate(
+        &self,
+        loss: &Var<'_>,
+        into: &mut Gradients,
+    ) -> Result<(), AutodiffError> {
+        self.0.backward_accumulate(loss, into)
+    }
+
     /// ノード列を葉プレフィックスまで切り詰め、次のステップで同一
     /// `Tape` を再利用可能にする（イシュー #1048。
     /// `fandhe_ai_autodiff::Tape::reset` への委譲。同メソッドの doc
