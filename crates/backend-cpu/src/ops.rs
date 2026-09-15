@@ -1717,6 +1717,14 @@ impl BackendOps for CpuBackendOps {
     /// 実装（イシュー #1738）。`targets` は非追跡のため `dInput` のみを
     /// 返す契約（`backend_ops.rs::BackendOps::nll_loss_backward` doc
     /// 参照）。
+    ///
+    /// `input_shape` は公開 `BackendOps` 経由で利用者が任意に渡す値の
+    /// ため、`numel` の確保前に `checked_alloc_numel_f32`（`f32`
+    /// 換算バイトサイズの `isize::MAX` 上限検査込み）で検証する（PR
+    /// #1850 codex-review P1 是正 2: `checked_shape_product` 単体では
+    /// `usize` 積算オーバーフローは検出できても、`vec![0.0f32; numel]`
+    /// が `Vec` の capacity overflow で本番経路 panic するケース
+    /// 〈例: `input_shape=[usize::MAX]`〉を防げなかった）。
     fn nll_loss_backward(
         &self,
         input_shape: &[usize],
@@ -1735,7 +1743,7 @@ impl BackendOps for CpuBackendOps {
             num_classes: input_shape[class_dim],
             inner: checked_shape_product(&input_shape[class_dim + 1..])?,
         };
-        let numel: usize = checked_shape_product(input_shape)?;
+        let numel: usize = checked_alloc_numel_f32(input_shape)?;
         let targets_c = targets.contiguous();
         let targets_slice = targets_c.as_slice().unwrap_or(&[]);
         let mut dinput = vec![0.0f32; numel];
@@ -2297,6 +2305,92 @@ fn checked_shape_product(shape: &[usize]) -> Result<usize, BackendError> {
         .ok_or(BackendError::ShapeMismatch(
             ShapeError::ElementCountOverflow,
         ))
+}
+
+/// `checked_shape_product` で求めた要素数積が、`f32` 換算のバイト
+/// サイズとして `Vec` へ確保可能な上限（`isize::MAX`）を超えないことも
+/// 検査する（`fandhe_ai_tensor_core::tensor::checked_numel_for::<f32>`
+/// と同じ理由。`pub(crate)` のためここでは同型を独立複製する。
+/// PR #1850 codex-review P1 是正 2: `nll_loss_backward` は
+/// `input_shape`〈公開 `BackendOps` 経由で利用者が渡す任意の
+/// shape〉から直接 `numel` を導出し `vec![0.0f32; numel]` を確保する
+/// ため、`checked_shape_product` 自身は成功しても `numel` が
+/// 非現実的に巨大〈例: `input_shape=[usize::MAX]`〉だと `Vec` の
+/// capacity overflow で本番経路 panic しうる。この関数は「積算の
+/// オーバーフロー」と「確保可能サイズの超過」の双方を同一箇所で
+/// 検査し、呼び出し元へ検証済みの `numel` を返す）。
+fn checked_alloc_numel_f32(shape: &[usize]) -> Result<usize, BackendError> {
+    let numel = checked_shape_product(shape)?;
+    let bytes =
+        numel
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(BackendError::ShapeMismatch(
+                ShapeError::ElementCountOverflow,
+            ))?;
+    if bytes > isize::MAX as usize {
+        return Err(BackendError::ShapeMismatch(
+            ShapeError::ElementCountOverflow,
+        ));
+    }
+    Ok(numel)
+}
+
+#[cfg(test)]
+mod checked_alloc_numel_f32_tests {
+    use super::*;
+
+    /// PR #1850 codex-review P1 是正 2 の回帰: `checked_shape_product`
+    /// 自身は `usize` オーバーフローしない〈`usize::MAX` は単一次元
+    /// なら積算 1 回で収まる〉が、`f32` 換算バイトサイズが
+    /// `isize::MAX` を超えるため確保不可能な shape を拒否することを
+    /// 確認する。
+    #[test]
+    fn rejects_single_dim_usize_max() {
+        let err = checked_alloc_numel_f32(&[usize::MAX]).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    /// 境界値: `numel * size_of::<f32>() == isize::MAX + 1` ちょうど
+    /// （`isize::MAX` を 1 バイトだけ超える）でも拒否することを確認
+    /// する（2 GiB 級の確保を伴う「受理側」境界のテストは意図的に
+    /// 避け、拒否側のみを固定する）。
+    #[test]
+    fn rejects_bytes_just_above_isize_max() {
+        let numel = (isize::MAX as usize / std::mem::size_of::<f32>()) + 2;
+        let err = checked_alloc_numel_f32(&[numel]).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn accepts_small_shape() {
+        assert_eq!(checked_alloc_numel_f32(&[2, 3]).unwrap(), 6);
+    }
+
+    /// PR #1850 codex-review P1 是正 2 の end-to-end 回帰: 公開
+    /// `BackendOps::nll_loss_backward` を `input_shape=[usize::MAX]`・
+    /// `class_dim=0`・スカラー `targets=0` で直接呼んでも
+    /// `vec![0.0f32; numel]` の capacity overflow panic ではなく
+    /// 型付きエラーを返すことを確認する（`Var::nll_loss` を経由せず
+    /// `BackendOps` を直接呼ぶ利用者が本関数自身の検証だけを頼りに
+    /// する経路）。
+    #[test]
+    fn nll_loss_backward_rejects_huge_input_shape() {
+        let ops = CpuBackendOps::new();
+        let targets = Tensor::<i32>::new(vec![0], &[]).unwrap();
+        let err = ops
+            .nll_loss_backward(&[usize::MAX], &targets, 0, 1.0)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
 }
 
 impl CpuBackendOps {
