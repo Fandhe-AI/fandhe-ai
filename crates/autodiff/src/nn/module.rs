@@ -27,10 +27,12 @@ use crate::nn::activation::{
     Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
     Tanh,
 };
+use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
 use crate::nn::conv::{Conv1d, Conv2d};
+use crate::nn::embedding::Embedding;
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::tape::Tape;
@@ -148,6 +150,79 @@ pub trait Module {
 
     /// [`Module::as_conv1d`] の可変版。
     fn as_conv1d_mut(&mut self) -> Option<&mut Conv1d> {
+        None
+    }
+
+    /// [`Module::as_linear`] と同型の明示フック（イシュー #1760・親
+    /// #1618）。`compat::Sequential` の学習経路（`bind`／
+    /// `trainable_parameters`／`apply_parameters` 等）が `LayerNorm` 層
+    /// を認識するために使う。既定 `None`。
+    fn as_layer_norm(&self) -> Option<&LayerNorm> {
+        None
+    }
+
+    /// [`Module::as_layer_norm`] の可変版。
+    fn as_layer_norm_mut(&mut self) -> Option<&mut LayerNorm> {
+        None
+    }
+
+    /// [`Module::as_layer_norm`] と同型の明示フック（イシュー #1760）。
+    /// `RmsNorm` 層向け。既定 `None`。
+    fn as_rms_norm(&self) -> Option<&RmsNorm> {
+        None
+    }
+
+    /// [`Module::as_rms_norm`] の可変版。
+    fn as_rms_norm_mut(&mut self) -> Option<&mut RmsNorm> {
+        None
+    }
+
+    /// [`Module::as_layer_norm`] と同型の明示フック（イシュー #1760）。
+    /// `BatchNorm1d` 層向け。既定 `None`。
+    fn as_batch_norm1d(&self) -> Option<&BatchNorm1d> {
+        None
+    }
+
+    /// [`Module::as_batch_norm1d`] の可変版。
+    fn as_batch_norm1d_mut(&mut self) -> Option<&mut BatchNorm1d> {
+        None
+    }
+
+    /// [`Module::as_layer_norm`] と同型の明示フック（イシュー #1760）。
+    /// `BatchNorm2d` 層向け。既定 `None`。
+    fn as_batch_norm2d(&self) -> Option<&BatchNorm2d> {
+        None
+    }
+
+    /// [`Module::as_batch_norm2d`] の可変版。
+    fn as_batch_norm2d_mut(&mut self) -> Option<&mut BatchNorm2d> {
+        None
+    }
+
+    /// [`Module::as_layer_norm`] と同型の明示フック（イシュー #1760）。
+    /// `Embedding` 層向け（`nn/embedding.rs` モジュール doc「`Module`
+    /// trait は実装しない（確定判断）」を本イシューで解消したことに
+    /// 伴い追加）。既定 `None`。
+    fn as_embedding(&self) -> Option<&Embedding> {
+        None
+    }
+
+    /// [`Module::as_embedding`] の可変版。
+    fn as_embedding_mut(&mut self) -> Option<&mut Embedding> {
+        None
+    }
+
+    /// [`Module::as_layer_norm`] と同型の明示フック（イシュー #1760）。
+    /// `MultiheadAttention` 層向け（`nn/attention.rs` モジュール doc
+    /// 「`Module` trait との関係」で「`compat::Sequential::add_*` が
+    /// 対応する層集合に含まれていない」としていた記述を本イシューで
+    /// 解消したことに伴い追加）。既定 `None`。
+    fn as_multihead_attention(&self) -> Option<&MultiheadAttention> {
+        None
+    }
+
+    /// [`Module::as_multihead_attention`] の可変版。
+    fn as_multihead_attention_mut(&mut self) -> Option<&mut MultiheadAttention> {
         None
     }
 
@@ -787,6 +862,17 @@ impl Module for RmsNorm {
         self.bind(tape).forward(input)
     }
 
+    /// イシュー #1760: `compat::Sequential` の学習経路が `RmsNorm` 層を
+    /// 認識するためのフック（`as_linear` と同型）。
+    fn as_rms_norm(&self) -> Option<&RmsNorm> {
+        Some(self)
+    }
+
+    /// [`Module::as_rms_norm`] の可変版。
+    fn as_rms_norm_mut(&mut self) -> Option<&mut RmsNorm> {
+        Some(self)
+    }
+
     /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
     /// `weight`（`Some` の場合のみ。affine なし構成は空）。
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
@@ -847,6 +933,17 @@ impl Module for RmsNorm {
 impl Module for LayerNorm {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.bind(tape).forward(input)
+    }
+
+    /// イシュー #1760: `compat::Sequential` の学習経路が `LayerNorm`
+    /// 層を認識するためのフック（`as_linear` と同型）。
+    fn as_layer_norm(&self) -> Option<&LayerNorm> {
+        Some(self)
+    }
+
+    /// [`Module::as_layer_norm`] の可変版。
+    fn as_layer_norm_mut(&mut self) -> Option<&mut LayerNorm> {
+        Some(self)
     }
 
     /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
@@ -998,6 +1095,17 @@ impl Module for BatchNorm1d {
         self.core.training()
     }
 
+    /// イシュー #1760: `compat::Sequential` の学習経路が `BatchNorm1d`
+    /// 層を認識するためのフック（`as_linear` と同型）。
+    fn as_batch_norm1d(&self) -> Option<&BatchNorm1d> {
+        Some(self)
+    }
+
+    /// [`Module::as_batch_norm1d`] の可変版。
+    fn as_batch_norm1d_mut(&mut self) -> Option<&mut BatchNorm1d> {
+        Some(self)
+    }
+
     /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
     /// `weight`（`Some` の場合）→ `bias`（`Some` の場合）の順。running
     /// stats は buffer であり学習可能パラメータではないため含めない
@@ -1044,6 +1152,17 @@ impl Module for BatchNorm2d {
 
     fn training(&self) -> bool {
         self.core.training()
+    }
+
+    /// イシュー #1760: `compat::Sequential` の学習経路が `BatchNorm2d`
+    /// 層を認識するためのフック（`as_linear` と同型）。
+    fn as_batch_norm2d(&self) -> Option<&BatchNorm2d> {
+        Some(self)
+    }
+
+    /// [`Module::as_batch_norm2d`] の可変版。
+    fn as_batch_norm2d_mut(&mut self) -> Option<&mut BatchNorm2d> {
+        Some(self)
     }
 
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
@@ -1146,6 +1265,42 @@ impl Module for LogSoftmax {
             )));
         }
         Ok(value)
+    }
+}
+
+/// `Embedding::bind(tape).forward_from_var(input)` への委譲（イシュー
+/// #1760）。`nn/embedding.rs` モジュール doc「`Module` trait は実装
+/// しない（確定判断）」節が挙げていた 2 つの理由——(1) `Module::
+/// forward` の f32 `Var` 契約と embedding の整数 id 契約が食い違う、
+/// (2) `compat::Sequential` の学習経路が `as_linear` 系フックにしか
+/// 反応しない——を本イシューで解消する: (1) は
+/// `EmbeddingVars::forward_from_var`（`nn/embedding.rs`。f32 → 厳格な
+/// i32 変換を挟む）で橋渡しし、(2) は [`Module::as_embedding`] フック
+/// の追加で解消する。
+impl Module for Embedding {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward_from_var(input)
+    }
+
+    fn as_embedding(&self) -> Option<&Embedding> {
+        Some(self)
+    }
+
+    fn as_embedding_mut(&mut self) -> Option<&mut Embedding> {
+        Some(self)
+    }
+
+    /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
+    /// `weight`（常に。`Embedding` は affine なし構成を持たないため
+    /// `Linear`／`Conv*` と異なり必ず `Some` 相当で 1 件のみ）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        vec![("weight".to_string(), self.weight())]
+    }
+
+    /// [`Module::set_parameter`] の実装。`Embedding::set_parameter`
+    /// （`nn/embedding.rs`）へ委譲する。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        Embedding::set_parameter(self, name, value)
     }
 }
 

@@ -45,10 +45,11 @@
 //! （`Unsupported` fail-safe）で本イシューでは実装しない（対象外）。
 //! `compat::Sequential` 用の `as_linear`／`as_relu` フックはいずれも
 //! trait 既定（オーバーライドしない）のままとする——`MultiheadAttention`
-//! は `Linear` の直接な代替ではなく、`compat::Sequential::add_*`
-//! （#1616 系）が対応する層集合に含まれていないため、誤って学習可能
-//! パラメータとして拾われたり `ReLU` 融合対象として先読みされたりする
-//! ことはない。
+//! は `Linear` の直接な代替ではなく `ReLU` 融合対象でもないため、
+//! それらのフックに誤って拾われることはない。学習可能パラメータの
+//! 認識には専用の [`Module::as_multihead_attention`] フックを使う
+//! （イシュー #1760・親 #1618 で `compat::Sequential::add_multihead_attention`
+//! として結線済み）。
 
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
@@ -778,6 +779,20 @@ fn sdpa_compose<'t>(
 impl Module for MultiheadAttention {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.bind(tape).forward(input, input, input, None, false)
+    }
+
+    /// イシュー #1760（親 #1618）: `compat::Sequential` の学習経路が
+    /// `MultiheadAttention` 層を認識するためのフック（`as_linear` と
+    /// 同型）。モジュール doc「`Module` trait との関係」が当初挙げて
+    /// いた「`compat::Sequential::add_*` が対応する層集合に含まれて
+    /// いない」という前提は本イシューで解消した。
+    fn as_multihead_attention(&self) -> Option<&MultiheadAttention> {
+        Some(self)
+    }
+
+    /// [`Module::as_multihead_attention`] の可変版。
+    fn as_multihead_attention_mut(&mut self) -> Option<&mut MultiheadAttention> {
+        Some(self)
     }
 
     /// 命名契約（`Module::named_parameters` doc §「命名契約」）:

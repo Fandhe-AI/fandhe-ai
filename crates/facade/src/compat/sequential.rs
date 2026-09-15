@@ -98,7 +98,9 @@ use crate::{
 };
 use fandhe_ai_autodiff::nn::activation::{Elu, Hardswish, LeakyRelu, Relu, Sigmoid, Silu, Tanh};
 use fandhe_ai_autodiff::nn::{
-    Conv1d, Conv1dVars, Conv2d, Conv2dVars, Dropout, Linear, Module, Sequential as NnSequential,
+    BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Dropout,
+    Embedding, EmbeddingVars, LayerNorm, LayerNormVars, Linear, Module, MultiheadAttention,
+    MultiheadAttentionVars, RmsNorm, RmsNormVars, Sequential as NnSequential,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps};
 
@@ -294,6 +296,116 @@ impl Sequential {
         Ok(self)
     }
 
+    /// LayerNorm 層を追加する（`nn::norm::LayerNorm`。イシュー #1760・
+    /// 親 #1618）。affine あり既定（PyTorch `nn.LayerNorm` の既定
+    /// `elementwise_affine=True` と揃える。affine なし構成を積みたい
+    /// 場合は本 API では表現できず、対象外として `docs/compat-api-
+    /// scope.md` へ記録する）。`normalized_size` は最終軸の要素数
+    /// （`LayerNorm::new` の `hidden` 引数。最終軸限定契約は
+    /// `docs/norm-ops-design.md` 参照）。`eps` は `LayerNorm::new` の
+    /// 検査（有限・非負）に委ねる。
+    pub fn add_layer_norm(
+        mut self,
+        normalized_size: usize,
+        eps: f32,
+    ) -> Result<Self, AutodiffError> {
+        let layer = LayerNorm::new(normalized_size, eps)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// RMSNorm 層を追加する（`nn::norm::RmsNorm`。イシュー #1760）。
+    /// [`Sequential::add_layer_norm`] と同様 affine あり既定・最終軸
+    /// 限定契約。
+    pub fn add_rms_norm(mut self, normalized_size: usize, eps: f32) -> Result<Self, AutodiffError> {
+        let layer = RmsNorm::new(normalized_size, eps)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// BatchNorm1d 層を追加する（`nn::batch_norm::BatchNorm1d`。イシュー
+    /// #1760）。affine あり既定（PyTorch `nn.BatchNorm1d` の既定
+    /// `affine=True` と揃える）。受理する入力 rank は 2〈`[N, C]`〉／3
+    /// 〈`[N, C, L]`〉（`docs/batch-norm-ops-design.md`）。`momentum` は
+    /// `BatchNorm1d::new` の検査（`[0, 1]` かつ有限）に委ねる。
+    ///
+    /// **モードの注意**: `BatchNorm` は本クレート内で唯一 train／eval
+    /// で挙動が変わる層（`Module::set_training` doc「モードの正は
+    /// コンテナが保持するフラグ」契約参照）。追加直後は train モード
+    /// （PyTorch `Module.training` の初期値と揃える）で、[`Sequential::
+    /// predict`] が train モードのまま呼ばれると running stats が
+    /// 呼び出しごとに更新される（決定的な推論には先に
+    /// [`Sequential::eval`] を呼ぶこと）。
+    pub fn add_batch_norm1d(
+        mut self,
+        num_features: usize,
+        eps: f32,
+        momentum: f32,
+    ) -> Result<Self, AutodiffError> {
+        let layer = BatchNorm1d::new(num_features, eps, momentum)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// BatchNorm2d 層を追加する（`nn::batch_norm::BatchNorm2d`。
+    /// イシュー #1760）。[`Sequential::add_batch_norm1d`] と同様
+    /// affine あり既定・モード契約。受理する入力 rank は 4
+    /// 〈`[N, C, H, W]`〉のみ。
+    pub fn add_batch_norm2d(
+        mut self,
+        num_features: usize,
+        eps: f32,
+        momentum: f32,
+    ) -> Result<Self, AutodiffError> {
+        let layer = BatchNorm2d::new(num_features, eps, momentum)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// Embedding 層を追加する（`nn::Embedding`。イシュー #1760）。
+    /// 決定的シードで `N(0, 1)` 初期化する（`Embedding::new` 参照）。
+    ///
+    /// **入力契約（重要）**: `Module::forward` は f32 `Var` 入力契約
+    /// だが embedding 本来の入力は整数クラス id であるため、本層を
+    /// 通る [`Sequential::predict`]／学習 forward は入力の各要素を
+    /// 厳格に整数 id へ変換する（`nn::embedding::EmbeddingVars::
+    /// forward_from_var`。非有限・非整数・負・範囲外は
+    /// `AutodiffError::InvalidArgument` で拒否——黙示の飽和・切り捨て
+    /// 変換はしない。`.claude/rules/security.md` A03）。呼び出し側は
+    /// id をあらかじめ `f32` として（例: `0.0, 3.0, 1.0, ...`）
+    /// `Tensor<f32>` へ詰めて渡すこと。
+    pub fn add_embedding(
+        mut self,
+        num_embeddings: usize,
+        embedding_dim: usize,
+        padding_idx: Option<usize>,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let layer = Embedding::new(num_embeddings, embedding_dim, padding_idx, seed)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// MultiheadAttention 層を追加する（`nn::MultiheadAttention`。
+    /// イシュー #1760）。`Module::forward` は self-attention
+    /// （`q = k = v = input`・mask なし・非 causal。`nn/attention.rs`
+    /// モジュール doc「`Module` trait との関係」参照）固定——
+    /// cross-attention や `attn_mask`／causal 指定を本 API から渡す
+    /// 経路は対象外。bias あり既定（`add_linear` と同様。PyTorch
+    /// `nn.MultiheadAttention` の既定 `bias=True` と揃える）。
+    /// `embed_dim % num_heads != 0` は `MultiheadAttention::new` が
+    /// 拒否する。
+    pub fn add_multihead_attention(
+        mut self,
+        embed_dim: usize,
+        num_heads: usize,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let layer = MultiheadAttention::new(embed_dim, num_heads, true, seed)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
     /// 積み上げた層を先頭から順に `Module::forward` へ委譲する。
     /// 呼び出し元が用意した `tape` 上で 1 回分の forward を計算する
     /// （`Linear::bind` がステップごとに葉ノードを登録し直す契約に従う。
@@ -474,11 +586,62 @@ impl Sequential {
             .filter_map(|layer| layer.as_conv1d())
             .map(|conv| conv.bind(&tape.0))
             .collect();
+        // イシュー #1760: LayerNorm／RmsNorm／BatchNorm1d／BatchNorm2d／
+        // Embedding／MultiheadAttention も同じ層順フィルタ方式で収集
+        // する。`BatchNorm1d::bind`／`BatchNorm2d::bind` はいずれも同一
+        // 具体型 `BatchNormVars<'t, '_>` を返す（rank 限定契約
+        // 〈`accepted_ranks`〉だけが異なる）ため、1d／2d を区別せず単一
+        // ベクタへ収集できる。
+        let layer_norms = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_layer_norm())
+            .map(|ln| ln.bind(&tape.0))
+            .collect();
+        let rms_norms = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_rms_norm())
+            .map(|rn| rn.bind(&tape.0))
+            .collect();
+        let batch_norms = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| {
+                if let Some(bn) = layer.as_batch_norm1d() {
+                    Some(bn.bind(&tape.0))
+                } else {
+                    layer.as_batch_norm2d().map(|bn| bn.bind(&tape.0))
+                }
+            })
+            .collect();
+        let embeddings = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_embedding())
+            .map(|emb| emb.bind(&tape.0))
+            .collect();
+        let mhas = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_multihead_attention())
+            .map(|mha| mha.bind(&tape.0))
+            .collect();
         SequentialVars {
             model: self,
             linears,
             conv2ds,
             conv1ds,
+            layer_norms,
+            rms_norms,
+            batch_norms,
+            embeddings,
+            mhas,
         }
     }
 
@@ -508,21 +671,43 @@ impl Sequential {
                 if let Some(bias) = conv.bias() {
                     out.push(bias);
                 }
+            } else {
+                // イシュー #1760: LayerNorm／RmsNorm／BatchNorm1d／
+                // BatchNorm2d／Embedding／MultiheadAttention は
+                // `Module::named_parameters` へ委譲する（各層が既に
+                // 同じ順序契約〈weight → bias〉で実装済みのため
+                // `Linear`／`Conv*` のように個別分岐を重複実装しない。
+                // REQ-9「薄いラッパーに徹する」）。無状態層（活性化
+                // 関数・`Dropout`）は空の `Vec` を返すため寄与しない。
+                for (_, tensor) in layer.named_parameters() {
+                    out.push(tensor);
+                }
             }
         }
         out
     }
 
-    /// `self.inner.layers()` に `Conv2d`／`Conv1d` 層が 1 つでも含まれる
-    /// かどうか（イシュー #1770）。デバイス常駐経路（[`Sequential::
+    /// `self.inner.layers()` にデバイス常駐経路（[`Sequential::
     /// init_device_param_store`]／[`Sequential::forward_resident`]／
-    /// [`Sequential::predict_resident`]）の fail-closed ガードに使う
-    /// （後述）。
-    fn contains_conv_layer(&self) -> bool {
-        self.inner
-            .layers()
-            .iter()
-            .any(|layer| layer.as_conv2d().is_some() || layer.as_conv1d().is_some())
+    /// [`Sequential::predict_resident`]）が対応しない層種別が 1 つでも
+    /// 含まれるかどうか（旧 `contains_conv_layer`。イシュー #1770 で
+    /// `Conv2d`／`Conv1d` 向けに新設し、イシュー #1760 で LayerNorm／
+    /// RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／
+    /// MultiheadAttention へ対象を拡張・改名した）。これらの層は
+    /// `forward_from_flat_leaves`（`Linear` 層のみを消費する走査）の
+    /// 対象外のため、常駐経路の入口で明示的に拒否する（黙示
+    /// フォールバックを作らない。`.claude/rules/security.md` A04）。
+    fn contains_resident_unsupported_layer(&self) -> bool {
+        self.inner.layers().iter().any(|layer| {
+            layer.as_conv2d().is_some()
+                || layer.as_conv1d().is_some()
+                || layer.as_layer_norm().is_some()
+                || layer.as_rms_norm().is_some()
+                || layer.as_batch_norm1d().is_some()
+                || layer.as_batch_norm2d().is_some()
+                || layer.as_embedding().is_some()
+                || layer.as_multihead_attention().is_some()
+        })
     }
 
     /// train／eval モードを切り替え（イシュー #1758。PyTorch
@@ -720,10 +905,27 @@ impl Sequential {
             Conv1d(Conv1d),
         }
 
+        /// LayerNorm／RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／
+        /// MultiheadAttention（イシュー #1760）向けの in-place 更新
+        /// エントリ。`Linear`／`Conv2d`／`Conv1d`（`Rebuilt` 経由の層
+        /// 丸ごと再構築方式。上記）とは異なり、`Module::set_parameter`
+        /// による shape 保存置換のみで済ませる——`BatchNorm` の
+        /// running stats／`num_batches_tracked`／`training` を
+        /// `Linear::from_parameters` 相当の「層を作り直す」方式で更新
+        /// すると失ってしまう罠を避けるため（`docs/compat-api-scope.md`
+        /// §5「適用記録（経路 2。イシュー #1760）」参照）。
+        struct GenericUpdate {
+            layer_index: usize,
+            /// `Module::named_parameters()` と同じ順の
+            /// `(名前, 検証済み新しい値)`。
+            values: Vec<(String, Tensor<f32>)>,
+        }
+
         let mut updated = updated.into_iter();
         // 1 パス目: `self.inner.layers()`（不変借用）を層順に走査し、
         // 検証込みで新しい層本体を全件構築する（代入は未実施）。
         let mut rebuilt: Vec<Rebuilt> = Vec::new();
+        let mut generic_updates: Vec<GenericUpdate> = Vec::new();
         for (layer_index, layer) in self.inner.layers().iter().enumerate() {
             if let Some(linear) = layer.as_linear() {
                 let (new_weight, new_bias) = take_weight_bias(
@@ -765,6 +967,41 @@ impl Sequential {
                     conv.dilation(),
                     conv.groups(),
                 )?));
+            } else {
+                // イシュー #1760: LayerNorm／RmsNorm／BatchNorm1d／
+                // BatchNorm2d／Embedding／MultiheadAttention は
+                // `named_parameters()` の順（各層が独自に「weight →
+                // bias」契約を守る。`Module::named_parameters` doc
+                // 「命名契約」参照）で shape 検証しつつ取り出す。
+                // 無状態層（活性化関数・`Dropout`）は空の `Vec` を
+                // 返すため何も消費しない。
+                let named = layer.named_parameters();
+                if !named.is_empty() {
+                    let mut values = Vec::with_capacity(named.len());
+                    for (name, current) in named {
+                        let new_value = updated.next().ok_or_else(|| {
+                            AutodiffError::InvalidArgument(format!(
+                                "Sequential::apply_parameters: updated has fewer elements \
+                                 than trainable_parameters() ({name} missing at layer \
+                                 {layer_index})"
+                            ))
+                        })?;
+                        if new_value.shape() != current.shape() {
+                            return Err(AutodiffError::InvalidArgument(format!(
+                                "Sequential::apply_parameters: layer {layer_index} {name} \
+                                 shape changed from {:?} to {:?} (apply_parameters only \
+                                 supports shape-preserving updates; #426)",
+                                current.shape(),
+                                new_value.shape()
+                            )));
+                        }
+                        values.push((name, new_value));
+                    }
+                    generic_updates.push(GenericUpdate {
+                        layer_index,
+                        values,
+                    });
+                }
             }
         }
         if updated.next().is_some() {
@@ -775,10 +1012,16 @@ impl Sequential {
             ));
         }
         // 2 パス目: `self.inner.layers_mut()` を同じ順序で再度走査し、
-        // 対応する `Rebuilt` を代入する。ここに到達した時点で件数・
-        // shape 検証は全件完了しているため、代入自体は失敗し得ない。
+        // 対応する `Rebuilt`（`Linear`／`Conv2d`／`Conv1d`）を代入する
+        // か、`GenericUpdate`（イシュー #1760 の 6 層種別）を
+        // `Module::set_parameter` で in-place 適用する。ここに到達した
+        // 時点で件数・shape 検証は全件（両経路とも）完了しているため、
+        // 代入・`set_parameter` 自体は失敗し得ない（`set_parameter`
+        // の戻り値はそれでも `?` で伝播し黙殺しない。fail-closed）。
         let mut rebuilt = rebuilt.into_iter();
-        for layer in self.inner.layers_mut() {
+        let mut generic_updates = generic_updates.into_iter();
+        let mut next_generic = generic_updates.next();
+        for (layer_index, layer) in self.inner.layers_mut().iter_mut().enumerate() {
             if let Some(linear) = layer.as_linear_mut() {
                 if let Some(Rebuilt::Linear(new_linear)) = rebuilt.next() {
                     *linear = new_linear;
@@ -791,6 +1034,11 @@ impl Sequential {
                 && let Some(Rebuilt::Conv1d(new_conv)) = rebuilt.next()
             {
                 *conv = new_conv;
+            } else if let Some(update) = next_generic.take_if(|u| u.layer_index == layer_index) {
+                for (name, value) in update.values {
+                    layer.set_parameter(&name, value)?;
+                }
+                next_generic = generic_updates.next();
             }
         }
         Ok(())
@@ -821,10 +1069,10 @@ impl Sequential {
         // 塞ぎ、原因が分かるメッセージで即座に拒否する（`.claude/rules/
         // security.md` A04「安全でない設計」: 黙示フォールバックを
         // 作らない）。
-        if self.contains_conv_layer() {
+        if self.contains_resident_unsupported_layer() {
             return Err(BackendError::Unsupported(
-                "Sequential::init_device_param_store: Conv 層を含む Sequential はデバイス常駐 \
-                 経路非対応（イシュー #1770）"
+                "Sequential::init_device_param_store: Conv／Norm／Embedding／Attention 層を \
+                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760）"
                     .to_string(),
             ));
         }
@@ -870,14 +1118,14 @@ impl Sequential {
         input: &Var<'t>,
         store: &mut DeviceParamStore,
     ) -> Result<Var<'t>, AutodiffError> {
-        // イシュー #1770: `Self::init_device_param_store` のガードと
-        // 同じ理由（`contains_conv_layer` doc 参照）。二重防御
-        // （呼び出し元が独自に構築した `store` を渡す誤用も想定した
-        // fail-closed）。
-        if self.contains_conv_layer() {
+        // イシュー #1770・#1760: `Self::init_device_param_store` の
+        // ガードと同じ理由（`contains_resident_unsupported_layer` doc
+        // 参照）。二重防御（呼び出し元が独自に構築した `store` を
+        // 渡す誤用も想定した fail-closed）。
+        if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
-                "Sequential::forward_resident: Conv 層を含む Sequential はデバイス常駐経路 \
-                 非対応（イシュー #1770）"
+                "Sequential::forward_resident: Conv／Norm／Embedding／Attention 層を含む \
+                 Sequential はデバイス常駐経路非対応（イシュー #1770・#1760）"
                     .to_string(),
             )));
         }
@@ -927,11 +1175,12 @@ impl Sequential {
         store: &DeviceParamStore,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        // イシュー #1770: `Self::forward_resident` と同じガード。
-        if self.contains_conv_layer() {
+        // イシュー #1770・#1760: `Self::forward_resident` と同じ
+        // ガード。
+        if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
-                "Sequential::predict_resident: Conv 層を含む Sequential はデバイス常駐経路 \
-                 非対応（イシュー #1770）"
+                "Sequential::predict_resident: Conv／Norm／Embedding／Attention 層を含む \
+                 Sequential はデバイス常駐経路非対応（イシュー #1770・#1760）"
                     .to_string(),
             )));
         }
@@ -1134,6 +1383,20 @@ pub struct SequentialVars<'m, 't> {
     linears: Vec<LinearVars<'t>>,
     conv2ds: Vec<Conv2dVars<'t>>,
     conv1ds: Vec<Conv1dVars<'t>>,
+    /// イシュー #1760。`layer_norms`／`rms_norms`／`embeddings`／`mhas`
+    /// は `Var<'t>` のみを保持し `'m` を借用しない（`nn::norm::
+    /// LayerNormVars`／`RmsNormVars`・`nn::embedding::EmbeddingVars`・
+    /// `nn::attention::MultiheadAttentionVars` の定義参照）。
+    layer_norms: Vec<LayerNormVars<'t>>,
+    rms_norms: Vec<RmsNormVars<'t>>,
+    /// `BatchNorm1d`／`BatchNorm2d` 層を単一ベクタへ層順で収集する
+    /// （`Sequential::bind` doc 参照）。`BatchNormVars<'t, 'm>` は
+    /// 自身が由来した `BatchNormCore`（`self.model.inner.layers()` の
+    /// 一部）を `&'m` で借用する——`RefCell` の running stats を train
+    /// forward の都度更新するため。
+    batch_norms: Vec<BatchNormVars<'t, 'm>>,
+    embeddings: Vec<EmbeddingVars<'t>>,
+    mhas: Vec<MultiheadAttentionVars<'t>>,
 }
 
 impl<'m, 't> SequentialVars<'m, 't> {
@@ -1183,6 +1446,11 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut linears = self.linears.iter();
         let mut conv2ds = self.conv2ds.iter();
         let mut conv1ds = self.conv1ds.iter();
+        let mut layer_norms = self.layer_norms.iter();
+        let mut rms_norms = self.rms_norms.iter();
+        let mut batch_norms = self.batch_norms.iter();
+        let mut embeddings = self.embeddings.iter();
+        let mut mhas = self.mhas.iter();
         let layers = self.model.inner.layers();
         let mut i = 0;
         while i < layers.len() {
@@ -1225,6 +1493,73 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 })?;
                 current = vars.forward(&current)?;
                 i += 1;
+            } else if layer.as_layer_norm().is_some() {
+                // イシュー #1760: LayerNorm も Conv2d／Conv1d と同様
+                // epilogue 融合を行わない（`LayerNormVars::forward` は
+                // `Var::layer_norm` への薄い委譲のみ）。
+                let vars = layer_norms.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み LayerNormVars が model.layers の \
+                         LayerNorm 層数より少ない（bind/forward 間の LayerNorm 層数対応が \
+                         崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current)?;
+                i += 1;
+            } else if layer.as_rms_norm().is_some() {
+                let vars = rms_norms.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み RmsNormVars が model.layers の \
+                         RmsNorm 層数より少ない（bind/forward 間の RmsNorm 層数対応が崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current)?;
+                i += 1;
+            } else if layer.as_batch_norm1d().is_some() || layer.as_batch_norm2d().is_some() {
+                // `BatchNormVars::forward` は `accepted_ranks`（1d は
+                // rank 2/3・2d は rank 4）を自身で検査する（`bind`
+                // doc 参照）ため、ここでは 1d／2d を区別しない。
+                let vars = batch_norms.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み BatchNormVars が model.layers の \
+                         BatchNorm 層数より少ない（bind/forward 間の BatchNorm 層数対応が \
+                         崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current)?;
+                i += 1;
+            } else if layer.as_embedding().is_some() {
+                // `EmbeddingVars::forward_from_var` が f32 `Var` 入力
+                // から厳格に整数 id へ変換してから embedding を呼ぶ
+                // （`nn/embedding.rs` の doc 参照）。
+                let vars = embeddings.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み EmbeddingVars が model.layers の \
+                         Embedding 層数より少ない（bind/forward 間の Embedding 層数対応が \
+                         崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward_from_var(&current)?;
+                i += 1;
+            } else if layer.as_multihead_attention().is_some() {
+                // self-attention 固定（`q = k = v = current`・mask
+                // なし・非 causal。`nn/attention.rs` モジュール doc
+                // 「`Module` trait との関係」・`Sequential::
+                // add_multihead_attention` doc 参照）。
+                let vars = mhas.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み MultiheadAttentionVars が \
+                         model.layers の MultiheadAttention 層数より少ない（bind/forward 間の \
+                         MultiheadAttention 層数対応が崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current, &current, &current, None, false)?;
+                i += 1;
             } else {
                 // 活性化層は `nn::Module::forward` へ委譲する（`&fandhe_ai_autodiff::Tape`
                 // が必要。`Sequential::forward` と同じ理由で `tape.0` 経由）。
@@ -1249,6 +1584,11 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut linears = self.linears.iter();
         let mut conv2ds = self.conv2ds.iter();
         let mut conv1ds = self.conv1ds.iter();
+        let mut layer_norms = self.layer_norms.iter();
+        let mut rms_norms = self.rms_norms.iter();
+        let mut batch_norms = self.batch_norms.iter();
+        let mut embeddings = self.embeddings.iter();
+        let mut mhas = self.mhas.iter();
         for layer in self.model.inner.layers() {
             if layer.as_linear().is_some() {
                 if let Some(vars) = linears.next() {
@@ -1270,6 +1610,52 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 out.push(&vars.weight);
                 if let Some(bias) = &vars.bias {
                     out.push(bias);
+                }
+            } else if layer.as_layer_norm().is_some()
+                && let Some(vars) = layer_norms.next()
+            {
+                if let Some(w) = &vars.weight {
+                    out.push(w);
+                }
+                if let Some(b) = &vars.bias {
+                    out.push(b);
+                }
+            } else if layer.as_rms_norm().is_some()
+                && let Some(vars) = rms_norms.next()
+                && let Some(w) = &vars.weight
+            {
+                out.push(w);
+            } else if (layer.as_batch_norm1d().is_some() || layer.as_batch_norm2d().is_some())
+                && let Some(vars) = batch_norms.next()
+            {
+                if let Some(w) = &vars.weight {
+                    out.push(w);
+                }
+                if let Some(b) = &vars.bias {
+                    out.push(b);
+                }
+            } else if layer.as_embedding().is_some()
+                && let Some(vars) = embeddings.next()
+            {
+                out.push(&vars.weight);
+            } else if layer.as_multihead_attention().is_some()
+                && let Some(vars) = mhas.next()
+            {
+                out.push(&vars.q.weight);
+                if let Some(b) = &vars.q.bias {
+                    out.push(b);
+                }
+                out.push(&vars.k.weight);
+                if let Some(b) = &vars.k.bias {
+                    out.push(b);
+                }
+                out.push(&vars.v.weight);
+                if let Some(b) = &vars.v.bias {
+                    out.push(b);
+                }
+                out.push(&vars.out.weight);
+                if let Some(b) = &vars.out.bias {
+                    out.push(b);
                 }
             }
         }
@@ -1320,10 +1706,33 @@ impl<'m, 't> SequentialVars<'m, 't> {
             Ok(())
         }
 
+        /// [`push_weight_bias`] の weight 自体が `Option`（`LayerNorm`
+        /// の bias・`RmsNorm`／`BatchNorm` の weight・bias。affine なし
+        /// 構成では `None`）な層向けの版（イシュー #1760）。
+        fn push_opt_weight_bias<'g>(
+            out: &mut Vec<&'g Tensor<f32>>,
+            grads: &'g Gradients,
+            weight: Option<&Var<'_>>,
+            bias: Option<&Var<'_>>,
+        ) -> Result<(), AutodiffError> {
+            if let Some(w) = weight {
+                push_weight_bias(out, grads, w, None)?;
+            }
+            if let Some(b) = bias {
+                push_weight_bias(out, grads, b, None)?;
+            }
+            Ok(())
+        }
+
         let mut out = Vec::new();
         let mut linears = self.linears.iter();
         let mut conv2ds = self.conv2ds.iter();
         let mut conv1ds = self.conv1ds.iter();
+        let mut layer_norms = self.layer_norms.iter();
+        let mut rms_norms = self.rms_norms.iter();
+        let mut batch_norms = self.batch_norms.iter();
+        let mut embeddings = self.embeddings.iter();
+        let mut mhas = self.mhas.iter();
         for layer in self.model.inner.layers() {
             if layer.as_linear().is_some() {
                 if let Some(vars) = linears.next() {
@@ -1337,6 +1746,29 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 && let Some(vars) = conv1ds.next()
             {
                 push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
+            } else if layer.as_layer_norm().is_some()
+                && let Some(vars) = layer_norms.next()
+            {
+                push_opt_weight_bias(&mut out, grads, vars.weight.as_ref(), vars.bias.as_ref())?;
+            } else if layer.as_rms_norm().is_some()
+                && let Some(vars) = rms_norms.next()
+            {
+                push_opt_weight_bias(&mut out, grads, vars.weight.as_ref(), None)?;
+            } else if (layer.as_batch_norm1d().is_some() || layer.as_batch_norm2d().is_some())
+                && let Some(vars) = batch_norms.next()
+            {
+                push_opt_weight_bias(&mut out, grads, vars.weight.as_ref(), vars.bias.as_ref())?;
+            } else if layer.as_embedding().is_some()
+                && let Some(vars) = embeddings.next()
+            {
+                push_weight_bias(&mut out, grads, &vars.weight, None)?;
+            } else if layer.as_multihead_attention().is_some()
+                && let Some(vars) = mhas.next()
+            {
+                push_weight_bias(&mut out, grads, &vars.q.weight, vars.q.bias.as_ref())?;
+                push_weight_bias(&mut out, grads, &vars.k.weight, vars.k.bias.as_ref())?;
+                push_weight_bias(&mut out, grads, &vars.v.weight, vars.v.bias.as_ref())?;
+                push_weight_bias(&mut out, grads, &vars.out.weight, vars.out.bias.as_ref())?;
             }
         }
         Ok(out)
