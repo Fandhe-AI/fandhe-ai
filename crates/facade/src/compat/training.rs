@@ -504,6 +504,12 @@ impl Sequential {
     /// 状態で呼ばれる。`&mut self` と `compiled: &mut Compiled` を
     /// 独立した借用として受け取ることで、`self.bind(&tape)`〈`&self`〉
     /// と `compiled.optimizer.step`〈`&mut compiled`〉を同時に生かせる）。
+    /// `method`（呼び出し元の公開メソッド名。イシュー #1763 PR #1883
+    /// レビュー指摘の是正）を追加したことで引数が 8 個になった
+    /// （既存の 7 引数構成を維持したまま追加したため。呼び出し元は
+    /// [`Self::fit_with_callbacks_named`] の 1 箇所のみで、これ以上
+    /// 引数が増える見込みも薄いため構造体化はせず許容する）。
+    #[allow(clippy::too_many_arguments)]
     fn run_fit<T: FitTarget>(
         &mut self,
         method: &'static str,
