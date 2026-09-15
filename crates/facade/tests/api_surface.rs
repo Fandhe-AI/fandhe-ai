@@ -1408,3 +1408,33 @@ fn data_types_are_reachable_via_facade_only() {
         .unwrap();
     assert_is_dataset(&probe);
 }
+
+/// Keras 風 `compile()`／`fit()`／`evaluate()`（イシュー #1761）の
+/// 新規公開型（`fandhe_ai::compat::{Loss, Optimizer, FitConfig,
+/// History}`）が `fandhe_ai` のみの import で構築でき、`FitTarget`
+/// が `f32`／`i32` の型境界として機能することを固定する。
+#[test]
+fn fit_types_are_reachable_via_facade_only() {
+    use fandhe_ai::compat::{FitConfig, FitTarget, History, Loss, Optimizer};
+
+    let _loss_mse = Loss::Mse;
+    let _loss_ce = Loss::CrossEntropy;
+
+    let _optimizer = Optimizer::Sgd(fandhe_ai::optim::SgdConfig::new(0.1));
+
+    let config = FitConfig::new(3, 2).shuffle(true).drop_last(true);
+    assert_eq!(config, FitConfig::new(3, 2).shuffle(true).drop_last(true));
+
+    // `History` は `#[non_exhaustive]`（フィールド `loss` は `pub`）
+    // のため struct literal では構築できない（クレート外からの想定
+    // 構築経路は `Sequential::fit` の戻り値のみ）。型自体が facade
+    // のみ import で参照可能であることだけを固定する。
+    fn assert_is_history_type(_h: &History) {}
+    let _ = assert_is_history_type;
+
+    // `FitTarget` が facade のみ import で型境界として使えることの固定
+    // （sealed trait のため呼び出し元は実装を追加できない）。
+    fn assert_is_fit_target<T: FitTarget>() {}
+    assert_is_fit_target::<f32>();
+    assert_is_fit_target::<i32>();
+}

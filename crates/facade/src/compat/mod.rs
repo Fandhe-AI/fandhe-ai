@@ -41,11 +41,17 @@
 //! **対象範囲**（`docs/compat-api-scope.md` §1〜2）: レイヤーは
 //! Linear・ReLU・Sigmoid・Tanh の 3 種限定。`Sequential` 経由の学習
 //! （勾配取得・パラメータ更新）は #294 で対応済み（`sequential.rs`
-//! 冒頭 doc・`SequentialVars` 参照。`fit()`/`compile()` 等の高水準
-//! 学習ループ API は引き続き対象外）。
+//! 冒頭 doc・`SequentialVars` 参照）。Keras 風 `compile()`／`fit()`／
+//! `evaluate()` 最小版は [`crate::compat::Sequential::compile`]／
+//! [`crate::compat::Sequential::fit`]／[`crate::compat::Sequential::evaluate`]
+//! （イシュー #1761）で実装済み。
+//! callbacks／`validation_data`／metrics／LR スケジューラ連携は
+//! 兄弟イシュー #1763 へ引き継ぐ。
 
 mod array;
 mod sequential;
+mod training;
 
 pub use array::{ArrayData, array};
 pub use sequential::{Sequential, SequentialVars};
+pub use training::{FitConfig, FitTarget, History, Loss, Optimizer};
