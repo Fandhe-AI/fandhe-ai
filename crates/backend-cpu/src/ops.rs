@@ -1355,9 +1355,11 @@ impl BackendOps for CpuBackendOps {
     /// `BackendOps::col2im` の CPU 実装（イシュー #1764）。
     /// [`im2col_out_shape`] で `input_shape`／`params` から期待する
     /// `d_col` 形状（`[N, G, Cin_g·kH·kW, Hout·Wout]`）を導出し、
-    /// `d_col.shape()` との完全一致を検査してから `crate::im2col::col2im`
+    /// `d_col.shape()` との完全一致を検査したうえで `input_shape`
+    /// （＝戻り値として確保する出力 shape）自体のバイトサイズも
+    /// `checked_alloc_numel_f32` で検査してから `crate::im2col::col2im`
     /// へ委譲する（`im2col` と同じ二重検査方針。PR #1862 codex-review
-    /// P1 是正: 是正前は `crate::im2col::col2im` 内部の座標計算
+    /// P1 是正 1: 是正前は `crate::im2col::col2im` 内部の座標計算
     /// 〈`checked_numel`／`conv_out_len`〉のみに検査を委ねており、
     /// ①`input_shape` の rank が 4 でない場合に `input_shape[1]` 等の
     /// 直接添字参照で panic する、②`d_col` の形状が想定より小さい場合
@@ -1365,6 +1367,17 @@ impl BackendOps for CpuBackendOps {
     /// して誤った結果のまま `Ok` を返してしまう、という 2 つの経路が
     /// 本番経路 panic 禁止・`BackendOps::col2im` の `ShapeMismatch`
     /// 契約〈`.claude/rules/security.md` A08〉に反していた）。
+    /// PR #1862 codex-review P1 是正 2: `d_col`／`input_shape` 双方の
+    /// shape 検査（rank・完全一致）を通過しても、`input_shape` 自体は
+    /// `d_col` とは独立に呼び出し元が任意に指定できるため、
+    /// `input_shape=[1, 1, L, 1]`（`L` が非常に大きい・`kernel=1`・
+    /// `stride=[L, 1]` 等で `d_col.shape()=[1, 1, 1, 1]` という小さな
+    /// テンソルから巨大な `input_shape` を指定できる）のような形状では
+    /// `crate::im2col::col2im` 内部の出力確保（`vec![0f32; out_numel]`）
+    /// が `f32` 換算バイトサイズで `isize::MAX` を超え `Vec` の capacity
+    /// overflow で panic しうる。`checked_shape_product`（`usize` 積算
+    /// オーバーフロー）単体では検出できないため、`nll_loss_backward`
+    /// と同じ `checked_alloc_numel_f32` で確保前に検証する。
     fn col2im(
         &self,
         d_col: &Tensor<f32>,
@@ -1379,6 +1392,7 @@ impl BackendOps for CpuBackendOps {
                 rhs: expected_col_shape,
             }));
         }
+        checked_alloc_numel_f32(input_shape)?;
         crate::im2col::col2im(d_col, input_shape, params).map_err(BackendError::ShapeMismatch)
     }
 
@@ -3303,6 +3317,41 @@ mod col2im_shape_validation_tests {
                 ))
             ),
             "0 要素の d_col 形状不一致も ShapeMismatch で拒否されるべき（実際: {result:?}）"
+        );
+    }
+
+    #[test]
+    fn col2im_rejects_input_shape_that_would_overflow_output_allocation() {
+        // PR #1862 codex-review P1 是正 2 の再現条件そのもの: L =
+        // isize::MAX as usize・input_shape=[1,1,L,1]・kernel=[1,1]・
+        // stride=[L,1]・padding=[0,0]・dilation=[1,1]・groups=1 では
+        // 期待する d_col 形状が [1,1,1,1]（小さい）まで縮退するため、
+        // `im2col_out_shape` による d_col 形状検査（P1 是正 1）だけでは
+        // input_shape 自体の確保可能性を検査できない。是正前は
+        // `crate::im2col::col2im` 内部の `vec![0f32; out_numel]` が
+        // `f32` 換算バイトサイズで `isize::MAX` を超え capacity
+        // overflow で panic していた。
+        let l = isize::MAX as usize;
+        let input_shape = [1usize, 1, l, 1];
+        let params = Conv2dParams::new([1, 1], [l, 1], [0, 0], [1, 1], 1).unwrap();
+        let expected = im2col_out_shape(&input_shape, &params).unwrap();
+        assert_eq!(
+            expected,
+            vec![1, 1, 1, 1],
+            "crafted 形状は d_col 側の期待形状が小さいままであることが前提"
+        );
+        let d_col = Tensor::new(vec![1.0f32], &expected).unwrap();
+
+        let ops = CpuBackendOps::new();
+        let result = ops.col2im(&d_col, &input_shape, &params);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::ShapeMismatch(
+                    ShapeError::ElementCountOverflow
+                ))
+            ),
+            "出力確保不能な input_shape は ElementCountOverflow で拒否されるべき（実際: {result:?}）"
         );
     }
 
