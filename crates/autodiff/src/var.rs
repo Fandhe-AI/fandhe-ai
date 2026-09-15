@@ -2844,7 +2844,7 @@ impl<'t> Var<'t> {
     /// shape 計算で tape 非接触）→ ⑤bias shape 検査 → ⑥ここで
     /// 初めて `input`／`weight` を `[N, Cin, 1, L]`／
     /// `[Cout, Cin/groups, 1, k]` へ reshape し `conv2d` を呼ぶ
-    /// （[`Self::contiguous`] 前段で `Var::reshape` の非 contiguous
+    /// （`Self::contiguous` 前段で `Var::reshape` の非 contiguous
     /// 拒否契約と `conv2d`〈transpose 済み入力も受理〉の間の非対称を
     /// 解消する）→ ⑦出力 `[N, Cout, 1, Lout]` を `[N, Cout, Lout]`
     /// へ reshape。
