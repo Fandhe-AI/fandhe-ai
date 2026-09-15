@@ -91,23 +91,33 @@ use crate::{
     Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{Elu, Hardswish, LeakyRelu, Relu, Sigmoid, Silu, Tanh};
-use fandhe_ai_autodiff::nn::{Linear, Module};
+use fandhe_ai_autodiff::nn::{Linear, Module, Sequential as NnSequential};
 use fandhe_ai_tensor_core::{Activation, BackendOps};
 
 /// Keras `Sequential` 慣習のレイヤー積み上げビルダー。`add_*` はメソッド
 /// チェーン（`self` を消費し `Self` を返す）で層を追加し、`predict` で
 /// 推論を実行する。層は `nn::Module`（`fandhe_ai_autodiff::nn::module`）実装として
-/// `Vec<Box<dyn Module>>` に格納するため、種類の異なる層（`Linear` と
-/// 活性化関数）を同じ列で扱える。
+/// 保持するため、種類の異なる層（`Linear` と活性化関数）を同じ列で
+/// 扱える。
+///
+/// **イシュー #1759（親 #1617）での再構成**: 層の保持・走査・
+/// train／eval モード・`named_parameters` の汎用ロジックは
+/// `fandhe_ai_autodiff::nn::Sequential`（`NnSequential`。ネスト可能な
+/// 汎用コンテナ。`docs/compat-api-scope.md` §1.2）へ移設し、本
+/// `Sequential`（compat 層）はそれを `inner` として保持する薄い
+/// ラッパーに徹する（REQ-9）。公開シグネチャ・数値挙動は不変
+/// （`docs/compat-api-scope.md` §1 の対象レイヤー集合限定は変わらない）。
+///
+/// **ネストの制限**: [`Sequential::bind`]／[`Sequential::
+/// trainable_parameters`]／[`Sequential::apply_parameters`]・デバイス
+/// 常駐経路（[`Sequential::init_device_param_store`] 等）は最上位の
+/// `as_linear()` のみを見る学習契約であり、この制限は本再構成でも
+/// 変わらない（`fandhe_ai_autodiff::nn::container` モジュール doc
+/// 「ネストの限界」参照。ただし compat 層は `NnSequential`／
+/// `ModuleList` を構築する経路自体を公開していないため、ネストは
+/// facade 経由では到達不能）。
 pub struct Sequential {
-    layers: Vec<Box<dyn Module>>,
-    /// train／eval モード（イシュー #1758。PyTorch `Module.training`
-    /// 相当）。**このコンテナ自身がモードの正**であり
-    /// （`nn::Module::set_training`／`training` の trait doc「モードの
-    /// 正はコンテナが保持するフラグ」契約）、[`Sequential::set_training`]
-    /// が全子層（`layers`）へ `Module::set_training` を伝播する。既定
-    /// `true`（PyTorch の初期値と揃える）。
-    training: bool,
+    inner: NnSequential,
 }
 
 impl Default for Sequential {
@@ -119,8 +129,7 @@ impl Default for Sequential {
 impl Sequential {
     pub fn new() -> Self {
         Sequential {
-            layers: Vec::new(),
-            training: true,
+            inner: NnSequential::new(),
         }
     }
 
@@ -136,26 +145,26 @@ impl Sequential {
         seed: u64,
     ) -> Result<Self, AutodiffError> {
         let linear = Linear::new(in_features, out_features, true, seed)?;
-        self.layers.push(Box::new(linear));
+        self.inner.push(Box::new(linear));
         Ok(self)
     }
 
     /// ReLU 層を追加する（`nn::activation::Relu`。shape 不変の演算のため
     /// 構造的に失敗しえず `Result` を返さない）。
     pub fn add_relu(mut self) -> Self {
-        self.layers.push(Box::new(Relu));
+        self.inner.push(Box::new(Relu));
         self
     }
 
     /// シグモイド層を追加する（`nn::activation::Sigmoid`）。
     pub fn add_sigmoid(mut self) -> Self {
-        self.layers.push(Box::new(Sigmoid));
+        self.inner.push(Box::new(Sigmoid));
         self
     }
 
     /// 双曲線正接層を追加する（`nn::activation::Tanh`）。
     pub fn add_tanh(mut self) -> Self {
-        self.layers.push(Box::new(Tanh));
+        self.inner.push(Box::new(Tanh));
         self
     }
 
@@ -164,14 +173,14 @@ impl Sequential {
     /// 行わない（`Module::as_relu` は既定 `false` のまま）。shape 不変
     /// の演算のため構造的に失敗しえず `Result` を返さない。
     pub fn add_silu(mut self) -> Self {
-        self.layers.push(Box::new(Silu));
+        self.inner.push(Box::new(Silu));
         self
     }
 
     /// Hardswish 層を追加する（`nn::activation::Hardswish`。イシュー
     /// #1714）。[`Sequential::add_silu`] と同様融合対象外。
     pub fn add_hardswish(mut self) -> Self {
-        self.layers.push(Box::new(Hardswish));
+        self.inner.push(Box::new(Hardswish));
         self
     }
 
@@ -179,7 +188,7 @@ impl Sequential {
     /// #1714）。`negative_slope`（負領域の傾き）は検証せず IEEE の
     /// まま伝播する。[`Sequential::add_silu`] と同様融合対象外。
     pub fn add_leaky_relu(mut self, negative_slope: f32) -> Self {
-        self.layers.push(Box::new(LeakyRelu::new(negative_slope)));
+        self.inner.push(Box::new(LeakyRelu::new(negative_slope)));
         self
     }
 
@@ -187,7 +196,7 @@ impl Sequential {
     /// `alpha` は検証せず IEEE のまま伝播する。[`Sequential::add_silu`]
     /// と同様融合対象外。
     pub fn add_elu(mut self, alpha: f32) -> Self {
-        self.layers.push(Box::new(Elu::new(alpha)));
+        self.inner.push(Box::new(Elu::new(alpha)));
         self
     }
 
@@ -197,48 +206,15 @@ impl Sequential {
     /// `fandhe_ai_autodiff::nn::module` 参照）。外部 `Tape` 上で呼ぶことで
     /// `Tape::backward` までグラフ記録がつながる（推論だけでなく
     /// grad check 等の用途にも使える）。
+    ///
+    /// **イシュー #1759 での再構成**: Linear→ReLU 融合先読み走査
+    /// （旧イシュー #1044・`docs/kernel-fusion.md` §2.2「学習経路への
+    /// 結線」）を含む本体は `fandhe_ai_autodiff::nn::Sequential::forward`
+    /// へ移設済み。`nn::Module::forward` と同じく `tape.0`（`pub(crate)`
+    /// フィールド）経由で内部の生 `Tape` を渡すだけの薄い委譲（本ファイル
+    /// 冒頭 doc「公開シグネチャの型」参照）。
     pub fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        let mut current = *input;
-        // イシュー #1044（`docs/kernel-fusion.md` §2.2「学習経路への
-        // 結線」）: 単純な `for layer in &self.layers` 逐次委譲だと
-        // `Linear` → `Add`（bias）→ `Relu` が別ノード・別カーネル起動に
-        // なる（`Module::forward` は多態 dispatch のため層間の関係を
-        // 知らない）。ここでインデックス走査へ変え、`Linear` 層に出会う
-        // たび「次層が `ReLU` か」（`Module::as_relu`）を先読みし、
-        // **`ReLU` が実際に続く場合のみ** `LinearVars::
-        // forward_with_activation(.., Activation::Relu)` へ結線して
-        // `ReLU` 層自体のノード追加をスキップする。`ReLU` が続かない
-        // 単体 `Linear`・`Linear` → `Sigmoid`／`Tanh` は、`docs/
-        // inference-forward-fixed-cost-design.md` §3.1 が `forward_host`
-        // について明記する bit-exactness 契約（「融合 epilogue は
-        // カーネル内 tiling 次第で加算順序が変わりうるため旧経路と
-        // 同じ演算列を使う」）を学習 forward 側でも壊さないよう、従来
-        // どおり `LinearVars::forward`（`matmul` → `add`。非融合）へ
-        // 委譲する（レビュー指摘 #1079・PRRT_kwDOTuUCJc6dgIt-。融合対象を
-        // `Linear` → `ReLU` に限定）。それ以外の層（`Sigmoid`／`Tanh`
-        // 等。`BackendOps::gemm_bias_act` の `Activation` に対応する
-        // variant を持たない）は従来どおり `Module::forward` へ委譲する。
-        let mut i = 0;
-        while i < self.layers.len() {
-            let layer = &self.layers[i];
-            if let Some(linear) = layer.as_linear() {
-                let fuse_relu = self.layers.get(i + 1).is_some_and(|next| next.as_relu());
-                // `nn::Module::forward` と同じく `tape.0`（`pub(crate)`
-                // フィールド）経由で内部の生 `Tape` を取り出す（本ファイル
-                // 冒頭 doc「公開シグネチャの型」参照）。
-                let bound = linear.bind(&tape.0);
-                current = if fuse_relu {
-                    bound.forward_with_activation(&current, Activation::Relu)?
-                } else {
-                    bound.forward(&current)?
-                };
-                i += if fuse_relu { 2 } else { 1 };
-            } else {
-                current = layer.forward(&tape.0, &current)?;
-                i += 1;
-            }
-        }
-        Ok(current)
+        self.inner.forward(&tape.0, input)
     }
 
     /// 推論の入口（受け入れ条件「Sequential でのモデル構築・推論が
@@ -331,12 +307,13 @@ impl Sequential {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        let layers = self.inner.layers();
         let mut current = input.clone();
         let mut i = 0;
-        while i < self.layers.len() {
-            let layer = &self.layers[i];
+        while i < layers.len() {
+            let layer = &layers[i];
             if let Some(linear) = layer.as_linear() {
-                let fuse_relu = self.layers.get(i + 1).is_some_and(|next| next.as_relu());
+                let fuse_relu = layers.get(i + 1).is_some_and(|next| next.as_relu());
                 current = if fuse_relu {
                     linear.forward_host_with_activation(ops, &current, Activation::Relu)?
                 } else {
@@ -367,7 +344,8 @@ impl Sequential {
         // `Linear::bind` も `&fandhe_ai_autodiff::Tape` を要求する（`forward` と
         // 同じ理由。`tape.0` 経由で取り出す）。
         let linears = self
-            .layers
+            .inner
+            .layers()
             .iter()
             .filter_map(|layer| layer.as_linear())
             .map(|linear| linear.bind(&tape.0))
@@ -387,7 +365,7 @@ impl Sequential {
     /// [`Sequential::apply_parameters`] と共通（#294 の設計不変条件）。
     pub fn trainable_parameters(&self) -> Vec<&Tensor<f32>> {
         let mut out = Vec::new();
-        for layer in &self.layers {
+        for layer in self.inner.layers() {
             if let Some(linear) = layer.as_linear() {
                 out.push(linear.weight());
                 if let Some(bias) = linear.bias() {
@@ -419,10 +397,10 @@ impl Sequential {
     /// `compat::Sequential` へ追加可能になった時点で、この伝播が実際の
     /// 挙動差を生む。
     pub fn set_training(&mut self, training: bool) {
-        self.training = training;
-        for layer in &mut self.layers {
-            layer.set_training(training);
-        }
+        // `nn::Sequential::set_training`（`Module` 実装）が自身のモード
+        // フラグ更新と全子層への伝播をまとめて担う（イシュー #1759 で
+        // ここへ移設済み）。
+        self.inner.set_training(training);
     }
 
     /// `set_training(true)` の別名（PyTorch `Module.train()` 相当）。
@@ -439,7 +417,7 @@ impl Sequential {
     /// フラグ**を返す（`nn::Module::training` の既定実装〈常に
     /// `true`〉には委譲しない。本 `Sequential` がモードの正のため）。
     pub fn training(&self) -> bool {
-        self.training
+        self.inner.training()
     }
 
     /// 「名前, パラメータ参照」列（PyTorch `Module.named_parameters()`
@@ -455,13 +433,10 @@ impl Sequential {
     /// （`docs/compat-api-scope.md` の位置対応契約と整合。イシュー
     /// #1758 のテストで固定）。
     pub fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
-        let mut out = Vec::new();
-        for (index, layer) in self.layers.iter().enumerate() {
-            for (name, tensor) in layer.named_parameters() {
-                out.push((format!("{index}.{name}"), tensor));
-            }
-        }
-        out
+        // `nn::Sequential::named_parameters`（`ModuleList::named_parameters`
+        // への委譲）が同じ `"{index}.{name}"` 接頭辞契約で実装済みのため
+        // そのまま委譲する（イシュー #1759）。
+        self.inner.named_parameters()
     }
 
     /// optimizer（[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]／
@@ -520,7 +495,8 @@ impl Sequential {
         // trainable_parameters() と同じ順序（層の追加順）で学習可能層への
         // 可変参照を先に集める。まだ何も書き換えない。
         let linears: Vec<&mut Linear> = self
-            .layers
+            .inner
+            .layers_mut()
             .iter_mut()
             .filter_map(|layer| layer.as_linear_mut())
             .collect();
@@ -721,14 +697,15 @@ impl Sequential {
             Activation,
         )>,
     > {
-        if self.layers.is_empty() {
+        let layers = self.inner.layers();
+        if layers.is_empty() {
             return None;
         }
         let mut steps = Vec::new();
         let mut cursor = leaves.iter();
         let mut i = 0;
-        while i < self.layers.len() {
-            let layer = &self.layers[i];
+        while i < layers.len() {
+            let layer = &layers[i];
             // `Linear` 以外の層（`Sigmoid`／`Tanh` 等）は chain 経路
             // 非対応のため `None` を返しフォールバックさせる。
             let linear = layer.as_linear()?;
@@ -738,7 +715,7 @@ impl Sequential {
             } else {
                 None
             };
-            let act = if self.layers.get(i + 1).is_some_and(|next| next.as_relu()) {
+            let act = if layers.get(i + 1).is_some_and(|next| next.as_relu()) {
                 Activation::Relu
             } else {
                 Activation::None
@@ -783,6 +760,7 @@ impl Sequential {
         leaves: &[ResidentLeaf<'t>],
         store: &DeviceParamStore,
     ) -> Result<Var<'t>, AutodiffError> {
+        let layers = self.inner.layers();
         let mut current = *input;
         let mut cursor = leaves.iter();
         // `SequentialVars::forward`（`Sequential::forward` 経由）と同じ
@@ -791,8 +769,8 @@ impl Sequential {
         // linear_forward_with_activation`（`BackendOps::
         // gemm_resident_rhs_act` を経由）を使う。
         let mut i = 0;
-        while i < self.layers.len() {
-            let layer = &self.layers[i];
+        while i < layers.len() {
+            let layer = &layers[i];
             if let Some(linear) = layer.as_linear() {
                 let weight = cursor.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
@@ -812,7 +790,7 @@ impl Sequential {
                 } else {
                     None
                 };
-                let act = if self.layers.get(i + 1).is_some_and(|next| next.as_relu()) {
+                let act = if layers.get(i + 1).is_some_and(|next| next.as_relu()) {
                     Activation::Relu
                 } else {
                     Activation::None
@@ -845,6 +823,20 @@ impl Sequential {
             ));
         }
         Ok(current)
+    }
+
+    /// テスト専用の内部コンストラクタ（イシュー #1759 再構成前の
+    /// `Sequential { layers: vec![...], training: true }` struct
+    /// literal に代わる経路）。公開 `add_*` はビルダー限定・bias 有無を
+    /// 自由に混在できないため、本クレート内テストが `Linear::new` を
+    /// 直接呼んで構成する既存パターンを維持するための薄いヘルパー。
+    #[cfg(test)]
+    fn from_boxed_layers(layers: Vec<Box<dyn Module>>) -> Self {
+        let mut inner = NnSequential::new();
+        for layer in layers {
+            inner.push(layer);
+        }
+        Sequential { inner }
     }
 }
 
@@ -903,7 +895,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         // `docs/inference-forward-fixed-cost-design.md` §3.1 の
         // bit-exactness 契約を学習側でも壊さない）。
         let mut linears = self.linears.iter();
-        let layers = &self.model.layers;
+        let layers = self.model.inner.layers();
         let mut i = 0;
         while i < layers.len() {
             let layer = &layers[i];
@@ -1052,10 +1044,11 @@ mod tests {
         let manual_output = linear2.bind(&manual_tape.0).forward(&h).unwrap();
 
         // Sequential 経路: 同じ Linear インスタンスを Module として積む。
-        let model = Sequential {
-            layers: vec![Box::new(linear1), Box::new(Relu), Box::new(linear2)],
-            training: true,
-        };
+        let model = Sequential::from_boxed_layers(vec![
+            Box::new(linear1),
+            Box::new(Relu),
+            Box::new(linear2),
+        ]);
         let seq_tape = crate::tape();
         let seq_input = seq_tape.var(&input_tensor);
         let seq_output = model.forward(&seq_tape, &seq_input).unwrap();
@@ -1117,17 +1110,14 @@ mod tests {
     #[test]
     fn sequential_predict_tape_free_matches_via_tape_bit_exact() {
         for batch in [1usize, 3, 8] {
-            let model = Sequential {
-                layers: vec![
-                    Box::new(Linear::new(8, 16, true, SEED1).unwrap()),
-                    Box::new(Relu),
-                    Box::new(Linear::new(16, 12, false, SEED2).unwrap()),
-                    Box::new(Sigmoid),
-                    Box::new(Linear::new(12, 4, true, SEED1 + SEED2).unwrap()),
-                    Box::new(Tanh),
-                ],
-                training: true,
-            };
+            let model = Sequential::from_boxed_layers(vec![
+                Box::new(Linear::new(8, 16, true, SEED1).unwrap()),
+                Box::new(Relu),
+                Box::new(Linear::new(16, 12, false, SEED2).unwrap()),
+                Box::new(Sigmoid),
+                Box::new(Linear::new(12, 4, true, SEED1 + SEED2).unwrap()),
+                Box::new(Tanh),
+            ]);
             let input_data: Vec<f32> = (0..batch * 8).map(|i| (i as f32) * 0.05 - 0.3).collect();
             let input = Tensor::new(input_data, &[batch, 8]).unwrap();
 
@@ -1158,19 +1148,16 @@ mod tests {
     #[test]
     fn sequential_predict_tape_free_matches_via_tape_bit_exact_with_1714_layers() {
         for batch in [1usize, 3] {
-            let model = Sequential {
-                layers: vec![
-                    Box::new(Linear::new(8, 16, true, SEED1).unwrap()),
-                    Box::new(Silu),
-                    Box::new(Linear::new(16, 12, false, SEED2).unwrap()),
-                    Box::new(Hardswish),
-                    Box::new(Linear::new(12, 8, true, SEED1 + SEED2).unwrap()),
-                    Box::new(LeakyRelu::new(0.2)),
-                    Box::new(Linear::new(8, 4, true, SEED2 + 1).unwrap()),
-                    Box::new(Elu::new(1.3)),
-                ],
-                training: true,
-            };
+            let model = Sequential::from_boxed_layers(vec![
+                Box::new(Linear::new(8, 16, true, SEED1).unwrap()),
+                Box::new(Silu),
+                Box::new(Linear::new(16, 12, false, SEED2).unwrap()),
+                Box::new(Hardswish),
+                Box::new(Linear::new(12, 8, true, SEED1 + SEED2).unwrap()),
+                Box::new(LeakyRelu::new(0.2)),
+                Box::new(Linear::new(8, 4, true, SEED2 + 1).unwrap()),
+                Box::new(Elu::new(1.3)),
+            ]);
             let input_data: Vec<f32> = (0..batch * 8).map(|i| (i as f32) * 0.05 - 0.3).collect();
             let input = Tensor::new(input_data, &[batch, 8]).unwrap();
 
@@ -1240,10 +1227,8 @@ mod tests {
             let y = ops.gemm(&h, l2.weight()).unwrap();
             let expected = ops.add(&y, l2.bias().unwrap()).unwrap();
 
-            let model = Sequential {
-                layers: vec![Box::new(l1), Box::new(Relu), Box::new(l2)],
-                training: true,
-            };
+            let model =
+                Sequential::from_boxed_layers(vec![Box::new(l1), Box::new(Relu), Box::new(l2)]);
             let actual = model.predict(&input).unwrap();
 
             assert_eq!(actual.shape(), expected.shape(), "batch={batch}");
@@ -1273,10 +1258,8 @@ mod tests {
         let h = Sigmoid.forward_host(&ops, &h).unwrap();
         let expected = ops.gemm(&h, l2.weight()).unwrap();
 
-        let model = Sequential {
-            layers: vec![Box::new(l1), Box::new(Sigmoid), Box::new(l2)],
-            training: true,
-        };
+        let model =
+            Sequential::from_boxed_layers(vec![Box::new(l1), Box::new(Sigmoid), Box::new(l2)]);
         let actual = model.predict(&input).unwrap();
 
         assert_eq!(dense_vec(&actual), dense_vec(&expected));
@@ -1359,10 +1342,7 @@ mod tests {
         // 層順どおり LinearVars を返すことを確認する。
         let l1 = Linear::new(4, 3, true, SEED1).unwrap();
         let l2 = Linear::new(3, 2, false, SEED2).unwrap();
-        let model = Sequential {
-            layers: vec![Box::new(l1), Box::new(Relu), Box::new(l2)],
-            training: true,
-        };
+        let model = Sequential::from_boxed_layers(vec![Box::new(l1), Box::new(Relu), Box::new(l2)]);
 
         let tape = crate::tape();
         let bound = model.bind(&tape);
@@ -1383,27 +1363,21 @@ mod tests {
         let input_tensor = Tensor::new(input_data, &[batch, 8]).unwrap();
 
         // Module 経路（既存の推論用 forward）。
-        let module_model = Sequential {
-            layers: vec![
-                Box::new(Linear::new(8, 16, true, SEED1).unwrap()),
-                Box::new(Relu),
-                Box::new(Linear::new(16, 4, true, SEED2).unwrap()),
-            ],
-            training: true,
-        };
+        let module_model = Sequential::from_boxed_layers(vec![
+            Box::new(Linear::new(8, 16, true, SEED1).unwrap()),
+            Box::new(Relu),
+            Box::new(Linear::new(16, 4, true, SEED2).unwrap()),
+        ]);
         let module_tape = crate::tape();
         let module_input = module_tape.var(&input_tensor);
         let module_output = module_model.forward(&module_tape, &module_input).unwrap();
 
         // SequentialVars 経路（学習用 forward）。
-        let train_model = Sequential {
-            layers: vec![
-                Box::new(Linear::new(8, 16, true, SEED1).unwrap()),
-                Box::new(Relu),
-                Box::new(Linear::new(16, 4, true, SEED2).unwrap()),
-            ],
-            training: true,
-        };
+        let train_model = Sequential::from_boxed_layers(vec![
+            Box::new(Linear::new(8, 16, true, SEED1).unwrap()),
+            Box::new(Relu),
+            Box::new(Linear::new(16, 4, true, SEED2).unwrap()),
+        ]);
         let train_tape = crate::tape();
         let bound = train_model.bind(&train_tape);
         let train_input = train_tape.var(&input_tensor);
@@ -1516,10 +1490,7 @@ mod tests {
         // コンストラクタ（`Sequential { layers: ... }`。同一クレート内の
         // テストのみ使用可能）で直接組み込んで検証する。
         let linear = Linear::new(2, 1, false, SEED1).unwrap();
-        let mut model = Sequential {
-            layers: vec![Box::new(linear)],
-            training: true,
-        };
+        let mut model = Sequential::from_boxed_layers(vec![Box::new(linear)]);
 
         // has_bias == false のため trainable_parameters()/apply_parameters()
         // は weight 1 件のみを要求する。
@@ -2071,10 +2042,10 @@ mod tests {
     fn build_device_chain_steps_includes_none_bias_for_no_bias_linear() {
         let linear_no_bias = Linear::new(4, 8, false, SEED1).unwrap();
         let linear_with_bias = Linear::new(8, 2, true, SEED2).unwrap();
-        let model = Sequential {
-            layers: vec![Box::new(linear_no_bias), Box::new(linear_with_bias)],
-            training: true,
-        };
+        let model = Sequential::from_boxed_layers(vec![
+            Box::new(linear_no_bias),
+            Box::new(linear_with_bias),
+        ]);
         let tape = crate::tape();
         let store = model.init_device_param_store(&tape).unwrap();
         let leaves = store.snapshot_resident_params(&tape.0).unwrap();
