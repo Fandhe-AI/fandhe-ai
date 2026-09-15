@@ -4722,6 +4722,25 @@ impl BackendOps for CudaBackendOps {
     /// 追従イシュー）。[`pool2d_out_shape`] で `input.shape()`／
     /// `params` を再検査してから `pooling::CudaPooling::
     /// run_avg_pool2d_f32` へ委譲する。
+    ///
+    /// **`dilation != [1, 1]` は起動前に `Unsupported` を返す**
+    /// （codex-review 指摘・PR #1888）: `pooling::CudaPooling::
+    /// run_avg_pool2d_f32`（延いては `kernels_pooling::
+    /// AVG_POOL2D_F32`）は `dilation` を引数に持たない構造で常に
+    /// `dilation=[1, 1]` として計算する（`kernels_pooling.rs` モジュール
+    /// doc「`AvgPool` の `dilation` は設計 doc §3 のとおり常に `1`
+    /// 固定のためカーネル引数に持たない」）。一方 `BackendOps::
+    /// avg_pool2d` は `Pool2dParams` を通じ任意の `dilation` を受理
+    /// できる一般 API であり、`out_shape` 自体は
+    /// [`pool2d_out_shape`] が `dilation` を正しく織り込んで計算する
+    /// （CPU 参照実装 `backend-cpu::pooling::avg_pool2d` は任意の
+    /// `dilation` で正しく動作する一般実装）。両者の乖離を放置すると
+    /// `dilation != [1, 1]` の呼び出しに対し CUDA が誤った数値
+    /// （またはたまたま一致する `out_shape` の下で誤った値）を返しうる
+    /// ため、カーネル側を拡張する代わりに fail-closed に
+    /// `Unsupported` へ落としホスト参照実装（`eval::avg_pool2d`）へ
+    /// フォールバックさせる（`MaxPool` は `kh_ * dh` を持つ構造で
+    /// 既に `dilation` に対応済みのため対象外）。
     fn avg_pool2d(
         &self,
         input: &Tensor<f32>,
@@ -4730,6 +4749,12 @@ impl BackendOps for CudaBackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         let out_shape =
             pool2d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        if params.dilation() != [1, 1] {
+            return Err(BackendError::Unsupported(format!(
+                "avg_pool2d: CUDA kernel does not support dilation != [1, 1] (got {:?})",
+                params.dilation()
+            )));
+        }
         if out_shape.contains(&0) {
             return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
         }
@@ -5502,6 +5527,27 @@ mod tests {
         assert_eq!(values.shape(), &[0, 1, 2, 2]);
         assert_eq!(indices.shape(), &[0, 1, 2, 2]);
         assert_eq!(values.numel(), 0);
+    }
+
+    /// codex-review 指摘（PR #1888・スレッド `crates/backend-cuda/src/
+    /// ops.rs:4758`）の再現固定: `input=[1,1,4,4]`（値 0〜15）・
+    /// `kernel=[2,2]`・`stride=[3,3]`・`padding=[0,0]`・
+    /// `dilation=[2,2]` は `pool2d_out_shape` 上は `[1,1,1,1]` を返す
+    /// ため（CPU 参照実装は該当ウィンドウ `{0,2}×{0,2}` の平均
+    /// `(0+2+8+10)/4=5.0` を返す）、CUDA カーネルが `dilation` を
+    /// 無視して誤った値（`stride` 前提の `{0,3}×{0,3}` 相当の
+    /// `(0+3+12+15)/4=7.5` 等）を返すのではなく `Unsupported` を
+    /// device 非接触のまま返すことを固定する。
+    #[test]
+    fn avg_pool2d_rejects_non_unit_dilation_without_touching_device() {
+        let x = Tensor::<f32>::new((0..16).map(|v| v as f32).collect(), &[1, 1, 4, 4]).unwrap();
+        let params = Pool2dParams::new([2, 2], Some([3, 3]), [0, 0], [2, 2]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops.avg_pool2d(&x, &params, true).unwrap_err();
+        assert!(
+            matches!(err, BackendError::Unsupported(_)),
+            "dilation != [1, 1] は Unsupported を返すべき: {err:?}"
+        );
     }
 
     #[test]
