@@ -96,6 +96,7 @@ mod init;
 mod linear;
 mod module;
 mod norm;
+mod pooling;
 mod rnn;
 
 pub mod activation;
@@ -114,6 +115,9 @@ pub use linear::{Linear, LinearVars};
 pub use module::Module;
 pub use norm::{
     LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, RMS_NORM_DEFAULT_EPS, RmsNorm, RmsNormVars,
+};
+pub use pooling::{
+    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
 };
 pub use rnn::{
     Gru, GruCell, GruCellVars, Lstm, LstmCell, LstmCellVars, LstmSeqOutput, Rnn, RnnCell,

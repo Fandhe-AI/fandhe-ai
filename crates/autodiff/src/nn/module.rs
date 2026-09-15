@@ -33,11 +33,15 @@ use crate::nn::batch_norm::{
 use crate::nn::conv::{Conv1d, Conv2d};
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
+use crate::nn::pooling::{
+    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
+};
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, ShapeError, Tensor, batch_norm_layout, broadcast_shape,
-    gemm_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
+    BackendError, BackendOps, ShapeError, Tensor, adaptive_pool2d_out_shape, batch_norm_layout,
+    broadcast_shape, gemm_out_shape, pool2d_out_shape, reduce_out_shape, require_same_shape,
+    row_norm_layout,
 };
 
 /// [`Module::named_parameters`] の実装が、子 `Module`（`Linear` 等）を
@@ -704,6 +708,193 @@ impl Module for Softplus {
             },
             input,
         )
+    }
+}
+
+/// `MaxPool2d::forward` への委譲（イシュー #1728）。`(values, index)`
+/// のうち `values` のみを返す（索引が必要な場合は `MaxPool2d::
+/// forward` を直接呼ぶ。`nn/pooling.rs` モジュール doc 参照）。
+impl Module for MaxPool2d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let (values, _index) = MaxPool2d::forward(self, input)?;
+        Ok(values)
+    }
+
+    /// `Var::max_pool2d` と同じ検査順序（`pool2d_out_shape` →
+    /// `max_pool2d_with_fallback`）を tape 不要経路で再現する
+    /// （`Var::max_pool2d` doc 参照）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let out_shape =
+            pool2d_out_shape(input.shape(), self.params()).map_err(AutodiffError::Shape)?;
+        let (values, _index) =
+            crate::grad::max_pool2d_with_fallback(ops, input, self.params(), &out_shape)?;
+        Ok(values)
+    }
+}
+
+/// `MaxPool1d::forward` への委譲。`[N,C,L]` を `[N,C,1,L]` へ reshape
+/// して [`MaxPool2d`] の `forward_host` 経路（`H` 軸固定）を再利用し、
+/// 出力を `[N,C,Lout]` へ戻す（`Var::max_pool1d` と同型。イシュー
+/// #1728）。
+impl Module for MaxPool1d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let (values, _index) = MaxPool1d::forward(self, input)?;
+        Ok(values)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let in_shape = input.shape();
+        if in_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: in_shape.len(),
+            }));
+        }
+        let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        let x4 = input
+            .contiguous()
+            .reshape(&[n, c, 1, l])
+            .map_err(AutodiffError::Shape)?;
+        let params2d = fandhe_ai_tensor_core::Pool2dParams::new(
+            self.kernel_size_2d(),
+            Some(self.stride_2d()),
+            self.padding_2d(),
+            self.dilation_2d(),
+        )
+        .map_err(AutodiffError::Backend)?;
+        let out_shape4 =
+            pool2d_out_shape(&[n, c, 1, l], &params2d).map_err(AutodiffError::Shape)?;
+        let (values4, _index4) =
+            crate::grad::max_pool2d_with_fallback(ops, &x4, &params2d, &out_shape4)?;
+        let lout = out_shape4[3];
+        values4.reshape(&[n, c, lout]).map_err(AutodiffError::Shape)
+    }
+}
+
+/// `AvgPool2d::forward` への委譲（イシュー #1728）。
+impl Module for AvgPool2d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        AvgPool2d::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let out_shape =
+            pool2d_out_shape(input.shape(), self.params()).map_err(AutodiffError::Shape)?;
+        crate::grad::avg_pool2d_with_fallback(
+            ops,
+            input,
+            self.params(),
+            self.count_include_pad(),
+            &out_shape,
+        )
+    }
+}
+
+/// `AvgPool1d::forward` への委譲（`MaxPool1d` の `forward_host` と
+/// 同型の reshape 併合。イシュー #1728）。
+impl Module for AvgPool1d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        AvgPool1d::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let in_shape = input.shape();
+        if in_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: in_shape.len(),
+            }));
+        }
+        let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        let x4 = input
+            .contiguous()
+            .reshape(&[n, c, 1, l])
+            .map_err(AutodiffError::Shape)?;
+        let params2d = fandhe_ai_tensor_core::Pool2dParams::new(
+            self.kernel_size_2d(),
+            Some(self.stride_2d()),
+            self.padding_2d(),
+            [1, 1],
+        )
+        .map_err(AutodiffError::Backend)?;
+        let out_shape4 =
+            pool2d_out_shape(&[n, c, 1, l], &params2d).map_err(AutodiffError::Shape)?;
+        let values4 = crate::grad::avg_pool2d_with_fallback(
+            ops,
+            &x4,
+            &params2d,
+            self.count_include_pad(),
+            &out_shape4,
+        )?;
+        let lout = out_shape4[3];
+        values4.reshape(&[n, c, lout]).map_err(AutodiffError::Shape)
+    }
+}
+
+/// `AdaptiveAvgPool2d::forward` への委譲（イシュー #1728）。
+impl Module for AdaptiveAvgPool2d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        AdaptiveAvgPool2d::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let out_shape = adaptive_pool2d_out_shape(input.shape(), self.output_size())
+            .map_err(AutodiffError::Shape)?;
+        crate::grad::adaptive_avg_pool2d_with_fallback(ops, input, self.output_size(), &out_shape)
+    }
+}
+
+/// `AdaptiveAvgPool1d::forward` への委譲（`MaxPool1d` と同型の
+/// reshape 併合。イシュー #1728）。
+impl Module for AdaptiveAvgPool1d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        AdaptiveAvgPool1d::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let in_shape = input.shape();
+        if in_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: in_shape.len(),
+            }));
+        }
+        let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        let x4 = input
+            .contiguous()
+            .reshape(&[n, c, 1, l])
+            .map_err(AutodiffError::Shape)?;
+        let output_size4 = [1, self.output_size_1d()];
+        let out_shape4 =
+            adaptive_pool2d_out_shape(&[n, c, 1, l], output_size4).map_err(AutodiffError::Shape)?;
+        let values4 =
+            crate::grad::adaptive_avg_pool2d_with_fallback(ops, &x4, output_size4, &out_shape4)?;
+        let lout = out_shape4[3];
+        values4.reshape(&[n, c, lout]).map_err(AutodiffError::Shape)
     }
 }
 

@@ -31,8 +31,8 @@
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, BatchNormTrainOutput, BceKind, CastElement, HuberKind,
-    KlDivTarget, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
-    batch_norm_layout, row_norm_layout,
+    KlDivTarget, Pool2dParams, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor,
+    VectorNormOrd, adaptive_window, batch_norm_layout, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -1960,6 +1960,104 @@ pub(crate) fn vjp(
             let d_input = Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?;
             vec![(input, d_input)]
         }
+        // `Var::max_pool2d`（イシュー #1728・設計 `docs/pooling-ops-
+        // design.md` §6）。forward が `values = gather 相当（勝者
+        // 索引で選択）` と数学的に同一のため、`Op::Sort`／`Op::Topk`
+        // と同じ scatter_add 式を使う。`input`／`upstream`／`index`
+        // を `[N·C, H·W]`／`[N·C, Hout·Wout]` へ reshape してから
+        // scatter し、最後に `[N,C,H,W]` へ戻す。
+        Op::MaxPool2d { input, index } => {
+            let input_shape = nodes[input.0].shape.clone();
+            if input_shape.len() != 4 {
+                return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                    expected: 4,
+                    actual: input_shape.len(),
+                }));
+            }
+            let (n, c, h, w) = (
+                input_shape[0],
+                input_shape[1],
+                input_shape[2],
+                input_shape[3],
+            );
+            let hw = h
+                .checked_mul(w)
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let nc = n
+                .checked_mul(c)
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let flat_in = [nc, hw];
+
+            // `upstream` は転置 view で来うるため reshape の前に
+            // `contiguous()` する（`Op::Conv2d` VJP と同じ注意）。
+            let upstream_c = upstream.contiguous();
+            let out_shape = upstream_c.shape().to_vec();
+            if out_shape.len() != 4 {
+                return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                    expected: 4,
+                    actual: out_shape.len(),
+                }));
+            }
+            let out_hw = out_shape[2]
+                .checked_mul(out_shape[3])
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let flat_out = [nc, out_hw];
+            let upstream_flat = upstream_c
+                .reshape(&flat_out)
+                .map_err(AutodiffError::Shape)?;
+            let index_flat = index
+                .contiguous()
+                .reshape(&flat_out)
+                .map_err(AutodiffError::Shape)?;
+
+            // 設計 doc §6「VJP 側でも debug_assert! と安全側スキップ」
+            // より厳格な側（fail-closed。`.claude/rules/security.md`
+            // A08）へ倒す: 索引がすべて `[0, H*W)` に収まることを事前
+            // 検証し、契約違反（forward の空窓拒否検査を経由しない
+            // 呼び出し経路等）を panic ではなく型付きエラーで拒否する。
+            for v in index_flat.host_slice().iter() {
+                let vi = i64::from(*v);
+                if vi < 0 || (vi as usize) >= hw {
+                    return Err(AutodiffError::Backward(format!(
+                        "Op::MaxPool2d の VJP: index の値 {vi} が [0, H*W)=[0, {hw}) の範囲外（契約違反）"
+                    )));
+                }
+            }
+
+            let zeros = Tensor::zeros(&flat_in).map_err(AutodiffError::Shape)?;
+            let d_input_flat = scatter_with_fallback(
+                ops,
+                &zeros,
+                1,
+                &index_flat,
+                &upstream_flat,
+                ScatterReduce::Add,
+                &flat_in,
+            )?;
+            let d_input = d_input_flat
+                .reshape(&input_shape)
+                .map_err(AutodiffError::Shape)?;
+            vec![(input, d_input)]
+        }
+        // `Var::avg_pool2d`（イシュー #1728・設計 `docs/pooling-ops-
+        // design.md` §8）。ホスト側のみの VJP（`cumsum_vjp_along` と
+        // 同方針）。
+        Op::AvgPool2d {
+            input,
+            params,
+            count_include_pad,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let d_input = avg_pool2d_vjp(upstream, &input_shape, &params, count_include_pad)?;
+            vec![(input, d_input)]
+        }
+        // `Var::adaptive_avg_pool2d`（イシュー #1728・設計 `docs/
+        // pooling-ops-design.md` §8）。ホスト側のみの VJP。
+        Op::AdaptiveAvgPool2d { input } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let d_input = adaptive_avg_pool2d_vjp(upstream, &input_shape)?;
+            vec![(input, d_input)]
+        }
     };
     Ok(contributions)
 }
@@ -2643,6 +2741,92 @@ pub(crate) fn topk_with_fallback(
             Ok((values, index))
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::topk(input, dim, k, largest, out_shape)?),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::MaxPool2d`] の forward（`Var::max_pool2d` 経由）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1728）。
+/// [`topk_with_fallback`] と同型: `ops.max_pool2d` → `Unsupported`
+/// のときのみ `eval::max_pool2d` へフォールバックし、それ以外の
+/// エラーは伝播する（判定迂回経路を作らない）。
+pub(crate) fn max_pool2d_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    params: &Pool2dParams,
+    out_shape: &[usize],
+) -> Result<(Tensor<f32>, Tensor<i32>), AutodiffError> {
+    match ops.max_pool2d(input, params) {
+        Ok((values, index)) => {
+            if values.shape() != out_shape || index.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: values.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok((values, index))
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::max_pool2d(input, params, out_shape)?),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::AvgPool2d`] の forward（`Var::avg_pool2d` 経由）が使う
+/// 「バックエンド実装 → フォールバック」ヘルパー（イシュー #1728）。
+/// [`max_pool2d_with_fallback`] と同型。
+pub(crate) fn avg_pool2d_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    params: &Pool2dParams,
+    count_include_pad: bool,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.avg_pool2d(input, params, count_include_pad) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::avg_pool2d(
+            input,
+            params,
+            count_include_pad,
+            out_shape,
+        )?),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::AdaptiveAvgPool2d`] の forward（`Var::adaptive_avg_pool2d`
+/// 経由）が使う「バックエンド実装 → フォールバック」ヘルパー
+/// （イシュー #1728）。[`max_pool2d_with_fallback`] と同型。
+pub(crate) fn adaptive_avg_pool2d_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    output_size: [usize; 2],
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.adaptive_avg_pool2d(input, output_size) {
+        Ok(v) => {
+            if v.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::adaptive_avg_pool2d(input, out_shape)?),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }
@@ -4260,6 +4444,203 @@ fn log_softmax_vjp_along(
         }
     }
     build_tensor(out, &shape)
+}
+
+/// [`avg_pool2d_vjp`]／[`adaptive_avg_pool2d_vjp`] が共有する、窓添字
+/// から入力座標を符号安全に逆算するヘルパー（`backend-cpu::pooling::
+/// window_input_pos` と同型の式。クレートが異なるため複製する。
+/// イシュー #1728）。`pos = out_idx*stride + k*dilation - padding` を
+/// `checked_*` のみで計算し、`padding` を超える減算はアンダーフロー
+/// として `None` を返す。
+fn pool_window_input_pos(
+    out_idx: usize,
+    stride: usize,
+    k: usize,
+    dilation: usize,
+    padding: usize,
+) -> Option<usize> {
+    let base = out_idx.checked_mul(stride)?;
+    let offset = k.checked_mul(dilation)?;
+    let sum = base.checked_add(offset)?;
+    sum.checked_sub(padding)
+}
+
+/// [`Op::AvgPool2d`] の VJP 本体（イシュー #1728・設計 `docs/pooling-
+/// ops-design.md` §8）。
+///
+/// 出力（`oh`, `ow`）を row-major で走査し、各出力位置の窓に属する
+/// 入力位置へ `upstream[oh,ow] / divisor` を `f64` アキュムレータ配列
+/// （`numel(input)`）へ加算し、最後に 1 回だけ `f32` へ downcast する。
+/// これは設計 doc §8「入力位置ごとに、それを含む窓を `(oh, ow)`
+/// row-major 順に走査」と**加算順が同一**である——特定の入力位置
+/// `p` への加算は、出力を row-major で辿るあいだ `p` を含む窓へ
+/// 到達するたびに発生するため、`p` への加算列は常に `(oh, ow)`
+/// row-major 順になる（浮動小数点和は特定アキュムレータへの加算列の
+/// 順序のみに依存し、外側ループの構造には依存しない）。forward
+/// （`avg_pool2d`）と同じ divisor 規約（`count_include_pad`）を使う。
+fn avg_pool2d_vjp(
+    upstream: &Tensor<f32>,
+    input_shape: &[usize],
+    params: &Pool2dParams,
+    count_include_pad: bool,
+) -> Result<Tensor<f32>, AutodiffError> {
+    if input_shape.len() != 4 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 4,
+            actual: input_shape.len(),
+        }));
+    }
+    let upstream = upstream.contiguous();
+    let out_shape = upstream.shape().to_vec();
+    if out_shape.len() != 4 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 4,
+            actual: out_shape.len(),
+        }));
+    }
+    let (n_batch, c_ch, h_out, w_out) = (out_shape[0], out_shape[1], out_shape[2], out_shape[3]);
+    let (h_in, w_in) = (input_shape[2], input_shape[3]);
+    let [kh, kw] = params.kernel_size();
+    let [sh, sw] = params.stride();
+    let [ph, pw] = params.padding();
+    let [dh, dw] = params.dilation();
+
+    let in_numel: usize = input_shape.iter().product();
+    let mut acc = vec![0f64; in_numel];
+    for n in 0..n_batch {
+        for c in 0..c_ch {
+            for oh in 0..h_out {
+                for ow in 0..w_out {
+                    let mut count: usize = 0;
+                    for kh_ in 0..kh {
+                        let Some(h) =
+                            pool_window_input_pos(oh, sh, kh_, dh, ph).filter(|&h| h < h_in)
+                        else {
+                            continue;
+                        };
+                        for kw_ in 0..kw {
+                            let Some(w) =
+                                pool_window_input_pos(ow, sw, kw_, dw, pw).filter(|&w| w < w_in)
+                            else {
+                                continue;
+                            };
+                            let _ = (h, w);
+                            count += 1;
+                        }
+                    }
+                    let divisor = if count_include_pad {
+                        kh.checked_mul(kw)
+                            .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?
+                    } else {
+                        count
+                    };
+                    // divisor == 0 は forward の `pool2d_out_shape` 空窓
+                    // 拒否検査が成立している限り到達しない（契約違反の
+                    // 安全側フォールバック。`max_pool2d` VJP の
+                    // `AutodiffError::Backward` と同方針）。
+                    if divisor == 0 {
+                        return Err(AutodiffError::Backward(
+                            "Op::AvgPool2d の VJP: divisor が 0（空窓・契約違反）".into(),
+                        ));
+                    }
+                    let g = upstream.get(&[n, c, oh, ow]).ok_or_else(|| {
+                        AutodiffError::Backend(BackendError::ShapeMismatch(
+                            ShapeError::ShapeMismatch {
+                                lhs: vec![n, c, oh, ow],
+                                rhs: out_shape.clone(),
+                            },
+                        ))
+                    })?;
+                    let contrib = f64::from(g) / divisor as f64;
+                    for kh_ in 0..kh {
+                        let Some(h) =
+                            pool_window_input_pos(oh, sh, kh_, dh, ph).filter(|&h| h < h_in)
+                        else {
+                            continue;
+                        };
+                        for kw_ in 0..kw {
+                            let Some(w) =
+                                pool_window_input_pos(ow, sw, kw_, dw, pw).filter(|&w| w < w_in)
+                            else {
+                                continue;
+                            };
+                            let idx = ((n * c_ch + c) * h_in + h) * w_in + w;
+                            acc[idx] += contrib;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let out: Vec<f32> = acc.into_iter().map(|v| v as f32).collect();
+    Tensor::new(out, input_shape).map_err(AutodiffError::Shape)
+}
+
+/// [`Op::AdaptiveAvgPool2d`] の VJP 本体（イシュー #1728・設計
+/// `docs/pooling-ops-design.md` §8）。[`avg_pool2d_vjp`] と同じ
+/// 出力 major 加算順の原則を、[`adaptive_window`]（forward と共有
+/// する単一情報源）が定める可変窓へ適用する。divisor は常に実際の
+/// 窓要素数（`count_include_pad=true` 相当）。
+fn adaptive_avg_pool2d_vjp(
+    upstream: &Tensor<f32>,
+    input_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    if input_shape.len() != 4 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 4,
+            actual: input_shape.len(),
+        }));
+    }
+    let upstream = upstream.contiguous();
+    let out_shape = upstream.shape().to_vec();
+    if out_shape.len() != 4 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 4,
+            actual: out_shape.len(),
+        }));
+    }
+    let (n_batch, c_ch, h_out, w_out) = (out_shape[0], out_shape[1], out_shape[2], out_shape[3]);
+    let (h_in, w_in) = (input_shape[2], input_shape[3]);
+
+    let in_numel: usize = input_shape.iter().product();
+    let mut acc = vec![0f64; in_numel];
+    for n in 0..n_batch {
+        for c in 0..c_ch {
+            for oh in 0..h_out {
+                let (h_start, h_end) = adaptive_window(oh, h_in, h_out)
+                    .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+                for ow in 0..w_out {
+                    let (w_start, w_end) = adaptive_window(ow, w_in, w_out)
+                        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+                    let count = (h_end - h_start)
+                        .checked_mul(w_end - w_start)
+                        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+                    if count == 0 {
+                        return Err(AutodiffError::Backward(
+                            "Op::AdaptiveAvgPool2d の VJP: 窓要素数が 0（契約違反）".into(),
+                        ));
+                    }
+                    let g = upstream.get(&[n, c, oh, ow]).ok_or_else(|| {
+                        AutodiffError::Backend(BackendError::ShapeMismatch(
+                            ShapeError::ShapeMismatch {
+                                lhs: vec![n, c, oh, ow],
+                                rhs: out_shape.clone(),
+                            },
+                        ))
+                    })?;
+                    let contrib = f64::from(g) / count as f64;
+                    for h in h_start..h_end {
+                        for w in w_start..w_end {
+                            let idx = ((n * c_ch + c) * h_in + h) * w_in + w;
+                            acc[idx] += contrib;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let out: Vec<f32> = acc.into_iter().map(|v| v as f32).collect();
+    Tensor::new(out, input_shape).map_err(AutodiffError::Shape)
 }
 
 /// `Op::Cumsum` の VJP 本体: `d_x[i] = Σ_{j>=i} g[j]`（`dim` 方向の
