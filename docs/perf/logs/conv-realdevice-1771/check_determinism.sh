@@ -264,7 +264,13 @@ main() {
         exit $?
         ;;
       --expect-logs)
-        expect_csv=${2:-}
+        if [[ $# -lt 2 ]]; then
+          echo "エラー: --expect-logs に値が指定されていない" >&2
+          echo "usage: $0 [--expect-logs <name1,name2,...>] <run1_dir> <run2_dir>" >&2
+          echo "       $0 --self-test" >&2
+          exit 2
+        fi
+        expect_csv=$2
         shift 2
         ;;
       --expect-logs=*)
