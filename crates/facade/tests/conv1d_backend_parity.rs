@@ -13,6 +13,20 @@
 //!   "macos")` 限定）／`tape_for(Device::Cuda(0))` を CPU tape と
 //!   `assert_parity`（REQ-2 複合判定。GEMM 由来の差を許容）で比較する。
 //!   実機未実測のまま出荷し記入欄を残す。
+//!
+//! **CUDA（イシュー #1767「Conv1d を Conv2d の特化として実装する」）**:
+//! CUDA は #1766 で `BackendOps::im2col`／`col2im` を override 済み
+//! （bit 完全一致契約）で、`conv1d` 自身は #1765 の reshape 併合
+//! （新規 `Op`／`BackendOps`／カーネルなし）のため、CUDA 経路も
+//! `conv2d_backend_parity.rs` と同じく「CUDA im2col（bit 一致）→
+//! CUDA GEMM（REQ-2 複合判定）→ CUDA add → CUDA col2im（bit 一致）」
+//! の合成としてそのまま到達する（本ファイル追記時点でコード変更は
+//! テストのみ・facade 新規公開面なし）。`cuda_conv1d_matches_manual_
+//! reshape_conv2d_bit_exact` は「特化」契約——同一 CUDA tape 上で
+//! `conv1d` と手動 reshape の `conv2d` が同一カーネル・同一形状を
+//! 通るため forward／backward とも bit 完全一致する——を実機で固定
+//! する（`crates/autodiff/tests/conv1d.rs::matches_manual_reshape_
+//! conv2d_bit_exact` の CUDA 版）。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Device;
@@ -232,6 +246,169 @@ fn cuda_conv1d_forward_matches_cpu() {
 
     assert_parity(
         "conv1d forward: CUDA tape_for vs CPU tape_for",
+        &contiguous_slice(&cuda_out),
+        &contiguous_slice(&cpu_out),
+    );
+}
+
+/// `device` 上で conv1d backward（forward → `sum(None)` →
+/// `backward`）を実行し `(dx, dw, db)` を返す（イシュー #1767。
+/// `conv2d_backend_parity.rs::conv2d_backward_on` と同型）。
+fn conv1d_backward_on(device: Device) -> (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x = tape.make_var(&leaf(1, &[1, 2, 9]));
+    let w = tape.make_var(&leaf(2, &[3, 2, 3]));
+    let b = tape.make_var(&leaf(3, &[3]));
+    let out = x
+        .conv1d(&w, Some(&b), 1, 1, 1, 1)
+        .expect("conv1d: 常に成功する形状");
+    let loss = out.sum(None).expect("sum: 常に成功する");
+    let grads = tape.backward(&loss).expect("backward: 常に成功する形状");
+    let dx = grads.get(&x).unwrap().expect("到達する").clone();
+    let dw = grads.get(&w).unwrap().expect("到達する").clone();
+    let db = grads.get(&b).unwrap().expect("到達する").clone();
+    (dx, dw, db)
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_conv1d_backward_matches_cpu() {
+    let (dx_cuda, dw_cuda, db_cuda) = conv1d_backward_on(Device::Cuda(0));
+    let (dx_cpu, dw_cpu, db_cpu) = conv1d_backward_on(Device::Cpu);
+
+    assert_parity(
+        "conv1d backward（dx）: CUDA tape_for vs CPU tape_for",
+        &contiguous_slice(&dx_cuda),
+        &contiguous_slice(&dx_cpu),
+    );
+    assert_parity(
+        "conv1d backward（dw）: CUDA tape_for vs CPU tape_for",
+        &contiguous_slice(&dw_cuda),
+        &contiguous_slice(&dw_cpu),
+    );
+    assert_parity(
+        "conv1d backward（db）: CUDA tape_for vs CPU tape_for",
+        &contiguous_slice(&db_cuda),
+        &contiguous_slice(&db_cpu),
+    );
+}
+
+/// イシュー #1767「Conv1d を Conv2d の特化として実装する」の中核
+/// 契約: 同一 CUDA tape 上で `conv1d` と「手動 reshape → `conv2d` →
+/// reshape」が forward／backward とも **bit 完全一致**する
+/// （`crates/autodiff/tests/conv1d.rs::matches_manual_reshape_conv2d_
+/// bit_exact` の CUDA 版。`conv1d` は新規カーネルを持たず reshape
+/// 併合のみのため、CUDA の im2col／col2im／GEMM いずれも同一形状・
+/// 同一カーネル呼び出しを経由し bit 同一が構造的に成立する）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_conv1d_matches_manual_reshape_conv2d_bit_exact() {
+    let tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+
+    let n = 2usize;
+    let cin = 3usize;
+    let l = 9usize;
+    let cout = 4usize;
+    let cin_g = 3usize;
+    let k = 3usize;
+    let stride = 1usize;
+    let padding = 1usize;
+    let dilation = 1usize;
+    let groups = 1usize;
+
+    let x_data = leaf(11, &[n, cin, l]);
+    let w_data = leaf(12, &[cout, cin_g, k]);
+    let b_data = leaf(13, &[cout]);
+
+    // conv1d 経路。
+    let x1 = tape.make_var(&x_data);
+    let w1 = tape.make_var(&w_data);
+    let b1 = tape.make_var(&b_data);
+    let y1 = x1
+        .conv1d(&w1, Some(&b1), stride, padding, dilation, groups)
+        .expect("conv1d: 常に成功する形状");
+    let out1 = y1.to_tensor();
+    let loss1 = y1.sum(None).expect("sum: 常に成功する");
+    let grads1 = tape.backward(&loss1).expect("backward: 常に成功する形状");
+    let dx1 = grads1.get(&x1).unwrap().expect("到達する").clone();
+    let dw1 = grads1.get(&w1).unwrap().expect("到達する").clone();
+    let db1 = grads1.get(&b1).unwrap().expect("到達する").clone();
+
+    // 手動 reshape -> conv2d 経路（同一 tape 上・別 leaf ノード）。
+    let x4_data = Tensor::new(
+        x_data.contiguous().as_slice().expect("contiguous").to_vec(),
+        &[n, cin, 1, l],
+    )
+    .expect("valid reshape");
+    let w4_data = Tensor::new(
+        w_data.contiguous().as_slice().expect("contiguous").to_vec(),
+        &[cout, cin_g, 1, k],
+    )
+    .expect("valid reshape");
+    let x2 = tape.make_var(&x4_data);
+    let w2 = tape.make_var(&w4_data);
+    let b2 = tape.make_var(&b_data);
+    let y2 = x2
+        .conv2d(
+            &w2,
+            Some(&b2),
+            [1, stride],
+            [0, padding],
+            [1, dilation],
+            groups,
+        )
+        .expect("conv2d: 常に成功する形状");
+    let out2 = y2.to_tensor();
+    let loss2 = y2.sum(None).expect("sum: 常に成功する");
+    let grads2 = tape.backward(&loss2).expect("backward: 常に成功する形状");
+    let dx2 = grads2.get(&x2).unwrap().expect("到達する").clone();
+    let dw2 = grads2.get(&w2).unwrap().expect("到達する").clone();
+    let db2 = grads2.get(&b2).unwrap().expect("到達する").clone();
+
+    assert_bits_eq(
+        "conv1d vs manual-reshape conv2d（CUDA forward）",
+        &contiguous_slice(&out1),
+        &contiguous_slice(&out2),
+    );
+    assert_bits_eq(
+        "conv1d vs manual-reshape conv2d（CUDA d_input）",
+        &contiguous_slice(&dx1),
+        &contiguous_slice(&dx2),
+    );
+    assert_bits_eq(
+        "conv1d vs manual-reshape conv2d（CUDA d_weight）",
+        &contiguous_slice(&dw1),
+        &contiguous_slice(&dw2),
+    );
+    assert_bits_eq(
+        "conv1d vs manual-reshape conv2d（CUDA d_bias）",
+        &contiguous_slice(&db1),
+        &contiguous_slice(&db2),
+    );
+}
+
+/// groups＋dilation を伴う 1d 形状の CUDA forward parity（イシュー
+/// #1767。`conv2d_backend_parity.rs` の groups 系ケースと同型）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_conv1d_forward_matches_cpu_groups_dilation() {
+    fn forward_groups_dilation(device: Device) -> Tensor<f32> {
+        let tape =
+            fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+        let x = tape.make_var(&leaf(21, &[2, 4, 11]));
+        let w = tape.make_var(&leaf(22, &[4, 1, 3]));
+        let b = tape.make_var(&leaf(23, &[4]));
+        x.conv1d(&w, Some(&b), 1, 2, 2, 4)
+            .expect("conv1d: 常に成功する形状")
+            .to_tensor()
+    }
+
+    let cuda_out = forward_groups_dilation(Device::Cuda(0));
+    let cpu_out = forward_groups_dilation(Device::Cpu);
+
+    assert_parity(
+        "conv1d forward（groups=4・dilation=2）: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&cuda_out),
         &contiguous_slice(&cpu_out),
     );
