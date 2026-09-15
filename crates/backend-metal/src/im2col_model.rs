@@ -361,7 +361,7 @@ fn validate_im2col_dims_consistent(
 /// `[N, G, K_g, P]` の稠密 `Vec`）。
 ///
 /// 本関数は `pub` かつ `#[cfg(test)]` の外にあるため、
-/// [`validate_im2col_dims_consistent`] を入口で呼び `dims` の内部
+/// `validate_im2col_dims_consistent` を入口で呼び `dims` の内部
 /// 整合性・`dims.numel`／`input` の実長一致まで検証してから本体
 /// ループへ入る（本番経路で panic させない方針。
 /// `.claude/rules/coding-rust.md`）。
@@ -438,7 +438,7 @@ pub fn im2col_model(input: &[f32], dims: &Im2colDims) -> Result<Vec<f32>, Im2col
 ///
 /// 本関数は `pub` かつ `#[cfg(test)]` の外にあるため、
 /// [`im2col_model`] と同じ理由で入口に
-/// [`validate_im2col_dims_consistent`] を呼び `dims` の内部整合性・
+/// `validate_im2col_dims_consistent` を呼び `dims` の内部整合性・
 /// `dims.numel`／`d_col` の実長一致まで検証してから本体ループへ入る
 /// （本番経路で panic させない方針。`.claude/rules/coding-rust.md`）。
 pub fn col2im_soft_f64(d_col: &[f32], dims: &Im2colDims) -> Result<Vec<f32>, Im2colPrepareError> {
