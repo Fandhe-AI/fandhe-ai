@@ -53,6 +53,13 @@
 //! `batch_norm_infer_f32` は grid-stride ループの `idx < numel` を
 //! 手動ガードする。添字演算は `long long`（`n*c*spatial` の乗算
 //! オーバーフロー回避。`kernels_layer_norm.rs::row_base` と同じ対策）。
+//! `batch_norm_train_f32` の 3 本の縮約ループ自体のカウンタ `i` も
+//! `long long` とする（`m` は `i32::MAX` まで許容されるホスト側検証の
+//! ため、`int` のまま `i += 32` を続けると終端付近で符号付き
+//! オーバーフローし負の添字による範囲外アクセスへつながる。ループ
+//! 内部の添字計算〈`BN_IDX` マクロ〉はもともと `long long` キャスト
+//! 済みだったが、カウンタ自身の更新はそれとは独立の別脆弱性だった
+//! ため、カウンタの型ごと修正する）。
 
 /// BatchNorm1d／2d train モードカーネル（冒頭コメント参照）。
 ///
@@ -94,7 +101,7 @@ extern "C" __global__ void batch_norm_train_f32(
 
     // パス 1: 平均（double アキュムレータ・warp butterfly reduction）。
     double sum = 0.0;
-    for (int i = lane; i < m; i += 32) {
+    for (long long i = lane; i < m; i += 32) {
         sum += (double)x[BN_IDX(i)];
     }
     __syncwarp(0xffffffffu);
@@ -105,7 +112,7 @@ extern "C" __global__ void batch_norm_train_f32(
 
     // パス 2: 分散（二パス。`(x-mean)^2` を double で蓄積）。
     double sq_acc = 0.0;
-    for (int i = lane; i < m; i += 32) {
+    for (long long i = lane; i < m; i += 32) {
         double d = (double)x[BN_IDX(i)] - mean;
         sq_acc = fma(d, d, sq_acc);
     }
@@ -126,7 +133,7 @@ extern "C" __global__ void batch_norm_train_f32(
     // 丸める（モジュール doc comment「縮約精度契約」参照）。
     float wv = (has_weight != 0) ? w[ch] : 1.0f;
     float bv = (has_bias != 0) ? b[ch] : 0.0f;
-    for (int i = lane; i < m; i += 32) {
+    for (long long i = lane; i < m; i += 32) {
         long long idx = BN_IDX(i);
         float xhat = (float)(((double)x[idx] - mean) * rstd);
         out[idx] = fmaf(xhat, wv, bv);

@@ -386,7 +386,16 @@ fn batch_norm_infer_matches_naive_across_shapes() {
     }
 }
 
-/// 数値安定性: 極値入力で NaN/inf を出さない（実機必須）。
+/// 数値安定性: 極値入力で NaN を出さない（実機必須）。
+///
+/// 正規化出力（`out`）・平均（`mean`）は常に有限であることを検証する。
+/// 分散（`var`）は内部 `f64` 二乗和を `f32` へ丸めた値のため、真の分散が
+/// `f32` の表現域（約 `3.4e38`）を超える極端な入力では仕様どおり `+inf`
+/// になり得る（`.claude/rules/coding-rust.md` の f64 縮約契約は「内部計算
+/// を f64 で行い最後に 1 回 f32 へ丸める」契約であり、丸め後の値が f32
+/// で表現不能なほど大きいことまでは禁じない）。このケース（`x` に
+/// `±1e30` を含む）では実際に分散が overflow して `+inf` になるため、
+/// `var` は NaN でないことのみを検証し有限性は要求しない。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn batch_norm_train_extreme_values_no_nan_inf() {
@@ -398,13 +407,25 @@ fn batch_norm_train_extreme_values_no_nan_inf() {
     let (out, mean, var) = batch_norm
         .run_batch_norm_train_f32(&x, None, None, 1e-5, 2, 1, 4)
         .expect("run_batch_norm_train_f32 must succeed");
-    for &v in out.iter().chain(mean.iter()).chain(var.iter()) {
-        assert!(v.is_finite(), "expected finite batch_norm output, got {v}");
+    for &v in out.iter().chain(mean.iter()) {
+        assert!(
+            v.is_finite(),
+            "expected finite batch_norm output/mean, got {v}"
+        );
+    }
+    for &v in var.iter() {
+        assert!(!v.is_nan(), "expected non-NaN batch_norm variance, got {v}");
     }
 }
 
-/// 極端なスケール（`2e20`）でも overflow しない（`.claude/rules/
-/// coding-rust.md` の正規化統計 `f64` 二乗和契約）。
+/// 極端なスケール（`2e20`）でも二乗和自体は overflow しない（`.claude/
+/// rules/coding-rust.md` の正規化統計 `f64` 二乗和契約）。
+///
+/// 正規化出力（`out`）は常に有限であることを検証する（`f64` の `rstd`
+/// を使って偏差を計算するため、`x` 自体が極端でも `xhat` は有限に収まる
+/// ことが契約の主眼）。分散（`var`）は真値（`4e40`）が `f32` の表現域を
+/// 超えるため `f32` へ丸めた返却値は仕様どおり `+inf` になり得る（上記
+/// `batch_norm_train_extreme_values_no_nan_inf` と同じ理由）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn batch_norm_train_extreme_scale_does_not_overflow() {
@@ -416,8 +437,11 @@ fn batch_norm_train_extreme_scale_does_not_overflow() {
     let (out, _mean, var) = batch_norm
         .run_batch_norm_train_f32(&x, None, None, 1e-5, 1, 2, 2)
         .expect("run_batch_norm_train_f32 must succeed");
-    for &v in out.iter().chain(var.iter()) {
+    for &v in out.iter() {
         assert!(v.is_finite(), "expected finite batch_norm output, got {v}");
+    }
+    for &v in var.iter() {
+        assert!(!v.is_nan(), "expected non-NaN batch_norm variance, got {v}");
     }
 }
 
