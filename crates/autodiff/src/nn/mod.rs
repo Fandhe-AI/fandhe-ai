@@ -66,7 +66,7 @@
 //! struct フィールド名／accessor 名をそのまま使う命名契約（PyTorch の
 //! packed 命名は追わない）とした。イシュー #1759（親 #1617）で
 //! [`Module`] trait doc が「将来の `ModuleList`／汎用 `Sequential`」
-//! として予告していたコンテナを [`container`] モジュールへ実装した
+//! として予告していたコンテナを `container` モジュールへ実装した
 //! （`ModuleList`・`Sequential`）。`fandhe_ai_facade::compat::sequential::
 //! Sequential`（Linear／活性化関数の閉集合限定ビルダー）は本モジュール
 //! の `Sequential` を `inner` として合成する薄いラッパーへ再構成した
