@@ -19,10 +19,11 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, ChecksumReadout,
     Conv2dParams, DType, FusionPlan, GemmChecksum, GruBackwardOutput, GruPointwiseOutput,
     HuberKind, InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    VectorNormOrd, batch_norm_layout, gather_out_shape, im2col_out_shape,
-    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    Pool2dParams, QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor,
+    UnaryElementwiseOp, VectorNormOrd, adaptive_pool2d_out_shape, batch_norm_layout,
+    gather_out_shape, im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape,
+    pad_out_shape, pool2d_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::batch_norm;
@@ -34,6 +35,7 @@ use crate::layer_norm;
 use crate::linalg::{self, LinalgError};
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::nll::{self, NllLayout};
+use crate::pooling;
 use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::scan;
 use crate::softmax::{self, match_softmax_plan};
@@ -1395,6 +1397,49 @@ impl BackendOps for CpuBackendOps {
         }
         checked_alloc_numel_f32(input_shape)?;
         crate::im2col::col2im(d_col, input_shape, params).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::max_pool2d` の CPU 実装（イシュー #1728）。
+    /// [`pool2d_out_shape`] で `input.shape()`／`params` を再検査して
+    /// から `pooling::max_pool2d` へ委譲する（`im2col`／`col2im` と
+    /// 同じ二重検査方針）。
+    fn max_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Pool2dParams,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape =
+            pool2d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        pooling::max_pool2d(input, params, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::avg_pool2d` の CPU 実装（イシュー #1728）。
+    /// [`pool2d_out_shape`] で `input.shape()`／`params` を再検査して
+    /// から `pooling::avg_pool2d` へ委譲する。
+    fn avg_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Pool2dParams,
+        count_include_pad: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            pool2d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        pooling::avg_pool2d(input, params, count_include_pad, &out_shape)
+            .map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::adaptive_avg_pool2d` の CPU 実装（イシュー
+    /// #1728）。[`adaptive_pool2d_out_shape`] で `input.shape()`／
+    /// `output_size` を再検査してから `pooling::adaptive_avg_pool2d`
+    /// へ委譲する。
+    fn adaptive_avg_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        output_size: [usize; 2],
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = adaptive_pool2d_out_shape(input.shape(), output_size)
+            .map_err(BackendError::ShapeMismatch)?;
+        pooling::adaptive_avg_pool2d(input, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// `BackendOps::scatter` の CPU 実装（イシュー #1776）。
