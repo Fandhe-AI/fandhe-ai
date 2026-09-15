@@ -100,6 +100,33 @@ impl RmsNorm {
         self.eps
     }
 
+    /// [`crate::nn::module::Module::set_parameter`]（`RmsNorm` 実装。
+    /// `module.rs` 参照）の本体。`"weight"` のみ受理（`without_affine`
+    /// 構成で `self.weight` が `None` の場合は未知名扱いで拒否）。
+    /// shape 保存置換のみ（`Linear::from_parameters` と同じ契約。
+    /// イシュー #1752）。
+    pub(crate) fn set_parameter(
+        &mut self,
+        name: &str,
+        value: Tensor<f32>,
+    ) -> Result<(), AutodiffError> {
+        match (name, &self.weight) {
+            ("weight", Some(current)) => {
+                if value.shape() != current.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: current.shape().to_vec(),
+                    }));
+                }
+                self.weight = Some(value);
+                Ok(())
+            }
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "RmsNorm::set_parameter: no parameter named `{name}`"
+            ))),
+        }
+    }
+
     /// このステップの `tape` へ `weight`（あれば）を葉ノードとして
     /// 登録し、`forward` を呼べる `RmsNormVars` を返す
     /// （`Linear::bind` と同じ理由。`Tape::var` 経由のため返る `Var` は
@@ -227,6 +254,41 @@ impl LayerNorm {
     /// 有限かつ非負であることを検証済み。
     pub fn eps(&self) -> f32 {
         self.eps
+    }
+
+    /// [`crate::nn::module::Module::set_parameter`]（`LayerNorm` 実装。
+    /// `module.rs` 参照）の本体。`"weight"`／`"bias"` を受理（対応する
+    /// フィールドが `None`〈`without_affine` 構成〉の場合は未知名扱い
+    /// で拒否）。shape 保存置換のみ（イシュー #1752）。
+    pub(crate) fn set_parameter(
+        &mut self,
+        name: &str,
+        value: Tensor<f32>,
+    ) -> Result<(), AutodiffError> {
+        let slot = match name {
+            "weight" => &mut self.weight,
+            "bias" => &mut self.bias,
+            _ => {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "LayerNorm::set_parameter: no parameter named `{name}`"
+                )));
+            }
+        };
+        match slot {
+            Some(current) => {
+                if value.shape() != current.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: current.shape().to_vec(),
+                    }));
+                }
+                *current = value;
+                Ok(())
+            }
+            None => Err(AutodiffError::InvalidArgument(format!(
+                "LayerNorm::set_parameter: no parameter named `{name}`"
+            ))),
+        }
     }
 
     /// このステップの `tape` へ `weight`／`bias`（あれば）を葉ノードと
@@ -378,5 +440,81 @@ mod tests {
             dense_vec(&via_vars.to_tensor()),
             dense_vec(&via_direct.to_tensor())
         );
+    }
+
+    // `RmsNorm`/`LayerNorm::set_parameter`（イシュー #1752）の単体
+    // テスト。
+
+    #[test]
+    fn rms_norm_set_parameter_replaces_weight() {
+        let mut norm = RmsNorm::new(4, RMS_NORM_DEFAULT_EPS).unwrap();
+        let new_weight = Tensor::new(vec![2.0f32; 4], &[4]).unwrap();
+        RmsNorm::set_parameter(&mut norm, "weight", new_weight.clone()).unwrap();
+        assert_eq!(
+            norm.weight().unwrap().contiguous().as_slice().unwrap(),
+            new_weight.contiguous().as_slice().unwrap()
+        );
+    }
+
+    #[test]
+    fn rms_norm_set_parameter_rejects_weight_when_without_affine() {
+        let mut norm = RmsNorm::without_affine(RMS_NORM_DEFAULT_EPS).unwrap();
+        let new_weight = Tensor::new(vec![2.0f32; 4], &[4]).unwrap();
+        let err = RmsNorm::set_parameter(&mut norm, "weight", new_weight)
+            .expect_err("without_affine 構成への weight 指定は Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn rms_norm_set_parameter_rejects_unknown_name() {
+        let mut norm = RmsNorm::new(4, RMS_NORM_DEFAULT_EPS).unwrap();
+        let dummy = norm.weight().unwrap().clone();
+        let err = RmsNorm::set_parameter(&mut norm, "bogus", dummy)
+            .expect_err("未知のパラメータ名は Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn rms_norm_set_parameter_rejects_shape_mismatch() {
+        let mut norm = RmsNorm::new(4, RMS_NORM_DEFAULT_EPS).unwrap();
+        let wrong_shape = Tensor::new(vec![1.0f32; 3], &[3]).unwrap();
+        let err = RmsNorm::set_parameter(&mut norm, "weight", wrong_shape)
+            .expect_err("shape 不一致は Err を返すはず");
+        assert!(matches!(err, AutodiffError::Shape(_)));
+    }
+
+    #[test]
+    fn layer_norm_set_parameter_replaces_weight_and_bias() {
+        let mut norm = LayerNorm::new(4, LAYER_NORM_DEFAULT_EPS).unwrap();
+        let new_weight = Tensor::new(vec![3.0f32; 4], &[4]).unwrap();
+        let new_bias = Tensor::new(vec![1.0f32; 4], &[4]).unwrap();
+        LayerNorm::set_parameter(&mut norm, "weight", new_weight.clone()).unwrap();
+        LayerNorm::set_parameter(&mut norm, "bias", new_bias.clone()).unwrap();
+        assert_eq!(
+            norm.weight().unwrap().contiguous().as_slice().unwrap(),
+            new_weight.contiguous().as_slice().unwrap()
+        );
+        assert_eq!(
+            norm.bias().unwrap().contiguous().as_slice().unwrap(),
+            new_bias.contiguous().as_slice().unwrap()
+        );
+    }
+
+    #[test]
+    fn layer_norm_set_parameter_rejects_unknown_name() {
+        let mut norm = LayerNorm::new(4, LAYER_NORM_DEFAULT_EPS).unwrap();
+        let dummy = norm.weight().unwrap().clone();
+        let err = LayerNorm::set_parameter(&mut norm, "bogus", dummy)
+            .expect_err("未知のパラメータ名は Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn layer_norm_set_parameter_rejects_when_without_affine() {
+        let mut norm = LayerNorm::without_affine(LAYER_NORM_DEFAULT_EPS).unwrap();
+        let new_weight = Tensor::new(vec![1.0f32; 4], &[4]).unwrap();
+        let err = LayerNorm::set_parameter(&mut norm, "weight", new_weight)
+            .expect_err("without_affine 構成への weight 指定は Err を返すはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 }
