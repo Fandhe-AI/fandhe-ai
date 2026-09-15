@@ -29,6 +29,10 @@ pub struct MaxPool2d {
 }
 
 impl MaxPool2d {
+    /// `kernel_size`／`stride`（省略時 `kernel_size` と同じ。
+    /// PyTorch 既定）／`padding`／`dilation` から構築する。
+    /// [`Pool2dParams::new`] の検査（カーネル 0 拒否・padding
+    /// 上限〈`padding <= kernel_size/2`〉等）を前倒しして行う。
     pub fn new(
         kernel_size: [usize; 2],
         stride: Option<[usize; 2]>,
@@ -48,6 +52,9 @@ impl MaxPool2d {
     }
 
     /// `self.params` を用いて [`Var::max_pool2d`] へ委譲する。
+    /// `NCHW` 入力を受け取り、`(values, index)` を返す
+    /// （`index` は先勝ち決定的タイ規則で選ばれた入力位置の
+    /// 平坦化添字。backward に必要な場合は呼び出し側が保持する）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
         let [kh, kw] = self.params.kernel_size();
         let [sh, sw] = self.params.stride();
@@ -69,6 +76,10 @@ pub struct MaxPool1d {
 }
 
 impl MaxPool1d {
+    /// `kernel_size`／`stride`（省略時 `kernel_size` と同じ）／
+    /// `padding`／`dilation` から構築する。内部で `[1, k]` 形の
+    /// [`Pool2dParams`] を構築し検査を前倒しする（`H` 軸は常に
+    /// `kernel=1`・`stride=1`・`padding=0`・`dilation=1` 固定）。
     pub fn new(
         kernel_size: usize,
         stride: Option<usize>,
@@ -89,6 +100,9 @@ impl MaxPool1d {
         })
     }
 
+    /// `self` の各パラメータを用いて [`Var::max_pool1d`] へ委譲
+    /// する。`NCL` 入力を受け取り、`(values, index)` を返す
+    /// （`index` の意味は [`MaxPool2d::forward`] と同じ）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
         input.max_pool1d(
             self.kernel_size,
@@ -127,6 +141,10 @@ pub struct AvgPool2d {
 }
 
 impl AvgPool2d {
+    /// `kernel_size`／`stride`（省略時 `kernel_size` と同じ）／
+    /// `padding`／`count_include_pad`（PyTorch `nn.AvgPool2d`
+    /// 既定は `true`。padding 領域を分母に含めるかどうか）から
+    /// 構築する。`dilation=[1,1]` 固定（設計 doc §2）。
     pub fn new(
         kernel_size: [usize; 2],
         stride: Option<[usize; 2]>,
@@ -177,6 +195,9 @@ pub struct AvgPool1d {
 }
 
 impl AvgPool1d {
+    /// `kernel_size`／`stride`（省略時 `kernel_size` と同じ）／
+    /// `padding`／`count_include_pad` から構築する。内部で
+    /// `[1, k]` 形の [`Pool2dParams`] を構築し検査を前倒しする。
     pub fn new(
         kernel_size: usize,
         stride: Option<usize>,
@@ -194,6 +215,9 @@ impl AvgPool1d {
         })
     }
 
+    /// `self` の各パラメータを用いて [`Var::avg_pool1d`] へ委譲
+    /// する。`NCL` 入力を受け取り出力を返す（無状態のため勾配は
+    /// 常に `f64` 縮約契約で決定的に求まる）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.avg_pool1d(
             self.kernel_size,
@@ -231,6 +255,9 @@ pub struct AdaptiveAvgPool2d {
 }
 
 impl AdaptiveAvgPool2d {
+    /// 出力空間サイズ `output_size`（`[out_h, out_w]`）から構築
+    /// する。各軸が `0` の場合は `AutodiffError::InvalidArgument`
+    /// を返す（PyTorch は `output_size=0` を許さないため）。
     pub fn new(output_size: [usize; 2]) -> Result<Self, AutodiffError> {
         if output_size[0] == 0 || output_size[1] == 0 {
             return Err(AutodiffError::InvalidArgument(
@@ -244,6 +271,10 @@ impl AdaptiveAvgPool2d {
         self.output_size
     }
 
+    /// `self.output_size` を用いて [`Var::adaptive_avg_pool2d`]
+    /// へ委譲する。`NCHW` 入力を受け取り `[N, C, out_h, out_w]`
+    /// の出力を返す（窓は [`fandhe_ai_tensor_core::adaptive_window`]
+    /// の重なり許容規則で決まる）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.adaptive_avg_pool2d(self.output_size)
     }
@@ -256,6 +287,8 @@ pub struct AdaptiveAvgPool1d {
 }
 
 impl AdaptiveAvgPool1d {
+    /// 出力長 `output_size` から構築する。`0` の場合は
+    /// `AutodiffError::InvalidArgument` を返す。
     pub fn new(output_size: usize) -> Result<Self, AutodiffError> {
         if output_size == 0 {
             return Err(AutodiffError::InvalidArgument(
@@ -265,6 +298,10 @@ impl AdaptiveAvgPool1d {
         Ok(Self { output_size })
     }
 
+    /// `self.output_size` を用いて [`Var::adaptive_avg_pool1d`]
+    /// へ委譲する。`NCL` 入力を受け取り `[N, C, output_size]`
+    /// の出力を返す（窓決定規則は [`AdaptiveAvgPool2d::forward`]
+    /// と同じ。`W` 軸固定で `H` 軸〈`out_h=1`〉を通すラッパー）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         input.adaptive_avg_pool1d(self.output_size)
     }

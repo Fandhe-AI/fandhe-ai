@@ -259,6 +259,52 @@ fn adaptive_avg_pool2d_matches_numeric_gradient_shrink_and_expand() {
         }
         assert_grad_close("adaptive_avg_pool2d(shrink) dX", &dense(dx), &numeric);
     }
+    // expand（出力サイズが入力サイズを上回り窓が重なり合う。
+    // codex-review 指摘: #1728 では shrink のみ検証されていた）
+    {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let x = t(
+            (0..4).map(|v| v as f32 * 0.7 + 0.3).collect(),
+            &[1, 1, 2, 2],
+        );
+        let xv = tape.var(&x);
+        // 2x2 -> 3x3: adaptive_window により窓が重なり合う
+        // （例えば列 0 と列 1 の窓は共に元の列 0 を含む）。
+        let y = xv.adaptive_avg_pool2d([3, 3]).unwrap();
+        // upstream を非一様にしてタイを避け、重なり寄与を確実に検証する。
+        let s = t(
+            (0..9).map(|v| (v as f32) * 0.37 - 1.1).collect(),
+            y.to_tensor().shape(),
+        );
+        let sv = tape.var(&s);
+        let loss = y.mul(&sv).unwrap().sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&xv).unwrap().unwrap();
+
+        let forward = |x: &Tensor<f32>| -> f64 {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let xv = tape.var(x);
+            let y = xv.adaptive_avg_pool2d([3, 3]).unwrap();
+            dense(&y.to_tensor())
+                .iter()
+                .zip(dense(&s).iter())
+                .map(|(&yv, &sv)| yv as f64 * sv as f64)
+                .sum()
+        };
+        let shape = x.shape().to_vec();
+        let mut data = dense(&x);
+        let mut numeric = vec![0f64; data.len()];
+        for i in 0..data.len() {
+            let orig = data[i] as f64;
+            data[i] = (orig + H) as f32;
+            let lp = forward(&t(data.clone(), &shape));
+            data[i] = (orig - H) as f32;
+            let lm = forward(&t(data.clone(), &shape));
+            data[i] = orig as f32;
+            numeric[i] = (lp - lm) / (2.0 * H);
+        }
+        assert_grad_close("adaptive_avg_pool2d(expand) dX", &dense(dx), &numeric);
+    }
 }
 
 #[test]
@@ -314,6 +360,34 @@ fn max_pool2d_overlapping_windows_backward_matches_hand_computed_scatter_add() {
     // scatter_add: 位置(1,0)(flat=3) <- 10.0, 位置(1,1)(flat=4) <- 100.0,
     // 他は 0。
     assert_eq!(dense(dx), vec![0.0, 0.0, 0.0, 10.0, 100.0, 0.0]);
+}
+
+#[test]
+fn max_pool2d_shared_winner_backward_accumulates_scatter_add() {
+    // 重なり窓が同一入力位置を共有する場合の scatter_add 勾配加算を検証する
+    // （codex-review 指摘: #1728 では検証されていなかったケース）。
+    // データ: row0=[1,10,2], row1=[3,4,5]（[1,1,2,3]）。
+    // 窓(0,0)={(0,0)=1,(0,1)=10,(1,0)=3,(1,1)=4} -> max=10 @ (0,1)。
+    // 窓(0,1)={(0,1)=10,(0,2)=2,(1,1)=4,(1,2)=5} -> max=10 @ (0,1)。
+    // 両窓とも勝者が同一入力位置 (0,1)（flat=1）になる。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = t(vec![1.0, 10.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 2, 3]);
+    let xv = tape.var(&x);
+    let (y, idx) = xv
+        .max_pool2d([2, 2], Some([1, 1]), [0, 0], [1, 1], false)
+        .unwrap();
+    assert_eq!(dense(&y.to_tensor()), vec![10.0, 10.0]);
+    // idx flat: 両窓とも (0,1)=0*3+1=1。
+    assert_eq!(idx.get(&[0, 0, 0, 0]), Some(1));
+    assert_eq!(idx.get(&[0, 0, 0, 1]), Some(1));
+
+    let upstream = t(vec![10.0, 100.0], &[1, 1, 1, 2]);
+    let uv = tape.var(&upstream);
+    let loss = y.mul(&uv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&xv).unwrap().unwrap();
+    // scatter_add: 共有位置(0,1)(flat=1) <- 10.0 + 100.0 = 110.0、他は 0。
+    assert_eq!(dense(dx), vec![0.0, 110.0, 0.0, 0.0, 0.0, 0.0]);
 }
 
 // --- 4. 1d ≡ [N,C,1,L] 2d の bit 一致 ---
