@@ -906,6 +906,13 @@ impl Module for BatchNorm1d {
         self.core.named_parameters()
     }
 
+    /// [`Module::set_parameter`] の実装。`BatchNormCore::set_parameter`
+    /// （`nn/batch_norm.rs`）へ委譲する（`LayerNorm::set_parameter` と
+    /// 同型。PR #1874 codex-review P1・Cursor Bugbot Medium 是正）。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        self.core.set_parameter(name, value)
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -940,6 +947,13 @@ impl Module for BatchNorm2d {
 
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
         self.core.named_parameters()
+    }
+
+    /// [`Module::set_parameter`] の実装。
+    /// [`Module for BatchNorm1d`](trait.Module.html) と同じ理由・
+    /// 同じ委譲先。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        self.core.set_parameter(name, value)
     }
 
     fn forward_host(
@@ -1434,5 +1448,166 @@ mod tests {
             .expect_err("set_parameter 既定失敗で Err のはず");
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
         assert_eq!(half.param.contiguous().as_slice().unwrap(), &[1.0f32, 2.0]);
+    }
+
+    // `BatchNorm1d`／`BatchNorm2d::set_parameter`（PR #1874 codex-review
+    // P1・Cursor Bugbot Medium 是正・イシュー #1732）の回帰テスト。
+    // `named_parameters` はオーバーライド済みだが `set_parameter` が
+    // 既定実装（常に `Err`）のままだと、affine ありの層でも自身の
+    // `state_dict()` を `load_state_dict()` へ渡すだけで失敗していた
+    // （`Module::set_parameter` doc「オーバーライド指針」違反）。
+
+    #[test]
+    fn batch_norm1d_state_dict_round_trip_updates_weight_and_bias() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut bn =
+            BatchNorm1d::new(3, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        let mut state = bn.state_dict();
+        assert_eq!(
+            state.len(),
+            2,
+            "affine あり BatchNorm1d は weight／bias の 2 キー"
+        );
+        state.insert(
+            "weight".to_string(),
+            Tensor::new(vec![2.0f32, 3.0, 4.0], &[3]).unwrap(),
+        );
+        state.insert(
+            "bias".to_string(),
+            Tensor::new(vec![0.5f32, 0.6, 0.7], &[3]).unwrap(),
+        );
+
+        bn.load_state_dict(state)
+            .expect("affine あり BatchNorm1d の state_dict 往復は成功するはず");
+
+        assert_eq!(
+            bn.weight().unwrap().contiguous().as_slice().unwrap(),
+            &[2.0f32, 3.0, 4.0]
+        );
+        assert_eq!(
+            bn.bias().unwrap().contiguous().as_slice().unwrap(),
+            &[0.5f32, 0.6, 0.7]
+        );
+    }
+
+    #[test]
+    fn batch_norm2d_state_dict_round_trip_is_no_op_for_identity_state() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut bn =
+            BatchNorm2d::new(4, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        let before_weight = bn
+            .weight()
+            .unwrap()
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .to_vec();
+        let before_bias = bn.bias().unwrap().contiguous().as_slice().unwrap().to_vec();
+
+        bn.load_state_dict(bn.state_dict())
+            .expect("自身の state_dict をそのまま load_state_dict へ渡すのは成功するはず");
+
+        assert_eq!(
+            bn.weight().unwrap().contiguous().as_slice().unwrap(),
+            before_weight.as_slice()
+        );
+        assert_eq!(
+            bn.bias().unwrap().contiguous().as_slice().unwrap(),
+            before_bias.as_slice()
+        );
+    }
+
+    #[test]
+    fn batch_norm1d_load_state_dict_rejects_shape_mismatch_and_leaves_state_unchanged() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut bn =
+            BatchNorm1d::new(3, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap();
+        let before_weight = bn
+            .weight()
+            .unwrap()
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .to_vec();
+
+        let mut state = bn.state_dict();
+        state.insert(
+            "weight".to_string(),
+            Tensor::new(vec![1.0f32, 2.0], &[2]).unwrap(),
+        );
+        let err = bn
+            .load_state_dict(state)
+            .expect_err("shape 不一致は Err のはず");
+        // `Module::load_state_dict` はパス 1（検証のみ）で shape 不一致を
+        // 検出し `AutodiffError::InvalidArgument` を返す（`set_parameter`
+        // 自体の `ShapeError::ShapeMismatch` へは到達しない。
+        // `compat_sequential_state_dict.rs::
+        // load_state_dict_rejects_shape_mismatch_and_leaves_model_unchanged`
+        // と同じ契約）。
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        assert_eq!(
+            bn.weight().unwrap().contiguous().as_slice().unwrap(),
+            before_weight.as_slice(),
+            "拒否後も weight が変化していない（アトミック性）"
+        );
+    }
+
+    #[test]
+    fn batch_norm1d_without_affine_load_state_dict_rejects_unknown_key() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut bn =
+            BatchNorm1d::without_affine(3, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM)
+                .unwrap();
+        assert!(
+            bn.state_dict().is_empty(),
+            "affine なしは named_parameters が空"
+        );
+
+        let mut state = HashMap::new();
+        state.insert(
+            "weight".to_string(),
+            Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap(),
+        );
+        let err = bn
+            .load_state_dict(state)
+            .expect_err("affine なし構成では `weight` は未知キーのはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// `ModuleList`（`HalfImplementedModule` の回帰テストと同じ複合層
+    /// パターン）内に `BatchNorm1d` を混在させても `state_dict`／
+    /// `load_state_dict` の往復が成功することを確認する（facade
+    /// `compat::Sequential` は現時点で `BatchNorm` 追加 API を持たない
+    /// ため、`ModuleList` を複合層の代替として使う）。
+    #[test]
+    fn module_list_with_batch_norm_state_dict_round_trip() {
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+
+        let mut list = ModuleList::new();
+        list.push(Box::new(Linear::new(3, 4, true, 21).unwrap()));
+        list.push(Box::new(
+            BatchNorm1d::new(4, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM).unwrap(),
+        ));
+
+        let mut state = list.state_dict();
+        assert!(state.contains_key("1.weight"));
+        assert!(state.contains_key("1.bias"));
+        state.insert(
+            "1.weight".to_string(),
+            Tensor::new(vec![9.0f32, 9.0, 9.0, 9.0], &[4]).unwrap(),
+        );
+
+        list.load_state_dict(state)
+            .expect("Linear と BatchNorm1d 混在の ModuleList でも state_dict 往復は成功するはず");
+
+        let after = list.state_dict();
+        assert_eq!(
+            after["1.weight"].contiguous().as_slice().unwrap(),
+            &[9.0f32, 9.0, 9.0, 9.0]
+        );
     }
 }

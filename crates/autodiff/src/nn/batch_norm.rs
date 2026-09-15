@@ -385,6 +385,47 @@ impl BatchNormCore {
         out
     }
 
+    /// [`crate::nn::module::Module::set_parameter`]（`BatchNorm1d`／
+    /// `BatchNorm2d` 実装。`module.rs` 参照）の本体。`nn::norm::
+    /// LayerNorm::set_parameter` と同型（`"weight"`／`"bias"` を受理し、
+    /// 対応するフィールドが `None`〈`without_affine` 構成〉の場合は
+    /// 未知名扱いで拒否）。shape 保存置換のみ（running stats
+    /// 〈`running_mean`／`running_var`〉は buffer であり
+    /// `named_parameters` に含めないため、本メソッドの対象にも
+    /// 含めない。`Module::set_parameter` doc「オーバーライド指針」の
+    /// `named_parameters` と対で実装する契約を満たす。PR #1874
+    /// codex-review P1・Cursor Bugbot Medium 是正・イシュー #1732）。
+    pub(crate) fn set_parameter(
+        &mut self,
+        name: &str,
+        value: Tensor<f32>,
+    ) -> Result<(), AutodiffError> {
+        let slot = match name {
+            "weight" => &mut self.weight,
+            "bias" => &mut self.bias,
+            _ => {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "BatchNormCore::set_parameter: no parameter named `{name}`"
+                )));
+            }
+        };
+        match slot {
+            Some(current) => {
+                if value.shape() != current.shape() {
+                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                        lhs: value.shape().to_vec(),
+                        rhs: current.shape().to_vec(),
+                    }));
+                }
+                *current = value;
+                Ok(())
+            }
+            None => Err(AutodiffError::InvalidArgument(format!(
+                "BatchNormCore::set_parameter: no parameter named `{name}`"
+            ))),
+        }
+    }
+
     /// train／eval モードに応じて `Var::batch_norm_with_batch_stats`／
     /// `batch_norm_infer` へ委譲する tape 経路の forward 本体
     /// （`BatchNormVars::forward` と `Module::forward_host` 双方が
