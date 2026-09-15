@@ -3289,12 +3289,15 @@ impl<'t> Var<'t> {
     }
 
     /// [`Self::dropout`] の内部本体（マスク固定入口。`pub(crate)`）。
-    /// `mask` を外部から渡せる形に分離する理由: グローバル RNG に
-    /// 触れずに VJP を解析解と bit 完全一致で検証するテスト
-    /// （`crate::grad` の `#[cfg(test)]`）が、固定マスクを与えて
-    /// forward／backward を実行するために使う。[`Self::dropout`] は
-    /// 検査・早期リターン判定・マスク生成の後に本メソッドへ委譲する
-    /// だけの薄い入口。
+    /// 現時点では [`Self::dropout`] が検査・早期リターン判定・マスク
+    /// 生成の後に本メソッドへ委譲するだけの薄い入口であり、
+    /// forward（マスク乗算）と backward（VJP）を `mask` の生成経路
+    /// から分離する内部構造上の役割にとどまる（実際の VJP 解析解
+    /// 検証は `crates/autodiff/tests/nn_dropout.rs` が `Var::mul` を
+    /// 直接組み立てる別経路で行っており、本メソッドは経由しない）。
+    /// `mask` を外部注入可能な形に分離してあるため、将来グローバル
+    /// RNG に触れず固定マスクで forward／backward を検証するテストを
+    /// 追加する余地として残している。
     pub(crate) fn dropout_with_mask(
         &self,
         mask: fandhe_ai_tensor_core::Tensor<f32>,
