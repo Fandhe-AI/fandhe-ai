@@ -288,7 +288,7 @@ impl<'a, V: std::fmt::Display> std::fmt::Debug for SlicePreview<'a, V> {
 /// `f.debug_struct` で維持しつつ、`data` フィールドに打ち切り付きの
 /// 値プレビューを追加する。`{:#?}`（pretty-print）でも
 /// `f.debug_struct` 経由のため自然に整形される。`shape`／`strides`
-/// フィールドは [`SlicePreview`] 経由で出力し、`data` の打ち切りとは
+/// フィールドは `SlicePreview` 経由で出力し、`data` の打ち切りとは
 /// 独立に rank に依らず出力サイズを有界にする（P2 是正）。
 ///
 /// `Element: Debug` は既存のトレイト境界（`crate::element::Element`）
@@ -321,8 +321,14 @@ impl<T: Element + std::fmt::Display> std::fmt::Display for Tensor<T> {
             // 空テンソル（rank 0 は `numel() == 1` のため到達しない）は
             // 値から shape を復元できないため、常に `shape=` を付す
             // （1 次元・多次元とも同じ規則。実装計画 §3.2 参照）。
+            // `shape` 自体は `self.shape()` を無条件に `{:?}` で出力する
+            // と rank に比例して出力サイズが増大する（例: 先頭軸 0・
+            // 残り 100,000 軸長 1 の shape で約 30 万文字。
+            // コードレビュー #1876 P2 指摘）。`Debug` 実装と同じ
+            // `SlicePreview` を経由し、rank に依らず出力サイズを
+            // 有界にする。
             f.write_str("[]")?;
-            write!(f, ", shape={:?}", self.shape())?;
+            write!(f, ", shape={:?}", SlicePreview(self.shape()))?;
         } else if self.rank() == 0 {
             match self.get(&[]) {
                 Some(v) => std::fmt::Display::fmt(&FmtElem(v), f)?,
@@ -512,6 +518,30 @@ mod tests {
         assert!(
             s.len() < 2_000,
             "shape/strides field not bounded: {} bytes",
+            s.len()
+        );
+    }
+
+    #[test]
+    fn display_empty_huge_rank_shape_field_is_bounded() {
+        // コードレビュー PR #1876 P2 指摘の再現条件: 空テンソル
+        // （先頭軸 0）で残り軸数が極端に大きい shape（本例では
+        // 100,000 軸・rank 100,001）を `Display`（`tensor(...)`）で
+        // 出力しても、`shape=` 部分は `debug_empty_huge_rank_shape_field_is_bounded`
+        // と同じ `SlicePreview` 経由の打ち切りにより出力サイズが
+        // rank に依らず有界であることを固定する（是正前は
+        // `write!(f, ", shape={:?}", self.shape())` が `Vec<usize>` の
+        // 素の `Debug` を無条件出力しており、本例で約 30 万文字を
+        // 出力しうる `.claude/rules/security.md` A04 観点の穴だった）。
+        let mut shape = vec![0usize];
+        shape.extend(std::iter::repeat_n(1usize, 100_000));
+        let t: Tensor<f32> = Tensor::new(vec![], &shape).unwrap();
+        let s = format!("{}", t);
+        assert!(s.starts_with("tensor([], shape=["), "{s}");
+        assert!(s.contains("..."), "{s}");
+        assert!(
+            s.len() < 2_000,
+            "shape field not bounded in Display: {} bytes",
             s.len()
         );
     }
