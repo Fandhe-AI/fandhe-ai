@@ -1045,3 +1045,40 @@ fn pad_records_single_eager_node() {
     assert_eq!(tape.len(), before + 1, "pad は 1 ノードのみ追加するはず");
     assert_eq!(padded.to_tensor().shape(), &[3, 3]);
 }
+
+/// 36. MaxPool2d／AvgPool2d／AdaptiveAvgPool2d（イシュー #1728）が
+///     1 ノードのみ追加する `push_eager`（実体化済み）ノードとして
+///     記録されることを検証する（`Op::Gather`／`Pad` と同型。view
+///     ノードではない）。
+#[test]
+fn pooling_2d_ops_record_single_eager_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0; 16], &[1, 1, 4, 4]));
+
+    let before = tape.len();
+    let (max_out, _idx) = x.max_pool2d([2, 2], None, [0, 0], [1, 1], false).unwrap();
+    assert_eq!(
+        tape.len(),
+        before + 1,
+        "max_pool2d は 1 ノードのみ追加するはず"
+    );
+    assert_eq!(max_out.to_tensor().shape(), &[1, 1, 2, 2]);
+
+    let before2 = tape.len();
+    let avg_out = x.avg_pool2d([2, 2], None, [0, 0], false, true).unwrap();
+    assert_eq!(
+        tape.len(),
+        before2 + 1,
+        "avg_pool2d は 1 ノードのみ追加するはず"
+    );
+    assert_eq!(avg_out.to_tensor().shape(), &[1, 1, 2, 2]);
+
+    let before3 = tape.len();
+    let adaptive_out = x.adaptive_avg_pool2d([2, 2]).unwrap();
+    assert_eq!(
+        tape.len(),
+        before3 + 1,
+        "adaptive_avg_pool2d は 1 ノードのみ追加するはず"
+    );
+    assert_eq!(adaptive_out.to_tensor().shape(), &[1, 1, 2, 2]);
+}
