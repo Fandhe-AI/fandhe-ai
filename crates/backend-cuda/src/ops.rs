@@ -34,12 +34,12 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BceKind, BinaryElementwiseOp, DType, DispatchFailureCell, FusionPlan,
-    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, LstmPointwiseOutput,
-    MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
-    SegmentKey, SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    gather_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp,
+    ScatterReduce, SegmentKey, SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor,
+    UnaryElementwiseOp, gather_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape,
+    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -3322,13 +3322,14 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// `BackendOps::interpolate` の CUDA 実装（イシュー #1757）。
-    /// [`fandhe_ai_tensor_core::interpolate_out_shape`] で `input`／`size` の shape を再検査
-    /// してから `interpolate.rs::CudaInterpolate::run_nearest_f32` へ
+    /// `BackendOps::interpolate` の CUDA 実装（イシュー #1757・#1762）。
+    /// [`fandhe_ai_tensor_core::interpolate_out_shape_for_mode`] で
+    /// `input`／`size`／`mode` の shape を再検査してから
+    /// `interpolate.rs::CudaInterpolate` の各 `mode` 別カーネルへ
     /// 委譲する（`gather`／`scatter` と同じ二重検査方針）。`mode` の
-    /// 未知 variant（`InterpolateMode` は `#[non_exhaustive]`。将来の
-    /// bilinear〈#1762〉等）は `BackendError::Unsupported` を返す
-    /// fail-safe（`ops.rs` 内他メソッドの未知 variant 分岐と同型）。
+    /// 未知 variant（`InterpolateMode` は `#[non_exhaustive]`）は
+    /// `BackendError::Unsupported` を返す fail-safe（`ops.rs` 内他
+    /// メソッドの未知 variant 分岐と同型）。
     fn interpolate(
         &self,
         input: &Tensor<f32>,
@@ -4073,6 +4074,208 @@ impl BackendOps for CudaBackendOps {
             &[],
             |e| BackendError::KernelLaunchFailed(e.to_string()),
             || bce.run_bce_backward_f32(input_slice, target_slice, kind, scale),
+        )?;
+        Tensor::new(out, input.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::nll_loss`] の CUDA 実装
+    /// （イシュー #1738。`mse_loss` と同型の委譲構成）。
+    fn nll_loss(
+        &self,
+        input: &Tensor<f32>,
+        targets: &Tensor<i32>,
+        class_dim: usize,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let shape = input.shape();
+        if class_dim >= shape.len() {
+            return Err(BackendError::ShapeMismatch(ShapeError::AxisOutOfRange {
+                axis: class_dim,
+                rank: shape.len(),
+            }));
+        }
+        let layout = crate::nll::NllLayout {
+            outer: checked_shape_numel(&shape[..class_dim]).map_err(BackendError::ShapeMismatch)?,
+            num_classes: shape[class_dim],
+            inner: checked_shape_numel(&shape[class_dim + 1..])
+                .map_err(BackendError::ShapeMismatch)?,
+        };
+        let input_owned = input.contiguous();
+        let targets_owned = targets.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("nll_loss: input not contiguous".into())
+        })?;
+        let targets_slice = targets_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("nll_loss: targets not contiguous".into())
+        })?;
+        let n = layout
+            .outer
+            .checked_mul(layout.inner)
+            .ok_or(BackendError::ShapeMismatch(
+                ShapeError::ElementCountOverflow,
+            ))?;
+        let factor = match reduction {
+            MseReduction::Mean => {
+                if n == 0 {
+                    1.0
+                } else {
+                    1.0 / n as f32
+                }
+            }
+            MseReduction::Sum => 1.0,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "nll_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+
+        let nll = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_nll(&device)
+            },
+        )?;
+        let value = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || nll.run_nll_loss_f32(input_slice, targets_slice, layout, factor),
+        )?;
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::nll_loss_backward`] の CUDA
+    /// 実装（イシュー #1738）。`targets` は非追跡のため `dInput` のみを
+    /// 返す契約（`backend_ops.rs::BackendOps::nll_loss_backward` doc
+    /// 参照）。
+    fn nll_loss_backward(
+        &self,
+        input_shape: &[usize],
+        targets: &Tensor<i32>,
+        class_dim: usize,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if class_dim >= input_shape.len() {
+            return Err(BackendError::ShapeMismatch(ShapeError::AxisOutOfRange {
+                axis: class_dim,
+                rank: input_shape.len(),
+            }));
+        }
+        let layout = crate::nll::NllLayout {
+            outer: checked_shape_numel(&input_shape[..class_dim])
+                .map_err(BackendError::ShapeMismatch)?,
+            num_classes: input_shape[class_dim],
+            inner: checked_shape_numel(&input_shape[class_dim + 1..])
+                .map_err(BackendError::ShapeMismatch)?,
+        };
+        let targets_owned = targets.contiguous();
+        let targets_slice = targets_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("nll_loss_backward: targets not contiguous".into())
+        })?;
+
+        let nll = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_nll(&device)
+            },
+        )?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || nll.run_nll_backward_f32(targets_slice, layout, scale),
+        )?;
+        Tensor::new(out, input_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::kl_div_loss`] の CUDA 実装
+    /// （イシュー #1738。`mse_loss` と同型の委譲構成）。
+    fn kl_div_loss(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: KlDivTarget,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_owned = input.contiguous();
+        let target_owned = target.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("kl_div_loss: input not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("kl_div_loss: target not contiguous".into())
+        })?;
+        let numel = input_slice.len();
+        let factor = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    1.0
+                } else {
+                    1.0 / numel as f32
+                }
+            }
+            MseReduction::Sum => 1.0,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "kl_div_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+
+        let kl_div = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_kl_div(&device)
+            },
+        )?;
+        let value = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || kl_div.run_kl_div_loss_f32(input_slice, target_slice, kind, factor),
+        )?;
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::kl_div_loss_backward`] の
+    /// CUDA 実装（イシュー #1738）。`dTarget` は呼び出し元
+    /// （`fandhe_ai_autodiff::grad::vjp`）がホスト側の逐次 map で計算
+    /// する契約のため、本メソッドは `dInput` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::kl_div_loss_backward` doc 参照）。
+    fn kl_div_loss_backward(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: KlDivTarget,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_owned = input.contiguous();
+        let target_owned = target.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("kl_div_loss_backward: input not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("kl_div_loss_backward: target not contiguous".into())
+        })?;
+
+        let kl_div = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_kl_div(&device)
+            },
+        )?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || kl_div.run_kl_div_backward_f32(input_slice, target_slice, kind, scale),
         )?;
         Tensor::new(out, input.shape()).map_err(BackendError::ShapeMismatch)
     }

@@ -222,6 +222,101 @@ impl CrossEntropyLoss {
     }
 }
 
+/// 負対数尤度損失。`Var::nll_loss` の薄いラッパー（PyTorch
+/// `nn.NLLLoss` 相当。イシュー #1738・親イシュー #1609）。`Default` は
+/// `class_dim = 1`（PyTorch の `[N, C, d1..]` 形状規約）・
+/// `Reduction::Mean`。
+#[derive(Debug, Clone, Copy)]
+pub struct NllLoss {
+    /// クラス次元（`CrossEntropyLoss::class_dim` と同じ規約）。
+    pub class_dim: usize,
+    pub reduction: Reduction,
+}
+
+impl Default for NllLoss {
+    fn default() -> Self {
+        NllLoss {
+            class_dim: 1,
+            reduction: Reduction::Mean,
+        }
+    }
+}
+
+impl NllLoss {
+    /// クラス次元・縮約種別を指定して構築する。
+    pub fn new(class_dim: usize, reduction: Reduction) -> Self {
+        NllLoss {
+            class_dim,
+            reduction,
+        }
+    }
+
+    /// `input`（log 確率・追跡対象）と `targets`（正解クラス添字・
+    /// 非追跡）から損失を計算する。検査の実体は `Var::nll_loss` 側に
+    /// あり、ここでは呼び出すだけ（「薄いラッパー性」は
+    /// `tests/nn_nll_kl_div_loss.rs` で検証する）。
+    pub fn forward<'t>(
+        &self,
+        input: &Var<'t>,
+        targets: &Tensor<i32>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        input.nll_loss(targets, self.class_dim, self.reduction)
+    }
+}
+
+/// Kullback-Leibler ダイバージェンス損失。`Var::kl_div_loss`／
+/// `kl_div_loss_with_log_target` の薄いラッパー（PyTorch `nn.KLDivLoss`
+/// 相当。イシュー #1738）。`Default` は `Reduction::Mean`・
+/// `log_target = false`（PyTorch 既定と一致）。
+#[derive(Debug, Clone, Copy)]
+pub struct KlDivLoss {
+    pub reduction: Reduction,
+    /// `true` のとき `target` を対数確率として扱う（PyTorch
+    /// `log_target=True` 相当。`Var::kl_div_loss_with_log_target` へ
+    /// 委譲）。
+    pub log_target: bool,
+}
+
+impl Default for KlDivLoss {
+    fn default() -> Self {
+        KlDivLoss {
+            reduction: Reduction::Mean,
+            log_target: false,
+        }
+    }
+}
+
+impl KlDivLoss {
+    /// 縮約種別を指定して構築する（`log_target = false`）。
+    pub fn new(reduction: Reduction) -> Self {
+        KlDivLoss {
+            reduction,
+            log_target: false,
+        }
+    }
+
+    /// 縮約種別・`log_target` を指定して構築する。
+    pub fn new_with_log_target(reduction: Reduction, log_target: bool) -> Self {
+        KlDivLoss {
+            reduction,
+            log_target,
+        }
+    }
+
+    /// `input`（log 確率・追跡対象）・`target`（`log_target` に応じ
+    /// 確率または対数確率・追跡対象）から損失を計算する。検査の実体は
+    /// `Var::kl_div_loss`／`kl_div_loss_with_log_target` 側にあり、
+    /// ここでは呼び出すだけ（「薄いラッパー性」は
+    /// `tests/nn_nll_kl_div_loss.rs` で検証する）。
+    pub fn forward<'t>(&self, input: &Var<'t>, target: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        if self.log_target {
+            input.kl_div_loss_with_log_target(target, self.reduction)
+        } else {
+            input.kl_div_loss(target, self.reduction)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! `nn::loss::MseLoss::forward` が、対応する `Var` メソッド直接呼び
@@ -428,6 +523,74 @@ mod tests {
             .forward(&input, &target)
             .unwrap();
         let via_var = input.bce_with_logits_loss(&target, Reduction::Sum).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    /// `nn::loss::NllLoss::forward` が `Var::nll_loss` 直接呼び出しと
+    /// 同一の値を返すことを確認する（「薄いラッパー性」の担保。
+    /// `forward_mean_matches_var_mse_loss` と同型。イシュー #1738）。
+    #[test]
+    fn nll_loss_forward_mean_matches_var_nll_loss() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let input = tape.var(
+            &fandhe_ai_tensor_core::Tensor::new(vec![-0.1, -2.0, -1.5, -0.3], &[2, 2]).unwrap(),
+        );
+        let targets = fandhe_ai_tensor_core::Tensor::new(vec![0, 1], &[2]).unwrap();
+
+        let via_module = NllLoss::default().forward(&input, &targets).unwrap();
+        let via_var = input.nll_loss(&targets, 1, Reduction::Mean).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    /// `nn::loss::KlDivLoss::forward` が `Var::kl_div_loss` 直接呼び出し
+    /// と同一の値を返すことを確認する（イシュー #1738）。
+    #[test]
+    fn kl_div_loss_forward_sum_matches_var() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let input = tape.var(
+            &fandhe_ai_tensor_core::Tensor::new(vec![-2.0, -0.5, -1.2, -0.1], &[2, 2]).unwrap(),
+        );
+        let target = tape
+            .var(&fandhe_ai_tensor_core::Tensor::new(vec![0.2, 0.8, 0.5, 0.5], &[2, 2]).unwrap());
+
+        let via_module = KlDivLoss::new(Reduction::Sum)
+            .forward(&input, &target)
+            .unwrap();
+        let via_var = input.kl_div_loss(&target, Reduction::Sum).unwrap();
+
+        assert_eq!(
+            dense_vec(&via_module.to_tensor()),
+            dense_vec(&via_var.to_tensor())
+        );
+    }
+
+    /// `nn::loss::KlDivLoss::forward`（`log_target = true`）が
+    /// `Var::kl_div_loss_with_log_target` 直接呼び出しと同一の値を返す
+    /// ことを確認する（イシュー #1738）。
+    #[test]
+    fn kl_div_loss_forward_log_target_matches_var() {
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let input = tape.var(
+            &fandhe_ai_tensor_core::Tensor::new(vec![-2.0, -0.5, -1.2, -0.1], &[2, 2]).unwrap(),
+        );
+        let target = tape.var(
+            &fandhe_ai_tensor_core::Tensor::new(vec![-1.6, -0.2, -0.7, -0.7], &[2, 2]).unwrap(),
+        );
+
+        let via_module = KlDivLoss::new_with_log_target(Reduction::Mean, true)
+            .forward(&input, &target)
+            .unwrap();
+        let via_var = input
+            .kl_div_loss_with_log_target(&target, Reduction::Mean)
+            .unwrap();
 
         assert_eq!(
             dense_vec(&via_module.to_tensor()),

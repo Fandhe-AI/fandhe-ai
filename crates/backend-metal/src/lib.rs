@@ -511,12 +511,16 @@ pub mod huber;
 pub mod index_buffer;
 pub mod interpolate_model;
 #[cfg(target_os = "macos")]
+pub mod kl_div;
+#[cfg(target_os = "macos")]
 pub mod layer_norm;
 pub mod layout;
 #[cfg(target_os = "macos")]
 pub mod memory;
 #[cfg(target_os = "macos")]
 pub mod mse;
+#[cfg(target_os = "macos")]
+pub mod nll;
 #[cfg(target_os = "macos")]
 pub mod ops;
 pub mod pad;
@@ -669,11 +673,15 @@ pub use half_buffer::MetalHalfBuffer;
 #[cfg(target_os = "macos")]
 pub use huber::MetalHuber;
 #[cfg(target_os = "macos")]
+pub use kl_div::MetalKlDiv;
+#[cfg(target_os = "macos")]
 pub use layer_norm::MetalLayerNorm;
 #[cfg(target_os = "macos")]
 pub use memory::MetalMemory;
 #[cfg(target_os = "macos")]
 pub use mse::MetalMse;
+#[cfg(target_os = "macos")]
+pub use nll::{MetalNll, NllLayout};
 #[cfg(target_os = "macos")]
 pub use ops::MetalBackendOps;
 #[cfg(target_os = "macos")]

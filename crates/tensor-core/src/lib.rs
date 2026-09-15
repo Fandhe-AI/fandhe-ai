@@ -155,7 +155,7 @@ mod typed_ops;
 
 pub use backend_ops::{
     Activation, BackendOps, BceKind, BinaryElementwiseOp, ChecksumReadout, Conv2dParams,
-    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode,
+    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScatterReduce, SegmentKey,
     SegmentResource, SegmentRun, SgdStepConfig, SvdFactors, UnaryElementwiseOp, VectorNormOrd,
     checked_gemm_batched_output_len, gemm_batched_via_per_batch_gemm,

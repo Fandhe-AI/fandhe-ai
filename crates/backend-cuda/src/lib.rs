@@ -378,11 +378,13 @@ mod kernels;
 mod kernels_bce;
 mod kernels_elementwise;
 mod kernels_huber;
+mod kernels_kl_div;
 mod kernels_layer_norm;
 mod kernels_mma;
 mod kernels_mma_tf32;
 mod kernels_mma_tf32x3;
 mod kernels_mse;
+mod kernels_nll;
 mod kernels_rmsnorm;
 mod kernels_rnn_cell;
 // イシュー #1700: `ScalarUnaryOp`／`ScalarBinaryOp`（`tensor-core::
@@ -408,10 +410,12 @@ mod readout_regression_diag_tests_1436;
 // `pub use` 経由で crate 外部へ公開）。
 mod bce;
 mod host_staging;
+mod kl_div;
 mod layer_norm;
 pub mod memory;
 mod module_cache;
 mod mse;
+mod nll;
 mod rnn_cell;
 // イシュー #1584: 汎用 reduction（`sum`／`max`）起動 API・カーネル
 // ソース。`mse.rs`／`kernels_mse.rs` と同じ 2 ファイル構成
@@ -495,7 +499,9 @@ pub use bce::CudaBce;
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::TiledF32Kernel;
 pub use huber::CudaHuber;
+pub use kl_div::CudaKlDiv;
 pub use mse::CudaMse;
+pub use nll::{CudaNll, NllLayout};
 pub use rnn_cell::CudaRnnCell;
 // イシュー #1584: 汎用 reduction（`sum`／`max`）の実機 `#[ignore]`
 // テスト（`tests/reduce_parity.rs`）が crate 外から `CudaReduce` を

@@ -291,6 +291,39 @@ pub(crate) enum Op {
         class_dim: usize,
         reduction: crate::var::Reduction,
     },
+    /// 負対数尤度損失（`NLLLoss`。イシュー #1738・親イシュー #1609
+    /// 「損失関数の拡張」）。`MseLoss` と同じ融合パターン
+    /// （`BackendOps::nll_loss`／`nll_loss_backward` 優先・`Unsupported`
+    /// のときのみホスト参照実装〈`eval::nll_loss`〉へフォールバック）で、
+    /// `BackendOps` に対応メソッドがない場合のフォールバック先を含め
+    /// 融合対象外とし常に実体化済み（`push_eager`）。
+    ///
+    /// `targets`（クラス添字）は `Op::CrossEntropyLoss.targets` と同型の
+    /// 非追跡データのため `Var`／`NodeId` を持たず、`Op` payload に直接
+    /// `Tensor<i32>` を埋め込む（勾配は `input` の 1 系統のみ定義され、
+    /// `targets` 側には流れない。`grad.rs::vjp` の `NllLoss` 分岐参照）。
+    NllLoss {
+        input: NodeId,
+        targets: Tensor<i32>,
+        class_dim: usize,
+        reduction: crate::var::Reduction,
+    },
+    /// Kullback-Leibler ダイバージェンス損失（`KLDivLoss`。`kind` で
+    /// [`fandhe_ai_tensor_core::KlDivTarget::Probabilities`]／
+    /// [`fandhe_ai_tensor_core::KlDivTarget::LogProbabilities`] を分岐。
+    /// イシュー #1738）。`MseLoss` と同じ融合パターン
+    /// （`BackendOps::kl_div_loss`／`kl_div_loss_backward` 優先・
+    /// `Unsupported` のときのみホスト参照実装〈`eval::kl_div_loss`〉へ
+    /// フォールバック）で常に実体化済み（`push_eager`）。`target` は
+    /// `MseLoss` と同じく**追跡対象 `Var`**（`CrossEntropyLoss::targets`
+    /// の非追跡 `Tensor<i32>` 方式ではない）で、`input`／`target` の
+    /// 両方に勾配が流れる。
+    KlDivLoss {
+        input: NodeId,
+        target: NodeId,
+        kind: fandhe_ai_tensor_core::KlDivTarget,
+        reduction: crate::var::Reduction,
+    },
     /// デバイス常駐パラメータの葉ノード（イシュー #1022・`docs/
     /// device-resident-update-design.md` §3.3e）。`Op::Leaf` と異なり
     /// **ホスト値を持たない**（`TapeNode::value` は常に空の `OnceCell`
@@ -1154,8 +1187,10 @@ impl Op {
             // 経路（`ResidentResolver` 前提の `LinearResident`）、その他
             // 未対応の forward 経路（`LinearAct`／`MseLoss`／`BceLoss`
             // （イシュー #1737。`MseLoss` と同型の理由で非適格）／
-            // `CrossEntropyLoss`／`RnnCell`／`Inv`／`Solve`／`Det`／
-            // `Cholesky`／`MatrixNorm`／`Softmax`／`LogSoftmax`／
+            // `NllLoss`／`KlDivLoss`（イシュー #1738。同じく `MseLoss`
+            // と同型の理由で非適格）／`CrossEntropyLoss`／`RnnCell`／
+            // `Inv`／`Solve`／`Det`／`Cholesky`／`MatrixNorm`／
+            // `Softmax`／`LogSoftmax`／
             // `RmsNorm`／`LayerNorm`。merge 時に非網羅 match 是正で追加）は
             // `docs/autodiff-checkpoint-design.md` §8 のスコープ外事項
             // として未実装のまま保持する。
@@ -1166,6 +1201,8 @@ impl Op {
             | Op::MseLoss { .. }
             | Op::HuberLoss { .. }
             | Op::BceLoss { .. }
+            | Op::NllLoss { .. }
+            | Op::KlDivLoss { .. }
             | Op::CrossEntropyLoss { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
@@ -1295,7 +1332,12 @@ impl Op {
             | Op::LogSoftmax { input, .. }
             | Op::Cumsum { input, .. }
             | Op::Cumprod { input, .. }
-            | Op::CrossEntropyLoss { logits: input, .. } => f(*input),
+            | Op::CrossEntropyLoss { logits: input, .. }
+            | Op::NllLoss { input, .. } => f(*input),
+            Op::KlDivLoss { input, target, .. } => {
+                f(*input);
+                f(*target);
+            }
             Op::Where { a, b, .. } => {
                 f(*a);
                 f(*b);
