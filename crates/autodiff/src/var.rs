@@ -17,9 +17,9 @@ use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, BceKind, CastElement, ChecksumReadout, GemmChecksum,
-    GruPointwiseOutput, HuberKind, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
-    MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
-    broadcast_shape, concat_out_shape, gather_out_shape, gemm_out_shape,
+    GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget, LstmPointwiseOutput,
+    MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor,
+    VectorNormOrd, broadcast_shape, concat_out_shape, gather_out_shape, gemm_out_shape,
     interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape, pad_out_shape,
     reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape,
     topk_out_shape,
@@ -1711,6 +1711,181 @@ impl<'t> Var<'t> {
                 logits: self.id,
                 targets: targets.clone(),
                 class_dim,
+                reduction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 負対数尤度損失（`self` = log 確率、`targets` = 正解クラス添字。
+    /// PyTorch `nn.NLLLoss` 相当。`log_softmax(x).nll_loss(t)` が
+    /// `cross_entropy_loss(x, t)` と一致する。#1738。親イシュー #1609
+    /// 「損失関数の拡張」）。`targets` は `Self::cross_entropy_loss` と
+    /// 同じく非追跡（`Tensor<i32>`。勾配は定義されないため `Var` に
+    /// しない。`tape::Op::NllLoss` doc 参照）。
+    ///
+    /// 検査順序（`Self::cross_entropy_loss` と同じ演算メソッド規律）:
+    /// ①`class_dim` 範囲・targets shape 一致（`reduce_out_shape` を
+    /// 再利用）→ ②targets 全添字が `0 <= t < C`（違反は
+    /// `AutodiffError::InvalidArgument`。REQ-8 趣旨の境界外アクセス
+    /// 防止・A03 対策）→ ③実体化（層 1）→ ④`self.tape.ops()` の融合
+    /// カーネル（`BackendOps::nll_loss`）を試み `Unsupported` のときのみ
+    /// ホスト参照実装（`eval::nll_loss`）へフォールバック（それ以外の
+    /// エラーは伝播し判定迂回経路を作らない。`.claude/rules/security.md`
+    /// A08）→ ⑤戻り値 shape `[]` の契約検証 → ⑥ノード記録。`nn::loss::
+    /// NllLoss`（`nn/loss.rs`）はこのメソッドを呼ぶだけの薄いラッパー
+    /// （REQ-9）。
+    pub fn nll_loss(
+        &self,
+        targets: &Tensor<i32>,
+        class_dim: usize,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let input_shape = self.shape();
+        let expected_targets_shape = reduce_out_shape(&input_shape, Some(class_dim))?;
+        require_same_shape(targets.shape(), &expected_targets_shape)?;
+
+        // `reduce_out_shape` が成功した時点で `class_dim < input_shape.len()`
+        // が保証されるため、この添字アクセスは安全（`Self::
+        // cross_entropy_loss` と同型の境界検査規律）。
+        let num_classes = input_shape[class_dim];
+        for t in eval::dense_vec_i32(targets) {
+            if t < 0 || (t as usize) >= num_classes {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "nll_loss: target 添字 {t} が範囲 [0, {num_classes}) を外れている"
+                )));
+            }
+        }
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value = match self
+            .tape
+            .ops()
+            .nll_loss(&input_val, targets, class_dim, reduction.into())
+        {
+            Ok(v) => {
+                // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                // nll_loss` doc「戻り値は shape `[]`」）を検証する
+                // （実装バグの黙認防止。`.claude/rules/security.md` A08）。
+                if !v.shape().is_empty() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: Vec::new(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => {
+                // `eval::nll_loss` は `ShapeError::ElementCountOverflow`
+                // を返しうる（PR #1850 codex-review P1 是正: `outer`／
+                // `inner` の部分積 overflow を `checked_mul` で拒否する
+                // ようになった）。判定迂回経路を作らず伝播する
+                // （`.claude/rules/security.md` A08）。
+                eval::nll_loss(&input_val, targets, class_dim, reduction)
+                    .map_err(AutodiffError::Shape)?
+            }
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::NllLoss {
+                input: self.id,
+                targets: targets.clone(),
+                class_dim,
+                reduction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// Kullback-Leibler ダイバージェンス損失（`self` = log 確率、
+    /// `target` = 確率〈PyTorch 既定 `log_target=False`〉。PyTorch
+    /// `nn.KLDivLoss` 相当。#1738）。`kl_div_loss_impl(target,
+    /// KlDivTarget::Probabilities, reduction)` への委譲。`nn::loss::
+    /// KlDivLoss`（`nn/loss.rs`）はこのメソッドを呼ぶだけの薄いラッパー
+    /// （REQ-9）。
+    pub fn kl_div_loss(
+        &self,
+        target: &Var<'t>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.kl_div_loss_impl(target, KlDivTarget::Probabilities, reduction)
+    }
+
+    /// Kullback-Leibler ダイバージェンス損失（対数確率 target 版。
+    /// `self` = log 確率、`target` = 対数確率。PyTorch `nn.KLDivLoss(
+    /// log_target=True)` 相当）。`kl_div_loss_impl(target,
+    /// KlDivTarget::LogProbabilities, reduction)` への委譲（#1738）。
+    /// `nn::loss::KlDivLoss::new_with_log_target`（`nn/loss.rs`）はこの
+    /// メソッドを呼ぶだけの薄いラッパー（REQ-9）。
+    pub fn kl_div_loss_with_log_target(
+        &self,
+        target: &Var<'t>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.kl_div_loss_impl(target, KlDivTarget::LogProbabilities, reduction)
+    }
+
+    /// [`Self::kl_div_loss`]／[`Self::kl_div_loss_with_log_target`] 共通
+    /// 実装（#1738）。`Self::bce_loss_impl`（PR #1848・イシュー #1737）
+    /// と同じ演算メソッド規律（層 1 実体化 → `self.tape.ops()` の融合
+    /// カーネルを試み `Unsupported` のときのみホスト参照実装
+    /// `eval::kl_div_loss` へフォールバック。それ以外のエラーは伝播し
+    /// 判定迂回経路を作らない。`.claude/rules/security.md` A08）。値域
+    /// 検査は行わない（shape 一致・クロステープのみ。`docs/
+    /// compat-api-scope.md` §1.2 参照）。
+    fn kl_div_loss_impl(
+        &self,
+        target: &Var<'t>,
+        kind: KlDivTarget,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(target)?;
+        let lhs_shape = self.shape();
+        let rhs_shape = target.shape();
+        require_same_shape(&lhs_shape, &rhs_shape)?;
+        let (input_val, target_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let input_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let target_val = materialize_fallible(&nodes, self.tape.ops(), target.id)?.clone();
+            (input_val, target_val)
+        };
+        let value =
+            match self
+                .tape
+                .ops()
+                .kl_div_loss(&input_val, &target_val, kind, reduction.into())
+            {
+                Ok(v) => {
+                    // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                    // kl_div_loss` doc「戻り値は shape `[]`」）を検証する
+                    // （実装バグの黙認防止。`.claude/rules/security.md` A08）。
+                    if !v.shape().is_empty() {
+                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                lhs: v.shape().to_vec(),
+                                rhs: Vec::new(),
+                            },
+                        )));
+                    }
+                    v
+                }
+                Err(BackendError::Unsupported(_)) => {
+                    eval::kl_div_loss(&input_val, &target_val, kind, reduction)
+                }
+                Err(other) => return Err(AutodiffError::Backend(other)),
+            };
+        let id = self.tape.push_eager(
+            Op::KlDivLoss {
+                input: self.id,
+                target: target.id,
+                kind,
                 reduction,
             },
             value,

@@ -24,8 +24,9 @@
 use std::borrow::Cow;
 
 use fandhe_ai_tensor_core::{
-    BceKind, GruBackwardOutput, GruPointwiseOutput, HuberKind, LstmPointwiseOutput, ScatterReduce,
-    ShapeError, Tensor, VectorNormOrd, bilinear_blend, bilinear_scale, bilinear_src_coord,
+    BceKind, GruBackwardOutput, GruPointwiseOutput, HuberKind, KlDivTarget, LstmPointwiseOutput,
+    ScatterReduce, ShapeError, Tensor, VectorNormOrd, bilinear_blend, bilinear_scale,
+    bilinear_src_coord,
 };
 
 use crate::layout;
@@ -1095,6 +1096,241 @@ pub(crate) fn bce_loss(
     build_tensor(vec![out], &[])
 }
 
+/// 負対数尤度損失（`NLLLoss`）のホスト参照実装（`Var::nll_loss`
+/// （`var.rs`）から `BackendOps::nll_loss` が `Unsupported` のときのみ
+/// 呼ばれる。イシュー #1738・親イシュー #1609）。`class_dim` 範囲・
+/// `targets` shape 一致・`0 <= t < C` 範囲検査は呼び出し元が済ませている
+/// 前提（`cross_entropy_loss`〈下記〉と同じ検査配置規律）。
+///
+/// `class_dim` を除いた添字の組（サンプル `s = o·inner + i`）ごとに
+/// `l_s = −input[(o·C + t_s)·inner + i]` を計算し、`reduction` で
+/// 集約する（`N = outer·inner` はサンプル数）。空バッチ（`N == 0`）は
+/// `mse_loss`（上記）の先例に合わせ `Mean`／`Sum` とも `0.0`（PyTorch
+/// は `NaN`。差異は既存の `mse_loss`／`cross_entropy_loss` と同じ許容
+/// 方針）。
+///
+/// **`ShapeError::ElementCountOverflow` を返しうる**（PR #1850
+/// codex-review P1 是正: `outer`／`inner` を `class_dim` の前後で分割
+/// して個別に `.iter().product()` するため、`input.shape()` 全体の
+/// 要素数積は `0`（例: 先頭軸が `0`）でも、分割後の片側の部分積だけを
+/// 見ると `0` を含まず `usize` オーバーフローしうる〈例:
+/// `shape=[0,1,usize::MAX,2]`・`class_dim=1` は `outer=0` で全体は
+/// 空だが `inner`（`shape[2..]=[usize::MAX,2]`）の積は単独で
+/// オーバーフローする〉。`shape` がどこかの軸で `0` を含む場合は
+/// `outer`／`inner` を計算せずに早期リターンする（イシュー #1834 の
+/// `interpolate_nearest` 是正と同じ「全体が空要素であることが既知なら
+/// 部分積計算を回避する」考え方）。`shape` に `0` を含まない実際に
+/// 実体化済みの `Tensor` に対しては、`outer`／`inner` いずれも全体の
+/// 要素数積（`Tensor::new` 側で確保済み）以下であるため
+/// `checked_mul` が失敗することはない契約だが、本番経路 panic 禁止
+/// 方針（`.claude/rules/coding-rust.md`）に従い防御的に `checked_mul`
+/// を使う。
+pub(crate) fn nll_loss(
+    input: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: crate::var::Reduction,
+) -> Result<Tensor<f32>, ShapeError> {
+    let shape = input.shape().to_vec();
+    if shape.contains(&0) {
+        // 空バッチ契約（関数冒頭 doc 参照）。`outer`／`inner` の部分積
+        // 計算そのものを回避する。
+        return Ok(build_tensor(vec![0.0], &[]));
+    }
+    let outer: usize = shape[..class_dim]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let data = dense_vec(input);
+    let target_data = dense_vec_i32(targets);
+    let n = outer
+        .checked_mul(inner)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+
+    let mut total = 0f32;
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            // 呼び出し元（`var.rs::Var::nll_loss`）が
+            // `0 <= t < axis_len` を検査済みの前提（`cross_entropy_loss`
+            // 直上の同型コメント参照）。範囲外は契約違反であり
+            // `unwrap()`/`expect()` を使わず `debug_assert!` で検知しつつ
+            // 安全側（loss 寄与 0）へフォールバックする（`.claude/rules/
+            // coding-rust.md` 本番経路 panic 禁止方針）。
+            if t >= 0 && (t as usize) < axis_len {
+                let idx = (o * axis_len + t as usize) * inner + i;
+                total -= data[idx];
+            } else {
+                debug_assert!(false, "nll_loss: target 添字が範囲外（契約違反）");
+            }
+        }
+    }
+
+    let loss = match reduction {
+        crate::var::Reduction::Mean if n > 0 => total / n as f32,
+        crate::var::Reduction::Mean => 0.0,
+        crate::var::Reduction::Sum => total,
+    };
+    Ok(build_tensor(vec![loss], &[]))
+}
+
+#[cfg(test)]
+mod nll_loss_empty_shape_overflow_tests {
+    use super::*;
+
+    // PR #1850 codex-review P1 是正の回帰: `input.shape()=[0,1,
+    // usize::MAX,2]`・`class_dim=1` は `Tensor::new`／`Var::nll_loss`
+    // の事前検査（`checked_numel`。先頭の `0` が後続の積を吸収する）を
+    // 通過するが、`nll_loss` 自身が `outer`／`inner` を `class_dim` の
+    // 前後で分割して個別に `.iter().product()` していたため、`inner`
+    // （`shape[2..]=[usize::MAX,2]`。ゼロを含まない部分積）が単独で
+    // overflow していた（`softmax_along`／`concat` と同型の bug。上記
+    // `softmax_empty_tensor_overflow_tests`／
+    // `concat_empty_out_shape_overflow_tests` 参照）。`shape` に `0`
+    // を含む場合は部分積を計算する前に早期 return し、`Mean`／`Sum`
+    // いずれも `0.0`（空バッチ契約）を返すことを確認する。
+    #[test]
+    fn nll_loss_empty_shape_with_overflow_prone_inner_does_not_panic_mean() {
+        let shape = [0usize, 1, usize::MAX, 2];
+        let input = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let targets = Tensor::<i32>::new(Vec::new(), &[0usize, usize::MAX, 2])
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let out = nll_loss(&input, &targets, 1, crate::var::Reduction::Mean)
+            .expect("空バッチは checked_mul 経路でも成功する契約");
+        assert_eq!(out.shape(), &[] as &[usize]);
+        assert_eq!(out.get(&[]).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn nll_loss_empty_shape_with_overflow_prone_inner_does_not_panic_sum() {
+        let shape = [0usize, 1, usize::MAX, 2];
+        let input = Tensor::<f32>::new(Vec::new(), &shape)
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let targets = Tensor::<i32>::new(Vec::new(), &[0usize, usize::MAX, 2])
+            .expect("要素数積は 0 のため構築は成功する契約（checked_numel）");
+        let out = nll_loss(&input, &targets, 1, crate::var::Reduction::Sum)
+            .expect("空バッチは checked_mul 経路でも成功する契約");
+        assert_eq!(out.shape(), &[] as &[usize]);
+        assert_eq!(out.get(&[]).unwrap(), 0.0);
+    }
+}
+
+/// `KlDivTarget::Probabilities`／`LogProbabilities` 共通の要素損失
+/// （`kl_div_loss`／`kl_div_loss_vjp`〈`grad.rs`〉の双方から呼ばれる
+/// 意味論の正。`docs/compat-api-scope.md` §1.2「損失」節参照）。
+///
+/// - `Probabilities`: `l = 0`（`t == 0`）／`t·(ln t − x)`（それ以外。
+///   `xlogy` 規約。負・NaN の `t` は PyTorch と同じく NaN を伝播）。
+/// - `LogProbabilities`: `l = exp(t)·(t − x)`。
+pub(crate) fn kl_div_elem_loss(input: f32, target: f32, kind: KlDivTarget) -> f32 {
+    match kind {
+        KlDivTarget::Probabilities => {
+            if target == 0.0 {
+                0.0
+            } else {
+                target * (target.ln() - input)
+            }
+        }
+        // `LogProbabilities`、および `KlDivTarget`（`#[non_exhaustive]`。
+        // `tensor-core` 側で将来 variant を追加しうる）の未知 variant は
+        // 同じ `LogProbabilities` 意味論へ安全側フォールバックする
+        // （`eval::bce_elem_loss`〈PR #1848・イシュー #1737〉の未知
+        // variant 処理と同型。本関数は infallible 契約のため `Result`
+        // を返せない。未知 variant への到達は契約違反として
+        // `debug_assert!` で検知するのみに留める。`.claude/rules/
+        // coding-rust.md` 本番経路 panic 禁止方針）。
+        kind => {
+            debug_assert!(
+                matches!(kind, KlDivTarget::LogProbabilities),
+                "eval::kl_div_elem_loss: 未知の KlDivTarget variant へフォールバックした（契約違反）"
+            );
+            target.exp() * (target - input)
+        }
+    }
+}
+
+/// `kl_div_elem_loss` の `dInput`（`scale` を乗じる前の要素勾配。
+/// `grad.rs` が上流勾配由来の `scale` を別途掛ける）。
+///
+/// - `Probabilities`: `−t`。
+/// - `LogProbabilities`: `−exp(t)`。
+pub(crate) fn kl_div_elem_grad_input(_input: f32, target: f32, kind: KlDivTarget) -> f32 {
+    match kind {
+        KlDivTarget::Probabilities => -target,
+        // `kl_div_elem_loss` と同じ未知 variant フォールバック規律。
+        kind => {
+            debug_assert!(
+                matches!(kind, KlDivTarget::LogProbabilities),
+                "eval::kl_div_elem_grad_input: 未知の KlDivTarget variant へフォールバックした（契約違反）"
+            );
+            -target.exp()
+        }
+    }
+}
+
+/// `kl_div_elem_loss` の `dTarget`（`scale` を乗じる前）。
+///
+/// - `Probabilities`: `t == 0` のとき `0`（forward の `l = 0` 分岐と
+///   整合。それ以外は `ln t + 1 − x`）。
+/// - `LogProbabilities`: `exp(t)·(t − x + 1)`。
+pub(crate) fn kl_div_elem_grad_target(input: f32, target: f32, kind: KlDivTarget) -> f32 {
+    match kind {
+        KlDivTarget::Probabilities => {
+            if target == 0.0 {
+                0.0
+            } else {
+                target.ln() + 1.0 - input
+            }
+        }
+        // `kl_div_elem_loss` と同じ未知 variant フォールバック規律。
+        kind => {
+            debug_assert!(
+                matches!(kind, KlDivTarget::LogProbabilities),
+                "eval::kl_div_elem_grad_target: 未知の KlDivTarget variant へフォールバックした（契約違反）"
+            );
+            target.exp() * (target - input + 1.0)
+        }
+    }
+}
+
+/// Kullback-Leibler ダイバージェンス損失のホスト参照実装
+/// （`Var::kl_div_loss`／`kl_div_loss_with_log_target`〈`var.rs`〉から
+/// `BackendOps::kl_div_loss` が `Unsupported` のときのみ呼ばれる。
+/// イシュー #1738）。`mse_loss`（上記）と同じ「shape 一致検査は
+/// 呼び出し元が済ませている・`numel == 0` は `Mean`／`Sum` とも `0.0`」
+/// 契約。
+pub(crate) fn kl_div_loss(
+    input: &Tensor<f32>,
+    target: &Tensor<f32>,
+    kind: KlDivTarget,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let input_data = dense_vec(input);
+    let target_data = dense_vec(target);
+    let numel = input_data.len();
+    let sum_loss: f32 = input_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&x, &t)| kl_div_elem_loss(x, t, kind))
+        .sum();
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                sum_loss / numel as f32
+            }
+        }
+        crate::var::Reduction::Sum => sum_loss,
+    };
+    build_tensor(vec![out], &[])
+}
 /// RMSNorm（`x · rsqrt(mean(x²) + eps) · w`。`w` が `None` の場合は乗算を
 /// スキップ）の行内統計（`mean`・`rstd`）を `f64` で計算する
 /// （イシュー #1596）。`x_row` は 1 行分（長さ `hidden`）。

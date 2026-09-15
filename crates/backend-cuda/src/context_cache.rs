@@ -440,6 +440,33 @@ pub(crate) fn cached_mse(device: &CudaDevice) -> Result<Arc<crate::mse::CudaMse>
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::nll::CudaNll`] スイート
+/// をプロセス内キャッシュから取得する（イシュー #1738。キーは
+/// [`ContextKey`]。`cached_mse` と同型）。`ops::CudaBackendOps::
+/// nll_loss`／`nll_loss_backward` の唯一の呼び出し先。
+pub(crate) fn cached_nll(device: &CudaDevice) -> Result<Arc<crate::nll::CudaNll>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::nll::CudaNll>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::nll::CudaNll::new(device)
+    })
+}
+
+/// `device` の `CudaContext` に対応する [`crate::kl_div::CudaKlDiv`]
+/// スイートをプロセス内キャッシュから取得する（イシュー #1738。キーは
+/// [`ContextKey`]。`cached_mse` と同型）。`ops::CudaBackendOps::
+/// kl_div_loss`／`kl_div_loss_backward` の唯一の呼び出し先。
+pub(crate) fn cached_kl_div(
+    device: &CudaDevice,
+) -> Result<Arc<crate::kl_div::CudaKlDiv>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::kl_div::CudaKlDiv>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::kl_div::CudaKlDiv::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`crate::huber::CudaHuber`]
 /// スイートをプロセス内キャッシュから取得する（イシュー #1739。キーは
 /// [`ContextKey`]。`cached_mse` と同型）。
