@@ -16,11 +16,12 @@
 //!   参照実装へ帰着するため bit 完全一致するはず。
 //! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
 //!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の同経路を CPU tape
-//!   と比較する。**#1750 時点では CUDA／Metal 側の `CastOps` accessor
-//!   が `None`（未実装）のため、これらのテストは実質「両バックエンドとも
-//!   ホスト参照実装へフォールバックする」ことの確認に留まる**——#1751
-//!   がカーネルを実装した後も同じテストで契約検証できる形にしている
-//!   （実機実測は #1751 側へ申し送り）。
+//!   と比較する。イシュー #1751 で CUDA（8 方向）・Metal（6 方向。
+//!   f64 2 方向は MSL `double` 非対応のため既定 `Unsupported` の
+//!   ままホスト参照実装へフォールバックする契約自体は `#1750` から
+//!   不変）のカーネルを実装済み。実機（DGX Spark GB10／Apple
+//!   Silicon）での実測は本エージェント実行環境に到達手段がないため
+//!   未実施のまま Mac／GB10 セッションへ申し送る。
 
 use fandhe_ai::Device;
 use fandhe_ai_autodiff::Var;
@@ -174,35 +175,127 @@ fn cast_i32_on(device: Device, x_data: &Tensor<f32>) -> Tensor<i32> {
     x.cast().expect("cast は常に成功する")
 }
 
+fn cast_i64_on(device: Device, x_data: &Tensor<f32>) -> Tensor<i64> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x = tape.make_var(x_data);
+    x.cast().expect("cast は常に成功する")
+}
+
+fn cast_bool_on(device: Device, x_data: &Tensor<f32>) -> Tensor<bool> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x = tape.make_var(x_data);
+    x.cast().expect("cast は常に成功する")
+}
+
+fn var_from_i32_on(device: Device, x_data: &Tensor<i32>) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    tape.var_from(x_data)
+        .expect("var_from は常に成功する")
+        .to_tensor()
+}
+
+fn var_from_i64_on(device: Device, x_data: &Tensor<i64>) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    tape.var_from(x_data)
+        .expect("var_from は常に成功する")
+        .to_tensor()
+}
+
+fn var_from_bool_on(device: Device, x_data: &Tensor<bool>) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    tape.var_from(x_data)
+        .expect("var_from は常に成功する")
+        .to_tensor()
+}
+
+/// `device` 上で 6 方向（f32↔{i32,i64,bool}。f64 2 方向は対象外——
+/// Metal は MSL `double` 非対応で常時ホストフォールバック・CUDA は
+/// `cuda_cast_matches_cpu` 側で別途 8 方向確認する）が CPU と
+/// bit 完全一致することを検証する共通ヘルパー。
+fn assert_six_directions_match_cpu(device: Device) {
+    let x_data = f32_fixture();
+
+    let dev_i32 = cast_i32_on(device, &x_data);
+    let cpu_i32 = cast_i32_on(Device::Cpu, &x_data);
+    assert_eq!(dev_i32.shape(), cpu_i32.shape());
+    assert_eq!(
+        dev_i32.contiguous().host_slice().into_owned(),
+        cpu_i32.contiguous().host_slice().into_owned()
+    );
+
+    let dev_i64 = cast_i64_on(device, &x_data);
+    let cpu_i64 = cast_i64_on(Device::Cpu, &x_data);
+    assert_eq!(
+        dev_i64.contiguous().host_slice().into_owned(),
+        cpu_i64.contiguous().host_slice().into_owned()
+    );
+
+    let dev_bool = cast_bool_on(device, &x_data);
+    let cpu_bool = cast_bool_on(Device::Cpu, &x_data);
+    assert_eq!(
+        dev_bool.contiguous().host_slice().into_owned(),
+        cpu_bool.contiguous().host_slice().into_owned()
+    );
+
+    let i32_in = Tensor::new(vec![i32::MIN, 0, i32::MAX, 1 << 24], &[4]).unwrap();
+    assert_eq!(
+        f32_bits(&var_from_i32_on(device, &i32_in)),
+        f32_bits(&var_from_i32_on(Device::Cpu, &i32_in))
+    );
+
+    let i64_in = Tensor::new(vec![i64::MIN, 0, i64::MAX, 1i64 << 24], &[4]).unwrap();
+    assert_eq!(
+        f32_bits(&var_from_i64_on(device, &i64_in)),
+        f32_bits(&var_from_i64_on(Device::Cpu, &i64_in))
+    );
+
+    let bool_in = Tensor::new(vec![true, false, true], &[3]).unwrap();
+    assert_eq!(
+        f32_bits(&var_from_bool_on(device, &bool_in)),
+        f32_bits(&var_from_bool_on(Device::Cpu, &bool_in))
+    );
+}
+
 // `Device::Metal` variant 自体が `cfg(target_os = "macos")` 限定
 // （`crates/tensor-core/src/device.rs`）のため、この variant を参照する
 // テスト関数はコンパイル自体を macOS 限定にする必要がある
 // （`unique_backend_parity.rs` と同じ理由）。
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない。#1750 時点では CastOps 未実装のためホストフォールバック経路の確認に留まる（#1751 へ引き継ぎ）"]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない。イシュー #1751 で 6 方向（f64 2 方向は MSL double 非対応のため対象外）のカーネルを実装済み"]
 fn metal_cast_matches_cpu() {
-    let x_data = f32_fixture();
-    let metal_out = cast_i32_on(Device::Metal, &x_data);
-    let cpu_out = cast_i32_on(Device::Cpu, &x_data);
-
-    assert_eq!(metal_out.shape(), cpu_out.shape());
-    assert_eq!(
-        metal_out.contiguous().host_slice().into_owned(),
-        cpu_out.contiguous().host_slice().into_owned()
-    );
+    assert_six_directions_match_cpu(Device::Metal);
 }
 
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。#1750 時点では CastOps 未実装のためホストフォールバック経路の確認に留まる（#1751 へ引き継ぎ）"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。イシュー #1751 で 8 方向すべてのカーネルを実装済み"]
 fn cuda_cast_matches_cpu() {
-    let x_data = f32_fixture();
-    let cuda_out = cast_i32_on(Device::Cuda(0), &x_data);
-    let cpu_out = cast_i32_on(Device::Cpu, &x_data);
+    assert_six_directions_match_cpu(Device::Cuda(0));
 
-    assert_eq!(cuda_out.shape(), cpu_out.shape());
-    assert_eq!(
-        cuda_out.contiguous().host_slice().into_owned(),
-        cpu_out.contiguous().host_slice().into_owned()
-    );
+    // CUDA は f64 2 方向も実装済み（Metal と異なり `double` を素直に
+    // 使える）ため、こちらのみ追加で検証する。
+    let x_data = f32_fixture();
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+    let cpu_tape = fandhe_ai::tape();
+    let cuda_f64: Tensor<f64> = cuda_tape
+        .make_var(&x_data)
+        .cast()
+        .expect("cast は常に成功する");
+    let cpu_f64: Tensor<f64> = cpu_tape
+        .make_var(&x_data)
+        .cast()
+        .expect("cast は常に成功する");
+    assert_eq!(f64_bits(&cuda_f64), f64_bits(&cpu_f64));
+
+    let f64_in = Tensor::new(vec![1.5f64, -2.5, f64::MAX, f64::MIN], &[4]).unwrap();
+    let cuda_from_f64 = cuda_tape
+        .var_from(&f64_in)
+        .expect("var_from は常に成功する")
+        .to_tensor();
+    let cpu_from_f64 = cpu_tape
+        .var_from(&f64_in)
+        .expect("var_from は常に成功する")
+        .to_tensor();
+    assert_eq!(f32_bits(&cuda_from_f64), f32_bits(&cpu_from_f64));
 }
