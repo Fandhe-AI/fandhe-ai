@@ -220,8 +220,8 @@ train モードは `M <= 1` を `AutodiffError::InvalidArgument` で拒否する
   issue が確定済み。両バックエンドとも `BackendOps::batch_norm_train`／
   `batch_norm_infer` は既定 `Unsupported` のまま本 issue では変更しない
   （`Var::batch_norm*` は自動的にホスト参照実装へフォールバックするため
-  既存の `#[ignore]` テストに影響しない）。**Metal は #1736 で実装済み
-  （§9 参照）**
+  既存の `#[ignore]` テストに影響しない）。**CUDA は #1735、Metal は
+  #1736 でそれぞれ実装済み（§9 参照）**
 - `momentum=None`（累積移動平均）
 - `track_running_stats=false`
 - `named_buffers`／state_dict 直列化（running stats を buffer として
@@ -388,3 +388,77 @@ batch_norm*` は既存 `pub use Var` 経由）。M4 Max 実機実測は本エー
 §7 と同じ（GPU backward・性能最適化・`momentum=None`・
 `track_running_stats=false`・rank 5・channels-last 等）。加えて
 デバイス常駐入出力（`DeviceBuffer` 経由の `batch_norm`）も対象外。
+## 10. CUDA 実装記録（#1735）
+
+§3.1「CUDA（1 warp = 1 channel）が再現すべき契約」（`warp_reduce_f64`
+butterfly 縮約・二パス分散・`double` アキュムレータ）を逐語実装した
+NVRTC カーネル 2 本（train／infer）を追加し、`CudaBackendOps::
+batch_norm_train`／`batch_norm_infer` を新設カーネル経由へオーバー
+ライドした（`Var::batch_norm*` の判定規律は不変）。
+
+### 10.1 設計判断
+
+- **カーネル分割**: train は `1 CTA = 1 warp（32 レーン）= 1 channel`・
+  `grid_dim = c`（`kernels_layer_norm.rs` と同じ 1 対 1 マッピング。
+  persistent block は採用しない）。infer は統計を再計算しないため
+  grid-stride の単純 elementwise（`block_dim = 256`）とし、train と
+  異なるカーネル・異なる block 幅を用いる（`kernels_batch_norm.rs`
+  冒頭コメント参照）
+- **`i32` 上限超過**（`CudaError::BatchNormSizeLimitExceeded`）は
+  `BackendError::Unsupported` へ写像し `fandhe_ai_autodiff::grad::
+  batch_norm_train_with_fallback`／`batch_norm_infer_with_fallback`
+  のホストフォールバックへ委ねる（`map_im2col_error`／
+  `map_unique_error` と同じ設計判断。ハード fail にしない）
+- **内部契約違反**（`CudaError::InvalidBatchNormShape`。`weight`／
+  `bias`／`mean`／`var` の長さ不一致・`eps` 検査）は `ops.rs` 側で
+  事前検査せず `CudaBatchNorm` 内部の `validate_batch_norm_launch` が
+  唯一の検査点であるため、CPU 側 `CpuBackendOps::batch_norm_train`
+  と同じ `BackendError::KernelLaunchFailed` へ写像する（判定迂回経路
+  を作らない）
+- **`w`／`b` が `None` の場合のダミーバッファ**: `layer_norm.rs` の
+  Cursor Bugbot 指摘（predicated load による OOB 読み出し回避）と
+  同じ理由で `c` 要素ゼロ初期化バッファを渡す
+- **判定契約**: CUDA vs CPU は REQ-2 統一複合判定
+  （`fandhe_ai_backend_cpu::parity::assert_parity`）を正式判定とする
+  （bit 一致は主張・assert しない）
+
+### 10.2 実装ファイル
+
+- `crates/backend-cuda/src/kernels_batch_norm.rs`（新設。
+  `BATCH_NORM_TRAIN_F32`／`BATCH_NORM_INFER_F32` の NVRTC ソース文字列）
+- `crates/backend-cuda/src/batch_norm.rs`（新設。`CudaBatchNorm`・
+  `validate_batch_norm_launch`・`run_batch_norm_train_f32`／
+  `run_batch_norm_infer_f32`）
+- `crates/backend-cuda/src/error.rs::{CudaError::InvalidBatchNormShape,
+  CudaError::BatchNormSizeLimitExceeded}`
+- `crates/backend-cuda/src/context_cache.rs::cached_batch_norm`
+- `crates/backend-cuda/src/lib.rs`（`mod batch_norm;`・
+  `mod kernels_batch_norm;`・`pub use batch_norm::CudaBatchNorm;`）
+- `crates/backend-cuda/src/ops.rs::{map_batch_norm_error,
+  CudaBackendOps::batch_norm_train, CudaBackendOps::batch_norm_infer}`
+
+テスト: `crates/backend-cuda/src/batch_norm.rs`（クレート内。
+`validate_batch_norm_launch` 単体テスト・GPU 不要）・
+`crates/backend-cuda/tests/batch_norm_parity.rs`（環境適応スモーク・
+実機必須の形状網羅〈rank 2／3／4・warp 幅端数・極値・NaN 伝播・
+決定性・`CpuBackendOps` 直接突合〉）・`crates/facade/tests/
+batch_norm_backend_parity.rs`（`cuda_batch_norm_train_forward_matches_cpu`・
+`cuda_batch_norm_infer_forward_matches_cpu`・
+`cuda_batch_norm_train_backward_matches_cpu`〈CUDA forward + ホスト
+VJP の結線確認〉・`cuda_batch_norm_train_forward_rank4_matches_cpu`）。
+
+**facade 新規公開面なし**（`crates/facade/src/**` は無変更。`Var::
+batch_norm*` は既存再エクスポート経由）。
+
+### 10.3 対象外（本 issue のスコープ外）
+
+- CUDA persistent grid／occupancy 最適化・`M` 方向並列化・`float4`
+  ベクトル化（性能課題。`c` が少なく `M` が巨大な形状では 1 warp = 1
+  channel は並列度不足だが、LayerNorm CUDA と同じく「正しい新設」を
+  優先する）
+- GPU backward カーネル（VJP は #1732 でホスト側に 3 バックエンド
+  共通実装済み。本 issue では forward カーネルのみを追加）
+- デバイス常駐入出力（`DeviceBuffer` 経由の `batch_norm`）
+- **GB10 実機実測**: 本エージェント実行環境に DGX Spark GB10 実機
+  への到達手段がなく未実施のまま `docs/perf/logs/cuda-batch-norm-1735/`
+  へ申し送る
