@@ -10,6 +10,9 @@
 （後続 #1771「CUDA／Metal 実機 parity・実測」が正式な受け皿）へ申し送る
 （`docs/perf/logs/cuda-conv1d-1767/README.md` と同型の運用）。
 
+> **実測の正式な受け皿はイシュー #1771**（`docs/perf/logs/conv-
+> realdevice-1771/`）。統合ランブックを参照すること。
+
 ## 目的
 
 イシュー #1769「Conv1d を Conv2d の特化として実装する」の実機正しさ

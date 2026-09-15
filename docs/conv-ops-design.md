@@ -1179,3 +1179,52 @@ reshape してから `Var::conv2d` へ委譲する薄いラッパーで新規 `O
   まま。CUDA（GB10）／Metal（M4 Max）実機 parity・実測は #1771 へ
   引き継ぐ（`crates/facade/tests/nn_conv_backend_parity.rs` に
   `#[ignore]` テストのスケルトンを用意済み）。
+
+### #1771（CUDA／Metal 実機 parity・実測。親 #1645）
+
+#1766〜#1770 の 4 イシューに分散していた実行手順・事前登録判定規則を
+`docs/perf/logs/conv-realdevice-1771/`（実機ランブック）へ統合し、
+不足していた nn 層（`compat::Sequential`）の `#[ignore]` テストを
+`crates/facade/tests/nn_conv_backend_parity.rs` へ追加した。
+
+- **追加テスト**（CUDA・Metal 各 6 件。既存 forward のみだった
+  `{cuda,metal}_sequential_conv2d_matches_cpu` に加え）:
+  - `{cuda,metal}_sequential_conv2d_backward_matches_cpu`: nn 層の
+    backward（weight／bias／入力勾配）を CPU と REQ-2 複合判定で比較
+  - `{cuda,metal}_sequential_conv1d_{forward,backward}_matches_cpu`:
+    `add_conv1d` 版（`conv1d_backend_parity.rs` は `Var::conv1d` 直叩き
+    のみだったため nn 層経由の版を補う）
+  - `{cuda,metal}_sequential_conv1d_matches_manual_reshape_conv2d_
+    bit_exact`: `conv1d_backend_parity.rs::conv1d_matches_manual_
+    reshape_conv2d_on` の nn 層版（「特化」契約。同一 GPU tape 上で
+    `add_conv1d` モデルと `add_conv2d`〈`[1,k]`・`[0,p]`・`[1,d]`〉
+    モデルへ同一重みを注入し forward・勾配とも bit 完全一致）
+  - `{cuda,metal}_sequential_conv2d_sgd_steps_record_only`:
+    `compat_sequential_conv.rs::train_loop_with_sgd_reduces_loss` と
+    同じ形状・SGD 設定で 5 step を GPU／CPU 双方で回し、各 step の
+    loss・最終パラメータを比較する（**record-only**。GEMM 由来の差が
+    step をまたいで累積しうるため ADOPT／REJECT の判定対象にしない）
+  - 上記いずれも `print_fold_bits`（`mse_backward_bench.rs::fold_bits`
+    と同一実装）で `<test>[<label>].fold_bits=<hex>` 形式の 1 行を
+    出力し、実機ランブックの run-to-run 決定性検査（2 回起動間の
+    `grep -E 'bits=|fold_bits='` 出力 `diff`）が機械的に確認できる
+    ようにした
+- **CPU での正しさ検証**（Linux 実行可能。実機到達不能のため本 issue
+  でできる限りの検証として実施）: 上記 5 個の内部ヘルパー関数
+  （`sequential_conv2d_backward_on`／`sequential_conv1d_forward_on`／
+  `sequential_conv1d_backward_on`／`sequential_conv1d_matches_manual_
+  reshape_conv2d_on`／`sgd_steps_on`）を一時的に `Device::Cpu` で
+  2 回呼び出す自己整合性テスト（コミット対象外・スクラッチ）を実行し、
+  bit 完全一致（決定性）・学習ループの loss 単調減少を確認済み
+  （テストコード自体は非コミット。ロジックの妥当性確認のみが目的）
+- **facade 新規公開面なし**: 既存 `Var`／`compat::Sequential` 再エクス
+  ポート経由のテストのみで `pub fn`／`pub use` の追加はない
+- **tolerance／`BASELINES`**: 変更なし。実機実行時に REQ-2 fail が発生
+  した場合は本 issue では対応せず、`docs/conv-ops-design.md` §7 の
+  baseline 方式適用可否をユーザー承認へエスカレーションする
+- **実機到達可否**: 本エージェント実行環境（Linux コンテナ）には
+  DGX Spark GB10・Apple Silicon いずれの実機への到達手段
+  （`docs/real-hardware-verification-env.local.md`・`CUDA_NODE`
+  環境変数・`~/.ssh/config` のいずれも確認できず）もないため
+  **未実測**。`verdict=undetermined` のまま親 #1645 を受け皿として
+  GB10／Mac 実機セッションへ申し送る
