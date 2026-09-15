@@ -78,6 +78,7 @@ use crate::error::MetalError;
 use crate::gather_scatter::MetalGatherScatter;
 use crate::gemm::MetalGemm;
 use crate::generic_cache::{get_or_build, get_or_build_keyed};
+use crate::im2col::MetalIm2col;
 use crate::interpolate::MetalInterpolate;
 use crate::layer_norm::MetalLayerNorm;
 use crate::pipeline::{self, MtlPipeline};
@@ -300,6 +301,15 @@ pub(crate) fn cached_constant_pad(
     static CACHE: OnceLock<Mutex<Option<Arc<MetalConstantPad>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || MetalConstantPad::new(ctx))
+}
+
+/// [`MetalIm2col`] をプロセス内キャッシュから取得する（イシュー
+/// #1768）。`ops::MetalBackendOps::im2col`／`col2im` の唯一の呼び出し
+/// 先（`cached_constant_pad` と同型）。
+pub(crate) fn cached_im2col(ctx: &Arc<MetalContext>) -> Result<Arc<MetalIm2col>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<MetalIm2col>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || MetalIm2col::new(ctx))
 }
 
 /// `unique` カーネル（`unique.rs::MetalUnique`）のコンパイル済み
