@@ -258,6 +258,13 @@ pub(crate) mod batch_state;
 // ようにする（`pool_pending.rs` モジュール冒頭コメント参照）。
 #[cfg(target_os = "macos")]
 pub mod bce;
+// BatchNorm1d／2d 順伝播カーネルの起動 API（イシュー #1736・親
+// #1608）。`layer_norm.rs` と同じ「カーネル起動は macOS 限定・
+// ホストモデルは Linux 実行可能」の 2 ファイル構成
+// （`batch_norm_model.rs` は下記の cfg なしブロックで宣言）。
+#[cfg(target_os = "macos")]
+pub mod batch_norm;
+pub mod batch_norm_model;
 #[cfg(target_os = "macos")]
 pub mod buffer;
 #[cfg(target_os = "macos")]
@@ -672,6 +679,8 @@ mod typed_bf16_probe_diag_tests;
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {}
 
+#[cfg(target_os = "macos")]
+pub use batch_norm::MetalBatchNorm;
 #[cfg(target_os = "macos")]
 pub use bce::MetalBce;
 #[cfg(target_os = "macos")]

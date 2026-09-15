@@ -38,13 +38,14 @@
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BceKind, BinaryElementwiseOp, Conv2dParams, DispatchFailureCell,
-    FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
-    LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp,
-    ScatterReduce, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, gather_out_shape,
-    im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
+    DispatchFailureCell, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
+    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors,
+    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
+    UnaryElementwiseOp, batch_norm_layout, gather_out_shape, im2col_out_shape,
+    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -279,6 +280,31 @@ fn map_im2col_error(err: MetalError) -> BackendError {
         MetalError::InvalidIm2colShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
+        other => BackendError::KernelLaunchFailed(other.to_string()),
+    }
+}
+
+/// `batch_norm.rs::MetalBatchNorm::run_batch_norm_train_f32`／
+/// `run_batch_norm_infer_f32` のエラーを `BackendOps::
+/// batch_norm_train`／`batch_norm_infer` の戻り値へ変換する（イシュー
+/// #1736）。[`MetalError::BatchNormSizeLimitExceeded`]（`n`／`c`／
+/// `spatial`／`m`／`numel` のいずれかがカーネル引数の `uint`
+/// （`u32::MAX`）上限を超過）**のみ** [`BackendError::Unsupported`]
+/// へ写像し、`fandhe_ai_autodiff::grad::batch_norm_train_with_fallback`／
+/// `batch_norm_infer_with_fallback` のホストフォールバック
+/// （`eval::batch_norm_train_channels`／`batch_norm_infer_channels`）
+/// へ委ねる（`map_im2col_error` と同じ設計判断・`backend-cuda::ops::
+/// map_batch_norm_error` と対になる）。[`MetalError::
+/// InvalidBatchNormShape`]（`weight`／`bias`／`mean`／`var` の長さ
+/// 不一致・`eps` 検査等）は CPU 側 `CpuBackendOps::batch_norm_train`
+/// （`BackendError::KernelLaunchFailed` を返す）と同じ variant へ
+/// 揃える（既存 CPU テストの `matches!(…, KernelLaunchFailed)` との
+/// 整合）。それ以外（デバイス・パイプライン起動失敗等）も
+/// `KernelLaunchFailed` へ変換する（判定迂回経路を作らない。
+/// `.claude/rules/security.md` A08）。
+fn map_batch_norm_error(err: MetalError) -> BackendError {
+    match err {
+        MetalError::BatchNormSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
         other => BackendError::KernelLaunchFailed(other.to_string()),
     }
 }
@@ -3712,6 +3738,105 @@ impl BackendOps for MetalBackendOps {
         let out = layer_norm
             .run_layer_norm_f32(&ctx, x_slice, w_slice, b_slice, eps, rows, hidden)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::batch_norm_train`] の Metal
+    /// 実装（イシュー #1736・親 #1608）。チャネル軸・レイアウト契約の
+    /// 導出は `batch_norm_layout`（`row_norm_layout` の BatchNorm 版。
+    /// チャネル軸は常に dim 1）。新設カーネル `crate::batch_norm::
+    /// MetalBatchNorm::run_batch_norm_train_f32`・`context_cache::
+    /// cached_batch_norm` を使う（`docs/batch-norm-ops-design.md`
+    /// §3.1「Metal（1 simdgroup = 1 channel）が再現すべき契約」）。
+    fn batch_norm_train(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<BatchNormTrainOutput, BackendError> {
+        let (n, c, spatial) = batch_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("batch_norm_train: input not contiguous".into())
+        })?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("batch_norm_train: weight not contiguous".into())
+            })?),
+            None => None,
+        };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_slice = match &b_owned {
+            Some(b) => Some(b.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("batch_norm_train: bias not contiguous".into())
+            })?),
+            None => None,
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let batch_norm = context_cache::cached_batch_norm(&ctx).map_err(map_batch_norm_error)?;
+        let raw = batch_norm
+            .run_batch_norm_train_f32(&ctx, x_slice, w_slice, b_slice, eps, n, c, spatial)
+            .map_err(map_batch_norm_error)?;
+        Ok(BatchNormTrainOutput {
+            output: Tensor::new(raw.out, x.shape()).map_err(BackendError::ShapeMismatch)?,
+            batch_mean: Tensor::new(raw.mean, &[c]).map_err(BackendError::ShapeMismatch)?,
+            batch_var: Tensor::new(raw.var, &[c]).map_err(BackendError::ShapeMismatch)?,
+        })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::batch_norm_infer`] の Metal
+    /// 実装（イシュー #1736・親 #1608）。[`Self::batch_norm_train`] と
+    /// 同じ shape 契約だが、`mean`／`var`（呼び出し元が保持する
+    /// running stats）をバッチから計算し直さずそのまま使う。
+    fn batch_norm_infer(
+        &self,
+        x: &Tensor<f32>,
+        mean: &Tensor<f32>,
+        var: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let (n, c, spatial) = batch_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("batch_norm_infer: input not contiguous".into())
+        })?;
+        let mean_owned = mean.contiguous();
+        let mean_slice = mean_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("batch_norm_infer: mean not contiguous".into())
+        })?;
+        let var_owned = var.contiguous();
+        let var_slice = var_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("batch_norm_infer: var not contiguous".into())
+        })?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("batch_norm_infer: weight not contiguous".into())
+            })?),
+            None => None,
+        };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_slice = match &b_owned {
+            Some(b) => Some(b.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("batch_norm_infer: bias not contiguous".into())
+            })?),
+            None => None,
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let batch_norm = context_cache::cached_batch_norm(&ctx).map_err(map_batch_norm_error)?;
+        let out = batch_norm
+            .run_batch_norm_infer_f32(
+                &ctx, x_slice, mean_slice, var_slice, w_slice, b_slice, eps, n, c, spatial,
+            )
+            .map_err(map_batch_norm_error)?;
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
