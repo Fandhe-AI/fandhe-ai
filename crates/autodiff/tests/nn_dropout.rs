@@ -65,6 +65,67 @@ fn dropout_vjp_matches_mask_multiplication_bit_exact() {
     assert_eq!(dx.as_slice().unwrap(), mask.as_slice().unwrap());
 }
 
+/// `Op::Dropout` の VJP（`grad.rs`）を実際に通す解析解検証
+/// （codex-review 指摘: 上記テストは `x.mul(&mask_var)` の勾配しか
+/// 検証しておらず `Op::Dropout` 自体の VJP を通っていなかった）。
+/// 固定 seed から `Var::dropout` が内部で使うのと同じマスク元列を
+/// `expected_mask`（forward 契約テストと同じヘルパー）で再現し、
+/// keep／drop が混在する実マスク（p=0.4・6 要素）に対して
+/// `d(sum(dropout(x, p, true) ⊙ weights))/dx = weights ⊙ mask` が
+/// bit 完全一致することを確認する。`weights` を非一様にすることで
+/// upstream が全要素 1（`sum` 直結）の場合には検出できない
+/// 「mask を無視して upstream をそのまま流す」「スケールを誤る」
+/// 種類の回帰も検出対象に含める。
+#[test]
+fn dropout_op_vjp_matches_analytic_mask_multiplication_bit_exact() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let p = 0.4f32;
+    let shape = [2usize, 3usize];
+    let x_data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let weights_data = vec![0.5f32, -1.5, 2.25, -0.25, 3.0, -4.0];
+
+    // 参照マスク: forward 契約テストと同じ `expected_mask` ヘルパーで
+    // `Var::dropout` が内部で消費するのと同じ乱数列から独立に再構成
+    // する（keep/drop 混在。p=0.4・6 要素のため両方が現れる）。
+    fandhe_ai_autodiff::manual_seed(42);
+    let uniforms = fandhe_ai_autodiff::rand(&shape).expect("rand は失敗しない");
+    let mask = expected_mask(uniforms.as_slice().unwrap(), p);
+    assert!(
+        mask.contains(&0.0) && mask.iter().any(|&m| m != 0.0),
+        "テスト前提: keep/drop が混在すること（seed=42, p=0.4 で確認済み）"
+    );
+
+    fandhe_ai_autodiff::manual_seed(42);
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x_data, &shape));
+    let weights_var = tape.var(&t(weights_data.clone(), &shape));
+    // `Var::dropout` を実際に呼ぶ（`Op::Dropout` がテープへ記録される）。
+    let dropped = x.dropout(p, true).expect("有効な p");
+    // upstream を非一様にするため要素ごとに異なる重みを乗算してから
+    // 縮約する（`sum` 直結〈upstream が全要素 1〉では検出できない
+    // 回帰も対象に含めるため）。
+    let weighted = dropped
+        .mul(&weights_var)
+        .expect("同 shape の要素積は失敗しない");
+    let loss = weighted.sum(None).expect("全軸縮約は失敗しない");
+
+    let grads = tape.backward(&loss).expect("x は requires_grad の葉");
+    let dx = grads
+        .get(&x)
+        .expect("x は requires_grad=true の葉")
+        .expect("x は loss に到達する");
+
+    // d(sum((x ⊙ mask) ⊙ weights))/dx = mask ⊙ weights
+    // （`Op::Dropout` の VJP は `upstream ⊙ mask` そのもの。乗算のみで
+    // FMA を含まないため bit 完全一致）。
+    let expected: Vec<f32> = mask
+        .iter()
+        .zip(weights_data.iter())
+        .map(|(&m, &w)| m * w)
+        .collect();
+    assert_eq!(dx.as_slice().unwrap(), expected.as_slice());
+}
+
 // --- forward 契約（`training`／`p` の早期リターン・マスク値） -----------
 
 #[test]
