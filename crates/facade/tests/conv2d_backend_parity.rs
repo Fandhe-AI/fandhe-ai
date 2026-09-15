@@ -10,13 +10,19 @@
 //!   含まないコピー・`f64` 逐次加算のいずれも bit 完全一致契約。設計
 //!   doc §7）。
 //! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
-//!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の「ホスト im2col →
-//!   GPU GEMM → GPU add」経路（CUDA／Metal は `im2col`／`col2im`／
-//!   `conv2d` を override しないため `conv2d_with_fallback` の段階的
-//!   合成のうち GEMM 段のみ GPU カーネルを通る）を CPU tape と
-//!   `assert_parity`（REQ-2 複合判定。GEMM 由来の差を許容）で比較する
-//!   （設計 doc §7「GPU parity は REQ-2 複合判定・im2col／col2im 単体は
-//!   bit 一致の 2 層構成」）。実機未実測のまま出荷し記入欄を残す。
+//!   "macos")` 限定）／`tape_for(Device::Cuda(0))` の経路を CPU tape
+//!   と `assert_parity`（REQ-2 複合判定。GEMM 由来の差を許容）で比較
+//!   する。CUDA は本ファイル追記時点（イシュー #1766）で `im2col`／
+//!   `col2im` を override 済み（bit 完全一致契約は不変）だが `conv2d`
+//!   自身は override しないため「GPU im2col → GPU GEMM → GPU add」の
+//!   段階的合成のうち GEMM 段のみが CPU 参照実装と異なりうる。Metal
+//!   は `im2col`／`col2im`／`conv2d` いずれも override しない（#1644
+//!   未実装）ため「ホスト im2col → GPU GEMM → GPU add」経路となるが、
+//!   im2col／col2im 自体は算術を含まないコピー・`f64` 逐次和のいずれも
+//!   bit 完全一致契約のため、差分の発生源は両バックエンドとも GEMM 段
+//!   のみである点は変わらない（設計 doc §7「GPU parity は REQ-2 複合
+//!   判定・im2col／col2im 単体は bit 一致の 2 層構成」）。実機未実測
+//!   のまま出荷し記入欄を残す。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Device;
