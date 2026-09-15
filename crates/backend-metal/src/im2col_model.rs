@@ -136,16 +136,31 @@ pub fn derive_im2col_dims(
     params: &fandhe_ai_tensor_core::Conv2dParams,
     numel: usize,
 ) -> Result<Im2colDims, Im2colPrepareError> {
-    debug_assert_eq!(
-        in_shape.len(),
-        4,
-        "derive_im2col_dims: in_shape must be rank 4"
-    );
-    debug_assert_eq!(
-        col_shape.len(),
-        4,
-        "derive_im2col_dims: col_shape must be rank 4"
-    );
+    // rank 検査を通常の条件分岐で行い、`in_shape[0..3]` への添字
+    // アクセス（直後の行）より必ず先に完了させる（codex-review P1
+    // 是正: 旧実装は `debug_assert_eq!` に依存しており、release
+    // ビルドでは rank 不足の `in_shape`（例 `[1, 1, 1]`）に対しても
+    // panic せずに範囲外添字アクセスへ進んでしまい `InvalidShape`
+    // を返せなかった。`col_shape` は直後で `expected_col_shape.
+    // as_slice()` とスライス比較〈長さ不一致なら即 false〉するのみで
+    // 添字アクセスしないため rank 不一致でも安全だが、`in_shape` と
+    // 対称にここで検査し早期に分かりやすいエラーへ倒す）。
+    if in_shape.len() != 4 {
+        return Err(Im2colPrepareError::InvalidShape {
+            detail: format!(
+                "in_shape must be rank 4, got rank {} ({in_shape:?})",
+                in_shape.len()
+            ),
+        });
+    }
+    if col_shape.len() != 4 {
+        return Err(Im2colPrepareError::InvalidShape {
+            detail: format!(
+                "col_shape must be rank 4, got rank {} ({col_shape:?})",
+                col_shape.len()
+            ),
+        });
+    }
 
     let (n_batch, cin, h_in, w_in) = (in_shape[0], in_shape[1], in_shape[2], in_shape[3]);
 
@@ -584,6 +599,28 @@ mod tests {
         // in_shape=[1,2,1,1] (groups=2) -> 正しい col_shape=[1,2,1,1]。
         // groups=1 に差し替えた col_shape を渡して不一致を起こす。
         let err = derive_im2col_dims(&[1, 2, 1, 1], &[1, 1, 1, 1], &params, 1).unwrap_err();
+        assert!(matches!(err, Im2colPrepareError::InvalidShape { .. }));
+    }
+
+    /// rank 不足の `in_shape`（例 `[1, 1, 1]`）は release ビルドでも
+    /// panic せず `InvalidShape` を返す（codex-review P1 是正の回帰
+    /// テスト。是正前は `debug_assert_eq!` にのみ依存しており、
+    /// `in_shape[0..3]` への添字アクセスへ進んでしまい release
+    /// ビルドでは範囲外添字アクセスで panic しえた）。
+    #[test]
+    fn derive_im2col_dims_rejects_rank_deficient_in_shape() {
+        let params = Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let err = derive_im2col_dims(&[1, 1, 1], &[1, 1, 1, 1], &params, 1).unwrap_err();
+        assert!(matches!(err, Im2colPrepareError::InvalidShape { .. }));
+    }
+
+    /// rank 不足の `col_shape` も同様に `InvalidShape` を返す
+    /// （`in_shape` と対称の検査。`run_im2col_f32` へ `out_shape=
+    /// [1,1,1,1]` のようなユーザー由来の値がそのまま渡る経路の防御）。
+    #[test]
+    fn derive_im2col_dims_rejects_rank_deficient_col_shape() {
+        let params = Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let err = derive_im2col_dims(&[1, 1, 1, 1], &[1, 1, 1], &params, 1).unwrap_err();
         assert!(matches!(err, Im2colPrepareError::InvalidShape { .. }));
     }
 
