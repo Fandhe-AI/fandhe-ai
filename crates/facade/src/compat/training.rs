@@ -12,16 +12,20 @@
 //! `cross_entropy_loss`）の合成のみで実装する（REQ-9「薄いラッパーに
 //! 徹する」）。
 //!
-//! callbacks（`EarlyStopping`／`ModelCheckpoint`）・`validation_data`・
-//! metrics・LR スケジューラ連携（`fandhe_ai::optim` の optimizer は
-//! 学習率更新 API を持たないため本 issue で結線不可）・`DataLoader` を
-//! 直接受ける `fit` 入口は対象外（兄弟イシュー #1763 へ引き継ぐ）。
+//! callbacks（`EarlyStopping`／`ModelCheckpoint`／LR スケジューラ連携）・
+//! `validation_data` は [`Sequential::fit_with_callbacks`]（イシュー
+//! #1763・親 #1618・`super::callbacks`）で実装済み。[`Sequential::fit`]
+//! は引き続き既存契約のまま（`fit_with_callbacks(x, y, config, None,
+//! &mut [])` への委譲）。metrics・`DataLoader` を直接受ける `fit` 入口は
+//! 対象外のまま（`docs/compat-callbacks-design.md` §8 参照）。
 
 use crate::optim::{Adam, AdamConfig, AdamW, AdamWConfig, Sgd, SgdConfig};
 use crate::{AutodiffError, Tensor};
 use fandhe_ai_autodiff::Reduction;
 use fandhe_ai_tensor_core::Element;
 use fandhe_ai_tensor_core::data::{DataLoader, DataLoaderConfig, TensorDataset};
+
+use super::callbacks::Callback;
 
 use super::sequential::Sequential;
 
@@ -109,15 +113,33 @@ impl FitConfig {
     }
 }
 
-/// `fit()` の戻り値（Keras `History.history["loss"]` 相当）。
+/// `fit()`／`fit_with_callbacks()` の戻り値（Keras `History.history`
+/// 相当。`["loss", "val_loss", "lr"]` の 3 キーに対応する 3 フィールド）。
 ///
 /// `loss[i]` は epoch `i`（0-indexed）の学習損失を、各バッチの
 /// サンプル数で重み付けした平均（`Σ(batch_loss * batch_n) / Σ batch_n`。
 /// `f64` で集計し最後に 1 回 `f32` へ downcast）として記録する。
+///
+/// `val_loss[i]`（イシュー #1763）は `fit_with_callbacks` の
+/// `validation` 引数が `Some` の場合のみ epoch `i` 末の検証損失
+/// （[`Sequential::evaluate`] と同じサンプル数重み付き平均集計方式）で
+/// 埋まる。`validation = None`（[`Sequential::fit`] を含む）の場合は
+/// 空のまま（`Vec::new()`）。
+///
+/// `lr[i]`（イシュー #1763）は epoch `i` の**全バッチが実際に使った**
+/// optimizer の学習率（`callbacks` の有無に関わらず常に記録する。
+/// [`super::callbacks::LrSchedule`] が存在しない場合は `compile()` 時に
+/// 設定した学習率が epoch を通じて一定のまま記録される）。
+///
+/// いずれの `Vec` も `i` は `fit_with_callbacks` 呼び出し内のローカル
+/// epoch 番号（0-indexed。`super::callbacks` モジュール doc「epoch
+/// 番号の数え方」節が定義する callback 側の通算 epoch 番号とは別物）。
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct History {
     pub loss: Vec<f32>,
+    pub val_loss: Vec<f32>,
+    pub lr: Vec<f32>,
 }
 
 /// `fit()`／`evaluate()` の target 要素型（sealed。[`crate::CastElement`]
@@ -221,6 +243,27 @@ impl OptimizerState {
         }
     }
 
+    /// 現在の学習率（LR scheduler 連携用。イシュー #1763）。
+    fn lr(&self) -> f32 {
+        match self {
+            OptimizerState::Sgd(sgd) => sgd.config().lr,
+            OptimizerState::AdamW(adamw) => adamw.config().lr,
+            OptimizerState::Adam(adam) => adam.config().lr,
+        }
+    }
+
+    /// 学習率のみを書き換える（各 optimizer の `set_lr` へ委譲。
+    /// イシュー #1763。`Sgd`／`AdamW`／`Adam::set_lr` doc の「PyTorch の
+    /// `param_group["lr"]` 書き換えと同じ意味論」節を参照——momentum
+    /// バッファ／moment 推定値／`step_count` は一切リセットしない）。
+    fn set_lr(&mut self, new_lr: f32) -> Result<(), AutodiffError> {
+        match self {
+            OptimizerState::Sgd(sgd) => sgd.set_lr(new_lr),
+            OptimizerState::AdamW(adamw) => adamw.set_lr(new_lr),
+            OptimizerState::Adam(adam) => adam.set_lr(new_lr),
+        }
+    }
+
     /// `params.len() != grads.len()` を各 `step` 実装（`Sgd::step` は
     /// 検査済み）へ委譲する前に、`AdamW`／`Adam::step` が要求する
     /// `&[(&Tensor, &Tensor)]` への zip 変換自体が短い側で黙って
@@ -294,52 +337,139 @@ impl Sequential {
     /// `x`（`[N, ...]`）・`y`（`[N, ...]`）を `config.epochs` 回学習する
     /// （Keras `model.fit(x, y, epochs=, batch_size=)` 相当）。
     ///
-    /// 1 バッチあたりの演算列は [`crate::compat::SequentialVars::forward`] →
-    /// `T::loss_for` → [`crate::Tape::backward`] →
-    /// [`crate::compat::SequentialVars::trainable_grads`] → optimizer `step` →
-    /// [`Self::apply_parameters`] という、`sequential.rs` モジュール
-    /// doc の doctest と同一の並びである（`fandhe_ai::tape()`。既定
-    /// CPU・`CpuBackendOps`・融合有効）。
+    /// [`Self::fit_with_callbacks`]（`validation=None`・`callbacks=&mut
+    /// []`）への薄い委譲——`fit_with_callbacks_empty_matches_fit_bit_
+    /// exact` が両者の演算列・戻り値の完全一致を検証する。callbacks／
+    /// `validation_data`／LR スケジューラ連携（イシュー #1763）が
+    /// 必要な場合は [`Self::fit_with_callbacks`] を直接使う。
     ///
-    /// # train／eval モード
-    ///
-    /// 呼び出し前のモード（[`Self::training`]）を記憶し、学習中は
-    /// train モードへ切り替える（[`Self::add_dropout`] 入りモデルの
-    /// マスク適用のため）。成功・失敗（バッチ処理中のエラー）いずれの
-    /// 場合も元のモードへ復元する。
-    ///
-    /// # エラー
-    /// - 未 compile → `InvalidArgument`（[`Self::is_compiled`] が
-    ///   `false` のまま維持される）
-    /// - `config.epochs == 0` → `InvalidArgument`
-    /// - `x`／`y` のサンプル数不一致・`batch_size == 0` →
-    ///   [`fandhe_ai_tensor_core::data::DataError`] 由来の
-    ///   `InvalidArgument`
-    /// - `loss` と `T`（target dtype）の組み合わせが不整合
-    ///   （[`FitTarget::loss_for`] 参照）→ `InvalidArgument`
-    /// - バッチ処理中に失敗した場合も、compile 済み状態
-    ///   （[`Self::is_compiled`]`() == true`）は維持したまま（optimizer
-    ///   状態は成功した step の分だけ進んだまま）エラーを返す
-    ///   （fail-closed。モデルを「未 compile」状態へ落とさない）
+    /// 1 バッチあたりの演算列・train／eval モードの扱い・エラー契約は
+    /// [`Self::fit_with_callbacks`] doc を参照（本メソッドはそのうち
+    /// `validation`／`callbacks` を使わないサブセット）。
     pub fn fit<T: FitTarget>(
         &mut self,
         x: &Tensor<f32>,
         y: &Tensor<T>,
         config: FitConfig,
     ) -> Result<History, AutodiffError> {
+        self.fit_with_callbacks(x, y, config, None, &mut [])
+    }
+
+    /// [`Self::fit`] の拡張版（イシュー #1763・親 #1618）:
+    /// `validation`（検証データ。`Some((x_val, y_val))`）・
+    /// `callbacks`（[`super::callbacks::Callback`] の可変スライス）を
+    /// 追加で受け取る。`validation=None`・`callbacks=&mut []` のとき
+    /// [`Self::fit`] と完全に同一の演算列・戻り値になる。
+    ///
+    /// # 1 epoch の処理順序
+    ///
+    /// 1. **epoch 開始 LR 同期**: `callbacks` 中の
+    ///    [`super::callbacks::Callback::LrSchedule`] それぞれについて
+    ///    `lr_for_epoch_begin()`（`callbacks` モジュール doc
+    ///    「LR 同期のタイミング」節）を読み `compiled.optimizer.set_lr`
+    ///    へ書き込む（複数存在する場合は `callbacks` の並び順で最後の
+    ///    ものが勝つ）。この時点の optimizer の学習率を
+    ///    `history.lr` へ記録する（`LrSchedule` が 1 つもない場合も
+    ///    常に記録する。既存学習率が epoch を通じて一定のまま
+    ///    記録される）。
+    /// 2. [`Self::fit`] と同一のバッチループ（`bind → forward →
+    ///    T::loss_for → backward → trainable_grads → optimizer.step →
+    ///    apply_parameters`）を回し `history.loss` へ記録する。
+    /// 3. `validation` が `Some` なら eval モードへ一時的に切り替えて
+    ///    [`Self::evaluate`] と同じ演算列（`run_evaluate`。
+    ///    `config.batch_size` を使う）で評価し `history.val_loss` へ
+    ///    記録する。
+    /// 4. **epoch 末 callbacks**: `callbacks` を**スライス順**で処理
+    ///    する（いずれかが学習打ち切りを要求しても、当該 epoch の他の
+    ///    callback は必ず処理してから打ち切る）。
+    ///    - [`super::callbacks::Callback::ModelCheckpoint`][]: 監視値と
+    ///      `self` から `observe`（スナップショット更新）する。
+    ///    - [`super::callbacks::Callback::LrSchedule`]: `advance` して
+    ///      内部状態（`Plateau` なら `ReduceLrOnPlateau::step`）を
+    ///      進める（optimizer への書き戻しは次 epoch 開始時のみ。
+    ///      「LR 同期のタイミング」節参照）。
+    ///    - [`super::callbacks::Callback::EarlyStopping`]: `observe` し、
+    ///      学習打ち切りを要求されたら（同一 epoch の他 callback 処理
+    ///      後に）ループを抜ける。
+    ///
+    /// # fit 呼び出しをまたぐ状態の扱い
+    ///
+    /// - [`super::callbacks::Callback::EarlyStopping`][]: 本メソッド
+    ///   呼び出しのたびに内部状態（`best`／`wait`／`stopped_epoch` 等）
+    ///   を**リセット**する（Keras `on_train_begin` と同じ。前回の
+    ///   呼び出しで停止済みの `EarlyStopping` を再利用しても即座には
+    ///   停止しない）。
+    /// - [`super::callbacks::Callback::ModelCheckpoint`]・
+    ///   [`super::callbacks::Callback::LrSchedule`]: 内部状態は
+    ///   **継続**する（optimizer 状態が `fit` 呼び出しをまたいで継続
+    ///   する既存契約——`fit(1)+fit(1) == fit(2)`——と整合する）。
+    ///
+    /// # `restore_best_weights`
+    ///
+    /// `callbacks` 中に `restore_best_weights(true)` の
+    /// [`super::callbacks::Callback::EarlyStopping`] があり、かつ
+    /// best スナップショットが記録されていれば、本メソッドが返る
+    /// 直前（学習打ち切り・完走いずれの終了経路でも）に
+    /// [`Self::load_state_dict`] でそこへ復元する（Keras 3 の
+    /// `restore_best_weights=True` と同じ意味論）。複数の
+    /// `EarlyStopping` が該当する場合は `callbacks` の並び順で最後の
+    /// ものが勝つ。
+    ///
+    /// # エラー
+    ///
+    /// [`Self::fit`] の既存エラー契約に加え:
+    /// - `callbacks` のいずれかが `monitor == Monitor::ValLoss`
+    ///   （[`super::callbacks::EarlyStopping`]／
+    ///   [`super::callbacks::ModelCheckpoint`] の既定・
+    ///   [`super::callbacks::LrSchedule::plateau`] の既定）で
+    ///   `validation.is_none()` の場合 → `InvalidArgument`
+    ///   （train／eval モード変更前に検査するため復元は不要）
+    /// - `LrSchedule::advance`／`optimizer.set_lr` が失敗した場合
+    ///   （例: ユーザー定義 `LrScheduler` が非有限値を返した）→
+    ///   その時点のエラーをそのまま返す（[`Self::fit`] と同じ
+    ///   fail-closed 契約: compile 済み状態は維持したまま返す）
+    pub fn fit_with_callbacks<T: FitTarget>(
+        &mut self,
+        x: &Tensor<f32>,
+        y: &Tensor<T>,
+        config: FitConfig,
+        validation: Option<(&Tensor<f32>, &Tensor<T>)>,
+        callbacks: &mut [Callback],
+    ) -> Result<History, AutodiffError> {
         // (1) 未 compile 検査・compiled の一時取り出し（借用衝突回避。
         // `run_fit` 内で `bind`〈&self 借用〉と `self.compiled`〈&mut
         // self 借用〉を同時に持てないため、compiled を一旦取り外して
         // 別変数として扱う。結果を問わず必ず書き戻す）。
-        let mut compiled = self.compiled.take().ok_or_else(|| not_compiled("fit"))?;
+        let mut compiled = self
+            .compiled
+            .take()
+            .ok_or_else(|| not_compiled("fit_with_callbacks"))?;
 
         // (2) 引数検査（モード変更・DataLoader 構築より前。早期 Err は
-        // モード変更前のため復元不要）。
+        // モード変更前のため復元不要——ただし compiled は既に take 済み
+        // なのでここで明示的に書き戻す）。
         if config.epochs == 0 {
             self.compiled = Some(compiled);
             return Err(AutodiffError::InvalidArgument(
-                "Sequential::fit: epochs == 0".to_string(),
+                "Sequential::fit_with_callbacks: epochs == 0".to_string(),
             ));
+        }
+        if validation.is_none()
+            && let Some(offending) = callbacks.iter().find(|cb| cb.requires_validation())
+        {
+            self.compiled = Some(compiled);
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::fit_with_callbacks: callback {offending:?} は \
+                 Monitor::ValLoss を監視するが validation が None"
+            )));
+        }
+
+        // (2.5) EarlyStopping はこの fit 呼び出しの開始時に必ずリセット
+        // する（本メソッド doc「fit 呼び出しをまたぐ状態の扱い」節）。
+        for cb in callbacks.iter_mut() {
+            if let Callback::EarlyStopping(es) = cb {
+                es.reset_for_fit();
+            }
         }
 
         // (3) train モードへ切り替え（Dropout 入りモデルのマスク適用の
@@ -347,7 +477,7 @@ impl Sequential {
         let prev_training = self.training();
         self.set_training(true);
 
-        let result = self.run_fit(&mut compiled, x, y, config);
+        let result = self.run_fit(&mut compiled, x, y, config, validation, callbacks);
 
         // (4) モード復元・compiled の書き戻し（結果を問わず必ず行う。
         // fail-closed: 失敗した fit の後もモデルを「未 compile」状態へ
@@ -357,19 +487,21 @@ impl Sequential {
         result
     }
 
-    /// [`Self::fit`] の本体（compiled を取り出し済みの状態で呼ばれる。
-    /// `&mut self` と `compiled: &mut Compiled` を独立した借用として
-    /// 受け取ることで、`self.bind(&tape)`〈`&self`〉と
-    /// `compiled.optimizer.step`〈`&mut compiled`〉を同時に生かせる）。
+    /// [`Self::fit_with_callbacks`] の本体（compiled を取り出し済みの
+    /// 状態で呼ばれる。`&mut self` と `compiled: &mut Compiled` を
+    /// 独立した借用として受け取ることで、`self.bind(&tape)`〈`&self`〉
+    /// と `compiled.optimizer.step`〈`&mut compiled`〉を同時に生かせる）。
     fn run_fit<T: FitTarget>(
         &mut self,
         compiled: &mut Compiled,
         x: &Tensor<f32>,
         y: &Tensor<T>,
         config: FitConfig,
+        validation: Option<(&Tensor<f32>, &Tensor<T>)>,
+        callbacks: &mut [Callback],
     ) -> Result<History, AutodiffError> {
         let to_invalid_arg = |e: fandhe_ai_tensor_core::data::DataError| {
-            AutodiffError::InvalidArgument(format!("Sequential::fit: {e}"))
+            AutodiffError::InvalidArgument(format!("Sequential::fit_with_callbacks: {e}"))
         };
         let x_dataset = TensorDataset::new(x.clone()).map_err(to_invalid_arg)?;
         let y_dataset = TensorDataset::new(y.clone()).map_err(to_invalid_arg)?;
@@ -385,25 +517,58 @@ impl Sequential {
         // が巨大・`usize::MAX` 近辺等）で panic する（本番経路の panic
         // 禁止。`.claude/rules/security.md` A03 の精神）。`try_reserve_exact`
         // で失敗可能にし、確保失敗は `InvalidArgument` へマッピングして
-        // 呼び出し元（[`Self::fit`]）の既存復元経路（train／eval モード
-        // 巻き戻し・`compiled` 復元）へ返す。
+        // 呼び出し元（[`Self::fit_with_callbacks`]）の既存復元経路
+        // （train／eval モード巻き戻し・`compiled` 復元）へ返す。
         let mut loss = Vec::new();
         loss.try_reserve_exact(config.epochs).map_err(|e| {
             AutodiffError::InvalidArgument(format!(
-                "Sequential::fit: History.loss 用の確保に失敗した \
+                "Sequential::fit_with_callbacks: History.loss 用の確保に失敗した \
                  (epochs={}): {e}",
                 config.epochs
             ))
         })?;
-        let mut history = History { loss };
+        // `val_loss` は `validation.is_some()` のときのみ epochs 分
+        // 確保する（`None` の場合は空のまま。`History::val_loss` doc
+        // 参照）。
+        let mut val_loss = Vec::new();
+        if validation.is_some() {
+            val_loss.try_reserve_exact(config.epochs).map_err(|e| {
+                AutodiffError::InvalidArgument(format!(
+                    "Sequential::fit_with_callbacks: History.val_loss 用の確保に失敗した \
+                     (epochs={}): {e}",
+                    config.epochs
+                ))
+            })?;
+        }
+        let mut lr = Vec::new();
+        lr.try_reserve_exact(config.epochs).map_err(|e| {
+            AutodiffError::InvalidArgument(format!(
+                "Sequential::fit_with_callbacks: History.lr 用の確保に失敗した \
+                 (epochs={}): {e}",
+                config.epochs
+            ))
+        })?;
+        let mut history = History { loss, val_loss, lr };
 
-        for _ in 0..config.epochs {
+        'epochs: for epoch_local in 0..config.epochs {
+            // (1) epoch 開始 LR 同期（[`Self::fit_with_callbacks`] doc
+            // 「1 epoch の処理順序」節）。`LrSchedule` が 1 つもなくても
+            // `history.lr` は常に記録する。
+            for cb in callbacks.iter() {
+                if let Callback::LrSchedule(ls) = cb {
+                    compiled.optimizer.set_lr(ls.lr_for_epoch_begin())?;
+                }
+            }
+            history.lr.push(compiled.optimizer.lr());
+
+            // (2) バッチループ（[`Self::fit`] と同一の演算列）。
             let mut weighted_sum = 0.0f64;
             let mut count = 0usize;
 
             for batch in &loader {
-                let (x_batch, y_batch) = batch
-                    .map_err(|e| AutodiffError::InvalidArgument(format!("Sequential::fit: {e}")))?;
+                let (x_batch, y_batch) = batch.map_err(|e| {
+                    AutodiffError::InvalidArgument(format!("Sequential::fit_with_callbacks: {e}"))
+                })?;
                 let n_batch = x_batch.shape().first().copied().unwrap_or(0);
 
                 let updated = {
@@ -415,7 +580,7 @@ impl Sequential {
                     let loss_var = T::loss_for(compiled.loss, &tape, &pred, &y_batch)?;
                     let loss_scalar = loss_var.to_tensor().get(&[]).ok_or_else(|| {
                         AutodiffError::InvalidArgument(
-                            "Sequential::fit: loss の shape が [] ではない\
+                            "Sequential::fit_with_callbacks: loss の shape が [] ではない\
                              （loss 演算の契約違反）"
                                 .to_string(),
                         )
@@ -435,17 +600,64 @@ impl Sequential {
                 // `drop_last = true` で全バッチが落ちた場合（0 除算を
                 // 黙って NaN にしない。fail-closed）。
                 return Err(AutodiffError::InvalidArgument(
-                    "Sequential::fit: この epoch で処理されたサンプルが 0 件\
+                    "Sequential::fit_with_callbacks: この epoch で処理されたサンプルが 0 件\
                      （drop_last により全バッチが切り捨てられた可能性がある）"
                         .to_string(),
                 ));
             }
             history.loss.push((weighted_sum / count as f64) as f32);
+
+            // (3) validation（[`Self::fit_with_callbacks`] doc「1 epoch
+            // の処理順序」節）。
+            if let Some((x_val, y_val)) = validation {
+                self.set_training(false);
+                let v = self.run_evaluate::<T>(x_val, y_val, config.batch_size, compiled.loss);
+                self.set_training(true);
+                history.val_loss.push(v?);
+            }
+
+            // (4) epoch 末 callbacks（スライス順。いずれかが学習打ち切り
+            // を要求しても、当該 epoch の他 callback はすべて処理して
+            // から打ち切る）。
+            let mut stop = false;
+            for cb in callbacks.iter_mut() {
+                match cb {
+                    Callback::ModelCheckpoint(mc) => {
+                        if let Some(value) = mc.monitor_value_at(&history, epoch_local) {
+                            mc.observe(value, self);
+                        }
+                    }
+                    Callback::LrSchedule(ls) => {
+                        let value = ls.monitor_value_at(&history, epoch_local);
+                        ls.advance(value)?;
+                    }
+                    Callback::EarlyStopping(es) => {
+                        if let Some(value) = es.monitor_value_at(&history, epoch_local)
+                            && es.observe(value, epoch_local, || self.state_dict())
+                        {
+                            stop = true;
+                        }
+                    }
+                }
+            }
+            if stop {
+                break 'epochs;
+            }
+        }
+
+        // fit 終了時: `restore_best_weights`（[`Self::fit_with_callbacks`]
+        // doc「`restore_best_weights`」節）。学習打ち切り・完走いずれの
+        // 終了経路でもここへ到達する。
+        for cb in callbacks.iter_mut() {
+            if let Callback::EarlyStopping(es) = cb
+                && let Some(state) = es.take_restore_state()
+            {
+                self.load_state_dict(state)?;
+            }
         }
 
         Ok(history)
     }
-
     /// `x`／`y` に対する平均損失を評価する（Keras
     /// `model.evaluate(x, y, batch_size=)` 相当。学習は行わない）。
     ///

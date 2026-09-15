@@ -44,14 +44,19 @@
 //! 冒頭 doc・`SequentialVars` 参照）。Keras 風 `compile()`／`fit()`／
 //! `evaluate()` 最小版は [`crate::compat::Sequential::compile`]／
 //! [`crate::compat::Sequential::fit`]／[`crate::compat::Sequential::evaluate`]
-//! （イシュー #1761）で実装済み。
-//! callbacks／`validation_data`／metrics／LR スケジューラ連携は
-//! 兄弟イシュー #1763 へ引き継ぐ。
+//! （イシュー #1761）で実装済み。callbacks
+//! （[`crate::compat::EarlyStopping`]／[`crate::compat::ModelCheckpoint`]／
+//! LR スケジューラ連携）・`validation_data` は
+//! [`crate::compat::Sequential::fit_with_callbacks`]（イシュー #1763・
+//! 親 #1618・`callbacks` モジュール）で実装済み。metrics・
+//! `DataLoader` を直接受ける `fit` 入口は対象外のまま。
 
 mod array;
+mod callbacks;
 mod sequential;
 mod training;
 
 pub use array::{ArrayData, array};
+pub use callbacks::{Callback, EarlyStopping, LrSchedule, ModelCheckpoint, Monitor, MonitorMode};
 pub use sequential::{Sequential, SequentialVars};
 pub use training::{FitConfig, FitTarget, History, Loss, Optimizer};

@@ -3,7 +3,10 @@
 イシュー #1761（親 #1618）。`docs/compat-api-scope.md` §1.2「Keras 風
 `Sequential` の層追加と `compile()`／`fit()`／`evaluate()`／callbacks の
 最小版」行のうち、`compile()`／`fit()`／`evaluate()` 最小版を実装した。
-`add_*` 拡張は兄弟イシュー #1760、callbacks は #1763 が対象。
+`add_*` 拡張は兄弟イシュー #1760。callbacks（`EarlyStopping`／
+`ModelCheckpoint`／LR スケジューラ連携）・`validation_data` は
+兄弟イシュー #1763 で実装済み（設計判断は
+`docs/compat-callbacks-design.md` を参照）。
 
 ## 1. 目的・スコープ
 
@@ -17,12 +20,11 @@ optimizer・`fandhe_ai::data::DataLoader`・`Var::mse_loss`／
 `cross_entropy_loss`）の合成のみで実装した（REQ-9「薄いラッパーに
 徹する」）。
 
-対象外: callbacks（`EarlyStopping`／`ModelCheckpoint`）・
-`validation_data`・metrics（accuracy 等）・LR スケジューラ連携
-（`fandhe_ai::optim` の optimizer は学習率更新 API を持たないため
-本 issue で結線不可）・`DataLoader` を直接受ける `fit` 入口・BCE／
-Huber 等の追加 `Loss` variant・デバイス常駐学習（`DeviceParamStore`）・
-GPU `Tape` 指定・AMP・gradient clipping。いずれも #1763 以降へ
+対象外: metrics（accuracy 等）・`DataLoader` を直接受ける `fit`
+入口・BCE／Huber 等の追加 `Loss` variant・デバイス常駐学習
+（`DeviceParamStore`）・GPU `Tape` 指定・AMP・gradient clipping。
+callbacks・`validation_data`・LR スケジューラ連携は #1763 で実装済み
+（`docs/compat-callbacks-design.md`）。上記の残りはいずれも #1763 以降へ
 引き継ぐ。
 
 ## 2. 公開 API
@@ -124,7 +126,8 @@ Keras `fit` の既定 `shuffle=True` とは異なり、`DataLoaderConfig::new`
 ### 3.7 対象外事項
 
 3.1 冒頭の「目的・スコープ」節を参照。callbacks・`validation_data`・
-metrics・LR スケジューラ連携・`DataLoader` 直接入力は #1763 へ引き継ぐ。
+LR スケジューラ連携は #1763 で実装済み（`docs/compat-callbacks-design.md`）。
+metrics・`DataLoader` 直接入力は引き続き対象外のまま。
 
 ## 4. 正しさの検証
 

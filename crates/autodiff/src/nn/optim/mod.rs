@@ -53,6 +53,19 @@
 //! `nn/mod.rs` の `Module` trait 未定義方針と同様、共通 `Optimizer`
 //! trait の定義は本イシューでは行わない（並行実装される #193/#194 と
 //! 一方的に API を固定しないため。親 #192 の統合時に判断する）。
+//!
+//! **学習率更新 API（イシュー #1763・親 #1618）**: [`AdamW::set_lr`]／
+//! [`adam::Adam::set_lr`]（`crate::optim::Sgd::set_lr` も同型）を追加し、
+//! `LrScheduler::lr_at`（本モジュール）が返す学習率を optimizer へ
+//! 書き戻せるようにした。従来は `lr_scheduler` モジュール冒頭 doc が
+//! 「SGD/AdamW との結線は本モジュールのスコープ外」と明記していた
+//! 欠落を埋める。`set_lr` は `step_count`／moment 推定値／momentum
+//! バッファ等の内部状態を一切リセットしない（PyTorch の
+//! `param_group["lr"] = new_lr` と同じ意味論）。結線自体（epoch ごとに
+//! `lr_at` の返り値で `set_lr` を呼ぶループ）は `facade::compat`
+//! （`Sequential::fit_with_callbacks`／`LrSchedule`）側の責務であり、
+//! 本モジュールはあくまで「optimizer 側に学習率を可変化する入口を
+//! 用意する」ところまでを担う。
 
 mod adagrad;
 mod adam;

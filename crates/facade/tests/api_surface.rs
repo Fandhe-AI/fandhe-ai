@@ -1413,9 +1413,19 @@ fn data_types_are_reachable_via_facade_only() {
 /// 新規公開型（`fandhe_ai::compat::{Loss, Optimizer, FitConfig,
 /// History}`）が `fandhe_ai` のみの import で構築でき、`FitTarget`
 /// が `f32`／`i32` の型境界として機能することを固定する。
+///
+/// callbacks（イシュー #1763）の新規公開型
+/// （`fandhe_ai::compat::{Callback, EarlyStopping, ModelCheckpoint,
+/// LrSchedule, Monitor, MonitorMode}`）が `fandhe_ai` のみの import で
+/// 構築できること・`fandhe_ai::optim::Sgd::set_lr`（LR scheduler 結線
+/// 用に追加した学習率更新 API）が facade 経由で到達可能であることも
+/// 同テストで固定する。
 #[test]
 fn fit_types_are_reachable_via_facade_only() {
-    use fandhe_ai::compat::{FitConfig, FitTarget, History, Loss, Optimizer};
+    use fandhe_ai::compat::{
+        Callback, EarlyStopping, FitConfig, FitTarget, History, Loss, LrSchedule, ModelCheckpoint,
+        Monitor, MonitorMode, Optimizer,
+    };
 
     let _loss_mse = Loss::Mse;
     let _loss_ce = Loss::CrossEntropy;
@@ -1437,4 +1447,39 @@ fn fit_types_are_reachable_via_facade_only() {
     fn assert_is_fit_target<T: FitTarget>() {}
     assert_is_fit_target::<f32>();
     assert_is_fit_target::<i32>();
+
+    // callbacks（イシュー #1763）: 各型が facade のみ import で構築・
+    // 到達可能であることを固定する。
+    let _monitor = Monitor::ValLoss;
+    let _mode = MonitorMode::Min;
+
+    let early_stopping = EarlyStopping::new(3)
+        .monitor(Monitor::Loss)
+        .mode(MonitorMode::Min)
+        .min_delta(0.0)
+        .expect("test fixture: min_delta(0.0) は有効値のはず")
+        .restore_best_weights(false);
+    assert_eq!(early_stopping.stopped_epoch(), None);
+    let _cb_early_stopping = Callback::EarlyStopping(early_stopping);
+
+    let checkpoint = ModelCheckpoint::new()
+        .monitor(Monitor::Loss)
+        .mode(MonitorMode::Min)
+        .save_best_only(true);
+    assert_eq!(checkpoint.best_value(), None);
+    let _cb_checkpoint = Callback::ModelCheckpoint(checkpoint);
+
+    let lr_schedule = LrSchedule::per_epoch(
+        fandhe_ai::optim::StepLr::new(0.1, 1, 0.5)
+            .expect("test fixture: StepLr::new(0.1, 1, 0.5) は有効値のはず"),
+    );
+    assert_eq!(lr_schedule.epoch(), 0);
+    let _cb_lr_schedule = Callback::LrSchedule(lr_schedule);
+
+    // `Sgd::set_lr`（イシュー #1763。LR scheduler 結線用の学習率更新
+    // API）が facade 経由でも到達可能であることを固定する。
+    let mut sgd = fandhe_ai::optim::Sgd::new(fandhe_ai::optim::SgdConfig::new(0.1))
+        .expect("test fixture: SgdConfig::new(0.1) は有効値のはず");
+    sgd.set_lr(0.05)
+        .expect("test fixture: set_lr(0.05) は有効値のはず");
 }
