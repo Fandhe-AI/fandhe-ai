@@ -1128,3 +1128,54 @@ reshape してから `Var::conv2d` へ委譲する薄いラッパーで新規 `O
   parity 実測（#1771）は対象外のまま。親 #1644 は全 sub 完了で
   close する方針のため、本 PR マージ後も実測が未完である旨を close
   判断の材料としてユーザーへ委ねる。
+
+### #1770（`nn::Conv1d`／`Conv2d` 層・`compat::Sequential` 接続）
+
+§8「`nn` 配線案」の実装（親 #1645）。
+
+- **実装ファイル**: `crates/autodiff/src/nn/conv.rs`（新設。`Conv2d`／
+  `Conv2dVars`／`Conv1d`／`Conv1dVars`）・`crates/autodiff/src/nn/
+  module.rs`（`Module` trait への `as_conv2d`／`as_conv2d_mut`／
+  `as_conv1d`／`as_conv1d_mut`〈defaulted・既定 `None`〉フック・
+  `impl Module for Conv2d`／`Conv1d`）・`crates/facade/src/compat/
+  sequential.rs`（`add_conv2d`／`add_conv1d`・学習経路〈`bind`／
+  `trainable_parameters`／`SequentialVars::forward`／`trainable_vars`／
+  `trainable_grads`／`apply_parameters`〉の Conv 対応拡張・
+  `contains_conv_layer` によるデバイス常駐経路 3 入口の fail-closed
+  ガード）。
+- **`Conv1d` の内部表現**: 当初案（内部に `Conv2d` を保持し `weight()`
+  を都度 reshape して返す）は `weight()` が所有値 `Tensor<f32>` しか
+  返せず、`compat::Sequential::trainable_parameters`（`Vec<&Tensor<f32>>`
+  契約）と整合しないため撤回した。最終実装は `weight`（rank 3）を
+  `Conv1d` 自身が直接保持し、`forward`／`forward_host` 内部でのみ
+  一時的に rank 4 へ reshape する（`Var::conv1d` と同じ演算列を再現）。
+- **`nn` 配線案からの変更点**: 設計時点（§8）は `compat::Sequential`
+  が `linears: Vec<LinearVars>` のみを保持する旧実装を前提としていた
+  が、実装着手時点では #1759（親 #1617）により `compat::Sequential` は
+  汎用 `nn::Sequential`（`inner`）への薄いラッパーへ再構成済みだった。
+  このため `Sequential::forward`／`predict`（推論経路）は `Module::
+  forward`／`forward_host` の多態 dispatch を通じて **無変更のまま**
+  Conv 層へ対応した。変更が必要だったのは学習経路（`bind`／
+  `trainable_parameters`／`SequentialVars::forward`／`trainable_vars`／
+  `trainable_grads`／`apply_parameters`）のみで、いずれも「`self.inner.
+  layers()` を層順に走査し、層種別ごとに対応するカーソル
+  （`linears`／`conv2ds`／`conv1ds`）から 1 件ずつ消費する」という
+  `Linear` 単独時と同型の設計を層種別 3 つへ一般化する形で対応した。
+- **デバイス常駐経路**: `forward_from_flat_leaves`／`build_device_
+  chain_steps` は `as_linear()` のみを消費する走査のため、
+  `trainable_parameters()` が Conv 層を含むようになった状態で
+  Conv 層を含む `Sequential` に対し `init_device_param_store` を無条件
+  で許すと、後段の forward で「leaves の要件超過」という迂遠な
+  エラーへ到達してしまう。`contains_conv_layer()` による入口ガード
+  （`init_device_param_store`／`forward_resident`／`predict_resident`
+  の 3 箇所。`BackendError::Unsupported`）で明示的に fail-closed 拒否
+  する設計とした（A04「安全でない設計」対策）。
+- **対象外**: Flatten 層（`nn::Flatten`／`compat::Sequential::
+  add_flatten`）は §5 手続き未了のため本 PR では追加しない（facade
+  経由で Conv 出力を `Linear` へ接続する経路は autodiff 側テストの
+  `Var::flatten` 直接呼び出しでのみ検証）。Conv 層のデバイス常駐
+  経路・`gemm_bias_act` epilogue 融合（Conv→ReLU）・
+  `padding_mode='same'`・ConvTranspose・pooling との組合せは対象外の
+  まま。CUDA（GB10）／Metal（M4 Max）実機 parity・実測は #1771 へ
+  引き継ぐ（`crates/facade/tests/nn_conv_backend_parity.rs` に
+  `#[ignore]` テストのスケルトンを用意済み）。

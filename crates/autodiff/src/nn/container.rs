@@ -33,12 +33,13 @@
 //! `fandhe_ai_facade::compat::sequential::Sequential` の学習契約
 //! （`bind`／`trainable_parameters`／`apply_parameters`・
 //! `init_device_param_store` 等のデバイス常駐経路）は最上位の
-//! `as_linear()` のみを見る。本モジュールの `Sequential`／
-//! `ModuleList` をネストして構築した `Box<dyn Module>` を compat 層へ
-//! 積んだ場合、ネスト内部の `Linear` は `as_linear()` が `None` を
-//! 返すため学習可能パラメータとして認識されない。ただし facade は
-//! `ModuleList`／`Sequential`（本モジュール）を構築する経路を公開して
-//! いないため、この制限は facade 経由では到達不能である。
+//! `as_linear()`／`as_conv2d()`／`as_conv1d()`（イシュー #1770）のみを
+//! 見る。本モジュールの `Sequential`／`ModuleList` をネストして構築
+//! した `Box<dyn Module>` を compat 層へ積んだ場合、ネスト内部の
+//! `Linear`／`Conv2d`／`Conv1d` は上記フックが `None` を返すため学習
+//! 可能パラメータとして認識されない。ただし facade は `ModuleList`／
+//! `Sequential`（本モジュール）を構築する経路を公開していないため、
+//! この制限は facade 経由では到達不能である。
 
 use crate::error::AutodiffError;
 use crate::nn::module::Module;
