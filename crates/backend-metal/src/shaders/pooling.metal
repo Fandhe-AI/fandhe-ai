@@ -59,6 +59,9 @@
 // overflow するため。codex-review 指摘・#1885。同関数の doc comment
 // 参照）。
 
+#include <metal_stdlib>
+using namespace metal;
+
 struct PoolDims {
     uint n;
     uint c;
