@@ -1132,7 +1132,7 @@ pub(crate) fn nll_loss(
     reduction: crate::var::Reduction,
 ) -> Result<Tensor<f32>, ShapeError> {
     let shape = input.shape().to_vec();
-    if shape.iter().any(|&d| d == 0) {
+    if shape.contains(&0) {
         // 空バッチ契約（関数冒頭 doc 参照）。`outer`／`inner` の部分積
         // 計算そのものを回避する。
         return Ok(build_tensor(vec![0.0], &[]));
