@@ -257,6 +257,8 @@ pub(crate) mod batch_state;
 // "macos")` を付けず、Linux（本実装環境・CI）でも単体テストが回る
 // ようにする（`pool_pending.rs` モジュール冒頭コメント参照）。
 #[cfg(target_os = "macos")]
+pub mod bce;
+#[cfg(target_os = "macos")]
 pub mod buffer;
 #[cfg(target_os = "macos")]
 pub mod context;
@@ -504,6 +506,8 @@ pub mod constant_pad_model;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
 #[cfg(target_os = "macos")]
+pub mod huber;
+#[cfg(target_os = "macos")]
 pub mod index_buffer;
 pub mod interpolate_model;
 #[cfg(target_os = "macos")]
@@ -643,6 +647,8 @@ mod typed_bf16_probe_diag_tests;
 unsafe extern "C" {}
 
 #[cfg(target_os = "macos")]
+pub use bce::MetalBce;
+#[cfg(target_os = "macos")]
 pub use buffer::MetalBuffer;
 #[cfg(target_os = "macos")]
 pub use context::MetalContext;
@@ -660,6 +666,8 @@ pub use gather_scatter::MetalGatherScatter;
 pub use gemm::{GemmVariant, MetalGemm, SplitKFallbackReason, SplitKRoute};
 #[cfg(target_os = "macos")]
 pub use half_buffer::MetalHalfBuffer;
+#[cfg(target_os = "macos")]
+pub use huber::MetalHuber;
 #[cfg(target_os = "macos")]
 pub use layer_norm::MetalLayerNorm;
 #[cfg(target_os = "macos")]

@@ -38,12 +38,13 @@
 use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
-    GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
-    MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors,
-    Tensor, UnaryElementwiseOp, gather_out_shape, interpolate_out_shape, one_hot_out_shape,
-    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    Activation, BackendOps, BceKind, BinaryElementwiseOp, DispatchFailureCell, FusionPlan,
+    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, LstmPointwiseOutput,
+    MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
+    ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, gather_out_shape,
+    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -2821,7 +2822,7 @@ impl BackendOps for MetalBackendOps {
     }
 
     /// `BackendOps::interpolate` の Metal 実装（イシュー #1757）。
-    /// [`interpolate_out_shape`] で `input`／`size` の shape を再検査
+    /// [`fandhe_ai_tensor_core::interpolate_out_shape`] で `input`／`size` の shape を再検査
     /// してから `interpolate.rs::MetalInterpolate::run_nearest_f32`
     /// へ委譲する（`gather`／`scatter` と同じ二重検査方針）。
     /// interpolate カーネルは gather／scatter と異なり座標配列を
@@ -2837,21 +2838,21 @@ impl BackendOps for MetalBackendOps {
         mode: InterpolateMode,
     ) -> Result<Tensor<f32>, BackendError> {
         match mode {
-            InterpolateMode::Nearest => {}
+            InterpolateMode::Nearest | InterpolateMode::Bilinear { .. } => {}
             _ => {
                 return Err(BackendError::Unsupported(format!(
                     "MetalBackendOps::interpolate: 未対応の InterpolateMode variant {mode:?}"
                 )));
             }
         }
-        let out_shape =
-            interpolate_out_shape(input.shape(), size).map_err(BackendError::ShapeMismatch)?;
+        let out_shape = interpolate_out_shape_for_mode(input.shape(), size, mode)
+            .map_err(BackendError::ShapeMismatch)?;
         let in_shape = input.shape().to_vec();
 
         // 出力が空なら `input` の shape に依らず結果は必ず空
         // （`gather`／`scatter` の同型早期リターンと同じ理由。空間軸は
-        // `interpolate_out_shape` により非 0 が保証されるため、ここで
-        // 0 を含みうるのは先頭の残り軸のみ）。
+        // `interpolate_out_shape_for_mode` により非 0 が保証されるため、
+        // ここで 0 を含みうるのは先頭の残り軸のみ）。
         if out_shape.contains(&0) {
             return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
         }
@@ -2871,9 +2872,22 @@ impl BackendOps for MetalBackendOps {
         let ctx = context_cache::cached_context().map_err(map_metal_error)?;
         let ip = context_cache::cached_interpolate(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
-        let out = ip
-            .run_nearest_f32(&ctx, input_slice, &in_shape, size, &out_shape)
-            .map_err(map_interpolate_error)?;
+        let out = match mode {
+            InterpolateMode::Nearest => ip
+                .run_nearest_f32(&ctx, input_slice, &in_shape, size, &out_shape)
+                .map_err(map_interpolate_error)?,
+            InterpolateMode::Bilinear { align_corners } => ip
+                .run_bilinear_f32(
+                    &ctx,
+                    input_slice,
+                    &in_shape,
+                    size,
+                    &out_shape,
+                    align_corners,
+                )
+                .map_err(map_interpolate_error)?,
+            _ => unreachable!("checked above"),
+        };
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -3147,6 +3161,161 @@ impl BackendOps for MetalBackendOps {
             .run_mse_backward_f32(&ctx, pred_slice, target_slice, scale)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::huber_loss`] の Metal 実装
+    /// （イシュー #1739）。[`Self::mse_loss`] と同じ構成（専用融合カーネル
+    /// `crate::huber::MetalHuber` へのディスパッチ・`factor` 計算・未知
+    /// `MseReduction` variant の `Unsupported` 拒否）。
+    fn huber_loss(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: HuberKind,
+        delta: f32,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_owned = pred.contiguous();
+        let target_owned = target.contiguous();
+        let pred_slice = pred_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("huber_loss: pred not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("huber_loss: target not contiguous".into())
+        })?;
+        let numel = pred_slice.len();
+        let factor = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    1.0
+                } else {
+                    1.0 / numel as f32
+                }
+            }
+            MseReduction::Sum => 1.0,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "huber_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let huber = context_cache::cached_huber(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let value = huber
+            .run_huber_loss_f32(&ctx, pred_slice, target_slice, kind, delta, factor)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::huber_loss_backward`] の Metal
+    /// 実装（イシュー #1739）。`dTarget = −dPred` は呼び出し元
+    /// （`fandhe_ai_autodiff::grad::vjp`）がホスト側で符号反転して得る
+    /// 契約のため、本メソッドは `dPred` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::huber_loss_backward` doc 参照。
+    /// [`Self::mse_loss_backward`] と同型）。
+    fn huber_loss_backward(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: HuberKind,
+        delta: f32,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let pred_owned = pred.contiguous();
+        let target_owned = target.contiguous();
+        let pred_slice = pred_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("huber_loss_backward: pred not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("huber_loss_backward: target not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let huber = context_cache::cached_huber(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = huber
+            .run_huber_backward_f32(&ctx, pred_slice, target_slice, kind, delta, scale)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::bce_loss`] の Metal 実装
+    /// （イシュー #1737。`mse_loss` と同型の委譲構成）。
+    fn bce_loss(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: BceKind,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_owned = input.contiguous();
+        let target_owned = target.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss: input not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss: target not contiguous".into())
+        })?;
+        let numel = input_slice.len();
+        let factor = match reduction {
+            MseReduction::Mean => {
+                if numel == 0 {
+                    1.0
+                } else {
+                    1.0 / numel as f32
+                }
+            }
+            MseReduction::Sum => 1.0,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "bce_loss: unsupported MseReduction variant {reduction:?}"
+                )));
+            }
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let bce = context_cache::cached_bce(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let value = bce
+            .run_bce_loss_f32(&ctx, input_slice, target_slice, kind, factor)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::bce_loss_backward`] の Metal
+    /// 実装（イシュー #1737）。`dTarget` は呼び出し元
+    /// （`fandhe_ai_autodiff::grad::vjp`）がホスト側の逐次 map で計算
+    /// する契約のため、本メソッドは `dInput` のみを計算して返す
+    /// （`backend_ops.rs::BackendOps::bce_loss_backward` doc 参照）。
+    fn bce_loss_backward(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: BceKind,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let input_owned = input.contiguous();
+        let target_owned = target.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss_backward: input not contiguous".into())
+        })?;
+        let target_slice = target_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("bce_loss_backward: target not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let bce = context_cache::cached_bce(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = bce
+            .run_bce_backward_f32(&ctx, input_slice, target_slice, kind, scale)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, input.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::rmsnorm`] の Metal 実装

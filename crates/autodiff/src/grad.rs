@@ -30,8 +30,8 @@
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError,
-    Tensor, VectorNormOrd, row_norm_layout,
+    Activation, BackendError, BackendOps, BceKind, CastElement, HuberKind, ScalarBinaryOp,
+    ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -450,6 +450,100 @@ pub(crate) fn vjp(
                 }
             };
             vec![(pred, dpred), (target, dtarget)]
+        }
+        Op::HuberLoss {
+            pred,
+            target,
+            kind,
+            delta,
+            reduction,
+        } => {
+            let pred_val = materialize_fallible(nodes, ops, pred)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = pred_val.numel();
+            let (dpred, dtarget) = if n == 0 {
+                // `huber_loss_vjp` と同じゼロ除算回避（`Op::MseLoss`
+                // 分岐と同じ理由で `scale` 計算前に早期 return）。
+                let zeros = build_tensor(vec![0f32; 0], pred_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = huber_loss_scale(g_value, n, reduction);
+                match ops.huber_loss_backward(pred_val, target_val, kind, delta, scale) {
+                    Ok(dpred) => {
+                        if dpred.shape() != pred_val.shape() {
+                            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                    lhs: dpred.shape().to_vec(),
+                                    rhs: pred_val.shape().to_vec(),
+                                },
+                            )));
+                        }
+                        // `dTarget = −dPred`（`Op::MseLoss` 分岐と同じ理由。
+                        // `backend_ops.rs::BackendOps::huber_loss_backward`
+                        // doc 参照）。
+                        let dtarget_data: Vec<f32> =
+                            dense_vec(&dpred).iter().map(|&v| -v).collect();
+                        let dtarget = build_tensor(dtarget_data, dpred.shape());
+                        (dpred, dtarget)
+                    }
+                    Err(BackendError::Unsupported(_)) => {
+                        huber_loss_vjp(pred_val, target_val, upstream, kind, delta, reduction)
+                    }
+                    Err(other) => return Err(AutodiffError::Backend(other)),
+                }
+            };
+            vec![(pred, dpred), (target, dtarget)]
+        }
+        Op::BceLoss {
+            input,
+            target,
+            kind,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = input_val.numel();
+            let (dinput, dtarget) = if n == 0 {
+                // `mse_loss` の `Op::MseLoss` 分岐と同じゼロ除算回避
+                // （`scale` 計算前に早期 return）。
+                let zeros = build_tensor(vec![0f32; 0], input_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+                let scale = bce_loss_scale(g_value, n, reduction);
+                match ops.bce_loss_backward(input_val, target_val, kind, scale) {
+                    Ok(dinput) => {
+                        if dinput.shape() != input_val.shape() {
+                            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                    lhs: dinput.shape().to_vec(),
+                                    rhs: input_val.shape().to_vec(),
+                                },
+                            )));
+                        }
+                        // `dTarget` は `dInput` と対称な単純合成
+                        // （符号反転）ではないため、`BackendOps::
+                        // bce_loss_backward` の doc 契約どおりホスト側の
+                        // 逐次 map で求める（新規 GPU カーネル起動・
+                        // D2H を増やさない）。
+                        let input_data = dense_vec(input_val);
+                        let target_data = dense_vec(target_val);
+                        let dtarget_data: Vec<f32> = input_data
+                            .iter()
+                            .zip(target_data.iter())
+                            .map(|(&p, &y)| scale * eval::bce_elem_grad_target(p, y, kind))
+                            .collect();
+                        let dtarget = build_tensor(dtarget_data, dinput.shape());
+                        (dinput, dtarget)
+                    }
+                    Err(BackendError::Unsupported(_)) => {
+                        bce_loss_vjp(input_val, target_val, kind, upstream, reduction)
+                    }
+                    Err(other) => return Err(AutodiffError::Backend(other)),
+                }
+            };
+            vec![(input, dinput), (target, dtarget)]
         }
         Op::CrossEntropyLoss {
             logits,
@@ -1608,6 +1702,85 @@ pub(crate) fn vjp(
                         .map_err(AutodiffError::Shape)?;
                     vec![(input, d_input)]
                 }
+                // `Var::interpolate`（`Bilinear`。イシュー #1762）。
+                // 各出力位置は 4 個の入力近傍への重み付き寄与を持つため
+                // （`Nearest` の 1 対 1 対応とは異なる）、scatter_add の
+                // index／src を「出力位置 × 4 コーナー」の平坦化 2 階
+                // テンソル（shape `[outer, sp_out * 4]`）として構築する。
+                // コーナー順は forward と共有する単一情報源
+                // （`bilinear_src_index_and_weight_map`。`tensor-core::
+                // interpolate::bilinear_src_coord` を呼ぶ）が固定する
+                // `(y0,x0),(y0,x1),(y1,x0),(y1,x1)` で、scatter_add は
+                // 出力位置 major・コーナー minor の逐次和として決定的に
+                // 集約する（`ScatterReduce::Add` の決定的集約契約。
+                // `.claude/rules/coding-rust.md`）。重複コーナー
+                // （境界・`in_size==1`）はそのまま複数回加算される
+                // （forward の重みの和が 1 のまま保たれるのと対）。
+                fandhe_ai_tensor_core::InterpolateMode::Bilinear { align_corners } => {
+                    if sp_in_numel > i32::MAX as usize {
+                        return Err(AutodiffError::InvalidArgument(format!(
+                            "Op::Interpolate の VJP: 空間軸要素数 {sp_in_numel} が \
+                             i32::MAX を超え scatter_add の index dtype (i32) に \
+                             収まらない"
+                        )));
+                    }
+                    // `sp_out_numel * 4`（各出力位置あたり 4 コーナー）・
+                    // `outer * (sp_out_numel * 4)`（`index`／`src` の
+                    // 実際の確保長）は `nearest_src_index_map` と同じ
+                    // 理由で `checked_mul` により独立に検査する（巨大な
+                    // `size` に対する capacity overflow panic 防止。
+                    // `.claude/rules/coding-rust.md`）。
+                    let sp_out_x4 = sp_out_numel
+                        .checked_mul(4)
+                        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+                    outer
+                        .checked_mul(sp_out_x4)
+                        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+
+                    let (index_row, weight_row) = bilinear_src_index_and_weight_map(
+                        &input_shape,
+                        &out_shape,
+                        spatial_start,
+                        align_corners,
+                    );
+
+                    let upstream2d = upstream
+                        .contiguous()
+                        .reshape(&[outer, sp_out_numel])
+                        .map_err(AutodiffError::Shape)?;
+                    let upstream_data = eval::dense_vec(&upstream2d);
+
+                    let mut index_data = Vec::with_capacity(outer * sp_out_x4);
+                    let mut src_data = Vec::with_capacity(outer * sp_out_x4);
+                    for o in 0..outer {
+                        index_data.extend_from_slice(&index_row);
+                        let row_base = o * sp_out_numel;
+                        for p in 0..sp_out_numel {
+                            let u = upstream_data[row_base + p];
+                            for k in 0..4 {
+                                src_data.push(u * weight_row[p * 4 + k]);
+                            }
+                        }
+                    }
+                    let index = eval::build_index_tensor(index_data, &[outer, sp_out_x4]);
+                    let src2d =
+                        Tensor::new(src_data, &[outer, sp_out_x4]).map_err(AutodiffError::Shape)?;
+                    let zeros2d =
+                        Tensor::zeros(&[outer, sp_in_numel]).map_err(AutodiffError::Shape)?;
+                    let d_input2d = scatter_with_fallback(
+                        ops,
+                        &zeros2d,
+                        1,
+                        &index,
+                        &src2d,
+                        ScatterReduce::Add,
+                        &[outer, sp_in_numel],
+                    )?;
+                    let d_input = d_input2d
+                        .reshape(&input_shape)
+                        .map_err(AutodiffError::Shape)?;
+                    vec![(input, d_input)]
+                }
                 // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
                 // 側で将来 variant を追加しうる。`Op::Scatter` VJP の
                 // 未知 `ScatterReduce` variant 分岐と同型の fail-closed
@@ -2369,6 +2542,72 @@ fn validate_unique_output(v: &Tensor<f32>, numel: usize) -> Result<(), AutodiffE
     }
 }
 
+/// [`Var::cast`] が使う「バックエンド実装 → フォールバック」ヘルパー
+/// （イシュー #1750）。[`unique_with_fallback`] と同型の 2 段構成だが、
+/// dtype ごとの分岐は [`CastElement::backend_cast_from_f32`] へ委譲
+/// する（型パラメータ trait 1 本に集約する `CastOps` の設計。
+/// `docs/tensor-core-cast-design.md` 参照）。
+///
+/// `ops.cast_ops()` が `None`（accessor 未対応）の場合と、`Some` だが
+/// 個別方向が [`BackendError::Unsupported`] を返す場合の両方で、
+/// ホスト参照実装（[`fandhe_ai_tensor_core::cast_from_f32`]）へ
+/// フォールバックする（判定迂回経路を作らない。
+/// `.claude/rules/security.md` A08）。要素数積のオーバーフロー検査
+/// は `tensor_core::cast::cast_from_f32` 内部（`checked_numel_for::<T>`）
+/// で完結しており、`unique_with_fallback` と異なり呼び出し元での
+/// 重複検査は不要（`CpuBackendOps::cast_ops` の実装もこの検査を経由
+/// する薄い委譲。`crates/backend-cpu/src/cast.rs` 参照）。
+pub(crate) fn cast_from_f32_with_fallback<T: CastElement>(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+) -> Result<Tensor<T>, AutodiffError> {
+    let result = match ops.cast_ops() {
+        Some(cast_ops) => match T::backend_cast_from_f32(cast_ops, x) {
+            Ok(v) => Ok(v),
+            Err(BackendError::Unsupported(_)) => Ok(fandhe_ai_tensor_core::cast_from_f32::<T>(x)?),
+            Err(other) => Err(AutodiffError::Backend(other)),
+        },
+        None => Ok(fandhe_ai_tensor_core::cast_from_f32::<T>(x)?),
+    };
+    let v = result?;
+    if v.shape() != x.shape() {
+        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+            ShapeError::ShapeMismatch {
+                lhs: v.shape().to_vec(),
+                rhs: x.shape().to_vec(),
+            },
+        )));
+    }
+    Ok(v)
+}
+
+/// [`Tape::var_from`] が使う「バックエンド実装 → フォールバック」
+/// ヘルパー（イシュー #1750）。[`cast_from_f32_with_fallback`] の
+/// 逆方向で、同じフォールバック規則・shape 事後検査を適用する。
+pub(crate) fn cast_to_f32_with_fallback<T: CastElement>(
+    ops: &dyn BackendOps,
+    x: &Tensor<T>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let result = match ops.cast_ops() {
+        Some(cast_ops) => match T::backend_cast_to_f32(cast_ops, x) {
+            Ok(v) => Ok(v),
+            Err(BackendError::Unsupported(_)) => Ok(fandhe_ai_tensor_core::cast_to_f32::<T>(x)?),
+            Err(other) => Err(AutodiffError::Backend(other)),
+        },
+        None => Ok(fandhe_ai_tensor_core::cast_to_f32::<T>(x)?),
+    };
+    let v = result?;
+    if v.shape() != x.shape() {
+        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+            ShapeError::ShapeMismatch {
+                lhs: v.shape().to_vec(),
+                rhs: x.shape().to_vec(),
+            },
+        )));
+    }
+    Ok(v)
+}
+
 /// [`Var::interpolate`] が使う「バックエンド実装 → フォールバック」
 /// ヘルパー（イシュー #1757）。[`gather_with_fallback`] と同型:
 /// `ops.interpolate` → `Unsupported` のときのみホスト参照実装
@@ -2399,6 +2638,9 @@ pub(crate) fn interpolate_with_fallback(
         Err(BackendError::Unsupported(_)) => match mode {
             fandhe_ai_tensor_core::InterpolateMode::Nearest => {
                 eval::interpolate_nearest(input, size).map_err(AutodiffError::Shape)
+            }
+            fandhe_ai_tensor_core::InterpolateMode::Bilinear { align_corners } => {
+                eval::interpolate_bilinear(input, size, align_corners).map_err(AutodiffError::Shape)
             }
             // `InterpolateMode` は `#[non_exhaustive]`（`tensor-core`
             // 側で将来 variant を追加しうる。`ScatterReduce` の
@@ -2461,6 +2703,81 @@ pub(crate) fn nearest_src_index_map(
         data.extend_from_slice(&row);
     }
     eval::build_index_tensor(data, &[outer, sp_out_numel])
+}
+
+/// [`Op::Interpolate`]（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Bilinear`]）の VJP が使う scatter_add index／重み構築（イシュー
+/// #1762）。forward のホスト参照実装（`eval::interpolate_bilinear`）と
+/// **同じ座標式**（`fandhe_ai_tensor_core::interpolate::
+/// bilinear_src_coord`。単一情報源）を使い、出力の各空間位置に対応する
+/// 4 個の入力近傍（flat 添字。`sp_in` 軸内）とその補間重みを求める。
+///
+/// 戻り値は「出力位置 1 個あたり 4 コーナー」を平坦化した行
+/// （長さ `sp_out * 4`。コーナー順は `(y0,x0),(y0,x1),(y1,x0),(y1,x1)`
+/// 固定——`nearest_src_index_map` と同様、全 `outer` 行が同一パターン
+/// を持つため呼び出し元がこの行を複製して 2 階テンソルを構築する）:
+/// - `.0`（`index_row: Vec<i32>`）: `sp_in` 内の flat 添字
+/// - `.1`（`weight_row: Vec<f32>`）: 対応する補間重み（`upstream` との
+///   乗算は呼び出し元が行う——本関数は `outer` に依存しないため）
+///
+/// `in_shape`／`out_shape` の空間軸は `spatial_start..` の**ちょうど 2
+/// 軸**（`(H, W)`。呼び出し元 `vjp` の `Op::Interpolate` 腕が
+/// `interpolate_out_shape_for_mode` 経由で事前保証済み——`Var::
+/// interpolate` が forward 時点で拒否するため `Bilinear` の `Op` は
+/// 必ず 2 空間軸を持つ）。
+pub(crate) fn bilinear_src_index_and_weight_map(
+    in_shape: &[usize],
+    out_shape: &[usize],
+    spatial_start: usize,
+    align_corners: bool,
+) -> (Vec<i32>, Vec<f32>) {
+    debug_assert_eq!(
+        out_shape.len() - spatial_start,
+        2,
+        "bilinear_src_index_and_weight_map: caller must guarantee exactly 2 spatial axes"
+    );
+    let sp_in = &in_shape[spatial_start..];
+    let sp_out = &out_shape[spatial_start..];
+    let sp_out_numel: usize = sp_out.iter().product();
+    let sp_in_strides = eval::row_major_strides(sp_in);
+    let stride_h = sp_in_strides[0];
+    let stride_w = sp_in_strides[1];
+    let (in_h, in_w) = (sp_in[0], sp_in[1]);
+    let (out_h, out_w) = (sp_out[0], sp_out[1]);
+    let scale_h = fandhe_ai_tensor_core::bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = fandhe_ai_tensor_core::bilinear_scale(in_w, out_w, align_corners);
+
+    let mut index_row = vec![0i32; sp_out_numel * 4];
+    let mut weight_row = vec![0f32; sp_out_numel * 4];
+    for p in 0..sp_out_numel {
+        // `sp_out` はちょうど 2 軸のため flat 添字は `(y, x)` へ直接
+        // 分解できる（`eval::unravel` の 2 軸特殊化——ここでは
+        // `p / out_w`／`p % out_w` で十分）。
+        let y = p / out_w;
+        let x = p % out_w;
+        let cy = fandhe_ai_tensor_core::bilinear_src_coord(y, in_h, scale_h, align_corners);
+        let cx = fandhe_ai_tensor_core::bilinear_src_coord(x, in_w, scale_w, align_corners);
+        let l0x = 1.0 - cx.lambda1;
+        let l0y = 1.0 - cy.lambda1;
+        // コーナー順固定: (y0,x0),(y0,x1),(y1,x0),(y1,x1)（forward の
+        // 添字読み出し順・`bilinear_blend` の引数順と一致させる）。
+        let corners = [
+            (cy.i0, cx.i0, l0y * l0x),
+            (cy.i0, cx.i1, l0y * cx.lambda1),
+            (cy.i1, cx.i0, cy.lambda1 * l0x),
+            (cy.i1, cx.i1, cy.lambda1 * cx.lambda1),
+        ];
+        for (k, &(iy, ix, w)) in corners.iter().enumerate() {
+            let pos = iy * stride_h + ix * stride_w;
+            // `pos` は `sp_in` 内の flat 添字。`i32` への切り詰めは
+            // 呼び出し元（`vjp` の `Op::Interpolate` Bilinear 分岐）が
+            // 事前に `sp_in_numel <= i32::MAX` を検査済みのため安全
+            // （`nearest_src_index_map` の同種コメントと同じ契約）。
+            index_row[p * 4 + k] = pos as i32;
+            weight_row[p * 4 + k] = w;
+        }
+    }
+    (index_row, weight_row)
 }
 
 /// [`Op::Scatter`]（`reduce = Overwrite`）の VJP 補助（イシュー
@@ -4350,6 +4667,105 @@ fn mse_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
     match reduction {
         Reduction::Mean => g_value * 2.0 / n as f32,
         Reduction::Sum => g_value * 2.0,
+    }
+}
+
+/// `HuberLoss{pred, target, kind, delta, reduction}` の VJP:
+/// `dPred = scale · grad_elem(d)`（`d = pred − target`。`grad_elem` は
+/// `eval::huber_elem_grad`）、`dTarget = −dPred`（イシュー #1739。
+/// `mse_loss_vjp` と同型）。`n == 0` は mean・sum ともゼロ除算を避け
+/// zeros を返す。
+fn huber_loss_vjp(
+    pred: &Tensor<f32>,
+    target: &Tensor<f32>,
+    g: &Tensor<f32>,
+    kind: HuberKind,
+    delta: f32,
+    reduction: Reduction,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let shape = pred.shape().to_vec();
+    let n = pred.numel();
+    if n == 0 {
+        let zeros = build_tensor(vec![0f32; 0], &shape);
+        return (zeros.clone(), zeros);
+    }
+    let g_value = dense_vec(g).first().copied().unwrap_or(0.0);
+    let pred_data = dense_vec(pred);
+    let target_data = dense_vec(target);
+    let scale = huber_loss_scale(g_value, n, reduction);
+    let dpred_data: Vec<f32> = pred_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&p, &t)| scale * eval::huber_elem_grad(p - t, kind, delta))
+        .collect();
+    let dtarget_data: Vec<f32> = dpred_data.iter().map(|&v| -v).collect();
+    let dpred = build_tensor(dpred_data, &shape);
+    let dtarget = build_tensor(dtarget_data, &shape);
+    (dpred, dtarget)
+}
+
+/// `huber_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の
+/// `Op::HuberLoss` 分岐）の双方が使う `scale` 算出の共有ロジック
+/// （`mse_loss_scale` と同型。イシュー #1739）:
+/// `dPred = scale·grad_elem(pred−target)`（`Mean` は `g/n`、`Sum` は
+/// `g`。`MseLoss` と異なり係数 2 は付かない——`grad_elem` 自体が
+/// `d(0.5·d²)/dd = d` を含むため）。
+fn huber_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
+    match reduction {
+        Reduction::Mean => g_value / n as f32,
+        Reduction::Sum => g_value,
+    }
+}
+
+/// `BceLoss{input, target, kind, reduction}` のホスト参照 VJP（`ops.
+/// bce_loss_backward` が `Unsupported` のときのみ呼ばれる。イシュー
+/// #1737）。`eval::bce_elem_grad_input`／`bce_elem_grad_target`
+/// （forward 要素式 `eval::bce_elem_loss` と対をなす意味論の正）に
+/// `bce_loss_scale` を乗じて `dInput`／`dTarget` を構成する。`n == 0`
+/// は `mse_loss_vjp` と同じくゼロ除算を避け zeros を返す。
+fn bce_loss_vjp(
+    input: &Tensor<f32>,
+    target: &Tensor<f32>,
+    kind: BceKind,
+    g: &Tensor<f32>,
+    reduction: Reduction,
+) -> (Tensor<f32>, Tensor<f32>) {
+    let shape = input.shape().to_vec();
+    let n = input.numel();
+    if n == 0 {
+        let zeros = build_tensor(vec![0f32; 0], &shape);
+        return (zeros.clone(), zeros);
+    }
+    let g_value = dense_vec(g).first().copied().unwrap_or(0.0);
+    let input_data = dense_vec(input);
+    let target_data = dense_vec(target);
+    let scale = bce_loss_scale(g_value, n, reduction);
+    let dinput_data: Vec<f32> = input_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&p, &y)| scale * eval::bce_elem_grad_input(p, y, kind))
+        .collect();
+    let dtarget_data: Vec<f32> = input_data
+        .iter()
+        .zip(target_data.iter())
+        .map(|(&p, &y)| scale * eval::bce_elem_grad_target(p, y, kind))
+        .collect();
+    let dinput = build_tensor(dinput_data, &shape);
+    let dtarget = build_tensor(dtarget_data, &shape);
+    (dinput, dtarget)
+}
+
+/// `mse_loss_vjp`（ホスト参照実装）と融合カーネル経路（`vjp()` の
+/// `Op::BceLoss` 分岐。イシュー #1737）の双方が使う `scale` 算出の
+/// 共有ロジック: `dInput = scale·bce_elem_grad_input(..)`（`Mean` は
+/// `g/n`、`Sum` は `g`。`mse_loss_scale` の `2` 倍係数〈二乗誤差由来〉
+/// は BCE には現れないため異なる式）。`BackendOps::bce_loss_backward`
+/// の呼び出し元がこのスケールを事前計算して渡す契約
+/// （`backend_ops.rs` doc 参照）。
+fn bce_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
+    match reduction {
+        Reduction::Mean => g_value / n as f32,
+        Reduction::Sum => g_value,
     }
 }
 
@@ -6304,6 +6720,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             lazy_chain_size: 0,
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
+            requires_grad: true,
         }
     }
 
@@ -6634,6 +7051,159 @@ release ビルドでも検知できるよう `assert!` を使う）"
         let (expected_dpred, expected_dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Sum);
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
         assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
+    }
+
+    #[test]
+    fn vjp_dispatch_huber_loss_mean_returns_both_inputs_in_order() {
+        let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
+        let g = t(&[3.0], &[]);
+        let out_value = eval::huber_loss(&pred, &target, HuberKind::Huber, 1.0, Reduction::Mean);
+        let nodes = vec![leaf_node(pred.clone()), leaf_node(target.clone())];
+        let op = Op::HuberLoss {
+            pred: NodeId(0),
+            target: NodeId(1),
+            kind: HuberKind::Huber,
+            delta: 1.0,
+            reduction: Reduction::Mean,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        let (expected_dpred, expected_dtarget) =
+            huber_loss_vjp(&pred, &target, &g, HuberKind::Huber, 1.0, Reduction::Mean);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
+        assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
+    }
+
+    #[test]
+    fn vjp_dispatch_huber_loss_sum_returns_both_inputs_in_order() {
+        // sum 縮約（イシュー #1739）でも `Op::HuberLoss` ディスパッチが
+        // reduction を正しく `huber_loss_vjp` へ引き渡すことを確認する
+        // （`vjp_dispatch_mse_loss_sum_returns_both_inputs_in_order` と
+        // 同型）。`SmoothL1` kind で異なる `delta` も併せて検証する。
+        let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
+        let g = t(&[3.0], &[]);
+        let out_value = eval::huber_loss(&pred, &target, HuberKind::SmoothL1, 2.0, Reduction::Sum);
+        let nodes = vec![leaf_node(pred.clone()), leaf_node(target.clone())];
+        let op = Op::HuberLoss {
+            pred: NodeId(0),
+            target: NodeId(1),
+            kind: HuberKind::SmoothL1,
+            delta: 2.0,
+            reduction: Reduction::Sum,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        let (expected_dpred, expected_dtarget) =
+            huber_loss_vjp(&pred, &target, &g, HuberKind::SmoothL1, 2.0, Reduction::Sum);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
+        assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
+    }
+
+    #[test]
+    fn huber_loss_grad_n_zero_is_zero() {
+        // `n == 0`（空テンソル）は mean・sum ともゼロ除算を避け zeros を
+        // 返す（`mse_loss_vjp` の同種契約と同型。イシュー #1739）。
+        let pred = t(&[], &[0]);
+        let target = t(&[], &[0]);
+        let g = t(&[1.0], &[]);
+        let (dpred, dtarget) =
+            huber_loss_vjp(&pred, &target, &g, HuberKind::Huber, 1.0, Reduction::Mean);
+        assert_eq!(dense_vec(&dpred), Vec::<f32>::new());
+        assert_eq!(dense_vec(&dtarget), Vec::<f32>::new());
+    }
+
+    /// `pred`／`target` の一方が NaN のとき、forward（`eval::huber_loss`
+    /// の `else` 分岐は `NaN − 0.5·delta = NaN`）と backward
+    /// （`eval::huber_elem_grad`）で NaN 伝播の有無が食い違わないことを
+    /// 確認する（イシュー #1739 レビュー指摘。`abs_d < delta` は NaN
+    /// 比較で常に false のため、明示チェックなしでは backward が
+    /// `copysign` 系の有限値〈±1／±delta〉を返してしまう）。
+    #[test]
+    fn huber_loss_grad_propagates_nan() {
+        let pred = t(&[f32::NAN], &[1]);
+        let target = t(&[0.0], &[1]);
+        let g = t(&[1.0], &[]);
+        for kind in [HuberKind::Huber, HuberKind::SmoothL1] {
+            for reduction in [Reduction::Mean, Reduction::Sum] {
+                let (dpred, dtarget) = huber_loss_vjp(&pred, &target, &g, kind, 1.0, reduction);
+                assert!(
+                    dense_vec(&dpred)[0].is_nan(),
+                    "kind={kind:?} reduction={reduction:?}: dPred は NaN を伝播すべき"
+                );
+                assert!(
+                    dense_vec(&dtarget)[0].is_nan(),
+                    "kind={kind:?} reduction={reduction:?}: dTarget は NaN を伝播すべき"
+                );
+            }
+        }
+    }
+
+    /// Huber／SmoothL1 の解析的 VJP（`huber_loss_vjp`）を中央差分
+    /// （`numeric_grad_unary`）と突合する（イシュー #1739）。損失は
+    /// `d = pred − target` のみの区分関数（`eval::huber_elem_loss`）で
+    /// `C¹`（連続微分可能）だが `C²` ではないため、標本点は折れ点
+    /// `|d| == delta` から中央差分の刻み幅 `H` の数倍以上離した値を
+    /// 選ぶ（`pred`/`target` 双方に負の差分・delta≠1 のケースを含む）。
+    #[test]
+    fn huber_loss_grad_matches_numeric() {
+        let pred = t(&[1.5, -3.0, 0.25, -0.8, 2.2, 0.0], &[6]);
+        let target = t(&[0.0, 0.0, 0.0, 0.3, -1.0, 0.0], &[6]);
+        let s = t(&[1.0], &[]); // スカラー出力への射影は恒等（係数 1）。
+
+        for kind in [HuberKind::Huber, HuberKind::SmoothL1] {
+            for delta in [0.5f32, 1.0, 2.0] {
+                for reduction in [Reduction::Mean, Reduction::Sum] {
+                    let analytic_pred = numeric_grad_unary(&pred, &s, |x| {
+                        eval::huber_loss(x, &target, kind, delta, reduction)
+                    });
+                    let analytic_target = numeric_grad_unary(&target, &s, |x| {
+                        eval::huber_loss(&pred, x, kind, delta, reduction)
+                    });
+                    let (dpred, dtarget) =
+                        huber_loss_vjp(&pred, &target, &s, kind, delta, reduction);
+                    assert_grad_close(
+                        &format!("huber_loss({kind:?}, delta={delta}, {reduction:?}) dPred"),
+                        &dpred,
+                        &analytic_pred,
+                    );
+                    assert_grad_close(
+                        &format!("huber_loss({kind:?}, delta={delta}, {reduction:?}) dTarget"),
+                        &dtarget,
+                        &analytic_target,
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -7701,6 +8271,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
                 lazy_chain_size: 0,
                 recompute: false,
                 recompute_failed: std::cell::Cell::new(false),
+                requires_grad: true,
             };
             vec![
                 leaf_node(x.clone()),
@@ -8531,6 +9102,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             lazy_chain_size: 0,
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
+            requires_grad: true,
         };
         let nodes = vec![node];
         let op = Op::Interpolate {

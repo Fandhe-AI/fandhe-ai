@@ -48,6 +48,7 @@
 
 use crate::Tensor;
 use crate::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
+use crate::cast::CastOps;
 use crate::device::{BackendError, Device};
 use crate::dispatch_failure::DispatchFailureCell;
 use crate::error::ShapeError;
@@ -270,6 +271,57 @@ pub enum MseReduction {
     Sum,
 }
 
+/// [`BackendOps::huber_loss`]／[`BackendOps::huber_loss_backward`] が
+/// 計算する要素損失の種別（イシュー #1739）。`d = pred − target` として
+/// `Huber`（PyTorch `nn.HuberLoss(delta)`）は二次分岐に `0.5·d²`・
+/// 線形分岐に `delta·(|d| − 0.5·delta)` を使う。`SmoothL1`（PyTorch
+/// `nn.SmoothL1Loss(beta)`）は同じ折れ点構造だが二次分岐が
+/// `0.5·d²/beta` に `beta` でスケールされる点のみ異なる（`beta = 1.0`
+/// のとき両者は一致する）。1 個の `Op::HuberLoss`／1 組のカーネルで両者を
+/// 表現するための選択子（`delta`／`beta` はどちらも同じ `f32` 引数
+/// スロットで渡す。呼び出し側の意味論は `delta`／`beta` という呼称の
+/// 違いのみ）。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`Activation`／`MseReduction`
+/// と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HuberKind {
+    /// PyTorch `nn.HuberLoss(delta)` 相当（二次分岐 `0.5·d²`）。
+    Huber,
+    /// PyTorch `nn.SmoothL1Loss(beta)` 相当（二次分岐 `0.5·d²/beta`）。
+    SmoothL1,
+}
+
+/// [`BackendOps::bce_loss`]／[`BackendOps::bce_loss_backward`] の入力種別
+/// （イシュー #1737。親イシュー #1609「損失関数の拡張」）。
+///
+/// `BCELoss`（PyTorch）は `input` を確率（`[0, 1]`）として扱うのに対し、
+/// `BCEWithLogitsLoss` は `input` を未正規化の logits として受け取り
+/// カーネル内で sigmoid を適用する（`log(sigmoid(x))` を素朴に
+/// `ln(1/(1+exp(-x)))` で計算すると `x` が大きい負値のとき桁落ち・
+/// overflow するため、数値安定な合成式（`x>=0`: `(1-y)·x + ln(1+exp(-x))`、
+/// `x<0`: `-y·x + ln(1+exp(x))`。`max(x,0) - x·y + ln(1+exp(-|x|))` と
+/// 数式として等価だが `x - x·y` の桁落ちを避けるため乗算のみで書く）
+/// を使う。`docs/compat-api-scope.md` §1.2 損失行参照）。両者は forward
+/// の要素式・backward の `dInput` 式が異なるため、[`MseReduction`] とは
+/// 独立にこの入力種別で分岐する（縮約種別自体は [`MseReduction`] を
+/// 共用する。`Mean`／`Sum` の意味論は BCE 系でも同一のため）。
+///
+/// `#[non_exhaustive]`: 公開 API 非破壊（ガードレール条件・
+/// `.claude/rules/security.md`）を保つため（`Activation`／`MseReduction`
+/// と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BceKind {
+    /// `input` は確率（`[0, 1]`）。`BCELoss` 相当。
+    Probabilities,
+    /// `input` は logits（範囲制約なし）。`BCEWithLogitsLoss` 相当
+    /// （sigmoid をカーネル内に内包し数値安定な合成式で計算する）。
+    Logits,
+}
+
 /// [`BackendOps::scatter`] が行う縮約種別（イシュー #1776）。
 /// `torch.scatter`（`Overwrite`）と `torch.scatter_add`（`Add`）の
 /// 差異を 1 メソッドへ集約する（`Var::scatter`／`Var::scatter_add` は
@@ -328,6 +380,48 @@ pub enum InterpolateMode {
     /// **構造的に bit 完全一致**する。`nearest-exact`〈`floor((dst+0.5)
     /// *in/out)`〉は対象外・別 variant として扱う）。
     Nearest,
+    /// バイリニア（`torch.nn.functional.interpolate(mode='bilinear',
+    /// align_corners=…)`／`tf.image.resize(method='bilinear')` 相当。
+    /// イシュー #1762）。空間軸は**ちょうど 2 軸**（`size.len() == 2`。
+    /// 末尾 2 軸 = `(H, W)`）限定——1 次元 `linear`／3 次元
+    /// `trilinear`／`bicubic` は対象外（[`crate::ops_shape::
+    /// interpolate_out_shape_for_mode`] が rank 違反を
+    /// `ShapeError::RankMismatch` で拒否する）。
+    ///
+    /// 各出力位置は 4 個の入力近傍（`(y0,x0)`／`(y0,x1)`／`(y1,x0)`／
+    /// `(y1,x1)`）を線形重み付けして合成する（`Nearest` と異なり
+    /// 算術を含む）。座標・重みの単一情報源は
+    /// [`crate::interpolate::bilinear_src_coord`]（`autodiff::eval`・
+    /// `backend-cpu`・`backend-metal::interpolate_model` が共有する）。
+    ///
+    /// `scale = align_corners ? (in-1)/(out-1) : in/out`（`out<=1` の
+    /// `align_corners=true` は `scale=0`。PyTorch
+    /// `area_pixel_compute_scale` 相当）:
+    /// - `align_corners=false`: `src = (dst + 0.5) * scale - 0.5`
+    ///   （`src < 0` は `0` へクランプ）
+    /// - `align_corners=true`: `src = dst * scale`
+    ///
+    /// `i0 = min(floor(src), in_size-1)`・`i1 = min(i0+1, in_size-1)`・
+    /// `lambda1 = src - i0`（`src` をクランプした後の差。境界・
+    /// `in_size==1` では `lambda1=0`）。ブレンドは
+    /// `out = lerp(lerp(v00,v01,l1x), lerp(v10,v11,l1x), l1y)` を
+    /// `fma` で構成する固定式順序（[`crate::interpolate`] doc 参照）。
+    ///
+    /// **受入契約は REQ-2 統一複合判定**（相対誤差 1e-3 未満 または
+    /// 絶対誤差 1e-5 未満。`fandhe_ai_backend_cpu::parity::
+    /// assert_parity`）であり `Nearest` のような bit 完全一致は
+    /// 断言しない——NVRTC の `fmad` 既定契約（上書き禁止。
+    /// `.claude/rules/coding-rust.md`）により GPU 側カーネルの丸めが
+    /// Rust ホスト参照実装と一致しない可能性があるため。Rust 実装
+    /// 同士（CPU ネイティブ ⟷ ホスト参照・Metal 逐語モデル ⟷ CPU）は
+    /// 引き続き bit 完全一致を検証する。
+    Bilinear {
+        /// `true` なら入力・出力の四隅を一致させる（PyTorch
+        /// `align_corners=True` 相当）。`false`（既定的に使われる値。
+        /// PyTorch のデフォルトと同じ）はピクセル中心を基準にする
+        /// half-pixel 変換を使う。
+        align_corners: bool,
+    },
 }
 
 /// [`BackendOps::captured_segment_key`]／[`BackendOps::run_captured_sgd_step_segment`]
@@ -560,6 +654,21 @@ pub trait BackendOps {
     /// `half::bf16` 演算本体（[`TypedOps<bf16>`]）への capability
     /// accessor。同上のデフォルト（`None`）。CPU 実装は #1699 が担当する。
     fn typed_ops_bf16(&self) -> Option<&dyn TypedOps<bf16>> {
+        None
+    }
+
+    /// dtype 変換カーネル（[`CastOps`]）への capability accessor
+    /// （イシュー #1750・`docs/tensor-core-cast-design.md`）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は `None`（cast 未対応。`crate::cast::cast_from_f32`／
+    /// `cast_to_f32`〈ホスト参照実装〉へフォールバックする契約は
+    /// `autodiff` 側のヘルパーが担う）。`typed_ops_f64` 等と同じ
+    /// 非破壊拡張パターンで、`BackendOps` を実装する外部クレートは
+    /// 何もしなくても既存実装のままコンパイルが通る。CPU 実装は
+    /// 本イシューが `Some(self)` へオーバーライドする
+    /// （`backend-cpu::cast::CastOps` 実装参照）。
+    fn cast_ops(&self) -> Option<&dyn CastOps> {
         None
     }
 
@@ -1251,6 +1360,146 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "mse_loss_backward: default fail-safe (no fused MSE backward kernel available)".into(),
+        ))
+    }
+
+    /// Huber／SmoothL1 損失（`d = pred − target` として `|d| < delta` で
+    /// `0.5·d²`〈`SmoothL1` は `/delta` でスケール〉・それ以外で
+    /// `delta·(|d| − 0.5·delta)`〈`SmoothL1` は `|d| − 0.5·delta`〉）の
+    /// forward を 1 個の融合カーネルで計算する（イシュー #1739）。
+    ///
+    /// `pred`／`target` は同一 shape（呼び出し元が [`crate::ops_shape::
+    /// require_same_shape`] で検証済み）。`delta` は呼び出し元
+    /// （`fandhe_ai_autodiff::var::Var::huber_loss`／`smooth_l1_loss`）が
+    /// 有限かつ `> 0` を検証済み。戻り値は shape `[]`（スカラー）。
+    /// `numel == 0` は `Mean`／`Sum` とも `0.0`（[`Self::mse_loss`] と
+    /// 同じ契約）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss`] と同じ非破壊拡張（デフォルトメソッド追加）
+    /// であり、既定は [`BackendError::Unsupported`] を返す fail-safe と
+    /// する。`Var::huber_loss_impl` は `Unsupported` のときのみ従来の
+    /// ホスト参照実装（`eval::huber_loss`）へフォールバックし、それ以外
+    /// のエラーは伝播する（判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。CPU／CUDA／Metal の各実装は
+    /// このデフォルトをカーネル内融合実装でオーバーライドする
+    /// （`backend-cpu::huber`・`backend-cuda::huber`・`backend-metal::huber`
+    /// 参照）。
+    fn huber_loss(
+        &self,
+        _pred: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _kind: HuberKind,
+        _delta: f32,
+        _reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "huber_loss: default fail-safe (no fused Huber/SmoothL1 forward kernel available)"
+                .into(),
+        ))
+    }
+
+    /// Huber／SmoothL1 損失の backward（`dPred = scale·grad_elem(d)`。
+    /// `grad_elem(d)` は `|d| < delta` で `d`〈`SmoothL1` は `/delta`〉・
+    /// それ以外で `copysign(delta, d)`〈`SmoothL1` は `copysign(1, d)`〉）
+    /// を 1 個の融合カーネルで計算する（イシュー #1739）。
+    ///
+    /// `scale` は呼び出し元（`fandhe_ai_autodiff::grad::vjp` の
+    /// `Op::HuberLoss` 分岐）が上流勾配 `g`（スカラー）と `reduction` から
+    /// 事前計算して渡す（`Mean` は `g/n`、`Sum` は `g`。[`Self::
+    /// mse_loss_backward`] と異なり係数 2 は付かない）。
+    ///
+    /// `dTarget = −dPred` は常に成り立つ（損失は `d = pred − target`
+    /// のみに依存する）ため、[`Self::mse_loss_backward`] と同じ理由で
+    /// 本メソッドは `dPred` の 1 テンソルのみを返す契約とする
+    /// （呼び出し元がホスト側で符号反転して `dTarget` を得る）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::huber_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、`Var::
+    /// huber_loss_impl` の呼び出し元（`grad::vjp`）は `Unsupported` の
+    /// ときのみ既存のホスト参照実装（`huber_loss_vjp`）へフォールバック
+    /// する。
+    fn huber_loss_backward(
+        &self,
+        _pred: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _kind: HuberKind,
+        _delta: f32,
+        _scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "huber_loss_backward: default fail-safe (no fused Huber/SmoothL1 backward kernel \
+             available)"
+                .into(),
+        ))
+    }
+
+    /// 二値交差エントロピー損失（`BCELoss`／`BCEWithLogitsLoss`。
+    /// [`BceKind`] で分岐）の forward を 1 個の融合カーネルで計算する
+    /// （イシュー #1737・親イシュー #1609）。
+    ///
+    /// `input`／`target` は同一 shape（呼び出し元が
+    /// [`crate::ops_shape::require_same_shape`] で検証済み）。戻り値は
+    /// shape `[]`（スカラー）。`numel == 0` は `Mean`／`Sum` とも `0.0`
+    /// （[`Self::mse_loss`] と同じ空縮約契約）。
+    ///
+    /// `input ∈ [0, 1]`（[`BceKind::Probabilities`] のときのみ）の範囲
+    /// 検査は呼び出し元（`fandhe_ai_autodiff::var::Var::bce_loss`）が
+    /// 本メソッド呼び出し前にホスト側で行う契約であり、本メソッド自身は
+    /// 範囲検査を行わない（カーネル内での分岐・エラー伝播コストを避ける
+    /// ため。`.claude/rules/security.md` A03 の観点はホスト側検査で
+    /// 満たす）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、
+    /// `Var::bce_loss`／`bce_with_logits_loss` は `Unsupported` の
+    /// ときのみホスト参照実装（`eval::bce_loss`）へフォールバックする
+    /// （それ以外のエラーは伝播する。判定迂回経路を作らない）。
+    fn bce_loss(
+        &self,
+        _input: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _kind: BceKind,
+        _reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "bce_loss: default fail-safe (no fused BCE forward kernel available)".into(),
+        ))
+    }
+
+    /// 二値交差エントロピー損失の backward（`dInput`）を 1 個の融合
+    /// カーネルで計算する（イシュー #1737）。
+    ///
+    /// [`Self::mse_loss_backward`] と異なり `dTarget = -dInput` という
+    /// 単純な符号反転関係が成り立たない（`dInput`／`dTarget` の式が
+    /// 非対称。`docs/compat-api-scope.md` §1.2 参照）ため、本メソッドは
+    /// `dInput` のみを返し、`dTarget` は呼び出し元（`grad::vjp`）が
+    /// ホスト側で要素ごとに計算する（新規 GPU カーネル起動・D2H を
+    /// 増やさないための設計判断。`mse_loss_backward` の dTarget 省略と
+    /// 同じ動機）。
+    ///
+    /// `scale` は呼び出し元が上流勾配 `g`（スカラー）と `reduction` から
+    /// 事前計算して渡す（`Mean` は `g/n`、`Sum` は `g`。二乗誤差の
+    /// `2` 倍係数を持つ `mse_loss_backward` の `scale` とは異なる）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::bce_loss`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とする。
+    fn bce_loss_backward(
+        &self,
+        _input: &Tensor<f32>,
+        _target: &Tensor<f32>,
+        _kind: BceKind,
+        _scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "bce_loss_backward: default fail-safe (no fused BCE backward kernel available)".into(),
         ))
     }
 
@@ -3533,6 +3782,40 @@ mod tests {
         assert!(matches!(backward, Err(BackendError::Unsupported(_))));
     }
 
+    /// [`BackendOps::huber_loss`]／[`BackendOps::huber_loss_backward`] の
+    /// 既定実装が fail-safe（[`BackendError::Unsupported`]）を返すことを
+    /// 確認する（イシュー #1739。`mse_loss_default_is_unsupported` と
+    /// 同型）。
+    #[test]
+    fn huber_loss_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let pred = Tensor::new(vec![1.0, 2.0], &[2]).unwrap();
+        let target = Tensor::new(vec![0.0, 0.0], &[2]).unwrap();
+
+        let forward = ops.huber_loss(&pred, &target, HuberKind::Huber, 1.0, MseReduction::Mean);
+        let backward = ops.huber_loss_backward(&pred, &target, HuberKind::Huber, 1.0, 1.0);
+
+        assert!(matches!(forward, Err(BackendError::Unsupported(_))));
+        assert!(matches!(backward, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::bce_loss`]／[`BackendOps::bce_loss_backward`] の
+    /// 既定実装が両方とも fail-safe（[`BackendError::Unsupported`]）を
+    /// 返すことを確認する（イシュー #1737。
+    /// `mse_loss_default_is_unsupported` と同型のガード）。
+    #[test]
+    fn bce_loss_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![0.3, 0.7], &[2]).unwrap();
+        let target = Tensor::new(vec![0.0, 1.0], &[2]).unwrap();
+
+        let forward = ops.bce_loss(&input, &target, BceKind::Probabilities, MseReduction::Mean);
+        let backward = ops.bce_loss_backward(&input, &target, BceKind::Probabilities, 1.0);
+
+        assert!(matches!(forward, Err(BackendError::Unsupported(_))));
+        assert!(matches!(backward, Err(BackendError::Unsupported(_))));
+    }
+
     /// [`BackendOps::softmax`] の既定実装が fail-safe
     /// （[`BackendError::Unsupported`]）を返すことを確認する
     /// （イシュー #1594。`mse_loss_default_is_unsupported` と同型）。
@@ -3960,6 +4243,86 @@ mod tests {
         assert!(ops.typed_ops_f64().is_none());
         assert!(ops.typed_ops_f16().is_none());
         assert!(ops.typed_ops_bf16().is_none());
+    }
+
+    /// `cast_ops` accessor が既定で `None`（dtype 変換未対応）を返す
+    /// ことを確認する（イシュー #1750・非破壊拡張の fail-closed 既定値
+    /// 回帰ガード。`typed_ops_accessors_default_to_none` と同型）。
+    #[test]
+    fn cast_ops_accessor_defaults_to_none() {
+        let ops = MockOps(Device::Cpu);
+        assert!(ops.cast_ops().is_none());
+    }
+
+    /// [`CastOps`] の positive-path テスト用スタブ（イシュー #1750）。
+    /// 全メソッドを既定実装（`Unsupported`）のまま使う——`TypedF64StubOps`
+    /// と異なり `CastOps` は全メソッドに既定実装を持つため、空の impl
+    /// ブロックだけで `&Self → &dyn CastOps` の coercion・dyn 呼び出し
+    /// が実際に機能することを検証できる。
+    struct CastOpsStub;
+    impl CastOps for CastOpsStub {}
+
+    /// `cast_ops` を `Some(self.0)` へオーバーライドする `BackendOps`
+    /// 実装（イシュー #1750）。`&dyn BackendOps` 経由で `CastOps` の
+    /// 具象実装へ実際に到達できることを検証する
+    /// （`OpsWithTypedF64` と同型のオーバーライドパターン）。
+    struct OpsWithCastOps(CastOpsStub);
+
+    impl BackendOps for OpsWithCastOps {
+        fn device(&self) -> Device {
+            Device::Cpu
+        }
+
+        fn cast_ops(&self) -> Option<&dyn CastOps> {
+            Some(&self.0)
+        }
+
+        fn gemm(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: gemm".into()))
+        }
+
+        fn add(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: add".into()))
+        }
+
+        fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: mul".into()))
+        }
+
+        fn relu(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: relu".into()))
+        }
+
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: exp".into()))
+        }
+
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: tanh".into()))
+        }
+
+        fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: sum".into()))
+        }
+
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("mock: max".into()))
+        }
+    }
+
+    /// `cast_ops` accessor が `&dyn BackendOps` 経由で具象 `CastOps`
+    /// 実装まで到達することを検証する（イシュー #1750）。
+    #[test]
+    fn cast_ops_accessor_reaches_concrete_impl_through_dyn_backend_ops() {
+        let stub = OpsWithCastOps(CastOpsStub);
+        let ops: &dyn BackendOps = &stub;
+
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let result = ops
+            .cast_ops()
+            .expect("cast_ops should be Some for OpsWithCastOps")
+            .cast_f32_to_f64(&a);
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
 
     /// `Box<dyn BackendOps + Send>` が成立し続けることを直接検証する

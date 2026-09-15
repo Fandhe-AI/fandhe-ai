@@ -20,13 +20,13 @@
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLDevice, MTLSize};
 
-use fandhe_ai_tensor_core::ShapeError;
+use fandhe_ai_tensor_core::{ShapeError, bilinear_scale};
 
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
 use crate::index_buffer::MetalIndexBuffer;
-use crate::interpolate_model::validate_interpolate_launch;
+use crate::interpolate_model::{validate_interpolate_bilinear_launch, validate_interpolate_launch};
 use crate::pipeline::{self, MtlPipeline};
 
 /// `shape` の行優先（row-major）ストライドを `u32` 配列として計算する
@@ -60,6 +60,9 @@ const IP_THREADGROUP_WIDTH: usize = 256;
 /// interpolate カーネルのコンパイル済みパイプラインを保持するハンドル。
 pub struct MetalInterpolate {
     nearest_f32: objc2::rc::Retained<MtlPipeline>,
+    /// bilinear パイプライン（イシュー #1762）。`nearest_f32` と同じ
+    /// `MetalInterpolate::new` で同時にコンパイル・保持する。
+    bilinear_f32: objc2::rc::Retained<MtlPipeline>,
 }
 
 impl MetalInterpolate {
@@ -78,8 +81,13 @@ impl MetalInterpolate {
 
         let nearest_f32 =
             pipeline::make_pipeline(ctx.device(), &library, "interpolate_nearest_f32")?;
+        let bilinear_f32 =
+            pipeline::make_pipeline(ctx.device(), &library, "interpolate_bilinear_f32")?;
 
-        Ok(Self { nearest_f32 })
+        Ok(Self {
+            nearest_f32,
+            bilinear_f32,
+        })
     }
 
     /// `interpolate_nearest_f32` カーネルを起動する（`torch.nn.
@@ -138,6 +146,66 @@ impl MetalInterpolate {
 
         Ok(out_buf.read_to_vec())
     }
+
+    /// `interpolate_bilinear_f32` カーネルを起動する（`torch.nn.
+    /// functional.interpolate(mode='bilinear', align_corners=…)`
+    /// 相当。イシュー #1762）。`out_shape` は `size.len() == 2` を
+    /// 満たす契約（[`crate::interpolate_model::
+    /// validate_interpolate_bilinear_launch`] が検査）。`scale_h`／
+    /// `scale_w` はホスト側（`fandhe_ai_tensor_core::bilinear_scale`。
+    /// forward の他バックエンド・ホスト参照実装と共有する単一情報源）
+    /// で 1 回だけ計算しカーネル引数として渡す。
+    pub fn run_bilinear_f32(
+        &self,
+        ctx: &MetalContext,
+        input: &[f32],
+        in_shape: &[usize],
+        size: &[usize],
+        out_shape: &[usize],
+        align_corners: bool,
+    ) -> Result<Vec<f32>, MetalError> {
+        let numel = validate_interpolate_bilinear_launch(input, in_shape, size, out_shape)
+            .map_err(shape_err_to_metal)?;
+        if numel == 0 {
+            return Ok(Vec::new());
+        }
+
+        let rank = out_shape.len();
+        let in_strides = row_major_strides_u32(in_shape);
+
+        let mut shapes: Vec<u32> = Vec::with_capacity(rank * 3);
+        shapes.extend(out_shape.iter().map(|&d| d as u32));
+        shapes.extend(in_shape.iter().map(|&d| d as u32));
+        shapes.extend(in_strides);
+
+        let scale_h = bilinear_scale(in_shape[rank - 2], out_shape[rank - 2], align_corners);
+        let scale_w = bilinear_scale(in_shape[rank - 1], out_shape[rank - 1], align_corners);
+
+        let input_buf = MetalBuffer::new_with_data(ctx, input)?;
+        let shapes_buf = MetalIndexBuffer::new_with_u32(ctx, &shapes)?;
+        let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, numel)?;
+
+        let rank_u = rank as u32;
+        let align_corners_u: u32 = if align_corners { 1 } else { 0 };
+        let numel_u = numel as u32;
+
+        ctx.dispatch_sync(|encoder| {
+            encode_interpolate_bilinear_dispatch(
+                encoder,
+                &self.bilinear_f32,
+                &input_buf,
+                &out_buf,
+                &shapes_buf,
+                rank_u,
+                align_corners_u,
+                numel_u,
+                scale_h,
+                scale_w,
+            );
+        })?;
+
+        Ok(out_buf.read_to_vec())
+    }
 }
 
 /// `interpolate_nearest_f32` カーネルのエンコード（バッファ index
@@ -186,6 +254,71 @@ fn encode_interpolate_dispatch(
             std::ptr::NonNull::from(&numel).cast(),
             std::mem::size_of::<u32>(),
             5,
+        );
+    }
+
+    let (threadgroups, threads_per_tg) = ip_dispatch_sizes(numel);
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// `interpolate_bilinear_f32` カーネルのエンコード（バッファ index
+/// 0〜2・スカラー index 3〜5・`float` index 6〜7・ディスパッチ）。
+/// `shaders/interpolate.metal::interpolate_bilinear_f32` のバッファ
+/// 宣言と一致させる（イシュー #1762）。
+#[allow(clippy::too_many_arguments)]
+fn encode_interpolate_bilinear_dispatch(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    input_buf: &MetalBuffer,
+    out_buf: &MetalBuffer,
+    shapes_buf: &MetalIndexBuffer,
+    rank: u32,
+    align_corners: u32,
+    numel: u32,
+    scale_h: f32,
+    scale_w: f32,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: FFI 境界 1/2。`encode_interpolate_dispatch` と同じ理由
+    // （`setBuffer_offset_atIndex` は生存中の `MTLBuffer` への参照を
+    // 保持するのみ・各バッファは `ctx.dispatch_sync` が完了するまで
+    // 生存する）。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(input_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(shapes_buf.raw()), 0, 2);
+    }
+
+    // SAFETY: FFI 境界 2/2。`setBytes_length_atIndex` は指定ポインタから
+    // 指定バイト数を即座に複製する。各ローカル変数は本呼び出し中生存し、
+    // 型・バイト数は `shaders/interpolate.metal::interpolate_bilinear_f32`
+    // の `constant uint&`／`constant float&` 宣言と一致させている。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&rank).cast(),
+            std::mem::size_of::<u32>(),
+            3,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&align_corners).cast(),
+            std::mem::size_of::<u32>(),
+            4,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&numel).cast(),
+            std::mem::size_of::<u32>(),
+            5,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&scale_h).cast(),
+            std::mem::size_of::<f32>(),
+            6,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&scale_w).cast(),
+            std::mem::size_of::<f32>(),
+            7,
         );
     }
 

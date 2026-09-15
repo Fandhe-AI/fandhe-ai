@@ -778,6 +778,77 @@ pub fn interpolate_out_shape(shape: &[usize], size: &[usize]) -> Result<Vec<usiz
     Ok(out)
 }
 
+/// [`interpolate_out_shape`] に `mode`（[`crate::InterpolateMode`]。
+/// イシュー #1762）別の追加検査を重ねた版。`Nearest` は
+/// `interpolate_out_shape` と完全に同じ（追加検査なし）。`Bilinear`
+/// は空間軸がちょうど 2 軸（`size.len() == 2`。末尾 2 軸 = `(H, W)`）
+/// であることを追加で要求し、それ以外は
+/// `ShapeError::RankMismatch { expected: 2, actual: size.len() }`
+/// で拒否する（`linear`〈1 次元〉／`trilinear`〈3 次元〉／`bicubic`
+/// は対象外。実装計画「設計判断」§3.1）。
+pub fn interpolate_out_shape_for_mode(
+    shape: &[usize],
+    size: &[usize],
+    mode: crate::backend_ops::InterpolateMode,
+) -> Result<Vec<usize>, ShapeError> {
+    if let crate::backend_ops::InterpolateMode::Bilinear { .. } = mode
+        && size.len() != 2
+    {
+        return Err(ShapeError::RankMismatch {
+            expected: 2,
+            actual: size.len(),
+        });
+    }
+    interpolate_out_shape(shape, size)
+}
+
+#[cfg(test)]
+mod interpolate_out_shape_for_mode_tests {
+    use super::*;
+    use crate::backend_ops::InterpolateMode;
+
+    #[test]
+    fn nearest_mode_is_identical_to_mode_agnostic_fn() {
+        let a = interpolate_out_shape(&[2, 8], &[3]).unwrap();
+        let b = interpolate_out_shape_for_mode(&[2, 8], &[3], InterpolateMode::Nearest).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn bilinear_mode_rejects_rank_other_than_two() {
+        let mode = InterpolateMode::Bilinear {
+            align_corners: false,
+        };
+        let err = interpolate_out_shape_for_mode(&[2, 3, 4], &[9], mode).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 2,
+                actual: 1
+            }
+        ));
+        let err = interpolate_out_shape_for_mode(&[2, 3, 4], &[9, 9, 9], mode).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 2,
+                actual: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn bilinear_mode_accepts_rank_two_and_matches_base_shape_calc() {
+        let mode = InterpolateMode::Bilinear {
+            align_corners: true,
+        };
+        let out = interpolate_out_shape_for_mode(&[2, 4, 4], &[9, 9], mode).unwrap();
+        let base = interpolate_out_shape(&[2, 4, 4], &[9, 9]).unwrap();
+        assert_eq!(out, base);
+        assert_eq!(out, vec![2, 9, 9]);
+    }
+}
+
 /// `one_hot`（`Var::one_hot`。PyTorch `F.one_hot`／TF `tf.one_hot` 相当。
 /// イシュー #1755）の出力 shape を検査・計算する。非微分演算（VJP は
 /// ゼロ扱い。`crates/autodiff/src/grad.rs::vjp` の `Op::OneHot` 分岐）

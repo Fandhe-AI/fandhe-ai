@@ -127,6 +127,7 @@
 mod backend_ops;
 mod broadcast;
 pub mod buffer;
+pub mod cast;
 pub mod creation;
 pub mod device;
 pub mod dispatch;
@@ -134,6 +135,7 @@ mod dispatch_failure;
 mod element;
 mod error;
 mod fusion;
+pub mod interpolate;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pool;
@@ -152,15 +154,16 @@ pub mod typed;
 mod typed_ops;
 
 pub use backend_ops::{
-    Activation, BackendOps, BinaryElementwiseOp, ChecksumReadout, Conv2dParams, GemmChecksum,
-    GruBackwardOutput, GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd,
-    MseReduction, QrFactors, ScatterReduce, SegmentKey, SegmentResource, SegmentRun, SgdStepConfig,
-    SvdFactors, UnaryElementwiseOp, VectorNormOrd, checked_gemm_batched_output_len,
-    gemm_batched_via_per_batch_gemm, gemm_batched_via_per_batch_gemm_fp32_strict,
-    normalize_batched_operand, ops_for,
+    Activation, BackendOps, BceKind, BinaryElementwiseOp, ChecksumReadout, Conv2dParams,
+    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScatterReduce, SegmentKey,
+    SegmentResource, SegmentRun, SgdStepConfig, SvdFactors, UnaryElementwiseOp, VectorNormOrd,
+    checked_gemm_batched_output_len, gemm_batched_via_per_batch_gemm,
+    gemm_batched_via_per_batch_gemm_fp32_strict, normalize_batched_operand, ops_for,
 };
 pub use broadcast::broadcast_shape;
 pub use buffer::{BufferHandle, DeviceBuffer, DeviceBufferView, MemoryOps};
+pub use cast::{CastDType, CastElement, CastOps, cast_from_f32, cast_to_f32};
 pub use creation::{CreationError, arange, eye, linspace, ones_like, zeros_like};
 pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all, select_from};
 pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
@@ -178,13 +181,14 @@ pub use fusion::{
     FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError, MAX_FUSED_CHAIN_LEN,
     MAX_FUSED_SEGMENT_NODES, RowFusionMeta,
 };
+pub use interpolate::{BilinearCoord, bilinear_blend, bilinear_scale, bilinear_src_coord};
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     BatchedMatmulPlan, batched_matmul_plan, concat_out_shape, conv_out_len, conv2d_out_shape,
     elementwise_out_shape, gather_out_shape, gemm_out_shape, im2col_out_shape,
-    interpolate_out_shape, matmul_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape,
-    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
-    topk_out_shape,
+    interpolate_out_shape, interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape,
+    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
 // `pool_core::SizeClassPoolConfig` は `pool::PoolConfig`（crates.io 0.4.0

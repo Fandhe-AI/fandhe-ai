@@ -181,3 +181,17 @@
 - `.claude/rules/security.md`（A08・公開 API 非破壊）
 - `.claude/rules/out-of-scope-tracking.md`（起票フロー）
 - `crates/autodiff/src/{tape.rs,backward.rs,grad.rs,error.rs}`・`crates/facade/src/lib.rs`（コード事実。§2）
+
+## 実装記録（#1748）
+
+本 issue（#1748）で §5 案 B の「登録 API＋契約」部分を実装した。§9（perf 目的の GEMM 系 VJP 内部での d_input 省略）は対象外のまま未実装。
+
+- `TapeNode::requires_grad: bool` を新設し、葉ノードは明示値（`Tape::var` → `true`・`Tape::var_no_grad`／`Var::detach` → `false`・`Op::ResidentLeaf` → 常に `true`）、非葉ノード（`push_eager`／`push_lazy`／`push_view`）は `Op::for_each_input` で列挙した全入力の論理和で確定する（`crates/autodiff/src/tape.rs`）。
+- 葉専用の `Tape::push_leaf(value, requires_grad)` を新設し、`Op::Leaf` は `push_eager` を経由しない契約へ変更した（`push_eager` は `debug_assert!(!matches!(op, Op::Leaf))` で機構的に固定）。
+- `Var::detach()`（`crates/autodiff/src/var.rs`）: `materialize_fallible` で値を取得し `push_leaf(value, false)` で新しい葉へ登録する。専用 `Op::Detach` variant は追加していない（既存の葉ノード機構の再利用で過不足なく表現できるため。§2.7 対象外整理のとおり）。
+- `Tape::backward_impl`（`crates/autodiff/src/backward.rs`）: 起点 `loss` が `requires_grad=false` なら `materialize_fallible` より前に `Err(AutodiffError::Backward)` を返す。逆走査の寄与蓄積は対象ノードの `requires_grad` を検査し `false` なら `accumulate` へ渡さず破棄する（`grads[target]` は `None` のまま。主ループの未到達分岐が checkpoint 帳簿を処理する）。
+- `Gradients::get`（同ファイル）: 対象ノードが `requires_grad=false` なら新設 `AutodiffError::GradientTrackingDisabled`（`#[non_exhaustive]` への非破壊 variant 追加）を返す。「loss から未到達」の `Ok(None)` とは型で区別する。
+- facade（`crates/facade/src/lib.rs`）: `Tape::var_no_grad` を薄いラッパーとして追加。`Var::detach` は既存 `Var` 再エクスポート経由で新規公開面なし（`docs/compat-api-scope.md` §5 手続き・親 #1612 承認範囲内）。
+- 数値契約: 本機構は算術を一切伴わない（テープのメタ情報のみ）ため、CPU 本番 ops（`fandhe_ai::tape()`）と naive 参照実装（`fandhe_ai_autodiff::Tape::new()`）の勾配が bit 完全一致することをテストで確認した（`crates/facade/tests/no_grad_detach_backend_parity.rs`）。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り（同テストの `#[ignore]` 群）。
+- テストは `crates/autodiff/tests/no_grad_detach.rs`（naive ops 経由の契約テスト。detach の定数扱い・葉プレフィックス保持・checkpoint poison 時の `Err`・reset 越境の `requires_grad` 保持等）と上記 facade parity テストの 2 ファイル。
+- 対象外（未実装のまま）: `MatMul`／`LinearAct`／`LinearResident` の VJP 内部での d_input GEMM 省略（§9 の perf 起票草案・未起票）・`retain_graph`（複数回 backward の勾配蓄積契約。兄弟 #1749）・PyTorch `torch.no_grad()` コンテキスト相当（既存の型分離方式が担う。§9・`docs/public-api-design.md` §3.1 追補）・`requires_grad_()` によるフラグの事後切替・`Op::ResidentLeaf` の `Gradients::get` 型付きエラー化（既知の縮小点。上記どおり変更なし）。

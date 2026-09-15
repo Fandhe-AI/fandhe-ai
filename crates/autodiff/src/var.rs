@@ -16,21 +16,23 @@
 use std::cell::Ref;
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, ChecksumReadout, Conv2dParams, GemmChecksum,
-    GruPointwiseOutput, InterpolateMode, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
-    broadcast_shape, concat_out_shape, conv2d_out_shape, gather_out_shape, gemm_out_shape,
-    interpolate_out_shape, matmul_out_shape, one_hot_out_shape, pad_out_shape, reduce_out_shape,
-    require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    Activation, BackendError, BackendOps, BceKind, CastElement, ChecksumReadout, Conv2dParams,
+    GemmChecksum, GruPointwiseOutput, HuberKind, InterpolateMode, LstmPointwiseOutput,
+    MatrixNormOrd, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor,
+    VectorNormOrd, broadcast_shape, concat_out_shape, conv2d_out_shape, gather_out_shape,
+    gemm_out_shape, interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape,
+    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::grad::{
-    ArgExtremum, argext_with_fallback, concat_with_fallback, conv2d_with_fallback,
-    gather_with_fallback, interpolate_with_fallback, min_with_fallback, one_hot_with_fallback,
-    pad_with_fallback, scalar_binary_with_fallback, scalar_unary_with_fallback,
-    scatter_with_fallback, sort_with_fallback, topk_with_fallback, unique_with_fallback,
+    ArgExtremum, argext_with_fallback, cast_from_f32_with_fallback, concat_with_fallback,
+    conv2d_with_fallback, gather_with_fallback, interpolate_with_fallback, min_with_fallback,
+    one_hot_with_fallback, pad_with_fallback, scalar_binary_with_fallback,
+    scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
+    unique_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -232,6 +234,49 @@ impl<'t> Var<'t> {
     /// 値）は reset をまたいで生存しうるため、こちらは実行時検査が要る。
     pub(crate) fn tape_epoch(&self) -> u64 {
         self.tape.epoch()
+    }
+
+    /// この `Var` が指すノードの勾配追跡フラグ（イシュー #1748・
+    /// `TapeNode::requires_grad` doc 参照）。`backward.rs::Gradients::get`
+    /// が「対象ノードが構造的に勾配を持ちうるか」を判定するのに使う
+    /// （`tape_id`/`tape_epoch` と同じ `pub(crate)` アクセサ方針）。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.tape.nodes.borrow()[self.id.0].requires_grad
+    }
+
+    /// 追跡を切り離し、現在の値を `requires_grad == false` の新しい
+    /// 葉ノードとして同じ `Tape` へ登録する（イシュー #1748。PyTorch
+    /// `Tensor.detach()` 相当。設計は `docs/
+    /// autodiff-nograd-leaf-dinput-skip-decision.md` §5「案 B」）。
+    ///
+    /// **専用 `Op` を追加しない設計**: 「detach された `Var`」を
+    /// 「`requires_grad == false` の通常の葉ノード」として表現する
+    /// （`Tape::var_no_grad` と実体を共有する）。専用 `Op::Detach`
+    /// variant を追加する案は、前方伝播（`Op::for_each_input` の網羅
+    /// match）・`is_checkpoint_eligible`・`grad::vjp` の網羅 match に
+    /// 3 箇所以上の更新を要するのに対し、本 issue が満たすべき契約
+    /// （値を共有しつつ勾配経路を切る）は既存の葉ノード機構で過不足
+    /// なく表現できるため採用しなかった。
+    ///
+    /// **値の共有**: `Tensor<f32>` は内部 `storage: Arc<Storage<T>>` を
+    /// 共有する値型（immutable）のため、新しい葉ノードへ渡す
+    /// `materialize_fallible` の戻り値の `.clone()` は `Arc` のポインタ
+    /// 複製のみで実データのコピーは発生しない（PyTorch の `detach()` が
+    /// storage を共有するのと同型）。
+    ///
+    /// **副作用**: 対象がまだ実体化されていない lazy elementwise 連鎖・
+    /// view ノードの場合、本メソッド呼び出し時点でその実体化が走る
+    /// （`materialize_fallible` 経由）。また checkpoint 解放済み
+    /// （イシュー #1624）で再計算に失敗（poison）した値を `detach` する
+    /// と `Err` を返す（stale／不正な値を新しい葉へ複製しない
+    /// fail-closed 方針）。
+    pub fn detach(&self) -> Result<Var<'t>, AutodiffError> {
+        let value = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let id = self.tape.push_leaf(value, false);
+        Ok(Var::from_raw(self.tape, id))
     }
 
     /// `matmul`（rank≥2。バッチ次元は NumPy 互換ブロードキャスト。
@@ -1078,6 +1123,221 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// Huber 損失（`self` = 予測値、`target` = 正解値。PyTorch
+    /// `nn.HuberLoss(delta)` 相当。イシュー #1739）。`|d| < delta`
+    /// （`d = pred − target`）で二次（`0.5·d²`）、それ以外で線形
+    /// （`delta·(|d| − 0.5·delta)`）となる区分的損失（`eval::
+    /// huber_elem_loss` が意味論の正）。`delta` は有限かつ `> 0` を
+    /// 要求する（PyTorch の `delta` 引数と同じ制約）。
+    /// `huber_loss_impl(target, HuberKind::Huber, delta, reduction)`
+    /// への委譲。
+    pub fn huber_loss(
+        &self,
+        target: &Var<'t>,
+        delta: f32,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.huber_loss_impl(target, HuberKind::Huber, delta, reduction)
+    }
+
+    /// SmoothL1 損失（`self` = 予測値、`target` = 正解値。PyTorch
+    /// `nn.SmoothL1Loss(beta)` 相当。イシュー #1739）。[`Self::huber_loss`]
+    /// と同じ折れ点構造だが二次分岐が `0.5·d²/beta` に `beta` で
+    /// スケールされる点のみ異なる（`beta = 1.0` のとき両者は一致する）。
+    /// `beta = 0`（PyTorch では `nn.L1Loss` 相当に退化する特殊値）は
+    /// 本メソッドの対象外——他の `delta`／`beta` 値と同じ「有限かつ
+    /// `> 0`」検査により `AutodiffError::InvalidArgument` で拒否する。
+    /// `huber_loss_impl(target, HuberKind::SmoothL1, beta, reduction)`
+    /// への委譲。
+    pub fn smooth_l1_loss(
+        &self,
+        target: &Var<'t>,
+        beta: f32,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.huber_loss_impl(target, HuberKind::SmoothL1, beta, reduction)
+    }
+
+    /// [`Self::huber_loss`]／[`Self::smooth_l1_loss`] の共通実装
+    /// （イシュー #1739）。`mse_loss_with` と同じ演算メソッド規律
+    /// （フォールバックは `Unsupported` のときのみ・それ以外のエラーは
+    /// 伝播・バックエンド戻り値の shape 契約検証）に、`delta`
+    /// （`SmoothL1` では `beta` と呼ぶが同じ引数）の検査を追加する
+    /// 検査順序: ①`check_same_tape` → ②shape 一致
+    /// （`require_same_shape`）→ ③`delta` が有限かつ `> 0`（違反は
+    /// `AutodiffError::InvalidArgument`。`rms_norm` の `eps` 検査と同型）
+    /// → ④実体化（層 1）→ ⑤`BackendOps::huber_loss` 試行 →
+    /// ⑥バックエンド契約検証（戻り値 shape `[]`）→ ⑦ノード記録。
+    fn huber_loss_impl(
+        &self,
+        target: &Var<'t>,
+        kind: HuberKind,
+        delta: f32,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(target)?;
+        let lhs_shape = self.shape();
+        let rhs_shape = target.shape();
+        require_same_shape(&lhs_shape, &rhs_shape)?;
+        if !delta.is_finite() || delta <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::huber_loss_impl: delta must be finite and positive, got {delta}"
+            )));
+        }
+        let (pred_val, target_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let pred_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let target_val = materialize_fallible(&nodes, self.tape.ops(), target.id)?.clone();
+            (pred_val, target_val)
+        };
+        let value =
+            match self
+                .tape
+                .ops()
+                .huber_loss(&pred_val, &target_val, kind, delta, reduction.into())
+            {
+                Ok(v) => {
+                    // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                    // huber_loss` doc「戻り値は shape `[]`」）を検証する
+                    // （`mse_loss_with` と同じ理由）。
+                    if !v.shape().is_empty() {
+                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                lhs: v.shape().to_vec(),
+                                rhs: Vec::new(),
+                            },
+                        )));
+                    }
+                    v
+                }
+                Err(BackendError::Unsupported(_)) => {
+                    eval::huber_loss(&pred_val, &target_val, kind, delta, reduction)
+                }
+                Err(other) => return Err(AutodiffError::Backend(other)),
+            };
+        let id = self.tape.push_eager(
+            Op::HuberLoss {
+                pred: self.id,
+                target: target.id,
+                kind,
+                delta,
+                reduction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 二値交差エントロピー損失（`self` = 予測確率 `[0, 1]`、`target` =
+    /// 正解ラベル。全要素平均・PyTorch `nn.BCELoss` 相当）。
+    /// `bce_loss_impl(target, BceKind::Probabilities, reduction)` への
+    /// 委譲（#1737。親イシュー #1609「損失関数の拡張」）。`nn::loss::
+    /// BceLoss`（`nn/loss.rs`）はこのメソッドを呼ぶだけの薄いラッパー
+    /// （REQ-9）。
+    pub fn bce_loss(
+        &self,
+        target: &Var<'t>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.bce_loss_impl(target, BceKind::Probabilities, reduction)
+    }
+
+    /// 二値交差エントロピー損失（logits 入力版。`self` = 未正規化の
+    /// logits、`target` = 正解ラベル。PyTorch `nn.BCEWithLogitsLoss`
+    /// 相当）。sigmoid をカーネル内に内包した数値安定な合成式で計算
+    /// する（`docs/compat-api-scope.md` §1.2 参照）。
+    /// `bce_loss_impl(target, BceKind::Logits, reduction)` への委譲
+    /// （#1737）。`self`（logits）は `[0, 1]` 範囲制約を受けない
+    /// （[`Self::bce_loss`] と異なり範囲検査を行わない）。`nn::loss::
+    /// BceWithLogitsLoss`（`nn/loss.rs`）はこのメソッドを呼ぶだけの
+    /// 薄いラッパー（REQ-9）。
+    pub fn bce_with_logits_loss(
+        &self,
+        target: &Var<'t>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.bce_loss_impl(target, BceKind::Logits, reduction)
+    }
+
+    /// [`Self::bce_loss`]／[`Self::bce_with_logits_loss`] 共通実装
+    /// （#1737）。`mse_loss_with` と同じ演算メソッド規律（層 1
+    /// 実体化 → `self.tape.ops()` の融合カーネルを試み `Unsupported`
+    /// のときのみホスト参照実装 `eval::bce_loss` へフォールバック。
+    /// それ以外のエラーは伝播し判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）に加え、[`BceKind::
+    /// Probabilities`] のときのみ `input`／`target` 双方の値が
+    /// `[0, 1]` 範囲内（NaN は範囲外として拒否）であることを
+    /// 実体化直後・バックエンド呼び出し前にホスト側で検査する
+    /// （`Self::cross_entropy_loss` の targets 範囲検査と同じ配置・
+    /// 同じ `AutodiffError::InvalidArgument` 文言様式。`.claude/rules/
+    /// security.md` A03）。
+    fn bce_loss_impl(
+        &self,
+        target: &Var<'t>,
+        kind: BceKind,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(target)?;
+        let lhs_shape = self.shape();
+        let rhs_shape = target.shape();
+        require_same_shape(&lhs_shape, &rhs_shape)?;
+        let (input_val, target_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let input_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let target_val = materialize_fallible(&nodes, self.tape.ops(), target.id)?.clone();
+            (input_val, target_val)
+        };
+        if matches!(kind, BceKind::Probabilities) {
+            for &v in eval::dense_vec(&input_val).iter() {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "bce_loss: input 値 {v} が範囲 [0, 1] を外れている"
+                    )));
+                }
+            }
+            for &v in eval::dense_vec(&target_val).iter() {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "bce_loss: target 値 {v} が範囲 [0, 1] を外れている"
+                    )));
+                }
+            }
+        }
+        let value = match self
+            .tape
+            .ops()
+            .bce_loss(&input_val, &target_val, kind, reduction.into())
+        {
+            Ok(v) => {
+                // バックエンド実装の契約（`backend_ops.rs::BackendOps::
+                // bce_loss` doc「戻り値は shape `[]`」）を検証する
+                // （実装バグの黙認防止。`.claude/rules/security.md` A08）。
+                if !v.shape().is_empty() {
+                    return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                        fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                            lhs: v.shape().to_vec(),
+                            rhs: Vec::new(),
+                        },
+                    )));
+                }
+                v
+            }
+            Err(BackendError::Unsupported(_)) => {
+                eval::bce_loss(&input_val, &target_val, kind, reduction)
+            }
+            Err(other) => return Err(AutodiffError::Backend(other)),
+        };
+        let id = self.tape.push_eager(
+            Op::BceLoss {
+                input: self.id,
+                target: target.id,
+                kind,
+                reduction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
     /// 行方向 RMSNorm（`x · rsqrt(mean(x²) + eps) · w`。`w` が `None`
     /// の場合は乗算をスキップ。イシュー #1596）。正規化軸は常に
     /// 最終軸（[`row_norm_layout`] が `(rows, hidden)` を導出する）。
@@ -2693,7 +2953,7 @@ impl<'t> Var<'t> {
     /// み。算術を含まない純粋なコピー演算のため forward は 3
     /// バックエンド間で構造的に bit 完全一致する）。
     ///
-    /// 検査順序: ①[`fandhe_ai_tensor_core::interpolate_out_shape`]
+    /// 検査順序: ①[`fandhe_ai_tensor_core::interpolate_out_shape_for_mode`]
     /// （`size` の rank・空間軸の 0 サイズ・要素数オーバーフローを
     /// 検査し `out_shape` を確定。違反は `AutodiffError::Shape`）→
     /// ②`self` を層 1 で実体化 → ③`ops.interpolate` →
@@ -2707,7 +2967,8 @@ impl<'t> Var<'t> {
         mode: InterpolateMode,
     ) -> Result<Var<'t>, AutodiffError> {
         let in_shape = self.shape();
-        let out_shape = interpolate_out_shape(&in_shape, size).map_err(AutodiffError::Shape)?;
+        let out_shape =
+            interpolate_out_shape_for_mode(&in_shape, size, mode).map_err(AutodiffError::Shape)?;
 
         let input_val = {
             let nodes = self.tape.nodes.borrow();
@@ -2900,6 +3161,38 @@ impl<'t> Var<'t> {
             materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
         };
         unique_with_fallback(self.tape.ops(), &input_val)
+    }
+
+    /// `self` を `Tensor<T>` へ変換する（`torch.Tensor.to(dtype)` 相当
+    /// の一方向。イシュー #1750。dtype 変換基盤の契約・数値表は
+    /// `docs/tensor-core-cast-design.md` を正とする）。
+    ///
+    /// **非微分演算**: 出力が f32 以外の dtype への cast は勾配を
+    /// 持たない（`Var::argmax`／`Var::unique` と同型の理由——`Tensor<T>`
+    /// は `Var` の tape 表現に乗らない）ため、本メソッドは新規 `Op` を
+    /// tape に記録せず（`push_eager` を呼ばない）、`self` を
+    /// `materialize_fallible` で実体化した値に対して
+    /// `cast_from_f32_with_fallback` を適用した **detached な
+    /// `Tensor<T>`** を返す。
+    ///
+    /// `T = f32` を指定した場合も本メソッドは detached なコピーを
+    /// 返すだけであり勾配は伝播しない——勾配を保ったまま f32 系の
+    /// 恒等射を得たい場合は [`Var::to_f32`] を使うこと。
+    pub fn cast<T: CastElement>(&self) -> Result<Tensor<T>, AutodiffError> {
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        cast_from_f32_with_fallback(self.tape.ops(), &input_val)
+    }
+
+    /// f32 系の恒等射（イシュー #1750）。`self` は既に `Tensor<f32>`
+    /// を表す `Var` であるため、`Var: Copy` により `self` をそのまま
+    /// 返すだけで済み、勾配は通常どおり `self` の tape ノードへ伝播
+    /// する（[`Var::cast`]`::<f32>()` が detached なコピーを返し勾配を
+    /// 打ち切るのとは対照的）。
+    pub fn to_f32(&self) -> Var<'t> {
+        *self
     }
 
     /// `mask` が真の位置を上書きする（`torch.scatter` 相当。イシュー

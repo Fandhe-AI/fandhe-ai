@@ -955,6 +955,63 @@ fn unique_empty_input_returns_shape_zero() {
     assert_eq!(out.shape(), &[0]);
 }
 
+/// `Var::cast`（イシュー #1750）が `unique`／`argmax` と同型の非微分
+/// 演算として、新規ノードを一切 tape に記録しないことを検証する
+/// （`docs/tensor-core-cast-design.md`）。
+#[test]
+fn cast_does_not_record_a_tape_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.5, -2.5, 3.0], &[3]));
+
+    let before = tape.len();
+    let out: Tensor<i32> = x.cast().unwrap();
+    assert_eq!(
+        tape.len(),
+        before,
+        "cast は非微分演算のため tape ノードを追加しないはず"
+    );
+    assert_eq!(out.shape(), &[3]);
+}
+
+/// `Var::to_f32` が `self` と同一ノードを指す恒等射であり、新規ノード
+/// を追加しないことを検証する（`Var::cast::<f32>()` の detached コピー
+/// とは対照的に、こちらは既存ノードをそのまま指す）。
+#[test]
+fn to_f32_is_identity_and_adds_no_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+
+    let before = tape.len();
+    let y = x.to_f32();
+    assert_eq!(
+        tape.len(),
+        before,
+        "to_f32 は恒等射のためノードを追加しない"
+    );
+    assert_eq!(y.to_tensor().host_slice().into_owned(), vec![1.0, 2.0]);
+}
+
+/// `Tape::var_from`（イシュー #1750）が [`Tape::var`] と同じく葉 1
+/// ノードのみを追加することを検証する（`gather`／`scatter` の「1
+/// ノード追加」と同型・非 f32 dtype からの登録という点のみが差分）。
+#[test]
+fn var_from_records_a_single_leaf_node() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let before = tape.len();
+    let x = tape
+        .var_from(&Tensor::new(vec![true, false, true], &[3]).unwrap())
+        .unwrap();
+    assert_eq!(
+        tape.len(),
+        before + 1,
+        "var_from は葉 1 ノードのみ追加するはず"
+    );
+    assert_eq!(
+        x.to_tensor().host_slice().into_owned(),
+        vec![1.0f32, 0.0, 1.0]
+    );
+}
+
 /// `interpolate`（イシュー #1757）が 1 ノードのみ追加する
 /// `push_eager`（実体化済み）ノードとして記録されることを検証する
 /// （`Op::Gather`／`Op::Pad` と同型。view ノードではない）。

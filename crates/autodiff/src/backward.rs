@@ -79,6 +79,14 @@ impl Gradients {
         if var.tape_epoch() != self.epoch {
             return Err(AutodiffError::TapeMismatch);
         }
+        // イシュー #1748: 対象ノードが `requires_grad == false`
+        // （`Tape::var_no_grad` の葉・`Var::detach` の葉・それらのみを
+        // 祖先に持つ非葉ノード）なら `Err(GradientTrackingDisabled)`。
+        // 「loss から未到達」（`Ok(None)`。下の分岐）とは型で区別する
+        // ——こちらは「そもそも構造的に勾配を持ちえない」ことを表す。
+        if !var.requires_grad() {
+            return Err(AutodiffError::GradientTrackingDisabled);
+        }
         Ok(self.grads.get(var.node_id().0).and_then(|g| g.as_ref()))
     }
 
@@ -112,6 +120,60 @@ impl Tape {
         self.backward_impl(loss, None)
     }
 
+    /// 同一 `Tape` 上で `loss` を逆伝播し、その結果を既存の `into`
+    /// （同一世代の `Gradients`）へ**加算**する（イシュー #1749）。
+    ///
+    /// PyTorch の「同一パラメータに対し `loss.backward()` を複数回
+    /// 呼ぶと `.grad` に加算される」契約（勾配蓄積によるマイクロ
+    /// バッチ・複数損失の学習）の opt-in 版。素の [`Tape::backward`]
+    /// は呼び出しごとに独立した `Gradients` を返す意味論のまま不変
+    /// ——本メソッドはそれとは別に、利用者が明示的に合成先
+    /// （`into`）を指定したときにのみ蓄積する（`docs/
+    /// autodiff-retain-graph-accumulate-decision.md` §2.2）。
+    ///
+    /// 処理順序（原子的マージ。途中の `Err` は `into` を無変更のまま
+    /// 返す）:
+    /// 1. `loss` が別 `Tape` に属する、または `into` が別 `Tape`／別
+    ///    世代（`Tape::reset` をまたいだ）のものなら `Err(TapeMismatch)`。
+    /// 2. `into` が resident 勾配経路（[`Tape::backward_device_param_
+    ///    store`] 相当。facade 経由）由来（`resident_fingerprint`
+    ///    が `Some`）なら `Err(Backward)`。`DeviceParamStore::step` は
+    ///    fingerprint で「今回の backward の結果そのもの」であることを
+    ///    検証するため、蓄積結果を渡すとその契約が壊れる
+    ///    （`Gradients::resident_fingerprint` doc 参照）。
+    /// 3. `self.backward_impl(loss, None)` で新規 `Gradients`
+    ///    （`fresh`）を完全に計算する（ここで `Err` なら `into` は
+    ///    無変更のまま返す）。
+    /// 4. `into.grads` と `fresh.grads` を要素ごとに合算した新しい
+    ///    `Vec` を組み立て、**全要素の合算に成功してから** `into` へ
+    ///    書き戻す（部分適用を作らない）。同一 fan-out 経路の合算と
+    ///    同じ `grad::vjp_elementwise_add`（クレート非公開項目のため
+    ///    リンクにはしない）を使うため、加算自体の数値契約は
+    ///    `backward.rs::accumulate` と同一。
+    pub fn backward_accumulate(
+        &self,
+        loss: &Var<'_>,
+        into: &mut Gradients,
+    ) -> Result<(), AutodiffError> {
+        if loss.tape_id() != self.id {
+            return Err(AutodiffError::TapeMismatch);
+        }
+        if into.tape_id != self.id || into.epoch != self.epoch() {
+            return Err(AutodiffError::TapeMismatch);
+        }
+        if into.resident_fingerprint.is_some() {
+            return Err(AutodiffError::Backward(
+                "resident 経路（DeviceParamStore::backward）由来の Gradients は \
+                 backward_accumulate の蓄積先にできない（fingerprint 契約と衝突する）"
+                    .into(),
+            ));
+        }
+
+        let fresh = self.backward_impl(loss, None)?;
+        into.grads = merge_gradient_vecs(self.ops(), &into.grads, &fresh.grads)?;
+        Ok(())
+    }
+
     /// [`Tape::backward`] のデバイス常駐対応版（イシュー #1022）。
     /// `resolver`（`fandhe_ai_autodiff::optim::device_store::
     /// DeviceParamStore` が実装する [`ResidentResolver`]）を
@@ -136,6 +198,20 @@ impl Tape {
     ) -> Result<Gradients, AutodiffError> {
         if loss.tape_id() != self.id {
             return Err(AutodiffError::TapeMismatch);
+        }
+        // イシュー #1748: `loss` 自身が `requires_grad == false`
+        // （`Tape::var_no_grad`／`Var::detach` の葉、またはそれらのみを
+        // 祖先に持つノード）なら、逆伝播できる追跡対象の祖先を持たない
+        // ため即座に `Err` とする。`materialize_fallible`（次のブロック。
+        // 未実体化なら実体化が走る）より**前**に検査することで、
+        // 追跡なし loss の拒否のために不要な実体化を走らせない
+        // （`TapeNode::requires_grad` doc 参照）。
+        if !loss.requires_grad() {
+            return Err(AutodiffError::Backward(
+                "loss は勾配追跡対象の祖先を持たない（起点ノードの requires_grad が false。\
+                 var_no_grad／detach の葉のみで構成されている）"
+                    .into(),
+            ));
         }
 
         // `backward` はノードを追加しないため、`n` は事前に確定して
@@ -237,8 +313,24 @@ impl Tape {
                     self.epoch(),
                 )?
             };
-            for (target, contribution) in contributions {
-                accumulate(self.ops(), &mut grads, target, contribution)?;
+            // イシュー #1748: `requires_grad == false` のノードへの寄与は
+            // `accumulate` へ渡さず捨てる（PyTorch が `requires_grad=False`
+            // の葉へ勾配を蓄積しないのと同じ意味論）。`grads[target]` は
+            // `None` のまま残るため、`target` を主ループが処理する反復
+            // （`for id in (0..n).rev()`）では `let Some(upstream) = ..
+            // else { ...; continue; }` に乗って VJP 自体もスキップされ、
+            // checkpoint 帳簿（`release_checkpoints_ending_at`）は既存の
+            // 未到達分岐がそのまま処理する。`nodes` を再借用する
+            // （直前のブロックで `Ref` は既に drop 済みのため二重借用に
+            // ならない）。
+            {
+                let nodes = self.nodes.borrow();
+                for (target, contribution) in contributions {
+                    if !nodes[target.0].requires_grad {
+                        continue;
+                    }
+                    accumulate(self.ops(), &mut grads, target, contribution)?;
+                }
             }
             // activation checkpointing（イシュー #1624）の再解放:
             // 上のブロックで `nodes`（`Ref`）は既に drop 済みのため、
@@ -277,6 +369,40 @@ impl Tape {
 /// 加算で bit 同一）。フォールバックは `crate::eval::add`（ホスト逐次
 /// 参照実装。ゲート `false` 時・`BackendError::Unsupported` 時の経路。
 /// `grad::vjp_elementwise_add` doc 参照）。
+/// [`Tape::backward_accumulate`] 用のマージ本体。`existing`（`into` の
+/// 現在値）と `fresh`（今回の backward 結果）を index ごとに合算した
+/// 新しい `Vec` を返す（`into` 自体はまだ書き換えない——呼び出し元が
+/// 全体の成功を確認してから代入することで、途中の `Err` で `into` が
+/// 半端に更新される事故を防ぐ）。
+///
+/// 片方のみ `Some` の場合は複製、両方 `None` の場合は `None` のまま。
+/// `fresh` は同一世代内で `existing` 生成後にノードが追加された場合
+/// でも `existing` より短くなることはない（`Tape::reset` を挟まない
+/// 限りノード数は単調増加。`Tape::len` 参照）が、`existing` 側が
+/// `fresh` より短い可能性に備え、添字越えで panic しない `get()`
+/// ベースの走査にする（`.claude/rules/coding-rust.md` 本番経路 panic
+/// 禁止方針）。
+fn merge_gradient_vecs(
+    ops: &dyn BackendOps,
+    existing: &[Option<Tensor<f32>>],
+    fresh: &[Option<Tensor<f32>>],
+) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+    let n = existing.len().max(fresh.len());
+    let mut merged: Vec<Option<Tensor<f32>>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let a = existing.get(i).and_then(|g| g.as_ref());
+        let b = fresh.get(i).and_then(|g| g.as_ref());
+        let combined = match (a, b) {
+            (Some(a), Some(b)) => Some(grad::vjp_elementwise_add(ops, a, b)?),
+            (Some(a), None) => Some(a.clone()),
+            (None, Some(b)) => Some(b.clone()),
+            (None, None) => None,
+        };
+        merged.push(combined);
+    }
+    Ok(merged)
+}
+
 fn accumulate(
     ops: &dyn BackendOps,
     grads: &mut [Option<Tensor<f32>>],

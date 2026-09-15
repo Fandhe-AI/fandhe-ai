@@ -16,7 +16,9 @@
 //! TASK-9.1a（#91）で第 1 分割として `Linear`（全結合層）を実装した。
 //! TASK-9.1b（#92）で活性化関数（[`activation`]）を追加した。#190
 //! （親 #189）で MSE 損失（[`loss`]）を追加し、#191 で CrossEntropy
-//! 損失（同じく [`loss`]）を追加した。#194（親 #192）で optimizer の
+//! 損失（同じく [`loss`]）を追加した。#1737（親 #1609）で二値交差
+//! エントロピー損失（`loss::BceLoss`／`loss::BceWithLogitsLoss`）を
+//! 追加した。#194（親 #192）で optimizer の
 //! 第 1 弾として AdamW（[`optim::AdamW`]）を追加した。#195（親 #192）で
 //! gradient clipping・LR スケジューラ最小セット（[`optim::clip`]・
 //! [`optim::lr_scheduler`]）を追加した。SGD 本体は `crate::optim`
@@ -42,7 +44,11 @@
 //! 既存 `Var` 演算（`matmul`／`reshape`／`permute`／`masked_fill`／
 //! `softmax`）の合成として実装している。`Module` trait は self-attention
 //! （`q=k=v=input`）として実装する（`attention.rs` モジュール doc
-//! 参照）。
+//! 参照）。イシュー #1739 で Huber／SmoothL1 損失（[`loss::HuberLoss`]／
+//! [`loss::SmoothL1Loss`]）を追加した。`MseLoss`／`CrossEntropyLoss` と
+//! 同じ「`BackendOps` の専用融合カーネルを優先し `Unsupported` のとき
+//! のみホスト参照実装へフォールバックする」設計を踏襲する
+//! （`loss.rs` モジュール doc 参照）。
 
 mod attention;
 mod embedding;

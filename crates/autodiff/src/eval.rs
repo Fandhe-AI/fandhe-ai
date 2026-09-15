@@ -24,8 +24,8 @@
 use std::borrow::Cow;
 
 use fandhe_ai_tensor_core::{
-    GruBackwardOutput, GruPointwiseOutput, LstmPointwiseOutput, ScatterReduce, ShapeError, Tensor,
-    VectorNormOrd,
+    BceKind, GruBackwardOutput, GruPointwiseOutput, HuberKind, LstmPointwiseOutput, ScatterReduce,
+    ShapeError, Tensor, VectorNormOrd, bilinear_blend, bilinear_scale, bilinear_src_coord,
 };
 
 use crate::layout;
@@ -793,6 +793,304 @@ pub(crate) fn mse_loss(
             }
         }
         crate::var::Reduction::Sum => sum_sq,
+    };
+    build_tensor(vec![out], &[])
+}
+
+/// [`huber_loss`]（ホストフォールバック）が縮約に使う固定チャンク
+/// サイズ（イシュー #1739）。`backend-cpu::mse::CHUNK`（融合カーネル
+/// 側）と同値とし、フォールバック経路が融合カーネル経路と異なる
+/// 加算順序で丸め誤差を蓄積し REQ-2 判定を超えて乖離することを避ける
+/// （フォールバックは `BackendOps::huber_loss` が `Unsupported` を
+/// 返したときのみ経由する`.claude/rules/coding-rust.md`「バックエンド間
+/// 数値一致は統一複合判定」の趣旨を先回りして踏襲）。
+const HUBER_HOST_FALLBACK_CHUNK: usize = 4096;
+
+/// Huber／SmoothL1 の要素損失 `l(d)`（`d = pred − target`。イシュー
+/// #1739）。PyTorch `nn.HuberLoss(delta)`／`nn.SmoothL1Loss(beta)` の
+/// 意味論の正（`grad.rs::huber_loss_vjp`・CPU 融合カーネルの CPU 参照
+/// 実装〈parity テスト〉双方がこの定義に一致することを検証する）。
+///
+/// | kind | `\|d\| < delta` | それ以外 |
+/// |---|---|---|
+/// | `Huber` | `0.5·d²` | `delta·(\|d\| − 0.5·delta)` |
+/// | `SmoothL1` | `0.5·d²/delta` | `\|d\| − 0.5·delta` |
+///
+/// 二次分岐の判定は PyTorch と同じ `<`（等号は線形分岐。両分岐は
+/// 境界 `\|d\| == delta` で連続）。`delta` は呼び出し元
+/// （`Var::huber_loss_impl`）が有限かつ `> 0` を検証済みの値。
+/// `#[non_exhaustive]` な `HuberKind` の未知 variant は `Huber` 意味論へ
+/// 安全側フォールバックする（`debug_assert!` でテスト時のみ検知。
+/// `bce_elem_loss` と同型の判断）。
+pub(crate) fn huber_elem_loss(d: f32, kind: HuberKind, delta: f32) -> f32 {
+    let abs_d = d.abs();
+    match kind {
+        HuberKind::SmoothL1 => {
+            if abs_d < delta {
+                // `d*d` を先に計算すると delta・d が巨大な有限値の
+                // ときに中間積が overflow しうる。`abs_d < delta`
+                // 分岐内では `|d/delta| < 1` が保証されるため、先に
+                // delta で割ってから d を掛けることで中間値を `|d|`
+                // 以下に抑える（`backend-cpu::huber::elem_loss`・
+                // CUDA `kernels_huber.rs`・Metal `shaders/huber.metal`
+                // と同じ演算順序で揃える）。
+                0.5 * (d / delta) * d
+            } else {
+                abs_d - 0.5 * delta
+            }
+        }
+        // `Huber`。未知 variant はここへ安全側フォールバック。
+        _ => {
+            debug_assert!(
+                matches!(kind, HuberKind::Huber),
+                "huber_elem_loss: unknown HuberKind variant {kind:?}; falling back to Huber \
+                 semantics"
+            );
+            if abs_d < delta {
+                0.5 * d * d
+            } else {
+                delta * (abs_d - 0.5 * delta)
+            }
+        }
+    }
+}
+
+/// ログクランプ下限（PyTorch `BCELoss` の実装と同じ `-100`。`p` が
+/// `0`／`1` に極めて近い場合の `ln` の `-inf` 発散を避ける）。
+const BCE_LOG_CLAMP_MIN: f32 = -100.0;
+
+/// [`BceKind::Probabilities`]／[`BceKind::Logits`] 共通の要素損失
+/// （`bce_loss`／`bce_loss_vjp`〈`grad.rs`〉の双方から呼ばれる意味論の
+/// 正。`docs/compat-api-scope.md` §1.2「損失」節参照）。
+///
+/// - `Probabilities`: `l = −( y·max(ln p, −100) + (1−y)·max(ln(1−p),
+///   −100) )`（PyTorch `BCELoss` と同じログクランプ）。
+/// - `Logits`: `x>=0` は `l = (1−y)·x + ln(1+exp(−x))`、`x<0` は
+///   `l = −y·x + ln(1+exp(x))`（`max(x,0) − x·y + ln(1+exp(−|x|))` と
+///   数式として等価だが、`x` が大きく `y` が 1 に近いとき `x − x·y` が
+///   桁落ちしバックエンド間 FMA 契約差で乖離しうるため、減算ではなく
+///   `(1−y)·x` の乗算のみで打ち消し量を先に求める形へ書き換えている
+///   〈codex-review 指摘・#1737 PR #1848〉。`exp` の引数は常に非正の
+///   ため overflow しない。PyTorch `BCEWithLogitsLoss` の内部式と同型）。
+pub(crate) fn bce_elem_loss(input: f32, target: f32, kind: BceKind) -> f32 {
+    match kind {
+        BceKind::Probabilities => {
+            let log_p = input.ln().max(BCE_LOG_CLAMP_MIN);
+            let log_1mp = (1.0 - input).ln().max(BCE_LOG_CLAMP_MIN);
+            -(target * log_p + (1.0 - target) * log_1mp)
+        }
+        // `Logits`、および `BceKind`（`#[non_exhaustive]`。`tensor-core`
+        // 側で将来 variant を追加しうる）の未知 variant は同じ
+        // `Logits` 意味論へ安全側フォールバックする（`eval::scatter`
+        // の `ScatterReduce` 未知 variant 処理と同型。本関数は
+        // infallible 契約のため `Result` を返せない。未知 variant への
+        // 到達は契約違反として `debug_assert!` で検知するのみに留める。
+        // `.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
+        kind => {
+            debug_assert!(
+                matches!(kind, BceKind::Logits),
+                "eval::bce_elem_loss: 未知の BceKind variant へフォールバックした（契約違反）"
+            );
+            if input >= 0.0 {
+                (1.0 - target) * input + (-input).exp().ln_1p()
+            } else {
+                -target * input + input.exp().ln_1p()
+            }
+        }
+    }
+}
+
+/// [`huber_elem_loss`] の `pred` に対する要素勾配 `∂l/∂pred`（`scale`
+/// 乗算前。イシュー #1739）。`sign(d)` は 3 バックエンドとも
+/// `copysign`（本関数は `f32::copysign`）で統一する
+/// （`.claude/rules/coding-rust.md` の丸め方針統一と同じ理由で
+/// `±0`／符号の扱いをバックエンド間で一致させる）。
+///
+/// | kind | `\|d\| < delta` | それ以外 |
+/// |---|---|---|
+/// | `Huber` | `d` | `copysign(delta, d)` |
+/// | `SmoothL1` | `d/delta` | `copysign(1, d)` |
+pub(crate) fn huber_elem_grad(d: f32, kind: HuberKind, delta: f32) -> f32 {
+    // `d` が NaN（`pred`／`target` のいずれかが NaN）のとき、
+    // `abs_d < delta` は NaN 比較の規約により常に false となり
+    // else 分岐（`copysign` 系）へ落ちて有限な勾配（±1／±delta）を
+    // 返してしまう。forward（`huber_elem_loss`）は同じ分岐構造でも
+    // else 分岐の結果が `NaN - 0.5*delta = NaN` となり自然に NaN を
+    // 返すため、forward と backward で NaN 伝播の有無が食い違う
+    // （イシュー #1739 レビュー指摘）。ここで明示的に NaN を伝播する
+    // （`backend-cpu::huber::elem_grad`・CUDA `kernels_huber.rs`・
+    // Metal `shaders/huber.metal` と同じ方針で揃える）。
+    if d.is_nan() {
+        return d;
+    }
+    let abs_d = d.abs();
+    match kind {
+        HuberKind::SmoothL1 => {
+            if abs_d < delta {
+                d / delta
+            } else {
+                1.0f32.copysign(d)
+            }
+        }
+        _ => {
+            debug_assert!(
+                matches!(kind, HuberKind::Huber),
+                "huber_elem_grad: unknown HuberKind variant {kind:?}; falling back to Huber \
+                 semantics"
+            );
+            if abs_d < delta { d } else { delta.copysign(d) }
+        }
+    }
+}
+
+/// `bce_elem_loss` の `dInput`（`scale` を乗じる前の要素勾配。`grad.rs`
+/// が上流勾配由来の `scale` を別途掛ける）。
+///
+/// - `Probabilities`: `(p − y) / max(p·(1−p), 1e−12)`（PyTorch と同じ
+///   `eps` によるゼロ除算回避）。
+/// - `Logits`: `sigmoid(x) − y`（`sigmoid_scalar` の数値安定形を使う）。
+pub(crate) fn bce_elem_grad_input(input: f32, target: f32, kind: BceKind) -> f32 {
+    match kind {
+        BceKind::Probabilities => {
+            let denom = (input * (1.0 - input)).max(1e-12);
+            (input - target) / denom
+        }
+        // `bce_elem_loss` と同じ未知 variant フォールバック規律。
+        kind => {
+            debug_assert!(
+                matches!(kind, BceKind::Logits),
+                "eval::bce_elem_grad_input: 未知の BceKind variant へフォールバックした（契約違反）"
+            );
+            sigmoid_scalar(input) - target
+        }
+    }
+}
+
+/// Huber／SmoothL1 損失の縮約（スカラー出力）のホスト参照実装
+/// （イシュー #1739）。`BackendOps::huber_loss` が `Unsupported` を
+/// 返したときのみ `Var::huber_loss_impl`（`var.rs`）から呼ばれる。
+/// shape 一致検査は呼び出し元が済ませている前提。`numel == 0` は
+/// [`mse_loss`] と同じく mean・sum とも `0.0` を返す。
+///
+/// **縮約方式**: [`HUBER_HOST_FALLBACK_CHUNK`] 固定チャンクで分割し、
+/// チャンク内は逐次加算・チャンク間はチャンク番号順に結合する
+/// （`backend-cpu::mse::mse_sum_sq_f32` と同じ決定的縮約方式のホスト側
+/// ミラー。素朴な先頭からの逐次和のみだと大規模入力で融合カーネル
+/// 経路と加算順序が乖離しうるため）。
+pub(crate) fn huber_loss(
+    pred: &Tensor<f32>,
+    target: &Tensor<f32>,
+    kind: HuberKind,
+    delta: f32,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let pred_data = dense_vec(pred);
+    let target_data = dense_vec(target);
+    let numel = pred_data.len();
+    let sum: f32 = pred_data
+        .chunks(HUBER_HOST_FALLBACK_CHUNK)
+        .zip(target_data.chunks(HUBER_HOST_FALLBACK_CHUNK))
+        .map(|(p_chunk, t_chunk)| {
+            p_chunk
+                .iter()
+                .zip(t_chunk.iter())
+                .fold(0.0f32, |acc, (&p, &t)| {
+                    acc + huber_elem_loss(p - t, kind, delta)
+                })
+        })
+        .fold(0.0f32, |acc, v| acc + v);
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                sum / numel as f32
+            }
+        }
+        crate::var::Reduction::Sum => sum,
+    };
+    build_tensor(vec![out], &[])
+}
+
+/// `bce_elem_loss` の `dTarget`（`scale` を乗じる前）。
+///
+/// - `Probabilities`: forward のクランプ済み式の厳密な導関数
+///   `−( max(ln p, −100) − max(ln(1−p), −100) )`（`p` が
+///   `(e^−100, 1−e^−100)` の外にあるときのみクランプが効き、PyTorch の
+///   無クランプ `−logit(p)` と差が生じる。`docs/compat-api-scope.md`
+///   §1.2 参照）。
+/// - `Logits`: `−x`。
+pub(crate) fn bce_elem_grad_target(input: f32, _target: f32, kind: BceKind) -> f32 {
+    match kind {
+        BceKind::Probabilities => {
+            let log_p = input.ln().max(BCE_LOG_CLAMP_MIN);
+            let log_1mp = (1.0 - input).ln().max(BCE_LOG_CLAMP_MIN);
+            -(log_p - log_1mp)
+        }
+        // `bce_elem_loss` と同じ未知 variant フォールバック規律。
+        kind => {
+            debug_assert!(
+                matches!(kind, BceKind::Logits),
+                "eval::bce_elem_grad_target: 未知の BceKind variant へフォールバックした（契約違反）"
+            );
+            -input
+        }
+    }
+}
+
+/// [`bce_loss`] の縮約チャンクサイズ（`backend-cpu::bce::CHUNK` と
+/// 同値。ホストフォールバック〈本関数〉と CPU 融合カーネル
+/// （`Unsupported` でないときに呼ばれる経路）とで縮約精度を揃える
+/// ための意図的複製。チャンク内は逐次 `f32` 加算・チャンク間は
+/// チャンク番号順に逐次結合し、単純な全要素逐次加算より丸め誤差を
+/// 抑える。codex-review 指摘（PR #1848）: フォールバック側が全要素
+/// 逐次加算のままだと、`BackendOps::bce_loss` が `Unsupported` の
+/// バックエンドへ切り替わった際に損失値が
+/// 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を
+/// 超えて乖離しうる（大きな入力での実測差: 相対差 約 0.00648・
+/// 絶対差 約 0.00449）。
+const BCE_HOST_FALLBACK_CHUNK: usize = 4096;
+
+/// 二値交差エントロピー損失のホスト参照実装（`Var::bce_loss`／
+/// `bce_with_logits_loss`〈`var.rs`〉から `BackendOps::bce_loss` が
+/// `Unsupported` のときのみ呼ばれる。イシュー #1737）。`mse_loss`
+/// （直上）と同じ「shape 一致検査は呼び出し元が済ませている・
+/// `numel == 0` は `Mean`／`Sum` とも `0.0`」契約。
+///
+/// 縮約精度は `backend-cpu::bce::bce_sum_f32`（CPU 融合カーネル）と
+/// 同じ固定チャンク（[`BCE_HOST_FALLBACK_CHUNK`]）縮約方式を用いる
+/// （`.claude/rules/coding-rust.md`「正規化統計・勾配の長軸縮約は
+/// `f64` アキュムレータで統一する」と同種の、縮約経路間の数値契約
+/// 統一。BCE の場合は `f64` ではなくチャンク分割方式で backend-cpu
+/// 側と揃える。PR #1848 codex-review 指摘）。
+pub(crate) fn bce_loss(
+    input: &Tensor<f32>,
+    target: &Tensor<f32>,
+    kind: BceKind,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
+    let input_data = dense_vec(input);
+    let target_data = dense_vec(target);
+    let numel = input_data.len();
+    let sum_loss: f32 = input_data
+        .chunks(BCE_HOST_FALLBACK_CHUNK)
+        .zip(target_data.chunks(BCE_HOST_FALLBACK_CHUNK))
+        .map(|(i_chunk, t_chunk)| {
+            i_chunk
+                .iter()
+                .zip(t_chunk.iter())
+                .fold(0.0f32, |acc, (&p, &y)| acc + bce_elem_loss(p, y, kind))
+        })
+        .fold(0.0f32, |acc, v| acc + v);
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                sum_loss / numel as f32
+            }
+        }
+        crate::var::Reduction::Sum => sum_loss,
     };
     build_tensor(vec![out], &[])
 }
@@ -1957,6 +2255,95 @@ pub(crate) fn interpolate_nearest(
             pos += coord * stride;
         }
         *out_val = input_data[pos];
+    }
+    Ok(build_tensor(out, &out_shape))
+}
+
+/// `interpolate`（[`fandhe_ai_tensor_core::InterpolateMode::
+/// Bilinear`]）のホスト参照実装（イシュー #1762）。
+/// `BackendOps::interpolate` が `Unsupported` を返したときのみ
+/// `grad::interpolate_with_fallback` から呼ばれる。`interpolate_nearest`
+/// と異なり算術（4 近傍の線形重み付け合成）を含むため、座標・重み・
+/// ブレンド式はいずれも [`fandhe_ai_tensor_core::interpolate`]
+/// （`bilinear_scale`／`bilinear_src_coord`／`bilinear_blend`）を単一
+/// 情報源として使う（backward の VJP index 構築
+/// `grad::bilinear_src_index_and_weight_map` も同じ関数を呼ぶ）。
+///
+/// `size` はちょうど 2 個の末尾空間軸サイズ（`(H, W)`。
+/// `Var::interpolate` が `interpolate_out_shape_for_mode` で事前検査
+/// 済み——本関数は `size.len() == 2` を前提とする。呼び出し元契約
+/// 違反は `debug_assert!` でのみ検出する）。
+pub(crate) fn interpolate_bilinear(
+    input: &Tensor<f32>,
+    size: &[usize],
+    align_corners: bool,
+) -> Result<Tensor<f32>, ShapeError> {
+    debug_assert_eq!(
+        size.len(),
+        2,
+        "interpolate_bilinear: caller must pre-validate size.len() == 2 via \
+         interpolate_out_shape_for_mode"
+    );
+    let in_shape = input.shape().to_vec();
+    let rank = in_shape.len();
+    let spatial_start = rank - size.len();
+    let mut out_shape = in_shape.clone();
+    out_shape[spatial_start..].copy_from_slice(size);
+
+    // `interpolate_nearest` と同じ理由: 出力側だけでなく入力側の
+    // 稠密化コスト（`dense_vec_ref`）も別途検査する（巨大な
+    // `broadcast_to` view からの縮小で入力の稠密化が capacity
+    // overflow panic しうるため）。
+    let in_numel = in_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let in_bytes = in_numel
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if in_bytes > isize::MAX as usize {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+
+    let numel: usize = out_shape.iter().product();
+    if numel == 0 {
+        return Ok(build_tensor(Vec::new(), &out_shape));
+    }
+
+    let input_data = dense_vec_ref(input);
+    let input_strides = row_major_strides(&in_shape);
+
+    let h_axis = spatial_start;
+    let w_axis = spatial_start + 1;
+    let in_h = in_shape[h_axis];
+    let in_w = in_shape[w_axis];
+    let out_h = out_shape[h_axis];
+    let out_w = out_shape[w_axis];
+    let scale_h = bilinear_scale(in_h, out_h, align_corners);
+    let scale_w = bilinear_scale(in_w, out_w, align_corners);
+
+    let mut out = vec![0f32; numel];
+    for (flat, out_val) in out.iter_mut().enumerate() {
+        let coords = unravel(flat, &out_shape);
+        let cy = bilinear_src_coord(coords[h_axis], in_h, scale_h, align_corners);
+        let cx = bilinear_src_coord(coords[w_axis], in_w, scale_w, align_corners);
+
+        // 空間軸以外（batch／channel 等）の素通し添字は共通の基底
+        // オフセットへ畳み込んでおく（4 近傍の読み出しで毎回同じ計算
+        // を繰り返さないため）。
+        let mut base = 0usize;
+        for (axis, &stride) in input_strides.iter().enumerate() {
+            if axis != h_axis && axis != w_axis {
+                base += coords[axis] * stride;
+            }
+        }
+        let stride_h = input_strides[h_axis];
+        let stride_w = input_strides[w_axis];
+        let v00 = input_data[base + cy.i0 * stride_h + cx.i0 * stride_w];
+        let v01 = input_data[base + cy.i0 * stride_h + cx.i1 * stride_w];
+        let v10 = input_data[base + cy.i1 * stride_h + cx.i0 * stride_w];
+        let v11 = input_data[base + cy.i1 * stride_h + cx.i1 * stride_w];
+        *out_val = bilinear_blend(v00, v01, v10, v11, cx.lambda1, cy.lambda1);
     }
     Ok(build_tensor(out, &out_shape))
 }
