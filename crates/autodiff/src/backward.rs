@@ -147,8 +147,9 @@ impl Tape {
     /// 4. `into.grads` と `fresh.grads` を要素ごとに合算した新しい
     ///    `Vec` を組み立て、**全要素の合算に成功してから** `into` へ
     ///    書き戻す（部分適用を作らない）。同一 fan-out 経路の合算と
-    ///    同じ [`grad::vjp_elementwise_add`] を使うため、加算自体の
-    ///    数値契約は `backward.rs::accumulate` と同一。
+    ///    同じ `grad::vjp_elementwise_add`（クレート非公開項目のため
+    ///    リンクにはしない）を使うため、加算自体の数値契約は
+    ///    `backward.rs::accumulate` と同一。
     pub fn backward_accumulate(
         &self,
         loss: &Var<'_>,

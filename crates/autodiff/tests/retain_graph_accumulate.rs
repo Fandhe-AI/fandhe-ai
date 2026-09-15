@@ -354,6 +354,29 @@ fn backward_accumulate_rejects_foreign_loss() {
     assert!(matches!(err, AutodiffError::TapeMismatch));
 }
 
+#[test]
+fn backward_accumulate_rejects_foreign_accumulation_target() {
+    // 上記 2 件はいずれも `loss` が `self` と不一致（第 1 検査）で
+    // 弾かれるケース。本テストは `loss` は `self` と一致するが
+    // `into`（蓄積先 `Gradients`）だけが別テープ由来という、
+    // `backward_accumulate` の第 2 検査（`into.tape_id != self.id`）
+    // を単独で踏む経路を網羅する（codex-review 指摘・イシュー #1749）。
+    let tape_a = Tape::new_with_ops(common::naive_ops());
+    let tape_b = Tape::new_with_ops(common::naive_ops());
+
+    let xa = tape_a.var(&t(vec![1.0, 2.0], &[2]));
+    let la = xa.mul(&xa).unwrap().sum(None).unwrap();
+    let mut grads_a = tape_a.backward(&la).unwrap();
+
+    let xb = tape_b.var(&t(vec![3.0, 4.0], &[2]));
+    let lb = xb.mul(&xb).unwrap().sum(None).unwrap();
+
+    // loss (lb) は self (tape_b) と一致するが、蓄積先 grads_a は
+    // tape_a 由来のため拒否される。
+    let err = tape_b.backward_accumulate(&lb, &mut grads_a).unwrap_err();
+    assert!(matches!(err, AutodiffError::TapeMismatch));
+}
+
 // --- 9. reset をまたいだ Gradients への蓄積は拒否 ---
 
 #[test]
