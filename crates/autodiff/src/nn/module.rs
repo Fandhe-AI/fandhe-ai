@@ -34,7 +34,6 @@ use fandhe_ai_tensor_core::{
     reduce_out_shape, require_same_shape, row_norm_layout,
 };
 
-/// `nn` の部品（層・活性化関数）に共通の forward シグネチャ。
 /// [`Module::named_parameters`] の実装が、子 `Module`（`Linear` 等）を
 /// 内包する複合層（`MultiheadAttention`・`Rnn`／`Lstm`／`Gru`）で名前へ
 /// 接頭辞（`"q_proj."` 等）を連結するための共通ヘルパー（イシュー
@@ -50,6 +49,7 @@ pub(crate) fn prefixed<'a>(
         .collect()
 }
 
+/// `nn` の部品（層・活性化関数）に共通の forward シグネチャ。
 pub trait Module {
     /// このステップの `tape` 上で 1 回分の forward を計算する。
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError>;
