@@ -132,7 +132,12 @@
 //! `rng::with_global_rng`（`manual_seed` 契約）を消費する。`Op`／
 //! `BackendOps`／VJP は追加しない（設計判断は
 //! `docs/dataset-dataloader-design.md`）。
-
+//!
+//! `tensor_fmt`（非公開モジュール。イシュー #1754）は `Tensor<T>` の
+//! `Debug`／`Display` 実装（打ち切り付きの値プレビュー）を提供する。
+//! `Tape: Debug` の既存公開契約（`docs/public-api-design.md` §7）越しに
+//! 巨大テンソルがダンプされても出力サイズが有界であることを保証する
+//! （設計判断は issue #1754 実装計画・PR 本文参照）。
 mod backend_ops;
 mod broadcast;
 pub mod buffer;
@@ -160,6 +165,7 @@ pub mod scalar_op;
 pub mod pool_core;
 pub mod rng;
 mod tensor;
+mod tensor_fmt;
 pub mod typed;
 mod typed_ops;
 
