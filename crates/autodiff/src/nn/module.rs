@@ -35,6 +35,21 @@ use fandhe_ai_tensor_core::{
 };
 
 /// `nn` の部品（層・活性化関数）に共通の forward シグネチャ。
+/// [`Module::named_parameters`] の実装が、子 `Module`（`Linear` 等）を
+/// 内包する複合層（`MultiheadAttention`・`Rnn`／`Lstm`／`Gru`）で名前へ
+/// 接頭辞（`"q_proj."` 等）を連結するための共通ヘルパー（イシュー
+/// #1758）。重複実装を避けるため `module.rs` 側に置き、`attention.rs`・
+/// `rnn.rs` から使う。
+pub(crate) fn prefixed<'a>(
+    prefix: &str,
+    inner: Vec<(String, &'a Tensor<f32>)>,
+) -> Vec<(String, &'a Tensor<f32>)> {
+    inner
+        .into_iter()
+        .map(|(name, tensor)| (format!("{prefix}.{name}"), tensor))
+        .collect()
+}
+
 pub trait Module {
     /// このステップの `tape` 上で 1 回分の forward を計算する。
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError>;
@@ -109,6 +124,53 @@ pub trait Module {
     fn as_relu(&self) -> bool {
         false
     }
+
+    /// `train()`／`eval()`（PyTorch `Module.training` 相当。イシュー
+    /// #1758・`docs/spec/04-requirements.md` REQ-9 2026-09-12 追記
+    /// Tier 1「Module の train／eval」）。**既定は no-op**。
+    ///
+    /// # 契約（無状態モジュールはモードを保持しない）
+    ///
+    /// 本クレート内実装（`Linear`・活性化関数群・`RmsNorm`／
+    /// `LayerNorm`・`Softmax`／`LogSoftmax`・`MultiheadAttention`・
+    /// `Rnn`／`Lstm`／`Gru`）はいずれも train／eval で挙動が変わらない
+    /// ため、このデフォルト（no-op）のままオーバーライドしない。
+    /// **モードの正はコンテナ**（`fandhe_ai_facade::compat::sequential::
+    /// Sequential`・将来の `ModuleList`／汎用 `Sequential`。イシュー
+    /// #1759）**が保持するフラグ**である。今後 Dropout（#1603）・
+    /// BatchNorm（#1608 配下）等のモード依存層を追加する際は、本
+    /// メソッドと [`Module::training`] の両方を必ずオーバーライドし、
+    /// 自層のフィールド（例: `Cell<bool>`）へ実際に保持すること
+    /// （既定のまま放置すると、コンテナ側の `set_training` 呼び出しが
+    /// 当該層へ伝播しても無視されてしまう）。
+    fn set_training(&mut self, _training: bool) {}
+
+    /// 現在のモード。**既定 `true`**（PyTorch `Module.training` の
+    /// 初期値と揃える）。[`Module::set_training`] と同じ契約
+    /// （無状態モジュールは保持しない・モード依存層は必ずオーバーライド
+    /// する）に従う。
+    fn training(&self) -> bool {
+        true
+    }
+
+    /// この層（および子を持つ場合は子を含む）が公開する学習可能
+    /// パラメータの「名前, 参照」列（PyTorch `Module.named_parameters()`
+    /// 相当。イシュー #1758）。
+    ///
+    /// # 命名契約
+    ///
+    /// 名前の正は PyTorch の packed 命名（`in_proj_weight`・
+    /// `weight_ih_l0` 等）ではなく、**本クレートの struct フィールド名／
+    /// accessor 名**とする（`docs/compat-api-scope.md` §1.2 該当行・
+    /// イシュー #1616〈state_dict〉が直列化する compat 契約の一部と
+    /// なるため、実装ごとに一貫させる）。列挙順は「登録順＝
+    /// weight → bias」（[`fandhe_ai_facade::compat::sequential::
+    /// Sequential::trainable_parameters`] と共通の順序契約。同 struct
+    /// を参照）。`Option` パラメータは `Some` のときのみ列挙する。
+    /// 既定は空 `Vec`（無状態モジュール向け）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        Vec::new()
+    }
 }
 
 /// `Linear::bind(tape)` で当該ステップの葉ノードを登録してから
@@ -124,6 +186,16 @@ impl Module for Linear {
 
     fn as_linear_mut(&mut self) -> Option<&mut Linear> {
         Some(self)
+    }
+
+    /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
+    /// `weight`（常に）→ `bias`（`Some` の場合のみ）の順。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![("weight".to_string(), self.weight())];
+        if let Some(bias) = self.bias() {
+            out.push(("bias".to_string(), bias));
+        }
+        out
     }
 
     /// [`Module::forward`]（`Linear::bind(tape).forward(input)`。
@@ -390,6 +462,14 @@ impl Module for RmsNorm {
         self.bind(tape).forward(input)
     }
 
+    /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
+    /// `weight`（`Some` の場合のみ。affine なし構成は空）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.weight()
+            .map(|w| vec![("weight".to_string(), w)])
+            .unwrap_or_default()
+    }
+
     /// `Var::rms_norm`（`var.rs`）と同じディスパッチ規律を `tape` 不要
     /// 経路（`ops` を直接受け取る）で再現する: `row_norm_layout` で
     /// `hidden` を導出し `weight` の shape を検査してから `ops.rmsnorm`
@@ -436,6 +516,19 @@ impl Module for RmsNorm {
 impl Module for LayerNorm {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.bind(tape).forward(input)
+    }
+
+    /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
+    /// `weight`（`Some` の場合）→ `bias`（`Some` の場合）の順。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = Vec::new();
+        if let Some(w) = self.weight() {
+            out.push(("weight".to_string(), w));
+        }
+        if let Some(b) = self.bias() {
+            out.push(("bias".to_string(), b));
+        }
+        out
     }
 
     fn forward_host(
