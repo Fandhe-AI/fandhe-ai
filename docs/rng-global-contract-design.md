@@ -147,7 +147,14 @@ pub fn manual_seed(seed: u64) {
   `with_global_rng` を消費する側）~~ → **#1725 で実装済み（§10）**。
 - ~~`arange`／`linspace`／`eye`／`zeros_like`／`ones_like`（#1726 が担当。
   RNG 契約は不要）~~ → **#1726 で実装済み（§11）**。
-- `nn::Dropout`（#1603）等、将来グローバル RNG を利用する確率的演算。
+- ~~`nn::Dropout`（#1603）等、将来グローバル RNG を利用する確率的演算。~~
+  → **#1603 で実装済み**（`crate::grad::dropout_mask` が
+  `fandhe_ai_tensor_core::rng::rand`〈本設計の `with_global_rng` を
+  内部で消費する既存関数〉をそのまま呼び、`numel` 回の draw を一様
+  乱数から `{0.0, scale}` マスクへ変換する。消費回数契約は
+  「`dropout(shape)` は `rand(shape)` と同一の消費列になる」——独自に
+  `with_global_rng` を叩き直さないことで機構として保証する。
+  `docs/compat-api-scope.md` §1.2「Dropout」行参照）。
   `data::DataLoader` の shuffle は #1615 で実装済み（`with_global_rng`
   を消費するホスト側完結の機構。`docs/dataset-dataloader-design.md`）。
 - `Linear::new`／`RnnCell::new` 等、既存の個別シード API のシグネチャ・
@@ -218,7 +225,8 @@ VJP は追加していない（生成結果は微分不能な葉値であり、`
   `randn_like`／`rand_like`／`normal(mean, std)`／`uniform_(a, b)`／
   `bernoulli`／`multinomial`／`randperm`・`torch.Generator` 相当の非
   グローバル RNG・CUDA／Metal デバイス側乱数カーネル・`nn::Dropout`
-  （#1603）・`randint` の int64 版。`ShapeError` の facade 再エクスポート
+  （#1603 で実装済み。上記「8. 対象外」節参照）・`randint` の int64
+  版。`ShapeError` の facade 再エクスポート
   は本イシューで実装済み（`crates/facade/src/lib.rs::ShapeError` 再
   エクスポート。旧版の本節が「対象外」と誤記していた点を PR #1815
   codex-review 指摘〈P2〉により是正）。

@@ -33,7 +33,8 @@
 //! **入出力契約（rank-3・batch_first 固定）**: `query: [B, L, E]`・
 //! `key`/`value: [B, S, E]` → 出力 `[B, L, E]`。unbatched `[L, E]`・
 //! `batch_first=false`・`kdim`/`vdim`・`key_padding_mask` 引数・
-//! `dropout_p`（#1603 未実装）・`need_weights`／attention weights の
+//! `dropout_p`（MHA への結線は対象外。`Var::dropout` 自体は #1603 で
+//! 実装済み）・`need_weights`／attention weights の
 //! 返却・`add_bias_kv`／`add_zero_attn`・packed `in_proj_weight`／
 //! PyTorch `state_dict` 対応付け（#1616）は対象外
 //! （`out-of-scope-tracking.md`）。
