@@ -136,8 +136,9 @@ pub trait Module {
     /// `Rnn`／`Lstm`／`Gru`）はいずれも train／eval で挙動が変わらない
     /// ため、このデフォルト（no-op）のままオーバーライドしない。
     /// **モードの正はコンテナ**（`fandhe_ai_facade::compat::sequential::
-    /// Sequential`・将来の `ModuleList`／汎用 `Sequential`。イシュー
-    /// #1759）**が保持するフラグ**である。今後 Dropout（#1603）・
+    /// Sequential`・`crate::nn::container::ModuleList`／`Sequential`
+    /// 〈イシュー #1759 で実装済み〉）**が保持するフラグ**である。今後
+    /// Dropout（#1603）・
     /// BatchNorm（#1608 配下）等のモード依存層を追加する際は、本
     /// メソッドと [`Module::training`] の両方を必ずオーバーライドし、
     /// 自層のフィールド（例: `Cell<bool>`）へ実際に保持すること
