@@ -35,9 +35,35 @@ fn truncation_bounds_output_for_large_tensor_via_facade() {
     // `Tape: Debug`（`docs/public-api-design.md` §7 の公開契約）越しに
     // 巨大テンソルがダンプされても出力サイズが有界であることを
     // facade 経由でも確認する（DoS 耐性。`.claude/rules/security.md`
-    // A04 観点）。
+    // A04 観点）。200x200 は各軸長（200）が `2 * FMT_EDGE_ITEMS` を
+    // 超えるため軸ごとの打ち切りだけでも有界になるケース。
     let t: Tensor<f32> = Tensor::zeros(&[200, 200]).unwrap();
     let s = format!("{}", t);
     assert!(s.len() < 2000, "output too long: {} bytes", s.len());
     assert!(s.contains("..."), "{s}");
+}
+
+#[test]
+fn truncation_bounds_output_when_no_single_axis_exceeds_edge_items_via_facade() {
+    // コードレビュー指摘（イシュー #1754）の再現ケースを facade 経由
+    // でも確認する: 各軸長 2・rank 20（numel = 2^20 = 1,048,576）は
+    // どの軸も `2 * FMT_EDGE_ITEMS` を超えないため軸ごとの打ち切りが
+    // 一度も発動しない。修正前はここで出力が 5MB 超・打ち切り
+    // マーカーなしに膨張していた（`tensor-core::tensor_fmt` の
+    // グローバル予算で修正済み）。
+    let t: Tensor<f32> = Tensor::zeros(&[2; 20]).unwrap();
+    let s = format!("{}", t);
+    assert!(s.contains("..."), "{s}");
+    assert!(s.len() < 50_000, "output too long: {} bytes", s.len());
+}
+
+#[test]
+fn extreme_rank_does_not_overflow_stack_via_facade() {
+    // `Tensor::new` は rank に上限を課さないため、全軸長 1（numel==1）
+    // にすれば安価に極端な rank のテンソルを構築できる。表示側の
+    // rank ガード（`FMT_MAX_RENDER_RANK`）がスタックオーバーフローを
+    // 防ぐことを facade 経由でも確認する。
+    let t: Tensor<f32> = Tensor::new(vec![0.0f32], &[1; 100_000]).unwrap();
+    let s = format!("{}", t);
+    assert!(s.contains("exceeds display limit"), "{s}");
 }

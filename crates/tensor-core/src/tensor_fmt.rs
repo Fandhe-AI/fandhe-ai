@@ -9,10 +9,32 @@
 //!
 //! `Tape: Debug` は既存の公開契約（`docs/public-api-design.md` §7）で
 //! あり、`Tape`/`Var`/`Op` は多数の `Tensor` を保持しうるため、値の
-//! 出力は必ず要素数上限つきで打ち切る（下記 [`FMT_MAX_ELEMS`]）。
-//! これにより `format!("{:?}", tape)` のような呼び出しが巨大テンソル
-//! 保持時でも出力サイズが入力サイズに比例して無限増加しない
-//! （`.claude/rules/security.md` A04 DoS 観点）。
+//! 出力は必ず要素数上限つきで打ち切る。打ち切りは 2 段構えで、総出力
+//! サイズと走査コストの双方を shape に依らず有界にする
+//! （`.claude/rules/security.md` A04 DoS 観点。レビュー指摘で判明した
+//! 元設計の穴と是正内容はコードレビュー #1754 追加修正を参照）:
+//!
+//! 1. 軸ごとの打ち切り（[`FMT_MAX_ELEMS`]／[`FMT_EDGE_ITEMS`]。可読性
+//!    目的）: `numel() > FMT_MAX_ELEMS` のとき、長さが
+//!    `2 * FMT_EDGE_ITEMS` を超える軸だけを先頭・末尾のみへ省略する。
+//!    **この基準だけでは軸ごとの長さが全て `2 * FMT_EDGE_ITEMS` 以下の
+//!    高階テンソル（例: `shape = [2; 20]`。`numel` は 100 万超だが全軸
+//!    長 2）で 1 軸も打ち切られず、出力が無制限に増大しうる**（元設計
+//!    の穴。当初は「有界」と誤って記載していた）。
+//! 2. 総出力要素数のグローバル上限（本修正で追加。[`render_axis`]／
+//!    [`render_axis_display`] の各呼び出し先頭で共有カウンタを検査し、
+//!    軸ごとの打ち切りが効かない形状でも総リーフ出力数を
+//!    `FMT_MAX_ELEMS` 以下に強制する。カウンタ枯渇後の呼び出しは
+//!    サブツリー全体を再帰せず即座に `"..."` を書いて返るため、走査
+//!    コストも `O(FMT_MAX_ELEMS * rank)` に有界となる）。
+//!
+//! 加えて、rank 自体が極端に大きいテンソル（例: `shape = [1; 100_000]`。
+//! `numel == 1` のため上記どちらの打ち切りも発動しないが、再帰の深さが
+//! rank に比例しスタックオーバーフローしうる）に対しては
+//! [`FMT_MAX_RENDER_RANK`] で rank 自体を検査し、超過時は再帰へ入らず
+//! 代替テキストを返す（`Tensor::new`／`shape` に rank 上限はないため
+//! 表示側で独立に守る必要がある。#1681 の checkpoint 反復化と同種の
+//! 「非信頼な深さでの再帰を避ける」設計判断）。
 //!
 //! 値の走査は `Tensor::get(&[usize])` による論理インデックス順（stride
 //! 走査）で行う。これにより `transpose`/`narrow`/`broadcast_to`
@@ -22,14 +44,33 @@
 use crate::element::Element;
 use crate::tensor::Tensor;
 
-/// 打ち切りを発動する要素数の上限（この値を超えると各軸を省略表示する）。
-/// PyTorch `torch.set_printoptions()` の既定値（`threshold=1000`）に
-/// 合わせた値（無限に大きい既定を避けデフォルトで DoS 耐性を持たせる）。
+/// 打ち切りを発動する要素数の上限。2 つの役割を持つ:
+/// (1) `numel() > FMT_MAX_ELEMS` のとき軸ごとの打ち切り判定
+///     （[`FMT_EDGE_ITEMS`]）を有効化する閾値、
+/// (2) 全軸を通じて実際に出力するリーフ要素数の総量上限（グローバル
+///     予算。モジュール doc 参照）。
+///     いずれも PyTorch `torch.set_printoptions()` の既定値
+///     （`threshold=1000`）に合わせた値。
 const FMT_MAX_ELEMS: usize = 1000;
 
 /// 打ち切り時に各軸の先頭・末尾に残す要素数。
 /// PyTorch `torch.set_printoptions()` の既定値（`edgeitems=3`）と同じ。
 const FMT_EDGE_ITEMS: usize = 3;
+
+/// 表示のために再帰的に descend する rank の上限。`Tensor::new`／
+/// `checked_numel` は shape の rank に上限を課さないため（要素数積が
+/// `usize` に収まりさえすれば任意 rank を構築可能。`numel == 0` や
+/// `1` になる shape なら rank を極端に大きくしても安価に構築できる）、
+/// 表示側で独立に守らないと `render_axis`／`render_axis_display` の
+/// 再帰深さが rank に比例してスタックオーバーフローしうる
+/// （`.claude/rules/coding-rust.md` の panic 禁止方針・
+/// `.claude/rules/security.md` A04 DoS 観点。#1681 で同種のスタック
+/// オーバーフロー対策として反復化した前例があるが、本モジュールは
+/// 再帰の深さ自体を通常利用で想定される範囲に制限する軽量な対策を
+/// 採る）。PyTorch/NumPy の実務上の rank 上限（NumPy `NPY_MAXDIMS`
+/// 系・PyTorch の実務上の次元数上限）より十分大きく、かつ default
+/// スレッドスタックでも安全な余裕を持つ値として 64 を採用する。
+const FMT_MAX_RENDER_RANK: usize = 64;
 
 /// 現在の走査位置（多次元インデックス）から `Tensor` の指定軸以降を
 /// 再帰的にレンダリングする。
@@ -38,18 +79,35 @@ const FMT_EDGE_ITEMS: usize = 3;
 /// それ以外の軸では `[` `]` の入れ子と `, ` 区切りで descend する。
 /// `truncate` は `numel() > FMT_MAX_ELEMS` のときに `true` となり、各軸の
 /// 長さが `2 * FMT_EDGE_ITEMS` を超える場合に先頭・末尾のみ表示し中間を
-/// `...` で省略する（該当軸の子孫がすべて省略されるため、打ち切りは
-/// 出力サイズを軸ごとに独立して抑える）。
+/// `...` で省略する（該当軸の子孫がすべて省略される）。
+///
+/// `budget` は全軸を通じて共有する残りリーフ出力予算（呼び出し元が
+/// `FMT_MAX_ELEMS` で初期化する）。`truncate` による軸ごとの打ち切り
+/// だけでは軸長が全て `2 * FMT_EDGE_ITEMS` 以下の高階テンソル（例:
+/// `shape = [2; 20]`）を打ち切れない（モジュール doc 参照）ため、
+/// リーフを 1 個出力するたびに `budget` を 1 減らし、既に枯渇して
+/// いる場合はこの呼び出し自体（葉・部分木の別なく）が構造へ descend
+/// せず `"..."` を書いて即座に返る。これにより総出力要素数と走査
+/// コストの双方を shape に依らず有界にする。
 fn render_axis<T>(
     tensor: &Tensor<T>,
     index: &mut Vec<usize>,
     axis: usize,
     truncate: bool,
+    budget: &mut usize,
     f: &mut std::fmt::Formatter<'_>,
 ) -> std::fmt::Result
 where
     T: Element,
 {
+    if *budget == 0 {
+        // グローバル予算が既に枯渇: 葉か部分木かを問わずこの呼び出しの
+        // 構造へは descend せず単一のプレースホルダで打ち切る
+        // （葉のみでチェックすると軸長が小さい高階形状で部分木ごと
+        // 再帰し続け、出力サイズ・走査コストとも有界にならないため）。
+        return f.write_str("...");
+    }
+
     let shape = tensor.shape();
     if axis == shape.len() {
         // 末端: 多次元インデックスが 1 要素を指す。`Tensor::get` は
@@ -57,6 +115,7 @@ where
         // 呼び出し元がその契約を破って到達不能な状態になった場合でも
         // 本番経路 panic を避けるため `?` を出力する
         // （`.claude/rules/coding-rust.md` の panic 禁止方針）。
+        *budget -= 1;
         return match tensor.get(index) {
             Some(v) => std::fmt::Debug::fmt(&FmtElem(v), f),
             None => f.write_str("?"),
@@ -71,13 +130,13 @@ where
                 f.write_str(", ")?;
             }
             index.push(i);
-            render_axis(tensor, index, axis + 1, truncate, f)?;
+            render_axis(tensor, index, axis + 1, truncate, budget, f)?;
             index.pop();
         }
         f.write_str(", ..., ")?;
         for i in (len - FMT_EDGE_ITEMS)..len {
             index.push(i);
-            render_axis(tensor, index, axis + 1, truncate, f)?;
+            render_axis(tensor, index, axis + 1, truncate, budget, f)?;
             index.pop();
             if i + 1 < len {
                 f.write_str(", ")?;
@@ -89,7 +148,7 @@ where
                 f.write_str(", ")?;
             }
             index.push(i);
-            render_axis(tensor, index, axis + 1, truncate, f)?;
+            render_axis(tensor, index, axis + 1, truncate, budget, f)?;
             index.pop();
         }
     }
@@ -130,8 +189,22 @@ impl<'a, T: Element> std::fmt::Debug for DataPreview<'a, T> {
                 None => f.write_str("?"),
             };
         }
+        if tensor.rank() > FMT_MAX_RENDER_RANK {
+            // rank が表示上限を超える（`numel` は小さくても `shape` に
+            // 上限がないため構築しうる。モジュール doc・
+            // `FMT_MAX_RENDER_RANK` 参照）。再帰へ入らずプレースホルダ
+            // のみ書いてスタックオーバーフローを避ける。
+            return write!(
+                f,
+                "<rank {} exceeds display limit {}; numel={}>",
+                tensor.rank(),
+                FMT_MAX_RENDER_RANK,
+                tensor.numel()
+            );
+        }
         let mut index = Vec::with_capacity(tensor.rank());
-        render_axis(tensor, &mut index, 0, truncate, f)
+        let mut budget = FMT_MAX_ELEMS;
+        render_axis(tensor, &mut index, 0, truncate, &mut budget, f)
     }
 }
 
@@ -179,29 +252,48 @@ impl<T: Element + std::fmt::Display> std::fmt::Display for Tensor<T> {
                 Some(v) => std::fmt::Display::fmt(&FmtElem(v), f)?,
                 None => f.write_str("?")?,
             }
+        } else if self.rank() > FMT_MAX_RENDER_RANK {
+            // rank が表示上限を超える（`DataPreview::fmt` と同じ理由。
+            // `FMT_MAX_RENDER_RANK` doc 参照）。再帰へ入らずプレースホルダ
+            // のみ書いてスタックオーバーフローを避ける。
+            write!(
+                f,
+                "<rank {} exceeds display limit {}; numel={}>",
+                self.rank(),
+                FMT_MAX_RENDER_RANK,
+                self.numel()
+            )?;
         } else {
             let truncate = self.numel() > FMT_MAX_ELEMS;
             let mut index = Vec::with_capacity(self.rank());
-            render_axis_display(self, &mut index, 0, truncate, f)?;
+            let mut budget = FMT_MAX_ELEMS;
+            render_axis_display(self, &mut index, 0, truncate, &mut budget, f)?;
         }
         f.write_str(")")
     }
 }
 
 /// [`render_axis`] の `Display` 版（要素を `T::fmt`（`Display`）へ委譲する
-/// 点のみ異なる。打ち切り・入れ子ロジックは共通）。
+/// 点・`budget` によるグローバル打ち切り契約のみ共通。[`render_axis`]
+/// の doc コメント参照）。
 fn render_axis_display<T>(
     tensor: &Tensor<T>,
     index: &mut Vec<usize>,
     axis: usize,
     truncate: bool,
+    budget: &mut usize,
     f: &mut std::fmt::Formatter<'_>,
 ) -> std::fmt::Result
 where
     T: Element + std::fmt::Display,
 {
+    if *budget == 0 {
+        return f.write_str("...");
+    }
+
     let shape = tensor.shape();
     if axis == shape.len() {
+        *budget -= 1;
         return match tensor.get(index) {
             Some(v) => std::fmt::Display::fmt(&FmtElem(v), f),
             None => f.write_str("?"),
@@ -216,13 +308,13 @@ where
                 f.write_str(", ")?;
             }
             index.push(i);
-            render_axis_display(tensor, index, axis + 1, truncate, f)?;
+            render_axis_display(tensor, index, axis + 1, truncate, budget, f)?;
             index.pop();
         }
         f.write_str(", ..., ")?;
         for i in (len - FMT_EDGE_ITEMS)..len {
             index.push(i);
-            render_axis_display(tensor, index, axis + 1, truncate, f)?;
+            render_axis_display(tensor, index, axis + 1, truncate, budget, f)?;
             index.pop();
             if i + 1 < len {
                 f.write_str(", ")?;
@@ -234,7 +326,7 @@ where
                 f.write_str(", ")?;
             }
             index.push(i);
-            render_axis_display(tensor, index, axis + 1, truncate, f)?;
+            render_axis_display(tensor, index, axis + 1, truncate, budget, f)?;
             index.pop();
         }
     }
@@ -353,12 +445,66 @@ mod tests {
 
     #[test]
     fn truncation_output_length_bounded_for_large_tensor() {
-        // 100x100（numel=10000）でも出力は有界（各軸が打ち切られるため
-        // 総出力は軸数に対して指数的ではなく多項式的に抑えられる）。
+        // 100x100（numel=10000）は各軸長（100）が `2 * FMT_EDGE_ITEMS`
+        // を超えるため軸ごとの打ち切りだけでも十分有界（総リーフ出力数
+        // は `FMT_EDGE_ITEMS` の 2 乗のオーダーに収まる）。
         let t = Tensor::new(vec![0.0f32; 10_000], &[100, 100]).unwrap();
         let s = format!("{}", t);
         assert!(s.len() < 2000, "output too long: {} bytes", s.len());
         assert!(s.contains("..."), "{s}");
+    }
+
+    #[test]
+    fn truncation_bounds_output_when_no_single_axis_exceeds_edge_items() {
+        // レビュー指摘（イシュー #1754）の再現ケース: 軸ごとの打ち切り
+        // （`len > 2 * FMT_EDGE_ITEMS`）は各軸長が 2 の rank 20 テンソル
+        // （numel = 2^20 = 1,048,576）では 1 度も発動しない
+        // （`2 <= 2 * FMT_EDGE_ITEMS`）。修正前はここで出力が
+        // 5MB 超・打ち切りマーカーなしに膨張していた。グローバル予算
+        // （`FMT_MAX_ELEMS`）がこのケースを打ち切ることを確認する。
+        let t = Tensor::new(vec![0.0f32; 1 << 20], &[2; 20]).unwrap();
+        let s = format!("{}", t);
+        assert!(s.contains("..."), "{s}");
+        // 総リーフ出力数は `FMT_MAX_ELEMS`（1000）以下に抑えられるため、
+        // 要素・カンマ・ネストの記号を含めても数万バイト程度で収まる
+        // （5MB という修正前の実測値とは桁が異なることを確認する）。
+        assert!(s.len() < 50_000, "output too long: {} bytes", s.len());
+
+        let dbg = format!("{:?}", t);
+        assert!(dbg.contains("..."), "{dbg}");
+        assert!(
+            dbg.len() < 50_000,
+            "debug output too long: {} bytes",
+            dbg.len()
+        );
+    }
+
+    #[test]
+    fn truncation_bounds_output_via_global_budget_only() {
+        // 各軸長 6（`== 2 * FMT_EDGE_ITEMS`。軸ごとの打ち切り条件
+        // `len > 2 * FMT_EDGE_ITEMS` は非成立）・rank 4・
+        // numel = 6^4 = 1296（`FMT_MAX_ELEMS` = 1000 超）。
+        // 軸ごとの打ち切りが一度も発動せず、グローバル予算のみで
+        // 打ち切られることを判別する最小ケース。
+        let t = Tensor::new(vec![0.0f32; 1296], &[6, 6, 6, 6]).unwrap();
+        let s = format!("{}", t);
+        assert!(s.contains("..."), "{s}");
+        assert!(s.len() < 20_000, "output too long: {} bytes", s.len());
+    }
+
+    #[test]
+    fn extreme_rank_does_not_overflow_stack() {
+        // `Tensor::new`／`checked_numel` は rank に上限を課さないため、
+        // 全軸長 1（numel == 1）にすれば安価に極端な rank（100,000）の
+        // テンソルを構築できる。`FMT_MAX_RENDER_RANK` によるガードが
+        // なければ `render_axis`／`render_axis_display` が rank に比例
+        // した深さまで再帰しスタックオーバーフローしうる
+        // （`.claude/rules/security.md` A04 DoS 観点）。
+        let t = Tensor::new(vec![0.0f32], &[1; 100_000]).unwrap();
+        let s = format!("{}", t);
+        assert!(s.contains("exceeds display limit"), "{s}");
+        let dbg = format!("{:?}", t);
+        assert!(dbg.contains("exceeds display limit"), "{dbg}");
     }
 
     #[test]
