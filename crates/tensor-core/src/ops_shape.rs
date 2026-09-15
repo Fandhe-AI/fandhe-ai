@@ -633,9 +633,17 @@ pub fn row_norm_layout(shape: &[usize]) -> Result<(usize, usize), ShapeError> {
 ///
 /// - rank 2（`[N, C]`。`BatchNorm1d` の非空間入力）は `spatial = 1`。
 /// - rank 3（`[N, C, L]`。`BatchNorm1d` の空間入力）は `spatial = L`。
-/// - rank 4（`[N, C, H, W]`。`BatchNorm2d`）は `spatial = H*W`
-///   （`checked_numel(&shape[2..])` で `usize` 範囲の乗算オーバー
-///   フローを検出し `ShapeError::ElementCountOverflow` を返す）。
+/// - rank 4（`[N, C, H, W]`。`BatchNorm2d`）は `spatial = H*W`。
+///   `N`／`C`／`H`／`W` の**いずれか**が `0` の場合（`x` 全体が空テンソル
+///   になる場合）は積を計算せず `spatial = 0` を返す。**4 軸すべてが
+///   非ゼロの場合に限り** `checked_numel(&shape[2..])` で `usize`
+///   範囲の乗算オーバーフローを検出し `ShapeError::
+///   ElementCountOverflow` を返す（`H*W` だけでは `N`／`C` 側の `0` を
+///   反映できないため、`N=0, C=1, H=usize::MAX, W=2` のような有効な
+///   空テンソルが `H*W` 単体のオーバーフロー検査で不当に拒否される
+///   のを防ぐ。`interpolate_out_shape` の「非ゼロ次元のみ
+///   `checked_numel`」規約と同型。Cursor Bugbot 指摘・イシュー
+///   #1732・PR #1874 fix ループ）。
 /// - rank 0・1・5 以上は `ShapeError::RankMismatch`（`expected` は
 ///   最も近い許容 rank。rank 0・1 は `2`、rank 5 以上は `4`）を返す。
 ///
@@ -655,7 +663,17 @@ pub fn batch_norm_layout(shape: &[usize]) -> Result<(usize, usize, usize), Shape
         2 => Ok((shape[0], shape[1], 1)),
         3 => Ok((shape[0], shape[1], shape[2])),
         4 => {
-            let spatial = checked_numel(&shape[2..])?;
+            // `shape` の 4 軸（`N`／`C`／`H`／`W`）のいずれかが `0` なら
+            // `x` 全体が空テンソルであり `spatial`（`H*W`）は数学的に
+            // 意味を持たないため積の計算自体を避ける（doc comment
+            // 参照）。`N`／`C` は `shape[2..]` に現れないため、
+            // `checked_numel(&shape[2..])` 単体の overflow 検査だけでは
+            // `N=0` や `C=0` を伴う空テンソルを正しく救えない。
+            let spatial = if shape.contains(&0) {
+                0
+            } else {
+                checked_numel(&shape[2..])?
+            };
             Ok((shape[0], shape[1], spatial))
         }
         _ => Err(ShapeError::RankMismatch {
@@ -723,6 +741,39 @@ mod batch_norm_layout_tests {
     fn zero_sized_axes_are_accepted() {
         assert_eq!(batch_norm_layout(&[0, 3, 4]).unwrap(), (0, 3, 4));
         assert_eq!(batch_norm_layout(&[8, 3, 0, 5]).unwrap(), (8, 3, 0));
+    }
+
+    /// `N=0` かつ空間軸（`H`）が巨大な rank-4 の空テンソルは、`H*W`
+    /// 単体では `usize` オーバーフローするが `x` 全体は空であり有効な
+    /// shape である。積を計算せず `spatial=0` を返す（`checked_numel`
+    /// を経由しない）ことを確認する（Cursor Bugbot 指摘・イシュー
+    /// #1732・PR #1874 fix ループ）。
+    #[test]
+    fn rank4_empty_leading_axis_with_huge_spatial_does_not_overflow() {
+        assert_eq!(
+            batch_norm_layout(&[0, 3, usize::MAX, 2]).unwrap(),
+            (0, 3, 0)
+        );
+    }
+
+    /// `C=0`（`N`／空間軸は非ゼロかつ空間軸が巨大）の同型ケース。
+    #[test]
+    fn rank4_empty_channel_axis_with_huge_spatial_does_not_overflow() {
+        assert_eq!(
+            batch_norm_layout(&[5, 0, usize::MAX, 2]).unwrap(),
+            (5, 0, 0)
+        );
+    }
+
+    /// 4 軸すべてが非ゼロの場合は従来どおり `checked_numel(&shape[2..])`
+    /// によるオーバーフロー拒否が維持されることを確認する（非空
+    /// テンソルでの誤った救済がないことの回帰）。
+    #[test]
+    fn rank4_nonempty_spatial_overflow_is_still_rejected() {
+        let err = batch_norm_layout(&[1, 1, usize::MAX, 2]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+        let err = batch_norm_layout(&[2, 3, usize::MAX, 2]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 }
 

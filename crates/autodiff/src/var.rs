@@ -5190,3 +5190,70 @@ mod host_view_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod batch_norm_empty_axis_huge_spatial_tests {
+    use super::*;
+    use crate::tape::Tape;
+
+    /// Cursor Bugbot 指摘（PR #1874・イシュー #1732 fix ループ）の回帰
+    /// テスト: rank-4 `[N=0, C, H=usize::MAX, W=2]` は `H*W` 単体では
+    /// `usize` オーバーフローするが、`N=0` により `x` 全体は要素数 0 の
+    /// 有効な空テンソルである。`batch_norm_layout`（`ops_shape.rs`）の
+    /// 修正により `ElementCountOverflow` で誤って拒否されず、
+    /// `batch_norm_infer`（eval モード）は空出力を返すことを確認する。
+    #[test]
+    fn batch_norm_infer_accepts_empty_leading_axis_with_huge_spatial() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(Vec::<f32>::new(), &[0, 3, usize::MAX, 2]).unwrap());
+        let mean = Tensor::new(vec![0.0f32; 3], &[3]).unwrap();
+        let var = Tensor::new(vec![1.0f32; 3], &[3]).unwrap();
+
+        let out = x
+            .batch_norm_infer(None, None, &mean, &var, 1e-5)
+            .expect("N=0 の空テンソルは ElementCountOverflow にならず成功するはず");
+        assert_eq!(out.shape(), &[0, 3, usize::MAX, 2]);
+        assert_eq!(out.to_tensor().as_slice().unwrap(), &[] as &[f32]);
+    }
+
+    /// `C=0` 版の同型ケース（`N`／空間軸は非ゼロかつ空間軸が巨大）。
+    #[test]
+    fn batch_norm_infer_accepts_empty_channel_axis_with_huge_spatial() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(Vec::<f32>::new(), &[5, 0, usize::MAX, 2]).unwrap());
+        let mean = Tensor::new(Vec::<f32>::new(), &[0]).unwrap();
+        let var = Tensor::new(Vec::<f32>::new(), &[0]).unwrap();
+
+        let out = x
+            .batch_norm_infer(None, None, &mean, &var, 1e-5)
+            .expect("C=0 の空テンソルは ElementCountOverflow にならず成功するはず");
+        assert_eq!(out.shape(), &[5, 0, usize::MAX, 2]);
+        assert_eq!(out.to_tensor().as_slice().unwrap(), &[] as &[f32]);
+    }
+
+    /// train モード（`batch_norm_with_batch_stats`）は同じ空テンソルに
+    /// 対し `ElementCountOverflow` ではなく、`M=n*spatial<=1`
+    /// （`n=0` の場合 `M=0`）を理由とする型付きエラーで拒否されること
+    /// を確認する（`batch_norm_layout` 修正後は `spatial=0` となり
+    /// `M<=1` 拒否経路へ正しく到達する）。
+    #[test]
+    fn batch_norm_train_rejects_empty_leading_axis_with_m_le_1_not_overflow() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(Vec::<f32>::new(), &[0, 3, usize::MAX, 2]).unwrap());
+
+        let err = x
+            .batch_norm_with_batch_stats(None, None, 1e-5)
+            .expect_err("train モードは M<=1 で拒否されるはず");
+        assert!(
+            matches!(err, AutodiffError::InvalidArgument(_)),
+            "ElementCountOverflow ではなく M<=1 の InvalidArgument であるべき: {err:?}"
+        );
+    }
+
+    // 4 軸すべてが非ゼロの場合に `ElementCountOverflow` が維持される
+    // ことの回帰は `tensor-core::ops_shape::batch_norm_layout_tests::
+    // rank4_nonempty_spatial_overflow_is_still_rejected` が担う
+    // （`Var::batch_norm_infer` レベルでは `Tensor::new` 自体が
+    // `checked_numel`〈shape 全体積〉で先に同じ `ElementCountOverflow`
+    // を返すため、この層で意味のある `Tensor` を構築できない）。
+}
