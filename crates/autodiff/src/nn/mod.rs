@@ -64,9 +64,18 @@
 //! 参照）。`named_parameters` は `Linear`／`RmsNorm`／`LayerNorm`／
 //! `MultiheadAttention`／`Rnn`／`Lstm`／`Gru` でオーバーライドし、
 //! struct フィールド名／accessor 名をそのまま使う命名契約（PyTorch の
-//! packed 命名は追わない）とした。
+//! packed 命名は追わない）とした。イシュー #1759（親 #1617）で
+//! [`Module`] trait doc が「将来の `ModuleList`／汎用 `Sequential`」
+//! として予告していたコンテナを `container` モジュールへ実装した
+//! （`ModuleList`・`Sequential`）。`fandhe_ai_facade::compat::sequential::
+//! Sequential`（Linear／活性化関数の閉集合限定ビルダー）は本モジュール
+//! の `Sequential` を `inner` として合成する薄いラッパーへ再構成した
+//! （`container.rs` モジュール doc「配置」節参照）。`ModuleList`／
+//! `Sequential` は facade から再エクスポートしない（`Module` trait
+//! 自体が非公開のため）。
 
 mod attention;
+mod container;
 mod embedding;
 mod init;
 mod linear;
@@ -79,6 +88,7 @@ pub mod loss;
 pub mod optim;
 
 pub use attention::{MultiheadAttention, MultiheadAttentionVars};
+pub use container::{ModuleList, Sequential};
 pub use embedding::{Embedding, EmbeddingVars};
 pub use linear::{Linear, LinearVars};
 pub use module::Module;
