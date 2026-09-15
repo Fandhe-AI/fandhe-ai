@@ -22,8 +22,8 @@
 //!
 //! この設計は [`Module::forward`]（tape 経路）と
 //! [`Module::forward_host`]（tape 不要経路）を同一の分岐
-//! （`training`／`p` の早期リターン判定 → [`crate::grad::
-//! dropout_mask`] → [`crate::grad::dropout_with_fallback`]）で実装する
+//! （`training`／`p` の早期リターン判定 → `crate::grad::
+//! dropout_mask` → `crate::grad::dropout_with_fallback`）で実装する
 //! ことで、`fandhe_ai_facade::compat::sequential::Sequential::
 //! predict`（`predict_tape_free ≡ predict_via_tape` の bit 完全一致
 //! 不変条件に依存する。`sequential.rs::predict` doc 参照）が train
@@ -87,12 +87,17 @@ impl Dropout {
 }
 
 impl Default for Dropout {
-    /// PyTorch `torch.nn.Dropout` の既定値（`p=0.5`）。`new` の検査
-    /// （有限性・範囲）を通る既知の定数のため本番経路で `unwrap` する
-    /// （`nn/activation.rs::Softplus` の `Default` 実装と同じ規律）。
+    /// PyTorch `torch.nn.Dropout` の既定値（`p=0.5`）。`p=0.5` は
+    /// `new` の検査（有限性・`[0, 1]` の範囲）を自明に満たすため、
+    /// `new` を経由して `unwrap` するのではなく構造体リテラルを直接
+    /// 構築する（本番経路での `unwrap`／`panic` を避ける
+    /// `.claude/rules/coding-rust.md`「本番経路で `unwrap()` /
+    /// `expect()` を使わない」規律）。
     fn default() -> Self {
-        #[allow(clippy::unwrap_used)]
-        Self::new(0.5).unwrap()
+        Self {
+            p: 0.5,
+            training: true,
+        }
     }
 }
 
@@ -102,8 +107,8 @@ impl Module for Dropout {
     }
 
     /// [`Var::dropout`]（`var.rs`）と**同一の関数列**
-    /// （[`crate::grad::dropout_mask`] → [`crate::grad::
-    /// dropout_with_fallback`]）を `tape` 不要経路で再現する
+    /// （`crate::grad::dropout_mask` → `crate::grad::
+    /// dropout_with_fallback`）を `tape` 不要経路で再現する
     /// （bit-exactness が構造的に成立する。モジュール doc「train／eval
     /// と `predict`／`forward_host` の整合」参照）。早期リターン条件
     /// （`!self.training || self.p == 0.0`）も `Var::dropout` と同一。

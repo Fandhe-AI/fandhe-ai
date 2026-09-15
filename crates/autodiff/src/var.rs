@@ -3264,7 +3264,7 @@ impl<'t> Var<'t> {
     ///
     /// # マスク生成（イシュー #1602 のグローバル RNG 契約）
     ///
-    /// [`crate::grad::dropout_mask`] が [`fandhe_ai_tensor_core::rng::
+    /// `crate::grad::dropout_mask` が [`fandhe_ai_tensor_core::rng::
     /// rand`] を経由してホスト側だけでマスクを生成する（`BackendOps`
     /// を経由しない。`docs/rng-global-contract-design.md` §3.2）。
     ///
