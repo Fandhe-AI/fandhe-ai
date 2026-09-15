@@ -25,9 +25,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, CastElement, Conv2dParams, DType, DeviceBufferView,
-    FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp,
-    ScatterReduce, Tensor,
+    Activation, BackendError, BackendOps, CastElement, Conv2dParams, DType, Device,
+    DeviceBufferView, FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN,
+    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, Tensor,
 };
 
 use crate::error::AutodiffError;
@@ -1919,6 +1919,16 @@ impl Tape {
     /// に使う。
     pub(crate) fn ops(&self) -> &dyn BackendOps {
         self.ops.as_ref()
+    }
+
+    /// この `Tape` が結線されているデバイス（イシュー #1614）。
+    /// `self.ops.device()`（`BackendOps` 必須メソッド）への委譲——
+    /// `ops()` 自体は `pub(crate)`（REQ-12。任意 `BackendOps` 実装を
+    /// 注入できる公開 API を設けない）のため、デバイス識別子だけを
+    /// 取り出すこの薄い公開アクセサが `Var::device`／facade
+    /// `Tape::device` の到達経路になる。
+    pub fn device(&self) -> Device {
+        self.ops.device()
     }
 
     /// activation checkpointing（イシュー #1624）: `f` を実行して得た

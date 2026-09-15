@@ -345,6 +345,27 @@ impl Tape {
     ) -> Result<Vec<Tensor<f32>>, BackendError> {
         store.param_grads_to_host(&self.0, grads)
     }
+
+    /// この `Tape` が結線されているデバイス（イシュー #1614）。
+    /// `fandhe_ai_autodiff::Tape::device` への委譲。
+    pub fn device(&self) -> Device {
+        self.0.device()
+    }
+
+    /// 別の `facade::Tape`（`self` 自身でもよい）上の `source` を、
+    /// この `Tape` 上へ新しい葉ノードとして転送する（イシュー #1614。
+    /// `fandhe_ai_autodiff::Var::to_tape` への委譲）。
+    ///
+    /// facade 利用者は `fandhe_ai_autodiff::Tape`（生の内部型）を
+    /// 取り出せない（本型のフィールド `0` は `pub(crate)`）ため、
+    /// facade 経由でクロスデバイス転送を行う唯一の入口がこのメソッド
+    /// になる。`self` と `source` が同じ `Tape` を指す場合は恒等
+    /// （`Var::to_tape` の契約どおり）。値の数値契約・`requires_grad`
+    /// 引き継ぎ・`reset` 契約は `fandhe_ai_autodiff::Var::to_tape` の
+    /// doc comment を参照。
+    pub fn transfer(&self, source: &Var<'_>) -> Result<Var<'_>, AutodiffError> {
+        source.to_tape(&self.0)
+    }
 }
 
 /// 既定バックエンド（CPU・TASK-2.5 ユーザー承認済み。
@@ -368,6 +389,60 @@ pub fn tape() -> Tape {
 pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
     let ops = resolve_ops(device)?;
     Ok(Tape(fandhe_ai_autodiff::Tape::new_with_ops(ops)))
+}
+
+/// 実行時に利用可能な [`Device`] を列挙する（`docs/public-api-design.md`
+/// §4.1 `Device::available()` の集約入口。イシュー #1614。TASK-1.9a
+/// （#44。`tensor-core::device` モジュール doc）が「集約入口をどの層で
+/// 結線するかは後続イシューへ引き継ぐ」としていた未決事項をここで解消
+/// する）。
+///
+/// `tensor-core::device::enumerate_all`（`&[&dyn DeviceProvider]` を
+/// 横断して列挙する下位ヘルパー。`tensor-core` は 3 バックエンドを
+/// 直接参照できないため依存逆転構成を取る）へ、composition root
+/// （本クレート）が 3 バックエンドの `DeviceProvider` を束ねて渡す
+/// 唯一の入口。返すのは [`Device`] 識別子のみで、`DeviceProvider`／
+/// `DeviceInfo`（デバイス名・メモリ容量等）は再エクスポートしない
+/// （REQ-12 と同じ「利用者向け公開面は `Device` 識別子のみ」の方針。
+/// `tests/api_surface.rs` が機械的に固定する）。
+///
+/// **順序契約**: `Device::Cpu`（常に含まれる）→ `Device::Cuda(0..n)`
+/// （ordinal 昇順。CUDA driver 不在なら 0 件）→ `Device::Metal`
+/// （`cfg(target_os = "macos")` 限定。デバイス検出 0 件なら含まれない）
+/// の順で、同一プロセス内の複数回呼び出しでも決定的。
+///
+/// **副作用**: `CudaDeviceProvider::enumerate` は検出した CUDA
+/// ordinal ごとに `context_cache` のコンテキストを初期化する
+/// （`crates/backend-cuda/src/device.rs`。2 回目以降はキャッシュ
+/// ヒットで軽量）。これは後で [`tape_for`] が払うはずのコストを
+/// 前倒しするだけであり、追加コストではない。
+///
+/// **一貫性契約**: 本関数が返した各 `Device` に対して [`tape_for`]
+/// を呼べば `Ok` になることを意図する（ただし列挙と `tape_for` の
+/// 呼び出しの間でデバイス状態が変化する TOCTOU は契約外——ドライバの
+/// 抜き差し等の外部要因まではカバーしない）。
+///
+/// **fail-safe**: 個々のバックエンドの列挙が失敗しても `panic!`／
+/// `unwrap()` せず、その分を除いた結果を返す（`enumerate_all` の
+/// fail-safe 方針をそのまま引き継ぐ）。
+pub fn available_devices() -> Vec<Device> {
+    let cpu = fandhe_ai_backend_cpu::CpuDeviceProvider::new();
+    let cuda = fandhe_ai_backend_cuda::CudaDeviceProvider::new();
+    #[cfg(target_os = "macos")]
+    let metal = fandhe_ai_backend_metal::MetalDeviceProvider::new();
+
+    // macOS 以外では 2 要素で固定（`providers` を `mut` にすると
+    // 非 macOS ビルドで `push` が到達不能になり `unused_mut` 警告
+    // （`-D warnings` で fail）になるため、cfg ごとに構築を分ける）。
+    #[cfg(target_os = "macos")]
+    let providers: Vec<&dyn DeviceProvider> = vec![&cpu, &cuda, &metal];
+    #[cfg(not(target_os = "macos"))]
+    let providers: Vec<&dyn DeviceProvider> = vec![&cpu, &cuda];
+
+    fandhe_ai_tensor_core::enumerate_all(&providers)
+        .into_iter()
+        .map(|info| info.device)
+        .collect()
 }
 
 /// PyTorch `torch.manual_seed` 相当。プロセス全体で共有されるグローバル
