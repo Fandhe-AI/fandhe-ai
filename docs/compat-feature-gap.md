@@ -1700,4 +1700,8 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 
 #1764 で追補を追記（`Var::conv2d`（im2col＋GEMM。cross-correlation。NCHW 固定。groups は `gemm_batched` の broadcast で吸収）実装済み化。`BackendOps::im2col`／`col2im`／`conv2d`〈既定 `Unsupported`〉・`Op::Conv2d`・CPU 実装〈`backend-cpu::im2col`〉まで実装済み・facade 新規公開面なし・CUDA／Metal 専用カーネルは #1643／#1644・`nn::Conv2d` 層は #1645 へ引き継ぎ）。
 
+
 #1751 で追補を追記（`CastOps`〈dtype 変換。#1750〉の CUDA〈8 方向すべて〉・Metal〈f64 2 方向を除く 6 方向。MSL `double` 非対応のため既定 `Unsupported` のままホストフォールバック〉のネイティブカーネルを実装済み化。`crate::cast_ops` accessor が `None` → `Some(self)` へ切り替わったため、GPU 非搭載環境で当該 tape から `Var::cast` を呼ぶと `Unsupported` 経由の暗黙フォールバックではなく `CudaUnavailable`／`KernelLaunchFailed` が表面化する挙動変更を伴う（`Var::unique`／`matmul` と同じ既存契約であり退行ではない。`docs/tensor-core-cast-design.md` §11）。facade 新規公開面なし・CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り。
+
+#1765 で追補を追記（`Var::conv1d`〈`Var::conv2d` を `H` 軸固定 `[N, Cin, 1, L]`／`[Cout, Cin_g, 1, k]` へ reshape 併合する薄いラッパー。新規 `Op`／`BackendOps`／VJP／バックエンドカーネルなし〉実装済み化。`contiguous`〈`pub(crate)`〉前段で `Var::reshape` の非 contiguous 拒否契約と `conv2d`〈transpose 済み入力も受理〉の非対称を解消。facade 新規公開面なし・`nn::Conv1d` 層・`compat::Sequential::add_conv1d` は #1645 へ引き継ぎ）。
+

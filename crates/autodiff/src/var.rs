@@ -2146,12 +2146,15 @@ impl<'t> Var<'t> {
     /// `ShapeError::NonContiguousReshape` で拒否する契約（案 A・
     /// `docs/public-api-design.md` §3.2）のため、`crate::einsum` が
     /// permute 後に reshape へ渡す前段の明示コピーとして使う。
+    /// `Var::conv1d`（イシュー #1765）も同じ理由（`conv2d` は
+    /// transpose 済み入力を受理するが `reshape` は非 contiguous を
+    /// 拒否する非対称の解消）で reshape 直前の明示コピーに使う。
     ///
     /// 可視性は `pub(crate)` に留める——`Var` は facade から
     /// 再エクスポートされるため、`docs/compat-api-scope.md` の Tier
     /// 列挙にない `contiguous` を `pub` にすると同 §5 手続きの対象になる
     /// 新規公開 API を無断で追加してしまう（承認範囲は `Var::einsum`
-    /// 自体のみ）。消費者は `crate::einsum` のみ。
+    /// 自体のみ）。消費者は `crate::einsum`・`Var::conv1d`。
     ///
     /// 既に contiguous な場合は新規ノードを積まず `self` をそのまま
     /// 返す（`Tensor::contiguous` 自体は contiguous なら clone のみだが、
@@ -2816,6 +2819,98 @@ impl<'t> Var<'t> {
             value_out,
         );
         Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 1 次元畳み込み（`torch.nn.functional.conv1d` 相当の
+    /// cross-correlation）。[`Self::conv2d`] を `H` 軸固定
+    /// （`kernel=1`・`stride=1`・`padding=0`・`dilation=1`）で呼び出す
+    /// reshape 併合の薄いラッパーであり、新規 `Op`／`BackendOps`
+    /// メソッド・VJP・バックエンドカーネルは追加しない（設計
+    /// `docs/conv-ops-design.md` §2／§8・イシュー #1765）。`self`
+    /// （`input`）: `[N, Cin, L]`・`weight`: `[Cout, Cin/groups, k]`・
+    /// `bias`: `Some` なら `[Cout]`。
+    ///
+    /// 検査順序（`Var::reshape` は view ノードを tape へ push する
+    /// ため、reshape より前にすべての引数検査を完了させ `Err` 経路で
+    /// 孤児ノードを残さない）: ①`check_same_tape`（weight／bias。
+    /// クロステープの weight を reshape すると相手 tape へ push して
+    /// しまうため最初に行う）→ ②`self`／`weight` の rank 検査
+    /// （rank 3 以外は `ShapeError::RankMismatch`）→ ③
+    /// `Conv2dParams::new`（`H` 軸固定・`W` 軸に `stride`／
+    /// `padding`／`dilation` を渡す。`stride`／`dilation`／`groups`
+    /// の 0・`2 * padding` オーバーフローを拒否）→ ④合成した 4d
+    /// shape に対する [`fandhe_ai_tensor_core::conv2d_out_shape`]
+    /// （チャンネル整合・`L = 0` 拒否・負分子拒否ゲート。純粋な
+    /// shape 計算で tape 非接触）→ ⑤bias shape 検査 → ⑥ここで
+    /// 初めて `input`／`weight` を `[N, Cin, 1, L]`／
+    /// `[Cout, Cin/groups, 1, k]` へ reshape し `conv2d` を呼ぶ
+    /// （`Self::contiguous` 前段で `Var::reshape` の非 contiguous
+    /// 拒否契約と `conv2d`〈transpose 済み入力も受理〉の間の非対称を
+    /// 解消する）→ ⑦出力 `[N, Cout, 1, Lout]` を `[N, Cout, Lout]`
+    /// へ reshape。
+    ///
+    /// `conv2d` 内部で再検査される項目（rank・チャンネル整合等）は
+    /// fail-closed の二重検査として許容する。`conv2d` 側のバックエンド
+    /// 失敗（`Unsupported` 以外）で view ノードが残る点は他の eager
+    /// 演算と同じ振る舞い。`nn::Conv1d` 層・`compat::Sequential::
+    /// add_conv1d`・CUDA／Metal 専用 im2col／col2im カーネルは対象外
+    /// （#1645・#1643・#1644 へ引き継ぐ）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv1d(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        stride: usize,
+        padding: usize,
+        dilation: usize,
+        groups: usize,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(weight)?;
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+
+        let in_shape = self.shape();
+        if in_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: in_shape.len(),
+            }));
+        }
+        let weight_shape = weight.shape();
+        if weight_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: weight_shape.len(),
+            }));
+        }
+
+        let (n, cin, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        let (cout, cin_g, k) = (weight_shape[0], weight_shape[1], weight_shape[2]);
+
+        let params = Conv2dParams::new([1, k], [1, stride], [0, padding], [1, dilation], groups)
+            .map_err(AutodiffError::Backend)?;
+
+        let in_shape_4d = vec![n, cin, 1, l];
+        let weight_shape_4d = vec![cout, cin_g, 1, k];
+        let out_shape_4d = conv2d_out_shape(&in_shape_4d, &weight_shape_4d, &params)
+            .map_err(AutodiffError::Shape)?;
+        let lout = out_shape_4d[3];
+
+        if let Some(b) = bias {
+            let bias_shape = b.shape();
+            if bias_shape != [cout] {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: bias_shape,
+                    rhs: vec![cout],
+                }));
+            }
+        }
+
+        let x4 = self.contiguous()?.reshape(&[n, cin, 1, l])?;
+        let w4 = weight.contiguous()?.reshape(&[cout, cin_g, 1, k])?;
+        let out4 = x4.conv2d(&w4, bias, [1, stride], [0, padding], [1, dilation], groups)?;
+        out4.reshape(&[n, cout, lout])
     }
 
     /// 指定した各長さ（`sizes`）で `dim` 軸を分割する（`torch.split`
