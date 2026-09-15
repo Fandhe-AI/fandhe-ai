@@ -3251,7 +3251,6 @@ fn batch_norm_vjp_channels(
     dy: &[f32],
     fixed_stats: Option<(&[f32], &[f32])>,
 ) -> (Vec<f32>, Option<Vec<f32>>, Option<Vec<f32>>) {
-    let m = n * spatial;
     let mut dx = vec![0.0f32; x.len()];
     let mut dw_acc: Option<Vec<f64>> = w.map(|_| vec![0.0f64; c]);
     let mut db_acc: Option<Vec<f64>> = if has_bias {
@@ -3259,11 +3258,25 @@ fn batch_norm_vjp_channels(
     } else {
         None
     };
-    if n == 0 || c == 0 || spatial == 0 || m == 0 {
-        let dw = dw_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
-        let db = db_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
-        return (dx, dw, db);
-    }
+    // 空次元判定（`n`／`c`／`spatial` のいずれかが 0）を `n * spatial`
+    // の乗算より先に行う。`Tensor::new(vec![], &[usize::MAX, 0, 2])`
+    // のような要素数 0 の有効テンソル（`c == 0`）では `n` が実データ
+    // サイズと無関係に大きくなりうるため、乗算を先に行うと overflow
+    // checks 有効時に本番経路で panic しうる（AGENTS.md「本番経路の
+    // panic 禁止」。codex-review P1 指摘・イシュー #1732 fix ループ）。
+    // ここで早期 return したあとは `n`／`c`／`spatial` がすべて非 0
+    // であることが保証され、実データ `x.len() == n*c*spatial` が
+    // 既に `usize` に収まっている（`x` は実在する slice）ため
+    // `n*spatial <= n*c*spatial` も収まる。`checked_mul` は追加の
+    // 多層防御として残す（overflow 時は同じ退化パスへ倒す）。
+    let m = match n.checked_mul(spatial) {
+        Some(m) if n != 0 && c != 0 && spatial != 0 && m != 0 => m,
+        _ => {
+            let dw = dw_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+            let db = db_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+            return (dx, dw, db);
+        }
+    };
     let mm = m as f64;
     for ch in 0..c {
         let (mean, rstd) = match fixed_stats {
@@ -8093,6 +8106,24 @@ release ビルドでも検知できるよう `assert!` を使う）"
             eval::batch_norm_train_channels(xt, None, None, eps, n, c, spatial).0
         });
         assert_grad_close("batch_norm train dx (no affine)", &da, &num_da);
+    }
+
+    #[test]
+    fn batch_norm_vjp_channels_zero_channel_huge_n_does_not_overflow() {
+        // `Tensor::new(vec![], &[usize::MAX, 0, 2])` のような要素数 0
+        // の有効テンソル（`c == 0`）は `n` が実データサイズと無関係に
+        // 大きくなりうる。空次元判定（`n==0||c==0||spatial==0`）より
+        // 先に `n * spatial` を計算すると、overflow checks 有効時に
+        // 本番経路で panic しうる（codex-review P1 指摘・イシュー
+        // #1732 fix ループ）。ここでは実際に overflow する
+        // `n=usize::MAX, c=0, spatial=2` を渡し、panic せず空の
+        // 勾配（`x.len()==0` に対応する `dx` は空 vec）を返すことを
+        // 確認する。
+        let (dx, dw, db) =
+            batch_norm_vjp_channels(&[], None, false, 1e-5, usize::MAX, 0, 2, &[], None);
+        assert!(dx.is_empty());
+        assert!(dw.is_none());
+        assert!(db.is_none());
     }
 
     #[test]

@@ -229,6 +229,18 @@ impl BatchNormCore {
         })
     }
 
+    /// `Var::batch_norm_with_batch_stats`／`batch_norm_infer` の shape
+    /// 検査は `weight`／`bias` が `Some` のときのみ入力チャネル数 `c`
+    /// を間接検証する（`w.shape() == [c]` かつ `w` は `[num_features]`
+    /// で構築済みのため）。`without_affine`（`weight`／`bias` とも
+    /// `None`）構成では `c` を検証する経路が無くなるため、呼び出し元
+    /// （[`BatchNormCore::forward_var`]／`batch_norm_forward_host`）が
+    /// `c == num_features` を明示検査するのに使うアクセサ（codex-review
+    /// P1・イシュー #1732 fix ループ）。
+    pub(crate) fn num_features(&self) -> usize {
+        self.num_features
+    }
+
     pub(crate) fn weight(&self) -> Option<&Tensor<f32>> {
         self.weight.as_ref()
     }
@@ -358,16 +370,36 @@ impl BatchNormCore {
     /// 参照する rank 限定契約を伴わない共通ロジック）。`accepted_ranks`
     /// の検査は呼び出し元（`BatchNormVars::forward`／`forward_host`）
     /// が先に行う。
+    ///
+    /// `weight`／`bias` が `Some` の構成では `Var::
+    /// batch_norm_with_batch_stats`／`batch_norm_infer` 内部の
+    /// `require_same_shape(w.shape(), &[c])` が `w` の構築時 shape
+    /// （`[num_features]`）経由で `c == num_features` を間接検証する
+    /// が、`without_affine`（両方 `None`）構成ではその経路が無い。
+    /// ここで `c == num_features` を明示検査しないと、train モードで
+    /// `update_running_stats` へ長さ `c` の `batch_mean`／`batch_var`
+    /// が渡り、running stats（長さ `num_features`）との `zip` が
+    /// `c < num_features` では debug_assert panic（debug）・
+    /// `c > num_features` では黙った切り詰め（release）を招く
+    /// （codex-review P1・Cursor Bugbot 指摘。イシュー #1732 fix
+    /// ループ。eval モードは `batch_norm_infer` が `running_mean`
+    /// shape `[num_features]` を `[c]` と検査するため既に安全）。
     fn forward_var<'t>(
         &self,
         input: &Var<'t>,
         weight: Option<&Var<'t>>,
         bias: Option<&Var<'t>>,
     ) -> Result<Var<'t>, AutodiffError> {
+        let (n, c, spatial) = batch_norm_layout(&input.shape())?;
+        if c != self.num_features {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![c],
+                rhs: vec![self.num_features],
+            }));
+        }
         if self.training {
             let (out, batch_mean, batch_var) =
                 input.batch_norm_with_batch_stats(weight, bias, self.eps)?;
-            let (n, _c, spatial) = batch_norm_layout(&input.shape())?;
             self.update_running_stats(&batch_mean, &batch_var, n * spatial);
             Ok(out)
         } else {
@@ -420,12 +452,22 @@ pub struct BatchNorm1d {
 }
 
 impl BatchNorm1d {
+    /// affine あり（`weight`／`bias` を持つ）`BatchNorm1d` を構築する。
+    /// `weight` は 1・`bias` は 0・`running_mean` は 0・`running_var` は 1
+    /// で初期化し、初期モードは train（[`Self::bind`] 直後は
+    /// `Var::batch_norm_with_batch_stats` 経由で running stats を
+    /// 更新する）。`num_features` は非 0 を要求する。対象入力 shape は
+    /// rank 2 `[N, C]`／rank 3 `[N, C, L]`（チャネル軸は常に dim 1）。
     pub fn new(num_features: usize, eps: f32, momentum: f32) -> Result<Self, AutodiffError> {
         Ok(Self {
             core: BatchNormCore::new(num_features, eps, momentum, "BatchNorm1d::new")?,
         })
     }
 
+    /// affine なし（`weight`／`bias` を持たない）`BatchNorm1d` を
+    /// 構築する。PyTorch `nn.BatchNorm*d(..., affine=False)` 相当。
+    /// `running_mean`／`running_var`・初期モード（train）は
+    /// [`Self::new`] と同じ。`num_features` は非 0 を要求する。
     pub fn without_affine(
         num_features: usize,
         eps: f32,
@@ -441,6 +483,12 @@ impl BatchNorm1d {
         })
     }
 
+    /// 既存の `weight`／`bias`／`running_mean`／`running_var` から
+    /// `BatchNorm1d` を構築する（チェックポイント復元等）。`weight`
+    /// と `bias` は独立に `Some`／`None` を取れる。`running_mean`／
+    /// `running_var` は形状が一致する非 0 長の rank 1 テンソルを
+    /// 要求し、`num_features` はその長さから導出する。初期モードは
+    /// train。
     pub fn from_parameters(
         weight: Option<Tensor<f32>>,
         bias: Option<Tensor<f32>>,
@@ -462,36 +510,50 @@ impl BatchNorm1d {
         })
     }
 
+    /// affine の重み（shape `[num_features]`）。`without_affine` 構成
+    /// では `None`。
     pub fn weight(&self) -> Option<&Tensor<f32>> {
         self.core.weight()
     }
 
+    /// affine のバイアス（shape `[num_features]`）。`without_affine`
+    /// 構成では `None`。
     pub fn bias(&self) -> Option<&Tensor<f32>> {
         self.core.bias()
     }
 
+    /// 現在の running mean（shape `[num_features]`）の clone。train
+    /// モードの forward を呼ぶたびに momentum に従って更新される
+    /// （モジュール doc comment「running stats 更新契約」参照）。
     pub fn running_mean(&self) -> Tensor<f32> {
         self.core.running_mean()
     }
 
+    /// 現在の running variance（shape `[num_features]`。unbiased）の
+    /// clone。更新契約は [`Self::running_mean`] と同じ。
     pub fn running_var(&self) -> Tensor<f32> {
         self.core.running_var()
     }
 
+    /// train モードの forward を呼んだ回数（`update_running_stats` の
+    /// 呼び出し回数）。`saturating_add` で飽和する。
     pub fn num_batches_tracked(&self) -> u64 {
         self.core.num_batches_tracked()
     }
 
+    /// 分散へ加える数値安定化定数（構築時に固定・非負かつ有限）。
     pub fn eps(&self) -> f32 {
         self.core.eps()
     }
 
+    /// running stats 更新の momentum（構築時に固定）。
     pub fn momentum(&self) -> f32 {
         self.core.momentum()
     }
 
     /// このステップの `tape` へ `weight`／`bias`（あれば）を葉ノード
-    /// として登録し、`forward` を呼べる `BatchNormVars` を返す。
+    /// として登録し、`forward` を呼べる [`BatchNormVars`] を返す。
+    /// 受理する入力 rank は rank 2 `[N, C]`／rank 3 `[N, C, L]`（`accepted_ranks`）に限る。
     pub fn bind<'t>(&self, tape: &'t Tape) -> BatchNormVars<'t, '_> {
         let weight = self.core.weight.as_ref().map(|w| tape.var(w));
         let bias = self.core.bias.as_ref().map(|b| tape.var(b));
@@ -512,12 +574,22 @@ pub struct BatchNorm2d {
 }
 
 impl BatchNorm2d {
+    /// affine あり（`weight`／`bias` を持つ）`BatchNorm2d` を構築する。
+    /// `weight` は 1・`bias` は 0・`running_mean` は 0・`running_var` は 1
+    /// で初期化し、初期モードは train（[`Self::bind`] 直後は
+    /// `Var::batch_norm_with_batch_stats` 経由で running stats を
+    /// 更新する）。`num_features` は非 0 を要求する。対象入力 shape は
+    /// rank 4 `[N, C, H, W]`（チャネル軸は常に dim 1）。
     pub fn new(num_features: usize, eps: f32, momentum: f32) -> Result<Self, AutodiffError> {
         Ok(Self {
             core: BatchNormCore::new(num_features, eps, momentum, "BatchNorm2d::new")?,
         })
     }
 
+    /// affine なし（`weight`／`bias` を持たない）`BatchNorm2d` を
+    /// 構築する。PyTorch `nn.BatchNorm*d(..., affine=False)` 相当。
+    /// `running_mean`／`running_var`・初期モード（train）は
+    /// [`Self::new`] と同じ。`num_features` は非 0 を要求する。
     pub fn without_affine(
         num_features: usize,
         eps: f32,
@@ -533,6 +605,12 @@ impl BatchNorm2d {
         })
     }
 
+    /// 既存の `weight`／`bias`／`running_mean`／`running_var` から
+    /// `BatchNorm2d` を構築する（チェックポイント復元等）。`weight`
+    /// と `bias` は独立に `Some`／`None` を取れる。`running_mean`／
+    /// `running_var` は形状が一致する非 0 長の rank 1 テンソルを
+    /// 要求し、`num_features` はその長さから導出する。初期モードは
+    /// train。
     pub fn from_parameters(
         weight: Option<Tensor<f32>>,
         bias: Option<Tensor<f32>>,
@@ -554,34 +632,50 @@ impl BatchNorm2d {
         })
     }
 
+    /// affine の重み（shape `[num_features]`）。`without_affine` 構成
+    /// では `None`。
     pub fn weight(&self) -> Option<&Tensor<f32>> {
         self.core.weight()
     }
 
+    /// affine のバイアス（shape `[num_features]`）。`without_affine`
+    /// 構成では `None`。
     pub fn bias(&self) -> Option<&Tensor<f32>> {
         self.core.bias()
     }
 
+    /// 現在の running mean（shape `[num_features]`）の clone。train
+    /// モードの forward を呼ぶたびに momentum に従って更新される
+    /// （モジュール doc comment「running stats 更新契約」参照）。
     pub fn running_mean(&self) -> Tensor<f32> {
         self.core.running_mean()
     }
 
+    /// 現在の running variance（shape `[num_features]`。unbiased）の
+    /// clone。更新契約は [`Self::running_mean`] と同じ。
     pub fn running_var(&self) -> Tensor<f32> {
         self.core.running_var()
     }
 
+    /// train モードの forward を呼んだ回数（`update_running_stats` の
+    /// 呼び出し回数）。`saturating_add` で飽和する。
     pub fn num_batches_tracked(&self) -> u64 {
         self.core.num_batches_tracked()
     }
 
+    /// 分散へ加える数値安定化定数（構築時に固定・非負かつ有限）。
     pub fn eps(&self) -> f32 {
         self.core.eps()
     }
 
+    /// running stats 更新の momentum（構築時に固定）。
     pub fn momentum(&self) -> f32 {
         self.core.momentum()
     }
 
+    /// このステップの `tape` へ `weight`／`bias`（あれば）を葉ノード
+    /// として登録し、`forward` を呼べる [`BatchNormVars`] を返す。
+    /// 受理する入力 rank は rank 4 `[N, C, H, W]`（`accepted_ranks`）に限る。
     pub fn bind<'t>(&self, tape: &'t Tape) -> BatchNormVars<'t, '_> {
         let weight = self.core.weight.as_ref().map(|w| tape.var(w));
         let bias = self.core.bias.as_ref().map(|b| tape.var(b));
@@ -688,6 +782,34 @@ mod tests {
             err,
             AutodiffError::Shape(ShapeError::RankMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn batch_norm_without_affine_train_rejects_channel_mismatch() {
+        // affine なし（`weight`／`bias` とも `None`）構成では
+        // `Var::batch_norm_with_batch_stats` 内部の `require_same_shape
+        // (w.shape(), &[c])` が働かないため、`forward_var` 自身が
+        // `c == num_features` を検査しないと `update_running_stats`
+        // （長さ `num_features` の running stats と入力由来の長さ `c`
+        // の batch 統計を `zip` する）で debug_assert panic（debug）・
+        // 黙った切り詰め（release）を招く（codex-review P1 指摘。
+        // イシュー #1732 fix ループ）。ここでは num_features=3 に対し
+        // c=2 の入力を渡し、panic せず型付きエラーで拒否されることを
+        // 確認する。
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&Tensor::new(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]).unwrap());
+        let bn =
+            BatchNorm1d::without_affine(3, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM)
+                .unwrap();
+        let err = bn.bind(&tape).forward(&x).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ShapeMismatch { .. })
+        ));
+        // running stats・num_batches_tracked は拒否時に不変のまま
+        // （`forward_var` が `update_running_stats` 呼び出し前に
+        // エラーで早期 return するため）。
+        assert_eq!(bn.num_batches_tracked(), 0);
     }
 
     #[test]

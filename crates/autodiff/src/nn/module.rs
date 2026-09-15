@@ -590,6 +590,16 @@ fn batch_norm_forward_host(
     input: &Tensor<f32>,
 ) -> Result<Tensor<f32>, AutodiffError> {
     let (n, c, spatial) = batch_norm_layout(input.shape())?;
+    // `weight`／`bias` が `Some` のときは直後の `require_same_shape`
+    // が `w`／`b` の構築時 shape（`[num_features]`）経由で
+    // `c == num_features` を間接検証するが、`without_affine`
+    // （両方 `None`）構成ではその経路が無い。`core.update_running_stats`
+    // （train 分岐。長さ `num_features` の running stats と `zip` する）
+    // へ長さ `c` の batch 統計が渡る前に、ここで明示検査する
+    // （codex-review P1・Cursor Bugbot 指摘。イシュー #1732 fix
+    // ループ。`nn::batch_norm::BatchNormCore::forward_var` と同型の
+    // 検査）。
+    require_same_shape(&[c], &[core.num_features()])?;
     if let Some(w) = core.weight() {
         require_same_shape(w.shape(), &[c])?;
     }
@@ -1081,5 +1091,30 @@ mod tests {
         let via_host = elu.forward_host(test_ops().as_ref(), &x).unwrap();
 
         assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn batch_norm_without_affine_forward_host_rejects_channel_mismatch() {
+        // `batch_norm_forward_host`（tape 不要経路）版の regression。
+        // `nn::batch_norm::BatchNormCore::forward_var`（tape 経路）と
+        // 同型の欠落——affine なし構成では `weight`／`bias` 経由の
+        // `c == num_features` 間接検証が働かないため、明示検査を
+        // `require_same_shape(&[c], &[core.num_features()])` で追加
+        // 済み（codex-review P1 指摘・イシュー #1732 fix ループ）。
+        // num_features=3 に対し c=2 の入力を渡し、panic せず型付き
+        // エラーで拒否されることを確認する。
+        use crate::nn::batch_norm::{BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM};
+        use crate::test_support::test_ops;
+
+        let bn =
+            BatchNorm1d::without_affine(3, BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM)
+                .unwrap();
+        let x = Tensor::new(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]).unwrap();
+        let err = bn.forward_host(test_ops().as_ref(), &x).unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ShapeMismatch { .. })
+        ));
+        assert_eq!(bn.core.num_batches_tracked(), 0);
     }
 }
