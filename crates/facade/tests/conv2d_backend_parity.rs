@@ -243,3 +243,49 @@ fn cuda_conv2d_forward_matches_cpu() {
         &contiguous_slice(&cpu_out),
     );
 }
+
+/// `device` 上で conv2d backward（forward → `sum(None)` → `backward`）を
+/// 実行し `(dx, dw, db)` を返す（イシュー #1766）。CUDA は `im2col`／
+/// `col2im` が本 issue で override されるが `conv2d` 自身は override
+/// しないため、`conv2d_with_fallback` の段階的合成のうち im2col
+/// （bit 一致）・GEMM（REQ-2）・col2im（bit 一致。d_input 側）を経由
+/// する。d_weight／d_bias はホスト側縮約（設計 doc §6.3〜§6.4）のため
+/// GEMM 段の差のみが REQ-2 判定対象となる。
+fn conv2d_backward_on(device: Device) -> (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x = tape.make_var(&leaf(1, &[1, 2, 5, 5]));
+    let w = tape.make_var(&leaf(2, &[3, 2, 3, 3]));
+    let b = tape.make_var(&leaf(3, &[3]));
+    let out = x
+        .conv2d(&w, Some(&b), [1, 1], [1, 1], [1, 1], 1)
+        .expect("conv2d: 常に成功する形状");
+    let loss = out.sum(None).expect("sum: 常に成功する");
+    let grads = tape.backward(&loss).expect("backward: 常に成功する形状");
+    let dx = grads.get(&x).unwrap().expect("到達する").clone();
+    let dw = grads.get(&w).unwrap().expect("到達する").clone();
+    let db = grads.get(&b).unwrap().expect("到達する").clone();
+    (dx, dw, db)
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_conv2d_backward_matches_cpu() {
+    let (dx_cuda, dw_cuda, db_cuda) = conv2d_backward_on(Device::Cuda(0));
+    let (dx_cpu, dw_cpu, db_cpu) = conv2d_backward_on(Device::Cpu);
+
+    assert_parity(
+        "conv2d backward（dx）: CUDA tape_for vs CPU tape_for",
+        &contiguous_slice(&dx_cuda),
+        &contiguous_slice(&dx_cpu),
+    );
+    assert_parity(
+        "conv2d backward（dw）: CUDA tape_for vs CPU tape_for",
+        &contiguous_slice(&dw_cuda),
+        &contiguous_slice(&dw_cpu),
+    );
+    assert_parity(
+        "conv2d backward（db）: CUDA tape_for vs CPU tape_for",
+        &contiguous_slice(&db_cuda),
+        &contiguous_slice(&db_cpu),
+    );
+}

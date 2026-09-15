@@ -33,13 +33,13 @@ use std::sync::Arc;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BceKind, BinaryElementwiseOp, DType, DispatchFailureCell, FusionPlan,
-    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
+    Activation, BackendOps, BceKind, BinaryElementwiseOp, Conv2dParams, DType, DispatchFailureCell,
+    FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
     LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp,
     ScatterReduce, SegmentKey, SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, gather_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape,
-    pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    UnaryElementwiseOp, gather_out_shape, im2col_out_shape, interpolate_out_shape_for_mode,
+    one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
+    row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -1460,6 +1460,31 @@ fn map_interpolate_error(err: CudaError) -> BackendError {
 fn map_constant_pad_error(err: CudaError) -> BackendError {
     match err {
         CudaError::InvalidConstantPadShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
+}
+
+/// `im2col.rs::CudaIm2col::run_im2col_f32`／`run_col2im_f32` のエラーを
+/// `BackendOps::im2col`／`col2im` の戻り値へ変換する（イシュー
+/// #1766）。[`CudaError::Im2colSizeLimitExceeded`]（形状パラメータが
+/// カーネル引数 `int` 上限を超過）**のみ**
+/// [`BackendError::Unsupported`] へ写像し、
+/// `fandhe_ai_autodiff::grad::im2col_with_fallback`／
+/// `col2im_with_fallback` のホストフォールバック（`eval::im2col`／
+/// `col2im`）へ委ねる（`map_scan_error`／`map_unique_error` と同じ
+/// 設計判断——col は入力の `kH·kW` 倍で現実的形状でも上限へ到達し
+/// うるため hard fail ではなくフォールバックが妥当）。
+/// [`CudaError::InvalidIm2colShape`]（内部契約違反。呼び出し元
+/// `ops.rs` の事前検証を通過した入力からは実質到達しない防御的経路）
+/// は `ShapeError::ElementCountOverflow` へ、それ以外（driver 不在
+/// 等）は既存 [`map_cuda_error`] へ委譲する（判定迂回経路を作らない。
+/// `.claude/rules/security.md` A08）。
+fn map_im2col_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::Im2colSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        CudaError::InvalidIm2colShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
         other => map_cuda_error(other),
@@ -3249,6 +3274,98 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::im2col` の CUDA 実装（イシュー #1766）。
+    /// [`im2col_out_shape`] で `input.shape()`／`params` を再検査して
+    /// から `im2col::CudaIm2col::run_im2col_f32` へ委譲する（`pad` と
+    /// 同じ二重検査方針。`.claude/rules/security.md` A08）。`conv2d`
+    /// 自身は override しない（`fandhe_ai_tensor_core::backend_ops::
+    /// BackendOps::conv2d` doc・設計 `docs/conv-ops-design.md` §9）。
+    fn im2col(
+        &self,
+        input: &Tensor<f32>,
+        params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            im2col_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+
+        // 出力が空なら（`N`／`Cin` 系の軸が 0。空間軸は
+        // `im2col_out_shape` が事前に拒否する契約）`input` を読む必要が
+        // 一切ない（`pad` の空出力早期リターンと同じ理由）。
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+        checked_f32_bytes(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("im2col: input not contiguous".into())
+        })?;
+
+        let ic = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_im2col(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_im2col_error, || {
+            ic.run_im2col_f32(input_slice, input.shape(), &out_shape, params)
+        })?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::col2im` の CUDA 実装（イシュー #1766）。
+    /// [`im2col_out_shape`] で `input_shape`／`params` から期待する
+    /// `d_col` 形状（`[N, G, Cin_g·kH·kW, Hout·Wout]`）を導出し、
+    /// `d_col.shape()` との完全一致を検査したうえで `input_shape`
+    /// （＝戻り値として確保する出力 shape）自体のバイトサイズも
+    /// `checked_f32_bytes` で検査してから `im2col::CudaIm2col::
+    /// run_col2im_f32` へ委譲する（`im2col` と同じ二重検査方針。
+    /// `backend-cpu::ops::CpuBackendOps::col2im` の PR #1862
+    /// codex-review 是正〈`input_shape` が `d_col` とは独立に任意の
+    /// 巨大値を指定できる攻撃面〉と同じ理由で、本メソッドも `d_col`
+    /// のサイズに依らず `input_shape` 自体を確保前検査する）。
+    fn col2im(
+        &self,
+        d_col: &Tensor<f32>,
+        input_shape: &[usize],
+        params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let expected_col_shape =
+            im2col_out_shape(input_shape, params).map_err(BackendError::ShapeMismatch)?;
+        if d_col.shape() != expected_col_shape.as_slice() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: d_col.shape().to_vec(),
+                rhs: expected_col_shape,
+            }));
+        }
+        checked_f32_bytes(input_shape).map_err(BackendError::ShapeMismatch)?;
+
+        if input_shape.contains(&0) {
+            return Tensor::new(Vec::new(), input_shape).map_err(BackendError::ShapeMismatch);
+        }
+        checked_f32_bytes(d_col.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let d_col_owned = d_col.contiguous();
+        let d_col_slice = d_col_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("col2im: d_col not contiguous".into())
+        })?;
+
+        let ic = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_im2col(&device)
+            },
+        )?;
+        let out = self.with_driver_call(&[], map_im2col_error, || {
+            ic.run_col2im_f32(d_col_slice, d_col.shape(), input_shape, params)
+        })?;
+        Tensor::new(out, input_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// `BackendOps::scatter` の CUDA 実装（イシュー #1777）。
     /// [`scatter_out_shape`] で `input`／`index`／`src` の shape を
     /// 再検査し、`index` の値が `[0, input.shape()[dim])` 範囲内である
@@ -4926,6 +5043,72 @@ mod tests {
         let ops = CudaBackendOps::new(0);
         let out = ops.cumprod(&x, 2).expect("empty cumprod must succeed");
         assert_eq!(out.shape(), &[3, 0, 2]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    /// [`CudaBackendOps::im2col`] の回帰テスト（イシュー #1766）。
+    /// `input.shape()` の rank が 4 でなければ `im2col_out_shape` が
+    /// `with_driver_call` 呼び出し前に拒否し、実デバイスへ触れない
+    /// （`cumsum_rejects_out_of_range_dim_without_touching_device` と
+    /// 同型）。
+    #[test]
+    fn im2col_rejects_rank_mismatch_without_touching_device() {
+        let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let params = Conv2dParams::new([2, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops.im2col(&x, &params).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::RankMismatch { .. })
+        ));
+    }
+
+    /// `input` の batch 軸が `0` の場合、`im2col` は空出力を
+    /// `with_driver_call` 呼び出し前に早期リターンする（`cumsum_
+    /// returns_empty_for_zero_sized_shape_without_touching_device` と
+    /// 同じ理由・同じ検証構成）。
+    #[test]
+    fn im2col_returns_empty_for_zero_batch_without_touching_device() {
+        let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 4, 4]).unwrap();
+        let params = Conv2dParams::new([2, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let out = ops.im2col(&x, &params).expect("empty im2col must succeed");
+        assert_eq!(out.shape(), &[0, 1, 4, 9]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    /// [`CudaBackendOps::col2im`] の回帰テスト（イシュー #1766）。
+    /// `d_col.shape()` が `input_shape`／`params` から導出した期待
+    /// 形状と不一致なら `with_driver_call` 呼び出し前に
+    /// `ShapeMismatch` を返す（`backend-cpu::ops::CpuBackendOps::
+    /// col2im` の同型テストと対称）。
+    #[test]
+    fn col2im_rejects_d_col_shape_mismatch_without_touching_device() {
+        let d_col = Tensor::<f32>::new(vec![1.0f32], &[1, 1, 1, 1]).unwrap();
+        let params = Conv2dParams::new([2, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops.col2im(&d_col, &[1, 1, 4, 4], &params).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ShapeMismatch { .. })
+        ));
+    }
+
+    /// `input_shape` がいずれかの軸に `0` を含む場合、`col2im` は
+    /// `with_driver_call` 呼び出し前に空出力を早期リターンする
+    /// （`d_col` を読まない。`im2col_returns_empty_for_zero_batch_
+    /// without_touching_device` と対称）。
+    #[test]
+    fn col2im_returns_empty_for_zero_batch_without_touching_device() {
+        let params = Conv2dParams::new([2, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let input_shape = [0usize, 1, 4, 4];
+        let expected_col_shape = im2col_out_shape(&input_shape, &params).unwrap();
+        let d_col = Tensor::<f32>::new(Vec::new(), &expected_col_shape).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let out = ops
+            .col2im(&d_col, &input_shape, &params)
+            .expect("empty col2im must succeed");
+        assert_eq!(out.shape(), &input_shape);
         assert_eq!(out.numel(), 0);
     }
 

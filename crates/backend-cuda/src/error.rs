@@ -517,6 +517,28 @@ pub enum CudaError {
     /// の契約のため、本 variant は主に長さ・オーバーフローに関する
     /// 起動前検証の失敗を表す。
     InvalidConstantPadShape { detail: String },
+
+    /// im2col／col2im 起動 API（`im2col.rs::CudaIm2col`）のホスト側検証
+    /// （`checked_numel` の要素数積オーバーフロー・ホストスライス長が
+    /// `in_shape`／`col_shape` から導出した期待長と不一致・`P` 軸が
+    /// `conv_out_len` から再計算した `h_out*w_out` と不一致）が拒否
+    /// した入力（イシュー #1766）。`InvalidScanShape` と同じ理由で
+    /// 独立 variant に分離する。`input.shape()`／`params` の rank 整合
+    /// （`im2col_out_shape`）は呼び出し元 `ops.rs` が事前検査済みの
+    /// 契約のため、本 variant は主に長さ・オーバーフロー・内部整合に
+    /// 関する起動前検証の失敗を表す。
+    InvalidIm2colShape { detail: String },
+
+    /// im2col／col2im の対象サイズがバックエンド固有の上限（形状
+    /// パラメータのいずれかがカーネル引数型 `int` の範囲
+    /// 〈`i32::MAX`〉を超える場合）を超過した（イシュー #1766）。
+    /// `ops.rs::CudaBackendOps::im2col`／`col2im` は本 variant のみを
+    /// [`fandhe_ai_tensor_core::device::BackendError::Unsupported`] へ
+    /// 写像し `fandhe_ai_autodiff::grad::im2col_with_fallback`／
+    /// `col2im_with_fallback` のホストフォールバック（`eval::im2col`／
+    /// `col2im`）へ委ねる（`ScanSizeLimitExceeded`／
+    /// `UniqueSizeLimitExceeded` と同じ設計判断）。
+    Im2colSizeLimitExceeded { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -660,6 +682,12 @@ impl fmt::Display for CudaError {
             }
             CudaError::InvalidConstantPadShape { detail } => {
                 write!(f, "invalid pad shape: {detail}")
+            }
+            CudaError::InvalidIm2colShape { detail } => {
+                write!(f, "invalid im2col/col2im shape: {detail}")
+            }
+            CudaError::Im2colSizeLimitExceeded { detail } => {
+                write!(f, "im2col/col2im size limit exceeded: {detail}")
             }
         }
     }
