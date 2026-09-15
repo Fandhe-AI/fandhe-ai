@@ -9,6 +9,9 @@
 セッションへ申し送る（`docs/perf/logs/cuda-conv2d-1766/README.md` と
 同型の運用）。
 
+> **実測の正式な受け皿はイシュー #1771**（`docs/perf/logs/conv-
+> realdevice-1771/`）。統合ランブックを参照すること。
+
 ## 目的
 
 イシュー #1768「Metal Conv2d forward／backward（im2col＋GEMM）」の

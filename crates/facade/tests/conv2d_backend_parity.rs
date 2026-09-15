@@ -81,6 +81,25 @@ fn contiguous_slice(t: &Tensor<f32>) -> Vec<f32> {
         .to_vec()
 }
 
+/// `data` の全要素の `to_bits()` を FNV-1a 相当で fold した診断用
+/// チェックサムを `<label>.fold_bits=<hex>` 形式で 1 行出力する
+/// （`nn_conv_backend_parity.rs::print_fold_bits`・
+/// `mse_backward_bench.rs::fold_bits` と同一の FNV-1a fold。PR #1882
+/// レビュー指摘: 実機ランブックの run-to-run 決定性チェック
+/// 〈`docs/perf/logs/conv-realdevice-1771/README.md` 事前登録判定
+/// 規則 4)〉が `bits=`／`fold_bits=` 行を `grep` で抽出して 2 回起動
+/// を `diff` する設計のため、抽出対象の行が 1 件も無いと空の抽出
+/// 結果同士が自明に一致し起動間の変化を検出できない）。
+fn print_fold_bits(label: &str, data: &[f32]) {
+    let mut acc: u64 = 0xcbf29ce484222325; // FNV-1a 相当の固定初期値（診断専用・暗号用途ではない）
+    for &v in data.iter() {
+        let bits = v.to_bits() as u64;
+        acc ^= bits;
+        acc = acc.wrapping_mul(0x100000001b3);
+    }
+    println!("{label}.fold_bits={acc:#018x}");
+}
+
 // --- forward（属性なし: CPU vs NaiveOps） ---
 
 #[test]
@@ -234,6 +253,10 @@ fn metal_conv2d_forward_matches_cpu() {
         &contiguous_slice(&metal_out),
         &contiguous_slice(&cpu_out),
     );
+    print_fold_bits(
+        "metal_conv2d_forward_matches_cpu[out]",
+        &contiguous_slice(&metal_out),
+    );
 }
 
 #[test]
@@ -246,6 +269,10 @@ fn cuda_conv2d_forward_matches_cpu() {
         "conv2d forward: CUDA tape_for vs CPU tape_for",
         &contiguous_slice(&cuda_out),
         &contiguous_slice(&cpu_out),
+    );
+    print_fold_bits(
+        "cuda_conv2d_forward_matches_cpu[out]",
+        &contiguous_slice(&cuda_out),
     );
 }
 
@@ -293,6 +320,18 @@ fn cuda_conv2d_backward_matches_cpu() {
         &contiguous_slice(&db_cuda),
         &contiguous_slice(&db_cpu),
     );
+    print_fold_bits(
+        "cuda_conv2d_backward_matches_cpu[dx]",
+        &contiguous_slice(&dx_cuda),
+    );
+    print_fold_bits(
+        "cuda_conv2d_backward_matches_cpu[dw]",
+        &contiguous_slice(&dw_cuda),
+    );
+    print_fold_bits(
+        "cuda_conv2d_backward_matches_cpu[db]",
+        &contiguous_slice(&db_cuda),
+    );
 }
 
 /// `metal_conv2d_forward_matches_cpu` と同じ理由で `cfg(target_os =
@@ -324,5 +363,17 @@ fn metal_conv2d_backward_matches_cpu() {
         "conv2d backward（db）: Metal tape_for vs CPU tape_for",
         &contiguous_slice(&db_metal),
         &contiguous_slice(&db_cpu),
+    );
+    print_fold_bits(
+        "metal_conv2d_backward_matches_cpu[dx]",
+        &contiguous_slice(&dx_metal),
+    );
+    print_fold_bits(
+        "metal_conv2d_backward_matches_cpu[dw]",
+        &contiguous_slice(&dw_metal),
+    );
+    print_fold_bits(
+        "metal_conv2d_backward_matches_cpu[db]",
+        &contiguous_slice(&db_metal),
     );
 }
