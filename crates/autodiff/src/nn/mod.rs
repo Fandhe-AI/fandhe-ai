@@ -52,7 +52,19 @@
 //! [`loss::SmoothL1Loss`]）を追加した。`MseLoss`／`CrossEntropyLoss` と
 //! 同じ「`BackendOps` の専用融合カーネルを優先し `Unsupported` のとき
 //! のみホスト参照実装へフォールバックする」設計を踏襲する
-//! （`loss.rs` モジュール doc 参照）。
+//! （`loss.rs` モジュール doc 参照）。イシュー #1758 で [`Module`] trait
+//! に `set_training`／`training`（PyTorch `Module.training` 相当）・
+//! `named_parameters`（PyTorch `Module.named_parameters()` 相当）の
+//! defaulted メソッドを追加した。本クレート内実装（`Linear`・活性化
+//! 関数群・`RmsNorm`／`LayerNorm`・`Softmax`／`LogSoftmax`・
+//! `MultiheadAttention`・`Rnn`／`Lstm`／`Gru`）はいずれもモード非依存
+//! のため `set_training`／`training` は既定（no-op／常に `true`）の
+//! まま——モードの正はコンテナ（`fandhe_ai_facade::compat::sequential::
+//! Sequential`）が保持するフラグとする契約（`module.rs` の trait doc
+//! 参照）。`named_parameters` は `Linear`／`RmsNorm`／`LayerNorm`／
+//! `MultiheadAttention`／`Rnn`／`Lstm`／`Gru` でオーバーライドし、
+//! struct フィールド名／accessor 名をそのまま使う命名契約（PyTorch の
+//! packed 命名は追わない）とした。
 
 mod attention;
 mod embedding;
