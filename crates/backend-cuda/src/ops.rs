@@ -35,12 +35,12 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
     DType, DispatchFailureCell, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
-    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors,
-    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey, SegmentResource, SegmentRun,
-    ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, batch_norm_layout, gather_out_shape,
-    im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams,
+    QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey, SegmentResource,
+    SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, adaptive_pool2d_out_shape,
+    batch_norm_layout, gather_out_shape, im2col_out_shape, interpolate_out_shape_for_mode,
+    one_hot_out_shape, pad_out_shape, pool2d_out_shape, reduce_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -1515,6 +1515,30 @@ fn map_batch_norm_error(err: CudaError) -> BackendError {
         CudaError::BatchNormSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
         CudaError::InvalidBatchNormShape { .. } => {
             BackendError::KernelLaunchFailed(err.to_string())
+        }
+        other => map_cuda_error(other),
+    }
+}
+
+/// `pooling.rs::CudaPooling::run_max_pool2d_f32`／
+/// `run_avg_pool2d_f32`／`run_adaptive_avg_pool2d_f32` のエラーを
+/// `BackendOps::max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d` の
+/// 戻り値へ変換する（イシュー #1729・追従イシュー）。
+/// [`CudaError::PoolingSizeLimitExceeded`]（形状パラメータがカーネル
+/// 引数 `int` 上限を超過）**のみ** [`BackendError::Unsupported`] へ
+/// 写像し、`fandhe_ai_autodiff` 側のホストフォールバック
+/// （`eval::max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`）へ委ねる
+/// （`map_im2col_error`／`map_unique_error` と同じ設計判断）。
+/// [`CudaError::InvalidPoolingShape`]（内部契約違反。呼び出し元
+/// `ops.rs` の事前検証を通過した入力からは実質到達しない防御的経路）
+/// は `ShapeError::ElementCountOverflow` へ、それ以外（driver 不在
+/// 等）は既存 [`map_cuda_error`] へ委譲する（判定迂回経路を作らない。
+/// `.claude/rules/security.md` A08）。
+fn map_pooling_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::PoolingSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        CudaError::InvalidPoolingShape { .. } => {
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
         other => map_cuda_error(other),
     }
@@ -4638,6 +4662,152 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `BackendOps::max_pool2d` の CUDA 実装（イシュー #1729・
+    /// 追従イシュー。#1607 ツリー）。[`pool2d_out_shape`] で
+    /// `input.shape()`／`params` を再検査してから
+    /// `pooling::CudaPooling::run_max_pool2d_f32` へ委譲する（`im2col`
+    /// と同じ二重検査方針）。`索引` テンソルの dtype は `i32` 固定
+    /// （`crate::pooling::CudaPooling::run_max_pool2d_f32` doc 参照）。
+    fn max_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Pool2dParams,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        let out_shape =
+            pool2d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Ok((
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+                Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
+            ));
+        }
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("max_pool2d: input not contiguous".into())
+        })?;
+        let in_shape: [usize; 4] = input.shape().try_into().map_err(|_| {
+            BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 4,
+                actual: input.shape().len(),
+            })
+        })?;
+
+        let p = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_pooling(&device)
+            },
+        )?;
+        let (values, indices, _) = self.with_driver_call(&[], map_pooling_error, || {
+            p.run_max_pool2d_f32(
+                input_slice,
+                in_shape,
+                params.kernel_size(),
+                params.stride(),
+                params.padding(),
+                params.dilation(),
+            )
+        })?;
+        Ok((
+            Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(indices, &out_shape).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// `BackendOps::avg_pool2d` の CUDA 実装（イシュー #1729・
+    /// 追従イシュー）。[`pool2d_out_shape`] で `input.shape()`／
+    /// `params` を再検査してから `pooling::CudaPooling::
+    /// run_avg_pool2d_f32` へ委譲する。
+    fn avg_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Pool2dParams,
+        count_include_pad: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape =
+            pool2d_out_shape(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("avg_pool2d: input not contiguous".into())
+        })?;
+        let in_shape: [usize; 4] = input.shape().try_into().map_err(|_| {
+            BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 4,
+                actual: input.shape().len(),
+            })
+        })?;
+
+        let p = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_pooling(&device)
+            },
+        )?;
+        let (values, _) = self.with_driver_call(&[], map_pooling_error, || {
+            p.run_avg_pool2d_f32(
+                input_slice,
+                in_shape,
+                params.kernel_size(),
+                params.stride(),
+                params.padding(),
+                count_include_pad,
+            )
+        })?;
+        Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// `BackendOps::adaptive_avg_pool2d` の CUDA 実装（イシュー
+    /// #1729・追従イシュー）。[`adaptive_pool2d_out_shape`] で
+    /// `input.shape()`／`output_size` を再検査してから
+    /// `pooling::CudaPooling::run_adaptive_avg_pool2d_f32` へ委譲する。
+    fn adaptive_avg_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        output_size: [usize; 2],
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = adaptive_pool2d_out_shape(input.shape(), output_size)
+            .map_err(BackendError::ShapeMismatch)?;
+        if out_shape.contains(&0) {
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let input_owned = input.contiguous();
+        let input_slice = input_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("adaptive_avg_pool2d: input not contiguous".into())
+        })?;
+        let in_shape: [usize; 4] = input.shape().try_into().map_err(|_| {
+            BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 4,
+                actual: input.shape().len(),
+            })
+        })?;
+
+        let p = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_pooling(&device)
+            },
+        )?;
+        let (values, _) = self.with_driver_call(&[], map_pooling_error, || {
+            p.run_adaptive_avg_pool2d_f32(input_slice, in_shape, output_size)
+        })?;
+        Tensor::new(values, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::lstm_pointwise`] の CUDA
     /// 実装（イシュー #1647）。`hidden` は `c_prev` の列数から導出する。
     fn lstm_pointwise(
@@ -5296,6 +5466,87 @@ mod tests {
             .col2im(&d_col, &input_shape, &params)
             .expect("empty col2im must succeed");
         assert_eq!(out.shape(), &input_shape);
+        assert_eq!(out.numel(), 0);
+    }
+
+    // --- pooling（max_pool2d／avg_pool2d／adaptive_avg_pool2d）の
+    // `BackendOps` 配線確認（イシュー #1729・追従イシュー。#1607 ツリー）。
+    // 親 #1729 が本体カーネル（`crate::pooling::CudaPooling`）を実装
+    // 済みだったが `ops.rs` への override 配線が漏れており本番経路が
+    // 既定の `Unsupported`（ホストフォールバック）に落ちてカーネルが
+    // デッドコードになっていた事実を回帰させる。`input.shape()` の
+    // rank 不一致・batch 軸 0 の早期リターンは `im2col` と同じ理由で
+    // 実機非依存に検証できる（`#[ignore]` 不要）。実機〈DGX Spark
+    // GB10〉でのカーネル実行自体（数値一致）は未実測のまま申し送る。 ---
+
+    #[test]
+    fn max_pool2d_rejects_rank_mismatch_without_touching_device() {
+        let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let params = Pool2dParams::new([2, 2], None, [0, 0], [1, 1]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops.max_pool2d(&x, &params).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::RankMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn max_pool2d_returns_empty_for_zero_batch_without_touching_device() {
+        let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 4, 4]).unwrap();
+        let params = Pool2dParams::new([2, 2], None, [0, 0], [1, 1]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let (values, indices) = ops
+            .max_pool2d(&x, &params)
+            .expect("empty max_pool2d must succeed");
+        assert_eq!(values.shape(), &[0, 1, 2, 2]);
+        assert_eq!(indices.shape(), &[0, 1, 2, 2]);
+        assert_eq!(values.numel(), 0);
+    }
+
+    #[test]
+    fn avg_pool2d_rejects_rank_mismatch_without_touching_device() {
+        let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let params = Pool2dParams::new([2, 2], None, [0, 0], [1, 1]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops.avg_pool2d(&x, &params, true).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::RankMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn avg_pool2d_returns_empty_for_zero_batch_without_touching_device() {
+        let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 4, 4]).unwrap();
+        let params = Pool2dParams::new([2, 2], None, [0, 0], [1, 1]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let out = ops
+            .avg_pool2d(&x, &params, true)
+            .expect("empty avg_pool2d must succeed");
+        assert_eq!(out.shape(), &[0, 1, 2, 2]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    #[test]
+    fn adaptive_avg_pool2d_rejects_rank_mismatch_without_touching_device() {
+        let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops.adaptive_avg_pool2d(&x, [2, 2]).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::RankMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn adaptive_avg_pool2d_returns_empty_for_zero_batch_without_touching_device() {
+        let x = Tensor::<f32>::new(Vec::new(), &[0, 1, 4, 4]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let out = ops
+            .adaptive_avg_pool2d(&x, [2, 2])
+            .expect("empty adaptive_avg_pool2d must succeed");
+        assert_eq!(out.shape(), &[0, 1, 2, 2]);
         assert_eq!(out.numel(), 0);
     }
 
