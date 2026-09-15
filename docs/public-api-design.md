@@ -635,7 +635,7 @@ let output = model.predict_with_ops(&input, Box::new(fandhe_ai_backend_cpu::CpuB
 
 **TASK-1.9a（#44）実装時の突合結果**: `Device`（`Cpu`／`Cuda(usize)`／`Metal`）は本節のシグネチャをそのまま `crates/tensor-core/src/device.rs` に実装した。以下は本文書からの拡張・保留であり、実装コメントにも同旨を記載している。
 
-- `Device::available()` は `tensor-core` から 3 バックエンドクレートを直接参照できないため実装せず、複数 `DeviceProvider`（新規追加。下記）を横断する `enumerate_all(providers: &[&dyn DeviceProvider]) -> Vec<DeviceInfo>` を同等機能として提供した。集約入口（`Device::available()` をどの層で結線するか）は TASK-1.9c（#46）では対象外とし、TASK-1.9d（#47）でも「3 バックエンド統合テストの整備」という受け入れ条件には不要と判断し対象外とした（実装は別途追跡）。
+- `Device::available()` は `tensor-core` から 3 バックエンドクレートを直接参照できないため実装せず、複数 `DeviceProvider`（新規追加。下記）を横断する `enumerate_all(providers: &[&dyn DeviceProvider]) -> Vec<DeviceInfo>` を同等機能として提供した。集約入口（`Device::available()` をどの層で結線するか）は TASK-1.9c（#46）では対象外とし、TASK-1.9d（#47）でも「3 バックエンド統合テストの整備」という受け入れ条件には不要と判断し対象外とした（実装は別途追跡）。**イシュー #1614 で解消**: 集約入口は `facade` の自由関数 `fandhe_ai::available_devices() -> Vec<Device>` として結線した（orphan rule により `Device` への inherent メソッド形は採れないため、既存の `release_cached_memory(device)` 等と同じ自由関数パターンに従う。`DeviceProvider`／`DeviceInfo`／`enumerate_all` 自体は再エクスポートせず `Device` 識別子のみを返す。詳細は `docs/facade-device-transfer-enumeration-design.md`）。
 - 3 バックエンドが「同一 trait でデバイス列挙・選択できる」（#44 受け入れ条件）ための入口として `DeviceProvider` trait（`backend_name`／`is_available`／`enumerate`／`select`）と `DeviceInfo`（`device`／`name`／`total_memory_bytes`／`compute_units`。`#[non_exhaustive]`）を新規追加した。本文書は §4.2 の `BackendOps`（カーネルディスパッチ）のみを定義しており、デバイス検出・選択専用の trait は記載していなかった。
 - 既定デバイス選択ロジック（本節の未決事項）は本イシューでも実装しない（列挙と明示選択のみを提供する。ユーザー承認が必要な事項のため自動運転では安全側に倒した）。
 
@@ -768,7 +768,7 @@ pub enum BackendError {
 ## 6. 未決事項・採否論点の一覧（ユーザー判断用）
 
 1. **非 contiguous な `reshape` の方針**（2.2.1）: エラー（案 A、本文書の推奨）か暗黙コピー（案 B）か。
-2. **CUDA 既定有効化の構成決定**（4.1）: REQ-2 でも未検証のまま残っている。`Device::available()` が返す既定デバイスの選択ロジックは本文書では確定しない。
+2. **CUDA 既定有効化の構成決定**（4.1）: REQ-2 でも未検証のまま残っている。`Device::available()` が返す既定デバイスの選択ロジックは本文書では確定しない。**（イシュー #1614 追記）** 列挙の集約入口自体（`fandhe_ai::available_devices()`）は解消済み（§4.1 突合結果参照）。既定デバイス自動選択ロジックはこの解消の対象外のまま未決事項として継続する。
 3. **rank 型載せの最終確定**（2.5）: 本文書は基盤層を実行時 rank、型レベル shape を後続レイヤー限定とする方針を決定として記録した。TASK-10.x 実装時にこの方針で問題がないか再確認すること。**（2026-08-07 TASK-10.1a 追記）** イシュー #98 でこの再確認を実施し、基盤 `Tensor<T>` を実行時 rank のまま据え置く決定を維持した。型レベル shape の設計正本は `docs/typed-shape-design.md` とする（本項の open item はクローズ）。
 4. **演算グラフ／融合機構（イシュー #161）との接続点**: `Var`/`Tape` の演算記録が将来の融合機構（TASK-12.1a）とどう接続するかは本文書では設計しない。`Tape` の `Op` 列挙が融合対象の中間表現候補になりうる点のみ接続点として記録する。
 5. **`DeviceBuffer` の内部表現**（4.2）: TASK-1.9b（#45）で確定した。`Box<dyn BufferHandle>`（`Any` ダウンキャスト経由の依存逆転構成）で不透明ハンドルを保持し、解放は各バックエンドの具体ハンドル型の `Drop` に一本化する（4.2 の「TASK-1.9b（#45）実装時の突合結果」参照）。

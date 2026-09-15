@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use fandhe_ai_tensor_core::ShapeError;
+use fandhe_ai_tensor_core::{Device, ShapeError};
 
 /// `autodiff` の公開 API が返すエラー型。
 ///
@@ -70,6 +70,22 @@ pub enum AutodiffError {
     /// ——未到達は「たまたま今回の loss には寄与しなかった」ことを、
     /// 本 variant は「この `Var` は構造的に勾配を持ちえない」ことを表す。
     GradientTrackingDisabled,
+    /// [`crate::Var::to`]（イシュー #1614）が要求先デバイスと実際の
+    /// デバイスの不一致を検出した。`Var` は所属する 1 つの `Tape`
+    /// （＝1 デバイス）に束縛されており（`docs/public-api-design.md`
+    /// §3.1「クロステープ安全性」）、同一テープ内でデバイスを差し
+    /// 替える演算は表現できない。単位 variant ではなく要求先・実際の
+    /// 両方の [`Device`] を保持するのは、呼び出し元が「なぜ失敗した
+    /// か」をエラー値だけから判断できるようにするため（`BackendError::
+    /// DeviceUnavailable` と同じ設計方針）。別デバイスへ実際に値を
+    /// 転送したい場合は [`crate::Var::to_tape`]（もしくは facade
+    /// `Tape::transfer`）を使う。
+    DeviceMismatch {
+        /// 呼び出し元が [`crate::Var::to`] へ渡した要求先デバイス。
+        requested: Device,
+        /// この `Var` が実際に属する `Tape` のデバイス。
+        actual: Device,
+    },
 }
 
 impl From<ShapeError> for AutodiffError {
@@ -99,6 +115,10 @@ impl fmt::Display for AutodiffError {
             AutodiffError::GradientTrackingDisabled => write!(
                 f,
                 "gradient tracking disabled: この Var は requires_grad=false の葉（var_no_grad／detach）から派生しており勾配を持たない"
+            ),
+            AutodiffError::DeviceMismatch { requested, actual } => write!(
+                f,
+                "device mismatch: requested {requested:?} but this Var belongs to a Tape on {actual:?}（別デバイスへ値を転送するには Var::to_tape／Tape::transfer を使うこと）"
             ),
         }
     }
