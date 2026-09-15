@@ -30,9 +30,9 @@
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, BceKind, CastElement, HuberKind, KlDivTarget,
-    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
-    row_norm_layout,
+    Activation, BackendError, BackendOps, BatchNormTrainOutput, BceKind, CastElement, HuberKind,
+    KlDivTarget, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
+    batch_norm_layout, row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -1127,6 +1127,59 @@ pub(crate) fn vjp(
             }
             if let (Some(b), Some(db)) = (bias, db) {
                 contributions.push((b, build_tensor(db, &[hidden])));
+            }
+            contributions
+        }
+        Op::BatchNorm {
+            input,
+            weight,
+            bias,
+            eps,
+            fixed_stats,
+        } => {
+            // train モード（`fixed_stats.is_none()`）のみ `input`／
+            // `weight` を実体化し直して統計を再計算する（`Op::LayerNorm`
+            // と同じ理由）。eval モードは `fixed_stats` が定数の
+            // `mean`／`var` を直接保持しているため再計算不要。
+            let x_val = materialize_fallible(nodes, ops, input)?.clone();
+            let w_val = match weight {
+                Some(w) => Some(materialize_fallible(nodes, ops, w)?.clone()),
+                None => None,
+            };
+            let x_shape = x_val.shape().to_vec();
+            let (n, c, spatial) = batch_norm_layout(&x_shape).unwrap_or_else(|_| {
+                debug_assert!(
+                    false,
+                    "grad::vjp: Op::BatchNorm の batch_norm_layout が forward 側の契約に反して失敗した"
+                );
+                (0, 0, 0)
+            });
+            let x_slice = dense_vec(&x_val);
+            let w_slice = w_val.as_ref().map(dense_vec);
+            let dy_slice = dense_vec(upstream);
+            let fixed_dense = fixed_stats
+                .as_ref()
+                .map(|(m, v)| (dense_vec(m), dense_vec(v)));
+            let fixed_ref = fixed_dense
+                .as_ref()
+                .map(|(m, v)| (m.as_slice(), v.as_slice()));
+            let (dx, dw, db) = batch_norm_vjp_channels(
+                &x_slice,
+                w_slice.as_deref(),
+                bias.is_some(),
+                eps,
+                n,
+                c,
+                spatial,
+                &dy_slice,
+                fixed_ref,
+            );
+            let mut contributions = vec![(input, build_tensor(dx, &x_shape))];
+            if let (Some(w), Some(dw)) = (weight, dw) {
+                contributions.push((w, build_tensor(dw, &[c])));
+            }
+            if let (Some(b), Some(db)) = (bias, db) {
+                contributions.push((b, build_tensor(db, &[c])));
             }
             contributions
         }
@@ -2254,6 +2307,116 @@ pub(crate) fn col2im_with_fallback(
     }
 }
 
+/// `Op::BatchNorm` train モードの forward（`Var::batch_norm_with_
+/// batch_stats`／`nn::BatchNorm1d`／`BatchNorm2d::forward_host`）が
+/// 共有する「バックエンド → `Unsupported` のときのみホスト参照実装」
+/// ヘルパー（[`conv2d_with_fallback`] と同型。イシュー #1732・親
+/// #1608）。`Var` メソッドと `Module::forward_host` の両方が本関数を
+/// 呼ぶことで、tape 経路／tape 不要経路の bit 一致を構造的に担保する。
+///
+/// **契約**: `x` は `[n, c, spatial]` 相当（`fandhe_ai_tensor_core::
+/// batch_norm_layout` が導出済み）。`weight`／`bias` を渡す場合は
+/// shape `[c]` を要求する（呼び出し元が事前検査済み）。戻り値
+/// [`BatchNormTrainOutput::output`] の shape は `x` と恒等・
+/// `batch_mean`／`batch_var` は shape `[c]`（バックエンド実装の契約
+/// 検証。実装バグの黙認防止。`.claude/rules/security.md` A08）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn batch_norm_train_with_fallback(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+    weight: Option<&Tensor<f32>>,
+    bias: Option<&Tensor<f32>>,
+    eps: f32,
+    n: usize,
+    c: usize,
+    spatial: usize,
+) -> Result<BatchNormTrainOutput, AutodiffError> {
+    match ops.batch_norm_train(x, weight, bias, eps) {
+        Ok(v) => {
+            if v.output.shape() != x.shape()
+                || v.batch_mean.shape() != [c]
+                || v.batch_var.shape() != [c]
+            {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.output.shape().to_vec(),
+                        rhs: x.shape().to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => {
+            let w_dense = weight.map(eval::dense_vec);
+            let b_dense = bias.map(eval::dense_vec);
+            let (output, batch_mean, batch_var) = eval::batch_norm_train_channels(
+                x,
+                w_dense.as_deref(),
+                b_dense.as_deref(),
+                eps,
+                n,
+                c,
+                spatial,
+            );
+            Ok(BatchNormTrainOutput {
+                output,
+                batch_mean: build_tensor(batch_mean, &[c]),
+                batch_var: build_tensor(batch_var, &[c]),
+            })
+        }
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// `Op::BatchNorm` eval モードの forward（`Var::batch_norm_infer`／
+/// `Module::forward_host`）が共有するフォールバックヘルパー
+/// （[`batch_norm_train_with_fallback`] の eval 版）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn batch_norm_infer_with_fallback(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+    mean: &Tensor<f32>,
+    var: &Tensor<f32>,
+    weight: Option<&Tensor<f32>>,
+    bias: Option<&Tensor<f32>>,
+    eps: f32,
+    n: usize,
+    c: usize,
+    spatial: usize,
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.batch_norm_infer(x, mean, var, weight, bias, eps) {
+        Ok(v) => {
+            if v.shape() != x.shape() {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: x.shape().to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => {
+            let mean_dense = eval::dense_vec(mean);
+            let var_dense = eval::dense_vec(var);
+            let w_dense = weight.map(eval::dense_vec);
+            let b_dense = bias.map(eval::dense_vec);
+            Ok(eval::batch_norm_infer_channels(
+                x,
+                &mean_dense,
+                &var_dense,
+                w_dense.as_deref(),
+                b_dense.as_deref(),
+                eps,
+                n,
+                c,
+                spatial,
+            ))
+        }
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
 /// [`Op::Conv2d`] の forward（`Var::conv2d`）が使う段階的合成ヘルパー
 /// （イシュー #1764・設計 `docs/conv-ops-design.md` §5.3）。
 ///
@@ -3135,6 +3298,141 @@ fn layer_norm_vjp_rows(
         if let Some(db_acc) = db_acc.as_mut() {
             for (acc, &dyv) in db_acc.iter_mut().zip(dy_row.iter()) {
                 *acc += dyv as f64;
+            }
+        }
+    }
+    let dw = dw_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+    let db = db_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+    (dx, dw, db)
+}
+
+/// `Op::BatchNorm` の VJP 本体（イシュー #1732・親 #1608）:
+/// [`layer_norm_vjp_rows`] のチャネル方向版。`x̂ = (x−μ_c)·r_c`・
+/// `dx̂ = dy·w`（`w` はチャネルごとにブロードキャスト）・train モード
+/// （`fixed_stats.is_none()`）は `dx = r_c·(dx̂ − mean_M(dx̂) −
+/// x̂·mean_M(dx̂·x̂))`（`mean_M` はチャネル `c` の `M = n·spatial` 要素
+/// にわたる平均）、eval モード（`fixed_stats = Some((mean, var))`。
+/// `mean`／`var` は定数）は `dx = r_c·dx̂` のみ（`mean`／`var` への
+/// 逆伝播は不要——forward 時点で固定統計として渡されるノードは
+/// `Op::BatchNorm` の入力グラフに現れない）。`dw_c = Σ_M dy·x̂`・
+/// `db_c = Σ_M dy`（train／eval 共通。要素を `f32` で確定してから
+/// `f64` 蓄積する `layer_norm_vjp_rows` と同じ縮約精度契約）。
+///
+/// `x`／`dy` は `[n, c, spatial]` 相当の行優先平坦化データ。
+/// `fixed_stats` は `Some((mean, var))`（それぞれ長さ `c`）で eval
+/// モードを表す。
+#[allow(clippy::too_many_arguments)]
+fn batch_norm_vjp_channels(
+    x: &[f32],
+    w: Option<&[f32]>,
+    has_bias: bool,
+    eps: f32,
+    n: usize,
+    c: usize,
+    spatial: usize,
+    dy: &[f32],
+    fixed_stats: Option<(&[f32], &[f32])>,
+) -> (Vec<f32>, Option<Vec<f32>>, Option<Vec<f32>>) {
+    let mut dx = vec![0.0f32; x.len()];
+    let mut dw_acc: Option<Vec<f64>> = w.map(|_| vec![0.0f64; c]);
+    let mut db_acc: Option<Vec<f64>> = if has_bias {
+        Some(vec![0.0f64; c])
+    } else {
+        None
+    };
+    // 空次元判定（`n`／`c`／`spatial` のいずれかが 0）を `n * spatial`
+    // の乗算より先に行う。`Tensor::new(vec![], &[usize::MAX, 0, 2])`
+    // のような要素数 0 の有効テンソル（`c == 0`）では `n` が実データ
+    // サイズと無関係に大きくなりうるため、乗算を先に行うと overflow
+    // checks 有効時に本番経路で panic しうる（AGENTS.md「本番経路の
+    // panic 禁止」。codex-review P1 指摘・イシュー #1732 fix ループ）。
+    // ここで早期 return したあとは `n`／`c`／`spatial` がすべて非 0
+    // であることが保証され、実データ `x.len() == n*c*spatial` が
+    // 既に `usize` に収まっている（`x` は実在する slice）ため
+    // `n*spatial <= n*c*spatial` も収まる。`checked_mul` は追加の
+    // 多層防御として残す（overflow 時は同じ退化パスへ倒す）。
+    let m = match n.checked_mul(spatial) {
+        Some(m) if n != 0 && c != 0 && spatial != 0 && m != 0 => m,
+        _ => {
+            let dw = dw_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+            let db = db_acc.map(|v| v.into_iter().map(|a| a as f32).collect());
+            return (dx, dw, db);
+        }
+    };
+    let mm = m as f64;
+    for ch in 0..c {
+        let (mean, rstd) = match fixed_stats {
+            Some((mean_arr, var_arr)) => (
+                mean_arr[ch] as f64,
+                1.0f64 / (var_arr[ch] as f64 + eps as f64).sqrt(),
+            ),
+            None => {
+                let (mean, rstd, _var) = eval::channel_bn_stats(x, ch, c, spatial, m, eps);
+                (mean, rstd)
+            }
+        };
+        let wv = w.map(|w| w[ch]);
+        // 局所添字 `i in 0..m` からチャネル `ch` に属する実データ添字
+        // への写像（`eval::channel_bn_stats`／`batch_norm_train_channels`
+        // と同一のストライドアクセス式）。
+        let idx_of = |i: usize| -> usize {
+            let batch = i / spatial;
+            let sp = i % spatial;
+            batch * (c * spatial) + ch * spatial + sp
+        };
+        let xhat_at = |idx: usize| -> f32 { ((x[idx] as f64 - mean) * rstd) as f32 };
+        let dxhat_at = |idx: usize| -> f32 {
+            match wv {
+                Some(w) => dy[idx] * w,
+                None => dy[idx],
+            }
+        };
+        match fixed_stats {
+            Some(_) => {
+                // eval モード: mean／var は定数のため補正項なし。
+                for i in 0..m {
+                    let idx = idx_of(i);
+                    let dxhat = dxhat_at(idx);
+                    dx[idx] = (rstd * dxhat as f64) as f32;
+                }
+            }
+            None => {
+                // train モード: `layer_norm_vjp_rows` と同じ補正項
+                // （`mean_M(dx̂)`／`mean_M(dx̂·x̂)` をチャネル `M` 要素
+                // 全体で先に求めてから第 2 パスで `dx` を書き出す）。
+                let mut sum_dxhat = 0.0f64;
+                let mut dot_acc = 0.0f64;
+                for i in 0..m {
+                    let idx = idx_of(i);
+                    let xhat = xhat_at(idx);
+                    let dxhat = dxhat_at(idx);
+                    sum_dxhat += dxhat as f64;
+                    let term = dxhat * xhat;
+                    dot_acc += term as f64;
+                }
+                let mean_dxhat = sum_dxhat / mm;
+                let mean_dot = dot_acc / mm;
+                for i in 0..m {
+                    let idx = idx_of(i);
+                    let xhat = xhat_at(idx);
+                    let dxhat = dxhat_at(idx);
+                    let d = rstd * (dxhat as f64 - mean_dxhat - (xhat as f64) * mean_dot);
+                    dx[idx] = d as f32;
+                }
+            }
+        }
+        if let Some(dw_acc) = dw_acc.as_mut() {
+            for i in 0..m {
+                let idx = idx_of(i);
+                let xhat = xhat_at(idx);
+                let term = dy[idx] * xhat;
+                dw_acc[ch] += term as f64;
+            }
+        }
+        if let Some(db_acc) = db_acc.as_mut() {
+            for i in 0..m {
+                let idx = idx_of(i);
+                db_acc[ch] += dy[idx] as f64;
             }
         }
     }
@@ -7866,6 +8164,290 @@ release ビルドでも検知できるよう `assert!` を使う）"
         assert_eq!(grads[0].0, NodeId(0));
         assert_eq!(grads[1].0, NodeId(1));
         assert_eq!(grads[2].0, NodeId(2));
+    }
+
+    // --- BatchNorm（イシュー #1732・親 #1608） ---
+
+    #[test]
+    fn batch_norm_train_grad_matches_numeric_no_affine() {
+        // [n=2, c=2, spatial=1] 相当（rank 2 の BatchNorm1d 入力）。
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0], &[2, 2]);
+        let eps = 1e-5f32;
+        let (n, c, spatial) = fandhe_ai_tensor_core::batch_norm_layout(&[2, 2]).unwrap();
+
+        let x_slice = dense_vec(&x);
+        let s_slice = dense_vec(&s);
+        let (da, dw, db) =
+            batch_norm_vjp_channels(&x_slice, None, false, eps, n, c, spatial, &s_slice, None);
+        assert!(dw.is_none());
+        assert!(db.is_none());
+        let da = build_tensor(da, &[2, 2]);
+
+        let num_da = numeric_grad_unary(&x, &s, |xt| {
+            eval::batch_norm_train_channels(xt, None, None, eps, n, c, spatial).0
+        });
+        assert_grad_close("batch_norm train dx (no affine)", &da, &num_da);
+    }
+
+    #[test]
+    fn batch_norm_vjp_channels_zero_channel_huge_n_does_not_overflow() {
+        // `Tensor::new(vec![], &[usize::MAX, 0, 2])` のような要素数 0
+        // の有効テンソル（`c == 0`）は `n` が実データサイズと無関係に
+        // 大きくなりうる。空次元判定（`n==0||c==0||spatial==0`）より
+        // 先に `n * spatial` を計算すると、overflow checks 有効時に
+        // 本番経路で panic しうる（codex-review P1 指摘・イシュー
+        // #1732 fix ループ）。ここでは実際に overflow する
+        // `n=usize::MAX, c=0, spatial=2` を渡し、panic せず空の
+        // 勾配（`x.len()==0` に対応する `dx` は空 vec）を返すことを
+        // 確認する。
+        let (dx, dw, db) =
+            batch_norm_vjp_channels(&[], None, false, 1e-5, usize::MAX, 0, 2, &[], None);
+        assert!(dx.is_empty());
+        assert!(dw.is_none());
+        assert!(db.is_none());
+    }
+
+    #[test]
+    fn batch_norm_train_grad_matches_numeric_with_weight_and_bias() {
+        // [n=2, c=2, spatial=2]（rank 3。BatchNorm1d の空間入力）。
+        let x = t(&[1.0, 2.0, -1.0, 0.5, 3.0, -0.5, 2.0, 1.5], &[2, 2, 2]);
+        let w = t(&[2.0, -1.0], &[2]);
+        let b = t(&[0.1, -0.2], &[2]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0, -1.0, 0.3, 0.7, -0.4], &[2, 2, 2]);
+        let eps = 1e-5f32;
+        let (n, c, spatial) = fandhe_ai_tensor_core::batch_norm_layout(&[2, 2, 2]).unwrap();
+
+        let x_slice = dense_vec(&x);
+        let w_slice = dense_vec(&w);
+        let s_slice = dense_vec(&s);
+        let (da, dw, db) = batch_norm_vjp_channels(
+            &x_slice,
+            Some(&w_slice),
+            true,
+            eps,
+            n,
+            c,
+            spatial,
+            &s_slice,
+            None,
+        );
+        let da = build_tensor(da, &[2, 2, 2]);
+        let dw = build_tensor(dw.expect("weight present"), &[2]);
+        let db = build_tensor(db.expect("bias present"), &[2]);
+
+        let num_da = numeric_grad_unary(&x, &s, |xt| {
+            eval::batch_norm_train_channels(
+                xt,
+                Some(&w_slice),
+                Some(&dense_vec(&b)),
+                eps,
+                n,
+                c,
+                spatial,
+            )
+            .0
+        });
+        assert_grad_close("batch_norm train dx (affine)", &da, &num_da);
+
+        let num_dw = numeric_grad_unary(&w, &s, |wt| {
+            eval::batch_norm_train_channels(
+                &x,
+                Some(&dense_vec(wt)),
+                Some(&dense_vec(&b)),
+                eps,
+                n,
+                c,
+                spatial,
+            )
+            .0
+        });
+        assert_grad_close("batch_norm train dw", &dw, &num_dw);
+
+        let num_db = numeric_grad_unary(&b, &s, |bt| {
+            eval::batch_norm_train_channels(
+                &x,
+                Some(&w_slice),
+                Some(&dense_vec(bt)),
+                eps,
+                n,
+                c,
+                spatial,
+            )
+            .0
+        });
+        assert_grad_close("batch_norm train db", &db, &num_db);
+    }
+
+    #[test]
+    fn batch_norm_infer_grad_matches_numeric_fixed_stats() {
+        // eval モード: mean/var は定数なので dx = rstd*dy*w のみ
+        // （train モードの補正項が乗らないことを数値微分で確認する）。
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
+        let w = t(&[2.0, -1.0], &[2]);
+        let b = t(&[0.1, -0.2], &[2]);
+        let mean = t(&[0.5, 0.0], &[2]);
+        let var = t(&[1.0, 2.0], &[2]);
+        let s = t(&[1.0, -2.0, 0.5, 2.0], &[2, 2]);
+        let eps = 1e-5f32;
+        let (n, c, spatial) = fandhe_ai_tensor_core::batch_norm_layout(&[2, 2]).unwrap();
+
+        let x_slice = dense_vec(&x);
+        let w_slice = dense_vec(&w);
+        let mean_slice = dense_vec(&mean);
+        let var_slice = dense_vec(&var);
+        let s_slice = dense_vec(&s);
+        let (da, dw, db) = batch_norm_vjp_channels(
+            &x_slice,
+            Some(&w_slice),
+            true,
+            eps,
+            n,
+            c,
+            spatial,
+            &s_slice,
+            Some((&mean_slice, &var_slice)),
+        );
+        let da = build_tensor(da, &[2, 2]);
+        let dw = build_tensor(dw.expect("weight present"), &[2]);
+        let db = build_tensor(db.expect("bias present"), &[2]);
+
+        let num_da = numeric_grad_unary(&x, &s, |xt| {
+            eval::batch_norm_infer_channels(
+                xt,
+                &mean_slice,
+                &var_slice,
+                Some(&w_slice),
+                Some(&dense_vec(&b)),
+                eps,
+                n,
+                c,
+                spatial,
+            )
+        });
+        assert_grad_close("batch_norm infer dx", &da, &num_da);
+
+        let num_dw = numeric_grad_unary(&w, &s, |wt| {
+            eval::batch_norm_infer_channels(
+                &x,
+                &mean_slice,
+                &var_slice,
+                Some(&dense_vec(wt)),
+                Some(&dense_vec(&b)),
+                eps,
+                n,
+                c,
+                spatial,
+            )
+        });
+        assert_grad_close("batch_norm infer dw", &dw, &num_dw);
+
+        let num_db = numeric_grad_unary(&b, &s, |bt| {
+            eval::batch_norm_infer_channels(
+                &x,
+                &mean_slice,
+                &var_slice,
+                Some(&w_slice),
+                Some(&dense_vec(bt)),
+                eps,
+                n,
+                c,
+                spatial,
+            )
+        });
+        assert_grad_close("batch_norm infer db", &db, &num_db);
+    }
+
+    #[test]
+    fn vjp_dispatch_batch_norm_train_returns_input_weight_bias() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
+        let w = t(&[1.0, 1.0], &[2]);
+        let b = t(&[0.0, 0.0], &[2]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[2, 2]);
+        let eps = 1e-5f32;
+        let (n, c, spatial) = fandhe_ai_tensor_core::batch_norm_layout(&[2, 2]).unwrap();
+        let (out_value, _, _) = eval::batch_norm_train_channels(
+            &x,
+            Some(&dense_vec(&w)),
+            Some(&dense_vec(&b)),
+            eps,
+            n,
+            c,
+            spatial,
+        );
+        let nodes = vec![
+            leaf_node(x.clone()),
+            leaf_node(w.clone()),
+            leaf_node(b.clone()),
+        ];
+        let op = Op::BatchNorm {
+            input: NodeId(0),
+            weight: Some(NodeId(1)),
+            bias: Some(NodeId(2)),
+            eps,
+            fixed_stats: None,
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 3);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        assert_eq!(grads[2].0, NodeId(2));
+    }
+
+    #[test]
+    fn vjp_dispatch_batch_norm_infer_returns_input_only_without_affine() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
+        let mean = t(&[0.0, 0.0], &[2]);
+        let var = t(&[1.0, 1.0], &[2]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[2, 2]);
+        let eps = 1e-5f32;
+        let (n, c, spatial) = fandhe_ai_tensor_core::batch_norm_layout(&[2, 2]).unwrap();
+        let out_value = eval::batch_norm_infer_channels(
+            &x,
+            &dense_vec(&mean),
+            &dense_vec(&var),
+            None,
+            None,
+            eps,
+            n,
+            c,
+            spatial,
+        );
+        let nodes = vec![leaf_node(x.clone())];
+        let op = Op::BatchNorm {
+            input: NodeId(0),
+            weight: None,
+            bias: None,
+            eps,
+            fixed_stats: Some((mean.clone(), var.clone())),
+        };
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
     }
 
     // --- Softmax / LogSoftmax（イシュー #1594） ---

@@ -477,6 +477,32 @@ pub(crate) enum Op {
         bias: Option<NodeId>,
         eps: f32,
     },
+    /// BatchNorm1d／2d（チャネル方向〈dim 1〉のバッチ統計 or 固定
+    /// 統計による正規化。イシュー #1732・親 #1608・`docs/batch-norm-
+    /// ops-design.md`）。[`Op::LayerNorm`] と同じ非融合・常実体化・
+    /// `eps` 事前検査済みの契約。`weight`／`bias` はそれぞれ独立に
+    /// `None` を取りうる（`nn::BatchNorm1d`／`BatchNorm2d::
+    /// without_affine`）。
+    ///
+    /// `fixed_stats`: `None` は train モード（バッチ統計から
+    /// `mean`／`rstd` を計算する）、`Some((mean, var))` は eval モード
+    /// （呼び出し元の running stats を固定統計として使う）を表す。
+    /// `Op::MaskedFill { mask }` と同型の「payload に非追跡
+    /// `Tensor<f32>` を保持する eager 実体化演算」（`mean`／`var` 自体
+    /// は学習対象ではなく `nn::BatchNorm1d`／`BatchNorm2d` が外部で
+    /// 保持する running stats のスナップショットであるため、`NodeId`
+    /// ではなく値そのものを持つ）。VJP（`grad.rs`）は train モードの
+    /// み `input`（と `weight` があれば `weight`）を `materialize_
+    /// fallible` で再取得し統計を再計算する（[`Op::LayerNorm`] と
+    /// 同じ理由。`fixed_stats` を持つ eval モードは `mean`／`var` が
+    /// 定数のため `dx = dx̂·rstd_c` のみで閉じる）。
+    BatchNorm {
+        input: NodeId,
+        weight: Option<NodeId>,
+        bias: Option<NodeId>,
+        eps: f32,
+        fixed_stats: Option<(Tensor<f32>, Tensor<f32>)>,
+    },
     /// RNN（tanh 版）セル 1 step（イシュー #1647・設計 `docs/autodiff-
     /// rnn-cell-tape-design.md` 決定 1・5）。`h_t = tanh(x·W_ih + b_ih +
     /// h_{t-1}·W_hh + b_hh)`。RNN は LSTM／GRU と異なりゲート同士の要素
@@ -1242,7 +1268,8 @@ impl Op {
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
             | Op::RmsNorm { .. }
-            | Op::LayerNorm { .. } => false,
+            | Op::LayerNorm { .. }
+            | Op::BatchNorm { .. } => false,
             // `Op::Where`／`Op::MaskedFill`（イシュー #1637）は `cond`／`mask`
             // テンソルを `Op` 自身が保持する eager 実体化演算で、
             // `recompute_value` に再計算経路を持たないため解放しない
@@ -1433,6 +1460,20 @@ impl Op {
                 }
             }
             Op::LayerNorm {
+                input,
+                weight,
+                bias,
+                ..
+            } => {
+                f(*input);
+                if let Some(w) = weight {
+                    f(*w);
+                }
+                if let Some(b) = bias {
+                    f(*b);
+                }
+            }
+            Op::BatchNorm {
                 input,
                 weight,
                 bias,
