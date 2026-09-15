@@ -62,6 +62,14 @@ pub enum AutodiffError {
     /// fusion-graph-design.md` §3.5.2「層 1 は `Unsupported` 以外の
     /// `run_fused` の失敗をフォールバックせずそのまま伝播する」）。
     Backend(fandhe_ai_tensor_core::BackendError),
+    /// `Gradients::get` の対象ノードが `requires_grad == false`
+    /// （`Tape::var_no_grad` で登録した葉、または `Var::detach` で
+    /// 切り離した葉、およびそれらのみを祖先に持つ非葉ノード）だった
+    /// （イシュー #1748・`docs/autodiff-nograd-leaf-dinput-skip-decision.md`
+    /// §5「案 B」）。「loss から未到達（`Ok(None)`）」とは型で区別する
+    /// ——未到達は「たまたま今回の loss には寄与しなかった」ことを、
+    /// 本 variant は「この `Var` は構造的に勾配を持ちえない」ことを表す。
+    GradientTrackingDisabled,
 }
 
 impl From<ShapeError> for AutodiffError {
@@ -88,6 +96,10 @@ impl fmt::Display for AutodiffError {
                 write!(f, "invalid argument: {message}")
             }
             AutodiffError::Backend(err) => write!(f, "backend error: {err}"),
+            AutodiffError::GradientTrackingDisabled => write!(
+                f,
+                "gradient tracking disabled: この Var は requires_grad=false の葉（var_no_grad／detach）から派生しており勾配を持たない"
+            ),
         }
     }
 }

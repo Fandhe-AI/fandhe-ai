@@ -22,6 +22,16 @@
 //! `GradScalerConfig`／`UnscaleResult`／`scale_loss`／`scale_grads`／
 //! `unscale_grads`／`has_non_finite`。実体は `fandhe_ai_autodiff::nn::optim::amp`
 //! モジュールだが再エクスポートは `nn::optim` 経由）を期待集合へ追加した。
+//! イシュー #1742 で Adam（coupled L2 weight decay。`Adam`／`AdamConfig`。
+//! 実体は `fandhe_ai_autodiff::nn::optim::adam` モジュール）を期待集合へ
+//! 追加した。イシュー #1743（親 #1610）で RMSprop（`RmsProp`／
+//! `RmsPropConfig`）・Adagrad（`Adagrad`／`AdagradConfig`）を期待集合へ
+//! 追加した。イシュー #1744 で LAMB（`Lamb`／`LambConfig`。実体は
+//! `fandhe_ai_autodiff::nn::optim::lamb` モジュール）を期待集合へ追加した。
+//! イシュー #1746（親 #1611）で ReduceLrOnPlateau
+//! （`ReduceLrOnPlateau`／`ReduceLrOnPlateauConfig`／`PlateauMode`／
+//! `ThresholdMode`。実体は `fandhe_ai_autodiff::nn::optim::
+//! reduce_lr_on_plateau` モジュール）を期待集合へ追加した。
 //!
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
 //! （`Cargo.toml`・`src/`）以外は走査しない固定パスのみを対象とし、
@@ -283,15 +293,33 @@ fn optim_module_reexports_exactly_expected_surface() {
     );
 
     let expected: std::collections::BTreeSet<String> = [
+        "Adagrad",
+        "AdagradConfig",
+        "Adam",
+        "AdamConfig",
         "AdamW",
         "AdamWConfig",
+        "Lamb",
+        "LambConfig",
         "ClipGradResult",
         "clip_grad_norm",
         "clip_grad_value",
         "global_grad_norm",
         "ConstantLr",
+        "CosineAnnealingLr",
+        "ExponentialLr",
+        "LinearWarmupLr",
         "LrScheduler",
+        "OneCycleAnneal",
+        "OneCycleLr",
+        "OneCycleLrConfig",
         "StepLr",
+        "RmsProp",
+        "RmsPropConfig",
+        "PlateauMode",
+        "ThresholdMode",
+        "ReduceLrOnPlateau",
+        "ReduceLrOnPlateauConfig",
         "Sgd",
         "SgdConfig",
         "GradScaler",
@@ -586,12 +614,107 @@ fn optim_types_are_reachable_via_facade_only() {
         .unwrap_or_else(|e| panic!("test fixture: AdamW::new が失敗した: {e}"));
     let _ = &mut adamw;
 
+    // Adam（coupled L2 weight decay。イシュー #1742）の facade 到達性固定。
+    // `AdamConfig::default().weight_decay == 0.0`（PyTorch `torch.optim.Adam`
+    // の既定値）が `AdamWConfig::default()` の `0.01` とドリフトしないこと
+    // も併せて固定する（`nn::optim::adam` モジュール doc 参照）。
+    let adam_config = fandhe_ai::optim::AdamConfig::default();
+    assert_eq!(
+        adam_config.weight_decay, 0.0,
+        "test fixture: AdamConfig の既定 weight_decay は PyTorch Adam と同じ 0.0"
+    );
+    let mut adam = fandhe_ai::optim::Adam::new(adam_config)
+        .unwrap_or_else(|e| panic!("test fixture: Adam::new が失敗した: {e}"));
+    let _ = &mut adam;
+
+    // RMSprop／Adagrad（イシュー #1743・親 #1610）が facade のみを
+    // 通じて到達可能であることの固定＋既定値ドリフトガード
+    // （`torch.optim.RMSprop`／`torch.optim.Adagrad` の既定値と一致する
+    // ことを `nn::optim::rmsprop`／`adagrad` doc と合わせて固定する）。
+    let rmsprop_config = fandhe_ai::optim::RmsPropConfig::default();
+    assert_eq!(
+        rmsprop_config.alpha, 0.99,
+        "test fixture: RmsPropConfig の既定 alpha は torch.optim.RMSprop と同じ 0.99"
+    );
+    let mut rmsprop = fandhe_ai::optim::RmsProp::new(rmsprop_config)
+        .unwrap_or_else(|e| panic!("test fixture: RmsProp::new が失敗した: {e}"));
+    let _ = &mut rmsprop;
+
+    let adagrad_config = fandhe_ai::optim::AdagradConfig::default();
+    assert_eq!(
+        adagrad_config.eps, 1e-10,
+        "test fixture: AdagradConfig の既定 eps は torch.optim.Adagrad と同じ 1e-10"
+    );
+    let mut adagrad = fandhe_ai::optim::Adagrad::new(adagrad_config)
+        .unwrap_or_else(|e| panic!("test fixture: Adagrad::new が失敗した: {e}"));
+    let _ = &mut adagrad;
+
+    // LAMB（イシュー #1744）の facade 到達性固定。既定値ドリフトガード
+    // （`eps=1e-6` は AdamW／Adam の `1e-8` と異なる・`weight_decay=0.0`。
+    // `nn::optim::lamb` モジュール doc 参照）。
+    let lamb_config = fandhe_ai::optim::LambConfig::default();
+    assert_eq!(
+        lamb_config.eps, 1e-6,
+        "test fixture: LambConfig の既定 eps は paper／apex／torch_optimizer 共通の 1e-6"
+    );
+    assert_eq!(
+        lamb_config.weight_decay, 0.0,
+        "test fixture: LambConfig の既定 weight_decay は 0.0"
+    );
+    let mut lamb = fandhe_ai::optim::Lamb::new(lamb_config)
+        .unwrap_or_else(|e| panic!("test fixture: Lamb::new が失敗した: {e}"));
+    let _ = &mut lamb;
+
     let constant_lr = fandhe_ai::optim::ConstantLr::new(0.1)
         .unwrap_or_else(|e| panic!("test fixture: ConstantLr::new が失敗した: {e}"));
     let step_lr = fandhe_ai::optim::StepLr::new(0.1, 2, 0.5)
         .unwrap_or_else(|e| panic!("test fixture: StepLr::new が失敗した: {e}"));
     let _: &dyn fandhe_ai::optim::LrScheduler = &constant_lr;
     let _: &dyn fandhe_ai::optim::LrScheduler = &step_lr;
+
+    // イシュー #1745: CosineAnnealingLr／ExponentialLr／LinearWarmupLr
+    // が facade のみ import で構築でき、既存 2 型と同じ `&dyn
+    // LrScheduler` へ coercion できることを固定する。
+    let cosine_lr = fandhe_ai::optim::CosineAnnealingLr::new(0.1, 4, 0.0)
+        .unwrap_or_else(|e| panic!("test fixture: CosineAnnealingLr::new が失敗した: {e}"));
+    let exponential_lr = fandhe_ai::optim::ExponentialLr::new(0.1, 0.5)
+        .unwrap_or_else(|e| panic!("test fixture: ExponentialLr::new が失敗した: {e}"));
+    let linear_warmup_lr = fandhe_ai::optim::LinearWarmupLr::new(0.1, 4, 0.25)
+        .unwrap_or_else(|e| panic!("test fixture: LinearWarmupLr::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &cosine_lr;
+    let _: &dyn fandhe_ai::optim::LrScheduler = &exponential_lr;
+    let _: &dyn fandhe_ai::optim::LrScheduler = &linear_warmup_lr;
+
+    // イシュー #1747: OneCycleLr が facade のみ import で構築でき、
+    // 既存スケジューラと同じ `&dyn LrScheduler` へ coercion できる
+    // ことを固定する。`OneCycleLrConfig::new` の既定値が PyTorch
+    // `OneCycleLR` の既定値と一致することも併せて固定する
+    // （`RmsPropConfig::default().alpha` 等と同型のドリフトガード）。
+    let one_cycle_config = fandhe_ai::optim::OneCycleLrConfig::new(0.1, 10);
+    assert_eq!(
+        one_cycle_config.pct_start, 0.3,
+        "test fixture: OneCycleLrConfig::new の既定 pct_start は PyTorch と同じ 0.3"
+    );
+    assert_eq!(
+        one_cycle_config.anneal_strategy,
+        fandhe_ai::optim::OneCycleAnneal::Cos,
+        "test fixture: OneCycleLrConfig::new の既定 anneal_strategy は PyTorch と同じ 'cos'"
+    );
+    assert_eq!(
+        one_cycle_config.div_factor, 25.0,
+        "test fixture: OneCycleLrConfig::new の既定 div_factor は PyTorch と同じ 25.0"
+    );
+    assert_eq!(
+        one_cycle_config.final_div_factor, 1e4,
+        "test fixture: OneCycleLrConfig::new の既定 final_div_factor は PyTorch と同じ 1e4"
+    );
+    assert!(
+        !one_cycle_config.three_phase,
+        "test fixture: OneCycleLrConfig::new の既定 three_phase は PyTorch と同じ false"
+    );
+    let one_cycle_lr = fandhe_ai::optim::OneCycleLr::new(one_cycle_config)
+        .unwrap_or_else(|e| panic!("test fixture: OneCycleLr::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &one_cycle_lr;
 
     let result: fandhe_ai::optim::ClipGradResult = fandhe_ai::optim::clip_grad_norm(&[], 1.0)
         .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));
@@ -664,6 +787,37 @@ fn optim_types_are_reachable_via_facade_only() {
     assert_eq!(
         scaled_value, 2.0,
         "test fixture: scale_loss(1.0, 2.0) は 2.0 のはず"
+    );
+
+    // ReduceLrOnPlateau（イシュー #1746・親 #1611）が facade のみを
+    // 通じて到達可能であることの固定＋既定値ドリフトガード
+    // （PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` の既定値と
+    // 一致することを `nn::optim::reduce_lr_on_plateau` doc と合わせて
+    // 固定する）。
+    let plateau_config = fandhe_ai::optim::ReduceLrOnPlateauConfig::default();
+    assert_eq!(
+        plateau_config.mode,
+        fandhe_ai::optim::PlateauMode::Min,
+        "test fixture: ReduceLrOnPlateauConfig の既定 mode は PyTorch と同じ Min"
+    );
+    assert_eq!(
+        plateau_config.threshold_mode,
+        fandhe_ai::optim::ThresholdMode::Rel,
+        "test fixture: ReduceLrOnPlateauConfig の既定 threshold_mode は PyTorch と同じ Rel"
+    );
+    assert_eq!(
+        plateau_config.patience, 10,
+        "test fixture: ReduceLrOnPlateauConfig の既定 patience は PyTorch と同じ 10"
+    );
+    let mut plateau = fandhe_ai::optim::ReduceLrOnPlateau::new(0.1, plateau_config)
+        .unwrap_or_else(|e| panic!("test fixture: ReduceLrOnPlateau::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &plateau;
+    let updated_lr = plateau
+        .step(1.0)
+        .unwrap_or_else(|e| panic!("test fixture: ReduceLrOnPlateau::step が失敗した: {e}"));
+    assert_eq!(
+        updated_lr, 0.1,
+        "test fixture: 初回観測（改善扱い）では減衰しないはず"
     );
 }
 
@@ -997,5 +1151,59 @@ fn facade_sources_do_not_reference_onnx_interop() {
         offending.is_empty(),
         "facade の src/ が onnx-interop を参照している\
          （facade は非公開クレートへ依存しない設計。#1775）: {offending:?}"
+    );
+}
+
+/// `fandhe_ai::{CastDType, CastElement}`（イシュー #1750）が facade から
+/// 到達可能であること・`Var::cast`／`Tape::var_from` が facade 経由でも
+/// 型検査できることを固定する（コンパイル時裏付け。
+/// `rng_tensor_generators_are_reachable_via_facade` と同型）。`CastDType`
+/// は `#[non_exhaustive]` のためワイルドカード腕で網羅する。
+#[test]
+fn cast_types_are_reachable_via_facade() {
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&fandhe_ai::Tensor::<f32>::zeros(&[3]).unwrap());
+    let casted: fandhe_ai::Tensor<i32> = x.cast().unwrap();
+    assert_eq!(casted.shape(), &[3]);
+
+    let bool_in = fandhe_ai::Tensor::<bool>::new(vec![true, false], &[2]).unwrap();
+    let y = tape.var_from(&bool_in).unwrap();
+    assert_eq!(y.to_tensor().shape(), &[2]);
+
+    let dtype: fandhe_ai::CastDType = <i32 as fandhe_ai::CastElement>::CAST_DTYPE;
+    let _label = match dtype {
+        fandhe_ai::CastDType::F32 => "f32",
+        fandhe_ai::CastDType::F64 => "f64",
+        fandhe_ai::CastDType::I32 => "i32",
+        fandhe_ai::CastDType::I64 => "i64",
+        fandhe_ai::CastDType::Bool => "bool",
+        _ => "unknown",
+    };
+}
+
+/// `crates/facade/src/` の `pub use` が `CastOps`（dtype 変換の動的
+/// ディスパッチ面）を再エクスポートしていないことを固定する
+/// （`docs/tensor-core-cast-design.md`「facade は `CastOps` を
+/// 再エクスポートしない」設計判断。`facade_does_not_reexport_tape_
+/// or_backend_ops` と同型の走査）。
+#[test]
+fn facade_does_not_reexport_cast_ops() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            if trimmed.contains("CastOps") {
+                offending.push(format!("{}: `{trimmed}` が CastOps を含む", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が CastOps を再エクスポートしている\
+         （動的ディスパッチ面は非公開の設計判断に違反）: {offending:?}"
     );
 }

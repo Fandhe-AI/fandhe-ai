@@ -25,11 +25,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, DType, DeviceBufferView, FusedOpKind, FusionPlan,
-    InterpolateMode, MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, Tensor,
+    Activation, BackendError, BackendOps, CastElement, DType, DeviceBufferView, FusedOpKind,
+    FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
+    Tensor,
 };
 
 use crate::error::AutodiffError;
+use crate::grad::cast_to_f32_with_fallback;
 use crate::var::matmul_forward;
 
 /// テープの識別子。プロセス全体で単調増加するカウンタから発行する。
@@ -1534,6 +1536,23 @@ pub(crate) struct TapeNode {
     /// 「poison された入力からの計算結果が正常値として登録される」
     /// 事故になるため（`push_eager` doc 参照）。
     pub(crate) recompute_failed: std::cell::Cell<bool>,
+    /// **勾配追跡フラグ（イシュー #1748・案 B。`docs/
+    /// autodiff-nograd-leaf-dinput-skip-decision.md` §5）**: PyTorch
+    /// `requires_grad` 相当。葉ノード（`Op::Leaf`）は
+    /// `Tape::var`（`true`。既定不変）／`Tape::var_no_grad`（`false`）／
+    /// `Var::detach`（`false`）が明示値で確定する。`Op::ResidentLeaf`
+    /// （デバイス常駐パラメータ）は常に `true`（`push_resident_leaf`
+    /// doc 参照）。非葉ノード（`push_eager`／`push_lazy`／`push_view`）は
+    /// `Op::for_each_input` で列挙した全入力ノードの `requires_grad` の
+    /// 論理和（1 つでも追跡対象があれば追跡対象。PyTorch のグラフ伝播
+    /// と同じ意味論）として確定する。`Tape::backward` は起点 `loss` が
+    /// `false` なら即座に `Err(Backward)` を返し、逆走査中は
+    /// `requires_grad == false` のノードへの寄与を `accumulate` へ渡さず
+    /// 捨てる（追跡対象ノードの勾配値は追跡なしノードの勾配を一切
+    /// 読まないため bit 同一契約に影響しない）。`Gradients::get` は
+    /// 対象ノードが `false` なら `Err(GradientTrackingDisabled)`
+    /// （「未到達」の `Ok(None)` と型で区別する）。
+    pub(crate) requires_grad: bool,
 }
 
 /// 演算を記録する Wengert list。`Var`（`var.rs`）上の演算のみがここに
@@ -1686,10 +1705,54 @@ impl Tape {
 
     /// 非追跡の `Tensor<f32>` を、テープ上の葉ノード（`Op::Leaf`）として
     /// 登録する。以後この `Var` を起点とする演算はすべて `self` へ記録
-    /// される。葉ノードは常に実体化済み（`push_eager`）。
+    /// される。葉ノードは常に実体化済み（`push_leaf`）。`requires_grad`
+    /// は `true`（既定不変。PyTorch `requires_grad=True` 相当）。
+    /// 勾配追跡なしの葉が必要な場合は [`Tape::var_no_grad`] を使う
+    /// （イシュー #1748）。
     pub fn var(&self, tensor: &Tensor<f32>) -> crate::var::Var<'_> {
-        let id = self.push_eager(Op::Leaf, tensor.clone());
+        let id = self.push_leaf(tensor.clone(), true);
         crate::var::Var::from_raw(self, id)
+    }
+
+    /// 非追跡の `Tensor<f32>` を、`requires_grad == false` の葉ノード
+    /// （`Op::Leaf`）として登録する（イシュー #1748・PyTorch
+    /// `requires_grad=False`／`torch.no_grad()` で作った葉テンソル
+    /// 相当。設計は `docs/autodiff-nograd-leaf-dinput-skip-decision.md`
+    /// §5「案 B」）。
+    ///
+    /// この `Var` は forward には通常どおり参加する（`Tape::var` との
+    /// 唯一の違いは `requires_grad` の初期値のみ）が、この葉を祖先に
+    /// 持つノードへ流れた勾配寄与は `Tape::backward` の逆走査中に
+    /// 破棄される（`backward.rs::accumulate` 呼び出し前の
+    /// `requires_grad` 検査）。`Gradients::get` にこの `Var`（または
+    /// これのみを祖先に持つ非葉ノード）を渡すと
+    /// `Err(AutodiffError::GradientTrackingDisabled)` を返す
+    /// （「loss から未到達」の `Ok(None)` とは型で区別する）。
+    ///
+    /// 演算そのものをテープに載せない（PyTorch `torch.no_grad()`
+    /// コンテキスト相当）用途には、引き続き `Tensor<f32>` のまま演算
+    /// する型分離方式（`docs/public-api-design.md` §3.1）を使うこと
+    /// ——本メソッドは「テープに載せたノードを勾配経路から外す」ため
+    /// のものであり、両者は独立の機構である。
+    pub fn var_no_grad(&self, tensor: &Tensor<f32>) -> crate::var::Var<'_> {
+        let id = self.push_leaf(tensor.clone(), false);
+        crate::var::Var::from_raw(self, id)
+    }
+
+    /// 非 f32 dtype の `Tensor<T>` を f32 へ変換したうえでテープ上の
+    /// 葉ノードとして登録する（[`Self::var`] の dtype 変換版。イシュー
+    /// #1750）。`T` へのキャストは `crate::grad::cast_to_f32_with_
+    /// fallback`（`BackendOps::cast_ops` accessor → ホスト参照実装
+    /// フォールバックの 2 段構成。`docs/tensor-core-cast-design.md`
+    /// 参照）を経由し、変換後の値を [`Self::var`] と同じく葉 1 ノード
+    /// として登録する——変換元 `tensor` へは勾配は流れない（`Var::cast`
+    /// の逆方向であり同じ非微分境界を持つ）。
+    pub fn var_from<T: CastElement>(
+        &self,
+        tensor: &Tensor<T>,
+    ) -> Result<crate::var::Var<'_>, AutodiffError> {
+        let f32_val = cast_to_f32_with_fallback(self.ops(), tensor)?;
+        Ok(self.var(&f32_val))
     }
 
     /// 現在記録済みのノード数を返す。受け入れ条件（forward 実行時に
@@ -1932,24 +1995,32 @@ impl Tape {
     }
 
     /// **非 elementwise・常に実体化済み**のノードを追記する（`matmul`/
-    /// `sum`/`max`・`Op::Leaf`・`Sigmoid`/`MseLoss`/`CrossEntropyLoss`
+    /// `sum`/`max`・`Sigmoid`/`MseLoss`/`CrossEntropyLoss`
     /// から呼ばれる。TASK-12.1d・#164 で `push` から改称）。`op` の入力側
     /// `Ref` を保持したまま呼ばれると `RefCell` の二重可変借用 panic に
     /// なるため、呼び出し元は値計算を終えて借用（`Ref`）を閉じてから
     /// 本関数を呼ぶ契約とする（`Var::value`/`to_tensor` のドキュメント
     /// 参照）。
+    ///
+    /// **`Op::Leaf` は本関数を経由しない（イシュー #1748）**: 葉ノードは
+    /// `requires_grad` を明示値で確定する必要があるため専用の
+    /// [`Tape::push_leaf`] を使う（`Tape::var`／`Tape::var_no_grad`／
+    /// `Var::detach` が呼ぶ）。`Op::for_each_input` は `Op::Leaf` に対し
+    /// 何も yield しないため、本関数のまま `Op::Leaf` を許すと
+    /// `requires_grad` が入力なし＝`false` に落ちてしまう落とし穴が
+    /// あった。呼び出し元を専用経路へ分離することで機構的に塞ぐ。
     pub(crate) fn push_eager(&self, op: Op, value: Tensor<f32>) -> NodeId {
+        debug_assert!(
+            !matches!(op, Op::Leaf),
+            "push_eager: Op::Leaf は Tape::push_leaf 経由で登録する契約（requires_grad 明示のため）"
+        );
         let shape = value.shape().to_vec();
         let mut nodes = self.nodes.borrow_mut();
-        // `Op::Leaf` のみ葉ノード（`push_resident_leaf` の `Op::ResidentLeaf`
-        // と合わせて #1048 の葉プレフィックス判定対象）。それ以外
-        // （`MatMul`/`Sum`/`Max`/`Sigmoid`/`MseLoss`/`CrossEntropyLoss`/
-        // `LinearResident`/`RmsNorm`/`LayerNorm`/`Softmax`/`LogSoftmax`）は
-        // 演算ノードのため、これから追記する直前の長さで葉プレフィックスを
-        // 固定する（`Tape::reset` doc 参照）。
-        if !matches!(op, Op::Leaf) {
-            self.freeze_leaf_prefix(nodes.len());
-        }
+        // 演算ノード（`MatMul`/`Sum`/`Max`/`Sigmoid`/`MseLoss`/
+        // `CrossEntropyLoss`/`LinearResident`/`RmsNorm`/`LayerNorm`/
+        // `Softmax`/`LogSoftmax` 等）はこれから追記する直前の長さで
+        // 葉プレフィックスを固定する（`Tape::reset` doc 参照）。
+        self.freeze_leaf_prefix(nodes.len());
         // **P0 是正（codex-review 指摘・イシュー #1624 PR #1681
         // レビュー）**: eager 演算（`Var::sigmoid` 等、`.value()` で
         // 入力を infallible に読んでから即座に計算する経路）は、
@@ -1983,9 +2054,17 @@ impl Tape {
         // 読み出しを行う経路、および将来同種の経路が追加された場合の
         // 安全網として機能する。
         let mut poisoned = false;
+        // 勾配追跡フラグ（イシュー #1748）: 入力のいずれかが
+        // `requires_grad == true` なら出力も追跡対象（`TapeNode::
+        // requires_grad` doc 参照）。poison 判定と同じ `for_each_input`
+        // 走査へ相乗りし、追加のノード列挙を発生させない。
+        let mut requires_grad = false;
         op.for_each_input(|input_id| {
             if elementwise_leaves_poisoned(&nodes, input_id) {
                 poisoned = true;
+            }
+            if nodes[input_id.0].requires_grad {
+                requires_grad = true;
             }
         });
         let id = NodeId(nodes.len());
@@ -1996,6 +2075,28 @@ impl Tape {
             lazy_chain_size: 0,
             recompute: false,
             recompute_failed: std::cell::Cell::new(poisoned),
+            requires_grad,
+        });
+        id
+    }
+
+    /// **葉ノード（`Op::Leaf`）専用**の追記経路（イシュー #1748）。
+    /// `push_eager` から分離した理由は `push_eager` の doc comment
+    /// 参照。`requires_grad` を呼び出し元が明示値で渡す
+    /// （`Tape::var` は `true`・`Tape::var_no_grad`／`Var::detach` は
+    /// `false`）。葉は常に実体化済み（`OnceCell::from`）。
+    pub(crate) fn push_leaf(&self, value: Tensor<f32>, requires_grad: bool) -> NodeId {
+        let shape = value.shape().to_vec();
+        let mut nodes = self.nodes.borrow_mut();
+        let id = NodeId(nodes.len());
+        nodes.push(TapeNode {
+            op: Op::Leaf,
+            shape,
+            value: OnceCell::from(value),
+            lazy_chain_size: 0,
+            recompute: false,
+            recompute_failed: std::cell::Cell::new(false),
+            requires_grad,
         });
         id
     }
@@ -2022,6 +2123,11 @@ impl Tape {
             lazy_chain_size: 0,
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
+            // デバイス常駐パラメータは常に追跡対象（イシュー #1748・
+            // `TapeNode::requires_grad` doc「`Op::ResidentLeaf` は常に
+            // `true`」参照）。`var_no_grad` 相当の非追跡 resident 葉は
+            // 本 issue のスコープ外。
+            requires_grad: true,
         });
         id
     }
@@ -2043,6 +2149,14 @@ impl Tape {
         let mut nodes = self.nodes.borrow_mut();
         // view ノードは常に非葉（#1048。`Tape::reset` doc 参照）。
         self.freeze_leaf_prefix(nodes.len());
+        // 勾配追跡フラグ（イシュー #1748）: 入力のいずれかが追跡対象
+        // なら view 自身も追跡対象（`push_eager` と同じ集約規則）。
+        let mut requires_grad = false;
+        op.for_each_input(|input_id| {
+            if nodes[input_id.0].requires_grad {
+                requires_grad = true;
+            }
+        });
         let id = NodeId(nodes.len());
         nodes.push(TapeNode {
             op,
@@ -2051,6 +2165,7 @@ impl Tape {
             lazy_chain_size: 0,
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
+            requires_grad,
         });
         id
     }
@@ -2122,6 +2237,14 @@ impl Tape {
         self.freeze_leaf_prefix(nodes.len());
         let size = Tape::effective_subtree_size(&nodes, &op);
         let at_limit = size >= MAX_FUSED_CHAIN_LEN;
+        // 勾配追跡フラグ（イシュー #1748）: `push_eager`／`push_view` と
+        // 同じ集約規則（入力のいずれかが追跡対象なら追跡対象）。
+        let mut requires_grad = false;
+        op.for_each_input(|input_id| {
+            if nodes[input_id.0].requires_grad {
+                requires_grad = true;
+            }
+        });
         let id = NodeId(nodes.len());
         nodes.push(TapeNode {
             op,
@@ -2130,6 +2253,7 @@ impl Tape {
             lazy_chain_size: size,
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
+            requires_grad,
         });
         (id, at_limit)
     }

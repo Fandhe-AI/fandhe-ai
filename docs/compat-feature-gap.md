@@ -1586,6 +1586,16 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - facade 到達経路は既存 `Var` 再エクスポート経由（`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）・新規 `pub use`／`pub fn` は facade へ追加していない。
 - `reduction='none'`（要素別損失出力）は対象外のまま。
 - CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/backend-cuda/tests/huber_parity.rs`・`crates/backend-metal/tests/huber_parity.rs`・`crates/facade/tests/huber_backend_parity.rs` の `#[ignore]` テストを参照）。
+## #1742 の追補（`Adam`。coupled L2 weight decay）
+
+§2.9 の `Adam`（coupled L2 weight decay）行はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（親 #1610）。
+
+- `fandhe_ai_autodiff::nn::optim::adam`（`Adam`・`AdamConfig`）を追加した（`crates/autodiff/src/nn/optim/adam.rs`）。`AdamW`（decoupled。`nn/optim/adamw.rs`）を意図的に鏡写しにした別実装であり、内部ループの共通化 refactor は行っていない（`AdamW` は crates.io 出荷済み公開 API であり、既存 fixture テストの統一複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉では bit ドリフトを検出できないリスクがあるため）。差分は decay の適用箇所のみ: `Adam` は `g_eff = grad + weight_decay*param`（PyTorch `_single_tensor_adam` と同じ分岐で `weight_decay == 0.0` のときは演算自体を skip し生の `grad` を使う）で moment（`m`／`v`）を更新し、`param` 自体への decay 乗算は行わない。
+- 新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は一切追加していない（`AdamW`・AMP〈#1722〉と同じく `Tape`／`Var`／`BackendOps` に依存しない値型・純関数。`params`／`grads` を `&Tensor<f32>` 参照列として受け取り更新後 `Tensor<f32>` 列を返す `step()` シグネチャは `AdamW::step` と同一）。
+- 受入検証（`crates/autodiff/tests/nn_optim_adam.rs`）: 新規 PyTorch 参照値 fixture は追加せず、(1) `weight_decay=0` ケースでは `torch.optim.Adam` と `torch.optim.AdamW(weight_decay=0)` が定義上完全に一致するため、既存 `adamw-pytorch-reference/adamw_reference.json`（実 PyTorch 2.13.0+cpu 実行値）の `weight_decay_zero` ケースへ `Adam` を直接突合（既存統一複合判定）、(2) 全 3 ケースで `weight_decay` を 0 に強制し `Adam` と `AdamW` の bit 完全一致を固定、(3) `weight_decay>0` は PyTorch `_single_tensor_adam` の定義（`grad = grad.add(param, alpha=weight_decay)`）に基づく恒等式 `Adam(wd).step(p, g) == AdamW(wd=0).step(p, mul_add(wd, p, g))` を bit 完全一致で固定——の 3 段で担保する。
+- facade（`crates/facade/src/optim.rs`）は `pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};` の 1 行のみ追加（純再エクスポート。`docs/facade-optimizer-promotion-decision.md` §4 案 A）。`crates/facade/tests/api_surface.rs` の期待集合・到達性検査、`crates/facade/tests/optim_train_loop.rs` の facade-only 学習ループ収束テスト（`adam_with_clip_converges_via_facade_only`）も追加済み。
+- **`DeviceParamStore` 非対応**: `crate::optim::device_store::DeviceParamStore::step` は `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、`Adam` は結線されていない（`AdamW` も同様に未結線）。`Adam::step` はホスト `Tensor<f32>` を介した optimizer step のみを提供する。
+- RMSprop／Adagrad（#1743）・LAMB（#1744）は本 issue の対象外のまま残る。
 ## 追補（イシュー #1737）
 
 `Var::bce_loss`（PyTorch `nn.BCELoss` 相当・確率入力）・`Var::bce_with_logits_loss`（`nn.BCEWithLogitsLoss` 相当・logits 入力。sigmoid をカーネル内に内包した数値安定な合成式）を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
@@ -1596,6 +1606,82 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `dInput`（`Probabilities` kind は分母をクランプした勾配 `(p − y) / max(p·(1−p), 1e−12)`。forward のクランプ済み式の厳密な導関数ではない点に注意。厳密な導関数となるのは `dTarget` 側）のみをカーネルが返し、`dTarget` は呼び出し元がホスト側の逐次 map で計算する契約（`MseLoss` の `dTarget = -dPred` という単純合成が成り立たないため）。
 - facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.2）。CUDA／Metal 実機での facade parity テスト・性能実測は未実施のまま Mac／GB10 セッションへ申し送る。
 
+## #1743 の追補（`RmsProp`／`Adagrad`）
+
+- `torch.optim.RMSprop`／`torch.optim.Adagrad` 相当の欠落（`Sgd`・`AdamW` の 2 種のみだった optimizer 面）を解消した。`crates/autodiff/src/nn/optim/{rmsprop,adagrad}.rs` に `AdamW`（#194）を鏡写しにした別実装として追加した（内部ループの共通化は行わない。統一複合判定では共通化による bit ドリフトを検出できないため）。
+- いずれも `Tape`／`Var`／`BackendOps` に一切依存しない値型・純関数（`(param, grad)` の参照列を受け取り更新後 `Tensor<f32>` の列を返す）であり、新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は追加していない（カーネルなし）。
+- RMSprop の更新則は `torch.optim.rmsprop._single_tensor_rmsprop`（torch 2.14.0+cpu で確認）と同一演算順（`square_avg` 更新 → `centered` 時は `grad_avg` の lerp と分散差 → `sqrt` の後に `eps` 加算 → `momentum>0` 時は momentum buffer 経由の更新、それ以外は直接更新）。Adagrad の更新則は `torch.optim.adagrad._single_tensor_adagrad` と同一演算順（`clr` の逐次計算・`state_sum` 累積・`std` 加算後の除算）。
+- 正しさの検証は VJP・parity テストの字義どおりの適用ができないため、実 PyTorch 2.14.0+cpu 実行値 fixture（`tests/fixtures/{rmsprop,adagrad}-pytorch-reference/`）との統一複合判定（`.claude/rules/coding-rust.md` 既存 tolerance。緩和なし）・閉形式（t=1）一致・決定性（bit 完全一致）で行う（`tests/nn_optim_{rmsprop,adagrad}.rs`）。
+- facade は `fandhe_ai::optim::{RmsProp, RmsPropConfig, Adagrad, AdagradConfig}` の素の再エクスポートのみ（`docs/facade-optimizer-promotion-decision.md` §4 案 A。`crates/facade/src/optim.rs`）。`crate::DeviceParamStore` へは未結線（対応する `BackendOps` メソッドを本 issue では追加していないため非対応）。
+- Adam（coupled L2 weight decay）は #1742 で実装済み・LAMB は #1744 の追補（次節）で実装済み。
+
+## #1744 の追補（LAMB。coupled trust ratio optimizer）
+
+§2.9 の LAMB 行（「PyTorch 側にも `torch.optim` 直下の対応物なし」）はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（親 #1610）。
+
+- `fandhe_ai_autodiff::nn::optim::lamb`（`Lamb`・`LambConfig`）を追加した（`crates/autodiff/src/nn/optim/lamb.rs`）。You et al., 2019, arXiv:1904.00962 Algorithm 2（bias correction 込み）をそのまま再現し、φ（trust ratio のスケーリング関数）は恒等写像固定（`torch_optimizer.Lamb` の `‖x‖` clamp・apex の `max_grad_norm`／NVLAMB 除外は非採用）。moment（`m`／`v`）更新は `AdamW` と同一の演算列（`step_size = lr/bias_correction1`・`denom = sqrt(v)/sqrt(bias_correction2) + eps`）を使うが、weight decay は paper 定義どおり更新方向 `u` へ coupled で織り込む（`u = r + weight_decay*x`）点が `AdamW`（decoupled 乗算減衰）と異なる。trust ratio はパラメータテンソル（1 スロット＝1 layer）ごとに独立計算し、`step()` へ渡した複数 `(param, grad)` ペア間で norm を合算しない。
+- `norm_x`／`norm_t`（trust ratio の分子・分母）は f64 アキュムレータの逐次和→f64 で `sqrt`→f64 のまま係数を計算し 1 回だけ `f32` へ downcast する（`.claude/rules/coding-rust.md` の勾配長軸縮約 f64 契約に沿う独立実装）。**非有限 norm（NaN／Inf）検出時は `Err(InvalidArgument)` を返す fail-closed 契約**を新設した（`AdamW`／`Adam` が非有限勾配を黙って伝播させるのとは意図的に異なる。trust ratio は 1 テンソル全体で共有するスカラー係数のため）。`step()` は検証（状態変更なし）→計算（状態変更なし。ここで非有限を検出）→コミット（ここで初めて状態を変更する）の 3 フェーズ構成。
+- PyTorch `torch.optim` 本体・実行環境の `torch_optimizer` いずれにも LAMB 実装がないため、新規 PyTorch 参照値 fixture は追加しない。代わりに (1) テストファイル内に独立に書いた f64 参照実装（paper Algorithm 2 そのまま。本体の「lr を先に折り込んだ」実装形とは異なる演算列）との統一複合判定突合、(2) 解析的恒等式 3 件（zero-grad かつ `wd>0` での結果が `wd` 非依存・`wd=0` での更新量が独立算出した trust ratio 込みで `AdamW(wd=0)` の更新量と一致・`wd=0` での 2 の冪スケール不変性は bit 完全一致）、(3) 再現性（run-to-run bit 同一）・MLP 収束テストの 3 段で受け入れを担保する（`crates/autodiff/tests/nn_optim_lamb.rs`）。
+- facade（`crates/facade/src/optim.rs`）は `pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};` の 1 行のみ追加（純再エクスポート）。`crates/facade/tests/api_surface.rs` の期待集合・到達性検査（既定値 `eps=1e-6`・`weight_decay=0.0` のドリフトガード込み）、`crates/facade/tests/optim_train_loop.rs` の facade-only 学習ループ収束テスト（`lamb_with_clip_converges_via_facade_only`。trust ratio により実効ステップが縮むため `AdamW` 用 lr のままでは収束せず、lr=0.02 へ調整）も追加済み。
+- **`DeviceParamStore` 非対応**: `crate::optim::device_store::DeviceParamStore::step` は `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、`Lamb` は結線されていない（`AdamW`／`Adam` も同様）。LAMB のデバイス常駐化にはパラメータテンソルごとの L2 norm reduction カーネルと trust ratio 適用カーネル（3 バックエンド）が必要で本イシューの対象外。
+- 新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は一切追加していない（`AdamW`／`Adam` と同じく `Tape`／`Var`／`BackendOps` に依存しない値型・純関数）。
+
+## 追補（イシュー #1745）
+
+§2.10 の `CosineAnnealingLR`・`ExponentialLR` 行を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `CosineAnnealingLr`・`ExponentialLr`・`LinearWarmupLr`（`crates/autodiff/src/nn/optim/lr_scheduler.rs`）を `ConstantLr`／`StepLr` と同じ `LrScheduler` trait 実装として追加した。いずれも `lr_at(step) -> f32` のみを持つ stateless 純関数で、新規 `Op`／`BackendOps`／`Var` は拡張していない。
+- `CosineAnnealingLr` は PyTorch `CosineAnnealingLR._get_closed_form_lr` 準拠の閉形式（`eta_min + (base_lr - eta_min) * (1 + cos(π * step / t_max)) / 2`）を採用し、`step > t_max` では TensorFlow `CosineDecay` のように clamp せず周期的に振る舞う（PyTorch 準拠）。
+- `ExponentialLr` は `lr(step) = base_lr * gamma^step`（PyTorch `ExponentialLR` と同一）。
+- `LinearWarmupLr` は PyTorch に同名クラスがないため、`LinearLR` の `end_factor = 1.0` 固定形として定義した独自スケジューラ。
+- いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する（`cos`／`powf` の libm 差による ULP 揺れを抑える精度方針。bit 同一契約は主張しない）。
+- facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
+- 状態保持型の `ReduceLROnPlateau`・`OneCycleLR` は #1746／#1747 の追補（下記）でいずれも実装済み化した。
+
+## #1746 の追補（`ReduceLrOnPlateau`）
+
+PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`ConstantLr`／`StepLr` の 2 種のみだった stateless scheduler 面）を解消した（親 #1611）。
+
+- `crates/autodiff/src/nn/optim/reduce_lr_on_plateau.rs` に `ReduceLrOnPlateau`／`ReduceLrOnPlateauConfig`／`PlateauMode`／`ThresholdMode` を新規追加した。既存 `ConstantLr`／`StepLr`（`lr_scheduler.rs` モジュール doc が明記する stateless 純関数契約）とは異なり、検証指標の観測に応じて内部可変状態（`best`・`num_bad_epochs`・`cooldown_counter`）を進める **唯一の状態保持型スケジューラ**である。
+- `LrScheduler` trait は実装するが、`lr_at(_step)` は引数を無視して現在の学習率を返すだけ（`ConstantLr::lr_at` と同型）で、状態を進める入口は `ReduceLrOnPlateau::step(metric)`（検証指標を受け取る）に限定される。`&dyn LrScheduler` 経由で `lr_at` のみを呼んでも状態は変化しない。
+- 意味論は `torch/optim/lr_scheduler.py::ReduceLROnPlateau` に準拠: `is_better` の 4 分岐（`mode`×`threshold_mode`）・`num_bad_epochs > patience`（厳密に大なり）での発火・`new_lr = max(lr*factor, min_lr)`・`eps` ガード（`lr - new_lr <= eps` のとき据え置くが、その場合でも `cooldown_counter`／`num_bad_epochs` はリセットする）・cooldown 中は `num_bad_epochs` をクリアする、という手順を実装済み。`Default` は PyTorch 既定値（`mode=min, factor=0.1, patience=10, threshold=1e-4, threshold_mode=rel, cooldown=0, min_lr=0, eps=1e-8`）と一致する。
+- **fail-closed 逸脱**: PyTorch は `metric` が NaN でも黙って「悪化」として処理を継続するが、本実装は `.claude/rules/coding-rust.md`（本番経路で `unwrap`/`expect` を使わない）・既存 `clip_grad_norm` 等の契約に合わせ、`metric` が非有限（NaN／±inf）のとき `AutodiffError::InvalidArgument` を返し状態を変更しない。
+- 新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は一切追加していない（`Tape`／`Var`／`BackendOps` に一切依存しない値型・純関数。`ConstantLr`／`StepLr` と同じ性質）。
+- 受入検証（`crates/autodiff/tests/nn_optim_reduce_lr_on_plateau.rs`）: PyTorch の `is_better`／発火手順の定義から導出した参照系列テスト（既定設定・`patience=0`・Max モード・Abs threshold 境界・cooldown・`min_lr` フロア・`eps` ガード時のカウンタリセット・`lr_at` の状態非依存性）11 件、および fail-closed 入力検証テスト（`base_lr`／`factor`／`threshold`／`min_lr`／`eps` の不正値・`min_lr > base_lr`・非有限 `metric`）で担保する。
+- facade（`crates/facade/src/optim.rs`）は `pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};` と `pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};` の 2 行のみ追加（純再エクスポート）。`crates/facade/tests/api_surface.rs` の期待集合・到達性検査、`crates/facade/tests/optim_reduce_lr_on_plateau.rs`（facade のみに依存する学習ループ統合テスト。`backward → clip → optimizer step` の適用順序契約を踏襲し、`ReduceLrOnPlateau::step(loss)` の返り値で毎 step `SgdConfig` を作り直す）も追加済み。
+- Issue 本文の「`Op`／`BackendOps`／`Var` メソッド追加」「VJP 追加」「parity テスト」という受け入れ条件は、`Var`／`Tape`／`BackendOps` に一切依存しないホスト側純データ構造（`clip.rs`／`amp.rs` と同カテゴリ）である本機能には該当しないため、上記の参照系列テスト・fail-closed 検証テスト・facade 統合テスト・`api_surface.rs` 機械検査で代替した。
+- `DeviceParamStore` は非対応（対応する `BackendOps` メソッドを本 issue では追加していないため。他の scheduler・optimizer と同様に無関係）。
+- OneCycle は下記 #1747 の追補で実装済み化した。
+
+## 追補（イシュー #1747）
+
+§2.10 の `OneCycleLR` 行を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `OneCycleLr`・`OneCycleLrConfig`・`OneCycleAnneal`（`crates/autodiff/src/nn/optim/lr_scheduler.rs`）を PyTorch `torch.optim.lr_scheduler.OneCycleLR` 相当として追加した。「フェーズ管理を要する」ため上記 #1745 の追補時点では状態保持型として見送っていたが、`OneCycleLr::new` 構築時にフェーズ境界（`end_step`・`start_lr`・`end_lr` の表）を事前計算して保持することで、`lr_at` 自体は参照のみで完結する stateless 純関数として表現できた（内部可変状態を持たないため他のスケジューラと同じ `LrScheduler` trait を実装できる）。
+- `initial_lr = max_lr / div_factor`・`min_lr = initial_lr / final_div_factor` から、2 フェーズ形式（既定・`three_phase=false`）では `initial_lr → max_lr → min_lr` の 2 区間、3 フェーズ形式（`three_phase=true`）では `max_lr → initial_lr` のフェーズを挟んだ 3 区間を作り、`anneal_strategy`（`Cos`〈既定〉／`Linear`）に従って各区間内を補間する。参照系列は PyTorch を実行できないため `OneCycleLr::new`／`lr_at` のアルゴリズムを python3 で忠実に再現し手計算した値で固定した（`crates/autodiff/tests/nn_optim_lr_scheduler.rs` §5）。
+- `step >= total_steps` の扱いは PyTorch（`step > total_steps` で `ValueError`）と意図的に異なる: `lr_at` は `Result` を返せない trait 契約のため、`step` を `total_steps - 1` へ clamp し最終フェーズの `end_lr`（`min_lr`）を返し続ける（panic しない安全側の挙動。`OneCycleLr::new` doc 参照）。
+- `OneCycleLrConfig::new(max_lr, total_steps)` が `pct_start=0.3`・`anneal_strategy=Cos`・`div_factor=25.0`・`final_div_factor=1e4`・`three_phase=false` という PyTorch の既定値を埋める（`AdamWConfig` 等と同じ Config 構造体方式。7 引数 positional `new` を避ける）。
+- momentum cycling（`cycle_momentum`／`base_momentum`／`max_momentum`）・`epochs`／`steps_per_epoch` からの `total_steps` 自動導出・param group ごとの `max_lr` は対象外のまま。新規 `Op`／`BackendOps`／`Var`／VJP は拡張していない（テンソル演算ではなくホスト側 `f32` 純関数のため）。
+- facade は `crates/facade/src/optim.rs` への `pub use` 1 行追加のみ（新規型・関数を facade 側に定義しない）。
+- 状態保持型（Plateau／OneCycle）・式ベース型（Cosine／Exponential／LinearWarmup）とも実装済みとなり、本節の対象外事項はなくなった。
+
+## 追補（イシュー #1748）
+
+- `Tape::var_no_grad`（追跡なし葉。`requires_grad=false` の `Op::Leaf`）・`Var::detach`（既存 `Var` を追跡なし葉へ変換）を実装済み化。`TapeNode::requires_grad` の前方伝播・`Tape::backward` の起点／蓄積スキップ・`Gradients::get` の型付きエラー（`AutodiffError::GradientTrackingDisabled`）で構成する（設計は `docs/autodiff-nograd-leaf-dinput-skip-decision.md` §5「案 B」）。
+- facade 新規公開面: `Tape::var_no_grad`（薄いラッパー 1 メソッド）のみ。`Var::detach` は既存 `Var` 再エクスポート経由で新規公開面なし。
+- 算術を伴わない機構のため CPU 本番 ops と naive 参照実装の勾配が bit 完全一致。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り。
+- `torch.no_grad()` コンテキスト（演算そのものをテープに載せない）は引き続き `Tensor<f32>` のまま演算する既存の型分離方式（`docs/public-api-design.md` §3.1）が担う。本 issue が追加したのは「テープに載せたノードを勾配経路から外す」機構であり、両者は独立。
+- `retain_graph`（複数回 backward の勾配蓄積契約）は兄弟イシュー #1749 の対象のまま。
+
+## 追補（イシュー #1750）
+
+§2.12 の `.to(dtype)`（型変換）行「なし」を実装済み化した。スナップショット本体（対象 HEAD `097bff19`）は不変のまま、以下を追記する。
+
+- `CastDType`（`#[non_exhaustive]`。`f32`／`f64`／`i32`／`i64`／`bool` の 5 dtype タグ）・`CastElement`（sealed trait。要素単位の変換規則の単一情報源）・`BackendOps::cast_ops` capability accessor・`CastOps`（8 方向。既定 `Unsupported`）・ホスト参照実装（`fandhe_ai_tensor_core::cast::{cast_from_f32, cast_to_f32}`）を `tensor-core` に新設した。
+- CPU 実装（`backend-cpu::cast`）は 8 方向すべてをホスト参照実装へ委譲する。CUDA／Metal のネイティブカーネル（accessor は現状 `None` のためホストフォールバックのみ機能する）は #1751 が担当する。
+- `Var::cast<T: CastElement>() -> Result<Tensor<T>, AutodiffError>`（**非微分演算**。VJP は明示的な打ち切り——`Var::argmax`／`unique` と同型に tape ノードを記録しない）・`Var::to_f32() -> Var<'t>`（f32 系の恒等射。勾配は通常どおり伝播）・`Tape::var_from<T: CastElement>(&Tensor<T>) -> Result<Var<'_>, AutodiffError>`（非 f32 dtype から葉ノードを直接登録）を実装した。
+- facade は `CastDType`／`CastElement` の純再エクスポート（1 行）と `facade::Tape::var_from` の委譲メソッド追加のみ。`CastOps`（動的ディスパッチ面）は facade へ再エクスポートしない（`crates/facade/tests/api_surface.rs::facade_does_not_reexport_cast_ops` が機械的に固定）。
+- 数値契約（NaN→0 の飽和整数変換・`v != 0.0` の bool 変換等）・API 配置案の比較は `docs/tensor-core-cast-design.md` を正とする。CUDA／Metal 実機での facade parity テストは未実測のまま GB10／Mac セッションへ申し送り。
 ## #1738 の追補（NLLLoss／KLDivLoss）
 §2.8「損失関数」の `NLLLoss` 行（`なし。cross_entropy_loss が事実上兼ねる設計`）はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（イシュー #1738・親 #1609）。`KLDivLoss` はスナップショット当時の同節に未掲載のため新規行として追記する。
 

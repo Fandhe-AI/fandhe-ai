@@ -30,8 +30,9 @@
 //! （`docs/perf/train-backward-gemm-wiring.md`）。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendError, BackendOps, BceKind, HuberKind, KlDivTarget, ScalarBinaryOp,
-    ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd, row_norm_layout,
+    Activation, BackendError, BackendOps, BceKind, CastElement, HuberKind, KlDivTarget,
+    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
+    row_norm_layout,
 };
 
 use crate::error::AutodiffError;
@@ -2400,6 +2401,72 @@ fn validate_unique_output(v: &Tensor<f32>, numel: usize) -> Result<(), AutodiffE
             v.shape()
         )))
     }
+}
+
+/// [`Var::cast`] が使う「バックエンド実装 → フォールバック」ヘルパー
+/// （イシュー #1750）。[`unique_with_fallback`] と同型の 2 段構成だが、
+/// dtype ごとの分岐は [`CastElement::backend_cast_from_f32`] へ委譲
+/// する（型パラメータ trait 1 本に集約する `CastOps` の設計。
+/// `docs/tensor-core-cast-design.md` 参照）。
+///
+/// `ops.cast_ops()` が `None`（accessor 未対応）の場合と、`Some` だが
+/// 個別方向が [`BackendError::Unsupported`] を返す場合の両方で、
+/// ホスト参照実装（[`fandhe_ai_tensor_core::cast_from_f32`]）へ
+/// フォールバックする（判定迂回経路を作らない。
+/// `.claude/rules/security.md` A08）。要素数積のオーバーフロー検査
+/// は `tensor_core::cast::cast_from_f32` 内部（`checked_numel_for::<T>`）
+/// で完結しており、`unique_with_fallback` と異なり呼び出し元での
+/// 重複検査は不要（`CpuBackendOps::cast_ops` の実装もこの検査を経由
+/// する薄い委譲。`crates/backend-cpu/src/cast.rs` 参照）。
+pub(crate) fn cast_from_f32_with_fallback<T: CastElement>(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+) -> Result<Tensor<T>, AutodiffError> {
+    let result = match ops.cast_ops() {
+        Some(cast_ops) => match T::backend_cast_from_f32(cast_ops, x) {
+            Ok(v) => Ok(v),
+            Err(BackendError::Unsupported(_)) => Ok(fandhe_ai_tensor_core::cast_from_f32::<T>(x)?),
+            Err(other) => Err(AutodiffError::Backend(other)),
+        },
+        None => Ok(fandhe_ai_tensor_core::cast_from_f32::<T>(x)?),
+    };
+    let v = result?;
+    if v.shape() != x.shape() {
+        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+            ShapeError::ShapeMismatch {
+                lhs: v.shape().to_vec(),
+                rhs: x.shape().to_vec(),
+            },
+        )));
+    }
+    Ok(v)
+}
+
+/// [`Tape::var_from`] が使う「バックエンド実装 → フォールバック」
+/// ヘルパー（イシュー #1750）。[`cast_from_f32_with_fallback`] の
+/// 逆方向で、同じフォールバック規則・shape 事後検査を適用する。
+pub(crate) fn cast_to_f32_with_fallback<T: CastElement>(
+    ops: &dyn BackendOps,
+    x: &Tensor<T>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let result = match ops.cast_ops() {
+        Some(cast_ops) => match T::backend_cast_to_f32(cast_ops, x) {
+            Ok(v) => Ok(v),
+            Err(BackendError::Unsupported(_)) => Ok(fandhe_ai_tensor_core::cast_to_f32::<T>(x)?),
+            Err(other) => Err(AutodiffError::Backend(other)),
+        },
+        None => Ok(fandhe_ai_tensor_core::cast_to_f32::<T>(x)?),
+    };
+    let v = result?;
+    if v.shape() != x.shape() {
+        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+            ShapeError::ShapeMismatch {
+                lhs: v.shape().to_vec(),
+                rhs: x.shape().to_vec(),
+            },
+        )));
+    }
+    Ok(v)
 }
 
 /// [`Var::interpolate`] が使う「バックエンド実装 → フォールバック」
@@ -6781,6 +6848,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             lazy_chain_size: 0,
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
+            requires_grad: true,
         }
     }
 
@@ -8331,6 +8399,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
                 lazy_chain_size: 0,
                 recompute: false,
                 recompute_failed: std::cell::Cell::new(false),
+                requires_grad: true,
             };
             vec![
                 leaf_node(x.clone()),
@@ -8936,6 +9005,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             lazy_chain_size: 0,
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
+            requires_grad: true,
         };
         let nodes = vec![node];
         let op = Op::Interpolate {

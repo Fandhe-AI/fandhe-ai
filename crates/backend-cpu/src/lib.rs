@@ -140,6 +140,7 @@
 //! しない。bf16（#1699）は別イシューで担当する。
 
 mod bce;
+mod cast;
 mod constant_pad;
 mod device;
 mod elementwise;

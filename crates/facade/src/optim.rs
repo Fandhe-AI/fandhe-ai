@@ -14,6 +14,33 @@
 //! clipping）を `fandhe_ai::optim`
 //! という単一の入口へ吸収する。
 //!
+//! **Adam（coupled L2 weight decay。イシュー #1742・親 #1610）**:
+//! [`crate::optim::Adam`]／[`crate::optim::AdamConfig`] を
+//! `fandhe_ai_autodiff::nn::optim`（実体は `nn::optim::adam` モジュール）
+//! から同じく素の再エクスポートで公開する。`AdamW`（decoupled）と
+//! `weight_decay > 0` のとき異なる更新値を生む点は `nn::optim::adam`
+//! モジュール doc・`docs/compat-feature-gap.md` §2.9 を参照。
+//!
+//! **LR スケジューラ拡充（式ベース 3 種。イシュー #1745・親 #1611）**:
+//! [`crate::optim::CosineAnnealingLr`]／[`crate::optim::ExponentialLr`]／
+//! [`crate::optim::LinearWarmupLr`] を [`crate::optim::ConstantLr`]／
+//! [`crate::optim::StepLr`] と同じく `fandhe_ai_autodiff::nn::optim`
+//! （実体は `nn::optim::lr_scheduler` モジュール）から素の再エクスポート
+//! で公開する。いずれも [`crate::optim::LrScheduler::lr_at`] のみを持つ
+//! stateless な純関数であり、状態保持型の `ReduceLROnPlateau` は対象外
+//! （兄弟イシュー #1746 が担当）。
+//!
+//! **OneCycleLr（PyTorch `OneCycleLR` 相当。イシュー #1747・親 #1611）**:
+//! [`crate::optim::OneCycleLr`]／[`crate::optim::OneCycleLrConfig`]／
+//! [`crate::optim::OneCycleAnneal`] を同じく `fandhe_ai_autodiff::nn::optim`
+//! （実体は `nn::optim::lr_scheduler` モジュール）から素の再エクスポート
+//! で公開する。`new` 構築時にフェーズ境界を事前計算して保持することで
+//! `lr_at` 自体は参照のみの stateless 純関数として実装されており（`nn::
+//! optim::lr_scheduler::OneCycleLr` doc 参照）、他のスケジューラと同じ
+//! [`crate::optim::LrScheduler`] trait を実装する。momentum cycling
+//! （`cycle_momentum` 等）は対象外。状態保持型で残る対象外は
+//! `ReduceLROnPlateau`（兄弟イシュー #1746）のみ。
+//!
 //! `fandhe_ai::optim` は REQ-9 の 2026-08-29 追記（正本 spec
 //! `docs/spec/04-requirements.md:211-212`。実装リポ #984／#986）で、
 //! `tape()`系・`compat` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
@@ -28,7 +55,8 @@
 //!
 //! # 呼び出し文脈（`compat::Sequential` との位置対応契約）
 //!
-//! [`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`] が受け取る `params`／`grads` の順序は、
+//! [`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]／
+//! [`crate::optim::Adam::step`] が受け取る `params`／`grads` の順序は、
 //! [`crate::compat::Sequential::trainable_parameters`]（更新前パラメータ
 //! 列）と [`crate::compat::SequentialVars::trainable_grads`]（対応する
 //! 勾配列）が返す列の位置に対応させる契約になっている（`Sequential` 側の
@@ -106,10 +134,45 @@
 //! （親 #192 の並行実装）により不統一だが、本モジュールでは単一の
 //! `fandhe_ai::optim` 入口へ吸収し利用者からは意識させない。一方で
 //! [`crate::optim::Sgd::step`] は `&[&Tensor<f32>]` 2 本（`params`・`grads`）を、
-//! [`crate::optim::AdamW::step`] は `&[(&Tensor<f32>, &Tensor<f32>)]`（tuple 列）を
+//! [`crate::optim::AdamW::step`]／[`crate::optim::Adam::step`]／
+//! [`crate::optim::Lamb::step`] は
+//! `&[(&Tensor<f32>, &Tensor<f32>)]`（tuple 列）を
 //! 引数に取るというシグネチャ形の相違は**本モジュールでは統一しない**
 //! （親 #192 の統合判断待ち。`docs/facade-optimizer-promotion-decision.md`
 //! §4.3）。将来統一する場合は破壊的変更になる。
+//!
+//! # RMSprop／Adagrad（イシュー #1743・親 #1610）
+//!
+//! [`crate::optim::RmsProp`]／[`crate::optim::RmsPropConfig`]・
+//! [`crate::optim::Adagrad`]／[`crate::optim::AdagradConfig`] を
+//! `fandhe_ai_autodiff::nn::optim`（`adamw.rs` を鏡写しにした別実装
+//! `rmsprop.rs`／`adagrad.rs`）から同じく素の再エクスポートで公開
+//! する。`AdamW`・[`crate::optim::Sgd`] と同じく `Tape`／`Var`／
+//! `BackendOps` に一切依存しない値型・純関数であり、新規 `Op`／
+//! `BackendOps` メソッド／`Var` メソッド／VJP は追加していない
+//! （カーネルなし）。位置対応契約（「呼び出し文脈」節）はそのまま
+//! 適用される。**`crate::DeviceParamStore` には未結線**（「デバイス
+//! 常駐更新との違い」節参照。RMSprop・Adagrad とも本 issue では対応
+//! する `BackendOps` メソッドを追加していないため非対応）。
+//!
+//! # ReduceLrOnPlateau（イシュー #1746・親 #1611）
+//!
+//! [`crate::optim::ReduceLrOnPlateau`]／[`crate::optim::ReduceLrOnPlateauConfig`]・
+//! [`crate::optim::PlateauMode`]／[`crate::optim::ThresholdMode`] を
+//! `fandhe_ai_autodiff::nn::optim`（実体は `nn::optim::reduce_lr_on_plateau`
+//! モジュール）から同じく素の再エクスポートで公開する。PyTorch
+//! `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当で、既存
+//! [`crate::optim::ConstantLr`]／[`crate::optim::StepLr`]（stateless
+//! 純関数）とは異なり、検証指標の観測に応じて内部状態
+//! （patience／best／cooldown カウンタ）を進める **状態保持型**である
+//! （詳細は `nn::optim::reduce_lr_on_plateau` モジュール doc）。
+//! [`crate::optim::LrScheduler`] は実装するが、状態を進める入口は
+//! [`crate::optim::ReduceLrOnPlateau::step`]（検証指標を受け取る）のみで
+//! `lr_at` は現在値を返すだけ（`ConstantLr` と同型）。他の optim 型と
+//! 同じく `Tape`／`Var`／`BackendOps` に一切依存しない値型・純関数で
+//! あり、新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は
+//! 追加していない（カーネルなし）。`crate::DeviceParamStore` には
+//! 未結線（「デバイス常駐更新との違い」節参照）。
 //!
 //! # デバイス常駐更新との違い（誤認防止）
 //!
@@ -122,15 +185,39 @@
 //! `Tape` を引数に取る状態機械であり本モジュールの値型群とは性質が
 //! 異なるため、意図的に本モジュールへは含めない（root 再エクスポート
 //! のまま）。AMP（[`crate::optim::GradScaler`]）もこの経路へは未結線（上記「AMP の
-//! 適用範囲」節参照）。
+//! 適用範囲」節参照）。[`crate::optim::Adam`]（coupled L2 weight decay。
+//! イシュー #1742）も同様に `DeviceParamStore` へは未結線であり、本
+//! モジュールの他の optimizer と同じくホスト `Tensor<f32>` を介した
+//! optimizer step のみを提供する（`nn::optim::adam` モジュール doc
+//! 「`DeviceParamStore` 非対応」節）。[`crate::optim::Lamb`]（layer-wise
+//! trust ratio。イシュー #1744）も同様に `DeviceParamStore` へは未結線
+//! （パラメータテンソルごとの L2 norm reduction カーネルが未実装の
+//! ため。`nn::optim::lamb` モジュール doc「`DeviceParamStore` 非対応」節）。
+//!
+//! **LAMB（イシュー #1744・親 #1610）**: [`crate::optim::Lamb`]／
+//! [`crate::optim::LambConfig`] を `fandhe_ai_autodiff::nn::optim`
+//! （実体は `nn::optim::lamb` モジュール）から素の再エクスポートで
+//! 公開する。weight decay は paper 定義どおり更新方向 `u` へ coupled
+//! で織り込む（`AdamW` の decoupled 乗算減衰とは構造が異なる。
+//! `nn::optim::lamb` モジュール doc 参照）。`step()` シグネチャは
+//! `AdamW::step`／`Adam::step` と同一（`&[(&Tensor<f32>, &Tensor<f32>)]`
+//! を受け取り更新後 `Tensor<f32>` の列を返す）。
 
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。`tests/api_surface.rs`
 // が `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査する
 // 契約に合わせる。`src/lib.rs` 冒頭コメントと同じ理由）。
+pub use fandhe_ai_autodiff::nn::optim::{Adagrad, AdagradConfig};
+pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig};
 pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_value};
 pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
+pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, LinearWarmupLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
+pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
+pub use fandhe_ai_autodiff::nn::optim::{OneCycleAnneal, OneCycleLr, OneCycleLrConfig};
+pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};
+pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};
+pub use fandhe_ai_autodiff::nn::optim::{RmsProp, RmsPropConfig};
 pub use fandhe_ai_autodiff::nn::optim::{clip_grad_norm, global_grad_norm};
 pub use fandhe_ai_autodiff::nn::optim::{has_non_finite, scale_grads, scale_loss, unscale_grads};
 pub use fandhe_ai_autodiff::optim::{Sgd, SgdConfig};
