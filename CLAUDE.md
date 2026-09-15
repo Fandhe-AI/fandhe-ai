@@ -118,6 +118,7 @@ fandhe-ai/
     ├── facade-onnx-import-exposure-decision.md # ONNX import（`onnx-interop::onnx::interp`。推論専用グラフ解釈器・autograd 未接続）の facade 公開可否の設計判断記録（コード変更なし。DDP／量子化と異なり除外事項への従属なしと確認・「facade 公開＝onnx-interop の crates.io 公開」という構造的等価性の整理・薄いラッパー原則に基づく案 B〈`OnnxModel`／`OnnxValue`〉推奨・publish 承認未取得のため現時点は非公開のまま段階 0・#1775／#1754 への読み替え。イシュー #1652）
     ├── facade-onnx-export-exposure-decision.md # ONNX export（`onnx-interop::onnx::export`。#1772〜#1774 で本体実装完了済み）の facade 公開可否の設計判断記録（#1652 の読み替え〈close しない・publish 承認待ちの段階 0〉を踏襲。export 固有の論点として export 元の限定・`Sequential`／`nn` -> `ExportNode` 橋渡しの配置候補を整理。唯一のコード変更は `crates/facade/tests/api_surface.rs` への段階 0 固定 guard テスト 2 件〈facade が非公開クレート `onnx-interop` へ依存しないことの機械的固定〉。イシュー #1775）
     ├── facade-optimizer-promotion-decision.md # facade optimizer 公開 API 昇格の設計判断（#932）
+    ├── facade-safetensors-exposure-decision.md # safetensors save／load（`onnx-interop::st_load`／`st_save`）の facade 公開可否の設計判断記録（#1652／#1775 と同型の publish 前提〈`onnx-interop` の crates.io 公開が facade 公開面拡張の一般承認範囲外〉を踏襲。案比較（A: publish→再エクスポート／B: facade 直接 `safetensors` 依存の独立実装／C: tensor-core 配置／D: 非公開のまま path 依存／E: 段階 0）・推奨（案 B。未承認）・再開条件を整理。コード変更なし。`Tensor` の `Debug`／`Display` 実装は本 issue で別途完了済み〈`tensor-core::tensor_fmt`〉。イシュー #1754）
     ├── git-history-exposure-decision.md # git 履歴残存内部情報・個人メールアドレスの扱い判断・暫定方針（#477）
     ├── guardrail-change-policy.md    # TASK-6.2 判定器変更時フローの明文化（#149）
     ├── guardrail-self-repair-cli.md  # guardrail／self-repair CLI コマンド仕様（#183）

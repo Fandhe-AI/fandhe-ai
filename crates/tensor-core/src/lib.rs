@@ -132,7 +132,18 @@
 //! `rng::with_global_rng`（`manual_seed` 契約）を消費する。`Op`／
 //! `BackendOps`／VJP は追加しない（設計判断は
 //! `docs/dataset-dataloader-design.md`）。
-
+//!
+//! `tensor_fmt`（非公開モジュール。イシュー #1754）は `Tensor<T>` の
+//! `Debug`／`Display` 実装（打ち切り付きの値プレビュー）を提供する。
+//! `Tape: Debug` の既存公開契約（`docs/public-api-design.md` §7）越しに
+//! 巨大テンソルがダンプされても、総出力要素数がグローバル予算
+//! （`FMT_MAX_ELEMS`）以下・rank が表示上限（`FMT_MAX_RENDER_RANK`）
+//! 以下に強制されることで出力サイズ・走査コストの双方が shape に
+//! 依らず有界であることを保証する（軸長のみに基づく打ち切りだけでは
+//! 高階小軸長形状を打ち切れない穴があったため、コードレビュー
+//! #1754 追加修正でグローバル予算・rank ガードを導入した。設計判断は
+//! issue #1754 実装計画・PR 本文、詳細契約は `tensor_fmt` モジュール
+//! doc 参照）。
 mod backend_ops;
 mod broadcast;
 pub mod buffer;
@@ -160,6 +171,7 @@ pub mod scalar_op;
 pub mod pool_core;
 pub mod rng;
 mod tensor;
+mod tensor_fmt;
 pub mod typed;
 mod typed_ops;
 
