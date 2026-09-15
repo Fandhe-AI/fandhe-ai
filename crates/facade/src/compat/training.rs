@@ -25,7 +25,7 @@ use fandhe_ai_tensor_core::data::{DataLoader, DataLoaderConfig, TensorDataset};
 
 use super::sequential::Sequential;
 
-/// `compile()` の `loss` 引数（`Reduction::Mean` 固定。#[non_exhaustive]
+/// `compile()` の `loss` 引数（`Reduction::Mean` 固定。`#[non_exhaustive]`
 /// のため後続の損失追加〈#1763 以降〉が既存呼び出し元の非網羅的
 /// `match` を破壊しない）。
 #[non_exhaustive]

@@ -42,8 +42,9 @@
 //! Linear・ReLU・Sigmoid・Tanh の 3 種限定。`Sequential` 経由の学習
 //! （勾配取得・パラメータ更新）は #294 で対応済み（`sequential.rs`
 //! 冒頭 doc・`SequentialVars` 参照）。Keras 風 `compile()`／`fit()`／
-//! `evaluate()` 最小版は [`Sequential::compile`]／[`Sequential::fit`]／
-//! [`Sequential::evaluate`]（イシュー #1761）で実装済み。
+//! `evaluate()` 最小版は [`crate::compat::Sequential::compile`]／
+//! [`crate::compat::Sequential::fit`]／[`crate::compat::Sequential::evaluate`]
+//! （イシュー #1761）で実装済み。
 //! callbacks／`validation_data`／metrics／LR スケジューラ連携は
 //! 兄弟イシュー #1763 へ引き継ぐ。
 

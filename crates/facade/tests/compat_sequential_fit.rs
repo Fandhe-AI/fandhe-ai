@@ -526,11 +526,8 @@ fn recompile_replaces_optimizer_state() {
     // 「velocity=None から始まる素の `Sgd::step` 1 回」と突き合わせる
     // （momentum バッファがリセットされていなければ、1 回目の fit で
     // 積まれた velocity が残ってしまい両者は一致しなくなる）。
-    let params_before: Vec<Tensor<f32>> = model
-        .trainable_parameters()
-        .into_iter()
-        .map(|t| t.clone())
-        .collect();
+    let params_before: Vec<Tensor<f32>> =
+        model.trainable_parameters().into_iter().cloned().collect();
 
     model.fit(&x, &y, FitConfig::new(1, N)).unwrap();
     let fit_params = model.trainable_parameters();
