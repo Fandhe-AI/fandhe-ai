@@ -28,9 +28,7 @@ use fandhe_ai_backend_metal::pooling_model::{
 use fandhe_ai_backend_metal::{MetalContext, MetalPooling};
 
 fn gen_input(rng: &mut Xorshift64Star, numel: usize) -> Vec<f32> {
-    (0..numel)
-        .map(|_| (rng.next_f64() as f32 - 0.5) * 10.0)
-        .collect()
+    (0..numel).map(|_| rng.next_f32() * 5.0).collect()
 }
 
 /// MaxPool の値・索引が run-to-run 決定的で `pooling_model` と

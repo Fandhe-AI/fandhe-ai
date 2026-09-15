@@ -112,7 +112,34 @@ fn compute_out_len(
     d: usize,
     axis: &str,
 ) -> Result<usize, PoolingPrepareError> {
-    let numerator: i128 = in_len as i128 + 2 * (p as i128) - (d as i128) * ((k as i128) - 1) - 1;
+    // 全項を `checked_*` で計算し、`kernel`／`dilation`／`padding` に
+    // `usize::MAX` 級の巨大値が渡されても `i128` 演算・最終的な
+    // `usize` への変換のいずれの段でも panic せず型付きエラーへ
+    // 落とす（本番経路 panic 禁止。`.claude/rules/coding-rust.md`）。
+    // `k`／`d`／`p` は `usize`（最大 `usize::MAX` 〜 1.8e19）のため
+    // `d*(k-1)` は `i128`（最大 〜1.7e38）すら超過しうる
+    // （codex-review 指摘・#1885 line 115）。
+    let overflow = |detail: String| PoolingPrepareError::SizeLimitExceeded { detail };
+    let k_m1 = (k as i128)
+        .checked_sub(1)
+        .ok_or_else(|| overflow(format!("{axis}: kernel-1 underflows (k={k})")))?;
+    let d_term = (d as i128).checked_mul(k_m1).ok_or_else(|| {
+        overflow(format!(
+            "{axis}: dilation*(kernel-1) overflows i128 (k={k}, d={d})"
+        ))
+    })?;
+    let p_term = (p as i128)
+        .checked_mul(2)
+        .ok_or_else(|| overflow(format!("{axis}: padding*2 overflows i128 (p={p})")))?;
+    let numerator = (in_len as i128)
+        .checked_add(p_term)
+        .and_then(|v| v.checked_sub(d_term))
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| {
+            overflow(format!(
+                "{axis}: output length numerator overflows i128 (in={in_len}, k={k}, s={s}, p={p}, d={d})"
+            ))
+        })?;
     if numerator < 0 {
         return Err(PoolingPrepareError::InvalidShape {
             detail: format!(
@@ -120,7 +147,19 @@ fn compute_out_len(
             ),
         });
     }
-    Ok((numerator as usize) / s + 1)
+    // `s` は呼び出し元（`derive_pool_dims`）が非零を保証済みだが、
+    // 本関数単体で呼ばれても panic しないよう `checked_div` で防御する。
+    let quotient = numerator
+        .checked_div(s as i128)
+        .ok_or_else(|| overflow(format!("{axis}: division by zero stride (s={s})")))?;
+    let out_len = quotient
+        .checked_add(1)
+        .ok_or_else(|| overflow(format!("{axis}: output length +1 overflows i128")))?;
+    usize::try_from(out_len).map_err(|_| {
+        overflow(format!(
+            "{axis}: output length {out_len} exceeds usize::MAX"
+        ))
+    })
 }
 
 /// `MaxPool2d`／`AvgPool2d` の起動前検証・[`PoolDims`] 導出
@@ -328,11 +367,68 @@ pub fn derive_adaptive_dims(
 /// `x`（`[N,C,H,W]` 行優先平坦化・長さ `n*c*plane_in`）の実長が
 /// `dims` と整合しているかを検証する（`crate::pooling::MetalPooling`
 /// の各 `run_*` から `derive_*` の直後に呼ばれる共通ヘルパー）。
+///
+/// `n`／`c`／`plane_in` はいずれも `u32`（`PoolDims` フィールド）
+/// からの `usize` 拡幅積のため理論上 `usize` を超えうる
+/// （`u32::MAX`^3 ≈ 7.9e28 > `usize::MAX`〈64bit〉）。`checked_mul`
+/// で防御し、overflow 時は panic ではなく型付きエラーを返す。
 pub fn validate_input_len(x_len: usize, dims: &PoolDims) -> Result<(), PoolingPrepareError> {
-    let expected = (dims.n as usize) * (dims.c as usize) * (dims.plane_in as usize);
+    let expected = (dims.n as usize)
+        .checked_mul(dims.c as usize)
+        .and_then(|v| v.checked_mul(dims.plane_in as usize))
+        .ok_or_else(|| PoolingPrepareError::SizeLimitExceeded {
+            detail: "validate_input_len: n * c * plane_in overflows usize".to_string(),
+        })?;
     if x_len != expected {
         return Err(PoolingPrepareError::InvalidShape {
             detail: format!("input length {x_len} does not match expected {expected}"),
+        });
+    }
+    Ok(())
+}
+
+/// [`PoolDims`] の全フィールドが内部整合していることを検証する
+/// （`n`／`c`／`plane_in` と入力長の一致だけでは、`h_out`／`w_out`／
+/// `plane_out`／`numel_out` を手動で不整合な値に構築した
+/// `PoolDims`（全フィールド `pub`）をすり抜けさせてしまい、
+/// [`max_pool2d_model`]／[`avg_pool2d_soft_f64`]／
+/// [`adaptive_avg_pool2d_soft_f64`] が `out[out_idx]` へ書き込む際に
+/// 長さ不足の `out` バッファへ out-of-bounds で panic しうる
+/// （codex-review 指摘・#1885 line 331）。
+///
+/// `dims` が持つ生パラメータ（`in_shape`・kernel／stride／padding／
+/// dilation・`count_include_pad`。adaptive 系は `kh==0 && kw==0` を
+/// マーカーとして扱う——[`derive_adaptive_dims`] が両者を常に `0`
+/// で埋める設計に対応）から [`derive_pool_dims`]／
+/// [`derive_adaptive_dims`] を再実行し、結果が `dims` 自身と
+/// `PartialEq` で完全一致することを要求する（両関数が持つ検証
+/// ロジック——`ceil_mode`・空窓ゲート・`checked_mul` 済み積・
+/// `u32` 上限等——を再利用でき、二重管理を避けられる）。
+fn validate_pool_dims_consistent(dims: &PoolDims) -> Result<(), PoolingPrepareError> {
+    let in_shape = [
+        dims.n as usize,
+        dims.c as usize,
+        dims.h_in as usize,
+        dims.w_in as usize,
+    ];
+    let recomputed = if dims.kh == 0 && dims.kw == 0 {
+        derive_adaptive_dims(&in_shape, (dims.h_out as usize, dims.w_out as usize))?
+    } else {
+        derive_pool_dims(
+            &in_shape,
+            (dims.kh as usize, dims.kw as usize),
+            (dims.sh as usize, dims.sw as usize),
+            (dims.ph as usize, dims.pw as usize),
+            (dims.dh as usize, dims.dw as usize),
+            false,
+            dims.count_include_pad != 0,
+        )?
+    };
+    if recomputed != *dims {
+        return Err(PoolingPrepareError::InvalidShape {
+            detail: format!(
+                "PoolDims is internally inconsistent: given={dims:?} recomputed={recomputed:?}"
+            ),
         });
     }
     Ok(())
@@ -351,6 +447,7 @@ pub fn max_pool2d_model(
     x: &[f32],
     dims: &PoolDims,
 ) -> Result<(Vec<f32>, Vec<i32>), PoolingPrepareError> {
+    validate_pool_dims_consistent(dims)?;
     validate_input_len(x.len(), dims)?;
     let (n, c, h_in, w_in, h_out, w_out) = (
         dims.n as i64,
@@ -426,6 +523,7 @@ pub fn max_pool2d_model(
 /// `pool_f64_from_uint` が同じ変換をビット構成で行い、両者が bit
 /// 完全一致することは [`tests`] が固定する）。
 pub fn avg_pool2d_soft_f64(x: &[f32], dims: &PoolDims) -> Result<Vec<f32>, PoolingPrepareError> {
+    validate_pool_dims_consistent(dims)?;
     validate_input_len(x.len(), dims)?;
     let (n, c, h_in, w_in, h_out, w_out) = (
         dims.n as i64,
@@ -503,6 +601,7 @@ pub fn adaptive_avg_pool2d_soft_f64(
     x: &[f32],
     dims: &PoolDims,
 ) -> Result<Vec<f32>, PoolingPrepareError> {
+    validate_pool_dims_consistent(dims)?;
     validate_input_len(x.len(), dims)?;
     let (n, c, h_in, w_in, h_out, w_out) = (
         dims.n as i64,
@@ -826,5 +925,88 @@ mod tests {
             };
             assert_eq!(got, expected, "mismatch for v={v}");
         }
+    }
+
+    /// codex-review 指摘（#1885 line 115）の回帰: `kernel`／`dilation`
+    /// に `usize::MAX` 級の巨大値を渡しても `compute_out_len`
+    /// （`derive_pool_dims` 経由）が overflow で panic せず型付き
+    /// エラーを返すことを固定する。
+    #[test]
+    fn huge_kernel_and_dilation_does_not_panic() {
+        // `k=usize::MAX, d=1` 単独では `d*(k-1)` 自体は `i128` に
+        // 収まる（分子が大きく負になり `InvalidShape` で拒否）が、
+        // 呼び出し自体が overflow で panic しないことを固定する。
+        assert!(matches!(
+            derive_pool_dims(
+                &[1, 1, 4, 4],
+                (usize::MAX, 1),
+                (1, 1),
+                (0, 0),
+                (1, 1),
+                false,
+                true,
+            ),
+            Err(PoolingPrepareError::InvalidShape { .. })
+        ));
+        // `k`／`d` がともに `usize::MAX` 級だと `d*(k-1)` が `i128`
+        // すら超過する（codex-review 指摘の具体例）ため
+        // `SizeLimitExceeded` を返す。
+        assert!(matches!(
+            derive_pool_dims(
+                &[1, 1, 4, 4],
+                (usize::MAX, usize::MAX),
+                (1, 1),
+                (0, 0),
+                (usize::MAX, usize::MAX),
+                false,
+                true,
+            ),
+            Err(PoolingPrepareError::SizeLimitExceeded { .. })
+        ));
+    }
+
+    /// codex-review 指摘（#1885 line 331）の回帰: `PoolDims` を手動で
+    /// 内部不整合（`numel_out` が実際の `n*c*h_out*w_out` より小さい）
+    /// に構築すると、`validate_input_len`（`n*c*plane_in` と入力長の
+    /// 一致）はすり抜けるが `validate_pool_dims_consistent` が
+    /// `InvalidShape` で拒否し、`out[out_idx]` への out-of-bounds
+    /// 書き込み panic を未然に防ぐことを固定する。
+    #[test]
+    fn inconsistent_numel_out_rejected_not_panicking() {
+        let mut dims =
+            derive_pool_dims(&[1, 1, 4, 4], (2, 2), (2, 2), (0, 0), (1, 1), false, true).unwrap();
+        assert_eq!(dims.numel_out, 4); // n=1,c=1,h_out=2,w_out=2
+        // numel_out を実際より小さく手動改竄する（`out` バッファが
+        // 短くなり、書き込み時に out-of-bounds を起こしうる構成）。
+        dims.numel_out = 1;
+        let x = vec![0.0f32; 16];
+        assert!(matches!(
+            max_pool2d_model(&x, &dims),
+            Err(PoolingPrepareError::InvalidShape { .. })
+        ));
+        assert!(matches!(
+            avg_pool2d_soft_f64(&x, &dims),
+            Err(PoolingPrepareError::InvalidShape { .. })
+        ));
+    }
+
+    /// 同上（#1885 line 331）の adaptive 系回帰: `PoolDims` を
+    /// adaptive マーカー（`kh==0 && kw==0`）のまま `h_out`／`w_out`
+    /// を手動改竄しても `adaptive_avg_pool2d_soft_f64` が panic
+    /// せず `InvalidShape` を返すことを固定する。
+    #[test]
+    fn inconsistent_adaptive_dims_rejected_not_panicking() {
+        let mut dims = derive_adaptive_dims(&[1, 1, 4, 4], (2, 2)).unwrap();
+        assert_eq!(dims.numel_out, 4);
+        // `h_out`／`w_out`／`plane_out` は正しい値（2, 2, 4）のまま
+        // `numel_out` だけを実際の積（`n*c*plane_out`=4）より小さく
+        // 改竄する（`out` バッファが短くなり書き込み時に
+        // out-of-bounds を起こしうる構成）。
+        dims.numel_out = 1;
+        let x = vec![0.0f32; 16];
+        assert!(matches!(
+            adaptive_avg_pool2d_soft_f64(&x, &dims),
+            Err(PoolingPrepareError::InvalidShape { .. })
+        ));
     }
 }
