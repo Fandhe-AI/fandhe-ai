@@ -16,9 +16,31 @@ use fandhe_ai_tensor_core::{BackendOps, Conv2dParams, ShapeError, Tensor, conv2d
 
 use crate::error::AutodiffError;
 use crate::grad::conv2d_with_fallback;
-use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, derive_seed, uniform_init};
+use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, derive_seed, try_uniform_init};
 use crate::tape::Tape;
 use crate::var::Var;
+
+/// [`try_uniform_init`] の `Err`（`TryReserveError`）を
+/// [`AutodiffError::InvalidArgument`] へ変換する重み初期化共通ヘルパー
+/// （`nn::rnn::checked_uniform_init` と同型。イシュー #1770
+/// codex-review P1 指摘: `checked_mul` による `usize` オーバーフロー
+/// 検査だけでは `Vec<f32>` の `isize::MAX` バイト制限を検査できず、
+/// `uniform_init` 内の `collect()` が capacity overflow で panic
+/// しうる。本番経路 panic 禁止。`.claude/rules/coding-rust.md`）。
+/// `field_name` はエラーメッセージにどのパラメータ（`weight`／
+/// `bias`）の確保に失敗したかを残すためのラベル。
+fn checked_uniform_init(
+    len: usize,
+    bound: f32,
+    seed: u64,
+    field_name: &str,
+) -> Result<Vec<f32>, AutodiffError> {
+    try_uniform_init(len, bound, seed).map_err(|err| {
+        AutodiffError::InvalidArgument(format!(
+            "{field_name}: len={len} 要素分のバッファを確保できません: {err}"
+        ))
+    })
+}
 
 /// Conv2d 層のパラメータ本体。`weight` は `[out_channels, in_channels /
 /// groups, kH, kW]`（PyTorch `nn.Conv2d.weight` と同じレイアウト。
@@ -117,12 +139,14 @@ impl Conv2d {
                     "Conv2d::new: weight element count overflows usize".to_string(),
                 )
             })?;
-        let weight_data = uniform_init(weight_numel, bound, weight_seed);
+        let weight_data =
+            checked_uniform_init(weight_numel, bound, weight_seed, "Conv2d::new: weight")?;
         let weight = Tensor::new(weight_data, &[out_channels, cin_g, kh, kw])?;
 
         let bias = if bias {
             let bias_seed = derive_seed(seed, BIAS_SEED_SALT);
-            let bias_data = uniform_init(out_channels, bound, bias_seed);
+            let bias_data =
+                checked_uniform_init(out_channels, bound, bias_seed, "Conv2d::new: bias")?;
             Some(Tensor::new(bias_data, &[out_channels])?)
         } else {
             None
@@ -243,26 +267,38 @@ impl Conv2d {
         }
     }
 
+    /// 重み `[out_channels, in_channels / groups, kH, kW]`
+    /// （PyTorch `nn.Conv2d.weight` と同じレイアウト）。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
     }
 
+    /// バイアス `[out_channels]`。[`Conv2d::new`]／
+    /// [`Conv2d::from_parameters`] に `bias: false`／`bias: None` を
+    /// 渡した場合は `None`。
     pub fn bias(&self) -> Option<&Tensor<f32>> {
         self.bias.as_ref()
     }
 
+    /// 空間軸 `[stride_h, stride_w]`（PyTorch `nn.Conv2d` と同じ軸順）。
     pub fn stride(&self) -> [usize; 2] {
         self.stride
     }
 
+    /// 空間軸 `[padding_h, padding_w]`（軸順は [`Conv2d::stride`] と
+    /// 同じ）。
     pub fn padding(&self) -> [usize; 2] {
         self.padding
     }
 
+    /// 空間軸 `[dilation_h, dilation_w]`（軸順は [`Conv2d::stride`] と
+    /// 同じ）。
     pub fn dilation(&self) -> [usize; 2] {
         self.dilation
     }
 
+    /// グループ数（`groups == 1` が通常の畳み込み、`groups ==
+    /// in_channels` が depthwise 畳み込みに相当）。
     pub fn groups(&self) -> usize {
         self.groups
     }
@@ -362,7 +398,11 @@ impl Conv2d {
 /// `Conv2d::bind` が返す、1 ステップ分のテープに登録済みパラメータ
 /// （`nn::LinearVars` と同型）。
 pub struct Conv2dVars<'t> {
+    /// `Conv2d::weight`（`[out_channels, in_channels / groups, kH,
+    /// kW]`）をテープへ登録した `Var`。
     pub weight: Var<'t>,
+    /// `Conv2d::bias`（`[out_channels]`）をテープへ登録した `Var`。
+    /// 元の `Conv2d` が `bias: None` の場合は `None`。
     pub bias: Option<Var<'t>>,
     stride: [usize; 2],
     padding: [usize; 2],
@@ -371,18 +411,23 @@ pub struct Conv2dVars<'t> {
 }
 
 impl<'t> Conv2dVars<'t> {
+    /// 空間軸 `[stride_h, stride_w]`（[`Conv2d::stride`] と同じ）。
     pub fn stride(&self) -> [usize; 2] {
         self.stride
     }
 
+    /// 空間軸 `[padding_h, padding_w]`（[`Conv2d::padding`] と同じ）。
     pub fn padding(&self) -> [usize; 2] {
         self.padding
     }
 
+    /// 空間軸 `[dilation_h, dilation_w]`（[`Conv2d::dilation`] と
+    /// 同じ）。
     pub fn dilation(&self) -> [usize; 2] {
         self.dilation
     }
 
+    /// グループ数（[`Conv2d::groups`] と同じ）。
     pub fn groups(&self) -> usize {
         self.groups
     }
@@ -494,12 +539,14 @@ impl Conv1d {
                     "Conv1d::new: weight element count overflows usize".to_string(),
                 )
             })?;
-        let weight_data = uniform_init(weight_numel, bound, weight_seed);
+        let weight_data =
+            checked_uniform_init(weight_numel, bound, weight_seed, "Conv1d::new: weight")?;
         let weight = Tensor::new(weight_data, &[out_channels, cin_g, kernel_size])?;
 
         let bias = if bias {
             let bias_seed = derive_seed(seed, BIAS_SEED_SALT);
-            let bias_data = uniform_init(out_channels, bound, bias_seed);
+            let bias_data =
+                checked_uniform_init(out_channels, bound, bias_seed, "Conv1d::new: bias")?;
             Some(Tensor::new(bias_data, &[out_channels])?)
         } else {
             None
@@ -611,26 +658,36 @@ impl Conv1d {
         }
     }
 
+    /// 重み `[out_channels, in_channels / groups, k]`（PyTorch
+    /// `nn.Conv1d.weight` と同じレイアウト）。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
     }
 
+    /// バイアス `[out_channels]`。[`Conv1d::new`]／
+    /// [`Conv1d::from_parameters`] に `bias: false`／`bias: None` を
+    /// 渡した場合は `None`。
     pub fn bias(&self) -> Option<&Tensor<f32>> {
         self.bias.as_ref()
     }
 
+    /// 空間軸方向のストライド。
     pub fn stride(&self) -> usize {
         self.stride
     }
 
+    /// 空間軸方向のパディング。
     pub fn padding(&self) -> usize {
         self.padding
     }
 
+    /// 空間軸方向のダイレーション。
     pub fn dilation(&self) -> usize {
         self.dilation
     }
 
+    /// グループ数（`groups == 1` が通常の畳み込み、`groups ==
+    /// in_channels` が depthwise 畳み込みに相当）。
     pub fn groups(&self) -> usize {
         self.groups
     }
@@ -744,7 +801,11 @@ impl Conv1d {
 
 /// `Conv1d::bind` が返す、1 ステップ分のテープに登録済みパラメータ。
 pub struct Conv1dVars<'t> {
+    /// `Conv1d::weight`（`[out_channels, in_channels / groups, k]`）
+    /// をテープへ登録した `Var`。
     pub weight: Var<'t>,
+    /// `Conv1d::bias`（`[out_channels]`）をテープへ登録した `Var`。
+    /// 元の `Conv1d` が `bias: None` の場合は `None`。
     pub bias: Option<Var<'t>>,
     stride: usize,
     padding: usize,
@@ -753,18 +814,22 @@ pub struct Conv1dVars<'t> {
 }
 
 impl<'t> Conv1dVars<'t> {
+    /// 空間軸方向のストライド（[`Conv1d::stride`] と同じ）。
     pub fn stride(&self) -> usize {
         self.stride
     }
 
+    /// 空間軸方向のパディング（[`Conv1d::padding`] と同じ）。
     pub fn padding(&self) -> usize {
         self.padding
     }
 
+    /// 空間軸方向のダイレーション（[`Conv1d::dilation`] と同じ）。
     pub fn dilation(&self) -> usize {
         self.dilation
     }
 
+    /// グループ数（[`Conv1d::groups`] と同じ）。
     pub fn groups(&self) -> usize {
         self.groups
     }

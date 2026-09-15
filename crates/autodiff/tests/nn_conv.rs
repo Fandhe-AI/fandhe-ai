@@ -184,6 +184,39 @@ fn conv1d_from_parameters_rejects_wrong_rank() {
     ));
 }
 
+/// codex-review P1 指摘（イシュー #1770 PR #1880）の回帰: `checked_mul`
+/// のみでは `usize` オーバーフローしか検査できず、`Vec<f32>` の
+/// `isize::MAX` バイト制限を超える確保は `uniform_init` 内の
+/// `collect()` が capacity overflow で panic していた。`weight_numel =
+/// out_channels * cin_g * kh * kw = 1 * (1<<61) * 1 * 1 = 1<<61` は
+/// `checked_mul` を素通りするが、f32 4 バイト換算で `1<<63` バイトと
+/// なり 64-bit の `isize::MAX`（`2^63 - 1`）を超える。本番経路 panic
+/// 禁止（`.claude/rules/coding-rust.md`）のため `Err` を返す契約を
+/// 固定する（panic せず `Err` が返ること自体が検証対象）。
+#[test]
+fn conv2d_new_rejects_weight_allocation_exceeding_isize_max() {
+    let err = err_of(Conv2d::new(
+        1usize << 61,
+        1,
+        [1, 1],
+        [1, 1],
+        [0, 0],
+        [1, 1],
+        1,
+        false,
+        0,
+    ));
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+/// [`conv2d_new_rejects_weight_allocation_exceeding_isize_max`] の
+/// `Conv1d` 版。
+#[test]
+fn conv1d_new_rejects_weight_allocation_exceeding_isize_max() {
+    let err = err_of(Conv1d::new(1usize << 61, 1, 1, 1, 0, 1, 1, false, 0));
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
 // --- 2. 決定性・初期化 ---
 
 #[test]

@@ -243,11 +243,15 @@ fn state_dict_round_trip_with_conv2d() {
     let model = conv_relu_model();
     let state = model.state_dict();
 
-    let mut model2 = conv_relu_model();
-    // model2 の初期重みは model と異なる（seed は同じだが構築が別インスタンス
-    // でも同一 seed なら同一重みになるため、ここでは異なる seed で構築し
-    // 直してから load_state_dict で上書きする）。
-    model2.load_state_dict(state).unwrap();
+    // model2 は SEED2（model の SEED1 とは異なる）で構築するため、
+    // load_state_dict 前は初期重みが model と異なる。load_state_dict が
+    // no-op でも偶然 predict が一致してしまう（codex-review／Cursor
+    // Bugbot 指摘: 同一 seed だと state_dict の中身に関わらず一致する
+    // ため復元の効果を検証できていなかった）ことのない構成にする。
+    let mut model2 = Sequential::new()
+        .add_conv2d(2, 4, [3, 3], [1, 1], [1, 1], [1, 1], 1, SEED2)
+        .unwrap()
+        .add_relu();
 
     let x = tensor(
         (0..2 * 2 * 4 * 4)
@@ -256,8 +260,17 @@ fn state_dict_round_trip_with_conv2d() {
         &[2, 2, 4, 4],
     );
     let out1 = model.predict(&x).unwrap();
-    let out2 = model2.predict(&x).unwrap();
-    assert_eq!(dense_vec(&out1), dense_vec(&out2));
+
+    // 復元前: 異なる seed のため predict は一致しないはず（load_state_dict
+    // が実際に効果を持つことの前提条件を確認する）。
+    let out2_before = model2.predict(&x).unwrap();
+    assert_ne!(dense_vec(&out1), dense_vec(&out2_before));
+
+    model2.load_state_dict(state).unwrap();
+
+    // 復元後: model と bit 完全一致するはず。
+    let out2_after = model2.predict(&x).unwrap();
+    assert_eq!(dense_vec(&out1), dense_vec(&out2_after));
 }
 
 #[test]
