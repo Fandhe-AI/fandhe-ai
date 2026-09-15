@@ -1207,3 +1207,74 @@ fn facade_does_not_reexport_cast_ops() {
          （動的ディスパッチ面は非公開の設計判断に違反）: {offending:?}"
     );
 }
+
+/// `fandhe_ai::available_devices`（イシュー #1614）が `pub fn` として、
+/// `fandhe_ai::Tape::device`／`Tape::transfer` が facade の公開面に
+/// 存在することを固定する（`facade_exposes_pool_release_api_and_pool_
+/// stats_reexport` と同型のソース走査）。
+#[test]
+fn facade_exposes_available_devices_and_tape_transfer() {
+    let lib_rs = facade_crate_root().join("src/lib.rs");
+    let content = read_to_string_or_panic(&lib_rs);
+    assert!(
+        content.contains("pub fn available_devices"),
+        "fandhe_ai::available_devices が pub fn として見つからない"
+    );
+    assert!(
+        content.contains("pub fn device(&self) -> Device"),
+        "fandhe_ai::Tape::device が pub fn として見つからない"
+    );
+    assert!(
+        content.contains("pub fn transfer"),
+        "fandhe_ai::Tape::transfer が pub fn として見つからない"
+    );
+}
+
+/// `crates/facade/src/` の `pub use` が `DeviceProvider`／`DeviceInfo`／
+/// `enumerate_all`／`select_from`（`tensor-core::device` の下位 API。
+/// 利用者向け公開面は `Device` 識別子のみに限定する方針）を再エクス
+/// ポートしていないことを固定する（`facade_does_not_reexport_cast_ops`
+/// と同型の走査。イシュー #1614）。
+#[test]
+fn facade_does_not_reexport_device_provider_internals() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            for forbidden in [
+                "DeviceProvider",
+                "DeviceInfo",
+                "enumerate_all",
+                "select_from",
+            ] {
+                if trimmed.contains(forbidden) {
+                    offending.push(format!(
+                        "{}: `{trimmed}` が {forbidden} を含む",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が DeviceProvider 系の下位 API を再エクスポートしている\
+         （利用者向け公開面は Device 識別子のみとする方針に違反）: {offending:?}"
+    );
+}
+
+/// `fandhe_ai::available_devices`（イシュー #1614）がコンパイル時に
+/// `Vec<fandhe_ai::Device>` を返す `pub fn` として到達可能であることの
+/// コンパイル時検証（`manual_seed_is_reachable_via_facade` と同型）。
+#[test]
+fn available_devices_is_reachable_via_facade() {
+    let devices: Vec<fandhe_ai::Device> = fandhe_ai::available_devices();
+    assert!(
+        devices.contains(&fandhe_ai::Device::Cpu),
+        "available_devices() は常に Device::Cpu を含むはず"
+    );
+}
