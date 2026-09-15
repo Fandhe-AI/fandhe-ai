@@ -204,9 +204,8 @@ impl<T: Element> Dataset for TensorDataset<T> {
 
     fn len(&self) -> usize {
         // `TensorDataset::new` が rank 0 を拒否済みのため、`shape()` は
-        // 常に少なくとも 1 要素を持つ（境界検査は #8 準拠。REQ-8
-        // 「境界検査を省略しない」の趣旨に沿い、検査済みの前提のみで
-        // 添字アクセスする）。
+        // 常に少なくとも 1 要素を持つ（REQ-8「境界検査を省略しない」の
+        // 趣旨に沿い、検査済みの前提のみで添字アクセスする）。
         self.tensor.shape()[0]
     }
 
@@ -755,11 +754,11 @@ mod tests {
         let order = with_global_rng(|rng| shuffled_indices(8, rng));
         // 整数演算のみの決定的順列（`rng::rand` のゴールデン値テストと
         // 同方式で許容される）。アルゴリズム変更時のみ更新する
-        // （下記値は本実装に対して実測したものを固定した golden value）。
-        assert_eq!(order.len(), 8);
-        let mut sorted = order.clone();
-        sorted.sort_unstable();
-        assert_eq!(sorted, (0..8).collect::<Vec<_>>());
+        // （下記値は本実装に対して実測したものを固定した golden value。
+        // `manual_seed(7)` から `shuffled_indices(8, ..)` を実行した実測値
+        // をそのまま固定しており、順列であることの検査のみに留まっていた
+        // 従来のアサーションを golden value 自体の固定へ強化する）。
+        assert_eq!(order, vec![0, 4, 1, 2, 6, 7, 5, 3]);
     }
 
     #[test]
