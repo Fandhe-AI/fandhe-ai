@@ -122,6 +122,13 @@ use fandhe_ai_tensor_core::{Activation, BackendOps};
 /// facade 経由では到達不能）。
 pub struct Sequential {
     inner: NnSequential,
+    /// Keras 風 `compile()`（イシュー #1761・`compat/training.rs`）で
+    /// 設定される optimizer／loss の組。`fit`／`evaluate` はこれが
+    /// `Some` であることを前提とする（未設定なら `InvalidArgument`）。
+    /// `Compiled`（`OptimizerState` 経由で `crate::optim::{Sgd, AdamW,
+    /// Adam}` を保持）は本クレート内でのみ構築・参照する非公開型で、
+    /// `Sequential` の他フィールドと同じく公開面には出さない。
+    pub(super) compiled: Option<super::training::Compiled>,
 }
 
 impl Default for Sequential {
@@ -134,6 +141,7 @@ impl Sequential {
     pub fn new() -> Self {
         Sequential {
             inner: NnSequential::new(),
+            compiled: None,
         }
     }
 
@@ -865,7 +873,10 @@ impl Sequential {
         for layer in layers {
             inner.push(layer);
         }
-        Sequential { inner }
+        Sequential {
+            inner,
+            compiled: None,
+        }
     }
 }
 
