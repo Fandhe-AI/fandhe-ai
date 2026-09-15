@@ -1351,15 +1351,32 @@ impl BackendOps for CpuBackendOps {
     }
 
     /// `BackendOps::col2im` の CPU 実装（イシュー #1764）。
-    /// `crate::im2col::col2im` へ委譲する（`d_col`／`input_shape`／
-    /// `params` の再検査は `crate::im2col::col2im` 内部の
-    /// `checked_numel`／`conv_out_len` が担う）。
+    /// [`im2col_out_shape`] で `input_shape`／`params` から期待する
+    /// `d_col` 形状（`[N, G, Cin_g·kH·kW, Hout·Wout]`）を導出し、
+    /// `d_col.shape()` との完全一致を検査してから `crate::im2col::col2im`
+    /// へ委譲する（`im2col` と同じ二重検査方針。PR #1862 codex-review
+    /// P1 是正: 是正前は `crate::im2col::col2im` 内部の座標計算
+    /// 〈`checked_numel`／`conv_out_len`〉のみに検査を委ねており、
+    /// ①`input_shape` の rank が 4 でない場合に `input_shape[1]` 等の
+    /// 直接添字参照で panic する、②`d_col` の形状が想定より小さい場合
+    /// でも `Tensor::get` の `unwrap_or(0.0)` により不足要素をゼロ埋め
+    /// して誤った結果のまま `Ok` を返してしまう、という 2 つの経路が
+    /// 本番経路 panic 禁止・`BackendOps::col2im` の `ShapeMismatch`
+    /// 契約〈`.claude/rules/security.md` A08〉に反していた）。
     fn col2im(
         &self,
         d_col: &Tensor<f32>,
         input_shape: &[usize],
         params: &Conv2dParams,
     ) -> Result<Tensor<f32>, BackendError> {
+        let expected_col_shape =
+            im2col_out_shape(input_shape, params).map_err(BackendError::ShapeMismatch)?;
+        if d_col.shape() != expected_col_shape.as_slice() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: d_col.shape().to_vec(),
+                rhs: expected_col_shape,
+            }));
+        }
         crate::im2col::col2im(d_col, input_shape, params).map_err(BackendError::ShapeMismatch)
     }
 
@@ -2948,5 +2965,112 @@ mod device_resident_elementwise_tests {
         fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
             self
         }
+    }
+}
+
+/// `BackendOps::col2im` の入力形状検査（PR #1862 codex-review P1 是正）の
+/// 回帰テスト。`crate::im2col::col2im` へ委譲する前に
+/// `im2col_out_shape(input_shape, params)` で期待形状を求め
+/// `d_col.shape()` との完全一致を検査することを確認する
+/// （rank 不正・`d_col` 形状不一致・空要素形状の 3 系統）。
+#[cfg(test)]
+mod col2im_shape_validation_tests {
+    use super::*;
+
+    #[test]
+    fn col2im_rejects_rank_mismatched_input_shape() {
+        // codex-review 指摘の再現条件そのもの: `input_shape=[1]`
+        // （rank 1）を渡すと、是正前は `crate::im2col::col2im` 内部の
+        // `input_shape[1]` 直接添字参照で panic していた。是正後は
+        // `im2col_out_shape` の rank 検査（4 でなければ
+        // `ShapeError::RankMismatch`）で panic せず型付きエラーを返す。
+        let ops = CpuBackendOps::new();
+        let params = Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let d_col = Tensor::new(vec![1.0f32], &[1]).unwrap();
+
+        let result = ops.col2im(&d_col, &[1], &params);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                    expected: 4,
+                    actual: 1,
+                }))
+            ),
+            "rank 不正な input_shape は RankMismatch で拒否されるべき（実際: {result:?}）"
+        );
+    }
+
+    #[test]
+    fn col2im_rejects_d_col_shape_smaller_than_expected() {
+        // codex-review 指摘のもう一方の再現条件: `input_shape=[1,1,1,1]`・
+        // `kernel=1` に対し `d_col.shape()=[1,1,0,1]`（P 軸が期待値 1 では
+        // なく 0）を渡す。是正前は `crate::im2col::col2im` 内部の
+        // `Tensor::get(..).unwrap_or(0.0)` が不足要素をゼロ埋めして
+        // `Ok` を返してしまっていた（誤った結果を静かに返す契約違反）。
+        // 是正後は `d_col.shape()` と `im2col_out_shape` の完全一致
+        // 検査で `ShapeMismatch` を返す。
+        let ops = CpuBackendOps::new();
+        let input_shape = [1usize, 1, 1, 1];
+        let params = Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        // 期待形状は im2col_out_shape([1,1,1,1], k=1,s=1,p=0,d=1) ==
+        // [1, 1, 1, 1]（K_g=1*1*1=1・P=1*1=1）。P 軸を 0 に破壊する。
+        let expected = im2col_out_shape(&input_shape, &params).unwrap();
+        assert_eq!(expected, vec![1, 1, 1, 1]);
+        let d_col = Tensor::new(Vec::<f32>::new(), &[1, 1, 0, 1]).unwrap();
+
+        let result = ops.col2im(&d_col, &input_shape, &params);
+        match result {
+            Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch { lhs, rhs })) => {
+                assert_eq!(lhs, vec![1, 1, 0, 1]);
+                assert_eq!(rhs, expected);
+            }
+            other => panic!("d_col 形状不一致は ShapeMismatch で拒否されるべき（実際: {other:?}）"),
+        }
+    }
+
+    #[test]
+    fn col2im_rejects_zero_numel_d_col_shape() {
+        // 0 要素形状（`N=0` を含まない、K_g もしくは P 軸のみが 0 の
+        // 病的な形状）も `d_col.shape() != expected` として一律
+        // ShapeMismatch で拒否されることを確認する（早期 return による
+        // 特別扱いをしない契約の固定）。
+        let ops = CpuBackendOps::new();
+        let input_shape = [1usize, 2, 3, 3];
+        let params = Conv2dParams::new([2, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let expected = im2col_out_shape(&input_shape, &params).unwrap();
+        // K_g 軸（cin_g*kh*kw = 2*2*2 = 8）を 0 に破壊した形状。
+        let broken_shape = vec![expected[0], expected[1], 0, expected[3]];
+        let d_col = Tensor::new(Vec::<f32>::new(), &broken_shape).unwrap();
+
+        let result = ops.col2im(&d_col, &input_shape, &params);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch { .. }
+                ))
+            ),
+            "0 要素の d_col 形状不一致も ShapeMismatch で拒否されるべき（実際: {result:?}）"
+        );
+    }
+
+    #[test]
+    fn col2im_accepts_matching_shape_and_matches_direct_call() {
+        // 正常系の非後退確認: 期待形状どおりの `d_col` は従来どおり
+        // `crate::im2col::col2im` 直接呼び出しと bit 完全一致する
+        // （検査追加が正常系の数値契約を変えないことの固定）。
+        let ops = CpuBackendOps::new();
+        let input_shape = [1usize, 1, 2, 2];
+        let params = Conv2dParams::new([2, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let out_shape = im2col_out_shape(&input_shape, &params).unwrap();
+        let d_col = Tensor::new(vec![1.0f32; out_shape.iter().product()], &out_shape).unwrap();
+
+        let via_backend_ops = ops.col2im(&d_col, &input_shape, &params).unwrap();
+        let via_direct = crate::im2col::col2im(&d_col, &input_shape, &params).unwrap();
+        assert_eq!(
+            via_backend_ops.contiguous().as_slice().unwrap(),
+            via_direct.contiguous().as_slice().unwrap()
+        );
     }
 }
