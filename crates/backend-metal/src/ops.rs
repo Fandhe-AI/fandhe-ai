@@ -3868,7 +3868,7 @@ impl BackendOps for MetalBackendOps {
     /// 追従イシュー。#1607 ツリー）。[`pool2d_out_shape`] で
     /// `input.shape()`／`params` を再検査してから `pooling::
     /// MetalPooling::run_max_pool2d_f32` へ委譲する（`im2col` と同じ
-    /// 二重検査方針。`.contiguous()` 前の [`checked_bytes_for`] も
+    /// 二重検査方針。`.contiguous()` 前の `checked_bytes_for` も
     /// `im2col`／`interpolate` と同型で適用し、非空入力の要素数積が
     /// `isize::MAX` バイト相当を超える場合の `.contiguous()` 側
     /// capacity overflow panic を未然に防ぐ。Cursor Bugbot 指摘の
@@ -3923,7 +3923,7 @@ impl BackendOps for MetalBackendOps {
     /// 追従イシュー）。[`pool2d_out_shape`] で `input.shape()`／
     /// `params` を再検査してから `pooling::MetalPooling::
     /// run_avg_pool2d_f32` へ委譲する（`.contiguous()` 前の
-    /// [`checked_bytes_for`] は [`Self::max_pool2d`] と同じ理由）。
+    /// `checked_bytes_for` は [`Self::max_pool2d`] と同じ理由）。
     fn avg_pool2d(
         &self,
         input: &Tensor<f32>,
@@ -3969,7 +3969,7 @@ impl BackendOps for MetalBackendOps {
     /// #1730・追従イシュー）。[`adaptive_pool2d_out_shape`] で
     /// `input.shape()`／`output_size` を再検査してから `pooling::
     /// MetalPooling::run_adaptive_avg_pool2d_f32` へ委譲する
-    /// （`.contiguous()` 前の [`checked_bytes_for`] は [`Self::
+    /// （`.contiguous()` 前の `checked_bytes_for` は [`Self::
     /// max_pool2d`] と同じ理由）。
     fn adaptive_avg_pool2d(
         &self,

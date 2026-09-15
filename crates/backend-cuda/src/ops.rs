@@ -4668,6 +4668,16 @@ impl BackendOps for CudaBackendOps {
     /// `pooling::CudaPooling::run_max_pool2d_f32` へ委譲する（`im2col`
     /// と同じ二重検査方針）。`索引` テンソルの dtype は `i32` 固定
     /// （`crate::pooling::CudaPooling::run_max_pool2d_f32` doc 参照）。
+    ///
+    /// `.contiguous()`（内部で無検査の `Vec::with_capacity(numel)` を
+    /// 呼ぶ）呼び出し前に `checked_bytes_for::<f32>` で確保前検査する
+    /// （`checked_shape_numel` 単体は要素数積が `usize` の範囲に収まる
+    /// かしか見ず `Vec` の `isize::MAX` バイト上限を検査しないため、
+    /// 単一要素を `[1,1,1usize<<61,1]` へ `broadcast_to` した入力へ
+    /// `kernel=stride=[1usize<<61,1]` を渡すと出力形状・要素数検証を
+    /// 通過し `.contiguous()` が capacity overflow panic しうる。
+    /// codex-review 指摘の是正・PR #1888。`checked_bytes_for` doc
+    /// 参照）。
     fn max_pool2d(
         &self,
         input: &Tensor<f32>,
@@ -4681,7 +4691,7 @@ impl BackendOps for CudaBackendOps {
                 Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch)?,
             ));
         }
-        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_bytes_for::<f32>(input.shape()).map_err(BackendError::ShapeMismatch)?;
 
         let input_owned = input.contiguous();
         let input_slice = input_owned.as_slice().ok_or_else(|| {
@@ -4741,6 +4751,10 @@ impl BackendOps for CudaBackendOps {
     /// `Unsupported` へ落としホスト参照実装（`eval::avg_pool2d`）へ
     /// フォールバックさせる（`MaxPool` は `kh_ * dh` を持つ構造で
     /// 既に `dilation` に対応済みのため対象外）。
+    ///
+    /// `.contiguous()` 呼び出し前の `checked_bytes_for::<f32>` は
+    /// [`Self::max_pool2d`] と同じ理由（codex-review 指摘の是正・
+    /// PR #1888）。
     fn avg_pool2d(
         &self,
         input: &Tensor<f32>,
@@ -4758,7 +4772,7 @@ impl BackendOps for CudaBackendOps {
         if out_shape.contains(&0) {
             return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
         }
-        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_bytes_for::<f32>(input.shape()).map_err(BackendError::ShapeMismatch)?;
 
         let input_owned = input.contiguous();
         let input_slice = input_owned.as_slice().ok_or_else(|| {
@@ -4796,6 +4810,10 @@ impl BackendOps for CudaBackendOps {
     /// #1729・追従イシュー）。[`adaptive_pool2d_out_shape`] で
     /// `input.shape()`／`output_size` を再検査してから
     /// `pooling::CudaPooling::run_adaptive_avg_pool2d_f32` へ委譲する。
+    ///
+    /// `.contiguous()` 呼び出し前の `checked_bytes_for::<f32>` は
+    /// [`Self::max_pool2d`] と同じ理由（codex-review 指摘の是正・
+    /// PR #1888）。
     fn adaptive_avg_pool2d(
         &self,
         input: &Tensor<f32>,
@@ -4806,7 +4824,7 @@ impl BackendOps for CudaBackendOps {
         if out_shape.contains(&0) {
             return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
         }
-        checked_shape_numel(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_bytes_for::<f32>(input.shape()).map_err(BackendError::ShapeMismatch)?;
 
         let input_owned = input.contiguous();
         let input_slice = input_owned.as_slice().ok_or_else(|| {
@@ -5594,6 +5612,67 @@ mod tests {
             .expect("empty adaptive_avg_pool2d must succeed");
         assert_eq!(out.shape(), &[0, 1, 2, 2]);
         assert_eq!(out.numel(), 0);
+    }
+
+    // --- pooling（max_pool2d／avg_pool2d／adaptive_avg_pool2d）の
+    // `.contiguous()` 呼び出し前の確保前検査（codex-review 指摘・
+    // PR #1888。`backend-metal::ops::tests` の同型テストと対称）。
+    // `checked_shape_numel` 単体は要素数積が `usize` の範囲に収まる
+    // かしか見ず `Vec` の `isize::MAX` バイト上限を検査しないため、
+    // 出力 shape を小さく保ったまま入力側だけを巨大にする必要が
+    // ある。pooling は出力 N／C が入力 N／C の素通しのため、N 軸を
+    // 巨大化すると出力側の `checked_numel_for`（`pool2d_out_shape`／
+    // `adaptive_pool2d_out_shape` 内）が先に overflow を検出して
+    // しまい `checked_bytes_for` 自体が不到達になる。そこで **H 軸**
+    // （N／C=1 のまま）を `broadcast_to` で巨大化し、max／avg は
+    // `kernel=stride=H_in` で `hout=1` へ縮約する（adaptive は
+    // `output_size` が入力 H に依存しないためそのまま `[2, 2]` で
+    // 足りる）ことで出力 shape を小さく保つ。`with_driver_call`
+    // 呼び出し前に完了するため GPU 非依存の通常テストとして Linux
+    // CI でも実行できる。 ---
+
+    #[test]
+    fn max_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
+        let huge = base.broadcast_to(&[1, 1, 1usize << 61, 4]).unwrap();
+        let params = Pool2dParams::new([1usize << 61, 1], None, [0, 0], [1, 1]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops
+            .max_pool2d(&huge, &params)
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn avg_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
+        let huge = base.broadcast_to(&[1, 1, 1usize << 61, 4]).unwrap();
+        let params = Pool2dParams::new([1usize << 61, 1], None, [0, 0], [1, 1]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops
+            .avg_pool2d(&huge, &params, true)
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn adaptive_avg_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
+        let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
+        let huge = base.broadcast_to(&[1, 1, 1usize << 61, 4]).unwrap();
+        let ops = CudaBackendOps::new(0);
+        let err = ops
+            .adaptive_avg_pool2d(&huge, [2, 2])
+            .expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        ));
     }
 
     /// [`CudaBackendOps::unique`] の回帰テスト（PR #1828 codex-review
