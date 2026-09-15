@@ -68,7 +68,7 @@ pub struct FitConfig {
 }
 
 impl FitConfig {
-    /// `epochs`（学習を繰り返す回数）・`batch_size`（[`Self::fit`] へ
+    /// `epochs`（学習を繰り返す回数）・`batch_size`（[`Sequential::fit`] へ
     /// 渡す `x`／`y` を分割する 1 バッチあたりのサンプル数）を指定して
     /// 構築する（Keras `fit(epochs=, batch_size=)` 相当）。
     ///
@@ -79,7 +79,7 @@ impl FitConfig {
     /// `epochs == 0`／`batch_size == 0` はここでは検査しない
     /// （両者とも `usize` の有効値であり、この時点では「不正な引数」
     /// ではなく「呼び出し方によっては無意味な設定」であるため）。
-    /// 実際の検査は [`Self::fit`] 呼び出し時に行う: `epochs == 0` は
+    /// 実際の検査は [`Sequential::fit`] 呼び出し時に行う: `epochs == 0` は
     /// `AutodiffError::InvalidArgument` を即座に返し、`batch_size == 0`
     /// は [`fandhe_ai_tensor_core::data::DataLoaderConfig::new`] 経由で
     /// 検査され同様に `InvalidArgument` へマッピングされる。
