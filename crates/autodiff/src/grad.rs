@@ -4456,6 +4456,15 @@ mod tests {
             .expect("test fixture: shape とデータ長は事前に一致させている")
     }
 
+    /// 形状（各軸の長さ）から要素数を計算する。テスト内のリテラル
+    /// `1 * 2 * 5 * 5` 等の直書き乗算は clippy::identity_op（1 との
+    /// 乗算除去提案）に抵触するため、shape 配列を単一の入力として
+    /// 明示するこのヘルパーへ委譲する（`tests/conv2d.rs` の
+    /// 同名ヘルパーと同一方針）。
+    fn numel(shape: &[usize]) -> usize {
+        shape.iter().product()
+    }
+
     fn assert_grad_close(label: &str, analytic: &Tensor<f32>, numeric: &Tensor<f32>) {
         let a = dense_vec(analytic);
         let n = dense_vec(numeric);
@@ -8159,7 +8168,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
         let params =
             fandhe_ai_tensor_core::Conv2dParams::new([3, 3], [1, 1], [1, 1], [1, 1], 1).unwrap();
         let x = t(
-            &(0..1 * 2 * 5 * 5)
+            &(0..numel(&[1, 2, 5, 5]))
                 .map(|i| (i as f32 * 0.037).sin())
                 .collect::<Vec<f32>>(),
             &[1, 2, 5, 5],

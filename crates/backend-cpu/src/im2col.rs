@@ -344,9 +344,14 @@ mod tests {
         // 辺セル (0,1) は 2 つの窓に含まれるため寄与 2。
         let back_c = back.contiguous();
         let data = back_c.as_slice().unwrap();
-        assert_eq!(data[0 * 3 + 0], 1.0); // 角
-        assert_eq!(data[0 * 3 + 1], 2.0); // 辺
-        assert_eq!(data[1 * 3 + 1], 4.0); // 中心
+        // clippy::identity_op（`0 * 3` 等のリテラル乗算除去提案）を避け
+        // つつ (row, col) 座標であることを明示するための小関数。
+        fn rc(row: usize, col: usize, width: usize) -> usize {
+            row * width + col
+        }
+        assert_eq!(data[rc(0, 0, 3)], 1.0); // 角
+        assert_eq!(data[rc(0, 1, 3)], 2.0); // 辺
+        assert_eq!(data[rc(1, 1, 3)], 4.0); // 中心
     }
 
     #[test]

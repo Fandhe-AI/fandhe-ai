@@ -37,6 +37,14 @@ fn dense(tensor: &Tensor<f32>) -> Vec<f32> {
         .unwrap_or_default()
 }
 
+/// 形状（各軸の長さ）から要素数を計算する。テスト内のリテラル
+/// `1 * 1 * 4 * 4` 等の直書き乗算は clippy::identity_op（1 との
+/// 乗算除去提案）に抵触するため、shape 配列を単一の入力として
+/// 明示するこのヘルパーへ委譲する。
+fn numel(shape: &[usize]) -> usize {
+    shape.iter().product()
+}
+
 fn assert_grad_close(label: &str, analytic: &[f32], numeric: &[f64]) {
     assert_eq!(analytic.len(), numeric.len(), "{label}: 要素数不一致");
     for (i, (&av, &nv)) in analytic.iter().zip(numeric.iter()).enumerate() {
@@ -115,18 +123,23 @@ fn numeric_conv2d_grad(
 
 // --- 1. forward: 出力 shape 表 ---
 
+/// forward shape 表の 1 行（input／weight／stride／padding／
+/// dilation／groups／expected out）。tuple 型を直書きすると
+/// clippy::type_complexity に抵触するためエイリアス化する。
+type ConvShapeCase = (
+    [usize; 4],
+    [usize; 4],
+    [usize; 2],
+    [usize; 2],
+    [usize; 2],
+    usize,
+    [usize; 4],
+);
+
 #[test]
 fn forward_output_shape_matches_pytorch_conv_output_size() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let cases: [(
-        [usize; 4],
-        [usize; 4],
-        [usize; 2],
-        [usize; 2],
-        [usize; 2],
-        usize,
-        [usize; 4],
-    ); 4] = [
+    let cases: [ConvShapeCase; 4] = [
         // (input, weight, stride, padding, dilation, groups, expected out)
         (
             [1, 3, 8, 8],
@@ -193,7 +206,7 @@ fn forward_n_zero_is_accepted_and_produces_empty_output() {
 #[test]
 fn backward_matches_numeric_grad_basic() {
     let x = t(
-        (0..1 * 2 * 5 * 5)
+        (0..numel(&[1, 2, 5, 5]))
             .map(|i| (i as f32 * 0.037).sin())
             .collect(),
         &[1, 2, 5, 5],
@@ -239,7 +252,7 @@ fn backward_matches_numeric_grad_basic() {
 #[test]
 fn backward_matches_numeric_grad_groups_dilation_no_bias() {
     let x = t(
-        (0..1 * 4 * 6 * 6)
+        (0..numel(&[1, 4, 6, 6]))
             .map(|i| (i as f32 * 0.029).sin())
             .collect(),
         &[1, 4, 6, 6],
@@ -279,7 +292,7 @@ fn backward_matches_numeric_grad_groups_dilation_no_bias() {
 fn backward_matches_numeric_grad_overlapping_windows() {
     // stride(1) < 有効カーネル幅(3) の重なり窓ケース。
     let x = t(
-        (0..1 * 1 * 6 * 6)
+        (0..numel(&[1, 1, 6, 6]))
             .map(|i| (i as f32 * 0.083).sin())
             .collect(),
         &[1, 1, 6, 6],
@@ -309,8 +322,8 @@ fn backward_matches_numeric_grad_overlapping_windows() {
 #[test]
 fn rejects_zero_stride() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![0.0; 1 * 1 * 4 * 4], &[1, 1, 4, 4]));
-    let w = tape.var(&t(vec![0.0; 1 * 1 * 3 * 3], &[1, 1, 3, 3]));
+    let x = tape.var(&t(vec![0.0; numel(&[1, 1, 4, 4])], &[1, 1, 4, 4]));
+    let w = tape.var(&t(vec![0.0; numel(&[1, 1, 3, 3])], &[1, 1, 3, 3]));
     let err = x.conv2d(&w, None, [0, 1], [0, 0], [1, 1], 1).unwrap_err();
     assert!(matches!(
         err,
@@ -321,8 +334,8 @@ fn rejects_zero_stride() {
 #[test]
 fn rejects_zero_dilation() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![0.0; 1 * 1 * 4 * 4], &[1, 1, 4, 4]));
-    let w = tape.var(&t(vec![0.0; 1 * 1 * 3 * 3], &[1, 1, 3, 3]));
+    let x = tape.var(&t(vec![0.0; numel(&[1, 1, 4, 4])], &[1, 1, 4, 4]));
+    let w = tape.var(&t(vec![0.0; numel(&[1, 1, 3, 3])], &[1, 1, 3, 3]));
     let err = x.conv2d(&w, None, [1, 1], [0, 0], [1, 0], 1).unwrap_err();
     assert!(matches!(
         err,
@@ -333,8 +346,8 @@ fn rejects_zero_dilation() {
 #[test]
 fn rejects_zero_groups() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![0.0; 1 * 1 * 4 * 4], &[1, 1, 4, 4]));
-    let w = tape.var(&t(vec![0.0; 1 * 1 * 3 * 3], &[1, 1, 3, 3]));
+    let x = tape.var(&t(vec![0.0; numel(&[1, 1, 4, 4])], &[1, 1, 4, 4]));
+    let w = tape.var(&t(vec![0.0; numel(&[1, 1, 3, 3])], &[1, 1, 3, 3]));
     let err = x.conv2d(&w, None, [1, 1], [0, 0], [1, 1], 0).unwrap_err();
     assert!(matches!(
         err,
@@ -345,7 +358,7 @@ fn rejects_zero_groups() {
 #[test]
 fn rejects_cin_not_divisible_by_groups() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![0.0; 1 * 3 * 8 * 8], &[1, 3, 8, 8]));
+    let x = tape.var(&t(vec![0.0; numel(&[1, 3, 8, 8])], &[1, 3, 8, 8]));
     let w = tape.var(&t(vec![0.0; 4 * 2 * 3 * 3], &[4, 2, 3, 3]));
     let err = x.conv2d(&w, None, [1, 1], [0, 0], [1, 1], 2).unwrap_err();
     assert!(matches!(
@@ -357,7 +370,7 @@ fn rejects_cin_not_divisible_by_groups() {
 #[test]
 fn rejects_weight_cin_mismatch() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![0.0; 1 * 4 * 8 * 8], &[1, 4, 8, 8]));
+    let x = tape.var(&t(vec![0.0; numel(&[1, 4, 8, 8])], &[1, 4, 8, 8]));
     let w = tape.var(&t(vec![0.0; 4 * 3 * 3 * 3], &[4, 3, 3, 3]));
     let err = x.conv2d(&w, None, [1, 1], [0, 0], [1, 1], 1).unwrap_err();
     assert!(matches!(
@@ -369,8 +382,8 @@ fn rejects_weight_cin_mismatch() {
 #[test]
 fn rejects_bias_shape_mismatch() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![0.0; 1 * 1 * 4 * 4], &[1, 1, 4, 4]));
-    let w = tape.var(&t(vec![0.0; 2 * 1 * 3 * 3], &[2, 1, 3, 3]));
+    let x = tape.var(&t(vec![0.0; numel(&[1, 1, 4, 4])], &[1, 1, 4, 4]));
+    let w = tape.var(&t(vec![0.0; numel(&[2, 1, 3, 3])], &[2, 1, 3, 3]));
     let b = tape.var(&t(vec![0.0; 3], &[3]));
     let err = x
         .conv2d(&w, Some(&b), [1, 1], [0, 0], [1, 1], 1)
@@ -385,8 +398,8 @@ fn rejects_bias_shape_mismatch() {
 fn rejects_negative_numerator_kernel_too_large() {
     // in=1, k=3, p=0, d=1 -> 分子 1 - 2 - 1 = -2 < 0（負分子拒否ゲート）。
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![0.0; 1 * 1 * 1 * 1], &[1, 1, 1, 1]));
-    let w = tape.var(&t(vec![0.0; 1 * 1 * 3 * 3], &[1, 1, 3, 3]));
+    let x = tape.var(&t(vec![0.0; numel(&[1, 1, 1, 1])], &[1, 1, 1, 1]));
+    let w = tape.var(&t(vec![0.0; numel(&[1, 1, 3, 3])], &[1, 1, 3, 3]));
     let err = x.conv2d(&w, None, [1, 1], [0, 0], [1, 1], 1).unwrap_err();
     assert!(matches!(
         err,
@@ -399,7 +412,7 @@ fn rejects_h_zero_but_accepts_padding_only_window() {
     let tape = Tape::new_with_ops(common::naive_ops());
     // H=0 は拒否
     let x0 = tape.var(&t(Vec::new(), &[1, 1, 0, 4]));
-    let w0 = tape.var(&t(vec![0.0; 1 * 1 * 1 * 1], &[1, 1, 1, 1]));
+    let w0 = tape.var(&t(vec![0.0; numel(&[1, 1, 1, 1])], &[1, 1, 1, 1]));
     let err = x0.conv2d(&w0, None, [1, 1], [0, 0], [1, 1], 1).unwrap_err();
     assert!(matches!(
         err,
@@ -420,8 +433,8 @@ fn rejects_h_zero_but_accepts_padding_only_window() {
 #[test]
 fn accepts_padding_greater_than_half_kernel() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![1.0; 1 * 1 * 4 * 4], &[1, 1, 4, 4]));
-    let w = tape.var(&t(vec![1.0; 1 * 1 * 3 * 3], &[1, 1, 3, 3]));
+    let x = tape.var(&t(vec![1.0; numel(&[1, 1, 4, 4])], &[1, 1, 4, 4]));
+    let w = tape.var(&t(vec![1.0; numel(&[1, 1, 3, 3])], &[1, 1, 3, 3]));
     // pooling は padding <= floor(k/2) の上限を持つが Conv は持たない
     // （設計 doc §0.2／§3 の意図的な差異）。
     let y = x.conv2d(&w, None, [1, 1], [5, 5], [1, 1], 1).unwrap();
@@ -438,7 +451,7 @@ fn groups_equivalent_to_per_group_narrow_composition_depthwise() {
     let cout = 4usize;
     let cout_g = cout / groups;
     let x = t(
-        (0..1 * cin * 5 * 5)
+        (0..numel(&[1, cin, 5, 5]))
             .map(|i| (i as f32 * 0.017).sin())
             .collect(),
         &[1, cin, 5, 5],
@@ -476,11 +489,11 @@ fn groups_equivalent_to_per_group_narrow_composition_depthwise() {
         out_shape_single[3],
     );
     let mut combined = vec![0f32; n * cout * hout * wout];
-    for g in 0..groups {
+    for (g, group_output) in per_group_outputs.iter().enumerate() {
         for co_g in 0..cout_g {
             let co = g * cout_g + co_g;
             for p in 0..hout * wout {
-                combined[co * hout * wout + p] = per_group_outputs[g][co_g * hout * wout + p];
+                combined[co * hout * wout + p] = group_output[co_g * hout * wout + p];
             }
         }
     }
@@ -494,8 +507,8 @@ fn bias_adds_to_cout_axis_not_wout_axis_when_equal() {
     // Cout == Wout となる形状（Cout=3, Wout=3）で、bias が誤って Wout
     // 軸へ加算されないことを確認する。
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![1.0; 1 * 1 * 5 * 5], &[1, 1, 5, 5]));
-    let w = tape.var(&t(vec![1.0; 3 * 1 * 3 * 3], &[3, 1, 3, 3]));
+    let x = tape.var(&t(vec![1.0; numel(&[1, 1, 5, 5])], &[1, 1, 5, 5]));
+    let w = tape.var(&t(vec![1.0; numel(&[3, 1, 3, 3])], &[3, 1, 3, 3]));
     let b = tape.var(&t(vec![10.0, 20.0, 30.0], &[3]));
     let y = x.conv2d(&w, Some(&b), [1, 1], [0, 0], [1, 1], 1).unwrap();
     assert_eq!(y.to_tensor().shape().to_vec(), vec![1, 3, 3, 3]);
