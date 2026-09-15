@@ -28,6 +28,18 @@
 //!    サブツリー全体を再帰せず即座に `"..."` を書いて返るため、走査
 //!    コストも `O(FMT_MAX_ELEMS * rank)` に有界となる）。
 //!
+//! **さらに、空テンソル（`numel() == 0`）は 2 の総量予算だけでは
+//! 塞げない別経路を持つ**: `budget` は末端（leaf）到達時のみ減算する
+//! 設計のため、非末端軸に長さ 0 の軸を含む shape
+//! （例: `shape = [1_000_000_000, 0]`）では末端へ一度も到達せず
+//! `budget` が枯渇しないまま、長さ 0 の軸へ descend する直前の軸の
+//! 要素数だけ空の内側配列 `"[]"` を書き続ける（本例では 10 億回。
+//! `Display` は `is_empty()` を再帰前に判定して打ち切っていたが
+//! `Debug`（[`DataPreview::fmt`]）側に同等のガードが無かったのが
+//! 原因。コードレビュー #1754 追加修正で判明・是正: `DataPreview::fmt`
+//! の先頭で `is_empty()` を判定し、非末端軸への descend 自体を発生
+//! させずに打ち切る）。
+//!
 //! 加えて、rank 自体が極端に大きいテンソル（例: `shape = [1; 100_000]`。
 //! `numel == 1` のため上記どちらの打ち切りも発動しないが、再帰の深さが
 //! rank に比例しスタックオーバーフローしうる）に対しては
@@ -183,6 +195,20 @@ struct DataPreview<'a, T: Element>(&'a Tensor<T>);
 impl<'a, T: Element> std::fmt::Debug for DataPreview<'a, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let tensor = self.0;
+        if tensor.is_empty() {
+            // 空テンソル（`numel() == 0`。rank 0 は `numel() == 1` のため
+            // 到達しない）は `Display` 実装（本ファイル下部）と同じく
+            // 再帰前に打ち切る。`truncate` 判定（`numel() > FMT_MAX_ELEMS`）
+            // は `numel() == 0` では常に `false` になり、かつ
+            // `render_axis` の `budget` 減算は末端（leaf）到達時のみ
+            // 発生するため、shape の非末端軸に 0 長がある場合
+            // （例: `shape = [1_000_000_000, 0]`）は末端へ一度も到達
+            // せず budget が枯渇しないまま非末端軸の要素数（本例では
+            // 10 億）だけ `render_axis` が空の内側配列 `"[]"` を書き
+            // 続ける（DoS 経路。`.claude/rules/security.md` A04
+            // 観点。コードレビュー #1754 追加修正で判明）。
+            return f.write_str("[]");
+        }
         let truncate = tensor.numel() > FMT_MAX_ELEMS;
         if tensor.rank() == 0 {
             // rank 0（`Tensor::scalar`）は括弧なしの単一値。
@@ -389,11 +415,34 @@ mod tests {
 
     #[test]
     fn debug_empty_2d_data_field_reports_shape() {
-        // shape [2, 0]: 2 行 × 各行 0 要素なので入れ子表現は `[[], []]`
-        // （outer 軸長 2 を素通しし各行が空、という一貫した規則）。
+        // shape [2, 0]（`numel() == 0`）は `DataPreview::fmt` が
+        // `is_empty()` を再帰前に判定して打ち切るため、outer 軸長を
+        // 素通しした入れ子表現（`[[], []]`）ではなくフラットな `[]`
+        // になる（`Display` と同じ規約。`data` フィールドとは別に
+        // `shape` フィールドが既に構造情報を持つため、shape の再掲は
+        // 不要）。outer 軸長が巨大（例: `shape = [1_000_000_000, 0]`）
+        // な場合に非末端軸への descend 自体を発生させないための設計
+        // （コードレビュー #1754 追加修正。モジュール doc 参照）。
         let t: Tensor<f32> = Tensor::new(vec![], &[2, 0]).unwrap();
         let s = format!("{:?}", t);
-        assert!(s.contains("data: [[], []]"), "{s}");
+        assert!(s.contains("data: []"), "{s}");
+    }
+
+    #[test]
+    fn debug_empty_huge_leading_axis_does_not_hang() {
+        // レビュー指摘の再現条件そのもの: shape の先頭軸が巨大
+        // （10 億）でも 2 軸目が 0 長のため `numel() == 0` となり、
+        // 実データ確保は発生しない。`is_empty()` の早期打ち切りが
+        // 無ければ非末端軸（axis=0）の `for i in 0..len` ループが
+        // 末端へ一度も到達せず `budget` を消費しないまま「軸長 0 の
+        // 内側配列 `[]`」を 10 億回書き続ける DoS 経路になっていた
+        // （`.claude/rules/security.md` A04 観点）。本テストは出力が
+        // 定数時間・定数サイズで完了することを固定する回帰テスト。
+        let t: Tensor<f32> = Tensor::new(vec![], &[1_000_000_000, 0]).unwrap();
+        let s = format!("{:?}", t);
+        assert!(s.contains("data: []"), "{s}");
+        let d = format!("{}", t);
+        assert_eq!(d, "tensor([], shape=[1000000000, 0])");
     }
 
     #[test]
