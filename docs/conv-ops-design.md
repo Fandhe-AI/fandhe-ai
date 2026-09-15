@@ -893,8 +893,7 @@ CPU 分（本 doc の実装対象 `#1642` に相当する範囲。イシュー�
   アップロードする往復コストが残る）は既存 #1643 コメントへ追記予定
   のスコープ外事項（別 issue）。
 
-### #1767（CUDA Conv1d。1d 形状の CUDA 経路検証・GB10 実機実測
-スキャフォールド）
+### #1767（CUDA Conv1d。1d 形状の CUDA 経路検証・GB10 実機実測スキャフォールド）
 
 origin/main（#1766 マージ後）時点で、CUDA の Conv1d 経路は既に
 構造的に成立していた: `Var::conv1d`（#1765）は `[N, Cin, L]`／
@@ -913,9 +912,14 @@ reshape してから `Var::conv2d` へ委譲する薄いラッパーで新規 `O
   に 1d 形状（`in_shape: [N, C, 1, L]`・`kernel: [1, k]`）を 6 件
   追加（基本・重なり窓〈padding〉・dilation・groups／depthwise・
   groups〈2 groups, batch>1〉・`stride > kernel extent`）。環境
-  適応スモーク（属性なし）にも 1d 代表 1 件（`"1d basic no pad"`）
-  を追加し、CUDA 非搭載環境でも panic しないことを通常 CI で固定
-  （`#[ignore]` 側の全形状網羅テストは 1d 6 件を自動的に含む）。
+  適応スモーク（属性なし）は CUDA 実機あり／なし両方の分岐で 1d
+  形状を通常 CI で確認する——実機ありの分岐では 1d 代表 1 件
+  （`"1d basic no pad"`）を CPU と bit 同一まで `run_case` で通し、
+  実機なしの分岐でも `p_1d`（`kh=1`）を用いた有効な入力で
+  `im2col_out_shape` の 1d 導出がデバイス初期化前に panic せず
+  正しく完了すること（CPU 側は最後まで成功・CUDA 側は
+  `CudaUnavailable` のみで停止すること）を確認する（`#[ignore]`
+  側の全形状網羅テストは 1d 6 件を自動的に含む）。
 - **`crates/backend-cuda/src/im2col.rs`**: `LaunchShape::derive`
   の 1d 単体テスト 2 件（driver 非接触）——非自明な
   `stride`／`padding`／`dilation` を伴う 1d 形状で `h_out=1`・

@@ -412,6 +412,22 @@ fn im2col_col2im_parity_smoke_env_adaptive() {
                 .expect_err("rank mismatch must be rejected even without CUDA");
             assert!(matches!(cpu_err, BackendError::ShapeMismatch(_)));
             assert!(matches!(cuda_err, BackendError::ShapeMismatch(_)));
+
+            // イシュー #1767: 1d 形状（`kh=1`）の有効な入力についても
+            // `im2col_out_shape`（`ops.rs::CudaBackendOps::im2col` が
+            // デバイス初期化より前に呼ぶ）が正しく計算され panic しない
+            // ことを、CUDA 非搭載環境でも確認する（`p_1d` は有効な形状
+            // のため、shape 検査自体は通過し、その後の
+            // `with_driver_call` 内でのみ `CudaUnavailable` になる想定
+            // ——CPU 側は最後まで成功する）。
+            let p_1d = params([1, 3], [1, 1], [0, 0], [1, 1], 1);
+            let input_1d = random_tensor(1002, &[1, 2, 1, 9]);
+            cpu.im2col(&input_1d, &p_1d)
+                .expect("cpu im2col(1d shape) always succeeds for valid input");
+            let cuda_1d_err = cuda
+                .im2col(&input_1d, &p_1d)
+                .expect_err("cuda im2col(1d shape) must still fail without a CUDA device");
+            assert!(matches!(cuda_1d_err, BackendError::CudaUnavailable(_)));
         }
         Err(other) => panic!("unexpected error variant for CudaBackendOps::im2col: {other}"),
     }
