@@ -4361,6 +4361,39 @@ mod tests {
         );
     }
 
+    // --- im2col／col2im の N=0 早期リターン（イシュー #1769）。
+    // `Self::im2col`／`Self::col2im` は出力（`im2col`）／`input_shape`
+    // （`col2im`）が空（`0` を含む）のとき `context_cache::
+    // cached_context()` より前で早期 return するため、`gather`／
+    // `scatter` の rank 上限テストと同じ理由で実機非依存に検証できる
+    // （`#[ignore]` 不要）。`backend-cuda::ops::tests::
+    // im2col_returns_empty_for_zero_batch_1d_without_touching_device`
+    // と同型。1d 形状（`H=1`・`kh=1`）で確認する。 ---
+
+    #[test]
+    fn im2col_returns_empty_for_zero_batch_1d_without_touching_device() {
+        let params = Conv2dParams::new([1, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let input = Tensor::new(Vec::<f32>::new(), &[0usize, 1, 1, 4]).unwrap();
+
+        let ops = MetalBackendOps::new();
+        let out = ops.im2col(&input, &params).unwrap();
+        assert_eq!(out.shape(), &[0, 1, 2, 3]);
+        assert_eq!(out.as_slice().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn col2im_returns_empty_for_zero_batch_1d_without_touching_device() {
+        let params = Conv2dParams::new([1, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let input_shape = [0usize, 1, 1, 4];
+        let col_shape = im2col_out_shape(&input_shape, &params).unwrap();
+        let d_col = Tensor::new(Vec::<f32>::new(), &col_shape).unwrap();
+
+        let ops = MetalBackendOps::new();
+        let out = ops.col2im(&d_col, &input_shape, &params).unwrap();
+        assert_eq!(out.shape(), &input_shape);
+        assert_eq!(out.as_slice().unwrap().len(), 0);
+    }
+
     /// `pad` は `gather`／`scatter` と異なりカーネル側に rank 上限が
     /// 存在しない（`shaders/constant_pad.metal` モジュール doc 参照）
     /// ため、`GS_MAX_RANK`（8）を超える rank でも

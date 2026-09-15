@@ -565,7 +565,10 @@ mod tests {
     /// と同じ意図の 6 ケース: 基本・重なり窓・dilation・depthwise・
     /// 2 groups＋batch>1・padding のみの窓・座標アンダーフロー
     /// （kernel=1・大 padding）・stride > kernel extent・非対称
-    /// H/W・1d 形状）。
+    /// H/W・1d 形状）。1d 形状は #1769 で
+    /// `tests/im2col_col2im_parity.rs::CASES` と同一の 6 件へ拡張
+    /// （Linux CI で回る唯一の 1d 実効検証。既存 1 件はそのまま残し
+    /// 1d dilation 相当として扱う）。
     const CASES: &[Case] = &[
         Case {
             label: "basic no pad",
@@ -655,6 +658,51 @@ mod tests {
             stride: [1, 1],
             padding: [0, 1],
             dilation: [1, 2],
+            groups: 1,
+        },
+        Case {
+            label: "1d basic no pad",
+            in_shape: [1, 2, 1, 9],
+            kernel: [1, 3],
+            stride: [1, 1],
+            padding: [0, 0],
+            dilation: [1, 1],
+            groups: 1,
+        },
+        Case {
+            label: "1d overlapping windows (pad)",
+            in_shape: [1, 1, 1, 6],
+            kernel: [1, 3],
+            stride: [1, 1],
+            padding: [0, 1],
+            dilation: [1, 1],
+            groups: 1,
+        },
+        Case {
+            label: "1d groups depthwise",
+            in_shape: [1, 4, 1, 6],
+            kernel: [1, 3],
+            stride: [1, 1],
+            padding: [0, 1],
+            dilation: [1, 1],
+            groups: 4,
+        },
+        Case {
+            label: "1d groups (2 groups, batch>1)",
+            in_shape: [2, 6, 1, 5],
+            kernel: [1, 3],
+            stride: [1, 2],
+            padding: [0, 1],
+            dilation: [1, 1],
+            groups: 2,
+        },
+        Case {
+            label: "1d stride > kernel extent",
+            in_shape: [1, 1, 1, 7],
+            kernel: [1, 2],
+            stride: [1, 3],
+            padding: [0, 0],
+            dilation: [1, 1],
             groups: 1,
         },
     ];
@@ -825,6 +873,20 @@ mod tests {
         assert_eq!(dims.sh, 1);
         assert_eq!(dims.ph, 0);
         assert_eq!(dims.dh, 1);
+    }
+
+    /// 1d 形状でも `P` 軸不整合（`h_out*w_out != p`）は 2d と同じ経路で
+    /// 拒否される（`derive_im2col_dims_rejects_p_axis_mismatch` の 1d
+    /// 版・`backend-cuda::im2col::
+    /// launch_shape_derive_rejects_1d_p_axis_mismatch` と同型。
+    /// イシュー #1769）。
+    #[test]
+    fn derive_im2col_dims_rejects_1d_p_axis_mismatch() {
+        let params = Conv2dParams::new([1, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        // in_shape=[1,1,1,4] -> 正しい w_out=3（P=3）のところに
+        // col_shape[3]=1 を渡して不一致を起こす。
+        let err = derive_im2col_dims(&[1, 1, 1, 4], &[1, 1, 2, 1], &params, 4).unwrap_err();
+        assert!(matches!(err, Im2colPrepareError::InvalidShape { .. }));
     }
 
     /// `Im2colDims` は `shaders/im2col.metal::struct Im2colDims` と

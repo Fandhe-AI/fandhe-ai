@@ -1059,3 +1059,72 @@ reshape してから `Var::conv2d` へ委譲する薄いラッパーで新規 `O
   `gemm_batched` へ再アップロードする往復コストが残る）・GPU 側
   d_weight／d_bias 縮約カーネル（設計 §11）は既存 #1643／#1644
   コメントへ追記予定のスコープ外事項（別 issue）。
+
+### #1769（Metal Conv1d。1d 形状の Metal 経路検証・M4 Max 実機実測スキャフォールド）
+
+origin/main（#1768 マージ後）時点で、Metal の Conv1d 経路は既に
+構造的に成立していた: `Var::conv1d`（#1765）は `[N, Cin, L]`／
+`[Cout, Cin_g, k]` を `[N, Cin, 1, L]`／`[Cout, Cin_g, 1, k]` へ
+reshape してから `Var::conv2d` へ委譲する薄いラッパーで新規 `Op`／
+`BackendOps`／VJP／カーネルを持たず、Metal `BackendOps::im2col`／
+`col2im`（#1768）は `Conv2dParams` の全スカラーを引数に取る形状汎用
+カーネルのため `kh=1`／`sh=1`／`ph=0`／`dh=1` の 1d 形状もそのまま
+処理する。本イシューはこの「特化」（1d を 2d の特殊ケースとして
+自動的に扱う）を実機で確認するためのテスト・実測スキャフォールドの
+追加に限定し、**新規カーネル・新規 `Op`・facade 新規公開面は追加
+しない**（CUDA #1767 と同じ整理。設計 §2「1d は 2d へ併合」・§15
+#1765「1d 専用の高速経路（`kH=1` の im2col 特殊化等）は設計時点で
+対象外」の方針を維持）。
+
+- **`crates/backend-metal/src/im2col_model.rs`**: `CASES` へ、
+  `tests/im2col_col2im_parity.rs::CASES`（#1871 で先行追加済み）と
+  同一の 1d 形状 5 件（基本・重なり窓〈padding〉・groups／depthwise・
+  groups〈2 groups, batch>1〉・`stride > kernel extent`）を追加し、
+  既存 1 件（`"1d shape (H=1, kh=1)"`）と合わせて 1d 形状 6 件が
+  `im2col_and_col2im_models_match_cpu_backend_across_shapes`（Linux
+  実行可能・CPU 参照実装と bit 完全一致）で網羅される（**Linux CI
+  で回る唯一の 1d 実効検証**）。`derive_im2col_dims_rejects_1d_p_
+  axis_mismatch`（`backend-cuda::im2col::launch_shape_derive_
+  rejects_1d_p_axis_mismatch` と同型・driver 非接触）も追加。
+- **`crates/backend-metal/src/ops.rs`**: `im2col`／`col2im` の
+  `N=0` 空出力早期リターンを 1d 形状で確認する driver 非接触
+  テスト各 1 件（`gather`／`scatter` の rank 上限テストと同じ理由で
+  `context_cache::cached_context()` より前に return するため実機
+  非依存）。
+- **`crates/backend-metal/tests/im2col_col2im_parity.rs`**:
+  `im2col_col2im_zero_batch_1d`（N=0・1d 形状。既存 2d 版
+  `im2col_col2im_zero_batch` と対称）を追加。
+- **`crates/facade/tests/conv1d_backend_parity.rs`**（`#[ignore]`。
+  Metal 実機必須。`cfg(target_os = "macos")`）:
+  - `metal_conv1d_backward_matches_cpu`（既存 `conv1d_backward_on`
+    ヘルパを共用。dx／dw／db を `assert_parity`。REQ-2 複合判定）。
+  - `metal_conv1d_matches_manual_reshape_conv2d_bit_exact`: 本
+    イシューの中核契約——同一 Metal tape 上で `conv1d` と「手動
+    reshape → `conv2d` → reshape」の forward・backward（dx／dw／
+    db）が **bit 完全一致**すること（CUDA 版
+    `cuda_conv1d_matches_manual_reshape_conv2d_bit_exact` と本体
+    `conv1d_matches_manual_reshape_conv2d_on` を共用。`crates/
+    autodiff/tests/conv1d.rs::matches_manual_reshape_conv2d_
+    bit_exact` の Metal 版）。
+  - `metal_conv1d_forward_matches_cpu_groups_dilation`: groups＋
+    dilation を伴う 1d 形状の forward `assert_parity`（`conv1d_
+    forward_groups_dilation_on` を CUDA 版と共用）。
+- **`Var::conv1d` doc comment**（`crates/autodiff/src/var.rs`）:
+  「Metal 経路の 1d 形状テスト（model・ops・facade bit 一致）は
+  #1769 で追加済み。CUDA／Metal 実機実測は #1771 へ申し送り」へ
+  更新（コード変更なし・doc のみ）。
+- **facade 公開面**: 新規 `pub use`／`pub fn` は追加していない。
+- **M4 Max 実機未実測**: 本エージェント実行環境（Linux コンテナ・
+  x86_64）に Apple Silicon 実機への到達手段がなく、`#[ignore]`
+  テスト群は未実行のまま `docs/perf/logs/metal-conv1d-1769/` へ
+  実行コマンド・保存すべきログ一覧・事前登録判定規則を申し送る
+  （#1768 分の Metal Conv2d 実測も未完了のため同ディレクトリが両方
+  の受け皿を兼ねる。実測の実施先は後続 #1771「CUDA／Metal 実機
+  parity・実測」）。
+- **引き継ぎ**: 1d 専用高速経路（`kh=1` 特殊化カーネル・GPU im2col
+  出力のデバイス常駐化・GPU 側 d_weight／d_bias 縮約カーネル。既存
+  #1643／#1644 コメントの性能スコープ外事項）・`nn::Conv1d`／
+  `compat::Sequential::add_conv1d`（#1770）・3 バックエンド実機
+  parity 実測（#1771）は対象外のまま。親 #1644 は全 sub 完了で
+  close する方針のため、本 PR マージ後も実測が未完である旨を close
+  判断の材料としてユーザーへ委ねる。
