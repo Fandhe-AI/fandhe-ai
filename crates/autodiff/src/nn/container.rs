@@ -213,6 +213,12 @@ impl Sequential {
 
     /// メソッドチェーン用ビルダー: `self` を消費し `Module + 'static` を
     /// `Box` 化して追加する。
+    ///
+    /// `#[allow(clippy::should_implement_trait)]`: メソッド名 `add` は
+    /// PyTorch `nn.Sequential.add_module` 系ビルダー API の慣用名を踏襲した
+    /// ものであり、`std::ops::Add` トレイトの実装を意図しない（算術演算子
+    /// ではなく子 `Module` を追加するビルダーメソッド）。
+    #[allow(clippy::should_implement_trait)]
     pub fn add<M: Module + 'static>(mut self, module: M) -> Self {
         self.inner.push(Box::new(module));
         self
