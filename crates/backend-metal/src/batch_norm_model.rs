@@ -37,6 +37,49 @@ use crate::soft_f64::{
     rsqrt_newton_f64_bits, sub_f64_bits, widen_f32_bits,
 };
 
+/// `shaders/batch_norm.metal::BATCH_NORM_SIMD_WIDTH` の Rust 側複製
+/// （[`warp_reduce_f64_bits`] 専用）。
+const BATCH_NORM_SIMD_WIDTH: usize = 32;
+
+/// GPU カーネルの reduction（32 レーンのストライドアクセス + soft-f64
+/// `bn_f64_add` によるレーンごとの逐次蓄積 → `simd_shuffle_xor` 幅
+/// 16/8/4/2/1 の 5 段 butterfly）と**同一の加算順序**で `M` 要素を
+/// soft-f64 総和する（`shaders/batch_norm.metal` の train カーネル
+/// パス 1／パス 2・`crates/backend-cpu/src/batch_norm.rs::
+/// warp_reduce_f64` の soft-f64 版複製）。
+///
+/// PR #1881 codex-review 指摘: 索引順の逐次加算で代用すると、対消滅
+/// 入力（例 `x=[1e30, 1, -1e30, 1]`）でレーン割り当て・butterfly の
+/// 結合順序に依存する結果と乖離し、REQ-2 統一複合判定（相対誤差
+/// 1e-3 未満または絶対誤差 1e-5 未満）を外れうることが実例で示された
+/// （索引順: mean=0.25／レーン+butterfly: mean=0.5）。よって本モデルは
+/// 「非結合性の影響は無視できる」という判断を撤回し、GPU と同じ縮約
+/// 順序を厳密に再現する。
+///
+/// `contribute(i)` はチャネル内局所添字 `i`（`0..m`）に対応する
+/// soft-f64 値（総和パスでは `x` 要素、二乗和パスでは `(x-mean)^2`）
+/// を返す。
+fn warp_reduce_f64_bits(m: usize, mut contribute: impl FnMut(usize) -> u64) -> u64 {
+    let mut lanes = [0u64; BATCH_NORM_SIMD_WIDTH]; // 各レーン +0.0（f64）で初期化。
+    for (lane, slot) in lanes.iter_mut().enumerate() {
+        let mut idx = lane;
+        while idx < m {
+            let xv = contribute(idx);
+            *slot = add_f64_bits(*slot, xv);
+            idx += BATCH_NORM_SIMD_WIDTH;
+        }
+    }
+    let mut offset = 16usize;
+    while offset > 0 {
+        let snapshot = lanes;
+        for (lane, slot) in lanes.iter_mut().enumerate() {
+            *slot = add_f64_bits(snapshot[lane], snapshot[lane ^ offset]);
+        }
+        offset >>= 1;
+    }
+    lanes[0]
+}
+
 /// [`validate_batch_norm_launch`] の型付きエラー（`backend-cpu::
 /// batch_norm::BatchNormError`・`crate::im2col_model::
 /// Im2colPrepareError` と同型の「小さな enum」方針）。
@@ -218,13 +261,13 @@ pub struct BatchNormTrainHostModel {
 }
 
 /// `shaders/batch_norm.metal::batch_norm_train_f32` の逐語モデル
-/// （縮約順序は `crate::soft_f64` の `add_f64_bits` を index 順に
-/// チャネルごと `M` 要素へ適用する——カーネル側の 32 レーン butterfly
-/// とは異なる順序だが、soft-f64 加算の非結合性の影響は
-/// REQ-2 統一複合判定の範囲内で無視できる〈`shaders/batch_norm.metal`
-/// 冒頭コメント「総和の順序」と同じ判断〉ため、本モデルは索引順の
-/// 逐次加算で代用する。二重丸め回避・round-to-odd affine の構造は
-/// カーネルと 1 対 1 対応する）。
+/// （縮約順序は [`warp_reduce_f64_bits`] によりカーネル側の 32 レーン
+/// ストライドアクセス + 5 段 butterfly（`simd_shuffle_xor` 幅
+/// 16/8/4/2/1）と同一の加算順序を再現する——[`warp_reduce_f64_bits`]
+/// doc comment「PR #1881 codex-review 指摘」参照: 索引順の逐次加算で
+/// 代用すると対消滅入力で REQ-2 統一複合判定を外れる実例が存在した
+/// ため、索引順への簡略化は行わない。二重丸め回避・round-to-odd
+/// affine の構造はカーネルと 1 対 1 対応する）。
 ///
 /// 呼び出し前提: [`validate_batch_norm_launch`] を通過済みの
 /// `n`／`c`／`spatial`・`x.len() == n*c*spatial`。`n == 0 || c == 0
@@ -260,20 +303,20 @@ pub fn batch_norm_train_host_model(
     let mut var_out = vec![0.0f32; c];
 
     for ch in 0..c {
-        let mut sum64 = 0u64; // +0.0（f64）。
-        for i in 0..m {
-            let xv = widen_f32_bits(x[channel_index(i, ch, c, spatial)].to_bits());
-            sum64 = add_f64_bits(sum64, xv);
-        }
+        // パス 1: 平均（[`warp_reduce_f64_bits`] で GPU と同一順序の
+        // soft-f64 総和。関数 doc comment「PR #1881 codex-review 指摘」
+        // 参照）。
+        let sum64 = warp_reduce_f64_bits(m, |i| {
+            widen_f32_bits(x[channel_index(i, ch, c, spatial)].to_bits())
+        });
         let mean64 = div_f64_bits(sum64, m64);
 
-        let mut sq64 = 0u64;
-        for i in 0..m {
+        // パス 2: 分散（二パス。`(x-mean)^2` を同じ縮約順序で蓄積する）。
+        let sq64 = warp_reduce_f64_bits(m, |i| {
             let xv = widen_f32_bits(x[channel_index(i, ch, c, spatial)].to_bits());
             let dev = sub_f64_bits(xv, mean64);
-            let devsq = mul_f64_bits(dev, dev);
-            sq64 = add_f64_bits(sq64, devsq);
-        }
+            mul_f64_bits(dev, dev)
+        });
         let var64 = div_f64_bits(sq64, m64);
         let eps64 = widen_f32_bits(eps.to_bits());
         let rstd64 = rsqrt_newton_f64_bits(add_f64_bits(var64, eps64));
@@ -528,5 +571,60 @@ mod tests {
     fn infer_host_model_handles_zero_axis_early_return() {
         let out = batch_norm_infer_host_model(&[], &[], &[], None, None, 1e-5, 0, 3, 4);
         assert!(out.is_empty());
+    }
+
+    /// PR #1881 codex-review 指摘（threadId `PRRT_kwDOTuUCJc6ifKzk`）の
+    /// 反例を固定する回帰テスト: `n=1, c=1, spatial=4,
+    /// x=[1e30, 1, -1e30, 1]` は索引順の逐次加算だと対消滅
+    /// （`1e30 + 1 - 1e30`）で `1` のみが残り mean=0.25 になるが、
+    /// GPU カーネルと同じ 32 レーンストライド + butterfly 縮約では
+    /// `1e30` 同士・`-1e30` 同士が別レーンに割り当たらず
+    /// `(1e30 + (-1e30)) + (1 + 1)` の順に結合されるため mean=0.5 に
+    /// なる（[`warp_reduce_f64_bits`] doc comment 参照。手計算は
+    /// PR #1881 レビュー本文に記載）。[`warp_reduce_f64_bits`] 導入後は
+    /// 後者（0.5）が再現され、かつ CPU 参照実装
+    /// （`warp_reduce_f64`。同一の縮約順序）と bit 一致することを
+    /// 固定する。
+    #[test]
+    fn train_host_model_reduction_order_matches_gpu_butterfly_not_sequential() {
+        let x = [1e30f32, 1.0, -1e30, 1.0];
+        let model = batch_norm_train_host_model(&x, None, None, 1e-5, 1, 1, 4);
+
+        assert_eq!(
+            model.mean[0], 0.5,
+            "レーン+butterfly 縮約なら mean=0.5 のはず（索引順の逐次加算〈0.25〉への\
+             後退の可能性）"
+        );
+
+        let cpu = fandhe_ai_backend_cpu::run_batch_norm_train_f32(&x, None, None, 1e-5, 1, 1, 4)
+            .expect("valid shape");
+        assert_eq!(
+            model.mean, cpu.mean,
+            "soft-f64 butterfly 縮約は CPU 参照実装（同一の縮約順序）と bit 一致するはず"
+        );
+    }
+
+    /// PR #1881 codex-review 指摘（threadId `PRRT_kwDOTuUCJc6ifuM9`）の
+    /// 別インスタンス反例を固定する回帰テスト:
+    /// `n=4, c=1, spatial=1, x=[1e20, 1, -1e20, 1]`（[`channel_index`]
+    /// の写像により `n` 軸を `M` の走査次元へ使う形状。上記テストと
+    /// 同型の相殺入力を `n` 軸側でも検証する）。
+    #[test]
+    fn train_host_model_reduction_order_matches_gpu_butterfly_cancelling_batch_axis() {
+        let x = [1e20f32, 1.0, -1e20, 1.0];
+        let model = batch_norm_train_host_model(&x, None, None, 1e-5, 4, 1, 1);
+
+        assert_eq!(
+            model.mean[0], 0.5,
+            "レーン+butterfly 縮約なら mean=0.5 のはず（索引順の逐次加算〈0.25〉への\
+             後退の可能性）"
+        );
+
+        let cpu = fandhe_ai_backend_cpu::run_batch_norm_train_f32(&x, None, None, 1e-5, 4, 1, 1)
+            .expect("valid shape");
+        assert_eq!(
+            model.mean, cpu.mean,
+            "soft-f64 butterfly 縮約は CPU 参照実装（同一の縮約順序）と bit 一致するはず"
+        );
     }
 }

@@ -247,11 +247,45 @@ fn affine_weight_and_bias_use_predicated_select_not_conditional_skip() {
     );
 }
 
+/// ソース文字列中の `" {name}("` シグネチャから、波括弧の深さを
+/// 数えて対応する関数本体（先頭 `{` から対応する `}` まで、両端含む）
+/// を抽出する（[`bn_f64_primitives_match_ln_f64_primitives_verbatim_modulo_prefix`]
+/// 専用のヘルパー。MSL の関数シグネチャ自体は波括弧を含まない前提の
+/// ため、シグネチャ検索後の最初の `{` を本体開始とみなしてよい）。
+/// 対応する閉じ波括弧が見つからない場合は `None` を返す（呼び出し側
+/// が fail-closed に扱う）。
+fn extract_fn_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!(" {name}(");
+    let sig_start = source.find(&needle)?;
+    let brace_start = source[sig_start..].find('{').map(|i| sig_start + i)?;
+    let mut depth: i32 = 0;
+    for (offset, ch) in source[brace_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let brace_end = brace_start + offset;
+                    return Some(&source[brace_start..=brace_end]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// [`bn_f64_*`]（本ファイル）の各関数本体が [`ln_f64_*`]
 /// （`layer_norm.metal`）の対応する関数本体と接頭辞以外で逐語一致する
 /// ことを固定する（`shaders/batch_norm.metal` 冒頭コメント「soft-f64
 /// プリミティブ」の複製契約。`layer_norm.metal` を変更した場合に本
 /// ファイルへの追従漏れを検出するドリフトガード）。
+///
+/// シグネチャ文字列の存在だけでなく、[`extract_fn_body`] で波括弧
+/// 対応から抽出した**関数本体そのもの**を（接頭辞置換後の）
+/// `layer_norm.metal` 側と突き合わせる（PR #1881 codex-review 指摘:
+/// 従来はシグネチャの存在確認のみで、関数名さえ残っていれば本体の
+/// 丸め処理・演算が変更されても検出できなかった）。
 ///
 /// 比較対象の関数名一覧（`clz64` は接頭辞のみ・他は `f64`／構造体名も
 /// 含めて機械的に置換して比較する）。
@@ -290,15 +324,18 @@ fn bn_f64_primitives_match_ln_f64_primitives_verbatim_modulo_prefix() {
     ];
 
     for name in fn_names {
-        let sig_needle = format!(" {name}(");
-        assert!(
-            BATCH_NORM_METAL_SOURCE.contains(&sig_needle),
-            "batch_norm.metal に {name} の定義が見つかりません"
-        );
-        assert!(
-            renamed_layer_norm_source.contains(&sig_needle),
-            "layer_norm.metal（接頭辞置換後）に {name} の定義が見つかりません \
-             （ドリフトガード自体の不整合）"
+        let bn_body = extract_fn_body(BATCH_NORM_METAL_SOURCE, name)
+            .unwrap_or_else(|| panic!("batch_norm.metal に {name} の定義（本体）が見つかりません"));
+        let ln_body = extract_fn_body(&renamed_layer_norm_source, name).unwrap_or_else(|| {
+            panic!(
+                "layer_norm.metal（接頭辞置換後）に {name} の定義（本体）が見つかりません \
+                 （ドリフトガード自体の不整合）"
+            )
+        });
+        assert_eq!(
+            bn_body, ln_body,
+            "{name} の関数本体が layer_norm.metal（接頭辞置換後）の対応する関数本体と \
+             逐語一致しません（soft-f64 プリミティブの複製契約からのドリフト）"
         );
     }
 }
