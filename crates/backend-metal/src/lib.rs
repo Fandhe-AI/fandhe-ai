@@ -537,6 +537,16 @@ pub mod scan;
 // を付けず、Linux（本実装環境・CI）でも単体テストが回る。
 pub mod scan_model;
 pub mod soft_f64;
+// dtype 変換（`fandhe_ai_tensor_core::cast::CastOps`。イシュー #1751・
+// 親 #1613・依存 #1750）の起動 API・`CastOps` 実装。`unique.rs` と
+// 同じ構成方針（実行時コンパイル・パイプライン保持・実行）。
+#[cfg(target_os = "macos")]
+pub mod cast;
+// `cast.rs` 専用の要素型 generic な Metal バッファ（`crate::buffer::
+// MetalBuffer`〈f32 専用〉・`crate::half_buffer::MetalHalfBuffer`
+// 〈f16 専用〉と同じ設計判断で objc2 FFI に触れるため macos 限定）。
+#[cfg(target_os = "macos")]
+pub mod cast_buffer;
 #[cfg(target_os = "macos")]
 pub mod unique;
 // `shaders/unique.metal::bitonic_step_u32` のホスト側逐語モデル
