@@ -186,31 +186,54 @@ fn to_tape_preserves_requires_grad_false() {
 }
 
 /// A5: lazy elementwise 連鎖（`add`→`mul` 等）を `to_tape` すると
-/// 転送前に実体化され、転送後の値は `to_tensor()`（層 2 実体化）の
-/// 結果と bit 一致する。
+/// 転送前に実体化され、転送後の値は期待値と bit 一致する。
+///
+/// **是正（codex-review 指摘。PR #1864）**: 当初実装は期待値を
+/// `chain.to_tensor()`（層 2・`materialize_non_fallible`）で取得して
+/// いたが、これは呼び出し時点で `chain` の `OnceCell` を確定的に
+/// 埋めてしまう（`materialize_non_fallible` は `OnceCell::get_or_init`
+/// で結果をキャッシュする）。そのため後続の `to_tape`（層 1・
+/// `materialize_fallible` 経由）は「まだ実体化されていない未実体化
+/// ノードを `build_lazy_plan` から直接実体化する経路」を通らず、
+/// 単に `nodes[id.0].value.get()` で既存のキャッシュ済み値を読むだけ
+/// になり、本テストが検証したかった「未実体化ノードの転送」経路が
+/// 一度も exercise されていなかった。ここでは期待値を `chain` に触れ
+/// ずに入力データから独立に計算し、`chain`（未実体化のまま）を直接
+/// `to_tape` へ渡すことで、この経路を実際に通す。
 #[test]
 fn to_tape_materializes_lazy_elementwise_chain_before_transfer() {
     let source = Tape::new_with_ops(common::naive_ops());
     let target = Tape::new_with_ops(common::naive_ops());
 
-    let x = source.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
-    let y = source.var(&t(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]));
+    let x_data = vec![1.0f32, 2.0, 3.0, 4.0];
+    let y_data = vec![5.0f32, 6.0, 7.0, 8.0];
+    let x = source.var(&t(x_data.clone(), &[2, 2]));
+    let y = source.var(&t(y_data.clone(), &[2, 2]));
     // add→mul は lazy elementwise 連鎖として構築されうる（`docs/
-    // fusion-graph-design.md`）。`to_tape` 呼び出し時点でまだ実体化
-    // されていないことを前提に検証する。
+    // fusion-graph-design.md`）。`chain` はここまで一度も `to_tensor()`
+    // 等で実体化しておらず、`to_tape` 呼び出し時点で未実体化のまま
+    // であることを前提に検証する。
     let chain = x
         .add(&y)
         .expect("同 shape の加算")
         .mul(&x)
         .expect("同 shape の乗算");
-    let expected = chain.to_tensor();
+
+    // 期待値は `chain` に触れず、入力データから独立に計算する
+    // （`(x + y) * x` の naive ops と同じ FMA 契約は使わないが、
+    // 加算・乗算のみの単純な式のため丸め誤差なく bit 一致する）。
+    let expected: Vec<f32> = x_data
+        .iter()
+        .zip(y_data.iter())
+        .map(|(xv, yv)| (xv + yv) * xv)
+        .collect();
 
     let chain_on_target = chain
         .to_tape(&target)
         .expect("lazy チェーンでも materialize_fallible 経由で実体化されて転送される");
     assert_eq!(
         chain_on_target.to_tensor().as_slice().unwrap(),
-        expected.as_slice().unwrap()
+        expected.as_slice()
     );
 }
 

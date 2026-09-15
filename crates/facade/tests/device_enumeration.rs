@@ -46,8 +46,14 @@ fn available_devices_is_deterministic_across_calls() {
 
 /// CUDA driver の有無と `Device::Cuda(_)` の有無が整合する（`CudaDevice
 /// Provider::is_available()` を実測してから突き合わせる。実機なしの
-/// 通常 CI 環境でも実行可能）。ordinal は 0 から昇順で連続すること
-/// （`enumerate_all` の順序契約）も確認する。
+/// 通常 CI 環境でも実行可能）。`CudaDeviceProvider::enumerate` は
+/// `probe` に失敗した ordinal を `filter_map` で除外するため（`crates/
+/// backend-cuda/src/device.rs::enumerate`）、GPU 0 の初期化にのみ失敗
+/// し GPU 1 が利用可能な環境では `[1]` のように非連続・非 0 始まりの
+/// 列挙が正当な結果になりうる。よって「0 から昇順で連続する」という
+/// 連続性の期待は誤りであり（codex-review 指摘。PR #1864）、ここでは
+/// `enumerate_all`／`enumerate` の実装契約が保証する「ordinal の
+/// 昇順・重複なし」のみを検証する。
 #[test]
 fn cuda_devices_presence_matches_provider_availability() {
     let provider = fandhe_ai_backend_cuda::CudaDeviceProvider::new();
@@ -71,10 +77,9 @@ fn cuda_devices_presence_matches_provider_availability() {
         !cuda_devices.is_empty(),
         "CUDA driver が利用可能なのに Device::Cuda(_) が 1 件も列挙されなかった"
     );
-    let expected: Vec<usize> = (0..cuda_devices.len()).collect();
-    assert_eq!(
-        cuda_devices, expected,
-        "Device::Cuda(ordinal) は 0 から昇順で連続することを期待する"
+    assert!(
+        cuda_devices.windows(2).all(|pair| pair[0] < pair[1]),
+        "Device::Cuda(ordinal) は昇順・重複なしであることを期待する: {cuda_devices:?}"
     );
 }
 

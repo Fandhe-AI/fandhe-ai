@@ -61,23 +61,48 @@ fn transfer_from_naive_tape_to_facade_cpu_tape_is_bit_exact() {
 /// 逆方向（facade CPU tape → naive tape）も同様に bit 完全一致する。
 /// `lazy` な elementwise 連鎖（`add` の結果）を転送対象にして、
 /// `to_tape` が転送前に実体化することも併せて確認する。
+///
+/// **是正（codex-review 指摘。PR #1864）**: 当初実装は期待値を
+/// `sum.to_tensor()` で取得していたが、これは `sum`（`Var` は
+/// `fandhe_ai_autodiff::Var` の再エクスポート）の内部 `OnceCell` を
+/// 呼び出し時点で確定させてしまい（`materialize_non_fallible` は
+/// `OnceCell::get_or_init` で結果をキャッシュする）、後続の
+/// `to_tape`（層 1・`materialize_fallible` 経由）は未実体化ノードを
+/// 実体化する経路を通らずキャッシュ済み値を読むだけになる
+/// （`crates/autodiff/tests/device_transfer.rs` の A5 是正と同型の
+/// 問題）。ここでは期待値を `sum` に触れず入力データから独立に計算し、
+/// `sum`（未実体化のまま）を直接 `to_tape` へ渡す。
 #[test]
 fn transfer_from_facade_cpu_tape_to_naive_tape_materializes_and_is_bit_exact() {
     let facade_tape = fandhe_ai::tape();
-    let a_data = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])
-        .expect("test fixture: shape とデータ長は事前に一致させている");
-    let b_data = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2])
-        .expect("test fixture: shape とデータ長は事前に一致させている");
-    let a = facade_tape.var(&a_data);
-    let b = facade_tape.var(&b_data);
+    let a_data = vec![1.0f32, 2.0, 3.0, 4.0];
+    let b_data = vec![5.0f32, 6.0, 7.0, 8.0];
+    let a = facade_tape.var(
+        &Tensor::new(a_data.clone(), &[2, 2])
+            .expect("test fixture: shape とデータ長は事前に一致させている"),
+    );
+    let b = facade_tape.var(
+        &Tensor::new(b_data.clone(), &[2, 2])
+            .expect("test fixture: shape とデータ長は事前に一致させている"),
+    );
     let sum = a.add(&b).expect("同 shape の加算は失敗しない");
-    let expected = sum.to_tensor();
+
+    // 期待値は `sum` に触れず、入力データから独立に計算する（加算のみ
+    // のため丸め誤差なく bit 一致する）。
+    let expected: Vec<f32> = a_data
+        .iter()
+        .zip(b_data.iter())
+        .map(|(av, bv)| av + bv)
+        .collect();
 
     let naive_tape = fandhe_ai_autodiff::Tape::new();
     let sum_on_naive = sum
         .to_tape(&naive_tape)
         .expect("lazy チェーンでも実体化されて転送される");
-    assert_eq!(f32_bits(&sum_on_naive.to_tensor()), f32_bits(&expected));
+    assert_eq!(
+        sum_on_naive.to_tensor().as_slice().unwrap(),
+        expected.as_slice()
+    );
 }
 
 // --- 実機横断（`#[ignore]`。Metal／CUDA） ---
