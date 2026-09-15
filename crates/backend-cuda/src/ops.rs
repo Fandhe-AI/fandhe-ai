@@ -3314,7 +3314,7 @@ impl BackendOps for CudaBackendOps {
         if out_shape.contains(&0) {
             return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
         }
-        checked_f32_bytes(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_bytes_for::<f32>(input.shape()).map_err(BackendError::ShapeMismatch)?;
 
         let input_owned = input.contiguous();
         let input_slice = input_owned.as_slice().ok_or_else(|| {
@@ -3340,7 +3340,7 @@ impl BackendOps for CudaBackendOps {
     /// `d_col` 形状（`[N, G, Cin_g·kH·kW, Hout·Wout]`）を導出し、
     /// `d_col.shape()` との完全一致を検査したうえで `input_shape`
     /// （＝戻り値として確保する出力 shape）自体のバイトサイズも
-    /// `checked_f32_bytes` で検査してから `im2col::CudaIm2col::
+    /// `checked_bytes_for::<f32>` で検査してから `im2col::CudaIm2col::
     /// run_col2im_f32` へ委譲する（`im2col` と同じ二重検査方針。
     /// `backend-cpu::ops::CpuBackendOps::col2im` の PR #1862
     /// codex-review 是正〈`input_shape` が `d_col` とは独立に任意の
@@ -3360,12 +3360,12 @@ impl BackendOps for CudaBackendOps {
                 rhs: expected_col_shape,
             }));
         }
-        checked_f32_bytes(input_shape).map_err(BackendError::ShapeMismatch)?;
+        checked_bytes_for::<f32>(input_shape).map_err(BackendError::ShapeMismatch)?;
 
         if input_shape.contains(&0) {
             return Tensor::new(Vec::new(), input_shape).map_err(BackendError::ShapeMismatch);
         }
-        checked_f32_bytes(d_col.shape()).map_err(BackendError::ShapeMismatch)?;
+        checked_bytes_for::<f32>(d_col.shape()).map_err(BackendError::ShapeMismatch)?;
 
         let d_col_owned = d_col.contiguous();
         let d_col_slice = d_col_owned.as_slice().ok_or_else(|| {
