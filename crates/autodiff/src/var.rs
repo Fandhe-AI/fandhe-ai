@@ -3284,6 +3284,24 @@ impl<'t> Var<'t> {
             }));
         }
         let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        // 検査を reshape より前に行う（`Var::conv1d` と同じ規律。
+        // reshape 後にエラーを返すと孤立した view ノードがテープに
+        // 残るため）。`max_pool2d` 側の再検査はフェイルクローズドの
+        // 二重化として残す。
+        if ceil_mode {
+            return Err(AutodiffError::InvalidArgument(
+                "Var::max_pool1d: ceil_mode=true は v1 で未対応".into(),
+            ));
+        }
+        let params_1d = Pool2dParams::new(
+            [1, kernel_size],
+            stride.map(|s| [1, s]),
+            [0, padding],
+            [1, dilation],
+        )
+        .map_err(AutodiffError::Backend)?;
+        pool2d_out_shape(&[n, c, 1, l], &params_1d).map_err(AutodiffError::Shape)?;
+
         let x4 = self.contiguous()?.reshape(&[n, c, 1, l])?;
         let (out4, index) = x4.max_pool2d(
             [1, kernel_size],
@@ -3378,6 +3396,23 @@ impl<'t> Var<'t> {
             }));
         }
         let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        // 検査を reshape より前に行う（`Var::conv1d` と同じ規律。
+        // `avg_pool2d` 側の再検査はフェイルクローズドの二重化として
+        // 残す）。
+        if ceil_mode {
+            return Err(AutodiffError::InvalidArgument(
+                "Var::avg_pool1d: ceil_mode=true は v1 で未対応".into(),
+            ));
+        }
+        let params_1d = Pool2dParams::new(
+            [1, kernel_size],
+            stride.map(|s| [1, s]),
+            [0, padding],
+            [1, 1],
+        )
+        .map_err(AutodiffError::Backend)?;
+        pool2d_out_shape(&[n, c, 1, l], &params_1d).map_err(AutodiffError::Shape)?;
+
         let x4 = self.contiguous()?.reshape(&[n, c, 1, l])?;
         let out4 = x4.avg_pool2d(
             [1, kernel_size],
@@ -3443,6 +3478,11 @@ impl<'t> Var<'t> {
             }));
         }
         let (n, c, l) = (in_shape[0], in_shape[1], in_shape[2]);
+        // 検査を reshape より前に行う（`Var::conv1d` と同じ規律。
+        // `adaptive_avg_pool2d` 側の再検査はフェイルクローズドの
+        // 二重化として残す）。
+        adaptive_pool2d_out_shape(&[n, c, 1, l], [1, output_size]).map_err(AutodiffError::Shape)?;
+
         let x4 = self.contiguous()?.reshape(&[n, c, 1, l])?;
         let out4 = x4.adaptive_avg_pool2d([1, output_size])?;
         let out_shape4 = out4.shape();

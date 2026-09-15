@@ -149,7 +149,7 @@ fn max_pool2d_forward_output_shape() {
 #[test]
 fn avg_pool2d_forward_output_shape_with_padding() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![0.0; 1 * 1 * 5 * 5], &[1, 1, 5, 5]));
+    let x = tape.var(&t(vec![0.0; 25], &[1, 1, 5, 5]));
     let y = x
         .avg_pool2d([3, 3], Some([1, 1]), [1, 1], false, true)
         .unwrap();
@@ -160,7 +160,7 @@ fn avg_pool2d_forward_output_shape_with_padding() {
 #[test]
 fn adaptive_avg_pool2d_forward_output_shape() {
     let tape = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![0.0; 1 * 1 * 7 * 9], &[1, 1, 7, 9]));
+    let x = tape.var(&t(vec![0.0; 63], &[1, 1, 7, 9]));
     let y = x.adaptive_avg_pool2d([2, 3]).unwrap();
     assert_eq!(y.to_tensor().shape().to_vec(), vec![1, 1, 2, 3]);
 }
@@ -180,7 +180,7 @@ fn avg_pool2d_matches_numeric_gradient_overlapping_padding() {
         .unwrap();
     let s = t(
         vec![1.0; y.to_tensor().shape().to_vec().iter().product()],
-        &y.to_tensor().shape().to_vec(),
+        y.to_tensor().shape(),
     );
     let sv = tape.var(&s);
     let loss = y.mul(&sv).unwrap().sum(None).unwrap();
@@ -201,7 +201,7 @@ fn avg_pool2d_matches_numeric_gradient_count_include_pad_false() {
         .unwrap();
     let s = t(
         vec![1.0; y.to_tensor().shape().to_vec().iter().product()],
-        &y.to_tensor().shape().to_vec(),
+        y.to_tensor().shape(),
     );
     let sv = tape.var(&s);
     let loss = y.mul(&sv).unwrap().sum(None).unwrap();
@@ -226,7 +226,7 @@ fn adaptive_avg_pool2d_matches_numeric_gradient_shrink_and_expand() {
         let y = xv.adaptive_avg_pool2d([2, 2]).unwrap();
         let s = t(
             vec![1.0; y.to_tensor().shape().to_vec().iter().product()],
-            &y.to_tensor().shape().to_vec(),
+            y.to_tensor().shape(),
         );
         let sv = tape.var(&s);
         let loss = y.mul(&sv).unwrap().sum(None).unwrap();
@@ -277,7 +277,7 @@ fn max_pool2d_matches_numeric_gradient_no_ties() {
         .unwrap();
     let s = t(
         vec![1.0; y.to_tensor().shape().to_vec().iter().product()],
-        &y.to_tensor().shape().to_vec(),
+        y.to_tensor().shape(),
     );
     let sv = tape.var(&s);
     let loss = y.mul(&sv).unwrap().sum(None).unwrap();
@@ -328,7 +328,7 @@ fn max_pool1d_forward_and_backward_matches_2d_reshape() {
         .unwrap();
     let s2 = t(
         vec![1.0; y2.to_tensor().shape().to_vec().iter().product()],
-        &y2.to_tensor().shape().to_vec(),
+        y2.to_tensor().shape(),
     );
     let sv2 = tape2d.var(&s2);
     let loss2 = y2.mul(&sv2).unwrap().sum(None).unwrap();
@@ -341,7 +341,7 @@ fn max_pool1d_forward_and_backward_matches_2d_reshape() {
     let (y1, idx1) = x1.max_pool1d(2, Some(2), 0, 1, false).unwrap();
     let s1 = t(
         vec![1.0; y1.to_tensor().shape().to_vec().iter().product()],
-        &y1.to_tensor().shape().to_vec(),
+        y1.to_tensor().shape(),
     );
     let sv1 = tape1d.var(&s1);
     let loss1 = y1.mul(&sv1).unwrap().sum(None).unwrap();
@@ -375,7 +375,7 @@ fn avg_pool1d_forward_and_backward_matches_2d_reshape() {
         .unwrap();
     let s2 = t(
         vec![1.0; y2.to_tensor().shape().to_vec().iter().product()],
-        &y2.to_tensor().shape().to_vec(),
+        y2.to_tensor().shape(),
     );
     let sv2 = tape2d.var(&s2);
     let loss2 = y2.mul(&sv2).unwrap().sum(None).unwrap();
@@ -388,7 +388,7 @@ fn avg_pool1d_forward_and_backward_matches_2d_reshape() {
     let y1 = x1.avg_pool1d(2, Some(2), 0, false, true).unwrap();
     let s1 = t(
         vec![1.0; y1.to_tensor().shape().to_vec().iter().product()],
-        &y1.to_tensor().shape().to_vec(),
+        y1.to_tensor().shape(),
     );
     let sv1 = tape1d.var(&s1);
     let loss1 = y1.mul(&sv1).unwrap().sum(None).unwrap();
