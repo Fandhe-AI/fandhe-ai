@@ -1536,6 +1536,154 @@ pub(crate) fn layer_norm_rows(
 /// 「シフトして exp・正規化する」実体を共有する（数式の実体を
 /// forward/backward で二重実装しない方針。`grad.rs` 冒頭 doc）。
 /// `pub(crate)`: `grad.rs` が VJP 計算で再利用する。
+/// BatchNorm1d／2d のチャネルごと統計（`mean: f64`・`rstd: f64`・
+/// `var: f64`〈biased ÷M〉。イシュー #1732・親 #1608）。[`row_ln_stats`]
+/// と同じ二パス縮約契約（平均は `Σx/M` の直接除算、分散は `Σ(x−μ)²/M`。
+/// `E[x²]−μ²` は使わない）・[`warp_reduce_f64`] による GPU butterfly
+/// 縮約順序の再現契約をチャネル方向へ拡張したもの。
+///
+/// `x`（`[N, C, spatial]` 相当の行優先平坦化データ）のうちチャネル
+/// `c` に属する `M = n*spatial` 要素（局所添字 `i in 0..M` を
+/// `batch = i/spatial`・`sp = i%spatial` へ分解し、実データ添字
+/// `batch*(c_total*spatial) + c*spatial + sp` へマップする、NCHW／NCL
+/// 平坦化データに対するチャネル方向ストライドアクセス）を縮約する。
+/// `m >= 1` を前提とする（`m == 0` は呼び出し元が早期 return する。
+/// [`batch_norm_train_channels`]／[`batch_norm_infer_channels`] 参照）。
+pub(crate) fn channel_bn_stats(
+    x: &[f32],
+    c: usize,
+    c_total: usize,
+    spatial: usize,
+    m: usize,
+    eps: f32,
+) -> (f64, f64, f64) {
+    let idx_of = |i: usize| -> usize {
+        let batch = i / spatial;
+        let sp = i % spatial;
+        batch * (c_total * spatial) + c * spatial + sp
+    };
+    let mm = m as f64;
+    let sum = warp_reduce_f64(m, |i, acc| acc + x[idx_of(i)] as f64);
+    let mean = sum / mm;
+    let sq_acc = warp_reduce_f64(m, |i, acc| {
+        let d = x[idx_of(i)] as f64 - mean;
+        d.mul_add(d, acc)
+    });
+    let var = sq_acc / mm;
+    let rstd = 1.0f64 / (var + eps as f64).sqrt();
+    (mean, rstd, var)
+}
+
+/// affine（`w`／`b`）適用の共通 4 分岐（[`layer_norm_rows`] と同じ
+/// 「`w`／`b` がともに指定された場合のみ `f32::mul_add` で明示的に
+/// 融合する」FMA 契約統一。`.claude/rules/coding-rust.md`）。
+#[inline]
+fn apply_affine(xhat: f32, w: Option<f32>, b: Option<f32>) -> f32 {
+    match (w, b) {
+        (Some(w), Some(b)) => xhat.mul_add(w, b),
+        (Some(w), None) => xhat * w,
+        (None, Some(b)) => xhat + b,
+        (None, None) => xhat,
+    }
+}
+
+/// BatchNorm1d／2d train モード（バッチ統計）のホスト参照実装
+/// （`BackendOps::batch_norm_train` が `Err(BackendError::
+/// Unsupported(_))` を返したときのみ `Var::batch_norm_with_batch_stats`
+/// がフォールバックする。イシュー #1732・親 #1608・
+/// `docs/batch-norm-ops-design.md`）。
+///
+/// `x` は `[n, c, spatial]` 相当の行優先平坦化済みテンソル、`w`／`b`
+/// を渡す場合はそれぞれ長さ `c` を要求する（呼び出し元
+/// `var.rs::Var::batch_norm_with_batch_stats` が shape 検査済み）。
+/// `n == 0`／`c == 0`／`spatial == 0` は全ゼロ出力・全ゼロ統計を返す
+/// （[`layer_norm_rows`] の `rows == 0 || hidden == 0` 早期 return と
+/// 同型の契約。呼び出し元は train モードの `m <= 1` 拒否を別途行う）。
+///
+/// 戻り値は `(output, batch_mean, batch_var)`。`batch_mean`／
+/// `batch_var`（biased ÷M）は shape `[c]` で running stats 更新専用。
+pub(crate) fn batch_norm_train_channels(
+    x: &Tensor<f32>,
+    w: Option<&[f32]>,
+    b: Option<&[f32]>,
+    eps: f32,
+    n: usize,
+    c: usize,
+    spatial: usize,
+) -> (Tensor<f32>, Vec<f32>, Vec<f32>) {
+    let shape = x.shape().to_vec();
+    let m = n * spatial;
+    if n == 0 || c == 0 || spatial == 0 || m == 0 {
+        let numel: usize = shape.iter().product();
+        return (
+            build_tensor(vec![0.0f32; numel], &shape),
+            vec![0.0f32; c],
+            vec![0.0f32; c],
+        );
+    }
+    let data = dense_vec(x);
+    let mut out = vec![0.0f32; data.len()];
+    let mut means = vec![0.0f32; c];
+    let mut vars = vec![0.0f32; c];
+    for ch in 0..c {
+        let (mean, rstd, var) = channel_bn_stats(&data, ch, c, spatial, m, eps);
+        means[ch] = mean as f32;
+        vars[ch] = var as f32;
+        let wv = w.map(|w| w[ch]);
+        let bv = b.map(|b| b[ch]);
+        for batch in 0..n {
+            for sp in 0..spatial {
+                let idx = batch * (c * spatial) + ch * spatial + sp;
+                let xhat = ((data[idx] as f64 - mean) * rstd) as f32;
+                out[idx] = apply_affine(xhat, wv, bv);
+            }
+        }
+    }
+    (build_tensor(out, &shape), means, vars)
+}
+
+/// BatchNorm1d／2d eval モード（固定統計）のホスト参照実装
+/// （`BackendOps::batch_norm_infer` が `Err(BackendError::
+/// Unsupported(_))` を返したときのみ `Var::batch_norm_infer` が
+/// フォールバックする。イシュー #1732・親 #1608）。[`batch_norm_train_
+/// channels`] と同じ shape 契約・早期 return 契約を持つが、`mean`／
+/// `var`（`nn::BatchNorm1d`／`BatchNorm2d` が保持する running stats）
+/// をバッチから計算し直さずそのまま使う。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn batch_norm_infer_channels(
+    x: &Tensor<f32>,
+    mean: &[f32],
+    var: &[f32],
+    w: Option<&[f32]>,
+    b: Option<&[f32]>,
+    eps: f32,
+    n: usize,
+    c: usize,
+    spatial: usize,
+) -> Tensor<f32> {
+    let shape = x.shape().to_vec();
+    if n == 0 || c == 0 || spatial == 0 {
+        let numel: usize = shape.iter().product();
+        return build_tensor(vec![0.0f32; numel], &shape);
+    }
+    let data = dense_vec(x);
+    let mut out = vec![0.0f32; data.len()];
+    for ch in 0..c {
+        let mean_c = mean[ch] as f64;
+        let rstd = 1.0f64 / (var[ch] as f64 + eps as f64).sqrt();
+        let wv = w.map(|w| w[ch]);
+        let bv = b.map(|b| b[ch]);
+        for batch in 0..n {
+            for sp in 0..spatial {
+                let idx = batch * (c * spatial) + ch * spatial + sp;
+                let xhat = ((data[idx] as f64 - mean_c) * rstd) as f32;
+                out[idx] = apply_affine(xhat, wv, bv);
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
 pub(crate) fn softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
     let shape = input.shape().to_vec();
     // 要素数ゼロ（shape のいずれかの次元が 0）のとき、`shape[..axis]`／
@@ -3393,6 +3541,111 @@ mod norm_rows_tests {
         let x = Tensor::new(vec![2e20f32, -2e20, 2e20, -2e20], &[1, 4]).unwrap();
         let out = dense_vec(&layer_norm_rows(&x, None, None, 1e-5, 1, 4));
         assert!(out.iter().all(|v| v.is_finite()), "{out:?}");
+    }
+}
+
+#[cfg(test)]
+mod batch_norm_channels_tests {
+    use super::*;
+
+    /// N=1,C=2,spatial=2（`[1,2,2]`。BatchNorm1d の空間入力形状）で
+    /// チャネルごとの平均・分散を手計算値と突き合わせる。
+    #[test]
+    fn batch_norm_train_matches_manual_computation() {
+        // ch0: [1,2] mean=1.5 var=0.25; ch1: [3,4] mean=3.5 var=0.25
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[1, 2, 2]).unwrap();
+        let (out, mean, var) = batch_norm_train_channels(&x, None, None, 0.0, 1, 2, 2);
+        assert!((mean[0] as f64 - 1.5).abs() < 1e-9);
+        assert!((mean[1] as f64 - 3.5).abs() < 1e-9);
+        assert!((var[0] as f64 - 0.25).abs() < 1e-9);
+        assert!((var[1] as f64 - 0.25).abs() < 1e-9);
+        let out = dense_vec(&out);
+        let rstd = 1.0f32 / 0.25f32.sqrt();
+        let expected = [
+            (1.0 - 1.5) * rstd,
+            (2.0 - 1.5) * rstd,
+            (3.0 - 3.5) * rstd,
+            (4.0 - 3.5) * rstd,
+        ];
+        for (o, e) in out.iter().zip(expected.iter()) {
+            assert!((o - e).abs() < 1e-5, "o={o} e={e}");
+        }
+    }
+
+    #[test]
+    fn batch_norm_train_reduces_over_batch_and_spatial_per_channel() {
+        // N=2,C=1,spatial=2: ch0 の 4 要素すべてが 1 チャネルへ縮約される
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 1, 2]).unwrap();
+        let (_, mean, var) = batch_norm_train_channels(&x, None, None, 0.0, 2, 1, 2);
+        assert!((mean[0] as f64 - 2.5).abs() < 1e-9);
+        // Σ(x-mean)^2/M = (2.25+0.25+0.25+2.25)/4 = 1.25
+        assert!((var[0] as f64 - 1.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn batch_norm_train_applies_weight_and_bias() {
+        let x = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[1, 2, 2]).unwrap();
+        let w = [2.0f32, 0.5];
+        let b = [1.0f32, -1.0];
+        let (out, _, _) = batch_norm_train_channels(&x, Some(&w), Some(&b), 0.0, 1, 2, 2);
+        let out = dense_vec(&out);
+        let rstd = 1.0f32 / 0.25f32.sqrt();
+        let expected = [
+            (1.0 - 1.5) * rstd * 2.0 + 1.0,
+            (2.0 - 1.5) * rstd * 2.0 + 1.0,
+            (3.0 - 3.5) * rstd * 0.5 - 1.0,
+            (4.0 - 3.5) * rstd * 0.5 - 1.0,
+        ];
+        for (o, e) in out.iter().zip(expected.iter()) {
+            assert!((o - e).abs() < 1e-5, "o={o} e={e}");
+        }
+    }
+
+    #[test]
+    fn batch_norm_train_empty_axes_are_empty_output() {
+        let x0 = Tensor::new(Vec::<f32>::new(), &[0, 2, 2]).unwrap();
+        let (out, mean, var) = batch_norm_train_channels(&x0, None, None, 1e-5, 0, 2, 2);
+        assert_eq!(dense_vec(&out), Vec::<f32>::new());
+        assert_eq!(mean, vec![0.0f32; 2]);
+        assert_eq!(var, vec![0.0f32; 2]);
+    }
+
+    #[test]
+    fn batch_norm_train_nan_propagates() {
+        let x = Tensor::new(vec![f32::NAN, 1.0, 1.0, 1.0], &[1, 2, 2]).unwrap();
+        let (out, mean, _) = batch_norm_train_channels(&x, None, None, 1e-5, 1, 2, 2);
+        let out = dense_vec(&out);
+        assert!(out[0].is_nan() && out[1].is_nan());
+        assert!(mean[0].is_nan());
+        assert!(!mean[1].is_nan());
+    }
+
+    #[test]
+    fn batch_norm_train_extreme_scale_does_not_overflow_stats() {
+        let x = Tensor::new(vec![2e20f32, -2e20, 2e20, -2e20], &[1, 2, 2]).unwrap();
+        let (out, _, _) = batch_norm_train_channels(&x, None, None, 1e-5, 1, 2, 2);
+        assert!(dense_vec(&out).iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn batch_norm_infer_uses_fixed_stats_not_batch_stats() {
+        let x = Tensor::new(vec![10.0f32, 20.0, 30.0, 40.0], &[1, 2, 2]).unwrap();
+        let mean = [0.0f32, 0.0];
+        let var = [1.0f32, 1.0];
+        let out = dense_vec(&batch_norm_infer_channels(
+            &x, &mean, &var, None, None, 0.0, 1, 2, 2,
+        ));
+        // with mean=0,var=1 output equals input unchanged
+        assert_eq!(out, vec![10.0f32, 20.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn batch_norm_infer_empty_axes_are_empty_output() {
+        let x0 = Tensor::new(Vec::<f32>::new(), &[0, 2, 2]).unwrap();
+        let mean = [0.0f32, 0.0];
+        let var = [1.0f32, 1.0];
+        let out = batch_norm_infer_channels(&x0, &mean, &var, None, None, 1e-5, 0, 2, 2);
+        assert_eq!(dense_vec(&out), Vec::<f32>::new());
     }
 }
 

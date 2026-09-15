@@ -2753,6 +2753,74 @@ pub trait BackendOps {
         ))
     }
 
+    /// BatchNorm1d／2d の train モード（バッチ統計。イシュー #1732・
+    /// 親 #1608・`docs/batch-norm-ops-design.md`）。統計計算と正規化を
+    /// 1 カーネルで融合し、内部の `f64` `mean`／`rstd` を `x̂` 書き出し
+    /// まで保持する（[`Self::layer_norm`] と同じ理由で、統計計算と
+    /// 適用を別呼び出しに分けると `mean` を `f32` へ丸めてから `x̂` を
+    /// 計算することになり精度が損なわれるため、2 メソッドに分けず
+    /// 1 メソッドへ集約する）。
+    ///
+    /// **契約**: チャネル軸は常に dim 1（[`crate::ops_shape::
+    /// batch_norm_layout`] が `(n, c, spatial)` を導出。NCHW／NCL
+    /// 固定）。`weight`／`bias` を渡す場合はそれぞれ独立に shape `[c]`
+    /// を要求する（呼び出し元 `Var::batch_norm` が事前検査する）。
+    /// `x` の `n*spatial <= 1`（チャネルごとの縮約要素数が 1 以下。
+    /// unbiased 分散の `M-1` 除算で 0 除算になる）は呼び出し元が
+    /// 事前に拒否する（本メソッドはその検査を前提とする）。
+    ///
+    /// 戻り値 [`BatchNormTrainOutput::output`] の shape は入力 `x` と
+    /// 恒等。[`BatchNormTrainOutput::batch_mean`]／
+    /// [`BatchNormTrainOutput::batch_var`]（biased ÷M）は shape `[c]`
+    /// で、running stats 更新専用（呼び出し元 `nn::BatchNorm1d`／
+    /// `BatchNorm2d` が unbiased 化して合成する）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::layer_norm`] と同じ非破壊拡張・fail-safe。`Var::
+    /// batch_norm`／`batch_norm_with_batch_stats` は `Unsupported` の
+    /// ときのみホスト参照実装（`eval::batch_norm_train_channels`）へ
+    /// フォールバックする（それ以外のエラーは伝播する。判定迂回経路を
+    /// 作らない。`.claude/rules/security.md` A08）。
+    fn batch_norm_train(
+        &self,
+        _x: &Tensor<f32>,
+        _weight: Option<&Tensor<f32>>,
+        _bias: Option<&Tensor<f32>>,
+        _eps: f32,
+    ) -> Result<BatchNormTrainOutput, BackendError> {
+        Err(BackendError::Unsupported(
+            "batch_norm_train: default fail-safe (no fused BatchNorm train kernel available)"
+                .into(),
+        ))
+    }
+
+    /// BatchNorm1d／2d の eval モード（固定統計。イシュー #1732・親
+    /// #1608）。[`Self::batch_norm_train`] と同じチャネル軸契約だが、
+    /// `mean`／`var` は呼び出し元（`nn::BatchNorm1d`／`BatchNorm2d`）が
+    /// 保持する running stats（shape `[c]` の `f32`）をそのまま渡す
+    /// （train のようにバッチから統計を計算しない）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::batch_norm_train`] と同じ非破壊拡張・fail-safe。`Var::
+    /// batch_norm_infer` は `Unsupported` のときのみホスト参照実装
+    /// （`eval::batch_norm_infer_channels`）へフォールバックする。
+    fn batch_norm_infer(
+        &self,
+        _x: &Tensor<f32>,
+        _mean: &Tensor<f32>,
+        _var: &Tensor<f32>,
+        _weight: Option<&Tensor<f32>>,
+        _bias: Option<&Tensor<f32>>,
+        _eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "batch_norm_infer: default fail-safe (no fused BatchNorm infer kernel available)"
+                .into(),
+        ))
+    }
+
     /// LSTM セルの pointwise 段（イシュー #1647・設計 `docs/autodiff-
     /// rnn-cell-tape-design.md` 決定 1・決定 1b・決定 5）。融合 GEMM
     /// `pre = x·W_ih + b_ih + h_prev·W_hh + b_hh`（`[B,4H]`。列ブロック
@@ -3364,6 +3432,23 @@ pub struct LstmPointwiseOutput {
     pub gates: Tensor<f32>,
     pub c: Tensor<f32>,
     pub h: Tensor<f32>,
+}
+
+/// [`BackendOps::batch_norm_train`] の戻り値（イシュー #1732・親
+/// #1608）。
+///
+/// `output` は正規化・affine 適用後の値（入力 `x` と shape 恒等）。
+/// `batch_mean`／`batch_var`（biased ÷M。shape `[c]`）は running stats
+/// 更新専用で、呼び出し元（`nn::BatchNorm1d`／`BatchNorm2d`）が
+/// unbiased 化して合成する。他クレート（`backend-cpu`／
+/// `backend-cuda`／`backend-metal`）が構築するため `#[non_exhaustive]`
+/// は付けない（フィールド追加は破壊的変更として扱う。
+/// `LstmPointwiseOutput` と同じ判断）。
+#[derive(Debug, Clone)]
+pub struct BatchNormTrainOutput {
+    pub output: Tensor<f32>,
+    pub batch_mean: Tensor<f32>,
+    pub batch_var: Tensor<f32>,
 }
 
 /// [`BackendOps::gru_pointwise`] の戻り値（イシュー #1647）。
@@ -4313,6 +4398,24 @@ mod tests {
         let result = ops.layer_norm(&x, None, None, 1e-5);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::batch_norm_train`]／[`BackendOps::batch_norm_infer`]
+    /// の既定実装が fail-safe（[`BackendError::Unsupported`]）を返す
+    /// ことを確認する（イシュー #1732。`layer_norm_default_is_unsupported`
+    /// と同型のガード）。
+    #[test]
+    fn batch_norm_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let mean = Tensor::new(vec![0.0, 0.0], &[2]).unwrap();
+        let var = Tensor::new(vec![1.0, 1.0], &[2]).unwrap();
+
+        let train_result = ops.batch_norm_train(&x, None, None, 1e-5);
+        assert!(matches!(train_result, Err(BackendError::Unsupported(_))));
+
+        let infer_result = ops.batch_norm_infer(&x, &mean, &var, None, None, 1e-5);
+        assert!(matches!(infer_result, Err(BackendError::Unsupported(_))));
     }
 
     /// RNN／LSTM／GRU セル演算（イシュー #1647）の 5 メソッドすべてが

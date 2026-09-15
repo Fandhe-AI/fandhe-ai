@@ -75,6 +75,7 @@
 //! 自体が非公開のため）。
 
 mod attention;
+mod batch_norm;
 mod container;
 mod embedding;
 mod init;
@@ -88,6 +89,9 @@ pub mod loss;
 pub mod optim;
 
 pub use attention::{MultiheadAttention, MultiheadAttentionVars};
+pub use batch_norm::{
+    BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,
+};
 pub use container::{ModuleList, Sequential};
 pub use embedding::{Embedding, EmbeddingVars};
 pub use linear::{Linear, LinearVars};

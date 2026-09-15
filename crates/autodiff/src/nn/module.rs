@@ -25,13 +25,16 @@ use crate::nn::activation::{
     Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
     Tanh,
 };
+use crate::nn::batch_norm::{
+    BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
+};
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, ShapeError, Tensor, broadcast_shape, gemm_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout,
+    BackendError, BackendOps, ShapeError, Tensor, batch_norm_layout, broadcast_shape,
+    gemm_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
 };
 
 /// [`Module::named_parameters`] の実装が、子 `Module`（`Linear` 等）を
@@ -570,6 +573,146 @@ impl Module for LayerNorm {
             )));
         }
         Ok(value)
+    }
+}
+
+/// `BatchNorm1d`／`BatchNorm2d::forward_host`（両者共通）が呼ぶ
+/// tape 不要経路の forward 本体（イシュー #1732・親 #1608）。`nn::
+/// batch_norm::BatchNormVars::forward`（tape 経路）と同じ判定規律
+/// （バックエンド → `Unsupported` のときのみホスト参照実装）を
+/// `ops` 直接呼び出しで再現する（`RmsNorm::forward_host` と同じ
+/// 理由）。train モードは呼ぶたび必ず running stats を更新する
+/// （`BatchNormVars::forward` と同じ契約。`nn::batch_norm` モジュール
+/// doc comment「running stats 更新契約」参照）。
+fn batch_norm_forward_host(
+    core: &BatchNormCore,
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let (n, c, spatial) = batch_norm_layout(input.shape())?;
+    if let Some(w) = core.weight() {
+        require_same_shape(w.shape(), &[c])?;
+    }
+    if let Some(b) = core.bias() {
+        require_same_shape(b.shape(), &[c])?;
+    }
+    if core.training() {
+        let m = n
+            .checked_mul(spatial)
+            .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+        if m <= 1 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "BatchNorm::forward_host: train モードはチャネルごとの要素数 \
+                 M=n*spatial が 1 以下を許容しない（got n={n}, spatial={spatial}, M={m}）"
+            )));
+        }
+        let out = crate::grad::batch_norm_train_with_fallback(
+            ops,
+            input,
+            core.weight(),
+            core.bias(),
+            core.eps(),
+            n,
+            c,
+            spatial,
+        )?;
+        core.update_running_stats(&out.batch_mean, &out.batch_var, m);
+        Ok(out.output)
+    } else {
+        let running_mean = core.running_mean_ref();
+        let running_var = core.running_var_ref();
+        crate::grad::batch_norm_infer_with_fallback(
+            ops,
+            input,
+            &running_mean,
+            &running_var,
+            core.weight(),
+            core.bias(),
+            core.eps(),
+            n,
+            c,
+            spatial,
+        )
+    }
+}
+
+/// `BatchNorm1d::bind(tape).forward(input)` への委譲（イシュー
+/// #1732・親 #1608）。本クレート内で初めて train／eval でモードにより
+/// 挙動が変わる層のため `set_training`／`training` を明示
+/// オーバーライドする（`Module::set_training` trait doc の「今後
+/// BatchNorm 等を追加する際は必ずオーバーライドすること」を実装する。
+/// `nn::batch_norm` モジュール doc comment 参照）。
+impl Module for BatchNorm1d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn set_training(&mut self, training: bool) {
+        self.core.set_training(training);
+    }
+
+    fn training(&self) -> bool {
+        self.core.training()
+    }
+
+    /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
+    /// `weight`（`Some` の場合）→ `bias`（`Some` の場合）の順。running
+    /// stats は buffer であり学習可能パラメータではないため含めない
+    /// （`nn::batch_norm` モジュール doc comment「`BatchNormCore` の
+    /// 可視性」節参照）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.core.named_parameters()
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let rank = input.shape().len();
+        if !BATCH_NORM_1D_RANKS.contains(&rank) {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: BATCH_NORM_1D_RANKS[0],
+                actual: rank,
+            }));
+        }
+        batch_norm_forward_host(&self.core, ops, input)
+    }
+}
+
+/// `BatchNorm2d::bind(tape).forward(input)` への委譲（イシュー
+/// #1732・親 #1608）。[`Module for BatchNorm1d`](trait.Module.html)
+/// と同じ理由・同じ構造だが rank 限定契約のみ異なる（rank 4 のみ）。
+impl Module for BatchNorm2d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn set_training(&mut self, training: bool) {
+        self.core.set_training(training);
+    }
+
+    fn training(&self) -> bool {
+        self.core.training()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        self.core.named_parameters()
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let rank = input.shape().len();
+        if !BATCH_NORM_2D_RANKS.contains(&rank) {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: BATCH_NORM_2D_RANKS[0],
+                actual: rank,
+            }));
+        }
+        batch_norm_forward_host(&self.core, ops, input)
     }
 }
 
