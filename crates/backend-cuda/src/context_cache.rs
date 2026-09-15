@@ -508,6 +508,22 @@ pub(crate) fn cached_layer_norm(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::batch_norm::
+/// CudaBatchNorm`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1735。キーは [`ContextKey`]。`cached_layer_norm` と
+/// 同型）。`ops::CudaBackendOps::batch_norm_train`／`batch_norm_infer`
+/// の唯一の呼び出し先。
+pub(crate) fn cached_batch_norm(
+    device: &CudaDevice,
+) -> Result<Arc<crate::batch_norm::CudaBatchNorm>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::batch_norm::CudaBatchNorm>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::batch_norm::CudaBatchNorm::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`crate::rnn_cell::CudaRnnCell`]
 /// スイートをプロセス内キャッシュから取得する（イシュー #1647。キーは
 /// [`ContextKey`]。`cached_gemm` 冒頭コメント参照）。

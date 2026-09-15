@@ -33,13 +33,14 @@ use std::sync::Arc;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BceKind, BinaryElementwiseOp, Conv2dParams, DType, DispatchFailureCell,
-    FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
-    LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors, ScalarBinaryOp, ScalarUnaryOp,
-    ScatterReduce, SegmentKey, SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, gather_out_shape, im2col_out_shape, interpolate_out_shape_for_mode,
-    one_hot_out_shape, pad_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
-    row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
+    DType, DispatchFailureCell, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
+    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, QrFactors,
+    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey, SegmentResource, SegmentRun,
+    ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, batch_norm_layout, gather_out_shape,
+    im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -1486,6 +1487,34 @@ fn map_im2col_error(err: CudaError) -> BackendError {
         CudaError::Im2colSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
         CudaError::InvalidIm2colShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+        }
+        other => map_cuda_error(other),
+    }
+}
+
+/// `batch_norm.rs::CudaBatchNorm::run_batch_norm_train_f32`／
+/// `run_batch_norm_infer_f32` のエラーを `BackendOps::batch_norm_train`／
+/// `batch_norm_infer` の戻り値へ変換する（イシュー #1735）。
+/// [`CudaError::BatchNormSizeLimitExceeded`]（形状パラメータがカーネル
+/// 引数 `int` 上限を超過）**のみ** [`BackendError::Unsupported`] へ
+/// 写像し、`fandhe_ai_autodiff::grad::batch_norm_train_with_fallback`／
+/// `batch_norm_infer_with_fallback` のホストフォールバック
+/// （`eval::batch_norm_train_channels`／`batch_norm_infer_channels`）
+/// へ委ねる（`map_im2col_error`／`map_unique_error` と同じ設計判断）。
+/// [`CudaError::InvalidBatchNormShape`]（`weight`／`bias`／`mean`／
+/// `var` の長さ不一致・`eps` 検査等）は `ops.rs` 側で事前検査せず
+/// `CudaBatchNorm::run_batch_norm_train_f32`／`run_batch_norm_infer_f32`
+/// 内部の `validate_batch_norm_launch` が唯一の検査点であるため、CPU
+/// 側 `CpuBackendOps::batch_norm_train`（`gemm_contiguity_fail_safe`
+/// 経由で `BackendError::KernelLaunchFailed` を返す）と同じ variant へ
+/// 揃える（既存 CPU テストの `matches!(…, KernelLaunchFailed)` との
+/// 整合）。それ以外（driver 不在等）は既存 [`map_cuda_error`] へ委譲
+/// する（判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+fn map_batch_norm_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::BatchNormSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
+        CudaError::InvalidBatchNormShape { .. } => {
+            BackendError::KernelLaunchFailed(err.to_string())
         }
         other => map_cuda_error(other),
     }
@@ -4502,6 +4531,110 @@ impl BackendOps for CudaBackendOps {
             |e| BackendError::KernelLaunchFailed(e.to_string()),
             || layer_norm.run_layer_norm_f32(x_slice, w_slice, b_slice, eps, rows, hidden),
         )?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::batch_norm_train`] の CUDA
+    /// 実装（イシュー #1735・親 #1608）。[`Self::layer_norm`] と同じ
+    /// `contiguous()`→`as_slice()` 取り出し方針だが、チャネル軸の
+    /// 導出は `batch_norm_layout`（`row_norm_layout` の BatchNorm 版。
+    /// チャネル軸は常に dim 1）。新設カーネル `crate::batch_norm::
+    /// CudaBatchNorm::run_batch_norm_train_f32`・`context_cache::
+    /// cached_batch_norm` を使う（`docs/batch-norm-ops-design.md`
+    /// §3.1「CUDA（1 warp = 1 channel）が再現すべき契約」）。
+    fn batch_norm_train(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<BatchNormTrainOutput, BackendError> {
+        let (n, c, spatial) = batch_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("batch_norm_train: input not contiguous".into())
+        })?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("batch_norm_train: weight not contiguous".into())
+            })?),
+            None => None,
+        };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_slice = match &b_owned {
+            Some(b) => Some(b.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("batch_norm_train: bias not contiguous".into())
+            })?),
+            None => None,
+        };
+
+        let batch_norm = self.with_driver_call(&[], map_fused_kernel_init_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_batch_norm(&device)
+        })?;
+        let (out, mean, var) = self.with_driver_call(&[], map_batch_norm_error, || {
+            batch_norm.run_batch_norm_train_f32(x_slice, w_slice, b_slice, eps, n, c, spatial)
+        })?;
+        Ok(BatchNormTrainOutput {
+            output: Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)?,
+            batch_mean: Tensor::new(mean, &[c]).map_err(BackendError::ShapeMismatch)?,
+            batch_var: Tensor::new(var, &[c]).map_err(BackendError::ShapeMismatch)?,
+        })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::batch_norm_infer`] の CUDA
+    /// 実装（イシュー #1735・親 #1608）。[`Self::batch_norm_train`] と
+    /// 同じ shape 契約だが、`mean`／`var`（呼び出し元が保持する
+    /// running stats）をバッチから計算し直さずそのまま使う。
+    fn batch_norm_infer(
+        &self,
+        x: &Tensor<f32>,
+        mean: &Tensor<f32>,
+        var: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let (n, c, spatial) = batch_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("batch_norm_infer: input not contiguous".into())
+        })?;
+        let mean_owned = mean.contiguous();
+        let mean_slice = mean_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("batch_norm_infer: mean not contiguous".into())
+        })?;
+        let var_owned = var.contiguous();
+        let var_slice = var_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("batch_norm_infer: var not contiguous".into())
+        })?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("batch_norm_infer: weight not contiguous".into())
+            })?),
+            None => None,
+        };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_slice = match &b_owned {
+            Some(b) => Some(b.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("batch_norm_infer: bias not contiguous".into())
+            })?),
+            None => None,
+        };
+
+        let batch_norm = self.with_driver_call(&[], map_fused_kernel_init_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_batch_norm(&device)
+        })?;
+        let out = self.with_driver_call(&[], map_batch_norm_error, || {
+            batch_norm.run_batch_norm_infer_f32(
+                x_slice, mean_slice, var_slice, w_slice, b_slice, eps, n, c, spatial,
+            )
+        })?;
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
