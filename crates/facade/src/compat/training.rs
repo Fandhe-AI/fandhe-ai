@@ -352,7 +352,7 @@ impl Sequential {
         y: &Tensor<T>,
         config: FitConfig,
     ) -> Result<History, AutodiffError> {
-        self.fit_with_callbacks(x, y, config, None, &mut [])
+        self.fit_with_callbacks_named("fit", x, y, config, None, &mut [])
     }
 
     /// [`Self::fit`] の拡張版（イシュー #1763・親 #1618）:
@@ -440,30 +440,39 @@ impl Sequential {
         validation: Option<(&Tensor<f32>, &Tensor<T>)>,
         callbacks: &mut [Callback],
     ) -> Result<History, AutodiffError> {
+        self.fit_with_callbacks_named("fit_with_callbacks", x, y, config, validation, callbacks)
+    }
+
+    fn fit_with_callbacks_named<T: FitTarget>(
+        &mut self,
+        method: &'static str,
+        x: &Tensor<f32>,
+        y: &Tensor<T>,
+        config: FitConfig,
+        validation: Option<(&Tensor<f32>, &Tensor<T>)>,
+        callbacks: &mut [Callback],
+    ) -> Result<History, AutodiffError> {
         // (1) 未 compile 検査・compiled の一時取り出し（借用衝突回避。
         // `run_fit` 内で `bind`〈&self 借用〉と `self.compiled`〈&mut
         // self 借用〉を同時に持てないため、compiled を一旦取り外して
         // 別変数として扱う。結果を問わず必ず書き戻す）。
-        let mut compiled = self
-            .compiled
-            .take()
-            .ok_or_else(|| not_compiled("fit_with_callbacks"))?;
+        let mut compiled = self.compiled.take().ok_or_else(|| not_compiled(method))?;
 
         // (2) 引数検査（モード変更・DataLoader 構築より前。早期 Err は
         // モード変更前のため復元不要——ただし compiled は既に take 済み
         // なのでここで明示的に書き戻す）。
         if config.epochs == 0 {
             self.compiled = Some(compiled);
-            return Err(AutodiffError::InvalidArgument(
-                "Sequential::fit_with_callbacks: epochs == 0".to_string(),
-            ));
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: epochs == 0"
+            )));
         }
         if validation.is_none()
             && let Some(offending) = callbacks.iter().find(|cb| cb.requires_validation())
         {
             self.compiled = Some(compiled);
             return Err(AutodiffError::InvalidArgument(format!(
-                "Sequential::fit_with_callbacks: callback {offending:?} は \
+                "Sequential::{method}: callback {offending:?} は \
                  Monitor::ValLoss を監視するが validation が None"
             )));
         }
@@ -481,7 +490,7 @@ impl Sequential {
         let prev_training = self.training();
         self.set_training(true);
 
-        let result = self.run_fit(&mut compiled, x, y, config, validation, callbacks);
+        let result = self.run_fit(method, &mut compiled, x, y, config, validation, callbacks);
 
         // (4) モード復元・compiled の書き戻し（結果を問わず必ず行う。
         // fail-closed: 失敗した fit の後もモデルを「未 compile」状態へ
@@ -497,6 +506,7 @@ impl Sequential {
     /// と `compiled.optimizer.step`〈`&mut compiled`〉を同時に生かせる）。
     fn run_fit<T: FitTarget>(
         &mut self,
+        method: &'static str,
         compiled: &mut Compiled,
         x: &Tensor<f32>,
         y: &Tensor<T>,
@@ -505,7 +515,7 @@ impl Sequential {
         callbacks: &mut [Callback],
     ) -> Result<History, AutodiffError> {
         let to_invalid_arg = |e: fandhe_ai_tensor_core::data::DataError| {
-            AutodiffError::InvalidArgument(format!("Sequential::fit_with_callbacks: {e}"))
+            AutodiffError::InvalidArgument(format!("Sequential::{method}: {e}"))
         };
         let x_dataset = TensorDataset::new(x.clone()).map_err(to_invalid_arg)?;
         let y_dataset = TensorDataset::new(y.clone()).map_err(to_invalid_arg)?;
@@ -526,7 +536,7 @@ impl Sequential {
         let mut loss = Vec::new();
         loss.try_reserve_exact(config.epochs).map_err(|e| {
             AutodiffError::InvalidArgument(format!(
-                "Sequential::fit_with_callbacks: History.loss 用の確保に失敗した \
+                "Sequential::{method}: History.loss 用の確保に失敗した \
                  (epochs={}): {e}",
                 config.epochs
             ))
@@ -538,7 +548,7 @@ impl Sequential {
         if validation.is_some() {
             val_loss.try_reserve_exact(config.epochs).map_err(|e| {
                 AutodiffError::InvalidArgument(format!(
-                    "Sequential::fit_with_callbacks: History.val_loss 用の確保に失敗した \
+                    "Sequential::{method}: History.val_loss 用の確保に失敗した \
                      (epochs={}): {e}",
                     config.epochs
                 ))
@@ -547,7 +557,7 @@ impl Sequential {
         let mut lr = Vec::new();
         lr.try_reserve_exact(config.epochs).map_err(|e| {
             AutodiffError::InvalidArgument(format!(
-                "Sequential::fit_with_callbacks: History.lr 用の確保に失敗した \
+                "Sequential::{method}: History.lr 用の確保に失敗した \
                  (epochs={}): {e}",
                 config.epochs
             ))
@@ -589,7 +599,7 @@ impl Sequential {
                         Ok(v) => v,
                         Err(e) => {
                             break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
-                                "Sequential::fit_with_callbacks: {e}"
+                                "Sequential::{method}: {e}"
                             )));
                         }
                     };
@@ -611,11 +621,10 @@ impl Sequential {
                         let loss_scalar = match loss_var.to_tensor().get(&[]) {
                             Some(v) => v,
                             None => {
-                                break 'epochs_block Err(AutodiffError::InvalidArgument(
-                                    "Sequential::fit_with_callbacks: loss の shape が [] ではない\
-                                     （loss 演算の契約違反）"
-                                        .to_string(),
-                                ));
+                                break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                                    "Sequential::{method}: loss の shape が [] ではない\
+                                         （loss 演算の契約違反）"
+                                )));
                             }
                         };
                         weighted_sum += loss_scalar as f64 * n_batch as f64;
@@ -643,11 +652,10 @@ impl Sequential {
                 if count == 0 {
                     // `drop_last = true` で全バッチが落ちた場合（0 除算を
                     // 黙って NaN にしない。fail-closed）。
-                    break 'epochs_block Err(AutodiffError::InvalidArgument(
-                        "Sequential::fit_with_callbacks: この epoch で処理されたサンプルが 0 件\
+                    break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                        "Sequential::{method}: この epoch で処理されたサンプルが 0 件\
                          （drop_last により全バッチが切り捨てられた可能性がある）"
-                            .to_string(),
-                    ));
+                    )));
                 }
                 history.loss.push((weighted_sum / count as f64) as f32);
 
@@ -655,7 +663,13 @@ impl Sequential {
                 // の処理順序」節）。
                 if let Some((x_val, y_val)) = validation {
                     self.set_training(false);
-                    let v = self.run_evaluate::<T>(x_val, y_val, config.batch_size, compiled.loss);
+                    let v = self.run_evaluate::<T>(
+                        x_val,
+                        y_val,
+                        config.batch_size,
+                        compiled.loss,
+                        method,
+                    );
                     self.set_training(true);
                     match v {
                         Ok(v) => history.val_loss.push(v),
@@ -756,20 +770,26 @@ impl Sequential {
 
         let prev_training = self.training();
         self.set_training(false);
-        let result = self.run_evaluate::<T>(x, y, batch_size, loss);
+        let result = self.run_evaluate::<T>(x, y, batch_size, loss, "evaluate");
         self.set_training(prev_training);
         result
     }
 
+    /// `method` には呼び出し元の公開メソッド名（`"evaluate"`、または
+    /// [`Self::fit_with_callbacks_named`] の validation フェーズ経由
+    /// なら `"fit"`／`"fit_with_callbacks"`）を渡し、エラーメッセージが
+    /// 実際に呼ばれた公開メソッド名を名乗るようにする（イシュー #1763
+    /// PR #1883 レビュー指摘の是正）。
     fn run_evaluate<T: FitTarget>(
         &self,
         x: &Tensor<f32>,
         y: &Tensor<T>,
         batch_size: usize,
         loss: Loss,
+        method: &str,
     ) -> Result<f32, AutodiffError> {
         let to_invalid_arg = |e: fandhe_ai_tensor_core::data::DataError| {
-            AutodiffError::InvalidArgument(format!("Sequential::evaluate: {e}"))
+            AutodiffError::InvalidArgument(format!("Sequential::{method}: {e}"))
         };
         let x_dataset = TensorDataset::new(x.clone()).map_err(to_invalid_arg)?;
         let y_dataset = TensorDataset::new(y.clone()).map_err(to_invalid_arg)?;
@@ -781,7 +801,7 @@ impl Sequential {
 
         for batch in &loader {
             let (x_batch, y_batch) = batch.map_err(|e| {
-                AutodiffError::InvalidArgument(format!("Sequential::evaluate: {e}"))
+                AutodiffError::InvalidArgument(format!("Sequential::{method}: {e}"))
             })?;
             let n_batch = x_batch.shape().first().copied().unwrap_or(0);
 
@@ -790,20 +810,19 @@ impl Sequential {
             let pred = self.forward(&tape, &x_var)?;
             let loss_var = T::loss_for(loss, &tape, &pred, &y_batch)?;
             let loss_scalar = loss_var.to_tensor().get(&[]).ok_or_else(|| {
-                AutodiffError::InvalidArgument(
-                    "Sequential::evaluate: loss の shape が [] ではない\
+                AutodiffError::InvalidArgument(format!(
+                    "Sequential::{method}: loss の shape が [] ではない\
                      （loss 演算の契約違反）"
-                        .to_string(),
-                )
+                ))
             })?;
             weighted_sum += loss_scalar as f64 * n_batch as f64;
             count += n_batch;
         }
 
         if count == 0 {
-            return Err(AutodiffError::InvalidArgument(
-                "Sequential::evaluate: 処理されたサンプルが 0 件".to_string(),
-            ));
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: 処理されたサンプルが 0 件"
+            )));
         }
         Ok((weighted_sum / count as f64) as f32)
     }
