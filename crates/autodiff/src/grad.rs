@@ -1547,6 +1547,15 @@ pub(crate) fn vjp(
             let d_input = masked_fill_vjp(&mask, upstream);
             vec![(input, d_input)]
         }
+        // `Var::dropout` が記録するノード（イシュー #1603）。
+        // `d_input = upstream ⊙ mask`（`mask` は `input` と同 shape の
+        // ため broadcast 縮約は不要。`Op::Mul` の VJP と同じ
+        // [`vjp_elementwise_mul`] を再利用する——forward `y = x ⊙ mask`
+        // に対する `∂y/∂x = mask` そのもの）。
+        Op::Dropout { input, mask } => {
+            let d_input = vjp_elementwise_mul(ops, upstream, &mask)?;
+            vec![(input, d_input)]
+        }
         // `Var::pad`（イシュー #1756）。「pad の forward ⟷ narrow の
         // VJP・pad の VJP ⟷ narrow の forward」という双対性
         // （`Op::Concat`⟷`Op::Narrow` の双対性と同型）に基づき、`Op::
@@ -2134,6 +2143,79 @@ pub(crate) fn masked_fill_with_fallback(
             Ok(v)
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::masked_fill(x, mask, value)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::Dropout`] の forward（`Var::dropout`）が使うマスク生成
+/// （イシュー #1603・`docs/rng-global-contract-design.md` §3.2）。
+///
+/// [`fandhe_ai_tensor_core::rng::rand`]（#1602 契約どおりホスト側の
+/// グローバル RNG。`with_global_rng` 経由で `numel` 回 `[0, 1)` の
+/// 一様乱数を引く）をそのまま呼び、要素ごとに `keep ⇔ u >= p`
+/// （keep 確率 `1 - p`）で `scale = 1.0 / (1.0 - p)` または `0.0` へ
+/// 変換する。`rand` を再利用する（独自に `with_global_rng` を叩き
+/// 直さない）ことで、グローバル RNG の消費回数契約（「`dropout` で
+/// `numel` 回引く」は「`rand(shape)` で `numel` 回引く」と同一の
+/// 消費列になる）を機構として保証する。
+///
+/// `p` は呼び出し元（[`crate::var::Var::dropout`]）が事前に
+/// `p.is_finite() && (0.0..=1.0).contains(&p)` を検査済みの前提
+/// （本関数はその検査を繰り返さない）。`p == 1.0` は `scale = inf` に
+/// なるが keep 位置（`u >= 1.0`）が存在しないため出力へは現れない
+/// （`f32::INFINITY` を計算はするが使わない。IEEE 754 のまま）。
+///
+/// `shape` は呼び出し元の `Var::shape()` 由来のため `rand` の要素数
+/// 検査が失敗することは実務上ないが、型付きエラーとして伝播する
+/// （本番経路で `unwrap`/`expect` を使わない規律。`.claude/rules/
+/// coding-rust.md`）。
+pub(crate) fn dropout_mask(shape: &[usize], p: f32) -> Result<Tensor<f32>, AutodiffError> {
+    let uniform = fandhe_ai_tensor_core::rng::rand(shape)
+        .map_err(AutodiffError::Shape)?
+        .contiguous();
+    let scale = 1.0f32 / (1.0f32 - p);
+    let data: Vec<f32> = uniform
+        .as_slice()
+        .map(|s| {
+            s.iter()
+                .map(|&u| if u >= p { scale } else { 0.0 })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(build_tensor(data, shape))
+}
+
+/// [`Op::Dropout`] の forward（`Var::dropout`）が使う「バックエンド
+/// 実装 → フォールバック」ヘルパー（イシュー #1603）。
+/// [`masked_fill_with_fallback`] と同型: `ops.mul` → `Unsupported` の
+/// ときのみ `eval::mul` へフォールバックし、それ以外のエラーは伝播
+/// する（判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+/// 出力 shape は `x`（`mask` と同 shape のため broadcast 縮約は
+/// 不要）と恒等。
+///
+/// `BackendOps::mul` は forward（`Op::Mul`）と全く同じ単一 IEEE 乗算
+/// のため、新規 `BackendOps` メソッドを追加せずに 3 バックエンド
+/// （CPU／CUDA／Metal）で bit 同一の dropout forward が構造的に
+/// 成立する（`docs/compat-api-scope.md` の Embedding／SDPA／einsum と
+/// 同じ「既存演算への合成のみで `BackendOps` 非拡張」方針）。
+pub(crate) fn dropout_with_fallback(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+    mask: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.mul(x, mask) {
+        Ok(v) => {
+            if v.shape() != x.shape() {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: v.shape().to_vec(),
+                        rhs: x.shape().to_vec(),
+                    },
+                )));
+            }
+            Ok(v)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(eval::mul(x, mask)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
 }

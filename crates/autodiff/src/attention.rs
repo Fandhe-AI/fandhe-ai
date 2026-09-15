@@ -27,7 +27,8 @@
 //! 学習ループへの影響はない。
 //!
 //! **対象外（本 issue のスコープ外。`out-of-scope-tracking.md`）**:
-//! `dropout_p`（Dropout 未実装。#1603）・`enable_gqa`・attention
+//! `dropout_p`（SDPA への結線は対象外。`Var::dropout` 自体は #1603 で
+//! 実装済み）・`enable_gqa`・attention
 //! weights の返却・f16／bf16 経路（#1626）・CUDA／Metal 専用の融合
 //! attention カーネル（`docs/kernel-fusion.md` の「複合ワークロードで
 //! 融合を性能目標の前提にしない」方針と整合）・`MultiheadAttention`

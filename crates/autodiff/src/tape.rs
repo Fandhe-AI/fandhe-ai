@@ -730,6 +730,27 @@ pub(crate) enum Op {
     /// （fill 位置の勾配は 0。broadcast なし・shape 不変のため縮約は
     /// 不要）。
     MaskedFill { input: NodeId, mask: Tensor<f32> },
+    /// `Var::dropout`（`torch.nn.functional.dropout(input, p, training)`
+    /// 相当。イシュー #1603）。`training == false` または `p == 0.0`
+    /// のときは forward 側（`Var::dropout`）が本 variant を記録せず
+    /// `self` を素通りさせる（PyTorch `if (p == 0 || !train) return
+    /// input;` と同じ早期リターン。RNG を一切消費しない）ため、本
+    /// variant が現れる時点で `p ∈ (0, 1]` は確定している。
+    ///
+    /// `mask`（`input` と同 shape・contiguous な f32）は forward 時点
+    /// で `crate::grad::dropout_mask` が生成し 1 回だけ実体化する
+    /// （[`Op::Where`]／[`Op::MaskedFill`] と同じ「`Op` 自身が保持し
+    /// 以後再計算しない」方針）。値は `keep` 位置（一様乱数
+    /// `u >= p`）で `scale = 1.0 / (1.0 - p)`、`drop` 位置で `0.0`
+    /// （`p == 1.0` は `scale = inf` だが keep 位置が存在しないため
+    /// 出力へは現れない。`docs/rng-global-contract-design.md` §3.2
+    /// のマスク契約）。`BackendOps::mul` に対応メソッドがあるため
+    /// 非融合対象（`push_eager` で常に実体化）。
+    ///
+    /// VJP（`grad.rs`）: `d_input = upstream ⊙ mask`（`Op::Mul` と
+    /// 同じ elementwise 積。`mask` は `input` と同 shape のため
+    /// broadcast 縮約は不要）。
+    Dropout { input: NodeId, mask: Tensor<f32> },
     /// `Var::gather`（`torch.gather` 相当。`Var::index_select` も
     /// 1-D `index` を同 rank の stride-0 view へ拡張したうえで本
     /// variant へ委譲する。イシュー #1776）。`index`（非追跡データ・
@@ -1254,6 +1275,10 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （merge 時の非網羅 match 是正）。
             Op::Where { .. } | Op::MaskedFill { .. } => false,
+            // `Op::Dropout`（イシュー #1603）も `mask` を `Op` 自身が
+            // 保持する eager 実体化演算で `recompute_value` に再計算
+            // 経路を持たないため非適格（`Op::MaskedFill` と同型）。
+            Op::Dropout { .. } => false,
             // `Op::ScalarUnary`／`Op::ScalarBinary`（イシュー #1634）は
             // eager 実体化演算だが `recompute_value` に再計算分岐を
             // 持たないため非適格（`Op` doc「最小・安全側の判断」参照。
@@ -1370,6 +1395,7 @@ impl Op {
                 f(*b);
             }
             Op::MaskedFill { input, .. } => f(*input),
+            Op::Dropout { input, .. } => f(*input),
             Op::ScalarUnary { input, .. } => f(*input),
             Op::ScalarBinary { a, b, .. } => {
                 f(*a);

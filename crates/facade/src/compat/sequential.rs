@@ -2,12 +2,16 @@
 //! #95。TASK-9.4・#411 で `fandhe_ai_autodiff::compat` から本クレートへ移設）。
 //! 数値ロジックは一切持たず、`fandhe_ai_autodiff::nn::Module` 実装
 //! （`Linear`・`Relu`・`Sigmoid`・`Tanh`・`Silu`・`Hardswish`・
-//! `LeakyRelu`・`Elu`〈イシュー #1714〉）をメソッドチェーンで積み上げ、
-//! `forward`/`predict` で `nn::Module::forward` へ委譲するだけの薄い
-//! ビルダー（REQ-9）。対象レイヤーは `docs/compat-api-scope.md` §1 の
-//! 範囲拡張手続き（同 §5）を経て追加された集合限定（Linear・
-//! ReLU/Sigmoid/Tanh・Silu/Hardswish/LeakyRelu/Elu。GELU／Softplus は
-//! #1713、Conv 等は未実施のまま同手続きを経ずに追加しない）。
+//! `LeakyRelu`・`Elu`〈イシュー #1714〉・`Dropout`〈イシュー #1603〉）を
+//! メソッドチェーンで積み上げ、`forward`/`predict` で
+//! `nn::Module::forward` へ委譲するだけの薄いビルダー（REQ-9）。対象
+//! レイヤーは `docs/compat-api-scope.md` §1 の範囲拡張手続き（同 §5）を
+//! 経て追加された集合限定（Linear・ReLU/Sigmoid/Tanh・Silu/Hardswish/
+//! LeakyRelu/Elu/Dropout。GELU／Softplus は #1713、Conv 等は未実施の
+//! まま同手続きを経ずに追加しない）。`Dropout` は本クレート内実装で
+//! 唯一 `set_training`／`training`（イシュー #1758）を実際に保持する
+//! 層のため、`Sequential::set_training` の伝播がここで初めて実挙動差
+//! を生む（`nn::Dropout` モジュール doc 参照）。
 //!
 //! **学習（勾配取得・パラメータ更新。#294 で対応済み）**: [`Sequential::bind`]
 //! が返す [`SequentialVars`] を経由して `LinearVars`（勾配取得の入口。
@@ -91,7 +95,7 @@ use crate::{
     Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{Elu, Hardswish, LeakyRelu, Relu, Sigmoid, Silu, Tanh};
-use fandhe_ai_autodiff::nn::{Linear, Module, Sequential as NnSequential};
+use fandhe_ai_autodiff::nn::{Dropout, Linear, Module, Sequential as NnSequential};
 use fandhe_ai_tensor_core::{Activation, BackendOps};
 
 /// Keras `Sequential` 慣習のレイヤー積み上げビルダー。`add_*` はメソッド
@@ -200,6 +204,21 @@ impl Sequential {
         self
     }
 
+    /// Dropout 層を追加する（`nn::Dropout`。イシュー #1603）。`p`
+    /// （drop 確率）が `[0, 1]` の範囲かつ有限であること（`Dropout::new`
+    /// の検査。`add_linear` と同じく層構築の時点で早期に弾くため
+    /// `Result` を返す）。追加時点の `training` は `true`（PyTorch
+    /// `Module.training` の初期値と揃える）——以後は
+    /// [`Sequential::set_training`]／[`Sequential::train`]／
+    /// [`Sequential::eval`] でモデル全体のモードを切り替えると本層へ
+    /// 伝播する（`Dropout` は本クレート内実装で唯一この伝播が実挙動差
+    /// を生む層。モジュール doc 参照）。
+    pub fn add_dropout(mut self, p: f32) -> Result<Self, AutodiffError> {
+        let dropout = Dropout::new(p)?;
+        self.inner.push(Box::new(dropout));
+        Ok(self)
+    }
+
     /// 積み上げた層を先頭から順に `Module::forward` へ委譲する。
     /// 呼び出し元が用意した `tape` 上で 1 回分の forward を計算する
     /// （`Linear::bind` がステップごとに葉ノードを登録し直す契約に従う。
@@ -242,6 +261,16 @@ impl Sequential {
     /// 到達しない。公開シグネチャ・戻り値・数値結果は変更しない
     /// （新旧経路の bit 完全一致は `sequential_predict_tape_free_matches_via_tape_bit_exact`
     /// で検証）。
+    ///
+    /// **train／eval モードの扱い（イシュー #1603・#1758）**: 本メソッド
+    /// は層の `training` フラグ（既定 `true`）を尊重する——
+    /// [`Sequential::add_dropout`] を含むモデルに対し `eval()` を呼ばず
+    /// に `predict` すると、PyTorch `model(x)` が `model.training` に
+    /// 従うのと同じく `Dropout` はマスクを適用する。決定的な推論結果が
+    /// 必要な場合は呼び出し側が先に [`Sequential::eval`] を呼ぶこと
+    /// （`predict` 自体が暗黙に推論モードへ切り替えることはない。
+    /// `nn::Dropout` モジュール doc「train／eval と `predict`／
+    /// `forward_host` の整合」参照）。
     pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
         match self.predict_tape_free(input) {
             Err(AutodiffError::Backend(BackendError::Unsupported(_))) => {
@@ -390,12 +419,12 @@ impl Sequential {
     /// 「借用を解放してから呼ぶ」注意と同じ制約）。構築時（`add_*`
     /// ビルダー）の後・forward の合間に呼ぶ想定。
     ///
-    /// 本クレート内実装（`Linear`・活性化関数群等）は全てモード非依存の
-    /// ため、現時点では `layers` への伝播は数値経路に一切影響しない
-    /// （`nn::module` の trait doc「モードの正はコンテナが保持する
-    /// フラグ」契約参照）。Dropout（#1603）等のモード依存層が
-    /// `compat::Sequential` へ追加可能になった時点で、この伝播が実際の
-    /// 挙動差を生む。
+    /// `Linear`・活性化関数群等は全てモード非依存のため `layers` への
+    /// 伝播は影響しないが、[`Sequential::add_dropout`]（イシュー #1603）
+    /// で追加した層はこの伝播で実際に `training` フラグが更新され、
+    /// forward の挙動（マスクの適用有無）が変わる（`nn::module` の
+    /// trait doc「モードの正はコンテナが保持するフラグ」契約参照。
+    /// `nn::Dropout` モジュール doc も参照）。
     pub fn set_training(&mut self, training: bool) {
         // `nn::Sequential::set_training`（`Module` 実装）が自身のモード
         // フラグ更新と全子層への伝播をまとめて担う（イシュー #1759 で

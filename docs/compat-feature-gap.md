@@ -930,8 +930,8 @@ facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_bi
   （#1726 で実装済み。下記「追補（イシュー #1726）」参照）・
   `randn_like`／`rand_like`／`normal`／`uniform_`／`bernoulli`／
   `multinomial`／`randperm`・非グローバル RNG（`torch.Generator` 相当）・
-  CUDA／Metal デバイス側乱数カーネル・`nn::Dropout`（#1603）・
-  `randint` の int64 版。
+  CUDA／Metal デバイス側乱数カーネル・`nn::Dropout`（#1603 で実装済み。
+  §1.2「Dropout」行参照）・`randint` の int64 版。
 
 ## 追補（イシュー #1726）
 
@@ -1558,8 +1558,8 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
   CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機での facade
   parity テストは、本実装エージェントの実行環境に実機への到達手段が
   ないため未実測のまま Mac／GB10 セッションへ申し送る。
-- 対象外（既存 issue で追跡可能）: `dropout_p`（Dropout 未実装。
-  #1603）・`enable_gqa`・attention weights の返却・f16／bf16 経路
+- 対象外（既存 issue で追跡可能）: `dropout_p`（SDPA への結線は対象外。
+  `Var::dropout` 自体は #1603 で実装済み）・`enable_gqa`・attention weights の返却・f16／bf16 経路
   （#1626）・CUDA／Metal 専用の融合 attention カーネル（性能最適化。
   `docs/kernel-fusion.md` の方針と整合）・`MultiheadAttention` Module
   自体（in/out projection・head 分割。親 #1605 の sub-issue (b)・
@@ -1570,7 +1570,7 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 
 - `nn::MultiheadAttention`（パラメータ本体。q/k/v/out の 4 `nn::Linear`）・`nn::MultiheadAttentionVars`（テープ登録済み。`forward(query, key, value, attn_mask, is_causal)`）を追加した（`crates/autodiff/src/nn/attention.rs`）。新規 `Op`／`BackendOps` メソッドは一切追加せず、既存の `Var::matmul`（rank≥3 バッチ。#1715）・`transpose`（zero-copy view）・`mul`（scale）・`masked_fill`（#1637）・`softmax`（#1594）と `nn::Linear`（4 層）の合成のみで実装した——分解先の演算はいずれも CPU／CUDA／Metal 全てに実装済みのため、「対応する Op／`BackendOps`／VJP を追加する」という受入要件は合成によって自動的に充足される（`crate::einsum`・#1639 と同型の論法）。
 - 前提 sub-issue #1639（`Var::scaled_dot_product_attention`）は本 issue の着手時点で未マージ（PR #1845 OPEN）だったため、attention 本体（scale・causal／`attn_mask`・softmax）は private ヘルパー `sdpa_compose` として #1639（PR #1845）と数式・mask 極性（`true`=attend。PyTorch bool mask 規約）・causal 規約（top-left aligned `j<=i`。非正方対応）を完全に一致させて複製した。#1639 マージ後、`sdpa_compose` は `Var::scaled_dot_product_attention` 呼び出しへ置き換える対象として残る（別 PR）。
-- 入出力契約は rank-3・batch_first 固定（`query: [B,L,E]`・`key`/`value: [B,S,E]` → `[B,L,E]`）。unbatched 入力・`batch_first=false`・`kdim`/`vdim`・`key_padding_mask` 引数・`dropout_p`（#1603 未実装）・`need_weights`／attention weights 返却・`add_bias_kv`／`add_zero_attn`・packed `in_proj_weight`（#1616）は対象外のまま。
+- 入出力契約は rank-3・batch_first 固定（`query: [B,L,E]`・`key`/`value: [B,S,E]` → `[B,L,E]`）。unbatched 入力・`batch_first=false`・`kdim`/`vdim`・`key_padding_mask` 引数・`dropout_p`（MHA への結線は対象外。`Var::dropout` 自体は #1603 で実装済み）・`need_weights`／attention weights 返却・`add_bias_kv`／`add_zero_attn`・packed `in_proj_weight`（#1616）は対象外のまま。
 - `Module` trait は実装した（`forward` は self-attention `q=k=v=input`・mask なし・非 causal として定義）。`compat::Sequential` 用の `as_linear`／`as_relu` フックはいずれも trait 既定のままオーバーライドしない（Embedding〈#1604〉と異なり `Module::forward` 自体は実装するが、学習可能パラメータの自動収集対象には含めない）。
 - facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
 - CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/mha_backend_parity.rs` の `#[ignore]` テストを参照）。
@@ -1712,3 +1712,4 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 #1767 で追補を追記（CUDA Conv1d 経路の検証済み化。`Var::conv1d`〈#1765〉は新規カーネルを持たない `conv2d` への reshape 併合のため、#1766 の CUDA `im2col`／`col2im` へ既に自動到達していたことをテストで固定——新規 `Op`／`BackendOps`／カーネル追加なし・facade 新規公開面なし。`crates/backend-cuda/tests/im2col_col2im_parity.rs::CASES` へ 1d 形状〈`H=1`・`kh=1`〉6 件を追加し `LaunchShape::derive`／`ops.rs` の `N=0` 早期リターンを 1d でも driver 非接触テストで確認。`crates/facade/tests/conv1d_backend_parity.rs` に `cuda_conv1d_backward_matches_cpu`〈REQ-2 複合判定〉・`cuda_conv1d_matches_manual_reshape_conv2d_bit_exact`〈同一 CUDA tape 上で `conv1d` と手動 reshape `conv2d` が forward／backward とも bit 完全一致する「特化」契約の直接検証〉・groups＋dilation forward parity を追加。CUDA／Metal 実機での facade parity テストは未実測のまま `docs/perf/logs/cuda-conv1d-1767/` へ申し送り）。
 
 #1732 で追補を追記（`nn.BatchNorm2d` 行を CPU 実装済み化。`Var::batch_norm`／`batch_norm_with_batch_stats`／`batch_norm_infer`・`tape::Op::BatchNorm`〈`fixed_stats: Option<(Tensor<f32>, Tensor<f32>)>` payload で train／eval を切替〉・`BackendOps::batch_norm_train`／`batch_norm_infer`〈既定 `Unsupported`〉・`nn::BatchNorm1d`／`BatchNorm2d`〈本クレート内で初めて `Module::set_training`／`training` を実際にオーバーライドするモード依存層。running stats は `RefCell` で保持し `named_parameters` には含めない〉。縮約順序は LayerNorm（#1596）の `warp_reduce_f64` butterfly 契約をチャネル方向の `M=n*spatial` 要素へ適用・CPU カーネルとホスト参照実装は bit 完全一致。facade 新規公開面なし〈`Var::batch_norm*` は既存 `Var` 再エクスポート経由〉。CUDA／Metal 専用カーネルは #1735／#1736 へ引き継ぎ。`docs/batch-norm-ops-design.md`）。
+#1603 で追補を追記（`nn.Dropout` 実装済み化。`Var::dropout(p, training)`〈inverted dropout。`torch.nn.functional.dropout` 相当〉・`tape::Op::Dropout`・`nn::Dropout`〈`p`／`training` を保持し `Module::set_training`／`training` を実際にオーバーライドする本クレート内実装で唯一の層〉・`compat::Sequential::add_dropout`〈facade 新規 `pub fn` 1 件〉。マスク生成は `crate::grad::dropout_mask` がホスト側のグローバル RNG（`fandhe_ai_tensor_core::rng::rand`。#1602）を経由し、forward／backward とも既存必須メソッド `BackendOps::mul` への単一乗算に帰着するため新規 `BackendOps` メソッドは追加していない（当初の想定は「RNG 契約設計＋マスク適用 Op〈train/eval モード分岐〉＋VJP」〈338 行目〉だったが、実装の結果 `BackendOps` trait 自体の拡張は不要と判明）。`predict`／`forward_host` とモードの整合は「コンテナの `training` フラグを尊重する」方式〈PyTorch `model(x)` と同じ。Keras の常時推論モードは不採用〉で確定。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り）。

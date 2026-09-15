@@ -2487,7 +2487,8 @@ impl<'t> Var<'t> {
     /// （`E == 0` かつ `scale == None` は [`AutodiffError::
     /// InvalidArgument`]）。
     ///
-    /// **対象外**: `dropout_p`（#1603 未実装）・`enable_gqa`・attention
+    /// **対象外**: `dropout_p`（SDPA への結線は対象外。`Var::dropout`
+    /// 自体は #1603 で実装済み）・`enable_gqa`・attention
     /// weights の返却・f16／bf16（#1626）。既存カーネルの合成のみで
     /// 実装しており、新規 `Op`／`BackendOps` メソッドは追加していない
     /// （CUDA／Metal 専用の融合 attention カーネルは対象外。
@@ -3423,6 +3424,83 @@ impl<'t> Var<'t> {
             Op::MaskedFill {
                 input: self.id,
                 mask: mask_f32,
+            },
+            value_out,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// dropout（`torch.nn.functional.dropout(input, p, training)`
+    /// 相当。イシュー #1603）。要素ごと独立に確率 `p` で 0 へ落とし、
+    /// 残す要素は `1/(1-p)` 倍する（inverted dropout。学習時と推論時で
+    /// 期待値のスケールを揃える PyTorch と同じ規約）。
+    ///
+    /// # 早期リターン（`Op` を記録しない・RNG を消費しない）
+    ///
+    /// `training == false` または `p == 0.0` のときは `self` をそのまま
+    /// 返す（`at::native::dropout` の `if (p == 0 || !train) return
+    /// input;` と同じ。`crate::tensor_core::rng::with_global_rng` を
+    /// 一切呼ばないため、eval モード下ではグローバル RNG の状態が
+    /// dropout 呼び出しの有無で変化しない）。
+    ///
+    /// # マスク生成（イシュー #1602 のグローバル RNG 契約）
+    ///
+    /// `crate::grad::dropout_mask` が [`fandhe_ai_tensor_core::rng::
+    /// rand`] を経由してホスト側だけでマスクを生成する（`BackendOps`
+    /// を経由しない。`docs/rng-global-contract-design.md` §3.2）。
+    ///
+    /// # エラー
+    ///
+    /// `p` が非有限、または `[0, 1]` の範囲外の場合
+    /// [`AutodiffError::InvalidArgument`]。
+    pub fn dropout(&self, p: f32, training: bool) -> Result<Var<'t>, AutodiffError> {
+        if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::dropout: p must be finite and in [0, 1], got {p}"
+            )));
+        }
+        if !training || p == 0.0 {
+            // 早期リターン: 新しいノードを積まず `self` の clone を
+            // 返す（`self.id` をそのまま指す `Var` を作るだけで、
+            // `Op` の記録もグローバル RNG の消費も一切行わない）。
+            return Ok(Var::from_raw(self.tape, self.id));
+        }
+        let mask = crate::grad::dropout_mask(&self.shape(), p)?;
+        self.dropout_with_mask(mask)
+    }
+
+    /// [`Self::dropout`] の内部本体（マスク固定入口。`pub(crate)`）。
+    /// 現時点では [`Self::dropout`] が検査・早期リターン判定・マスク
+    /// 生成の後に本メソッドへ委譲するだけの薄い入口であり、
+    /// forward（マスク乗算）と backward（VJP）を `mask` の生成経路
+    /// から分離する内部構造上の役割にとどまる（実際の VJP 解析解
+    /// 検証は `crates/autodiff/tests/nn_dropout.rs` が `Var::mul` を
+    /// 直接組み立てる別経路で行っており、本メソッドは経由しない）。
+    /// `mask` を外部注入可能な形に分離してあるため、将来グローバル
+    /// RNG に触れず固定マスクで forward／backward を検証するテストを
+    /// 追加する余地として残している。
+    pub(crate) fn dropout_with_mask(
+        &self,
+        mask: fandhe_ai_tensor_core::Tensor<f32>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let out_shape = self.shape();
+        let x_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let value_out = crate::grad::dropout_with_fallback(self.tape.ops(), &x_val, &mask)?;
+        if value_out.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value_out.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Dropout {
+                input: self.id,
+                mask,
             },
             value_out,
         );

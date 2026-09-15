@@ -140,9 +140,11 @@ pub trait Module {
     /// ため、このデフォルト（no-op）のままオーバーライドしない。
     /// **モードの正はコンテナ**（`fandhe_ai_facade::compat::sequential::
     /// Sequential`・`crate::nn::container::ModuleList`／`Sequential`
-    /// 〈イシュー #1759 で実装済み〉）**が保持するフラグ**である。今後
-    /// Dropout（#1603）・
-    /// BatchNorm（#1608 配下）等のモード依存層を追加する際は、本
+    /// 〈イシュー #1759 で実装済み〉）**が保持するフラグ**である。
+    /// [`crate::nn::Dropout`]（イシュー #1603）がこの契約に従い
+    /// `set_training`／`training` を実際にオーバーライドする**最初の
+    /// 実装**である（`nn/dropout.rs` モジュール doc 参照）。今後
+    /// BatchNorm（#1608 配下）等のモード依存層を追加する際も、本
     /// メソッドと [`Module::training`] の両方を必ずオーバーライドし、
     /// 自層のフィールド（例: `Cell<bool>`）へ実際に保持すること
     /// （既定のまま放置すると、コンテナ側の `set_training` 呼び出しが
