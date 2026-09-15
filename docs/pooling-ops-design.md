@@ -293,11 +293,14 @@ VJP 手順:
 フォールバック）。
 
 padding 位置は §5 の索引契約上勝者になり得ないため索引は常に `[0, H·W)`
-の範囲に収まる（forward 側で保証）。VJP 側でも `debug_assert!` と安全側
-スキップ（境界外索引を無視する）を設ける。この保証は §3 の
-`dilation` による空窓拒否検査（`kernel=2` かつ `dilation > H` の構成を
-`ShapeError` で拒否）が「すべての窓が少なくとも 1 つの有効入力を含む」
-ことを前提として成立している。
+の範囲に収まる（forward 側で保証）。**#1728 実装時に fail-closed へ
+確定**: VJP 側は `debug_assert!` と安全側スキップ（境界外索引を無視する）
+ではなく、索引が `[0, H·W)` を外れる場合は `AutodiffError::Backward` を
+返して拒否する（`.claude/rules/security.md` A08「判定迂回経路を作らない」
+規律に合わせ、release ビルドでも契約違反を検知できるようにするため）。
+この保証は §3 の `dilation` による空窓拒否検査（`kernel=2` かつ
+`dilation > H` の構成を `ShapeError` で拒否）が「すべての窓が少なくとも
+1 つの有効入力を含む」ことを前提として成立している。
 
 ## 7. AvgPool／AdaptiveAvgPool forward
 
@@ -476,3 +479,66 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
 本 issue（#1727）はコード変更を含まない設計 doc のみ。実装記録は
 #1728（CPU）・#1729（CUDA）・#1730（Metal）の各 issue で本節へ追記する
 （または各 issue 側の doc へ記録し本節から forward pointer を張る）。
+
+### #1728（CPU）実装記録
+
+- `tensor-core`: `backend_ops.rs::Pool2dParams`（`#[non_exhaustive]`・
+  `new` で padding 上限〈`padding <= kernel/2`〉・`kernel`／`stride`／
+  `dilation` の 0 を検査）・`BackendOps::max_pool2d`／`avg_pool2d`／
+  `adaptive_avg_pool2d`（既定 `Unsupported`）。`ops_shape.rs::
+  pool_out_len`（`conv_out_len` と同式・別関数）・`pool2d_out_shape`
+  （`H`／`W=0` を負分子ゲートより前に独立検査・`kernel=2 && dilation
+  > in_len` の空窓拒否）・`adaptive_pool2d_out_shape`・
+  `adaptive_window`（forward／VJP 共有の単一情報源）。
+- `backend-cpu`: `pooling.rs`（単一スレッド逐次参照実装。
+  `window_input_pos` ヘルパー・先勝ちタイ規則＋NaN 伝播〈MaxPool〉・
+  `f64` アキュムレータ縮約〈AvgPool／AdaptiveAvgPool〉）を `ops.rs`
+  の `CpuBackendOps::max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`
+  へ二重検査方針で接続。
+- `autodiff`: `tape.rs::Op::MaxPool2d`（索引 payload）／`Op::AvgPool2d`
+  （`params`／`count_include_pad` payload）／`Op::AdaptiveAvgPool2d`
+  （`is_checkpoint_eligible=false`・`for_each_input` 網羅 match 登録）。
+  `eval.rs::max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`（ホスト
+  参照実装。CPU 実装と意図的に同一アルゴリズムを複製）。
+  `grad.rs::max_pool2d_with_fallback` 等（`Unsupported` のときのみ
+  `eval::*` へフォールバック）・VJP（`avg_pool2d_vjp`／
+  `adaptive_avg_pool2d_vjp` を出力 major ループの `f64` アキュムレータ
+  配列で実装。加算順が入力 major ループと同一であることを doc comment
+  に導出記録・MaxPool VJP は `[N·C, H·W]` へ reshape してから
+  `scatter_add`）。`var.rs::Var::max_pool2d`／`max_pool1d`／
+  `avg_pool2d`／`avg_pool1d`／`adaptive_avg_pool2d`／
+  `adaptive_avg_pool1d`（1d は `conv1d` と同型の reshape 併合）。
+  `nn/pooling.rs`（`MaxPool1d`／`MaxPool2d`／`AvgPool1d`／`AvgPool2d`／
+  `AdaptiveAvgPool1d`／`AdaptiveAvgPool2d`。無状態・コンストラクタで
+  `Pool2dParams::new` 相当の検査を前倒し）・`nn/module.rs::impl
+  Module`（`forward`／`forward_host` の bit 一致を統合テストで確認）。
+- VJP の索引域外検査は §6 の記述改訂どおり `debug_assert!`＋安全側
+  スキップではなく `AutodiffError::Backward` による fail-closed 拒否
+  として実装した。
+- facade 新規公開面なし（`Var` 再エクスポート経由の到達のみ）。
+- 数値契約: MaxPool は forward（値・索引）・backward とも CPU 参照
+  実装とホストフォールバック（`eval::*`）で **bit 完全一致**
+  （`crates/backend-cpu/tests/pooling_parity.rs`・
+  `crates/facade/tests/pooling_backend_parity.rs` で確認）。AvgPool／
+  AdaptiveAvgPool も `f64` アキュムレータ契約が両実装で同一のため
+  同じく bit 完全一致（相殺列を含む回帰テストで確認済み）。
+- テスト: `crates/tensor-core/src/{backend_ops.rs, ops_shape.rs}`
+  `#[cfg(test)]`（padding 上限境界・負分子拒否・空間軸ゼロ検査・空窓
+  拒否・adaptive 窓式）・`crates/backend-cpu/src/pooling.rs`
+  `#[cfg(test)]`（タイ・NaN・padding 非勝者・重なり窓・非 contiguous
+  入力・相殺列）・`crates/backend-cpu/tests/pooling_parity.rs`（CPU
+  vs `eval::*` フォールバックの forward／backward bit 一致・shape
+  再検査の fail-closed 拒否）・`crates/autodiff/tests/pooling.rs`
+  （出力 shape 表・数値微分突合・重なり窓手計算値との bit 一致・1d≡2d
+  bit 一致・引数検査エラー variant）・`crates/autodiff/tests/
+  nn_pooling.rs`（`Module::forward`≡`forward_host`≡`Var::*` 直呼びの
+  bit 一致・構築時検査・`named_parameters` 空）・
+  `crates/autodiff/tests/tape_recording.rs`（2d 各演算が 1 eager
+  ノードのみ追加）・`crates/facade/tests/pooling_backend_parity.rs`
+  （facade 経由 CPU vs NaiveOps の forward／backward bit 一致・
+  `#[ignore]` Metal／CUDA〈本エージェント実行環境に実機なしのため
+  未実測。専用カーネル未実装〈#1729／#1730〉のため CPU と bit 完全
+  一致する契約〉）。
+- CUDA／Metal 実機実測は本エージェント実行環境に実機がないため未実施
+  （既定 `Unsupported` → ホストフォールバックのため機能的には到達
+  可能。専用カーネル・実機実測は #1729／#1730 へ引き継ぐ）。
