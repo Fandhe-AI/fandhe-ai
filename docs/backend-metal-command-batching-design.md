@@ -981,23 +981,57 @@ Linux 実行環境（本エージェント実行環境）には Apple Silicon �
   cargo test -p fandhe-ai-backend-metal --release --test resident_lhs_dinput_phase_bench -- --ignored --nocapture --test-threads=1
   cargo test -p fandhe-ai-backend-metal --release --features internal-diagnostics --test resident_lhs_dinput_phase_bench -- --ignored --nocapture --test-threads=1
 
-backward-only median（5 run 中央値・ms）: 未実測
-encode_delta / command_buffer_delta / wait_delta（trial ごと）: 未実測
+backward-only median（5 run 中央値・ms）: 2026-09-16 実測済み → median=0.634042 ms（q1=0.623666 / q3=0.638083, n=5）
+encode_delta / command_buffer_delta / wait_delta（trial ごと）: 2026-09-16 実測済み →
+  encode_deltas=[5, 5, 5, 5, 5] command_buffer_deltas=[4, 4, 4, 4, 4] wait_deltas=[3, 3, 3, 3, 3]
+  （§7.3.2 の訂正仮説 encode_delta=5・command_buffer_delta=4・wait_delta=3 と 5 trial すべて一致）
 
 resident_lhs_dinput_phase_bench（L1: p=784,q=256,r=64／L2: p=256,q=10,r=64）:
-  L1 variant_a: encode= sync= readback= transpose= total=
-  L1 variant_b: encode_only=
-  L1 recoverable_upper_bound=
-  L2 variant_a: encode= sync= readback= transpose= total=
-  L2 variant_b: encode_only=
-  L2 recoverable_upper_bound=
-  kernel_gpu（internal-diagnostics）: L1= L2=
+  ※ 通常ビルド（resident_lhs_phase.log）の値。n=5
+  L1 variant_a: encode=0.006167 ms sync=0.471208 ms readback=0.003209 ms transpose=0.000375 ms total(encode+sync+readback)=0.490124 ms
+  L1 variant_b: encode_only=0.009375 ms
+  L1 recoverable_upper_bound(A_total - B_encode)=0.480749 ms
+  L2 variant_a: encode=0.006333 ms sync=0.148500 ms readback=0.001375 ms transpose=0.000292 ms total(encode+sync+readback)=0.155708 ms
+  L2 variant_b: encode_only=0.005458 ms
+  L2 recoverable_upper_bound(A_total - B_encode)=0.150250 ms
+  ※ `--features internal-diagnostics` 再実行（resident_lhs_phase_gpu_timestamps.log）の値。n=5
+  L1 variant_a: encode=0.006500 ms sync=0.243084 ms readback=0.003417 ms transpose=0.000083 ms total=0.253001 ms | variant_b: encode_only=0.015166 ms | recoverable_upper_bound=0.237835 ms
+  L2 variant_a: encode=0.005958 ms sync=0.156542 ms readback=0.001291 ms transpose=0.000208 ms total=0.171542 ms | variant_b: encode_only=0.006791 ms | recoverable_upper_bound=0.164751 ms
+  kernel_gpu（internal-diagnostics。GPUEndTime-GPUStartTime median）: L1=0.109375 ms L2=0.013667 ms
 
-env_info（内部ホスト名は含めない）: 未実測
+env_info（内部ホスト名は含めない）: 2026-09-16 実測済み → Apple M4 Max（論理 CPU 16）・macOS 26.6.2（Darwin 25.6.0 arm64）・rustc 1.98.1・
+  実行コミット c9bf9830f7ed69c7cb56b22c0a5cf4d9e64938f5（#1563 適用前の before 腕）・record_only（専有ゲートなし）・
+  load average（1 分）実行前 14.87 / 実行後 28.04（共有負荷下。別セッションの workspace 全体テストが並走）
 ```
 
 実測は `docs/perf/logs/metal-dinput-sync-1562/`（生ログ・env_info）へ
 記録する。
+
+**2026-09-16 実測記録（#1563 の `orchestrate.sh` ステップ 4 による
+backfill。生ログは `docs/perf/logs/metal-dinput-sync-1562/`・同一実行の
+写しは `docs/perf/logs/metal-dinput-sync-1563/issue_1562_backfill.log`）**:
+
+- 方針 A のカウンタは 5 trial すべてが `5/4/3` で、§7.3.2 の訂正仮説
+  （`encode_delta=5`・`command_buffer_delta=4`・`wait_delta=3`）と
+  **一致**。当初仮説（`4/2/2`）は再現しない（`Op::MseLoss` VJP の
+  `dispatch_sync` を数え落としていた訂正前の値であり、訂正後の仮説が
+  実機でも成立することを確認）
+- 方針 B の `recoverable_upper_bound` は L1 0.480749 ms／L2 0.150250 ms
+  （通常ビルド）で、`variant_a` の `sync` が total の 96〜95% を占める
+  （encode・readback・transpose は合計 0.01 ms 未満）。`kernel_gpu`
+  内訳では L1 0.109375 ms／L2 0.013667 ms が純粋な GPU カーネル専有
+  時間で、`sync` の残り（L1 で約 0.13 ms・L2 で約 0.14 ms。internal-
+  diagnostics 実行の `sync` 基準）は host 側の `waitUntilCompleted`
+  待ち・ドライバオーバーヘッドに帰属する
+- **要確認**: L1 の `sync` が通常ビルド（0.471208 ms）と
+  internal-diagnostics 再実行（0.243084 ms）とで約 2 倍異なる。両方
+  とも共有負荷下（load average 1 分 14.87〜28.04）の単発計測であり
+  専有環境での再計測は未実施のため、どちらを代表値とするかは確定
+  しない（record only。本イシューは相対比較〈A vs B〉が主目的で、
+  いずれの実行でも `sync` 支配・`recoverable_upper_bound ≈ sync` の
+  構造は同じ）
+- 本節の値は #1563 適用前（c9bf9830）の状態で測定したもの。#1563
+  適用後のカウンタは §7.4.5 を参照
 
 ### 7.4 #1563: 層内合流の実装・回収しない結論の確定
 
@@ -1091,22 +1125,77 @@ only）→ d_input（同期点を持つ）**」へ入れ替えた。
 #### 7.4.5 実測記入欄（Mac セッション）
 
 ```
-bit 同一（metal_reuse_step_grad_bit_dump. main vs branch）: 未実測
-#[ignore] 群非後退: 未実測
+bit 同一（metal_reuse_step_grad_bit_dump. main vs branch）: 2026-09-16 実測済み → 4462/4462 行・diff 0 行（bit-identical。bitdump_label_diff.txt も 0 行＝項目集合一致）
+#[ignore] 群非後退: 2026-09-16 実測済み → 全 pass（mnist 3 passed／gemm_resident_parity 2 passed／device_param_store_backend_parity〈on_metal フィルタ〉2 passed／command_batching 2 passed）
 カウンタ（mnist_scale_train_reuse_metal_batch_counters）:
-  before（#1555 時点。再現確認）: encode= command_buffer= wait=
-  after（#1563）: encode= command_buffer= wait=
+  before（#1555 時点。再現確認）: encode=11 command_buffer=9 wait=9（再現）
+  after（#1563）: encode=11 command_buffer=8 wait=8（hard assert pass）
 カウンタ（mnist_scale_train_reuse_metal_backward_dinput_phase。record-only）:
-  before（#1562 時点。再現確認）: encode= command_buffer= wait=
-  after（#1563）: encode= command_buffer= wait=
+  before（#1562 時点。再現確認）: encode=[5,5,5,5,5] command_buffer=[4,4,4,4,4] wait=[3,3,3,3,3]（backward-only median=0.620416 ms q1=0.619500 q3=0.760083）
+  after（#1563）: encode=[5,5,5,5,5] command_buffer=[3,3,3,3,3] wait=[3,3,3,3,3]（backward-only median=1.073333 ms q1=1.064667 q3=1.176042。同テストの ignored_after_mnist.log 側実行では median=0.635666 ms q1=0.628167 q3=0.643750）
 A/B（scripts/bench/framework-compare/run_ab_dinput_sync_metal.sh。5 round・record_only）:
-  size=64 reuse step_total 中央値比 after/before= checksum一致=
-  fresh（対照・非判定）: 中央値比=
-env_info（内部ホスト名は含めない）: 未実測
+  size=64 reuse step_total 中央値比 after/before=0.9373（before 1.767 ms〈min 1.675 / max 1.797〉→ after 1.656 ms〈min 1.583 / max 1.668〉。run 内比 0.9912, 0.9259, 0.8960, 0.9283, 0.9138＝5/5 run すべて 1.00 未満） checksum一致=完全一致（全セル 0.080541）
+  fresh（対照・非判定）: 中央値比=0.9746（before 2.061 ms → after 2.009 ms。run 内比 0.9867, 0.9949, 0.9746, 0.8182, 1.0248。checksum 完全一致）
+env_info（内部ホスト名は含めない）: 2026-09-16 実測済み → Apple M4 Max（論理 CPU 16）・macOS 26.6.2（Darwin 25.6.0 arm64）・rustc 1.98.1・
+  before=c9bf9830f7ed69c7cb56b22c0a5cf4d9e64938f5／after=e851e91ae59660603f181c5847e776dba2d7106a（隣接コミット比較）・record_only（専有ゲートなし）・
+  load average（1 分）約 13〜41（uptime_before 13.65 / uptime_after 40.93 / A/B 中 42.50〜42.14。別セッションの workspace 全体テストが並走する共有負荷下）
 ```
 
 実測は `docs/perf/logs/metal-dinput-sync-1563/`（生ログ・env_info）へ
 記録する。
+
+**2026-09-16 実測記録・判定（Apple M4 Max。README の事前登録判定規則
+1〜8 に照らす。生ログは `docs/perf/logs/metal-dinput-sync-1563/`）**:
+
+- **比較対象の確定（経緯）**: README の「before=origin/main（#1563
+  適用前）」は起票当時の main を指す。実測時点の main（565300e4）は
+  #1563（PR #1665・マージコミット e851e91a）に加え、それ以後の変更
+  （#1566 の bias 勾配 f64 統一・#1690 等）を含むため、初回実行
+  （before=c9bf9830〈e851e91a の第 1 親〉・after=565300e4）では bit
+  dump に 117 行の diff（値の差分 14 件。いずれも `grad[1]`〈8 件〉／
+  `grad[3]`〈6 件〉＝bias 勾配で、13 件が 1 ULP・1 件〈step[3].grad[1][13]〉
+  が 2 ULP）が出た。これは #1563 以外の後続変更の影響であり #1563 の
+  bit 同一契約の検証にならないため、**隣接コミット比較
+  （before=c9bf9830・after=e851e91a）で再実行し、これを正式記録とする**。
+  初回（vs main）は `docs/perf/logs/metal-dinput-sync-1563/vs-main/`
+  （`bitdump_diff.txt`・`bitdump_label_diff.txt`）に事実のみ残す
+- 規則 1（bit 同一）: **充足**。両腕 4462 行・項目集合一致・diff 0 行
+- 規則 2（`#[ignore]` 群非後退）: **充足**。4 ログとも全 pass・既知
+  FAIL なし。`device_param_store_backend_parity` は `orchestrate.sh` の
+  `IGNORED_CMD_STORE_PARITY` に `on_metal` フィルタを付けて実行した
+  （フィルタなしでは CUDA 必須テストが `set -eu` で中断するため。#1691
+  側 orchestrate と同じ扱い。同ディレクトリの `orchestrate.sh` に同一
+  内容の 1 行修正を反映済み）
+- 規則 3（カウンタ）: **充足**。`batch_counters` は before 11/9/9 を
+  再現・after 11/8/8（hard assert pass）。`backward_dinput_phase` は
+  before 5/4/3・after 5/3/3 を 5 trial すべてで再現（§7.4.1 の机上導出
+  どおり cb 生成が 4 → 3 に 1 減り、wait は 3 のままだが内訳が変わる
+  ——before では d_weight(L1) 分の cb が窓内で未 wait のまま SGD update
+  側へ持ち越されていたのに対し、after では層内合流により窓終了時点で
+  open バッチが残らず全て窓内で wait 済み）
+- 規則 4（A/B・Tier 1）: **充足**。size=64 reuse `step_total` 中央値比
+  0.9373 ≤ 1.00・5/5 run すべて 1.00 未満・checksum 完全一致
+  （`--require-checksum-exact` 機械判定 pass）
+- 規則 5（fresh 対照）: 0.9746（非判定。`Op::LinearAct` 経路・本変更
+  非到達のため差はノイズ帯と解釈。run 内比 0.8182〜1.0248 と幅が大きい）
+- 規則 6（`--phases` 診断・reuse・単発）: backward 607.2 → 702.8 us
+  （1.157）・device_update 213.2 → 4.8 us（0.022）・step_total 1.751 →
+  1.620 ms（0.925）。backward 窓が増え device_update 窓がほぼ消える方向
+  は、#1562 時点で d_weight(L1) 分の cb wait が SGD update 側へ持ち越さ
+  れていた（`wait_delta` 5/4/3 の注記）ものが #1563 で backward 窓内へ
+  移った（5/3/3）というカウンタの変化と整合する（単発計測・非判定）
+- 規則 7: record_only・uptime／pmset 記録済み（pmset は thermal／
+  performance warning の記録なし）
+- 規則 8: 未達なし
+- **verdict: ADOPT（非後退・bit 同一・カウンタ 11/9/9 → 11/8/8 再現。
+  #1563 の結線を維持）**
+- **要確認**: `backward_dinput_phase` の backward-only median が after
+  腕で 1.073 ms（`backward_phase_after.log`）と 0.636 ms（同テストの
+  `ignored_after_mnist.log` 側実行）とで約 1.7 倍異なる。before 腕
+  （0.620 ms）と比べても前者は大きく、共有負荷下（load average 1 分
+  13〜41）の単発計測に起因する可能性が高いが、専有環境での再計測は
+  未実施のため確定しない（record only・非判定。カウンタ値自体は両
+  実行とも 5/3/3 で一致）
 
 ### 7.5 #1690: MSE forward/backward の encode-only 化
 

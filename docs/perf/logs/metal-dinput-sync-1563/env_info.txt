@@ -1,0 +1,11 @@
+# イシュー #1563 M4 Max 実機実測の環境情報（2026-09-16。内部ホスト名は含めない）
+hostname: masked
+machine: Apple M4 Max（論理 CPU 16）
+os: macOS 26.6.2 (Darwin 25.6.0 arm64, BuildVersion 25G83)
+rustc: 1.98.1 (48a229cea 2026-09-01)
+load_gate: record_only（専有ゲート機構なし。別セッションの workspace 全体テストが並走する共有負荷下）
+load_average_1min_during_measurement: 約 13〜41（uptime_before.txt: 13.65 / uptime_after.txt: 40.93 / ab/raw/uptime-1563.log: 42.50〜42.14）
+before_arm: c9bf9830f7ed69c7cb56b22c0a5cf4d9e64938f5（#1563 マージコミット e851e91a の第 1 親。#1563 適用前）
+after_arm:  e851e91ae59660603f181c5847e776dba2d7106a（PR #1665 マージコミット。#1563 適用後）
+comparison: 隣接コミット比較（正式記録）。初回の before=c9bf9830 / after=origin/main 565300e4 比較は vs-main/ を参照（参考。#1566 等の後続変更が混入するため #1563 の bit 同一契約の検証にならない）
+orchestrate_sh_note: IGNORED_CMD_STORE_PARITY に `on_metal` フィルタを付けて実行（CUDA 必須テストで set -eu 中断するため。#1691 側 orchestrate と同じ扱い）

@@ -66,7 +66,7 @@ BIT_DUMP_CMD="cargo test -p fandhe-ai --release --test metal_reuse_step_grad_bit
 EXPECTED_BITDUMP_LINES=4462
 IGNORED_CMD_MNIST="cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture --test-threads=1"
 IGNORED_CMD_GEMM_PARITY="cargo test -p fandhe-ai-backend-metal --release --test gemm_resident_parity -- --ignored --nocapture"
-IGNORED_CMD_STORE_PARITY="cargo test -p fandhe-ai --release --test device_param_store_backend_parity -- --ignored --nocapture"
+IGNORED_CMD_STORE_PARITY="cargo test -p fandhe-ai --release --test device_param_store_backend_parity -- --ignored --nocapture on_metal"
 IGNORED_CMD_COMMAND_BATCHING="cargo test -p fandhe-ai-backend-metal --release --test command_batching_bench -- --ignored --nocapture"
 BATCH_COUNTERS_CMD="cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture --test-threads=1 mnist_scale_train_reuse_metal_batch_counters"
 BACKWARD_PHASE_CMD="cargo test -p fandhe-ai --release --test mnist_scale_train_reuse_bench -- --ignored --nocapture --test-threads=1 mnist_scale_train_reuse_metal_backward_dinput_phase"

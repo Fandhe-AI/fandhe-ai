@@ -1,0 +1,50 @@
+     Locking 6 packages to latest compatible versions
+      Adding fandhe-ai v0.8.0 (/Users/<user>/work/wt-1563-before/crates/facade)
+      Adding fandhe-ai-autodiff v0.8.0 (/Users/<user>/work/wt-1563-before/crates/autodiff)
+      Adding fandhe-ai-backend-cpu v0.8.0 (/Users/<user>/work/wt-1563-before/crates/backend-cpu)
+      Adding fandhe-ai-backend-cuda v0.8.0 (/Users/<user>/work/wt-1563-before/crates/backend-cuda)
+      Adding fandhe-ai-backend-metal v0.8.0 (/Users/<user>/work/wt-1563-before/crates/backend-metal)
+      Adding fandhe-ai-tensor-core v0.8.0 (/Users/<user>/work/wt-1563-before/crates/tensor-core)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.56
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling objc2 v0.6.4
+   Compiling crossbeam-utils v0.8.22
+   Compiling objc2-encode v4.1.0
+   Compiling crossbeam-epoch v0.9.20
+   Compiling bitflags v2.13.1
+   Compiling crossbeam-deque v0.8.7
+   Compiling rayon-core v1.13.0
+   Compiling cudarc v0.19.8
+   Compiling libloading v0.9.0
+   Compiling fandhe-ai-backend-cpu v0.8.0 (/Users/<user>/work/wt-1563-before/crates/backend-cpu)
+   Compiling either v1.18.0
+   Compiling num-traits v0.2.19
+   Compiling bench-common v0.1.0 (/Users/<user>/work/wt-1563-after/scripts/bench/framework-compare/bench-common)
+   Compiling objc2-core-foundation v0.3.2
+   Compiling block2 v0.6.2
+   Compiling dispatch2 v0.3.1
+   Compiling rayon v1.12.0
+   Compiling syn v2.0.119
+   Compiling objc2-foundation v0.3.2
+   Compiling rand_core v0.9.5
+   Compiling zerocopy-derive v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.8.0 (/Users/<user>/work/wt-1563-before/crates/tensor-core)
+   Compiling fandhe-ai-autodiff v0.8.0 (/Users/<user>/work/wt-1563-before/crates/autodiff)
+   Compiling fandhe-ai-backend-cuda v0.8.0 (/Users/<user>/work/wt-1563-before/crates/backend-cuda)
+   Compiling objc2-metal v0.3.2
+   Compiling fandhe-ai-backend-metal v0.8.0 (/Users/<user>/work/wt-1563-before/crates/backend-metal)
+   Compiling fandhe-ai v0.8.0 (/Users/<user>/work/wt-1563-before/crates/facade)
+   Compiling bench-fandhe v0.1.0 (/Users/<user>/work/wt-1563-after/scripts/bench/framework-compare/bench-fandhe)
+    Finished `release` profile [optimized] target(s) in 15.76s
