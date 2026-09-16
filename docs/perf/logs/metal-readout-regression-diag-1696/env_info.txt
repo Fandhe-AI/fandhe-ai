@@ -1,0 +1,15 @@
+Darwin 25.6.0 arm64
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+rustc 1.98.1 (48a229cea 2026-09-01)
+machdep.cpu.brand_string: Apple M4 Max
+hw.pagesize: 16384
+565300e41d5854b0d2ade6c23a5eaa04b6bf3685
+hostname: masked
+hw.logicalcpu: 16
+tree: origin/main 565300e4（上記 HEAD）・release ビルド
+run mode: record_only（専有ゲート機構なし）
+run window (UTC): 2026-09-16T01:38:15Z 〜 2026-09-16T01:39:37Z（JST 10:38〜10:39）
+load average (1 min) during run: 19.57 → 14.00 → 18.53 → 17.73（uptime_sampler.log／uptime_before・after。5 min は 20.46〜22.03）。別セッションの workspace 全体テストが並走する共有負荷下
+pmset -g therm: thermal／performance warning の記録なし（pmset_therm_before／after.txt）
