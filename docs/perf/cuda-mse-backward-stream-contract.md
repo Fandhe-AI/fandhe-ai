@@ -76,18 +76,55 @@ cuda-1560/` と同型の運用）。
 `docs/perf/logs/cuda-mse-backward-1692/`（`README.md`・
 `orchestrate.sh`・`env_info.txt`）を参照。
 
-### 記入欄（GB10 実機実測後に埋める）
+**2026-09-16 実測済み → DGX Spark GB10 実機（driver 580.173.02・CUDA 13.0・
+NVRTC V13.0.88・rustc 1.97.0・Linux 6.17.0-1031-nvidia）で `orchestrate.sh`
+を 5 round（起動順反転・別プロセス・warmup 5 → 計測 20）実行し、下表を
+埋めた。** 生ログ・集計は `docs/perf/logs/cuda-mse-backward-1692/`
+（`runs-1692/`・`mse_parity.log`・`orchestrate_stdout.log`・`env_info.txt`・
+`aggregate.py`／`aggregate.md`）を参照。実測条件: 専有ゲートなし・実行
+区間の load average 1.41〜1.53・GPU 利用率 0〜4%（他プロセスの GPU メモリ
+常駐あり〈python 170 MiB・Xorg 18 MiB〉だが演算負荷なし）。
+
+- **before/after の差分範囲（要注記）**: before 腕は `c9505fb5`（PR #1780
+  の第 1 親）・after 腕は `3e43bbd0`（`crates/`・`scripts/` が origin/main
+  `565300e4` と同一）で、両者の間には 108 コミット（#1780〜#1888）が入る。
+  計測区間 `tape.backward(&loss)` が通る MSE 経路——
+  `crates/backend-cuda/src/ops.rs::CudaBackendOps::mse_loss_backward`・
+  `crates/backend-cuda/src/mse.rs::CudaMse::run_mse_backward_f32`（本
+  issue の追記は doc comment 7 行のみ）・`crates/autodiff/src/grad.rs` の
+  `Op::MseLoss` 分岐と `mse_loss_vjp`——は before/after で byte 同一である
+  ことを確認した。一方、tape の backward driver（`crates/autodiff/src/
+  backward.rs`）は #1859（no_grad／detach）・#1861（retain_graph／
+  `backward_accumulate`）の差分を含むため、本 A/B は「MSE 経路は同一ソース
+  の再測定」だが「計測区間全体が完全に同一ソース」ではない。§2 の規則
+  どおり ADOPT／REJECT の判定対象とはせず、ノイズ床・再現性の記録として
+  扱う。
+- **ノイズ床**: 5 round 中央値の比（after/before）は全 4 case で
+  0.9687〜1.0069。round 別の比は 0.8348〜1.1423 で、`general_shape[1048576]`
+  が最も広い（10 run 中 3 run〈r1 before・r2 after・r5 after〉が約
+  0.0072〜0.0074 s、残り 7 run が約 0.0082〜0.0087 s の bimodal。低値群は
+  腕にも起動順にも固定されず、`docs/perf/cuda-gemm-tiled-naive-speedup-
+  4096-triage.md` §6 と同様の確率的 slow／fast モードと整合するが機構は
+  本記録では未特定）。`train_shape`（主対象・640 要素）は before
+  0.000017024〜0.000017968 s・after 0.000017504〜0.000018080 s で、5 round
+  中央値の比 0.9955・round 別 0.9742〜1.0620。
+- **再現性**: `grad[...].fold_bits` は 4 case すべてで before 5 run・after
+  5 run の 10 run 完全一致（腕内・腕間とも）。数値契約不変。
+- **正しさ（REQ-2）**: `mse_parity.rs::mse_matches_cpu_across_shapes` は
+  GB10 で pass（1 passed・0 failed・0.35s。`mse_parity.log`）。
+
+### 記入欄（GB10 実機実測後に埋める。2026-09-16 実測済み）
 
 | 項目 | 値 |
 |------|-----|
-| 実測日 | (未実測) |
-| before_sha | |
-| after_sha | |
-| `mse_parity.rs::mse_matches_cpu_across_shapes` | |
-| `train_shape` median_s ratio（after/before・5 round 中央値） | |
-| `general_shape[16384/65536/1048576]` median_s ratio | |
-| `grad[...].fold_bits` 完全一致 | |
-| 結論（ADOPT／REJECT／ノイズ床記録のみ） | |
+| 実測日 | 2026-09-16（GB10 実機。UTC 01:41:25Z〜01:41:42Z） |
+| before_sha | `c9505fb5`（PR #1780 の第 1 親。MSE 経路は after と byte 同一） |
+| after_sha | `3e43bbd0`（`crates/`・`scripts/` は origin/main `565300e4` と同一） |
+| `mse_parity.rs::mse_matches_cpu_across_shapes` | pass（1 passed・0 failed・0.35s） |
+| `train_shape` median_s ratio（after/before・5 round 中央値） | 0.9955（before 0.000017680 s → after 0.000017600 s） |
+| `general_shape[16384/65536/1048576]` median_s ratio | 1.0069／1.0046／0.9687（before 0.000032464／0.000087664／0.008438272 s → after 0.000032688／0.000088064／0.008174207 s） |
+| `grad[...].fold_bits` 完全一致 | 一致（4 case × 10 run。`0x7fb3edad4355b8f2`／`0x4812f01cab0b2ac3`／`0xf7ea5b2a5f6e9680`／`0x134c26f7f42eb94a`） |
+| 結論（ADOPT／REJECT／ノイズ床記録のみ） | ノイズ床記録のみ（§2 規則どおり判定なし。比 0.9687〜1.0069・fold_bits 完全一致・parity pass） |
 
 ## 4. スコープ外事項
 

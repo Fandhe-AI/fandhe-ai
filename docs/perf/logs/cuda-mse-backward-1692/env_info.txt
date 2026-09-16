@@ -1,23 +1,25 @@
-# イシュー #1692 CUDA mse_loss_backward ストリーム順序契約確認 実測環境（記入欄）
+# イシュー #1692 CUDA mse_loss_backward ストリーム順序契約確認 実測環境
 #
-# 本 PR 実行環境（Linux コンテナ／worktree）に DGX Spark GB10 実機への
-# 到達手段がないため未実測。GB10 実機での実測時にこのテンプレートを
-# 埋めること（内部ホスト名・ユーザー名は書かない）。
+# 2026-09-16 に DGX Spark GB10 実機で実測済み（内部ホスト名・ユーザー名は
+# 書かない。値の出典は runs-1692/・mse_parity.log・orchestrate_stdout.log
+# および実行セッションの progress.log／nvidia-smi／uptime 記録）。
 
 hostname: masked
-date:
-gpu:
-cpu:
-os:
-cuda_driver_version:
-rustc:
-cargo:
-before_sha:
-after_sha:
-mse_parity_result:
-train_shape_median_s_ratio:
-general_shape_16384_ratio:
-general_shape_65536_ratio:
-general_shape_1048576_ratio:
-fold_bits_match:
-verdict:
+date: 2026-09-16（mse_parity 01:41:25Z〜01:41:26Z・5 round 計測 01:41:26Z〜01:41:42Z。UTC）
+gpu: NVIDIA GB10（sm_121）
+cpu: 要確認（ログ未記録。GB10 の Grace CPU〈Cortex-X925×10 + A725×10〉構成は docs/perf/sm121-device-attributes.md を参照）
+os: Linux 6.17.0-1031-nvidia
+cuda_driver_version: 580.173.02（CUDA 13.0・NVRTC V13.0.88）
+rustc: 1.97.0
+cargo: 要確認（ログ未記録。rustc 1.97.0 同梱版）
+before_sha: c9505fb5（PR #1780 の第 1 親。git archive で独立ツリー化・crates/facade/tests/mse_backward_bench.rs は orchestrate.sh が自動コピー）
+after_sha: 3e43bbd0（crates/・scripts/ は origin/main 565300e4 と同一）
+mse_parity_result: pass（mse_parity.rs::mse_matches_cpu_across_shapes ... ok。1 passed・0 failed・0.35s）
+train_shape_median_s_ratio: 0.9955（before 0.000017680 s / after 0.000017600 s。5 round 中央値）
+general_shape_16384_ratio: 1.0069（before 0.000032464 s / after 0.000032688 s）
+general_shape_65536_ratio: 1.0046（before 0.000087664 s / after 0.000088064 s）
+general_shape_1048576_ratio: 0.9687（before 0.008438272 s / after 0.008174207 s）
+fold_bits_match: 全 4 case × 10 run（before 5・after 5）で完全一致
+verdict: ノイズ床記録のみ（§2 規則。MSE 経路に機能差分なしのため ADOPT／REJECT 判定対象外）
+load_average: 実行区間 1.41〜1.53（セッション開始時 0.42）・専有ゲートなし
+gpu_util: 0〜4%（progress.log）。他プロセスの GPU メモリ常駐あり（python 170 MiB・Xorg 18 MiB。演算負荷なし）
