@@ -155,8 +155,13 @@ panic はすべて
 **是正済み（#1893）**: 単位元を `__uint_as_float(0xff800000u)`／
 `__uint_as_float(0x7f800000u)` の bit パターン直接構成へ置換し
 `INFINITY`／`-INFINITY` マクロ依存を解消した。GB10 実機再実測は
-`docs/perf/logs/cuda-reduce-nvrtc-infinity-1893/` を参照（本 PR 時点で
-は未実測のまま記入欄のみ）。
+`docs/perf/logs/cuda-reduce-nvrtc-infinity-1893/` を参照。
+
+**2026-09-16（UTC）GB10 再実測済み（#1931・PR 記録）**: 本節の対象 16 テストは
+すべて pass（`reduce_parity` 6・typed f16／bf16 reduction 2・`var_norm` 1・
+`Var::sum(None)` を loss とする backward 7）。§1 で判定不能としていた conv の
+backward・bit 一致契約も pass。全体非後退は 315 pass・13 FAIL（by-name 後退 3 件は
+いずれも並列干渉の計測系テストで直列再実行では pass・新規 pass 9 件）。
 
 ### 3.2 既知 FAIL（10 件）
 

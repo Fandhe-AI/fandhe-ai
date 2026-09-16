@@ -1,0 +1,498 @@
+rev: cf0626437d8df84babac591d95c27dfde6211669
+start: 2026-09-16T17:12:16Z
+ 02:12:16 up 20 days, 13:39,  8 users,  load average: 0.48, 0.98, 0.97
+== cargo test -p fandhe-ai-backend-cuda --release --all-features --lib init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm -- --ignored --nocapture --test-threads=1 
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (/home/<user>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_cuda-bd57fdee581f4a8f)
+
+running 72 tests
+test context_cache::async_ordering_poison_tests::invalidate_with_real_stream_sync_drains_pending_launches_and_reactivates ... ok
+test context_cache::poison_recovery_real_device_tests::poison_from_real_cuda_error_fails_closed_to_unrecoverable ... skipping poison_from_real_cuda_error_fails_closed_to_unrecoverable: set FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1 to opt in (単独プロセス・単独 テスト名フィルタでの実行を前提とする運用契約。モジュール冒頭コメント 「運用契約」参照)
+ok
+test context_cache::poison_recovery_real_device_tests::poison_recovery_real_probe_restores_active_and_rejects_stale_generation ... skipping poison_recovery_real_probe_restores_active_and_rejects_stale_generation: set FANDHE_AI_CUDA_POISON_RECOVERY_REAL_DEVICE=1 to opt in (単独プロセス・単独 テスト名フィルタでの実行を前提とする運用契約。モジュール冒頭コメント 「運用契約」参照)
+ok
+test context_cache::tests::cached_allocator_keeps_distinct_contexts_on_same_ordinal_separate ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_g_cached_device_select_reference ... === (g) context_cache::cached_device(0) 参照値（イシュー #956 H4）===
+  cached_device(0) [warm]: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v0_fresh_drop_each_trial ... === fresh GEMM D2H フェーズ分解: variant=V0-fresh(drop each trial) (イシュー #956) ===
+ -- N=1024 --
+  (a) H2D A: median=0.077 ms  q1=0.076 ms  q3=0.077 ms
+  (b) H2D B: median=0.076 ms  q1=0.076 ms  q3=0.076 ms
+  (c) C 確保: median=0.003 ms  q1=0.003 ms  q3=0.003 ms
+  (d) launch+synchronize: median=0.002 ms  q1=0.002 ms  q3=0.002 ms
+  (e) D2H: median=0.263 ms  q1=0.262 ms  q3=0.264 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+  (a+b+c+d+e+f) 再構成合計: median=0.422 ms  q1=0.420 ms  q3=0.423 ms
+ -- N=2048 --
+  (a) H2D A: median=0.282 ms  q1=0.281 ms  q3=0.283 ms
+  (b) H2D B: median=0.287 ms  q1=0.287 ms  q3=0.288 ms
+  (c) C 確保: median=0.003 ms  q1=0.003 ms  q3=0.003 ms
+  (d) launch+synchronize: median=0.002 ms  q1=0.002 ms  q3=0.002 ms
+  (e) D2H: median=1.501 ms  q1=1.498 ms  q3=1.508 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+  (a+b+c+d+e+f) 再構成合計: median=2.075 ms  q1=2.072 ms  q3=2.081 ms
+ -- N=4096 --
+  (a) H2D A: median=1.142 ms  q1=1.141 ms  q3=1.143 ms
+  (b) H2D B: median=1.127 ms  q1=1.126 ms  q3=1.128 ms
+  (c) C 確保: median=0.010 ms  q1=0.009 ms  q3=0.011 ms
+  (d) launch+synchronize: median=0.006 ms  q1=0.005 ms  q3=0.006 ms
+  (e) D2H: median=30.855 ms  q1=30.643 ms  q3=30.942 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=7.074 ms  q1=7.063 ms  q3=7.161 ms
+  (a+b+c+d+e+f) 再構成合計: median=40.282 ms  q1=39.960 ms  q3=40.691 ms
+ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v1_keep_alive ... === fresh GEMM D2H フェーズ分解: variant=V1-keep_alive(reuse相当) (イシュー #956) ===
+ -- N=1024 --
+  (a) H2D A: median=0.079 ms  q1=0.079 ms  q3=0.080 ms
+  (b) H2D B: median=0.077 ms  q1=0.077 ms  q3=0.077 ms
+  (c) C 確保: median=0.003 ms  q1=0.003 ms  q3=0.004 ms
+  (d) launch+synchronize: median=0.002 ms  q1=0.002 ms  q3=0.002 ms
+  (e) D2H: median=31.498 ms  q1=30.519 ms  q3=33.339 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+  (a+b+c+d+e+f) 再構成合計: median=31.660 ms  q1=30.680 ms  q3=33.502 ms
+ -- N=2048 --
+  (a) H2D A: median=0.290 ms  q1=0.289 ms  q3=0.290 ms
+  (b) H2D B: median=0.287 ms  q1=0.286 ms  q3=0.287 ms
+  (c) C 確保: median=0.005 ms  q1=0.005 ms  q3=0.005 ms
+  (d) launch+synchronize: median=0.004 ms  q1=0.003 ms  q3=0.004 ms
+  (e) D2H: median=5.374 ms  q1=5.245 ms  q3=5.481 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+  (a+b+c+d+e+f) 再構成合計: median=6.009 ms  q1=5.830 ms  q3=6.073 ms
+ -- N=4096 --
+  (a) H2D A: median=1.148 ms  q1=1.140 ms  q3=1.156 ms
+  (b) H2D B: median=1.142 ms  q1=1.128 ms  q3=1.146 ms
+  (c) C 確保: median=0.010 ms  q1=0.009 ms  q3=0.010 ms
+  (d) launch+synchronize: median=0.005 ms  q1=0.005 ms  q3=0.005 ms
+  (e) D2H: median=32.047 ms  q1=31.612 ms  q3=32.603 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.000 ms  q1=0.000 ms  q3=0.000 ms
+  (a+b+c+d+e+f) 再構成合計: median=34.328 ms  q1=33.884 ms  q3=34.920 ms
+ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v2_pre_touched ... === fresh GEMM D2H フェーズ分解: variant=V2-pre_touched (イシュー #956) ===
+ -- N=1024 --
+  (a) H2D A: median=0.077 ms  q1=0.077 ms  q3=0.077 ms
+  (b) H2D B: median=0.079 ms  q1=0.079 ms  q3=0.079 ms
+  (c) C 確保: median=0.004 ms  q1=0.004 ms  q3=0.004 ms
+  (d) launch+synchronize: median=0.002 ms  q1=0.002 ms  q3=0.002 ms
+  (e) D2H: median=0.075 ms  q1=0.075 ms  q3=0.075 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=0.611 ms  q1=0.611 ms  q3=0.612 ms
+  (a+b+c+d+e+f) 再構成合計: median=0.848 ms  q1=0.847 ms  q3=0.849 ms
+ -- N=2048 --
+  (a) H2D A: median=0.292 ms  q1=0.292 ms  q3=0.294 ms
+  (b) H2D B: median=0.292 ms  q1=0.291 ms  q3=0.292 ms
+  (c) C 確保: median=0.004 ms  q1=0.003 ms  q3=0.004 ms
+  (d) launch+synchronize: median=0.003 ms  q1=0.002 ms  q3=0.003 ms
+  (e) D2H: median=0.295 ms  q1=0.294 ms  q3=0.295 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=2.387 ms  q1=2.384 ms  q3=2.389 ms
+  (a+b+c+d+e+f) 再構成合計: median=3.275 ms  q1=3.264 ms  q3=3.335 ms
+ -- N=4096 --
+  (a) H2D A: median=1.154 ms  q1=1.153 ms  q3=1.155 ms
+  (b) H2D B: median=1.145 ms  q1=1.144 ms  q3=1.147 ms
+  (c) C 確保: median=0.010 ms  q1=0.010 ms  q3=0.011 ms
+  (d) launch+synchronize: median=0.006 ms  q1=0.006 ms  q3=0.006 ms
+  (e) D2H: median=1.167 ms  q1=1.161 ms  q3=1.265 ms
+  (f) ホスト出力バッファ解放（+ V2 事前タッチ）: median=38.897 ms  q1=35.039 ms  q3=39.169 ms
+  (a+b+c+d+e+f) 再構成合計: median=42.378 ms  q1=38.514 ms  q3=42.765 ms
+ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v3_pooled_output ... === fresh GEMM (c) C 確保フェーズ: V3-pooled（イシュー #1020）===
+--- N=1024 ---
+  run_tiled_f32 [pool miss on first C alloc, warmup]: 3.672 ms
+    (c) alloc_zeroed_f32 [pool hit]: median=0.002 ms  q1=0.002 ms  q3=0.002 ms
+  pool stats after N=1024: PoolStats { alloc_count: 1, reuse_count: 10, cached_bytes: 4194304, pending_return_bytes: 0, capacity_waste_bytes: 0, released_bytes: 0 }
+--- N=2048 ---
+  run_tiled_f32 [pool miss on first C alloc, warmup]: 7.636 ms
+    (c) alloc_zeroed_f32 [pool hit]: median=0.003 ms  q1=0.002 ms  q3=0.005 ms
+  pool stats after N=2048: PoolStats { alloc_count: 2, reuse_count: 20, cached_bytes: 20971520, pending_return_bytes: 0, capacity_waste_bytes: 0, released_bytes: 0 }
+--- N=4096 ---
+  run_tiled_f32 [pool miss on first C alloc, warmup]: 47.051 ms
+    (c) alloc_zeroed_f32 [pool hit]: median=0.002 ms  q1=0.002 ms  q3=0.003 ms
+  pool stats after N=4096: PoolStats { alloc_count: 3, reuse_count: 30, cached_bytes: 88080384, pending_return_bytes: 0, capacity_waste_bytes: 0, released_bytes: 0 }
+=== release_cached: freed_bytes=88080384 ===
+ok
+test gemm::tests::tiled_f32_swizzle_variant_matches_base_bit_exact_output ... ok
+test gemm::tests::tiled_f32_swizzle_variant_matches_cpu_reference ... ok
+test gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress ... ok
+test gemm::tests::wmma_tf32_diagnostic_constructors_force_expected_kernel ... ok
+test gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes ... ok
+test gemm::tests::wmma_tf32_opt_kernel_parity_does_not_regress ... ok
+test gemm::tests::wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096 ... ok
+test gemm::tests::wmma_tf32_staged_new_wires_size_conditional_swizzle_into_production_constructor ... ok
+test gemm::tests::wmma_tf32_staged_pad_variant_matches_base_bit_exact_output ... ok
+test gemm::tests::wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output ... ok
+test gemm_mma::tests::mma_f16_derived_stage_count_matches_default_stage_count_bit_exact ... ok
+test gemm_mma::tests::mma_f16_new_wires_size_conditional_swizzle_into_production_constructor ... ok
+test gemm_mma::tests::mma_f16_stage_count_does_not_change_bit_exact_output ... ok
+test gemm_mma::tests::mma_f16_swizzle_variant_matches_base_bit_exact_output ... ok
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_classic ...   N=1024 kernel=Classic (median over 20 trials, 20 warmup):
+    h2d_a: median=0.0827 ms  q1=0.0823 ms  q3=0.0829 ms
+    h2d_b: median=0.0783 ms  q1=0.0780 ms  q3=0.0784 ms
+    alloc_c: median=0.0001 ms  q1=0.0001 ms  q3=0.0001 ms
+    launch_issue: median=0.0030 ms  q1=0.0029 ms  q3=0.0030 ms
+    kernel_wait: median=0.3266 ms  q1=0.3261 ms  q3=0.3269 ms
+    d2h: median=0.0754 ms  q1=0.0753 ms  q3=0.0755 ms
+    host_copy: median=1.2774 ms  q1=1.2233 ms  q3=1.3031 ms
+    sum of medians: 1.8434 ms
+  N=2048 kernel=Classic (median over 20 trials, 20 warmup):
+    h2d_a: median=0.3049 ms  q1=0.3037 ms  q3=0.3053 ms
+    h2d_b: median=0.2911 ms  q1=0.2908 ms  q3=0.2914 ms
+    alloc_c: median=0.0003 ms  q1=0.0003 ms  q3=0.0004 ms
+    launch_issue: median=0.0072 ms  q1=0.0068 ms  q3=0.0074 ms
+    kernel_wait: median=2.2848 ms  q1=2.2824 ms  q3=2.2859 ms
+    d2h: median=0.3151 ms  q1=0.3140 ms  q3=0.3169 ms
+    host_copy: median=5.5731 ms  q1=5.4363 ms  q3=5.7059 ms
+    sum of medians: 8.7766 ms
+  N=4096 kernel=Classic (median over 20 trials, 20 warmup):
+    h2d_a: median=1.1641 ms  q1=1.1631 ms  q3=1.1649 ms
+    h2d_b: median=1.1442 ms  q1=1.1433 ms  q3=1.1447 ms
+    alloc_c: median=0.0005 ms  q1=0.0005 ms  q3=0.0006 ms
+    launch_issue: median=0.0081 ms  q1=0.0080 ms  q3=0.0083 ms
+    kernel_wait: median=20.2311 ms  q1=20.2025 ms  q3=20.8850 ms
+    d2h: median=520.6705 ms  q1=24.2751 ms  q3=523.8824 ms
+    host_copy: median=19.7414 ms  q1=19.0029 ms  q3=20.2905 ms
+    sum of medians: 562.9599 ms
+ok
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_select ...   N=1024 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=0.0867 ms  q1=0.0858 ms  q3=0.0870 ms
+    h2d_b: median=0.0783 ms  q1=0.0781 ms  q3=0.0785 ms
+    alloc_c: median=0.0002 ms  q1=0.0002 ms  q3=0.0002 ms
+    launch_issue: median=0.0051 ms  q1=0.0049 ms  q3=0.0053 ms
+    kernel_wait: median=0.1884 ms  q1=0.1878 ms  q3=0.1888 ms
+    d2h: median=0.0756 ms  q1=0.0756 ms  q3=0.0759 ms
+    host_copy: median=1.5478 ms  q1=1.4794 ms  q3=1.6131 ms
+    sum of medians: 1.9821 ms
+  N=2048 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=0.3054 ms  q1=0.3047 ms  q3=0.3064 ms
+    h2d_b: median=0.2916 ms  q1=0.2913 ms  q3=0.2926 ms
+    alloc_c: median=0.0003 ms  q1=0.0003 ms  q3=0.0004 ms
+    launch_issue: median=0.0074 ms  q1=0.0072 ms  q3=0.0076 ms
+    kernel_wait: median=1.1823 ms  q1=1.1796 ms  q3=1.1939 ms
+    d2h: median=0.3174 ms  q1=0.3165 ms  q3=0.3186 ms
+    host_copy: median=5.5166 ms  q1=5.3256 ms  q3=5.5375 ms
+    sum of medians: 7.6212 ms
+  N=4096 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=1.1639 ms  q1=1.1631 ms  q3=1.1743 ms
+    h2d_b: median=1.1425 ms  q1=1.1418 ms  q3=1.1433 ms
+    alloc_c: median=0.0006 ms  q1=0.0005 ms  q3=0.0006 ms
+    launch_issue: median=0.0082 ms  q1=0.0080 ms  q3=0.0085 ms
+    kernel_wait: median=9.9420 ms  q1=9.9259 ms  q3=10.0283 ms
+    d2h: median=612.2609 ms  q1=24.2570 ms  q3=643.8773 ms
+    host_copy: median=20.5215 ms  q1=19.8030 ms  q3=20.9245 ms
+    sum of medians: 645.0395 ms
+ok
+test init_cost_diag_tests::init_cost_diag_e2e_matches_framework_compare_shape ... === CUDA tape 初期化コスト e2e（本番 CudaBackendOps::gemm 経路）===
+  N=256: median=0.056 ms  q1=0.055 ms  q3=0.057 ms
+  N=1024: median=0.426 ms  q1=0.424 ms  q3=0.427 ms
+  N=4096: median=28.796 ms  q1=26.964 ms  q3=29.439 ms
+ok
+test init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm ... === CudaGemm::new module_cache LRU cold/warm（イシュー #1024）===
+  1st CudaGemm::new (LRU cold; 9 kernels NVRTC-compiled): median=181.062 ms  q1=181.062 ms  q3=181.062 ms
+  2nd CudaGemm::new (LRU warm; module_cache hit for every kernel): median=0.064 ms  q1=0.064 ms  q3=0.064 ms
+ok
+test init_cost_diag_tests::init_cost_diag_phase_breakdown ... === CUDA tape 初期化コスト フェーズ分解（イシュー #926） ===
+  (p1) CudaDevice::new: median=0.041 ms  q1=0.040 ms  q3=0.042 ms
+  (p2) compile_ptx[naive_f32]: median=5.159 ms  q1=5.147 ms  q3=5.173 ms
+  (p3) load_module+load_function[naive_f32]: median=0.072 ms  q1=0.071 ms  q3=0.072 ms
+  (p2) compile_ptx[naive_f16]: median=14.903 ms  q1=14.880 ms  q3=14.908 ms
+  (p3) load_module+load_function[naive_f16]: median=0.077 ms  q1=0.076 ms  q3=0.078 ms
+  (p2) compile_ptx[tiled_f32]: median=5.652 ms  q1=5.628 ms  q3=5.663 ms
+  (p3) load_module+load_function[tiled_f32]: median=0.103 ms  q1=0.101 ms  q3=0.104 ms
+  (p2) compile_ptx[tiled_f16]: median=15.234 ms  q1=15.198 ms  q3=15.245 ms
+  (p3) load_module+load_function[tiled_f16]: median=0.081 ms  q1=0.080 ms  q3=0.081 ms
+  (p2) compile_ptx[tiled_bias_act_f32]: median=5.693 ms  q1=5.679 ms  q3=5.702 ms
+  (p3) load_module+load_function[tiled_bias_act_f32]: median=0.118 ms  q1=0.116 ms  q3=0.119 ms
+  (p2) compile_ptx[wmma_tf32]: median=30.386 ms  q1=30.245 ms  q3=30.418 ms
+  (p3) load_module+load_function[wmma_tf32]: median=0.105 ms  q1=0.103 ms  q3=0.106 ms
+  (p2) compile_ptx[wmma_tf32_opt]: median=30.260 ms  q1=30.149 ms  q3=30.274 ms
+  (p3) load_module+load_function[wmma_tf32_opt]: median=0.129 ms  q1=0.129 ms  q3=0.132 ms
+  (p2) compile_ptx[wmma_tf32_staged]: median=30.998 ms  q1=30.896 ms  q3=31.047 ms
+  (p3) load_module+load_function[wmma_tf32_staged]: median=0.134 ms  q1=0.132 ms  q3=0.135 ms
+  (p2+p3 本番同一呼び出し) CudaGemm::new: median=190.425 ms  q1=190.330 ms  q3=190.624 ms
+  (p4) run_tiled_f32(N=1024): median=0.463 ms  q1=0.463 ms  q3=0.464 ms
+  (p1+p2+p3+p4 再構成合計。診断用の個別計測経路): median=139.444 ms  q1=139.394 ms  q3=139.480 ms
+ok
+test init_cost_diag_tests::init_cost_diag_reused_handle_steady_state_reference ... === CUDA GEMM 再利用ハンドルの定常状態 1 回あたりコスト（参照値）===
+  reused-handle run_tiled_f32(N=1024) per-call: median=0.413 ms  q1=0.413 ms  q3=0.414 ms
+ok
+test kernels_mma::tests::mma_f16_sources_compile_with_nvrtc_when_available ... ok
+test kernels_wmma_opt::tests::wmma_opt_sources_compile_with_nvrtc_when_available ... ok
+test module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache ... ok
+test module_cache_wiring_tests::cuda_gemm_new_stores_disk_cache_entry_for_every_kernel ... ok
+test nvrtc::jit_cache_bench_tests::jit_cache_bench_cold_compile_vs_warm_load_latency ... [jit_cache_bench:cold_vs_warm] descriptor=c12-static-mnk-1024 compile_median_s=0.016383 (q1=0.016343, q3=0.016395) store_median_s=0.012573 (q1=0.012124, q3=0.013209) cold_total_median_s=0.028916 (q1=0.028519, q3=0.029592) warm_load_median_s=0.000095 (q1=0.000066, q3=0.000098) speedup_x=303.18 warm_faster=true — record only, non-gating (see module doc comment)
+[jit_cache_bench:cold_vs_warm] descriptor=c12-static-mnk-4096 compile_median_s=0.015918 (q1=0.015917, q3=0.016341) store_median_s=0.012482 (q1=0.011997, q3=0.012509) cold_total_median_s=0.028823 (q1=0.027914, q3=0.028917) warm_load_median_s=0.000083 (q1=0.000067, q3=0.000095) speedup_x=345.36 warm_faster=true — record only, non-gating (see module doc comment)
+[jit_cache_bench:cold_vs_warm] descriptor=c12-dynamic-all-4096 compile_median_s=0.015962 (q1=0.015915, q3=0.016348) store_median_s=0.012549 (q1=0.011829, q3=0.012725) cold_total_median_s=0.028624 (q1=0.028178, q3=0.028862) warm_load_median_s=0.000066 (q1=0.000066, q3=0.000097) speedup_x=434.43 warm_faster=true — record only, non-gating (see module doc comment)
+ok
+test nvrtc::jit_cache_bench_tests::jit_cache_bench_module_load_and_throughput_parity ... [jit_cache_bench:module_load] fresh_ptx_load_and_resolve_median_s=0.000057 (q1=0.000057, q3=0.000058) cached_ptx_load_and_resolve_median_s=0.000059 (q1=0.000059, q3=0.000060)
+[jit_cache_bench:throughput] shape=(4096,4096,4096) fresh_tflops=33.47 (median_s=0.004106) cached_tflops=33.57 (median_s=0.004094) — kernel launch + sync only (excludes buffer alloc/D2H; comparable with gemm_mma_bench::measure_mma_f16), record only, non-gating (see module doc comment), ABBA counter-balanced order within each round (ROUNDS=5, see comment above)
+ok
+test nvrtc::tests::nvrtc_version_returns_ok_on_real_device ... ok
+test pooling::pooling_real_device_tests::adaptive_avg_pool2d_global_average_matches_model ... adaptive_avg_pool2d_global.values.fold_bits=0x86c22bc161eb9c37
+ok
+test pooling::pooling_real_device_tests::adaptive_avg_pool2d_upsampling_matches_model ... adaptive_avg_pool2d_upsample.values.fold_bits=0x03a10a5b08af6663
+ok
+test pooling::pooling_real_device_tests::avg_pool2d_count_include_pad_false_matches_model ... avg_pool2d_include_pad_false.values.fold_bits=0x40a1133a540297bb
+ok
+test pooling::pooling_real_device_tests::avg_pool2d_count_include_pad_true_matches_model ... avg_pool2d_include_pad_true.values.fold_bits=0x6980ee7b35563345
+ok
+test pooling::pooling_real_device_tests::max_pool2d_1d_merged_shape_matches_model ... max_pool2d_1d.values.fold_bits=0x7563ccb8023f9ed9
+max_pool2d_1d.indices.fold_bits=0x1d8132339eafe39a
+ok
+test pooling::pooling_real_device_tests::max_pool2d_basic_matches_model ... max_pool2d_basic.values.fold_bits=0xa57e3e99b5f582dd
+max_pool2d_basic.indices.fold_bits=0x422180132914f4d0
+ok
+test pooling::pooling_real_device_tests::max_pool2d_crosses_block_boundary_matches_model ... max_pool2d_block_boundary.values.fold_bits=0xb2e1ae1b352d94fb
+max_pool2d_block_boundary.indices.fold_bits=0xf9f0f4f247340a50
+ok
+test pooling::pooling_real_device_tests::max_pool2d_dilation_boundary_matches_model ... max_pool2d_dilation.values.fold_bits=0xa819f33ba28e13f5
+max_pool2d_dilation.indices.fold_bits=0xdbd09287ea36b659
+ok
+test pooling::pooling_real_device_tests::max_pool2d_nan_inf_negzero_matches_model ... ok
+test pooling::pooling_real_device_tests::max_pool2d_overlapping_window_matches_model ... max_pool2d_overlap.values.fold_bits=0x02d010dcf7367799
+max_pool2d_overlap.indices.fold_bits=0xe582dce0501d1ab5
+ok
+test pooling::pooling_real_device_tests::max_pool2d_run_to_run_bit_identical ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_all_arms ...   N=1024 arm=LegacyToVec (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=0.0992 ms  q1=0.0987 ms  q3=0.0999 ms  (q3-q1)=0.0013 ms
+    host_read: median=2.0226 ms  q1=1.9457 ms  q3=2.1336 ms  (q3-q1)=0.1879 ms
+    sum of medians: 2.1218 ms
+  N=1024 arm=BorrowedKeepAlive (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=32.0582 ms  q1=31.8495 ms  q3=32.6129 ms  (q3-q1)=0.7634 ms
+    host_read: median=0.5352 ms  q1=0.5338 ms  q3=0.5362 ms  (q3-q1)=0.0023 ms
+    sum of medians: 32.5934 ms
+  N=1024 arm=BorrowedWithDummyAllocFree (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=0.0976 ms  q1=0.0972 ms  q3=0.0981 ms  (q3-q1)=0.0008 ms
+    host_read: median=2.3737 ms  q1=2.3620 ms  q3=2.3918 ms  (q3-q1)=0.0298 ms
+    sum of medians: 2.4713 ms
+  N=1024 arm=PretouchedReusedDest (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=0.0785 ms  q1=0.0784 ms  q3=0.0787 ms  (q3-q1)=0.0002 ms
+    host_read: median=2.2471 ms  q1=2.2111 ms  q3=2.2645 ms  (q3-q1)=0.0534 ms
+    sum of medians: 2.3257 ms
+  N=1024 arm=PretouchedFreshDest (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=1.1811 ms  q1=1.0505 ms  q3=1.2565 ms  (q3-q1)=0.2059 ms
+    host_read: median=0.5319 ms  q1=0.5316 ms  q3=0.5323 ms  (q3-q1)=0.0006 ms
+    sum of medians: 1.7130 ms
+  N=2048 arm=LegacyToVec (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=0.3163 ms  q1=0.3154 ms  q3=0.3184 ms  (q3-q1)=0.0030 ms
+    host_read: median=7.4968 ms  q1=7.2815 ms  q3=7.5225 ms  (q3-q1)=0.2410 ms
+    sum of medians: 7.8131 ms
+  N=2048 arm=BorrowedKeepAlive (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=126.6238 ms  q1=126.0162 ms  q3=127.4173 ms  (q3-q1)=1.4011 ms
+    host_read: median=2.1548 ms  q1=2.1522 ms  q3=2.1562 ms  (q3-q1)=0.0039 ms
+    sum of medians: 128.7786 ms
+  N=2048 arm=BorrowedWithDummyAllocFree (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=0.3150 ms  q1=0.3139 ms  q3=0.3165 ms  (q3-q1)=0.0026 ms
+    host_read: median=9.2921 ms  q1=9.1517 ms  q3=9.4850 ms  (q3-q1)=0.3333 ms
+    sum of medians: 9.6071 ms
+  N=2048 arm=PretouchedReusedDest (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=0.2874 ms  q1=0.2869 ms  q3=0.2885 ms  (q3-q1)=0.0016 ms
+    host_read: median=7.9323 ms  q1=7.8646 ms  q3=7.9797 ms  (q3-q1)=0.1150 ms
+    sum of medians: 8.2197 ms
+  N=2048 arm=PretouchedFreshDest (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=5.3063 ms  q1=5.1717 ms  q3=5.4362 ms  (q3-q1)=0.2645 ms
+    host_read: median=2.1527 ms  q1=2.1467 ms  q3=2.1587 ms  (q3-q1)=0.0120 ms
+    sum of medians: 7.4591 ms
+  N=4096 arm=LegacyToVec (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=22.3185 ms  q1=22.0612 ms  q3=22.8374 ms  (q3-q1)=0.7762 ms
+    host_read: median=27.8279 ms  q1=27.4187 ms  q3=28.2039 ms  (q3-q1)=0.7853 ms
+    sum of medians: 50.1463 ms
+  N=4096 arm=BorrowedKeepAlive (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=22.8691 ms  q1=21.4477 ms  q3=23.4088 ms  (q3-q1)=1.9611 ms
+    host_read: median=8.6308 ms  q1=8.6057 ms  q3=8.6373 ms  (q3-q1)=0.0316 ms
+    sum of medians: 31.4999 ms
+  N=4096 arm=BorrowedWithDummyAllocFree (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=22.3458 ms  q1=21.0651 ms  q3=22.9508 ms  (q3-q1)=1.8858 ms
+    host_read: median=35.0232 ms  q1=34.6258 ms  q3=35.1745 ms  (q3-q1)=0.5487 ms
+    sum of medians: 57.3689 ms
+  N=4096 arm=PretouchedReusedDest (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=1.1291 ms  q1=1.1250 ms  q3=1.2530 ms  (q3-q1)=0.1280 ms
+    host_read: median=29.2844 ms  q1=29.0503 ms  q3=29.6569 ms  (q3-q1)=0.6066 ms
+    sum of medians: 30.4135 ms
+  N=4096 arm=PretouchedFreshDest (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=20.9244 ms  q1=20.7793 ms  q3=21.0528 ms  (q3-q1)=0.2735 ms
+    host_read: median=8.6222 ms  q1=8.6152 ms  q3=8.6243 ms  (q3-q1)=0.0091 ms
+    sum of medians: 29.5465 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024 ...   N=1024 arm=LegacyToVec (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=0.1001 ms  q1=0.0993 ms  q3=0.1010 ms  (q3-q1)=0.0016 ms
+    host_read: median=1.9325 ms  q1=1.9131 ms  q3=1.9643 ms  (q3-q1)=0.0512 ms
+    sum of medians: 2.0326 ms
+  N=1024 arm=BorrowedKeepAlive (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=32.6521 ms  q1=31.9704 ms  q3=33.5841 ms  (q3-q1)=1.6137 ms
+    host_read: median=0.5352 ms  q1=0.5341 ms  q3=0.5361 ms  (q3-q1)=0.0020 ms
+    sum of medians: 33.1873 ms
+  N=1024 arm=BorrowedWithDummyAllocFree (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=0.0969 ms  q1=0.0963 ms  q3=0.0974 ms  (q3-q1)=0.0011 ms
+    host_read: median=2.3727 ms  q1=2.3600 ms  q3=2.3765 ms  (q3-q1)=0.0165 ms
+    sum of medians: 2.4696 ms
+  N=1024 arm=PretouchedReusedDest (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=0.0783 ms  q1=0.0781 ms  q3=0.0784 ms  (q3-q1)=0.0002 ms
+    host_read: median=2.2216 ms  q1=2.2009 ms  q3=2.2306 ms  (q3-q1)=0.0297 ms
+    sum of medians: 2.2999 ms
+  N=1024 arm=PretouchedFreshDest (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=1.3772 ms  q1=1.3475 ms  q3=1.4002 ms  (q3-q1)=0.0528 ms
+    host_read: median=0.5340 ms  q1=0.5318 ms  q3=0.5367 ms  (q3-q1)=0.0049 ms
+    sum of medians: 1.9112 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024_borrowed_keep_alive ...   N=1024 arm=BorrowedKeepAlive (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=31.8045 ms  q1=31.2586 ms  q3=32.1058 ms  (q3-q1)=0.8472 ms
+    host_read: median=0.5335 ms  q1=0.5329 ms  q3=0.5344 ms  (q3-q1)=0.0015 ms
+    sum of medians: 32.3380 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024_borrowed_with_dummy_alloc_free ...   N=1024 arm=BorrowedWithDummyAllocFree (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=0.0977 ms  q1=0.0969 ms  q3=0.0981 ms  (q3-q1)=0.0012 ms
+    host_read: median=2.3824 ms  q1=2.3628 ms  q3=2.3921 ms  (q3-q1)=0.0292 ms
+    sum of medians: 2.4800 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024_legacy_to_vec ...   N=1024 arm=LegacyToVec (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=0.0981 ms  q1=0.0976 ms  q3=0.0991 ms  (q3-q1)=0.0015 ms
+    host_read: median=2.0572 ms  q1=2.0279 ms  q3=2.0695 ms  (q3-q1)=0.0416 ms
+    sum of medians: 2.1553 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024_pretouched_fresh_dest ...   N=1024 arm=PretouchedFreshDest (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=1.5335 ms  q1=1.4893 ms  q3=1.5529 ms  (q3-q1)=0.0636 ms
+    host_read: median=0.5390 ms  q1=0.5388 ms  q3=0.5414 ms  (q3-q1)=0.0027 ms
+    sum of medians: 2.0726 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024_pretouched_reused_dest ...   N=1024 arm=PretouchedReusedDest (median over 20 trials, 20 warmup) checksum=-4106.223973:
+    d2h: median=0.0782 ms  q1=0.0781 ms  q3=0.0783 ms  (q3-q1)=0.0001 ms
+    host_read: median=2.2734 ms  q1=2.2507 ms  q3=2.2863 ms  (q3-q1)=0.0356 ms
+    sum of medians: 2.3516 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048 ...   N=2048 arm=LegacyToVec (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=0.3158 ms  q1=0.3151 ms  q3=0.3166 ms  (q3-q1)=0.0015 ms
+    host_read: median=7.4016 ms  q1=7.2541 ms  q3=7.5476 ms  (q3-q1)=0.2935 ms
+    sum of medians: 7.7173 ms
+  N=2048 arm=BorrowedKeepAlive (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=129.1069 ms  q1=126.7021 ms  q3=131.6301 ms  (q3-q1)=4.9280 ms
+    host_read: median=2.1532 ms  q1=2.1490 ms  q3=2.1540 ms  (q3-q1)=0.0051 ms
+    sum of medians: 131.2601 ms
+  N=2048 arm=BorrowedWithDummyAllocFree (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=0.3144 ms  q1=0.3132 ms  q3=0.3153 ms  (q3-q1)=0.0021 ms
+    host_read: median=9.1878 ms  q1=9.1220 ms  q3=9.8469 ms  (q3-q1)=0.7249 ms
+    sum of medians: 9.5021 ms
+  N=2048 arm=PretouchedReusedDest (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=0.2870 ms  q1=0.2869 ms  q3=0.2872 ms  (q3-q1)=0.0003 ms
+    host_read: median=7.9829 ms  q1=7.8764 ms  q3=8.0252 ms  (q3-q1)=0.1488 ms
+    sum of medians: 8.2699 ms
+  N=2048 arm=PretouchedFreshDest (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=5.3350 ms  q1=5.2051 ms  q3=5.5769 ms  (q3-q1)=0.3719 ms
+    host_read: median=2.1540 ms  q1=2.1501 ms  q3=2.1556 ms  (q3-q1)=0.0055 ms
+    sum of medians: 7.4890 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048_borrowed_keep_alive ...   N=2048 arm=BorrowedKeepAlive (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=127.5882 ms  q1=126.1808 ms  q3=131.4324 ms  (q3-q1)=5.2516 ms
+    host_read: median=2.1502 ms  q1=2.1483 ms  q3=2.1511 ms  (q3-q1)=0.0027 ms
+    sum of medians: 129.7383 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048_borrowed_with_dummy_alloc_free ...   N=2048 arm=BorrowedWithDummyAllocFree (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=0.3148 ms  q1=0.3141 ms  q3=0.3157 ms  (q3-q1)=0.0016 ms
+    host_read: median=9.5030 ms  q1=9.2921 ms  q3=9.7562 ms  (q3-q1)=0.4641 ms
+    sum of medians: 9.8178 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048_legacy_to_vec ...   N=2048 arm=LegacyToVec (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=0.3175 ms  q1=0.3150 ms  q3=0.3216 ms  (q3-q1)=0.0066 ms
+    host_read: median=7.4360 ms  q1=7.3177 ms  q3=7.5394 ms  (q3-q1)=0.2216 ms
+    sum of medians: 7.7536 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048_pretouched_fresh_dest ...   N=2048 arm=PretouchedFreshDest (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=5.5602 ms  q1=5.3143 ms  q3=5.6759 ms  (q3-q1)=0.3616 ms
+    host_read: median=2.1677 ms  q1=2.1467 ms  q3=2.1697 ms  (q3-q1)=0.0231 ms
+    sum of medians: 7.7278 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048_pretouched_reused_dest ...   N=2048 arm=PretouchedReusedDest (median over 20 trials, 20 warmup) checksum=-14130.001181:
+    d2h: median=0.2879 ms  q1=0.2870 ms  q3=0.2882 ms  (q3-q1)=0.0013 ms
+    host_read: median=7.9510 ms  q1=7.8434 ms  q3=7.9915 ms  (q3-q1)=0.1481 ms
+    sum of medians: 8.2388 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096 ...   N=4096 arm=LegacyToVec (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=22.1623 ms  q1=21.8676 ms  q3=22.5192 ms  (q3-q1)=0.6517 ms
+    host_read: median=27.9047 ms  q1=27.4441 ms  q3=27.9638 ms  (q3-q1)=0.5197 ms
+    sum of medians: 50.0670 ms
+  N=4096 arm=BorrowedKeepAlive (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=506.0856 ms  q1=18.9967 ms  q3=518.2760 ms  (q3-q1)=499.2793 ms
+    host_read: median=8.6341 ms  q1=8.6238 ms  q3=8.6444 ms  (q3-q1)=0.0206 ms
+    sum of medians: 514.7197 ms
+  N=4096 arm=BorrowedWithDummyAllocFree (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=22.4605 ms  q1=21.9554 ms  q3=22.7496 ms  (q3-q1)=0.7941 ms
+    host_read: median=35.0113 ms  q1=34.8119 ms  q3=35.0677 ms  (q3-q1)=0.2558 ms
+    sum of medians: 57.4718 ms
+  N=4096 arm=PretouchedReusedDest (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=1.1284 ms  q1=1.1244 ms  q3=1.2443 ms  (q3-q1)=0.1199 ms
+    host_read: median=29.5959 ms  q1=29.2802 ms  q3=29.8146 ms  (q3-q1)=0.5344 ms
+    sum of medians: 30.7242 ms
+  N=4096 arm=PretouchedFreshDest (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=20.9443 ms  q1=20.7652 ms  q3=21.0458 ms  (q3-q1)=0.2807 ms
+    host_read: median=8.6204 ms  q1=8.6049 ms  q3=8.6284 ms  (q3-q1)=0.0235 ms
+    sum of medians: 29.5647 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096_borrowed_keep_alive ...   N=4096 arm=BorrowedKeepAlive (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=23.1741 ms  q1=22.8044 ms  q3=23.6351 ms  (q3-q1)=0.8307 ms
+    host_read: median=8.6163 ms  q1=8.6102 ms  q3=8.6256 ms  (q3-q1)=0.0154 ms
+    sum of medians: 31.7904 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096_borrowed_with_dummy_alloc_free ...   N=4096 arm=BorrowedWithDummyAllocFree (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=22.6553 ms  q1=22.0131 ms  q3=23.4397 ms  (q3-q1)=1.4266 ms
+    host_read: median=35.5824 ms  q1=34.8146 ms  q3=35.6763 ms  (q3-q1)=0.8617 ms
+    sum of medians: 58.2377 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096_legacy_to_vec ...   N=4096 arm=LegacyToVec (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=22.7579 ms  q1=22.3560 ms  q3=23.1006 ms  (q3-q1)=0.7446 ms
+    host_read: median=28.4944 ms  q1=28.1660 ms  q3=28.7569 ms  (q3-q1)=0.5909 ms
+    sum of medians: 51.2523 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096_pretouched_fresh_dest ...   N=4096 arm=PretouchedFreshDest (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=21.2219 ms  q1=20.8662 ms  q3=21.3438 ms  (q3-q1)=0.4777 ms
+    host_read: median=8.6073 ms  q1=8.6024 ms  q3=8.6190 ms  (q3-q1)=0.0166 ms
+    sum of medians: 29.8292 ms
+ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096_pretouched_reused_dest ...   N=4096 arm=PretouchedReusedDest (median over 20 trials, 20 warmup) checksum=122505.660672:
+    d2h: median=1.1289 ms  q1=1.1269 ms  q3=1.1333 ms  (q3-q1)=0.0064 ms
+    host_read: median=29.7113 ms  q1=29.2882 ms  q3=29.8971 ms  (q3-q1)=0.6090 ms
+    sum of medians: 30.8402 ms
+ok
+test scalar_op_cache_wiring_tests::cached_scalar_binary_kernel_second_call_reuses_cache ... ok
+test scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_clamp_payload_does_not_split_cache ... ok
+test scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_distinct_devices_do_not_share_cache ... ok
+test scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_returns_none_for_unimplemented_kind ... ok
+test scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_second_call_reuses_cache ... ok
+test scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_second_call_reuses_cache_for_transcendental_kind ... ok
+
+test result: ok. 72 passed; 0 failed; 0 ignored; 0 measured; 988 filtered out; finished in 151.20s
+
+rc=0
+== cargo test -p fandhe-ai-backend-cuda --release --all-features --test dispatch_boundary -- --ignored --nocapture --test-threads=1 small_shape_matrix_unit_has_no_floor_tflops_record
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/dispatch_boundary.rs (/home/<user>/work/target-fandhe-ai/release/deps/dispatch_boundary-6c77bb7f162ad1ac)
+
+running 1 test
+test small_shape_matrix_unit_has_no_floor_tflops_record ... environment: name="NVIDIA GB10" compute_capability=(12, 1) arch="compute_121"
+dispatch_boundary_record dim=128 path=tiled_f32 tflops=1.533
+dispatch_boundary_record dim=128 path=wmma_tf32_opt tflops=0.799 matrix_unit_over_tiled=0.521 report={"schema_version":"1","name":"gemm_wmma_tf32_opt_dim128","backend":"cuda","warmup":20,"iters":20,"median_secs":0.000026657,"q1_secs":0.000026544,"q3_secs":0.000026704,"samples_secs":[0.000027024,0.0000264,0.000027697,0.000026704,0.000026609,0.000026496,0.000026544,0.000027713,0.000026592,0.0000264,0.000026657,0.00002664,0.000026689,0.000026496,0.000026448,0.000026625,0.000027616,0.000026688,0.000026689,0.000027488]}
+dispatch_boundary_record dim=128 path=tiled_f16 tflops=0.882
+dispatch_boundary_record dim=128 path=wmma_f16_opt tflops=0.319 matrix_unit_over_tiled=0.362 report={"schema_version":"1","name":"gemm_wmma_f16_opt_dim128","backend":"cuda","warmup":20,"iters":20,"median_secs":0.00003296,"q1_secs":0.00003264,"q3_secs":0.000033809,"samples_secs":[0.000034801,0.00003648,0.000032993,0.000032816,0.000033904,0.000032657,0.00003264,0.000033809,0.000034832,0.000032593,0.00003296,0.000032401,0.000032784,0.000033105,0.000032528,0.000034848,0.000033809,0.00003248,0.000032801,0.000032608]}
+dispatch_boundary_record dim=256 path=tiled_f32 tflops=5.892
+dispatch_boundary_record dim=256 path=wmma_tf32_opt tflops=3.022 matrix_unit_over_tiled=0.513 report={"schema_version":"1","name":"gemm_wmma_tf32_opt_dim256","backend":"cuda","warmup":20,"iters":20,"median_secs":0.000053169,"q1_secs":0.000052753,"q3_secs":0.000053473,"samples_secs":[0.000053584,0.000053329,0.000053809,0.000053105,0.00005272,0.000052753,0.000053169,0.000053473,0.00005296,0.000054241,0.000053441,0.000053008,0.000052209,0.000053409,0.000054145,0.000053104,0.000052401,0.000054225,0.000052368,0.000052305]}
+dispatch_boundary_record dim=256 path=tiled_f16 tflops=1.198
+dispatch_boundary_record dim=256 path=wmma_f16_opt tflops=1.185 matrix_unit_over_tiled=0.989 report={"schema_version":"1","name":"gemm_wmma_f16_opt_dim256","backend":"cuda","warmup":20,"iters":20,"median_secs":0.000063489,"q1_secs":0.000063345,"q3_secs":0.000063553,"samples_secs":[0.000063521,0.000063345,0.000063569,0.000063329,0.000063553,0.00006368,0.000063265,0.000063329,0.000063601,0.000063409,0.000063297,0.000063521,0.000064817,0.000064368,0.000063265,0.000063489,0.000063457,0.000063457,0.000063489,0.000063345]}
+dispatch_boundary_record dim=384 path=tiled_f32 tflops=7.245
+dispatch_boundary_record dim=384 path=wmma_tf32_opt tflops=6.458 matrix_unit_over_tiled=0.891 report={"schema_version":"1","name":"gemm_wmma_tf32_opt_dim384","backend":"cuda","warmup":20,"iters":20,"median_secs":0.000077489,"q1_secs":0.000077265,"q3_secs":0.000077601,"samples_secs":[0.00007725,0.000077393,0.000077505,0.000077073,0.000077041,0.000077329,0.000077105,0.000077649,0.000077793,0.000077521,0.000077441,0.000077265,0.000077409,0.000077569,0.000077489,0.000078049,0.000076977,0.000077601,0.000077698,0.000078529]}
+dispatch_boundary_record dim=384 path=tiled_f16 tflops=2.286
+dispatch_boundary_record dim=384 path=wmma_f16_opt tflops=2.378 matrix_unit_over_tiled=1.040 report={"schema_version":"1","name":"gemm_wmma_f16_opt_dim384","backend":"cuda","warmup":20,"iters":20,"median_secs":0.000091249,"q1_secs":0.000091121,"q3_secs":0.000092113,"samples_secs":[0.000091122,0.000091137,0.000091249,0.000091985,0.000091314,0.000091025,0.000092225,0.000092113,0.00009093,0.000091201,0.000091025,0.000092081,0.000091089,0.000090994,0.000092129,0.000091217,0.000091121,0.000092178,0.000092113,0.000092129]}
+dispatch_boundary_record dim=512 path=tiled_f32 tflops=7.640
+dispatch_boundary_record dim=512 path=wmma_tf32_opt tflops=4.444 matrix_unit_over_tiled=0.582 report={"schema_version":"1","name":"gemm_wmma_tf32_opt_dim512","backend":"cuda","warmup":20,"iters":20,"median_secs":0.000143058,"q1_secs":0.000129377,"q3_secs":0.000151906,"samples_secs":[0.000118706,0.00011877,0.00015197,0.000132242,0.000151906,0.000129377,0.000147954,0.000161043,0.000115249,0.000173347,0.000144033,0.000123746,0.000189219,0.000123361,0.000165763,0.000149906,0.000142594,0.000143058,0.000140289,0.000139202]}
+dispatch_boundary_record dim=512 path=tiled_f16 tflops=2.101
+dispatch_boundary_record dim=512 path=wmma_f16_opt tflops=4.212 matrix_unit_over_tiled=2.005 report={"schema_version":"1","name":"gemm_wmma_f16_opt_dim512","backend":"cuda","warmup":20,"iters":20,"median_secs":0.000119953,"q1_secs":0.000113473,"q3_secs":0.00012181,"samples_secs":[0.000111522,0.000112369,0.00012045,0.00012293,0.000114609,0.000112802,0.000113473,0.000112194,0.000120193,0.00012181,0.000122178,0.000121601,0.00012269,0.000123058,0.000122849,0.000114898,0.000114258,0.000119777,0.000112546,0.000119953]}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.53s
+
+rc=0
+== cargo test -p fandhe-ai-backend-cuda --release --all-features --test managed_placement_real_device -- --ignored --nocapture --test-threads=1 managed_placement_does_not_leak_on_real_hardware
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/managed_placement_real_device.rs (/home/<user>/work/target-fandhe-ai/release/deps/managed_placement_real_device-3e034d9bc1ef07d1)
+
+running 1 test
+test managed_placement_does_not_leak_on_real_hardware ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 2.74s
+
+rc=0
+end: 2026-09-16T17:14:51Z

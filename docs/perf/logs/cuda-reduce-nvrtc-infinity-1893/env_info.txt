@@ -1,0 +1,9 @@
+hostname: masked
+gpu: NVIDIA GB10
+driver: 580.173.02
+cuda: 13.0, V13.0.88
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+kernel: Linux 6.17.0-1031-nvidia aarch64
+date: 2026-09-16
+source_sha: cf0626437d8df84babac591d95c27dfde6211669
+load:  02:11:10 up 20 days, 13:38,  8 users,  load average: 1.16, 1.17, 1.03

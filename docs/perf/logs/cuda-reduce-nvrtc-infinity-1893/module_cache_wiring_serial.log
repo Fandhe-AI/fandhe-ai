@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (/home/<user>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_cuda-bd57fdee581f4a8f)
+
+running 2 tests
+test module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache ... ok
+test module_cache_wiring_tests::cuda_gemm_new_stores_disk_cache_entry_for_every_kernel ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1058 filtered out; finished in 0.41s
+
