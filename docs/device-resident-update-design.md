@@ -1922,13 +1922,17 @@ train-resident-grad-device-update.md` を参照（CUDA の実機実測は #1560
 
 - **`resident_grads_to_host`（strict 版）**: `GradStaging` に今回の
   backward で新鮮に充填済みの slot のみ `Some(Tensor<f32>)` を返し、
-  未充填 slot（bias 等）は `None`。resident 未対応バックエンド
+  未充填 slot は `None`。resident 未対応バックエンド
   （`resident_grad_capability == Some(false)`）では `BackendError::
   Unsupported` を返す（panic なし）。**本追補時点（#1479）では CUDA／
   Metal がこれに該当していたが、Metal は #1555・CUDA は #1559 で
   `gemm_fp32_strict_into` を実装したため、現状は 3 バックエンドとも
   `resident_grad_capability == Some(true)` へ確定し、この分岐は probe
-  失敗等の例外経路以外では通常到達しない（§3 参照）**
+  失敗等の例外経路以外では通常到達しない（§3 参照）**。bias slot の
+  扱いは本追補時点では 3 バックエンドとも `None` だったが、**その後
+  #1566（PR #1659）で Metal のみ bias 縮約も resident 経由で書くよう
+  になり、Metal の bias slot は `Some` へ変わった**（CPU・CUDA は
+  引き続き `None`。下記「#1898 追補」参照）
 - **`param_grads_to_host`（unified 版）**: strict 版と同じ内部経路
   （`resident_filled_slots`／`download_staging_slots`。§2.1 の由来
   検証ヘルパを `step()` と共有）を使いつつ、未充填 slot は `grads.
@@ -1971,3 +1975,39 @@ src/optim/device_store.rs::tests`（`MockDeviceOps` 経由の配管検証）・
 （`grad_readout_contract_on_{metal,cuda}`。CUDA／Metal 実機 `#[ignore]`。
 本エージェント実行環境には実機がないため未実測のまま。#1480 が GB10
 実機で実行する）。
+
+### #1898 追補: bias slot 期待の契約更新とテスト側の追従是正
+
+イシュー #1566（PR #1659。Metal `gemm_fp32_strict_into_with_bias_
+reduce_tracked` オーバーライドの追加）により、Metal は weight slot に
+加えて **bias slot も resident 経由（`GradStaging`）で `Some` を返す**
+ようになった（NT/TN のカーネル経路・NN/TT のホスト縮約フォールバック
+経路のいずれも bias 縮約を書く。`crates/backend-metal/src/ops.rs::
+MetalBackendOps::gemm_fp32_strict_into_with_bias_reduce_tracked` doc
+参照）。CPU・CUDA は `gemm_fp32_strict_into_with_bias_reduce_tracked`
+の trait 既定実装（bias を無視し常に `Ok(false)` を返す）のままの
+ため、bias slot は引き続き `None`。
+
+この契約変更は本体実装（#1659）に伴うものだったが、`crates/facade/
+tests/device_param_store_backend_parity.rs::grad_readout_contract_
+on_metal`（Metal 実機 `#[ignore]` テスト）は「Metal も CPU・CUDA と
+同じく bias slot は `None`」という #1566 以前の古い期待のまま据え
+置かれており、`e851e91a..565300e4` の回帰窓で main 上 FAIL していた
+（原因コミット `98c3c67e`＝PR #1659 の本体。`crates/facade/tests/
+device_param_store_backend_parity.rs`・`device_param_store_metal_
+mixed_shape_grad.rs` が未更新のまま残っていた）。イシュー #1898 で
+両テストの期待を現契約（Metal のみ bias slot も `Some`）へ更新し、
+実装側の契約自体（本節・§3 の記述含む）は変更していない。
+
+現在のバックエンド別契約（strict 版 `resident_grads_to_host` の
+bias slot）:
+
+| バックエンド | weight slot | bias slot |
+|---|---|---|
+| CPU | `Some` | `None` |
+| CUDA（#1559） | `Some` | `None`（bias 縮約は #1566 スコープ外のまま） |
+| Metal（#1555 + #1566） | `Some` | `Some` |
+
+実機実測（Metal 2 テスト pass・CUDA 非後退）は本エージェント実行環境
+に実機がないため未実施のまま `docs/perf/logs/grad-readout-contract-
+1898/` へ申し送る。

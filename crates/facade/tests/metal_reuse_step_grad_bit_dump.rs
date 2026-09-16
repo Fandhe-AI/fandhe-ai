@@ -17,7 +17,8 @@
 //! main 時点の Metal は `gemm_fp32_strict_into` 未実装のため resident
 //! staging へ到達せず常に `BackendError::Unsupported` を返す
 //! （`device_param_store_backend_parity.rs::assert_grad_readout_contract`
-//! の `resident_capable = false` 分岐と同じ挙動）。本テストが検証したい
+//! の `StrictBiasExpectation::HostRouted`〈イシュー #1898 で `resident_
+//! capable: bool` から改名〉相当の挙動）。本テストが検証したい
 //! のは「`param_grads_to_host`（統合版。resident 未充填 slot は
 //! `grads.get(...)` へフォールバックする設計のため常に `Ok` を返す）の
 //! 戻り値が変更前後で bit 同一」という事実であり、strict 版の成否

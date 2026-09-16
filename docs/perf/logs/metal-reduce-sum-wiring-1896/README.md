@@ -77,7 +77,8 @@ docs/perf/logs/metal-reduce-sum-wiring-1896/run_ignored_tests_metal.sh
 ## 既知 FAIL（本イシューのスコープ外・非後退判定に含めない）
 
 - `rejects_huge_broadcast_view` 系 3 件（#1897）
-- `grad_readout_contract_on_metal`（#1898）
+- `grad_readout_contract_on_metal`（#1898。→ #1898 で原因 `98c3c67e`〈PR #1659〉を特定し
+  テスト側の期待を bias resident 化後の契約へ追従させ是正済み。本 Mac 実測で非 FAIL 化を確認する）
 - split-K `auto_entry` の `k=63` fixture（#1899）
 - `command_batching` の並列実行時のみの既知 FAIL（Makefile の
   `--no-fail-fast`／`--test-threads=1` 化で吸収する運用は本スクリプト

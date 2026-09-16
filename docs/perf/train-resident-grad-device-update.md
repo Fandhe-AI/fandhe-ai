@@ -110,8 +110,12 @@ update 全体）は速度差が計測ノイズ（±10% 程度）に埋もれて�
 - Metal 実機（Apple Silicon）での同実装・実測（#1555 で実装完了。§5 参照）
 - `scripts/bench/framework-compare` を使った実践規模（`--task train`）の
   5 回計測キャンペーン（本ファイル §0 の軽量プロトコルの上位互換）
-- bias 勾配（`reduce_to_shape`）自体のデバイス常駐化（デバイス側列縮約
-  カーネルが必要。現状は bias は常にホスト経由で `upload_into` される）
+- bias 勾配（`reduce_to_shape`）自体のデバイス常駐化: **Metal は #1566
+  （§9 参照）で実装済み**（NT/TN・NN/TT フォールバックいずれの経路でも
+  d_weight と同じ encode-only ディスパッチで bias 縮約を resident
+  staging へ直接書き込む）。CUDA は引き続き既定 `Unsupported`（`gemm_
+  fp32_strict_into_with_bias_reduce_tracked` の trait 既定実装のまま。
+  bias は常にホスト経由）でスコープ外
 - `Gradients` へのマーカー追加による「常駐 weight への `get()` が
   `Err(InvalidArgument)` を返す」設計（計画 §3.1 item 3）は本実装では
   採用しなかった（`grads.get()` は単に `Ok(None)` を返す。公開 API から

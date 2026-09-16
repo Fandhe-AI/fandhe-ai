@@ -133,8 +133,12 @@ pub type TrainOnCudaResult = (
 /// `resident_grads_to_host` は CUDA でも weight slot を `Some`・bias
 /// slot を `None` で返すようになった（`crates/facade/tests/
 /// device_param_store_backend_parity.rs::assert_grad_readout_contract`
-/// が別途検証。CPU・Metal〈#1555〉と同じ扱い）。統合版
-/// `param_grads_to_host` は resident 未充填 slot（bias 等）を
+/// が別途検証。CPU と同じ扱い）。**Metal は #1566（PR #1659）以降 bias
+/// slot も resident 経由で `Some` を返す点が CPU・CUDA と異なる**（イ
+/// シュー #1898 で `grad_readout_contract_on_metal` の期待をこの契約へ
+/// 是正済み。`crates/backend-metal/src/ops.rs::MetalBackendOps::
+/// gemm_fp32_strict_into_with_bias_reduce_tracked` doc 参照）。統合版
+/// `param_grads_to_host` は resident 未充填 slot（CPU・CUDA の bias 等）を
 /// `grads.get(...)` フォールバックで補うため、resident 充填の有無に
 /// 関わらずいずれのバックエンドでも全 slot を `Ok` で返す。
 ///

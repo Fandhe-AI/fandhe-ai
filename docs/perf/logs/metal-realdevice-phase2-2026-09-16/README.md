@@ -74,6 +74,15 @@ Metal の bias 勾配 resident 化（#1566）後にテスト側の期待（bias 
 （`docs/perf/logs/metal-dinput-sync-1563/ignored_after_store_parity.log`・2 pass）したため、
 FAIL は `e851e91a..565300e4` の間で入った変更に起因する。
 
+**→ #1898 で原因を特定・是正済み**: 回帰窓内の `98c3c67e`（PR #1659・イシュー #1566。
+Metal `gemm_fp32_strict_into_with_bias_reduce_tracked` オーバーライドの追加）で bias
+縮約も resident staging へ書かれる契約へ変わったが、本テスト（`device_param_store_
+backend_parity.rs`）と `device_param_store_metal_mixed_shape_grad.rs` はこの変更に
+追従できておらず「bias slot は `None`」という旧契約の期待のまま残っていた。#1898 で
+両テストの期待を現契約（Metal のみ bias slot も `Some`）へ更新済み（実装側のコード
+自体は変更なし）。M4 Max 実機再実測は `docs/perf/logs/grad-readout-contract-1898/` へ
+申し送り。
+
 ## 2. 高優先（Phase 2 機能 parity）結果一覧
 
 pass 数は各ログ末尾の `test result:` 行の実測値。`metal_` はテスト名フィルタ
