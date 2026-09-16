@@ -1,0 +1,7 @@
+Darwin 25.6.0 arm64
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+rustc 1.98.1 (48a229cea 2026-09-01)
+machdep.cpu.brand_string: Apple M4 Max
+3e43bbd0861da7a6728be1e9609edb2b334022e6
