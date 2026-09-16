@@ -1,0 +1,11 @@
+== backend-cuda_gather_scatter_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test gather_scatter_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/gather_scatter_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/gather_scatter_parity-484c509f8ad28586)
+
+running 3 tests
+test one_hot_matches_cpu_across_shapes ... ok
+test gather_matches_cpu_across_shapes ... ok
+test scatter_matches_cpu_across_shapes_and_reduce ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.27s
+

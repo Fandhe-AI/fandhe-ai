@@ -1,0 +1,125 @@
+### step2 start 2026-09-16T00:52:57Z
+ 09:52:57 up 19 days, 21:19,  8 users,  load average: 0.89, 1.12, 0.97
+0 %
+== im2col_col2im_parity ==
+== conv2d_backend_parity ==
+  -> FAILED (see /home/<user>/work/rust-ai-library-run/docs/perf/logs/conv-realdevice-1771/cuda/ignored/conv2d_backend_parity.log)
+== conv1d_backend_parity ==
+  -> FAILED (see /home/<user>/work/rust-ai-library-run/docs/perf/logs/conv-realdevice-1771/cuda/ignored/conv1d_backend_parity.log)
+== nn_conv_backend_parity ==
+  -> FAILED (see /home/<user>/work/rust-ai-library-run/docs/perf/logs/conv-realdevice-1771/cuda/ignored/nn_conv_backend_parity.log)
+done. logs in /home/<user>/work/rust-ai-library-run/docs/perf/logs/conv-realdevice-1771/cuda/ignored
+FAILED: 3 test group(s) failed; see /home/<user>/work/rust-ai-library-run/docs/perf/logs/conv-realdevice-1771/cuda/ignored
+conv run1 rc=1
+== im2col_col2im_parity ==
+== conv2d_backend_parity ==
+  -> FAILED (see /home/<user>/work/rust-ai-library-run/docs/perf/logs/conv-realdevice-1771/cuda/ignored/conv2d_backend_parity.log)
+== conv1d_backend_parity ==
+  -> FAILED (see /home/<user>/work/rust-ai-library-run/docs/perf/logs/conv-realdevice-1771/cuda/ignored/conv1d_backend_parity.log)
+== nn_conv_backend_parity ==
+  -> FAILED (see /home/<user>/work/rust-ai-library-run/docs/perf/logs/conv-realdevice-1771/cuda/ignored/nn_conv_backend_parity.log)
+done. logs in /home/<user>/work/rust-ai-library-run/docs/perf/logs/conv-realdevice-1771/cuda/ignored
+FAILED: 3 test group(s) failed; see /home/<user>/work/rust-ai-library-run/docs/perf/logs/conv-realdevice-1771/cuda/ignored
+conv run2 rc=1
+determinism rc=0
+PASS: nn_conv_backend_parity.log run-to-run bit 同一（20 行）
+PASS: conv2d_backend_parity.log run-to-run bit 同一（1 行）
+PASS: conv1d_backend_parity.log run-to-run bit 同一（2 行）
+PASS: im2col_col2im_parity.log run-to-run bit 同一（39 行）
+PASS: 全ログ群で run-to-run 決定性チェック成立
+== backend-cuda_batch_norm_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test batch_norm_parity -- --ignored --nocapture
+backend-cuda_batch_norm_parity	rc=0	test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.39s
+== facade_batch_norm_backend_parity: cargo test -p fandhe-ai --release --test batch_norm_backend_parity -- --ignored --nocapture cuda_
+facade_batch_norm_backend_parity	rc=0	test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.46s
+== backend-cuda_pooling_real_device: cargo test -p fandhe-ai-backend-cuda --release --all-features --lib pooling::pooling_real_device_tests -- --ignored --nocapture
+backend-cuda_pooling_real_device	rc=0	test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 1048 filtered out; finished in 0.64s
+== facade_pooling_backend_parity: cargo test -p fandhe-ai --release --test pooling_backend_parity -- --ignored --nocapture cuda_
+facade_pooling_backend_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.29s
+== backend-cuda_sort_topk_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test sort_topk_parity -- --ignored --nocapture
+backend-cuda_sort_topk_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.25s
+== backend-cuda_scan_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test scan_parity -- --ignored --nocapture
+backend-cuda_scan_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.27s
+== backend-cuda_gather_scatter_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test gather_scatter_parity -- --ignored --nocapture
+backend-cuda_gather_scatter_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.27s
+== backend-cuda_cast_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test cast_parity -- --ignored --nocapture
+backend-cuda_cast_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.28s
+== backend-cuda_cast_ops_contract: cargo test -p fandhe-ai-backend-cuda --release --all-features --test cast_ops_contract -- --ignored --nocapture
+backend-cuda_cast_ops_contract	rc=0	test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+== backend-cuda_unique_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test unique_parity -- --ignored --nocapture
+backend-cuda_unique_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.24s
+== backend-cuda_constant_pad_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test constant_pad_parity -- --ignored --nocapture
+backend-cuda_constant_pad_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.24s
+== backend-cuda_interpolate_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test interpolate_parity -- --ignored --nocapture
+backend-cuda_interpolate_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.24s
+== backend-cuda_gemm_batched_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test gemm_batched_parity -- --ignored --nocapture
+backend-cuda_gemm_batched_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.51s
+== backend-cuda_typed_ops_f16_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test typed_ops_f16_parity -- --ignored --nocapture
+backend-cuda_typed_ops_f16_parity	rc=101	test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.93s
+== backend-cuda_typed_ops_bf16_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test typed_ops_bf16_parity -- --ignored --nocapture
+backend-cuda_typed_ops_bf16_parity	rc=101	test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.48s
+== backend-cuda_typed_ops_f64_contract: cargo test -p fandhe-ai-backend-cuda --release --all-features --test typed_ops_f64_contract -- --ignored --nocapture
+backend-cuda_typed_ops_f64_contract	rc=0	test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+== backend-cuda_rnn_cell_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test rnn_cell_parity -- --ignored --nocapture
+backend-cuda_rnn_cell_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.39s
+== backend-cuda_rmsnorm_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test rmsnorm_parity -- --ignored --nocapture
+backend-cuda_rmsnorm_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.36s
+== backend-cuda_rmsnorm_backward_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test rmsnorm_backward_parity -- --ignored --nocapture
+backend-cuda_rmsnorm_backward_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 4.25s
+== backend-cuda_scalar_op_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test scalar_op_parity -- --ignored --nocapture
+backend-cuda_scalar_op_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.42s
+== backend-cuda_mse_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test mse_parity -- --ignored --nocapture
+backend-cuda_mse_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.34s
+== backend-cuda_where_masked_fill_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test where_masked_fill_parity -- --ignored --nocapture
+backend-cuda_where_masked_fill_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.26s
+== backend-cuda_lib_gemm_batched: cargo test -p fandhe-ai-backend-cuda --release --all-features --lib -- --ignored --nocapture gemm_batched
+backend-cuda_lib_gemm_batched	rc=0	test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1059 filtered out; finished in 0.00s
+== facade_sort_topk_backend_parity: cargo test -p fandhe-ai --release --test sort_topk_backend_parity -- --ignored --nocapture cuda_
+facade_sort_topk_backend_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.26s
+== facade_index_ops_backend_parity: cargo test -p fandhe-ai --release --test index_ops_backend_parity -- --ignored --nocapture cuda_
+facade_index_ops_backend_parity	rc=0	test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.52s
+== facade_cast_backend_parity: cargo test -p fandhe-ai --release --test cast_backend_parity -- --ignored --nocapture cuda_
+facade_cast_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.31s
+== facade_unique_backend_parity: cargo test -p fandhe-ai --release --test unique_backend_parity -- --ignored --nocapture cuda_
+facade_unique_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.24s
+== facade_constant_pad_backend_parity: cargo test -p fandhe-ai --release --test constant_pad_backend_parity -- --ignored --nocapture cuda_
+facade_constant_pad_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.24s
+== facade_interpolate_backend_parity: cargo test -p fandhe-ai --release --test interpolate_backend_parity -- --ignored --nocapture cuda_
+facade_interpolate_backend_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.26s
+== facade_batched_matmul_backend_parity: cargo test -p fandhe-ai --release --test batched_matmul_backend_parity -- --ignored --nocapture cuda_
+facade_batched_matmul_backend_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.44s
+== facade_scalar_ops_backend_parity: cargo test -p fandhe-ai --release --test scalar_ops_backend_parity -- --ignored --nocapture cuda_
+facade_scalar_ops_backend_parity	rc=0	test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.36s
+== facade_scalar_unary_transcendental_backend_parity: cargo test -p fandhe-ai --release --test scalar_unary_transcendental_backend_parity -- --ignored --nocapture cuda_
+facade_scalar_unary_transcendental_backend_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.30s
+== facade_activation_gelu_softplus_backend_parity: cargo test -p fandhe-ai --release --test activation_gelu_softplus_backend_parity -- --ignored --nocapture cuda_
+facade_activation_gelu_softplus_backend_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.29s
+== facade_bce_backend_parity: cargo test -p fandhe-ai --release --test bce_backend_parity -- --ignored --nocapture cuda_
+facade_bce_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.27s
+== facade_nll_kl_div_backend_parity: cargo test -p fandhe-ai --release --test nll_kl_div_backend_parity -- --ignored --nocapture cuda_
+facade_nll_kl_div_backend_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.28s
+== facade_huber_backend_parity: cargo test -p fandhe-ai --release --test huber_backend_parity -- --ignored --nocapture cuda_
+facade_huber_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.27s
+== facade_dropout_backend_parity: cargo test -p fandhe-ai --release --test dropout_backend_parity -- --ignored --nocapture cuda_
+facade_dropout_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.27s
+== facade_attention_backend_parity: cargo test -p fandhe-ai --release --test attention_backend_parity -- --ignored --nocapture cuda_
+facade_attention_backend_parity	rc=101	test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.57s
+== facade_mha_backend_parity: cargo test -p fandhe-ai --release --test mha_backend_parity -- --ignored --nocapture cuda_
+facade_mha_backend_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.48s
+== facade_compat_sequential_layers_backend_parity: cargo test -p fandhe-ai --release --test compat_sequential_layers_backend_parity -- --ignored --nocapture cuda_
+facade_compat_sequential_layers_backend_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+== facade_no_grad_detach_backend_parity: cargo test -p fandhe-ai --release --test no_grad_detach_backend_parity -- --ignored --nocapture cuda_
+facade_no_grad_detach_backend_parity	rc=101	test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.30s
+== facade_backward_accumulate_backend_parity: cargo test -p fandhe-ai --release --test backward_accumulate_backend_parity -- --ignored --nocapture cuda_
+facade_backward_accumulate_backend_parity	rc=101	test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.30s
+== facade_norm_backend_parity: cargo test -p fandhe-ai --release --test norm_backend_parity -- --ignored --nocapture cuda_
+facade_norm_backend_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.28s
+== facade_var_norm_backend_parity: cargo test -p fandhe-ai --release --test var_norm_backend_parity -- --ignored --nocapture cuda_
+facade_var_norm_backend_parity	rc=101	test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.26s
+== facade_device_transfer_backend_parity: cargo test -p fandhe-ai --release --test device_transfer_backend_parity -- --ignored --nocapture cuda_
+facade_device_transfer_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.41s
+== facade_scan_ops_backend_parity: cargo test -p fandhe-ai --release --test scan_ops_backend_parity -- --ignored --nocapture cuda_
+facade_scan_ops_backend_parity	rc=0	test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+== facade_device_enumeration: cargo test -p fandhe-ai --release --test device_enumeration -- --nocapture
+facade_device_enumeration	rc=0	test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+### step2 done 2026-09-16T00:53:45Z
+done2.

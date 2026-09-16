@@ -486,6 +486,22 @@ VJP の結線確認〉・`cuda_batch_norm_train_forward_rank4_matches_cpu`）。
 **facade 新規公開面なし**（`crates/facade/src/**` は無変更。`Var::
 batch_norm*` は既存再エクスポート経由）。
 
+### 10.2a GB10 実機実測（2026-09-16）
+
+`docs/perf/logs/cuda-batch-norm-1735/README.md` の手順で DGX Spark GB10（転送元
+コミット `3e43bbd0`）にて実測した（ログは `docs/perf/logs/cuda-realdevice-phase2-2026-09-16/
+backend-cuda_batch_norm_parity.log`・`facade_batch_norm_backend_parity.log`。同ディレクトリ
+README §2b）。
+
+- `crates/backend-cuda/tests/batch_norm_parity.rs`（`--ignored`）: **10 pass / 0 fail**
+- `crates/facade/tests/batch_norm_backend_parity.rs`（`cuda_` 4 件: train forward／infer
+  forward／train backward／train forward rank4）: **4 pass / 0 fail**
+- `make test-ignored-cuda` 相当の既存 `#[ignore]` 群は非後退（新規 FAIL は reduction
+  カーネルの NVRTC コンパイルエラー〈BatchNorm 非関連〉のみ。同 README §1）
+
+判定: PASS（§3.1 縮約契約の逐語実装が実機でも REQ-2 統一複合判定 fail 0 件。
+tolerance／baseline 変更なし）。
+
 ### 10.3 対象外（本 issue のスコープ外）
 
 - CUDA persistent grid／occupancy 最適化・`M` 方向並列化・`float4`

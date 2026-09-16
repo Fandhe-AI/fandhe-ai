@@ -1,0 +1,11 @@
+== backend-cuda_sort_topk_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test sort_topk_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/sort_topk_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/sort_topk_parity-d864d8165f2ac229)
+
+running 3 tests
+test sort_matches_cpu_for_non_contiguous_input ... ok
+test topk_matches_cpu_across_k_and_largest ... ok
+test sort_matches_cpu_across_shapes ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.25s
+

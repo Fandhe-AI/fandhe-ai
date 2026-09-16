@@ -1,0 +1,11 @@
+== backend-cuda_rmsnorm_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test rmsnorm_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/rmsnorm_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/rmsnorm_parity-59c326edd61e9c84)
+
+running 3 tests
+test backend_ops_rmsnorm_matches_cpu_backend_ops_across_shapes ... ok
+test rmsnorm_matches_cpu_across_shapes ... ok
+test rmsnorm_matches_backend_cpu_directly ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.36s
+

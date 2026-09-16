@@ -30,3 +30,7 @@ cargo test -p fandhe-ai-backend-cuda --release --lib \
   一致）。
 - run-to-run で bit 完全同一であること（`max_pool2d_run_to_run_bit_identical`）。
 - FAIL 時は `CudaPooling::run_*` の実装（特に走査順・更新条件）を見直す。
+
+## 実測記録（2026-09-16・DGX Spark GB10・転送元コミット `3e43bbd0`）
+
+実測ログは `docs/perf/logs/cuda-realdevice-phase2-2026-09-16/`（`backend-cuda_*.log`・`facade_*.log`・`env_info.txt`）に収めた。結果一覧と判定は同ディレクトリ README §2 と design doc の該当節を参照。

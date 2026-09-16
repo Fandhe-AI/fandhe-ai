@@ -1,0 +1,9 @@
+== backend-cuda_unique_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test unique_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/unique_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/unique_parity-4a950abb1afcfd47)
+
+running 1 test
+test unique_matches_cpu_across_sizes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.24s
+

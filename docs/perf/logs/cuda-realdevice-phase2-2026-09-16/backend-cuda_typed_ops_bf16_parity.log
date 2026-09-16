@@ -1,0 +1,19 @@
+== backend-cuda_typed_ops_bf16_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test typed_ops_bf16_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/typed_ops_bf16_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/typed_ops_bf16_parity-4540761ae95577f9)
+
+running 1 test
+
+thread 'typed_ops_bf16_matches_across_shapes' (1334972) panicked at crates/backend-cuda/tests/typed_ops_bf16_parity.rs:187:60:
+called `Result::unwrap()` on an `Err` value: CudaUnavailable("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_121\"], log: \"default_program(11): error: identifier \\\"INFINITY\\\" is undefined\\n      float acc = -INFINITY;\\n                   ^\\n\\n1 error detected in the compilation of \\\"default_program\\\".\\n\" }")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test typed_ops_bf16_matches_across_shapes ... FAILED
+
+failures:
+
+failures:
+    typed_ops_bf16_matches_across_shapes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.48s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test typed_ops_bf16_parity`

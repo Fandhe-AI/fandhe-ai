@@ -1,0 +1,10 @@
+== backend-cuda_gemm_batched_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test gemm_batched_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/gemm_batched_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/gemm_batched_parity-ef9bf6b19ee3daef)
+
+running 2 tests
+test gemm_batched_fp32_strict_matches_default_per_batch_composition_bit_exact_on_real_device ... ok
+test gemm_batched_matches_cpu_reference_on_real_device ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.51s
+

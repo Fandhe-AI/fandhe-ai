@@ -3,21 +3,21 @@
 ## CUDA（DGX Spark GB10）
 
 hostname: masked
-GPU:
-driver:
-CUDA:
-rustc:
-sha:
-run 日時（UTC）:
+GPU: NVIDIA GB10（sm_121）
+driver: 580.173.02
+CUDA: 13.0（nvcc V13.0.88・NVRTC 13.0）
+rustc: 1.97.0 (2d8144b78 2026-07-07)
+sha: 3e43bbd0861da7a6728be1e9609edb2b334022e6（転送元コミット。ノード側 .rev-stamp で確認）
+run 日時（UTC）: 2026-09-16T00:52:57Z 以降（run1・run2 連続。load average 約 1.3・GPU 0〜3%）
 
-判定結果:
-- im2col_col2im_parity:
-- conv2d_backend_parity:
-- conv1d_backend_parity:
-- nn_conv_backend_parity:
-- run-to-run 決定性（bits=／fold_bits= diff）:
+判定結果（run1／run2 とも同一。ログは `cuda/ignored-run{1,2}/`）:
+- im2col_col2im_parity: 4 pass / 0 fail → 規則 1) PASS（bit 完全一致）
+- conv2d_backend_parity: 1 pass / 1 fail（`cuda_conv2d_backward_matches_cpu` が loss 縮約 `Var::sum` で CUDA reduction カーネルの NVRTC コンパイルエラー〈`INFINITY` 未定義〉により比較前に失敗）
+- conv1d_backend_parity: 2 pass / 2 fail（`cuda_conv1d_backward_matches_cpu`・`cuda_conv1d_matches_manual_reshape_conv2d_bit_exact`。同上）
+- nn_conv_backend_parity: 5 pass / 1 fail（`cuda_sequential_conv1d_matches_manual_reshape_conv2d_bit_exact`。同上。nn 層 forward／backward〈mse_loss 経由〉・record-only 学習ループは pass）
+- run-to-run 決定性（bits=／fold_bits= diff）: PASS（`cuda/check_determinism.log`。4 ログ群とも bit 同一。比較対象は pass したテストの出力行のみ）
 
-verdict:
+verdict: FAIL（規則 2)・3) 未成立。CUDA reduction カーネルの NVRTC コンパイルエラーにより 4 テストが比較に到達しない。conv 演算の数値不一致は未観測。分析は `docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md` §3.1）
 
 ## Metal（Apple Silicon）
 
