@@ -1,0 +1,7 @@
+info: /home/<user>/work/ab-trees/before-1692/crates/facade/tests/mse_backward_bench.rs が未配置のためコピーします
+== round 1/5 ==
+== round 2/5 ==
+== round 3/5 ==
+== round 4/5 ==
+== round 5/5 ==
+done. logs in /home/<user>/work/rust-ai-library-run/docs/perf/logs/cuda-mse-backward-1692/runs-1692
