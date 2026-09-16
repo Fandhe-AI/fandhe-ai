@@ -5,8 +5,9 @@
 #
 # `bench-fandhe` は既定ビルド（`graph-step` feature 無効）では `--graph`
 # を常に MEASURE_ERROR で拒否する。`cuda_graph_step_mode`/
-# `cuda_graph_step_stats` API は crates.io 公開版 `fandhe-ai =0.8.0`
-# （#1487 でピン更新）に収録済みだが、feature 分岐自体は挙動不変のまま
+# `cuda_graph_step_stats` API は crates.io 公開版 `fandhe-ai =0.9.0`
+# （v0.9.0 ピン更新。#1487 の `=0.8.0` 時点から既に収録済み）に
+# 収録済みだが、feature 分岐自体は挙動不変のまま
 # 維持されている（`bench-fandhe/src/main.rs` dispatch 参照）。本スクリプトは
 # `graph-step` feature を有効化し、かつ `AB_PATCH_FACADE_PATH`（未リリース
 # の HEAD `crates/facade` への path patch。deps-policy.md 第 9 区分は

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """イシュー #1306: Metal GEMM の before（正式系列。承認ピン〈現行
-`fandhe-ai =0.8.0`。#1487〉）/after（参考系列 HEAD。`crates/facade` への
+`fandhe-ai =0.9.0`。v0.9.0 ピン更新〉）/after（参考系列 HEAD。`crates/facade` への
 path patch）2 バイナリ A/B 比較。
 
 `run_ab_gemm_metal.sh` が出力する 2 本の JSONL（`bench-fandhe --task gemm
@@ -389,7 +389,7 @@ def evaluate_cell(before_rows, after_rows, threshold):
                 "status": "undeterminable",
                 "reason": f"'{field}' が before または after 内で不一致",
             }
-        # `version` はいずれも承認ピンのバージョン文字列（現行 "0.8.0"）を
+        # `version` はいずれも承認ピンのバージョン文字列（現行 "0.9.0"）を
         # 名乗ることが前提（before=registry・after=HEAD path patch。
         # workspace.package.version 不変）。before/after 間で異なる場合は
         # 前提が崩れているため判定不能とする。

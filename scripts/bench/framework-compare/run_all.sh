@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 # イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）に加え
 # PR #1452 codex-review P1 是正（PRRT_kwDOTuUCJc6gIbMM）で導入した
 # `GEMM_GATE_PATCH_FACADE_PATH`（任意。`crates/facade` への path patch）は
-# 承認ピン `fandhe-ai =0.8.0`（#1487）への更新後も参考系列（HEAD ソース）
+# 承認ピン `fandhe-ai =0.9.0`（v0.9.0）への更新後も参考系列（HEAD ソース）
 # 計測用として維持する。指定時のみ `--config patch.crates-io.fandhe-ai.
 # path=...` でビルドする（deps-policy.md 第 9 区分の承認済みピン固定は
 # Cargo.lock へ永続化しない invocation 限定の `--config` のため壊さない）。

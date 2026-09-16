@@ -9,8 +9,8 @@
 
 ## 1. 目的と位置づけ
 
-- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.8.0`。2026-09-09 に crates.io 公開済み
-  〈`docs/crates-io-publishing-order.md` §10 追補〉。イシュー #1487 で `=0.7.0` から更新）を、既存 ML フレームワーク
+- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.9.0`。2026-09-17 に crates.io 公開済み
+  〈`docs/crates-io-publishing-order.md` §10 追補〉。v0.9.0 リリースサイクルで `=0.8.0` から更新）を、既存 ML フレームワーク
   `candle-core =0.11.0`・`burn =0.21.0` と**同一プロトコル**（同一シード・同一入力・
   同一の同期境界・warmup 20 → 計測 20・中央値 + Q1/Q3）で横並び計測する
 - 本 workspace はベンチ専用ツール（全クレート `publish = false`・非配布）であり、
@@ -30,7 +30,7 @@
   `Cargo.toml`／`Cargo.lock`）への混入は引き続き禁止で、ルート Cargo.lock・
   `cargo tree` に対する `scripts/check-forbidden-deps.sh` が fail-closed に検出する
 - 直接依存は `=x.y.z` 完全固定（`burn =0.21.0`・`candle-core =0.11.0`・
-  `fandhe-ai =0.8.0`）で、`Cargo.lock` をコミットして再現性を確保する
+  `fandhe-ai =0.9.0`）で、`Cargo.lock` をコミットして再現性を確保する
 - 同 workspace の `Cargo.lock` は比較対象という性質上、依存禁止リストのクレート
   （`burn-*`・`candle-*`・`cubecl`・`ndarray`・`tch` 等の推移的混入を含む）を
   **意図的に含む**。このため禁止リスト grep（`check_lock`）は適用せず、代わりに
@@ -38,7 +38,7 @@
   （`check_framework_compare`）を毎回実行する:
   1. `Cargo.lock` の存在（不在はエラー）
   2. `Cargo.toml` の独自 `[workspace]` 宣言（本体 workspace への構造的非混入）
-  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.8.0）の存在
+  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.9.0）の存在
      （承認外バージョンへのドリフト・比較対象の削除を検出。加えて各エントリが
      `source = "registry+https://github.com/rust-lang/crates.io-index"` を
      伴うことを要求する＝path/git 依存への差し替えで `source`/`checksum` 行が
@@ -123,6 +123,17 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   split-K 本番結線・resident `GradStaging` 読み出し API・CPU 出力並列ゼロ
   埋めの本番既定確定）を crates.io 公開版としてフレームワーク横並びベンチの
   比較対象に反映するため
+- 2026-09-17: ユーザー指示「v0.9.0 を出してから、再計測してください」
+  （2026-09-17）に基づき、v0.9.0 の crates.io 公開と `fandhe-ai` 承認ピンの
+  `=0.9.0` への更新を承認（`.github/workflows/release-all.yml` run
+  35136585936・tag `v0.9.0` = `88c79317`。`verify` → environment
+  `crates-io-release` 承認 → `publish` の順に success・6 クレート crates.io
+  反映確認済み）。ピン更新理由は v0.8.0 公開（2026-09-09）以降の #1570 ツリー
+  （spec REQ-9 Tier 1／2 の機能網羅）・同期境界最適化（#1555／#1559／#1563／
+  #1566／#1580／#1688／#1689）・VJP 転置入口（#1213／#1214／#1215）・
+  reduction カーネル是正（#1893／#1894）を crates.io 公開版としてフレーム
+  ワーク横並びベンチの比較対象に反映するため。`git diff v0.9.0..HEAD --
+  crates/` は空（facade 差分なし）
 
 ## 5. tch-rs を計測対象に含めない判断
 

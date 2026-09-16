@@ -12,8 +12,9 @@
 # を合成したもの。
 #
 # `--readout` override（`bench-fandhe` 側実装）は `Var::host_view` 等
-# （#1335。crates.io 公開版 `fandhe-ai =0.8.0` に #1487 でピン更新済みの
-# ため収録済み）自体は要求せず（`readout_uses_borrowed_view` の device
+# （#1335。crates.io 公開版 `fandhe-ai =0.9.0`〈v0.9.0 ピン更新。#1487 の
+# `=0.8.0` 時点から既に収録済み〉に収録済み）自体は要求せず
+# （`readout_uses_borrowed_view` の device
 # 文字列 1 個の runtime 分岐のみ）、`AB_PATCH_FACADE_PATH` は本スクリプト
 # の主目的（HEAD ソースでの計測）のため必須とする（`run_ab_gemm_metal.sh`
 # の after 腕と同型。registry pin 限定の before 腕は本スクリプトには無い

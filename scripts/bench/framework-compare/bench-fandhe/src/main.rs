@@ -104,9 +104,10 @@
 //! checksum（全要素 `f64` 逐次和）・parity（`GemmReference::verify`）の
 //! 契約・計算式はいずれの分岐でも不変（呼び出し側は両型とも
 //! `Deref<Target=[f32]>` のため無変更）。該当 API は crates.io 公開版
-//! `fandhe-ai =0.8.0`（#1487 でピン更新）に収録済みのため、registry
-//! 解決のまま既定ビルドが成立する（path patch は不要。旧
-//! `bench_fandhe_pin_guard.sh` は #1487 で撤去済み）。
+//! `fandhe-ai =0.9.0`（v0.9.0 ピン更新。#1487 の `=0.8.0` 時点から
+//! 既に収録済み）のため、registry 解決のまま既定ビルドが成立する
+//! （path patch は不要。旧 `bench_fandhe_pin_guard.sh` は #1487 で撤去
+//! 済み）。
 
 use bench_common::*;
 use fandhe_ai::compat::Sequential;
@@ -114,7 +115,7 @@ use fandhe_ai::{Device, SgdConfig, Tape, Tensor};
 use std::time::{Duration, Instant};
 
 const FRAMEWORK: &str = "fandhe-ai";
-const VERSION: &str = "0.8.0";
+const VERSION: &str = "0.9.0";
 
 /// イシュー #1350: `--graph` が渡された `--task train` 計測の record
 /// 生成時に 1 回だけ呼び、launch 固定費の診断カウンタ（`fandhe_ai::
@@ -167,7 +168,7 @@ const PHASE_STEP_TOTAL: &str = "step_total";
 // H2D／D2H／同期」と推定した内容を、公開 API 呼び出し境界で分解して
 // 実測確定するための計装。`matmul` 区間の内側に H2D（A/B のアップロード）
 // ・カーネル実行・D2H（結果ダウンロード）・ストリーム同期が全て閉じて
-// おり、fandhe-ai 0.8.0 の公開 API（`Var::matmul`）ではこれ以上分離
+// おり、fandhe-ai 0.9.0 の公開 API（`Var::matmul`）ではこれ以上分離
 // できない（内訳は CUDA／Metal／CPU 各バックエンドの
 // `gemm_reuse_phase_diag_tests` が別途取る。`docs/perf/
 // cuda-gemm-reuse-phase-breakdown.md`・`docs/perf/
@@ -304,8 +305,9 @@ fn readout_uses_borrowed_view(device: &str, readout_override: Option<&str>) -> b
 /// の分岐でも無変更で成立する。
 ///
 /// `VarHostView`／`Var::host_view` は crates.io 公開版
-/// `fandhe-ai =0.8.0`（#1487 でピン更新）に収録済みのため、registry
-/// 解決のまま既定ビルドが成立する（path patch は不要。旧
+/// `fandhe-ai =0.9.0`（v0.9.0 ピン更新。#1487 の `=0.8.0` 時点から既に
+/// 収録済み）のため、registry 解決のまま既定ビルドが成立する（path
+/// patch は不要。旧
 /// `bench_fandhe_pin_guard.sh` は #1487 で撤去済み。#1438 で既定経路化・
 /// 旧計測専用 cargo feature〈#1337 導入〉は撤去済み。Metal の legacy
 /// 分岐は runtime 判定のためこの制約と無関係に成立する）。
@@ -1932,7 +1934,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// **`--tf32`（イシュー #1042）は本バイナリでは常に MEASURE_ERROR で
 /// fail-fast する**: `bench-fandhe` は crates.io 公開版 `fandhe-ai
-/// =0.8.0` に完全固定されており（deps-policy 第 9 区分。
+/// =0.9.0` に完全固定されており（deps-policy 第 9 区分。
 /// `check_framework_compare` が registry 取得元を fail-closed 検査する
 /// ため path 依存への差し替えは不可）。`fandhe_ai::set_cuda_tf32_gemm_enabled`
 /// 自体は crates.io 公開版から呼び出し可能になったが（承認ピンは v0.5.0 公開
@@ -1944,8 +1946,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// **`--managed`（イシュー #1353）**: CUDA managed memory 配置
 /// （`fandhe_ai::set_cuda_managed_memory_enabled`。#1352）を有効化して
-/// 計測する。当該 API は crates.io 公開版 `fandhe-ai =0.8.0`
-/// （#1487 でピン更新）に収録済みだが、`managed-placement` feature
+/// 計測する。当該 API は crates.io 公開版 `fandhe-ai =0.9.0`
+/// （v0.9.0 ピン更新。#1487 の `=0.8.0` 時点から既に収録済み）に
+/// 収録済みだが、`managed-placement` feature
 /// （既定無効）による呼び出しのコンパイル時分離は挙動不変のまま維持する
 /// （feature 有効化・撤去は #1487 のスコープ外）。`device != "cuda"` は
 /// プロセスワイドフラグが cpu 計測で無音 no-op になるのを防ぐため
@@ -1954,8 +1957,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// **`--pinned-h2d`（イシュー #1585）**: CUDA H2D 側 pinned staging
 /// （`fandhe_ai::set_cuda_pinned_h2d_enabled`。`crate::host_staging::
 /// H2dStagingCache`）を有効化して計測する。当該 API は crates.io 公開版
-/// `fandhe-ai =0.8.0` には未収録のため、`pinned-h2d-toggle` feature
-/// （既定無効）による呼び出しのコンパイル時分離を要する（`--managed` と
+/// `fandhe-ai =0.8.0` には未収録だったが `fandhe-ai =0.9.0`（v0.9.0
+/// ピン更新）で収録済み。`pinned-h2d-toggle` feature は既定 OFF のまま
+/// 維持し、有効化する場合は本 feature を付けてビルドする（`--managed` と
 /// 同型の allowlist 方式）。`device != "cuda"` は同じ理由で fail-fast
 /// する（README「`--pinned-h2d`」節参照）。この分岐は `AtomicBool` の
 /// 読み書きのみで CUDA デバイスを初期化しないため、`--graph on` の
@@ -2003,9 +2007,11 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // 限定の allowlist 方式（`--managed` の `--device cuda` 限定と同型）。
     // CUDA H2D 側 pinned staging（`fandhe_ai::set_cuda_pinned_h2d_enabled`。
     // `crate::host_staging::H2dStagingCache`）は runtime トグルを持つ
-    // facade 公開 API だが crates.io 公開版 `fandhe-ai =0.8.0` には未収録
-    // のため、`pinned-h2d-toggle` feature（既定無効）でコンパイル時に
-    // 分離する。有効化・呼び出しは計測開始前（run_* を呼ぶより前）に行い、
+    // facade 公開 API で、crates.io 公開版 `fandhe-ai =0.8.0` には未収録
+    // だったが `fandhe-ai =0.9.0`（v0.9.0 ピン更新）で収録済み。
+    // `pinned-h2d-toggle` feature は既定 OFF のまま維持し、有効化する
+    // 場合は本 feature を付けてビルドする。有効化・呼び出しは計測開始前
+    // （run_* を呼ぶより前）に行い、
     // `set_cuda_pinned_h2d_enabled(true)` 直後に
     // `cuda_pinned_h2d_enabled()` を読み戻して反映を確認する
     // （`--managed` と同一の fail-closed 確認パターン）。
@@ -2032,9 +2038,11 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(not(feature = "pinned-h2d-toggle"))]
         {
             return Err(
-                "MEASURE_ERROR: --pinned-h2d requires a path-patched facade built with \
-                 --features pinned-h2d-toggle (fandhe_ai::set_cuda_pinned_h2d_enabled is not \
-                 part of the crates.io =0.8.0 pin; issue #1585; see \
+                "MEASURE_ERROR: --pinned-h2d requires rebuilding bench-fandhe with \
+                 --features pinned-h2d-toggle (this feature is always required, regardless \
+                 of whether fandhe-ai resolves to the crates.io =0.9.0 pin or to a \
+                 path-patched facade; fandhe_ai::set_cuda_pinned_h2d_enabled itself is part \
+                 of the =0.9.0 pin; issue #1585; see \
                  scripts/bench/framework-compare/README.md \"--pinned-h2d\" section)"
                     .into(),
             );
@@ -2044,8 +2052,9 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--task train` 限定（`DeviceParamStore::step` の update 区間のみが
     // capture 対象のため。gemm／infer は `sgd_step_device_tracked` に
     // 到達しない）。`cuda_graph_step_mode`/`cuda_graph_step_stats` API は
-    // crates.io 公開版 `fandhe-ai =0.8.0`（#1487 でピン更新）に収録済み
-    // だが、`graph-step` feature（既定無効）によるコンパイル時分離は
+    // crates.io 公開版 `fandhe-ai =0.9.0`（v0.9.0 ピン更新。#1487 の
+    // `=0.8.0` 時点から既に収録済み）に収録済みだが、`graph-step`
+    // feature（既定無効）によるコンパイル時分離は
     // 挙動不変のまま維持する（`--managed`／`--device-checksum` と同型の
     // allowlist 方式。feature 有効化・撤去は #1487 のスコープ外）。
     //
@@ -2144,7 +2153,8 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // イシュー #1339: `--device-checksum` は `--task gemm`（`--phases` なし。
     // `run_gemm`／`run_gemm_reuse` のみが device reduction 分岐を持つ）
     // 限定の allowlist 方式。`Var::matmul_checksum` API は crates.io
-    // 公開版 `fandhe-ai =0.8.0`（#1487 でピン更新）に収録済みだが、
+    // 公開版 `fandhe-ai =0.9.0`（v0.9.0 ピン更新。#1487 の `=0.8.0`
+    // 時点から既に収録済み）に収録済みだが、
     // `device-checksum` feature が無効なビルドでは常に MEASURE_ERROR
     // とする挙動は不変のまま維持する（`--managed` と同型）。
     if cli.device_checksum {
@@ -2216,9 +2226,11 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(not(feature = "metal-split-k-toggle"))]
         {
             return Err(format!(
-                "MEASURE_ERROR: --metal-split-k {split_k_mode} requires a path-patched facade \
-                 built with --features metal-split-k-toggle (fandhe_ai::set_metal_split_k_gemm_\
-                 enabled is not part of the crates.io =0.8.0 pin; issue #1545; see \
+                "MEASURE_ERROR: --metal-split-k {split_k_mode} requires rebuilding bench-fandhe \
+                 with --features metal-split-k-toggle (this feature is always required, \
+                 regardless of whether fandhe-ai resolves to the crates.io =0.9.0 pin or to a \
+                 path-patched facade; fandhe_ai::set_metal_split_k_gemm_enabled itself is \
+                 part of the =0.9.0 pin; issue #1545; see \
                  scripts/bench/framework-compare/README.md \"--metal-split-k\" section)"
             )
             .into());
@@ -3399,8 +3411,9 @@ mod tests {
     }
 
     /// イシュー #1353: `managed-placement` feature が無効な既定ビルド
-    /// （`set_cuda_managed_memory_enabled` API は `fandhe-ai =0.8.0`
-    /// 〈#1487 でピン更新〉に収録済みだが、feature 分岐自体は挙動不変の
+    /// （`set_cuda_managed_memory_enabled` API は `fandhe-ai =0.9.0`
+    /// 〈v0.9.0 ピン更新。#1487 の `=0.8.0` 時点から既に収録済み〉に
+    /// 収録済みだが、feature 分岐自体は挙動不変の
     /// まま維持する）では、`--device cuda` でも `--managed` は常に
     /// MEASURE_ERROR で fail-fast する。本テストはこのビルド構成（既定
     /// feature）でのみ意味を持つ（`managed-placement` feature 有効ビルド
@@ -3465,7 +3478,9 @@ mod tests {
 
     /// イシュー #1545: `metal-split-k-toggle` feature が無効な既定ビルド
     /// （`fandhe_ai::set_metal_split_k_gemm_enabled` API は crates.io 公開版
-    /// `fandhe-ai =0.8.0` に未収録）では、`--device metal` でも
+    /// `fandhe-ai =0.8.0` には未収録だったが `=0.9.0`〈v0.9.0 ピン更新〉で
+    /// 収録済み。ただし feature 分岐自体は既定 OFF のまま維持する）では、
+    /// `--device metal` でも
     /// `--metal-split-k` は常に MEASURE_ERROR で fail-fast する。本テストは
     /// このビルド構成（既定 feature）でのみ意味を持つ（`metal-split-k-toggle`
     /// feature 有効ビルドでは実際に path patch 済み facade を呼び出す経路が
@@ -3529,7 +3544,9 @@ mod tests {
 
     /// イシュー #1585: `pinned-h2d-toggle` feature が無効な既定ビルド
     /// （`fandhe_ai::set_cuda_pinned_h2d_enabled` API は crates.io 公開版
-    /// `fandhe-ai =0.8.0` に未収録）では、`--device cuda` でも
+    /// `fandhe-ai =0.8.0` には未収録だったが `=0.9.0`〈v0.9.0 ピン更新〉で
+    /// 収録済み。ただし feature 分岐自体は既定 OFF のまま維持する）では、
+    /// `--device cuda` でも
     /// `--pinned-h2d` は常に MEASURE_ERROR で fail-fast する。本テストは
     /// このビルド構成（既定 feature）でのみ意味を持つ（`pinned-h2d-toggle`
     /// feature 有効ビルドでは実際に path patch 済み facade を呼び出す経路が
@@ -3601,7 +3618,8 @@ mod tests {
 
     /// イシュー #1350: `graph-step` feature が無効な既定ビルド
     /// （`cuda_graph_step_mode`/`cuda_graph_step_stats` API は
-    /// `fandhe-ai =0.8.0`〈#1487 でピン更新〉に収録済みだが、feature
+    /// `fandhe-ai =0.9.0`〈v0.9.0 ピン更新。#1487 の `=0.8.0` 時点から
+    /// 既に収録済み〉に収録済みだが、feature
     /// 分岐自体は挙動不変のまま維持する）では、`--device cuda --task
     /// train` でも `--graph` は常に MEASURE_ERROR で fail-fast する。本
     /// テストはこのビルド構成（既定 feature）でのみ意味を持つ
@@ -3695,8 +3713,9 @@ mod tests {
     }
 
     /// イシュー #1339: `device-checksum` feature が無効な既定ビルド
-    /// （`Var::matmul_checksum` API は `fandhe-ai =0.8.0`〈#1487 でピン
-    /// 更新〉に収録済みだが、feature 分岐自体は挙動不変のまま維持する）
+    /// （`Var::matmul_checksum` API は `fandhe-ai =0.9.0`〈v0.9.0 ピン
+    /// 更新。#1487 の `=0.8.0` 時点から既に収録済み〉に収録済みだが、
+    /// feature 分岐自体は挙動不変のまま維持する）
     /// では、`--task gemm` でも `--device-checksum` は常に MEASURE_ERROR
     /// で fail-fast する。本テストはこのビルド構成（既定 feature）
     /// でのみ意味を持つ（`device-checksum` feature 有効ビルドは本

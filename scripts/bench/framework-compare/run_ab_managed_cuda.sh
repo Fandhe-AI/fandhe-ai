@@ -5,7 +5,8 @@
 # `bench-fandhe` は既定ビルド（`managed-placement` feature 無効）では
 # `--managed` を常に MEASURE_ERROR で拒否する。
 # `set_cuda_managed_memory_enabled` API は crates.io 公開版
-# `fandhe-ai =0.8.0`（#1487 でピン更新）に収録済みだが、feature 分岐
+# `fandhe-ai =0.9.0`（v0.9.0 ピン更新。#1487 の `=0.8.0` 時点から既に
+# 収録済み）に収録済みだが、feature 分岐
 # 自体は挙動不変のまま維持されている（`bench-fandhe/src/main.rs`
 # dispatch 参照）。
 # 本スクリプトは `managed-placement` feature を有効化し、かつ
