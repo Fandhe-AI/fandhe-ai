@@ -1,11 +1,13 @@
-# イシュー #1585 実測記録（CUDA H2D pinned staging・ゲート A）
+# イシュー #1585 実測記録（CUDA H2D pinned staging・ゲート A／Layer A／Layer B）
 
 ## 位置づけ
 
 `docs/perf/cuda-h2d-pinned-staging.md` §3 の事前登録判定規則のうち、
-**ゲート A（`#[ignore]` 実機テスト全件 pass）のみ**を DGX Spark GB10 実機で
-2026-09-16 に実行した記録。Layer A／Layer B は未実施であり、verdict は
-**undetermined のまま**・既定 OFF（`PINNED_H2D_ENABLED=false`）を維持する。
+ゲート A（`#[ignore]` 実機テスト全件 pass）・Layer A（framework-compare 非後退）・
+Layer B（H2D 単体マイクロ A/B）を DGX Spark GB10 実機で 2026-09-16 に実行した記録。
+ゲート A は pass、Layer A は判定 8 セル全て後退、Layer B は全 N 非改善で、verdict は
+**REJECT**（`docs/perf/cuda-h2d-pinned-staging.md` §4.2）・既定 OFF
+（`PINNED_H2D_ENABLED=false`）は不変・opt-in 実装は維持する。
 
 ## 実行したもの
 
@@ -19,31 +21,19 @@
   ツリー 3e43bbd0〈crates/・scripts/ は origin/main 565300e4 と同一〉・負荷は
   record_only 相当）。内部ホスト名は masked。
 
-## 未実施（本セッションでは実行不能だったもの）
+## 経緯
 
-- **Layer A（framework-compare 非後退）**: `scripts/bench/framework-compare/`
-  に pinned-h2d 版 `run_ab_*.sh` がなく、`--pinned-h2d` フラグを持つベンチも
-  存在しないため実行不能。
-- **Layer B（H2D 単体マイクロ A/B）**: `pinned_staged/pageable` を N ごとに
-  5 プロセス起動で計測するハーネスが未実装のため実行不能。
-
-いずれも本セッションでは新規実装しない（実装コード・ハーネスは触らない方針）。
-
-## 再開条件
-
-Layer A／B のハーネス実装（framework-compare `--pinned-h2d`・H2D 単体
-マイクロベンチ）は別イシューとして起票し、実装後に §3 の事前登録規則
-（off→on 交互 5 run・中央値比・checksum 完全一致）に従って GB10 で再計測する。
-ゲート A は本記録で pass 済みのため、再計測時は Layer A／B のみで判定を確定
-できる。
+ゲート A 実測時点（2026-09-16 01:41Z）では Layer A／B のハーネスが本リポジトリに
+未実装だったため verdict は undetermined としていた。同日中に両ハーネスを本ブランチで
+実装し（下記）、03:15Z〜03:20Z に GB10 で実測して REJECT を確定した。
 
 ## Layer B（H2D 単体マイクロ A/B。イシュー #1585 本セッションで追加）
 
 `docs/perf/cuda-h2d-pinned-staging.md` §3 の事前登録判定規則
 「H2D 単体（発行＋`synchronize`）で N ごとに 5 プロセス起動中央値の
 `pinned_staged/pageable`。`< 1.00` を改善、`>= 1.00` を非改善として
-記録」を実行するハーネスを実装した（本追記時点ではハーネスの実装のみ
-で、GB10 実機実測は未実施のまま次セッションへ引き継ぐ）。
+記録」を実行するハーネスを実装し、同日 GB10 で実測した（結果は
+`aggregate.md`。全 N 非改善）。
 
 ### 実装物
 
