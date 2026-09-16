@@ -78,7 +78,17 @@ members = [
 # Pinned 既定化・PR #1496/#1500 Metal split-K 経路の本番結線・PR #1492 resident
 # GradStaging 読み出し API・PR #1502 CPU 出力並列ゼロ埋めの本番既定確定）を含めて
 # crates.io へ公開する前提として 0.7.0 → 0.8.0 とする。
-version = "0.8.0"
+#
+# v0.9.0（2026-09-17）: 0.8.0 公開（2026-09-09）以降の 203 コミット——#1570 ツリー
+# （spec REQ-9 Tier 1／2 の機能網羅。softmax・LayerNorm／RMSNorm／BatchNorm・
+# Conv1d／2d・Pooling・Embedding・MultiheadAttention・RNN／LSTM／GRU・Dropout・
+# index／cast／TypedOps・optimizer／scheduler／AMP・DataLoader・fit／compile／
+# evaluate・no_grad／detach／retain_graph）・同期境界最適化（#1555／#1559／#1563／
+# #1566 resident 勾配・#1580／#1688／#1689 推論チェーン単一同期）・VJP 転置入口
+# （#1213／#1214／#1215）・reduction カーネル是正（#1893 CUDA NVRTC INFINITY・
+# #1894 Metal sum）——を含めて crates.io へ公開し、framework-compare の対戦成績を
+# `fandhe-ai =0.9.0` で再判定するため 0.8.0 → 0.9.0 とする。
+version = "0.9.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false

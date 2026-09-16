@@ -679,6 +679,17 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
 
 ## 変更履歴
 
+- 2026-09-17（v0.9.0 リリースサイクル）: 公開 6 クレートの `workspace.version` を
+  0.8.0 → 0.9.0 へ lockstep バンプした（0.8.0 公開〈2026-09-09〉以降の 203
+  コミット——#1570 ツリー〈spec REQ-9 Tier 1／2 の機能網羅〉・同期境界最適化
+  〈#1555／#1559／#1563／#1566／#1580／#1688／#1689〉・VJP 転置入口〈#1213／
+  #1214／#1215〉・reduction カーネル是正〈#1893／#1894〉——の公開前提。ユーザー
+  指示「v0.9.0 を出してから、再計測してください」〈2026-09-17〉。§11 手順 1）。
+  内部依存 `version = "=0.9.0"`（9 箇所）・ルート `Cargo.lock`（`cargo update -w
+  --offline`）・`scripts/bench/oss-gemm-compare/Cargo.lock`（`fandhe-ai-*` 4
+  クレート・`bench-harness` のみ狙い撃ち更新）を同時に更新した。`release-all.yml`
+  の `mode: dry-run-only` → `publish`・environment 承認・タグ付与・framework-compare
+  の承認ピン更新（`=0.8.0` → `=0.9.0`）は公開完了後に §10 追補へ記録する。
 - 2026-09-10（#1487）: `.github/workflows/release-all.yml`（run 34417008617）
   で v0.8.0 の crates.io 公開が完了した（#1486 コメントに記録）ことを受け、
   framework-compare の承認ピン（`.claude/rules/deps-policy.md` 第 9 区分）を
