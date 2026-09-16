@@ -57,6 +57,20 @@ overflow を拒否するため検証対象（`checked_bytes_for`）に到達し�
 投稿済み。コード変更は本 PR に含めない）。再現:
 `cargo test -p fandhe-ai-backend-metal --all-features --lib rejects_huge_broadcast_view`。
 
+### 1b. `device_param_store_backend_parity::grad_readout_contract_on_metal` の M4 Max FAIL（origin/main 上の既存 FAIL）
+
+中優先項目（#1691／#1563）のオーケストレーションが (f) `#[ignore]` 群非後退確認で
+`cargo test -p fandhe-ai --release --test device_param_store_backend_parity -- --ignored --nocapture on_metal`
+を実行したところ、origin/main（`565300e4`）で `grad_readout_contract_on_metal` が
+`crates/facade/tests/device_param_store_backend_parity.rs:239` の
+`assertion left == right failed: param 1（bias）の resident 充填状態が期待と異なる` で FAIL した
+（`device_resident_matches_host_sgd_on_metal_across_100_steps` は pass）。`--test-threads=1` の直列でも
+再現するため並列干渉ではない。同バイナリは `make test-ignored-metal` の対象に含まれないため §1 の
+集計には現れていない。CUDA 側の同名テスト（`grad_readout_contract_on_cuda`）は同日 GB10 で pass。
+Metal の bias 勾配 resident 化（#1566）後にテスト側の期待（bias が resident 充填されない前提）が
+更新されていない可能性があるが、本記録ではコードを変更せず事実のみ残す（起票候補）。
+再現ログ: `docs/perf/logs/metal-mse-backward-1691/ignored_store_parity_serial.log`（#1691 ブランチ）。
+
 ## 2. 高優先（Phase 2 機能 parity）結果一覧
 
 pass 数は各ログ末尾の `test result:` 行の実測値。`metal_` はテスト名フィルタ
