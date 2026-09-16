@@ -2,6 +2,8 @@
 
 ## 位置づけ（本 PR 時点では未実測）
 
+**2026-09-16 実測済み**: DGX Spark GB10 実機で R0／R1／R2／Tier 1 A/B を実行し、`ignored/`・`bitdump/`・`ab/`・`gate-1689.log`・`run-1689.log`・`env_info.txt`・`diff_edb85c43_3e43bbd0_cuda_infer_path.txt`（帰属 diff。全文 27k 行は収めず `--stat`＋到達コミット一覧のみ）を回収した。verdict と数値は `docs/perf/infer-chain-single-sync-cuda-ab.md` §5〜§6 を正とする。以下の「未実測」「未生成」記述は実測前の状態を残したものである。
+
 本 PR の実行環境（Linux。`docs/real-hardware-verification-env.local.md`・
 `CUDA_NODE` 環境変数のいずれも確認できず、ローカル GPU も driver/library
 version mismatch により NVML／CUDA 初期化不可）には DGX Spark GB10 実機

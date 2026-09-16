@@ -1,0 +1,169 @@
+# 帰属 diff（edb85c43 ↔ 3e43bbd0。イシュー #1689・2026-09-16）
+# 全文（70 files / +27,545 / -711）は docs/ に収めず、--stat と到達コミット一覧のみを記録する。
+# after 腕 3e43bbd0 は crates/・scripts/・Cargo.* が origin/main 565300e4 と同一（git diff --stat 3e43bbd0 565300e4 -- crates scripts Cargo.toml Cargo.lock が空）。
+
+## git diff --stat edb85c43 3e43bbd0 -- crates/backend-cuda/src crates/autodiff/src/optim crates/facade/src crates/tensor-core/src
+
+ crates/autodiff/src/optim/device_store.rs          |  410 +++
+ crates/autodiff/src/optim/sgd.rs                   |  109 +-
+ crates/backend-cuda/src/batch_norm.rs              |  461 ++++
+ crates/backend-cuda/src/bce.rs                     |  264 ++
+ crates/backend-cuda/src/cast.rs                    |  351 +++
+ crates/backend-cuda/src/constant_pad.rs            |  226 ++
+ crates/backend-cuda/src/context_cache.rs           |  278 +-
+ crates/backend-cuda/src/elementwise.rs             |   58 +-
+ crates/backend-cuda/src/error.rs                   |  234 ++
+ crates/backend-cuda/src/gather_scatter.rs          |  540 ++++
+ crates/backend-cuda/src/gemm.rs                    |  352 +++
+ crates/backend-cuda/src/gemm_auto.rs               |   95 +-
+ crates/backend-cuda/src/gemm_mma.rs                |   17 +-
+ crates/backend-cuda/src/gemm_wmma.rs               |   20 +-
+ crates/backend-cuda/src/huber.rs                   |  274 ++
+ crates/backend-cuda/src/im2col.rs                  |  480 ++++
+ crates/backend-cuda/src/interpolate.rs             |  294 ++
+ crates/backend-cuda/src/kernels_batch_norm.rs      |  181 ++
+ crates/backend-cuda/src/kernels_bce.rs             |  240 ++
+ crates/backend-cuda/src/kernels_cast.rs            |  286 ++
+ crates/backend-cuda/src/kernels_constant_pad.rs    |  104 +
+ crates/backend-cuda/src/kernels_gather_scatter.rs  |  305 ++
+ crates/backend-cuda/src/kernels_huber.rs           |  271 ++
+ crates/backend-cuda/src/kernels_im2col.rs          |  218 ++
+ crates/backend-cuda/src/kernels_interpolate.rs     |  277 ++
+ crates/backend-cuda/src/kernels_kl_div.rs          |  211 ++
+ crates/backend-cuda/src/kernels_nll.rs             |  237 ++
+ crates/backend-cuda/src/kernels_pooling.rs         |  272 ++
+ crates/backend-cuda/src/kernels_reduce.rs          |  183 +-
+ crates/backend-cuda/src/kernels_scalar_op.rs       |  553 +++-
+ crates/backend-cuda/src/kernels_scan.rs            |  150 +
+ crates/backend-cuda/src/kernels_sort.rs            |  191 ++
+ crates/backend-cuda/src/kernels_unique.rs          |   78 +
+ crates/backend-cuda/src/kl_div.rs                  |  273 ++
+ crates/backend-cuda/src/lib.rs                     |   78 +-
+ crates/backend-cuda/src/memory.rs                  |   34 +
+ crates/backend-cuda/src/nll.rs                     |  486 ++++
+ crates/backend-cuda/src/ops.rs                     | 2919 ++++++++++++++++++--
+ crates/backend-cuda/src/pooling.rs                 |  704 +++++
+ crates/backend-cuda/src/pooling_model.rs           |  272 ++
+ .../backend-cuda/src/pooling_real_device_tests.rs  |  348 +++
+ crates/backend-cuda/src/reduce.rs                  |  147 +
+ .../src/scalar_op_cache_wiring_tests.rs            |   87 +-
+ crates/backend-cuda/src/scan.rs                    |  209 ++
+ crates/backend-cuda/src/sort.rs                    |  291 ++
+ crates/backend-cuda/src/sort_model.rs              |  494 ++++
+ crates/backend-cuda/src/typed_bf16.rs              |  337 +++
+ crates/backend-cuda/src/typed_f16.rs               |  298 ++
+ crates/backend-cuda/src/typed_f64.rs               |  210 ++
+ crates/backend-cuda/src/unique.rs                  |  166 ++
+ crates/backend-cuda/src/unique_model.rs            |  220 ++
+ crates/facade/src/compat/callbacks.rs              |  839 ++++++
+ crates/facade/src/compat/mod.rs                    |   22 +-
+ crates/facade/src/compat/sequential.rs             | 1495 ++++++++--
+ crates/facade/src/compat/training.rs               |  835 ++++++
+ crates/facade/src/data.rs                          |   37 +
+ crates/facade/src/lib.rs                           |  257 +-
+ crates/facade/src/optim.rs                         |  170 +-
+ crates/tensor-core/src/backend_ops.rs              | 2869 +++++++++++++++++--
+ crates/tensor-core/src/cast.rs                     |  721 +++++
+ crates/tensor-core/src/creation.rs                 |  454 +++
+ crates/tensor-core/src/data.rs                     |  903 ++++++
+ crates/tensor-core/src/error.rs                    |   61 +-
+ crates/tensor-core/src/interpolate.rs              |  267 ++
+ crates/tensor-core/src/lib.rs                      |   67 +-
+ crates/tensor-core/src/ops_shape.rs                | 2167 ++++++++++++++-
+ crates/tensor-core/src/rng.rs                      |  517 +++-
+ crates/tensor-core/src/scalar_op.rs                |   15 +
+ crates/tensor-core/src/tensor.rs                   |   67 +-
+ crates/tensor-core/src/tensor_fmt.rs               |  700 +++++
+ 70 files changed, 27545 insertions(+), 711 deletions(-)
+
+## git log --oneline --no-merges edb85c43..3e43bbd0 -- crates/backend-cuda/src
+
+3e43bbd0 feat(backend): CUDA／Metal の pooling を BackendOps へ配線する (#1888)
+1723d073 feat(backend-cuda): MaxPool／AvgPool／AdaptiveAvgPool（1d／2d）を実装する (#1886)
+671192e3 feat(backend-cuda): BatchNorm1d／2d（train／eval・running stats）を実装する (#1879)
+28f60d21 feat(backend-cuda): Conv1d を Conv2d の特化として実装する (#1868)
+cfdbe555 feat(backend-cuda): Conv2d forward／backward（im2col＋GEMM）を実装する (#1866)
+ccc1c72e feat(backend): CUDA／Metal の cast 変換カーネルを実装する (#1865)
+c0d7761b feat(autodiff): NLLLoss／KLDivLoss を追加する (#1850)
+1914a12a feat(autodiff): interpolate（bilinear）を追加する (#1853)
+4dd07449 feat(autodiff): HuberLoss（SmoothL1）を追加する (#1851)
+14b4ebfc feat(autodiff): BCELoss／BCEWithLogitsLoss を追加する (#1848)
+2dd64f71 feat(autodiff): interpolate（nearest）を追加する (#1834)
+04616370 feat(backend): cumsum／cumprod の CUDA／Metal カーネルを追加する (#1849)
+c9d7a21a feat(backend): sort／argsort／topk の CUDA／Metal カーネルを追加する (#1844)
+515c8ff3 feat(backend-cuda): バッチ行列積を実装する (#1841)
+f7ce365f feat(autodiff): pad（narrow 基盤流用 VJP・3 バックエンド）を追加する (#1831)
+1a1bcd5a feat(autodiff): min／argmax／argmin を追加する (#1830)
+acf9e2df feat(autodiff): one_hot（非微分・3 バックエンド）を追加する (#1827)
+c8d26963 feat(tensor-core): unique（勾配なし・3 バックエンド・facade 公開判断込み）を追加する (#1828)
+a71599fb feat(tensor-core): matmul_out_shape のバッチ次元対応と CPU バッチ GEMM を実装する (#1810)
+57e954e4 feat(autodiff): SiLU・LeakyReLU・ELU・Hardswish を追加する (#1825)
+4594e7ce feat(autodiff): GELU（erf／tanh 近似）・Softplus を追加する (#1824)
+1f3414cc feat(backend-cuda): TypedOps<f64>（Unsupported起点）とTypedOps<f16>（run_f16結線）を実装する (#1797)
+621940e0 feat(backend-cuda): gather／scatter／scatter_add／index_select を追加する (#1795)
+8fa12a34 feat(backend-cuda): TypedOps<bf16> の cudarc DeviceRepr 可用性を調査し実装する (#1800)
+a79bbd7b feat(backend-cuda): ScalarOp 超越関数系（log／log2／log10／sin／cos／tan）を追加する (#1790)
+b7251241 feat(backend-cuda): ScalarOp 比較演算（bool 出力）と clamp を追加する (#1792)
+
+## git log --oneline --no-merges edb85c43..3e43bbd0 -- crates/autodiff/src/optim
+
+8778b5bd feat(facade): callbacks（EarlyStopping／ModelCheckpoint／LR scheduler 連携）を追加する (#1883)
+87b1e338 feat(autodiff): DeviceParamStore::predict_device_chain を追加し facade Sequential::predict_resident の内部を単一同期チェーンへ差し替える (#1788)
+
+## git log --oneline --no-merges edb85c43..3e43bbd0 -- crates/facade/src
+
+e1270d28 feat(facade): compat::Sequential::add_*（Conv／Norm／Dropout／Embedding／Attention）を追加する (#1884)
+8778b5bd feat(facade): callbacks（EarlyStopping／ModelCheckpoint／LR scheduler 連携）を追加する (#1883)
+48dee7c9 feat(autodiff): nn::Conv1d／Conv2d 層を追加し facade へ公開する (#1880)
+2463e42f feat(facade): Keras 風 compile()／fit()／evaluate() 最小版を追加する (#1877)
+f41a19a3 feat(facade): state_dict／load_state_dict を追加する (#1875)
+202c03e9 feat(autodiff): Dropout（train／eval モード）を追加する (#1873)
+7b53683e feat(autodiff): ModuleList／汎用 Sequential コンテナを追加し compat::Sequential を再構成する (#1870)
+ddcd1480 feat(facade): Dataset／DataLoader（batch・shuffle・drop_last・イテレータ）を追加する (#1867)
+215d5107 feat(autodiff): nn::Module に train／eval モードと named_parameters を追加する (#1869)
+8111910f feat(facade): Tensor／Var の .to(device) と Device::available() 列挙を追加する (#1864)
+3c9e8720 feat(autodiff): retain_graph と複数回 backward の勾配蓄積契約を追加する (#1861)
+becef63f feat(tensor-core): dtype 変換基盤と CPU cast を実装する (#1860)
+5854eea7 feat(autodiff): no_grad と detach を追加する (#1859)
+0abec318 feat(facade): OneCycleLR を追加する (#1858)
+7f39e05d feat(facade): ReduceLROnPlateau を追加する (#1857)
+7dbf332a feat(facade): LAMB を追加する (#1856)
+46b607c7 feat(facade): CosineAnnealingLR／ExponentialLR／LinearWarmup を追加する (#1855)
+9843fb51 feat(facade): RMSprop／Adagrad を追加する (#1854)
+5a3789b3 feat(facade): Adam（coupled L2）を追加する (#1852)
+1914a12a feat(autodiff): interpolate（bilinear）を追加する (#1853)
+2dd64f71 feat(autodiff): interpolate（nearest）を追加する (#1834)
+35104de6 feat(facade): clip_grad_value を追加する (#1840)
+b4f1e1f3 feat(facade): GradScaler相当をfandhe_ai::optimへ公開し適用順序契約を更新する (#1838)
+a66bec26 feat(tensor-core): randint／arange 等の形状ユーティリティを実装する (#1832)
+57e954e4 feat(autodiff): SiLU・LeakyReLU・ELU・Hardswish を追加する (#1825)
+6d9f8815 feat(tensor-core): randn／rand を実装する (#1815)
+87b1e338 feat(autodiff): DeviceParamStore::predict_device_chain を追加し facade Sequential::predict_resident の内部を単一同期チェーンへ差し替える (#1788)
+
+## git log --oneline --no-merges edb85c43..3e43bbd0 -- crates/tensor-core/src
+
+426e10ae feat(backend-cpu): MaxPool／AvgPool／AdaptiveAvgPool（1d／2d）を実装する (#1887)
+e9f07ad1 feat(backend-cpu): BatchNorm1d／2d（train／eval・running stats）を実装する (#1874)
+45d962a5 feat(facade): safetensors save／load の再公開と Tensor の Debug／Display を追加する (#1876)
+ddcd1480 feat(facade): Dataset／DataLoader（batch・shuffle・drop_last・イテレータ）を追加する (#1867)
+1c8ec35f feat(backend-cpu): Conv2d forward／backward（im2col＋GEMM）を実装する (#1862)
+c0d7761b feat(autodiff): NLLLoss／KLDivLoss を追加する (#1850)
+becef63f feat(tensor-core): dtype 変換基盤と CPU cast を実装する (#1860)
+1914a12a feat(autodiff): interpolate（bilinear）を追加する (#1853)
+4dd07449 feat(autodiff): HuberLoss（SmoothL1）を追加する (#1851)
+14b4ebfc feat(autodiff): BCELoss／BCEWithLogitsLoss を追加する (#1848)
+2dd64f71 feat(autodiff): interpolate（nearest）を追加する (#1834)
+515c8ff3 feat(backend-cuda): バッチ行列積を実装する (#1841)
+f7ce365f feat(autodiff): pad（narrow 基盤流用 VJP・3 バックエンド）を追加する (#1831)
+a66bec26 feat(tensor-core): randint／arange 等の形状ユーティリティを実装する (#1832)
+57fa7185 feat(autodiff): var／std／norm（L1/L2）を追加する (#1826)
+1a1bcd5a feat(autodiff): min／argmax／argmin を追加する (#1830)
+acf9e2df feat(autodiff): one_hot（非微分・3 バックエンド）を追加する (#1827)
+c8d26963 feat(tensor-core): unique（勾配なし・3 バックエンド・facade 公開判断込み）を追加する (#1828)
+8240d9cb feat(autodiff): cumsum／cumprod（CPU 参照実装・VJP）を追加する (#1819)
+a71599fb feat(tensor-core): matmul_out_shape のバッチ次元対応と CPU バッチ GEMM を実装する (#1810)
+678b9ced feat(autodiff): sort／argsort／topk（CPU 参照実装・scatter ベース VJP）を追加する (#1818)
+2271042d feat(autodiff): Var::clamp と比較演算（bool 出力・勾配ゼロ）を追加する (#1823)
+6d9f8815 feat(tensor-core): randn／rand を実装する (#1815)
+56d12760 feat(autodiff): Gather／Scatter Op 定義・CPU 参照実装・VJP を追加する (#1786)
+87b1e338 feat(autodiff): DeviceParamStore::predict_device_chain を追加し facade Sequential::predict_resident の内部を単一同期チェーンへ差し替える (#1788)

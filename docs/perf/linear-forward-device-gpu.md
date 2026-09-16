@@ -152,6 +152,8 @@ tests.sh` の R0「前提ゲート」）でも実行対象とした。結果（4
 する運用とし、本エージェント実行環境に GB10 実機がないため引き続き
 未実測のまま記入欄を残す。
 
+**2026-09-16 追記**: GB10 実機で R0 を実行し結果を `docs/perf/infer-chain-single-sync-cuda-ab.md` §5.1 へ転記した（`#[ignore]` 4 件すべて ok・record-only bench `before_median_s=0.000131 after_median_s=0.000094 speedup_x=1.389`。ログ: `docs/perf/logs/infer-chain-single-sync-cuda-1689/ignored/linear_forward_device_*.log`）。
+
 ### 既存回帰（非後退確認）
 
 ```sh
