@@ -70,6 +70,9 @@ overflow を拒否するため検証対象（`checked_bytes_for`）に到達し�
 Metal の bias 勾配 resident 化（#1566）後にテスト側の期待（bias が resident 充填されない前提）が
 更新されていない可能性があるが、本記録ではコードを変更せず事実のみ残す（起票候補）。
 再現ログ: `docs/perf/logs/metal-mse-backward-1691/ignored_store_parity_serial.log`（#1691 ブランチ）。
+回帰窓: #1563 の隣接コミット比較で after=`e851e91a`（PR #1665 マージ）上では同テストが pass
+（`docs/perf/logs/metal-dinput-sync-1563/ignored_after_store_parity.log`・2 pass）したため、
+FAIL は `e851e91a..565300e4` の間で入った変更に起因する。
 
 ## 2. 高優先（Phase 2 機能 parity）結果一覧
 
