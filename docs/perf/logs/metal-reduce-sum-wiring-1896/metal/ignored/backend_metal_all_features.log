@@ -1,0 +1,2341 @@
+== backend_metal_all_features ==
+   Compiling libc v0.2.189
+   Compiling either v1.17.0
+   Compiling num-traits v0.2.19
+   Compiling serde_core v1.0.229
+   Compiling fandhe-ai-backend-cpu v0.8.0 (/Users/<user>/fandhe/library/rust-ai-library/crates/backend-cpu)
+   Compiling zerocopy v0.8.56
+   Compiling rayon v1.12.0
+   Compiling getrandom v0.3.4
+   Compiling objc2-foundation v0.3.2
+   Compiling rand_core v0.9.5
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.8.0 (/Users/<user>/fandhe/library/rust-ai-library/crates/tensor-core)
+   Compiling cudarc v0.19.8
+   Compiling fandhe-ai-backend-cuda v0.8.0 (/Users/<user>/fandhe/library/rust-ai-library/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.8.0 (/Users/<user>/fandhe/library/rust-ai-library/crates/autodiff)
+warning: unused import: `CudaSlice`
+  --> crates/backend-cuda/src/gemm_mma.rs:17:19
+   |
+17 |     CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, LaunchConfig, PushKernelArg,
+   |                   ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `CudaSlice`
+  --> crates/backend-cuda/src/gemm_mma_tf32x3.rs:30:36
+   |
+30 | use cudarc::driver::{CudaFunction, CudaSlice, CudaStream};
+   |                                    ^^^^^^^^^
+
+   Compiling objc2-metal v0.3.2
+warning: field `tiled_pipeline_128x64_error` is never read
+   --> crates/backend-cuda/src/gemm.rs:399:5
+    |
+238 | pub struct CudaGemm {
+    |            -------- field in this struct
+...
+399 |     tiled_pipeline_128x64_error: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `1` is never read
+   --> crates/backend-cuda/src/gemm.rs:977:48
+    |
+977 | pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+    |            ---------------------               ^^^^^
+    |            |
+    |            field in this struct
+    |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+977 - pub struct TiledPipelineFunction(CudaFunction, usize, TiledPipelineTile);
+977 + pub struct TiledPipelineFunction(CudaFunction, (), TiledPipelineTile);
+    |
+
+warning: method `context_ptr` is never used
+   --> crates/backend-cuda/src/gemm.rs:990:8
+    |
+979 | impl TiledPipelineFunction {
+    | -------------------------- method in this implementation
+...
+990 |     fn context_ptr(&self) -> usize {
+    |        ^^^^^^^^^^^
+
+warning: function `persistent_grid_blocks` is never used
+    --> crates/backend-cuda/src/gemm.rs:1153:15
+     |
+1153 | pub(crate) fn persistent_grid_blocks(num_tiles: u32, num_sms: u32, blocks_per_sm: u32) -> u32 {
+     |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persistent_tile_count` is never used
+    --> crates/backend-cuda/src/gemm.rs:1173:15
+     |
+1173 | pub(crate) fn persistent_tile_count(
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `PersistentTiledPipelineFunction` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1240:12
+     |
+1240 | pub struct PersistentTiledPipelineFunction {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `persistent_block_threads` is never used
+    --> crates/backend-cuda/src/gemm.rs:1483:4
+     |
+1483 | fn persistent_block_threads(tile: TiledPipelineTile) -> u32 {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `StreamKPlan` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1516:12
+     |
+1516 | pub struct StreamKPlan {
+     |            ^^^^^^^^^^^
+
+warning: method `is_active` is never used
+    --> crates/backend-cuda/src/gemm.rs:1547:12
+     |
+1542 | impl StreamKPlan {
+     | ---------------- method in this implementation
+...
+1547 |     pub fn is_active(&self) -> bool {
+     |            ^^^^^^^^^
+
+warning: function `streamk_plan` is never used
+    --> crates/backend-cuda/src/gemm.rs:1577:15
+     |
+1577 | pub(crate) fn streamk_plan(
+     |               ^^^^^^^^^^^^
+
+warning: function `u32_from_u64_bounded` is never used
+    --> crates/backend-cuda/src/gemm.rs:1680:4
+     |
+1680 | fn u32_from_u64_bounded(value: u64, context: &str) -> Result<u32, CudaError> {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `StreamKTiledPipelineFunction` is never constructed
+    --> crates/backend-cuda/src/gemm.rs:1715:12
+     |
+1715 | pub struct StreamKTiledPipelineFunction {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `GemmVariantKind` is never used
+  --> crates/backend-cuda/src/gemm_variant.rs:89:10
+   |
+89 | pub enum GemmVariantKind {
+   |          ^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:113:11
+    |
+113 | pub const SPLITK_MIN_K: u32 = 1024;
+    |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_MIN_K_PER_SPLIT` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:118:11
+    |
+118 | pub const SPLITK_MIN_K_PER_SPLIT: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_MAX_SPLITS` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:124:11
+    |
+124 | pub const SPLITK_MAX_SPLITS: u32 = 32;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_MAX_BYTES` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:130:11
+    |
+130 | pub const SPLITK_PARTIAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_BUFFER_MIN_K` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:134:11
+    |
+134 | pub const DOUBLE_BUFFER_MIN_K: u32 = 2 * 32;
+    |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VARIANT_TILE` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:141:7
+    |
+141 | const VARIANT_TILE: u32 = 32;
+    |       ^^^^^^^^^^^^
+
+warning: function `num_blocks` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:147:4
+    |
+147 | fn num_blocks(m: u32, n: u32) -> u64 {
+    |    ^^^^^^^^^^
+
+warning: function `derive_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:159:4
+    |
+159 | fn derive_split_count(num_blocks: u64, num_sms: u32, k: u32) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `recommend_split_count` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:206:15
+    |
+206 | pub(crate) fn recommend_split_count(m: u32, n: u32, k: u32, num_sms: u32) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_k_partial_bytes` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:221:4
+    |
+221 | fn split_k_partial_bytes(num_splits: u32, m: u32, n: u32) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_f32_gemm_variant` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:264:8
+    |
+264 | pub fn select_f32_gemm_variant(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_split_k_launch` is never used
+   --> crates/backend-cuda/src/gemm_variant.rs:301:8
+    |
+301 | pub fn validate_split_k_launch(m: u32, n: u32, num_splits: u32) -> Result<(), CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_TILE` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:26:11
+   |
+26 | pub const TILED_DB_TILE: u32 = 32;
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TILED_DB_F32` is never used
+  --> crates/backend-cuda/src/kernels_gemm_variants.rs:55:11
+   |
+55 | pub const TILED_DB_F32: &str = r#"
+   |           ^^^^^^^^^^^^
+
+warning: constant `SPLITK_PARTIAL_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:144:11
+    |
+144 | pub const SPLITK_PARTIAL_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_BLOCK_DIM` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:212:11
+    |
+212 | pub const SPLITK_REDUCE_BLOCK_DIM: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SPLITK_REDUCE_F32` is never used
+   --> crates/backend-cuda/src/kernels_gemm_variants.rs:228:11
+    |
+228 | pub const SPLITK_REDUCE_F32: &str = r#"
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_f32_source_with_swizzle` is never used
+   --> crates/backend-cuda/src/kernels.rs:731:8
+    |
+731 | pub fn tiled_f32_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:240:8
+    |
+240 | pub fn tiled_pipeline_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_persistent_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:302:4
+    |
+302 | fn render_persistent_source(stages: u32) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_persistent_f32_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:320:8
+    |
+320 | pub fn tiled_pipeline_persistent_f32_source() -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_PERSISTENT_F32_SOURCE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:324:8
+    |
+324 | static TILED_PIPELINE_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:331:8
+    |
+331 | pub fn tiled_pipeline_persistent_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:596:7
+    |
+596 | const TP_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:661:7
+    |
+661 | const TP_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_KERNEL_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:711:7
+    |
+711 | const TP_SK_KERNEL_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_streamk_f32(
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_TILE_CORE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:827:7
+    |
+827 | const TP_SK_TILE_CORE: &str = r#"            int tid = threadIdx.x;
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_KERNEL_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:965:7
+    |
+965 | const TP_SK_KERNEL_SUFFIX: &str = "        }\n    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_FIXUP_BLOCK_THREADS` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:979:11
+    |
+979 | pub const TP_SK_FIXUP_BLOCK_THREADS: u32 = 256;
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP_SK_FIXUP_KERNEL` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1036:7
+     |
+1036 | const TP_SK_FIXUP_KERNEL: &str = r#"
+     |       ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_streamk_source` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1105:4
+     |
+1105 | fn render_streamk_source(stages: u32) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_streamk_f32_source` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1120:8
+     |
+1120 | pub fn tiled_pipeline_streamk_f32_source() -> &'static str {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_STREAMK_F32_SOURCE` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1124:8
+     |
+1124 | static TILED_PIPELINE_STREAMK_F32_SOURCE: LazyLock<String> =
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_streamk_f32_source_with_stages` is never used
+    --> crates/backend-cuda/src/kernels_tiled_pipeline.rs:1130:8
+     |
+1130 | pub fn tiled_pipeline_streamk_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:320:8
+    |
+320 | pub fn tiled_pipeline_128x64_f32_source_with_stages(stages: u32) -> Result<String, CudaError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_persistent_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:380:4
+    |
+380 | fn render_persistent_source(stages: u32) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:399:8
+    |
+399 | pub fn tiled_pipeline_128x64_persistent_f32_source() -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:403:8
+    |
+403 | static TILED_PIPELINE_128X64_PERSISTENT_F32_SOURCE: LazyLock<String> =
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tiled_pipeline_128x64_persistent_f32_source_with_stages` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:411:8
+    |
+411 | pub fn tiled_pipeline_128x64_persistent_f32_source_with_stages(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_PREFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:695:7
+    |
+695 | const TP128_KERNEL_PERSISTENT_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_128x64_persistent_f32(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TP128_KERNEL_PERSISTENT_SUFFIX` is never used
+   --> crates/backend-cuda/src/kernels_tiled_pipeline_128x64.rs:763:7
+    |
+763 | const TP128_KERNEL_PERSISTENT_SUFFIX: &str = "    }\n}\n";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Pageable` is never constructed
+   --> crates/backend-cuda/src/host_staging.rs:118:5
+    |
+100 | pub enum HostStagingKind {
+    |          --------------- variant in this enum
+...
+118 |     Pageable,
+    |     ^^^^^^^^
+    |
+    = note: `HostStagingKind` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `stats` is never used
+   --> crates/backend-cuda/src/host_staging.rs:278:19
+    |
+251 | impl HostStagingCache {
+    | --------------------- method in this implementation
+...
+278 |     pub(crate) fn stats(&self) -> HostStagingStats {
+    |                   ^^^^^
+
+warning: method `stats` is never used
+   --> crates/backend-cuda/src/host_staging.rs:501:19
+    |
+481 | impl H2dStagingCache {
+    | -------------------- method in this implementation
+...
+501 |     pub(crate) fn stats(&self) -> HostStagingStats {
+    |                   ^^^^^
+
+warning: variant `Fresh` is never constructed
+   --> crates/backend-cuda/src/memory.rs:618:5
+    |
+614 | pub(crate) enum ReadbackDest {
+    |                 ------------ variant in this enum
+...
+618 |     Fresh,
+    |     ^^^^^
+    |
+    = note: `ReadbackDest` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `context` is never used
+   --> crates/backend-cuda/src/pool.rs:319:19
+    |
+299 | impl<T: PoolDtype> PooledCudaHandle<T> {
+    | -------------------------------------- method in this implementation
+...
+319 |     pub(crate) fn context(&self) -> &Arc<CudaContext> {
+    |                   ^^^^^^^
+
+warning: methods `alloc_uninit_f16` and `upload_f16` are never used
+   --> crates/backend-cuda/src/pool.rs:715:19
+    |
+517 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+715 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+   Compiling fandhe-ai-backend-metal v0.8.0 (/Users/<user>/fandhe/library/rust-ai-library/crates/backend-metal)
+   Compiling bench-harness v0.8.0 (/Users/<user>/fandhe/library/rust-ai-library/crates/bench-harness)
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.45s
+     Running unittests src/lib.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/fandhe_ai_backend_metal-d687a03e5515488f)
+
+running 660 tests
+test batch_norm_model::tests::channel_index_matches_cpu_reference_layout ... ok
+test batch_norm_model::tests::validate_batch_norm_launch_rejects_u32_overflow ... ok
+test batch_norm_model::tests::train_host_model_rejects_degenerate_channel_count_instead_of_panicking ... ok
+test batch_norm_model::tests::m_f64_bits_roundtrips_to_exact_f64 ... ok
+test batch_norm_model::tests::infer_host_model_rejects_stats_len_mismatch_instead_of_panicking ... ok
+test batch_norm_model::tests::validate_batch_norm_launch_rejects_stats_len_mismatch ... ok
+test batch_norm_model::tests::infer_host_model_handles_zero_axis_early_return ... ok
+test batch_norm_model::tests::validate_batch_norm_launch_rejects_non_finite_eps ... ok
+test batch_norm_model::tests::validate_batch_norm_launch_rejects_degenerate_channel_count_allocation ... ok
+test batch_norm_model::tests::train_host_model_rejects_x_len_mismatch_instead_of_panicking ... ok
+test batch_norm_model::tests::validate_batch_norm_launch_accepts_matching_dims ... ok
+test batch_norm_model::tests::train_host_model_handles_zero_axis_early_return ... ok
+test batch_norm_model::tests::validate_batch_norm_launch_rejects_weight_len_mismatch ... ok
+test batch_norm_model::tests::validate_batch_norm_launch_rejects_x_len_mismatch ... ok
+test batch_state::tests::propagate_failure_on_empty_tokens_is_noop ... ok
+test batch_state::tests::batch_meta_auto_flush_triggers_at_limit ... ok
+test batch_state::tests::format_failure_message_handles_empty_labels ... ok
+test batch_state::tests::batch_meta_tracks_dispatch_count_and_labels ... ok
+test batch_state::tests::propagate_failure_sets_all_tokens_first_writer_wins ... ok
+test cast_buffer::tests::checked_byte_len_rejects_zero_length ... ok
+test cast_buffer::tests::checked_byte_len_accepts_ordinary_length ... ok
+test cast_buffer::tests::checked_byte_len_rejects_overflow ... ok
+test context_cache::tests::cached_context_returns_same_instance_across_calls ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test context_cache::tests::cached_gemm_returns_same_instance_across_calls ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test context_cache::tests::cached_scalar_unary_pipeline_second_call_reuses_cache_for_clamp_regardless_of_payload ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test context_cache::tests::cached_scalar_unary_pipeline_second_call_reuses_cache_for_transcendental_kind ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test device::tests::metal_occupancy_info_reports_smem_upper_bound_at_least_32kib ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test device::tests::probe_gpu_core_count_returns_positive_value_on_apple_silicon ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test device::tests::probe_soc_brand_string_returns_apple_prefixed_value_on_apple_silicon ... ignored, Apple Silicon 実機（sysctl machdep.cpu.brand_string）依存。CI では実行しない
+test constant_pad_model::tests::validate_pad_launch_rejects_rank_mismatch ... ok
+test batch_state::tests::format_failure_message_includes_labels_in_order ... ok
+test elementwise::tests::ew_dispatch_sizes_covers_all_elements_with_div_ceil ... ok
+test elementwise::tests::validate_elementwise_binary_dims_accepts_matching_lengths ... ok
+test context_cache::tests::on_poison_produces_context_cache_unavailable ... ok
+test constant_pad_model::tests::validate_pad_launch_rejects_input_len_mismatch ... ok
+test elementwise::tests::validate_elementwise_binary_dims_rejects_len_exceeding_u32_even_when_matching ... ok
+test batch_norm_model::tests::infer_host_model_matches_cpu_reference_req2 ... ok
+test batch_norm_model::tests::train_host_model_reduction_order_matches_gpu_butterfly_cancelling_batch_axis ... ok
+test elementwise::tests::validate_elementwise_binary_dims_rejects_length_mismatch ... ok
+test batch_norm_model::tests::train_host_model_matches_cpu_reference_req2 ... ok
+test batch_norm_model::tests::train_host_model_reduction_order_matches_gpu_butterfly_not_sequential ... ok
+test cast::tests::checked_contiguous_rejects_huge_broadcast_view_input_without_panicking ... ok
+test elementwise::tests::validate_elementwise_len_accepts_small_len ... ok
+test constant_pad_model::tests::constant_pad_model_nan_value_class_matches_cpu ... ok
+test constant_pad_model::tests::constant_pad_model_matches_cpu_1d ... ok
+test constant_pad_model::tests::constant_pad_model_matches_cpu_2d_both_axes ... ok
+test constant_pad_model::tests::constant_pad_model_matches_cpu_all_zero_pads ... ok
+test constant_pad_model::tests::constant_pad_model_matches_cpu_empty_input_to_nonempty_output ... ok
+test constant_pad_model::tests::constant_pad_model_matches_cpu_3d ... ok
+test elementwise::tests::validate_elementwise_len_rejects_len_exceeding_u32 ... ok
+test elementwise::tests::validate_elementwise_ternary_dims_accepts_matching_lengths ... ok
+test elementwise::tests::validate_elementwise_ternary_dims_rejects_a_mismatch ... ok
+test elementwise::tests::validate_elementwise_ternary_dims_rejects_cond_mismatch ... ok
+test gather_scatter_model::tests::gather_matches_cpu_1d ... ok
+test gather_scatter_model::tests::gather_matches_cpu_2d_each_dim ... ok
+test gather_scatter_model::tests::gather_matches_cpu_3d ... ok
+test gather_scatter_model::tests::gather_model_rejects_negative_index_instead_of_panicking ... ok
+test gather_scatter_model::tests::one_hot_model_empty_index_returns_empty_output ... ok
+test gather_scatter_model::tests::one_hot_model_matches_cpu_1d ... ok
+test gather_scatter_model::tests::one_hot_model_matches_cpu_2d ... ok
+test gather_scatter_model::tests::one_hot_model_matches_cpu_3d ... ok
+test gather_scatter_model::tests::one_hot_model_rejects_negative_index_instead_of_panicking ... ok
+test gather_scatter_model::tests::one_hot_model_rejects_out_of_range_index_instead_of_panicking ... ok
+test gather_scatter_model::tests::scatter_add_cancelling_sequence_matches_cpu ... ok
+test gather_scatter_model::tests::scatter_add_duplicate_indices_matches_cpu ... ok
+test gather_scatter_model::tests::scatter_add_matches_cpu_2d ... ok
+test gather_scatter_model::tests::scatter_add_nan_inf_matches_cpu_class ... ok
+test gather_scatter_model::tests::scatter_model_rejects_input_len_mismatch_instead_of_panicking ... ok
+test gather_scatter_model::tests::scatter_matches_cpu_3d_add ... ok
+test gather_scatter_model::tests::scatter_model_validates_index_range_even_for_empty_output ... ok
+test gather_scatter_model::tests::scatter_overwrite_matches_cpu_2d ... ok
+test gather_scatter_model::tests::validate_gather_launch_empty_output_skips_stride_overflow ... ok
+test gather_scatter_model::tests::scatter_reduced_index_axis_passes_through_input ... ok
+test gather_scatter_model::tests::validate_gather_launch_rejects_input_len_mismatch ... ok
+test gather_scatter_model::tests::validate_gather_launch_rejects_negative_index ... ok
+test gather_scatter_model::tests::validate_gather_launch_rejects_non_dim_axis_mismatch ... ok
+test gather_scatter_model::tests::validate_index_range_rejects_out_of_range_and_negative ... ok
+test gather_scatter_model::tests::validate_launch_len_accepts_len_at_u32_max ... ok
+test gather_scatter_model::tests::validate_launch_len_rejects_len_exceeding_u32_max ... ok
+test gather_scatter_model::tests::validate_one_hot_launch_rejects_num_classes_zero ... ok
+test gather_scatter_model::tests::validate_scatter_launch_empty_output_skips_stride_overflow ... ok
+test gather_scatter_model::tests::validate_scatter_launch_rejects_non_dim_axis_exceeding_out_shape ... ok
+test gather_scatter_model::tests::validate_scatter_launch_reports_empty_index_as_passthrough ... ok
+test gather_scatter_model::tests::validate_scatter_launch_validates_index_range_even_for_empty_output ... ok
+test gather_scatter_model::tests::validate_shapes_fit_u32_accepts_small_shapes ... ok
+test gather_scatter_model::tests::validate_shapes_fit_u32_rejects_dim_exceeding_u32 ... ok
+test gather_scatter_model::tests::validate_shapes_fit_u32_rejects_excess_rank ... ok
+test gemm::tests::all_staged_candidates_match_hfrag_cpu_reference_512_nn ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::all_staged_candidates_match_te_cpu_reference_512_nn ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::coop_load_bit_match_all_candidates ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::coop_load_bit_match_boundary_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::coop_load_bit_match_dispatch_auto ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::coop_load_default_matches_production_constants ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::coop_load_f16_path_is_noop ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::coop_load_transposed_bit_match ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::diag_encode_tiled_hfrag_nn_matches_cpu_reference_small_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::dispatch_hfrag_tiled_unverified_nn_matches_cpu_reference_small_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::frag_load_on_off_bit_match_all_candidates ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::frag_load_on_off_bit_match_dispatch_auto ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::frag_load_tgp_vs_device_same_shape_bit_match ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::frag_load_transposed_bit_match ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::gemm_strides_from_layouts_encodes_transpose_flags ... ok
+test gemm::tests::gemm_strides_nn_has_zero_transpose_flags ... ok
+test gemm::tests::gemm_strides_repr_c_layout_matches_msl_struct ... ok
+test gemm::tests::mma_frag_load_accessor_reflects_constructor_argument ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::run_tiled_bias_act_f32_increments_fused_launch_counter ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::gemm_variant_function_names_match_shader_kernel_names ... ok
+test gemm::tests::run_tiled_bias_act_f32_k_zero_does_not_increment_fused_launch_counter ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::source_specialized_on_off_bit_match_all_candidates ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::source_specialized_on_off_bit_match_dispatch_auto ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::source_specialized_route_populates_only_spec_cache ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::strided_tiled_eligibility_accepts_eight_divisible_nn_shape ... ok
+test gemm::tests::strided_tiled_eligibility_accepts_four_divisible_offset ... ok
+test gemm::tests::simdgroup_f16_epilogue_stride_matches_threadgroup_width_constant ... ok
+test gemm::tests::strided_tiled_eligibility_rejects_non_eight_divisible_k ... ok
+test gemm::tests::strided_tiled_eligibility_rejects_non_eight_divisible_m ... ok
+test gemm::tests::strided_tiled_eligibility_rejects_non_four_divisible_ld ... ok
+test gemm::tests::strided_tiled_eligibility_rejects_non_four_divisible_offset ... ok
+test gemm::tests::strided_tiled_eligibility_rejects_zero_dims ... ok
+test gemm::tests::te_layout_probe_matches_model ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::tile_class_default_matches_production_constants ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::tile_class_split_bit_match_all_candidates ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::tile_class_split_bit_match_dispatch_auto ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::tile_class_split_bit_match_edge_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::unroll_acc_effective_matches_candidate_acc_product_threshold ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::unroll_acc_on_off_bit_match_all_candidates ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::unroll_acc_on_off_bit_match_dispatch_auto ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm::tests::validate_bias_act_dims_accepts_valid_shape ... ok
+test gemm::tests::validate_bias_act_dims_accepts_zero_m_n_k_unlike_validate_dims ... ok
+test gemm::tests::validate_bias_act_dims_rejects_a_len_mismatch ... ok
+test gemm::tests::validate_bias_act_dims_rejects_b_len_mismatch ... ok
+test gemm::tests::validate_bias_act_dims_rejects_dimension_exceeding_u32 ... ok
+test gemm::tests::validate_dims_accepts_valid_shape ... ok
+test gemm::tests::validate_dims_f16_accepts_valid_shape ... ok
+test gemm::tests::validate_dims_f16_rejects_a_len_mismatch ... ok
+test gemm::tests::validate_dims_f16_rejects_dimension_exceeding_u32 ... ok
+test gemm::tests::validate_dims_f16_rejects_zero_k ... ok
+test gemm::tests::validate_dims_rejects_a_len_mismatch ... ok
+test gemm::tests::validate_dims_rejects_b_len_mismatch ... ok
+test gemm::tests::validate_dims_rejects_dim_product_overflow ... ok
+test gemm::tests::validate_dims_rejects_dimension_exceeding_u32 ... ok
+test gemm::tests::validate_dims_rejects_zero_m ... ok
+test gemm::tests::validate_dims_rejects_zero_n ... ok
+test gemm::tests::validate_effective_dims_accepts_padded_shape ... ok
+test gemm::tests::validate_effective_dims_rejects_dim_product_overflow ... ok
+test gemm::tests::validate_effective_dims_rejects_dimension_exceeding_u32 ... ok
+test gemm::tests::validate_strided_dims_accepts_nn_and_matches_validate_bias_act_dims ... ok
+test gemm::tests::validate_strided_dims_accepts_transposed_layout ... ok
+test gemm::tests::validate_strided_dims_impl_with_c_offset_accepts_range_within_larger_buffer ... ok
+test gemm::tests::validate_strided_dims_impl_with_c_offset_rejects_out_of_range ... ok
+test gemm::tests::validate_strided_dims_rejects_c_len_mismatch ... ok
+test gemm::tests::validate_strided_dims_rejects_offset_pushing_span_out_of_bounds ... ok
+test gemm::tests::validate_strided_dims_rejects_shape_mismatch ... ok
+test gemm::tests::validate_strided_dims_rejects_span_exceeding_buffer ... ok
+test gemm_bk32_diag_tests::bk32_kernel_gpu_ab_vs_candidate0 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_bk32_diag_tests::bk32_kernel_gpu_ab_vs_production_select ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_bm128_diag_tests::bm128_kernel_gpu_ab_vs_candidate0 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_bm128_diag_tests::bm128_kernel_gpu_ab_vs_production_select ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_coop_load_diag_tests::coop_load_kernel_gpu_ab_production_sizes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_frag_load_diag_tests::frag_load_kernel_gpu_ab_production_sizes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_hfrag_diag_tests::hfrag_kernel_gpu_ab_best_vs_production_select ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_hfrag_diag_tests::hfrag_kernel_gpu_ab_same_tile_vs_f32 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_hfrag_diag_tests::hfrag_kernel_gpu_sweep_all_staged_candidates ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_hfrag_diag_tests::hfrag_smoke_rounded_inputs_pass_composite_vs_f32 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_mpp_diag_tests::mpp_kernel_gpu_ab_vs_production_select ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_mpp_diag_tests::mpp_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_mpp_diag_tests::mpp_metal4_compile_probe ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_production_batch ... ignored
+test gemm_reuse_phase_diag_tests::gpu_timestamps_within_commit_wait_window ... ignored
+test gemm_spec_source_diag_tests::candidate_10_reflection_shows_no_fallback_for_every_transpose_pattern ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_spec_source_diag_tests::candidate_9_reflection_shows_no_fallback_for_every_transpose_pattern ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_spec_source_diag_tests::spec_source_kernel_gpu_ab_production_sizes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_spec_source_diag_tests::spec_source_reflection_dump_all_candidates ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_te_diag_tests::te_kernel_gpu_ab_vs_production_select ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_tile_class_diag_tests::tile_class_kernel_gpu_ab_production_sizes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_tile_class_diag_tests::tile_class_production_select_kernel_gpu_ab ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test generic_cache::tests::get_or_build_does_not_cache_errors ... ok
+test generic_cache::tests::get_or_build_keyed_separates_distinct_keys ... ok
+test generic_cache::tests::get_or_build_constructs_once_and_caches_hit ... ok
+test im2col::tests::im2col_msl_source_declares_both_kernels ... ok
+test generic_cache::tests::get_or_build_keyed_constructs_once_per_key_and_caches_hit ... ok
+test im2col_model::tests::derive_im2col_dims_rejects_rank_deficient_col_shape ... ok
+test generic_cache::tests::get_or_build_keyed_does_not_cache_errors ... ok
+test im2col_model::tests::derive_im2col_dims_handles_1d_shape ... ok
+test im2col_model::tests::derive_im2col_dims_rejects_rank_deficient_in_shape ... ok
+test im2col_model::tests::derive_im2col_dims_rejects_p_axis_mismatch ... ok
+test im2col_model::tests::derive_im2col_dims_rejects_n_axis_mismatch ... ok
+test im2col_model::tests::derive_im2col_dims_rejects_groups_axis_mismatch ... ok
+test im2col_model::tests::derive_im2col_dims_rejects_1d_p_axis_mismatch ... ok
+test im2col_model::tests::col2im_no_contribution_position_yields_positive_zero ... ok
+test im2col_model::tests::derive_im2col_dims_rejects_u32_overflow ... ok
+test im2col_model::tests::col2im_soft_f64_rejects_empty_d_col_slice_without_panicking ... ok
+test im2col_model::tests::im2col_dims_size_matches_msl_struct ... ok
+test im2col_model::tests::im2col_model_rejects_empty_input_slice_without_panicking ... ok
+test generic_cache::tests::get_or_build_keyed_reports_typed_error_on_poisoned_mutex ... ok
+test generic_cache::tests::get_or_build_reports_typed_error_on_poisoned_mutex ... ok
+test im2col_model::tests::im2col_model_rejects_hand_built_dims_with_zero_p_without_panicking ... ok
+test interpolate_model::tests::interpolate_bilinear_model_degenerate_in_size_one_matches_cpu ... ok
+test interpolate_model::tests::interpolate_bilinear_model_matches_cpu_downsample_align_corners_true ... ok
+test interpolate_model::tests::interpolate_bilinear_model_matches_cpu_leading_batch_axis ... ok
+test interpolate_model::tests::interpolate_bilinear_model_matches_cpu_upsample_align_corners_false ... ok
+test interpolate_model::tests::interpolate_nearest_model_matches_cpu_1d_downsample_non_integer ... ok
+test interpolate_model::tests::interpolate_nearest_model_matches_cpu_1d_upsample ... ok
+test interpolate_model::tests::interpolate_nearest_model_matches_cpu_2d_leading_batch_axis ... ok
+test interpolate_model::tests::interpolate_nearest_model_matches_cpu_identity_size ... ok
+test interpolate_model::tests::interpolate_nearest_model_nan_inf_class_matches_cpu ... ok
+test interpolate_model::tests::row_major_strides_axis0_overflows_u32_for_review_example_shape ... ok
+test interpolate_model::tests::validate_interpolate_bilinear_launch_rejects_input_len_mismatch ... ok
+test interpolate_model::tests::validate_interpolate_bilinear_launch_rejects_size_len_other_than_two ... ok
+test interpolate_model::tests::validate_interpolate_launch_rejects_input_len_mismatch ... ok
+test interpolate_model::tests::validate_interpolate_launch_rejects_rank_mismatch ... ok
+test interpolate_model::tests::validate_interpolate_launch_rejects_zero_spatial_axis ... ok
+test layer_norm::tests::validate_hidden_exact_f32_accepts_boundary ... ok
+test layer_norm::tests::validate_hidden_exact_f32_rejects_above_boundary ... ok
+test layout::tests::classify_col_major_transposed ... ok
+test layout::tests::classify_rejects_broadcast_zero_stride ... ok
+test layout::tests::classify_rejects_negative_stride ... ok
+test layout::tests::classify_rejects_non_rank2 ... ok
+test layout::tests::classify_rejects_unsupported_stride_combo ... ok
+test layout::tests::classify_rejects_zero_dim ... ok
+test layout::tests::classify_row_major_contiguous ... ok
+test layout::tests::classify_row_major_padded_ld ... ok
+test layout::tests::collapse_rank2_contiguous ... ok
+test layout::tests::collapse_rank3_batch ... ok
+test layout::tests::collapse_rank4_batch ... ok
+test layout::tests::collapse_rejects_element_count_overflow ... ok
+test layout::tests::collapse_rejects_non_contiguous_batch_gap ... ok
+test layout::tests::collapse_rejects_rank_below_2 ... ok
+test layout::tests::collapse_rejects_trailing_stride_not_one ... ok
+test layout::tests::collapse_rejects_zero_dim ... ok
+test layout::tests::reduce_bias_grad_rows_host_preserves_cancelling_contribution_via_f64_accumulator ... ok
+test layout::tests::reduce_bias_grad_rows_host_preserves_nan_and_inf ... ok
+test layout::tests::reduce_bias_grad_rows_host_rejects_insufficient_data_instead_of_panicking ... ok
+test layout::tests::reduce_bias_grad_rows_host_rejects_overflowing_layout ... ok
+test layout::tests::reduce_bias_grad_rows_host_single_row_preserves_negative_zero_sign ... ok
+test layout::tests::reduce_bias_grad_rows_host_transposed_view_matches_logical_shape ... ok
+test layout::tests::required_span_overflow_is_none ... ok
+test layout::tests::required_span_row_major ... ok
+test layout::tests::required_span_transposed ... ok
+test layout::tests::required_span_zero_major_is_zero ... ok
+test layout::tests::strided_reference_matches_dense_for_all_transpose_patterns ... ok
+test layout::tests::strided_reference_matches_dense_with_padded_ld ... ok
+test layout::tests::transpose_pattern_from_flags ... ok
+test layout::tests::validate_gemm_bias_write_ranges_accepts_disjoint_ranges ... ok
+test layout::tests::validate_gemm_bias_write_ranges_accepts_no_bias ... ok
+test layout::tests::validate_gemm_bias_write_ranges_accepts_zero_rows_without_false_overlap ... ok
+test layout::tests::validate_gemm_bias_write_ranges_rejects_bias_n_mismatch ... ok
+test layout::tests::validate_gemm_bias_write_ranges_rejects_full_overlap ... ok
+test layout::tests::validate_gemm_bias_write_ranges_rejects_out_of_bounds_weight ... ok
+test layout::tests::validate_gemm_bias_write_ranges_rejects_partial_overlap ... ok
+test memory::tests::checked_byte_len_accepts_ordinary_numel_including_zero ... ok
+test memory::tests::checked_byte_len_rejects_overflow ... ok
+test memory::tests::checked_numel_accepts_ordinary_shape ... ok
+test memory::tests::checked_numel_rejects_overflow ... ok
+test memory::tests::map_metal_error_covers_device_unavailable ... ok
+test memory::tests::map_metal_error_covers_zero_length_allocation ... ok
+test memory::tests::metal_memory_and_pooled_metal_memory_implement_memory_stats ... ok
+test memory::tests::pooled_alloc_zeroed_records_logical_bytes_via_shared_context ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test nll::tests::validate_nll_buffers_rejects_input_length_mismatch ... ok
+test nll::tests::validate_nll_buffers_rejects_negative_target ... ok
+test nll::tests::validate_nll_buffers_rejects_out_of_range_target ... ok
+test nll::tests::validate_nll_buffers_rejects_targets_length_mismatch ... ok
+test nll::tests::validate_nll_layout_rejects_n_samples_overflow ... ok
+test im2col_model::tests::im2col_and_col2im_models_match_cpu_backend_across_shapes ... ok
+test nll::tests::validate_nll_layout_rejects_numel_overflow ... ok
+test nll::tests::validate_nll_layout_rejects_u32_range_exceeded ... ok
+test ops::tests::adaptive_avg_pool2d_rejects_huge_broadcast_view_input_without_panicking ... ok
+test ops::tests::adaptive_avg_pool2d_returns_empty_for_zero_batch_without_touching_device ... ok
+test ops::tests::avg_pool2d_rejects_huge_broadcast_view_input_without_panicking ... ok
+test ops::tests::avg_pool2d_returns_empty_for_zero_batch_without_touching_device ... ok
+test ops::tests::col2im_returns_empty_for_zero_batch_1d_without_touching_device ... ok
+test ops::tests::gather_returns_unsupported_for_rank_exceeding_kernel_limit ... ok
+test ops::tests::gemm_bias_act_route_falls_back_when_bias_len_mismatches_n ... ok
+test ops::tests::gemm_bias_act_route_falls_back_when_bias_shape_is_broadcastable_but_not_n ... ok
+test ops::tests::gemm_bias_act_route_selects_fused_when_bias_is_none ... ok
+test ops::tests::gemm_bias_act_route_selects_fused_when_bias_shape_matches_n_exactly ... ok
+test ops::tests::gemm_nt_transposed_b_does_not_increment_repack_counter ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test ops::tests::gemm_resident_lhs_transposed_b_does_not_increment_repack_counter ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test ops::tests::gemm_tn_transposed_a_does_not_increment_repack_counter ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test ops::tests::gemm_tt_both_transposed_increments_repack_counter_twice ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test ops::tests::im2col_returns_empty_for_zero_batch_1d_without_touching_device ... ok
+test ops::tests::interpolate_rejects_huge_broadcast_view_input_without_panicking ... ok
+test ops::tests::map_interpolate_error_falls_back_to_kernel_launch_failed_for_other_errors ... ok
+test ops::tests::map_interpolate_error_treats_invalid_interpolate_shape_as_shape_mismatch ... ok
+test ops::tests::max_pool2d_rejects_huge_broadcast_view_input_without_panicking ... ok
+test ops::tests::max_pool2d_returns_empty_for_zero_batch_without_touching_device ... ok
+test ops::tests::pad_rejects_dim_exceeding_u32_before_touching_metal_context ... ok
+test ops::tests::scatter_returns_unsupported_for_rank_exceeding_kernel_limit ... ok
+test ops::tests::unique_rejects_transposed_shape_with_overflowing_intermediate_product ... ok
+test pad::tests::pad8_rounds_up_to_multiple_of_eight ... ok
+test pad::tests::pad_matrix_f16_passthrough_when_size_matches ... ok
+test pad::tests::pad_matrix_passthrough_when_size_matches ... ok
+test pad::tests::pad_matrix_f16_zero_pads_rows_and_cols ... ok
+test pad::tests::pad_matrix_zero_pads_rows_and_cols ... ok
+test pad::tests::unpad_matrix_discards_padding_tail ... ok
+test pad::tests::unpad_matrix_f16_is_inverse_of_pad_matrix_f16 ... ok
+test pad::tests::unpad_matrix_f16_passthrough_preserves_ownership ... ok
+test pad::tests::unpad_matrix_is_inverse_of_pad_matrix ... ok
+test pad::tests::unpad_matrix_passthrough_when_size_matches ... ok
+test pool::tests::logical_bytes_for_computes_f32_byte_length ... ok
+test pool::tests::logical_bytes_for_rejects_overflow ... ok
+test pipeline::tests::compile_options_pins_safe_math_mode_and_precise_functions ... ok
+test pool_pending::tests::drain_for_merge_does_not_depend_on_synchronize_outcome ... ok
+test pool_pending::tests::drain_for_merge_empties_and_records_merge_for_each_entry ... ok
+test pool_pending::tests::drain_for_merge_on_empty_pending_is_noop ... ok
+test pool_pending::tests::drain_for_merge_then_put_all_merged_near_limit_does_not_self_evict ... ok
+test pool_pending::tests::in_flight_false_returns_entry_for_immediate_put ... ok
+test pool_pending::tests::in_flight_true_defers_and_records_pending_return ... ok
+test pool_pending::tests::repeated_push_drain_rounds_converge_to_consistent_totals ... ok
+test pooling_model::tests::adaptive_avg_pool_zero_output_size_rejected ... ok
+test pooling::tests::pooling_msl_source_declares_all_kernels ... ok
+test pooling_model::tests::adaptive_avg_pool_matches_naive_f64_reference_output_size_le_input ... ok
+test pooling_model::tests::adaptive_avg_pool_output_size_greater_than_input_allowed ... ok
+test pooling_model::tests::adaptive_pool_model_rejects_regular_style_dims ... ok
+test pooling_model::tests::adaptive_window_no_overflow_near_u32_max ... ok
+test pooling_model::tests::avg_pool_cancelling_sum_matches_naive_f64_reference ... ok
+test pooling_model::tests::avg_pool_count_include_pad_false_matches_naive_reference ... ok
+test pooling_model::tests::ceil_mode_rejected ... ok
+test pooling_model::tests::divisor_u32_to_f64_bits_matches_pool_f64_from_uint_contract ... ok
+test pooling_model::tests::empty_window_via_padding_compensated_dilation_rejected ... ok
+test pooling_model::tests::avg_pool_matches_naive_f64_reference_bit_exact ... ok
+test pooling_model::tests::huge_kernel_and_dilation_does_not_panic ... ok
+test pooling_model::tests::inconsistent_adaptive_dims_rejected_not_panicking ... ok
+test pooling_model::tests::inconsistent_numel_out_rejected_not_panicking ... ok
+test pooling_model::tests::max_pool_all_negative_infinity_window ... ok
+test pooling_model::tests::max_pool_first_nan_wins_and_stays ... ok
+test pooling_model::tests::max_pool_padding_never_wins ... ok
+test pooling_model::tests::max_pool_tie_prefers_first_index ... ok
+test pooling_model::tests::negative_output_numerator_rejected ... ok
+test pooling_model::tests::padding_at_floor_half_kernel_allowed ... ok
+test pooling_model::tests::padding_exceeding_floor_half_kernel_rejected ... ok
+test pooling_model::tests::pool_dims_size_matches_msl_struct ... ok
+test pooling_model::tests::regular_pool_models_reject_adaptive_style_dims ... ok
+test pooling_model::tests::reshape_merged_1d_shape_accepted ... ok
+test pooling_model::tests::zero_spatial_axis_rejected_zero_batch_allowed ... ok
+test readout_regression_diag_arms::tests::all_has_exactly_four_arms ... ok
+test readout_regression_diag_arms::tests::arm_labels_are_distinct ... ok
+test readout_regression_diag_arms::tests::checksum_f64_empty_is_zero ... ok
+test readout_regression_diag_arms::tests::checksum_f64_matches_manual_sum_for_small_vector ... ok
+test readout_regression_diag_arms::tests::dummy_alloc_touch_free_does_not_panic_for_zero_len ... ok
+test readout_regression_diag_arms::tests::pretouched_host_vec_f32_has_requested_len_and_nonzero_sentinel ... ok
+test readout_regression_diag_arms::tests::pretouched_host_vec_f32_zero_len_is_empty ... ok
+test readout_regression_diag_tests_1695::readout_regression_diag_all_arms ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n1024 ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n1024_borrowed_keep_alive ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n1024_borrowed_with_dummy_alloc_free ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n1024_legacy_to_vec ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n1024_pretouched_reused_dest ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n2048 ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n2048_borrowed_keep_alive ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n2048_borrowed_with_dummy_alloc_free ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n2048_legacy_to_vec ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n2048_pretouched_reused_dest ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n4096 ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n4096_borrowed_keep_alive ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n4096_borrowed_with_dummy_alloc_free ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n4096_legacy_to_vec ... ignored
+test readout_regression_diag_tests_1695::readout_regression_diag_n4096_pretouched_reused_dest ... ignored
+test reduce_model::tests::plan_reduce_all_boundaries ... ok
+test reduce_model::tests::plan_reduce_all_u32_limit_boundary ... ok
+test reduce::tests::reduce_msl_source_declares_all_kernels ... ok
+test reduce_model::tests::plan_reduce_axis_normal_and_out_of_range ... ok
+test reduce_model::tests::plan_reduce_axis_u32_limit_boundary ... ok
+test reduce_model::tests::sum_axis_empty_axis_len_yields_zero_outputs ... ok
+test rnn_cell::tests::require_len_rejects_mismatch ... ok
+test rnn_cell::tests::validate_rnn_dims_accepts_gated_within_bound ... ok
+test rnn_cell::tests::validate_rnn_dims_accepts_multiple ... ok
+test rnn_cell::tests::validate_rnn_dims_rejects_gated_overflow ... ok
+test rnn_cell::tests::validate_rnn_dims_rejects_non_multiple ... ok
+test rnn_cell::tests::validate_rnn_dims_rejects_zero_hidden ... ok
+test row_kernel::tests::derive_persistent_grid_clamps_grid_at_rows ... ok
+test row_kernel::tests::derive_persistent_grid_clamps_groups_per_core_at_cap ... ok
+test row_kernel::tests::derive_persistent_grid_fallback_clamps_at_cap ... ok
+test row_kernel::tests::derive_persistent_grid_fallback_passes_through_small_rows ... ok
+test row_kernel::tests::derive_persistent_grid_fallback_rows_zero_is_one ... ok
+test reduce_model::tests::sum_all_nan_and_inf_propagation ... ok
+test reduce_model::tests::sum_all_negative_zero_only_yields_positive_zero ... ok
+test reduce_model::tests::sum_all_matches_sequential_when_single_chunk ... ok
+test row_kernel::tests::derive_persistent_grid_returns_at_least_one ... ok
+test row_kernel::tests::derive_persistent_grid_rows_zero_is_failsafe_one ... ok
+test reduce_model::tests::sum_all_flat_sequential_diverges_from_chunked_at_large_n ... ok
+test reduce_model::tests::sum_all_chunk_boundary_cancelling_sequence_matches_cpu ... ok
+test row_kernel::tests::derive_persistent_grid_uses_declared_smem_budget_not_actual_hidden ... ok
+test row_kernel::tests::derive_persistent_grid_zero_smem_uses_cap ... ok
+test row_kernel::tests::match_rmsnorm_plan_accepts_canonical_plan ... ok
+test row_kernel::tests::match_rmsnorm_plan_rejects_row_axis_variant ... ok
+test row_kernel::tests::match_rmsnorm_plan_rejects_softmax_shaped_plan ... ok
+test row_kernel::tests::match_softmax_plan_accepts_last_axis_plan ... ok
+test row_kernel::tests::match_softmax_plan_accepts_none_axis_plan ... ok
+test row_kernel::tests::match_softmax_plan_rejects_mismatched_axis_across_ops ... ok
+test row_kernel::tests::match_softmax_plan_rejects_non_last_axis ... ok
+test row_kernel::tests::match_softmax_plan_rejects_rmsnorm_shaped_plan ... ok
+test row_kernel::tests::plan_dtype_is_f32_true_for_f32_plan ... ok
+test row_kernel::tests::select_route_onepass_at_boundary ... ok
+test row_kernel::tests::select_route_onepass_for_small_hidden ... ok
+test row_kernel::tests::select_route_onepass_for_zero_hidden ... ok
+test row_kernel::tests::select_route_twopass_over_boundary ... ok
+test row_kernel::tests::softmax_neg_flt_max_equals_negative_f32_max ... ok
+test row_kernel::tests::softmax_neg_flt_max_is_finite ... ok
+test row_kernel::tests::softmax_neg_flt_max_is_less_than_or_equal_to_any_finite_f32 ... ok
+test row_kernel::tests::softmax_neg_flt_max_survives_fma_without_producing_negative_infinity ... ok
+test row_kernel::tests::validate_row_kernel_launch_accepts_matching_dims ... ok
+test row_kernel::tests::validate_row_kernel_launch_accepts_zero_eps ... ok
+test row_kernel::tests::validate_row_kernel_launch_rejects_dims_exceeding_i32_max ... ok
+test row_kernel::tests::validate_row_kernel_launch_rejects_negative_eps ... ok
+test row_kernel::tests::validate_row_kernel_launch_rejects_non_finite_eps ... ok
+test row_kernel::tests::validate_row_kernel_launch_rejects_w_len_mismatch ... ok
+test row_kernel::tests::validate_row_kernel_launch_rejects_x_len_mismatch ... ok
+test row_kernel::tests::validate_row_kernel_launch_skips_eps_check_when_none ... ok
+test scalar_op_source::tests::clamp_source_declares_payload_params_and_omits_values ... ok
+test scalar_op_source::tests::clamp_source_does_not_use_fmin_fmax_or_metal_clamp ... ok
+test scalar_op_source::tests::clamp_source_is_payload_value_independent ... ok
+test scalar_op_source::tests::comparison_kinds_include_bounds_check_and_zero_one_literals ... ok
+test scalar_op_source::tests::elu_source_uses_expm1_helper_not_naive_exp_minus_one ... ok
+test scalar_op_source::tests::expm1_reconstruction_formula_matches_exp_m1_reference ... ok
+test scalar_op_source::tests::function_names_are_kind_name_derived_and_stable ... ok
+test scalar_op_source::tests::gelu_source_includes_bounds_check_and_erf_prelude ... ok
+test scalar_op_source::tests::gelu_sources_are_payload_independent ... ok
+test scalar_op_source::tests::gelu_tanh_source_includes_bounds_check_and_precise_tanh_without_prelude ... ok
+test scalar_op_source::tests::hardswish_and_leaky_relu_do_not_use_fmin_fmax_or_metal_clamp ... ok
+test scalar_op_source::tests::implemented_binary_kinds_include_bounds_check_and_expected_buffer_indices ... ok
+test scalar_op_source::tests::leaky_relu_and_elu_sources_are_payload_value_independent ... ok
+test scalar_op_source::tests::neg_and_abs_host_reference_matches_documented_bit_contract ... ok
+test scalar_op_source::tests::payload_param_count_matches_source_for_all_implemented_unary_kinds ... ok
+test scalar_op_source::tests::pow_source_uses_precise_pow ... ok
+test scalar_op_source::tests::preamble_is_empty_for_kinds_without_expm1_helper ... ok
+test scalar_op_source::tests::prelude_is_empty_for_kinds_that_do_not_need_it ... ok
+test scalar_op_source::tests::silu_and_elu_use_precise_exp_only ... ok
+test scalar_op_source::tests::silu_hardswish_leaky_relu_elu_include_bounds_check_and_buffer_indices ... ok
+test scalar_op_source::tests::softplus_source_declares_payload_params_and_log1p_prelude ... ok
+test scalar_op_source::tests::softplus_source_is_payload_value_independent ... ok
+test scalar_op_source::tests::sqrt_source_declares_expected_buffer_indices ... ok
+test scalar_op_source::tests::sqrt_source_includes_bounds_check_and_precise_sqrt ... ok
+test reduce_model::tests::sum_axis_matches_cpu_reference_across_shapes_and_dims ... ok
+test scalar_op_source::tests::sqrt_source_is_payload_independent ... ok
+test scalar_op_source::tests::sub_and_div_sources_use_plain_operators ... ok
+test scalar_op_source::tests::unimplemented_binary_kinds_return_none ... ok
+test scalar_op_source::tests::unimplemented_kinds_remain_none_after_1709_additions ... ok
+test scalar_op_source::tests::transcendental_unary_kinds_include_bounds_check_and_use_precise_msl ... ok
+test scalar_op_source::tests::unimplemented_unary_kinds_return_none ... ok
+test scan_model::tests::cumprod_contract_vector_avoids_underflow ... ok
+test scan::tests::scan_msl_source_declares_both_kernels ... ok
+test scan_model::tests::cumprod_zero_times_inf_is_nan ... ok
+test scan_model::tests::cumsum_contract_vector_matches_f64_accumulator_semantics ... ok
+test scan_model::tests::cumsum_handles_negative_zero_leading ... ok
+test scan_model::tests::cumsum_inf_plus_neg_inf_is_nan ... ok
+test scan_model::tests::cumsum_handles_subnormal ... ok
+test scan_model::tests::cumsum_soft_f64_respects_shape_dim ... ok
+test scan_model::tests::plan_scan_dim_out_of_range_is_size_limit_error ... ok
+test scan_model::tests::plan_scan_small_shape_ok ... ok
+test scan_model::tests::plan_scan_u32_limit_boundary ... ok
+test scan_model::tests::plan_scan_usize_overflow_is_size_limit_error ... ok
+test soft_f64::tests::add_handles_subnormal_and_boundary_cases ... ok
+test soft_f64::tests::div_matches_hardware_for_boundary_cases ... ok
+test soft_f64::tests::fma_matches_hardware_mul_add_for_codex_review_overflow_boundary_case ... ok
+test scan_model::tests::cumsum_lane_soft_f64_matches_native_f64_random ... ok
+test soft_f64::tests::mul_matches_hardware_for_boundary_cases ... ok
+test scan_model::tests::cumprod_lane_soft_f64_matches_native_f64_random ... ok
+test soft_f64::tests::div_exact_for_uniform_row_mean_repro ... ok
+test soft_f64::tests::rsqrt_newton_handles_special_values_and_converges ... ok
+test sort_model::tests::line_layout_rejects_dim_out_of_range ... ok
+test reduce_model::tests::sum_all_matches_cpu_reference_across_sizes ... ok
+test sort_model::tests::plan_sort_basic_shapes ... ok
+test sort_model::tests::plan_sort_rejects_dim_out_of_range_without_panic ... ok
+test sort_model::tests::plan_sort_rejects_dim_size_overflow ... ok
+test sort_model::tests::sort_lines_host_model_explicit_descending_case ... ok
+test sort_model::tests::value_key_matches_total_cmp_ordering ... ok
+test sort_model::tests::value_key_normalizes_nan_and_zero ... ok
+test spec_source::tests::bool_fields_render_as_true_false_literals ... ok
+test spec_source::tests::coop_load_axis_overrides_are_reflected_in_generated_defines ... ok
+test spec_source::tests::distinct_inputs_produce_distinct_sources ... ok
+test spec_source::tests::generated_source_ends_with_original_gemm_metal_source ... ok
+test split_k_runtime::tests::current_value_matches_default_without_prior_setter_call ... ok
+test spec_source::tests::generated_header_matches_config_fields_for_all_candidates ... ok
+test split_k_runtime::tests::disabling_then_restoring_round_trips_via_guard ... ok
+test split_k_runtime::tests::set_true_then_false_round_trips ... ok
+test split_k_runtime::tests::split_k_default_enabled_is_true ... ok
+test tile::tests::acc_rows_cols_match_validate_formula ... ok
+test tile::tests::actual_groups_is_none_on_overflow ... ok
+test tile::tests::actual_groups_is_none_when_bm_is_zero ... ok
+test tile::tests::actual_groups_is_none_when_bn_is_zero ... ok
+test tile::tests::actual_groups_matches_m4_max_reference_table_for_64x64_tile ... ok
+test tile::tests::all_candidates_satisfy_vec_width_constraints ... ok
+test tile::tests::actual_groups_rounds_up_for_non_multiple_shapes ... ok
+test tile::tests::all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tile::tests::all_tile_candidates_match_cpu_reference_f16_tiled_non_multiple_boundary_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tile::tests::all_tile_candidates_match_cpu_reference_medium_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tile::tests::all_tile_candidates_match_cpu_reference_non_multiple_boundary_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tile::tests::all_tile_candidates_resolve_without_fallback_for_every_transpose_pattern ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tile::tests::all_tile_candidates_validate_under_actual_device_shared_memory_limit ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tile::tests::bk32_candidate_shared_mem_is_13824_bytes_within_32kib_limit ... ok
+test tile::tests::bn_not_divisible_display_does_not_panic_on_overflowing_wn ... ok
+test tile::tests::bm_not_divisible_display_does_not_panic_on_overflowing_wm ... ok
+test tile::tests::candidate_10_shared_mem_bytes_for_every_transpose_pattern_within_32kib_and_16_aligned ... ok
+test tile::tests::candidate_9_shared_mem_bytes_for_every_transpose_pattern_within_32kib_and_16_aligned ... ok
+test tile::tests::candidates_include_the_three_mlx_classic_configs_added_in_issue_532 ... ok
+test tile::tests::candidates_index_8_is_the_issue_1143_wm1wn2_wide_config_and_indices_0_to_7_unchanged ... ok
+test tile::tests::coop_load_config_default_is_current_path ... ok
+test tile::tests::coop_load_default_pad_elems_matches_tile_config_pad ... ok
+test tile::tests::coop_load_pad_elems_is_zero_when_not_staged ... ok
+test tile::tests::direct_load_path_config_resolves_without_fallback ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tile::tests::direct_load_path_config_still_validates ... ok
+test tile::tests::coop_load_flat_index_model_is_bijection_for_all_candidates_and_patterns ... ok
+test tile::tests::dispatch_f16_auto_tile_select_shapes_resolve_without_fallback ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tile::tests::dispatch_f16_auto_shapes_resolve_to_expected_candidate ... ok
+test tile::tests::f16_tiled_candidates_excludes_exactly_candidate_10 ... ok
+test tile::tests::fallback_chain_appends_single_simdgroup_when_primary_differs ... ok
+test tile::tests::fallback_chain_is_single_element_when_primary_is_already_fallback ... ok
+test tile::tests::fine_barrier_enabled_is_false_by_default ... ok
+test tile::tests::frag_load_config_default_is_current_path ... ok
+test tile::tests::ideal_groups_is_capped_by_smem_budget ... ok
+test tile::tests::ideal_groups_is_none_when_gpu_core_count_is_zero ... ok
+test tile::tests::ideal_groups_is_none_when_multiplier_is_zero ... ok
+test tile::tests::ideal_groups_is_none_when_smem_groups_per_core_is_zero ... ok
+test tile::tests::ideal_groups_matches_mfa_formula_when_smem_unconstrained ... ok
+test tile::tests::gemm_simdgroup_tiled_source_uses_tgid_swizzle ... ok
+test soft_f64::tests::mul_matches_hardware_for_targeted_exponent_products ... ok
+test tile::tests::ideal_groups_uses_cap_for_direct_load_config ... ok
+test tile::tests::is_underoccupied_is_false_when_actual_exceeds_ideal ... ok
+test tile::tests::is_underoccupied_is_true_when_actual_is_below_ideal ... ok
+test tile::tests::is_underoccupied_treats_exact_boundary_as_underoccupied ... ok
+test tile::tests::mma_frag_load_default_is_simdgroup_load ... ok
+test tile::tests::non_staged_config_uses_same_divisibility_check_as_staged ... ok
+test tile::tests::pad_is_derived_purely_from_staged ... ok
+test tile::tests::select_exact_match_table_is_gated_by_m4_max_gpu_core_count ... ok
+test tile::tests::select_falls_back_to_single_simdgroup_for_small_shapes ... ok
+test tile::tests::select_keeps_pre_744_behavior_for_near_square_large_rectangle ... ok
+test tile::tests::select_keeps_pre_744_behavior_for_near_square_moderate_rectangle ... ok
+test tile::tests::select_keeps_pre_744_behavior_for_rank_unstable_measured_points ... ok
+test tile::tests::select_keeps_pre_744_behavior_for_square_output_with_unmeasured_k ... ok
+test tile::tests::select_keeps_pre_744_behavior_for_true_square_beyond_measured_range ... ok
+test tile::tests::select_picks_measured_best_config_for_near_square_large_rectangle ... ok
+test tile::tests::select_picks_measured_best_config_for_true_square_shapes ... ok
+test tile::tests::select_picks_mid_square_config_for_moderate_shapes ... ok
+test tile::tests::select_picks_tall_config_when_m_dominates ... ok
+test tile::tests::select_picks_wide_config_when_n_dominates ... ok
+test tile::tests::select_result_always_validates_under_typical_device_limits ... ok
+test tile::tests::select_route_for_device_returns_classic_for_non_target_shapes ... ok
+test tile::tests::select_route_for_device_returns_split_k_for_target_shapes ... ok
+test tile::tests::select_route_for_device_uses_padded_effective_dims_contract ... ok
+test soft_f64::tests::recip_newton_converges_for_hidden_range ... ok
+test tile::tests::select_with_occupancy_747_confirms_absorption_by_744_correction ... ok
+test tile::tests::select_with_occupancy_does_not_further_shrink_mid_or_tiny_candidates ... ok
+test tile::tests::select_with_occupancy_falls_back_when_gpu_core_count_is_zero ... ok
+test tile::tests::select_with_occupancy_falls_back_when_smem_budget_is_exceeded ... ok
+test tile::tests::select_with_occupancy_keeps_near_square_large_rectangle_without_shrink_when_occupied ... ok
+test tile::tests::select_with_occupancy_none_matches_select_for_representative_shapes ... ok
+test tile::tests::select_with_occupancy_result_always_validates_under_typical_device_limits ... ok
+test tile::tests::select_with_occupancy_shrinks_exact_match_candidates_when_underoccupied ... ok
+test tile::tests::select_with_occupancy_shrinks_on_boundary_actual_equals_ideal ... ok
+test tile::tests::select_with_occupancy_shrinks_wide_shape_when_underoccupied ... ok
+test tile::tests::select_with_occupancy_shrinks_tall_shape_when_underoccupied ... ok
+test tile::tests::select_with_occupancy_true_square_shapes_bypass_occupancy_shrink_via_step1 ... ok
+test tile::tests::shared_mem_bytes_f16_all_candidates_within_32kib_device_limit ... ok
+test tile::tests::shared_mem_bytes_f16_fits_standard_shared_mem_limit_for_all_candidates ... ok
+test tile::tests::shared_mem_bytes_f16_includes_half_tile_region_plus_epilogue_when_staged ... ok
+test tile::tests::shared_mem_bytes_f16_is_multiple_of_16_for_all_candidates ... ok
+test tile::tests::shared_mem_bytes_f16_returns_epilogue_only_when_not_staged ... ok
+test tile::tests::shared_mem_bytes_f16_saturates_instead_of_wrapping_on_overflow ... ok
+test tile::tests::shared_mem_bytes_for_class_edge_forces_staged_even_when_cfg_not_staged ... ok
+test tile::tests::shared_mem_bytes_for_class_interior_forces_direct_load_even_when_cfg_staged ... ok
+test tile::tests::shared_mem_bytes_for_class_legacy_matches_shared_mem_bytes_for_pad ... ok
+test tile::tests::shared_mem_bytes_for_nn_matches_shared_mem_bytes ... ok
+test tile::tests::shared_mem_bytes_for_not_staged_is_always_zero ... ok
+test tile::tests::shared_mem_bytes_for_pad_eight_is_at_least_pad_four_for_staged_candidates ... ok
+test tile::tests::shared_mem_bytes_for_pad_matches_shared_mem_bytes_for_at_default_pad ... ok
+test tile::tests::shared_mem_bytes_for_saturates_instead_of_wrapping_on_overflow ... ok
+test tile::tests::shared_mem_bytes_for_trans_a_swaps_a_tile_row_col_roles ... ok
+test tile::tests::shared_mem_bytes_for_trans_b_swaps_b_tile_row_col_roles ... ok
+test tile::tests::shared_mem_bytes_hfrag_for_is_half_of_shared_mem_bytes_for_all_candidates_and_patterns ... ok
+test tile::tests::shared_mem_bytes_hfrag_for_not_staged_is_always_zero ... ok
+test tile::tests::shared_mem_bytes_hfrag_for_saturates_instead_of_wrapping_on_overflow ... ok
+test tile::tests::shared_mem_bytes_includes_derived_pad_in_both_tile_strides_when_staged ... ok
+test tile::tests::shared_mem_bytes_is_zero_when_not_staged ... ok
+test tile::tests::shared_mem_bytes_saturates_instead_of_wrapping_on_overflow ... ok
+test tile::tests::should_split_k_accepts_target_9_shapes ... ok
+test tile::tests::should_split_k_handles_k_tail_not_multiple_of_16 ... ok
+test tile::tests::should_split_k_plan_partitions_within_declared_bounds ... ok
+test tile::tests::should_split_k_rejects_below_min_k_tiles ... ok
+test tile::tests::should_split_k_rejects_k_below_max_m_n ... ok
+test tile::tests::should_split_k_rejects_large_square_and_wide_shapes ... ok
+test tile::tests::should_split_k_rejects_zero_dims ... ok
+test tile::tests::should_split_k_with_custom_params_narrows_max_groups ... ok
+test tile::tests::smem_groups_per_core_bk32_candidate_yields_two ... ok
+test tile::tests::smem_groups_per_core_divides_max_smem_by_tile_smem_bytes ... ok
+test tile::tests::smem_groups_per_core_is_zero_when_tile_exceeds_device_limit ... ok
+test tile::tests::smem_groups_per_core_returns_cap_when_not_staged ... ok
+test tile::tests::source_specialization_enabled_is_false_by_default ... ok
+test tile::tests::split_k_tile_selects_16_or_32_by_dimension ... ok
+test tile::tests::swizzled_grid_matches_div_ceil_scaling ... ok
+test tile::tests::thread_count_is_wm_wn_times_32 ... ok
+test tile::tests::thread_count_saturates_instead_of_wrapping_on_overflow ... ok
+test tile::tests::thread_elements_coord_is_bijection_over_8x8 ... ok
+test tile::tests::thread_elements_coord_matches_mlx_known_values ... ok
+test tile::tests::tile_class_as_u32_values ... ok
+test tile::tests::tile_class_mode_default_is_legacy ... ok
+test tile::tests::tile_class_plan_interior_region_is_fully_aligned ... ok
+test tile::tests::tile_class_plan_non_divisible_k_has_no_interior ... ok
+test tile::tests::swizzled_grid_covers_every_tile_exactly_once ... ok
+test tile::tests::tile_class_region_layout_matches_msl_struct ... ok
+test tile::tests::tiled_dispatch_grid_is_identity_by_default ... ok
+test tile::tests::tiled_dispatch_grid_matches_swizzle_enabled_gate ... ok
+test tile::tests::unroll_acc_candidates_are_exactly_acc_product_ge_16 ... ok
+test tile::tests::unroll_acc_enabled_is_false_by_default ... ok
+test tile::tests::unroll_acc_loops_for_requires_instance_flag ... ok
+test tile::tests::unroll_acc_loops_returns_false_for_zero_wm_or_wn_without_panicking ... ok
+test tile::tests::validate_accepts_all_candidates_under_typical_device_limits ... ok
+test tile::tests::validate_rejects_acc_cols_exceeding_max ... ok
+test tile::tests::validate_rejects_acc_rows_exceeding_max ... ok
+test tile::tests::validate_rejects_bk_not_multiple_of_eight ... ok
+test tile::tests::validate_ok_implies_vec_width_divisibility ... ok
+test tile::tests::validate_ok_implies_vec_width_f16_divisibility ... ok
+test tile::tests::validate_rejects_bk_that_is_vec_width_multiple_but_not_eight ... ok
+test tile::tests::validate_rejects_bm_not_divisible_by_wm8 ... ok
+test tile::tests::validate_rejects_bn_not_divisible_by_wn8 ... ok
+test tile::tests::validate_rejects_shared_memory_exceeding_device_limit ... ok
+test tile::tests::validate_rejects_staged_bk_not_divisible_by_vec_width ... ok
+test tile::tests::validate_rejects_staged_bn_not_divisible_by_vec_width ... ok
+test tile::tests::validate_rejects_thread_count_exceeding_device_limit ... ok
+test tile::tests::verify_m4_max_requires_both_gpu_core_count_and_soc_brand_to_match ... ok
+test tile::tests::wm1_wn2_candidate_acc_rows_hits_max_acc_boundary_and_validates ... ok
+test tile::tests::wm4_bk8_candidate_has_128_threads_and_validates ... ok
+test typed_bf16::tests::sum_matches_f32_backend_ops_rounded_bit_exact ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_bf16::tests::max_remains_unsupported_without_device_init ... ok
+test typed_bf16::tests::typed_ops_bf16_accessor_returns_some_without_device_init ... ok
+test typed_bf16_convert::tests::downcast_rounds_to_nearest_even_at_bf16_boundary ... ok
+test typed_bf16_convert::tests::non_contiguous_transpose_view_upcast_matches_contiguous_equivalent ... ok
+test typed_bf16_convert::tests::shape_is_preserved_across_roundtrip ... ok
+test typed_bf16_convert::tests::upcast_bf16_infinity_and_nan_are_preserved ... ok
+test typed_bf16_convert::tests::upcast_downcast_roundtrip_preserves_exact_values ... ok
+test typed_bf16_probe_diag_tests::p0_device_attributes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_bf16_probe_diag_tests::p1_bfloat_scalar_compile_probe ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_bf16_probe_diag_tests::p2_simdgroup_bfloat_mma_compile_probe ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_bf16_probe_diag_tests::p3_simdgroup_store_bfloat_compile_probe ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_bf16_probe_diag_tests::p4_bfloat_roundtrip_numeric_smoke ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_f16::tests::add_mul_reject_shape_mismatch_before_touching_device ... ok
+test typed_f16::tests::gemm_rejects_shape_mismatch_before_touching_device ... ok
+test typed_f16::tests::max_inherit_f32_backend_ops_unsupported_without_device_init ... ok
+test typed_f16::tests::sum_matches_f32_backend_ops_rounded_bit_exact ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_f16::tests::sum_rejects_out_of_range_dim_before_touching_device ... ok
+test typed_f16::tests::typed_ops_f16_is_some_and_typed_ops_f64_is_none ... ok
+test typed_f16::tests::upcast_downcast_roundtrip_matches_known_values ... ok
+test unique_model::tests::checked_padded_len_accepts_small_sizes ... ok
+test unique_model::tests::checked_padded_len_does_not_panic_on_small_input ... ok
+test unique_model::tests::checked_padded_len_rejects_i32_overflow ... ok
+test unique_model::tests::total_order_key_roundtrip_matches_bits ... ok
+test readout_regression_diag_arms::tests::dummy_alloc_touch_free_does_not_panic_for_typical_sizes ... ok
+test sort_model::tests::sort_lines_host_model_matches_cpu_reference_bit_exact ... ok
+test tile::tests::tile_class_plan_covers_every_tile_exactly_once_for_all_candidates_and_shapes ... ok
+test unique_model::tests::bitonic_sort_host_matches_total_cmp_various_sizes ... ok
+test soft_f64::tests::div_matches_hardware_for_targeted_exponent_quotients ... ok
+test soft_f64::tests::add_matches_hardware_for_targeted_exponent_gaps ... ok
+test soft_f64::tests::sub_matches_hardware_for_random_pairs ... ok
+test soft_f64::tests::widen_matches_hardware_for_random_and_special_inputs ... ok
+test soft_f64::tests::sequential_sum_matches_host_f64_reduction ... ok
+test soft_f64::tests::narrow_matches_hardware_for_random_and_boundary_inputs ... ok
+test soft_f64::tests::add_matches_hardware_for_random_pairs ... ok
+test soft_f64::tests::fma_matches_hardware_mul_add_for_random_triples ... ok
+test soft_f64::tests::mul_matches_hardware_for_random_pairs ... ok
+test soft_f64::tests::div_matches_hardware_for_random_pairs ... ok
+
+test result: ok. 567 passed; 0 failed; 93 ignored; 0 measured; 0 filtered out; finished in 3.50s
+
+     Running tests/backend_ops_real_device.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/backend_ops_real_device-fad21f18d300a011)
+
+running 8 tests
+test backend_ops_elementwise_matches_cpu ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test backend_ops_gemm_matches_cpu_mid_square_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test backend_ops_gemm_matches_cpu_near_small_tile_threshold ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test backend_ops_gemm_matches_cpu_non_power_of_two_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test backend_ops_gemm_matches_cpu_tall_and_wide_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test backend_ops_sum_matches_cpu_bit_exact ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test ops_for_selects_metal_backend_and_matches_cpu ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test max_remains_unsupported_without_device_init ... ok
+
+test result: ok. 1 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/batch_norm_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/batch_norm_parity-1cfec48b72345abc)
+
+running 9 tests
+test batch_norm_infer_matches_f64_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test batch_norm_train_accepts_non_contiguous_input_via_backend_ops ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test batch_norm_train_and_infer_empty_axis_return_without_touching_device ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test batch_norm_train_extreme_values_stay_finite ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test batch_norm_train_is_deterministic_across_runs ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test batch_norm_train_matches_f64_reference_across_shapes_and_affine_combinations ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test batch_norm_train_nan_propagates_only_to_owning_channel ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test batch_norm_train_rejects_weight_length_mismatch ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test metal_backend_ops_batch_norm_train_matches_cpu_backend_ops_req2 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/batch_norm_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/batch_norm_source_evidence-2c8ed2aba1361b48)
+
+running 12 tests
+test affine_uses_round_to_odd_add_for_single_rounding_fma_equivalence ... ok
+test channel_index_macro_uses_64bit_arithmetic_to_avoid_overflow ... ok
+test does_not_use_threadgroup_barrier ... ok
+test affine_weight_and_bias_use_predicated_select_not_conditional_skip ... ok
+test channel_and_element_loops_use_64bit_counters_to_avoid_wraparound ... ok
+test infer_kernel_uses_manual_bounds_check_without_grid_stride ... ok
+test m_f64_is_passed_as_exact_bit_pattern_not_float_cast ... ok
+test mean_and_variance_reductions_use_five_stage_butterfly ... ok
+test train_kernel_uses_persistent_threadgroup_loop_over_channels ... ok
+test mean_and_variance_reductions_shuffle_both_halves_of_soft_f64_accumulator ... ok
+test mean_and_variance_use_soft_f64_widen_add_and_div ... ok
+test bn_f64_primitives_match_ln_f64_primitives_verbatim_modulo_prefix ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bce_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/bce_parity-322496da4bddbe0d)
+
+running 1 test
+test bce_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bce_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/bce_source_evidence-2e555c72526dda1a)
+
+running 6 tests
+test bce_metal_partial_grid_stride_loop_index_is_declared_ulong ... ok
+test bce_metal_source_defines_log1p_helper ... ok
+test bce_metal_source_declares_all_three_kernels ... ok
+test bce_metal_source_uses_threadgroup_barrier ... ok
+test bce_metal_source_has_bound_checks ... ok
+test bce_metal_source_uses_simd_sum_without_atomics ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cast_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/cast_parity-2720730323866154)
+
+running 1 test
+test cast_parity_all_directions ... ignored, Metal 実機（Apple Silicon）必須
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cast_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/cast_source_evidence-2635dfd0b7caab24)
+
+running 9 tests
+test saturating_int_casts_use_literal_bounds ... ok
+test nan_sensitive_kernels_use_bit_pattern_checks_not_isnan ... ok
+test shader_bool_directions_use_uchar ... ok
+test shader_declares_all_six_kernels_with_expected_buffer_indices ... ok
+test shader_does_not_use_double_type ... ok
+test shader_retains_bounds_check_in_all_kernels ... ok
+test shader_has_metal_stdlib_header ... ok
+test ops_rs_overrides_cast_ops_accessor ... ok
+test f64_directions_are_not_overridden_anywhere_in_crate ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/command_batching.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/command_batching-57e015cf615df033)
+
+running 5 tests
+test dependent_dispatches_in_one_batch_execute_in_order ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_sync_callers_unchanged_regression_is_covered_elsewhere ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない。ドキュメント目的の no-op
+test pool_reuse_zero_fill_does_not_synchronize_open_batch ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test sgd_batched_multi_param_matches_cpu_across_many_steps ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test synchronize_after_auto_flush_at_limit ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/command_batching_bench.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/command_batching_bench-ff0b77993a495beb)
+
+running 2 tests
+test command_batching_micro_bench_untracked_vs_tracked ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test pool_reuse_interleaved_with_tracked_steps_preserves_batching ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/constant_pad_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/constant_pad_parity-5fabd6a764f850a2)
+
+running 5 tests
+test backend_ops_pad_rejects_rank_mismatch ... ignored, Apple Silicon 実機必須
+test pad_backward_matches_cpu_tape ... ignored, Apple Silicon 実機必須
+test pad_empty_input_matches_cpu ... ignored, Apple Silicon 実機必須
+test pad_matches_cpu_across_shapes ... ignored, Apple Silicon 実機必須
+test pad_rank_zero_matches_cpu ... ignored, Apple Silicon 実機必須
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/constant_pad_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/constant_pad_source_evidence-a5b7016c5731b675)
+
+running 5 tests
+test kernel_has_padding_fallback_to_value ... ok
+test kernel_has_grid_boundary_guard ... ok
+test kernel_name_and_buffer_order_are_declared ... ok
+test source_includes_metal_stdlib_and_namespace ... ok
+test stride_arithmetic_uses_signed_64bit ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/context_cache_bench.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/context_cache_bench-a7a901a1828b4af1)
+
+running 2 tests
+test gemm_repeated_calls_are_deterministic_via_cache ... ignored, Metal 実機依存。CI では実行しない
+test gemm_second_call_avoids_reconstruction_cost ... ignored, Metal 実機必須。イシュー #930 受け入れ条件 1（cold/warm 固定オーバーヘッド比較）
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cpu_metal_f16_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/cpu_metal_f16_parity-1e4228cb12e3b6e0)
+
+running 6 tests
+test f16_dispatch_is_bit_deterministic_across_runs ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test f16_k4096_stress ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test f16_parity_baseline_8x8x8 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test f16_parity_baseline_shape_512 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test f16_parity_boundary_shapes_non_multiple_of_eight ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cpu_metal_f16_tiled_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/cpu_metal_f16_tiled_parity-a223b134089d8b7b)
+
+running 5 tests
+test f16_tiled_k4096_stress ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test f16_tiled_parity_boundary_shape_non_multiple_of_tile ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test f16_tiled_parity_direct_load_single_simdgroup_8x8 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test f16_tiled_parity_matches_existing_8x8_kernel ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test f16_tiled_parity_staged_baseline_shape_512 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cpu_metal_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/cpu_metal_parity-b9c3ba690798b89c)
+
+running 5 tests
+test baseline_shape_512_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test boundary_shapes_non_multiple_of_threadgroup ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_is_bit_deterministic_across_runs ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test falsification_injected_perturbation_is_detected ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test k4096_stress_poc_v2_5 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/device.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/device-a3a5855d27f4e761)
+
+running 3 tests
+test select_metal_device_on_real_hardware ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test backend_name_is_metal ... ok
+test enumerate_never_panics ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.60s
+
+     Running tests/device_smoke.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/device_smoke-d44c92fda16f6d72)
+
+running 3 tests
+test allocation_size_overflow_is_rejected ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test device_and_buffer_roundtrip ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test zero_length_allocation_is_rejected ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/dispatch_boundary.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/dispatch_boundary-47d57a19587398b6)
+
+running 2 tests
+test boundary_shapes_tflops_record ... ignored, Metal 実機（Apple Silicon）依存。実測記録は docs/perf/dispatch-boundary-measurement.md
+test dispatch_backend_auto_matches_reference_at_boundary_shapes ... ignored, Metal 実機（Apple Silicon）依存。実測記録は docs/perf/dispatch-boundary-measurement.md
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/elementwise_device_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/elementwise_device_parity-10b52462e1266396)
+
+running 5 tests
+test binary_and_unary_elementwise_device_match_host_bit_exact ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test binary_elementwise_device_handles_empty_numel ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test binary_elementwise_device_rejects_device_mismatch ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test binary_elementwise_device_rejects_shape_mismatch ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test elementwise_device_chain_matches_per_op_host_composition ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/elementwise_gemm_bias_act_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/elementwise_gemm_bias_act_source_evidence-8353245be9bb2f2c)
+
+running 6 tests
+test elementwise_metal_kernels_keep_manual_bounds_check ... ok
+test elementwise_metal_uses_precise_math_for_exp_and_tanh ... ok
+test elementwise_metal_defines_all_seven_kernels ... ok
+test gemm_tiled_bias_act_keeps_manual_bounds_check_and_bias_inside_guard ... ok
+test gemm_metal_defines_tiled_bias_act_kernel ... ok
+test gemm_tiled_bias_act_applies_relu_with_cpu_matching_comparison_direction ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gather_scatter_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gather_scatter_parity-3e9e2c0e801b5123)
+
+running 20 tests
+test gather_backward_matches_cpu_tape ... ignored, Apple Silicon 実機（Metal）が必要
+test gather_direct_call_rejects_non_dim_axis_mismatch ... ignored, Apple Silicon 実機（Metal）が必要
+test gather_parity_1d ... ignored, Apple Silicon 実機（Metal）が必要
+test gather_parity_2d_each_dim ... ignored, Apple Silicon 実機（Metal）が必要
+test gather_parity_3d ... ignored, Apple Silicon 実機（Metal）が必要
+test gather_parity_index_select_like ... ignored, Apple Silicon 実機（Metal）が必要
+test gather_scatter_direct_call_empty_index_scatter_passes_through_input ... ignored, Apple Silicon 実機（Metal）が必要
+test gather_scatter_direct_call_rejects_rank_mismatch_and_bad_dim ... ignored, Apple Silicon 実機（Metal）が必要
+test gather_scatter_direct_call_rejects_slice_length_mismatch ... ignored, Apple Silicon 実機（Metal）が必要
+test gather_scatter_error_paths_reach_native_kernel ... ignored, Apple Silicon 実機（Metal）が必要
+test one_hot_direct_call_matches_host_model ... ignored, Apple Silicon 実機（Metal）が必要
+test one_hot_error_path_reaches_native_kernel ... ignored, Apple Silicon 実機（Metal）が必要
+test one_hot_parity_1d ... ignored, Apple Silicon 実機（Metal）が必要
+test one_hot_parity_2d ... ignored, Apple Silicon 実機（Metal）が必要
+test one_hot_parity_3d ... ignored, Apple Silicon 実機（Metal）が必要
+test scatter_add_parity_2d ... ignored, Apple Silicon 実機（Metal）が必要
+test scatter_add_parity_cancelling_sequence ... ignored, Apple Silicon 実機（Metal）が必要
+test scatter_overwrite_parity_2d ... ignored, Apple Silicon 実機（Metal）が必要
+test scatter_parity_3d_add ... ignored, Apple Silicon 実機（Metal）が必要
+test scatter_parity_reduced_index_axis ... ignored, Apple Silicon 実機（Metal）が必要
+
+test result: ok. 0 passed; 0 failed; 20 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gather_scatter_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gather_scatter_source_evidence-126a08c57a7def99)
+
+running 7 tests
+test all_kernels_have_grid_boundary_guard ... ok
+test gs_f64_constants_match_host_model_constants ... ok
+test gather_has_defensive_index_range_guard ... ok
+test source_includes_metal_stdlib_and_namespace ... ok
+test only_scatter_add_uses_soft_f64_helpers ... ok
+test stride_arithmetic_uses_ulong ... ok
+test kernel_names_and_buffer_order_are_declared ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_auto_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_auto_parity-aa4cc61339f14842)
+
+running 3 tests
+test at_or_above_threshold_shape_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test below_threshold_shape_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test threshold_boundary_511_and_512_both_match_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_batched_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_batched_parity-365dd72da0e2d2f1)
+
+running 13 tests
+test gemm_batched_batch_broadcast_incompatible_is_shape_mismatch ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_broadcasts_lhs_batch_dim_one ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_broadcasts_middle_batch_axis ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_fp32_strict_matches_gemm_batched_bit_exact ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_handles_transposed_view_input ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_inner_dim_mismatch_is_shape_mismatch ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_is_deterministic_across_runs ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_matches_reference_and_per_batch_gemm ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_output_unaffected_by_split_k_runtime_toggle ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_rank2_delegates_to_gemm_bit_exact ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_zero_batch_returns_empty_output ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_zero_k_returns_zero_filled_output ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_batched_zero_m_or_n_returns_empty_output ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_bias_act_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_bias_act_parity-926a5d7d231e6f05)
+
+running 7 tests
+test elementwise_matches_cpu_across_ops ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_bias_act_broadcast_fallback_matches_cpu ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_bias_act_broadcast_fallback_zero_dim_matches_cpu ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_bias_act_k_zero_matches_cpu ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_bias_act_matches_cpu_across_shapes_and_activations ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_bias_act_rejects_incompatible_bias_shape_like_cpu ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_bias_act_without_bias_matches_cpu ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_bias_grad_reduce_bit_match.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_bias_grad_reduce_bit_match-cd864b0744788876)
+
+running 2 tests
+test bias_grad_reduce_kernel_matches_host_f64_bit_exactly ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test bias_grad_reduce_kernel_single_row_copies_bits ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_dynamic_tile_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_dynamic_tile_parity-64ca2b690cac1718)
+
+running 15 tests
+test bk32_64x64_candidate_matches_cpu_reference_k_stress ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test bk32_64x64_candidate_matches_cpu_reference_non_multiple_of_tile ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test bk32_candidate_matches_cpu_reference_k_stress ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test bk32_candidate_matches_cpu_reference_non_multiple_of_tile ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test bm128_candidate_matches_cpu_reference_k_stress ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test bm128_candidate_matches_cpu_reference_non_multiple_of_tile ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test direct_load_path_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test direct_load_path_matches_cpu_reference_non_multiple_of_tile ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_auto_matches_cpu_reference_across_shape_bands ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_tiled_prepared_matches_dispatch_variant ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_tiled_prepared_rejects_undersized_and_misaligned_inputs ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tiled_matches_cpu_reference_k_stress ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tiled_matches_cpu_reference_non_multiple_of_tile ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test wm1_wn2_candidate_matches_cpu_reference_non_multiple_of_tile ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test wm4_bk8_candidate_matches_cpu_reference_non_multiple_of_tile ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 15 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_f16_auto_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_f16_auto_parity-3a1e6241e9ca7e40)
+
+running 8 tests
+test dispatch_f16_auto_matches_cpu_reference_large_near_square_rectangle ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_f16_auto_matches_cpu_reference_non_multiple_of_8_boundary_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_f16_auto_matches_cpu_reference_square_cube_512 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_f16_auto_matches_cpu_reference_tall_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_f16_auto_matches_cpu_reference_tiny_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_f16_auto_matches_cpu_reference_wide_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_f16_auto_matches_existing_non_tiled_8x8_kernel ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_f16_auto_matches_explicit_tile_select_dispatch ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_fine_barrier_bit_match.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_fine_barrier_bit_match-d411c5208fc23bcc)
+
+running 2 tests
+test fine_barrier_on_off_bit_match_dispatch_auto ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test fine_barrier_on_off_bit_match_dispatch_tiled_prepared ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_fp32_strict_into_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_fp32_strict_into_parity-32c921ac3a7e18c0)
+
+running 10 tests
+test gemm_fp32_strict_into_bit_matches_with_negative_zero_operands ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_fp32_strict_into_falls_back_for_in_features_one_transpose ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_fp32_strict_into_falls_back_to_host_path_for_nn_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_fp32_strict_into_matches_gemm_fp32_strict_with_offset ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_fp32_strict_into_rejects_device_mismatch ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_fp32_strict_into_rejects_out_of_range_offset ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_fp32_strict_into_with_bias_reduce_tracked_matches_reference_for_nn_fallback ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_fp32_strict_into_with_bias_reduce_tracked_matches_reference_for_nt_tn ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_fp32_strict_into_with_bias_reduce_tracked_none_bias_matches_weight_only_entry ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_fp32_strict_into_with_bias_reduce_tracked_rejects_out_of_range_bias_offset ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_hfrag_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_hfrag_parity-81bb2c10a603e08b)
+
+running 4 tests
+test non_staged_candidate_is_rejected ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test ragged_shapes_all_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test square_shapes_all_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tall_wide_and_k_tail_shapes_all_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_naive_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_naive_parity-2db1af6ff5d68ff5)
+
+running 6 tests
+test dispatch_and_dispatch_variant_naive_agree ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_rejects_invalid_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test naive_matches_cpu_reference_degenerate_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test naive_matches_cpu_reference_k_stress ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test naive_matches_cpu_reference_medium_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test naive_matches_cpu_reference_non_multiple_of_threadgroup ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_resident_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_resident_parity-74b9e96cf8c56b24)
+
+running 2 tests
+test gemm_resident_lhs_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_resident_rhs_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_simdgroup_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_simdgroup_parity-f8de0dbf45d6c7b3)
+
+running 9 tests
+test dispatch_variant_rejects_invalid_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test simdgroup_matches_cpu_reference_degenerate_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test simdgroup_matches_cpu_reference_k_stress ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test simdgroup_matches_cpu_reference_medium_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test simdgroup_matches_cpu_reference_non_multiple_of_eight ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tiled_matches_cpu_reference_degenerate_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tiled_matches_cpu_reference_k_stress ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tiled_matches_cpu_reference_medium_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test tiled_matches_cpu_reference_non_multiple_of_tile ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_splitk_auto_entry_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_splitk_auto_entry_parity-a1f6cf7666d88202)
+
+running 3 tests
+test auto_entry_dispatches_split_k_for_eligible_shapes_and_matches_baseline ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test auto_entry_rejects_precondition_violating_shapes_with_typed_err ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_splitk_auto_wiring.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_splitk_auto_wiring-d60121d44f7cc3e3)
+
+running 4 tests
+test wiring_default_is_bit_identical_to_explicit_on ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test wiring_explicit_off_forces_classic_route_for_targets ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test wiring_on_keeps_classic_bit_identical_for_non_eligible ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test wiring_on_routes_split_k_for_targets_and_matches_baseline ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_splitk_bit_match.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_splitk_bit_match-fef3443d2e24b8fb)
+
+running 2 tests
+test classic_dispatch_auto_remains_run_to_run_bit_exact_after_split_k_addition ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test split_k_run_to_run_bit_match_for_target_shapes_and_partition_counts ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_splitk_f64_truth.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_splitk_f64_truth-c912ed04f215783d)
+
+running 1 test
+test split_k_classic_cpu_f32_error_vs_f64_truth_for_target_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_splitk_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_splitk_parity-875bbe837fc74518)
+
+running 1 test
+test split_k_matches_classic_and_cpu_reference_for_target_shapes_and_transpose_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_splitk_runtime_toggle.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_splitk_runtime_toggle-d1a7f12d2f3947d4)
+
+running 3 tests
+test runtime_off_forces_classic_route_and_matches_instance_off ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test runtime_on_routes_split_k_and_matches_instance_on ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test runtime_toggle_round_trip_restores_default_behavior ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_strided_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_strided_parity-f9697cd0ec934afe)
+
+running 15 tests
+test bk32_64x64_candidate_agrees_with_bk16_counterpart_within_composite_tolerance ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test bk32_64x64_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test bk32_64x64_candidate_matches_cpu_reference_for_n4096_cubic_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない（実行時間が長い）
+test bm128_candidate_agrees_with_bm64_counterpart_within_composite_tolerance ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test bm128_candidate_matches_cpu_reference_for_all_shapes_and_transpose_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test bm128_candidate_matches_cpu_reference_for_n4096_cubic_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない（実行時間が長い）
+test dispatch_bias_act_prepared_nn_is_bit_identical_to_strided_nn ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_strided_bias_act_prepared_matches_cpu_reference_for_all_transpose_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_strided_tiled_prepared_handles_padded_leading_dimension_for_non_transposed_side ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_strided_tiled_prepared_matches_cpu_reference_for_all_transpose_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_strided_tiled_prepared_nn_is_bit_identical_to_dispatch_tiled_prepared ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dispatch_strided_tiled_prepared_rejects_non_eight_divisible_shape_while_classic_succeeds ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_collapsed_lhs_matches_per_batch_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test production_select_matches_cpu_reference_for_all_shapes_and_transpose_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test production_select_matches_cpu_reference_for_n4096_cubic_shape ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない（実行時間が長い）
+
+test result: ok. 0 passed; 0 failed; 15 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_swizzle_bit_match.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_swizzle_bit_match-c29322cb34d149ea)
+
+running 2 tests
+test swizzle_on_off_bit_match_dispatch_auto ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test swizzle_on_off_bit_match_dispatch_tiled_prepared ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_te_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_te_parity-947eb4ae802320d7)
+
+running 5 tests
+test te_bit_match_with_production_dispatch_auto ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test te_ragged_shapes_nn ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test te_rejects_non_staged_candidate ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test te_square_shapes_all_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test te_tall_wide_and_k_tail_shapes_all_patterns ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_transposed_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_transposed_parity-6ebc4ca2aab7972c)
+
+running 5 tests
+test gemm_narrow_then_transpose_uses_strided_entry_with_padded_ld_and_is_correct_on_real_device ... ignored, Metal 実機（Apple Silicon）必須
+test gemm_nt_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ignored, Metal 実機（Apple Silicon）必須
+test gemm_nt_via_trait_object_matches_concrete_call_on_real_device ... ignored, Metal 実機（Apple Silicon）必須
+test gemm_tn_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ignored, Metal 実機（Apple Silicon）必須
+test gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device ... ignored, Metal 実機（Apple Silicon）必須
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gemm_transposed_perf.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/gemm_transposed_perf-4650ac02dd807af0)
+
+running 2 tests
+test nt_transposed_entry_vs_contiguous_across_shapes ... ignored, 実機（Apple Silicon）計測専用（#1215 補助 A/B）。cargo test -p fandhe-ai-backend-metal --release --test gemm_transposed_perf -- --ignored --nocapture
+test tn_transposed_entry_vs_contiguous_across_shapes ... ignored, 実機（Apple Silicon）計測専用（#1215 補助 A/B）。cargo test -p fandhe-ai-backend-metal --release --test gemm_transposed_perf -- --ignored --nocapture
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/huber_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/huber_parity-2f5d2b0c2d536c64)
+
+running 1 test
+test huber_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/huber_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/huber_source_evidence-c034bc720457b995)
+
+running 7 tests
+test huber_metal_partial_grid_stride_loop_index_is_declared_ulong ... ok
+test huber_metal_source_declares_all_three_kernels ... ok
+test huber_metal_source_declares_kind_and_delta_arguments ... ok
+test huber_metal_source_has_bound_checks ... ok
+test huber_metal_source_uses_copysign ... ok
+test huber_metal_source_uses_threadgroup_barrier ... ok
+test huber_metal_source_uses_simd_sum_without_atomics ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/im2col_col2im_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/im2col_col2im_parity-04139cc662cc7373)
+
+running 6 tests
+test im2col_col2im_crosses_256_threadgroup_boundary ... ignored, Metal 実機（Apple Silicon）必須
+test im2col_col2im_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）必須
+test im2col_col2im_special_values_pass_through ... ignored, Metal 実機（Apple Silicon）必須
+test im2col_col2im_zero_batch ... ignored, Metal 実機（Apple Silicon）必須
+test im2col_col2im_zero_batch_1d ... ignored, Metal 実機（Apple Silicon）必須
+test im2col_matches_cpu_for_non_contiguous_input ... ignored, Metal 実機（Apple Silicon）必須
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/im2col_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/im2col_source_evidence-ca0cd545d1ef251c)
+
+running 9 tests
+test both_kernels_have_bounds_check ... ok
+test col2im_kernel_body_uses_f64_emulation ... ok
+test col2im_checks_sign_before_modulo ... ok
+test im2col_dims_struct_has_19_fields ... ok
+test coordinate_arithmetic_uses_signed_long ... ok
+test include_precedes_using_namespace ... ok
+test declares_both_kernels ... ok
+test im2col_kernel_body_contains_no_f64_emulation_calls ... ok
+test declares_expected_buffer_indices ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/interpolate_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/interpolate_parity-6796a76e2182729c)
+
+running 6 tests
+test backend_ops_interpolate_bilinear_rejects_size_len_other_than_two ... ignored, Apple Silicon 実機必須
+test backend_ops_interpolate_rejects_zero_spatial_axis ... ignored, Apple Silicon 実機必須
+test interpolate_backward_matches_cpu_tape ... ignored, Apple Silicon 実機必須
+test interpolate_bilinear_backward_matches_cpu_tape ... ignored, Apple Silicon 実機必須
+test interpolate_bilinear_matches_cpu_across_shapes ... ignored, Apple Silicon 実機必須
+test interpolate_matches_cpu_across_shapes ... ignored, Apple Silicon 実機必須
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/interpolate_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/interpolate_source_evidence-74a9d3829782357f)
+
+running 11 tests
+test bilinear_kernel_has_grid_boundary_guard ... ok
+test bilinear_kernel_name_and_buffer_order_are_declared ... ok
+test bilinear_kernel_takes_precomputed_scale_arguments ... ok
+test bilinear_kernel_clamps_spatial_src_coord ... ok
+test bilinear_kernel_uses_fma_for_blend ... ok
+test kernel_passes_through_non_spatial_axes ... ok
+test kernel_has_grid_boundary_guard ... ok
+test kernel_clamps_spatial_src_coord ... ok
+test kernel_name_and_buffer_order_are_declared ... ok
+test source_includes_metal_stdlib_and_namespace ... ok
+test stride_arithmetic_uses_unsigned_64bit ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/kl_div_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/kl_div_parity-13c10bfed646ae28)
+
+running 1 test
+test kl_div_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/kl_div_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/kl_div_source_evidence-f8d6605190b98a22)
+
+running 6 tests
+test kl_div_metal_partial_grid_stride_loop_index_is_declared_ulong ... ok
+test kl_div_metal_source_handles_target_zero_branch ... ok
+test kl_div_metal_source_declares_all_three_kernels ... ok
+test kl_div_metal_source_uses_threadgroup_barrier ... ok
+test kl_div_metal_source_has_bound_checks ... ok
+test kl_div_metal_source_uses_simd_sum_without_atomics ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/layer_norm_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/layer_norm_parity-d6c846b340328b7e)
+
+running 18 tests
+test backend_ops_layer_norm_is_bit_identical_to_metal_layer_norm ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test backend_ops_layer_norm_matches_cpu_reference_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_affine_overflow_boundary_matches_hardware_fma_not_double_rounding ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_constant_large_row_does_not_overflow ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_deviation_overflow_case_stays_finite ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_extreme_eps_does_not_overflow ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_extreme_values_no_nan_inf ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_large_opposite_sign_pair_stays_finite ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_matches_f64_reference_across_shapes_and_affine_combinations ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_nonfinite_weight_propagates_nan_in_degenerate_row ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_positive_eps_degenerate_row_stays_finite_near_zero ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_preserves_mean_precision_near_f32_epsilon_boundary ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_propagates_nan_for_row_with_nan_element ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_rejects_hidden_exceeding_exact_f32_range ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_tiny_x_huge_eps_stays_finite_and_nonzero ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_uniform_row_non_power_of_two_hidden_matches_zero_deviation ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_weight_bias_cancellation_precision ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test layer_norm_zero_eps_degenerate_row_propagates_nan ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 18 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/layer_norm_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/layer_norm_source_evidence-ef0ea7bbac178467)
+
+running 12 tests
+test does_not_use_threadgroup_barrier ... ok
+test eps_is_widened_directly_to_soft_f64 ... ok
+test ln_f64_add_ro_uses_round_to_odd_not_round_to_nearest_even ... ok
+test all_soft_f64_primitives_are_defined ... ok
+test mean_and_variance_reductions_use_five_stage_butterfly ... ok
+test kernel_declares_four_buffer_arguments_in_expected_order ... ok
+test mean_and_variance_reductions_shuffle_both_halves_of_soft_f64_accumulator ... ok
+test row_base_uses_64bit_index_to_avoid_overflow ... ok
+test soft_f64_add_and_mul_explicitly_handle_nan_and_zero_times_inf ... ok
+test uses_persistent_threadgroup_loop ... ok
+test mean_and_variance_passes_use_soft_f64_widen_add_and_div ... ok
+test pass3_computes_affine_via_round_to_odd_soft_f64_fma ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/linear_forward_device_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/linear_forward_device_parity-9a7c9580bf4c4a76)
+
+running 6 tests
+test linear_forward_device_bench_metal ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない（record only）
+test linear_forward_device_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test linear_forward_device_matches_gemm_resident_rhs_act_bit_exact ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test linear_forward_device_rejects_shape_mismatches_and_handles_empty_input ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test linear_forward_device_tracked_matches_linear_forward_device_and_leaves_token_unset ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test linear_forward_device_two_layer_chain_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/memory_roundtrip.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/memory_roundtrip-e247755a144bdb23)
+
+running 8 tests
+test alloc_zeroed_returns_all_zero ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test peak_allocated_bytes_matches_known_allocation_size ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test pooled_memory_reuses_buffer_and_zero_fills ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test repeated_alloc_drop_cycles_do_not_leak_device_memory ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test upload_download_roundtrip_is_bit_exact ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test with_host_view_matches_download_bit_exact_on_uploaded_buffer ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test with_host_view_matches_download_on_gpu_written_buffer ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test zero_numel_tensor_roundtrips_without_touching_ffi ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mse_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/mse_parity-5577e126a31a0bdc)
+
+running 1 test
+test mse_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mse_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/mse_source_evidence-a525665131070332)
+
+running 5 tests
+test mse_metal_partial_grid_stride_loop_index_is_declared_ulong ... ok
+test mse_metal_source_uses_threadgroup_barrier ... ok
+test mse_metal_source_has_bound_checks ... ok
+test mse_metal_source_declares_all_three_kernels ... ok
+test mse_metal_source_uses_simd_sum_and_fma_without_atomics ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/nll_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/nll_parity-b02d8c1d82a26475)
+
+running 1 test
+test nll_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/nll_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/nll_source_evidence-2c6999a0010984ba)
+
+running 7 tests
+test nll_metal_partial_grid_stride_loop_index_is_declared_ulong ... ok
+test nll_metal_source_declares_int_targets_buffer ... ok
+test nll_metal_source_declares_all_three_kernels ... ok
+test nll_metal_source_has_target_bound_checks ... ok
+test nll_metal_source_has_bound_checks ... ok
+test nll_metal_source_uses_threadgroup_barrier ... ok
+test nll_metal_source_uses_simd_sum_without_atomics ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/pool_real_device.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/pool_real_device-ad04dd4229fe4212)
+
+running 4 tests
+test dropping_pooled_alloc_zeroed_returns_bytes_to_free_list ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test gemm_via_pooled_output_buffer_matches_expected ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test release_cached_device_memory_empties_free_list ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test second_alloc_of_same_class_reuses_freed_handle ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/pooling_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/pooling_parity-79d4045f5ff3d680)
+
+running 6 tests
+test adaptive_avg_pool2d_bit_exact_against_host_model ... ignored
+test avg_pool2d_bit_exact_against_host_model ... ignored
+test max_pool2d_bit_exact_against_host_model ... ignored
+test max_pool2d_special_values_bit_exact ... ignored
+test oversized_shape_returns_size_limit_exceeded_error ... ignored
+test zero_batch_returns_empty_without_device_dispatch ... ignored
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/pooling_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/pooling_source_evidence-043fd6f4a7cda937)
+
+running 7 tests
+test pool_dims_msl_struct_declares_fields_in_order ... ok
+test max_pool_update_rule_is_first_wins_tie_and_first_nan_sticky ... ok
+test avg_kernels_use_soft_f64_accumulation_and_no_barrier ... ok
+test pool_f64_from_uint_is_defined_and_used_for_divisor_conversion ... ok
+test all_kernels_use_manual_bounds_check_without_grid_stride ... ok
+test kernels_use_signed_long_arithmetic_for_window_offsets ... ok
+test pool_f64_primitives_match_bn_f64_primitives_verbatim_modulo_prefix ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/reduce_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/reduce_parity-dd8d52f631bf8a07)
+
+running 3 tests
+test metal_sum_all_matches_cpu_bit_exact ... ignored, Metal 実機（Apple Silicon）必須
+test metal_sum_axis_empty_cases_match_cpu ... ignored, Metal 実機（Apple Silicon）必須
+test metal_sum_axis_matches_cpu_bit_exact ... ignored, Metal 実機（Apple Silicon）必須
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/reduce_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/reduce_source_evidence-488deab9a51b0844)
+
+running 7 tests
+test indices_are_64bit_and_no_threadgroup_barrier ... ok
+test reduce_sum_chunk_constant_matches_rust_side ... ok
+test boundary_checks_are_present ... ok
+test kernels_use_soft_f64_accumulator ... ok
+test source_includes_metal_stdlib_and_namespace ... ok
+test kernel_names_and_buffer_indices_are_declared ... ok
+test red_f64_primitives_match_scan_f64_primitives_verbatim_modulo_prefix ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/resident_lhs_dinput_phase_bench.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/resident_lhs_dinput_phase_bench-7a8c9fa9017e074a)
+
+running 2 tests
+test dinput_phase_l1_784x256x64 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test dinput_phase_l2_256x10x64 ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/rmsnorm_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/rmsnorm_parity-fb39ea46faafcfbe)
+
+running 9 tests
+test backend_ops_rmsnorm_is_bit_identical_to_metal_rmsnorm ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test backend_ops_rmsnorm_matches_cpu_reference_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test rmsnorm_matches_backend_cpu_directly ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test rmsnorm_matches_backend_cpu_with_extreme_eps ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test rmsnorm_matches_backend_cpu_with_extreme_magnitude_values ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test rmsnorm_matches_backend_cpu_with_multiple_inf_in_same_row ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test rmsnorm_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test rmsnorm_propagates_nan_matching_backend_cpu ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test rmsnorm_run_fused_matches_cpu_composed ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/rmsnorm_softmax_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/rmsnorm_softmax_source_evidence-1a758f76e35c3505)
+
+running 11 tests
+test onepass_max_hidden_matches_row_kernel_constant ... ok
+test rmsnorm_and_softmax_do_not_use_threadgroup_barrier ... ok
+test rmsnorm_and_softmax_row_base_is_declared_ulong ... ok
+test rmsnorm_and_softmax_use_persistent_threadgroup_loop ... ok
+test rmsnorm_vectorized_path_keeps_manual_bounds_check ... ok
+test rmsnorm_uses_overflow_safe_ssq_for_accumulation ... ok
+test rmsnorm_and_softmax_define_onepass_and_twopass_kernels ... ok
+test rmsnorm_uses_five_stage_ssq_butterfly_reduction ... ok
+test softmax_uses_exp2_only_not_exp ... ok
+test softmax_uses_finite_negative_sentinel_not_infinity_and_gates_sum_by_valid ... ok
+test softmax_uses_five_stage_butterfly_reduction ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/rnn_cell_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/rnn_cell_parity-6d8a643f2c011ba7)
+
+running 1 test
+test rnn_cell_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/rnn_cell_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/rnn_cell_source_evidence-5c9b21bf7f3545a0)
+
+running 5 tests
+test rnn_cell_metal_source_uses_fma ... ok
+test rnn_cell_metal_source_has_bound_checks_for_all_five_kernels ... ok
+test rnn_cell_metal_source_uses_precise_math ... ok
+test rnn_cell_metal_source_declares_all_five_kernel_entry_points ... ok
+test rnn_cell_metal_source_uses_no_atomics ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scalar_op_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/scalar_op_parity-bd08d8e7c3b9c108)
+
+running 11 tests
+test comparison_and_clamp_edge_cases ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test pow_negative_base_noninteger_exponent_is_nan ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test pow_zero_pow_zero_is_one ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test scalar_binary_broadcast_matches_cpu ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test scalar_binary_incompatible_shape_is_rejected ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test scalar_op_empty_shape_returns_empty ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test scalar_op_handles_zero_inf_nan ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test scalar_op_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test silu_hardswish_leaky_relu_elu_edge_cases ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test transcendental_scalar_op_edge_cases ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test unimplemented_kinds_return_unsupported ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 11 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scan_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/scan_parity-105863af82897056)
+
+running 2 tests
+test scan_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）必須
+test scan_matches_cpu_for_large_shapes ... ignored, Metal 実機（Apple Silicon）必須
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scan_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/scan_source_evidence-3af8c2265046c5c5)
+
+running 4 tests
+test boundary_checks_are_present ... ok
+test source_includes_metal_stdlib_and_namespace ... ok
+test kernels_use_soft_f64_accumulator ... ok
+test kernel_names_and_buffer_order_are_declared ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sgd_device_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/sgd_device_parity-6a734d93582136d8)
+
+running 7 tests
+test empty_tensor_step_is_a_no_op ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test full_combo_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test full_combo_matches_cpu_reference_across_100_steps ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test momentum_sgd_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test sgd_step_device_rejects_missing_velocity_when_momentum_enabled ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test sgd_step_device_rejects_shape_mismatch ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test vanilla_sgd_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/shader_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/shader_source_evidence-da1dd7d92cde963a)
+
+running 54 tests
+test gemm_metal_source_declares_split_k_params_struct ... ok
+test gemm_metal_source_declares_fine_barrier_enabled_function_constant ... ok
+test gemm_metal_source_declares_tgp_pad_function_constant ... ok
+test gemm_metal_boundary_helpers_retain_req8_condition_expressions ... ok
+test gemm_metal_source_declares_unroll_acc_enabled_function_constant ... ok
+test gemm_metal_source_declares_transpose_boundary_helpers ... ok
+test gemm_metal_source_declares_trans_a_trans_b_function_constants ... ok
+test gemm_simdgroup_f16_source_uses_f32_accumulator_type ... ok
+test gemm_simdgroup_f16_source_retains_req8_boundary_guard ... ok
+test gemm_simdgroup_f16_source_uses_simdgroup_half_matrix_instructions ... ok
+test gemm_metal_source_declares_spec_ifdef_block_with_all_seventeen_defines ... ok
+test gemm_metal_source_uses_simdgroup_matrix_instructions ... ok
+test gemm_metal_source_else_branch_retains_all_seventeen_function_constants ... ok
+test gemm_simdgroup_tiled_f16_source_epilogue_uses_single_barrier ... ok
+test gemm_simdgroup_tiled_f16_source_does_not_reference_coop_load_constants ... ok
+test gemm_simdgroup_tiled_f16_source_does_not_reference_unroll_acc ... ok
+test gemm_simdgroup_tiled_f16_source_max_acc_unchanged ... ok
+test gemm_simdgroup_tiled_f16_source_does_not_reference_tile_class ... ok
+test gemm_simdgroup_tiled_f16_source_retains_req8_boundary_guards ... ok
+test gemm_simdgroup_tiled_f16_source_uses_matrix_unit_instructions ... ok
+test gemm_simdgroup_tiled_f16_source_uses_half_fragments_and_f32_accumulator ... ok
+test gemm_simdgroup_tiled_f16_source_does_not_reference_frag_load_candidates ... ok
+test gemm_simdgroup_tiled_f16_source_uses_vectorized_staged_load ... ok
+test gemm_simdgroup_tiled_hfrag_introduces_no_new_function_constants ... ok
+test gemm_simdgroup_tiled_hfrag_source_retains_transpose_branches ... ok
+test gemm_simdgroup_tiled_hfrag_source_uses_half_fragments_f32_io_and_matrix_unit_instructions ... ok
+test gemm_simdgroup_tiled_source_contains_split_k_partition_derivation ... ok
+test gemm_simdgroup_tiled_source_declares_acc_cap_and_static_asserts ... ok
+test gemm_simdgroup_tiled_hfrag_source_retains_req8_boundary_guards ... ok
+test gemm_simdgroup_tiled_hfrag_source_does_not_reference_experimental_gates ... ok
+test gemm_simdgroup_tiled_source_gates_frag_load_candidates_behind_function_constants ... ok
+test gemm_simdgroup_tiled_source_retains_transpose_fragment_loads ... ok
+test gemm_simdgroup_tiled_source_uses_float4_staged_load ... ok
+test gemm_simdgroup_tiled_source_gates_tile_class_behind_function_constant ... ok
+test gemm_simdgroup_tiled_source_retains_region_guard_before_offset ... ok
+test f16_and_hfrag_kernels_do_not_reference_split_k ... ok
+test gemm_simdgroup_tiled_source_retains_float4_load_boundary_fallback ... ok
+test gemm_simdgroup_tiled_source_retains_boundary_guard_with_padding ... ok
+test gemm_simdgroup_tiled_source_uses_register_resident_fragment_arrays ... ok
+test gemm_simdgroup_tiled_source_uses_tgp_padding_stride ... ok
+test gemm_simdgroup_tiled_source_gates_fine_barrier_between_fragment_load_and_mma ... ok
+test gemm_simdgroup_tiled_source_gates_unroll_pragmas_behind_function_constant ... ok
+test gemm_splitk_reduce_source_still_uses_no_atomics_after_te_addition ... ok
+test gemm_tiled_bias_act_source_retains_req8_boundary_guards ... ok
+test gemm_tiled_bias_act_source_retains_gemm_strides_transpose_branch ... ok
+test gemm_splitk_reduce_source_has_boundary_check_and_ascending_loop ... ok
+test gemm_simdgroup_tiled_source_uses_serpentine_scan_order ... ok
+test gemm_simdgroup_tiled_variants_share_boundary_check_helpers ... ok
+test gemm_splitk_reduce_source_uses_no_atomics ... ok
+test gemm_metal_source_declares_thread_elements_layout_probe_kernel ... ok
+test gemm_simdgroup_tiled_te_source_does_not_reference_out_of_scope_gates ... ok
+test gemm_simdgroup_tiled_te_source_uses_thread_elements_and_matrix_unit_instructions ... ok
+test gemm_simdgroup_tiled_source_retains_req8_boundary_guards_in_both_unroll_variants ... ok
+test gemm_simdgroup_tiled_source_uses_coop_load_flat_index_helper ... ok
+
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/softmax_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/softmax_parity-b2e96d4200e563bd)
+
+running 8 tests
+test backend_ops_softmax_is_bit_identical_to_metal_softmax ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test backend_ops_softmax_matches_cpu_reference_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test softmax_is_numerically_stable_at_extreme_values ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test softmax_is_numerically_stable_near_f32_max_with_non_multiple_of_32_hidden ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test softmax_matches_backend_cpu_directly ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test softmax_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test softmax_run_fused_matches_cpu_reference ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test backend_ops_softmax_non_final_axis_is_unsupported ... ok
+
+test result: ok. 1 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sort_topk_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/sort_topk_parity-db3eaafdc61ff784)
+
+running 4 tests
+test sort_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）必須
+test sort_matches_cpu_for_non_contiguous_input ... ignored, Metal 実機（Apple Silicon）必須
+test topk_k_zero_returns_empty_on_metal ... ignored, Metal 実機（Apple Silicon）必須
+test topk_matches_cpu_across_k_and_largest ... ignored, Metal 実機（Apple Silicon）必須
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sort_topk_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/sort_topk_source_evidence-b835954d77e7c697)
+
+running 5 tests
+test bitonic_step_u64_body_contains_no_floating_point_types ... ok
+test bitonic_step_u64_boundary_checks_are_present ... ok
+test all_three_kernels_are_declared ... ok
+test build_and_finalize_have_numel_boundary_checks ... ok
+test source_includes_metal_stdlib_and_namespace ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/splitk_gemm_gate_shape_attribution.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/splitk_gemm_gate_shape_attribution-72951669358cea12)
+
+running 3 tests
+test gate_shapes_route_to_classic_matching_select_for_device ... ok
+test gate_shapes_are_not_split_k_candidates ... ok
+test print_attribution_table ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/splitk_parity_baseline_contract.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/splitk_parity_baseline_contract-8cb88203daf0cd52)
+
+running 11 tests
+test approved_baseline_shapes_are_split_k_eligible ... ok
+test baseline_fixture_is_self_consistent ... ok
+test baselines_match_approved_ceiling_table ... ok
+test assert_no_split_k_parity_regression_panics_on_mean_abs_diff_regression - should panic ... ok
+test assert_no_split_k_parity_regression_panics_on_max_abs_diff_regression - should panic ... ok
+test find_baseline_resolves_all_approved_shapes ... ok
+test find_baseline_returns_none_for_unregistered_shape ... ok
+test assert_no_split_k_parity_regression_panics_on_max_rel_err_regression - should panic ... ok
+test assert_no_split_k_parity_regression_panics_on_fail_count_regression - should panic ... ok
+test assert_no_split_k_parity_regression_panics_on_total_mismatch - should panic ... ok
+test assert_no_split_k_parity_regression_passes_on_zero_diff_report ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/splitk_train_shape_attribution.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/splitk_train_shape_attribution-74ba43bcf32abd77)
+
+running 4 tests
+test forward_l1_shape ... ok
+test forward_l2_shape ... ok
+test backward_shapes_are_none ... ok
+test print_attribution_table ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/typed_ops_bf16_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/typed_ops_bf16_parity-fc782aee747d9f02)
+
+running 5 tests
+test sum_matches_f32_backend_ops_rounded_bit_exact ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_ops_bf16_gemm_shape_mismatch_returns_typed_error ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_ops_bf16_matches_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_ops_bf16_accessor_returns_some_without_device_init ... ok
+test max_remains_unsupported_without_device_init ... ok
+
+test result: ok. 2 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/typed_ops_f16_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/typed_ops_f16_parity-baba62aef0e43245)
+
+running 10 tests
+test gemm_zero_dim_shape_reaches_device_and_fails_without_panic ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test sum_matches_f32_backend_ops_rounded_bit_exact ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_f16_elementwise_matches_cpu_backend_ops_rounded ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_f16_gemm_is_bit_identical_to_dispatch_f16_auto_unverified ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_f16_gemm_matches_cpu_reference_rounded ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test typed_ops_f16_is_some_and_typed_ops_f64_is_none ... ok
+test gemm_rejects_shape_mismatch_before_touching_device ... ok
+test gemm_rejects_batched_rank3_input_before_touching_device ... ok
+test add_mul_reject_shape_mismatch_before_touching_device ... ok
+test max_is_unsupported_matching_metal_f32_backend_ops ... ok
+
+test result: ok. 5 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/typed_ops_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/typed_ops_source_evidence-9ae9ccf3e1e87ea4)
+
+running 5 tests
+test typed_f16_gemm_calls_dispatch_f16_auto_unverified_without_implicit_f32_fallback ... ok
+test typed_f16_module_is_declared_in_lib_rs ... ok
+test typed_ops_f16_accessor_is_wired_in_ops_rs ... ok
+test typed_ops_f64_accessor_is_not_overridden_in_ops_rs ... ok
+test no_typed_ops_f64_impl_exists_in_crate ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/unique_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/unique_parity-46c940426a81b38b)
+
+running 1 test
+test unique_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）必須
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/unique_source_evidence.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/unique_source_evidence-c6914b2bb57f7f81)
+
+running 4 tests
+test kernel_body_contains_no_floating_point_types ... ok
+test boundary_checks_are_present ... ok
+test source_includes_metal_stdlib_and_namespace ... ok
+test kernel_name_and_buffer_order_are_declared ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/where_masked_fill_parity.rs (/Users/<user>/work/target-fandhe-ai/debug/deps/where_masked_fill_parity-19eaa60bf2db59ea)
+
+running 3 tests
+test where_cond_shape_mismatch_is_rejected ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test where_forward_isolates_nan_and_inf_to_unselected_side ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+test where_masked_fill_matches_cpu_across_shapes ... ignored, Metal 実機（Apple Silicon）依存。CI では実行しない
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/gemm_fine_barrier_ab_bench.rs (/Users/<user>/work/target-fandhe-ai/debug/examples/gemm_fine_barrier_ab_bench-afad98776b7ff79e)
+
+running 9 tests
+test phase1_round_stats_tests::round_extrema_empty_slice_is_none ... ok
+test phase1_round_stats_tests::round_extrema_single_spike_finds_correct_index ... ok
+test phase1_round_stats_tests::format_aux_spread_keys_trimmed_none_renders_na_sentinel ... ok
+test phase1_round_stats_tests::auxiliary_trim_per_side_is_one ... ok
+test single_run_verdict_tests::adopts_when_large_sizes_improve_and_small_sizes_hold_within_5_percent ... ok
+test single_run_verdict_tests::rejects_when_a_large_size_does_not_improve ... ok
+test single_run_verdict_tests::undetermined_when_stability_gate_exceeded_even_if_ratios_look_good ... ok
+test single_run_verdict_tests::rejects_when_a_small_size_regresses_more_than_5_percent ... ok
+test phase1_round_stats_tests::format_phase1_round_stats_line_has_expected_keys_and_order ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/gemm_splitk_ab_bench.rs (/Users/<user>/work/target-fandhe-ai/debug/examples/gemm_splitk_ab_bench-7b5483124ccea3a6)
+
+running 19 tests
+test tests::env_guard_result_label_gated_maps_verdict ... ok
+test tests::control_shapes_has_three_entries_at_control_mn ... ok
+test tests::env_guard_result_label_record_only_ignores_verdict ... ok
+test tests::bit_equal_distinguishes_signed_zero_and_detects_length_mismatch ... ok
+test tests::format_ab_line_computes_speedup_as_a_over_b ... ok
+test tests::format_ab_line_partitions_none_renders_na ... ok
+test tests::floor_shapes_uses_floor_k ... ok
+test tests::parse_args_from_accepts_known_flags ... ok
+test tests::format_phase0_target_line_includes_checksum_bits_for_round_trip_comparison ... ok
+test tests::parse_args_from_rejects_guard_max_attempts_without_max_load_avg ... ok
+test tests::format_floor_line_renders_na_sentinels_for_b_side ... ok
+test tests::parse_args_from_rejects_duplicate_max_load_avg ... ok
+test tests::parse_args_from_rejects_non_finite_max_load_avg ... ok
+test tests::parse_args_from_rejects_unknown_flag ... ok
+test tests::parse_args_from_self_check_only ... ok
+test tests::should_split_k_is_none_for_all_control_shapes ... ok
+test tests::should_split_k_is_some_for_all_target_shapes ... ok
+test tests::should_split_k_with_forced_max_groups_is_some_for_control_shapes ... ok
+test tests::target_shapes_has_nine_entries ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running unittests examples/gemm_splitk_shapes_bench.rs (/Users/<user>/work/target-fandhe-ai/debug/examples/gemm_splitk_shapes_bench-a91fea8d0ebe4ac8)
+
+running 4 tests
+test tests::matched_cube_side_approximately_preserves_flops ... ok
+test tests::mlx_case1_domain_matches_known_cases ... ok
+test tests::matched_cube_side_is_multiple_of_eight ... ok
+test tests::mlx_case1_domain_excludes_large_square ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running unittests examples/gemm_swizzle_ab_bench.rs (/Users/<user>/work/target-fandhe-ai/debug/examples/gemm_swizzle_ab_bench-70e1a8d0854fd3cb)
+
+running 10 tests
+test phase1_round_stats_tests::auxiliary_trim_per_side_is_one ... ok
+test phase1_round_stats_tests::format_aux_spread_keys_trimmed_none_renders_na_sentinel ... ok
+test phase1_round_stats_tests::round_extrema_single_spike_finds_correct_index ... ok
+test single_run_verdict_tests::adopts_when_large_sizes_improve_in_both_phases_and_small_sizes_hold ... ok
+test single_run_verdict_tests::rejects_when_neither_phase_improves_large_sizes ... ok
+test single_run_verdict_tests::rejects_when_phase3_large_size_does_not_improve_even_if_phase2_does ... ok
+test phase1_round_stats_tests::round_extrema_empty_slice_is_none ... ok
+test single_run_verdict_tests::size_conditional_when_large_sizes_improve_but_a_small_size_regresses ... ok
+test single_run_verdict_tests::undetermined_when_stability_gate_exceeded_even_if_ratios_look_good ... ok
+test phase1_round_stats_tests::format_phase1_round_stats_line_has_expected_keys_and_order ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/gemm_transpose_route_ab_bench.rs (/Users/<user>/work/target-fandhe-ai/debug/examples/gemm_transpose_route_ab_bench-bda463684c6ee0b0)
+
+running 57 tests
+test cli_and_round_stats_tests::auxiliary_trim_per_side_is_one ... ok
+test cli_and_round_stats_tests::env_guard_result_label_gated_maps_verdict ... ok
+test cli_and_round_stats_tests::env_guard_result_label_record_only_ignores_verdict ... ok
+test cli_and_round_stats_tests::aggregate_gpu_host_round_resolved_cfg_from_actual_execution ... ok
+test cli_and_round_stats_tests::aggregate_gpu_host_size_one_invalid_round_makes_kernel_gpu_spread_na ... ok
+test cli_and_round_stats_tests::aggregate_gpu_host_size_all_valid_computes_spreads ... ok
+test cli_and_round_stats_tests::aggregate_gpu_host_round_invalid_when_batches_len_not_one ... ok
+test cli_and_round_stats_tests::aggregate_gpu_host_round_resolved_cfg_mixed_when_samples_disagree ... ok
+test cli_and_round_stats_tests::format_aux_spread_keys_trimmed_none_renders_na_sentinel ... ok
+test cli_and_round_stats_tests::aggregate_gpu_host_round_uses_measured_wall_not_closure_wall ... ok
+test cli_and_round_stats_tests::aggregate_gpu_host_round_invalid_when_kernel_gpu_missing ... ok
+test cli_and_round_stats_tests::format_gpu_host_round_line_reports_na_for_invalid_round ... ok
+test cli_and_round_stats_tests::format_aux_spread_keys_key_order_is_trimmed_then_iqr_then_mad ... ok
+test cli_and_round_stats_tests::aggregate_gpu_host_round_invalid_when_invariant_order_violated ... ok
+test cli_and_round_stats_tests::aggregate_gpu_host_round_valid_tail_computes_medians ... ok
+test cli_and_round_stats_tests::aggregate_gpu_host_round_panics_on_length_mismatch - should panic ... ok
+test cli_and_round_stats_tests::format_gpu_host_round_line_starts_with_grep_key_and_includes_size ... ok
+test cli_and_round_stats_tests::format_gpu_host_size_line_starts_with_grep_key_and_includes_na ... ok
+test cli_and_round_stats_tests::format_phase1_round_stats_line_starts_with_existing_log_prefix ... ok
+test cli_and_round_stats_tests::measured_tail_exact_length_returns_whole_slice ... ok
+test cli_and_round_stats_tests::measured_tail_returns_last_iters_elements ... ok
+test cli_and_round_stats_tests::measured_tail_returns_none_when_shorter_than_iters ... ok
+test cli_and_round_stats_tests::min_warmup_override_duration_defaults_when_none ... ok
+test cli_and_round_stats_tests::min_warmup_override_duration_uses_override_when_some ... ok
+test cli_and_round_stats_tests::parse_args_from_both_flags_combine_regardless_of_order ... ok
+test cli_and_round_stats_tests::parse_args_from_duplicate_gpu_timestamps_is_error ... ok
+test cli_and_round_stats_tests::parse_args_from_duplicate_phase1_only_is_error ... ok
+test cli_and_round_stats_tests::parse_args_from_empty_defaults_to_phase1_only_false ... ok
+test cli_and_round_stats_tests::parse_args_from_env_info_out_rejects_empty_value ... ok
+test cli_and_round_stats_tests::parse_args_from_env_info_out_sets_path ... ok
+test cli_and_round_stats_tests::parse_args_from_gpu_timestamps_flag_sets_true ... ok
+test cli_and_round_stats_tests::parse_args_from_gpu_watch_alone_is_error ... ok
+test cli_and_round_stats_tests::parse_args_from_gpu_watch_with_max_load_avg_collects_multiple ... ok
+test cli_and_round_stats_tests::parse_args_from_guard_max_attempts_rejects_zero ... ok
+test cli_and_round_stats_tests::parse_args_from_guard_only_flag_sets_true ... ok
+test cli_and_round_stats_tests::parse_args_from_guard_options_combine_with_existing_flags ... ok
+test cli_and_round_stats_tests::parse_args_from_guard_wait_secs_rejects_duration_overflow ... ok
+test cli_and_round_stats_tests::parse_args_from_guard_wait_secs_rejects_non_positive ... ok
+test cli_and_round_stats_tests::parse_args_from_max_load_avg_duplicate_is_error ... ok
+test cli_and_round_stats_tests::parse_args_from_max_load_avg_rejects_non_numeric ... ok
+test cli_and_round_stats_tests::parse_args_from_max_load_avg_rejects_zero_and_negative ... ok
+test cli_and_round_stats_tests::parse_args_from_max_load_avg_sets_gated_mode ... ok
+test cli_and_round_stats_tests::parse_args_from_min_warmup_secs_accepts_boundary_and_typical_values ... ok
+test cli_and_round_stats_tests::parse_args_from_min_warmup_secs_combines_with_other_flags_regardless_of_order ... ok
+test cli_and_round_stats_tests::parse_args_from_min_warmup_secs_rejects_above_upper_bound ... ok
+test cli_and_round_stats_tests::parse_args_from_min_warmup_secs_rejects_below_default ... ok
+test cli_and_round_stats_tests::parse_args_from_min_warmup_secs_rejects_duplicate ... ok
+test cli_and_round_stats_tests::parse_args_from_min_warmup_secs_rejects_non_numeric_or_empty ... ok
+test cli_and_round_stats_tests::parse_args_from_min_warmup_secs_space_separated_value_is_unknown_arg ... ok
+test cli_and_round_stats_tests::parse_args_from_phase1_only_flag_sets_true ... ok
+test cli_and_round_stats_tests::parse_args_from_unknown_argument_is_error ... ok
+test cli_and_round_stats_tests::parse_min_warmup_secs_boundary_values_ok ... ok
+test cli_and_round_stats_tests::round_extrema_empty_slice_is_none ... ok
+test cli_and_round_stats_tests::round_extrema_min_secs_from_non_empty_slice ... ok
+test cli_and_round_stats_tests::round_extrema_single_spike_finds_correct_index ... ok
+test cli_and_round_stats_tests::round_extrema_single_element_min_equals_max_at_index_zero ... ok
+test cli_and_round_stats_tests::round_extrema_tie_picks_first_occurrence ... ok
+
+test result: ok. 57 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests examples/gemm_unroll_acc_ab_bench.rs (/Users/<user>/work/target-fandhe-ai/debug/examples/gemm_unroll_acc_ab_bench-8cc215c3f88bce99)
+
+running 9 tests
+test phase1_round_stats_tests::auxiliary_trim_per_side_is_one ... ok
+test phase1_round_stats_tests::round_extrema_empty_slice_is_none ... ok
+test phase1_round_stats_tests::round_extrema_single_spike_finds_correct_index ... ok
+test single_run_verdict_tests::adopts_when_all_shapes_hold_within_5_percent ... ok
+test single_run_verdict_tests::rejects_when_a_square_shape_regresses_more_than_5_percent ... ok
+test phase1_round_stats_tests::format_aux_spread_keys_trimmed_none_renders_na_sentinel ... ok
+test phase1_round_stats_tests::format_phase1_round_stats_line_has_m_n_k_identity_keys ... ok
+test single_run_verdict_tests::undetermined_when_stability_gate_exceeded_even_if_ratios_look_good ... ok
+test single_run_verdict_tests::rejects_when_a_supplementary_shape_regresses_more_than_5_percent ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests fandhe_ai_backend_metal
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
