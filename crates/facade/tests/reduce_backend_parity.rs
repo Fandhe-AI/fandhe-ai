@@ -9,8 +9,16 @@
 //! 対象とし、既知の解析値との一致を確認する（CI で常時実行）。
 //! `#[ignore]` テストは `tape_for(Device::Cuda(0))` の forward／backward
 //! を CPU tape と REQ-2 統一複合判定（[`fandhe_ai_backend_cpu::
-//! assert_parity`]）で突き合わせる（実機必須。Metal は本イシュー時点で
-//! `sum`／`max`／`min` 未実装のため対象外）。
+//! assert_parity`]）で突き合わせる（実機必須。`max`／`min` は Metal で
+//! 未実装のため対象外のまま）。
+//!
+//! イシュー #1896 で `sum`（Metal）が `reduce::MetalReduce` へ結線
+//! されたことを受け、`sum`／`mean`／`sum_dims`（axis なしの単純縮約）
+//! を CPU tape と bit 完全一致で突き合わせる `#[cfg(target_os =
+//! "macos")]` `#[ignore]` テストを追加した（`Var::sum`／`Op::Sum` の
+//! VJP は算術を伴わないホスト側のため勾配も bit 一致する。`max`は
+//! 引き続き対象外。`conv2d_backend_parity.rs::
+//! metal_conv2d_backward_matches_cpu` と同型の cfg 構成）。
 //!
 //! ```sh
 //! cargo test -p fandhe-ai --release --test reduce_backend_parity -- --ignored --nocapture
@@ -26,8 +34,10 @@
 //! - (g) `sum_dims`／`max_dims`／`mean_dims` の CPU 解析値突合
 //!   （複数軸・`keepdim`）。
 //! - (h) `#[ignore]` CUDA 実機 parity（`sum_dims`／`max_dims`／
-//!   `mean_dims`。Metal は `sum`／`max` 自体が `Unsupported`
-//!   〈TASK-1.9c スコープ外〉のため対象外のまま）。
+//!   `mean_dims`。Metal は `max` 自体が `Unsupported`〈TASK-1.9c
+//!   スコープ外〉のため `max_dims` は対象外のまま。`sum`（イシュー
+//!   #1896 結線済み）を用いる `sum_dims`／`mean_dims` の Metal parity
+//!   は下記 (l) が別途追加する）。
 
 use fandhe_ai::{Device, Tensor, tape_for};
 
@@ -467,4 +477,132 @@ fn assert_parity_tensors(actual: &Tensor<f32>, expected: &Tensor<f32>, ctx: &str
     let a = actual.contiguous();
     let e = expected.contiguous();
     fandhe_ai_backend_cpu::assert_parity(ctx, a.as_slice().unwrap(), e.as_slice().unwrap());
+}
+
+/// (l) `tape_for(Device::Metal)` の `Var::sum(None)`（全軸）
+/// forward／backward が CPU tape と**bit 完全一致**することを確認する
+/// （イシュー #1896。`sum`（Metal）は `ops::MetalBackendOps::sum` が
+/// `reduce::MetalReduce` へ結線されており CPU 参照実装〈`fandhe_ai_
+/// backend_cpu::reduction::sum`〉と bit 完全一致する契約〈`crate::
+/// reduce_model` doc〉。`Op::Sum` の VJP は算術を伴わないホスト側の
+/// ブロードキャストのみ〈`grad.rs`〉のため勾配も bit 一致する）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_sum_all_forward_and_backward_match_cpu_bit_exact() {
+    let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let shape = [2usize, 3];
+
+    let metal_tape = tape_for(Device::Metal).unwrap();
+    let metal_a = metal_tape.var(&tensor(data.clone(), &shape));
+    let metal_loss = metal_a.sum(None).unwrap();
+    let metal_grads = metal_tape.backward(&metal_loss).unwrap();
+    let metal_da = metal_grads
+        .get(&metal_a)
+        .unwrap()
+        .expect("a は loss に到達する");
+
+    let cpu_tape = tape_for(Device::Cpu).unwrap();
+    let cpu_a = cpu_tape.var(&tensor(data, &shape));
+    let cpu_loss = cpu_a.sum(None).unwrap();
+    let cpu_grads = cpu_tape.backward(&cpu_loss).unwrap();
+    let cpu_da = cpu_grads
+        .get(&cpu_a)
+        .unwrap()
+        .expect("a は loss に到達する");
+
+    assert_eq!(
+        dense_vec(&metal_loss.to_tensor()),
+        dense_vec(&cpu_loss.to_tensor()),
+        "sum(None) forward が Metal/CPU で bit 一致しない"
+    );
+    assert_eq!(
+        dense_vec(metal_da),
+        dense_vec(cpu_da),
+        "sum(None) backward が Metal/CPU で bit 一致しない"
+    );
+}
+
+/// (m) `tape_for(Device::Metal)` の `Var::sum(Some(axis))`（単一軸）
+/// forward／backward が CPU tape と**bit 完全一致**することを確認する
+/// （イシュー #1896。(l) と同じ理由）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_sum_axis_forward_and_backward_match_cpu_bit_exact() {
+    let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let shape = [2usize, 3];
+
+    let metal_tape = tape_for(Device::Metal).unwrap();
+    let metal_a = metal_tape.var(&tensor(data.clone(), &shape));
+    let metal_loss = metal_a.sum(Some(0)).unwrap();
+    let metal_grads = metal_tape.backward(&metal_loss).unwrap();
+    let metal_da = metal_grads
+        .get(&metal_a)
+        .unwrap()
+        .expect("a は loss に到達する");
+
+    let cpu_tape = tape_for(Device::Cpu).unwrap();
+    let cpu_a = cpu_tape.var(&tensor(data, &shape));
+    let cpu_loss = cpu_a.sum(Some(0)).unwrap();
+    let cpu_grads = cpu_tape.backward(&cpu_loss).unwrap();
+    let cpu_da = cpu_grads
+        .get(&cpu_a)
+        .unwrap()
+        .expect("a は loss に到達する");
+
+    assert_eq!(
+        dense_vec(&metal_loss.to_tensor()),
+        dense_vec(&cpu_loss.to_tensor()),
+        "sum(Some(0)) forward が Metal/CPU で bit 一致しない"
+    );
+    assert_eq!(
+        dense_vec(metal_da),
+        dense_vec(cpu_da),
+        "sum(Some(0)) backward が Metal/CPU で bit 一致しない"
+    );
+}
+
+/// (n) `tape_for(Device::Metal)` の `Var::mean`（全軸・単一軸）
+/// forward／backward が CPU tape と**bit 完全一致**することを確認する
+/// （イシュー #1896。`Var::mean` は `sum` の結果をホスト側で 1 回だけ
+/// `n as f32` で除算する合成実装〈`var.rs::mean`〉であり、`sum` 自体が
+/// Metal/CPU で bit 一致するため mean も bit 一致する）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_mean_forward_and_backward_match_cpu_bit_exact() {
+    let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let shape = [2usize, 3];
+
+    for dim in [None, Some(0usize), Some(1usize)] {
+        let metal_tape = tape_for(Device::Metal).unwrap();
+        let metal_a = metal_tape.var(&tensor(data.clone(), &shape));
+        let metal_loss = metal_a.mean(dim).unwrap();
+        let metal_grads = metal_tape.backward(&metal_loss).unwrap();
+        let metal_da = metal_grads
+            .get(&metal_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+
+        let cpu_tape = tape_for(Device::Cpu).unwrap();
+        let cpu_a = cpu_tape.var(&tensor(data.clone(), &shape));
+        let cpu_loss = cpu_a.mean(dim).unwrap();
+        let cpu_grads = cpu_tape.backward(&cpu_loss).unwrap();
+        let cpu_da = cpu_grads
+            .get(&cpu_a)
+            .unwrap()
+            .expect("a は loss に到達する");
+
+        assert_eq!(
+            dense_vec(&metal_loss.to_tensor()),
+            dense_vec(&cpu_loss.to_tensor()),
+            "mean(dim={dim:?}) forward が Metal/CPU で bit 一致しない"
+        );
+        assert_eq!(
+            dense_vec(metal_da),
+            dense_vec(cpu_da),
+            "mean(dim={dim:?}) backward が Metal/CPU で bit 一致しない"
+        );
+    }
 }
