@@ -642,6 +642,65 @@ enabled_is_true`（`black_box` 経由で `SPLIT_K_DEFAULT_ENABLED` 自体が
   `SPLIT_K_DISPATCH_AUTO_PRODUCTION_ENABLED` という定数名は、いずれも
   撤去前の実装状態を記した歴史記録として**書き換えずに保持**する。
 
+### 自動判定入口の事前条件契約（#1899・2026-09-16 ユーザー承認）
+
+**経緯**: `crates/backend-metal/tests/gemm_splitk_auto_entry_parity.rs`
+の negative テスト（旧 `NON_ELIGIBLE_SHAPES = [(512,512,512),
+(64,64,63)]`）は両形状で `Ok(SplitKRoute::Classic { reason:
+NotEligible })` を期待していたが、2026-09-16 の M4 Max 実測（#1904・
+`docs/perf/logs/metal-gemm-splitk-auto-entry-1513/auto_entry.log`
+476〜480 行）で `(64,64,63)` が `Err(MetalError::
+StridedTiledIneligible)` を返し FAIL した。原因はコード読解で確定
+済み: 自動判定入口 `MetalGemm::dispatch_split_k_strided_prepared`
+（`gemm.rs:2870-2925` 付近）は `should_split_k` が `None` の分岐でも
+`validate_strided_dims` → `strided_tiled_eligibility`（m/n/k 非 0 かつ
+8 の倍数・`ld`／offset が `TileConfig::VEC_WIDTH`=4 の倍数）を `?` で
+通してから classic（`encode_tiled_by_class`）へ進むため、k=63 では
+`Classic` が構造的に到達不能だった。`_with_plan_impl` も同じ検査を
+先頭で通す。
+
+**契約 (A) の確定内容**: 入口は「m/n/k が 8 の倍数」等の事前条件を
+宣言し、違反は `should_split_k` の判定結果（`Some`／`None`）に関わらず
+型付き `Err(MetalError::StridedTiledIneligible)` のまま維持する
+（`SplitKRoute::Classic` へは分類しない）。事前条件検査は両分岐
+（split-K 経路・classic フォールバック）とも encode より前に完結する
+ため、`Err` を返した呼び出しは出力バッファ（`c_buf`）を一切書き換え
+ない（fail-closed。`.claude/rules/security.md` A03）。
+`SplitKFallbackReason::NotEligible` は「事前条件を満たす形状のうち
+`should_split_k` が `None` を返したもの」に限定する意味へ精密化した
+（事前条件違反はこの variant では表現しない）。
+
+**(B) の不採用理由**: 8 の倍数でない形状を入口自身が classic 経路で
+「実行した」ことにして `Ok(Classic{reason})` を返す代替案は不採用と
+した。現在の classic フォールバック先（`MetalGemm::
+encode_tiled_by_class`）は strided タイルカーネル（`gemm_simdgroup_
+tiled`）限定であり、非 8 倍数の実効次元を扱えるのはホストスライス
+入力の `MetalGemm::dispatch_variant`（`SimdgroupTiled` 以外の構成）
+だけである。デバイスバッファ入口（本関数）からこれを使うには readback
+と再 upload が必要になり、新カーネル経路なしに「実行した」ことにする
+契約は避けた。
+
+**本番経路への影響**: `dispatch_auto`（`select_route_for_device`）は
+`pad8` 済みの実効次元で判定するため、8 の倍数でない形状はそもそも本
+入口 `dispatch_split_k_strided_prepared` を呼ばず `dispatch_variant
+(SimdgroupTiled)` で処理する。よって本契約は `dispatch_auto`／
+`MetalBackendOps::gemm` の挙動・bit 同一契約を一切変えない（本入口は
+独立の自動判定入口であり本番未結線のまま）。
+
+**是正内容**（#1899）: `gemm_splitk_auto_entry_parity.rs` の fixture を
+`NON_ELIGIBLE_PRECONDITION_OK_SHAPES = [(512,512,512)]`（事前条件を
+満たす非対象形状。既存 negative テストが引き続き対象）と
+`PRECONDITION_VIOLATING_SHAPES = [(64,64,63)]`（事前条件違反形状。
+新設した negative テスト `auto_entry_rejects_precondition_violating_
+shapes_with_typed_err` が対象）へ 2 分割した。`dispatch_split_k_
+strided_prepared`・`SplitKFallbackReason::NotEligible`・
+`strided_tiled_eligibility` の doc comment（`gemm.rs`）へ本契約を
+明文化した。tolerance・`BASELINES`・実行時トグル（`split_k_runtime`）・
+`select_route_for_device`・本番既定経路はすべて不変。M4 Max での
+再実測は `docs/perf/metal-gemm-splitk-two-pass.md` §5.9「追記
+（#1899）」および `docs/perf/logs/metal-gemm-splitk-auto-entry-1513/
+README.md` へ申し送る。
+
 ## §6 参照
 
 - `docs/perf/logs/metal-gemm-splitk-shapes-1308/`（M4 Max 実機実測の生ログ・`aggregate.py`／

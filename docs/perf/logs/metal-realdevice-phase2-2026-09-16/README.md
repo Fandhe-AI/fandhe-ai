@@ -210,6 +210,10 @@ fixture では `SplitKRoute::Classic` が構造的に到達不能であり、テ
 ユーザーへ回す（入口契約の確定 issue: #1899）。`run_auto_entry.sh` は `set -e` により本 FAIL で中断した
 ため（`uptime_during.log` は 1 本目のみ）、`bit_match.log`／`parity.log` は
 スクリプト記載と同一コマンドを手動実行して補完した（2 pass・1 pass）。
+**→ #1899 で契約 (A)（事前条件違反は型付き `Err` のまま維持し
+`Classic` へは分類しない）が確定し、fixture を 2 分割済み（是正後の
+M4 Max 再実測は未実施のまま `docs/perf/logs/metal-gemm-splitk-auto-
+entry-1513/README.md` へ申し送り）。**
 
 ### 3.3 `command_batching::pool_reuse_zero_fill_does_not_synchronize_open_batch`
 

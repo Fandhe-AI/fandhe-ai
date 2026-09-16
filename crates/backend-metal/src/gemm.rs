@@ -703,7 +703,14 @@ pub(crate) struct TilePipelineReflectionDiag {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitKFallbackReason {
     /// `crate::tile::should_split_k` が `None` を返した（形状が split-K
-    /// 対象条件〈MLX Case 1 ＋ 並列度条件〉を満たさない）。
+    /// 対象条件〈MLX Case 1 ＋ 並列度条件〉を満たさない）。**この
+    /// variant は `strided_tiled_eligibility`（非公開の pure 関数）の事前条件（m/n/k が
+    /// 8 の倍数等）を満たす形状のうち `should_split_k` が `None` を
+    /// 返したものに限る**（イシュー #1899）。事前条件そのものに違反する
+    /// 形状（例: k が 8 の倍数でない `(64, 64, 63)`）は
+    /// `should_split_k` の判定結果に関わらず
+    /// `Err(`[`MetalError::StridedTiledIneligible`]`)` を返し、本
+    /// variant では表現しない。
     NotEligible,
     /// スクラッチバッファの要素数（`partitions * m * n`）が `usize` の
     /// 範囲でオーバーフローする（`checked_mul` によりアクセス前に検出。
@@ -2866,6 +2873,36 @@ impl MetalGemm {
     /// 上記の `SPLIT_K_NUMERIC_CONTRACT_APPROVED` ゲートは既に解除済みの
     /// ため、`should_split_k` が対象と判定した形状では `dispatch_auto` の
     /// 結線状態とは無関係に split-K 経路を実行する。
+    ///
+    /// **事前条件（イシュー #1899・契約 (A)。2026-09-16 ユーザー承認）**:
+    /// 本関数は `should_split_k` の判定結果に関わらず、両分岐
+    /// （split-K 経路・classic フォールバック）とも encode 前に
+    /// `strided_tiled_eligibility`（非公開の pure 関数）の検査集合（`m`/`n`/`k` が非 0 かつ
+    /// 8 の倍数、`a_layout.ld`/`b_layout.ld` と `a_offset`/`b_offset`
+    /// （要素単位）が [`TileConfig::VEC_WIDTH`]（4）の倍数）を通す。
+    /// この事前条件に違反する形状（例: `(64, 64, 63)`。`k=63` が 8 の
+    /// 倍数でない）は `should_split_k` が `Some`/`None` のいずれを返すか
+    /// に関わらず `Err(`[`MetalError::StridedTiledIneligible`]`)` を返し、
+    /// [`SplitKRoute::Classic`] へは**分類しない**（`fail-closed`。
+    /// `.claude/rules/security.md` A03）。検査は encode より前に完結する
+    /// ため、`Err` を返した呼び出しは `c_buf` を一切書き換えない。
+    ///
+    /// `(A)` を採用し `(B)`（8 の倍数でない形状を本入口自身が classic
+    /// 経路で「実行した」ことにして `Ok(Classic { .. })` を返す案）を
+    /// 不採用とした理由: 現在の classic フォールバック先
+    /// （`Self::encode_tiled_by_class`。非公開メソッド）は `gemm_simdgroup_tiled` の
+    /// strided タイルカーネル限定であり、8 の倍数でない実効次元を扱える
+    /// のはホストスライス入力の `Self::dispatch_variant`
+    /// （`SimdgroupTiled` 以外の構成・`4139` 行）だけである。デバイス
+    /// バッファ入口（本関数）からこれを使うには readback と再 upload が
+    /// 必要になり、新カーネル経路なしに「実行した」ことにする契約は
+    /// 避けたため。本番経路 `Self::dispatch_auto` は `pad8` 済みの
+    /// 実効次元で `crate::tile::select_route_for_device` を判定するため
+    /// 非 8 倍数形状は本関数を呼ばず `Self::dispatch_variant
+    /// (SimdgroupTiled)` で処理する——よって本契約は `dispatch_auto`／
+    /// `crate::ops::MetalBackendOps::gemm` の挙動・bit 同一契約を一切
+    /// 変えない。詳細な経緯は `docs/backend-metal-splitk-decision.md`
+    /// §5「自動判定入口の事前条件契約（#1899）」を参照。
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_split_k_strided_prepared(
         &self,
@@ -4484,6 +4521,12 @@ fn validate_strided_dims_impl(
 ///   （float4 `reinterpret_cast` の 16 バイト境界。`setBuffer:offset:`
 ///   後の device 先頭ポインタと合わせて成立させる必要があるため offset も
 ///   検査する）
+///
+/// 本関数は [`MetalGemm::dispatch_split_k_strided_prepared`] 系の事前
+/// 条件でもある（イシュー #1899）: `should_split_k` の判定結果に関わらず
+/// 両分岐（split-K 経路・classic フォールバック）とも encode 前に本検査
+/// を通り、違反時は `SplitKRoute::Classic` へは分類せず型付き `Err` を
+/// 返す。
 fn strided_tiled_eligibility(
     m: usize,
     n: usize,
@@ -6069,6 +6112,20 @@ mod tests {
         let a = nn_layout(15, 32, 32);
         let b = nn_layout(32, 24, 24);
         let err = strided_tiled_eligibility(15, 24, 32, a, 0, b, 0).unwrap_err();
+        assert!(matches!(err, MetalError::StridedTiledIneligible { .. }));
+    }
+
+    #[test]
+    fn strided_tiled_eligibility_rejects_non_eight_divisible_k() {
+        // イシュー #1899: `Self::dispatch_split_k_strided_prepared` の
+        // 自動判定入口が fixture `(64, 64, 63)`（k が 8 の倍数でない）を
+        // 事前条件違反として型付き `Err` にする契約 (A) を純関数レベルで
+        // 固定する（`should_split_k` は `k < max(m, n)` で `None` を返す
+        // ため split-K 経路の可否とは無関係に、本関数が k の 8 整除を
+        // 独立に要求することを確認する）。
+        let a = nn_layout(64, 63, 63);
+        let b = nn_layout(63, 64, 64);
+        let err = strided_tiled_eligibility(64, 64, 63, a, 0, b, 0).unwrap_err();
         assert!(matches!(err, MetalError::StridedTiledIneligible { .. }));
     }
 

@@ -337,7 +337,8 @@ $ grep -rn "dispatch_split_k_strided_prepared" crates/backend-metal/src/ops.rs
     `should_split_k` が `None` を返す形状（`(512,512,512)`・`(64,64,63)`）で
     公開入口が `SplitKRoute::Classic { reason: NotEligible }` を返し
     （`NumericContractPendingApproval` では**ない**ことを直接 assert）、CPU 参照
-    実装と bit 完全一致することを確認する。
+    実装と bit 完全一致することを確認する（**#1899 で 2 分割済み**。下記
+    「追記（#1899・2026-09-16）」参照）。
 
 `required-features` を指定しない設計により、両テストは
 `cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`
@@ -402,6 +403,37 @@ metal-gemm-splitk-auto-entry-1513/`（`run_auto_entry.sh`。`auto_entry.log`・`
   §5.5 の既知 FAIL 8 形状は解消）
 - (d) load average: `uptime_before`／`uptime_after` とも 1 分平均 約 10〜30 の共有負荷下
   （parity・到達確認は負荷非依存）
+
+**追記（#1899・2026-09-16）**: 上記 (b) の FAIL（`(64,64,63)` が `Err(StridedTiled
+Ineligible)` を返すため、`Ok(Classic{NotEligible})` を期待する旧 fixture と食い違う
+事象）について、ユーザーが契約 (A)（事前条件違反は `should_split_k` の判定結果に
+関わらず型付き `Err` のまま維持し `SplitKRoute::Classic` へは分類しない）を承認した
+（2026-09-16。詳細は `docs/backend-metal-splitk-decision.md` §5「自動判定入口の
+事前条件契約（#1899）」参照）。これを受け `gemm_splitk_auto_entry_parity.rs` の
+fixture を 2 分割した:
+
+- `NON_ELIGIBLE_PRECONDITION_OK_SHAPES = [(512, 512, 512)]`（事前条件を満たす非
+  対象形状。既存 `auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_
+  shapes` が引き続き対象・`Ok(Classic{NotEligible})` を期待）
+- `PRECONDITION_VIOLATING_SHAPES = [(64, 64, 63)]`（事前条件違反形状。新設した
+  `auto_entry_rejects_precondition_violating_shapes_with_typed_err` が対象・
+  `Err(MetalError::StridedTiledIneligible)` を期待し、`c_buf` が `Err` 後も
+  全要素ゼロのまま変化しないことも直接確認する）
+
+`dispatch_split_k_strided_prepared`・`SplitKFallbackReason::NotEligible`・
+`strided_tiled_eligibility` の doc comment（`gemm.rs`）へ本契約を明文化した。
+tolerance・`BASELINES`・実行時トグル・`select_route_for_device`・本番既定経路は
+すべて不変（本番コード変更はテスト・doc comment のみ）。
+
+**M4 Max 再実測（#1899。本 PR 時点では未実施のまま Mac セッションへ申し送り）**:
+
+- negative 2 テスト（`auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_
+  shapes`・`auto_entry_rejects_precondition_violating_shapes_with_typed_err`）: 未実測
+- positive テスト（`auto_entry_dispatches_split_k_for_eligible_shapes_and_matches_
+  baseline`）: 未実測（非後退確認）
+- `run_auto_entry.sh` 完走（3 ログ生成・`DONE` 出力）: 未実測
+- `cpu_metal_parity`・`gemm_strided_parity`（15 件）: 未実測
+- `gemm_splitk_bit_match`（`dispatch_auto` bit 同一）: 未実測
 
 ## 6. AC-5: 本番経路の非後退確認
 
