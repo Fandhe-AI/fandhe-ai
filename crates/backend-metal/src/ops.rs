@@ -3140,10 +3140,10 @@ impl BackendOps for MetalBackendOps {
         crate::gather_scatter_model::checked_numel(x.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let n = x.numel();
-        if n >= 2 {
-            if let Err(e) = crate::unique_model::checked_padded_len(n) {
-                return Err(BackendError::Unsupported(e.to_string()));
-            }
+        if n >= 2
+            && let Err(e) = crate::unique_model::checked_padded_len(n)
+        {
+            return Err(BackendError::Unsupported(e.to_string()));
         }
 
         let x_owned = x.contiguous();

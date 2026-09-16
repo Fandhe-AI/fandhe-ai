@@ -152,7 +152,7 @@ fn measure_one_readout_trial(
     c_buf: &MetalBuffer,
     arm: ReadoutArm,
     keep_alive: &mut Vec<Vec<f32>>,
-    pretouched_dest: &mut Vec<f32>,
+    pretouched_dest: &mut [f32],
 ) -> ArmSample {
     match arm {
         ReadoutArm::LegacyToVec => {

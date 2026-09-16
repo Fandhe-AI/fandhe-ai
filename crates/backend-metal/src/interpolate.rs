@@ -138,9 +138,11 @@ impl MetalInterpolate {
                 &input_buf,
                 &out_buf,
                 &shapes_buf,
-                rank_u,
-                spatial_start_u,
-                numel_u,
+                NearestScalars {
+                    rank: rank_u,
+                    spatial_start: spatial_start_u,
+                    numel: numel_u,
+                },
             );
         })?;
 
@@ -208,6 +210,18 @@ impl MetalInterpolate {
     }
 }
 
+/// `interpolate_nearest_f32` カーネルへ `setBytes` で渡すスカラー引数
+/// （バッファ index 3〜5）。`encode_interpolate_dispatch` の引数を
+/// 8 個から 6 個へ束ねる（clippy `too_many_arguments` 是正。`#[allow]`
+/// で抑止しない方針 `.claude/rules/coding-rust.md`）。フィールド順は
+/// バッファ index 順（3: `rank`・4: `spatial_start`・5: `numel`）。
+#[derive(Clone, Copy)]
+struct NearestScalars {
+    rank: u32,
+    spatial_start: u32,
+    numel: u32,
+}
+
 /// `interpolate_nearest_f32` カーネルのエンコード（バッファ index
 /// 0〜2・スカラー index 3〜5・ディスパッチ）。`shaders/
 /// interpolate.metal::interpolate_nearest_f32` のバッファ宣言と
@@ -218,10 +232,13 @@ fn encode_interpolate_dispatch(
     input_buf: &MetalBuffer,
     out_buf: &MetalBuffer,
     shapes_buf: &MetalIndexBuffer,
-    rank: u32,
-    spatial_start: u32,
-    numel: u32,
+    scalars: NearestScalars,
 ) {
+    let NearestScalars {
+        rank,
+        spatial_start,
+        numel,
+    } = scalars;
     encoder.setComputePipelineState(pipeline);
 
     // SAFETY: FFI 境界 1/2。`setBuffer_offset_atIndex` は生存中の

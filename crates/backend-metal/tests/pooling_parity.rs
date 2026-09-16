@@ -27,6 +27,28 @@ use fandhe_ai_backend_metal::pooling_model::{
 };
 use fandhe_ai_backend_metal::{MetalContext, MetalPooling};
 
+/// max pooling parity のケース表 1 行（入力 shape・kernel・stride・
+/// padding・dilation の順）。clippy `type_complexity` 是正の `type`
+/// 定義（`#[allow]` で抑止しない方針 `.claude/rules/coding-rust.md`）。
+type MaxPoolCase<'a> = (
+    &'a [usize],
+    (usize, usize),
+    (usize, usize),
+    (usize, usize),
+    (usize, usize),
+);
+
+/// avg pooling parity のケース表 1 行（`MaxPoolCase` の末尾に
+/// `count_include_pad` を加えたもの）。
+type AvgPoolCase<'a> = (
+    &'a [usize],
+    (usize, usize),
+    (usize, usize),
+    (usize, usize),
+    (usize, usize),
+    bool,
+);
+
 fn gen_input(rng: &mut Xorshift64Star, numel: usize) -> Vec<f32> {
     (0..numel).map(|_| rng.next_f32() * 5.0).collect()
 }
@@ -41,13 +63,7 @@ fn max_pool2d_bit_exact_against_host_model() {
     let pooling = MetalPooling::new(&ctx).expect("MetalPooling 構築に失敗");
     let mut rng = Xorshift64Star::new(0x1730_0001);
 
-    let cases: &[(
-        &[usize],
-        (usize, usize),
-        (usize, usize),
-        (usize, usize),
-        (usize, usize),
-    )] = &[
+    let cases: &[MaxPoolCase] = &[
         (&[2, 3, 5, 5], (2, 2), (2, 2), (0, 0), (1, 1)),
         (&[2, 3, 5, 5], (3, 3), (1, 1), (1, 1), (1, 1)),
         (&[1, 2, 7, 4], (3, 2), (2, 1), (1, 0), (1, 1)),
@@ -150,14 +166,7 @@ fn avg_pool2d_bit_exact_against_host_model() {
     let pooling = MetalPooling::new(&ctx).expect("MetalPooling 構築に失敗");
     let mut rng = Xorshift64Star::new(0x1730_0002);
 
-    let cases: &[(
-        &[usize],
-        (usize, usize),
-        (usize, usize),
-        (usize, usize),
-        (usize, usize),
-        bool,
-    )] = &[
+    let cases: &[AvgPoolCase] = &[
         (&[2, 3, 5, 5], (3, 3), (2, 2), (1, 1), (1, 1), true),
         (&[2, 3, 5, 5], (3, 3), (2, 2), (1, 1), (1, 1), false),
         (&[1, 2, 7, 4], (3, 2), (1, 1), (1, 0), (1, 1), true),
