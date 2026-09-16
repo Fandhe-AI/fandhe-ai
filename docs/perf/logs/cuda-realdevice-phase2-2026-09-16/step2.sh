@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 export PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai
-cd ~/work/rust-ai-library-run
+cd ~/work/rust-ai-library-run || exit 1
 until grep -q "^done\." ~/work/cuda-phase2/make-test-ignored-cuda.log; do sleep 20; done
 O=$HOME/work/cuda-phase2; S=$O/summary.tsv; : > $S
 run() { local name=$1; shift; echo "== $name: $*" | tee "$O/$name.log"; "$@" >> "$O/$name.log" 2>&1; local rc=$?; local res; res=$(grep -E "^test result:" "$O/$name.log" | tail -1); printf "%s\t%s\t%s\n" "$name" "rc=$rc" "$res" | tee -a $S; }
 echo "### step2 start $(date -u +%FT%TZ)"; uptime; nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader
 # 2a conv runbook (2 runs + determinism)
 C=docs/perf/logs/conv-realdevice-1771
-rm -rf $C/cuda/ignored; bash $C/run_ignored_tests_cuda.sh; echo "conv run1 rc=$?"; rm -rf $C/cuda/ignored-run1; mv $C/cuda/ignored $C/cuda/ignored-run1
-bash $C/run_ignored_tests_cuda.sh; echo "conv run2 rc=$?"; rm -rf $C/cuda/ignored-run2; mv $C/cuda/ignored $C/cuda/ignored-run2
+rm -rf "${C}/cuda/ignored"; bash $C/run_ignored_tests_cuda.sh; echo "conv run1 rc=$?"; rm -rf "${C}/cuda/ignored-run1"; mv $C/cuda/ignored $C/cuda/ignored-run1
+bash $C/run_ignored_tests_cuda.sh; echo "conv run2 rc=$?"; rm -rf "${C}/cuda/ignored-run2"; mv $C/cuda/ignored $C/cuda/ignored-run2
 bash $C/check_determinism.sh --expect-logs im2col_col2im_parity,conv2d_backend_parity,conv1d_backend_parity,nn_conv_backend_parity $C/cuda/ignored-run1 $C/cuda/ignored-run2 > $C/cuda/check_determinism.log 2>&1; echo "determinism rc=$?"; cat $C/cuda/check_determinism.log
 # 2b batchnorm
 run backend-cuda_batch_norm_parity cargo test -p fandhe-ai-backend-cuda --release --all-features --test batch_norm_parity -- --ignored --nocapture
