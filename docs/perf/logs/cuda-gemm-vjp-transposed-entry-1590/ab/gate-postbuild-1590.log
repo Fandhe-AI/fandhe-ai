@@ -1,0 +1,8 @@
+post-build gate protocol: load1 < 1.0 && util.gpu == 0% for 3 consecutive samples (interval 30s, max 20)
+start: 2026-09-16T01:43:37Z
+sample=1 ts=01:43:37Z load1=1.43 util_gpu=0% compute_apps=2 gate_ok=0
+sample=2 ts=01:44:07Z load1=0.86 util_gpu=0% compute_apps=2 gate_ok=1
+sample=3 ts=01:44:37Z load1=0.52 util_gpu=0% compute_apps=2 gate_ok=1
+sample=4 ts=01:45:07Z load1=0.37 util_gpu=0% compute_apps=2 gate_ok=1
+post-build gate passed at 2026-09-16T01:45:07Z
+ 10:45:07 up 19 days, 22:12,  9 users,  load average: 0.37, 0.75, 0.55

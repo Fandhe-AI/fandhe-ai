@@ -1,0 +1,12 @@
+gate protocol: load1 < 1.0 && util.gpu == 0% for 3 consecutive samples (interval 30s, max 20)
+start: 2026-09-16T01:41:53Z
+sample=1 ts=01:41:53Z load1=1.45 util_gpu=0% compute_apps=2 gate_ok=0
+sample=2 ts=01:42:23Z load1=0.94 util_gpu=0% compute_apps=2 gate_ok=1
+sample=3 ts=01:42:53Z load1=0.78 util_gpu=0% compute_apps=2 gate_ok=1
+sample=4 ts=01:43:23Z load1=0.47 util_gpu=0% compute_apps=2 gate_ok=1
+gate passed at 2026-09-16T01:43:23Z
+ 10:43:23 up 19 days, 22:10,  9 users,  load average: 0.47, 0.81, 0.54
+run_ab_vjp_transposed_cuda exit=0
+ 10:45:22 up 19 days, 22:12,  9 users,  load average: 0.51, 0.76, 0.56
+end: 2026-09-16T01:45:22Z
+done.

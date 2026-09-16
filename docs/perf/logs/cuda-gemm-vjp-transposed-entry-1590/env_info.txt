@@ -1,32 +1,58 @@
 # イシュー #1590 実測記入欄（GB10 実機セッションが埋める）
 #
-# 本 PR 時点では未実測（本エージェント実行環境に DGX Spark GB10 実機への
-# 到達手段がないため）。値を捏造しない。README.md「GB10 実機での実行
-# 手順」に従って実測したセッションが下記を埋めること。
+# 2026-09-16 に DGX Spark GB10 実機で実測済み（値はすべて本ディレクトリ配下の
+# ログから転記。推定値は含まない）。内部ホスト名・ユーザー名・実パスはマスク済み。
+
+hostname: masked
+measured_at: 2026-09-16 (UTC 01:41〜01:45。gate-1590.log／ab/uptime-1590.log)
+gpu: NVIDIA GB10 (sm_121)
+driver: 580.173.02
+cuda: 13.0 (NVRTC V13.0.88)
+rustc: 1.97.0
+os: Linux 6.17.0-1031-nvidia
 
 before_sha: 82058501
 after_sha: ab0b77d0
-head_sha:
+head_sha: 3e43bbd0
+# before／after ツリーの同定根拠: `git archive 82058501`／`git archive ab0b77d0`
+# で展開したツリー（実行担当者の申告）＋ ab/tree-{before,after}-1590.txt（両者とも
+# fandhe-ai v0.6.0 の path 依存）。展開ツリーは `.git` を持たないため `.rev-stamp`
+# 等による独立検証記録は本ディレクトリに含まれていない（要確認事項として
+# docs/perf/cuda-gemm-vjp-transposed-entry.md §3.3 に明記）。
+# head_sha 3e43bbd0 は crates/・scripts/ が origin/main 565300e4 と同一。
+before_binary_sha256: 30b1634c304cd25507415287c182caa4dc774561f4ef30d9eed84203ce1bd2d3
+after_binary_sha256: 0e28f27bc947e8d555317c68744c065dec3d9681ebe501e7185c011453542ad7
 
-# R1（#[ignore] 群非後退。README「対象テスト」節）
-r1_result:
+# R1（#[ignore] 群非後退。README「対象テスト」節。HEAD ツリー 3e43bbd0 で実行）
+r1_result: green（20/20 pass・0 fail。内訳: gemm_transposed_parity 5/5・gemm_transposed_perf 2/2（5 起動すべて 2 passed）・gemm_fp32_strict_into_parity 4/4・transpose_parity 4/4・repack_count_tests 3/3・device_param_store_backend_parity CUDA 2/2）
 
-# 正式補助 A/B（gemm_transposed_perf・5 プロセス起動・after ツリー）
-aux_ab_5launch_nt_m64_k784_n256:
-aux_ab_5launch_nt_m64_k256_n10:
-aux_ab_5launch_nt_m1024_k1024_n1024:
-aux_ab_5launch_nt_m2048_k2048_n2048:
-aux_ab_5launch_tn_m64_k784_n256:
-aux_ab_5launch_tn_m64_k256_n10:
-aux_ab_5launch_tn_m1024_k1024_n1024:
-aux_ab_5launch_tn_m2048_k2048_n2048:
+# 正式補助 A/B（gemm_transposed_perf・5 プロセス起動）
+# 要確認: 事前登録規則（README 手順 2）は AUX_TREE=after ツリー（ab0b77d0）限定
+# だが、aux/gemm_transposed_perf_run{1..5}.log の見出しは HEAD ツリー
+# （tree=/home/<user>/work/rust-ai-library-run = 3e43bbd0）での実行を示す。
+# after ツリー限定の隔離条件を満たしていないため、下記値は「HEAD ツリーでの
+# 5 起動中央値」として記録し、§3.2 診断系列を置き換える正式値とは扱わない。
+aux_ab_tree: HEAD 3e43bbd0（after ツリー ab0b77d0 ではない。要確認）
+aux_ab_5launch_nt_m64_k784_n256: 5.386x (before 0.000430 s / after 0.000079 s, n_runs=5)
+aux_ab_5launch_nt_m64_k256_n10: 1.067x (before 0.000038 s / after 0.000036 s, n_runs=5)
+aux_ab_5launch_nt_m1024_k1024_n1024: 5.443x (before 0.002352 s / after 0.000431 s, n_runs=5)
+aux_ab_5launch_nt_m2048_k2048_n2048: 5.494x (before 0.012445 s / after 0.002241 s, n_runs=5)
+aux_ab_5launch_tn_m64_k784_n256: 2.223x (before 0.000163 s / after 0.000072 s, n_runs=5)
+aux_ab_5launch_tn_m64_k256_n10: 2.154x (before 0.000050 s / after 0.000023 s, n_runs=5)
+aux_ab_5launch_tn_m1024_k1024_n1024: 5.295x (before 0.002375 s / after 0.000445 s, n_runs=5)
+aux_ab_5launch_tn_m2048_k2048_n2048: 2.757x (before 0.021117 s / after 0.007755 s, n_runs=5)
+# 集計は aux/aggregate_aux.md（`aggregate_aux_ab.py aux/*.log` の出力）。オーケストレータが
+# 引数なしで呼んだ 1 回目は usage エラー（rc=2）で終了しており、本集計とは別。
 
 # Tier 1（train size=64。fresh／reuse 両方が判定対象）
-tier1_load_gate_mode:
-tier1_ratio_fresh_step_total:
-tier1_ratio_reuse_step_total:
-checksum_exact_match_fresh:
-checksum_exact_match_reuse:
+tier1_load_gate_mode: default（gated）。事前ゲート gate-1590.log は sample 2〜4 で通過（load1 0.94→0.78→0.47・util.gpu 0 %）。ビルド後再ゲート ab/gate-postbuild-1590.log も sample 2〜4 で通過（load1 0.86→0.52→0.37・util.gpu 0 %）。両ゲートとも全サンプルで compute_apps=2 を観測（ゲート条件は load1／util.gpu のみのため通過扱い。事実として記録）
+tier1_rounds: 5（run 単位で before／after の起動順反転。ab/uptime-1590.log の load1 0.37〜0.51）
+tier1_ratio_fresh_step_total: 0.4892 (before 1.079 ms / after 528.1 us。run 内比 0.4768, 0.5034, 0.5010, 0.4926, 0.4816)
+tier1_ratio_reuse_step_total: 0.7365 (before 607.8 us / after 447.6 us。run 内比 0.7403, 0.7300, 0.7208, 0.7354, 0.7321)
+checksum_exact_match_fresh: yes（全 run・両腕 0.080541）
+checksum_exact_match_reuse: yes（全 run・両腕 0.080541）
+phases_diag_fresh_backward: before 737.5 us / after 196.1 us (0.266。単発・非判定)
+phases_diag_reuse_backward: before 361.5 us / after 197.9 us (0.547。単発・非判定)
 
 # 総合判定
-ab_verdict:
+ab_verdict: ADOPT（Tier 1 fresh 0.4892・reuse 0.7365 とも ≤1.00・checksum 完全一致・専有ゲート通過・R1 green）
