@@ -2437,15 +2437,18 @@ impl DeviceParamStore {
     /// （イシュー #1479・`docs/device-resident-
     /// update-design.md` 追補）。
     ///
-    /// **由来**: `Op::LinearResident` の weight 勾配は CPU（#1212）と
-    /// Metal（#1555）の resident 経路（`gemm_fp32_strict_into` の
-    /// デフォルト実装が `Unsupported` のため CUDA は resident 経路に
-    /// 到達しない）では `Gradients` へ寄与を残さず、`GradStaging`
-    /// へ直接書き込まれる（`docs/perf/train-resident-grad-device-update.md`
-    /// §4）。したがって resident 経由の重み勾配は、本イシュー以前は
-    /// ホストから一切観測できなかった（PR #1390 codex-review P2「対象
-    /// 外」・`crates/facade/tests/cuda_graph_step_common/mod.rs` doc
-    /// 参照）。
+    /// **由来**: `Op::LinearResident` の weight 勾配は CPU（#1212）・
+    /// Metal（#1555）・CUDA（#1559。NT/TN 形状限定）の resident 経路
+    /// では `Gradients` へ寄与を残さず、`GradStaging` へ直接書き込まれる
+    /// （`docs/perf/train-resident-grad-device-update.md` §4）。した
+    /// がって resident 経由の重み勾配は、#1479 以前はホストから一切
+    /// 観測できなかった（PR #1390 codex-review P2「対象外」・
+    /// `crates/facade/tests/cuda_graph_step_common/mod.rs` doc 参照）。
+    /// **bias 勾配は Metal（#1566 以降）のみ同様に resident 経由で
+    /// `GradStaging` へ直接書き込まれる**（CPU・CUDA は bias 縮約が
+    /// `gemm_fp32_strict_into_with_bias_reduce_tracked` の trait 既定
+    /// 実装〈bias を無視〉のまま残るため引き続き `Gradients` 経由。
+    /// イシュー #1898 参照）。
     ///
     /// **呼び出し窓**: `tape.backward_device_param_store(...)`（backward
     /// 実行）の後、`step()`（`pending` を消費）の前に限る。`step()` 消費
@@ -2460,14 +2463,21 @@ impl DeviceParamStore {
     ///
     /// **戻り値**: `pending` の登録順（`sync_to_host` と同じ並び）で
     /// slot ごとに `Some(Tensor<f32>)`（今回の backward で resident 経由
-    /// により新鮮に充填された slot）または `None`（bias 等、resident
-    /// 未充填の slot。呼び出し元は `grads.get(...)` へフォールバック
-    /// する。[`Self::param_grads_to_host`] がその統合版）。
+    /// により新鮮に充填された slot）または `None`（resident 未充填の
+    /// slot。CPU・CUDA の bias slot は常にこちら。Metal〈#1566 以降〉の
+    /// bias slot は resident 経由のため `Some`。呼び出し元は
+    /// `grads.get(...)` へフォールバックする。[`Self::
+    /// param_grads_to_host`] がその統合版）。
     ///
     /// **バックエンド差異（AC-R2）**: `resident_grad_capability` が
     /// `Some(false)`（`gemm_fp32_strict_into` が `Unsupported` と確定
-    /// 済み。CUDA／Metal の現状）の場合は panic せず
-    /// [`BackendError::Unsupported`] を返す。`grad_staging.is_some()` を
+    /// 済み。CPU・CUDA〈#1559〉・Metal〈#1555〉いずれも通常は到達せず、
+    /// `gemm_fp32_strict_into` 未実装のモック等が対象）の場合は panic
+    /// せず [`BackendError::Unsupported`] を返す。この capability 判定
+    /// は weight 側のみを見ており、bias 縮約が resident 経由か
+    /// （Metal〈#1566 以降〉のみ）ホスト経由か（CPU・CUDA）は独立の
+    /// 契約である（戻り値の bias slot は前者のみ `Some`）。
+    /// `grad_staging.is_some()` を
     /// 判定に使わない理由: CUDA Graph capture 経路は `step()` 内で
     /// `any_resident == false` のまま `grad_staging` を確保することが
     /// ある（`step()` の graph capture 分岐参照）ため、staging の有無
@@ -2508,15 +2518,18 @@ impl DeviceParamStore {
     /// `pending` の登録順（`sync_to_host` と同じ並び）で全パラメータ
     /// 勾配を返す。
     ///
-    /// **strict 版と分ける理由**: CUDA／Metal は `gemm_fp32_strict_into`
-    /// 未実装のため resident 経由の重み勾配は常に `Gradients` 側（通常の
-    /// `ResidentLeaf` ではなく、backward が `Op::LinearResident` の VJP
-    /// から生成した寄与）に載る。strict 版（GradStaging 限定）を CUDA
-    /// で呼ぶと必ず `Unsupported` になり、3 バックエンド横断で「各
-    /// step の重み勾配を読む」ことができない。本メソッドは内部経路
-    /// （`resident_filled_slots`／`download_staging_slots`）を strict 版
-    /// と共有しつつ、未充填 slot を `grads` からのフォールバックで
-    /// 埋めることで 3 バックエンド共通の読み出し窓を提供する。
+    /// **strict 版と分ける理由**: bias 縮約は CPU・CUDA では常に
+    /// `Gradients` 側（通常の `ResidentLeaf` ではなく、backward が
+    /// `Op::LinearResident` の VJP から生成した寄与）に載り、strict 版
+    /// （`GradStaging` 限定）は bias slot を `None` のまま返す
+    /// （Metal〈#1566 以降〉のみ bias も resident 経由で `Some`）。
+    /// また resident 対応可否がバックエンド構成によって非対応
+    /// （`gemm_fp32_strict_into` 未実装）でありうるため、strict 版
+    /// 単独では「各 step の全パラメータ勾配を読む」ことがバックエンド
+    /// 横断で保証できない。本メソッドは内部経路（`resident_filled_
+    /// slots`／`download_staging_slots`）を strict 版と共有しつつ、
+    /// 未充填 slot を `grads` からのフォールバックで埋めることで
+    /// 3 バックエンド共通の読み出し窓を提供する。
     ///
     /// **契約**: 呼び出し窓・非破壊性は strict 版と同じ。`grads.get`
     /// が `Err`（クロステープ）を返した slot は [`BackendError::

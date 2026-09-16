@@ -192,6 +192,7 @@ make lint
 | `make test-ignored` | 実機（Metal / CUDA）専用の `#[ignore]` 分離テスト |
 | `make test-ignored-cuda` | CUDA 実機専用: `backend-cuda` の `#[ignore]` 分離テストのみ実行（TASK-1.7e・#36） |
 | `make test-ignored-metal` | Metal 実機専用: `backend-metal` の `#[ignore]` 分離テストのみ実行・release（TASK-1.8e・#42） |
+| `make test-ignored-metal-facade` | Metal 実機専用: facade（`fandhe-ai`）の `DeviceParamStore` 契約 `#[ignore]` テストのみ実行・release（イシュー #1898） |
 | `make deny` | `cargo deny --locked check advisories bans licenses sources`（依存の脆弱性・重複・ライセンス・取得元監査〈#353〉。`cargo-deny` 未導入なら自動導入） |
 | `make deps-forbidden` | 依存禁止リスト（burn 系等）の混入検査 |
 | `make ci` | CI（`.github/workflows/ci.yml`）と同一チェックの一括実行 |
@@ -235,6 +236,14 @@ make test-ignored-metal   # backend-metal に限定した #[ignore] テスト実
 # 相当コマンド:
 cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 ```
+
+`make test-ignored-metal` は `backend-metal` クレート単体限定です。`crates/facade/tests/
+device_param_store_backend_parity.rs`・`device_param_store_metal_mixed_shape_grad.rs`
+（facade クレート `fandhe-ai` 配下の `DeviceParamStore` 契約テスト）は対象外のため、
+別途 `make test-ignored-metal-facade` を使ってください（同一テストバイナリに CUDA 実機
+必須の `cuda_*` テストが混在するため `-p fandhe-ai --tests -- --ignored` は Mac 上で
+必ず一部 FAIL します。イシュー #1898）。`make test-ignored`（workspace 全体）はこの
+facade バイナリも含みます。
 
 **実測状況**（Metal 実機検証・ベンチ計測トラッキングツリー、親 #379。2026-08-10 完了）: 上記
 `#[ignore]` テスト 52 件は Apple Silicon 実機（M4 Max・macOS 26.6）で green を実測確認済み（#380）。

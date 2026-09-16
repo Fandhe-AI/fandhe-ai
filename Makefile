@@ -171,6 +171,22 @@ else
 	@echo "skip: Cargo.toml 未追加のため test-ignored-metal をスキップ"
 endif
 
+# イシュー #1898: 上記 test-ignored-metal は `-p fandhe-ai-backend-metal`（クレート
+# 単体）限定であり、`crates/facade/tests/device_param_store_backend_parity.rs`／
+# `device_param_store_metal_mixed_shape_grad.rs`（facade クレート `fandhe-ai` 配下）の
+# Metal 実機 #[ignore] 契約テストは対象外（`-p fandhe-ai --tests -- --ignored` は同一
+# バイナリに CUDA 実機必須の `cuda_*` テストが混在し Mac 上で必ず FAIL するため未収載。
+# `make test-ignored` は workspace 全体を対象とするため facade バイナリを含む）。
+# 名前フィルタで facade 側の DeviceParamStore 契約テストのみを実行する専用ターゲット。
+.PHONY: test-ignored-metal-facade
+test-ignored-metal-facade: ## Metal 実機専用: facade の DeviceParamStore 契約 #[ignore] テストを実行する（release）
+ifdef HAS_CARGO
+	cargo test -p fandhe-ai --release --test device_param_store_backend_parity -- --ignored --nocapture --test-threads=1 on_metal
+	cargo test -p fandhe-ai --release --test device_param_store_metal_mixed_shape_grad -- --ignored --nocapture --test-threads=1
+else
+	@echo "skip: Cargo.toml 未追加のため test-ignored-metal-facade をスキップ"
+endif
+
 # macOS runner 未登録の代替として、aarch64-apple-darwin へのクロスターゲットビルドで
 # Metal 有効経路（cfg(target_os = "macos")）のコンパイルを検証する（TASK-2.1b・イシュー #50。
 # 全 9 クレートは lib のみでリンク不要なため、macOS SDK が無い環境でもコンパイル検証が成立する。

@@ -19,6 +19,15 @@
 //! 対応形状（後段 NT/TN）と非対応形状（前段 NN 縮退）が同一 backward に
 //! 混在するケースに絞った回帰テストである点が異なる。
 //!
+//! **イシュー #1898 追従**: その後イシュー #1566（PR #1659。Metal
+//! `gemm_fp32_strict_into_with_bias_reduce_tracked` オーバーライドの
+//! 追加）により、前段（NN フォールバック）・後段（NT/TN）のいずれの
+//! 経路でも bias 縮約が resident staging へ書かれるようになった。本
+//! ファイルの bias slot 期待（旧: `None`）はこの変更に追従できておらず
+//! `device_param_store_backend_parity.rs::grad_readout_contract_on_metal`
+//! と同じ原因（`98c3c67e`）で古いままだったため、全 4 slot（weight・
+//! bias とも）が `Some` である期待へ更新する。
+//!
 //! **実機ゲーティング**: `cfg(target_os = "macos")` は非 macOS の CI での
 //! コンパイル対象除外にしかならず実機の有無までは保証しないため
 //! （`.claude/rules/ci.md`「実機依存」節）、`#[ignore]` で通常 CI から
@@ -114,15 +123,47 @@ fn param_grads_to_host_succeeds_when_backward_mixes_supported_and_fallback_shape
     // AC: `resident_grads_to_host` が `Unsupported`（旧実装のバグ挙動）
     // ではなく `Ok` を返し、両層の weight slot（build_model の層順で
     // index 0・2）が `Some`（resident 経由で充填済み）であること。
-    // bias slot（index 1・3）は resident 経由で充填されないため `None`。
+    //
+    // **イシュー #1898 で更新**: bias slot（index 1・3）も `Some`
+    // （前段 NN 縮退・後段 NT/TN のいずれの経路でも
+    // `gemm_fp32_strict_into_with_bias_reduce_tracked` が bias 縮約を
+    // resident staging へ書く。イシュー #1566・PR #1659。
+    // `crates/backend-metal/src/ops.rs::MetalBackendOps::gemm_fp32_
+    // strict_into_with_bias_reduce_tracked` doc「NN/TT・分類不能形状」
+    // 分岐参照: フォールバック経路も `bias` が `Some` なら
+    // `upload_into` で書き込み `Ok(true)` を返す）。
     let resident = tape.resident_grads_to_host(&store, &grads).unwrap();
     assert_eq!(resident.len(), 4, "2 層 Linear で計 4 パラメータのはず");
     for (i, slot) in resident.iter().enumerate() {
-        let is_weight = i % 2 == 0;
-        assert_eq!(
+        assert!(
             slot.is_some(),
-            is_weight,
-            "param {i} の resident 充填状態が期待と異なる（is_weight={is_weight}）: {slot:?}"
+            "param {i} は weight・bias とも resident 経由で充填されるはず: {slot:?}"
+        );
+    }
+
+    // 追加検証（イシュー #1898）: strict 版の bias slot が統合版
+    // `param_grads_to_host` の同 index と bit 完全一致すること（同じ
+    // staging バッファからの download のはず）。
+    let unified_preview = tape.param_grads_to_host(&store, &grads).unwrap();
+    for (i, slot) in resident.iter().enumerate() {
+        let strict_tensor = slot.as_ref().expect("上の assert で Some を確認済み");
+        let strict_bits: Vec<u32> = strict_tensor
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        let unified_bits: Vec<u32> = unified_preview[i]
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(
+            strict_bits, unified_bits,
+            "param {i}: strict 版と統合版の resident 充填値が bit 一致しない"
         );
     }
 

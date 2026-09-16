@@ -330,13 +330,17 @@ impl Tape {
 
     /// [`DeviceParamStore::resident_grads_to_host`] への委譲入口
     /// （イシュー #1479）。resident 経路（`GradStaging`）で新鮮に充填
-    /// 済みの重み勾配のみをホストへ読み出す（bias 等の未充填 slot は
-    /// `None`）。resident 未対応バックエンド（CUDA。`gemm_fp32_
-    /// strict_into` 未実装。CPU・Metal はイシュー #1555 で対応済み）では
-    /// [`BackendError::Unsupported`] を返す（panic なし）。全パラメータの
-    /// 勾配をバックエンド横断で読みたい場合は
-    /// [`Self::param_grads_to_host`] を使う。上記 `sync_device_param_
-    /// store_to_host` と同じ理由の薄い委譲。
+    /// 済みの勾配のみをホストへ読み出す。weight slot は CPU・CUDA
+    /// 〈#1559〉・Metal〈#1555〉のいずれも resident 経由で `Some`。bias
+    /// slot は Metal〈#1566 以降〉のみ resident 経由で `Some` を返し、
+    /// CPU・CUDA は引き続き `None`（bias 縮約はホスト経由の
+    /// `Gradients` へ回る。イシュー #1898・`crates/backend-metal/src/
+    /// ops.rs::MetalBackendOps::gemm_fp32_strict_into_with_bias_reduce_
+    /// tracked` doc 参照）。resident 未対応バックエンド（`gemm_fp32_
+    /// strict_into` 未実装のモック等）では [`BackendError::Unsupported`]
+    /// を返す（panic なし）。全パラメータの勾配をバックエンド横断で
+    /// 読みたい場合は [`Self::param_grads_to_host`] を使う。上記
+    /// `sync_device_param_store_to_host` と同じ理由の薄い委譲。
     pub fn resident_grads_to_host(
         &self,
         store: &DeviceParamStore,

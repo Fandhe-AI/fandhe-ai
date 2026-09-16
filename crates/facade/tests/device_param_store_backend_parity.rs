@@ -179,22 +179,51 @@ fn device_resident_matches_host_sgd_on_cuda_across_100_steps() {
     assert_params_match(&device_params, &host_params, "CUDA vs host (100 steps)");
 }
 
-/// イシュー #1479 の AC-R2（バックエンド差異）を実機で確認する共通
-/// ヘルパ: `device` で 1 step だけ forward・backward し、`resident_
-/// capable`（`BackendOps::gemm_fp32_strict_into` を実装しているか）に
-/// 応じて strict 版（`resident_grads_to_host`）の期待挙動を切り替える。
+/// strict 版 `resident_grads_to_host` が bias slot に何を返すかを
+/// バックエンド別に表す（イシュー #1898）。
 ///
-/// - `resident_capable == false`（現時点でこの分岐に該当するバックエンド
-///   はない。CPU・Metal〈#1555〉・CUDA〈#1559〉のいずれも `gemm_fp32_
-///   strict_into` を実装済みのため resident 経路に到達する）:
-///   `BackendError::Unsupported` を返すこと（panic なし）を検証する。
-/// - `resident_capable == true`（CPU・Metal〈イシュー #1555〉・CUDA
-///   〈イシュー #1559〉）: 各 `Linear` 層の weight slot（`build_model` の
-///   層順・層内 weight → bias の順序契約。`Sequential::
-///   init_device_param_store` doc 参照）が `Some`、bias slot は resident
-///   経由で充填されない（`gemm_fp32_strict_into` は d_weight のみを対象
-///   とし bias 勾配は reduction 経由のまま）ため `None` であることを
-///   検証する。
+/// `gemm_fp32_strict_into_with_bias_reduce_tracked`（`BackendOps` の
+/// trait 既定実装は bias を無視し常に `Ok(false)` を返す）を Metal
+/// のみがオーバーライドし、NT/TN（encode-only カーネル）・NN/TT
+/// フォールバック（ホスト縮約 → `upload_into`）のいずれの経路でも
+/// bias 縮約を resident staging へ書く（イシュー #1566・PR #1659。
+/// `crates/backend-metal/src/ops.rs::MetalBackendOps::gemm_fp32_
+/// strict_into_with_bias_reduce_tracked` doc 参照）。CPU・CUDA は
+/// この trait メソッドをオーバーライドしないため、bias 縮約は常に
+/// 通常の `Gradients` 経由（`DeviceParamStore::fill_resident_weight_
+/// grad` の `!outcome.bias_filled` 分岐）に留まる。
+#[derive(Clone, Copy)]
+enum StrictBiasExpectation {
+    /// CPU・CUDA: bias slot は resident 経由で充填されないため `None`。
+    HostRouted,
+    /// Metal（#1566 以降）: bias slot も resident 経由で充填されるため
+    /// `Some`。`grad_readout_contract_on_metal`
+    /// （`#[cfg(target_os = "macos")]`）のみが構築するため、非 macOS
+    /// ビルドでは未構築（`dead_code` lint 抑制。他バックエンド用の
+    /// `#[cfg]` ゲート付きテストと同型。`device_param_store_grad_
+    /// readout.rs::assert_var_type_is_reexported` 参照）。
+    #[allow(dead_code)]
+    Resident,
+}
+
+/// イシュー #1479 の AC-R2（バックエンド差異）を実機で確認する共通
+/// ヘルパ: `device` で 1 step だけ forward・backward し、
+/// `bias_expectation`（[`StrictBiasExpectation`]）に応じて strict 版
+/// （`resident_grads_to_host`）の bias slot 期待挙動を切り替える。
+///
+/// weight slot（`build_model` の層順・層内 weight → bias の順序契約。
+/// `Sequential::init_device_param_store` doc 参照）は CPU・Metal
+/// 〈#1555〉・CUDA〈#1559〉のいずれも `gemm_fp32_strict_into` を実装済み
+/// のため resident 経路に到達し常に `Some`。bias slot のみバックエンド
+/// によって異なる（`StrictBiasExpectation` doc 参照）。
+///
+/// **`resident_grad_capability` が `Some(false)`（`Unsupported`）となる
+/// 分岐**: 本ヘルパの呼び出し元（CPU・Metal・CUDA）はいずれも resident
+/// 経路に到達するためこの分岐は再現しない。同分岐の回帰カバレッジは
+/// `crates/autodiff/src/optim/device_store.rs` の単体テスト
+/// `resident_grads_to_host_is_unsupported_on_backend_without_gemm_into`
+/// （`MockDeviceOps::new()`。`gemm_fp32_strict_into` 未実装のモック）に
+/// 残る。
 ///
 /// unified 版（`param_grads_to_host`）はいずれの場合も全パラメータの
 /// 勾配を `Ok` で返し、host-only 参照実装（`Sgd::step` が使うのと同じ
@@ -203,10 +232,9 @@ fn device_resident_matches_host_sgd_on_cuda_across_100_steps() {
 ///
 /// `docs/perf/train-resident-grad-device-update.md` §4「追補: #1479」・
 /// イシュー本文の受入基準 AC-R4 に対応。本エージェント実行環境には
-/// CUDA 実機がないため、CUDA（イシュー #1559 の `resident_capable = true`
-/// への移行後）の実機再実測は未実施のまま引き継ぐ（未実測は下記個別
-/// テストの doc に明記）。
-fn assert_grad_readout_contract(device: Device, resident_capable: bool) {
+/// CUDA・Metal 実機がないため、実機再実測は未実施のまま引き継ぐ
+/// （未実測は下記個別テストの doc に明記）。
+fn assert_grad_readout_contract(device: Device, bias_expectation: StrictBiasExpectation) {
     let model = build_model();
     let (x_data, y_data) = gen_regression_data(SEED_DATA);
 
@@ -222,40 +250,63 @@ fn assert_grad_readout_contract(device: Device, resident_capable: bool) {
     let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
     let grads = tape.backward_device_param_store(&loss, &store).unwrap();
 
-    if resident_capable {
-        // strict 版: `build_model`（2 層 Linear。層順に weight → bias）の
-        // weight slot（index 0・2）は resident 経由で新鮮に充填され
-        // `Some`、bias slot（index 1・3）は resident 経由で充填されない
-        // ため `None`（`docs/device-resident-update-design.md` 追補
-        // 「gemm_fp32_strict_into は d_weight のみが対象」）。
-        let strict = tape.resident_grads_to_host(&store, &grads).unwrap();
+    // strict 版: `build_model`（2 層 Linear。層順に weight → bias）の
+    // weight slot（index 0・2）は resident 経由で新鮮に充填され常に
+    // `Some`。bias slot（index 1・3）は `bias_expectation` に応じて
+    // `Some`（Metal）／`None`（CPU・CUDA）となる
+    // （`StrictBiasExpectation` doc 参照）。
+    let strict = tape.resident_grads_to_host(&store, &grads).unwrap();
+    assert_eq!(
+        strict.len(),
+        4,
+        "build_model は 2 層 Linear（各 weight・bias）で計 4 パラメータ"
+    );
+    for (i, slot) in strict.iter().enumerate() {
+        let is_weight = i % 2 == 0;
+        let expected_some =
+            is_weight || matches!(bias_expectation, StrictBiasExpectation::Resident);
         assert_eq!(
-            strict.len(),
-            4,
-            "build_model は 2 層 Linear（各 weight・bias）で計 4 パラメータ"
-        );
-        for (i, slot) in strict.iter().enumerate() {
-            let is_weight = i % 2 == 0;
-            assert_eq!(
-                slot.is_some(),
-                is_weight,
-                "param {i}（{}）の resident 充填状態が期待と異なる: {slot:?}",
-                if is_weight { "weight" } else { "bias" }
-            );
-        }
-    } else {
-        // strict 版: CUDA は `gemm_fp32_strict_into` 未実装のため
-        // resident 経路に到達せず、必ず `Unsupported`（panic なし）。
-        let strict_err = tape.resident_grads_to_host(&store, &grads).unwrap_err();
-        assert!(
-            matches!(strict_err, fandhe_ai::BackendError::Unsupported(_)),
-            "resident 未対応バックエンドでは Unsupported を返すはず（panic なし）: {strict_err:?}"
+            slot.is_some(),
+            expected_some,
+            "param {i}（{}）の resident 充填状態が期待と異なる: {slot:?}",
+            if is_weight { "weight" } else { "bias" }
         );
     }
 
-    // unified 版: 全パラメータの勾配を `Ok` で返す（`grads.get(...)`
-    // フォールバックのみ。CUDA は resident 未充填のため全 slot
-    // がこの経路を通る）。
+    // strict 版の bias slot が `Some` の場合（Metal）、統合版
+    // `param_grads_to_host` の同 index と bit 完全一致することを確認
+    // する（同じ staging バッファからの download のはず。イシュー
+    // #1898）。ホスト参照実装との比較は下記のとおり統一複合判定の
+    // ままで、ここでは strict 版と統合版の内部整合のみを bit 単位で
+    // 検証する。
+    if matches!(bias_expectation, StrictBiasExpectation::Resident) {
+        let unified_preview = tape.param_grads_to_host(&store, &grads).unwrap();
+        for (i, slot) in strict.iter().enumerate() {
+            if let Some(strict_tensor) = slot {
+                let strict_bits: Vec<u32> = strict_tensor
+                    .contiguous()
+                    .as_slice()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect();
+                let unified_bits: Vec<u32> = unified_preview[i]
+                    .contiguous()
+                    .as_slice()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect();
+                assert_eq!(
+                    strict_bits, unified_bits,
+                    "param {i}: strict 版と統合版の resident 充填値が bit 一致しない"
+                );
+            }
+        }
+    }
+
+    // unified 版: 全パラメータの勾配を `Ok` で返す（resident 未充填の
+    // slot は `grads.get(...)` フォールバックへ回る）。
     let device_grads_host = tape.param_grads_to_host(&store, &grads).unwrap();
 
     // host-only 参照実装（同一初期化・同一データの 1 step 目）。
@@ -304,14 +355,29 @@ fn assert_grad_readout_contract(device: Device, resident_capable: bool) {
 /// Metal 実機での AC-R2 契約検証（`assert_grad_readout_contract` 参照）。
 ///
 /// イシュー #1479 実装セッションでは本エージェント実行環境に Metal 実機が
-/// なかったため未実測のまま引き継がれていたが、**イシュー #1555（Metal
-/// `gemm_fp32_strict_into` の実装）で Metal は resident_capable
-/// （`resident_capable = true`）側へ移った**うえで M4 Max 実機実測 pass
-/// 済み: strict 版 `resident_grads_to_host` が weight slot（index 0・2）
-/// を `Some`・bias slot（index 1・3）を `None` で返すこと（`gemm_fp32_
-/// strict_into` は NT/TN 限定・d_weight のみ対象）・統合版
-/// `param_grads_to_host` が返す全パラメータ勾配がホスト参照実装と統一
-/// 複合判定内で一致することの両方を確認した。
+/// なかったため未実測のまま引き継がれていたが、イシュー #1555（Metal
+/// `gemm_fp32_strict_into` の実装）で Metal は resident 経路（weight
+/// slot は resident 経由で `Some`）へ移った時点で M4 Max 実機実測 pass
+/// 済みだった。
+///
+/// **イシュー #1898 で是正（本テスト自体の期待を更新）**: その後イシュー
+/// #1566（PR #1659。Metal `gemm_fp32_strict_into_with_bias_reduce_
+/// tracked` オーバーライドの追加）により、Metal は bias slot（index
+/// 1・3）も resident 経由で `Some` を返すようになった。本テストは
+/// 従来「Metal も CPU・CUDA と同じく bias slot は `None`」という古い
+/// 期待のまま据え置かれていたため、#1566 マージ後の main
+/// （`e851e91a..565300e4`）で「param 1（bias）の resident 充填状態が
+/// 期待と異なる」で FAIL していた（原因コミット `98c3c67e`）。
+/// `assert_grad_readout_contract` の `bias_expectation` 引数を
+/// `StrictBiasExpectation::Resident` へ更新し、strict 版
+/// `resident_grads_to_host` が weight slot（index 0・2）・bias slot
+/// （index 1・3）とも `Some` で返すこと（`gemm_fp32_strict_into_
+/// with_bias_reduce_tracked` は NT/TN・NN/TT フォールバックいずれも
+/// bias 縮約を resident staging へ書く）・その値が統合版
+/// `param_grads_to_host` の同 index と bit 完全一致すること・統合版が
+/// 返す全パラメータ勾配がホスト参照実装と統一複合判定内で一致すること
+/// を検証する（M4 Max 実機実測は未実施のまま Mac セッションへ申し送り。
+/// `docs/perf/logs/grad-readout-contract-1898/` 参照）。
 ///
 /// ```sh
 /// cargo test -p fandhe-ai --test device_param_store_backend_parity -- --ignored --nocapture
@@ -320,7 +386,7 @@ fn assert_grad_readout_contract(device: Device, resident_capable: bool) {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn grad_readout_contract_on_metal() {
-    assert_grad_readout_contract(Device::Metal, true);
+    assert_grad_readout_contract(Device::Metal, StrictBiasExpectation::Resident);
 }
 
 /// CUDA 実機での AC-R2 契約検証（`assert_grad_readout_contract` 参照）。
@@ -328,14 +394,20 @@ fn grad_readout_contract_on_metal() {
 /// イシュー #1479 実装セッションでは本エージェント実行環境に CUDA 実機が
 /// なかったため未実測のまま引き継がれていたが、イシュー #1480 の GB10
 /// 実機実測（2026-09-09）で pass 済みだった（`docs/perf/logs/
-/// cuda-graph-step-grad-1480/grad_readout_contract_on_cuda.log`）。
-/// **その後イシュー #1559 で CUDA が `gemm_fp32_strict_into` を実装した
-/// ことにより `resident_grad_capability` が `Some(true)` へ確定し、Metal
-/// （イシュー #1555）と同じ `resident_capable = true` 側（weight slot
-/// のみ resident 経由で `Some`・bias slot は `None`）へ移行した**
-/// （`crates/backend-cuda/src/ops.rs::CudaBackendOps::gemm_fp32_strict_into`
-/// doc 参照）。本エージェント実行環境には CUDA 実機がないため、この
-/// 更新後の実機再実測は未実施のまま引き継ぐ。
+/// cuda-graph-step-grad-1480/grad_readout_contract_on_cuda.log`）。その後
+/// イシュー #1559 で CUDA が `gemm_fp32_strict_into` を実装したことにより
+/// `resident_grad_capability` が `Some(true)` へ確定し、weight slot は
+/// resident 経由で `Some` を返す側へ移行した（`crates/backend-cuda/src/
+/// ops.rs::CudaBackendOps::gemm_fp32_strict_into` doc 参照）。
+///
+/// **CUDA は bias slot は `None` のまま（イシュー #1898 で確認・不変）**:
+/// CUDA は `gemm_fp32_strict_into_with_bias_reduce_tracked` を
+/// オーバーライドしない（trait 既定実装のまま）ため、bias 縮約は
+/// resident staging へ書かれず常に通常の `Gradients` 経由。Metal
+/// （イシュー #1566 以降）とは異なりこの契約は変わっていない
+/// （`StrictBiasExpectation::HostRouted`）。本エージェント実行環境には
+/// CUDA 実機がないため、この契約下での実機再実測は未実施のまま
+/// 引き継ぐ（`docs/perf/logs/grad-readout-contract-1898/` 参照）。
 ///
 /// ```sh
 /// cargo test -p fandhe-ai --test device_param_store_backend_parity -- --ignored --nocapture
@@ -343,5 +415,5 @@ fn grad_readout_contract_on_metal() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn grad_readout_contract_on_cuda() {
-    assert_grad_readout_contract(Device::Cuda(0), true);
+    assert_grad_readout_contract(Device::Cuda(0), StrictBiasExpectation::HostRouted);
 }
