@@ -334,7 +334,7 @@ bf16 デバイス常駐経路（bf16 のまま H2D し device 側で widen/narro
 
 `add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` は CPU（#1698）・CUDA（#1703）と同じ 3 段構成（`Tensor::host_slice` で昇格 → 既存 `<MetalBackendOps as BackendOps>` の f32 カーネルへ委譲 → `f16::from_f32` で 1 回丸め）を採る。各メソッドは構造的に `f16::from_f32(BackendOps::op(upcast(x)))`（要素ごと bit 一致）という不変条件を満たす。
 
-**`sum`／`max` は `Unsupported` を継承する**: `ops::MetalBackendOps::sum`／`max`（f32）は reduction カーネル未実装のため常に `BackendError::Unsupported` を返す。`typed_f16.rs::sum`／`max` は上記 3 段構成をそのまま適用するだけで、委譲先が常に `Unsupported` を返すため構造的に同じ結果になる——ホスト側で reduction を計算して `Unsupported` を偽装しない（バックエンド内部で CPU 計算を隠す silent fallback を避ける方針。レイヤリング上、ホストフォールバックは `autodiff` 側の責務）。Metal f32 reduction カーネルが将来実装されれば、`typed_f16.rs` は変更なしでそのまま有効になる。
+**`max` のみ `Unsupported` を継承する（`sum` はイシュー #1896 で結線済み）**: `ops::MetalBackendOps::max`（f32）は reduction カーネル未実装のため常に `BackendError::Unsupported` を返す。`typed_f16.rs::max` は上記 3 段構成をそのまま適用するだけで、委譲先が常に `Unsupported` を返すため構造的に同じ結果になる——ホスト側で reduction を計算して `Unsupported` を偽装しない（バックエンド内部で CPU 計算を隠す silent fallback を避ける方針。レイヤリング上、ホストフォールバックは `autodiff` 側の責務）。`ops::MetalBackendOps::sum` はイシュー #1896 で `crate::reduce::MetalReduce` へ結線されたため、`typed_f16.rs::sum` は本ファイルの変更なしにそのまま f32 経路の成功結果（CPU 参照実装と bit 完全一致）を `f16::from_f32` で丸めた値を返すようになった（`docs/backend-metal-reduce-sum-design.md` §9）。`max`（`min` も含む）が将来実装されれば同様に `typed_f16.rs` は変更なしでそのまま有効になる。
 
 ### 14.4 実装ファイル
 
@@ -351,7 +351,7 @@ bf16 デバイス常駐経路（bf16 のまま H2D し device 側で widen/narro
 
 ### 14.6 テスト構成・実機実測の記入欄
 
-- `typed_f16.rs::tests`（accessor 契約・shape 検証・`sum`／`max` の `Unsupported` 継承・upcast/downcast 往復）5 件・`tests/typed_ops_f16_parity.rs` の非 `#[ignore]` 部（accessor・shape 検証・零次元形状は `#[ignore]` 側）はいずれも `cfg(target_os = "macos")`／`#![cfg(target_os = "macos")]` 限定のため、本エージェント実行環境（ネイティブ Linux）ではコンパイル対象に入らずテスト実行・pass 確認はできない。本エージェント環境で実施できたのは `cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`（クロス型検査。green）に留まり、実行・pass 確認は Mac セッションへ申し送る。`tests/typed_ops_source_evidence.rs` 5 件は cfg なしのため Linux CI で実際に実行され green（`cargo test -p fandhe-ai-backend-metal --test typed_ops_source_evidence` で確認済み）
+- `typed_f16.rs::tests`（accessor 契約・shape 検証・`max` の `Unsupported` 継承・範囲外 `dim` の `sum` `ShapeMismatch`・upcast/downcast 往復。イシュー #1896 で `sum` 関連テストを再構成済み）・`tests/typed_ops_f16_parity.rs` の非 `#[ignore]` 部（accessor・shape 検証・零次元形状は `#[ignore]` 側）はいずれも `cfg(target_os = "macos")`／`#![cfg(target_os = "macos")]` 限定のため、本エージェント実行環境（ネイティブ Linux）ではコンパイル対象に入らずテスト実行・pass 確認はできない。本エージェント環境で実施できたのは `cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`（クロス型検査。green）に留まり、実行・pass 確認は Mac セッションへ申し送る。`tests/typed_ops_source_evidence.rs` 5 件は cfg なしのため Linux CI で実際に実行され green（`cargo test -p fandhe-ai-backend-metal --test typed_ops_source_evidence` で確認済み）
 - `#[ignore]`（Apple Silicon 実機依存）: `tests/typed_ops_f16_parity.rs` の L1 gemm bit 一致・L2 gemm／elementwise vs CPU 参照 rounded・零次元形状のデバイス到達確認。本エージェント実行環境に Apple Silicon 実機への到達手段がなく未実施のまま記入欄を残す（Mac セッションへ申し送り）。実行コマンド:
 
 ```sh
@@ -400,7 +400,7 @@ tolerance 変更なし。
 
 CUDA §13.5 と同じ理由（bf16 の 1 ulp は相対誤差 `RELATIVE_TOLERANCE`＝1e-3 を超えうる）で、tolerance を変更せず二層構成とする。
 
-- **層 1（主判定）**: 同一バックエンド内の構造的不変条件 `TypedOps::<bf16>::op(x) == bf16::from_f32(BackendOps::op_f32(f32(x)))` を bit 完全一致で検証（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`。`sum`／`max` は `Unsupported` のため対象外）。run-to-run 決定性も確認する
+- **層 1（主判定）**: 同一バックエンド内の構造的不変条件 `TypedOps::<bf16>::op(x) == bf16::from_f32(BackendOps::op_f32(f32(x)))` を bit 完全一致で検証（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`。`sum` はイシュー #1896 で `crate::reduce::MetalReduce` へ結線され層 1 の対象化済み。`max` は `Unsupported` のため引き続き対象外）。run-to-run 決定性も確認する
 - **層 2（クロスバックエンド）**: CPU の既存 f32 `BackendOps` をホスト側で bf16 丸めした値を参照とし、小整数（`[-8, 8]`）・小 K（16 以下）の入力に限定して `fandhe_ai_backend_cpu::assert_parity`（複合判定 1e-3/1e-5・変更なし）を適用する（`gemm`／`add`／`mul`／`relu`）。`exp`／`tanh` はこの技法が使えないため層 2 の対象外とし層 1 で検証する
 
 ### 15.6 M4 Max 実機実測
@@ -439,8 +439,8 @@ cargo test -p fandhe-ai-backend-metal --release --test typed_ops_bf16_parity -- 
 
 Metal `half` 専用 elementwise／reduction カーネル（H2D 転送量削減の性能最適化）・f16 NT/TN strided 入口（非 contiguous view の性能最適化）・`_unverified`／`#[doc(hidden)]` の解除（§7-4 の別途承認事項）・Metal f32 `sum`／`max` reduction カーネル自体の実装（実装されれば f16 版は自動的に有効化される。out-of-scope-tracking.md 対象。後続イシュー起票の要否はユーザー承認後に判断）・bf16（#1706）・`Var`／`Tape`／VJP・facade 公開面への昇格・`MemoryOps`／`DeviceBuffer<f16>` 常駐経路（段階 B）・M4 Max 実機実測（§14.6）。
 
-**#1895 で追記**: Metal f32 `sum`（全要素・単一軸）reduction カーネルは `crate::reduce`（`MetalReduce`）として実装済み（`docs/backend-metal-reduce-sum-design.md`）。`MetalBackendOps::sum` への結線（`typed_f16` 等の自動有効化を含む）・本節の記述更新は引き続き #1896 のスコープ。
+**#1895 で追記**: Metal f32 `sum`（全要素・単一軸）reduction カーネルは `crate::reduce`（`MetalReduce`）として実装済み（`docs/backend-metal-reduce-sum-design.md`）。**#1896 で追記**: `MetalBackendOps::sum` を `context_cache::cached_reduce` 経由で結線済み・`typed_f16`／`typed_bf16` の `sum` はコード変更なしで自動有効化された（同 doc §9）。
 
 ### 15.7 スコープ外
 
-MSL `bfloat`／`simdgroup_bfloat8x8` を用いるデバイス常駐ネイティブ bf16 経路（(b) の実測が可の場合の後続候補）・Metal f32 `sum`／`max` reduction カーネル自体（未実装）・Metal `TypedOps<f64>`（恒久 `Unsupported`）／`TypedOps<f16>`（#1705）・`Var`／`Tape`／VJP・facade 公開面への昇格・M4 Max 実機実測（§15.6）。CPU bf16 は #1699・CUDA bf16 は #1704 で実装済み・origin/main マージ済み。
+MSL `bfloat`／`simdgroup_bfloat8x8` を用いるデバイス常駐ネイティブ bf16 経路（(b) の実測が可の場合の後続候補）・Metal f32 `max` reduction カーネル自体（未実装。`sum` はイシュー #1896 で結線済み）・Metal `TypedOps<f64>`（恒久 `Unsupported`）／`TypedOps<f16>`（#1705）・`Var`／`Tape`／VJP・facade 公開面への昇格・M4 Max 実機実測（§15.6）。CPU bf16 は #1699・CUDA bf16 は #1704 で実装済み・origin/main マージ済み。

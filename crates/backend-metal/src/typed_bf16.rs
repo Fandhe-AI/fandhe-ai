@@ -176,19 +176,18 @@ impl TypedOps<bf16> for MetalBackendOps {
         downcast_f32(&out32)
     }
 
-    /// 既存 `BackendOps::sum` へ委譲する。Metal f32 `sum` は GPU
-    /// カーネル未実装のため常に `Err(BackendError::Unsupported(_))`
-    /// を返し、本メソッドもそれをそのまま伝播する（モジュール doc
-    /// 「`sum`／`max` は `Unsupported` をそのまま伝播する」参照。bf16
-    /// だけ f32 より高機能にしない）。
+    /// 既存 `BackendOps::sum` へ委譲する（イシュー #1896 で
+    /// `reduce::MetalReduce` へ結線済み。モジュール doc「`sum` は
+    /// 結線済み」参照。bf16 側は f32 より高機能にせず、実デバイスの
+    /// CPU 参照実装 bit 一致値を `bf16::from_f32` で 1 回丸める）。
     fn sum(&self, a: &Tensor<bf16>, dim: Option<usize>) -> Result<Tensor<bf16>, BackendError> {
         let a32 = upcast_bf16(a)?;
         let out32 = BackendOps::sum(self, &a32, dim)?;
         downcast_f32(&out32)
     }
 
-    /// 既存 `BackendOps::max` へ委譲する。`sum` と同じ理由で常に
-    /// `Unsupported` を伝播する。
+    /// 既存 `BackendOps::max` へ委譲する。`max` は Metal f32 reduction
+    /// カーネル未実装のため常に `Unsupported` を伝播する。
     fn max(&self, a: &Tensor<bf16>, dim: Option<usize>) -> Result<Tensor<bf16>, BackendError> {
         let a32 = upcast_bf16(a)?;
         let out32 = BackendOps::max(self, &a32, dim)?;
@@ -212,22 +211,44 @@ mod tests {
         );
     }
 
-    /// `sum`／`max` がデバイス初期化なしで `Unsupported` を返すことを
+    /// `max` がデバイス初期化なしで `Unsupported` を返すことを
     /// 確認する（`tests/backend_ops_real_device.rs::
-    /// reduction_remains_unsupported_without_device_init` の bf16 版。
+    /// max_remains_unsupported_without_device_init` の bf16 版。
     /// f32 版と同じく `MetalContext::new` を呼ばないため実機不要）。
     #[test]
-    fn sum_and_max_remain_unsupported_without_device_init() {
+    fn max_remains_unsupported_without_device_init() {
         let metal = MetalBackendOps::new();
         let a = Tensor::new(vec![bf16::from_f32(1.0), bf16::from_f32(-2.0)], &[1, 2]).unwrap();
 
         assert!(matches!(
-            TypedOps::<bf16>::sum(&metal, &a, None),
-            Err(BackendError::Unsupported(_))
-        ));
-        assert!(matches!(
             TypedOps::<bf16>::max(&metal, &a, None),
             Err(BackendError::Unsupported(_))
         ));
+    }
+
+    /// `sum`（イシュー #1896 で `reduce::MetalReduce` へ結線済み）が
+    /// `bf16::from_f32(BackendOps::sum(f32))` と一致することを Metal
+    /// 実機で検証する（実デバイスへ到達するため `#[ignore]`）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn sum_matches_f32_backend_ops_rounded_bit_exact() {
+        let metal = MetalBackendOps::new();
+        let a = Tensor::new(vec![bf16::from_f32(1.0), bf16::from_f32(-2.0)], &[1, 2]).unwrap();
+        let a32 = upcast_bf16(&a).unwrap();
+
+        let v16 = TypedOps::<bf16>::sum(&metal, &a, None).unwrap();
+        let v32 = BackendOps::sum(&metal, &a32, None).unwrap();
+        let rounded32: Vec<f32> = v32
+            .host_slice()
+            .iter()
+            .map(|&x| bf16::from_f32(x).to_f32())
+            .collect();
+        assert_eq!(
+            v16.host_slice()
+                .iter()
+                .map(|v| v.to_f32())
+                .collect::<Vec<_>>(),
+            rounded32
+        );
     }
 }

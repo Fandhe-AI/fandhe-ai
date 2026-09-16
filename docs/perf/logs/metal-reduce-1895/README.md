@@ -42,3 +42,11 @@ cargo test -p fandhe-ai-backend-metal --release --test reduce_parity \
 - 性能実測（純カーネル時間等）は本イシューのスコープ外
   （`MetalBackendOps::sum` 未結線のため framework-compare 等の
   実践規模計測は #1896 以降が対象）
+
+## 結線後の一括実行（イシュー #1896）
+
+`MetalBackendOps::sum` への結線（イシュー #1896）が完了した後は、
+本ディレクトリの `reduce_parity.log` 単体実行に加え、結線後の
+新規テスト・#1902 判定不能 11 テストを含む一括実行ランブックを
+`docs/perf/logs/metal-reduce-sum-wiring-1896/` で提供する
+（`run_ignored_tests_metal.sh`・README「事前登録判定規則」参照）。

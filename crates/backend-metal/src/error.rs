@@ -245,11 +245,14 @@ pub enum MetalError {
     /// 独立 variant に分離する（`.claude/rules/security.md` A08）。
     /// `detail` は元の [`crate::reduce_model::ReducePrepareError`] の
     /// `Display` 文字列表現、またはスライス長不整合の直接メッセージ。
-    /// `sum` はサイズ上限超過でもホストフォールバックが可能な値域
+    /// `ops.rs::MetalBackendOps::sum`（イシュー #1896）は起動前に
+    /// `reduce_model::plan_reduce_all`／`plan_reduce_axis` を先出しして
+    /// サイズ上限超過を `BackendError::Unsupported` へ写像するため、
+    /// 本 variant が `ops.rs` 経由で観測されるのは呼び出し元の検査を
+    /// すり抜けた内部契約違反の場合のみであり、`map_metal_error` の
+    /// wildcard arm（`other => KernelLaunchFailed`）へ落ちる
     /// （`Im2colSizeLimitExceeded`／`PoolingSizeLimitExceeded` と異なり
-    /// `MetalBackendOps::sum` への結線自体が #1896 のスコープのため、
-    /// 現時点では単一 variant のみを用意し `Unsupported` 写像分岐の
-    /// 要否は #1896 で判断する）。
+    /// 専用の `Unsupported` 写像分岐は設けない）。
     InvalidReduceShape { detail: String },
 }
 

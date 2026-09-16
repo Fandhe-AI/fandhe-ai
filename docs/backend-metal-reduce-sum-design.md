@@ -7,11 +7,13 @@
 ## 1. 背景・目的
 
 `MetalBackendOps::sum`（`crates/backend-metal/src/ops.rs`）は常に
-`Unsupported` を返す。本イシューは是正の第 1 段として、Metal f32 `sum`
-（全要素・単一軸）の**カーネル・起動 API・cfg なしホスト逐語モデル**を
-追加する。`MetalBackendOps::sum` への結線・`Var::sum` のホスト
-フォールバック可否の設計判断・M4 Max 実機実測は**#1896 のスコープ**であり
-本イシューには含まない。
+`Unsupported` を返していた。#1895 は是正の第 1 段として、Metal f32
+`sum`（全要素・単一軸）の**カーネル・起動 API・cfg なしホスト逐語
+モデル**を追加した。`MetalBackendOps::sum` への結線・`Var::sum` の
+ホストフォールバック可否の設計判断・M4 Max 実機実測は**イシュー
+#1896** のスコープであり、結線・設計判断は §9・§10 に、実機実測は
+Mac セッションへの申し送り（`docs/perf/logs/
+metal-reduce-sum-wiring-1896/README.md`）として記録する。
 
 ## 2. CPU 参照実装の演算順序（本実装が逐語再現する対象）
 
@@ -79,11 +81,11 @@ red_f64_primitives_match_scan_f64_primitives_verbatim_modulo_prefix` が
   `axis_len==0 && lanes>0` は `vec![0.0; lanes]` を早期リターン（ともに
   ディスパッチを回避。`fandhe_ai_backend_cpu::reduction::
   axis_reduce_sum` の空縮約契約と同じ）
-- 呼び出し元（`ops.rs`）が存在しない現時点では、本モジュール自身が
-  `reduce_model::plan_reduce_*` による事前検査を行い
-  `MetalError::InvalidReduceShape` へ写像する（`scan.rs` が
-  「呼び出し元の検査結果を信頼しない」二重検査を行うのと対称の設計。
-  #1896 で `ops.rs` 側にも同型の事前検査が追加される見込み）
+- `ops.rs::MetalBackendOps::sum`（イシュー #1896 で結線済み。§9）は
+  起動前に `reduce_model::plan_reduce_*` を先出しして検査するが、本
+  モジュール自身も同型の事前検査を維持し `MetalError::
+  InvalidReduceShape` へ写像する（`scan.rs` の「呼び出し元の検査結果
+  を信頼しない」二重検査と同じ設計）
 
 encode-only（`ctx.encode` + `DispatchFailureCell`）は使わない:
 `run_sum_all_f32`／`run_sum_axis_f32` はいずれも戻り値を同期的に消費
@@ -139,16 +141,126 @@ CPU 参照実装（`fandhe_ai_backend_cpu::reduction::sum`）と **bit 完全
   fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`）で
   型検査のみ通す
 
-## 8. スコープ外（#1896 等へ引き継ぐ）
+## 8. スコープ外（後続イシューへ引き継ぐ）
 
-- `MetalBackendOps::sum` 結線・`context_cache::cached_reduce`・
-  `map_reduce_prepare_error`・`docs/backend-dtype-dispatch-design.md`
-  §14.2 記述更新
-- M4 Max 実機での `reduce_parity.rs` 実測（11 件の backward テスト
-  判定不能の解消確認を含む）
-- `Var::sum` のホストフォールバック可否（facade 公開契約に関わる
-  設計判断。ユーザー承認を要する）
-- `max`／`min`／`mean` の Metal カーネル
-- `typed_f16`／`typed_bf16` の `sum` 自動有効化の実機確認
+- `max`／`min`／`mean` の Metal カーネル自体（`sum` は #1896 で結線
+  済み。`mean` は `sum` の結果をホスト側で 1 回除算する合成実装の
+  ため対象外のまま自動的に有効化されている）
+- M4 Max 実機での結線後の実測（§9・11 件の backward テスト判定不能の
+  解消確認を含む。`docs/perf/logs/metal-reduce-sum-wiring-1896/
+  README.md` へ申し送り）
+- `Var::sum` ホストフォールバックの実装（§10 の設計判断はユーザー
+  承認待ちの段階 0）
 - 並列度改善（結合順序を変えずには実現できないため対象外のまま。
   §3「既知の制約」参照）
+
+## 9. 実装記録（`MetalBackendOps::sum` 結線。イシュー #1896）
+
+`crates/backend-metal/src/ops.rs::MetalBackendOps::sum` を
+`context_cache::cached_reduce`（新設。`cached_unique` と同型の
+プロセス内キャッシュ）経由で `reduce::MetalReduce` へ結線した。
+`context_cache::cached_scan`／`ops.rs::run_scan`（#1740）と同一の
+検査順序を踏襲する:
+
+1. [`fandhe_ai_tensor_core::ops_shape::reduce_out_shape`] で `dim` の
+   範囲を検査し出力 shape を導出する（デバイス初期化前。範囲外 `dim`
+   は `ShapeMismatch` として即座に返り、`context_cache::cached_context`
+   に一切触れない）
+2. **0 サイズ契約を要素数積の検査より先に処理する**: `shape` が 0 を
+   含む場合、`dim=None` なら `0.0` を、`dim=Some` かつ出力 shape に
+   0 を含むなら空テンソルを、`dim=Some` かつ `shape[axis]==0` のみ
+   （他軸は非零）なら出力を `0.0` で埋めて早期リターンする。**この
+   順序は巨大な非零軸を含む 0 サイズ shape（例
+   `[1<<40, 0, 1<<40]`）で `checked_numel` の中間積 overflow により
+   誤って `ShapeMismatch` を返すのを防ぐために必須**（`run_scan` と
+   同じ理由。§7 の `backend_ops_sum_matches_cpu_bit_exact` が直接
+   検証する）
+3. [`crate::gather_scatter_model::checked_numel`] で要素数積の
+   `usize` オーバーフローを検査（`a.numel()` を無検査で呼ぶ前）
+4. `reduce_model::plan_reduce_all`／`plan_reduce_axis` を先出しし、
+   カーネル `uint` 引数の上限超過（`u32::MAX` 超）を
+   `map_reduce_prepare_error` で `BackendError::Unsupported` へ写像
+   する
+5. `context_cache::cached_context`／`cached_reduce` 経由で
+   `reduce::MetalReduce::run_sum_all_f32`／`run_sum_axis_f32` へ委譲
+
+エラー写像表:
+
+| 状況 | 戻り値 |
+|---|---|
+| `dim` が軸範囲外 | `BackendError::ShapeMismatch(AxisOutOfRange)`（デバイス非接触） |
+| 要素数積 `usize` オーバーフロー | `BackendError::ShapeMismatch(ElementCountOverflow)`（デバイス非接触） |
+| カーネル `uint` 引数上限超過（`numel`／`num_chunks`／`lanes`／`axis_len`／`inner` が `u32::MAX` 超） | `BackendError::Unsupported`（`Var::sum` はホストフォールバックを持たないため呼び出し元へそのまま伝播。§10） |
+| 内部契約違反（呼び出し元の検査をすり抜けた `reduce.rs` 側の二重検査失敗） | `BackendError::KernelLaunchFailed`（`map_metal_error` の wildcard arm） |
+| 上記以外 | `Ok`。CPU 参照実装と bit 完全一致 |
+
+**変更したテスト**（`sum` の `Unsupported` 前提を撤去し、`max` のみへ
+縮小・改名。新規 `#[ignore]` 実機テストで `sum` を検証）:
+
+| ファイル | 変更 |
+|---|---|
+| `crates/backend-metal/tests/backend_ops_real_device.rs` | `reduction_remains_unsupported_without_device_init` → `max_remains_unsupported_without_device_init`（`max` のみ）。新規 `#[ignore]` `backend_ops_sum_matches_cpu_bit_exact`（`BackendOps` 経由・非 contiguous view・0 サイズ契約・範囲外 dim・NaN・決定性） |
+| `crates/backend-metal/src/typed_f16.rs` | `sum_max_inherit_f32_backend_ops_result_class` を `max_inherit_f32_backend_ops_unsupported_without_device_init`（`max` のみ・非 `#[ignore]`）と `sum_rejects_out_of_range_dim_before_touching_device`（非 `#[ignore]`）・`#[ignore]` `sum_matches_f32_backend_ops_rounded_bit_exact` へ分割 |
+| `crates/backend-metal/src/typed_bf16.rs` | `sum_and_max_remain_unsupported_without_device_init` → `max_remains_unsupported_without_device_init`（`max` のみ）。新規 `#[ignore]` `sum_matches_f32_backend_ops_rounded_bit_exact` |
+| `crates/backend-metal/tests/typed_ops_f16_parity.rs` | `sum_max_are_unsupported_matching_metal_f32_backend_ops` → `max_is_unsupported_matching_metal_f32_backend_ops`。新規 `#[ignore]` `sum_matches_f32_backend_ops_rounded_bit_exact` |
+| `crates/backend-metal/tests/typed_ops_bf16_parity.rs` | `sum_and_max_remain_unsupported_without_device_init` → `max_remains_unsupported_without_device_init`。新規 `#[ignore]` `sum_matches_f32_backend_ops_rounded_bit_exact` |
+| `crates/facade/tests/reduce_backend_parity.rs` | `#[cfg(target_os = "macos")]` `#[ignore]` 新規 3 テスト（`metal_sum_all_forward_and_backward_match_cpu_bit_exact`／`metal_sum_axis_forward_and_backward_match_cpu_bit_exact`／`metal_mean_forward_and_backward_match_cpu_bit_exact`。CPU tape との forward・backward bit 完全一致。`Op::Sum` の VJP は算術を伴わないホスト側のため勾配も bit 一致） |
+
+`typed_f16`／`typed_bf16` の `sum` は本ファイル自体を変更せず（3 段
+構成〈昇格 → `BackendOps::sum` へ委譲 → 丸め〉のまま）、委譲先の
+`ops::MetalBackendOps::sum` 実装差し替えにより自動的に有効化された
+（`TypedOps<f16|bf16>::sum` が成功結果を返すようになる）。
+
+**Linux 検証結果**: `cargo fmt --all -- --check`・`cargo clippy
+--workspace --all-targets --all-features -- -D warnings`・`cargo test
+--workspace --all-features`・`make check-cross-metal-tests`（`cargo
+check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`）・
+`cargo check -p fandhe-ai --tests --target aarch64-apple-darwin`・
+`RUSTDOCFLAGS="-D warnings" cargo doc -p fandhe-ai-backend-metal -p
+fandhe-ai-backend-cpu --no-deps --locked --target aarch64-apple-darwin`
+がいずれも green（本 PR 実装時点）。
+
+**M4 Max 実機実測は未実施**。`docs/perf/logs/
+metal-reduce-sum-wiring-1896/README.md`（事前登録判定規則・実行
+コマンド・記入欄）へ申し送る。
+
+## 10. `Var::sum` ホストフォールバックの設計判断（未承認・段階 0）
+
+`ops.rs::MetalBackendOps::sum` が `Unsupported` を返すのは（§9 の検査
+順序どおり）カーネル `uint` 引数の上限超過（`numel`／`num_chunks`／
+`lanes`／`axis_len`／`inner` が `u32::MAX` 超。f32 で概ね 16 GiB 超）の
+場合のみに限定された。この残存 `Unsupported` に対し `Var::sum` が
+ホストへフォールバックすべきかを検討する。
+
+### 候補
+
+- **案 A**: `eval::sum`（ホスト側 f32 逐次和の参照実装）へフォール
+  バックする（`min_with_fallback`／`cumsum` と同型のパターン）
+- **案 B**: フォールバック先を CPU 参照実装（`fandhe_ai_backend_cpu::
+  reduction::sum`。f64 チャンク 2 段構成）と bit 一致する新規ホスト
+  実装にする
+- **案 C（推奨）**: フォールバックを実装しない（現状維持）
+
+### 判断材料
+
+1. `eval::sum` は素の f32 逐次和であり `fandhe_ai_backend_cpu::
+   reduction::sum`（f64 チャンク 2 段構成。§2）と bit 一致しない。
+   案 A を採ると、サイズ上限超過時のみ `Unsupported` が無言で異なる
+   数値方式へすり替わる（silent fallback）ことになり、`.claude/
+   rules/security.md` A08「判定の迂回経路を作らない」方針・
+   `Var::mean`／`Op::Mean` 再計算・`var`／`std` 等 `sum` に依存する
+   演算全体へこの非一貫性が波及する
+2. `ops.rs::MetalBackendOps::sum` が `Unsupported` を返すのは実用上
+   到達しないサイズ域（f32 で 16 GiB 超）に限定された（§9）ため、
+   フォールバックの実利は小さい
+3. CPU／CUDA は `sum` を実装済みであり、facade 公開契約
+   （`docs/compat-api-scope.md`）上フォールバック必須の要件はない
+4. 案 B は `autodiff` クレートが `backend-cpu` クレートへ依存しない
+   設計（cfg ベースバックエンド切替。REQ-2）のため実装が重複する
+
+### 結論（段階 0）
+
+**案 C を推奨**。サイズ上限超過は `AutodiffError::Backend(Unsupported)`
+として呼び出し元へそのまま伝播することを受け入れ済み事項として明記
+する。採否・案 A／B への転換はユーザー承認事項であり、本 PR では
+実装しない。

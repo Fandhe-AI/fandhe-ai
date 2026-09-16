@@ -569,7 +569,8 @@ pub mod scan;
 pub mod scan_model;
 // f32 `sum` reduction（全要素・単一軸）の起動 API（イシュー #1895・親
 // #1894）。`scan.rs` と同じ設計方針（実行時コンパイル・パイプライン
-// 保持・実行）。`MetalBackendOps::sum` への結線は行わない（#1896）。
+// 保持・実行）。`MetalBackendOps::sum` から `context_cache::cached_reduce`
+// 経由で到達する（イシュー #1896）。
 #[cfg(target_os = "macos")]
 pub mod reduce;
 // `shaders/reduce.metal` のホスト側逐語モデル（イシュー #1895）。

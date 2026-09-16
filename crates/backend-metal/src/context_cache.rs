@@ -396,6 +396,18 @@ pub(crate) fn cached_sort(
     get_or_build(cache, on_poison, || crate::sort::MetalSort::new(ctx))
 }
 
+/// f32 `sum` reduction（全要素・単一軸。`reduce.rs::MetalReduce`）の
+/// コンパイル済みパイプラインをプロセス内キャッシュから取得する
+/// （イシュー #1896。`cached_unique` と同型）。
+/// `ops::MetalBackendOps::sum` の唯一の呼び出し先。
+pub(crate) fn cached_reduce(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::reduce::MetalReduce>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::reduce::MetalReduce>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || crate::reduce::MetalReduce::new(ctx))
+}
+
 pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAllocator>, MetalError> {
     static CACHE: OnceLock<Mutex<Option<Arc<MetalAllocator>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
