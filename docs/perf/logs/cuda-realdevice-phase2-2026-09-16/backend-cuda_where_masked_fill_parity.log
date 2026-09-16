@@ -1,0 +1,9 @@
+== backend-cuda_where_masked_fill_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test where_masked_fill_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/where_masked_fill_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/where_masked_fill_parity-c2c9355ddc0c27fb)
+
+running 1 test
+test where_masked_fill_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.26s
+

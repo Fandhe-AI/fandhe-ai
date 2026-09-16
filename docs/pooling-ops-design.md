@@ -696,6 +696,19 @@ warning はベースライン不変）。**GB10 実機実測は本エージェ�
 到達手段が無いため未実施のまま `docs/perf/logs/cuda-pooling-1729/` へ
 申し送る**。
 
+#### GB10 実機実測（2026-09-16・追従 PR #1888 の Layer B 配線後）
+
+`docs/perf/logs/cuda-pooling-1729/README.md` の手順で DGX Spark GB10（転送元コミット
+`3e43bbd0`）にて実測した（ログは `docs/perf/logs/cuda-realdevice-phase2-2026-09-16/
+backend-cuda_pooling_real_device.log`・`facade_pooling_backend_parity.log`。同 README §2c）。
+
+- `--lib pooling::pooling_real_device_tests`（`--ignored`）: **11 pass / 0 fail**
+- `crates/facade/tests/pooling_backend_parity.rs`（`cuda_` 3 件。`CudaBackendOps` へ
+  配線済みの本番経路）: **3 pass / 0 fail**
+
+判定: PASS（MaxPool は値・索引とも bit 完全一致、AvgPool／AdaptiveAvgPool は
+`double` 縮約契約で CPU `f64` 参照実装と bit 完全一致。tolerance 変更なし）。
+
 ### #1729／#1730 マージ後の追従 PR（#1607 ツリー・Layer B 配線）
 
 CUDA・Metal とも `ops.rs::{CudaBackendOps, MetalBackendOps}` への

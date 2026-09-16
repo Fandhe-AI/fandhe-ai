@@ -1,0 +1,5 @@
+PASS: nn_conv_backend_parity.log run-to-run bit 同一（20 行）
+PASS: conv2d_backend_parity.log run-to-run bit 同一（1 行）
+PASS: conv1d_backend_parity.log run-to-run bit 同一（2 行）
+PASS: im2col_col2im_parity.log run-to-run bit 同一（39 行）
+PASS: 全ログ群で run-to-run 決定性チェック成立

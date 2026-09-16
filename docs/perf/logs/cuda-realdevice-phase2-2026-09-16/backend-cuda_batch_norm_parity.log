@@ -1,0 +1,18 @@
+== backend-cuda_batch_norm_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test batch_norm_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/batch_norm_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/batch_norm_parity-41c2581ab5ea16b3)
+
+running 10 tests
+test batch_norm_train_extreme_values_no_nan_inf ... ok
+test batch_norm_train_extreme_scale_does_not_overflow ... ok
+test batch_norm_infer_matches_naive_across_shapes ... ok
+test batch_norm_train_propagates_nan_only_for_channel_with_nan ... ok
+test batch_norm_train_matches_backend_cpu_directly ... ok
+test backend_ops_batch_norm_rejects_length_mismatch ... ok
+test backend_ops_batch_norm_train_non_contiguous_input_matches_contiguous_equivalent ... ok
+test backend_ops_batch_norm_matches_cpu_backend_ops_across_shapes ... ok
+test batch_norm_train_is_run_to_run_deterministic ... ok
+test batch_norm_train_matches_naive_across_shapes ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.39s
+

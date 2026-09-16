@@ -243,6 +243,17 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 - **テスト**: クレート内単体テスト（`typed_f64.rs` 8 演算 `Unsupported` 確認・`typed_f16.rs` accessor／shape エラー／upcast-downcast 往復・`ops.rs` の poison-ordinal 拒否）・統合テスト（`tests/typed_ops_f64_contract.rs`。GPU 不要）・（`tests/typed_ops_f16_parity.rs`。GPU 不要な accessor／shape 検証テストに加え、GB10 実機 `#[ignore]` テスト 3 件: `gemm` が `CudaGemmAuto::run_f16` 直接呼び出しと bit 完全一致・CPU 参照実装〈f16 丸め後〉との REQ-2 複合判定・7 演算が CPU `BackendOps`〈f32〉を f16 へ丸めた値と REQ-2 複合判定で一致）。GB10 実機実測は本エージェント実行環境に CUDA 実機への到達手段がないため未実施のまま記入欄を残す。
 - **数値契約**: f64 は driver 非接触（数値契約自体が存在しない）。f16 の `gemm` は `CudaGemmAuto::run_f16` の既存数値契約（GB10 実機実測済み。`docs/perf/cuda-tensor-core-tolerance-tf32x3-gb10.md` 等）をそのまま継承。残り 7 演算は「f32 へ昇格・f32 累算・最後に 1 回丸め」（CPU f16 と同一。`.claude/rules/coding-rust.md` の FMA 契約統一とは独立の軸）。
 - **スコープ外**: CUDA `__half` 専用 elementwise／reduction カーネル（H2D 転送量削減の性能最適化）・f64 SIMT GEMM カーネル・bf16（#1704）・Metal（#1705）・`Var`／`Tape`／VJP・facade 公開面への昇格（§7-7・§8。`docs/compat-api-scope.md` §5 手続き要）・`MemoryOps`／`DeviceBuffer<T>` 常駐経路の dtype 多重化（段階 B）・`dispatch::DType` の拡張
+
+**GB10 実機実測（2026-09-16 追記）**: `crates/backend-cuda/tests/typed_ops_f16_parity.rs`
+（`--ignored`）を転送元コミット `3e43bbd0` で実行し **2 pass / 1 fail**。pass は gemm
+（`run_f16` 結線）と型付きエラー契約、FAIL は
+`typed_f16_elementwise_and_reduction_match_cpu_backend_ops_rounded` で、f32 昇格後に委譲する
+`CudaBackendOps::sum` が reduction カーネル（`kernels_reduce.rs`）の NVRTC コンパイルエラー
+（`identifier "INFINITY" is undefined`・compute_121）で失敗するため（f16 経路自体ではなく
+委譲先 f32 reduction の不具合。`docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md`
+§3.1）。`typed_ops_f64_contract.rs` は `#[ignore]` なし（GPU 非依存の契約テスト）のため
+実機では対象外。
+
 ## 13. 調査・実装記録（#1704・CUDA `TypedOps<bf16>`）
 
 `backend-cuda` に `TypedOps<half::bf16>` を実装し、`CudaBackendOps::typed_ops_bf16()`（`crates/tensor-core/src/backend_ops.rs` の非破壊拡張 accessor。既定 `None`）を `Some(self)` へオーバーライドして結線した（イシュー #1704・親 #1650）。
@@ -292,6 +303,14 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 ```sh
 cargo test -p fandhe-ai-backend-cuda --release --test typed_ops_bf16_parity -- --ignored --nocapture
 ```
+
+**GB10 実機実測（2026-09-16 追記）**: `crates/backend-cuda/tests/typed_ops_bf16_parity.rs`
+（`--ignored`）を転送元コミット `3e43bbd0` で実行し **0 pass / 1 fail**
+（`typed_ops_bf16_matches_across_shapes`）。ホスト側 bf16⇔f32 変換後に委譲する
+`CudaBackendOps::sum` が reduction カーネルの NVRTC コンパイルエラー（`INFINITY` 未定義）
+で失敗するため、gemm／elementwise を含む同一テスト内の後続比較に到達しない（bf16 変換
+経路自体の不一致は未観測。`docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md` §3.1）。
+判定は FAIL のまま記録し、tolerance／baseline は変更しない。
 
 ### 12.7 スコープ外
 

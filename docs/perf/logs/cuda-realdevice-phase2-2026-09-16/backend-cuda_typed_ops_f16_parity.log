@@ -1,0 +1,21 @@
+== backend-cuda_typed_ops_f16_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test typed_ops_f16_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/typed_ops_f16_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/typed_ops_f16_parity-92fc376709618e56)
+
+running 3 tests
+
+thread 'typed_f16_elementwise_and_reduction_match_cpu_backend_ops_rounded' (1334944) panicked at crates/backend-cuda/tests/typed_ops_f16_parity.rs:257:64:
+cuda sum succeeds: CudaUnavailable("nvrtc compile error: CompileError { nvrtc: NvrtcError(NVRTC_ERROR_COMPILATION), options: [\"--gpu-architecture=compute_121\"], log: \"default_program(11): error: identifier \\\"INFINITY\\\" is undefined\\n      float acc = -INFINITY;\\n                   ^\\n\\n1 error detected in the compilation of \\\"default_program\\\".\\n\" }")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test typed_f16_elementwise_and_reduction_match_cpu_backend_ops_rounded ... FAILED
+test typed_f16_gemm_matches_cpu_reference_rounded ... ok
+test typed_f16_gemm_is_bit_identical_to_cuda_gemm_auto_run_f16 ... ok
+
+failures:
+
+failures:
+    typed_f16_elementwise_and_reduction_match_cpu_backend_ops_rounded
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.93s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test typed_ops_f16_parity`

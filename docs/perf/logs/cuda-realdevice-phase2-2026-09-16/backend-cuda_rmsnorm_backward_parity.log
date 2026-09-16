@@ -1,0 +1,10 @@
+== backend-cuda_rmsnorm_backward_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test rmsnorm_backward_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/rmsnorm_backward_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/rmsnorm_backward_parity-0fa339aee9e225e9)
+
+running 2 tests
+test rmsnorm_backward_matches_cpu_across_shapes ... ok
+test rmsnorm_backward_dw_split_matches_cpu_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 4.25s
+

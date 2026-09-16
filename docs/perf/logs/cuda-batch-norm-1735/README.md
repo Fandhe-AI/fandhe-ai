@@ -58,3 +58,7 @@ cargo test -p fandhe-ai --release --test batch_norm_backend_parity -- --ignored 
   いこと（`batch_norm_train_propagates_nan_only_for_channel_with_nan`）
 - 上記いずれも FAIL の場合は本番結線（`ops.rs::CudaBackendOps::
   batch_norm_train`／`batch_norm_infer`）を見直す（イシュー再オープン）
+
+## 実測記録（2026-09-16・DGX Spark GB10・転送元コミット `3e43bbd0`）
+
+実測ログは `docs/perf/logs/cuda-realdevice-phase2-2026-09-16/`（`backend-cuda_*.log`・`facade_*.log`・`env_info.txt`）に収めた。結果一覧と判定は同ディレクトリ README §2 と design doc の該当節を参照。

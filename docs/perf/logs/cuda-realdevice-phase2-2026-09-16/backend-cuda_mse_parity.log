@@ -1,0 +1,9 @@
+== backend-cuda_mse_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test mse_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/mse_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/mse_parity-22c593ca0ab68dc0)
+
+running 1 test
+test mse_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.34s
+

@@ -1,0 +1,9 @@
+== backend-cuda_constant_pad_parity: cargo test -p fandhe-ai-backend-cuda --release --all-features --test constant_pad_parity -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/constant_pad_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/constant_pad_parity-8b2f84d471a79ccd)
+
+running 1 test
+test pad_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.24s
+

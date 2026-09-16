@@ -1262,3 +1262,31 @@ reduction カーネル・`Var::sum` のホストフォールバック・テス�
 `mse_loss` へ変更）はいずれもコード変更であり本記録の対象外（ユーザー判断
 へ回す）。CUDA（GB10）側は本節の対象外。総合分析は
 `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §2a・§3.1。
+
+#### #1771 CUDA（DGX Spark GB10）実機実測（2026-09-16）
+
+`docs/perf/logs/conv-realdevice-1771/run_ignored_tests_cuda.sh` を 2 回起動し
+`check_determinism.sh` で突合した（転送元コミット `3e43bbd0`・GPU アイドル・ログは
+同ディレクトリ `cuda/ignored-run{1,2}/`・`cuda/check_determinism.log`・`env_info.txt`
+CUDA 節）。
+
+| ログ | pass | fail | 失敗テスト |
+|---|---|---|---|
+| `im2col_col2im_parity` | 4 | 0 | — |
+| `conv2d_backend_parity`（`cuda_`） | 1 | 1 | `cuda_conv2d_backward_matches_cpu` |
+| `conv1d_backend_parity`（`cuda_`） | 2 | 2 | `cuda_conv1d_backward_matches_cpu`・`cuda_conv1d_matches_manual_reshape_conv2d_bit_exact` |
+| `nn_conv_backend_parity`（`cuda_`） | 5 | 1 | `cuda_sequential_conv1d_matches_manual_reshape_conv2d_bit_exact` |
+
+- 規則 1)・4)・5): PASS（im2col／col2im bit 完全一致・run-to-run 決定性・record-only
+  学習ループ）
+- 規則 2)・3): Metal と同じ 4 テストが、loss 縮約 `Var::sum` の段階で
+  `CudaUnavailable("nvrtc compile error … identifier \"INFINITY\" is undefined")`
+  （`crates/backend-cuda/src/kernels_reduce.rs` の `-INFINITY`。GB10 の NVRTC 13.0 で
+  未定義）により比較に到達せず FAIL（判定不能）。`mse_loss` 経由の nn 層 backward
+  は pass しており conv 演算自体の数値不一致は未観測
+
+**verdict = FAIL（規則 2)・3) 未成立。CUDA reduction カーネルの NVRTC コンパイル
+エラーに起因）**。tolerance／`BASELINES` は変更せず、判定規則の事後緩和も行わない。
+是正（reduction カーネル側の `INFINITY` 定義の置換）はコード変更であり本記録の
+対象外（ユーザー判断へ回す）。総合分析は
+`docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md` §2a・§3.1。

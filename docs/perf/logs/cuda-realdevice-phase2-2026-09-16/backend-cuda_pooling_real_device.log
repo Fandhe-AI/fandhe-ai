@@ -1,0 +1,33 @@
+== backend-cuda_pooling_real_device: cargo test -p fandhe-ai-backend-cuda --release --all-features --lib pooling::pooling_real_device_tests -- --ignored --nocapture
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (/home/<user>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_cuda-bd57fdee581f4a8f)
+
+running 11 tests
+max_pool2d_dilation.values.fold_bits=0xa819f33ba28e13f5
+max_pool2d_dilation.indices.fold_bits=0xdbd09287ea36b659
+test pooling::pooling_real_device_tests::max_pool2d_dilation_boundary_matches_model ... ok
+max_pool2d_basic.values.fold_bits=0xa57e3e99b5f582dd
+max_pool2d_basic.indices.fold_bits=0x422180132914f4d0
+test pooling::pooling_real_device_tests::max_pool2d_basic_matches_model ... ok
+test pooling::pooling_real_device_tests::max_pool2d_nan_inf_negzero_matches_model ... ok
+max_pool2d_1d.values.fold_bits=0x7563ccb8023f9ed9
+max_pool2d_1d.indices.fold_bits=0x1d8132339eafe39a
+test pooling::pooling_real_device_tests::max_pool2d_1d_merged_shape_matches_model ... ok
+adaptive_avg_pool2d_upsample.values.fold_bits=0x03a10a5b08af6663
+test pooling::pooling_real_device_tests::adaptive_avg_pool2d_upsampling_matches_model ... ok
+avg_pool2d_include_pad_false.values.fold_bits=0x40a1133a540297bb
+test pooling::pooling_real_device_tests::avg_pool2d_count_include_pad_false_matches_model ... ok
+avg_pool2d_include_pad_true.values.fold_bits=0x6980ee7b35563345
+test pooling::pooling_real_device_tests::avg_pool2d_count_include_pad_true_matches_model ... ok
+test pooling::pooling_real_device_tests::max_pool2d_run_to_run_bit_identical ... ok
+max_pool2d_block_boundary.values.fold_bits=0xb2e1ae1b352d94fb
+max_pool2d_block_boundary.indices.fold_bits=0xf9f0f4f247340a50
+test pooling::pooling_real_device_tests::max_pool2d_crosses_block_boundary_matches_model ... ok
+max_pool2d_overlap.values.fold_bits=0x02d010dcf7367799
+max_pool2d_overlap.indices.fold_bits=0xe582dce0501d1ab5
+test pooling::pooling_real_device_tests::max_pool2d_overlapping_window_matches_model ... ok
+adaptive_avg_pool2d_global.values.fold_bits=0x86c22bc161eb9c37
+test pooling::pooling_real_device_tests::adaptive_avg_pool2d_global_average_matches_model ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 1048 filtered out; finished in 0.64s
+
