@@ -280,12 +280,17 @@ mod tests {
         }
     }
 
-    /// チャンク境界感度: `CHUNK`（4096）境界を跨ぐ相殺列を配置した
-    /// 場合に、モデルが CPU 参照実装（チャンク内逐次 → チャンク間
-    /// 逐次の 2 段結合）と bit 一致することを確認する。誤った
-    /// `REDUCE_SUM_CHUNK` 値や単純な平坦逐次和ではこの入力で不一致に
-    /// なる（下の `sum_all_flat_sequential_diverges_from_chunked_at_
-    /// large_n` が平坦逐次和との相違を独立に示す）。
+    /// チャンク境界感度（複数チャンク・端数チャンクを跨ぐ規模）:
+    /// `CHUNK`（4096）境界を跨ぐ相殺列を含む大きめの配列で、モデルが
+    /// CPU 参照実装（チャンク内逐次 → チャンク間逐次の 2 段結合）と
+    /// bit 一致することを確認する。**注意**: 本テストの相殺値
+    /// （`2^24`／`2^20`）は f64 の仮数精度（52 bit）内に十分収まる
+    /// ため、実際には平坦逐次和でも同じ結果になり（binary64 では
+    /// 結合順序による丸め差が生じない）、`REDUCE_SUM_CHUNK` の値の
+    /// 取り違えやチャンク数の計算誤りは検出するが、2 段結合という
+    /// 構造そのもの（結合順序）は検出しない。結合順序依存の丸め差は
+    /// 下の `sum_all_flat_sequential_diverges_from_chunked_at_large_n`
+    /// が別途固定する（codex-review 指摘。イシュー #1895 PR #1925）。
     #[test]
     fn sum_all_chunk_boundary_cancelling_sequence_matches_cpu() {
         // 2^24 は f32 の仮数精度限界（`2^24 + 1` は `2^24` へ丸められる）
@@ -301,6 +306,51 @@ mod tests {
         let tensor = Tensor::new(data, &[4097 * 3]).unwrap();
         let expected = cpu_sum(&tensor, None).unwrap().as_slice().unwrap()[0];
         assert_bits_match(model, expected);
+    }
+
+    /// チャンク境界の結合順序依存性（binary64 の丸め差を実際に顕在化
+    /// させる入力）: `2^53`（f64 仮数精度限界。`2^53 + 1` は最近接
+    /// 偶数丸めで `2^53` へ丸められる）をチャンク 0 の末尾（index
+    /// `CHUNK - 1`）に、`1.0` と `-2^53` をチャンク 1 の先頭 2 要素
+    /// （index `CHUNK`・`CHUNK + 1`）に配置する。
+    ///
+    /// 平坦逐次和（単一アキュムレータで先頭から通しで加算）は
+    /// `(2^53 + 1) + (-2^53)` の順で評価され、`2^53 + 1` が `2^53`
+    /// へ丸められた結果 `-2^53` と相殺して `0.0` になる。一方
+    /// [`sum_all_soft_f64`] の 2 段結合（チャンク 1 を `0.0` から
+    /// 独立に `1.0 + (-2^53)` として先に評価してから `2^53` へ加算）
+    /// は `1.0 + (-2^53) = -(2^53 - 1)`（`2^53 - 1` は 53 bit 仮数で
+    /// 丸めなしに正確に表現できる）を経て `2^53 + (-(2^53 - 1)) =
+    /// 1.0` になる。両者は `0.0` と `1.0` という異なる結果になり
+    /// （Python `float`〈binary64〉で事前計算し固定した値。本テストは
+    /// この相違自体を主張とする）、CPU 参照実装の 2 段結合構造との
+    /// bit 一致とあわせて、モデルが単純な平坦逐次和ではなくチャンク
+    /// 境界での結合順序を正しく再現していることを検証する
+    /// （codex-review 指摘・イシュー #1895 PR #1925）。
+    #[test]
+    fn sum_all_flat_sequential_diverges_from_chunked_at_large_n() {
+        let mut data = vec![0.0f32; REDUCE_SUM_CHUNK + 2];
+        data[REDUCE_SUM_CHUNK - 1] = 2f32.powi(53); // チャンク 0 末尾。
+        data[REDUCE_SUM_CHUNK] = 1.0; // チャンク 1 先頭。
+        data[REDUCE_SUM_CHUNK + 1] = -(2f32.powi(53)); // チャンク 1 2 番目。
+
+        let flat = crate::soft_f64::sequential_sum_f32(&data);
+        let chunked = sum_all_soft_f64(&data);
+
+        // 事前に Python（binary64）で計算し固定した値: 平坦逐次和は
+        // `0.0`・2 段チャンク結合は `1.0` になり、実際に異なる。
+        assert_eq!(flat.to_bits(), 0.0f32.to_bits(), "flat sequential sum");
+        assert_eq!(chunked.to_bits(), 1.0f32.to_bits(), "chunked sum");
+        assert_ne!(
+            flat.to_bits(),
+            chunked.to_bits(),
+            "平坦逐次和と 2 段チャンク結合が一致してしまっている（構造を検証できていない）"
+        );
+
+        // モデルは CPU 参照実装（同じ 2 段結合構造）と bit 一致する。
+        let tensor = Tensor::new(data, &[REDUCE_SUM_CHUNK + 2]).unwrap();
+        let expected = cpu_sum(&tensor, None).unwrap().as_slice().unwrap()[0];
+        assert_bits_match(chunked, expected);
     }
 
     /// `-0.0` のみの入力は `+0.0` になる（fold の初期値 `+0.0` により

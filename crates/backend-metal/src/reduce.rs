@@ -318,6 +318,13 @@ fn encode_sum_all_finalize_dispatch(
         encoder.setBuffer_offset_atIndex(Some(partial_buf.raw()), 0, 0);
         encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
     }
+
+    // SAFETY: `setBytes_length_atIndex` はポインタが指すバイト列を
+    // 呼び出し中に即座に複製するため、`num_chunks`（ローカル変数）の
+    // 生存期間は本呼び出し内で閉じており呼び出し後に破棄されても
+    // 問題ない。バイト数 `size_of::<u32>()` と型は `shaders/reduce.
+    // metal::reduce_sum_all_finalize_f32` の `constant uint& num_chunks`
+    // 宣言（index 2）と一致させている。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&num_chunks).cast(),
@@ -361,6 +368,14 @@ fn encode_sum_axis_dispatch(
         encoder.setBuffer_offset_atIndex(Some(x_buf.raw()), 0, 0);
         encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
     }
+
+    // SAFETY: `setBytes_length_atIndex` はポインタが指すバイト列を
+    // 呼び出し中に即座に複製するため、`lanes`／`axis_len`／`inner`
+    // （いずれもローカル変数）の生存期間は本呼び出し内で閉じており
+    // 呼び出し後に破棄されても問題ない。各バイト数 `size_of::<u32>()`
+    // と型は `shaders/reduce.metal::reduce_sum_axis_f32` の
+    // `constant uint& lanes`（index 2）／`axis_len`（index 3）／
+    // `inner`（index 4）宣言と一致させている。
     unsafe {
         encoder.setBytes_length_atIndex(
             std::ptr::NonNull::from(&lanes).cast(),
