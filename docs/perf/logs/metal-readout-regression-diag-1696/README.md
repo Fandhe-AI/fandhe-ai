@@ -3,6 +3,12 @@
 `crates/backend-metal/src/readout_regression_diag_tests_1695.rs`（イシュー
 #1695）の 4 腕診断ハーネスを M4 Max 実機で実行した結果の置き場。
 
+**2026-09-16 実測済み**: M4 Max 実機で `orchestrate.sh` を実行し、生成物
+（`aggregate.md`・主系列 60 ログ・副系列 3 ログ・`uptime_*`・
+`pmset_therm_*`・`env_info.txt`）を本ディレクトリへ収めた（record_only・
+共有負荷下。転記先は `docs/perf/metal-readout-legacy-regression-four-arm-
+diag.md` §6・§7・§8・§10）。以下は実測前の記述をそのまま残す。
+
 **現状（本 PR 時点）**: `orchestrate.sh`・本 README・
 `env_info.txt.example`・`aggregate.py` は用意済みだが、実測ログ（生成物
 自体）は未生成。本 PR を書いた実行環境に Apple Silicon 実機へのアクセス
