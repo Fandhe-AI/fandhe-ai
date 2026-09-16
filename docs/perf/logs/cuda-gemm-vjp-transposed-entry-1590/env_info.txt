@@ -15,10 +15,12 @@ before_sha: 82058501
 after_sha: ab0b77d0
 head_sha: 3e43bbd0
 # before／after ツリーの同定根拠: `git archive 82058501`／`git archive ab0b77d0`
-# で展開したツリー（実行担当者の申告）＋ ab/tree-{before,after}-1590.txt（両者とも
-# fandhe-ai v0.6.0 の path 依存）。展開ツリーは `.git` を持たないため `.rev-stamp`
-# 等による独立検証記録は本ディレクトリに含まれていない（要確認事項として
-# docs/perf/cuda-gemm-vjp-transposed-entry.md §3.3 に明記）。
+# で展開したツリー＋ ab/tree-{before,after}-1590.txt（両者とも fandhe-ai v0.6.0 の
+# path 依存）。展開ツリーは `.git` を持たないため、両ツリーの `.rev-stamp`
+# （ab/rev-stamp-{before,after}-1590.txt。before=820585014a6d…f7a02・
+# after=ab0b77d0b233…fde791）を回収し、crates/ とハーネスの全ファイル SHA-256 一覧を
+# `git archive` と突合して両腕とも一致することを独立検証済み（2026-09-16。
+# ab/rev-stamp-verification-1590.md・docs/perf/cuda-gemm-vjp-transposed-entry.md §3.3）。
 # head_sha 3e43bbd0 は crates/・scripts/ が origin/main 565300e4 と同一。
 before_binary_sha256: 30b1634c304cd25507415287c182caa4dc774561f4ef30d9eed84203ce1bd2d3
 after_binary_sha256: 0e28f27bc947e8d555317c68744c065dec3d9681ebe501e7185c011453542ad7
