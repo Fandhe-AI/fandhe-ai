@@ -152,6 +152,12 @@ panic はすべて
   `-1.0f/0.0f` 等 NVRTC で解決できる定義への置換）であり本 PR 対象外。
   `out-of-scope-tracking.md` に従い切り出し済み: #1893
 
+**是正済み（#1893）**: 単位元を `__uint_as_float(0xff800000u)`／
+`__uint_as_float(0x7f800000u)` の bit パターン直接構成へ置換し
+`INFINITY`／`-INFINITY` マクロ依存を解消した。GB10 実機再実測は
+`docs/perf/logs/cuda-reduce-nvrtc-infinity-1893/` を参照（本 PR 時点で
+は未実測のまま記入欄のみ）。
+
 ### 3.2 既知 FAIL（10 件）
 
 §1 の表のとおり、f16 Tensor Core K=4096 ストレス 3 件・TF32／3×TF32 の厳密ゼロ fail

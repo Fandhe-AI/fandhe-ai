@@ -289,7 +289,9 @@ impl CudaReduce {
                 shared_mem_bytes: 0,
             };
             // SAFETY: `run_sum_all_f32` と同一の根拠（`partial` は f32・
-            // `-INFINITY` 単位元で全ブロックが 1 回だけ書く）。
+            // −inf 単位元〈`NEG_INF_F32`。カーネル側は NVRTC が
+            // `INFINITY` マクロを解決できないための bit パターン
+            // 直接構成。イシュー #1893〉で全ブロックが 1 回だけ書く）。
             unsafe {
                 self.stream
                     .launch_builder(&self.max_all_partial_f32)
@@ -491,7 +493,9 @@ impl CudaReduce {
                 shared_mem_bytes: 0,
             };
             // SAFETY: `run_max_all_f32` と同一の根拠（`partial` は f32・
-            // `+INFINITY` 単位元で全ブロックが 1 回だけ書く）。
+            // +inf 単位元〈`POS_INF_F32`。カーネル側は NVRTC が
+            // `INFINITY` マクロを解決できないための bit パターン
+            // 直接構成。イシュー #1893〉で全ブロックが 1 回だけ書く）。
             unsafe {
                 self.stream
                     .launch_builder(&self.min_all_partial_f32)
