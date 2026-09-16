@@ -1,0 +1,11 @@
+# イシュー #1580 M4 Max 実機実測 env_info（内部ホスト名・ユーザー名・絶対パスは書かない）
+date_utc: 2026-09-16T01:35:57Z 〜 01:38Z
+hostname: masked
+machine: Apple M4 Max（40 コア構成・論理 CPU 16・P コア 12）
+os: macOS 26.6.2
+rustc: 1.98.1 (48a229cea 2026-09-01)
+before_tree: git worktree edb85c43（#1688 直前の親。`git-sha-before-1580.txt`）
+after_tree: git worktree 565300e4（origin/main。`git-sha-after-1580.txt`）
+load_gate: record_only（専有ゲート機構なし）。計測中 load average（1 分）21〜23（別セッションの workspace 全体テストが並走した共有負荷下。`uptime-1580.log`）
+build_during_measure: 本 A/B の bench-fandhe ビルドは計測前に完了（`run_ab_infer_chain_metal.sh` の設計どおり）。他セッションの cargo ビルドは並走
+ignored_tests: linear_forward_device_parity 6 pass・infer_device_chain_metal 4 pass
