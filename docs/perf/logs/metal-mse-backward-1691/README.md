@@ -1,5 +1,17 @@
 # イシュー #1691 実測スキャフォールド（Metal `mse_loss_backward` encode-only 化）
 
+## 2026-09-16 実測済み（M4 Max）
+
+本ディレクトリには 2026-09-16 の M4 Max 実機実測の生成物を保存済み
+（`orchestrate.sh` の (a)〜(d)(f) 生成物・`orchestrate_stdout.log`・
+`progress_1691_excerpt.txt`・`ignored_store_parity_serial.log`・(e) 手動
+実行分 `ab/`）。`orchestrate.sh` は (f) の `device_param_store_backend_
+parity`（`grad_readout_contract_on_metal`。main 既存 FAIL・本 issue 対象外）
+で `set -eu` 中断したため `uptime_after.txt` は未生成。verdict は
+**REJECT**（(d) `general_shape 16384` ratio 1.0109 > 1.00・(f) FAIL 1 件）。
+実値・判定・原因分析は `docs/perf/metal-mse-backward-encode-only-ab.md`
+§3 と `env_info.txt` を正とする。以下はスキャフォールド作成時の記述。
+
 ## 位置づけ（本 PR 時点では未実測）
 
 本 PR の実行環境（Linux コンテナ／worktree）には Apple Silicon 実機への

@@ -1,0 +1,249 @@
+=== env_info (before) ===
+Darwin 25.6.0 arm64
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+rustc 1.98.1 (48a229cea 2026-09-01)
+machdep.cpu.brand_string: Apple M4 Max
+84490ad11314ad482892d0fb01831f15ca1b0663
+=== env_info (after) ===
+Darwin 25.6.0 arm64
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+rustc 1.98.1 (48a229cea 2026-09-01)
+machdep.cpu.brand_string: Apple M4 Max
+565300e41d5854b0d2ade6c23a5eaa04b6bf3685
+=== (a) REQ-2 正しさ確認（after 腕・mse_parity） ===
+ 753 | impl MetalGemm {
+     | -------------- methods in this implementation
+...
+2607 |     fn encode_tiled_nn_recorded(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2729 |     pub(crate) fn encode_tiled_prepared(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+   Compiling fandhe-ai-backend-metal v0.8.0 (/Users/<user>/work/wt-after-main/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 0.49s
+     Running tests/mse_parity.rs (target/release/deps/mse_parity-8731023bb9e006f2)
+
+running 1 test
+test mse_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+=== (b) bit 同一確認（before 腕） ===
+final.param[3][3].bits = 0x3d67d211
+test dump_metal_reuse_step_grad_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.92s
+
+=== (b) bit 同一確認（after 腕） ===
+final.param[3][3].bits = 0x3d67d211
+test dump_metal_reuse_step_grad_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.04s
+
+bit dump: 4462/4462 行・0 diff lines (bit-identical)
+=== (c) カウンタ実測（after 腕。hard assert 11/7/7 期待） ===
+    | ------------------ methods in this implementation
+...
+715 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+   Compiling fandhe-ai v0.8.0 (/Users/<user>/work/wt-after-main/crates/facade)
+    Finished `release` profile [optimized] target(s) in 1.48s
+     Running tests/mnist_scale_train_reuse_bench.rs (target/release/deps/mnist_scale_train_reuse_bench-a0c1c5da115ae501)
+
+running 1 test
+test mnist_scale_train_reuse_metal_batch_counters ... [mnist_scale_train_reuse_metal_batch_counters] steady-state 1 step: encode_delta=11 command_buffer_delta=7 wait_delta=7 — before（#1099 適用前）は 9/9/9、#1099 適用直後は 9/8/8、#1223（VJP の Metal GPU dispatch 化）適用直後は 11/10/10、#1555 （gemm_fp32_strict_into の Metal 実装）適用後は 11/9/9、#1563 （d_weight encode を d_input の同期点より前へ移し層内で合流）適用後は 11/8/8、#1566（bias 勾配も同一 encode-only ディスパッチへ統合。 机上導出では #1563 時点で bias 用 upload_into が既に no-op だった ため 11/8/8 から不変と結論。本ファイル冒頭 doc comment「#1566 追記（是正版）」参照）適用後も 11/8/8（見込み・Mac 実機未確認） （`docs/backend-metal-command-batching-design.md` §4.2・§7「#1550」「#1555」「#1563」節・§10.7〜§10.9「#1566」節）
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.19s
+
+ 753 | impl MetalGemm {
+     | -------------- methods in this implementation
+...
+2607 |     fn encode_tiled_nn_recorded(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2729 |     pub(crate) fn encode_tiled_prepared(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+    Finished `release` profile [optimized] target(s) in 0.15s
+     Running tests/mnist_scale_train_reuse_bench.rs (target/release/deps/mnist_scale_train_reuse_bench-a0c1c5da115ae501)
+
+running 1 test
+test mnist_scale_train_reuse_metal_backward_dinput_phase ... [mnist_scale_train_reuse_metal_backward_dinput_phase] backward-only median=0.682667ms q1=0.636041ms q3=0.760666ms (n=5) encode_deltas=[5, 5, 5, 5, 5] command_buffer_deltas=[3, 3, 3, 3, 3] wait_deltas=[3, 3, 3, 3, 3] — 事前登録仮説（#1562 codex-review 是正後・#1563 で更新）: encode_delta=5（MseLoss VJP の dispatch_sync 1 回 + d_input 2 回 + d_weight 2 回。不変）・command_buffer_delta=3（cb 生成は MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。#1562 時点の 4 から 1 減る）・wait_delta=3（MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。窓終了時点で open バッチが残らないため全て本窓内で wait 済み）。record only, non-gating（`docs/backend-metal-command-batching-design.md` §7.4）
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.10s
+
+=== (c) カウンタ実測（before 腕。11/8/8 再現確認） ===
+    | ------------------ methods in this implementation
+...
+715 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+   Compiling fandhe-ai v0.8.0 (/Users/<user>/work/wt-1691-before/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.47s
+     Running tests/mnist_scale_train_reuse_bench.rs (target/release/deps/mnist_scale_train_reuse_bench-a0c1c5da115ae501)
+
+running 1 test
+test mnist_scale_train_reuse_metal_batch_counters ... [mnist_scale_train_reuse_metal_batch_counters] steady-state 1 step: encode_delta=11 command_buffer_delta=8 wait_delta=8 — before（#1099 適用前）は 9/9/9、#1099 適用直後は 9/8/8、#1223（VJP の Metal GPU dispatch 化）適用直後は 11/10/10、#1555 （gemm_fp32_strict_into の Metal 実装）適用後は 11/9/9、#1563 （d_weight encode を d_input の同期点より前へ移し層内で合流）適用後は 11/8/8、#1566（bias 勾配も同一 encode-only ディスパッチへ統合。 机上導出では #1563 時点で bias 用 upload_into が既に no-op だった ため 11/8/8 から不変と結論。本ファイル冒頭 doc comment「#1566 追記（是正版）」参照）適用後も 11/8/8（見込み・Mac 実機未確認） （`docs/backend-metal-command-batching-design.md` §4.2・§7「#1550」「#1555」「#1563」節・§10.7〜§10.9「#1566」節）
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.12s
+
+ 732 | impl MetalGemm {
+     | -------------- methods in this implementation
+...
+2408 |     fn encode_tiled_nn_recorded(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2530 |     pub(crate) fn encode_tiled_prepared(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running tests/mnist_scale_train_reuse_bench.rs (target/release/deps/mnist_scale_train_reuse_bench-a0c1c5da115ae501)
+
+running 1 test
+test mnist_scale_train_reuse_metal_backward_dinput_phase ... [mnist_scale_train_reuse_metal_backward_dinput_phase] backward-only median=1.026833ms q1=1.021667ms q3=1.037584ms (n=5) encode_deltas=[5, 5, 5, 5, 5] command_buffer_deltas=[3, 3, 3, 3, 3] wait_deltas=[3, 3, 3, 3, 3] — 事前登録仮説（#1562 codex-review 是正後・#1563 で更新）: encode_delta=5（MseLoss VJP の dispatch_sync 1 回 + d_input 2 回 + d_weight 2 回。不変）・command_buffer_delta=3（cb 生成は MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。#1562 時点の 4 から 1 減る）・wait_delta=3（MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。窓終了時点で open バッチが残らないため全て本窓内で wait 済み）。record only, non-gating（`docs/backend-metal-command-batching-design.md` §7.4）
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.11s
+
+=== (d) backward マイクロベンチ 5 round・起動順反転 ===
+-- round 1/5 --
+-- round 2/5 --
+-- round 3/5 --
+-- round 4/5 --
+-- round 5/5 --
+WARNING: aggregate.py exited non-zero (regression ratio>1.00 or grad mismatch); see /Users/<user>/work/wt-after-main/docs/perf/logs/metal-mse-backward-1691/aggregate.md
+case                 numel   before_med_s    after_med_s    ratio  grad_ok
+general_shape        16384    0.000164375    0.000166166   1.0109       OK >1.00
+general_shape        65536    0.000224667    0.000213667   0.9510       OK <=1.00
+general_shape      1048576    0.001411000    0.001340416   0.9500       OK <=1.00
+train_shape            640    0.000142500    0.000140667   0.9871       OK <=1.00
+
+grad bit-fold all match: True
+all cells ratio<=1.00: False
+overall judgement (grad match and ratio<=1.00): False
+=== (f) #[ignore] 群非後退確認（after 腕） ===
+    |
+517 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+715 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.20s
+     Running tests/mse_parity.rs (target/release/deps/mse_parity-8731023bb9e006f2)
+
+running 1 test
+test mse_matches_cpu_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running tests/mnist_scale_train_reuse_bench.rs (target/release/deps/mnist_scale_train_reuse_bench-a0c1c5da115ae501)
+
+running 3 tests
+test mnist_scale_train_fresh_vs_reuse_metal ... [mnist_scale_train_reuse_bench:metal] trials=5 fresh_median_ms=1.234 (q1=1.219, q3=1.303) reuse_median_ms=0.995 (q1=0.949, q3=1.026) reuse_vs_fresh_x=1.240 — HEAD 絶対値。0.4.0 基準点との境界差は 本ファイル冒頭コメント参照。record only, non-gating
+ok
+test mnist_scale_train_reuse_metal_backward_dinput_phase ... [mnist_scale_train_reuse_metal_backward_dinput_phase] backward-only median=0.461083ms q1=0.457792ms q3=0.470375ms (n=5) encode_deltas=[5, 5, 5, 5, 5] command_buffer_deltas=[3, 3, 3, 3, 3] wait_deltas=[3, 3, 3, 3, 3] — 事前登録仮説（#1562 codex-review 是正後・#1563 で更新）: encode_delta=5（MseLoss VJP の dispatch_sync 1 回 + d_input 2 回 + d_weight 2 回。不変）・command_buffer_delta=3（cb 生成は MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。#1562 時点の 4 から 1 減る）・wait_delta=3（MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。窓終了時点で open バッチが残らないため全て本窓内で wait 済み）。record only, non-gating（`docs/backend-metal-command-batching-design.md` §7.4）
+ok
+test mnist_scale_train_reuse_metal_batch_counters ... [mnist_scale_train_reuse_metal_batch_counters] steady-state 1 step: encode_delta=11 command_buffer_delta=7 wait_delta=7 — before（#1099 適用前）は 9/9/9、#1099 適用直後は 9/8/8、#1223（VJP の Metal GPU dispatch 化）適用直後は 11/10/10、#1555 （gemm_fp32_strict_into の Metal 実装）適用後は 11/9/9、#1563 （d_weight encode を d_input の同期点より前へ移し層内で合流）適用後は 11/8/8、#1566（bias 勾配も同一 encode-only ディスパッチへ統合。 机上導出では #1563 時点で bias 用 upload_into が既に no-op だった ため 11/8/8 から不変と結論。本ファイル冒頭 doc comment「#1566 追記（是正版）」参照）適用後も 11/8/8（見込み・Mac 実機未確認） （`docs/backend-metal-command-batching-design.md` §4.2・§7「#1550」「#1555」「#1563」節・§10.7〜§10.9「#1566」節）
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s
+
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+   Compiling fandhe-ai-backend-metal v0.8.0 (/Users/<user>/work/wt-after-main/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 0.40s
+     Running tests/command_batching.rs (target/release/deps/command_batching-29e5304bbe1e2fcf)
+
+running 5 tests
+test dispatch_sync_callers_unchanged_regression_is_covered_elsewhere ... ok
+test dependent_dispatches_in_one_batch_execute_in_order ... ok
+test pool_reuse_zero_fill_does_not_synchronize_open_batch ... ok
+test sgd_batched_multi_param_matches_cpu_across_many_steps ... ok
+test synchronize_after_auto_flush_at_limit ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+2607 |     fn encode_tiled_nn_recorded(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2729 |     pub(crate) fn encode_tiled_prepared(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+   Compiling fandhe-ai-backend-metal v0.8.0 (/Users/<user>/work/wt-after-main/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 0.67s
+     Running tests/command_batching_bench.rs (target/release/deps/command_batching_bench-31b29bbe19687a3f)
+
+running 2 tests
+[command_batching_micro_bench] steps=100 numel=1024 untracked_median_s=0.011007 (q1=0.009599, q3=0.011986) tracked_median_s=0.000340 (q1=0.000306, q3=0.000390) speedup_x=32.351 tracked_faster=true — record only, non-gating（本ファイル冒頭コメント参照）
+test command_batching_micro_bench_untracked_vs_tracked ... ok
+[pool_reuse_interleaved_with_tracked_steps_preserves_batching] steps=50 encode_delta=50 command_buffer_delta=1
+test pool_reuse_interleaved_with_tracked_steps_preserves_batching ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+    | ------------------ methods in this implementation
+...
+715 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+warning: `fandhe-ai-backend-cuda` (lib) generated 62 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+   Compiling fandhe-ai-backend-metal v0.8.0 (/Users/<user>/work/wt-after-main/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 0.38s
+     Running tests/gemm_resident_parity.rs (target/release/deps/gemm_resident_parity-bbb331afe74c98b9)
+
+running 2 tests
+test gemm_resident_lhs_matches_cpu_reference ... ok
+test gemm_resident_rhs_matches_cpu_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+

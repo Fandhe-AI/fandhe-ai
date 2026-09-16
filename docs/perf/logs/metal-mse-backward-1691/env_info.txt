@@ -1,31 +1,35 @@
-# イシュー #1691 Metal mse_loss_backward encode-only 化 実測環境（記入欄）
+# イシュー #1691 Metal mse_loss_backward encode-only 化 実測環境
 #
-# 本 PR 実行環境（Linux コンテナ／worktree）に Apple Silicon 実機への
-# 到達手段がないため未実測。M4 Max 実機での実測時にこのテンプレートを
-# 埋めること（内部ホスト名・ユーザー名は書かない）。
+# 2026-09-16 に Apple M4 Max 実機（Mac セッション）で実測済み。
+# 内部ホスト名・ユーザー名は書かない（絶対パスは `/Users/<user>` へマスク済み）。
+# 時刻・load average は progress_1691_excerpt.txt（ランナーの progress.log
+# から #1691 行のみ抜粋）・uptime_before.txt・ab/raw/uptime-1691.log の転記。
 
 hostname: masked
-date:
-os:
-cpu:
-rustc:
-cargo:
-before_sha:
-after_sha:
-mse_parity_result:
-bitdump_line_count:
-bitdump_label_diff_empty:
-bitdump_diff_empty:
-batch_counters_after:
-batch_counters_before:
-backward_phase_after:
-backward_phase_before:
-train_shape_median_s_ratio:
-general_shape_16384_ratio:
-general_shape_65536_ratio:
-general_shape_1048576_ratio:
-fold_bits_match:
-ab_reuse_step_total_ratio:
-ab_checksum_exact_match:
-ignored_tests_result:
-verdict:
+date: 2026-09-16（orchestrate.sh 01:37:07Z〜01:37:55Z〈(f) の store parity FAIL で rc=101 中断〉・(e) A/B 手動実行 01:42:25Z〜01:43:36Z・store parity 直列再実行 01:43:36Z〜01:43:40Z）
+os: macOS 26.6.2 (25G83) / Darwin 25.6.0 arm64
+cpu: Apple M4 Max（論理 CPU 16）
+rustc: rustc 1.98.1 (48a229cea 2026-09-01)
+cargo: cargo 1.98.1 (797e8a9bc 2026-08-05)
+before_sha: 84490ad11314ad482892d0fb01831f15ca1b0663（git worktree。PR #1785 マージ直前 main）
+after_sha: 565300e41d5854b0d2ade6c23a5eaa04b6bf3685（git worktree。origin/main。crates/ は 84490ad1 比で mse.rs 以外にも多数の後続マージを含む〈git diff --stat 84490ad1 565300e4 -- crates/*/src: 117 files changed〉）
+load_gate: record_only（専有ゲート機構なし）。計測中 1 分 load average: orchestrate 開始 21.17／終了 23.51・A/B 開始 8.27／終了 13.36・A/B run 1〜5 中 11.82〜13.36（別セッションの workspace 全体テストが並走する共有負荷下）
+thermal: pmset_therm before/after とも「No thermal warning level has been recorded」
+mse_parity_result: pass（mse_matches_cpu_across_shapes ... ok。1 passed）
+bitdump_line_count: 4462/4462（before/after とも filtered・labels）
+bitdump_label_diff_empty: yes（0 行）
+bitdump_diff_empty: yes（0 行）
+batch_counters_after: encode_delta=11 command_buffer_delta=7 wait_delta=7（hard assert pass）
+batch_counters_before: encode_delta=11 command_buffer_delta=8 wait_delta=8
+backward_phase_after: encode_deltas=[5,5,5,5,5] command_buffer_deltas=[3,3,3,3,3] wait_deltas=[3,3,3,3,3]（backward-only median=0.682667ms q1=0.636041ms q3=0.760666ms n=5。record-only）
+backward_phase_before: encode_deltas=[5,5,5,5,5] command_buffer_deltas=[3,3,3,3,3] wait_deltas=[3,3,3,3,3]（backward-only median=1.026833ms q1=1.021667ms q3=1.037584ms n=5。record-only）
+train_shape_median_s_ratio: 0.9871（before 0.000142500 / after 0.000140667）
+general_shape_16384_ratio: 1.0109（before 0.000164375 / after 0.000166166）>1.00
+general_shape_65536_ratio: 0.9510（before 0.000224667 / after 0.000213667）
+general_shape_1048576_ratio: 0.9500（before 0.001411000 / after 0.001340416）
+fold_bits_match: True（全 4 セル・5 run・両腕で完全一致）
+ab_reuse_step_total_ratio: 0.9618（before 2.006 ms / after 1.929 ms。run 内比 0.9600, 0.9373, 0.9633, 0.9982, 1.3338）。参考 fresh: 0.9794
+ab_checksum_exact_match: yes（reuse・fresh とも完全一致）
+ignored_tests_result: mse_parity 1/1 pass・mnist_scale_train_reuse_bench 3/3 pass・command_batching 5/5 pass・command_batching_bench 2/2 pass・gemm_resident_parity 2/2 pass・device_param_store_backend_parity 1 pass 1 FAIL（grad_readout_contract_on_metal。--test-threads=1 直列でも FAIL 再現〈ignored_store_parity_serial.log〉。origin/main 上の既存 FAIL・本 issue 対象外）
+uptime_after: 未生成（orchestrate.sh が (f) で中断したため `uptime_after.txt` は書かれていない。A/B 側の uptime は ab/raw/uptime-1691.log）
+verdict: REJECT（事前登録規則: (d) general_shape 16384 が ratio 1.0109 > 1.00。加えて (f) に FAIL 1 件〈main 既存〉があり「(f) pass」も成立しない）
