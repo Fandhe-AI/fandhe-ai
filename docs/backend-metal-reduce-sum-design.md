@@ -149,8 +149,8 @@ CPU 参照実装（`fandhe_ai_backend_cpu::reduction::sum`）と **bit 完全
 - M4 Max 実機での結線後の実測（§9・11 件の backward テスト判定不能の
   解消確認を含む。`docs/perf/logs/metal-reduce-sum-wiring-1896/
   README.md` へ申し送り）
-- `Var::sum` ホストフォールバックの実装（§10 の設計判断はユーザー
-  承認待ちの段階 0）
+- `Var::sum` ホストフォールバックの実装（§10 の設計判断は案 C〈実装
+  しない〉で 2026-09-17 ユーザー承認済み・確定。実装対象から外れた）
 - 並列度改善（結合順序を変えずには実現できないため対象外のまま。
   §3「既知の制約」参照）
 
@@ -190,7 +190,7 @@ CPU 参照実装（`fandhe_ai_backend_cpu::reduction::sum`）と **bit 完全
 |---|---|
 | `dim` が軸範囲外 | `BackendError::ShapeMismatch(AxisOutOfRange)`（デバイス非接触） |
 | 要素数積 `usize` オーバーフロー | `BackendError::ShapeMismatch(ElementCountOverflow)`（デバイス非接触） |
-| カーネル `uint` 引数上限超過（`numel`／`num_chunks`／`lanes`／`axis_len`／`inner` が `u32::MAX` 超） | `BackendError::Unsupported`（`Var::sum` はホストフォールバックを持たないため呼び出し元へそのまま伝播。§10） |
+| カーネル `uint` 引数上限超過（`numel`／`num_chunks`／`lanes`／`axis_len`／`inner` が `u32::MAX` 超） | `BackendError::Unsupported`（`Var::sum` はホストフォールバックを持たず呼び出し元へそのまま伝播。§10 案 C・2026-09-17 ユーザー承認済み） |
 | 内部契約違反（呼び出し元の検査をすり抜けた `reduce.rs` 側の二重検査失敗） | `BackendError::KernelLaunchFailed`（`map_metal_error` の wildcard arm） |
 | 上記以外 | `Ok`。CPU 参照実装と bit 完全一致 |
 
@@ -230,10 +230,10 @@ metal-reduce-sum-wiring-1896/README.md`（事前登録判定規則・実行
 pass。フル実行（`--all-features --no-fail-fast -- --ignored`）は 411 pass／
 1 FAIL で、FAIL は `command_batching` の並列干渉による既知 FAIL 1 件のみ
 （直列 3/3 pass）。#1902（398 pass）比の by-name 差は後退 0 件・新規 pass
-14 件。§10 の `Var::sum` ホストフォールバックは引き続き段階 0（未承認）の
-まま。
+14 件。§10 の `Var::sum` ホストフォールバックは同日時点では段階 0（未承認）
+だったが、2026-09-17 に案 C（実装しない）でユーザー承認済み（§10 結論）。
 
-## 10. `Var::sum` ホストフォールバックの設計判断（未承認・段階 0）
+## 10. `Var::sum` ホストフォールバックの設計判断（案 C 確定・2026-09-17 ユーザー承認済み）
 
 `ops.rs::MetalBackendOps::sum` が `Unsupported` を返すのは（§9 の検査
 順序どおり）カーネル `uint` 引数の上限超過（`numel`／`num_chunks`／
@@ -267,9 +267,22 @@ pass。フル実行（`--all-features --no-fail-fast -- --ignored`）は 411 pas
 4. 案 B は `autodiff` クレートが `backend-cpu` クレートへ依存しない
    設計（cfg ベースバックエンド切替。REQ-2）のため実装が重複する
 
-### 結論（段階 0）
+### 結論（案 C 確定）
 
-**案 C を推奨**。サイズ上限超過は `AutodiffError::Backend(Unsupported)`
+**案 C を採用**。サイズ上限超過は `AutodiffError::Backend(Unsupported)`
 として呼び出し元へそのまま伝播することを受け入れ済み事項として明記
-する。採否・案 A／B への転換はユーザー承認事項であり、本 PR では
-実装しない。
+する。#1896 時点では段階 0（推奨のみ・未承認）として記録し実装しな
+かったが、**2026-09-17 にユーザーが案 C を承認**（イシュー #1932・
+親 #1930・ルート #1920）し確定した。案 A／B への転換は改めてユーザー
+承認を要する別イシューとする。
+
+承認に伴う反映（#1932。コード挙動変更なし）:
+
+- `crates/autodiff/src/var.rs::Var::sum` の doc comment に「`BackendOps::
+  sum` の `Unsupported` はホストへフォールバックせず伝播する（`cumsum`
+  のフォールバック規律とは対になる）」旨を明記
+- `crates/autodiff/tests/sum_no_host_fallback.rs`（Linux 実行可能）:
+  `sum` が `Unsupported` を返すスタブ `BackendOps` 上で `Var::sum(None)`／
+  `Var::sum(Some(dim))` が `Err(AutodiffError::Backend(BackendError::
+  Unsupported(_)))` を返すことを機械的に固定（`cast.rs` のフィクス
+  チャと同型。判定迂回経路を作らない `.claude/rules/security.md` A08）

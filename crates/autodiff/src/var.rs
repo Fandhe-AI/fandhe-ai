@@ -915,6 +915,17 @@ impl<'t> Var<'t> {
     /// `dim` に沿った縮約和。`dim: None` は全軸縮約（スカラー）。
     /// 非 elementwise のため常に実体化済みで返る（`matmul` と同じ
     /// TASK-12.1d の置き換え方針。実行は `self.tape.ops().sum` 経由）。
+    ///
+    /// `BackendOps::sum` が `BackendError::Unsupported` を返した場合も
+    /// ホスト参照実装へは**フォールバックせず**、`AutodiffError::Backend`
+    /// としてそのまま伝播する（[`Self::cumsum`] のフォールバック規律とは
+    /// 対になる契約。案 C・2026-09-17 ユーザー承認済み。
+    /// `docs/backend-metal-reduce-sum-design.md` §10。CPU／CUDA／Metal の
+    /// 本番 `sum` は実装済みで、`Unsupported` は Metal のカーネル引数上限
+    /// 超過等の到達しにくい経路に限られる。ホスト側 `eval::sum` は素の
+    /// f32 逐次和で CPU 参照実装〈f64 チャンク 2 段〉と bit 一致しないため
+    /// silent fallback を許すと `mean`／`var`／`std` 等 `sum` に依存する
+    /// 演算へ数値方式の非一貫性が波及する）。
     pub fn sum(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
         let shape = self.shape();
         reduce_out_shape(&shape, dim)?;
