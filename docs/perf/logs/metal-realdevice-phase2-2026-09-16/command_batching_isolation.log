@@ -1,0 +1,27 @@
+== run1 --test-threads=1 ==
+test dependent_dispatches_in_one_batch_execute_in_order ... ok
+test dispatch_sync_callers_unchanged_regression_is_covered_elsewhere ... ok
+test pool_reuse_zero_fill_does_not_synchronize_open_batch ... ok
+test sgd_batched_multi_param_matches_cpu_across_many_steps ... ok
+test synchronize_after_auto_flush_at_limit ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+== run2 --test-threads=1 ==
+test dependent_dispatches_in_one_batch_execute_in_order ... ok
+test dispatch_sync_callers_unchanged_regression_is_covered_elsewhere ... ok
+test pool_reuse_zero_fill_does_not_synchronize_open_batch ... ok
+test sgd_batched_multi_param_matches_cpu_across_many_steps ... ok
+test synchronize_after_auto_flush_at_limit ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+== run3 --test-threads=1 ==
+test dependent_dispatches_in_one_batch_execute_in_order ... ok
+test dispatch_sync_callers_unchanged_regression_is_covered_elsewhere ... ok
+test pool_reuse_zero_fill_does_not_synchronize_open_batch ... ok
+test sgd_batched_multi_param_matches_cpu_across_many_steps ... ok
+test synchronize_after_auto_flush_at_limit ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+test dispatch_sync_callers_unchanged_regression_is_covered_elsewhere ... ok
+test dependent_dispatches_in_one_batch_execute_in_order ... ok
+test pool_reuse_zero_fill_does_not_synchronize_open_batch ... FAILED
+test synchronize_after_auto_flush_at_limit ... ok
+test sgd_batched_multi_param_matches_cpu_across_many_steps ... ok
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s

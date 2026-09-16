@@ -394,6 +394,26 @@ batch_norm*` は既存 `pub use Var` 経由）。M4 Max 実機実測は本エー
 実行環境に Apple Silicon 実機がないため未実施のまま
 `docs/perf/logs/metal-batch-norm-1736/README.md` へ申し送る。
 
+### 9.6a M4 Max 実機実測（2026-09-16）
+
+`docs/perf/logs/metal-batch-norm-1736/README.md` の手順で実測した（origin/main
+`3e43bbd0`・共有負荷下・ログは同ディレクトリ `batch_norm_parity.log`・
+`batch_norm_backend_parity.log`。`make test-ignored-metal` 相当の非後退確認は
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/make-test-ignored-metal-nofailfast.log`）。
+
+- `crates/backend-metal/tests/batch_norm_parity.rs`（`--ignored`）: **9 pass / 0 fail**
+  （`batch_norm_train_matches_f64_reference_across_shapes_and_affine_combinations`・
+  `batch_norm_infer_matches_f64_reference`・`metal_backend_ops_batch_norm_train_matches_cpu_backend_ops_req2`・
+  `batch_norm_train_is_deterministic_across_runs`〈run-to-run bit 一致〉・NaN 伝播・
+  極端値・非 contiguous 入力・空軸・重み長不一致の各テスト）
+- `crates/facade/tests/batch_norm_backend_parity.rs::metal_batch_norm_train_forward_matches_cpu`:
+  **1 pass / 0 fail**（facade 経路の REQ-2 統一複合判定）
+- 既存 `#[ignore]` 群（`layer_norm_parity` 18 pass・`rmsnorm_parity` 9 pass・
+  `softmax_parity` 7 pass 等）は非後退
+
+判定: PASS（§9.3 判定契約どおり REQ-2 統一複合判定で fail 0 件・決定性成立。
+tolerance／baseline 変更なし）。
+
 ### 9.7 対象外（本 issue でも変更しない）
 
 §7 と同じ（GPU backward・性能最適化・`momentum=None`・

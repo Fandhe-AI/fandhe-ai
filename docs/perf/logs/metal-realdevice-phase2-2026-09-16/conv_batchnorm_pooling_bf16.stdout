@@ -1,0 +1,30 @@
+### conv run1 2026-09-16T00:26:14Z
+ 9:26  up 27 days, 20:38, 24 users, load averages: 30.55 15.57 9.91
+== im2col_col2im_parity ==
+== conv2d_backend_parity ==
+  -> FAILED (see /Users/<user>/fandhe/library/rust-ai-library/docs/perf/logs/conv-realdevice-1771/metal/ignored/conv2d_backend_parity.log)
+== conv1d_backend_parity ==
+  -> FAILED (see /Users/<user>/fandhe/library/rust-ai-library/docs/perf/logs/conv-realdevice-1771/metal/ignored/conv1d_backend_parity.log)
+== nn_conv_backend_parity ==
+  -> FAILED (see /Users/<user>/fandhe/library/rust-ai-library/docs/perf/logs/conv-realdevice-1771/metal/ignored/nn_conv_backend_parity.log)
+done. logs in /Users/<user>/fandhe/library/rust-ai-library/docs/perf/logs/conv-realdevice-1771/metal/ignored
+FAILED: 3 test group(s) failed; see /Users/<user>/fandhe/library/rust-ai-library/docs/perf/logs/conv-realdevice-1771/metal/ignored
+conv run1 rc=1
+### conv run2 2026-09-16T00:26:39Z
+== im2col_col2im_parity ==
+== conv2d_backend_parity ==
+  -> FAILED (see /Users/<user>/fandhe/library/rust-ai-library/docs/perf/logs/conv-realdevice-1771/metal/ignored/conv2d_backend_parity.log)
+== conv1d_backend_parity ==
+  -> FAILED (see /Users/<user>/fandhe/library/rust-ai-library/docs/perf/logs/conv-realdevice-1771/metal/ignored/conv1d_backend_parity.log)
+== nn_conv_backend_parity ==
+  -> FAILED (see /Users/<user>/fandhe/library/rust-ai-library/docs/perf/logs/conv-realdevice-1771/metal/ignored/nn_conv_backend_parity.log)
+done. logs in /Users/<user>/fandhe/library/rust-ai-library/docs/perf/logs/conv-realdevice-1771/metal/ignored
+FAILED: 3 test group(s) failed; see /Users/<user>/fandhe/library/rust-ai-library/docs/perf/logs/conv-realdevice-1771/metal/ignored
+conv run2 rc=1
+### determinism
+PASS: nn_conv_backend_parity.log run-to-run bit 同一（20 行）
+PASS: conv2d_backend_parity.log run-to-run bit 同一（1 行）
+PASS: conv1d_backend_parity.log run-to-run bit 同一（2 行）
+PASS: im2col_col2im_parity.log run-to-run bit 同一（39 行）
+PASS: 全ログ群で run-to-run 決定性チェック成立
+(eval):4: PIPESTATUS[0]: parameter not set

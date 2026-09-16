@@ -1,0 +1,47 @@
+### batch_norm 2026-09-16T00:27:16Z
+bn backend rc=0
+bn facade rc=0
+docs/perf/logs/metal-batch-norm-1736/batch_norm_parity.log:test batch_norm_train_rejects_weight_length_mismatch ... ok
+docs/perf/logs/metal-batch-norm-1736/batch_norm_parity.log:test batch_norm_train_and_infer_empty_axis_return_without_touching_device ... ok
+docs/perf/logs/metal-batch-norm-1736/batch_norm_parity.log:test batch_norm_train_accepts_non_contiguous_input_via_backend_ops ... ok
+docs/perf/logs/metal-batch-norm-1736/batch_norm_parity.log:test batch_norm_train_nan_propagates_only_to_owning_channel ... ok
+docs/perf/logs/metal-batch-norm-1736/batch_norm_parity.log:test batch_norm_infer_matches_f64_reference ... ok
+docs/perf/logs/metal-batch-norm-1736/batch_norm_parity.log:test batch_norm_train_extreme_values_stay_finite ... ok
+docs/perf/logs/metal-batch-norm-1736/batch_norm_parity.log:test metal_backend_ops_batch_norm_train_matches_cpu_backend_ops_req2 ... ok
+docs/perf/logs/metal-batch-norm-1736/batch_norm_parity.log:test batch_norm_train_is_deterministic_across_runs ... ok
+docs/perf/logs/metal-batch-norm-1736/batch_norm_parity.log:test batch_norm_train_matches_f64_reference_across_shapes_and_affine_combinations ... ok
+docs/perf/logs/metal-batch-norm-1736/batch_norm_parity.log:test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+docs/perf/logs/metal-batch-norm-1736/batch_norm_backend_parity.log:test metal_batch_norm_train_forward_matches_cpu ... ok
+docs/perf/logs/metal-batch-norm-1736/batch_norm_backend_parity.log:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.23s
+### pooling 2026-09-16T00:27:23Z
+pooling rc=0
+pooling facade rc=0
+docs/perf/logs/metal-pooling-1730/pooling_parity.log:test zero_batch_returns_empty_without_device_dispatch ... ok
+docs/perf/logs/metal-pooling-1730/pooling_parity.log:test oversized_shape_returns_size_limit_exceeded_error ... ok
+docs/perf/logs/metal-pooling-1730/pooling_parity.log:test max_pool2d_special_values_bit_exact ... ok
+docs/perf/logs/metal-pooling-1730/pooling_parity.log:test adaptive_avg_pool2d_bit_exact_against_host_model ... ok
+docs/perf/logs/metal-pooling-1730/pooling_parity.log:test avg_pool2d_bit_exact_against_host_model ... ok
+docs/perf/logs/metal-pooling-1730/pooling_parity.log:test max_pool2d_bit_exact_against_host_model ... ok
+docs/perf/logs/metal-pooling-1730/pooling_parity.log:test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+docs/perf/logs/metal-realdevice-phase2-2026-09-16/facade_pooling_backend_parity.log:test metal_avg_pool2d_forward_matches_cpu ... ok
+docs/perf/logs/metal-realdevice-phase2-2026-09-16/facade_pooling_backend_parity.log:test metal_adaptive_avg_pool2d_forward_matches_cpu ... ok
+docs/perf/logs/metal-realdevice-phase2-2026-09-16/facade_pooling_backend_parity.log:test metal_max_pool2d_forward_matches_cpu ... ok
+docs/perf/logs/metal-realdevice-phase2-2026-09-16/facade_pooling_backend_parity.log:test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.05s
+### bf16 probe 2026-09-16T00:27:29Z
+probe rc=0
+bf16_probe label=p0_device_attributes device_architecture=applegpu_g16s supports_apple7=true supports_apple8=true supports_apple9=true supports_metal3=true
+test typed_bf16_probe_diag_tests::p0_device_attributes ... ok
+bf16_probe label=p2_simdgroup_bfloat_mma lang=default compile_result=ok
+bf16_probe label=p1_bfloat_scalar lang=default compile_result=ok
+bf16_probe label=p2_simdgroup_bfloat_mma lang=3.1 compile_result=ok
+bf16_probe label=p1_bfloat_scalar lang=3.1 compile_result=ok
+test typed_bf16_probe_diag_tests::p2_simdgroup_bfloat_mma_compile_probe ... ok
+test typed_bf16_probe_diag_tests::p1_bfloat_scalar_compile_probe ... ok
+bf16_probe label=p4_bfloat_roundtrip total=256 mismatches=0 matches=256
+test typed_bf16_probe_diag_tests::p4_bfloat_roundtrip_numeric_smoke ... ok
+bf16_probe label=p3_simdgroup_store_bfloat lang=default compile_result=error message=LibraryCompilation { message: "program_source:19:5: error: no matching function for call to 'simdgroup_store'\n    simdgroup_store(sc, c_ptr, 8);\n    ^~~~~~~~~~~~~~~\n/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/lib/clang/32023.886/include/metal/metal_simdgroup_matrix:174:17: note: candidate template ignored: deduced conflicting types for parameter 'T' ('float' vs. 'bfloat')\nMETAL_FUNC void simdgroup_store(simdgroup_matrix<T, Cols, Rows> a, threadgroup T *dst, ulong elements_per_row = Cols, ulong2 matrix_origin = ulong2(0, 0), bool transpose_matrix = false)\n                ^\n/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/lib/clang/32023.886/include/metal/metal_simdgroup_matrix:179:17: note: candidate template ignored: deduced conflicting types for parameter 'T' ('float' vs. 'bfloat')\nMETAL_FUNC void simdgroup_store(simdgroup_matrix<T, Cols, Rows> a, device T *dst, ulong elements_per_row = Cols, ulong2 matrix_origin = ulong2(0, 0), bool transpose_matrix = false)\n                ^\n" }
+bf16_probe label=p3_simdgroup_store_bfloat lang=3.1 compile_result=error message=LibraryCompilation { message: "program_source:19:5: error: no matching function for call to 'simdgroup_store'\n    simdgroup_store(sc, c_ptr, 8);\n    ^~~~~~~~~~~~~~~\n/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/lib/clang/32023.886/include/metal/metal_simdgroup_matrix:174:17: note: candidate template ignored: deduced conflicting types for parameter 'T' ('float' vs. 'bfloat')\nMETAL_FUNC void simdgroup_store(simdgroup_matrix<T, Cols, Rows> a, threadgroup T *dst, ulong elements_per_row = Cols, ulong2 matrix_origin = ulong2(0, 0), bool transpose_matrix = false)\n                ^\n/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/lib/clang/32023.886/include/metal/metal_simdgroup_matrix:179:17: note: candidate template ignored: deduced conflicting types for parameter 'T' ('float' vs. 'bfloat')\nMETAL_FUNC void simdgroup_store(simdgroup_matrix<T, Cols, Rows> a, device T *dst, ulong elements_per_row = Cols, ulong2 matrix_origin = ulong2(0, 0), bool transpose_matrix = false)\n                ^\n" }
+test typed_bf16_probe_diag_tests::p3_simdgroup_store_bfloat_compile_probe ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 638 filtered out; finished in 0.06s
+### done 2026-09-16T00:27:29Z
+ 9:27  up 27 days, 20:40, 24 users, load averages: 11.44 12.98 9.40

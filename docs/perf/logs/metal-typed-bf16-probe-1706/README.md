@@ -5,6 +5,8 @@ typed_bf16_probe_diag_tests.rs`）の `#[ignore]` テスト（P0〜P4。MSL
 `bfloat` 型・`simdgroup_bfloat8x8` の実機コンパイル可否を調査する非 gating
 プローブ）を Apple Silicon 実機で実行するログ置き場。
 
+**実測済み（2026-09-16・Apple M4 Max・origin/main `3e43bbd0`）**: `typed_bf16_probe.log`・`typed_ops_bf16_parity.log`・`env_info.txt` を収めた。結果の転記は `docs/backend-dtype-dispatch-design.md` §15.6。以下は記入欄作成時（本 PR 時点）の記述をそのまま残す。
+
 **現状（本 PR 時点）**: このディレクトリはまだ空。本 PR を書いた実行環境
 （Linux）には Apple Silicon 実機への到達手段がないため、下記の実測は
 未実施のまま記入欄として残す（`docs/backend-dtype-dispatch-design.md`
@@ -54,5 +56,5 @@ cargo test -p fandhe-ai-backend-metal --release \
 ## 判定基準
 
 本プローブは非 gating（成否を記録するだけで pass/fail 判定を行わない）。
-実測完了後、結果を `docs/backend-dtype-dispatch-design.md` §14.6 へ転記し、
+実測完了後、結果を `docs/backend-dtype-dispatch-design.md` §15.6（bf16 の記入欄。§14.6 は f16〈#1705〉向け）へ転記し、
 (b) の可否（デバイス常駐ネイティブ bf16 経路の実現可能性）を記録する。

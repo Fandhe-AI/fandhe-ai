@@ -22,18 +22,19 @@ verdict:
 ## Metal（Apple Silicon）
 
 hostname: masked
-chip:
-macOS:
-Metal:
-rustc:
-sha:
-run 日時（UTC）:
+chip: Apple M4 Max
+macOS: 26.6.2 (25G83)
+Metal: applegpu_g16s（Apple9 / Metal3 family 対応。`typed_bf16_probe` P0 より）
+rustc: 1.98.1 (48a229cea 2026-09-01)
+sha: 3e43bbd0861da7a6728be1e9609edb2b334022e6
+run 日時（UTC）: 2026-09-16T00:26:14Z（run1）／2026-09-16T00:26:39Z（run2）
+負荷: 共有負荷下（load average 約 10〜30。parity・決定性は負荷非依存）
 
-判定結果:
-- im2col_col2im_parity:
-- conv2d_backend_parity:
-- conv1d_backend_parity:
-- nn_conv_backend_parity:
-- run-to-run 決定性（bits=／fold_bits= diff）:
+判定結果（run1／run2 とも同一。ログは `metal/ignored-run{1,2}/`）:
+- im2col_col2im_parity: 6 pass / 0 fail → 規則 1) PASS（bit 完全一致）
+- conv2d_backend_parity: 1 pass / 1 fail（`metal_conv2d_backward_matches_cpu` が loss 縮約 `Var::sum` の `MetalBackendOps::sum: reduction カーネル未実装` で比較前に失敗）
+- conv1d_backend_parity: 2 pass / 2 fail（`metal_conv1d_backward_matches_cpu`・`metal_conv1d_matches_manual_reshape_conv2d_bit_exact`。同上）
+- nn_conv_backend_parity: 5 pass / 1 fail（`metal_sequential_conv1d_matches_manual_reshape_conv2d_bit_exact`。同上。nn 層の forward／backward〈mse_loss 経由〉・record-only 学習ループは pass）
+- run-to-run 決定性（bits=／fold_bits= diff）: PASS（`metal/check_determinism.log`。4 ログ群とも bit 同一。比較対象は pass したテストが出力した行のみ）
 
-verdict:
+verdict: FAIL（規則 2)・3) 未成立・テスト構造起因。Metal `sum` 未実装により 4 テストが比較に到達しない。conv 演算の数値不一致は未観測。分析は `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §3.1）
