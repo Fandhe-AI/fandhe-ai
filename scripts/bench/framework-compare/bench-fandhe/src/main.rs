@@ -2038,10 +2038,11 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(not(feature = "pinned-h2d-toggle"))]
         {
             return Err(
-                "MEASURE_ERROR: --pinned-h2d requires fandhe-ai >= 0.9.0 or a path-patched \
-                 facade built with --features pinned-h2d-toggle \
-                 (fandhe_ai::set_cuda_pinned_h2d_enabled is not part of the crates.io =0.8.0 \
-                 pin but is part of the =0.9.0 pin; issue #1585; see \
+                "MEASURE_ERROR: --pinned-h2d requires rebuilding bench-fandhe with \
+                 --features pinned-h2d-toggle (this feature is always required, regardless \
+                 of whether fandhe-ai resolves to the crates.io =0.9.0 pin or to a \
+                 path-patched facade; fandhe_ai::set_cuda_pinned_h2d_enabled itself is part \
+                 of the =0.9.0 pin; issue #1585; see \
                  scripts/bench/framework-compare/README.md \"--pinned-h2d\" section)"
                     .into(),
             );
@@ -2225,10 +2226,11 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(not(feature = "metal-split-k-toggle"))]
         {
             return Err(format!(
-                "MEASURE_ERROR: --metal-split-k {split_k_mode} requires fandhe-ai >= 0.9.0 or a \
-                 path-patched facade built with --features metal-split-k-toggle \
-                 (fandhe_ai::set_metal_split_k_gemm_enabled is not part of the crates.io \
-                 =0.8.0 pin but is part of the =0.9.0 pin; issue #1545; see \
+                "MEASURE_ERROR: --metal-split-k {split_k_mode} requires rebuilding bench-fandhe \
+                 with --features metal-split-k-toggle (this feature is always required, \
+                 regardless of whether fandhe-ai resolves to the crates.io =0.9.0 pin or to a \
+                 path-patched facade; fandhe_ai::set_metal_split_k_gemm_enabled itself is \
+                 part of the =0.9.0 pin; issue #1545; see \
                  scripts/bench/framework-compare/README.md \"--metal-split-k\" section)"
             )
             .into());

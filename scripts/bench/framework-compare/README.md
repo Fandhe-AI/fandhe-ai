@@ -878,10 +878,12 @@ CUDA H2D（ホスト → デバイス）側 pinned staging（`fandhe_ai::set_cud
   計測で無音 no-op になるのを防ぐ）。`--device cuda` でも、`pinned-h2d-toggle` cargo feature
   （既定無効）を有効化したビルドでなければ `MEASURE_ERROR` になる。`set_cuda_pinned_h2d_enabled`
   API は crates.io 公開版 `fandhe-ai =0.8.0` には未収録だったが `=0.9.0`（v0.9.0 ピン更新）で
-  収録済み。feature 分岐は既定 OFF のまま維持しているため、`managed-placement` と同じく
-  **`pinned-h2d-toggle` feature ＋ `[patch.crates-io.fandhe-ai]` による HEAD `crates/facade`
-  への path patch**の両方が必要（`[patch]` は HEAD ソースでの計測が主目的の任意指定であり、
-  収録済み API 自体は registry 解決のままでも到達可能）:
+  収録済み。feature 分岐は既定 OFF のまま維持しているため、`cargo build` 自体には
+  **`pinned-h2d-toggle` feature の有効化が必須**であり、`[patch.crates-io.fandhe-ai]` による
+  HEAD `crates/facade` への path patch は HEAD ソース計測用の任意指定（収録済み API 自体は
+  registry 解決のままでも到達可能。下記の `--config` 引数は省略可）。ただし後述の A/B スクリプト
+  `run_ab_pinned_h2d_cuda.sh` は HEAD ソース計測を主目的とするため `AB_PATCH_FACADE_PATH`
+  （path patch）を必須とし、未設定なら fail-closed で exit 1 する（両者を区別すること）:
 
   ```sh
   cargo build --release -p bench-fandhe --features pinned-h2d-toggle     --config 'patch.crates-io.fandhe-ai.path="/absolute/path/to/crates/facade"'
@@ -1122,11 +1124,14 @@ ENABLED` を撤去し per-instance フィールドへ一本化〉）を、facade
   でなければ `MEASURE_ERROR` になる。`set_metal_split_k_gemm_enabled` API
   は crates.io 公開版 `fandhe-ai =0.8.0` には未収録だったが `=0.9.0`
   （v0.9.0 ピン更新）で収録済み。feature 分岐は既定 OFF のまま維持して
-  いるため、`managed-placement`／`graph-step` と同じく
-  **`metal-split-k-toggle` feature ＋ `[patch.crates-io.fandhe-ai]` に
-  よる HEAD `crates/facade` への path patch**の両方が必要（`[patch]` は
-  HEAD ソースでの計測が主目的の任意指定であり、収録済み API 自体は
-  registry 解決のままでも到達可能）:
+  いるため、`cargo build` 自体には **`metal-split-k-toggle` feature の
+  有効化が必須**であり、`[patch.crates-io.fandhe-ai]` による HEAD
+  `crates/facade` への path patch は HEAD ソース計測用の任意指定
+  （収録済み API 自体は registry 解決のままでも到達可能。下記の
+  `--config` 引数は省略可）。ただし後述の A/B スクリプト
+  `run_ab_splitk_metal.sh` は HEAD ソース計測を主目的とするため
+  `AB_PATCH_FACADE_PATH`（path patch）を必須とし、未設定なら
+  fail-closed で exit 1 する（両者を区別すること）:
 
   ```sh
   cargo build --release -p bench-fandhe --features metal-split-k-toggle \

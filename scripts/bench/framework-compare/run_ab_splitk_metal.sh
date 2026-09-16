@@ -4,8 +4,10 @@
 # `#[cfg(target_os = "macos")]`。crates.io 公開版 `fandhe-ai =0.8.0` には
 # 未収録だったが `=0.9.0`（v0.9.0 ピン更新）で収録済み。feature 分岐は
 # 既定 OFF のまま維持しているため `bench-fandhe` の `metal-split-k-toggle`
-# feature〈既定無効〉経由のビルド限定。path patch は HEAD ソース計測用の
-# 任意指定）を、同一バイナリで run 単位に interleave
+# feature〈既定無効〉経由のビルド限定。API 自体は registry 版で到達
+# 可能だが、本スクリプトは HEAD ソース計測を主目的とするため
+# `AB_PATCH_FACADE_PATH`〈path patch〉を必須とし、未設定なら後述の検証で
+# fail-closed に exit 1 する）を、同一バイナリで run 単位に interleave
 # 計測する。
 #
 # **旧方式からの変更点（#1517 当時 → 本イシュー #1545 で置換）**: #1517

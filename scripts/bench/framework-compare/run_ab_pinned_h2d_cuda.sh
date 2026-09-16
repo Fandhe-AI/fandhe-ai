@@ -18,8 +18,11 @@
 # patch。deps-policy.md 第 9 区分は registry 取得元のみを許容するため、
 # この patch は本スクリプトの CLI 引数としてのみ与え、
 # `scripts/bench/framework-compare/Cargo.toml`／`.cargo/config.toml` へは
-# コミットしない）は HEAD ソース計測が目的の任意指定であり、必須では
-# ない。
+# コミットしない）は**本スクリプトでは必須**（未設定なら下記の検証で
+# fail-closed に exit 1）。API 自体は registry 版 `=0.9.0` で到達可能
+# だが、本スクリプトは HEAD ソース計測を主目的とするため path patch を
+# 要求する（「API が registry で使える」ことと「本 A/B スクリプトが
+# path patch を要求する」ことは別の事項）。
 #
 # 判定対象（イシュー #1585・`docs/perf/cuda-h2d-pinned-staging.md` §3
 # 「Layer A（非後退ゲート）」）: gemm N∈{1024,2048,4096}×{fresh,reuse}・
