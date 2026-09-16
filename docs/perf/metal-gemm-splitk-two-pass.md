@@ -259,7 +259,16 @@ Linux 相当チェック（`cargo fmt --all --check`・`cargo clippy -p fandhe-a
 fandhe-ai-backend-metal --tests --all-features --target aarch64-apple-darwin`・
 `make check-cross-metal-tests`・`make doc-warnings`・`make test`）は green。
 
-**M4 Max 実機実測（イシュー #1512 記入欄）**: 未実測。`docs/perf/logs/metal-gemm-splitk-
+**M4 Max 実機実測（イシュー #1512。2026-09-16・origin/main `3e43bbd0`・共有負荷下）**:
+`docs/perf/logs/metal-gemm-splitk-parity-baseline-1512/`（`run_parity.sh`。`parity.log`・
+`uptime_*`・`env_info.txt`）に記録。(a) `gemm_splitk_parity.rs` は **ok**（11 形状 × 4 転置
+パターン = 44 組合せすべてが記録済みベースライン ceiling 以下。§5.5 の既知 FAIL 8 形状は
+解消）、(b) `parity.log` の `fail_count`／`mean_abs_diff`／`max_abs_diff`／`max_rel_err` は
+§5.3 の表と 11 形状すべてで同値（転置 4 パターン間も同値で、#1474 実測の再現性を確認）、
+(c) load average は `uptime_before`／`uptime_after` とも 1 分平均 約 8.6〜8.9（5 分平均
+約 12）の共有負荷下（parity 判定は負荷非依存）。
+
+（旧記入欄）未実測。`docs/perf/logs/metal-gemm-splitk-
 parity-baseline-1512/`（`run_parity.sh`・事前登録判定規則・README）を用意し、Mac セッション
 での実行を申し送る。実測完了後、本節へ以下を追記する: (a) 11 形状 × 4 パターン全 44 組合せが
 記録済みベースライン ceiling 以下であることの確認結果、(b) §5.3 の表との実測値差分の有無、
@@ -365,6 +374,34 @@ Mac セッションでの実行を申し送る。実測完了後、本節へ以�
 (c) 既存 `gemm_splitk_bit_match.rs`（`classic_dispatch_auto_remains_run_to_run_bit_
     exact_after_split_k_addition` を含む）・`gemm_splitk_parity.rs` の非後退確認結果
 (d) `uptime_during.log` から見た load average 推移
+
+**M4 Max 実機実測（2026-09-16・origin/main `3e43bbd0`・共有負荷下）**: `docs/perf/logs/
+metal-gemm-splitk-auto-entry-1513/`（`run_auto_entry.sh`。`auto_entry.log`・`bit_match.log`・
+`parity.log`・`uptime_*`・`env_info.txt`）と `docs/perf/logs/metal-gemm-splitk-parity-baseline-1512/`
+（`run_parity.sh`。`parity.log`・`uptime_*`・`env_info.txt`）に記録。
+
+- (a) `auto_entry_dispatches_split_k_for_eligible_shapes_and_matches_baseline`: **ok**
+  （11 形状 × 4 パターン = 44 組合せすべてで `SplitKRoute::Split` へ到達し
+  baseline ceiling 以下）
+- (b) `auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_shapes`: **FAILED**
+  （事前登録規則 2(2) 不成立）。`(512,512,512)` は `Classic{NotEligible}`＋CPU 参照
+  bit 一致を通過したが、`(64,64,63)` で `dispatch_split_k_strided_prepared` が
+  `strided tiled GEMM route ineligible: m/n/k must all be multiples of 8` の `Err` を
+  返し panic した。同入口は split-K 判定・Classic フォールバックより前に
+  `strided_tiled_eligibility`（8 の倍数検査）を通すため、k=63 の fixture では
+  `Classic` が構造的に到達不能であり、#1513 で実機未測のまま作成した fixture の
+  前提と入口の契約が食い違っている。`NumericContractPendingApproval` の再出現では
+  ない。「8 の倍数でない形状を `Err` ではなく `Classic{NotEligible}` へ分類すべきか」
+  は入口契約の判断としてユーザーへ回す（本記録ではテスト・実装とも変更しない）。
+  `run_auto_entry.sh` は `set -e` により本 FAIL で中断したため `uptime_during.log`
+  は 1 本目のみで、`bit_match.log`／`parity.log` はスクリプト記載と同一コマンドを
+  手動実行して補完した
+- (c) `gemm_splitk_bit_match.rs`（`classic_dispatch_auto_remains_run_to_run_bit_exact_after_split_k_addition`
+  含む 2 件）: ok・`gemm_splitk_parity.rs`（`split_k_matches_classic_and_cpu_reference_for_target_shapes_and_transpose_patterns`）:
+  ok（#1512 の baseline 方式再切替後、実機で初めて全形状 pass を確認。
+  §5.5 の既知 FAIL 8 形状は解消）
+- (d) load average: `uptime_before`／`uptime_after` とも 1 分平均 約 10〜30 の共有負荷下
+  （parity・到達確認は負荷非依存）
 
 ## 6. AC-5: 本番経路の非後退確認
 
