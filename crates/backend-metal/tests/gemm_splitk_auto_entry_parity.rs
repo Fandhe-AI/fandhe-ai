@@ -17,11 +17,20 @@
 //!   で、公開入口が実際に [`SplitKRoute::Split`] を返し、かつその出力が
 //!   `assert_no_split_k_parity_regression`（実測ベースライン非後退契約。
 //!   tolerance 定数は変更しない）を満たすこと
-//! - (negative) `should_split_k` が `None` を返す形状では、公開入口が
+//! - (negative・事前条件は満たす) `should_split_k` が `None` を返し、
+//!   かつ `strided_tiled_eligibility`（事前条件ゲート。イシュー #1899）
+//!   は満たす形状では、公開入口が
 //!   `SplitKRoute::Classic { reason: SplitKFallbackReason::NotEligible }`
 //!   を返し、**`NumericContractPendingApproval` では決してない**こと
 //!   （ゲート解除自体の直接検証。`NumericContractPendingApproval` は
 //!   後方互換のため enum には残っているが本テスト時点ではもう返らない）
+//! - (negative・事前条件違反) `strided_tiled_eligibility` の事前条件
+//!   （m/n/k が 8 の倍数等）**に違反する**形状（例: `(64, 64, 63)`）では、
+//!   `should_split_k` の判定結果に関わらず公開入口が型付き
+//!   `Err(`[`fandhe_ai_backend_metal::MetalError::StridedTiledIneligible`]`)`
+//!   を返し `SplitKRoute::Classic` へは分類しないこと（契約 (A)。イシュー
+//!   #1899・2026-09-16 ユーザー承認。`docs/backend-metal-splitk-decision.md`
+//!   §5「自動判定入口の事前条件契約（#1899）」参照）
 //!
 //! を確認する。`dispatch_auto`／`crate::tile::select_for_device` への
 //! 本番結線はイシュー #1513 のスコープ外（#1516 へ引き継ぎ）であり、
@@ -51,7 +60,7 @@ use fandhe_ai_backend_cpu::parity::{compare, matmul_reference_fma};
 use fandhe_ai_backend_metal::layout::{MatrixLayout, classify_2d};
 use fandhe_ai_backend_metal::tile;
 use fandhe_ai_backend_metal::{
-    MetalBuffer, MetalContext, MetalGemm, SplitKFallbackReason, SplitKRoute,
+    MetalBuffer, MetalContext, MetalError, MetalGemm, SplitKFallbackReason, SplitKRoute,
 };
 
 /// `logical`（行優先の論理 `[rows, cols]`）から `[cols, rows]` 行優先の
@@ -101,13 +110,39 @@ const TARGET_SHAPES: &[(usize, usize, usize)] = &[
     (128, 128, 2064),
 ];
 
-/// `should_split_k` が `None` を返す（対象条件を満たさない）形状。
+/// `should_split_k` が `None` を返し、かつ
+/// `strided_tiled_eligibility`（`backend-metal` 内部の非公開関数。
+/// `dispatch_split_k_strided_prepared` の事前条件）**も満たす**形状。
 /// `crates/backend-metal/src/tile.rs` の
-/// `should_split_k_rejects_large_square_and_wide_shapes`／
-/// `should_split_k_rejects_k_below_max_m_n` が Linux で確認済みの事実
-/// （正方 512 以上は並列度条件で除外・K が M/N 未満は Case 1 不成立）を
-/// 転用する。
-const NON_ELIGIBLE_SHAPES: &[(usize, usize, usize)] = &[(512, 512, 512), (64, 64, 63)];
+/// `should_split_k_rejects_large_square_and_wide_shapes` が Linux で
+/// 確認済みの事実（正方 512 以上は並列度条件で除外）を転用する。
+/// この定数は `SplitKRoute::Classic { reason: NotEligible }` を返す
+/// 既存 negative テストの対象であり続ける（イシュー #1899 で `(64, 64,
+/// 63)` を下記 [`PRECONDITION_VIOLATING_SHAPES`] へ分離する前の挙動を
+/// そのまま引き継ぐ）。
+const NON_ELIGIBLE_PRECONDITION_OK_SHAPES: &[(usize, usize, usize)] = &[(512, 512, 512)];
+
+/// `should_split_k` が `None` を返す**が**、
+/// `strided_tiled_eligibility` の事前条件（m/n/k が 8 の倍数）には
+/// **違反する**形状（イシュー #1899・#1513 (b)）。
+///
+/// 2026-09-16 の M4 Max 実測（#1904。
+/// `docs/perf/logs/metal-gemm-splitk-auto-entry-1513/auto_entry.log`）で、
+/// `(64, 64, 63)`（k=63 が 8 の倍数でない）が
+/// `Ok(SplitKRoute::Classic { reason: NotEligible })` を期待する旧
+/// `NON_ELIGIBLE_SHAPES` fixture に含まれていたため FAIL
+/// （実際には `Err(MetalError::StridedTiledIneligible)` を返す）した。
+/// 契約 (A)（イシュー #1899 コメント・2026-09-16 ユーザー承認）は
+/// 「事前条件違反は `should_split_k` の判定結果に関わらず型付き `Err`
+/// のまま維持し、`SplitKRoute::Classic` へは分類しない」と確定した
+/// ため、この fixture は
+/// `auto_entry_rejects_precondition_violating_shapes_with_typed_err`
+/// （別テスト）の対象とし、`SplitKRoute::Classic { NotEligible }` を
+/// 期待する対象からは外す（`crates/backend-metal/src/tile.rs::
+/// should_split_k_rejects_k_below_max_m_n` が `should_split_k` 自体は
+/// `None` を返すことを Linux で別途確認済み。ここでは
+/// `strided_tiled_eligibility` 側の事前条件違反を検証する）。
+const PRECONDITION_VIOLATING_SHAPES: &[(usize, usize, usize)] = &[(64, 64, 63)];
 
 /// (positive) 承認済み 11 形状 × NN/NT/TN/TT で、公開入口
 /// `dispatch_split_k_strided_prepared` が実際に split-K 経路を実行し、
@@ -224,25 +259,34 @@ fn auto_entry_dispatches_split_k_for_eligible_shapes_and_matches_baseline() {
     }
 }
 
-/// (negative) `should_split_k` が `None` を返す形状では、公開入口が
-/// classic 経路（`SplitKFallbackReason::NotEligible`）へフォールバック
-/// し、**`NumericContractPendingApproval` では決してない**こと
-/// （ゲート解除自体の直接検証）。classic 経路の出力は既存 bit 一致群
+/// (negative) `should_split_k` が `None` を返し、かつ
+/// `strided_tiled_eligibility` の事前条件は満たす形状（
+/// [`NON_ELIGIBLE_PRECONDITION_OK_SHAPES`]）では、公開入口が classic
+/// 経路（`SplitKFallbackReason::NotEligible`）へフォールバックし、
+/// **`NumericContractPendingApproval` では決してない**こと（ゲート解除
+/// 自体の直接検証）。classic 経路の出力は既存 bit 一致群
 /// （`tests/gemm_splitk_bit_match.rs` 等）が別途カバーするが、ここでも
 /// CPU 参照実装との bit 完全一致を `to_bits()` 経由（許容誤差を用いる
 /// `compare()`/`fail_count` ではなく `assert_bit_exact_vs_reference`）で
 /// 併せて確認する。
+///
+/// `strided_tiled_eligibility` の事前条件**に違反する**形状
+/// （[`PRECONDITION_VIOLATING_SHAPES`]。例: `(64, 64, 63)`）は本テストの
+/// 対象ではない（`Ok(Classic)` ではなく型付き `Err` を返す契約 (A)。
+/// イシュー #1899）。その契約は
+/// `auto_entry_rejects_precondition_violating_shapes_with_typed_err`
+/// （別テスト）が検証する。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_shapes() {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
-    for &(m, n, k) in NON_ELIGIBLE_SHAPES {
+    for &(m, n, k) in NON_ELIGIBLE_PRECONDITION_OK_SHAPES {
         assert!(
             tile::should_split_k(m, n, k).is_none(),
-            "m={m}, n={n}, k={k}: NON_ELIGIBLE_SHAPES の前提（should_split_k が None を \
-             返すこと）が崩れている"
+            "m={m}, n={n}, k={k}: NON_ELIGIBLE_PRECONDITION_OK_SHAPES の前提\
+             （should_split_k が None を返すこと）が崩れている"
         );
 
         let a_logical = Xorshift64Star::new(m as u64 * 13 + k as u64 + 3).fill_vec(m * k);
@@ -284,5 +328,89 @@ fn auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_shapes() {
         let actual = c_buf.read_to_vec();
         let context = format!("auto entry classic fallback vs CPU reference (m={m}, n={n}, k={k})");
         assert_bit_exact_vs_reference(&actual, &expected, &context);
+    }
+}
+
+/// (negative) `strided_tiled_eligibility` の事前条件（m/n/k が 8 の倍数
+/// 等）に**違反する**形状（[`PRECONDITION_VIOLATING_SHAPES`]。例:
+/// `(64, 64, 63)`）では、`should_split_k` の判定結果に関わらず公開入口
+/// が型付き `Err(MetalError::StridedTiledIneligible)` を返し、
+/// [`SplitKRoute::Classic`] へは分類しないこと（契約 (A)。イシュー
+/// #1899・2026-09-16 ユーザー承認）。
+///
+/// 2026-09-16 の M4 Max 実測（#1904。
+/// `docs/perf/logs/metal-gemm-splitk-auto-entry-1513/auto_entry.log`）で、
+/// `(64, 64, 63)` を旧 `NON_ELIGIBLE_SHAPES`（`Ok(Classic{NotEligible})`
+/// を期待）に含めていたため FAIL していた事象の是正: `(64, 64, 63)` を
+/// 本テスト専用の [`PRECONDITION_VIOLATING_SHAPES`] へ切り出し、
+/// `Err` を返すことそのものを期待値とする。
+///
+/// また、事前条件検査は encode より前に完結する
+/// （`dispatch_split_k_strided_prepared` 内の両分岐が
+/// `strided_tiled_eligibility(...)?` を encode 呼び出しより先に評価する
+/// ため）契約を、`c_buf`（`MetalBuffer::new_zeroed` で確保したゼロ埋め
+/// バッファ）が `Err` 後も全要素ゼロのまま変化しないことで直接確認する
+/// （`Err` を返した呼び出しが出力バッファへ一切書き込まないという
+/// fail-closed 契約の裏付け。`.claude/rules/security.md` A03）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn auto_entry_rejects_precondition_violating_shapes_with_typed_err() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+    for &(m, n, k) in PRECONDITION_VIOLATING_SHAPES {
+        assert!(
+            tile::should_split_k(m, n, k).is_none(),
+            "m={m}, n={n}, k={k}: PRECONDITION_VIOLATING_SHAPES の前提\
+             （should_split_k が None を返すこと）が崩れている"
+        );
+        assert!(
+            !m.is_multiple_of(8) || !n.is_multiple_of(8) || !k.is_multiple_of(8),
+            "m={m}, n={n}, k={k}: PRECONDITION_VIOLATING_SHAPES の前提\
+             （m/n/k のいずれかが 8 の倍数でないこと。事前条件違反 fixture である\
+             こと）が崩れている"
+        );
+
+        let a_logical = Xorshift64Star::new(m as u64 * 19 + k as u64 + 7).fill_vec(m * k);
+        let b_logical = Xorshift64Star::new(n as u64 * 23 + k as u64 + 11).fill_vec(k * n);
+
+        let a_layout = classify_2d(&[m, k], &[k as isize, 1]).unwrap();
+        let b_layout = classify_2d(&[k, n], &[n as isize, 1]).unwrap();
+        let a_buf = MetalBuffer::new_with_data(&ctx, &a_logical).expect("A バッファ確保に失敗した");
+        let b_buf = MetalBuffer::new_with_data(&ctx, &b_logical).expect("B バッファ確保に失敗した");
+        let c_buf = MetalBuffer::new_zeroed(&ctx, m * n).expect("C バッファ確保に失敗した");
+
+        let result = gemm.dispatch_split_k_strided_prepared(
+            &ctx, &a_buf, 0, a_layout, &b_buf, 0, b_layout, &c_buf, m, n, k,
+        );
+
+        println!("[auto-entry] precondition-violation m={m} n={n} k={k} result={result:?}");
+
+        match result {
+            Ok(SplitKRoute::Split { .. }) => panic!(
+                "m={m}, n={n}, k={k}: 事前条件違反形状のはずが split-K 経路を実行した \
+                 （契約 (A) 違反。イシュー #1899）"
+            ),
+            Ok(SplitKRoute::Classic { reason, .. }) => panic!(
+                "m={m}, n={n}, k={k}: 事前条件違反形状のはずが classic 経路 \
+                 （reason={reason:?}）へ分類された（契約 (A) 違反。事前条件違反は \
+                 SplitKRoute::Classic ではなく型付き Err を返すべき。イシュー #1899）"
+            ),
+            Err(err) => {
+                assert!(
+                    matches!(err, MetalError::StridedTiledIneligible { .. }),
+                    "m={m}, n={n}, k={k}: 事前条件違反時のエラーが \
+                     StridedTiledIneligible ではない（err={err:?}）"
+                );
+            }
+        }
+
+        let c_after = c_buf.read_to_vec();
+        assert!(
+            c_after.iter().all(|v| v.to_bits() == 0u32),
+            "m={m}, n={n}, k={k}: Err を返したにも関わらず c_buf が書き換えられた \
+             （事前条件検査が encode より前に完結し出力バッファへ一切副作用を \
+             及ぼさないという契約〈イシュー #1899〉が崩れている）"
+        );
     }
 }
