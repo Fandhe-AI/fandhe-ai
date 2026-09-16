@@ -101,13 +101,32 @@ D2H 側（`MemoryOps::with_host_view`。イシュー #1336・#1478）には形�
 ハーネス自体は §5 のとおり整備済みで、実機到達可能なセッションでの実行手順は
 `docs/real-hardware-verification-env.md`・メモリ「DGX Spark 実機作業手順」を
 参照する。
+**（2026-09-16 追記）** ゲート A のみ DGX Spark GB10 実機で実測済み（§4.1）。
+Layer A／B はハーネス未実装のため未実施で、verdict は undetermined のまま。
 
 | 項目 | 結果 |
 |---|---|
-| ゲート A（`#[ignore]` 実機テスト） | 未実施（記入欄） |
-| Layer A（framework-compare 非後退） | 未実施（記入欄） |
-| Layer B（H2D 単体 A/B） | 未実施（記入欄） |
-| **verdict** | **undetermined**（実機未到達） |
+| ゲート A（`#[ignore]` 実機テスト） | 2026-09-16 実測済み → **pass（3 passed / 0 failed・rc=0）**。DGX Spark GB10（sm_121）・driver 580.173.02・CUDA 13.0・rustc 1.97.0・ツリー 3e43bbd0（crates/・scripts/ は origin/main 565300e4 と同一）。`pinned_h2d_sequential_uploads_match_plain_upload_bit_exact`・`pinned_h2d_upload_into_partial_update_matches_plain_bit_exact`・`pinned_h2d_upload_after_release_staging_is_bit_exact` の 3 件。ログ: `docs/perf/logs/cuda-h2d-pinned-staging-1585/gateA.log` |
+| Layer A（framework-compare 非後退） | 未実施（記入欄）→ 2026-09-16 時点: **ハーネス未実装のため未実施**（`scripts/bench/framework-compare/` に pinned-h2d 版 `run_ab_*.sh`・`--pinned-h2d` フラグを持つベンチが存在しない） |
+| Layer B（H2D 単体 A/B） | 未実施（記入欄）→ 2026-09-16 時点: **ハーネス未実装のため未実施**（`pinned_staged/pageable` の 5 プロセス起動マイクロベンチが存在しない） |
+| **verdict** | **undetermined**（実機未到達）→ 2026-09-16 実測後も **undetermined**（ゲート A pass のみ。Layer A／B 未実施）。**既定 OFF（`PINNED_H2D_ENABLED=false`）維持** |
+
+### 4.1 2026-09-16 GB10 実測記録（ゲート A のみ）
+
+- 実行コマンド: `cargo test -p fandhe-ai-backend-cuda --release --all-features
+  --test pinned_h2d_real_device -- --ignored --nocapture --test-threads=1`
+- 結果: `test result: ok. 3 passed; 0 failed; 0 ignored`（finished in 0.87s・rc=0）。
+  §3 ゲート A の「`#[ignore]` 実機テスト全件 pass・on/off 出力 bit 同一」を充足。
+- 環境: NVIDIA GB10（sm_121）・driver 580.173.02・CUDA 13.0（NVRTC V13.0.88）・
+  rustc 1.97.0・Linux 6.17.0-1031-nvidia。負荷ゲートは `record_only` 相当
+  （1 分 load average 1.53・GPU 利用率 2 %・他利用なし）。内部ホスト名は
+  記録しない（`docs/perf/logs/cuda-h2d-pinned-staging-1585/env_info.txt`）。
+- Layer A／Layer B は §3 で事前登録したものの、対応するハーネス（framework-
+  compare の `--pinned-h2d` 版 A/B スクリプト・H2D 単体マイクロベンチ）が
+  本リポジトリに未実装のため本セッションでは実行できず、verdict は
+  undetermined のまま。既定値は §3「判定が規定するもの」のとおり結果に
+  依らず OFF であり、本記録でも変更しない。ハーネスの実装は別イシューへ
+  引き継ぐ（§6）。
 
 機械的自己監査（GPU 非依存で確認可能な事項）は以下のとおり済み:
 
@@ -133,6 +152,13 @@ D2H 側（`MemoryOps::with_host_view`。イシュー #1336・#1478）には形�
 ## 6. 引き継ぎ・スコープ外
 
 - 実機（DGX Spark GB10）でのゲート A／Layer A／Layer B 実測（§3・§4）。
+  → ゲート A は 2026-09-16 に GB10 で実測済み（pass。§4.1）。Layer A／B は
+  ハーネス未実装のため未実施のまま（下記）。
+- **Layer A／B ハーネスの実装（別イシューへ引き継ぎ）**: framework-compare
+  の pinned-h2d 版 `run_ab_*.sh`（`--pinned-h2d` フラグ）・H2D 単体
+  `pinned_staged/pageable` マイクロベンチ（5 プロセス起動）が本リポジトリに
+  存在しないため、実装後に §3 の事前登録規則で GB10 再計測を行い verdict を
+  確定する。
 - pinned H2D staging の既定化（`HOST_STAGING_KIND`〈#1478〉と同型のユーザー
   承認・security-auditor 到達が前提）。
 - f16 Tensor Core 経路（`gemm_mma.rs` の `run_f16` 系・`run_f16_kernel`。

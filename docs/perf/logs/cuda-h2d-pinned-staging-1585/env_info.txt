@@ -1,0 +1,18 @@
+# イシュー #1585 CUDA H2D pinned staging ゲート A 実測環境（2026-09-16 実測済み）
+#
+# 内部ホスト名・ユーザー名・絶対パスは記録しない（hostname は masked）。
+
+hostname: masked
+date: 2026-09-16T01:41:42Z（start）〜 2026-09-16T01:41:43Z（end）
+gpu: NVIDIA GB10（sm_121）
+os: Linux 6.17.0-1031-nvidia
+cuda_driver_version: 580.173.02
+cuda: 13.0（NVRTC V13.0.88）
+rustc: 1.97.0
+tree_sha: 3e43bbd0（crates/・scripts/ は origin/main 565300e4 と同一。`git diff --stat 3e43bbd0 565300e4 -- crates scripts` が空）
+load_gate: record_only 相当（1 分 load average 1.53・GPU 利用率 2 %〈他利用なし〉。判定条件にはしない）
+command: cargo test -p fandhe-ai-backend-cuda --release --all-features --test pinned_h2d_real_device -- --ignored --nocapture --test-threads=1
+gate_a_result: 3 passed / 0 failed（rc=0・finished in 0.87s）
+layer_a_result: 未実施（framework-compare の pinned-h2d 版 run_ab_*.sh・`--pinned-h2d` フラグを持つベンチが本リポジトリに未実装）
+layer_b_result: 未実施（H2D 単体マイクロ A/B ハーネスが本リポジトリに未実装）
+verdict: undetermined（ゲート A pass のみ。既定 OFF〈PINNED_H2D_ENABLED=false〉維持）
