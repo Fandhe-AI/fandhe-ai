@@ -70,8 +70,13 @@ issue コメント
 
 ## 3. 実測記録
 
+**2026-09-16 実測済み → §3.1 以降に M4 Max 実機の実値を記録する（結論:
+REJECT。事前登録規則 §2 をそのまま適用）。** 以下の段落はスキャフォールド
+作成時（PR 時点）の記述を残したもの。
+
 本エージェント実行環境（Linux コンテナ／worktree）に Apple Silicon
-実機への到達手段がないため、**実測値は一切含まれていない**。本文書は
+実機への到達手段がないため、**実測値は一切含まれていない**（スキャフォールド
+作成時点の記述。2026-09-16 に実測済み）。本文書は
 スキャフォールド（実行スクリプト・事前登録判定規則・記入欄）のみを
 提供し、実測は Mac セッションへ申し送る（`docs/perf/logs/train-
 resident-grad-cuda-1560/`・`docs/perf/logs/cuda-mse-backward-1692/`
@@ -81,24 +86,103 @@ resident-grad-cuda-1560/`・`docs/perf/logs/cuda-mse-backward-1692/`
 `docs/perf/logs/metal-mse-backward-1691/`（`README.md`・
 `orchestrate.sh`・`aggregate.py`・`env_info.txt`）を参照。
 
-### 記入欄（M4 Max 実機実測後に埋める）
+### 記入欄（M4 Max 実機実測後に埋める → 2026-09-16 実測済み）
 
 | 項目 | 値 |
 |------|-----|
-| 実測日 | (未実測) |
-| before_sha | |
-| after_sha | |
-| (a) `mse_parity.rs::mse_matches_cpu_across_shapes` | |
-| (b) bit dump 件数・ラベル集合・diff | |
-| (c) `batch_counters` before/after (encode/cb/wait) | |
-| (c) `backward_dinput_phase` before/after (encode/cb/wait) | |
-| (d) `train_shape/640` median_s ratio (5 run) | |
-| (d) `general_shape[16384/65536/1048576]` median_s ratio | |
-| (d) `grad[...].fold_bits` 完全一致 | |
-| (e) `run_ab_mse_encode_metal.sh` reuse step_total 5 run 中央値比 | |
-| (e) checksum 完全一致 | |
-| (f) 既存 `#[ignore]` 群非後退 | |
-| 結論（ADOPT／REJECT／undetermined） | |
+| 実測日 | 2026-09-16（orchestrate 01:37:07Z〜01:37:55Z・(e) A/B 01:42:25Z〜01:43:36Z。UTC） |
+| before_sha | `84490ad1`（git worktree。PR #1785 マージ直前 main） |
+| after_sha | `565300e4`（git worktree。origin/main。§3.3 の交絡注記参照） |
+| (a) `mse_parity.rs::mse_matches_cpu_across_shapes` | pass（1 passed; 0 failed。`mse_parity_after.log`） |
+| (b) bit dump 件数・ラベル集合・diff | 4462/4462 行（両腕）・ラベル集合 diff 0 行・値 diff 0 行（bit 同一） |
+| (c) `batch_counters` before/after (encode/cb/wait) | before 11/8/8・after 11/7/7（見積りどおり。after は hard assert pass） |
+| (c) `backward_dinput_phase` before/after (encode/cb/wait) | 両腕とも 5/3/3（5 run すべて）。backward-only median before 1.026833 ms／after 0.682667 ms（record-only・非判定） |
+| (d) `train_shape/640` median_s ratio (5 run) | **0.9871**（before 0.000142500 s / after 0.000140667 s） |
+| (d) `general_shape[16384/65536/1048576]` median_s ratio | **1.0109**（>1.00。before 0.000164375 / after 0.000166166）／0.9510（0.000224667 / 0.000213667）／0.9500（0.001411000 / 0.001340416） |
+| (d) `grad[...].fold_bits` 完全一致 | True（全 4 セル・5 run・両腕） |
+| (e) `run_ab_mse_encode_metal.sh` reuse step_total 5 run 中央値比 | **0.9618**（before 2.006 ms / after 1.929 ms。run 内比 0.9600, 0.9373, 0.9633, 0.9982, 1.3338。参考 fresh 0.9794） |
+| (e) checksum 完全一致 | 完全一致（reuse・fresh とも） |
+| (f) 既存 `#[ignore]` 群非後退 | 5 ファイル全 pass（mse_parity 1・mnist 3・command_batching 5・command_batching_bench 2・gemm_resident_parity 2）。`device_param_store_backend_parity` は 1 pass 1 **FAIL**（`grad_readout_contract_on_metal`。§3.4） |
+| 結論（ADOPT／REJECT／undetermined） | **REJECT**（(d) 1 セル >1.00。加えて (f) に FAIL 1 件があり「(f) pass」も成立しない。§3.2） |
+
+### 3.1 実測環境・生成物
+
+- Apple M4 Max（論理 CPU 16）・macOS 26.6.2（25G83）・rustc 1.98.1・
+  cargo 1.98.1。record_only（専有ゲート機構なし）。計測中の 1 分 load
+  average は orchestrate 開始 21.17／終了 23.51・(e) A/B 開始 8.27／終了
+  13.36（run 1〜5 中 11.82〜13.36）で、別セッションの workspace 全体テスト
+  が並走する**共有負荷下**の計測である（`docs/perf/logs/metal-mse-
+  backward-1691/env_info.txt`・`progress_1691_excerpt.txt`・
+  `ab/raw/uptime-1691.log`）。pmset は thermal warning なし。
+- `orchestrate.sh` は (a)〜(d)(f) を完走したのち、(f) の最終項目
+  `device_param_store_backend_parity` の FAIL で `set -eu` により
+  **(e) の前に中断**した（rc=101。`orchestrate_stdout.log`・
+  `progress_1691_excerpt.txt`。このため `uptime_after.txt` は未生成）。
+  (e) は同日 `run_ab_mse_encode_metal.sh 1691` を手動で別途実行し、
+  生成物を `ab/`（`compare-train-1691.md`・`compare-train-1691-fresh-
+  reference.md`・`run_ab_1691.log`・`raw/`〈JSONL・sha・cargo tree・
+  uptime・pmset。バイナリは含めない〉）へ保存した。
+- (d) の生ログは `before_round{1..5}.log`／`after_round{1..5}.log`・
+  集計は `aggregate.md`（`aggregate.py`。5 round・起動順反転
+  〈`rounds.log`〉・別プロセス）。集計値は生ログの per-run 値から手計算
+  でも再現することを確認した（例: `general_shape 16384` after の 5 run
+  は 0.000162583／0.000169167／0.000166166／0.000160292／0.000184042 s
+  で中央値 0.000166166 s）。
+
+### 3.2 判定（事前登録規則 §2 をそのまま適用）
+
+- (a) pass・(b) pass（4462 行 bit 同一）・(c) 一致（before 11/8/8 →
+  after 11/7/7。見積りどおり）・(d) `fold_bits` 全一致・(e) reuse 0.9618
+  ≤ 1.00 かつ checksum 完全一致。
+- しかし **(d) `general_shape 16384` が ratio 1.0109 > 1.00** であり、
+  規則「(e) または (d) に > 1.00 → REJECT」に該当する。
+- さらに **(f) は pass ではない**（`grad_readout_contract_on_metal`
+  FAIL。§3.4）。規則は「(a)(b)(f) pass」を ADOPT の必要条件とするため、
+  この点でも ADOPT は成立しない。
+- **verdict = REJECT**（規則を事後に緩めない。tolerance／baseline 不変）。
+  なお #1690（PR #1785）は既にマージ済みであり、本判定を受けた結線の
+  扱い（維持／差し戻し）はユーザー判断事項として本文書では結論しない。
+
+### 3.3 原因分析・参考（判定とは分けて記録）
+
+- (d) の超過は 4 セル中 1 セル・幅 1.1 %（0.000164375 → 0.000166166 s、
+  差 1.8 µs）で、共有負荷下（load average 8〜23）の計測ノイズ帯に
+  収まる規模である。同セルの per-run 値は before 0.000139458〜
+  0.000199917 s・after 0.000160292〜0.000184042 s と run 間の振れ幅
+  （約 40 µs）が差分（1.8 µs）を大きく上回る。他 3 セル（0.9871／
+  0.9510／0.9500）は改善方向。事前見通し（backward の wait 回数は 1 → 1
+  で不変のため ≈1.00）と整合する。
+- (e) は主判定の reuse が 0.9618・対照の fresh が 0.9794 でいずれも
+  改善方向・checksum 完全一致。診断用フェーズ分解（単発・非判定）では
+  reuse の `forward_resident` 0.887 倍・`backward` 1.015 倍・
+  `step_total` 0.952 倍、fresh の `forward` 0.908 倍・`backward`
+  1.026 倍・`step_total` 0.953 倍で、forward 側（2 wait → 1 wait）の
+  改善が step_total の改善を説明し backward は不変という §1 の見積りと
+  向きが一致する。ただし reuse の run 5 は 1.3338（他 4 run は
+  0.9373〜0.9982）で符号一貫ではない。
+- **交絡注記（after 腕）**: after 腕は `565300e4`（origin/main）で
+  あり、`git diff --stat 84490ad1 565300e4 -- crates/*/src` は 117
+  files changed（`mse.rs` 209 行に加え #1885〜#1889 等の後続マージを
+  含む）。§1 の「差分は `mse.rs` のみ」は `84490ad1..38b72b1f` に
+  ついての事実であり、本 A/B の差分を #1690 単独へ帰属させる分離は
+  できていない。size=64 train 経路（Linear／MSE／reuse）が後続マージで
+  変わったかは本文書では確認していない（要確認）。
+- 以上は原因帰属の参考であり、§3.2 の verdict を変更しない。
+
+### 3.4 (f) `grad_readout_contract_on_metal` FAIL（main 既存・本 issue 対象外）
+
+- `crates/facade/tests/device_param_store_backend_parity.rs:239` の
+  assert「param 1（bias）の resident 充填状態が期待と異なる」で FAIL
+  （`ignored_after_device_param_store_backend_parity.log`。同ファイルの
+  `device_resident_matches_host_sgd_on_metal_across_100_steps` は
+  pass）。`--test-threads=1` の直列実行でも同じ assert で FAIL を再現
+  した（`ignored_store_parity_serial.log`。01:43:36Z〜01:43:40Z）。
+- 本テストは after 腕（origin/main `565300e4`）上で再現した FAIL で
+  あり、`mse.rs` の encode-only 化とは無関係な bias 勾配 resident
+  充填契約（#1566 系）の検査である。before 腕 `84490ad1` で同テストが
+  存在・pass するかは未確認のため「main 上で再現・原因は本 issue
+  対象外」とのみ記録する（要確認: 起票はユーザー承認後。
+  `.claude/rules/out-of-scope-tracking.md`）。
 
 ## 4. スコープ外事項
 
@@ -109,11 +193,15 @@ resident-grad-cuda-1560/`・`docs/perf/logs/cuda-mse-backward-1692/`
   （`.claude/rules/out-of-scope-tracking.md` に従いユーザー承認なしに
   issue 化はしない）。
 - tolerance／baseline・ガードレール閾値の変更は対象外（不変）。
+- §3.4 の `grad_readout_contract_on_metal` FAIL（main 既存）の原因調査・
+  是正は本 issue の対象外（ユーザー承認なしに issue 化はしない）。
 
 ## 5. 出典
 
 - `docs/backend-metal-command-batching-design.md` §7.5（#1690 実装記録・
-  §7.5.4 実測記入欄）
+  §7.5.4 実測記入欄。2026-09-16 実測値は本文書 §3 が正）
+- `docs/perf/logs/metal-mse-backward-1691/`（2026-09-16 M4 Max 実測の
+  生ログ・`aggregate.md`・`ab/`・`env_info.txt`。内部ホスト名は含めない）
 - `docs/perf/cuda-mse-backward-stream-contract.md`（#1692・CUDA 側の
   同型記録）
 - `docs/perf/lowlayer-diagnosis-2026-09-12.md` §4（動機となった診断
