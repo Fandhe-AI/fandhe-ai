@@ -26,6 +26,12 @@ base（変更前）と head（変更後）それぞれについて計測し、5 
 （`bench-harness::protocol::run` が中央値計測を実装済み。`coding-rust.md` 準拠。手順自体は
 `docs/real-hardware-verification-env.md` の接続・転送手順に従う。実ホスト名はローカル管理外ファイル参照）。
 
+> **注（#1919）**: `--example metal_gemm_bench` は backend-metal の example ターゲット名を
+> `gemm_bench` → `metal_gemm_bench` へ改名した PR（イシュー #1919）以降のコミットにのみ存在する。
+> 下記の base（`<base-sha>`）・head（`perf/536-metal-gemm-serpentine`）はいずれも #1919 より
+> 前のコミットのため、当時のとおり再現する場合は `--example metal_gemm_bench` を
+> `--example gemm_bench`（改名前の名称）に読み替えること。
+
 ```sh
 git fetch origin
 

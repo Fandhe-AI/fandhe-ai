@@ -246,6 +246,12 @@ pool_reuse_interleaved_with_tracked_steps_preserves_batching` の 2 件が FAILE
 系統誤差として乗る問題があり（#746 イシュー本文の 2026-08-19 実測: 対照カーネルが最大 70% 超変動）、
 上記「計測手順」節の interleaved 方式へ置き換えた。参考として残す。
 
+> **注（#1919）**: `--example metal_gemm_bench` は backend-metal の example ターゲット名を
+> `gemm_bench` → `metal_gemm_bench` へ改名した PR（イシュー #1919）以降のコミットにのみ存在する。
+> 下記の base（`<base-sha>`）・head（`perf/540-metal-gemm-tgid-swizzle`）はいずれも #1919 より
+> 前のコミットのため、当時のとおり再現する場合は `--example metal_gemm_bench` を
+> `--example gemm_bench`（改名前の名称）に読み替えること。
+
 ```sh
 git fetch origin
 
