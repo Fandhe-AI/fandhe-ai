@@ -1,0 +1,30 @@
+rev: cf0626437d8df84babac591d95c27dfde6211669
+start: 2026-09-16T16:47:55Z
+ 01:47:55 up 20 days, 13:14,  8 users,  load average: 0.26, 0.08, 0.04
+NVIDIA GB10, 580.173.02, 0 %
+== reduce_parity-ignored.log: cargo test -p fandhe-ai-backend-cuda --release --all-features --test reduce_parity -- --ignored --nocapture
+rc=0 reduce_parity-ignored.log test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+== typed_ops_f16_parity-ignored.log: cargo test -p fandhe-ai-backend-cuda --release --all-features --test typed_ops_f16_parity -- --ignored --nocapture
+rc=0 typed_ops_f16_parity-ignored.log test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.90s
+== typed_ops_bf16_parity-ignored.log: cargo test -p fandhe-ai-backend-cuda --release --all-features --test typed_ops_bf16_parity -- --ignored --nocapture
+rc=0 typed_ops_bf16_parity-ignored.log test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.52s
+== var_norm_backend_parity-ignored.log: cargo test -p fandhe-ai --release --test var_norm_backend_parity -- --ignored --nocapture cuda_
+rc=0 var_norm_backend_parity-ignored.log test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.41s
+== conv1d_backend_parity-cuda-ignored.log: cargo test -p fandhe-ai --release --test conv1d_backend_parity -- --ignored --nocapture cuda_
+rc=0 conv1d_backend_parity-cuda-ignored.log test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.52s
+== conv2d_backend_parity-cuda-ignored.log: cargo test -p fandhe-ai --release --test conv2d_backend_parity -- --ignored --nocapture cuda_
+rc=0 conv2d_backend_parity-cuda-ignored.log test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.54s
+== nn_conv_backend_parity-cuda-ignored.log: cargo test -p fandhe-ai --release --test nn_conv_backend_parity -- --ignored --nocapture cuda_
+rc=0 nn_conv_backend_parity-cuda-ignored.log test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.57s
+== attention_backend_parity-cuda-ignored.log: cargo test -p fandhe-ai --release --test attention_backend_parity -- --ignored --nocapture cuda_
+rc=0 attention_backend_parity-cuda-ignored.log test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.52s
+== no_grad_detach_backend_parity-cuda-ignored.log: cargo test -p fandhe-ai --release --test no_grad_detach_backend_parity -- --ignored --nocapture cuda_
+rc=0 no_grad_detach_backend_parity-cuda-ignored.log test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.32s
+== backward_accumulate_backend_parity-cuda-ignored.log: cargo test -p fandhe-ai --release --test backward_accumulate_backend_parity -- --ignored --nocapture cuda_
+rc=0 backward_accumulate_backend_parity-cuda-ignored.log test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.34s
+== 1898-device_param_store_backend_parity_cuda.log: cargo test -p fandhe-ai --release --test device_param_store_backend_parity -- --ignored --nocapture --test-threads=1 on_cuda
+rc=0 1898-device_param_store_backend_parity_cuda.log test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+== module_cache_wiring_serial.log: cargo test -p fandhe-ai-backend-cuda --release --all-features --lib -- --ignored --nocapture --test-threads=1 module_cache_wiring_tests
+rc=0 module_cache_wiring_serial.log test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1058 filtered out; finished in 0.41s
+end: 2026-09-16T17:11:10Z
+ALL_DONE

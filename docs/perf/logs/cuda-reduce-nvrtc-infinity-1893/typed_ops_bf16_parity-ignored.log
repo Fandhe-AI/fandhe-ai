@@ -1,0 +1,9 @@
+   Compiling fandhe-ai-backend-cuda v0.8.0 (/home/<user>/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.35s
+     Running tests/typed_ops_bf16_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/typed_ops_bf16_parity-4540761ae95577f9)
+
+running 1 test
+test typed_ops_bf16_matches_across_shapes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.52s
+

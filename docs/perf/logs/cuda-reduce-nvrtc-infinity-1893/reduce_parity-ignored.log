@@ -1,0 +1,16 @@
+   Compiling fandhe-ai-backend-cpu v0.8.0 (/home/<user>/work/rust-ai-library-run/crates/backend-cpu)
+   Compiling fandhe-ai-backend-cuda v0.8.0 (/home/<user>/work/rust-ai-library-run/crates/backend-cuda)
+   Compiling bench-harness v0.8.0 (/home/<user>/work/rust-ai-library-run/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 4.53s
+     Running tests/reduce_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/reduce_parity-873aaac4fa141640)
+
+running 6 tests
+test empty_reduction_semantics_match_cpu_on_real_device ... ok
+test sum_and_max_are_run_to_run_deterministic_on_real_device ... ok
+test nan_and_infinity_semantics_match_cpu_on_real_device ... ok
+test min_matches_cpu_reference_on_real_device ... ok
+test sum_matches_cpu_reference_on_real_device ... ok
+test max_matches_cpu_reference_on_real_device ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+

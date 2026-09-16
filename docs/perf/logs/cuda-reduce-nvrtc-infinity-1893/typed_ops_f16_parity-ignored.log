@@ -1,0 +1,11 @@
+   Compiling fandhe-ai-backend-cuda v0.8.0 (/home/<user>/work/rust-ai-library-run/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.43s
+     Running tests/typed_ops_f16_parity.rs (/home/<user>/work/target-fandhe-ai/release/deps/typed_ops_f16_parity-92fc376709618e56)
+
+running 3 tests
+test typed_f16_gemm_matches_cpu_reference_rounded ... ok
+test typed_f16_elementwise_and_reduction_match_cpu_backend_ops_rounded ... ok
+test typed_f16_gemm_is_bit_identical_to_cuda_gemm_auto_run_f16 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.90s
+
