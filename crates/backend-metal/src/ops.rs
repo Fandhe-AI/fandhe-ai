@@ -22,7 +22,8 @@
 //! `docs/matmul-vjp-zero-copy-decision.md` §4.4 参照）。elementwise
 //! （`add`／`mul`／`relu`／`exp`／`tanh`）は `elementwise::MetalElementwise`
 //! へ委譲する（イシュー #605。CUDA 側 #599 の Metal 対応版）。汎用
-//! reduction（`sum`／`max`）は未実装のまま
+//! reduction のうち `sum` は `reduce::MetalReduce` へ結線済み（イシュー
+//! #1896）。`max`（`min` 含む）は未実装のまま
 //! [`fandhe_ai_tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。
 //! out-of-scope-tracking.md 対象）。
 //!
@@ -83,6 +84,28 @@ use crate::row_kernel::{self, plan_dtype_is_f32};
 fn map_scan_prepare_error(err: crate::scan_model::ScanPrepareError) -> BackendError {
     match err {
         crate::scan_model::ScanPrepareError::SizeLimitExceeded { .. } => {
+            BackendError::Unsupported(err.to_string())
+        }
+    }
+}
+
+/// `crate::reduce_model::{plan_reduce_all, plan_reduce_axis}`（`ops::
+/// MetalBackendOps::sum` が起動前に呼ぶ。イシュー #1896）のエラーを
+/// `BackendOps::sum` の戻り値へ変換する。唯一の variant
+/// `SizeLimitExceeded`（`numel`／`num_chunks`〈全要素〉または
+/// `lanes`／`axis_len`／`inner`〈単一軸〉がカーネル `uint` 引数の範囲
+/// 〈`u32::MAX`〉を超過、または中間積が `usize` をオーバーフロー）を
+/// `BackendError::Unsupported` へ写像する。`Var::sum` 自体はホスト
+/// フォールバックを持たない（`docs/backend-metal-reduce-sum-design.md`
+/// §10「`Var::sum` ホストフォールバックの設計判断」段階 0）ため、
+/// 本エラーは `AutodiffError::Backend(Unsupported)` として呼び出し元
+/// へそのまま伝播する（`map_scan_prepare_error`・CUDA
+/// `ops.rs::map_reduce_error` とは異なり、Metal 側は `TypedOps<f16|
+/// bf16>::sum` の f32 経路委譲・`Op::Mean` 再計算からも到達するが、
+/// いずれもこのサイズ上限に実用上到達しない〈f32 で 16 GiB 超〉）。
+fn map_reduce_prepare_error(err: crate::reduce_model::ReducePrepareError) -> BackendError {
+    match err {
+        crate::reduce_model::ReducePrepareError::SizeLimitExceeded { .. } => {
             BackendError::Unsupported(err.to_string())
         }
     }
@@ -2639,27 +2662,118 @@ impl BackendOps for MetalBackendOps {
         self.elementwise_unary(a, |ew, ctx, a_s| ew.run_tanh_f32(ctx, a_s))
     }
 
-    fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::sum: reduction カーネル未実装（TASK-1.9c スコープ外）".into(),
-        ))
+    /// `torch.sum(x)` / `torch.sum(x, dim=dim)` 相当（イシュー #1896。
+    /// `reduce::MetalReduce::run_sum_all_f32`／`run_sum_axis_f32` への
+    /// 委譲。`Var::sum`／`Var::mean`／`sum_dims`／`Op::Mean` 再計算・
+    /// `TypedOps<f16|bf16>::sum`〈f32 経路への薄い委譲〉の唯一の到達
+    /// 先）。
+    ///
+    /// 検査順序（`run_scan`・CUDA `reduce_dispatch` と同型。`ops.rs`
+    /// 側は shape の正しさのみ検査し、カーネル `uint` 引数上限等の
+    /// 起動前検証は `reduce_model::plan_reduce_*` に委ねる二重責務
+    /// 分離）:
+    /// 1. [`reduce_out_shape`] で `dim` の範囲を検査し出力 shape を
+    ///    導出する（デバイス初期化前）。
+    /// 2. **0 サイズ契約を要素数積の検査より先に処理する**（`shape`
+    ///    が 0 を含む場合、巨大な非零軸〈例 `[1<<40, 0, 1<<40]`〉でも
+    ///    中間積の overflow で `checked_numel` が誤って `ShapeMismatch`
+    ///    を返すのを避けるため。`fandhe_ai_backend_cpu::reduction::sum`
+    ///    の空縮約契約と同じ: `dim=None` → `0.0`・`dim=Some` かつ
+    ///    `out_shape` に 0 を含む → 空テンソル・`dim=Some` かつ
+    ///    `shape[axis]==0` のみ → 出力を `0.0` で埋める）。いずれも
+    ///    `contiguous()`／デバイスに触れず GPU 起動なし（`MetalReduce`
+    ///    側も同契約で二重に安全）。
+    /// 3. `gather_scatter_model::checked_numel` で要素数積の
+    ///    `usize` オーバーフローを検査（`a.numel()` を無検査で呼ぶ前）。
+    /// 4. 起動計画を先出しし（`reduce_model::plan_reduce_all`／
+    ///    `plan_reduce_axis`）、カーネル `uint` 引数の上限超過を
+    ///    `Unsupported` へ写像する（`map_reduce_prepare_error`）。
+    ///    `Var::sum` はホストフォールバックを持たない（段階 0。
+    ///    `docs/backend-metal-reduce-sum-design.md` §10）ため、この
+    ///    `Unsupported` は `AutodiffError::Backend` としてそのまま
+    ///    呼び出し元へ伝播する。
+    /// 5. `context_cache::cached_reduce` 経由で [`crate::reduce::
+    ///    MetalReduce`] へ委譲する。
+    ///
+    /// 数値契約: `fandhe_ai_backend_cpu::reduction::sum` と bit 完全
+    /// 一致（`crate::reduce_model` doc「CPU 参照実装との演算順序の
+    /// 対応」参照）。
+    fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        let shape = a.shape().to_vec();
+        if shape.contains(&0) {
+            if dim.is_none() {
+                return Tensor::new(vec![0.0], &out_shape).map_err(BackendError::ShapeMismatch);
+            }
+            if out_shape.contains(&0) {
+                return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+            }
+            // `dim=Some(axis)` かつ `shape[axis]==0` のみ（他軸は非零）:
+            // 空縮約契約により各出力要素が `0.0` になる。
+            let lanes = crate::gather_scatter_model::checked_numel(&out_shape)
+                .map_err(BackendError::ShapeMismatch)?;
+            return Tensor::new(vec![0.0; lanes], &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+        let numel = crate::gather_scatter_model::checked_numel(&shape)
+            .map_err(BackendError::ShapeMismatch)?;
+
+        // カーネル `uint` 引数の上限超過を、デバイス初期化
+        // （`context_cache::cached_context`）より前に先出しして検査する
+        // （`map_reduce_prepare_error` 参照。`Var::sum` はホスト
+        // フォールバックを持たないため `Unsupported` はそのまま呼び
+        // 出し元へ伝播する。§10）。
+        let axis_plan = match dim {
+            None => {
+                crate::reduce_model::plan_reduce_all(numel).map_err(map_reduce_prepare_error)?;
+                None
+            }
+            Some(axis) => Some(
+                crate::reduce_model::plan_reduce_axis(&shape, axis)
+                    .map_err(map_reduce_prepare_error)?,
+            ),
+        };
+
+        let a_owned = a.contiguous();
+        let a_slice = a_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("sum: input not contiguous".into()))?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let reduce = context_cache::cached_reduce(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let data = match axis_plan {
+            None => {
+                let value = reduce
+                    .run_sum_all_f32(&ctx, a_slice)
+                    .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+                vec![value]
+            }
+            Some(plan) => reduce
+                .run_sum_axis_f32(&ctx, a_slice, plan.outer, plan.axis_len, plan.inner)
+                .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?,
+        };
+        Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// `max`（`min`・`sum` とは異なり）reduction カーネル未実装
+    /// （`sum` は #1896 で結線済み。`max`／`min` は親 #1894 の残項目・
+    /// `docs/backend-metal-reduce-sum-design.md` §8「スコープ外」）。
     fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "MetalBackendOps::max: reduction カーネル未実装（TASK-1.9c スコープ外）".into(),
         ))
     }
 
-    /// `min`（イシュー #1720）は `Self::sum`／`Self::max` と同じく
-    /// reduction カーネル未実装。`min` は `BackendOps` のデフォルト
-    /// メソッド（既定 `Unsupported`）のため本オーバーライドは機能上
-    /// 必須ではないが、`sum`／`max` と横並びで明示し「Metal は sum／
-    /// max／min いずれも未実装」という事実を観測しやすくする
-    /// （`Var::min` はホスト参照実装〈`eval::min`〉へフォールバック
-    /// するため、この非対称〈`Var::max` は既存の必須メソッド契約上
-    /// フォールバックを持たずエラーとなる〉は既知の事実として記録
-    /// する。実装計画 §7「スコープ外」参照）。
+    /// `min`（イシュー #1720）は `Self::max` と同じく reduction
+    /// カーネル未実装（`sum` は #1896 で結線済み）。`min` は
+    /// `BackendOps` のデフォルトメソッド（既定 `Unsupported`）のため
+    /// 本オーバーライドは機能上必須ではないが、`max` と横並びで明示し
+    /// 「Metal は max／min が未実装（sum は実装済み）」という事実を
+    /// 観測しやすくする（`Var::min` はホスト参照実装〈`eval::min`〉へ
+    /// フォールバックするため、この非対称〈`Var::max` は既存の必須
+    /// メソッド契約上フォールバックを持たずエラーとなる〉は既知の
+    /// 事実として記録する。実装計画 §7「スコープ外」参照）。
     fn min(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "MetalBackendOps::min: reduction カーネル未実装（イシュー #1720 スコープ外）".into(),

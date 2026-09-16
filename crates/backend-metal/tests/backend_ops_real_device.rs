@@ -109,9 +109,9 @@ fn backend_ops_gemm_matches_cpu_non_power_of_two_shape() {
     assert_backend_ops_gemm_parity(511, 512, 97, 71, 83);
 }
 
-/// reduction（`sum`／`max`）の `Unsupported` 契約を検証する。
+/// `max`（reduction）の `Unsupported` 契約を検証する。
 ///
-/// `MetalBackendOps::sum`／`max`（`backend-metal/src/ops.rs`）は
+/// `MetalBackendOps::max`（`backend-metal/src/ops.rs`）は
 /// `MetalContext::new` を呼ばず即座に `BackendError::Unsupported` を返す
 /// 実装（スコープ外の未実装カーネル用プレースホルダ。
 /// out-of-scope-tracking.md 対象）のため、本テストは Metal 実機・デバイス
@@ -120,7 +120,12 @@ fn backend_ops_gemm_matches_cpu_non_power_of_two_shape() {
 /// 限定のため非 macOS 環境ではコンパイル対象に入らない）、実機依存では
 /// ないため `#[ignore]` を付けない。macOS 上での通常の
 /// `cargo test -p fandhe-ai-backend-metal`（`--ignored` なし）で毎回実行され、
-/// `sum`／`max` が `Unsupported` を返し続けることを回帰的に固定する。
+/// `max` が `Unsupported` を返し続けることを回帰的に固定する。
+///
+/// `sum` はイシュー #1896 で `reduce::MetalReduce` へ結線されデバイス
+/// 初期化を要するようになったため本テストの対象外とし、実機での数値
+/// 一致検証は下記 `#[ignore]` 付き `backend_ops_sum_matches_cpu_bit_exact`
+/// が担う。
 ///
 /// `add`／`mul`／`relu`／`exp`／`tanh` はイシュー #605 で実カーネル化
 /// 済みのため（`elementwise::MetalElementwise` 経由。`MetalContext::new`
@@ -137,18 +142,155 @@ fn backend_ops_gemm_matches_cpu_non_power_of_two_shape() {
 /// 誤って「テストと分離していない」と記述していたが、実際は「そもそも
 /// カバーしていない」が正確な記述である）。
 #[test]
-fn reduction_remains_unsupported_without_device_init() {
+fn max_remains_unsupported_without_device_init() {
     let metal = MetalBackendOps::new();
     let a = Tensor::new(vec![1.0, -2.0, 3.0, -4.0], &[2, 2]).expect("valid tensor");
 
     assert!(matches!(
-        metal.sum(&a, None),
-        Err(BackendError::Unsupported(_))
-    ));
-    assert!(matches!(
         metal.max(&a, None),
         Err(BackendError::Unsupported(_))
     ));
+}
+
+/// `sum`（`reduce::MetalReduce` 経由。イシュー #1896）が
+/// `fandhe_ai_backend_cpu::reduction::sum`（`CpuBackendOps::sum`）と
+/// bit 完全一致することを実機で検証する（`crate::reduce_model` doc
+/// 「CPU 参照実装との演算順序の対応」参照。`dim=None`／`Some(axis)`
+/// 〈rank 1〜4・複数軸位置〉・非 contiguous 入力〈`transpose` view〉・
+/// 0 サイズ契約〈空テンソル・`shape[axis]==0`・非縮約軸 0・巨大な非零軸
+/// を含む 0 サイズ shape が `ShapeMismatch` にならないこと〉・範囲外
+/// `dim`〈デバイス非接触で `ShapeMismatch`〉・NaN 混入〈クラス一致〉・
+/// run-to-run 決定性を対象とする。`reduce_parity.rs`（起動 API 直叩き）
+/// の `BackendOps` 経由版）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn backend_ops_sum_matches_cpu_bit_exact() {
+    let metal = MetalBackendOps::new();
+    let cpu = CpuBackendOps::new();
+
+    let assert_bit_exact = |metal_t: &Tensor<f32>, cpu_t: &Tensor<f32>, label: &str| {
+        assert_eq!(metal_t.shape(), cpu_t.shape(), "{label}: shape 不一致");
+        let m = metal_t.as_slice().expect("metal sum 出力は contiguous");
+        let c = cpu_t.as_slice().expect("cpu sum 出力は contiguous");
+        assert_eq!(m.len(), c.len(), "{label}: 要素数不一致");
+        for (i, (&mv, &cv)) in m.iter().zip(c.iter()).enumerate() {
+            if mv.is_nan() && cv.is_nan() {
+                continue;
+            }
+            assert_eq!(
+                mv.to_bits(),
+                cv.to_bits(),
+                "{label}[{i}]: bit 不一致（metal={mv:?}, cpu={cv:?}）"
+            );
+        }
+    };
+
+    let mut rng = Xorshift64Star::new(0x1896_0000);
+    let gen_vec = |n: usize, rng: &mut Xorshift64Star| -> Vec<f32> {
+        (0..n).map(|_| rng.next_f32() * 1024.0 - 512.0).collect()
+    };
+
+    // dim=None・複数 rank の dim=Some(axis)。
+    let cases: &[(&[usize], Option<usize>)] = &[
+        (&[7], None),
+        (&[7], Some(0)),
+        (&[3, 4], Some(0)),
+        (&[3, 4], Some(1)),
+        (&[2, 3, 5], Some(1)),
+        (&[2, 3, 4, 2], Some(2)),
+    ];
+    for &(shape, dim) in cases {
+        let numel: usize = shape.iter().product();
+        let data = gen_vec(numel, &mut rng);
+        let a = Tensor::new(data, shape).expect("tensor");
+        let m = metal.sum(&a, dim).expect("metal sum must succeed");
+        let c = cpu.sum(&a, dim).expect("cpu sum always succeeds");
+        assert_bit_exact(&m, &c, &format!("shape={shape:?} dim={dim:?}"));
+    }
+
+    // 非 contiguous 入力（transpose view）。
+    {
+        let data = gen_vec(12, &mut rng);
+        let a = Tensor::new(data, &[3, 4]).expect("tensor");
+        let a_t = a.transpose(0, 1).expect("transpose");
+        let m = metal
+            .sum(&a_t, Some(1))
+            .expect("metal sum on transposed view");
+        let c = cpu.sum(&a_t, Some(1)).expect("cpu sum on transposed view");
+        assert_bit_exact(&m, &c, "transpose view");
+    }
+
+    // 0 サイズ契約: 空テンソル（dim=None → 0.0）。
+    {
+        let a = Tensor::<f32>::new(Vec::new(), &[0]).expect("empty tensor");
+        let m = metal.sum(&a, None).expect("metal sum on empty");
+        let c = cpu.sum(&a, None).expect("cpu sum on empty");
+        assert_bit_exact(&m, &c, "empty numel=0 dim=None");
+    }
+
+    // 0 サイズ契約: shape[axis]==0（空縮約 → 各出力 0.0）。
+    {
+        let a = Tensor::<f32>::new(Vec::new(), &[0, 3]).expect("tensor");
+        let m = metal.sum(&a, Some(0)).expect("metal sum shape[axis]=0");
+        let c = cpu.sum(&a, Some(0)).expect("cpu sum shape[axis]=0");
+        assert_bit_exact(&m, &c, "shape[axis]=0");
+    }
+
+    // 0 サイズ契約: 非縮約軸 0（空出力）。
+    {
+        let a = Tensor::<f32>::new(Vec::new(), &[0, 3, 5]).expect("tensor");
+        let m = metal.sum(&a, Some(1)).expect("metal sum empty output");
+        let c = cpu.sum(&a, Some(1)).expect("cpu sum empty output");
+        assert_bit_exact(&m, &c, "empty output (outer=0)");
+    }
+
+    // 0 サイズ契約: 巨大な非零軸を含む 0 サイズ shape が ShapeMismatch
+    // にならず CPU と同じ結果になること（`checked_numel` より前に
+    // 0 サイズ早期リターンを行う検査順序の直接検証。`ops.rs::sum`
+    // doc「検査順序」参照）。
+    {
+        let huge = 1usize << 40;
+        let a = Tensor::<f32>::new(Vec::new(), &[huge, 0, huge]).expect("huge zero-sized tensor");
+        let m = metal
+            .sum(&a, None)
+            .expect("metal sum on huge zero-sized shape must not overflow-reject");
+        let c = cpu.sum(&a, None).expect("cpu sum on huge zero-sized shape");
+        assert_bit_exact(&m, &c, "huge zero-sized shape dim=None");
+
+        let m_axis = metal
+            .sum(&a, Some(1))
+            .expect("metal sum(dim=1) on huge zero-sized shape");
+        let c_axis = cpu
+            .sum(&a, Some(1))
+            .expect("cpu sum(dim=1) on huge zero-sized shape");
+        assert_bit_exact(&m_axis, &c_axis, "huge zero-sized shape dim=Some(1)");
+    }
+
+    // 範囲外 dim: デバイス非接触で ShapeMismatch。
+    {
+        let a = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor");
+        assert!(matches!(
+            metal.sum(&a, Some(5)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    // NaN 混入（クラス一致）。
+    {
+        let a = Tensor::new(vec![1.0f32, f32::NAN, 3.0, 4.0], &[4]).expect("tensor");
+        let m = metal.sum(&a, None).expect("metal sum with nan");
+        let c = cpu.sum(&a, None).expect("cpu sum with nan");
+        assert_bit_exact(&m, &c, "nan propagation");
+    }
+
+    // run-to-run 決定性。
+    {
+        let data = gen_vec(64, &mut rng);
+        let a = Tensor::new(data, &[64]).expect("tensor");
+        let m1 = metal.sum(&a, None).expect("metal sum run1");
+        let m2 = metal.sum(&a, None).expect("metal sum run2");
+        assert_bit_exact(&m1, &m2, "run-to-run determinism");
+    }
 }
 
 /// `add`／`mul`／`relu`／`exp`／`tanh`（`elementwise::MetalElementwise`

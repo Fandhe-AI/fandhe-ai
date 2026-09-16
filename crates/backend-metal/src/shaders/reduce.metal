@@ -2,9 +2,9 @@
 // #1895・親イシュー #1894）。
 //
 // `crate::reduce::MetalReduce`（`reduce.rs`）から実行時コンパイルされる。
-// 本ファイル自身では `MetalBackendOps::sum` への結線は行わない
-// （`ops.rs` からの呼び出しは #1896 のスコープ）。ホストモデルは
-// `crate::reduce_model`。
+// `ops.rs::MetalBackendOps::sum` は `context_cache::cached_reduce` 経由で
+// `MetalReduce` を呼び本カーネルへ到達する（イシュー #1896）。ホスト
+// モデルは `crate::reduce_model`。
 //
 // ---- 数値方式（binary64 ソフトウェアエミュレーション）----
 //

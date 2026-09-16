@@ -16,14 +16,17 @@
 //! 実装と bit 完全一致する契約）は `shaders/reduce.metal` 冒頭コメント
 //! および `crate::reduce_model` doc が正。
 //!
-//! **結線について**: 本モジュールは `MetalBackendOps::sum` から呼ばれ
-//! ない（`context_cache::cached_reduce` は未追加・`ops.rs` からの参照
-//! なし）。結線・`Var::sum` 経由の到達確認は #1896 のスコープ。
+//! **結線について**: 本モジュールは `MetalBackendOps::sum`
+//! （`ops.rs`）から `context_cache::cached_reduce` 経由で呼ばれる
+//! （イシュー #1896。`Var::sum`／`Var::mean`／`sum_dims`／`Op::Mean`
+//! 再計算・`TypedOps<f16|bf16>::sum` が到達する）。
 //!
-//! 呼び出し元を前提としないため（現時点で `ops.rs` からの呼び出しが
-//! 存在しない）、本モジュール自身が事前検査する（`crate::scan::
-//! MetalScan` の「呼び出し元の検査結果を信頼しない」方針を先取りする
-//! 形。#1896 で `ops.rs` 側にも事前検査が追加される見込み）。
+//! `ops.rs::MetalBackendOps::sum` 側も起動前に `reduce_model::
+//! plan_reduce_all`／`plan_reduce_axis` を先出しして検査するが、本
+//! モジュール自身の検査（[`MetalReduce::run_sum_all_f32`]・
+//! [`MetalReduce::run_sum_axis_f32`] 内の `plan_reduce_all` 呼び出し・
+//! インライン検査）は「呼び出し元の検査結果を信頼しない」二重検査
+//! として維持する（`crate::scan::MetalScan` と同じ方針）。
 //! [`MetalReduce::run_sum_all_f32`] は `crate::reduce_model::
 //! plan_reduce_all` を呼んで検査する一方、[`MetalReduce::
 //! run_sum_axis_f32`] は既に `outer`／`axis_len`／`inner` へ分解済み

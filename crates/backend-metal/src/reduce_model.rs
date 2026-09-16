@@ -41,10 +41,10 @@
 //! # 結線について
 //!
 //! 本モジュールは `MetalReduce`（`crate::reduce`）の正しさを裏付ける
-//! ホスト側参照実装・`plan_reduce_all`／`plan_reduce_axis`（`ops.rs`
-//! からの呼び出しを見越した事前検証ヘルパー）を提供するのみであり、
+//! ホスト側参照実装・`plan_reduce_all`／`plan_reduce_axis`（`ops.rs::
+//! MetalBackendOps::sum` が起動前に呼ぶ事前検証ヘルパー）を提供する。
 //! `MetalBackendOps::sum` への結線（`context_cache::cached_reduce`・
-//! `ops.rs` からの呼び出し）は行わない（#1896 のスコープ）。
+//! `ops.rs` からの呼び出し）はイシュー #1896 で完了済み。
 
 use crate::soft_f64::{add_f64_bits, narrow_f64_bits, sequential_sum_f32_bits, widen_f32_bits};
 
@@ -130,10 +130,12 @@ pub enum ReducePrepareError {
     /// `inner`（単一軸）のいずれか（`what`）がカーネル `uint` 引数の
     /// 範囲（[`REDUCE_KERNEL_ARG_LIMIT`]）を超えた、または中間積が
     /// `usize` をオーバーフローした（`value == usize::MAX` で表す）。
-    /// `ops.rs::map_reduce_prepare_error`（#1896 で追加予定）は本
-    /// variant を `BackendError::Unsupported` へ写像しホスト
-    /// フォールバックへ委ねる設計を想定する（`crate::scan_model::
-    /// ScanPrepareError` と同じ判断）。
+    /// `ops.rs::map_reduce_prepare_error`（イシュー #1896 で追加済み）
+    /// は本 variant を `BackendError::Unsupported` へ写像し
+    /// ホストフォールバックへ委ねる（`crate::scan_model::
+    /// ScanPrepareError` と同じ判断。`Var::sum` 自体はホスト
+    /// フォールバックを持たないため、呼び出し元へそのまま伝播する。
+    /// `docs/backend-metal-reduce-sum-design.md` §10）。
     SizeLimitExceeded {
         what: &'static str,
         value: usize,

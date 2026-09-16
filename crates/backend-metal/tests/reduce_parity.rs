@@ -1,10 +1,12 @@
 //! イシュー #1895: `crate::reduce::MetalReduce`（f32 `sum` reduction。
 //! 全要素・単一軸）の CPU-Metal 数値一致検証。
 //!
-//! `MetalBackendOps::sum` への結線は #1896 のスコープ（本イシュー時点で
-//! 未結線）のため、`fandhe_ai_tensor_core::BackendOps` trait 経由ではなく
-//! `MetalReduce::run_sum_all_f32`／`run_sum_axis_f32` を直接呼ぶ
-//! （`dispatch_boundary.rs` と同じ「起動 API 直接構築」方針）。
+//! `MetalBackendOps::sum` への結線はイシュー #1896 で完了済み。本
+//! ファイルは結線後も起動 API 直叩き（`MetalReduce::run_sum_all_f32`／
+//! `run_sum_axis_f32`）の検証として維持する（`dispatch_boundary.rs` と
+//! 同じ「起動 API 直接構築」方針）。`BackendOps` 経由（0 サイズ契約・
+//! 検査順序込み）の検証は `tests/backend_ops_real_device.rs::
+//! backend_ops_sum_matches_cpu_bit_exact` が担う。
 //!
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する
 //! （`scan_parity.rs` と同方針。`#![cfg(target_os = "macos")]` により

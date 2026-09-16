@@ -9,11 +9,12 @@
 //! - **層 1（同一バックエンド内の構造的不変条件・bit 完全一致）**:
 //!   `TypedOps::<bf16>::op(x) == bf16::from_f32(BackendOps::op_f32(f32(x)))`
 //!   を `gemm`（`gemm_fp32_strict` と比較）／`add`／`mul`／`relu`／`exp`／
-//!   `tanh` の 6 演算について検証する。`sum`／`max` は Metal f32
-//!   `BackendOps` が GPU カーネル未実装で常に `Unsupported` を返すため
-//!   （`typed_bf16.rs` モジュール doc「`sum`／`max` は `Unsupported` を
-//!   そのまま伝播する」参照）、bit 一致検証の対象外とし別テストで
-//!   `Unsupported` 伝播のみを確認する
+//!   `tanh` の 6 演算について検証する。`sum` はイシュー #1896 で
+//!   `reduce::MetalReduce` へ結線済みのため層 1 で検証する。`max` は
+//!   Metal f32 `BackendOps` が GPU カーネル未実装で常に `Unsupported`
+//!   を返すため（`typed_bf16.rs` モジュール doc「`max` は
+//!   `Unsupported` をそのまま伝播する」参照）、bit 一致検証の対象外と
+//!   し別テストで `Unsupported` 伝播のみを確認する
 //! - **層 2（CPU `BackendOps` を bf16 丸めした値とのクロスバックエンド
 //!   判定）**: 丸め境界またぎによる誤判定を避けるため、入力を bf16 で
 //!   正確に表現できる小整数・小 K（累算順序に依存しない）に限定する
@@ -231,23 +232,56 @@ fn typed_ops_bf16_accessor_returns_some_without_device_init() {
     );
 }
 
-/// `sum`／`max` が実機不要で `Unsupported` を返すこと（Metal f32
-/// `BackendOps::sum`／`max` が GPU カーネル未実装のため。
-/// `typed_bf16.rs` の同名ユニットテストと同じ確認だが、統合テスト側にも
-/// 固定して回帰対象を明示する）。
+/// `max` が実機不要で `Unsupported` を返すこと（Metal f32
+/// `BackendOps::max` が GPU カーネル未実装のため。`typed_bf16.rs` の
+/// 同名ユニットテストと同じ確認だが、統合テスト側にも固定して回帰
+/// 対象を明示する）。`sum`（イシュー #1896 で結線済み）は層 1 の
+/// `sum_matches_f32_backend_ops_rounded_bit_exact`（`#[ignore]`）が
+/// 別途担う。
 #[test]
-fn sum_and_max_remain_unsupported_without_device_init() {
+fn max_remains_unsupported_without_device_init() {
     let metal = MetalBackendOps::new();
     let a = small_int_bf16_tensor(1, &[1, 2]);
 
     assert!(matches!(
-        TypedOps::<bf16>::sum(&metal, &a, None),
-        Err(BackendError::Unsupported(_))
-    ));
-    assert!(matches!(
         TypedOps::<bf16>::max(&metal, &a, None),
         Err(BackendError::Unsupported(_))
     ));
+}
+
+/// `sum`（イシュー #1896 で `reduce::MetalReduce` へ結線済み）が
+/// `bf16::from_f32(BackendOps::sum(f32))` と要素ごと bit 一致すること・
+/// 範囲外 `dim` は両者 `ShapeMismatch` になることを Metal 実機で検証
+/// する（層 1。`typed_bf16.rs` モジュール doc「`sum` は結線済み」参照）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn sum_matches_f32_backend_ops_rounded_bit_exact() {
+    let metal = MetalBackendOps::new();
+    let a16 = small_int_bf16_tensor(1, &[2, 3]);
+    let a32_data: Vec<f32> = a16.host_slice().iter().map(|v| v.to_f32()).collect();
+    let a32 = Tensor::new(a32_data, a16.shape()).expect("tensor");
+
+    for dim in [None, Some(0)] {
+        let v16 = TypedOps::<bf16>::sum(&metal, &a16, dim).expect("metal bf16 sum");
+        let v32 = BackendOps::sum(&metal, &a32, dim).expect("metal f32 sum");
+        let rounded32: Vec<f32> = v32
+            .host_slice()
+            .iter()
+            .map(|&x| bf16::from_f32(x).to_f32())
+            .collect();
+        assert_eq!(
+            v16.host_slice()
+                .iter()
+                .map(|v| v.to_f32())
+                .collect::<Vec<_>>(),
+            rounded32
+        );
+    }
+
+    let err16 = TypedOps::<bf16>::sum(&metal, &a16, Some(5));
+    let err32 = BackendOps::sum(&metal, &a32, Some(5));
+    assert!(matches!(err16, Err(BackendError::ShapeMismatch(_))));
+    assert!(matches!(err32, Err(BackendError::ShapeMismatch(_))));
 }
 
 /// 実機必須の形状網羅（受け入れ条件の本体。層 1／層 2 双方を実行する）。
