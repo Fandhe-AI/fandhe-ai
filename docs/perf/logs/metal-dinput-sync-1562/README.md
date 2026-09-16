@@ -7,7 +7,7 @@ design.md` §7.3）が backward フェーズ単独にどれだけの同期境界
 
 **現状（本 PR 時点）**: `orchestrate.sh`・本 README・
 `env_info.txt.example` は用意済みだが、実測ログ（`backward_phase.log`
-等の生成物）自体は未生成。本 PR を書いた実行環境に Apple Silicon 実機へ
+等の生成物）自体は未生成（**2026-09-16 実測済み。末尾「実測記録」参照**）。本 PR を書いた実行環境に Apple Silicon 実機へ
 のアクセス経路がないため、下記の実測は未実施のまま記入欄として残す
 （§7.3.4 の記入欄と対応）。Mac セッションで `orchestrate.sh` を実行し、
 生成物をこのディレクトリへ収める。
@@ -74,3 +74,11 @@ sh orchestrate.sh --dry-run
   `linear_forward_device` の先例）
 - 親イシュー #1557 → #1561 → 本イシュー #1562（測定）→ #1563（実装・
   前後比較。次の子イシュー）
+
+## 実測記録（2026-09-16・Apple M4 Max）
+
+本ディレクトリの生成物は 2026-09-16 に #1563 の `orchestrate.sh` ステップ
+4（before 腕 c9bf9830 上で本 `orchestrate.sh` を実行）により収めた
+（record_only・共有負荷下。詳細は `env_info.txt`）。転記先は
+`docs/backend-metal-command-batching-design.md` §7.3.4（方針 A のカウンタは
+5 trial すべて 5/4/3 で訂正仮説と一致）。

@@ -1,0 +1,72 @@
+=== env_info ===
+Darwin 25.6.0 arm64
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+rustc 1.98.1 (48a229cea 2026-09-01)
+machdep.cpu.brand_string: Apple M4 Max
+c9bf9830f7ed69c7cb56b22c0a5cf4d9e64938f5
+=== 方針 A: backward 限定カウンタ・壁時間 ===
+517 | impl CudaAllocator {
+    | ------------------ methods in this implementation
+...
+715 |     pub(crate) fn alloc_uninit_f16(
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+warning: `fandhe-ai-backend-cuda` (lib) generated 61 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/mnist_scale_train_reuse_bench.rs (target/release/deps/mnist_scale_train_reuse_bench-a0c1c5da115ae501)
+
+running 1 test
+test mnist_scale_train_reuse_metal_backward_dinput_phase ... [mnist_scale_train_reuse_metal_backward_dinput_phase] backward-only median=0.634042ms q1=0.623666ms q3=0.638083ms (n=5) encode_deltas=[5, 5, 5, 5, 5] command_buffer_deltas=[4, 4, 4, 4, 4] wait_deltas=[3, 3, 3, 3, 3] — 事前登録仮説（#1562 codex-review 是正後）: encode_delta=5（MseLoss VJP の dispatch_sync 1 回 + d_input 2 回 + d_weight 2 回）・command_buffer_delta=4（cb 生成は MseLoss 1 + d_input(L2) 1 + [d_weight(L2)+d_input(L1)が同一バッチ] 1 + d_weight(L1) 1）・wait_delta=3（MseLoss 1 + d_input(L2) 1 + [d_weight(L2)+d_input(L1)合流] 1。d_weight(L1) 分の cb は本窓内で未 wait のまま SGD update 側へ持ち越す）。record only, non-gating（`docs/backend-metal-command-batching-design.md` §7.3）
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.11s
+
+=== 方針 B: d_input GEMM 単体隔離フェーズ分解 ===
+2387 |     fn encode_tiled_nn_recorded(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2509 |     pub(crate) fn encode_tiled_prepared(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 61 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+   Compiling fandhe-ai-backend-metal v0.8.0 (/Users/<user>/work/wt-1563-before/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 0.41s
+     Running tests/resident_lhs_dinput_phase_bench.rs (target/release/deps/resident_lhs_dinput_phase_bench-91f8c220c2c1ae0f)
+
+running 2 tests
+test dinput_phase_l1_784x256x64 ... [resident_lhs_dinput_phase_bench::l1_784x256x64] p=784 q=256 r=64 (n=5) variant_a: encode=0.006167ms sync=0.471208ms readback=0.003209ms transpose=0.000375ms total(encode+sync+readback)=0.490124ms | variant_b: encode_only=0.009375ms | recoverable_upper_bound(A_total - B_encode)=0.480749ms — record only, non-gating（`docs/backend-metal-command-batching-design.md` §7.3）
+ok
+test dinput_phase_l2_256x10x64 ... [resident_lhs_dinput_phase_bench::l2_256x10x64] p=256 q=10 r=64 (n=5) variant_a: encode=0.006333ms sync=0.148500ms readback=0.001375ms transpose=0.000292ms total(encode+sync+readback)=0.155708ms | variant_b: encode_only=0.005458ms | recoverable_upper_bound(A_total - B_encode)=0.150250ms — record only, non-gating（`docs/backend-metal-command-batching-design.md` §7.3）
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+=== 方針 B（GPU タイムスタンプ内訳）===
+    |                   ^^^^^^^^^^^^^^^^
+...
+730 |     pub(crate) fn upload_f16(&self, src: &[f16]) -> Result<PooledCudaHandle<f16>, CudaError> {
+    |                   ^^^^^^^^^^
+
+warning: `fandhe-ai-backend-cuda` (lib) generated 61 warnings (run `cargo fix --lib -p fandhe-ai-backend-cuda` to apply 2 suggestions)
+   Compiling bench-harness v0.8.0 (/Users/<user>/work/wt-1563-before/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 4.22s
+     Running tests/resident_lhs_dinput_phase_bench.rs (target/release/deps/resident_lhs_dinput_phase_bench-fee5712e7042d1a0)
+
+running 2 tests
+test dinput_phase_l1_784x256x64 ... [resident_lhs_dinput_phase_bench::l1_784x256x64] p=784 q=256 r=64 (n=5) variant_a: encode=0.006500ms sync=0.243084ms readback=0.003417ms transpose=0.000083ms total(encode+sync+readback)=0.253001ms | variant_b: encode_only=0.015166ms | recoverable_upper_bound(A_total - B_encode)=0.237835ms — record only, non-gating（`docs/backend-metal-command-batching-design.md` §7.3）
+[resident_lhs_dinput_phase_bench::l1_784x256x64] kernel_gpu (GPUEndTime-GPUStartTime) median=0.109375ms — sync 区間のうち純粋な GPU カーネル専有時間の内訳 （残りは host 側の waitUntilCompleted 待ち・ドライバオーバーヘッド）
+ok
+test dinput_phase_l2_256x10x64 ... [resident_lhs_dinput_phase_bench::l2_256x10x64] p=256 q=10 r=64 (n=5) variant_a: encode=0.005958ms sync=0.156542ms readback=0.001291ms transpose=0.000208ms total(encode+sync+readback)=0.171542ms | variant_b: encode_only=0.006791ms | recoverable_upper_bound(A_total - B_encode)=0.164751ms — record only, non-gating（`docs/backend-metal-command-batching-design.md` §7.3）
+[resident_lhs_dinput_phase_bench::l2_256x10x64] kernel_gpu (GPUEndTime-GPUStartTime) median=0.013667ms — sync 区間のうち純粋な GPU カーネル専有時間の内訳 （残りは host 側の waitUntilCompleted 待ち・ドライバオーバーヘッド）
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+DONE

@@ -9,7 +9,7 @@ bit 同一確認・`#[ignore]` 群非後退確認・カウンタ実測・A/B を
 
 **現状（本 PR 時点）**: `orchestrate.sh`・本 README・
 `env_info.txt.example` は用意済みだが、実測ログ（`bitdump_before.log`
-等の生成物）自体は未生成。本 PR を書いた実行環境に Apple Silicon 実機へ
+等の生成物）自体は未生成（**2026-09-16 実測済み。末尾「実測記録」参照**）。本 PR を書いた実行環境に Apple Silicon 実機へ
 のアクセス経路がないため、下記の実測は未実施のまま記入欄として残す
 （`docs/backend-metal-command-batching-design.md` §7.4 の記入欄と対応）。
 Mac セッションで `orchestrate.sh` を実行し、生成物をこのディレクトリへ
@@ -132,3 +132,18 @@ sh orchestrate.sh --dry-run
   イシューでは実装しない）
 - 親イシュー #1557 → #1561 → #1562（測定・完了）→ 本イシュー #1563
   （実装・前後比較）
+
+## 実測記録（2026-09-16・Apple M4 Max）
+
+本ディレクトリの生成物は 2026-09-16 に M4 Max 実機で `orchestrate.sh` を
+実行して収めた（record_only・共有負荷下。詳細は `env_info.txt`）。
+正式記録は隣接コミット比較（before=c9bf9830〈#1563 マージコミット
+e851e91a の第 1 親〉・after=e851e91a）。上記「before=origin/main」で
+実行した初回（after=565300e4）は #1566 等の後続変更が混入し bias 勾配に
+1〜2 ULP 差（117 行 diff）が出たため `vs-main/` に参考として残す（`bitdump_diff.txt`・`bitdump_label_diff.txt`・同 main 腕の `ignored_after_mnist.log`〈カウンタ 11/7/7・5/3/3〉）。
+`ab/` には A/B 本体（`compare-train-1563.md`・`compare-train-1563-fresh-
+reference.md`・`raw/`〈JSONL・sha・tree・uptime・pmset・skipped。バイナリ
+は含めない〉）を収めた。`orchestrate.sh` の `IGNORED_CMD_STORE_PARITY`
+には `on_metal` フィルタを付けている（フィルタなしでは CUDA 必須テスト
+で `set -eu` 中断するため）。判定は
+`docs/backend-metal-command-batching-design.md` §7.4.5（verdict: ADOPT）。

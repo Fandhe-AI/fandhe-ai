@@ -376,16 +376,27 @@ design.md` §7.4 を正とし本節では重複記載しない）の前後比較
 
 | 項目 | 結果 |
 |---|---|
-| bit 同一（`metal_reuse_step_grad_bit_dump`。4462 行） | 未実測 |
-| `#[ignore]` 非後退 | 未実測 |
-| カウンタ（`mnist_scale_train_reuse_metal_batch_counters`。hard assert） | 未実測（期待: before 11/9/9 → after 11/8/8） |
-| カウンタ（`mnist_scale_train_reuse_metal_backward_dinput_phase`。record-only） | 未実測（期待仮説: before 5/4/3 → after 5/3/3） |
-| A/B reuse `step_total` 判定（`run_ab_dinput_sync_metal.sh`） | 未実測 |
-| fresh 対照セル | 未実測 |
+| bit 同一（`metal_reuse_step_grad_bit_dump`。4462 行） | 2026-09-16 実測済み → 4462/4462 行・diff 0 行（bit-identical。項目集合も一致）。隣接コミット比較 before=c9bf9830／after=e851e91a |
+| `#[ignore]` 非後退 | 2026-09-16 実測済み → 全 pass（mnist 3／gemm_resident_parity 2／device_param_store_backend_parity〈on_metal〉2／command_batching 2） |
+| カウンタ（`mnist_scale_train_reuse_metal_batch_counters`。hard assert） | 2026-09-16 実測済み → before 11/9/9（再現）→ after 11/8/8（pass）。期待どおり |
+| カウンタ（`mnist_scale_train_reuse_metal_backward_dinput_phase`。record-only） | 2026-09-16 実測済み → before 5/4/3 → after 5/3/3（5 trial すべて）。期待仮説どおり。backward-only median は before 0.620416 ms／after 1.073333 ms（同テストの `ignored_after_mnist.log` 側実行では 0.635666 ms。共有負荷下の単発計測・非判定） |
+| A/B reuse `step_total` 判定（`run_ab_dinput_sync_metal.sh`） | 2026-09-16 実測済み → after/before=0.9373（1.767 ms → 1.656 ms。run 内比 0.9912, 0.9259, 0.8960, 0.9283, 0.9138＝5/5 run すべて 1.00 未満）・checksum 完全一致（0.080541）→ **非後退（ADOPT）** |
+| fresh 対照セル | 2026-09-16 実測済み → 0.9746（2.061 ms → 2.009 ms。run 内比 0.9867, 0.9949, 0.9746, 0.8182, 1.0248・checksum 完全一致。非判定） |
 
 実測は `docs/perf/logs/metal-dinput-sync-1563/`（生ログ・env_info）へ
 記録し、実測完了後に本節を実測値で更新すること（事前登録規則の事後
 緩和は行わない）。
+
+**2026-09-16 実測記録**: Apple M4 Max（論理 CPU 16）・macOS 26.6.2・
+rustc 1.98.1・record_only（専有ゲートなし。load average 1 分 約 13〜41
+の共有負荷下）。`--phases`（reuse・単発・非判定）は backward 607.2 →
+702.8 us（1.157）・device_update 213.2 → 4.8 us（0.022）・step_total
+1.751 → 1.620 ms（0.925）で、d_weight(L1) 分の cb wait が update 窓から
+backward 窓へ移ったカウンタ変化（5/4/3 → 5/3/3）と整合する。実測時点の
+main（565300e4）は #1566 等の後続変更を含むため main 比較では bias
+勾配に 1〜2 ULP 差（117 行 diff）が出ることを確認したうえで隣接
+コミット比較を正式記録とした（経緯・判定の詳細は
+`docs/backend-metal-command-batching-design.md` §7.4.5 を正とする）。
 
 **#1566（§9）取り込み時の追記**: 上表のカウンタ期待値（11/9/9 →
 11/8/8・5/4/3 → 5/3/3）は #1563 単独の期待値。§9 の bias 勾配デバイス
@@ -402,6 +413,21 @@ doc comment は「L1 は NN・分類不能」という根拠のない推測を�
 が、本追記の導出時に誤りと判明し是正済み（実際は L1・L2 とも同一の
 NT パターンで分類される）。上表・アサーション値ともに実機実測は
 未実施のまま Mac 実機セッションへ引き継ぐ。
+
+**2026-09-16 追記（#1566 適用後のカウンタ）**: 上記の正式記録
+（隣接コミット比較 after=e851e91a）は #1566 適用前の状態のため、
+「#1566 適用後も 11/8/8」の机上結論を直接には検証しない。参考として、
+初回実行（after=origin/main 565300e4。#1566 と #1690〈MSE forward/
+backward の encode-only 化〉の両方を含む）の
+`docs/perf/logs/metal-dinput-sync-1563/vs-main/ignored_after_mnist.log`
+では `mnist_scale_train_reuse_metal_batch_counters` が
+**11/7/7**（hard assert pass）・`mnist_scale_train_reuse_metal_backward_
+dinput_phase` が **5/3/3**（5 trial すべて）を実測した。11/7/7 は
+#1690 の机上見積り（`docs/backend-metal-command-batching-design.md`
+§7.5.2。11/8/8 → 11/7/7）と一致し、#1566 がカウンタを変えない
+（11/8/8 のまま #1690 で 1 減る）という机上結論と整合するが、#1566
+単独の効果はこの計測では分離できていない（#1566 のみを含み #1690 を
+含まないコミットでの実測は未実施）。
 
 ## 9. bias 勾配のデバイス常駐化（イシュー #1566）
 

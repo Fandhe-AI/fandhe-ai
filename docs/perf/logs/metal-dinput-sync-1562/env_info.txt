@@ -1,0 +1,9 @@
+# イシュー #1562 M4 Max 実機実測（#1563 の orchestrate.sh ステップ 4 による backfill。2026-09-16。内部ホスト名は含めない）
+hostname: masked
+machine: Apple M4 Max（論理 CPU 16）
+os: macOS 26.6.2 (Darwin 25.6.0 arm64, BuildVersion 25G83)
+rustc: 1.98.1 (48a229cea 2026-09-01)
+commit: c9bf9830f7ed69c7cb56b22c0a5cf4d9e64938f5（#1563 適用前の before 腕。#1562 の測定対象状態）
+load_gate: record_only（専有ゲート機構なし。別セッションの workspace 全体テストが並走する共有負荷下）
+load_average_1min: uptime_before.txt 14.87 / uptime_after.txt 28.04
+note: 同一実行のログは docs/perf/logs/metal-dinput-sync-1563/issue_1562_backfill.log にも収録
