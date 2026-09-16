@@ -567,6 +567,16 @@ pub mod scan;
 // 設計判断で `objc2` 系 FFI に触れないため `cfg(target_os = "macos")`
 // を付けず、Linux（本実装環境・CI）でも単体テストが回る。
 pub mod scan_model;
+// f32 `sum` reduction（全要素・単一軸）の起動 API（イシュー #1895・親
+// #1894）。`scan.rs` と同じ設計方針（実行時コンパイル・パイプライン
+// 保持・実行）。`MetalBackendOps::sum` への結線は行わない（#1896）。
+#[cfg(target_os = "macos")]
+pub mod reduce;
+// `shaders/reduce.metal` のホスト側逐語モデル（イシュー #1895）。
+// `scan_model`・`unique_model` と同じ設計判断で `objc2` 系 FFI に
+// 触れないため `cfg(target_os = "macos")` を付けず、Linux（本実装
+// 環境・CI）でも単体テストが回る。
+pub mod reduce_model;
 pub mod soft_f64;
 // dtype 変換（`fandhe_ai_tensor_core::cast::CastOps`。イシュー #1751・
 // 親 #1613・依存 #1750）の起動 API・`CastOps` 実装。`unique.rs` と
@@ -729,6 +739,8 @@ pub use nll::{MetalNll, NllLayout};
 pub use ops::MetalBackendOps;
 #[cfg(target_os = "macos")]
 pub use pooling::MetalPooling;
+#[cfg(target_os = "macos")]
+pub use reduce::MetalReduce;
 #[cfg(target_os = "macos")]
 pub use rmsnorm::MetalRmsNorm;
 #[cfg(target_os = "macos")]

@@ -235,6 +235,22 @@ pub enum MetalError {
     /// `BackendError::Unsupported` へ写像しホストフォールバックへ
     /// 委ねる。`Im2colSizeLimitExceeded` と同型の設計判断）。
     PoolingSizeLimitExceeded { detail: String },
+    /// `crate::reduce_model::{plan_reduce_all, plan_reduce_axis}`
+    /// （`crate::reduce::MetalReduce::run_sum_all_f32`／
+    /// `run_sum_axis_f32` が起動前に呼ぶ。イシュー #1895）が検知した
+    /// 契約違反（ホストスライス実長不一致・`outer*inner`／
+    /// `lanes*axis_len` の `usize` オーバーフロー・カーネル `uint`
+    /// 引数〈`numel`／`num_chunks`／`lanes`／`axis_len`／`inner`〉の
+    /// `u32::MAX` 上限超過）。`InvalidGatherScatterShape` と同じ理由で
+    /// 独立 variant に分離する（`.claude/rules/security.md` A08）。
+    /// `detail` は元の [`crate::reduce_model::ReducePrepareError`] の
+    /// `Display` 文字列表現、またはスライス長不整合の直接メッセージ。
+    /// `sum` はサイズ上限超過でもホストフォールバックが可能な値域
+    /// （`Im2colSizeLimitExceeded`／`PoolingSizeLimitExceeded` と異なり
+    /// `MetalBackendOps::sum` への結線自体が #1896 のスコープのため、
+    /// 現時点では単一 variant のみを用意し `Unsupported` 写像分岐の
+    /// 要否は #1896 で判断する）。
+    InvalidReduceShape { detail: String },
 }
 
 impl fmt::Display for MetalError {
@@ -366,6 +382,9 @@ impl fmt::Display for MetalError {
             }
             MetalError::PoolingSizeLimitExceeded { detail } => {
                 write!(f, "pooling size limit exceeded: {detail}")
+            }
+            MetalError::InvalidReduceShape { detail } => {
+                write!(f, "invalid reduce shape: {detail}")
             }
         }
     }

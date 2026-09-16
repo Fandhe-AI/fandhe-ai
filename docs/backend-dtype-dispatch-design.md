@@ -439,6 +439,8 @@ cargo test -p fandhe-ai-backend-metal --release --test typed_ops_bf16_parity -- 
 
 Metal `half` 専用 elementwise／reduction カーネル（H2D 転送量削減の性能最適化）・f16 NT/TN strided 入口（非 contiguous view の性能最適化）・`_unverified`／`#[doc(hidden)]` の解除（§7-4 の別途承認事項）・Metal f32 `sum`／`max` reduction カーネル自体の実装（実装されれば f16 版は自動的に有効化される。out-of-scope-tracking.md 対象。後続イシュー起票の要否はユーザー承認後に判断）・bf16（#1706）・`Var`／`Tape`／VJP・facade 公開面への昇格・`MemoryOps`／`DeviceBuffer<f16>` 常駐経路（段階 B）・M4 Max 実機実測（§14.6）。
 
+**#1895 で追記**: Metal f32 `sum`（全要素・単一軸）reduction カーネルは `crate::reduce`（`MetalReduce`）として実装済み（`docs/backend-metal-reduce-sum-design.md`）。`MetalBackendOps::sum` への結線（`typed_f16` 等の自動有効化を含む）・本節の記述更新は引き続き #1896 のスコープ。
+
 ### 15.7 スコープ外
 
 MSL `bfloat`／`simdgroup_bfloat8x8` を用いるデバイス常駐ネイティブ bf16 経路（(b) の実測が可の場合の後続候補）・Metal f32 `sum`／`max` reduction カーネル自体（未実装）・Metal `TypedOps<f64>`（恒久 `Unsupported`）／`TypedOps<f16>`（#1705）・`Var`／`Tape`／VJP・facade 公開面への昇格・M4 Max 実機実測（§15.6）。CPU bf16 は #1699・CUDA bf16 は #1704 で実装済み・origin/main マージ済み。
