@@ -206,8 +206,8 @@ fn gemm_batched_broadcasts_lhs_batch_dim_one() {
 fn gemm_batched_broadcasts_middle_batch_axis() {
     let ops = MetalBackendOps::new();
     let (m, k, n) = (3usize, 4usize, 5usize);
-    let a = tensor(random_matrix(0x35, 2 * 1 * m * k), &[2, 1, m, k]);
-    let b = tensor(random_matrix(0x45, 1 * 3 * k * n), &[1, 3, k, n]);
+    let a = tensor(random_matrix(0x35, 2 * m * k), &[2, 1, m, k]);
+    let b = tensor(random_matrix(0x45, 3 * k * n), &[1, 3, k, n]);
 
     let batched = ops.gemm_batched(&a, &b).unwrap();
     assert_eq!(batched.shape(), &[2, 3, m, n]);

@@ -69,6 +69,17 @@ fn f64_batch_norm_train_reference(
     (out, mean_out, var_out)
 }
 
+/// `f64_batch_norm_infer_reference` の入力レイアウト（`[n, c, spatial]`
+/// の NC* 形状）。引数を 9 個から 7 個へ束ねる（clippy
+/// `too_many_arguments` 是正。`#[allow]` で抑止しない方針
+/// `.claude/rules/coding-rust.md`）。
+#[derive(Clone, Copy)]
+struct BnDims {
+    n: usize,
+    c: usize,
+    spatial: usize,
+}
+
 fn f64_batch_norm_infer_reference(
     x: &[f32],
     mean: &[f32],
@@ -76,10 +87,9 @@ fn f64_batch_norm_infer_reference(
     w: Option<&[f32]>,
     b: Option<&[f32]>,
     eps: f32,
-    n: usize,
-    c: usize,
-    spatial: usize,
+    dims: BnDims,
 ) -> Vec<f32> {
+    let BnDims { n, c, spatial } = dims;
     let mut out = vec![0.0f32; x.len()];
     if n == 0 || c == 0 || spatial == 0 {
         return out;
@@ -233,9 +243,7 @@ fn batch_norm_infer_matches_f64_reference() {
         Some(&w_data),
         Some(&b_data),
         eps,
-        n,
-        c,
-        spatial,
+        BnDims { n, c, spatial },
     );
 
     assert_parity("batch_norm infer n=4 c=3 spatial=5", &gpu_out, &expected);

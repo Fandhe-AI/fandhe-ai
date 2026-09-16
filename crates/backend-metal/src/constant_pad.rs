@@ -149,14 +149,28 @@ impl MetalConstantPad {
                 &input_buf,
                 &out_buf,
                 &shapes_buf,
-                rank_u,
-                numel_u,
-                value,
+                PadScalars {
+                    rank: rank_u,
+                    numel: numel_u,
+                    value,
+                },
             );
         })?;
 
         Ok(out_buf.read_to_vec())
     }
+}
+
+/// `constant_pad_f32` カーネルへ `setBytes` で渡すスカラー引数
+/// （バッファ index 3〜5）。`encode_pad_dispatch` の引数を 8 個から
+/// 6 個へ束ねる（clippy `too_many_arguments` 是正。`#[allow]` で
+/// 抑止しない方針 `.claude/rules/coding-rust.md`）。フィールド順は
+/// バッファ index 順（3: `rank`・4: `numel`・5: `value`）。
+#[derive(Clone, Copy)]
+struct PadScalars {
+    rank: u32,
+    numel: u32,
+    value: f32,
 }
 
 /// `constant_pad_f32` カーネルのエンコード（バッファ index 0〜2・
@@ -168,10 +182,9 @@ fn encode_pad_dispatch(
     input_buf: &MetalBuffer,
     out_buf: &MetalBuffer,
     shapes_buf: &MetalIndexBuffer,
-    rank: u32,
-    numel: u32,
-    value: f32,
+    scalars: PadScalars,
 ) {
+    let PadScalars { rank, numel, value } = scalars;
     encoder.setComputePipelineState(pipeline);
 
     // SAFETY: FFI 境界 1/2。`setBuffer_offset_atIndex` は生存中の
