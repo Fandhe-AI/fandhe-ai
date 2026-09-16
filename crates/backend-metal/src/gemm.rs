@@ -6123,10 +6123,30 @@ mod tests {
         // 固定する（`should_split_k` は `k < max(m, n)` で `None` を返す
         // ため split-K 経路の可否とは無関係に、本関数が k の 8 整除を
         // 独立に要求することを確認する）。
-        let a = nn_layout(64, 63, 63);
+        //
+        // Bugbot 指摘（PR #1927）是正: `a_layout.ld` を `cols`（=k=63）と
+        // 同値にすると `ld` の `VEC_WIDTH`（4）整除検査にも同時に抵触し、
+        // k の 8 整除ゲートを削除しても本テストが通ってしまう（テストが
+        // 独立でない）。`a_layout.ld` を 64（cols=63 に対しパディング済み・
+        // 4 の倍数）へ分離し、k=63 の 8 非整除のみが `Err` の原因になる
+        // ことを保証する（`classify_2d` の `ld >= cols` パディング契約と
+        // 整合する構成。`b_layout` は元々 ld=64 で 4 整除済みのため変更なし）。
+        let a = MatrixLayout {
+            rows: 64,
+            cols: 63,
+            ld: 64,
+            transposed: false,
+        };
         let b = nn_layout(63, 64, 64);
         let err = strided_tiled_eligibility(64, 64, 63, a, 0, b, 0).unwrap_err();
         assert!(matches!(err, MetalError::StridedTiledIneligible { .. }));
+        let MetalError::StridedTiledIneligible { detail } = err else {
+            unreachable!()
+        };
+        assert!(
+            detail.contains("multiples of 8"),
+            "k=63 の 8 非整除以外の理由で reject された可能性があります: {detail}"
+        );
     }
 
     #[test]
