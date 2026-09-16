@@ -84,14 +84,64 @@ docs/perf/logs/metal-reduce-sum-wiring-1896/run_ignored_tests_metal.sh
   `--no-fail-fast`／`--test-threads=1` 化で吸収する運用は本スクリプト
   側で対応済み。Makefile 自体は変更しない）
 
-## 結果（記入欄。未実測のまま空欄）
+## 結果（2026-09-16 M4 Max 実測。イシュー #1894）
+
+実測: Apple M4 Max・origin/main `e64e7565`・`--release`・
+`CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai`・共有負荷下（load average
+約 6〜9。本ディレクトリの項目はすべて parity・bit 一致の確認で負荷非依存）。
+ログは `metal/ignored/*.log`・環境は `metal/env_info.txt`（内部ホスト名は
+含めない。ログ内の絶対パスは `/Users/<user>/…` へ置換済み）。実装コードの
+変更なし・tolerance／baseline／判定規則の事後緩和なし。
 
 | 項目 | 結果 | 備考 |
 |---|---|---|
-| 1. 非 `#[ignore]` 群 | 未実測 | |
-| 2. `reduce_parity` | 未実測 | |
-| 3. 新規 `#[ignore]`（sum bit 一致） | 未実測 | |
-| 4. 11 テスト | 未実測 | |
-| 5. フル実行非後退 | 未実測 | |
+| 1. 非 `#[ignore]` 群 | **PASS**（lib 567 pass／0 fail／93 ignored。統合テスト群も 0 fail） | `backend_metal_all_features.log`（`cargo test -p fandhe-ai-backend-metal --all-features`。書き換えた `max_remains_unsupported_*` 群・`sum_rejects_out_of_range_dim_before_touching_device` を含む） |
+| 2. `reduce_parity` | **PASS**（3/3。bit 完全一致） | `reduce_parity.log`: `metal_sum_all_matches_cpu_bit_exact`・`metal_sum_axis_matches_cpu_bit_exact`・`metal_sum_axis_empty_cases_match_cpu` |
+| 3. 新規 `#[ignore]`（sum bit 一致） | **PASS**（6/6。bit 完全一致） | `backend_ops_sum_bit_exact.log`（1）・`typed_ops_f16_sum.log`（1）・`typed_ops_bf16_sum.log`（1）・`reduce_backend_parity_metal.log`（3: `metal_sum_all_*`／`metal_sum_axis_*`／`metal_mean_*`） |
+| 4. 11 テスト | **PASS**（11/11。全件 FAIL → pass へ転換） | 内訳は下表 |
+| 5. フル実行非後退 | **非後退**（411 pass／1 FAIL。#1902 の 398 pass との by-name 差: 後退 0 件〈`command_batching` 並列限定の既知 FAIL 1 件を除く〉・新規 pass 14 件） | `full_ignored_metal.log`・`command_batching_isolation.log` |
 
-env_info: 未取得（内部ホスト名は書かないこと）。
+### 項目 4 の内訳（#1902 §3.1 の 11 テスト）
+
+| ログ | テスト | #1902 | 今回 |
+|---|---|---|---|
+| `conv2d_backend_parity.log` | `metal_conv2d_backward_matches_cpu` | FAIL（判定不能） | pass |
+| `conv1d_backend_parity.log` | `metal_conv1d_backward_matches_cpu` | FAIL（判定不能） | pass |
+| `conv1d_backend_parity.log` | `metal_conv1d_matches_manual_reshape_conv2d_bit_exact` | FAIL（判定不能） | pass |
+| `nn_conv_backend_parity.log` | `metal_sequential_conv1d_matches_manual_reshape_conv2d_bit_exact` | FAIL（判定不能） | pass |
+| `gather_scatter_parity.log` | `gather_backward_matches_cpu_tape` | FAIL（判定不能） | pass |
+| `constant_pad_parity.log` | `pad_backward_matches_cpu_tape` | FAIL（判定不能） | pass |
+| `interpolate_parity.log` | `interpolate_backward_matches_cpu_tape` | FAIL（判定不能） | pass |
+| `interpolate_parity.log` | `interpolate_bilinear_backward_matches_cpu_tape` | FAIL（判定不能） | pass |
+| `attention_backend_parity.log` | `metal_sdpa_backward_dq_matches_cpu` | FAIL（判定不能） | pass |
+| `no_grad_detach_backend_parity.log` | `metal_detach_weight_grad_matches_cpu` | FAIL（判定不能） | pass |
+| `backward_accumulate_backend_parity.log` | `metal_backward_accumulate_weight_grad_matches_cpu` | FAIL（判定不能） | pass |
+
+各バイナリの同居テスト（forward parity 等）も全件 pass（`conv2d` 2・
+`conv1d` 4・`nn_conv` 6・`gather_scatter` 20・`constant_pad` 5・
+`interpolate` 6・`attention` 2・`no_grad_detach` 1・`backward_accumulate` 1）。
+
+### 項目 5 の内訳（フル実行 `--all-features --no-fail-fast -- --ignored`）
+
+- 今回: 411 pass／1 FAIL（`command_batching::pool_reuse_zero_fill_does_not_
+  synchronize_open_batch`）。#1902: 398 pass／5 FAIL
+- by-name 比較（`test … ok` 行の名前の多重集合差）:
+  - #1902 で ok・今回 ok でない: `pool_reuse_zero_fill_does_not_synchronize_
+    open_batch` の 1 件のみ。#1902 §1 で記録済みの singleton `MetalContext`
+    診断カウンタの**並列干渉**（既知 FAIL。非後退判定に含めない）。同
+    バイナリを `--test-threads=1` で 3 回直列再実行し **3/3 pass**
+    （`command_batching_isolation.log`）
+  - 今回新たに ok: 14 件（#1902 の FAIL 5 件のうち `sum` 起因 4 件
+    〈`gather_backward`／`pad_backward`／`interpolate_backward`／
+    `interpolate_bilinear_backward`〉と split-K `auto_entry_falls_back_to_
+    classic_not_eligible_for_non_split_k_shapes`〈#1899 是正〉の計 5 件が
+    pass へ転換・#1899 新規 `auto_entry_rejects_precondition_violating_
+    shapes_with_typed_err` 1 件・#1895 `reduce_parity` 3 件・#1896 新規
+    sum テスト 5 件〈lib 2・統合 3〉）
+- #1902 既知 FAIL との突合: `rejects_huge_broadcast_view` 系 3 件（#1897）は
+  項目 1 の lib テストで pass（0 fail）・split-K `k=63` fixture（#1899）は
+  上記のとおり pass・`grad_readout_contract_on_metal`（#1898）は facade
+  クレート側のため本フル実行の対象外（#1898 ランブックで別途 2/2 pass を
+  確認し #1898 へコメント）
+
+env_info: `metal/env_info.txt`（内部ホスト名は含めない）。

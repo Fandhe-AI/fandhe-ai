@@ -224,6 +224,15 @@ fandhe-ai-backend-cpu --no-deps --locked --target aarch64-apple-darwin`
 metal-reduce-sum-wiring-1896/README.md`（事前登録判定規則・実行
 コマンド・記入欄）へ申し送る。
 
+**2026-09-16 M4 Max 実測済み（イシュー #1894）**: 上記 README の事前登録
+判定規則どおり、非 `#[ignore]` 群（lib 567 pass／0 fail）・`reduce_parity`
+3/3・新規 sum bit 一致テスト 6/6・#1902 §3.1 の 11 テスト 11/11 がすべて
+pass。フル実行（`--all-features --no-fail-fast -- --ignored`）は 411 pass／
+1 FAIL で、FAIL は `command_batching` の並列干渉による既知 FAIL 1 件のみ
+（直列 3/3 pass）。#1902（398 pass）比の by-name 差は後退 0 件・新規 pass
+14 件。§10 の `Var::sum` ホストフォールバックは引き続き段階 0（未承認）の
+まま。
+
 ## 10. `Var::sum` ホストフォールバックの設計判断（未承認・段階 0）
 
 `ops.rs::MetalBackendOps::sum` が `Unsupported` を返すのは（§9 の検査
