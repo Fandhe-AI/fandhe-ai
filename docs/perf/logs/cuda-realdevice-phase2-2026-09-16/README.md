@@ -150,7 +150,7 @@ panic はすべて
   `min`／`var`／`std` は GB10 実機で失敗する（CPU は成功・Metal は別理由〈reduction
   カーネル未実装〉で失敗）。是正はコード変更（例: `__int_as_float(0x7f800000)` や
   `-1.0f/0.0f` 等 NVRTC で解決できる定義への置換）であり本 PR 対象外。
-  `out-of-scope-tracking.md` に従い切り出し先の起票可否はユーザー判断へ回す
+  `out-of-scope-tracking.md` に従い切り出し済み: #1893
 
 ### 3.2 既知 FAIL（10 件）
 
