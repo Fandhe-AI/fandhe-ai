@@ -198,8 +198,9 @@ jobs:
   # オーバーライド。共通側入力の既定値は self-hosted）・deny-checks（advisories bans
   # licenses sources。共通側既定〈advisories licenses sources〉に bans を追加するため
   # 明示指定する。#353。advisories / bans の設定・違反 0 件の実測根拠は deny.toml の
-  # [advisories] / [bans] 節コメント参照）・test-timeout-minutes（45。共通側既定 30
-  # より長い移行前の値を維持。#465 の Phase 2 移行）・cache（true。#622。下記コメント
+  # [advisories] / [bans] 節コメント参照）・test-timeout-minutes（20。共通側既定 30
+  # より短縮。#1917。ハング時の runner 占有を打ち切る目的・実測根拠は下記ジョブ
+  # 直下のコメント参照）・cache（true。#622。下記コメント
   # 参照）以外の入力（fmt/clippy/deny の timeout・cache-key-prefix 等）は、共通側の
   # 既定値が本リポジトリの意図と同一のため指定しない。concurrency は reusable
   # workflow のトップレベルでは機能しないため、従来どおり本ファイル冒頭の
@@ -276,12 +277,26 @@ jobs:
       # 共通側既定（advisories licenses sources）へ bans を追加（#353）。トークンは
       # 共通側 deny ジョブが閉じた whitelist と厳密一致で fail-closed 検証する
       deny-checks: advisories bans licenses sources
-      # ホステッド（使い捨て VM）移行後も、まずは移行前と同じ 45 分を維持する
-      # （共通側既定は 30 分）。#465 の PR #618 実測: rust-ci / cargo test は 2m9s
-      # （04:18:38〜04:20:47 UTC。
-      # https://github.com/Fandhe-AI/fandhe-ai/actions/runs/31769466364/job/94672194814）
-      # であり 35 分を大幅に下回るため 45 分を維持で確定した（60 分への引き上げは不要）
-      test-timeout-minutes: 45
+      # 20 分へ短縮（共通側既定 30 分より短いため明示指定を継続。#1917）。
+      # #465 の PR #618 実測（2m9s）から移行前の 45 分を暫定維持していたが、
+      # 2026-09-16 に run 35058613570（PR #1902）の attempt 1（job
+      # 104673956712）が compile 段でハングし、05:12:52〜06:07:52（55 分。
+      # 手動 force-cancel まで）runner を占有する実害が発生した。#1917 で
+      # 通常ケース（cache exact hit）・`Cargo.lock` 変更直後（restore-keys
+      # prefix フォールバック）・真の cold（`Cache not found`。全キャッシュ
+      # evict 後）の 3 ケースを実測し、いずれも 20 分に十分収まることを
+      # 確認したうえで短縮した:
+      #   - 通常: main 直近 40 run 中央値 7.4 分・最大 8.4 分
+      #     （run 35041629455）／PR 直近 60 run 中央値 7.6 分・最大 8.9 分
+      #     （run 35058642984 job 104674045198）
+      #   - partial miss: PR #1799 の run 34783903916 job 103795774362 で
+      #     7.5 分（21:28:00〜21:35:34 UTC）
+      #   - 真の cold: main run 34795785230 job 103828495484 で 6.8 分
+      #     （01:24:03〜01:30:52 UTC。`Cache not found for input keys` を
+      #     ログで確認したうえでの実測）
+      # 最悪観測値（8.9 分）でも 20 分の半分以下であり十分な余裕がある。
+      # テスト実行時間が将来伸びた場合は本値を再検討する
+      test-timeout-minutes: 20
       # ホステッド（使い捨て VM）向けキャッシュ設計の確立（#622）。詳細は本ジョブ
       # 直上のコメント参照
       cache: true
