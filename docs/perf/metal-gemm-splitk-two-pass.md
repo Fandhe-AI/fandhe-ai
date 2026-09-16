@@ -392,7 +392,7 @@ metal-gemm-splitk-auto-entry-1513/`（`run_auto_entry.sh`。`auto_entry.log`・`
   `Classic` が構造的に到達不能であり、#1513 で実機未測のまま作成した fixture の
   前提と入口の契約が食い違っている。`NumericContractPendingApproval` の再出現では
   ない。「8 の倍数でない形状を `Err` ではなく `Classic{NotEligible}` へ分類すべきか」
-  は入口契約の判断としてユーザーへ回す（本記録ではテスト・実装とも変更しない）。
+  は入口契約の判断としてユーザーへ回す（本記録ではテスト・実装とも変更しない。契約確定・是正 issue: #1899）。
   `run_auto_entry.sh` は `set -e` により本 FAIL で中断したため `uptime_during.log`
   は 1 本目のみで、`bit_match.log`／`parity.log` はスクリプト記載と同一コマンドを
   手動実行して補完した
