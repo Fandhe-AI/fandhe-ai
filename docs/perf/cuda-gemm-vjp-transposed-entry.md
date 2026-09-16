@@ -71,7 +71,9 @@ f32`（前利用データが起動完了までに全要素上書きされ露出�
 fresh/reuse A/B）は本ドキュメント作成時点でも未実施**であり、イシュー
 #1590 が実行スキャフォールドを整備した（実測本体は GB10 実機セッション
 へ引き継ぎ。詳細は `docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/
-README.md`）。
+README.md`）。**2026-09-16 実測済み → §3.3 の train A/B・R1・5 起動
+補助 A/B を DGX Spark GB10 実機（専有ゲート既定 ON で通過）で実行し、
+§4 で ADOPT を確定した**（生ログ・env_info は同ディレクトリ）。
 
 ### 3.1 実機テスト（`#[ignore]`。実測済み・#1574）
 
@@ -124,8 +126,36 @@ TN 2.096x と僅かではあるが改善方向であり、当該診断系列の�
 logs/lowlayer-diagnosis-2026-09-12/dgx/gemm_transposed_{parity,perf}.log`
 に不変のまま残す）。
 
-### 3.3 train fresh/reuse A/B（未実施。イシュー #1590 でスキャフォールド
-整備済み）
+**2026-09-16 実測済み → 5 プロセス起動中央値（イシュー #1590）**。出典
+`docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/aux/
+gemm_transposed_perf_run{1..5}.log`・同 `aux/aggregate_aux.md`
+（`aggregate_aux_ab.py aux/*.log`。5 起動とも `2 passed; 0 failed`）:
+
+| パターン | m | k | n | before 中央値 (s) | after 中央値 (s) | 倍率中央値（5 起動） | n_runs |
+|----------|---|---|---|-------------------|-------------------|----------------------|--------|
+| NT | 64 | 784 | 256 | 0.000430 | 0.000079 | 5.386x | 5 |
+| NT | 64 | 256 | 10 | 0.000038 | 0.000036 | 1.067x | 5 |
+| NT | 1024 | 1024 | 1024 | 0.002352 | 0.000431 | 5.443x | 5 |
+| NT | 2048 | 2048 | 2048 | 0.012445 | 0.002241 | 5.494x | 5 |
+| TN | 64 | 784 | 256 | 0.000163 | 0.000072 | 2.223x | 5 |
+| TN | 64 | 256 | 10 | 0.000050 | 0.000023 | 2.154x | 5 |
+| TN | 1024 | 1024 | 1024 | 0.002375 | 0.000445 | 5.295x | 5 |
+| TN | 2048 | 2048 | 2048 | 0.021117 | 0.007755 | 2.757x | 5 |
+
+8 形状すべてで倍率中央値 ≥ 1.0（1.067x〜5.494x）。小形状 `m=64,k=256,
+n=10` も NT 1.067x・TN 2.154x で診断系列（1 起動）と同方向。
+
+**要確認（事前登録規則からの逸脱）**: README 手順 2 は本 5 起動を
+`AUX_TREE=<after ツリー ab0b77d0>` 内で実行する（post-#1214 の CUDA
+変更が混入しないための隔離条件）と定めているが、5 起動ログの見出しは
+いずれも **HEAD ツリー（`3e43bbd0`。R1 と同一ツリー）での実行**を示す
+（`tree=/home/<user>/work/rust-ai-library-run`）。したがって上表は
+「HEAD ツリーでの 5 起動中央値」として記録し、**診断系列を置き換える
+正式値（after ツリー限定）としては扱わない**。補助 A/B は非判定のため
+§4 の verdict には影響しない。after ツリー限定での再実行は後続へ申し送る。
+
+### 3.3 train fresh/reuse A/B（2026-09-16 実測済み → GB10 実機・イシュー
+#1590。当初は未実施でスキャフォールドのみ整備）
 
 `docs/perf/train-backward-gemm-wiring.md` §3 と同一系統の参考系列方式
 だが、本イシュー固有の理由（本ブランチ HEAD の `bench-fandhe` ハーネス
@@ -160,7 +190,60 @@ local.md`・`CUDA_NODE` 未確認・ローカル GPU も driver/library version
 mismatch で初期化不可）には DGX Spark GB10 実機への到達手段がないため、
 上表は未実測のまま GB10 実機セッションへ申し送る。
 
-## 4. 採否判断（保留・イシュー #1590 で更新）
+**2026-09-16 実測済み → 上表を GB10 実機の実値で確定する（イシュー
+#1590）。** 環境: NVIDIA GB10（sm_121）・driver 580.173.02・CUDA 13.0
+（NVRTC V13.0.88）・rustc 1.97.0・Linux 6.17.0-1031-nvidia。出典
+`docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/`（`run-1590.log`・
+`ab/compare-train-1590-{fresh,reuse}.md`・`ab/results-{before,after}-
+1590-{train,phases}.jsonl`・`gate-1590.log`・`ab/gate-postbuild-1590.log`・
+`ab/uptime-1590.log`・`env_info.txt`）。
+
+| モード | 指標 | before 中央値 | after 中央値 | 倍率（after/before） | 系列 |
+|--------|------|---------------|---------------|----------------------|------|
+| fresh | step_total | 1.079 ms（min 1.068 / max 1.090） | 528.1 us（min 514.7 / max 544.5） | **0.4892** | Tier 1・5 run 中央値・判定対象 |
+| fresh | backward | 737.5 us | 196.1 us | 0.266 | `--phases` 診断・単発・非判定 |
+| reuse | step_total | 607.8 us（min 606.0 / max 621.6） | 447.6 us（min 443.6 / max 449.5） | **0.7365** | Tier 1・5 run 中央値・判定対象 |
+| reuse | backward | 361.5 us | 197.9 us | 0.547 | `--phases` 診断・単発・非判定 |
+
+- run 内比（5 run・起動順反転）: fresh 0.4768, 0.5034, 0.5010, 0.4926,
+  0.4816／reuse 0.7403, 0.7300, 0.7208, 0.7354, 0.7321（全 run < 1.00・
+  符号一貫「全 run >1.00」は両 mode とも「いいえ」）
+- checksum: 両 mode・両腕・全 run とも `0.080541` で**完全一致**
+  （`--require-checksum-exact` 通過）
+- `--phases` 診断（単発・非判定）の `step_total` は fresh 1.068 ms →
+  511.8 us（0.479）・reuse 610.6 us → 444.9 us（0.729）で Tier 1 と同方向。
+  fresh の backward 以外の phase（forward 0.993・param_readout 0.889・
+  host_sgd 0.967）、reuse の forward_resident 0.976・device_update 0.996
+  はほぼ不変であり、改善は backward（NT／TN 入口が到達する VJP GEMM）に
+  局在する
+- 専有ゲート（既定 ON）: 事前ゲート `gate-1590.log` は sample 2〜4
+  （load1 0.94→0.78→0.47・util.gpu 0 %）、ビルド後再ゲート
+  `ab/gate-postbuild-1590.log` は sample 2〜4（load1 0.86→0.52→0.37・
+  util.gpu 0 %）でいずれも通過。両ゲートとも全サンプルで
+  `compute_apps=2` を観測した（ゲート条件は load1／util.gpu のみのため
+  通過扱い。事実として記録）。計測中 load1 は 0.37〜0.51（`ab/uptime-
+  1590.log`）
+- 腕の同定: before＝`git archive 82058501`・after＝`git archive
+  ab0b77d0`（`ab/tree-{before,after}-1590.txt` は両腕とも `fandhe-ai
+  v0.6.0` の path 依存を示す）。バイナリ sha256 は
+  `ab/sha-{before,after}-1590.txt`。**独立検証済み（2026-09-16・PR #1909
+  codex P2 対応）**: DGX 側展開ツリー（`/home/<user>/work/ab-trees/
+  {before,after}-1590`）に残っていた `.rev-stamp` を回収し、before＝
+  `820585014a6d…`・after＝`ab0b77d0b233…`（`git rev-parse` と一致。
+  `ab/rev-stamp-{before,after}-1590.txt`）を確認したうえで、`crates/`・
+  `scripts/bench/framework-compare/` 配下の全ファイル SHA-256 一覧を
+  `git archive <sha>` 側と突合し、両腕とも完全一致（before 725 件・after
+  727 件。除外は cargo が書き換える `framework-compare/Cargo.lock` と
+  ビルド成果物 `target-ab-*` のみ）。手順・一覧ハッシュは
+  `ab/rev-stamp-verification-1590.md`
+- R1（HEAD ツリー `3e43bbd0`。`ignored/*.log`・`aux/*.log`）: **20/20
+  pass・0 fail**（`gemm_transposed_parity` 5/5・`gemm_transposed_perf`
+  2/2〈5 起動すべて〉・`gemm_fp32_strict_into_parity` 4/4・
+  `transpose_parity` 4/4・`repack_count_tests` 3/3・
+  `device_param_store_backend_parity` CUDA 2/2）
+
+## 4. 採否判断（2026-09-16 実測済み → ADOPT 確定。当初は保留・イシュー
+#1590 で更新）
 
 §3.1（parity 5/5 pass）・§3.2（補助 A/B 8/8 形状 ≥1.0 倍。診断系列・
 1 起動）は実測済みだが、§3.3（train A/B・正式判定対象）は未実測のため
@@ -190,10 +273,38 @@ ADOPT／REJECT を確定する（`docs/perf/train-backward-gemm-wiring.md`
 cuda-gemm-vjp-transposed-entry-1590/README.md`「事前登録判定規則」節に
 計画確定済みであり事後に緩和しない。
 
+**2026-09-16 実測済み → verdict = ADOPT（イシュー #1590）。** 事前登録
+判定規則（`docs/perf/logs/cuda-gemm-vjp-transposed-entry-1590/README.md`
+「事前登録判定規則」節）に照らした根拠:
+
+1. Tier 1（必須）: `size=64` fresh `step_total` 5 run 中央値比 **0.4892**・
+   reuse **0.7365** で両セルとも ≤ 1.00、かつ checksum 両 mode・全 run
+   完全一致（§3.3）
+2. 専有ゲート既定 ON で事前・ビルド後再ゲートとも通過（`verdict=
+   undetermined` 条件に該当しない）
+3. R1（HEAD `#[ignore]` 群）20/20 pass で #1214 起因の fail なし
+4. 補助 A/B（非判定）は 5 起動中央値でも 8 形状すべて ≥ 1.0（§3.2。
+   ただし after ツリー限定の隔離条件を満たさず HEAD ツリーで実行された
+   点は要確認として記録）。旧 §4 項目 3 が懸念した小形状 `m=64,k=256,
+   n=10` の後退は train 総和（Tier 1）でも観測されず、「記録して受容」
+   「numel 閾値ゲート追加」「結線無効化」のいずれの分岐にも該当しない
+
+5. 腕の同定（§3.3）は 2026-09-16 に `.rev-stamp` の回収とツリー内容
+   指紋の突合で独立検証済み（`ab/rev-stamp-verification-1590.md`。
+   PR #1909 codex P2 対応）であり、上記 Tier 1 の差分は事前登録した
+   `82058501` → `ab0b77d0`、すなわち #1214 単独の効果として追跡できる
+
+結線（`CudaBackendOps::gemm_fp32_strict_impl`／`gemm_resident_lhs` の
+NT／TN 入口）は現状のまま維持する。tolerance・baseline・本番コードの
+変更はない。
+
 ## 5. 後続
 
 - 本ドキュメント §3.3・§4 の GB10 実機実測・採否確定（イシュー #1590。
   スキャフォールドは整備済み。実測は GB10 実機セッションへ申し送り）
+  → 2026-09-16 実測済み・ADOPT 確定（§3.3／§4）。残: §3.2 の 5 起動
+  補助 A/B を事前登録どおり after ツリー（`ab0b77d0`）限定で再実行する
+  こと（現行値は HEAD ツリー実行。非判定のため verdict には影響しない）
 - #1212: reuse 経路の grad をデバイス常駐のまま `device_update` へ直結
 - #1215: Metal GEMM の NT/TN strided 結線 → 完了
   （`docs/perf/metal-gemm-vjp-transposed-entry.md`）
