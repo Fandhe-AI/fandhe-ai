@@ -3,14 +3,21 @@
 //! サイト原稿（`site/examples/gemm-bench.md`）に転記するコード例の一次
 //! ソース（`getting_started.rs`〈#874〉と同じ理由で二重実装を避ける。
 //! `.claude/rules/code-comment-style.md`）。本 example の実行成功
-//! （`cargo run -p fandhe-ai --example gemm_bench`）が原稿の受け入れ条件
-//! （コード例がコンパイル・動作確認済みであること）を担保する。
+//! （`cargo run -p fandhe-ai --example facade_gemm_bench`）が原稿の受け入れ
+//! 条件（コード例がコンパイル・動作確認済みであること）を担保する。
+//!
+//! **ターゲット名注記**（イシュー #1919）: `Cargo.toml` の `[[example]]`
+//! で本ファイルの出力ターゲット名を `facade_gemm_bench` に指定している
+//! （ファイル名 `gemm_bench.rs` とは異なる）。`crates/backend-cpu`・
+//! `crates/backend-metal` にも同名の `examples/gemm_bench.rs` があり、
+//! 素の `gemm_bench` のままでは出力先（`target/debug/examples/gemm_bench`）
+//! が衝突するため。
 //!
 //! **計測規約**: ウォームアップ 1 回の後、5 回計測し中央値を採用する
 //! （`.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値を
 //! 採用」）。CI（GitHub ホステッド・実機 GPU 非搭載）でも数秒以内に
 //! 終わるよう N=256 の正方 GEMM に抑える。**`--release` を付けて実行
-//! すること**（`cargo run --release -p fandhe-ai --example gemm_bench`）:
+//! すること**（`cargo run --release -p fandhe-ai --example facade_gemm_bench`）:
 //! debug ビルドの計測値は最適化なしの実行速度を測るだけで GEMM 演算の
 //! 性能デモとしては意味を持たないため。
 //!

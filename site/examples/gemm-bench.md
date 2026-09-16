@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 なしの実行速度を測るだけで GEMM 演算の性能デモとしては意味を持ちません）。
 
 ```
-cargo run --release -p fandhe-ai --example gemm_bench
+cargo run --release -p fandhe-ai --example facade_gemm_bench
 ```
 
 このコードブロックは `crates/facade/examples/gemm_bench.rs` の実行

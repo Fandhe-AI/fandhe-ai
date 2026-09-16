@@ -251,13 +251,13 @@ git fetch origin
 
 # base（変更前。スウィズル導入前の直近コミット）
 git checkout <base-sha>
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_base.txt
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release > /tmp/gemm_bench_base.txt
 
 # head（本イシューの実装ブランチ）。SWIZZLE_ENABLED は既定 false のため、
 # 計測前に crates/backend-metal/src/tile.rs の SWIZZLE_ENABLED を一時的に
 # true へ書き換える（コミットしない。計測後に revert する）。
 git checkout perf/540-metal-gemm-tgid-swizzle
 # （ここで SWIZZLE_ENABLED を true へ一時変更）
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_head.txt
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release > /tmp/gemm_bench_head.txt
 # （計測後: git checkout -- crates/backend-metal/src/tile.rs で revert）
 ```

@@ -37,9 +37,9 @@
 
 ```
 CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-  cargo build --release -p fandhe-ai-backend-cpu --example gemm_bench
+  cargo build --release -p fandhe-ai-backend-cpu --example cpu_gemm_bench
 CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-  ./target/release/examples/gemm_bench 512
+  ./target/release/examples/cpu_gemm_bench 512
 ```
 
 ### M=N=K=512（naive/blocked/parallel 3 実装フル計測、warmup 20・iters 20）

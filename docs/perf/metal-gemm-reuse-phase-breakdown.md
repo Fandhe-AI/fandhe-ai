@@ -114,7 +114,7 @@ observed`／`#[cfg(test)] pub(crate) synchronize_with_gpu_timestamps`）
 ### 相互検証（`gemm_bench` example）
 
 同一セッションで `cargo run -p fandhe-ai-backend-metal --example
-gemm_bench --release` を実行し、`dynamic_tile_auto`（転送込み）の
+metal_gemm_bench --release` を実行し、`dynamic_tile_auto`（転送込み）の
 TFLOPS 換算値を突合した（§7）。ログは
 `docs/perf/logs/metal-gemm-reuse-phase-1189/gemm_bench-crosscheck.log`。
 

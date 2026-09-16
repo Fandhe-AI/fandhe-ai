@@ -29,7 +29,7 @@ simdgroup 版と `dispatch_auto` の性能比較を実機実測し、下記「�
 ```sh
 git fetch origin
 git checkout perf/188-metal-dynamic-tile   # 本イシューの実装ブランチ
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release
 ```
 
 出力形式（`examples/gemm_bench.rs` 参照）:
@@ -226,7 +226,7 @@ cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 全ケース PASS を確認してからベンチを実行する。
 
 ```sh
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release
 cargo run -p fandhe-ai-backend-metal --example gemm_f16_bench --release
 ```
 

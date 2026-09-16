@@ -31,11 +31,11 @@ git fetch origin
 
 # base（変更前。蛇行走査導入前の直近コミット）
 git checkout <base-sha>
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_base.txt
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release > /tmp/gemm_bench_base.txt
 
 # head（本イシューの実装ブランチ）
 git checkout perf/536-metal-gemm-serpentine
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_head.txt
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release > /tmp/gemm_bench_head.txt
 ```
 
 出力形式（`examples/gemm_bench.rs` 参照）は `docs/perf/metal-gemm-dynamic-tile.md` と同一（`size=<N>` 行・
