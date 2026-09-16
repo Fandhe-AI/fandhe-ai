@@ -117,9 +117,9 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 - warm build（キャッシュ残存後）: 0.1s 未満
 - `tests/device.rs` の `select_device_zero_on_real_hardware`（`--ignored`）: 実機で pass 済み
 
-### 4.3 既知の warning
+### 4.3 既知の warning（解消済み）
 
-`cargo build --workspace --all-targets` で `backend-cpu` と `backend-metal` の example `gemm_bench` が出力名衝突 warning を出す。エラーではない。
+`cargo build --workspace --all-targets` で `backend-cpu`・`backend-metal`・`facade` の example `gemm_bench` が出力名衝突 warning を出していた（エラーではなかった）。#1919 で example ターゲット名を `cpu_gemm_bench`／`metal_gemm_bench`／`facade_gemm_bench` へ分離し解消済み（ファイル名 `gemm_bench.rs` 自体は各クレートとも不変）。
 
 ### 4.4 長時間実行の切り離し
 

@@ -246,18 +246,24 @@ pool_reuse_interleaved_with_tracked_steps_preserves_batching` の 2 件が FAILE
 系統誤差として乗る問題があり（#746 イシュー本文の 2026-08-19 実測: 対照カーネルが最大 70% 超変動）、
 上記「計測手順」節の interleaved 方式へ置き換えた。参考として残す。
 
+> **注（#1919）**: `--example metal_gemm_bench` は backend-metal の example ターゲット名を
+> `gemm_bench` → `metal_gemm_bench` へ改名した PR（イシュー #1919）以降のコミットにのみ存在する。
+> 下記の base（`<base-sha>`）・head（`perf/540-metal-gemm-tgid-swizzle`）はいずれも #1919 より
+> 前のコミットのため、当時のとおり再現する場合は `--example metal_gemm_bench` を
+> `--example gemm_bench`（改名前の名称）に読み替えること。
+
 ```sh
 git fetch origin
 
 # base（変更前。スウィズル導入前の直近コミット）
 git checkout <base-sha>
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_base.txt
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release > /tmp/gemm_bench_base.txt
 
 # head（本イシューの実装ブランチ）。SWIZZLE_ENABLED は既定 false のため、
 # 計測前に crates/backend-metal/src/tile.rs の SWIZZLE_ENABLED を一時的に
 # true へ書き換える（コミットしない。計測後に revert する）。
 git checkout perf/540-metal-gemm-tgid-swizzle
 # （ここで SWIZZLE_ENABLED を true へ一時変更）
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_head.txt
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release > /tmp/gemm_bench_head.txt
 # （計測後: git checkout -- crates/backend-metal/src/tile.rs で revert）
 ```

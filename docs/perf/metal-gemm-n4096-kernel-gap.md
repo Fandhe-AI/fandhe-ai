@@ -266,7 +266,7 @@ Instruments 系の GPU counters 実測は本イシューでも対象外のまま
 - 計測 example: `cargo run -p fandhe-ai-backend-metal --example
   gemm_transpose_tile_sweep --release`（`CANDIDATES` 全 9 候補・NN/NT/TN/TT・
   warmup 20・計測 20・中央値・決定的シード `0xC0FFEE`。§3 と同一プロトコル）
-  および `cargo run -p fandhe-ai-backend-metal --example gemm_bench --release`
+  および `cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release`
   （本番 `dispatch_auto` 経路の前後比較）
 - **採否判断は `coding-rust.md`「ベンチは 5 回計測の中央値を採用」規約に従い
   5 回計測の中央値で行う**（codex-review 指摘・PR #1204。初版は base/E1 各 3
@@ -346,7 +346,7 @@ N=4096 に限定して行う）。
 
 ### 7.5 本番 `dispatch_auto` 経路の before/after（N=4096・5 run 中央値）
 
-`cargo run -p fandhe-ai-backend-metal --example gemm_bench --release` の
+`cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release` の
 `dynamic_tile_auto_tflops`（`crate::tile::select` が実運用で返す構成。
 N=4096 では cand2 相当）:
 

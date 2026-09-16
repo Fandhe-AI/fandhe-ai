@@ -17,10 +17,17 @@
 //! （`cargo build --workspace --all-targets`）のみが CI で走るようにする
 //! ためである（self-hosted runner をベンチ実行で占有しない。`ci.md`）。
 //!
+//! **ターゲット名注記**（イシュー #1919）: `Cargo.toml` の `[[example]]`
+//! で本ファイルの出力ターゲット名を `metal_gemm_bench` に指定している
+//! （ファイル名 `gemm_bench.rs` とは異なる）。`crates/backend-cpu`・
+//! `crates/facade` にも同名の `examples/gemm_bench.rs` があり、
+//! 素の `gemm_bench` のままでは出力先（`target/debug/examples/gemm_bench`）
+//! が衝突するため。
+//!
 //! ## 実機実行手順（macOS・Apple Silicon）
 //!
 //! ```sh
-//! cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
+//! cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release
 //! ```
 //!
 //! size=256/512/1024/2048/4096（正方）で naive/tiled/simdgroup/
@@ -469,6 +476,6 @@ fn main() {
 fn main() {
     println!(
         "backend-metal gemm_bench example requires macOS (Apple Silicon). \
-         run it on macOS hardware: cargo run -p fandhe-ai-backend-metal --example gemm_bench --release"
+         run it on macOS hardware: cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release"
     );
 }

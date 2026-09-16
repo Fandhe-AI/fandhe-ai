@@ -70,3 +70,16 @@ fandhe-ai-backend-metal = { path = "../backend-metal", version = "=0.8.0" }
 # `docs/license-matrix.md` 更新不要）と同じ扱いとする。
 [dev-dependencies]
 bench-harness = { path = "../bench-harness" }
+
+# イシュー #1919: `crates/backend-cpu`／`crates/backend-metal` にも同名
+# `examples/gemm_bench.rs` があり、`cargo build --workspace --examples`
+# が出力先（`target/debug/examples/gemm_bench`）の衝突警告を出していた
+# （cargo#6313 で将来ハードエラー化予告）。ファイル名は変更せず（`site/`
+# 原稿の一次ソース参照・`docs/perf/**` の言及を保つため）、出力ターゲット
+# 名のみ `facade_gemm_bench` へ分離する。本クレートは crates.io 公開対象
+# のため本 example も `cargo package` に同梱される（`path` は package 内
+# 相対パスとして解決される）。公開後の実行コマンドは
+# `cargo run --release -p fandhe-ai --example facade_gemm_bench`。
+[[example]]
+name = "facade_gemm_bench"
+path = "examples/gemm_bench.rs"

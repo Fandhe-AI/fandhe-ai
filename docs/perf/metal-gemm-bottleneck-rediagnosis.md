@@ -138,7 +138,7 @@ cargo run -p fandhe-ai-backend-metal --example gemm_f32_prepared_bench --release
 ### 4.3 end-to-end 境界との同一プロセス内比較（`gemm_bench`）
 
 ```
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release
 ```
 
 `dispatch_auto`（end-to-end。転送込み）:

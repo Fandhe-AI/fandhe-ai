@@ -102,7 +102,7 @@ metal-gemm-occupancy-target.md` §3.3 の期待値。実機実測は未完了）
 ## 4. 実機計測手順（Mac 実機セッションで実施）
 
 ```sh
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release
 ```
 
 `examples/gemm_bench.rs` の `--- occupancy 判定組み込み比較 ---` セクション（size ∈ {512, 1024, 2048,

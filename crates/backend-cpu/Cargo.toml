@@ -79,3 +79,15 @@ fandhe-ai-autodiff = { path = "../autodiff" }
 # コメント参照（イシュー #881・dev-dependencies は path-only strip 方針。
 # `docs/crates-io-publishing-order.md`）。
 fandhe-ai-backend-metal = { path = "../backend-metal" }
+
+# イシュー #1919: `crates/backend-metal`／`crates/facade` にも同名
+# `examples/gemm_bench.rs` があり、`cargo build --workspace --examples`
+# が出力先（`target/debug/examples/gemm_bench`）の衝突警告を出していた
+# （cargo#6313 で将来ハードエラー化予告）。ファイル名は変更せず（`src`・
+# scripts・docs のファイルパス参照を保つため。`docs/perf/**` に
+# `gemm_bench.rs` への言及多数）、出力ターゲット名のみ `cpu_gemm_bench`
+# へ分離する。bench ゲート（`scripts/run-verification-gates.sh`）は
+# `--example cpu_gemm_bench` で本 example を呼ぶ。
+[[example]]
+name = "cpu_gemm_bench"
+path = "examples/gemm_bench.rs"

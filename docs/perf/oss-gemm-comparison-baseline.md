@@ -47,7 +47,7 @@ venv はリポジトリ管理外（`.venv*/` は `.gitignore` 済み）。実測
 そのまま実行する:
 
 - デバイス内境界: `cargo run --release -p fandhe-ai-backend-metal --example gemm_f32_prepared_bench`
-- 転送込み境界: `cargo run --release -p fandhe-ai-backend-metal --example gemm_bench`
+- 転送込み境界: `cargo run --release -p fandhe-ai-backend-metal --example metal_gemm_bench`
 
 ## 2. 計測プロトコル
 

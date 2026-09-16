@@ -7,6 +7,13 @@
 //! `fandhe_ai_backend_cpu::gemm::BlockSizes`／`gemm_parallel_tuned` の
 //! オーバーサブスクリプション係数を実測スイープできるようにした点。
 //!
+//! **ターゲット名注記**（イシュー #1919）: `Cargo.toml` の `[[example]]`
+//! で本ファイルの出力ターゲット名を `cpu_gemm_bench` に指定している
+//! （ファイル名 `gemm_bench.rs` とは異なる）。`crates/backend-metal`・
+//! `crates/facade` にも同名の `examples/gemm_bench.rs` があり、
+//! 素の `gemm_bench` のままでは出力先（`target/debug/examples/gemm_bench`）
+//! が衝突するため。
+//!
 //! `examples/` に置くのは、`dev-dependencies`（`bench-harness`）を
 //! 利用しつつ、通常の `cargo test`／CI では実行されず、ビルド検証
 //! （`cargo build --workspace --all-targets`）のみが CI で走るようにする
@@ -14,11 +21,11 @@
 //!
 //! ## 使い方
 //!
-//! - `cargo run --release -p fandhe-ai-backend-cpu --example gemm_bench` — 既定サイズ
+//! - `cargo run --release -p fandhe-ai-backend-cpu --example cpu_gemm_bench` — 既定サイズ
 //!   （512/2048/4096）で naive/blocked/parallel を計測し、改善比・並列効率を表示する
 //!   （naive@4096 は所要時間過大のため計測せず、blocked@4096 を分母に使う。
 //!   本ファイル内コメント参照）
-//! - `cargo run --release -p fandhe-ai-backend-cpu --example gemm_bench -- sweep` —
+//! - `cargo run --release -p fandhe-ai-backend-cpu --example cpu_gemm_bench -- sweep` —
 //!   M=N=K=2048 での MC/KC/NC 座標降下法スイープと、512/2048 での
 //!   オーバーサブスクリプション係数（1/2/4）スイープを実行する
 //!

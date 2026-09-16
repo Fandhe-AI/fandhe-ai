@@ -112,6 +112,14 @@ main 側の候補比較ループが `measure()`（`dispatch_variant` 経由。A�
 （`measure_tiled_prepared`・出力フォーマットとも本ブランチのもので固定）は変えず、`gemm_simdgroup_tiled` の
 シェーダ実体（`crates/backend-metal/src/shaders/gemm.metal`）のみを base/head で差し替える。
 
+> **注（#1919）**: `--example metal_gemm_bench` は backend-metal の example ターゲット名を
+> `gemm_bench` → `metal_gemm_bench` へ改名した PR（イシュー #1919）以降のコミットにのみ存在する。
+> `perf/745-metal-register-accumulator-tile` は #1919 より前のブランチのため、当時のとおり
+> 再現する場合は `--example metal_gemm_bench` を `--example gemm_bench`（改名前の名称）に
+> 読み替えること（`git checkout origin/main -- crates/backend-metal/src/shaders/gemm.metal` で
+> シェーダのみ差し替えても、example ターゲット名自体は checkout 中の `perf/745-...` 側の
+> `Cargo.toml` で決まる点に注意）。
+
 ```sh
 git fetch origin
 
@@ -120,11 +128,11 @@ git checkout perf/745-metal-register-accumulator-tile
 
 # base（是正前 main のシェーダ）: gemm.metal のみ main のものへ差し替えて計測する
 git checkout origin/main -- crates/backend-metal/src/shaders/gemm.metal
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_745_base.txt
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release > /tmp/gemm_bench_745_base.txt
 
 # head（本イシューの是正後シェーダ）へ復元して計測する
 git checkout perf/745-metal-register-accumulator-tile -- crates/backend-metal/src/shaders/gemm.metal
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_745_head.txt
+cargo run -p fandhe-ai-backend-metal --example metal_gemm_bench --release > /tmp/gemm_bench_745_head.txt
 
 # 作業ツリーを head の状態へ戻す（上の checkout で index に変更が乗っていないか確認する）
 git status --short crates/backend-metal/src/shaders/gemm.metal

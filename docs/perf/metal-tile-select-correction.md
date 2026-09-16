@@ -131,7 +131,7 @@ cargo test -p fandhe-ai-backend-metal --release -- --ignored
 ### 候補・自動選択ベンチ（受け入れ条件 1・2）
 
 ```sh
-cargo run -p fandhe-ai-backend-metal --release --example gemm_bench
+cargo run -p fandhe-ai-backend-metal --release --example metal_gemm_bench
 ```
 
 | size | 是正前 auto TFLOPS | 是正後 auto TFLOPS | 候補中最良 TFLOPS | 是正後 auto/最良 |
