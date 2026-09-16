@@ -233,6 +233,15 @@ def load_rows(path):
                     f"実際: {obj['graph']!r}） — skipped"
                 )
                 continue
+            # イシュー #1585: `pinned_h2d`（`Record.pinned_h2d`）も同じ
+            # fail-closed 型検証を適用する（`managed`／`device_checksum`
+            # と同型の bool 値）。
+            if "pinned_h2d" in obj and not isinstance(obj["pinned_h2d"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'pinned_h2d' フィールド型（bool を"
+                    f"期待。実際: {obj['pinned_h2d']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -277,6 +286,12 @@ def _train_records(rows, mode):
         # とのゲート混同防止。graph 有無の A/B 自体は専用ツール
         # `compare_graph_ab.py` で行う）。
         if "graph" in r:
+            continue
+        # イシュー #1585: `pinned_h2d:true`（CUDA H2D 側 pinned staging）
+        # 行も本ツールの A/B 比較対象外（既存プロトコル計測とのゲート
+        # 混同防止。pinned_h2d 有無の A/B 自体は専用ツール
+        # `compare_pinned_h2d_ab.py` で行う）。
+        if r.get("pinned_h2d", False) is True:
             continue
         out.append(r)
     return out

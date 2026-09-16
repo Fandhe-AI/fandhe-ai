@@ -244,6 +244,16 @@ def load_rows(path):
                     f"{obj['metal_split_k']!r}） — skipped"
                 )
                 continue
+            # イシュー #1585: `pinned_h2d`（CUDA H2D 側 pinned staging
+            # opt-in 経路の runtime トグル A/B。`--pinned-h2d`）行も
+            # `managed`／`device_checksum` と同型の理由で型検証する
+            # （値は bool）。
+            if "pinned_h2d" in obj and not isinstance(obj["pinned_h2d"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'pinned_h2d' フィールド型（bool を"
+                    f"期待。実際: {obj['pinned_h2d']!r}） — skipped"
+                )
+                continue
             rows.append(obj)
     return rows, warnings
 
@@ -301,6 +311,12 @@ def _matching_rows(rows, framework, mode, size, device="cuda"):
         # 計測とのゲート混同を防ぐため除外する（`run_ab_splitk_metal.sh`
         # が `compare_gemm_ab.py` で専用の A/B 比較を別途担う）。
         if "metal_split_k" in r:
+            continue
+        # イシュー #1585: `pinned_h2d:true`（CUDA H2D 側 pinned staging
+        # opt-in 経路）行は既定プロトコル計測とのゲート混同を防ぐため
+        # 除外する（`compare_pinned_h2d_ab.py` が専用の A/B 比較を
+        # 別途担う）。
+        if r.get("pinned_h2d", False) is True:
             continue
         out.append(r)
     return out

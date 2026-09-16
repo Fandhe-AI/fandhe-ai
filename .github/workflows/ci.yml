@@ -806,6 +806,16 @@ jobs:
       - name: フレームワーク横並びベンチ compare_readout_ab.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/compare_readout_ab_test.py
 
+      # イシュー #1585: compare_pinned_h2d_ab.py（CUDA H2D 側 pinned
+      # staging〈`--pinned-h2d`〉有無の A/B 比較ヘルパー。
+      # `compare_managed_ab.py` と同型の設計）の回帰テスト。
+      # summarize_test.py・compare_ab_test.py・compare_gemm_gate_test.py・
+      # compare_managed_ab_test.py・compare_gemm_ab_test.py・
+      # compare_graph_ab_test.py・compare_readout_ab_test.py と同一方針
+      # （stdlib の unittest のみ・cargo の有無に関わらず常時実行）。
+      - name: フレームワーク横並びベンチ compare_pinned_h2d_ab.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/compare_pinned_h2d_ab_test.py
+
       # イシュー #1237: parity_tolerance_candidates.py（#1184 ダンプ実値から
       # スケール付き絶対誤差／ULP 判定候補の fail 数を机上計算するスクリプト）
       # の回帰テスト。summarize_test.py・compare_gemm_ab_test.py 等と同一方針

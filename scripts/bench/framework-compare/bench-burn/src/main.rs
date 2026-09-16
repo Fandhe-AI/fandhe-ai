@@ -142,6 +142,7 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
         tf32: cli.device == "cuda",
         managed: cli.managed,
+        pinned_h2d: cli.pinned_h2d,
         device_checksum: false,
         graph: None,
         graph_stats: None,
@@ -262,6 +263,7 @@ fn run_train<B: AutodiffBackend>(
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
         tf32: cli.device == "cuda",
         managed: cli.managed,
+        pinned_h2d: cli.pinned_h2d,
         device_checksum: false,
         graph: None,
         graph_stats: None,
@@ -315,6 +317,7 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
         tf32: cli.device == "cuda",
         managed: cli.managed,
+        pinned_h2d: cli.pinned_h2d,
         device_checksum: false,
         graph: None,
         graph_stats: None,
@@ -424,6 +427,17 @@ fn validate_unsupported_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error
                 .into(),
         );
     }
+    // イシュー #1585: `--pinned-h2d`（CUDA H2D 側 pinned staging）も
+    // fandhe-ai 固有の opt-in API（`set_cuda_pinned_h2d_enabled`）を指す
+    // 概念であり、burn には対応する公開 API が存在しない。`--managed`
+    // と同型の allowlist 方式で常に拒否する。
+    if cli.pinned_h2d {
+        return Err(
+            "MEASURE_ERROR: --pinned-h2d is not supported by burn (fandhe-ai-only CUDA \
+             H2D pinned staging opt-in; issue #1585)"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -459,6 +473,7 @@ mod tests {
             phases: false,
             tf32,
             managed: false,
+            pinned_h2d: false,
             device_checksum: false,
             graph: None,
             readout: None,
@@ -538,6 +553,25 @@ mod tests {
 
     #[test]
     fn metal_split_k_flag_absent_passes_the_guard() {
+        assert!(validate_unsupported_flags(&base_cli(false)).is_ok());
+    }
+
+    /// イシュー #1585: `--pinned-h2d` は fandhe-ai 固有の opt-in であり
+    // burn には対応する公開 API が存在しないため、`--managed` と同様に
+    // 常に MEASURE_ERROR で拒否されることを確認する。
+    #[test]
+    fn pinned_h2d_flag_is_always_measure_error() {
+        let mut cli = base_cli(false);
+        cli.pinned_h2d = true;
+        let err = validate_unsupported_flags(&cli)
+            .expect_err("--pinned-h2d must be rejected on bench-burn");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--pinned-h2d"), "msg={msg}");
+    }
+
+    #[test]
+    fn pinned_h2d_flag_absent_passes_the_guard() {
         assert!(validate_unsupported_flags(&base_cli(false)).is_ok());
     }
 }

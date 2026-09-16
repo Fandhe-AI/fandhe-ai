@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""イシュー #1353: CUDA managed memory 配置（`--managed`）有無の A/B 集計。
+"""イシュー #1585: CUDA H2D 側 pinned staging（`--pinned-h2d`）有無の A/B 集計。
 
-`run_ab_managed_cuda.sh` が出力する 1 本の JSONL には、`managed` フィールド
-（`bench-common::Record.managed`。キー欠損／`false` = off・`true` = on）で
-off/on 行が交互に混在する。本ツールはこれを `(task, device, size, mode)`
-セルごとに off/on へ分離し、5 回計測中央値の比・checksum 一致（複合判定 +
-完全一致の両方）を報告する。
+`compare_managed_ab.py`（イシュー #1353。CUDA managed memory 配置 A/B）を
+基に、対象フラグを `--pinned-h2d`（`fandhe_ai::set_cuda_pinned_h2d_enabled`。
+`docs/perf/cuda-h2d-pinned-staging.md`）へ差し替えたもの。
+
+`run_ab_pinned_h2d_cuda.sh` が出力する 1 本の JSONL には、`pinned_h2d`
+フィールド（`bench-common::Record.pinned_h2d`。キー欠損／`false` = off・
+`true` = on）で off/on 行が交互に混在する。本ツールはこれを
+`(task, device, size, mode)` セルごとに off/on へ分離し、5 回計測中央値の
+比・checksum 一致（複合判定 + 完全一致の両方）を報告する。
 
 `compare_ab.py` は `framework_version` が before/after で同一であることを
 fail-closed で拒否する（同一バージョンの A/B は before/after 比較として
@@ -13,14 +17,18 @@ fail-closed で拒否する（同一バージョンの A/B は before/after 比�
 フラグのみを変える本用途には流用できない（`.claude/rules/deps-policy.md`
 「同一バイナリ・off/on を run 単位で交互起動」の設計）。
 
-fail-closed 方針（security.md A08。`compare_gemm_gate.py` と同方針）:
+fail-closed 方針（security.md A08。`compare_gemm_gate.py`／
+`compare_managed_ab.py` と同方針）:
 - `framework != "fandhe-ai"` の行、`tf32:true` の行は判定不能行として除外
   する（本ツールは「同一実装・同一バイナリで配置フラグのみを変える」
-  A/B 比較契約に限定されるため。イシュー #1353・PR #1397 codex-review 指摘）
+  A/B 比較契約に限定されるため）
+- `managed`／`device_checksum`／`graph`／`readout`／`metal_split_k` の
+  いずれかが混入した行も、別軸のフラグ違いを H2D pinned staging 配置の
+  違いと取り違えないため除外する
 - 各セル off/on とも「ちょうど 5 件」でなければ「判定不能」
 - `warmup`/`iters`/`version` が off/on で不一致なら「判定不能」
 - checksum が複合判定（`checksum_contract.checksums_match`）を外れれば
-  「判定不能」。加えて完全一致（`==`）列を別途表示する（#1352 の核心契約
+  「判定不能」。加えて完全一致（`==`）列を別途表示する（#1585 の核心契約
   「配置に依らず bit 同一」の裏取りのため、複合判定 pass だけでは契約破れ
   を隠してしまう）
 """
@@ -43,10 +51,10 @@ def _import_from_path(name, filename):
 
 checksum_contract = _import_from_path("checksum_contract", "checksum_contract.py")
 
-# `_cell_key` がグループ化に使う識別フィールドの許容値（イシュー #1353・
-# github-actions レビュー指摘）。`run_ab_managed_cuda.sh` が起動する
+# `_cell_key` がグループ化に使う識別フィールドの許容値（イシュー #1585・
+# github-actions レビュー指摘）。`run_ab_pinned_h2d_cuda.sh` が起動する
 # `bench-fandhe` の task（`--phases` 指定時は `<task>_phases`）・device
-# （`summarize.py::DEVICE_ORDER` と同じ許容集合。本ツールは CUDA managed
+# （`summarize.py::DEVICE_ORDER` と同じ許容集合。本ツールは CUDA pinned_h2d
 # 配置専用のため `cuda` のみだが、将来の拡張余地を残し他デバイスも許容する）・
 # mode の値をここで固定する。
 _VALID_TASKS = frozenset(
@@ -58,18 +66,18 @@ _VALID_MODES = frozenset({"fresh", "reuse"})
 
 def _valid_cell_identity(obj):
     """`_cell_key` がグループ化キーへ使う `task`/`device`/`size`/`mode`/
-    `phase` の型・値域を検証する（イシュー #1353・github-actions レビュー
+    `phase` の型・値域を検証する（イシュー #1585・github-actions レビュー
     指摘）。
 
     これらを検証せずに読み込むと、正常な off/on 各 5 件からこれらの
     フィールドを削除した行でも `_cell_key` が `(None, None, None,
     "fresh", None)` のような単一セルへ迂回して集約され、比較対象が
     実際には不明であるにもかかわらず判定 "ok" となりうる（fail-open の
-    おそれ。`managed` フィールド自体の型検証だけでは防げない）。
+    おそれ。`pinned_h2d` フィールド自体の型検証だけでは防げない）。
 
     `task`/`device`/`mode` は `frozenset` への `in`/`not in` 判定の前に
     必ず `isinstance(..., str)` で型を確認する（codex-review 指摘・
-    イシュー #1353 3 巡目）。JSON の配列・オブジェクト（Python では
+    イシュー #1585 3 巡目）。JSON の配列・オブジェクト（Python では
     list/dict）は非 hashable なため、型確認なしに `not in _VALID_TASKS`
     等の集合メンバーシップ判定へ直接渡すと、`False` を返す前に
     `TypeError` を送出してクラッシュする（`load_rows` は「不正な行は
@@ -101,15 +109,16 @@ def _valid_cell_identity(obj):
 def load_rows(path):
     """JSONL を読み、不正な行は理由付きで報告しスキップする（A08）。
 
-    `managed` フィールドの型検証は summarize.py/compare_gemm_gate.py と同じ
+    `pinned_h2d` フィールドの型検証は summarize.py/compare_gemm_gate.py と同じ
     fail-closed 方針（bool 以外はスキップ）。`task`/`device`/`size`/`mode`
     （`_cell_key` が使う識別フィールド）も `_valid_cell_identity` で検証する
-    （イシュー #1353・github-actions レビュー指摘。詳細は同関数 docstring）。
+    （イシュー #1585・github-actions レビュー指摘。詳細は同関数 docstring）。
 
-    加えて `framework`/`tf32` を検証する（イシュー #1353・PR #1397
-    codex-review 指摘）。本ツールは「同一実装（`fandhe-ai`）の同一バイナリで
-    `--managed` 配置フラグのみを変える」A/B 比較契約（モジュール docstring）
-    に限定される。この検証を欠くと、`framework` が全行で欠損した記録
+    加えて `framework`/`tf32` を検証する（`compare_managed_ab.py`
+    〈イシュー #1353・PR #1397 codex-review 指摘〉と同方針）。本ツールは
+    「同一実装（`fandhe-ai`）の同一バイナリで `--pinned-h2d` 配置フラグ
+    のみを変える」A/B 比較契約（モジュール docstring）に限定される。
+    この検証を欠くと、`framework` が全行で欠損した記録
     （他フレームワークとの取り違え）や、一方の行にのみ `tf32:true` が混入
     した記録（数値モードの違いを配置フラグの違いと取り違え）でも、件数・
     warmup/iters/version 一致・checksum の条件さえ揃えば「ADOPT 候補」を
@@ -134,10 +143,10 @@ def load_rows(path):
                     f"{path}:{lineno}: JSON object ではない（{type(obj).__name__}） — skipped"
                 )
                 continue
-            if "managed" in obj and not isinstance(obj["managed"], bool):
+            if "pinned_h2d" in obj and not isinstance(obj["pinned_h2d"], bool):
                 warnings.append(
-                    f"{path}:{lineno}: 不正な 'managed' フィールド型（bool を期待。"
-                    f"実際: {obj['managed']!r}） — skipped"
+                    f"{path}:{lineno}: 不正な 'pinned_h2d' フィールド型（bool を期待。"
+                    f"実際: {obj['pinned_h2d']!r}） — skipped"
                 )
                 continue
             if obj.get("framework") != "fandhe-ai":
@@ -159,13 +168,13 @@ def load_rows(path):
                 continue
             if obj.get("tf32", False) is True:
                 warnings.append(
-                    f"{path}:{lineno}: 'tf32:true' の行は managed 配置 A/B の"
+                    f"{path}:{lineno}: 'tf32:true' の行は pinned_h2d 配置 A/B の"
                     "対象外（数値モードの違いを配置フラグの違いと取り違える"
                     "ため） — skipped"
                 )
                 continue
             # イシュー #1339: `device_checksum` も `tf32` と同じ理由（別軸の
-            # フラグ違いを managed 配置の違いと取り違えない）で除外する。
+            # フラグ違いを pinned_h2d 配置の違いと取り違えない）で除外する。
             if "device_checksum" in obj and not isinstance(obj["device_checksum"], bool):
                 warnings.append(
                     f"{path}:{lineno}: 不正な 'device_checksum' フィールド型（bool を"
@@ -174,12 +183,12 @@ def load_rows(path):
                 continue
             if obj.get("device_checksum", False) is True:
                 warnings.append(
-                    f"{path}:{lineno}: 'device_checksum:true' の行は managed 配置 "
+                    f"{path}:{lineno}: 'device_checksum:true' の行は pinned_h2d 配置 "
                     "A/B の対象外 — skipped"
                 )
                 continue
             # イシュー #1350: `graph`（CUDA Graph step capture 経路）行も
-            # 同じ理由（別軸のフラグ違いを managed 配置の違いと取り違え
+            # 同じ理由（別軸のフラグ違いを pinned_h2d 配置の違いと取り違え
             # ない）で除外する。
             if "graph" in obj and not isinstance(obj["graph"], str):
                 warnings.append(
@@ -189,13 +198,13 @@ def load_rows(path):
                 continue
             if "graph" in obj:
                 warnings.append(
-                    f"{path}:{lineno}: 'graph' キーを持つ行は managed 配置 A/B の"
+                    f"{path}:{lineno}: 'graph' キーを持つ行は pinned_h2d 配置 A/B の"
                     "対象外 — skipped"
                 )
                 continue
             # イシュー #1545: `metal_split_k`（Metal GEMM split-K opt-in
             # 経路の runtime トグル A/B）行も `graph` と同じ理由（別軸の
-            # フラグ違いを managed 配置の違いと取り違えない）で除外する。
+            # フラグ違いを pinned_h2d 配置の違いと取り違えない）で除外する。
             if "metal_split_k" in obj and not isinstance(obj["metal_split_k"], str):
                 warnings.append(
                     f"{path}:{lineno}: 不正な 'metal_split_k' フィールド型"
@@ -204,24 +213,37 @@ def load_rows(path):
                 continue
             if "metal_split_k" in obj:
                 warnings.append(
-                    f"{path}:{lineno}: 'metal_split_k' キーを持つ行は managed "
+                    f"{path}:{lineno}: 'metal_split_k' キーを持つ行は pinned_h2d "
                     "配置 A/B の対象外 — skipped"
                 )
                 continue
-            # イシュー #1585: `pinned_h2d`（CUDA H2D 側 pinned staging
-            # opt-in 経路の runtime トグル A/B。`--pinned-h2d`）行も
-            # `metal_split_k` と同じ理由（別軸のフラグ違いを managed
-            # 配置の違いと取り違えない）で除外する。
-            if "pinned_h2d" in obj and not isinstance(obj["pinned_h2d"], bool):
+            # イシュー #1353: `managed`（CUDA managed memory 配置）行も
+            # `graph`／`metal_split_k` と同じ理由（別軸のフラグ違いを
+            # pinned_h2d 配置の違いと取り違えない）で除外する。
+            if "managed" in obj and not isinstance(obj["managed"], bool):
                 warnings.append(
-                    f"{path}:{lineno}: 不正な 'pinned_h2d' フィールド型（bool を"
-                    f"期待。実際: {obj['pinned_h2d']!r}） — skipped"
+                    f"{path}:{lineno}: 不正な 'managed' フィールド型（bool を期待。"
+                    f"実際: {obj['managed']!r}） — skipped"
                 )
                 continue
-            if obj.get("pinned_h2d", False) is True:
+            if obj.get("managed", False) is True:
                 warnings.append(
-                    f"{path}:{lineno}: 'pinned_h2d:true' の行は managed 配置 "
-                    "A/B の対象外 — skipped"
+                    f"{path}:{lineno}: 'managed:true' の行は pinned_h2d 配置 A/B の"
+                    "対象外 — skipped"
+                )
+                continue
+            # イシュー #1477: `readout`（Metal 借用ビュー readout の
+            # legacy/borrowed override）行も同じ理由で除外する。
+            if "readout" in obj and not isinstance(obj["readout"], str):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'readout' フィールド型（str を期待。"
+                    f"実際: {obj['readout']!r}） — skipped"
+                )
+                continue
+            if "readout" in obj:
+                warnings.append(
+                    f"{path}:{lineno}: 'readout' キーを持つ行は pinned_h2d 配置 A/B "
+                    "の対象外 — skipped"
                 )
                 continue
             if not _valid_cell_identity(obj):
@@ -252,14 +274,14 @@ def split_off_on(rows):
     cells = {}
     for r in rows:
         key = _cell_key(r)
-        bucket = "on" if r.get("managed", False) is True else "off"
+        bucket = "on" if r.get("pinned_h2d", False) is True else "off"
         cells.setdefault(key, {"off": [], "on": []})[bucket].append(r)
     return cells
 
 
 def _valid_field_value(field, v):
     """`warmup`／`iters`／`version` 1 値の型・値域を検証する（イシュー
-    #1353・github-actions レビュー指摘）。
+    #1585・github-actions レビュー指摘）。
 
     `bool` は Python では `int` のサブクラス（`True == 1`）のため、
     `isinstance(v, int)` だけでは `warmup=True` のような型混入を弾けない。
@@ -305,7 +327,7 @@ def evaluate_cell(off_rows, on_rows):
             ),
         }
     for field in ("warmup", "iters", "version"):
-        # イシュー #1353（github-actions レビュー指摘・2 巡目）: `bool` は
+        # イシュー #1585（github-actions レビュー指摘・2 巡目）: `bool` は
         # Python では `int` のサブクラスで `True == 1`／`hash(True) ==
         # hash(1)` が成立するため、型検証より先に `set` 化すると
         # `iters=[1, True, 1, 1, 1]` のような入力で `True` が同値の `1` に
@@ -323,14 +345,14 @@ def evaluate_cell(off_rows, on_rows):
                 "status": "undeterminable",
                 "reason": f"'{field}' が off または on の行に欠損している",
             }
-        # イシュー #1353（github-actions レビュー指摘）: 型・値域を検証する。
+        # イシュー #1585（github-actions レビュー指摘）: 型・値域を検証する。
         # 欠損チェック（上）と一致チェック（下）だけでは
         # `warmup=-1`／`iters=0`／`version=""` のような不正値でも off/on
         # 双方で揃ってさえいれば「一致」として素通りしてしまう（fail-open
         # のおそれ）。生値リストの各要素に対して明示的に妥当性を検証する。
         #
         # `invalid_values` は `set` ではなく `list` として構築する
-        # （codex-review 指摘・イシュー #1353 3 巡目）: 外部 JSONL の
+        # （codex-review 指摘・イシュー #1585 3 巡目）: 外部 JSONL の
         # `warmup`/`iters`/`version` は任意の JSON 値になりうり、配列・
         # オブジェクト（Python の list/dict）は非 hashable。`_valid_field_value`
         # がそれらを「不正」と正しく判定しても、判定結果を `set` 内包表記へ
@@ -389,7 +411,7 @@ def evaluate_cell(off_rows, on_rows):
 
     off_checksums = [r.get("checksum") for r in off_rows]
     on_checksums = [r.get("checksum") for r in on_rows]
-    # イシュー #1353（github-actions レビュー指摘）: `bool` は `int` の
+    # イシュー #1585（github-actions レビュー指摘）: `bool` は `int` の
     # サブクラス（`True == 1`）のため、`checksum` に `bool` が混入すると
     # `checksums_match`／`==` が数値として扱ってしまい「完全一致」と
     # 誤判定されうる。欠損（`None`）に加え非数値・`bool` も明示的に拒否

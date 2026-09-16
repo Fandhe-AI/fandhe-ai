@@ -174,6 +174,23 @@ def load_rows(path):
                     "A/B の対象外 — skipped"
                 )
                 continue
+            # イシュー #1585: `pinned_h2d`（CUDA H2D 側 pinned staging
+            # opt-in 経路の runtime トグル A/B。`--pinned-h2d`）行も
+            # `metal_split_k` と同方針で除外する（本ツールは graph フラグの
+            # 切替効果に分離キーを限定するため、別軸のトグルが混入した行は
+            # 判定対象にしない）。
+            if "pinned_h2d" in obj and not isinstance(obj["pinned_h2d"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'pinned_h2d' フィールド型"
+                    f"（bool を期待。実際: {obj['pinned_h2d']!r}） — skipped"
+                )
+                continue
+            if obj.get("pinned_h2d", False) is True:
+                warnings.append(
+                    f"{path}:{lineno}: 'pinned_h2d:true' の行は graph "
+                    "A/B の対象外 — skipped"
+                )
+                continue
             state = _graph_state(obj)
             if state is None:
                 warnings.append(

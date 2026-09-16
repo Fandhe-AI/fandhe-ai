@@ -520,6 +520,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph_stats: None,
         readout: cli.readout.as_deref(),
         metal_split_k: cli.metal_split_k.as_deref(),
+        pinned_h2d: cli.pinned_h2d,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -621,6 +622,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph_stats: None,
         readout: cli.readout.as_deref(),
         metal_split_k: cli.metal_split_k.as_deref(),
+        pinned_h2d: cli.pinned_h2d,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -708,6 +710,7 @@ fn run_gemm_device_checksum(
         graph_stats: None,
         readout: None,
         metal_split_k: cli.metal_split_k.as_deref(),
+        pinned_h2d: cli.pinned_h2d,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -791,6 +794,7 @@ fn run_gemm_reuse_device_checksum(
         graph_stats: None,
         readout: None,
         metal_split_k: cli.metal_split_k.as_deref(),
+        pinned_h2d: cli.pinned_h2d,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -950,6 +954,7 @@ fn emit_gemm_phase_records(
                 graph_stats: None,
                 readout: cli.readout.as_deref(),
                 metal_split_k: cli.metal_split_k.as_deref(),
+                pinned_h2d: cli.pinned_h2d,
             },
             phase,
             phase_index,
@@ -1059,6 +1064,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph: cli.graph.as_deref(),
         readout: None,
         metal_split_k: cli.metal_split_k.as_deref(),
+        pinned_h2d: cli.pinned_h2d,
         #[cfg(feature = "graph-step")]
         graph_stats: cli.graph.as_ref().map(|_| current_graph_stats()),
         #[cfg(not(feature = "graph-step"))]
@@ -1226,6 +1232,7 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph: cli.graph.as_deref(),
         readout: None,
         metal_split_k: cli.metal_split_k.as_deref(),
+        pinned_h2d: cli.pinned_h2d,
         #[cfg(feature = "graph-step")]
         graph_stats: cli.graph.as_ref().map(|_| current_graph_stats()),
         #[cfg(not(feature = "graph-step"))]
@@ -1467,6 +1474,7 @@ fn emit_phase_records(
                 graph: cli.graph.as_deref(),
                 readout: None,
                 metal_split_k: cli.metal_split_k.as_deref(),
+                pinned_h2d: cli.pinned_h2d,
                 #[cfg(feature = "graph-step")]
                 graph_stats: cli.graph.as_ref().map(|_| current_graph_stats()),
                 #[cfg(not(feature = "graph-step"))]
@@ -1550,6 +1558,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph_stats: None,
         readout: cli.readout.as_deref(),
         metal_split_k: cli.metal_split_k.as_deref(),
+        pinned_h2d: cli.pinned_h2d,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1655,6 +1664,7 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         graph_stats: None,
         readout: cli.readout.as_deref(),
         metal_split_k: cli.metal_split_k.as_deref(),
+        pinned_h2d: cli.pinned_h2d,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -1878,6 +1888,7 @@ fn emit_infer_phase_records(
                 graph_stats: None,
                 readout: cli.readout.as_deref(),
                 metal_split_k: cli.metal_split_k.as_deref(),
+                pinned_h2d: cli.pinned_h2d,
             },
             phase,
             phase_index,
@@ -1939,6 +1950,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// （feature 有効化・撤去は #1487 のスコープ外）。`device != "cuda"` は
 /// プロセスワイドフラグが cpu 計測で無音 no-op になるのを防ぐため
 /// fail-fast する（README「`--managed`」節参照）。
+///
+/// **`--pinned-h2d`（イシュー #1585）**: CUDA H2D 側 pinned staging
+/// （`fandhe_ai::set_cuda_pinned_h2d_enabled`。`crate::host_staging::
+/// H2dStagingCache`）を有効化して計測する。当該 API は crates.io 公開版
+/// `fandhe-ai =0.8.0` には未収録のため、`pinned-h2d-toggle` feature
+/// （既定無効）による呼び出しのコンパイル時分離を要する（`--managed` と
+/// 同型の allowlist 方式）。`device != "cuda"` は同じ理由で fail-fast
+/// する（README「`--pinned-h2d`」節参照）。この分岐は `AtomicBool` の
+/// 読み書きのみで CUDA デバイスを初期化しないため、`--graph on` の
+/// コメントが要求する「これより前の分岐が CUDA デバイスを初期化しない」
+/// 契約を壊さない。
 fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.tf32 {
         return Err(
@@ -1977,6 +1999,47 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    // イシュー #1585: `--pinned-h2d`（値なしフラグ）は `--device cuda`
+    // 限定の allowlist 方式（`--managed` の `--device cuda` 限定と同型）。
+    // CUDA H2D 側 pinned staging（`fandhe_ai::set_cuda_pinned_h2d_enabled`。
+    // `crate::host_staging::H2dStagingCache`）は runtime トグルを持つ
+    // facade 公開 API だが crates.io 公開版 `fandhe-ai =0.8.0` には未収録
+    // のため、`pinned-h2d-toggle` feature（既定無効）でコンパイル時に
+    // 分離する。有効化・呼び出しは計測開始前（run_* を呼ぶより前）に行い、
+    // `set_cuda_pinned_h2d_enabled(true)` 直後に
+    // `cuda_pinned_h2d_enabled()` を読み戻して反映を確認する
+    // （`--managed` と同一の fail-closed 確認パターン）。
+    if cli.pinned_h2d {
+        if cli.device != "cuda" {
+            return Err(format!(
+                "MEASURE_ERROR: --pinned-h2d is only meaningful for --device cuda (got \
+                 device='{}'; H2D pinned staging affects only the CUDA backend. issue #1585)",
+                cli.device
+            )
+            .into());
+        }
+        #[cfg(feature = "pinned-h2d-toggle")]
+        {
+            fandhe_ai::set_cuda_pinned_h2d_enabled(true);
+            if !fandhe_ai::cuda_pinned_h2d_enabled() {
+                return Err(
+                    "MEASURE_ERROR: set_cuda_pinned_h2d_enabled(true) did not take effect \
+                     (cuda_pinned_h2d_enabled() returned false after enabling; issue #1585)"
+                        .into(),
+                );
+            }
+        }
+        #[cfg(not(feature = "pinned-h2d-toggle"))]
+        {
+            return Err(
+                "MEASURE_ERROR: --pinned-h2d requires a path-patched facade built with \
+                 --features pinned-h2d-toggle (fandhe_ai::set_cuda_pinned_h2d_enabled is not \
+                 part of the crates.io =0.8.0 pin; issue #1585; see \
+                 scripts/bench/framework-compare/README.md \"--pinned-h2d\" section)"
+                    .into(),
+            );
+        }
+    }
     // イシュー #1350: `--graph <on|stream-only>` は `--device cuda` かつ
     // `--task train` 限定（`DeviceParamStore::step` の update 区間のみが
     // capture 対象のため。gemm／infer は `sgd_step_device_tracked` に
@@ -1990,7 +2053,8 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // cuda::graph` モジュール冒頭コメントの契約）:
     // - `on`: `fandhe_ai::set_cuda_graph_step_enabled(true)` を呼ぶ（API
     //   明示設定は環境変数より優先される）。**この呼び出しは本関数の
-    //   これより前の分岐（`--tf32`／`--managed`／`--device-checksum`）が
+    //   これより前の分岐（`--tf32`／`--managed`／`--pinned-h2d`／
+    //   `--device-checksum`）が
     //   いずれも CUDA デバイスを初期化しないことに依存しており、かつ
     //   `dispatch` から呼ばれる `run_train*`（`make_tape`/`CudaDevice::
     //   new` を呼ぶ最初の箇所）より確実に前で実行される契約を、この
@@ -2228,6 +2292,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         }
     }
 
@@ -2311,6 +2376,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         }
     }
 
@@ -2447,6 +2513,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         };
         let err = dispatch(&cli).expect_err("task/--phases combination must be rejected");
         let msg = err.to_string();
@@ -2475,6 +2542,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         }
     }
 
@@ -2725,6 +2793,7 @@ mod tests {
         let cli = Cli {
             readout: Some("legacy".to_string()),
             metal_split_k: None,
+            pinned_h2d: false,
             ..make_cli("gemm", "fresh", &temp_out_path("gemm-readout-legacy"))
         };
         let out_path = std::path::PathBuf::from(cli.out.clone());
@@ -2743,6 +2812,7 @@ mod tests {
         let cli = Cli {
             readout: Some("borrowed".to_string()),
             metal_split_k: None,
+            pinned_h2d: false,
             ..make_cli(
                 "gemm",
                 "reuse",
@@ -2875,6 +2945,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         };
         dispatch(&cli).expect("cuda gemm --mode reuse --phases smoke failed");
         let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2905,6 +2976,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         };
         dispatch(&cli).expect("metal gemm --mode reuse --phases smoke failed");
         let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -2936,6 +3008,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         }
     }
 
@@ -3161,6 +3234,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         })
         .expect("cuda infer --mode reuse smoke failed");
         let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
@@ -3186,6 +3260,7 @@ mod tests {
                 graph: None,
                 readout: None,
                 metal_split_k: None,
+                pinned_h2d: false,
             })
             .expect("cuda infer --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -3221,6 +3296,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         })
         .expect("metal infer --mode reuse smoke failed");
         let reuse_content = std::fs::read_to_string(&reuse_out).expect("test: JSONL 読み取り失敗");
@@ -3246,6 +3322,7 @@ mod tests {
                 graph: None,
                 readout: None,
                 metal_split_k: None,
+                pinned_h2d: false,
             })
             .expect("metal infer --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -3282,6 +3359,7 @@ mod tests {
                 graph: None,
                 readout: None,
                 metal_split_k: None,
+                pinned_h2d: false,
             };
             let err = dispatch(&cli).expect_err("--tf32 must be rejected on bench-fandhe");
             let msg = err.to_string();
@@ -3311,6 +3389,7 @@ mod tests {
                 graph: None,
                 readout: None,
                 metal_split_k: None,
+                pinned_h2d: false,
             };
             let err = dispatch(&cli).expect_err("--managed must be rejected on non-cuda device");
             let msg = err.to_string();
@@ -3344,6 +3423,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         };
         let err = dispatch(&cli)
             .expect_err("--managed must be rejected without managed-placement feature");
@@ -3373,6 +3453,7 @@ mod tests {
                 graph: None,
                 readout: None,
                 metal_split_k: Some("on".to_string()),
+                pinned_h2d: false,
             };
             let err =
                 dispatch(&cli).expect_err("--metal-split-k must be rejected on non-metal device");
@@ -3407,6 +3488,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: Some("on".to_string()),
+            pinned_h2d: false,
         };
         let err = dispatch(&cli)
             .expect_err("--metal-split-k must be rejected without metal-split-k-toggle feature");
@@ -3414,6 +3496,70 @@ mod tests {
         assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
         assert!(msg.contains("--metal-split-k"), "msg={msg}");
         assert!(msg.contains("metal-split-k-toggle"), "msg={msg}");
+    }
+
+    /// イシュー #1585: `--pinned-h2d` は `--device cuda` 以外では常に
+    /// MEASURE_ERROR で fail-fast する（プロセスワイドフラグが cpu／metal
+    /// 計測で無音 no-op になるのを防ぐため。`--managed` と同型）。
+    #[test]
+    fn pinned_h2d_flag_on_non_cuda_device_is_measure_error() {
+        for device in ["cpu", "metal"] {
+            let out = temp_out_path(&format!("pinned-h2d-non-cuda-{device}"));
+            let cli = Cli {
+                task: "gemm".to_string(),
+                device: device.to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: "fresh".to_string(),
+                phases: false,
+                tf32: false,
+                managed: false,
+                device_checksum: false,
+                graph: None,
+                readout: None,
+                metal_split_k: None,
+                pinned_h2d: true,
+            };
+            let err = dispatch(&cli).expect_err("--pinned-h2d must be rejected on non-cuda device");
+            let msg = err.to_string();
+            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+            assert!(msg.contains("--pinned-h2d"), "msg={msg}");
+        }
+    }
+
+    /// イシュー #1585: `pinned-h2d-toggle` feature が無効な既定ビルド
+    /// （`fandhe_ai::set_cuda_pinned_h2d_enabled` API は crates.io 公開版
+    /// `fandhe-ai =0.8.0` に未収録）では、`--device cuda` でも
+    /// `--pinned-h2d` は常に MEASURE_ERROR で fail-fast する。本テストは
+    /// このビルド構成（既定 feature）でのみ意味を持つ（`pinned-h2d-toggle`
+    /// feature 有効ビルドでは実際に path patch 済み facade を呼び出す経路が
+    /// 走るため、本テストとは別に GB10 実機実測で検証する。README
+    /// 「`--pinned-h2d`」節）。
+    #[test]
+    #[cfg(not(feature = "pinned-h2d-toggle"))]
+    fn pinned_h2d_flag_without_feature_is_measure_error() {
+        let out = temp_out_path("pinned-h2d-no-feature-cuda");
+        let cli = Cli {
+            task: "gemm".to_string(),
+            device: "cuda".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: "fresh".to_string(),
+            phases: false,
+            tf32: false,
+            managed: false,
+            device_checksum: false,
+            graph: None,
+            readout: None,
+            metal_split_k: None,
+            pinned_h2d: true,
+        };
+        let err = dispatch(&cli)
+            .expect_err("--pinned-h2d must be rejected without pinned-h2d-toggle feature");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--pinned-h2d"), "msg={msg}");
+        assert!(msg.contains("pinned-h2d-toggle"), "msg={msg}");
     }
 
     /// イシュー #1350: `--graph` は `--device cuda --task train` 以外では
@@ -3443,6 +3589,7 @@ mod tests {
                 graph: Some("on".to_string()),
                 readout: None,
                 metal_split_k: None,
+                pinned_h2d: false,
             };
             let err = dispatch(&cli)
                 .expect_err("--graph must be rejected outside --device cuda --task train");
@@ -3479,6 +3626,7 @@ mod tests {
                 graph: Some(mode.to_string()),
                 readout: None,
                 metal_split_k: None,
+                pinned_h2d: false,
             };
             let err =
                 dispatch(&cli).expect_err("--graph must be rejected without graph-step feature");
@@ -3509,6 +3657,7 @@ mod tests {
                 graph: None,
                 readout: None,
                 metal_split_k: None,
+                pinned_h2d: false,
             };
             let err =
                 dispatch(&cli).expect_err("--device-checksum must be rejected for non-gemm tasks");
@@ -3537,6 +3686,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         };
         let err = dispatch(&cli).expect_err("--device-checksum --phases must be rejected");
         let msg = err.to_string();
@@ -3569,6 +3719,7 @@ mod tests {
             graph: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         };
         let err = dispatch(&cli)
             .expect_err("--device-checksum must be rejected without device-checksum feature");
@@ -3630,6 +3781,7 @@ mod tests {
                 graph: None,
                 readout: None,
                 metal_split_k: None,
+                pinned_h2d: false,
             };
             dispatch(&cli).expect("cuda train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
@@ -3663,6 +3815,7 @@ mod tests {
                 graph: None,
                 readout: None,
                 metal_split_k: None,
+                pinned_h2d: false,
             };
             dispatch(&cli).expect("metal train --phases smoke failed");
             let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
