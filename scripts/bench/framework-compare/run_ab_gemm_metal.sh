@@ -1,6 +1,6 @@
 #!/bin/bash
 # イシュー #1306: Metal GEMM の framework-compare 実践規模計測を
-# before（正式系列。`fandhe-ai` 承認ピン〈現行 `=0.8.0`。#1487〉の
+# before（正式系列。`fandhe-ai` 承認ピン〈現行 `=0.9.0`。v0.9.0 ピン更新〉の
 # registry 解決）/ after（参考系列 HEAD。`crates/facade` への path
 # patch）の 2 バイナリで交互起動し、N=512/1024/2048/4096 × fresh/reuse
 # を 5 回ずつ計測する。

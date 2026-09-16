@@ -7,15 +7,19 @@
 # `compare_pinned_h2d_ab.py` による判定まで自動実行する。
 #
 # `bench-fandhe` は既定ビルド（`pinned-h2d-toggle` feature 無効）では
-# `--pinned-h2d` を常に MEASURE_ERROR で拒否する。
-# `set_cuda_pinned_h2d_enabled`/`cuda_pinned_h2d_enabled` API は crates.io
-# 公開版 `fandhe-ai =0.8.0` には未収録のため（`bench-fandhe/src/main.rs`
-# dispatch 参照）、本スクリプトは `pinned-h2d-toggle` feature を有効化し、
-# かつ `AB_PATCH_FACADE_PATH`（未リリースの HEAD `crates/facade` への
-# path patch。deps-policy.md 第 9 区分は registry 取得元のみを許容する
-# ため、この patch は本スクリプトの CLI 引数としてのみ与え、
+# `--pinned-h2d` を常に MEASURE_ERROR で拒否する（`bench-fandhe/src/
+# main.rs` dispatch 参照）。`set_cuda_pinned_h2d_enabled`/
+# `cuda_pinned_h2d_enabled` API は crates.io 公開版 `fandhe-ai =0.8.0`
+# には未収録だったが `=0.9.0`（v0.9.0 ピン更新）で収録済みのため
+# registry 解決のままでも到達可能になったが、feature 分岐自体は既定 OFF
+# のまま維持する（挙動変更は本イシューのスコープ外）ため、本スクリプトは
+# 引き続き `pinned-h2d-toggle` feature を有効化して計測する。
+# `AB_PATCH_FACADE_PATH`（未リリースの HEAD `crates/facade` への path
+# patch。deps-policy.md 第 9 区分は registry 取得元のみを許容するため、
+# この patch は本スクリプトの CLI 引数としてのみ与え、
 # `scripts/bench/framework-compare/Cargo.toml`／`.cargo/config.toml` へは
-# コミットしない）を要求する。
+# コミットしない）は HEAD ソース計測が目的の任意指定であり、必須では
+# ない。
 #
 # 判定対象（イシュー #1585・`docs/perf/cuda-h2d-pinned-staging.md` §3
 # 「Layer A（非後退ゲート）」）: gemm N∈{1024,2048,4096}×{fresh,reuse}・

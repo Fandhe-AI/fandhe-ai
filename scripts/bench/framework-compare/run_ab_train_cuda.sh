@@ -32,7 +32,7 @@ fi
 # イシュー #1438 P0 是正（codex-review 指摘 PRRT_kwDOTuUCJc6gH59Q）に加え
 # PR #1452 codex-review P1 是正（PRRT_kwDOTuUCJc6gIbMM）: `run_all.sh` と
 # 同じ理由で `GEMM_GATE_PATCH_FACADE_PATH`（任意。`crates/facade` への
-# path patch）を導入した。承認ピン `fandhe-ai =0.8.0`（#1487）への更新後
+# path patch）を導入した。承認ピン `fandhe-ai =0.9.0`（v0.9.0）への更新後
 # も参考系列（HEAD ソース）計測用として維持し、未指定時は registry 解決
 # （承認ピン）のまま通常ビルドする。
 

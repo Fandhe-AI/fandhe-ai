@@ -507,6 +507,17 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > イシュー #1487 でユーザー承認を得て `fandhe-ai =0.7.0` から `=0.8.0` へ
 > 更新した（`scripts/bench/framework-compare/`）。
 
+> **追補（2026-09-17）**: `.github/workflows/release-all.yml`
+> （run 35136585936）により公開 6 クレートの **v0.9.0 の公開を完了した**
+> （`verify` → environment `crates-io-release` 承認 → `publish` の順に
+> success・6 クレート crates.io 反映確認済み。ユーザー指示「v0.9.0 を
+> 出してから、再計測してください」（2026-09-17）に基づく公開承認）。
+> リリースタグ `v0.9.0` はコミット `88c79317` として付与済み。
+> framework-compare の承認ピン（`.claude/rules/deps-policy.md` 第 9
+> 区分）は、v0.9.0 公開完了を受けて `fandhe-ai =0.8.0` から `=0.9.0` へ
+> 更新した（`scripts/bench/framework-compare/`）。`git diff v0.9.0..HEAD
+> -- crates/` は空（facade 差分なし）。
+
 イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
 `mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
 不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
@@ -690,6 +701,15 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
   クレート・`bench-harness` のみ狙い撃ち更新）を同時に更新した。`release-all.yml`
   の `mode: dry-run-only` → `publish`・environment 承認・タグ付与・framework-compare
   の承認ピン更新（`=0.8.0` → `=0.9.0`）は公開完了後に §10 追補へ記録する。
+- 2026-09-17（v0.9.0 ピン更新）: `.github/workflows/release-all.yml`（run
+  35136585936）で v0.9.0 の crates.io 公開が完了した（`verify` →
+  environment `crates-io-release` 承認 → `publish` の順に success・6
+  クレート crates.io 反映確認済み）ことを受け、framework-compare の承認
+  ピン（`.claude/rules/deps-policy.md` 第 9 区分）を `fandhe-ai =0.8.0`
+  → `=0.9.0` へ更新した（ユーザー指示「v0.9.0 を出してから、再計測して
+  ください」〈2026-09-17〉に基づく公開・ピン更新承認）。リリースタグ
+  `v0.9.0` はコミット `88c79317` として付与済み。`git diff v0.9.0..HEAD
+  -- crates/` は空（facade 差分なし）。§10 に追補を記録した。
 - 2026-09-10（#1487）: `.github/workflows/release-all.yml`（run 34417008617）
   で v0.8.0 の crates.io 公開が完了した（#1486 コメントに記録）ことを受け、
   framework-compare の承認ピン（`.claude/rules/deps-policy.md` 第 9 区分）を
