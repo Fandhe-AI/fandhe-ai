@@ -54,7 +54,7 @@ PR #1888 で追加）が `called Result::unwrap() on an Err value: ElementCountO
 overflow を拒否するため検証対象（`checked_bytes_for`）に到達しない。`cfg(target_os =
 "macos")` 限定ファイルのため Linux CI では未コンパイル。本 PR の変更（docs／ログのみ）
 とは無関係だが、本フックにより Mac からの push が拒否される（PR #1888 へ所見コメント
-投稿済み。コード変更は本 PR に含めない）。再現:
+投稿済み。コード変更は本 PR に含めない。是正 issue: #1897）。再現:
 `cargo test -p fandhe-ai-backend-metal --all-features --lib rejects_huge_broadcast_view`。
 
 ### 1b. `device_param_store_backend_parity::grad_readout_contract_on_metal` の M4 Max FAIL（origin/main 上の既存 FAIL）
@@ -68,7 +68,7 @@ overflow を拒否するため検証対象（`checked_bytes_for`）に到達し�
 再現するため並列干渉ではない。同バイナリは `make test-ignored-metal` の対象に含まれないため §1 の
 集計には現れていない。CUDA 側の同名テスト（`grad_readout_contract_on_cuda`）は同日 GB10 で pass。
 Metal の bias 勾配 resident 化（#1566）後にテスト側の期待（bias が resident 充填されない前提）が
-更新されていない可能性があるが、本記録ではコードを変更せず事実のみ残す（起票候補）。
+更新されていない可能性があるが、本記録ではコードを変更せず事実のみ残す（是正 issue: #1898）。
 再現ログ: `docs/perf/logs/metal-mse-backward-1691/ignored_store_parity_serial.log`（#1691 ブランチ）。
 回帰窓: #1563 の隣接コミット比較で after=`e851e91a`（PR #1665 マージ）上では同テストが pass
 （`docs/perf/logs/metal-dinput-sync-1563/ignored_after_store_parity.log`・2 pass）したため、
@@ -187,7 +187,7 @@ panic メッセージはすべて
   `Unsupported` で失敗する（CUDA・CPU は成功）。是正候補（Metal reduction
   カーネル実装／`Var::sum` のホストフォールバック／テスト側の loss を
   `mse_loss` 等へ書き換え）はいずれもコード変更であり本 PR の対象外。
-  `out-of-scope-tracking.md` に従い、切り出し先の起票可否はユーザー判断へ
+  `out-of-scope-tracking.md` に従い切り出し済み: #1894（sub #1895・#1896）
   回す（本 PR では起票しない）
 
 ### 3.2 split-K 自動判定入口 `auto_entry_falls_back_to_classic_not_eligible_for_non_split_k_shapes`（#1513・1 テスト）
@@ -207,7 +207,7 @@ fixture では `SplitKRoute::Classic` が構造的に到達不能であり、テ
 `MetalBackendOps::gemm` は別ルーティングで、`cpu_metal_parity`・
 `gemm_strided_parity`（15 pass）等は全 pass。「8 の倍数でない形状を
 `Err` ではなく `Classic` に分類すべきか」は入口の契約に関する判断で
-ユーザーへ回す。`run_auto_entry.sh` は `set -e` により本 FAIL で中断した
+ユーザーへ回す（入口契約の確定 issue: #1899）。`run_auto_entry.sh` は `set -e` により本 FAIL で中断した
 ため（`uptime_during.log` は 1 本目のみ）、`bit_match.log`／`parity.log` は
 スクリプト記載と同一コマンドを手動実行して補完した（2 pass・1 pass）。
 
