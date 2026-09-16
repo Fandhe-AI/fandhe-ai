@@ -22,6 +22,19 @@ REPO_ROOT="$(cd "${HERE}/../../../.." && pwd)"
 
 cd "${REPO_ROOT}"
 
+# PR #1907 codex-review P2 指摘の是正（Layer A `scripts/bench/framework-
+# compare/run_ab_pinned_h2d_cuda.sh` の判定レポート削除と同型）: 同じ
+# ディレクトリで再実行して途中の run が失敗すると `set -euo pipefail` で
+# 終了するが、前回の `aggregate.md`・未実行分の `layer_b_run*.log`・
+# `uptime_after.txt` が残り、新旧の記録が混在して古い判定が今回の成果物
+# として残ってしまう。計測開始時点で前回の成果物を削除し、未完了時に
+# 古い記録が現在の結果として残らないようにする（`aggregate.md` は全 run
+# 完了後の `aggregate.py` 成功時にのみ再生成される）。
+rm -f "${HERE}/aggregate.md" "${HERE}/uptime_after.txt"
+for i in 1 2 3 4 5; do
+  rm -f "${HERE}/layer_b_run${i}.log"
+done
+
 TEST_CMD=(
   cargo test -p fandhe-ai-backend-cuda --release --features internal-diagnostics
   --test pinned_h2d_upload_ab_1585 -- --ignored --nocapture --test-threads=1

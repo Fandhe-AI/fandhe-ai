@@ -49,11 +49,14 @@ Layer B（H2D 単体マイクロ A/B）を DGX Spark GB10 実機で 2026-09-16 �
   （python3 標準ライブラリのみ・`--self-test` 付き）: `layer_b_run{1..5}.log`
   から CSV 行を抽出し、N ごとに 5 run の `median_ms` 中央値を取り、
   `pinned_staged/pageable` 比と改善／非改善判定を `aggregate.md` として
-  出力する（5 run 揃わない・セル欠落・重複行は fail-closed で失敗する）。
+  出力する（5 run 揃わない・セル欠落・重複行・非有限／非正の `median_ms` は
+  fail-closed で失敗する。PR #1907 codex-review P2 是正）。
 - `docs/perf/logs/cuda-h2d-pinned-staging-1585/run_layer_b.sh`:
   上記テストを 5 プロセス起動し `layer_b_run{1..5}.log` へ記録した後
   `aggregate.py` を呼ぶ。`uptime_before.txt`／`uptime_after.txt` に
-  実行前後の負荷を記録する。
+  実行前後の負荷を記録する。開始時に前回の `aggregate.md`・
+  `layer_b_run*.log`・`uptime_after.txt` を削除し、途中失敗時に新旧の記録が
+  混在しないようにする（PR #1907 codex-review P2 是正）。
 
 ### 実行手順（DGX Spark GB10 実機）
 
