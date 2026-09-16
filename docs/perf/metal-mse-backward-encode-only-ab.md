@@ -184,6 +184,20 @@ resident-grad-cuda-1560/`・`docs/perf/logs/cuda-mse-backward-1692/`
   対象外」とのみ記録する（要確認: 起票はユーザー承認後。
   `.claude/rules/out-of-scope-tracking.md`）。
 
+### 3.5 隣接コミット比較による補足（2026-09-16 追記・判定は §3.2 のまま不変）
+
+§3.3 の after 腕交絡（after=origin/main は #1690 以外の差分を含む）を切り分けるため、同日に
+before=`84490ad1`／after=`fdec66a0`（#1690 マージコミット）の隣接コミット比較で (d)(e) を再実行した
+（`docs/perf/logs/metal-mse-backward-1691/adj/`。record_only・1 分 load average 約 9〜14、5 分 約 17〜19 の共有負荷下）。
+
+- (d) `mse_backward_cases` 5 round 交互（`adj/aggregate.md`）: 4 セルすべて ratio > 1.00
+  （train_shape 640: 1.0657・general 16384: 1.1085・65536: 1.0250・1048576: 1.0234）。`fold_bits` は全一致
+- (e) framework-compare train（`adj/compare-train-1691adj*.md`）: reuse ratio 0.9561（run 内比 0.8489〜1.2006・
+  before spread > 1.5 倍でスクリプトが負荷ノイズの疑いを付記）・fresh 0.9818・checksum 完全一致
+- 結論: 隣接コミット比較でも (d) は規則を満たさず、§3.2 の **REJECT** は不変。(d) と (e) の符号が
+  一致しない点は共有負荷下のノイズが判定に影響している可能性を示すが、規則の事後緩和は行わない。
+  専有環境での再計測が必要なら別途ユーザー判断で実施する
+
 ## 4. スコープ外事項
 
 - CUDA 側は #1692 で分解済み・別スコープ（コード変更なし）。
