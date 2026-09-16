@@ -1,0 +1,15 @@
+gate protocol: load1 < 1.0 && util.gpu == 0% for 3 consecutive samples (interval 30s, max 20)
+start: 2026-09-16T01:34:59Z
+sample=1 ts=01:34:59Z load1=3.88 util_gpu=0% compute_apps=2 gate_ok=0
+sample=2 ts=01:35:29Z load1=2.43 util_gpu=0% compute_apps=2 gate_ok=0
+sample=3 ts=01:35:59Z load1=1.68 util_gpu=0% compute_apps=2 gate_ok=0
+sample=4 ts=01:36:29Z load1=1.07 util_gpu=0% compute_apps=2 gate_ok=0
+sample=5 ts=01:36:59Z load1=0.85 util_gpu=0% compute_apps=2 gate_ok=1
+sample=6 ts=01:37:29Z load1=0.57 util_gpu=0% compute_apps=2 gate_ok=1
+sample=7 ts=01:37:59Z load1=0.46 util_gpu=0% compute_apps=2 gate_ok=1
+gate passed at 2026-09-16T01:37:59Z
+ 10:37:59 up 19 days, 22:04,  8 users,  load average: 0.46, 0.66, 0.37
+run_ab_infer_chain_cuda exit=0
+ 10:38:31 up 19 days, 22:05,  8 users,  load average: 1.29, 0.88, 0.45
+end: 2026-09-16T01:38:31Z
+done.

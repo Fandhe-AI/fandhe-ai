@@ -1,26 +1,29 @@
-# イシュー #1689 CUDA 推論 forward チェーン単一同期化 実測環境（記入欄）
+# イシュー #1689 CUDA 推論 forward チェーン単一同期化 実測環境
 #
-# 本 PR 実行環境（Linux。DGX Spark GB10 実機への到達手段なし・ローカル
-# GPU は driver/library version mismatch で NVML／CUDA 初期化不可）の
-# ため未実測。GB10 実機での実測時にこのテンプレートを埋めること
-# （内部ホスト名・ユーザー名は書かない）。
+# 2026-09-16 に DGX Spark GB10 実機で実測済み（内部ホスト名・ユーザー名は書かない。
+# ログ内の実パスは /home/<user>/ へマスク済み）。実行時刻は progress.log 由来:
+#   1689-ignored 01:34:32Z〜01:34:40Z（load 0.42→0.54・GPU 0→4 %）
+#   1689-bitdump 01:34:40Z〜01:34:59Z（load 0.54→3.88・GPU 4→0 %）
+#   1689-ab      01:34:59Z〜01:38:31Z（専有ゲート通過 01:37:59Z・load 1.29 で終了）
 
 hostname: masked
-date:
-gpu:
-cpu:
-os:
-cuda_driver_version:
-rustc:
-cargo:
-before_sha: edb85c43
-after_sha:
-before_arm: edb85c43 crates/facade（path patch）bench-fandhe sha256=
-after_arm: <branch> crates/facade（path patch）bench-fandhe sha256=
-load_gate_mode:
-r0_result:
-r1_result:
-r2_bitdump_result:
-tier1_ratio_reuse:
-checksum_exact_match_reuse:
-ab_verdict:
+date: 2026-09-16（UTC 01:34Z〜01:38Z）
+gpu: NVIDIA GB10（sm_121）
+cpu: 未記録（ログ・環境事実に無し。DGX Spark GB10 の Grace CPU）
+os: Linux 6.17.0-1031-nvidia
+cuda_driver_version: 580.173.02（CUDA 13.0・NVRTC V13.0.88）
+rustc: 1.97.0
+cargo: 未記録（ログ・環境事実に無し。rustc 1.97.0 同梱の stable）
+before_sha: edb85c43（git archive edb85c43。#1788〈#1688 実装〉マージ直前の親）
+after_sha: 3e43bbd0（crates/・scripts/・Cargo.* は origin/main 565300e4 と同一。docs のみ差分）
+before_arm: edb85c43 crates/facade（path patch）bench-fandhe sha256=1d2b29ea2e427167eb6f3ac316919d78e22674cce219cb4d141992e64650da76
+after_arm: 3e43bbd0 crates/facade（path patch）bench-fandhe sha256=e955b6626f104fb16f8a9eb4e5526e389a1405d93c74e8ccdbf89c8ef16b753e
+load_gate_mode: gated（既定 ON。load1 < 1.0 && util.gpu == 0 % を 30 秒間隔 3 サンプル連続。sample 5〜7〈load1 0.85／0.57／0.46〉で通過・01:37:59Z。全 7 サンプルで compute_apps=2 だが本値はゲート条件に含まれない）
+r0_result: green（4 件＋record-only bench すべて ok。bench: before_median_s=0.000131 after_median_s=0.000094 speedup_x=1.389）
+r1_result: green（bit_exact 3 件・predict_resident_matches_cpu_reference_on_cuda〈REQ-2〉・predict_resident_bit_dump_cuda すべて ok）
+r2_bitdump_result: before_lines=640 after_lines=640 diff=empty（bitdump_diff.txt は空。ランナーログ「OK: before/after は 640 行すべて bit 同一」）
+tier1_ratio_reuse: 0.7084（before 140.2 us / after 99.3 us。run 内比 0.7078, 0.7109, 0.6941, 0.6977, 0.7338）
+checksum_exact_match_reuse: 完全一致（13.976574。before/after × fresh/reuse 全 20 行同値）
+ab_verdict: ADOPT（Tier 1 成立・R0/R1/R2 すべて green・専有ゲート通過。帰属の留保は docs/perf/infer-chain-single-sync-cuda-ab.md §5.8 参照）
+fresh_reference: 0.9817（153.9 us → 151.1 us。非判定。run 5 のみ 1.0103）
+existing_regression: device_param_store_backend_parity_cuda_100steps ok・device_param_store_backend_parity_cuda_grad_readout ok
