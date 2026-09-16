@@ -1,4 +1,4 @@
-# イシュー #1585 CUDA H2D pinned staging ゲート A 実測環境（2026-09-16 実測済み）
+# イシュー #1585 CUDA H2D pinned staging 実測環境（ゲート A・Layer A・Layer B。2026-09-16 実測済み）
 #
 # 内部ホスト名・ユーザー名・絶対パスは記録しない（hostname は masked）。
 
@@ -13,6 +13,13 @@ tree_sha: 3e43bbd0（crates/・scripts/ は origin/main 565300e4 と同一。`gi
 load_gate: record_only 相当（1 分 load average 1.53・GPU 利用率 2 %〈他利用なし〉。判定条件にはしない）
 command: cargo test -p fandhe-ai-backend-cuda --release --all-features --test pinned_h2d_real_device -- --ignored --nocapture --test-threads=1
 gate_a_result: 3 passed / 0 failed（rc=0・finished in 0.87s）
-layer_a_result: 未実施（framework-compare の pinned-h2d 版 run_ab_*.sh・`--pinned-h2d` フラグを持つベンチが本リポジトリに未実装）
-layer_b_result: 未実施（H2D 単体マイクロ A/B ハーネスが本リポジトリに未実装）
-verdict: undetermined（ゲート A pass のみ。既定 OFF〈PINNED_H2D_ENABLED=false〉維持）
+
+# --- Layer A／Layer B（同日・ハーネス実装後） ---
+layer_ab_date: 2026-09-16T03:15:48Z（Layer B start）〜 2026-09-16T03:20:24Z（Layer A end）
+layer_ab_tree_sha: 8f598e2b（本ブランチ。crates/ の本番コードは origin/main 565300e4 と同一）
+layer_b_command: bash docs/perf/logs/cuda-h2d-pinned-staging-1585/run_layer_b.sh（5 プロセス起動・record_only。前 load1 0.15・後 0.35）
+layer_b_result: 全 N 非改善（pinned_staged/pageable: N=1024 2.400・N=2048 2.992・N=4096 3.297。bit 同一・cache hit 確認）
+layer_a_command: AB_PATCH_FACADE_PATH=<tree>/crates/facade bash run_ab_pinned_h2d_cuda.sh pinned-h2d-1585（単一バイナリ・off→on 交互 5 run）
+layer_a_load_gate: gated（既定 ON）。load1 < 1.0 かつ GPU 0 % の 30 秒 3 連続を初回で通過（0.60／0.36／0.42。常駐 compute_apps=2 は記録のみ）
+layer_a_result: 判定 8 セル全て後退（gemm 1024 f/r 2.0758／1.4136・2048 1.5288／1.1961・4096 1.2166／1.2175・train 64 f/r 1.0595／1.0539）。checksum 全セル完全一致。副次 infer 64 reuse 0.9584
+verdict: REJECT（§3 事前登録規則。既定 OFF〈PINNED_H2D_ENABLED=false〉維持・opt-in 実装は維持）

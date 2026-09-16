@@ -1,0 +1,15 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/pinned_h2d_upload_ab_1585.rs (/home/<user>/work/target-fandhe-ai/release/deps/pinned_h2d_upload_ab_1585-c4f4d8e155c0bd6f)
+
+running 1 test
+test pinned_h2d_upload_ab ... phase,n,bytes_mib,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms
+pageable,1024,4.0000,7.7782,0.0812,0.0814,0.0815,0.0815,0.0820
+pinned_staged,1024,4.0000,0.9717,0.1827,0.1908,0.1959,0.2010,0.2234
+pageable,2048,16.0000,0.3305,0.2926,0.2931,0.2932,0.2934,0.3007
+pinned_staged,2048,16.0000,3.1585,0.9140,0.9230,0.9315,0.9336,0.9485
+pageable,4096,64.0000,2.6869,1.1403,1.1411,1.1415,1.1422,1.1503
+pinned_staged,4096,64.0000,12.0358,3.8067,3.8164,3.8202,3.8237,3.8700
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+

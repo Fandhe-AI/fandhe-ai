@@ -72,11 +72,18 @@ Layer A／B のハーネス実装（framework-compare `--pinned-h2d`・H2D 単�
 ```
 
 保存されるファイル: `layer_b_run{1..5}.log`・`aggregate.md`・
-`uptime_before.txt`・`uptime_after.txt`（本追記時点ではいずれも未生成。
-実機実測を実施したセッションで追加する）。
+`uptime_before.txt`・`uptime_after.txt`（2026-09-16 GB10 実測済み。全 N 非改善）。
 
-### 未実施（本セッションでは実機なしのため実行不能）
+### Layer A（framework-compare 非後退。2026-09-16 GB10 実測済み）
 
-- Layer B の GB10 実機実測自体（`run_layer_b.sh` の実行）。
-- Layer A（framework-compare 非後退）は README 冒頭のとおり別途
-  ハーネス実装が必要（本セッションのスコープ外）。
+実行本体は `scripts/bench/framework-compare/run_ab_pinned_h2d_cuda.sh`
+（`AB_PATCH_FACADE_PATH` 必須・専有ゲート既定 ON・`AB_LOAD_GATE_MODE=record_only` で
+opt-out）。保存先 `layer_a/`:
+
+- `compare-pinned-h2d-pinned-h2d-1585-{gemm,train,infer}.md`（`.err` は空）
+- `results-dgx-pinned-h2d-ab-pinned-h2d-1585-{gemm,train,infer,phases}.jsonl`
+- `gate-pinned-h2d-ab-pinned-h2d-1585.log`（専有ゲート 3 サンプル通過）・`skipped-*.log`（空）
+- `runner/`（DGX 側の一括ランナー `dgx_run_1585.sh`・`progress.log`・各ログ。内部ホスト名・絶対パスはマスク済み）
+
+結果: 判定 8 セル全て後退（checksum 完全一致）・副次 infer 64 reuse のみ改善方向。
+verdict は `docs/perf/cuda-h2d-pinned-staging.md` §4.2 のとおり **REJECT**。

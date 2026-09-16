@@ -1,0 +1,7 @@
+== layerB start 2026-09-16T03:15:48Z load=0.15 gpu=0 %
+   layerB rc=0
+== layerB end 2026-09-16T03:15:57Z load=0.35 gpu=3 %
+== layerA-gated start 2026-09-16T03:15:57Z load=0.35 gpu=3 %
+   layerA-gated rc=0
+== layerA-gated end 2026-09-16T03:20:24Z load=3.86 gpu=2 %
+ALL DONE 1585 2026-09-16T03:20:24Z
