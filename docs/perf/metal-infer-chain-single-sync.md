@@ -101,6 +101,19 @@ AB_AFTER_FACADE_PATH=/absolute/path/to/head-checkout/crates/facade \
 - 総合判定（ADOPT／REJECT／undetermined）: **ADOPT**（2026-09-16・M4 Max・record_only・共有負荷下〈計測中 load average 21〜23。別セッションの workspace テストが並走〉。§2 の規則 `ratio<=1.00` かつ checksum 完全一致を充足。負荷は両腕に同時に乗っており比の向きは 5 round 一貫）
 - 生ログ・JSONL・env_info の保存先: `docs/perf/logs/metal-infer-chain-single-sync-1580/`（2026-09-16 作成。`compare-infer-1580.md`・`results-{before,after}-1580-infer.jsonl`・`git-sha-*`・`sha-*`・`uptime-1580.log`・`pmset_therm_*`・`ignored_*.log`・`env_info.txt`）
 
+### 3.3 隣接コミット比較による帰属確認（2026-09-16 追記）
+
+§3.2 の after 腕は origin/main（`565300e4`）であり、`edb85c43` との間には #1688 以外の変更も
+含まれる。改善が #1688（`87b1e338`）に帰属することを確認するため、同日に
+before=`edb85c43`／after=`87b1e338`（#1688 マージコミット）の隣接コミット比較を
+同一スクリプト（`run_ab_infer_chain_metal.sh 1580adj`。origin/main ツリーのスクリプトから
+facade path のみ差し替え）で実行した（`docs/perf/logs/metal-infer-chain-single-sync-1580/adj/`）。
+
+- `mode=reuse`（判定対象）: `ratio=0.5469`・`checksum_exact_match=True` → §3.2 と同符号・同規模で、
+  改善は #1688 単独に帰属する
+- `mode=fresh`（対照・非判定）: `ratio=1.0031`・`checksum_exact_match=True`（誤差範囲）
+- 共有負荷下（1 分 load average 約 8・5 分 約 24）。record_only
+
 ## 4. 出典
 
 `docs/inference-chain-single-sync-design.md`（イシュー #1579・決定 9）・
