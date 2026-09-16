@@ -782,11 +782,10 @@ gather／scatter／scatter_add（#1637 で where／masked_fill を実装済み�
   `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §3.1）・
   CUDA〈GB10〉は引き続き未実測 → CUDA〈GB10〉も 2026-09-16 に実測済み
   （`crates/backend-cuda/tests/gather_scatter_parity.rs` の gather／
-  scatter／one_hot forward は pass。backward を伴う facade 経路は、CUDA
-  reduction カーネル〈`kernels_reduce.rs`〉が GB10 の NVRTC で
-  `identifier "INFINITY" is undefined` のコンパイルエラーとなり
-  `Var::sum` が失敗するため判定不能＝FAIL 記録と推定〈本セッションの
-  他多数の backward テストと同一根本原因〉。演算自体の不一致は未観測。
+  scatter／one_hot forward 3 件・facade `index_ops_backend_parity.rs` の
+  `cuda_` 4 件はいずれも pass。Metal 側にある `gather_backward_matches_cpu_tape`
+  相当の tape backward テストは CUDA 側テストファイルに存在しないため、
+  gather backward は本セッションでは未検証〈FAIL ではない〉。
   `docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md`）。
 
 #### #1703 の追補（`backend-cuda` の `TypedOps<f64>`／`TypedOps<f16>` 実装）
