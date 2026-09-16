@@ -60,11 +60,11 @@ cargo test -p fandhe-ai-backend-metal --release --test linear_forward_device_par
 cargo test -p fandhe-ai --release --test infer_device_chain_metal -- --ignored --nocapture
 ```
 
-- `linear_forward_device_tracked_matches_linear_forward_device_and_leaves_token_unset`: 記入欄（pass/fail・実行ログ）
-- `predict_resident_device_chain_matches_manual_per_layer_chain_bit_exact_metal`: 記入欄
-- `predict_resident_device_chain_is_run_to_run_bit_identical_metal`: 記入欄
-- `predict_resident_device_chain_dispatch_counters_metal`: 記入欄（`encode_calls` 差分・`wait_until_completed` 差分の実測値）
-- `predict_resident_device_chain_bench_metal`（record-only）: 記入欄（`old_median_s`／`new_median_s`／`speedup_x`）
+- `linear_forward_device_tracked_matches_linear_forward_device_and_leaves_token_unset`: **pass**（2026-09-16・M4 Max。`linear_forward_device_parity` 6 件すべて pass。`docs/perf/logs/metal-infer-chain-single-sync-1580/ignored_linear_forward_device_parity.log`）
+- `predict_resident_device_chain_matches_manual_per_layer_chain_bit_exact_metal`: **pass**（同ディレクトリ `ignored_infer_device_chain_metal.log`）
+- `predict_resident_device_chain_is_run_to_run_bit_identical_metal`: **pass**
+- `predict_resident_device_chain_dispatch_counters_metal`: **pass**（テスト内 assert のとおり `encode_calls` 差分 = 2・`wait_until_completed` 差分 = 1 を実機で確認。層ごとの同期点なし）
+- `predict_resident_device_chain_bench_metal`（record-only）: `old_median_s=0.000615`／`new_median_s=0.000371`／`speedup_x=1.658`（共有負荷下・参考値）
 
 ### 3.2 framework-compare A/B（`run_ab_infer_chain_metal.sh`）
 
@@ -93,13 +93,13 @@ AB_AFTER_FACADE_PATH=/absolute/path/to/head-checkout/crates/facade \
 （codex-review 指摘対応）。実測記録には必ずこの 2 ファイルの内容
 （両腕の commit SHA）を転記すること。
 
-- `before` facade git SHA（期待値 `edb85c43` 相当）: 記入欄
+- `before` facade git SHA（期待値 `edb85c43` 相当）: `edb85c438fa06783ea19470c492d90a6c12d165d`
 - `after` facade git SHA（期待値: 実測時点の本ブランチ head。都度
-  `git rev-parse HEAD` で確認し、この記入欄へ実際の SHA を転記する）: 記入欄
-- `mode=reuse`（判定対象）: `before_median_s` / `after_median_s` / `ratio` / `checksum_exact_match` — 記入欄
-- `mode=fresh`（対照）: 同上（参考記録） — 記入欄
-- 総合判定（ADOPT／REJECT／undetermined）: 記入欄
-- 生ログ・JSONL・env_info の保存先: `docs/perf/logs/metal-infer-chain-single-sync-1580/`（本 PR 時点では未作成。実測時に Mac セッションが作成する）
+  `git rev-parse HEAD` で確認し、この記入欄へ実際の SHA を転記する）: `565300e41d5854b0d2ade6c23a5eaa04b6bf3685`（origin/main・2026-09-16）
+- `mode=reuse`（判定対象）: `before_median_s=0.000752146` / `after_median_s=0.000428709` / `ratio=0.5700` / `checksum_exact_match=True`（5 round・checksum 13.976574 が両腕 5/5 一致）
+- `mode=fresh`（対照）: `before_median_s=0.000743167` / `after_median_s=0.000729667` / `ratio=0.9818` / `checksum_exact_match=True`（参考記録・非判定）
+- 総合判定（ADOPT／REJECT／undetermined）: **ADOPT**（2026-09-16・M4 Max・record_only・共有負荷下〈計測中 load average 21〜23。別セッションの workspace テストが並走〉。§2 の規則 `ratio<=1.00` かつ checksum 完全一致を充足。負荷は両腕に同時に乗っており比の向きは 5 round 一貫）
+- 生ログ・JSONL・env_info の保存先: `docs/perf/logs/metal-infer-chain-single-sync-1580/`（2026-09-16 作成。`compare-infer-1580.md`・`results-{before,after}-1580-infer.jsonl`・`git-sha-*`・`sha-*`・`uptime-1580.log`・`pmset_therm_*`・`ignored_*.log`・`env_info.txt`）
 
 ## 4. 出典
 
