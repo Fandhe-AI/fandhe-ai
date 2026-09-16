@@ -264,6 +264,18 @@ diff_edb85c43_3e43bbd0_cuda_infer_path.txt`）。したがって Tier 1 の 0.70
 して記録する。#1688 単独帰属を確定したい場合は before=`edb85c43`／
 after=`87b1e338`（PR #1788 マージコミット）の 2 腕で再計測する。
 
+### 5.9 隣接コミット比較による帰属確認（2026-09-16 追記）
+
+§5.8 の留保（after 腕が origin/main 相当で #1688 以外の差分を含む）を解くため、同日に
+before=`edb85c43`／after=`87b1e338`（#1688 マージコミット。`git archive` 展開）の隣接コミット比較を
+同一スクリプト（`orchestrate.sh 1689adj`。専有ゲート既定 ON で通過）で実行した
+（`docs/perf/logs/infer-chain-single-sync-cuda-1689/adj/`）。
+
+- R2 相当: before 640 行／after 640 行・`bitdump_diff.txt` 空（bit 同一）
+- Tier 1（size=64/reuse）: before 141.0 us → after 99.3 us・**ratio 0.7041**・run 内比 0.6919〜0.7119・
+  checksum 完全一致 → §5 の 0.7084 と同符号・同規模で、改善は #1688 単独に帰属する
+- 対照 fresh（非判定）: ratio 1.0148（run 内比 0.9845〜1.0210・ノイズ帯）
+
 ## 6. verdict
 
 **undetermined**（本エージェント実行環境に DGX Spark GB10 実機への到達
