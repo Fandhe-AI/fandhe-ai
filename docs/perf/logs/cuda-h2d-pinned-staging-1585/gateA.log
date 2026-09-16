@@ -1,0 +1,10 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/pinned_h2d_real_device.rs (/home/<user>/work/target-fandhe-ai/release/deps/pinned_h2d_real_device-eb6a8b8fa5546029)
+
+running 3 tests
+test pinned_h2d_sequential_uploads_match_plain_upload_bit_exact ... ok
+test pinned_h2d_upload_after_release_staging_is_bit_exact ... ok
+test pinned_h2d_upload_into_partial_update_matches_plain_bit_exact ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+

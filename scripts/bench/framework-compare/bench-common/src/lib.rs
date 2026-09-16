@@ -333,6 +333,18 @@ pub struct Record<'a> {
     /// 達成ゲート・既存 A/B 比較の除外設定は別イシューへ引き継ぐ
     /// （README「`--metal-split-k`」節参照）。
     pub metal_split_k: Option<&'a str>,
+    /// `--pinned-h2d`（値なしフラグ。イシュー #1585）。CUDA H2D 側 pinned
+    /// staging（`fandhe_ai::set_cuda_pinned_h2d_enabled`。`crate::
+    /// host_staging::H2dStagingCache`。既定 OFF）を有効化して計測した
+    /// ことを示す。既定 `false`（device-only H2D。既存プロトコル不変）。
+    /// `managed`／`device_checksum` と同型の「キー欠損 = false」後方
+    /// 互換規約: `true` のときのみ JSON に `"pinned_h2d":true` を emit
+    /// する。summarize.py・compare_gemm_gate.py・compare_ab.py・
+    /// compare_gemm_ab.py の目標達成ゲート・既存 A/B 比較は既定でこの
+    /// フィールドが `true` の行を除外する（`docs/perf/
+    /// cuda-h2d-pinned-staging.md` 参照。既定 OFF・fail-closed 方針は
+    /// 変更しない）。
+    pub pinned_h2d: bool,
 }
 
 /// [`Record::graph_stats`] の中身（POD。イシュー #1350）。
@@ -420,6 +432,9 @@ impl Record<'_> {
         }
         if let Some(m) = self.metal_split_k {
             s.push_str(&format!(",\"metal_split_k\":\"{m}\""));
+        }
+        if self.pinned_h2d {
+            s.push_str(",\"pinned_h2d\":true");
         }
         s.push('}');
         s
@@ -570,6 +585,15 @@ pub struct Cli {
     /// `bench-burn` は本フラグを受理しない（`metal_split_k: None` 固定で
     /// 無視）。
     pub metal_split_k: Option<String>,
+    /// `--pinned-h2d`（値なしフラグ。イシュー #1585）。CUDA H2D 側
+    /// pinned staging を有効化して計測することを要求する。既定 `false`
+    /// （device-only H2D。既存プロトコル不変）。対応は `bench-fandhe` ×
+    /// `cuda` に限定し（`bench-candle`／`bench-burn` は常に拒否）、
+    /// `pinned-h2d-toggle` feature（crates.io 公開版 fandhe-ai には
+    /// 未収録の API のため path patch 前提。README「`--pinned-h2d`」節
+    /// 参照）が有効なビルドでのみ受理する（`--managed` と同型の
+    /// allowlist 方式）。
+    pub pinned_h2d: bool,
 }
 
 /// Parse the CLI arguments from `std::env::args()`. 薄いラッパーで、実体は
@@ -692,6 +716,7 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
         graph,
         readout,
         metal_split_k,
+        pinned_h2d: has_flag("--pinned-h2d"),
     })
 }
 
@@ -784,6 +809,7 @@ mod tests {
             graph_stats: None,
             readout: None,
             metal_split_k: None,
+            pinned_h2d: false,
         }
     }
 
@@ -1379,5 +1405,55 @@ mod tests {
         let mut r = sample_record("fresh", None);
         r.metal_split_k = Some("off");
         assert!(r.to_json_line().contains("\"metal_split_k\":\"off\""));
+    }
+
+    // イシュー #1585: `--pinned-h2d`（`parse_cli_from`）・
+    // `Record.pinned_h2d` の契約（`--managed` と同型）。
+
+    #[test]
+    fn parse_cli_from_defaults_pinned_h2d_to_false() {
+        let cli = parse_cli_from(&args(&["--task", "gemm"])).expect("parse should succeed");
+        assert!(!cli.pinned_h2d);
+    }
+
+    #[test]
+    fn parse_cli_from_recognizes_pinned_h2d_flag() {
+        let cli = parse_cli_from(&args(&[
+            "--task",
+            "gemm",
+            "--device",
+            "cuda",
+            "--pinned-h2d",
+        ]))
+        .expect("parse should succeed");
+        assert!(cli.pinned_h2d);
+    }
+
+    #[test]
+    fn parse_cli_from_pinned_h2d_flag_is_order_independent() {
+        let cli = parse_cli_from(&args(&[
+            "--pinned-h2d",
+            "--task",
+            "gemm",
+            "--device",
+            "cuda",
+        ]))
+        .expect("parse should succeed");
+        assert!(cli.pinned_h2d);
+        assert_eq!(cli.task, "gemm");
+        assert_eq!(cli.device, "cuda");
+    }
+
+    #[test]
+    fn json_line_without_pinned_h2d_omits_pinned_h2d_key() {
+        let line = sample_record("fresh", None).to_json_line();
+        assert!(!line.contains("\"pinned_h2d\""));
+    }
+
+    #[test]
+    fn json_line_with_pinned_h2d_includes_pinned_h2d_true() {
+        let mut r = sample_record("fresh", None);
+        r.pinned_h2d = true;
+        assert!(r.to_json_line().contains("\"pinned_h2d\":true"));
     }
 }

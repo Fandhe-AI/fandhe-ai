@@ -855,6 +855,45 @@ reuse とも `a.matmul(&b)`（`CudaBackendOps::gemm` の `clone_htod`／`alloc_z
   `(task, device, size, mode)` セルごとに 5 回計測中央値・checksum 一致（複合判定＋完全一致）を
   集計する。実測記録・既定化可否の判定は `docs/perf/cuda-managed-placement-ab.md` を参照
 
+### `--pinned-h2d`（イシュー #1585。CUDA H2D 側 pinned staging 有無の A/B）
+
+CUDA H2D（ホスト → デバイス）側 pinned staging（`fandhe_ai::set_cuda_pinned_h2d_enabled`。
+`crates/backend-cuda` の `host_staging::H2dStagingCache`。既定 OFF・明示 opt-in）を有効化して
+計測する値なしフラグ。D2H 側 pinned staging（`--managed` とは別軸。`HostStagingCache`。#1336・
+#1478）に対称な H2D 側の A/B 用フラグであり、既定 OFF・fail-closed 方針は不変。`--managed` と
+同様、`bench-fandhe --task gemm` の fresh／reuse は `CudaBackendOps::gemm` の
+`clone_htod`／`alloc_zeros`／`clone_dtoh` 直呼び経路を通るため、`upload_h2d_new` を経由する
+形状（`gemm_resident_rhs`／`gemm_resident_lhs`〈NT 分岐除く〉等）とは異なる可能性がある点に
+留意する（`docs/perf/cuda-h2d-pinned-staging.md` 参照）。
+
+- **`bench-fandhe`**: `--device cuda` 以外は常に `MEASURE_ERROR`（プロセスワイドフラグが cpu
+  計測で無音 no-op になるのを防ぐ）。`--device cuda` でも、`pinned-h2d-toggle` cargo feature
+  （既定無効）を有効化したビルドでなければ `MEASURE_ERROR` になる。`set_cuda_pinned_h2d_enabled`
+  API は crates.io 公開版 `fandhe-ai =0.8.0` には未収録のため、`managed-placement` と同じく
+  **`pinned-h2d-toggle` feature ＋ `[patch.crates-io.fandhe-ai]` による HEAD `crates/facade`
+  への path patch**の両方が必要（HEAD ソースでの計測が主目的）:
+
+  ```sh
+  cargo build --release -p bench-fandhe --features pinned-h2d-toggle     --config 'patch.crates-io.fandhe-ai.path="/absolute/path/to/crates/facade"'
+  ```
+
+  `[patch]`／`.cargo/config.toml` は本 workspace の `Cargo.toml`・`Cargo.lock` へコミットしない
+  （deps-policy.md 第 9 区分は registry 取得元のみを許容するため、patch は CLI 引数として都度
+  与える。計測後は `git checkout -- scripts/bench/framework-compare/Cargo.lock` で復元する）
+- **`bench-candle`／`bench-burn`**: `--pinned-h2d` は fandhe-ai 固有の CUDA H2D pinned staging
+  opt-in API を指す概念であり対応する公開 API がないため、常に `MEASURE_ERROR` で fail-fast する
+- **JSONL**: `--pinned-h2d` で計測した行は `"pinned_h2d":true` を emit する（既定は emit しない
+  キー欠損 = `false` の互換規約。`bench_common::Record::pinned_h2d`。`managed` と同型）
+- **`summarize.py`／`compare_gemm_gate.py`／`compare_ab.py`**: `pinned_h2d:true` 行は目標達成
+  ゲート・A/B 比較から**既定で除外**する（既定 device-only H2D との速度混同防止）
+- **A/B 計測**: `run_ab_pinned_h2d_cuda.sh`（`AB_PATCH_FACADE_PATH` 環境変数必須。上記 path
+  patch 先の絶対パスを指定。`AB_LOAD_GATE_MODE=record_only` で専有ゲートを opt-out 可能）が
+  同一バイナリで off/on を交互起動し、gemm（N=1024/2048/4096 × fresh/reuse）・train（size=64 ×
+  fresh/reuse）・infer（size=64 reuse。副次）を 5 round 計測したうえで
+  `compare_pinned_h2d_ab.py` を呼び出す。判定は `(task, device, size, mode)` セルごとに 5 回
+  計測中央値・checksum 一致（複合判定＋完全一致）。実測記録・既定化可否の判定は
+  `docs/perf/cuda-h2d-pinned-staging.md` §3「Layer A（非後退ゲート）」を参照
+
 ### `--device-checksum`（イシュー #1339。checksum のデバイス側 f64 reduction 化）
 
 `docs/perf/cuda-gemm-reuse-phase-breakdown.md`・`metal-gemm-reuse-phase-breakdown.md` の

@@ -282,6 +282,23 @@ def load_rows(path, device=DEFAULT_DEVICE, size_set=None, modes=None, task=DEFAU
                     f"{obj['metal_split_k']!r}） — skipped"
                 )
                 continue
+            # イシュー #1585: `pinned_h2d`（CUDA H2D 側 pinned staging
+            # opt-in 経路の runtime トグル A/B。`--pinned-h2d`）は
+            # `readout`／`managed` と同じ理由（専用ツール
+            # `compare_pinned_h2d_ab.py` が別途 off/on を単一 JSONL 内で
+            # 分離して A/B 比較を担うため）で本比較器の対象から除外する。
+            if "pinned_h2d" in obj and not isinstance(obj["pinned_h2d"], bool):
+                warnings.append(
+                    f"{path}:{lineno}: 不正な 'pinned_h2d' フィールド型（bool を"
+                    f"期待。実際: {obj['pinned_h2d']!r}） — skipped"
+                )
+                continue
+            if obj.get("pinned_h2d", False) is True:
+                warnings.append(
+                    f"{path}:{lineno}: 'pinned_h2d:true' の行は本 A/B の対象外 "
+                    "— skipped"
+                )
+                continue
             if not _valid_cell_identity(obj, device, size_set=size_set, task=task):
                 warnings.append(
                     f"{path}:{lineno}: 不正または欠損した 'task'/'device'/'size'/"

@@ -1,0 +1,19 @@
+   Compiling fandhe-ai-backend-cpu v0.8.0 (/home/<user>/work/rust-ai-library-run-1585/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.8.0 (/home/<user>/work/rust-ai-library-run-1585/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.8.0 (/home/<user>/work/rust-ai-library-run-1585/crates/backend-cuda)
+   Compiling bench-harness v0.8.0 (/home/<user>/work/rust-ai-library-run-1585/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 5.25s
+     Running tests/pinned_h2d_upload_ab_1585.rs (/home/<user>/work/target-fandhe-ai/release/deps/pinned_h2d_upload_ab_1585-c4f4d8e155c0bd6f)
+
+running 1 test
+test pinned_h2d_upload_ab ... phase,n,bytes_mib,cold_ms,min_ms,q1_ms,median_ms,q3_ms,max_ms
+pageable,1024,4.0000,7.8746,0.0812,0.0813,0.0814,0.0815,0.0817
+pinned_staged,1024,4.0000,0.8894,0.1651,0.1692,0.1713,0.1739,0.1893
+pageable,2048,16.0000,0.3279,0.2927,0.2939,0.2942,0.2943,0.2953
+pinned_staged,2048,16.0000,2.8447,0.7014,0.7066,0.7100,0.7141,0.7237
+pageable,4096,64.0000,2.5041,1.1437,1.1445,1.1449,1.1454,1.1533
+pinned_staged,4096,64.0000,11.2348,3.3939,3.4141,3.4191,3.4269,3.8642
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+

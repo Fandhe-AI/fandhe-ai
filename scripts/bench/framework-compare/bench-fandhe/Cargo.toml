@@ -63,3 +63,14 @@ graph-step = []
 # 併用する前提とする（README「`--metal-split-k`」節・
 # `run_ab_splitk_metal.sh` 参照）。
 metal-split-k-toggle = []
+
+# イシュー #1585: `--pinned-h2d`（CUDA H2D 側 pinned staging。
+# `docs/perf/cuda-h2d-pinned-staging.md`）の実計測結線用。facade 公開 API
+# `fandhe_ai::set_cuda_pinned_h2d_enabled`/`cuda_pinned_h2d_enabled` は
+# crates.io 公開版 `fandhe-ai =0.8.0` には未収録のため、
+# `managed-placement`/`graph-step`/`metal-split-k-toggle` と同じく feature
+# 分岐でコンパイル時に分離し、有効化する場合は `[patch.crates-io.
+# fandhe-ai]` で `crates/facade` への path patch を CLI `--config` 経由で
+# 併用する前提とする（README「`--pinned-h2d`」節・
+# `run_ab_pinned_h2d_cuda.sh` 参照）。
+pinned-h2d-toggle = []
