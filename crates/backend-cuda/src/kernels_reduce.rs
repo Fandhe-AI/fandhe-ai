@@ -54,9 +54,23 @@
 //! `f32::max`（`backend-cpu::reduction::max_slice`）と同じ NaN 非伝播
 //! （NaN を無視して他方を返す）意味論）。`Op::Max` の VJP（`grad.rs::
 //! max_vjp`）は forward 記録値と入力の `==` 一致で argmax 位置を決める
-//! ため、丸めを伴う値を返すと勾配が誤って 0 になる。単位元は
-//! `-INFINITY`（空縮約は呼び出し元がカーネル起動前に拒否する契約。
-//! `reduce.rs` 参照）。
+//! ため、丸めを伴う値を返すと勾配が誤って 0 になる。単位元は −inf
+//! （空縮約は呼び出し元がカーネル起動前に拒否する契約。`reduce.rs`
+//! 参照）。
+//!
+//! # NVRTC の `INFINITY` マクロ非対応（イシュー #1893）
+//!
+//! NVRTC は `<math.h>` を暗黙に含めないため、C 標準の `INFINITY`／
+//! `-INFINITY` マクロは未定義識別子としてコンパイルエラーになる
+//! （DGX Spark GB10・`compute_121` で実測確認済み）。max／min 系
+//! カーネルは単位元として ±inf を `#define NEG_INF_F32 (__uint_as_float
+//! (0xff800000u))`／`#define POS_INF_F32 (__uint_as_float(0x7f800000u))`
+//! （各カーネル文字列に自己完結する形で埋め込む。定数は各文字列ごと
+//! 個別に NVRTC コンパイルされるため共通プレフィックスへは括り出さ
+//! ない）という bit パターン直接構成で表現する。`__uint_as_float` は
+//! 同族の `__float_as_uint` が `kernels_cast.rs`／`kernels_sort.rs` の
+//! カーネルで GB10 上のコンパイル・実行実績があり、include path なし
+//! で解決できる組み込み device function である。
 //!
 //! # REQ-8（カーネル境界検査規約）
 //!
@@ -228,8 +242,11 @@ extern "C" __global__ void reduce_sum_lastaxis_f32(
 
 /// max 全軸縮約 1 段目: 各ブロックが担当区間の `max(in[i])` を `float`
 /// アキュムレータ（`fmaxf`。本ファイル冒頭コメント「max は厳密選択」
-/// 参照）で計算し `partial[blockIdx.x]` へ書く。単位元は `-INFINITY`。
+/// 参照）で計算し `partial[blockIdx.x]` へ書く。単位元は −inf
+/// （`NEG_INF_F32`。本ファイル冒頭コメント「NVRTC の `INFINITY` マクロ
+/// 非対応」参照）。
 pub const REDUCE_MAX_ALL_PARTIAL_F32: &str = r#"
+#define NEG_INF_F32 (__uint_as_float(0xff800000u))
 extern "C" __global__ void reduce_max_all_partial_f32(
     const float* __restrict__ in,
     float* __restrict__ partial,
@@ -239,7 +256,7 @@ extern "C" __global__ void reduce_max_all_partial_f32(
     int lane = threadIdx.x % 32;
     int warp_id = threadIdx.x / 32;
 
-    float acc = -INFINITY;
+    float acc = NEG_INF_F32;
     long long stride = (long long)gridDim.x * blockDim.x;
     for (long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x; idx < numel; idx += stride) {
         acc = fmaxf(acc, in[idx]);
@@ -255,7 +272,7 @@ extern "C" __global__ void reduce_max_all_partial_f32(
     __syncthreads();
 
     if (warp_id == 0) {
-        float block_max = (lane < 8) ? warp_maxes[lane] : -INFINITY;
+        float block_max = (lane < 8) ? warp_maxes[lane] : NEG_INF_F32;
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             block_max = fmaxf(block_max, __shfl_xor_sync(0xffffffff, block_max, offset));
@@ -270,6 +287,7 @@ extern "C" __global__ void reduce_max_all_partial_f32(
 /// max 全軸縮約 2 段目: `partial`（`num_partials` 要素。`float`。1
 /// ブロックのみで起動）を再度 `fmaxf` で結合し `out[0]` へ書く。
 pub const REDUCE_MAX_ALL_FINALIZE_F32: &str = r#"
+#define NEG_INF_F32 (__uint_as_float(0xff800000u))
 extern "C" __global__ void reduce_max_all_finalize_f32(
     const float* __restrict__ partial,
     float* __restrict__ out,
@@ -279,7 +297,7 @@ extern "C" __global__ void reduce_max_all_finalize_f32(
     int lane = threadIdx.x % 32;
     int warp_id = threadIdx.x / 32;
 
-    float acc = -INFINITY;
+    float acc = NEG_INF_F32;
     for (int idx = threadIdx.x; idx < num_partials; idx += blockDim.x) {
         acc = fmaxf(acc, partial[idx]);
     }
@@ -294,7 +312,7 @@ extern "C" __global__ void reduce_max_all_finalize_f32(
     __syncthreads();
 
     if (warp_id == 0) {
-        float block_max = (lane < 8) ? warp_maxes[lane] : -INFINITY;
+        float block_max = (lane < 8) ? warp_maxes[lane] : NEG_INF_F32;
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             block_max = fmaxf(block_max, __shfl_xor_sync(0xffffffff, block_max, offset));
@@ -312,6 +330,7 @@ extern "C" __global__ void reduce_max_all_finalize_f32(
 /// `axis_len == 0` の起動を行わない契約（空縮約は host 側で拒否済み。
 /// `reduce.rs` 参照）。
 pub const REDUCE_MAX_AXIS_F32: &str = r#"
+#define NEG_INF_F32 (__uint_as_float(0xff800000u))
 extern "C" __global__ void reduce_max_axis_f32(
     const float* __restrict__ in,
     float* __restrict__ out,
@@ -324,7 +343,7 @@ extern "C" __global__ void reduce_max_axis_f32(
     if (idx < total) {
         long long o = idx / inner;
         long long i = idx % inner;
-        float acc = -INFINITY;
+        float acc = NEG_INF_F32;
         for (long long a = 0; a < axis_len; a++) {
             long long src = (o * (long long)axis_len + a) * (long long)inner + i;
             acc = fmaxf(acc, in[src]);
@@ -338,6 +357,7 @@ extern "C" __global__ void reduce_max_axis_f32(
 /// `REDUCE_SUM_LASTAXIS_F32` と同一構造（stride 分割ループの添字 `c`
 /// が `long long` である点を含む）だが `float`／`fmaxf` で累積する。
 pub const REDUCE_MAX_LASTAXIS_F32: &str = r#"
+#define NEG_INF_F32 (__uint_as_float(0xff800000u))
 extern "C" __global__ void reduce_max_lastaxis_f32(
     const float* __restrict__ in,
     float* __restrict__ out,
@@ -347,7 +367,7 @@ extern "C" __global__ void reduce_max_lastaxis_f32(
     int lane = threadIdx.x;
     long long row_stride = (long long)gridDim.x;
     for (long long row = (long long)blockIdx.x; row < rows; row += row_stride) {
-        float acc = -INFINITY;
+        float acc = NEG_INF_F32;
         for (long long c = lane; c < cols; c += 32) {
             long long src = row * (long long)cols + c;
             acc = fmaxf(acc, in[src]);
@@ -367,6 +387,7 @@ extern "C" __global__ void reduce_max_lastaxis_f32(
 /// の逐語ミラー（`fmaxf`→`fminf`・単位元 `-INFINITY`→`+INFINITY`。
 /// `max` と同じ「厳密選択のため `float` のまま・丸めなし」方針）。
 pub const REDUCE_MIN_ALL_PARTIAL_F32: &str = r#"
+#define POS_INF_F32 (__uint_as_float(0x7f800000u))
 extern "C" __global__ void reduce_min_all_partial_f32(
     const float* __restrict__ in,
     float* __restrict__ partial,
@@ -376,7 +397,7 @@ extern "C" __global__ void reduce_min_all_partial_f32(
     int lane = threadIdx.x % 32;
     int warp_id = threadIdx.x / 32;
 
-    float acc = INFINITY;
+    float acc = POS_INF_F32;
     long long stride = (long long)gridDim.x * blockDim.x;
     for (long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x; idx < numel; idx += stride) {
         acc = fminf(acc, in[idx]);
@@ -392,7 +413,7 @@ extern "C" __global__ void reduce_min_all_partial_f32(
     __syncthreads();
 
     if (warp_id == 0) {
-        float block_min = (lane < 8) ? warp_mins[lane] : INFINITY;
+        float block_min = (lane < 8) ? warp_mins[lane] : POS_INF_F32;
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             block_min = fminf(block_min, __shfl_xor_sync(0xffffffff, block_min, offset));
@@ -407,6 +428,7 @@ extern "C" __global__ void reduce_min_all_partial_f32(
 /// min 全軸縮約 2 段目（イシュー #1720）。
 /// `REDUCE_MAX_ALL_FINALIZE_F32` の逐語ミラー。
 pub const REDUCE_MIN_ALL_FINALIZE_F32: &str = r#"
+#define POS_INF_F32 (__uint_as_float(0x7f800000u))
 extern "C" __global__ void reduce_min_all_finalize_f32(
     const float* __restrict__ partial,
     float* __restrict__ out,
@@ -416,7 +438,7 @@ extern "C" __global__ void reduce_min_all_finalize_f32(
     int lane = threadIdx.x % 32;
     int warp_id = threadIdx.x / 32;
 
-    float acc = INFINITY;
+    float acc = POS_INF_F32;
     for (int idx = threadIdx.x; idx < num_partials; idx += blockDim.x) {
         acc = fminf(acc, partial[idx]);
     }
@@ -431,7 +453,7 @@ extern "C" __global__ void reduce_min_all_finalize_f32(
     __syncthreads();
 
     if (warp_id == 0) {
-        float block_min = (lane < 8) ? warp_mins[lane] : INFINITY;
+        float block_min = (lane < 8) ? warp_mins[lane] : POS_INF_F32;
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             block_min = fminf(block_min, __shfl_xor_sync(0xffffffff, block_min, offset));
@@ -446,6 +468,7 @@ extern "C" __global__ void reduce_min_all_finalize_f32(
 /// min 単一軸縮約（汎用版。`inner != 1`。イシュー #1720）。
 /// `REDUCE_MAX_AXIS_F32` の逐語ミラー。
 pub const REDUCE_MIN_AXIS_F32: &str = r#"
+#define POS_INF_F32 (__uint_as_float(0x7f800000u))
 extern "C" __global__ void reduce_min_axis_f32(
     const float* __restrict__ in,
     float* __restrict__ out,
@@ -458,7 +481,7 @@ extern "C" __global__ void reduce_min_axis_f32(
     if (idx < total) {
         long long o = idx / inner;
         long long i = idx % inner;
-        float acc = INFINITY;
+        float acc = POS_INF_F32;
         for (long long a = 0; a < axis_len; a++) {
             long long src = (o * (long long)axis_len + a) * (long long)inner + i;
             acc = fminf(acc, in[src]);
@@ -471,6 +494,7 @@ extern "C" __global__ void reduce_min_axis_f32(
 /// min 単一軸縮約（`inner == 1`。最終軸縮約の coalesced 版。イシュー
 /// #1720）。`REDUCE_MAX_LASTAXIS_F32` の逐語ミラー。
 pub const REDUCE_MIN_LASTAXIS_F32: &str = r#"
+#define POS_INF_F32 (__uint_as_float(0x7f800000u))
 extern "C" __global__ void reduce_min_lastaxis_f32(
     const float* __restrict__ in,
     float* __restrict__ out,
@@ -480,7 +504,7 @@ extern "C" __global__ void reduce_min_lastaxis_f32(
     int lane = threadIdx.x;
     long long row_stride = (long long)gridDim.x;
     for (long long row = (long long)blockIdx.x; row < rows; row += row_stride) {
-        float acc = INFINITY;
+        float acc = POS_INF_F32;
         for (long long c = lane; c < cols; c += 32) {
             long long src = row * (long long)cols + c;
             acc = fminf(acc, in[src]);
@@ -573,8 +597,15 @@ mod tests {
         assert!(REDUCE_SUM_LASTAXIS_F32.contains("out[row] = (float)acc;"));
     }
 
+    /// max カーネルが `fmaxf`・単位元 −inf（`NEG_INF_F32`。NVRTC は
+    /// `<math.h>` を暗黙に含めないため C マクロ `INFINITY` は使えない。
+    /// イシュー #1893）・`double` 非混入という契約を満たすことを固定
+    /// する。`#define NEG_INF_F32 (__uint_as_float(0xff800000u))` が
+    /// 各カーネル文字列に自己完結していることも検査する（定数は各文字
+    /// 列ごと個別に NVRTC コンパイルされるため共通プレフィックスへの
+    /// 括り出しはできない）。
     #[test]
-    fn max_kernels_use_float_fmaxf_and_neg_infinity_identity() {
+    fn max_kernels_use_float_fmaxf_and_neg_inf_bit_pattern_identity() {
         for src in [
             REDUCE_MAX_ALL_PARTIAL_F32,
             REDUCE_MAX_ALL_FINALIZE_F32,
@@ -582,7 +613,8 @@ mod tests {
             REDUCE_MAX_LASTAXIS_F32,
         ] {
             assert!(src.contains("fmaxf"));
-            assert!(src.contains("-INFINITY"));
+            assert!(src.contains("#define NEG_INF_F32 (__uint_as_float(0xff800000u))"));
+            assert!(src.contains("float acc = NEG_INF_F32;"));
             assert!(
                 !src.contains("double"),
                 "max カーネルに double が混入: {src}"
@@ -590,13 +622,12 @@ mod tests {
         }
     }
 
-    /// min カーネル（イシュー #1720）が `fminf`・単位元 `+INFINITY`・
-    /// `double` 非混入という `max` と対称の契約を満たすことを固定する
-    /// （`max_kernels_use_float_fmaxf_and_neg_infinity_identity` と
-    /// 同型）。`+INFINITY` は無符号なので単純な文字列検査で足りる
-    /// （`-INFINITY` と誤って一致しないことを別途確認する）。
+    /// min カーネル（イシュー #1720）が `fminf`・単位元 +inf
+    /// （`POS_INF_F32`）・`double` 非混入という `max` と対称の契約を
+    /// 満たすことを固定する（`max_kernels_use_float_fmaxf_and_neg_inf_
+    /// bit_pattern_identity` と同型。イシュー #1893）。
     #[test]
-    fn min_kernels_use_float_fminf_and_pos_infinity_identity() {
+    fn min_kernels_use_float_fminf_and_pos_inf_bit_pattern_identity() {
         for src in [
             REDUCE_MIN_ALL_PARTIAL_F32,
             REDUCE_MIN_ALL_FINALIZE_F32,
@@ -604,14 +635,49 @@ mod tests {
             REDUCE_MIN_LASTAXIS_F32,
         ] {
             assert!(src.contains("fminf"));
-            assert!(src.contains("INFINITY"));
+            assert!(src.contains("#define POS_INF_F32 (__uint_as_float(0x7f800000u))"));
+            assert!(src.contains("float acc = POS_INF_F32;"));
             assert!(
-                !src.contains("-INFINITY"),
-                "min カーネルの単位元は +INFINITY のはず: {src}"
+                !src.contains("NEG_INF_F32"),
+                "min カーネルの単位元は POS_INF_F32 のはず: {src}"
             );
             assert!(
                 !src.contains("double"),
                 "min カーネルに double が混入: {src}"
+            );
+        }
+    }
+
+    /// reduce カーネル 12 定数すべてが NVRTC 組み込みヘッダに含まれない
+    /// `INFINITY` マクロを参照しないこと（逆戻り防止）・`#include` に
+    /// 依存しないこと・`kernels_softmax.rs` で compute_121 未定義と
+    /// 実測済みの `__FLT_MAX__`（イシュー #1101）を使わないことを
+    /// fail-closed に固定する（NVRTC は `<math.h>` を暗黙に含めない。
+    /// イシュー #1893）。
+    #[test]
+    fn reduce_kernels_do_not_reference_nvrtc_undefined_infinity_macro() {
+        for src in [
+            REDUCE_SUM_ALL_PARTIAL_F32,
+            REDUCE_SUM_ALL_FINALIZE_F32,
+            REDUCE_SUM_AXIS_F32,
+            REDUCE_SUM_LASTAXIS_F32,
+            REDUCE_MAX_ALL_PARTIAL_F32,
+            REDUCE_MAX_ALL_FINALIZE_F32,
+            REDUCE_MAX_AXIS_F32,
+            REDUCE_MAX_LASTAXIS_F32,
+            REDUCE_MIN_ALL_PARTIAL_F32,
+            REDUCE_MIN_ALL_FINALIZE_F32,
+            REDUCE_MIN_AXIS_F32,
+            REDUCE_MIN_LASTAXIS_F32,
+        ] {
+            assert!(
+                !src.contains("INFINITY"),
+                "NVRTC 未定義の INFINITY マクロが残存: {src}"
+            );
+            assert!(!src.contains("#include"), "ヘッダ依存を追加しない: {src}");
+            assert!(
+                !src.contains("__FLT_MAX__"),
+                "__FLT_MAX__ は compute_121 で未定義（#1101）: {src}"
             );
         }
     }
