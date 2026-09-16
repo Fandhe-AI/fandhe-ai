@@ -21,11 +21,16 @@
 //! なし）。結線・`Var::sum` 経由の到達確認は #1896 のスコープ。
 //!
 //! 呼び出し元を前提としないため（現時点で `ops.rs` からの呼び出しが
-//! 存在しない）、本モジュール自身が `crate::reduce_model::
-//! plan_reduce_all`／`plan_reduce_axis` で二重検査する
-//! （`crate::scan::MetalScan` の「呼び出し元の検査結果を信頼しない」
-//! 方針を先取りする形。#1896 で `ops.rs` 側にも事前検査が追加される
-//! 見込み）。
+//! 存在しない）、本モジュール自身が事前検査する（`crate::scan::
+//! MetalScan` の「呼び出し元の検査結果を信頼しない」方針を先取りする
+//! 形。#1896 で `ops.rs` 側にも事前検査が追加される見込み）。
+//! [`MetalReduce::run_sum_all_f32`] は `crate::reduce_model::
+//! plan_reduce_all` を呼んで検査する一方、[`MetalReduce::
+//! run_sum_axis_f32`] は既に `outer`／`axis_len`／`inner` へ分解済み
+//! の引数を受け取る都合上 `crate::reduce_model::plan_reduce_axis`
+//! （`shape`／`dim` 起点）は呼ばず、同等の検査（`checked_mul`・
+//! `u32::try_from` による `REDUCE_KERNEL_ARG_LIMIT` 相当の上限確認）
+//! をインラインで行う（`plan_reduce_axis` はテストからのみ参照）。
 
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLDevice, MTLSize};
@@ -103,18 +108,16 @@ impl MetalReduce {
     /// 方式とは異なり、本関数は完了を待つ必要があるディスパッチが 1
     /// 回のみで済むため `dispatch_sync` の単一クロージャで完結できる）。
     pub fn run_sum_all_f32(&self, ctx: &MetalContext, x: &[f32]) -> Result<f32, MetalError> {
+        // `plan_reduce_all(x.len())` は渡した `x.len()` をそのまま
+        // `ReduceAllPlan::numel` へ格納する（`crate::reduce_model::
+        // plan_reduce_all` 参照）ため、直後の `x.len() != plan.numel`
+        // という再比較は構造的に常に false であり冗長だった（is-dead
+        // code。呼び出し引数と戻り値が同一フィールドを指すだけで
+        // 実際の検証にはならない）。よってここでは削除し、`plan.numel`
+        // をそのまま `x.len()` の検証済み値として扱う。
         let plan = reduce_model::plan_reduce_all(x.len()).map_err(map_prepare_error)?;
         if plan.numel == 0 {
             return Ok(0.0);
-        }
-        if x.len() != plan.numel {
-            return Err(MetalError::InvalidReduceShape {
-                detail: format!(
-                    "run_sum_all_f32: x.len()={} does not match numel={}",
-                    x.len(),
-                    plan.numel
-                ),
-            });
         }
         let numel_u = u32::try_from(plan.numel).map_err(|_| MetalError::InvalidReduceShape {
             detail: format!(
