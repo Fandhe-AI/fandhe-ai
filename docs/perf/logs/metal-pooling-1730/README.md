@@ -47,3 +47,7 @@ make test-ignored-metal
 - 上記 2 コマンドの標準出力（内部ホスト名は含めない）。
 - `env_info.txt`（`docs/real-hardware-verification-env.md` の手順に
   従い OS・チップ・rustc バージョン等を記録。内部ホスト名は含めない）。
+
+## 実測記録（2026-09-16・Apple M4 Max・origin/main `3e43bbd0`）
+
+本ディレクトリのログ（`*.log`・`env_info.txt`）は 2026-09-16 の Mac セッションで取得済み。結果一覧と判定は `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §2 と、design doc の該当節を参照。

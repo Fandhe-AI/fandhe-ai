@@ -616,6 +616,24 @@ API を trait 非依存の引数（`&[f32]` + shape タプル）で完結させ�
 MaxUnpool／AdaptiveMaxPool・facade 公開面拡張（設計 doc §12）・
 M4 Max 実機実測（`docs/perf/logs/metal-pooling-1730/README.md` へ
 申し送り）。
+#### Metal M4 Max 実機実測（2026-09-16・追従 PR #1888 の Layer B 配線後）
+
+`docs/perf/logs/metal-pooling-1730/README.md` の手順で実測した（origin/main
+`3e43bbd0`・共有負荷下・ログは同ディレクトリ `pooling_parity.log` と
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/facade_pooling_backend_parity.log`）。
+
+- `crates/backend-metal/tests/pooling_parity.rs`（`--ignored`）: **6 pass / 0 fail**
+  （`max_pool2d_bit_exact_against_host_model`・`max_pool2d_special_values_bit_exact`・
+  `avg_pool2d_bit_exact_against_host_model`・`adaptive_avg_pool2d_bit_exact_against_host_model`・
+  `zero_batch_returns_empty_without_device_dispatch`・`oversized_shape_returns_size_limit_exceeded_error`）
+- `crates/facade/tests/pooling_backend_parity.rs`（`metal_` 3 件。`MetalBackendOps` へ
+  配線済みの本番経路）: **3 pass / 0 fail**
+- `make test-ignored-metal` 相当の既存 `#[ignore]` 群は非後退（`docs/perf/logs/
+  metal-realdevice-phase2-2026-09-16/README.md` §1）
+
+判定: PASS（Max は値・索引とも bit 完全一致、Avg／Adaptive は soft-f64 により
+CPU `f64` 参照実装と bit 完全一致。決定性成立。tolerance 変更なし）。
+
 ### #1729（CUDA 実装）
 
 **前提の事実（2026-09-15 `main` 調査）**: 兄弟イシュー #1728（`backend-cpu`。

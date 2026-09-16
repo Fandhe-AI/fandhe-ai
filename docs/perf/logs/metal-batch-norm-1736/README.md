@@ -77,3 +77,7 @@ tolerance／baseline 定数の変更はなし（本イシューでは提案・�
 - `env_info.txt`（`sw_vers`・`sysctl -n machdep.cpu.brand_string`・
   `system_profiler SPDisplaysDataType | grep Chipset` 等。内部ホスト名
   は含めない）
+
+## 実測記録（2026-09-16・Apple M4 Max・origin/main `3e43bbd0`）
+
+本ディレクトリのログ（`*.log`・`env_info.txt`）は 2026-09-16 の Mac セッションで取得済み。結果一覧と判定は `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §2 と、design doc の該当節を参照。

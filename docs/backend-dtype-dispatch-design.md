@@ -339,6 +339,11 @@ bf16 デバイス常駐経路（bf16 のまま H2D し device 側で widen/narro
 cargo test -p fandhe-ai-backend-metal --release --test typed_ops_f16_parity -- --ignored --nocapture
 ```
 
+**M4 Max 実機実測（2026-09-16 追記）**: `crates/backend-metal/tests/typed_ops_f16_parity.rs`
+（`--ignored`）を origin/main `3e43bbd0` で実行し **4 pass / 0 fail**（REQ-2 統一複合判定。
+ログ `docs/perf/logs/metal-realdevice-phase2-2026-09-16/backend-metal_typed_ops_f16_parity.log`）。
+tolerance 変更なし。
+
 ## 15. 調査・実装記録（#1706・Metal `TypedOps<bf16>`）
 
 `backend-metal` に `TypedOps<half::bf16>` を実装し、`MetalBackendOps::typed_ops_bf16()`（既定 `None`）を `Some(self)` へオーバーライドして結線した（イシュー #1706・親 #1651）。
@@ -386,6 +391,30 @@ CUDA §13.5 と同じ理由（bf16 の 1 ulp は相対誤差 `RELATIVE_TOLERANCE
 ```sh
 cargo test -p fandhe-ai-backend-metal --release --test typed_ops_bf16_parity -- --ignored --nocapture
 ```
+
+**M4 Max 実機実測（2026-09-16 追記）**（origin/main `3e43bbd0`・共有負荷下・
+`docs/perf/logs/metal-typed-bf16-probe-1706/`〈`typed_bf16_probe.log`・
+`typed_ops_bf16_parity.log`〉）:
+
+- `typed_ops_bf16_parity.rs`（`--ignored`）: **2 pass / 0 fail**
+  （`typed_ops_bf16_matches_across_shapes`〈REQ-2〉・
+  `typed_ops_bf16_gemm_shape_mismatch_returns_typed_error`）。(a) の実装は実機でも成立
+- `typed_bf16_probe_diag_tests`（非 gating。コンパイル可否の事実記録のみ）:
+  - P0 `p0_device_attributes`: `device_architecture=applegpu_g16s`・
+    `supports_apple7/8/9=true`・`supports_metal3=true`
+  - P1 `p1_bfloat_scalar_compile_probe`: `bfloat` スカラー／`bfloat4`／変換の
+    コンパイル **ok**（既定言語版・`Version3_1` の両条件）
+  - P2 `p2_simdgroup_bfloat_mma_compile_probe`: `simdgroup_bfloat8x8` の
+    `simdgroup_load`／`simdgroup_multiply_accumulate` のコンパイル **ok**
+    （既定・3.1 とも）。**コンパイル可否のみ**で、実行時の数値・性能は未検証
+  - P3 `p3_simdgroup_store_bfloat_compile_probe`: `simdgroup_store(float8x8, device bfloat*)`
+    は **error**（`deduced conflicting types for parameter T (float vs. bfloat)`。
+    f16 版〈#380〉と同様の見込みどおり。型を揃えた store が必要）
+  - P4 `p4_bfloat_roundtrip_numeric_smoke`: 256 要素中 **256 一致・0 不一致**
+    （ホスト `half::bf16::from_f32` と bit 一致）
+- (b) の結論: MSL `bfloat`／`simdgroup_bfloat8x8` は本機（M4 Max・macOS 26.6.2）で
+  コンパイル可能であり、デバイス常駐ネイティブ bf16 経路の実現可能性は
+  「コンパイルレベルでは可」。採否判定・性能実測は本記録の対象外（§15.7）
 
 ### 14.7 スコープ外
 

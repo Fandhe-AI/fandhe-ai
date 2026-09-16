@@ -1,0 +1,65 @@
+== backend-metal_sort_topk_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test sort_topk_parity -- --ignored --nocapture
+backend-metal_sort_topk_parity	rc=0	test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+== backend-metal_scan_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test scan_parity -- --ignored --nocapture
+backend-metal_scan_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+== backend-metal_gather_scatter_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test gather_scatter_parity -- --ignored --nocapture
+backend-metal_gather_scatter_parity	rc=101	test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+== backend-metal_cast_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test cast_parity -- --ignored --nocapture
+backend-metal_cast_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+== backend-metal_unique_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test unique_parity -- --ignored --nocapture
+backend-metal_unique_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+== backend-metal_constant_pad_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test constant_pad_parity -- --ignored --nocapture
+backend-metal_constant_pad_parity	rc=101	test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+== backend-metal_interpolate_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test interpolate_parity -- --ignored --nocapture
+backend-metal_interpolate_parity	rc=101	test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+== backend-metal_gemm_batched_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test gemm_batched_parity -- --ignored --nocapture
+backend-metal_gemm_batched_parity	rc=0	test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+== backend-metal_scalar_op_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test scalar_op_parity -- --ignored --nocapture
+backend-metal_scalar_op_parity	rc=0	test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+== backend-metal_typed_ops_f16_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test typed_ops_f16_parity -- --ignored --nocapture
+backend-metal_typed_ops_f16_parity	rc=0	test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.04s
+== backend-metal_typed_ops_bf16_parity: cargo test -p fandhe-ai-backend-metal --release --all-features --test typed_ops_bf16_parity -- --ignored --nocapture
+backend-metal_typed_ops_bf16_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.04s
+== facade_sort_topk_backend_parity: cargo test -p fandhe-ai --release --test sort_topk_backend_parity -- --ignored --nocapture metal_
+facade_sort_topk_backend_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.04s
+== facade_index_ops_backend_parity: cargo test -p fandhe-ai --release --test index_ops_backend_parity -- --ignored --nocapture metal_
+facade_index_ops_backend_parity	rc=0	test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.04s
+== facade_cast_backend_parity: cargo test -p fandhe-ai --release --test cast_backend_parity -- --ignored --nocapture metal_
+facade_cast_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.04s
+== facade_unique_backend_parity: cargo test -p fandhe-ai --release --test unique_backend_parity -- --ignored --nocapture metal_
+facade_unique_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.04s
+== facade_constant_pad_backend_parity: cargo test -p fandhe-ai --release --test constant_pad_backend_parity -- --ignored --nocapture metal_
+facade_constant_pad_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.04s
+== facade_interpolate_backend_parity: cargo test -p fandhe-ai --release --test interpolate_backend_parity -- --ignored --nocapture metal_
+facade_interpolate_backend_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.04s
+== facade_batched_matmul_backend_parity: cargo test -p fandhe-ai --release --test batched_matmul_backend_parity -- --ignored --nocapture metal_
+facade_batched_matmul_backend_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.04s
+== facade_scalar_ops_backend_parity: cargo test -p fandhe-ai --release --test scalar_ops_backend_parity -- --ignored --nocapture metal_
+facade_scalar_ops_backend_parity	rc=0	test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.04s
+== facade_scalar_unary_transcendental_backend_parity: cargo test -p fandhe-ai --release --test scalar_unary_transcendental_backend_parity -- --ignored --nocapture metal_
+facade_scalar_unary_transcendental_backend_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.04s
+== facade_activation_gelu_softplus_backend_parity: cargo test -p fandhe-ai --release --test activation_gelu_softplus_backend_parity -- --ignored --nocapture metal_
+facade_activation_gelu_softplus_backend_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.04s
+== facade_bce_backend_parity: cargo test -p fandhe-ai --release --test bce_backend_parity -- --ignored --nocapture metal_
+facade_bce_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.04s
+== facade_nll_kl_div_backend_parity: cargo test -p fandhe-ai --release --test nll_kl_div_backend_parity -- --ignored --nocapture metal_
+facade_nll_kl_div_backend_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.04s
+== facade_huber_backend_parity: cargo test -p fandhe-ai --release --test huber_backend_parity -- --ignored --nocapture metal_
+facade_huber_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.04s
+== facade_dropout_backend_parity: cargo test -p fandhe-ai --release --test dropout_backend_parity -- --ignored --nocapture metal_
+facade_dropout_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.04s
+== facade_attention_backend_parity: cargo test -p fandhe-ai --release --test attention_backend_parity -- --ignored --nocapture metal_
+facade_attention_backend_parity	rc=101	test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.04s
+== facade_mha_backend_parity: cargo test -p fandhe-ai --release --test mha_backend_parity -- --ignored --nocapture metal_
+facade_mha_backend_parity	rc=0	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.05s
+== facade_compat_sequential_layers_backend_parity: cargo test -p fandhe-ai --release --test compat_sequential_layers_backend_parity -- --ignored --nocapture metal_
+facade_compat_sequential_layers_backend_parity	rc=0	test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.04s
+== facade_no_grad_detach_backend_parity: cargo test -p fandhe-ai --release --test no_grad_detach_backend_parity -- --ignored --nocapture metal_
+facade_no_grad_detach_backend_parity	rc=101	test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.04s
+== facade_backward_accumulate_backend_parity: cargo test -p fandhe-ai --release --test backward_accumulate_backend_parity -- --ignored --nocapture metal_
+facade_backward_accumulate_backend_parity	rc=101	test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.04s
+== facade_device_transfer_backend_parity: cargo test -p fandhe-ai --release --test device_transfer_backend_parity -- --ignored --nocapture metal_
+facade_device_transfer_backend_parity	rc=0	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.07s
+== facade_device_enumeration: cargo test -p fandhe-ai --release --test device_enumeration -- --nocapture
+facade_device_enumeration	rc=0	test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+ALL DONE 2026-09-16T00:25:34Z

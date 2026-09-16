@@ -772,6 +772,12 @@ gather／scatter／scatter_add（#1637 で where／masked_fill を実装済み�
   がないため未実施のまま Mac セッションへ申し送る（Linux 実行可能な
   ホスト逐語モデル bit 一致テスト・ソース証跡テスト・
   `aarch64-apple-darwin` クロス型検査は本 PR で完了済み）。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（gather／scatter forward・
+  scatter_add は pass。`gather_backward_matches_cpu_tape` は Metal tape
+  上の loss 縮約 `Var::sum` が `MetalBackendOps::sum` 未実装の
+  `Unsupported` を返すため判定不能＝FAIL 記録。演算自体の不一致は未観測。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §3.1）・
+  CUDA〈GB10〉は引き続き未実測。
 
 #### #1703 の追補（`backend-cuda` の `TypedOps<f64>`／`TypedOps<f16>` 実装）
 
@@ -854,6 +860,9 @@ encode するだけで積み、`download` 1 回だけが GPU 完了を待つ「�
 トグル（`crate::split_k_runtime`。既定 `true`）の状態に依存しない。
 facade 新規公開面なし。M4 Max 実機実測は本エージェント実行環境に
 Apple Silicon 実機がないため未実施のまま Mac セッションへ申し送る。
+→ Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+CUDA〈GB10〉は引き続き未実測。
 
 **追補（イシュー #1716）**: `CudaBackendOps::gemm_batched`／
 `gemm_batched_fp32_strict` 専用オーバーライド（デバイス常駐バッチループ
@@ -884,6 +893,9 @@ facade 新規公開面はない（既存 `BackendOps::scalar_unary`／`scalar_bi
 の担当。M4 Max 実機での parity・キャッシュ非分裂テスト（`#[ignore]`）は
 本イシューの実行環境に Apple Silicon 実機がないため未実施のまま Mac
 セッションへ申し送り。
+→ Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+CUDA〈GB10〉は引き続き未実測。
 
 ## #1652 の追補（ONNX import の facade 公開可否の設計判断）
 
@@ -1014,6 +1026,9 @@ typed_bf16.rs`。イシュー #1706・`docs/backend-dtype-dispatch-design.md`
   実現可能性）はコンパイルプローブ（`crate::typed_bf16_probe_diag_tests`。
   全 `#[ignore]`・非 gating）へ切り出し、本エージェント実行環境に
   Apple Silicon 実機がないため未実測のまま Mac セッションへ申し送る。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。`typed_bf16_probe.log`
+  5 pass・非 gating。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/
+  README.md`）・CUDA〈GB10〉は引き続き未実測。
 - CPU bf16 は #1699・CUDA bf16 は #1704 で実装済み・origin/main マージ
   済み。3 バックエンドとも bf16 の主要 6 演算（`gemm`／`add`／`mul`／
   `relu`／`exp`／`tanh`）に到達可能になった。
@@ -1054,6 +1069,9 @@ CPU／CUDA／Metal 3 バックエンドの `BackendOps::scalar_unary`／
 （`docs/scalar-op-dispatch-design.md`）。facade 新規公開面はない（既存
 `Var` 再エクスポート経由）。CUDA／Metal 実機での facade parity 実測は
 本エージェント実行環境に実機がないため未実施のまま申し送る。
+→ Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+CUDA〈GB10〉は引き続き未実測。
 `pow_scalar`（スカラー指数版）は対象外のまま（`log`／三角関数／`abs`／
 `neg` は #1711、`clamp`／比較演算は #1712 で実装済み。下記参照）。
 
@@ -1086,6 +1104,9 @@ CPU／CUDA／Metal 3 バックエンドの `BackendOps::scalar_unary`／
   （Apple Silicon）実機での facade parity テストは、本実装エージェント
   の実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッション
   へ申し送る。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 - `sub`／`div`／`pow`／`sqrt`（#1710）・`clamp`／比較演算（#1712）は本
   issue の対象外のまま。
 
@@ -1158,6 +1179,9 @@ one_hot_f32`。CUDA 版と同型の設計）の 3 バックエンドとも専用
 エクスポート経由）。CUDA・Metal 実機での facade parity 実測（`#[ignore]`
 分離済み）は本エージェント実行環境に実機がないため未実施のまま
 申し送る。
+→ Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+CUDA〈GB10〉は引き続き未実測。
 
 ## #1734 の追補
 
@@ -1171,6 +1195,9 @@ compare/swap のみで浮動小数点演算を含まないため決定的）の 
 バックエンドとも bit 完全一致契約。CUDA／Metal 実機（DGX Spark
 GB10・Apple Silicon）は本実装環境に到達手段がなく `#[ignore]`
 テストとして未実測のまま GB10／Mac セッションへ申し送る。
+→ Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+CUDA〈GB10〉は引き続き未実測。
 `return_inverse`／`return_counts`／`dim` 指定・`sorted=false`・
 `unique_consecutive`・GPU 側 prefix-sum 圧縮は対象外のまま
 （decision doc §5／§6）。facade 新規公開面なし（既存 `Var`
@@ -1193,6 +1220,9 @@ Softplus）を実装済み化した。`ScalarUnaryOp::Gelu`／`GeluTanh`／
 builder はユーザー承認待ちで対象外のまま。CUDA／Metal 実機での facade
 parity テストは本実装エージェントの実行環境に実機への到達手段がない
 ため未実測のまま Mac／GB10 セッションへ申し送る。
+→ Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+CUDA〈GB10〉は引き続き未実測。
 
 **#1714 追補（SiLU・LeakyReLU・ELU・Hardswish）**: 本調査時点で §2.4／
 §2.7 が欠落と判定した ReLU 系派生活性化のうち、SiLU／LeakyReLU／ELU／
@@ -1224,6 +1254,9 @@ libm 実装）とは一般に bit 同一にならず、超越関数系と同じ�
 Metal（Apple Silicon）実機での parity テストは、本実装エージェントの
 実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ
 申し送る。
+→ Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+CUDA〈GB10〉は引き続き未実測。
 
 ## #1719 の追補
 
@@ -1339,6 +1372,9 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
   含まない純粋なコピー演算のため bit 完全一致契約）。CUDA／Metal
   実機（DGX Spark GB10／Apple Silicon）での parity テストは未実測の
   まま Mac／GB10 セッションへ申し送り。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 - facade は `InterpolateMode` の新規 `pub use`（`Var::interpolate` の
   `mode` 引数型のため。`Var::interpolate` 自体は既存 `Var` 再
   エクスポート経由）。
@@ -1386,6 +1422,9 @@ facade parity テストは未実測のまま Mac／GB10 セッションへ申し
 - CPU／CUDA／Metal 3 バックエンドとも専用カーネル実装済み。CUDA／
   Metal 実機（DGX Spark GB10／Apple Silicon）での parity 実測は
   未実施のまま Mac／GB10 セッションへ申し送り。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 - facade 新規公開面なし（`InterpolateMode` 自体の再エクスポートは
   #1757 で完了済み。`Bilinear` variant 追加のみで新規アイテムは
   発生しない）。
@@ -1412,6 +1451,9 @@ AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「�
 - サイズ上限とエラー写像（PR #1849 codex-review／Cursor Bugbot 指摘の是正）: (1) 要素数積が `usize` オーバーフローする形状は CUDA／Metal とも `run_scan` 冒頭の検査（`checked_shape_numel`／`gather_scatter_model::checked_numel`）で `BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)` として**拒否**し、ホストフォールバックには入らない。(2) カーネル引数の上限超過は両バックエンドとも**バックエンド固有上限として `BackendError::Unsupported` へ写像**し、`Var::cumsum`／`cumprod` のホストフォールバック（`eval::cumsum_along`／`cumprod_along`）へ委譲する——CUDA は `lanes = outer * inner`／`axis_len`／`inner`／`numel` が `int` 引数の範囲（`i32::MAX`）を超えると `CudaError::ScanSizeLimitExceeded`（`ops.rs::map_scan_error` がこの variant のみ `Unsupported` へ）、Metal は `lanes`／`axis_len`／`inner` が `uint` 引数の範囲（`u32::MAX`）を超えると `scan_model::plan_scan` が `dispatch_sync` 前に `ScanPrepareError::SizeLimitExceeded` を返し `ops.rs::map_scan_prepare_error` が `Unsupported` へ写像する（Metal `sort`／`unique` の事前検査と同型。Linux 実行可能な単体テスト付き）。(3) 内部契約違反（CUDA `InvalidScanShape` → `ShapeMismatch(ElementCountOverflow)`・Metal `scan.rs` 内の二重検査失敗 → `KernelLaunchFailed`）・driver／起動失敗はフォールバックで覆い隠さない（`.claude/rules/security.md` A08）。
 - facade 新規公開面なし（#1731 と同じく既存 `Var` 再エクスポート経由でそのまま到達可能）。
 - CUDA／Metal 実機（DGX Spark GB10・Apple Silicon）での parity 実測は本エージェント実行環境に到達不能のため未実施のまま GB10／Mac セッションへ申し送る（Linux 実行可能なソース証跡テスト・環境適応スモーク・型検査〈`cargo check --target aarch64-apple-darwin`〉は完了済み）。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 
 ## #1627 の追補（int8 量子化の段階 0 設計判断）
 
@@ -1428,6 +1470,9 @@ AMP（自動混合精度。§2.12 の上記行「なし（`optim.rs` doc に「�
 - 両バックエンドとも 64bit 合成キー（`hi`：値を「NaN は最大・NaN 同士は同値・±0 は同値」へ正規化した `u32` totalOrder 風キー・`descending` のときのみ反転／`lo`：ライン内の元添字。`lo` を反転しないことで非安定ソートでも `key` 自体がライン内で一意になり、`docs/spec` の順序契約（同値タイブレークは `descending` に関わらず元添字昇順）が構造的に成立する）によるビットニックソート方式で実装した（CUDA: `crates/backend-cuda/src/{sort_model.rs,kernels_sort.rs,sort.rs}`。Metal: `crates/backend-metal/src/{sort_model.rs,shaders/sort.metal,sort.rs}`）。
 - CPU 参照実装（`backend-cpu::sort_topk`）との bit 完全一致（`values`・`index` とも）を、実機なしで Linux 上検証できるホストモデル（`sort_model.rs::sort_lines_host_model` が実カーネルと同一アルゴリズムを意図的に複製）で網羅的に確認済み（12 形状 × `descending` × 複数 `out_len`）。
 - `facade/tests/sort_topk_backend_parity.rs`（CPU vs NaiveOps の forward・backward parity。scatter ベース VJP を含め bit 完全一致確認済み）・`backend-cuda/tests/sort_topk_parity.rs`・`backend-metal/tests/{sort_topk_parity.rs,sort_topk_source_evidence.rs}` を追加した。CUDA・Metal 実機での `#[ignore]` テスト実行（形状網羅・非 contiguous 入力・`k` 網羅）は本エージェント実行環境に両実機への到達手段がないため未実施のまま GB10／Mac セッションへ申し送り。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 - facade 新規公開面なし（既存の `Var` 再エクスポート経由のまま）。`sorted=False` の topk・負 `dim`・`k` の `Var` 化は引き続き対象外。
 ## #1753 の追補（親 #1631）
 
@@ -1472,6 +1517,9 @@ init.rs::normal_init`。Box–Muller・`Linear::new` と同じくグローバル
 スコープ外として別 issue へ引き継ぐ）。facade 新規公開面なし（既存の
 `Var`／`nn` 再エクスポート経由）。CUDA／Metal 実機での facade parity
 テストは未実測のまま Mac／GB10 セッションへ申し送る。
+→ Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+CUDA〈GB10〉は引き続き未実測。
 
 ## 追補（イシュー #1756）
 
@@ -1503,6 +1551,9 @@ init.rs::normal_init`。Box–Muller・`Linear::new` と同じくグローバル
   Mac／GB10 セッションへ申し送る（`crates/backend-cuda/tests/
   constant_pad_parity.rs`・`crates/backend-metal/tests/
   constant_pad_parity.rs` の `#[ignore]` テストを参照）。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 
 ## #1633 の追補（sparse／complex テンソルの非対応を明文化）
 
@@ -1558,6 +1609,12 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
   CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機での facade
   parity テストは、本実装エージェントの実行環境に実機への到達手段が
   ないため未実測のまま Mac／GB10 セッションへ申し送る。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（forward pass・backward は
+  Metal tape 上の loss 縮約 `Var::sum` が `MetalBackendOps::sum` 未実装の
+  `Unsupported` を返すため判定不能＝FAIL 記録〈`metal_sdpa_backward_dq_matches_cpu`〉。
+  演算自体の不一致は未観測。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §3.1）・
+  CUDA〈GB10〉は引き続き未実測。
 - 対象外（既存 issue で追跡可能）: `dropout_p`（SDPA への結線は対象外。
   `Var::dropout` 自体は #1603 で実装済み）・`enable_gqa`・attention weights の返却・f16／bf16 経路
   （#1626）・CUDA／Metal 専用の融合 attention カーネル（性能最適化。
@@ -1574,6 +1631,9 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `Module` trait は実装した（`forward` は self-attention `q=k=v=input`・mask なし・非 causal として定義）。`compat::Sequential` 用の `as_linear`／`as_relu` フックはいずれも trait 既定のままオーバーライドしない（Embedding〈#1604〉と異なり `Module::forward` 自体は実装するが、学習可能パラメータの自動収集対象には含めない）。
 - facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
 - CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/mha_backend_parity.rs` の `#[ignore]` テストを参照）。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 
 ## #1739 の追補（`HuberLoss`／`SmoothL1Loss`）
 
@@ -1586,6 +1646,9 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - facade 到達経路は既存 `Var` 再エクスポート経由（`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）・新規 `pub use`／`pub fn` は facade へ追加していない。
 - `reduction='none'`（要素別損失出力）は対象外のまま。
 - CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/backend-cuda/tests/huber_parity.rs`・`crates/backend-metal/tests/huber_parity.rs`・`crates/facade/tests/huber_backend_parity.rs` の `#[ignore]` テストを参照）。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 ## #1742 の追補（`Adam`。coupled L2 weight decay）
 
 §2.9 の `Adam`（coupled L2 weight decay）行はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（親 #1610）。
@@ -1605,6 +1668,9 @@ sub-issue (a)（scaled dot product attention 関数）が実装済みになっ�
 - `Probabilities` kind のみ `input`／`target` の `[0, 1]` 範囲検査（NaN 含む）を実体化直後・バックエンド呼び出し前にホスト側で行い、違反は `AutodiffError::InvalidArgument`（`cross_entropy_loss` の targets 範囲検査と同配置）。`Logits` kind は範囲制約なし。
 - `dInput`（`Probabilities` kind は分母をクランプした勾配 `(p − y) / max(p·(1−p), 1e−12)`。forward のクランプ済み式の厳密な導関数ではない点に注意。厳密な導関数となるのは `dTarget` 側）のみをカーネルが返し、`dTarget` は呼び出し元がホスト側の逐次 map で計算する契約（`MseLoss` の `dTarget = -dPred` という単純合成が成り立たないため）。
 - facade 新規公開面なし（既存 `Var` 再エクスポート経由でそのまま到達可能。`docs/compat-api-scope.md` §1.2）。CUDA／Metal 実機での facade parity テスト・性能実測は未実施のまま Mac／GB10 セッションへ申し送る。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 
 ## #1743 の追補（`RmsProp`／`Adagrad`）
 
@@ -1670,6 +1736,12 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - `Tape::var_no_grad`（追跡なし葉。`requires_grad=false` の `Op::Leaf`）・`Var::detach`（既存 `Var` を追跡なし葉へ変換）を実装済み化。`TapeNode::requires_grad` の前方伝播・`Tape::backward` の起点／蓄積スキップ・`Gradients::get` の型付きエラー（`AutodiffError::GradientTrackingDisabled`）で構成する（設計は `docs/autodiff-nograd-leaf-dinput-skip-decision.md` §5「案 B」）。
 - facade 新規公開面: `Tape::var_no_grad`（薄いラッパー 1 メソッド）のみ。`Var::detach` は既存 `Var` 再エクスポート経由で新規公開面なし。
 - 算術を伴わない機構のため CPU 本番 ops と naive 参照実装の勾配が bit 完全一致。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（no_grad／`Var::detach` の
+  機構自体は成立。`metal_detach_weight_grad_matches_cpu` は Metal tape 上の
+  loss 縮約 `Var::sum` が `MetalBackendOps::sum` 未実装の `Unsupported` を
+  返すため判定不能＝FAIL 記録。機構自体の不一致は未観測。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §3.1）・
+  CUDA〈GB10〉は引き続き未実測。
 - `torch.no_grad()` コンテキスト（演算そのものをテープに載せない）は引き続き `Tensor<f32>` のまま演算する既存の型分離方式（`docs/public-api-design.md` §3.1）が担う。本 issue が追加したのは「テープに載せたノードを勾配経路から外す」機構であり、両者は独立。
 - `retain_graph`（複数回 backward の勾配蓄積契約）は兄弟イシュー #1749 で実装済み。詳細は下記「追補（イシュー #1749）」を参照。
 
@@ -1682,12 +1754,21 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - `Var::cast<T: CastElement>() -> Result<Tensor<T>, AutodiffError>`（**非微分演算**。VJP は明示的な打ち切り——`Var::argmax`／`unique` と同型に tape ノードを記録しない）・`Var::to_f32() -> Var<'t>`（f32 系の恒等射。勾配は通常どおり伝播）・`Tape::var_from<T: CastElement>(&Tensor<T>) -> Result<Var<'_>, AutodiffError>`（非 f32 dtype から葉ノードを直接登録）を実装した。
 - facade は `CastDType`／`CastElement` の純再エクスポート（1 行）と `facade::Tape::var_from` の委譲メソッド追加のみ。`CastOps`（動的ディスパッチ面）は facade へ再エクスポートしない（`crates/facade/tests/api_surface.rs::facade_does_not_reexport_cast_ops` が機械的に固定）。
 - 数値契約（NaN→0 の飽和整数変換・`v != 0.0` の bool 変換等）・API 配置案の比較は `docs/tensor-core-cast-design.md` を正とする。CUDA／Metal 実機での facade parity テストは未実測のまま GB10／Mac セッションへ申し送り。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 
 ## 追補（イシュー #1749）
 
 - `retain_graph`（PyTorch 相当）は追加 API なしで常時成立する契約として確定した——`Tape` は明示的に `reset`（#1048）／drop するまでグラフ（`TapeNode::value`）を保持し続けるため、同一グラフに対し `Tape::backward` を何度呼んでも成功しノードを追加しない。`retain_graph=false` 相当の「backward 後にノード値を解放するモード」は意図的に追加しない（`Var::value()` の契約〈未実体化かつ `recompute==false` なら契約違反〉と衝突するため。理由は `docs/autodiff-retain-graph-accumulate-decision.md` §2.1）。
 - `Tape::backward_accumulate(&self, loss: &Var<'_>, into: &mut Gradients) -> Result<(), AutodiffError>` を新設した。PyTorch の複数回 `loss.backward()` による `.grad` 蓄積相当の opt-in API——素の `backward` の意味論（独立 `Gradients`）は不変のまま、利用者が明示的に指定した `into` へのみ蓄積する。クロステープ／世代不一致（`reset` をまたいだ場合）は `TapeMismatch`、resident 勾配経路（`DeviceParamStore::backward`）由来の `Gradients` への蓄積は `Backward` で fail-closed に拒否する（fingerprint 契約と衝突するため）。マージは既存 fan-out 蓄積と同じ `grad::vjp_elementwise_add` を使い、全要素の加算成功後にのみ `into` へ書き戻す原子的更新（途中失敗で `into` が部分更新されない）。
 - facade は `Tape::backward_accumulate` の 1 メソッド追加のみ（新規型・`Op`／`BackendOps` 拡張なし）。CPU 本番 ops と naive 参照実装の勾配が bit 完全一致（同一 loss を 2 回蓄積した `2g` の比較）。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（`backward_accumulate` の機構
+  自体は成立。`metal_backward_accumulate_weight_grad_matches_cpu` は
+  Metal tape 上の loss 縮約 `Var::sum` が `MetalBackendOps::sum` 未実装の
+  `Unsupported` を返すため判定不能＝FAIL 記録。機構自体の不一致は未観測。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §3.1）・
+  CUDA〈GB10〉は引き続き未実測。
 
 ## #1738 の追補（NLLLoss／KLDivLoss）
 §2.8「損失関数」の `NLLLoss` 行（`なし。cross_entropy_loss が事実上兼ねる設計`）はスナップショット（対象 HEAD `097bff19`）として不変のまま、以下を実装済みとして追記する（イシュー #1738・親 #1609）。`KLDivLoss` はスナップショット当時の同節に未掲載のため新規行として追記する。
@@ -1697,12 +1778,16 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 - `nn::loss::NllLoss`／`KlDivLoss`（薄いラッパー。`Default` は PyTorch 既定 `class_dim=1`／`reduction='mean'`／`log_target=false` と一致）を追加した。
 - facade 新規公開面なし（既存 `Var`／`nn` 再エクスポート経由。`compat-api-scope.md` §5 の範囲拡張手続きは Tier 1 列挙済み機能につき再適用不要）。
 - CUDA／Metal 実機（GB10／M4 Max）での facade parity テストは、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る（`crates/facade/tests/nll_kl_div_backend_parity.rs`・`crates/backend-cuda/tests/{nll,kl_div}_parity.rs`・`crates/backend-metal/tests/{nll,kl_div}_parity.rs` の `#[ignore]` テストを参照）。
+  → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。
+  `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
+  CUDA〈GB10〉は引き続き未実測。
 
 #1764 で追補を追記（`Var::conv2d`（im2col＋GEMM。cross-correlation。NCHW 固定。groups は `gemm_batched` の broadcast で吸収）実装済み化。`BackendOps::im2col`／`col2im`／`conv2d`〈既定 `Unsupported`〉・`Op::Conv2d`・CPU 実装〈`backend-cpu::im2col`〉まで実装済み・facade 新規公開面なし・CUDA／Metal 専用カーネルは #1643／#1644・`nn::Conv2d` 層は #1645 へ引き継ぎ）。
 
 #1751 で追補を追記（`CastOps`〈dtype 変換。#1750〉の CUDA〈8 方向すべて〉・Metal〈f64 2 方向を除く 6 方向。MSL `double` 非対応のため既定 `Unsupported` のままホストフォールバック〉のネイティブカーネルを実装済み化。`crate::cast_ops` accessor が `None` → `Some(self)` へ切り替わったため、GPU 非搭載環境で当該 tape から `Var::cast` を呼ぶと `Unsupported` 経由の暗黙フォールバックではなく `CudaUnavailable`／`KernelLaunchFailed` が表面化する挙動変更を伴う（`Var::unique`／`matmul` と同じ既存契約であり退行ではない。`docs/tensor-core-cast-design.md` §11）。facade 新規公開面なし・CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り。
+→ Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・CUDA〈GB10〉は引き続き未実測。
 
-#1614 で追補を追記（デバイス転送と列挙の実装済み化。`fandhe_ai::available_devices()`〈3 バックエンドの `DeviceProvider` を束ねた列挙入口。`Device::Cpu` を常に含み `Device::Cuda(0..n)` 昇順・`Device::Metal`〈macOS のみ〉の順で決定的〉・`Var::device`／`Var::to(device)`〈PyTorch `Tensor.to(device)` 相当。同一デバイスなら恒等・不一致なら新設 `AutodiffError::DeviceMismatch { requested, actual }` を返す fail-fast の検査であり黙ってフォールバックしない〉・`Var::to_tape(target)`〈別 `Tape` への実際の値転送。同一 tape への転送は恒等・別 tape は `materialize_fallible` 経由で実体化した値〈算術を含まないため bit 完全一致〉を新しい葉として登録し `requires_grad` を引き継ぐ〈勾配はテープをまたがない非微分境界〉・checkpoint 解放済みで再計算に失敗した poison ノードは `Var::detach` と同じ fail-closed 方針で `Err` を返す〉・facade `Tape::device`／`Tape::transfer`〈`Var::to_tape` への薄い委譲。facade 利用者が生の `fandhe_ai_autodiff::Tape` を取り出せないため cross-device 転送の唯一の入口〉。`Tensor<f32>` はデバイス常駐を持たない設計のため独立の `.to(device)` は設けず `tape_for(device)?.var(&t)` と等価という非対応を明記。新規 `Op`／`BackendOps`／VJP は追加していない。設計・実装記録は `docs/facade-device-transfer-enumeration-design.md`。CUDA／Metal 実機（GB10／M4 Max）での facade parity テスト〈`crates/facade/tests/device_transfer_backend_parity.rs` の `#[ignore]` 2 件〉は、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る）。
+#1614 で追補を追記（デバイス転送と列挙の実装済み化。`fandhe_ai::available_devices()`〈3 バックエンドの `DeviceProvider` を束ねた列挙入口。`Device::Cpu` を常に含み `Device::Cuda(0..n)` 昇順・`Device::Metal`〈macOS のみ〉の順で決定的〉・`Var::device`／`Var::to(device)`〈PyTorch `Tensor.to(device)` 相当。同一デバイスなら恒等・不一致なら新設 `AutodiffError::DeviceMismatch { requested, actual }` を返す fail-fast の検査であり黙ってフォールバックしない〉・`Var::to_tape(target)`〈別 `Tape` への実際の値転送。同一 tape への転送は恒等・別 tape は `materialize_fallible` 経由で実体化した値〈算術を含まないため bit 完全一致〉を新しい葉として登録し `requires_grad` を引き継ぐ〈勾配はテープをまたがない非微分境界〉・checkpoint 解放済みで再計算に失敗した poison ノードは `Var::detach` と同じ fail-closed 方針で `Err` を返す〉・facade `Tape::device`／`Tape::transfer`〈`Var::to_tape` への薄い委譲。facade 利用者が生の `fandhe_ai_autodiff::Tape` を取り出せないため cross-device 転送の唯一の入口〉。`Tensor<f32>` はデバイス常駐を持たない設計のため独立の `.to(device)` は設けず `tape_for(device)?.var(&t)` と等価という非対応を明記。新規 `Op`／`BackendOps`／VJP は追加していない。設計・実装記録は `docs/facade-device-transfer-enumeration-design.md`。CUDA／Metal 実機（GB10／M4 Max）での facade parity テスト〈`crates/facade/tests/device_transfer_backend_parity.rs` の `#[ignore]` 2 件〉は、本実装エージェントの実行環境に実機への到達手段がないため未実測のまま Mac／GB10 セッションへ申し送る → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・CUDA〈GB10〉は引き続き未実測）。
 
 #1765 で追補を追記（`Var::conv1d`〈`Var::conv2d` を `H` 軸固定 `[N, Cin, 1, L]`／`[Cout, Cin_g, 1, k]` へ reshape 併合する薄いラッパー。新規 `Op`／`BackendOps`／VJP／バックエンドカーネルなし〉実装済み化。`contiguous`〈`pub(crate)`〉前段で `Var::reshape` の非 contiguous 拒否契約と `conv2d`〈transpose 済み入力も受理〉の非対称を解消。facade 新規公開面なし・`nn::Conv1d` 層・`compat::Sequential::add_conv1d` は #1645 へ引き継ぎ）。
 #1615 で追補を追記（Dataset／DataLoader 実装済み化。`data::Dataset`／`data::TensorDataset<T>`〈map-style。異種 dtype／複数列は 2/3 要素タプル impl〉・`data::DataLoader`／`data::DataLoaderConfig`〈batch_size／shuffle／drop_last〉・`data::Batches`〈`ExactSizeIterator`〉・`data::DataError`。`rng`／`creation` と同じホスト側完結レイヤーで `Op`／`BackendOps`／`Var`／VJP を一切経由しない・シャッフルは Fisher–Yates＋`rng::with_global_rng` の rejection sampling（`manual_seed` 契約下で決定的）。facade は `fandhe_ai::data::{Batches, DataError, DataLoader, DataLoaderConfig, Dataset, TensorDataset}` の純再エクスポートのみ。設計は `docs/dataset-dataloader-design.md`）。
@@ -1711,18 +1796,18 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 
 #1767 で追補を追記（CUDA Conv1d 経路の検証済み化。`Var::conv1d`〈#1765〉は新規カーネルを持たない `conv2d` への reshape 併合のため、#1766 の CUDA `im2col`／`col2im` へ既に自動到達していたことをテストで固定——新規 `Op`／`BackendOps`／カーネル追加なし・facade 新規公開面なし。`crates/backend-cuda/tests/im2col_col2im_parity.rs::CASES` へ 1d 形状〈`H=1`・`kh=1`〉6 件を追加し `LaunchShape::derive`／`ops.rs` の `N=0` 早期リターンを 1d でも driver 非接触テストで確認。`crates/facade/tests/conv1d_backend_parity.rs` に `cuda_conv1d_backward_matches_cpu`〈REQ-2 複合判定〉・`cuda_conv1d_matches_manual_reshape_conv2d_bit_exact`〈同一 CUDA tape 上で `conv1d` と手動 reshape `conv2d` が forward／backward とも bit 完全一致する「特化」契約の直接検証〉・groups＋dilation forward parity を追加。CUDA／Metal 実機での facade parity テストは未実測のまま `docs/perf/logs/cuda-conv1d-1767/` へ申し送り）。
 
-#1603 で追補を追記（`nn.Dropout` 実装済み化。`Var::dropout(p, training)`〈inverted dropout。`torch.nn.functional.dropout` 相当〉・`tape::Op::Dropout`・`nn::Dropout`〈`p`／`training` を保持し `Module::set_training`／`training` を実際にオーバーライドする本クレート内実装で唯一の層〉・`compat::Sequential::add_dropout`〈facade 新規 `pub fn` 1 件〉。マスク生成は `crate::grad::dropout_mask` がホスト側のグローバル RNG（`fandhe_ai_tensor_core::rng::rand`。#1602）を経由し、forward／backward とも既存必須メソッド `BackendOps::mul` への単一乗算に帰着するため新規 `BackendOps` メソッドは追加していない（当初の想定は「RNG 契約設計＋マスク適用 Op〈train/eval モード分岐〉＋VJP」〈338 行目〉だったが、実装の結果 `BackendOps` trait 自体の拡張は不要と判明）。`predict`／`forward_host` とモードの整合は「コンテナの `training` フラグを尊重する」方式〈PyTorch `model(x)` と同じ。Keras の常時推論モードは不採用〉で確定。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り）。#1754 で追補を追記（`Tensor<T>` の `Debug`／`Display`〈打ち切り付き値プレビュー〉実装済み化。`tensor-core::tensor_fmt`〈非公開モジュール〉・facade 新規公開面なし〈既存 `pub use fandhe_ai_tensor_core::Tensor` 経由でそのまま到達〉・`Tape: Debug`〈`docs/public-api-design.md` §7 の既存公開契約〉越しの出力サイズ有界性〈PyTorch `torch.set_printoptions` 既定と同値の `threshold=1000`／`edgeitems=3`〉を確認済み。safetensors save／load の facade 再公開自体は `onnx-interop` の publish 承認前提が未充足のため段階 0 のまま変更なし。`docs/facade-safetensors-exposure-decision.md` 参照）。
+#1603 で追補を追記（`nn.Dropout` 実装済み化。`Var::dropout(p, training)`〈inverted dropout。`torch.nn.functional.dropout` 相当〉・`tape::Op::Dropout`・`nn::Dropout`〈`p`／`training` を保持し `Module::set_training`／`training` を実際にオーバーライドする本クレート内実装で唯一の層〉・`compat::Sequential::add_dropout`〈facade 新規 `pub fn` 1 件〉。マスク生成は `crate::grad::dropout_mask` がホスト側のグローバル RNG（`fandhe_ai_tensor_core::rng::rand`。#1602）を経由し、forward／backward とも既存必須メソッド `BackendOps::mul` への単一乗算に帰着するため新規 `BackendOps` メソッドは追加していない（当初の想定は「RNG 契約設計＋マスク適用 Op〈train/eval モード分岐〉＋VJP」〈338 行目〉だったが、実装の結果 `BackendOps` trait 自体の拡張は不要と判明）。`predict`／`forward_host` とモードの整合は「コンテナの `training` フラグを尊重する」方式〈PyTorch `model(x)` と同じ。Keras の常時推論モードは不採用〉で確定。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・CUDA〈GB10〉は引き続き未実測）。#1754 で追補を追記（`Tensor<T>` の `Debug`／`Display`〈打ち切り付き値プレビュー〉実装済み化。`tensor-core::tensor_fmt`〈非公開モジュール〉・facade 新規公開面なし〈既存 `pub use fandhe_ai_tensor_core::Tensor` 経由でそのまま到達〉・`Tape: Debug`〈`docs/public-api-design.md` §7 の既存公開契約〉越しの出力サイズ有界性〈PyTorch `torch.set_printoptions` 既定と同値の `threshold=1000`／`edgeitems=3`〉を確認済み。safetensors save／load の facade 再公開自体は `onnx-interop` の publish 承認前提が未充足のため段階 0 のまま変更なし。`docs/facade-safetensors-exposure-decision.md` 参照）。
 #1732 で追補を追記（`nn.BatchNorm2d` 行を CPU 実装済み化。`Var::batch_norm`／`batch_norm_with_batch_stats`／`batch_norm_infer`・`tape::Op::BatchNorm`〈`fixed_stats: Option<(Tensor<f32>, Tensor<f32>)>` payload で train／eval を切替〉・`BackendOps::batch_norm_train`／`batch_norm_infer`〈既定 `Unsupported`〉・`nn::BatchNorm1d`／`BatchNorm2d`〈本クレート内で初めて `Module::set_training`／`training` を実際にオーバーライドするモード依存層。running stats は `RefCell` で保持し `named_parameters` には含めない〉。縮約順序は LayerNorm（#1596）の `warp_reduce_f64` butterfly 契約をチャネル方向の `M=n*spatial` 要素へ適用・CPU カーネルとホスト参照実装は bit 完全一致。facade 新規公開面なし〈`Var::batch_norm*` は既存 `Var` 再エクスポート経由〉。CUDA／Metal 専用カーネルは #1735／#1736 へ引き継ぎ。`docs/batch-norm-ops-design.md`）。
 
 #1752 で追補を追記（`state_dict()`/`load_state_dict()` 実装済み化。`nn::Module` trait に `set_parameter`〈defaulted・既定 `Err`。`Linear`／`RmsNorm`／`LayerNorm`／`MultiheadAttention`／`Rnn`／`Lstm`／`Gru`／`ModuleList`／`Sequential` で実装〉・`state_dict`／`load_state_dict`〈defaulted。`named_parameters`／`set_parameter` の上に組む合成のみ・`HashMap<String, Tensor<f32>>`・strict・two-pass アトミック〈パス 1 でキー集合完全一致・shape 完全一致を検証してから、全通過後のパス 2 で書き戻す。`compat::Sequential::apply_parameters` の #294／#426 と同型の不変条件〉〉を追加し、`compat::Sequential::state_dict`／`load_state_dict`〈facade 新規 `pub fn` 2 件〉へ 1 行委譲。数値経路（`Op`／`BackendOps`／VJP）を一切追加しない機構のため CPU での bit 完全一致を統合テストで確認済み・CUDA／Metal 実機 parity は数値経路非依存のため対象外。safetensors save／load の facade 再公開は #1754 が対象）。
 
 #1761 で追補を追記（`compile()`／`fit()`／`evaluate()` 最小版実装済み化。`compat::{Loss, Optimizer, FitConfig, History, FitTarget}`・`Sequential::{compile, is_compiled, fit, evaluate}`。`Sequential::bind`／`fandhe_ai::optim`／`fandhe_ai::data::DataLoader`／`Var::mse_loss`／`cross_entropy_loss` の合成のみで新規 `Op`／`BackendOps`／VJP なし・CPU `tape()` 固定。正しさは手動学習ループとのパラメータ・loss 系列 bit 完全一致で検証。callbacks／`validation_data`／metrics／LR スケジューラ連携は #1763 へ引き継ぎ）。
 
-#1768 で追補を追記（`BackendOps::im2col`／`col2im` の Metal 実装済み化。`crates/backend-metal/src/{im2col.rs, im2col_model.rs, shaders/im2col.metal}`。`conv2d` 自身は override せず `conv2d_with_fallback`／既存 VJP の段階的合成が Metal `im2col`／`gemm_batched`／`col2im` へ自動的に到達する設計〈`autodiff` 側コード変更なし〉。im2col は算術を含まない純粋コピーのため 3 バックエンド bit 完全一致・col2im は CPU `f64` 逐次和と bit 完全一致〈Metal は binary64 ソフトウェアエミュレーション。`Im2colDims`〈19 × `uint`〉を 1 回の `setBytes` でまとめて渡す方式〉・facade 新規公開面なし・M4 Max 実機での facade parity テスト（`crates/facade/tests/conv2d_backend_parity.rs::{metal_conv2d_forward_matches_cpu, metal_conv2d_backward_matches_cpu}`）は未実測のまま申し送り。Metal Conv1d 経路の実機検証は #1769 へ引き継ぎ）。
-#1769 で追補を追記（Metal Conv1d 経路〈`Var::conv1d`〉を検証済み。origin/main 時点で `Var::conv1d`（#1765）は `Var::conv2d` への reshape 併合のみで新規 `Op`／`BackendOps`／カーネルを持たず、Metal `BackendOps::im2col`／`col2im`（#1768）は形状汎用カーネルのため 1d 形状（`H=1`・`kh=1`）もそのまま処理する構造が既に成立していた。本イシューは `crates/backend-metal/src/im2col_model.rs::CASES` へ `tests/im2col_col2im_parity.rs::CASES` と同一の 1d 形状 6 件を追加（Linux CI で回る唯一の 1d 実効検証）・`ops.rs` の N=0 早期リターンを 1d 形状で確認するテスト 2 件・`crates/facade/tests/conv1d_backend_parity.rs` へ Metal 版 3 テスト（backward parity・`conv1d`↔手動 reshape `conv2d` の bit 完全一致・groups＋dilation forward parity）を追加。facade 新規公開面なし・M4 Max 実機実測は未実施のまま `docs/perf/logs/metal-conv1d-1769/` へ申し送り）。
-#1735 で追補を追記（CUDA `batch_norm_train`／`batch_norm_infer` 実装済み化。`kernels_batch_norm.rs`〈train／infer 2 カーネル。1 warp = 1 channel・`double` アキュムレータ〉・`CudaBackendOps::batch_norm_train`／`batch_norm_infer`。`i32` 上限超過のみ `Unsupported` でホストフォールバック・facade 新規公開面なし・GB10 実機 parity は未実測のまま申し送り）。#1736 で追補を追記（`nn.BatchNorm2d` 行を Metal 実装済み化。`shaders/batch_norm.metal`（train／infer 2 カーネル。soft-f64 方式——issue 題名の Neumaier＋scale/ssq は `layer_norm.metal`〈#1596〉が反例により不採用へ転換した経緯を踏襲し実装時点から不採用）・`MetalBackendOps::batch_norm_train`／`batch_norm_infer`。CPU との bit 一致は主張せず REQ-2 統一複合判定で検証。facade 新規公開面なし・M4 Max 実機実測は未実施のまま `docs/perf/logs/metal-batch-norm-1736/` へ申し送り。`docs/batch-norm-ops-design.md` §9）。 
-#1770 で追補を追記（`nn::Conv2d`／`nn::Conv1d` 層・`compat::Sequential::add_conv2d`／`add_conv1d` 実装済み化。`Module::as_conv2d`／`as_conv1d`〈各 `_mut` 込み〉フック・学習経路〈`trainable_parameters`／`bind`／`SequentialVars::forward`／`trainable_vars`／`trainable_grads`／`apply_parameters`〉を Conv 層対応へ拡張。デバイス常駐経路は Conv 層を含む `Sequential` を fail-closed 拒否のまま対象外。facade 新規公開面は `add_conv2d`／`add_conv1d` の 2 件のみ・CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り）。#1771 で追補を追記（#1766〜#1770 の実行手順・事前登録判定規則を `docs/perf/logs/conv-realdevice-1771/` へ統合し、nn 層（`compat::Sequential`）の backward・Conv1d・「特化」契約〈conv1d と手動 reshape conv2d の bit 完全一致〉・学習ループ〈record-only〉を対象とする `#[ignore]` テスト 12 件（CUDA／Metal 各 6 件）を `crates/facade/tests/nn_conv_backend_parity.rs` へ追加。facade 新規公開面なし・CUDA／Metal 実機実測は本エージェント実行環境に実機なしのため未実施のまま親 #1645 を受け皿として GB10／Mac セッションへ申し送り）。
+#1768 で追補を追記（`BackendOps::im2col`／`col2im` の Metal 実装済み化。`crates/backend-metal/src/{im2col.rs, im2col_model.rs, shaders/im2col.metal}`。`conv2d` 自身は override せず `conv2d_with_fallback`／既存 VJP の段階的合成が Metal `im2col`／`gemm_batched`／`col2im` へ自動的に到達する設計〈`autodiff` 側コード変更なし〉。im2col は算術を含まない純粋コピーのため 3 バックエンド bit 完全一致・col2im は CPU `f64` 逐次和と bit 完全一致〈Metal は binary64 ソフトウェアエミュレーション。`Im2colDims`〈19 × `uint`〉を 1 回の `setBytes` でまとめて渡す方式〉・facade 新規公開面なし・M4 Max 実機での facade parity テスト（`crates/facade/tests/conv2d_backend_parity.rs::{metal_conv2d_forward_matches_cpu, metal_conv2d_backward_matches_cpu}`）は未実測のまま申し送り → Metal〈M4 Max〉は 2026-09-16 に実測済み（forward pass・backward は Metal tape 上の loss 縮約 `Var::sum` が `MetalBackendOps::sum` 未実装の `Unsupported` を返すため判定不能＝FAIL 記録。演算自体の不一致は未観測。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §3.1）・CUDA〈GB10〉は引き続き未実測。Metal Conv1d 経路の実機検証は #1769 へ引き継ぎ）。
+#1769 で追補を追記（Metal Conv1d 経路〈`Var::conv1d`〉を検証済み。origin/main 時点で `Var::conv1d`（#1765）は `Var::conv2d` への reshape 併合のみで新規 `Op`／`BackendOps`／カーネルを持たず、Metal `BackendOps::im2col`／`col2im`（#1768）は形状汎用カーネルのため 1d 形状（`H=1`・`kh=1`）もそのまま処理する構造が既に成立していた。本イシューは `crates/backend-metal/src/im2col_model.rs::CASES` へ `tests/im2col_col2im_parity.rs::CASES` と同一の 1d 形状 6 件を追加（Linux CI で回る唯一の 1d 実効検証）・`ops.rs` の N=0 早期リターンを 1d 形状で確認するテスト 2 件・`crates/facade/tests/conv1d_backend_parity.rs` へ Metal 版 3 テスト（backward parity・`conv1d`↔手動 reshape `conv2d` の bit 完全一致・groups＋dilation forward parity）を追加。facade 新規公開面なし・M4 Max 実機実測は未実施のまま `docs/perf/logs/metal-conv1d-1769/` へ申し送り → Metal〈M4 Max〉は 2026-09-16 に実測済み（forward pass・backward は Metal tape 上の loss 縮約 `Var::sum` が `MetalBackendOps::sum` 未実装の `Unsupported` を返すため判定不能＝FAIL 記録。演算自体の不一致は未観測。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §3.1）・CUDA〈GB10〉は引き続き未実測）。
+#1735 で追補を追記（CUDA `batch_norm_train`／`batch_norm_infer` 実装済み化。`kernels_batch_norm.rs`〈train／infer 2 カーネル。1 warp = 1 channel・`double` アキュムレータ〉・`CudaBackendOps::batch_norm_train`／`batch_norm_infer`。`i32` 上限超過のみ `Unsupported` でホストフォールバック・facade 新規公開面なし・GB10 実機 parity は未実測のまま申し送り）。#1736 で追補を追記（`nn.BatchNorm2d` 行を Metal 実装済み化。`shaders/batch_norm.metal`（train／infer 2 カーネル。soft-f64 方式——issue 題名の Neumaier＋scale/ssq は `layer_norm.metal`〈#1596〉が反例により不採用へ転換した経緯を踏襲し実装時点から不採用）・`MetalBackendOps::batch_norm_train`／`batch_norm_infer`。CPU との bit 一致は主張せず REQ-2 統一複合判定で検証。facade 新規公開面なし・M4 Max 実機実測は未実施のまま `docs/perf/logs/metal-batch-norm-1736/` へ申し送り → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・CUDA〈GB10〉は引き続き未実測。`docs/batch-norm-ops-design.md` §9）。 
+#1770 で追補を追記（`nn::Conv2d`／`nn::Conv1d` 層・`compat::Sequential::add_conv2d`／`add_conv1d` 実装済み化。`Module::as_conv2d`／`as_conv1d`〈各 `_mut` 込み〉フック・学習経路〈`trainable_parameters`／`bind`／`SequentialVars::forward`／`trainable_vars`／`trainable_grads`／`apply_parameters`〉を Conv 層対応へ拡張。デバイス常駐経路は Conv 層を含む `Sequential` を fail-closed 拒否のまま対象外。facade 新規公開面は `add_conv2d`／`add_conv1d` の 2 件のみ・CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り）。#1771 で追補を追記（#1766〜#1770 の実行手順・事前登録判定規則を `docs/perf/logs/conv-realdevice-1771/` へ統合し、nn 層（`compat::Sequential`）の backward・Conv1d・「特化」契約〈conv1d と手動 reshape conv2d の bit 完全一致〉・学習ループ〈record-only〉を対象とする `#[ignore]` テスト 12 件（CUDA／Metal 各 6 件）を `crates/facade/tests/nn_conv_backend_parity.rs` へ追加。facade 新規公開面なし・CUDA／Metal 実機実測は本エージェント実行環境に実機なしのため未実施のまま親 #1645 を受け皿として GB10／Mac セッションへ申し送り → Metal〈M4 Max〉は 2026-09-16 に実測済み（forward pass・backward は Metal tape 上の loss 縮約 `Var::sum` が `MetalBackendOps::sum` 未実装の `Unsupported` を返すため判定不能＝FAIL 記録。演算自体の不一致は未観測。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §3.1）・CUDA〈GB10〉は引き続き未実測）。
 #1763 で追補を追記（callbacks〈`EarlyStopping`／`ModelCheckpoint`〉・`validation_data`・LR スケジューラ連携実装済み化。`compat::{Callback, EarlyStopping, ModelCheckpoint, LrSchedule, Monitor, MonitorMode}`・`Sequential::fit_with_callbacks`・`fandhe_ai::optim::{Sgd, AdamW, Adam}::set_lr`〈学習率更新 API〉新設。テンソル演算を一切追加しないホスト側状態機械のみのため新規 `Op`／`BackendOps`／VJP／カーネルなし。facade 新規公開面は上記型・メソッドのみ。正しさは手動ループとの bit 完全一致で検証（`crates/facade/tests/compat_sequential_callbacks.rs`）。設計判断は `docs/compat-callbacks-design.md`。metrics は引き続き対象外のまま）。
-#1728 で追補を追記（§2.7「Pooling（Max/AvgPool）」の CPU 実装済み化。`Var::max_pool2d`／`max_pool1d`／`avg_pool2d`／`avg_pool1d`／`adaptive_avg_pool2d`／`adaptive_avg_pool1d`・`nn::{MaxPool1d, MaxPool2d, AvgPool1d, AvgPool2d, AdaptiveAvgPool1d, AdaptiveAvgPool2d}`・`tape::Op::MaxPool2d`／`Op::AvgPool2d`／`Op::AdaptiveAvgPool2d`〈`is_checkpoint_eligible=false`・`push_eager` 常時実体化〉・`BackendOps::max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`〈既定 `Unsupported`〉・`tensor-core::{Pool2dParams, pool_out_len, pool2d_out_shape, adaptive_pool2d_out_shape, adaptive_window}`。MaxPool の VJP は `[N·C, H·W]` へ reshape してから `scatter_add`（`ScatterReduce::Add` の決定的集約契約）・索引域外は `AutodiffError::Backward` で fail-closed 拒否。AvgPool／AdaptiveAvgPool の VJP は出力 major ループの `f64` アキュムレータ配列（入力 major ループと同一の加算順であることを doc comment に導出記録）。MaxPool は forward（値・索引）・backward とも CPU 参照実装とホストフォールバック（`eval::*`）で bit 完全一致・AvgPool／AdaptiveAvgPool も `f64` 縮約契約が一致するため同じく bit 完全一致。facade 新規公開面なし（既存 `Var` 再エクスポート経由）。CUDA／Metal 専用カーネルは #1729／#1730 へ引き継ぎ〈既定 `Unsupported` → ホストフォールバックのため機能的には到達可能〉。設計は `docs/pooling-ops-design.md` §15）。#1729／#1730 マージ後の追従 PR（#1607 ツリー）で `ops.rs::CudaBackendOps`／`MetalBackendOps` への override 配線を完了し、本番経路がカーネル実装（既定 `Unsupported` フォールバックではなく専用カーネル）へ到達するよう修正した（CUDA／Metal 実機での数値実測は未実施のまま申し送り）。
-#1760 で追補を追記（`compat::Sequential::add_layer_norm`／`add_rms_norm`／`add_batch_norm1d`／`add_batch_norm2d`／`add_embedding`／`add_multihead_attention` 実装済み化。`nn::Module` trait への `as_layer_norm`／`as_rms_norm`／`as_batch_norm1d`／`as_batch_norm2d`／`as_embedding`／`as_multihead_attention`〈`_mut` 込み。defaulted・非破壊拡張〉フック追加・`Embedding` への `impl Module` 新設（f32 `Var` 入力を厳格に整数 id へ変換する `EmbeddingVars::forward_from_var` 経由。`nn/embedding.rs` の「`Module` trait は実装しない（確定判断）」節を解消）・`compat::Sequential` の `bind`／`trainable_parameters`／`apply_parameters`〈`Module::set_parameter` による in-place 更新で BatchNorm の running stats／`num_batches_tracked`／`training` を保持〉／常駐経路ガード（`contains_conv_layer` → `contains_resident_unsupported_layer` 改名・拡張）への結線まで実装済み。新規 `Op`／`BackendOps`／VJP／カーネルなし〈既存 `Var::layer_norm`／`rms_norm`／`batch_norm_*`／`embedding`・既存 `matmul`／`transpose`／`masked_fill`／`softmax` の合成のみ〉・facade 新規公開面は `add_*` 6 件のみ。CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッションへ申し送り〈`crates/facade/tests/compat_sequential_layers_backend_parity.rs`〉）。
+#1728 で追補を追記（§2.7「Pooling（Max/AvgPool）」の CPU 実装済み化。`Var::max_pool2d`／`max_pool1d`／`avg_pool2d`／`avg_pool1d`／`adaptive_avg_pool2d`／`adaptive_avg_pool1d`・`nn::{MaxPool1d, MaxPool2d, AvgPool1d, AvgPool2d, AdaptiveAvgPool1d, AdaptiveAvgPool2d}`・`tape::Op::MaxPool2d`／`Op::AvgPool2d`／`Op::AdaptiveAvgPool2d`〈`is_checkpoint_eligible=false`・`push_eager` 常時実体化〉・`BackendOps::max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`〈既定 `Unsupported`〉・`tensor-core::{Pool2dParams, pool_out_len, pool2d_out_shape, adaptive_pool2d_out_shape, adaptive_window}`。MaxPool の VJP は `[N·C, H·W]` へ reshape してから `scatter_add`（`ScatterReduce::Add` の決定的集約契約）・索引域外は `AutodiffError::Backward` で fail-closed 拒否。AvgPool／AdaptiveAvgPool の VJP は出力 major ループの `f64` アキュムレータ配列（入力 major ループと同一の加算順であることを doc comment に導出記録）。MaxPool は forward（値・索引）・backward とも CPU 参照実装とホストフォールバック（`eval::*`）で bit 完全一致・AvgPool／AdaptiveAvgPool も `f64` 縮約契約が一致するため同じく bit 完全一致。facade 新規公開面なし（既存 `Var` 再エクスポート経由）。CUDA／Metal 専用カーネルは #1729／#1730 へ引き継ぎ〈既定 `Unsupported` → ホストフォールバックのため機能的には到達可能〉。設計は `docs/pooling-ops-design.md` §15）。#1729／#1730 マージ後の追従 PR（#1607 ツリー）で `ops.rs::CudaBackendOps`／`MetalBackendOps` への override 配線を完了し、本番経路がカーネル実装（既定 `Unsupported` フォールバックではなく専用カーネル）へ到達するよう修正した（CUDA／Metal 実機での数値実測は未実施のまま申し送り → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。facade 配線経由の `facade_pooling_backend_parity.log` 3 pass・`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・CUDA〈GB10〉は引き続き未実測）。
+#1760 で追補を追記（`compat::Sequential::add_layer_norm`／`add_rms_norm`／`add_batch_norm1d`／`add_batch_norm2d`／`add_embedding`／`add_multihead_attention` 実装済み化。`nn::Module` trait への `as_layer_norm`／`as_rms_norm`／`as_batch_norm1d`／`as_batch_norm2d`／`as_embedding`／`as_multihead_attention`〈`_mut` 込み。defaulted・非破壊拡張〉フック追加・`Embedding` への `impl Module` 新設（f32 `Var` 入力を厳格に整数 id へ変換する `EmbeddingVars::forward_from_var` 経由。`nn/embedding.rs` の「`Module` trait は実装しない（確定判断）」節を解消）・`compat::Sequential` の `bind`／`trainable_parameters`／`apply_parameters`〈`Module::set_parameter` による in-place 更新で BatchNorm の running stats／`num_batches_tracked`／`training` を保持〉／常駐経路ガード（`contains_conv_layer` → `contains_resident_unsupported_layer` 改名・拡張）への結線まで実装済み。新規 `Op`／`BackendOps`／VJP／カーネルなし〈既存 `Var::layer_norm`／`rms_norm`／`batch_norm_*`／`embedding`・既存 `matmul`／`transpose`／`masked_fill`／`softmax` の合成のみ〉・facade 新規公開面は `add_*` 6 件のみ。CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッションへ申し送り → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・CUDA〈GB10〉は引き続き未実測〈`crates/facade/tests/compat_sequential_layers_backend_parity.rs`〉）。
 #1729 で追補を追記（Pooling（Max/AvgPool）行の CUDA 実装状況を追記。`crates/backend-cuda/src/{pooling, kernels_pooling}.rs` に MaxPool2d／AvgPool2d／AdaptiveAvgPool2d の forward カーネル 3 種を実装済み（`docs/pooling-ops-design.md` §5／§7 の数値契約〈MaxPool は先勝ち決定的タイ規則＋NaN 伝播で算術なしの純粋選択・Avg 系は `double` 逐次加算＋1 回 `float` downcast〉を CUDA 上で実装し、`pooling_model.rs`〈ホスト Rust 逐語モデル〉と値・索引とも bit 完全一致）。実装時点で兄弟イシュー #1728（`backend-cpu`。共有基盤 `Pool2dParams`・`BackendOps` 3 メソッド・出力 shape 関数）が `main` に未マージだったため、`CudaPooling` はプリミティブ引数で自己完結し `ops.rs::CudaBackendOps` への override 配線を持たない（#1728 マージ後の追従 PR へ引き継ぐ）。facade 新規公開面なし・GB10 実機実測は未実施のまま `docs/perf/logs/cuda-pooling-1729/` へ申し送り）。

@@ -1228,3 +1228,37 @@ reshape してから `Var::conv2d` へ委譲する薄いラッパーで新規 `O
   環境変数・`~/.ssh/config` のいずれも確認できず）もないため
   **未実測**。`verdict=undetermined` のまま親 #1645 を受け皿として
   GB10／Mac 実機セッションへ申し送る
+
+#### #1771 Metal（Apple M4 Max）実機実測（2026-09-16）
+
+`docs/perf/logs/conv-realdevice-1771/run_ignored_tests_metal.sh` を 2 回起動し
+`check_determinism.sh` で突合した（origin/main `3e43bbd0`・共有負荷下・ログは
+同ディレクトリ `metal/ignored-run{1,2}/`・`metal/check_determinism.log`・
+`env_info.txt` Metal 節）。
+
+| ログ | pass | fail | 失敗テスト |
+|---|---|---|---|
+| `im2col_col2im_parity` | 6 | 0 | — |
+| `conv2d_backend_parity`（`metal_`） | 1 | 1 | `metal_conv2d_backward_matches_cpu` |
+| `conv1d_backend_parity`（`metal_`） | 2 | 2 | `metal_conv1d_backward_matches_cpu`・`metal_conv1d_matches_manual_reshape_conv2d_bit_exact` |
+| `nn_conv_backend_parity`（`metal_`） | 5 | 1 | `metal_sequential_conv1d_matches_manual_reshape_conv2d_bit_exact` |
+
+- 規則 1)（im2col／col2im bit 完全一致）: PASS
+- 規則 2)（conv forward／backward の REQ-2）: forward は全 pass。backward 3 件と
+  「特化」bit 一致 2 件は、Metal tape 上の loss 縮約 `Var::sum` が
+  `MetalBackendOps::sum: reduction カーネル未実装（TASK-1.9c スコープ外）` の
+  `Unsupported` を返すため比較に到達せず FAIL（判定不能）。同じ backward を
+  `mse_loss` 経由で行う `metal_sequential_conv{1d,2d}_backward_matches_cpu` は
+  pass しており、conv 演算自体の数値不一致は観測されていない
+- 規則 3)（conv1d ↔ 手動 reshape conv2d の bit 一致）: 同上（`sum` で未到達）
+- 規則 4)（run-to-run 決定性）: PASS（pass したテストの `fold_bits=`／`bits=`
+  行が 2 起動間で bit 同一）
+- 規則 5)（学習ループ record-only）: `metal_sequential_conv2d_sgd_steps_record_only`
+  pass・記録のみ
+
+**verdict = FAIL（規則 2)・3) 未成立。テスト構造起因）**。tolerance／
+`BASELINES` は変更せず、判定規則の事後緩和も行わない。是正候補（Metal f32
+reduction カーネル・`Var::sum` のホストフォールバック・テストの loss を
+`mse_loss` へ変更）はいずれもコード変更であり本記録の対象外（ユーザー判断
+へ回す）。CUDA（GB10）側は本節の対象外。総合分析は
+`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §2a・§3.1。
