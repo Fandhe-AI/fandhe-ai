@@ -96,6 +96,7 @@ exact` 等、#1214 当時になかった新しいフラグに対応するため�
 | `aggregate_aux_ab.py` | `gemm_transposed_perf` の 5 プロセス起動ログから形状ごとの speedup 中央値表を生成する（`--self-test` あり） |
 | `env_info.txt` | 実行環境・sha・バイナリ sha256・判定結果の記入欄（未実測のため未記入） |
 | `ab/` | `run_ab_vjp_transposed_cuda.sh` の出力回収先（JSONL・compare md・sha・tree・uptime・skipped。未生成） |
+| `ab/rev-stamp-verification-1590.md` | 両腕の `.rev-stamp`（`rev-stamp-{before,after}-1590.txt`）とツリー内容指紋（`tree-hashes-*.txt`）の独立検証記録（PR #1909 codex P2 対応・2026-09-16） |
 | `ignored/` | `run_ignored_tests.sh` の出力回収先（テストごとのログ。未生成） |
 | `aux/` | `gemm_transposed_perf` 5 プロセス起動ログの回収先（未生成） |
 

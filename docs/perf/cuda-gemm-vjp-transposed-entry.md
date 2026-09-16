@@ -224,10 +224,18 @@ mismatch で初期化不可）には DGX Spark GB10 実機への到達手段が�
   通過扱い。事実として記録）。計測中 load1 は 0.37〜0.51（`ab/uptime-
   1590.log`）
 - 腕の同定: before＝`git archive 82058501`・after＝`git archive
-  ab0b77d0`（実行担当者の申告。`ab/tree-{before,after}-1590.txt` は両腕
-  とも `fandhe-ai v0.6.0` の path 依存を示す）。展開ツリーは `.git` を
-  持たず `.rev-stamp` 等の独立検証記録は成果物に含まれていない（要確認）。
-  バイナリ sha256 は `ab/sha-{before,after}-1590.txt`
+  ab0b77d0`（`ab/tree-{before,after}-1590.txt` は両腕とも `fandhe-ai
+  v0.6.0` の path 依存を示す）。バイナリ sha256 は
+  `ab/sha-{before,after}-1590.txt`。**独立検証済み（2026-09-16・PR #1909
+  codex P2 対応）**: DGX 側展開ツリー（`/home/<user>/work/ab-trees/
+  {before,after}-1590`）に残っていた `.rev-stamp` を回収し、before＝
+  `820585014a6d…`・after＝`ab0b77d0b233…`（`git rev-parse` と一致。
+  `ab/rev-stamp-{before,after}-1590.txt`）を確認したうえで、`crates/`・
+  `scripts/bench/framework-compare/` 配下の全ファイル SHA-256 一覧を
+  `git archive <sha>` 側と突合し、両腕とも完全一致（before 725 件・after
+  727 件。除外は cargo が書き換える `framework-compare/Cargo.lock` と
+  ビルド成果物 `target-ab-*` のみ）。手順・一覧ハッシュは
+  `ab/rev-stamp-verification-1590.md`
 - R1（HEAD ツリー `3e43bbd0`。`ignored/*.log`・`aux/*.log`）: **20/20
   pass・0 fail**（`gemm_transposed_parity` 5/5・`gemm_transposed_perf`
   2/2〈5 起動すべて〉・`gemm_fp32_strict_into_parity` 4/4・
@@ -280,6 +288,11 @@ cuda-gemm-vjp-transposed-entry-1590/README.md`「事前登録判定規則」節�
    点は要確認として記録）。旧 §4 項目 3 が懸念した小形状 `m=64,k=256,
    n=10` の後退は train 総和（Tier 1）でも観測されず、「記録して受容」
    「numel 閾値ゲート追加」「結線無効化」のいずれの分岐にも該当しない
+
+5. 腕の同定（§3.3）は 2026-09-16 に `.rev-stamp` の回収とツリー内容
+   指紋の突合で独立検証済み（`ab/rev-stamp-verification-1590.md`。
+   PR #1909 codex P2 対応）であり、上記 Tier 1 の差分は事前登録した
+   `82058501` → `ab0b77d0`、すなわち #1214 単独の効果として追跡できる
 
 結線（`CudaBackendOps::gemm_fp32_strict_impl`／`gemm_resident_lhs` の
 NT／TN 入口）は現状のまま維持する。tolerance・baseline・本番コードの
