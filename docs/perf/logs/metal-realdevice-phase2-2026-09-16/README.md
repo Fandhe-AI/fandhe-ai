@@ -42,6 +42,21 @@ two-pass.md` §5.5）は #1512 の baseline 方式再切替により解消済み
 `gemm_splitk_parity` は 1/1 pass。`gemm_hfrag_parity`（4 pass）・
 `gemm_te_parity`（5 pass）も pass。
 
+
+### 1a. 非 `#[ignore]` lib テストの M4 Max での FAIL（pre-push フックのブロッカー）
+
+`cargo test --workspace --all-features`（`lefthook.yml` pre-push の `test` と同一）を本機で
+実行すると、`crates/backend-metal/src/ops.rs` の macOS 限定・非 `#[ignore]` テスト 3 件
+（`{max,avg,adaptive_avg}_pool2d_rejects_huge_broadcast_view_input_without_panicking`。
+PR #1888 で追加）が `called Result::unwrap() on an Err value: ElementCountOverflow`
+で FAIL する（backend-metal lib: 549 pass・3 fail・91 ignored）。panic 位置は fixture の
+`base.broadcast_to(&[1, 1, 1usize << 62, 4]).unwrap()` で、`broadcast_to` 自体が要素数
+overflow を拒否するため検証対象（`checked_bytes_for`）に到達しない。`cfg(target_os =
+"macos")` 限定ファイルのため Linux CI では未コンパイル。本 PR の変更（docs／ログのみ）
+とは無関係だが、本フックにより Mac からの push が拒否される（PR #1888 へ所見コメント
+投稿済み。コード変更は本 PR に含めない）。再現:
+`cargo test -p fandhe-ai-backend-metal --all-features --lib rejects_huge_broadcast_view`。
+
 ## 2. 高優先（Phase 2 機能 parity）結果一覧
 
 pass 数は各ログ末尾の `test result:` 行の実測値。`metal_` はテスト名フィルタ
