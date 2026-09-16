@@ -4745,11 +4745,23 @@ mod tests {
     // できる（このファイル自体が `cfg(target_os = "macos")` 限定の
     // ため実際に実行されるのは macOS 上のみ）。 ---
 
+    // fixture は `1usize << 59` を使う（イシュー #1897 是正）。
+    // 当初 `1usize << 62` だった shape `[1, 1, H, 4]` は
+    // `numel = H * 4 = 2usize.pow(64)` となり `Tensor::broadcast_to`
+    // 自身の `checked_numel`（`usize` 積のオーバーフロー検査のみ・
+    // バイトサイズは見ない）が `ElementCountOverflow` を返すため、
+    // fixture 構築の `.unwrap()` 自体が panic していた（本検査対象の
+    // `checked_bytes_for::<f32>` には到達しない）。`H = 1usize << 59`
+    // は `numel = 2usize.pow(61)` で `usize` 積として overflow しない
+    // ため `broadcast_to` は成功し、`checked_bytes_for::<f32>` の
+    // `bytes = numel * size_of::<f32>() = 2usize.pow(63)` が
+    // `isize::MAX`（`2usize.pow(63) - 1`）をちょうど 1 超えることで
+    // 検査対象の分岐（バイトサイズ超過）を確実に通す。
     #[test]
     fn max_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
         let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
-        let huge = base.broadcast_to(&[1, 1, 1usize << 62, 4]).unwrap();
-        let params = Pool2dParams::new([1usize << 62, 1], None, [0, 0], [1, 1]).unwrap();
+        let huge = base.broadcast_to(&[1, 1, 1usize << 59, 4]).unwrap();
+        let params = Pool2dParams::new([1usize << 59, 1], None, [0, 0], [1, 1]).unwrap();
         let ops = MetalBackendOps::new();
         let err = ops
             .max_pool2d(&huge, &params)
@@ -4763,8 +4775,8 @@ mod tests {
     #[test]
     fn avg_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
         let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
-        let huge = base.broadcast_to(&[1, 1, 1usize << 62, 4]).unwrap();
-        let params = Pool2dParams::new([1usize << 62, 1], None, [0, 0], [1, 1]).unwrap();
+        let huge = base.broadcast_to(&[1, 1, 1usize << 59, 4]).unwrap();
+        let params = Pool2dParams::new([1usize << 59, 1], None, [0, 0], [1, 1]).unwrap();
         let ops = MetalBackendOps::new();
         let err = ops
             .avg_pool2d(&huge, &params, true)
@@ -4778,7 +4790,7 @@ mod tests {
     #[test]
     fn adaptive_avg_pool2d_rejects_huge_broadcast_view_input_without_panicking() {
         let base = Tensor::<f32>::new(vec![0.0f32; 4], &[1usize, 1, 1, 4]).unwrap();
-        let huge = base.broadcast_to(&[1, 1, 1usize << 62, 4]).unwrap();
+        let huge = base.broadcast_to(&[1, 1, 1usize << 59, 4]).unwrap();
         let ops = MetalBackendOps::new();
         let err = ops
             .adaptive_avg_pool2d(&huge, [2, 2])
