@@ -593,6 +593,8 @@ m*n 要素データ転送 2 回 + sync 2 回を要したが、新経路はデー
 判定規則）を整備済み（`docs/perf/train-resident-grad-device-update.md`
 §7・`docs/perf/logs/train-resident-grad-cuda-1560/`）。GB10 実機実測は
 本 PR 時点では未実施のまま同節へ引き継ぐ。
+→ 2026-09-16 GB10 実機で実測済み（同 §7.3。隣接コミット比較 d77f8bde→e41db903 で
+bit 同一 4782 行・差分 0、reuse `step_total` 0.7339・checksum 完全一致・ADOPT）。
 
 ## 16. 実装記録（#1692・`mse_loss_backward` ストリーム順序契約確認）
 

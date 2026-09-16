@@ -257,12 +257,13 @@ NT/TN 経路は `transpose_to_pooled` が返す中間バッファ（`PooledCudaH
 m*n 要素データ転送 2 回 + sync 2 回）と比較し、新経路はデータ転送ゼロで sync 1 回のみに
 削減される設計だが、**実測値は本イシュー（#1559）のスコープ外**（本エージェント実行環境に
 CUDA 実機がないため）で、GB10 実機での bit 同一検証・性能 A/B は #1560 へ引き継ぐ。
+→ 2026-09-16 GB10 実機で実測済み（§7.3。bit 同一 4782 行・reuse `step_total` 0.7339・ADOPT）。
 
 GPU 非依存単体テスト（`crates/backend-cuda/src/ops.rs`）・GB10 実機 `#[ignore]` テスト
 （`crates/backend-cuda/tests/gemm_fp32_strict_into_parity.rs`。実機未実行のまま記入欄を
 残す）を追加した。
 
-## 7. #1560 GB10 実機実測（スキャフォールドのみ・本 PR 時点では未実測）
+## 7. #1560 GB10 実機実測（スキャフォールドのみ・本 PR 時点では未実測 → 2026-09-16 実測済み・§7.3）
 
 #1559 の bit 同一検証・性能 A/B をイシュー #1560 で引き継いだ。本 PR の実行環境
 （Linux・QEMU VM）には DGX Spark GB10 実機への到達手段がないため、**実測値は
@@ -298,14 +299,73 @@ GB10 実機を持つセッションへ実測を申し送る。
 
 | 項目 | 結果 |
 |---|---|
-| bit 同一（R2） | 未実測 |
-| `#[ignore]` 非後退（R1） | 未実測 |
-| A/B reuse `step_total` 判定 | 未実測 |
-| fresh 対照セル | 未実測 |
-| フェーズ分解診断 | 未実測 |
-| CUDA Graph capture 副次観測 | 未実測 |
+| bit 同一（R2） | 未実測 → 2026-09-16 実測済み: before/after とも 4782 行・差分 0（`bitdump/line_counts.txt`・`bitdump/bitdump_diff.txt` は改行 1 バイトのみ。#1480 実績値 4782 行と一致） |
+| `#[ignore]` 非後退（R1） | 未実測 → 2026-09-16 実測済み: 10 本すべて pass（`ignored/`。HEAD ツリー `3e43bbd0` で実行） |
+| A/B reuse `step_total` 判定 | 未実測 → 2026-09-16 実測済み: 0.7339（459.5 us → 337.2 us）・checksum 完全一致・**Tier 1 充足** |
+| fresh 対照セル | 未実測 → 2026-09-16 実測済み: 0.9912（非判定） |
+| フェーズ分解診断 | 未実測 → 2026-09-16 実測済み: `backward` 0.789・`device_update` 0.091・`step_total` 0.731（単発・非判定） |
+| CUDA Graph capture 副次観測 | 未実測 → 未実施（`--features graph-step` の `--graph on` カウンタは記録していない） |
 
 実測完了後、本節を実測値で更新すること（事前登録規則の事後緩和は行わない）。
+
+#### 7.3.1 実測環境・比較腕（2026-09-16・DGX Spark GB10）
+
+- 環境: NVIDIA GB10（sm_121）・driver 580.173.02・CUDA 13.0（NVRTC V13.0.88）・
+  rustc 1.97.0・Linux 6.17.0-1031-nvidia（cpu 型番・cargo 版はログ未記録のため
+  要確認。`env_info.txt`）
+- **正式記録は隣接コミット比較（ラベル `1560adj`）**: before=`d77f8bde`（#1569
+  マージコミットの第 1 親）・after=`e41db903`（#1569 マージコミット）をいずれも
+  `git archive` 展開し、`crates/facade` の path patch で別バイナリ・別
+  `--target-dir` でビルド（sha256: before `7ab4e220…`・after `5695a098…`。
+  `ab/raw/sha-*-1560adj.txt`）。§7.1 の「after 腕 = #1560 のブランチ」は
+  `crates/*/src` が `e41db903` と同一という前提だったが、本記録時点のブランチ
+  （`origin/main` `565300e4` 起点）は #1569 以後の変更を含むため、事前登録の
+  意図（#1559 単体の検証）どおり `e41db903` のアーカイブを after 腕とした
+- **初回実行（ラベル `1560`・参考。`vs-main/`）**: after を main 相当ツリー
+  `3e43bbd0`（`crates/` が `origin/main` `565300e4` と同一）で実行したところ、
+  bit dump（`eager_baseline`）に 54 行の diff（先頭は 465 行目
+  `step[0].grad[1][6]` の 1 ulp 差）が出た。#1569 以後の変更（#1566 bias 勾配
+  f64 統一等）の影響であり #1559 単体の bit 同一契約の検証にならないため、
+  隣接コミット比較で再実行した。初回の A/B は reuse 0.6730（run 内比 0.6694〜0.6851・checksum 完全一致）・fresh 1.0030（`compare_gemm_ab.py`
+  の機械判定ラベルは「後退」だが対照セルのため非判定）
+- 専有ゲート（既定 ON）: `gate-1560adj.log` で load1 0.59→0.43→0.26・
+  util.gpu 0% の 3 サンプル連続により 01:46:35Z に通過。A/B 実行中（5 round・
+  01:46:50〜01:47:05Z）の load1 は 1.51〜1.66（`ab/raw/uptime-1560adj.log`。
+  計測自身の負荷を含む事実として記録）
+- R1 `#[ignore]` 群は HEAD ツリー `3e43bbd0` で実行（`gemm_fp32_strict_into_parity`
+  4 件・`gemm_transposed_parity` 5 件・`device_param_store_backend_parity_cuda`
+  2 件・`cuda_graph_step_bit_identity` 3 件・`graph_capture_real_device` 3 件・
+  `backend_cuda_upload_into_unit` 2 件。すべて `test result: ok`）
+
+#### 7.3.2 A/B 実測値（`ab/compare-train-1560adj.md`・5 round・起動順反転）
+
+| size/mode | before median | after median | after/before | checksum | run 内比（5 run） | 判定 |
+|---|---|---|---|---|---|---|
+| 64/reuse（Tier 1） | 459.5 us（min 458.7 / max 468.5） | 337.2 us（min 335.6 / max 338.0） | **0.7339** | 完全一致 | 0.7230, 0.7354, 0.7303, 0.7191, 0.7361 | 非後退（5/5 run 改善方向） |
+| 64/fresh（対照・非判定） | 514.7 us（min 512.0 / max 518.6） | 510.2 us（min 508.2 / max 536.5） | 0.9912 | 完全一致 | 0.9874, 0.9952, 1.0405, 0.9936, 0.9869 | 非判定（resident 経路非到達） |
+
+フェーズ分解（reuse・単発・非判定。`ab/compare-train-1560adj.md`）:
+
+| phase | before | after | after/before |
+|---|---|---|---|
+| forward_resident | 155.6 us | 154.8 us | 0.995 |
+| backward | 215.3 us | 170.0 us | 0.789 |
+| device_update | 85.6 us | 7.8 us | 0.091 |
+| step_total | 460.5 us | 336.5 us | 0.731 |
+
+`device_update` の縮小（85.6 → 7.8 us）は §6 の設計（D2H `readback` → H2D
+`upload_into` の m*n 要素転送 2 回 + sync 2 回を、デバイス上で完結する転送ゼロ・
+sync 1 回へ置換）と整合する。`backward` 側の縮小は NT/TN 経路の中間バッファ
+`stream.synchronize()`（§6「設計判断 A」）を含めた結果であり、本計測では内訳を
+分離していない。
+
+#### 7.3.3 verdict
+
+事前登録規則（§7.2）に照らし、Tier 1（reuse `step_total` 5 run 中央値比 0.7339
+≤ 1.00・checksum 完全一致）と R2（4782 行 bit 同一・差分 0）をいずれも充足する。
+**verdict = ADOPT（#1569 は既に main へマージ済みのため事後の非後退確認）**。
+R1 は 10 本全 pass。副次観測（`--graph on` カウンタ）は未実施のまま記入欄として
+残す（判定には用いない）。tolerance／baseline／事前登録規則は変更していない。
 
 ## 8. #1563 層内合流の実装・前後比較（記入欄）
 

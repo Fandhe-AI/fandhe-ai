@@ -1,6 +1,20 @@
 # イシュー #1560 実測スキャフォールド（CUDA resident weight 勾配経路）
 
-## 位置づけ（本 PR 時点では未実測）
+## 位置づけ（本 PR 時点では未実測 → 2026-09-16 GB10 実機で実測済み）
+
+**2026-09-16 実測記録**: 正式記録は隣接コミット比較（ラベル `1560adj`。
+before=`d77f8bde`・after=`e41db903` をいずれも `git archive` 展開）。
+成果物は `bitdump/`（4782 行すべて bit 同一・差分 0）・`ignored/`（R1 10 本
+全 pass。HEAD ツリー `3e43bbd0` で実行）・`gate-1560adj.log`（専有ゲート
+通過）・`run-1560adj.log`・`ab/`（reuse `step_total` 0.7339・checksum 完全
+一致・fresh 対照 0.9912）・`env_info.txt`。初回実行（ラベル `1560`。after を
+main 相当ツリー `3e43bbd0` で実行）は bit dump に 54 行の diff が出た
+（#1569 以後の変更〈#1566 bias 勾配 f64 統一等〉の影響で #1559 単体の検証に
+ならない）ため参考として `vs-main/` に残す（reuse 0.6730・fresh 1.0030）。
+副次観測（`--graph on` カウンタ）は未実施。転記先は
+`docs/perf/train-resident-grad-device-update.md` §7.3。以下の「未実測」
+「未生成」の記述はスキャフォールド作成時点のもの。
+
 
 本 PR の実行環境（Linux・QEMU VM）には DGX Spark GB10 実機への到達手段
 （`docs/real-hardware-verification-env.local.md`・`CUDA_NODE` 環境変数・

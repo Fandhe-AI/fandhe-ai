@@ -1,22 +1,26 @@
-# イシュー #1560 CUDA resident weight 勾配経路 実測環境（記入欄）
+# イシュー #1560 CUDA resident weight 勾配経路 実測環境
 #
-# 本 PR 実行環境（Linux・QEMU VM）に DGX Spark GB10 実機への到達手段が
-# ないため未実測。GB10 実機での実測時にこのテンプレートを埋めること
-# （内部ホスト名・ユーザー名は書かない）。
+# 2026-09-16 に DGX Spark GB10 実機で実測済み（内部ホスト名・ユーザー名は
+# 書かない。絶対パスは `/home/<user>` へマスク済み）。正式記録は隣接コミット
+# 比較（ラベル `1560adj`。before=d77f8bde・after=e41db903 の両方を
+# `git archive` 展開）。初回（after を main 相当ツリー 3e43bbd0 で実行した
+# ラベル `1560`）は参考として `vs-main/` に残す。
 
 hostname: masked
-date:
-gpu:
-cpu:
-os:
-cuda_driver_version:
-rustc:
-cargo:
-before_sha: d77f8bde
-after_sha:
-before_arm: d77f8bde crates/facade（path patch）bench-fandhe sha256=
-after_arm: <branch> crates/facade（path patch）bench-fandhe sha256=
-load_gate_mode:
-bitdump_result:
-ab_verdict:
-graph_capture_secondary_observation:
+date: 2026-09-16（専有ゲート開始 01:45:35Z・A/B 終了 01:47:05Z。ローカル時刻 10:45〜10:47）
+gpu: NVIDIA GB10（sm_121）
+cpu: 要確認（ログ未記録）
+os: Linux 6.17.0-1031-nvidia
+cuda_driver_version: 580.173.02（CUDA 13.0・NVRTC V13.0.88）
+rustc: 1.97.0
+cargo: 要確認（ログ未記録）
+before_sha: d77f8bde（#1569 マージコミットの第 1 親。`git archive` 展開）
+after_sha: e41db903（#1569 マージコミット。`git archive` 展開。テンプレートの `<branch>` は本ブランチ〈565300e4 起点〉ではなく e41db903 のアーカイブを用いた）
+before_arm: d77f8bde crates/facade（path patch）bench-fandhe sha256=7ab4e2208d7f22d95ac7620574b6ab416d019b819574c6ac854ef78ce27cac6f
+after_arm: e41db903 crates/facade（path patch）bench-fandhe sha256=5695a09857d3f54ef6a2669198f03f4a0988def5da56ce335ffe5935d119b1fb
+load_gate_mode: gated（既定 ON。load1 0.59→0.43→0.26・util.gpu 0% の 3 サンプル連続で通過。`gate-1560adj.log`）
+bitdump_result: OK（before/after とも 4782 行・差分 0。`bitdump/bitdump_diff.txt` は改行 1 バイトのみ。#1480 実績値 4782 行と一致）
+ignored_tests: R1 10 本すべて pass（HEAD ツリー 3e43bbd0〈crates/ は origin/main 565300e4 と同一〉で実行。`ignored/`）
+ab_verdict: ADOPT（非後退確認）。size=64/reuse step_total 5 run 中央値比 0.7339（459.5 us → 337.2 us）・run 内比 0.7230/0.7354/0.7303/0.7191/0.7361・checksum 完全一致（`ab/compare-train-1560adj.md`）。fresh 対照 0.9912（非判定）
+graph_capture_secondary_observation: 未実施（`--features graph-step` の `--graph on` カウンタ記録は行っていない）
+vs_main_reference: 初回（after=3e43bbd0）は bitdump 54 行 diff（`vs-main/bitdump/bitdump_diff.txt`。#1569 以後の変更〈#1566 bias 勾配 f64 統一等〉の影響）・reuse 0.6730・fresh 1.0030（`vs-main/`）。#1559 単体の検証にならないため参考扱い
