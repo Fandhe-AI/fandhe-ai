@@ -248,6 +248,14 @@ fn backend_ops_sum_matches_cpu_bit_exact() {
     // にならず CPU と同じ結果になること（`checked_numel` より前に
     // 0 サイズ早期リターンを行う検査順序の直接検証。`ops.rs::sum`
     // doc「検査順序」参照）。
+    //
+    // `dim=Some(1)`（縮約軸自体が 0 サイズ）は out_shape=[huge, huge]
+    // となり出力要素数積が `2^80` で `usize` に収まらないため、CPU・
+    // Metal いずれも `ElementCountOverflow`（`ShapeMismatch`）を返す
+    // のが正当な挙動であり「成功」は期待できない（PR #1926
+    // codex-review P2・Cursor Bugbot 指摘）。成功検証には縮約軸を
+    // 0 サイズ軸以外（`Some(0)`／`Some(2)`）にした場合を使い、
+    // `Some(1)` は拒否検証として分離する。
     {
         let huge = 1usize << 40;
         let a = Tensor::<f32>::new(Vec::new(), &[huge, 0, huge]).expect("huge zero-sized tensor");
@@ -257,13 +265,36 @@ fn backend_ops_sum_matches_cpu_bit_exact() {
         let c = cpu.sum(&a, None).expect("cpu sum on huge zero-sized shape");
         assert_bit_exact(&m, &c, "huge zero-sized shape dim=None");
 
+        // 成功検証: 縮約軸 0（0 サイズ軸を残す。out_shape=[0, huge]
+        // で要素数 0 のため overflow しない）。
         let m_axis = metal
-            .sum(&a, Some(1))
-            .expect("metal sum(dim=1) on huge zero-sized shape");
+            .sum(&a, Some(0))
+            .expect("metal sum(dim=0) on huge zero-sized shape");
         let c_axis = cpu
-            .sum(&a, Some(1))
-            .expect("cpu sum(dim=1) on huge zero-sized shape");
-        assert_bit_exact(&m_axis, &c_axis, "huge zero-sized shape dim=Some(1)");
+            .sum(&a, Some(0))
+            .expect("cpu sum(dim=0) on huge zero-sized shape");
+        assert_bit_exact(&m_axis, &c_axis, "huge zero-sized shape dim=Some(0)");
+
+        // 成功検証: 縮約軸 2（同様に 0 サイズ軸を残す）。
+        let m_axis2 = metal
+            .sum(&a, Some(2))
+            .expect("metal sum(dim=2) on huge zero-sized shape");
+        let c_axis2 = cpu
+            .sum(&a, Some(2))
+            .expect("cpu sum(dim=2) on huge zero-sized shape");
+        assert_bit_exact(&m_axis2, &c_axis2, "huge zero-sized shape dim=Some(2)");
+
+        // 拒否検証: 縮約軸 1（0 サイズ軸自体を縮約）は out_shape の
+        // 要素数積 `2^80` が `usize` オーバーフローするため、CPU・
+        // Metal とも `ShapeMismatch`（`ElementCountOverflow`）を返す。
+        assert!(matches!(
+            metal.sum(&a, Some(1)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            cpu.sum(&a, Some(1)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
     }
 
     // 範囲外 dim: デバイス非接触で ShapeMismatch。

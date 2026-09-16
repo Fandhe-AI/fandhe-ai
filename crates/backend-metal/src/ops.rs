@@ -2709,10 +2709,14 @@ impl BackendOps for MetalBackendOps {
                 return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
             }
             // `dim=Some(axis)` かつ `shape[axis]==0` のみ（他軸は非零）:
-            // 空縮約契約により各出力要素が `0.0` になる。
-            let lanes = crate::gather_scatter_model::checked_numel(&out_shape)
-                .map_err(BackendError::ShapeMismatch)?;
-            return Tensor::new(vec![0.0; lanes], &out_shape).map_err(BackendError::ShapeMismatch);
+            // 空縮約契約により各出力要素が `0.0` になる。`out_shape` の
+            // 要素数積は `usize` に収まっても `f32` 込みのバイトサイズが
+            // `Vec` の allocation 上限（`isize::MAX` バイト）を超えうる
+            // ため、`vec![0.0; lanes]` を直接確保せず `Tensor::zeros`
+            // （内部で `checked_numel_for::<f32>` によるバイトサイズ検査
+            // を経る）を使い `ShapeError` として伝播する（PR #1926
+            // codex-review P1 是正）。
+            return Tensor::zeros(&out_shape).map_err(BackendError::ShapeMismatch);
         }
         let numel = crate::gather_scatter_model::checked_numel(&shape)
             .map_err(BackendError::ShapeMismatch)?;

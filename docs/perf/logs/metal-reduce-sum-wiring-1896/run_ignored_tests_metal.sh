@@ -92,7 +92,7 @@ run_case reduce_backend_parity_metal \
 #    の非後退確認。1 バイナリの FAIL で以降未実行になるのを避けるため
 #    `--no-fail-fast` を付ける）。
 run_case full_ignored_metal \
-  cargo test -p fandhe-ai-backend-metal --release --all-features -- --ignored --nocapture --no-fail-fast
+  cargo test -p fandhe-ai-backend-metal --release --all-features --no-fail-fast -- --ignored --nocapture
 
 {
   echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
