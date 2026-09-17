@@ -149,10 +149,20 @@
 //! 〈#1600〉未実装のため拒否等）・分解アルゴリズムは `einsum` モジュール
 //! doc を参照。
 
+//! イシュー #1946（親 #1944・設計確定は兄弟 #1945）でユーザー定義
+//! forward／backward プラグイン機構（案 B。`Op` enum への trait object
+//! variant）を追加した。[`CustomFunction`]（`custom.rs`）を実装し
+//! `Tape::custom` へ渡すことで、組み込み演算では表現できない独自の
+//! 勾配（straight-through estimator・gradient reversal 等）をグラフへ
+//! 登録できる。内部クレート限定の `pub` API（`docs/autodiff-custom-
+//! function-decision.md` §12.5 (a)）であり、facade（唯一のサポート
+//! 対象公開面）は再エクスポートしない（(b) は未承認のまま対象外）。
+
 mod attention;
 mod backward;
 pub mod compat;
 mod create_graph;
+mod custom;
 mod default_ops;
 mod einsum;
 mod error;
@@ -175,6 +185,7 @@ pub use backward::Gradients;
 // へは再エクスポートしない（同 doc §9「facade」・#10 承認事項 5 は
 // 未承認のまま。内部クレート限定の機能）。
 pub use create_graph::CreateGraphResult;
+pub use custom::CustomFunction;
 pub use error::AutodiffError;
 pub use tape::{NodeId, Tape, TapeId};
 // `manual_seed`（イシュー #1724）・`randn`／`rand`／`randint`（イシュー

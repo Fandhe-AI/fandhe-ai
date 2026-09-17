@@ -33,8 +33,10 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use fandhe_ai_autodiff::nn::Linear;
-use fandhe_ai_autodiff::{AutodiffError, Tape, Var};
+use fandhe_ai_autodiff::{AutodiffError, CustomFunction, Tape, Var};
 use fandhe_ai_tensor_core::{Activation, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -685,6 +687,62 @@ fn create_graph_rejects_unsupported_op_softmax() {
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
     assert!(child.is_empty());
+}
+
+/// 恒等関数として振る舞う `CustomFunction`（`Op::Custom` を経由させる
+/// ためだけの最小実装。forward はそのままコピー、backward は upstream
+/// をそのまま入力へ流す）。
+struct IdentityCustomFn;
+
+impl CustomFunction for IdentityCustomFn {
+    fn name(&self) -> &str {
+        "identity_custom_fn"
+    }
+
+    fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+        Ok(input_shapes[0].to_vec())
+    }
+
+    fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(inputs[0].contiguous())
+    }
+
+    fn backward(
+        &self,
+        _inputs: &[&Tensor<f32>],
+        _out_value: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        requires_grad: &[bool],
+    ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+        if !requires_grad[0] {
+            return Ok(vec![None]);
+        }
+        Ok(vec![Some(upstream.contiguous())])
+    }
+}
+
+/// `Op::Custom`（イシュー #1946。ユーザー定義 forward／backward
+/// プラグイン）は `create_graph` の対象外である（`Op::
+/// supports_create_graph()` が `false` を返すため `validate_ancestors`
+/// が子テープへ一切書き込む前に fail-closed 拒否する契約。
+/// `docs/autodiff-higher-order-grad-decision.md` §8・`docs/autodiff-
+/// custom-function-decision.md` §14 参照）。
+#[test]
+fn create_graph_rejects_unsupported_op_custom() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let identity = tape
+        .custom(Arc::new(IdentityCustomFn), &[x])
+        .expect("Tape::custom 登録成功");
+    let loss = identity.sum(None).unwrap();
+
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(
+        child.is_empty(),
+        "入口検査で拒否された場合、child は無変更（空）のまま保たれるはず"
+    );
 }
 
 // --- MatMul（rank 2 × rank 2）: 二次形式・Linear（bias 込み）・fail

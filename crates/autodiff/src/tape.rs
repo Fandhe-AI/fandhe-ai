@@ -1009,6 +1009,22 @@ pub(crate) enum Op {
     /// `BackendOps::adaptive_avg_pool2d` に対応メソッドがあるため
     /// 非融合対象（`push_eager` で常に実体化）。
     AdaptiveAvgPool2d { input: NodeId },
+    /// ユーザー定義 forward／backward プラグイン（案 B。イシュー #1946・
+    /// `docs/autodiff-custom-function-decision.md` §12.4）。`inputs` の
+    /// 順序が [`crate::custom::CustomFunction::forward`]／`backward` に
+    /// 渡す入力列の順序そのもの。`Tape::custom`（本ファイル下部）
+    /// からのみ構築される——組み込み演算と異なりホスト値は常に
+    /// `push_eager` により即座に実体化する（融合境界。ユーザーコードの
+    /// 実行タイミングを予測可能にするため遅延評価の対象にしない）。
+    ///
+    /// `func` は [`crate::custom::CustomFn`]（`Arc<dyn CustomFunction>`
+    /// の newtype）。`Arc::clone` のみで安価なため `Op: Clone` を維持
+    /// できる（`grad::vjp` が `op.clone()` して網羅 match する契約
+    /// との整合。§12.4「保持形」）。
+    Custom {
+        inputs: Vec<NodeId>,
+        func: crate::custom::CustomFn,
+    },
 }
 
 /// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
@@ -1398,6 +1414,15 @@ impl Op {
             // 経路を持たないため解放しない（非網羅 match 是正で新規
             // variant 追加時に強制される）。
             Op::MaxPool2d { .. } | Op::AvgPool2d { .. } | Op::AdaptiveAvgPool2d { .. } => false,
+            // `Op::Custom`（イシュー #1946）はユーザー実装の
+            // `forward`／`backward` を host 上で実行する。checkpoint
+            // 解放後の再計算は同じユーザー `forward` をもう一度呼ぶ
+            // ことになるが、決定的・副作用なしの契約はドキュメント上の
+            // 要請に留まり型では強制できないため、再計算結果が forward
+            // 時点の値と bit 同一である保証がない。安全側に倒し非適格
+            // のまま保持する（`docs/autodiff-custom-function-decision.md`
+            // §12.4「各網羅 match の腕」）。
+            Op::Custom { .. } => false,
         }
     }
 
@@ -1608,7 +1633,7 @@ impl Op {
                 }
             }
             Op::LstmHidden { cell, .. } => f(*cell),
-            Op::Concat { inputs, .. } => {
+            Op::Concat { inputs, .. } | Op::Custom { inputs, .. } => {
                 for i in inputs {
                     f(*i);
                 }
@@ -1717,7 +1742,16 @@ impl Op {
             | Op::OneHot { .. }
             | Op::MaxPool2d { .. }
             | Op::AvgPool2d { .. }
-            | Op::AdaptiveAvgPool2d { .. } => false,
+            | Op::AdaptiveAvgPool2d { .. }
+            // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
+            // プラグイン。`docs/autodiff-custom-function-decision.md`）は
+            // 子テープ方式の高階微分（`create_graph`）に対応しない。
+            // ユーザー提供の `CustomFunction::backward` は VJP（1 階の
+            // 勾配値）のみを返す契約であり、子テープ上で再生可能な
+            // 演算列（`Var` を返す forward 相当の記録）を持たないため
+            // 構造的に非対応（`docs/autodiff-higher-order-grad-decision.md`
+            // §8・`docs/autodiff-custom-function-decision.md` §14）。
+            | Op::Custom { .. } => false,
         }
     }
 }
@@ -2049,6 +2083,105 @@ impl Tape {
     pub fn var_no_grad(&self, tensor: &Tensor<f32>) -> crate::var::Var<'_> {
         let id = self.push_leaf(tensor.clone(), false);
         crate::var::Var::from_raw(self, id)
+    }
+
+    /// ユーザー定義 forward／backward（[`crate::custom::CustomFunction`]）
+    /// をこのテープへ登録する（イシュー #1946・案 B。
+    /// `docs/autodiff-custom-function-decision.md` §12.4「入口」）。
+    ///
+    /// `Var::custom` ではなく本メソッド（`Tape::custom`）に置く理由:
+    /// facade は `pub use fandhe_ai_autodiff::Var` で `Var` 型そのものを
+    /// 再エクスポート済みのため、`Var` に生やすと facade が本 issue の
+    /// 対象外（§12.5 (b)。未承認）である公開面を無断で持ち込んでしまう。
+    /// `fandhe_ai_autodiff::Tape` 自体は facade の機械検査
+    /// （`facade_does_not_reexport_tape_or_backend_ops`）で再エクスポート
+    /// 禁止が固定されているため、本メソッドは facade 側 `Tape` へ対応
+    /// する転送メソッドを追加しない限り facade から到達不能なまま保てる。
+    ///
+    /// 検査順序（§12.4「forward 時の評価」）:
+    /// 1. `inputs` が空なら `AutodiffError::InvalidArgument`
+    /// 2. 全入力の `tape_id()` が `self.id` と一致すること（不一致は
+    ///    `AutodiffError::TapeMismatch`。shape・NodeId 解決より前）
+    /// 3. 各入力が `Op::ResidentLeaf`（ホスト値を持たないデバイス常駐
+    ///    パラメータ）でないこと——`materialize_fallible` はこの場合
+    ///    型付き `Err` を返すため、ここで先に検出して意図を明示する
+    ///    （§3 項 6・§12.4「resident／reuse 経路との相互作用」）
+    /// 4. `func.output_shape(..)` が返す宣言 shape を取得
+    /// 5. 全入力を層 1（`materialize_fallible`）で実体化し、`Ref` を
+    ///    閉じてから所有値として持ち出す（`RefCell` 借用の外で
+    ///    ユーザー `forward` を呼ぶ規律。`Var::cat` と同型）
+    /// 6. `func.forward(&refs)` を呼ぶ
+    /// 7. 実出力 shape が宣言 shape と一致することを検査
+    ///    （不一致は `AutodiffError::Shape(ShapeMismatch)`。失敗時は
+    ///    ノードを残さない）
+    /// 8. `push_eager(Op::Custom{..}, value)` で登録する（常に融合境界。
+    ///    §12.4「forward 時の評価」）
+    pub fn custom<'t>(
+        &'t self,
+        func: std::sync::Arc<dyn crate::custom::CustomFunction>,
+        inputs: &[crate::var::Var<'t>],
+    ) -> Result<crate::var::Var<'t>, AutodiffError> {
+        if inputs.is_empty() {
+            return Err(AutodiffError::InvalidArgument(
+                "Tape::custom: inputs must not be empty".into(),
+            ));
+        }
+        for v in inputs {
+            if v.tape_id() != self.id {
+                return Err(AutodiffError::TapeMismatch);
+            }
+        }
+        {
+            let nodes = self.nodes.borrow();
+            for v in inputs {
+                if matches!(nodes[v.node_id().0].op, Op::ResidentLeaf { .. }) {
+                    return Err(AutodiffError::InvalidArgument(
+                        "Tape::custom: デバイス常駐パラメータ（Op::ResidentLeaf）を \
+                         直接入力に渡すことはできない（ホスト値を持たないため）"
+                            .into(),
+                    ));
+                }
+            }
+        }
+        let input_shapes: Vec<Vec<usize>> = inputs.iter().map(|v| v.shape()).collect();
+        let shape_refs: Vec<&[usize]> = input_shapes.iter().map(|s| s.as_slice()).collect();
+        let declared_shape = func.output_shape(&shape_refs)?;
+
+        // 層 1（`materialize_fallible`）で全入力を実体化してから所有値
+        // として持ち出す（`Var::cat` と同じ規律。`RefCell` 借用を閉じて
+        // からユーザー `forward` を呼ぶことで、`forward` 内でこの
+        // `Tape` へ再入しても `borrow_mut` の二重可変借用にならない
+        // ——ただし `CustomFunction: 'static` により `&Tape` 自体を
+        // 捕捉できないため、この再入は型で構造的に発生しない）。
+        let materialized: Vec<Tensor<f32>> = {
+            let nodes = self.nodes.borrow();
+            let ops = self.ops();
+            let mut out = Vec::with_capacity(inputs.len());
+            for v in inputs {
+                out.push(materialize_fallible(&nodes, ops, v.node_id())?.clone());
+            }
+            out
+        };
+        let refs: Vec<&Tensor<f32>> = materialized.iter().collect();
+        let value = func.forward(&refs)?;
+
+        if value.shape() != declared_shape.as_slice() {
+            return Err(AutodiffError::Shape(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: value.shape().to_vec(),
+                    rhs: declared_shape,
+                },
+            ));
+        }
+
+        let id = self.push_eager(
+            Op::Custom {
+                inputs: inputs.iter().map(|v| v.node_id()).collect(),
+                func: crate::custom::CustomFn(func),
+            },
+            value,
+        );
+        Ok(crate::var::Var::from_raw(self, id))
     }
 
     /// 非 f32 dtype の `Tensor<T>` を f32 へ変換したうえでテープ上の
@@ -3824,4 +3957,97 @@ fn eval_fallback(nodes: &[TapeNode], ops: &dyn BackendOps, id: NodeId) -> Tensor
         .get(&id.0)
         .cloned()
         .unwrap_or_else(|| safe_zeros(&nodes[id.0].shape))
+}
+
+/// `Tape::custom`（イシュー #1946）の一部契約は、`push_resident_leaf`
+/// （`pub(crate)`）を直接使う必要があり統合テスト（別クレート扱い）
+/// からは到達できないため、ここにクレート内単体テストとして置く
+/// （`docs/autodiff-custom-function-decision.md` §12.6「ResidentLeaf
+/// 入力拒否」）。それ以外の `Tape::custom` の契約
+/// （bit 一致・エラー系・`requires_grad` 伝播・`backward_accumulate`
+/// 等）は `crates/autodiff/tests/custom_function.rs`（公開 API のみを
+/// 経由する統合テスト）を参照。
+#[cfg(test)]
+mod custom_op_tests {
+    use std::sync::Arc;
+
+    use crate::custom::CustomFunction;
+    use crate::error::AutodiffError;
+
+    use super::*;
+
+    /// 何もしない `CustomFunction`（本モジュールのテストは登録前の
+    /// 検査経路のみを対象とし、`forward`／`backward` の呼び出しまで
+    /// 到達しない）。
+    struct NoopFn;
+
+    impl CustomFunction for NoopFn {
+        fn name(&self) -> &str {
+            "noop"
+        }
+        fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+            Ok(input_shapes[0].to_vec())
+        }
+        fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+            Ok((*inputs[0]).clone())
+        }
+        fn backward(
+            &self,
+            inputs: &[&Tensor<f32>],
+            _out_value: &Tensor<f32>,
+            upstream: &Tensor<f32>,
+            _requires_grad: &[bool],
+        ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+            let _ = inputs;
+            Ok(vec![Some(upstream.clone())])
+        }
+    }
+
+    /// `Op::Custom` は checkpoint 解放対象から常に除外される
+    /// （§12.4「各網羅 match の腕」。ユーザー実装の再計算 bit 同一性が
+    /// 型で保証されないため安全側に倒す設計）。
+    #[test]
+    fn custom_op_is_never_checkpoint_eligible() {
+        let op = Op::Custom {
+            inputs: vec![NodeId(0)],
+            func: crate::custom::CustomFn(Arc::new(NoopFn)),
+        };
+        assert!(!op.is_checkpoint_eligible());
+    }
+
+    /// `for_each_input` は `inputs` の全要素を発生順に yield する
+    /// （`requires_grad`／poison 前方伝播の唯一の情報源。§12.6）。
+    #[test]
+    fn custom_op_for_each_input_yields_all_inputs_in_order() {
+        let op = Op::Custom {
+            inputs: vec![NodeId(2), NodeId(0), NodeId(1)],
+            func: crate::custom::CustomFn(Arc::new(NoopFn)),
+        };
+        let mut seen = Vec::new();
+        op.for_each_input(|id| seen.push(id.0));
+        assert_eq!(seen, vec![2, 0, 1]);
+    }
+
+    /// `Tape::custom` はデバイス常駐パラメータ（`Op::ResidentLeaf`。
+    /// ホスト値を持たない）を直接入力に渡すと型付き `Err` で拒否する
+    /// （§3 項 6・§12.4「resident／reuse 経路との相互作用」）。
+    /// `materialize_fallible` の一般的な `Err` 経路に落とすのではなく
+    /// `Tape::custom` 自身が事前検査で意図を明示する。
+    #[test]
+    fn tape_custom_rejects_resident_leaf_input() {
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let resident_id = tape.push_resident_leaf(vec![2, 2], 0, 0);
+        let resident_var = crate::var::Var::from_raw(&tape, resident_id);
+        let result = tape.custom(Arc::new(NoopFn), &[resident_var]);
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+    }
+
+    /// 空の `inputs` は `AutodiffError::InvalidArgument`（`Var::cat`／
+    /// `stack` と同型の検査規律）。
+    #[test]
+    fn tape_custom_rejects_empty_inputs() {
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let result = tape.custom(Arc::new(NoopFn), &[]);
+        assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+    }
 }

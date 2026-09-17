@@ -123,6 +123,15 @@
 
 上記で 69 variant すべて（対象 26・非対象〈resident/fused〉3・非対象〈非追跡ペイロード〉5・非対象〈数値契約〉15・保留 19・非対象〈非微分〉1）を分類済み。
 
+**70 番目の variant（`Op::Custom`。イシュー #1946。上記分類表は本 variant 新設前の
+69 variant 時点のもの）**: `custom autograd Function` プラグイン機構（案 B。
+`docs/autodiff-custom-function-decision.md`）の実装で追加された `Op::Custom { inputs,
+func: CustomFn }` も「非対象」に分類する。`CustomFunction::backward` はユーザー提供の
+数値関数（上流勾配のテンソルを受け取り入力勾配のテンソルを返すのみ）であり、
+(a) の基準「VJP が既存 `Var` 演算の合成で表現できる」を構造的に満たさない
+（ブラックボックスの host 計算であり `Var` 演算列として再生する手段がない）。
+詳細・実装記録は `docs/autodiff-custom-function-decision.md` §14 を参照。
+
 **checkpoint 区間（#1624）との相互作用**: `Tape::checkpoint`／`Var::checkpoint_from` で構成した区間は forward 値を破棄し `recompute_value` で再計算する。子テープ方式で二階勾配を取る際、checkpoint 済みノードの VJP（1 階）を子テープへ記録するには forward 値の再計算（1 階と同じ `recompute_value` 経路）が必要になり、対象 Op（`MatMul`／`Sigmoid`／`Sum`／`Max`）が checkpoint 対象と重なる場合は追加の設計整理を要する（本追記では踏み込まず段階 1 実装 issue へ引き継ぐ）。
 
 **`var_no_grad`／`detach` 葉との相互作用**（#1941 是正: 到達拒否と勾配要求拒否の区別）: 1 階 `backward_impl` は非追跡葉（`requires_grad == false`）への**到達自体は拒否しない**——`backward.rs:316-333` は当該ノードへの寄与を `accumulate` へ渡さず静かに捨てるのみで（`grads[target]` は `None` のまま）、走査自体は継続する。これは `loss = x.mul(&x).mul(&c)`（`x` は学習対象・`c` は `var_no_grad` の定数）のような通常の二階微分パターンで `c` を定数として扱うために必要な挙動であり、拒否してしまうと成立しなくなる。拒否されるのは別の 2 点のみ（実装値を実測して訂正。#1941 追加是正）: (i) **`loss` 自身**が非追跡の場合（`Tape::backward` 冒頭の `requires_grad` 検査。`backward.rs:209-215` の実装は `Err(AutodiffError::Backward(String))` を返す——「勾配追跡対象の祖先を持たない」旨のメッセージ付きであり `GradientTrackingDisabled` ではない）、(ii) 非追跡の葉**自体の勾配値を明示的に要求**した場合（`Gradients::get`。`backward.rs:87-89` の実装は `Err(AutodiffError::GradientTrackingDisabled)` を返す——こちらは「未到達」（`Ok(None)`）とは型で区別される別の分岐であり、`None` を返す契約ではない）。子テープ方式でも同じ区別を踏襲し、子テープ構築前に検査するのは (i)（`loss` の requires_grad）のみとする。非追跡葉への到達自体（寄与の破棄）は子テープでも 1 階と同じ挙動（当該葉への VJP 記録をスキップし定数として扱う）とし、拒否しない（契約 7 を上記のとおり精密化）。
