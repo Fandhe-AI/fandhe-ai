@@ -1,0 +1,13 @@
+# 実機（Apple Silicon）実測時の env_info 記入欄（イシュー #1970）。
+#
+# 本 PR（Linux 実装環境）時点では未実施のため空欄のまま出荷する。
+# Mac セッションで実測する際は以下を記入する（内部ホスト名は含めない）:
+#
+# - macOS バージョン:
+# - チップ（例: Apple M4 Max）:
+# - rustc バージョン（`rustc --version`）:
+# - cargo バージョン（`cargo --version`）:
+# - リポジトリ HEAD（`git rev-parse HEAD`）:
+# - 実行日時（UTC）:
+# - `orchestrate.sh gate` 結果（pass/fail）:
+# - run1〜run5 完了時刻（`run<N>_monitor.log` 末尾行から転記）:

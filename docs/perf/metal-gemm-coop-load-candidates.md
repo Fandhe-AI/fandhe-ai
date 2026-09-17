@@ -227,14 +227,10 @@ fandhe-ai-backend-metal` 実行で確認〉、少なくとも非 ignore 経路�
 
 ## 6. スコープ外（PR 本文へ記録。新規 Issue は起票しない）
 
-- **バンク競合回避（XOR swizzle）軸（計画 S7）**: 時間制約により未実装。
-  `COOP_LOAD_LAYOUT`（index 14）実装後の残り時間で着手する予定だった
-  `COOP_SMEM_SWIZZLE`（index 15）・`tg_tile_offset` ヘルパ・20 箇所の
-  添字置換は行っていない。index 15 は未割当のまま残す（`CoopLoadConfig`
-  にも `smem_swizzle` フィールドを追加していない）。実装する場合は本
-  ドキュメント §1〜§2 の設計と同じ論法（格納位置の純粋な置換であり
-  `simdgroup_load(ptr, ld)` の契約を満たす限り bit 不変）が適用できる
-  はずだが、実装・自己検証は行っていない。
+- **バンク競合回避（XOR swizzle）軸（計画 S7）**: 当初は時間制約により
+  未実装だったが、**イシュー #1970 で実装済み**（§7 参照。`index 17`＝
+  `COOP_SMEM_SWIZZLE`。実機性能実測は未実施のまま Mac セッションへ
+  申し送り）。
 - 各候補の純カーネル時間比較・有効性判断・`tile::select` 候補表への
   組み込み・本番結線は #1300 で REJECT・#1304 で組み込み対象なしと確定
   済み（`docs/perf/metal-gemm-n4096-kernel-gap.md` §11.4・§18）。
@@ -253,3 +249,116 @@ swizzle）軸を将来実装する場合は index 17 以降を使うこと（**�
 イシュー #1474**: index 16 は split-K 有効化ゲート
 〈`SPLIT_K_ENABLED`〉が占有した。`docs/backend-metal-splitk-decision.md`・
 `docs/perf/metal-gemm-splitk-two-pass.md` 参照）。
+
+## 7. XOR swizzle 軸の実装（イシュー #1970）
+
+上記 §6「スコープ外」・追記で「index 17 以降を使う」とした軸を実装した
+（`crate::tile::SmemSwizzle`。`shaders/gemm.metal` の
+`COOP_SMEM_SWIZZLE`。**index 17**。#1474 の `SPLIT_K_ENABLED` が
+index 16 を占有したため §6 追記の見積り「index 17 以降」が実際の割当
+先と一致することを確定した）。
+
+### 7.1 `simdgroup_load` 互換性の不変条件
+
+`gemm_simdgroup_tiled` の staged 経路は threadgroup タイルを
+`simdgroup_load(frag, tile + row*ld + col, ld[, transpose])` で 8×8
+ブロック単位の不透明な連続読みとして読む（`row`・`col` は常に 8 の
+倍数）。CUDA 128×64 pipeline 版のような float4（16 バイト）チャンク単位
+の XOR をそのまま持ち込むと 8×8 ブロックの連続性が壊れるため、swizzle
+（`smem_swizzle_col`。`crates/backend-metal/src/shaders/gemm.metal`）は
+次の不変条件を満たす形に限定する（Rust 側モデル
+`crate::tile::tests::smem_swizzle_col_model` と単体テスト群
+〈全単射性・8×8 ブロック連続性・float4 グループ連続性・パディング
+非到達・恒等縮退・隣接行ブロック分離・ホスト往復モデル〉で Linux 実行
+可能な範囲を固定済み）:
+
+1. 粒度は 8 要素（`chunk8 = col / 8`）単位。float4 協調ロード書き込み
+   （`col & 7 ∈ {0, 4}` 始まりの 4 要素）は必ず 1 つの chunk8 内に収まる。
+2. XOR 鍵は 8 行ブロック内で一定（`key = (row >> 3) & (chunks - 1)`）。
+   任意の 8×8 フラグメントは同じ物理列ブロックへ一様に写るため、
+   `simdgroup_load(ptr, ld)` の「`ptr + i*ld + j`」契約を保ったまま
+   ベースポインタの列オフセットだけを差し替えればよい（`lda`/`ldb`
+   ストライドは不変）。
+3. `row_len/8`（`chunks`）が 2 のべき乗でない、または `chunks < 2`
+   （`CANDIDATES` の `BK=8` 候補が該当）の場合は恒等へ縮退する。
+4. swizzle 後の列は常に `[0, row_len)` に閉じる（パディング列非到達。
+   `shared_mem_bytes_for_pad` の確保量は不変）。
+
+**効果の上限**: 不変条件 2 により、1 回の `simdgroup_load` が読む 8 行は
+必ず同じ鍵を共有するため、swizzle は単一ロード内部のアクセスパターン
+（固定ストライド `ld` の 8×8 読み）を一切変えられない（これは bit 透過
+性を成立させる性質そのものでもある）。単一ロード内のバンク整合に効く
+レバーは従来どおり `TGP_PAD`（行ストライド）だけであり、XOR swizzle が
+変えられるのは「異なる行ブロック／異なる simdgroup の同時並行ロードが、
+どの列チャンクに着地するか」（ロード間の競合）のみである。したがって
+結果が約 1.00（差なし）になることは十分ありうる帰結であり、実装不良を
+意味しない。
+
+### 7.2 CUDA 版との差異
+
+CUDA 128×64 pipeline カーネル（`crates/backend-cuda/src/
+kernels_tiled_pipeline_128x64.rs`）の A フラグメント XOR スウィズルは
+float4（16 バイト）チャンク単位だが、本実装は §7.1 の理由により 8 要素
+（f32 で 32 バイト）チャンク単位である点が異なる。
+
+### 7.3 実装形
+
+- `shaders/gemm.metal`: `COOP_SMEM_SWIZZLE`（`#else`／`#ifdef
+  GEMM_SPEC_ENABLED` 両側に 1:1 宣言）・`smem_swizzle_col` ヘルパ
+  （`coop_load_flat_index` 直後）・`gemm_simdgroup_tiled` 本体 20 箇所
+  （協調ロード書き込み 4 + フラグメントロード 16）の置換。A タイル箇所は
+  `COOP_SMEM_SWIZZLE >= 1`、B タイル箇所は `COOP_SMEM_SWIZZLE >= 2` を
+  ゲートにする（値: `0`=Off・`1`=ATile・`2`=BothTiles）。direct-load 節・
+  境界検査（REQ-8）・`gemm_simdgroup_tiled_f16`／`_hfrag`／`_te` は
+  一切変更しない（no-op 契約）。
+- `crate::tile::SmemSwizzle`（`Off`/`ATile`/`BothTiles`）・
+  `SMEM_SWIZZLE`（本番既定 `Off`）。`CoopLoadConfig` へはフィールドを
+  追加しない設計判断（同構造体は crates.io 公開クレート配下の `pub mod
+  tile` にある全フィールド `pub`・非 `#[non_exhaustive]` の構造体のため、
+  フィールド追加は構造体リテラルを破壊する公開 API 破壊的変更になる。
+  `FragLoadConfig`／`CoopLoadConfig` が別ゲートとして独立しているのと
+  同型の設計）。
+- `crate::pipeline::GemmGateConstants::coop_smem_swizzle`・
+  `crate::spec_source::SpecializationParams::coop_smem_swizzle`
+  （`GEMM_SPEC_COOP_SMEM_SWIZZLE`）。
+- `crate::gemm::MetalGemm::new_with_smem_swizzle`（`pub`。実機
+  `#[ignore]` bit 一致自己検証テスト・kernel_gpu A/B 計測専用の入口。
+  他フラグは本番既定のまま据え置く）・`#[cfg(test)] smem_swizzle()`
+  アクセサ。
+
+### 7.4 Linux 実行可能な範囲の検証結果
+
+- `crate::tile::tests` の swizzle 関連ユニットテスト 8 件（全単射・
+  8×8 ブロック連続性・float4 グループ連続性・パディング非到達・恒等
+  縮退・隣接行ブロック分離・本番既定固定・ホスト往復モデル）: 全 pass。
+- `crate::spec_source::tests` の `#define GEMM_SPEC_COOP_SMEM_SWIZZLE`
+  既定値・override 反映確認: 全 pass。
+- `cargo check -p fandhe-ai-backend-metal --tests --target
+  aarch64-apple-darwin`: エラーなし（`gemm.rs`／`pipeline.rs` の
+  `cfg(macos)` 限定コード込み）。
+- `tests/shader_source_evidence.rs`
+  （`gemm_simdgroup_tiled_source_uses_smem_swizzle_col_helper`・
+  `f16_hfrag_te_kernels_do_not_reference_smem_swizzle` の新規 2 件 +
+  既存 needle 更新分を含め全 56 件）: 全 pass。`[[function_constant(`
+  総数 18・`smem_swizzle_col(` 総数 21（ヘルパ定義 1 + 呼び出し 20）を
+  機械確認。
+
+MSL 自体は Linux ではコンパイルできないため、上記は (a) Rust 側置換
+モデルによるホスト往復検証、(b) シェーダソース証跡テスト、(c)
+reviewer による 20 箇所の目視突合で代替した。
+
+### 7.5 実機（Apple Silicon）テスト表・記入欄
+
+| テスト | 内容 | 結果 |
+|---|---|---|
+| `gemm::tests::smem_swizzle_bit_match_all_candidates` | 全 11 候補 × N=512〜4096 × 12 head の `dispatch_tiled_prepared` bit 一致 | 未実測 |
+| `gemm::tests::smem_swizzle_bit_match_dispatch_auto` | 本番自動選択経路 × N=512〜4096 × 12 head の bit 一致 | 未実測 |
+| `gemm::tests::smem_swizzle_transposed_bit_match` | NT/TN/TT × N=1024 × 2 候補 × 12 head の bit 一致 | 未実測 |
+| `gemm::tests::smem_swizzle_bit_match_boundary_shape` | 端数形状（M=1032/N=1048/K=1032）× 全候補 × 12 head の bit 一致 | 未実測 |
+| `gemm::tests::smem_swizzle_f16_path_is_noop` | f16 経路の no-op 契約 | 未実測 |
+| `gemm::tests::smem_swizzle_default_matches_production_constants` | 本番既定不変のドリフト検出 | 未実測 |
+| `gemm_smem_swizzle_diag_tests::xor_swizzle_kernel_gpu_ab_production_sizes` | 7 arm × N=512〜4096 の kernel_gpu A/B（record_only・5 run） | 未実測 |
+
+実行手順・判定規則・保存すべきログ一覧は `docs/perf/logs/
+metal-gemm-smem-swizzle-ab-1970/README.md` を参照（Mac セッションへ
+申し送り。`verdict=undetermined（計測未実施）` のまま出荷）。

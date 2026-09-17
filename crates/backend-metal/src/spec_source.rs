@@ -93,6 +93,11 @@ pub(crate) struct SpecializationParams {
     /// `crate::pipeline::GemmGateConstants::split_k_enabled` と同じ意味。
     /// [`new`](Self::new) は本番既定 `false`（classic 経路）を渡す。
     pub(crate) split_k_enabled: bool,
+    /// `GEMM_SPEC_COOP_SMEM_SWIZZLE`（イシュー #1970）。
+    /// `crate::pipeline::GemmGateConstants::coop_smem_swizzle` と同じ意味。
+    /// [`new`](Self::new) は本番既定 `0`（`crate::tile::SmemSwizzle::Off`）
+    /// を渡す。
+    pub(crate) coop_smem_swizzle: u32,
 }
 
 impl SpecializationParams {
@@ -136,6 +141,9 @@ impl SpecializationParams {
             // イシュー #1474: 本コンストラクタは従来の 7 引数のまま据え置き、
             // split-K 軸も本番既定値（`false`＝classic 経路）で埋める。
             split_k_enabled: false,
+            // イシュー #1970: 本コンストラクタは従来の 7 引数のまま据え置き、
+            // XOR swizzle 軸も本番既定値（`0`＝`SmemSwizzle::Off`）で埋める。
+            coop_smem_swizzle: 0,
         }
     }
 }
@@ -224,6 +232,10 @@ pub(crate) fn specialized_gemm_source(params: &SpecializationParams) -> String {
         "#define GEMM_SPEC_SPLIT_K_ENABLED {}\n",
         msl_bool(params.split_k_enabled)
     ));
+    header.push_str(&format!(
+        "#define GEMM_SPEC_COOP_SMEM_SWIZZLE {}\n",
+        params.coop_smem_swizzle
+    ));
     header.push_str(&format!("#define GEMM_SPEC_ACC_ROWS {acc_rows}\n"));
     header.push_str(&format!("#define GEMM_SPEC_ACC_COLS {acc_cols}\n"));
     header.push_str(GEMM_MSL_SRC);
@@ -263,6 +275,7 @@ mod tests {
                 assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_DEVICE_HOISTED false\n"));
                 assert!(src.contains("#define GEMM_SPEC_FRAG_LOAD_KSTEPS 1\n"));
                 assert!(src.contains("#define GEMM_SPEC_COOP_LOAD_LAYOUT 0\n"));
+                assert!(src.contains("#define GEMM_SPEC_COOP_SMEM_SWIZZLE 0\n"));
                 assert!(src.contains(&format!("#define GEMM_SPEC_ACC_ROWS {}\n", cfg.acc_rows())));
                 assert!(src.contains(&format!("#define GEMM_SPEC_ACC_COLS {}\n", cfg.acc_cols())));
             }
@@ -391,6 +404,37 @@ mod tests {
             specialized_gemm_source(&base),
             src,
             "pad/layout 差分が生成文字列へ反映されていない"
+        );
+    }
+
+    /// イシュー #1970: XOR swizzle 軸（`coop_smem_swizzle`）を `new()` の
+    /// 既定値（`0`）から変更した場合、生成される `#define` が実際に
+    /// 追従することを固定する（struct update 構文で直接フィールドを
+    /// 上書きして構築。`new()` 自体は 7 引数のまま不変。上記
+    /// `coop_load_axis_overrides_are_reflected_in_generated_defines` と
+    /// 同型のテスト）。
+    #[test]
+    fn coop_smem_swizzle_override_is_reflected_in_generated_defines() {
+        let base = SpecializationParams::new(
+            CANDIDATES[3],
+            false,
+            false,
+            false,
+            false,
+            1,
+            TransposePattern::Nn,
+        );
+        assert_eq!(base.coop_smem_swizzle, 0);
+        let overridden = SpecializationParams {
+            coop_smem_swizzle: 2,
+            ..base
+        };
+        let src = specialized_gemm_source(&overridden);
+        assert!(src.contains("#define GEMM_SPEC_COOP_SMEM_SWIZZLE 2\n"));
+        assert_ne!(
+            specialized_gemm_source(&base),
+            src,
+            "swizzle 差分が生成文字列へ反映されていない"
         );
     }
 }
