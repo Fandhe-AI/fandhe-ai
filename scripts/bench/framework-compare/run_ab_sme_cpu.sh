@@ -58,13 +58,16 @@ validate_facade_path AB_AFTER_FACADE_PATH "${AB_AFTER_FACADE_PATH:-}"
 BEFORE_FACADE="$AB_BEFORE_FACADE_PATH"
 AFTER_FACADE="$AB_AFTER_FACADE_PATH"
 
-# 判定対象デバイス（既定 cpu）。ガードセル計測（metal／cuda）にも
-# 同一スクリプトを流用できるよう環境変数で切り替える。
+# 判定対象デバイスは cpu 限定（既定 cpu）。本スクリプトの gemm セル集合
+# （N=512/1024/2048）は `compare_gemm_ab.py --device cpu` の入力契約と
+# 一致させてあり、metal（512/1024/2048/4096）・cuda（1024/2048/4096）
+# では 4096 セルが必ず欠落して非後退判定が成立しないため、cpu 以外は
+# fail-closed で拒否する（PR #2016 codex-review 指摘）。
 DEVICE=${AB_DEVICE:-cpu}
 case "$DEVICE" in
-  cpu | metal | cuda) ;;
+  cpu) ;;
   *)
-    echo "error: AB_DEVICE must be one of cpu|metal|cuda (got: $DEVICE)" >&2
+    echo "error: AB_DEVICE must be cpu (got: $DEVICE). gemm cell set 512/1024/2048 matches compare_gemm_ab.py --device cpu only" >&2
     exit 1
     ;;
 esac
