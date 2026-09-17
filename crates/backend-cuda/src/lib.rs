@@ -381,6 +381,7 @@ mod kernels_elementwise;
 mod kernels_huber;
 mod kernels_kl_div;
 mod kernels_layer_norm;
+mod kernels_log_softmax_backward;
 mod kernels_mma;
 mod kernels_mma_tf32;
 mod kernels_mma_tf32x3;
@@ -415,6 +416,7 @@ mod bce;
 mod host_staging;
 mod kl_div;
 mod layer_norm;
+mod log_softmax_backward;
 pub mod memory;
 mod module_cache;
 mod mse;
@@ -652,6 +654,7 @@ pub use host_staging::HostStagingStats;
 #[cfg(feature = "internal-diagnostics")]
 pub use host_staging::HostStagingKind;
 pub use layer_norm::CudaLayerNorm;
+pub use log_softmax_backward::CudaLogSoftmaxBackward;
 // イシュー #1735: BatchNorm1d／2d 順伝播カーネル起動 API（`layer_norm.rs`
 // と同型）。`crates/backend-cuda/tests/batch_norm_parity.rs` から
 // クレート外部として参照する。
