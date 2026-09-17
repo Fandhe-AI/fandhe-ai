@@ -2006,10 +2006,14 @@ pub trait BackendOps {
     /// （`fandhe_ai_autodiff::grad`）は `Unsupported` のときのみ既存
     /// ホスト参照実装（`grad::log_softmax_vjp_along`）へフォールバック
     /// する（それ以外のエラーは伝播する。判定迂回経路を作らない。
-    /// `.claude/rules/security.md` A08）。本イシュー時点で CPU／Metal
-    /// に専用カーネルは存在しないため両バックエンドともこの既定の
-    /// まま（ホストフォールバックに委ねる）で、CUDA のみ 1 warp = 1
-    /// 行の融合カーネルでオーバーライドする。
+    /// `.claude/rules/security.md` A08）。本イシュー時点で CPU に
+    /// 専用カーネルは存在しないためこの既定のまま（ホスト
+    /// フォールバックに委ねる）で、CUDA は 1 warp = 1 行の融合
+    /// カーネル、Metal は `Σ_dim(g)` を soft-f64（binary64 逐次和の
+    /// 64bit 整数ソフトウェアエミュレーション）で計算する 2 パス
+    /// カーネルでそれぞれオーバーライドする（イシュー #1952。Metal
+    /// 実装は `docs/backend-metal-reduce-sum-design.md` 追補節を
+    /// 参照）。
     fn log_softmax_backward(
         &self,
         _out: &Tensor<f32>,

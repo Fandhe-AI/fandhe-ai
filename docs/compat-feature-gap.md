@@ -452,6 +452,26 @@ Softmax`／`LogSoftmax`＋VJP・`autodiff::var::Var::softmax`／`log_softmax`・
 非最終軸 GPU 対応は out-of-scope として記録し、起票はユーザー承認後に限る
 （`.claude/rules/out-of-scope-tracking.md`）。
 
+## 追補（イシュー #1952）
+
+上記「GPU（CUDA／Metal）の `log_softmax` は行カーネルを新設せず…
+ホスト参照実装へフォールバックする」という記述は **backward（VJP）に
+ついて Metal は解消済み**である: `BackendOps::log_softmax_backward`
+（既定 `Unsupported`。#1949 と共有の trait 拡張）を新設し、`crate::
+log_softmax_backward::MetalLogSoftmaxBackward`（`Σ_dim(g)` の縮約・
+`exp(y)` との乗算・`g` からの減算を binary64 ソフトウェア
+エミュレーションで計算する 2 カーネル構成）へ結線した。`exp(y)`
+自体の丸めは Metal `precise::exp` とホスト `f32::exp` で bit 一致が
+保証されないため REQ-2 統一複合判定で検証し、`y=0`／`y=-inf` の行
+（`exp` の丸め差が生じない）に限り bit 完全一致を実機テストで検証
+する契約（`docs/backend-metal-reduce-sum-design.md` §12）。**forward
+（`log_softmax` 自体）は本イシューのスコープ外で無変更のまま**（CPU
+融合カーネルのみが本番オーバーライドされ、GPU forward は引き続き
+ホスト参照実装フォールバック）。facade 新規公開面なし。CUDA 側
+backward（#1949）は別イシュー。M4 Max 実機実測は本実装セッション
+（Linux 環境）では未実施のまま Mac セッションへ申し送り
+（`docs/perf/logs/metal-log-softmax-backward-1952/README.md`）。
+
 ## 追補（2026-09-13・イシュー #1624）
 
 §2.11 の「`torch.utils.checkpoint`（activation checkpointing）」行（上記
