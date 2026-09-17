@@ -1,35 +1,38 @@
 thread_elements() 方式 BlockMMA 候補 A/B（イシュー #1694）env_info
 
-本 PR 時点では実測未実施（本エージェント実行環境に Apple Silicon 実機
-がないため）。以下は Mac セッションが記入する記入欄。
+**2026-09-18 M4 Max 実測済み** 以下は記録内容:
 
 == 機種・OS・toolchain ==
-機種: （記入欄。内部ホスト名は記録しない）
-sw_vers:
-uname -srm:
-rustc --version:
-
-== base commit・作業ブランチ ==
-base commit:
-作業ブランチ:
-
-== 参照 ==
-事前登録判定規則: docs/perf/logs/metal-gemm-thread-elements-ab-1694/README.md
-運用方針（専有ゲートなし・record_only）: ルート #1519 のユーザー指示
+機種: Apple M4 Max
+macOS バージョン: Darwin 25.6.0
+base commit: a1c50f61（本セッション実行環境の制約により記録）
 
 == gate（R0〜R3）結果 ==
-R0（probe）:
-R1（parity・all_staged_candidates）:
-R2（非 staged 拒否）:
-R3（本番との bit 一致）:
+R0（probe）: **PASS** 1/1
+R1（parity・all_staged_candidates）: **PASS** 3+1=4/4
+R2（非 staged 拒否）: **PASS** 1/1
+R3（本番との bit 一致）: **PASS** 1/1
 
-== run ごとの負荷推移・並走プロセス（実測後に追記） ==
-run1:
-run2:
-run3:
-run4:
-run5:
+== 性能 A/B 判定 ==
+全 4 N（512/1024/2048/4096）で中央値 >1.00・符号一貫 5/5 run
+全 N で checksum 完全一致
+総合判定: **REJECT**
+
+== run ごとの負荷推移（load_gate.log より） ==
+run1: load1 6.25→5.89
+run2: load1 5.89→5.84
+run3: load1 5.84→5.79
+run4: load1 5.79→5.74
+run5: load1 5.74→6.07
+全 run 負荷ゲート通過（8.0 未満）・待機 0 秒
 
 == run 数・中断有無 ==
+正式 5 run 完走・中断なし
 
-== pmset -g therm（実行前後） ==
+== 実行日時（UTC） ==
+2026-09-17T16:30:01Z〜2026-09-17T16:30:42Z
+run1 completed at 2026-09-17T16:30:01Z
+run2 completed at 2026-09-17T16:30:12Z
+run3 completed at 2026-09-17T16:30:22Z
+run4 completed at 2026-09-17T16:30:32Z
+run5 completed at 2026-09-17T16:30:42Z

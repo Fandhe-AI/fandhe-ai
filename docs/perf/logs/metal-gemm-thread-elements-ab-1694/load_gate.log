@@ -1,0 +1,11 @@
+run1 gate=pass load1=6.25 waited_s=0 at=2026-09-17T16:29:51Z
+run1 exit=0 end_load1=5.89
+run2 gate=pass load1=5.89 waited_s=0 at=2026-09-17T16:30:01Z
+run2 exit=0 end_load1=5.84
+run3 gate=pass load1=5.84 waited_s=0 at=2026-09-17T16:30:12Z
+run3 exit=0 end_load1=5.79
+run4 gate=pass load1=5.79 waited_s=0 at=2026-09-17T16:30:22Z
+run4 exit=0 end_load1=5.74
+run5 gate=pass load1=5.74 waited_s=0 at=2026-09-17T16:30:32Z
+run5 exit=0 end_load1=6.07
+series done

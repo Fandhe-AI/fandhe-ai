@@ -1,0 +1,6 @@
+gate: R0 (probe) を実行する
+gate: R1 (parity, 外部テスト) を実行する
+gate: R1 (all_staged_candidates_match_te_cpu_reference_512_nn) を実行する
+gate: R2 (非 staged 拒否) を実行する
+gate: R3 (本番との bit 一致) を実行する
+gate: R0〜R3 すべて成功した。性能 A/B（run1〜run5）へ進める
