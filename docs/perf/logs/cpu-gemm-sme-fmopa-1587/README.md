@@ -13,7 +13,7 @@
   本ディレクトリには含めない）。
 - **R1（framework-compare 非後退）・R2（checksum）・R4（しきい値の
   正式 5-run 独立プロセス起動スイープ）は Apple M4 Max で実施済み**
-  （イシュー #1978。総合判定 ADOPT。詳細・数値は
+  （イシュー #1978。総合判定 undetermined〈初版は ADOPT と記録したが、PR #2016 レビュー指摘により train size=64 を到達セルへ再分類し、train reuse の round 1・5 が 1.0 超のため ADOPT 候補条件不成立〉。詳細・数値は
   `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.4）。DGX Spark
   GB10 側は RULE.txt が明記するとおり本セッションの対象外（SME 非
   対応）。`SME_PRODUCTION_ENABLED` の本番切替・しきい値確定は

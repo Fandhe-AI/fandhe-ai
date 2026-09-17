@@ -370,8 +370,37 @@ R4 採用候補（しきい値以上の全格子点が 5/5 run で SME>=NEON と
 本 R1 結果は §5.4.1 が特定した `(256, 64)` 境界点の判定不成立とは
 独立で（しきい値の選び方に依存しない）成立している。
 
-非到達セル（train／infer size=64。RULE.txt が「SME 非到達セル」と
-事前宣言・NEON のまま。単位 us）:
+**正誤（PR #2016 レビュー指摘による再分類）**: RULE.txt は train／infer
+size=64 を一括で「SME 非到達セル」と事前宣言したが、これは形状分析を
+記録せずに分類した誤りである。after 腕（`on-arm.patch` で
+`SME_PRODUCTION_ENABLED=true`）の現行しきい値 `SME_MIN_M/N/K=256/256/64`
+で、train の第 1 層 weight 勾配 GEMM が `sme_shape_eligible` を満たし
+SME へディスパッチされる（fresh は `matmul_vjp` → `CpuBackendOps::gemm`
+→ `gemm_blis_parallel_tn`、reuse は `fill_resident_weight_grad` →
+`gemm_fp32_strict_into` → 同じ `gemm_blis_parallel_tn` →
+`dispatch_two_d_dynamic` → `sme_shape_eligible(784, 256, 64)`）。
+MNIST 規模 train（784→256→10・batch 64）の GEMM を層別に分解すると:
+
+| GEMM | m | n | k | `sme_shape_eligible`（256/256/64） |
+|---|---|---|---|---|
+| L1 forward `x @ W1` | 64 | 256 | 784 | 否（m<256） |
+| L1 d_weight `x^T @ g`（TN） | 784 | 256 | 64 | **可** |
+| L1 d_input（非計算・葉） | – | – | – | – |
+| L2 forward `h @ W2` | 64 | 10 | 256 | 否（m, n<256） |
+| L2 d_weight `h^T @ g`（TN） | 256 | 10 | 64 | 否（n<256） |
+| L2 d_input `g @ W2^T`（NT） | 64 | 256 | 10 | 否（m<256・k<64） |
+| infer forward（fresh／reuse とも L1・L2） | 64 | 256／10 | 784／256 | 否（m<256） |
+
+したがって **train fresh／reuse は到達セル**（L1 d_weight のみ SME）、
+infer fresh／reuse は非到達セルである。RULE.txt 自体は事前宣言の一次
+記録として書き換えず、以下の表と §5.4.4 の判定はこの再分類に RULE.txt
+の各規則（到達セル: 5 round 中央値 <=1.00 かつ 5/5 round <=1.00 で
+ADOPT 候補。非到達セル: 5/5 一貫の後退のみ REJECT 材料）を適用する。
+なお L1 d_weight の形状 (784, 256, 64) は k=64 の境界点にあり、§5.4.1 で
+`(256, 64)` 格子点が 5/5 run 一貫しなかった事実と機構的に整合する
+（仮説。#1979 のしきい値判断への申し送り材料）。
+
+train／infer size=64（単位 us。train は到達セル・infer は非到達セル）:
 
 | task/size/mode | before median | after median | after/before | checksum | run 内比（5 run） | 5/5 一貫の後退 |
 |---|---|---|---|---|---|---|
@@ -380,11 +409,14 @@ R4 採用候補（しきい値以上の全格子点が 5/5 run で SME>=NEON と
 | infer 64/fresh | 180.7 us | 173.3 us | 0.9592 | 完全一致 | 0.9050, 1.0375, 0.9753, 0.9076, 0.9749 | いいえ |
 | infer 64/reuse | 177.7 us | 156.1 us | 0.8787 | 完全一致 | 0.8349, 1.1102, 0.8187, 1.1041, 0.7438 | いいえ |
 
-非到達セルは train 64/reuse（1.0244, 1.0248）・infer 64/fresh
-（1.0375）・infer 64/reuse（1.1102, 1.1041）に 1.0 超の run を含むが、
-いずれも 5/5 run 一貫した後退（全 run >1.00）ではないため RULE.txt の
-REJECT 材料には該当しない（非到達セルの後退方向ばらつきはノイズ帯と
-整合。SME 非到達のため機構上の因果はない）。
+到達セルとして扱う train 64/fresh は中央値 0.9061 かつ 5/5 round
+<=1.00 で ADOPT 候補条件を満たす。train 64/reuse は中央値 0.9892 で
+<=1.00 だが round 1・5 が 1.0244／1.0248 と 1.00 を超えるため ADOPT
+候補条件（5/5 round <=1.00）を満たさない。一方 5/5 一貫の後退（全 run
+>1.00）でもないため REJECT 材料にも該当しない。非到達セルの infer
+64/fresh（1.0375）・infer 64/reuse（1.1102, 1.1041）は 1.0 超の run を
+含むが 5/5 一貫ではなく REJECT 材料に該当しない（SME 非到達のため
+機構上の因果はなくノイズ帯と整合）。
 
 #### 5.4.3 R2（checksum）
 
@@ -396,8 +428,17 @@ checksum 列）。
 
 RULE.txt の総合規則（「R4 に採用候補があり・R1 の到達セルが全て
 ADOPT 候補・非到達セルに REJECT 材料がなく・R2 が全セル一致のとき
-ADOPT」）に照らすと、本セッションの実測は **ADOPT**（採用候補）に
-該当する。ただし RULE.txt・#1587 の合意どおり、本判定は
+ADOPT。到達セルに 5/5 一貫の後退が 1 つでもあれば REJECT。それ以外は
+undetermined」）に、§5.4.2 の再分類（train fresh／reuse は到達セル）を
+当てると、到達セル 8 個のうち train 64/reuse が ADOPT 候補条件を満たさず
+（round 1・5 が 1.0244／1.0248）、かつ 5/5 一貫の後退はないため、本
+セッションの総合判定は **undetermined** である。本 PR の初版は RULE.txt
+の一括分類のまま ADOPT と記録していたが、PR #2016 のレビュー指摘
+（train の L1 d_weight GEMM が SME 到達）を受けて再分類した結果であり、
+判定規則自体は緩めていない（ADOPT → undetermined の厳格化方向）。
+gemm cpu 到達セル 6 個は 0.5725〜0.7378 倍の改善で 5/5 一貫しており、
+train 64/fresh も ADOPT 候補条件を満たすため、SME の性能効果自体は
+本実測で否定されていない。RULE.txt・#1587 の合意どおり、本判定は
 `SME_PRODUCTION_ENABLED` を実際に切り替えるものではない。§5.4.1 で
 判明した「現行しきい値の境界点 `(256, 64)` は 5/5 run 一貫ではない」
 という事実から、しきい値を `min(m,n)>=256 かつ k>=128` または
