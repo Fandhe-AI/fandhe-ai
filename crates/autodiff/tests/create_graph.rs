@@ -331,6 +331,58 @@ fn hessian_broadcast_add_is_zero() {
     }
 }
 
+// --- 6b. Mul の broadcast 縮約が桁落ちを伴う場合に 1 階 VJP
+//         （`grad.rs::reduce_to_shape`。f32 逐次和）と数値的に一致する
+//         ことを確認する回帰テスト（codex-review 指摘・PR #1998）。
+//         `reduce_to`（`create_graph.rs`）が `Var::sum_dims`〈CPU
+//         `sum` の f64 アキュムレータ縮約〉を使っていた当初実装では、
+//         `c = [1e8, 1, -1e8]` のように桁落ちを伴う broadcast 入力で
+//         1 階勾配（f32 逐次和: `(1e8+1)-1e8` は `1e8+1` が丸めで
+//         `1e8` のまま変わらず結果 `0.0`）と 2 階側の縮約（f64 で
+//         先に総和してから 1 回丸め: 結果 `1.0`）が乖離し、REQ-2
+//         統一複合判定を満たさなかった。
+
+fn build_broadcast_mul_cancellation<'t>(
+    tape: &'t Tape,
+    x: &Var<'t>,
+) -> Result<Var<'t>, AutodiffError> {
+    let c = tape.var_no_grad(&t(vec![1.0e8, 1.0, -1.0e8], &[3]));
+    x.mul(&c)?.sum(None)
+}
+
+#[test]
+fn create_graph_reduce_to_matches_first_order_under_cancellation() {
+    let x0 = [1.0f32];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), &[1]));
+    let loss = build_broadcast_mul_cancellation(&tape, &x).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+
+    let first_order = cg
+        .first_order()
+        .get(&x)
+        .unwrap()
+        .expect("x は loss に到達する");
+    let first_order_val = first_order.get(&[0]).unwrap() as f64;
+    // f32 逐次和（`[1e8, 1, -1e8]` の順序）は `1e8+1` が丸めで `1e8`
+    // のまま変わらず、続けて `-1e8` を足すと厳密に `0.0` になる
+    // （`grad.rs::reduce_to_shape` の実際の挙動をまず固定する）。
+    assert!(
+        common::req2_close(first_order_val, 0.0),
+        "1 階 VJP（f32 逐次和）は桁落ちにより 0.0 になるはず: {first_order_val}"
+    );
+
+    let cgrad = cg.grad(&x).unwrap().expect("x は loss に到達する");
+    let cgrad_val = cgrad.value().get(&[0]).unwrap() as f64;
+    assert!(
+        common::req2_close(cgrad_val, first_order_val),
+        "create_graph の broadcast 縮約（reduce_to）が 1 階 VJP（grad.rs::\
+         reduce_to_shape）と数値的に乖離した: cgrad={cgrad_val} \
+         first_order={first_order_val}"
+    );
+}
+
 fn build_sum_single_axis<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
     x.mul(x)?.sum(Some(0))?.sum(None)
 }

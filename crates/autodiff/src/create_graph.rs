@@ -17,9 +17,16 @@
 //! は一切変更しない——本モジュールは `Tape::backward`（公開 API）を
 //! 素のまま呼ぶのみで、`backward.rs`／`grad.rs` へのコード変更を伴わ
 //! ない。二階側の数値方式（本モジュールが子テープへ記録する `Var`
-//! 演算列）は既存 VJP ヘルパー（`grad.rs`）の数値方式（`f64` 縮約
-//! 契約等）とは独立の実装であり、bit 同一は主張しない——正しさは
-//! 有限差分突合（`tests/create_graph.rs`）で検証する。
+//! 演算列）は既存 VJP ヘルパー（`grad.rs`）とは独立の実装であり、
+//! 一般には bit 同一を主張しない——正しさは有限差分突合
+//! （`tests/create_graph.rs`）で検証する。ただし broadcast 縮約
+//! （`reduce_to`）は例外で、`grad.rs::reduce_to_shape` の f32 逐次和
+//! アルゴリズムを `Var::narrow`／`Var::add` の連鎖として逐語再現して
+//! おり、1 階 VJP と数値方式（縮約順序・アキュムレータ精度）が一致
+//! する（`reduce_to` のドキュメント参照。codex-review 指摘・PR
+//! #1998 で是正——当初 `Var::sum_dims`〈CPU `sum` の `f64` アキュム
+//! レータ縮約〉を使っていたため、桁落ちを伴う broadcast 入力で 1 階
+//! 勾配と乖離し REQ-2 統一複合判定を満たさない具体例があった）。
 //!
 //! REQ-12「利用者向け融合制御 API を提供しない」は、`create_graph` が
 //! 二階の勾配グラフを構築するかどうかの選択であり `docs/
@@ -33,7 +40,7 @@
 //! 手続きを経ていないため、内部クレート（`fandhe_ai_autodiff`）限定の
 //! 機能として留める。
 //!
-//! **初期スコープ（設計 doc §8。[`Op::supports_create_graph`] が判定する
+//! **初期スコープ（設計 doc §8。`Op::supports_create_graph` が判定する
 //! 対象）**: `Leaf`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`・`Sigmoid`・
 //! `Sum`・`Mean`・`Reshape`・`BroadcastTo` の 11 variant のみ。それ以外の
 //! 追跡対象 Op（`MatMul` を含む）へ到達した場合は
@@ -88,7 +95,7 @@ impl<'c> CreateGraphResult<'c> {
     ///   `Err(GradientTrackingDisabled)`（`Gradients::get` と同じ区別。
     ///   `docs/autodiff-nograd-leaf-dinput-skip-decision.md` §5）。
     /// - `loss` から未到達、または対象 Op が
-    ///   [`Op::supports_create_graph`] を満たさない部分木の外側にある
+    ///   `Op::supports_create_graph` を満たさない部分木の外側にある
     ///   場合: `Ok(None)`。
     pub fn grad(&self, parent_var: &Var<'_>) -> Result<Option<Var<'c>>, AutodiffError> {
         self.check(parent_var)?;
@@ -121,7 +128,7 @@ impl Tape {
     /// 子テープ方式の `create_graph`（PyTorch
     /// `torch.autograd.grad(..., create_graph=True)` 相当。イシュー
     /// #1942）。`loss` を起点に逆伝播しつつ、
-    /// [`Op::supports_create_graph`] を満たす祖先ノードの VJP を
+    /// `Op::supports_create_graph` を満たす祖先ノードの VJP を
     /// `child`（呼び出し側があらかじめ [`Tape::new_with_ops`] 等で
     /// 構築した**空**の `Tape`）上へ `Var` 演算として記録する。
     ///
@@ -134,7 +141,7 @@ impl Tape {
     ///    フィックス契約〈`Tape::reset` doc〉を素直に保つため、既存
     ///    ノードを持つテープの再利用は許さない）。
     /// 5. `self` に checkpoint 区間が登録済み → `Err(Backward)`
-    ///    （[`Tape::has_registered_checkpoints`] doc 参照）。
+    ///    （`Tape::has_registered_checkpoints` doc 参照）。
     /// 6. 上記を満たせば既存 [`Tape::backward`] をそのまま呼んで 1 階
     ///    勾配を得る（`loss.requires_grad() == false` の拒否もここで
     ///    既存どおり発生する）。
@@ -240,7 +247,7 @@ fn collect_ancestors(tape: &Tape, root: NodeId) -> Vec<NodeId> {
 ///    `LinearAct`〉は値の実体化自体が成立しないため、`requires_grad`
 ///    の値に関わらず本段の**手前**で無条件に拒否する）。
 /// 2. 残り（`requires_grad == true` かつ非葉）を昇順で走査し、
-///    [`Op::supports_create_graph`] を満たす場合のみ `Var` 演算として
+///    `Op::supports_create_graph` を満たす場合のみ `Var` 演算として
 ///    再生する。満たさない場合は `Err`（fail-closed。#1943 等へ引き継ぐ
 ///    未対応 Op）。
 fn build_mirror<'c>(
@@ -509,40 +516,56 @@ fn accumulate<'c>(
 
 /// broadcast された `v` を `target_shape` へ縮約する（`Var::add`／
 /// `mul` の VJP が使う `reduce_to_shape`〈`grad.rs`〉の `Var` 演算版）。
-/// 子テープ上へ `Var::sum_dims`（`keepdim=true`）＋必要なら
-/// `Var::reshape` として記録する——`grad.rs::reduce_to_shape` の数値
-/// 方式（生テンソルの直接縮約）とは独立の実装であり、bit 同一は主張
-/// しない（正しさは有限差分突合〈`tests/create_graph.rs`〉のみを根拠
-/// とする。モジュール doc 参照）。
+///
+/// **数値方式は `grad.rs::reduce_to_shape` と同一のアルゴリズムを
+/// `Var` 演算列として逐語再現する**（`Var::narrow` で縮約対象軸を
+/// 長さ 1 のスライスへ分解し、`Var::add` で添字昇順に逐次加算する。
+/// `reduce_to_shape` の二重ループ `for axis { for a in 0..axis_len {
+/// reduced[...] += data[src] } }` と同じ縮約順序・同じ f32 逐次和で
+/// あり、CPU 上の `Var::add` は要素ごとの単純加算〈f64 アキュムレータ
+/// を挟まない〉のため 1 階 VJP の `reduce_to_shape` と bit 同一になる
+/// ——当初実装〈`Var::sum_dims`。CPU `sum` の f64 アキュムレータ縮約〉
+/// では、桁落ちを伴う broadcast 入力〈大きさの異なる値が完全に
+/// 相殺するケース〉で 1 階勾配と乖離し REQ-2 統一複合判定を満たさない
+/// 具体例が確認されたため是正した。codex-review 指摘（PR #1998）。
 fn reduce_to<'c>(v: &Var<'c>, target_shape: &[usize]) -> Result<Var<'c>, AutodiffError> {
     let v_shape = v.shape();
     if v_shape == target_shape {
         return Ok(*v);
     }
+    debug_assert!(
+        v_shape.len() >= target_shape.len(),
+        "reduce_to: broadcast 後 shape の rank は入力 rank 以上のはず（契約違反）"
+    );
     let rank_diff = v_shape.len().saturating_sub(target_shape.len());
-    let mut dims: Vec<usize> = (0..rank_diff).collect();
-    for (i, (&vs, &ts)) in v_shape[rank_diff..]
-        .iter()
-        .zip(target_shape.iter())
-        .enumerate()
-    {
-        if ts == 1 && vs != 1 {
-            dims.push(rank_diff + i);
+    let mut padded_target = vec![1usize; rank_diff];
+    padded_target.extend_from_slice(target_shape);
+
+    let mut cur = *v;
+    let mut cur_shape = v_shape;
+    for axis in 0..cur_shape.len() {
+        if padded_target[axis] == 1 && cur_shape[axis] != 1 {
+            let axis_len = cur_shape[axis];
+            // `reduce_to_shape` の `for a in 0..axis_len { reduced[..] +=
+            // data[src] }` を、添字昇順の `Var::narrow`＋`Var::add` の
+            // 逐次連鎖として同じ順序で再現する（f32 逐次和・f64
+            // アキュムレータなし）。
+            let mut acc = cur.narrow(axis, 0, 1)?;
+            for a in 1..axis_len {
+                let slice = cur.narrow(axis, a, 1)?;
+                acc = acc.add(&slice)?;
+            }
+            cur = acc;
+            cur_shape[axis] = 1;
         }
     }
-    if dims.is_empty() {
-        // `v_shape != target_shape` かつ縮約対象軸が 1 つもない場合は
-        // 通常到達しない（有効な broadcast 由来の shape であれば必ず
-        // 上のいずれかの条件に当たる）が、安全側に `reshape` へ委ね、
-        // 要素数不一致なら型付きエラーとして fail-closed に拒否する。
-        return v.contiguous()?.reshape(target_shape);
-    }
-    let reduced = v.sum_dims(&dims, true)?;
-    let reduced_shape = reduced.shape();
-    if reduced_shape == target_shape {
-        Ok(reduced)
+    if cur_shape == target_shape {
+        Ok(cur)
     } else {
-        reduced.contiguous()?.reshape(target_shape)
+        // `cur_shape` は `padded_target`（先頭 `rank_diff` 個の 1 軸を
+        // 含む）と一致しているはずであり、要素数は `target_shape` と
+        // 同一のため `reshape` で先頭の 1 軸を落とせる。
+        cur.contiguous()?.reshape(target_shape)
     }
 }
 
