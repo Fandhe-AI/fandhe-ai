@@ -1856,6 +1856,57 @@ pub trait BackendOps {
         ))
     }
 
+    /// `log_softmax` の backward（VJP）をカーネル 1 個で計算する
+    /// エントリ（イシュー #1949・親 #1947）。`out` は forward 記録値
+    /// `y = log_softmax(x, dim)`（`Self::log_softmax` または
+    /// ホスト参照実装 `eval::log_softmax_along` のいずれで得た値でも
+    /// よい。数式上 forward の生成元に依存しない）、`upstream` は `y`
+    /// と同一 shape の上流勾配 `g`。意味論は
+    /// `dx = g − exp(y)·Σ_dim(g)`（`Σ_dim` は `dim` 軸に沿った縮約。
+    /// `Var::log_softmax` の既存ホスト VJP `grad::log_softmax_vjp_along`
+    /// と同じ式）。戻り値 shape は `out`（および `upstream`）と同一。
+    ///
+    /// **数値契約**: `Σ_dim(g)` は要素を直接 `f64` へ昇格してから加算
+    /// する縮約（`.claude/rules/coding-rust.md` の勾配長軸縮約契約。
+    /// 要素積を伴わない単純和のため二乗和方式ではなく直接昇格）。GPU
+    /// 実装（warp／simdgroup 単位の butterfly 縮約等）は縮約の結合順序
+    /// がホスト参照実装（`dim` 添字の昇順逐次和）と異なりうるため、
+    /// **bit 完全一致は要求せず** REQ-2 統一複合判定（相対誤差 1e-3
+    /// 未満 または 絶対誤差 1e-5 未満）で検証する。tolerance／baseline
+    /// は変更しない。
+    ///
+    /// `dim` は `out`／`upstream` の最終軸限定（`Self::log_softmax` と
+    /// 同じ最終軸限定契約）。非最終軸の呼び出しは実装側で
+    /// `Unsupported` を返してよい（呼び出し元がホストへフォールバック
+    /// する）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::log_softmax`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Op::LogSoftmax` の VJP
+    /// （`fandhe_ai_autodiff::grad`）は `Unsupported` のときのみ既存
+    /// ホスト参照実装（`grad::log_softmax_vjp_along`）へフォールバック
+    /// する（それ以外のエラーは伝播する。判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。本イシュー時点で CPU に
+    /// 専用カーネルは存在しないためこの既定のまま（ホスト
+    /// フォールバックに委ねる）で、CUDA は 1 warp = 1 行の融合
+    /// カーネル、Metal は `Σ_dim(g)` を soft-f64（binary64 逐次和の
+    /// 64bit 整数ソフトウェアエミュレーション）で計算する 2 パス
+    /// カーネルでそれぞれオーバーライドする（イシュー #1952。Metal
+    /// 実装は `docs/backend-metal-reduce-sum-design.md` 追補節を
+    /// 参照）。
+    fn log_softmax_backward(
+        &self,
+        _out: &Tensor<f32>,
+        _upstream: &Tensor<f32>,
+        _dim: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "log_softmax_backward: default fail-safe (no fused log_softmax backward kernel available)"
+                .into(),
+        ))
+    }
+
     /// `inputs` を `dim` 軸で連結する（`torch.cat` 相当。イシュー
     /// #1598）。入力は strided view（`contiguous()` を経ずに渡されうる）
     /// でよく、出力は必ず contiguous・**bit 完全一致のコピー**（丸め
@@ -4335,6 +4386,19 @@ mod tests {
         let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
 
         let result = ops.log_softmax(&x, 0);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::log_softmax_backward`] の既定実装が fail-safe を
+    /// 返すことを確認する（イシュー #1949）。
+    #[test]
+    fn log_softmax_backward_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let out = Tensor::new(vec![-1.0, -2.0, -3.0], &[3]).unwrap();
+        let upstream = Tensor::new(vec![0.1, 0.2, 0.3], &[3]).unwrap();
+
+        let result = ops.log_softmax_backward(&out, &upstream, 0);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

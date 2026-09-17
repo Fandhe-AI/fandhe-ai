@@ -173,3 +173,75 @@ fn cuda_softmax_forward_matches_cpu() {
         cpu_out.as_slice().expect("contiguous"),
     );
 }
+
+// --- log_softmax backward の Metal 専用カーネル（イシュー #1952） ---
+//
+// `log_softmax_forward_on` は macOS 限定テストからのみ呼ばれるため、
+// Linux（CI）ビルドでは未使用関数になる（`softmax_forward_on` は
+// `cuda_softmax_forward_matches_cpu` が cfg 非限定で参照するため対称
+// ではない）。関数定義自体も macOS 限定にして dead_code を防ぐ。
+#[cfg(target_os = "macos")]
+fn log_softmax_forward_on(device: Device) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    tape.make_var(&leaf())
+        .log_softmax(1)
+        .expect("log_softmax: dim=1 は rank=2 の範囲内")
+        .to_tensor()
+}
+
+/// `Var::log_softmax` forward が Metal（イシュー #1952 の backward
+/// カーネル追加時点でも forward 経路は無変更のまま）で CPU と一致する
+/// ことの非後退確認（`cuda_log_softmax_forward_matches_cpu` と対称）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_log_softmax_forward_matches_cpu() {
+    let metal_out = log_softmax_forward_on(Device::Metal);
+    let cpu_out = log_softmax_forward_on(Device::Cpu);
+
+    assert_parity(
+        "log_softmax forward: Metal tape_for vs CPU tape_for",
+        metal_out.as_slice().expect("contiguous"),
+        cpu_out.as_slice().expect("contiguous"),
+    );
+}
+
+/// `matmul → log_softmax → mse_loss` backward（`d_weight`）を Metal
+/// （`BackendOps::log_softmax_backward` 専用カーネル。イシュー #1952）
+/// と CPU（既定 `Unsupported` によるホスト VJP フォールバック）で
+/// 突き合わせる（`cuda_log_softmax_backward_matches_cpu` と対称の
+/// グラフ構成。Metal カーネルは `exp(y)` 自体の丸めを bit 一致対象と
+/// しないため REQ-2 統一複合判定で検証する契約——`shaders/
+/// log_softmax_backward.metal` 冒頭コメント参照）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_log_softmax_backward_matches_cpu() {
+    let w = Tensor::new(
+        vec![0.5, -0.3, 0.2, 0.7, -0.6, 0.1, 0.4, -0.2, 0.3, 0.9],
+        &[5, 2],
+    )
+    .expect("valid tensor");
+    let target = Tensor::new(vec![0.2, 0.6, 0.3, 0.4], &[2, 2]).expect("valid tensor");
+
+    let dw_on = |device: Device| -> Tensor<f32> {
+        let tape =
+            fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+        let x = tape.make_var(&leaf());
+        let w_var = tape.make_var(&w);
+        let t_var = tape.make_var(&target);
+        let y = x.matmul(&w_var).unwrap().log_softmax(1).unwrap();
+        let loss = y.mse_loss(&t_var).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        grads.get(&w_var).unwrap().expect("到達する").clone()
+    };
+
+    let dw_metal = dw_on(Device::Metal);
+    let dw_cpu = dw_on(Device::Cpu);
+
+    assert_parity(
+        "log_softmax backward（dW）: Metal tape_for vs CPU tape_for",
+        dw_metal.as_slice().expect("contiguous"),
+        dw_cpu.as_slice().expect("contiguous"),
+    );
+}

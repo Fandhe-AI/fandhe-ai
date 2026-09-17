@@ -2896,6 +2896,81 @@ impl BackendOps for MetalBackendOps {
         metal_argext(a, dim, crate::reduce::ArgExtKind::Min)
     }
 
+    /// `log_softmax` backward（`dx = g − exp(y)·Σ_dim(g)`。イシュー
+    /// #1952・親 #1947）。`crate::log_softmax_backward::
+    /// MetalLogSoftmaxBackward` の 2 カーネル（lane 単位の
+    /// `Σ_dim(g)`・要素単位の `dx` 計算）へ結線する。数値契約は
+    /// `BackendOps::log_softmax_backward` trait doc・`shaders/
+    /// log_softmax_backward.metal` 冒頭コメント参照（`exp(y)` 自体の
+    /// 丸めは bit 一致を主張せず REQ-2 統一複合判定で検証する）。
+    ///
+    /// `sum` と異なり任意の `dim`（最終軸限定ではない）を受理する
+    /// （`crate::log_softmax_backward::MetalLogSoftmaxBackward::
+    /// run_f32` がカーネルへ渡す `outer`／`axis_len`／`inner` 分解は
+    /// `reduce_sum_axis_f32` と同じ添字規約のため軸位置に依存しない）。
+    ///
+    /// 手順（`Self::sum` と対称）: 1. shape 一致検査。2. `dim` 範囲
+    /// 検査。3. 空 shape（`0` を含む）は空 `Tensor` を早期 return（GPU
+    /// 非接触）。4. `reduce_model::plan_reduce_axis` を先出しして
+    /// カーネル `uint` 引数の上限超過を検査し `Unsupported` へ写像する
+    /// （`Op::LogSoftmax` の VJP は `Unsupported` のときのみホスト
+    /// フォールバックへ委ねる契約。`grad.rs` の 3 分岐ディスパッチ
+    /// 参照）。5. 両入力 `contiguous()`。6. `context_cache::
+    /// cached_log_softmax_backward` 経由でカーネルを実行する。
+    fn log_softmax_backward(
+        &self,
+        out: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        dim: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(out.shape(), upstream.shape()).map_err(BackendError::ShapeMismatch)?;
+        let shape = out.shape().to_vec();
+        if dim >= shape.len() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: shape.clone(),
+                rhs: vec![dim],
+            }));
+        }
+        if shape.contains(&0) {
+            return Tensor::new(Vec::new(), &shape).map_err(BackendError::ShapeMismatch);
+        }
+
+        // カーネル `uint` 引数の上限超過を、デバイス初期化
+        // （`context_cache::cached_context`）より前に先出しして検査
+        // する（`Self::sum` の `axis_plan` 先出しと同じ判断）。
+        let plan = crate::log_softmax_backward_model::plan_log_softmax_backward(&shape, dim)
+            .map_err(map_reduce_prepare_error)?;
+
+        let out_owned = out.contiguous();
+        let out_slice = out_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed(
+                "log_softmax_backward: out not contiguous after contiguous()".into(),
+            )
+        })?;
+        let upstream_owned = upstream.contiguous();
+        let upstream_slice = upstream_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed(
+                "log_softmax_backward: upstream not contiguous after contiguous()".into(),
+            )
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let kernel = context_cache::cached_log_softmax_backward(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let data = kernel
+            .run_f32(
+                &ctx,
+                out_slice,
+                upstream_slice,
+                plan.outer,
+                plan.axis_len,
+                plan.inner,
+            )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(data, &shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）は
     /// GPU カーネル未実装（設計文書「スコープ外」節）。既定
     /// `Unsupported` を明示オーバーライドし、`device_handle()` を経由
