@@ -22,8 +22,10 @@ readme = "README.md"
 # クレート向け既定）を明示的に上書きし、本クレートを公開可能にする。
 # 本 issue（#1963）はリポジトリ側の公開準備のみを行うもので、実際の
 # `cargo publish`（`release-all.yml`）は次回リリースサイクルでユーザーが
-# 実行する（facade からの ONNX／safetensors 再エクスポートは未提供のまま。
-# `docs/facade-onnx-import-exposure-decision.md` 等。段階 0 は継続）。
+# 実行する。facade からの ONNX import は `fandhe-ai::interop::onnx`
+# として #2017 で公開済み。ONNX export・safetensors 再エクスポートは
+# 引き続き未提供のまま（`docs/facade-onnx-export-exposure-decision.md`・
+# `docs/facade-safetensors-exposure-decision.md`。段階 0 は継続）。
 publish = true
 # crates.io 検索・カテゴリページ向けメタデータ（イシュー #1963）。keywords は
 # crates.io 制約（最大 5 個・各 20 文字以内英数字とハイフン）を満たす。

@@ -177,3 +177,74 @@ pub mod attribute_type {
     pub const FLOATS: i32 = 6;
     pub const INTS: i32 = 7;
 }
+
+/// `ModelProto::decode` への薄い委譲入口（イシュー #2017）。
+///
+/// facade（`crates/facade`）は crates.io 公開クレートの依存面を絞るため
+/// `prost` へ直接依存せず、呼び出し側が `prost::Message` を `use` しなくても
+/// `.onnx` バイト列を復号できるこの関数だけを経由する。検証（dims 非負・
+/// 要素数整合・トポロジカル順等）は本関数の責務外で、後続の
+/// `graph::build_graph` が担う（本モジュール冒頭コメント・`graph.rs` 冒頭
+/// コメント参照）。
+pub fn decode_model(bytes: &[u8]) -> Result<ModelProto, prost::DecodeError> {
+    ModelProto::decode(bytes)
+}
+
+/// `ModelProto::encode_to_vec` への薄い委譲入口（イシュー #2017）。
+///
+/// `decode_model` と対称の書き出し方向。facade からの再利用に加え、本クレート
+/// 内テスト（合成モデルのバイト列化）でも `prost::Message` を都度 `use` せず
+/// 済む便宜のために公開する（`onnx::export::build_model_proto` が組み立てた
+/// `ModelProto` をワイヤフォーマットへ落とす最終段。ONNX export 自体の
+/// facade 公開可否は別 issue のスコープ。`docs/facade-onnx-export-exposure-
+/// decision.md`）。
+pub fn encode_model(model: &ModelProto) -> Vec<u8> {
+    model.encode_to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `encode_model` -> `decode_model` の往復が構造的に等価（`PartialEq`
+    /// derive）であることを最小構成の `ModelProto` で確認する（イシュー
+    /// #2017 §5 ステップ 1）。
+    #[test]
+    fn encode_then_decode_roundtrips() {
+        let model = ModelProto {
+            ir_version: 7,
+            producer_name: "fandhe-ai-test".to_string(),
+            graph: Some(GraphProto {
+                node: Vec::new(),
+                name: "g".to_string(),
+                initializer: Vec::new(),
+                input: Vec::new(),
+                output: Vec::new(),
+                value_info: Vec::new(),
+            }),
+            opset_import: vec![OperatorSetIdProto {
+                domain: String::new(),
+                version: 18,
+            }],
+        };
+
+        let bytes = encode_model(&model);
+        let decoded = decode_model(&bytes).expect("decode は成功するはず");
+
+        assert_eq!(decoded, model);
+    }
+
+    /// 壊れたバイト列（有効な protobuf ワイヤフォーマットではない）を渡すと
+    /// `Err` で fail-closed に拒否されることを確認する（no-silent-skip
+    /// 契約。`onnx::graph`／`onnx::interp` と同じ方針）。
+    #[test]
+    fn decode_rejects_garbage_bytes() {
+        // タグ 1（varint）を宣言しつつ後続 varint を打ち切る不完全なバイト列。
+        let garbage = [0x08u8, 0xffu8];
+        let result = decode_model(&garbage);
+        assert!(
+            result.is_err(),
+            "壊れたバイト列を decode_model が受理してしまった"
+        );
+    }
+}
