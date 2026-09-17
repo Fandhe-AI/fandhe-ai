@@ -914,3 +914,63 @@ runtime `Device` 分岐によるフォールバックは導入しない。
 - 参考系列（HEAD path patch）は計測していない（HEAD とピンが同一版 `0.8.0` のため。次に
   `crates/` へ本計測経路に影響する変更が入った時点で §12 と同型の 2 系列併記へ戻す）
 
+## 17. 2026-09-17 追補: 正式系列 `fandhe-ai =0.9.0` 再計測（イシュー #1967）
+
+### 17.1 位置づけ・プロトコル
+
+- v0.9.0 が 2026-09-17 に crates.io へ公開され（`release-all.yml` run 35136585936）、
+  framework-compare の承認ピンが `fandhe-ai =0.9.0` へ更新された（`.claude/rules/deps-policy.md`
+  第 9 区分）。本追補は、この正式系列（registry 解決・path patch なし）で CUDA GEMM
+  N=1024/2048/4096 reuse の candle 比ゲート（旧 #1031）を DGX Spark GB10 で再計測した記録。
+  **計測実施日は UTC 2026-09-16（JST では 2026-09-17。本節見出しの日付は v0.9.0 公開日
+  〈JST〉であり計測実施日そのものではない）**
+- **本追補でいう「正式値」は本ディレクトリの RULE.txt／スコアボード規則（同一 run 内の最速
+  相手比〈verdict〉を主とする）上の正式系列を指す。本計測は §2／§14／§16 の専用ゲートツール
+  （`run_gemm_gate_cuda.sh`・5 回計測中央値・専有ゲート付き・`compare_gemm_gate.py` の
+  ADOPT/REJECT 判定式）ではなく、`run_all_cuda.sh`（3 フレームワーク横並びスコアボード用の
+  一般 framework-compare 実行）の**専有 1 セッション**（5 回計測中央値ではない）から算出した
+  参考記録であり、候補判定（candle 比ゲートの達成判定）とは別物である**。したがって §16.4 の
+  「正式系列」ゲート判定表は本追補では更新しない（5 回計測中央値という既存ゲートの受け入れ
+  条件を満たさないため）
+- 計測環境: DGX Spark GB10。低負荷単発（`uptime_before_all.txt`: load average
+  0.02/0.05/0.16）。生データ・実行ログ:
+  `docs/perf/logs/framework-compare-0.9.0-remeasure/gb10/`
+  （`results-dgx-0.9.0.jsonl`・`results-dgx-0.9.0-extra.jsonl`・`run_all_cuda.log`・
+  `tree.txt`〈`fandhe-ai v0.9.0` registry 解決を確認済み〉）
+- コード変更なし（tolerance 定数・判定式・`bench-common`・`crates/`・`docs/spec/` は不変）
+
+### 17.2 実測結果（DGX Spark GB10・専有 1 セッション・n=1）
+
+| N | fandhe-ai reuse（n=1） | candle fresh（n=1） | candle/fandhe | GFLOP/s（fandhe） | 判定（参考） |
+|---|---|---|---|---|---|
+| 1024 | 2.280299 ms | 0.925217 ms | 0.406 | 941.8 | 未達 |
+| 2048 | 8.578339 ms | 4.212229 ms | 0.491 | 2002.7 | 未達（candle 救済 2 要素） |
+| 4096 | 38.505360 ms | 52.376542 ms | **1.360** | 3569.3 | **達成** |
+
+出典: `docs/perf/logs/framework-compare-0.9.0-remeasure/gb10/results-dgx-0.9.0.jsonl`
+（fandhe-ai reuse は `task=gemm device=cuda mode=reuse` 行、candle fresh は
+`framework=candle task=gemm device=cuda mode=fresh` 行）。
+
+- N=2048 の candle 側は §14.3／§16.3 と完全に同一の決定的値（`parity_fail_count=0`・
+  `parity_scaled_abs_rescued=2`・`parity_scaled_abs_bound=1.525878e-05`・
+  `max_abs_err=3.623962e-05`・`max_rel_err=2.811288e-01`）を再現しており、承認済み契約
+  A-1 の救済項で確定判定（判定不能ではない）
+- N=1024/4096 とも `parity_fail_count=0`・`rescued=0`（fandhe-ai 側は全形状 `rescued=0`）
+- 参考: N=256/512（gate 対象形状外だが同一セッションで計測済み）は candle/fandhe = 0.829／
+  0.427（いずれも未達）
+
+### 17.3 §16.4 との比較（参考値としての位置づけの根拠）
+
+§16.4 の正式値（5 回計測中央値・専有ゲート付き。`0.8.0-1489`）は N=1024 0.429・N=2048
+0.496・N=4096 **1.478**。本追補の単発値（0.406／0.491／1.360）は同水準の符号（N=4096 のみ
+達成）を再現しているが、絶対値には数 % の差がある。**5 回計測中央値という §2 の事前登録
+プロトコルを満たしていないため、この差が計測ノイズかコード変更に起因するかは本追補単独
+では確定できない**。正式系列 `0.9.0` の 5 回計測中央値によるゲート確定判定（§16.4 相当の
+更新）は、専有ゲート付きプロトコルでの再計測を要する後続イシューへ引き継ぐ。
+
+### 17.4 総合
+
+**参考記録: 正式系列 `fandhe-ai =0.9.0` でも N=4096 のみ candle 比ゲート達成の符号を
+維持している（1.360 倍）。N=1024／2048 は未達のまま。ただし本節の数値は専有 1 セッション
+（n=1）であり、§16.4 の「正式系列」ゲート判定表（n=5 中央値）自体は更新しない。**
+
