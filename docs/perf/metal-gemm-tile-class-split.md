@@ -244,6 +244,8 @@ bit 一致）は本試作では実装しなかった**（時間制約。§6「�
 - 一般 stride／TT 以外の転置パターンでの性能面。
 - XOR swizzle 軸（旧 index 15 予約）の index 17 以降への再割当と実装
   （index 16 はイシュー #1474 で split-K 有効化ゲートが占有した）。
+  **イシュー #1970 で index 17（`COOP_SMEM_SWIZZLE`）に割当・実装済み**
+  （`docs/perf/metal-gemm-coop-load-candidates.md` §7）。
 
 ## 7. 実測結果と採否（#1328）
 

@@ -106,6 +106,13 @@ pub(crate) struct GemmGateConstants {
     /// `false`（本番既定・classic 経路）。`gemm_simdgroup_tiled_f16` は
     /// 参照しない（他ゲートと同じ扱い）。
     pub(crate) split_k_enabled: bool,
+    /// 協調ロードの threadgroup メモリ格納位置 XOR swizzle 軸（イシュー
+    /// #1970。`COOP_SMEM_SWIZZLE`。index 17。値は 0〈Off〉/1〈ATile〉/
+    /// 2〈BothTiles〉）。呼び出し元 [`crate::gemm::MetalGemm::
+    /// pipeline_for_tile`] がインスタンスの `smem_swizzle:
+    /// crate::tile::SmemSwizzle` から渡す。`gemm_simdgroup_tiled_f16`／
+    /// `_hfrag`／`_te` は参照しない（他ゲートと同じ扱い）。
+    pub(crate) coop_smem_swizzle: u32,
 }
 
 /// `shaders/gemm.metal` を実行時コンパイルして `MTLLibrary` を返す。
@@ -248,6 +255,7 @@ pub(crate) fn make_pipeline_with_constants(
         coop_load_layout,
         tile_class,
         split_k_enabled,
+        coop_smem_swizzle,
     } = gates;
     let name = NSString::from_str(function_name);
     let constants = MTLFunctionConstantValues::new();
@@ -427,6 +435,18 @@ pub(crate) fn make_pipeline_with_constants(
             MTLDataType::Bool,
             16,
         );
+        // 協調ロードの threadgroup メモリ格納位置 XOR swizzle 軸（イシュー
+        // #1970）。index は SPLIT_K_ENABLED（index 16）の直後の 17
+        // （`shaders/gemm.metal` 冒頭 COOP_SMEM_SWIZZLE 宣言と 1:1 対応。
+        // `tests/shader_source_evidence.rs` が index を含めて固定する）。
+        // `gemm_simdgroup_tiled_f16`／`_hfrag`／`_te` は参照しないため、
+        // それらのパイプライン構築では無害な no-op（他ゲートと同じ扱い）。
+        let smem_swizzle = coop_smem_swizzle;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&smem_swizzle).cast(),
+            MTLDataType::UInt,
+            17,
+        );
     }
 
     let func = library
@@ -482,18 +502,21 @@ pub(crate) fn make_pipeline_source_specialized(
         coop_load_layout,
         tile_class,
         split_k_enabled,
+        coop_smem_swizzle,
     } = gates;
     let params = crate::spec_source::SpecializationParams {
-        // イシュー #1298/#1327/#1474: 協調ロード軸（`tgp_pad_elems`/
+        // イシュー #1298/#1327/#1474/#1970: 協調ロード軸（`tgp_pad_elems`/
         // `coop_load_layout`）・タイルクラス軸（`tile_class`）・split-K 軸
-        // （`split_k_enabled`）は `SpecializationParams::new`（7 引数のまま
-        // 不変）の既定値（`cfg.pad()`／`0`／`0`／`false`）を struct update
-        // 構文で `gates` の実効値へ上書きする（`GemmGateConstants`
+        // （`split_k_enabled`）・XOR swizzle 軸（`coop_smem_swizzle`）は
+        // `SpecializationParams::new`（7 引数のまま不変）の既定値
+        // （`cfg.pad()`／`0`／`0`／`false`／`0`）を struct update 構文で
+        // `gates` の実効値へ上書きする（`GemmGateConstants`
         // 〈function constant 経路〉と同一の値を渡す契約を保つ）。
         tgp_pad_elems,
         coop_load_layout,
         tile_class,
         split_k_enabled,
+        coop_smem_swizzle,
         ..crate::spec_source::SpecializationParams::new(
             cfg,
             swizzle_enabled,

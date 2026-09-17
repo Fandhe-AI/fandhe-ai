@@ -622,6 +622,7 @@ constant uint FRAG_LOAD_KSTEPS = GEMM_SPEC_FRAG_LOAD_KSTEPS;
 constant uint COOP_LOAD_LAYOUT = GEMM_SPEC_COOP_LOAD_LAYOUT;
 constant uint TILE_CLASS = GEMM_SPEC_TILE_CLASS;
 constant bool SPLIT_K_ENABLED = GEMM_SPEC_SPLIT_K_ENABLED;
+constant uint COOP_SMEM_SWIZZLE = GEMM_SPEC_COOP_SMEM_SWIZZLE;
 #else
 constant uint BM [[function_constant(0)]];
 constant uint BN [[function_constant(1)]];
@@ -827,9 +828,37 @@ constant uint TILE_CLASS [[function_constant(15)]];
 // #1298/#1327 と同じ論法）。index は TILE_CLASS（#1327・index 15）の
 // 直後の 16（`docs/perf/metal-gemm-tile-class-split.md`／
 // `metal-gemm-coop-load-candidates.md` が「index 16 以降は XOR swizzle
-// 軸に予約」と記していた枠を本イシューで占有する。両 doc は本 PR で
-// 「index 17 以降」へ改訂する）。
+// 軸に予約」と記していた枠を本イシューで占有する。XOR swizzle 軸は
+// 直後の index 17〈`COOP_SMEM_SWIZZLE`。#1970〉が占有する）。
 constant bool SPLIT_K_ENABLED [[function_constant(16)]];
+
+// 協調ロードの threadgroup メモリ格納位置 XOR swizzle 軸（イシュー
+// #1970）: `gemm_simdgroup_tiled` の staged 経路（`USE_TGP_STAGING=true`）
+// が threadgroup タイルへ書く／から読む「列添字」を、行 8 ブロック単位で
+// 一定の鍵を持つ XOR 全単射（`smem_swizzle_col`）で置換するかどうかを
+// 切り替える。値: `0`（Off・本番既定）は恒等（`smem_swizzle_col` の
+// `enabled=false` 分岐へコンパイル時に畳み込まれ従来と同一アドレス式）。
+// `1`（ATile）は A オペランド（協調ロード書き込み＋フラグメントロード
+// 読み出し双方）のみに適用。`2`（BothTiles）は A・B 両オペランドに適用。
+//
+// **bit 一致の論拠**（#536/#538/#745/#809/#1138/#1282/#1288/#1293/#1298/
+// #1327/#1474 と同じ論法・詳細は `smem_swizzle_col` 直前のコメント）:
+// swizzle は共有メモリ上の「物理格納位置」の全単射置換であり、writer
+// （協調ロード）と reader（フラグメントロード）が同じ写像を通るため、
+// `simdgroup_load` が読む 8×8 ブロックの内容・MMA 発行順・K 方向累算
+// オペランド列は不変。値は `crate::tile::SmemSwizzle::as_u32`（instance
+// ゲート。`crate::gemm::MetalGemm::new_with_smem_swizzle`）が
+// `crate::pipeline::make_pipeline_with_constants` 経由で畳み込む。
+// **本番既定は `0`**（`crate::tile::SMEM_SWIZZLE`）で挙動は無変更。
+// 性能実測・`tile::select` への組み込み判断は本イシューのスコープ外
+// （実機〈Apple Silicon〉未実測のまま Mac セッションへ申し送り。
+// `docs/perf/metal-gemm-n4096-kernel-gap.md` §該当節）。
+// `gemm_simdgroup_tiled_f16`／`_hfrag`／`_te` は本定数を参照しない
+// no-op 契約（`COOP_LOAD_LAYOUT`／`TRANS_A`／`TRANS_B` 等と同じ設計）。
+// index は SPLIT_K_ENABLED（#1474・index 16）の直後の 17（本ファイル内で
+// 未使用の最小 index。`tests/shader_source_evidence.rs` が index まで
+// 含めて固定する）。
+constant uint COOP_SMEM_SWIZZLE [[function_constant(17)]];
 #endif
 
 // イシュー #1298: 協調ロードの「スレッド → float4 グループ」割当を
@@ -854,6 +883,41 @@ inline uint coop_load_flat_index(uint vi, uint rows, uint row_len) {
         return r * row_len + chunk * 4;
     }
     return vi * 4;
+}
+
+// イシュー #1970: threadgroup 共有メモリ上の「列添字」を、行 8 ブロック
+// 単位で一定の鍵を持つ XOR 全単射で置換するヘルパ（`COOP_SMEM_SWIZZLE`
+// 直前のコメント参照）。`enabled` は呼び出し側が function constant のみ
+// の式（`COOP_SMEM_SWIZZLE >= 1` 等）で渡すためコンパイル時に畳み込まれ、
+// `enabled=false`（本番既定）では恒等（`col` をそのまま返す）へ確定する。
+//
+// **不変条件**（`crate::tile::smem_swizzle_col_model`〈Rust 側モデル。
+// 単体テストで全単射性・8×8 ブロック連続性・float4 グループ連続性・
+// パディング非到達を固定〉と 1:1 対応。本ヘルパ自体は Rust 側モデルの
+// 逐語 MSL 実装であり、両者を Linux では機械的に単一ソース化できないため
+// 意図的に複製する）:
+// 1. 粒度は 8 要素（chunk8 = `col / 8`）単位。float4 協調ロード書き込み
+//    （`col & 7 ∈ {0, 4}` 始まりの 4 要素）は必ず 1 つの chunk8 内に収まり、
+//    chunk8 内の要素順は変えない（`(chunk << 3) | (col & 7)`）。
+// 2. XOR 鍵は 8 行ブロック内で一定（`(row >> 3) & (chunks - 1)`）。任意の
+//    8×8 フラグメント（8 行とも同じ `row >> 3`）は同じ物理列ブロックへ
+//    一様に写るため、`simdgroup_load(ptr, ld)` の「`ptr + i*ld + j`」契約
+//    を保ったままベースポインタの列オフセットだけを差し替えればよい
+//    （`lda`/`ldb` ストライドは不変）。
+// 3. `row_len/8`（`chunks`）が 2 のべき乗でない、または `chunks < 2`
+//    （chunk 数 1。`BK=8` 候補が該当）の場合は恒等へ縮退する
+//    （writer/reader が同一ヘルパを通るため縮退しても整合は保たれる）。
+// 4. swizzle 後の列は常に `[0, row_len)` に閉じる（パディング列非到達。
+//    `shared_mem_bytes_for_pad` の確保量は不変）。
+//
+// **bit 一致の論拠**は `COOP_SMEM_SWIZZLE` 直前のコメントを参照。
+inline uint smem_swizzle_col(bool enabled, uint row, uint col, uint row_len) {
+    uint chunks = row_len >> 3;
+    if (!enabled || chunks < 2 || (chunks & (chunks - 1)) != 0) {
+        return col;
+    }
+    uint chunk = (col >> 3) ^ ((row >> 3) & (chunks - 1));
+    return (chunk << 3) | (col & 7);
 }
 
 // threadgroup 共有メモリは function constant でサイズ指定できないため、
@@ -1190,7 +1254,7 @@ kernel void gemm_simdgroup_tiled(
                     uint idx = coop_load_flat_index(vi, BK, BM);
                     uint kk = idx / BM;
                     uint r = idx % BM;
-                    uint dst_idx = kk * lda + r;
+                    uint dst_idx = kk * lda + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, kk, r, BM);
                     uint global_row = row0 + r;
                     uint global_k = p0 + kk;
                     bool group_in_bounds = tiled_at_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
@@ -1213,7 +1277,9 @@ kernel void gemm_simdgroup_tiled(
                     uint idx = coop_load_flat_index(vi, BM, BK);
                     uint r = idx / BK;
                     uint kk = idx % BK;
-                    uint dst_idx = r * lda + kk; // パディング込みの書き込み先添字。
+                    // パディング込みの書き込み先添字（イシュー #1970: 列項
+                    // kk を `COOP_SMEM_SWIZZLE >= 1` ゲートで swizzle）。
+                    uint dst_idx = r * lda + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, r, kk, BK);
                     uint global_row = row0 + r;
                     uint global_k = p0 + kk;
                     bool group_in_bounds = tiled_a_group_in_bounds(kk, bk_eff, global_row, global_k, 4, dims);
@@ -1244,7 +1310,7 @@ kernel void gemm_simdgroup_tiled(
                     uint idx = coop_load_flat_index(vi, BN, BK);
                     uint c_ = idx / BK;
                     uint kk = idx % BK;
-                    uint dst_idx = c_ * ldb + kk;
+                    uint dst_idx = c_ * ldb + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, c_, kk, BK);
                     uint global_k = p0 + kk;
                     uint global_col = col0 + c_;
                     bool group_in_bounds = tiled_bt_group_in_bounds(kk, bk_eff, global_col, global_k, 4, dims);
@@ -1268,7 +1334,9 @@ kernel void gemm_simdgroup_tiled(
                     uint idx = coop_load_flat_index(vi, BK, BN);
                     uint kk = idx / BN;
                     uint c_ = idx % BN;
-                    uint dst_idx = kk * ldb + c_; // パディング込みの書き込み先添字。
+                    // パディング込みの書き込み先添字（イシュー #1970: 列項
+                    // c_ を `COOP_SMEM_SWIZZLE >= 2` ゲートで swizzle）。
+                    uint dst_idx = kk * ldb + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, c_, BN);
                     uint global_k = p0 + kk;
                     uint global_col = col0 + c_;
                     bool group_in_bounds = tiled_b_group_in_bounds(kk, bk_eff, global_k, global_col, 4, dims);
@@ -1311,16 +1379,16 @@ kernel void gemm_simdgroup_tiled(
                         uint kk_s = kk + ks * 8;
                         for (uint r = 0; r < acc_rows; r++) {
                             if (TRANS_A) {
-                                simdgroup_load(a_frag2[ks][r], tile_a + (size_t)kk_s * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);
+                                simdgroup_load(a_frag2[ks][r], tile_a + (size_t)kk_s * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, kk_s, wm_idx * sub_bm + r * 8, BM), lda, ulong2(0), true);
                             } else {
-                                simdgroup_load(a_frag2[ks][r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk_s, lda);
+                                simdgroup_load(a_frag2[ks][r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, wm_idx * sub_bm + r * 8, kk_s, BK), lda);
                             }
                         }
                         for (uint c_ = 0; c_ < acc_cols; c_++) {
                             if (TRANS_B) {
-                                simdgroup_load(b_frag2[ks][c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk_s, ldb, ulong2(0), true);
+                                simdgroup_load(b_frag2[ks][c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, wn_idx * sub_bn + c_ * 8, kk_s, BK), ldb, ulong2(0), true);
                             } else {
-                                simdgroup_load(b_frag2[ks][c_], tile_b + (size_t)kk_s * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                                simdgroup_load(b_frag2[ks][c_], tile_b + (size_t)kk_s * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk_s, wn_idx * sub_bn + c_ * 8, BN), ldb);
                             }
                         }
                     }
@@ -1343,16 +1411,16 @@ kernel void gemm_simdgroup_tiled(
                     simdgroup_float8x8 b_frag[ACC_COLS_CAP];
                     for (uint r = 0; r < acc_rows; r++) {
                         if (TRANS_A) {
-                            simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);
+                            simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, kk, wm_idx * sub_bm + r * 8, BM), lda, ulong2(0), true);
                         } else {
-                            simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
+                            simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, wm_idx * sub_bm + r * 8, kk, BK), lda);
                         }
                     }
                     for (uint c_ = 0; c_ < acc_cols; c_++) {
                         if (TRANS_B) {
-                            simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk, ldb, ulong2(0), true);
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, wn_idx * sub_bn + c_ * 8, kk, BK), ldb, ulong2(0), true);
                         } else {
-                            simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, wn_idx * sub_bn + c_ * 8, BN), ldb);
                         }
                     }
                     if (FINE_BARRIER_ENABLED) {
@@ -1408,9 +1476,9 @@ kernel void gemm_simdgroup_tiled(
                         // 一致する。`docs/backend-metal-transpose-collapse-design.md`
                         // §2・本ファイル冒頭 TRANS_A 宣言のコメント参照）。
                         if (TRANS_A) {
-                            simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);
+                            simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, kk, wm_idx * sub_bm + r * 8, BM), lda, ulong2(0), true);
                         } else {
-                            simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
+                            simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, wm_idx * sub_bm + r * 8, kk, BK), lda);
                         }
                     }
                 } else {
@@ -1428,9 +1496,9 @@ kernel void gemm_simdgroup_tiled(
                         // 一致する。`docs/backend-metal-transpose-collapse-design.md`
                         // §2・本ファイル冒頭 TRANS_A 宣言のコメント参照）。
                         if (TRANS_A) {
-                            simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);
+                            simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, kk, wm_idx * sub_bm + r * 8, BM), lda, ulong2(0), true);
                         } else {
-                            simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
+                            simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, wm_idx * sub_bm + r * 8, kk, BK), lda);
                         }
                     }
                 }
@@ -1448,9 +1516,9 @@ kernel void gemm_simdgroup_tiled(
                         // `transpose_matrix=true` で K×N へ転置し B_frag の
                         // 期待するレイアウト（K 方向行・N 方向列）に一致させる。
                         if (TRANS_B) {
-                            simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk, ldb, ulong2(0), true);
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, wn_idx * sub_bn + c_ * 8, kk, BK), ldb, ulong2(0), true);
                         } else {
-                            simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, wn_idx * sub_bn + c_ * 8, BN), ldb);
                         }
                     }
                 } else {
@@ -1464,9 +1532,9 @@ kernel void gemm_simdgroup_tiled(
                         // `transpose_matrix=true` で K×N へ転置し B_frag の
                         // 期待するレイアウト（K 方向行・N 方向列）に一致させる。
                         if (TRANS_B) {
-                            simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk, ldb, ulong2(0), true);
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, wn_idx * sub_bn + c_ * 8, kk, BK), ldb, ulong2(0), true);
                         } else {
-                            simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, wn_idx * sub_bn + c_ * 8, BN), ldb);
                         }
                     }
                 }

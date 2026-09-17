@@ -1777,6 +1777,64 @@ impl CoopLoadConfig {
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const COOP_LOAD_CONFIG: CoopLoadConfig = CoopLoadConfig::DEFAULT;
 
+/// 協調ロードの threadgroup メモリ格納位置 XOR swizzle 軸（イシュー
+/// #1970）の instance ゲート。`shaders/gemm.metal` の `COOP_SMEM_SWIZZLE`
+/// （**index 17**。#1298 doc comment が「index 16 以降」と書いていた見積り
+/// は #1474 の `SPLIT_K_ENABLED` が index 16 を占有したため陳腐化しており、
+/// 本イシューが実際に使うのは 17 だと #1970 で確定した）へ渡す。
+/// `crate::gemm::MetalGemm::new_with_smem_swizzle` が受け取り、
+/// `pipeline_for_tile` 経由で `GemmGateConstants::coop_smem_swizzle` へ
+/// 畳み込まれる契約。
+///
+/// `CoopLoadConfig` へフィールドを追加せず独立した instance ゲートにした
+/// 設計判断: `CoopLoadConfig` は crates.io 公開クレート配下の `pub mod
+/// tile` にある全フィールド `pub`・非 `#[non_exhaustive]` の構造体のため、
+/// フィールド追加は構造体リテラルを破壊する公開 API 破壊的変更になる
+/// （`FragLoadConfig`／`CoopLoadConfig` が別ゲートとして独立しているのと
+/// 同型の設計）。
+///
+/// bit 一致の論拠（詳細は `docs/perf/metal-gemm-coop-load-candidates.md`
+/// §7）: `smem_swizzle_col` は行 8 ブロック内で鍵が一定の列チャンク単位
+/// 全単射置換であり、協調ロード（writer）とフラグメントロード（reader）
+/// が同一の写像を通るため、`simdgroup_load` が読む 8×8 ブロックの内容・
+/// MMA 発行順・K 方向累算オペランド列は一切変わらない。
+///
+/// **本 sub-issue（#1970）は機構の実装と Linux 実行可能な自己検証のみを
+/// 行い、実機〈Apple Silicon〉での bit 一致実行・性能実測・`tile::select`
+/// への組み込み判断は行わない**（未実測のまま Mac セッションへ申し送り。
+/// `docs/perf/metal-gemm-n4096-kernel-gap.md` の該当節）。
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SmemSwizzle {
+    /// 既定（本番既定。`gemm.metal` の `smem_swizzle_col` 呼び出しが
+    /// `enabled=false` の恒等分岐へコンパイル時に畳み込まれ、結線前と
+    /// アドレス式が同値になる）。
+    Off,
+    /// A タイル（`gemm_simdgroup_tiled` の A オペランド協調ロード・
+    /// フラグメントロード双方）のみに swizzle を適用する。
+    ATile,
+    /// A・B 両タイルに swizzle を適用する。
+    BothTiles,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl SmemSwizzle {
+    /// `shaders/gemm.metal` の `COOP_SMEM_SWIZZLE`（`constant uint`）へ
+    /// 渡す実効値（0/1/2）。
+    pub(crate) fn as_u32(self) -> u32 {
+        match self {
+            SmemSwizzle::Off => 0,
+            SmemSwizzle::ATile => 1,
+            SmemSwizzle::BothTiles => 2,
+        }
+    }
+}
+
+/// [`SmemSwizzle::Off`] を本番既定として公開する定数（`COOP_LOAD_CONFIG`
+/// 等と同型の設計。`crate::gemm::MetalGemm::new` が本定数を渡す）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const SMEM_SWIZZLE: SmemSwizzle = SmemSwizzle::Off;
+
 /// タイルクラス分割（イシュー #1327・E6 試作）の instance ゲート。
 /// `crate::gemm::MetalGemm::new_with_tile_class` が受け取る。`Legacy`
 /// （本番既定）では従来どおり `USE_TGP_STAGING` 単独でロード方式を決める
@@ -5682,6 +5740,314 @@ mod tests {
     fn coop_load_default_pad_elems_matches_tile_config_pad() {
         for &cfg in CANDIDATES.iter().filter(|c| c.staged) {
             assert_eq!(CoopLoadConfig::DEFAULT.pad_elems(cfg), cfg.pad());
+        }
+    }
+
+    /// イシュー #1970: `shaders/gemm.metal::smem_swizzle_col` と同一の式を
+    /// Rust 側モデルとして固定する（デバイス前の唯一の全単射証明。Linux
+    /// 実行可能）。MSL 側は本モデルを 1:1 で写した実装であることを
+    /// PR レビュー（reviewer による目視突合）で確認する（コンパイル
+    /// できない MSL 自体を Linux では検証できない制約への代替）。
+    fn smem_swizzle_col_model(enabled: bool, row: u32, col: u32, row_len: u32) -> u32 {
+        let chunks = row_len >> 3;
+        if !enabled || chunks < 2 || (chunks & (chunks - 1)) != 0 {
+            return col;
+        }
+        let chunk = (col >> 3) ^ ((row >> 3) & (chunks - 1));
+        (chunk << 3) | (col & 7)
+    }
+
+    /// [`smem_swizzle_col_model`] が `CANDIDATES` 全候補 × A-NN/A-T/B-NN/
+    /// B-T の `(rows, row_len)` 組合せ × `enabled ∈ {false, true}` で、
+    /// 各行について `col ↦ swizzled col` が `[0, row_len)` 上の全単射で
+    /// あることを固定する（イシュー #1970 計画「2.1 最重要制約」節）。
+    #[test]
+    fn smem_swizzle_col_model_is_per_row_bijection_for_all_candidates_and_patterns() {
+        for &cfg in CANDIDATES.iter() {
+            if !cfg.staged {
+                continue; // swizzle は staged 経路専用（協調ロードと同じ前提）。
+            }
+            // A-NN: rows=bm, row_len=bk。A-T: rows=bk, row_len=bm。
+            // B-NN: rows=bk, row_len=bn。B-T: rows=bn, row_len=bk。
+            let shapes = [
+                (cfg.bm, cfg.bk),
+                (cfg.bk, cfg.bm),
+                (cfg.bk, cfg.bn),
+                (cfg.bn, cfg.bk),
+            ];
+            for (rows, row_len) in shapes {
+                for enabled in [false, true] {
+                    for row in 0..rows {
+                        let mut seen = vec![false; row_len as usize];
+                        for col in 0..row_len {
+                            let swizzled = smem_swizzle_col_model(enabled, row, col, row_len);
+                            assert!(
+                                (swizzled as usize) < seen.len(),
+                                "enabled={enabled} row={row} rows={rows} row_len={row_len} \
+                                 col={col}: swizzled={swizzled} が範囲外"
+                            );
+                            assert!(
+                                !seen[swizzled as usize],
+                                "enabled={enabled} row={row} rows={rows} row_len={row_len} \
+                                 col={col}: swizzled={swizzled} が重複して写された \
+                                 （全単射違反）"
+                            );
+                            seen[swizzled as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 任意の 8 の倍数 `(row0, col0)` について、8×8 フラグメント全体が
+    /// 連続 8 要素として保存される（`model(row0+i, col0+j) ==
+    /// model(row0, col0) + j`。`i, j ∈ 0..8`）ことを固定する。
+    /// `simdgroup_load(ptr, ld)` が「`ptr + i*ld + j`」で 8×8 を不透明な
+    /// 連続読みとして読む契約を保つための核心制約（イシュー #1970 計画
+    /// 「2.1」節の不変条件 1・2）。
+    #[test]
+    fn smem_swizzle_key_is_constant_within_8_row_blocks() {
+        for &cfg in CANDIDATES.iter().filter(|c| c.staged) {
+            let shapes = [
+                (cfg.bm, cfg.bk),
+                (cfg.bk, cfg.bm),
+                (cfg.bk, cfg.bn),
+                (cfg.bn, cfg.bk),
+            ];
+            for (rows, row_len) in shapes {
+                if rows < 8 || row_len < 8 {
+                    continue;
+                }
+                for row0 in (0..rows).step_by(8) {
+                    for col0 in (0..row_len).step_by(8) {
+                        let base = smem_swizzle_col_model(true, row0, col0, row_len);
+                        for i in 0..8u32.min(rows - row0) {
+                            for j in 0..8u32.min(row_len - col0) {
+                                let v = smem_swizzle_col_model(true, row0 + i, col0 + j, row_len);
+                                assert_eq!(
+                                    v,
+                                    base + j,
+                                    "row0={row0} col0={col0} i={i} j={j} row_len={row_len}: \
+                                     8×8 フラグメント連続性が壊れている"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// float4 協調ロード書き込み（`col % 4 == 0` の 4 要素グループ）が
+    /// swizzle 後も 1 つの chunk8 内へ連続配置されることを固定する
+    /// （イシュー #1970 計画「2.1」節の不変条件 1）。
+    #[test]
+    fn smem_swizzle_keeps_float4_groups_contiguous() {
+        for &cfg in CANDIDATES.iter().filter(|c| c.staged) {
+            let shapes = [
+                (cfg.bm, cfg.bk),
+                (cfg.bk, cfg.bm),
+                (cfg.bk, cfg.bn),
+                (cfg.bn, cfg.bk),
+            ];
+            for (rows, row_len) in shapes {
+                for row in 0..rows.min(4) {
+                    let mut col = 0u32;
+                    while col + 4 <= row_len {
+                        let base = smem_swizzle_col_model(true, row, col, row_len);
+                        for e in 0..4u32 {
+                            assert_eq!(
+                                smem_swizzle_col_model(true, row, col + e, row_len),
+                                base + e,
+                                "row={row} col={col} e={e} row_len={row_len}: \
+                                 float4 グループが chunk8 を跨いだ"
+                            );
+                        }
+                        col += 4;
+                    }
+                }
+            }
+        }
+    }
+
+    /// swizzle の像が常に `< row_len`（パディング列非到達）であることを
+    /// 固定する（`shared_mem_bytes_for_pad` の確保量計算と実アクセス範囲
+    /// の一致契約。イシュー #1970 計画「2.1」節の不変条件 4）。
+    #[test]
+    fn smem_swizzle_never_touches_padding() {
+        for &cfg in CANDIDATES.iter().filter(|c| c.staged) {
+            let shapes = [
+                (cfg.bm, cfg.bk),
+                (cfg.bk, cfg.bm),
+                (cfg.bk, cfg.bn),
+                (cfg.bn, cfg.bk),
+            ];
+            for (rows, row_len) in shapes {
+                for row in 0..rows {
+                    for col in 0..row_len {
+                        let v = smem_swizzle_col_model(true, row, col, row_len);
+                        assert!(v < row_len, "row={row} col={col} row_len={row_len}: v={v}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// `row_len == 8`（`CANDIDATES` の BK=8 候補。chunk 数 1）と
+    /// `enabled=false` の両方で恒等へ縮退することを固定する（イシュー
+    /// #1970 計画「2.1」節の不変条件 3）。
+    #[test]
+    fn smem_swizzle_degenerates_to_identity_for_single_chunk_or_disabled() {
+        for col in 0..8u32 {
+            assert_eq!(smem_swizzle_col_model(true, 0, col, 8), col);
+            assert_eq!(smem_swizzle_col_model(true, 3, col, 8), col);
+        }
+        for col in 0..64u32 {
+            assert_eq!(smem_swizzle_col_model(false, 5, col, 64), col);
+        }
+    }
+
+    /// `chunks >= 2` のとき、隣接する行ブロック（`row` と `row+8`）は
+    /// 同一 `col` を異なる物理位置へ写す（CUDA 128×64 pipeline 版
+    /// `a_fragment_swizzle_resolves_8_row_bank_conflict` の類比。ロード間
+    /// 競合を緩和するという設計意図の固定。イシュー #1970 計画「2.1」節）。
+    #[test]
+    fn smem_swizzle_separates_adjacent_row_blocks() {
+        for &cfg in CANDIDATES.iter().filter(|c| c.staged) {
+            let shapes = [
+                (cfg.bm, cfg.bk),
+                (cfg.bk, cfg.bm),
+                (cfg.bk, cfg.bn),
+                (cfg.bn, cfg.bk),
+            ];
+            for (rows, row_len) in shapes {
+                let chunks = row_len >> 3;
+                if rows < 16 || chunks < 2 {
+                    continue;
+                }
+                let mut any_differs = false;
+                for col in 0..row_len {
+                    let a = smem_swizzle_col_model(true, 0, col, row_len);
+                    let b = smem_swizzle_col_model(true, 8, col, row_len);
+                    if a != b {
+                        any_differs = true;
+                    }
+                }
+                assert!(
+                    any_differs,
+                    "rows={rows} row_len={row_len}: 隣接行ブロックの物理位置が \
+                     一切分離されていない"
+                );
+            }
+        }
+    }
+
+    /// [`SMEM_SWIZZLE`]（本番既定）が [`SmemSwizzle::Off`] であることを
+    /// 固定する（イシュー #1970 計画「2.1」節 T6 相当）。
+    #[test]
+    fn smem_swizzle_default_is_off() {
+        assert_eq!(SMEM_SWIZZLE, SmemSwizzle::Off);
+        assert_eq!(SmemSwizzle::Off.as_u32(), 0);
+        assert_eq!(SmemSwizzle::ATile.as_u32(), 1);
+        assert_eq!(SmemSwizzle::BothTiles.as_u32(), 2);
+    }
+
+    /// 協調ロード（writer）→ フラグメントロード（reader）のホスト往復
+    /// モデル: 論理タイル（決定的擬似乱数）を writer モデル
+    /// （`coop_load_flat_index_model` + `dst = r*ld + swizzle(col)`）で
+    /// 物理配列へ書き、reader モデル（8×8 ブロックを `base = row8*ld +
+    /// swizzle(row8, col8)` から stride `ld` で読む）で読み戻した値が
+    /// swizzle 有効・無効いずれでも元の論理値と完全一致することを検査する
+    /// （swizzle は物理格納位置の全単射置換に過ぎず読み出し値を変えない
+    /// という論拠そのものの検証。MSL 編集ミスを実機前に
+    /// 検出できる唯一の層。MSL とは異なる言語・実行環境のため機械的な
+    /// 単一ソース化ができず本モデル自体が全単射性の検証目的を兼ねる。
+    /// イシュー #1970 計画 S1 節）。
+    #[test]
+    fn smem_swizzle_roundtrip_matches_identity_for_all_candidates_and_configs() {
+        // 決定的 xorshift（他モジュールの RNG 依存を避けるための自己完結
+        // 実装。`tensor-core::rng` は本クレートの被依存側ではないため
+        // ここでは使わない）。
+        fn next_u32(state: &mut u32) -> u32 {
+            let mut x = *state;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *state = x;
+            x
+        }
+
+        for &cfg in CANDIDATES.iter().filter(|c| c.staged) {
+            let shapes = [
+                (cfg.bm, cfg.bk),
+                (cfg.bk, cfg.bm),
+                (cfg.bk, cfg.bn),
+                (cfg.bn, cfg.bk),
+            ];
+            for (rows, row_len) in shapes {
+                if rows < 8 || row_len < 8 || row_len % 8 != 0 {
+                    continue;
+                }
+                for pad in [TgpPad::Zero, TgpPad::Four, TgpPad::Eight] {
+                    for layout in [CoopLoadLayout::RowLinear, CoopLoadLayout::RowStrided] {
+                        for enabled in [false, true] {
+                            let ld = row_len + pad.elems();
+                            let mut state = 0x1234_5678u32 ^ rows ^ (row_len << 8) ^ (ld << 16);
+                            if state == 0 {
+                                state = 1;
+                            }
+                            let logical: Vec<u32> =
+                                (0..rows * row_len).map(|_| next_u32(&mut state)).collect();
+
+                            // writer: 協調ロードの vi 添字→論理 (r, c) は
+                            // `coop_load_flat_index_model` の逆写像
+                            // （float4 単位の連続割当）そのもの。論理配列
+                            // は row-major（idx = r*row_len + c）のため、
+                            // vi から直接 (r, c) を導出する。
+                            let mut physical = vec![0u32; (rows * ld) as usize];
+                            let total_vecs = (rows * row_len) / 4;
+                            for vi in 0..total_vecs {
+                                let flat = coop_load_flat_index_model(layout, vi, rows, row_len);
+                                let r = flat / row_len;
+                                let c0 = flat % row_len;
+                                for e in 0..4u32 {
+                                    let c = c0 + e;
+                                    let logical_val = logical[(r * row_len + c) as usize];
+                                    let dst_col = smem_swizzle_col_model(enabled, r, c, row_len);
+                                    physical[(r * ld + dst_col) as usize] = logical_val;
+                                }
+                            }
+
+                            // reader: 8×8 ブロック単位で `simdgroup_load`
+                            // 相当（base = row8*ld + swizzle(row8, col8)
+                            // から stride ld で 8 行連続読み）を再現。
+                            for row8 in (0..rows).step_by(8) {
+                                for col8 in (0..row_len).step_by(8) {
+                                    let base_col =
+                                        smem_swizzle_col_model(enabled, row8, col8, row_len);
+                                    for i in 0..8u32 {
+                                        for j in 0..8u32 {
+                                            let read =
+                                                physical[((row8 + i) * ld + base_col + j) as usize];
+                                            let expected =
+                                                logical[((row8 + i) * row_len + col8 + j) as usize];
+                                            assert_eq!(
+                                                read, expected,
+                                                "cfg={cfg:?} rows={rows} row_len={row_len} \
+                                                 pad={pad:?} layout={layout:?} enabled={enabled} \
+                                                 row8={row8} col8={col8} i={i} j={j}: \
+                                                 swizzle 有効時の往復値が swizzle Off と \
+                                                 一致しない"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

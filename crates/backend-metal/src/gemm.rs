@@ -595,6 +595,21 @@ pub struct MetalGemm {
     /// REJECT・イシュー #1304 で組み込み対象なしと確定。`docs/perf/
     /// metal-gemm-n4096-kernel-gap.md` §11.4・§18）。
     coop_load: tile::CoopLoadConfig,
+    /// 協調ロードの threadgroup メモリ格納位置 XOR swizzle 軸（イシュー
+    /// #1970）をこのインスタンスの `SimdgroupTiled` **f32 staged 経路**
+    /// （[`Self::pipeline_for_tile`]）でどう有効化するか。`coop_load` と
+    /// 同じ設計判断（instance フィールド化により base（`tile::
+    /// SMEM_SWIZZLE`。既定 `Off`）/head（任意の [`tile::SmemSwizzle`]）の
+    /// 2 `MetalGemm` を同一プロセス内に構築して bit 一致を自己検証できる
+    /// ようにする）。`crate::pipeline::GemmGateConstants::
+    /// coop_smem_swizzle` として `pipeline_for_tile` 経由で
+    /// `shaders/gemm.metal` の `COOP_SMEM_SWIZZLE`（index 17）へ畳み込まれる。
+    /// `MetalGemm::new` は本番既定 `tile::SMEM_SWIZZLE`（`Off`）を渡すため
+    /// 既定挙動は不変。**本 sub-issue（#1970）は機構の実装と bit 一致の
+    /// 自己検証のみを行い、実機〈Apple Silicon〉未実測のまま Mac
+    /// セッションへ申し送り、性能実測・`tile::select` への組み込み判断は
+    /// 行わない**（`docs/perf/metal-gemm-n4096-kernel-gap.md` §該当節）。
+    smem_swizzle: tile::SmemSwizzle,
     /// タイルクラス分割（イシュー #1327・E6 試作）をこのインスタンスの
     /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]・
     /// [`Self::encode_tiled_by_class`]）で有効化するかどうか。
@@ -800,6 +815,7 @@ impl MetalGemm {
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
+            tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
         )
     }
 
@@ -841,6 +857,7 @@ impl MetalGemm {
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
+            tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
         )
     }
 
@@ -878,6 +895,7 @@ impl MetalGemm {
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
+            tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
         )
     }
 
@@ -887,6 +905,54 @@ impl MetalGemm {
     #[cfg(test)]
     pub(crate) fn coop_load(&self) -> tile::CoopLoadConfig {
         self.coop_load
+    }
+
+    /// [`Self::new`] と同じ構築を行うが、`gemm_simdgroup_tiled` の協調ロード
+    /// threadgroup メモリ格納位置 XOR swizzle 軸（イシュー #1970）を
+    /// 明示的な `smem_swizzle` 引数で指定する。実機 `#[ignore]` bit 一致
+    /// 自己検証テスト・kernel_gpu A/B 計測専用の入口: 同一プロセス内で
+    /// base（`tile::SMEM_SWIZZLE`＝`Off`。既定）/head（任意の
+    /// [`tile::SmemSwizzle`]）の 2 インスタンスを構築して比較する
+    /// （[`Self::new_with_coop_load`] と同型の設計）。他フラグ（threadgroup
+    /// ID スウィズル・simdgroup 細粒度同期・条件付き loop unroll・ソース
+    /// テキスト特殊化・フラグメントロード方式候補・協調ロードレイアウト
+    /// 候補・タイルクラス分割・split-K 自動結線・`thread_elements()` 方式
+    /// 候補）は本番既定のまま据え置く。本番経路（[`Self::new`]）は常に
+    /// `tile::SMEM_SWIZZLE`（`Off`）を渡すため、本関数の追加自体は既定
+    /// 挙動を変えない。性能実測・`tile::select` への組み込み判断は行わない
+    /// （本イシューのスコープ外。実機〈Apple Silicon〉未実測のまま Mac
+    /// セッションへ申し送り）。
+    ///
+    /// `pub` にする理由は [`Self::new_with_coop_load`] doc comment と同じ
+    /// （`tile::SmemSwizzle` を `pub` にしている以上、本関数も少なくとも
+    /// 同じ可視性が必要。`pub(crate)` のまま `#[cfg(test)]` を付けない
+    /// 場合の dead_code 検査抵触も同型）。
+    pub fn new_with_smem_swizzle(
+        ctx: &MetalContext,
+        coop_load: tile::CoopLoadConfig,
+        smem_swizzle: tile::SmemSwizzle,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_gates(
+            ctx,
+            tile::SWIZZLE_ENABLED,
+            tile::FINE_BARRIER_ENABLED,
+            tile::UNROLL_ACC_ENABLED,
+            tile::SOURCE_SPECIALIZATION_ENABLED,
+            tile::FRAG_LOAD_CONFIG,
+            coop_load,
+            tile::TILE_CLASS_MODE,
+            crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
+            tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
+            smem_swizzle,
+        )
+    }
+
+    /// テスト専用: このインスタンスが保持する [`tile::SmemSwizzle`] を
+    /// 取得する（実機 `#[ignore]` テストが base/head インスタンスの構成を
+    /// 突き合わせる用途。イシュー #1970）。
+    #[cfg(test)]
+    pub(crate) fn smem_swizzle(&self) -> tile::SmemSwizzle {
+        self.smem_swizzle
     }
 
     /// [`Self::new`] と同じ構築を行うが、`gemm_simdgroup_tiled` の 1
@@ -923,6 +989,7 @@ impl MetalGemm {
             tile_class_mode,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
+            tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
         )
     }
 
@@ -962,6 +1029,7 @@ impl MetalGemm {
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
+            tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
         )
     }
 
@@ -991,6 +1059,7 @@ impl MetalGemm {
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
+            tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
         )
     }
 
@@ -1019,6 +1088,7 @@ impl MetalGemm {
             tile::TILE_CLASS_MODE,
             crate::split_k_runtime::SPLIT_K_DEFAULT_ENABLED, // split_k_auto_enabled 既定（#1547 でコンパイル時定数ゲートを撤去し split_k_runtime::SPLIT_K_DEFAULT_ENABLED へ一本化）
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
+            tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
         )
     }
 
@@ -1062,6 +1132,7 @@ impl MetalGemm {
             tile::TILE_CLASS_MODE,
             split_k_auto_enabled,
             tile::MMA_FRAG_LOAD, // mma_frag_load 既定（イシュー #1693。gemm_simdgroup_tiled_te 候補は new_with_mma_frag_load 経由でのみ指定）
+            tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
         )
     }
 
@@ -1117,6 +1188,7 @@ impl MetalGemm {
                 tile::MmaFragLoad::ThreadElements => false,
             },
             mma_frag_load,
+            tile::SMEM_SWIZZLE, // smem_swizzle 既定（イシュー #1970。XOR swizzle 軸は new_with_smem_swizzle 経由でのみ指定）
         )
     }
 
@@ -1210,6 +1282,7 @@ impl MetalGemm {
         tile_class_mode: tile::TileClassMode,
         split_k_auto_enabled: bool,
         mma_frag_load: tile::MmaFragLoad,
+        smem_swizzle: tile::SmemSwizzle,
     ) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
@@ -1256,6 +1329,7 @@ impl MetalGemm {
             tiled_spec_cache: Mutex::new(HashMap::new()),
             frag_load,
             coop_load,
+            smem_swizzle,
             tile_class_mode,
             tiled_splitk_cache: Mutex::new(HashMap::new()),
             pipeline_splitk_reduce,
@@ -1394,6 +1468,11 @@ impl MetalGemm {
                 // 契約）。split-K 専用パイプラインは
                 // `pipeline_for_tile_split_k`（別キャッシュ）が構築する。
                 split_k_enabled: false,
+                // イシュー #1970: XOR swizzle 軸はこのインスタンスが保持する
+                // `smem_swizzle`（本番既定 `tile::SMEM_SWIZZLE`＝`Off`）を
+                // そのまま渡す（`coop_load_layout` と同じ instance ゲート
+                // 方式）。
+                coop_smem_swizzle: self.smem_swizzle.as_u32(),
             };
             // イシュー #1693: `mma_frag_load` に応じてカーネル関数名を
             // 切り替える（`GemmVariant::SimdgroupTiled` の本番関数名
@@ -1519,6 +1598,10 @@ impl MetalGemm {
                 coop_load_layout: 0,
                 tile_class: tile_class.as_u32(),
                 split_k_enabled: true,
+                // イシュー #1970: split-K 専用パイプラインも上記コメントと
+                // 同じ理由で XOR swizzle 軸を opt-in せず本番既定値（`0`＝
+                // `SmemSwizzle::Off`）で固定する。
+                coop_smem_swizzle: 0,
             };
             let function_name = GemmVariant::SimdgroupTiled(candidate).function_name();
             let build_result = pipeline::make_pipeline_with_constants(
@@ -1846,6 +1929,10 @@ impl MetalGemm {
                 // 一切参照しないため常に `false` を渡す no-op 契約
                 // （他ゲートと同じ扱い）。
                 split_k_enabled: false,
+                // イシュー #1970: f16 経路は `COOP_SMEM_SWIZZLE` を一切
+                // 参照しないため常に `0`（`SmemSwizzle::Off`）を渡す
+                // no-op 契約（他ゲートと同じ扱い）。
+                coop_smem_swizzle: 0,
             };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
@@ -1944,6 +2031,10 @@ impl MetalGemm {
                 // イシュー #1474: hfrag 経路も split-K（`SPLIT_K_ENABLED`）を
                 // 一切参照しないため常に `false`（no-op 契約）。
                 split_k_enabled: false,
+                // イシュー #1970: hfrag 経路も `COOP_SMEM_SWIZZLE` を一切
+                // 参照しないため常に `0`（`SmemSwizzle::Off`）を渡す
+                // no-op 契約（`pipeline_for_tile_f16` と同じ扱い）。
+                coop_smem_swizzle: 0,
             };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
@@ -7413,6 +7504,483 @@ mod tests {
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
         assert_eq!(gemm.coop_load(), tile::COOP_LOAD_CONFIG);
         assert_eq!(tile::COOP_LOAD_CONFIG, tile::CoopLoadConfig::DEFAULT);
+    }
+
+    // --- イシュー #1970: 協調ロードの threadgroup メモリ格納位置 XOR
+    //     swizzle 軸（`tile::SmemSwizzle`）の bit 一致自己検証（計画
+    //     「S5」節。#1298 の T1〜T6 と同型の設計） ---
+
+    /// 12 head（既存 6 協調ロード候補〈`L0-P4`＝本番既定を含む〉×
+    /// `{ATile, BothTiles}`）を返す。`crate::gemm::MetalGemm::
+    /// new_with_smem_swizzle` の第 1 引数（`coop_load`）・第 2 引数
+    /// （`smem_swizzle`）へそのまま渡す。
+    fn smem_swizzle_required_heads() -> [(tile::CoopLoadConfig, tile::SmemSwizzle); 12] {
+        let coop_configs = [
+            tile::COOP_LOAD_CONFIG, // L0-P4（本番既定）
+            tile::CoopLoadConfig {
+                layout: tile::CoopLoadLayout::RowLinear,
+                pad: tile::TgpPad::Zero,
+            }, // L0-P0
+            tile::CoopLoadConfig {
+                layout: tile::CoopLoadLayout::RowLinear,
+                pad: tile::TgpPad::Eight,
+            }, // L0-P8
+            tile::CoopLoadConfig {
+                layout: tile::CoopLoadLayout::RowStrided,
+                pad: tile::TgpPad::Zero,
+            }, // L1-P0
+            tile::CoopLoadConfig {
+                layout: tile::CoopLoadLayout::RowStrided,
+                pad: tile::TgpPad::Four,
+            }, // L1-P4
+            tile::CoopLoadConfig {
+                layout: tile::CoopLoadLayout::RowStrided,
+                pad: tile::TgpPad::Eight,
+            }, // L1-P8
+        ];
+        [
+            (coop_configs[0], tile::SmemSwizzle::ATile),
+            (coop_configs[0], tile::SmemSwizzle::BothTiles),
+            (coop_configs[1], tile::SmemSwizzle::ATile),
+            (coop_configs[1], tile::SmemSwizzle::BothTiles),
+            (coop_configs[2], tile::SmemSwizzle::ATile),
+            (coop_configs[2], tile::SmemSwizzle::BothTiles),
+            (coop_configs[3], tile::SmemSwizzle::ATile),
+            (coop_configs[3], tile::SmemSwizzle::BothTiles),
+            (coop_configs[4], tile::SmemSwizzle::ATile),
+            (coop_configs[4], tile::SmemSwizzle::BothTiles),
+            (coop_configs[5], tile::SmemSwizzle::ATile),
+            (coop_configs[5], tile::SmemSwizzle::BothTiles),
+        ]
+    }
+
+    /// base（`tile::SMEM_SWIZZLE`＝`Off`。本番既定）を、`coop_load` は
+    /// `tile::COOP_LOAD_CONFIG` 固定で構築する共通ヘルパ（12 head 全テスト
+    /// が共有）。
+    fn smem_swizzle_base_gemm(ctx: &crate::context::MetalContext) -> MetalGemm {
+        MetalGemm::new_with_smem_swizzle(ctx, tile::COOP_LOAD_CONFIG, tile::SMEM_SWIZZLE)
+            .expect("base GEMM パイプラインの構築に失敗した")
+    }
+
+    /// 1: [`tile::CANDIDATES`] 全 11 候補 × N∈{512,1024,2048,4096} × 12
+    /// head で `dispatch_tiled_prepared` 出力が bit 単位で一致することを
+    /// 確認する（`coop_load_bit_match_all_candidates` と同型の設計）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn smem_swizzle_bit_match_all_candidates() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = smem_swizzle_base_gemm(&ctx);
+        assert_eq!(base_gemm.smem_swizzle(), tile::SMEM_SWIZZLE);
+
+        const SEED: u64 = 0x1970;
+
+        for (coop_cfg, swizzle) in smem_swizzle_required_heads() {
+            let head_gemm = MetalGemm::new_with_smem_swizzle(&ctx, coop_cfg, swizzle)
+                .expect("head GEMM パイプラインの構築に失敗した");
+
+            for (i, cfg) in tile::CANDIDATES.iter().copied().enumerate() {
+                for size in [512usize, 1024, 2048, 4096] {
+                    let base_resolved = base_gemm
+                        .resolve_tile_config(&ctx, cfg)
+                        .expect("base 構成の解決に失敗した");
+                    assert_eq!(
+                        base_resolved, cfg,
+                        "coop_cfg={coop_cfg:?} swizzle={swizzle:?} index={i} size={size}: \
+                         base 側でフォールバックが発生した（検証が空振りする）"
+                    );
+                    let head_resolved = head_gemm
+                        .resolve_tile_config(&ctx, cfg)
+                        .expect("head 構成の解決に失敗した");
+                    assert_eq!(
+                        head_resolved, cfg,
+                        "coop_cfg={coop_cfg:?} swizzle={swizzle:?} index={i} size={size}: \
+                         head 側でフォールバックが発生した（検証が空振りする）"
+                    );
+
+                    let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+                    let a = rng.fill_vec(size * size);
+                    let b = rng.fill_vec(size * size);
+
+                    let a_buf = MetalBuffer::new_with_data(&ctx, &a)
+                        .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                    let b_buf = MetalBuffer::new_with_data(&ctx, &b)
+                        .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                    let base_c_buf = MetalBuffer::new_zeroed(&ctx, size * size)
+                        .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+                    let head_c_buf = MetalBuffer::new_zeroed(&ctx, size * size)
+                        .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+
+                    base_gemm
+                        .dispatch_tiled_prepared(
+                            &ctx,
+                            &a_buf,
+                            &b_buf,
+                            &base_c_buf,
+                            size,
+                            size,
+                            size,
+                            cfg,
+                        )
+                        .expect(
+                            "base GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                        );
+                    head_gemm
+                        .dispatch_tiled_prepared(
+                            &ctx,
+                            &a_buf,
+                            &b_buf,
+                            &head_c_buf,
+                            size,
+                            size,
+                            size,
+                            cfg,
+                        )
+                        .expect(
+                            "head GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                        );
+
+                    let base_bits: Vec<u32> = base_c_buf
+                        .read_to_vec()
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect();
+                    let head_bits: Vec<u32> = head_c_buf
+                        .read_to_vec()
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect();
+                    assert_eq!(
+                        base_bits, head_bits,
+                        "coop_cfg={coop_cfg:?} swizzle={swizzle:?} index={i} size={size}: \
+                         XOR swizzle 軸の違いにより出力がビット単位で一致しなかった。演算\
+                         オペランド列が変わっている疑いがあるため、shaders/gemm.metal の\
+                         smem_swizzle_col 呼び出し箇所を確認すること。"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 2: 本番自動選択経路 `dispatch_auto` で N=512〜4096 × 12 head の
+    /// bit 一致を確認する。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn smem_swizzle_bit_match_dispatch_auto() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = smem_swizzle_base_gemm(&ctx);
+
+        const SEED: u64 = 0x1970;
+
+        for (coop_cfg, swizzle) in smem_swizzle_required_heads() {
+            let head_gemm = MetalGemm::new_with_smem_swizzle(&ctx, coop_cfg, swizzle)
+                .expect("head GEMM パイプラインの構築に失敗した");
+
+            for size in [512usize, 1024, 2048, 4096] {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+                let a = rng.fill_vec(size * size);
+                let b = rng.fill_vec(size * size);
+
+                let base_out = base_gemm
+                    .dispatch_auto(&ctx, &a, &b, size, size, size)
+                    .expect("base GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+                let head_out = head_gemm
+                    .dispatch_auto(&ctx, &a, &b, size, size, size)
+                    .expect("head GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+
+                let base_bits: Vec<u32> = base_out.iter().map(|v| v.to_bits()).collect();
+                let head_bits: Vec<u32> = head_out.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(
+                    base_bits, head_bits,
+                    "coop_cfg={coop_cfg:?} swizzle={swizzle:?} size={size}: dispatch_auto で \
+                     XOR swizzle 軸の違いにより出力がビット単位で一致しなかった。"
+                );
+            }
+        }
+    }
+
+    /// 3: NT/TN/TT（`dispatch_strided_tiled_prepared`）を N=1024・
+    /// `CANDIDATES[3]`／`CANDIDATES[5]`（bk=32）× 12 head で確認する
+    /// （A-T・B-T レイアウトの検証。`coop_load_transposed_bit_match` と
+    /// 同型の設計）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn smem_swizzle_transposed_bit_match() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = smem_swizzle_base_gemm(&ctx);
+
+        const SEED: u64 = 0x1970;
+        const SIZE: usize = 1024;
+
+        for cfg in [tile::CANDIDATES[3], tile::CANDIDATES[5]] {
+            for (coop_cfg, swizzle) in smem_swizzle_required_heads() {
+                let head_gemm = MetalGemm::new_with_smem_swizzle(&ctx, coop_cfg, swizzle)
+                    .expect("head GEMM パイプラインの構築に失敗した");
+
+                for pattern in [
+                    TransposePattern::Nt,
+                    TransposePattern::Tn,
+                    TransposePattern::Tt,
+                ] {
+                    let (trans_a, trans_b) = match pattern {
+                        TransposePattern::Nt => (false, true),
+                        TransposePattern::Tn => (true, false),
+                        TransposePattern::Tt => (true, true),
+                        TransposePattern::Nn => unreachable!("NN はこのループ対象外"),
+                    };
+                    let a_layout = MatrixLayout {
+                        rows: SIZE,
+                        cols: SIZE,
+                        ld: SIZE,
+                        transposed: trans_a,
+                    };
+                    let b_layout = MatrixLayout {
+                        rows: SIZE,
+                        cols: SIZE,
+                        ld: SIZE,
+                        transposed: trans_b,
+                    };
+
+                    let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+                    let a = rng.fill_vec(SIZE * SIZE);
+                    let b = rng.fill_vec(SIZE * SIZE);
+                    let a_buf = MetalBuffer::new_with_data(&ctx, &a)
+                        .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                    let b_buf = MetalBuffer::new_with_data(&ctx, &b)
+                        .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                    let base_c_buf = MetalBuffer::new_zeroed(&ctx, SIZE * SIZE)
+                        .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+                    let head_c_buf = MetalBuffer::new_zeroed(&ctx, SIZE * SIZE)
+                        .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+
+                    base_gemm
+                        .dispatch_strided_tiled_prepared(
+                            &ctx,
+                            &a_buf,
+                            0,
+                            a_layout,
+                            &b_buf,
+                            0,
+                            b_layout,
+                            &base_c_buf,
+                            SIZE,
+                            SIZE,
+                            SIZE,
+                            cfg,
+                        )
+                        .expect(
+                            "base GEMM dispatch_strided_tiled_prepared に失敗した\
+                             （実機でのみ実行する前提）",
+                        );
+                    head_gemm
+                        .dispatch_strided_tiled_prepared(
+                            &ctx,
+                            &a_buf,
+                            0,
+                            a_layout,
+                            &b_buf,
+                            0,
+                            b_layout,
+                            &head_c_buf,
+                            SIZE,
+                            SIZE,
+                            SIZE,
+                            cfg,
+                        )
+                        .expect(
+                            "head GEMM dispatch_strided_tiled_prepared に失敗した\
+                             （実機でのみ実行する前提）",
+                        );
+
+                    let base_bits: Vec<u32> = base_c_buf
+                        .read_to_vec()
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect();
+                    let head_bits: Vec<u32> = head_c_buf
+                        .read_to_vec()
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect();
+                    assert_eq!(
+                        base_bits, head_bits,
+                        "cfg={cfg:?} coop_cfg={coop_cfg:?} swizzle={swizzle:?} \
+                         pattern={pattern:?}: 転置ロードで XOR swizzle 軸の違いにより出力が\
+                         ビット単位で一致しなかった。"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 4: 端数形状（M=1032・N=1048・K=1032。スカラーフォールバック経路を
+    /// 通る）で `dispatch_tiled_prepared` × 全候補 × 12 head の bit 一致を
+    /// 確認する。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn smem_swizzle_bit_match_boundary_shape() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = smem_swizzle_base_gemm(&ctx);
+
+        const SEED: u64 = 0x1970;
+        const M: usize = 1032;
+        const N: usize = 1048;
+        const K: usize = 1032;
+
+        for (coop_cfg, swizzle) in smem_swizzle_required_heads() {
+            let head_gemm = MetalGemm::new_with_smem_swizzle(&ctx, coop_cfg, swizzle)
+                .expect("head GEMM パイプラインの構築に失敗した");
+
+            for cfg in tile::CANDIDATES.iter().copied() {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+                let a = rng.fill_vec(M * K);
+                let b = rng.fill_vec(K * N);
+
+                let a_buf = MetalBuffer::new_with_data(&ctx, &a)
+                    .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                let b_buf = MetalBuffer::new_with_data(&ctx, &b)
+                    .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+                let base_c_buf = MetalBuffer::new_zeroed(&ctx, M * N)
+                    .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+                let head_c_buf = MetalBuffer::new_zeroed(&ctx, M * N)
+                    .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+
+                base_gemm
+                    .dispatch_tiled_prepared(&ctx, &a_buf, &b_buf, &base_c_buf, M, N, K, cfg)
+                    .expect(
+                        "base GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+                head_gemm
+                    .dispatch_tiled_prepared(&ctx, &a_buf, &b_buf, &head_c_buf, M, N, K, cfg)
+                    .expect(
+                        "head GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）",
+                    );
+
+                let base_bits: Vec<u32> = base_c_buf
+                    .read_to_vec()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect();
+                let head_bits: Vec<u32> = head_c_buf
+                    .read_to_vec()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect();
+                assert_eq!(
+                    base_bits, head_bits,
+                    "cfg={cfg:?} coop_cfg={coop_cfg:?} swizzle={swizzle:?}: 端数形状\
+                     （M={M} N={N} K={K}）で XOR swizzle 軸の違いにより出力がビット単位で\
+                     一致しなかった。"
+                );
+            }
+        }
+    }
+
+    /// 5: `gemm_simdgroup_tiled_f16` は `COOP_SMEM_SWIZZLE` を参照しない
+    /// no-op 契約であることを、base（`tile::SMEM_SWIZZLE`）と head
+    /// （`L1-P8` + `BothTiles`）が `dispatch_f16_tiled_prepared_unverified`
+    /// で bit 一致することにより実機証明する（`coop_load_f16_path_is_noop`
+    /// と同型の設計。`pipeline_for_tile_f16` が常に `coop_smem_swizzle: 0`
+    /// を渡す契約〈`gemm.rs` 呼び出し側コメント参照〉の裏付け）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn smem_swizzle_f16_path_is_noop() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let base_gemm = smem_swizzle_base_gemm(&ctx);
+        let head_gemm = MetalGemm::new_with_smem_swizzle(
+            &ctx,
+            tile::CoopLoadConfig {
+                layout: tile::CoopLoadLayout::RowStrided,
+                pad: tile::TgpPad::Eight,
+            },
+            tile::SmemSwizzle::BothTiles,
+        )
+        .expect("head GEMM パイプラインの構築に失敗した");
+
+        const SEED: u64 = 0x1970;
+        const SIZE: usize = 1024;
+        let cfg = tile::CANDIDATES[3];
+
+        let mut rng = bench_harness::rng::Xorshift64Star::new(SEED);
+        let a: Vec<half::f16> = rng.fill_vec_f16(SIZE * SIZE);
+        let b: Vec<half::f16> = rng.fill_vec_f16(SIZE * SIZE);
+
+        let a_buf = MetalHalfBuffer::new_with_data(&ctx, &a)
+            .expect("A バッファのアップロードに失敗した（実機でのみ実行する前提）");
+        let b_buf = MetalHalfBuffer::new_with_data(&ctx, &b)
+            .expect("B バッファのアップロードに失敗した（実機でのみ実行する前提）");
+        let base_c_buf = MetalHalfBuffer::new_zeroed(&ctx, SIZE * SIZE)
+            .expect("base C バッファの確保に失敗した（実機でのみ実行する前提）");
+        let head_c_buf = MetalHalfBuffer::new_zeroed(&ctx, SIZE * SIZE)
+            .expect("head C バッファの確保に失敗した（実機でのみ実行する前提）");
+
+        base_gemm
+            .dispatch_f16_tiled_prepared_unverified(
+                &ctx,
+                &a_buf,
+                &b_buf,
+                &base_c_buf,
+                SIZE,
+                SIZE,
+                SIZE,
+                cfg,
+            )
+            .expect(
+                "base GEMM dispatch_f16_tiled_prepared_unverified に失敗した\
+                 （実機でのみ実行する前提）",
+            );
+        head_gemm
+            .dispatch_f16_tiled_prepared_unverified(
+                &ctx,
+                &a_buf,
+                &b_buf,
+                &head_c_buf,
+                SIZE,
+                SIZE,
+                SIZE,
+                cfg,
+            )
+            .expect(
+                "head GEMM dispatch_f16_tiled_prepared_unverified に失敗した\
+                 （実機でのみ実行する前提）",
+            );
+
+        let base_bits: Vec<u16> = base_c_buf
+            .read_to_vec()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        let head_bits: Vec<u16> = head_c_buf
+            .read_to_vec()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(
+            base_bits, head_bits,
+            "f16 経路（gemm_simdgroup_tiled_f16）が COOP_SMEM_SWIZZLE を参照してしまって\
+             いる疑いがある（no-op 契約違反）。"
+        );
+    }
+
+    /// 6: [`tile::SMEM_SWIZZLE`]（本番既定）が [`tile::SmemSwizzle::Off`]
+    /// であり、`MetalGemm::new` が構築するインスタンスの
+    /// `smem_swizzle()`／`coop_load()` も本番既定と一致することを実機上で
+    /// 固定する（本番既定不変のドリフト検出。`coop_load_default_matches_
+    /// production_constants` と同型の設計。Linux 実行可能な部分は
+    /// `tile::tests::smem_swizzle_default_is_off`）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn smem_swizzle_default_matches_production_constants() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+        assert_eq!(gemm.smem_swizzle(), tile::SMEM_SWIZZLE);
+        assert_eq!(tile::SMEM_SWIZZLE, tile::SmemSwizzle::Off);
+        assert_eq!(gemm.coop_load(), tile::COOP_LOAD_CONFIG);
     }
 
     // --- タイルクラス分割（イシュー #1327・E6 試作） ---

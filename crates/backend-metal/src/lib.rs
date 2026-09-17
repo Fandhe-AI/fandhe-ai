@@ -354,6 +354,21 @@ mod gemm_frag_load_diag_tests;
 // （`gemm.rs`／`tile.rs`／`shaders/gemm.metal`）は無変更。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_coop_load_diag_tests;
+// 協調ロードの threadgroup メモリ格納位置 XOR swizzle 軸（`tile::
+// SmemSwizzle`。イシュー #1970 で実装・Linux 実行可能な範囲で bit 一致を
+// 自己検証済み）の N=512/1024/2048/4096 純カーネル時間（GPU タイム
+// スタンプ）を 7 arm（`L0-P4-S0`〈本番既定〉/`L0-P0-S0`/`L0-P4-S1`/
+// `L0-P0-S1`/`L0-P8-S1`/`L0-P4-S2`/`L0-P0-S2`）で計測し有効性を判定する
+// 診断テスト。`gemm::MetalGemm::new_with_smem_swizzle`（`pub`。イシュー
+// #1970）・`gemm_reuse_phase_diag_tests::measure_one_phase_trial`
+// （`pub(crate)`）・`tile::SmemSwizzle`／`CoopLoadConfig::pad_elems`
+// （いずれも `pub`／`pub(crate)`）へ到達するため、`gemm_coop_load_diag_
+// tests` と同じ理由でクレートルートの兄弟モジュールとして配置する。
+// `objc2` 系 FFI 型に触れるため同じ `cfg(all(test, target_os = "macos"))`
+// を付ける。プロダクションコード（`gemm.rs`／`tile.rs`／
+// `shaders/gemm.metal`）は無変更。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_smem_swizzle_diag_tests;
 // E6 タイルクラス分割（`tile::TileClassMode`。イシュー #1327・PR #1388で
 // opt-in 機構を追加・bit 一致を自己検証済み）の N=1024/2048/4096 純カー
 // ネル時間（GPU タイムスタンプ）を候補 0/4/5/8（`tile::CANDIDATES`）で

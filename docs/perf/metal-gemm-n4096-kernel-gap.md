@@ -1464,7 +1464,15 @@ constant 経路）が M4 Max 上では既に局所最適に近い」ことを補
   **追記（イシュー #1327）**: index 15 はその後 `TILE_CLASS`（タイル
   クラス分割ゲート。E6 試作）へ割り当てられた。詳細・実測は
   `docs/perf/metal-gemm-tile-class-split.md`。性能実測・採否判断は
-  イシュー #1328（本ファイル §12）で完了済み（組み込み不可・REJECT）
+  イシュー #1328（本ファイル §12）で完了済み（組み込み不可・REJECT）。
+  **追記（イシュー #1970）**: XOR swizzle 軸自体は index 17
+  （`COOP_SMEM_SWIZZLE`。index 16 は #1474 の `SPLIT_K_ENABLED` が占有）
+  で実装済み（`docs/perf/metal-gemm-coop-load-candidates.md` §7）。
+  機構実装・Linux 実行可能な範囲の検証のみが完了しており、実機
+  〈Apple Silicon〉での bit 一致実行・kernel_gpu 5 run A/B・`tile::
+  select` への組み込み判断は本イシューのスコープ外のまま未実施
+  （`verdict=undetermined（計測未実施）`。実測スキャフォールドは
+  `docs/perf/logs/metal-gemm-smem-swizzle-ab-1970/` へ申し送り）
 - NT/TN/TT 転置パターンでの性能比較（bit 一致は #1298 T3 で NN 以外も
   検証済みだが、性能実測は NN のみが対象）
 - f16 経路（`gemm_simdgroup_tiled_f16`）への E4 展開（T5 は f16 経路が

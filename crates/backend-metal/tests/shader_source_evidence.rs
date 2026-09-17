@@ -578,8 +578,11 @@ fn gemm_simdgroup_tiled_source_uses_register_resident_fragment_arrays() {
     for needle in [
         "simdgroup_float8x8 a_frag[ACC_ROWS_CAP];",
         "simdgroup_float8x8 b_frag[ACC_COLS_CAP];",
-        "simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);",
-        "simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);",
+        // イシュー #1970: XOR swizzle 軸の導入により列項（kk）が
+        // `smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, ...)` で包まれた
+        // （`enabled=false` では恒等へ畳み込まれ挙動は無変更）。
+        "simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, wm_idx * sub_bm + r * 8, kk, BK), lda);",
+        "simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, wn_idx * sub_bn + c_ * 8, BN), ldb);",
         "simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);",
     ] {
         assert!(
@@ -689,9 +692,10 @@ fn gemm_simdgroup_tiled_source_uses_tgp_padding_stride() {
         "uint ldb = BN + TGP_PAD;",
         // イシュー #745 でフラグメント配列（`a_frag`/`b_frag`）へ移植された後も
         // パディング込みストライド（`lda`/`ldb`）でのロードは維持される
-        // （変数名のみ変更。ストライド式自体は不変）。
-        "simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);",
-        "simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);",
+        // （変数名のみ変更。ストライド式自体は不変）。イシュー #1970 で
+        // 列項が `smem_swizzle_col` で包まれた（上記テストと同じ理由）。
+        "simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, wm_idx * sub_bm + r * 8, kk, BK), lda);",
+        "simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, wn_idx * sub_bn + c_ * 8, BN), ldb);",
     ] {
         assert!(
             kernel_body.contains(needle),
@@ -709,12 +713,19 @@ fn gemm_simdgroup_tiled_source_uses_tgp_padding_stride() {
 #[test]
 fn gemm_simdgroup_tiled_source_retains_boundary_guard_with_padding() {
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    // イシュー #1970: NN 書き込み先添字の列項（kk）が
+    // `smem_swizzle_col(COOP_SMEM_SWIZZLE >= N, ...)` で包まれた
+    // （`enabled=false` では恒等へ畳み込まれ挙動は無変更）。
     assert!(
-        kernel_body.contains("uint dst_idx = r * lda + kk;"),
+        kernel_body.contains(
+            "uint dst_idx = r * lda + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, r, kk, BK);"
+        ),
         "A タイルのパディング込み書き込み先添字 dst_idx が見つかりません"
     );
     assert!(
-        kernel_body.contains("uint dst_idx = kk * ldb + c_;"),
+        kernel_body.contains(
+            "uint dst_idx = kk * ldb + smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, c_, BN);"
+        ),
         "B タイルのパディング込み書き込み先添字 dst_idx が見つかりません"
     );
     // イシュー #1138: 上記コメントと同じ理由で 4 箇所（NN 2 + 転置 2）。
@@ -1014,8 +1025,11 @@ fn gemm_simdgroup_tiled_source_retains_transpose_fragment_loads() {
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
     for needle in [
         "constant GemmStrides& st [[buffer(4)]]",
-        "simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)(wm_idx * sub_bm + r * 8), lda, ulong2(0), true);",
-        "simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)kk, ldb, ulong2(0), true);",
+        // イシュー #1970: 転置フラグメントロードの列項（それぞれ
+        // wm_idx.../kk）が `smem_swizzle_col` で包まれた
+        // （`enabled=false` では恒等へ畳み込まれ挙動は無変更）。
+        "simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, kk, wm_idx * sub_bm + r * 8, BM), lda, ulong2(0), true);",
+        "simdgroup_load(b_frag[c_], tile_b + (size_t)(wn_idx * sub_bn + c_ * 8) * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, wn_idx * sub_bn + c_ * 8, kk, BK), ldb, ulong2(0), true);",
         "if (TRANS_A) {",
         "if (TRANS_B) {",
     ] {
@@ -1045,13 +1059,13 @@ fn gemm_metal_source_declares_transpose_boundary_helpers() {
     }
 }
 
-/// イシュー #1288/#1293/#1298/#1327/#1474 の証跡: ソーステキスト特殊化
-/// 経路（`GEMM_SPEC_ENABLED`）が定義される `#ifdef` 分岐に 16 個の
-/// `= GEMM_SPEC_*` リテラル代入（function constant 経路 16 宣言と 1:1
-/// 対応。#1474 で split-K 有効化ゲート 1 個〈index 16〉が追加され
-/// 15→16 へ増えた）が全て存在することをロックする。
+/// イシュー #1288/#1293/#1298/#1327/#1474/#1970 の証跡: ソーステキスト
+/// 特殊化経路（`GEMM_SPEC_ENABLED`）が定義される `#ifdef` 分岐に 17 個の
+/// `= GEMM_SPEC_*` リテラル代入（function constant 経路 17 宣言と 1:1
+/// 対応。#1970 で XOR swizzle 軸 1 個〈index 17〉が追加され 16→17 へ
+/// 増えた）が全て存在することをロックする。
 #[test]
-fn gemm_metal_source_declares_spec_ifdef_block_with_all_seventeen_defines() {
+fn gemm_metal_source_declares_spec_ifdef_block_with_all_eighteen_defines() {
     assert!(
         GEMM_METAL_SOURCE.contains("#ifdef GEMM_SPEC_ENABLED"),
         "gemm.metal に #ifdef GEMM_SPEC_ENABLED 分岐（イシュー #1288）が見つかりません"
@@ -1074,22 +1088,23 @@ fn gemm_metal_source_declares_spec_ifdef_block_with_all_seventeen_defines() {
         "constant uint COOP_LOAD_LAYOUT = GEMM_SPEC_COOP_LOAD_LAYOUT;",
         "constant uint TILE_CLASS = GEMM_SPEC_TILE_CLASS;",
         "constant bool SPLIT_K_ENABLED = GEMM_SPEC_SPLIT_K_ENABLED;",
+        "constant uint COOP_SMEM_SWIZZLE = GEMM_SPEC_COOP_SMEM_SWIZZLE;",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
-            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288/#1293/#1298/#1327/#1474）が見つかりません"
+            "gemm.metal の #ifdef GEMM_SPEC_ENABLED 分岐に `{needle}`（イシュー #1288/#1293/#1298/#1327/#1474/#1970）が見つかりません"
         );
     }
 }
 
-/// イシュー #1288/#1293/#1298/#1327/#1474 の証跡: `#ifdef GEMM_SPEC_ENABLED`
-/// 導入後も `#else` 側の 16 個の function constant 宣言（本番既定経路。
-/// #188/#538/#540/#809/#1138/#1282/#1293/#1298/#1327/#1474 の各 index）が
-/// バイト同一で残っていることをロックする（`crate::spec_source` へ移設した
-/// `SOURCE_SPECIALIZATION_ENABLED` 既定 `false` の裏付け——`#else` 側が
-/// 変わっていなければ本番挙動は変わらない）。
+/// イシュー #1288/#1293/#1298/#1327/#1474/#1970 の証跡: `#ifdef
+/// GEMM_SPEC_ENABLED` 導入後も `#else` 側の 17 個の function constant
+/// 宣言（本番既定経路。#188/#538/#540/#809/#1138/#1282/#1293/#1298/
+/// #1327/#1474/#1970 の各 index）がバイト同一で残っていることをロックする
+/// （`crate::spec_source` へ移設した `SOURCE_SPECIALIZATION_ENABLED` 既定
+/// `false` の裏付け——`#else` 側が変わっていなければ本番挙動は変わらない）。
 #[test]
-fn gemm_metal_source_else_branch_retains_all_seventeen_function_constants() {
+fn gemm_metal_source_else_branch_retains_all_eighteen_function_constants() {
     for needle in [
         "constant uint BM [[function_constant(0)]];",
         "constant uint BN [[function_constant(1)]];",
@@ -1108,11 +1123,12 @@ fn gemm_metal_source_else_branch_retains_all_seventeen_function_constants() {
         "constant uint COOP_LOAD_LAYOUT [[function_constant(14)]];",
         "constant uint TILE_CLASS [[function_constant(15)]];",
         "constant bool SPLIT_K_ENABLED [[function_constant(16)]];",
+        "constant uint COOP_SMEM_SWIZZLE [[function_constant(17)]];",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
             "gemm.metal の #else 側（本番既定）に function constant 宣言 `{needle}` が見つかりません。\
-             イシュー #1288/#1293/#1298/#1327/#1474 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
+             イシュー #1288/#1293/#1298/#1327/#1474/#1970 の #ifdef 導入で #else 側の内容が変わっている疑いがあります。"
         );
     }
 }
@@ -1182,6 +1198,96 @@ fn gemm_simdgroup_tiled_f16_source_does_not_reference_coop_load_constants() {
         !f16_body.contains("coop_load_flat_index"),
         "gemm_simdgroup_tiled_f16 が coop_load_flat_index を参照している（no-op 契約違反）"
     );
+}
+
+/// イシュー #1970 の証跡: `gemm_simdgroup_tiled` の staged 協調ロード・
+/// フラグメントロード計 20 箇所が `smem_swizzle_col` ヘルパを経由し、
+/// A 箇所（協調ロード書き込み 2 + フラグメントロード 8 = 10）は
+/// `COOP_SMEM_SWIZZLE >= 1`、B 箇所（同 10）は `COOP_SMEM_SWIZZLE >= 2`
+/// をゲートに使っていること・direct-load 節（`else` 側。
+/// `USE_TGP_STAGING=false`）には本ヘルパ呼び出しが一切現れないことを
+/// ロックする（計画「S2」節・「2.2」節の 20 箇所という見積りの機械検証）。
+#[test]
+fn gemm_simdgroup_tiled_source_uses_smem_swizzle_col_helper() {
+    assert!(
+        GEMM_METAL_SOURCE.contains(
+            "inline uint smem_swizzle_col(bool enabled, uint row, uint col, uint row_len) {"
+        ),
+        "gemm.metal に smem_swizzle_col ヘルパ本体（イシュー #1970）が見つかりません"
+    );
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    let total_calls = kernel_body.matches("smem_swizzle_col(").count();
+    assert_eq!(
+        total_calls, 20,
+        "gemm_simdgroup_tiled 本体内の smem_swizzle_col 呼び出しがちょうど 20 箇所で \
+         あるはずです（見つかった数: {total_calls}）"
+    );
+    let a_gate_calls = kernel_body
+        .matches("smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1,")
+        .count();
+    assert_eq!(
+        a_gate_calls, 10,
+        "A タイル箇所（協調ロード書き込み 2 + フラグメントロード 8）の \
+         COOP_SMEM_SWIZZLE >= 1 ゲート呼び出しが 10 箇所であるはずです \
+         （見つかった数: {a_gate_calls}）"
+    );
+    let b_gate_calls = kernel_body
+        .matches("smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2,")
+        .count();
+    assert_eq!(
+        b_gate_calls, 10,
+        "B タイル箇所（協調ロード書き込み 2 + フラグメントロード 8）の \
+         COOP_SMEM_SWIZZLE >= 2 ゲート呼び出しが 10 箇所であるはずです \
+         （見つかった数: {b_gate_calls}）"
+    );
+
+    // direct-load 節（`else` 側）には smem_swizzle_col 呼び出しが一切
+    // 現れないことを確認する（swizzle は staged 経路専用。ファイル冒頭
+    // `smem_swizzle_col` doc comment「不変条件」参照）。
+    let direct_load_marker = "// 直接ロード: device メモリから simdgroup ごとに直接";
+    let direct_load_start = kernel_body.find(direct_load_marker).expect(
+        "gemm_simdgroup_tiled の direct-load 経路（else 節）の目印コメントが見つかりません",
+    );
+    let staged_scope = &kernel_body[..direct_load_start];
+    let staged_calls = staged_scope.matches("smem_swizzle_col(").count();
+    assert_eq!(
+        staged_calls, 20,
+        "smem_swizzle_col 呼び出しは全て staged 経路（direct-load 目印コメントより前）に \
+         収まっているはずです（staged 側で見つかった数: {staged_calls}）"
+    );
+}
+
+/// イシュー #1970 の証跡: `gemm_simdgroup_tiled_f16`／`_hfrag`／`_te` は
+/// `COOP_SMEM_SWIZZLE`／`smem_swizzle_col` のいずれも参照しない no-op
+/// 契約であることをソーステキストレベルで固定する（`crate::gemm::
+/// MetalGemm::pipeline_for_tile_f16` 等が常に `0` を渡す契約の裏付け。
+/// `gemm_simdgroup_tiled_f16_source_does_not_reference_coop_load_
+/// constants` と同型の設計）。
+#[test]
+fn f16_hfrag_te_kernels_do_not_reference_smem_swizzle() {
+    for (label, body) in [
+        (
+            "gemm_simdgroup_tiled_f16",
+            gemm_simdgroup_tiled_f16_kernel_body(),
+        ),
+        (
+            "gemm_simdgroup_tiled_hfrag",
+            gemm_simdgroup_tiled_hfrag_kernel_body(),
+        ),
+        (
+            "gemm_simdgroup_tiled_te",
+            gemm_simdgroup_tiled_te_kernel_body(),
+        ),
+    ] {
+        assert!(
+            !body.contains("COOP_SMEM_SWIZZLE"),
+            "{label} が COOP_SMEM_SWIZZLE を参照している（no-op 契約違反）"
+        );
+        assert!(
+            !body.contains("smem_swizzle_col"),
+            "{label} が smem_swizzle_col を参照している（no-op 契約違反）"
+        );
+    }
 }
 
 /// イシュー #1288 の証跡: `gemm_simdgroup_tiled` のアキュムレータ配列
@@ -1468,9 +1574,10 @@ fn gemm_simdgroup_tiled_hfrag_source_does_not_reference_experimental_gates() {
 }
 
 /// 実装計画 §2.4 (f) の証跡（イシュー #1474 で index 16 の
-/// `SPLIT_K_ENABLED` 追加に伴い 16→17 個へ更新）: 17 個の function
+/// `SPLIT_K_ENABLED` 追加に伴い 16→17 個・イシュー #1970 で index 17 の
+/// `COOP_SMEM_SWIZZLE` 追加に伴い 17→18 個へ更新）: 18 個の function
 /// constant 宣言
-/// （`gemm_metal_source_declares_spec_ifdef_block_with_all_seventeen_defines`
+/// （`gemm_metal_source_declares_spec_ifdef_block_with_all_eighteen_defines`
 /// が既に固定している宣言群）が `gemm_simdgroup_tiled_hfrag` の追加後も
 /// 個数不変であることを再確認する（`gemm_simdgroup_tiled_hfrag` 自体は
 /// 新規 function constant を追加しない契約。実装計画 §2.1
@@ -1479,12 +1586,12 @@ fn gemm_simdgroup_tiled_hfrag_source_does_not_reference_experimental_gates() {
 #[test]
 fn gemm_simdgroup_tiled_hfrag_introduces_no_new_function_constants() {
     let declared = GEMM_METAL_SOURCE.matches("[[function_constant(").count();
-    // `gemm_metal_source_declares_spec_ifdef_block_with_all_seventeen_defines`
-    // が個々の宣言文字列（index 0〜16 の 17 個）を固定済みのため、本テストは
+    // `gemm_metal_source_declares_spec_ifdef_block_with_all_eighteen_defines`
+    // が個々の宣言文字列（index 0〜17 の 18 個）を固定済みのため、本テストは
     // 総数のみを再確認する（`gemm_simdgroup_tiled_hfrag` が新規宣言を追加
     // していないことの裏付け）。
     assert_eq!(
-        declared, 17,
+        declared, 18,
         "function_constant 宣言の総数が想定外です（gemm_simdgroup_tiled_hfrag または他カーネルが新規 function constant を追加した疑い）"
     );
 }
