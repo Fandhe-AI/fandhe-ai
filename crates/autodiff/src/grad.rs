@@ -3069,7 +3069,18 @@ pub(crate) enum ArgExtremum {
 /// 持たない。[`sort_with_fallback`] と同型の「バックエンド実装 →
 /// フォールバック」ヘルパー（イシュー #1720）で、`kind` に応じて
 /// `ops.argmax`／`argmin` → `Unsupported` のときのみ空縮約を検査して
-/// から `eval::argmax`／`argmin` へフォールバックする。
+/// から `eval::argmax`／`argmin` へフォールバックする。`Unsupported`
+/// 以外のエラー（`CudaUnavailable`・`ShapeMismatch` 等）はそのまま
+/// `Err` として伝播し、ここではホストへ落とさない（判定迂回経路を
+/// 作らない。`.claude/rules/security.md` A08）。CUDA は
+/// イシュー #1948 でネイティブカーネルを実装済み（`CudaBackendOps::
+/// argmax`／`argmin`）で、`Unsupported` を返すのはカーネル引数 `int`
+/// 上限（`i32::MAX`）を超える巨大テンソル（`CudaError::
+/// ArgReduceSizeLimitExceeded`）のときに限る。それ以外の理由（driver
+/// 不在等）は `CudaUnavailable`／`KernelLaunchFailed` 等として伝播し
+/// 本フォールバックは発火しない。Metal はイシュー #1951 でネイティブ
+/// カーネル（`MetalBackendOps::argmax`／`argmin`）を実装済みのため、
+/// CUDA と同様に通常経路では `Unsupported` を返さない。
 pub(crate) fn argext_with_fallback(
     ops: &dyn BackendOps,
     input: &Tensor<f32>,

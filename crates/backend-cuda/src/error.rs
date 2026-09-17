@@ -104,14 +104,33 @@ pub enum CudaError {
     /// 独立 variant に分離し `Display` メッセージの誤表示を避ける。
     InvalidReduceShape { detail: String },
 
-    /// reduction（`reduce.rs::CudaReduce`）の縮約対象要素数が 0
-    /// （イシュー #1584）。`max` は単位元を持たないため、`backend-cpu::
-    /// reduction::ReduceError::EmptyReduction` と同一の意味論・
-    /// `Display` 文言（`ops.rs` が `BackendError::KernelLaunchFailed`
-    /// へ写像する際に CPU 側と同一の `"empty reduction for op \"{op}\""`
-    /// 文字列を再現する）で表す。`op` は失敗した演算名（現状 `"max"` の
-    /// み。`sum` は単位元 `0.0` を持つため到達しない）。
+    /// reduction（`reduce.rs::CudaReduce`／`arg_reduce.rs::
+    /// CudaArgReduce`）の縮約対象要素数が 0（イシュー #1584・#1720・
+    /// #1948）。`max`／`min`／`argmax`／`argmin` は単位元を持たない
+    /// ため、`backend-cpu::reduction::ReduceError::EmptyReduction` と
+    /// 同一の意味論・`Display` 文言（`ops.rs` が
+    /// `BackendError::KernelLaunchFailed` へ写像する際に CPU 側と同一
+    /// の `"empty reduction for op \"{op}\""` 文字列を再現する）で表す。
+    /// `op` は失敗した演算名（`"max"`／`"min"`／`"argmax"`／`"argmin"`。
+    /// `sum` は単位元 `0.0` を持つため到達しない）。
     EmptyReduction { op: &'static str },
+
+    /// `argmax`／`argmin`（`arg_reduce.rs::CudaArgReduce`）の対象サイズが
+    /// バックエンド固有の上限（カーネル引数型 `int` の範囲〈`i32::MAX`〉
+    /// を全軸縮約の `numel`／`chunk_len`／`num_chunks`、単一軸縮約の
+    /// `outer`／`axis_len`／`inner` のいずれかが超過）を超過した
+    /// （イシュー #1948。Cursor Bugbot 指摘・PR #2005 の是正）。
+    /// `InvalidReduceShape`（`reduce.rs::CudaReduce` と共用する形状検証・
+    /// `checked_mul` オーバーフロー等の内部契約違反）とは異なり、これは
+    /// 有効な形状の巨大テンソルがこのカーネル実装の容量を超えるだけの
+    /// 「このカーネルでは非対応」ケースであるため、`ScanSizeLimitExceeded`
+    /// ／`UniqueSizeLimitExceeded`／`BatchNormSizeLimitExceeded` と同じ
+    /// 設計判断で独立 variant に分離する。`ops.rs::CudaBackendOps::
+    /// argmax`／`argmin` は本 variant のみを [`fandhe_ai_tensor_core::
+    /// device::BackendError::Unsupported`] へ写像し
+    /// `fandhe_ai_autodiff::grad::argext_with_fallback` のホスト
+    /// フォールバック（`eval::argmax`／`argmin`）へ委ねる。
+    ArgReduceSizeLimitExceeded { detail: String },
 
     /// gather／scatter 起動 API（`gather_scatter.rs::CudaGatherScatter`）
     /// のホスト側検証（`checked_numel` の要素数積オーバーフロー・
@@ -624,6 +643,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::EmptyReduction { op } => {
                 write!(f, "cannot compute {op} of an empty reduction")
+            }
+            CudaError::ArgReduceSizeLimitExceeded { detail } => {
+                write!(f, "argmax/argmin size limit exceeded: {detail}")
             }
             CudaError::InvalidGatherScatterShape { detail } => {
                 write!(f, "invalid gather/scatter shape: {detail}")

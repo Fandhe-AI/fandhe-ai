@@ -1159,6 +1159,54 @@ impl CudaBackendOps {
         Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`Self::argmax`]／[`Self::argmin`] 共通のディスパッチ（イシュー
+    /// #1948）。`reduce_dispatch` と同型の二重責務分離（`ops.rs` が
+    /// shape の正しさのみ検査し、`i32::MAX` 上限等のカーネル起動前検証は
+    /// `arg_reduce::CudaArgReduce` 側に委ねる）だが、出力 dtype が `i32`
+    /// である点・`dim = None` の戻り値が単一 `i32` 値である点が
+    /// `reduce_dispatch` と異なるため別関数として持つ。
+    fn arg_reduce_dispatch(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+        kind: ArgKind,
+    ) -> Result<Tensor<i32>, BackendError> {
+        let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        let a_owned = a.contiguous();
+        let a_slice = a_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("arg_reduce: input not contiguous".into())
+        })?;
+
+        let arg_reduce = self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_arg_reduce(&device)
+            },
+        )?;
+
+        let data = match dim {
+            None => {
+                let value = self.with_driver_call(&[], map_reduce_error, || match kind {
+                    ArgKind::Max => arg_reduce.run_argmax_all_f32(a_slice),
+                    ArgKind::Min => arg_reduce.run_argmin_all_f32(a_slice),
+                })?;
+                vec![value]
+            }
+            Some(axis) => {
+                let (outer, axis_len, inner) =
+                    crate::reduce::reduce_axis_layout(a_owned.shape(), axis)
+                        .map_err(map_reduce_error)?;
+                self.with_driver_call(&[], map_reduce_error, || match kind {
+                    ArgKind::Max => arg_reduce.run_argmax_axis_f32(a_slice, outer, axis_len, inner),
+                    ArgKind::Min => arg_reduce.run_argmin_axis_f32(a_slice, outer, axis_len, inner),
+                })?
+            }
+        };
+        Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`BackendOps::run_fused`] の RMSNorm 一致経路（イシュー #592）。
     /// `match_rmsnorm_plan` が一致した後の dtype／leaf 数／leaf shape の
     /// 起動前 fail-closed 検証と、`CudaRmsNorm::run_rmsnorm_f32_raw`
@@ -1391,6 +1439,15 @@ enum ReduceKind {
     Min,
 }
 
+/// [`CudaBackendOps::arg_reduce_dispatch`] が `argmax`／`argmin` の
+/// どちらを実行するかを選ぶ内部専用の選択子（イシュー #1948）。
+/// `ReduceKind` と同じく `tensor-core` 公開 API の一部ではない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgKind {
+    Max,
+    Min,
+}
+
 /// `reduce::CudaReduce`／`reduce::reduce_axis_layout` が返す `CudaError`
 /// を `BackendError` へ写像する（イシュー #1584）。`CudaError::
 /// EmptyReduction` は `backend-cpu::reduction::ReduceError::
@@ -1399,12 +1456,28 @@ enum ReduceKind {
 /// （起動前 `i32::MAX` 上限・`checked_mul` オーバーフロー検査の失敗。
 /// `ops.rs` 側の shape 検証〈`reduce_out_shape`〉を通過した入力からは
 /// 実質到達しない防御的経路）は `ShapeError::ElementCountOverflow` へ、
-/// それ以外は既存 [`map_cuda_error`] へ委譲する。
+/// それ以外は既存 [`map_cuda_error`] へ委譲する。`arg_reduce::
+/// CudaArgReduce`（イシュー #1948。`op: "argmax"`／`"argmin"`）もこの
+/// エラー写像をそのまま共用する（`CudaError::EmptyReduction` の `op`
+/// フィールドは呼び出し元が任意の文字列を渡せる汎用設計のため）。
+///
+/// [`CudaError::ArgReduceSizeLimitExceeded`]（`arg_reduce.rs` 専用。
+/// 全要素／単一軸いずれの縮約でもカーネル引数 `int` 上限〈`i32::MAX`〉
+/// を超過した実在しうる巨大テンソルの入力。PR #2005 の Cursor Bugbot
+/// 指摘の是正）**のみ** [`BackendError::Unsupported`] へ写像し、
+/// `fandhe_ai_autodiff::grad::argext_with_fallback` のホスト
+/// フォールバック（`eval::argmax`／`argmin`）へ委ねる
+/// （`map_scan_error`／`map_batch_norm_error` と同じ設計判断:
+/// 「形状不正」〈`InvalidReduceShape`〉と「このカーネルでは非対応」
+/// 〈サイズ上限超過〉を別 variant で区別し、後者のみホスト
+/// フォールバックへ流す）。`reduce::CudaReduce`（`sum`／`max`／`min`）
+/// 側はこの variant を生成しないため、本関数で扱っても安全。
 fn map_reduce_error(err: CudaError) -> BackendError {
     match err {
         CudaError::EmptyReduction { op } => {
             BackendError::KernelLaunchFailed(format!("empty reduction for op \"{op}\""))
         }
+        CudaError::ArgReduceSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
         CudaError::InvalidReduceShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
@@ -3898,29 +3971,18 @@ impl BackendOps for CudaBackendOps {
         self.reduce_dispatch(a, dim, ReduceKind::Min)
     }
 
-    /// `argmax`／`argmin` の CUDA ネイティブカーネルは本イシュー
-    /// （#1720）のスコープ外（フォローアップ候補・PR 本文に記録）。
-    /// デフォルト実装（`Unsupported`）へ委ねると driver 初期化を経由
-    /// してから `Unsupported` を返すことになり無駄なため、`linalg_inv`
-    /// 等と同じ方針で明示的にオーバーライドし driver に触れず即座に
-    /// `Unsupported` を返す。`Var::argmax` はこれを検出してホスト
-    /// フォールバック（`eval::argmax`）へ迂回する。
-    fn argmax(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "CudaBackendOps::argmax: GPU argmax カーネル未実装（#1720 スコープ外・\
-             フォローアップ）。ホスト参照実装へフォールバックする。"
-                .into(),
-        ))
+    /// `argmax`（イシュー #1948。`arg_reduce::CudaArgReduce::
+    /// run_argmax_all_f32`／`run_argmax_axis_f32` への委譲）。走査契約
+    /// （タイは最初の添字・NaN 無視）は `arg_reduce_dispatch` の doc・
+    /// `kernels_arg_reduce.rs` モジュール doc が正。
+    fn argmax(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        self.arg_reduce_dispatch(a, dim, ArgKind::Max)
     }
 
-    /// [`Self::argmax`] と同じ理由・同じ方針（イシュー #1720 スコープ
-    /// 外）。
-    fn argmin(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "CudaBackendOps::argmin: GPU argmin カーネル未実装（#1720 スコープ外・\
-             フォローアップ）。ホスト参照実装へフォールバックする。"
-                .into(),
-        ))
+    /// [`Self::argmax`] と同じ委譲構造（`run_argmin_all_f32`／
+    /// `run_argmin_axis_f32`。イシュー #1948）。
+    fn argmin(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        self.arg_reduce_dispatch(a, dim, ArgKind::Min)
     }
 
     /// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）は
@@ -5386,23 +5448,55 @@ impl BackendOps for CudaBackendOps {
 mod tests {
     use super::*;
 
-    /// `CudaBackendOps::argmax`／`argmin`（イシュー #1720）が driver を
-    /// 一切経由せず即座に `Unsupported` を返すことを確認する
-    /// （`CudaBackendOps::new` 自体は driver 初期化を伴わない遅延構築の
-    /// ため、CUDA 実機がない CI でも実行可能）。
+    /// `CudaBackendOps::argmax`／`argmin`（イシュー #1948）が範囲外
+    /// `dim` を driver 初期化前（`reduce_out_shape` は `arg_reduce_
+    /// dispatch` の driver 取得より前に走る）に `ShapeMismatch` として
+    /// fail-closed に拒否することを確認する（CUDA 実機がない CI でも
+    /// 実行可能）。
     #[test]
-    fn argmax_and_argmin_are_explicitly_unsupported_without_touching_driver() {
+    fn argmax_and_argmin_reject_out_of_range_dim_without_touching_driver() {
         let ops = CudaBackendOps::new(0);
         let a = Tensor::new(vec![1.0f32, 2.0, 3.0], &[3]).unwrap();
 
         assert!(matches!(
-            ops.argmax(&a, None),
-            Err(BackendError::Unsupported(_))
+            ops.argmax(&a, Some(5)),
+            Err(BackendError::ShapeMismatch(_))
         ));
         assert!(matches!(
-            ops.argmin(&a, None),
-            Err(BackendError::Unsupported(_))
+            ops.argmin(&a, Some(5)),
+            Err(BackendError::ShapeMismatch(_))
         ));
+    }
+
+    /// `CudaBackendOps::argmax`／`argmin`（イシュー #1948）の環境適応
+    /// スモークテスト: CUDA 実機がない CI では driver 初期化失敗
+    /// （`CudaUnavailable`）を許容し、実機がある環境では期待どおりの
+    /// 添字を返す（`Unsupported` が返らないこと自体が実装済みの証跡。
+    /// `rmsnorm_parity.rs` 等の env-adaptive スモークテストと同型）。
+    #[test]
+    fn argmax_and_argmin_smoke_returns_expected_index_or_cuda_unavailable() {
+        let ops = CudaBackendOps::new(0);
+        // タイなし・NaN なしの単純な入力（値 [1,3,3,2] の argmax=1,
+        // argmin=0）。
+        let a = Tensor::new(vec![1.0f32, 3.0, 3.0, 2.0], &[4]).unwrap();
+
+        match ops.argmax(&a, None) {
+            Ok(out) => {
+                assert_eq!(out.contiguous().as_slice().unwrap(), &[1i32]);
+            }
+            Err(BackendError::CudaUnavailable(_)) => {
+                // CUDA/NVRTC 非搭載環境（通常 CI）。
+            }
+            Err(other) => panic!("argmax は Unsupported を返してはならない: {other:?}"),
+        }
+
+        match ops.argmin(&a, None) {
+            Ok(out) => {
+                assert_eq!(out.contiguous().as_slice().unwrap(), &[0i32]);
+            }
+            Err(BackendError::CudaUnavailable(_)) => {}
+            Err(other) => panic!("argmin は Unsupported を返してはならない: {other:?}"),
+        }
     }
 
     /// [`map_fused_kernel_init_error`]: `DriverUnavailable`／
@@ -5438,6 +5532,30 @@ mod tests {
         assert!(matches!(
             err,
             BackendError::KernelLaunchFailed(msg) if msg.contains("negative SM count")
+        ));
+    }
+
+    /// [`map_reduce_error`]: `arg_reduce.rs` 専用の
+    /// `CudaError::ArgReduceSizeLimitExceeded`（カーネル引数 `int` 上限
+    /// 超過。`arg_reduce.rs::validate_i32_bound` が返す）は
+    /// `BackendError::Unsupported` へ写像され、`argext_with_fallback`
+    /// のホストフォールバックへ委ねられることを固定する（PR #2005
+    /// Cursor Bugbot 指摘の回帰テスト。巨大バッファは確保せず形状
+    /// メタデータのみで検証する）。共用する `InvalidReduceShape`
+    /// （真の形状不正）は従来どおり `ShapeMismatch` へ写像される。
+    #[test]
+    fn map_reduce_error_treats_arg_reduce_size_limit_as_unsupported() {
+        assert!(matches!(
+            map_reduce_error(CudaError::ArgReduceSizeLimitExceeded {
+                detail: "numel=3000000000".into()
+            }),
+            BackendError::Unsupported(msg) if msg.contains("numel=3000000000")
+        ));
+        assert!(matches!(
+            map_reduce_error(CudaError::InvalidReduceShape {
+                detail: "outer * axis_len * inner overflow".into()
+            }),
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         ));
     }
 

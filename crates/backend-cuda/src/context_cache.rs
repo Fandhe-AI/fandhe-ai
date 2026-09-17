@@ -589,6 +589,23 @@ pub(crate) fn cached_reduce(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::arg_reduce::
+/// CudaArgReduce`] スイートをプロセス内キャッシュから取得する（イシュー
+/// #1948。キーは [`ContextKey`]。`cached_reduce` と同型。`sum`／`max`／
+/// `min` の初回コンパイルコストに argmax/argmin 6 カーネルを相乗り
+/// させないため独立キャッシュに分離する）。`ops::CudaBackendOps::
+/// argmax`／`argmin` の唯一の呼び出し先。
+pub(crate) fn cached_arg_reduce(
+    device: &CudaDevice,
+) -> Result<Arc<crate::arg_reduce::CudaArgReduce>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::arg_reduce::CudaArgReduce>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::arg_reduce::CudaArgReduce::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`crate::gather_scatter::
 /// CudaGatherScatter`] スイートをプロセス内キャッシュから取得する
 /// （イシュー #1777。キーは [`ContextKey`]。`cached_reduce` と同型）。
