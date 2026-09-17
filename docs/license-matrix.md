@@ -30,23 +30,6 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 
 すべて MIT OR Apache-2.0 系（`objc2-metal` のみ三重ライセンス）であり、商用配布・改変・再頒布に適合する。
 
-`half` は `tensor-core`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・
-`bench-harness` の `[dependencies]` で既に使用済み（本表の上記エントリで承認済み）に加え、
-イシュー #1960 で `autodiff` の `[dev-dependencies]`（低精度 Linear forward の bit 一致
-オラクルテスト `crates/autodiff/src/var.rs::linear_act_tests` が `TypedOps<half::f16>` の
-丸め計算を再現するモックで使用。本番コード非経由）としても参照するようになった。`Cargo.lock`
-の `fandhe-ai-autodiff` パッケージへ `half` が依存として追加される以外に新規パッケージの
-混入はなく（`cargo tree` 実測で確認）、`=2.7.1` 完全固定・上記ライセンス判定はそのまま適用
-される。ワークスペース既承認クレートを別クレートの `dev-dependencies` から参照する扱いは
-`serde`／`serde_json`（`autodiff` の `dev-dependencies`。#194。`onnx-interop`〈#73〉・
-`bench-harness`〈#29〉が先行した判断と同型）で既に前例がある。本件はこの前例に倣うのみで
-新規の外部依存追加ではないため、本追記は事実の明記であり、新たなユーザー承認の取得は不要と
-判断した（deps-policy.md の許容依存表は区分単位の可否表であり、既承認区分をどのクレートの
-`dev-dependencies` から参照するかまでは承認対象としていない）。
-
-`criterion` に限らず `deny.toml` の `[licenses]` は `include-dev = true` を明示しており（8 節）、
-`half` の dev-dependency としての推移的依存もライセンス監査の対象に含まれる（新規混入なし）。
-
 ## 3. feature 組合せの実測範囲の定義
 
 「有効化しうる feature 組合せ」を推定で除外しないため、まず組合せの軸そのものを実測で確定する。

@@ -5618,7 +5618,11 @@ mod linear_act_tests {
     // §1・§2）が未検証だった。以下はそれを埋める「bit 一致オラクル
     // テスト」（同 doc §1 が言及する検証手段の実体）。
 
-    use half::{bf16, f16};
+    // `half::f16`／`half::bf16` は `fandhe_ai_tensor_core` の再エクスポート
+    // 経由で参照する（本クレートの `half` への直接 Cargo 依存は追加しない。
+    // codex-review 指摘対応・PR #2000 discussion 参照。`tensor-core::lib.rs`
+    // の `pub use half::{bf16, f16};` doc comment 参照）。
+    use fandhe_ai_tensor_core::{bf16, f16};
 
     /// `TypedOps<half::f16>`／`TypedOps<half::bf16>` の実装契約
     /// （`crates/backend-cpu/src/typed_f16.rs` doc:
