@@ -213,6 +213,23 @@ pub use fandhe_ai_tensor_core::InterpolateMode;
 // 経路は facade の公開契約に含めない（`docs/tensor-core-cast-design.md`
 // 参照）。
 pub use fandhe_ai_tensor_core::{CastDType, CastElement};
+// `Scalar`／`ScalarDType`／`TypedOps`（イシュー #1939・
+// `docs/compat-api-scope.md` §5 経路 2 承認・`docs/backend-dtype-
+// dispatch-design.md`）: `Tensor<T>` を直接対象とする dtype 別演算集合
+// （`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の 8 演算
+// 限定）への capability accessor 面を facade へ昇格する。到達経路は
+// `Tape::typed_ops_f64`／`_f16`／`_bf16`（本ファイル下部）が返す
+// `Option<&dyn TypedOps<T>>` のみで、`Var`／autograd は経由しない
+// （勾配は付かない）。`half::f16`／`half::bf16` を名指しする利用者は
+// `half`（本 workspace と同一バージョン）へ直接依存する前提とし、
+// facade は `half` 自体を再エクスポートしない（承認事項）。上記コメント
+// 「1 文 1 行を維持する」と同じ理由で 1 行にまとめる。
+pub use fandhe_ai_tensor_core::{Scalar, ScalarDType, TypedOps};
+
+// `TypedOps<T>` の戻り値型シグネチャで `half::f16`／`half::bf16` を
+// 名指しするための非公開 `use`（facade 自体は `half` を再エクスポート
+// しない。上記 `Scalar`／`ScalarDType`／`TypedOps` コメント参照）。
+use fandhe_ai_tensor_core::{bf16, f16};
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の
 /// newtype ラッパー（codex-review PR #424 P1 是正）。
@@ -475,6 +492,43 @@ impl Tape {
         h0: Option<&Var<'t>>,
     ) -> Result<nn::rnn::RnnSeqOutput<'t, nn::rnn::GruCellVars<'t>>, AutodiffError> {
         gru.forward_seq(&self.0, x, h0)
+    }
+
+    /// この `Tape` が結線されているバックエンドの `f64` 演算本体
+    /// （[`TypedOps<f64>`]）への capability accessor（イシュー #1939・
+    /// `docs/compat-api-scope.md` §5 経路 2 承認・`docs/backend-dtype-
+    /// dispatch-design.md`）。
+    ///
+    /// `Tensor<f64>` を直接対象とする 8 演算（`gemm`／`add`／`mul`／
+    /// `relu`／`exp`／`tanh`／`sum`／`max`）限定の capability であり、
+    /// `Var`／autograd を経由しない（呼び出しは tape に記録されず
+    /// 勾配は付かない）。バックエンドが対応しない場合は `None`
+    /// （fail-closed。例: Metal は f64 型自体が既定非対応）。`Some` が
+    /// 返っても個々の演算が [`BackendError::Unsupported`] を返す場合が
+    /// ある（例: CUDA の `TypedOps<f64>` は 8 演算すべて
+    /// `Unsupported`）——`Some`/`None` は型としての対応可否のみを表す。
+    ///
+    /// REQ-12: 返すのは `TypedOps<f64>` の不変借用のみで、`BackendOps`
+    /// 自体の注入経路は増えない（`fandhe_ai_autodiff::Tape::ops()` は
+    /// 引き続き `pub(crate)`）。
+    pub fn typed_ops_f64(&self) -> Option<&dyn TypedOps<f64>> {
+        self.0.typed_ops_f64()
+    }
+
+    /// `half::f16` 演算本体（[`TypedOps<f16>`]）への capability
+    /// accessor。契約は [`Self::typed_ops_f64`] と同じ（イシュー
+    /// #1939）。`half::f16` を名指しするには利用者が `half` クレート
+    /// （本 workspace と同一バージョン）へ直接依存する（facade は
+    /// `half` を再エクスポートしない）。
+    pub fn typed_ops_f16(&self) -> Option<&dyn TypedOps<f16>> {
+        self.0.typed_ops_f16()
+    }
+
+    /// `half::bf16` 演算本体（[`TypedOps<bf16>`]）への capability
+    /// accessor。契約は [`Self::typed_ops_f64`] と同じ（イシュー
+    /// #1939）。
+    pub fn typed_ops_bf16(&self) -> Option<&dyn TypedOps<bf16>> {
+        self.0.typed_ops_bf16()
     }
 }
 
