@@ -63,6 +63,9 @@ $ git diff --stat v0.9.0..HEAD -- crates
 - RNN／LSTM／GRU・Pooling 層（`nn::MaxPool2d` 等）は本体クレートに実装済み
   だが、`compat::Sequential` に対応する `add_*` が無いため facade からは
   依然到達不能（「NN 層」行が「部分的」のまま残る理由）。
+- #1962 で「推論・サービング」行の残る穴（KV キャッシュ・トークナイザ・
+  グラフ最適化区分 B）の段階を確定した（`docs/facade-inference-serving-
+  scope-decision.md`）。0.9.0 判定値自体（本表 §3）は変更しない。
 
 ## 5. スコアボード（Artifact）反映状況
 
