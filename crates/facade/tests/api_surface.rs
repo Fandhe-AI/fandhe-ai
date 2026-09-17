@@ -1034,6 +1034,33 @@ fn value_contains_forbidden_key(value: &str, key: &str) -> bool {
     })
 }
 
+/// `value`（インライン table 形の依存値）中に `package` キーが現れ、その
+/// 値（クォートを除去した後の文字列）が `names` のいずれかと完全一致する
+/// かを検査する（`package` によるクレート名リネーム迂回の検出）。
+///
+/// TOML はダブルクォート文字列（`"..."`）とシングルクォートのリテラル
+/// 文字列（`'...'`）の両方を許容する。旧実装（`value.contains(&format!("\"{name}\""))`）
+/// はダブルクォートのみを対象としていたため、`package = 'fandhe-ai-onnx-interop'`
+/// のようなシングルクォート表記で検査を回避できてしまっていた
+/// （codex-review 指摘 P1・#2024 2 回目レビュー）。`value_contains_forbidden_key`
+/// と同じキー／値の字句分割方式を用い、クォート種別に依存せず判定する。
+fn value_has_package_rename_to(value: &str, names: &[&str]) -> bool {
+    value.split(',').any(|segment| {
+        let segment = segment.trim().trim_start_matches('{').trim_end_matches('}');
+        match segment.split_once('=') {
+            Some((k, v)) => {
+                let k = k.trim().trim_matches('"').trim_matches('\'');
+                if k != "package" {
+                    return false;
+                }
+                let v = v.trim().trim_matches('"').trim_matches('\'');
+                names.contains(&v)
+            }
+            None => false,
+        }
+    })
+}
+
 /// `facade_depends_on_onnx_interop_only_in_approved_shape` の走査ロジック
 /// 本体。実 `Cargo.toml` からの呼び出しと、パース境界（コメント付き
 /// ヘッダ行等）を固定する合成入力からの呼び出しの両方から使えるよう、
@@ -1128,11 +1155,12 @@ fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
         // に限定する（単純な部分文字列一致は path 値を誤検出するため
         // 不採用）。
         let is_alt_key = ONNX_INTEROP_ALT_NAMES.contains(&key);
-        let value_has_package_rename = value.contains("package")
-            && ONNX_INTEROP_ALT_NAMES
-                .iter()
-                .chain(std::iter::once(&ONNX_INTEROP_DEPENDENCY_KEY))
-                .any(|name| value.contains(&format!("\"{name}\"")));
+        let package_rename_names: Vec<&str> = ONNX_INTEROP_ALT_NAMES
+            .iter()
+            .copied()
+            .chain(std::iter::once(ONNX_INTEROP_DEPENDENCY_KEY))
+            .collect();
+        let value_has_package_rename = value_has_package_rename_to(value, &package_rename_names);
         if !is_target_key && !is_alt_key && !value_has_package_rename {
             continue;
         }
@@ -1339,6 +1367,41 @@ fandhe-ai-onnx-interop = { git = "https://example.invalid/onnx-interop", version
     assert!(
         offending.iter().any(|e| e.contains("禁止キー `git`")),
         "git 取得元差し替えが検出されなかった: {offending:?}"
+    );
+}
+
+/// `package = "..."` によるクレート名リネーム迂回がダブルクォート・
+/// シングルクォート（TOML リテラル文字列）のいずれでも検出されることを
+/// 確認する（codex-review 指摘 P1・#2024 2 回目レビューの回帰固定。旧
+/// 実装はダブルクォートのみを対象としシングルクォート表記ですり抜け
+/// 可能だった）。
+#[test]
+fn package_rename_bypass_is_flagged_regardless_of_quote_style() {
+    let double_quoted = r#"
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+
+[build-dependencies]
+alias = { package = "fandhe-ai-onnx-interop", path = "../onnx-interop", version = "=0.9.0" }
+"#;
+    let (offending, _) = scan_onnx_dependency_shape(double_quoted);
+    assert!(
+        offending.iter().any(|e| e.contains("package")),
+        "ダブルクォートの package リネームが検出されなかった: {offending:?}"
+    );
+
+    let single_quoted = r#"
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+
+[build-dependencies]
+alias = { package = 'fandhe-ai-onnx-interop', path = '../onnx-interop', version = '=0.9.0' }
+"#;
+    let (offending, _) = scan_onnx_dependency_shape(single_quoted);
+    assert!(
+        offending.iter().any(|e| e.contains("package")),
+        "シングルクォート（TOML リテラル文字列）の package リネームが\
+         検出されなかった: {offending:?}"
     );
 }
 
