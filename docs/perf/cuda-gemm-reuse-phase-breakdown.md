@@ -281,3 +281,28 @@ bit_exact`・`host_view_readout_keeps_tape_usable`）で自己検証済み（fea
 Metal §12・CPU §15 は off 腕が registry・on 腕が HEAD path という
 ソース差を含む参考比較のため、readout 単独への帰属は保留のまま各節に
 明記している（詳細は各節を参照）。
+
+## §12 `fandhe-ai =0.9.0` ピンでの再計測（イシュー #1973・未実測）
+
+§3〜§9 の実測は crates.io 公開版 `fandhe-ai =0.6.0` 時点（2026-09-04
+計測）のものであり、その後 §11（#1337 借用ビュー readout の既定経路化・
+#1438）・split-K 本番結線（#1516）・VJP 転置入口（#1590・#1909 で ADOPT
+確定）等、reuse 経路に影響しうる変更が複数マージされている。イシュー
+#1973（親 #1972）は、framework-compare の承認ピンが `fandhe-ai =0.9.0`
+（2026-09-17 公開。`.claude/rules/deps-policy.md` 参照）へ更新された
+現時点で §3〜§9 と同じ 2 層方法論（Layer A: `--phases` 公開 API 境界・
+Layer B: `crates/backend-cuda` 非公開 API 内部分解）を再実行し、candle
+比の約 0.5 倍という乖離（出典: issue #1973 本文のスコアボード参照）が
+どのフェーズに帰属するかを確定する目的で起票された。
+
+本セッションの実行環境（Linux・GPU 利用不能）には DGX Spark GB10 実機
+への到達手段がないため、**実測は未実施のまま**であり、実測スキャフォー
+ルド（`docs/perf/logs/cuda-gemm-reuse-phase-1973/`。`orchestrate.sh`・
+`aggregate.py`・事前登録判定規則・記入欄）のみを整備した。対象形状は
+§3 の N=1024／2048／4096 を継承する（issue #1973 の受け入れ条件本文に
+ある「N=512／1024／2048」という表記との揺れがあるが、`gemm_reuse_
+phase_diag_tests.rs::SIZES` 定数〈`[1024, 2048, 4096]`〉と #1182 実測
+範囲との整合を優先した。表記揺れの解消要否は issue 側で別途確認する）。
+実測完了後は本節へ N 別内訳表・削減候補の優先順位を転記する（GB10 実機
+セッションへ申し送り。`docs/perf/logs/cuda-gemm-reuse-phase-1973/
+README.md` 参照）。
