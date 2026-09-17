@@ -2058,6 +2058,63 @@ pub(crate) fn vjp(
             let d_input = adaptive_avg_pool2d_vjp(upstream, &input_shape)?;
             vec![(input, d_input)]
         }
+        // `Tape::custom`（イシュー #1946・`docs/autodiff-custom-function-
+        // decision.md` §12.4）が登録するユーザー定義 forward／backward。
+        // 各入力を層 1（`materialize_fallible`）で実体化し、
+        // `TapeNode::requires_grad`（`Op::for_each_input` と同じ情報源。
+        // イシュー #1748）から `requires_grad: &[bool]` を組み立てて
+        // `CustomFunction::backward` へ渡す。戻り値の長さ・shape 不一致・
+        // `requires_grad[i]==true` への `None` はいずれも fail-closed で
+        // `AutodiffError::Backward` とし、`name()` をメッセージへ含める
+        // （どのユーザー実装が契約違反したか呼び出し元が特定できる
+        // ようにするため）。
+        Op::Custom { inputs, func } => {
+            let input_vals: Vec<&Tensor<f32>> = inputs
+                .iter()
+                .map(|id| materialize_fallible(nodes, ops, *id))
+                .collect::<Result<_, _>>()?;
+            let requires_grad: Vec<bool> =
+                inputs.iter().map(|id| nodes[id.0].requires_grad).collect();
+            let name = func.0.name().to_string();
+            let grads = func
+                .0
+                .backward(&input_vals, out_value, upstream, &requires_grad)?;
+            if grads.len() != inputs.len() {
+                return Err(AutodiffError::Backward(format!(
+                    "Op::Custom（{name}）の backward: 戻り値の長さ {} が入力数 {} と \
+                     一致しない",
+                    grads.len(),
+                    inputs.len()
+                )));
+            }
+            let mut contributions = Vec::with_capacity(inputs.len());
+            for (i, (input, grad)) in inputs.iter().zip(grads).enumerate() {
+                match grad {
+                    Some(g) => {
+                        let expected = &nodes[input.0].shape;
+                        if g.shape() != expected.as_slice() {
+                            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                                lhs: g.shape().to_vec(),
+                                rhs: expected.clone(),
+                            }));
+                        }
+                        contributions.push((*input, g));
+                    }
+                    None => {
+                        if requires_grad[i] {
+                            return Err(AutodiffError::Backward(format!(
+                                "Op::Custom（{name}）の backward: requires_grad[{i}] == \
+                                 true の入力に None を返した（勾配欠落）"
+                            )));
+                        }
+                        // `requires_grad[i] == false` の入力への寄与は
+                        // `backward_impl` 側で改めて破棄されるため、ここ
+                        // では単に列挙しない（§12.4「backward の戻り値」）。
+                    }
+                }
+            }
+            contributions
+        }
     };
     Ok(contributions)
 }

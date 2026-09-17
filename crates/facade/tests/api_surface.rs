@@ -1483,3 +1483,51 @@ fn fit_types_are_reachable_via_facade_only() {
     sgd.set_lr(0.05)
         .expect("test fixture: set_lr(0.05) は有効値のはず");
 }
+
+/// `crates/facade/src/` の `pub use` が `CustomFunction`（ユーザー定義
+/// forward／backward プラグイン機構。イシュー #1946・案 B）を
+/// 再エクスポートしていないことを固定する（`docs/autodiff-custom-
+/// function-decision.md` §12.5 (b)「facade 公開面」は未承認のまま対象外。
+/// `facade_does_not_reexport_cast_ops` と同型の走査）。
+#[test]
+fn facade_does_not_reexport_custom_function() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            if trimmed.contains("CustomFunction") {
+                offending.push(format!(
+                    "{}: `{trimmed}` が CustomFunction を含む",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が CustomFunction を再エクスポートしている\
+         （§12.5 (b) は未承認のまま対象外という設計判断に違反）: {offending:?}"
+    );
+}
+
+/// facade 独自の `struct Tape`（`crates/facade/src/lib.rs`）が
+/// `Tape::custom` への転送メソッドを持たないことを固定する（`Tape::
+/// var_no_grad` の前例〈`docs/autodiff-custom-function-decision.md`
+/// §12.4「入口」〉と同じ「転送メソッドを追加しない限り facade から
+/// 到達不能」という設計を、転送メソッド自体が生えていないことで直接
+/// 検査する）。承認 (b) を得て転送メソッドを追加する際は本テストを
+/// 更新する。
+#[test]
+fn facade_tape_does_not_expose_custom_forwarding_method() {
+    let lib_rs = facade_crate_root().join("src/lib.rs");
+    let content = read_to_string_or_panic(&lib_rs);
+    assert!(
+        !content.contains("pub fn custom("),
+        "facade 独自の Tape に `pub fn custom(` が見つかった\
+         （§12.5 (b) 未承認のまま到達可能にしてしまっている）"
+    );
+}
