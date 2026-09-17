@@ -3,10 +3,24 @@
 
 判定に使う `gemm_ms`・M4_PY（Python 3 FW の転記値）は、隣接する scoreboard/gen_090.py の
 該当区間（`def gemm_ms` から `M4_SKIP =` の直前まで）を exec して取り込む（収録済みファイルのみ参照）。
+
+比較元（0.8.0）はリポジトリ収録ファイルを既定とし、引数で差し替えられる（PR #2023 codex-review 指摘）:
+- M4 Max: `scripts/bench/framework-compare/results/raw/results-m4max-0.8.0.jsonl`（git 管理下）
+- GB10: `docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx/results-dgx-0.8.0{,-extra}.jsonl`・
+  `results-dgx-py-0.8.0.jsonl`
+比較元が読めないセルは「（比較元なし）」と表示して続行する（例外で停止しない）。
+本スクリプトの比は median_rounds.py が選んだ「中央値同士の比」であり、RULE.txt が主判定とする
+「同一 run 内の対戦相手比」ではない（参考値。詳細は median_rounds.py の docstring）。
+
+使い方:
+  compare_head.py [--old-m4 PATH] [--old-gb PATH ...] [--new-gb PATH ...] [NEW_M4_JSONL]
+  例: compare_head.py ../m4max-series-b/results-m4max-0.9.0-median5.jsonl \
+        --new-gb ../gb10/results-dgx-0.9.0.jsonl ../gb10/results-dgx-0.9.0-extra.jsonl
 """
-import json, re, sys
+import argparse, json, re, sys
 from pathlib import Path
-REPO = Path('<repo>')
+# 本ファイルの位置（docs/perf/logs/<dir>/aggregate/）からリポジトリルートを解決する
+REPO = Path(__file__).resolve().parents[5]
 RAW = REPO / 'scripts/bench/framework-compare/results/raw'
 DGX = REPO / 'docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx'
 SB = Path(__file__).resolve().parent.parent / 'scoreboard'
@@ -16,9 +30,19 @@ exec(src[src.index('def gemm_ms'):src.index('M4_SKIP =')], ns)   # gemm_ms + M4_
 M4_PY = ns['m4']
 FW = ['candle', 'burn', 'pytorch', 'tensorflow', 'scipy']
 
+ap = argparse.ArgumentParser()
+ap.add_argument('new_m4', nargs='?', help='HEAD 再計測の M4 Max JSONL（median_rounds.py 出力）')
+ap.add_argument('--old-m4', default=str(RAW / 'results-m4max-0.8.0.jsonl'))
+ap.add_argument('--old-gb', nargs='*', default=[str(DGX / f) for f in ('results-dgx-0.8.0.jsonl', 'results-dgx-0.8.0-extra.jsonl', 'results-dgx-py-0.8.0.jsonl')])
+ap.add_argument('--new-gb', nargs='*', default=[])
+args = ap.parse_args()
+
 def load(p):
     p = Path(p)
-    return [json.loads(l) for l in open(p) if l.strip()] if p.exists() else []
+    if not p.exists():
+        print(f'warning: 比較元／入力が見つからない: {p}', file=sys.stderr)
+        return []
+    return [json.loads(l) for l in open(p) if l.strip()]
 def index(rows):
     d = {}
     for r in rows:
@@ -48,11 +72,11 @@ M4_ROWS = [('gemm', 'metal', n) for n in (256, 512, 1024, 2048, 4096)] + [('gemm
 GB_ROWS = [('gemm', 'cuda', n) for n in (256, 512, 1024, 2048, 4096)] + [('gemm', 'cpu', n) for n in (256, 512, 1024, 2048, 4096)] + \
           [('train', 'cuda', 64), ('infer', 'cuda', 64), ('train', 'cpu', 64), ('infer', 'cpu', 64)]
 
-m4_old = index(load(RAW / 'results-m4max-0.8.0.jsonl')); m4_old.update(M4_PY)
-gb_old = index(load(DGX / 'results-dgx-0.8.0.jsonl') + load(DGX / 'results-dgx-0.8.0-extra.jsonl') + load(DGX / 'results-dgx-py-0.8.0.jsonl'))
-m4_new = index(load(sys.argv[1])) if len(sys.argv) > 1 else {}
+m4_old = index(load(args.old_m4)); m4_old.update(M4_PY)
+gb_old = index(sum((load(p) for p in args.old_gb), []))
+m4_new = index(load(args.new_m4)) if args.new_m4 else {}
 m4_new.update(M4_PY)  # M4 Python 3 FW は再計測環境なし・前版転記のまま
-gb_new = index(sum((load(p) for p in sys.argv[2:]), [])) if len(sys.argv) > 2 else {}
+gb_new = index(sum((load(p) for p in args.new_gb), []))
 
 def show(machine, rows, old, new):
     print(f'\n### {machine}')
@@ -61,6 +85,9 @@ def show(machine, rows, old, new):
     for task, dev, size in rows:
         a = judge(old, task, dev, size); b = judge(new, task, dev, size)
         lab = f'{task} {dev}' + (f' N={size}' if task == 'gemm' else '')
+        if a is None:
+            bs = '（未計測）' if b is None else f'{b["verdict"]} {b["ratio"]:.2f}× vs {b["best"]}'
+            print(f'| {lab} | （比較元なし） | {bs} | | |'); continue
         if b is None: print(f'| {lab} | {a["verdict"]} {a["ratio"]:.2f}× vs {a["best"]} | （未計測） | | |'); continue
         rk = lambda v: 1 if v == '1位' else 1.5 if v == '僅差' else int(v[:-1])
         chg = '' if a['verdict'] == b['verdict'] else ('↑' if rk(b['verdict']) < rk(a['verdict']) else '↓')

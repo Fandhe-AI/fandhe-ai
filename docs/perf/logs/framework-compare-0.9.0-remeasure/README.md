@@ -17,7 +17,7 @@ framework-compare の承認ピンを `=0.9.0` へ更新したうえで GEMM／tr
 | `m4max-series-b/` | Apple M4 Max・系列 B（load1 < 8.0 ゲート付き）5 run。`run{1..5}/`・`results-m4max-0.9.0-median5.jsonl`・`gate.log`（ゲート判定履歴）・`RULE.txt`（事前登録規則）・`loop.log` |
 | `gb10/` | DGX Spark GB10・専有 1 セッション。`results-dgx-0.9.0.jsonl`（`run_all_cuda.sh` 全セル）・`results-dgx-0.9.0-extra.jsonl`（CPU gemm reuse／N=4096 追加計測・Python 参照 FW は含まない）・`run_all_cuda.log`・`uptime_before_all.txt`／`uptime_after_all.txt`・`tree.txt`（registry pin 確認）・`skipped-dgx-0.9.0.log`・`extra.err` |
 | `scripts/` | 計測オーケストレーション（`m4max-run-090.sh`・`m4max-090-loop.sh`〈系列 A〉・`m4max-090b-loop.sh`〈系列 B・ゲート実装〉・`dgx-run-090.sh`） |
-| `aggregate/` | 集計ツール（`median_rounds.py`・`compare_head.py`） |
+| `aggregate/` | 集計ツール。`median_rounds.py`（5 run → `results-m4max-0.9.0-median5.jsonl`。framework ごとに `median_s` の中央値 run の行を選ぶほか、fandhe-ai の `gemm`／`reuse` 行へ同一 run 内比 `candle_ratio_runs`／`candle_ratio_median` を付与）・`compare_head.py`（0.8.0 → HEAD の対戦成績表。比較元は `scripts/bench/framework-compare/results/raw/results-m4max-0.8.0.jsonl`〈git 管理下〉・`docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx/results-dgx-0.8.0{,-extra}.jsonl`／`results-dgx-py-0.8.0.jsonl` を既定とし `--old-m4`／`--old-gb` で差し替え可。HEAD 側は位置引数〈M4〉と `--new-gb`〈GB10〉。比較元が読めないセルは「（比較元なし）」表示で続行。例: `python3 aggregate/compare_head.py m4max-series-b/results-m4max-0.9.0-median5.jsonl --new-gb gb10/results-dgx-0.9.0.jsonl gb10/results-dgx-0.9.0-extra.jsonl`） |
 | `scoreboard/` | フレームワーク横並びスコアボード artifact（`gen_090.py`・`body_090.html`・`style.css`）。0.8.0 比較を含む対戦成績表。Python 3 参照 FW（PyTorch／TensorFlow／SciPy）は 0.9.0 で未再計測のため 2026-09-12 計測値をそのまま流用（`gen_090.py` 冒頭 docstring・`body_090.html` の lede 参照） |
 
 ## 計測条件
@@ -43,8 +43,17 @@ framework-compare の承認ピンを `=0.9.0` へ更新したうえで GEMM／tr
 
 ## 判定規則（GEMM reuse の candle 比ゲート。既存 doc と同一）
 
-- 主判定は同一 run 内の対戦相手比: `candle fresh 中央値 / fandhe-ai reuse 中央値`。1.0 を超えれば
-  fandhe-ai が candle より高速（**達成**）、1.0 未満なら**未達**
+- 主判定は同一 run 内の対戦相手比: run ごとに `candle fresh median_s / fandhe-ai reuse median_s` を
+  計算し、5 run の中央値（`median5.jsonl` の `candle_ratio_median`）が 1.0 を超えれば fandhe-ai が
+  candle より高速（**達成**）、1.0 未満なら**未達**
+- **2 種類の比を区別する**（PR #2023 codex-review 指摘）: `median_rounds.py` が framework ごとに
+  独立に選んだ中央値行同士から算出する比（scoreboard `gen_090.py`・`compare_head.py` が用いる
+  「中央値同士の比」）は上記の主判定とは別物で参考値。両者は通常は符号が一致するが、共有負荷下の
+  系列 A では CPU N=1024 が主判定 1.266（達成）・中央値同士の比 0.975（未達）と符号が分かれる。
+  正式値（系列 B）は全セルで両方式の判定が一致する。scoreboard artifact は多フレームワークとの
+  対戦成績表であり中央値同士の比のまま（主判定への置換はしない）。candle 比ゲート追補
+  （`docs/perf/{cpu,metal}-gemm-candle-gate-remeasurement.md` の #1967 節）は両方式を併記し、
+  主判定の値でノイズ帯（A/B 反転セル: CPU N=1024／2048）を明示する
 - `parity_fail_count > 0` のセルは比較データの妥当性上「判定不能」とする（REQ-2 2026-09-12 追記。
   `docs/candle-parity-tolerance-contract-decision.md` §8）。本追補で参照した全セルは
   `parity_fail_count = 0`（fandhe-ai・candle いずれも）であり判定不能セルは無かった
