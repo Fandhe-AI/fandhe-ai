@@ -43,7 +43,7 @@ fn cpu_log_softmax_backward_reference(y: &[f32], g: &[f32], rows: usize, cols: u
         let sum: f64 = g_row.iter().map(|&v| v as f64).sum();
         let dx_row = &mut dx[r * cols..(r + 1) * cols];
         for i in 0..cols {
-            dx_row[i] = g_row[i] - (y_row[i].exp() as f64 * sum) as f32;
+            dx_row[i] = (g_row[i] as f64 - y_row[i].exp() as f64 * sum) as f32;
         }
     }
     dx

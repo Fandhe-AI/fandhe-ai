@@ -243,7 +243,7 @@ fn reference_log_softmax_backward(
             }
             for c in 0..axis_len {
                 let idx = (o * axis_len + c) * inner + i;
-                dx[idx] = g[idx] - (y[idx].exp() as f64 * sum) as f32;
+                dx[idx] = (g[idx] as f64 - y[idx].exp() as f64 * sum) as f32;
             }
         }
     }
