@@ -426,7 +426,7 @@ impl Sequential {
     ///
     /// 1. `Linear` 層 forward を `amp.compute_dtype`（f32 master weight・
     ///    backward は常に f32）で計算する（`Linear` 以外の層は f32 の
-    ///    まま。[`crate::compat::SequentialVars::forward_with_precision`]
+    ///    まま。`crate::compat::SequentialVars::forward_with_precision`
     ///    doc 参照）
     /// 2. **scale 前**の素の loss を `History::loss` へ記録する（非有限
     ///    でも overflow を可視化するためそのまま記録する）
@@ -449,7 +449,7 @@ impl Sequential {
     ///
     /// # Errors
     ///
-    /// `optimizer`（[`OptimizerState::new`]）または `amp.grad_scaler`
+    /// `optimizer`（`OptimizerState::new`）または `amp.grad_scaler`
     /// （[`GradScaler::new`]）の検証に失敗した場合 `InvalidArgument`
     /// （fail-closed。いずれかが失敗した場合 `self.compiled` は
     /// 変更しない——[`Self::compile`] と同じ construct-before-assign
