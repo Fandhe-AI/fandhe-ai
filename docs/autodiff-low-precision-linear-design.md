@@ -34,7 +34,41 @@
 
 ## 6. スコープ外
 
-- facade 公開（`LinearVars`／`Var` の `pub fn` 化・`ScalarDType` 再エクスポート）・`compat::Sequential` の precision 設定・`fit()` 連携 → `docs/compat-api-scope.md` §5 のユーザー承認が前提。
+- facade 公開（`LinearVars`／`Var` の `pub fn` 化・`ScalarDType` 再エクスポート）→ 引き続き `docs/compat-api-scope.md` §5 のユーザー承認が前提（未取得。§7 で追加した `compat::AmpDType` は `ScalarDType` を facade へ直接持ち出さない facade ローカルの薄い写像であり、この非公開方針とは矛盾しない）。
 - `DeviceParamStore` 常駐経路・`linear_forward_device` の低精度化、backward の低精度化（真の混合精度）、Linear 以外の層、fusion の dtype 対応。
 - 真の f16 カーネルによる CPU 高速化（現 CPU `TypedOps` は f32 昇格方式のソフトウェア変換。`crates/backend-cpu/src/typed_f16.rs`／`typed_bf16.rs` 参照）。
 - CUDA／Metal 実機での低精度 Linear forward の facade parity 実測（本実装エージェントの実行環境に実機への到達手段がないため未実施。既存 `typed_ops_f16`／`typed_ops_bf16` 自体の実機実測状況は `docs/backend-dtype-dispatch-design.md` の該当節を参照）。
+- `compat::Sequential::evaluate`／`predict`／`predict_resident` の低精度化（fit の学習ループのみが対象。§7 実装計画 §8）。
+
+## 7. GradScaler 統合・fit opt-in（#1961）
+
+イシュー #1961・親 #1958。上記 §6 が当初スコープ外としていた「`compat::Sequential` の precision 設定・`fit()` 連携」を、`fandhe_ai::optim::GradScaler`（#1721／#1722）と統合したうえで実装した。
+
+### 7.1 §5 手続きの適用根拠（`docs/compat-api-scope.md` §5）
+
+AMP は Tier 2（`docs/compat-api-scope.md` §1.3「AMP」行・#1625）、`compile()`／`fit()` は Tier 1（同 §1.2・#1618）に列挙済みの機能であり、§5「Tier 1／Tier 2 に列挙済みの機能の実装は本節の再適用を要しない（1 節の各 issue の承認事項に従う）」に従う。#1625・#1618 のいずれも 2026-09-12 のユーザー承認コメントで facade 公開面（`fandhe_ai`／`compat`）の §5 手続きに基づく範囲拡張を承認済み（範囲外は tolerance／baseline 変更・依存追加・unsafe 監査省略のみ）。#1961 の概要自体が「`compat::Sequential::fit` からの opt-in」を成果物として明示しているため、この根拠に基づき facade 公開面（`compat::{AmpConfig, AmpDType}`・`Sequential::compile_with_amp`／`amp_loss_scale`）を追加した。
+
+**残る soft spot**: `ScalarDType` 自体の facade 再エクスポート・`LinearVars`／`Var` への `pub fn` 追加（§6 参照）は引き続き未承認のまま。`AmpDType`（facade ローカルの `#[non_exhaustive] enum`）は `ScalarDType` を internal に写像するのみで、この非公開方針を回避しない。
+
+### 7.2 演算列（AMP 有効時）
+
+`compat::Sequential::compile_with_amp`（`crates/facade/src/compat/training.rs`）は `Compiled` に `amp: Option<AmpState>`（`dtype: ScalarDType`・`scaler: GradScaler`）を追加し、`run_fit` のバッチループを次の順序へ分岐させる:
+
+1. `SequentialVars::forward_with_precision`（`sequential.rs`。既存 `forward` を内部実装化し `low_precision: Option<ScalarDType>` 引数を追加。`None` のときは既存実装と完全に同一の演算列・bit 同一）が `Linear` 層のみ `linear_forward_low_precision`（#1960）へ切り替える。`Linear` 以外の層は常に f32
+2. **scale 前**の素の loss を `History::loss` へ記録する（非有限でもそのまま記録して overflow を可視化する）
+3. `scaler.scale_loss` → `tape.backward` → `trainable_grads` → `scaler.unscale`
+4. `should_skip_step()` が `true` なら `optimizer.step`／`apply_parameters` を両方スキップ（`optimizer` の `step_count` も進めない）
+5. `false` なら unscale 済み勾配で `optimizer.step` → `apply_parameters`
+6. 最後に必ず `scaler.update(found_non_finite)`
+
+AMP 無効（`compiled.amp.is_none()`）のときは既存 f32 経路をそのまま通る（`if let Some(amp) = compiled.amp.as_mut() { .. } else { .. }` の `else` 分岐が AMP 導入前の演算列と完全に同一）。
+
+### 7.3 正しさの検証
+
+- **AC-a（bit 一致）**: `crates/facade/tests/compat_sequential_fit_amp.rs`。`compile()`（AMP なし）が AMP 配線導入前と bit 同一（`fit_without_amp_is_unchanged_by_amp_wiring`）・`compile_with_amp` が手動 `GradScaler` + `linear_forward_low_precision` ループと bit 完全一致（F16／Bf16 各 1 件）・skip／backoff の挙動が手動ループと bit 一致（`fit_amp_skip_and_backoff_matches_gradscaler_bit_exact`。最初の step が skip されパラメータ不変のまま scale が半減することを直接検証）・AMP 状態が `fit` 呼び出しをまたいで継続（`fit(4)+fit(4) == fit(8)`）・`compile_with_amp` の検証失敗時に既存 `compiled` 状態を保持することを確認済み（6 件全 pass）。
+- **AC-b（MNIST 規模・REQ-2 統一複合判定）**: `crates/facade/tests/mnist_amp_low_precision_parity.rs`。784→256(ReLU)→10・batch 64・20 step（shuffle なし）の loss 系列（f32 `compile()` vs AMP `compile_with_amp`）を `fandhe_ai_backend_cpu::parity::compare`（既存 tolerance・判定式は不変）で突合。**主判定（F16）・副判定（Bf16）とも `fail_count=0/20` で達成**（実測: F16 `max_abs_diff=8.583069e-6`・`max_rel_err=2.525904e-5`／Bf16 `max_abs_diff=4.190207e-5`・`max_rel_err=1.189803e-4`。両系列とも全点有限・単調に減少）。backward は AMP 有無に関わらず常に f32 のため、GradScaler 結線自体の正しさは AC-a の bit 一致テストが独立に証明する。
+- 学習ループ例（CI 実行可能なサンプル兼テスト）: `crates/facade/tests/optim_amp_low_precision_fit.rs`。`fandhe_ai` のみを import し `compile_with_amp` → `fit` の 2 呼び出しで低精度 forward + GradScaler を使った学習ループを組めることを示す。
+
+### 7.4 スコープ外（実装計画 §8）
+
+`compat::Sequential::evaluate`／validation／`predict`／`predict_resident` の低精度化、`SequentialVars` の公開低精度 forward、`ScalarDType` の facade 再エクスポート（引き続き §6・#1939 の範囲）、`DeviceParamStore` 常駐経路（`step_adam` 等）への AMP・低精度結線、backward の低精度化、Linear 以外の層、fit の勾配 clip 連携、CUDA／Metal 実機での実測（`fit` は CPU `tape()` 固定）、CPU `TypedOps<f16/bf16>` の真の低精度カーネル化（性能目標なし・ベンチ追加なし）。

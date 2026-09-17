@@ -19,15 +19,97 @@
 //! &mut [])` への委譲）。metrics・`DataLoader` を直接受ける `fit` 入口は
 //! 対象外のまま（`docs/compat-callbacks-design.md` §8 参照）。
 
-use crate::optim::{Adam, AdamConfig, AdamW, AdamWConfig, Sgd, SgdConfig};
+use crate::optim::{
+    Adam, AdamConfig, AdamW, AdamWConfig, GradScaler, GradScalerConfig, Sgd, SgdConfig,
+};
 use crate::{AutodiffError, Tensor};
 use fandhe_ai_autodiff::Reduction;
 use fandhe_ai_tensor_core::Element;
+use fandhe_ai_tensor_core::ScalarDType;
 use fandhe_ai_tensor_core::data::{DataLoader, DataLoaderConfig, TensorDataset};
 
 use super::callbacks::Callback;
 
 use super::sequential::Sequential;
+
+/// `compile_with_amp()` の低精度 forward dtype 指定（イシュー #1961・
+/// 親 #1958。`docs/autodiff-low-precision-linear-design.md` §7「facade
+/// 統合（#1961）」）。
+///
+/// **facade ローカルに閉じる理由**: `fandhe_ai_tensor_core::ScalarDType`
+/// 自体の facade 再エクスポートは `docs/compat-api-scope.md` §5 未承認の
+/// まま（イシュー #1939）——本 enum はその承認を経ずに `compile_with_amp`
+/// が dtype を受け取れるようにするための facade 専用の薄い写像であり、
+/// `ScalarDType` を facade 公開面へ直接持ち出さない（`to_scalar_dtype`
+/// が内部でのみ変換する）。`#[non_exhaustive]` は `ScalarDType` 自体の
+/// バリアント追加余地に追従するため。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmpDType {
+    /// IEEE 754 半精度（仮数 10bit）。
+    F16,
+    /// bfloat16（仮数 7bit・指数幅は f32 と同一）。
+    Bf16,
+}
+
+impl AmpDType {
+    fn to_scalar_dtype(self) -> ScalarDType {
+        match self {
+            AmpDType::F16 => ScalarDType::F16,
+            AmpDType::Bf16 => ScalarDType::Bf16,
+        }
+    }
+}
+
+/// [`Sequential::compile_with_amp`] の構成（イシュー #1961）。
+///
+/// `compute_dtype`（[`AmpDType`]。`Linear` 層 forward の低精度化）と
+/// `grad_scaler`（[`GradScalerConfig`]。損失スケーリングのハイパー
+/// パラメータ）を束ねる。両者は独立の機構——`compute_dtype` は
+/// forward 経路（`linear_forward_low_precision`。backward は常に f32）、
+/// `grad_scaler` は backward 後の勾配スケーリング（`GradScaler`）——
+/// であり、本 struct は `fit` へ渡す前にこれらをまとめて検証・保持する
+/// ための単なる入れ物（新規数値ロジックなし）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AmpConfig {
+    compute_dtype: AmpDType,
+    grad_scaler: GradScalerConfig,
+}
+
+impl AmpConfig {
+    /// `grad_scaler` は [`GradScalerConfig::default`]（PyTorch
+    /// `torch.cuda.amp.GradScaler` の既定と同一値）で初期化する。
+    pub fn new(compute_dtype: AmpDType) -> Self {
+        AmpConfig {
+            compute_dtype,
+            grad_scaler: GradScalerConfig::default(),
+        }
+    }
+
+    /// `grad_scaler` を明示的に差し替える（ビルダー）。
+    pub fn grad_scaler(mut self, config: GradScalerConfig) -> Self {
+        self.grad_scaler = config;
+        self
+    }
+}
+
+/// [`Compiled`] が AMP 有効時のみ保持する状態（`dtype` は `compile_with_amp`
+/// 呼び出し時点で固定・`scaler` は `fit` 呼び出しをまたいで継続する
+/// `GradScaler` 本体）。`GradScaler` は `Debug` を実装しないため
+/// [`OptimizerState`] と同様に手書き `Debug` を用意する。
+struct AmpState {
+    dtype: ScalarDType,
+    scaler: GradScaler,
+}
+
+impl std::fmt::Debug for AmpState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AmpState")
+            .field("dtype", &self.dtype)
+            .field("scale", &self.scaler.scale())
+            .finish()
+    }
+}
 
 /// `compile()` の `loss` 引数（`Reduction::Mean` 固定。`#[non_exhaustive]`
 /// のため後続の損失追加〈#1763 以降〉が既存呼び出し元の非網羅的
@@ -304,6 +386,11 @@ impl OptimizerState {
 pub(super) struct Compiled {
     optimizer: OptimizerState,
     loss: Loss,
+    /// [`Sequential::compile_with_amp`] で設定された AMP 状態（既定
+    /// `None`。イシュー #1961）。`GradScaler` は fit 呼び出しをまたいで
+    /// 継続する状態のため `FitConfig`（`Copy`＋`Eq` 導出済み）ではなく
+    /// ここに保持する（`optimizer` と同じ理由）。
+    amp: Option<AmpState>,
 }
 
 /// 未 compile のモデルへ `fit`／`evaluate` を呼んだ場合の共通エラー。
@@ -325,6 +412,65 @@ impl Sequential {
         self.compiled = Some(Compiled {
             optimizer: OptimizerState::new(optimizer)?,
             loss,
+            amp: None,
+        });
+        Ok(())
+    }
+
+    /// [`Self::compile`] の AMP（自動混合精度）版（イシュー #1961・親
+    /// #1958）。`optimizer`／`loss` は [`Self::compile`] と同じ意味だが、
+    /// 追加で `amp`（[`AmpConfig`]）を渡すことで [`Self::fit`]／
+    /// [`Self::fit_with_callbacks`] の 1 step が次の演算列になる
+    /// （`crate::optim` モジュール doc「AMP（GradScaler）を使う場合」
+    /// 節・`docs/autodiff-low-precision-linear-design.md` §7 参照）:
+    ///
+    /// 1. `Linear` 層 forward を `amp.compute_dtype`（f32 master weight・
+    ///    backward は常に f32）で計算する（`Linear` 以外の層は f32 の
+    ///    まま。[`crate::compat::SequentialVars::forward_with_precision`]
+    ///    doc 参照）
+    /// 2. **scale 前**の素の loss を `History::loss` へ記録する（非有限
+    ///    でも overflow を可視化するためそのまま記録する）
+    /// 3. `scale_loss → backward → unscale`（非有限検出込み）
+    /// 4. `should_skip_step()` が `true` ならこの step の
+    ///    `optimizer.step`／`apply_parameters` を**両方**スキップする
+    ///    （`optimizer` の `step_count` も進めない）
+    /// 5. `false` なら unscale 済み勾配で `optimizer.step` →
+    ///    `apply_parameters`
+    /// 6. 最後に必ず `scaler.update(found_non_finite)`
+    ///
+    /// [`Self::evaluate`]・`validation_data`（[`Self::fit_with_callbacks`]）・
+    /// [`Self::predict`][crate::compat::Sequential::predict] は f32 の
+    /// ままで AMP の対象外（2h 粒度のスコープ外。実装計画 §8）。
+    ///
+    /// 再度 [`Self::compile`]／[`Self::compile_with_amp`] を呼ぶと
+    /// optimizer 状態と同様に AMP 状態（`GradScaler` のスケール値・
+    /// backoff 履歴）も破棄される（`Self::compile` doc の再 compile
+    /// 契約と同じ）。
+    ///
+    /// # Errors
+    ///
+    /// `optimizer`（[`OptimizerState::new`]）または `amp.grad_scaler`
+    /// （[`GradScaler::new`]）の検証に失敗した場合 `InvalidArgument`
+    /// （fail-closed。いずれかが失敗した場合 `self.compiled` は
+    /// 変更しない——[`Self::compile`] は失敗時に前の `compiled` を
+    /// そのまま残す契約とは異なる〈`OptimizerState::new` 失敗時は
+    /// 元々 `self.compiled` へ代入する前に return する〉ため、本
+    /// メソッドも同じく「全構築成功後にのみ代入する」規約で揃える）。
+    pub fn compile_with_amp(
+        &mut self,
+        optimizer: Optimizer,
+        loss: Loss,
+        amp: AmpConfig,
+    ) -> Result<(), AutodiffError> {
+        let optimizer_state = OptimizerState::new(optimizer)?;
+        let scaler = GradScaler::new(amp.grad_scaler)?;
+        self.compiled = Some(Compiled {
+            optimizer: optimizer_state,
+            loss,
+            amp: Some(AmpState {
+                dtype: amp.compute_dtype.to_scalar_dtype(),
+                scaler,
+            }),
         });
         Ok(())
     }
@@ -332,6 +478,18 @@ impl Sequential {
     /// [`Self::compile`] 済みかどうか。
     pub fn is_compiled(&self) -> bool {
         self.compiled.is_some()
+    }
+
+    /// 現在の AMP スケール値（[`GradScaler::scale`]）。AMP 未使用
+    /// （[`Self::compile`] のみ・[`Self::compile_with_amp`] 未呼び出し）
+    /// または未 compile の場合は `None`（イシュー #1961。AC-a を facade
+    /// のみで観測するための読み取り専用アクセサ）。
+    pub fn amp_loss_scale(&self) -> Option<f32> {
+        self.compiled
+            .as_ref()?
+            .amp
+            .as_ref()
+            .map(|amp| amp.scaler.scale())
     }
 
     /// `x`（`[N, ...]`）・`y`（`[N, ...]`）を `config.epochs` 回学習する
@@ -611,12 +769,25 @@ impl Sequential {
                     };
                     let n_batch = x_batch.shape().first().copied().unwrap_or(0);
 
-                    let updated = {
+                    // `updated == None` は AMP 有効時に非有限勾配で
+                    // この step をスキップしたことを表す（イシュー
+                    // #1961 実装計画 §2.3 手順 4。`optimizer.step`／
+                    // `apply_parameters` を両方スキップし、`optimizer`
+                    // の `step_count` も進めない）。AMP 無効
+                    // （`compiled.amp.is_none()`）のときは常に `Some`
+                    // であり、下記のブロック全体・エラー経路は
+                    // AMP 導入前の実装と完全に同一（bit 同一契約）。
+                    let updated: Option<Vec<Tensor<f32>>> = {
                         let tape = crate::tape();
                         let bound = self.bind(&tape);
                         let x_var = tape.var(&x_batch);
 
-                        let pred = match bound.forward(&tape, &x_var) {
+                        let low_precision_dtype = compiled.amp.as_ref().map(|amp| amp.dtype);
+                        let pred = match bound.forward_with_precision(
+                            &tape,
+                            &x_var,
+                            low_precision_dtype,
+                        ) {
                             Ok(v) => v,
                             Err(e) => break 'epochs_block Err(e),
                         };
@@ -624,6 +795,10 @@ impl Sequential {
                             Ok(v) => v,
                             Err(e) => break 'epochs_block Err(e),
                         };
+                        // 適用順序契約（手順 2）: **scale 前**の素の loss
+                        // を常に記録する（非有限でも overflow をそのまま
+                        // 可視化する。AMP 無効時は scale が存在しない
+                        // ためこの値がそのまま記録対象）。
                         let loss_scalar = match loss_var.to_tensor().get(&[]) {
                             Some(v) => v,
                             None => {
@@ -636,21 +811,70 @@ impl Sequential {
                         weighted_sum += loss_scalar as f64 * n_batch as f64;
                         count += n_batch;
 
-                        let grads = match tape.backward(&loss_var) {
-                            Ok(v) => v,
-                            Err(e) => break 'epochs_block Err(e),
-                        };
-                        let grad_refs = match bound.trainable_grads(&grads) {
-                            Ok(v) => v,
-                            Err(e) => break 'epochs_block Err(e),
-                        };
-                        let param_refs = self.trainable_parameters();
-                        match compiled.optimizer.step(&param_refs, &grad_refs) {
-                            Ok(v) => v,
-                            Err(e) => break 'epochs_block Err(e),
+                        if let Some(amp) = compiled.amp.as_mut() {
+                            // 適用順序契約（手順 3）: scale_loss → backward → unscale。
+                            let scaled_loss = match amp.scaler.scale_loss(&loss_var) {
+                                Ok(v) => v,
+                                Err(e) => break 'epochs_block Err(e),
+                            };
+                            let grads = match tape.backward(&scaled_loss) {
+                                Ok(v) => v,
+                                Err(e) => break 'epochs_block Err(e),
+                            };
+                            let grad_refs = match bound.trainable_grads(&grads) {
+                                Ok(v) => v,
+                                Err(e) => break 'epochs_block Err(e),
+                            };
+                            let unscale_result = match amp.scaler.unscale(&grad_refs) {
+                                Ok(v) => v,
+                                Err(e) => break 'epochs_block Err(e),
+                            };
+                            if unscale_result.should_skip_step() {
+                                // 適用順序契約（手順 4）: skip でも
+                                // `scaler.update` は必ず呼ぶ。
+                                if let Err(e) = amp.scaler.update(true) {
+                                    break 'epochs_block Err(e);
+                                }
+                                None
+                            } else {
+                                // 適用順序契約（手順 5）: unscale 済み
+                                // 勾配で optimizer.step。
+                                let unscaled_refs: Vec<&Tensor<f32>> =
+                                    unscale_result.grads.iter().collect();
+                                let param_refs = self.trainable_parameters();
+                                let stepped =
+                                    match compiled.optimizer.step(&param_refs, &unscaled_refs) {
+                                        Ok(v) => v,
+                                        Err(e) => break 'epochs_block Err(e),
+                                    };
+                                // 適用順序契約（手順 6）: 非 skip step も
+                                // `scaler.update` を必ず呼ぶ（`amp` は
+                                // `compiled.amp.as_mut()` から借用済みの
+                                // まま・再取得しない）。
+                                if let Err(e) = amp.scaler.update(false) {
+                                    break 'epochs_block Err(e);
+                                }
+                                Some(stepped)
+                            }
+                        } else {
+                            let grads = match tape.backward(&loss_var) {
+                                Ok(v) => v,
+                                Err(e) => break 'epochs_block Err(e),
+                            };
+                            let grad_refs = match bound.trainable_grads(&grads) {
+                                Ok(v) => v,
+                                Err(e) => break 'epochs_block Err(e),
+                            };
+                            let param_refs = self.trainable_parameters();
+                            match compiled.optimizer.step(&param_refs, &grad_refs) {
+                                Ok(v) => Some(v),
+                                Err(e) => break 'epochs_block Err(e),
+                            }
                         }
                     };
-                    if let Err(e) = self.apply_parameters(updated) {
+                    if let Some(updated) = updated
+                        && let Err(e) = self.apply_parameters(updated)
+                    {
                         break 'epochs_block Err(e);
                     }
                 }
