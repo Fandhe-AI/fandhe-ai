@@ -1,0 +1,13 @@
+diff --git a/crates/backend-cpu/src/gemm_blis/mod.rs b/crates/backend-cpu/src/gemm_blis/mod.rs
+index 57d44d8d..ef39bc39 100644
+--- a/crates/backend-cpu/src/gemm_blis/mod.rs
++++ b/crates/backend-cpu/src/gemm_blis/mod.rs
+@@ -3082,7 +3082,7 @@ const TWO_D_DYNAMIC_PRODUCTION_ENABLED: bool = true;
+ /// 確定するまでは `false` を維持する。採否記録は
+ /// `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` を参照。
+ #[cfg(target_arch = "aarch64")]
+-const SME_PRODUCTION_ENABLED: bool = false;
++const SME_PRODUCTION_ENABLED: bool = true;
+ 
+ /// [`SME_PRODUCTION_ENABLED`] が `true` のときに SME 経路を候補とする
+ /// 形状しきい値（イシュー #1587 事前登録規則 R4）。`sme_shape_eligible`
