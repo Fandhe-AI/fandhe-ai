@@ -309,14 +309,33 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
 
 ## 9. 対象外事項
 
-- **GPU backward カーネルの結線**: **CUDA は #1950 で実装済み**（§10 参照。
-  既存の学習ループ専用 API（`CudaRmsNorm::run_rmsnorm_f32_train`〈rstd
-  保存〉＋`run_rmsnorm_bwd_f32`。#596／#597）は無変更のまま残し、
+- **GPU backward カーネルの結線**: 当初（本節初版）は CUDA にしか backward
+  カーネルが存在せず（`CudaRmsNorm::run_rmsnorm_f32_train`〈rstd 保存〉＋
+  `run_rmsnorm_bwd_f32`。CPU／Metal は forward のみ）VJP は autodiff ホスト
+  側（`grad.rs`）で 3 バックエンド共通にフォールバック実装するのみ
+  だったが、**イシュー #1950（CUDA・`crate::norm_backward::
+  CudaNormBackward`。§10 参照。既存の学習ループ専用 API
+  〈`CudaRmsNorm::run_rmsnorm_f32_train`〈rstd 保存〉＋
+  `run_rmsnorm_bwd_f32`。#596／#597〉は無変更のまま残し、
   `BackendOps::rmsnorm_backward`／`layer_norm_backward`〈autodiff の
   `grad::vjp` から一般的に呼ばれる新設エントリ〉専用に独立した
-  recompute-in-backward カーネルを新設する設計とした）。**Metal は #1953
-  のスコープのまま対象外**（本イシュー時点では forward のみ。VJP は
-  autodiff ホスト側 `grad.rs` のホスト参照実装へフォールバックする）
+  recompute-in-backward カーネルを新設する設計とした）／#1953（Metal・
+  `crate::norm_backward::MetalNormBackward`。いずれも `Op::RmsNorm`／
+  `Op::LayerNorm` の forward カーネル・tape 記録を一切変更しない
+  recompute-in-backward 方式）で `BackendOps::rmsnorm_backward`／
+  `layer_norm_backward`（`docs/autodiff-nograd-leaf-dinput-skip-decision.
+  md` 等とは独立の新設 trait メソッド。`crates/tensor-core/src/
+  backend_ops.rs`）の CUDA／Metal 実装が完了し本節は解消済み**。dx／
+  dw／db いずれも CPU ホスト参照実装（`grad::rmsnorm_vjp_rows`／
+  `layer_norm_vjp_rows`）と REQ-2 統一複合判定で一致させる契約（bit
+  完全一致は主張しない。行内統計の縮約順序が GPU の並列 reduction で
+  あり CPU の逐次走査と異なるため。forward の `xhat` が REQ-2 契約な
+  のと同じ理由。§5 参照）。Metal は Apple M4 Max 実機への到達手段が
+  本実装エージェント実行環境になく、`#[ignore]` テスト
+  （`crates/backend-metal/tests/norm_backward_parity.rs`・facade
+  `crates/facade/tests/norm_backend_parity.rs::metal_{rms_norm,
+  layer_norm}_backward_matches_cpu`）は未実測のまま
+  `docs/perf/logs/metal-norm-backward-1953/` へ記入欄を残す
 - **多次元 `normalized_shape`**: 最終軸限定（§1）
 - **`Sequential::add_rms_norm`／`add_layer_norm`**: #1618 のスコープ
 
