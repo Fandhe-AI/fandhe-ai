@@ -118,16 +118,55 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
-use fandhe_ai_tensor_core::{Activation, BackendOps, DispatchFailureCell, SgdStepConfig, Tensor};
+use fandhe_ai_tensor_core::{
+    Activation, AdamStepConfig, AdamStepKind, BackendOps, DispatchFailureCell, SgdStepConfig,
+    Tensor,
+};
 
 use crate::backward::Gradients;
 use crate::error::AutodiffError;
 use crate::eval::reduce_bias_grad_rows;
+use crate::nn::optim::{AdamConfig, AdamWConfig};
 use crate::optim::sgd::SgdConfig;
 use crate::tape::{
     NodeId, Op, ResidentBiasTarget, ResidentFillOutcome, ResidentResolver, Tape, TapeId,
 };
 use crate::var::Var;
+
+/// [`DeviceParamStore::step_adam`]／[`DeviceParamStore::step_adamw`] が
+/// 保持する Adam 系状態（イシュー #1959）。
+///
+/// `beta1_pow_t`／`beta2_pow_t` を `f64` の逐次積として保持する理由は
+/// ホスト参照実装（`crate::nn::optim::{adam::Adam, adamw::AdamW}`）と
+/// 同一（PyTorch の Python float 丸め挙動へ丸め手順を寄せるため）。
+/// `kind`／`beta1`／`beta2`／`eps`／`weight_decay` は初回 `step_adam`／
+/// `step_adamw` 呼び出しで確定し、以後の呼び出しで変更を拒否する
+/// （§「状態種別ガード」。`lr` のみ呼び出しごとに可変）。
+/// [`DeviceParamStore::step_adam`]／[`DeviceParamStore::step_adamw`] から
+/// [`DeviceParamStore::step_adam_impl`] へハイパーパラメータをまとめて
+/// 渡すための束（イシュー #1959・PR レビュー是正: `clippy::too_many_
+/// arguments` を個々の引数展開ではなく構造体化で解消する。`.claude/
+/// rules/coding-rust.md` の `#[allow(clippy::…)]` 非追加方針に従う）。
+#[derive(Debug, Clone, Copy)]
+struct AdamHyperparams {
+    kind: AdamStepKind,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdamStoreState {
+    kind: AdamStepKind,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    beta1_pow_t: f64,
+    beta2_pow_t: f64,
+}
 
 /// forward で登録済みだが `step()` にまだ消費されていない葉ノード列
 /// （モジュール冒頭「状態機械」参照）。
@@ -334,6 +373,19 @@ pub struct DeviceParamStore {
     /// `step()` で遅延確保する。#1023 で `Vec<Option<DeviceBuffer<f32>>>`
     /// から単一連結バッファへ変更）。
     velocity: Option<DeviceBuffer<f32>>,
+    /// Adam／AdamW（イシュー #1959）の 1 次モーメント（`m`）。`params`
+    /// と同形の連結バッファ。初回 `step_adam`／`step_adamw` で遅延確保
+    /// する（`velocity` と同じタイミング契約）。
+    adam_m: Option<DeviceBuffer<f32>>,
+    /// Adam／AdamW の 2 次モーメント（`v`）。`adam_m` と対で確保する。
+    adam_v: Option<DeviceBuffer<f32>>,
+    /// `step_adam`／`step_adamw` が確定した固定ハイパーパラメータ・
+    /// `beta^t` 逐次積（`AdamStoreState` doc 参照）。`SGD` と Adam 系を
+    /// 同一ストア上で切り替えると `momentum_state_exists` 検査と同型の
+    /// 意味論の破綻が起きるため、`step()`（SGD）と `step_adam`／
+    /// `step_adamw` を混在させることは事前検証フェーズで拒否する
+    /// （§「状態種別ガード」）。
+    adam_state: Option<AdamStoreState>,
     step_count: u64,
     poisoned: AtomicBool,
     pending: Option<PendingForward>,
@@ -1112,6 +1164,9 @@ impl DeviceParamStore {
             total_numel,
             params: params_buf,
             velocity: None,
+            adam_m: None,
+            adam_v: None,
+            adam_state: None,
             step_count: 0,
             poisoned: AtomicBool::new(false),
             pending: None,
@@ -2384,6 +2439,360 @@ impl DeviceParamStore {
             }
         }
 
+        self.step_count += 1;
+        Ok(())
+    }
+
+    /// [`AdamConfig`]（coupled L2 weight decay。`crate::nn::optim::
+    /// adam::Adam` と同一の演算列）を使い、デバイス常駐パラメータへ
+    /// 1 step を適用する（イシュー #1959・`docs/device-resident-update-
+    /// design.md`）。
+    ///
+    /// `step()`（SGD）とは独立の状態（`adam_m`／`adam_v`／
+    /// `adam_state`）を使うため、同一ストア上で SGD と Adam 系を混在
+    /// させることはできない（[`Self::step_adam_impl`] の「状態種別
+    /// ガード」参照）。CUDA Graph capture の対象外
+    /// （[`BackendOps::captured_segment_key`] を一切呼ばない。常に
+    /// [`BackendOps::adam_step_device_tracked`] の直接実行。スコープ外
+    /// として実装計画で明記済み）。
+    pub fn step_adam(
+        &mut self,
+        tape: &Tape,
+        grads: &Gradients,
+        config: &AdamConfig,
+    ) -> Result<(), BackendError> {
+        self.step_adam_impl(
+            tape,
+            grads,
+            AdamHyperparams {
+                kind: AdamStepKind::Coupled,
+                lr: config.lr,
+                beta1: config.beta1,
+                beta2: config.beta2,
+                eps: config.eps,
+                weight_decay: config.weight_decay,
+            },
+        )
+    }
+
+    /// [`AdamWConfig`]（decoupled weight decay。`crate::nn::optim::
+    /// adamw::AdamW` と同一の演算列）版の [`Self::step_adam`]。
+    pub fn step_adamw(
+        &mut self,
+        tape: &Tape,
+        grads: &Gradients,
+        config: &AdamWConfig,
+    ) -> Result<(), BackendError> {
+        self.step_adam_impl(
+            tape,
+            grads,
+            AdamHyperparams {
+                kind: AdamStepKind::Decoupled,
+                lr: config.lr,
+                beta1: config.beta1,
+                beta2: config.beta2,
+                eps: config.eps,
+                weight_decay: config.weight_decay,
+            },
+        )
+    }
+
+    /// [`Self::step_adam`]／[`Self::step_adamw`] の共有実装。構造は
+    /// `step()`（SGD）の「①事前検証フェーズ→②更新フェーズ」を踏襲する
+    /// が、CUDA Graph capture（`captured_segment_key`／
+    /// `run_captured_sgd_step_segment` 相当）は持たない（本イシューの
+    /// スコープ外。実装計画 §8）。
+    ///
+    /// # 状態種別ガード
+    /// 初回呼び出しで `kind`／`beta1`／`beta2`／`eps`／`weight_decay`・
+    /// `AdamStoreState` を確定し、以後の呼び出しでの変更を拒否する
+    /// （`lr` のみ可変。`AdamW::set_lr` と同じ意味論）。また、このストア
+    /// が既に `step()`（SGD。`self.step_count > 0 && self.adam_state.
+    /// is_none()`）で使われている場合は Adam 系への切替を拒否する
+    /// （逆方向——Adam 使用後に `step()` を呼ぶこと自体は `step()` 側を
+    /// 変更しない方針〈実装計画 §2.3〉のため、本メソッド側では検査
+    /// しない。`step()` は `self.velocity`／`self.step_count` のみを見て
+    /// 動作し、`adam_m`／`adam_v`／`adam_state` の存在を検査しないため、
+    /// 呼び出し自体は成功するが `m`／`v` は更新されない——SGD として
+    /// 独立に動作する）。
+    fn step_adam_impl(
+        &mut self,
+        tape: &Tape,
+        grads: &Gradients,
+        hyperparams: AdamHyperparams,
+    ) -> Result<(), BackendError> {
+        let AdamHyperparams {
+            kind,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        } = hyperparams;
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+
+        // `Adam::new`／`AdamW::new` と同一基準の検証（`step()` が
+        // `SgdConfig::validate()` を呼ぶのと同じ理由。ホスト側 optimizer
+        // を経由しない直接呼び出しのため、ここで明示的に通す）。
+        if !(lr.is_finite() && lr >= 0.0) {
+            return Err(BackendError::InvalidArgument(format!(
+                "DeviceParamStore::step_adam_impl: lr must be finite and >= 0.0, got {lr}"
+            )));
+        }
+        if !(beta1.is_finite() && (0.0..1.0).contains(&beta1)) {
+            return Err(BackendError::InvalidArgument(format!(
+                "DeviceParamStore::step_adam_impl: beta1 must be in [0.0, 1.0), got {beta1}"
+            )));
+        }
+        if !(beta2.is_finite() && (0.0..1.0).contains(&beta2)) {
+            return Err(BackendError::InvalidArgument(format!(
+                "DeviceParamStore::step_adam_impl: beta2 must be in [0.0, 1.0), got {beta2}"
+            )));
+        }
+        if !(eps.is_finite() && eps > 0.0) {
+            return Err(BackendError::InvalidArgument(format!(
+                "DeviceParamStore::step_adam_impl: eps must be finite and > 0.0, got {eps}"
+            )));
+        }
+        if !(weight_decay.is_finite() && weight_decay >= 0.0) {
+            return Err(BackendError::InvalidArgument(format!(
+                "DeviceParamStore::step_adam_impl: weight_decay must be finite and >= 0.0, got \
+                 {weight_decay}"
+            )));
+        }
+
+        // `pending` は `step()` と同じく、事前検証フェーズ全体を通じて
+        // `take()` せず参照だけで検査する。
+        let Some(pending) = self.pending.as_ref() else {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_adam_impl: no pending forward registration (call \
+                 register_resident_params first)"
+                    .to_string(),
+            ));
+        };
+        if pending.tape_id != tape.id {
+            return Err(BackendError::TapeMismatch);
+        }
+        if pending.epoch != tape.epoch() {
+            return Err(BackendError::TapeMismatch);
+        }
+
+        // 状態種別ガード（`lr` を除く固定ハイパーパラメータ・`kind` の
+        // 途中変更を拒否）。
+        if let Some(state) = self.adam_state {
+            if state.kind != kind
+                || state.beta1 != beta1
+                || state.beta2 != beta2
+                || state.eps != eps
+                || state.weight_decay != weight_decay
+            {
+                return Err(BackendError::InvalidArgument(
+                    "DeviceParamStore::step_adam_impl: kind/beta1/beta2/eps/weight_decay changed \
+                     mid-training; reconstruct the store to change these settings (lr may still \
+                     be changed freely)"
+                        .to_string(),
+                ));
+            }
+        } else if self.step_count > 0 {
+            // このストアは既に `step()`（SGD）で使われている
+            // （`adam_state` 未確定のまま `step_count > 0`）。SGD と
+            // Adam 系の混在は意味論が定義されないため拒否する
+            // （実装計画 §2.3「状態種別ガード」）。
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_adam_impl: this store already has SGD step() history; \
+                 reconstruct the store to switch to Adam/AdamW"
+                    .to_string(),
+            ));
+        }
+
+        // ①事前検証フェーズ（`step()` と同型）: 勾配の存在・shape を
+        // 検証する。resident 経由で直接充填済みの slot（現時点では CPU
+        // backend の weight のみ）は `grads.get()` を呼ばない。
+        let vars: Vec<Var<'_>> = pending
+            .node_ids
+            .iter()
+            .map(|&id| Var::from_raw(tape, id))
+            .collect();
+        let resident_filled = self.resident_filled_slots(pending, grads);
+        let any_resident = resident_filled.iter().any(|&f| f);
+
+        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
+        for (i, var) in vars.iter().enumerate() {
+            if resident_filled[i] {
+                continue;
+            }
+            let grad = grads.get(var).map_err(|_| BackendError::TapeMismatch)?;
+            let grad = grad.ok_or_else(|| {
+                BackendError::MissingGradient(format!(
+                    "DeviceParamStore::step_adam_impl: parameter {i} has no gradient (loss \
+                     unreachable)"
+                ))
+            })?;
+            if grad.shape() != self.layout[i].shape.as_slice() {
+                return Err(BackendError::InvalidArgument(format!(
+                    "DeviceParamStore::step_adam_impl: gradient shape {:?} does not match \
+                     parameter {i} shape {:?}",
+                    grad.shape(),
+                    self.layout[i].shape
+                )));
+            }
+            if any_resident {
+                host_grads_for_staging.push((i, grad.clone()));
+            } else {
+                let contiguous = grad.contiguous();
+                flat_grad.extend_from_slice(contiguous.as_slice().unwrap_or(&[]));
+            }
+        }
+
+        let ops = tape.ops();
+        let mem = ops.memory_ops().ok_or_else(|| {
+            BackendError::Unsupported(
+                "DeviceParamStore::step_adam_impl: backend does not implement MemoryOps"
+                    .to_string(),
+            )
+        })?;
+
+        // `m`／`v` は momentum の velocity と同じタイミング（初回
+        // step で遅延確保。ホスト `Adam`／`AdamW` の
+        // `vec![0.0f32; numel]` 初期化と同じ意味論）で確保する。
+        if self.adam_m.is_none() {
+            self.adam_m = Some(mem.alloc_zeroed(&[self.total_numel])?);
+        }
+        if self.adam_v.is_none() {
+            self.adam_v = Some(mem.alloc_zeroed(&[self.total_numel])?);
+        }
+
+        // `beta^t` は `f64` 逐次積で更新してから `f32` スカラーへ
+        // 導出する（ホスト実装と同一の丸め手順。`AdamStoreState` doc
+        // 参照）。この時点ではまだどのデバイスバッファも変更していない
+        // ため、以降のエラーで `poisoned` へ遷移しても状態の整合性は
+        // 保たれる（`beta_pow_t` の更新はこの関数の成功が確定した後に
+        // 反映する。下記「状態確定」参照）。
+        let mut state = self.adam_state.unwrap_or(AdamStoreState {
+            kind,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            beta1_pow_t: 1.0,
+            beta2_pow_t: 1.0,
+        });
+        state.beta1_pow_t *= beta1 as f64;
+        state.beta2_pow_t *= beta2 as f64;
+        let bias_correction1 = 1.0 - state.beta1_pow_t;
+        let bias_correction2 = 1.0 - state.beta2_pow_t;
+        let step_config = AdamStepConfig {
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            decay_factor: 1.0 - lr * weight_decay,
+            step_size: (lr as f64 / bias_correction1) as f32,
+            bias_correction2_sqrt: bias_correction2.sqrt() as f32,
+            kind,
+        };
+
+        // `pending` を消費するのはここから（以降のエラーは `poisoned`
+        // 遷移で `pending` の意味自体が失われるため、これより手前で
+        // `take()` しない。`step()` と同じ理由）。
+        let pending_backup = self.pending.take();
+
+        // ②更新フェーズ（`step()` の `any_resident` 分岐と同型。CUDA
+        // Graph capture は持たないため常に直接実行）。
+        if !any_resident {
+            let grad_tensor = match Tensor::new(flat_grad, &[self.total_numel])
+                .map_err(BackendError::ShapeMismatch)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let grad_buf = match mem.upload(&grad_tensor) {
+                Ok(buf) => buf,
+                Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => {
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                Err(e) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            // `adam_m`／`adam_v` は本関数冒頭で無条件に遅延確保済み
+            // （`.claude/rules/coding-rust.md` の「本番経路で `unwrap()`／
+            // `expect()` を使わない」方針に従い、`.expect()` ではなく
+            // 型付きエラーへ変換する fail-closed 分岐とする。到達時点で
+            // `None` は契約違反——`grad_staging` の同型分岐と同じ扱い）。
+            let (Some(m), Some(v)) = (self.adam_m.as_mut(), self.adam_v.as_mut()) else {
+                self.pending = pending_backup;
+                return Err(BackendError::InvalidArgument(
+                    "DeviceParamStore::step_adam_impl: adam_m/adam_v was None despite being \
+                     allocated earlier in this call（契約違反）"
+                        .to_string(),
+                ));
+            };
+            if let Err(e) = ops.adam_step_device_tracked(
+                &mut self.params,
+                &grad_buf,
+                m,
+                v,
+                &step_config,
+                &self.failure_token,
+            ) {
+                if matches!(e, BackendError::DeviceContextCaptureInProgress { .. }) {
+                    self.pending = pending_backup;
+                    return Err(e);
+                }
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        } else {
+            let mut staging_ref = self.grad_staging.borrow_mut();
+            let staging = staging_ref.as_mut().ok_or_else(|| {
+                BackendError::InvalidArgument(
+                    "DeviceParamStore::step_adam_impl: any_resident == true だが grad_staging \
+                     が None だった（契約違反）"
+                        .to_string(),
+                )
+            })?;
+            for (i, grad) in &host_grads_for_staging {
+                let offset = self.layout[*i].offset;
+                if let Err(e) = mem.upload_into(grad, &mut staging.buf, offset) {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            }
+            // 上の `!any_resident` 分岐と同じ理由（`.expect()` を使わず
+            // fail-closed に拒否する）。
+            let (Some(m), Some(v)) = (self.adam_m.as_mut(), self.adam_v.as_mut()) else {
+                drop(staging_ref);
+                self.pending = pending_backup;
+                return Err(BackendError::InvalidArgument(
+                    "DeviceParamStore::step_adam_impl: adam_m/adam_v was None despite being \
+                     allocated earlier in this call（契約違反）"
+                        .to_string(),
+                ));
+            };
+            if let Err(e) = ops.adam_step_device_tracked(
+                &mut self.params,
+                &staging.buf,
+                m,
+                v,
+                &step_config,
+                &self.failure_token,
+            ) {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+
+        // 状態確定: 更新フェーズが成功した後にのみ `beta_pow_t`
+        // （更新済み `state`）・`step_count` を反映する。
+        self.adam_state = Some(state);
         self.step_count += 1;
         Ok(())
     }

@@ -97,6 +97,62 @@ pub struct SgdStepConfig {
     pub is_first_step: bool,
 }
 
+/// [`AdamStepConfig`] の weight decay 適用方式（イシュー #1959・
+/// `fandhe_ai_autodiff::nn::optim::{adam, adamw}` の 2 方式に対応）。
+///
+/// `#[non_exhaustive]` はガードレール条件（`.claude/rules/security.md`
+/// A08。公開 API 非破壊）を保ちながら将来 variant 追加を可能にするため
+/// （`SgdStepConfig` と異なり enum のため列挙値の追加余地を残す）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdamStepKind {
+    /// `fandhe_ai_autodiff::nn::optim::adam::Adam` と同じ coupled L2
+    /// weight decay（`g_eff = mul_add(weight_decay, p, g)`。`weight_decay
+    /// == 0.0` では decay 項の演算自体を skip する）。
+    Coupled,
+    /// `fandhe_ai_autodiff::nn::optim::adamw::AdamW` と同じ decoupled
+    /// weight decay（`p_eff = p * decay_factor`。`decay_factor` は
+    /// `AdamStepConfig::decay_factor` を無条件に乗じる——`weight_decay
+    /// == 0.0` でも `decay_factor == 1.0` として同じ演算列を通る）。
+    Decoupled,
+}
+
+/// [`BackendOps::adam_step_device`] の 1 ステップ分のハイパーパラメータ
+/// （イシュー #1959・`docs/device-resident-update-design.md`）。
+///
+/// `SgdStepConfig` と同じ設計方針: `fandhe_ai_autodiff::optim::
+/// device_store::DeviceParamStore` がホスト側で `beta1_pow_t`／
+/// `beta2_pow_t`（`f64` 逐次積。PyTorch の Python float 丸め挙動へ寄せる
+/// ため `f64` のまま保持する契約は `Adam`／`AdamW` ホスト実装と同一）を
+/// 保持し、本型へは呼び出しごとに導出済みの `f32` スカラー
+/// （`step_size`／`bias_correction2_sqrt`／`decay_factor`）として渡す
+/// （カーネル内で `beta^t` を再計算しない。`.claude/rules/coding-rust.md`
+/// の bit 一致契約を CPU 実装で満たすための設計）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdamStepConfig {
+    /// 1 次モーメント（`m`）の指数移動平均係数 `β1`。
+    pub beta1: f32,
+    /// 2 次モーメント（`v`）の指数移動平均係数 `β2`。
+    pub beta2: f32,
+    /// 分母のゼロ除算防止項。
+    pub eps: f32,
+    /// `AdamStepKind::Coupled` の場合のみ参照する coupled L2 weight
+    /// decay 係数（`AdamStepKind::Decoupled` では未使用。呼び出し元は
+    /// `decay_factor` 側へ既に織り込み済み）。
+    pub weight_decay: f32,
+    /// `AdamStepKind::Decoupled` の場合のみ参照する事前計算済み
+    /// `1.0 - lr * weight_decay`（`AdamStepKind::Coupled` では未使用）。
+    pub decay_factor: f32,
+    /// ホストで `(lr as f64 / (1.0 - beta1_pow_t)) as f32` として
+    /// 事前計算した値。
+    pub step_size: f32,
+    /// ホストで `((1.0 - beta2_pow_t).sqrt()) as f32` として事前計算
+    /// した値。
+    pub bias_correction2_sqrt: f32,
+    /// weight decay の適用方式。
+    pub kind: AdamStepKind,
+}
+
 /// Conv2d（`BackendOps::im2col`／`col2im`／`conv2d`）のパラメータ記述子
 /// （イシュー #1764・設計 `docs/conv-ops-design.md` §8）。
 ///
@@ -901,6 +957,69 @@ pub trait BackendOps {
         _token: &DispatchFailureCell,
     ) -> Result<(), BackendError> {
         self.sgd_step_device(param, grad, velocity, config)
+    }
+
+    /// デバイス常駐パラメータへ Adam／AdamW 1 step を in-place 適用する
+    /// （イシュー #1959・`docs/device-resident-update-design.md`）。
+    ///
+    /// `param`／`m`／`v` は同一 shape・同一デバイス。演算列は
+    /// `fandhe_ai_autodiff::nn::optim::{adam::Adam::step, adamw::AdamW::
+    /// step}` を逐語再現する契約（`AdamStepConfig::kind` で分岐）:
+    /// `g_eff`（`Coupled` のみ `weight_decay` を勾配へ coupled 加算）→
+    /// `m ← mul_add(β1, m, (1-β1)·g_eff)` → `v ← mul_add(β2, v,
+    /// (1-β2)·g_eff²)` → `denom = sqrt(v)/bias_correction2_sqrt + eps` →
+    /// `new_p = p_eff - step_size·m/denom`（`p_eff` は `Decoupled` のみ
+    /// `decay_factor` を乗算済み）。`f32::mul_add` を使い CPU 参照実装
+    /// （`Adam`／`AdamW`）と bit 一致させる契約は CPU 実装が担う（`SgdConfig`
+    /// と異なり `beta^t` はホスト側で確定済みの `step_size`／
+    /// `bias_correction2_sqrt` として受け取るためカーネル内では再計算
+    /// しない）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は常に [`BackendError::Unsupported`] を返す fail-closed
+    /// （`sgd_step_device` と同方針。設計文書 §3.2 改訂）。CPU はこの
+    /// デフォルトを実カーネルでオーバーライドする。CUDA／Metal は
+    /// 本イシュー時点では未実装のままこのデフォルトを維持する
+    /// （`out-of-scope-tracking.md` 対象。引き継ぎはユーザー承認を得て
+    /// 別 Issue で追跡する）。
+    ///
+    /// # エラー
+    /// - `param`／`m`／`v` のいずれかがこのバックエンドのハンドル型へ
+    ///   ダウンキャストできない・デバイスが一致しない →
+    ///   [`BackendError::DeviceMismatch`]
+    /// - shape が一致しない → [`BackendError::ShapeMismatch`]
+    fn adam_step_device(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _m: &mut DeviceBuffer<f32>,
+        _v: &mut DeviceBuffer<f32>,
+        _config: &AdamStepConfig,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "adam_step_device: default fail-safe (no in-place Adam kernel available)".into(),
+        ))
+    }
+
+    /// [`BackendOps::adam_step_device`] と同型だが、Metal のコマンド
+    /// バッファ共有向けに共有失敗トークン [`DispatchFailureCell`] を
+    /// 追加引数として受け取る非破壊拡張（`sgd_step_device_tracked` と
+    /// 同じ「デフォルトメソッド追加」パターン）。
+    ///
+    /// # デフォルト実装
+    /// 既定は `token` を無視して [`BackendOps::adam_step_device`] へ
+    /// そのまま委譲する（CPU はこのデフォルトのままでよい。`sgd_step_
+    /// device_tracked` と同じ理由）。
+    fn adam_step_device_tracked(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        m: &mut DeviceBuffer<f32>,
+        v: &mut DeviceBuffer<f32>,
+        config: &AdamStepConfig,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.adam_step_device(param, grad, m, v, config)
     }
 
     /// 学習 step の一区間（イシュー #1349 では

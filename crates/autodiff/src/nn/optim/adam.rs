@@ -32,13 +32,15 @@
 //! 受け取り更新後 `Tensor<f32>` の列を返す（`AdamW::step` と同じ
 //! シグネチャ・呼び出しパターン）。
 //!
-//! **`DeviceParamStore` 非対応**（イシュー #1742 のスコープ外）:
-//! `crate::optim::device_store::DeviceParamStore::step` は
-//! `BackendOps::sgd_step_device` 専用のデバイス常駐更新経路であり、
-//! `Adam` を含む Adam 系 optimizer は結線されていない。`Adam::step` は
-//! 本ファイルの `AdamW::step` と同様、ホスト `Tensor<f32>` を介した
-//! optimizer step のみを提供する
-//! （`crates/facade/src/optim.rs`「デバイス常駐更新との違い」節）。
+//! **`DeviceParamStore` 結線済み**（イシュー #1959）:
+//! `crate::optim::device_store::DeviceParamStore::step_adam` が
+//! `BackendOps::adam_step_device(_tracked)`（本ファイルの `step()` と
+//! 同一の演算列を CPU 実装で bit 完全一致再現。CUDA／Metal カーネルは
+//! 本イシュー時点で未実装のまま `Unsupported` を返す）経由でデバイス
+//! 常駐 1 step を提供する。`Adam::step`（本ファイル）自体は引き続き
+//! ホスト `Tensor<f32>` を介した独立経路であり、`step_adam` はこれを
+//! 呼び出さない（両者は同一演算列を意図的に複製した別実装。`AdamW`
+//! と同型）。
 //!
 //! 新規 `Op`／`BackendOps` メソッド／`Var` メソッド／VJP は追加しない
 //! （`AdamW` と同様、`Tape`/`Var`/`BackendOps` に依存しない値型・純関数。
