@@ -3,7 +3,9 @@
 //! `Var::min`／`argmax`／`argmin`（イシュー #1720）も本ファイルへ追加
 //! 済み（`argmax`／`argmin` は非微分演算のため forward 解析値の比較
 //! のみ・CUDA 実機比較は #1720 スコープ外〈`CudaBackendOps::argmax`／
-//! `argmin` は未実装のまま既定 `Unsupported`〉）。
+//! `argmin` は未実装のまま既定 `Unsupported`〉）。`argmax`／`argmin`
+//! の Metal カーネル（イシュー #1951）は下記 (o) が CPU tape との
+//! 添字完全一致を検証する。
 //!
 //! 属性なしのテストは CPU（`fandhe_ai::tape_for(Device::Cpu)`）のみを
 //! 対象とし、既知の解析値との一致を確認する（CI で常時実行）。
@@ -603,6 +605,42 @@ fn metal_mean_forward_and_backward_match_cpu_bit_exact() {
             dense_vec(metal_da),
             dense_vec(cpu_da),
             "mean(dim={dim:?}) backward が Metal/CPU で bit 一致しない"
+        );
+    }
+}
+
+/// (o) `tape_for(Device::Metal)` の `Var::argmax`／`Var::argmin`
+/// （全軸・単一軸）が CPU tape と**添字完全一致**することを確認する
+/// （イシュー #1951。`crate::reduce::MetalReduce` の argext カーネルが
+/// CPU 参照実装〈`fandhe_ai_backend_cpu::reduction::{argmax, argmin}`〉
+/// と添字が完全一致する契約。非微分演算のため backward は関与しない）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_argmax_and_argmin_match_cpu_exact() {
+    let data = vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0];
+    let shape = [2usize, 3];
+
+    for dim in [None, Some(0usize), Some(1usize)] {
+        let metal_tape = tape_for(Device::Metal).unwrap();
+        let metal_a = metal_tape.var(&tensor(data.clone(), &shape));
+        let metal_argmax = metal_a.argmax(dim).unwrap();
+        let metal_argmin = metal_a.argmin(dim).unwrap();
+
+        let cpu_tape = tape_for(Device::Cpu).unwrap();
+        let cpu_a = cpu_tape.var(&tensor(data.clone(), &shape));
+        let cpu_argmax = cpu_a.argmax(dim).unwrap();
+        let cpu_argmin = cpu_a.argmin(dim).unwrap();
+
+        assert_eq!(
+            metal_argmax.contiguous().as_slice().unwrap(),
+            cpu_argmax.contiguous().as_slice().unwrap(),
+            "argmax(dim={dim:?}) が Metal/CPU で添字一致しない"
+        );
+        assert_eq!(
+            metal_argmin.contiguous().as_slice().unwrap(),
+            cpu_argmin.contiguous().as_slice().unwrap(),
+            "argmin(dim={dim:?}) が Metal/CPU で添字一致しない"
         );
     }
 }

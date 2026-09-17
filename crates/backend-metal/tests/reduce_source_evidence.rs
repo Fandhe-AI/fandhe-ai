@@ -56,15 +56,20 @@ fn kernel_names_and_buffer_indices_are_declared() {
         "reduce_sum_all_chunk_f32",
         "reduce_sum_all_finalize_f32",
         "reduce_sum_axis_f32",
+        "reduce_arg_all_chunk_f32",
+        "reduce_arg_all_finalize_f32",
+        "reduce_arg_axis_f32",
     ] {
         assert!(
             REDUCE_METAL_SOURCE.contains(&format!("kernel void {kernel}(")),
             "{kernel} カーネルの宣言が見つかりません"
         );
     }
-    // 3 カーネル合算で buffer index 0〜4 が使われる（chunk: 0/1/2/3・
-    // finalize: 0/1/2・axis: 0/1/2/3/4）。
-    for idx in 0..=4 {
+    // 6 カーネル合算で buffer index 0〜5 が使われる（sum の 3 カーネル:
+    // chunk 0/1/2/3・finalize 0/1/2・axis 0/1/2/3/4。argext の 3
+    // カーネル〈イシュー #1951〉: chunk 0/1/2/3/4/5・finalize 0/1/2/3/4・
+    // axis 0/1/2/3/4/5）。
+    for idx in 0..=5 {
         assert!(
             REDUCE_METAL_SOURCE.contains(&format!("[[buffer({idx})]]")),
             "buffer({idx}) の宣言が見つかりません"
@@ -72,28 +77,31 @@ fn kernel_names_and_buffer_indices_are_declared() {
     }
 }
 
-/// REQ-8（境界検査規約）: `reduce_sum_all_chunk_f32` は
-/// `gid >= num_chunks`、`reduce_sum_all_finalize_f32` は `gid != 0u`、
-/// `reduce_sum_axis_f32` は `gid >= lanes` の境界検査を持つことを
-/// 機械検証する（最適化を理由に省略しない契約のロック）。
+/// REQ-8（境界検査規約）: `reduce_sum_all_chunk_f32`／
+/// `reduce_arg_all_chunk_f32`（イシュー #1951 追加）は
+/// `gid >= num_chunks`、`reduce_sum_all_finalize_f32`／
+/// `reduce_arg_all_finalize_f32` は `gid != 0u`、`reduce_sum_axis_f32`／
+/// `reduce_arg_axis_f32` は `gid >= lanes` の境界検査を持つことを
+/// 機械検証する（最適化を理由に省略しない契約のロック。sum／argext の
+/// 各ペアで 1 回ずつ、計 2 回出現する）。
 #[test]
 fn boundary_checks_are_present() {
     assert_eq!(
         REDUCE_METAL_SOURCE
             .matches("if (gid >= num_chunks)")
             .count(),
-        1,
-        "reduce_sum_all_chunk_f32 に `if (gid >= num_chunks)` 境界検査が必要"
+        2,
+        "reduce_sum_all_chunk_f32／reduce_arg_all_chunk_f32 に `if (gid >= num_chunks)` 境界検査が必要"
     );
     assert_eq!(
         REDUCE_METAL_SOURCE.matches("if (gid != 0u)").count(),
-        1,
-        "reduce_sum_all_finalize_f32 に `if (gid != 0u)` 境界検査が必要"
+        2,
+        "reduce_sum_all_finalize_f32／reduce_arg_all_finalize_f32 に `if (gid != 0u)` 境界検査が必要"
     );
     assert_eq!(
         REDUCE_METAL_SOURCE.matches("if (gid >= lanes)").count(),
-        1,
-        "reduce_sum_axis_f32 に `if (gid >= lanes)` 境界検査が必要"
+        2,
+        "reduce_sum_axis_f32／reduce_arg_axis_f32 に `if (gid >= lanes)` 境界検査が必要"
     );
 }
 
@@ -263,5 +271,49 @@ fn indices_are_64bit_and_no_threadgroup_barrier() {
     assert!(
         !REDUCE_METAL_SOURCE.contains("threadgroup_barrier"),
         "reduce.metal は lane 逐次構造のため threadgroup_barrier を使わないはず"
+    );
+}
+
+/// argmax／argmin（イシュー #1951）: カーネル本体が加減算アキュムレータ
+/// （`red_f64_*`）を一切参照しないこと（比較のみのため不要。参照して
+/// いれば設計逸脱として検出する）・GPU 上の非正規化数 flush 対策として
+/// float の `isnan(`／`<`／`>` を直接使わずビットキー関数
+/// （`red_arg_is_nan`／`red_arg_key`／`red_arg_better`）のみで比較する
+/// ことを機械検証する（モジュール doc §2.3 の裏付け）。
+#[test]
+fn argext_kernels_use_bit_key_comparison_not_soft_f64_or_float_compare() {
+    let chunk_start = REDUCE_METAL_SOURCE
+        .find("kernel void reduce_arg_all_chunk_f32(")
+        .expect("reduce_arg_all_chunk_f32 declaration must exist");
+    let argext_body = &REDUCE_METAL_SOURCE[chunk_start..];
+
+    assert!(
+        !argext_body.contains("red_f64_"),
+        "argext カーネル本体は red_f64_* を参照しないはず（比較のみで加減算不要）"
+    );
+    assert!(
+        !argext_body.contains("isnan("),
+        "argext カーネルは isnan( を使わず red_arg_is_nan によるビット判定を使うはず"
+    );
+    for f in ["red_arg_is_nan", "red_arg_key", "red_arg_better"] {
+        assert!(
+            argext_body.contains(f),
+            "reduce.metal の argext カーネル群に `{f}` が見つかりません"
+        );
+    }
+}
+
+/// argmax／argmin の各カーネルが `mode`（`constant uint&`）引数を持ち、
+/// `red_arg_better` へ渡していることを機械検証する（`ArgExtKind`
+/// との結線ロック）。
+#[test]
+fn argext_kernels_declare_mode_argument() {
+    assert_eq!(
+        REDUCE_METAL_SOURCE
+            .matches("constant uint& mode [[buffer(")
+            .count(),
+        3,
+        "reduce_arg_all_chunk_f32／reduce_arg_all_finalize_f32／reduce_arg_axis_f32 の \
+         3 カーネルすべてに `constant uint& mode` 引数が必要"
     );
 }
