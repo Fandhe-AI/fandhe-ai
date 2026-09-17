@@ -452,6 +452,26 @@ Softmax`／`LogSoftmax`＋VJP・`autodiff::var::Var::softmax`／`log_softmax`・
 非最終軸 GPU 対応は out-of-scope として記録し、起票はユーザー承認後に限る
 （`.claude/rules/out-of-scope-tracking.md`）。
 
+## 追補（イシュー #1952）
+
+上記「GPU（CUDA／Metal）の `log_softmax` は行カーネルを新設せず…
+ホスト参照実装へフォールバックする」という記述は **backward（VJP）に
+ついて Metal は解消済み**である: `BackendOps::log_softmax_backward`
+（既定 `Unsupported`。#1949 と共有の trait 拡張）を新設し、`crate::
+log_softmax_backward::MetalLogSoftmaxBackward`（`Σ_dim(g)` の縮約・
+`exp(y)` との乗算・`g` からの減算を binary64 ソフトウェア
+エミュレーションで計算する 2 カーネル構成）へ結線した。`exp(y)`
+自体の丸めは Metal `precise::exp` とホスト `f32::exp` で bit 一致が
+保証されないため REQ-2 統一複合判定で検証し、`y=0`／`y=-inf` の行
+（`exp` の丸め差が生じない）に限り bit 完全一致を実機テストで検証
+する契約（`docs/backend-metal-reduce-sum-design.md` §12）。**forward
+（`log_softmax` 自体）は本イシューのスコープ外で無変更のまま**（CPU
+融合カーネルのみが本番オーバーライドされ、GPU forward は引き続き
+ホスト参照実装フォールバック）。facade 新規公開面なし。CUDA 側
+backward（#1949）は別イシュー。M4 Max 実機実測は本実装セッション
+（Linux 環境）では未実施のまま Mac セッションへ申し送り
+（`docs/perf/logs/metal-log-softmax-backward-1952/README.md`）。
+
 ## 追補（2026-09-13・イシュー #1624）
 
 §2.11 の「`torch.utils.checkpoint`（activation checkpointing）」行（上記
@@ -1881,6 +1901,7 @@ PyTorch `torch.optim.lr_scheduler.ReduceLROnPlateau` 相当の欠落（`Constant
 #1760 で追補を追記（`compat::Sequential::add_layer_norm`／`add_rms_norm`／`add_batch_norm1d`／`add_batch_norm2d`／`add_embedding`／`add_multihead_attention` 実装済み化。`nn::Module` trait への `as_layer_norm`／`as_rms_norm`／`as_batch_norm1d`／`as_batch_norm2d`／`as_embedding`／`as_multihead_attention`〈`_mut` 込み。defaulted・非破壊拡張〉フック追加・`Embedding` への `impl Module` 新設（f32 `Var` 入力を厳格に整数 id へ変換する `EmbeddingVars::forward_from_var` 経由。`nn/embedding.rs` の「`Module` trait は実装しない（確定判断）」節を解消）・`compat::Sequential` の `bind`／`trainable_parameters`／`apply_parameters`〈`Module::set_parameter` による in-place 更新で BatchNorm の running stats／`num_batches_tracked`／`training` を保持〉／常駐経路ガード（`contains_conv_layer` → `contains_resident_unsupported_layer` 改名・拡張）への結線まで実装済み。新規 `Op`／`BackendOps`／VJP／カーネルなし〈既存 `Var::layer_norm`／`rms_norm`／`batch_norm_*`／`embedding`・既存 `matmul`／`transpose`／`masked_fill`／`softmax` の合成のみ〉・facade 新規公開面は `add_*` 6 件のみ。CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッションへ申し送り → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・CUDA〈GB10〉は引き続き未実測 → CUDA〈GB10〉も 2026-09-16 に実測済み（pass。`docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md`）〈`crates/facade/tests/compat_sequential_layers_backend_parity.rs`〉）。
 #1729 で追補を追記（Pooling（Max/AvgPool）行の CUDA 実装状況を追記。`crates/backend-cuda/src/{pooling, kernels_pooling}.rs` に MaxPool2d／AvgPool2d／AdaptiveAvgPool2d の forward カーネル 3 種を実装済み（`docs/pooling-ops-design.md` §5／§7 の数値契約〈MaxPool は先勝ち決定的タイ規則＋NaN 伝播で算術なしの純粋選択・Avg 系は `double` 逐次加算＋1 回 `float` downcast〉を CUDA 上で実装し、`pooling_model.rs`〈ホスト Rust 逐語モデル〉と値・索引とも bit 完全一致）。実装時点で兄弟イシュー #1728（`backend-cpu`。共有基盤 `Pool2dParams`・`BackendOps` 3 メソッド・出力 shape 関数）が `main` に未マージだったため、`CudaPooling` はプリミティブ引数で自己完結し `ops.rs::CudaBackendOps` への override 配線を持たない（#1728 マージ後の追従 PR へ引き継ぐ）。facade 新規公開面なし・GB10 実機実測は未実施のまま `docs/perf/logs/cuda-pooling-1729/` へ申し送り → CUDA〈GB10〉は 2026-09-16 に実測済み（pass。`docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md`））。
 #1896 で追補を追記（`MetalBackendOps::sum` を `context_cache::cached_reduce` 経由で `reduce::MetalReduce`（#1895）へ結線済み化。`Var::sum`／`Var::mean`／`sum_dims`／`Op::Mean` 再計算・`TypedOps<f16|bf16>::sum` が Metal 上で到達可能になった（コード変更は `typed_f16.rs`／`typed_bf16.rs` に及ばず委譲先の実装差し替えのみで自動有効化。`max`／`min` は引き続き `Unsupported`）。facade 新規公開面なし。`Var::sum` のホストフォールバックは実装せず段階 0（`docs/backend-metal-reduce-sum-design.md` §10。未承認）。2026-09-16 に判定不能だった 11 テスト（`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md` §3.1）の再実測は未実施のまま `docs/perf/logs/metal-reduce-sum-wiring-1896/README.md` へ申し送り）。
+#1949 で追補を追記（`log_softmax` backward の CUDA 専用カーネル実装済み化。`BackendOps::log_softmax_backward`〈非破壊拡張・既定 `Unsupported`〉・`crates/backend-cuda/src/{kernels_log_softmax_backward.rs, log_softmax_backward.rs}`〈1 warp = 1 行・`Σ_dim(g)` は lane 0 のみが `i` 昇順で逐次和する方式（`double` アキュムレータ）で縮約し、ホスト参照実装〈`grad::log_softmax_vjp_along` の添字昇順逐次和〉と完全同順にする。当初採用していた `__shfl_xor_sync` butterfly reduction は加算順序がホストと異なり、大きさの近い符号違いの値が相殺する入力（例: `logits=[0,0,0,0]`・`g=[1e20,-1e20,1,0]`）で桁落ちの位置がずれ dx の一部要素が REQ-2 統一複合判定を外れる具体例が判明したため撤回した〉・`ops.rs::CudaBackendOps::log_softmax_backward`〈`row_softmax_layout` で非最終軸を `Unsupported` に区別・`softmax` オーバーライドと同型〉・`crates/autodiff/src/grad.rs::vjp` の `Op::LogSoftmax` 分岐を `Op::NllLoss` と同型の 3 分岐（`Ok`／`Unsupported` フォールバック／その他エラー伝播）へ変更。forward（`Var::log_softmax`・`BackendOps::log_softmax`・CUDA `softmax` forward）は無変更のまま bit 同一・CPU／Metal 側の backward は既定 `Unsupported` のままホストフォールバック維持。`expf` の丸め差異は残るため bit 完全一致は主張せず REQ-2 統一複合判定で検証（tolerance／baseline 不変）。facade 新規公開面なし。GB10 実機実測は未実施のまま `docs/perf/logs/cuda-log-softmax-backward-1949/README.md` へ申し送り）。
 #1951 で追補を追記（§2.5「Var 演算」の `argmax`／`argmin` 行を更新。Metal `argmax`／`argmin` を `crate::reduce::MetalReduce` の argext カーネル（全要素 2 段・単一軸 1 段。`argext_all_chunked` の等価性証明・NaN 除外／±0 同値化した整数ビットキー比較。`docs/backend-metal-reduce-sum-design.md` §11）へ結線済み化（`ops.rs::MetalBackendOps::argmax`／`argmin` の明示 `Unsupported` を解消）。CPU 参照実装〈`fandhe_ai_backend_cpu::reduction::{argmax, argmin}`〉と添字完全一致する契約。facade 新規公開面なし。CUDA は引き続き `Unsupported`（ホストフォールバック。#1720 スコープ外のまま）。M4 Max 実機実測は本実装エージェント実行環境〈Linux〉に Apple Silicon 実機への到達手段がなく未実施のまま `docs/perf/logs/metal-argext-1951/README.md` へ申し送り）。
 
 #1941 で §2.11「高階微分（`grad of grad`）」行の実装状態は「なし」のまま不変（コード変更なし）だが、設計記録（`docs/autodiff-higher-order-grad-decision.md`。#1622）を前提 issue（#1593／#1597／#1599／#1601／#1612。いずれも CLOSED 確認済み）完了後の HEAD へ更新し、主案 A-2（子テープ方式）の `create_graph` API 契約案・`Op` enum 69 variant 全体の対象／非対象／保留分類を確定した。段階 0（非対応の明文化）から段階 1（設計確定・実装未着手）へ位置づけを更新。実装着手はユーザー承認（同 doc §10）が前提のまま。

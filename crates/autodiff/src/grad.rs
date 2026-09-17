@@ -334,8 +334,28 @@ pub(crate) fn vjp(
         Op::LogSoftmax { input, dim } => {
             // d/dx log_softmax(x) = g − exp(y) ⊙ Σ_dim(g)（`y` = forward
             // 記録値 `out_value` = log_softmax(x)）。軸方向の縮約
-            // （`Σ_dim(g)`）は f64 アキュムレータ。
-            let da = log_softmax_vjp_along(out_value, upstream, dim);
+            // （`Σ_dim(g)`）は f64 アキュムレータ。`BackendOps::
+            // log_softmax_backward`（イシュー #1949）優先・`Unsupported`
+            // のときのみ既存ホスト参照実装（`log_softmax_vjp_along`）へ
+            // フォールバックする（`Op::NllLoss` 分岐と同型の 3 分岐。
+            // 判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+            let da = match ops.log_softmax_backward(out_value, upstream, dim) {
+                Ok(da) => {
+                    if da.shape() != out_value.shape() {
+                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                lhs: da.shape().to_vec(),
+                                rhs: out_value.shape().to_vec(),
+                            },
+                        )));
+                    }
+                    da
+                }
+                Err(BackendError::Unsupported(_)) => {
+                    log_softmax_vjp_along(out_value, upstream, dim)
+                }
+                Err(other) => return Err(AutodiffError::Backend(other)),
+            };
             vec![(input, da)]
         }
         Op::Cumsum { input, dim } => {
