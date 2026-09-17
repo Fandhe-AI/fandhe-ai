@@ -313,12 +313,16 @@ fn cuda_layer_norm_forward_matches_cpu() {
     );
 }
 
+// --- backward（親 #1608 配下。Metal はイシュー #1953・CUDA はイシュー
+// #1950/#1995 のそれぞれの facade テストが担う） ---
+
 /// `matmul → rms_norm → mse_loss` backward（`dW`）を同一グラフで CPU
-/// tape・CUDA tape の双方で backward し、`BackendOps::rmsnorm_backward`
-/// の CUDA 実装（イシュー #1950。`crate::norm_backward::
-/// CudaNormBackward`）が返す `dw` を CPU 経路（ホスト VJP）と REQ-2
-/// 統一複合判定で突き合わせる（`cpu_rms_norm_backward_matches_naive_
-/// reference` の実機横断版）。
+/// tape・Metal／CUDA tape の双方で backward し、`BackendOps::
+/// rmsnorm_backward` の各バックエンド実装（Metal: イシュー #1953・
+/// `crate::norm_backward::MetalNormBackward` / CUDA: イシュー #1950・
+/// `crate::norm_backward::CudaNormBackward`）が返す `dw` を CPU 経路
+/// （ホスト VJP）と REQ-2 統一複合判定で突き合わせる
+/// （`cpu_rms_norm_backward_matches_naive_reference` の実機横断版）。
 fn rms_norm_backward_dw_on(device: Device) -> Tensor<f32> {
     let w_lin = Tensor::new(
         vec![
@@ -347,6 +351,20 @@ fn rms_norm_backward_dw_on(device: Device) -> Tensor<f32> {
     let loss = y.mse_loss(&t).unwrap();
     let grads = tape.backward(&loss).unwrap();
     grads.get(&w_rms).unwrap().expect("到達する").clone()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_rms_norm_backward_matches_cpu() {
+    let metal_dw = rms_norm_backward_dw_on(Device::Metal);
+    let cpu_dw = rms_norm_backward_dw_on(Device::Cpu);
+
+    assert_parity(
+        "rms_norm backward（dW）: Metal tape_for vs CPU tape_for",
+        metal_dw.as_slice().expect("contiguous"),
+        cpu_dw.as_slice().expect("contiguous"),
+    );
 }
 
 #[test]
@@ -394,6 +412,25 @@ fn layer_norm_backward_dw_db_on(device: Device) -> (Tensor<f32>, Tensor<f32>) {
     let dw = grads.get(&w_ln).unwrap().expect("到達する").clone();
     let db = grads.get(&b_ln).unwrap().expect("到達する").clone();
     (dw, db)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_layer_norm_backward_matches_cpu() {
+    let (metal_dw, metal_db) = layer_norm_backward_dw_db_on(Device::Metal);
+    let (cpu_dw, cpu_db) = layer_norm_backward_dw_db_on(Device::Cpu);
+
+    assert_parity(
+        "layer_norm backward（dW）: Metal tape_for vs CPU tape_for",
+        metal_dw.as_slice().expect("contiguous"),
+        cpu_dw.as_slice().expect("contiguous"),
+    );
+    assert_parity(
+        "layer_norm backward（dB）: Metal tape_for vs CPU tape_for",
+        metal_db.as_slice().expect("contiguous"),
+        cpu_db.as_slice().expect("contiguous"),
+    );
 }
 
 #[test]
