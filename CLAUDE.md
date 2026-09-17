@@ -137,6 +137,7 @@ fandhe-ai/
     ├── onnx-export-op-mapping.md # ONNX export の内部 op 逆マッピング（`onnx-interop::onnx::export_ops`。`ExportOp` -> `NodeProto`）の対応表・契約（属性常時書き出し・`Transpose::perm` 省略時の例外・allowlist による層 B fail-closed 検査・対象外事項。facade 非公開のまま。イシュー #1773）。#1774 で §6 に roundtrip テスト記録を追記
     ├── oss-comparison-harness-decision.md # OSS 直接比較ハーネス（matrixmultiply・gemm crate・MLX・PyTorch）の恒久化・本体 workspace 外配置の設計判断・matrixmultiply/gemm の許容依存第 9 区分〈ベンチ比較対象〉としての条件付きユーザー承認記録（#755）
     ├── perf/                # 性能実測・下限確定の記録群（`performance-floor-decision.md` ほか。GEMM 最適化ツリー #479 の実測記録を含む）
+    │   ├── framework-compare-feature-matrix-0.9.0.md # フレームワーク横並びスコアボード「役割・機能の対応表」9 行を crates.io `fandhe-ai =0.9.0`（タグ `v0.9.0` 時点の facade 公開面。`git diff v0.9.0..HEAD -- crates` 空により HEAD と同一と確認済み）基準で再判定した記録。各行の「ある」判定に facade 公開 API 名＋実装イシュー番号、残る穴に親 #1937 配下の子イシュー番号を付与。スコアボード生成スクリプト・Artifact 自体はリポジトリ外かつ本実装セッションから到達不能のため反映は申し送り（イシュー #1938）
     │   ├── performance-floor-decision.md # REQ-8 段階的下限の確定判断・追補記録（#158・#386・#393・#577）
     │   ├── gemm-optimization-baseline.md # REQ-8 GEMM 5 行の分母・分子（対象カーネル・実機・PyTorch 版・出典）の突合基準（#481）
     │   ├── oss-gemm-comparison-baseline.md # OSS 直接比較の再現手順・計測境界・ベースライン・再計測キャンペーン表（#755）
