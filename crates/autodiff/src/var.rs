@@ -542,7 +542,23 @@ impl<'t> Var<'t> {
         let rhs_shape = weight.shape();
         let out_shape = gemm_out_shape(&lhs_shape, &rhs_shape)?;
         if let Some(b) = bias {
-            broadcast_shape(&out_shape, &b.shape())?;
+            // `broadcast_shape` の成功のみでは、`bias` が `out_shape`
+            // （gemm の出力 shape）を「拡張」する場合（例: out_shape
+            // `[1,1]`・bias `[2,1]`）を誤って受理してしまう。`grad::vjp`
+            // の `Op::LinearAct` 分岐は upstream（実際の forward 出力
+            // shape。add により拡張されていれば `[2,1]`）を `matmul_vjp`
+            // へそのまま渡すため、`weight` の shape（`[2,1]`）との
+            // 縮約次元が食い違い K 不一致で失敗する。勾配の形状契約を
+            // 守るため、bias は `out_shape` へブロードキャスト「される」
+            // 側（結果が `out_shape` と一致する）ことを検証し、拡張は
+            // fail-closed に拒否する（codex-review 指摘・PR #2000）。
+            let broadcast_result = broadcast_shape(&out_shape, &b.shape())?;
+            if broadcast_result != out_shape {
+                return Err(AutodiffError::Shape(ShapeError::BroadcastIncompatible {
+                    lhs: out_shape,
+                    rhs: b.shape().to_vec(),
+                }));
+            }
         }
         let (lhs_val, rhs_val, bias_val) = {
             let nodes = self.tape.nodes.borrow();
@@ -5562,6 +5578,35 @@ mod linear_act_tests {
                 _
             ))
         ));
+    }
+
+    /// codex-review 指摘（PR #2000）の回帰テスト: `bias` が
+    /// `gemm_out_shape` の結果（`out_shape`）を「拡張」するブロード
+    /// キャスト（`input=[1,2]`・`weight=[2,1]`・`bias=[2,1]`。
+    /// `out_shape` は `[1,1]` だが `bias` との NumPy 互換ブロードキャスト
+    /// 結果は `[2,1]` で `out_shape` と一致しない）を、
+    /// `typed_ops_f16()`／`typed_ops_bf16()` accessor が既定 `None` の
+    /// `Tape::new()`（fail-closed 経路と同じ前提）でも shape 検査段階で
+    /// 拒否することを確認する（`AutodiffError::Shape(_)`。accessor 探索
+    /// より前に検査が完結する契約は `tensor-core::low_precision::
+    /// linear_forward_low_precision` 側の同型テスト
+    /// `expanding_bias_broadcast_is_rejected_before_accessor_lookup` と
+    /// 対になる）。
+    #[test]
+    fn linear_act_low_precision_rejects_bias_that_expands_out_shape() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(vec![1.0, 2.0], &[1, 2]).unwrap());
+        let w = tape.var(&Tensor::new(vec![1.0, 1.0], &[2, 1]).unwrap());
+        let bias = tape.var(&Tensor::new(vec![0.0, 0.0], &[2, 1]).unwrap());
+        let err = x
+            .linear_act_low_precision(
+                &w,
+                Some(&bias),
+                Activation::None,
+                fandhe_ai_tensor_core::ScalarDType::F16,
+            )
+            .unwrap_err();
+        assert!(matches!(err, crate::error::AutodiffError::Shape(_)));
     }
 
     // 低精度 Linear forward（イシュー #1960）の成功経路テスト

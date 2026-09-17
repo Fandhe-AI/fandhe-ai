@@ -48,6 +48,7 @@ use crate::backend_ops::{Activation, BackendOps};
 use crate::broadcast::broadcast_shape;
 use crate::device::BackendError;
 use crate::element::ScalarDType;
+use crate::error::ShapeError;
 use crate::ops_shape::gemm_out_shape;
 use crate::tensor::Tensor;
 use crate::typed_ops::TypedOps;
@@ -174,7 +175,26 @@ pub fn linear_forward_low_precision(
     let out_shape =
         gemm_out_shape(input.shape(), weight.shape()).map_err(BackendError::ShapeMismatch)?;
     if let Some(b) = bias {
-        broadcast_shape(&out_shape, b.shape()).map_err(BackendError::ShapeMismatch)?;
+        // `broadcast_shape` の成功のみでは bias が `out_shape` を
+        // 「拡張」する場合（例: out_shape `[1,1]`・bias `[2,1]`）を
+        // 誤って受理してしまう。`fandhe_ai_autodiff::grad::vjp` の
+        // `Op::LinearAct` 分岐は forward の実際の出力 shape（`add` が
+        // bias 方向へ拡張していればそちら）を `matmul_vjp` へそのまま
+        // 渡すため、`weight` との縮約次元が食い違い K 不一致で失敗する。
+        // 呼び出し元（`autodiff::var.rs::linear_act_low_precision`）も
+        // 同型の検査を行うが、本関数は `tensor-core` の公開 API として
+        // 直接呼ばれうるため独立に検査する（判定迂回経路を作らない。
+        // `.claude/rules/security.md` A08。codex-review 指摘・PR #2000）。
+        let broadcast_result =
+            broadcast_shape(&out_shape, b.shape()).map_err(BackendError::ShapeMismatch)?;
+        if broadcast_result != out_shape {
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::BroadcastIncompatible {
+                    lhs: out_shape,
+                    rhs: b.shape().to_vec(),
+                },
+            ));
+        }
     }
     match dtype {
         ScalarDType::F16 => {
@@ -303,6 +323,30 @@ mod tests {
         let err =
             linear_forward_low_precision(&ops, ScalarDType::F16, &x, &w, None, Activation::None)
                 .unwrap_err();
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    /// codex-review 指摘（PR #2000）の回帰テスト: `bias` が `out_shape`
+    /// を「拡張」するブロードキャスト（out_shape `[1,1]`・bias `[2,1]`。
+    /// NumPy 互換規則では両立するが結果 shape は `[2,1]` へ拡張される）
+    /// は、`typed_ops_f16()` を呼ぶ前に fail-closed で拒否される
+    /// （accessor が `None` の `NoTypedOpsBackend` でも到達できることで
+    /// 拒否が shape 検査段階で完結することを確認する）。
+    #[test]
+    fn expanding_bias_broadcast_is_rejected_before_accessor_lookup() {
+        let ops = NoTypedOpsBackend;
+        let x = t(&[1.0, 2.0], &[1, 2]);
+        let w = t(&[1.0, 1.0], &[2, 1]);
+        let bias = t(&[0.0, 0.0], &[2, 1]);
+        let err = linear_forward_low_precision(
+            &ops,
+            ScalarDType::F16,
+            &x,
+            &w,
+            Some(&bias),
+            Activation::None,
+        )
+        .unwrap_err();
         assert!(matches!(err, BackendError::ShapeMismatch(_)));
     }
 }
