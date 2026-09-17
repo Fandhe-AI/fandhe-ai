@@ -151,10 +151,20 @@ pub fn rms_row_rstd(row: &[f32], eps: f32) -> f32 {
 /// （`MetalNormBackward::run_rmsnorm_backward_f32` の逐語モデル。`rows`
 /// 行すべてを走査する。`w` は `None` なら `dxhat = dy`）。
 ///
-/// 入口で [`validate_norm_backward_launch`] を呼び `rows`／`hidden`・
+/// 入口で `validate_norm_backward_launch` を呼び `rows`／`hidden`・
 /// `x.len()`／`dy.len()`／`w.len()` の不整合を型付き `Result` で拒否
 /// してから本体処理へ入る（本番経路で panic させない方針。
 /// `.claude/rules/coding-rust.md`）。
+///
+/// ゼロ要素分岐（`rows == 0 || hidden == 0`）は `dw_acc` 等の
+/// `hidden` サイズ scratch buffer を確保するより前で判定する。
+/// `rows == 0` の場合、`validate_norm_backward_launch` の
+/// `rows.checked_mul(hidden) == x.len()` 制約により `x.len()`／
+/// `dy.len()` は必ず 0 になる一方、`hidden` 自体は巨大な値
+/// （例 `usize::MAX`）でも検証を通過しうる。この場合に `dw`／`db` を
+/// 無条件で `hidden` サイズ確保すると capacity overflow で panic する
+/// （PR #2001 codex-review P1 指摘）。`dw`／`db` は `w`／`has_bias` で
+/// 実際に要求された場合のみ確保する。
 pub fn rmsnorm_backward_rows(
     x: &[f32],
     w: Option<&[f32]>,
@@ -164,12 +174,17 @@ pub fn rmsnorm_backward_rows(
     dy: &[f32],
 ) -> Result<(Vec<f32>, Option<Vec<f32>>), NormBackwardPrepareError> {
     validate_norm_backward_launch(rows, hidden, x.len(), dy.len(), w.map(<[f32]>::len))?;
-    let mut dx = vec![0.0f32; x.len()];
-    let mut dw_acc: Vec<u64> = vec![0u64; hidden]; // +0.0（f64 bits）。
     if rows == 0 || hidden == 0 {
-        let dw = w.map(|_| dw_acc.into_iter().map(narrow_f64_bits_f32).collect());
+        // rows == 0 の場合 x.len() == 0 が上記検証で保証されるため
+        // dx 確保は安全。dw は w が Some のときのみ確保する（w が
+        // Some なら validate 済みの w.len() == hidden の実スライスが
+        // 既にメモリ上に存在するため、この確保も安全）。
+        let dx = vec![0.0f32; x.len()];
+        let dw = w.map(|_| vec![0.0f32; hidden]);
         return Ok((dx, dw));
     }
+    let mut dx = vec![0.0f32; x.len()];
+    let mut dw_acc: Option<Vec<u64>> = w.map(|_| vec![0u64; hidden]); // +0.0（f64 bits）。
     let hidden_f64 = widen_f32_bits((hidden as f32).to_bits());
     for r in 0..rows {
         let row = &x[r * hidden..(r + 1) * hidden];
@@ -195,13 +210,15 @@ pub fn rmsnorm_backward_rows(
             let d64 = mul_f64_bits(rstd64, inner);
             *dxv = f32::from_bits(narrow_f64_bits(d64));
         }
-        for (i, (&xv, &dyv)) in row.iter().zip(dy_row.iter()).enumerate() {
-            let xhat = xv * rstd;
-            let term = dyv * xhat;
-            dw_acc[i] = add_f64_bits(dw_acc[i], widen_f32_bits(term.to_bits()));
+        if let Some(dw_acc) = dw_acc.as_mut() {
+            for (i, (&xv, &dyv)) in row.iter().zip(dy_row.iter()).enumerate() {
+                let xhat = xv * rstd;
+                let term = dyv * xhat;
+                dw_acc[i] = add_f64_bits(dw_acc[i], widen_f32_bits(term.to_bits()));
+            }
         }
     }
-    let dw = w.map(|_| dw_acc.into_iter().map(narrow_f64_bits_f32).collect());
+    let dw = dw_acc.map(|acc| acc.into_iter().map(narrow_f64_bits_f32).collect());
     Ok((dx, dw))
 }
 
@@ -231,9 +248,10 @@ pub fn ln_row_mean_rstd(row: &[f32], eps: f32) -> (u64, u64) {
 /// LayerNorm backward（`dx`・`dw`・`db`）の完全な行走査版ホストモデル
 /// （`MetalNormBackward::run_layer_norm_backward_f32` の逐語モデル）。
 ///
-/// 入口で [`validate_norm_backward_launch`] を呼び `rows`／`hidden`・
+/// 入口で `validate_norm_backward_launch` を呼び `rows`／`hidden`・
 /// `x.len()`／`dy.len()`／`w.len()` の不整合を型付き `Result` で拒否
-/// してから本体処理へ入る（[`rmsnorm_backward_rows`] と同じ理由）。
+/// してから本体処理へ入る（[`rmsnorm_backward_rows`] と同じ理由。
+/// ゼロ要素分岐を scratch buffer 確保より前へ移す設計判断も同一）。
 #[allow(clippy::too_many_arguments)]
 pub fn layer_norm_backward_rows(
     x: &[f32],
@@ -245,14 +263,18 @@ pub fn layer_norm_backward_rows(
     dy: &[f32],
 ) -> Result<LayerNormBackwardRowsOutput, NormBackwardPrepareError> {
     validate_norm_backward_launch(rows, hidden, x.len(), dy.len(), w.map(<[f32]>::len))?;
-    let mut dx = vec![0.0f32; x.len()];
-    let mut dw_acc: Vec<u64> = vec![0u64; hidden];
-    let mut db_acc: Vec<u64> = vec![0u64; hidden];
     if rows == 0 || hidden == 0 {
-        let dw = w.map(|_| dw_acc.into_iter().map(narrow_f64_bits_f32).collect());
-        let db = has_bias.then(|| db_acc.into_iter().map(narrow_f64_bits_f32).collect());
+        // rows == 0 の場合 x.len() == 0 が検証済みのため dx 確保は
+        // 安全。dw／db は w／has_bias で実際に要求された場合のみ
+        // 確保する（`rmsnorm_backward_rows` と同じ理由）。
+        let dx = vec![0.0f32; x.len()];
+        let dw = w.map(|_| vec![0.0f32; hidden]);
+        let db = has_bias.then(|| vec![0.0f32; hidden]);
         return Ok((dx, dw, db));
     }
+    let mut dx = vec![0.0f32; x.len()];
+    let mut dw_acc: Option<Vec<u64>> = w.map(|_| vec![0u64; hidden]);
+    let mut db_acc: Option<Vec<u64>> = has_bias.then(|| vec![0u64; hidden]);
     let hidden_f64 = widen_f32_bits((hidden as f32).to_bits());
     for r in 0..rows {
         let row = &x[r * hidden..(r + 1) * hidden];
@@ -290,12 +312,16 @@ pub fn layer_norm_backward_rows(
         for (i, &dyv) in dy_row.iter().enumerate() {
             let xhat = xhat_at(i);
             let term = dyv * xhat;
-            dw_acc[i] = add_f64_bits(dw_acc[i], widen_f32_bits(term.to_bits()));
-            db_acc[i] = add_f64_bits(db_acc[i], widen_f32_bits(dyv.to_bits()));
+            if let Some(dw_acc) = dw_acc.as_mut() {
+                dw_acc[i] = add_f64_bits(dw_acc[i], widen_f32_bits(term.to_bits()));
+            }
+            if let Some(db_acc) = db_acc.as_mut() {
+                db_acc[i] = add_f64_bits(db_acc[i], widen_f32_bits(dyv.to_bits()));
+            }
         }
     }
-    let dw = w.map(|_| dw_acc.into_iter().map(narrow_f64_bits_f32).collect());
-    let db = has_bias.then(|| db_acc.into_iter().map(narrow_f64_bits_f32).collect());
+    let dw = dw_acc.map(|acc| acc.into_iter().map(narrow_f64_bits_f32).collect());
+    let db = db_acc.map(|acc| acc.into_iter().map(narrow_f64_bits_f32).collect());
     Ok((dx, dw, db))
 }
 
@@ -564,5 +590,29 @@ mod tests {
             layer_norm_backward_rows(&[1.0, 2.0], Some(&[1.0]), false, 1e-5, 1, 2, &[1.0, 2.0]),
             Err(NormBackwardPrepareError::InvalidShape { .. })
         ));
+    }
+
+    /// `rows == 0` かつ `hidden` が巨大（`usize::MAX`）な入力は
+    /// `validate_norm_backward_launch` の `rows*hidden == x.len()`
+    /// 検査を通過するが、`w`／`has_bias` が指定されていなければ
+    /// `hidden` サイズの scratch buffer を一切確保せずに空の出力を
+    /// 返す（PR #2001 codex-review P1 指摘の再現・是正確認。
+    /// 是正前は `dw_acc`／`db_acc` を無条件確保しており
+    /// capacity overflow で panic していた）。
+    #[test]
+    fn rmsnorm_backward_rows_zero_rows_huge_hidden_does_not_panic() {
+        let (dx, dw) = rmsnorm_backward_rows(&[], None, 1e-5, 0, usize::MAX, &[])
+            .expect("rows == 0 は形状検証を通過するはず");
+        assert!(dx.is_empty());
+        assert!(dw.is_none());
+    }
+
+    #[test]
+    fn layer_norm_backward_rows_zero_rows_huge_hidden_does_not_panic() {
+        let (dx, dw, db) = layer_norm_backward_rows(&[], None, false, 1e-5, 0, usize::MAX, &[])
+            .expect("rows == 0 は形状検証を通過するはず");
+        assert!(dx.is_empty());
+        assert!(dw.is_none());
+        assert!(db.is_none());
     }
 }
