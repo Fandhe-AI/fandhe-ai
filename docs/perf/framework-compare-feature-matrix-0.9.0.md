@@ -62,11 +62,18 @@ $ git diff --stat v0.9.0..HEAD -- crates
   LinearWarmup／Plateau／OneCycle）は 0.9.0 時点で全て揃っている。
 - RNN／LSTM／GRU・Pooling 層（`nn::MaxPool2d` 等）は本体クレートに実装済み
   だが、`compat::Sequential` に対応する `add_*` が無いため facade からは
-  依然到達不能（「NN 層」行が「部分的」のまま残る理由）。**Pooling 層の
-  `add_*` 欠落は #1957 で解消済み**（`compat::Sequential::add_max_pool2d`
-  等 6 件。0.9.0 以降の HEAD。**0.9.0 判定値自体〈§3〉は変更しない**——
-  本表は `fandhe-ai =0.9.0`〈タグ `v0.9.0`〉基準のスナップショットで
-  あり #1957 は同タグより後の変更のため）。RNN／LSTM／GRU の穴は継続。
+  依然到達不能（「NN 層」行が「部分的」のまま残る理由）。**#1955 追補**:
+  RNN／LSTM／GRU は HEAD では `fandhe_ai::nn::rnn`（`Rnn`／`Lstm`／`Gru`
+  の純再エクスポート＋`Tape::rnn_forward_seq`／`lstm_forward_seq`／
+  `gru_forward_seq`）経由で facade から到達可能になった（`compat::
+  Sequential::add_*` は承認スコープにより追加していない。
+  `docs/compat-api-scope.md` §5 適用記録参照）。**#1957 追補**: Pooling
+  層の `add_*` 欠落も `compat::Sequential::add_max_pool2d` 等 6 件で
+  解消済み（同 §5 適用記録参照）。crates.io 公開版 `fandhe-ai =0.9.0`
+  （本表の判定基準）にはいずれも未収録のため、0.9.0 時点の「NN 層」行
+  判定値自体は変更しない（本表は `fandhe-ai =0.9.0`〈タグ `v0.9.0`〉
+  基準のスナップショットであり #1955／#1957 は同タグより後の変更の
+  ため）。
 - #1962 で「推論・サービング」行の残る穴（KV キャッシュ・トークナイザ・
   グラフ最適化区分 B）の段階を確定した（`docs/facade-inference-serving-
   scope-decision.md`）。0.9.0 判定値自体（本表 §3）は変更しない。

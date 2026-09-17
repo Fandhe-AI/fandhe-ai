@@ -166,7 +166,7 @@ PyTorch 準拠で固定する:
 ### 決定 10: 公開面（承認事項として分離）
 
 - 内部クレート `fandhe_ai_autodiff::nn::{RnnCell, LstmCell, GruCell, Rnn, Lstm, Gru}`（本文書の設計対象）と、facade 公開面（`fandhe_ai` 再エクスポート・`compat::Sequential::add_lstm` 等）は分ける
-- facade 公開面拡張は `docs/compat-api-scope.md` §5 の手続き（正本 spec 側の REQ-9 改定〈完了済み: Tier 2 明記〉＋実装リポ側 `docs/compat-api-scope.md` §1／§2／§5 の更新〈#1591。**CLOSED（PR #1661）**〉＋ユーザー承認〈#1647 時点でも未取得〉）が完了するまで**実装不可**とする
+- facade 公開面拡張は `docs/compat-api-scope.md` §5 の手続き（正本 spec 側の REQ-9 改定〈完了済み: Tier 2 明記〉＋実装リポ側 `docs/compat-api-scope.md` §1／§2／§5 の更新〈#1591。**CLOSED（PR #1661）**〉＋ユーザー承認〈#1647 時点でも未取得〉）が完了するまで**実装不可**とする → **#1955 で承認・実装済み（§9 参照）**
 - `compat::Sequential` への統合（2 次元入力前提の平坦鎖からの拡張）は #1618（`add_*` 拡張）の管轄で扱うことを推奨する
 - 実装は `crates/facade/tests/api_surface.rs` の機械検査（`BackendOps`／生 `Tape` を再エクスポート・直接引数化しない）を通過する構成であることを条件とする
 
@@ -278,7 +278,8 @@ h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
   `docs/compat-api-scope.md` を更新」自体は N/A（同ファイルは変更
   していない）。ユーザー承認（決定 10 の 3 条件目）が本実装時点でも
   未取得のため、`fandhe_ai` 再エクスポート・`compat::Sequential::
-  add_lstm` 等は依然として実装不可のまま。
+  add_lstm` 等は依然として実装不可のまま。 → **#1955 で承認・実装
+  済み（§9 参照）**。
 - **実機実測**: Metal（Apple Silicon・本セッション実行機）は
   `cargo test -p fandhe-ai-backend-metal --release --test
   rnn_cell_parity -- --ignored --nocapture` で実機実測を完了し、
@@ -315,3 +316,53 @@ h_t = (1 − z_t) ⊙ n_t + z_t ⊙ h_{t-1}
   になっていること（手組み展開ループの数値微分との突合）を確認した。
 - **多層スタック（決定 4a (i)）**: 2 層のセル単位交互適用で層 1 の
   重みへ勾配が連続することを数値微分で確認した。
+
+## 9. facade 公開記録（#1955）
+
+決定 10 が実装不可としていた facade 公開面拡張は、2026-09-17 に
+issue コメントでユーザー承認（「選択肢 C」）を得て実装完了した
+（`docs/compat-api-scope.md` §5「適用記録（経路 2。イシュー #1955）」
+参照）。
+
+- **公開形**: `compat::Sequential::add_rnn`／`add_lstm`／`add_gru`
+  は追加しない（決定 10 の「`compat::Sequential` への統合を推奨する」
+  という記述からの変更点。理由は `crates/facade/src/nn/rnn.rs`
+  モジュール doc「`Sequential::add_*` を設けない理由」参照:
+  `compat::Sequential` は `Var → Var` の平坦鎖を前提とするが
+  `forward_seq` は `&Tensor<f32>` 入力・複数 `Var` 出力構造体を
+  返すため構造的に不整合）。代わりに独立モジュール
+  `fandhe_ai::nn::rnn` として `Rnn`／`Lstm`／`Gru`・
+  `RnnSeqOutput`／`LstmSeqOutput`・`RnnCellVars`／`LstmCellVars`／
+  `GruCellVars` の 8 型を素のまま再エクスポートする。
+- **`forward_seq` を呼ぶための橋渡し**: `forward_seq` は第 1 引数に
+  生の `fandhe_ai_autodiff::Tape` を取るが、facade `Tape`
+  newtype（内部フィールドは `pub(crate)`）はこれを取り出す手段を
+  持たない。`fandhe_ai::Tape` に `rnn_forward_seq`／
+  `lstm_forward_seq`／`gru_forward_seq`（`&self.0` を渡すだけの薄い
+  委譲）を追加し入口とした（`Tape::step_device_param_store` と同型・
+  同じ理由の前例。決定 10 が想定していなかった追加公開面だが
+  「facade のみの import で `forward_seq` に到達できる」という
+  受入基準自体がこの委譲なしには構造的に満たせないため回避不能）。
+- **対象外のまま残す型**: `RnnCell`／`LstmCell`／`GruCell`
+  （`forward_seq` の入出力に現れないため。`Rnn::cell()` の戻り値型を
+  facade から名指しできず、`from_cell`／`from_parameters` による
+  外部重み持ち込みは facade からは行えない）・`Module` trait
+  （`named_parameters`／`state_dict`／`forward_host`〈`&dyn
+  BackendOps` 引数〉は facade へ `BackendOps` を露出させずには
+  到達できない。REQ-12）。
+- **正しさの検証**: facade 経由（`fandhe_ai` のみ import する
+  `facade_side` ヘルパー）と内部クレート直接呼び出し（参照側 `Tape`
+  は facade `tape()` と同じ `CpuBackendOps` へ結線）で forward・
+  backward（BPTT を含む T=3 系列）とも bit 完全一致することを
+  `crates/facade/tests/nn_rnn_facade_bit_identity.rs` で確認した
+  （Rnn／Lstm／Gru 各 2 ケース〈`h0` 省略・明示〉・bias なしケース・
+  `weight_ih`／`weight_hh`／`bias_ih`／`bias_hh` の勾配 bit 完全一致
+  込み）。`crates/facade/tests/api_surface.rs` に固定ガード 5 件
+  （再エクスポート識別子の完全一致・純再エクスポート検査・
+  `nn/mod.rs` 宣言限定・facade 経由到達の実行時固定・
+  `compat::Sequential` への `add_rnn` 等非存在の否定ガード）を追加
+  した。
+- **未実測のまま申し送る事項**: CUDA／Metal 実機での facade
+  parity（`#[ignore]` テスト。REQ-2 統一複合判定）は本実装エージェント
+  実行環境に実機への到達手段がなく未実施のまま
+  `docs/perf/logs/facade-nn-rnn-1955/README.md` へ申し送る。
