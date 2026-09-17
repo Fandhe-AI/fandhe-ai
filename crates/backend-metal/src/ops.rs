@@ -111,6 +111,87 @@ fn map_reduce_prepare_error(err: crate::reduce_model::ReducePrepareError) -> Bac
     }
 }
 
+/// `argmax`／`argmin`（イシュー #1951）共通の実装。`kind` で切替える
+/// 以外は完全に対称（`fandhe_ai_backend_cpu::reduction::{argmax,
+/// argmin}` の CPU 側実装と同じ構成方針）。エラー契約・段取りは
+/// `MetalBackendOps::argmax`／`argmin` doc 参照。
+fn metal_argext(
+    a: &Tensor<f32>,
+    dim: Option<usize>,
+    kind: crate::reduce::ArgExtKind,
+) -> Result<Tensor<i32>, BackendError> {
+    let op_name = match kind {
+        crate::reduce::ArgExtKind::Max => "argmax",
+        crate::reduce::ArgExtKind::Min => "argmin",
+    };
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+    let shape = a.shape().to_vec();
+
+    if shape.contains(&0) {
+        if dim.is_none() {
+            // `numel == 0`: CPU `reduction::argmax`／`argmin` は単位元を
+            // 持たないため `EmptyReduction` を返す。`reduce_error_to_
+            // backend_error` の `"argmax"`／`"argmin"` は `else` 分岐
+            // （`KernelLaunchFailed`）に落ちるため、ここでも同じ分類へ
+            // 直接写像する（同一形状に対し CPU／Metal で同じエラー
+            // 分類になることを保証する）。
+            return Err(BackendError::KernelLaunchFailed(format!(
+                "empty reduction for op \"{op_name}\""
+            )));
+        }
+        if out_shape.contains(&0) {
+            // 空出力（`dim` 以外のいずれかの軸が 0）: 添字も 0 件。
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+        // `dim=Some(axis)` かつ `shape[axis]==0` のみ（他軸は非零）:
+        // 空縮約でありエラー（CPU と同じ `EmptyReduction` 相当）。
+        return Err(BackendError::KernelLaunchFailed(format!(
+            "empty reduction for op \"{op_name}\""
+        )));
+    }
+
+    let numel =
+        crate::gather_scatter_model::checked_numel(&shape).map_err(BackendError::ShapeMismatch)?;
+
+    // カーネル `uint`／`i32` 引数の上限超過を、デバイス初期化
+    // （`context_cache::cached_context`）より前に先出しして検査する。
+    // `Var::argmax`／`argmin` はホスト参照実装（`eval::argmax`／
+    // `argmin`）へのフォールバックを持つため、この `Unsupported` は
+    // ホストへ迂回される（`sum` とは異なる）。
+    let axis_plan = match dim {
+        None => {
+            crate::reduce_model::plan_argext_all(numel).map_err(map_reduce_prepare_error)?;
+            None
+        }
+        Some(axis) => Some(
+            crate::reduce_model::plan_argext_axis(&shape, axis)
+                .map_err(map_reduce_prepare_error)?,
+        ),
+    };
+
+    let a_owned = a.contiguous();
+    let a_slice = a_owned.as_slice().ok_or_else(|| {
+        BackendError::KernelLaunchFailed(format!("{op_name}: input not contiguous"))
+    })?;
+
+    let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+    let reduce = context_cache::cached_reduce(&ctx)
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+    let data: Vec<i32> = match axis_plan {
+        None => {
+            let value = reduce
+                .run_arg_all_f32(&ctx, a_slice, kind)
+                .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+            vec![value]
+        }
+        Some(plan) => reduce
+            .run_arg_axis_f32(&ctx, a_slice, plan.outer, plan.axis_len, plan.inner, kind)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?,
+    };
+    Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
+}
+
 fn map_sort_prepare_error(err: crate::sort_model::SortPrepareError) -> BackendError {
     match err {
         crate::sort_model::SortPrepareError::SizeLimitExceeded { .. } => {
@@ -2784,20 +2865,35 @@ impl BackendOps for MetalBackendOps {
         ))
     }
 
-    /// `argmax`（イシュー #1720）は GPU カーネル未実装。`Var::argmax`
-    /// はホスト参照実装（`eval::argmax`）へフォールバックする。
-    fn argmax(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::argmax: argmax カーネル未実装（イシュー #1720 スコープ外）".into(),
-        ))
+    /// `argmax`（イシュー #1951）。`crate::reduce::MetalReduce` の
+    /// argmax カーネル（全要素 2 段・単一軸 1 段。CPU 参照実装
+    /// `fandhe_ai_backend_cpu::reduction::argmax` と添字が完全一致する
+    /// 契約）へ結線する。エラー契約は [`Self::sum`] と対称
+    /// （`docs/backend-metal-reduce-sum-design.md` §11「サイズ上限・
+    /// エラー契約」参照）:
+    /// 1. 空縮約（`dim=None` かつ `numel==0`、または `dim=Some(axis)`
+    ///    かつ `shape[axis]==0` で他軸が非零）は CPU `reduction::argmax`
+    ///    と同じ `EmptyReduction` 相当のエラー
+    ///    （`BackendError::KernelLaunchFailed`）を GPU 起動なしで返す
+    ///    （`reduce_error_to_backend_error` の `"argmax"`／`"argmin"`
+    ///    分岐と同じ写像。CPU と Metal で同一形状に対し同一のエラー
+    ///    分類が返る）。
+    /// 2. `out_shape` に 0 を含む形状（空出力）は空 `Tensor` を返す。
+    /// 3. `checked_numel` で要素数積のオーバーフローを検査する。
+    /// 4. `reduce_model::plan_argext_all`／`plan_argext_axis`（`sum`
+    ///    用の `plan_reduce_*` に加えて添字が `i32` 範囲へ収まる形状か
+    ///    どうかも検査する）を先出しし、カーネル `uint` 引数の上限
+    ///    超過・添字が `i32` 範囲を超えうる形状は `Unsupported` へ
+    ///    写像する。`Var::argmax` はホスト参照実装（`eval::argmax`）
+    ///    フォールバックを持つため、この `Unsupported` は `sum` とは
+    ///    異なりホストへ迂回される。
+    fn argmax(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        metal_argext(a, dim, crate::reduce::ArgExtKind::Max)
     }
 
-    /// [`Self::argmax`] と同じ理由・同じ方針（イシュー #1720 スコープ
-    /// 外）。
-    fn argmin(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::argmin: argmin カーネル未実装（イシュー #1720 スコープ外）".into(),
-        ))
+    /// [`Self::argmax`] と対称（イシュー #1951。`v < best` のみ更新）。
+    fn argmin(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        metal_argext(a, dim, crate::reduce::ArgExtKind::Min)
     }
 
     /// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）は
