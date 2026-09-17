@@ -131,6 +131,11 @@ pub mod data;
 // `docs/spec/04-requirements.md:213`。実装リポ #984／#986）で `tape()`系・
 // `compat`／`optim` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
 pub use fandhe_ai_autodiff::optim::{DeviceParamStore, ResidentLeaf, SgdConfig};
+// `Tape::step_device_param_store_adam`／`_adamw`（イシュー #1959）の
+// 引数型として使う。`AdamConfig`／`AdamWConfig` 自体は `crate::optim`
+// （`optim.rs`）から利用者向けにも再エクスポート済みのため、ここでは
+// 型を参照するためだけの `use`（`pub use` ではない）とする。
+use fandhe_ai_autodiff::nn::optim::{AdamConfig, AdamWConfig};
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
 // `VarHostView`（借用ビュー読み出し API。イシュー #1335）は 1 文 1 行を
 // 維持する（`tests/api_surface.rs` が `pub use` を行単位で走査するため。
@@ -297,6 +302,28 @@ impl Tape {
         config: &SgdConfig,
     ) -> Result<(), BackendError> {
         store.step(&self.0, grads, config)
+    }
+
+    /// [`DeviceParamStore::step_adam`] への委譲入口（イシュー #1959）。
+    /// `step_device_param_store`（SGD）と同じ理由の薄い委譲。
+    pub fn step_device_param_store_adam(
+        &self,
+        store: &mut DeviceParamStore,
+        grads: &Gradients,
+        config: &AdamConfig,
+    ) -> Result<(), BackendError> {
+        store.step_adam(&self.0, grads, config)
+    }
+
+    /// [`DeviceParamStore::step_adamw`] への委譲入口（イシュー #1959）。
+    /// `step_device_param_store`（SGD）と同じ理由の薄い委譲。
+    pub fn step_device_param_store_adamw(
+        &self,
+        store: &mut DeviceParamStore,
+        grads: &Gradients,
+        config: &AdamWConfig,
+    ) -> Result<(), BackendError> {
+        store.step_adamw(&self.0, grads, config)
     }
 
     /// [`DeviceParamStore::backward`] への委譲入口（イシュー #1022）。
