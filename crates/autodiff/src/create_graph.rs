@@ -166,8 +166,8 @@ impl Tape {
     ///    ノードを持つテープの再利用は許さない）。
     /// 5. `self` に checkpoint 区間が登録済み → `Err(Backward)`
     ///    （`Tape::has_registered_checkpoints` doc 参照）。
-    /// 6. `loss` から到達する祖先ノードを [`collect_ancestors`] で
-    ///    走査し、[`validate_ancestors`] で resident／fused 経路・
+    /// 6. `loss` から到達する祖先ノードを `collect_ancestors` で
+    ///    走査し、`validate_ancestors` で resident／fused 経路・
     ///    未対応 Op・rank≥3 の `MatMul` を事前拒否する
     ///    （`Err(AutodiffError::Backward)`）。**素の [`Tape::backward`]
     ///    より前に行う**——resident グラフ（`Op::ResidentLeaf`／
@@ -182,7 +182,7 @@ impl Tape {
     ///
     /// 4〜7 のいずれかで失敗した場合、`child` へは一切書き込まない
     /// （4 の事前検査により `child` の空性が確認済みであること、6 が
-    /// [`build_mirror`]／[`build_cgrads`] より前に走ることの両方に
+    /// `build_mirror`／`build_cgrads` より前に走ることの両方に
     /// より、途中失敗で `child` へノードが残ることはない）。
     pub fn backward_create_graph<'c>(
         &self,
@@ -524,17 +524,24 @@ fn build_cgrads<'c>(
             Op::MatMul(a, b) => {
                 // 1 階 `grad.rs::matmul_vjp`（rank 2 経路）と同一の
                 // オペランド順序（`da = gemm(g, bᵀ)`・
-                // `db = gemm(aᵀ, g)`）を `Var::matmul`／`transpose` の
-                // 合成として子テープ上へ記録する。`requires_grad ==
-                // false` 側（`accumulate` が捨てる）でも VJP 自体は
-                // 記録して構わない——`transpose`／`matmul` は追加の
-                // 副作用を持たないため無駄なノードが増えるだけで
-                // 正しさに影響しない（既存 `Op::Add`／`Mul` 腕と同じ
-                // 方針）。
+                // `db = gemm(aᵀ, g)`）を `transpose` と
+                // `Var::matmul_fp32_strict`（codex-review 指摘。
+                // PR #2003）の合成として子テープ上へ記録する。
+                // `Var::matmul`（`ops.gemm`）ではなく
+                // `matmul_fp32_strict`（`ops.gemm_fp32_strict`）を
+                // 使うのは、CUDA TF32 opt-in（`set_cuda_gemm_precision`）
+                // が有効な間も 1 階 `matmul_vjp` と同じく
+                // バックプロパゲーションを FP32 厳密のまま保つため
+                // （`Var::matmul_fp32_strict` doc 参照）。
+                // `requires_grad == false` 側（`accumulate` が捨てる）
+                // でも VJP 自体は記録して構わない——`transpose`／
+                // `matmul_fp32_strict` は追加の副作用を持たないため
+                // 無駄なノードが増えるだけで正しさに影響しない
+                // （既存 `Op::Add`／`Mul` 腕と同じ方針）。
                 let a_m = get_mirror(mirror, a)?;
                 let b_m = get_mirror(mirror, b)?;
-                let da = g.matmul(&b_m.transpose(0, 1)?)?;
-                let db = a_m.transpose(0, 1)?.matmul(&g)?;
+                let da = g.matmul_fp32_strict(&b_m.transpose(0, 1)?)?;
+                let db = a_m.transpose(0, 1)?.matmul_fp32_strict(&g)?;
                 accumulate(&parent_nodes, &mut cgrads, a, da)?;
                 accumulate(&parent_nodes, &mut cgrads, b, db)?;
             }
