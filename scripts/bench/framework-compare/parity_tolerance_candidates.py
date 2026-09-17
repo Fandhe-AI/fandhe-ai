@@ -1,6 +1,38 @@
 #!/usr/bin/env python3
 """GEMM parity fail 要素に対する tolerance 判定候補の机上評価（イシュー #1237）。
 
+## 単位丸め `u` のパラメータ化（イシュー #1984／#1985）
+
+候補 A（スケール付き絶対誤差 `bound = c * u * K^p * M`）の単位丸め `u` は
+当初 `EPS_F32`/`U_F32`（f32 machine epsilon／unit roundoff）の 2 値のみ
+固定でスイープしていた。#1984（burn cuda・TF32 経路の `u=2^-11`）・#1985
+（PyTorch cpu・線形 K／√K 形の `c` 変化）はいずれも異なる `u`・`c` の組で
+机上計算したい診断要求であり、`--extra-eps LABEL=VALUE`（任意精度クラスの
+`u` を追加）・`--extra-c VALUE`（任意 `c` を追加）の 2 フラグで対応する
+（両方またはいずれかを指定しない限り出力は従来と byte 単位で不変。
+`ExtraEpsCParameterizationTest` で固定）。追加候補は `EXTRA c=<c> eps=<label>
+<K|sqrtK>*0.25` として候補 A 表へ追記され、`--extra-eps`×`--extra-c` の
+全組合せ × `k_mode ∈ {K, sqrtK}` を機械的に生成する（`m_mode` は既存候補と
+同じ `fixed0.25`。M を実測 `max_ab` に置換する A-2 系列は対象外）。
+
+使用例（#1984: TF32 単位丸め `u=2^-11`・`c=0.5`）:
+
+    python3 parity_tolerance_candidates.py --n 4096 \\
+        --dump burn_cuda=<path> \\
+        --extra-eps 'tf32u2^-11=0.00048828125' --extra-c 0.5
+
+使用例（#1985: 現行 eps=2^-23 で `c=0.5/1.0/1.5` を K／√K 双方で比較）:
+
+    python3 parity_tolerance_candidates.py --n 4096 \\
+        --dump torch_cpu=<path> \\
+        --extra-eps 'eps2^-23=0.00000011920928955078125' \\
+        --extra-c 0.5 --extra-c 1.0 --extra-c 1.5
+
+**本パラメータ化自体も契約変更ではない**（本体 `RELATIVE_TOLERANCE`／
+`ABSOLUTE_RESCUE_THRESHOLD`／`PARITY_SCALED_ABS_COEFF`・`bench-common::parity`・
+`compare_gemm_gate.py` の判定式・`BASELINES` は一切変更しない診断専用ツール
+の拡張）。
+
 ## 位置づけ
 
 `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5 は N=2048 で candle 側
@@ -231,6 +263,37 @@ def build_candidates_a() -> list[CandidateA]:
     return cands
 
 
+def build_extra_candidates_a(
+    extra_eps: list[tuple[str, float]], extra_c: list[float]
+) -> list[CandidateA]:
+    """CLI `--extra-eps`/`--extra-c`（イシュー #1984／#1985）由来の追加候補 A。
+
+    `extra_eps`・`extra_c` のいずれかが空なら空リストを返す（既定出力を
+    byte 単位で不変に保つ契約。`ExtraEpsCParameterizationTest` で固定）。
+    非空の場合は全組合せ × `k_mode ∈ {"K", "sqrtK"}` を生成する
+    （`m_mode` は既存 A-1 系列と同じ `fixed0.25` のみ。M を実測値へ置換する
+    A-2 系列は対象外——実測 `max_ab` は要素ごとに異なり `--extra-c` の
+    網羅スイープと組み合わせると表が過大になるため）。
+    """
+    if not extra_eps or not extra_c:
+        return []
+    cands: list[CandidateA] = []
+    for eps_label, eps_value in extra_eps:
+        for c in extra_c:
+            for k_mode in ("K", "sqrtK"):
+                cands.append(
+                    CandidateA(
+                        name=f"EXTRA c={c} eps={eps_label} {k_mode}*0.25",
+                        eps_label=eps_label,
+                        eps_value=eps_value,
+                        c=c,
+                        k_mode=k_mode,
+                        m_mode="fixed0.25",
+                    )
+                )
+    return cands
+
+
 @dataclass(frozen=True)
 class CandidateB:
     """ULP ベース候補。`pass 条件: err <= t * ulp(base(metric))`。"""
@@ -304,16 +367,22 @@ def _escape_md_cell(text: str) -> str:
 def render_markdown(
     metrics_by_label: dict[str, list[ElementMetrics]],
     k: int,
+    extra_candidates_a: list[CandidateA] | None = None,
 ) -> str:
     lines: list[str] = []
     labels = list(metrics_by_label.keys())
 
     lines.append(f"# tolerance 判定候補 机上評価（K=N={k}）")
     lines.append("")
+    # 「対象は K=<n>」は呼び出し時の `--n`（本関数の `k` 引数）をそのまま
+    # 反映する（イシュー #1984／#1985 が `--n 4096` で実行するため。旧版は
+    # `K=2048` 固定文字列だったが、#1237 の元計測が K=2048 だっただけで
+    # 本文自体は形状非依存の一般記述のため f-string 化しても K=2048 時点の
+    # 出力は byte 単位で不変。§8 再現手順の diff で確認済み）。
     lines.append(
         "評価モデルの限界: 各候補は現行複合判定への OR 追加としてのみ評価できる "
         "（`fail 数（候補）= 入力要素数 − 救済件数`。現行 pass 要素が新たに fail "
-        "に転じうるかは本ダンプからは評価不能）。対象は K=2048・正方・入力 "
+        f"に転じうるかは本ダンプからは評価不能）。対象は K={k}・正方・入力 "
         "U[-0.5,0.5)・固定シードの 1 条件のみ。詳細はスクリプト冒頭 docstring を "
         "参照。"
     )
@@ -352,6 +421,21 @@ def render_markdown(
         # bound は要素依存（A-2 の m_mode="actual"）の場合があるため代表値として
         # 各 label の最初の要素で bound を1つ例示する（表の可読性目的。厳密な
         # per-element bound は「要素別メトリクス」表の max_ab から手計算可能）。
+        sample_metric = next(iter(metrics_by_label.values()))[0]
+        bound_repr = f"{cand.bound(sample_metric, k):.3e}"
+        lines.append(
+            f"| {_escape_md_cell(cand.name)} | {bound_repr} | " + " | ".join(row_cells) + " | 適用可能 |"
+        )
+    # `--extra-eps`/`--extra-c`（イシュー #1984／#1985）由来の追加候補。
+    # 未指定（`extra_candidates_a` が空 or None）なら 1 行も追加されず、
+    # 既定出力は byte 単位で不変（`ExtraEpsCParameterizationTest`）。
+    for cand in extra_candidates_a or []:
+        row_cells = []
+        for label in labels:
+            metrics = metrics_by_label[label]
+            rescued = evaluate_a(metrics, cand, k)
+            fail = len(metrics) - rescued
+            row_cells.append(f"{fail}/{len(metrics)}")
         sample_metric = next(iter(metrics_by_label.values()))[0]
         bound_repr = f"{cand.bound(sample_metric, k):.3e}"
         lines.append(
@@ -425,6 +509,50 @@ def _parse_dump_arg(value: str) -> tuple[str, str]:
     return label, path
 
 
+# `--extra-eps` のラベルは Markdown 表・ファイル名に外部由来文字列を無検証で
+# 埋め込まないための入力検証（security.md A03）。`--dump` の `_LABEL_RE`
+# より緩い（`^` を含む TF32 表記 `2^-11` 等を許容するため）が、依然として
+# 制御文字・`|`（Markdown 列区切り）・`=`（値との区切り文字）を含まない
+# 印字可能 ASCII の allowlist に限定する。
+_EXTRA_EPS_LABEL_RE = re.compile(r"^[A-Za-z0-9_.^+-]+$")
+
+
+def _positive_finite_float(raw: str, flag: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{flag} は数値として解釈できない（受領: {raw!r}）") from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise argparse.ArgumentTypeError(
+            f"{flag} は正の有限値でなければならない（受領: {value!r}）"
+        )
+    return value
+
+
+def _parse_extra_eps_arg(value: str) -> tuple[str, float]:
+    """`--extra-eps LABEL=VALUE`（イシュー #1984／#1985）のパーサ。
+
+    `LABEL` は候補 A 表の `eps=<LABEL>` 表示に使う任意ラベル（例:
+    `tf32_u=2^-11`）。`VALUE` は単位丸め `u` の 10 進数表現（例:
+    `0.00048828125`）で、正の有限値のみ許可する。
+    """
+    if "=" not in value:
+        raise argparse.ArgumentTypeError(
+            f"--extra-eps は LABEL=VALUE 形式で指定する（受領: {value!r}）"
+        )
+    label, raw_value = value.split("=", 1)
+    if not _EXTRA_EPS_LABEL_RE.match(label):
+        raise argparse.ArgumentTypeError(
+            f"--extra-eps のラベルは [A-Za-z0-9_.^+-]+ のみ許可する（受領: {label!r}）"
+        )
+    eps_value = _positive_finite_float(raw_value, "--extra-eps の VALUE")
+    return label, eps_value
+
+
+def _parse_extra_c_arg(value: str) -> float:
+    return _positive_finite_float(value, "--extra-c")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n", type=int, required=True, help="GEMM の正方行列一辺長")
@@ -434,6 +562,28 @@ def main(argv: list[str] | None = None) -> int:
         type=_parse_dump_arg,
         required=True,
         help="LABEL=PATH 形式で PARITY_DUMP ファイルを指定する（複数可）",
+    )
+    parser.add_argument(
+        "--extra-eps",
+        action="append",
+        type=_parse_extra_eps_arg,
+        default=[],
+        help=(
+            "LABEL=VALUE 形式で単位丸め u の追加候補を指定する（複数可。"
+            "イシュー #1984／#1985。--extra-c と組み合わせて候補 A 表へ "
+            "EXTRA 行を追加する。未指定なら既定出力は不変）"
+        ),
+    )
+    parser.add_argument(
+        "--extra-c",
+        action="append",
+        type=_parse_extra_c_arg,
+        default=[],
+        help=(
+            "候補 A の係数 c の追加値を指定する（複数可。--extra-eps と "
+            "組み合わせて候補 A 表へ EXTRA 行を追加する。未指定なら既定"
+            "出力は不変）"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -525,7 +675,8 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: 入力ダンプの検証に失敗したため計算結果は出力しない", file=sys.stderr)
         return 1
 
-    print(render_markdown(metrics_by_label, n))
+    extra_candidates_a = build_extra_candidates_a(args.extra_eps, args.extra_c)
+    print(render_markdown(metrics_by_label, n, extra_candidates_a=extra_candidates_a))
     return 0
 
 
