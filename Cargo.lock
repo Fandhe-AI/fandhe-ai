@@ -290,6 +290,7 @@ version = "0.9.0"
 dependencies = [
  "bench-harness",
  "fandhe-ai-tensor-core",
+ "half",
  "serde",
  "serde_json",
 ]
