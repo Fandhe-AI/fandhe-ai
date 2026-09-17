@@ -365,3 +365,68 @@ pass。フル実行（`--all-features --no-fail-fast -- --ignored`）は 411 pas
   実装セッション（Linux 環境。Apple Silicon 実機への到達手段なし）
   では未実施のまま Mac セッションへ申し送り**（`docs/perf/logs/
   metal-argext-1951/README.md` に実行手順・事前登録判定規則を記載）。
+
+## 12. 追補（イシュー #1952）: `log_softmax` backward の Metal カーネル
+
+`Op::LogSoftmax` の VJP（`dx = g − exp(y)·Σ_dim(g)`。`fandhe_ai_autodiff::
+grad::log_softmax_vjp_along` と同一式）の GPU ホストフォールバック残存
+（親 #1947）を、`crate::log_softmax_backward::MetalLogSoftmaxBackward`
+（`log_softmax_backward.rs`・`shaders/log_softmax_backward.metal`）で
+解消した。`BackendOps::log_softmax_backward`（`crates/tensor-core/src/
+backend_ops.rs`。#1949 と共有の trait 拡張）を `MetalBackendOps::
+log_softmax_backward`（`ops.rs`）でオーバーライドする。
+
+### 12.1 カーネル構成（2 段。`reduce_sum_axis_f32` の分解を再利用）
+
+1. `log_softmax_bwd_lane_sum`: 1 thread = 1 lane（`outer×inner` 個。
+   `reduce_sum_axis_f32` と同じ添字規約）。`Σ_dim(g)` を `0.0` から
+   index 昇順に `lsb_f64_widen`／`lsb_f64_add` で逐次和し、**narrow
+   せず** `f64` bit（`ulong`）のまま `lane_sum` へ書く。
+2. `log_softmax_bwd_apply_f32`: 1 thread = 1 要素（`numel` 個）。
+   `e = precise::exp(y[gid])` → `lsb_f64_widen` → `lsb_f64_mul`
+   （`lane_sum` との積・1 回の丸め）→ `lsb_f64_sub`（`widen(g[gid])`
+   からの減算・1 回の丸め）→ `lsb_f64_narrow` で 1 回だけ `f32` へ
+   downcast する。
+
+`lsb_f64_*` は `layer_norm.metal::ln_f64_*`（widen／neg／add／sub／
+narrow／精密乗算一式）の接頭辞置換のみの逐語複製（`reduce.metal::
+red_f64_*` は加算のみのため乗算を持たず、本イシューでは
+`layer_norm.metal` 側を複製元に選んだ）。ドリフトは `tests/
+log_softmax_backward_source_evidence.rs` が機械検証する。
+
+### 12.2 数値契約
+
+**bit 一致を主張する範囲**は (1) の縮約と (2) の `f64` 連鎖（ウィデン
+→ 乗算 → 減算 → narrow）のみ。**`exp(y)` 自体の丸めは bit 一致を
+主張しない**（Metal `precise::exp` とホスト `f32::exp` の丸めは規格上
+一致が保証されない）。実機の最終出力（`exp` の丸め差を含む）は REQ-2
+統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で検証する
+契約とし、`y=0`（`exp(0)=1.0` 厳密丸め）・`y=-inf`（`exp(-inf)=0.0`
+厳密丸め）の行に限り bit 完全一致を実機テストで直接検証する
+（`log_softmax_backward_parity.rs`）。ホスト側逐語モデル（`crate::
+log_softmax_backward_model`）は `exp` の bit 表現を入力として受け取る
+形にし、Linux（本実装環境）でも `f64` 連鎖の bit 一致を機械検証する。
+
+`Var::log_softmax` は最終軸限定契約だが、本カーネルは `sum` と同じ
+添字分解のため**任意の `dim`**（非最終軸を含む）を受理する。
+
+### 12.3 テスト構成・実機実測
+
+- Linux 実行可能: `log_softmax_backward_model.rs` 単体テスト（`f64`
+  参照実装との縮約・乗算・減算の bit 一致・相殺列・overflow 回避・
+  `y=0`／`y=-inf` 行の全体一致・`plan_log_softmax_backward` の境界）・
+  `tests/log_softmax_backward_source_evidence.rs`（MSL 文字列証跡:
+  カーネル宣言・境界検査・`precise::exp` 使用・narrow 非使用・
+  `lsb_f64_*` 使用・`layer_norm.metal` とのドリフトガード）・
+  `crates/autodiff/tests/log_softmax_backward_dispatch.rs`（3 分岐
+  ディスパッチ。#1949 と共有）。
+- macOS 実機 `#[ignore]`: `log_softmax_backward_parity.rs`（起動 API
+  直叩き。複数 rank・複数 dim・REQ-2 複合判定・`y=0`／`y=-inf` 行の
+  bit 完全一致・run-to-run 決定性・`BackendOps` 経由との一致）・
+  `facade/tests/softmax_backend_parity.rs::
+  metal_log_softmax_backward_matches_cpu`（`matmul → log_softmax →
+  mse_loss` backward の facade 到達経路）。**M4 Max 実機実測は本実装
+  セッション（Linux 環境。Apple Silicon 実機への到達手段なし）では
+  未実施のまま Mac セッションへ申し送り**（`docs/perf/logs/
+  metal-log-softmax-backward-1952/README.md` に実行手順・事前登録
+  判定規則を記載）。

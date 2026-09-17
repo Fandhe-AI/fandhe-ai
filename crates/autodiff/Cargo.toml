@@ -56,7 +56,6 @@ bench-harness = { path = "../bench-harness" }
 # （#29）が行った同種の判断の先例）。
 serde.workspace = true
 serde_json.workspace = true
-
 # view 系ノード（reshape / transpose。イシュー #1047）の「forward・
 # backward でバッファ確保が 0」という受け入れ条件を
 # `bench_harness::alloc_tracker::TrackingAllocator`（`#[global_allocator]`

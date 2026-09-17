@@ -186,4 +186,208 @@
 - `crates/facade/src/lib.rs:35-90`
 - `crates/facade/tests/api_surface.rs:66-113`
 
+## 13. 実装記録（#1942・段階 2「部分実装」）
+
+自動運転（ユーザー承認待ちを介さない実装 issue）のため、§10 承認事項の
+うち内部クレート限定の範囲（trait／API の新規追加は `fandhe_ai_autodiff`
+非公開のまま）に限定して実装した。**facade 公開（承認事項 5）は未承認の
+まま不実施**。
+
+- **実装物**: `crates/autodiff/src/create_graph.rs`（新規モジュール）に
+  `Tape::backward_create_graph(&self, loss: &Var<'_>, child: &'c Tape) ->
+  Result<CreateGraphResult<'c>, AutodiffError>` と戻り値型
+  `CreateGraphResult<'c>`（`first_order()`・`grad()`・`child_var()`）を
+  実装した。`tape.rs` に `Op::supports_create_graph()`（新設。
+  `pub(crate)`・網羅 match）・`Tape::has_registered_checkpoints()`（新設）
+  を追加し、`Op::for_each_input` を `pub(crate)` へ可視性緩和した
+  （本体・網羅性は無変更）。
+- **§10 承認事項の採否（本実装時点の確定）**:
+  1. `docs/fusion-graph-design.md` §3.3 解釈拡張 → 採用（子テープ上の
+     再生は対象外という解釈のまま実装）。
+  2. `ops` 供給方式 → §7 の (i)（呼び出し側が子 `Tape` を渡す）を採用。
+  3. 1 階勾配の bit 同一性 → §9 の選択肢 (i)（2 パス方式）を採用。
+     `backward_create_graph` は既存 `Tape::backward`（無変更）をそのまま
+     呼ぶため、1 階勾配は単体で `backward` を呼んだ場合と bit 同一
+     （`tests/create_graph.rs::create_graph_first_order_matches_plain_
+     backward_and_leaves_parent_intact` で確認）。
+  4. エラー契約 → 既存 `AutodiffError::Backward(String)` を流用（専用
+     variant は新設せず）。
+  5. facade 公開 → **未承認のまま不実施**（内部クレート限定）。
+  6. 対象 Op の初期スコープ → `Leaf`・`Add`・`Mul`・`Relu`・`Exp`・
+     `Tanh`・`Sigmoid`・`Sum`・`Mean`・`Reshape`・`BroadcastTo` の 11
+     variant のみ実装（§8「対象」区分のうち `MatMul`・
+     `ScalarUnary`／`ScalarBinary`・`Transpose`／`Permute`／`Narrow`／
+     `Concat`／`Contiguous`／`Where`／`MaskedFill`／`Gather`／
+     `Scatter`／`Pad`／`MseLoss`／`CrossEntropyLoss` は未実装のまま
+     `Op::supports_create_graph() == false` に残し、#1943 等の後続
+     イシューへ引き継ぐ）。
+  7. 二階微分の数値判定方式 → 新規 tolerance／baseline は定めない
+     （§6 の方針どおり）。二階側の子テープ上の演算列は既存 VJP
+     ヘルパー（`grad.rs`）とは独立の実装（`Var` 演算の合成）であり
+     bit 同一は主張しない。正しさは有限差分突合（1 階解析勾配
+     `Tape::backward` の中央差分。`create_graph` を経由しない独立経路）
+     ＋代表的合成の閉形式突合で検証した
+     （`crates/autodiff/tests/create_graph.rs`）。
+  8. `Op::supports_create_graph()` 機構 → 新設（上記）。
+  9. 段階 1 実装 issue の起票 → 本 issue（#1942）自体がそれに該当。
+- **機構（設計 doc §8「機構案」の実装）**: 祖先集合は `loss` から
+  `Op::for_each_input` を辿る走査で求め、`requires_grad == false` の
+  ノードでは descend しない（当該部分木はまるごと `child.var_no_grad`
+  の定数葉へ変換し、Op 種別を問わず replay しない。`ResidentLeaf`／
+  `LinearResident`／`LinearAct` は `requires_grad` の値に関わらず値の
+  実体化を試みる前に無条件で `Err` とする）。子テープの葉プレフィックス
+  契約（`Tape::reset` doc）を保つため、葉相当（`Op::Leaf`・
+  `requires_grad == false` の任意ノード）をすべて先に登録してから、
+  残り（`supports_create_graph() == true` の非葉ノード）を昇順で再生
+  する 2 段構成とした。
+- **checkpoint 併用**: `Tape::has_registered_checkpoints()` が親テープに
+  登録済みの checkpoint 区間を検出すると fail-closed に拒否する
+  （checkpoint 済みノードの forward 値解放・再計算経路との統合は §8
+  「checkpoint 区間との相互作用」のとおり本 issue のスコープ外）。
+- **`retain_graph`／`backward_accumulate` との併用**: 子テープは独立の
+  `TapeId`／`epoch` を持ち、`Tape::reset`／drop まで保持され続ける
+  （§9「世代契約」）ため `retain_graph`（#1749）と同型に複数回
+  `child.backward(..)` を呼べる（`tests/create_graph.rs` の Hessian
+  各テストが `x` の成分ごとに `child.backward` を反復呼び出しすること
+  で検証済み）。`backward_accumulate` との組み合わせは対象外のまま
+  （§9 の方針を維持）。
+- **数値実測**: CPU（`common::naive_ops()`。ホスト参照実装）でのみ
+  実装・検証した。CUDA／Metal は機構上同一経路（`Var` 演算の合成の
+  みで新規カーネルを追加していない）だが実機実測は未実施のまま Mac／
+  GB10 セッションへ申し送る。
+- **facade／compat-api-scope への反映**: `docs/compat-api-scope.md`
+  §1.3「高階微分」行・`docs/compat-feature-gap.md` §2.11 を本追記と
+  同時に更新した（内部クレート限定の部分実装であることを明記）。
+
+## 14. 実装記録（#1943・§8「対象」区分の `MatMul` 拡張・HVP 例）
+
+親 #1940・前段 #1942 を受け、`Op::supports_create_graph()` の対象を
+`MatMul`（**rank 2 × rank 2 限定**）へ拡張し、小型 MLP（`Linear`→
+`tanh`→`Linear`）の HVP（ヘッセ・ベクトル積）を有限差分と突合する
+統合テストを追加した。§13 の 11 variant からの累積で **12 variant**
+が対象になる。
+
+- **`MatMul` の VJP（`crates/autodiff/src/create_graph.rs::build_cgrads`
+  の `Op::MatMul` 腕）**: `da = g.matmul_fp32_strict(&bᵀ)`・
+  `db = aᵀ.matmul_fp32_strict(&g)`（1 階 `grad.rs::matmul_vjp` の
+  rank 2 経路と同一のオペランド順序）を `Var::matmul_fp32_strict`
+  （`ops().gemm_fp32_strict` 経由）／`transpose` の合成として子テープ
+  へ記録する（当初案の `Var::matmul`〈`ops().gemm`〉から PR #2003
+  codex-review 指摘を受けて切り替えた。§14a 参照）。
+- **rank≥3 を対象外とした理由**: 1 階 `matmul_vjp` の rank≥3 経路は
+  `reduce_batch_axes_f64`（`f64` アキュムレータの broadcast 縮約。
+  `.claude/rules/coding-rust.md` の勾配長軸縮約契約）を経由するが、
+  子テープ側の [`reduce_to`]（`Var::narrow`＋`Var::add` の `f32` 逐次和）
+  はこれを逐語再現しない。PR #1998 の codex-review 指摘（§13 実装記録
+  参照）と同型の数値乖離を生みうるため、rank 2 × rank 2 のみを対象
+  とした（rank≥3 は `validate_ancestors` が型付き `Err` で事前拒否）。
+- **入口検査の新設（`validate_ancestors`）**: `loss` から到達する祖先
+  ノードを `Tape::backward_create_graph` の入口で `build_mirror`／
+  `build_cgrads` より前に走査し、(a) resident／fused 経路
+  （`ResidentLeaf`／`LinearResident`／`LinearAct`）・(b) 未対応 Op・
+  (c) rank≥3 の `MatMul` をまとめて `Err(AutodiffError::Backward)` で
+  拒否する。**素の `Tape::backward` より前に実行する**——resident
+  グラフでは素の `backward` 自体が `AutodiffError::InvalidArgument`
+  （`DeviceParamStore::backward` を使えという誤誘導的なメッセージ）を
+  返してしまうため、順序を入れ替えて正確な型付きエラーを先に返す
+  ようにした（§13 時点の実装では `self.backward(loss)?` が
+  `collect_ancestors`／検査より先だったが、本 issue でこの順序自体を
+  入れ替えた）。拒否時は `child` へ一切書き込まれない
+  （`crates/autodiff/src/optim/device_store.rs::tests::
+  create_graph_rejects_resident_path_with_typed_error` で resident
+  経路の型付き拒否・`child.is_empty()`・拒否後も通常の
+  `store.backward(&tape, &loss)` が成功することを検証済み）。
+- **数値契約**: 子テープの `MatMul` VJP は `Var::matmul_fp32_strict`
+  （= `ops().gemm_fp32_strict`）経由であり、1 階 `matmul_vjp`（同じく
+  `ops.gemm_fp32_strict` 経由）と入口が揃っている。CPU バックエンドは
+  両者が同一カーネルへ帰着するため bit 同一で、CUDA TF32 opt-in
+  （`docs/cuda-tf32-optin-api-decision.md`）が有効な場合も 1 階
+  `matmul_vjp` と同じく常に FP32 厳密のまま計算されるため
+  `first_order()` との bit 一致が崩れない（§14a）。本モジュールは
+  元々「子テープの数値方式は一般に bit 同一を主張せず、正しさは
+  有限差分突合で検証する」立場（`create_graph.rs` モジュール doc）の
+  ためこの整理はその範囲内に収まる。tolerance／baseline は無変更。
+- **テスト**: `crates/autodiff/tests/create_graph.rs` に以下を追加（31
+  件が全 green。CPU `common::naive_ops()` でのみ検証）。
+  - `hessian_matmul_quadratic_w_matches_finite_difference_and_closed_form`／
+    `hessian_matmul_quadratic_x_matches_finite_difference`: matmul の
+    二次形式で `da`／`db` 両腕を網羅し、閉形式（`2・XᵀX ⊗ I`）とも突合。
+  - `hessian_linear_with_bias_w_matches_finite_difference`／
+    `_b_matches_finite_difference`: `MatMul`→`Add`（bias パターン）の
+    合成（`nn::Linear` 既定 forward 経路と同型）。
+  - `hessian_via_nn_linear_forward_matches_manual_composition`:
+    `nn::Linear::from_parameters(..).bind(&tape).forward(..)` 経由の
+    2 階勾配が手動 `matmul`＋`add` 合成と数値的に一致することを確認。
+  - `hvp_small_mlp_matches_finite_difference`: 2 層 MLP（`Linear`→
+    `tanh`→`Linear`。二乗誤差 loss は未対応 `Var::sub` を避け
+    `add`＋自乗＋`mean` で構成）の HVP（`Σ_p grad_p・v_p` を子テープ上で
+    合成し再度 `backward`）を、`create_graph` を経由しない独立な方向
+    微分の中央差分と突合。判定は既存 `common::req2_close`（REQ-2
+    統一複合判定）のみを使用し、tolerance は変更していない。
+  - `create_graph_rejects_unsupported_op_sub`（旧
+    `create_graph_rejects_unsupported_op_matmul` を置き換え）・
+    `create_graph_rejects_fused_linear_act`・
+    `create_graph_rejects_rank3_matmul`: いずれも `child.is_empty()`
+    まで確認する fail-closed 契約テスト。
+- **残る対象外事項**: `ScalarUnary`／`ScalarBinary`（`Var::sub` 等）・
+  `Transpose`／`Permute`／`Narrow`／`Concat`／`Contiguous`／`Where`／
+  `MaskedFill`／`Gather`／`Scatter`／`Pad`／`MseLoss`／
+  `CrossEntropyLoss`（§8「対象」区分の残り）は引き続き未実装のまま
+  `Op::supports_create_graph() == false`。facade 公開（§10 承認事項 5）
+  も引き続き未承認のまま不実施。checkpoint 併用・rank≥3 matmul の
+  対応は後続イシューへ引き継ぐ。
+- **CUDA／Metal 実機実測**: CPU（`naive_ops()`）でのみ検証済み。新規
+  カーネルは追加していない（既存 `Var::matmul_fp32_strict`／
+  `transpose` の合成のみ）が、実機実測は未実施のまま Mac／GB10
+  セッションへ申し送る。
+- **facade／compat-api-scope への反映**: `docs/compat-api-scope.md`
+  §1.3「高階微分」行・`docs/compat-feature-gap.md` §2.11 を本追記と
+  同時に更新した。
+
+## 14a. 是正記録（PR #2003 codex-review 指摘・イシュー #1943）
+
+§14 時点の実装は 2 点の精度契約上の問題を含んでいた。いずれも
+codex-review（PR #2003）の指摘を受けて是正した。
+
+- **問題 1（P1・`build_cgrads` の `Op::MatMul` 腕）**: 当初 `da =
+  g.matmul(&bᵀ)`・`db = aᵀ.matmul(&g)`（`Var::matmul` = `ops().gemm`）
+  として子テープへ記録していたため、CUDA TF32 opt-in
+  （`set_cuda_gemm_precision`）が有効な間、1 階 `grad.rs::matmul_vjp`
+  （`ops.gemm_fp32_strict` 経由で常に FP32 厳密）が守る
+  「バックプロパゲーションは常に FP32 厳密」という契約が、二階微分の
+  記録経路でだけ TF32 相当まで精度低下していた。`Var::matmul_fp32_strict`
+  （`crates/autodiff/src/var.rs`。`ops().gemm_fp32_strict` を forward
+  値の計算に使う以外は `Var::matmul` と同一の `pub(crate)` メソッド）
+  を新設し、`build_cgrads` の `Op::MatMul` 腕をこちらへ切り替えた。
+- **問題 2（P1・checkpoint との相互作用）**: `Var::matmul_fp32_strict`
+  も記録するノードは通常版と同じ `Op::MatMul(a, b)` であり、`Op::
+  MatMul` は `is_checkpoint_eligible() == true`（`docs/
+  autodiff-checkpoint-design.md`）。区別する情報が `Op` 側にないため、
+  子テープ上で `g`（`matmul_fp32_strict` の結果）から `h = g.mul(&g)?.
+  sum(None)?` を作り `h.checkpoint_from(&[])` を呼ぶと `g` が解放対象
+  になり、後続 `child.backward(&h)` の再計算（`tape.rs::
+  recompute_value` の `Op::MatMul` 分岐）が非厳密な `matmul_forward`
+  （`ops.gemm`）を使ってしまい、問題 1 と同じ精度低下が checkpoint
+  経由で再発する経路があった。`TapeNode`（`tape.rs`）へ `fp32_strict:
+  bool` フィールド（既定 `false`）を追加し、`Var::matmul_fp32_strict`
+  が `push_eager` 直後に戻り値ノードへ限定して `true` を立てる。
+  `release_checkpoint_region`（`Tape::register_checkpoint`／
+  `Tape::release_checkpoints_ending_at` 共通の解放ロジック。唯一の
+  `is_checkpoint_eligible()` 呼び出し箇所）の判定を `node.op.
+  is_checkpoint_eligible() && !node.fp32_strict` へ変更し、フラグが
+  立ったノードは checkpoint 区間に含まれても解放されない（`value`
+  は常に厳密精度のまま保持され、`recompute_fallible`／`recompute_
+  infallible` がこのノードを再計算する経路へは一切到達しない）よう
+  にした。`Op::MatMul` の通常版（`Var::matmul`）・他の全 Op variant の
+  checkpoint 適格性は無変更。
+- **影響範囲**: `TapeNode` を直接構築する全箇所（`tape.rs` の
+  `push_eager`／`push_leaf`／`push_resident_leaf`／`push_view`／
+  `push_lazy`、`grad.rs` のテストフィクスチャ 3 箇所）へ
+  `fp32_strict: false` の初期化を追加。フィールド追加自体が構造体
+  リテラルの網羅性によりコンパイルエラーで検出されるため、更新漏れ
+  はビルドで機械的に防がれる。
+- **CUDA／Metal 実機実測**: 問題 1・2 とも数値契約の是正であり新規
+  カーネルは追加していない。実機実測は未実施のまま Mac／GB10
+  セッションへ申し送る（§14 の既存申し送りと同一）。
+
 内部ホスト名・秘密情報は含めない。

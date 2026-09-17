@@ -101,8 +101,9 @@ use fandhe_ai_autodiff::nn::{
     BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Dropout,
     Embedding, EmbeddingVars, LayerNorm, LayerNormVars, Linear, Module, MultiheadAttention,
     MultiheadAttentionVars, RmsNorm, RmsNormVars, Sequential as NnSequential,
+    linear_forward_low_precision,
 };
-use fandhe_ai_tensor_core::{Activation, BackendOps};
+use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
 /// Keras `Sequential` 慣習のレイヤー積み上げビルダー。`add_*` はメソッド
 /// チェーン（`self` を消費し `Self` を返す）で層を追加し、`predict` で
@@ -1440,6 +1441,30 @@ impl<'m, 't> SequentialVars<'m, 't> {
     /// が到達不能（`Ok(None)`）を返してしまう。そのため学習用 forward
     /// は必ず `self.linears` に保持済みの `LinearVars::forward` を使う。
     pub fn forward(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.forward_with_precision(tape, input, None)
+    }
+
+    /// [`Self::forward`] の内部実装。`low_precision` が `Some(dtype)` の
+    /// とき、`Linear` 層（epilogue 融合有無を問わず）のみ
+    /// `linear_forward_low_precision`（イシュー #1960。f32 master
+    /// weight・backward は常に f32）へ切り替える（イシュー #1961・
+    /// `docs/autodiff-low-precision-linear-design.md` §7「facade
+    /// 統合（#1961）」）。`Linear` 以外の層（活性化・`Conv2d`／
+    /// `Conv1d`／`LayerNorm` 等）は `low_precision` の値に関わらず常に
+    /// f32 のまま——`linear_forward_low_precision` 自体が `Linear` 層の
+    /// forward 計算のみを対象とする opt-in 経路であり、他層への
+    /// 拡張は本イシューのスコープ外（実装計画 §8「スコープ外」）。
+    /// `low_precision = None` のときは本メソッドが行う分岐は
+    /// `fuse_relu` の判定を含め [`Self::forward`] 移設前の実装と完全に
+    /// 同一の演算列・戻り値になる（bit 同一契約。`compat::Sequential::
+    /// compile_with_amp` 未使用時の既存 `Sequential::forward`／`fit`
+    /// 経路を壊さないための唯一の要件）。
+    pub(super) fn forward_with_precision(
+        &self,
+        tape: &'t Tape,
+        input: &Var<'t>,
+        low_precision: Option<ScalarDType>,
+    ) -> Result<Var<'t>, AutodiffError> {
         let mut current = *input;
         // `self.linears` は `model.layers` から `Linear` 層のみを同じ順序で
         // 抽出したもの（`Sequential::bind` 参照）のため、`Linear` 層に
@@ -1490,10 +1515,15 @@ impl<'m, 't> SequentialVars<'m, 't> {
                     )
                 })?;
                 let fuse_relu = layers.get(i + 1).is_some_and(|next| next.as_relu());
-                current = if fuse_relu {
-                    vars.forward_with_activation(&current, Activation::Relu)?
+                let act = if fuse_relu {
+                    Activation::Relu
                 } else {
-                    vars.forward(&current)?
+                    Activation::None
+                };
+                current = match low_precision {
+                    Some(dtype) => linear_forward_low_precision(vars, &current, act, dtype)?,
+                    None if fuse_relu => vars.forward_with_activation(&current, act)?,
+                    None => vars.forward(&current)?,
                 };
                 i += if fuse_relu { 2 } else { 1 };
             } else if layer.as_conv2d().is_some() {

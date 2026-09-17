@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, CastElement, Conv2dParams, DType, Device,
     DeviceBufferView, FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, Pool2dParams,
-    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, Tensor,
+    ScalarBinaryOp, ScalarDType, ScalarUnaryOp, ScatterReduce, Tensor,
 };
 
 use crate::error::AutodiffError;
@@ -399,11 +399,30 @@ pub(crate) enum Op {
     /// いずれもホスト常駐の通常ノード（`Op::Leaf` 等）を指す。デバイス
     /// 常駐オペランドは扱わないため `ResidentResolver` を必要とせず、
     /// 素の [`Tape::backward`] からも正しく計算できる。
+    ///
+    /// **`compute_dtype`（イシュー #1960）と checkpoint 非適格の関係**:
+    /// 本 variant は `is_checkpoint_eligible()` で非適格（常に
+    /// `push_eager` で実体化済みの値をそのまま使い、再計算されない）
+    /// のため、`compute_dtype` が `F16`／`Bf16` の場合でも再計算時に
+    /// 精度が食い違う経路は存在しない。将来 `LinearAct` を checkpoint
+    /// 適格へ拡張する場合は、再計算ロジックが `compute_dtype` を見て
+    /// 同じ低精度経路を再実行する必要がある。
     LinearAct {
         input: NodeId,
         weight: NodeId,
         bias: Option<NodeId>,
         act: Activation,
+        /// forward の計算精度（イシュー #1960）。既定は `Var::linear_act`
+        /// （`LinearVars::forward_with_activation`）が記録する
+        /// `ScalarDType::F32`（f32 GEMM・挙動不変）。`Var::
+        /// linear_act_low_precision`（`nn::linear::
+        /// linear_forward_low_precision` の唯一の呼び出し元）のみが
+        /// `F16`／`Bf16` を記録する opt-in 経路。VJP（`grad::vjp`）は
+        /// 本フィールドを見ず常に f32 backward を行う（`docs/autodiff-
+        /// low-precision-linear-design.md` の「backward は意図的に f32
+        /// のまま」参照）ため、値そのものは forward 経路の記録専用で
+        /// 勾配計算には影響しない。
+        compute_dtype: ScalarDType,
     },
     /// `Var::reshape` が記録する view ノード（イシュー #1047・親 #1043
     /// 「カーネル融合・autodiff 実行モデルの強化」）。出力 shape は
@@ -1417,7 +1436,13 @@ impl Op {
     /// フィールドが入力ノードか」をコンパイルエラーで判断させ、
     /// 判断漏れのまま既定で「入力なし」扱いにしてしまう事故
     /// （poison 伝播の抜け穴。`.claude/rules/security.md` A08）を防ぐ。
-    fn for_each_input(&self, mut f: impl FnMut(NodeId)) {
+    ///
+    /// **`pub(crate)` 化（イシュー #1942）**: `create_graph.rs` の
+    /// 祖先集合構築（`loss` から `Op` 入力を辿る走査）が
+    /// `Tape::push_eager` の poison 伝播判定と同じ「全入力を網羅する」
+    /// 走査を必要とするため、クレート内の別モジュールから呼べるよう
+    /// 可視性のみ緩和する（本体・網羅性は無変更）。
+    pub(crate) fn for_each_input(&self, mut f: impl FnMut(NodeId)) {
         match self {
             Op::Leaf | Op::ResidentLeaf { .. } => {}
             Op::MatMul(a, b) | Op::Add(a, b) | Op::Mul(a, b) | Op::Solve { a, b } => {
@@ -1615,6 +1640,120 @@ impl Op {
             }
         }
     }
+
+    /// 子テープ方式の `create_graph`（イシュー #1942・設計 `docs/
+    /// autodiff-higher-order-grad-decision.md` §8「機構案」）が、この
+    /// `Op` を子テープ上へ `Var` 演算として再生（replay）できるか判定
+    /// する。`true` の Op のみ [`crate::create_graph`] が対応する
+    /// （`Tape::backward_create_graph` の唯一の呼び出し元）。
+    ///
+    /// **対象スコープ（設計 doc §8「対象（初期スコープ）」のうち、
+    /// #1942・#1943 で実装済みのサブセット）**: `Leaf`・`Add`・`Mul`・
+    /// `Relu`・`Exp`・`Tanh`・`Sigmoid`・`Sum`（`dim` 制限なし。単一軸／
+    /// 全軸いずれも VJP を持つ）・`Mean`（同）・`Reshape`・
+    /// `BroadcastTo`・`MatMul`（**rank 2 × rank 2 のみ**。rank≥3 は
+    /// `create_graph.rs::validate_ancestors` が別途 `Err` で事前拒否
+    /// する——rank≥3 の 1 階 `matmul_vjp` は `reduce_batch_axes_f64`
+    /// 〈`f64` アキュムレータの broadcast 縮約〉を経由するが、子テープ
+    /// 側の `reduce_to`〈`Var::narrow`＋`Var::add` の f32 逐次和〉は
+    /// これを逐語再現しないため対象外とした。#1943・
+    /// `docs/autodiff-higher-order-grad-decision.md` §14）の 12
+    /// variant のみ `true`。設計 doc §8 の「対象」区分に残る
+    /// `ScalarUnary`／`ScalarBinary`・`Transpose`／`Permute`／
+    /// `Narrow`／`Concat`／`Contiguous`／`Where`／`MaskedFill`／
+    /// `Gather`／`Scatter`／`Pad`／`MseLoss`／`CrossEntropyLoss` は
+    /// 引き続き対象外とし、以後のイシューへ引き継ぐ（`false` のまま
+    /// 残す。設計 doc §8「非対象」「保留」区分の Op はすべて構造的に
+    /// 非対象）。
+    ///
+    /// **網羅 match（ワイルドカードなし）とする理由**: `is_checkpoint_
+    /// eligible`／`for_each_input` と同じ——新しい `Op` variant を
+    /// 追加するたびに「子テープで再生可能か」をコンパイルエラーで
+    /// 判断させ、判断漏れのまま既定で `false`（安全側だが無言）に
+    /// してしまう事故を防ぐ（`.claude/rules/out-of-scope-tracking.md`
+    /// の「スコープ外事項を放置しない」精神を型検査で強制する）。
+    pub(crate) fn supports_create_graph(&self) -> bool {
+        match self {
+            Op::Leaf
+            | Op::Add(..)
+            | Op::Mul(..)
+            | Op::Relu(..)
+            | Op::Exp(..)
+            | Op::Tanh(..)
+            | Op::Sigmoid(..)
+            | Op::Sum { .. }
+            | Op::Mean { .. }
+            | Op::Reshape { .. }
+            | Op::BroadcastTo { .. }
+            | Op::MatMul(..) => true,
+            Op::ScalarUnary { .. }
+            | Op::ScalarBinary { .. }
+            | Op::Max { .. }
+            | Op::Var { .. }
+            | Op::VectorNorm { .. }
+            | Op::Std { .. }
+            | Op::Min { .. }
+            | Op::MseLoss { .. }
+            | Op::HuberLoss { .. }
+            | Op::BceLoss { .. }
+            | Op::CrossEntropyLoss { .. }
+            | Op::NllLoss { .. }
+            | Op::KlDivLoss { .. }
+            | Op::ResidentLeaf { .. }
+            | Op::LinearResident { .. }
+            | Op::LinearAct { .. }
+            | Op::Transpose { .. }
+            | Op::Contiguous { .. }
+            | Op::RmsNorm { .. }
+            | Op::LayerNorm { .. }
+            | Op::BatchNorm { .. }
+            | Op::RnnCell { .. }
+            | Op::LstmCell { .. }
+            | Op::LstmHidden { .. }
+            | Op::GruCell { .. }
+            | Op::Inv { .. }
+            | Op::Solve { .. }
+            | Op::Det { .. }
+            | Op::Cholesky { .. }
+            | Op::QrQ { .. }
+            | Op::QrR { .. }
+            | Op::SvdU { .. }
+            | Op::SvdS { .. }
+            | Op::SvdVh { .. }
+            | Op::MatrixNorm { .. }
+            | Op::Permute { .. }
+            | Op::Concat { .. }
+            | Op::Narrow { .. }
+            | Op::Softmax { .. }
+            | Op::LogSoftmax { .. }
+            | Op::Where { .. }
+            | Op::MaskedFill { .. }
+            | Op::Dropout { .. }
+            | Op::Gather { .. }
+            | Op::Scatter { .. }
+            | Op::Embedding { .. }
+            | Op::Cumsum { .. }
+            | Op::Cumprod { .. }
+            | Op::Sort { .. }
+            | Op::Topk { .. }
+            | Op::Interpolate { .. }
+            | Op::Pad { .. }
+            | Op::Conv2d { .. }
+            | Op::OneHot { .. }
+            | Op::MaxPool2d { .. }
+            | Op::AvgPool2d { .. }
+            | Op::AdaptiveAvgPool2d { .. }
+            // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
+            // プラグイン。`docs/autodiff-custom-function-decision.md`）は
+            // 子テープ方式の高階微分（`create_graph`）に対応しない。
+            // ユーザー提供の `CustomFunction::backward` は VJP（1 階の
+            // 勾配値）のみを返す契約であり、子テープ上で再生可能な
+            // 演算列（`Var` を返す forward 相当の記録）を持たないため
+            // 構造的に非対応（`docs/autodiff-higher-order-grad-decision.md`
+            // §8・`docs/autodiff-custom-function-decision.md` §14）。
+            | Op::Custom { .. } => false,
+        }
+    }
 }
 
 /// テープ上の 1 ノード。演算種別（`Op`）・構造的に確定する出力 shape・
@@ -1725,6 +1864,28 @@ pub(crate) struct TapeNode {
     /// 対象ノードが `false` なら `Err(GradientTrackingDisabled)`
     /// （「未到達」の `Ok(None)` と型で区別する）。
     pub(crate) requires_grad: bool,
+    /// **FP32 厳密精度契約フラグ（codex-review 指摘。PR #2003）**:
+    /// [`crate::var::Var::matmul_fp32_strict`]（`ops.gemm_fp32_strict`
+    /// で forward 値を計算した `Op::MatMul` ノード）にのみ `true` を
+    /// 立てる。`Op::MatMul` は既定で [`Op::is_checkpoint_eligible`]
+    /// （activation checkpointing が値を解放し `matmul_forward`
+    /// 〈`ops.gemm`。CUDA TF32 opt-in 中は非厳密〉で再計算してよい対象）
+    /// だが、本フィールドが `true` のノードはこの解放対象から除外する
+    /// （[`release_checkpoint_region`] の唯一の呼び出し箇所で検査）。
+    /// `Op::MatMul` variant 自体は forward 精度の情報を持たないため
+    /// （通常版・厳密版とも同じ `Op::MatMul(a, b)` を記録する）、
+    /// このノード単位のフラグが「厳密精度で計算された」という事実を
+    /// checkpoint 解放判定へ伝える唯一の経路である。解放しないことで
+    /// `TapeNode::value` は常に厳密精度の forward 値のまま保持され、
+    /// `recompute_fallible`／`recompute_infallible` が非厳密な
+    /// `matmul_forward` で再計算する経路へは一切到達しない
+    /// （現時点の唯一の呼び出し元は `create_graph::build_cgrads` の
+    /// 2 階 MatMul VJP が子テープ上へ記録する `da`／`db` ノード。
+    /// 1 階 `grad.rs::matmul_vjp` は `ops.gemm_fp32_strict` を直接
+    /// 呼ぶのみでテープへは何も記録しないため対象外）。既定は
+    /// `false`（既存の `Var::matmul`〈`Op::MatMul` 通常版〉・他の全
+    /// Op variant は checkpoint 解放判定に影響しない）。
+    pub(crate) fp32_strict: bool,
 }
 
 /// 演算を記録する Wengert list。`Var`（`var.rs`）上の演算のみがここに
@@ -2288,6 +2449,22 @@ impl Tape {
         Ok(())
     }
 
+    /// この `Tape` に checkpoint 区間（[`Tape::checkpoint`]／
+    /// `Var::checkpoint_from`）が一度でも登録されたかを返す（イシュー
+    /// #1942）。`crate::create_graph::Tape::backward_create_graph` の
+    /// 入口検査が使う——checkpoint 済みノードの forward 値は解放されて
+    /// おり、子テープ側での再生（replay）には `docs/
+    /// autodiff-checkpoint-design.md` の再計算経路との追加整理が要る
+    /// ため（設計 doc `docs/autodiff-higher-order-grad-decision.md`
+    /// §8「checkpoint 区間との相互作用」）、本イシューの初期スコープ
+    /// では checkpoint 済み親テープを一律 fail-closed に拒否する。
+    /// `checkpoints`（`HashMap<usize, Vec<CheckpointRegion>>`）は
+    /// [`Tape::reset`] でのみ消去されるため、reset 後は再び `false` を
+    /// 返す。
+    pub(crate) fn has_registered_checkpoints(&self) -> bool {
+        !self.checkpoints.borrow().is_empty()
+    }
+
     /// **非 elementwise・常に実体化済み**のノードを追記する（`matmul`/
     /// `sum`/`max`・`Sigmoid`/`MseLoss`/`CrossEntropyLoss`
     /// から呼ばれる。TASK-12.1d・#164 で `push` から改称）。`op` の入力側
@@ -2370,6 +2547,12 @@ impl Tape {
             recompute: false,
             recompute_failed: std::cell::Cell::new(poisoned),
             requires_grad,
+            // 既定 `false`（`TapeNode::fp32_strict` doc 参照）。
+            // `Var::matmul_fp32_strict` は本関数を呼んだ直後に自身の
+            // 戻り値ノードへ限定してこのフィールドを `true` へ立てる
+            // （`push_eager` 自体は通常版・厳密版の呼び出し元を区別
+            // しない）。
+            fp32_strict: false,
         });
         id
     }
@@ -2391,6 +2574,7 @@ impl Tape {
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
             requires_grad,
+            fp32_strict: false,
         });
         id
     }
@@ -2422,6 +2606,7 @@ impl Tape {
             // `true`」参照）。`var_no_grad` 相当の非追跡 resident 葉は
             // 本 issue のスコープ外。
             requires_grad: true,
+            fp32_strict: false,
         });
         id
     }
@@ -2460,6 +2645,7 @@ impl Tape {
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
             requires_grad,
+            fp32_strict: false,
         });
         id
     }
@@ -2548,6 +2734,7 @@ impl Tape {
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
             requires_grad,
+            fp32_strict: false,
         });
         (id, at_limit)
     }
@@ -2802,9 +2989,22 @@ fn build_lazy_plan(
 /// ノードへ再度呼んでも副作用はない（`OnceCell::take` は空なら
 /// `None` を返すのみ）——`checkpoint_from` の入れ子区間（内側区間が
 /// 先に解放したノードを外側区間が再度走査する場合）を単純に許容する。
+///
+/// **`TapeNode::fp32_strict` による除外（codex-review 指摘。
+/// PR #2003）**: `Op::MatMul` は `is_checkpoint_eligible() == true`
+/// だが、`fp32_strict` が立っているノード（`Var::matmul_fp32_strict`
+/// で forward 値を計算した `Op::MatMul`）は解放対象から除外する。
+/// `Op::MatMul` variant 自体は forward 精度の情報を持たないため、
+/// 解放して `recompute` フラグを立てると再計算時に必ず非厳密な
+/// `matmul_forward`（`recompute_value` の `Op::MatMul` 分岐。
+/// `ops.gemm`）が使われてしまい、CUDA TF32 opt-in が有効な間は
+/// 厳密精度契約（`Var::matmul_fp32_strict` doc 参照）が checkpoint
+/// 経由で静かに破られる。解放しないことで該当ノードの値は常に
+/// 厳密精度のまま保持され、`recompute_fallible`／`recompute_
+/// infallible` がこのノードを再計算する経路へは一切到達しない。
 fn release_checkpoint_region(nodes: &mut [TapeNode], lo: usize, output: usize) {
     for node in nodes.iter_mut().take(output).skip(lo) {
-        if node.op.is_checkpoint_eligible() {
+        if node.op.is_checkpoint_eligible() && !node.fp32_strict {
             node.value.take();
             node.recompute = true;
         }

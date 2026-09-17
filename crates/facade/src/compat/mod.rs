@@ -64,4 +64,4 @@ mod training;
 pub use array::{ArrayData, array};
 pub use callbacks::{Callback, EarlyStopping, LrSchedule, ModelCheckpoint, Monitor, MonitorMode};
 pub use sequential::{Sequential, SequentialVars};
-pub use training::{FitConfig, FitTarget, History, Loss, Optimizer};
+pub use training::{AmpConfig, AmpDType, FitConfig, FitTarget, History, Loss, Optimizer};

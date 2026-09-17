@@ -334,8 +334,28 @@ pub(crate) fn vjp(
         Op::LogSoftmax { input, dim } => {
             // d/dx log_softmax(x) = g − exp(y) ⊙ Σ_dim(g)（`y` = forward
             // 記録値 `out_value` = log_softmax(x)）。軸方向の縮約
-            // （`Σ_dim(g)`）は f64 アキュムレータ。
-            let da = log_softmax_vjp_along(out_value, upstream, dim);
+            // （`Σ_dim(g)`）は f64 アキュムレータ。`BackendOps::
+            // log_softmax_backward`（イシュー #1949）優先・`Unsupported`
+            // のときのみ既存ホスト参照実装（`log_softmax_vjp_along`）へ
+            // フォールバックする（`Op::NllLoss` 分岐と同型の 3 分岐。
+            // 判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+            let da = match ops.log_softmax_backward(out_value, upstream, dim) {
+                Ok(da) => {
+                    if da.shape() != out_value.shape() {
+                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                lhs: da.shape().to_vec(),
+                                rhs: out_value.shape().to_vec(),
+                            },
+                        )));
+                    }
+                    da
+                }
+                Err(BackendError::Unsupported(_)) => {
+                    log_softmax_vjp_along(out_value, upstream, dim)
+                }
+                Err(other) => return Err(AutodiffError::Backend(other)),
+            };
             vec![(input, da)]
         }
         Op::Cumsum { input, dim } => {
@@ -890,6 +910,13 @@ pub(crate) fn vjp(
             weight,
             bias,
             act,
+            // `compute_dtype`（イシュー #1960）は forward の計算精度
+            // 記録専用のフィールドであり、backward（VJP）の計算式自体は
+            // 常に f32（`docs/autodiff-low-precision-linear-design.md`
+            // 「backward は意図的に f32 のまま」）で `compute_dtype` を
+            // 見て分岐しない。ここで束縛するのは、未対応 `Activation`
+            // 拒否時の診断メッセージへ含めるため（下記 `format!`）。
+            compute_dtype,
         } => {
             let w_val = materialize_fallible(nodes, ops, weight)?;
             let x_val = materialize_fallible(nodes, ops, input)?;
@@ -912,8 +939,9 @@ pub(crate) fn vjp(
                 // （`.claude/rules/security.md` A08）。
                 _ => {
                     return Err(AutodiffError::InvalidArgument(format!(
-                        "grad::vjp: Op::LinearAct has an unsupported Activation variant \
-                         ({act:?}); the VJP mask is only defined for None/Relu"
+                        "grad::vjp: Op::LinearAct (compute_dtype={compute_dtype:?}) has an \
+                         unsupported Activation variant ({act:?}); the VJP mask is only \
+                         defined for None/Relu"
                     )));
                 }
             };
@@ -1077,11 +1105,43 @@ pub(crate) fn vjp(
                 );
                 (0, 0)
             });
-            let x_slice = dense_vec(&x_val);
-            let w_slice = w_val.as_ref().map(dense_vec);
-            let dy_slice = dense_vec(upstream);
-            let (dx, dw) =
-                rmsnorm_vjp_rows(&x_slice, w_slice.as_deref(), eps, rows, hidden, &dy_slice);
+            // イシュー #1950: `BackendOps::rmsnorm_backward`（CUDA 等の
+            // 融合 backward カーネル）を優先し、`Unsupported` のときのみ
+            // 既存のホスト参照実装（`rmsnorm_vjp_rows`）へフォールバック
+            // する（`Op::MseLoss` 分岐と同型のフォールバック規律。それ以外
+            // のエラーは伝播し判定迂回経路を作らない。
+            // `.claude/rules/security.md` A08）。
+            let upstream_c = upstream.contiguous();
+            let (dx, dw) = match ops.rmsnorm_backward(&x_val, w_val.as_ref(), &upstream_c, eps) {
+                Ok((dx_t, dw_t)) => {
+                    if dx_t.shape() != x_shape.as_slice() {
+                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                lhs: dx_t.shape().to_vec(),
+                                rhs: x_shape.clone(),
+                            },
+                        )));
+                    }
+                    if let Some(dw_t) = &dw_t
+                        && dw_t.shape() != [hidden]
+                    {
+                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                lhs: dw_t.shape().to_vec(),
+                                rhs: vec![hidden],
+                            },
+                        )));
+                    }
+                    (dense_vec(&dx_t), dw_t.map(|t| dense_vec(&t)))
+                }
+                Err(BackendError::Unsupported(_)) => {
+                    let x_slice = dense_vec(&x_val);
+                    let w_slice = w_val.as_ref().map(dense_vec);
+                    let dy_slice = dense_vec(&upstream_c);
+                    rmsnorm_vjp_rows(&x_slice, w_slice.as_deref(), eps, rows, hidden, &dy_slice)
+                }
+                Err(other) => return Err(AutodiffError::Backend(other)),
+            };
             let mut contributions = vec![(input, build_tensor(dx, &x_shape))];
             if let (Some(w), Some(dw)) = (weight, dw) {
                 contributions.push((w, build_tensor(dw, &[hidden])));
@@ -1109,18 +1169,68 @@ pub(crate) fn vjp(
                 );
                 (0, 0)
             });
-            let x_slice = dense_vec(&x_val);
-            let w_slice = w_val.as_ref().map(dense_vec);
-            let dy_slice = dense_vec(upstream);
-            let (dx, dw, db) = layer_norm_vjp_rows(
-                &x_slice,
-                w_slice.as_deref(),
+            // イシュー #1950: `Op::RmsNorm` 分岐と同型の
+            // `BackendOps::layer_norm_backward` 優先・`Unsupported` 限定
+            // フォールバック。
+            let upstream_c = upstream.contiguous();
+            let (dx, dw, db) = match ops.layer_norm_backward(
+                &x_val,
+                w_val.as_ref(),
                 bias.is_some(),
+                &upstream_c,
                 eps,
-                rows,
-                hidden,
-                &dy_slice,
-            );
+            ) {
+                Ok((dx_t, dw_t, db_t)) => {
+                    if dx_t.shape() != x_shape.as_slice() {
+                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                lhs: dx_t.shape().to_vec(),
+                                rhs: x_shape.clone(),
+                            },
+                        )));
+                    }
+                    if let Some(dw_t) = &dw_t
+                        && dw_t.shape() != [hidden]
+                    {
+                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                lhs: dw_t.shape().to_vec(),
+                                rhs: vec![hidden],
+                            },
+                        )));
+                    }
+                    if let Some(db_t) = &db_t
+                        && db_t.shape() != [hidden]
+                    {
+                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                                lhs: db_t.shape().to_vec(),
+                                rhs: vec![hidden],
+                            },
+                        )));
+                    }
+                    (
+                        dense_vec(&dx_t),
+                        dw_t.map(|t| dense_vec(&t)),
+                        db_t.map(|t| dense_vec(&t)),
+                    )
+                }
+                Err(BackendError::Unsupported(_)) => {
+                    let x_slice = dense_vec(&x_val);
+                    let w_slice = w_val.as_ref().map(dense_vec);
+                    let dy_slice = dense_vec(&upstream_c);
+                    layer_norm_vjp_rows(
+                        &x_slice,
+                        w_slice.as_deref(),
+                        bias.is_some(),
+                        eps,
+                        rows,
+                        hidden,
+                        &dy_slice,
+                    )
+                }
+                Err(other) => return Err(AutodiffError::Backend(other)),
+            };
             let mut contributions = vec![(input, build_tensor(dx, &x_shape))];
             if let (Some(w), Some(dw)) = (weight, dw) {
                 contributions.push((w, build_tensor(dw, &[hidden])));
@@ -3439,12 +3549,18 @@ fn rmsnorm_vjp_rows(
                 None => dy_row[i],
             }
         };
-        let mut dot_acc = 0.0f64;
-        for (i, &xv) in row.iter().enumerate() {
-            let xhat = xv * rstd;
+        // イシュー #1950・PR #1995 codex-review P1 是正: `dot`（符号付き
+        // 項 `dxhat・xhat` の行内総和）は CUDA
+        // `kernels_norm_backward.rs::rmsnorm_bwd_dx_new_f32` の
+        // レーンストライド＋butterfly 縮約と同一順序（`eval::
+        // warp_reduce_f64`）で計算する（単純な先頭からの逐次和では
+        // 相殺入力で GPU 側と乖離しうる。`eval::warp_reduce_f64` doc
+        // comment 参照）。
+        let dot_acc = eval::warp_reduce_f64(hidden, |i, acc| {
+            let xhat = row[i] * rstd;
             let term = dxhat_at(i) * xhat;
-            dot_acc += term as f64;
-        }
+            acc + term as f64
+        });
         let mean_dot = dot_acc * inv_n;
         let dx_row = &mut dx[r * hidden..(r + 1) * hidden];
         for (i, (&xv, dxv)) in row.iter().zip(dx_row.iter_mut()).enumerate() {
@@ -3509,15 +3625,20 @@ fn layer_norm_vjp_rows(
                 None => dy_row[i],
             }
         };
-        let mut sum_dxhat = 0.0f64;
-        let mut dot_acc = 0.0f64;
-        for i in 0..row.len() {
+        // イシュー #1950・PR #1995 codex-review P1 是正: `sum_dxhat`／
+        // `dot`（ともに符号付き項の行内総和）は CUDA
+        // `kernels_norm_backward.rs::layer_norm_bwd_dx_f32` の
+        // レーンストライド＋butterfly 縮約と同一順序（`eval::
+        // warp_reduce_f64`）で計算する（`mean`／`rstd`〈上の
+        // `row_ln_stats` 呼び出し〉と同じ理由。`eval::warp_reduce_f64`
+        // doc comment 参照）。
+        let sum_dxhat = eval::warp_reduce_f64(hidden, |i, acc| acc + dxhat_at(i) as f64);
+        let dot_acc = eval::warp_reduce_f64(hidden, |i, acc| {
             let xhat = xhat_at(i);
             let dxhat = dxhat_at(i);
-            sum_dxhat += dxhat as f64;
             let term = dxhat * xhat;
-            dot_acc += term as f64;
-        }
+            acc + term as f64
+        });
         // `mean` と同じ理由（`row_ln_stats` doc 参照）で、事前丸めした
         // 逆数との積ではなく `hidden` による直接除算で求める。
         let mean_dxhat = sum_dxhat / n;
@@ -7905,6 +8026,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
             requires_grad: true,
+            fp32_strict: false,
         }
     }
 
@@ -8473,6 +8595,50 @@ release ビルドでも検知できるよう `assert!` を使う）"
         assert_grad_close("rmsnorm dw", &dw, &num_dw);
     }
 
+    /// イシュー #1950・PR #1995 codex-review P1 是正の回帰テスト（Linux
+    /// 実行可能。CUDA 実機不要）。`kernels_norm_backward.rs`
+    /// （レーンストライド＋butterfly 縮約）と、この
+    /// `rmsnorm_vjp_rows`（`eval::warp_reduce_f64` 経由に是正済み）が
+    /// 同一の `dot`（相殺入力での符号付き項の行内総和）を計算すること
+    /// を、codex レビュー指摘の具体的な相殺入力で直接検証する。
+    ///
+    /// `x = [1.0; 32]`・`eps = 0.0`（`rstd = 1.0`）・`w = None`・
+    /// `dy = [1e20, 1.0, -1e20, 0.0, ...]`。単純な先頭からの逐次和では
+    /// `dot_acc` が厳密に `0.0`（`1e20` は `f64` の丸めで `1.0` を吸収
+    /// し、直後の `-1e20` で完全に相殺する）になるが、32 レーンの
+    /// butterfly 縮約（offset 16→1）ではペアリング順序が異なるため
+    /// `dot = 1.0` になる（`dy[0]=1e20` と `dy[2]=-1e20` が
+    /// offset=2 の段で先に相殺し、`dy[1]=1.0` だけが生き残る）。
+    /// 是正前は `dx[1] == 1.0`（`dxhat` そのまま）・`dx[3] == 0.0`
+    /// だったが、是正後は `mean_dot = 1.0/32 = 0.03125` が伝播し
+    /// `dx[1] == 0.96875`・`dx[3] == -0.03125` になる——これは
+    /// `f32` で厳密に表現可能な値であり `assert_eq!` で bit 一致を
+    /// 検証できる。
+    #[test]
+    fn rmsnorm_grad_dot_reduction_matches_gpu_butterfly_order_on_cancelling_input() {
+        let hidden = 32usize;
+        let x = vec![1.0f32; hidden];
+        let eps = 0.0f32;
+        let mut dy = vec![0.0f32; hidden];
+        dy[0] = 1e20;
+        dy[1] = 1.0;
+        dy[2] = -1e20;
+
+        let (dx, dw) = rmsnorm_vjp_rows(&x, None, eps, 1, hidden, &dy);
+        assert!(dw.is_none());
+
+        assert_eq!(
+            dx[1], 0.96875f32,
+            "dx[1] は butterfly 縮約の dot=1.0 を反映するはず"
+        );
+        for (i, &v) in dx.iter().enumerate().skip(3) {
+            assert_eq!(
+                v, -0.03125f32,
+                "dx[{i}] は butterfly 縮約の dot=1.0 を反映するはず"
+            );
+        }
+    }
+
     #[test]
     fn layer_norm_grad_matches_numeric_no_affine() {
         let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
@@ -8532,6 +8698,52 @@ release ビルドでも検知できるよう `assert!` を使う）"
             eval::layer_norm_rows(&x, Some(&w_slice), Some(&dense_vec(bt)), eps, rows, hidden)
         });
         assert_grad_close("layer_norm db", &db, &num_db);
+    }
+
+    /// イシュー #1950・PR #1995 codex-review P1 是正の回帰テスト（Linux
+    /// 実行可能。CUDA 実機不要）。`kernels_norm_backward.rs::
+    /// layer_norm_bwd_dx_f32` の `sum_dxhat`（相殺入力での符号付き項の
+    /// 行内総和）と、この `layer_norm_vjp_rows`（`eval::warp_reduce_f64`
+    /// 経由に是正済み）が同一の値を計算することを、codex レビュー指摘
+    /// の具体的な相殺入力で直接検証する。
+    ///
+    /// `x = [0.0; 32]`・`eps = 1.0`（`mean = 0`・`var = 0`・`rstd = 1`
+    /// より `xhat = 0` を全要素で恒等に満たす）・`w = None`・
+    /// `has_bias = false`・`dy = [1e20, 1.0, -1e20, 0.0, ...]`。単純な
+    /// 先頭からの逐次和では `sum_dxhat` が厳密に `0.0` になるが、32
+    /// レーンの butterfly 縮約では `1.0` になる（`rmsnorm_grad_dot_
+    /// reduction_matches_gpu_butterfly_order_on_cancelling_input` と
+    /// 同じペアリング順序）。`xhat = 0` のため `dot_acc` は経路に依らず
+    /// `0.0`（`mean_dot = 0`）だが、`mean_dxhat` の違いがそのまま
+    /// `dx[i] = rstd * (dxhat_i - mean_dxhat - 0) = dy[i] - mean_dxhat`
+    /// へ伝播する。是正前は `dx[1] == 1.0`・`dx[3] == 0.0` だったが、
+    /// 是正後は `mean_dxhat = 1.0/32 = 0.03125` により
+    /// `dx[1] == 0.96875`・`dx[3] == -0.03125` になる（`f32` で厳密に
+    /// 表現可能）。
+    #[test]
+    fn layer_norm_grad_sum_dxhat_reduction_matches_gpu_butterfly_order_on_cancelling_input() {
+        let hidden = 32usize;
+        let x = vec![0.0f32; hidden];
+        let eps = 1.0f32;
+        let mut dy = vec![0.0f32; hidden];
+        dy[0] = 1e20;
+        dy[1] = 1.0;
+        dy[2] = -1e20;
+
+        let (dx, dw, db) = layer_norm_vjp_rows(&x, None, false, eps, 1, hidden, &dy);
+        assert!(dw.is_none());
+        assert!(db.is_none());
+
+        assert_eq!(
+            dx[1], 0.96875f32,
+            "dx[1] は butterfly 縮約の sum_dxhat=1.0 を反映するはず"
+        );
+        for (i, &v) in dx.iter().enumerate().skip(3) {
+            assert_eq!(
+                v, -0.03125f32,
+                "dx[{i}] は butterfly 縮約の sum_dxhat=1.0 を反映するはず"
+            );
+        }
     }
 
     #[test]
@@ -8602,6 +8814,386 @@ release ビルドでも検知できるよう `assert!` を使う）"
         assert_eq!(grads[0].0, NodeId(0));
         assert_eq!(grads[1].0, NodeId(1));
         assert_eq!(grads[2].0, NodeId(2));
+    }
+
+    /// イシュー #1950: `BackendOps::rmsnorm_backward`／`layer_norm_backward`
+    /// を優先し `Unsupported` のときのみホスト参照実装（`rmsnorm_vjp_rows`／
+    /// `layer_norm_vjp_rows`）へフォールバックする `grad::vjp` の分岐挙動を
+    /// 検証するモック（CUDA 等の融合 backward カーネルをスタブ化する）。
+    /// `device`／`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` は
+    /// 本テストの経路では呼ばれないため `unreachable!` とする。
+    enum NormBackwardBehavior {
+        /// 常に `Unsupported`（ホスト参照実装へフォールバックする経路）。
+        Unsupported,
+        /// 固定値を返す（フォールバックを使わず、この値がそのまま
+        /// contributions に載ることを確認する経路）。
+        Fixed {
+            dx: Vec<f32>,
+            dw: Option<Vec<f32>>,
+            db: Option<Vec<f32>>,
+        },
+        /// `dx` の shape が入力と食い違う不正値を返す（fail-closed 拒否を
+        /// 確認する経路）。
+        WrongDxShape,
+        /// `KernelLaunchFailed` を返す（`Unsupported` 以外は伝播すること
+        /// を確認する経路）。
+        OtherError,
+    }
+
+    struct NormBackwardMockOps(NormBackwardBehavior);
+
+    impl BackendOps for NormBackwardMockOps {
+        fn device(&self) -> fandhe_ai_tensor_core::Device {
+            fandhe_ai_tensor_core::Device::Cpu
+        }
+        fn gemm(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("NormBackwardMockOps::gemm はイシュー #1950 テストでは使わない")
+        }
+        fn add(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("NormBackwardMockOps::add はイシュー #1950 テストでは使わない")
+        }
+        fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("NormBackwardMockOps::mul はイシュー #1950 テストでは使わない")
+        }
+        fn relu(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("NormBackwardMockOps::relu はイシュー #1950 テストでは使わない")
+        }
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("NormBackwardMockOps::exp はイシュー #1950 テストでは使わない")
+        }
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("NormBackwardMockOps::tanh はイシュー #1950 テストでは使わない")
+        }
+        fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("NormBackwardMockOps::sum はイシュー #1950 テストでは使わない")
+        }
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            unreachable!("NormBackwardMockOps::max はイシュー #1950 テストでは使わない")
+        }
+        fn rmsnorm_backward(
+            &self,
+            x: &Tensor<f32>,
+            _weight: Option<&Tensor<f32>>,
+            _dy: &Tensor<f32>,
+            _eps: f32,
+        ) -> Result<(Tensor<f32>, Option<Tensor<f32>>), BackendError> {
+            match &self.0 {
+                NormBackwardBehavior::Unsupported => Err(BackendError::Unsupported("stub".into())),
+                NormBackwardBehavior::Fixed { dx, dw, .. } => Ok((
+                    build_tensor(dx.clone(), x.shape()),
+                    dw.clone().map(|v| build_tensor(v, &[v_len(dw)])),
+                )),
+                NormBackwardBehavior::WrongDxShape => {
+                    Ok((build_tensor(vec![0.0f32; 1], &[1]), None))
+                }
+                NormBackwardBehavior::OtherError => Err(BackendError::KernelLaunchFailed(
+                    "stub launch failure".into(),
+                )),
+            }
+        }
+        fn layer_norm_backward(
+            &self,
+            x: &Tensor<f32>,
+            _weight: Option<&Tensor<f32>>,
+            _has_bias: bool,
+            _dy: &Tensor<f32>,
+            _eps: f32,
+        ) -> Result<(Tensor<f32>, Option<Tensor<f32>>, Option<Tensor<f32>>), BackendError> {
+            match &self.0 {
+                NormBackwardBehavior::Unsupported => Err(BackendError::Unsupported("stub".into())),
+                NormBackwardBehavior::Fixed { dx, dw, db } => Ok((
+                    build_tensor(dx.clone(), x.shape()),
+                    dw.clone().map(|v| build_tensor(v, &[v_len(dw)])),
+                    db.clone().map(|v| build_tensor(v, &[v_len(db)])),
+                )),
+                NormBackwardBehavior::WrongDxShape => {
+                    Ok((build_tensor(vec![0.0f32; 1], &[1]), None, None))
+                }
+                NormBackwardBehavior::OtherError => Err(BackendError::KernelLaunchFailed(
+                    "stub launch failure".into(),
+                )),
+            }
+        }
+    }
+
+    /// `Option<Vec<f32>>` の長さを取り出す（`NormBackwardMockOps` の
+    /// `Fixed` 分岐専用の小道具。`dw`/`db` はテストが必ず正しい
+    /// `hidden` 長で組み立てるため `unwrap` する）。
+    fn v_len(v: &Option<Vec<f32>>) -> usize {
+        v.as_ref().map(|v| v.len()).unwrap_or(0)
+    }
+
+    #[test]
+    fn rmsnorm_backward_unsupported_falls_back_to_host_reference() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[1, 4]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[1, 4]);
+        let eps = 1e-5f32;
+        let out_value = eval::rmsnorm_rows(&x, None, eps, 1, 4);
+        let nodes = vec![leaf_node(x.clone())];
+        let op = Op::RmsNorm {
+            input: NodeId(0),
+            weight: None,
+            eps,
+        };
+        let ops = NormBackwardMockOps(NormBackwardBehavior::Unsupported);
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &ops,
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+        let expected = {
+            let x_slice = dense_vec(&x);
+            let dy_slice = dense_vec(&g);
+            let (dx, _dw) = rmsnorm_vjp_rows(&x_slice, None, eps, 1, 4, &dy_slice);
+            dx
+        };
+        assert_eq!(dense_vec(&grads[0].1), expected);
+    }
+
+    #[test]
+    fn rmsnorm_backward_ok_bypasses_host_reference() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[1, 4]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[1, 4]);
+        let eps = 1e-5f32;
+        let out_value = eval::rmsnorm_rows(&x, None, eps, 1, 4);
+        let nodes = vec![leaf_node(x.clone())];
+        let op = Op::RmsNorm {
+            input: NodeId(0),
+            weight: None,
+            eps,
+        };
+        let fixed_dx = vec![9.0, 8.0, 7.0, 6.0];
+        let ops = NormBackwardMockOps(NormBackwardBehavior::Fixed {
+            dx: fixed_dx.clone(),
+            dw: None,
+            db: None,
+        });
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &ops,
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+        assert_eq!(dense_vec(&grads[0].1), fixed_dx);
+    }
+
+    #[test]
+    fn rmsnorm_backward_wrong_shape_is_rejected() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[1, 4]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[1, 4]);
+        let eps = 1e-5f32;
+        let out_value = eval::rmsnorm_rows(&x, None, eps, 1, 4);
+        let nodes = vec![leaf_node(x.clone())];
+        let op = Op::RmsNorm {
+            input: NodeId(0),
+            weight: None,
+            eps,
+        };
+        let ops = NormBackwardMockOps(NormBackwardBehavior::WrongDxShape);
+
+        let err = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &ops,
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn rmsnorm_backward_other_error_propagates() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[1, 4]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[1, 4]);
+        let eps = 1e-5f32;
+        let out_value = eval::rmsnorm_rows(&x, None, eps, 1, 4);
+        let nodes = vec![leaf_node(x.clone())];
+        let op = Op::RmsNorm {
+            input: NodeId(0),
+            weight: None,
+            eps,
+        };
+        let ops = NormBackwardMockOps(NormBackwardBehavior::OtherError);
+
+        let err = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &ops,
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::KernelLaunchFailed(_))
+        ));
+    }
+
+    #[test]
+    fn layer_norm_backward_unsupported_falls_back_to_host_reference() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[1, 4]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[1, 4]);
+        let eps = 1e-5f32;
+        let out_value = eval::layer_norm_rows(&x, None, None, eps, 1, 4);
+        let nodes = vec![leaf_node(x.clone())];
+        let op = Op::LayerNorm {
+            input: NodeId(0),
+            weight: None,
+            bias: None,
+            eps,
+        };
+        let ops = NormBackwardMockOps(NormBackwardBehavior::Unsupported);
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &ops,
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+        let expected = {
+            let x_slice = dense_vec(&x);
+            let dy_slice = dense_vec(&g);
+            let (dx, _dw, _db) = layer_norm_vjp_rows(&x_slice, None, false, eps, 1, 4, &dy_slice);
+            dx
+        };
+        assert_eq!(dense_vec(&grads[0].1), expected);
+    }
+
+    #[test]
+    fn layer_norm_backward_ok_bypasses_host_reference() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[1, 4]);
+        let w = t(&[1.0, 1.0, 1.0, 1.0], &[4]);
+        let b = t(&[0.0, 0.0, 0.0, 0.0], &[4]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[1, 4]);
+        let eps = 1e-5f32;
+        let out_value =
+            eval::layer_norm_rows(&x, Some(&dense_vec(&w)), Some(&dense_vec(&b)), eps, 1, 4);
+        let nodes = vec![
+            leaf_node(x.clone()),
+            leaf_node(w.clone()),
+            leaf_node(b.clone()),
+        ];
+        let op = Op::LayerNorm {
+            input: NodeId(0),
+            weight: Some(NodeId(1)),
+            bias: Some(NodeId(2)),
+            eps,
+        };
+        let fixed_dx = vec![9.0, 8.0, 7.0, 6.0];
+        let fixed_dw = vec![1.0, 2.0, 3.0, 4.0];
+        let fixed_db = vec![0.1, 0.2, 0.3, 0.4];
+        let ops = NormBackwardMockOps(NormBackwardBehavior::Fixed {
+            dx: fixed_dx.clone(),
+            dw: Some(fixed_dw.clone()),
+            db: Some(fixed_db.clone()),
+        });
+
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &ops,
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+        assert_eq!(dense_vec(&grads[0].1), fixed_dx);
+        assert_eq!(dense_vec(&grads[1].1), fixed_dw);
+        assert_eq!(dense_vec(&grads[2].1), fixed_db);
+    }
+
+    #[test]
+    fn layer_norm_backward_wrong_shape_is_rejected() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[1, 4]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[1, 4]);
+        let eps = 1e-5f32;
+        let out_value = eval::layer_norm_rows(&x, None, None, eps, 1, 4);
+        let nodes = vec![leaf_node(x.clone())];
+        let op = Op::LayerNorm {
+            input: NodeId(0),
+            weight: None,
+            bias: None,
+            eps,
+        };
+        let ops = NormBackwardMockOps(NormBackwardBehavior::WrongDxShape);
+
+        let err = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &ops,
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn layer_norm_backward_other_error_propagates() {
+        let x = t(&[1.0, 2.0, -1.0, 0.5], &[1, 4]);
+        let g = t(&[1.0, -2.0, 0.5, 2.0], &[1, 4]);
+        let eps = 1e-5f32;
+        let out_value = eval::layer_norm_rows(&x, None, None, eps, 1, 4);
+        let nodes = vec![leaf_node(x.clone())];
+        let op = Op::LayerNorm {
+            input: NodeId(0),
+            weight: None,
+            bias: None,
+            eps,
+        };
+        let ops = NormBackwardMockOps(NormBackwardBehavior::OtherError);
+
+        let err = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &ops,
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::KernelLaunchFailed(_))
+        ));
     }
 
     // --- BatchNorm（イシュー #1732・親 #1608） ---
@@ -9740,6 +10332,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
                 recompute: false,
                 recompute_failed: std::cell::Cell::new(false),
                 requires_grad: true,
+                fp32_strict: false,
             };
             vec![
                 leaf_node(x.clone()),
@@ -10571,6 +11164,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
             requires_grad: true,
+            fp32_strict: false,
         };
         let nodes = vec![node];
         let op = Op::Interpolate {

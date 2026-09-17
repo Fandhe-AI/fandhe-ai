@@ -82,6 +82,7 @@ use crate::generic_cache::{get_or_build, get_or_build_keyed};
 use crate::im2col::MetalIm2col;
 use crate::interpolate::MetalInterpolate;
 use crate::layer_norm::MetalLayerNorm;
+use crate::norm_backward::MetalNormBackward;
 use crate::pipeline::{self, MtlPipeline};
 use crate::pool::MetalAllocator;
 use crate::rmsnorm::MetalRmsNorm;
@@ -183,6 +184,17 @@ pub(crate) fn cached_layer_norm(
     static CACHE: OnceLock<Mutex<Option<Arc<MetalLayerNorm>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || MetalLayerNorm::new(ctx))
+}
+
+/// [`MetalNormBackward`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1953。`ops::MetalBackendOps::rmsnorm_backward`／
+/// `layer_norm_backward` の唯一の呼び出し先）。
+pub(crate) fn cached_norm_backward(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<MetalNormBackward>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<MetalNormBackward>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || MetalNormBackward::new(ctx))
 }
 
 /// [`MetalBatchNorm`] スイートをプロセス内キャッシュから取得する
@@ -406,6 +418,22 @@ pub(crate) fn cached_reduce(
     static CACHE: OnceLock<Mutex<Option<Arc<crate::reduce::MetalReduce>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || crate::reduce::MetalReduce::new(ctx))
+}
+
+/// `log_softmax` backward（2 カーネル。`log_softmax_backward.rs::
+/// MetalLogSoftmaxBackward`）のコンパイル済みパイプラインをプロセス内
+/// キャッシュから取得する（イシュー #1952。`cached_reduce` と同型）。
+/// `ops::MetalBackendOps::log_softmax_backward` の唯一の呼び出し先。
+pub(crate) fn cached_log_softmax_backward(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::log_softmax_backward::MetalLogSoftmaxBackward>, MetalError> {
+    static CACHE: OnceLock<
+        Mutex<Option<Arc<crate::log_softmax_backward::MetalLogSoftmaxBackward>>>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || {
+        crate::log_softmax_backward::MetalLogSoftmaxBackward::new(ctx)
+    })
 }
 
 pub(crate) fn cached_allocator(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAllocator>, MetalError> {

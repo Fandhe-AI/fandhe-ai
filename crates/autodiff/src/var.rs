@@ -404,6 +404,50 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// [`Var::matmul`] の FP32 厳密版（rank 2 限定）。`ops.gemm`
+    /// （CUDA `crate::precision` の TF32 opt-in フラグに従う）ではなく
+    /// 常に `ops.gemm_fp32_strict` で forward 値を計算する点のみが
+    /// 異なり、記録する `Op::MatMul` ノード自体・shape 検証・クロス
+    /// テープ検査は [`Var::matmul`] と同一。
+    ///
+    /// [`create_graph::backward_create_graph`](crate::create_graph)
+    /// の子テープ上 MatMul VJP（`da = g.matmul(&bᵀ)`・
+    /// `db = aᵀ.matmul(&g)`）専用（codex-review 指摘。PR #2003）:
+    /// 1 階 `grad.rs::matmul_vjp` は既に `ops.gemm_fp32_strict` を
+    /// 使っており、CUDA TF32 opt-in（`set_cuda_gemm_precision`）が
+    /// 有効な間もバックプロパゲーションだけは FP32 厳密のまま保つ
+    /// 契約（`BackendOps::gemm_fp32_strict` doc 参照）。子テープ上で
+    /// `Var::matmul`（`ops.gemm`）を使うと、この契約が二階微分の
+    /// 記録経路でだけ破られ、勾配が TF32 相当まで精度低下する
+    /// （REQ-2 の統一複合判定を外れうる）。rank 2 限定なのは
+    /// [`create_graph::validate_ancestors`](crate::create_graph) が
+    /// rank≥3 の `MatMul` を子テープ記録の対象から事前拒否しており、
+    /// このメソッドの呼び出し元では常に rank 2 であるため
+    /// （バッチ版 `gemm_batched_fp32_strict` は未使用）。
+    pub(crate) fn matmul_fp32_strict(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(other)?;
+        let lhs_shape = self.shape();
+        let rhs_shape = other.shape();
+        matmul_out_shape(&lhs_shape, &rhs_shape)?;
+        let (lhs_val, rhs_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let lhs_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let rhs_val = materialize_fallible(&nodes, self.tape.ops(), other.id)?.clone();
+            (lhs_val, rhs_val)
+        };
+        let value = self.tape.ops().gemm_fp32_strict(&lhs_val, &rhs_val)?;
+        let id = self.tape.push_eager(Op::MatMul(self.id, other.id), value);
+        // `TapeNode::fp32_strict` を立てる（codex-review 指摘。
+        // PR #2003）: `push_eager` 自体は通常版・厳密版の呼び出し元を
+        // 区別しないため、戻り値ノードへ限定してここで事後設定する。
+        // これにより activation checkpointing（`release_checkpoint_
+        // region`）が本ノードの forward 値を解放しなくなり、以後の
+        // 再計算が非厳密な `matmul_forward`（`ops.gemm`）へ落ちる事故
+        // （厳密精度契約が checkpoint 経由で失われる）を防ぐ。
+        self.tape.nodes.borrow_mut()[id.0].fp32_strict = true;
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// `C = self @ other` を計算しつつ、`C` の全要素和（checksum）を
     /// バックエンド側の `f64` reduction（`BackendOps::gemm_checksum`）で
     /// 求める（イシュー #1339）。framework-compare の gemm 計測窓が毎
@@ -504,6 +548,87 @@ impl<'t> Var<'t> {
                 weight: weight.id,
                 bias: bias.map(|b| b.id),
                 act,
+                compute_dtype: fandhe_ai_tensor_core::ScalarDType::F32,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// [`Self::linear_act`] の低精度版（イシュー #1960・親 #1626／
+    /// #1648）。`fandhe_ai_tensor_core::linear_forward_low_precision`
+    /// （`TypedOps<f16>`／`TypedOps<bf16>` 経由。CPU 昇格→降格ソフト
+    /// ウェア変換方式）へ forward 値計算のみを委譲する opt-in 経路。
+    /// `nn::linear::linear_forward_low_precision`（自由関数。
+    /// `LinearVars` へのフィールド追加〈破壊的変更〉を避けるための
+    /// 配置）の唯一の呼び出し元。
+    ///
+    /// `weight`／`bias`（f32 master 値）・backward（`grad::vjp` の
+    /// `Op::LinearAct` 分岐。常に f32）は [`Self::linear_act`] と完全に
+    /// 同一——低精度なのは forward の GEMM／bias 加算／activation の
+    /// 計算過程のみで、テープに記録する `Tensor<f32>` 値自体は既存
+    /// `LinearAct` と同じ f32 表現（`compute_dtype` フィールドで記録
+    /// 経路のみを区別する）。①クロステープ検査 → ②shape 検査 →
+    /// ③forward 値計算 → ④ノード記録の順序も [`Self::linear_act`] と
+    /// 同一（`Var::matmul` 以来の共通パターン）。
+    pub(crate) fn linear_act_low_precision(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        act: Activation,
+        dtype: fandhe_ai_tensor_core::ScalarDType,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(weight)?;
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+        let lhs_shape = self.shape();
+        let rhs_shape = weight.shape();
+        let out_shape = gemm_out_shape(&lhs_shape, &rhs_shape)?;
+        if let Some(b) = bias {
+            // `broadcast_shape` の成功のみでは、`bias` が `out_shape`
+            // （gemm の出力 shape）を「拡張」する場合（例: out_shape
+            // `[1,1]`・bias `[2,1]`）を誤って受理してしまう。`grad::vjp`
+            // の `Op::LinearAct` 分岐は upstream（実際の forward 出力
+            // shape。add により拡張されていれば `[2,1]`）を `matmul_vjp`
+            // へそのまま渡すため、`weight` の shape（`[2,1]`）との
+            // 縮約次元が食い違い K 不一致で失敗する。勾配の形状契約を
+            // 守るため、bias は `out_shape` へブロードキャスト「される」
+            // 側（結果が `out_shape` と一致する）ことを検証し、拡張は
+            // fail-closed に拒否する（codex-review 指摘・PR #2000）。
+            let broadcast_result = broadcast_shape(&out_shape, &b.shape())?;
+            if broadcast_result != out_shape {
+                return Err(AutodiffError::Shape(ShapeError::BroadcastIncompatible {
+                    lhs: out_shape,
+                    rhs: b.shape().to_vec(),
+                }));
+            }
+        }
+        let (lhs_val, rhs_val, bias_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let lhs_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let rhs_val = materialize_fallible(&nodes, self.tape.ops(), weight.id)?.clone();
+            let bias_val = match bias {
+                Some(b) => Some(materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone()),
+                None => None,
+            };
+            (lhs_val, rhs_val, bias_val)
+        };
+        let value = fandhe_ai_tensor_core::linear_forward_low_precision(
+            self.tape.ops(),
+            dtype,
+            &lhs_val,
+            &rhs_val,
+            bias_val.as_ref(),
+            act,
+        )?;
+        let id = self.tape.push_eager(
+            Op::LinearAct {
+                input: self.id,
+                weight: weight.id,
+                bias: bias.map(|b| b.id),
+                act,
+                compute_dtype: dtype,
             },
             value,
         );
@@ -5447,6 +5572,499 @@ mod linear_act_tests {
             fused.value().as_slice().unwrap(),
             composed.value().as_slice().unwrap(),
             "broadcast bias 経路は融合・非融合合成で bit 一致するはず"
+        );
+    }
+
+    // `Op::LinearAct::compute_dtype`（イシュー #1960）: `linear_act`
+    // （既存 F32 記録経路）と `linear_act_low_precision`（opt-in 低精度
+    // 記録経路）が正しい `ScalarDType` を記録することを直接確認する。
+    // `compute_dtype` は VJP からは読まれない純粋な記録専用フィールド
+    // （`grad::vjp` の `Op::LinearAct` 分岐 doc 参照）のため、dead_code
+    // 回避の便宜的な用途ではなく「forward 経路の識別子として正しく
+    // 記録される」という本イシューの契約そのものを検証する。
+    #[test]
+    fn linear_act_records_f32_compute_dtype() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(vec![1.0, 2.0], &[1, 2]).unwrap());
+        let w = tape.var(&Tensor::new(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap());
+        let out = x.linear_act(&w, None, Activation::None).unwrap();
+        let nodes = tape.nodes.borrow();
+        match &nodes[out.id.0].op {
+            crate::tape::Op::LinearAct { compute_dtype, .. } => {
+                assert_eq!(*compute_dtype, fandhe_ai_tensor_core::ScalarDType::F32);
+            }
+            other => panic!("expected Op::LinearAct, got {other:?}"),
+        }
+    }
+
+    /// 低精度カーネル未実装のバックエンド（`Tape::new()` 既定の
+    /// naive 参照実装は `typed_ops_f16`／`typed_ops_bf16` accessor が
+    /// 既定 `None`）に対し、`linear_act_low_precision` が f32 へ静かに
+    /// フォールバックせず `AutodiffError::Backend(BackendError::
+    /// Unsupported(_))` を返すことを確認する（`.claude/rules/
+    /// security.md` A04 の fail-closed 方針）。
+    #[test]
+    fn linear_act_low_precision_without_typed_ops_returns_unsupported() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(vec![1.0, 2.0], &[1, 2]).unwrap());
+        let w = tape.var(&Tensor::new(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap());
+        let err = x
+            .linear_act_low_precision(
+                &w,
+                None,
+                Activation::None,
+                fandhe_ai_tensor_core::ScalarDType::F16,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::AutodiffError::Backend(fandhe_ai_tensor_core::BackendError::Unsupported(
+                _
+            ))
+        ));
+    }
+
+    /// codex-review 指摘（PR #2000）の回帰テスト: `bias` が
+    /// `gemm_out_shape` の結果（`out_shape`）を「拡張」するブロード
+    /// キャスト（`input=[1,2]`・`weight=[2,1]`・`bias=[2,1]`。
+    /// `out_shape` は `[1,1]` だが `bias` との NumPy 互換ブロードキャスト
+    /// 結果は `[2,1]` で `out_shape` と一致しない）を、
+    /// `typed_ops_f16()`／`typed_ops_bf16()` accessor が既定 `None` の
+    /// `Tape::new()`（fail-closed 経路と同じ前提）でも shape 検査段階で
+    /// 拒否することを確認する（`AutodiffError::Shape(_)`。accessor 探索
+    /// より前に検査が完結する契約は `tensor-core::low_precision::
+    /// linear_forward_low_precision` 側の同型テスト
+    /// `expanding_bias_broadcast_is_rejected_before_accessor_lookup` と
+    /// 対になる）。
+    #[test]
+    fn linear_act_low_precision_rejects_bias_that_expands_out_shape() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(vec![1.0, 2.0], &[1, 2]).unwrap());
+        let w = tape.var(&Tensor::new(vec![1.0, 1.0], &[2, 1]).unwrap());
+        let bias = tape.var(&Tensor::new(vec![0.0, 0.0], &[2, 1]).unwrap());
+        let err = x
+            .linear_act_low_precision(
+                &w,
+                Some(&bias),
+                Activation::None,
+                fandhe_ai_tensor_core::ScalarDType::F16,
+            )
+            .unwrap_err();
+        assert!(matches!(err, crate::error::AutodiffError::Shape(_)));
+    }
+
+    // 低精度 Linear forward（イシュー #1960）の成功経路テスト
+    // （codex-review 指摘・PR #2000 discussion_r3889050931 対応）。
+    // 上記 `..._without_typed_ops_returns_unsupported` は accessor 不在の
+    // fail-closed 経路のみを検証しており、①丸めを伴う forward、②低精度
+    // 出力による ReLU マスク、③f32 master 値を使う backward という
+    // 成功経路の 3 契約（`docs/autodiff-low-precision-linear-design.md`
+    // §1・§2）が未検証だった。以下はそれを埋める「bit 一致オラクル
+    // テスト」（同 doc §1 が言及する検証手段の実体）。
+
+    // `half::f16`／`half::bf16` は `fandhe_ai_tensor_core` の再エクスポート
+    // 経由で参照する（本クレートの `half` への直接 Cargo 依存は追加しない。
+    // codex-review 指摘対応・PR #2000 discussion 参照。`tensor-core::lib.rs`
+    // の `pub use half::{bf16, f16};` doc comment 参照）。
+    use fandhe_ai_tensor_core::{bf16, f16};
+
+    /// `TypedOps<half::f16>`／`TypedOps<half::bf16>` の実装契約
+    /// （`crates/backend-cpu/src/typed_f16.rs` doc:
+    /// `f16::from_f32(BackendOps::op(upcast(x)))`）を再現するモック
+    /// `BackendOps`。CPU バックエンドクレートへの新規依存を避けるため
+    /// （`nn/linear.rs::ComputingMockOps` と同じ方針）、f32 側の
+    /// `gemm`／`add`／`relu`（backward の `matmul_vjp` が経由する）も
+    /// 素朴な実装を本構造体に複製する。
+    struct ComputingLowPrecisionBackendOps;
+
+    impl ComputingLowPrecisionBackendOps {
+        fn gemm_f32(a: &Tensor<f32>, b: &Tensor<f32>) -> Tensor<f32> {
+            // `matmul_vjp`（backward）は転置 view（`transpose2d`。非
+            // contiguous な zero-copy view）をそのまま渡してくるため、
+            // `nn/linear.rs::ComputingMockOps` と異なり本モックは
+            // `.contiguous()` で実体化してから読む（本番 BackendOps は
+            // stride 読みで対応するが、本テスト用の素朴な実装では
+            // 簡略化する）。
+            let a = a.contiguous();
+            let b = b.contiguous();
+            let (m, k) = (a.shape()[0], a.shape()[1]);
+            let n = b.shape()[1];
+            let a_data = a.as_slice().expect("test: a must be contiguous");
+            let b_data = b.as_slice().expect("test: b must be contiguous");
+            let mut out = vec![0.0f32; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = 0.0f32;
+                    for p in 0..k {
+                        acc = a_data[i * k + p].mul_add(b_data[p * n + j], acc);
+                    }
+                    out[i * n + j] = acc;
+                }
+            }
+            Tensor::new(out, &[m, n]).unwrap()
+        }
+
+        fn add_f32(a: &Tensor<f32>, b: &Tensor<f32>) -> Tensor<f32> {
+            let a_shape = a.shape().to_vec();
+            let a_data = a.as_slice().expect("test: a must be contiguous");
+            let b_data = b.as_slice().expect("test: b must be contiguous");
+            let n = a_shape[1];
+            let out: Vec<f32> = a_data
+                .iter()
+                .enumerate()
+                .map(|(idx, x)| x + b_data[idx % n])
+                .collect();
+            Tensor::new(out, &a_shape).unwrap()
+        }
+
+        fn relu_f32(a: &Tensor<f32>) -> Tensor<f32> {
+            let data = a.as_slice().expect("test: a must be contiguous");
+            let out: Vec<f32> = data.iter().map(|x| x.max(0.0)).collect();
+            Tensor::new(out, a.shape()).unwrap()
+        }
+    }
+
+    impl BackendOps for ComputingLowPrecisionBackendOps {
+        fn device(&self) -> Device {
+            Device::Cpu
+        }
+        fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Ok(Self::gemm_f32(a, b))
+        }
+        fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Ok(Self::add_f32(a, b))
+        }
+        fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("test: mul".into()))
+        }
+        fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Ok(Self::relu_f32(a))
+        }
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("test: exp".into()))
+        }
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("test: tanh".into()))
+        }
+        fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            // 低精度 backward テスト（`linear_act_low_precision_backward_*`）
+            // が `Var::sum(None)` で loss をスカラー化するためだけに使う
+            // 全要素縮約の素朴な実装（`reduce_out_shape(shape, None) ==
+            // []` に合わせ shape `[]` の 1 要素 Tensor を返す）。軸指定版
+            // （`dim.is_some()`）は本テストでは未使用のため未実装のまま。
+            match dim {
+                None => {
+                    let data = a.as_slice().expect("test: a must be contiguous");
+                    let total: f32 = data.iter().sum();
+                    Tensor::new(vec![total], &[]).map_err(BackendError::ShapeMismatch)
+                }
+                Some(_) => Err(BackendError::Unsupported("test: sum(dim)".into())),
+            }
+        }
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("test: max".into()))
+        }
+        fn typed_ops_f16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<f16>> {
+            Some(self)
+        }
+        fn typed_ops_bf16(&self) -> Option<&dyn fandhe_ai_tensor_core::TypedOps<bf16>> {
+            Some(self)
+        }
+    }
+
+    impl fandhe_ai_tensor_core::TypedOps<f16> for ComputingLowPrecisionBackendOps {
+        fn gemm(&self, a: &Tensor<f16>, b: &Tensor<f16>) -> Result<Tensor<f16>, BackendError> {
+            Ok(round_f16(&Self::gemm_f32(&upcast_f16(a), &upcast_f16(b))))
+        }
+        fn add(&self, a: &Tensor<f16>, b: &Tensor<f16>) -> Result<Tensor<f16>, BackendError> {
+            Ok(round_f16(&Self::add_f32(&upcast_f16(a), &upcast_f16(b))))
+        }
+        fn mul(&self, _a: &Tensor<f16>, _b: &Tensor<f16>) -> Result<Tensor<f16>, BackendError> {
+            Err(BackendError::Unsupported("test: mul".into()))
+        }
+        fn relu(&self, a: &Tensor<f16>) -> Result<Tensor<f16>, BackendError> {
+            Ok(round_f16(&Self::relu_f32(&upcast_f16(a))))
+        }
+        fn exp(&self, _a: &Tensor<f16>) -> Result<Tensor<f16>, BackendError> {
+            Err(BackendError::Unsupported("test: exp".into()))
+        }
+        fn tanh(&self, _a: &Tensor<f16>) -> Result<Tensor<f16>, BackendError> {
+            Err(BackendError::Unsupported("test: tanh".into()))
+        }
+        fn sum(&self, _a: &Tensor<f16>, _dim: Option<usize>) -> Result<Tensor<f16>, BackendError> {
+            Err(BackendError::Unsupported("test: sum".into()))
+        }
+        fn max(&self, _a: &Tensor<f16>, _dim: Option<usize>) -> Result<Tensor<f16>, BackendError> {
+            Err(BackendError::Unsupported("test: max".into()))
+        }
+    }
+
+    impl fandhe_ai_tensor_core::TypedOps<bf16> for ComputingLowPrecisionBackendOps {
+        fn gemm(&self, a: &Tensor<bf16>, b: &Tensor<bf16>) -> Result<Tensor<bf16>, BackendError> {
+            Ok(round_bf16(&Self::gemm_f32(
+                &upcast_bf16(a),
+                &upcast_bf16(b),
+            )))
+        }
+        fn add(&self, a: &Tensor<bf16>, b: &Tensor<bf16>) -> Result<Tensor<bf16>, BackendError> {
+            Ok(round_bf16(&Self::add_f32(&upcast_bf16(a), &upcast_bf16(b))))
+        }
+        fn mul(&self, _a: &Tensor<bf16>, _b: &Tensor<bf16>) -> Result<Tensor<bf16>, BackendError> {
+            Err(BackendError::Unsupported("test: mul".into()))
+        }
+        fn relu(&self, a: &Tensor<bf16>) -> Result<Tensor<bf16>, BackendError> {
+            Ok(round_bf16(&Self::relu_f32(&upcast_bf16(a))))
+        }
+        fn exp(&self, _a: &Tensor<bf16>) -> Result<Tensor<bf16>, BackendError> {
+            Err(BackendError::Unsupported("test: exp".into()))
+        }
+        fn tanh(&self, _a: &Tensor<bf16>) -> Result<Tensor<bf16>, BackendError> {
+            Err(BackendError::Unsupported("test: tanh".into()))
+        }
+        fn sum(
+            &self,
+            _a: &Tensor<bf16>,
+            _dim: Option<usize>,
+        ) -> Result<Tensor<bf16>, BackendError> {
+            Err(BackendError::Unsupported("test: sum".into()))
+        }
+        fn max(
+            &self,
+            _a: &Tensor<bf16>,
+            _dim: Option<usize>,
+        ) -> Result<Tensor<bf16>, BackendError> {
+            Err(BackendError::Unsupported("test: max".into()))
+        }
+    }
+
+    fn upcast_f16(t: &Tensor<f16>) -> Tensor<f32> {
+        let data: Vec<f32> = t
+            .as_slice()
+            .expect("test: contiguous")
+            .iter()
+            .map(|v| v.to_f32())
+            .collect();
+        Tensor::new(data, t.shape()).unwrap()
+    }
+    fn round_f16(t: &Tensor<f32>) -> Tensor<f16> {
+        let data: Vec<f16> = t
+            .as_slice()
+            .expect("test: contiguous")
+            .iter()
+            .map(|&v| f16::from_f32(v))
+            .collect();
+        Tensor::new(data, t.shape()).unwrap()
+    }
+    fn upcast_bf16(t: &Tensor<bf16>) -> Tensor<f32> {
+        let data: Vec<f32> = t
+            .as_slice()
+            .expect("test: contiguous")
+            .iter()
+            .map(|v| v.to_f32())
+            .collect();
+        Tensor::new(data, t.shape()).unwrap()
+    }
+    fn round_bf16(t: &Tensor<f32>) -> Tensor<bf16> {
+        let data: Vec<bf16> = t
+            .as_slice()
+            .expect("test: contiguous")
+            .iter()
+            .map(|&v| bf16::from_f32(v))
+            .collect();
+        Tensor::new(data, t.shape()).unwrap()
+    }
+
+    /// forward（F16・bias・ReLU あり）が `TypedOps<f16>` の丸め契約
+    /// （`downcast → gemm → add → relu → upcast`。各演算後に f16 へ
+    /// 丸める）と bit 完全一致することを検証する。`x`／`w`／`bias` は
+    /// f16 で厳密表現できない値（0.1・0.3 等）を含み、丸めが実際に
+    /// パイプライン全体で適用されることを確認する。
+    #[test]
+    fn linear_act_low_precision_f16_forward_matches_rounding_oracle() {
+        let tape = Tape::new_with_ops(Box::new(ComputingLowPrecisionBackendOps));
+        let x_data = Tensor::new(vec![0.1f32, 0.2, -0.3, 0.4], &[2, 2]).unwrap();
+        let w_data = Tensor::new(vec![0.3f32, 0.7, -0.5, 0.6], &[2, 2]).unwrap();
+        let bias_data = Tensor::new(vec![0.05f32, -0.02], &[2]).unwrap();
+
+        let x = tape.var(&x_data);
+        let w = tape.var(&w_data);
+        let bias = tape.var(&bias_data);
+
+        let out = x
+            .linear_act_low_precision(
+                &w,
+                Some(&bias),
+                Activation::Relu,
+                fandhe_ai_tensor_core::ScalarDType::F16,
+            )
+            .expect("f16 forward は mock TypedOps<f16> で成功するはず");
+
+        // 独立オラクル: `linear_forward_typed`（`crates/tensor-core/src/
+        // low_precision.rs`）と同じ手順を、Var 経由ではなく直接
+        // `ComputingLowPrecisionBackendOps` の f32 ヘルパーと `half::f16`
+        // の丸めのみで再現する。
+        let x_f16 = round_f16(&x_data);
+        let w_f16 = round_f16(&w_data);
+        let bias_f16 = round_f16(&bias_data);
+        let y = round_f16(&ComputingLowPrecisionBackendOps::gemm_f32(
+            &upcast_f16(&x_f16),
+            &upcast_f16(&w_f16),
+        ));
+        let y = round_f16(&ComputingLowPrecisionBackendOps::add_f32(
+            &upcast_f16(&y),
+            &upcast_f16(&bias_f16),
+        ));
+        let y = round_f16(&ComputingLowPrecisionBackendOps::relu_f32(&upcast_f16(&y)));
+        let expected = upcast_f16(&y);
+
+        assert_eq!(
+            out.value().as_slice().unwrap(),
+            expected.as_slice().unwrap(),
+            "linear_act_low_precision(F16) の forward は TypedOps<f16> の \
+             丸め契約（各演算後に f16 へ丸める）と bit 完全一致するはず"
+        );
+    }
+
+    /// 上記 F16 版の Bf16 対（bias・活性化なしの単純ケース）。`typed_ops_bf16`
+    /// accessor 経由の成功経路と丸め契約を確認する。
+    #[test]
+    fn linear_act_low_precision_bf16_forward_matches_rounding_oracle() {
+        let tape = Tape::new_with_ops(Box::new(ComputingLowPrecisionBackendOps));
+        let x_data = Tensor::new(vec![0.1f32, 0.2, -0.3, 0.4], &[2, 2]).unwrap();
+        let w_data = Tensor::new(vec![0.3f32, 0.7, -0.5, 0.6], &[2, 2]).unwrap();
+
+        let x = tape.var(&x_data);
+        let w = tape.var(&w_data);
+
+        let out = x
+            .linear_act_low_precision(
+                &w,
+                None,
+                Activation::None,
+                fandhe_ai_tensor_core::ScalarDType::Bf16,
+            )
+            .expect("bf16 forward は mock TypedOps<bf16> で成功するはず");
+
+        let x_bf16 = round_bf16(&x_data);
+        let w_bf16 = round_bf16(&w_data);
+        let y = round_bf16(&ComputingLowPrecisionBackendOps::gemm_f32(
+            &upcast_bf16(&x_bf16),
+            &upcast_bf16(&w_bf16),
+        ));
+        let expected = upcast_bf16(&y);
+
+        assert_eq!(
+            out.value().as_slice().unwrap(),
+            expected.as_slice().unwrap(),
+            "linear_act_low_precision(Bf16) の forward は TypedOps<bf16> の \
+             丸め契約と bit 完全一致するはず"
+        );
+    }
+
+    /// backward の ReLU マスクが低精度 forward 出力の符号（`out_value >
+    /// 0.0`）で決まることを検証する（`grad::vjp` の `Op::LinearAct`
+    /// 分岐）。`x`／`w` は f16 で厳密表現できる値（0.5・1.0 は 2 の冪）を
+    /// 選び、丸めによる寄与を排除してマスク判定のみを分離して確認する。
+    #[test]
+    fn linear_act_low_precision_backward_relu_mask_uses_low_precision_output_sign() {
+        let tape = Tape::new_with_ops(Box::new(ComputingLowPrecisionBackendOps));
+        let x_data = Tensor::new(vec![0.5f32, 0.5, -0.5, -0.5], &[2, 2]).unwrap();
+        let w_data = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).unwrap();
+        let x = tape.var(&x_data);
+        let w = tape.var(&w_data);
+
+        let out = x
+            .linear_act_low_precision(
+                &w,
+                None,
+                Activation::Relu,
+                fandhe_ai_tensor_core::ScalarDType::F16,
+            )
+            .unwrap();
+        // 1 行目: 0.5+0.5=1.0（relu 通過）／2 行目: -0.5-0.5=-1.0 →
+        // relu(-1.0)=0.0（masked）。
+        assert_eq!(out.value().as_slice().unwrap(), &[1.0f32, 0.0f32]);
+
+        let loss = out.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let d_x = grads
+            .get(&x)
+            .unwrap()
+            .expect("x へ backward が到達するはず");
+        let d_w = grads
+            .get(&w)
+            .unwrap()
+            .expect("w へ backward が到達するはず");
+
+        // upstream（sum の勾配）は全要素 1.0 だが、relu マスクにより
+        // masked 行（2 行目。低精度 forward 出力が 0.0 だった行）の
+        // 寄与はゼロになる。
+        assert_eq!(
+            d_x.contiguous().as_slice().unwrap(),
+            &[1.0f32, 1.0, 0.0, 0.0],
+            "低精度 forward の ReLU マスクは backward 側の f32 VJP にも \
+             正しく伝播するはず（2 行目は masked=0）"
+        );
+        assert_eq!(
+            d_w.contiguous().as_slice().unwrap(),
+            &[0.5f32, 0.5],
+            "d_weight は masked 行（2 行目）を除いた寄与のみを持つはず \
+             （1 行目 x=[0.5,0.5] の寄与のみ）"
+        );
+    }
+
+    /// backward（`matmul_vjp`）が forward で丸めた低精度値ではなく f32
+    /// master 値（`x`／`weight` そのもの）を使うことを検証する。`0.1`
+    /// ／`0.2`／`0.3`／`0.4` は f16 で厳密表現できない値であり、backward
+    /// が f16 丸め後の値を使っていれば本テストの期待値とは異なる結果に
+    /// なる（`half::f16::from_f32(0.1).to_f32() != 0.1` を前提として
+    /// 明示検査する）。
+    #[test]
+    fn linear_act_low_precision_backward_uses_f32_master_values_not_rounded() {
+        assert_ne!(
+            f16::from_f32(0.1f32).to_f32(),
+            0.1f32,
+            "本テストの前提（0.1 は f16 で厳密表現できない）が崩れている"
+        );
+
+        let tape = Tape::new_with_ops(Box::new(ComputingLowPrecisionBackendOps));
+        let x_data = Tensor::new(vec![0.1f32, 0.2], &[1, 2]).unwrap();
+        let w_data = Tensor::new(vec![0.3f32, 0.4], &[2, 1]).unwrap();
+        let x = tape.var(&x_data);
+        let w = tape.var(&w_data);
+
+        let out = x
+            .linear_act_low_precision(
+                &w,
+                None,
+                Activation::None,
+                fandhe_ai_tensor_core::ScalarDType::F16,
+            )
+            .unwrap();
+        let loss = out.sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let d_x = grads
+            .get(&x)
+            .unwrap()
+            .expect("x へ backward が到達するはず");
+        let d_w = grads
+            .get(&w)
+            .unwrap()
+            .expect("w へ backward が到達するはず");
+
+        // upstream（sum の勾配）は 1.0（out は [1,1] スカラー）。
+        // d_input = g @ w^T = w の f32 master 値そのもの・
+        // d_weight = x^T @ g = x の f32 master 値そのもの（k=1 の自明な
+        // 乗算のため bit 完全一致で検証できる）。
+        assert_eq!(
+            d_x.contiguous().as_slice().unwrap(),
+            &[0.3f32, 0.4],
+            "d_input は w の f32 master 値（丸め前）と bit 完全一致するはず"
+        );
+        assert_eq!(
+            d_w.contiguous().as_slice().unwrap(),
+            &[0.1f32, 0.2],
+            "d_weight は x の f32 master 値（丸め前）と bit 完全一致するはず"
         );
     }
 }

@@ -161,6 +161,7 @@
 mod attention;
 mod backward;
 pub mod compat;
+mod create_graph;
 mod custom;
 mod default_ops;
 mod einsum;
@@ -177,6 +178,13 @@ mod test_support;
 mod var;
 
 pub use backward::Gradients;
+// 子テープ方式の高階微分（`create_graph`。イシュー #1942・設計
+// `docs/autodiff-higher-order-grad-decision.md` §7〜§9）: `Tape::
+// backward_create_graph`（`impl Tape` ブロック内で定義。`create_graph.rs`
+// を参照）に加え、その戻り値型 `CreateGraphResult` を公開する。facade
+// へは再エクスポートしない（同 doc §9「facade」・#10 承認事項 5 は
+// 未承認のまま。内部クレート限定の機能）。
+pub use create_graph::CreateGraphResult;
 pub use custom::CustomFunction;
 pub use error::AutodiffError;
 pub use tape::{NodeId, Tape, TapeId};

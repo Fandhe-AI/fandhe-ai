@@ -1403,9 +1403,17 @@ pub(crate) fn row_ln_stats(x_row: &[f32], eps: f32, hidden: usize) -> (f64, f64)
 /// この順序へ揃えるか）は `backend-cpu::layer_norm` モジュール doc
 /// comment・同名関数の doc comment を正本とし、ここでは二重管理しない。
 ///
-/// [`row_ln_stats`] のみが使用する（[`row_rms_stats`] は二乗和のみで
-/// 相殺が生じないため対象外。`docs/norm-ops-design.md`）。
-fn warp_reduce_f64(hidden: usize, mut contribute: impl FnMut(usize, f64) -> f64) -> f64 {
+/// [`row_ln_stats`] に加え、[`crate::grad::rmsnorm_vjp_rows`]／
+/// [`crate::grad::layer_norm_vjp_rows`] の `dot`／`sum_dxhat`（VJP の
+/// 行内縮約。符号付き項の相殺が起こりうる）からも使う（イシュー
+/// #1950・PR #1995 codex-review P1 是正: `kernels_norm_backward.rs`
+/// の CUDA backward カーネルは同じレーンストライド＋butterfly 順序で
+/// これらを縮約するため、ホスト参照実装側をこの縮約順序へ揃えないと
+/// 極端な相殺入力〈例: `dy = [1e20, 1, -1e20, 0, ...]`〉で単純逐次和
+/// との差が REQ-2 統一複合判定〈相対誤差 1e-3 未満 または絶対誤差
+/// 1e-5 未満〉を外れる。[`row_rms_stats`] の二乗和〈符号なし項のみで
+/// 相殺が生じない〉は対象外のまま単純逐次和を維持する）。
+pub(crate) fn warp_reduce_f64(hidden: usize, mut contribute: impl FnMut(usize, f64) -> f64) -> f64 {
     const LANES: usize = 32;
     let mut lanes = [0.0f64; LANES];
     for (lane, slot) in lanes.iter_mut().enumerate() {
