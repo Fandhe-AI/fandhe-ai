@@ -1648,3 +1648,234 @@ fn amp_fit_types_are_reachable_via_facade() {
     // 65536.0`）を使う（`training.rs::AmpConfig::new` doc 参照）。
     assert_eq!(model.amp_loss_scale(), Some(65536.0));
 }
+
+// =====================================================================
+// nn::rnn 公開面（イシュー #1955）のガード。
+// `data_*` 3 点セット（`data_module_reexports_exactly_expected_
+// surface`／`data_module_is_pure_reexport`／`data_types_are_reachable_
+// via_facade_only`）を鏡写しにする。
+// =====================================================================
+
+fn nn_rnn_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/nn/rnn.rs")
+}
+
+fn nn_mod_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/nn/mod.rs")
+}
+
+/// `src/nn/rnn.rs` の `pub use` 行から `{...}` 内の識別子を抽出し、
+/// 昇格元公開面（`fandhe_ai_autodiff::nn`）と完全一致（過不足とも
+/// fail）することを固定する（`data_module_reexports_exactly_expected_
+/// surface` と同型の検査）。
+#[test]
+fn nn_rnn_module_reexports_exactly_expected_surface() {
+    let path = nn_rnn_rs_path();
+    let content = read_to_string_or_panic(&path);
+
+    let allowed_prefix = "pub use fandhe_ai_autodiff::nn::";
+
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut offending_lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("pub use") {
+            continue;
+        }
+        if !trimmed.starts_with(allowed_prefix) {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        }
+        let rest = &trimmed[allowed_prefix.len()..];
+        let Some(open) = rest.find('{') else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        let Some(close) = rest.find('}') else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        for ident in rest[open + 1..close].split(',') {
+            let ident = ident.trim();
+            if !ident.is_empty() {
+                found.insert(ident.to_string());
+            }
+        }
+    }
+
+    assert!(
+        offending_lines.is_empty(),
+        "src/nn/rnn.rs の pub use が昇格元公開面（fandhe_ai_autodiff::nn）以外の\
+         接頭辞を持つか、`{{...}}` 形式でない行を含む: {offending_lines:?}"
+    );
+
+    let expected: std::collections::BTreeSet<String> = [
+        "Gru",
+        "GruCellVars",
+        "Lstm",
+        "LstmCellVars",
+        "LstmSeqOutput",
+        "Rnn",
+        "RnnCellVars",
+        "RnnSeqOutput",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "src/nn/rnn.rs が再エクスポートする識別子が期待集合と一致しない\
+         （過不足いずれも不可。`forward_seq` の入出力に必要な型に限定する\
+         承認スコープの固定。`RnnCell`／`LstmCell`／`GruCell`・`Module` は\
+         意図して対象外）"
+    );
+}
+
+/// `src/nn/rnn.rs` が facade 独自の型・関数を定義しない純再エクスポート
+/// モジュールであることを固定する（`data_module_is_pure_reexport` と
+/// 同じ走査ロジック〈`scan_forbidden_pub_items`〉を再利用する）。
+/// `src/nn/mod.rs`（`pub mod rnn;` を含む）は対象外
+/// （`nn_mod_declares_only_rnn_submodule` が別途固定する）。
+#[test]
+fn nn_rnn_module_is_pure_reexport() {
+    let path = nn_rnn_rs_path();
+    let content = read_to_string_or_panic(&path);
+    let offending = scan_forbidden_pub_items(&content);
+    assert!(
+        offending.is_empty(),
+        "src/nn/rnn.rs が facade 独自の型・関数・impl・pub type/const/static/mod/union 等の\
+         公開宣言を定義している（純再エクスポートモジュールの契約違反）: {offending:?}"
+    );
+}
+
+/// `src/nn/mod.rs` の公開宣言が `pub mod rnn;` の 1 件のみであること
+/// を固定する（将来の無断拡大を fail-closed に検出する）。
+#[test]
+fn nn_mod_declares_only_rnn_submodule() {
+    let path = nn_mod_rs_path();
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+
+    let declared: Vec<&str> = cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("pub mod"))
+        .collect();
+
+    assert_eq!(
+        declared,
+        vec!["pub mod rnn;"],
+        "src/nn/mod.rs が宣言する pub mod が `pub mod rnn;` の 1 件と一致しない\
+         （nn 公開面の無断拡大を検知）: {declared:?}"
+    );
+}
+
+/// `fandhe_ai::nn::rnn` の全再エクスポート型が facade のみを通じて
+/// 到達可能であることのコンパイル時＋実行時固定（`data_types_are_
+/// reachable_via_facade_only` と同型。`fandhe_ai_autodiff` は
+/// import しない）。`Tape::rnn_forward_seq`／`lstm_forward_seq`／
+/// `gru_forward_seq`（本テストが呼ぶ橋渡し入口）も同時に固定する。
+#[test]
+fn nn_rnn_types_are_reachable_via_facade_only() {
+    use fandhe_ai::nn::rnn::{
+        Gru, GruCellVars, Lstm, LstmSeqOutput, Rnn, RnnCellVars, RnnSeqOutput,
+    };
+
+    let tape = fandhe_ai::tape();
+
+    // Rnn: forward_seq → backward → params 経由の勾配取得。
+    let rnn = Rnn::new(2, 3, true, 7).expect("test fixture: Rnn::new は有効値のはず");
+    // T=3, B=1, D=2（input_size=2 と一致させる）。
+    let x = fandhe_ai::Tensor::<f32>::new(vec![0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6], &[3usize, 1, 2])
+        .expect("test fixture: x tensor の構築に失敗");
+    let out: RnnSeqOutput<'_, RnnCellVars<'_>> = tape
+        .rnn_forward_seq(&rnn, &x, None)
+        .expect("test fixture: rnn_forward_seq は有効値のはず");
+    let loss = out
+        .outputs
+        .last()
+        .expect("test fixture: outputs は空でないはず")
+        .sum(None)
+        .expect("test fixture: sum は有効値のはず");
+    let grads = tape
+        .backward(&loss)
+        .expect("test fixture: backward は有効値のはず");
+    assert!(
+        grads
+            .get(&out.params.weight_ih)
+            .expect("test fixture: get は有効値のはず")
+            .is_some()
+    );
+
+    // Lstm: h0/c0 を明示して forward_seq → backward。
+    let lstm = Lstm::new(2, 3, true, 11).expect("test fixture: Lstm::new は有効値のはず");
+    let h0 = tape.var(
+        &fandhe_ai::Tensor::<f32>::zeros(&[1, 3]).expect("test fixture: zeros は有効値のはず"),
+    );
+    let c0 = tape.var(
+        &fandhe_ai::Tensor::<f32>::zeros(&[1, 3]).expect("test fixture: zeros は有効値のはず"),
+    );
+    let lstm_out: LstmSeqOutput<'_> = tape
+        .lstm_forward_seq(&lstm, &x, Some(&h0), Some(&c0))
+        .expect("test fixture: lstm_forward_seq は有効値のはず");
+    let lstm_loss = lstm_out
+        .c_n
+        .sum(None)
+        .expect("test fixture: sum は有効値のはず");
+    let lstm_grads = tape
+        .backward(&lstm_loss)
+        .expect("test fixture: backward は有効値のはず");
+    assert!(
+        lstm_grads
+            .get(&lstm_out.params.weight_hh)
+            .expect("test fixture: get は有効値のはず")
+            .is_some()
+    );
+    let _: &Option<fandhe_ai::Var<'_>> = &lstm_out.params.bias_ih;
+
+    // Gru: forward_seq → backward。
+    let gru = Gru::new(2, 3, true, 13).expect("test fixture: Gru::new は有効値のはず");
+    let gru_out: RnnSeqOutput<'_, GruCellVars<'_>> = tape
+        .gru_forward_seq(&gru, &x, None)
+        .expect("test fixture: gru_forward_seq は有効値のはず");
+    let gru_loss = gru_out
+        .h_n
+        .sum(None)
+        .expect("test fixture: sum は有効値のはず");
+    let gru_grads = tape
+        .backward(&gru_loss)
+        .expect("test fixture: backward は有効値のはず");
+    assert!(
+        gru_grads
+            .get(&gru_out.params.weight_ih)
+            .expect("test fixture: get は有効値のはず")
+            .is_some()
+    );
+    let _: &Option<fandhe_ai::Var<'_>> = &out.params.bias_hh;
+}
+
+/// `compat::Sequential` に `add_rnn`／`add_lstm`／`add_gru` が存在
+/// しないことを固定する（承認スコープ「`Sequential::add_*` は追加
+/// しない」の機械固定。`nn_rnn_module_reexports_exactly_expected_
+/// surface` が Cell 型・`Module` の非再エクスポートを別途固定する）。
+#[test]
+fn compat_sequential_does_not_expose_rnn_add_methods() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let forbidden = ["pub fn add_rnn", "pub fn add_lstm", "pub fn add_gru"];
+    let mut offenses = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        for needle in forbidden {
+            if cleaned.contains(needle) {
+                offenses.push(format!("{}: {needle}", path.display()));
+            }
+        }
+    });
+    assert!(
+        offenses.is_empty(),
+        "src/compat 配下に add_rnn／add_lstm／add_gru が見つかった\
+         （承認スコープ〈#1955〉は Sequential への追加を認めていない）: {offenses:?}"
+    );
+}

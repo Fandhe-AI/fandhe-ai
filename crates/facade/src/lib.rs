@@ -32,6 +32,17 @@
 //!    `BackendOps`／VJP を経由しないため REQ-12 と矛盾しない（詳細は
 //!    [`data`] モジュール doc）。
 //!
+//! 5. **nn 公開面**（[`nn::rnn`]。イシュー #1955）: RNN／LSTM／GRU の
+//!    Sequence レベル API（`Rnn`／`Lstm`／`Gru`。実体は
+//!    `fandhe_ai_autodiff::nn`。#1647）を `fandhe_ai::nn::rnn` の単一
+//!    入口へ純再エクスポートする。`forward_seq` が生 `Tape` を引数に
+//!    取るため facade 利用者からは直接呼べず、`impl Tape` に追加した
+//!    `rnn_forward_seq`／`lstm_forward_seq`／`gru_forward_seq`（`&self.0`
+//!    を渡すだけの薄い委譲。`step_device_param_store` 等と同型）が
+//!    入口となる。値型の再エクスポート＋薄い委譲のみで任意
+//!    `BackendOps` 注入経路を新設しないため REQ-12 と矛盾しない
+//!    （詳細は [`nn::rnn`] モジュール doc）。
+//!
 //! # 公開面の設計（REQ-12: 任意 `BackendOps` 注入の公開 API を設けない）
 //!
 //! 利用者向けに公開するのは [`Device`] 識別子を受け取る 2 関数
@@ -106,6 +117,13 @@ pub mod optim;
 /// 再エクスポートする（詳細はモジュール doc・`docs/dataset-dataloader-
 /// design.md` 参照）。
 pub mod data;
+
+/// `nn` 公開面（イシュー #1955）。現時点は [`nn::rnn`]
+/// （`Rnn`／`Lstm`／`Gru` の Sequence レベル API の純再エクスポート）
+/// のみを提供する。`forward_seq` の呼び出しには [`Tape::rnn_forward_seq`]
+/// 等（本モジュール自体ではなく `impl Tape` の薄い委譲メソッド）を
+/// 使う（詳細は [`nn::rnn`] モジュール doc 参照）。
+pub mod nn;
 
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
@@ -410,6 +428,53 @@ impl Tape {
     /// doc comment を参照。
     pub fn transfer(&self, source: &Var<'_>) -> Result<Var<'_>, AutodiffError> {
         source.to_tape(&self.0)
+    }
+
+    /// [`fandhe_ai_autodiff::nn::Rnn::forward_seq`] への委譲入口
+    /// （イシュー #1955）。
+    ///
+    /// `Rnn::forward_seq` は生の `fandhe_ai_autodiff::Tape` を第 1
+    /// 引数に取るため、`facade::Tape`（本型。内部フィールド `0` は
+    /// `pub(crate)`）の利用者からは直接呼べない。本メソッドは
+    /// `&self.0` を渡すだけの薄い委譲であり、`BackendOps` を利用者向け
+    /// 公開面へ露出しない（`step_device_param_store` と同じ理由。
+    /// `crate::lib.rs` モジュール doc「公開面の設計」・REQ-12）。
+    /// `h0` 省略時はゼロ初期化される（`Rnn::forward_seq` の契約を
+    /// 参照）。
+    pub fn rnn_forward_seq<'t>(
+        &'t self,
+        rnn: &nn::rnn::Rnn,
+        x: &Tensor<f32>,
+        h0: Option<&Var<'t>>,
+    ) -> Result<nn::rnn::RnnSeqOutput<'t, nn::rnn::RnnCellVars<'t>>, AutodiffError> {
+        rnn.forward_seq(&self.0, x, h0)
+    }
+
+    /// [`fandhe_ai_autodiff::nn::Lstm::forward_seq`] への委譲入口
+    /// （イシュー #1955）。上記 [`Self::rnn_forward_seq`] と同じ理由の
+    /// 薄い委譲。`h0`／`c0` 省略時はいずれもゼロ初期化される
+    /// （`Lstm::forward_seq` の契約を参照）。
+    pub fn lstm_forward_seq<'t>(
+        &'t self,
+        lstm: &nn::rnn::Lstm,
+        x: &Tensor<f32>,
+        h0: Option<&Var<'t>>,
+        c0: Option<&Var<'t>>,
+    ) -> Result<nn::rnn::LstmSeqOutput<'t>, AutodiffError> {
+        lstm.forward_seq(&self.0, x, h0, c0)
+    }
+
+    /// [`fandhe_ai_autodiff::nn::Gru::forward_seq`] への委譲入口
+    /// （イシュー #1955）。上記 [`Self::rnn_forward_seq`] と同じ理由の
+    /// 薄い委譲。`h0` 省略時はゼロ初期化される（`Gru::forward_seq`
+    /// の契約を参照）。
+    pub fn gru_forward_seq<'t>(
+        &'t self,
+        gru: &nn::rnn::Gru,
+        x: &Tensor<f32>,
+        h0: Option<&Var<'t>>,
+    ) -> Result<nn::rnn::RnnSeqOutput<'t, nn::rnn::GruCellVars<'t>>, AutodiffError> {
+        gru.forward_seq(&self.0, x, h0)
     }
 }
 
