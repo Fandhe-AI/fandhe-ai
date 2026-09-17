@@ -244,7 +244,11 @@ fn interp_value_to_onnx(v: InterpValue) -> OnnxValue {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum OnnxError {
-    /// `from_path` でのファイル読み込み失敗。
+    /// ファイル I/O 失敗（[`OnnxModel::from_path`] での読み込み失敗、または
+    /// [`OnnxModel::to_path`] での書き込み失敗）。読み込み・書き込みを
+    /// 区別する専用 variant は設けず（薄いラッパー原則。`std::io::Error`
+    /// 自体は操作の別を保持しない）、[`fmt::Display`] 側で「I/O 失敗」と
+    /// 中立に表現する。
     Io(std::io::Error),
     /// protobuf デコード失敗（壊れたバイト列等）。`prost::DecodeError` は
     /// `Display` 文字列のみを保持する（`prost` 型を公開面に出さない）。
@@ -280,7 +284,7 @@ pub enum OnnxError {
 impl fmt::Display for OnnxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            OnnxError::Io(e) => write!(f, "ONNX ファイル読み込み失敗: {e}"),
+            OnnxError::Io(e) => write!(f, "ONNX ファイル I/O 失敗（読み込みまたは書き込み）: {e}"),
             OnnxError::Decode { message } => write!(f, "ONNX protobuf デコード失敗: {message}"),
             OnnxError::UnsupportedDataType {
                 tensor_name,
