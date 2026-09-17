@@ -99,10 +99,14 @@ cargo run -p fandhe-ai --example getting_started
 上記 6 クレートが crates.io 公開対象です（[`docs/crates-io-naming-decision.md`](docs/crates-io-naming-decision.md)）。
 ディレクトリ名（`crates/tensor-core` 等）はリネーム前のまま維持しており、
 `[package] name`（crates.io 公開名）のみ `fandhe-ai` prefix 付きへ変更しています。
+相互運用（ONNX／safetensors）を担う `fandhe-ai-onnx-interop`（`crates/onnx-interop`）は
+次回リリースサイクルから 7 クレート目として crates.io 公開対象に加わります
+（`fandhe-ai` からの再エクスポートは未提供のため、`fandhe-ai` 経由での利用は
+引き続きできません）。
 
-このほか、相互運用（`onnx-interop`）・自己修復ループ（`guardrail`・`self-repair`）・
-ベンチ計測（`bench-harness`）・ドキュメントサイト生成（`docs-site`）を担う非公開の
-内部クレートがあります。compat API のサポート境界の詳細は [`docs/compat-api-scope.md`](docs/compat-api-scope.md) を参照してください。
+このほか、自己修復ループ（`guardrail`・`self-repair`）・ベンチ計測（`bench-harness`）・
+ドキュメントサイト生成（`docs-site`）を担う非公開の内部クレートがあります。
+compat API のサポート境界の詳細は [`docs/compat-api-scope.md`](docs/compat-api-scope.md) を参照してください。
 
 ## バックエンド
 

@@ -13,7 +13,8 @@ autodiff・演算グラフ／カーネル融合機構・計算カーネル・バ
 |---|---|
 | `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`Device` → バックエンドの結線）・compat 公開面（`compat::array`／`compat::Sequential`）・`optim`・デバイス常駐更新経路を提供します |
 | `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal` | 内部クレート。直接利用はサポート対象外です |
-| `onnx-interop`・`guardrail`・`self-repair`・`bench-harness` | 相互運用・自己修復ループ・ベンチ計測を担う内部クレート |
+| `onnx-interop`（公開名 `fandhe-ai-onnx-interop`。次回リリースから crates.io 公開対象） | 相互運用（ONNX／safetensors）を担う内部クレート。`fandhe-ai` からの再エクスポートは未提供 |
+| `guardrail`・`self-repair`・`bench-harness` | 自己修復ループ・ベンチ計測を担う非公開の内部クレート |
 
 `fandhe-ai-tensor-core`／`fandhe-ai-autodiff`／`fandhe-ai-backend-*` の型・
 関数は Rust の可視性としては `pub` な箇所がありますが、サポート境界上は

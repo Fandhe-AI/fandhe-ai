@@ -109,3 +109,21 @@ package.version` 一括更新）方針の記録のみ。
   `crates/autodiff`・`crates/backend-cpu`・`crates/backend-cuda`・`crates/backend-metal`）
 - `.claude/rules/security.md`「自己修復ループ固有のガードレール」（命名確定という
   不可逆性の高い判断への準用）
+
+## 7 件目: `onnx-interop` → `fandhe-ai-onnx-interop`（イシュー #1963）
+
+上記 6 クレートの公開完了後、`onnx-interop`（ONNX import／export・safetensors
+相互運用。REQ-7）を 7 クレート目として crates.io 公開対象へ追加する選択肢が
+イシュー #1963 の承認コメントで **2026-09-17 にユーザー承認済み**。命名規則
+（`fandhe-ai` prefix 付与・ディレクトリ名 `crates/onnx-interop` は不変）を
+そのまま適用し `fandhe-ai-onnx-interop` とする。
+
+空き確認は本イシューの計画立案時に `GET https://crates.io/api/v1/crates/
+fandhe-ai-onnx-interop`（sparse index 経路。`https://index.crates.io/fa/nd/
+fandhe-ai-onnx-interop`）で再実測し、HTTP 404（未登録・空き）であることを
+確認した（2026-09-17）。crates.io の名前制約（ASCII 英数字・`-`・`_`、64 文字
+以内・19 文字）も満たす。
+
+rename・公開メタデータ整備の実装は #1963 自身が行う（`crates/onnx-interop/
+Cargo.toml`・README・LICENSE-* の追加。実際の `cargo publish` は次回リリース
+サイクルで `release-all.yml` を通じてユーザーが実行する）。

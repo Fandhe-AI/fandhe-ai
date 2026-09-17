@@ -688,8 +688,94 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
   挙動）。部分公開状態からの復旧は release.yml で未公開の残りクレートを
   1 クレートずつ実行する（9.4 節と同一方針）。
 
+## 13. 7 クレート目 `fandhe-ai-onnx-interop` の公開準備と検証記録（#1963）
+
+イシュー #1963 のユーザー承認（2026-09-17）を受け、`onnx-interop` を
+`fandhe-ai-onnx-interop` として公開対象へ追加した。本節時点では**公開準備の
+みで実 publish は未実施**（次回リリースサイクルで `release-all.yml` を通じて
+ユーザーが実行する）。
+
+### 13.1 依存グラフ上の位置づけ
+
+`fandhe-ai-onnx-interop` は `[dependencies]` に `fandhe-ai-tensor-core` のみを
+持ち、facade（`fandhe-ai`）は現時点で `fandhe-ai-onnx-interop` に依存しない
+（facade からの ONNX import／export・safetensors save／load のラッパーは
+未実装のまま段階 0。`crates/facade/tests/api_surface.rs` の否定ガードで
+機械固定）。よって 3 節のトポロジカル順は次のとおり更新される。
+
+```
+① fandhe-ai-tensor-core
+       │
+       ├──▶ ② fandhe-ai-autodiff / fandhe-ai-backend-cpu /
+       │       fandhe-ai-backend-cuda / fandhe-ai-backend-metal /
+       │       fandhe-ai-onnx-interop（順不同・facade は非依存）
+       │
+       └──▶ ③ fandhe-ai
+```
+
+2 節「`[dev-dependencies]` の公開クレート間依存」の対象箇所にも
+`onnx-interop ⇄ bench-harness`（非公開クレートへの dev-dep のため既存規則の
+まま version 非併記）に加え、`onnx-interop → fandhe-ai-autodiff`・
+`onnx-interop → fandhe-ai-backend-cpu`（いずれも片方向・循環なし）の 2 行が
+追加される。1 節・4 節「内部依存 `version` 併記箇所」は 9 → **10 箇所**へ増える
+（`fandhe-ai-onnx-interop` の `[dependencies].fandhe-ai-tensor-core`）。6 節
+「非公開クレート」の一覧は `guardrail`・`self-repair`・`bench-harness`・
+`docs-site` の 4 クレートへ変わる（`onnx-interop` が公開側へ移動したため）。
+
+### 13.2 rename・公開メタデータの内容
+
+`crates/onnx-interop/Cargo.toml` を 7 節までの公開クレート（`fandhe-ai-
+tensor-core` 等）と同型のフィールド構成（`name`・英語 `description`・
+`repository.workspace`・`readme = "README.md"`・`publish = true`・
+`keywords`／`categories`）へ整備し、`README.md`・`LICENSE-APACHE`・
+`LICENSE-MIT` を新規同梱した。`[dependencies].fandhe-ai-tensor-core` へ
+`version = "=0.9.0"` を併記し、`[dev-dependencies]`（`bench-harness`・
+`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`）は 2 節の strip 方針どおり
+version 非併記のまま維持した。
+
+### 13.3 検証記録（実測。2026-09-17）
+
+- `cargo package --list -p fandhe-ai-onnx-interop --locked`: `README.md`・
+  `LICENSE-APACHE`・`LICENSE-MIT`・`src/**`・`tests/**`（fixtures 含む）が
+  同梱され、意図しないファイルの混入なしを確認した。
+- 単一クレート `cargo publish -p fandhe-ai-onnx-interop --dry-run --locked`:
+  `git log v0.9.0..HEAD --oneline -- crates/onnx-interop/src` は本 rename
+  コミット自身（doc comment のみの変更）1 件のみで実質無変更（アルゴリズム
+  的な変更なし）であることを確認したうえで実行し、registry 版
+  `fandhe-ai-tensor-core 0.9.0` に対する verify ビルドが成功することを
+  実測確認した（Packaging → Verifying → `warning: aborting upload due to
+  dry run` まで成功）。
+- 7 パッケージ一括 `cargo publish --dry-run --locked -p fandhe-ai-tensor-core
+  -p fandhe-ai-autodiff -p fandhe-ai-backend-cpu -p fandhe-ai-backend-cuda
+  -p fandhe-ai-backend-metal -p fandhe-ai-onnx-interop -p fandhe-ai`
+  （`env.RELEASE_CRATES` と同一順）が Packaging → Verifying → dry-run 中断
+  まで全 7 件成功することを確認した。
+- `target/package/fandhe-ai-onnx-interop-0.9.0/Cargo.toml`（正規化済み
+  マニフェスト）で `[dev-dependencies]` の path-only 依存（`bench-harness`
+  等）が strip され、`fandhe-ai-tensor-core` が `version = "=0.9.0"` で
+  残ることを確認した。
+- `cargo deny --locked check advisories bans licenses sources`: `bans ok`
+  （`publish = true` 化後も `version` 併記により `wildcards = "deny"` に
+  抵触しないことの裏付け）を含め全項目 green。
+- `scripts/check-forbidden-deps.sh lock-all`: green（`onnx-interop` の
+  rename が framework-compare／oss-gemm-compare の専用契約検査へ影響しない
+  ことを確認）。
+
+`.github/workflows/release-all.yml` の `env.RELEASE_CRATES`・
+`.github/workflows/release.yml` の `crate` choice 入力にも
+`fandhe-ai-onnx-interop` を追加済み（`fandhe-ai-backend-metal` の後・
+`fandhe-ai` の前）。実際の `cargo publish`（`mode: publish`・environment
+承認）は次回リリースサイクルでユーザーが実行する。
+
 ## 変更履歴
 
+- 2026-09-17（#1963）: `onnx-interop` を `fandhe-ai-onnx-interop` として
+  7 クレート目の公開対象へ追加する公開準備を実施した（実 publish は未実施。
+  次回リリースサイクルでユーザーが実行）。13 節として rename・依存グラフ
+  上の位置づけ（1・2・4・6 節の 6 クレート時点の記述との差分）・公開前検証
+  実測を記録した（1〜9 節本文は当時の 6 クレート記述のまま不変。7 クレート
+  構成での差分は 13 節を正とする）。`.github/workflows/release-all.yml` の
+  `env.RELEASE_CRATES`・`release.yml` の `crate` choice 入力にも追加した。
 - 2026-09-17（v0.9.0 リリースサイクル）: 公開 6 クレートの `workspace.version` を
   0.8.0 → 0.9.0 へ lockstep バンプした（0.8.0 公開〈2026-09-09〉以降の 203
   コミット——#1570 ツリー〈spec REQ-9 Tier 1／2 の機能網羅〉・同期境界最適化
