@@ -333,7 +333,17 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
   （`rmsnorm_vjp_rows`／`layer_norm_vjp_rows`）へフォールバックする
   （`Op::MseLoss` 分岐と同型のフォールバック規律。それ以外のエラーは伝播
   しバックエンド戻り値の shape も検証する）。CPU・Metal はこの default を
-  オーバーライドしないため既存の挙動（ホスト VJP）は bit 完全一致で不変。
+  オーバーライドしないため引き続きホスト VJP（`rmsnorm_vjp_rows`／
+  `layer_norm_vjp_rows`）へフォールバックする経路自体は維持される。
+  **ただし「既存の挙動が bit 完全一致で不変」ではない**: 本 PR（#1995
+  codex-review P1 是正）は host／CUDA 間の縮約順序不一致を解消するため
+  `rmsnorm_vjp_rows`／`layer_norm_vjp_rows` 自体の `dot`／`sum_dxhat`
+  （符号付き項の行内総和）を先頭からの単純逐次和から GPU の butterfly
+  縮約順序（`eval::warp_reduce_f64`）へ変更しており、この変更はオーバー
+  ライドしない CPU・Metal 経路にもそのまま適用される。相殺入力
+  （`dy = [1e20, 1.0, -1e20, 0.0, ...]`）では従来 `dx[1] == 1.0` だった
+  結果が是正後は `dx[1] == 0.96875` になる（§10 の回帰テスト参照）ため、
+  CPU・Metal の数値結果は本 PR により変わりうる。
 - CUDA 実装は新設ファイル `crates/backend-cuda/src/{kernels_norm_backward,
   norm_backward}.rs`（`CudaNormBackward`）＋`context_cache::
   cached_norm_backward`＋`ops.rs::CudaBackendOps` オーバーライド 2 件。

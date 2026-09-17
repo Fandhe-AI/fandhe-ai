@@ -207,6 +207,43 @@ fn cpu_layer_norm_backward_reference(
     (dx, dw, db)
 }
 
+/// Linux 実行可能（CUDA 実機不要）: 本ファイルの `cpu_rmsnorm_backward_
+/// reference`／`cpu_layer_norm_backward_reference`（`warp_reduce_f64` 経由）
+/// が `crates/autodiff/src/grad.rs` の
+/// `rmsnorm_grad_dot_reduction_matches_gpu_butterfly_order_on_cancelling_input`／
+/// `layer_norm_grad_sum_dxhat_reduction_matches_gpu_butterfly_order_on_cancelling_input`
+/// と同一アルゴリズムであることを、同一の相殺入力・同一の期待値
+/// （`dx[1] == 0.96875f32`）で直接検証する。
+/// `norm_backward_cancelling_input_detects_reduction_order_regression`
+/// （実機必須）が「回帰を検出できる」前提としている CPU 参照値の正しさを、
+/// 実機なしでも担保する。
+#[test]
+fn cpu_reference_matches_host_vjp_butterfly_order_on_cancelling_input() {
+    let hidden = 32usize;
+    let mut dy = vec![0.0f32; hidden];
+    dy[0] = 1e20;
+    dy[1] = 1.0;
+    dy[2] = -1e20;
+
+    let rms_x = vec![1.0f32; hidden];
+    let (rms_dx, rms_dw) = cpu_rmsnorm_backward_reference(&rms_x, None, 0.0, 1, hidden, &dy);
+    assert!(rms_dw.is_none());
+    assert_eq!(rms_dx[1], 0.96875f32);
+    for &v in &rms_dx[3..] {
+        assert_eq!(v, -0.03125f32);
+    }
+
+    let ln_x = vec![0.0f32; hidden];
+    let (ln_dx, ln_dw, ln_db) =
+        cpu_layer_norm_backward_reference(&ln_x, None, false, 1.0, 1, hidden, &dy);
+    assert!(ln_dw.is_none());
+    assert!(ln_db.is_none());
+    assert_eq!(ln_dx[1], 0.96875f32);
+    for &v in &ln_dx[3..] {
+        assert_eq!(v, -0.03125f32);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assert_rmsnorm_backward_parity(
     nb: &CudaNormBackward,
@@ -515,6 +552,83 @@ fn norm_backward_numerical_stability_and_determinism() {
         )
         .expect("re-run must succeed");
     assert_eq!(ln_dx1, ln_dx2, "run-to-run bit 同一契約（決定性）");
+}
+
+/// 縮約順序不一致を実際に検出できる相殺入力での CPU-CUDA 突合（実機必須）。
+///
+/// PR #1995（codex-review P2 是正）: 上記
+/// `norm_backward_numerical_stability_and_determinism` が使う相殺入力
+/// `[1e30, 1.0, -1e30, 0.0]` は `rstd` が約 `1e-30` まで縮むため、`dx` の
+/// 差分も極小になり `assert_parity` の絶対誤差救済（1e-5 未満）で縮約順序が
+/// 一致していなくても素通りしてしまう（この入力では回帰を検出できない）。
+/// `crates/autodiff/src/grad.rs` の
+/// `rmsnorm_grad_dot_reduction_matches_gpu_butterfly_order_on_cancelling_input`／
+/// `layer_norm_grad_sum_dxhat_reduction_matches_gpu_butterfly_order_on_cancelling_input`
+/// と同一の入力（RMSNorm: `x=[1.0; 32]`・`eps=0.0`。LayerNorm:
+/// `x=[0.0; 32]`・`eps=1.0`。共通: `dy=[1e20, 1.0, -1e20, 0.0, ...]`）を
+/// 本ファイルの `warp_reduce_f64`／`cpu_*_backward_reference`（CUDA と同一の
+/// butterfly 縮約順序）へ通すと、host 側の `dx[1]` は厳密に
+/// `0.96875f32`・`dx[3..]` は `-0.03125f32` になる（先頭からの単純逐次和
+/// では `0.0`／`1.0` のまま）。CUDA 側がこの縮約順序不一致を起こせば
+/// `dx` の差分は `0.03125` 程度になり、絶対誤差救済閾値 `1e-5` を明確に
+/// 超えるため `assert_parity` が確実に fail する。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn norm_backward_cancelling_input_detects_reduction_order_regression() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let nb = CudaNormBackward::new(&device)
+        .expect("CudaNormBackward::new must succeed on CUDA-equipped test runner");
+    let hidden = 32usize;
+
+    let mut dy = vec![0.0f32; hidden];
+    dy[0] = 1e20;
+    dy[1] = 1.0;
+    dy[2] = -1e20;
+
+    // RMSNorm: x=[1.0; 32]・eps=0.0（rstd=1.0。#1950 回帰と同一の入力）。
+    let rms_x = vec![1.0f32; hidden];
+    let (rms_dx, rms_dw) = nb
+        .run_rmsnorm_backward_f32(&rms_x, None, &dy, 0.0, 1, hidden)
+        .expect("cancelling-input rmsnorm backward must succeed");
+    let (cpu_rms_dx, cpu_rms_dw) =
+        cpu_rmsnorm_backward_reference(&rms_x, None, 0.0, 1, hidden, &dy);
+    assert_eq!(
+        cpu_rms_dx[1], 0.96875f32,
+        "CPU 参照値自体が butterfly 縮約の dot=1.0 を反映しているはず（回帰の前提）"
+    );
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "rmsnorm_backward dx cancelling-input (hidden=32)",
+        &rms_dx,
+        &cpu_rms_dx,
+    );
+    assert_eq!(rms_dw, cpu_rms_dw, "weight なし: dw は両側とも None のはず");
+
+    // LayerNorm: x=[0.0; 32]・eps=1.0（xhat=0 を全要素で恒等に満たす。
+    // #1950 回帰と同一の入力）。
+    let ln_x = vec![0.0f32; hidden];
+    let (ln_dx, ln_dw, ln_db) = nb
+        .run_layer_norm_backward_f32(
+            &ln_x,
+            None,
+            false,
+            &dy,
+            1.0,
+            NormBackwardShape { rows: 1, hidden },
+        )
+        .expect("cancelling-input layer_norm backward must succeed");
+    let (cpu_ln_dx, cpu_ln_dw, cpu_ln_db) =
+        cpu_layer_norm_backward_reference(&ln_x, None, false, 1.0, 1, hidden, &dy);
+    assert_eq!(
+        cpu_ln_dx[1], 0.96875f32,
+        "CPU 参照値自体が butterfly 縮約の sum_dxhat=1.0 を反映しているはず（回帰の前提）"
+    );
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "layer_norm_backward dx cancelling-input (hidden=32)",
+        &ln_dx,
+        &cpu_ln_dx,
+    );
+    assert_eq!(ln_dw, cpu_ln_dw, "weight なし: dw は両側とも None のはず");
+    assert_eq!(ln_db, cpu_ln_db, "bias なし: db は両側とも None のはず");
 }
 
 // --- BackendOps::rmsnorm_backward／layer_norm_backward 独立エントリ ---
