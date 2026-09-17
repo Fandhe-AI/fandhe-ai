@@ -2538,14 +2538,21 @@ impl DeviceParamStore {
     /// 初回呼び出しで `kind`／`beta1`／`beta2`／`eps`／`weight_decay`・
     /// `AdamStoreState` を確定し、以後の呼び出しでの変更を拒否する
     /// （`lr` のみ可変。`AdamW::set_lr` と同じ意味論）。また、このストア
-    /// が既に `step()`（SGD。`self.step_count > 0 && self.adam_state.
-    /// is_none()`）で使われている場合は Adam 系への切替を拒否する
-    /// （逆方向——Adam 使用後に `step()` を呼ぶこと自体は `step()` 側を
-    /// 変更しない方針〈実装計画 §2.3〉のため、本メソッド側では検査
-    /// しない。`step()` は `self.velocity`／`self.step_count` のみを見て
-    /// 動作し、`adam_m`／`adam_v`／`adam_state` の存在を検査しないため、
-    /// 呼び出し自体は成功するが `m`／`v` は更新されない——SGD として
-    /// 独立に動作する）。
+    /// が一度でも `step()`（SGD。`self.sgd_used == true`）で使われた
+    /// ことがある場合は、以後の Adam 系呼び出しを `self.adam_state` の
+    /// 有無・内容に関わらず常に拒否する（codex-review・Cursor Bugbot
+    /// 指摘対応〈PR #2002 レビュー是正〉。Adam→SGD→Adam の順で呼び出す
+    /// と `adam_state` が既に確定済みのため素通りし、`step()` による
+    /// 更新後のパラメータへ SGD 実行前の古い `m`／`v`／`beta_pow_t` を
+    /// 再適用してしまう不整合を防ぐ）。逆方向——Adam 使用後に `step()`
+    /// を呼ぶこと自体は `step()` 側を変更しない方針〈実装計画 §2.3〉の
+    /// ため、本メソッド側では検査しない。`step()` は
+    /// `self.velocity`／`self.sgd_used` のみを見て動作し、`adam_m`／
+    /// `adam_v`／`adam_state` の存在を検査しないため、呼び出し自体は
+    /// 成功するが `m`／`v` は更新されない（SGD として独立に動作する）。
+    /// ただしこの `step()` 呼び出しにより `self.sgd_used` が `true` へ
+    /// 遷移するため、それ以降の Adam 系呼び出しは上記ガードにより
+    /// 一律で拒否される。
     fn step_adam_impl(
         &mut self,
         tape: &Tape,
@@ -2611,28 +2618,39 @@ impl DeviceParamStore {
 
         // 状態種別ガード（`lr` を除く固定ハイパーパラメータ・`kind` の
         // 途中変更を拒否）。
-        if let Some(state) = self.adam_state {
-            if state.kind != kind
-                || state.beta1 != beta1
-                || state.beta2 != beta2
-                || state.eps != eps
-                || state.weight_decay != weight_decay
-            {
-                return Err(BackendError::InvalidArgument(
-                    "DeviceParamStore::step_adam_impl: kind/beta1/beta2/eps/weight_decay changed \
-                     mid-training; reconstruct the store to change these settings (lr may still \
-                     be changed freely)"
-                        .to_string(),
-                ));
-            }
-        } else if self.step_count > 0 {
-            // このストアは既に `step()`（SGD）で使われている
-            // （`adam_state` 未確定のまま `step_count > 0`）。SGD と
-            // Adam 系の混在は意味論が定義されないため拒否する
-            // （実装計画 §2.3「状態種別ガード」）。
+        //
+        // SGD 使用履歴の検査（`self.sgd_used`）は `self.adam_state` の
+        // 有無に関わらず常に行う（codex-review・Cursor Bugbot 指摘対応
+        // 〈PR #2002 レビュー是正〉）。`self.adam_state.is_none()` の
+        // 場合限定で検査していた旧実装では、Adam→SGD→Adam の順で
+        // 呼び出すと `adam_state` が既に `Some` であるために本ガードを
+        // 素通りし、`step()`（SGD）による更新後のパラメータへ SGD 実行
+        // 前の古い `m`／`v`／`beta_pow_t`（`self.adam_state` に保持され
+        // たまま）を再適用してしまう（数値的に誤り）。`step()`（SGD）を
+        // 独立の SGD として成功させる設計自体は変更しない
+        // （`Self::step_adam` doc コメント「状態種別ガード」節）が、
+        // 一度でも `step()` が成功した（`self.sgd_used == true`）ストア
+        // に対する以後の Adam 系呼び出しは、ハイパーパラメータの一致・
+        // 不一致に関わらず一律で拒否し、stale な moment の再利用を
+        // 構造的に防ぐ。
+        if self.sgd_used {
             return Err(BackendError::InvalidArgument(
                 "DeviceParamStore::step_adam_impl: this store already has SGD step() history; \
                  reconstruct the store to switch to Adam/AdamW"
+                    .to_string(),
+            ));
+        }
+        if let Some(state) = self.adam_state
+            && (state.kind != kind
+                || state.beta1 != beta1
+                || state.beta2 != beta2
+                || state.eps != eps
+                || state.weight_decay != weight_decay)
+        {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::step_adam_impl: kind/beta1/beta2/eps/weight_decay changed \
+                 mid-training; reconstruct the store to change these settings (lr may still be \
+                 changed freely)"
                     .to_string(),
             ));
         }
@@ -5335,6 +5353,74 @@ mod tests {
         assert!(
             store.sgd_used,
             "SGD step() 成功後は sgd_used が true になるはず"
+        );
+    }
+
+    /// codex-review（P2）・Cursor Bugbot 指摘対応（PR #2002 レビュー
+    /// 是正・イシュー #1959）: Adam→SGD→Adam の順で呼び出した場合、
+    /// 最後の Adam 呼び出しは `self.adam_state` が既に `Some` であって
+    /// も `self.sgd_used == true` を理由に一律で拒否されなければ
+    /// ならない（SGD 実行前の古い `m`／`v`／`beta1_pow_t`／
+    /// `beta2_pow_t` を SGD 実行後のパラメータへ誤って再適用してしまう
+    /// 数値的な不整合を防ぐ）。上記
+    /// `step_after_step_adam_succeeds_as_independent_sgd_with_momentum`
+    /// と同じ手法で「Adam 成功後に SGD が成功した」状態を直接
+    /// シミュレートし、その後の `step_adam` 呼び出しが
+    /// `BackendError::InvalidArgument` で拒否されることを確認する。
+    #[test]
+    fn step_adam_after_sgd_is_rejected_even_with_existing_adam_state() {
+        let tape = simple_tape(None);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+        let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
+
+        // 「Adam が先に成功し、その後 SGD が独立の SGD として成功した」
+        // 状態を直接シミュレートする（`adam_state` は `Some` のまま・
+        // `sgd_used` は SGD 成功時に `true` へ遷移する）。
+        store.adam_state = Some(AdamStoreState {
+            kind: AdamStepKind::Coupled,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.0,
+            beta1_pow_t: 0.9,
+            beta2_pow_t: 0.999,
+        });
+
+        let leaves = store.register_resident_params(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
+        store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
+        assert!(
+            store.sgd_used,
+            "SGD step() 成功後は sgd_used が true になるはず"
+        );
+        assert!(
+            store.adam_state.is_some(),
+            "SGD step() は adam_state に触れないため Some のまま残るはず"
+        );
+
+        // 以後の `step_adam`（Adam）呼び出しは `adam_state` が `Some`
+        // であっても sgd_used を理由に一律で拒否されなければならない。
+        let leaves2 = store.register_resident_params(&tape).unwrap();
+        let pred2 = store.linear_forward(&tape, &x, &leaves2[0], None).unwrap();
+        let loss2 = pred2.mse_loss(&target).unwrap();
+        let grads2 = store.backward(&tape, &loss2).unwrap();
+        let err = store
+            .step_adam(
+                &tape,
+                &grads2,
+                &AdamConfig {
+                    lr: 0.1,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidArgument(_)),
+            "SGD 使用歴後の step_adam は InvalidArgument で拒否されなければならない: {err:?}"
         );
     }
 
