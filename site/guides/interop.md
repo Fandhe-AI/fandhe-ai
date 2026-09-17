@@ -2,18 +2,20 @@
 
 ## サポート境界（現状の重要な制約）
 
-**ONNX import は `fandhe_ai::interop::onnx`（`OnnxModel`／`OnnxValue`／
-`OnnxError`）として、safetensors save／load は `fandhe_ai::interop::
-safetensors`（`LoadError`／`SaveError`／`load_safetensors_f32`／
-`load_safetensors_f32_from_bytes`／`require_keys`／`save_safetensors_f32`／
-`save_safetensors_f32_to_bytes`）として、いずれも `fandhe-ai` から
-公開されています。** ONNX export は現時点で公開されていません
+**ONNX import／export は `fandhe_ai::interop::onnx`（`OnnxModel`／
+`OnnxValue`／`OnnxError`・`OnnxModel::{from_bytes, from_path, run,
+to_bytes, to_path}`・`OnnxExportOptions`）として、safetensors save／load
+は `fandhe_ai::interop::safetensors`（`LoadError`／`SaveError`／
+`load_safetensors_f32`／`load_safetensors_f32_from_bytes`／
+`require_keys`／`save_safetensors_f32`／`save_safetensors_f32_to_bytes`）
+として、いずれも `fandhe-ai` から公開されています。** export は
+import 済みモデルの roundtrip export に限定されます（`compat::Sequential`
+／`nn` から ONNX グラフへの書き出しは未対応）
 （`onnx-interop` クレート。公開名 `fandhe-ai-onnx-interop`。依存解決の
 ための公開であり直接利用はサポート対象外）。`fandhe-ai` が唯一の
 サポートされる公開 API 面であるという原則（[API Reference](/api/)参照）
 に従うと、`onnx-interop` を直接 `use` する経路はサポート対象外の内部
-利用にあたります。ONNX export を利用者向けに公開する入口の新設は
-本ページのスコープ外です。
+利用にあたります。
 
 ### ONNX import の最小コード例
 
@@ -47,8 +49,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `half` クレートへ直接依存する必要があります。数値契約は
 「`abs_err/(|ref|+1e-6) <= 1e-3`」という ONNX 固有の判定式であり、
 [数値一致契約](/guides/numerical-parity/)のバックエンド間統一複合判定とは
-別指標です。以下は残りの設計解説です（ONNX export 部分は動くコード例を
-用意していません）。
+別指標です。以下は残りの設計解説です。
+
+### ONNX export の最小コード例
+
+```rust
+use fandhe_ai::interop::onnx::{OnnxExportOptions, OnnxModel};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = OnnxModel::from_path("model.onnx")?;
+    model.to_path("model_roundtrip.onnx", &OnnxExportOptions::default())?;
+    Ok(())
+}
+```
+
+以下の点に注意してください:
+
+- `value_info`（中間テンソルの型・形状情報）は常に空で書き出されます。
+  `fandhe-ai` 自身の `from_bytes`／`from_path` に対する roundtrip は bit
+  同一で保証しますが、`onnx.checker` 等の外部ツールでの厳密な妥当性
+  検証までは保証しません。
+- `OnnxExportOptions` の既定値は `ir_version=8`・`opset_version=17`
+  です。**import 時に元モデルの `opset_import`／`ir_version`／
+  `producer_name`／グラフ名は保持されない**ため、export 結果には
+  options の値が書き出されます。元モデルの opset と合わせる責任は
+  利用者側にあります。
+- allowlist（`interp` 対応 22 op・既定 domain）外のノードを含む
+  モデルは、`from_bytes` では構築できても `to_bytes`／`to_path` の
+  時点で `OnnxError::UnsupportedOp` により拒否されます。
 
 ### safetensors の最小コード例
 

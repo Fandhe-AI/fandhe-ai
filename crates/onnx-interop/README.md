@@ -10,17 +10,15 @@
 （composition root・compat 公開面）であり、本クレートはその内部実装として
 crates.io にも公開されています（依存解決のため）。
 
-ONNX import は `fandhe-ai::interop::onnx`（`OnnxModel`／`OnnxValue`／
-`OnnxError`）として `fandhe-ai` から公開済みです（イシュー #2017）。
-safetensors save／load も `fandhe-ai::interop::safetensors`
-（`LoadError`／`SaveError`／`load_safetensors_f32`／
-`load_safetensors_f32_from_bytes`／`require_keys`／
-`save_safetensors_f32`／`save_safetensors_f32_to_bytes`）として
-`fandhe-ai` から公開済みです（イシュー #2019）。ONNX export への
-再エクスポートは引き続き提供されていません（facade 公開面の拡張は
-別途ユーザー承認が必要な段階 0 のまま。
-[`docs/facade-onnx-export-exposure-decision.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/facade-onnx-export-exposure-decision.md)
-参照）。
+ONNX import／export は `fandhe-ai::interop::onnx`（`OnnxModel`／
+`OnnxValue`／`OnnxError`・`OnnxModel::{from_bytes, from_path, run,
+to_bytes, to_path}`・`OnnxExportOptions`）として `fandhe-ai` から公開済み
+です（import はイシュー #2017・export はイシュー #2018。export は
+import 済みモデルの roundtrip 限定）。safetensors save／load も
+`fandhe-ai::interop::safetensors`（`LoadError`／`SaveError`／
+`load_safetensors_f32`／`load_safetensors_f32_from_bytes`／
+`require_keys`／`save_safetensors_f32`／`save_safetensors_f32_to_bytes`）
+として `fandhe-ai` から公開済みです（イシュー #2019）。
 
 本クレートは ONNX（protobuf）・safetensors という外部フォーマットの
 パーサーを含みます。信頼できない入力のパースは長さ・形状検証を先行させる

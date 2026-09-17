@@ -1547,8 +1547,9 @@ fn facade_sources_reference_onnx_interop_only_in_interop_module() {
 /// `src/interop/onnx.rs` に承認範囲外の公開アイテム（`pub struct`／
 /// `pub enum`／`pub fn`／`pub trait`／`pub type`／`pub const`／
 /// `pub static`／`pub mod`）が存在しないかを走査する。承認範囲は
-/// `interop::onnx::{OnnxModel, OnnxValue, OnnxError}` と
-/// `OnnxModel::{from_bytes, from_path, run}` の 6 件のみ。
+/// `interop::onnx::{OnnxModel, OnnxValue, OnnxError, OnnxExportOptions}`
+/// と `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path}` の 9
+/// 件のみ（イシュー #2017・#2018）。
 ///
 /// `interop_module_exposes_only_approved_onnx_surface` の従来実装は
 /// 期待する 6 文字列が「存在すること」の contains 検査のみで、
@@ -1576,20 +1577,29 @@ fn facade_sources_reference_onnx_interop_only_in_interop_module() {
 /// （`ModelProto` 等）の露出を見逃していた（codex-review 指摘 P2・
 /// #2024。本関数へ統合し単一の走査でシグネチャ全体を検査する）。
 fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
-    const ALLOWED_PUB_ITEMS: [(&str, &str); 6] = [
+    const ALLOWED_PUB_ITEMS: [(&str, &str); 9] = [
         ("struct", "OnnxModel"),
         ("enum", "OnnxValue"),
         ("enum", "OnnxError"),
+        ("struct", "OnnxExportOptions"),
         ("fn", "from_bytes"),
         ("fn", "from_path"),
         ("fn", "run"),
+        ("fn", "to_bytes"),
+        ("fn", "to_path"),
     ];
     const SCANNED_KINDS: [&str; 9] = [
         "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
     ];
     const QUALIFIER_KEYWORDS: [&str; 3] = ["async", "unsafe", "extern"];
-    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 4] =
-        ["ModelProto", "NodeProto", "prost::", "onnx::graph::Graph"];
+    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 6] = [
+        "ModelProto",
+        "NodeProto",
+        "prost::",
+        "onnx::graph::Graph",
+        "ExportError",
+        "onnx::export::",
+    ];
 
     let cleaned = strip_comments_and_literals(original);
     let len = cleaned.len();
@@ -1742,8 +1752,9 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
 }
 
 /// `scan_unapproved_onnx_pub_items` が承認範囲外の `pub fn`（例:
-/// `OnnxModel::to_bytes`）を検出することを確認する（codex-review 指摘
-/// P2・#2024 の回帰固定）。
+/// `OnnxModel::input_names`）を検出することを確認する（codex-review
+/// 指摘 P2・#2024 の回帰固定。`to_bytes` は #2018 で承認範囲へ追加された
+/// ため合成例からは差し替えている）。
 #[test]
 fn unapproved_onnx_pub_fn_is_flagged() {
     let synthetic = r#"
@@ -1756,15 +1767,15 @@ impl OnnxModel {
         unimplemented!()
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn input_names(&self) -> Vec<String> {
         unimplemented!()
     }
 }
 "#;
     let offenses = scan_unapproved_onnx_pub_items(synthetic);
     assert!(
-        offenses.iter().any(|e| e.contains("to_bytes")),
-        "承認範囲外の `pub fn to_bytes` が検出されなかった: {offenses:?}"
+        offenses.iter().any(|e| e.contains("input_names")),
+        "承認範囲外の `pub fn input_names` が検出されなかった: {offenses:?}"
     );
 }
 
@@ -1888,6 +1899,62 @@ impl OnnxModel {
     );
 }
 
+/// `scan_unapproved_onnx_pub_items` が承認範囲 9 件（`OnnxModel`／
+/// `OnnxValue`／`OnnxError`／`OnnxExportOptions` の型定義 4 件と
+/// `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path}` の
+/// メソッド 5 件）をすべて含む合成ソースに対してオフェンス 0 件を返す
+/// ことを確認する（空虚 pass 防止。承認範囲の拡張〈#2018〉自体が正しく
+/// 反映されていることの正例テスト）。
+#[test]
+fn approved_onnx_surface_yields_no_offenses() {
+    let synthetic = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+impl OnnxModel {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, OnnxError> {
+        unimplemented!()
+    }
+
+    pub fn from_path(path: &str) -> Result<Self, OnnxError> {
+        unimplemented!()
+    }
+
+    pub fn run(&self) -> Result<(), OnnxError> {
+        unimplemented!()
+    }
+
+    pub fn to_bytes(&self, options: &OnnxExportOptions) -> Result<Vec<u8>, OnnxError> {
+        unimplemented!()
+    }
+
+    pub fn to_path(&self, path: &str, options: &OnnxExportOptions) -> Result<(), OnnxError> {
+        unimplemented!()
+    }
+}
+
+pub enum OnnxValue {
+    F32(()),
+}
+
+pub enum OnnxError {
+    Io(()),
+}
+
+pub struct OnnxExportOptions {
+    pub ir_version: i64,
+    pub opset_version: i64,
+}
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(
+        offenses.is_empty(),
+        "承認範囲 9 件のみの合成ソースでオフェンスが検出された（空虚 pass 防止\
+         テストの前提が崩れている）: {offenses:?}"
+    );
+}
+
 /// `src/interop/` の公開面が承認範囲（`interop::onnx::{OnnxModel,
 /// OnnxValue, OnnxError}` と `OnnxModel::{from_bytes, from_path, run}`）
 /// のみであることを固定する。`prost`・`onnx-interop` の内部型
@@ -1949,7 +2016,14 @@ fn interop_module_exposes_only_approved_onnx_surface() {
         if !trimmed.starts_with("pub ") && !trimmed.contains(" pub ") {
             continue;
         }
-        for forbidden in ["ModelProto", "NodeProto", "prost::", "onnx::graph::Graph"] {
+        for forbidden in [
+            "ModelProto",
+            "NodeProto",
+            "prost::",
+            "onnx::graph::Graph",
+            "ExportError",
+            "onnx::export::",
+        ] {
             if line.contains(forbidden) {
                 leaked_internal_types.push(format!("`{trimmed}` が {forbidden} を含む"));
             }
@@ -1966,9 +2040,12 @@ fn interop_module_exposes_only_approved_onnx_surface() {
         "pub struct OnnxModel",
         "pub enum OnnxValue",
         "pub enum OnnxError",
+        "pub struct OnnxExportOptions",
         "pub fn from_bytes",
         "pub fn from_path",
         "pub fn run",
+        "pub fn to_bytes",
+        "pub fn to_path",
     ] {
         assert!(
             onnx_rs_content.contains(expected),
@@ -1976,7 +2053,7 @@ fn interop_module_exposes_only_approved_onnx_surface() {
         );
     }
 
-    // 承認範囲外の追加公開アイテム（例: `pub fn to_bytes` 等）が
+    // 承認範囲外の追加公開アイテム（例: `pub fn input_names` 等）が
     // 紛れ込んでいないことを網羅的に固定する（codex-review 指摘 P2・
     // #2024。上記の contains 検査は期待シグネチャの存在確認のみで、
     // 承認外の追加 pub アイテムを拒否できていなかった）。
@@ -2011,6 +2088,41 @@ fn onnx_import_types_are_reachable_via_facade() {
     };
 
     let _value: Option<OnnxValue> = None;
+}
+
+/// `fandhe_ai::interop::onnx::{OnnxModel::to_bytes, OnnxModel::to_path,
+/// OnnxExportOptions}`（イシュー #2018）が facade から到達可能であること
+/// をコンパイル時に固定する（`onnx_import_types_are_reachable_via_facade`
+/// と同型）。既定値ドリフトガード（`ir_version=8`・`opset_version=17`。
+/// `docs/facade-onnx-export-exposure-decision.md` §4 承認事項 1）も併せて
+/// 固定する。
+#[test]
+fn onnx_export_types_are_reachable_via_facade() {
+    use fandhe_ai::interop::onnx::{OnnxError, OnnxExportOptions, OnnxModel};
+
+    let options = OnnxExportOptions::default();
+    assert_eq!(
+        options.ir_version, 8,
+        "test fixture: OnnxExportOptions の既定 ir_version は 8 のはず"
+    );
+    assert_eq!(
+        options.opset_version, 17,
+        "test fixture: OnnxExportOptions の既定 opset_version は 17 のはず"
+    );
+
+    // 未構築のモデルは扱えないため、`from_bytes` の失敗パスから
+    // `to_bytes`／`to_path` の型シグネチャのみをコンパイル時に固定する
+    // （`OnnxModel` インスタンスを要求しない静的な型検査）。
+    fn _to_bytes_signature(m: &OnnxModel, o: &OnnxExportOptions) -> Result<Vec<u8>, OnnxError> {
+        m.to_bytes(o)
+    }
+    fn _to_path_signature(
+        m: &OnnxModel,
+        path: &std::path::Path,
+        o: &OnnxExportOptions,
+    ) -> Result<(), OnnxError> {
+        m.to_path(path, o)
+    }
 }
 
 /// `src/interop/safetensors.rs`（イシュー #2019）専用の固定パス。

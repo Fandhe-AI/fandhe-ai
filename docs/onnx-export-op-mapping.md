@@ -1,16 +1,26 @@
 # ONNX export op マッピング（イシュー #1773）
 
 `onnx-interop` 内部（`crate::onnx::export_ops`）の export 側 op マッピング
-（`ExportOp` -> `NodeProto`）の対応表・契約を記録する。facade へは一切公開しない
-（`docs/compat-api-scope.md` 対象外・`onnx-interop` は crates.io 非公開クレート）。
+（`ExportOp` -> `NodeProto`）の対応表・契約を記録する。**本モジュール自体**
+（`ExportOp`／`ExportNode`／`to_node_proto` 等）は facade へ一切公開しない
+（`crates/facade/tests/api_surface.rs` が `ExportError`／`onnx::export::` の
+`pub` シグネチャへの露出を機械検査で固定）。ただし、本モジュールが担う
+allowlist fail-closed 検査（`check_exportable`）は #2018 で facade
+`OnnxModel::to_bytes`／`to_path`（`export::build_model_proto` 経由）から
+間接的に実行される（import 済みモデルの roundtrip export に限定。
+`compat::Sequential`／`nn` -> `ExportNode` 橋渡しは対象外のまま。
+`docs/compat-api-scope.md` §1.3・`docs/facade-onnx-export-exposure-
+decision.md` §14）。
 
 ## 0. スコープ境界
 
 - 本 issue の対象は「`interp.rs` が読む 22 op の逆方向（内部 op -> `NodeProto`）」
-  のみ。autodiff `Op`／`Tape` -> `ExportOp` の橋渡し・facade 公開は #1653 のスコープで、
-  facade 公開可否自体は #1775 が判断済み（現状は `onnx-interop` の crates.io 公開という
-  ユーザー承認未取得の前提により非公開のまま段階 0。close はしない。
-  `docs/facade-onnx-export-exposure-decision.md`）。
+  のみ。autodiff `Op`／`Tape` -> `ExportOp` の橋渡し（`compat::Sequential`／
+  `nn` -> `ExportNode`）は #1653 のスコープのまま対象外（#2018 でも実装しない）。
+  facade 公開可否自体は #1775 が判断済みで、#2018 で
+  `OnnxModel::to_bytes`／`to_path`（import 済みモデルの roundtrip export
+  ラッパー限定）として実装済み（`docs/facade-onnx-export-exposure-
+  decision.md` §14）。
 - import -> export -> import の総合 roundtrip・未対応 op を含むモデルの
   fail-closed 確認という総合テストは #1774 で実装済み（§6 参照）。本ドキュメント・
   実装の単体テストは op 単位の対称性検証に限定する。
@@ -87,8 +97,10 @@ import 側（`decode_tensor`）がエラーメッセージにしか使わない�
 ## 5. 対象外事項
 
 - autodiff `Op`／`Tape`／`Sequential` -> `ExportOp` の橋渡し（#1653。橋渡しの
-  配置候補は `docs/facade-onnx-export-exposure-decision.md` §3.2）・facade 公開
-  （#1775 が判断済み。publish 承認待ちの段階 0）
+  配置候補は `docs/facade-onnx-export-exposure-decision.md` §3.2。#2018 の
+  対象外のまま残る）。本モジュール自体（`ExportOp`／`ExportNode`）の
+  facade 再エクスポートは対象外のまま（`OnnxModel::to_bytes`／`to_path`
+  という薄いラッパー経由の間接実行のみ。#1775 が判断済み・#2018 で実装）
 - `value_info`／`TypeProto` 非出力による外部ツール（`onnx.checker`）妥当性
   （#1772 既知事項）
 - opset<13 の attr 形（`Squeeze`/`Unsqueeze` の `axes` 属性）での export・
@@ -137,4 +149,6 @@ ONNX_INTEROP_TRANSFORMER_ONNX=<path> \
 
 比較はすべて **bit 同一**の別軸契約であり、REQ-2 バックエンド間数値一致複合
 判定・REQ-7 事前固定判定式（`abs_err / (|ref| + 1e-6) <= 1e-3`）とは混同しない
-（tolerance は導入も変更もしていない）。facade への新規公開面はなし。
+（tolerance は導入も変更もしていない）。本モジュール自体への facade 新規
+公開面はなし（#2018 の facade 公開面は `OnnxModel::to_bytes`／`to_path`・
+`OnnxExportOptions` の 3 件のみで、`ExportOp`／`ExportNode` 等は含まない）。

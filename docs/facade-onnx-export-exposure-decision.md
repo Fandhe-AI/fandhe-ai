@@ -162,3 +162,47 @@ approved_onnx_surface` が `src/interop/onnx.rs` の `pub` シグネチャを
 実装は依然として §10 承認事項 2・3（facade ラッパー API 形状・
 `Sequential`／`nn` -> `ExportNode` 橋渡しの配置）のユーザー承認が前提の
 まま、後続イシュー（#2018）へ引き継ぐ。
+
+## 14. 追補（イシュー #2018・2026-09-17）: facade ラッパー実装完了
+
+§10 承認事項 2（facade ラッパー API 形状。export 側の `OnnxModel::
+to_bytes`／`to_path` 形状）は 2026-09-17 にイシュー本文・承認コメントで
+**承認済み**（API 形状: `OnnxModel::to_bytes`／`to_path` ＋
+`OnnxExportOptions`〈`ir_version` 既定 8・`opset_version` 既定 17〉）。
+**§10 承認事項 3（`Sequential`／`nn` -> `ExportNode` 橋渡し）は本 issue の
+対象外のまま**（本 issue は import 済みモデルの roundtrip export ラッパー
+に限定。橋渡しは別途承認が必要な起票候補として §6 に残る）。
+
+実装は `crates/facade/src/interop/onnx.rs` に追加した:
+
+- `OnnxExportOptions`（`#[non_exhaustive]`。`ir_version: i64`・
+  `opset_version: i64` の 2 フィールドのみ。`ExportOptions` の
+  `producer_name`／`graph_name`／`opset_domain` は公開せず内部既定値の
+  まま private ヘルパ `to_internal()` で補う）
+- `OnnxModel::to_bytes(&self, options: &OnnxExportOptions) ->
+  Result<Vec<u8>, OnnxError>`（`export::build_model_proto`〈allowlist
+  fail-closed 検査込み〉→ `proto::encode_model` への薄い委譲）
+- `OnnxModel::to_path(&self, path, options) -> Result<(), OnnxError>`
+  （`to_bytes` 完了後にのみ `std::fs::write`。export 失敗時にファイルを
+  作成・切り詰めない順序。既存ファイルは上書き）
+- `map_export_error(ExportError) -> OnnxError`（新規 `OnnxError`
+  variant は追加しない。`ExportError::UnsupportedOp` は既存
+  `OnnxError::UnsupportedOp { op_type }` へ写像し、非既定 domain の
+  場合は `op_type` を `"{domain}::{op_type}"` 形式にして情報を保持する。
+  それ以外の `ExportError` variant は `OnnxError::InvalidModel` へ写像）
+
+`crates/facade/tests/api_surface.rs` の承認範囲を 6 件 → 9 件（型定義 4
+件・メソッド 5 件）へ拡張し、正例テスト（`approved_onnx_surface_yields_
+no_offenses`）・負例テストの改名（`to_bytes` が承認済みになったため合成
+違反例を `input_names` へ差し替え）・`FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS`
+への `ExportError`／`onnx::export::` 追加・facade 単独の到達性テスト
+（`onnx_export_types_are_reachable_via_facade`）を追加した。
+
+正しさは `crates/facade/tests/interop_onnx_export.rs`（facade + std の
+み。roundtrip bit 完全一致・決定性・不動点・`to_path` バイト一致・
+allowlist 外 op の fail-closed 拒否〈手組み protobuf〉）と
+`crates/facade/tests/interop_onnx_internal_parity.rs`（facade +
+`fandhe_ai_onnx_interop` 両方 import。`to_bytes` が内部クレート直接
+呼び出しとバイト完全一致・`value_info` 空／`raw_data` 限定契約の確認・
+既定値ドリフトガード・domain 修飾 `UnsupportedOp` の確認）で検証済み。
+`Cargo.toml`／`Cargo.lock` は無変更（新規依存なし）。

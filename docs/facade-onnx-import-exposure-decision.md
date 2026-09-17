@@ -274,10 +274,13 @@ facade は `prost` へ直接依存せず（Cargo.toml に追加していない�
 
 ### 12.7 スコープ外（実装しない・issue は起票しない）
 
-- ONNX export（#2018）・`Sequential`／`nn` →
-  `ExportNode` 橋渡し・学習可能化・`BackendOps` 経由の GPU 実行化。
-  safetensors 側は #2019 で facade 公開が完了済み（本 issue とは別ファイル
-  `docs/facade-safetensors-exposure-decision.md` §11 参照）。
+- ONNX export（**#2018 で実装済み**。`OnnxModel::to_bytes`／`to_path`・
+  `docs/facade-onnx-export-exposure-decision.md` §14）は本 issue の
+  スコープ外だったが別 issue で公開済み。safetensors 側も #2019 で
+  facade 公開が完了済み（本 issue とは別ファイル
+  `docs/facade-safetensors-exposure-decision.md` §11 参照）。`Sequential`／
+  `nn` → `ExportNode` 橋渡し・学習可能化・`BackendOps` 経由の GPU 実行化は
+  引き続きスコープ外。
 - 入力総バイト数／要素数の明示上限導入（§7 A03 の懸念事項。値の決定に
   承認が必要なため見送り。既存の fail-closed 境界〈`build_graph` の長さ
   整合検査〉のみで運用）。

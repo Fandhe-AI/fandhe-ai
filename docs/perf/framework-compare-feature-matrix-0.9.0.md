@@ -104,3 +104,11 @@ $ git diff --stat v0.9.0..HEAD -- crates
 
 `crates/` 全体・`docs/spec/`・tolerance／baseline・依存関係・CI 設定・
 `docs/compat-api-scope.md`／`docs/compat-feature-gap.md` は変更していない。
+
+## 7. 追補（イシュー #2018・2026-09-17）
+
+本 doc は `v0.9.0` タグ時点のスナップショットのまま**不変**（§1〜§6 は
+再判定しない）。`v0.9.0` タグ以降、HEAD では相互運用行の一部
+（`OnnxModel::to_bytes`／`to_path`・`OnnxExportOptions`。#2018）が
+facade 公開済みとなった。次回のタグ基準再判定（#1938 系）で §3 相互運用
+行へ反映する。

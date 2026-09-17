@@ -101,10 +101,12 @@ cargo run -p fandhe-ai --example getting_started
 `[package] name`（crates.io 公開名）のみ `fandhe-ai` prefix 付きへ変更しています。
 相互運用（ONNX／safetensors）を担う `fandhe-ai-onnx-interop`（`crates/onnx-interop`）は
 次回リリースサイクルから 7 クレート目として crates.io 公開対象に加わります。
-ONNX import は `fandhe_ai::interop::onnx`（`OnnxModel`／`OnnxValue`／
-`OnnxError`）として `fandhe-ai` から公開済みです。ONNX export・safetensors
-save／load は引き続き `fandhe-ai` からの再エクスポートが未提供のため利用
-できません。
+ONNX import／export は `fandhe_ai::interop::onnx`（`OnnxModel`／
+`OnnxValue`／`OnnxError`・`OnnxModel::{from_bytes, from_path, run,
+to_bytes, to_path}`・`OnnxExportOptions`）として `fandhe-ai` から公開済み
+です（export は import 済みモデルの roundtrip 限定）。safetensors
+save／load は引き続き `fandhe-ai` からの再エクスポートが未提供のため
+利用できません。
 
 このほか、自己修復ループ（`guardrail`・`self-repair`）・ベンチ計測（`bench-harness`）・
 ドキュメントサイト生成（`docs-site`）を担う非公開の内部クレートがあります。

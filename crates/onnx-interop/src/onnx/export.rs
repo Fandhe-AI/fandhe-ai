@@ -19,14 +19,14 @@
 //!   から組み立てる（詳細対応表は `docs/onnx-export-op-mapping.md`）。
 //! - import -> export -> import の構造一致 roundtrip テスト・未対応 op の
 //!   fail-closed 確認は `tests/onnx_export_roundtrip.rs` で固定済み（#1774）。
-//! - facade 公開は #1775 が判断済み（方針としては公開〈薄いラッパー型〉を
-//!   推奨するが、facade は crates.io 公開クレートのため `onnx-interop` 自体の
-//!   crates.io 公開というユーザー承認未取得の別個の前提が要り、それまでは
-//!   非公開のまま段階 0。close はしない。
-//!   `docs/facade-onnx-export-exposure-decision.md`）。本モジュールは
-//!   `onnx-interop` 内部 API のみを提供し facade へは一切公開しない
-//!   （`onnx-interop` は crates.io 非公開クレート・`docs/compat-api-scope.md` の
-//!   対象外）。
+//! - facade 公開は #1775 で publish 承認取得後の段階 0 として整理し、
+//!   #2018 で `fandhe_ai::interop::onnx::{OnnxModel::to_bytes,
+//!   OnnxModel::to_path, OnnxExportOptions}` として実装済み（`docs/facade-
+//!   onnx-export-exposure-decision.md`。案 B・薄いラッパー型）。facade は
+//!   `build_model_proto` → `proto::encode_model` への委譲のみで、本
+//!   モジュール自体は非公開クレート `onnx-interop` 内に留まる（facade は
+//!   `crates/facade/src/interop/onnx.rs` の `pub use` で本モジュールの型
+//!   を再エクスポートしない）。
 //!
 //! ## `value_info` を常に空にする契約
 //!
