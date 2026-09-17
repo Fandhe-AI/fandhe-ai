@@ -504,6 +504,71 @@ impl<'t> Var<'t> {
                 weight: weight.id,
                 bias: bias.map(|b| b.id),
                 act,
+                compute_dtype: fandhe_ai_tensor_core::ScalarDType::F32,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// [`Self::linear_act`] の低精度版（イシュー #1960・親 #1626／
+    /// #1648）。`fandhe_ai_tensor_core::linear_forward_low_precision`
+    /// （`TypedOps<f16>`／`TypedOps<bf16>` 経由。CPU 昇格→降格ソフト
+    /// ウェア変換方式）へ forward 値計算のみを委譲する opt-in 経路。
+    /// `nn::linear::linear_forward_low_precision`（自由関数。
+    /// `LinearVars` へのフィールド追加〈破壊的変更〉を避けるための
+    /// 配置）の唯一の呼び出し元。
+    ///
+    /// `weight`／`bias`（f32 master 値）・backward（`grad::vjp` の
+    /// `Op::LinearAct` 分岐。常に f32）は [`Self::linear_act`] と完全に
+    /// 同一——低精度なのは forward の GEMM／bias 加算／activation の
+    /// 計算過程のみで、テープに記録する `Tensor<f32>` 値自体は既存
+    /// `LinearAct` と同じ f32 表現（`compute_dtype` フィールドで記録
+    /// 経路のみを区別する）。①クロステープ検査 → ②shape 検査 →
+    /// ③forward 値計算 → ④ノード記録の順序も [`Self::linear_act`] と
+    /// 同一（`Var::matmul` 以来の共通パターン）。
+    pub(crate) fn linear_act_low_precision(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        act: Activation,
+        dtype: fandhe_ai_tensor_core::ScalarDType,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(weight)?;
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+        let lhs_shape = self.shape();
+        let rhs_shape = weight.shape();
+        let out_shape = gemm_out_shape(&lhs_shape, &rhs_shape)?;
+        if let Some(b) = bias {
+            broadcast_shape(&out_shape, &b.shape())?;
+        }
+        let (lhs_val, rhs_val, bias_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let lhs_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let rhs_val = materialize_fallible(&nodes, self.tape.ops(), weight.id)?.clone();
+            let bias_val = match bias {
+                Some(b) => Some(materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone()),
+                None => None,
+            };
+            (lhs_val, rhs_val, bias_val)
+        };
+        let value = fandhe_ai_tensor_core::linear_forward_low_precision(
+            self.tape.ops(),
+            dtype,
+            &lhs_val,
+            &rhs_val,
+            bias_val.as_ref(),
+            act,
+        )?;
+        let id = self.tape.push_eager(
+            Op::LinearAct {
+                input: self.id,
+                weight: weight.id,
+                bias: bias.map(|b| b.id),
+                act,
+                compute_dtype: dtype,
             },
             value,
         );
@@ -5448,6 +5513,55 @@ mod linear_act_tests {
             composed.value().as_slice().unwrap(),
             "broadcast bias 経路は融合・非融合合成で bit 一致するはず"
         );
+    }
+
+    // `Op::LinearAct::compute_dtype`（イシュー #1960）: `linear_act`
+    // （既存 F32 記録経路）と `linear_act_low_precision`（opt-in 低精度
+    // 記録経路）が正しい `ScalarDType` を記録することを直接確認する。
+    // `compute_dtype` は VJP からは読まれない純粋な記録専用フィールド
+    // （`grad::vjp` の `Op::LinearAct` 分岐 doc 参照）のため、dead_code
+    // 回避の便宜的な用途ではなく「forward 経路の識別子として正しく
+    // 記録される」という本イシューの契約そのものを検証する。
+    #[test]
+    fn linear_act_records_f32_compute_dtype() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(vec![1.0, 2.0], &[1, 2]).unwrap());
+        let w = tape.var(&Tensor::new(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap());
+        let out = x.linear_act(&w, None, Activation::None).unwrap();
+        let nodes = tape.nodes.borrow();
+        match &nodes[out.id.0].op {
+            crate::tape::Op::LinearAct { compute_dtype, .. } => {
+                assert_eq!(*compute_dtype, fandhe_ai_tensor_core::ScalarDType::F32);
+            }
+            other => panic!("expected Op::LinearAct, got {other:?}"),
+        }
+    }
+
+    /// 低精度カーネル未実装のバックエンド（`Tape::new()` 既定の
+    /// naive 参照実装は `typed_ops_f16`／`typed_ops_bf16` accessor が
+    /// 既定 `None`）に対し、`linear_act_low_precision` が f32 へ静かに
+    /// フォールバックせず `AutodiffError::Backend(BackendError::
+    /// Unsupported(_))` を返すことを確認する（`.claude/rules/
+    /// security.md` A04 の fail-closed 方針）。
+    #[test]
+    fn linear_act_low_precision_without_typed_ops_returns_unsupported() {
+        let tape = Tape::new();
+        let x = tape.var(&Tensor::new(vec![1.0, 2.0], &[1, 2]).unwrap());
+        let w = tape.var(&Tensor::new(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap());
+        let err = x
+            .linear_act_low_precision(
+                &w,
+                None,
+                Activation::None,
+                fandhe_ai_tensor_core::ScalarDType::F16,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::AutodiffError::Backend(fandhe_ai_tensor_core::BackendError::Unsupported(
+                _
+            ))
+        ));
     }
 }
 

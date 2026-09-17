@@ -910,6 +910,13 @@ pub(crate) fn vjp(
             weight,
             bias,
             act,
+            // `compute_dtype`（イシュー #1960）は forward の計算精度
+            // 記録専用のフィールドであり、backward（VJP）の計算式自体は
+            // 常に f32（`docs/autodiff-low-precision-linear-design.md`
+            // 「backward は意図的に f32 のまま」）で `compute_dtype` を
+            // 見て分岐しない。ここで束縛するのは、未対応 `Activation`
+            // 拒否時の診断メッセージへ含めるため（下記 `format!`）。
+            compute_dtype,
         } => {
             let w_val = materialize_fallible(nodes, ops, weight)?;
             let x_val = materialize_fallible(nodes, ops, input)?;
@@ -932,8 +939,9 @@ pub(crate) fn vjp(
                 // （`.claude/rules/security.md` A08）。
                 _ => {
                     return Err(AutodiffError::InvalidArgument(format!(
-                        "grad::vjp: Op::LinearAct has an unsupported Activation variant \
-                         ({act:?}); the VJP mask is only defined for None/Relu"
+                        "grad::vjp: Op::LinearAct (compute_dtype={compute_dtype:?}) has an \
+                         unsupported Activation variant ({act:?}); the VJP mask is only \
+                         defined for None/Relu"
                     )));
                 }
             };
