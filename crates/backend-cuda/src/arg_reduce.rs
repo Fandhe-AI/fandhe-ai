@@ -31,7 +31,7 @@ use crate::kernels_arg_reduce;
 use crate::kernels_reduce::REDUCE_BLOCK_DIM;
 use crate::memory::readback;
 use crate::nvrtc::compile_ptx;
-use crate::reduce::{validate_axis_layout, validate_i32_bound};
+use crate::reduce::validate_axis_layout;
 
 /// 全軸縮約 1 段目の 1 チャンクが担当する最小要素数。値そのものは
 /// 性能チューニング対象外（実測なしで決めた既定値）で、正当性
@@ -46,6 +46,23 @@ const ARG_MIN_CHUNK: usize = 4096;
 /// （`arg_reduce.rs::run_argmax_all_f32` 等）が超過を防ぐわけではなく
 /// 単に起動ブロック数の目安として使う）。
 const ARG_MAX_CHUNKS: usize = (REDUCE_BLOCK_DIM as usize) * 16;
+
+/// `value` が `i32::MAX` に収まることを検証する（カーネル引数 `int` は
+/// C の 32bit 符号付き整数のため。`reduce.rs::validate_i32_bound` と
+/// 同じ理由の複製——モジュールごとに専用の検証関数を持つ既存方針
+/// 〈`scan.rs`／`gather_scatter.rs`〉を踏襲する）。値が上限を超える
+/// 場合は [`CudaError::ArgReduceSizeLimitExceeded`]（バックエンド固有
+/// サイズ上限の超過。`ops.rs` が `Unsupported` へ写像しホスト
+/// フォールバックへ委ねる。`reduce.rs` 側と共用する `InvalidReduceShape`
+/// 〈形状不正・`ops.rs` が `ShapeMismatch` へ写像する〉とは区別する）を
+/// 返す。
+fn validate_i32_bound(value: usize, name: &str) -> Result<i32, CudaError> {
+    i32::try_from(value).map_err(|_| CudaError::ArgReduceSizeLimitExceeded {
+        detail: format!(
+            "arg_reduce dimension must fit in i32 (kernel argument type): {name}={value}"
+        ),
+    })
+}
 
 /// 全軸縮約 1 段目の起動パラメータ（`chunk_len`, `num_chunks`）を
 /// 決定する純関数（`kernels_arg_reduce.rs` モジュール doc「全軸縮約の
@@ -289,6 +306,17 @@ impl CudaArgReduce {
         op: &'static str,
         func: &CudaFunction,
     ) -> Result<Vec<i32>, CudaError> {
+        // `outer`／`axis_len`／`inner` はカーネル引数 `int` としてそのまま
+        // 渡す値のため、`i32::MAX` 超過はここで先に `Unsupported` へ写像
+        // 可能な `ArgReduceSizeLimitExceeded` として検出する。以降の
+        // `validate_axis_layout`（`reduce.rs` と共用）は形状不一致・
+        // `checked_mul` オーバーフローという本来の「形状不正」検査へ
+        // 収束する（この 3 値は本チェックで既に `i32::MAX` 以下と
+        // 判明しているため、`validate_axis_layout` 内部で同じ 3 値に
+        // 対して行う `i32::MAX` 検査は再到達しない）。
+        validate_i32_bound(outer, "outer")?;
+        validate_i32_bound(axis_len, "axis_len")?;
+        validate_i32_bound(inner, "inner")?;
         let total_out = validate_axis_layout(a.len(), outer, axis_len, inner)?;
         if axis_len == 0 {
             if total_out > 0 {
@@ -334,6 +362,29 @@ impl CudaArgReduce {
 mod tests {
     use super::*;
     use fandhe_ai_tensor_core::Tensor;
+
+    // ------------------------------------------------------------------
+    // `validate_i32_bound` の分類検証（PR #2005 Cursor Bugbot 指摘の
+    // 回帰テスト。GPU 不要・巨大バッファは確保せず値そのものだけを
+    // 検証する）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn validate_i32_bound_accepts_i32_max() {
+        assert!(validate_i32_bound(i32::MAX as usize, "numel").is_ok());
+    }
+
+    /// `i32::MAX` を超える値は `ArgReduceSizeLimitExceeded`（`ops.rs::
+    /// map_reduce_error` が `Unsupported` へ写像しホストフォールバック
+    /// へ委ねる variant）として拒否され、`reduce.rs` と共用する
+    /// `InvalidReduceShape`（`ShapeMismatch` へ写像される真の形状不正）
+    /// とは区別されることを確認する。
+    #[test]
+    fn validate_i32_bound_rejects_exceeding_i32_max_as_size_limit() {
+        let err = validate_i32_bound(i32::MAX as usize + 1, "numel").unwrap_err();
+        assert!(matches!(err, CudaError::ArgReduceSizeLimitExceeded { .. }));
+        assert!(!matches!(err, CudaError::InvalidReduceShape { .. }));
+    }
 
     // ------------------------------------------------------------------
     // `arg_all_plan` の網羅性検証

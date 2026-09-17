@@ -1460,11 +1460,24 @@ enum ArgKind {
 /// CudaArgReduce`（イシュー #1948。`op: "argmax"`／`"argmin"`）もこの
 /// エラー写像をそのまま共用する（`CudaError::EmptyReduction` の `op`
 /// フィールドは呼び出し元が任意の文字列を渡せる汎用設計のため）。
+///
+/// [`CudaError::ArgReduceSizeLimitExceeded`]（`arg_reduce.rs` 専用。
+/// 全要素／単一軸いずれの縮約でもカーネル引数 `int` 上限〈`i32::MAX`〉
+/// を超過した実在しうる巨大テンソルの入力。PR #2005 の Cursor Bugbot
+/// 指摘の是正）**のみ** [`BackendError::Unsupported`] へ写像し、
+/// `fandhe_ai_autodiff::grad::argext_with_fallback` のホスト
+/// フォールバック（`eval::argmax`／`argmin`）へ委ねる
+/// （`map_scan_error`／`map_batch_norm_error` と同じ設計判断:
+/// 「形状不正」〈`InvalidReduceShape`〉と「このカーネルでは非対応」
+/// 〈サイズ上限超過〉を別 variant で区別し、後者のみホスト
+/// フォールバックへ流す）。`reduce::CudaReduce`（`sum`／`max`／`min`）
+/// 側はこの variant を生成しないため、本関数で扱っても安全。
 fn map_reduce_error(err: CudaError) -> BackendError {
     match err {
         CudaError::EmptyReduction { op } => {
             BackendError::KernelLaunchFailed(format!("empty reduction for op \"{op}\""))
         }
+        CudaError::ArgReduceSizeLimitExceeded { .. } => BackendError::Unsupported(err.to_string()),
         CudaError::InvalidReduceShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
@@ -5519,6 +5532,30 @@ mod tests {
         assert!(matches!(
             err,
             BackendError::KernelLaunchFailed(msg) if msg.contains("negative SM count")
+        ));
+    }
+
+    /// [`map_reduce_error`]: `arg_reduce.rs` 専用の
+    /// `CudaError::ArgReduceSizeLimitExceeded`（カーネル引数 `int` 上限
+    /// 超過。`arg_reduce.rs::validate_i32_bound` が返す）は
+    /// `BackendError::Unsupported` へ写像され、`argext_with_fallback`
+    /// のホストフォールバックへ委ねられることを固定する（PR #2005
+    /// Cursor Bugbot 指摘の回帰テスト。巨大バッファは確保せず形状
+    /// メタデータのみで検証する）。共用する `InvalidReduceShape`
+    /// （真の形状不正）は従来どおり `ShapeMismatch` へ写像される。
+    #[test]
+    fn map_reduce_error_treats_arg_reduce_size_limit_as_unsupported() {
+        assert!(matches!(
+            map_reduce_error(CudaError::ArgReduceSizeLimitExceeded {
+                detail: "numel=3000000000".into()
+            }),
+            BackendError::Unsupported(msg) if msg.contains("numel=3000000000")
+        ));
+        assert!(matches!(
+            map_reduce_error(CudaError::InvalidReduceShape {
+                detail: "outer * axis_len * inner overflow".into()
+            }),
+            BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         ));
     }
 
