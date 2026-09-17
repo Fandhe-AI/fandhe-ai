@@ -2362,6 +2362,25 @@ mod tests {
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
+    /// `fandhe_ai::set_cuda_tf32_gemm_enabled` が触れるプロセスグローバル
+    /// フラグ（`AtomicU8`。`fandhe_ai_backend_cuda::precision`）は本テスト
+    /// バイナリ内の全 `#[test]` 関数間で共有される。`cargo test`（既定の
+    /// マルチスレッド実行）へ `--include-ignored` を渡すと、`gemm_tf32_
+    /// cuda_smoke` がフラグを `true` にしている窓と、他のテスト（`--tf32`
+    /// 拒否条件検証・既定行検証・他の CUDA GEMM 実機 smoke テスト）が
+    /// 同一プロセス内で並行実行されうる。前者はフラグの読み取りに依存する
+    /// assertion が意図せず `true` を観測して flaky に失敗し、後者は
+    /// `--tf32` を渡していないにもかかわらず意図せず TF32 経路で実行され
+    /// うる。これを避けるため、フラグへ触れる／その状態に依存する全
+    /// テストが共有する排他ロック（`crates/facade/tests/cuda_tf32_gemm_
+    /// optin.rs::Tf32FlagGuard` と同型。RAII で保持し `Drop` の暗黙解放に
+    /// 任せる）を新設し、対象テストはその lock guard を保持している間だけ
+    /// 実行する（イシュー #1983 codex-review 指摘）。
+    fn tf32_flag_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// テスト間で衝突しない一時 JSONL パスを作る（pid + カウンタで一意化。
     /// 並行テスト実行時の読み取り／削除の混入を防ぐ）。
     fn temp_out_path(tag: &str) -> std::path::PathBuf {
@@ -3021,10 +3040,14 @@ mod tests {
     }
 
     /// 実機（CUDA）依存の smoke テスト（coding-rust.md「実機依存テストは
-    /// `#[ignore]` で分離」）。
+    /// `#[ignore]` で分離」）。`tf32_flag_test_lock()` を保持し、
+    /// `gemm_tf32_cuda_smoke` がプロセスグローバル TF32 フラグを一時的に
+    /// 有効化している窓と並行実行されて意図せず TF32 経路で走ることを
+    /// 防ぐ（codex-review 指摘。イシュー #1983）。
     #[test]
     #[ignore]
     fn gemm_reuse_phases_cuda_smoke() {
+        let _flag_lock = tf32_flag_test_lock();
         let out = temp_out_path("gemm-phases-cuda-smoke");
         let cli = Cli {
             task: "gemm".to_string(),
@@ -3056,7 +3079,13 @@ mod tests {
     /// ことを確認する。プロセスグローバルフラグ（`AtomicU8`）を汚さない
     /// よう、終了時に必ず `set_cuda_tf32_gemm_enabled(false)` へ戻す
     /// （`--include-ignored` で他テストと同一プロセス実行される場合の
-    /// 漏洩防止。panic 時も Drop で復元する）。
+    /// 漏洩防止。panic 時も Drop で復元する）。加えて `tf32_flag_test_
+    /// lock()` を関数全体で保持し、フラグを `true` にしている窓の間に
+    /// 他の CUDA 実機 smoke テスト（`gemm_reuse_phases_cuda_smoke` 等）や
+    /// フラグ状態を検証するテストが並行実行されて意図せず TF32 経路で
+    /// 走る／flaky に失敗することを防ぐ（codex-review 指摘。lock guard の
+    /// drop 順序は宣言と逆順のため、`_flag_lock` を `_guard` より先に
+    /// 宣言してフラグの原状復帰が完了した後にロックを解放する）。
     #[test]
     #[ignore]
     fn gemm_tf32_cuda_smoke() {
@@ -3066,6 +3095,7 @@ mod tests {
                 fandhe_ai::set_cuda_tf32_gemm_enabled(false);
             }
         }
+        let _flag_lock = tf32_flag_test_lock();
         let _guard = Tf32ResetGuard;
 
         for mode in ["fresh", "reuse"] {
@@ -3359,6 +3389,9 @@ mod tests {
     #[test]
     #[ignore]
     fn infer_reuse_and_phases_cuda_smoke() {
+        // `tf32_flag_test_lock()`: `gemm_tf32_cuda_smoke` の TF32 フラグ
+        // 有効化窓との並行実行を防ぐ（codex-review 指摘。イシュー #1983）。
+        let _flag_lock = tf32_flag_test_lock();
         let reuse_out = temp_out_path("infer-reuse-cuda-smoke");
         dispatch(&Cli {
             task: "infer".to_string(),
@@ -3503,6 +3536,11 @@ mod tests {
     /// （`gemm_bias_act`／学習経路は FP32 のままのため誤ラベル行を防ぐ）。
     #[test]
     fn tf32_flag_on_non_gemm_task_is_measure_error() {
+        // `tf32_flag_test_lock()`: `!cuda_tf32_gemm_enabled()` の
+        // assertion が `gemm_tf32_cuda_smoke` のフラグ有効化窓と並行実行
+        // されて flaky に失敗することを防ぐ（codex-review 指摘。
+        // イシュー #1983）。
+        let _flag_lock = tf32_flag_test_lock();
         for task in ["train", "infer"] {
             let cli = tf32_test_cli(task, "cuda", "fresh");
             let err =
@@ -3521,6 +3559,8 @@ mod tests {
     /// 以外では MEASURE_ERROR で拒否する。
     #[test]
     fn tf32_flag_on_non_cuda_device_is_measure_error() {
+        // `tf32_flag_test_lock()`: 同上（イシュー #1983 codex-review 指摘）。
+        let _flag_lock = tf32_flag_test_lock();
         for device in ["cpu", "metal"] {
             let cli = tf32_test_cli("gemm", device, "fresh");
             let err =
@@ -3536,6 +3576,8 @@ mod tests {
     /// ないため MEASURE_ERROR で拒否する。
     #[test]
     fn tf32_flag_with_phases_is_measure_error() {
+        // `tf32_flag_test_lock()`: 同上（イシュー #1983 codex-review 指摘）。
+        let _flag_lock = tf32_flag_test_lock();
         let mut cli = tf32_test_cli("gemm", "cuda", "fresh");
         cli.phases = true;
         let err = validate_tf32_flag(&cli).expect_err("--tf32 --phases must be rejected");
@@ -3550,6 +3592,8 @@ mod tests {
     /// 安全側で MEASURE_ERROR とする。
     #[test]
     fn tf32_flag_with_device_checksum_is_measure_error() {
+        // `tf32_flag_test_lock()`: 同上（イシュー #1983 codex-review 指摘）。
+        let _flag_lock = tf32_flag_test_lock();
         let mut cli = tf32_test_cli("gemm", "cuda", "fresh");
         cli.device_checksum = true;
         let err = validate_tf32_flag(&cli).expect_err("--tf32 --device-checksum must be rejected");
@@ -3564,6 +3608,8 @@ mod tests {
     /// MEASURE_ERROR とする。
     #[test]
     fn tf32_flag_with_managed_or_pinned_h2d_is_measure_error() {
+        // `tf32_flag_test_lock()`: 同上（イシュー #1983 codex-review 指摘）。
+        let _flag_lock = tf32_flag_test_lock();
         for (managed, pinned_h2d) in [(true, false), (false, true)] {
             let mut cli = tf32_test_cli("gemm", "cuda", "fresh");
             cli.managed = managed;
@@ -3593,6 +3639,11 @@ mod tests {
     /// 出力される）、結線前と bit 同一のままであることを固定する。
     #[test]
     fn run_gemm_default_row_omits_tf32_key_and_leaves_flag_off() {
+        // `tf32_flag_test_lock()`: 末尾の `!cuda_tf32_gemm_enabled()`
+        // assertion が `gemm_tf32_cuda_smoke` のフラグ有効化窓と並行実行
+        // されて flaky に失敗することを防ぐ（codex-review 指摘。
+        // イシュー #1983）。
+        let _flag_lock = tf32_flag_test_lock();
         let out = temp_out_path("tf32-default-omitted");
         let cli = Cli {
             task: "gemm".to_string(),
@@ -4022,6 +4073,9 @@ mod tests {
     #[test]
     #[ignore]
     fn train_phases_cuda_smoke() {
+        // `tf32_flag_test_lock()`: `gemm_tf32_cuda_smoke` の TF32 フラグ
+        // 有効化窓との並行実行を防ぐ（codex-review 指摘。イシュー #1983）。
+        let _flag_lock = tf32_flag_test_lock();
         for mode in ["fresh", "reuse"] {
             let out = temp_out_path(&format!("phases-cuda-smoke-{mode}"));
             let cli = Cli {
