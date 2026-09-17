@@ -2972,9 +2972,12 @@ pub trait BackendOps {
     /// [`Self::rmsnorm`] の逆伝播（イシュー #1950。`fandhe_ai_autodiff::
     /// grad::vjp` の `Op::RmsNorm` 分岐から呼ばれる）。
     ///
-    /// `x`／`dy` は forward と同じ `[rows, hidden]`（[`crate::ops_shape::
-    /// row_norm_layout`] 導出）に平坦化済みのテンソルであることを呼び出し元が
-    /// 保証する。`weight` は forward に渡した値と同一のもの（呼び出し元が
+    /// `x`／`dy` は forward（[`Self::rmsnorm`]）と同じ任意 shape（呼び出し元
+    /// が `contiguous()` を適用済みではあるが `[rows, hidden]` へ reshape は
+    /// しない）で渡される。実装は [`Self::rmsnorm`] と同じく
+    /// [`crate::ops_shape::row_norm_layout`] で `x.shape()` から
+    /// `(rows, hidden)` を自ら導出する契約とする（rank 1／rank 3 以上の入力
+    /// も受理する）。`weight` は forward に渡した値と同一のもの（呼び出し元が
     /// `input`／`weight` ノードを実体化し直して渡す）。
     ///
     /// 戻り値は `(dx, dw)`。`dx.shape() == x.shape()` を常に満たす。`dw` は
@@ -3011,8 +3014,9 @@ pub trait BackendOps {
 
     /// [`Self::layer_norm`] の逆伝播（イシュー #1950。`fandhe_ai_autodiff::
     /// grad::vjp` の `Op::LayerNorm` 分岐から呼ばれる）。[`Self::
-    /// rmsnorm_backward`] と同じ入力契約（`x`／`dy` は `[rows, hidden]`
-    /// 平坦化済み・`weight` は forward と同一値）。
+    /// rmsnorm_backward`] と同じ入力契約（`x`／`dy` は forward と同じ任意
+    /// shape のまま渡され、実装が [`crate::ops_shape::row_norm_layout`] で
+    /// `(rows, hidden)` を自ら導出する。`weight` は forward と同一値）。
     ///
     /// `has_bias`（forward で `bias` が `Some` だったか。`weight` の有無とは
     /// 独立）は `db` を計算するかどうかを決める。`bias` の実データは backward

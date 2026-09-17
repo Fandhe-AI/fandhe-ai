@@ -443,6 +443,14 @@ fn norm_backward_zero_element_contract() {
 }
 
 /// 相殺入力・NaN 混入・run-to-run 決定性（実機必須）。
+///
+/// PR #1995（codex-review P2 是正）: 従来は有限性・run-to-run 決定性のみを
+/// 検証しており、本 PR で修正した host／CUDA 間の縮約順序不一致（相殺
+/// 入力での誤差）を検出できていなかった。`assert_rmsnorm_backward_parity`／
+/// `assert_layer_norm_backward_parity`（`cpu_*_backward_reference` との
+/// `assert_parity` REQ-2 統一複合判定）と同じ相殺入力
+/// `[1e30, 1.0, -1e30, 0.0]` に対して CPU 参照値との数値一致を確認する
+/// （bit 一致は主張しない。ファイル冒頭 doc comment 参照）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn norm_backward_numerical_stability_and_determinism() {
@@ -453,18 +461,28 @@ fn norm_backward_numerical_stability_and_determinism() {
     // 相殺入力（REQ-2 判定。bit 一致は主張しない）。
     let x: Vec<f32> = vec![1e30, 1.0, -1e30, 0.0];
     let dy: Vec<f32> = vec![1.0, 1.0, 1.0, 1.0];
-    let (rms_dx1, _) = nb
+    let (rms_dx1, rms_dw1) = nb
         .run_rmsnorm_backward_f32(&x, None, &dy, 1e-5, 1, 4)
         .expect("cancelling-input rmsnorm backward must succeed");
     for &v in &rms_dx1 {
         assert!(v.is_finite(), "expected finite rmsnorm dx, got {v}");
     }
+    let (cpu_rms_dx, cpu_rms_dw) = cpu_rmsnorm_backward_reference(&x, None, 1e-5, 1, 4, &dy);
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "rmsnorm_backward dx cancelling-input",
+        &rms_dx1,
+        &cpu_rms_dx,
+    );
+    assert_eq!(
+        rms_dw1, cpu_rms_dw,
+        "weight なし: dw は両側とも None のはず"
+    );
     let (rms_dx2, _) = nb
         .run_rmsnorm_backward_f32(&x, None, &dy, 1e-5, 1, 4)
         .expect("re-run must succeed");
     assert_eq!(rms_dx1, rms_dx2, "run-to-run bit 同一契約（決定性）");
 
-    let (ln_dx1, _, _) = nb
+    let (ln_dx1, ln_dw1, ln_db1) = nb
         .run_layer_norm_backward_f32(
             &x,
             None,
@@ -477,6 +495,15 @@ fn norm_backward_numerical_stability_and_determinism() {
     for &v in &ln_dx1 {
         assert!(v.is_finite(), "expected finite layer_norm dx, got {v}");
     }
+    let (cpu_ln_dx, cpu_ln_dw, cpu_ln_db) =
+        cpu_layer_norm_backward_reference(&x, None, false, 1e-5, 1, 4, &dy);
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "layer_norm_backward dx cancelling-input",
+        &ln_dx1,
+        &cpu_ln_dx,
+    );
+    assert_eq!(ln_dw1, cpu_ln_dw, "weight なし: dw は両側とも None のはず");
+    assert_eq!(ln_db1, cpu_ln_db, "bias なし: db は両側とも None のはず");
     let (ln_dx2, _, _) = nb
         .run_layer_norm_backward_f32(
             &x,
