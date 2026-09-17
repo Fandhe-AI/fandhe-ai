@@ -412,7 +412,9 @@ fn gru_forward_seq_facade_matches_reference_bit_exact() {
 }
 
 /// bias なし（`bias=false`）ケース: `bias_ih`／`bias_hh` が `None` の
-/// まま forward・backward とも bit 一致することを確認する。
+/// まま forward・backward とも bit 一致することを確認する
+/// （`weight_ih`／`weight_hh` の勾配比較を含む。codex-review 指摘対応:
+/// 当初 forward の `h_n` 比較のみで backward を呼んでいなかった）。
 #[test]
 fn rnn_forward_seq_no_bias_facade_matches_reference_bit_exact() {
     // `bias=false` は各 `forward_backward` 内で固定していないため、
@@ -437,6 +439,8 @@ fn rnn_forward_seq_no_bias_facade_matches_reference_bit_exact() {
     let ref_out = ref_rnn
         .forward_seq(&ref_tape, &ref_x, None)
         .expect("test fixture: forward_seq は有効値のはず");
+    assert!(ref_out.params.bias_ih.is_none());
+    assert!(ref_out.params.bias_hh.is_none());
 
     let facade_h_n = out
         .h_n
@@ -453,6 +457,57 @@ fn rnn_forward_seq_no_bias_facade_matches_reference_bit_exact() {
         .expect("as_slice は Some のはず")
         .to_vec();
     assert_bit_identical_vec("Rnn（bias=false）forward h_n", &facade_h_n, &ref_h_n);
+
+    // 同じ loss（h_n の総和）を両腕で構築し backward を呼んで
+    // weight_ih／weight_hh の勾配が bias あり経路と同様に bit 一致
+    // することを確認する（bias なし経路特有の勾配欠落を検出する）。
+    let facade_loss = out.h_n.sum(None).expect("test fixture: sum は有効値のはず");
+    let facade_grads = tape
+        .backward(&facade_loss)
+        .expect("test fixture: backward は有効値のはず");
+    let facade_dw_ih = facade_grads
+        .get(&out.params.weight_ih)
+        .expect("test fixture: get は有効値のはず")
+        .expect("weight_ih は常に勾配を持つはず")
+        .contiguous()
+        .as_slice()
+        .expect("as_slice は Some のはず")
+        .to_vec();
+    let facade_dw_hh = facade_grads
+        .get(&out.params.weight_hh)
+        .expect("test fixture: get は有効値のはず")
+        .expect("weight_hh は常に勾配を持つはず")
+        .contiguous()
+        .as_slice()
+        .expect("as_slice は Some のはず")
+        .to_vec();
+
+    let ref_loss = ref_out
+        .h_n
+        .sum(None)
+        .expect("test fixture: sum は有効値のはず");
+    let ref_grads = ref_tape
+        .backward(&ref_loss)
+        .expect("test fixture: backward は有効値のはず");
+    let ref_dw_ih = ref_grads
+        .get(&ref_out.params.weight_ih)
+        .expect("test fixture: get は有効値のはず")
+        .expect("weight_ih は常に勾配を持つはず")
+        .contiguous()
+        .as_slice()
+        .expect("as_slice は Some のはず")
+        .to_vec();
+    let ref_dw_hh = ref_grads
+        .get(&ref_out.params.weight_hh)
+        .expect("test fixture: get は有効値のはず")
+        .expect("weight_hh は常に勾配を持つはず")
+        .contiguous()
+        .as_slice()
+        .expect("as_slice は Some のはず")
+        .to_vec();
+
+    assert_bit_identical_vec("Rnn（bias=false）grad weight_ih", &facade_dw_ih, &ref_dw_ih);
+    assert_bit_identical_vec("Rnn（bias=false）grad weight_hh", &facade_dw_hh, &ref_dw_hh);
 }
 
 // --- 実機横断（`#[ignore]`。Metal／CUDA。REQ-2 統一複合判定） ---
