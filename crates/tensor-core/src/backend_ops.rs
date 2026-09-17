@@ -97,6 +97,62 @@ pub struct SgdStepConfig {
     pub is_first_step: bool,
 }
 
+/// [`AdamStepConfig`] の weight decay 適用方式（イシュー #1959・
+/// `fandhe_ai_autodiff::nn::optim::{adam, adamw}` の 2 方式に対応）。
+///
+/// `#[non_exhaustive]` はガードレール条件（`.claude/rules/security.md`
+/// A08。公開 API 非破壊）を保ちながら将来 variant 追加を可能にするため
+/// （`SgdStepConfig` と異なり enum のため列挙値の追加余地を残す）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdamStepKind {
+    /// `fandhe_ai_autodiff::nn::optim::adam::Adam` と同じ coupled L2
+    /// weight decay（`g_eff = mul_add(weight_decay, p, g)`。`weight_decay
+    /// == 0.0` では decay 項の演算自体を skip する）。
+    Coupled,
+    /// `fandhe_ai_autodiff::nn::optim::adamw::AdamW` と同じ decoupled
+    /// weight decay（`p_eff = p * decay_factor`。`decay_factor` は
+    /// `AdamStepConfig::decay_factor` を無条件に乗じる——`weight_decay
+    /// == 0.0` でも `decay_factor == 1.0` として同じ演算列を通る）。
+    Decoupled,
+}
+
+/// [`BackendOps::adam_step_device`] の 1 ステップ分のハイパーパラメータ
+/// （イシュー #1959・`docs/device-resident-update-design.md`）。
+///
+/// `SgdStepConfig` と同じ設計方針: `fandhe_ai_autodiff::optim::
+/// device_store::DeviceParamStore` がホスト側で `beta1_pow_t`／
+/// `beta2_pow_t`（`f64` 逐次積。PyTorch の Python float 丸め挙動へ寄せる
+/// ため `f64` のまま保持する契約は `Adam`／`AdamW` ホスト実装と同一）を
+/// 保持し、本型へは呼び出しごとに導出済みの `f32` スカラー
+/// （`step_size`／`bias_correction2_sqrt`／`decay_factor`）として渡す
+/// （カーネル内で `beta^t` を再計算しない。`.claude/rules/coding-rust.md`
+/// の bit 一致契約を CPU 実装で満たすための設計）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdamStepConfig {
+    /// 1 次モーメント（`m`）の指数移動平均係数 `β1`。
+    pub beta1: f32,
+    /// 2 次モーメント（`v`）の指数移動平均係数 `β2`。
+    pub beta2: f32,
+    /// 分母のゼロ除算防止項。
+    pub eps: f32,
+    /// `AdamStepKind::Coupled` の場合のみ参照する coupled L2 weight
+    /// decay 係数（`AdamStepKind::Decoupled` では未使用。呼び出し元は
+    /// `decay_factor` 側へ既に織り込み済み）。
+    pub weight_decay: f32,
+    /// `AdamStepKind::Decoupled` の場合のみ参照する事前計算済み
+    /// `1.0 - lr * weight_decay`（`AdamStepKind::Coupled` では未使用）。
+    pub decay_factor: f32,
+    /// ホストで `(lr as f64 / (1.0 - beta1_pow_t)) as f32` として
+    /// 事前計算した値。
+    pub step_size: f32,
+    /// ホストで `((1.0 - beta2_pow_t).sqrt()) as f32` として事前計算
+    /// した値。
+    pub bias_correction2_sqrt: f32,
+    /// weight decay の適用方式。
+    pub kind: AdamStepKind,
+}
+
 /// Conv2d（`BackendOps::im2col`／`col2im`／`conv2d`）のパラメータ記述子
 /// （イシュー #1764・設計 `docs/conv-ops-design.md` §8）。
 ///
@@ -714,6 +770,13 @@ pub enum VectorNormOrd {
 /// `gru_backward` 側に集約する）。
 pub type GruBackwardOutput = (Tensor<f32>, Tensor<f32>, Tensor<f32>);
 
+/// [`BackendOps::layer_norm_backward`] の戻り値型エイリアス（イシュー
+/// #1950）。`(dx, dw, db)`（`dx` は shape 恒等・`dw`／`db` は
+/// `weight`／`has_bias` に応じて `Some`／`None`）。[`GruBackwardOutput`]
+/// と同じ `clippy::type_complexity` 回避のための命名（doc は
+/// `layer_norm_backward` 側に集約する）。
+pub type LayerNormBackwardOutput = (Tensor<f32>, Option<Tensor<f32>>, Option<Tensor<f32>>);
+
 /// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
 /// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
 ///
@@ -901,6 +964,69 @@ pub trait BackendOps {
         _token: &DispatchFailureCell,
     ) -> Result<(), BackendError> {
         self.sgd_step_device(param, grad, velocity, config)
+    }
+
+    /// デバイス常駐パラメータへ Adam／AdamW 1 step を in-place 適用する
+    /// （イシュー #1959・`docs/device-resident-update-design.md`）。
+    ///
+    /// `param`／`m`／`v` は同一 shape・同一デバイス。演算列は
+    /// `fandhe_ai_autodiff::nn::optim::{adam::Adam::step, adamw::AdamW::
+    /// step}` を逐語再現する契約（`AdamStepConfig::kind` で分岐）:
+    /// `g_eff`（`Coupled` のみ `weight_decay` を勾配へ coupled 加算）→
+    /// `m ← mul_add(β1, m, (1-β1)·g_eff)` → `v ← mul_add(β2, v,
+    /// (1-β2)·g_eff²)` → `denom = sqrt(v)/bias_correction2_sqrt + eps` →
+    /// `new_p = p_eff - step_size·m/denom`（`p_eff` は `Decoupled` のみ
+    /// `decay_factor` を乗算済み）。`f32::mul_add` を使い CPU 参照実装
+    /// （`Adam`／`AdamW`）と bit 一致させる契約は CPU 実装が担う（`SgdConfig`
+    /// と異なり `beta^t` はホスト側で確定済みの `step_size`／
+    /// `bias_correction2_sqrt` として受け取るためカーネル内では再計算
+    /// しない）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は常に [`BackendError::Unsupported`] を返す fail-closed
+    /// （`sgd_step_device` と同方針。設計文書 §3.2 改訂）。CPU はこの
+    /// デフォルトを実カーネルでオーバーライドする。CUDA／Metal は
+    /// 本イシュー時点では未実装のままこのデフォルトを維持する
+    /// （`out-of-scope-tracking.md` 対象。引き継ぎはユーザー承認を得て
+    /// 別 Issue で追跡する）。
+    ///
+    /// # エラー
+    /// - `param`／`m`／`v` のいずれかがこのバックエンドのハンドル型へ
+    ///   ダウンキャストできない・デバイスが一致しない →
+    ///   [`BackendError::DeviceMismatch`]
+    /// - shape が一致しない → [`BackendError::ShapeMismatch`]
+    fn adam_step_device(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _m: &mut DeviceBuffer<f32>,
+        _v: &mut DeviceBuffer<f32>,
+        _config: &AdamStepConfig,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "adam_step_device: default fail-safe (no in-place Adam kernel available)".into(),
+        ))
+    }
+
+    /// [`BackendOps::adam_step_device`] と同型だが、Metal のコマンド
+    /// バッファ共有向けに共有失敗トークン [`DispatchFailureCell`] を
+    /// 追加引数として受け取る非破壊拡張（`sgd_step_device_tracked` と
+    /// 同じ「デフォルトメソッド追加」パターン）。
+    ///
+    /// # デフォルト実装
+    /// 既定は `token` を無視して [`BackendOps::adam_step_device`] へ
+    /// そのまま委譲する（CPU はこのデフォルトのままでよい。`sgd_step_
+    /// device_tracked` と同じ理由）。
+    fn adam_step_device_tracked(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        m: &mut DeviceBuffer<f32>,
+        v: &mut DeviceBuffer<f32>,
+        config: &AdamStepConfig,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.adam_step_device(param, grad, m, v, config)
     }
 
     /// 学習 step の一区間（イシュー #1349 では
@@ -1853,6 +1979,57 @@ pub trait BackendOps {
     fn log_softmax(&self, _x: &Tensor<f32>, _dim: usize) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "log_softmax: default fail-safe (no fused log_softmax kernel available)".into(),
+        ))
+    }
+
+    /// `log_softmax` の backward（VJP）をカーネル 1 個で計算する
+    /// エントリ（イシュー #1949・親 #1947）。`out` は forward 記録値
+    /// `y = log_softmax(x, dim)`（`Self::log_softmax` または
+    /// ホスト参照実装 `eval::log_softmax_along` のいずれで得た値でも
+    /// よい。数式上 forward の生成元に依存しない）、`upstream` は `y`
+    /// と同一 shape の上流勾配 `g`。意味論は
+    /// `dx = g − exp(y)·Σ_dim(g)`（`Σ_dim` は `dim` 軸に沿った縮約。
+    /// `Var::log_softmax` の既存ホスト VJP `grad::log_softmax_vjp_along`
+    /// と同じ式）。戻り値 shape は `out`（および `upstream`）と同一。
+    ///
+    /// **数値契約**: `Σ_dim(g)` は要素を直接 `f64` へ昇格してから加算
+    /// する縮約（`.claude/rules/coding-rust.md` の勾配長軸縮約契約。
+    /// 要素積を伴わない単純和のため二乗和方式ではなく直接昇格）。GPU
+    /// 実装（warp／simdgroup 単位の butterfly 縮約等）は縮約の結合順序
+    /// がホスト参照実装（`dim` 添字の昇順逐次和）と異なりうるため、
+    /// **bit 完全一致は要求せず** REQ-2 統一複合判定（相対誤差 1e-3
+    /// 未満 または 絶対誤差 1e-5 未満）で検証する。tolerance／baseline
+    /// は変更しない。
+    ///
+    /// `dim` は `out`／`upstream` の最終軸限定（`Self::log_softmax` と
+    /// 同じ最終軸限定契約）。非最終軸の呼び出しは実装側で
+    /// `Unsupported` を返してよい（呼び出し元がホストへフォールバック
+    /// する）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::log_softmax`] と同じ非破壊拡張・fail-safe。既定は
+    /// [`BackendError::Unsupported`] を返し、`Op::LogSoftmax` の VJP
+    /// （`fandhe_ai_autodiff::grad`）は `Unsupported` のときのみ既存
+    /// ホスト参照実装（`grad::log_softmax_vjp_along`）へフォールバック
+    /// する（それ以外のエラーは伝播する。判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。本イシュー時点で CPU に
+    /// 専用カーネルは存在しないためこの既定のまま（ホスト
+    /// フォールバックに委ねる）で、CUDA は 1 warp = 1 行の融合
+    /// カーネル、Metal は `Σ_dim(g)` を soft-f64（binary64 逐次和の
+    /// 64bit 整数ソフトウェアエミュレーション）で計算する 2 パス
+    /// カーネルでそれぞれオーバーライドする（イシュー #1952。Metal
+    /// 実装は `docs/backend-metal-reduce-sum-design.md` 追補節を
+    /// 参照）。
+    fn log_softmax_backward(
+        &self,
+        _out: &Tensor<f32>,
+        _upstream: &Tensor<f32>,
+        _dim: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "log_softmax_backward: default fail-safe (no fused log_softmax backward kernel available)"
+                .into(),
         ))
     }
 
@@ -2959,6 +3136,88 @@ pub trait BackendOps {
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "layer_norm: default fail-safe (no fused LayerNorm kernel available)".into(),
+        ))
+    }
+
+    /// [`Self::rmsnorm`] の逆伝播（イシュー #1950。`fandhe_ai_autodiff::
+    /// grad::vjp` の `Op::RmsNorm` 分岐から呼ばれる）。
+    ///
+    /// `x`／`dy` は forward（[`Self::rmsnorm`]）と同じ任意 shape（呼び出し元
+    /// が `contiguous()` を適用済みではあるが `[rows, hidden]` へ reshape は
+    /// しない）で渡される。実装は [`Self::rmsnorm`] と同じく
+    /// [`crate::ops_shape::row_norm_layout`] で `x.shape()` から
+    /// `(rows, hidden)` を自ら導出する契約とする（rank 1／rank 3 以上の入力
+    /// も受理する）。`weight` は forward に渡した値と同一のもの（呼び出し元が
+    /// `input`／`weight` ノードを実体化し直して渡す）。
+    ///
+    /// 戻り値は `(dx, dw)`。`dx.shape() == x.shape()` を常に満たす。`dw` は
+    /// `weight.is_some()` のときのみ `Some`（shape `[hidden]`）で、`None`
+    /// のときは常に `None`（forward で乗算していない以上 `weight` への
+    /// 勾配は存在しない）。`rows == 0 || hidden == 0` は `dx` が空・`dw` が
+    /// （`weight` ありなら）ゼロ埋めの `[hidden]` を返す（`Self::rmsnorm`
+    /// の 0 要素契約と対称）。
+    ///
+    /// `dw`（行方向・長軸縮約）の数値方式は `.claude/rules/coding-rust.md`
+    /// 「勾配の長軸縮約の要素積は `f32` で確定してから `f64` へ昇格して
+    /// 蓄積する」契約に従う（各バックエンドの実装がこれを満たす）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss_backward`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、呼び出し元
+    /// （`grad::vjp` の `Op::RmsNorm` 分岐）は `Unsupported` のときのみ
+    /// 既存のホスト参照実装（`grad::rmsnorm_vjp_rows`）へフォールバックする
+    /// （それ以外のエラーは伝播する。判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。
+    fn rmsnorm_backward(
+        &self,
+        _x: &Tensor<f32>,
+        _weight: Option<&Tensor<f32>>,
+        _dy: &Tensor<f32>,
+        _eps: f32,
+    ) -> Result<(Tensor<f32>, Option<Tensor<f32>>), BackendError> {
+        Err(BackendError::Unsupported(
+            "rmsnorm_backward: default fail-safe (no fused RMSNorm backward kernel available)"
+                .into(),
+        ))
+    }
+
+    /// [`Self::layer_norm`] の逆伝播（イシュー #1950。`fandhe_ai_autodiff::
+    /// grad::vjp` の `Op::LayerNorm` 分岐から呼ばれる）。[`Self::
+    /// rmsnorm_backward`] と同じ入力契約（`x`／`dy` は forward と同じ任意
+    /// shape のまま渡され、実装が [`crate::ops_shape::row_norm_layout`] で
+    /// `(rows, hidden)` を自ら導出する。`weight` は forward と同一値）。
+    ///
+    /// `has_bias`（forward で `bias` が `Some` だったか。`weight` の有無とは
+    /// 独立）は `db` を計算するかどうかを決める。`bias` の実データは backward
+    /// では不要（`db = Σ_rows dy` は `bias` の値に依存しない）ため引数に
+    /// 含めない。
+    ///
+    /// 戻り値は `(dx, dw, db)`。`dx.shape() == x.shape()` を常に満たす。
+    /// `dw` は `weight.is_some()` のときのみ `Some`（shape `[hidden]`）、
+    /// `db` は `has_bias` のときのみ `Some`（shape `[hidden]`）。
+    /// `rows == 0 || hidden == 0` は [`Self::rmsnorm_backward`] と同じ
+    /// 0 要素契約（`dx` 空・`dw`／`db` は該当時ゼロ埋め）。
+    ///
+    /// `dw`／`db` の数値方式は [`Self::rmsnorm_backward`] と同じ
+    /// `.claude/rules/coding-rust.md` の長軸縮約契約に従う。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::rmsnorm_backward`] と同じ非破壊拡張・fail-safe・
+    /// フォールバック規律（`grad::layer_norm_vjp_rows` へフォールバック）。
+    fn layer_norm_backward(
+        &self,
+        _x: &Tensor<f32>,
+        _weight: Option<&Tensor<f32>>,
+        _has_bias: bool,
+        _dy: &Tensor<f32>,
+        _eps: f32,
+    ) -> Result<LayerNormBackwardOutput, BackendError> {
+        Err(BackendError::Unsupported(
+            "layer_norm_backward: default fail-safe (no fused LayerNorm backward kernel \
+             available)"
+                .into(),
         ))
     }
 
@@ -4234,6 +4493,24 @@ mod tests {
         assert!(matches!(backward, Err(BackendError::Unsupported(_))));
     }
 
+    /// [`BackendOps::rmsnorm_backward`]／[`BackendOps::
+    /// layer_norm_backward`] の既定実装が両方とも fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する
+    /// （イシュー #1950。`mse_loss_default_is_unsupported` と同型の
+    /// ガード）。
+    #[test]
+    fn norm_backward_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let dy = Tensor::new(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]).unwrap();
+
+        let rms = ops.rmsnorm_backward(&x, None, &dy, 1e-5);
+        let ln = ops.layer_norm_backward(&x, None, false, &dy, 1e-5);
+
+        assert!(matches!(rms, Err(BackendError::Unsupported(_))));
+        assert!(matches!(ln, Err(BackendError::Unsupported(_))));
+    }
+
     /// [`BackendOps::bce_loss`]／[`BackendOps::bce_loss_backward`] の
     /// 既定実装が両方とも fail-safe（[`BackendError::Unsupported`]）を
     /// 返すことを確認する（イシュー #1737。
@@ -4335,6 +4612,19 @@ mod tests {
         let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
 
         let result = ops.log_softmax(&x, 0);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::log_softmax_backward`] の既定実装が fail-safe を
+    /// 返すことを確認する（イシュー #1949）。
+    #[test]
+    fn log_softmax_backward_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let out = Tensor::new(vec![-1.0, -2.0, -3.0], &[3]).unwrap();
+        let upstream = Tensor::new(vec![0.1, 0.2, 0.3], &[3]).unwrap();
+
+        let result = ops.log_softmax_backward(&out, &upstream, 0);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

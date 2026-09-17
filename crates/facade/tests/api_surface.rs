@@ -1483,3 +1483,39 @@ fn fit_types_are_reachable_via_facade_only() {
     sgd.set_lr(0.05)
         .expect("test fixture: set_lr(0.05) は有効値のはず");
 }
+
+/// AMP 統合（イシュー #1961。`compat::Sequential::compile_with_amp`）の
+/// 新規公開型（`fandhe_ai::compat::{AmpConfig, AmpDType}`）が `fandhe_ai`
+/// のみの import で構築でき、`Sequential::compile_with_amp`／
+/// `amp_loss_scale` が到達可能であることを固定する。
+#[test]
+fn amp_fit_types_are_reachable_via_facade() {
+    use fandhe_ai::compat::{AmpConfig, AmpDType, Loss, Optimizer, Sequential};
+
+    let config_f16 = AmpConfig::new(AmpDType::F16);
+    let config_bf16 =
+        AmpConfig::new(AmpDType::Bf16).grad_scaler(fandhe_ai::optim::GradScalerConfig {
+            init_scale: 128.0,
+            growth_factor: 2.0,
+            backoff_factor: 0.5,
+            growth_interval: 100,
+        });
+    assert_eq!(config_f16, AmpConfig::new(AmpDType::F16));
+    assert_ne!(config_f16, config_bf16);
+
+    let mut model = Sequential::new()
+        .add_linear(2, 2, 1)
+        .expect("test fixture: add_linear は有効値のはず");
+    assert_eq!(model.amp_loss_scale(), None);
+    model
+        .compile_with_amp(
+            Optimizer::Sgd(fandhe_ai::optim::SgdConfig::new(0.1)),
+            Loss::Mse,
+            config_f16,
+        )
+        .expect("test fixture: compile_with_amp は有効値のはず");
+    assert!(model.is_compiled());
+    // `AmpConfig::new` は `GradScalerConfig::default()`（`init_scale =
+    // 65536.0`）を使う（`training.rs::AmpConfig::new` doc 参照）。
+    assert_eq!(model.amp_loss_scale(), Some(65536.0));
+}

@@ -62,6 +62,17 @@
 // 各カーネルは `gid`（グローバルスレッド id）が起動対象範囲
 // （`num_chunks`／`1`／`lanes`）未満かどうかを検査してから処理する。
 // 添字計算は `ulong`（64bit）で行う。
+//
+// ---- argmax／argmin（イシュー #1951）----
+//
+// 本ファイル下部に `reduce_arg_all_chunk_f32`／
+// `reduce_arg_all_finalize_f32`／`reduce_arg_axis_f32` を追加する
+// （`crate::reduce_model` の `arg_key`／`argext_all_chunked`／
+// `argext_axis_lane` の逐語移植。CPU 参照実装
+// `fandhe_ai_backend_cpu::reduction::{argmax, argmin}` と添字が完全
+// 一致する契約。詳細は `docs/backend-metal-reduce-sum-design.md` §11）。
+// `sum` とは異なり加減算を伴わないため `red_f64_*` は使わず、比較は
+// NaN 除外・±0 同値化した単調 `uint` キーへの整数比較のみで行う。
 
 #include <metal_stdlib>
 using namespace metal;
@@ -329,4 +340,163 @@ kernel void reduce_sum_axis_f32(
         acc = red_f64_add(acc, red_f64_widen(as_type<uint>(x[idx])));
     }
     out[gid] = as_type<float>(red_f64_narrow(acc));
+}
+
+// ---- argmax／argmin（イシュー #1951。`crate::reduce_model` の
+// `arg_key`／`argext_all_chunked`／`argext_axis_lane` の逐語移植）----
+//
+// `mode`: 0 = argmax（`Max`）・1 = argmin（`Min`）。カーネル数を抑える
+// ため 1 対の function 引数で argmax/argmin を切り替える
+// （`crate::reduce_model::ArgExtKind` と 1 対 1 対応。ホスト側モデルと
+// 同じ判断根拠は `crate::reduce_model` doc・
+// `docs/backend-metal-reduce-sum-design.md` §11 参照）。
+//
+// 比較は f32 の `<`／`>`・`isnan(` を使わず、ビットパターンから
+// 「NaN は除外（無効マーカー）・±0 は同値化」した単調 `uint` キーへ
+// 変換してから整数比較する（GPU 上で非正規化数が flush されうるため。
+// `crate::reduce_model::arg_key` と同一の変換式）。NaN 判定・キー
+// 変換のみで加減算は行わないため `red_f64_*` は使わない。
+
+// NaN 判定（`red_f64_widen` の NaN 判定条件〈exp==0xFF && frac!=0〉と
+// 同型。`arg_key` の `v.is_nan()` に対応）。
+inline bool red_arg_is_nan(uint bits) {
+    return ((bits >> 23) & 0xFFu) == 0xFFu && (bits & 0x7FFFFFu) != 0u;
+}
+
+// `crate::reduce_model::arg_key` の逐語移植（NaN は呼び出し元が
+// `red_arg_is_nan` で先に除外する契約のため、本関数自体は NaN 入力を
+// 想定しない）。
+inline uint red_arg_key(uint bits) {
+    // ±0 同値化: `bits == 0x8000_0000`（-0.0）のときのみ `+0.0`
+    // （`0x0`）へ正規化する。それ以外はそのまま単調写像へ渡す。
+    uint nbits = (bits == 0x80000000u) ? 0u : bits;
+    return (nbits >> 31) == 1u ? ~nbits : (nbits | 0x80000000u);
+}
+
+// `red_arg_key` の比較結果（`mode` に応じた strict 比較）。
+inline bool red_arg_better(uint mode, uint challenger_key, uint incumbent_key) {
+    return (mode == 0u) ? (challenger_key > incumbent_key) : (challenger_key < incumbent_key);
+}
+
+// ---- 全要素 argmax／argmin（2 段構成。`crate::reduce_model::
+// argext_all_chunked` の逐語移植）----
+//
+// `partial_key`／`partial_idx`: `num_chunks` 要素。各スレッドがチャンク
+// 内で最初に現れる極値の (キー, グローバル添字) を書く。チャンクが
+// 全要素 NaN の場合は無効マーカー（`partial_idx[gid] = 0xFFFFFFFFu`）
+// を書く（`crate::reduce_model::argext_all_chunked` の `local_best:
+// Option` が `None` のままの場合に対応）。
+
+kernel void reduce_arg_all_chunk_f32(
+    device const float* x [[buffer(0)]],
+    device uint* partial_key [[buffer(1)]],
+    device uint* partial_idx [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    constant uint& num_chunks [[buffer(4)]],
+    constant uint& mode [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= num_chunks) {
+        return;
+    }
+    ulong begin = (ulong)gid * (ulong)REDUCE_SUM_CHUNK;
+    ulong end = begin + (ulong)REDUCE_SUM_CHUNK;
+    if (end > (ulong)numel) {
+        end = (ulong)numel;
+    }
+    bool has_best = false;
+    uint best_key = 0u;
+    uint best_idx = 0u;
+    for (ulong idx = begin; idx < end; idx++) {
+        uint bits = as_type<uint>(x[idx]);
+        if (red_arg_is_nan(bits)) {
+            continue;
+        }
+        uint key = red_arg_key(bits);
+        if (!has_best || red_arg_better(mode, key, best_key)) {
+            has_best = true;
+            best_key = key;
+            best_idx = (uint)idx;
+        }
+    }
+    partial_key[gid] = best_key;
+    partial_idx[gid] = has_best ? best_idx : 0xFFFFFFFFu;
+}
+
+kernel void reduce_arg_all_finalize_f32(
+    device const uint* partial_key [[buffer(0)]],
+    device const uint* partial_idx [[buffer(1)]],
+    device int* out [[buffer(2)]],
+    constant uint& num_chunks [[buffer(3)]],
+    constant uint& mode [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid != 0u) {
+        return;
+    }
+    bool has_best = false;
+    uint best_key = 0u;
+    uint best_idx = 0u;
+    for (uint c = 0u; c < num_chunks; c++) {
+        uint idx = partial_idx[c];
+        if (idx == 0xFFFFFFFFu) {
+            continue; // このチャンクは全要素 NaN（無効）。
+        }
+        uint key = partial_key[c];
+        if (!has_best || red_arg_better(mode, key, best_key)) {
+            has_best = true;
+            best_key = key;
+            best_idx = idx;
+        }
+    }
+    // 全チャンク無効（全要素 NaN）の場合は添字 0（`crate::reduce_model::
+    // argext_all_chunked` の `global_best_idx` 初期値のまま。呼び出し元
+    // `ops.rs::metal_argext` は `numel==0` を別途 GPU 起動なしで処理
+    // するため、本カーネルが呼ばれる時点で `numel >= 1` が保証される）。
+    out[0] = (int)best_idx;
+}
+
+// ---- 単一軸 argmax／argmin（`crate::reduce_model::argext_axis_lane`
+// の逐語移植）----
+//
+// `x`: `outer * axis_len * inner` 要素（`reduce_sum_axis_f32` と同じ
+// 添字規約）。`out`: `lanes`（`outer * inner`）要素・軸内添字（`int`）。
+
+kernel void reduce_arg_axis_f32(
+    device const float* x [[buffer(0)]],
+    device int* out [[buffer(1)]],
+    constant uint& lanes [[buffer(2)]],
+    constant uint& axis_len [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    constant uint& mode [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= lanes) {
+        return;
+    }
+    ulong o = (ulong)gid / (ulong)inner;
+    ulong i = (ulong)gid % (ulong)inner;
+    bool has_best = false;
+    uint best_key = 0u;
+    uint best_idx = 0u;
+    for (uint a = 0u; a < axis_len; a++) {
+        ulong idx = (o * (ulong)axis_len + (ulong)a) * (ulong)inner + i;
+        uint bits = as_type<uint>(x[idx]);
+        if (red_arg_is_nan(bits)) {
+            continue;
+        }
+        uint key = red_arg_key(bits);
+        if (!has_best || red_arg_better(mode, key, best_key)) {
+            has_best = true;
+            best_key = key;
+            best_idx = a;
+        }
+    }
+    // `axis_len >= 1` は呼び出し元が保証する（`axis_len == 0` は
+    // `ops.rs::metal_argext` が GPU 起動なしでエラーへ写像する。
+    // モジュール doc 「空縮約」参照）ため、全要素 NaN でも
+    // `has_best == false` のまま `best_idx` の初期値 0 を書く
+    // （`crate::reduce_model::argext_axis_lane` と同じ「全 NaN は
+    // 添字 0」契約）。
+    out[gid] = (int)best_idx;
 }

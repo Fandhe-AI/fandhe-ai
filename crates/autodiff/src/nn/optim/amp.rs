@@ -15,6 +15,21 @@
 //! §8 で明示的にスコープ外とされている別軸の変更のため）。本モジュールは
 //! f32 勾配列に対するスケーリング／unscale／非有限検出のみを提供する。
 //!
+//! **Linear 層限定の低精度 forward は本モジュールの対象外**
+//! （イシュー #1960）。`nn::linear::linear_forward_low_precision`
+//! （`crate::var::Var::linear_act_low_precision` の唯一の呼び出し元。
+//! `TypedOps<f16>`／`TypedOps<bf16>` へ forward 計算のみを委譲する
+//! opt-in 経路）が Linear 層の forward を f16／bf16 で計算しつつ
+//! master weight・backward は f32 のまま保つ。`Var`／`Tape` dtype の
+//! 一般化は引き続き対象外（上記 §8 参照）。両者は併用可能（低精度
+//! forward の出力を loss scaling する場合、AMP の適用順序契約——
+//! backward → unscale → clip → optimizer step——は変わらない）。
+//! 設計記録は `docs/autodiff-low-precision-linear-design.md`（§7 に
+//! facade 統合〈イシュー #1961〉の実装記録を追記済み）。両者の facade
+//! 統合入口は `fandhe_ai::compat::Sequential::compile_with_amp`（低精度
+//! forward の dtype 指定と本モジュールの `GradScalerConfig` を束ねる
+//! `compat::AmpConfig` 経由）。
+//!
 //! `nn/optim/mod.rs` の適用順序契約（backward → unscale → clip →
 //! optimizer step）における「unscale」ステップの実体がこのモジュール
 //! （[`unscale_grads`]／[`GradScaler`]）である。facade（`fandhe_ai::optim`）

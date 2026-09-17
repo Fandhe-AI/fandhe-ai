@@ -158,3 +158,34 @@ metrics・`DataLoader` 直接入力は引き続き対象外のまま。
 - `crates/facade/tests/api_surface.rs::fit_types_are_reachable_via_
   facade_only`: 新規公開型が `fandhe_ai` のみの import で構築・型境界
   として使えることの固定
+
+## 4. AMP（`compile_with_amp`）統合（イシュー #1961・親 #1958）
+
+`Sequential::compile_with_amp`（低精度 forward・#1960 + `GradScaler`・
+#1721）は `compile`／`fit` と独立の追加メソッドとして実装した（既存
+`compile`／`fit`／`evaluate` のシグネチャ・戻り値・演算列は無変更）。
+設計判断の詳細は `docs/autodiff-low-precision-linear-design.md` §7 を
+正とし、本節では `compile`／`fit` 側の設計との関係のみを記す。
+
+- **AMP 状態の置き場所**: `GradScaler` は optimizer と同じく `fit`
+  呼び出しをまたいで継続すべき状態（`fit(1)+fit(1)==fit(2)` 契約と
+  整合）。`FitConfig` は `Copy`＋`Eq` 導出済みで f32 フィールドを足すと
+  破壊的変更になるため、`Compiled`（`compile()` 済み状態を保持する
+  非公開 struct）へ `amp: Option<AmpState>` として追加した——`FitConfig`
+  自体は不変のまま。
+- **skip 時の loss 記録**: `History::loss` は「scale 前の素の loss」を
+  常に記録する（skip した step でも記録する。overflow をそのまま
+  可視化するため）。`unscale` 後の skip 判定は `optimizer.step`／
+  `apply_parameters` のみに作用し、loss 集計（サンプル数重み付き
+  平均）には影響しない。
+- **validation は f32 のまま**: `run_evaluate`（`fit_with_callbacks` の
+  validation フェーズ・`evaluate` 自身）は `compiled.amp` を参照しない
+  ため、AMP 使用時も常に f32 で評価する（実装計画 §8 のスコープ外
+  整理。決定的な検証値を保つ狙い）。
+- **callbacks（#1763）との関係**: `Callback::LrSchedule`／
+  `EarlyStopping`／`ModelCheckpoint` はいずれも `history`（f32 の
+  `loss`／`val_loss`）のみを見るため、AMP の有無に関わらず既存の
+  callbacks 契約（`docs/compat-callbacks-design.md`）はそのまま成立
+  する（`fit_with_callbacks` と `compile_with_amp` は独立に組み合わせ
+  可能。組み合わせ専用テストは追加していない——両者とも `run_fit`
+  経由で `compiled.amp` を見るだけの直交した分岐のため）。

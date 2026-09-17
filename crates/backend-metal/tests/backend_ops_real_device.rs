@@ -324,6 +324,166 @@ fn backend_ops_sum_matches_cpu_bit_exact() {
     }
 }
 
+/// `argmax`／`argmin`（イシュー #1951）の形状由来エラー経路
+/// （範囲外 `dim`・空縮約〈`dim=None` で `numel==0`・`dim=Some(axis)` で
+/// `shape[axis]==0` かつ他軸非零〉）が、`max_remains_unsupported_
+/// without_device_init` と同じ理由で `MetalContext::new` を呼ばず
+/// （`ops.rs::metal_argext` が `reduce_out_shape`／`shape.contains(&0)`
+/// の検査を `context_cache::cached_context()` 呼び出しより前に行う
+/// ため）Metal 実機・デバイス初期化を一切必要としないことを検証する。
+#[test]
+fn argmax_argmin_shape_errors_without_device_init() {
+    let metal = MetalBackendOps::new();
+
+    // 範囲外 dim: ShapeMismatch。
+    let a = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor");
+    assert!(matches!(
+        metal.argmax(&a, Some(5)),
+        Err(BackendError::ShapeMismatch(_))
+    ));
+    assert!(matches!(
+        metal.argmin(&a, Some(5)),
+        Err(BackendError::ShapeMismatch(_))
+    ));
+
+    // 空縮約: dim=None かつ numel==0。
+    let empty = Tensor::<f32>::new(Vec::new(), &[0]).expect("empty tensor");
+    assert!(matches!(
+        metal.argmax(&empty, None),
+        Err(BackendError::KernelLaunchFailed(_))
+    ));
+    assert!(matches!(
+        metal.argmin(&empty, None),
+        Err(BackendError::KernelLaunchFailed(_))
+    ));
+
+    // 空縮約: dim=Some(axis) かつ shape[axis]==0 で他軸は非零。
+    let empty_axis = Tensor::<f32>::new(Vec::new(), &[0, 3]).expect("tensor");
+    assert!(matches!(
+        metal.argmax(&empty_axis, Some(0)),
+        Err(BackendError::KernelLaunchFailed(_))
+    ));
+    assert!(matches!(
+        metal.argmin(&empty_axis, Some(0)),
+        Err(BackendError::KernelLaunchFailed(_))
+    ));
+
+    // 空出力（非縮約軸が 0）は空 Tensor を返す成功経路（エラーではない）。
+    let empty_output = Tensor::<f32>::new(Vec::new(), &[0, 3, 5]).expect("tensor");
+    let out = metal
+        .argmax(&empty_output, Some(1))
+        .expect("empty output is not an error");
+    assert!(out.as_slice().expect("contiguous").is_empty());
+}
+
+/// `argmax`／`argmin`（`reduce::MetalReduce` 経由。イシュー #1951）が
+/// `fandhe_ai_backend_cpu::reduction::{argmax, argmin}` と添字が完全
+/// 一致することを実機で検証する。`dim=None`／`Some(axis)`〈複数
+/// rank・複数軸位置〉・非 contiguous 入力（transpose view）・タイ
+/// （先勝ち）・NaN 混入（全 NaN は添字 0）・run-to-run 決定性を対象と
+/// する（`reduce_parity.rs`〈起動 API 直叩き〉の `BackendOps` 経由版。
+/// `backend_ops_sum_matches_cpu_bit_exact` と同型構成）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn backend_ops_argmax_argmin_match_cpu_exact() {
+    let metal = MetalBackendOps::new();
+    let cpu = CpuBackendOps::new();
+
+    let assert_exact = |metal_t: &Tensor<i32>, cpu_t: &Tensor<i32>, label: &str| {
+        assert_eq!(metal_t.shape(), cpu_t.shape(), "{label}: shape 不一致");
+        let m = metal_t.as_slice().expect("metal argext 出力は contiguous");
+        let c = cpu_t.as_slice().expect("cpu argext 出力は contiguous");
+        assert_eq!(m, c, "{label}: 添字不一致");
+    };
+
+    let mut rng = Xorshift64Star::new(0x1951_0000);
+    let gen_vec = |n: usize, rng: &mut Xorshift64Star| -> Vec<f32> {
+        (0..n).map(|_| rng.next_f32() * 1024.0 - 512.0).collect()
+    };
+
+    let cases: &[(&[usize], Option<usize>)] = &[
+        (&[7], None),
+        (&[7], Some(0)),
+        (&[3, 4], Some(0)),
+        (&[3, 4], Some(1)),
+        (&[2, 3, 5], Some(1)),
+        (&[2, 3, 4, 2], Some(2)),
+    ];
+    for &(shape, dim) in cases {
+        let numel: usize = shape.iter().product();
+        let data = gen_vec(numel, &mut rng);
+        let a = Tensor::new(data, shape).expect("tensor");
+
+        let m_max = metal.argmax(&a, dim).expect("metal argmax must succeed");
+        let c_max = cpu
+            .argmax(&a, dim)
+            .expect("cpu argmax always succeeds for non-empty reduction");
+        assert_exact(
+            &m_max,
+            &c_max,
+            &format!("argmax shape={shape:?} dim={dim:?}"),
+        );
+
+        let m_min = metal.argmin(&a, dim).expect("metal argmin must succeed");
+        let c_min = cpu
+            .argmin(&a, dim)
+            .expect("cpu argmin always succeeds for non-empty reduction");
+        assert_exact(
+            &m_min,
+            &c_min,
+            &format!("argmin shape={shape:?} dim={dim:?}"),
+        );
+    }
+
+    // 非 contiguous 入力（transpose view）。
+    {
+        let data = gen_vec(12, &mut rng);
+        let a = Tensor::new(data, &[3, 4]).expect("tensor");
+        let a_t = a.transpose(0, 1).expect("transpose");
+        let m = metal
+            .argmax(&a_t, Some(1))
+            .expect("metal argmax on transposed view");
+        let c = cpu
+            .argmax(&a_t, Some(1))
+            .expect("cpu argmax on transposed view");
+        assert_exact(&m, &c, "transpose view argmax");
+    }
+
+    // タイ（先勝ち）。
+    {
+        let a = Tensor::new(vec![2.0f32; 4097 * 2], &[4097 * 2]).expect("tensor");
+        let m = metal.argmax(&a, None).expect("metal argmax tie");
+        let c = cpu.argmax(&a, None).expect("cpu argmax tie");
+        assert_exact(&m, &c, "tie argmax");
+        assert_eq!(m.as_slice().unwrap()[0], 0, "先勝ちタイは添字 0 のはず");
+    }
+
+    // NaN 混入（全 NaN は添字 0）。
+    {
+        let a = Tensor::new(vec![f32::NAN, 3.0, f32::NAN, 1.0, f32::NAN], &[5]).expect("tensor");
+        let m = metal.argmax(&a, None).expect("metal argmax nan");
+        let c = cpu.argmax(&a, None).expect("cpu argmax nan");
+        assert_exact(&m, &c, "nan argmax");
+
+        let all_nan = Tensor::new(vec![f32::NAN; 4097], &[4097]).expect("tensor");
+        let m_all_nan = metal.argmax(&all_nan, None).expect("metal argmax all-nan");
+        assert_eq!(
+            m_all_nan.as_slice().unwrap()[0],
+            0,
+            "全 NaN は添字 0 のはず"
+        );
+    }
+
+    // run-to-run 決定性。
+    {
+        let data = gen_vec(64, &mut rng);
+        let a = Tensor::new(data, &[64]).expect("tensor");
+        let m1 = metal.argmin(&a, None).expect("metal argmin run1");
+        let m2 = metal.argmin(&a, None).expect("metal argmin run2");
+        assert_exact(&m1, &m2, "run-to-run determinism");
+    }
+}
+
 /// `add`／`mul`／`relu`／`exp`／`tanh`（`elementwise::MetalElementwise`
 /// 経由。イシュー #605）が CPU 参照実装と数値一致することを実機で固定
 /// する（複合判定は REQ-2・`.claude/rules/coding-rust.md`。他の

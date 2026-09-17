@@ -540,6 +540,14 @@ pub mod memory;
 pub mod mse;
 #[cfg(target_os = "macos")]
 pub mod nll;
+// LayerNorm／RMSNorm backward カーネルの起動 API（イシュー #1953・親
+// #1947。`layer_norm.rs`／`batch_norm.rs` と同じ「カーネル起動は macOS
+// 限定・ホストモデルは Linux 実行可能」の 2 ファイル構成。forward
+// カーネル・tape 記録は一切変更しない recompute-in-backward 方式
+// 〈CUDA 側 #1950 と同型〉）。
+#[cfg(target_os = "macos")]
+pub mod norm_backward;
+pub mod norm_backward_model;
 #[cfg(target_os = "macos")]
 pub mod ops;
 pub mod pad;
@@ -578,6 +586,17 @@ pub mod reduce;
 // 触れないため `cfg(target_os = "macos")` を付けず、Linux（本実装
 // 環境・CI）でも単体テストが回る。
 pub mod reduce_model;
+// `log_softmax` backward（イシュー #1952・親 #1947）の起動 API。
+// `reduce.rs` と同じ設計方針（実行時コンパイル・パイプライン保持・
+// 実行）。`MetalBackendOps::log_softmax_backward` から `context_cache::
+// cached_log_softmax_backward` 経由で到達する。
+#[cfg(target_os = "macos")]
+pub mod log_softmax_backward;
+// `shaders/log_softmax_backward.metal` のホスト側逐語モデル（イシュー
+// #1952）。`reduce_model` と同じ設計判断で `objc2` 系 FFI に触れない
+// ため `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）
+// でも単体テストが回る。
+pub mod log_softmax_backward_model;
 pub mod soft_f64;
 // dtype 変換（`fandhe_ai_tensor_core::cast::CastOps`。イシュー #1751・
 // 親 #1613・依存 #1750）の起動 API・`CastOps` 実装。`unique.rs` と
@@ -731,11 +750,15 @@ pub use kl_div::MetalKlDiv;
 #[cfg(target_os = "macos")]
 pub use layer_norm::MetalLayerNorm;
 #[cfg(target_os = "macos")]
+pub use log_softmax_backward::MetalLogSoftmaxBackward;
+#[cfg(target_os = "macos")]
 pub use memory::MetalMemory;
 #[cfg(target_os = "macos")]
 pub use mse::MetalMse;
 #[cfg(target_os = "macos")]
 pub use nll::{MetalNll, NllLayout};
+#[cfg(target_os = "macos")]
+pub use norm_backward::MetalNormBackward;
 #[cfg(target_os = "macos")]
 pub use ops::MetalBackendOps;
 #[cfg(target_os = "macos")]

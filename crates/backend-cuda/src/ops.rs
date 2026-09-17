@@ -4607,6 +4607,127 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::rmsnorm_backward`] の CUDA
+    /// 実装（イシュー #1950）。[`Self::rmsnorm`] と同じ `row_norm_layout`
+    /// 導出・`contiguous()`／`as_slice()` イディオムで
+    /// `crate::norm_backward::CudaNormBackward::run_rmsnorm_backward_f32`
+    /// （新設・recompute-in-backward。forward カーネルとは独立）を呼ぶ。
+    fn rmsnorm_backward(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        dy: &Tensor<f32>,
+        eps: f32,
+    ) -> Result<(Tensor<f32>, Option<Tensor<f32>>), BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        if dy.shape() != x.shape() {
+            return Err(BackendError::ShapeMismatch(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: dy.shape().to_vec(),
+                    rhs: x.shape().to_vec(),
+                },
+            ));
+        }
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("rmsnorm_backward: input not contiguous".into())
+        })?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("rmsnorm_backward: weight not contiguous".into())
+            })?),
+            None => None,
+        };
+        let dy_owned = dy.contiguous();
+        let dy_slice = dy_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("rmsnorm_backward: dy not contiguous".into())
+        })?;
+
+        let norm_backward = self.with_driver_call(&[], map_fused_kernel_init_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_norm_backward(&device)
+        })?;
+        let (dx, dw) = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                norm_backward
+                    .run_rmsnorm_backward_f32(x_slice, w_slice, dy_slice, eps, rows, hidden)
+            },
+        )?;
+        let dx_t = Tensor::new(dx, x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let dw_t = match dw {
+            Some(dw) => Some(Tensor::new(dw, &[hidden]).map_err(BackendError::ShapeMismatch)?),
+            None => None,
+        };
+        Ok((dx_t, dw_t))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::layer_norm_backward`] の CUDA
+    /// 実装（イシュー #1950）。[`Self::rmsnorm_backward`] と同型。
+    fn layer_norm_backward(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        has_bias: bool,
+        dy: &Tensor<f32>,
+        eps: f32,
+    ) -> Result<fandhe_ai_tensor_core::LayerNormBackwardOutput, BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        if dy.shape() != x.shape() {
+            return Err(BackendError::ShapeMismatch(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: dy.shape().to_vec(),
+                    rhs: x.shape().to_vec(),
+                },
+            ));
+        }
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("layer_norm_backward: input not contiguous".into())
+        })?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed(
+                    "layer_norm_backward: weight not contiguous".into(),
+                )
+            })?),
+            None => None,
+        };
+        let dy_owned = dy.contiguous();
+        let dy_slice = dy_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("layer_norm_backward: dy not contiguous".into())
+        })?;
+
+        let norm_backward = self.with_driver_call(&[], map_fused_kernel_init_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_norm_backward(&device)
+        })?;
+        let shape = crate::norm_backward::NormBackwardShape { rows, hidden };
+        let (dx, dw, db) = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                norm_backward
+                    .run_layer_norm_backward_f32(x_slice, w_slice, has_bias, dy_slice, eps, shape)
+            },
+        )?;
+        let dx_t = Tensor::new(dx, x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let dw_t = match dw {
+            Some(dw) => Some(Tensor::new(dw, &[hidden]).map_err(BackendError::ShapeMismatch)?),
+            None => None,
+        };
+        let db_t = match db {
+            Some(db) => Some(Tensor::new(db, &[hidden]).map_err(BackendError::ShapeMismatch)?),
+            None => None,
+        };
+        Ok((dx_t, dw_t, db_t))
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::batch_norm_train`] の CUDA
     /// 実装（イシュー #1735・親 #1608）。[`Self::layer_norm`] と同じ
     /// `contiguous()`→`as_slice()` 取り出し方針だが、チャネル軸の
@@ -5171,6 +5292,68 @@ impl BackendOps for CudaBackendOps {
             || softmax.run_softmax_f32(x_slice, rows, cols),
         )?;
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::log_softmax_backward`] の
+    /// CUDA 実装（イシュー #1949）。`softmax` オーバーライドと同じ構成:
+    /// [`row_softmax_layout`] が非最終軸を `Ok(None)` として区別する
+    /// 契約に従い、その場合はデフォルトの `Unsupported`（`grad::vjp` の
+    /// `Op::LogSoftmax` 分岐がホスト参照実装
+    /// `grad::log_softmax_vjp_along` へフォールバックする合図）と同じ
+    /// 挙動を返す。最終軸の場合は `context_cache::
+    /// cached_log_softmax_backward`・`CudaLogSoftmaxBackward::
+    /// run_log_softmax_backward_f32` を呼ぶ（融合プランを経由しない
+    /// 独立入口。`softmax` と同型）。
+    fn log_softmax_backward(
+        &self,
+        out: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        dim: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let Some((rows, cols)) =
+            row_softmax_layout(out.shape(), dim).map_err(BackendError::ShapeMismatch)?
+        else {
+            return Err(BackendError::Unsupported(
+                "log_softmax_backward: CUDA 行カーネルは最終軸限定（非最終軸はホスト参照実装へ委ねる）"
+                    .into(),
+            ));
+        };
+        if out.shape() != upstream.shape() {
+            return Err(BackendError::ShapeMismatch(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: out.shape().to_vec(),
+                    rhs: upstream.shape().to_vec(),
+                },
+            ));
+        }
+
+        let out_owned = out.contiguous();
+        let out_slice = out_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("log_softmax_backward: out not contiguous".into())
+        })?;
+        let upstream_owned = upstream.contiguous();
+        let upstream_slice = upstream_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("log_softmax_backward: upstream not contiguous".into())
+        })?;
+
+        let log_softmax_backward =
+            self.with_driver_call(&[], map_fused_kernel_init_error, || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_log_softmax_backward(&device)
+            })?;
+        let dx = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                log_softmax_backward.run_log_softmax_backward_f32(
+                    out_slice,
+                    upstream_slice,
+                    rows,
+                    cols,
+                )
+            },
+        )?;
+        Tensor::new(dx, out.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::release_cached_device_memory`] の CUDA 実装

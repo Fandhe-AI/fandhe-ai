@@ -41,12 +41,12 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
     DispatchFailureCell, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
-    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams,
-    QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape,
-    im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
-    pool2d_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    InterpolateMode, KlDivTarget, LayerNormBackwardOutput, LstmPointwiseOutput, MatrixNormOrd,
+    MseReduction, Pool2dParams, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
+    ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, adaptive_pool2d_out_shape,
+    batch_norm_layout, gather_out_shape, im2col_out_shape, interpolate_out_shape_for_mode,
+    one_hot_out_shape, pad_out_shape, pool2d_out_shape, reduce_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::context::MetalContext;
@@ -109,6 +109,87 @@ fn map_reduce_prepare_error(err: crate::reduce_model::ReducePrepareError) -> Bac
             BackendError::Unsupported(err.to_string())
         }
     }
+}
+
+/// `argmax`／`argmin`（イシュー #1951）共通の実装。`kind` で切替える
+/// 以外は完全に対称（`fandhe_ai_backend_cpu::reduction::{argmax,
+/// argmin}` の CPU 側実装と同じ構成方針）。エラー契約・段取りは
+/// `MetalBackendOps::argmax`／`argmin` doc 参照。
+fn metal_argext(
+    a: &Tensor<f32>,
+    dim: Option<usize>,
+    kind: crate::reduce::ArgExtKind,
+) -> Result<Tensor<i32>, BackendError> {
+    let op_name = match kind {
+        crate::reduce::ArgExtKind::Max => "argmax",
+        crate::reduce::ArgExtKind::Min => "argmin",
+    };
+    let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+    let shape = a.shape().to_vec();
+
+    if shape.contains(&0) {
+        if dim.is_none() {
+            // `numel == 0`: CPU `reduction::argmax`／`argmin` は単位元を
+            // 持たないため `EmptyReduction` を返す。`reduce_error_to_
+            // backend_error` の `"argmax"`／`"argmin"` は `else` 分岐
+            // （`KernelLaunchFailed`）に落ちるため、ここでも同じ分類へ
+            // 直接写像する（同一形状に対し CPU／Metal で同じエラー
+            // 分類になることを保証する）。
+            return Err(BackendError::KernelLaunchFailed(format!(
+                "empty reduction for op \"{op_name}\""
+            )));
+        }
+        if out_shape.contains(&0) {
+            // 空出力（`dim` 以外のいずれかの軸が 0）: 添字も 0 件。
+            return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+        }
+        // `dim=Some(axis)` かつ `shape[axis]==0` のみ（他軸は非零）:
+        // 空縮約でありエラー（CPU と同じ `EmptyReduction` 相当）。
+        return Err(BackendError::KernelLaunchFailed(format!(
+            "empty reduction for op \"{op_name}\""
+        )));
+    }
+
+    let numel =
+        crate::gather_scatter_model::checked_numel(&shape).map_err(BackendError::ShapeMismatch)?;
+
+    // カーネル `uint`／`i32` 引数の上限超過を、デバイス初期化
+    // （`context_cache::cached_context`）より前に先出しして検査する。
+    // `Var::argmax`／`argmin` はホスト参照実装（`eval::argmax`／
+    // `argmin`）へのフォールバックを持つため、この `Unsupported` は
+    // ホストへ迂回される（`sum` とは異なる）。
+    let axis_plan = match dim {
+        None => {
+            crate::reduce_model::plan_argext_all(numel).map_err(map_reduce_prepare_error)?;
+            None
+        }
+        Some(axis) => Some(
+            crate::reduce_model::plan_argext_axis(&shape, axis)
+                .map_err(map_reduce_prepare_error)?,
+        ),
+    };
+
+    let a_owned = a.contiguous();
+    let a_slice = a_owned.as_slice().ok_or_else(|| {
+        BackendError::KernelLaunchFailed(format!("{op_name}: input not contiguous"))
+    })?;
+
+    let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+    let reduce = context_cache::cached_reduce(&ctx)
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+    let data: Vec<i32> = match axis_plan {
+        None => {
+            let value = reduce
+                .run_arg_all_f32(&ctx, a_slice, kind)
+                .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+            vec![value]
+        }
+        Some(plan) => reduce
+            .run_arg_axis_f32(&ctx, a_slice, plan.outer, plan.axis_len, plan.inner, kind)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?,
+    };
+    Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
 }
 
 fn map_sort_prepare_error(err: crate::sort_model::SortPrepareError) -> BackendError {
@@ -352,6 +433,25 @@ fn map_pooling_error(err: MetalError) -> BackendError {
         MetalError::InvalidPoolingShape { .. } => {
             BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
         }
+        other => BackendError::KernelLaunchFailed(other.to_string()),
+    }
+}
+
+/// `norm_backward::MetalNormBackward::run_rmsnorm_backward_f32`／
+/// `run_layer_norm_backward_f32` のエラーを `BackendOps::
+/// rmsnorm_backward`／`layer_norm_backward` の戻り値へ変換する
+/// （イシュー #1953）。[`MetalError::InvalidRowKernelShape`]（`hidden`
+/// の `2^24` 上限・`row_kernel::validate_row_kernel_launch` の
+/// `i32::MAX` 上限超過等、起動前 fail-closed 検査の失敗）**のみ**
+/// [`BackendError::Unsupported`] へ写像し、`fandhe_ai_autodiff` 側の
+/// ホストフォールバック（`grad::rmsnorm_vjp_rows`／
+/// `layer_norm_vjp_rows`）へ委ねる（`map_batch_norm_error`／
+/// `map_pooling_error` と同じ設計判断）。それ以外（デバイス・パイプ
+/// ライン起動失敗等）は `KernelLaunchFailed` へ変換する（判定迂回経路を
+/// 作らない。`.claude/rules/security.md` A08）。
+fn map_norm_backward_error(err: MetalError) -> BackendError {
+    match err {
+        MetalError::InvalidRowKernelShape { .. } => BackendError::Unsupported(err.to_string()),
         other => BackendError::KernelLaunchFailed(other.to_string()),
     }
 }
@@ -2784,20 +2884,110 @@ impl BackendOps for MetalBackendOps {
         ))
     }
 
-    /// `argmax`（イシュー #1720）は GPU カーネル未実装。`Var::argmax`
-    /// はホスト参照実装（`eval::argmax`）へフォールバックする。
-    fn argmax(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::argmax: argmax カーネル未実装（イシュー #1720 スコープ外）".into(),
-        ))
+    /// `argmax`（イシュー #1951）。`crate::reduce::MetalReduce` の
+    /// argmax カーネル（全要素 2 段・単一軸 1 段。CPU 参照実装
+    /// `fandhe_ai_backend_cpu::reduction::argmax` と添字が完全一致する
+    /// 契約）へ結線する。エラー契約は [`Self::sum`] と対称
+    /// （`docs/backend-metal-reduce-sum-design.md` §11「サイズ上限・
+    /// エラー契約」参照）:
+    /// 1. 空縮約（`dim=None` かつ `numel==0`、または `dim=Some(axis)`
+    ///    かつ `shape[axis]==0` で他軸が非零）は CPU `reduction::argmax`
+    ///    と同じ `EmptyReduction` 相当のエラー
+    ///    （`BackendError::KernelLaunchFailed`）を GPU 起動なしで返す
+    ///    （`reduce_error_to_backend_error` の `"argmax"`／`"argmin"`
+    ///    分岐と同じ写像。CPU と Metal で同一形状に対し同一のエラー
+    ///    分類が返る）。
+    /// 2. `out_shape` に 0 を含む形状（空出力）は空 `Tensor` を返す。
+    /// 3. `checked_numel` で要素数積のオーバーフローを検査する。
+    /// 4. `reduce_model::plan_argext_all`／`plan_argext_axis`（`sum`
+    ///    用の `plan_reduce_*` に加えて添字が `i32` 範囲へ収まる形状か
+    ///    どうかも検査する）を先出しし、カーネル `uint` 引数の上限
+    ///    超過・添字が `i32` 範囲を超えうる形状は `Unsupported` へ
+    ///    写像する。`Var::argmax` はホスト参照実装（`eval::argmax`）
+    ///    フォールバックを持つため、この `Unsupported` は `sum` とは
+    ///    異なりホストへ迂回される。
+    fn argmax(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        metal_argext(a, dim, crate::reduce::ArgExtKind::Max)
     }
 
-    /// [`Self::argmax`] と同じ理由・同じ方針（イシュー #1720 スコープ
-    /// 外）。
-    fn argmin(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::argmin: argmin カーネル未実装（イシュー #1720 スコープ外）".into(),
-        ))
+    /// [`Self::argmax`] と対称（イシュー #1951。`v < best` のみ更新）。
+    fn argmin(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        metal_argext(a, dim, crate::reduce::ArgExtKind::Min)
+    }
+
+    /// `log_softmax` backward（`dx = g − exp(y)·Σ_dim(g)`。イシュー
+    /// #1952・親 #1947）。`crate::log_softmax_backward::
+    /// MetalLogSoftmaxBackward` の 2 カーネル（lane 単位の
+    /// `Σ_dim(g)`・要素単位の `dx` 計算）へ結線する。数値契約は
+    /// `BackendOps::log_softmax_backward` trait doc・`shaders/
+    /// log_softmax_backward.metal` 冒頭コメント参照（`exp(y)` 自体の
+    /// 丸めは bit 一致を主張せず REQ-2 統一複合判定で検証する）。
+    ///
+    /// `sum` と異なり任意の `dim`（最終軸限定ではない）を受理する
+    /// （`crate::log_softmax_backward::MetalLogSoftmaxBackward::
+    /// run_f32` がカーネルへ渡す `outer`／`axis_len`／`inner` 分解は
+    /// `reduce_sum_axis_f32` と同じ添字規約のため軸位置に依存しない）。
+    ///
+    /// 手順（`Self::sum` と対称）: 1. shape 一致検査。2. `dim` 範囲
+    /// 検査。3. 空 shape（`0` を含む）は空 `Tensor` を早期 return（GPU
+    /// 非接触）。4. `reduce_model::plan_reduce_axis` を先出しして
+    /// カーネル `uint` 引数の上限超過を検査し `Unsupported` へ写像する
+    /// （`Op::LogSoftmax` の VJP は `Unsupported` のときのみホスト
+    /// フォールバックへ委ねる契約。`grad.rs` の 3 分岐ディスパッチ
+    /// 参照）。5. 両入力 `contiguous()`。6. `context_cache::
+    /// cached_log_softmax_backward` 経由でカーネルを実行する。
+    fn log_softmax_backward(
+        &self,
+        out: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        dim: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        require_same_shape(out.shape(), upstream.shape()).map_err(BackendError::ShapeMismatch)?;
+        let shape = out.shape().to_vec();
+        if dim >= shape.len() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: shape.clone(),
+                rhs: vec![dim],
+            }));
+        }
+        if shape.contains(&0) {
+            return Tensor::new(Vec::new(), &shape).map_err(BackendError::ShapeMismatch);
+        }
+
+        // カーネル `uint` 引数の上限超過を、デバイス初期化
+        // （`context_cache::cached_context`）より前に先出しして検査
+        // する（`Self::sum` の `axis_plan` 先出しと同じ判断）。
+        let plan = crate::log_softmax_backward_model::plan_log_softmax_backward(&shape, dim)
+            .map_err(map_reduce_prepare_error)?;
+
+        let out_owned = out.contiguous();
+        let out_slice = out_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed(
+                "log_softmax_backward: out not contiguous after contiguous()".into(),
+            )
+        })?;
+        let upstream_owned = upstream.contiguous();
+        let upstream_slice = upstream_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed(
+                "log_softmax_backward: upstream not contiguous after contiguous()".into(),
+            )
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let kernel = context_cache::cached_log_softmax_backward(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let data = kernel
+            .run_f32(
+                &ctx,
+                out_slice,
+                upstream_slice,
+                plan.outer,
+                plan.axis_len,
+                plan.inner,
+            )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(data, &shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）は
@@ -3881,6 +4071,116 @@ impl BackendOps for MetalBackendOps {
             .run_layer_norm_f32(&ctx, x_slice, w_slice, b_slice, eps, rows, hidden)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::rmsnorm_backward`] の Metal
+    /// 実装（イシュー #1953・親 #1947。CUDA 側 #1950 と同じ
+    /// recompute-in-backward 方式）。`x`／`weight`／`dy` は
+    /// `.contiguous()` してから起動する（forward `rmsnorm` と同じ理由:
+    /// `grad::vjp` は `Unsupported` 以外を伝播するため、ホスト経路が
+    /// 受理していた非連続レイアウトを拒否すると学習が退行する）。
+    /// `MetalError::InvalidRowKernelShape`（`hidden` の `2^24` 上限・
+    /// `i32::MAX` 上限超過等の起動前検査失敗）のみ `Unsupported` へ写像
+    /// してホスト参照実装〈`grad::rmsnorm_vjp_rows`〉へフォールバック
+    /// させ、それ以外（実際のカーネル起動失敗）は伝播する
+    /// （`.claude/rules/security.md` A08 の判定迂回経路を作らない方針）。
+    fn rmsnorm_backward(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        dy: &Tensor<f32>,
+        eps: f32,
+    ) -> Result<(Tensor<f32>, Option<Tensor<f32>>), BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        if dy.shape() != x.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: dy.shape().to_vec(),
+                rhs: x.shape().to_vec(),
+            }));
+        }
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("rmsnorm_backward: input not contiguous".into())
+        })?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed("rmsnorm_backward: weight not contiguous".into())
+            })?),
+            None => None,
+        };
+        let dy_owned = dy.contiguous();
+        let dy_slice = dy_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("rmsnorm_backward: dy not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let norm_backward = context_cache::cached_norm_backward(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (dx, dw) = norm_backward
+            .run_rmsnorm_backward_f32(&ctx, x_slice, w_slice, dy_slice, eps, rows, hidden)
+            .map_err(map_norm_backward_error)?;
+        let dx_t = Tensor::new(dx, x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let dw_t = dw
+            .map(|dw| Tensor::new(dw, &[hidden]).map_err(BackendError::ShapeMismatch))
+            .transpose()?;
+        Ok((dx_t, dw_t))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::layer_norm_backward`] の
+    /// Metal 実装（イシュー #1953・親 #1947）。[`Self::rmsnorm_backward`]
+    /// と同じ入力契約・フォールバック規律。
+    fn layer_norm_backward(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        has_bias: bool,
+        dy: &Tensor<f32>,
+        eps: f32,
+    ) -> Result<LayerNormBackwardOutput, BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        if dy.shape() != x.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: dy.shape().to_vec(),
+                rhs: x.shape().to_vec(),
+            }));
+        }
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("layer_norm_backward: input not contiguous".into())
+        })?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_slice = match &w_owned {
+            Some(w) => Some(w.as_slice().ok_or_else(|| {
+                BackendError::KernelLaunchFailed(
+                    "layer_norm_backward: weight not contiguous".into(),
+                )
+            })?),
+            None => None,
+        };
+        let dy_owned = dy.contiguous();
+        let dy_slice = dy_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("layer_norm_backward: dy not contiguous".into())
+        })?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let norm_backward = context_cache::cached_norm_backward(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let (dx, dw, db) = norm_backward
+            .run_layer_norm_backward_f32(
+                &ctx, x_slice, w_slice, has_bias, dy_slice, eps, rows, hidden,
+            )
+            .map_err(map_norm_backward_error)?;
+        let dx_t = Tensor::new(dx, x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let dw_t = dw
+            .map(|dw| Tensor::new(dw, &[hidden]).map_err(BackendError::ShapeMismatch))
+            .transpose()?;
+        let db_t = db
+            .map(|db| Tensor::new(db, &[hidden]).map_err(BackendError::ShapeMismatch))
+            .transpose()?;
+        Ok((dx_t, dw_t, db_t))
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::batch_norm_train`] の Metal

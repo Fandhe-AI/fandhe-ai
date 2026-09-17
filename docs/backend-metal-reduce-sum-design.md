@@ -144,8 +144,9 @@ CPU 参照実装（`fandhe_ai_backend_cpu::reduction::sum`）と **bit 完全
 ## 8. スコープ外（後続イシューへ引き継ぐ）
 
 - `max`／`min`／`mean` の Metal カーネル自体（`sum` は #1896 で結線
-  済み。`mean` は `sum` の結果をホスト側で 1 回除算する合成実装の
-  ため対象外のまま自動的に有効化されている）
+  済み。`argmax`／`argmin` は #1951 で実装済み〈§11〉。`mean` は
+  `sum` の結果をホスト側で 1 回除算する合成実装のため対象外のまま
+  自動的に有効化されている）
 - M4 Max 実機での結線後の実測（§9・11 件の backward テスト判定不能の
   解消確認を含む。`docs/perf/logs/metal-reduce-sum-wiring-1896/
   README.md` へ申し送り）
@@ -286,3 +287,146 @@ pass。フル実行（`--all-features --no-fail-fast -- --ignored`）は 411 pas
   `Var::sum(Some(dim))` が `Err(AutodiffError::Backend(BackendError::
   Unsupported(_)))` を返すことを機械的に固定（`cast.rs` のフィクス
   チャと同型。判定迂回経路を作らない `.claude/rules/security.md` A08）
+
+## 11. argmax／argmin（イシュー #1951）
+
+### 11.1 契約の核心
+
+- **単一軸（`dim=Some(axis)`）**: `sum` と同じく CPU `axis_arg_reduce`
+  （出力要素ごとに独立して縮約軸を昇順に逐次走査）を **逐語再現**する。
+  1 スレッド = 1 lane で `best_idx=0`／`best` 未確定から開始し、NaN は
+  スキップ、`v > best`（argmax）／`v < best`（argmin）の strict 比較の
+  ときのみ更新する。
+- **全要素（`dim=None`）**: CPU `arg_slice` は `sum_slice_f64`（`sum`）
+  と異なり**平坦な逐次走査**（チャンク分割しない）。Metal は `sum` と
+  同じ 2 段構成（チャンク内走査 → チャンク間走査）を採るため、逐語
+  再現ではなく**等価性の証明**に依拠する: (1) チャンク内走査で
+  「チャンク内最初に現れる極値」の (キー, グローバル添字) を求め、
+  (2) チャンク番号昇順の走査で strict 置換のみ行う（同値は先行チャンク
+  を保持）。平坦走査の結果は「極値を持つ最小添字」であり、(1) は
+  チャンク内最小添字、(2) の strict 置換は同値時に先行チャンク（＝
+  より小さい添字）を保持するため、2 段構成の結果は全域で平坦走査と
+  一致する。`crate::reduce_model::argext_all_chunked_matches_flat_scan`
+  が全域で機械的に裏付ける。
+- **比較は整数ドメインで行う**: GPU 上の f32 非正規化数は flush され
+  うるため、float の `<`／`>`・`isnan(` を直接使わず、ビットパターン
+  から「NaN は除外・±0 は同値化」した単調 `uint` キー（`crate::
+  reduce_model::arg_key`／`reduce.metal::red_arg_key`）へ変換してから
+  整数比較する。`crate::sort_model::value_key`（NaN を最大キーへ写像）
+  とは NaN の扱いが異なるため独立に定義する。
+
+### 11.2 実装構成
+
+- `crate::reduce_model`: `ArgExtKind`（Max／Min）・`arg_key`・
+  `argext_axis_lane`・`argext_all_chunked`（ホスト逐語モデル・
+  等価性検証テスト込み）・`plan_argext_all`／`plan_argext_axis`
+  （既存 `plan_reduce_*` に `i32` 添字範囲検査を追加）。
+- `shaders/reduce.metal`: `reduce_arg_all_chunk_f32`／
+  `reduce_arg_all_finalize_f32`（全要素 2 段。中間値は `partial_key`／
+  `partial_idx`〈`u32`〉2 本。無効チャンクは `partial_idx=0xFFFFFFFF`）・
+  `reduce_arg_axis_f32`（単一軸 1 段）。`mode`（`constant uint&`。
+  0=Max・1=Min）で切替。`red_f64_*` は使わない（加減算不要）。
+- `crate::reduce::MetalReduce`: `run_arg_all_f32`／`run_arg_axis_f32`
+  （新規パイプライン 3 種を保持）。
+- `crate::ops::metal_argext`（`MetalBackendOps::argmax`／`argmin` 共通
+  ヘルパ）: `reduce_out_shape` → 空縮約判定（CPU
+  `reduce_error_to_backend_error` の `"argmax"`／`"argmin"` 分岐と同じ
+  `BackendError::KernelLaunchFailed` 写像。単位元を持たないため）→
+  `checked_numel` → `plan_argext_all`／`plan_argext_axis` 先出し
+  （`i32` 範囲超過は `Unsupported` へ写像しホストフォールバックへ委ねる。
+  `Var::argmax`／`argmin` は `sum` と異なりホスト参照実装
+  〈`eval::argmax`／`argmin`〉フォールバックを持つ）→
+  `context_cache::cached_reduce` 経由でカーネル起動。
+
+### 11.3 サイズ上限・エラー契約
+
+- カーネル引数は `uint`（既存 `plan_reduce_*` と同じ `u32::MAX` 上限）。
+- 出力は `int`。CPU `build_index_tensor` の `IndexRangeOverflow` は
+  **データ依存**（選ばれた添字が `i32::MAX` 超のときのみ）だが、
+  Metal 側は形状だけから判定できる十分条件（全要素: `numel >
+  i32::MAX`・単一軸: `axis_len > i32::MAX`）を `plan_argext_all`／
+  `plan_argext_axis` で検査し、該当時は `Unsupported` へ写像して
+  ホスト参照実装（同じデータ依存エラー契約を持つ）へ委ねる。
+- 空縮約は CPU と同じくエラー（`sum` のようにゼロ埋めしない）。
+
+### 11.4 テスト構成・実機実測
+
+- Linux 実行可能: `reduce_model.rs` 単体テスト（CPU 参照実装との
+  全域一致・チャンク境界タイ・NaN・±0・平坦走査との等価性・plan の
+  `i32` 境界）・`reduce_source_evidence.rs`（MSL 文字列証跡: カーネル
+  宣言・境界検査・`mode` 引数・`red_f64_*` 非参照・ビットキー比較）・
+  `backend_ops_real_device.rs::argmax_argmin_shape_errors_without_
+  device_init`（形状由来エラー経路がデバイス初期化を要しないこと）。
+- macOS 実機 `#[ignore]`: `reduce_parity.rs`（起動 API 直叩き。全要素・
+  単一軸・タイ・NaN・run-to-run 決定性）・`backend_ops_real_device.rs::
+  backend_ops_argmax_argmin_match_cpu_exact`（`BackendOps` 経由。
+  transpose view 込み）・`facade/tests/reduce_backend_parity.rs::
+  metal_argmax_and_argmin_match_cpu_exact`。**M4 Max 実機実測は本
+  実装セッション（Linux 環境。Apple Silicon 実機への到達手段なし）
+  では未実施のまま Mac セッションへ申し送り**（`docs/perf/logs/
+  metal-argext-1951/README.md` に実行手順・事前登録判定規則を記載）。
+
+## 12. 追補（イシュー #1952）: `log_softmax` backward の Metal カーネル
+
+`Op::LogSoftmax` の VJP（`dx = g − exp(y)·Σ_dim(g)`。`fandhe_ai_autodiff::
+grad::log_softmax_vjp_along` と同一式）の GPU ホストフォールバック残存
+（親 #1947）を、`crate::log_softmax_backward::MetalLogSoftmaxBackward`
+（`log_softmax_backward.rs`・`shaders/log_softmax_backward.metal`）で
+解消した。`BackendOps::log_softmax_backward`（`crates/tensor-core/src/
+backend_ops.rs`。#1949 と共有の trait 拡張）を `MetalBackendOps::
+log_softmax_backward`（`ops.rs`）でオーバーライドする。
+
+### 12.1 カーネル構成（2 段。`reduce_sum_axis_f32` の分解を再利用）
+
+1. `log_softmax_bwd_lane_sum`: 1 thread = 1 lane（`outer×inner` 個。
+   `reduce_sum_axis_f32` と同じ添字規約）。`Σ_dim(g)` を `0.0` から
+   index 昇順に `lsb_f64_widen`／`lsb_f64_add` で逐次和し、**narrow
+   せず** `f64` bit（`ulong`）のまま `lane_sum` へ書く。
+2. `log_softmax_bwd_apply_f32`: 1 thread = 1 要素（`numel` 個）。
+   `e = precise::exp(y[gid])` → `lsb_f64_widen` → `lsb_f64_mul`
+   （`lane_sum` との積・1 回の丸め）→ `lsb_f64_sub`（`widen(g[gid])`
+   からの減算・1 回の丸め）→ `lsb_f64_narrow` で 1 回だけ `f32` へ
+   downcast する。
+
+`lsb_f64_*` は `layer_norm.metal::ln_f64_*`（widen／neg／add／sub／
+narrow／精密乗算一式）の接頭辞置換のみの逐語複製（`reduce.metal::
+red_f64_*` は加算のみのため乗算を持たず、本イシューでは
+`layer_norm.metal` 側を複製元に選んだ）。ドリフトは `tests/
+log_softmax_backward_source_evidence.rs` が機械検証する。
+
+### 12.2 数値契約
+
+**bit 一致を主張する範囲**は (1) の縮約と (2) の `f64` 連鎖（ウィデン
+→ 乗算 → 減算 → narrow）のみ。**`exp(y)` 自体の丸めは bit 一致を
+主張しない**（Metal `precise::exp` とホスト `f32::exp` の丸めは規格上
+一致が保証されない）。実機の最終出力（`exp` の丸め差を含む）は REQ-2
+統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で検証する
+契約とし、`y=0`（`exp(0)=1.0` 厳密丸め）・`y=-inf`（`exp(-inf)=0.0`
+厳密丸め）の行に限り bit 完全一致を実機テストで直接検証する
+（`log_softmax_backward_parity.rs`）。ホスト側逐語モデル（`crate::
+log_softmax_backward_model`）は `exp` の bit 表現を入力として受け取る
+形にし、Linux（本実装環境）でも `f64` 連鎖の bit 一致を機械検証する。
+
+`Var::log_softmax` は最終軸限定契約だが、本カーネルは `sum` と同じ
+添字分解のため**任意の `dim`**（非最終軸を含む）を受理する。
+
+### 12.3 テスト構成・実機実測
+
+- Linux 実行可能: `log_softmax_backward_model.rs` 単体テスト（`f64`
+  参照実装との縮約・乗算・減算の bit 一致・相殺列・overflow 回避・
+  `y=0`／`y=-inf` 行の全体一致・`plan_log_softmax_backward` の境界）・
+  `tests/log_softmax_backward_source_evidence.rs`（MSL 文字列証跡:
+  カーネル宣言・境界検査・`precise::exp` 使用・narrow 非使用・
+  `lsb_f64_*` 使用・`layer_norm.metal` とのドリフトガード）・
+  `crates/autodiff/tests/log_softmax_backward_dispatch.rs`（3 分岐
+  ディスパッチ。#1949 と共有）。
+- macOS 実機 `#[ignore]`: `log_softmax_backward_parity.rs`（起動 API
+  直叩き。複数 rank・複数 dim・REQ-2 複合判定・`y=0`／`y=-inf` 行の
+  bit 完全一致・run-to-run 決定性・`BackendOps` 経由との一致）・
+  `facade/tests/softmax_backend_parity.rs::
+  metal_log_softmax_backward_matches_cpu`（`matmul → log_softmax →
+  mse_loss` backward の facade 到達経路）。**M4 Max 実機実測は本実装
+  セッション（Linux 環境。Apple Silicon 実機への到達手段なし）では
+  未実施のまま Mac セッションへ申し送り**（`docs/perf/logs/
+  metal-log-softmax-backward-1952/README.md` に実行手順・事前登録
+  判定規則を記載）。
