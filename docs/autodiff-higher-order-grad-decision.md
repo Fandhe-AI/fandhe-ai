@@ -186,4 +186,77 @@
 - `crates/facade/src/lib.rs:35-90`
 - `crates/facade/tests/api_surface.rs:66-113`
 
+## 13. 実装記録（#1942・段階 2「部分実装」）
+
+自動運転（ユーザー承認待ちを介さない実装 issue）のため、§10 承認事項の
+うち内部クレート限定の範囲（trait／API の新規追加は `fandhe_ai_autodiff`
+非公開のまま）に限定して実装した。**facade 公開（承認事項 5）は未承認の
+まま不実施**。
+
+- **実装物**: `crates/autodiff/src/create_graph.rs`（新規モジュール）に
+  `Tape::backward_create_graph(&self, loss: &Var<'_>, child: &'c Tape) ->
+  Result<CreateGraphResult<'c>, AutodiffError>` と戻り値型
+  `CreateGraphResult<'c>`（`first_order()`・`grad()`・`child_var()`）を
+  実装した。`tape.rs` に `Op::supports_create_graph()`（新設。
+  `pub(crate)`・網羅 match）・`Tape::has_registered_checkpoints()`（新設）
+  を追加し、`Op::for_each_input` を `pub(crate)` へ可視性緩和した
+  （本体・網羅性は無変更）。
+- **§10 承認事項の採否（本実装時点の確定）**:
+  1. `docs/fusion-graph-design.md` §3.3 解釈拡張 → 採用（子テープ上の
+     再生は対象外という解釈のまま実装）。
+  2. `ops` 供給方式 → §7 の (i)（呼び出し側が子 `Tape` を渡す）を採用。
+  3. 1 階勾配の bit 同一性 → §9 の選択肢 (i)（2 パス方式）を採用。
+     `backward_create_graph` は既存 `Tape::backward`（無変更）をそのまま
+     呼ぶため、1 階勾配は単体で `backward` を呼んだ場合と bit 同一
+     （`tests/create_graph.rs::create_graph_first_order_matches_plain_
+     backward_and_leaves_parent_intact` で確認）。
+  4. エラー契約 → 既存 `AutodiffError::Backward(String)` を流用（専用
+     variant は新設せず）。
+  5. facade 公開 → **未承認のまま不実施**（内部クレート限定）。
+  6. 対象 Op の初期スコープ → `Leaf`・`Add`・`Mul`・`Relu`・`Exp`・
+     `Tanh`・`Sigmoid`・`Sum`・`Mean`・`Reshape`・`BroadcastTo` の 11
+     variant のみ実装（§8「対象」区分のうち `MatMul`・
+     `ScalarUnary`／`ScalarBinary`・`Transpose`／`Permute`／`Narrow`／
+     `Concat`／`Contiguous`／`Where`／`MaskedFill`／`Gather`／
+     `Scatter`／`Pad`／`MseLoss`／`CrossEntropyLoss` は未実装のまま
+     `Op::supports_create_graph() == false` に残し、#1943 等の後続
+     イシューへ引き継ぐ）。
+  7. 二階微分の数値判定方式 → 新規 tolerance／baseline は定めない
+     （§6 の方針どおり）。二階側の子テープ上の演算列は既存 VJP
+     ヘルパー（`grad.rs`）とは独立の実装（`Var` 演算の合成）であり
+     bit 同一は主張しない。正しさは有限差分突合（1 階解析勾配
+     `Tape::backward` の中央差分。`create_graph` を経由しない独立経路）
+     ＋代表的合成の閉形式突合で検証した
+     （`crates/autodiff/tests/create_graph.rs`）。
+  8. `Op::supports_create_graph()` 機構 → 新設（上記）。
+  9. 段階 1 実装 issue の起票 → 本 issue（#1942）自体がそれに該当。
+- **機構（設計 doc §8「機構案」の実装）**: 祖先集合は `loss` から
+  `Op::for_each_input` を辿る走査で求め、`requires_grad == false` の
+  ノードでは descend しない（当該部分木はまるごと `child.var_no_grad`
+  の定数葉へ変換し、Op 種別を問わず replay しない。`ResidentLeaf`／
+  `LinearResident`／`LinearAct` は `requires_grad` の値に関わらず値の
+  実体化を試みる前に無条件で `Err` とする）。子テープの葉プレフィックス
+  契約（`Tape::reset` doc）を保つため、葉相当（`Op::Leaf`・
+  `requires_grad == false` の任意ノード）をすべて先に登録してから、
+  残り（`supports_create_graph() == true` の非葉ノード）を昇順で再生
+  する 2 段構成とした。
+- **checkpoint 併用**: `Tape::has_registered_checkpoints()` が親テープに
+  登録済みの checkpoint 区間を検出すると fail-closed に拒否する
+  （checkpoint 済みノードの forward 値解放・再計算経路との統合は §8
+  「checkpoint 区間との相互作用」のとおり本 issue のスコープ外）。
+- **`retain_graph`／`backward_accumulate` との併用**: 子テープは独立の
+  `TapeId`／`epoch` を持ち、`Tape::reset`／drop まで保持され続ける
+  （§9「世代契約」）ため `retain_graph`（#1749）と同型に複数回
+  `child.backward(..)` を呼べる（`tests/create_graph.rs` の Hessian
+  各テストが `x` の成分ごとに `child.backward` を反復呼び出しすること
+  で検証済み）。`backward_accumulate` との組み合わせは対象外のまま
+  （§9 の方針を維持）。
+- **数値実測**: CPU（`common::naive_ops()`。ホスト参照実装）でのみ
+  実装・検証した。CUDA／Metal は機構上同一経路（`Var` 演算の合成の
+  みで新規カーネルを追加していない）だが実機実測は未実施のまま Mac／
+  GB10 セッションへ申し送る。
+- **facade／compat-api-scope への反映**: `docs/compat-api-scope.md`
+  §1.3「高階微分」行・`docs/compat-feature-gap.md` §2.11 を本追記と
+  同時に更新した（内部クレート限定の部分実装であることを明記）。
+
 内部ホスト名・秘密情報は含めない。
