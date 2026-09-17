@@ -2011,3 +2011,50 @@ bias slot）:
 実機実測（Metal 2 テスト pass・CUDA 非後退）は本エージェント実行環境
 に実機がないため未実施のまま `docs/perf/logs/grad-readout-contract-
 1898/` へ申し送る。
+
+## Adam／AdamW の常駐 step 結線（イシュー #1959）
+
+SGD（`sgd_step_device`／`sgd_step_device_tracked`）に加え、Adam
+（coupled L2 weight decay）・AdamW（decoupled weight decay）の
+1 次・2 次モーメント（`m`／`v`）をデバイス常駐バッファとして保持し、
+`DeviceParamStore::step_adam`／`step_adamw`（`facade::Tape::
+step_device_param_store_adam`／`_adamw`）経由で 1 step をデバイス上
+in-place 実行する経路を追加した。
+
+- **新規 `BackendOps` メソッド**: `adam_step_device`（既定
+  `Unsupported`）・`adam_step_device_tracked`（既定は前者へ委譲）。
+  `SgdStepConfig` と同型の非破壊拡張（デフォルトメソッド追加）。
+  `AdamStepConfig`（`kind: AdamStepKind::{Coupled, Decoupled}`・
+  `beta1`／`beta2`／`eps`／`weight_decay`／`decay_factor`・ホストで
+  事前計算した `step_size`／`bias_correction2_sqrt`）を新設。
+- **数値契約**: `crate::nn::optim::{adam::Adam, adamw::AdamW}` の
+  演算列（`f32::mul_add` を用いる項の並び）を逐語再現し、CPU 実装は
+  ホスト参照実装と **bit 完全一致**する（`crates/backend-cpu/tests/
+  adam_device_parity.rs`）。`beta1_pow_t`／`beta2_pow_t` は `f64`
+  逐次積のままホスト側（`DeviceParamStore` 内部）で保持し、カーネル
+  内では再計算しない（PyTorch の Python float 丸め挙動へ寄せる契約を
+  維持）。
+- **CPU 実装のみ**: CUDA／Metal のカーネルは本イシューのスコープ外
+  （`adam_step_device` の既定 `Unsupported` のまま。
+  `.claude/rules/out-of-scope-tracking.md` 対象。ユーザー承認を得て
+  別イシューへ切り出す）。
+- **CUDA Graph capture 対象外**: `step()`（SGD）が持つ
+  `captured_segment_key`／`run_captured_sgd_step_segment` 経由の
+  capture・replay は Adam 系には実装しない（常に直接実行。実装計画
+  で明示したスコープ縮小）。
+- **状態種別ガード**: 初回 `step_adam`／`step_adamw` 呼び出しで
+  `kind`／`beta1`／`beta2`／`eps`／`weight_decay` を確定し、以後の
+  変更を `BackendError::InvalidArgument` で拒否する（`lr` のみ可変。
+  `AdamW::set_lr` と同じ意味論）。同一ストア上での SGD（`step()`）↔
+  Adam 系の切替も拒否する（`SGD → Adam` 方向。逆方向 `Adam → step()`
+  は `step()` 自身を無変更に保つ設計判断により、`step()` 側では検査
+  せず「SGD として独立に動作し `m`／`v` は無視される」契約とした）。
+- **facade 新規公開面**: `Tape::step_device_param_store_adam`／
+  `_adamw` の 2 メソッドのみ（`AdamConfig`／`AdamWConfig` は既存の
+  `fandhe_ai::optim` 再エクスポートをそのまま渡せる）。
+- **検証**: `crates/backend-cpu/tests/adam_device_parity.rs`（カーネル
+  単体・bit 一致）・`crates/facade/tests/device_param_store_adam_train.rs`
+  （`Sequential::forward_resident` 学習ループ内で毎 step の勾配を
+  `Tape::param_grads_to_host` で読み出し、ホスト `Adam::step`／
+  `AdamW::step` の結果と bit 完全一致で突合。状態種別ガードの拒否系も
+  検証）。CUDA／Metal 実機実測は対象外（未実装のため）。

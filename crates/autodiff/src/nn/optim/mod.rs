@@ -135,8 +135,10 @@ pub use rmsprop::{RmsProp, RmsPropConfig};
 // 公開・`crates/facade/tests/api_surface.rs` の期待集合更新・
 // `docs/compat-api-scope.md` §1.3 optimizer 行の更新も本イシューで完了
 // 済み（`Adam`／`AdamConfig` の純再エクスポート。`crates/facade/src/
-// optim.rs` 参照）。`DeviceParamStore` への結線は非対応のまま
-// （`adam` モジュール doc「`DeviceParamStore` 非対応」節）。
+// optim.rs` 参照）。`DeviceParamStore` への結線はイシュー #1959 で
+// 完了済み（`crate::optim::device_store::DeviceParamStore::step_adam`／
+// `step_adamw`。`adam` モジュール doc「`DeviceParamStore` 結線済み」
+// 節・`facade::Tape::step_device_param_store_adam`／`_adamw`）。
 
 // イシュー #1744（親 #1610）: LAMB（layer-wise adaptive trust ratio。
 // You et al., 2019）を追加した（`lamb` モジュール doc 参照）。`AdamW`・

@@ -16,14 +16,15 @@ use std::sync::OnceLock;
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, ChecksumReadout,
-    Conv2dParams, DType, FusionPlan, GemmChecksum, GruBackwardOutput, GruPointwiseOutput,
-    HuberKind, InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    Pool2dParams, QrFactors, ScatterReduce, SgdStepConfig, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, VectorNormOrd, adaptive_pool2d_out_shape, batch_norm_layout,
-    gather_out_shape, im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape,
-    pad_out_shape, pool2d_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    Activation, AdamStepConfig, AdamStepKind, BackendOps, BatchNormTrainOutput, BceKind,
+    BinaryElementwiseOp, ChecksumReadout, Conv2dParams, DType, FusionPlan, GemmChecksum,
+    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
+    LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams, QrFactors, ScatterReduce,
+    SgdStepConfig, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, VectorNormOrd,
+    adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape, im2col_out_shape,
+    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, pool2d_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape,
+    topk_out_shape,
 };
 
 use crate::batch_norm;
@@ -582,6 +583,113 @@ impl BackendOps for CpuBackendOps {
                 };
             }
             param_handle.data[j] = p - config.lr * g;
+        }
+        Ok(())
+    }
+
+    /// `fandhe_ai_autodiff::nn::optim::{adam::Adam::step, adamw::AdamW::
+    /// step}` の演算列を逐語再現する CPU 実装（イシュー #1959。
+    /// `AdamStepConfig` doc コメント参照）。`sgd_step_device` と同じ
+    /// shape・device 検査パターンを踏襲する。
+    fn adam_step_device(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        m: &mut DeviceBuffer<f32>,
+        v: &mut DeviceBuffer<f32>,
+        config: &AdamStepConfig,
+    ) -> Result<(), BackendError> {
+        if param.device() != Device::Cpu
+            || grad.device() != Device::Cpu
+            || m.device() != Device::Cpu
+            || v.device() != Device::Cpu
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if param.shape() != grad.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: grad.shape().to_vec(),
+            }));
+        }
+        if param.shape() != m.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: m.shape().to_vec(),
+            }));
+        }
+        if param.shape() != v.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: v.shape().to_vec(),
+            }));
+        }
+        let grad_handle = grad
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let m_handle = m
+            .downcast_handle_mut::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let v_handle = v
+            .downcast_handle_mut::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let param_handle = param
+            .downcast_handle_mut::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+
+        // `#[non_exhaustive]` の `AdamStepKind` は将来 variant が増えうる
+        // ため、未知の variant は fail-closed に拒否する（`.claude/rules/
+        // security.md` A08）。ループ本体ではなくここで 1 回だけ検査する
+        // ことで、未知 variant 検出時に `param`／`m`／`v` が部分的に
+        // 更新された状態のまま `Err` を返すことを構造的に防ぐ（他の
+        // 早期 return〈shape／device 不一致〉と同じ「どの要素も更新前」
+        // 契約を維持する）。
+        match config.kind {
+            AdamStepKind::Coupled | AdamStepKind::Decoupled => {}
+            _ => {
+                return Err(BackendError::Unsupported(
+                    "adam_step_device: unknown AdamStepKind variant".into(),
+                ));
+            }
+        }
+
+        for j in 0..param_handle.data.len() {
+            let p = param_handle.data[j];
+            let g = grad_handle.data[j];
+
+            // `Adam::step`（coupled L2）: `weight_decay == 0.0` では
+            // decay 項の演算自体を skip する（`docs/perf` の
+            // bit 一致契約と同じ理由。`AdamStepConfig` doc 参照）。
+            // `AdamW::step`（decoupled）: `g_eff` は常に生の `g`。
+            let g_eff = match config.kind {
+                AdamStepKind::Coupled if config.weight_decay != 0.0 => {
+                    f32::mul_add(config.weight_decay, p, g)
+                }
+                AdamStepKind::Coupled => g,
+                AdamStepKind::Decoupled => g,
+                _ => unreachable!("AdamStepKind variant validated before the loop"),
+            };
+            // `Adam::step` は decay 適用前の `p` をそのまま使う
+            // （coupled 方式は勾配側へ decay を織り込むため）。
+            // `AdamW::step` は `p_eff = p * decay_factor` を先に計算
+            // してから更新式へ渡す（decoupled 方式）。
+            let p_eff = match config.kind {
+                AdamStepKind::Coupled => p,
+                AdamStepKind::Decoupled => p * config.decay_factor,
+                _ => unreachable!("AdamStepKind variant validated before the loop"),
+            };
+
+            let m_new = f32::mul_add(config.beta1, m_handle.data[j], (1.0 - config.beta1) * g_eff);
+            let v_new = f32::mul_add(
+                config.beta2,
+                v_handle.data[j],
+                (1.0 - config.beta2) * g_eff * g_eff,
+            );
+            m_handle.data[j] = m_new;
+            v_handle.data[j] = v_new;
+
+            let denom = v_new.sqrt() / config.bias_correction2_sqrt + config.eps;
+            param_handle.data[j] = p_eff - config.step_size * m_new / denom;
         }
         Ok(())
     }
