@@ -770,6 +770,13 @@ pub enum VectorNormOrd {
 /// `gru_backward` 側に集約する）。
 pub type GruBackwardOutput = (Tensor<f32>, Tensor<f32>, Tensor<f32>);
 
+/// [`BackendOps::layer_norm_backward`] の戻り値型エイリアス（イシュー
+/// #1950）。`(dx, dw, db)`（`dx` は shape 恒等・`dw`／`db` は
+/// `weight`／`has_bias` に応じて `Some`／`None`）。[`GruBackwardOutput`]
+/// と同じ `clippy::type_complexity` 回避のための命名（doc は
+/// `layer_norm_backward` 側に集約する）。
+pub type LayerNormBackwardOutput = (Tensor<f32>, Option<Tensor<f32>>, Option<Tensor<f32>>);
+
 /// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
 /// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
 ///
@@ -3132,6 +3139,88 @@ pub trait BackendOps {
         ))
     }
 
+    /// [`Self::rmsnorm`] の逆伝播（イシュー #1950。`fandhe_ai_autodiff::
+    /// grad::vjp` の `Op::RmsNorm` 分岐から呼ばれる）。
+    ///
+    /// `x`／`dy` は forward（[`Self::rmsnorm`]）と同じ任意 shape（呼び出し元
+    /// が `contiguous()` を適用済みではあるが `[rows, hidden]` へ reshape は
+    /// しない）で渡される。実装は [`Self::rmsnorm`] と同じく
+    /// [`crate::ops_shape::row_norm_layout`] で `x.shape()` から
+    /// `(rows, hidden)` を自ら導出する契約とする（rank 1／rank 3 以上の入力
+    /// も受理する）。`weight` は forward に渡した値と同一のもの（呼び出し元が
+    /// `input`／`weight` ノードを実体化し直して渡す）。
+    ///
+    /// 戻り値は `(dx, dw)`。`dx.shape() == x.shape()` を常に満たす。`dw` は
+    /// `weight.is_some()` のときのみ `Some`（shape `[hidden]`）で、`None`
+    /// のときは常に `None`（forward で乗算していない以上 `weight` への
+    /// 勾配は存在しない）。`rows == 0 || hidden == 0` は `dx` が空・`dw` が
+    /// （`weight` ありなら）ゼロ埋めの `[hidden]` を返す（`Self::rmsnorm`
+    /// の 0 要素契約と対称）。
+    ///
+    /// `dw`（行方向・長軸縮約）の数値方式は `.claude/rules/coding-rust.md`
+    /// 「勾配の長軸縮約の要素積は `f32` で確定してから `f64` へ昇格して
+    /// 蓄積する」契約に従う（各バックエンドの実装がこれを満たす）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::mse_loss_backward`] と同じ非破壊拡張。既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とし、呼び出し元
+    /// （`grad::vjp` の `Op::RmsNorm` 分岐）は `Unsupported` のときのみ
+    /// 既存のホスト参照実装（`grad::rmsnorm_vjp_rows`）へフォールバックする
+    /// （それ以外のエラーは伝播する。判定迂回経路を作らない。
+    /// `.claude/rules/security.md` A08）。
+    fn rmsnorm_backward(
+        &self,
+        _x: &Tensor<f32>,
+        _weight: Option<&Tensor<f32>>,
+        _dy: &Tensor<f32>,
+        _eps: f32,
+    ) -> Result<(Tensor<f32>, Option<Tensor<f32>>), BackendError> {
+        Err(BackendError::Unsupported(
+            "rmsnorm_backward: default fail-safe (no fused RMSNorm backward kernel available)"
+                .into(),
+        ))
+    }
+
+    /// [`Self::layer_norm`] の逆伝播（イシュー #1950。`fandhe_ai_autodiff::
+    /// grad::vjp` の `Op::LayerNorm` 分岐から呼ばれる）。[`Self::
+    /// rmsnorm_backward`] と同じ入力契約（`x`／`dy` は forward と同じ任意
+    /// shape のまま渡され、実装が [`crate::ops_shape::row_norm_layout`] で
+    /// `(rows, hidden)` を自ら導出する。`weight` は forward と同一値）。
+    ///
+    /// `has_bias`（forward で `bias` が `Some` だったか。`weight` の有無とは
+    /// 独立）は `db` を計算するかどうかを決める。`bias` の実データは backward
+    /// では不要（`db = Σ_rows dy` は `bias` の値に依存しない）ため引数に
+    /// 含めない。
+    ///
+    /// 戻り値は `(dx, dw, db)`。`dx.shape() == x.shape()` を常に満たす。
+    /// `dw` は `weight.is_some()` のときのみ `Some`（shape `[hidden]`）、
+    /// `db` は `has_bias` のときのみ `Some`（shape `[hidden]`）。
+    /// `rows == 0 || hidden == 0` は [`Self::rmsnorm_backward`] と同じ
+    /// 0 要素契約（`dx` 空・`dw`／`db` は該当時ゼロ埋め）。
+    ///
+    /// `dw`／`db` の数値方式は [`Self::rmsnorm_backward`] と同じ
+    /// `.claude/rules/coding-rust.md` の長軸縮約契約に従う。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::rmsnorm_backward`] と同じ非破壊拡張・fail-safe・
+    /// フォールバック規律（`grad::layer_norm_vjp_rows` へフォールバック）。
+    fn layer_norm_backward(
+        &self,
+        _x: &Tensor<f32>,
+        _weight: Option<&Tensor<f32>>,
+        _has_bias: bool,
+        _dy: &Tensor<f32>,
+        _eps: f32,
+    ) -> Result<LayerNormBackwardOutput, BackendError> {
+        Err(BackendError::Unsupported(
+            "layer_norm_backward: default fail-safe (no fused LayerNorm backward kernel \
+             available)"
+                .into(),
+        ))
+    }
+
     /// BatchNorm1d／2d の train モード（バッチ統計。イシュー #1732・
     /// 親 #1608・`docs/batch-norm-ops-design.md`）。統計計算と正規化を
     /// 1 カーネルで融合し、内部の `f64` `mean`／`rstd` を `x̂` 書き出し
@@ -4402,6 +4491,24 @@ mod tests {
 
         assert!(matches!(forward, Err(BackendError::Unsupported(_))));
         assert!(matches!(backward, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::rmsnorm_backward`]／[`BackendOps::
+    /// layer_norm_backward`] の既定実装が両方とも fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する
+    /// （イシュー #1950。`mse_loss_default_is_unsupported` と同型の
+    /// ガード）。
+    #[test]
+    fn norm_backward_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let dy = Tensor::new(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]).unwrap();
+
+        let rms = ops.rmsnorm_backward(&x, None, &dy, 1e-5);
+        let ln = ops.layer_norm_backward(&x, None, false, &dy, 1e-5);
+
+        assert!(matches!(rms, Err(BackendError::Unsupported(_))));
+        assert!(matches!(ln, Err(BackendError::Unsupported(_))));
     }
 
     /// [`BackendOps::bce_loss`]／[`BackendOps::bce_loss_backward`] の
