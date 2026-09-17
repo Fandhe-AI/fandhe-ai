@@ -19,7 +19,7 @@
 #   AB_AFTER_FACADE_PATH=/path/to/after/crates/facade \
 #     bash run_ab_sme_cpu.sh 1978
 set -u
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 # shellcheck source=./bench_fandhe_lock_restore.sh
 source ./bench_fandhe_lock_restore.sh
 
@@ -72,9 +72,25 @@ esac
 OUT="results/raw"
 mkdir -p "$OUT"
 SKIP="$OUT/skipped-1978-${DEVICE}-${LABEL}.log"
-: >"$SKIP"
 ANY_FAILED=0
 
+# 同じ LABEL の既存系列は消去しない（RULE.txt: run の差し替え・追加起動はしない）。
+# 既存 JSONL を検出したら書き込み前に終了し、再実行は別ラベルで行わせる
+# （R4 の orchestrate_m4max.sh と同じ fail-closed）。
+for _reset_arm in before after; do
+  for _reset_suffix in gemm train infer; do
+    _existing="$OUT/results-${_reset_arm}-${LABEL}-${DEVICE}-${_reset_suffix}.jsonl"
+    if [[ -e "$_existing" ]]; then
+      echo "error: 既存の計測記録 $_existing があります。差し替え禁止のため別の LABEL で実行してください" >&2
+      exit 1
+    fi
+  done
+done
+if [[ -e "$SKIP" ]]; then
+  echo "error: 既存の失敗記録 $SKIP があります。差し替え禁止のため別の LABEL で実行してください" >&2
+  exit 1
+fi
+: >"$SKIP"
 for _reset_arm in before after; do
   for _reset_suffix in gemm train infer; do
     : >"$OUT/results-${_reset_arm}-${LABEL}-${DEVICE}-${_reset_suffix}.jsonl"
@@ -157,7 +173,14 @@ wait_load_gate() { # wait_load_gate <round>
   local waited=0 status=timeout l1 ok
   while ((waited < 1800)); do
     l1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
-    [[ -z "$l1" ]] && l1=$(awk '{print $1}' /proc/loadavg)
+    [[ -z "$l1" && -r /proc/loadavg ]] && l1=$(awk '{print $1}' /proc/loadavg)
+    # 負荷を取得できない（空・非数値）場合は gate=pass に化けさせず unavailable として
+    # 記録する（実行は継続し系列は参考扱い。RULE.txt の不通過時と同じ扱い）。
+    if [[ -z "$l1" || "$l1" =~ [^0-9.] ]]; then
+      status=unavailable
+      l1=NA
+      break
+    fi
     ok=$(awk -v a="$l1" -v t="$LOAD_GATE" 'BEGIN{print (a<t)?1:0}')
     if [[ "$ok" == "1" ]]; then
       status=pass
@@ -193,8 +216,17 @@ for task in gemm train infer; do
     "$OUT/results-before-${LABEL}-${DEVICE}-${task}.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-${task}.jsonl" \
     >"compare-${task}-1978-${DEVICE}.md" 2>"compare-${task}-1978-${DEVICE}.err"
   COMPARE_EXIT=$?
-  # 非ゼロは「後退セルあり」を含む判定結果であり、計測失敗ではない（記録のみ）。
+  # compare_gemm_ab.py の終了コード: 0 = 非後退・3 = 後退セルあり（いずれも正常な
+  # 判定結果で記録のみ）。2 = 入力不正・空データ、それ以外（python 起動失敗等）は
+  # 比較処理自体の失敗であり、判定結果と区別して非ゼロ終了へ伝播する。
   echo "compare task=$task exit=$COMPARE_EXIT" | tee -a "$OUT/compare-exit-1978-${DEVICE}-${LABEL}.log"
+  case "$COMPARE_EXIT" in
+    0 | 3) ;;
+    *)
+      echo "compare task=$task: 比較不能（exit=$COMPARE_EXIT）。$(tail -3 "compare-${task}-1978-${DEVICE}.err" | tr '\n' ' ')" >>"$SKIP"
+      ANY_FAILED=$((ANY_FAILED + 1))
+      ;;
+  esac
 done
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"
