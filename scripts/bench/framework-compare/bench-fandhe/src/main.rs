@@ -513,7 +513,11 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         mode: "fresh",
         init_s: None,
         parity,
-        tf32: false,
+        // イシュー #1983: `validate_tf32_flag` が `--task gemm --device
+        // cuda` の素の GEMM に限定して受理済みのため、ここでは cli 値を
+        // そのまま反映する（`--tf32` なしなら常に `false`＝結線前と bit
+        // 同一）。
+        tf32: cli.tf32,
         managed: cli.managed,
         device_checksum: cli.device_checksum,
         // イシュー #1350: `--graph` は `--task train` 限定（dispatch の
@@ -615,7 +619,9 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         mode: "reuse",
         init_s: Some(init_s),
         parity: Some(parity),
-        tf32: false,
+        // イシュー #1983: `validate_tf32_flag` が `--task gemm --device
+        // cuda`（reuse 込み）の素の GEMM に限定して受理済み。
+        tf32: cli.tf32,
         managed: cli.managed,
         device_checksum: cli.device_checksum,
         // イシュー #1350: gemm は `--graph` 対象外（dispatch のゲート
@@ -1932,17 +1938,41 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// phases_with_gemm_fresh_is_measure_error` から直接分岐を検証できる
 /// ようにするため。
 ///
-/// **`--tf32`（イシュー #1042）は本バイナリでは常に MEASURE_ERROR で
-/// fail-fast する**: `bench-fandhe` は crates.io 公開版 `fandhe-ai
-/// =0.9.0` に完全固定されており（deps-policy 第 9 区分。
-/// `check_framework_compare` が registry 取得元を fail-closed 検査する
-/// ため path 依存への差し替えは不可）。`fandhe_ai::set_cuda_tf32_gemm_enabled`
-/// 自体は crates.io 公開版から呼び出し可能になったが（承認ピンは v0.5.0 公開
-/// 時点で `>= 0.5.0` を満たしている）、`bench-fandhe`（`main.rs`）側の
-/// 呼び出し結線・`run_all` の tf32 スイープ追加（C-2。
-/// `docs/cuda-tf32-optin-api-decision.md` 参照）は依然未実施のため
-/// fail-fast する。`--phases` の対象外組合せ拒否と同型の allowlist 方式で、
-/// `cli.phases`（`match` の第 3 要素）より先に検査する。
+/// **`--tf32`（イシュー #1042 C-2・#1983 で結線済み）**: CUDA GEMM の
+/// TF32 Tensor Core 経路（`fandhe_ai::set_cuda_tf32_gemm_enabled`。
+/// crates.io 公開版 `fandhe-ai =0.9.0` に無条件公開面として収録済みの
+/// ため `--managed`／`--pinned-h2d`／`--graph` と異なり追加 cargo
+/// feature は不要）を有効化して計測する。受理条件は `--task gemm
+/// --device cuda`（fresh／reuse とも）の**素の GEMM のみ**に限定する
+/// allowlist 方式（`--managed` と同型）で、以下はすべて
+/// `MEASURE_ERROR` で fail-closed 拒否する:
+/// - `task != "gemm"` または `device != "cuda"`: TF32 opt-in は
+///   `CudaBackendOps::gemm` 経路のみに効き `gemm_bias_act`／
+///   `gemm_resident_*`／学習・推論経路（train／infer）は FP32 のまま
+///   のため、許すと「`tf32:true` ラベルだが実態 FP32」という誤ラベル
+///   行を生む
+/// - `cli.phases`: `PhaseRecord` に `tf32` キーがなく FP32 行と
+///   区別不能になる
+/// - `cli.device_checksum`: `matmul_checksum` → `gemm_checksum`
+///   経路の TF32 対応は未検証のため安全側で拒否する
+/// - `cli.managed`／`cli.pinned_h2d`: `summarize.py` (a-tf32) 節の
+///   `get()` は managed／pinned を区別しないため複合条件行の混入を
+///   安全側で拒否する（解禁は別イシュー）
+///
+/// `--graph`（train 限定）・`--metal-split-k`（metal 限定）は
+/// task／device 条件で自動的に排他になるため個別検査は不要。受理時は
+/// `set_cuda_tf32_gemm_enabled(true)` 直後に `cuda_tf32_gemm_enabled()`
+/// を読み戻して反映を確認する（`--managed` と同一の fail-closed 確認
+/// パターン）。本分岐は `AtomicU8` の読み書きのみで CUDA デバイスを
+/// 初期化しないため、`--graph on` コメントが要求する「これより前の
+/// 分岐が CUDA デバイスを初期化しない」契約を壊さない。TF32 カーネル
+/// 使用不能環境ではライブラリ側が `KernelLaunchFailed` で fail-closed
+/// するためそのまま計測失敗（`skipped-cuda.log` 記録）になり、FP32 へ
+/// 黙示フォールバックしない。1 計測 1 プロセス設計のためフラグを
+/// 明示的に戻す必要はない（`--tf32` なしの既定行は `set_cuda_
+/// tf32_gemm_enabled`／`cuda_tf32_gemm_enabled` を一切呼ばないため
+/// bit 同一のまま）。`docs/cuda-tf32-optin-api-decision.md` 追補
+/// （イシュー #1983）参照。
 ///
 /// **`--managed`（イシュー #1353）**: CUDA managed memory 配置
 /// （`fandhe_ai::set_cuda_managed_memory_enabled`。#1352）を有効化して
@@ -1965,13 +1995,65 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// 読み書きのみで CUDA デバイスを初期化しないため、`--graph on` の
 /// コメントが要求する「これより前の分岐が CUDA デバイスを初期化しない」
 /// 契約を壊さない。
-fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if cli.tf32 {
+/// `--tf32` の対象外組合せを fail-closed 拒否する純関数（イシュー
+/// #1983）。`fandhe_ai::set_cuda_tf32_gemm_enabled` を呼ばないため
+/// テストから副作用なく検証できる（`dispatch` doc comment の受理条件
+/// 一覧を参照）。
+fn validate_tf32_flag(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if !cli.tf32 {
+        return Ok(());
+    }
+    if cli.task != "gemm" || cli.device != "cuda" {
+        return Err(format!(
+            "MEASURE_ERROR: --tf32 is only meaningful for --task gemm --device cuda (got \
+             task='{}' device='{}'; TF32 opt-in affects only the plain CudaBackendOps::gemm \
+             path, not gemm_bias_act/gemm_resident_*/train/infer. issue #1983; #1042)",
+            cli.task, cli.device
+        )
+        .into());
+    }
+    if cli.phases {
         return Err(
-            "MEASURE_ERROR: --tf32 requires fandhe-ai >= 0.5.0 (wiring not implemented in \
-             bench-fandhe yet; see docs/cuda-tf32-optin-api-decision.md C-2; issue #1042)"
+            "MEASURE_ERROR: --tf32 cannot be combined with --phases (PhaseRecord has no tf32 \
+             key, so phase rows would be indistinguishable from FP32 rows; issue #1983; #1042)"
                 .into(),
         );
+    }
+    if cli.device_checksum {
+        return Err(
+            "MEASURE_ERROR: --tf32 cannot be combined with --device-checksum (the \
+             matmul_checksum/gemm_checksum path's TF32 behavior is unverified; issue #1983; \
+             #1042)"
+                .into(),
+        );
+    }
+    if cli.managed || cli.pinned_h2d {
+        return Err(
+            "MEASURE_ERROR: --tf32 cannot be combined with --managed/--pinned-h2d \
+             (summarize.py's (a-tf32) section does not distinguish managed/pinned rows, so a \
+             combined-condition row would be ambiguous; issue #1983; #1042)"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    validate_tf32_flag(cli)?;
+    if cli.tf32 {
+        // イシュー #1983: 検証済み（`validate_tf32_flag` が `--task gemm
+        // --device cuda` かつ `--phases`／`--device-checksum`／
+        // `--managed`／`--pinned-h2d` 非併用を確認済み）のため、ここでは
+        // 有効化のみ行う。`AtomicU8` の読み書きのみで CUDA デバイスを
+        // 初期化しない（`--graph on` の前提契約を満たす）。
+        fandhe_ai::set_cuda_tf32_gemm_enabled(true);
+        if !fandhe_ai::cuda_tf32_gemm_enabled() {
+            return Err(
+                "MEASURE_ERROR: set_cuda_tf32_gemm_enabled(true) did not take effect \
+                 (cuda_tf32_gemm_enabled() returned false after enabling; issue #1983)"
+                    .into(),
+            );
+        }
     }
     if cli.managed {
         if cli.device != "cuda" {
@@ -2279,6 +2361,25 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// `fandhe_ai::set_cuda_tf32_gemm_enabled` が触れるプロセスグローバル
+    /// フラグ（`AtomicU8`。`fandhe_ai_backend_cuda::precision`）は本テスト
+    /// バイナリ内の全 `#[test]` 関数間で共有される。`cargo test`（既定の
+    /// マルチスレッド実行）へ `--include-ignored` を渡すと、`gemm_tf32_
+    /// cuda_smoke` がフラグを `true` にしている窓と、他のテスト（`--tf32`
+    /// 拒否条件検証・既定行検証・他の CUDA GEMM 実機 smoke テスト）が
+    /// 同一プロセス内で並行実行されうる。前者はフラグの読み取りに依存する
+    /// assertion が意図せず `true` を観測して flaky に失敗し、後者は
+    /// `--tf32` を渡していないにもかかわらず意図せず TF32 経路で実行され
+    /// うる。これを避けるため、フラグへ触れる／その状態に依存する全
+    /// テストが共有する排他ロック（`crates/facade/tests/cuda_tf32_gemm_
+    /// optin.rs::Tf32FlagGuard` と同型。RAII で保持し `Drop` の暗黙解放に
+    /// 任せる）を新設し、対象テストはその lock guard を保持している間だけ
+    /// 実行する（イシュー #1983 codex-review 指摘）。
+    fn tf32_flag_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// テスト間で衝突しない一時 JSONL パスを作る（pid + カウンタで一意化。
     /// 並行テスト実行時の読み取り／削除の混入を防ぐ）。
@@ -2939,10 +3040,14 @@ mod tests {
     }
 
     /// 実機（CUDA）依存の smoke テスト（coding-rust.md「実機依存テストは
-    /// `#[ignore]` で分離」）。
+    /// `#[ignore]` で分離」）。`tf32_flag_test_lock()` を保持し、
+    /// `gemm_tf32_cuda_smoke` がプロセスグローバル TF32 フラグを一時的に
+    /// 有効化している窓と並行実行されて意図せず TF32 経路で走ることを
+    /// 防ぐ（codex-review 指摘。イシュー #1983）。
     #[test]
     #[ignore]
     fn gemm_reuse_phases_cuda_smoke() {
+        let _flag_lock = tf32_flag_test_lock();
         let out = temp_out_path("gemm-phases-cuda-smoke");
         let cli = Cli {
             task: "gemm".to_string(),
@@ -2967,6 +3072,58 @@ mod tests {
             content.contains("\"phase\":\"iter_total\""),
             "content={content}"
         );
+    }
+
+    /// 実機（CUDA）依存の smoke テスト（イシュー #1983）。`--tf32` が
+    /// `gemm × cuda`（fresh／reuse）で受理され `"tf32":true` を emit する
+    /// ことを確認する。プロセスグローバルフラグ（`AtomicU8`）を汚さない
+    /// よう、終了時に必ず `set_cuda_tf32_gemm_enabled(false)` へ戻す
+    /// （`--include-ignored` で他テストと同一プロセス実行される場合の
+    /// 漏洩防止。panic 時も Drop で復元する）。加えて `tf32_flag_test_
+    /// lock()` を関数全体で保持し、フラグを `true` にしている窓の間に
+    /// 他の CUDA 実機 smoke テスト（`gemm_reuse_phases_cuda_smoke` 等）や
+    /// フラグ状態を検証するテストが並行実行されて意図せず TF32 経路で
+    /// 走る／flaky に失敗することを防ぐ（codex-review 指摘。lock guard の
+    /// drop 順序は宣言と逆順のため、`_flag_lock` を `_guard` より先に
+    /// 宣言してフラグの原状復帰が完了した後にロックを解放する）。
+    #[test]
+    #[ignore]
+    fn gemm_tf32_cuda_smoke() {
+        struct Tf32ResetGuard;
+        impl Drop for Tf32ResetGuard {
+            fn drop(&mut self) {
+                fandhe_ai::set_cuda_tf32_gemm_enabled(false);
+            }
+        }
+        let _flag_lock = tf32_flag_test_lock();
+        let _guard = Tf32ResetGuard;
+
+        for mode in ["fresh", "reuse"] {
+            let out = temp_out_path(&format!("gemm-tf32-cuda-smoke-{mode}"));
+            let cli = Cli {
+                task: "gemm".to_string(),
+                device: "cuda".to_string(),
+                size: 512,
+                out: out.to_string_lossy().into_owned(),
+                mode: mode.to_string(),
+                phases: false,
+                tf32: true,
+                managed: false,
+                device_checksum: false,
+                graph: None,
+                readout: None,
+                metal_split_k: None,
+                pinned_h2d: false,
+            };
+            dispatch(&cli)
+                .unwrap_or_else(|e| panic!("cuda gemm --tf32 ({mode}) smoke failed: {e}"));
+            let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+            let _ = std::fs::remove_file(&out);
+            assert!(
+                content.contains("\"tf32\":true"),
+                "mode={mode} content={content}"
+            );
+        }
     }
 
     /// 実機（Metal）依存の smoke テスト。macOS のみコンパイル対象。
@@ -3232,6 +3389,9 @@ mod tests {
     #[test]
     #[ignore]
     fn infer_reuse_and_phases_cuda_smoke() {
+        // `tf32_flag_test_lock()`: `gemm_tf32_cuda_smoke` の TF32 フラグ
+        // 有効化窓との並行実行を防ぐ（codex-review 指摘。イシュー #1983）。
+        let _flag_lock = tf32_flag_test_lock();
         let reuse_out = temp_out_path("infer-reuse-cuda-smoke");
         dispatch(&Cli {
             task: "infer".to_string(),
@@ -3350,35 +3510,163 @@ mod tests {
             );
         }
     }
-    /// イシュー #1042: `bench-fandhe` は `fandhe-ai =0.4.0` に完全固定
-    /// されており本イシューの新 API を呼べないため、`--tf32` は task/mode
-    /// の組合せに関わらず常に MEASURE_ERROR で fail-fast する
-    /// （`docs/cuda-tf32-optin-api-decision.md` C-1）。
+    /// イシュー #1983: `validate_tf32_flag` は非破壊のため
+    /// `set_cuda_tf32_gemm_enabled` を呼ばずに検証できる（CPU 環境でも
+    /// 実行可能）。task／device 以外の対象外組合せの拒否を検証する。
+    fn tf32_test_cli(task: &str, device: &str, mode: &str) -> Cli {
+        Cli {
+            task: task.to_string(),
+            device: device.to_string(),
+            size: 64,
+            out: String::new(),
+            mode: mode.to_string(),
+            phases: false,
+            tf32: true,
+            managed: false,
+            device_checksum: false,
+            graph: None,
+            readout: None,
+            metal_split_k: None,
+            pinned_h2d: false,
+        }
+    }
+
+    /// イシュー #1983: `--tf32` は `--task gemm` 以外では
+    /// `--device cuda` であっても MEASURE_ERROR で拒否する
+    /// （`gemm_bias_act`／学習経路は FP32 のままのため誤ラベル行を防ぐ）。
     #[test]
-    fn tf32_flag_is_always_measure_error() {
-        for (task, mode) in [("gemm", "fresh"), ("gemm", "reuse"), ("train", "fresh")] {
-            let out = temp_out_path(&format!("tf32-unsupported-{task}-{mode}"));
-            let cli = Cli {
-                task: task.to_string(),
-                device: "cuda".to_string(),
-                size: 64,
-                out: out.to_string_lossy().into_owned(),
-                mode: mode.to_string(),
-                phases: false,
-                tf32: true,
-                managed: false,
-                device_checksum: false,
-                graph: None,
-                readout: None,
-                metal_split_k: None,
-                pinned_h2d: false,
-            };
-            let err = dispatch(&cli).expect_err("--tf32 must be rejected on bench-fandhe");
+    fn tf32_flag_on_non_gemm_task_is_measure_error() {
+        // `tf32_flag_test_lock()`: `!cuda_tf32_gemm_enabled()` の
+        // assertion が `gemm_tf32_cuda_smoke` のフラグ有効化窓と並行実行
+        // されて flaky に失敗することを防ぐ（codex-review 指摘。
+        // イシュー #1983）。
+        let _flag_lock = tf32_flag_test_lock();
+        for task in ["train", "infer"] {
+            let cli = tf32_test_cli(task, "cuda", "fresh");
+            let err =
+                validate_tf32_flag(&cli).expect_err("--tf32 must be rejected for non-gemm tasks");
             let msg = err.to_string();
             assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
             assert!(msg.contains("--tf32"), "msg={msg}");
-            assert!(msg.contains("0.5.0"), "msg={msg}");
+            assert!(
+                !fandhe_ai::cuda_tf32_gemm_enabled(),
+                "rejection must occur before the setter is called"
+            );
         }
+    }
+
+    /// イシュー #1983: `--tf32` は `--task gemm` でも `--device cuda`
+    /// 以外では MEASURE_ERROR で拒否する。
+    #[test]
+    fn tf32_flag_on_non_cuda_device_is_measure_error() {
+        // `tf32_flag_test_lock()`: 同上（イシュー #1983 codex-review 指摘）。
+        let _flag_lock = tf32_flag_test_lock();
+        for device in ["cpu", "metal"] {
+            let cli = tf32_test_cli("gemm", device, "fresh");
+            let err =
+                validate_tf32_flag(&cli).expect_err("--tf32 must be rejected for non-cuda devices");
+            let msg = err.to_string();
+            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+            assert!(msg.contains("--tf32"), "msg={msg}");
+            assert!(!fandhe_ai::cuda_tf32_gemm_enabled());
+        }
+    }
+
+    /// イシュー #1983: `--tf32 --phases` は `PhaseRecord` に `tf32` キーが
+    /// ないため MEASURE_ERROR で拒否する。
+    #[test]
+    fn tf32_flag_with_phases_is_measure_error() {
+        // `tf32_flag_test_lock()`: 同上（イシュー #1983 codex-review 指摘）。
+        let _flag_lock = tf32_flag_test_lock();
+        let mut cli = tf32_test_cli("gemm", "cuda", "fresh");
+        cli.phases = true;
+        let err = validate_tf32_flag(&cli).expect_err("--tf32 --phases must be rejected");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--tf32"), "msg={msg}");
+        assert!(!fandhe_ai::cuda_tf32_gemm_enabled());
+    }
+
+    /// イシュー #1983: `--tf32 --device-checksum` は
+    /// `matmul_checksum`／`gemm_checksum` の TF32 挙動が未検証のため
+    /// 安全側で MEASURE_ERROR とする。
+    #[test]
+    fn tf32_flag_with_device_checksum_is_measure_error() {
+        // `tf32_flag_test_lock()`: 同上（イシュー #1983 codex-review 指摘）。
+        let _flag_lock = tf32_flag_test_lock();
+        let mut cli = tf32_test_cli("gemm", "cuda", "fresh");
+        cli.device_checksum = true;
+        let err = validate_tf32_flag(&cli).expect_err("--tf32 --device-checksum must be rejected");
+        let msg = err.to_string();
+        assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+        assert!(msg.contains("--tf32"), "msg={msg}");
+        assert!(!fandhe_ai::cuda_tf32_gemm_enabled());
+    }
+
+    /// イシュー #1983: `--tf32` と `--managed`／`--pinned-h2d` の併用は
+    /// `summarize.py` (a-tf32) 節が区別しないため安全側で
+    /// MEASURE_ERROR とする。
+    #[test]
+    fn tf32_flag_with_managed_or_pinned_h2d_is_measure_error() {
+        // `tf32_flag_test_lock()`: 同上（イシュー #1983 codex-review 指摘）。
+        let _flag_lock = tf32_flag_test_lock();
+        for (managed, pinned_h2d) in [(true, false), (false, true)] {
+            let mut cli = tf32_test_cli("gemm", "cuda", "fresh");
+            cli.managed = managed;
+            cli.pinned_h2d = pinned_h2d;
+            let err = validate_tf32_flag(&cli)
+                .expect_err("--tf32 with --managed/--pinned-h2d must be rejected");
+            let msg = err.to_string();
+            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+            assert!(msg.contains("--tf32"), "msg={msg}");
+            assert!(!fandhe_ai::cuda_tf32_gemm_enabled());
+        }
+    }
+
+    /// イシュー #1983: `--task gemm --device cuda`（fresh／reuse とも）の
+    /// 素の GEMM は受理される（他フラグ非併用）。
+    #[test]
+    fn validate_tf32_flag_accepts_gemm_cuda_fresh_and_reuse() {
+        for mode in ["fresh", "reuse"] {
+            let cli = tf32_test_cli("gemm", "cuda", mode);
+            validate_tf32_flag(&cli)
+                .expect("gemm x cuda (fresh/reuse) with no other flags must be accepted");
+        }
+    }
+
+    /// イシュー #1983: `--tf32` なしの既定行は `set_cuda_tf32_gemm_enabled`
+    /// を一切呼ばず（構造的に `tf32` フィールドが `false` のまま JSONL へ
+    /// 出力される）、結線前と bit 同一のままであることを固定する。
+    #[test]
+    fn run_gemm_default_row_omits_tf32_key_and_leaves_flag_off() {
+        // `tf32_flag_test_lock()`: 末尾の `!cuda_tf32_gemm_enabled()`
+        // assertion が `gemm_tf32_cuda_smoke` のフラグ有効化窓と並行実行
+        // されて flaky に失敗することを防ぐ（codex-review 指摘。
+        // イシュー #1983）。
+        let _flag_lock = tf32_flag_test_lock();
+        let out = temp_out_path("tf32-default-omitted");
+        let cli = Cli {
+            task: "gemm".to_string(),
+            device: "cpu".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: "fresh".to_string(),
+            phases: false,
+            tf32: false,
+            managed: false,
+            device_checksum: false,
+            graph: None,
+            readout: None,
+            metal_split_k: None,
+            pinned_h2d: false,
+        };
+        dispatch(&cli).expect("cpu gemm dispatch must succeed");
+        let content = std::fs::read_to_string(&out).expect("read jsonl output");
+        assert!(
+            !content.contains("\"tf32\""),
+            "default row must omit the tf32 key: content={content}"
+        );
+        assert!(!fandhe_ai::cuda_tf32_gemm_enabled());
     }
 
     /// イシュー #1353: `--managed` は `--device cuda` 以外では常に
@@ -3785,6 +4073,9 @@ mod tests {
     #[test]
     #[ignore]
     fn train_phases_cuda_smoke() {
+        // `tf32_flag_test_lock()`: `gemm_tf32_cuda_smoke` の TF32 フラグ
+        // 有効化窓との並行実行を防ぐ（codex-review 指摘。イシュー #1983）。
+        let _flag_lock = tf32_flag_test_lock();
         for mode in ["fresh", "reuse"] {
             let out = temp_out_path(&format!("phases-cuda-smoke-{mode}"));
             let cli = Cli {

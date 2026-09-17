@@ -122,3 +122,50 @@ precision::CudaGemmPrecision` を `bool`（TF32 単発の 2 値）から 3 モ�
   スコープ外。上記 C-2 と同型のフォローアップ）。
 - **適用範囲**: 素の `CudaBackendOps::gemm` のみ（`gemm_bias_act`・
   `gemm_resident_*`・学習経路は対象外。既存の適用範囲契約を継承）。
+
+## 追補（イシュー #1983）: C-2（`bench-fandhe` 結線・`run_all_cuda.sh` TF32 スイープ）実施
+
+上記「framework-compare の制約」節の C-2（v0.5.0 ピン更新後の `bench-fandhe`
+結線・`run_all` tf32 スイープ追加）を実施した。承認済みピンは `fandhe-ai
+=0.9.0` まで進み `fandhe_ai::set_cuda_tf32_gemm_enabled`／
+`cuda_tf32_gemm_enabled` は crates.io 公開版へ cfg ゲートなしで収録済みの
+ため、`--managed`／`--pinned-h2d`／`--graph`（v0.9.0 未収録の API を要する）
+と異なり追加の cargo feature 導入は不要だった。
+
+- **受理条件**: `bench-fandhe --tf32` は `--task gemm --device cuda`
+  （fresh／reuse とも）の素の GEMM のみを受理する（`validate_tf32_flag`
+  関数。`--managed` と同型の allowlist 方式）。以下はすべて `MEASURE_ERROR`
+  で fail-closed 拒否する: `task != "gemm"` または `device != "cuda"`
+  （TF32 opt-in が `CudaBackendOps::gemm` のみに効き `gemm_bias_act`／
+  `gemm_resident_*`／train／infer は FP32 のままのため誤ラベル行を防ぐ）・
+  `--phases`（`PhaseRecord` に `tf32` キーがない）・`--device-checksum`
+  （`matmul_checksum`／`gemm_checksum` 経路の TF32 挙動未検証）・
+  `--managed`／`--pinned-h2d`（`summarize.py` (a-tf32) 節が managed／pinned
+  を区別しないため複合条件行の混入を防ぐ）。
+- **有効化**: 受理時は `set_cuda_tf32_gemm_enabled(true)` を呼び
+  `cuda_tf32_gemm_enabled()` で読み戻し確認する（`--managed` と同一の
+  fail-closed 確認パターン）。`--tf32` なしの既定行は setter／getter を
+  一切呼ばず、結線前と bit 同一のまま不変（`Record.tf32` は `cli.tf32`
+  の値をそのまま反映し、`false` なら従来どおり JSONL に `tf32` キーを
+  emit しない）。
+- **要素単位検証は不変**: `reference.verify_strict(&out)`（救済項なし）の
+  まま変更しない。TF32 は結合順序・精度が異なるため大きい N で
+  `fail_count > 0` になりうるが、これは想定内の記録事項であり是正対象では
+  ない（`summarize.py` (a-tf32) 節が「無効: …」と表示する既存挙動に委ねる。
+  tolerance・baseline は不変）。
+- **`run_all_cuda.sh` へ (a-tf32) スイープを追加**: `bench-fandhe`・
+  `bench-candle`（C-1 で既に `--tf32` 結線済み）の `gemm cuda`（fresh・
+  N=256〜4096）に `--tf32` を付けて実行する。`bench-burn` は `--tf32` を
+  常に `MEASURE_ERROR` で拒否する仕様のため対象外（(a') ブロックと同じ
+  理由: 対象外の既知失敗で `skipped-cuda.log` を汚さない）。burn の cuda
+  gemm 行は通常スイープ（(a)）で既に `tf32:true` として記録されるため、
+  `summarize.py` の (a-tf32) 節には fandhe-ai／candle／burn の 3
+  フレームワークが並ぶ。
+- **対象外のまま**: 3×TF32（`CudaGemmPrecision::Tf32x3`／
+  `set_cuda_gemm_precision`）の `--tf32` 対応は引き続きスコープ外（上記
+  「追補（イシュー #1355）」節のフォローアップと同じ）。新規 Issue は
+  起票せず本追補への記録のみとする。
+- **実機実測**: 本イシューの実装エージェント実行環境に DGX Spark GB10
+  実機への到達手段がなく、`gemm_tf32_cuda_smoke`（`#[ignore]`）・
+  `run_all_cuda.sh` の (a-tf32) 実数値取得は未実施のまま GB10 セッションへ
+  申し送る（数値を捏造しない）。

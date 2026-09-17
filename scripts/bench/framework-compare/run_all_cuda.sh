@@ -128,4 +128,24 @@ if [[ " ${BINS[*]} " == *" bench-fandhe "* ]]; then
   done
 fi
 
+# (a-tf32) GEMM — TF32 Tensor Core opt-in スイープ（イシュー #1983。
+# #1042 C-2）。fresh のみ（`summarize.py` (a-tf32) 節は `mode="fresh"`
+# 既定で行を拾う・bench-burn の cuda gemm 行も fresh のみ）。
+# bench-fandhe は `--task gemm --device cuda` 限定で `--tf32` を受理する
+# （`validate_tf32_flag`。他 task／device・`--phases`／`--device-checksum`／
+# `--managed`／`--pinned-h2d` との併用は非対象）。bench-candle は既に C-1
+# で `--tf32` を結線済み。bench-burn は `--tf32` を必ず MEASURE_ERROR で
+# fail-fast する仕様のため対象外とする（(a') と同じ理由: 対象外の既知
+# 失敗で skipped-cuda.log を汚さない）。burn の cuda gemm 行はこのループを
+# 通さずとも通常スイープ（(a)）で既に `tf32:true` として記録されるため、
+# `summarize.py` (a-tf32) 節には fandhe-ai／candle／burn の 3 フレームワーク
+# が並ぶ。
+for bin in "${BINS[@]}"; do
+  if [[ "$bin" == "bench-fandhe" || "$bin" == "bench-candle" ]]; then
+    for n in 256 512 1024 2048 4096; do
+      run "$bin" gemm cuda "$n" fresh --tf32
+    done
+  fi
+done
+
 echo "done. results in $OUT ; failures (if any) in $SKIP"

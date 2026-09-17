@@ -762,6 +762,53 @@ class SectionRenderingTests(unittest.TestCase):
         self.assertIn("(a-tf32)", text)
         self.assertIn("無効: 要素誤差超過", text)
 
+    def test_tf32_section_lists_fandhe_and_burn_side_by_side(self):
+        # イシュー #1983: bench-fandhe の `--tf32` 結線（#1042 C-2）に
+        # より、fandhe-ai の TF32 行が burn（常時 TF32・`bench-burn` は
+        # cuda gemm 行を tf32:true で記録）・candle（C-1 で既に結線
+        # 済み）と同じ N・同じ (a-tf32) 節に並ぶことを確認する。
+        rows = [
+            dict(
+                _with_parity(
+                    _base_row(framework="fandhe-ai", device="cuda", size=512), total=512 * 512
+                ),
+                tf32=True,
+                gflops=100.0,
+            ),
+            dict(
+                _with_parity(
+                    _base_row(framework="candle", device="cuda", size=512), total=512 * 512
+                ),
+                tf32=True,
+                gflops=150.0,
+            ),
+            dict(
+                _with_parity(
+                    _base_row(framework="burn", device="cuda", size=512), total=512 * 512
+                ),
+                tf32=True,
+                gflops=200.0,
+            ),
+            # fandhe-ai の FP32 行（tf32 なし）は (a) 節へ・(a-tf32) 節へは
+            # 混入しないことも合わせて確認する。
+            _with_parity(
+                _base_row(framework="fandhe-ai", device="cuda", size=512), total=512 * 512
+            ),
+        ]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        tf32_section = text.split("### (a-tf32)")[1].split("### (b)")[0]
+        self.assertIn("| 512 | fandhe-ai |", tf32_section)
+        self.assertIn("| 512 | candle |", tf32_section)
+        self.assertIn("| 512 | burn |", tf32_section)
+        self.assertIn("| 100.0 |", tf32_section)
+        self.assertIn("| 150.0 |", tf32_section)
+        self.assertIn("| 200.0 |", tf32_section)
+        # (a) 節（FP32）には TF32 の GFLOP/s（150.0／200.0）が混入しない。
+        fp32_section = text.split("### (a)")[1].split("### (a-tf32)")[0]
+        self.assertNotIn("150.0", fp32_section)
+        self.assertNotIn("200.0", fp32_section)
+
     def test_ok_row_not_marked_invalid(self):
         rows = [_with_parity(_base_row())]
         lines, has_checksum_mismatch, has_parity_failure, _, _, _, _, _, _ = summarize.section(
