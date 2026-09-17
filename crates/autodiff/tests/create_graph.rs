@@ -19,6 +19,12 @@
 //! 参照）——正しさは本ファイルの有限差分突合・閉形式突合のみを根拠と
 //! する。
 
+// 本ファイルの Hessian 添字ループは `hessian[j][i]` のような 2 次元
+// 添字書き込み・`analytic[j][i]` の対称性検査など、`i`／`j` 自身を
+// 複数の配列へ同時に使う箇所が中心で、`enumerate()` の単一要素参照
+// だけでは代替できない（`nn_optim_lamb.rs` と同型の判断）。
+#![allow(clippy::needless_range_loop)]
+
 mod common;
 
 use fandhe_ai_autodiff::{AutodiffError, Tape, Var};
