@@ -333,9 +333,9 @@ fn synthetic_model_cast_to_float16_yields_onnx_value_f16_via_facade() {
 // --- export（イシュー #2018）: facade ↔ 内部クレート直接呼び出し突合 ---
 
 /// 1. facade `to_bytes(default)` == 内部クレート直接呼び出し
-/// （`encode_model(&build_model_proto(&build_graph(&decode_model(bytes)),
-/// &ExportOptions::default()))`）とバイト完全一致することを固定する
-/// （`model.onnx`・`slice_repro.onnx`）。
+///    （`encode_model(&build_model_proto(&build_graph(&decode_model(bytes)),
+///    &ExportOptions::default()))`）とバイト完全一致することを固定する
+///    （`model.onnx`・`slice_repro.onnx`）。
 #[test]
 fn to_bytes_matches_internal_direct_call_byte_exact() {
     for fixture in ["model.onnx", "slice_repro.onnx"] {
@@ -360,11 +360,11 @@ fn to_bytes_matches_internal_direct_call_byte_exact() {
 }
 
 /// 2. `build_graph(decode_model(facade_bytes)) ==
-/// build_graph(decode_model(元 bytes))`（`Graph: PartialEq`）に加え、
-/// decode 結果の `value_info` が空・全 initializer の `float_data`／
-/// `int64_data` が空であることを確認する（export の契約確認。
-/// `docs/facade-onnx-export-exposure-decision.md` §4「value_info は常に
-/// 空」・`export.rs` の「常に raw_data のみへ書き出す」契約）。
+///    build_graph(decode_model(元 bytes))`（`Graph: PartialEq`）に加え、
+///    decode 結果の `value_info` が空・全 initializer の `float_data`／
+///    `int64_data` が空であることを確認する（export の契約確認。
+///    `docs/facade-onnx-export-exposure-decision.md` §4「value_info は常に
+///    空」・`export.rs` の「常に raw_data のみへ書き出す」契約）。
 #[test]
 fn to_bytes_output_graph_structurally_equal_and_satisfies_export_contract() {
     for fixture in ["model.onnx", "slice_repro.onnx"] {
@@ -416,7 +416,7 @@ fn to_bytes_output_graph_structurally_equal_and_satisfies_export_contract() {
 }
 
 /// 3. 既定値ドリフトガード: `OnnxExportOptions::default()` の 2 フィールド
-/// == `ExportOptions::default()` の対応フィールド。
+///    == `ExportOptions::default()` の対応フィールド。
 #[test]
 fn onnx_export_options_default_matches_internal_export_options_default() {
     let facade_default = OnnxExportOptions::default();
@@ -432,8 +432,8 @@ fn onnx_export_options_default_matches_internal_export_options_default() {
 }
 
 /// 4. 合成モデル: 未対応 op_type → `UnsupportedOp`、対応 op だが非既定
-/// domain → `UnsupportedOp`（`op_type` が domain 修飾形）。いずれも拒否は
-/// import 時ではなく export 時に起きることを assert する。
+///    domain → `UnsupportedOp`（`op_type` が domain 修飾形）。いずれも拒否は
+///    import 時ではなく export 時に起きることを assert する。
 #[test]
 fn synthetic_model_export_rejects_unsupported_op_and_non_default_domain() {
     // 4a. 未対応 op_type（allowlist 外）。

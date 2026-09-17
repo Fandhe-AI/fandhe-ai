@@ -40,7 +40,7 @@ fn run_scalar_input(model: &OnnxModel, input: [f32; 2]) -> Vec<f32> {
 const SAMPLES: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 1.0], [0.3, 0.7], [2.0, -1.0]];
 
 /// 1. `model.onnx`: `from_path` → `to_bytes(default)` → `from_bytes` →
-/// 4 サンプル入力で `run`、元モデルの `run` 出力と bit 同一（AC1）。
+///    4 サンプル入力で `run`、元モデルの `run` 出力と bit 同一（AC1）。
 #[test]
 fn model_onnx_export_import_roundtrip_matches_original_bit_exact() {
     let original =
@@ -129,8 +129,8 @@ fn slice_repro_onnx_export_import_roundtrip_matches_original_bit_exact() {
 }
 
 /// 3. 不動点・決定性: `b1 = m.to_bytes()`、`b2 = from_bytes(b1).to_bytes()`
-/// で `b1 == b2`。同一モデルへ `to_bytes` を 2 回呼んでも同一
-/// （`HashMap` 走査順序に依存しない決定的出力）。
+///    で `b1 == b2`。同一モデルへ `to_bytes` を 2 回呼んでも同一
+///    （`HashMap` 走査順序に依存しない決定的出力）。
 #[test]
 fn to_bytes_is_deterministic_and_a_fixed_point() {
     let model = OnnxModel::from_path(onnx_interop_fixture("model.onnx")).expect("from_path 成功");
@@ -154,8 +154,8 @@ fn to_bytes_is_deterministic_and_a_fixed_point() {
 }
 
 /// 4. `to_path` → `from_path` roundtrip: 一意なファイル名で書き出し、
-/// ファイル内容が `to_bytes` と一致・再 import の `run` が bit 同一。
-/// 絶対パスは assert メッセージへ出さない（`.claude/rules/security.md`）。
+///    ファイル内容が `to_bytes` と一致・再 import の `run` が bit 同一。
+///    絶対パスは assert メッセージへ出さない（`.claude/rules/security.md`）。
 #[test]
 fn to_path_writes_bytes_matching_to_bytes_and_roundtrips() {
     let model = OnnxModel::from_path(onnx_interop_fixture("model.onnx")).expect("from_path 成功");
@@ -198,7 +198,7 @@ fn to_path_writes_bytes_matching_to_bytes_and_roundtrips() {
 }
 
 /// 5. `OnnxExportOptions::default()` が 8／17。非既定値（例 9／18）でも
-/// roundtrip `run` は bit 同一、かつ既定値のバイト列とは異なる。
+///    roundtrip `run` は bit 同一、かつ既定値のバイト列とは異なる。
 #[test]
 fn non_default_export_options_still_roundtrip_but_produce_different_bytes() {
     let default_options = OnnxExportOptions::default();
@@ -262,9 +262,9 @@ fn to_path_with_nonexistent_parent_directory_returns_io_error() {
 }
 
 /// 7. allowlist 外 op の fail-closed（facade 単独版）: std のみで最小
-/// protobuf（allowlist 外の合成 op_type を持つグラフ）を手組みし、
-/// `from_bytes` は成功・`to_bytes`／`to_path` は
-/// `OnnxError::UnsupportedOp` で拒否されることを確認する。
+///    protobuf（allowlist 外の合成 op_type を持つグラフ）を手組みし、
+///    `from_bytes` は成功・`to_bytes`／`to_path` は
+///    `OnnxError::UnsupportedOp` で拒否されることを確認する。
 ///
 /// protobuf の length-delimited wire format（field number << 3 | wire
 /// type）に従い、`ModelProto { graph: GraphProto { node, input, output } }`
@@ -344,7 +344,7 @@ fn synthetic_model_with_disallowed_op_type_is_rejected_at_export_fail_closed() {
 }
 
 /// 8. `OnnxError` のワイルドカード付き `match` が facade 単独でも
-/// コンパイルできることを固定する（`#[non_exhaustive]` の扱い）。
+///    コンパイルできることを固定する（`#[non_exhaustive]` の扱い）。
 #[test]
 fn onnx_error_wildcard_match_compiles_facade_only() {
     let err = OnnxModel::from_bytes(&[0x08u8, 0xffu8]).unwrap_err();
