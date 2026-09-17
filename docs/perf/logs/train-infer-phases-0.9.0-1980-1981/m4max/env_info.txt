@@ -1,0 +1,13 @@
+# 実機（Apple Silicon）実測記録（イシュー #1980／#1981。Mac 分）。
+#
+# - チップ: Apple M4 Max
+# - macOS バージョン: Darwin 25.6.0
+# - バイナリ: registry `fandhe-ai =0.9.0`（`scripts/bench/
+#   framework-compare/target/release/bench-fandhe`。cargo を起動しない
+#   事前ビルド済み・path patch なし）
+# - 実行日時（UTC）: 2026-09-17T16:35:13Z〜16:35:18Z（各 run 開始）
+# - 負荷ゲート: 5/5 run 通過（run1 は load1=6.08・waited_s=120、
+#   run2〜5 は load1=7.03・waited_s=0）
+# - run1〜5.err: いずれも空（失敗なし）
+# - 対象: cpu／metal × train／infer × fresh／reuse の 8 セル
+# - GB10（DGX Spark GB10）: 別セッションで未実測
