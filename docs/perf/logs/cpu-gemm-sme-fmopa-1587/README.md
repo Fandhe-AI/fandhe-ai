@@ -41,7 +41,9 @@
 - `env_info.txt` — 実行環境・時刻の記録（内部ホスト名は含めない）
 - `r1r2/` — R1（framework-compare gemm／train／infer cpu）・R2
   （checksum）の実測一式
-  - `compare-{gemm,train,infer}-1978-cpu.md` — before/after 比較表
+  - `compare-{gemm,train,infer}-1978-cpu.md` — before/after 比較表（是正前の
+    `run_ab_sme_cpu.sh` が生成した名前。PR #2016 是正後は LABEL を含む
+    `compare-{task}-1978-cpu-<LABEL>.md`／`.err` へ出力する）
     （`scripts/bench/framework-compare/compare_gemm_ab.py
     --require-checksum-exact` の出力）
   - `results-{before,after}-1978-cpu-{gemm,train,infer}.jsonl` —

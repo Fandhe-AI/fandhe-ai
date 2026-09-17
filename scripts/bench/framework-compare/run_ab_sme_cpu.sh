@@ -213,11 +213,14 @@ for run_i in $(seq 1 "$ROUNDS"); do
   echo "round $run_i: $(uptime | sed 's/.*load/load/')" | tee -a "$OUT/uptime-1978-${DEVICE}-${LABEL}.log"
 done
 
+# 比較レポート・エラーログの名前にも LABEL を含め、別 LABEL の再実行が前系列の
+# レポートを上書きしないようにする（JSONL・終了コードログと同じ系列別保持。
+# PR #2016 codex-review 指摘）
 for task in gemm train infer; do
   python3 compare_gemm_ab.py --device "$DEVICE" --task "$task" --threshold 1.00 --per-run \
     --require-checksum-exact \
     "$OUT/results-before-${LABEL}-${DEVICE}-${task}.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-${task}.jsonl" \
-    >"compare-${task}-1978-${DEVICE}.md" 2>"compare-${task}-1978-${DEVICE}.err"
+    >"compare-${task}-1978-${DEVICE}-${LABEL}.md" 2>"compare-${task}-1978-${DEVICE}-${LABEL}.err"
   COMPARE_EXIT=$?
   # compare_gemm_ab.py の終了コード: 0 = 非後退・3 = 後退セルあり（いずれも正常な
   # 判定結果で記録のみ）。2 = 入力不正・空データ、それ以外（python 起動失敗等）は
@@ -226,7 +229,7 @@ for task in gemm train infer; do
   case "$COMPARE_EXIT" in
     0 | 3) ;;
     *)
-      echo "compare task=$task: 比較不能（exit=$COMPARE_EXIT）。$(tail -3 "compare-${task}-1978-${DEVICE}.err" | tr '\n' ' ')" >>"$SKIP"
+      echo "compare task=$task: 比較不能（exit=$COMPARE_EXIT）。$(tail -3 "compare-${task}-1978-${DEVICE}-${LABEL}.err" | tr '\n' ' ')" >>"$SKIP"
       ANY_FAILED=$((ANY_FAILED + 1))
       ;;
   esac
