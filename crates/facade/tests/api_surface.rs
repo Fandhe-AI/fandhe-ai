@@ -1015,9 +1015,23 @@ fn extract_version_literal(value: &str) -> Option<String> {
 }
 
 /// 値の中に禁止キー（`FORBIDDEN_DEPENDENCY_VALUE_KEYS`）・`features` が
-/// 区切り文字（空白／`=`）を伴う形で現れるかを検査する。
+/// TOML インライン table のキーとして現れるかを検査する。
+///
+/// `{ optional = true }` のような各エントリを `,` で分割し、`=` より
+/// 前のキー部分だけを取り出して比較する字句解析方式を取る。単純な
+/// 部分文字列検査（`" key "` / `"key ="` 形の固定パターン照合）では、
+/// 空白を伴わない `optional=true`・タブ区切り・`"optional" = true` の
+/// ような引用符付きキーで一致せず検査を回避できてしまうため（codex-review
+/// 指摘 P1・#2024）、キー部分をトリム＋引用符除去したうえで完全一致で
+/// 比較する。
 fn value_contains_forbidden_key(value: &str, key: &str) -> bool {
-    value.contains(&format!(" {key} ")) || value.contains(&format!("{key} ="))
+    value.split(',').any(|segment| {
+        let segment = segment.trim().trim_start_matches('{').trim_end_matches('}');
+        match segment.split_once('=') {
+            Some((k, _)) => k.trim().trim_matches('"').trim_matches('\'') == key,
+            None => false,
+        }
+    })
 }
 
 /// `facade_depends_on_onnx_interop_only_in_approved_shape` の走査ロジック
@@ -1049,10 +1063,10 @@ fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
             if section != APPROVED_PLAIN_DEPENDENCIES_SECTION {
                 continue;
             }
-            if let Some((key, value)) = code_part.split_once('=') {
-                if key.trim().trim_matches('"') == "fandhe-ai-tensor-core" {
-                    approved_version = extract_version_literal(value);
-                }
+            if let Some((key, value)) = code_part.split_once('=')
+                && key.trim().trim_matches('"') == "fandhe-ai-tensor-core"
+            {
+                approved_version = extract_version_literal(value);
             }
         }
     }

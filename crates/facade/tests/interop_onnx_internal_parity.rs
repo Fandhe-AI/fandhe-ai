@@ -48,7 +48,7 @@ fn model_onnx_facade_matches_internal_direct_call_bit_exact() {
     let samples: [([f32; 2], usize); 4] = [
         ([0.0, 0.0], 0),
         ([1.0, 1.0], 1),
-        ([0.30000001192092896, 0.699999988079071], 2),
+        ([0.3, 0.7], 2),
         ([2.0, -1.0], 3),
     ];
 
