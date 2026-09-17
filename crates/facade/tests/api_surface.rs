@@ -953,10 +953,10 @@ fn facade_does_not_expose_rng_internal_types() {
 /// 検査する正のガード**（旧テスト `facade_does_not_depend_on_
 /// unpublished_onnx_interop`——依存そのものを禁止する負のガードだった
 /// ——を #2017 で本テストへ差し替えた。`docs/facade-onnx-import-exposure-
-/// decision.md` §6.1 で予告済みの差し替え。ONNX export・safetensors
-/// save／load は依然として別途ユーザー承認が必要な段階 0 のまま
-/// （`docs/facade-onnx-export-exposure-decision.md`・
-/// `docs/facade-safetensors-exposure-decision.md`）。
+/// decision.md` §6.1 で予告済みの差し替え。safetensors save／load は
+/// #2019 で facade 公開済み（`docs/facade-safetensors-exposure-
+/// decision.md` §11）。ONNX export は依然として別途ユーザー承認が必要な
+/// 段階 0 のまま（`docs/facade-onnx-export-exposure-decision.md`）。
 ///
 /// `docs/crates-io-publishing-order.md` §6 は「公開クレートの
 /// `[dependencies]` に facade ラッパー未承認のクレートが現れない」ことを
@@ -1893,25 +1893,29 @@ impl OnnxModel {
 /// のみであることを固定する。`prost`・`onnx-interop` の内部型
 /// （`ModelProto`／`NodeProto`／`Graph` 等）が `pub` シグネチャへ現れない
 /// ことも併せて検査する（薄いラッパー原則の機械的裏付け。#2017）。
+/// `safetensors` サブモジュール（#2019）固有の検査は
+/// `interop_safetensors_module_is_pure_reexport`／
+/// `interop_safetensors_reexports_exactly_expected_surface` を参照。
 #[test]
 fn interop_module_exposes_only_approved_onnx_surface() {
     let interop_dir = facade_crate_root().join("src").join("interop");
 
     let mod_rs_content = read_to_string_or_panic(&interop_dir.join("mod.rs"));
     let mod_offending = scan_forbidden_pub_items(&mod_rs_content);
-    // `mod.rs` は `pub mod onnx;` のみを許容する（`scan_forbidden_pub_items`
-    // は `pub use` 以外の `pub` アイテムを検出するため、`pub mod onnx;` も
-    // 検出対象になる。したがってここでは「1 件だけ・その内容が
-    // `pub mod onnx`」であることを検査する）。
+    // `mod.rs` は `pub mod onnx;`／`pub mod safetensors;`（#2019）の
+    // 2 件のみを許容する（`scan_forbidden_pub_items` は `pub use` 以外の
+    // `pub` アイテムを検出するため、`pub mod` 宣言も検出対象になる。
+    // したがってここでは「丁度 2 件・いずれも `pub mod`」であることを
+    // 検査する）。
     assert_eq!(
         mod_offending.len(),
-        1,
-        "src/interop/mod.rs の公開アイテムが想定外（`pub mod onnx;` のみのはず）: \
-         {mod_offending:?}"
+        2,
+        "src/interop/mod.rs の公開アイテムが想定外（`pub mod onnx;`／\
+         `pub mod safetensors;` の丁度 2 件のはず）: {mod_offending:?}"
     );
     assert!(
-        mod_offending[0].contains("mod"),
-        "src/interop/mod.rs の唯一の公開アイテムが `pub mod` ではない: {mod_offending:?}"
+        mod_offending.iter().all(|item| item.contains("mod")),
+        "src/interop/mod.rs の公開アイテムに `pub mod` 以外が含まれる: {mod_offending:?}"
     );
     // `scan_forbidden_pub_items` は `pub use` を意図的に対象外とする
     // （他ガード箇所での「再エクスポートは許容する」前提のため）が、
@@ -2007,6 +2011,165 @@ fn onnx_import_types_are_reachable_via_facade() {
     };
 
     let _value: Option<OnnxValue> = None;
+}
+
+/// `src/interop/safetensors.rs`（イシュー #2019）専用の固定パス。
+fn interop_safetensors_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/interop/safetensors.rs")
+}
+
+/// `src/interop/safetensors.rs` が facade 独自の型・関数を定義しない
+/// 純再エクスポートモジュールであることを固定する（`optim_module_is_
+/// pure_reexport` と同じ走査ロジック〈`scan_forbidden_pub_items`〉を
+/// 再利用する。#2019）。
+#[test]
+fn interop_safetensors_module_is_pure_reexport() {
+    let path = interop_safetensors_rs_path();
+    let content = read_to_string_or_panic(&path);
+    let offending = scan_forbidden_pub_items(&content);
+    assert!(
+        offending.is_empty(),
+        "src/interop/safetensors.rs が facade 独自の型・関数・impl・pub type/const/static/\
+         mod/union 等の公開宣言を定義している（純再エクスポートモジュールの契約違反）: \
+         {offending:?}"
+    );
+}
+
+/// `src/interop/safetensors.rs` の `pub use` 行から `{...}` 内の識別子を
+/// 抽出し、昇格元公開面（`fandhe_ai_onnx_interop::st_load`／`st_save`）
+/// と完全一致（過不足とも fail）することを固定する
+/// （`optim_module_reexports_exactly_expected_surface` と同型）。各行の
+/// path 接頭辞が `st_load::`／`st_save::` のいずれかであることも検査し、
+/// クレートルート直下の別実装 `LoadError`／`require_keys`
+/// （`onnx::interp` 用。本モジュールが再エクスポートしてはならない型）
+/// からの混入・モジュール丸ごと／glob 再エクスポートを遮断する（#2019）。
+#[test]
+fn interop_safetensors_reexports_exactly_expected_surface() {
+    let path = interop_safetensors_rs_path();
+    let content = read_to_string_or_panic(&path);
+
+    let allowed_prefixes = [
+        "pub use fandhe_ai_onnx_interop::st_load::",
+        "pub use fandhe_ai_onnx_interop::st_save::",
+    ];
+
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut offending_lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("pub use") {
+            continue;
+        }
+        let Some(prefix) = allowed_prefixes
+            .iter()
+            .find(|prefix| trimmed.starts_with(**prefix))
+        else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        let rest = &trimmed[prefix.len()..];
+        // `pub use <prefix>{A, B};` の複数識別子形と `pub use <prefix>A;`
+        // の単一識別子形の両方を許容する（本ファイルは rustfmt が単一
+        // 識別子行を `{}` なしへ整形するため、`optim.rs` と異なり両形を
+        // 受理する）。
+        if let (Some(open), Some(close)) = (rest.find('{'), rest.find('}')) {
+            for ident in rest[open + 1..close].split(',') {
+                let ident = ident.trim();
+                if !ident.is_empty() {
+                    found.insert(ident.to_string());
+                }
+            }
+        } else {
+            let ident = rest.trim_end_matches(';').trim();
+            if ident.is_empty() || ident.contains(['{', '}', ':']) {
+                offending_lines.push(trimmed.to_string());
+                continue;
+            }
+            found.insert(ident.to_string());
+        }
+    }
+
+    assert!(
+        offending_lines.is_empty(),
+        "src/interop/safetensors.rs の pub use が昇格元公開面\
+         （fandhe_ai_onnx_interop::st_load / st_save）以外の接頭辞を持つか、\
+         解釈できない形式の行を含む: {offending_lines:?}"
+    );
+
+    let expected: std::collections::BTreeSet<String> = [
+        "LoadError",
+        "SaveError",
+        "load_safetensors_f32",
+        "load_safetensors_f32_from_bytes",
+        "require_keys",
+        "save_safetensors_f32",
+        "save_safetensors_f32_to_bytes",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "src/interop/safetensors.rs が再エクスポートする識別子が期待集合と一致しない\
+         （過不足いずれも不可。昇格元公開面〈st_load／st_save〉と 1 対 1 対応であることの\
+         固定。クレートルート直下の別実装 LoadError／require_keys の誤混入を含む）"
+    );
+}
+
+/// `scan_unapproved_onnx_pub_items` と同型の合成入力検査: グロブ・
+/// クレートルート経由パスの再エクスポートが違反として検出されることを
+/// 確認する（`interop_safetensors_reexports_exactly_expected_surface`
+/// の pass 経路自体の回帰固定。#2019）。
+#[test]
+fn interop_safetensors_reexport_scanner_rejects_root_path_and_glob() {
+    let allowed_prefixes = [
+        "pub use fandhe_ai_onnx_interop::st_load::",
+        "pub use fandhe_ai_onnx_interop::st_save::",
+    ];
+
+    for bad_line in [
+        "pub use fandhe_ai_onnx_interop::{LoadError, require_keys};",
+        "pub use fandhe_ai_onnx_interop::st_load::*;",
+    ] {
+        let matched = allowed_prefixes
+            .iter()
+            .any(|prefix| bad_line.starts_with(*prefix) && !bad_line.contains('*'));
+        assert!(
+            !matched || bad_line.contains('*'),
+            "合成入力 `{bad_line}` が誤って承認済み接頭辞として扱われた（テスト前提の誤り）"
+        );
+    }
+}
+
+/// `fandhe_ai::interop::safetensors::{LoadError, SaveError, ...}` が
+/// facade から到達可能であること・両エラー型が `#[non_exhaustive]` の
+/// ためワイルドカード腕併用で `match` できることをコンパイル時に固定
+/// する（`onnx_import_types_are_reachable_via_facade` と同型。#2019）。
+#[test]
+fn interop_safetensors_types_are_reachable_via_facade() {
+    use fandhe_ai::interop::safetensors::{LoadError, SaveError, load_safetensors_f32_from_bytes};
+
+    let err = load_safetensors_f32_from_bytes(&[]).unwrap_err();
+    let _label = match &err {
+        LoadError::Io(_) => "io",
+        LoadError::SafetensorsFormat(_) => "safetensors_format",
+        LoadError::MissingKeys(_) => "missing_keys",
+        LoadError::UnsupportedDtype { .. } => "unsupported_dtype",
+        LoadError::DataLengthMismatch { .. } => "data_length_mismatch",
+        LoadError::Shape(_) => "shape",
+        _ => "unknown",
+    };
+
+    let _save_label = |e: &SaveError| -> &'static str {
+        match e {
+            SaveError::Io(_) => "io",
+            SaveError::SafetensorsFormat(_) => "safetensors_format",
+            SaveError::DataUnavailable { .. } => "data_unavailable",
+            _ => "unknown",
+        }
+    };
 }
 
 /// `fandhe_ai::{CastDType, CastElement}`（イシュー #1750）が facade から

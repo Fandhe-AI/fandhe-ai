@@ -68,9 +68,12 @@
 //! # 対象外・切り出し候補
 //!
 //! ユーザー定義 callback（trait object による拡張点）・
-//! `ModelCheckpoint` のファイル保存（safetensors。`onnx-interop` の
-//! crates.io 公開承認が前提。`docs/facade-safetensors-exposure-decision.md`
-//! 段階 0）・metrics（accuracy 等）・`DataLoader` を直接受ける `fit`
+//! `ModelCheckpoint` のファイル保存（safetensors。facade 公開自体は
+//! #2019 で完了済み〈[`crate::interop::safetensors`]〉だが、
+//! `ModelCheckpoint` からの薄いラッパー結線は本 issue のスコープ外の
+//! まま。`docs/facade-safetensors-exposure-decision.md` §11・
+//! `docs/compat-callbacks-design.md` §8）・metrics（accuracy 等）・
+//! `DataLoader` を直接受ける `fit`
 //! 入口・追加 `Loss` variant・デバイス常駐学習（`DeviceParamStore`）／
 //! GPU `Tape`／AMP／gradient clipping との結線・`TerminateOnNaN` 相当
 //! （現状は [`fandhe_ai_autodiff::nn::optim::ReduceLrOnPlateau::step`]

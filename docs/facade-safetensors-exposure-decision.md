@@ -4,9 +4,9 @@
 
 本ドキュメントは **コード変更を伴わない設計記録**を成果物とする。`crates/onnx-interop/src/st_load.rs`／`st_save.rs`（本体ロジック）・`docs/spec/`（正本 submodule）・依存（`Cargo.toml`／`Cargo.lock`）・ガードレール閾値・数値一致許容誤差（tolerance／baseline）はいずれも変更しない。`Tensor` の `Debug`／`Display`（(A) 部分）はコード実装済み（本 PR 内・別コミット）であり、本ドキュメントの対象は (B) のみである。
 
-基準コミット: 本 PR ブランチ作成時点の `origin/main`（2026-09-15）。
+基準コミット: 本 PR ブランチ作成時点の `origin/main`（2026-09-15）。**イシュー #2019（2026-09-17）で案 A（素の再エクスポート）を確定・facade 公開実装を完了した（§11）。以下 §1〜§10 は #2019 以前の段階 0 記録として残し、最新状態は §11 を参照する。**
 
-**結論（先に記す）**: `docs/compat-api-scope.md` §5（2026-09-14 追記）は「#1754 は onnx-interop の crates.io publish 承認を前提として共有するため blocked のまま close しない」と明記しており、`docs/facade-onnx-import-exposure-decision.md` §6.2・§9 も同旨の読み替えを確定済みである。本判断はこれをそのまま踏襲する。facade（`fandhe_ai`）への公開面追加コードは一切書かない（前提となる `onnx-interop` の crates.io 公開が未承認のため）。既存の負の guard テスト（`crates/facade/tests/api_surface.rs::facade_does_not_depend_on_unpublished_onnx_interop`）は段階 0 のまま不変。
+**結論（当初記録。#2019 以前）**: `docs/compat-api-scope.md` §5（2026-09-14 追記）は「#1754 は onnx-interop の crates.io publish 承認を前提として共有するため blocked のまま close しない」と明記しており、`docs/facade-onnx-import-exposure-decision.md` §6.2・§9 も同旨の読み替えを確定済みである。本判断はこれをそのまま踏襲する。facade（`fandhe_ai`）への公開面追加コードは一切書かない（前提となる `onnx-interop` の crates.io 公開が未承認のため）。既存の負の guard テスト（`crates/facade/tests/api_surface.rs::facade_does_not_depend_on_unpublished_onnx_interop`）は段階 0 のまま不変。
 
 ## 1. 背景
 
@@ -18,15 +18,15 @@
 
 | 事実 | 出典 |
 |---|---|
-| `onnx-interop` は `publish.workspace = true`（= `false` 継承）の非公開クレート。`facade`（`fandhe-ai`）は crates.io 公開クレート（`publish = true`） | `crates/onnx-interop/Cargo.toml`・`crates/facade/Cargo.toml`・`Cargo.toml` `[workspace.package]` |
-| `facade` の `src/`・`Cargo.toml` は `onnx-interop`（`onnx_interop`）を一切参照しない。`crates/facade/tests/api_surface.rs::facade_does_not_depend_on_unpublished_onnx_interop`／`facade_sources_do_not_reference_onnx_interop` が機械的に固定（#1775 で追加） | `crates/facade/Cargo.toml`・`crates/facade/src/`（grep 0 件） |
+| `onnx-interop` は `publish.workspace = true`（= `false` 継承）の非公開クレート。`facade`（`fandhe-ai`）は crates.io 公開クレート（`publish = true`） | `crates/onnx-interop/Cargo.toml`・`crates/facade/Cargo.toml`・`Cargo.toml` `[workspace.package]`（**#2013 で `fandhe-ai-onnx-interop` として公開対象へ追加済み・`publish = true` へ更新済み。§11 参照**） |
+| `facade` の `src/`・`Cargo.toml` は `onnx-interop`（`onnx_interop`）を一切参照しない。`crates/facade/tests/api_surface.rs::facade_does_not_depend_on_unpublished_onnx_interop`／`facade_sources_do_not_reference_onnx_interop` が機械的に固定（#1775 で追加） | `crates/facade/Cargo.toml`・`crates/facade/src/`（grep 0 件）（**#2017 で通常依存へ変更済み。§10 参照**） |
 | 公開クレートの `Cargo.toml` に非公開クレートへの通常依存を持てないため「facade から公開する」は `onnx-interop` 自体を crates.io へ公開することと構造的に等価になる | `docs/facade-onnx-import-exposure-decision.md` §3.1・`docs/crates-io-publishing-order.md` §6 |
-| `st_load` の公開 API: `LoadError`（`#[non_exhaustive]` ではない具象 enum）・`load_safetensors_f32_from_bytes(&[u8]) -> Result<HashMap<String, Tensor<f32>>, LoadError>`・`load_safetensors_f32(&Path) -> Result<HashMap<String, Tensor<f32>>, LoadError>`・`require_keys(&HashMap<String, Tensor<f32>>, &[&str]) -> Result<(), LoadError>` | `crates/onnx-interop/src/st_load.rs:48,116,170,181` |
-| `st_save` の公開 API: `SaveError`・`save_safetensors_f32_to_bytes(&HashMap<String, Tensor<f32>>) -> Result<Vec<u8>, SaveError>`・`save_safetensors_f32(&HashMap<String, Tensor<f32>>, &Path) -> Result<(), SaveError>` | `crates/onnx-interop/src/st_save.rs:73,114,188` |
+| `st_load` の公開 API: `LoadError`（**`#[non_exhaustive]` 具象 enum**）・`load_safetensors_f32_from_bytes(&[u8]) -> Result<HashMap<String, Tensor<f32>>, LoadError>`・`load_safetensors_f32(&Path) -> Result<HashMap<String, Tensor<f32>>, LoadError>`・`require_keys(&HashMap<String, Tensor<f32>>, &[&str]) -> Result<(), LoadError>` | `crates/onnx-interop/src/st_load.rs:46,48,116,170,181` |
+| `st_save` の公開 API: `SaveError`（**`#[non_exhaustive]` 具象 enum**）・`save_safetensors_f32_to_bytes(&HashMap<String, Tensor<f32>>, Option<HashMap<String, String>>) -> Result<Vec<u8>, SaveError>`（**第 2 引数は `__metadata__` pass-through**）・`save_safetensors_f32(&Path, &HashMap<String, Tensor<f32>>) -> Result<(), SaveError>`（**引数順は path が先**） | `crates/onnx-interop/src/st_save.rs:71,73,114,188` |
 | REQ-7 契約: 暗黙アダプタなし（転置・キーリネームを行わない）・無言 skip 禁止（`require_keys` は不足キーを全件収集）・F32 のみ（型レベルで保証）・キー昇順ソートによる決定的出力・一時ファイル + rename による書き込み整合性（OWASP A08） | `crates/onnx-interop/src/st_load.rs`・`st_save.rs` 冒頭コメント |
 | `safetensors =0.7.0` は許容依存 9 区分の「相互運用」区分に含まれる（無条件承認済み。ただし現状は `onnx-interop` の `[dependencies]` としてのみ） | `.claude/rules/deps-policy.md`・`crates/onnx-interop/Cargo.toml` |
-| `onnx-interop` の `tensor-core` 依存は `{ path = "..." }` のみで `version` 併記なし（公開時は公開クレートの規則へ追従が必要） | `crates/onnx-interop/Cargo.toml` |
-| `docs/compat-api-scope.md` §1.2「state_dict／safetensors」行は #1616 対応中（未実装）のまま | `docs/compat-api-scope.md` §1.2 |
+| `onnx-interop` の `tensor-core` 依存は `{ path = "..." }` のみで `version` 併記なし（公開時は公開クレートの規則へ追従が必要） | `crates/onnx-interop/Cargo.toml`（**#2013 の公開準備で version 併記済み。§11 参照**） |
+| `docs/compat-api-scope.md` §1.2「state_dict／safetensors」行は #1616 対応中（未実装）のまま | `docs/compat-api-scope.md` §1.2（**#2019 で safetensors 部分は実装済みへ更新済み**） |
 
 ## 3. 契約整理
 
@@ -100,3 +100,76 @@ unpublished_onnx_interop`）は「承認済み依存形状の検査」
 safetensors 側の公開シグネチャを一切追加していない。案 B（facade 直接
 `safetensors` 依存の独立実装）の採否・実装着手は依然としてユーザー承認
 が前提のまま、段階 0 を継続する。
+
+## 11. 追補（イシュー #2019・2026-09-17）: 案 A 確定・facade 公開実装
+
+### 11.1 案の変更（案 B → 案 A）
+
+§5 は当初「案 B（facade 直接 `safetensors` 依存の独立実装）を推奨候補」
+としていたが、§5 が案 B を推した根拠（publish〈案 A〉はユーザーにとって
+影響範囲が大きい判断であり、safetensors 単体の公開ニーズに対して過大）
+は §9 の追補（#1963。2026-09-17 ユーザー承認）と `docs/onnx-interop`
+の crates.io 公開準備完了（#2013。`fandhe-ai-onnx-interop` として 7
+クレート目の公開対象へ追加済み）により**解消済み**である。さらに
+facade → `onnx-interop` への通常依存自体は #2017（ONNX import）で
+既に成立しており（§10 追補）、本 issue（#2019）の時点で追加の依存結線
+コスト・承認コストは発生しない。
+
+一方、案 B は `onnx-interop::st_load`／`st_save` とロジックを事実上
+複製することになり、REQ-7 契約（暗黙アダプタなし・無言 skip 禁止・
+キー昇順ソートの決定的出力・一時ファイル + rename）が将来的に facade
+側実装と onnx-interop 側実装の 2 系統へドリフトするリスクを新たに抱える
+（§4 の案 B 判定欄がもとより指摘していた懸念）。加えて facade へ
+`safetensors` クレートへの直接依存を追加することになり、`fandhe-ai`
+の依存ツリーが 1 本増える。
+
+これらを踏まえ、ワークフロー起動時のユーザー指示「#2019 は推奨で OK」
+（2026-09-17）により **案 A（`fandhe_ai_onnx_interop::st_load`／
+`st_save` の素の再エクスポート）を確定**した。案 A はロジック重複ゼロ・
+facade への `safetensors` 直接依存追加なし（`onnx-interop` 経由の
+推移的依存のまま）という利点があり、当初 §5 が案 B を推した際に前提と
+していた「publish は重い判断」という制約が解消された結果、素の
+再エクスポートで足りるという判断に至った。
+
+### 11.2 実装記録
+
+- 公開パス: `fandhe_ai::interop::safetensors::{LoadError, SaveError,
+  load_safetensors_f32, load_safetensors_f32_from_bytes, require_keys,
+  save_safetensors_f32, save_safetensors_f32_to_bytes}`（計 7 アイテム。
+  `crates/facade/src/interop/safetensors.rs`。`pub use` のみのモジュール
+  で型・関数を一切定義しない）
+- `crates/facade/src/interop/mod.rs` は `pub mod onnx;`／
+  `pub mod safetensors;` の 2 件のみを許容（`pub use` は引き続き 0 件）
+- クレートルート直下の別実装 `LoadError`／`require_keys`（`onnx::interp`
+  用。private `require_keys.rs` 由来）は再エクスポート対象から明示的に
+  除外（`st_load::`／`st_save::` 接頭辞限定の再エクスポートで型を混同
+  しない設計）
+- ガード: `crates/facade/tests/api_surface.rs` に
+  `interop_safetensors_module_is_pure_reexport`（純再エクスポート検査。
+  `optim_module_is_pure_reexport` と同型）・
+  `interop_safetensors_reexports_exactly_expected_surface`（再エクス
+  ポート識別子の完全一致検査。`optim_module_reexports_exactly_expected_
+  surface` と同型）・`interop_safetensors_types_are_reachable_via_facade`
+  （facade 経由の到達性・`#[non_exhaustive]` ワイルドカード腕検査）を
+  追加
+- 統合テスト: `crates/facade/tests/interop_safetensors_roundtrip.rs`
+  （`fandhe_ai`／`std` のみ import。bytes／`compat::Sequential::
+  state_dict`／ファイルの 3 往復が全 bit 完全一致・特殊値〈NaN／±inf／
+  -0.0／非正規化数〉も bit 完全一致・決定的出力・暗黙アダプタなし・
+  不足キー／dtype 不一致／形状不一致／壊れたバイト列／存在しないパスが
+  すべて型付き `Err` で fail-closed）
+- `Cargo.toml`／`Cargo.lock`／`deny.toml`／`docs/license-matrix.md` は
+  無変更（依存結線は #2017 で完了済みのため、facade への `safetensors`
+  直接依存追加＝案 B の機構的帰結は本 issue では発生しない）
+- `compat::Sequential::state_dict`／`load_state_dict`（#1752）と組み
+  合わせた save→load→load_state_dict の往復例をモジュール doc の
+  doctest として整備済み
+
+### 11.3 スコープ外（不変）
+
+`compat::Sequential`／`compat::callbacks::ModelCheckpoint` へのファイル
+保存の薄いラッパー（`Sequential::save`／`load` 等）は案 A の範囲外
+（素の再エクスポートのみ）のまま次点の切り出し候補として記録する
+（`docs/compat-callbacks-design.md` §8）。F32 以外の dtype・入力サイズ
+上限の導入・`st_load`／`st_save` 本体ロジックの変更・ONNX export（#2018）
+も引き続き対象外。

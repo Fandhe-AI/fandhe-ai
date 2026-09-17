@@ -139,15 +139,12 @@ fit_types_are_reachable_via_facade_only` が `assert_eq!` で固定）で
 
 ### 4.3 `ModelCheckpoint` はファイルへ書かない（in-memory スナップショットのみ）
 
-safetensors は facade から到達不能（`docs/facade-safetensors-exposure-decision.md`
-段階 0。`onnx-interop` の crates.io 公開承認自体はイシュー #1963 で取得
-済みだが、safetensors 側ラッパーの API 形状・実装着手は別途ユーザー承認
-が前提。ONNX import〈#2017〉が同クレートへの通常依存を正式に持つように
-なった現在も、safetensors 側の公開シグネチャは未追加のまま）であり、
-`crates/facade/tests/api_surface.rs::facade_depends_on_onnx_interop_only_in_approved_shape`
-（承認済み依存形状の検査。旧 `facade_does_not_depend_on_unpublished_onnx_interop`
-から #2017 で差し替え済み）がその承認済み形状から逸脱していないかを
-機械的に固定する。永続化はユーザーが `best_state_dict()`／
+safetensors save／load 自体は **#2019 で facade 公開済み**
+（`fandhe_ai::interop::safetensors`。`docs/facade-safetensors-exposure-
+decision.md` §11）だが、`ModelCheckpoint` からそれを呼ぶ薄いラッパー
+結線自体は本 issue（#1763）のスコープ外のまま維持する（in-memory
+スナップショット限定の設計は変更しない。ファイル保存版は引き続き
+切り出し候補〈§8〉）。永続化はユーザーが `best_state_dict()`／
 `take_best_state_dict()` で取り出した `HashMap<String, Tensor<f32>>`
 を自前で扱い、復元は既存の `Sequential::load_state_dict`（アトミック。
 イシュー #1752）で行う。ファイル保存版は切り出し候補（§8）。
@@ -333,8 +330,9 @@ facade 経由到達性を固定した。`fandhe_ai::optim`（`optim.rs`）は純
 ## 8. 対象外・切り出し候補
 
 - ユーザー定義 callback（trait object による拡張点）
-- `ModelCheckpoint` のファイル保存（safetensors。
-  `docs/facade-safetensors-exposure-decision.md` 段階 0 が前提）
+- `ModelCheckpoint` のファイル保存（safetensors。facade 公開自体は
+  #2019 で完了済み〈`fandhe_ai::interop::safetensors`〉だが、
+  `ModelCheckpoint` からの結線は未実装のまま）
 - metrics（accuracy 等）・`Monitor` の metrics 拡張
 - `DataLoader` を直接受ける `fit` 入口・追加 `Loss` variant・
   デバイス常駐学習（`DeviceParamStore`）／GPU `Tape`／AMP／gradient

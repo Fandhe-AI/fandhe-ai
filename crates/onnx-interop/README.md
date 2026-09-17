@@ -12,10 +12,14 @@ crates.io にも公開されています（依存解決のため）。
 
 ONNX import は `fandhe-ai::interop::onnx`（`OnnxModel`／`OnnxValue`／
 `OnnxError`）として `fandhe-ai` から公開済みです（イシュー #2017）。
-ONNX export・safetensors save／load への再エクスポートは引き続き提供
-されていません（facade 公開面の拡張は別途ユーザー承認が必要な段階 0 のまま。
-[`docs/facade-onnx-export-exposure-decision.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/facade-onnx-export-exposure-decision.md)・
-[`docs/facade-safetensors-exposure-decision.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/facade-safetensors-exposure-decision.md)
+safetensors save／load も `fandhe-ai::interop::safetensors`
+（`LoadError`／`SaveError`／`load_safetensors_f32`／
+`load_safetensors_f32_from_bytes`／`require_keys`／
+`save_safetensors_f32`／`save_safetensors_f32_to_bytes`）として
+`fandhe-ai` から公開済みです（イシュー #2019）。ONNX export への
+再エクスポートは引き続き提供されていません（facade 公開面の拡張は
+別途ユーザー承認が必要な段階 0 のまま。
+[`docs/facade-onnx-export-exposure-decision.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/facade-onnx-export-exposure-decision.md)
 参照）。
 
 本クレートは ONNX（protobuf）・safetensors という外部フォーマットの

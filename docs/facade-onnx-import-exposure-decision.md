@@ -159,7 +159,9 @@ publishing-order.md` §13・`docs/crates-io-naming-decision.md`「7 件目」節
 
 §9 承認事項 2・3 は issue 本文・2026-09-17 承認コメントで取得済みとなり、
 以下のとおり実装した。§11 の「段階 0 は継続」は **import に限り解消**
-（export・safetensors は §8 のとおり引き続き段階 0）。
+（export は §8 のとおり引き続き段階 0。**safetensors は #2019 で解消済み**
+——`fandhe_ai::interop::safetensors`。`docs/facade-safetensors-exposure-
+decision.md` §11 参照）。
 
 ### 12.1 公開面
 
@@ -272,8 +274,10 @@ facade は `prost` へ直接依存せず（Cargo.toml に追加していない�
 
 ### 12.7 スコープ外（実装しない・issue は起票しない）
 
-- ONNX export（#2018）・safetensors（#2019）・`Sequential`／`nn` →
+- ONNX export（#2018）・`Sequential`／`nn` →
   `ExportNode` 橋渡し・学習可能化・`BackendOps` 経由の GPU 実行化。
+  safetensors 側は #2019 で facade 公開が完了済み（本 issue とは別ファイル
+  `docs/facade-safetensors-exposure-decision.md` §11 参照）。
 - 入力総バイト数／要素数の明示上限導入（§7 A03 の懸念事項。値の決定に
   承認が必要なため見送り。既存の fail-closed 境界〈`build_graph` の長さ
   整合検査〉のみで運用）。
