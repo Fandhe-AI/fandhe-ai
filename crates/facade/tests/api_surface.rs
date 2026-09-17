@@ -1446,8 +1446,16 @@ version = "=0.9.0"
         saw_known_dependency_line,
         "自己検証: 合成入力の [dependencies] セクションが走査されなかった"
     );
+    // `offending` の非空性だけを見ると、この合成入力が承認済み
+    // `fandhe-ai-onnx-interop` の素の `[dependencies]` エントリを含まない
+    // ため「依存が見つからない」という無関係なオフェンスだけでも常に
+    // 非空になり、テーブル形式 package リネーム検出自体が後退しても
+    // 本テストが green のまま残る空虚検査になる（Cursor Bugbot Medium
+    // 指摘・#2024。兄弟テスト
+    // `package_rename_bypass_is_flagged_regardless_of_quote_style` と
+    // 同様にメッセージへ `package` を含むオフェンスの存在を直接検査する）。
     assert!(
-        !offending.is_empty(),
+        offending.iter().any(|e| e.contains("package")),
         "テーブル形式配下の独立 `package = \"fandhe-ai-onnx-interop\"` 行による \
          リネーム迂回が検出されなかった（すり抜け再発）: {offending:?}"
     );
@@ -1467,7 +1475,7 @@ version = '=0.9.0'
 "#;
     let (offending, _) = scan_onnx_dependency_shape(table_form_rename_single_quoted);
     assert!(
-        !offending.is_empty(),
+        offending.iter().any(|e| e.contains("package")),
         "テーブル形式配下の独立 `package = 'fandhe-ai-onnx-interop'`（シングル\
          クォート）行によるリネーム迂回が検出されなかった: {offending:?}"
     );
@@ -1548,8 +1556,25 @@ fn facade_sources_reference_onnx_interop_only_in_interop_module() {
 /// 検出できなかった（codex-review 指摘 P2・#2024）。本関数は逆方向
 /// （ファイル中の全 `pub` 宣言を列挙し、承認リストの外側にあるものを
 /// 検出する）で拒否側のガードを担う。`pub(crate)`／`pub(super)` 等の
-/// 限定可視性は crate 外へ公開されないため対象外。`pub use` も対象外
-/// （再エクスポートは本ファイルの型宣言そのものではないため）。
+/// 限定可視性は crate 外へ公開されないため対象外。
+///
+/// `pub use`（再エクスポート）も走査対象に含める（codex-review 指摘
+/// P2・#2024 2 回目レビュー。`onnx.rs` の承認範囲は 6 件の型定義のみで
+/// 再エクスポートは 1 件も承認していないため、`kind == "use"` を
+/// `ALLOWED_PUB_ITEMS` に一致し得ない種別として扱うだけで
+/// `pub use fandhe_ai_onnx_interop::...` のような追加を機構的に拒否
+/// できる）。`async`／`unsafe`／`extern` 修飾子付き宣言
+/// （`pub async fn`／`pub unsafe fn` 等）も `pub` 直後の識別子を種別と
+/// 誤認せず読み飛ばしたうえで種別を判定する（Cursor Bugbot Low 指摘・
+/// #2024。`scan_forbidden_pub_items` の同種修飾子スキップと同じ方針）。
+///
+/// `pub fn` については、パラメータ列・戻り値型を含む完全なシグネチャ
+/// （`fn` から本体開始 `{` または宣言終端 `;` まで）を抽出し、
+/// `FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS` のいずれかを含んでいないかも
+/// 検査する。旧実装（`interop_module_exposes_only_approved_onnx_surface`
+/// 内の行単位 `pub` 行検査）は複数行にまたがる戻り値型宣言で内部型
+/// （`ModelProto` 等）の露出を見逃していた（codex-review 指摘 P2・
+/// #2024。本関数へ統合し単一の走査でシグネチャ全体を検査する）。
 fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
     const ALLOWED_PUB_ITEMS: [(&str, &str); 6] = [
         ("struct", "OnnxModel"),
@@ -1559,9 +1584,12 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
         ("fn", "from_path"),
         ("fn", "run"),
     ];
-    const SCANNED_KINDS: [&str; 8] = [
-        "struct", "enum", "fn", "trait", "type", "const", "static", "mod",
+    const SCANNED_KINDS: [&str; 9] = [
+        "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
     ];
+    const QUALIFIER_KEYWORDS: [&str; 3] = ["async", "unsafe", "extern"];
+    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 4] =
+        ["ModelProto", "NodeProto", "prost::", "onnx::graph::Graph"];
 
     let cleaned = strip_comments_and_literals(original);
     let len = cleaned.len();
@@ -1602,6 +1630,28 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
             i = k;
             continue;
         }
+        // `async`／`unsafe`／`extern` 修飾子を種別と誤認しないよう
+        // 読み飛ばす（`pub async fn` 等）。
+        loop {
+            if !(k < len && is_ident_start(cleaned[k])) {
+                break;
+            }
+            let qs = k;
+            let mut qe = k + 1;
+            while qe < len && is_ident_char(cleaned[qe]) {
+                qe += 1;
+            }
+            let candidate: String = cleaned[qs..qe].iter().collect();
+            if !QUALIFIER_KEYWORDS.contains(&candidate.as_str()) {
+                break;
+            }
+            k = qe;
+            while k < len && cleaned[k].is_whitespace() {
+                k += 1;
+            }
+            // `extern "C"` のような文字列リテラルはコメント除去段階で
+            // 空白へ置換済みのため追加処理は不要。
+        }
         if !(k < len && is_ident_start(cleaned[k])) {
             i = j;
             continue;
@@ -1612,7 +1662,7 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
             ke += 1;
         }
         let kind: String = cleaned[ks..ke].iter().collect();
-        if kind == "use" || !SCANNED_KINDS.contains(&kind.as_str()) {
+        if !SCANNED_KINDS.contains(&kind.as_str()) {
             i = j;
             continue;
         }
@@ -1635,6 +1685,40 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
                     "line {}: `pub {kind} {name}` は承認範囲外の公開アイテム",
                     line_at(&cleaned, start)
                 ));
+            }
+            // `pub fn` は承認済みのものも含め、パラメータ列・戻り値型を
+            // 含む完全なシグネチャを走査し、複数行にまたがる戻り値型
+            // 宣言中の内部型露出（`ModelProto` 等）を検出する。
+            if kind == "fn" {
+                let mut p = ne;
+                while p < len && cleaned[p] != '(' && cleaned[p] != '{' && cleaned[p] != ';' {
+                    p += 1;
+                }
+                if p < len && cleaned[p] == '(' {
+                    let mut depth = 1i32;
+                    p += 1;
+                    while p < len && depth > 0 {
+                        match cleaned[p] {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        p += 1;
+                    }
+                }
+                while p < len && cleaned[p] != '{' && cleaned[p] != ';' {
+                    p += 1;
+                }
+                let signature: String = cleaned[start..p.min(len)].iter().collect();
+                for forbidden in FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS {
+                    if signature.contains(forbidden) {
+                        offenses.push(format!(
+                            "line {}: `pub fn {name}` のシグネチャが内部クレート型 \
+                             `{forbidden}` を含む（複数行の戻り値型宣言を含む）",
+                            line_at(&cleaned, start)
+                        ));
+                    }
+                }
             }
         }
         i = j;
@@ -1669,6 +1753,94 @@ impl OnnxModel {
     );
 }
 
+/// `scan_unapproved_onnx_pub_items` が `pub use` 再エクスポート（例:
+/// `pub use fandhe_ai_onnx_interop::onnx::proto::encode_model;`）を
+/// 承認範囲外として検出することを確認する（codex-review 指摘 P2・
+/// #2024 の回帰固定。`onnx.rs` の承認範囲は型定義 6 件のみで再
+/// エクスポートは 0 件のため、`pub use` はいかなる形でも許容されない）。
+#[test]
+fn unapproved_onnx_pub_use_reexport_is_flagged() {
+    let synthetic = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+pub use fandhe_ai_onnx_interop::onnx::proto::encode_model;
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(
+        offenses
+            .iter()
+            .any(|e| e.contains("use") && e.contains("fandhe_ai_onnx_interop")),
+        "承認範囲外の `pub use` 再エクスポートが検出されなかった: {offenses:?}"
+    );
+}
+
+/// `scan_unapproved_onnx_pub_items` が `async`／`unsafe` 修飾子付きの
+/// `pub fn`（`pub async fn`／`pub unsafe fn`）も種別を正しく `fn` と
+/// 判定して承認リストと照合することを確認する（Cursor Bugbot Low
+/// 指摘・#2024。修飾子を種別と誤認してスキップすると、これらの宣言が
+/// 検査を素通りしてしまう）。
+#[test]
+fn unapproved_onnx_pub_fn_with_qualifiers_is_flagged() {
+    let synthetic = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+impl OnnxModel {
+    pub async fn to_bytes_async(&self) -> Vec<u8> {
+        unimplemented!()
+    }
+
+    pub unsafe fn to_bytes_unsafe(&self) -> Vec<u8> {
+        unimplemented!()
+    }
+}
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(
+        offenses.iter().any(|e| e.contains("to_bytes_async")),
+        "承認範囲外の `pub async fn` が検出されなかった: {offenses:?}"
+    );
+    assert!(
+        offenses.iter().any(|e| e.contains("to_bytes_unsafe")),
+        "承認範囲外の `pub unsafe fn` が検出されなかった: {offenses:?}"
+    );
+}
+
+/// `scan_unapproved_onnx_pub_items` が複数行にまたがる `pub fn` の
+/// 戻り値型宣言中の内部クレート型露出（`ModelProto` 等）を検出する
+/// ことを確認する（codex-review 指摘 P2・#2024 3 回目レビュー。旧
+/// 実装の行単位 `pub` 行検査は戻り値型が改行を挟むと見逃していた）。
+#[test]
+fn multiline_return_type_internal_leak_is_flagged() {
+    let synthetic = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+impl OnnxModel {
+    pub fn from_bytes(
+        bytes: &[u8],
+    ) -> Result<
+        ModelProto,
+        OnnxError,
+    > {
+        unimplemented!()
+    }
+}
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(
+        offenses
+            .iter()
+            .any(|e| e.contains("from_bytes") && e.contains("ModelProto")),
+        "複数行の戻り値型に含まれる内部型 `ModelProto` の露出が検出されなかった: \
+         {offenses:?}"
+    );
+}
+
 /// `src/interop/` の公開面が承認範囲（`interop::onnx::{OnnxModel,
 /// OnnxValue, OnnxError}` と `OnnxModel::{from_bytes, from_path, run}`）
 /// のみであることを固定する。`prost`・`onnx-interop` の内部型
@@ -1693,6 +1865,22 @@ fn interop_module_exposes_only_approved_onnx_surface() {
     assert!(
         mod_offending[0].contains("mod"),
         "src/interop/mod.rs の唯一の公開アイテムが `pub mod` ではない: {mod_offending:?}"
+    );
+    // `scan_forbidden_pub_items` は `pub use` を意図的に対象外とする
+    // （他ガード箇所での「再エクスポートは許容する」前提のため）が、
+    // `src/interop/mod.rs` は `pub mod onnx;` のみを承認しており
+    // 再エクスポートは 1 件も承認していない。`pub use` が別途紛れ込んで
+    // いないかをここで直接検査する（codex-review 指摘 P2・#2024
+    // 「mod.rs 側も同様に pub use が検査対象外」を解消）。
+    let mod_rs_pub_use_offending: Vec<&str> = mod_rs_content
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("pub use"))
+        .collect();
+    assert!(
+        mod_rs_pub_use_offending.is_empty(),
+        "src/interop/mod.rs に承認範囲外の `pub use` 再エクスポートがある: \
+         {mod_rs_pub_use_offending:?}"
     );
 
     let onnx_rs_path = interop_dir.join("onnx.rs");
