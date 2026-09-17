@@ -21,7 +21,6 @@ use crate::error::CudaError;
 use crate::kernels_log_softmax_backward::LOG_SOFTMAX_BACKWARD_F32;
 use crate::memory::readback;
 use crate::nvrtc::compile_ptx;
-use crate::softmax::validate_softmax_launch;
 
 /// カーネル起動時の block 幅（32 スレッド = 1 warp 固定。
 /// `kernels_log_softmax_backward.rs` の「1 CTA = 1 warp」設計と一致
@@ -29,23 +28,56 @@ use crate::softmax::validate_softmax_launch;
 const LOG_SOFTMAX_BACKWARD_BLOCK_DIM: u32 = 32;
 
 /// 起動前 fail-closed 検証: `rows * cols == y_len == g_len`（checked
-/// 乗算）・各次元が `i32::MAX`（カーネル引数 `int rows`／`int cols`
-/// 契約）に収まること。`validate_softmax_launch`（`softmax.rs`）の
-/// `rows * cols == x_len` 検査を `y_len`／`g_len` の両方へ適用する形で
-/// 再利用する（判定式自体は同一。`layer_norm.rs::
-/// validate_layer_norm_launch` が `w_len`／`b_len` を追加検証するのと
-/// 同じ構成方針）。
+/// 乗算）・`rows`／`cols` それぞれが `i32::MAX`（カーネル引数
+/// `int rows`／`int cols` 契約）に収まること。
+///
+/// `validate_softmax_launch`（`softmax.rs`）は `rows*cols`（`numel`）
+/// 自体も `i32::MAX` 以下であることを要求するが、これは softmax
+/// フォワードカーネルが `numel` を index 計算に使わないためだけの
+/// 制約である。本カーネル（`kernels_log_softmax_backward.rs`）は
+/// 行内オフセットを `long long row_base = (long long)row * (long
+/// long)cols` として `long long` で計算するため `rows*cols` が
+/// `i32::MAX` を超えても正しく動作する。`validate_softmax_launch` を
+/// そのまま再利用すると `rows`／`cols` が個別に `i32` へ収まる大きな
+/// vocab バッチ（例: `rows` は小さいが `cols` が大きく `numel` のみ
+/// `i32::MAX` 超）を不要に拒否し、`grad::vjp` の CUDA 経路が
+/// `KernelLaunchFailed` を返してホストフォールバック
+/// （`log_softmax_vjp_along`）へ委譲する前に失敗してしまう
+/// （Cursor Bugbot 指摘・PR #1994）。そのため `numel` の上限検査は
+/// 行わず、カーネル引数として実際に `int` へキャストする
+/// `rows`／`cols` のみを個別に検証する。
 pub(crate) fn validate_log_softmax_backward_launch(
     rows: usize,
     cols: usize,
     y_len: usize,
     g_len: usize,
 ) -> Result<(), CudaError> {
-    validate_softmax_launch(rows, cols, y_len)?;
+    let numel = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CudaError::InvalidSoftmaxShape {
+            detail: format!(
+                "log_softmax_backward rows*cols overflowed usize: rows={rows}, cols={cols}"
+            ),
+        })?;
+    if numel != y_len {
+        return Err(CudaError::InvalidSoftmaxShape {
+            detail: format!(
+                "log_softmax_backward y length mismatch: rows*cols={numel}, y.len()={y_len}"
+            ),
+        });
+    }
     if g_len != y_len {
         return Err(CudaError::InvalidSoftmaxShape {
             detail: format!(
                 "log_softmax_backward: y/g length mismatch: y.len()={y_len}, g.len()={g_len}"
+            ),
+        });
+    }
+    if rows > i32::MAX as usize || cols > i32::MAX as usize {
+        return Err(CudaError::InvalidSoftmaxShape {
+            detail: format!(
+                "log_softmax_backward rows/cols must each fit in i32 (kernel argument type): \
+                 rows={rows}, cols={cols}"
             ),
         });
     }
@@ -171,10 +203,23 @@ mod tests {
 
     #[test]
     fn validate_log_softmax_backward_launch_rejects_dims_over_i32_max() {
-        // `rows*cols` を `i32::MAX` 超過させる（`checked_mul` 自体は
-        // `usize` の範囲内に収まる組み合わせ）。
+        // `rows`（カーネル引数 `int rows`）自体が `i32::MAX` を超える
+        // 場合は拒否する（`rows*cols` の上限とは独立の検査）。
         let rows = (i32::MAX as usize) + 1;
         let err = validate_log_softmax_backward_launch(rows, 1, rows, rows).unwrap_err();
         assert!(matches!(err, CudaError::InvalidSoftmaxShape { .. }));
+    }
+
+    #[test]
+    fn validate_log_softmax_backward_launch_accepts_numel_over_i32_max_when_dims_fit() {
+        // `rows`／`cols` は個別に `i32::MAX` に収まるが `rows*cols`
+        // （numel）は `i32::MAX` を超える形状。本カーネルは行内
+        // オフセットを `long long` で計算するため numel 自体の上限は
+        // 不要（Cursor Bugbot 指摘・PR #1994）。
+        let rows: usize = 100_000;
+        let cols: usize = 100_000;
+        let numel = rows * cols;
+        assert!(numel > i32::MAX as usize);
+        assert!(validate_log_softmax_backward_launch(rows, cols, numel, numel).is_ok());
     }
 }
