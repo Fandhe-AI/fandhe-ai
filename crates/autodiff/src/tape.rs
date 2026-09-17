@@ -1411,7 +1411,13 @@ impl Op {
     /// フィールドが入力ノードか」をコンパイルエラーで判断させ、
     /// 判断漏れのまま既定で「入力なし」扱いにしてしまう事故
     /// （poison 伝播の抜け穴。`.claude/rules/security.md` A08）を防ぐ。
-    fn for_each_input(&self, mut f: impl FnMut(NodeId)) {
+    ///
+    /// **`pub(crate)` 化（イシュー #1942）**: `create_graph.rs` の
+    /// 祖先集合構築（`loss` から `Op` 入力を辿る走査）が
+    /// `Tape::push_eager` の poison 伝播判定と同じ「全入力を網羅する」
+    /// 走査を必要とするため、クレート内の別モジュールから呼べるよう
+    /// 可視性のみ緩和する（本体・網羅性は無変更）。
+    pub(crate) fn for_each_input(&self, mut f: impl FnMut(NodeId)) {
         match self {
             Op::Leaf | Op::ResidentLeaf { .. } => {}
             Op::MatMul(a, b) | Op::Add(a, b) | Op::Mul(a, b) | Op::Solve { a, b } => {
@@ -1607,6 +1613,104 @@ impl Op {
                     f(*i);
                 }
             }
+        }
+    }
+
+    /// 子テープ方式の `create_graph`（イシュー #1942・設計 `docs/
+    /// autodiff-higher-order-grad-decision.md` §8「機構案」）が、この
+    /// `Op` を子テープ上へ `Var` 演算として再生（replay）できるか判定
+    /// する。`true` の Op のみ [`crate::create_graph`] が対応する
+    /// （`Tape::backward_create_graph` の唯一の呼び出し元）。
+    ///
+    /// **初期スコープ（設計 doc §8「対象（初期スコープ）」のうち、
+    /// 本イシューで実装するサブセット）**: `Leaf`・`Add`・`Mul`・
+    /// `Relu`・`Exp`・`Tanh`・`Sigmoid`・`Sum`（`dim` 制限なし。単一軸／
+    /// 全軸いずれも VJP を持つ）・`Mean`（同）・`Reshape`・
+    /// `BroadcastTo` の 11 variant のみ `true`。設計 doc §8 の「対象」
+    /// 区分に含まれる `MatMul`・`ScalarUnary`／`ScalarBinary`・
+    /// `Transpose`／`Permute`／`Narrow`／`Concat`／`Contiguous`／
+    /// `Where`／`MaskedFill`／`Gather`／`Scatter`／`Pad`／`MseLoss`／
+    /// `CrossEntropyLoss` は本イシューの 2h 粒度では対象外とし、以後の
+    /// イシュー（#1943 等）へ引き継ぐ（`false` のまま残す。設計 doc
+    /// §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
+    ///
+    /// **網羅 match（ワイルドカードなし）とする理由**: `is_checkpoint_
+    /// eligible`／`for_each_input` と同じ——新しい `Op` variant を
+    /// 追加するたびに「子テープで再生可能か」をコンパイルエラーで
+    /// 判断させ、判断漏れのまま既定で `false`（安全側だが無言）に
+    /// してしまう事故を防ぐ（`.claude/rules/out-of-scope-tracking.md`
+    /// の「スコープ外事項を放置しない」精神を型検査で強制する）。
+    pub(crate) fn supports_create_graph(&self) -> bool {
+        match self {
+            Op::Leaf
+            | Op::Add(..)
+            | Op::Mul(..)
+            | Op::Relu(..)
+            | Op::Exp(..)
+            | Op::Tanh(..)
+            | Op::Sigmoid(..)
+            | Op::Sum { .. }
+            | Op::Mean { .. }
+            | Op::Reshape { .. }
+            | Op::BroadcastTo { .. } => true,
+            Op::MatMul(..)
+            | Op::ScalarUnary { .. }
+            | Op::ScalarBinary { .. }
+            | Op::Max { .. }
+            | Op::Var { .. }
+            | Op::VectorNorm { .. }
+            | Op::Std { .. }
+            | Op::Min { .. }
+            | Op::MseLoss { .. }
+            | Op::HuberLoss { .. }
+            | Op::BceLoss { .. }
+            | Op::CrossEntropyLoss { .. }
+            | Op::NllLoss { .. }
+            | Op::KlDivLoss { .. }
+            | Op::ResidentLeaf { .. }
+            | Op::LinearResident { .. }
+            | Op::LinearAct { .. }
+            | Op::Transpose { .. }
+            | Op::Contiguous { .. }
+            | Op::RmsNorm { .. }
+            | Op::LayerNorm { .. }
+            | Op::BatchNorm { .. }
+            | Op::RnnCell { .. }
+            | Op::LstmCell { .. }
+            | Op::LstmHidden { .. }
+            | Op::GruCell { .. }
+            | Op::Inv { .. }
+            | Op::Solve { .. }
+            | Op::Det { .. }
+            | Op::Cholesky { .. }
+            | Op::QrQ { .. }
+            | Op::QrR { .. }
+            | Op::SvdU { .. }
+            | Op::SvdS { .. }
+            | Op::SvdVh { .. }
+            | Op::MatrixNorm { .. }
+            | Op::Permute { .. }
+            | Op::Concat { .. }
+            | Op::Narrow { .. }
+            | Op::Softmax { .. }
+            | Op::LogSoftmax { .. }
+            | Op::Where { .. }
+            | Op::MaskedFill { .. }
+            | Op::Dropout { .. }
+            | Op::Gather { .. }
+            | Op::Scatter { .. }
+            | Op::Embedding { .. }
+            | Op::Cumsum { .. }
+            | Op::Cumprod { .. }
+            | Op::Sort { .. }
+            | Op::Topk { .. }
+            | Op::Interpolate { .. }
+            | Op::Pad { .. }
+            | Op::Conv2d { .. }
+            | Op::OneHot { .. }
+            | Op::MaxPool2d { .. }
+            | Op::AvgPool2d { .. }
+            | Op::AdaptiveAvgPool2d { .. } => false,
         }
     }
 }
@@ -2181,6 +2285,22 @@ impl Tape {
             release_checkpoint_region(&mut nodes, region.lo, region.output);
         }
         Ok(())
+    }
+
+    /// この `Tape` に checkpoint 区間（[`Tape::checkpoint`]／
+    /// `Var::checkpoint_from`）が一度でも登録されたかを返す（イシュー
+    /// #1942）。`crate::create_graph::Tape::backward_create_graph` の
+    /// 入口検査が使う——checkpoint 済みノードの forward 値は解放されて
+    /// おり、子テープ側での再生（replay）には `docs/
+    /// autodiff-checkpoint-design.md` の再計算経路との追加整理が要る
+    /// ため（設計 doc `docs/autodiff-higher-order-grad-decision.md`
+    /// §8「checkpoint 区間との相互作用」）、本イシューの初期スコープ
+    /// では checkpoint 済み親テープを一律 fail-closed に拒否する。
+    /// `checkpoints`（`HashMap<usize, Vec<CheckpointRegion>>`）は
+    /// [`Tape::reset`] でのみ消去されるため、reset 後は再び `false` を
+    /// 返す。
+    pub(crate) fn has_registered_checkpoints(&self) -> bool {
+        !self.checkpoints.borrow().is_empty()
     }
 
     /// **非 elementwise・常に実体化済み**のノードを追記する（`matmul`/
