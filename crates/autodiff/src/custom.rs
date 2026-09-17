@@ -43,7 +43,7 @@ use crate::error::AutodiffError;
 ///   §9 のスコープ外整理）。
 pub trait CustomFunction: Send + Sync + 'static {
     /// ログ・エラーメッセージ表示用の識別名。`Op::Custom` の手書き
-    /// `Debug` 実装（[`CustomFn`]）が参照する。
+    /// `Debug` 実装（`CustomFn`）が参照する。
     fn name(&self) -> &str;
 
     /// 入力 shape 列から出力 shape を宣言する。`forward` の実出力

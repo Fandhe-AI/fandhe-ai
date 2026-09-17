@@ -1946,7 +1946,7 @@ impl Tape {
     ///    型付き `Err` を返すため、ここで先に検出して意図を明示する
     ///    （§3 項 6・§12.4「resident／reuse 経路との相互作用」）
     /// 4. `func.output_shape(..)` が返す宣言 shape を取得
-    /// 5. 全入力を層 1（[`materialize_fallible`]）で実体化し、`Ref` を
+    /// 5. 全入力を層 1（`materialize_fallible`）で実体化し、`Ref` を
     ///    閉じてから所有値として持ち出す（`RefCell` 借用の外で
     ///    ユーザー `forward` を呼ぶ規律。`Var::cat` と同型）
     /// 6. `func.forward(&refs)` を呼ぶ
