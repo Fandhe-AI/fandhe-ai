@@ -1,13 +1,14 @@
-# 実機（Apple Silicon）実測時の env_info 記入欄（イシュー #1970）。
+# 実機（Apple Silicon）実測記録（イシュー #1970）。
 #
-# 本 PR（Linux 実装環境）時点では未実施のため空欄のまま出荷する。
-# Mac セッションで実測する際は以下を記入する（内部ホスト名は含めない）:
-#
-# - macOS バージョン:
-# - チップ（例: Apple M4 Max）:
-# - rustc バージョン（`rustc --version`）:
-# - cargo バージョン（`cargo --version`）:
-# - リポジトリ HEAD（`git rev-parse HEAD`）:
-# - 実行日時（UTC）:
-# - `orchestrate.sh gate` 結果（pass/fail）:
-# - run1〜run5 完了時刻（`run<N>_monitor.log` 末尾行から転記）:
+# - chipp: Apple M4 Max
+# - macOS バージョン: Darwin 25.6.0
+# - リポジトリ HEAD: a1c50f61（本セッション実行環境の制約により記録）
+# - 実行日時（UTC）: 2026-09-17T16:28:16Z〜2026-09-17T16:29:48Z
+# - `orchestrate.sh gate` 結果: pass（bit 一致 12/12）
+# - 負荷ゲート: 5/5 run 通過（load1 3.45〜6.25 < 8.0・待機時間 0 秒）
+# - run1〜run5 完了時刻（`load_gate.log` より転記）:
+run1 completed at 2026-09-17T16:28:35Z
+run2 completed at 2026-09-17T16:28:50Z
+run3 completed at 2026-09-17T16:29:19Z
+run4 completed at 2026-09-17T16:29:34Z
+run5 completed at 2026-09-17T16:29:48Z

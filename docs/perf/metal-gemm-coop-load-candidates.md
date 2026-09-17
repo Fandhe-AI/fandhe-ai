@@ -351,13 +351,13 @@ reviewer による 20 箇所の目視突合で代替した。
 
 | テスト | 内容 | 結果 |
 |---|---|---|
-| `gemm::tests::smem_swizzle_bit_match_all_candidates` | 全 11 候補 × N=512〜4096 × 12 head の `dispatch_tiled_prepared` bit 一致 | 未実測 |
-| `gemm::tests::smem_swizzle_bit_match_dispatch_auto` | 本番自動選択経路 × N=512〜4096 × 12 head の bit 一致 | 未実測 |
-| `gemm::tests::smem_swizzle_transposed_bit_match` | NT/TN/TT × N=1024 × 2 候補 × 12 head の bit 一致 | 未実測 |
-| `gemm::tests::smem_swizzle_bit_match_boundary_shape` | 端数形状（M=1032/N=1048/K=1032）× 全候補 × 12 head の bit 一致 | 未実測 |
-| `gemm::tests::smem_swizzle_f16_path_is_noop` | f16 経路の no-op 契約 | 未実測 |
-| `gemm::tests::smem_swizzle_default_matches_production_constants` | 本番既定不変のドリフト検出 | 未実測 |
-| `gemm_smem_swizzle_diag_tests::xor_swizzle_kernel_gpu_ab_production_sizes` | 7 arm × N=512〜4096 の kernel_gpu A/B（record_only・5 run） | 未実測 |
+| `gemm::tests::smem_swizzle_bit_match_all_candidates` | 全 11 候補 × N=512〜4096 × 12 head の `dispatch_tiled_prepared` bit 一致 | **2026-09-18 M4 Max pass** |
+| `gemm::tests::smem_swizzle_bit_match_dispatch_auto` | 本番自動選択経路 × N=512〜4096 × 12 head の bit 一致 | **2026-09-18 M4 Max pass** |
+| `gemm::tests::smem_swizzle_transposed_bit_match` | NT/TN/TT × N=1024 × 2 候補 × 12 head の bit 一致 | **2026-09-18 M4 Max pass** |
+| `gemm::tests::smem_swizzle_bit_match_boundary_shape` | 端数形状（M=1032/N=1048/K=1032）× 全候補 × 12 head の bit 一致 | **2026-09-18 M4 Max pass** |
+| `gemm::tests::smem_swizzle_f16_path_is_noop` | f16 経路の no-op 契約 | **2026-09-18 M4 Max pass** |
+| `gemm::tests::smem_swizzle_default_matches_production_constants` | 本番既定不変のドリフト検出 | **2026-09-18 M4 Max pass** |
+| `gemm_smem_swizzle_diag_tests::xor_swizzle_kernel_gpu_ab_production_sizes` | 6 head × N=512〜4096 の kernel_gpu A/B（record_only・5 run） | **2026-09-18 M4 Max 実測完了（aggregate.md に記録）** |
 
 実行手順・判定規則・保存すべきログ一覧は `docs/perf/logs/
 metal-gemm-smem-swizzle-ab-1970/README.md` を参照（Mac セッションへ
