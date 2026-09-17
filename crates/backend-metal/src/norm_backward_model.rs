@@ -95,10 +95,37 @@ impl std::error::Error for NormBackwardPrepareError {}
 /// `clippy::type_complexity` 回避のための命名）。
 pub type LayerNormBackwardRowsOutput = (Vec<f32>, Option<Vec<f32>>, Option<Vec<f32>>);
 
+/// `hidden` の `(float)hidden` 厳密表現上限（`2^24`）。GPU 起動側
+/// （`crate::norm_backward::MetalNormBackward::run_rmsnorm_backward_f32`／
+/// `run_layer_norm_backward_f32` の `validate_hidden_exact_f32`）が検査
+/// する上限とここで**値を共有**する（`crate::norm_backward` 側は本定数を
+/// `use` して二重定義を避ける）。本モジュールのホストモデルも
+/// `widen_f32_bits((hidden as f32).to_bits())`（[`rms_row_rstd`]・
+/// [`ln_row_mean_rstd`] 等）で `hidden` を `f32` 経由で widen するため、
+/// GPU 側と同じ境界検査が必要（PR #2001 codex-review P2 指摘: ホスト
+/// モデルはこの検査を欠いており、`hidden > 2^24` では `(float)hidden`
+/// の丸めにより GPU 側と異なる誤った `dx` を返しうる。`rows=1,
+/// hidden=16_777_217, x` 全要素 `1.0`, `dy` 全要素 `1e30`, `eps=0` で
+/// CPU 参照実装の `dx=0` に対し約 `-5.96e22` を返す再現例あり）。
+pub const NORM_BACKWARD_MAX_HIDDEN_EXACT_F32: usize = 1 << 24;
+
+fn validate_hidden_exact_f32(hidden: usize) -> Result<(), NormBackwardPrepareError> {
+    if hidden > NORM_BACKWARD_MAX_HIDDEN_EXACT_F32 {
+        return Err(NormBackwardPrepareError::InvalidShape {
+            detail: format!(
+                "norm_backward hidden exceeds exact f32 integer range: hidden={hidden} > {NORM_BACKWARD_MAX_HIDDEN_EXACT_F32} (2^24)"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// 起動前 fail-closed 検証: `rows.checked_mul(hidden)` が
 /// `x.len()`／`dy.len()` と一致し、`w` が `Some` のときは
 /// `w.len() == hidden` であることを確認する（`crate::
-/// batch_norm_model::validate_batch_norm_launch` と同型）。
+/// batch_norm_model::validate_batch_norm_launch` と同型）。`hidden` の
+/// `f32` 厳密表現上限（[`validate_hidden_exact_f32`]）も GPU 起動側と
+/// 同じ基準でここで検査する。
 fn validate_norm_backward_launch(
     rows: usize,
     hidden: usize,
@@ -128,6 +155,7 @@ fn validate_norm_backward_launch(
             detail: format!("weight length mismatch: hidden={hidden}, w.len()={wl}"),
         });
     }
+    validate_hidden_exact_f32(hidden)?;
     Ok(())
 }
 
@@ -142,12 +170,20 @@ fn validate_norm_backward_launch(
 /// （スライスはそれ自体 `isize::MAX` バイト以内に収まる Rust の不変
 /// 条件）ため安全だが、`has_bias` は単なる真偽値でそのような裏付けを
 /// 一切持たない。`rows == 0` の早期 return 分岐では `hidden` が検証を
-/// 通過しつつ任意に大きい値（例 `usize::MAX`）を取りうるため、確保前
-/// にここで拒否しなければ `vec![0.0f32; hidden]` が capacity overflow
-/// で panic する（PR #2001 codex-review P1 指摘。`.claude/rules/
-/// coding-rust.md`「本番経路で panic させない」方針）。`db_acc`
-/// （非ゼロ行パスの `u64` 要素）の方が `db`（`f32` 要素）より厳しい
-/// 上界のため、こちらを基準に検査する。
+/// 通過しつつ任意に大きい値を取りうるため、確保前にここで拒否しなければ
+/// `vec![0.0f32; hidden]` が capacity overflow で panic する（PR #2001
+/// codex-review P1 指摘。`.claude/rules/coding-rust.md`「本番経路で
+/// panic させない」方針）。`db_acc`（非ゼロ行パスの `u64` 要素）の方が
+/// `db`（`f32` 要素）より厳しい上界のため、こちらを基準に検査する。
+///
+/// 呼び出し元 [`layer_norm_backward_rows`] は本関数より先に
+/// `validate_norm_backward_launch`（`hidden` の `f32` 厳密表現上限
+/// `2^24` 検査を含む。PR #2001 codex-review P2 指摘）を通しているため、
+/// `hidden` は実際には `2^24` 以下に絞り込まれた状態で本関数へ渡る
+/// （`2^24 ≪ MAX_ELEMS`）。よって現実の呼び出し経路では本関数が拒否を
+/// 返すことは無い。それでも本関数自体を削除しないのは、将来
+/// `has_bias` 駆動の確保が `validate_norm_backward_launch` を経由しない
+/// 経路へ追加された場合に備える多層防御としての位置づけのため。
 fn validate_bias_alloc(hidden: usize) -> Result<(), NormBackwardPrepareError> {
     const MAX_ELEMS: usize = isize::MAX as usize / std::mem::size_of::<u64>();
     if hidden > MAX_ELEMS {
@@ -165,6 +201,14 @@ fn validate_bias_alloc(hidden: usize) -> Result<(), NormBackwardPrepareError> {
 /// CPU 参照実装 `row_rms_stats` と異なりレーンストライド butterfly で
 /// 二乗和を求める（forward `rmsnorm.metal` と同じ GPU 側都合。REQ-2
 /// 範囲での一致に留まる）。
+///
+/// # 前提条件（呼び出し元が保証）
+///
+/// `row.len() <= NORM_BACKWARD_MAX_HIDDEN_EXACT_F32`（`2^24`）。本関数
+/// 自体は `hidden` を `(row.len() as f32)` へ丸めるだけで検査しない
+/// （infallible）ため、上限は [`layer_norm_backward_rows`]／
+/// [`rmsnorm_backward_rows`] が呼び出し前に `validate_norm_backward_
+/// launch` 経由で強制する。
 pub fn rms_row_rstd(row: &[f32], eps: f32) -> f32 {
     let hidden = row.len();
     let hidden_f64 = widen_f32_bits((hidden as f32).to_bits());
@@ -266,6 +310,12 @@ fn narrow_f64_bits_f32(bits: u64) -> f32 {
 
 /// LayerNorm 行内統計（`mean`・`rstd`。`f64` bit パターンのまま返す。
 /// `layer_norm_bwd_dx_f32` パス 1／2 の逐語モデル）。
+///
+/// # 前提条件（呼び出し元が保証）
+///
+/// [`rms_row_rstd`] と同じく `row.len() <= NORM_BACKWARD_MAX_HIDDEN_
+/// EXACT_F32`（`2^24`）を呼び出し元（[`layer_norm_backward_rows`]）が
+/// `validate_norm_backward_launch` 経由で強制する。
 pub fn ln_row_mean_rstd(row: &[f32], eps: f32) -> (u64, u64) {
     let hidden = row.len();
     let hidden_f64 = widen_f32_bits((hidden as f32).to_bits());
@@ -637,26 +687,30 @@ mod tests {
 
     /// `rows == 0` かつ `hidden` が巨大（`usize::MAX`）な入力は
     /// `validate_norm_backward_launch` の `rows*hidden == x.len()`
-    /// 検査を通過するが、`w`／`has_bias` が指定されていなければ
-    /// `hidden` サイズの scratch buffer を一切確保せずに空の出力を
-    /// 返す（PR #2001 codex-review P1 指摘の再現・是正確認。
-    /// 是正前は `dw_acc`／`db_acc` を無条件確保しており
-    /// capacity overflow で panic していた）。
+    /// 検査自体は通過するが、`NORM_BACKWARD_MAX_HIDDEN_EXACT_F32`
+    /// （`2^24`）の `f32` 厳密表現上限検査（PR #2001 codex-review P2
+    /// 指摘の是正）により、`w`／`has_bias` の有無に関わらず scratch
+    /// buffer 確保より前に型付き `Err` で拒否される（`usize::MAX`
+    /// は上限を大きく超えるため、`validate_bias_alloc` の capacity
+    /// overflow 防止〈PR #2001 codex-review P1 指摘〉より手前で
+    /// 弾かれる。両検査は独立の防御であり後者は他の巨大 `hidden`
+    /// 値〈`f32` 表現上限は超えないが `Vec` capacity は超えるような
+    /// 値は本 crate の対象環境では存在しないが、設計上の多層防御
+    /// として維持する）。
     #[test]
-    fn rmsnorm_backward_rows_zero_rows_huge_hidden_does_not_panic() {
-        let (dx, dw) = rmsnorm_backward_rows(&[], None, 1e-5, 0, usize::MAX, &[])
-            .expect("rows == 0 は形状検証を通過するはず");
-        assert!(dx.is_empty());
-        assert!(dw.is_none());
+    fn rmsnorm_backward_rows_zero_rows_huge_hidden_rejects_instead_of_panicking() {
+        assert!(matches!(
+            rmsnorm_backward_rows(&[], None, 1e-5, 0, usize::MAX, &[]),
+            Err(NormBackwardPrepareError::InvalidShape { .. })
+        ));
     }
 
     #[test]
-    fn layer_norm_backward_rows_zero_rows_huge_hidden_does_not_panic() {
-        let (dx, dw, db) = layer_norm_backward_rows(&[], None, false, 1e-5, 0, usize::MAX, &[])
-            .expect("rows == 0 は形状検証を通過するはず");
-        assert!(dx.is_empty());
-        assert!(dw.is_none());
-        assert!(db.is_none());
+    fn layer_norm_backward_rows_zero_rows_huge_hidden_rejects_instead_of_panicking() {
+        assert!(matches!(
+            layer_norm_backward_rows(&[], None, false, 1e-5, 0, usize::MAX, &[]),
+            Err(NormBackwardPrepareError::InvalidShape { .. })
+        ));
     }
 
     /// `has_bias == true` かつ `hidden` が巨大（`usize::MAX`）で
@@ -665,14 +719,79 @@ mod tests {
     /// 是正前は `db`（`rows == 0` 早期 return 分岐）を無条件で
     /// `hidden` サイズ確保しており capacity overflow で panic して
     /// いた（PR #2001 codex-review P1 指摘の再現・是正確認。直前の
-    /// `layer_norm_backward_rows_zero_rows_huge_hidden_does_not_panic`
+    /// `layer_norm_backward_rows_zero_rows_huge_hidden_rejects_instead_of_panicking`
     /// は `has_bias == false` のみを検証しており、この分岐を捕捉
     /// できていなかった）。是正後は panic ではなく型付き
-    /// `NormBackwardPrepareError::InvalidShape` を返す。
+    /// `NormBackwardPrepareError::InvalidShape` を返す（`hidden ==
+    /// usize::MAX` は `f32` 厳密表現上限検査でも独立に拒否されるため、
+    /// この分岐の bias 専用検査〈`validate_bias_alloc`〉は本ケースでは
+    /// 到達しないが、多層防御として維持する）。
     #[test]
     fn layer_norm_backward_rows_zero_rows_huge_hidden_has_bias_rejects_instead_of_panicking() {
         assert!(matches!(
             layer_norm_backward_rows(&[], None, true, 1e-5, 0, usize::MAX, &[]),
+            Err(NormBackwardPrepareError::InvalidShape { .. })
+        ));
+    }
+
+    /// GPU 起動側（`crate::norm_backward::validate_hidden_exact_f32`）
+    /// が検査する `f32` 厳密表現上限（`2^24`）をホストモデルが共有
+    /// していない場合の再現例（PR #2001 codex-review P2 指摘）:
+    /// `rows=1, hidden=2^24+1, x` 全要素 `1.0`, `dy` 全要素 `1e30`,
+    /// `eps=0, weight=None` は CPU 参照実装では `dx` が全要素 `0.0`
+    /// になるが、是正前のホストモデルは `hidden` を `(float)hidden`
+    /// 経由で丸めるため誤った非ゼロ値（約 `-5.96e22`）を返していた。
+    /// 是正後は計算前に型付き `Err` で拒否する。境界値
+    /// （`hidden == 2^24` ちょうど）は許容されることも併せて確認する。
+    #[test]
+    fn layer_norm_backward_rows_rejects_hidden_above_f32_exact_range() {
+        let hidden = (1usize << 24) + 1;
+        let x = vec![1.0f32; hidden];
+        let dy = vec![1e30f32; hidden];
+        assert!(matches!(
+            layer_norm_backward_rows(&x, None, false, 0.0, 1, hidden, &dy),
+            Err(NormBackwardPrepareError::InvalidShape { .. })
+        ));
+    }
+
+    #[test]
+    fn layer_norm_backward_rows_accepts_hidden_at_f32_exact_range_boundary() {
+        let hidden = 1usize << 24;
+        let rows = 0usize;
+        let x: Vec<f32> = Vec::new();
+        let dy: Vec<f32> = Vec::new();
+        let (dx, dw, db) = layer_norm_backward_rows(&x, None, false, 1e-5, rows, hidden, &dy)
+            .expect("valid shape");
+        assert!(dx.is_empty());
+        assert!(dw.is_none());
+        assert!(db.is_none());
+    }
+
+    /// 上記境界テストの `has_bias == true` 版。`rows == 0` 早期
+    /// return 分岐で `db` を `hidden`（境界値 `2^24`）サイズ確保する
+    /// 経路（PR #2001 codex-review P1 指摘の本来のシナリオ）を実際に
+    /// 通し、境界値ちょうどでは `validate_bias_alloc` も正常に確保を
+    /// 許容することを確認する（`2^24` 要素 `* 4` バイト = 64 MiB）。
+    #[test]
+    fn layer_norm_backward_rows_accepts_hidden_at_f32_exact_range_boundary_with_bias() {
+        let hidden = 1usize << 24;
+        let rows = 0usize;
+        let x: Vec<f32> = Vec::new();
+        let dy: Vec<f32> = Vec::new();
+        let (dx, dw, db) =
+            layer_norm_backward_rows(&x, None, true, 1e-5, rows, hidden, &dy).expect("valid shape");
+        assert!(dx.is_empty());
+        assert!(dw.is_none());
+        assert_eq!(db, Some(vec![0.0f32; hidden]));
+    }
+
+    #[test]
+    fn rmsnorm_backward_rows_rejects_hidden_above_f32_exact_range() {
+        let hidden = (1usize << 24) + 1;
+        let x = vec![1.0f32; hidden];
+        let dy = vec![1e30f32; hidden];
+        assert!(matches!(
+            rmsnorm_backward_rows(&x, None, 0.0, 1, hidden, &dy),
             Err(NormBackwardPrepareError::InvalidShape { .. })
         ));
     }

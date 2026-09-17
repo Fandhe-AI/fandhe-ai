@@ -28,6 +28,7 @@ use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, 
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
+use crate::norm_backward_model::NORM_BACKWARD_MAX_HIDDEN_EXACT_F32;
 use crate::pipeline::{self, MtlPipeline};
 use crate::row_kernel::{self, RowKernelValidationError};
 
@@ -45,11 +46,15 @@ const NORM_BACKWARD_DX_THREADGROUP_WIDTH: usize = 32;
 /// 単純に `div_ceil` した threadgroup 数で覆う設計）。
 const NORM_BACKWARD_REDUCE_TG: usize = 64;
 
-/// `hidden` の `(float)hidden` 厳密表現上限（`2^24`。`layer_norm.rs::
-/// LAYER_NORM_MAX_HIDDEN_EXACT_F32` と同じ理由・同じ値。本ファイルの
-/// カーネルも `nb_f64_widen(as_type<uint>((float)hidden))` で `hidden`
-/// を `f32` 経由で widen するため同じ境界検査が必要）。
-const NORM_BACKWARD_MAX_HIDDEN_EXACT_F32: usize = 1 << 24;
+// `hidden` の `(float)hidden` 厳密表現上限（`2^24`）は
+// `crate::norm_backward_model::NORM_BACKWARD_MAX_HIDDEN_EXACT_F32`
+// （ホスト側逐語モデル。Linux 実行可能な単体テスト対象）で定義し
+// 本ファイルはそれを `use` する（`layer_norm.rs::
+// LAYER_NORM_MAX_HIDDEN_EXACT_F32` と同じ理由・同じ値だが二重定義は
+// しない）。本ファイルのカーネルも `nb_f64_widen(as_type<uint>
+// ((float)hidden))` で `hidden` を `f32` 経由で widen するため
+// 同じ境界検査が必要（PR #2001 codex-review P2 指摘: ホストモデルが
+// 同じ上限検査を欠いていたため導入。GPU 起動側の振る舞いは不変）。
 
 fn map_validation_error(err: RowKernelValidationError) -> MetalError {
     MetalError::InvalidRowKernelShape {
