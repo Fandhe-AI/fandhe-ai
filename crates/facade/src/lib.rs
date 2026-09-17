@@ -126,10 +126,12 @@ pub mod data;
 pub mod nn;
 
 /// 相互運用（interop）公開面の入口（イシュー #2017）。現時点は
-/// [`interop::onnx`]（ONNX import。`OnnxModel`／`OnnxValue`／`OnnxError`）
-/// のみを提供する。ONNX export・safetensors save／load は別途ユーザー
-/// 承認が必要な段階 0 のまま（`docs/facade-onnx-export-exposure-
-/// decision.md`・`docs/facade-safetensors-exposure-decision.md`）。
+/// [`interop::onnx`]（ONNX import／export。`OnnxModel`／`OnnxValue`／
+/// `OnnxError`・`OnnxModel::{from_bytes, from_path, run, to_bytes,
+/// to_path}`・`OnnxExportOptions`。export は #2018 で公開済み・roundtrip
+/// export ラッパー限定）のみを提供する。safetensors save／load は別途
+/// ユーザー承認が必要な段階 0 のまま（`docs/facade-safetensors-exposure-
+/// decision.md`）。
 pub mod interop;
 
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。

@@ -1,18 +1,21 @@
 //! `fandhe_ai::interop::onnx::OnnxModel` と `fandhe_ai_onnx_interop` の
-//! 直接呼び出し（`decode_model` → `build_graph` → `interp::run`）の出力
-//! 突合テスト（イシュー #2017・AC1）。
+//! 直接呼び出し（`decode_model` → `build_graph` → `interp::run`。
+//! `build_model_proto` → `encode_model`）の出力突合テスト（イシュー
+//! #2017・AC1 / イシュー #2018・AC1）。
 //!
 //! **本ファイルは意図的に `fandhe_ai` と `fandhe_ai_onnx_interop` の両方を
 //! import する**（facade ラッパーが内部クレートへ委譲するだけの薄い層で
 //! あり、コピー・再計算を挟まないことを直接検証するため。
-//! `tests/interop_onnx_import.rs`〈facade のみ import〉とは目的が異なる）。
+//! `tests/interop_onnx_import.rs`／`tests/interop_onnx_export.rs`
+//! 〈facade のみ import〉とは目的が異なる）。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use fandhe_ai::Tensor;
-use fandhe_ai::interop::onnx::{OnnxError, OnnxModel, OnnxValue};
+use fandhe_ai::interop::onnx::{OnnxError, OnnxExportOptions, OnnxModel, OnnxValue};
 
+use fandhe_ai_onnx_interop::onnx::export::{ExportOptions, build_model_proto};
 use fandhe_ai_onnx_interop::onnx::graph::build_graph;
 use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
 use fandhe_ai_onnx_interop::onnx::proto::{
@@ -324,5 +327,184 @@ fn synthetic_model_cast_to_float16_yields_onnx_value_f16_via_facade() {
         matches!(&result["y"], OnnxValue::F16(_)),
         "OnnxValue::F16 を期待したが {:?}",
         result["y"]
+    );
+}
+
+// --- export（イシュー #2018）: facade ↔ 内部クレート直接呼び出し突合 ---
+
+/// 1. facade `to_bytes(default)` == 内部クレート直接呼び出し
+/// （`encode_model(&build_model_proto(&build_graph(&decode_model(bytes)),
+/// &ExportOptions::default()))`）とバイト完全一致することを固定する
+/// （`model.onnx`・`slice_repro.onnx`）。
+#[test]
+fn to_bytes_matches_internal_direct_call_byte_exact() {
+    for fixture in ["model.onnx", "slice_repro.onnx"] {
+        let facade_model = OnnxModel::from_path(onnx_interop_fixture(fixture))
+            .unwrap_or_else(|e| panic!("{fixture} の from_path が失敗: {e}"));
+        let facade_bytes = facade_model
+            .to_bytes(&OnnxExportOptions::default())
+            .unwrap_or_else(|e| panic!("{fixture} の to_bytes が失敗: {e}"));
+
+        let internal_model = load_internal_model(fixture);
+        let internal_graph = build_graph(&internal_model)
+            .unwrap_or_else(|e| panic!("{fixture} の build_graph が失敗: {e}"));
+        let internal_proto = build_model_proto(&internal_graph, &ExportOptions::default())
+            .unwrap_or_else(|e| panic!("{fixture} の build_model_proto が失敗: {e}"));
+        let internal_bytes = proto::encode_model(&internal_proto);
+
+        assert_eq!(
+            facade_bytes, internal_bytes,
+            "{fixture}: facade to_bytes と内部クレート直接呼び出しがバイト不一致"
+        );
+    }
+}
+
+/// 2. `build_graph(decode_model(facade_bytes)) ==
+/// build_graph(decode_model(元 bytes))`（`Graph: PartialEq`）に加え、
+/// decode 結果の `value_info` が空・全 initializer の `float_data`／
+/// `int64_data` が空であることを確認する（export の契約確認。
+/// `docs/facade-onnx-export-exposure-decision.md` §4「value_info は常に
+/// 空」・`export.rs` の「常に raw_data のみへ書き出す」契約）。
+#[test]
+fn to_bytes_output_graph_structurally_equal_and_satisfies_export_contract() {
+    for fixture in ["model.onnx", "slice_repro.onnx"] {
+        let facade_model = OnnxModel::from_path(onnx_interop_fixture(fixture))
+            .unwrap_or_else(|e| panic!("{fixture} の from_path が失敗: {e}"));
+        let facade_bytes = facade_model
+            .to_bytes(&OnnxExportOptions::default())
+            .unwrap_or_else(|e| panic!("{fixture} の to_bytes が失敗: {e}"));
+
+        let reexported_model = proto::decode_model(&facade_bytes)
+            .unwrap_or_else(|e| panic!("{fixture} の再 decode が失敗: {e}"));
+        let reexported_graph = build_graph(&reexported_model)
+            .unwrap_or_else(|e| panic!("{fixture} の再 build_graph が失敗: {e}"));
+
+        let original_model = load_internal_model(fixture);
+        let original_graph = build_graph(&original_model)
+            .unwrap_or_else(|e| panic!("{fixture} の元 build_graph が失敗: {e}"));
+
+        assert_eq!(
+            reexported_graph, original_graph,
+            "{fixture}: export→decode→build_graph が元 Graph と構造的に一致しない"
+        );
+
+        let graph_proto = reexported_model
+            .graph
+            .as_ref()
+            .unwrap_or_else(|| panic!("{fixture}: 再 decode したモデルに graph が無い"));
+        assert!(
+            graph_proto.value_info.is_empty(),
+            "{fixture}: value_info が空ではない（export 契約違反）"
+        );
+        assert!(
+            !graph_proto.initializer.is_empty() || fixture == "slice_repro.onnx",
+            "{fixture}: initializer が空虚 pass（少なくとも 1 件は想定）"
+        );
+        for tensor in &graph_proto.initializer {
+            assert!(
+                tensor.float_data.is_empty(),
+                "{fixture}: initializer '{}' の float_data が空でない（raw_data 限定契約違反）",
+                tensor.name
+            );
+            assert!(
+                tensor.int64_data.is_empty(),
+                "{fixture}: initializer '{}' の int64_data が空でない（raw_data 限定契約違反）",
+                tensor.name
+            );
+        }
+    }
+}
+
+/// 3. 既定値ドリフトガード: `OnnxExportOptions::default()` の 2 フィールド
+/// == `ExportOptions::default()` の対応フィールド。
+#[test]
+fn onnx_export_options_default_matches_internal_export_options_default() {
+    let facade_default = OnnxExportOptions::default();
+    let internal_default = ExportOptions::default();
+    assert_eq!(
+        facade_default.ir_version, internal_default.ir_version,
+        "OnnxExportOptions::default().ir_version が ExportOptions::default() とドリフトしている"
+    );
+    assert_eq!(
+        facade_default.opset_version, internal_default.opset_version,
+        "OnnxExportOptions::default().opset_version が ExportOptions::default() とドリフトしている"
+    );
+}
+
+/// 4. 合成モデル: 未対応 op_type → `UnsupportedOp`、対応 op だが非既定
+/// domain → `UnsupportedOp`（`op_type` が domain 修飾形）。いずれも拒否は
+/// import 時ではなく export 時に起きることを assert する。
+#[test]
+fn synthetic_model_export_rejects_unsupported_op_and_non_default_domain() {
+    // 4a. 未対応 op_type（allowlist 外）。
+    let node = NodeProto {
+        input: vec!["x".to_string()],
+        output: vec!["y".to_string()],
+        name: "n_unsupported".to_string(),
+        op_type: "LSTM".to_string(),
+        attribute: vec![],
+        domain: String::new(),
+    };
+    let model = minimal_model_with_node(node, vec!["x"], vec!["y"]);
+    let bytes = proto::encode_model(&model);
+    let facade_model = OnnxModel::from_bytes(&bytes)
+        .expect("import 時点では成功するはず（未対応判定は export 時）");
+    let err = facade_model
+        .to_bytes(&OnnxExportOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&err, OnnxError::UnsupportedOp { op_type } if op_type == "LSTM"),
+        "未対応 op_type で OnnxError::UnsupportedOp を期待したが {err:?}"
+    );
+
+    // 4b. 対応 op（Relu）だが非既定 domain。
+    let node = NodeProto {
+        input: vec!["x".to_string()],
+        output: vec!["y".to_string()],
+        name: "n_custom_domain".to_string(),
+        op_type: "Relu".to_string(),
+        attribute: vec![],
+        domain: "custom.domain".to_string(),
+    };
+    let model = minimal_model_with_node(node, vec!["x"], vec!["y"]);
+    let bytes = proto::encode_model(&model);
+    let facade_model = OnnxModel::from_bytes(&bytes)
+        .expect("import 時点では成功するはず（domain 検査も export 時のみ）");
+    let err = facade_model
+        .to_bytes(&OnnxExportOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&err, OnnxError::UnsupportedOp { op_type } if op_type == "custom.domain::Relu"),
+        "非既定 domain で domain 修飾形の OnnxError::UnsupportedOp を期待したが {err:?}"
+    );
+}
+
+/// 5. 非既定 options が内部 `ExportOptions { ir_version, opset_version,
+/// ..default }` の出力とバイト一致する。
+#[test]
+fn non_default_options_match_internal_export_options_byte_exact() {
+    let facade_model =
+        OnnxModel::from_path(onnx_interop_fixture("model.onnx")).expect("from_path 成功");
+    let mut facade_options = OnnxExportOptions::default();
+    facade_options.ir_version = 9;
+    facade_options.opset_version = 18;
+    let facade_bytes = facade_model
+        .to_bytes(&facade_options)
+        .expect("非既定 options での to_bytes 成功");
+
+    let internal_model = load_internal_model("model.onnx");
+    let internal_graph = build_graph(&internal_model).expect("build_graph 成功");
+    let internal_options = ExportOptions {
+        ir_version: 9,
+        opset_version: 18,
+        ..ExportOptions::default()
+    };
+    let internal_proto =
+        build_model_proto(&internal_graph, &internal_options).expect("build_model_proto 成功");
+    let internal_bytes = proto::encode_model(&internal_proto);
+
+    assert_eq!(
+        facade_bytes, internal_bytes,
+        "非既定 options での facade to_bytes と内部クレート直接呼び出しがバイト不一致"
     );
 }

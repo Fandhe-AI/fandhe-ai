@@ -43,11 +43,12 @@
 //!   （内部グラフ表現 `onnx::graph::Graph` -> `GraphProto`／`ModelProto`）の
 //!   構造的な組み立てを担う（イシュー #1772）。`onnx-interop`（公開名
 //!   `fandhe-ai-onnx-interop`）は crates.io 公開対象クレート（イシュー #1963
-//!   で公開準備完了・ユーザー承認済み）だが、`onnx::export` は本クレート
-//!   内部 API のみで facade からの参照・再エクスポートは行わない（facade
-//!   公開の要否は #1775 が判断済み: 方針としては公開を推奨するが、facade
-//!   ラッパー実装自体は別途ユーザー承認が必要な段階 0 のまま。close は
-//!   しない。`docs/facade-onnx-export-exposure-decision.md`）。
+//!   で公開準備完了・ユーザー承認済み）で、`onnx::export` は #2018 で
+//!   `fandhe_ai::interop::onnx::{OnnxModel::to_bytes, OnnxModel::to_path,
+//!   OnnxExportOptions}`（import 済みモデルの roundtrip export ラッパー
+//!   限定。`compat::Sequential`／`nn` -> `ExportNode` 橋渡しは対象外）
+//!   として facade へ公開済み（`docs/facade-onnx-export-exposure-
+//!   decision.md`）。
 //! - [`st_save`]: `tensor-core::Tensor<f32>` → safetensors ワイヤフォーマットへの
 //!   書き出し（TASK-7.1c・#197・REQ-7）。[`st_load`] と対称の契約（暗黙アダプタを
 //!   設けない・dtype は F32 のみ）を持つ保存経路。親イシュー #196 の
