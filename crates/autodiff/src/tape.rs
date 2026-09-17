@@ -1603,17 +1603,24 @@ impl Op {
     /// する。`true` の Op のみ [`crate::create_graph`] が対応する
     /// （`Tape::backward_create_graph` の唯一の呼び出し元）。
     ///
-    /// **初期スコープ（設計 doc §8「対象（初期スコープ）」のうち、
-    /// 本イシューで実装するサブセット）**: `Leaf`・`Add`・`Mul`・
+    /// **対象スコープ（設計 doc §8「対象（初期スコープ）」のうち、
+    /// #1942・#1943 で実装済みのサブセット）**: `Leaf`・`Add`・`Mul`・
     /// `Relu`・`Exp`・`Tanh`・`Sigmoid`・`Sum`（`dim` 制限なし。単一軸／
     /// 全軸いずれも VJP を持つ）・`Mean`（同）・`Reshape`・
-    /// `BroadcastTo` の 11 variant のみ `true`。設計 doc §8 の「対象」
-    /// 区分に含まれる `MatMul`・`ScalarUnary`／`ScalarBinary`・
-    /// `Transpose`／`Permute`／`Narrow`／`Concat`／`Contiguous`／
-    /// `Where`／`MaskedFill`／`Gather`／`Scatter`／`Pad`／`MseLoss`／
-    /// `CrossEntropyLoss` は本イシューの 2h 粒度では対象外とし、以後の
-    /// イシュー（#1943 等）へ引き継ぐ（`false` のまま残す。設計 doc
-    /// §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
+    /// `BroadcastTo`・`MatMul`（**rank 2 × rank 2 のみ**。rank≥3 は
+    /// `create_graph.rs::validate_ancestors` が別途 `Err` で事前拒否
+    /// する——rank≥3 の 1 階 `matmul_vjp` は `reduce_batch_axes_f64`
+    /// 〈`f64` アキュムレータの broadcast 縮約〉を経由するが、子テープ
+    /// 側の `reduce_to`〈`Var::narrow`＋`Var::add` の f32 逐次和〉は
+    /// これを逐語再現しないため対象外とした。#1943・
+    /// `docs/autodiff-higher-order-grad-decision.md` §14）の 12
+    /// variant のみ `true`。設計 doc §8 の「対象」区分に残る
+    /// `ScalarUnary`／`ScalarBinary`・`Transpose`／`Permute`／
+    /// `Narrow`／`Concat`／`Contiguous`／`Where`／`MaskedFill`／
+    /// `Gather`／`Scatter`／`Pad`／`MseLoss`／`CrossEntropyLoss` は
+    /// 引き続き対象外とし、以後のイシューへ引き継ぐ（`false` のまま
+    /// 残す。設計 doc §8「非対象」「保留」区分の Op はすべて構造的に
+    /// 非対象）。
     ///
     /// **網羅 match（ワイルドカードなし）とする理由**: `is_checkpoint_
     /// eligible`／`for_each_input` と同じ——新しい `Op` variant を
@@ -1633,9 +1640,9 @@ impl Op {
             | Op::Sum { .. }
             | Op::Mean { .. }
             | Op::Reshape { .. }
-            | Op::BroadcastTo { .. } => true,
-            Op::MatMul(..)
-            | Op::ScalarUnary { .. }
+            | Op::BroadcastTo { .. }
+            | Op::MatMul(..) => true,
+            Op::ScalarUnary { .. }
             | Op::ScalarBinary { .. }
             | Op::Max { .. }
             | Op::Var { .. }
