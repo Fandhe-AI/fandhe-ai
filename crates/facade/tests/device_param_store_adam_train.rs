@@ -228,3 +228,140 @@ fn adam_rejects_hyperparameter_change_mid_training() {
         .step_device_param_store_adam(&mut store, &grads2, &lr_changed)
         .unwrap();
 }
+
+/// 状態種別ガード（続き・実装計画 §5.2）: `step_adam` で確定した
+/// ストアへ `step_adamw`（`kind` 不一致）を呼ぶと拒否される。
+#[test]
+fn adam_then_adamw_on_same_store_is_rejected() {
+    let model = build_model();
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let init_tape = fandhe_ai::tape();
+    let mut store = model.init_device_param_store(&init_tape).unwrap();
+    drop(init_tape);
+
+    let adam_config = AdamConfig {
+        lr: 1e-3,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+        weight_decay: 0.0,
+    };
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&x_data);
+    let y = tape.var(&y_data);
+    let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
+    let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+    let grads = tape.backward_device_param_store(&loss, &store).unwrap();
+    tape.step_device_param_store_adam(&mut store, &grads, &adam_config)
+        .unwrap();
+
+    let adamw_config = AdamWConfig {
+        lr: 1e-3,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+        weight_decay: 0.0,
+    };
+    let tape2 = fandhe_ai::tape();
+    let x2 = tape2.var(&x_data);
+    let y2 = tape2.var(&y_data);
+    let pred2 = model.forward_resident(&tape2, &x2, &mut store).unwrap();
+    let loss2 = MseLoss::new(Reduction::Mean).forward(&pred2, &y2).unwrap();
+    let grads2 = tape2.backward_device_param_store(&loss2, &store).unwrap();
+    let err = tape2
+        .step_device_param_store_adamw(&mut store, &grads2, &adamw_config)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        fandhe_ai_tensor_core::BackendError::InvalidArgument(_)
+    ));
+}
+
+/// 状態種別ガード（続き・実装計画 §2.3「SGD → Adam 方向」）: `step()`
+/// （SGD）で既に使われているストアへ `step_adam` を呼ぶと拒否される。
+#[test]
+fn sgd_then_adam_on_same_store_is_rejected() {
+    use fandhe_ai::optim::SgdConfig;
+
+    let model = build_model();
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let init_tape = fandhe_ai::tape();
+    let mut store = model.init_device_param_store(&init_tape).unwrap();
+    drop(init_tape);
+
+    let sgd_config = SgdConfig::new(0.1);
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&x_data);
+    let y = tape.var(&y_data);
+    let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
+    let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+    let grads = tape.backward_device_param_store(&loss, &store).unwrap();
+    tape.step_device_param_store(&mut store, &grads, &sgd_config)
+        .unwrap();
+
+    let adam_config = AdamConfig {
+        lr: 1e-3,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+        weight_decay: 0.0,
+    };
+    let tape2 = fandhe_ai::tape();
+    let x2 = tape2.var(&x_data);
+    let y2 = tape2.var(&y_data);
+    let pred2 = model.forward_resident(&tape2, &x2, &mut store).unwrap();
+    let loss2 = MseLoss::new(Reduction::Mean).forward(&pred2, &y2).unwrap();
+    let grads2 = tape2.backward_device_param_store(&loss2, &store).unwrap();
+    let err = tape2
+        .step_device_param_store_adam(&mut store, &grads2, &adam_config)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        fandhe_ai_tensor_core::BackendError::InvalidArgument(_)
+    ));
+}
+
+/// `Adam::new`（ホスト参照実装）と同一基準のハイパーパラメータ検証:
+/// `lr = NaN` は拒否され、デバイス側パラメータは未変更のまま残る。
+#[test]
+fn adam_rejects_nan_lr_and_leaves_params_unchanged() {
+    let model = build_model();
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let init_tape = fandhe_ai::tape();
+    let mut store = model.init_device_param_store(&init_tape).unwrap();
+    let before = init_tape.sync_device_param_store_to_host(&store).unwrap();
+    drop(init_tape);
+
+    let bad_config = AdamConfig {
+        lr: f32::NAN,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+        weight_decay: 0.0,
+    };
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&x_data);
+    let y = tape.var(&y_data);
+    let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
+    let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+    let grads = tape.backward_device_param_store(&loss, &store).unwrap();
+    let err = tape
+        .step_device_param_store_adam(&mut store, &grads, &bad_config)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        fandhe_ai_tensor_core::BackendError::InvalidArgument(_)
+    ));
+
+    // ハイパーパラメータ検証は `pending`（forward で登録済みの葉ノード
+    // 集合）を消費する更新フェーズより前に失敗するため、デバイス側
+    // パラメータは未変更のまま残る。
+    let after = tape.sync_device_param_store_to_host(&store).unwrap();
+    for (i, (b, a)) in before.iter().zip(after.iter()).enumerate() {
+        assert_bits_eq(
+            a,
+            b,
+            &format!("param slot {i} unchanged after rejected step"),
+        );
+    }
+}
