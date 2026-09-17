@@ -186,10 +186,13 @@
 //! 異なるため、意図的に本モジュールへは含めない（root 再エクスポート
 //! のまま）。AMP（[`crate::optim::GradScaler`]）もこの経路へは未結線（上記「AMP の
 //! 適用範囲」節参照）。[`crate::optim::Adam`]（coupled L2 weight decay。
-//! イシュー #1742）も同様に `DeviceParamStore` へは未結線であり、本
-//! モジュールの他の optimizer と同じくホスト `Tensor<f32>` を介した
-//! optimizer step のみを提供する（`nn::optim::adam` モジュール doc
-//! 「`DeviceParamStore` 非対応」節）。[`crate::optim::Lamb`]（layer-wise
+//! イシュー #1742）・[`crate::optim::AdamW`] は **イシュー #1959 で
+//! `DeviceParamStore` への結線を完了済み**（[`crate::Tape::
+//! step_device_param_store_adam`]／[`crate::Tape::
+//! step_device_param_store_adamw`]。本モジュールの [`AdamConfig`]／
+//! [`AdamWConfig`] をそのまま渡せる。CPU 実装のみ・CUDA／Metal は
+//! `Unsupported` のまま。`nn::optim::adam` モジュール doc
+//! 「`DeviceParamStore` 結線済み」節）。[`crate::optim::Lamb`]（layer-wise
 //! trust ratio。イシュー #1744）も同様に `DeviceParamStore` へは未結線
 //! （パラメータテンソルごとの L2 norm reduction カーネルが未実装の
 //! ため。`nn::optim::lamb` モジュール doc「`DeviceParamStore` 非対応」節）。
