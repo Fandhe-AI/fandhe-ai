@@ -3,15 +3,16 @@
 # release.yml（単一クレート・crate choice 入力）との使い分け:
 #   - release.yml: 1 クレートずつの実行・障害復旧用。途中で失敗したクレートの
 #     再実行や、依存順どおり 1 つずつ確認しながら進めたい場合はこちらを使う。
-#   - 本ファイル（release-all.yml）: 公開 6 クレート（`fandhe-ai-tensor-core`・
+#   - 本ファイル（release-all.yml）: 公開 7 クレート（`fandhe-ai-tensor-core`・
 #     `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
-#     `fandhe-ai-backend-metal`・`fandhe-ai`。命名確定は
-#     docs/crates-io-naming-decision.md、公開順序・版数運用は
-#     docs/crates-io-publishing-order.md）を単一の workflow_dispatch で一括
-#     リリースする。両ファイルとも並行して存置し、release.yml は削除しない。
+#     `fandhe-ai-backend-metal`・`fandhe-ai-onnx-interop`〈#1963 で追加〉・
+#     `fandhe-ai`。命名確定は docs/crates-io-naming-decision.md、公開順序・
+#     版数運用は docs/crates-io-publishing-order.md）を単一の
+#     workflow_dispatch で一括リリースする。両ファイルとも並行して存置し、
+#     release.yml は削除しない。
 #
 # 対象クレートをハードコードで固定する理由:
-#   本ワークフローの対象は常に公開 6 クレート全件であり、crate 選択入力は
+#   本ワークフローの対象は常に公開 7 クレート全件であり、crate 選択入力は
 #   不要（release.yml と異なり choice 入力を持たない）。対象一覧は下記
 #   `env.RELEASE_CRATES`（スペース区切り 1 箇所）に集約し、複数箇所への
 #   重複記述を避ける。
@@ -34,7 +35,7 @@
 # 承認は 1 回で全クレートに効く設計の前提条件（充足済み。2026-08-23 設定完了）:
 #   `environment: crates-io-release` の required reviewers + deployment
 #   branch 制限（main 限定）が GitHub 側で設定されて初めて、本ワークフローの
-#   1 回の承認が 6 クレートの publish 全体に対するゲートとして機能する。
+#   1 回の承認が 7 クレートの publish 全体に対するゲートとして機能する。
 #   同 environment は 2026-08-23 に設定済み（required reviewers + main 限定
 #   deployment branch 制限。`docs/crates-io-publishing-order.md` §10 追補）で
 #   あり、現在この前提は充足している。将来 environment が削除・改変され
@@ -53,7 +54,7 @@
 #   多層のバックストップとして機能する。
 #
 # 途中失敗時の再開方針（本ワークフローは非再開設計）:
-#   6 パッケージ一括 `cargo publish` が一部クレートの公開後に失敗した場合、
+#   7 パッケージ一括 `cargo publish` が一部クレートの公開後に失敗した場合、
 #   本ワークフローを再実行すると「crates.io 既公開バージョンの検証」ガードが
 #   公開済みクレート分で fail する（意図した挙動）。**部分公開状態からの
 #   再開・再実行は本ワークフローでは行わず、release.yml で未公開の残り
@@ -65,11 +66,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "公開バージョン（公開 6 クレート共通の workspace version と完全一致必須。例: 0.3.0）"
+        description: "公開バージョン（公開 7 クレート共通の workspace version と完全一致必須。例: 0.3.0）"
         type: string
         required: true
       mode:
-        description: "dry-run-only: verify のみ（既定・トークン不要）。publish: verify 通過後に 6 クレート一括で実公開（environment 承認ゲートを通る）"
+        description: "dry-run-only: verify のみ（既定・トークン不要）。publish: verify 通過後に 7 クレート一括で実公開（environment 承認ゲートを通る）"
         type: choice
         required: true
         default: dry-run-only
@@ -82,14 +83,15 @@ on:
 permissions:
   contents: read
 
-# 対象 6 クレート一覧の単一ソース（依存順ではなく列挙順。公開順序自体は cargo の
+# 対象 7 クレート一覧の単一ソース（依存順ではなく列挙順。公開順序自体は cargo の
 # 複数 -p publish が内部で解決するため列挙順に意味はない。
 # docs/crates-io-publishing-order.md §3）。verify・publish 両ジョブで参照するため
 # ワークフロー直下（ジョブ横断で参照可能な唯一の env スコープ）に 1 箇所だけ定義する。
 env:
   RELEASE_CRATES: >-
     fandhe-ai-tensor-core fandhe-ai-autodiff fandhe-ai-backend-cpu
-    fandhe-ai-backend-cuda fandhe-ai-backend-metal fandhe-ai
+    fandhe-ai-backend-cuda fandhe-ai-backend-metal fandhe-ai-onnx-interop
+    fandhe-ai
 
 # release.yml と同一グループ（`crates-io-release`）で相互排他する: 一括リリースと
 # 単体リリース（復旧用）が同時に走ると同一クレートへの publish が競合しうるため、
@@ -112,8 +114,8 @@ concurrency:
 
 jobs:
   # --------------------------------------------------
-  # verify: トークン不要・承認不要。ref 検証 + 入力検証 + 6 クレート全件の
-  # 既公開チェック + 6 パッケージ一括 dry-run。mode に関わらず常に実行する
+  # verify: トークン不要・承認不要。ref 検証 + 入力検証 + 7 クレート全件の
+  # 既公開チェック + 7 パッケージ一括 dry-run。mode に関わらず常に実行する
   # （publish ジョブの前段ゲートを兼ねる）。
   # --------------------------------------------------
   verify:
@@ -171,7 +173,7 @@ jobs:
           fi
           echo "入力 version '${RELEASE_VERSION}' は semver 形式です"
 
-      - name: "guard: Cargo.toml バージョン一致の検証（6 クレート全件）"
+      - name: "guard: Cargo.toml バージョン一致の検証（7 クレート全件）"
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/rust-ai-library-release-all-target
         run: |
@@ -194,12 +196,12 @@ jobs:
             exit 1
           fi
 
-      - name: "guard: crates.io 既公開バージョンの検証（6 クレート全件）"
+      - name: "guard: crates.io 既公開バージョンの検証（7 クレート全件）"
         run: |
           set -euo pipefail
           # 非冪等な `cargo publish` の再実行で同一バージョンを二重公開しない
           # ための fail-closed ガード（.claude/rules/security.md A08）。
-          # release.yml の同名ガードと同一ロジックを 6 クレート分ループする。
+          # release.yml の同名ガードと同一ロジックを 7 クレート分ループする。
           # 1 件でも既公開なら失敗させるが、どのクレートが既公開済みかを
           # 1 回の実行でまとめて把握できるよう、最初の失敗で即 exit せず
           # 全件走査してから判定する。
@@ -247,11 +249,11 @@ jobs:
             fi
           done
           if [ "${failed}" -ne 0 ]; then
-            echo "::error::6 クレート中 1 件以上が既公開バージョンとの衝突・取得失敗のため中断します"
+            echo "::error::7 クレート中 1 件以上が既公開バージョンとの衝突・取得失敗のため中断します"
             exit 1
           fi
 
-      - name: "verify: cargo package --list（6 クレート全件・同梱ファイル一覧の監査ログ）"
+      - name: "verify: cargo package --list（7 クレート全件・同梱ファイル一覧の監査ログ）"
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/rust-ai-library-release-all-target
         run: |
@@ -265,12 +267,12 @@ jobs:
             done
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: "verify: cargo publish --dry-run（6 パッケージ一括）"
+      - name: "verify: cargo publish --dry-run（7 パッケージ一括）"
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/rust-ai-library-release-all-target
         run: |
           set -euo pipefail
-          # 6 パッケージ同時指定はワークスペース内の path 依存をローカルで解決
+          # 7 パッケージ同時指定はワークスペース内の path 依存をローカルで解決
           # するため、依存先クレートが実 crates.io 未公開でも成功する
           # （docs/crates-io-publishing-order.md §8.1）。release.yml の単一
           # クレート dry-run（§8.2。実 index のみ参照するため依存先未公開の
@@ -283,7 +285,7 @@ jobs:
 
   # --------------------------------------------------
   # publish: mode=publish のときのみ実行。environment 承認ゲートを通過後、
-  # CARGO_REGISTRY_TOKEN をステップ限定で注入して 6 パッケージ一括で実公開する。
+  # CARGO_REGISTRY_TOKEN をステップ限定で注入して 7 パッケージ一括で実公開する。
   # --------------------------------------------------
   publish:
     name: publish (all crates ${{ inputs.version }})
@@ -352,7 +354,7 @@ jobs:
           fi
           echo "CARGO_REGISTRY_TOKEN が設定されていることを確認しました"
 
-      - name: "publish: cargo publish（6 パッケージ一括）"
+      - name: "publish: cargo publish（7 パッケージ一括）"
         env:
           # トークンはこのステップの env にのみ注入する（ジョブ env・他ステップへ
           # 広げない。.claude/rules/security.md A02/A07）。

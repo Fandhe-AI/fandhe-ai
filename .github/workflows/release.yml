@@ -1,8 +1,9 @@
 # crates.io publish ワークフロー（イシュー #884）。
 #
 # 役割・呼び出し文脈:
-#   公開対象 6 クレート（`fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・
+#   公開対象 7 クレート（`fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・
 #   `fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`・
+#   `fandhe-ai-onnx-interop`〈#1963 で追加〉・
 #   `fandhe-ai`。命名確定は docs/crates-io-naming-decision.md、公開順序・版数運用は
 #   docs/crates-io-publishing-order.md）を、手元の `cargo publish` 直叩きではなく
 #   CI 上の監査可能・fail-closed なワークフローで公開できるようにする。初回公開の
@@ -14,14 +15,15 @@
 #   イシュー #884 の旧タイトルは「タグトリガー / Trusted Publishing（OIDC）」だったが、
 #   ユーザー指示（2026-08-22）により workflow_dispatch トリガー + `CARGO_REGISTRY_TOKEN`
 #   （org secret）方式へ改定済み。OIDC 設定・タグ push トリガーは採用しない。理由:
-#   6 クレート同居 monorepo でタグ命名規約が未確定であり、明示入力（crate/version/mode）
+#   7 クレート同居 monorepo でタグ命名規約が未確定であり、明示入力（crate/version/mode）
 #   による 3 重ガードの方が誤公開に対し fail-closed（Fandhe-AI/fandhe-frontend の
 #   release.yml と同旨の判断）。
 #
 # 依存順公開の運用手順（本ワークフロー自身はクレート横断の順序保証を持たない）:
 #   docs/crates-io-publishing-order.md §3 のトポロジカル順（① fandhe-ai-tensor-core
 #   → ② fandhe-ai-autodiff / fandhe-ai-backend-cpu / fandhe-ai-backend-cuda /
-#   fandhe-ai-backend-metal（順不同）→ ③ fandhe-ai）で 1 クレートずつ本ワークフローを
+#   fandhe-ai-backend-metal / fandhe-ai-onnx-interop（順不同）→ ③ fandhe-ai）で
+#   1 クレートずつ本ワークフローを
 #   実行し、各実行後に sparse index（`https://index.crates.io/<index-path>`）へ該当
 #   バージョンが反映されたことを確認してから次のクレートを実行する。未公開の依存先を
 #   参照するクレートの単一 dry-run は「no matching package named ...」で想定内失敗と
@@ -67,6 +69,7 @@ on:
           - fandhe-ai-backend-cpu
           - fandhe-ai-backend-cuda
           - fandhe-ai-backend-metal
+          - fandhe-ai-onnx-interop
           - fandhe-ai
       version:
         description: "公開バージョン（対象クレートの Cargo.toml の version と完全一致必須。例: 0.3.0）"
