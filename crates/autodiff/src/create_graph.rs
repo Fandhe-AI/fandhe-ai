@@ -415,7 +415,7 @@ fn build_mirror<'c>(
                 id.0
             )));
         }
-        let replayed = replay_op(node.op.clone(), &node.shape, mirror)?;
+        let replayed = replay_op(node.op.clone(), &node.shape, node.fp32_strict, mirror)?;
         mirror[id.0] = Some(replayed);
     }
 
@@ -446,18 +446,42 @@ fn get_mirror<'c>(mirror: &[Option<Var<'c>>], id: NodeId) -> Result<Var<'c>, Aut
 /// `shape` は再生対象ノード自身の `TapeNode::shape`（`Op::Reshape`／
 /// `Op::BroadcastTo` の目的 shape はこの `shape` から読む——`Op` 自身は
 /// 入力 `NodeId` のみを保持し目的 shape を持たないため）。
+///
+/// `fp32_strict` は再生対象ノード自身の `TapeNode::fp32_strict`
+/// （PR #2003 codex-review 指摘で追加）。`Op::MatMul` variant 自体は
+/// forward 精度の情報を持たないため、親テープ側で
+/// `Var::matmul_fp32_strict` により記録されたノード（1 階
+/// `matmul_vjp` の `d_input`／`d_weight` 等）を再生する際は、子テープ
+/// 側でも `Var::matmul_fp32_strict` を使い、通常の `Var::matmul`
+/// （`ops.gemm`。CUDA TF32 opt-in が有効な場合は非厳密）へ落ちて
+/// 「バックプロパゲーションは常に FP32 厳密」という契約
+/// （`.claude/rules/coding-rust.md`・`Var::matmul_fp32_strict` doc）を
+/// 二階微分の記録経路でだけ破ることを防ぐ。
 fn replay_op<'c>(
     op: Op,
     shape: &[usize],
+    fp32_strict: bool,
     mirror: &[Option<Var<'c>>],
 ) -> Result<Var<'c>, AutodiffError> {
     match op {
         Op::Add(a, b) => get_mirror(mirror, a)?.add(&get_mirror(mirror, b)?),
         Op::Mul(a, b) => get_mirror(mirror, a)?.mul(&get_mirror(mirror, b)?),
         // rank 2 × rank 2 限定（`validate_ancestors` (c) が入口で
-        // 事前検査済み）。`Var::matmul` は `ops.gemm` へ委譲し forward
-        // と同一カーネルを経由する。
-        Op::MatMul(a, b) => get_mirror(mirror, a)?.matmul(&get_mirror(mirror, b)?),
+        // 事前検査済み）。親ノードが `fp32_strict` フラグを立てて
+        // いれば（`Var::matmul_fp32_strict` 由来）子テープ側も
+        // `matmul_fp32_strict` で再生し、`ops.gemm_fp32_strict`
+        // 経由の厳密精度契約を引き継ぐ。フラグが立っていなければ
+        // 通常の `Var::matmul`（`ops.gemm`）で forward と同一カーネル
+        // を経由する。
+        Op::MatMul(a, b) => {
+            let lhs = get_mirror(mirror, a)?;
+            let rhs = get_mirror(mirror, b)?;
+            if fp32_strict {
+                lhs.matmul_fp32_strict(&rhs)
+            } else {
+                lhs.matmul(&rhs)
+            }
+        }
         Op::Relu(a) => Ok(get_mirror(mirror, a)?.relu()),
         Op::Exp(a) => Ok(get_mirror(mirror, a)?.exp()),
         Op::Tanh(a) => Ok(get_mirror(mirror, a)?.tanh()),

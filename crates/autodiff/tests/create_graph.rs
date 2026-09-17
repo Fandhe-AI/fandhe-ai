@@ -1383,3 +1383,195 @@ fn create_graph_matmul_fp32_strict_grad_survives_checkpoint_release() {
          使った——TapeNode::fp32_strict による checkpoint 解放除外が機能していない"
     );
 }
+
+/// [`GemmPathCountingOps`] と異なり `gemm`（非厳密）と
+/// `gemm_fp32_strict`（厳密）が**数値的に異なる結果**を返す
+/// `BackendOps` ラッパー。call-count 計装だけでは
+/// `build_cgrads`（`Op::MatMul` 腕。既に `matmul_fp32_strict` 使用済み
+/// で本 PR の対象外）由来の呼び出しと [`build_mirror`] 由来の呼び出し
+/// を区別できない（後者が対象の gx ノードへ到達する経路には前者も
+/// 必ず伴うため）ので、[`create_graph_nested_build_mirror_replays_matmul_fp32_strict`]
+/// では `mirror`（forward 値の写し。VJP 経路を経由しない）を直接
+/// 読み出して数値そのもので区別する。`gemm` を全 0 埋めにすることで、
+/// もし `build_mirror` が誤って非厳密経路へ落ちれば再生値が明確に
+/// 崩れる。
+struct WrongNonStrictOps {
+    inner: Box<dyn fandhe_ai_tensor_core::BackendOps + Send>,
+}
+
+impl fandhe_ai_tensor_core::BackendOps for WrongNonStrictOps {
+    fn device(&self) -> fandhe_ai_tensor_core::Device {
+        self.inner.device()
+    }
+
+    fn gemm(
+        &self,
+        a: &Tensor<f32>,
+        _b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        // 非厳密経路は意図的に破損した値（全 0）を返す——正しい形状は
+        // 維持しつつ、正しい厳密経路の結果とは必ず異なる値にする。
+        let m = a.shape()[0];
+        let n = _b.shape()[1];
+        Ok(t(vec![0.0f32; m * n], &[m, n]))
+    }
+
+    fn gemm_fp32_strict(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.gemm(a, b)
+    }
+
+    fn gemm_checksum(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        readout: fandhe_ai_tensor_core::ChecksumReadout,
+    ) -> Result<fandhe_ai_tensor_core::GemmChecksum, fandhe_ai_tensor_core::BackendError> {
+        self.inner.gemm_checksum(a, b, readout)
+    }
+
+    fn add(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.add(a, b)
+    }
+
+    fn mul(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.mul(a, b)
+    }
+
+    fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.relu(a)
+    }
+
+    fn exp(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.exp(a)
+    }
+
+    fn tanh(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.tanh(a)
+    }
+
+    fn sum(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.sum(a, dim)
+    }
+
+    fn max(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.max(a, dim)
+    }
+}
+
+/// PR #2003 codex-review 指摘（threadId `PRRT_kwDOTuUCJc6jRs6Z`）の
+/// 再現テスト: `create_graph` を 2 段重ねた三階微分相当の経路
+/// （`tape.backward_create_graph` → `child.backward_create_graph`）で、
+/// 2 段目の [`build_mirror`]（`create_graph.rs`。非公開関数のため直接
+/// 呼べず本テストは公開 API 経由で間接検証する）が 1 段目の
+/// `build_cgrads` が `Var::matmul_fp32_strict` で記録した `gx`
+/// （`Op::MatMul`。`TapeNode::fp32_strict == true`）を再生する際、
+/// 修正前は無条件に非厳密 `Var::matmul`（`ops.gemm`）を使っていた——
+/// `fp32_strict` フラグを `replay_op` へ伝播しないため。
+///
+/// `w` を非追跡葉（`tape.var_no_grad`）にすることで、指摘が挙げた
+/// 「`transpose(w)` が非追跡のため `validate_ancestors` の rank 検査
+/// を通過してしまう」具体シナリオを再現する。`loss = sum(y*z)`
+/// （`z` は `y` と同形状の**別の**追跡葉。`y=x@w` に対して**線形**
+/// なので `dL/dy = z` となり、`gx`〈`x` についての勾配〉の入力
+/// （`g=z` の写し・`wᵀ` の写し）はいずれも `Op::Leaf`／非追跡葉
+/// 由来で `build_mirror` の 段 1〈キャッシュ済み値の読み出しのみ・
+/// 演算呼び出しなし〉で再生される——`loss=sum((x@w)^2)` のような
+/// 二次形式だと `dL/dy` が `y` の写し〈`Op::MatMul`。`fp32_strict ==
+/// false` が正しい非厳密ノード〉に依存してしまい、後述の
+/// [`WrongNonStrictOps`] がその**正当な**非厳密再生まで巻き込んで
+/// 壊してしまうため使えない）の勾配 `gx`（`x` について）を子テープへ
+/// 作り、`h = sum(gx)`（`gx` を「使う」だけで gx 自身の値そのものを
+/// ancestor mirror へ反映させれば十分——`Op::Sum` の VJP は `gx` の
+/// mirror 値を読まないため build_cgrads 側の寄与を持ち込まない）へ
+/// 再度 `backward_create_graph` を適用し、[`WrongNonStrictOps`] 下で
+/// `cg2.child_var(&gx)`（`build_mirror` が再生した gx の写し。VJP を
+/// 経由しない純粋な forward 値）を読み出す。孫テープの `gemm`
+/// （非厳密）は意図的に破損した値を返すため、`build_mirror` が
+/// `fp32_strict` を無視して非厳密経路へ落ちていれば写しの値が
+/// `child` 側の本来の `gx` の値と食い違う。
+#[test]
+fn create_graph_nested_build_mirror_replays_matmul_fp32_strict() {
+    // 1 段目（parent）は数値方式の計装が不要なため素の naive_ops。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    // 2 段目の対象（1 階勾配 gx を記録する子テープ）も同様。
+    let child = Tape::new_with_ops(common::naive_ops());
+
+    let x = tape.var(&t(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]));
+    // `w` は非追跡葉——指摘シナリオの前提（`transpose(w)` 側が
+    // requires_grad を持たないため rank 検査を素通りする）。
+    let w = tape.var_no_grad(&t(vec![0.3, -0.7, 1.1, 0.2], &[2, 2]));
+    // `z` は `y` と同形状の別の追跡葉（`y` 自身への依存を断ち切る
+    // ための線形化）。
+    let z = tape.var(&t(vec![0.4, -1.2, 0.9, 2.1], &[2, 2]));
+    let y = x.matmul(&w).expect("matmul: forward");
+    let loss = y.mul(&z).expect("mul").sum(None).expect("sum");
+
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .expect("backward_create_graph（1 段目）に失敗");
+    let gx = cg
+        .grad(&x)
+        .expect("grad: クロステープ検査は通るはず")
+        .expect("x は loss に到達するはず（da 腕）");
+    // `child` 自身の naive_ops（正しい fp32_strict 経路）で計算済みの
+    // 正解値。`gx` の `Op::MatMul` は `matmul_fp32_strict` 経由なので
+    // `child` の gemm／gemm_fp32_strict は常に同一実装（naive_ops）
+    // へ帰着し、この値は「厳密経路で計算した正しい gx」そのもの。
+    let expected = gx.to_tensor();
+
+    // 3 段目（孫テープ）: `gemm`（非厳密）が意図的に破損した値を返す。
+    let grandchild = Tape::new_with_ops(Box::new(WrongNonStrictOps {
+        inner: common::naive_ops(),
+    }));
+
+    // `gx` を「使う」だけの極小 loss（`Op::Sum` の VJP は mirror 値を
+    // 読まないため、build_cgrads 側の gx 自身の逆伝播は本テストの
+    // 数値検証に混入しない——検証対象は build_mirror が構築する
+    // 写しの値そのもの）。
+    let h = gx.sum(None).expect("sum");
+
+    let cg2 = child
+        .backward_create_graph(&h, &grandchild)
+        .expect("backward_create_graph（2 段目）に失敗");
+
+    let gx_mirror = cg2
+        .child_var(&gx)
+        .expect("child_var: クロステープ検査は通るはず")
+        .expect("gx は h の祖先のはず（build_mirror が写しを構築する）");
+
+    // 本テストの核心: `build_mirror` が `gx`（`TapeNode::fp32_strict
+    // == true`）を再生した写しの値が、正しい厳密経路の値
+    // （`expected`）と一致すること。修正前は非厳密 `gemm`（意図的に
+    // 破損した値を返す）を使うため、この写しの値は 0 埋めになり
+    // `expected` と食い違う。
+    let mirror_value = gx_mirror.to_tensor();
+    assert_eq!(
+        mirror_value.as_slice(),
+        expected.as_slice(),
+        "build_mirror が fp32_strict なノード（gx）の再生に非厳密 gemm \
+         を使った——TapeNode::fp32_strict が build_mirror（replay_op）\
+         へ伝播していない（写しの値: {:?}・期待値: {:?}）",
+        mirror_value.as_slice(),
+        expected.as_slice()
+    );
+}
