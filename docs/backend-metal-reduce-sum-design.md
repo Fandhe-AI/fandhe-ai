@@ -361,10 +361,7 @@ pass。フル実行（`--all-features --no-fail-fast -- --ignored`）は 411 pas
   単一軸・タイ・NaN・run-to-run 決定性）・`backend_ops_real_device.rs::
   backend_ops_argmax_argmin_match_cpu_exact`（`BackendOps` 経由。
   transpose view 込み）・`facade/tests/reduce_backend_parity.rs::
-  metal_argmax_and_argmin_match_cpu_exact`。**M4 Max 実機実測は本
-  実装セッション（Linux 環境。Apple Silicon 実機への到達手段なし）
-  では未実施のまま Mac セッションへ申し送り**（`docs/perf/logs/
-  metal-argext-1951/README.md` に実行手順・事前登録判定規則を記載）。
+  metal_argmax_and_argmin_match_cpu_exact`。**2026-09-18 M4 Max 実測済み**: 添字完全一致・5/5 テスト pass（§11 参照）。
 
 ## 12. 追補（イシュー #1952）: `log_softmax` backward の Metal カーネル
 
@@ -425,8 +422,4 @@ log_softmax_backward_model`）は `exp` の bit 表現を入力として受け�
   bit 完全一致・run-to-run 決定性・`BackendOps` 経由との一致）・
   `facade/tests/softmax_backend_parity.rs::
   metal_log_softmax_backward_matches_cpu`（`matmul → log_softmax →
-  mse_loss` backward の facade 到達経路）。**M4 Max 実機実測は本実装
-  セッション（Linux 環境。Apple Silicon 実機への到達手段なし）では
-  未実施のまま Mac セッションへ申し送り**（`docs/perf/logs/
-  metal-log-softmax-backward-1952/README.md` に実行手順・事前登録
-  判定規則を記載）。
+  mse_loss` backward の facade 到達経路）。**2026-09-18 M4 Max 実測済み**: source_evidence 7/7・parity 2 回実行各 4/4・facade Metal フィルタ 3/3 pass（§12 参照）。

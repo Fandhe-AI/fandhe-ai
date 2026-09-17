@@ -36,6 +36,8 @@ cargo test -p fandhe-ai --release --test norm_backend_parity -- --ignored metal_
 
 | テスト | 結果 | 実行日 | 備考 |
 |---|---|---|---|
-| `crates/backend-metal/tests/norm_backward_parity.rs`（全テスト） | 未実測 | - | - |
-| `metal_rms_norm_backward_matches_cpu` | 未実測 | - | - |
-| `metal_layer_norm_backward_matches_cpu` | 未実測 | - | - |
+| `crates/backend-metal/tests/norm_backward_parity.rs`（全テスト） | 3/3 pass | 2026-09-18 | `norm_backward_parity.log` |
+| `metal_rms_norm_backward_matches_cpu` | pass | 2026-09-18 | `facade_rms_norm_backward.log` |
+| `metal_layer_norm_backward_matches_cpu` | pass | 2026-09-18 | `facade_layer_norm_backward.log` |
+
+合格（規則 1〜4 充足）。

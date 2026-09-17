@@ -1382,18 +1382,18 @@ CUDA〈GB10〉は引き続き未実測 → CUDA〈GB10〉も 2026-09-16 に実�
 CudaReduce::run_min_all_f32`／`run_min_axis_f32`。`fminf`・単位元
 `+INFINITY`）を実装済みだが `argmax`／`argmin` は GPU カーネル未実装
 （明示 `Unsupported`。`CudaBackendOps::argmax`／`argmin` が driver 非
-接触で即座に返す）。Metal は `min`／`argmax`／`argmin` の 3 演算とも
-明示 `Unsupported`。いずれも `Unsupported` の場合は `Var::min`／
-`argmax`／`argmin` がホスト参照実装（`fandhe_ai_autodiff::eval::min`／
-`argmax`／`argmin`）へフォールバックするため forward は全バックエンド
-で動作する。`min` の VJP（`Op::Min`）は `Op::Max` と共有するヘルパー
-`grad::extremum_first_match_vjp`（forward 記録値と `==` 一致する最初の
-位置へ勾配を伝播する先勝ち決定的方式。旧 `max_vjp` を改称し `max_vjp`
-自体は既存呼び出し元を壊さない薄いラッパーとして維持）を使う——#1718
-（amax／amin 勾配分配方式の確定）が均等分配へ変更する場合はこのヘル
-パー 1 箇所の差し替えで `Max`／`Min` 両方へ反映される。facade 新規
-公開面なし（既存の `Var` 再エクスポート経由）。CUDA／Metal 実機での
-facade parity テストは未実測のまま Mac／GB10 セッションへ申し送る。
+接触で即座に返す）。**Metal は #1951 で `argmax`／`argmin` のカーネル
+を実装済み**。`min` は引き続き明示 `Unsupported`。いずれも `Unsupported`
+の場合は `Var::min`／`argmax`／`argmin` がホスト参照実装
+（`fandhe_ai_autodiff::eval::min`／`argmax`／`argmin`）へフォールバック
+するため forward は全バックエンドで動作する。`min` の VJP（`Op::Min`）は
+`Op::Max` と共有するヘルパー`grad::extremum_first_match_vjp`（forward 記録
+値と `==` 一致する最初の位置へ勾配を伝播する先勝ち決定的方式。旧 `max_vjp`
+を改称し `max_vjp` 自体は既存呼び出し元を壊さない薄いラッパーとして維持）を
+使う——#1718（amax／amin 勾配分配方式の確定）が均等分配へ変更する場合は
+このヘルパー 1 箇所の差し替えで `Max`／`Min` 両方へ反映される。facade 新規
+公開面なし（既存の `Var` 再エクスポート経由）。**2026-09-18 M4 Max 実測済み
+（#1951）: Metal の `argmax`／`argmin` テスト 5/5 pass・添字完全一致**。
 
 ## 追補（イシュー #1731）
 

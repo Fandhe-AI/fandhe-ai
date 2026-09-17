@@ -1,0 +1,19 @@
+## 実行環境情報
+
+実行日: 2026-09-18
+マシン: Apple M4 Max（Mac16,6）
+コア数: 16（P コア 12 + E コア 4）
+メモリ: 64 GB
+OS: macOS（Darwin 25.6.0）
+Rust toolchain: stable（rust-toolchain.toml 参照）
+
+## 負荷情報
+
+テスト開始時 load average (1 min): 10.58
+テスト終了時 load average (1 min): 18.98
+実行モード: record_only（共有負荷下・他セッション並走）
+
+## ベースコミット
+
+SHA: a1c50f61
+メッセージ: perf(backend-metal): 協調ロードの threadgroup メモリ XOR swizzle 軸（index 17）を opt-in で実装する (#2008)

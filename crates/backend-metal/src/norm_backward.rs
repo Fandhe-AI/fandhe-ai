@@ -32,6 +32,10 @@ use crate::norm_backward_model::NORM_BACKWARD_MAX_HIDDEN_EXACT_F32;
 use crate::pipeline::{self, MtlPipeline};
 use crate::row_kernel::{self, RowKernelValidationError};
 
+/// [`MetalNormBackward::run_layer_norm_backward_f32`] の戻り値 `(dx, dw, db)`。
+/// `dw` は `w` 指定時のみ・`db` は `has_bias` 時のみ `Some`（clippy::type_complexity 回避のための別名で意味は不変）。
+pub type LayerNormBackwardOutput = (Vec<f32>, Option<Vec<f32>>, Option<Vec<f32>>);
+
 /// `shaders/norm_backward.metal` のソース（4 カーネル共通の単一
 /// ライブラリ）。
 const NORM_BACKWARD_MSL_SRC: &str = include_str!("shaders/norm_backward.metal");
@@ -277,7 +281,7 @@ impl MetalNormBackward {
         eps: f32,
         rows: usize,
         hidden: usize,
-    ) -> Result<(Vec<f32>, Option<Vec<f32>>, Option<Vec<f32>>), MetalError> {
+    ) -> Result<LayerNormBackwardOutput, MetalError> {
         row_kernel::validate_row_kernel_launch(
             rows,
             hidden,

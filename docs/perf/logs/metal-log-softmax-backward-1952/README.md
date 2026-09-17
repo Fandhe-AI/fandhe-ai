@@ -53,3 +53,19 @@ cargo test -p fandhe-ai --release \
 
 FAIL が生じた場合は是正せず本 README に記録のみ行い、原因調査は
 別イシューへ切り出す（事後緩和はしない）。
+
+## 実測結果（2026-09-18・Apple M4 Max・base `a1c50f61`）
+
+| テスト | 結果 | ログファイル |
+|---|---|---|
+| `log_softmax_backward_source_evidence.rs`（7 テスト） | 7/7 pass | `source_evidence.log` |
+| `log_softmax_backward_parity.rs`（4 テスト・run 1） | 4/4 pass | `parity_run1.log` |
+| `log_softmax_backward_parity.rs`（4 テスト・run 2） | 4/4 pass | `parity_run2.log` |
+| `metal_log_softmax_forward_matches_cpu`（facade） | pass | `facade_parity_metal_only_run1.log` |
+| `metal_log_softmax_backward_matches_cpu`（facade） | pass | `facade_parity_metal_only_run1.log` |
+
+合格（規則 1〜4 充足・2 回実行とも pass）。
+注記: 同一バイナリに `cuda_*` テストを含むため、フィルタなし全実行では
+CUDA 実機非搭載環境での FAILED が報告される（`facade_parity_run1.log`）が、
+本イシュー判定対象外。Metal 限定フィルタで再実行時は 3/3 pass
+（`facade_parity_metal_only_run1.log`）。

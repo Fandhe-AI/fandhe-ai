@@ -28,6 +28,12 @@
   `BackendError::Unsupported` を返す（fail-closed。実機なしでも
   Linux で確認可能——`docs/device-resident-update-design.md` 参照）。
 
+## 確認（2026-09-18・Mac セッション）
+
+本イシュー #1959 のマージ時点（base `a1c50f61`）において、Metal カーネルの
+実装は存在せず（既定 `Unsupported` のままで、関連テストも新規追加されていない）。
+よって 2026-09-18 の Apple M4 Max 実機での実測対象外。
+
 ## 後続イシューが実装すべきカーネル（未着手）
 
 - `crates/backend-cuda/src/{adam.rs, kernels_adam.rs}`（新規）・
