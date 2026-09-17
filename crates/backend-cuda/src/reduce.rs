@@ -19,6 +19,12 @@
 //!   `ops.rs` が同一の文言 `"empty reduction for op \"max\""` を持つ
 //!   `BackendError::KernelLaunchFailed` へ写像する）。`outer*inner == 0`
 //!   （出力自体が空）は vacuous に成功（空 `Vec`）。
+//!
+//! `argmax`／`argmin`（イシュー #1948）は本モジュールではなく
+//! `arg_reduce.rs::CudaArgReduce` が別ハンドルとして実装する（`sum`／
+//! `max`／`min` の初回コンパイルコストに argmax/argmin 6 カーネルを
+//! 相乗りさせないための分離。`validate_i32_bound`／
+//! `validate_axis_layout` は両モジュールで共用するため `pub(crate)`）。
 
 use std::sync::Arc;
 
@@ -36,7 +42,7 @@ use crate::pool::CudaAllocator;
 /// `i32::MAX` に収まることを検証する（カーネル引数 `int` は C の 32bit
 /// 符号付き整数のため。`elementwise.rs::validate_elementwise_len` と
 /// 同じ理由）。
-fn validate_i32_bound(value: usize, name: &str) -> Result<i32, CudaError> {
+pub(crate) fn validate_i32_bound(value: usize, name: &str) -> Result<i32, CudaError> {
     i32::try_from(value).map_err(|_| CudaError::InvalidReduceShape {
         detail: format!("reduce dimension must fit in i32 (kernel argument type): {name}={value}"),
     })
@@ -598,8 +604,10 @@ impl CudaReduce {
 /// `run_*_axis_f32` 共通の起動前検証: `outer`/`axis_len`/`inner` が
 /// `i32::MAX` に収まり、`outer*axis_len*inner == a.len()`（呼び出し元の
 /// `Tensor` 実体化と `(outer, axis_len, inner)` 分解が矛盾しないこと）を
-/// 確認し、`total_out = outer*inner` を返す。
-fn validate_axis_layout(
+/// 確認し、`total_out = outer*inner` を返す。`arg_reduce.rs::
+/// CudaArgReduce`（イシュー #1948）が `argmax`／`argmin` の単一軸縮約で
+/// 再利用するため `pub(crate)`。
+pub(crate) fn validate_axis_layout(
     a_len: usize,
     outer: usize,
     axis_len: usize,

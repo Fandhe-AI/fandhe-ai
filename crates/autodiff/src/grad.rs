@@ -2902,7 +2902,12 @@ pub(crate) enum ArgExtremum {
 /// 持たない。[`sort_with_fallback`] と同型の「バックエンド実装 →
 /// フォールバック」ヘルパー（イシュー #1720）で、`kind` に応じて
 /// `ops.argmax`／`argmin` → `Unsupported` のときのみ空縮約を検査して
-/// から `eval::argmax`／`argmin` へフォールバックする。
+/// から `eval::argmax`／`argmin` へフォールバックする。CUDA は
+/// イシュー #1948 でネイティブカーネルを実装済み（`CudaBackendOps::
+/// argmax`／`argmin` は `Unsupported` を返さない）ため、CUDA 経路で
+/// 本フォールバックが発火するのは実質 CUDA/NVRTC 非搭載環境
+/// （`CudaUnavailable`。この分岐は通らない）のみ。Metal は host
+/// フォールバック（`Unsupported`）のまま。
 pub(crate) fn argext_with_fallback(
     ops: &dyn BackendOps,
     input: &Tensor<f32>,

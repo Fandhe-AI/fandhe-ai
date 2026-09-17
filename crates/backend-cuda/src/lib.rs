@@ -424,6 +424,12 @@ mod rnn_cell;
 // （起動 API／NVRTC カーネル文字列の責務分離）。
 mod kernels_reduce;
 mod reduce;
+// イシュー #1948: argmax／argmin（`torch.argmax`／`torch.argmin`
+// 相当）起動 API・カーネルソース。`reduce.rs` とは別ハンドル
+// （`CudaArgReduce`）に分離する（`reduce.rs`／`arg_reduce.rs` モジュール
+// doc 参照）。
+mod arg_reduce;
+mod kernels_arg_reduce;
 // イシュー #1777: gather／scatter（`torch.gather`／`torch.scatter`／
 // `torch.scatter_add` 相当）起動 API・カーネルソース。`reduce.rs`／
 // `kernels_reduce.rs` と同じ 2 ファイル構成（起動 API／NVRTC カーネル

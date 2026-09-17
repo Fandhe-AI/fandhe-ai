@@ -2,8 +2,12 @@
 //! を facade 横断で検証する（イシュー #1584・親イシュー #1571）。
 //! `Var::min`／`argmax`／`argmin`（イシュー #1720）も本ファイルへ追加
 //! 済み（`argmax`／`argmin` は非微分演算のため forward 解析値の比較
-//! のみ・CUDA 実機比較は #1720 スコープ外〈`CudaBackendOps::argmax`／
-//! `argmin` は未実装のまま既定 `Unsupported`〉）。
+//! のみ）。CUDA は `CudaBackendOps::argmax`／`argmin` をイシュー #1948
+//! で実装済みだが、本ファイル自身の CUDA `#[ignore]` 実機比較テストは
+//! `argmax`／`argmin` を対象に含めない（低レイヤーの CPU 参照実装との
+//! 添字完全一致は `crates/backend-cuda/tests/reduce_parity.rs` が
+//! カバー済みで、本ファイルは facade `Var` 経由の forward 解析値検証
+//! に専念する）。Metal は host フォールバックのまま。
 //!
 //! 属性なしのテストは CPU（`fandhe_ai::tape_for(Device::Cpu)`）のみを
 //! 対象とし、既知の解析値との一致を確認する（CI で常時実行）。

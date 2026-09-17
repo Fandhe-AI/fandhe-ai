@@ -104,13 +104,15 @@ pub enum CudaError {
     /// 独立 variant に分離し `Display` メッセージの誤表示を避ける。
     InvalidReduceShape { detail: String },
 
-    /// reduction（`reduce.rs::CudaReduce`）の縮約対象要素数が 0
-    /// （イシュー #1584）。`max` は単位元を持たないため、`backend-cpu::
-    /// reduction::ReduceError::EmptyReduction` と同一の意味論・
-    /// `Display` 文言（`ops.rs` が `BackendError::KernelLaunchFailed`
-    /// へ写像する際に CPU 側と同一の `"empty reduction for op \"{op}\""`
-    /// 文字列を再現する）で表す。`op` は失敗した演算名（現状 `"max"` の
-    /// み。`sum` は単位元 `0.0` を持つため到達しない）。
+    /// reduction（`reduce.rs::CudaReduce`／`arg_reduce.rs::
+    /// CudaArgReduce`）の縮約対象要素数が 0（イシュー #1584・#1720・
+    /// #1948）。`max`／`min`／`argmax`／`argmin` は単位元を持たない
+    /// ため、`backend-cpu::reduction::ReduceError::EmptyReduction` と
+    /// 同一の意味論・`Display` 文言（`ops.rs` が
+    /// `BackendError::KernelLaunchFailed` へ写像する際に CPU 側と同一
+    /// の `"empty reduction for op \"{op}\""` 文字列を再現する）で表す。
+    /// `op` は失敗した演算名（`"max"`／`"min"`／`"argmax"`／`"argmin"`。
+    /// `sum` は単位元 `0.0` を持つため到達しない）。
     EmptyReduction { op: &'static str },
 
     /// gather／scatter 起動 API（`gather_scatter.rs::CudaGatherScatter`）
