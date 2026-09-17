@@ -399,14 +399,17 @@ v1 の VJP は **ホスト側のみ**（`crates/autodiff/src/grad.rs`。`cumsum`
 - GPU backward カーネル（v1 はホスト VJP のみ）
 - CPU 並列化
 - ONNX export マッピング（`docs/onnx-export-op-mapping.md`）
-- facade `compat::Sequential::add_max_pool2d` 等の統合ヘルパー
+- ~~facade `compat::Sequential::add_max_pool2d` 等の統合ヘルパー~~
+  **#1957 で実装済み**（§16 参照）
 
 ## 12. 承認事項（#1728 着手前の前提）
 
 - **facade 公開面拡張**: `compat::Sequential::add_max_pool2d` 等
-  （`docs/compat-api-scope.md` §5 経路 2）はユーザー承認が未取得のため、
-  本 doc の対象外（§11）のまま承認事項として記録する。`#1714` の親 issue
-  コメントでの承認が先例となる。
+  （`docs/compat-api-scope.md` §5 経路 2）は当初ユーザー承認が未取得の
+  ため本 doc の対象外（§11）のまま承認事項として記録していたが、
+  **2026-09-17 issue #1957 コメントで承認済み（選択肢 A・6 メソッド
+  一括追加）・実装完了**（§16 参照）。`#1714` の親 issue コメントでの
+  承認が先例。
 - **`nn::*Pool*` の追加自体**: 内部クレート（`fandhe_ai_autodiff::nn`）への
   追加であり承認は不要。ただし facade からの到達は既存 `Var` 再エクスポート
   経由に限り、facade クレートへの新規 `pub` 追加は行わない。
@@ -762,3 +765,56 @@ override 配線を追加した（`Pool2dParams` が兄弟イシュー #1728 で
   構造を変更しない分リスクが小さいため）。回帰テストは
   `ops::tests::avg_pool2d_rejects_non_unit_dilation_without_touching_device`
   （上記の codex-review 例を device 非接触のまま固定）。
+
+## 16. facade `compat::Sequential::add_*` 実装記録（イシュー #1957）
+
+§11 で対象外・§12 で承認待ちとしていた facade 統合ヘルパー
+（`compat::Sequential::add_max_pool2d` 等）は、2026-09-17 issue #1957
+コメントでのユーザー承認（選択肢 A・6 メソッド一括追加）を受けて
+実装した。
+
+- `crates/facade/src/compat/sequential.rs`: `add_max_pool2d`／
+  `add_max_pool1d`／`add_avg_pool2d`／`add_avg_pool1d`／
+  `add_adaptive_avg_pool2d`／`add_adaptive_avg_pool1d` の 6 メソッドを
+  `add_multihead_attention` の後ろへ追加。引数は `nn::pooling::*::new`
+  の実シグネチャをそのまま踏襲する（承認依頼時点の案は Avg 系が
+  `dilation` を持つ想定だったが、実際は `dilation=[1,1]` 固定で代わりに
+  `count_include_pad: bool` が必須。§2「Avg 系は `dilation=[1,1]`
+  固定」の記述と整合する）。各メソッドは `nn::pooling::*::new` の
+  検査結果（`Result`）をそのまま `?` で伝播する薄い委譲（`add_conv2d`
+  等と同型）。
+- `crates/autodiff/src/nn/module.rs`: `Module` trait へ
+  `is_pooling(&self) -> bool`（既定 `false`。`as_relu` と同型の bool
+  フック）を追加し、Pooling 6 型（`MaxPool2d`／`MaxPool1d`／
+  `AvgPool2d`／`AvgPool1d`／`AdaptiveAvgPool2d`／`AdaptiveAvgPool1d`）
+  の `impl Module` でオーバーライドする。用途は
+  `compat::Sequential::contains_resident_unsupported_layer` の判定
+  入口のみのため、`as_conv2d` 等と異なり型付き `Option<&T>` ではなく
+  bool を返す（型付き参照を必要とする消費者が存在しないため。
+  `docs/compat-api-scope.md` §1 の閉集合維持方針は不変）。非破壊拡張
+  のため crates.io 公開済み `fandhe-ai-autodiff` の外部 `impl Module`
+  を壊さない。
+- `contains_resident_unsupported_layer` へ `|| layer.is_pooling()` を
+  追加し、Pooling を含む `Sequential` のデバイス常駐経路
+  （`init_device_param_store`／`forward_resident`／`predict_resident`）
+  を fail-closed 拒否する（§11「GPU backward カーネル」の対象外整理
+  とは独立の理由——Pooling forward 自体は CUDA／Metal 実装済み〈上記
+  §15 参照〉だが、常駐経路〈`forward_from_flat_leaves`〉は `Linear`
+  層のみを消費する走査のため対応しない。`Conv2d`／`Norm`／
+  `Embedding`／`Attention` と同じ扱い）。
+- 新規 `Op`／`BackendOps`／VJP は追加していない（既存 #1728〜#1730
+  の実装をそのまま通る）。facade 新規 `pub fn` は 6 件のみ。
+- **正しさ検証**: `crates/facade/tests/compat_sequential_pooling.rs`
+  （Linux 実行可能。26 件。受入条件「`Sequential` 経由〈`predict`〉の
+  出力が `Var::max_pool2d` 等の直接呼び出しと bit 完全一致」を 6 型
+  すべてで確認・`predict`≡`forward` bit 一致・backward の入力勾配
+  bit 一致〈Max／Avg 各 1〉・無効引数〈`kernel_size=0`・`stride=Some(0)`・
+  `dilation=0`・`2*padding>kernel`・`output_size=0`〉の fail-fast・
+  rank 不一致の拒否・パラメータ非寄与・学習ループでの loss 減少・
+  常駐経路 3 API の fail-closed・train／eval 非依存）。
+- CUDA／Metal 実機での facade parity は
+  `crates/facade/tests/compat_sequential_pooling_backend_parity.rs`
+  （`#[ignore]`。既存 Pooling カーネル自体の parity は 2026-09-16 に
+  実測済み〈#1902／#1903〉）として整備したが、本エージェント実行
+  環境に到達手段がないため未実測のまま Mac／GB10 セッションへ
+  申し送る。

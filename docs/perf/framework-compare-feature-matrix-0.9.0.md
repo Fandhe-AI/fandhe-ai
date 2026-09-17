@@ -62,7 +62,11 @@ $ git diff --stat v0.9.0..HEAD -- crates
   LinearWarmup／Plateau／OneCycle）は 0.9.0 時点で全て揃っている。
 - RNN／LSTM／GRU・Pooling 層（`nn::MaxPool2d` 等）は本体クレートに実装済み
   だが、`compat::Sequential` に対応する `add_*` が無いため facade からは
-  依然到達不能（「NN 層」行が「部分的」のまま残る理由）。
+  依然到達不能（「NN 層」行が「部分的」のまま残る理由）。**Pooling 層の
+  `add_*` 欠落は #1957 で解消済み**（`compat::Sequential::add_max_pool2d`
+  等 6 件。0.9.0 以降の HEAD。**0.9.0 判定値自体〈§3〉は変更しない**——
+  本表は `fandhe-ai =0.9.0`〈タグ `v0.9.0`〉基準のスナップショットで
+  あり #1957 は同タグより後の変更のため）。RNN／LSTM／GRU の穴は継続。
 - #1962 で「推論・サービング」行の残る穴（KV キャッシュ・トークナイザ・
   グラフ最適化区分 B）の段階を確定した（`docs/facade-inference-serving-
   scope-decision.md`）。0.9.0 判定値自体（本表 §3）は変更しない。
