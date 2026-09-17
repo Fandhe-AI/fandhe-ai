@@ -2035,6 +2035,66 @@ fn interop_safetensors_module_is_pure_reexport() {
     );
 }
 
+/// `interop_safetensors_reexports_exactly_expected_surface` と合成入力
+/// テスト `interop_safetensors_reexport_scanner_rejects_root_path_and_glob`
+/// が共有する実際の走査・許可判定本体（#2019 の codex-review P2 指摘を
+/// 受け #2025 で抽出）。`content` の各行を `allowed_prefixes` に対して
+/// 判定し、承認接頭辞以外の行・解釈できない行を `offending_lines` へ、
+/// 承認接頭辞行から抽出した識別子を `found` へ積む。`pub use <prefix>A;`
+/// の単一識別子形と `pub use <prefix>{A, B};` の複数識別子形の両方を
+/// 受理する一方、`*`（glob 再エクスポート）を含む識別子は明示的に
+/// offending として拒否する（元実装は glob をブレースなし単一識別子と
+/// 誤って受理し、後続の `assert_eq!` 頼みでしか検出できなかったため、
+/// この関数自体を合成入力テストで直接検証できるよう是正した）。
+fn scan_safetensors_reexport_lines(
+    content: &str,
+    allowed_prefixes: &[&str],
+) -> (Vec<String>, std::collections::BTreeSet<String>) {
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut offending_lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("pub use") {
+            continue;
+        }
+        let Some(prefix) = allowed_prefixes
+            .iter()
+            .find(|prefix| trimmed.starts_with(**prefix))
+        else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        let rest = &trimmed[prefix.len()..];
+        if let (Some(open), Some(close)) = (rest.find('{'), rest.find('}')) {
+            let mut braced_offending = false;
+            for ident in rest[open + 1..close].split(',') {
+                let ident = ident.trim();
+                if ident.is_empty() {
+                    continue;
+                }
+                if ident.contains('*') {
+                    braced_offending = true;
+                    continue;
+                }
+                found.insert(ident.to_string());
+            }
+            if braced_offending {
+                offending_lines.push(trimmed.to_string());
+            }
+        } else {
+            let ident = rest.trim_end_matches(';').trim();
+            if ident.is_empty() || ident.contains(['{', '}', ':', '*']) {
+                offending_lines.push(trimmed.to_string());
+                continue;
+            }
+            found.insert(ident.to_string());
+        }
+    }
+
+    (offending_lines, found)
+}
+
 /// `src/interop/safetensors.rs` の `pub use` 行から `{...}` 内の識別子を
 /// 抽出し、昇格元公開面（`fandhe_ai_onnx_interop::st_load`／`st_save`）
 /// と完全一致（過不足とも fail）することを固定する
@@ -2053,42 +2113,7 @@ fn interop_safetensors_reexports_exactly_expected_surface() {
         "pub use fandhe_ai_onnx_interop::st_save::",
     ];
 
-    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut offending_lines = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("pub use") {
-            continue;
-        }
-        let Some(prefix) = allowed_prefixes
-            .iter()
-            .find(|prefix| trimmed.starts_with(**prefix))
-        else {
-            offending_lines.push(trimmed.to_string());
-            continue;
-        };
-        let rest = &trimmed[prefix.len()..];
-        // `pub use <prefix>{A, B};` の複数識別子形と `pub use <prefix>A;`
-        // の単一識別子形の両方を許容する（本ファイルは rustfmt が単一
-        // 識別子行を `{}` なしへ整形するため、`optim.rs` と異なり両形を
-        // 受理する）。
-        if let (Some(open), Some(close)) = (rest.find('{'), rest.find('}')) {
-            for ident in rest[open + 1..close].split(',') {
-                let ident = ident.trim();
-                if !ident.is_empty() {
-                    found.insert(ident.to_string());
-                }
-            }
-        } else {
-            let ident = rest.trim_end_matches(';').trim();
-            if ident.is_empty() || ident.contains(['{', '}', ':']) {
-                offending_lines.push(trimmed.to_string());
-                continue;
-            }
-            found.insert(ident.to_string());
-        }
-    }
+    let (offending_lines, found) = scan_safetensors_reexport_lines(&content, &allowed_prefixes);
 
     assert!(
         offending_lines.is_empty(),
@@ -2118,10 +2143,12 @@ fn interop_safetensors_reexports_exactly_expected_surface() {
     );
 }
 
-/// `scan_unapproved_onnx_pub_items` と同型の合成入力検査: グロブ・
-/// クレートルート経由パスの再エクスポートが違反として検出されることを
-/// 確認する（`interop_safetensors_reexports_exactly_expected_surface`
-/// の pass 経路自体の回帰固定。#2019）。
+/// `interop_safetensors_reexports_exactly_expected_surface` が使う実際の
+/// 走査・許可判定本体（`scan_safetensors_reexport_lines`）へ不正入力を
+/// 直接渡し、両方とも offending として拒否されることを確認する
+/// （codex-review 指摘: 旧実装は接頭辞判定のみを検証する合成テストで
+/// glob 入力が `bad_line.contains('*')` により機械的に true 判定される
+/// ため検出可否に関係なく assert が成立してしまっていた。#2025）。
 #[test]
 fn interop_safetensors_reexport_scanner_rejects_root_path_and_glob() {
     let allowed_prefixes = [
@@ -2129,18 +2156,37 @@ fn interop_safetensors_reexport_scanner_rejects_root_path_and_glob() {
         "pub use fandhe_ai_onnx_interop::st_save::",
     ];
 
-    for bad_line in [
+    // クレートルート直下の別実装（`LoadError`／`require_keys`）を
+    // 承認接頭辞なしで再エクスポートしようとする行。
+    let (offending, found) = scan_safetensors_reexport_lines(
         "pub use fandhe_ai_onnx_interop::{LoadError, require_keys};",
+        &allowed_prefixes,
+    );
+    assert!(
+        !offending.is_empty(),
+        "承認接頭辞を持たないクレートルート直下パスの再エクスポートが offending として\
+         検出されなかった（実処理の回帰）"
+    );
+    assert!(
+        found.is_empty(),
+        "offending として拒否されるべき行から識別子が found へ混入した: {found:?}"
+    );
+
+    // 承認接頭辞は持つが glob（`st_load::*`）で丸ごと再エクスポートしよ
+    // うとする行。
+    let (offending, found) = scan_safetensors_reexport_lines(
         "pub use fandhe_ai_onnx_interop::st_load::*;",
-    ] {
-        let matched = allowed_prefixes
-            .iter()
-            .any(|prefix| bad_line.starts_with(*prefix) && !bad_line.contains('*'));
-        assert!(
-            !matched || bad_line.contains('*'),
-            "合成入力 `{bad_line}` が誤って承認済み接頭辞として扱われた（テスト前提の誤り）"
-        );
-    }
+        &allowed_prefixes,
+    );
+    assert!(
+        !offending.is_empty(),
+        "承認接頭辞配下の glob 再エクスポートが offending として検出されなかった\
+         （実処理の回帰。`*` を通常の単一識別子として誤って受理していないか確認）"
+    );
+    assert!(
+        found.is_empty(),
+        "offending として拒否されるべき glob 行から識別子が found へ混入した: {found:?}"
+    );
 }
 
 /// `fandhe_ai::interop::safetensors::{LoadError, SaveError, ...}` が
