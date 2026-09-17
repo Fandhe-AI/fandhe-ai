@@ -170,8 +170,21 @@ run_pair() { # run_pair <round> <task> <mode> [size]
 }
 
 LOAD_GATE=${AB_LOAD_GATE:-8.0}
+# RULE.txt が正式系列の条件とする閾値は 8.0 固定。AB_LOAD_GATE で緩和した系列は
+# 「通過」と記録せず、適用閾値とともに参考系列（reference）としてログへ明記する
+# （PR #2016 codex-review 指摘。事前登録規則とログの通過判定を一致させる）。
+RULE_LOAD_GATE=8.0
+if [[ ! "$LOAD_GATE" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "error: AB_LOAD_GATE must be numeric (got: $LOAD_GATE)" >&2
+  exit 1
+fi
+GATE_SERIES=official
+if [[ "$(awk -v a="$LOAD_GATE" -v r="$RULE_LOAD_GATE" 'BEGIN{print (a==r)?1:0}')" != "1" ]]; then
+  GATE_SERIES=reference
+fi
 GATE_LOG="$OUT/load-gate-1978-${DEVICE}-${LABEL}.log"
 : >"$GATE_LOG"
+echo "threshold=${LOAD_GATE} rule_threshold=${RULE_LOAD_GATE} series=${GATE_SERIES}" >>"$GATE_LOG"
 wait_load_gate() { # wait_load_gate <round>
   local waited=0 status=timeout l1 ok
   while ((waited < 1800)); do
@@ -192,7 +205,9 @@ wait_load_gate() { # wait_load_gate <round>
     sleep 30
     waited=$((waited + 30))
   done
-  echo "round${1} gate=${status} load1=${l1} waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GATE_LOG"
+  # 緩和閾値で通過した round は pass ではなく pass-reference（参考扱い）として記録する
+  if [[ "$status" == pass && "$GATE_SERIES" == reference ]]; then status=pass-reference; fi
+  echo "round${1} gate=${status} threshold=${LOAD_GATE} load1=${l1} waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GATE_LOG"
 }
 
 : >"$OUT/uptime-1978-${DEVICE}-${LABEL}.log"
