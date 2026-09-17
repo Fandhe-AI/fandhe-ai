@@ -99,7 +99,7 @@ def main() -> int:
         top = "・".join(f"{name}（{ratio*100:.1f}%・{med*1e6:.1f} µs）" for ratio, name, med in ranked[:3])
         covered = sum(m for _, _, m in ranked)
         print(f"\n- トップ 3: {top}")
-        print(f"- フェーズ和／合計: {covered/total*100:.1f}%（差分は計測区間外の固定費）\n")
+        print(f"- フェーズ和／合計: {covered/total*100:.1f}%（差分は各フェーズ中央値の非加法性を含み、固定費は未測定）\n")
     return 0
 
 
