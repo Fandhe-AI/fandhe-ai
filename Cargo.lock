@@ -281,6 +281,7 @@ dependencies = [
  "fandhe-ai-backend-cpu",
  "fandhe-ai-backend-cuda",
  "fandhe-ai-backend-metal",
+ "fandhe-ai-onnx-interop",
  "fandhe-ai-tensor-core",
 ]
 

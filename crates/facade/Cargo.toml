@@ -55,6 +55,12 @@ fandhe-ai-autodiff = { path = "../autodiff", version = "=0.9.0" }
 fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.9.0" }
 # `Device::Cuda(_)` 指定時に `CudaBackendOps`／`CudaDeviceProvider` を解決する。
 fandhe-ai-backend-cuda = { path = "../backend-cuda", version = "=0.9.0" }
+# ONNX import ラッパー（`fandhe_ai::interop::onnx`。イシュー #2017・
+# 2026-09-17 ユーザー承認）。workspace 内クレートの結線であり外部依存の
+# 新規追加ではない（`prost`／`safetensors` は許容依存「相互運用」区分で
+# 承認済み・`docs/license-matrix.md` 更新不要）。version 併記は #881 方針
+# （上記各依存のコメント参照）。
+fandhe-ai-onnx-interop = { path = "../onnx-interop", version = "=0.9.0" }
 
 # `Device::Metal` 指定時に `MetalBackendOps`／`MetalDeviceProvider` を解決する。
 # `cfg(target_os = "macos")` 限定（.claude/rules/deps-policy.md）。
