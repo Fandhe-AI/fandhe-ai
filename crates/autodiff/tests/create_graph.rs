@@ -1169,3 +1169,217 @@ fn create_graph_rejects_cross_tape_loss() {
     let err = tape_b.backward_create_graph(&loss_a, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::TapeMismatch));
 }
+
+// --- checkpoint との相互作用（codex-review 指摘。PR #2003・イシュー
+//     #1943） ---------------------------------------------------------
+
+/// [`common::NaiveOps`] に薄い計装をかける `BackendOps` ラッパー。
+/// `gemm`（非厳密）と `gemm_fp32_strict`（厳密）の呼び出し回数を
+/// **別々の**カウンタへ記録する（`checkpoint_review_1624.rs::
+/// InstrumentedOps` と同型だが、`gemm_fp32_strict` を素通しで
+/// `self.gemm(..)` へ委譲する `BackendOps` の既定実装は使わず、両者を
+/// 独立に計装する点が異なる——既定実装のまま `gemm` だけを計装すると
+/// `gemm_fp32_strict` 呼び出しが自動的に `gemm` カウンタへ混入し、
+/// 「厳密経路と非厳密経路のどちらが呼ばれたか」を区別できない）。
+struct GemmPathCountingOps {
+    inner: Box<dyn fandhe_ai_tensor_core::BackendOps + Send>,
+    gemm_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    gemm_fp32_strict_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl fandhe_ai_tensor_core::BackendOps for GemmPathCountingOps {
+    fn device(&self) -> fandhe_ai_tensor_core::Device {
+        self.inner.device()
+    }
+
+    fn gemm(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.gemm_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.gemm(a, b)
+    }
+
+    fn gemm_fp32_strict(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.gemm_fp32_strict_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // `self.inner.gemm(..)` へ直接委譲する（`self.gemm(..)` を経由
+        // すると `gemm_calls` も同時に加算されてしまい、厳密経路単独の
+        // 呼び出し回数を計装できなくなるため）。`common::NaiveOps` は
+        // TF32 の概念を持たないため forward 値自体は `gemm` と同一。
+        self.inner.gemm(a, b)
+    }
+
+    fn gemm_checksum(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        readout: fandhe_ai_tensor_core::ChecksumReadout,
+    ) -> Result<fandhe_ai_tensor_core::GemmChecksum, fandhe_ai_tensor_core::BackendError> {
+        self.inner.gemm_checksum(a, b, readout)
+    }
+
+    fn add(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.add(a, b)
+    }
+
+    fn mul(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.mul(a, b)
+    }
+
+    fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.relu(a)
+    }
+
+    fn exp(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.exp(a)
+    }
+
+    fn tanh(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.tanh(a)
+    }
+
+    fn sum(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.sum(a, dim)
+    }
+
+    fn max(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+    ) -> Result<Tensor<f32>, fandhe_ai_tensor_core::BackendError> {
+        self.inner.max(a, dim)
+    }
+}
+
+/// **P1 是正の回帰**（codex-review 指摘。PR #2003）: `create_graph` の
+/// 子テープ上で `Op::MatMul` VJP（`build_cgrads` が `Var::
+/// matmul_fp32_strict` で記録する `da`／`db`）から作った `Var` を
+/// `Var::checkpoint_from` で checkpoint 区間の外側入力にしても、
+/// 後続の `Tape::backward` が非厳密な `matmul_forward`（`ops.gemm`）
+/// で再計算しない（＝解放対象から除外される）ことを確認する。
+///
+/// **シナリオ（指摘本文と同型）**: `y = x.matmul(&w)`・
+/// `loss = sum(y*y)` から `create_graph` で子テープ上の `db`
+/// （`gw = cg.grad(&w)`）を得たうえで、`h = gw.mul(&gw)?.sum(None)?`
+/// を構築し `h.checkpoint_from(&[])`（区間 `[0, h)`。`gw` を含む）を
+/// 呼ぶ。この時点で `is_checkpoint_eligible() == true` な `Op::MatMul`
+/// はそのままでは解放対象になるが、`gw` の `TapeNode::fp32_strict` が
+/// 立っているため実際には解放されない（`release_checkpoint_region`
+/// doc 参照）。続けて `child.backward(&h)` を呼ぶと、`Op::Mul` の VJP
+/// （`grad.rs`）が `gw` の値を `materialize_fallible` で読むが、値が
+/// 解放されていなければ再計算（`recompute_value` の `Op::MatMul` 分岐。
+/// 常に非厳密な `matmul_forward`／`ops.gemm` を使う）は一切発生しない
+/// ——子テープの `Op::MatMul` は本テストを通じて `matmul_fp32_strict`
+/// でしか作られないため、`gemm_calls`（非厳密カウンタ）が 0 のまま
+/// なら「非厳密経路が一度も使われなかった」ことの直接証拠になる
+/// （修正前は checkpoint 解放 → `child.backward` の再計算で `gemm_
+/// calls` が 1 以上へ増加し、本テストは失敗していたはずである）。
+#[test]
+fn create_graph_matmul_fp32_strict_grad_survives_checkpoint_release() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let parent_gemm_calls = Arc::new(AtomicUsize::new(0));
+    let parent_strict_calls = Arc::new(AtomicUsize::new(0));
+    let tape = Tape::new_with_ops(Box::new(GemmPathCountingOps {
+        inner: common::naive_ops(),
+        gemm_calls: parent_gemm_calls,
+        gemm_fp32_strict_calls: parent_strict_calls,
+    }));
+
+    let child_gemm_calls = Arc::new(AtomicUsize::new(0));
+    let child_strict_calls = Arc::new(AtomicUsize::new(0));
+    let child = Tape::new_with_ops(Box::new(GemmPathCountingOps {
+        inner: common::naive_ops(),
+        gemm_calls: Arc::clone(&child_gemm_calls),
+        gemm_fp32_strict_calls: Arc::clone(&child_strict_calls),
+    }));
+
+    let x = tape.var(&t(vec![1.0, 2.0, -1.0, 0.5], &[2, 2]));
+    let w = tape.var(&t(vec![0.3, -0.7, 1.1, 0.2], &[2, 2]));
+    let y = x.matmul(&w).expect("matmul: forward");
+    // `loss = sum(y)`（**二次形式にしない**）: `Op::Sum` の VJP は
+    // upstream をそのまま `Var::broadcast_to`（view。`y` 自身の値を
+    // 読まない）で広げるだけのため、`Op::MatMul(x, w)` VJP へ流れ込む
+    // upstream `g` は `y` の forward mirror（`y_mirror`。`build_mirror`
+    // が非厳密 `Var::matmul` で再生する、checkpoint 解放されうる別の
+    // `Op::MatMul` ノード）へ一切依存しない。`loss = sum(y*y)`
+    // （二次形式）だと upstream が `2・g_loss・y_mirror` になり、`gw`
+    // 自身の 2 階 VJP（`child.backward` が `gw` を `Op::MatMul` として
+    // 逆伝播する際の入力再構築）が `y_mirror` の値を要求してしまい、
+    // `y_mirror`（元々 `fp32_strict` の対象外——`Var::matmul` 経由の
+    // forward 写しであり厳密精度契約を持たない）の非厳密再計算という
+    // 無関係な `gemm` 呼び出しが本テストの意図（`gw` 自身の checkpoint
+    // 解放除外の検証）に混入してしまう。線形にすることでこの混入を
+    // 避け、`gw` の再計算経路だけを単離する。
+    let loss = y.sum(None).expect("sum");
+
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .expect("backward_create_graph に失敗");
+    let gw = cg
+        .grad(&w)
+        .expect("grad: クロステープ検査は通るはず")
+        .expect("w は loss に到達するはず（`db` 腕）");
+
+    // ここまでで `build_cgrads` の `Op::MatMul` 腕（`da`／`db`）が子
+    // テープ上へ厳密経路で記録されているはず。`build_mirror`（forward
+    // 値の写し。VJP 式自体の正しさに関わるのみで checkpoint 解放除外
+    // 契約の対象外）は `Var::matmul`（非厳密）で再生するため、この
+    // 時点までに非厳密 `gemm` が既に 1 回以上呼ばれていてよい——以降の
+    // 比較はこの時点の値を**基準（baseline）**として、それ以上
+    // 増えないことだけを検証する。
+    assert!(
+        child_strict_calls.load(Ordering::SeqCst) > 0,
+        "build_cgrads の MatMul VJP が gemm_fp32_strict を呼んでいない"
+    );
+    let baseline_gemm_calls = child_gemm_calls.load(Ordering::SeqCst);
+
+    let h = gw.mul(&gw).expect("mul").sum(None).expect("sum");
+    let checkpointed = h
+        .checkpoint_from(&[])
+        .expect("checkpoint_from: 区間 [0, h) の登録に失敗");
+
+    // checkpoint 解放（`register_checkpoint`。`checkpoint_from` 内で
+    // forward 直後に同期実行）の直後時点では非厳密 gemm はまだ増えて
+    // いない（解放自体は値を落とすだけで再計算を即座には起こさない）。
+    assert_eq!(
+        child_gemm_calls.load(Ordering::SeqCst),
+        baseline_gemm_calls,
+        "checkpoint_from の解放処理自体が非厳密な gemm を呼んでいる"
+    );
+
+    child
+        .backward(&checkpointed)
+        .expect("child.backward（checkpoint 解放済み gw 経由）に失敗");
+
+    // 本テストの核心: checkpoint 解放済みの `gw`（`Op::MatMul`。
+    // `fp32_strict` フラグにより解放対象から除外されているはず）の
+    // 再計算が `Tape::backward` の VJP 経由で発生しても、非厳密な
+    // `matmul_forward`（`ops.gemm`）は基準から一切増えない。
+    assert_eq!(
+        child_gemm_calls.load(Ordering::SeqCst),
+        baseline_gemm_calls,
+        "checkpoint 解放済み gw の再計算が非厳密な gemm（matmul_forward）を \
+         使った——TapeNode::fp32_strict による checkpoint 解放除外が機能していない"
+    );
+}

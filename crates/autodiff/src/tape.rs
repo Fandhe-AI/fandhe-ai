@@ -1811,6 +1811,28 @@ pub(crate) struct TapeNode {
     /// 対象ノードが `false` なら `Err(GradientTrackingDisabled)`
     /// （「未到達」の `Ok(None)` と型で区別する）。
     pub(crate) requires_grad: bool,
+    /// **FP32 厳密精度契約フラグ（codex-review 指摘。PR #2003）**:
+    /// [`crate::var::Var::matmul_fp32_strict`]（`ops.gemm_fp32_strict`
+    /// で forward 値を計算した `Op::MatMul` ノード）にのみ `true` を
+    /// 立てる。`Op::MatMul` は既定で [`Op::is_checkpoint_eligible`]
+    /// （activation checkpointing が値を解放し `matmul_forward`
+    /// 〈`ops.gemm`。CUDA TF32 opt-in 中は非厳密〉で再計算してよい対象）
+    /// だが、本フィールドが `true` のノードはこの解放対象から除外する
+    /// （[`release_checkpoint_region`] の唯一の呼び出し箇所で検査）。
+    /// `Op::MatMul` variant 自体は forward 精度の情報を持たないため
+    /// （通常版・厳密版とも同じ `Op::MatMul(a, b)` を記録する）、
+    /// このノード単位のフラグが「厳密精度で計算された」という事実を
+    /// checkpoint 解放判定へ伝える唯一の経路である。解放しないことで
+    /// `TapeNode::value` は常に厳密精度の forward 値のまま保持され、
+    /// `recompute_fallible`／`recompute_infallible` が非厳密な
+    /// `matmul_forward` で再計算する経路へは一切到達しない
+    /// （現時点の唯一の呼び出し元は `create_graph::build_cgrads` の
+    /// 2 階 MatMul VJP が子テープ上へ記録する `da`／`db` ノード。
+    /// 1 階 `grad.rs::matmul_vjp` は `ops.gemm_fp32_strict` を直接
+    /// 呼ぶのみでテープへは何も記録しないため対象外）。既定は
+    /// `false`（既存の `Var::matmul`〈`Op::MatMul` 通常版〉・他の全
+    /// Op variant は checkpoint 解放判定に影響しない）。
+    pub(crate) fp32_strict: bool,
 }
 
 /// 演算を記録する Wengert list。`Var`（`var.rs`）上の演算のみがここに
@@ -2373,6 +2395,12 @@ impl Tape {
             recompute: false,
             recompute_failed: std::cell::Cell::new(poisoned),
             requires_grad,
+            // 既定 `false`（`TapeNode::fp32_strict` doc 参照）。
+            // `Var::matmul_fp32_strict` は本関数を呼んだ直後に自身の
+            // 戻り値ノードへ限定してこのフィールドを `true` へ立てる
+            // （`push_eager` 自体は通常版・厳密版の呼び出し元を区別
+            // しない）。
+            fp32_strict: false,
         });
         id
     }
@@ -2394,6 +2422,7 @@ impl Tape {
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
             requires_grad,
+            fp32_strict: false,
         });
         id
     }
@@ -2425,6 +2454,7 @@ impl Tape {
             // `true`」参照）。`var_no_grad` 相当の非追跡 resident 葉は
             // 本 issue のスコープ外。
             requires_grad: true,
+            fp32_strict: false,
         });
         id
     }
@@ -2463,6 +2493,7 @@ impl Tape {
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
             requires_grad,
+            fp32_strict: false,
         });
         id
     }
@@ -2551,6 +2582,7 @@ impl Tape {
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
             requires_grad,
+            fp32_strict: false,
         });
         (id, at_limit)
     }
@@ -2805,9 +2837,22 @@ fn build_lazy_plan(
 /// ノードへ再度呼んでも副作用はない（`OnceCell::take` は空なら
 /// `None` を返すのみ）——`checkpoint_from` の入れ子区間（内側区間が
 /// 先に解放したノードを外側区間が再度走査する場合）を単純に許容する。
+///
+/// **`TapeNode::fp32_strict` による除外（codex-review 指摘。
+/// PR #2003）**: `Op::MatMul` は `is_checkpoint_eligible() == true`
+/// だが、`fp32_strict` が立っているノード（`Var::matmul_fp32_strict`
+/// で forward 値を計算した `Op::MatMul`）は解放対象から除外する。
+/// `Op::MatMul` variant 自体は forward 精度の情報を持たないため、
+/// 解放して `recompute` フラグを立てると再計算時に必ず非厳密な
+/// `matmul_forward`（`recompute_value` の `Op::MatMul` 分岐。
+/// `ops.gemm`）が使われてしまい、CUDA TF32 opt-in が有効な間は
+/// 厳密精度契約（`Var::matmul_fp32_strict` doc 参照）が checkpoint
+/// 経由で静かに破られる。解放しないことで該当ノードの値は常に
+/// 厳密精度のまま保持され、`recompute_fallible`／`recompute_
+/// infallible` がこのノードを再計算する経路へは一切到達しない。
 fn release_checkpoint_region(nodes: &mut [TapeNode], lo: usize, output: usize) {
     for node in nodes.iter_mut().take(output).skip(lo) {
-        if node.op.is_checkpoint_eligible() {
+        if node.op.is_checkpoint_eligible() && !node.fp32_strict {
             node.value.take();
             node.recompute = true;
         }

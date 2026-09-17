@@ -437,6 +437,14 @@ impl<'t> Var<'t> {
         };
         let value = self.tape.ops().gemm_fp32_strict(&lhs_val, &rhs_val)?;
         let id = self.tape.push_eager(Op::MatMul(self.id, other.id), value);
+        // `TapeNode::fp32_strict` を立てる（codex-review 指摘。
+        // PR #2003）: `push_eager` 自体は通常版・厳密版の呼び出し元を
+        // 区別しないため、戻り値ノードへ限定してここで事後設定する。
+        // これにより activation checkpointing（`release_checkpoint_
+        // region`）が本ノードの forward 値を解放しなくなり、以後の
+        // 再計算が非厳密な `matmul_forward`（`ops.gemm`）へ落ちる事故
+        // （厳密精度契約が checkpoint 経由で失われる）を防ぐ。
+        self.tape.nodes.borrow_mut()[id.0].fp32_strict = true;
         Ok(Var::from_raw(self.tape, id))
     }
 

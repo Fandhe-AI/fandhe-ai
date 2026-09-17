@@ -268,9 +268,12 @@
 が対象になる。
 
 - **`MatMul` の VJP（`crates/autodiff/src/create_graph.rs::build_cgrads`
-  の `Op::MatMul` 腕）**: `da = g.matmul(&bᵀ)`・`db = aᵀ.matmul(&g)`
-  （1 階 `grad.rs::matmul_vjp` の rank 2 経路と同一のオペランド順序）を
-  `Var::matmul`／`transpose` の合成として子テープへ記録する。
+  の `Op::MatMul` 腕）**: `da = g.matmul_fp32_strict(&bᵀ)`・
+  `db = aᵀ.matmul_fp32_strict(&g)`（1 階 `grad.rs::matmul_vjp` の
+  rank 2 経路と同一のオペランド順序）を `Var::matmul_fp32_strict`
+  （`ops().gemm_fp32_strict` 経由）／`transpose` の合成として子テープ
+  へ記録する（当初案の `Var::matmul`〈`ops().gemm`〉から PR #2003
+  codex-review 指摘を受けて切り替えた。§14a 参照）。
 - **rank≥3 を対象外とした理由**: 1 階 `matmul_vjp` の rank≥3 経路は
   `reduce_batch_axes_f64`（`f64` アキュムレータの broadcast 縮約。
   `.claude/rules/coding-rust.md` の勾配長軸縮約契約）を経由するが、
@@ -294,15 +297,16 @@
   create_graph_rejects_resident_path_with_typed_error` で resident
   経路の型付き拒否・`child.is_empty()`・拒否後も通常の
   `store.backward(&tape, &loss)` が成功することを検証済み）。
-- **数値契約**: 子テープの `MatMul` VJP は `Var::matmul`（=
-  `ops().gemm`）経由であり、1 階 `matmul_vjp`（`ops.gemm_fp32_strict`
-  経由）とは入口が異なる。CPU バックエンドは両者が同一カーネルへ
-  帰着するため bit 同一だが、CUDA TF32 opt-in（`docs/
-  cuda-tf32-optin-api-decision.md`）が有効な場合は `first_order()` と
-  bit 一致しない可能性がある——本モジュールは元々「子テープの数値
-  方式は一般に bit 同一を主張せず、正しさは有限差分突合で検証する」
-  立場（`create_graph.rs` モジュール doc）のためこの整理はその範囲内
-  に収まる。tolerance／baseline は無変更。
+- **数値契約**: 子テープの `MatMul` VJP は `Var::matmul_fp32_strict`
+  （= `ops().gemm_fp32_strict`）経由であり、1 階 `matmul_vjp`（同じく
+  `ops.gemm_fp32_strict` 経由）と入口が揃っている。CPU バックエンドは
+  両者が同一カーネルへ帰着するため bit 同一で、CUDA TF32 opt-in
+  （`docs/cuda-tf32-optin-api-decision.md`）が有効な場合も 1 階
+  `matmul_vjp` と同じく常に FP32 厳密のまま計算されるため
+  `first_order()` との bit 一致が崩れない（§14a）。本モジュールは
+  元々「子テープの数値方式は一般に bit 同一を主張せず、正しさは
+  有限差分突合で検証する」立場（`create_graph.rs` モジュール doc）の
+  ためこの整理はその範囲内に収まる。tolerance／baseline は無変更。
 - **テスト**: `crates/autodiff/tests/create_graph.rs` に以下を追加（31
   件が全 green。CPU `common::naive_ops()` でのみ検証）。
   - `hessian_matmul_quadratic_w_matches_finite_difference_and_closed_form`／
@@ -333,10 +337,57 @@
   も引き続き未承認のまま不実施。checkpoint 併用・rank≥3 matmul の
   対応は後続イシューへ引き継ぐ。
 - **CUDA／Metal 実機実測**: CPU（`naive_ops()`）でのみ検証済み。新規
-  カーネルは追加していない（既存 `Var::matmul`／`transpose` の合成の
-  み）が、実機実測は未実施のまま Mac／GB10 セッションへ申し送る。
+  カーネルは追加していない（既存 `Var::matmul_fp32_strict`／
+  `transpose` の合成のみ）が、実機実測は未実施のまま Mac／GB10
+  セッションへ申し送る。
 - **facade／compat-api-scope への反映**: `docs/compat-api-scope.md`
   §1.3「高階微分」行・`docs/compat-feature-gap.md` §2.11 を本追記と
   同時に更新した。
+
+## 14a. 是正記録（PR #2003 codex-review 指摘・イシュー #1943）
+
+§14 時点の実装は 2 点の精度契約上の問題を含んでいた。いずれも
+codex-review（PR #2003）の指摘を受けて是正した。
+
+- **問題 1（P1・`build_cgrads` の `Op::MatMul` 腕）**: 当初 `da =
+  g.matmul(&bᵀ)`・`db = aᵀ.matmul(&g)`（`Var::matmul` = `ops().gemm`）
+  として子テープへ記録していたため、CUDA TF32 opt-in
+  （`set_cuda_gemm_precision`）が有効な間、1 階 `grad.rs::matmul_vjp`
+  （`ops.gemm_fp32_strict` 経由で常に FP32 厳密）が守る
+  「バックプロパゲーションは常に FP32 厳密」という契約が、二階微分の
+  記録経路でだけ TF32 相当まで精度低下していた。`Var::matmul_fp32_strict`
+  （`crates/autodiff/src/var.rs`。`ops().gemm_fp32_strict` を forward
+  値の計算に使う以外は `Var::matmul` と同一の `pub(crate)` メソッド）
+  を新設し、`build_cgrads` の `Op::MatMul` 腕をこちらへ切り替えた。
+- **問題 2（P1・checkpoint との相互作用）**: `Var::matmul_fp32_strict`
+  も記録するノードは通常版と同じ `Op::MatMul(a, b)` であり、`Op::
+  MatMul` は `is_checkpoint_eligible() == true`（`docs/
+  autodiff-checkpoint-design.md`）。区別する情報が `Op` 側にないため、
+  子テープ上で `g`（`matmul_fp32_strict` の結果）から `h = g.mul(&g)?.
+  sum(None)?` を作り `h.checkpoint_from(&[])` を呼ぶと `g` が解放対象
+  になり、後続 `child.backward(&h)` の再計算（`tape.rs::
+  recompute_value` の `Op::MatMul` 分岐）が非厳密な `matmul_forward`
+  （`ops.gemm`）を使ってしまい、問題 1 と同じ精度低下が checkpoint
+  経由で再発する経路があった。`TapeNode`（`tape.rs`）へ `fp32_strict:
+  bool` フィールド（既定 `false`）を追加し、`Var::matmul_fp32_strict`
+  が `push_eager` 直後に戻り値ノードへ限定して `true` を立てる。
+  `release_checkpoint_region`（`Tape::register_checkpoint`／
+  `Tape::release_checkpoints_ending_at` 共通の解放ロジック。唯一の
+  `is_checkpoint_eligible()` 呼び出し箇所）の判定を `node.op.
+  is_checkpoint_eligible() && !node.fp32_strict` へ変更し、フラグが
+  立ったノードは checkpoint 区間に含まれても解放されない（`value`
+  は常に厳密精度のまま保持され、`recompute_fallible`／`recompute_
+  infallible` がこのノードを再計算する経路へは一切到達しない）よう
+  にした。`Op::MatMul` の通常版（`Var::matmul`）・他の全 Op variant の
+  checkpoint 適格性は無変更。
+- **影響範囲**: `TapeNode` を直接構築する全箇所（`tape.rs` の
+  `push_eager`／`push_leaf`／`push_resident_leaf`／`push_view`／
+  `push_lazy`、`grad.rs` のテストフィクスチャ 3 箇所）へ
+  `fp32_strict: false` の初期化を追加。フィールド追加自体が構造体
+  リテラルの網羅性によりコンパイルエラーで検出されるため、更新漏れ
+  はビルドで機械的に防がれる。
+- **CUDA／Metal 実機実測**: 問題 1・2 とも数値契約の是正であり新規
+  カーネルは追加していない。実機実測は未実施のまま Mac／GB10
+  セッションへ申し送る（§14 の既存申し送りと同一）。
 
 内部ホスト名・秘密情報は含めない。

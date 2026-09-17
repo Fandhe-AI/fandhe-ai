@@ -60,18 +60,27 @@
 //! `child` へ一切書き込む前の入口で判定するため、途中失敗時も
 //! `child` は無変更のまま保たれる）。
 //!
-//! **`MatMul` の数値契約（イシュー #1943）**: 子テープの matmul VJP
-//! （[`build_cgrads`] の `Op::MatMul` 腕）は `Var::matmul`（=
-//! `ops().gemm`）経由であり、1 階 `matmul_vjp`（`grad.rs`。
-//! `ops.gemm_fp32_strict` 経由）とは入口が異なる。CPU バックエンドは
-//! 両者が同一カーネルへ帰着するため bit 同一だが、CUDA の TF32
-//! opt-in（`docs/cuda-tf32-optin-api-decision.md`）が有効な場合、子
-//! テープ上の `Var::matmul` は `first_order()`（既存 `Tape::backward`
-//! の無変更な結果）と bit 一致しない可能性がある。本モジュールは
-//! 元々「子テープの数値方式は一般に bit 同一を主張せず、正しさは
-//! 有限差分突合で検証する」立場（本ファイル冒頭の既存契約節）を
-//! 取っており、この整理はその範囲内に収まる（tolerance／baseline は
-//! 無変更）。
+//! **`MatMul` の数値契約（イシュー #1943・PR #2003 codex-review 指摘
+//! で是正）**: 子テープの matmul VJP（[`build_cgrads`] の
+//! `Op::MatMul` 腕）は [`Var::matmul_fp32_strict`]（`ops().
+//! gemm_fp32_strict` 経由。`crate::var` 限定公開）を使い、1 階
+//! `matmul_vjp`（`grad.rs`。同じく `ops.gemm_fp32_strict` 経由）と
+//! 入口を揃えている——当初案の `Var::matmul`（`ops().gemm`）は CUDA
+//! TF32 opt-in（`docs/cuda-tf32-optin-api-decision.md`）が有効な間、
+//! 1 階 `matmul_vjp` が守る「バックプロパゲーションは常に FP32 厳密」
+//! という契約を二階微分の記録経路でだけ破ってしまうため、`Var::
+//! matmul_fp32_strict` へ切り替えた。CPU バックエンドは両者が同一
+//! カーネルへ帰着するため bit 同一のまま不変。さらに、
+//! `matmul_fp32_strict` が記録する `Op::MatMul` ノードは
+//! `TapeNode::fp32_strict` フラグにより activation checkpointing
+//! （`Tape::checkpoint`／`Var::checkpoint_from`）の解放対象からも
+//! 除外される（`release_checkpoint_region` doc 参照）——`Op::MatMul`
+//! variant 自体は forward 精度の情報を持たないため、解放後の再計算
+//! （`recompute_value`）が非厳密な `matmul_forward`（`ops.gemm`）を
+//! 使ってしまう事故を防ぐ。本モジュールは元々「子テープの数値方式は
+//! 一般に bit 同一を主張せず、正しさは有限差分突合で検証する」立場
+//! （本ファイル冒頭の既存契約節）を取っており、この整理はその範囲内
+//! に収まる（tolerance／baseline は無変更）。
 
 use fandhe_ai_tensor_core::Tensor;
 
