@@ -19,7 +19,10 @@ cargo test -p fandhe-ai --release --test softmax_backend_parity -- --ignored --n
 
 1. `#[ignore]` 対象テスト全 pass（REQ-2 統一複合判定・
    `fandhe_ai_backend_cpu::parity::assert_parity`。tolerance 定数は
-   不変）。
+   不変）。`log_softmax_backward_cancelling_upstream_grad_matches_cpu`
+   （PR #1994 codex-review 指摘の相殺反例 `logits=[0,0,0,0]`・
+   `g=[1e20,-1e20,1,0]` の実機回帰。`Σ_dim(g)` を lane 0 逐次和へ是正
+   済み）を含む。
 2. run-to-run bit 同一（`log_softmax_backward_is_run_to_run_bit_identical`）。
 3. 既存 `make test-ignored-cuda`（本イシューが追加した対象を含む）の
    非後退。既知 FAIL 一覧は
