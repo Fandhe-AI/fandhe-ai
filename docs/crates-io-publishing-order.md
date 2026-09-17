@@ -767,8 +767,42 @@ version 非併記のまま維持した。
 `fandhe-ai` の前）。実際の `cargo publish`（`mode: publish`・environment
 承認）は次回リリースサイクルでユーザーが実行する。
 
+### 13.4 追補（イシュー #2017・2026-09-17）: facade が onnx-interop へ依存するようになった
+
+13.1 の「facade（`fandhe-ai`）は現時点で `fandhe-ai-onnx-interop` に
+依存しない」という記述は **#2017 で ONNX import（`fandhe_ai::interop::
+onnx::{OnnxModel, OnnxValue, OnnxError}`）を facade 公開したことにより
+事実が変わった**。`crates/facade/Cargo.toml` に `fandhe-ai-onnx-interop`
+への通常依存（`version = "=0.9.0"` 併記済み。1 節の方針どおり）を追加
+したため、13.1 の依存グラフ図は次のとおり更新される（③ が ②′ の一部
+〈`fandhe-ai-onnx-interop`〉にも依存するようになった点のみが差分）。
+
+```
+① fandhe-ai-tensor-core
+       │
+       ├──▶ ②  fandhe-ai-autodiff / fandhe-ai-backend-cpu /
+       │        fandhe-ai-backend-cuda / fandhe-ai-backend-metal
+       │
+       ├──▶ ②′ fandhe-ai-onnx-interop
+       │
+       └──▶ ③ fandhe-ai（① 〜 ②′ すべてに依存）
+```
+
+`env.RELEASE_CRATES`（トポロジカル順）は既に 13 節で `fandhe-ai-onnx-
+interop` を `fandhe-ai-backend-metal` の後・`fandhe-ai` の前に置いて
+いたため、本追補による公開順序自体への影響はない（facade が
+`fandhe-ai-onnx-interop` へ依存する形は元々の順序と整合していた）。
+1・2・4・6 節「6 クレート時点の記述」は本追補時点でも 7 クレート構成へ
+の差分を 13 節が正として扱う方針のまま不変（依存グラフの追加差分は
+本節が正）。
+
 ## 変更履歴
 
+- 2026-09-17（#2017）: `fandhe-ai`（facade）の `[dependencies]` へ
+  `fandhe-ai-onnx-interop`（`version = "=0.9.0"` 併記）を追加し、ONNX
+  import（`fandhe_ai::interop::onnx::{OnnxModel, OnnxValue, OnnxError}`）
+  を facade 公開した。13.4 節に依存グラフの更新を記録した（`env.
+  RELEASE_CRATES` の公開順序自体への影響なし）。
 - 2026-09-17（#1963）: `onnx-interop` を `fandhe-ai-onnx-interop` として
   7 クレート目の公開対象へ追加する公開準備を実施した（実 publish は未実施。
   次回リリースサイクルでユーザーが実行）。13 節として rename・依存グラフ

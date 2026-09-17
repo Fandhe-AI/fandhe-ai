@@ -943,40 +943,57 @@ fn facade_does_not_expose_rng_internal_types() {
 }
 
 /// facade（crates.io 公開クレート `fandhe-ai`）が
-/// `onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963 で crates.io
-/// 公開対象へ追加済み・`docs/facade-onnx-export-exposure-decision.md`）へ
-/// 通常依存を持たないことを固定する。
+/// `onnx-interop`（公開名 `fandhe-ai-onnx-interop`）へ**承認済み依存形状
+/// でのみ**依存していることを固定する（イシュー #2017）。
+///
+/// ONNX import（`OnnxModel`／`OnnxValue`／`OnnxError`。`src/interop/
+/// onnx.rs`）は #2017 で公開済みのため、facade は onnx-interop への通常
+/// 依存を正式に持つ。**本テストは「依存の有無」ではなく「承認された
+/// 依存の形状（path・version 併記・取得元）から逸脱していないか」を
+/// 検査する正のガード**（旧テスト `facade_does_not_depend_on_
+/// unpublished_onnx_interop`——依存そのものを禁止する負のガードだった
+/// ——を #2017 で本テストへ差し替えた。`docs/facade-onnx-import-exposure-
+/// decision.md` §6.1 で予告済みの差し替え。ONNX export・safetensors
+/// save／load は依然として別途ユーザー承認が必要な段階 0 のまま
+/// （`docs/facade-onnx-export-exposure-decision.md`・
+/// `docs/facade-safetensors-exposure-decision.md`）。
 ///
 /// `docs/crates-io-publishing-order.md` §6 は「公開クレートの
 /// `[dependencies]` に facade ラッパー未承認のクレートが現れない」ことを
 /// 実測確認済みの前提としているが、CI は `cargo publish --dry-run` を
-/// 実行しないため、誰かが `[dependencies]` へ
-/// `fandhe-ai-onnx-interop = { path = "../onnx-interop" }` を追加しても
-/// 通常の `cargo build`／`cargo test` は成功してしまい、意図しない公開
-/// 面の拡張が気付かれにくい。本テストはこの盲点を CI 時点の検出へ前倒し
-/// する（ホストクレート `Cargo.toml` のみを対象とする固定パス走査で、
-/// 外部入力を受け取らない。`.claude/rules/security.md` A08）。
+/// 実行しないため、誰かが依存の取得元を `git = ...` へ差し替えたり
+/// version 併記を外したりしても通常の `cargo build`／`cargo test` は
+/// 成功してしまい、意図しない公開面の拡張・取得元差し替えが気付かれ
+/// にくい。本テストはこの盲点を CI 時点の検出へ前倒しする（ホスト
+/// クレート `Cargo.toml` のみを対象とする固定パス走査で、外部入力を
+/// 受け取らない。`.claude/rules/security.md` A08）。
 ///
-/// **facade ラッパー未実装の間の負のガードである**: `onnx-interop` の
-/// crates.io 公開自体はユーザー承認済み・公開準備完了（#1963）だが、
-/// facade からの ONNX import／export・safetensors save／load の
-/// ラッパー API 実装（`docs/facade-onnx-import-exposure-decision.md`
-/// §6.1・`docs/facade-onnx-export-exposure-decision.md` §6・
-/// `docs/facade-safetensors-exposure-decision.md` §6）は別途ユーザー
-/// 承認が必要な段階 0 のまま未完了のため、本テストは維持する。ラッパー
-/// 実装 issue が完了したら、本テストは削除ではなく「承認済み依存形状
-/// （`version = "=x.y.z"` 併記等）の検査」へ差し替える。
+/// 承認済み依存形状の要件（すべて fail-closed）:
+/// 1. `fandhe-ai-onnx-interop` は**素の `[dependencies]`**（コメント除去後
+///    `[dependencies]` に完全一致するセクション）に**丁度 1 回**だけ現れる。
+///    `[build-dependencies]`・`[target.'cfg(...)'.dependencies]`・
+///    `[dependencies.<name>]` テーブル形式・別名（`onnx-interop`・
+///    `fandhe-ai-interop`）・`package = "..."` によるリネーム迂回は
+///    すべて違反。
+/// 2. 依存行の値に `path = "../onnx-interop"` と、他の公開 path 依存
+///    （`fandhe-ai-tensor-core`。基準値として先に走査する）と**同一の**
+///    `version = "=x.y.z"` を含む（バンプ時のドリフト検出）。
+/// 3. 依存行の値に `git`／`registry`／`branch`／`rev`／`tag`／`optional`／
+///    `features` キーを含まない（取得元差し替え・feature フラグなし cfg
+///    方針〈coding-rust.md〉との整合）。
 ///
-/// `[dev-dependencies]` は対象外（公開クレートの `Cargo.toml` に残っても
-/// `cargo publish` を壊さない。`bench-harness` 等の既存 dev-dependency と
-/// 同じ扱い）。`[dependencies]`・`[build-dependencies]`・
-/// `[target.'cfg(...)'.dependencies]`・`[dependencies.<name>]` 形の
-/// ヘッダ・`package = "..."` によるリネーム迂回はいずれも検出する。
-const FORBIDDEN_ONNX_NAMES: [&str; 3] = [
-    "onnx-interop",
-    "fandhe-ai-onnx-interop",
-    "fandhe-ai-interop",
-];
+/// `[dev-dependencies]` は対象外（`bench-harness` 等の既存
+/// dev-dependency と同じ扱い。`cargo publish` を壊さない）。
+const ONNX_INTEROP_DEPENDENCY_KEY: &str = "fandhe-ai-onnx-interop";
+const ONNX_INTEROP_ALT_NAMES: [&str; 2] = ["onnx-interop", "fandhe-ai-interop"];
+const APPROVED_PLAIN_DEPENDENCIES_SECTION: &str = "[dependencies]";
+/// 依存行の値に現れてはならないキー（取得元差し替え・feature フラグ
+/// 追加を検出する）。`" <key> "`／`"<key>="` の形で走査するため、他の
+/// 単語の部分文字列に誤爆しない（例: "average" は "rev" を含まない
+/// 連続部分列を持たない上、本チェックは区切り文字を伴う形でのみ一致
+/// する）。
+const FORBIDDEN_DEPENDENCY_VALUE_KEYS: [&str; 6] =
+    ["git", "registry", "branch", "rev", "tag", "optional"];
 
 fn is_dev_dependencies_section(section: &str) -> bool {
     section.contains("dev-dependencies")
@@ -986,27 +1003,111 @@ fn is_relevant_dependency_section(section: &str) -> bool {
     section.contains("dependencies") && !is_dev_dependencies_section(section)
 }
 
-/// `facade_does_not_depend_on_unpublished_onnx_interop` の走査ロジック本体。
-/// 実 `Cargo.toml` からの呼び出しと、パース境界（コメント付きヘッダ行
-/// 等）を固定する合成入力からの呼び出しの両方から使えるよう、ファイル
-/// 読み込みと判定ロジックを分離した（#1775 PR #1821 codex-review 指摘の
-/// 回帰テスト `dependency_section_header_with_trailing_comment_is_recognized`
-/// 用）。戻り値は `(offending, saw_known_dependency_line)`。
-fn scan_onnx_dependency_offenses(content: &str) -> (Vec<String>, bool) {
+/// `value`（`{ path = "...", version = "=x.y.z" }` 形の依存値）から
+/// `version` キーのクォート内リテラルを抽出する。見つからなければ
+/// `None`（version 指定なしとして扱う）。
+fn extract_version_literal(value: &str) -> Option<String> {
+    let after_key = value.split_once("version")?.1;
+    let after_eq = after_key.split_once('=')?.1;
+    let after_first_quote = after_eq.split_once('"')?.1;
+    let (literal, _) = after_first_quote.split_once('"')?;
+    Some(literal.to_string())
+}
+
+/// 値の中に禁止キー（`FORBIDDEN_DEPENDENCY_VALUE_KEYS`）・`features` が
+/// TOML インライン table のキーとして現れるかを検査する。
+///
+/// `{ optional = true }` のような各エントリを `,` で分割し、`=` より
+/// 前のキー部分だけを取り出して比較する字句解析方式を取る。単純な
+/// 部分文字列検査（`" key "` / `"key ="` 形の固定パターン照合）では、
+/// 空白を伴わない `optional=true`・タブ区切り・`"optional" = true` の
+/// ような引用符付きキーで一致せず検査を回避できてしまうため（codex-review
+/// 指摘 P1・#2024）、キー部分をトリム＋引用符除去したうえで完全一致で
+/// 比較する。
+fn value_contains_forbidden_key(value: &str, key: &str) -> bool {
+    value.split(',').any(|segment| {
+        let segment = segment.trim().trim_start_matches('{').trim_end_matches('}');
+        match segment.split_once('=') {
+            Some((k, _)) => k.trim().trim_matches('"').trim_matches('\'') == key,
+            None => false,
+        }
+    })
+}
+
+/// `value`（インライン table 形の依存値）中に `package` キーが現れ、その
+/// 値（クォートを除去した後の文字列）が `names` のいずれかと完全一致する
+/// かを検査する（`package` によるクレート名リネーム迂回の検出）。
+///
+/// TOML はダブルクォート文字列（`"..."`）とシングルクォートのリテラル
+/// 文字列（`'...'`）の両方を許容する。旧実装（`value.contains(&format!("\"{name}\""))`）
+/// はダブルクォートのみを対象としていたため、`package = 'fandhe-ai-onnx-interop'`
+/// のようなシングルクォート表記で検査を回避できてしまっていた
+/// （codex-review 指摘 P1・#2024 2 回目レビュー）。`value_contains_forbidden_key`
+/// と同じキー／値の字句分割方式を用い、クォート種別に依存せず判定する。
+fn value_has_package_rename_to(value: &str, names: &[&str]) -> bool {
+    value.split(',').any(|segment| {
+        let segment = segment.trim().trim_start_matches('{').trim_end_matches('}');
+        match segment.split_once('=') {
+            Some((k, v)) => {
+                let k = k.trim().trim_matches('"').trim_matches('\'');
+                if k != "package" {
+                    return false;
+                }
+                let v = v.trim().trim_matches('"').trim_matches('\'');
+                names.contains(&v)
+            }
+            None => false,
+        }
+    })
+}
+
+/// `facade_depends_on_onnx_interop_only_in_approved_shape` の走査ロジック
+/// 本体。実 `Cargo.toml` からの呼び出しと、パース境界（コメント付き
+/// ヘッダ行等）を固定する合成入力からの呼び出しの両方から使えるよう、
+/// ファイル読み込みと判定ロジックを分離した（#1775 PR #1821
+/// codex-review 指摘の回帰テスト
+/// `dependency_section_header_with_trailing_comment_is_recognized` 用の
+/// 構造を #2017 でも踏襲する）。戻り値は
+/// `(offending, saw_known_dependency_line)`。
+fn scan_onnx_dependency_shape(content: &str) -> (Vec<String>, bool) {
+    // 1 パス目: バンプ時ドリフト検出の基準となる `fandhe-ai-tensor-core`
+    // の version リテラルを、素の `[dependencies]` セクション内から
+    // 先に集める（出現順序に依存しないようにする）。
+    let mut approved_version: Option<String> = None;
+    {
+        let mut section = String::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            let code_part = trimmed
+                .split_once('#')
+                .map(|(a, _)| a)
+                .unwrap_or(trimmed)
+                .trim();
+            if code_part.starts_with('[') && code_part.ends_with(']') {
+                section = code_part.to_string();
+                continue;
+            }
+            if section != APPROVED_PLAIN_DEPENDENCIES_SECTION {
+                continue;
+            }
+            if let Some((key, value)) = code_part.split_once('=')
+                && key.trim().trim_matches('"') == "fandhe-ai-tensor-core"
+            {
+                approved_version = extract_version_literal(value);
+            }
+        }
+    }
+
     let mut current_section = String::new();
     let mut offending = Vec::new();
     let mut saw_known_dependency_line = false;
+    let mut plain_dependency_occurrences = 0usize;
 
     for line in content.lines() {
         let trimmed = line.trim();
-        // コメント除去（`#` 以降）。TOML の文字列値に `#` を含む既存行は
-        // 本ファイルには存在しないため、この単純化で安全に判定できる。
-        // ヘッダ判定（`[section]` の角カッコ）もこのコメント除去後の
-        // `code_part` に対して行う: `[build-dependencies] # export support`
-        // のようなコメント付きヘッダ行は元の `trimmed` では `]` で終わら
-        // ないため、コメント除去前に判定すると `current_section` の切替
-        // を見落とし、以降の依存走査が丸ごと読み飛ばされてしまう
-        // （codex-review 指摘。#1775 PR #1821）。
+        // コメント除去（`#` 以降）。ヘッダ判定もコメント除去後の
+        // `code_part` に対して行う理由は #1775 PR #1821 の codex-review
+        // 指摘（コメント付きヘッダ行の見落とし）と同じ。
         let code_part = trimmed
             .split_once('#')
             .map(|(a, _)| a)
@@ -1014,13 +1115,18 @@ fn scan_onnx_dependency_offenses(content: &str) -> (Vec<String>, bool) {
             .trim();
         if code_part.starts_with('[') && code_part.ends_with(']') {
             current_section = code_part.to_string();
-            if is_relevant_dependency_section(&current_section) {
-                for name in FORBIDDEN_ONNX_NAMES {
-                    if current_section.contains(name) {
-                        offending.push(format!(
-                            "section header `{current_section}` が `{name}` を含む"
-                        ));
-                    }
+            if is_relevant_dependency_section(&current_section)
+                && current_section != APPROVED_PLAIN_DEPENDENCIES_SECTION
+            {
+                let mentions_target = current_section.contains(ONNX_INTEROP_DEPENDENCY_KEY)
+                    || ONNX_INTEROP_ALT_NAMES
+                        .iter()
+                        .any(|name| current_section.contains(name));
+                if mentions_target {
+                    offending.push(format!(
+                        "section header `{current_section}` が onnx-interop への言及を含む\
+                         （承認形状は素の `{APPROVED_PLAIN_DEPENDENCIES_SECTION}` のみ）"
+                    ));
                 }
             }
             continue;
@@ -1035,34 +1141,120 @@ fn scan_onnx_dependency_offenses(content: &str) -> (Vec<String>, bool) {
             continue;
         };
         let key = key.trim().trim_matches('"');
-        if FORBIDDEN_ONNX_NAMES.contains(&key) {
-            offending.push(format!(
-                "`{current_section}` に依存 `{key}` を検出: `{trimmed}`"
-            ));
-        }
-        // `package = "onnx-interop"` によるクレート名リネーム迂回も検出する。
-        for name in FORBIDDEN_ONNX_NAMES {
-            if value.contains(name) {
-                offending.push(format!(
-                    "`{current_section}` の行 `{trimmed}` の値に `{name}` を検出\
-                     （package リネーム等での迂回を含む）"
-                ));
-            }
-        }
+
         if key == "fandhe-ai-tensor-core" || key == "fandhe-ai-autodiff" {
             saw_known_dependency_line = true;
         }
+
+        let is_target_key = key == ONNX_INTEROP_DEPENDENCY_KEY;
+        // 別名キー（`onnx-interop = { .. }` のように prefix なしでキー
+        // そのものが別名）の検出。`path = "../onnx-interop"` のように
+        // 値の一部として正当に "onnx-interop" 文字列が現れる（依存先
+        // ディレクトリ名）ケースと区別するため、値側の別名検出は
+        // `package = "..."` キーによるリネーム迂回（クォート内完全一致）
+        // に限定する（単純な部分文字列一致は path 値を誤検出するため
+        // 不採用）。
+        let is_alt_key = ONNX_INTEROP_ALT_NAMES.contains(&key);
+        let package_rename_names: Vec<&str> = ONNX_INTEROP_ALT_NAMES
+            .iter()
+            .copied()
+            .chain(std::iter::once(ONNX_INTEROP_DEPENDENCY_KEY))
+            .collect();
+        let value_has_package_rename = value_has_package_rename_to(value, &package_rename_names);
+        // テーブル形式（`[dependencies.<alias>]`／`[build-dependencies.alias]`
+        // 配下の独立行としての `package = "..."`）による迂回の検出。
+        // インライン table（`{ package = "..." }`）内の package キーは
+        // `value_has_package_rename_to` が検出するが、テーブル形式では
+        // `package = "..."` 自体が独立した `key = value` 行になり、
+        // value 側に更なる `=` が現れないため `value_has_package_rename_to`
+        // の分割ロジック（value を `,` 分割し各セグメントを `=` で再分割
+        // してキーを取り出す方式）では検出できずすり抜ける（codex-review
+        // 指摘 P1・#2024）。ここでは行の key 自体が `package` であり、
+        // value（クォート除去後）が onnx-interop 名のいずれかと一致する
+        // ケースを直接判定する。
+        let top_level_package_rename = key == "package" && {
+            let v = value.trim().trim_matches('"').trim_matches('\'');
+            package_rename_names.contains(&v)
+        };
+        let has_package_rename = value_has_package_rename || top_level_package_rename;
+        if !is_target_key && !is_alt_key && !has_package_rename {
+            continue;
+        }
+
+        if current_section != APPROVED_PLAIN_DEPENDENCIES_SECTION {
+            offending.push(format!(
+                "`{current_section}` の行 `{trimmed}` は承認形状外のセクションにある\
+                 （素の `{APPROVED_PLAIN_DEPENDENCIES_SECTION}` 以外は禁止）"
+            ));
+            continue;
+        }
+        if is_alt_key {
+            offending.push(format!(
+                "`{trimmed}` は別名キー `{key}` による onnx-interop 依存（承認名は \
+                 `{ONNX_INTEROP_DEPENDENCY_KEY}` のみ）"
+            ));
+        }
+        if has_package_rename {
+            offending.push(format!(
+                "`{trimmed}` の値に `package` によるクレート名リネームを検出\
+                 （迂回の疑い）"
+            ));
+        }
+        if !is_target_key {
+            continue;
+        }
+
+        plain_dependency_occurrences += 1;
+        if !value.contains("path = \"../onnx-interop\"") {
+            offending.push(format!(
+                "`{trimmed}` に承認済み path `path = \"../onnx-interop\"` がない"
+            ));
+        }
+        match (extract_version_literal(value), &approved_version) {
+            (Some(v), Some(approved)) if &v == approved => {}
+            (Some(v), Some(approved)) => offending.push(format!(
+                "`{trimmed}` の version `{v}` が fandhe-ai-tensor-core の version \
+                 `{approved}` と不一致（バンプ漏れの疑い）"
+            )),
+            (None, _) => offending.push(format!("`{trimmed}` に version 指定がない")),
+            (_, None) => offending.push(
+                "基準となる fandhe-ai-tensor-core の version 行が見つからなかった\
+                 （自己検証の失敗）"
+                    .to_string(),
+            ),
+        }
+        for forbidden_key in FORBIDDEN_DEPENDENCY_VALUE_KEYS {
+            if value_contains_forbidden_key(value, forbidden_key) {
+                offending.push(format!("`{trimmed}` に禁止キー `{forbidden_key}` を検出"));
+            }
+        }
+        if value_contains_forbidden_key(value, "features") {
+            offending.push(format!(
+                "`{trimmed}` に `features` キーを検出（feature フラグなし cfg 方針との不整合）"
+            ));
+        }
+    }
+
+    if plain_dependency_occurrences == 0 {
+        offending.push(format!(
+            "`{APPROVED_PLAIN_DEPENDENCIES_SECTION}` に `{ONNX_INTEROP_DEPENDENCY_KEY}` が見つからない"
+        ));
+    } else if plain_dependency_occurrences > 1 {
+        offending.push(format!(
+            "`{APPROVED_PLAIN_DEPENDENCIES_SECTION}` に `{ONNX_INTEROP_DEPENDENCY_KEY}` が\
+             {plain_dependency_occurrences} 回出現（丁度 1 回のはず）"
+        ));
     }
 
     (offending, saw_known_dependency_line)
 }
 
 #[test]
-fn facade_does_not_depend_on_unpublished_onnx_interop() {
+fn facade_depends_on_onnx_interop_only_in_approved_shape() {
     let cargo_toml_path = facade_crate_root().join("Cargo.toml");
     let content = read_to_string_or_panic(&cargo_toml_path);
 
-    let (offending, saw_known_dependency_line) = scan_onnx_dependency_offenses(&content);
+    let (offending, saw_known_dependency_line) = scan_onnx_dependency_shape(&content);
 
     // 空虚 pass 防止の自己検証: 少なくとも 1 行、既知の依存
     // （`fandhe-ai-tensor-core` 等）を対象セクション内で実際に走査した
@@ -1075,9 +1267,37 @@ fn facade_does_not_depend_on_unpublished_onnx_interop() {
     );
     assert!(
         offending.is_empty(),
-        "facade（crates.io 公開クレート）が facade ラッパー未承認の\
-         onnx-interop へ通常依存している（意図しない公開面拡張の検出。\
-         `docs/facade-onnx-export-exposure-decision.md` 参照）: {offending:?}"
+        "facade（crates.io 公開クレート）の onnx-interop 依存が承認済み形状から\
+         逸脱している（意図しない公開面拡張・取得元差し替えの検出。\
+         `docs/facade-onnx-import-exposure-decision.md` 参照）: {offending:?}"
+    );
+}
+
+/// 承認形状（`path = "../onnx-interop"`・version 併記・素の
+/// `[dependencies]`）の合成入力は違反として検出されないことを確認する
+/// （`facade_depends_on_onnx_interop_only_in_approved_shape` の pass 経路
+/// 自体の回帰固定）。
+#[test]
+fn approved_shape_synthetic_input_is_not_flagged() {
+    let synthetic_cargo_toml = r#"
+[package]
+name = "fandhe-ai"
+
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+fandhe-ai-autodiff = { path = "../autodiff", version = "=0.9.0" }
+fandhe-ai-onnx-interop = { path = "../onnx-interop", version = "=0.9.0" }
+"#;
+
+    let (offending, saw_known_dependency_line) = scan_onnx_dependency_shape(synthetic_cargo_toml);
+
+    assert!(
+        saw_known_dependency_line,
+        "自己検証: 合成入力の [dependencies] セクションが走査されなかった"
+    );
+    assert!(
+        offending.is_empty(),
+        "承認形状の合成入力が誤って違反として検出された: {offending:?}"
     );
 }
 
@@ -1102,8 +1322,7 @@ fandhe-ai-autodiff = { version = "=0.9.0", path = "../autodiff" }
 onnx-interop = { path = "../onnx-interop" }
 "#;
 
-    let (offending, saw_known_dependency_line) =
-        scan_onnx_dependency_offenses(synthetic_cargo_toml);
+    let (offending, saw_known_dependency_line) = scan_onnx_dependency_shape(synthetic_cargo_toml);
 
     assert!(
         saw_known_dependency_line,
@@ -1124,14 +1343,180 @@ onnx-interop = { path = "../onnx-interop" }
     );
 }
 
-/// facade の `src/` が `onnx-interop`（クレート名を Rust 識別子化した
-/// `onnx_interop`）を `use`／型パス等で一切参照していないことを固定する
-/// （上記 Cargo.toml 側ガードの対を成す src 側チェック。#1775）。
+/// 承認済み version（`fandhe-ai-tensor-core` と同一）を外した・ドリフト
+/// させた合成入力が違反として検出されることを確認する（要件 2 の固定）。
 #[test]
-fn facade_sources_do_not_reference_onnx_interop() {
+fn version_drift_or_missing_version_is_flagged() {
+    let missing_version = r#"
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+fandhe-ai-onnx-interop = { path = "../onnx-interop" }
+"#;
+    let (offending, _) = scan_onnx_dependency_shape(missing_version);
+    assert!(
+        offending.iter().any(|e| e.contains("version 指定がない")),
+        "version 指定なしが検出されなかった: {offending:?}"
+    );
+
+    let drifted_version = r#"
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+fandhe-ai-onnx-interop = { path = "../onnx-interop", version = "=0.8.0" }
+"#;
+    let (offending, _) = scan_onnx_dependency_shape(drifted_version);
+    assert!(
+        offending.iter().any(|e| e.contains("不一致")),
+        "version ドリフトが検出されなかった: {offending:?}"
+    );
+}
+
+/// 取得元差し替え（`git = ...`）が違反として検出されることを確認する
+/// （要件 3 の固定）。
+#[test]
+fn git_source_override_is_flagged() {
+    let git_override = r#"
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+fandhe-ai-onnx-interop = { git = "https://example.invalid/onnx-interop", version = "=0.9.0" }
+"#;
+    let (offending, _) = scan_onnx_dependency_shape(git_override);
+    assert!(
+        offending.iter().any(|e| e.contains("禁止キー `git`")),
+        "git 取得元差し替えが検出されなかった: {offending:?}"
+    );
+}
+
+/// `package = "..."` によるクレート名リネーム迂回がダブルクォート・
+/// シングルクォート（TOML リテラル文字列）のいずれでも検出されることを
+/// 確認する（codex-review 指摘 P1・#2024 2 回目レビューの回帰固定。旧
+/// 実装はダブルクォートのみを対象としシングルクォート表記ですり抜け
+/// 可能だった）。
+#[test]
+fn package_rename_bypass_is_flagged_regardless_of_quote_style() {
+    let double_quoted = r#"
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+
+[build-dependencies]
+alias = { package = "fandhe-ai-onnx-interop", path = "../onnx-interop", version = "=0.9.0" }
+"#;
+    let (offending, _) = scan_onnx_dependency_shape(double_quoted);
+    assert!(
+        offending.iter().any(|e| e.contains("package")),
+        "ダブルクォートの package リネームが検出されなかった: {offending:?}"
+    );
+
+    let single_quoted = r#"
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+
+[build-dependencies]
+alias = { package = 'fandhe-ai-onnx-interop', path = '../onnx-interop', version = '=0.9.0' }
+"#;
+    let (offending, _) = scan_onnx_dependency_shape(single_quoted);
+    assert!(
+        offending.iter().any(|e| e.contains("package")),
+        "シングルクォート（TOML リテラル文字列）の package リネームが\
+         検出されなかった: {offending:?}"
+    );
+}
+
+/// テーブル形式の依存宣言下に独立行として現れる `package = "..."`
+/// （インライン table の外側。例: `[build-dependencies.alias]` セクション
+/// 配下の `package = "fandhe-ai-onnx-interop"` 行）による package
+/// リネーム迂回が検出されることを確認する（codex-review 指摘 P1・#2024
+/// の回帰固定。旧実装は `value_has_package_rename_to` がインライン
+/// table〈`{ package = "..." }`〉のみを対象としており、テーブル形式
+/// 配下の独立 `package = "..."` 行は value 側に `=` を含まないため
+/// キー抽出ロジックが素通りしてしまい、承認済み通常依存〈本テストの
+/// `fandhe-ai-tensor-core`〉を残したまま検出をすり抜けられた）。
+#[test]
+fn table_form_package_rename_bypass_is_flagged() {
+    let table_form_rename = r#"
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+
+[build-dependencies.alias]
+package = "fandhe-ai-onnx-interop"
+path = "../onnx-interop"
+version = "=0.9.0"
+"#;
+    let (offending, saw_known_dependency_line) = scan_onnx_dependency_shape(table_form_rename);
+    assert!(
+        saw_known_dependency_line,
+        "自己検証: 合成入力の [dependencies] セクションが走査されなかった"
+    );
+    // `offending` の非空性だけを見ると、この合成入力が承認済み
+    // `fandhe-ai-onnx-interop` の素の `[dependencies]` エントリを含まない
+    // ため「依存が見つからない」という無関係なオフェンスだけでも常に
+    // 非空になり、テーブル形式 package リネーム検出自体が後退しても
+    // 本テストが green のまま残る空虚検査になる（Cursor Bugbot Medium
+    // 指摘・#2024。兄弟テスト
+    // `package_rename_bypass_is_flagged_regardless_of_quote_style` と
+    // 同様にメッセージへ `package` を含むオフェンスの存在を直接検査する）。
+    assert!(
+        offending.iter().any(|e| e.contains("package")),
+        "テーブル形式配下の独立 `package = \"fandhe-ai-onnx-interop\"` 行による \
+         リネーム迂回が検出されなかった（すり抜け再発）: {offending:?}"
+    );
+
+    // シングルクォート（TOML リテラル文字列）でも同様に検出されることを
+    // 確認する（インライン table 側の既存回帰
+    // `package_rename_bypass_is_flagged_regardless_of_quote_style` と
+    // 同じ観点をテーブル形式へ拡張）。
+    let table_form_rename_single_quoted = r#"
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+
+[build-dependencies.alias]
+package = 'fandhe-ai-onnx-interop'
+path = '../onnx-interop'
+version = '=0.9.0'
+"#;
+    let (offending, _) = scan_onnx_dependency_shape(table_form_rename_single_quoted);
+    assert!(
+        offending.iter().any(|e| e.contains("package")),
+        "テーブル形式配下の独立 `package = 'fandhe-ai-onnx-interop'`（シングル\
+         クォート）行によるリネーム迂回が検出されなかった: {offending:?}"
+    );
+}
+
+/// `[dependencies.<name>]` テーブル形式による迂回が違反として検出される
+/// ことを確認する（要件 1 の固定）。
+#[test]
+fn dependencies_table_form_is_flagged() {
+    let table_form = r#"
+[dependencies]
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
+
+[dependencies.fandhe-ai-onnx-interop]
+path = "../onnx-interop"
+version = "=0.9.0"
+"#;
+    let (offending, _) = scan_onnx_dependency_shape(table_form);
+    assert!(
+        offending
+            .iter()
+            .any(|e| e.contains("dependencies.fandhe-ai-onnx-interop")),
+        "[dependencies.<name>] テーブル形式が検出されなかった: {offending:?}"
+    );
+}
+
+/// facade の `src/` のうち `src/interop/` 配下以外が `onnx-interop`
+/// （クレート名を Rust 識別子化した `onnx_interop`）を `use`／型パス等で
+/// 参照していないことを固定する（上記 Cargo.toml 側ガードの対を成す
+/// src 側チェック。#1775 の負ガードを #2017 で承認モジュール限定の正
+/// ガードへ差し替え）。`src/interop/` 自体は onnx-interop 型を扱う唯一の
+/// 承認済みモジュールのため対象外とする。
+#[test]
+fn facade_sources_reference_onnx_interop_only_in_interop_module() {
     let src_dir = facade_crate_root().join("src");
+    let interop_dir = src_dir.join("interop");
     let mut offending = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
+        if path.starts_with(&interop_dir) {
+            return;
+        }
         for line in content.lines() {
             let trimmed = line.trim_start();
             if trimmed.starts_with("//") {
@@ -1153,10 +1538,475 @@ fn facade_sources_do_not_reference_onnx_interop() {
     });
     assert!(
         offending.is_empty(),
-        "facade の src/ が onnx-interop を参照している\
-         （facade は facade ラッパー未承認のクレートへ依存しない設計。\
-         #1775）: {offending:?}"
+        "facade の src/interop/ 以外が onnx-interop を参照している\
+         （onnx-interop 型は承認済みモジュール src/interop/ 配下に閉じ込める設計。\
+         #2017）: {offending:?}"
     );
+}
+
+/// `src/interop/onnx.rs` に承認範囲外の公開アイテム（`pub struct`／
+/// `pub enum`／`pub fn`／`pub trait`／`pub type`／`pub const`／
+/// `pub static`／`pub mod`）が存在しないかを走査する。承認範囲は
+/// `interop::onnx::{OnnxModel, OnnxValue, OnnxError}` と
+/// `OnnxModel::{from_bytes, from_path, run}` の 6 件のみ。
+///
+/// `interop_module_exposes_only_approved_onnx_surface` の従来実装は
+/// 期待する 6 文字列が「存在すること」の contains 検査のみで、
+/// `OnnxModel::to_bytes` のような承認外の追加公開メソッドが増えても
+/// 検出できなかった（codex-review 指摘 P2・#2024）。本関数は逆方向
+/// （ファイル中の全 `pub` 宣言を列挙し、承認リストの外側にあるものを
+/// 検出する）で拒否側のガードを担う。`pub(crate)`／`pub(super)` 等の
+/// 限定可視性は crate 外へ公開されないため対象外。
+///
+/// `pub use`（再エクスポート）も走査対象に含める（codex-review 指摘
+/// P2・#2024 2 回目レビュー。`onnx.rs` の承認範囲は 6 件の型定義のみで
+/// 再エクスポートは 1 件も承認していないため、`kind == "use"` を
+/// `ALLOWED_PUB_ITEMS` に一致し得ない種別として扱うだけで
+/// `pub use fandhe_ai_onnx_interop::...` のような追加を機構的に拒否
+/// できる）。`async`／`unsafe`／`extern` 修飾子付き宣言
+/// （`pub async fn`／`pub unsafe fn` 等）も `pub` 直後の識別子を種別と
+/// 誤認せず読み飛ばしたうえで種別を判定する（Cursor Bugbot Low 指摘・
+/// #2024。`scan_forbidden_pub_items` の同種修飾子スキップと同じ方針）。
+///
+/// `pub fn` については、パラメータ列・戻り値型を含む完全なシグネチャ
+/// （`fn` から本体開始 `{` または宣言終端 `;` まで）を抽出し、
+/// `FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS` のいずれかを含んでいないかも
+/// 検査する。旧実装（`interop_module_exposes_only_approved_onnx_surface`
+/// 内の行単位 `pub` 行検査）は複数行にまたがる戻り値型宣言で内部型
+/// （`ModelProto` 等）の露出を見逃していた（codex-review 指摘 P2・
+/// #2024。本関数へ統合し単一の走査でシグネチャ全体を検査する）。
+fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
+    const ALLOWED_PUB_ITEMS: [(&str, &str); 6] = [
+        ("struct", "OnnxModel"),
+        ("enum", "OnnxValue"),
+        ("enum", "OnnxError"),
+        ("fn", "from_bytes"),
+        ("fn", "from_path"),
+        ("fn", "run"),
+    ];
+    const SCANNED_KINDS: [&str; 9] = [
+        "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
+    ];
+    const QUALIFIER_KEYWORDS: [&str; 3] = ["async", "unsafe", "extern"];
+    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 4] =
+        ["ModelProto", "NodeProto", "prost::", "onnx::graph::Graph"];
+
+    let cleaned = strip_comments_and_literals(original);
+    let len = cleaned.len();
+    let mut offenses = Vec::new();
+    let mut i = 0usize;
+    while i < len {
+        if !is_ident_start(cleaned[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut j = i + 1;
+        while j < len && is_ident_char(cleaned[j]) {
+            j += 1;
+        }
+        let word: String = cleaned[start..j].iter().collect();
+        if word != "pub" {
+            i = j;
+            continue;
+        }
+        let mut k = j;
+        while k < len && cleaned[k].is_whitespace() {
+            k += 1;
+        }
+        if k < len && cleaned[k] == '(' {
+            // `pub(crate)`／`pub(super)` 等。crate 外非公開のため
+            // スキップする（括弧の対応を数えて閉じ括弧まで読み飛ばす）。
+            let mut depth = 1i32;
+            k += 1;
+            while k < len && depth > 0 {
+                match cleaned[k] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        // `async`／`unsafe`／`extern` 修飾子を種別と誤認しないよう
+        // 読み飛ばす（`pub async fn` 等）。
+        loop {
+            if !(k < len && is_ident_start(cleaned[k])) {
+                break;
+            }
+            let qs = k;
+            let mut qe = k + 1;
+            while qe < len && is_ident_char(cleaned[qe]) {
+                qe += 1;
+            }
+            let candidate: String = cleaned[qs..qe].iter().collect();
+            if !QUALIFIER_KEYWORDS.contains(&candidate.as_str()) {
+                break;
+            }
+            k = qe;
+            while k < len && cleaned[k].is_whitespace() {
+                k += 1;
+            }
+            // `extern "C"` のような文字列リテラルはコメント除去段階で
+            // 空白へ置換済みのため追加処理は不要。
+        }
+        if !(k < len && is_ident_start(cleaned[k])) {
+            i = j;
+            continue;
+        }
+        let ks = k;
+        let mut ke = k + 1;
+        while ke < len && is_ident_char(cleaned[ke]) {
+            ke += 1;
+        }
+        let kind: String = cleaned[ks..ke].iter().collect();
+        if !SCANNED_KINDS.contains(&kind.as_str()) {
+            i = j;
+            continue;
+        }
+        if kind == "use" {
+            // `onnx.rs` の承認範囲は型定義 6 件のみで再エクスポートは
+            // 0 件のため、`pub use` は再エクスポート先のパスが
+            // 識別子で始まらない形（`pub use {a, b};` のグループ化・
+            // `pub use ::krate::...;` の先頭 `::` 等）でも取りこぼさず
+            // 無条件にオフェンスとして記録する（advisor 指摘。下の
+            // 識別子抽出ブロックは `use` 以降が識別子で始まる場合しか
+            // 拾えず、その前提が崩れる形を素通りさせてしまうため）。
+            offenses.push(format!(
+                "line {}: `pub use` は onnx.rs で承認されていない再エクスポート",
+                line_at(&cleaned, start)
+            ));
+            i = j;
+            continue;
+        }
+        let mut m = ke;
+        while m < len && cleaned[m].is_whitespace() {
+            m += 1;
+        }
+        if m < len && is_ident_start(cleaned[m]) {
+            let ns = m;
+            let mut ne = m + 1;
+            while ne < len && is_ident_char(cleaned[ne]) {
+                ne += 1;
+            }
+            let name: String = cleaned[ns..ne].iter().collect();
+            let approved = ALLOWED_PUB_ITEMS
+                .iter()
+                .any(|(k2, n2)| *k2 == kind.as_str() && *n2 == name.as_str());
+            if !approved {
+                offenses.push(format!(
+                    "line {}: `pub {kind} {name}` は承認範囲外の公開アイテム",
+                    line_at(&cleaned, start)
+                ));
+            }
+            // `pub fn` は承認済みのものも含め、パラメータ列・戻り値型を
+            // 含む完全なシグネチャを走査し、複数行にまたがる戻り値型
+            // 宣言中の内部型露出（`ModelProto` 等）を検出する。
+            if kind == "fn" {
+                let mut p = ne;
+                while p < len && cleaned[p] != '(' && cleaned[p] != '{' && cleaned[p] != ';' {
+                    p += 1;
+                }
+                if p < len && cleaned[p] == '(' {
+                    let mut depth = 1i32;
+                    p += 1;
+                    while p < len && depth > 0 {
+                        match cleaned[p] {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        p += 1;
+                    }
+                }
+                while p < len && cleaned[p] != '{' && cleaned[p] != ';' {
+                    p += 1;
+                }
+                let signature: String = cleaned[start..p.min(len)].iter().collect();
+                for forbidden in FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS {
+                    if signature.contains(forbidden) {
+                        offenses.push(format!(
+                            "line {}: `pub fn {name}` のシグネチャが内部クレート型 \
+                             `{forbidden}` を含む（複数行の戻り値型宣言を含む）",
+                            line_at(&cleaned, start)
+                        ));
+                    }
+                }
+            }
+        }
+        i = j;
+    }
+    offenses
+}
+
+/// `scan_unapproved_onnx_pub_items` が承認範囲外の `pub fn`（例:
+/// `OnnxModel::to_bytes`）を検出することを確認する（codex-review 指摘
+/// P2・#2024 の回帰固定）。
+#[test]
+fn unapproved_onnx_pub_fn_is_flagged() {
+    let synthetic = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+impl OnnxModel {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, OnnxError> {
+        unimplemented!()
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        unimplemented!()
+    }
+}
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(
+        offenses.iter().any(|e| e.contains("to_bytes")),
+        "承認範囲外の `pub fn to_bytes` が検出されなかった: {offenses:?}"
+    );
+}
+
+/// `scan_unapproved_onnx_pub_items` が `pub use` 再エクスポート（通常の
+/// パス形・グループ化形・先頭 `::` 形のいずれも）を承認範囲外として
+/// 検出することを確認する（codex-review 指摘 P2・#2024 の回帰固定。
+/// `onnx.rs` の承認範囲は型定義 6 件のみで再エクスポートは 0 件のため、
+/// `pub use` はいかなる形でも許容されない）。グループ化形
+/// （`pub use {a, b};`）・先頭 `::` 形（`pub use ::krate::...;`）は
+/// `use` 直後が識別子で始まらないため、名前抽出（`is_ident_start`
+/// 前提）に依存する検出だと素通りしうる（advisor 指摘）。`kind == "use"`
+/// を検出した時点で無条件にオフェンスを記録する fail-closed 実装に
+/// よってこれらも検出できることを併せて固定する。
+#[test]
+fn unapproved_onnx_pub_use_reexport_is_flagged() {
+    let normal_path = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+pub use fandhe_ai_onnx_interop::onnx::proto::encode_model;
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(normal_path);
+    assert!(
+        offenses.iter().any(|e| e.contains("pub use")),
+        "承認範囲外の `pub use` 再エクスポート（通常のパス形）が検出されなかった: \
+         {offenses:?}"
+    );
+
+    let grouped = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+pub use {fandhe_ai_onnx_interop::onnx::proto::encode_model};
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(grouped);
+    assert!(
+        offenses.iter().any(|e| e.contains("pub use")),
+        "承認範囲外の `pub use` 再エクスポート（グループ化形）が検出されなかった: \
+         {offenses:?}"
+    );
+
+    let leading_colon = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+pub use ::fandhe_ai_onnx_interop::onnx::proto::encode_model;
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(leading_colon);
+    assert!(
+        offenses.iter().any(|e| e.contains("pub use")),
+        "承認範囲外の `pub use` 再エクスポート（先頭 `::` 形）が検出されなかった: \
+         {offenses:?}"
+    );
+}
+
+/// `scan_unapproved_onnx_pub_items` が `async`／`unsafe` 修飾子付きの
+/// `pub fn`（`pub async fn`／`pub unsafe fn`）も種別を正しく `fn` と
+/// 判定して承認リストと照合することを確認する（Cursor Bugbot Low
+/// 指摘・#2024。修飾子を種別と誤認してスキップすると、これらの宣言が
+/// 検査を素通りしてしまう）。
+#[test]
+fn unapproved_onnx_pub_fn_with_qualifiers_is_flagged() {
+    let synthetic = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+impl OnnxModel {
+    pub async fn to_bytes_async(&self) -> Vec<u8> {
+        unimplemented!()
+    }
+
+    pub unsafe fn to_bytes_unsafe(&self) -> Vec<u8> {
+        unimplemented!()
+    }
+}
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(
+        offenses.iter().any(|e| e.contains("to_bytes_async")),
+        "承認範囲外の `pub async fn` が検出されなかった: {offenses:?}"
+    );
+    assert!(
+        offenses.iter().any(|e| e.contains("to_bytes_unsafe")),
+        "承認範囲外の `pub unsafe fn` が検出されなかった: {offenses:?}"
+    );
+}
+
+/// `scan_unapproved_onnx_pub_items` が複数行にまたがる `pub fn` の
+/// 戻り値型宣言中の内部クレート型露出（`ModelProto` 等）を検出する
+/// ことを確認する（codex-review 指摘 P2・#2024 3 回目レビュー。旧
+/// 実装の行単位 `pub` 行検査は戻り値型が改行を挟むと見逃していた）。
+#[test]
+fn multiline_return_type_internal_leak_is_flagged() {
+    let synthetic = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+impl OnnxModel {
+    pub fn from_bytes(
+        bytes: &[u8],
+    ) -> Result<
+        ModelProto,
+        OnnxError,
+    > {
+        unimplemented!()
+    }
+}
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(
+        offenses
+            .iter()
+            .any(|e| e.contains("from_bytes") && e.contains("ModelProto")),
+        "複数行の戻り値型に含まれる内部型 `ModelProto` の露出が検出されなかった: \
+         {offenses:?}"
+    );
+}
+
+/// `src/interop/` の公開面が承認範囲（`interop::onnx::{OnnxModel,
+/// OnnxValue, OnnxError}` と `OnnxModel::{from_bytes, from_path, run}`）
+/// のみであることを固定する。`prost`・`onnx-interop` の内部型
+/// （`ModelProto`／`NodeProto`／`Graph` 等）が `pub` シグネチャへ現れない
+/// ことも併せて検査する（薄いラッパー原則の機械的裏付け。#2017）。
+#[test]
+fn interop_module_exposes_only_approved_onnx_surface() {
+    let interop_dir = facade_crate_root().join("src").join("interop");
+
+    let mod_rs_content = read_to_string_or_panic(&interop_dir.join("mod.rs"));
+    let mod_offending = scan_forbidden_pub_items(&mod_rs_content);
+    // `mod.rs` は `pub mod onnx;` のみを許容する（`scan_forbidden_pub_items`
+    // は `pub use` 以外の `pub` アイテムを検出するため、`pub mod onnx;` も
+    // 検出対象になる。したがってここでは「1 件だけ・その内容が
+    // `pub mod onnx`」であることを検査する）。
+    assert_eq!(
+        mod_offending.len(),
+        1,
+        "src/interop/mod.rs の公開アイテムが想定外（`pub mod onnx;` のみのはず）: \
+         {mod_offending:?}"
+    );
+    assert!(
+        mod_offending[0].contains("mod"),
+        "src/interop/mod.rs の唯一の公開アイテムが `pub mod` ではない: {mod_offending:?}"
+    );
+    // `scan_forbidden_pub_items` は `pub use` を意図的に対象外とする
+    // （他ガード箇所での「再エクスポートは許容する」前提のため）が、
+    // `src/interop/mod.rs` は `pub mod onnx;` のみを承認しており
+    // 再エクスポートは 1 件も承認していない。`pub use` が別途紛れ込んで
+    // いないかをここで直接検査する（codex-review 指摘 P2・#2024
+    // 「mod.rs 側も同様に pub use が検査対象外」を解消）。
+    let mod_rs_pub_use_offending: Vec<&str> = mod_rs_content
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("pub use"))
+        .collect();
+    assert!(
+        mod_rs_pub_use_offending.is_empty(),
+        "src/interop/mod.rs に承認範囲外の `pub use` 再エクスポートがある: \
+         {mod_rs_pub_use_offending:?}"
+    );
+
+    let onnx_rs_path = interop_dir.join("onnx.rs");
+    let onnx_rs_content = read_to_string_or_panic(&onnx_rs_path);
+
+    // 内部クレートの型（`prost`・`ModelProto`・`NodeProto`・`Graph` 等）が
+    // `pub` シグネチャへ露出していないことを、`pub` を含む行に限定して
+    // 検査する（doc comment・private ヘルパ内の同名参照は対象外）。
+    let mut leaked_internal_types = Vec::new();
+    for line in onnx_rs_content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with("//!") || trimmed.starts_with("///") {
+            continue;
+        }
+        if !trimmed.starts_with("pub ") && !trimmed.contains(" pub ") {
+            continue;
+        }
+        for forbidden in ["ModelProto", "NodeProto", "prost::", "onnx::graph::Graph"] {
+            if line.contains(forbidden) {
+                leaked_internal_types.push(format!("`{trimmed}` が {forbidden} を含む"));
+            }
+        }
+    }
+    assert!(
+        leaked_internal_types.is_empty(),
+        "src/interop/onnx.rs の pub シグネチャに内部クレート型が露出している: \
+         {leaked_internal_types:?}"
+    );
+
+    // 公開型・メソッド名が期待どおり存在することの空虚 pass 防止。
+    for expected in [
+        "pub struct OnnxModel",
+        "pub enum OnnxValue",
+        "pub enum OnnxError",
+        "pub fn from_bytes",
+        "pub fn from_path",
+        "pub fn run",
+    ] {
+        assert!(
+            onnx_rs_content.contains(expected),
+            "src/interop/onnx.rs に期待する公開シグネチャ `{expected}` が見つからない"
+        );
+    }
+
+    // 承認範囲外の追加公開アイテム（例: `pub fn to_bytes` 等）が
+    // 紛れ込んでいないことを網羅的に固定する（codex-review 指摘 P2・
+    // #2024。上記の contains 検査は期待シグネチャの存在確認のみで、
+    // 承認外の追加 pub アイテムを拒否できていなかった）。
+    let unapproved_pub_items = scan_unapproved_onnx_pub_items(&onnx_rs_content);
+    assert!(
+        unapproved_pub_items.is_empty(),
+        "src/interop/onnx.rs に承認範囲外の公開アイテムがある（薄いラッパー原則\
+         違反の疑い。docs/facade-onnx-import-exposure-decision.md §12 参照）: \
+         {unapproved_pub_items:?}"
+    );
+}
+
+/// `fandhe_ai::interop::onnx::{OnnxModel, OnnxValue, OnnxError}` が
+/// facade から到達可能であること・`OnnxError` が `#[non_exhaustive]` の
+/// ためワイルドカード腕併用で `match` できることをコンパイル時に固定
+/// する（`cast_types_are_reachable_via_facade` と同型。#2017）。
+#[test]
+fn onnx_import_types_are_reachable_via_facade() {
+    use fandhe_ai::interop::onnx::{OnnxError, OnnxModel, OnnxValue};
+
+    let err = OnnxModel::from_bytes(&[0x08u8, 0xffu8]).unwrap_err();
+    let _label = match &err {
+        OnnxError::Io(_) => "io",
+        OnnxError::Decode { .. } => "decode",
+        OnnxError::UnsupportedDataType { .. } => "unsupported_data_type",
+        OnnxError::UnsupportedOp { .. } => "unsupported_op",
+        OnnxError::MissingFeed { .. } => "missing_feed",
+        OnnxError::UnknownFeed { .. } => "unknown_feed",
+        OnnxError::InvalidModel { .. } => "invalid_model",
+        OnnxError::Execution { .. } => "execution",
+        _ => "unknown",
+    };
+
+    let _value: Option<OnnxValue> = None;
 }
 
 /// `fandhe_ai::{CastDType, CastElement}`（イシュー #1750）が facade から

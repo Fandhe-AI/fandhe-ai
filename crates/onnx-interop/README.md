@@ -10,10 +10,10 @@
 （composition root・compat 公開面）であり、本クレートはその内部実装として
 crates.io にも公開されています（依存解決のため）。
 
-現時点では `fandhe-ai` から本クレートの ONNX import／export・safetensors
-save／load への再エクスポートは提供されていません（facade 公開面の拡張は
-別途ユーザー承認が必要な段階 0 のまま。
-[`docs/facade-onnx-import-exposure-decision.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/facade-onnx-import-exposure-decision.md)・
+ONNX import は `fandhe-ai::interop::onnx`（`OnnxModel`／`OnnxValue`／
+`OnnxError`）として `fandhe-ai` から公開済みです（イシュー #2017）。
+ONNX export・safetensors save／load への再エクスポートは引き続き提供
+されていません（facade 公開面の拡張は別途ユーザー承認が必要な段階 0 のまま。
 [`docs/facade-onnx-export-exposure-decision.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/facade-onnx-export-exposure-decision.md)・
 [`docs/facade-safetensors-exposure-decision.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/facade-safetensors-exposure-decision.md)
 参照）。

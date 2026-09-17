@@ -137,3 +137,28 @@ import 側 doc の案 A〜E（`docs/facade-onnx-import-exposure-decision.md` 4 �
 `ExportNode` 橋渡しの配置）は未承認のまま残り、facade 公開面は段階 0 を
 継続する（唯一のコード変更である `crates/facade/tests/api_surface.rs` の
 段階 0 固定 guard テスト 2 件は無変更）。
+
+## 13. 追補（イシュー #2017・2026-09-17）: import 側の facade 公開に伴う事実更新
+
+§2 の事実表（「`facade` の `src/`・`Cargo.toml` は `onnx-interop` を一切
+参照しない」行）は **ONNX import の facade 公開（#2017）により事実が
+変わった**。facade は `fandhe_ai::interop::onnx::{OnnxModel, OnnxValue,
+OnnxError}`（import 専用）のために `onnx-interop` への通常依存を正式に
+持つようになった。旧 guard テスト名（`facade_does_not_depend_on_
+unpublished_onnx_interop`／`facade_sources_do_not_reference_onnx_
+interop`）は「承認済み依存形状の検査」（`facade_depends_on_onnx_
+interop_only_in_approved_shape`／`facade_sources_reference_onnx_
+interop_only_in_interop_module`）へ差し替えられた（詳細は
+`docs/facade-onnx-import-exposure-decision.md` §12.4）。
+
+**本 issue（ONNX export）の判断自体は不変**: export（`OnnxModel::
+to_bytes`／`to_path` 相当）は #2017 のスコープ外であり、`src/interop/
+onnx.rs` には export 側の公開シグネチャを一切追加していない。
+`crates/facade/tests/api_surface.rs::interop_module_exposes_only_
+approved_onnx_surface` が `src/interop/onnx.rs` の `pub` シグネチャを
+`OnnxModel`／`OnnxValue`／`OnnxError`／`from_bytes`／`from_path`／`run`
+に限定して検査するが、export 用メソッド（`to_bytes` 等）の追加自体を
+拒否する専用ガードは本 issue のスコープでは新設していない——export
+実装は依然として §10 承認事項 2・3（facade ラッパー API 形状・
+`Sequential`／`nn` -> `ExportNode` 橋渡しの配置）のユーザー承認が前提の
+まま、後続イシュー（#2018）へ引き継ぐ。

@@ -19,6 +19,12 @@
 //!   インタープリタ）。spec 根拠: `docs/spec/05-tasks.md` TASK-7.2a〜7.2b、REQ-7。
 //!   [`onnx::interp::run`] は `onnx::graph::build_graph` が構築した `Graph` を
 //!   `op_type` 名で [`ops`] へディスパッチして実行する（TASK-7.2b・#78）。
+//!   ONNX import（decode→build_graph→run）は
+//!   `fandhe-ai::interop::onnx`（`OnnxModel`／`OnnxValue`／`OnnxError`）として
+//!   facade から公開済み（イシュー #2017。`docs/facade-onnx-import-exposure-
+//!   decision.md`）。[`onnx::proto::decode_model`]／[`onnx::proto::encode_model`]
+//!   は facade が本クレートの `prost` 依存を直接持たずに ONNX バイト列を
+//!   復号・書き出しできるようにする薄い入口（同 issue）。
 //! - [`ops`]（TASK-7.2c・#79 / TASK-7.3a・#82 / TASK-7.3b・#83 / TASK-7.3c・#84 /
 //!   TASK-7.3d・#85）: ONNX オペを `tensor-core::Tensor<f32>` 上の純粋関数として提供する。
 //!   8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／`Slice`）に

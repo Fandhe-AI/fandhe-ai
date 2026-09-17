@@ -125,6 +125,13 @@ pub mod data;
 /// 使う（詳細は [`nn::rnn`] モジュール doc 参照）。
 pub mod nn;
 
+/// 相互運用（interop）公開面の入口（イシュー #2017）。現時点は
+/// [`interop::onnx`]（ONNX import。`OnnxModel`／`OnnxValue`／`OnnxError`）
+/// のみを提供する。ONNX export・safetensors save／load は別途ユーザー
+/// 承認が必要な段階 0 のまま（`docs/facade-onnx-export-exposure-
+/// decision.md`・`docs/facade-safetensors-exposure-decision.md`）。
+pub mod interop;
+
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
 // （`Tape::new_with_ops` という BackendOps 注入経路が到達可能になるため。
