@@ -248,7 +248,7 @@ Phase 3（親 #1573）の各 issue へ対応付ける。
 | 高階微分 | #1622（設計記録。`docs/autodiff-higher-order-grad-decision.md`）。#1941 で前提 issue（#1593／#1597／#1599／#1601／#1612）完了後の HEAD へ設計記録を更新し、主案 A-2（子テープ方式）の `create_graph` API 契約案・対象 Op 分類（`Op` enum 69 variant の対象／非対象／保留区分）を確定。#1942 で elementwise／sum 系 Op（`Leaf`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`・`Sigmoid`・`Sum`・`Mean`・`Reshape`・`BroadcastTo` の 11 variant）を対象に `Tape::backward_create_graph`（内部クレート `fandhe_ai_autodiff` 限定。`Op::supports_create_graph()` 網羅 match で対象 Op を判定）を実装し、有限差分突合・閉形式突合で正しさを検証済み（`crates/autodiff/tests/create_graph.rs`）。facade 公開（同 doc §10 承認事項 5）は未承認のまま不実施。#1943 で `MatMul`（**rank 2 × rank 2 限定**。rank≥3 は `validate_ancestors` が入口で型付き `Err` 事前拒否）を対象へ追加し（累計 12 variant）、`nn::Linear`（`MatMul`→`Add` bias）経由の 2 階微分・小型 MLP（`Linear`→`tanh`→`Linear`）の HVP（ヘッセ・ベクトル積。有限差分の方向微分と突合）を検証済み。resident グラフ（`DeviceParamStore`）は素の `Tape::backward` より前に構造的検査で型付き `Err(Backward)` を返す（誤誘導的な `InvalidArgument` を避ける）よう順序を調整。`ScalarUnary`／`ScalarBinary`・`Transpose` 等の残る対象 Op は後続イシューへ引き継ぎ。CUDA／Metal 実機実測は未実施のまま Mac／GB10 セッションへ申し送り |
 | custom autograd Function | #1623（設計記録。`docs/autodiff-custom-function-decision.md`）。#1945 で trait 境界（`CustomFunction`。案 B）を HEAD 基準で確定済み（同 doc §12。内部クレート `fandhe_ai_autodiff` 限定の承認事項 (a) と facade 公開面 (b・未承認) を分離）。実装は #1946 が対象 |
 | activation checkpointing | #1624（実装済み。`Var::checkpoint_from`／内部クレート `Tape::checkpoint`。対象 Op は `MatMul`／`Sigmoid`／`Sum`／`Max`・view 系〈`Reshape`／`Transpose`〉限定〈`Op::is_checkpoint_eligible()`〉。facade `Tape` passthrough は承認未取得のため未追加——facade からは既存の `Var` 再エクスポート経由〈`Var::checkpoint_from`〉で到達可能。`docs/autodiff-checkpoint-design.md`） |
-| AMP | #1625（#1721 でコア関数を実装・#1722 で facade 公開済み。`fandhe_ai::optim::{GradScaler, GradScalerConfig, UnscaleResult, scale_loss, scale_grads, unscale_grads, has_non_finite}` の純再エクスポート〈案 A〉。ホスト `Tensor<f32>` 勾配限定・真の混合精度〈f16 forward／f32 master weight〉は `docs/backend-dtype-dispatch-design.md` §8 のとおり対象外・デバイス常駐更新経路〈`DeviceParamStore`〉への unscale／非有限検出は未結線。承認記録は #1625 コメント〈2026-09-12〉） |
+| AMP | #1625（#1721 でコア関数を実装・#1722 で facade 公開済み。`fandhe_ai::optim::{GradScaler, GradScalerConfig, UnscaleResult, scale_loss, scale_grads, unscale_grads, has_non_finite}` の純再エクスポート〈案 A〉。ホスト `Tensor<f32>` 勾配限定・デバイス常駐更新経路〈`DeviceParamStore`〉への unscale／非有限検出は未結線。承認記録は #1625 コメント〈2026-09-12〉。#1961 で `compat::Sequential::compile_with_amp`〈Linear 限定低精度 forward〈#1960〉＋`GradScaler` を `fit` から opt-in〉を実装し、真の混合精度〈f16／bf16 forward・f32 master weight・backward は常に f32〉を統合済み——`docs/backend-dtype-dispatch-design.md` §8 の「`Var`／`Tape` dtype 一般化」自体は依然として対象外だが、Linear 層限定の低精度 forward という部分的な適用は本 issue で解消した。facade 新規公開面は `compat::{AmpConfig, AmpDType}`・`Sequential::compile_with_amp`／`amp_loss_scale`（`ScalarDType` 自体は非公開のまま・`AmpDType` が facade ローカルの薄い写像）。MNIST 規模〈784→256→10・batch 64・20 step〉での f32 比 REQ-2 統一複合判定は F16／Bf16 とも `fail_count=0` で達成。`docs/autodiff-low-precision-linear-design.md` §7・`docs/compat-fit-evaluate-design.md` §4 参照） |
 | f64／f16／bf16 演算 | #1626 |
 | **量子化** | #1627（除外事項「分散学習・量子化の網羅対応」〈Won't・条件付き〉に従属。実装着手は同除外事項の格上げ条件充足と Phase 4 要件見直しでの新 REQ 追加のユーザー承認まで不可。5 節参照） |
 | **複数 GPU／DDP** | #1628（同上に従属。設計判断の記録〈docs のみ〉に留め、実装・通信層の依存追加は行わない。5 節参照） |
@@ -573,6 +573,25 @@ CUDA／Metal 実機での facade parity は未実測のまま Mac／GB10 セッ�
 `docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・
 CUDA〈GB10〉は引き続き未実測（`crates/facade/tests/compat_sequential_layers_backend_
 parity.rs`）。
+
+**適用記録（イシュー #1961・親 #1958）**: `compat::{AmpConfig, AmpDType}`・
+`Sequential::compile_with_amp`／`amp_loss_scale` の追加は、AMP（#1625）・
+`compile()`／`fit()`（#1618）がいずれも本節 2 段落目「Tier 1／Tier 2 に
+列挙済みの機能の実装は本節の再適用を要しない（1 節の各 issue の承認
+事項に従う）」に該当するため §5 の再適用は不要——#1625・#1618 いずれも
+2026-09-12 のユーザー承認コメントで「facade 公開面（`fandhe_ai`／
+`compat`）の §5 手続きに基づく範囲拡張」を承認済み（範囲外は
+tolerance／baseline 変更・依存追加・unsafe 監査省略のみ）。#1961 自体・
+兄弟 #1959（PR #2002）にはこの根拠に基づく個別の承認コメントは無いが、
+#1961 の概要が「`compat::Sequential::fit` からの opt-in」を成果物として
+明示していることを根拠とした（同一ランで承認前提と判断された他イシュー
+と異なり親から切り離されていない）。facade 新規公開面は `AmpConfig`／
+`AmpDType`（`#[non_exhaustive]`）・`Sequential::compile_with_amp`／
+`amp_loss_scale` の 4 件のみ（目視確認）。`ScalarDType` 自体は facade へ
+再エクスポートしていない（`AmpDType::to_scalar_dtype` が内部でのみ
+`ScalarDType` へ写像する。`docs/autodiff-low-precision-linear-design.md`
+§6 の非公開方針〈#1939 未承認〉は維持）。実装記録は同 doc §7・
+`docs/compat-fit-evaluate-design.md` §4 を参照。
 
 ## 6. 出典一覧
 
