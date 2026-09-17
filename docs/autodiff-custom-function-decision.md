@@ -252,8 +252,16 @@ pub trait CustomFunction: Send + Sync + 'static {
     /// host `Tensor<f32>` のみを受け渡す（`BackendOps` 非露出。REQ-12 §7 読み (i)）。
     fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError>;
 
-    /// 戻り値は `inputs` と同じ長さ。`None` は「この入力に寄与しない」を表す
-    /// （`requires_grad == false` の入力を無駄に計算しないための最適化枠）。
+    /// 戻り値は `inputs` と同じ長さ。`requires_grad` は `inputs` と同じ長さで、
+    /// 各要素は呼び出し元（`grad::vjp`）が該当入力について判断済みの要否
+    /// （`TapeNode::requires_grad` 前方伝播の結果。
+    /// `docs/autodiff-nograd-leaf-dinput-skip-decision.md`）を渡す。
+    /// `requires_grad[i] == false` の入力は計算を省略し `None` を返してよい
+    /// （`Some` を返すこと自体は禁止しない。無駄な計算を避けるための情報提供であり、
+    /// `backward_impl` 側は `requires_grad[i] == false` の要素を受け取った場合
+    /// `Some`／`None` のいずれでも安全に破棄する）。`requires_grad[i] == true` の
+    /// 入力に対して `None` を返した場合は fail-closed で `Err` とする
+    /// （勾配欠落をユーザー実装の不備として検出するため）。
     /// `Some` の要素は対応する入力と同じ shape でなければならず、不一致は
     /// fail-closed で拒否する。
     fn backward(
@@ -261,6 +269,7 @@ pub trait CustomFunction: Send + Sync + 'static {
         inputs: &[&Tensor<f32>],
         out_value: &Tensor<f32>,
         upstream: &Tensor<f32>,
+        requires_grad: &[bool],
     ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError>;
 }
 ```
@@ -273,12 +282,12 @@ pub trait CustomFunction: Send + Sync + 'static {
 | `'static` 境界 | trait 自体に `'static` を課す | `&Tape` や `Var<'t>` を捕捉した実装を型で弾き、backward からの Tape 再入（§3 項 7・§12.2 の `RefCell` panic 契約）を構造的に不可能にする |
 | `Op: Debug` との整合 | `Op` 全体の `#[derive(Debug)]` は維持せず、`Op::Custom` 腕のみ `.name()` を出力する手書き `Debug` 実装（または `Op` 全体を手書き `Debug` へ切替え）に置き換える | ユーザー実装に `Debug` を強制しない。`Arc<dyn CustomFunction>` 自体は `Debug` を実装できないため `derive` のままでは追加不可 |
 | メソッド集合 | `name`／`output_shape`／`forward`／`backward` の 4 メソッド | 既存案 B（§4 表）を踏襲。`ctx.save_for_backward` 相当は持たず、backward は `inputs`＋`output`＋`upstream` のみから計算する（tape 側の追加状態を持たせない） |
-| backward の戻り値 | `Vec<Option<Tensor<f32>>>`（長さ・shape 不一致は `Err`） | `backward_impl` は `requires_grad == false` の入力への寄与を捨てる契約（`docs/autodiff-nograd-leaf-dinput-skip-decision.md`）と整合させ、無駄な確保を避ける |
+| backward の戻り値 | `Vec<Option<Tensor<f32>>>`（長さ・shape 不一致は `Err`）。`backward` 自身にも `requires_grad: &[bool]`（`inputs` と同じ長さ）を渡す | 当初案（`requires_grad` を渡さない）では `backward_impl` の寄与破棄が VJP 実行後に起きるため、ユーザー実装はどの入力で計算を省略してよいか判断できず `None` 枠が無駄な確保回避の役に立たなかった（codex-review 指摘。§12.2 で棚卸し済みの `TapeNode::requires_grad`／`for_each_input` を `grad::vjp` 側で入力ごとに解決し `backward` へ渡すことで解消）。`requires_grad[i] == false` の入力への寄与は `backward_impl` 側で改めて捨てる契約（`docs/autodiff-nograd-leaf-dinput-skip-decision.md`）と整合させる。`requires_grad[i] == true` に対する `None` は fail-closed で拒否し、勾配欠落の実装不備を早期検出する |
 | 純関数・冪等契約 | `forward`／`backward` は決定的・副作用なしとする。同一ノードの `backward` は複数回呼ばれ得る | `Tape::backward_accumulate`（#1749）・`retain_graph` 常時保持契約により VJP が複数回走るため |
 | エラー型 | 4 メソッドとも `AutodiffError` を返す（新規エラー型は起こさない） | facade が既に再エクスポート済み（§12.2）・`#[non_exhaustive]` のため将来 variant 追加も非破壊 |
-| 入口 | `Var::custom(func: Arc<dyn CustomFunction>, inputs: &[&Var<'t>]) -> Result<Var<'t>, AutodiffError>`（autodiff 内部 `pub fn`） | 既存 `Var` 演算と同型の入口。全入力の `tape_id` 一致を検査し不一致は `TapeMismatch` |
+| 入口 | `Tape::custom(&self, func: Arc<dyn CustomFunction>, inputs: &[&Var<'t>]) -> Result<Var<'t>, AutodiffError>`（`fandhe_ai_autodiff::Tape` の inherent method。autodiff 内部 `pub fn`） | `Var` ではなく `Tape` に置く。facade は `pub use fandhe_ai_autodiff::Var` で `Var` 型そのものを再エクスポートしている（`crates/facade/src/lib.rs:134`）ため、`Var` に `pub fn custom` を生やすと facade 非公開の主張（§12.5(a)/(b) の分離）に反し `fandhe_ai::Var::custom(...)` として自動的に到達可能になってしまう（codex-review 指摘）。一方 `fandhe_ai_autodiff::Tape` 自体は facade の `api_surface.rs` 機械検査（`facade_does_not_reexport_tape_or_backend_ops`）で再エクスポート禁止が固定されており、facade 独自の `pub struct Tape(pub(crate) fandhe_ai_autodiff::Tape)`（`crates/facade/src/lib.rs:206`）が転送実装するメソッドのみが facade から呼び出し可能（`Tape::var_no_grad` の前例と同型。`crates/facade/src/lib.rs:236`）。よって内部クレート限定の `Tape::custom` を追加しても、facade 側 `Tape` に対応する転送メソッドを追加しない限り facade からは到達不能。全入力の `tape_id` 一致を検査し不一致は `TapeMismatch` |
 | forward 時の評価 | 入力を実体化してから `forward` へ渡し、常に `push_eager`（融合境界） | §3 項 2（`docs/fusion-graph-design.md` §3.3）を維持。`output_shape` の宣言と実出力 shape の不一致は fail-closed |
-| 各網羅 match の腕（§12.2 で棚卸し） | `is_lazy_elementwise` = false／`is_view` = false／`is_checkpoint_eligible` = **false**（ユーザーコードの再実行結果が bit 同一である保証がないため安全側に倒す。checkpoint 区間内で解放されない）／`for_each_input` = `inputs` 全件を yield（`requires_grad`／poison 伝播が自動的に乗る）／`grad::vjp` = `inputs`・`out_value` を実体化し `func.backward` を呼んで検証後に `(NodeId, Tensor)` へ変換 | 既存機構（`docs/autodiff-checkpoint-design.md`・`docs/autodiff-nograd-leaf-dinput-skip-decision.md`）にそのまま乗せる |
+| 各網羅 match の腕（§12.2 で棚卸し） | `is_lazy_elementwise` = false／`is_view` = false／`is_checkpoint_eligible` = **false**（ユーザーコードの再実行結果が bit 同一である保証がないため安全側に倒す。checkpoint 区間内で解放されない）／`for_each_input` = `inputs` 全件を yield（`requires_grad`／poison 伝播が自動的に乗る）／`grad::vjp` = `inputs`・`out_value` を実体化し、各入力の `TapeNode::requires_grad`（`for_each_input` と同じ情報源）から `requires_grad: &[bool]` を組み立てて `func.backward` へ渡し、`requires_grad[i] == true` かつ `None` の要素があれば `Err` として拒否したうえで `(NodeId, Tensor)` へ変換 | 既存機構（`docs/autodiff-checkpoint-design.md`・`docs/autodiff-nograd-leaf-dinput-skip-decision.md`）にそのまま乗せる |
 | resident／reuse 経路との相互作用 | `Op::ResidentLeaf` 由来（ホスト値なし）の入力が混ざる場合は型付き `Err` で拒否する（`materialize_fallible` の既存契約に落とし込む） | §3 項 6・§9 のスコープ外整理を踏襲。GPU tape 上でも host 実行とし、性能は保証しない |
 | 数値契約 | §6 を踏襲（REQ-2 判定対象外・同一ビット入力／同一 `Tape` 状態／決定的実装に限り host 実行で bit 同一） | 変更なし |
 
@@ -288,11 +297,16 @@ pub trait CustomFunction: Send + Sync + 'static {
   - `Op::Custom` variant の追加・`Op` の `Debug` 実装変更
   - `pub trait CustomFunction`（autodiff クレート内 pub。crates.io 公開クレートの一部になる点は
     facade 非公開でも変わらないため、この意味で「内部だが公開物」であることを明記する）
-  - `Var::custom` 入口（autodiff 内部 pub）
+  - `Tape::custom` 入口（`fandhe_ai_autodiff::Tape` の inherent method。autodiff 内部 pub。
+    §12.4「入口」行の理由により `Var::custom` ではなく `Tape::custom` とし、facade が
+    `Var` 型を再エクスポート済み（§12.4 出典）でも facade 非公開のまま保てることを
+    設計上担保する）
   - `AutodiffError` への新規 variant 追加（`#[non_exhaustive]` のため非破壊。要否は実装時に判断）
 - (b) **facade 公開面**（**未承認**。#1946 の対象外とし別途承認を得る）:
   - `fandhe_ai::CustomFunction` の再エクスポート
-  - facade `Tape`／`Var` 経由の `custom(...)` 入口
+  - facade `Tape` への `custom(...)` 転送メソッド追加（facade 独自 `struct Tape` が
+    (a) の `fandhe_ai_autodiff::Tape::custom` を呼び出す薄いラッパー。追加するまでは
+    facade から到達不能）
   - `api_surface.rs` の検査拡張（新規 trait が `BackendOps` を引数に取らないことの機械検査）
 - (c) REQ-12 の読み（(i) を採る）の確認。§7 の推奨方針は不変。spec 側への注記提案の要否は
   未承認のまま（`docs/spec/` は本 PR・#1946 とも編集しない）
@@ -310,8 +324,11 @@ pub trait CustomFunction: Send + Sync + 'static {
 
 - `Tape::backward_accumulate`（#1749）で同一 `Op::Custom` ノードの `backward` を 2 回呼んだ場合の
   勾配蓄積の整合
-- `requires_grad == false` の入力に対して `backward` が `None` を返すケースの正しい取り扱い
+- `backward` に渡す `requires_grad: &[bool]` が `TapeNode::requires_grad` の実値と一致すること、
+  および `requires_grad[i] == false` の入力に対して `backward` が `None` を返すケースの正しい取り扱い
   （§6 の「resident 経路混在時の型付きエラー」に加える）
+- `requires_grad[i] == true` の入力に対して `backward` が `None` を返した場合に fail-closed で
+  `Err` となること（勾配欠落の実装不備検出）
 - checkpoint 区間内に `Op::Custom` が混在した場合、`is_checkpoint_eligible = false` により
   当該ノードが再計算対象から除外され続けることの確認
 - `for_each_input` 経由の poison 伝播（`docs/autodiff-checkpoint-design.md` §3.5）が
