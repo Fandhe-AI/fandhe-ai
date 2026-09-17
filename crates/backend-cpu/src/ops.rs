@@ -637,6 +637,22 @@ impl BackendOps for CpuBackendOps {
             .downcast_handle_mut::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
 
+        // `#[non_exhaustive]` の `AdamStepKind` は将来 variant が増えうる
+        // ため、未知の variant は fail-closed に拒否する（`.claude/rules/
+        // security.md` A08）。ループ本体ではなくここで 1 回だけ検査する
+        // ことで、未知 variant 検出時に `param`／`m`／`v` が部分的に
+        // 更新された状態のまま `Err` を返すことを構造的に防ぐ（他の
+        // 早期 return〈shape／device 不一致〉と同じ「どの要素も更新前」
+        // 契約を維持する）。
+        match config.kind {
+            AdamStepKind::Coupled | AdamStepKind::Decoupled => {}
+            _ => {
+                return Err(BackendError::Unsupported(
+                    "adam_step_device: unknown AdamStepKind variant".into(),
+                ));
+            }
+        }
+
         for j in 0..param_handle.data.len() {
             let p = param_handle.data[j];
             let g = grad_handle.data[j];
@@ -645,20 +661,13 @@ impl BackendOps for CpuBackendOps {
             // decay 項の演算自体を skip する（`docs/perf` の
             // bit 一致契約と同じ理由。`AdamStepConfig` doc 参照）。
             // `AdamW::step`（decoupled）: `g_eff` は常に生の `g`。
-            // `#[non_exhaustive]` の `AdamStepKind` は将来 variant が
-            // 増えうるため、未知の variant は fail-closed に拒否する
-            // （`.claude/rules/security.md` A08）。
             let g_eff = match config.kind {
                 AdamStepKind::Coupled if config.weight_decay != 0.0 => {
                     f32::mul_add(config.weight_decay, p, g)
                 }
                 AdamStepKind::Coupled => g,
                 AdamStepKind::Decoupled => g,
-                _ => {
-                    return Err(BackendError::Unsupported(
-                        "adam_step_device: unknown AdamStepKind variant".into(),
-                    ));
-                }
+                _ => unreachable!("AdamStepKind variant validated before the loop"),
             };
             // `Adam::step` は decay 適用前の `p` をそのまま使う
             // （coupled 方式は勾配側へ decay を織り込むため）。
@@ -667,11 +676,7 @@ impl BackendOps for CpuBackendOps {
             let p_eff = match config.kind {
                 AdamStepKind::Coupled => p,
                 AdamStepKind::Decoupled => p * config.decay_factor,
-                _ => {
-                    return Err(BackendError::Unsupported(
-                        "adam_step_device: unknown AdamStepKind variant".into(),
-                    ));
-                }
+                _ => unreachable!("AdamStepKind variant validated before the loop"),
             };
 
             let m_new = f32::mul_add(config.beta1, m_handle.data[j], (1.0 - config.beta1) * g_eff);
