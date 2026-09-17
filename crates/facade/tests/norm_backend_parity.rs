@@ -312,3 +312,104 @@ fn cuda_layer_norm_forward_matches_cpu() {
         cpu_out.as_slice().expect("contiguous"),
     );
 }
+
+/// `matmul → rms_norm → mse_loss` backward（`dW`）を同一グラフで CPU
+/// tape・CUDA tape の双方で backward し、`BackendOps::rmsnorm_backward`
+/// の CUDA 実装（イシュー #1950。`crate::norm_backward::
+/// CudaNormBackward`）が返す `dw` を CPU 経路（ホスト VJP）と REQ-2
+/// 統一複合判定で突き合わせる（`cpu_rms_norm_backward_matches_naive_
+/// reference` の実機横断版）。
+fn rms_norm_backward_dw_on(device: Device) -> Tensor<f32> {
+    let w_lin = Tensor::new(
+        vec![
+            0.5, -0.3, 0.2, 0.7, -0.6, 0.1, 0.4, -0.2, 0.3, 0.9, 0.2, -0.5, 0.1, 0.3, -0.2, -0.4,
+            0.6, -0.1, 0.2, 0.5, 0.3, -0.2, 0.4, -0.6, 0.1,
+        ],
+        &[5, 5],
+    )
+    .expect("valid tensor");
+    let target = Tensor::new(
+        vec![0.2, 0.6, 0.3, 0.4, -0.1, 0.5, -0.3, 0.2, 0.1, -0.2],
+        &[2, 5],
+    )
+    .expect("valid tensor");
+
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x = tape.make_var(&leaf());
+    let w_lin_v = tape.make_var(&w_lin);
+    let w_rms = tape.make_var(&weight());
+    let t = tape.make_var(&target);
+    let y = x
+        .matmul(&w_lin_v)
+        .unwrap()
+        .rms_norm(Some(&w_rms), 1e-6)
+        .unwrap();
+    let loss = y.mse_loss(&t).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    grads.get(&w_rms).unwrap().expect("到達する").clone()
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_rms_norm_backward_matches_cpu() {
+    let cuda_dw = rms_norm_backward_dw_on(Device::Cuda(0));
+    let cpu_dw = rms_norm_backward_dw_on(Device::Cpu);
+
+    assert_parity(
+        "rms_norm backward（dW）: CUDA tape_for vs CPU tape_for",
+        cuda_dw.as_slice().expect("contiguous"),
+        cpu_dw.as_slice().expect("contiguous"),
+    );
+}
+
+/// [`rms_norm_backward_dw_on`] の LayerNorm 版（`dW`／`dB` の両方を返す）。
+fn layer_norm_backward_dw_db_on(device: Device) -> (Tensor<f32>, Tensor<f32>) {
+    let w_lin = Tensor::new(
+        vec![
+            0.5, -0.3, 0.2, 0.7, -0.6, 0.1, 0.4, -0.2, 0.3, 0.9, 0.2, -0.5, 0.1, 0.3, -0.2, -0.4,
+            0.6, -0.1, 0.2, 0.5, 0.3, -0.2, 0.4, -0.6, 0.1,
+        ],
+        &[5, 5],
+    )
+    .expect("valid tensor");
+    let target = Tensor::new(
+        vec![0.2, 0.6, 0.3, 0.4, -0.1, 0.5, -0.3, 0.2, 0.1, -0.2],
+        &[2, 5],
+    )
+    .expect("valid tensor");
+
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let x = tape.make_var(&leaf());
+    let w_lin_v = tape.make_var(&w_lin);
+    let w_ln = tape.make_var(&weight());
+    let b_ln = tape.make_var(&bias());
+    let t = tape.make_var(&target);
+    let y = x
+        .matmul(&w_lin_v)
+        .unwrap()
+        .layer_norm(Some(&w_ln), Some(&b_ln), 1e-5)
+        .unwrap();
+    let loss = y.mse_loss(&t).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dw = grads.get(&w_ln).unwrap().expect("到達する").clone();
+    let db = grads.get(&b_ln).unwrap().expect("到達する").clone();
+    (dw, db)
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_layer_norm_backward_matches_cpu() {
+    let (cuda_dw, cuda_db) = layer_norm_backward_dw_db_on(Device::Cuda(0));
+    let (cpu_dw, cpu_db) = layer_norm_backward_dw_db_on(Device::Cpu);
+
+    assert_parity(
+        "layer_norm backward（dW）: CUDA tape_for vs CPU tape_for",
+        cuda_dw.as_slice().expect("contiguous"),
+        cpu_dw.as_slice().expect("contiguous"),
+    );
+    assert_parity(
+        "layer_norm backward（dB）: CUDA tape_for vs CPU tape_for",
+        cuda_db.as_slice().expect("contiguous"),
+        cpu_db.as_slice().expect("contiguous"),
+    );
+}
