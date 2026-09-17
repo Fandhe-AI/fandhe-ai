@@ -14,7 +14,7 @@
 //! `LinearVars` を作り直し、`forward` を呼ぶ。
 
 use fandhe_ai_tensor_core::{
-    Activation, BackendOps, ShapeError, Tensor, broadcast_shape, gemm_out_shape,
+    Activation, BackendOps, ScalarDType, ShapeError, Tensor, broadcast_shape, gemm_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -285,6 +285,47 @@ impl<'t> LinearVars<'t> {
     ) -> Result<Var<'t>, AutodiffError> {
         input.linear_act(&self.weight, self.bias.as_ref(), act)
     }
+}
+
+/// [`LinearVars::forward_with_activation`] の opt-in 低精度版（イシュー
+/// #1960・親 #1626／#1648）。`y = act(input.matmul(weight) (+ bias))` を
+/// `dtype`（[`ScalarDType::F16`]／[`ScalarDType::Bf16`]）で指定した
+/// 精度で計算する（**f32 master weight**: `vars.weight`／`vars.bias`
+/// 自体は変更せず、`TypedOps<T>` 経由の forward 計算のみが低精度）。
+///
+/// **`LinearVars` へメソッドとして追加しない理由**: `LinearVars` は
+/// `pub weight`／`pub bias` の公開フィールドを持つ struct であり
+/// （`crates/facade/tests/mha_backend_parity.rs` 等が外部から struct
+/// literal で構築する。facade crates.io 公開互換のため破壊的変更を
+/// 避ける必要がある）、フィールド追加なしに opt-in 精度指定を渡す
+/// 手段としてメソッドではなく自由関数を選んだ（実装計画 §2.2）。
+///
+/// **backward は常に f32**: `Var::linear_act_low_precision`
+/// （唯一の呼び出し元）が記録する `Op::LinearAct` ノードは `grad::vjp`
+/// から見れば通常の `LinearAct` と同一であり、`compute_dtype`
+/// フィールドは forward 経路の記録専用（VJP は読まない）。真の混合
+/// 精度（勾配も低精度で計算する経路）・`DeviceParamStore` 常駐経路
+/// への結線は本関数のスコープ外（`docs/autodiff-low-precision-linear-
+/// design.md` §6「スコープ外」）。
+///
+/// **`Activation` が `#[non_exhaustive]`**：未対応 variant（`None`／
+/// `Relu` 以外）は `tensor-core::linear_forward_low_precision` 側で
+/// `AutodiffError::Backend(BackendError::InvalidArgument(_))` として
+/// fail-closed に拒否される。`typed_ops_f16`／`typed_ops_bf16`
+/// accessor が `None`（低精度カーネル未実装のバックエンド）の場合も
+/// 同様に `AutodiffError::Backend(BackendError::Unsupported(_))` を
+/// 返す（f32 へのフォールバックはしない）。
+///
+/// **rank≥3 は対象外**: [`LinearVars::forward`] と同じく
+/// `gemm_out_shape`（2 次元厳密版）で明示検査する。
+pub fn linear_forward_low_precision<'t>(
+    vars: &LinearVars<'t>,
+    input: &Var<'t>,
+    act: Activation,
+    dtype: ScalarDType,
+) -> Result<Var<'t>, AutodiffError> {
+    gemm_out_shape(&input.shape(), &vars.weight.shape())?;
+    input.linear_act_low_precision(&vars.weight, vars.bias.as_ref(), act, dtype)
 }
 
 #[cfg(test)]

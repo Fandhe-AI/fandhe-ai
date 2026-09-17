@@ -111,7 +111,7 @@ pub use container::{ModuleList, Sequential};
 pub use conv::{Conv1d, Conv1dVars, Conv2d, Conv2dVars};
 pub use dropout::Dropout;
 pub use embedding::{Embedding, EmbeddingVars};
-pub use linear::{Linear, LinearVars};
+pub use linear::{Linear, LinearVars, linear_forward_low_precision};
 pub use module::Module;
 pub use norm::{
     LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, RMS_NORM_DEFAULT_EPS, RmsNorm, RmsNormVars,

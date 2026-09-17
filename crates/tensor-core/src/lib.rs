@@ -157,6 +157,7 @@ mod element;
 mod error;
 mod fusion;
 pub mod interpolate;
+mod low_precision;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pool;
@@ -193,6 +194,20 @@ pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel}
 pub use dispatch_failure::DispatchFailureCell;
 pub use element::{Element, Scalar, ScalarDType};
 pub use error::ShapeError;
+// `half::f16`／`half::bf16` の再エクスポート（イシュー #1960 codex-review
+// 対応）。`Scalar`（`element.rs`）は sealed trait で実装対象を
+// `f32`／`f64`／`half::f16`／`half::bf16` の 4 型に封印しており、本クレート
+// は既に `half` を無条件の本番依存として使用している（`element.rs` の
+// `impl Element for f16` 等）。`TypedOps<half::f16>` を実装する下流クレート
+// （`crates/autodiff` のテスト用モック等）は `half::f16`/`half::bf16` の
+// 具体型が必要になるが、`half` は承認済み依存区分（`.claude/rules/
+// deps-policy.md` 数値型）の型であり本クレートの公開 API 面
+// （`typed_ops_f16`／`typed_ops_bf16` の戻り値型）に既に露出しているため、
+// ここでの再エクスポートは依存サーフェスの拡張ではなく既存公開面の型を
+// 名指しできるようにする経路の追加に過ぎない。これにより下流クレートは
+// `half` への新規直接 Cargo 依存を追加せずに `TypedOps<f16>`／
+// `TypedOps<bf16>` を実装できる。
+pub use half::{bf16, f16};
 // `MAX_FUSED_CHAIN_LEN`（#404）: `fandhe_ai_autodiff::tape` の push 時上限適用が
 // 参照する単一真実源（`fusion/detect.rs` の doc comment 参照）。
 // `RowFusionMeta`（#588）: 行方向 reduction＋broadcast 融合プランの行
@@ -205,6 +220,7 @@ pub use fusion::{
     MAX_FUSED_SEGMENT_NODES, RowFusionMeta,
 };
 pub use interpolate::{BilinearCoord, bilinear_blend, bilinear_scale, bilinear_src_coord};
+pub use low_precision::linear_forward_low_precision;
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     BatchedMatmulPlan, adaptive_pool2d_out_shape, adaptive_window, batch_norm_layout,

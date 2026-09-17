@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, CastElement, Conv2dParams, DType, Device,
     DeviceBufferView, FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, Pool2dParams,
-    ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, Tensor,
+    ScalarBinaryOp, ScalarDType, ScalarUnaryOp, ScatterReduce, Tensor,
 };
 
 use crate::error::AutodiffError;
@@ -399,11 +399,30 @@ pub(crate) enum Op {
     /// いずれもホスト常駐の通常ノード（`Op::Leaf` 等）を指す。デバイス
     /// 常駐オペランドは扱わないため `ResidentResolver` を必要とせず、
     /// 素の [`Tape::backward`] からも正しく計算できる。
+    ///
+    /// **`compute_dtype`（イシュー #1960）と checkpoint 非適格の関係**:
+    /// 本 variant は `is_checkpoint_eligible()` で非適格（常に
+    /// `push_eager` で実体化済みの値をそのまま使い、再計算されない）
+    /// のため、`compute_dtype` が `F16`／`Bf16` の場合でも再計算時に
+    /// 精度が食い違う経路は存在しない。将来 `LinearAct` を checkpoint
+    /// 適格へ拡張する場合は、再計算ロジックが `compute_dtype` を見て
+    /// 同じ低精度経路を再実行する必要がある。
     LinearAct {
         input: NodeId,
         weight: NodeId,
         bias: Option<NodeId>,
         act: Activation,
+        /// forward の計算精度（イシュー #1960）。既定は `Var::linear_act`
+        /// （`LinearVars::forward_with_activation`）が記録する
+        /// `ScalarDType::F32`（f32 GEMM・挙動不変）。`Var::
+        /// linear_act_low_precision`（`nn::linear::
+        /// linear_forward_low_precision` の唯一の呼び出し元）のみが
+        /// `F16`／`Bf16` を記録する opt-in 経路。VJP（`grad::vjp`）は
+        /// 本フィールドを見ず常に f32 backward を行う（`docs/autodiff-
+        /// low-precision-linear-design.md` の「backward は意図的に f32
+        /// のまま」参照）ため、値そのものは forward 経路の記録専用で
+        /// 勾配計算には影響しない。
+        compute_dtype: ScalarDType,
     },
     /// `Var::reshape` が記録する view ノード（イシュー #1047・親 #1043
     /// 「カーネル融合・autodiff 実行モデルの強化」）。出力 shape は
