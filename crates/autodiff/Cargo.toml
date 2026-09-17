@@ -58,12 +58,15 @@ serde.workspace = true
 serde_json.workspace = true
 # 低精度 Linear forward（イシュー #1960）の bit 一致オラクルテスト
 # （`crates/autodiff/src/var.rs::linear_act_tests`）が `TypedOps<half::f16>`
-# の実装契約（`f16::from_f32(BackendOps::op(upcast(x)))`。
-# `crates/backend-cpu/src/typed_f16.rs` doc 参照）を再現したモック
-# `TypedOps<half::f16>` の丸め計算に使う。`half` は workspace で
-# 固定済みの許容依存（deps-policy.md）であり、`tensor-core`／
-# `backend-cpu` 等が既に使う既承認区分をテストのみで参照するのみで
-# 新規外部依存の追加ではない（上記 `serde`／`serde_json` と同型の判断）。
+# の実装契約（`f16::from_f32(BackendOps::op(upcast(x)))`。CPU バックエンド
+# クレートの typed_f16 実装 doc 参照）を再現したモック `TypedOps<half::f16>`
+# の丸め計算に使う。`half` は workspace で固定済みの許容依存
+# （deps-policy.md）であり、`tensor-core` 等が既に使う既承認区分をテスト
+# のみで参照するのみで新規外部依存の追加ではない（上記 `serde`／
+# `serde_json` と同型の判断。本クレートは架構境界テスト
+# `crates/autodiff/tests/architecture_boundaries.rs` により具体バックエンド
+# クレートへの依存を禁じられているため、依存自体は追加していない
+# ——コメント中の名称も避ける）。
 half.workspace = true
 
 # view 系ノード（reshape / transpose。イシュー #1047）の「forward・
