@@ -198,3 +198,14 @@ REQ-12 の文言が Burn／CubeCL 前提だった旧版の名残を持つこと�
   `crates/backend-metal/src/ops.rs`・`crates/facade/src/lib.rs`（§2 の出典行）
 - 参考として issue #1632 本文に記載された外部 artifact リンク 2 件（`claude.ai/code/artifact/
   ...`）: 内容は本 doc の事実確認には使わず、参考情報としてのみ扱った
+
+## #1962 追補
+
+区分 B（5 節）各候補の HEAD 時点（`06cb1e38`）のゲート状況・判定は
+`docs/facade-inference-serving-scope-decision.md` §2.3・§6 を正とする
+（本節・5 節本文は書き換えない）。要点: `Op::is_lazy_elementwise`・CUDA／
+Metal `run_fused` は本 doc 記録時点（`1a1bcd5a`）から不変で B-1〜B-6 いずれも
+未着手のまま。B-3 の前提ゲートは (i) forward 常駐結線（#1688）・(ii) 重み
+勾配のデバイス直接計算（#1555／#1559／#1908）が充足済みだが、`d_input`・
+loss のデバイス常駐化は未充足。同 doc は B-1 のみを「実装する」（起票案
+G-1）として引き継いだ。区分 A（実装済み）・区分 C（非目標）は不変。

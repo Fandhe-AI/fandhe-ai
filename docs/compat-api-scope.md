@@ -294,6 +294,25 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   キャスト以外の高度な配列操作のうち、1.2 節の要素演算・index 系（#1592・
   #1593・#1599）でカバーされない範囲。独自に in／out を確定せず、必要に
   なった時点で 5 節の手続きに従い判断する
+- **実装リポ側の設計判断による非目標（トークナイザ・サービング基盤）**:
+  `04-requirements.md:233` の「引き続き対象外」列挙には現れないが、#1962
+  の設計記録（`docs/facade-inference-serving-scope-decision.md`）により
+  実装リポ側の判断として非目標を確定した項目。PyTorch／TensorFlow 本体
+  もトークナイザを同梱しない（Hugging Face `tokenizers`／`tf.text`／
+  `keras_nlp` は別パッケージ）ため REQ-9 の網羅対象そのものに当たらない
+  こと、外部トークナイザ crate は許容依存 9 区分外であること、自作は
+  REQ-1 の自作コア範囲外の非信頼入力パース面（BPE／Unicode 正規化／
+  語彙ファイルパース）を新設することが根拠。paged attention・連続
+  バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ
+  等のサービング基盤も同 doc §6 で非目標として整理済み。spec の
+  「引き続き対象外」列挙への追記は spec 提案候補（未起票）として同 doc
+  §9 に記録した
+- **KV キャッシュ（自己回帰デコード用）**: 上記トークナイザとは対照的に
+  「未定義」残余のうち §5 経路 2（ユーザー承認＋issue 起票）の起票案が
+  ある項目として `docs/facade-inference-serving-scope-decision.md` §9 に
+  記録した（K-1／K-2。既存 `Var` 演算の合成のみで新規 `Op`／`BackendOps`／
+  依存を要しない設計。ユーザー承認前のため Tier 1／Tier 2 表への行追加は
+  行わない）
 - **`amax`/`max` 縮約 API**（PyTorch `torch.amax` 相当）: 縮約 API 自体は
   Tier 1（1.2 節・#1601）で対象範囲となった。`crates/autodiff/src/grad.rs`
   の `max_vjp` は同値タイ発生時「最初に現れる最大要素 1 箇所のみ」へ
@@ -474,6 +493,8 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 **#1628 の設計記録は `docs/facade-multi-gpu-ddp-decision.md` として完了した。**
 
 **#1633（sparse／complex テンソルの非対応の明文化）の設計記録は `docs/tensor-core-sparse-complex-decision.md` として完了した。** 量子化／DDP と異なり除外事項「分散学習・量子化の網羅対応」には従属しない（sparse／complex は REQ-9 の「引き続き対象外」列挙にのみ現れ、格上げ条件表を持つ Won't 項目ではない）。コード変更なし。再開には本節の範囲拡張手続き（経路 1 または経路 2）を要する（同 doc §3・§9）。
+
+**#1962（推論・サービング〈KV キャッシュ・トークナイザ・グラフ最適化区分 B〉のスコープ・段階）の設計記録は `docs/facade-inference-serving-scope-decision.md` として完了した。** コード変更なし。トークナイザ・サービング基盤（paged attention・連続バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ）は実装リポ側の設計判断による非目標（2 節に独立 bullet として記録・spec 提案は未起票）。KV キャッシュ（自己回帰デコード用）は「未定義」残余のうち本節経路 2 の起票案あり（同 doc §9 の K-1／K-2。ユーザー承認前）。グラフ最適化区分 B（`docs/autodiff-graph-optimization-scope-decision.md`）は段階 0 を維持しつつ HEAD 時点のゲート状況を更新し、B-1（GPU `run_fused` elementwise allowlist）のみ起票案（同 doc §9 の G-1）として記録した。
 
 **#1652（ONNX import 公開可否）の設計記録は `docs/facade-onnx-import-exposure-decision.md` として完了した。** DDP／量子化と異なり本項目は正本 spec の除外事項（上記）に従属しない——facade へ公開する方針自体は案 B（薄いラッパー型）として推奨されるが、facade は crates.io 公開クレートであり非公開クレートへの通常依存を持てないため、「facade から公開する」は `onnx-interop` 自体を crates.io へ公開することと構造的に等価になる。この publish 承認（命名確定・`RELEASE_CRATES` 変更を含む）は 2026-09-12 の facade 公開面拡張の承認範囲には含まれない別個の事項であり、承認が得られるまでは非公開のまま段階 0（現状維持）とする。#1775（ONNX export の facade 公開）・#1754（safetensors save／load の facade 再公開）はいずれも同じ publish 前提を共有するため blocked のまま close しない（同 doc §6.2）。
 
