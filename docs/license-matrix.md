@@ -20,8 +20,8 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | Metal | `objc2` | `=0.6.4` | MIT | 可 | a, d, e |
 | Metal | `objc2-foundation` | `=0.3.2` | MIT | 可 | a, d, e |
 | Metal | `objc2-metal` | `=0.3.2` | Zlib OR Apache-2.0 OR MIT | 可 | a, d, e。三重ライセンスのうち MIT を選択すれば直接依存 8 区分の適合基準（MIT OR Apache-2.0 系）と両立する |
-| 相互運用 | `safetensors` | `=0.7.0` | Apache-2.0 | 可 | c, e（`docs/spec/01-brainstorm.md:183`）。ワイヤフォーマット処理のみに使用（テンソルへのマッピングは自作） |
-| 相互運用 | `prost` | `=0.14.4` | Apache-2.0 | 可 | c（`docs/spec/01-brainstorm.md:184`）。protobuf デコードのみ。`prost-build`（`protoc` ビルド時依存）は使わない |
+| 相互運用 | `safetensors` | `=0.7.0` | Apache-2.0 | 可 | c, e（`docs/spec/01-brainstorm.md:183`）。ワイヤフォーマット処理のみに使用（テンソルへのマッピングは自作）。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
+| 相互運用 | `prost` | `=0.14.4` | Apache-2.0 | 可 | c（`docs/spec/01-brainstorm.md:184`）。protobuf デコードのみ。`prost-build`（`protoc` ビルド時依存）は使わない。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | シリアライズ | `serde` | `=1.0.229`（`derive`） | MIT OR Apache-2.0 | 可 | a。構造化データのシリアライズ |
 | シリアライズ | `serde_json` | `=1.0.151` | MIT OR Apache-2.0 | 可 | a |
 | CPU 並列 | `rayon` | `=1.12.0` | MIT OR Apache-2.0 | 可 | c（`docs/spec/01-brainstorm.md:185`）。PoC-v2-1 で naive/blocked 比 約 6〜8.5 倍改善を実測 |

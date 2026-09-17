@@ -15,9 +15,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use fandhe_ai_onnx_interop::st_load::load_safetensors_f32;
+use fandhe_ai_onnx_interop::st_save::{save_safetensors_f32, save_safetensors_f32_to_bytes};
 use fandhe_ai_tensor_core::Tensor;
-use onnx_interop::st_load::load_safetensors_f32;
-use onnx_interop::st_save::{save_safetensors_f32, save_safetensors_f32_to_bytes};
 use safetensors::tensor::SafeTensors;
 
 const FIXTURE_DIR: &str = concat!(
@@ -74,8 +74,8 @@ fn round_trips_pytorch_fixture_with_bit_exact_values() {
     let original = load_fixture_weights();
 
     let bytes = save_safetensors_f32_to_bytes(&original, None).expect("書き出しに失敗した");
-    let reloaded =
-        onnx_interop::st_load::load_safetensors_f32_from_bytes(&bytes).expect("再ロードに失敗した");
+    let reloaded = fandhe_ai_onnx_interop::st_load::load_safetensors_f32_from_bytes(&bytes)
+        .expect("再ロードに失敗した");
 
     for key in WEIGHT_KEYS {
         let orig_t = &original[key];
@@ -176,7 +176,8 @@ fn non_contiguous_transposed_view_round_trips_correctly() {
     tensors.insert("fc1.weight.T".to_string(), fc1_w_t.clone());
 
     let bytes = save_safetensors_f32_to_bytes(&tensors, None).unwrap();
-    let reloaded = onnx_interop::st_load::load_safetensors_f32_from_bytes(&bytes).unwrap();
+    let reloaded =
+        fandhe_ai_onnx_interop::st_load::load_safetensors_f32_from_bytes(&bytes).unwrap();
     let reloaded_t = &reloaded["fc1.weight.T"];
 
     assert_eq!(reloaded_t.shape(), fc1_w_t.shape());
@@ -194,7 +195,8 @@ fn non_contiguous_transposed_view_round_trips_correctly() {
 fn empty_map_round_trips_without_error() {
     let tensors: HashMap<String, Tensor<f32>> = HashMap::new();
     let bytes = save_safetensors_f32_to_bytes(&tensors, None).unwrap();
-    let reloaded = onnx_interop::st_load::load_safetensors_f32_from_bytes(&bytes).unwrap();
+    let reloaded =
+        fandhe_ai_onnx_interop::st_load::load_safetensors_f32_from_bytes(&bytes).unwrap();
     assert!(reloaded.is_empty());
 }
 
@@ -203,7 +205,8 @@ fn zero_element_tensor_round_trips_without_error() {
     let mut tensors: HashMap<String, Tensor<f32>> = HashMap::new();
     tensors.insert("empty".to_string(), Tensor::new(vec![], &[0]).unwrap());
     let bytes = save_safetensors_f32_to_bytes(&tensors, None).unwrap();
-    let reloaded = onnx_interop::st_load::load_safetensors_f32_from_bytes(&bytes).unwrap();
+    let reloaded =
+        fandhe_ai_onnx_interop::st_load::load_safetensors_f32_from_bytes(&bytes).unwrap();
     assert_eq!(reloaded["empty"].shape(), &[0]);
 }
 

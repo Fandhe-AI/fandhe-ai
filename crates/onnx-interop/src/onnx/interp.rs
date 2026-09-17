@@ -779,7 +779,7 @@ fn require_single_output(node: &NodeProto) -> Result<&str, InterpError> {
 
 /// `Graph`（`build_graph` が構築したトポロジカル順検証済みグラフ）を実行する。
 ///
-/// 呼び出し元は `onnx-interop` 利用者（将来の `onnx_interop::run_model` 等の
+/// 呼び出し元は `onnx-interop` 利用者（将来の `fandhe_ai_onnx_interop::run_model` 等の
 /// 上位 API・TASK-7.4）。`feeds` は `graph.inputs` のうち initializer を持たない
 /// 入力に対応する実行時の値（feeds 検証は以下の順序で行う。no-silent-skip 契約）:
 ///

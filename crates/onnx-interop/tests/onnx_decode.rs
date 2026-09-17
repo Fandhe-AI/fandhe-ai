@@ -5,8 +5,8 @@
 //! テストは実機依存テストと同じ運用で `#[ignore]` 分離し、環境変数でパスを指定
 //! されたときのみ実行する（`tests/fixtures/README.md` の取得手順参照）。
 
-use onnx_interop::onnx::graph::{GraphError, RawTensor, build_graph};
-use onnx_interop::onnx::proto::{
+use fandhe_ai_onnx_interop::onnx::graph::{GraphError, RawTensor, build_graph};
+use fandhe_ai_onnx_interop::onnx::proto::{
     AttributeProto, GraphProto, ModelProto, NodeProto, TensorProto, ValueInfoProto,
 };
 use prost::Message;
@@ -177,7 +177,7 @@ fn raw_data_len_mismatch_is_rejected() {
     // dims=[2] (F32) は 8 バイト期待だが raw_data は 4 バイトのみ与える。
     let t = TensorProto {
         dims: vec![2],
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
         int64_data: vec![],
         name: "bad_tensor".to_string(),
@@ -208,7 +208,7 @@ fn bool_tensor_raw_data_decodes_nonzero_as_true() {
     // 変換規則をテストで固定化する）。
     let t = TensorProto {
         dims: vec![3],
-        data_type: onnx_interop::onnx::proto::data_type::BOOL,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::BOOL,
         float_data: vec![],
         int64_data: vec![],
         name: "bool_tensor".to_string(),
@@ -231,7 +231,7 @@ fn bool_tensor_raw_data_byte_len_mismatch_is_rejected() {
     // バイト長を検査する。`decode_tensor` の既存方針と同じ順序）。
     let t = TensorProto {
         dims: vec![4],
-        data_type: onnx_interop::onnx::proto::data_type::BOOL,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::BOOL,
         float_data: vec![],
         int64_data: vec![],
         name: "bad_bool_tensor".to_string(),
@@ -265,7 +265,7 @@ fn float16_tensor_raw_data_decodes_little_endian_pairs() {
 
     let t = TensorProto {
         dims: vec![2],
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT16,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT16,
         float_data: vec![],
         int64_data: vec![],
         name: "f16_tensor".to_string(),
@@ -287,7 +287,7 @@ fn float16_tensor_raw_data_decodes_little_endian_pairs() {
 fn negative_dim_is_rejected() {
     let t = TensorProto {
         dims: vec![-1],
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
         int64_data: vec![],
         name: "neg_dim_tensor".to_string(),
@@ -335,7 +335,7 @@ fn element_count_overflow_is_rejected() {
     // （バイト列走査）より前に checked_mul で拒否できることを確認する。
     let t = TensorProto {
         dims: vec![i64::MAX, i64::MAX],
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
         int64_data: vec![],
         name: "overflow_tensor".to_string(),
@@ -361,7 +361,7 @@ fn byte_length_multiply_overflow_is_rejected() {
     // wrap して不正なテンソルを通してしまう）。
     let t = TensorProto {
         dims: vec![1i64 << 62],
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
         int64_data: vec![],
         name: "byte_overflow_tensor".to_string(),
@@ -387,7 +387,7 @@ fn empty_data_with_nonzero_dims_is_rejected_not_silently_accepted() {
     // dims=[0] の真の空テンソルとは区別し、こちらは明示的に拒否する。
     let t = TensorProto {
         dims: vec![2],
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
         int64_data: vec![],
         name: "empty_but_nonzero_dims_tensor".to_string(),
@@ -416,7 +416,7 @@ fn truly_empty_tensor_dims_zero_is_still_accepted() {
     // （回帰確認: 一致検査を expected_bytes==0==raw_data.len() で通す経路）。
     let t = TensorProto {
         dims: vec![0],
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
         int64_data: vec![],
         name: "truly_empty_tensor".to_string(),
@@ -441,7 +441,7 @@ fn raw_data_takes_precedence_over_typed_float_data() {
     // （Bugbot 指摘: typed data が raw_data を無言で shadow していた）。
     let t = TensorProto {
         dims: vec![1],
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![1.0],
         int64_data: vec![],
         name: "both_fields".to_string(),
@@ -462,7 +462,7 @@ fn raw_data_takes_precedence_over_typed_int64_data() {
     // FLOAT と同じ解決順序を INT64 でも確認する。
     let t = TensorProto {
         dims: vec![1],
-        data_type: onnx_interop::onnx::proto::data_type::INT64,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::INT64,
         float_data: vec![],
         int64_data: vec![1],
         name: "both_fields_i64".to_string(),
@@ -485,7 +485,7 @@ fn duplicate_initializer_name_is_rejected_not_silently_overwritten() {
     // no-silent-skip 契約に従い明示的なエラーで拒否することを確認する。
     let t1 = TensorProto {
         dims: vec![1],
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![1.0],
         int64_data: vec![],
         name: "dup".to_string(),
@@ -493,7 +493,7 @@ fn duplicate_initializer_name_is_rejected_not_silently_overwritten() {
     };
     let t2 = TensorProto {
         dims: vec![1],
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![2.0],
         int64_data: vec![],
         name: "dup".to_string(),
@@ -958,7 +958,7 @@ fn attribute_proto_round_trips_with_tensor_field() {
         s: vec![],
         t: Some(TensorProto {
             dims: vec![1],
-            data_type: onnx_interop::onnx::proto::data_type::INT64,
+            data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::INT64,
             float_data: vec![],
             int64_data: vec![7],
             name: "const_t".to_string(),

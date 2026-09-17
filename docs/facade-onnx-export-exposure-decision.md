@@ -125,3 +125,15 @@ import 側 doc の案 A〜E（`docs/facade-onnx-import-exposure-decision.md` 4 �
 - `docs/compat-api-scope.md` §1.3・§5（Tier 2 列挙・#1652 適用記録）
 - `docs/crates-io-publishing-order.md` §6（公開クレートの依存規則）
 - `crates/onnx-interop/src/onnx/export.rs`・`export_ops.rs`（本判断が参照するコード事実）
+
+## 12. 追補（イシュー #1963・2026-09-17）: publish 承認取得済み
+
+§10 承認事項 1（`onnx-interop` の crates.io 公開そのもの。import 側 #1652の
+承認事項 1 と同一事項）は**取得済み**（2026-09-17・イシュー #1963 承認
+コメント。`docs/crates-io-publishing-order.md` §13）。公開準備（rename・
+公開メタデータ整備）は #1963 自身が完了させた。
+
+§10 承認事項 2・3（facade ラッパー API 形状・`Sequential`／`nn` ->
+`ExportNode` 橋渡しの配置）は未承認のまま残り、facade 公開面は段階 0 を
+継続する（唯一のコード変更である `crates/facade/tests/api_surface.rs` の
+段階 0 固定 guard テスト 2 件は無変更）。

@@ -138,3 +138,19 @@ REQ-7 の受け入れ判定式（`abs_err/(|ref|+1e-6) <= 1e-3`）は REQ-2 統�
 | `docs/compat-feature-gap.md` | §1.9／§2 の ONNX import ギャップ記述 |
 | `docs/spec/04-requirements.md` | REQ-7・REQ-9（2026-09-12 追記）・REQ-12 |
 | `docs/facade-multi-gpu-ddp-decision.md` | 同型の設計判断記録（構成テンプレートの先例） |
+
+## 11. 追補（イシュー #1963・2026-09-17）: publish 承認取得済み
+
+§9 承認事項 1（「onnx-interop の crates.io 公開」自体の承認）は
+**取得済み**（2026-09-17・イシュー #1963 承認コメント。`docs/crates-io-
+publishing-order.md` §13・`docs/crates-io-naming-decision.md`「7 件目」節）。
+`onnx-interop` は `fandhe-ai-onnx-interop` として 7 クレート目の公開準備が
+完了し、次回リリースサイクルで `release-all.yml` を通じて crates.io へ
+公開される見込みである。
+
+ただし本追補は「facade からの ONNX import ラッパー実装」自体を承認する
+ものではない。§9 承認事項 2・3（`OnnxModel`／`OnnxValue` 等のラッパー API
+形状・`Value::F16` の扱い）は未承認のまま残り、facade 公開面（段階 0）は
+継続する。`crates/facade/tests/api_surface.rs` の否定ガード（facade が
+`onnx-interop` へ通常依存しないことの機械固定）も維持する。ラッパー実装の
+起票はユーザー承認を得てから行う。

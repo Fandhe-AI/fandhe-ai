@@ -18,12 +18,12 @@
 //!   [`fandhe_ai_backend_cpu::CpuBackendOps::gemm`]（BLIS 型・rayon 並列の最適化済み自作カーネル）を
 //!   経由する。REQ-8 が求める「自作カーネルでの Transformer ブロック実測」の主対象。
 //! - attention 内のバッチ行列積（`Q @ K^T`・`softmax(...) @ V`）は
-//!   [`onnx_interop::ops::matmul`]（`numpy.matmul` 準拠のバッチ対応 naive 実装）を使う。
+//!   [`fandhe_ai_onnx_interop::ops::matmul`]（`numpy.matmul` 準拠のバッチ対応 naive 実装）を使う。
 //!   ヘッド単位 2D GEMM ループへの分解は行っていない（naive 経路であることが計測値に
 //!   含まれる。過小評価方向であり、下限確定〈#158〉の判断材料として
 //!   `docs/perf/transformer-workload-measurement.md` に明記する）。
 //! - softmax・LayerNormalization・Erf（GELU 合成）・残差 Add は
-//!   [`onnx_interop::ops`] の公開関数（naive 実装）をそのまま使う。
+//!   [`fandhe_ai_onnx_interop::ops`] の公開関数（naive 実装）をそのまま使う。
 //!
 //! ## スコープ境界
 //!
@@ -39,7 +39,7 @@
 //! 親 #582（Phase G）で CUDA 側にマージ済みの融合カーネル
 //! （`gemm_bias_act` epilogue 融合・#599／online softmax・#594）を、上記
 //! 経路選択の QKV・出力射影・FFN の GEMM＋bias（`linear` → `linear_fused`）と
-//! attention softmax（`onnx_interop::ops::softmax` → `run_fused` 経由の
+//! attention softmax（`fandhe_ai_onnx_interop::ops::softmax` → `run_fused` 経由の
 //! canonical softmax プラン）にのみ適用した「改善後」経路
 //! （[`linear_fused`]／[`multi_head_attention_fused`]／[`feed_forward_fused`]／
 //! [`transformer_block_forward_fused`]／[`full_forward_fused`]）を追加する。
@@ -67,10 +67,10 @@ use bench_harness::transformer_workload::{baseline_spec, report_name, report_nam
 use bench_harness::{BenchError, BenchReport, MeasurementConfig, run};
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_backend_cuda::CudaBackendOps;
-use fandhe_ai_tensor_core::{Activation, BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
-use onnx_interop::ops::{
+use fandhe_ai_onnx_interop::ops::{
     LayerNormAttrs, add, erf, layer_normalization, matmul, mul, reshape, softmax, transpose,
 };
+use fandhe_ai_tensor_core::{Activation, BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 
 /// ワークロード形状（PoC-8 定義。単一真実源は [`bench_harness::transformer_workload::baseline_spec`]。
 /// 本ファイルはローカル `const` へ束縛して既存コードの参照箇所を変えずに済ませる
@@ -117,7 +117,7 @@ fn gen_tensor(rng: &mut Xorshift64Star, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("固定 shape のテンソル生成に失敗するはずがない")
 }
 
-/// 単一値を持つ形状 `[1]` のテンソルを構築する（`onnx_interop::ops::{add,mul}` の
+/// 単一値を持つ形状 `[1]` のテンソルを構築する（`fandhe_ai_onnx_interop::ops::{add,mul}` の
 /// multidirectional broadcasting を利用したスカラー演算に使う。`gemm.rs` の `C` 引数と
 /// 同じブロードキャスト委譲パターン）。
 fn scalar(value: f32) -> Tensor<f32> {
@@ -210,7 +210,7 @@ fn linear(
 /// Multi-Head Self-Attention サブレイヤー（`x: [batch, seq, d_model] -> [batch, seq, d_model]`）。
 ///
 /// QKV・出力射影は `ops.gemm`（最適化済み自作カーネル）、ヘッド分割後のバッチ行列積・
-/// softmax は `onnx_interop::ops`（naive 実装）を使う（モジュール冒頭コメント「経路選択」節）。
+/// softmax は `fandhe_ai_onnx_interop::ops`（naive 実装）を使う（モジュール冒頭コメント「経路選択」節）。
 fn multi_head_attention(
     ops: &dyn BackendOps,
     x: &Tensor<f32>,
@@ -273,7 +273,7 @@ fn multi_head_attention(
     .expect("attention 出力の [batch, seq, d_model] への reshape に失敗するはずがない")
 }
 
-/// GELU（`0.5*x*(1+erf(x/sqrt(2)))`）を `onnx_interop::ops`（`erf`／`add`／`mul`）の合成で計算する。
+/// GELU（`0.5*x*(1+erf(x/sqrt(2)))`）を `fandhe_ai_onnx_interop::ops`（`erf`／`add`／`mul`）の合成で計算する。
 /// ONNX に `Gelu` 単体オペは無く（`transformer.onnx` も `Erf` 合成で表現する。REQ-7 準拠）、
 /// 本ワークロードも同じ合成方式を採る。
 fn gelu(x: &Tensor<f32>) -> Tensor<f32> {
@@ -455,7 +455,7 @@ fn linear_fused(
 /// 呼び出し元（[`multi_head_attention_fused`]）が計測する速度差は「CUDA
 /// 融合 online softmax カーネルの高速性」ではなく「ホスト naive 計算から
 /// GPU 計算への移行」であることに注意（モジュール冒頭コメント「計測解釈上の
-/// 重要な非対称性」参照。非融合側の [`softmax`]（`onnx_interop::ops`）は
+/// 重要な非対称性」参照。非融合側の [`softmax`]（`fandhe_ai_onnx_interop::ops`）は
 /// GPU に一切触れないため）。
 fn softmax_fused(ops: &dyn BackendOps, scores: &Tensor<f32>) -> Tensor<f32> {
     let shape = scores.shape().to_vec();
@@ -642,7 +642,7 @@ fn full_forward_fused(
 /// `CudaBackendOps::new(0)` はドライバ初期化を行わないため常に成功する
 /// （`crates/backend-cuda/src/ops.rs::CudaBackendOps::new` ドキュメンテーション
 /// コメント参照）。実際の CUDA 呼び出しは各 `ops.gemm`／`add`
-/// （`onnx_interop::ops`。ホスト naive）の実行時点で発生し、CUDA 非搭載
+/// （`fandhe_ai_onnx_interop::ops`。ホスト naive）の実行時点で発生し、CUDA 非搭載
 /// 環境では `BackendError::CudaUnavailable` で `panic` する（`#[ignore]`
 /// 分離により通常 CI では実行されないため許容する。実機・計測環境で
 /// 明示実行する契約は本ファイル冒頭コメント「経路選択」節と同じ）。

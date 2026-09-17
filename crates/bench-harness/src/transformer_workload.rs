@@ -53,7 +53,7 @@ pub struct TransformerWorkloadSpec {
     pub batch: usize,
     /// 系列長。
     pub seq_len: usize,
-    /// LayerNormalization の epsilon（`onnx_interop::ops::LayerNormAttrs::epsilon` に渡す値）。
+    /// LayerNormalization の epsilon（`fandhe_ai_onnx_interop::ops::LayerNormAttrs::epsilon` に渡す値）。
     pub layer_norm_eps: f32,
     /// Multi-Head Self-Attention サブレイヤーを含むかどうか。
     /// #589 時点の確定値は `true`（既存実測実装が Q/K/V・softmax・スケーリングを含む構成のため）。

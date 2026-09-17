@@ -56,7 +56,7 @@ fmt / clippy / test / cargo-deny の 4 ジョブ実体は Fandhe-AI/actions の 
 
 ## release.yml（crates.io publish。イシュー #884）
 
-`.github/workflows/release.yml` は公開 6 クレートの crates.io 公開を担う本リポ固有ワークフロー。手順の詳細・実測記録は `docs/crates-io-publishing-order.md` §9〜11 を正とし、本節では CI 規約上の位置づけのみを記す。
+`.github/workflows/release.yml` は公開 7 クレート（#1963 で `fandhe-ai-onnx-interop` 追加）の crates.io 公開を担う本リポ固有ワークフロー。手順の詳細・実測記録は `docs/crates-io-publishing-order.md` §9〜11・§13 を正とし、本節では CI 規約上の位置づけのみを記す。
 
 - **トリガーは `workflow_dispatch` のみ**（タグ push トリガー・Trusted Publishing〈OIDC〉はユーザー指示により不採用と確定済み。#884・#885。理由は release.yml 冒頭コメントを正とし本節では書き写さない）
 - **verify → publish の 2 段構成**: `verify` ジョブ（トークン不要。semver 形式検証・`Cargo.toml` バージョン一致検証・crates.io 既公開バージョン検証・`cargo package --list`・`cargo publish --dry-run`）が green であることを確認したうえで、同一入力の `mode: publish` を再ディスパッチする。`publish` ジョブは `environment: crates-io-release` の承認ゲートを経てから `CARGO_REGISTRY_TOKEN`（org secret）をステップ限定で注入し `cargo publish` を実行する。runner は「ワークフロー設計」節の方針に従い `ubuntu-latest`・`timeout-minutes` 設定済み

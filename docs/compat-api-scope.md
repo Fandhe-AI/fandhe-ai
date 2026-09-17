@@ -504,6 +504,14 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 
 **#1775（ONNX export の facade 公開）の設計記録は `docs/facade-onnx-export-exposure-decision.md` として完了した。** #1652 と同じ publish 前提（上記段落）を共有するため段階 0・blocked のまま close しない。本 issue では facade（`crates/facade/src/**`・`Cargo.toml`）へのコード追加は一切行わず、代わりに「facade（crates.io 公開クレート）が非公開クレート `onnx-interop` へ通常依存しない」ことを固定する負の guard テスト（`crates/facade/tests/api_surface.rs::facade_does_not_depend_on_unpublished_onnx_interop`／`facade_sources_do_not_reference_onnx_interop`）を追加した——CI が `cargo publish --dry-run` を実行しないため、公開クレートの `Cargo.toml` へ非公開クレートへの path 依存を誤って追加しても通常の `cargo build`／`cargo test` は成功してしまい、次回リリース（`release-all.yml`）まで壊れに気づけないという盲点を機械的に前倒しする。`onnx-interop` の crates.io 公開承認取得後は、本テストを削除ではなく「承認済み依存形状の検査」へ差し替える（同 doc §6）。
 
+**追補（#1963・2026-09-17）**: 上記 #1652・#1775・#1754 が共有する publish
+前提（`onnx-interop` 自体の crates.io 公開というユーザー承認）は 2026-09-17
+にイシュー #1963 で取得済み（`docs/crates-io-publishing-order.md` §13）。
+`onnx-interop` は `fandhe-ai-onnx-interop` として 7 クレート目の公開準備が
+完了し、次回リリースサイクルで実 publish される。ただし facade ラッパー
+API 形状・配置の承認は別事項であり未取得のまま残るため、facade 公開面
+（段階 0・上記 3 issue の guard テスト）は変更なく継続する。
+
 **#1754（safetensors save／load の facade 再公開・`Tensor` の Debug／Display）は 2 部構成として完了した。** (A)「`Tensor<T>` の `Debug`／`Display`」は本 issue でコード実装済み（`crates/tensor-core/src/tensor_fmt.rs`。打ち切り付きの値プレビュー・`Tape: Debug` の既存公開契約〈`docs/public-api-design.md` §7〉越しの DoS 耐性〈`.claude/rules/security.md` A04〉を含む。facade 新規公開面なし・既存 `pub use fandhe_ai_tensor_core::Tensor` 経由でそのまま到達）。**コードレビューで、初版の軸ごとの打ち切り（`len > 2 * FMT_EDGE_ITEMS` の軸のみ省略）だけでは、全軸長が閾値以下の高階テンソル（例 `shape=[2;20]`。numel は 100 万超）で 1 軸も打ち切られず出力が無制限に増大する穴、および `shape` の rank 自体に上限がないため再帰深さが rank に比例しスタックオーバーフローしうる穴が指摘され、総出力要素数のグローバル予算（`FMT_MAX_ELEMS`）と rank 上限ガード（`FMT_MAX_RENDER_RANK`）を追加して是正済み**（`tensor_fmt` モジュール doc・追加テスト参照）。(B)「safetensors 再公開」は #1652・#1775 と同じ publish 前提を共有するため段階 0・blocked のまま close しない。設計記録は `docs/facade-safetensors-exposure-decision.md` として完了した（案比較・推奨〈facade 直接 `safetensors` 依存の独立実装。承認未取得〉・再開条件を記録）。
 
 **適用記録（`DeviceParamStore::predict_device_chain`。イシュー #1688）**:

@@ -78,8 +78,11 @@ multiple-versions = "warn"
 # 任意の最新版を受け入れる宣言であり、許容依存 8 区分の `=x.y.z` 完全固定方針
 # （deps-policy.md）に反するため fail-closed で弾く）。
 wildcards = "deny"
-# ワークスペース内 9 クレートは全て `publish = false`（workspace 継承）の private
-# クレートで、相互参照はバージョン無しの path 依存（cargo 上は `*` 扱い）のため、
-# private クレートの path 依存に限り wildcards の対象外とする（cargo-deny の仕様上
-# publish 対象クレートの path 依存には適用されず、その場合は従来どおり deny される）。
+# ワークスペース内クレートのうち非公開（`publish = false`。workspace 継承）の
+# private クレート（`guardrail`・`self-repair`・`bench-harness`・`docs-site`）は
+# 相互参照がバージョン無しの path 依存（cargo 上は `*` 扱い）のため、private
+# クレートの path 依存に限り wildcards の対象外とする（cargo-deny の仕様上
+# publish 対象クレートの path 依存には適用されず、その場合は従来どおり deny
+# される。公開クレート間の path 依存は `version = "=x.y.z"` を併記して回避する。
+# `docs/crates-io-publishing-order.md`）。
 allow-wildcard-paths = true

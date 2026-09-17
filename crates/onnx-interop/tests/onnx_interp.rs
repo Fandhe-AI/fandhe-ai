@@ -17,12 +17,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use fandhe_ai_tensor_core::Tensor;
-use onnx_interop::onnx::graph::{Graph, build_graph};
-use onnx_interop::onnx::interp::{InterpError, Value, run};
-use onnx_interop::onnx::proto::{
+use fandhe_ai_onnx_interop::onnx::graph::{Graph, build_graph};
+use fandhe_ai_onnx_interop::onnx::interp::{InterpError, Value, run};
+use fandhe_ai_onnx_interop::onnx::proto::{
     AttributeProto, GraphProto, ModelProto, NodeProto, TensorProto, ValueInfoProto,
 };
+use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
 use serde::Deserialize;
 
@@ -299,7 +299,7 @@ fn run_feed_overrides_initializer_pre_ir4_pattern() {
     // initializer を上書きすることを確認する（本モジュール `run` のドキュメント参照）。
     let init = TensorProto {
         name: "x".to_string(),
-        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
         dims: vec![1],
         float_data: vec![100.0],
         int64_data: vec![],

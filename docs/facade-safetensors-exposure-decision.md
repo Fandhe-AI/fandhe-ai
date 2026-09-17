@@ -73,3 +73,13 @@
 - `docs/compat-feature-gap.md` §2.15
 - `crates/onnx-interop/src/st_load.rs`・`st_save.rs`
 - `.claude/rules/deps-policy.md`
+
+## 9. 追補（イシュー #1963・2026-09-17）: publish 前提の充足
+
+§3.1 の publish 前提（`onnx-interop` の crates.io 公開が facade 公開面拡張
+の一般承認範囲外であるため段階 0 とする根拠）のうち、「`onnx-interop`
+自体の crates.io 公開」はイシュー #1963 のユーザー承認（2026-09-17）を
+受けて充足した（`docs/crates-io-publishing-order.md` §13）。ただし推奨案
+（案 B: facade 直接 `safetensors` 依存の独立実装）自体の採否・実装着手は
+別途ユーザー承認が必要であり、本追補は publish 前提の充足のみを記録する
+（段階 0 は継続）。

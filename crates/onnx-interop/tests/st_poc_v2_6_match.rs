@@ -2,7 +2,7 @@
 //!
 //! `tests/st_load.rs`（#73）は「`Tensor::get()` 経由の素朴なローカル forward」による
 //! 突合に留まる。本ファイルはそのギャップを埋め、以下 4 点を production オペ
-//! （`onnx_interop::ops::{gemm, relu, sigmoid}`）を用いて検証する（実装計画の 4 テスト群）。
+//! （`fandhe_ai_onnx_interop::ops::{gemm, relu, sigmoid}`）を用いて検証する（実装計画の 4 テスト群）。
 //!
 //! 1. 暗黙アダプタ不在の検証（キー集合完全一致・shape が `[out,in]` ネイティブのまま・
 //!    転置省略時は `OpError::GemmDimMismatch` になる負のテスト）
@@ -28,9 +28,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use fandhe_ai_onnx_interop::ops::{GemmAttrs, OpError, gemm, relu, sigmoid};
+use fandhe_ai_onnx_interop::st_load::{load_safetensors_f32, require_keys};
 use fandhe_ai_tensor_core::Tensor;
-use onnx_interop::ops::{GemmAttrs, OpError, gemm, relu, sigmoid};
-use onnx_interop::st_load::{load_safetensors_f32, require_keys};
 use serde::Deserialize;
 
 const FIXTURE_DIR: &str = concat!(

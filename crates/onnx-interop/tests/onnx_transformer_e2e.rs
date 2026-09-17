@@ -28,10 +28,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use fandhe_ai_onnx_interop::onnx::graph::build_graph;
+use fandhe_ai_onnx_interop::onnx::interp::{Value, run};
+use fandhe_ai_onnx_interop::onnx::proto::ModelProto;
 use fandhe_ai_tensor_core::Tensor;
-use onnx_interop::onnx::graph::build_graph;
-use onnx_interop::onnx::interp::{Value, run};
-use onnx_interop::onnx::proto::ModelProto;
 use prost::Message;
 use serde::Deserialize;
 
