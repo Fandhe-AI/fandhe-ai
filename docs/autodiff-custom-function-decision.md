@@ -350,3 +350,104 @@ pub trait CustomFunction: Send + Sync + 'static {
 - `docs/autodiff-rnn-cell-tape-design.md`（内部クレート実装・facade 公開分離の前例。#1647）
 - 関連イシュー: #1945（本節）・#1946（実装引き継ぎ先）・#1944（親）・#1612・#1593・#1634（前提。
   いずれも CLOSED）
+
+## 13. 実装記録（#1946）
+
+§12.5 (a)（内部クレート限定）の範囲で実装済み。§12.4 の確定設計をそのまま実装しており、
+以下は実装時に判明した差異・実測のみを記録する。
+
+### 13.1 イシュー文面との差異
+
+イシュー #1946 の文面は `Box<dyn CustomFunction>`・入口名 `apply_custom` を挙げていたが、
+§12.4（本 issue #1945 の確定設計）は `Arc<dyn CustomFunction>`・入口名 `Tape::custom` を
+確定させており、実装は §12.4 に従った。`grad::vjp` が `op.clone()` して網羅 match する契約
+（`Op: Clone` が必須）のため、`Box<dyn Trait>`（`Clone` 不可）では成立せず `Arc` が必須である。
+
+### 13.2 実装ファイル・構成
+
+- `crates/autodiff/src/custom.rs`（新規）: `pub trait CustomFunction`（`name`／`output_shape`／
+  `forward`／`backward` の 4 メソッド）・`pub(crate) struct CustomFn(Arc<dyn CustomFunction>)`
+  （`derive(Clone)` + 手書き `Debug`。`.name()` のみ出力し `Op` 全体の `derive(Debug)` を保つ）。
+- `crates/autodiff/src/tape.rs`: `Op::Custom { inputs: Vec<NodeId>, func: CustomFn }` を追加。
+  `is_checkpoint_eligible` へ `Op::Custom => false` の腕・`for_each_input` へ `Op::Concat` と
+  合流する腕（`inputs` 全件 yield）を追加。`Tape::custom` を新設（`Var::cat` と同じ「層 1で
+  実体化 → `RefCell` 借用を閉じてからユーザー `forward` を呼ぶ」規律）。
+- `crates/autodiff/src/grad.rs`: `vjp` の match に `Op::Custom` の腕を 1 つ追加（既存の腕は
+  1 行も変更していない——受入基準 1「既存 backward は bit 同一のまま」の構造的担保）。
+- `crates/autodiff/src/lib.rs`: `mod custom;`・`pub use custom::CustomFunction;` とクレート doc
+  1 段落を追加。`AutodiffError` に新規 variant は追加していない（既存 `InvalidArgument`／
+  `Shape`／`Backward`／`TapeMismatch` で全ケースを表現できたため）。
+
+### 13.3 コンパイルエラー箇所の実測（受入基準 3）
+
+`Op::Custom` variant を追加した直後（`for_each_input`／`is_checkpoint_eligible` へ腕を
+追加する前）に `cargo check -p fandhe-ai-autodiff` を実行し、非網羅 match によるコンパイル
+エラーが計画どおり `is_checkpoint_eligible`・`for_each_input`・`grad::vjp` の 3 箇所のみで
+あることを実測確認した（他の `match &node.op`／`match self`（`is_lazy_elementwise`・
+`is_view`・`recompute_value` 内の各 match 等）は `matches!` マクロまたは `_` ワイルドカードを
+持つため非到達で影響なし）。
+
+### 13.4 テスト
+
+- `crates/autodiff/src/tape.rs::custom_op_tests`（`pub(crate)` API を直接使う必要がある
+  契約のみ。クレート内単体テスト・4 件）: `is_checkpoint_eligible() == false` 固定・
+  `for_each_input` が `inputs` を発生順に yield・`Tape::custom` が `Op::ResidentLeaf` 入力を
+  `InvalidArgument` で拒否・空 `inputs` を `InvalidArgument` で拒否。
+- `crates/autodiff/src/custom.rs::tests`（1 件）: `CustomFn` の `Debug` 出力が `.name()` の
+  みを表示すること。
+- `crates/autodiff/tests/custom_function.rs`（公開 API のみを経由する統合テスト・11 件）:
+  自作 `CustomRelu` と組み込み `Var::relu` の grad 経路が forward／`dx`／`dw` すべて bit
+  完全一致（受入基準 2）・2 入力の解析的 `CustomMul`・`output_shape` 宣言と実出力の不一致
+  検出・`backward` 戻り値の長さ不一致／shape 不一致／`requires_grad[i]==true` への `None`
+  のいずれも fail-closed（`AutodiffError::Backward`／`Shape`）・`requires_grad` 前方伝播
+  （`Tape::var_no_grad` 入力に対し `false` が正しく渡り `None` を受理し、`Some` を返しても
+  破棄されること）・`Tape::backward_accumulate` で `backward` が 2 回呼ばれ勾配が単純 2 倍
+  になること（bit 一致）・クロステープ検査・`Arc<dyn CustomFunction>: Send + Sync` の静的
+  アサーション。
+- `crates/facade/tests/api_surface.rs`（否定ガード 2 件追加）:
+  `facade_does_not_reexport_custom_function`（`pub use` に `CustomFunction` を含まない）・
+  `facade_tape_does_not_expose_custom_forwarding_method`（facade 独自 `struct Tape` に
+  `pub fn custom(` が存在しない）。§12.5 (b) 承認取得時にこれらのガードを更新・撤去する。
+
+checkpoint 区間との相互作用（`Op::Custom` が常に checkpoint 解放対象から除外される）・
+`for_each_input` 経由の poison 伝播は、`is_checkpoint_eligible`／`for_each_input` の実装
+自体が `Op::Concat`・既存の非適格演算群（`Op::Where`／`Op::Gather` 等）と完全に同型の
+網羅 match の腕として構成されているため、既存の checkpoint／poison 回帰テスト
+（`tests/checkpoint.rs`・`tests/checkpoint_review_1624.rs`）が固定する不変条件がそのまま
+`Op::Custom` にも適用される（個別の統合テストとしては追加していない）。
+
+### 13.5 数値契約・実機実測
+
+`CustomFunction::forward`／`backward` は常に host 実行（`BackendOps` 非経由）のため、
+REQ-2（バックエンド間数値一致）の対象外・CUDA／Metal 実機実測の対象外である
+（§6・§12.5 (d) のとおり）。
+
+### 13.6 スコープ外（§12.5 (b)・実装せず）
+
+facade 公開面（`fandhe_ai::CustomFunction` 再エクスポート・facade `Tape::custom` 転送
+メソッド・`api_surface.rs` の公開面拡張検査）は本 issue の対象外のまま、別途ユーザー
+承認を得てから着手する。
+
+## 14. `create_graph`（高階微分。#1942／#1943）との関係
+
+本 issue（#1946）と `create_graph`（`docs/autodiff-higher-order-grad-decision.md`。
+イシュー #1942／#1943）は並行して実装され、`origin/main` へ取り込む際に `Op` の網羅
+match（`Op::supports_create_graph()`。同 doc §8 の 69 variant 分類は `Op::Custom`
+新設前のもので同 variant を含まない）が `Op::Custom` を欠いたままコンパイル不能に
+なることが判明した（PR #1996 マージ時。イシュー #1946）。
+
+`Op::Custom` は `create_graph` の**対象外**（`Op::supports_create_graph()` は
+`Op::Custom { .. } => false` を返す）と確定する。理由: `CustomFunction::backward` は
+上流勾配（`upstream: &Tensor<f32>`）を受け取り数値テンソルの VJP のみを返す契約
+（§12.4／§13.2）であり、子テープ（`create_graph.rs::backward_create_graph`）が要求する
+「入力ノードを起点に `Var` 演算として再生可能な演算列」を一切持たない。ユーザー定義
+`forward`／`backward` はブラックボックスの数値関数であり、子テープ上でその微分演算
+自体を記録する手段が構造的に存在しないため、対応するには `CustomFunction` に
+二階微分専用の別メソッド（例: `backward_of_backward`）を追加する API 拡張が必要になる
+（本 issue のスコープ外）。
+
+拒否時の挙動は他の非対象 Op（`Op::ScalarUnary`／`Op::Softmax` 等）と同型で、
+`Tape::backward_create_graph` の入口検査（`validate_ancestors`）が子テープへ一切
+書き込む前に型付き `Err(AutodiffError::Backward(_))` を返す（fail-closed）。
+`crates/autodiff/tests/create_graph.rs::create_graph_rejects_unsupported_op_custom`
+で固定した。

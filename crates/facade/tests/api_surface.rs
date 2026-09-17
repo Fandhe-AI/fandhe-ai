@@ -1484,6 +1484,135 @@ fn fit_types_are_reachable_via_facade_only() {
         .expect("test fixture: set_lr(0.05) は有効値のはず");
 }
 
+/// `crates/facade/src/` の `pub use` が `CustomFunction`（ユーザー定義
+/// forward／backward プラグイン機構。イシュー #1946・案 B）を
+/// 再エクスポートしていないことを固定する（`docs/autodiff-custom-
+/// function-decision.md` §12.5 (b)「facade 公開面」は未承認のまま対象外。
+/// `facade_does_not_reexport_cast_ops` と同型の走査）。
+#[test]
+fn facade_does_not_reexport_custom_function() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            if trimmed.contains("CustomFunction") {
+                offending.push(format!(
+                    "{}: `{trimmed}` が CustomFunction を含む",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が CustomFunction を再エクスポートしている\
+         （§12.5 (b) は未承認のまま対象外という設計判断に違反）: {offending:?}"
+    );
+}
+
+/// facade 独自の `struct Tape`（`crates/facade/src/lib.rs`）が
+/// `Tape::custom` への転送メソッドを持たないことを固定する（`Tape::
+/// var_no_grad` の前例〈`docs/autodiff-custom-function-decision.md`
+/// §12.4「入口」〉と同じ「転送メソッドを追加しない限り facade から
+/// 到達不能」という設計を、転送メソッド自体が生えていないことで直接
+/// 検査する）。承認 (b) を得て転送メソッドを追加する際は本テストを
+/// 更新する。
+#[test]
+fn facade_tape_does_not_expose_custom_forwarding_method() {
+    let lib_rs = facade_crate_root().join("src/lib.rs");
+    let content = read_to_string_or_panic(&lib_rs);
+    assert!(
+        !contains_pub_fn_custom_declaration(&content),
+        "facade 独自の Tape に `pub fn custom(...)` 宣言（ジェネリクス・\
+         lifetime 付き `pub fn custom<'t>(` を含む）が見つかった\
+         （§12.5 (b) 未承認のまま到達可能にしてしまっている）"
+    );
+}
+
+/// `pub fn custom` 宣言（`pub fn custom(` に加え、`Tape::custom` 本体
+/// と同型の `pub fn custom<'t>(` のようなジェネリクス／lifetime 付き
+/// 宣言も含む）の検出。`pub fn custom` の直後に任意個の空白、続けて
+/// 任意で `<...>`（ジェネリクス・lifetime パラメータ節。ネストする
+/// `<>` を素朴にカウントして対応する）、さらに任意個の空白を挟んで
+/// `(` が現れる形を宣言とみなす（`pub fn custom_foo(` のような無関係
+/// な識別子への誤検出は、`custom` 直後が英数字／`_` の場合を除外する
+/// ことで避ける）。
+fn contains_pub_fn_custom_declaration(content: &str) -> bool {
+    const NEEDLE: &str = "pub fn custom";
+    let bytes = content.as_bytes();
+    let mut search_start = 0usize;
+    while let Some(rel_idx) = content[search_start..].find(NEEDLE) {
+        let idx = search_start + rel_idx;
+        let after = idx + NEEDLE.len();
+        search_start = after;
+        // `custom` の直後が識別子構成文字（英数字／`_`）なら
+        // `custom_foo` 等の無関係な関数名なので除外する。
+        if bytes
+            .get(after)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        {
+            continue;
+        }
+        let mut pos = after;
+        // 任意個の空白（改行含む）をスキップする。
+        while bytes.get(pos).is_some_and(|b| b.is_ascii_whitespace()) {
+            pos += 1;
+        }
+        // 任意で `<...>`（ジェネリクス／lifetime 節）をスキップする。
+        // ネストする `<>`（例: `<T: Foo<Bar>>`）にも対応するため
+        // 深さカウンタで対応する `>` まで読み飛ばす。
+        if bytes.get(pos) == Some(&b'<') {
+            let mut depth = 0i32;
+            while let Some(b) = bytes.get(pos) {
+                match b {
+                    b'<' => depth += 1,
+                    b'>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            pos += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                pos += 1;
+            }
+            if depth != 0 {
+                // 対応する `>` が見つからないまま終端した場合は
+                // 宣言として確定できないので次の occurrence を探す。
+                continue;
+            }
+        }
+        // 任意個の空白をスキップし、`(` が続けば宣言とみなす。
+        while bytes.get(pos).is_some_and(|b| b.is_ascii_whitespace()) {
+            pos += 1;
+        }
+        if bytes.get(pos) == Some(&b'(') {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn contains_pub_fn_custom_declaration_detects_variants() {
+    assert!(contains_pub_fn_custom_declaration("pub fn custom("));
+    assert!(contains_pub_fn_custom_declaration("pub fn custom<'t>("));
+    assert!(contains_pub_fn_custom_declaration(
+        "pub fn custom<'t, T: Foo<Bar>>("
+    ));
+    assert!(contains_pub_fn_custom_declaration("pub fn custom  (\n"));
+    assert!(!contains_pub_fn_custom_declaration("pub fn custom_foo("));
+    assert!(!contains_pub_fn_custom_declaration(
+        "// pub fn custom_bar(\nfn other() {}"
+    ));
+    assert!(!contains_pub_fn_custom_declaration("let custom = 1;"));
+}
+
 /// AMP 統合（イシュー #1961。`compat::Sequential::compile_with_amp`）の
 /// 新規公開型（`fandhe_ai::compat::{AmpConfig, AmpDType}`）が `fandhe_ai`
 /// のみの import で構築でき、`Sequential::compile_with_amp`／
