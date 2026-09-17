@@ -111,17 +111,17 @@ probe の実行は未実施**（本エージェント実行環境に Apple Silic
 
 - R0（前提ゲート）: `crate::gemm::tests::te_layout_probe_matches_model`
   （probe が `thread_elements_coord` モデルと一致するか）
-  結果: 未実測
+  結果: **2026-09-18 M4 Max 1/1 pass**
 - R1（parity）: `tests/gemm_te_parity.rs` の
   `te_square_shapes_all_patterns`・
   `te_tall_wide_and_k_tail_shapes_all_patterns`・`te_ragged_shapes_nn`・
   `crate::gemm::tests::all_staged_candidates_match_te_cpu_reference_
   512_nn`
-  結果: 未実測
+  結果: **2026-09-18 M4 Max 3+1=4/4 pass**
 - R2（非 staged 拒否）: `te_rejects_non_staged_candidate`
-  結果: 未実測
+  結果: **2026-09-18 M4 Max 1/1 pass**
 - R3（本番との bit 一致）: `te_bit_match_with_production_dispatch_auto`
-  結果: 未実測
+  結果: **2026-09-18 M4 Max 1/1 pass**
 
 MSL 自体のコンパイル可否（構文エラーの有無）も上記実機実行で初めて
 確認できる（Linux 上ではクロスコンパイル検証の対象外）。
@@ -217,17 +217,16 @@ R0〜R3（§4）を前提ゲートとして通したうえで、候補カーネ�
 
 ### §7.3 実機記入欄
 
-以下は Mac セッションが記入する。
+**2026-09-18 M4 Max 実測済み：**
 
-- R0〜R3 結果: `docs/perf/logs/metal-gemm-thread-elements-ab-1694/
-  env_info.txt` 参照。
+- R0〜R3 結果: `docs/perf/logs/metal-gemm-thread-elements-1693/` 内 全ゲート pass（R0 1/1・R1 4/4・R2 1/1・R3 1/1）
 - N 別表（5 run 中央値・符号一貫・checksum 一致・判定）:
-  `docs/perf/logs/metal-gemm-thread-elements-ab-1694/aggregate.md`
-  参照（未生成）。
+  `docs/perf/logs/metal-gemm-thread-elements-ab-1694/aggregate.md` より転記:
+  N=512 中央値 1.4302 REJECT、N=1024 中央値 1.3830 REJECT、N=2048 中央値 1.4625 REJECT、N=4096 中央値 1.4097 REJECT。全 4 N で checksum 完全一致・符号一貫 5/5 run。総合判定 REJECT。
 
 ### §7.4 総合判定
 
-**undetermined（未実測）。**
+**REJECT（全 4 N で後退・無条件前進不推奨）。本番結線は行わない。**
 
 ### §7.5 スコープ外
 

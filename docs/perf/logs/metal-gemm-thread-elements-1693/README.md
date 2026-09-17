@@ -1,8 +1,8 @@
 # thread_elements() 方式 BlockMMA 候補（イシュー #1693）実測ログ置き場
 
-本ディレクトリは Mac セッション（#1694）が実機実測ログを置くための
-記入欄。本 PR 時点ではログは未生成（本エージェント実行環境に Apple
-Silicon 実機がないため）。
+## 実測結果（2026-09-18・Apple M4 Max）
+
+すべてのゲート（R0〜R3）が通過。実測ログは下記「保存すべきファイル一覧」に記録済み。詳細は `docs/perf/metal-gemm-thread-elements-candidate.md` §4 を参照。
 
 ## 保存すべきファイル一覧（予定）
 
