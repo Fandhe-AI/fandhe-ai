@@ -144,8 +144,9 @@ CPU 参照実装（`fandhe_ai_backend_cpu::reduction::sum`）と **bit 完全
 ## 8. スコープ外（後続イシューへ引き継ぐ）
 
 - `max`／`min`／`mean` の Metal カーネル自体（`sum` は #1896 で結線
-  済み。`mean` は `sum` の結果をホスト側で 1 回除算する合成実装の
-  ため対象外のまま自動的に有効化されている）
+  済み。`argmax`／`argmin` は #1951 で実装済み〈§11〉。`mean` は
+  `sum` の結果をホスト側で 1 回除算する合成実装のため対象外のまま
+  自動的に有効化されている）
 - M4 Max 実機での結線後の実測（§9・11 件の backward テスト判定不能の
   解消確認を含む。`docs/perf/logs/metal-reduce-sum-wiring-1896/
   README.md` へ申し送り）
@@ -286,3 +287,81 @@ pass。フル実行（`--all-features --no-fail-fast -- --ignored`）は 411 pas
   `Var::sum(Some(dim))` が `Err(AutodiffError::Backend(BackendError::
   Unsupported(_)))` を返すことを機械的に固定（`cast.rs` のフィクス
   チャと同型。判定迂回経路を作らない `.claude/rules/security.md` A08）
+
+## 11. argmax／argmin（イシュー #1951）
+
+### 11.1 契約の核心
+
+- **単一軸（`dim=Some(axis)`）**: `sum` と同じく CPU `axis_arg_reduce`
+  （出力要素ごとに独立して縮約軸を昇順に逐次走査）を **逐語再現**する。
+  1 スレッド = 1 lane で `best_idx=0`／`best` 未確定から開始し、NaN は
+  スキップ、`v > best`（argmax）／`v < best`（argmin）の strict 比較の
+  ときのみ更新する。
+- **全要素（`dim=None`）**: CPU `arg_slice` は `sum_slice_f64`（`sum`）
+  と異なり**平坦な逐次走査**（チャンク分割しない）。Metal は `sum` と
+  同じ 2 段構成（チャンク内走査 → チャンク間走査）を採るため、逐語
+  再現ではなく**等価性の証明**に依拠する: (1) チャンク内走査で
+  「チャンク内最初に現れる極値」の (キー, グローバル添字) を求め、
+  (2) チャンク番号昇順の走査で strict 置換のみ行う（同値は先行チャンク
+  を保持）。平坦走査の結果は「極値を持つ最小添字」であり、(1) は
+  チャンク内最小添字、(2) の strict 置換は同値時に先行チャンク（＝
+  より小さい添字）を保持するため、2 段構成の結果は全域で平坦走査と
+  一致する。`crate::reduce_model::argext_all_chunked_matches_flat_scan`
+  が全域で機械的に裏付ける。
+- **比較は整数ドメインで行う**: GPU 上の f32 非正規化数は flush され
+  うるため、float の `<`／`>`・`isnan(` を直接使わず、ビットパターン
+  から「NaN は除外・±0 は同値化」した単調 `uint` キー（`crate::
+  reduce_model::arg_key`／`reduce.metal::red_arg_key`）へ変換してから
+  整数比較する。`crate::sort_model::value_key`（NaN を最大キーへ写像）
+  とは NaN の扱いが異なるため独立に定義する。
+
+### 11.2 実装構成
+
+- `crate::reduce_model`: `ArgExtKind`（Max／Min）・`arg_key`・
+  `argext_axis_lane`・`argext_all_chunked`（ホスト逐語モデル・
+  等価性検証テスト込み）・`plan_argext_all`／`plan_argext_axis`
+  （既存 `plan_reduce_*` に `i32` 添字範囲検査を追加）。
+- `shaders/reduce.metal`: `reduce_arg_all_chunk_f32`／
+  `reduce_arg_all_finalize_f32`（全要素 2 段。中間値は `partial_key`／
+  `partial_idx`〈`u32`〉2 本。無効チャンクは `partial_idx=0xFFFFFFFF`）・
+  `reduce_arg_axis_f32`（単一軸 1 段）。`mode`（`constant uint&`。
+  0=Max・1=Min）で切替。`red_f64_*` は使わない（加減算不要）。
+- `crate::reduce::MetalReduce`: `run_arg_all_f32`／`run_arg_axis_f32`
+  （新規パイプライン 3 種を保持）。
+- `crate::ops::metal_argext`（`MetalBackendOps::argmax`／`argmin` 共通
+  ヘルパ）: `reduce_out_shape` → 空縮約判定（CPU
+  `reduce_error_to_backend_error` の `"argmax"`／`"argmin"` 分岐と同じ
+  `BackendError::KernelLaunchFailed` 写像。単位元を持たないため）→
+  `checked_numel` → `plan_argext_all`／`plan_argext_axis` 先出し
+  （`i32` 範囲超過は `Unsupported` へ写像しホストフォールバックへ委ねる。
+  `Var::argmax`／`argmin` は `sum` と異なりホスト参照実装
+  〈`eval::argmax`／`argmin`〉フォールバックを持つ）→
+  `context_cache::cached_reduce` 経由でカーネル起動。
+
+### 11.3 サイズ上限・エラー契約
+
+- カーネル引数は `uint`（既存 `plan_reduce_*` と同じ `u32::MAX` 上限）。
+- 出力は `int`。CPU `build_index_tensor` の `IndexRangeOverflow` は
+  **データ依存**（選ばれた添字が `i32::MAX` 超のときのみ）だが、
+  Metal 側は形状だけから判定できる十分条件（全要素: `numel >
+  i32::MAX`・単一軸: `axis_len > i32::MAX`）を `plan_argext_all`／
+  `plan_argext_axis` で検査し、該当時は `Unsupported` へ写像して
+  ホスト参照実装（同じデータ依存エラー契約を持つ）へ委ねる。
+- 空縮約は CPU と同じくエラー（`sum` のようにゼロ埋めしない）。
+
+### 11.4 テスト構成・実機実測
+
+- Linux 実行可能: `reduce_model.rs` 単体テスト（CPU 参照実装との
+  全域一致・チャンク境界タイ・NaN・±0・平坦走査との等価性・plan の
+  `i32` 境界）・`reduce_source_evidence.rs`（MSL 文字列証跡: カーネル
+  宣言・境界検査・`mode` 引数・`red_f64_*` 非参照・ビットキー比較）・
+  `backend_ops_real_device.rs::argmax_argmin_shape_errors_without_
+  device_init`（形状由来エラー経路がデバイス初期化を要しないこと）。
+- macOS 実機 `#[ignore]`: `reduce_parity.rs`（起動 API 直叩き。全要素・
+  単一軸・タイ・NaN・run-to-run 決定性）・`backend_ops_real_device.rs::
+  backend_ops_argmax_argmin_match_cpu_exact`（`BackendOps` 経由。
+  transpose view 込み）・`facade/tests/reduce_backend_parity.rs::
+  metal_argmax_and_argmin_match_cpu_exact`。**M4 Max 実機実測は本
+  実装セッション（Linux 環境。Apple Silicon 実機への到達手段なし）
+  では未実施のまま Mac セッションへ申し送り**（`docs/perf/logs/
+  metal-argext-1951/README.md` に実行手順・事前登録判定規則を記載）。
