@@ -173,3 +173,64 @@ fn cuda_softmax_forward_matches_cpu() {
         cpu_out.as_slice().expect("contiguous"),
     );
 }
+
+fn log_softmax_forward_on(device: Device) -> Tensor<f32> {
+    let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    tape.make_var(&leaf())
+        .log_softmax(1)
+        .expect("log_softmax: dim=1 は rank=2 の範囲内")
+        .to_tensor()
+}
+
+/// `Var::log_softmax` forward が CUDA（イシュー #1949 の backward
+/// カーネル追加時点でも forward 経路は無変更のまま）で CPU と一致する
+/// ことの非後退確認。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_log_softmax_forward_matches_cpu() {
+    let cuda_out = log_softmax_forward_on(Device::Cuda(0));
+    let cpu_out = log_softmax_forward_on(Device::Cpu);
+
+    assert_parity(
+        "log_softmax forward: CUDA tape_for vs CPU tape_for",
+        cuda_out.as_slice().expect("contiguous"),
+        cpu_out.as_slice().expect("contiguous"),
+    );
+}
+
+/// `matmul → log_softmax → mse_loss` backward（`d_weight`）を CUDA
+/// （`BackendOps::log_softmax_backward` 専用カーネル。イシュー #1949）
+/// と CPU（既定 `Unsupported` によるホスト VJP フォールバック）で
+/// 突き合わせる（`cpu_softmax_backward_matches_naive_reference` と同型
+/// のグラフ構成を device 横断へ拡張）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn cuda_log_softmax_backward_matches_cpu() {
+    let w = Tensor::new(
+        vec![0.5, -0.3, 0.2, 0.7, -0.6, 0.1, 0.4, -0.2, 0.3, 0.9],
+        &[5, 2],
+    )
+    .expect("valid tensor");
+    let target = Tensor::new(vec![0.2, 0.6, 0.3, 0.4], &[2, 2]).expect("valid tensor");
+
+    let dw_on = |device: Device| -> Tensor<f32> {
+        let tape =
+            fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+        let x = tape.make_var(&leaf());
+        let w_var = tape.make_var(&w);
+        let t_var = tape.make_var(&target);
+        let y = x.matmul(&w_var).unwrap().log_softmax(1).unwrap();
+        let loss = y.mse_loss(&t_var).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        grads.get(&w_var).unwrap().expect("到達する").clone()
+    };
+
+    let dw_cuda = dw_on(Device::Cuda(0));
+    let dw_cpu = dw_on(Device::Cpu);
+
+    assert_parity(
+        "log_softmax backward（dW）: CUDA tape_for vs CPU tape_for",
+        dw_cuda.as_slice().expect("contiguous"),
+        dw_cpu.as_slice().expect("contiguous"),
+    );
+}

@@ -5124,6 +5124,68 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::log_softmax_backward`] の
+    /// CUDA 実装（イシュー #1949）。`softmax` オーバーライドと同じ構成:
+    /// [`row_softmax_layout`] が非最終軸を `Ok(None)` として区別する
+    /// 契約に従い、その場合はデフォルトの `Unsupported`（`grad::vjp` の
+    /// `Op::LogSoftmax` 分岐がホスト参照実装
+    /// `grad::log_softmax_vjp_along` へフォールバックする合図）と同じ
+    /// 挙動を返す。最終軸の場合は `context_cache::
+    /// cached_log_softmax_backward`・`CudaLogSoftmaxBackward::
+    /// run_log_softmax_backward_f32` を呼ぶ（融合プランを経由しない
+    /// 独立入口。`softmax` と同型）。
+    fn log_softmax_backward(
+        &self,
+        out: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        dim: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let Some((rows, cols)) =
+            row_softmax_layout(out.shape(), dim).map_err(BackendError::ShapeMismatch)?
+        else {
+            return Err(BackendError::Unsupported(
+                "log_softmax_backward: CUDA 行カーネルは最終軸限定（非最終軸はホスト参照実装へ委ねる）"
+                    .into(),
+            ));
+        };
+        if out.shape() != upstream.shape() {
+            return Err(BackendError::ShapeMismatch(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: out.shape().to_vec(),
+                    rhs: upstream.shape().to_vec(),
+                },
+            ));
+        }
+
+        let out_owned = out.contiguous();
+        let out_slice = out_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("log_softmax_backward: out not contiguous".into())
+        })?;
+        let upstream_owned = upstream.contiguous();
+        let upstream_slice = upstream_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("log_softmax_backward: upstream not contiguous".into())
+        })?;
+
+        let log_softmax_backward =
+            self.with_driver_call(&[], map_fused_kernel_init_error, || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_log_softmax_backward(&device)
+            })?;
+        let dx = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                log_softmax_backward.run_log_softmax_backward_f32(
+                    out_slice,
+                    upstream_slice,
+                    rows,
+                    cols,
+                )
+            },
+        )?;
+        Tensor::new(dx, out.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::release_cached_device_memory`] の CUDA 実装
     /// （イシュー #1020・REQ-14）。`gemm.rs`／`elementwise.rs`／`softmax.rs`
     /// が `context_cache::cached_allocator` 経由で共有する
