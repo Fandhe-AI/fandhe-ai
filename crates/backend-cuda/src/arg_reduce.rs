@@ -64,6 +64,40 @@ fn validate_i32_bound(value: usize, name: &str) -> Result<i32, CudaError> {
     })
 }
 
+/// `a * b`（例: 単一軸縮約の出力要素数 `total_out = outer * inner`）を
+/// 検証しつつ計算する（PR #2005 の codex／Cursor Bugbot 指摘の是正:
+/// `outer`／`inner` 個別は [`validate_i32_bound`] の上限内でも、積が
+/// `i32::MAX` を超えるケース——例 `[65536, 1, 32768]` を `dim=1` で
+/// 縮約すると `total_out = 65536 * 32768 = 2^31`——が
+/// `reduce.rs::validate_axis_layout` 経由の `InvalidReduceShape`
+/// 〈`ShapeMismatch` へ写像〉としてしか検出されず、ホスト
+/// フォールバックが効かなかった）。
+///
+/// 積を `usize` として表現できない場合（`checked_mul` が `None`。
+/// 現実的なテンソル形状では到達しない真の形状不正）は
+/// [`CudaError::InvalidReduceShape`]（`reduce.rs::validate_axis_layout`
+/// の同型オーバーフロー検査と同じ variant・同じ `ops.rs::
+/// map_reduce_error` の `ShapeMismatch` 写像）を返す。積が `usize` で
+/// 表現できるがカーネル引数 `int` 型の範囲（`i32::MAX`）を超える場合
+/// （このカーネル実装の容量超過）は [`CudaError::
+/// ArgReduceSizeLimitExceeded`] を返し `Unsupported` 経由でホスト
+/// フォールバックへ委ねる。
+fn validate_i32_bound_product(a: usize, b: usize, name: &str) -> Result<usize, CudaError> {
+    let product = a
+        .checked_mul(b)
+        .ok_or_else(|| CudaError::InvalidReduceShape {
+            detail: format!("arg_reduce: {name} overflow (a={a}, b={b})"),
+        })?;
+    if i32::try_from(product).is_err() {
+        return Err(CudaError::ArgReduceSizeLimitExceeded {
+            detail: format!(
+                "arg_reduce {name} must fit in i32 (kernel argument type): {name}={product}"
+            ),
+        });
+    }
+    Ok(product)
+}
+
 /// 全軸縮約 1 段目の起動パラメータ（`chunk_len`, `num_chunks`）を
 /// 決定する純関数（`kernels_arg_reduce.rs` モジュール doc「全軸縮約の
 /// 2 段構成」参照）。`numel == 0` は `(0, 0)`（呼び出し元は `numel == 0`
@@ -317,6 +351,12 @@ impl CudaArgReduce {
         validate_i32_bound(outer, "outer")?;
         validate_i32_bound(axis_len, "axis_len")?;
         validate_i32_bound(inner, "inner")?;
+        // `outer`／`inner` は個別には上限内でも積（`total_out`。単一軸
+        // 縮約の出力要素数）が `i32::MAX` を超えうる。`validate_axis_layout`
+        // 自身も同じ積を検査するが真の形状不正〈`InvalidReduceShape`〉と
+        // 混同して返すため、ここで先に容量超過〈`ArgReduceSizeLimitExceeded`〉
+        // のみを切り出す（`validate_i32_bound_product` doc 参照）。
+        validate_i32_bound_product(outer, inner, "total_out")?;
         let total_out = validate_axis_layout(a.len(), outer, axis_len, inner)?;
         if axis_len == 0 {
             if total_out > 0 {
@@ -384,6 +424,57 @@ mod tests {
         let err = validate_i32_bound(i32::MAX as usize + 1, "numel").unwrap_err();
         assert!(matches!(err, CudaError::ArgReduceSizeLimitExceeded { .. }));
         assert!(!matches!(err, CudaError::InvalidReduceShape { .. }));
+    }
+
+    // ------------------------------------------------------------------
+    // `validate_i32_bound_product` の分類検証（同じ codex／Cursor Bugbot
+    // 追加指摘の回帰テスト。`outer`／`inner` 個別は `i32::MAX` 以内でも
+    // 積〈単一軸縮約の出力要素数 `total_out`〉が超過するケースを
+    // `ArgReduceSizeLimitExceeded` として切り出せることを検証する）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn validate_i32_bound_product_accepts_within_bound() {
+        // outer=1024, inner=1024 → total_out=1_048_576（i32::MAX 未満）。
+        assert_eq!(
+            validate_i32_bound_product(1024, 1024, "total_out").unwrap(),
+            1_048_576
+        );
+    }
+
+    /// 実際に報告された形状 `[65536, 1, 32768]` を `dim=1` で単一軸縮約
+    /// した場合（`outer=65536, inner=32768`）: `outer`／`inner` は個別に
+    /// は `i32::MAX`〈約 2.1e9〉を大きく下回るが、積
+    /// `total_out = 65536 * 32768 = 2^31 = 2_147_483_648` は
+    /// `i32::MAX`（`2_147_483_647`）を 1 超過する。`ArgReduceSizeLimitExceeded`
+    /// として分類され（真の形状不正 `InvalidReduceShape` ではない）
+    /// `ops.rs::map_reduce_error` 経由で `Unsupported`
+    /// （`argext_with_fallback` のホストフォールバック対象）となること
+    /// を確認する。
+    #[test]
+    fn validate_i32_bound_product_detects_total_out_overflow_for_65536x1x32768_shape() {
+        let outer = 65536usize;
+        let inner = 32768usize;
+        assert!(validate_i32_bound(outer, "outer").is_ok());
+        assert!(validate_i32_bound(inner, "inner").is_ok());
+        assert_eq!(outer * inner, i32::MAX as usize + 1);
+
+        let err = validate_i32_bound_product(outer, inner, "total_out").unwrap_err();
+        assert!(matches!(err, CudaError::ArgReduceSizeLimitExceeded { .. }));
+        assert!(!matches!(err, CudaError::InvalidReduceShape { .. }));
+    }
+
+    /// `checked_mul` 自体がオーバーフローする（積が `usize` で表現
+    /// できない）場合は、真の形状不正として従来どおり
+    /// `InvalidReduceShape`（`ops.rs::map_reduce_error` が `ShapeMismatch`
+    /// へ写像し、ホストフォールバックへは委ねない）のまま維持される
+    /// ことを確認する（`ArgReduceSizeLimitExceeded` への誤分類がない
+    /// ことの固定）。
+    #[test]
+    fn validate_i32_bound_product_rejects_usize_overflow_as_shape_error() {
+        let err = validate_i32_bound_product(usize::MAX, 2, "total_out").unwrap_err();
+        assert!(matches!(err, CudaError::InvalidReduceShape { .. }));
+        assert!(!matches!(err, CudaError::ArgReduceSizeLimitExceeded { .. }));
     }
 
     // ------------------------------------------------------------------
