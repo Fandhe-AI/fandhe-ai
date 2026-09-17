@@ -17,6 +17,7 @@
   bit パターン改変ダンプがいずれも非 0 終了する
 """
 
+import argparse
 import importlib.util
 import io
 import math
@@ -224,6 +225,146 @@ class EscapeMdCellTest(unittest.TestCase):
         self.assertEqual(len(a4_lines), 1)
         self.assertIn("sum\\|ab\\|", a4_lines[0])
         self.assertNotIn("sum|ab|", a4_lines[0])
+
+
+class ExtraEpsCParameterizationTest(unittest.TestCase):
+    """`--extra-eps`/`--extra-c`（イシュー #1984／#1985）の単位丸め `u`
+    パラメータ化を検証する。既定出力の不変性・`build_extra_candidates_a`
+    の組合せ生成・`bound()` の計算式・CLI パーサの fail-closed 検証を対象
+    とする。
+    """
+
+    def test_build_extra_candidates_a_empty_when_either_missing(self):
+        # eps のみ／c のみでは空リスト（既定出力を byte 単位で不変に保つ契約）。
+        self.assertEqual(ptc.build_extra_candidates_a([("u", 1e-3)], []), [])
+        self.assertEqual(ptc.build_extra_candidates_a([], [0.5]), [])
+        self.assertEqual(ptc.build_extra_candidates_a([], []), [])
+
+    def test_build_extra_candidates_a_full_cross_product(self):
+        # 1 eps × 2 c × 2 k_mode(K/sqrtK) = 4 件。
+        cands = ptc.build_extra_candidates_a([("tf32_u=2^-11", 2.0**-11)], [0.5, 1.0])
+        self.assertEqual(len(cands), 4)
+        names = {c.name for c in cands}
+        self.assertIn("EXTRA c=0.5 eps=tf32_u=2^-11 K*0.25", names)
+        self.assertIn("EXTRA c=0.5 eps=tf32_u=2^-11 sqrtK*0.25", names)
+        self.assertIn("EXTRA c=1.0 eps=tf32_u=2^-11 K*0.25", names)
+        self.assertIn("EXTRA c=1.0 eps=tf32_u=2^-11 sqrtK*0.25", names)
+        for c in cands:
+            self.assertEqual(c.eps_value, 2.0**-11)
+            self.assertEqual(c.m_mode, "fixed0.25")
+
+    def test_extra_candidate_bound_matches_formula(self):
+        # イシュー #1984 相当（u=2^-11・c=0.5・K=4096）の bound 式突合。
+        cands = ptc.build_extra_candidates_a([("u", 2.0**-11)], [0.5])
+        k_cand = next(c for c in cands if c.k_mode == "K")
+        sqrtk_cand = next(c for c in cands if c.k_mode == "sqrtK")
+        m = _metric()
+        self.assertAlmostEqual(k_cand.bound(m, 4096), 0.5 * (2.0**-11) * 4096 * 0.25)
+        self.assertAlmostEqual(sqrtk_cand.bound(m, 4096), 0.5 * (2.0**-11) * math.sqrt(4096) * 0.25)
+
+    def test_render_markdown_default_output_unchanged_with_empty_extras(self):
+        # extra_candidates_a=None と extra_candidates_a=[] が既定（何も
+        # 指定しない）出力と byte 単位で一致すること（イシュー #1984／#1985
+        # の要求「既定出力は byte 単位で不変」の直接検証）。
+        n = 8
+        row, col = 2, 5
+        a_rows = parity_dump_truth.extract_rows_exact(parity_dump_truth.SEED_A, n, {row})
+        b_cols = parity_dump_truth.extract_cols_exact(parity_dump_truth.SEED_B, n, {col})
+        fma_f32, _partials = parity_dump_truth.fma_sequential_f32_exact(a_rows[row], b_cols[col])
+        ref_bits = struct.unpack("<I", struct.pack("<f", fma_f32))[0]
+        idx = row * n + col
+        line = (
+            f"PARITY_DUMP call=1 n={n} idx={idx} row={row} col={col} "
+            f"ref={fma_f32!r} ref_bits=0x{ref_bits:08x} "
+            f"actual={fma_f32!r} actual_bits=0x{ref_bits:08x} "
+            "abs=0.0 rel=0.0"
+        )
+        error_count = [0]
+        rows = list(parity_dump_truth.parse_dump_lines([line], n, error_count=error_count))
+        metrics = ptc.compute_metrics(rows, n)
+        doc_none = ptc.render_markdown({"cuda": metrics}, n)
+        doc_default = ptc.render_markdown({"cuda": metrics}, n, extra_candidates_a=None)
+        doc_empty = ptc.render_markdown({"cuda": metrics}, n, extra_candidates_a=[])
+        self.assertEqual(doc_none, doc_default)
+        self.assertEqual(doc_none, doc_empty)
+        self.assertNotIn("EXTRA", doc_none)
+
+    def test_render_markdown_with_extras_appends_extra_rows(self):
+        n = 8
+        row, col = 2, 5
+        a_rows = parity_dump_truth.extract_rows_exact(parity_dump_truth.SEED_A, n, {row})
+        b_cols = parity_dump_truth.extract_cols_exact(parity_dump_truth.SEED_B, n, {col})
+        fma_f32, _partials = parity_dump_truth.fma_sequential_f32_exact(a_rows[row], b_cols[col])
+        ref_bits = struct.unpack("<I", struct.pack("<f", fma_f32))[0]
+        idx = row * n + col
+        line = (
+            f"PARITY_DUMP call=1 n={n} idx={idx} row={row} col={col} "
+            f"ref={fma_f32!r} ref_bits=0x{ref_bits:08x} "
+            f"actual={fma_f32!r} actual_bits=0x{ref_bits:08x} "
+            "abs=0.0 rel=0.0"
+        )
+        error_count = [0]
+        rows = list(parity_dump_truth.parse_dump_lines([line], n, error_count=error_count))
+        metrics = ptc.compute_metrics(rows, n)
+        extras = ptc.build_extra_candidates_a([("tf32_u=2^-11", 2.0**-11)], [0.5])
+        doc = ptc.render_markdown({"cuda": metrics}, n, extra_candidates_a=extras)
+        self.assertIn("EXTRA c=0.5 eps=tf32_u=2^-11 K*0.25", doc)
+        self.assertIn("EXTRA c=0.5 eps=tf32_u=2^-11 sqrtK*0.25", doc)
+
+    def test_positive_finite_float_rejects_non_positive_and_non_finite(self):
+        for bad in ("0", "-1.0", "nan", "inf", "-inf", "not-a-number"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                ptc._positive_finite_float(bad, "--extra-c")
+
+    def test_parse_extra_eps_arg_valid(self):
+        label, value = ptc._parse_extra_eps_arg("tf32u2^-11=0.00048828125")
+        self.assertEqual(label, "tf32u2^-11")
+        self.assertAlmostEqual(value, 0.00048828125)
+
+    def test_parse_extra_eps_arg_rejects_missing_equals(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            ptc._parse_extra_eps_arg("no-equals-sign")
+
+    def test_parse_extra_eps_arg_rejects_invalid_label(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            ptc._parse_extra_eps_arg("bad|label=0.5")
+
+    def test_cli_extra_eps_without_extra_c_leaves_output_unchanged(self):
+        # イシュー #1984／#1985 の契約「片方のみ指定では追加候補が生成
+        # されない」を CLI 経由でも確認する。
+        n = 8
+        row, col = 2, 5
+        a_rows = parity_dump_truth.extract_rows_exact(parity_dump_truth.SEED_A, n, {row})
+        b_cols = parity_dump_truth.extract_cols_exact(parity_dump_truth.SEED_B, n, {col})
+        fma_f32, _partials = parity_dump_truth.fma_sequential_f32_exact(a_rows[row], b_cols[col])
+        ref_bits = struct.unpack("<I", struct.pack("<f", fma_f32))[0]
+        idx = row * n + col
+        line = (
+            f"PARITY_DUMP call=1 n={n} idx={idx} row={row} col={col} "
+            f"ref={fma_f32!r} ref_bits=0x{ref_bits:08x} "
+            f"actual={fma_f32!r} actual_bits=0x{ref_bits:08x} "
+            "abs=0.0 rel=0.0"
+        )
+        import tempfile
+
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+        f.write(line + "\n")
+        f.close()
+        try:
+            out_base, err_base = io.StringIO(), io.StringIO()
+            with redirect_stdout(out_base), redirect_stderr(err_base):
+                code_base = ptc.main(["--n", str(n), "--dump", f"cuda={f.name}"])
+            out_extra, err_extra = io.StringIO(), io.StringIO()
+            with redirect_stdout(out_extra), redirect_stderr(err_extra):
+                code_extra = ptc.main(
+                    ["--n", str(n), "--dump", f"cuda={f.name}", "--extra-eps", "u=0.5"]
+                )
+            self.assertEqual(code_base, 0)
+            self.assertEqual(code_extra, 0)
+            self.assertEqual(out_base.getvalue(), out_extra.getvalue())
+            self.assertNotIn("EXTRA", out_extra.getvalue())
+        finally:
+            os.unlink(f.name)
 
 
 class CliFailClosedTest(unittest.TestCase):

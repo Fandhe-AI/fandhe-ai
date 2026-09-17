@@ -242,3 +242,81 @@ python3 parity_dump_truth.py --n 2048 < ../../../docs/perf/logs/cuda-gemm-candle
 入力: `docs/perf/logs/cuda-gemm-candle-parity-1184/`（転送元コミット
 `4e1ad9cdb809969be3b98602a9d8f9cd23006c1f`）。
 実行環境・commit の記録: `docs/perf/logs/candle-parity-tolerance-candidates-1237/env_info.txt`。
+
+## 9. 単位丸め `u` のパラメータ化（イシュー #1984／#1985。実機不要な準備）
+
+イシュー #1984（burn cuda・TF32 経路の `u=2^-11`・`c=0.5` での机上救済確認）・
+#1985（PyTorch cpu N=4096 fail 1 要素の `c=0.5/1.0/1.5`・線形 K／√K 形の
+比較）は、いずれも §3 の候補 A（`bound = c × u × K^p × M`）を当初固定
+だった `u ∈ {2^-23, 2^-24}` 以外の値で机上計算したい要求である。本節は
+その**実機不要な準備**として `parity_tolerance_candidates.py` を拡張した
+記録であり、実測ダンプ突合そのもの（#1984／#1985 の受け入れ条件）は
+GB10／M4 Max 実機で `FRAMEWORK_COMPARE_PARITY_DUMP=1` によりダンプを取得
+した後の別作業として残る。
+
+### 9.1 拡張内容
+
+- `--extra-eps LABEL=VALUE`（複数可）: 単位丸め `u` の追加候補を
+  `LABEL=<c 表示用ラベル>`・`VALUE=<u の 10 進数表現>` で指定する
+  （例: `--extra-eps 'tf32u2^-11=0.00048828125'`）
+- `--extra-c VALUE`（複数可）: 候補 A の係数 `c` の追加値を指定する
+- 両方を指定した場合のみ、候補 A 表へ `EXTRA c=<c> eps=<LABEL>
+  <K|sqrtK>*0.25` 行が全組合せ（`--extra-eps` × `--extra-c` ×
+  `k_mode ∈ {K, sqrtK}`）で追記される。**いずれか一方のみ、または両方
+  未指定なら追加行は生成されず、既定出力は byte 単位で不変**
+  （`parity_tolerance_candidates_test.py::ExtraEpsCParameterizationTest`
+  で固定）
+- `M` は既存候補と同じ `fixed0.25`（入力範囲 U[-0.5,0.5) からの事前上界）
+  のみに限定する。実測 `max_ab` へ置換する A-2 系列は対象外
+  （`--extra-c` との全組合せで表が過大になるため）
+- 本体側の第 3 項（`docs/candle-parity-tolerance-contract-decision.md`）は
+  `0.5・u・K・S_A・S_B`（`S_A`／`S_B` は GEMM の A・B 全体から求める
+  **大域**の `max|A|`／`max|B|`。`docs/perf/candle-parity-tolerance-baseline-impact.md`
+  §3.3 の O(1) 導出）であり、本スクリプトの A-2（要素ごとの `max_ab`）とは
+  スケール導出方法が異なる。入力 U[-0.5,0.5) では大域積 `S_A・S_B` は
+  相対誤差約 1e-7 で `0.25`（`0.5 × 0.5`）へ収束するため、`fixed0.25` は
+  本体の大域積スケールに対する妥当な代用値として扱える
+
+### 9.1a `--extra-eps`/`--extra-c` の代表値・実測ダンプ取得コマンド（申し送り）
+
+- `2^-11 = 0.00048828125`（TF32 仮数部 10 bit の unit roundoff。#1984）
+- `2^-23 = 0.00000011920928955078125`（f32 machine epsilon。#1985 の
+  「現行 bound」相当）
+- 実測ダンプは `FRAMEWORK_COMPARE_PARITY_DUMP=1` で `bench-burn`／
+  `bench-fandhe`（PyTorch 側は Python ハーネス）を実行して取得する
+  （§8 の再現手順と同型。burn cuda・torch cpu 固有の起動手順は #1984／
+  #1985 側で確定する）
+
+### 9.2 #1984／#1985 での使用例
+
+```bash
+# #1984: TF32 単位丸め u=2^-11・c=0.5（burn cuda）
+python3 parity_tolerance_candidates.py --n 4096 \
+  --dump burn_cuda=<parity-dump path> \
+  --extra-eps 'tf32u2^-11=0.00048828125' --extra-c 0.5
+
+# #1985: 現行 eps=2^-23 で c=0.5/1.0/1.5 を K／√K 双方で比較（PyTorch cpu）
+python3 parity_tolerance_candidates.py --n 4096 \
+  --dump torch_cpu=<parity-dump path> \
+  --extra-eps 'eps2^-23=0.00000011920928955078125' \
+  --extra-c 0.5 --extra-c 1.0 --extra-c 1.5
+```
+
+`2^-11 = 0.00048828125`・`2^-23 = 0.00000011920928955078125` は Python の
+`2.0**-11`／`2.0**-23` で機械的に再現できる（浮動小数点として厳密表現可能
+な 2 のべき分母の値）。
+
+### 9.3 本拡張がスコープに含まないこと
+
+- **契約変更なし**: 本体 `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`／
+  `PARITY_SCALED_ABS_COEFF`・`bench-common::parity`・`compare_gemm_gate.py`
+  の判定式・`BASELINES` はいずれも変更していない。本拡張は診断専用ツール
+  （`scripts/bench/framework-compare/parity_tolerance_candidates.py`）への
+  純粋な追加のみ
+- **実測ダンプ突合そのものは対象外**: #1984（burn cuda 5 セル）・#1985
+  （PyTorch cpu N=4096 fail 1 要素）の実際の `PARITY_DUMP` 取得・
+  `parity_dump_truth.py` によるダンプ検証・本スクリプトでの救済可否判定は、
+  GB10／M4 Max 実機での `FRAMEWORK_COMPARE_PARITY_DUMP=1` 実行を要するため
+  本セッションのスコープ外のまま Mac／GB10 セッションへ申し送る
+- **#1986（精度クラス設計判断）は対象外**: `bench-common::parity` への
+  「比較対象の精度クラス」導入案の整理は本拡張の対象外（別 issue）
