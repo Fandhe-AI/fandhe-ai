@@ -186,6 +186,14 @@ pub fn rmsnorm_backward_rows(
     let mut dx = vec![0.0f32; x.len()];
     let mut dw_acc: Option<Vec<u64>> = w.map(|_| vec![0u64; hidden]); // +0.0（f64 bits）。
     let hidden_f64 = widen_f32_bits((hidden as f32).to_bits());
+    // `mean_dot` は CPU 参照実装（`grad::rmsnorm_vjp_rows`）・CUDA
+    // （`kernels_norm_backward.rs::rmsnorm_bwd_dx_new_f32`）と同じく
+    // `dot * (1.0 / hidden)`（逆数を丸めてから乗算）の演算列で計算する
+    // （PR #2001 codex-review P1 是正）。`dot / hidden` は数学的には
+    // 同値でも丸め誤差が異なり、相殺する `dot` と組み合わさると
+    // REQ-2 の統一複合判定を外れうる（例: rows=1, hidden=49, eps=0,
+    // weight=None, x=[1.0;49], dy=[1e30;49]）。
+    let inv_hidden_f64 = div_f64_bits(widen_f32_bits(1.0f32.to_bits()), hidden_f64);
     for r in 0..rows {
         let row = &x[r * hidden..(r + 1) * hidden];
         let dy_row = &dy[r * hidden..(r + 1) * hidden];
@@ -199,7 +207,7 @@ pub fn rmsnorm_backward_rows(
             let term = dxhat_at(i) * xhat;
             add_f64_bits(acc, widen_f32_bits(term.to_bits()))
         });
-        let mean_dot = div_f64_bits(dot, hidden_f64);
+        let mean_dot = mul_f64_bits(dot, inv_hidden_f64);
         let rstd64 = widen_f32_bits(rstd.to_bits());
         let dx_row = &mut dx[r * hidden..(r + 1) * hidden];
         for (i, (&xv, dxv)) in row.iter().zip(dx_row.iter_mut()).enumerate() {
@@ -614,5 +622,29 @@ mod tests {
         assert!(dx.is_empty());
         assert!(dw.is_none());
         assert!(db.is_none());
+    }
+
+    /// `mean_dot`（RMSNorm backward の `dot * (1.0 / hidden)`）を
+    /// `dot / hidden` のまま計算すると、相殺入力で CPU 参照実装
+    /// （`dot_acc * inv_n`）と丸め誤差が乖離し REQ-2 の統一複合判定を
+    /// 外れうる（PR #2001 codex-review P1 指摘の再現・是正確認）。
+    /// `rows=1, hidden=49, eps=0, weight=None, x=[1.0;49],
+    /// dy=[1e30;49]` は指摘コメントが挙げた具体例そのもの
+    /// （是正前は `dx` が全要素 `0.0` になり CPU 参照値 約 `1.407e14`
+    /// と乖離していた）。
+    #[test]
+    fn rmsnorm_backward_mean_dot_rounding_order_matches_cpu_reference() {
+        let hidden = 49usize;
+        let x = vec![1.0f32; hidden];
+        let dy = vec![1e30f32; hidden];
+        let (dx_gpu, dw_gpu) =
+            rmsnorm_backward_rows(&x, None, 0.0, 1, hidden, &dy).expect("valid shape");
+        let (dx_cpu, dw_cpu) = cpu_rmsnorm_backward(&x, None, 0.0, 1, hidden, &dy);
+        assert_parity("rmsnorm dx (mean_dot rounding order)", &dx_gpu, &dx_cpu);
+        assert!(dw_gpu.is_none());
+        assert!(dw_cpu.is_none());
+        // 是正前の既知の誤った挙動（全要素 0.0）へ後戻りしていないこと
+        // を明示的に確認する。
+        assert!(dx_gpu.iter().all(|&v| v != 0.0));
     }
 }

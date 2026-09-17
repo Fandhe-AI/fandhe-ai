@@ -670,7 +670,14 @@ kernel void rmsnorm_bwd_dx_f32(
         for (ushort offset = 16u; offset > 0u; offset >>= 1u) {
             lane_dot = nb_f64_add(lane_dot, nb_shuffle_xor_u64(lane_dot, offset));
         }
-        ulong mean_dot = nb_f64_div(lane_dot, hidden_f64);
+        // CPU 参照実装（`grad::rmsnorm_vjp_rows`）・CUDA
+        // （`kernels_norm_backward.rs::rmsnorm_bwd_dx_new_f32`）と同じ
+        // 演算列 `dot * (1.0 / hidden)`（逆数を丸めてから乗算）へ揃える
+        // （PR #2001 codex-review P1 是正）。`dot / hidden` は数学的に
+        // 同値でも丸め誤差が異なり、相殺する `dot` と組み合わさると
+        // REQ-2 の統一複合判定を外れうる。
+        ulong inv_hidden64 = nb_f64_div(0x3FF0000000000000ul, hidden_f64);
+        ulong mean_dot = nb_f64_mul(lane_dot, inv_hidden64);
 
         // パス 3: `dx = rstd * (dxhat - xhat * mean_dot)`。
         for (uint idx = lane; idx < hidden; idx += NB_SIMD_WIDTH) {
