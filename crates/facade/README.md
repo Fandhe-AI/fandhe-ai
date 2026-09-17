@@ -59,6 +59,27 @@ CUDA・Metal は実行時にデバイスの存在を検証し、利用できな�
 （自動フォールバックはしません）。バックエンド間の数値一致は「相対誤差 1e-3 未満
 または絶対誤差 1e-5 未満」の複合判定で担保します。
 
+## 相互運用（interop）
+
+`fandhe_ai::interop::safetensors` から safetensors 形式の save／load
+（`compat::Sequential::state_dict`／`load_state_dict` と組み合わせて
+使います）へ到達できます。
+
+```rust
+use fandhe_ai::compat::Sequential;
+use fandhe_ai::interop::safetensors::{
+    load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes,
+};
+
+let model = Sequential::new().add_linear(4, 8, /* seed = */ 1).unwrap();
+let bytes = save_safetensors_f32_to_bytes(&model.state_dict(), None).unwrap();
+let loaded = load_safetensors_f32_from_bytes(&bytes).unwrap();
+```
+
+ONNX import（`fandhe_ai::interop::onnx::OnnxModel`）も利用できます
+（詳細は `docs/facade-onnx-import-exposure-decision.md` 参照）。ONNX
+export への再エクスポートは引き続き未提供です。
+
 ## ドキュメント・リポジトリ
 
 利用者向けドキュメントサイト（GitHub Pages）: https://fandhe-ai.github.io/fandhe-ai/（Getting Started / Guides / Examples / API Reference）。API リファレンスは https://docs.rs/fandhe-ai
