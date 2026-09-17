@@ -131,6 +131,36 @@ fn validate_norm_backward_launch(
     Ok(())
 }
 
+/// [`layer_norm_backward_rows`] の `has_bias`（`bool`）駆動で確保する
+/// `hidden` サイズの bias 勾配 scratch buffer（`db`／`db_acc`）が
+/// `Vec` の capacity 上限（`isize::MAX` バイト）に収まることを事前
+/// 検査する。
+///
+/// `w: Option<&[f32]>` 駆動の `dw`／`dw_acc` 確保は `validate_norm_
+/// backward_launch` が既に検証済みの実スライス `w`（`w.len() ==
+/// hidden`）が存在する時点で `hidden` の確保可能性が裏付けられている
+/// （スライスはそれ自体 `isize::MAX` バイト以内に収まる Rust の不変
+/// 条件）ため安全だが、`has_bias` は単なる真偽値でそのような裏付けを
+/// 一切持たない。`rows == 0` の早期 return 分岐では `hidden` が検証を
+/// 通過しつつ任意に大きい値（例 `usize::MAX`）を取りうるため、確保前
+/// にここで拒否しなければ `vec![0.0f32; hidden]` が capacity overflow
+/// で panic する（PR #2001 codex-review P1 指摘。`.claude/rules/
+/// coding-rust.md`「本番経路で panic させない」方針）。`db_acc`
+/// （非ゼロ行パスの `u64` 要素）の方が `db`（`f32` 要素）より厳しい
+/// 上界のため、こちらを基準に検査する。
+fn validate_bias_alloc(hidden: usize) -> Result<(), NormBackwardPrepareError> {
+    const MAX_ELEMS: usize = isize::MAX as usize / std::mem::size_of::<u64>();
+    if hidden > MAX_ELEMS {
+        return Err(NormBackwardPrepareError::InvalidShape {
+            detail: format!(
+                "hidden too large to allocate bias gradient scratch buffer: \
+                 hidden={hidden}, max allocatable elements={MAX_ELEMS}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// RMSNorm 行内統計（`rstd`。`rmsnorm_bwd_dx_f32` パス 1 の逐語モデル）。
 /// CPU 参照実装 `row_rms_stats` と異なりレーンストライド butterfly で
 /// 二乗和を求める（forward `rmsnorm.metal` と同じ GPU 側都合。REQ-2
@@ -271,10 +301,15 @@ pub fn layer_norm_backward_rows(
     dy: &[f32],
 ) -> Result<LayerNormBackwardRowsOutput, NormBackwardPrepareError> {
     validate_norm_backward_launch(rows, hidden, x.len(), dy.len(), w.map(<[f32]>::len))?;
+    if has_bias {
+        validate_bias_alloc(hidden)?;
+    }
     if rows == 0 || hidden == 0 {
         // rows == 0 の場合 x.len() == 0 が検証済みのため dx 確保は
-        // 安全。dw／db は w／has_bias で実際に要求された場合のみ
-        // 確保する（`rmsnorm_backward_rows` と同じ理由）。
+        // 安全。dw は w が Some のときのみ確保する（`rmsnorm_backward_
+        // rows` と同じ理由）。db は has_bias が要求する場合のみ確保
+        // するが、直前の `validate_bias_alloc` により hidden の確保
+        // 可能性は既に保証済み。
         let dx = vec![0.0f32; x.len()];
         let dw = w.map(|_| vec![0.0f32; hidden]);
         let db = has_bias.then(|| vec![0.0f32; hidden]);
@@ -622,6 +657,24 @@ mod tests {
         assert!(dx.is_empty());
         assert!(dw.is_none());
         assert!(db.is_none());
+    }
+
+    /// `has_bias == true` かつ `hidden` が巨大（`usize::MAX`）で
+    /// `w == None`（bias 有無の裏付けとなる実スライスが一切存在
+    /// しない）な入力は `validate_norm_backward_launch` を通過するが、
+    /// 是正前は `db`（`rows == 0` 早期 return 分岐）を無条件で
+    /// `hidden` サイズ確保しており capacity overflow で panic して
+    /// いた（PR #2001 codex-review P1 指摘の再現・是正確認。直前の
+    /// `layer_norm_backward_rows_zero_rows_huge_hidden_does_not_panic`
+    /// は `has_bias == false` のみを検証しており、この分岐を捕捉
+    /// できていなかった）。是正後は panic ではなく型付き
+    /// `NormBackwardPrepareError::InvalidShape` を返す。
+    #[test]
+    fn layer_norm_backward_rows_zero_rows_huge_hidden_has_bias_rejects_instead_of_panicking() {
+        assert!(matches!(
+            layer_norm_backward_rows(&[], None, true, 1e-5, 0, usize::MAX, &[]),
+            Err(NormBackwardPrepareError::InvalidShape { .. })
+        ));
     }
 
     /// `mean_dot`（RMSNorm backward の `dot * (1.0 / hidden)`）を
