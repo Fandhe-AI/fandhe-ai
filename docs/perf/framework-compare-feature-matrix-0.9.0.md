@@ -30,7 +30,13 @@ $ git diff --stat v0.9.0..HEAD -- crates
   （根拠: `crates/facade/tests/api_surface.rs` の
   `facade_does_not_depend_on_unpublished_onnx_interop`／
   `facade_sources_do_not_reference_onnx_interop` が facade の
-  `onnx-interop` 非依存を機械的に固定している）。
+  `onnx-interop` 非依存を機械的に固定している。**注**: これは `v0.9.0`
+  タグ時点の公開面のスナップショット判定である。HEAD ではイシュー #2017
+  で ONNX import が `fandhe_ai::interop::onnx` として facade 公開済みと
+  なり、上記 2 テストは承認済み依存形状の検査
+  〈`facade_depends_on_onnx_interop_only_in_approved_shape`／
+  `facade_sources_reference_onnx_interop_only_in_interop_module`〉へ
+  差し替えられている。本記録自体〈`v0.9.0` タグ基準〉は変更しない）。
 - **判定値**: ある／部分的／リポ内／ない の 4 値。1 行内で項目により判定が
   割れる場合は行判定を「部分的」とし、根拠欄で内訳を分ける。
 - **0.8.0 時点の判定列**: 親イシュー #1937 の対応表に記載された値を出典として

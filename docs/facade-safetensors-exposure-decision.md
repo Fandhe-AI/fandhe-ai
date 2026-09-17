@@ -83,3 +83,20 @@
 （案 B: facade 直接 `safetensors` 依存の独立実装）自体の採否・実装着手は
 別途ユーザー承認が必要であり、本追補は publish 前提の充足のみを記録する
 （段階 0 は継続）。
+
+## 10. 追補（イシュー #2017・2026-09-17）: import 側の facade 公開に伴う事実更新
+
+§2 の事実表（「`facade` の `src/`・`Cargo.toml` は `onnx-interop` を一切
+参照しない」行）は **ONNX import の facade 公開（#2017）により事実が
+変わった**。facade は `fandhe_ai::interop::onnx::{OnnxModel, OnnxValue,
+OnnxError}`（import 専用）のために `onnx-interop` への通常依存を正式に
+持つようになった。旧 guard テスト名（`facade_does_not_depend_on_
+unpublished_onnx_interop`）は「承認済み依存形状の検査」
+（`facade_depends_on_onnx_interop_only_in_approved_shape`）へ差し替え
+られた（詳細は `docs/facade-onnx-import-exposure-decision.md` §12.4）。
+
+**本 issue（safetensors save／load）の判断自体は不変**: safetensors は
+#2017 のスコープ外であり、`src/interop/onnx.rs`（ONNX 専用）には
+safetensors 側の公開シグネチャを一切追加していない。案 B（facade 直接
+`safetensors` 依存の独立実装）の採否・実装着手は依然としてユーザー承認
+が前提のまま、段階 0 を継続する。

@@ -1045,7 +1045,20 @@ blocked のまま close しない（`docs/facade-onnx-import-exposure-decision.m
 （`facade_does_not_depend_on_unpublished_onnx_interop`／
 `facade_sources_do_not_reference_onnx_interop`。facade が非公開クレート
 `onnx-interop` へ依存しないことの機械的固定）であり、facade 新規公開面は
-なし。
+なし。ONNX export 自体はこの追記時点でも段階 0 のまま不変（下記 #2017
+追記は import 側のみを扱う）。
+
+**#2017 追記（ONNX import の facade 公開）**: 上記「ONNX import」行
+（347 行目）のスナップショット本文は不変のまま、`fandhe_ai::interop::
+onnx::{OnnxModel, OnnxValue, OnnxError}`（`OnnxModel::from_bytes`／
+`from_path`／`run`）として facade から実装済み・到達可能になった
+（`docs/facade-onnx-import-exposure-decision.md` §12）。推論専用・
+ホスト CPU 実行のみ（`BackendOps`／`Device` 非経由）・autograd 未接続
+（出力は `Tensor` であり `Var` ではない）という制約は不変。旧負ガード
+2 件は「承認済み依存形状の検査」（`facade_depends_on_onnx_interop_
+only_in_approved_shape`／`facade_sources_reference_onnx_interop_only_
+in_interop_module`）へ差し替え済み。ONNX export・safetensors save／load
+は引き続き未公開のまま段階 0。
 
 ## #1705 の追補
 

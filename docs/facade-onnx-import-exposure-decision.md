@@ -154,3 +154,128 @@ publishing-order.md` §13・`docs/crates-io-naming-decision.md`「7 件目」節
 継続する。`crates/facade/tests/api_surface.rs` の否定ガード（facade が
 `onnx-interop` へ通常依存しないことの機械固定）も維持する。ラッパー実装の
 起票はユーザー承認を得てから行う。
+
+## 12. 実装記録（イシュー #2017・2026-09-17）
+
+§9 承認事項 2・3 は issue 本文・2026-09-17 承認コメントで取得済みとなり、
+以下のとおり実装した。§11 の「段階 0 は継続」は **import に限り解消**
+（export・safetensors は §8 のとおり引き続き段階 0）。
+
+### 12.1 公開面
+
+- `fandhe_ai::interop::onnx::{OnnxModel, OnnxValue, OnnxError}`
+  （`crates/facade/src/interop/{mod.rs, onnx.rs}`。新規モジュール
+  `pub mod interop;` を `crates/facade/src/lib.rs` に追加）。
+- `OnnxModel::{from_bytes, from_path, run}` の 3 メソッドのみ（§4 案 B の
+  設計どおり）。`input_names` 等の追加アクセサは承認範囲外のため未実装。
+- `OnnxValue`（`#[non_exhaustive]` ではない exhaustive enum。承認文言
+  どおり）: `F32(Tensor<f32>)`／`I64(Tensor<i64>)`／`Bool(Tensor<bool>)`／
+  `F16(Tensor<half::f16>)`。§6.3 (d) の判断: `half::f16` を**素通し**する
+  （facade は `half` を再エクスポートしない。`TypedOps<half::f16>`
+  〈#1939〉と同じ扱い。利用者は `half` へ直接依存し version を
+  `fandhe-ai` の固定版に合わせる）。
+- `OnnxError`（`#[non_exhaustive]`）: `Io`／`Decode`／`UnsupportedDataType`／
+  `UnsupportedOp`／`MissingFeed`／`UnknownFeed`／`InvalidModel`／
+  `Execution` の 8 variant。
+
+### 12.2 `OnnxError` の設計判断（自己完結型を採用）
+
+内部クレートのエラー enum（`GraphError`／`InterpError`）をそのまま
+ペイロードに持たせる案（`Graph(GraphError)`／`Interp(InterpError)`）は
+**不採用**とした。理由:
+
+1. 承認済み公開面は `OnnxModel`／`OnnxValue`／`OnnxError` の 3 型のみ。
+   内部エラー enum をペイロードに含めると facade 利用者がそれらを
+   名指しできず、「型付き `Err` を fail-closed に拒否する」という
+   受け入れ条件（AC2）を facade 単独では満たせない。
+2. 名指し可能にするには内部エラー型自体の再エクスポートが必要になり、
+   承認範囲（3 型のみ）を超える。
+3. `GraphError`／`InterpError` は `onnx-interop` のエラー面がそのまま
+   facade の SemVer 面へ侵入することになり、薄いラッパー原則
+   （`docs/compat-api-scope.md` §3）に反する。
+
+代わりに `OnnxError` を「名指し variant ＋ ワイルドカード（内部
+`Display` 文字列を保持する `InvalidModel`／`Execution` への退避）」の
+自己完結型として定義した（`crates/facade/src/interop/onnx.rs::
+map_graph_error`／`map_interp_error`）。`InterpError::Graph(GraphError::
+UnknownDataType{..})`（`Constant` 属性テンソル decode 経由）も
+モデル構築時と同じ写像規則（`OnnxError::UnsupportedDataType`）を適用する
+よう統一した。
+
+### 12.3 `prost` 非露出の機構
+
+facade は `prost` へ直接依存せず（Cargo.toml に追加していない）、
+`onnx-interop` 側に新設した `onnx::proto::{decode_model, encode_model}`
+（`ModelProto::decode`／`encode_to_vec` への薄い委譲。呼び出し側が
+`prost::Message` を `use` しなくても呼べる入口）を経由する。facade は
+戻りの `prost::DecodeError` を `to_string()` するだけで `prost` 型を
+名指ししない。
+
+### 12.4 guard テストの差し替え（`crates/facade/tests/api_surface.rs`）
+
+§6.1「実装 issue の起票」で予告したとおり、旧負ガード 2 件を承認済み
+依存形状の正ガードへ差し替えた:
+
+- `facade_does_not_depend_on_unpublished_onnx_interop` →
+  `facade_depends_on_onnx_interop_only_in_approved_shape`
+  （`fandhe-ai-onnx-interop` が素の `[dependencies]` に丁度 1 回・
+  `path = "../onnx-interop"`・`version` が他の公開 path 依存と同一・
+  `git`／`registry`／`branch`／`rev`／`tag`／`optional`／`features`
+  キーを含まない、を fail-closed に検査する）。回帰テスト 5 件
+  （承認形状 pass・ヘッダコメント付き build-dependencies 検出・
+  version 欠落／ドリフト検出・`git` 取得元差し替え検出・
+  `[dependencies.<name>]` テーブル形式検出）を追加した。
+- `facade_sources_do_not_reference_onnx_interop` →
+  `facade_sources_reference_onnx_interop_only_in_interop_module`
+  （`onnx_interop`／`fandhe_ai_onnx_interop` 等への参照が `src/interop/`
+  配下に閉じていることを検査する。`src/interop/` 以外からの参照は
+  引き続き禁止）。
+- 新設 `interop_module_exposes_only_approved_onnx_surface`（`src/
+  interop/mod.rs` の公開アイテムが `pub mod onnx;` のみ・`src/interop/
+  onnx.rs` の `pub` シグネチャに `ModelProto`／`NodeProto`／`prost::`／
+  `onnx::graph::Graph` が現れないことを検査）・`onnx_import_types_are_
+  reachable_via_facade`（3 型の名指し・`OnnxError` の `#[non_exhaustive]`
+  ワイルドカード `match` をコンパイル時に固定）を追加した。
+
+### 12.5 テスト構成
+
+- `crates/facade/tests/interop_onnx_import.rs`（**`fandhe_ai` と `std`
+  のみ import**。facade 単独到達性の直接的な裏付け）: `model.onnx`
+  （8 サンプル・`onnx_reference.json` からの転記）・`slice_repro.onnx`
+  （動的境界 Slice パターン。5×6 → 5×4）を `from_path`／`from_bytes`
+  両方で REQ-7 判定式（`abs_err/(|ref|+1e-6) <= 1e-3`）突合。負例
+  （壊れたバイト列・空バイト列・存在しないパス・feed 欠落・未知
+  feed 名）・`OnnxError` の `#[non_exhaustive]` ワイルドカード `match`
+  を検証。9 テストすべて green。
+- `crates/facade/tests/interop_onnx_internal_parity.rs`（**facade と
+  `fandhe_ai_onnx_interop` の両方を意図的に import**）: AC1（facade 経由
+  と内部クレート直接呼び出し〈`decode_model → build_graph → interp::run`〉
+  の出力が `to_bits()` 完全一致であることを `model.onnx`・
+  `slice_repro.onnx` で確認）・AC2（`onnx::proto::*` の struct リテラル
+  ＋ `encode_model` で合成した壊れたモデル〈未対応 op `LSTM`・
+  `data_type=999` の initializer・負 dims〉が `OnnxError::UnsupportedOp`／
+  `UnsupportedDataType`／`InvalidModel` へ正しく写像されることを確認）・
+  `Cast(to=FLOAT16)` の合成モデル出力が `OnnxValue::F16` になることを
+  確認。6 テストすべて green。
+- 正しさは AC1（bit 完全一致）・AC2（負例の型付き `Err`）で検証済み。
+  移動・コピーのみで再計算を挟まない設計（`onnx_value_to_interp`／
+  `interp_value_to_onnx` は move）のため bit 一致は構造的に成立する。
+
+### 12.6 §6.3 制約の充足状況
+
+- (a) 推論専用・ホスト CPU 実行のみ・autograd 未接続——doc comment
+  （`crates/facade/src/interop/onnx.rs` モジュール冒頭）に明記。
+- (b) 数値契約は REQ-7 判定式のまま・REQ-2 parity 非経由（`BackendOps`
+  を一切参照しない）。
+- (c) 学習可能化（`Tape`／`Var` への変換層）は未実装のまま。
+- (d) `Value::F16` は素通し方針で確定（12.1 参照）。
+
+### 12.7 スコープ外（実装しない・issue は起票しない）
+
+- ONNX export（#2018）・safetensors（#2019）・`Sequential`／`nn` →
+  `ExportNode` 橋渡し・学習可能化・`BackendOps` 経由の GPU 実行化。
+- 入力総バイト数／要素数の明示上限導入（§7 A03 の懸念事項。値の決定に
+  承認が必要なため見送り。既存の fail-closed 境界〈`build_graph` の長さ
+  整合検査〉のみで運用）。
+- `OnnxModel::input_names` 等の追加アクセサ・`OnnxValue` の
+  `#[non_exhaustive]` 化（承認文言に無いため見送り）。

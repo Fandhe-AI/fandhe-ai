@@ -2,15 +2,50 @@
 
 ## サポート境界（現状の重要な制約）
 
-**相互運用機能（`onnx-interop` クレート。公開名 `fandhe-ai-onnx-interop`）は
-現時点で `fandhe-ai` から公開されていません。** `onnx-interop` 自体は
-次回リリースサイクルから crates.io 公開対象（依存解決のための公開であり
-直接利用はサポート対象外）に加わりますが、`fandhe-ai` からの再エクスポート
-は未提供です。`fandhe-ai` が唯一のサポートされる公開 API 面であるという
-原則（[API Reference](/api/)参照）に従うと、`onnx-interop` を直接 `use`
-する経路はサポート対象外の内部利用にあたります。相互運用機能を利用者向け
-に公開する入口の新設は本ページのスコープ外です。以下は設計の解説であり、
-動くコード例は用意していません。
+**ONNX import は `fandhe_ai::interop::onnx`（`OnnxModel`／`OnnxValue`／
+`OnnxError`）として `fandhe-ai` から公開されています。** ONNX export・
+safetensors save／load は現時点で公開されていません（`onnx-interop`
+クレート。公開名 `fandhe-ai-onnx-interop`。依存解決のための公開であり
+直接利用はサポート対象外）。`fandhe-ai` が唯一のサポートされる公開 API
+面であるという原則（[API Reference](/api/)参照）に従うと、`onnx-interop`
+を直接 `use` する経路はサポート対象外の内部利用にあたります。ONNX
+export・safetensors を利用者向けに公開する入口の新設は本ページのスコープ
+外です。
+
+### ONNX import の最小コード例
+
+```rust
+use std::collections::HashMap;
+
+use fandhe_ai::interop::onnx::{OnnxModel, OnnxValue};
+use fandhe_ai::Tensor;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = OnnxModel::from_path("model.onnx")?;
+
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "input".to_string(),
+        OnnxValue::F32(Tensor::<f32>::new(vec![0.0, 1.0], &[1, 2])?),
+    );
+
+    let outputs = model.run(feeds)?;
+    if let OnnxValue::F32(y) = &outputs["output"] {
+        println!("{:?}", y.as_slice());
+    }
+    Ok(())
+}
+```
+
+**推論専用・ホスト CPU 実行のみ**（`OnnxModel::run` は `BackendOps`／
+`Device` を経由しないため GPU 実行にはなりません）で**autograd 未接続**
+（入出力は [`Tensor`](/api/)であり `Var` ではないため勾配は取れません）。
+`OnnxValue::F16` は `half::f16` を素通しするため、扱うには利用者側が
+`half` クレートへ直接依存する必要があります。数値契約は
+「`abs_err/(|ref|+1e-6) <= 1e-3`」という ONNX 固有の判定式であり、
+[数値一致契約](/guides/numerical-parity/)のバックエンド間統一複合判定とは
+別指標です。以下は残りの設計解説です（ONNX export・safetensors 部分は
+動くコード例を用意していません）。
 
 ## safetensors: ワイヤフォーマット処理のみ
 
