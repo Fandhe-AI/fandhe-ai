@@ -452,10 +452,10 @@ impl Sequential {
     /// `optimizer`（[`OptimizerState::new`]）または `amp.grad_scaler`
     /// （[`GradScaler::new`]）の検証に失敗した場合 `InvalidArgument`
     /// （fail-closed。いずれかが失敗した場合 `self.compiled` は
-    /// 変更しない——[`Self::compile`] は失敗時に前の `compiled` を
-    /// そのまま残す契約とは異なる〈`OptimizerState::new` 失敗時は
-    /// 元々 `self.compiled` へ代入する前に return する〉ため、本
-    /// メソッドも同じく「全構築成功後にのみ代入する」規約で揃える）。
+    /// 変更しない——[`Self::compile`] と同じ construct-before-assign
+    /// 〈`?` が構造体リテラル内で先に評価されるため代入前に return
+    /// する〉により、本メソッドも「全構築成功後にのみ代入する」規約
+    /// で揃えている）。
     pub fn compile_with_amp(
         &mut self,
         optimizer: Optimizer,
