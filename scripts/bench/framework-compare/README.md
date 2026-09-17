@@ -801,16 +801,26 @@ opt-in で WMMA TF32 Tensor Core 経路（`run_wmma_tf32`）へ切り替えら�
   有効化してから計測する。`--task gemm --device cuda` 以外との組合せは `MEASURE_ERROR` で
   fail-fast する。`cuda` cargo feature を有効化したビルド（`--no-default-features --features
   cuda`）が必要（既定は `metal`）
-- **`bench-fandhe`**: **`--tf32` は常に `MEASURE_ERROR` で fail-fast する**。
-  承認済みピンは `fandhe-ai =0.5.0`（イシュー #1011 で `=0.4.0` から更新済み）を経て
+- **`bench-fandhe`**: **`--task gemm --device cuda`（fresh／reuse とも）の素の GEMM
+  限定で `--tf32` を受理する**（イシュー #1042 C-2・#1983 で結線済み）。承認済みピンは
+  `fandhe-ai =0.5.0`（イシュー #1011 で `=0.4.0` から更新済み）を経て
   `fandhe-ai =0.6.0`（v0.6.0 リリースサイクルでユーザー承認済み）・`fandhe-ai =0.7.0`
   （イシュー #1185 に対するユーザー指示で承認済み）・`fandhe-ai =0.8.0`（イシュー
   #1487 でユーザー承認済み）・`fandhe-ai =0.9.0`（v0.9.0 リリースサイクルで
-  ユーザー承認済み）へ進んだが、
-  `set_cuda_tf32_gemm_enabled` は crates.io 公開版から呼び出し可能なまま、
-  `bench-fandhe`（`main.rs`）側の呼び出し結線・`run_all` の tf32 スイープ追加（C-2。
-  `docs/cuda-tf32-optin-api-decision.md`）は依然スコープ外で未実施のため、fail-fast
-  の挙動は変わらない
+  ユーザー承認済み）へ進み、`fandhe_ai::set_cuda_tf32_gemm_enabled`／`cuda_tf32_gemm_enabled`
+  は crates.io 公開版の無条件公開面として収録済みのため、`--managed`／`--pinned-h2d`／
+  `--graph` と異なり追加の cargo feature は不要である。受理時は
+  `set_cuda_tf32_gemm_enabled(true)` を呼び読み戻し確認したうえで計測する。
+  `--task gemm --device cuda` 以外（train／infer・cpu／metal）・`--phases`・
+  `--device-checksum`・`--managed`・`--pinned-h2d` との併用は`MEASURE_ERROR` で
+  fail-closed 拒否する（`--managed` と同型の allowlist 方式。TF32 opt-in は素の
+  `CudaBackendOps::gemm` 経路のみに効き `gemm_bias_act`／`gemm_resident_*`／
+  学習・推論経路は FP32 のままのため、許すと誤ラベル行を生む）。要素単位検証は
+  従来どおり `verify_strict`（救済項なし）のまま変更しない——TF32 は結合順序・精度が
+  異なり大きい N で `fail_count > 0` になりうるが、これは想定内の記録事項であり
+  `summarize.py` (a-tf32) 節が「無効」と表示する既存挙動に委ねる（是正しない）。
+  TF32 カーネル使用不能環境ではライブラリ側が `KernelLaunchFailed` で fail-closed
+  するためそのまま計測失敗として記録され、FP32 へ黙示フォールバックしない
 - **`bench-burn`**: `--tf32` は受理せず常に `MEASURE_ERROR` で fail-fast する。burn の CUDA
   バックエンドは FP32 厳密経路自体を持たないため、フラグに opt-in／opt-out の意味を持たせられ
   ない（既存の burn GEMM 計測が実質的に常に TF32 相当であることの明記）
@@ -1219,7 +1229,7 @@ ENABLED` を撤去し per-instance フィールドへ一本化〉）を、facade
 ```bash
 cd scripts/bench/framework-compare
 ./run_all.sh                 # macOS: cpu + metal 全組み合わせ（+ metal gemm reuse・train reuse・train phases スイープ）→ results/raw/results.jsonl
-./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ（+ cuda gemm reuse・train reuse・train phases スイープ）→ results/raw/results-cuda.jsonl
+./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ（+ cuda gemm reuse・train reuse・train phases スイープ + gemm cuda TF32 スイープ〈bench-fandhe・bench-candle。イシュー #1983〉）→ results/raw/results-cuda.jsonl
 # 承認ピン fandhe-ai =0.9.0（v0.9.0 ピン更新。#1487 の =0.8.0 時点から
 # 既に収録済み）が借用ビュー readout API
 # （Var::host_view/Tensor::host_slice。#1438 で既定経路化）を収録済みの
