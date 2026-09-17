@@ -27,6 +27,15 @@
 //! #1998 で是正——当初 `Var::sum_dims`〈CPU `sum` の `f64` アキュム
 //! レータ縮約〉を使っていたため、桁落ちを伴う broadcast 入力で 1 階
 //! 勾配と乖離し REQ-2 統一複合判定を満たさない具体例があった）。
+//! `Op::Add` の bias パターン（`upstream: [m, n]` → `[n]`／`[1, n]`
+//! の行方向縮約）に限っては [`reduce_bias_grad_var`] が
+//! `grad.rs::reduce_bias_grad`（f64 相当のアキュムレータ。2026-09-12
+//! ユーザー承認・`.claude/rules/coding-rust.md` の勾配長軸縮約契約）
+//! と数値方式を揃える別経路を使う——`eval::reduce_bias_grad_rows`
+//! （1 階 VJP と同一のホスト関数）でホスト側の値を直接計算し
+//! `Tape::push_eager` で子テープへ登録する（`Var::sum` は
+//! `child.ops()` の実装〈テスト用 `naive_ops()` は f32 逐次和〉に
+//! 依存するため使わない。codex-review 指摘・PR #1998 是正）。
 //!
 //! REQ-12「利用者向け融合制御 API を提供しない」は、`create_graph` が
 //! 二階の勾配グラフを構築するかどうかの選択であり `docs/
@@ -383,8 +392,17 @@ fn build_cgrads<'c>(
             Op::Add(a, b) => {
                 let a_shape = parent_nodes[a.0].shape.clone();
                 let b_shape = parent_nodes[b.0].shape.clone();
-                let da = reduce_to(&g, &a_shape)?;
-                let db = reduce_to(&g, &b_shape)?;
+                // codex-review 指摘（PR #1998）: `grad.rs::Op::Add` の
+                // VJP は bias パターン（`upstream: [m, n]` →
+                // `[n]`／`[1, n]` の行方向縮約）に限り `reduce_bias_
+                // grad`（f64 相当アキュムレータ）へ委譲する
+                // （`.claude/rules/coding-rust.md` の勾配長軸縮約
+                // 契約・2026-09-12 ユーザー承認）。子テープ側も同じ
+                // 分岐を [`reduce_bias_grad_var`] で再現し、bias
+                // パターン以外は従来どおり [`reduce_to`]（`reduce_to_
+                // shape` と同じ f32 逐次和）のまま維持する。
+                let da = reduce_bias_grad_var(child, &g, &a_shape)?;
+                let db = reduce_bias_grad_var(child, &g, &b_shape)?;
                 accumulate(&parent_nodes, &mut cgrads, a, da)?;
                 accumulate(&parent_nodes, &mut cgrads, b, db)?;
             }
@@ -393,8 +411,8 @@ fn build_cgrads<'c>(
                 let b_m = get_mirror(mirror, b)?;
                 let ga = g.mul(&b_m)?;
                 let gb = g.mul(&a_m)?;
-                let da = reduce_to(&ga, &a_m.shape())?;
-                let db = reduce_to(&gb, &b_m.shape())?;
+                let da = reduce_to(child, &ga, &a_m.shape())?;
+                let db = reduce_to(child, &gb, &b_m.shape())?;
                 accumulate(&parent_nodes, &mut cgrads, a, da)?;
                 accumulate(&parent_nodes, &mut cgrads, b, db)?;
             }
@@ -470,7 +488,7 @@ fn build_cgrads<'c>(
             }
             Op::BroadcastTo { input } => {
                 let input_shape = parent_nodes[input.0].shape.clone();
-                let da = reduce_to(&g, &input_shape)?;
+                let da = reduce_to(child, &g, &input_shape)?;
                 accumulate(&parent_nodes, &mut cgrads, input, da)?;
             }
             _ => {
@@ -528,7 +546,11 @@ fn accumulate<'c>(
 /// では、桁落ちを伴う broadcast 入力〈大きさの異なる値が完全に
 /// 相殺するケース〉で 1 階勾配と乖離し REQ-2 統一複合判定を満たさない
 /// 具体例が確認されたため是正した。codex-review 指摘（PR #1998）。
-fn reduce_to<'c>(v: &Var<'c>, target_shape: &[usize]) -> Result<Var<'c>, AutodiffError> {
+fn reduce_to<'c>(
+    child: &'c Tape,
+    v: &Var<'c>,
+    target_shape: &[usize],
+) -> Result<Var<'c>, AutodiffError> {
     let v_shape = v.shape();
     if v_shape == target_shape {
         return Ok(*v);
@@ -546,6 +568,23 @@ fn reduce_to<'c>(v: &Var<'c>, target_shape: &[usize]) -> Result<Var<'c>, Autodif
     for axis in 0..cur_shape.len() {
         if padded_target[axis] == 1 && cur_shape[axis] != 1 {
             let axis_len = cur_shape[axis];
+            if axis_len == 0 {
+                // 合法な空テンソル（縮約対象の軸長が 0。例:
+                // `x: [3]` を `broadcast_to(&[0, 3])` した結果を
+                // 逆縮約する場合）。`reduce_to_shape`（1 階 VJP）の
+                // 対応する二重ループは `for a in 0..axis_len {...}`
+                // が 0 回実行されるため、ゼロ初期化された `reduced`
+                // バッファがそのまま結果になる（codex-review P2
+                // 是正・PR #1998）。`Var::narrow(axis, 0, 1)` は
+                // `axis_len == 0` では範囲外（`NarrowOutOfBounds`）
+                // になるため呼ばず、縮約後 shape を持つ明示的な
+                // ゼロ定数へ直接差し替える。
+                let mut reduced_shape = cur_shape.clone();
+                reduced_shape[axis] = 1;
+                cur = child.var_no_grad(&Tensor::zeros(&reduced_shape)?);
+                cur_shape[axis] = 1;
+                continue;
+            }
             // `reduce_to_shape` の `for a in 0..axis_len { reduced[..] +=
             // data[src] }` を、添字昇順の `Var::narrow`＋`Var::add` の
             // 逐次連鎖として同じ順序で再現する（f32 逐次和・f64
@@ -567,6 +606,82 @@ fn reduce_to<'c>(v: &Var<'c>, target_shape: &[usize]) -> Result<Var<'c>, Autodif
         // 同一のため `reshape` で先頭の 1 軸を落とせる。
         cur.contiguous()?.reshape(target_shape)
     }
+}
+
+/// `Op::Add` の bias パターンに限り `grad.rs::reduce_bias_grad`（f64
+/// 相当のアキュムレータで行方向を縮約する）と数値方式を揃える
+/// `reduce_to` の薄いラッパー（codex-review 指摘・PR #1998 是正）。
+///
+/// **背景**: `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64`
+/// アキュムレータで統一する」契約は `Op::LinearResident`／
+/// `Op::LinearAct` の bias フォールバックに加え、2026-09-12 ユーザー
+/// 承認により `Op::Add`（`nn::Linear` 既定 forward 経路 `matmul → add`
+/// が経由する）の bias パターンへも横展開済み（`grad.rs::
+/// reduce_bias_grad`）。本モジュール（子テープ上の `Var` 演算列）の
+/// `reduce_to` は 1 階 `reduce_to_shape`（`f32` 逐次和・bias 以外の
+/// 一般的な broadcast 縮約）を逐語再現する設計のため、`Op::Add` を
+/// 無条件に `reduce_to` へ委譲すると bias パターンでのみ 1 階勾配
+/// （`reduce_bias_grad` 経由）と符号レベルで乖離する（例:
+/// `x: [3, 1]`・`b: [1]`・`c = [1e8, 1, -1e8]: [3, 1]` に対する
+/// `loss = ((x + b) * c).sum()` で `b` の 1 階勾配は `1` だが `f32`
+/// 逐次和では丸め誤差により `0` になる）。
+///
+/// **判定条件は `reduce_bias_grad` と同一**（`g_shape.len() == 2` かつ
+/// `target_shape` が「軸 0 方向の縮約」を表す形状——末尾次元が `g` の
+/// 列数と一致し、それより前の全次元が `1`）。条件を満たさない場合は
+/// 従来どおり [`reduce_to`] へそのまま委譲し挙動を変えない（bias
+/// パターン限定の横展開であり、汎用 `Op::Add`・`reduce_to` 本体は
+/// 不変）。
+///
+/// **数値方式の再現方法**: `Var::sum(Some(0))` は `child.ops().sum()`
+/// （`BackendOps` 実装依存。テスト用 `naive_ops()` は `f32` 逐次和・
+/// 本番 `backend-cpu` は `f64` アキュムレータの `axis_reduce_sum` など
+/// バックエンドごとに異なる）を経由するため、`Var::sum` へは委譲
+/// **しない**（当初案は `naive_ops()` を使う統合テストで 1 階 VJP と
+/// 再度乖離する回帰があった。実装時の実測で判明）。代わりに
+/// `eval::reduce_bias_grad_rows`（`grad.rs::reduce_bias_grad` が呼ぶ
+/// のと**同一のホスト関数**。行 `0..m` を列ごとに `f64` で逐次加算し
+/// 最後に 1 回 `f32` へ downcast。`m == 1` の短絡〈符号付きゼロ保持〉
+/// も同関数内で処理される）を直接呼んでホスト側で縮約後の値を計算し、
+/// [`Tape::push_eager`]（`pub(crate)`）で `Op::Sum { input: g.id, dim:
+/// Some(0) }` として子テープへ登録する。`child.ops()` の実装（テスト
+/// 用 `naive_ops()` を含む）に依存せず 1 階 VJP と常に一致する。
+///
+/// `Op` タグを `Op::Sum { dim: Some(0) }` のまま維持することは、
+/// `child.backward(..)`（さらなる微分。設計上 3 階微分は対象外だが、
+/// 2 階勾配 `cg.grad(&b)` 自身を通常の `Var` として扱うために必要）に
+/// 対する整合性を壊さない——`grad.rs::Op::Sum` の VJP（上流勾配を
+/// `input` の shape へ broadcast するのみ）は前方値の精度に一切
+/// 依存しないため、値を host 側で計算し直しても VJP の正しさは
+/// 影響を受けない。
+fn reduce_bias_grad_var<'c>(
+    child: &'c Tape,
+    g: &Var<'c>,
+    target_shape: &[usize],
+) -> Result<Var<'c>, AutodiffError> {
+    let g_shape = g.shape();
+    let is_row_axis_reduction = g_shape.len() == 2
+        && target_shape.last() == Some(&g_shape[1])
+        && target_shape[..target_shape.len().saturating_sub(1)]
+            .iter()
+            .all(|&d| d == 1);
+    if !is_row_axis_reduction {
+        return reduce_to(child, g, target_shape);
+    }
+    let g_val = {
+        let nodes = child.nodes.borrow();
+        materialize_fallible(&nodes, child.ops(), g.node_id())?.clone()
+    };
+    let reduced = crate::eval::reduce_bias_grad_rows(&g_val);
+    let value = Tensor::new(reduced, &[g_shape[1]])?;
+    let id = child.push_eager(
+        Op::Sum {
+            input: g.node_id(),
+            dim: Some(0),
+        },
+        value,
+    );
+    Var::from_raw(child, id).reshape(target_shape)
 }
 
 /// `t`（親テープ側の実測値）の各要素が正かどうかを表す `Tensor<bool>`

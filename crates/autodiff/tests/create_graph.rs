@@ -383,6 +383,94 @@ fn create_graph_reduce_to_matches_first_order_under_cancellation() {
     );
 }
 
+// --- 6c. Op::Add の bias パターン（`upstream: [m, n]` → `[n]`／
+//         `[1, n]` の行方向縮約）が 1 階 VJP（`grad.rs::
+//         reduce_bias_grad`。f64 相当のアキュムレータ。2026-09-12
+//         ユーザー承認・`.claude/rules/coding-rust.md` の勾配長軸縮約
+//         契約）と数値的に一致することを確認する回帰テスト（codex-review
+//         指摘・PR #1998）。`reduce_bias_grad_var` を追加する前は
+//         `Op::Add` の bias パターンにも一様に `reduce_to`（f32 逐次和）
+//         を適用していたため、桁落ちを伴う入力で符号レベルの不一致が
+//         生じた: `x: [3, 1]`・`b: [1]`・`c = [1e8, 1, -1e8]: [3, 1]`
+//         に対する `loss = ((x + b) * c).sum()` で `b` の 1 階勾配は
+//         `1.0` だが旧 `reduce_to`（f32 逐次和。`(1e8+1)-1e8` が丸めで
+//         `0.0` になる）は `0.0` を返していた。
+
+#[test]
+fn create_graph_bias_pattern_add_matches_first_order_under_cancellation() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0, 0.0, 0.0], &[3, 1]));
+    let b = tape.var(&t(vec![0.0], &[1]));
+    let c = tape.var_no_grad(&t(vec![1.0e8, 1.0, -1.0e8], &[3, 1]));
+    let loss = x.add(&b).unwrap().mul(&c).unwrap().sum(None).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+
+    let first_order = cg
+        .first_order()
+        .get(&b)
+        .unwrap()
+        .expect("b は loss に到達する");
+    let first_order_val = first_order.get(&[0]).unwrap() as f64;
+    // `reduce_bias_grad`（f64 相当のアキュムレータ）は桁落ちの影響を
+    // 受けず `1e8 + 1 - 1e8 = 1.0` を厳密に計算する
+    // （`grad.rs::reduce_bias_grad` の実際の挙動をまず固定する）。
+    assert!(
+        common::req2_close(first_order_val, 1.0),
+        "1 階 VJP（reduce_bias_grad。f64 相当）は桁落ちに強く 1.0 のはず: {first_order_val}"
+    );
+
+    let cgrad = cg.grad(&b).unwrap().expect("b は loss に到達する");
+    let cgrad_val = cgrad.value().get(&[0]).unwrap() as f64;
+    assert!(
+        common::req2_close(cgrad_val, first_order_val),
+        "create_graph の Op::Add bias パターン縮約（reduce_bias_grad_var）が \
+         1 階 VJP（grad.rs::reduce_bias_grad）と数値的に乖離した: \
+         cgrad={cgrad_val} first_order={first_order_val}"
+    );
+}
+
+// --- 6d. `reduce_to`（`Op::BroadcastTo` の VJP 経路）がゼロ長軸
+//         （縮約対象の要素数が 0 の合法な空テンソル）を
+//         `NarrowOutOfBounds` で失敗せずゼロ勾配として処理できることを
+//         確認する回帰テスト（codex-review 指摘・PR #1998。P2）。
+//         `x: [3]` を `broadcast_to(&[0, 3])` した結果を縮約する場合、
+//         旧 `reduce_to` は `axis_len == 0` でも無条件に
+//         `Var::narrow(axis, 0, 1)` を呼んでいたため
+//         `ShapeError::NarrowOutOfBounds` になっていた。1 階 VJP
+//         （`grad.rs::reduce_to_shape`）は縮約ループが 0 回実行される
+//         ためゼロ初期化された結果をそのまま返す。
+
+#[test]
+fn create_graph_reduce_to_handles_zero_length_axis() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let loss = x.broadcast_to(&[0, 3]).unwrap().sum(None).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+
+    let first_order = cg
+        .first_order()
+        .get(&x)
+        .unwrap()
+        .expect("x は loss に到達する");
+    for i in 0..3 {
+        let v = first_order.get(&[i]).unwrap() as f64;
+        assert!(common::req2_close(v, 0.0), "1 階勾配はゼロのはず: {v}");
+    }
+
+    // 子テープ側（`reduce_to` の `axis_len == 0` 分岐）が panic／Err
+    // にならず、同じくゼロ勾配を構築できることを確認する。
+    let cgrad = cg.grad(&x).unwrap().expect("x は loss に到達する");
+    for i in 0..3 {
+        let v = cgrad.value().get(&[i]).unwrap() as f64;
+        assert!(
+            common::req2_close(v, 0.0),
+            "create_graph 側のゼロ長軸縮約がゼロ勾配と一致しない: {v}"
+        );
+    }
+}
+
 fn build_sum_single_axis<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
     x.mul(x)?.sum(Some(0))?.sum(None)
 }
