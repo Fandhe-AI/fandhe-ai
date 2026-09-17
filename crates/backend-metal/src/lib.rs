@@ -578,6 +578,17 @@ pub mod reduce;
 // 触れないため `cfg(target_os = "macos")` を付けず、Linux（本実装
 // 環境・CI）でも単体テストが回る。
 pub mod reduce_model;
+// `log_softmax` backward（イシュー #1952・親 #1947）の起動 API。
+// `reduce.rs` と同じ設計方針（実行時コンパイル・パイプライン保持・
+// 実行）。`MetalBackendOps::log_softmax_backward` から `context_cache::
+// cached_log_softmax_backward` 経由で到達する。
+#[cfg(target_os = "macos")]
+pub mod log_softmax_backward;
+// `shaders/log_softmax_backward.metal` のホスト側逐語モデル（イシュー
+// #1952）。`reduce_model` と同じ設計判断で `objc2` 系 FFI に触れない
+// ため `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）
+// でも単体テストが回る。
+pub mod log_softmax_backward_model;
 pub mod soft_f64;
 // dtype 変換（`fandhe_ai_tensor_core::cast::CastOps`。イシュー #1751・
 // 親 #1613・依存 #1750）の起動 API・`CastOps` 実装。`unique.rs` と
@@ -730,6 +741,8 @@ pub use huber::MetalHuber;
 pub use kl_div::MetalKlDiv;
 #[cfg(target_os = "macos")]
 pub use layer_norm::MetalLayerNorm;
+#[cfg(target_os = "macos")]
+pub use log_softmax_backward::MetalLogSoftmaxBackward;
 #[cfg(target_os = "macos")]
 pub use memory::MetalMemory;
 #[cfg(target_os = "macos")]
