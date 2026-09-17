@@ -1666,6 +1666,21 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
             i = j;
             continue;
         }
+        if kind == "use" {
+            // `onnx.rs` の承認範囲は型定義 6 件のみで再エクスポートは
+            // 0 件のため、`pub use` は再エクスポート先のパスが
+            // 識別子で始まらない形（`pub use {a, b};` のグループ化・
+            // `pub use ::krate::...;` の先頭 `::` 等）でも取りこぼさず
+            // 無条件にオフェンスとして記録する（advisor 指摘。下の
+            // 識別子抽出ブロックは `use` 以降が識別子で始まる場合しか
+            // 拾えず、その前提が崩れる形を素通りさせてしまうため）。
+            offenses.push(format!(
+                "line {}: `pub use` は onnx.rs で承認されていない再エクスポート",
+                line_at(&cleaned, start)
+            ));
+            i = j;
+            continue;
+        }
         let mut m = ke;
         while m < len && cleaned[m].is_whitespace() {
             m += 1;
@@ -1753,26 +1768,58 @@ impl OnnxModel {
     );
 }
 
-/// `scan_unapproved_onnx_pub_items` が `pub use` 再エクスポート（例:
-/// `pub use fandhe_ai_onnx_interop::onnx::proto::encode_model;`）を
-/// 承認範囲外として検出することを確認する（codex-review 指摘 P2・
-/// #2024 の回帰固定。`onnx.rs` の承認範囲は型定義 6 件のみで再
-/// エクスポートは 0 件のため、`pub use` はいかなる形でも許容されない）。
+/// `scan_unapproved_onnx_pub_items` が `pub use` 再エクスポート（通常の
+/// パス形・グループ化形・先頭 `::` 形のいずれも）を承認範囲外として
+/// 検出することを確認する（codex-review 指摘 P2・#2024 の回帰固定。
+/// `onnx.rs` の承認範囲は型定義 6 件のみで再エクスポートは 0 件のため、
+/// `pub use` はいかなる形でも許容されない）。グループ化形
+/// （`pub use {a, b};`）・先頭 `::` 形（`pub use ::krate::...;`）は
+/// `use` 直後が識別子で始まらないため、名前抽出（`is_ident_start`
+/// 前提）に依存する検出だと素通りしうる（advisor 指摘）。`kind == "use"`
+/// を検出した時点で無条件にオフェンスを記録する fail-closed 実装に
+/// よってこれらも検出できることを併せて固定する。
 #[test]
 fn unapproved_onnx_pub_use_reexport_is_flagged() {
-    let synthetic = r#"
+    let normal_path = r#"
 pub struct OnnxModel {
     graph: (),
 }
 
 pub use fandhe_ai_onnx_interop::onnx::proto::encode_model;
 "#;
-    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    let offenses = scan_unapproved_onnx_pub_items(normal_path);
     assert!(
-        offenses
-            .iter()
-            .any(|e| e.contains("use") && e.contains("fandhe_ai_onnx_interop")),
-        "承認範囲外の `pub use` 再エクスポートが検出されなかった: {offenses:?}"
+        offenses.iter().any(|e| e.contains("pub use")),
+        "承認範囲外の `pub use` 再エクスポート（通常のパス形）が検出されなかった: \
+         {offenses:?}"
+    );
+
+    let grouped = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+pub use {fandhe_ai_onnx_interop::onnx::proto::encode_model};
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(grouped);
+    assert!(
+        offenses.iter().any(|e| e.contains("pub use")),
+        "承認範囲外の `pub use` 再エクスポート（グループ化形）が検出されなかった: \
+         {offenses:?}"
+    );
+
+    let leading_colon = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+pub use ::fandhe_ai_onnx_interop::onnx::proto::encode_model;
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(leading_colon);
+    assert!(
+        offenses.iter().any(|e| e.contains("pub use")),
+        "承認範囲外の `pub use` 再エクスポート（先頭 `::` 形）が検出されなかった: \
+         {offenses:?}"
     );
 }
 
