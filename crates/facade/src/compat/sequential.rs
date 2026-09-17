@@ -7,8 +7,11 @@
 //! `nn::Module::forward` へ委譲するだけの薄いビルダー（REQ-9）。対象
 //! レイヤーは `docs/compat-api-scope.md` §1 の範囲拡張手続き（同 §5）を
 //! 経て追加された集合限定（Linear・ReLU/Sigmoid/Tanh・Silu/Hardswish/
-//! LeakyRelu/Elu/Dropout。GELU／Softplus は #1713、Conv 等は未実施の
-//! まま同手続きを経ずに追加しない）。`Dropout` は本クレート内実装で
+//! LeakyRelu/Elu/Dropout・Conv2d/Conv1d〈#1770〉・LayerNorm/RmsNorm/
+//! BatchNorm1d/BatchNorm2d/Embedding/MultiheadAttention〈#1760〉・
+//! MaxPool2d/MaxPool1d/AvgPool2d/AvgPool1d/AdaptiveAvgPool2d/
+//! AdaptiveAvgPool1d〈#1957〉。GELU／Softplus は #1713、同手続きを
+//! 経ずに追加しない）。`Dropout` は本クレート内実装で
 //! 唯一 `set_training`／`training`（イシュー #1758）を実際に保持する
 //! 層のため、`Sequential::set_training` の伝播がここで初めて実挙動差
 //! を生む（`nn::Dropout` モジュール doc 参照）。
@@ -98,8 +101,9 @@ use crate::{
 };
 use fandhe_ai_autodiff::nn::activation::{Elu, Hardswish, LeakyRelu, Relu, Sigmoid, Silu, Tanh};
 use fandhe_ai_autodiff::nn::{
-    BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Dropout,
-    Embedding, EmbeddingVars, LayerNorm, LayerNormVars, Linear, Module, MultiheadAttention,
+    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, BatchNorm1d, BatchNorm2d,
+    BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Dropout, Embedding, EmbeddingVars,
+    LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module, MultiheadAttention,
     MultiheadAttentionVars, RmsNorm, RmsNormVars, Sequential as NnSequential,
     linear_forward_low_precision,
 };
@@ -403,6 +407,94 @@ impl Sequential {
         seed: u64,
     ) -> Result<Self, AutodiffError> {
         let layer = MultiheadAttention::new(embed_dim, num_heads, true, seed)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// 2 次元 MaxPool 層を追加する（`nn::MaxPool2d`。イシュー #1957・
+    /// 親 #1618。2026-09-17 ユーザー承認〈選択肢 A・6 メソッド一括
+    /// 追加〉）。`ceil_mode=false` 固定（`MaxPool2d::new` doc 参照）。
+    /// `stride` を省略（`None`）すると `kernel_size` と同じ値になる
+    /// （PyTorch `nn.MaxPool2d` の既定と同じ）。入力は `NCHW`（rank 4）。
+    /// 無状態層のため学習可能パラメータを持たない（`named_parameters`
+    /// は空のまま。`nn/pooling.rs` モジュール doc 参照）。
+    pub fn add_max_pool2d(
+        mut self,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> Result<Self, AutodiffError> {
+        let layer = MaxPool2d::new(kernel_size, stride, padding, dilation)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// 1 次元 MaxPool 層を追加する（`nn::MaxPool1d`。イシュー #1957）。
+    /// [`Sequential::add_max_pool2d`] と同様 `ceil_mode=false` 固定。
+    /// 入力は `NCL`（rank 3）。
+    pub fn add_max_pool1d(
+        mut self,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        dilation: usize,
+    ) -> Result<Self, AutodiffError> {
+        let layer = MaxPool1d::new(kernel_size, stride, padding, dilation)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// 2 次元 AvgPool 層を追加する（`nn::AvgPool2d`。イシュー #1957）。
+    /// `ceil_mode=false` 固定・`dilation=[1,1]` 固定（`AvgPool2d::new`
+    /// doc 参照）。`count_include_pad` は PyTorch `nn.AvgPool2d` の
+    /// 同名引数と同じ意味（`true` で padding 領域も分母に含める）。
+    /// 入力は `NCHW`（rank 4）。
+    pub fn add_avg_pool2d(
+        mut self,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        count_include_pad: bool,
+    ) -> Result<Self, AutodiffError> {
+        let layer = AvgPool2d::new(kernel_size, stride, padding, count_include_pad)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// 1 次元 AvgPool 層を追加する（`nn::AvgPool1d`。イシュー #1957）。
+    /// [`Sequential::add_avg_pool2d`] と同様 `ceil_mode=false` 固定。
+    /// 入力は `NCL`（rank 3）。
+    pub fn add_avg_pool1d(
+        mut self,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        count_include_pad: bool,
+    ) -> Result<Self, AutodiffError> {
+        let layer = AvgPool1d::new(kernel_size, stride, padding, count_include_pad)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// 2 次元 AdaptiveAvgPool 層を追加する（`nn::AdaptiveAvgPool2d`。
+    /// イシュー #1957）。`output_size` の各軸が `0` の場合は
+    /// `AutodiffError::InvalidArgument`（`AdaptiveAvgPool2d::new`
+    /// doc 参照）。入力は `NCHW`（rank 4）。
+    pub fn add_adaptive_avg_pool2d(
+        mut self,
+        output_size: [usize; 2],
+    ) -> Result<Self, AutodiffError> {
+        let layer = AdaptiveAvgPool2d::new(output_size)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// 1 次元 AdaptiveAvgPool 層を追加する（`nn::AdaptiveAvgPool1d`。
+    /// イシュー #1957）。`output_size` が `0` の場合は
+    /// `AutodiffError::InvalidArgument`。入力は `NCL`（rank 3）。
+    pub fn add_adaptive_avg_pool1d(mut self, output_size: usize) -> Result<Self, AutodiffError> {
+        let layer = AdaptiveAvgPool1d::new(output_size)?;
         self.inner.push(Box::new(layer));
         Ok(self)
     }
@@ -720,10 +812,11 @@ impl Sequential {
     /// 含まれるかどうか（旧 `contains_conv_layer`。イシュー #1770 で
     /// `Conv2d`／`Conv1d` 向けに新設し、イシュー #1760 で LayerNorm／
     /// RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／
-    /// MultiheadAttention へ対象を拡張・改名した）。これらの層は
-    /// `forward_from_flat_leaves`（`Linear` 層のみを消費する走査）の
-    /// 対象外のため、常駐経路の入口で明示的に拒否する（黙示
-    /// フォールバックを作らない。`.claude/rules/security.md` A04）。
+    /// MultiheadAttention へ、イシュー #1957 で Pooling（MaxPool／
+    /// AvgPool／AdaptiveAvgPool の 1d／2d）へ対象を拡張・改名した）。
+    /// これらの層は `forward_from_flat_leaves`（`Linear` 層のみを
+    /// 消費する走査）の対象外のため、常駐経路の入口で明示的に拒否する
+    /// （黙示フォールバックを作らない。`.claude/rules/security.md` A04）。
     fn contains_resident_unsupported_layer(&self) -> bool {
         self.inner.layers().iter().any(|layer| {
             layer.as_conv2d().is_some()
@@ -734,6 +827,7 @@ impl Sequential {
                 || layer.as_batch_norm2d().is_some()
                 || layer.as_embedding().is_some()
                 || layer.as_multihead_attention().is_some()
+                || layer.is_pooling()
         })
     }
 
@@ -1098,8 +1192,8 @@ impl Sequential {
         // 作らない）。
         if self.contains_resident_unsupported_layer() {
             return Err(BackendError::Unsupported(
-                "Sequential::init_device_param_store: Conv／Norm／Embedding／Attention 層を \
-                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760）"
+                "Sequential::init_device_param_store: Conv／Norm／Embedding／Attention／Pooling 層を \
+                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957）"
                     .to_string(),
             ));
         }
@@ -1145,14 +1239,14 @@ impl Sequential {
         input: &Var<'t>,
         store: &mut DeviceParamStore,
     ) -> Result<Var<'t>, AutodiffError> {
-        // イシュー #1770・#1760: `Self::init_device_param_store` の
+        // イシュー #1770・#1760・#1957: `Self::init_device_param_store` の
         // ガードと同じ理由（`contains_resident_unsupported_layer` doc
         // 参照）。二重防御（呼び出し元が独自に構築した `store` を
         // 渡す誤用も想定した fail-closed）。
         if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
-                "Sequential::forward_resident: Conv／Norm／Embedding／Attention 層を含む \
-                 Sequential はデバイス常駐経路非対応（イシュー #1770・#1760）"
+                "Sequential::forward_resident: Conv／Norm／Embedding／Attention／Pooling 層を \
+                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957）"
                     .to_string(),
             )));
         }
@@ -1202,12 +1296,12 @@ impl Sequential {
         store: &DeviceParamStore,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
-        // イシュー #1770・#1760: `Self::forward_resident` と同じ
+        // イシュー #1770・#1760・#1957: `Self::forward_resident` と同じ
         // ガード。
         if self.contains_resident_unsupported_layer() {
             return Err(AutodiffError::Backend(BackendError::Unsupported(
-                "Sequential::predict_resident: Conv／Norm／Embedding／Attention 層を含む \
-                 Sequential はデバイス常駐経路非対応（イシュー #1770・#1760）"
+                "Sequential::predict_resident: Conv／Norm／Embedding／Attention／Pooling 層を \
+                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957）"
                     .to_string(),
             )));
         }
