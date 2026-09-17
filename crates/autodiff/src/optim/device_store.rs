@@ -3888,6 +3888,58 @@ mod tests {
         );
     }
 
+    /// イシュー #1943（AC-2）: resident グラフ（`DeviceParamStore`
+    /// 経由。`Op::ResidentLeaf`／`Op::LinearResident` を含む）に対し
+    /// `Tape::backward_create_graph` を呼ぶと、[`validate_ancestors`]
+    /// （`create_graph.rs`）が `child` へ一切書き込む前に型付き
+    /// `Err(AutodiffError::Backward)` で拒否することを検証する
+    /// （`docs/autodiff-higher-order-grad-decision.md` §8「resident／
+    /// fused 経路は非対応」契約）。`resident_grads_to_host_is_
+    /// unsupported_on_backend_without_gemm_into` と同じ構成
+    /// （`MockDeviceOps::new()`。resident 経路自体は
+    /// `register_resident_params`／`linear_forward` で forward 済み）
+    /// を使う——create_graph の拒否は resident **backward**（`Op::
+    /// LinearResident` 経由の `gemm_fp32_strict_into`）の可否とは
+    /// 独立に、forward グラフに `Op::ResidentLeaf`／`Op::
+    /// LinearResident` が含まれる時点で発生する。
+    ///
+    /// 拒否後も `store.backward(&tape, &loss)`（通常の 1 階 backward）
+    /// が引き続き成功する（create_graph の事前拒否が `store`／親
+    /// テープの状態を破壊しない）ことも併せて確認する。
+    #[test]
+    fn create_graph_rejects_resident_path_with_typed_error() {
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let tape = simple_tape(None);
+        let child =
+            Tape::new_with_ops(Box::new(MockDeviceOps::new()) as Box<dyn BackendOps + Send>);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+        let leaves = store.register_resident_params(&tape).unwrap();
+        let x_var = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred = store
+            .linear_forward(&tape, &x_var, &leaves[0], None)
+            .unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+
+        let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+        assert!(
+            matches!(err, AutodiffError::Backward(_)),
+            "resident グラフの create_graph は型付き Err(Backward) で拒否するはず: {err:?}"
+        );
+        assert!(
+            child.is_empty(),
+            "入口検査（validate_ancestors）は child へ一切書き込む前に拒否するはず"
+        );
+
+        // 拒否後も通常の 1 階 backward は通常どおり成功する（create_graph
+        // の事前拒否が store／親テープの状態を破壊しない）。
+        let grads = store.backward(&tape, &loss);
+        assert!(
+            grads.is_ok(),
+            "create_graph 拒否後も store.backward は成功するはず: {grads:?}"
+        );
+    }
+
     /// イシュー #1479: `resident_grads_to_host`／`param_grads_to_host` は
     /// `&self`・読み出し専用であり、`pending`・`backward_serial` を
     /// 変更しない（呼び出し後も `step()` が通常どおり成功する）ことを
