@@ -14,6 +14,16 @@ from collections import defaultdict
 from pathlib import Path
 
 TOTAL = {"train_phases": "step_total", "infer_phases": "iter_total"}
+# README・RULE.txt が契約する 8 セル（cpu／metal × train／infer × fresh／reuse）。
+# orchestrate は個々の実行失敗を記録して続行するため、観測された行だけから
+# セル集合を作ると全 run で欠落したセル（例: metal 全滅）を静かに除いた表が
+# 出てしまう。期待集合を明示し、run ごとの欠落を fail-closed に検出する。
+EXPECTED_CELLS = sorted(
+    (dev, task, mode)
+    for dev in ("cpu", "metal")
+    for task in ("train_phases", "infer_phases")
+    for mode in ("fresh", "reuse")
+)
 
 
 def main() -> int:
@@ -25,6 +35,7 @@ def main() -> int:
         return 1
     vals = defaultdict(list)  # (device, task, mode) -> phase -> [median_s per run]
     order = {}
+    phase_sets = {}  # run 名 -> {cell -> frozenset(phase)}。run 間のフェーズ集合一致を検査する
     for f in files:
         seen = set()
         for line in f.read_text(encoding="utf-8").splitlines():
@@ -40,7 +51,30 @@ def main() -> int:
             seen.add(key)
             vals[key].append(r["median_s"])
             order[key] = r["phase_index"]
-    cells = sorted({k[:3] for k in vals})
+        per_cell = defaultdict(set)
+        for k in seen:
+            per_cell[k[:3]].add(k[3])
+        missing_cells = [c for c in EXPECTED_CELLS if c not in per_cell]
+        if missing_cells:
+            print(f"error: {f.name} に欠落セル {missing_cells}（期待 {len(EXPECTED_CELLS)} セル）", file=sys.stderr)
+            return 1
+        extra_cells = sorted(c for c in per_cell if c not in EXPECTED_CELLS)
+        if extra_cells:
+            print(f"error: {f.name} に期待外のセル {extra_cells}", file=sys.stderr)
+            return 1
+        for c, ph in per_cell.items():
+            if TOTAL[c[1]] not in ph:
+                print(f"error: {f.name} の {c} に合計フェーズ {TOTAL[c[1]]} がない", file=sys.stderr)
+                return 1
+        phase_sets[f.name] = {c: frozenset(ph) for c, ph in per_cell.items()}
+    ref_name = files[0].name
+    for name, ps in phase_sets.items():
+        for c in EXPECTED_CELLS:
+            if ps[c] != phase_sets[ref_name][c]:
+                diff = sorted(ps[c] ^ phase_sets[ref_name][c])
+                print(f"error: {name} と {ref_name} で {c} のフェーズ集合が不一致 {diff}", file=sys.stderr)
+                return 1
+    cells = EXPECTED_CELLS
     print("# train／infer `--phases` 5 run 中央値（registry `fandhe-ai =0.9.0`・Apple M4 Max）\n")
     for cell in cells:
         dev, task, mode = cell

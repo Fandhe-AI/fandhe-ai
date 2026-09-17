@@ -26,7 +26,13 @@ for i in 1 2 3 4 5; do
   waited=0
   status="timeout"
   while [ "${waited}" -lt 1800 ]; do
-    l1=$(sysctl -n vm.loadavg | awk '{print $2}')
+    # sysctl の失敗・空出力を「負荷 0」と誤読して gate=pass にしない。
+    # 数値として読めない場合は gate=unavailable として記録し、run は実行する
+    # （RULE.txt: 不通過でも実行し系列は参考扱い。取得不能も同じ扱い）。
+    l1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
+    case "${l1}" in
+      ''|*[!0-9.]*) status="unavailable"; l1="NA"; break ;;
+    esac
     ok=$(awk -v a="${l1}" 'BEGIN{print (a<8.0)?1:0}')
     if [ "${ok}" = "1" ]; then status="pass"; break; fi
     sleep 30
