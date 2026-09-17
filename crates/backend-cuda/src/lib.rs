@@ -387,6 +387,7 @@ mod kernels_mma_tf32;
 mod kernels_mma_tf32x3;
 mod kernels_mse;
 mod kernels_nll;
+mod kernels_norm_backward;
 mod kernels_rmsnorm;
 mod kernels_rnn_cell;
 // イシュー #1700: `ScalarUnaryOp`／`ScalarBinaryOp`（`tensor-core::
@@ -420,6 +421,7 @@ pub mod memory;
 mod module_cache;
 mod mse;
 mod nll;
+mod norm_backward;
 mod rnn_cell;
 // イシュー #1584: 汎用 reduction（`sum`／`max`）起動 API・カーネル
 // ソース。`mse.rs`／`kernels_mse.rs` と同じ 2 ファイル構成
@@ -665,6 +667,7 @@ pub use batch_norm::CudaBatchNorm;
 // 公開スイッチであり、統計・種別を覗く診断専用型（上記 2 つ）とは
 // 性質が異なる。
 pub use host_staging::{pinned_h2d_enabled, set_pinned_h2d_enabled};
+pub use norm_backward::{CudaNormBackward, LayerNormBackwardHostOutput, NormBackwardShape};
 pub use nvrtc::{
     CompiledDims, CudaKernelCacheKey, CudaKernelDescriptor, MAX_PIPELINE_STAGES, compile_ptx,
     derive_pipeline_stages, nvrtc_version,
