@@ -427,3 +427,27 @@ REQ-2（バックエンド間数値一致）の対象外・CUDA／Metal 実機�
 facade 公開面（`fandhe_ai::CustomFunction` 再エクスポート・facade `Tape::custom` 転送
 メソッド・`api_surface.rs` の公開面拡張検査）は本 issue の対象外のまま、別途ユーザー
 承認を得てから着手する。
+
+## 14. `create_graph`（高階微分。#1942／#1943）との関係
+
+本 issue（#1946）と `create_graph`（`docs/autodiff-higher-order-grad-decision.md`。
+イシュー #1942／#1943）は並行して実装され、`origin/main` へ取り込む際に `Op` の網羅
+match（`Op::supports_create_graph()`。同 doc §8 の 69 variant 分類は `Op::Custom`
+新設前のもので同 variant を含まない）が `Op::Custom` を欠いたままコンパイル不能に
+なることが判明した（PR #1996 マージ時。イシュー #1946）。
+
+`Op::Custom` は `create_graph` の**対象外**（`Op::supports_create_graph()` は
+`Op::Custom { .. } => false` を返す）と確定する。理由: `CustomFunction::backward` は
+上流勾配（`upstream: &Tensor<f32>`）を受け取り数値テンソルの VJP のみを返す契約
+（§12.4／§13.2）であり、子テープ（`create_graph.rs::backward_create_graph`）が要求する
+「入力ノードを起点に `Var` 演算として再生可能な演算列」を一切持たない。ユーザー定義
+`forward`／`backward` はブラックボックスの数値関数であり、子テープ上でその微分演算
+自体を記録する手段が構造的に存在しないため、対応するには `CustomFunction` に
+二階微分専用の別メソッド（例: `backward_of_backward`）を追加する API 拡張が必要になる
+（本 issue のスコープ外）。
+
+拒否時の挙動は他の非対象 Op（`Op::ScalarUnary`／`Op::Softmax` 等）と同型で、
+`Tape::backward_create_graph` の入口検査（`validate_ancestors`）が子テープへ一切
+書き込む前に型付き `Err(AutodiffError::Backward(_))` を返す（fail-closed）。
+`crates/autodiff/tests/create_graph.rs::create_graph_rejects_unsupported_op_custom`
+で固定した。
