@@ -39,13 +39,23 @@
 //!   バッファ（`rows` 要素）へ lane 0 が書き出す（dw／db カーネルが同じ
 //!   統計を再計算せず再利用するため）。
 //!
-//!   行内の縮約順序（butterfly）はホスト参照実装（`rmsnorm_vjp_rows` は
-//!   `mean(dxhat·xhat)` を単純な逐次和、`layer_norm_vjp_rows` の
-//!   `sum_dxhat`／`dot_acc` も単純な逐次和）とは異なるため、`dx` は bit
-//!   一致を主張せず REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対
-//!   誤差 1e-5 未満）で判定する（`.claude/rules/coding-rust.md`
-//!   「結合順序が単一の連続 K ループと異なるカーネルの parity 判定方式」の
-//!   一般原則とは別に、そもそも縮約自体が異なる典型例）。
+//!   行内の縮約順序（butterfly。offset 16→1）は、ホスト参照実装
+//!   （`rmsnorm_vjp_rows` の `dot_acc`・`layer_norm_vjp_rows` の
+//!   `sum_dxhat`／`dot_acc`）側が `eval::warp_reduce_f64`（レーン
+//!   ストライド `idx = lane; idx += 32` で分担してから同じ offset
+//!   16→1 の butterfly で合流する、GPU 側とビット単位で同一の縮約
+//!   関数）を経由するよう揃えてある（イシュー #1950・PR #1995
+//!   codex-review P1 是正）。相殺を含む符号付き入力（例:
+//!   `dy = [1e20, 1, -1e20, 0, ...]`）では縮約順序の違いだけで `dx` が
+//!   O(1) 規模で乖離しうるため、単純逐次和のままでは REQ-2 統一複合
+//!   判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる
+//!   ケースがあった（縮約自体が異なると判定の余地がないため、`dx` は
+//!   引き続き bit 一致は主張しない。`.claude/rules/coding-rust.md`
+//!   「結合順序が単一の連続 K ループと異なるカーネルの parity 判定方式」
+//!   の一般原則とは別に、縮約順序そのものをホスト側で GPU に揃える
+//!   ことで REQ-2 判定を成立させる対処である）。二乗和（RMSNorm の
+//!   `acc`）は符号なし項のみで相殺が生じないため対象外のまま（`eval::
+//!   row_rms_stats` は単純逐次和を維持）。
 //!
 //! - `rmsnorm_bwd_dw_new_f32`・`layer_norm_bwd_dwdb_f32`:
 //!   列（`hidden`）方向 grid-stride（1 スレッド = 1 列）で `rows` を

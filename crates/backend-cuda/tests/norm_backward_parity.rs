@@ -9,8 +9,12 @@
 //! 検証）と、実機必須の形状網羅（`#[ignore]`。DGX Spark GB10 等）を
 //! 分離する。判定式・許容誤差は再定義せず
 //! `fandhe_ai_backend_cpu::parity::assert_parity`（REQ-2 統一複合判定）を
-//! 唯一の参照とする（`.claude/rules/coding-rust.md`）。dx は行内縮約の
-//! 順序（butterfly 対 逐次和）が host 参照実装と異なるため bit 一致を
+//! 唯一の参照とする（`.claude/rules/coding-rust.md`）。dx は
+//! 符号付き項の行内総和（`dot`／`sum_dxhat`）こそ [`warp_reduce_f64`]
+//! で GPU の butterfly 縮約と同一順序に揃えてあるが（イシュー #1950・
+//! PR #1995 codex-review P1 是正）、RMSNorm の二乗和（`rstd`
+//! 導出）は符号なし項のみで相殺が生じないため意図して単純逐次和の
+//! ままであり、rstd 自体の丸め誤差が dx へ伝播するため bit 一致は
 //! 主張しない（`kernels_norm_backward.rs` 冒頭コメント参照）。
 //!
 //! CPU 参照実装は `fandhe_ai_autodiff::grad::rmsnorm_vjp_rows`／
@@ -32,9 +36,38 @@ use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaNormBackward, NormBackwa
 
 mod common;
 
+/// `fandhe_ai_autodiff::eval::warp_reduce_f64`（private・`autodiff` クレート
+/// 内限定）のテスト専用複製。CUDA
+/// `kernels_norm_backward.rs`（レーンストライド `idx = lane; idx += 32`
+/// で分担してから offset 16→1 の butterfly で合流）と同一の縮約順序
+/// を再現する（イシュー #1950・PR #1995 codex-review P1 是正）。
+fn warp_reduce_f64(hidden: usize, mut contribute: impl FnMut(usize, f64) -> f64) -> f64 {
+    const LANES: usize = 32;
+    let mut lanes = [0.0f64; LANES];
+    for (lane, slot) in lanes.iter_mut().enumerate() {
+        let mut idx = lane;
+        while idx < hidden {
+            *slot = contribute(idx, *slot);
+            idx += LANES;
+        }
+    }
+    let mut offset = 16usize;
+    while offset > 0 {
+        let snapshot = lanes;
+        for (lane, slot) in lanes.iter_mut().enumerate() {
+            *slot = snapshot[lane] + snapshot[lane ^ offset];
+        }
+        offset >>= 1;
+    }
+    lanes[0]
+}
+
 /// `fandhe_ai_autodiff::grad::rmsnorm_vjp_rows`（private）と同一
 /// アルゴリズムのテスト専用複製（doc comment 冒頭参照）。`rstd` は
 /// `row_rms_stats` 相当（`f64` 二乗和 → 1 回 `f32` downcast）で導出する。
+/// `dot_acc`（符号付き項の行内総和）は上記 [`warp_reduce_f64`] で
+/// CUDA カーネルと同一順序に揃える（イシュー #1950・PR #1995
+/// codex-review P1 是正）。
 fn cpu_rmsnorm_backward_reference(
     x: &[f32],
     w: Option<&[f32]>,
@@ -65,12 +98,11 @@ fn cpu_rmsnorm_backward_reference(
                 None => dy_row[i],
             }
         };
-        let mut dot_acc = 0.0f64;
-        for (i, &xv) in row.iter().enumerate() {
-            let xhat = xv * rstd;
+        let dot_acc = warp_reduce_f64(hidden, |i, acc| {
+            let xhat = row[i] * rstd;
             let term = dxhat_at(i) * xhat;
-            dot_acc += term as f64;
-        }
+            acc + term as f64
+        });
         let mean_dot = dot_acc * inv_n;
         let dx_row = &mut dx[r * hidden..(r + 1) * hidden];
         for (i, (&xv, dxv)) in row.iter().zip(dx_row.iter_mut()).enumerate() {
@@ -93,7 +125,13 @@ fn cpu_rmsnorm_backward_reference(
 
 /// `fandhe_ai_autodiff::grad::layer_norm_vjp_rows`（private）と同一
 /// アルゴリズムのテスト専用複製。`mean`／`rstd` は `row_ln_stats` 相当
-/// （butterfly reduction・`f64` のまま保持）で導出する。
+/// （[`warp_reduce_f64`] butterfly reduction・`f64` のまま保持）で
+/// 導出する。`sum_dxhat`／`dot_acc`（符号付き項の行内総和）も同じ
+/// [`warp_reduce_f64`] で CUDA カーネルと同一順序に揃える（イシュー
+/// #1950・PR #1995 codex-review P2 是正: 従来はこの doc comment の
+/// 記述に反し `mean`／`sq_acc`／`dot_acc` が単純逐次和のままで、相殺を
+/// 含む入力では実際の `eval::row_ln_stats`／CUDA butterfly 縮約と
+/// 乖離した基準値を返していた）。
 #[allow(clippy::too_many_arguments)]
 fn cpu_layer_norm_backward_reference(
     x: &[f32],
@@ -120,16 +158,12 @@ fn cpu_layer_norm_backward_reference(
     for r in 0..rows {
         let row = &x[r * hidden..(r + 1) * hidden];
         let dy_row = &dy[r * hidden..(r + 1) * hidden];
-        let mut sum = 0.0f64;
-        for &v in row {
-            sum += v as f64;
-        }
+        let sum = warp_reduce_f64(hidden, |i, acc| acc + row[i] as f64);
         let mean = sum / n;
-        let mut sq_acc = 0.0f64;
-        for &v in row {
-            let d = v as f64 - mean;
-            sq_acc = d.mul_add(d, sq_acc);
-        }
+        let sq_acc = warp_reduce_f64(hidden, |i, acc| {
+            let d = row[i] as f64 - mean;
+            d.mul_add(d, acc)
+        });
         let var = sq_acc / n;
         let rstd = 1.0f64 / (var + eps as f64).sqrt();
         let xhat_at = |i: usize| -> f32 { ((row[i] as f64 - mean) * rstd) as f32 };
@@ -139,15 +173,13 @@ fn cpu_layer_norm_backward_reference(
                 None => dy_row[i],
             }
         };
-        let mut sum_dxhat = 0.0f64;
-        let mut dot_acc = 0.0f64;
-        for i in 0..row.len() {
+        let sum_dxhat = warp_reduce_f64(hidden, |i, acc| acc + dxhat_at(i) as f64);
+        let dot_acc = warp_reduce_f64(hidden, |i, acc| {
             let xhat = xhat_at(i);
             let dxhat = dxhat_at(i);
-            sum_dxhat += dxhat as f64;
             let term = dxhat * xhat;
-            dot_acc += term as f64;
-        }
+            acc + term as f64
+        });
         let mean_dxhat = sum_dxhat / n;
         let mean_dot = dot_acc / n;
         let dx_row = &mut dx[r * hidden..(r + 1) * hidden];
@@ -385,10 +417,20 @@ fn norm_backward_zero_element_contract() {
     assert!(dx.is_empty());
     assert_eq!(dw, Some(vec![0.0f32; 2]));
 
+    // `validate_norm_backward_launch` は `numel == 0` の早期 return 分岐
+    // より前に `w.len() == hidden` を検査する（`norm_backward.rs`
+    // 参照）。`hidden == 0` のこのケースでは `weight` も長さ 0
+    // （`Some(&[])`）で渡す必要がある——さもないと意図した 0 要素
+    // 早期 return 経路ではなく `InvalidRmsNormShape` に落ちてしまう
+    // （イシュー #1950・PR #1995 codex-review P2／Cursor Bugbot 重複
+    // 指摘の是正）。不正な weight 長の拒否自体は
+    // `validate_norm_backward_launch_rejects_w_len_mismatch`
+    // （`norm_backward.rs` 内の Linux 実行可能な単体テスト）が別途
+    // 検証済み。
     let (dx, dw, db) = nb
         .run_layer_norm_backward_f32(
             &[],
-            Some(&[1.0, 2.0]),
+            Some(&[]),
             true,
             &[],
             1e-5,
@@ -396,7 +438,7 @@ fn norm_backward_zero_element_contract() {
         )
         .expect("hidden==0 must succeed");
     assert!(dx.is_empty());
-    assert_eq!(dw, Some(vec![0.0f32; 2]));
+    assert_eq!(dw, Some(vec![0.0f32; 0]));
     assert_eq!(db, Some(vec![0.0f32; 0]));
 }
 

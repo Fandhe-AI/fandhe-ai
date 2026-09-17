@@ -341,9 +341,34 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
   `__shfl_xor_sync` butterfly reduction で行内統計を再計算）と dw／db
   カーネル（列方向 grid-stride・行を `r=0..rows` の順に逐次走査し
   `float` で確定した積を `double` へ昇格して蓄積。
-  `.claude/rules/coding-rust.md` の長軸縮約契約）の 2 段構成。dx は行内
-  縮約順序が host 参照実装（単純な逐次和）と異なるため bit 一致を主張
-  せず REQ-2 統一複合判定で判定する。
+  `.claude/rules/coding-rust.md` の長軸縮約契約）の 2 段構成。
+
+  **行内の符号付き項の縮約（PR #1995 codex-review P1 是正）**: dx カーネル
+  内の `dot`（RMSNorm）・`sum_dxhat`／`dot`（LayerNorm）は符号付き項の
+  行内総和であり相殺を起こしうる。当初実装はホスト参照実装
+  （`rmsnorm_vjp_rows`／`layer_norm_vjp_rows`）側がこれらを単純な先頭
+  からの逐次和で計算していたため、極端な相殺入力（例:
+  `dy = [1e20, 1.0, -1e20, 0.0, ...]`）では CUDA 側の butterfly 縮約
+  （32 レーンストライド分担 + offset 16→1）と host 側の逐次和とで
+  ペアリング順序が異なり、`dx` が REQ-2 統一複合判定（相対誤差 1e-3
+  未満 または 絶対誤差 1e-5 未満）を外れる場合があった。§9「縮約順序
+  の是正（PR #1671 codex-review P1 指摘）」が forward の `mean`／`var`
+  （`row_ln_stats`）に適用した「ホスト側を GPU の butterfly 縮約順序
+  （`eval::warp_reduce_f64`）へ合わせる」方針を本 backward VJP の
+  `dot`／`sum_dxhat` へも横展開し是正した（`crates/autodiff/src/
+  eval.rs::warp_reduce_f64` を `pub(crate)` 化し `grad.rs` から再利用。
+  CUDA カーネル自体は無変更）。是正後は `dot`／`sum_dxhat` について
+  host と CUDA が同一の縮約順序を計算するため、相殺入力を含む単体
+  テスト（`crates/autodiff/src/grad.rs::tests::
+  rmsnorm_grad_dot_reduction_matches_gpu_butterfly_order_on_cancelling_input`／
+  `layer_norm_grad_sum_dxhat_reduction_matches_gpu_butterfly_order_on_cancelling_input`。
+  Linux 実行可能）で厳密な期待値と bit 一致することを確認済み。
+  ただし RMSNorm の二乗和（`rstd` 導出。`row_rms_stats` と CUDA の
+  `acc`）は符号なし項のみで相殺が生じないため引き続き対象外（単純
+  逐次和のまま）であり、これに起因する `rstd` の丸め誤差が `dx` へ
+  伝播するため、dx は全体として bit 一致を主張せず REQ-2 統一複合判定
+  で判定する（LayerNorm の `mean`／`var` は §9 の是正により forward
+  時点で butterfly 縮約済みのため対象外）。
 - 正しさ検証: `crates/tensor-core/src/backend_ops.rs`
   （`norm_backward_default_is_unsupported`）・`crates/autodiff/src/
   grad.rs`（`NormBackwardMockOps` によるモックテスト 8 件。優先呼び出し・

@@ -3464,12 +3464,18 @@ fn rmsnorm_vjp_rows(
                 None => dy_row[i],
             }
         };
-        let mut dot_acc = 0.0f64;
-        for (i, &xv) in row.iter().enumerate() {
-            let xhat = xv * rstd;
+        // イシュー #1950・PR #1995 codex-review P1 是正: `dot`（符号付き
+        // 項 `dxhat・xhat` の行内総和）は CUDA
+        // `kernels_norm_backward.rs::rmsnorm_bwd_dx_new_f32` の
+        // レーンストライド＋butterfly 縮約と同一順序（`eval::
+        // warp_reduce_f64`）で計算する（単純な先頭からの逐次和では
+        // 相殺入力で GPU 側と乖離しうる。`eval::warp_reduce_f64` doc
+        // comment 参照）。
+        let dot_acc = eval::warp_reduce_f64(hidden, |i, acc| {
+            let xhat = row[i] * rstd;
             let term = dxhat_at(i) * xhat;
-            dot_acc += term as f64;
-        }
+            acc + term as f64
+        });
         let mean_dot = dot_acc * inv_n;
         let dx_row = &mut dx[r * hidden..(r + 1) * hidden];
         for (i, (&xv, dxv)) in row.iter().zip(dx_row.iter_mut()).enumerate() {
@@ -3534,15 +3540,20 @@ fn layer_norm_vjp_rows(
                 None => dy_row[i],
             }
         };
-        let mut sum_dxhat = 0.0f64;
-        let mut dot_acc = 0.0f64;
-        for i in 0..row.len() {
+        // イシュー #1950・PR #1995 codex-review P1 是正: `sum_dxhat`／
+        // `dot`（ともに符号付き項の行内総和）は CUDA
+        // `kernels_norm_backward.rs::layer_norm_bwd_dx_f32` の
+        // レーンストライド＋butterfly 縮約と同一順序（`eval::
+        // warp_reduce_f64`）で計算する（`mean`／`rstd`〈上の
+        // `row_ln_stats` 呼び出し〉と同じ理由。`eval::warp_reduce_f64`
+        // doc comment 参照）。
+        let sum_dxhat = eval::warp_reduce_f64(hidden, |i, acc| acc + dxhat_at(i) as f64);
+        let dot_acc = eval::warp_reduce_f64(hidden, |i, acc| {
             let xhat = xhat_at(i);
             let dxhat = dxhat_at(i);
-            sum_dxhat += dxhat as f64;
             let term = dxhat * xhat;
-            dot_acc += term as f64;
-        }
+            acc + term as f64
+        });
         // `mean` と同じ理由（`row_ln_stats` doc 参照）で、事前丸めした
         // 逆数との積ではなく `hidden` による直接除算で求める。
         let mean_dxhat = sum_dxhat / n;
@@ -8498,6 +8509,50 @@ release ビルドでも検知できるよう `assert!` を使う）"
         assert_grad_close("rmsnorm dw", &dw, &num_dw);
     }
 
+    /// イシュー #1950・PR #1995 codex-review P1 是正の回帰テスト（Linux
+    /// 実行可能。CUDA 実機不要）。`kernels_norm_backward.rs`
+    /// （レーンストライド＋butterfly 縮約）と、この
+    /// `rmsnorm_vjp_rows`（`eval::warp_reduce_f64` 経由に是正済み）が
+    /// 同一の `dot`（相殺入力での符号付き項の行内総和）を計算すること
+    /// を、codex レビュー指摘の具体的な相殺入力で直接検証する。
+    ///
+    /// `x = [1.0; 32]`・`eps = 0.0`（`rstd = 1.0`）・`w = None`・
+    /// `dy = [1e20, 1.0, -1e20, 0.0, ...]`。単純な先頭からの逐次和では
+    /// `dot_acc` が厳密に `0.0`（`1e20` は `f64` の丸めで `1.0` を吸収
+    /// し、直後の `-1e20` で完全に相殺する）になるが、32 レーンの
+    /// butterfly 縮約（offset 16→1）ではペアリング順序が異なるため
+    /// `dot = 1.0` になる（`dy[0]=1e20` と `dy[2]=-1e20` が
+    /// offset=2 の段で先に相殺し、`dy[1]=1.0` だけが生き残る）。
+    /// 是正前は `dx[1] == 1.0`（`dxhat` そのまま）・`dx[3] == 0.0`
+    /// だったが、是正後は `mean_dot = 1.0/32 = 0.03125` が伝播し
+    /// `dx[1] == 0.96875`・`dx[3] == -0.03125` になる——これは
+    /// `f32` で厳密に表現可能な値であり `assert_eq!` で bit 一致を
+    /// 検証できる。
+    #[test]
+    fn rmsnorm_grad_dot_reduction_matches_gpu_butterfly_order_on_cancelling_input() {
+        let hidden = 32usize;
+        let x = vec![1.0f32; hidden];
+        let eps = 0.0f32;
+        let mut dy = vec![0.0f32; hidden];
+        dy[0] = 1e20;
+        dy[1] = 1.0;
+        dy[2] = -1e20;
+
+        let (dx, dw) = rmsnorm_vjp_rows(&x, None, eps, 1, hidden, &dy);
+        assert!(dw.is_none());
+
+        assert_eq!(
+            dx[1], 0.96875f32,
+            "dx[1] は butterfly 縮約の dot=1.0 を反映するはず"
+        );
+        for (i, &v) in dx.iter().enumerate().skip(3) {
+            assert_eq!(
+                v, -0.03125f32,
+                "dx[{i}] は butterfly 縮約の dot=1.0 を反映するはず"
+            );
+        }
+    }
+
     #[test]
     fn layer_norm_grad_matches_numeric_no_affine() {
         let x = t(&[1.0, 2.0, -1.0, 0.5, -0.5, 2.0], &[2, 3]);
@@ -8557,6 +8612,52 @@ release ビルドでも検知できるよう `assert!` を使う）"
             eval::layer_norm_rows(&x, Some(&w_slice), Some(&dense_vec(bt)), eps, rows, hidden)
         });
         assert_grad_close("layer_norm db", &db, &num_db);
+    }
+
+    /// イシュー #1950・PR #1995 codex-review P1 是正の回帰テスト（Linux
+    /// 実行可能。CUDA 実機不要）。`kernels_norm_backward.rs::
+    /// layer_norm_bwd_dx_f32` の `sum_dxhat`（相殺入力での符号付き項の
+    /// 行内総和）と、この `layer_norm_vjp_rows`（`eval::warp_reduce_f64`
+    /// 経由に是正済み）が同一の値を計算することを、codex レビュー指摘
+    /// の具体的な相殺入力で直接検証する。
+    ///
+    /// `x = [0.0; 32]`・`eps = 1.0`（`mean = 0`・`var = 0`・`rstd = 1`
+    /// より `xhat = 0` を全要素で恒等に満たす）・`w = None`・
+    /// `has_bias = false`・`dy = [1e20, 1.0, -1e20, 0.0, ...]`。単純な
+    /// 先頭からの逐次和では `sum_dxhat` が厳密に `0.0` になるが、32
+    /// レーンの butterfly 縮約では `1.0` になる（`rmsnorm_grad_dot_
+    /// reduction_matches_gpu_butterfly_order_on_cancelling_input` と
+    /// 同じペアリング順序）。`xhat = 0` のため `dot_acc` は経路に依らず
+    /// `0.0`（`mean_dot = 0`）だが、`mean_dxhat` の違いがそのまま
+    /// `dx[i] = rstd * (dxhat_i - mean_dxhat - 0) = dy[i] - mean_dxhat`
+    /// へ伝播する。是正前は `dx[1] == 1.0`・`dx[3] == 0.0` だったが、
+    /// 是正後は `mean_dxhat = 1.0/32 = 0.03125` により
+    /// `dx[1] == 0.96875`・`dx[3] == -0.03125` になる（`f32` で厳密に
+    /// 表現可能）。
+    #[test]
+    fn layer_norm_grad_sum_dxhat_reduction_matches_gpu_butterfly_order_on_cancelling_input() {
+        let hidden = 32usize;
+        let x = vec![0.0f32; hidden];
+        let eps = 1.0f32;
+        let mut dy = vec![0.0f32; hidden];
+        dy[0] = 1e20;
+        dy[1] = 1.0;
+        dy[2] = -1e20;
+
+        let (dx, dw, db) = layer_norm_vjp_rows(&x, None, false, eps, 1, hidden, &dy);
+        assert!(dw.is_none());
+        assert!(db.is_none());
+
+        assert_eq!(
+            dx[1], 0.96875f32,
+            "dx[1] は butterfly 縮約の sum_dxhat=1.0 を反映するはず"
+        );
+        for (i, &v) in dx.iter().enumerate().skip(3) {
+            assert_eq!(
+                v, -0.03125f32,
+                "dx[{i}] は butterfly 縮約の sum_dxhat=1.0 を反映するはず"
+            );
+        }
     }
 
     #[test]
