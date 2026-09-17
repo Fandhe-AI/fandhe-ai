@@ -48,6 +48,193 @@
 
 use crate::soft_f64::{add_f64_bits, narrow_f64_bits, sequential_sum_f32_bits, widen_f32_bits};
 
+/// `argmax`／`argmin`（イシュー #1951）の走査対象（`max`／`min`）。
+/// `reduce.metal::reduce_arg_*` の `constant uint& mode`（0=Max・
+/// 1=Min）と 1 対 1 対応する（カーネル数を抑えるための切替引数。
+/// モジュール doc §2「数値契約の核心」参照）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgExtKind {
+    Max,
+    Min,
+}
+
+/// `v`（`f32` の bit 表現）を「NaN は除外（`None`）・±0 は同値化」した
+/// `u32` の totalOrder 風キーへ変換する。`crate::sort_model::value_key`
+/// と同じ正規化式（`±0` 同値化・符号ビット反転による単調写像）を使うが、
+/// NaN の扱いが異なる（`sort_model::value_key` は NaN を最大キーへ
+/// 写像するのに対し、本関数は argmax／argmin の「NaN は無視」契約
+/// （`fandhe_ai_tensor_core::BackendOps::argmax` doc の走査契約 2）に
+/// 合わせて `None` を返す）ため、`sort_model` の関数を再利用せず独立に
+/// 定義する（`docs/backend-metal-reduce-sum-design.md` §11 参照）。
+///
+/// 返すキーは非 NaN の `f32` 全順序（`partial_cmp`）と同型（単調）で
+/// あることを本モジュール下部の単体テストで検証する。GPU 側（`reduce.
+/// metal::red_arg_key`）はこの関数のビット演算のみを逐語再現し、
+/// `f32` の `<`／`>`・`isnan(`（GPU 上で非正規化数が flush されうる
+/// ため float 比較そのものは使わない）は用いない。
+pub fn arg_key(bits: u32) -> Option<u32> {
+    let v = f32::from_bits(bits);
+    if v.is_nan() {
+        return None;
+    }
+    let normalized = if v == 0.0 { 0.0f32 } else { v };
+    let nbits = normalized.to_bits();
+    Some(if nbits >> 31 == 1 {
+        !nbits
+    } else {
+        nbits | 0x8000_0000
+    })
+}
+
+/// `kind` に応じて `challenger` が `incumbent`（現在の最良値。`None`
+/// は「まだ何も採用していない」）より優れているかを判定する
+/// （`axis_arg_reduce`／`arg_slice`〈`crates/backend-cpu/src/
+/// reduction.rs`〉の `best_val.is_nan() || better(v, best_val)` と同じ
+/// 「未確定または strict に優れる場合のみ更新」契約）。
+fn arg_better(kind: ArgExtKind, challenger: u32, incumbent: Option<u32>) -> bool {
+    match incumbent {
+        None => true,
+        Some(b) => match kind {
+            ArgExtKind::Max => challenger > b,
+            ArgExtKind::Min => challenger < b,
+        },
+    }
+}
+
+/// `reduce.metal::reduce_arg_axis_f32` の 1 lane 分のループ本体の逐語
+/// モデル（`fandhe_ai_backend_cpu::reduction::axis_arg_reduce` の
+/// 出力要素ごとの畳み込みと同一構造）。`xs` はライン内を軸順に並べた
+/// スライス。NaN はスキップし、`best` が未確定または strict に優れる
+/// 場合のみ更新する。全要素 NaN の場合は添字 0 を返す（`best_idx` の
+/// 初期値のまま。CPU `axis_arg_reduce` と同じ契約）。
+pub fn argext_axis_lane(xs: &[f32], kind: ArgExtKind) -> usize {
+    let mut best_idx = 0usize;
+    let mut best_key: Option<u32> = None;
+    for (k, &v) in xs.iter().enumerate() {
+        let Some(key) = arg_key(v.to_bits()) else {
+            continue;
+        };
+        if arg_better(kind, key, best_key) {
+            best_key = Some(key);
+            best_idx = k;
+        }
+    }
+    best_idx
+}
+
+/// 全要素縮約（`dim=None`）の 2 段構成モデル（`reduce.metal::
+/// reduce_arg_all_chunk_f32`／`reduce_arg_all_finalize_f32` の逐語
+/// モデル）。
+///
+/// CPU 参照実装 `fandhe_ai_backend_cpu::reduction::arg_slice` は
+/// **平坦な逐次走査**（`sum` の `sum_slice_f64` と異なりチャンク分割
+/// しない）だが、本関数は GPU 側の並列度確保のため
+/// [`REDUCE_SUM_CHUNK`] 単位のチャンクへ分割し、
+/// (1) 各チャンク内を昇順走査して「チャンク内で最初に現れる極値」の
+/// (キー, グローバル添字) を求め（チャンクが全要素 NaN なら
+/// 「無効」）、
+/// (2) チャンク番号昇順に走査し、無効チャンクはスキップ、`best` が
+/// 未確定または strict に優れる場合のみ置換する（同値なら先行
+/// チャンクを保持）
+/// という 2 段構成で結果を求める。
+///
+/// **等価性の証明**（`docs/backend-metal-reduce-sum-design.md` §11
+/// 参照）: 平坦走査の結果は「値が最良でその中で最小添字を持つ要素」
+/// である。(1) はチャンク内で最小添字（先勝ち）を選ぶ。(2) の strict
+/// 置換は同値のとき先行チャンク（＝より小さい添字）を保持するため、
+/// チャンクをまたいでも「先勝ち」が保たれる。よって 2 段構成の結果は
+/// 平坦走査と常に一致する（両者は演算順序が異なるが比較は丸めを
+/// 伴わない厳密演算のため結合順序に依存しない。下記テスト
+/// `argext_all_chunked_matches_flat_scan` が全域で機械的に検証する）。
+pub fn argext_all_chunked(x: &[f32], kind: ArgExtKind) -> usize {
+    let mut global_best_idx = 0usize;
+    let mut global_best_key: Option<u32> = None;
+    for (chunk_idx, chunk) in x.chunks(REDUCE_SUM_CHUNK).enumerate() {
+        let base = chunk_idx * REDUCE_SUM_CHUNK;
+        let mut local_best: Option<(u32, usize)> = None;
+        for (k, &v) in chunk.iter().enumerate() {
+            let Some(key) = arg_key(v.to_bits()) else {
+                continue;
+            };
+            let better = match local_best {
+                None => true,
+                Some((bk, _)) => arg_better(kind, key, Some(bk)),
+            };
+            if better {
+                local_best = Some((key, k));
+            }
+        }
+        if let Some((key, k)) = local_best {
+            let global_idx = base + k;
+            if arg_better(kind, key, global_best_key) {
+                global_best_key = Some(key);
+                global_best_idx = global_idx;
+            }
+        }
+    }
+    global_best_idx
+}
+
+/// [`argext_all_chunked`] の平坦走査版参照実装（CPU `arg_slice` と
+/// 同一構造。`argext_all_chunked` との一致を検証するためのテスト
+/// 専用ヘルパー）。
+#[cfg(test)]
+fn argext_all_flat(x: &[f32], kind: ArgExtKind) -> usize {
+    let mut best_idx = 0usize;
+    let mut best_key: Option<u32> = None;
+    for (k, &v) in x.iter().enumerate() {
+        let Some(key) = arg_key(v.to_bits()) else {
+            continue;
+        };
+        if arg_better(kind, key, best_key) {
+            best_key = Some(key);
+            best_idx = k;
+        }
+    }
+    best_idx
+}
+
+// [`plan_argext_all`]／[`plan_argext_axis`] の失敗理由。[`argext_all_chunked`]
+// のグローバル添字は `numel` 未満、[`argext_axis_lane`] の添字は
+// `axis_len` 未満であり、CPU `build_index_tensor` の `IndexRangeOverflow`
+// と同じくデータに依存せず「形状だけから」 `i32` 範囲超過の可能性を
+// 判定できる（実際に選ばれる添字がその範囲に収まるかはデータ依存だが、
+// 形状上その可能性がある場合は `sum` と同じ `Unsupported` 経由の
+// ホストフォールバックへ委ねる。`docs/backend-metal-reduce-sum-design.md`
+// §11「サイズ上限・エラー契約」参照）。エラー型自体は既存の
+// `ReducePrepareError` をそのまま再利用する（専用型を新設しない）。
+
+/// 全要素縮約（`dim=None`）の起動計画。[`plan_reduce_all`] に加えて
+/// `numel > i32::MAX` を検査する（候補添字が `i32` 範囲を超えうる
+/// ため。`ops.rs::metal_argext` が `Unsupported` へ写像しホスト
+/// フォールバックへ委ねる）。
+pub fn plan_argext_all(numel: usize) -> Result<ReduceAllPlan, ReducePrepareError> {
+    let plan = plan_reduce_all(numel)?;
+    if numel > i32::MAX as usize {
+        return Err(ReducePrepareError::SizeLimitExceeded {
+            what: "numel (i32 index range)",
+            value: numel,
+            limit: i32::MAX as usize,
+        });
+    }
+    Ok(plan)
+}
+
+/// 単一軸縮約（`dim=Some(axis)`）の起動計画。[`plan_reduce_axis`] に
+/// 加えて `axis_len > i32::MAX` を検査する（候補添字は軸内添字
+/// `0..axis_len` のため）。
+pub fn plan_argext_axis(shape: &[usize], dim: usize) -> Result<ReduceAxisPlan, ReducePrepareError> {
+    let plan = plan_reduce_axis(shape, dim)?;
+    if plan.axis_len > i32::MAX as usize {
+        return Err(ReducePrepareError::SizeLimitExceeded {
+            what: "axis_len (i32 index range)",
+            value: plan.axis_len,
+            limit: i32::MAX as usize,
+        });
+    }
+    Ok(plan)
+}
+
 /// 全要素縮約（`dim=None`）のチャンク分割サイズ。`fandhe_ai_backend_cpu::
 /// reduction::CHUNK` と同値（同モジュールは `pub(crate)` のため本
 /// クレートから直接参照できない。ドリフトは
@@ -542,6 +729,221 @@ mod tests {
         assert!(matches!(
             plan_reduce_axis(&[over, 2], 1),
             Err(ReducePrepareError::SizeLimitExceeded { what: "lanes", .. })
+        ));
+    }
+
+    // ---- argmax／argmin（イシュー #1951）----
+
+    use fandhe_ai_backend_cpu::reduction::{argmax as cpu_argmax, argmin as cpu_argmin};
+
+    fn cpu_argext(data: &[f32], shape: &[usize], dim: Option<usize>, kind: ArgExtKind) -> Vec<i32> {
+        let tensor = Tensor::new(data.to_vec(), shape).unwrap();
+        let out = match kind {
+            ArgExtKind::Max => cpu_argmax(&tensor, dim).unwrap(),
+            ArgExtKind::Min => cpu_argmin(&tensor, dim).unwrap(),
+        };
+        out.as_slice().unwrap().to_vec()
+    }
+
+    /// [`arg_key`]: 非 NaN の代表値集合の全ペアで、キーの大小が
+    /// `f32::partial_cmp`（NaN を除く）と一致することを検証する
+    /// （モジュール doc「§2.3 比較は整数ドメインで行う」の裏付け）。
+    #[test]
+    fn arg_key_total_order_matches_partial_cmp() {
+        let values: &[f32] = &[
+            f32::NEG_INFINITY,
+            -1e30,
+            -2.0,
+            -1.0,
+            -0.0,
+            0.0,
+            1.0,
+            2.0,
+            1e30,
+            f32::INFINITY,
+            f32::MIN_POSITIVE, // 非正規化数近傍。
+            -f32::MIN_POSITIVE,
+        ];
+        for &a in values {
+            for &b in values {
+                let ka = arg_key(a.to_bits()).unwrap();
+                let kb = arg_key(b.to_bits()).unwrap();
+                let expected = a.partial_cmp(&b).unwrap();
+                assert_eq!(
+                    ka.cmp(&kb),
+                    expected,
+                    "arg_key order mismatch: a={a:?} b={b:?}"
+                );
+            }
+        }
+        // ±0 は同値キー。
+        assert_eq!(arg_key(0.0f32.to_bits()), arg_key((-0.0f32).to_bits()));
+        // NaN は None（除外）。
+        assert_eq!(arg_key(f32::NAN.to_bits()), None);
+    }
+
+    /// [`argext_all_chunked`]: CPU `argmax`／`argmin`（`dim=None`）と
+    /// 各種サイズ（チャンク境界前後を含む）で完全一致する。
+    #[test]
+    fn argext_all_matches_cpu_reference_across_sizes() {
+        let mut rng = Rng(0x2222_4444_6666_8888);
+        for &n in &[1usize, 2, 4095, 4096, 4097, 2 * 4096 + 1, 3 * 4096 + 17] {
+            let data: Vec<f32> = (0..n).map(|_| rng.f32()).collect();
+            for kind in [ArgExtKind::Max, ArgExtKind::Min] {
+                let model = argext_all_chunked(&data, kind);
+                let expected = cpu_argext(&data, &[n], None, kind);
+                assert_eq!(model as i32, expected[0], "n={n} kind={kind:?}");
+            }
+        }
+    }
+
+    /// [`argext_all_chunked`] と平坦走査（[`argext_all_flat`]）が全域で
+    /// 一致する（モジュール doc §2.2「等価性の証明」の機械的裏付け）。
+    #[test]
+    fn argext_all_chunked_matches_flat_scan() {
+        let mut rng = Rng(0x1357_9bdf_2468_ace0);
+        for &n in &[1usize, 4095, 4096, 4097, 8192, 3 * 4096 + 17] {
+            let data: Vec<f32> = (0..n).map(|_| rng.f32()).collect();
+            for kind in [ArgExtKind::Max, ArgExtKind::Min] {
+                assert_eq!(
+                    argext_all_chunked(&data, kind),
+                    argext_all_flat(&data, kind),
+                    "n={n} kind={kind:?}"
+                );
+            }
+        }
+    }
+
+    /// 全要素同値・チャンク境界をまたぐ同値極値は最小添字を返す
+    /// （先勝ちタイ契約）。
+    #[test]
+    fn argext_all_tie_returns_first_index() {
+        let data = vec![1.0f32; 4097 * 2];
+        assert_eq!(argext_all_chunked(&data, ArgExtKind::Max), 0);
+        assert_eq!(argext_all_chunked(&data, ArgExtKind::Min), 0);
+
+        // チャンク境界（4096）をまたぐ同値極値: index 4095 と 4096 が
+        // 同じ最大値・4095 が先勝ち。
+        let mut data2 = vec![0.0f32; 4098];
+        data2[4095] = 5.0;
+        data2[4096] = 5.0;
+        assert_eq!(argext_all_chunked(&data2, ArgExtKind::Max), 4095);
+    }
+
+    /// NaN 混入時の挙動: NaN はスキップし有効な極値の添字を返す。
+    /// 全要素 NaN の場合は添字 0（`fandhe_ai_tensor_core::BackendOps::
+    /// argmax` doc の走査契約 1〜3 参照）。
+    #[test]
+    fn argext_all_nan_handling() {
+        let data = vec![f32::NAN, 3.0, f32::NAN, 1.0, f32::NAN];
+        assert_eq!(argext_all_chunked(&data, ArgExtKind::Max), 1);
+        assert_eq!(argext_all_chunked(&data, ArgExtKind::Min), 3);
+
+        // 全要素 NaN（先頭・中間・末尾の NaN を含むチャンク）。
+        let all_nan = vec![f32::NAN; 4097];
+        assert_eq!(argext_all_chunked(&all_nan, ArgExtKind::Max), 0);
+        assert_eq!(argext_all_chunked(&all_nan, ArgExtKind::Min), 0);
+
+        // CPU 参照実装と一致することも確認する。
+        for kind in [ArgExtKind::Max, ArgExtKind::Min] {
+            let expected = cpu_argext(&data, &[data.len()], None, kind);
+            assert_eq!(argext_all_chunked(&data, kind) as i32, expected[0]);
+        }
+    }
+
+    /// [`argext_axis_lane`]: CPU `argmax`／`argmin`（`dim=Some`）と
+    /// 複数 shape・複数 dim・タイ・NaN で一致する。
+    #[test]
+    fn argext_axis_matches_cpu_reference_across_shapes_and_dims() {
+        let mut rng = Rng(0xabab_cdcd_efef_0101);
+        let cases: &[(&[usize], usize)] = &[
+            (&[5], 0),
+            (&[3, 4], 0),
+            (&[3, 4], 1),
+            (&[2, 3, 5], 0),
+            (&[2, 3, 5], 1),
+            (&[2, 3, 5], 2),
+            (&[2, 3, 4, 2], 2),
+        ];
+        for &(shape, dim) in cases {
+            let numel: usize = shape.iter().product();
+            let data: Vec<f32> = (0..numel).map(|_| rng.f32()).collect();
+            for kind in [ArgExtKind::Max, ArgExtKind::Min] {
+                let expected = cpu_argext(&data, shape, Some(dim), kind);
+                let outer: usize = shape[..dim].iter().product();
+                let axis_len = shape[dim];
+                let inner: usize = shape[dim + 1..].iter().product();
+                for o in 0..outer {
+                    for i in 0..inner {
+                        let lane: Vec<f32> = (0..axis_len)
+                            .map(|a| data[(o * axis_len + a) * inner + i])
+                            .collect();
+                        let model = argext_axis_lane(&lane, kind);
+                        assert_eq!(
+                            model as i32,
+                            expected[o * inner + i],
+                            "shape={shape:?} dim={dim} kind={kind:?} o={o} i={i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// [`argext_axis_lane`]: タイ（先勝ち）・NaN 混入時に添字 0。
+    #[test]
+    fn argext_axis_lane_tie_and_nan() {
+        assert_eq!(
+            argext_axis_lane(&[2.0, 2.0, 2.0], ArgExtKind::Max),
+            0,
+            "全同値は先勝ちで添字 0"
+        );
+        assert_eq!(
+            argext_axis_lane(&[f32::NAN, f32::NAN], ArgExtKind::Max),
+            0,
+            "全 NaN は添字 0"
+        );
+        assert_eq!(argext_axis_lane(&[f32::NAN, 3.0, 1.0], ArgExtKind::Max), 1);
+        assert_eq!(argext_axis_lane(&[f32::NAN, 3.0, 1.0], ArgExtKind::Min), 2);
+    }
+
+    /// [`plan_argext_all`]: `numel <= i32::MAX` は既存 `plan_reduce_all`
+    /// と同じ結果、`i32::MAX` 超過は新規の `i32` 上限違反を返す。
+    #[test]
+    fn plan_argext_all_i32_limit() {
+        assert!(plan_argext_all(REDUCE_SUM_CHUNK).is_ok());
+        let over = i32::MAX as usize + 1;
+        assert!(matches!(
+            plan_argext_all(over),
+            Err(ReducePrepareError::SizeLimitExceeded {
+                what: "numel (i32 index range)",
+                value,
+                ..
+            }) if value == over
+        ));
+    }
+
+    /// [`plan_argext_axis`]: `axis_len <= i32::MAX` は既存
+    /// `plan_reduce_axis` と同じ結果、超過は新規の `i32` 上限違反を
+    /// 返す。
+    #[test]
+    fn plan_argext_axis_i32_limit() {
+        assert_eq!(
+            plan_argext_axis(&[2, 3, 4], 1).unwrap(),
+            ReduceAxisPlan {
+                outer: 2,
+                axis_len: 3,
+                inner: 4,
+                lanes: 8,
+            }
+        );
+        let over = i32::MAX as usize + 1;
+        assert!(matches!(
+            plan_argext_axis(&[1, over], 1),
+            Err(ReducePrepareError::SizeLimitExceeded {
+                what: "axis_len (i32 index range)",
+                ..
+            })
         ));
     }
 }
