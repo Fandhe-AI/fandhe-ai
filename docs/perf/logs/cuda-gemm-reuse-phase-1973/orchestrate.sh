@@ -78,14 +78,22 @@ if [[ "$DRY_RUN" == "1" ]]; then
   ls -la "$REPO_ROOT/crates/backend-cuda/src/gemm_reuse_phase_diag_tests.rs"
   echo "dry-run: registry pin確認 (bench-fandhe/Cargo.toml の fandhe-ai 行)"
   grep -n '^fandhe-ai' "$WORK_DIR/bench-fandhe/Cargo.toml" || true
+  echo "dry-run: ビルドコマンド（run_all_cuda.sh／run_gemm_gate.sh の CUDA 分岐と同型）"
+  echo "  cargo build --release -p bench-fandhe"
+  echo "  cargo build --release -p bench-candle --no-default-features --features cuda"
   echo "dry-run: OK"
   exit 0
 fi
 
 cd "$WORK_DIR"
 
+# ビルドフラグは `run_all_cuda.sh`／`run_gemm_gate.sh` の CUDA 分岐と揃える
+# （bench-candle は既定 feature が `metal` のため `--device cuda` で使うには
+# `--no-default-features --features cuda` が必須。bench-fandhe は device
+# 別の cargo feature を持たないため既定ビルドのままでよい）。
 echo "== ビルド（release） =="
-cargo build --release -p bench-fandhe -p bench-candle
+cargo build --release -p bench-fandhe
+cargo build --release -p bench-candle --no-default-features --features cuda
 
 echo "== Layer A: bench-fandhe gemm reuse --phases (N=${SIZES[*]}, ${RUNS} run) =="
 for n in "${SIZES[@]}"; do

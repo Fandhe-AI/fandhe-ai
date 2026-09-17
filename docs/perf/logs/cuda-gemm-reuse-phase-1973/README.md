@@ -33,6 +33,12 @@ N=1024／2048／4096（#1182 の対象形状を継承）。issue #1973 本文の
   （`matmul`／`to_tensor`／`host_copy`／`checksum`／`iter_total`）の
   5 run 中央値・`iter_total` に対する比率を記録する（`aggregate.py`
   が機械算出）
+- **完全性検査（fail-closed）**: `aggregate.py` は各対象サイズで
+  5 run が揃い、各 run に全 phase が重複なく含まれることを検証する。
+  壊れた JSON 行・run 数不足・phase 欠落／重複を検出した場合は
+  当該サイズを黙って除外せず、正式な集計値（Markdown 表）を一切
+  出力せず非ゼロ終了でエラーにする（`LogIntegrityError`。詳細は
+  `aggregate.py` の doc comment を正とする）
 - **Layer B**: `h2d_a`／`h2d_b`／`alloc_c`／`launch_issue`／
   `kernel_wait`／`d2h`／`host_copy` の 5 run 中央値を N × 変種
   （Select／Classic）ごとに記録する（`gemm_reuse_phase_diag_tests.rs`
