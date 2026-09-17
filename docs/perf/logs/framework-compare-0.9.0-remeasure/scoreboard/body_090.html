@@ -1,0 +1,170 @@
+<title>fandhe-ai 0.9.0 対戦成績</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Sans+Condensed:wght@600;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
+<style>
+{css}
+</style>
+<main>
+<p class="eyebrow">fandhe-ai · framework-compare · candle · burn · PyTorch · TensorFlow · SciPy · f32 · warmup 20 + 計測 20（GEMM）／100 step（学習）· M4 Max 2026-09-16 · GB10 2026-09-16（UTC）／2026-09-17（JST）· 2026-09-17 更新</p>
+<h1>他フレームワークとの勝敗スコアボード</h1>
+<p class="lede">crates.io 公開版 <code>fandhe-ai =0.9.0</code> を、同一ハーネス・同一 xorshift64* シード入力で <code>candle-core =0.11.0</code>・<code>burn =0.21.0</code>・PyTorch 2.14.0・TensorFlow（M4 Max 2.16.2＋Metal プラグイン／GB10 2.21.0 CPU）・SciPy 1.18.1 と比較。Hugging Face transformers と LangChain は計算層ではないため性能比較の対象外とし、下の役割対応表で扱う。<b>Apple M4 Max（Metal／CPU）は 2026-09-16 に fandhe-ai・candle・burn を同席で 5 ラウンド計測</b>（{m4_load}）。<b>Python 3 フレームワーク（PyTorch／TensorFlow／SciPy）は 0.9.0 でも再計測しておらず、2026-09-12 版ページからの転記値をそのまま流用</b>している（比較対象 FW 自体の性能はホスト・バージョンが同じであれば版間で変わらない）。<b>DGX Spark GB10（CUDA／CPU）は 2026-09-16（UTC）の専有 1 セッションで fandhe-ai・candle・burn を同席計測</b>（{gb_load}）。<b>GB10 の Python 3 フレームワークも 0.9.0 では未再計測のため、同日 2026-09-16（UTC）の別セッション（HEAD 参考系列）の値を流用</b>している。「勝敗」は fandhe-ai の中央値を有効な他フレームワーク最速と比べた順位。値は中央値 ms（GEMM は GFLOP/s 併記）、推論はバッチ/秒。「0.8.0 比」は同一セル・同一モードの fandhe-ai 中央値の比（&lt;1 が高速化。推論は &gt;1 が改善）。0.8.0 に同モードの記録がないセル（CPU GEMM・推論）は fresh 同士の比とし「（fresh 同士）」と表示する。</p>
+<div class="tally"><div class="w"><b>{n_win}</b><span>1 位（勝ち）</span></div><div class="n"><b>{n_near}</b><span>僅差（最速の 90% 以内）</span></div><div class="l"><b>{n_loss}</b><span>負け</span></div><div><b>{n_invalid}</b><span>判定不能セル（要素検証超過・順位に含めない）／判定対象 {n_total} 行</span></div></div>
+
+<h2>Apple M4 Max（Metal／CPU）— 2026-09-16・fandhe-ai／candle／burn 同席計測（5 ラウンド中央値）＋PyTorch／TensorFlow／SciPy は 2026-09-12 版からの転記（未再計測）</h2>
+<div class="wrap"><table>{m4_head}<tbody>
+{m4_rows}
+</tbody></table></div>
+<p class="note">判定列は全行 fandhe-ai <code>reuse</code>（デバイス／tape を 1 回構築して計測区間を candle・burn と一致させる。candle 比ゲートの正式記録と同じ組み合わせ）、参考列は <code>fresh</code>（毎回 tape 新規生成）。fandhe-ai／candle／burn は registry ピン <code>fandhe-ai =0.9.0</code> で 5 ラウンド計測した中央値（<code>{m4_load}</code>）。学習 <code>reuse</code> は <code>DeviceParamStore</code> によるデバイス常駐 SGD 更新、推論 <code>reuse</code> は <code>predict_resident</code>。点線下線は他フレームワーク最速。<b>burn Metal N≥512 は結果テンソルが全ゼロ（upstream 既知バグ・<code>docs/perf/burn-wgpu-metal-gemm-zero-result.md</code>）のため記録拒否</b>、△ の数字はスケール付き絶対誤差で救済した要素数（#1241 承認契約・有効セル扱い）。学習の最終 loss は fandhe-ai 0.080541・他 5 フレームワーク 0.1175（fandhe-ai のみ重み初期化が異なるため一致しない。時間には影響しない。0.8.0 時点と同一の checksum で版間の再現性を確認済み）。<b>Python 3 フレームワークの計測条件</b>: bench-common／bench-candle のプロトコル（xorshift64* 固定シード・計測窓＝matmul ディスパッチ＋ホスト実体化＋全要素 checksum・parity は CPU f32 FMA 参照との複合判定＋スケール付き絶対誤差救済）を Python へ移植し、GEMM checksum（N=256: 237.5466599）・学習 loss・推論 checksum が candle と一致することを確認したうえで実行。すべて eager 実行（<code>torch.compile</code>／<code>tf.function</code> なし）、PyTorch MPS と TensorFlow Metal（tensorflow-metal 1.2.0）の同期点は <code>.cpu()</code>／<code>.numpy()</code> のホスト転送、SciPy は <code>scipy.linalg.blas.sgemm</code>＋NumPy 手書き backprop で CPU のみ。<b>Python 3 フレームワークは 0.9.0 でも再計測しておらず</b>、値は 2026-09-12 版ページからの転記（元 JSONL <code>results-m4max-py-0.8.0.jsonl</code> はリポジトリ未収録。GEMM は GFLOP/s から ms を逆算しているため下 2 桁がずれる場合がある）。</p>
+
+<h2>DGX Spark GB10（CUDA／ARM CPU）— 2026-09-16（UTC）専有・fandhe-ai／candle／burn 同席計測＋Python 3 FW は同日別セッションから流用</h2>
+<div class="wrap"><table>{gb_head}<tbody>
+{gb_rows}
+</tbody></table></div>
+<p class="note"><b>出典</b>: registry ピン <code>fandhe-ai =0.9.0</code> で <code>run_all_cuda.sh</code>（fandhe-ai／candle／burn、19:03:37 UTC → 19:04:51 UTC、load average 0.02 → 3.14。<code>{gb_load}</code>）と、直後の追加計測（CPU GEMM の <code>reuse</code> N=256〜4096 と N=4096 の fresh 3 種）から本体行を取った。ハーネス既定の単一起動・内部 20 反復の中央値で、M4 Max 側と同じ「同席 1 run」の証拠等級。<b>Python 3 フレームワーク（PyTorch cu130 CPU／CUDA・TensorFlow CPU・SciPy）は 0.9.0 では未再計測</b>のため、同日 2026-09-16（UTC）の別セッション（HEAD 参考系列・03:14:56 UTC → 03:20:29 UTC、load average 0.22 → 6.35）の値を流用した。<b>burn CUDA GEMM は 5 形状すべて TF32 降格による要素検証超過</b>（N=1024 で 169,929/1,048,576 不一致。0.8.0 時点と同一の不一致数。<code>docs/perf/cuda-parity-baseline.md</code>）、<b>PyTorch CPU N=4096 は 1 要素が複合判定を外れ判定不能</b>で、いずれも打ち消し線・順位に含めない。TensorFlow 2.21.0 は GB10 では CPU のみ計測（CUDA 列は未計測で「—」）。CUDA GEMM の N≤2048 で fandhe-ai の <code>reuse</code> が <code>fresh</code> より遅いのは既知の傾向（reuse は matmul ごとにホスト実体化と checksum を含む計測窓のため。<code>docs/perf/cuda-gemm-reuse-phase-breakdown.md</code>）で、判定列は規則どおり <code>reuse</code> のまま。</p>
+
+<h2>0.8.0（2026-09-09）→ 0.9.0 の変化 — 同一ハーネス・同一モード</h2>
+<div class="kv">
+{m4_cards}
+{gb_cards}
+<div><h3>何が変わったか（0.6.0→0.8.0。v0.7.0／v0.8.0 に含まれる変更。0.9.0 分の変更点はここには未反映）</h3><span class="v">学習 1 step が 1/12〜1/7・推論 1.0〜3.2 倍</span><p>v0.7.0: backward の VJP をホスト参照実装から <code>BackendOps::gemm</code>（forward と同じ BLIS／CUDA／Metal カーネル）へ結線（<code>docs/perf/train-backward-gemm-wiring.md</code>）、CPU／CUDA／Metal に VJP 専用 NT/TN 転置入口（<code>cpu-gemm-vjp-transposed-entry.md</code>・<code>cuda-gemm-vjp-transposed-entry.md</code>・<code>metal-gemm-vjp-transposed-entry.md</code>）、CPU の reuse 経路で weight 勾配をデバイス常駐 staging へ直接書き込み（<code>train-resident-grad-device-update.md</code>）、非学習葉への d_input 伝播スキップ、推論 tape 不要経路の融合（<code>cpu-infer-predict-profile.md</code>・<code>infer-reuse-phase-breakdown.md</code>）。v0.8.0: CPU GEMM の (mc, nc) 2D 動的分配 <code>TwoDDynamic</code> 本番結線・借用ビュー readout 既定化。GB10 の CUDA GEMM N=2048 は 0.6.0 の fresh 139.65 ms が #1130 系の異常値（32 MiB 閾値の D2H スパイク）だったため reuse 同士の比で見る。GEMM 単体は共有負荷（M4 Max）・単一 run のためノイズ帯を含む。Metal split-K の本番結線・Metal／CUDA 側 resident 勾配（#1555／#1559）・推論チェーン単一同期化（#1688）は 0.8.0 には含まれない（HEAD のみ）。</p></div>
+</div>
+
+<h2>役割・機能の対応表 — fandhe-ai は何であり、何でないか</h2>
+<p class="note"><b>注記</b>: 本表の内容は 0.8.0 版（2026-09-12）時点の記述のままで、0.9.0 基準への再監査は未実施（v0.9.0 で追加された Conv／Pooling／BatchNorm／Embedding／Attention／RNN／Dropout／state_dict 等は未反映）。0.9.0 基準への更新は Phase 4 の issue として別途扱う。</p>
+<p class="note">fandhe-ai 列は 0.9.0 の facade（crates.io 公開面）から到達できる範囲を「ある」とし、リポジトリ内にはあるが非公開クレート（onnx-interop・guardrail・self-repair・bench-harness）にとどまるものは「リポ内」と区別する。他列は各プロジェクトの公開ドキュメント上の一般的事実。Hugging Face と LangChain は fandhe-ai と同じ層の製品ではなく、性能比較の相手ではない。</p>
+<div class="wrap"><table class="pos"><thead><tr><th>項目</th>
+<th>fandhe-ai 0.9.0</th>
+<th>PyTorch</th>
+<th>TensorFlow (Keras 3)</th>
+<th>SciPy / NumPy</th>
+<th>Hugging Face transformers</th>
+<th>LangChain</th>
+</tr></thead><tbody>
+<tr><th scope="row"><span class="ph">層・役割</span></th>
+<td class="pc me"><span class="pill win">ある</span><span class="pt">Rust 製の自作コア（テンソル・動的テープ autodiff・カーネル・バックエンド抽象）＋薄い compat 層。REQ-1 で既存 ML フレームワークへの依存を排除</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">汎用 DL フレームワーク（テンソル・autograd・nn・分散）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">汎用 DL フレームワーク（Keras 3 高水準 API・XLA）</span></td>
+<td class="pc"><span class="pill near">部分的</span><span class="pt">科学計算（BLAS/LAPACK・最適化・統計・信号処理）。NN・autodiff の層ではない</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">事前学習済みモデルとハブ。計算は PyTorch/TF/JAX に委譲</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">LLM アプリのオーケストレーション（チェーン・エージェント・RAG）。数値計算をしない</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">言語・配布</span></th>
+<td class="pc me"><span class="pill win">ある</span><span class="pt">Rust のみ。crates.io 6 クレート・MIT OR Apache-2.0。Python バインディングなし</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Python（C++ コア libtorch）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Python（C++ コア）・JS/Lite</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Python（C/Fortran）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Python</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Python・JS</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">dtype</span><span class="ds">facade の演算セットは f32</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">演算は f32 固定。f16 GEMM は GPU 内部のみ・CUDA TF32／3×TF32 は既定 OFF の opt-in。f64/i32/i64/bool は生成・view のみ</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">f16/bf16/f32/f64/int/bool/量子化型</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">同左＋mixed precision policy</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">f32/f64/complex/int（NN 用の低精度型はない）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">バックエンドに準拠（bf16/int8/4bit 量子化ロード）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">自動微分</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">動的テープ・1 階のみ。高階微分・no_grad・カスタム VJP・requires_grad 制御なし（テープ登録は pub(crate)）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">動的 autograd・高階・カスタム Function・functorch</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">GradientTape・高階・tf.function</span></td>
+<td class="pc"><span class="pill loss">ない</span><span class="pt">なし（有限差分・手書き勾配）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">バックエンドに委譲</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">演算の範囲</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">matmul・add・mul・relu・tanh・exp・sum・max（sum/max の CUDA/Metal カーネルは Unsupported）・MSE・CrossEntropy。conv・softmax 単体・LayerNorm/RMSNorm・reshape 以外の高度な index 操作は公開面になし</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">網羅（数千 op）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">網羅</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">線形代数・FFT・疎行列・最適化（NN 向けではない）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">NN 層・モデル構築</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">compat::Sequential（add_linear/add_relu/add_sigmoid/add_tanh）。Conv・Norm・Embedding・Attention・RNN は 0.8.0 時点では意図的スコープ外だったが、0.9.0 では Tier 1／2 の実装が進行中（docs/compat-api-scope.md。本表の他行は 0.8.0 時点の記述のまま未監査）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torch.nn 網羅</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Keras レイヤー網羅</span></td>
+<td class="pc"><span class="pill loss">ない</span><span class="pt">なし</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Transformer 系アーキテクチャ多数</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">最適化・学習ループ</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">SGD（momentum/nesterov/weight_decay）・AdamW・ConstantLr/StepLr・grad clip。fit()/compile()・DataLoader・混合精度なし。DeviceParamStore によるデバイス常駐更新は独自</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torch.optim 網羅・DataLoader・AMP</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Keras optimizer 網羅・fit()・tf.data</span></td>
+<td class="pc"><span class="pill near">部分的</span><span class="pt">scipy.optimize（L-BFGS 等。NN 学習用ではない）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Trainer・PEFT</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">バックエンド・ハード</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">CPU（BLIS 風自作 GEMM・rayon）／CUDA（NVRTC 自作カーネル）／Metal（simdgroup 自作カーネル）を cfg 切替。単一デバイスのみ・分散なし・AMD なし</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">CPU/CUDA/ROCm/MPS/XPU・DDP/FSDP</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">CPU/CUDA/TPU・Metal はプラグイン（本計測は 2.16.2＋tensorflow-metal／GB10 は 2.21.0 CPU）・分散戦略</span></td>
+<td class="pc"><span class="pill near">部分的</span><span class="pt">CPU（Accelerate/OpenBLAS）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">バックエンドに委譲</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">相互運用（重み・モデル形式）</span></th>
+<td class="pc me"><span class="pill solo">リポ内</span><span class="pt">safetensors ロード/セーブ・ONNX インポート（21 op のインタープリタ）はリポジトリ内 onnx-interop にあるが非公開クレートで facade から到達不能（site/guides/interop.md）。ONNX エクスポートは HEAD で実装済み・未公開</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torch.export・ONNX export・safetensors</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">SavedModel・TFLite・ONNX（tf2onnx）</span></td>
+<td class="pc"><span class="pill near">部分的</span><span class="pt">npy/npz・scipy.io（MATLAB・netCDF）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Hub・safetensors・GGUF 変換</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">事前学習済みモデル</span></th>
+<td class="pc me"><span class="pill loss">ない</span><span class="pt">なし。0.9.0 時点でも事前学習済みモデルの配布・ロード機構自体はない（個別レイヤーの実装状況は上行を参照）</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torchvision・torch.hub</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Keras Applications・TF Hub</span></td>
+<td class="pc"><span class="pill loss">ない</span><span class="pt">なし</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">数十万モデル（Hub）</span></td>
+<td class="pc"><span class="pill near">部分的</span><span class="pt">モデルは API・ローカルランタイム経由で利用</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">推論・サービング</span></th>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">predict／predict_resident（デバイス常駐チェーン）。量子化・KV キャッシュ・トークナイザ・コンパイルなし</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torch.compile・TorchScript・量子化・TorchServe</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">TFLite・TF Serving・XLA</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">pipeline・generate・TGI</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">チェーン実行・LangServe</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">固有の仕組み</span></th>
+<td class="pc me"><span class="pill win">ある</span><span class="pt">バックエンド間数値一致契約（rel&lt;1e-3 or abs&lt;1e-5・FMA 契約統一）・依存 =x.y.z 完全固定と禁止リストの CI 検査。guardrail（3 分岐判定）・self-repair・bench-harness はリポジトリ内の非公開クレート</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">torch.compile／Inductor</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">XLA・tf.function グラフ</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">LAPACK ラッパの網羅性</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Hub とモデルカード</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">Agents・RAG・LCEL</span></td>
+</tr>
+<tr><th scope="row"><span class="ph">本ページの性能実測</span></th>
+<td class="pc me"><span class="pill win">ある</span><span class="pt">判定側（reuse）・両機体</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">M4 Max CPU／MPS・GB10 CPU／CUDA で同一プロトコル計測</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">M4 Max CPU／Metal・GB10 CPU で同一プロトコル計測</span></td>
+<td class="pc"><span class="pill win">ある</span><span class="pt">M4 Max CPU・GB10 CPU（sgemm＋NumPy 手書き backprop）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">対象外（計算層ではない）</span></td>
+<td class="pc"><span class="pill solo">対象外</span><span class="pt">対象外（計算層ではない）</span></td>
+</tr>
+</tbody></table></div>
+<h2>エンジン単体の対照（framework-compare 外のハーネス・参考）</h2>
+<div class="kv">
+<div><h3>CPU GEMM vs gemm crate／matrixmultiply（M4 Max・2026-09-03）</h3><span class="v">対 gemm crate 0.84〜0.97×</span><p>N=512/1024/2048/4096 で 433／786／874／1,041 GFLOP/s 対 519／837／978／1,070（5 回中央値・<code>oss-gemm-compare</code>・本番既定 RowPanel。<code>docs/perf/oss-gemm-comparison-baseline.md</code>）。matrixmultiply は 110 GFLOP/s 前後で K≥1024 は出力不一致のため参照除外。DGX 側の Tier 2 併記（#1312）では N=4096 で gemm crate の 1.43 倍（0.77 → 1.09 TFLOP/s）。2026-09-11 に結線した <code>TwoDDynamic</code>（#1313）の対 OSS 単体実測は未実施。</p></div>
+<div><h3>Metal GEMM vs MLX f32／PyTorch MPS f32（M4 Max・2026-08-23）</h3><span class="v">転送込み 0.41〜0.60×（MLX）・0.27〜0.77×（MPS）</span><p>N=4096: 自作 4.16 TFLOPS 対 MLX 9.64・MPS 13.05（H2D＋GEMM＋D2H 込み）。デバイス内比較（自作 prepared 7.23 対 MLX 12.78）は MLX が呼び出しごとに出力配列を確保する非対称があり参考値。この OSS ハーネスでの Metal 再計測は 2026-08-23 以降なし（以後は candle 比へ移行）。</p></div>
+<div><h3>REQ-8 段階的下限（対 PyTorch・2026-08-18 確定・凍結）</h3><span class="v">GEMM 5 行すべて達成</span><p>CPU 24.7%（目標 20%）・CUDA f32 51.96%（50%）・CUDA f16 37.47%（35%）・Metal f32 13.01%（10%）・Metal f16 18.78%（15%）。<code>docs/performance-targets.md</code> の確定値で、その後の candle 比再計測は反映されない。</p></div>
+<div><h3>candle 比ゲート（正式系列 0.8.0・5 回中央値）</h3><span class="v">達成 4 セル／12 セル</span><p>CUDA N=4096（1.478×）・Metal N=2048（1.002×）・CPU GB10 N=2048（1.400×）・CPU M4 Max N=512（1.015×）が正式系列として達成。他 8 セルは未達（<code>docs/perf/cuda,metal,cpu-gemm-candle-gate-remeasurement.md</code> §16／§16／§24）。本ページの両機体の行は同席 1 run の値で、ゲート判定の正式値ではない。</p></div>
+</div>
+
+<h2>まとめ（判定対象 {n_total} 行 = 勝ち {n_win}＋僅差 {n_near}＋負け {n_loss}・相手は candle／burn／PyTorch／TensorFlow／SciPy の有効セル最速）</h2>
+<div class="kv">
+<div><h3>勝っている領域（{n_win}）</h3><p>{win_list}</p></div><div><h3>僅差（{n_near}）</h3><p>{near_list}</p></div><div><h3>負けている領域（{n_loss}）</h3><p>{loss_list}</p></div>
+<div><h3>読み方</h3><p>内訳は上記「勝っている領域」「僅差」「負けている領域」のとおり（詳細は各表の行を参照）。0.9.0 に含まれる同期境界最適化・機能網羅の各種変更（#1902／#1903／#1905／#1908／#1909／#1911 等の性能記録）は fandhe-ai 単体の HEAD 側 A/B であり、本表の registry 公開版同士の比較には未反映のものを含む。</p></div>
+</div>
+
+<h2>計測条件・再現手順</h2>
+<p class="note"><b>M4 Max</b>: registry ピン <code>fandhe-ai =0.9.0</code>・5 ラウンド計測（<code>{m4_load}</code>）。計測失敗（各ラウンドの <code>skipped-m4max-0.9.0.log</code>）: bench-burn gemm metal size=512/1024/2048/4096 mode=fresh: MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor is all-zero or non-finite; refusing to record timing（0.8.0 と同一・全ラウンド共通）。Python 3 フレームワークは未再計測（上記 M4 Max 節の注記参照）。<br><b>DGX Spark GB10</b>: NVIDIA GB10 · driver 580.173.02 · CUDA 13.0（PyTorch は cu130 wheel）· Linux aarch64 · registry ピン <code>fandhe-ai =0.9.0</code>・専有 1 ラウンド（<code>run_all_cuda.sh</code>）。<code>{gb_load}</code>。開始 04:03:37 UTC（load average 0.02 0.05 0.16）→ 04:04:51 UTC（3.14 0.97 0.47）、直後の追加計測（CPU GEMM reuse・N=4096）も同セッション内。計測失敗なし（<code>skipped-dgx-0.9.0.log</code> 空）。Python 3 フレームワークは同日 2026-09-16（UTC）の別セッション（HEAD 参考系列）から流用（上記 GB10 節の注記参照）。</p>
+<pre>cd scripts/bench/framework-compare
+# M4 Max: 出力先を results-m4max-0.9.0.jsonl に向けた run_all.sh の複製で実行（Cargo.lock は復元 trap で不変）。5 ラウンド実行し中央値を採用
+./run_all.sh                                   # macOS: cpu + metal（既定出力 results/raw/results.jsonl）
+python3 summarize.py results/raw/results-m4max-0.9.0.jsonl
+# Python 3 フレームワーク: 隔離 venv（torch 2.14.0 / scipy 1.18.1、TF は 2.16.2 + tensorflow-metal 1.2.0 の別 venv）で bench_py.py を同一プロトコルで実行
+# DGX（docs/perf/logs/lowlayer-diagnosis-2026-09-12/scripts/）: dgx-prebuild.sh → dgx-run.sh（run_all_cuda.sh 全セル）→ dgx-py.sh（bench_py.py）→ dgx-run2.sh（CPU reuse・N=4096）
+python3 summarize.py results-dgx-0.9.0.jsonl  # DGX 側の出力先（run_all_cuda.sh・専有 1 ラウンド）</pre>
+</main>

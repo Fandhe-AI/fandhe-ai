@@ -1235,3 +1235,144 @@ loss 常駐化が前提。スコープ外・§16.9 参照）が必要と考え�
   申し送り）どおり後続イシューへ引き継ぐ
 - 実機全体の kernel launch 総数計測（nsys／CUPTI）は GB10 での可用性
   未確認のため引き続き対象外
+
+## 17. v0.9.0 ピン再計測（Apple M4 Max・2026-09-18。イシュー #1980）
+
+### 17.1 目的・条件
+
+registry `fandhe-ai =0.9.0`（`scripts/bench/framework-compare/` の
+承認済みピン）にビルドした `bench-fandhe --task train --phases` を
+Apple M4 Max で cpu／metal × fresh／reuse の 4 セル・5 プロセス独立
+起動で再計測した。事前登録規則・生ログ・env_info は
+`docs/perf/logs/train-infer-phases-0.9.0-1980-1981/`（README 参照）。
+**採否判定を伴わない記録**（tolerance・判定規則・本番定数は変更しない）。
+DGX Spark GB10 側は別セッションで未実測のため、両実機が受け入れ条件の
+#1980 は本節だけでは close しない。
+
+### 17.2 内訳表（5 run 中央値・min–max・step_total 比）
+
+`docs/perf/logs/train-infer-phases-0.9.0-1980-1981/m4max/aggregate.md`
+からの転記。単位は µs。
+
+#### train_phases / cpu / fresh
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| tape_build | 0.1 | 0.1–0.1 | 0.0% |
+| leaf_register | 0.7 | 0.5–0.7 | 0.1% |
+| forward | 235.9 | 223.4–246.8 | 30.0% |
+| loss_readout | 0.0 | 0.0–0.0 | 0.0% |
+| backward | 476.3 | 470.0–508.3 | 60.6% |
+| param_readout | 23.1 | 23.0–23.3 | 2.9% |
+| host_sgd | 33.6 | 33.2–34.7 | 4.3% |
+| apply_params | 0.3 | 0.3–0.4 | 0.0% |
+| tape_drop | 1.0 | 1.0–1.0 | 0.1% |
+| step_total | 785.9 | 780.0–800.8 | 100.0% |
+
+トップ 3: backward（60.6%・476.3 µs）・forward（30.0%・235.9 µs）・
+host_sgd（4.3%・33.6 µs）。フェーズ和／合計: 98.1%（差分は各フェーズ中央値の
+非加法性を含み、固定費は未測定）。
+
+#### train_phases / cpu / reuse
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| tape_build | 0.1 | 0.1–0.2 | 0.0% |
+| leaf_register | 0.2 | 0.1–0.2 | 0.0% |
+| forward_resident | 236.8 | 230.6–245.1 | 26.9% |
+| loss_readout | 0.0 | 0.0–0.0 | 0.0% |
+| backward | 520.7 | 511.5–564.0 | 59.0% |
+| device_update | 122.3 | 121.3–123.0 | 13.9% |
+| tape_drop | 0.4 | 0.4–0.5 | 0.0% |
+| step_total | 881.9 | 868.1–931.6 | 100.0% |
+
+トップ 3: backward（59.0%・520.7 µs）・forward_resident（26.9%・
+236.8 µs）・device_update（13.9%・122.3 µs）。フェーズ和／合計:
+99.9%（差分は各フェーズ中央値の非加法性を含み、固定費は未測定）。
+
+#### train_phases / metal / fresh
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| tape_build | 15.7 | 15.2–19.9 | 1.0% |
+| leaf_register | 0.5 | 0.5–0.7 | 0.0% |
+| forward | 668.4 | 622.6–794.8 | 41.9% |
+| loss_readout | 0.0 | 0.0–0.0 | 0.0% |
+| backward | 854.3 | 768.8–1008.9 | 53.5% |
+| param_readout | 20.8 | 20.1–21.8 | 1.3% |
+| host_sgd | 30.0 | 30.0–34.3 | 1.9% |
+| apply_params | 0.2 | 0.2–0.3 | 0.0% |
+| tape_drop | 0.6 | 0.6–0.8 | 0.0% |
+| step_total | 1596.6 | 1474.2–1914.5 | 100.0% |
+
+トップ 3: backward（53.5%・854.3 µs）・forward（41.9%・668.4 µs）・
+host_sgd（1.9%・30.0 µs）。フェーズ和／合計: 99.6%（差分は各フェーズ中央値の
+非加法性を含み、固定費は未測定）。
+
+#### train_phases / metal / reuse
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| tape_build | 14.9 | 14.5–16.0 | 1.4% |
+| leaf_register | 0.2 | 0.1–0.2 | 0.0% |
+| forward_resident | 516.3 | 500.1–522.2 | 48.6% |
+| loss_readout | 0.0 | 0.0–0.0 | 0.0% |
+| backward | 524.6 | 505.8–532.3 | 49.4% |
+| device_update | 3.4 | 3.4–3.6 | 0.3% |
+| tape_drop | 0.4 | 0.4–0.4 | 0.0% |
+| step_total | 1061.6 | 1039.1–1077.4 | 100.0% |
+
+トップ 3: backward（49.4%・524.6 µs）・forward_resident（48.6%・
+516.3 µs）・tape_build（1.4%・14.9 µs）。フェーズ和／合計: 99.8%
+（差分は各フェーズ中央値の非加法性を含み、固定費は未測定）。
+
+### 17.3 所見
+
+- **backward が 4 セルとも最大の残差**（cpu 59.0〜60.6%・metal
+  49.4〜53.5%）で、§15 までの結論（backward が支配項）と整合する。
+  metal は forward（41.9〜48.6%）の比重が cpu（26.9〜30.0%）より
+  高く、backward と forward がほぼ二分する構成になっている
+- **cpu reuse は fresh より step_total が遅い**（881.9 µs 対
+  785.9 µs）。差分は 2 箇所に分散する: (a) backward 自体が
+  520.7 µs 対 476.3 µs（+44.4 µs）、(b) 更新区間が
+  `device_update`（122.3 µs）対 `param_readout`＋`host_sgd`＋
+  `apply_params`（23.1+33.6+0.3=57.0 µs。+65.3 µs）。`device_update`
+  は `docs/perf/train-resident-grad-device-update.md`（#1212。reuse
+  経路の resident staging 書き込み）が対象とする区間
+- **metal は tape_build が cpu より 2 桁大きい**（14.9〜15.7 µs 対
+  0.1 µs）。cpu 側は無視できる規模だが metal では step_total の
+  1.0〜1.4% を占める
+- フェーズ和／合計は fresh cpu が 98.1%・他の 3 セルが 99.6〜99.9%
+  だが、この比は各フェーズの中央値の和を `step_total` の中央値で
+  割ったもので加法的ではない（同じ集計で metal fresh の推論は
+  100.8% になる）。したがってこの差だけから「計装されていない
+  固定費が他セルより大きい」とは判断できず、未確定の所見にとどめる。
+  固定費を比較するなら、同一 iteration の `step_total` から各フェーズ
+  を引いた残差を iteration ごとに直接集計する必要がある（未実施）
+
+### 17.4 施策の起票案（列挙のみ。起票はしていない。新規 issue 化は
+ユーザー承認が必要）
+
+- backward の GEMM／非 GEMM 内訳が未分解のまま（§17.5「限界」）。
+  診断計装パッチ（`docs/perf/logs/lowlayer-diagnosis-2026-09-12/
+  diag-instrumentation.patch`。`docs/perf/lowlayer-diagnosis-2026-09-12.md`
+  §4「backward 非 GEMM 残差 18〜34%」が同パッチを使った既存実測）
+  を registry ビルドへ再適用し、v0.9.0 時点での内訳を確認する
+- metal train forward（668.4 µs／516.3 µs）の encode-only 化余地の
+  確認（`docs/backend-metal-command-batching-design.md` が同型の
+  同期境界回収を扱う既存節あり。forward 自体は同 doc の対象外の
+  ため要精査）
+- cpu reuse の `backward`（+44.4 µs）・更新区間（+65.3 µs）双方の
+  fresh 比後退の原因切り分け。`docs/perf/train-resident-grad-
+  device-update.md`（#1212）・`docs/perf/train-backward-gemm-wiring.md`
+  （#1211）が近縁の既存記録
+- metal の tape_build（15 µs 前後）が cpu 比で目立つ点の要否確認
+  （size=64 では絶対値として小さいが比率としては非無視）
+
+### 17.5 限界
+
+- backward 内部の GEMM／非 GEMM 内訳は診断計装パッチが必要で、
+  registry `fandhe-ai =0.9.0`（cargo を起動しない事前ビルド済み
+  バイナリ）では取得不能。本計測では未取得
+- DGX Spark GB10 側は別セッションで未実測。#1980 は両実機が受け入れ
+  条件のため、本節だけでは close しない
