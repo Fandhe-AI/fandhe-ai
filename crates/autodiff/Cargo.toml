@@ -66,7 +66,9 @@ serde_json.workspace = true
 # `serde_json` と同型の判断。本クレートは架構境界テスト
 # `crates/autodiff/tests/architecture_boundaries.rs` により具体バックエンド
 # クレートへの依存を禁じられているため、依存自体は追加していない
-# ——コメント中の名称も避ける）。
+# ——コメント中の名称も避ける）。`docs/license-matrix.md` 2 節に本
+# dev-dependency 追加の利用範囲・Cargo.lock 実測結果（新規パッケージ
+# 混入なし）を記録済み。
 half.workspace = true
 
 # view 系ノード（reshape / transpose。イシュー #1047）の「forward・
