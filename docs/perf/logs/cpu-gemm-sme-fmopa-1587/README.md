@@ -1,30 +1,65 @@
-# SME `fmopa` マイクロカーネル A/B（イシュー #1587）実測ログ置き場
+# SME `fmopa` マイクロカーネル A/B（イシュー #1587／#1978）実測ログ置き場
 
-正式記録は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` を参照。
+正式記録は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md`（§5.4 が
+本ディレクトリの正式実測を転記した節）を参照。
 
-## 本 PR 時点の状態
+## 状態（2026-09-18 更新）
 
-- R3（数値契約: run-to-run bit 同一・SME vs scalar 参照の有限値／非正規化数
-  bit 一致・NaN 混入で panic なし・本番入口 bit 一致）は Apple M4 Max
-  実機で完全実施・全 PASS 済み（`docs/perf/cpu-gemm-sme-fmopa-microkernel.md`
-  §4）。ログは `cargo test` の標準出力そのもの（決定的・非タイミング系の
-  ため生ログの保存は不要と判断し本ディレクトリには含めない）。
-- R1（framework-compare 非後退）・R2（checksum）・R4（しきい値の正式
-  5-run 独立プロセス起動スイープ）は**未実施**（事前登録コメントで
-  「本セッションの制約」として明記済み）。参考（非正式）計測は
-  `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.2 に記載済み。
-- 本ディレクトリには正式実測が完了した時点で以下を格納する:
-  - `orchestrate_m4max.sh` / `orchestrate_dgx.sh`（5 プロセス独立起動・
-    `uptime` 前後記録・`--dry-run` 対応）
-  - `aggregate.py`（python3 標準ライブラリのみ・`--self-test` 付き）
-  - 生ログ（`sme_vs_neon_ab_run{1..5}.log` 等）・`env_info.txt`
-    （内部ホスト名はマスクする）
-  - framework-compare gemm/train/infer cpu の before/after JSONL・
-    `compare_*.md`
+- **R3**（数値契約: run-to-run bit 同一・SME vs scalar 参照の有限値／
+  非正規化数 bit 一致・NaN 混入で panic なし・本番入口 bit 一致）は
+  Apple M4 Max 実機で完全実施・全 PASS 済み（`docs/perf/
+  cpu-gemm-sme-fmopa-microkernel.md` §4）。`cargo test` の標準出力
+  そのもの（決定的・非タイミング系のため生ログの保存は不要と判断し
+  本ディレクトリには含めない）。
+- **R1（framework-compare 非後退）・R2（checksum）・R4（しきい値の
+  正式 5-run 独立プロセス起動スイープ）は Apple M4 Max で実施済み**
+  （イシュー #1978。総合判定 undetermined〈初版は ADOPT と記録したが、PR #2016 レビュー指摘により train size=64 を到達セルへ再分類し、train reuse の round 1・5 が 1.0 超のため ADOPT 候補条件不成立〉。詳細・数値は
+  `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.4）。DGX Spark
+  GB10 側は RULE.txt が明記するとおり本セッションの対象外（SME 非
+  対応）。`SME_PRODUCTION_ENABLED` の本番切替・しきい値確定は
+  #1979 のユーザー承認事項として未実施のまま。
 
-## 事前登録判定規則（issue #1587 コメントの転記）
+## ディレクトリ構成
+
+- `RULE.txt` — 事前登録判定規則（固定日時 2026-09-17T16:32:14Z。一次
+  ソースは issue #1587 の事前登録コメント）
+- `orchestrate_m4max.sh` — R4 用 5 プロセス独立起動スクリプト
+  （`--dry-run` 対応）
+- `aggregate.py` — R4 集計スクリプト（python3 標準ライブラリのみ・
+  `--self-test` 付き。計測後に `cargo test` 出力の 1 行目パース条件
+  のみ是正済み。判定規則は不変）
+- `aggregate_r4.md` — R4（16 格子点 × 5 run）の集計結果
+- `load_gate_r4.log` — R4 の負荷ゲート記録（5/5 通過）
+- `sme_r4_grid_run{1..5}.log` — R4 各 run の抽出ログ（`variant=`／`test `／`SME ` 行）。
+  PR #2016 の是正後の `orchestrate_m4max.sh` は未加工出力を
+  `sme_r4_grid_run{1..5}.raw.log` へ併せて保存し、計測プロセスの非ゼロ終了・
+  抽出行 0 件を非ゼロ終了で伝播する（本ディレクトリの実測は是正前の
+  スクリプトで取得したため `.raw.log` は存在しない）
+- `on-arm.patch` — after 腕の差分（main `a1c50f61` に対し
+  `SME_PRODUCTION_ENABLED` のみ `false` → `true` へ反転。計測専用
+  worktree の変更で main へはコミットしない）
+- `env_info.txt` — 実行環境・時刻の記録（内部ホスト名は含めない）
+- `r1r2/` — R1（framework-compare gemm／train／infer cpu）・R2
+  （checksum）の実測一式
+  - `compare-{gemm,train,infer}-1978-cpu.md` — before/after 比較表（是正前の
+    `run_ab_sme_cpu.sh` が生成した名前。PR #2016 是正後は LABEL を含む
+    `compare-{task}-1978-cpu-<LABEL>.md`／`.err` へ出力する）
+    （`scripts/bench/framework-compare/compare_gemm_ab.py
+    --require-checksum-exact` の出力）
+  - `results-{before,after}-1978-cpu-{gemm,train,infer}.jsonl` —
+    生の計測結果（5 round）
+  - `load-gate-1978-cpu-1978.log` — R1／R2 の負荷ゲート記録（5/5 通過）
+  - `uptime-1978-cpu-1978.log`・`compare-exit-1978-cpu-1978.log`・
+    `skipped-1978-cpu-1978.log`（空＝スキップなし）
+  - `sha-1978-{before,after}-1978.txt` — before／after 各バイナリの
+    sha256（ビルド成果物の再現性確認用。ホスト情報は含まない）
+  - `tree-1978-{before,after}-1978.txt` — before／after 各ツリーの
+    指紋記録
+
+## 事前登録判定規則（issue #1587／#1978 コメントの転記）
 
 正式版・一次ソースは GitHub issue #1587 の実装着手前コメント
-（`https://github.com/Fandhe-AI/fandhe-ai/issues/1587#issuecomment-5648848287`）。
-本 README は要旨のみを転記し、規則自体はコメント側を正とする
-（事後の緩和はコメント側を編集せず新規コメントで記録する規約）。
+（`https://github.com/Fandhe-AI/fandhe-ai/issues/1587#issuecomment-5648848287`）
+および本ディレクトリの `RULE.txt`（イシュー #1978 用に固定した運用
+規則）を正とする。本 README は要旨のみを転記し、規則自体はそちら側を
+正とする（事後の緩和はコメント側を編集せず新規コメントで記録する規約）。
