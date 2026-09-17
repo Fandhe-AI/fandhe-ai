@@ -37,12 +37,15 @@ use super::sequential::Sequential;
 /// 統合（#1961）」）。
 ///
 /// **facade ローカルに閉じる理由**: `fandhe_ai_tensor_core::ScalarDType`
-/// 自体の facade 再エクスポートは `docs/compat-api-scope.md` §5 未承認の
-/// まま（イシュー #1939）——本 enum はその承認を経ずに `compile_with_amp`
-/// が dtype を受け取れるようにするための facade 専用の薄い写像であり、
-/// `ScalarDType` を facade 公開面へ直接持ち出さない（`to_scalar_dtype`
-/// が内部でのみ変換する）。`#[non_exhaustive]` は `ScalarDType` 自体の
-/// バリアント追加余地に追従するため。
+/// 自体は #1939（`docs/compat-api-scope.md` §5 経路 2 承認）で
+/// `crate::ScalarDType` として facade 再エクスポート済みだが、
+/// `compile_with_amp` が受理する dtype は F16／Bf16 の 2 種のみに限る
+/// （`ScalarDType` は `#[non_exhaustive]` で他 variant にも将来拡張
+/// されうる）ため、本 enum は受理集合をこの 2 種へ型で狭める facade
+/// 専用の薄い写像として維持する（`to_scalar_dtype` が内部でのみ
+/// 変換する）。`AmpDType` 自体を `ScalarDType` へ置換する統合は本
+/// 変更のスコープ外（イシュー #1939 実装記録参照）。`#[non_exhaustive]`
+/// は `ScalarDType` 自体のバリアント追加余地に追従するため。
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AmpDType {

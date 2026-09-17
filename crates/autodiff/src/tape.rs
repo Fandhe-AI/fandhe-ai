@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fandhe_ai_tensor_core::{
     Activation, BackendError, BackendOps, CastElement, Conv2dParams, DType, Device,
     DeviceBufferView, FusedOpKind, FusionPlan, InterpolateMode, MAX_FUSED_CHAIN_LEN, Pool2dParams,
-    ScalarBinaryOp, ScalarDType, ScalarUnaryOp, ScatterReduce, Tensor,
+    ScalarBinaryOp, ScalarDType, ScalarUnaryOp, ScatterReduce, Tensor, TypedOps, bf16, f16,
 };
 
 use crate::error::AutodiffError;
@@ -2328,6 +2328,32 @@ impl Tape {
         self.ops.device()
     }
 
+    /// この `Tape` が結線されているバックエンドの `f64` 演算本体
+    /// （[`TypedOps<f64>`]）への借用（イシュー #1939・
+    /// `docs/backend-dtype-dispatch-design.md`）。
+    /// `self.ops.typed_ops_f64()`（`BackendOps` の capability accessor。
+    /// 既定 `None`）への委譲——`device()` と同じく `ops()` 自体は
+    /// `pub(crate)`（REQ-12。任意 `BackendOps` 実装を注入できる公開 API
+    /// を設けない）のため、`&dyn TypedOps<f64>` の不変借用だけを取り出す
+    /// 狭い公開アクセサとして facade `Tape::typed_ops_f64` の到達経路に
+    /// なる。ここで返すのは `Tensor<f64>` を直接対象とする capability
+    /// であり `Var`／autograd を経由しない（勾配は付かない）。
+    pub fn typed_ops_f64(&self) -> Option<&dyn TypedOps<f64>> {
+        self.ops.typed_ops_f64()
+    }
+
+    /// `half::f16` 演算本体（[`TypedOps<f16>`]）への借用。
+    /// 契約は [`Tape::typed_ops_f64`] と同じ（イシュー #1939）。
+    pub fn typed_ops_f16(&self) -> Option<&dyn TypedOps<f16>> {
+        self.ops.typed_ops_f16()
+    }
+
+    /// `half::bf16` 演算本体（[`TypedOps<bf16>`]）への借用。
+    /// 契約は [`Tape::typed_ops_f64`] と同じ（イシュー #1939）。
+    pub fn typed_ops_bf16(&self) -> Option<&dyn TypedOps<bf16>> {
+        self.ops.typed_ops_bf16()
+    }
+
     /// activation checkpointing（イシュー #1624）: `f` を実行して得た
     /// `Var` を「区間の出力」として、`f` が新規に push したノードのうち
     /// `Op::is_checkpoint_eligible()` なもの（`output` 自身を除く）の
@@ -4049,5 +4075,173 @@ mod custom_op_tests {
         let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
         let result = tape.custom(Arc::new(NoopFn), &[]);
         assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+    }
+}
+
+/// `Tape::typed_ops_f64`／`_f16`／`_bf16`（イシュー #1939）の委譲契約
+/// （`self.ops.typed_ops_*()` への薄い委譲であること）を、既定 `None`
+/// 実装と `Some` へオーバーライドした最小フィクスチャの両方で固定する。
+/// facade `Tape::typed_ops_*` はここで確立した契約への到達経路
+/// （`crates/facade/src/lib.rs`）に過ぎず、実際の dtype 別演算内容の
+/// 検証は各バックエンドクレートの `TypedOps<T>` 実装テスト（#1697／
+/// #1698／#1699 等）の責務（本テストは委譲配線のみを対象とする）。
+#[cfg(test)]
+mod typed_ops_accessor_tests {
+    use fandhe_ai_tensor_core::{BackendError, BackendOps, Device, Tensor, TypedOps};
+
+    use super::Tape;
+
+    /// 既定 `BackendOps`（`typed_ops_f64`／`_f16`／`_bf16` を
+    /// オーバーライドしない。`OpsWithUnsupportedCast` 等と同型の最小
+    /// フィクスチャ）を結線した `Tape` は 3 accessor すべて `None` を
+    /// 返す（`BackendOps` の既定実装〈非破壊拡張〉が素通しされることの
+    /// 確認）。
+    #[test]
+    fn typed_ops_accessors_default_to_none() {
+        struct MinimalOps;
+        impl BackendOps for MinimalOps {
+            fn device(&self) -> Device {
+                Device::Cpu
+            }
+            fn gemm(
+                &self,
+                _a: &Tensor<f32>,
+                _b: &Tensor<f32>,
+            ) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: gemm".into()))
+            }
+            fn add(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: add".into()))
+            }
+            fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: mul".into()))
+            }
+            fn relu(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: relu".into()))
+            }
+            fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: exp".into()))
+            }
+            fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: tanh".into()))
+            }
+            fn sum(
+                &self,
+                _a: &Tensor<f32>,
+                _dim: Option<usize>,
+            ) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: sum".into()))
+            }
+            fn max(
+                &self,
+                _a: &Tensor<f32>,
+                _dim: Option<usize>,
+            ) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: max".into()))
+            }
+        }
+
+        let tape = Tape::new_with_ops(Box::new(MinimalOps));
+        assert!(tape.typed_ops_f64().is_none());
+        assert!(tape.typed_ops_f16().is_none());
+        assert!(tape.typed_ops_bf16().is_none());
+    }
+
+    /// `typed_ops_f64` をオーバーライドした `BackendOps` を結線した
+    /// `Tape` は、`typed_ops_f64()` がそのオーバーライドをそのまま
+    /// 返す（`Tape::typed_ops_f64` が `self.ops.typed_ops_f64()` への
+    /// 委譲であることの確認。`_f16`／`_bf16` は既定のまま `None`）。
+    #[test]
+    fn typed_ops_f64_accessor_delegates_to_backend_ops_override() {
+        struct DummyF64Ops;
+        impl TypedOps<f64> for DummyF64Ops {
+            fn gemm(
+                &self,
+                _a: &Tensor<f64>,
+                _b: &Tensor<f64>,
+            ) -> Result<Tensor<f64>, BackendError> {
+                Err(BackendError::Unsupported("mock: f64 gemm".into()))
+            }
+            fn add(&self, _a: &Tensor<f64>, _b: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+                Err(BackendError::Unsupported("mock: f64 add".into()))
+            }
+            fn mul(&self, _a: &Tensor<f64>, _b: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+                Err(BackendError::Unsupported("mock: f64 mul".into()))
+            }
+            fn relu(&self, _a: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+                Err(BackendError::Unsupported("mock: f64 relu".into()))
+            }
+            fn exp(&self, _a: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+                Err(BackendError::Unsupported("mock: f64 exp".into()))
+            }
+            fn tanh(&self, _a: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
+                Err(BackendError::Unsupported("mock: f64 tanh".into()))
+            }
+            fn sum(
+                &self,
+                _a: &Tensor<f64>,
+                _dim: Option<usize>,
+            ) -> Result<Tensor<f64>, BackendError> {
+                Err(BackendError::Unsupported("mock: f64 sum".into()))
+            }
+            fn max(
+                &self,
+                _a: &Tensor<f64>,
+                _dim: Option<usize>,
+            ) -> Result<Tensor<f64>, BackendError> {
+                Err(BackendError::Unsupported("mock: f64 max".into()))
+            }
+        }
+
+        struct OpsWithTypedF64(DummyF64Ops);
+        impl BackendOps for OpsWithTypedF64 {
+            fn device(&self) -> Device {
+                Device::Cpu
+            }
+            fn typed_ops_f64(&self) -> Option<&dyn TypedOps<f64>> {
+                Some(&self.0)
+            }
+            fn gemm(
+                &self,
+                _a: &Tensor<f32>,
+                _b: &Tensor<f32>,
+            ) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: gemm".into()))
+            }
+            fn add(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: add".into()))
+            }
+            fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: mul".into()))
+            }
+            fn relu(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: relu".into()))
+            }
+            fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: exp".into()))
+            }
+            fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: tanh".into()))
+            }
+            fn sum(
+                &self,
+                _a: &Tensor<f32>,
+                _dim: Option<usize>,
+            ) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: sum".into()))
+            }
+            fn max(
+                &self,
+                _a: &Tensor<f32>,
+                _dim: Option<usize>,
+            ) -> Result<Tensor<f32>, BackendError> {
+                Err(BackendError::Unsupported("mock: max".into()))
+            }
+        }
+
+        let tape = Tape::new_with_ops(Box::new(OpsWithTypedF64(DummyF64Ops)));
+        assert!(tape.typed_ops_f64().is_some());
+        assert!(tape.typed_ops_f16().is_none());
+        assert!(tape.typed_ops_bf16().is_none());
     }
 }

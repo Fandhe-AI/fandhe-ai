@@ -444,3 +444,65 @@ Metal `half` 専用 elementwise／reduction カーネル（H2D 転送量削減�
 ### 15.7 スコープ外
 
 MSL `bfloat`／`simdgroup_bfloat8x8` を用いるデバイス常駐ネイティブ bf16 経路（(b) の実測が可の場合の後続候補）・Metal f32 `max` reduction カーネル自体（未実装。`sum` はイシュー #1896 で結線済み）・Metal `TypedOps<f64>`（恒久 `Unsupported`）／`TypedOps<f16>`（#1705）・`Var`／`Tape`／VJP・facade 公開面への昇格・M4 Max 実機実測（§15.6）。CPU bf16 は #1699・CUDA bf16 は #1704 で実装済み・origin/main マージ済み。
+
+## 16. facade 公開面への昇格（イシュー #1939）
+
+### 16.1 承認記録
+
+2026-09-17・issue #1939 コメントの承認依頼「選択肢 A」をユーザーが承認。
+公開する facade 新規公開面は以下の 4 件に限定する（`docs/compat-api-scope.md`
+§5 経路 2 の手続き）。
+
+1. `pub use fandhe_ai_tensor_core::{Scalar, ScalarDType, TypedOps};`
+2. `fandhe_ai::Tape::typed_ops_f64(&self) -> Option<&dyn TypedOps<f64>>`
+3. `fandhe_ai::Tape::typed_ops_f16(&self) -> Option<&dyn TypedOps<f16>>`
+4. `fandhe_ai::Tape::typed_ops_bf16(&self) -> Option<&dyn TypedOps<bf16>>`
+
+付随制約（承認事項）: 勾配なし（`Var`／autograd 非経由）・8 演算限定
+（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`）・
+`half::f16`／`half::bf16` は利用者が `fandhe_ai_tensor_core` 経由で
+直接名指しする前提とし、facade は `half` 自体を再エクスポートしない。
+
+### 16.2 到達経路
+
+```
+facade::Tape::typed_ops_f64/_f16/_bf16
+  → autodiff::Tape::typed_ops_f64/_f16/_bf16（新設。§4.1 で確定した
+    `BackendOps::typed_ops_*` capability accessor への狭い委譲。
+    `Tape::device`〈イシュー #1614〉と同型のパターン）
+  → BackendOps::typed_ops_f64/_f16/_bf16（§7 の既存 capability accessor。
+    既定 `None`）
+```
+
+autodiff 側 3 アクセサ（`crates/autodiff/src/tape.rs`）は **内部クレート
+の到達経路**であり facade 公開面の追加ではない。`Tape::ops()` 自体は
+`pub(crate)` のまま（REQ-12。任意 `BackendOps` 実装を注入できる公開 API
+を設けない）で、返すのは `&dyn TypedOps<T>` の不変借用のみ。
+
+### 16.3 バックエンド × dtype の対応状況（HEAD 時点）
+
+| バックエンド | `f64` | `f16` | `bf16` |
+|---|---|---|---|
+| CPU | `Some`（#1697。8 演算とも動作） | `Some`（#1698。ソフトウェア変換） | `Some`（#1699。f32 カーネル再利用） |
+| CUDA | `Some`（#1703。8 演算とも `Err(Unsupported)`） | `Some`（#1703。`gemm` はネイティブ f16 経路・残り 7 演算は f32 昇格） | `Some`（#1704。ホスト側変換＋既存 f32 経路委譲） |
+| Metal | `None`（恒久。#1705） | `Some`（#1705。`dispatch_f16_auto_unverified` 内部結線） | `Some`（#1706 (a)。ホスト側変換＋既存 f32 経路委譲。(b) MSL ネイティブ経路は未採否） |
+
+### 16.4 検証
+
+facade のみを import する統合テスト（`crates/facade/tests/api_surface.rs::
+typed_ops_types_are_reachable_via_facade`）で、CPU バックエンドにおける
+`f64::add`・`f16::relu`・`bf16::relu` の実行結果がホスト参照実装と
+一致することを確認済み（f64 は `to_bits` 比較で bit 完全一致・f16／bf16
+は厳密に表現可能な値の一致）。ソース走査による否定ガード
+（`facade_does_not_reexport_half`・`facade_cargo_toml_does_not_depend_on_half`）
+で承認範囲逸脱（`half` の再エクスポート・facade 直接依存化）を機械固定。
+
+### 16.5 スコープ外
+
+`Var`／`Tape` autograd 経由の dtype 一般化（§8）・facade での `half`
+再エクスポート・8 演算以外の dtype 別演算の公開・`CastOps` の公開・
+`AmpDType` の `ScalarDType` への統合リファクタ（`AmpDType` 自体は
+本 issue の対象外のまま不変）。CUDA／Metal 実機での facade 経由
+`typed_ops_*` 実測は本実装エージェント実行環境に到達手段がなく未実施
+（各バックエンドの `TypedOps<T>` 実装自体は §12〜§14 で個別に検証・
+申し送り済み）。

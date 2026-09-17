@@ -275,6 +275,19 @@ pub trait Module {
         false
     }
 
+    /// この層が Pooling（[`MaxPool2d`]／[`MaxPool1d`]／[`AvgPool2d`]／
+    /// [`AvgPool1d`]／[`AdaptiveAvgPool2d`]／[`AdaptiveAvgPool1d`]）
+    /// かどうか（イシュー #1957）。`as_relu` と同じ bool フック方式
+    /// （`docs/compat-api-scope.md` §1 の閉集合維持。用途が
+    /// `fandhe_ai_facade::compat::sequential::Sequential::
+    /// contains_resident_unsupported_layer` の真偽判定のみであり
+    /// 型付き参照を必要とする消費者が無いため、`as_conv2d` 等と異なり
+    /// `Option<&T>` ではなく bool を返す）。既定は `false`
+    /// （Pooling 6 型のみオーバーライドする）。
+    fn is_pooling(&self) -> bool {
+        false
+    }
+
     /// `train()`／`eval()`（PyTorch `Module.training` 相当。イシュー
     /// #1758・`docs/spec/04-requirements.md` REQ-9 2026-09-12 追記
     /// Tier 1「Module の train／eval」）。**既定は no-op**。
@@ -839,6 +852,10 @@ impl Module for MaxPool2d {
             crate::grad::max_pool2d_with_fallback(ops, input, self.params(), &out_shape)?;
         Ok(values)
     }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
 }
 
 /// `MaxPool1d::forward` への委譲。`[N,C,L]` を `[N,C,1,L]` へ reshape
@@ -882,6 +899,10 @@ impl Module for MaxPool1d {
         let lout = out_shape4[3];
         values4.reshape(&[n, c, lout]).map_err(AutodiffError::Shape)
     }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
 }
 
 /// `AvgPool2d::forward` への委譲（イシュー #1728）。
@@ -904,6 +925,10 @@ impl Module for AvgPool2d {
             self.count_include_pad(),
             &out_shape,
         )
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
     }
 }
 
@@ -950,6 +975,10 @@ impl Module for AvgPool1d {
         let lout = out_shape4[3];
         values4.reshape(&[n, c, lout]).map_err(AutodiffError::Shape)
     }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
 }
 
 /// `AdaptiveAvgPool2d::forward` への委譲（イシュー #1728）。
@@ -966,6 +995,10 @@ impl Module for AdaptiveAvgPool2d {
         let out_shape = adaptive_pool2d_out_shape(input.shape(), self.output_size())
             .map_err(AutodiffError::Shape)?;
         crate::grad::adaptive_avg_pool2d_with_fallback(ops, input, self.output_size(), &out_shape)
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
     }
 }
 
@@ -1000,6 +1033,10 @@ impl Module for AdaptiveAvgPool1d {
             crate::grad::adaptive_avg_pool2d_with_fallback(ops, &x4, output_size4, &out_shape4)?;
         let lout = out_shape4[3];
         values4.reshape(&[n, c, lout]).map_err(AutodiffError::Shape)
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
     }
 }
 
@@ -2095,5 +2132,31 @@ mod tests {
             after["1.weight"].contiguous().as_slice().unwrap(),
             &[9.0f32, 9.0, 9.0, 9.0]
         );
+    }
+
+    /// [`Module::is_pooling`] が Pooling 6 型でのみ `true` を返し、
+    /// 他の層（`Relu`・`Linear`）では既定の `false` のままであること
+    /// を確認する（イシュー #1957。`compat::Sequential::
+    /// contains_resident_unsupported_layer` の判定入口として使う
+    /// フックのため、閉集合であることをここで固定する）。
+    #[test]
+    fn is_pooling_true_only_for_pooling_layers() {
+        let max_pool2d = MaxPool2d::new([2, 2], None, [0, 0], [1, 1]).unwrap();
+        let max_pool1d = MaxPool1d::new(2, None, 0, 1).unwrap();
+        let avg_pool2d = AvgPool2d::new([2, 2], None, [0, 0], true).unwrap();
+        let avg_pool1d = AvgPool1d::new(2, None, 0, true).unwrap();
+        let adaptive_avg_pool2d = AdaptiveAvgPool2d::new([2, 2]).unwrap();
+        let adaptive_avg_pool1d = AdaptiveAvgPool1d::new(2).unwrap();
+
+        assert!(Module::is_pooling(&max_pool2d));
+        assert!(Module::is_pooling(&max_pool1d));
+        assert!(Module::is_pooling(&avg_pool2d));
+        assert!(Module::is_pooling(&avg_pool1d));
+        assert!(Module::is_pooling(&adaptive_avg_pool2d));
+        assert!(Module::is_pooling(&adaptive_avg_pool1d));
+
+        assert!(!Module::is_pooling(&Relu));
+        let linear = Linear::new(3, 2, true, 7).unwrap();
+        assert!(!Module::is_pooling(&linear));
     }
 }

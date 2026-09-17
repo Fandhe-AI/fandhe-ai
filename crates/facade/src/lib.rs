@@ -32,6 +32,17 @@
 //!    `BackendOps`／VJP を経由しないため REQ-12 と矛盾しない（詳細は
 //!    [`data`] モジュール doc）。
 //!
+//! 5. **nn 公開面**（[`nn::rnn`]。イシュー #1955）: RNN／LSTM／GRU の
+//!    Sequence レベル API（`Rnn`／`Lstm`／`Gru`。実体は
+//!    `fandhe_ai_autodiff::nn`。#1647）を `fandhe_ai::nn::rnn` の単一
+//!    入口へ純再エクスポートする。`forward_seq` が生 `Tape` を引数に
+//!    取るため facade 利用者からは直接呼べず、`impl Tape` に追加した
+//!    `rnn_forward_seq`／`lstm_forward_seq`／`gru_forward_seq`（`&self.0`
+//!    を渡すだけの薄い委譲。`step_device_param_store` 等と同型）が
+//!    入口となる。値型の再エクスポート＋薄い委譲のみで任意
+//!    `BackendOps` 注入経路を新設しないため REQ-12 と矛盾しない
+//!    （詳細は [`nn::rnn`] モジュール doc）。
+//!
 //! # 公開面の設計（REQ-12: 任意 `BackendOps` 注入の公開 API を設けない）
 //!
 //! 利用者向けに公開するのは [`Device`] 識別子を受け取る 2 関数
@@ -106,6 +117,13 @@ pub mod optim;
 /// 再エクスポートする（詳細はモジュール doc・`docs/dataset-dataloader-
 /// design.md` 参照）。
 pub mod data;
+
+/// `nn` 公開面（イシュー #1955）。現時点は [`nn::rnn`]
+/// （`Rnn`／`Lstm`／`Gru` の Sequence レベル API の純再エクスポート）
+/// のみを提供する。`forward_seq` の呼び出しには [`Tape::rnn_forward_seq`]
+/// 等（本モジュール自体ではなく `impl Tape` の薄い委譲メソッド）を
+/// 使う（詳細は [`nn::rnn`] モジュール doc 参照）。
+pub mod nn;
 
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
@@ -195,6 +213,23 @@ pub use fandhe_ai_tensor_core::InterpolateMode;
 // 経路は facade の公開契約に含めない（`docs/tensor-core-cast-design.md`
 // 参照）。
 pub use fandhe_ai_tensor_core::{CastDType, CastElement};
+// `Scalar`／`ScalarDType`／`TypedOps`（イシュー #1939・
+// `docs/compat-api-scope.md` §5 経路 2 承認・`docs/backend-dtype-
+// dispatch-design.md`）: `Tensor<T>` を直接対象とする dtype 別演算集合
+// （`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max` の 8 演算
+// 限定）への capability accessor 面を facade へ昇格する。到達経路は
+// `Tape::typed_ops_f64`／`_f16`／`_bf16`（本ファイル下部）が返す
+// `Option<&dyn TypedOps<T>>` のみで、`Var`／autograd は経由しない
+// （勾配は付かない）。`half::f16`／`half::bf16` を名指しする利用者は
+// `half`（本 workspace と同一バージョン）へ直接依存する前提とし、
+// facade は `half` 自体を再エクスポートしない（承認事項）。上記コメント
+// 「1 文 1 行を維持する」と同じ理由で 1 行にまとめる。
+pub use fandhe_ai_tensor_core::{Scalar, ScalarDType, TypedOps};
+
+// `TypedOps<T>` の戻り値型シグネチャで `half::f16`／`half::bf16` を
+// 名指しするための非公開 `use`（facade 自体は `half` を再エクスポート
+// しない。上記 `Scalar`／`ScalarDType`／`TypedOps` コメント参照）。
+use fandhe_ai_tensor_core::{bf16, f16};
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の
 /// newtype ラッパー（codex-review PR #424 P1 是正）。
@@ -410,6 +445,90 @@ impl Tape {
     /// doc comment を参照。
     pub fn transfer(&self, source: &Var<'_>) -> Result<Var<'_>, AutodiffError> {
         source.to_tape(&self.0)
+    }
+
+    /// [`fandhe_ai_autodiff::nn::Rnn::forward_seq`] への委譲入口
+    /// （イシュー #1955）。
+    ///
+    /// `Rnn::forward_seq` は生の `fandhe_ai_autodiff::Tape` を第 1
+    /// 引数に取るため、`facade::Tape`（本型。内部フィールド `0` は
+    /// `pub(crate)`）の利用者からは直接呼べない。本メソッドは
+    /// `&self.0` を渡すだけの薄い委譲であり、`BackendOps` を利用者向け
+    /// 公開面へ露出しない（`step_device_param_store` と同じ理由。
+    /// `crate::lib.rs` モジュール doc「公開面の設計」・REQ-12）。
+    /// `h0` 省略時はゼロ初期化される（`Rnn::forward_seq` の契約を
+    /// 参照）。
+    pub fn rnn_forward_seq<'t>(
+        &'t self,
+        rnn: &nn::rnn::Rnn,
+        x: &Tensor<f32>,
+        h0: Option<&Var<'t>>,
+    ) -> Result<nn::rnn::RnnSeqOutput<'t, nn::rnn::RnnCellVars<'t>>, AutodiffError> {
+        rnn.forward_seq(&self.0, x, h0)
+    }
+
+    /// [`fandhe_ai_autodiff::nn::Lstm::forward_seq`] への委譲入口
+    /// （イシュー #1955）。上記 [`Self::rnn_forward_seq`] と同じ理由の
+    /// 薄い委譲。`h0`／`c0` 省略時はいずれもゼロ初期化される
+    /// （`Lstm::forward_seq` の契約を参照）。
+    pub fn lstm_forward_seq<'t>(
+        &'t self,
+        lstm: &nn::rnn::Lstm,
+        x: &Tensor<f32>,
+        h0: Option<&Var<'t>>,
+        c0: Option<&Var<'t>>,
+    ) -> Result<nn::rnn::LstmSeqOutput<'t>, AutodiffError> {
+        lstm.forward_seq(&self.0, x, h0, c0)
+    }
+
+    /// [`fandhe_ai_autodiff::nn::Gru::forward_seq`] への委譲入口
+    /// （イシュー #1955）。上記 [`Self::rnn_forward_seq`] と同じ理由の
+    /// 薄い委譲。`h0` 省略時はゼロ初期化される（`Gru::forward_seq`
+    /// の契約を参照）。
+    pub fn gru_forward_seq<'t>(
+        &'t self,
+        gru: &nn::rnn::Gru,
+        x: &Tensor<f32>,
+        h0: Option<&Var<'t>>,
+    ) -> Result<nn::rnn::RnnSeqOutput<'t, nn::rnn::GruCellVars<'t>>, AutodiffError> {
+        gru.forward_seq(&self.0, x, h0)
+    }
+
+    /// この `Tape` が結線されているバックエンドの `f64` 演算本体
+    /// （[`TypedOps<f64>`]）への capability accessor（イシュー #1939・
+    /// `docs/compat-api-scope.md` §5 経路 2 承認・`docs/backend-dtype-
+    /// dispatch-design.md`）。
+    ///
+    /// `Tensor<f64>` を直接対象とする 8 演算（`gemm`／`add`／`mul`／
+    /// `relu`／`exp`／`tanh`／`sum`／`max`）限定の capability であり、
+    /// `Var`／autograd を経由しない（呼び出しは tape に記録されず
+    /// 勾配は付かない）。バックエンドが対応しない場合は `None`
+    /// （fail-closed。例: Metal は f64 型自体が既定非対応）。`Some` が
+    /// 返っても個々の演算が [`BackendError::Unsupported`] を返す場合が
+    /// ある（例: CUDA の `TypedOps<f64>` は 8 演算すべて
+    /// `Unsupported`）——`Some`/`None` は型としての対応可否のみを表す。
+    ///
+    /// REQ-12: 返すのは `TypedOps<f64>` の不変借用のみで、`BackendOps`
+    /// 自体の注入経路は増えない（`fandhe_ai_autodiff::Tape::ops()` は
+    /// 引き続き `pub(crate)`）。
+    pub fn typed_ops_f64(&self) -> Option<&dyn TypedOps<f64>> {
+        self.0.typed_ops_f64()
+    }
+
+    /// `half::f16` 演算本体（[`TypedOps<f16>`]）への capability
+    /// accessor。契約は [`Self::typed_ops_f64`] と同じ（イシュー
+    /// #1939）。`half::f16` を名指しするには利用者が `half` クレート
+    /// （本 workspace と同一バージョン）へ直接依存する（facade は
+    /// `half` を再エクスポートしない）。
+    pub fn typed_ops_f16(&self) -> Option<&dyn TypedOps<f16>> {
+        self.0.typed_ops_f16()
+    }
+
+    /// `half::bf16` 演算本体（[`TypedOps<bf16>`]）への capability
+    /// accessor。契約は [`Self::typed_ops_f64`] と同じ（イシュー
+    /// #1939）。
+    pub fn typed_ops_bf16(&self) -> Option<&dyn TypedOps<bf16>> {
+        self.0.typed_ops_bf16()
     }
 }
 
