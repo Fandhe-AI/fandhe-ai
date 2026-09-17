@@ -26,7 +26,7 @@ framework-compare の承認ピンを `=0.9.0` へ更新したうえで GEMM／tr
 - **Apple M4 Max**:
   - 系列 A: 共有負荷下（他セッション並走）で 5 run。各 run 開始時 load1 = 8.46/16.92/23.46/28.05/20.47
   - 系列 B: 各 run 開始前に load1 < 8.0（系列 A の最小 8.46 未満）を最大 30 分待つゲート付きで 5 run。`gate.log` のとおり全 5 run がゲートを通過して完走した（詳細は「事前登録規則」節）
-  - いずれも `SKIP_BUILD=1`（prebuild 済みバイナリを使い回し、計測からビルド残余負荷を分離）
+  - ビルドの扱い: 系列 A の run1 のみビルド直後（`scripts/m4max-090-loop.sh` は初回だけ `SKIP_BUILD` を指定せず、`m4max-series-a/run1/run.log` に 9.77 秒のビルドが記録されている）。系列 A の run2〜5 と系列 B の全 run は `SKIP_BUILD=1`（prebuild 済みバイナリを使い回し、計測からビルド残余負荷を分離）
 - **DGX Spark GB10**: 専有 1 セッション（5 回計測中央値ではない。`uptime_before_all.txt` の load average 0.02/0.05/0.16 のとおり低負荷単発）
 
 ## 事前登録規則（`m4max-series-b/RULE.txt`。2026-09-16T19:43:40Z、系列 B の結果が出る前に固定）

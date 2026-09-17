@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""0.8.0（前版スコアボード）と HEAD 再計測の判定を並べる。gen.py と同じ判定規則。"""
+"""0.8.0（前版スコアボード）と HEAD 再計測の判定を並べる。gen_090.py と同じ判定規則。
+
+判定に使う `gemm_ms`・M4_PY（Python 3 FW の転記値）は、隣接する scoreboard/gen_090.py の
+該当区間（`def gemm_ms` から `M4_SKIP =` の直前まで）を exec して取り込む（収録済みファイルのみ参照）。
+"""
 import json, re, sys
 from pathlib import Path
 REPO = Path('<repo>')
 RAW = REPO / 'scripts/bench/framework-compare/results/raw'
 DGX = REPO / 'docs/perf/logs/lowlayer-diagnosis-2026-09-12/dgx'
 SB = Path(__file__).resolve().parent.parent / 'scoreboard'
-src = SB.joinpath('gen.py').read_text()
+src = SB.joinpath('gen_090.py').read_text()
 ns = {'m4': {}}
 exec(src[src.index('def gemm_ms'):src.index('M4_SKIP =')], ns)   # gemm_ms + M4_PY（転記値）→ ns['m4']
 M4_PY = ns['m4']
