@@ -404,6 +404,50 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// [`Var::matmul`] の FP32 厳密版（rank 2 限定）。`ops.gemm`
+    /// （CUDA `crate::precision` の TF32 opt-in フラグに従う）ではなく
+    /// 常に `ops.gemm_fp32_strict` で forward 値を計算する点のみが
+    /// 異なり、記録する `Op::MatMul` ノード自体・shape 検証・クロス
+    /// テープ検査は [`Var::matmul`] と同一。
+    ///
+    /// [`create_graph::backward_create_graph`](crate::create_graph)
+    /// の子テープ上 MatMul VJP（`da = g.matmul(&bᵀ)`・
+    /// `db = aᵀ.matmul(&g)`）専用（codex-review 指摘。PR #2003）:
+    /// 1 階 `grad.rs::matmul_vjp` は既に `ops.gemm_fp32_strict` を
+    /// 使っており、CUDA TF32 opt-in（`set_cuda_gemm_precision`）が
+    /// 有効な間もバックプロパゲーションだけは FP32 厳密のまま保つ
+    /// 契約（`BackendOps::gemm_fp32_strict` doc 参照）。子テープ上で
+    /// `Var::matmul`（`ops.gemm`）を使うと、この契約が二階微分の
+    /// 記録経路でだけ破られ、勾配が TF32 相当まで精度低下する
+    /// （REQ-2 の統一複合判定を外れうる）。rank 2 限定なのは
+    /// [`create_graph::validate_ancestors`](crate::create_graph) が
+    /// rank≥3 の `MatMul` を子テープ記録の対象から事前拒否しており、
+    /// このメソッドの呼び出し元では常に rank 2 であるため
+    /// （バッチ版 `gemm_batched_fp32_strict` は未使用）。
+    pub(crate) fn matmul_fp32_strict(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(other)?;
+        let lhs_shape = self.shape();
+        let rhs_shape = other.shape();
+        matmul_out_shape(&lhs_shape, &rhs_shape)?;
+        let (lhs_val, rhs_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let lhs_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let rhs_val = materialize_fallible(&nodes, self.tape.ops(), other.id)?.clone();
+            (lhs_val, rhs_val)
+        };
+        let value = self.tape.ops().gemm_fp32_strict(&lhs_val, &rhs_val)?;
+        let id = self.tape.push_eager(Op::MatMul(self.id, other.id), value);
+        // `TapeNode::fp32_strict` を立てる（codex-review 指摘。
+        // PR #2003）: `push_eager` 自体は通常版・厳密版の呼び出し元を
+        // 区別しないため、戻り値ノードへ限定してここで事後設定する。
+        // これにより activation checkpointing（`release_checkpoint_
+        // region`）が本ノードの forward 値を解放しなくなり、以後の
+        // 再計算が非厳密な `matmul_forward`（`ops.gemm`）へ落ちる事故
+        // （厳密精度契約が checkpoint 経由で失われる）を防ぐ。
+        self.tape.nodes.borrow_mut()[id.0].fp32_strict = true;
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// `C = self @ other` を計算しつつ、`C` の全要素和（checksum）を
     /// バックエンド側の `f64` reduction（`BackendOps::gemm_checksum`）で
     /// 求める（イシュー #1339）。framework-compare の gemm 計測窓が毎

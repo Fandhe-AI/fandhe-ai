@@ -7961,6 +7961,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
             requires_grad: true,
+            fp32_strict: false,
         }
     }
 
@@ -10266,6 +10267,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
                 recompute: false,
                 recompute_failed: std::cell::Cell::new(false),
                 requires_grad: true,
+                fp32_strict: false,
             };
             vec![
                 leaf_node(x.clone()),
@@ -11097,6 +11099,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             recompute: false,
             recompute_failed: std::cell::Cell::new(false),
             requires_grad: true,
+            fp32_strict: false,
         };
         let nodes = vec![node];
         let op = Op::Interpolate {

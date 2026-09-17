@@ -49,14 +49,38 @@
 //! 手続きを経ていないため、内部クレート（`fandhe_ai_autodiff`）限定の
 //! 機能として留める。
 //!
-//! **初期スコープ（設計 doc §8。`Op::supports_create_graph` が判定する
+//! **対象スコープ（設計 doc §8。`Op::supports_create_graph` が判定する
 //! 対象）**: `Leaf`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`・`Sigmoid`・
-//! `Sum`・`Mean`・`Reshape`・`BroadcastTo` の 11 variant のみ。それ以外の
-//! 追跡対象 Op（`MatMul` を含む）へ到達した場合は
-//! `Err(AutodiffError::Backward)`（fail-closed。#1943 等の後続イシューへ
-//! 引き継ぐ）。`resident`／`fused` 経路（`ResidentLeaf`／
-//! `LinearResident`／`LinearAct`）・checkpoint 済み親テープも同様に
-//! fail-closed で拒否する。
+//! `Sum`・`Mean`・`Reshape`・`BroadcastTo`・`MatMul`（rank 2 × rank 2
+//! 限定。#1943）の 12 variant のみ。それ以外の追跡対象 Op・rank≥3 の
+//! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
+//! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
+//! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
+//! 親テープも同様に fail-closed で拒否する（[`validate_ancestors`]。
+//! `child` へ一切書き込む前の入口で判定するため、途中失敗時も
+//! `child` は無変更のまま保たれる）。
+//!
+//! **`MatMul` の数値契約（イシュー #1943・PR #2003 codex-review 指摘
+//! で是正）**: 子テープの matmul VJP（[`build_cgrads`] の
+//! `Op::MatMul` 腕）は [`Var::matmul_fp32_strict`]（`ops().
+//! gemm_fp32_strict` 経由。`crate::var` 限定公開）を使い、1 階
+//! `matmul_vjp`（`grad.rs`。同じく `ops.gemm_fp32_strict` 経由）と
+//! 入口を揃えている——当初案の `Var::matmul`（`ops().gemm`）は CUDA
+//! TF32 opt-in（`docs/cuda-tf32-optin-api-decision.md`）が有効な間、
+//! 1 階 `matmul_vjp` が守る「バックプロパゲーションは常に FP32 厳密」
+//! という契約を二階微分の記録経路でだけ破ってしまうため、`Var::
+//! matmul_fp32_strict` へ切り替えた。CPU バックエンドは両者が同一
+//! カーネルへ帰着するため bit 同一のまま不変。さらに、
+//! `matmul_fp32_strict` が記録する `Op::MatMul` ノードは
+//! `TapeNode::fp32_strict` フラグにより activation checkpointing
+//! （`Tape::checkpoint`／`Var::checkpoint_from`）の解放対象からも
+//! 除外される（`release_checkpoint_region` doc 参照）——`Op::MatMul`
+//! variant 自体は forward 精度の情報を持たないため、解放後の再計算
+//! （`recompute_value`）が非厳密な `matmul_forward`（`ops.gemm`）を
+//! 使ってしまう事故を防ぐ。本モジュールは元々「子テープの数値方式は
+//! 一般に bit 同一を主張せず、正しさは有限差分突合で検証する」立場
+//! （本ファイル冒頭の既存契約節）を取っており、この整理はその範囲内
+//! に収まる（tolerance／baseline は無変更）。
 
 use fandhe_ai_tensor_core::Tensor;
 
@@ -151,13 +175,24 @@ impl Tape {
     ///    ノードを持つテープの再利用は許さない）。
     /// 5. `self` に checkpoint 区間が登録済み → `Err(Backward)`
     ///    （`Tape::has_registered_checkpoints` doc 参照）。
-    /// 6. 上記を満たせば既存 [`Tape::backward`] をそのまま呼んで 1 階
+    /// 6. `loss` から到達する祖先ノードを `collect_ancestors` で
+    ///    走査し、`validate_ancestors` で resident／fused 経路・
+    ///    未対応 Op・rank≥3 の `MatMul` を事前拒否する
+    ///    （`Err(AutodiffError::Backward)`）。**素の [`Tape::backward`]
+    ///    より前に行う**——resident グラフ（`Op::ResidentLeaf`／
+    ///    `Op::LinearResident`）に対しては素の `backward` 自体が
+    ///    `AutodiffError::InvalidArgument`（`DeviceParamStore::
+    ///    backward` を使えという誤誘導的なメッセージ）を返してしまう
+    ///    ため、先に構造的検査で正確な型付きエラーを返す
+    ///    （イシュー #1943）。
+    /// 7. 上記を満たせば既存 [`Tape::backward`] をそのまま呼んで 1 階
     ///    勾配を得る（`loss.requires_grad() == false` の拒否もここで
     ///    既存どおり発生する）。
     ///
-    /// 4〜6 のいずれかで失敗した場合、`child` へは一切書き込まない
-    /// （4 の事前検査により `child` の空性が確認済みのため、途中失敗で
-    /// `child` へノードが残ることはない）。
+    /// 4〜7 のいずれかで失敗した場合、`child` へは一切書き込まない
+    /// （4 の事前検査により `child` の空性が確認済みであること、6 が
+    /// `build_mirror`／`build_cgrads` より前に走ることの両方に
+    /// より、途中失敗で `child` へノードが残ることはない）。
     pub fn backward_create_graph<'c>(
         &self,
         loss: &Var<'_>,
@@ -191,9 +226,23 @@ impl Tape {
             ));
         }
 
+        // `ancestors` の収集・検査（[`validate_ancestors`]）は `self.
+        // backward(loss)` より前に行う——resident グラフ（`Op::
+        // ResidentLeaf`／`Op::LinearResident`）は素の `Tape::backward`
+        // 自体が `AutodiffError::InvalidArgument`（`DeviceParamStore::
+        // backward` を使えという誤誘導的なメッセージ）を返してしまう
+        // ため、先に構造的な事前検査で「create_graph は resident 経路
+        // 非対応」という型付き `Err(Backward)` を返す方が呼び出し側に
+        // とって正確（イシュー #1943）。`collect_ancestors`／
+        // `validate_ancestors` はいずれも `self`（構造の読み取りのみ）
+        // に依存し `backward` の結果を必要としないため、順序を入れ替え
+        // ても既存の 1 階勾配計算（[`Self::backward`]。無変更）には
+        // 影響しない。
+        let ancestors = collect_ancestors(self, loss.node_id());
+        validate_ancestors(self, &ancestors)?;
+
         let first_order = self.backward(loss)?;
 
-        let ancestors = collect_ancestors(self, loss.node_id());
         let n = self.nodes.borrow().len();
         let mut mirror: Vec<Option<Var<'c>>> = vec![None; n];
         build_mirror(self, child, &ancestors, &mut mirror)?;
@@ -240,6 +289,67 @@ fn collect_ancestors(tape: &Tape, root: NodeId) -> Vec<NodeId> {
     }
     ids.sort_unstable_by_key(|id| id.0);
     ids
+}
+
+/// [`Tape::backward_create_graph`] の入口検査 7（[`build_mirror`]／
+/// [`build_cgrads`] が `child` へ一切書き込む前に呼ぶ純関数。イシュー
+/// #1943）。`ancestors`（[`collect_ancestors`] の結果）を走査し、
+/// 以下のいずれかに該当するノードがあれば即座に `Err` を返す:
+///
+/// (a) `Op::ResidentLeaf`／`Op::LinearResident`／`Op::LinearAct`
+///     （`requires_grad` の値に関わらず。[`build_mirror`] 段 1 の
+///     拒否と同一条件——値の実体化自体が成立しないため）。
+/// (b) `requires_grad == true` かつ非葉（`Op::Leaf` でない）で
+///     `Op::supports_create_graph() == false`。
+/// (c) `requires_grad == true` の `Op::MatMul` で、いずれかの入力
+///     shape の rank が 2 でない（子テープの matmul VJP は
+///     rank 2 × rank 2 限定。[`Op::supports_create_graph`] の doc
+///     参照）。
+///
+/// **多層防御**: [`build_mirror`]／[`build_cgrads`] 自身も同型の
+/// 拒否分岐（(a) は段 1 の手前・(b) は段 2 の `supports_create_graph`
+/// 検査）を保持したまま残す——本関数はそれらより前に実行され、失敗
+/// 時に `child` へ一部ノードが残る事態（4 の事前検査が保証するのは
+/// 「呼び出し開始時点で `child` が空」であって「呼び出し失敗時に
+/// `child` が空のまま」ではない）を避けるための追加ゲートである。
+fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), AutodiffError> {
+    let parent_nodes = parent.nodes.borrow();
+    for &id in ancestors {
+        let node = &parent_nodes[id.0];
+        if matches!(
+            node.op,
+            Op::ResidentLeaf { .. } | Op::LinearResident { .. } | Op::LinearAct { .. }
+        ) {
+            return Err(AutodiffError::Backward(format!(
+                "create_graph: resident／fused 経路の Op（NodeId({}))は非対応（\
+                 docs/autodiff-higher-order-grad-decision.md §8 参照）",
+                id.0
+            )));
+        }
+        if !node.requires_grad || matches!(node.op, Op::Leaf) {
+            continue;
+        }
+        if !node.op.supports_create_graph() {
+            return Err(AutodiffError::Backward(format!(
+                "create_graph: 未対応の Op（NodeId({}))へ到達した（\
+                 docs/autodiff-higher-order-grad-decision.md §8 の対象 Op のみ再生可能）",
+                id.0
+            )));
+        }
+        if let Op::MatMul(a, b) = node.op {
+            let a_rank = parent_nodes[a.0].shape.len();
+            let b_rank = parent_nodes[b.0].shape.len();
+            if a_rank != 2 || b_rank != 2 {
+                return Err(AutodiffError::Backward(format!(
+                    "create_graph: rank≥3 の MatMul（NodeId({}))は非対応（\
+                     子テープの matmul VJP は rank 2 × rank 2 限定。\
+                     docs/autodiff-higher-order-grad-decision.md §14 参照）",
+                    id.0
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 祖先ノードの「写し」を子テープ上へ構築する（[`Tape::backward_
@@ -305,7 +415,7 @@ fn build_mirror<'c>(
                 id.0
             )));
         }
-        let replayed = replay_op(node.op.clone(), &node.shape, mirror)?;
+        let replayed = replay_op(node.op.clone(), &node.shape, node.fp32_strict, mirror)?;
         mirror[id.0] = Some(replayed);
     }
 
@@ -336,14 +446,42 @@ fn get_mirror<'c>(mirror: &[Option<Var<'c>>], id: NodeId) -> Result<Var<'c>, Aut
 /// `shape` は再生対象ノード自身の `TapeNode::shape`（`Op::Reshape`／
 /// `Op::BroadcastTo` の目的 shape はこの `shape` から読む——`Op` 自身は
 /// 入力 `NodeId` のみを保持し目的 shape を持たないため）。
+///
+/// `fp32_strict` は再生対象ノード自身の `TapeNode::fp32_strict`
+/// （PR #2003 codex-review 指摘で追加）。`Op::MatMul` variant 自体は
+/// forward 精度の情報を持たないため、親テープ側で
+/// `Var::matmul_fp32_strict` により記録されたノード（1 階
+/// `matmul_vjp` の `d_input`／`d_weight` 等）を再生する際は、子テープ
+/// 側でも `Var::matmul_fp32_strict` を使い、通常の `Var::matmul`
+/// （`ops.gemm`。CUDA TF32 opt-in が有効な場合は非厳密）へ落ちて
+/// 「バックプロパゲーションは常に FP32 厳密」という契約
+/// （`.claude/rules/coding-rust.md`・`Var::matmul_fp32_strict` doc）を
+/// 二階微分の記録経路でだけ破ることを防ぐ。
 fn replay_op<'c>(
     op: Op,
     shape: &[usize],
+    fp32_strict: bool,
     mirror: &[Option<Var<'c>>],
 ) -> Result<Var<'c>, AutodiffError> {
     match op {
         Op::Add(a, b) => get_mirror(mirror, a)?.add(&get_mirror(mirror, b)?),
         Op::Mul(a, b) => get_mirror(mirror, a)?.mul(&get_mirror(mirror, b)?),
+        // rank 2 × rank 2 限定（`validate_ancestors` (c) が入口で
+        // 事前検査済み）。親ノードが `fp32_strict` フラグを立てて
+        // いれば（`Var::matmul_fp32_strict` 由来）子テープ側も
+        // `matmul_fp32_strict` で再生し、`ops.gemm_fp32_strict`
+        // 経由の厳密精度契約を引き継ぐ。フラグが立っていなければ
+        // 通常の `Var::matmul`（`ops.gemm`）で forward と同一カーネル
+        // を経由する。
+        Op::MatMul(a, b) => {
+            let lhs = get_mirror(mirror, a)?;
+            let rhs = get_mirror(mirror, b)?;
+            if fp32_strict {
+                lhs.matmul_fp32_strict(&rhs)
+            } else {
+                lhs.matmul(&rhs)
+            }
+        }
         Op::Relu(a) => Ok(get_mirror(mirror, a)?.relu()),
         Op::Exp(a) => Ok(get_mirror(mirror, a)?.exp()),
         Op::Tanh(a) => Ok(get_mirror(mirror, a)?.tanh()),
@@ -413,6 +551,30 @@ fn build_cgrads<'c>(
                 let gb = g.mul(&a_m)?;
                 let da = reduce_to(child, &ga, &a_m.shape())?;
                 let db = reduce_to(child, &gb, &b_m.shape())?;
+                accumulate(&parent_nodes, &mut cgrads, a, da)?;
+                accumulate(&parent_nodes, &mut cgrads, b, db)?;
+            }
+            Op::MatMul(a, b) => {
+                // 1 階 `grad.rs::matmul_vjp`（rank 2 経路）と同一の
+                // オペランド順序（`da = gemm(g, bᵀ)`・
+                // `db = gemm(aᵀ, g)`）を `transpose` と
+                // `Var::matmul_fp32_strict`（codex-review 指摘。
+                // PR #2003）の合成として子テープ上へ記録する。
+                // `Var::matmul`（`ops.gemm`）ではなく
+                // `matmul_fp32_strict`（`ops.gemm_fp32_strict`）を
+                // 使うのは、CUDA TF32 opt-in（`set_cuda_gemm_precision`）
+                // が有効な間も 1 階 `matmul_vjp` と同じく
+                // バックプロパゲーションを FP32 厳密のまま保つため
+                // （`Var::matmul_fp32_strict` doc 参照）。
+                // `requires_grad == false` 側（`accumulate` が捨てる）
+                // でも VJP 自体は記録して構わない——`transpose`／
+                // `matmul_fp32_strict` は追加の副作用を持たないため
+                // 無駄なノードが増えるだけで正しさに影響しない
+                // （既存 `Op::Add`／`Mul` 腕と同じ方針）。
+                let a_m = get_mirror(mirror, a)?;
+                let b_m = get_mirror(mirror, b)?;
+                let da = g.matmul_fp32_strict(&b_m.transpose(0, 1)?)?;
+                let db = a_m.transpose(0, 1)?.matmul_fp32_strict(&g)?;
                 accumulate(&parent_nodes, &mut cgrads, a, da)?;
                 accumulate(&parent_nodes, &mut cgrads, b, db)?;
             }
