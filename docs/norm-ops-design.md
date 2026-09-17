@@ -330,12 +330,7 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
   `layer_norm_vjp_rows`）と REQ-2 統一複合判定で一致させる契約（bit
   完全一致は主張しない。行内統計の縮約順序が GPU の並列 reduction で
   あり CPU の逐次走査と異なるため。forward の `xhat` が REQ-2 契約な
-  のと同じ理由。§5 参照）。Metal は Apple M4 Max 実機への到達手段が
-  本実装エージェント実行環境になく、`#[ignore]` テスト
-  （`crates/backend-metal/tests/norm_backward_parity.rs`・facade
-  `crates/facade/tests/norm_backend_parity.rs::metal_{rms_norm,
-  layer_norm}_backward_matches_cpu`）は未実測のまま
-  `docs/perf/logs/metal-norm-backward-1953/` へ記入欄を残す
+  のと同じ理由。§5 参照）。**2026-09-18 M4 Max 実測済み**（#1953）: `crates/backend-metal/tests/norm_backward_parity.rs` 3/3 pass・facade `crates/facade/tests/norm_backend_parity.rs::metal_{rms_norm, layer_norm}_backward_matches_cpu` 各 1/1 pass（REQ-2 統一複合判定で合格）
 - **多次元 `normalized_shape`**: 最終軸限定（§1）
 - **`Sequential::add_rms_norm`／`add_layer_norm`**: #1618 のスコープ
 

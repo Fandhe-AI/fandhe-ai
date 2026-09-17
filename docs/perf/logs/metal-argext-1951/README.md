@@ -47,3 +47,15 @@ cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 - 既存 `#[ignore]` テスト群（`sum`／`gemm`／`elementwise` 等）が新規
   カーネル追加により非後退であること（新規 FAIL がないこと）。
 - FAIL は是正せず記録のみとする（事後緩和なし）。
+
+## 実測結果（2026-09-18・Apple M4 Max・base `a1c50f61`）
+
+| テスト | 結果 | ログファイル |
+|---|---|---|
+| `reduce_parity.rs::metal_arg_all_matches_cpu_exact` | pass | `reduce_parity_metal_arg.log` |
+| `reduce_parity.rs::metal_arg_all_tie_and_nan_match_cpu` | pass | `reduce_parity_metal_arg.log` |
+| `reduce_parity.rs::metal_arg_axis_matches_cpu_exact` | pass | `reduce_parity_metal_arg.log` |
+| `backend_ops_argmax_argmin_match_cpu_exact` | pass | `backend_ops_argmax_argmin.log` |
+| `metal_argmax_and_argmin_match_cpu_exact`（facade） | pass | `facade_reduce_backend_parity.log` |
+
+合格（添字完全一致・新規 FAIL なし）。
