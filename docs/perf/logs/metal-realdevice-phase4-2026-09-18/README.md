@@ -15,7 +15,7 @@ cargo test -p fandhe-ai-backend-metal --release --all-features --no-fail-fast --
 - **実行日**: 2026-09-18
 - **環境**: Apple M4 Max、共有負荷下（record_only）
 - **base SHA**: `a1c50f61`（`perf(backend-metal): 協調ロードの threadgroup メモリ XOR swizzle 軸（index 17）を opt-in で実装する (#2008)` のコミット）
-- **負荷**: load1 開始前 18.98、終了後 10.58（共有負荷下・他セッション並走）
+- **負荷**: load1 開始前 10.58、終了後 18.98（共有負荷下・他セッション並走）
 
 ## by-name 差分（基準との比較）
 

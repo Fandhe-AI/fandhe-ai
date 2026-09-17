@@ -9,8 +9,8 @@ Rust toolchain: stable（rust-toolchain.toml 参照）
 
 ## 負荷情報
 
-テスト開始時 load average (1 min): 18.98
-テスト終了時 load average (1 min): 10.58
+テスト開始時 load average (1 min): 10.58
+テスト終了時 load average (1 min): 18.98
 実行モード: record_only（共有負荷下・他セッション並走）
 
 ## ベースコミット
