@@ -32,6 +32,7 @@
 #![cfg(target_os = "macos")]
 
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_metal::reduce::ArgExtKind;
 use fandhe_ai_backend_metal::{MetalContext, MetalReduce};
 use fandhe_ai_tensor_core::Tensor;
 
@@ -163,4 +164,131 @@ fn metal_sum_axis_empty_cases_match_cpu() {
         .run_sum_axis_f32(&ctx, &[], 0, 5, 3)
         .expect("metal sum axis (empty outer)");
     assert!(out_empty.is_empty());
+}
+
+// ---- argmax／argmin（イシュー #1951）----
+
+fn cpu_argext(x: &[f32], shape: &[usize], dim: Option<usize>, kind: ArgExtKind) -> Vec<i32> {
+    let t = Tensor::new(x.to_vec(), shape).expect("tensor");
+    let out = match kind {
+        ArgExtKind::Max => fandhe_ai_backend_cpu::reduction::argmax(&t, dim),
+        ArgExtKind::Min => fandhe_ai_backend_cpu::reduction::argmin(&t, dim),
+    }
+    .expect("cpu argext succeeds for non-empty reduction");
+    out.as_slice().expect("contiguous").to_vec()
+}
+
+/// [`MetalReduce::run_arg_all_f32`] が CPU 参照実装（`fandhe_ai_backend_cpu::
+/// reduction::{argmax, argmin}`）と各種サイズ（`REDUCE_SUM_CHUNK` 境界
+/// 前後・大形状）で添字完全一致することを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn metal_arg_all_matches_cpu_exact() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let reduce = MetalReduce::new(&ctx).expect("MetalReduce::new に失敗した");
+
+    for &n in &[1usize, 2, 4095, 4096, 4097, 8192, 3 * 4096 + 17, 1 << 20] {
+        let data = gen_data(n, 0x1951_0000 + n as u64);
+        for kind in [ArgExtKind::Max, ArgExtKind::Min] {
+            let metal_out = reduce
+                .run_arg_all_f32(&ctx, &data, kind)
+                .expect("metal argext all must succeed on Metal-equipped runner");
+            let cpu_out = cpu_argext(&data, &[n], None, kind)[0];
+            assert_eq!(
+                metal_out, cpu_out,
+                "n={n} kind={kind:?}: 添字不一致（metal={metal_out}, cpu={cpu_out}）"
+            );
+
+            // run-to-run 決定性。
+            let metal_out2 = reduce
+                .run_arg_all_f32(&ctx, &data, kind)
+                .expect("metal argext all run2");
+            assert_eq!(
+                metal_out2, metal_out,
+                "n={n} kind={kind:?}: run-to-run で添字同一のはず"
+            );
+        }
+    }
+}
+
+/// [`MetalReduce::run_arg_axis_f32`] が CPU 参照実装と複数 shape・
+/// 複数 dim で添字完全一致することを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn metal_arg_axis_matches_cpu_exact() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let reduce = MetalReduce::new(&ctx).expect("MetalReduce::new に失敗した");
+
+    let cases: &[(&[usize], usize)] = &[
+        (&[5], 0),
+        (&[3, 4], 0),
+        (&[3, 4], 1),
+        (&[2, 3, 5], 0),
+        (&[2, 3, 5], 1),
+        (&[2, 3, 5], 2),
+        (&[2, 3, 4, 2], 2),
+    ];
+
+    for &(shape, dim) in cases {
+        let numel: usize = shape.iter().product();
+        let data = gen_data(numel, 0x1951_1000 + numel as u64);
+        let outer: usize = shape[..dim].iter().product();
+        let axis_len = shape[dim];
+        let inner: usize = shape[dim + 1..].iter().product();
+
+        for kind in [ArgExtKind::Max, ArgExtKind::Min] {
+            let metal_out = reduce
+                .run_arg_axis_f32(&ctx, &data, outer, axis_len, inner, kind)
+                .expect("metal argext axis must succeed on Metal-equipped runner");
+            let cpu_out = cpu_argext(&data, shape, Some(dim), kind);
+
+            assert_eq!(
+                metal_out.len(),
+                cpu_out.len(),
+                "shape={shape:?} dim={dim} kind={kind:?}: 出力長不一致"
+            );
+            assert_eq!(
+                metal_out, cpu_out,
+                "shape={shape:?} dim={dim} kind={kind:?}: 添字不一致"
+            );
+
+            // run-to-run 決定性。
+            let metal_out2 = reduce
+                .run_arg_axis_f32(&ctx, &data, outer, axis_len, inner, kind)
+                .expect("metal argext axis run2");
+            assert_eq!(
+                metal_out2, metal_out,
+                "shape={shape:?} dim={dim} kind={kind:?}: run-to-run で添字同一のはず"
+            );
+        }
+    }
+}
+
+/// タイ（同値）・NaN 混入時の挙動が CPU 参照実装と一致することを確認
+/// する（先勝ちタイ規則・全 NaN は添字 0）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn metal_arg_all_tie_and_nan_match_cpu() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let reduce = MetalReduce::new(&ctx).expect("MetalReduce::new に失敗した");
+
+    let cases: &[Vec<f32>] = &[
+        vec![1.0f32; 4097 * 2],
+        vec![f32::NAN, 3.0, f32::NAN, 1.0, f32::NAN],
+        vec![f32::NAN; 4097],
+        vec![-0.0f32, 0.0f32, 1.0f32],
+    ];
+
+    for data in cases {
+        for kind in [ArgExtKind::Max, ArgExtKind::Min] {
+            let metal_out = reduce
+                .run_arg_all_f32(&ctx, data, kind)
+                .expect("metal argext all (tie/nan) must succeed");
+            let cpu_out = cpu_argext(data, &[data.len()], None, kind)[0];
+            assert_eq!(
+                metal_out, cpu_out,
+                "kind={kind:?} data={data:?}: 添字不一致（metal={metal_out}, cpu={cpu_out}）"
+            );
+        }
+    }
 }

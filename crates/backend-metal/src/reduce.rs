@@ -62,12 +62,21 @@ fn map_prepare_error(err: ReducePrepareError) -> MetalError {
     }
 }
 
-/// f32 `sum` reduction 3 カーネル（全要素 2 段・単一軸 1 段）のコンパイル
-/// 済みパイプラインを保持するハンドル。
+/// argmax／argmin の走査対象（イシュー #1951）。`reduce.metal` の
+/// `constant uint& mode`（0=Max・1=Min）と 1 対 1 対応する
+/// （`crate::reduce_model::ArgExtKind` と同じ値）。
+pub use crate::reduce_model::ArgExtKind;
+
+/// f32 `sum` reduction 3 カーネル（全要素 2 段・単一軸 1 段）に加え、
+/// argmax／argmin 3 カーネル（全要素 2 段・単一軸 1 段。イシュー
+/// #1951）のコンパイル済みパイプラインを保持するハンドル。
 pub struct MetalReduce {
     sum_all_chunk_f32: objc2::rc::Retained<MtlPipeline>,
     sum_all_finalize_f32: objc2::rc::Retained<MtlPipeline>,
     sum_axis_f32: objc2::rc::Retained<MtlPipeline>,
+    arg_all_chunk_f32: objc2::rc::Retained<MtlPipeline>,
+    arg_all_finalize_f32: objc2::rc::Retained<MtlPipeline>,
+    arg_axis_f32: objc2::rc::Retained<MtlPipeline>,
 }
 
 impl MetalReduce {
@@ -88,11 +97,19 @@ impl MetalReduce {
         let sum_all_finalize_f32 =
             pipeline::make_pipeline(ctx.device(), &library, "reduce_sum_all_finalize_f32")?;
         let sum_axis_f32 = pipeline::make_pipeline(ctx.device(), &library, "reduce_sum_axis_f32")?;
+        let arg_all_chunk_f32 =
+            pipeline::make_pipeline(ctx.device(), &library, "reduce_arg_all_chunk_f32")?;
+        let arg_all_finalize_f32 =
+            pipeline::make_pipeline(ctx.device(), &library, "reduce_arg_all_finalize_f32")?;
+        let arg_axis_f32 = pipeline::make_pipeline(ctx.device(), &library, "reduce_arg_axis_f32")?;
 
         Ok(Self {
             sum_all_chunk_f32,
             sum_all_finalize_f32,
             sum_axis_f32,
+            arg_all_chunk_f32,
+            arg_all_finalize_f32,
+            arg_axis_f32,
         })
     }
 
@@ -248,6 +265,165 @@ impl MetalReduce {
         })?;
 
         Ok(out_buf.read_to_vec())
+    }
+
+    /// `torch.argmax(x)`／`torch.argmin(x)`（全要素・単一スカラー出力。
+    /// イシュー #1951）相当。呼び出し元（`ops.rs::metal_argext`）が
+    /// `numel == 0` を GPU 起動なしで別処理する契約のため、本関数は
+    /// `x` が非空であることを前提とする（空の場合は `plan_argext_all`
+    /// 経由の検査で弾かれず `MetalBuffer::new_with_data` がゼロ長
+    /// 確保拒否エラーを返す。呼び出し元契約は `ops.rs` doc 参照）。
+    ///
+    /// `sum` の 2 段構成（`run_sum_all_f32`）と同じ理由で
+    /// `dispatch_sync` の単一クロージャ内に 2 段をエンコードする。
+    pub fn run_arg_all_f32(
+        &self,
+        ctx: &MetalContext,
+        x: &[f32],
+        kind: ArgExtKind,
+    ) -> Result<i32, MetalError> {
+        let plan = reduce_model::plan_argext_all(x.len()).map_err(map_prepare_error)?;
+        let numel_u = u32::try_from(plan.numel).map_err(|_| MetalError::InvalidReduceShape {
+            detail: format!(
+                "run_arg_all_f32: numel={} exceeds u32 range (kernel argument type)",
+                plan.numel
+            ),
+        })?;
+        let num_chunks_u =
+            u32::try_from(plan.num_chunks).map_err(|_| MetalError::InvalidReduceShape {
+                detail: format!(
+                    "run_arg_all_f32: num_chunks={} exceeds u32 range (kernel argument type)",
+                    plan.num_chunks
+                ),
+            })?;
+        let mode: u32 = match kind {
+            ArgExtKind::Max => 0,
+            ArgExtKind::Min => 1,
+        };
+
+        let x_buf = MetalBuffer::new_with_data(ctx, x)?;
+        // `partial_key`／`partial_idx` は `reduce_arg_all_chunk_f32` が
+        // `gid < num_chunks` の各スレッドで必ず 1 回書く
+        // （`shaders/reduce.metal` 参照）ため未初期化確保でよいが、
+        // `u32` 要素バッファは既存の `MetalIndexBuffer::new_with_u32`
+        // （アップロード用）しか用意されていない。GPU 上でのみ書かれ
+        // 読まれる中間バッファのため、ホスト側でゼロ埋め `Vec` を
+        // 経由してアップロードする（`MetalBuffer::alloc_uninit_pooled`
+        // 相当の未初期化確保 API を `MetalIndexBuffer` 向けに新設する
+        // までの暫定策。GPU が全要素を上書きするため初期値自体に意味は
+        // ない）。
+        let zeros = vec![0u32; plan.num_chunks];
+        let partial_key_buf = MetalIndexBuffer::new_with_u32(ctx, &zeros)?;
+        let partial_idx_buf = MetalIndexBuffer::new_with_u32(ctx, &zeros)?;
+        let out_buf = MetalIndexBuffer::new_zeroed_i32(ctx, 1)?;
+
+        ctx.dispatch_sync(|encoder| {
+            encode_arg_all_chunk_dispatch(
+                encoder,
+                &self.arg_all_chunk_f32,
+                &x_buf,
+                &partial_key_buf,
+                &partial_idx_buf,
+                numel_u,
+                num_chunks_u,
+                mode,
+            );
+            encode_arg_all_finalize_dispatch(
+                encoder,
+                &self.arg_all_finalize_f32,
+                &partial_key_buf,
+                &partial_idx_buf,
+                &out_buf,
+                num_chunks_u,
+                mode,
+            );
+        })?;
+
+        Ok(out_buf.read_to_vec_i32()[0])
+    }
+
+    /// `torch.argmax(x, dim=dim)`／`torch.argmin(x, dim=dim)` 相当
+    /// （イシュー #1951）。`x` は `outer * axis_len * inner` 要素の
+    /// 稠密（contiguous）スライス。呼び出し元が `lanes == 0`
+    /// （空出力）・`axis_len == 0`（空縮約）を事前に処理する契約
+    /// （`ops.rs::metal_argext` 参照。`run_sum_axis_f32` と異なり
+    /// `sum` の単位元 `0.0` に相当する値が存在しないため、本関数自体は
+    /// 空縮約を扱わない）。
+    pub fn run_arg_axis_f32(
+        &self,
+        ctx: &MetalContext,
+        x: &[f32],
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+        kind: ArgExtKind,
+    ) -> Result<Vec<i32>, MetalError> {
+        let lanes = outer
+            .checked_mul(inner)
+            .ok_or_else(|| MetalError::InvalidReduceShape {
+                detail: "run_arg_axis_f32: outer * inner overflowed usize".to_string(),
+            })?;
+        let numel = lanes
+            .checked_mul(axis_len)
+            .ok_or_else(|| MetalError::InvalidReduceShape {
+                detail: "run_arg_axis_f32: lanes * axis_len overflowed usize".to_string(),
+            })?;
+        if x.len() != numel {
+            return Err(MetalError::InvalidReduceShape {
+                detail: format!(
+                    "run_arg_axis_f32: x.len()={} does not match numel={numel}",
+                    x.len()
+                ),
+            });
+        }
+        if lanes == 0 || axis_len == 0 {
+            return Err(MetalError::InvalidReduceShape {
+                detail: "run_arg_axis_f32: lanes==0 or axis_len==0 must be handled by the caller"
+                    .to_string(),
+            });
+        }
+        let lanes_u = u32::try_from(lanes).map_err(|_| MetalError::InvalidReduceShape {
+            detail: format!(
+                "run_arg_axis_f32: lanes={lanes} exceeds u32 range (kernel argument type)"
+            ),
+        })?;
+        let axis_len_u = u32::try_from(axis_len).map_err(|_| MetalError::InvalidReduceShape {
+            detail: format!(
+                "run_arg_axis_f32: axis_len={axis_len} exceeds u32 range (kernel argument type)"
+            ),
+        })?;
+        if axis_len > i32::MAX as usize {
+            return Err(MetalError::InvalidReduceShape {
+                detail: format!("run_arg_axis_f32: axis_len={axis_len} exceeds i32 index range"),
+            });
+        }
+        let inner_u = u32::try_from(inner).map_err(|_| MetalError::InvalidReduceShape {
+            detail: format!(
+                "run_arg_axis_f32: inner={inner} exceeds u32 range (kernel argument type)"
+            ),
+        })?;
+        let mode: u32 = match kind {
+            ArgExtKind::Max => 0,
+            ArgExtKind::Min => 1,
+        };
+
+        let x_buf = MetalBuffer::new_with_data(ctx, x)?;
+        let out_buf = MetalIndexBuffer::new_zeroed_i32(ctx, lanes)?;
+
+        ctx.dispatch_sync(|encoder| {
+            encode_arg_axis_dispatch(
+                encoder,
+                &self.arg_axis_f32,
+                &x_buf,
+                &out_buf,
+                lanes_u,
+                axis_len_u,
+                inner_u,
+                mode,
+            );
+        })?;
+
+        Ok(out_buf.read_to_vec_i32())
     }
 }
 
@@ -411,6 +587,183 @@ fn encode_sum_axis_dispatch(
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
 }
 
+/// `reduce_arg_all_chunk_f32` のエンコード（バッファ index 0〜2・
+/// スカラー index 3〜5・ディスパッチ）。`shaders/reduce.metal::
+/// reduce_arg_all_chunk_f32` のバッファ宣言と一致させる
+/// （`encode_sum_all_chunk_dispatch` と同型・イシュー #1951）。
+#[allow(clippy::too_many_arguments)]
+fn encode_arg_all_chunk_dispatch(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    x_buf: &MetalBuffer,
+    partial_key_buf: &MetalIndexBuffer,
+    partial_idx_buf: &MetalIndexBuffer,
+    numel: u32,
+    num_chunks: u32,
+    mode: u32,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: `encode_sum_all_chunk_dispatch` と同じ契約（各バッファは
+    // `ctx.dispatch_sync` が完了するまで生存する）。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(x_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(partial_key_buf.raw()), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(partial_idx_buf.raw()), 0, 2);
+    }
+
+    // SAFETY: `setBytes_length_atIndex` はポインタが指すバイト列を
+    // 呼び出し中に即座に複製する（`encode_sum_all_chunk_dispatch` と
+    // 同じ契約）。型・バイト数・index は `shaders/reduce.metal::
+    // reduce_arg_all_chunk_f32` の `constant uint&` 宣言（index 3〜5）
+    // と一致させている。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&numel).cast(),
+            std::mem::size_of::<u32>(),
+            3,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&num_chunks).cast(),
+            std::mem::size_of::<u32>(),
+            4,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&mode).cast(),
+            std::mem::size_of::<u32>(),
+            5,
+        );
+    }
+
+    let threads_per_tg = MTLSize {
+        width: REDUCE_THREADGROUP_WIDTH,
+        height: 1,
+        depth: 1,
+    };
+    let groups = (num_chunks as usize).div_ceil(REDUCE_THREADGROUP_WIDTH);
+    let threadgroups = MTLSize {
+        width: groups,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// `reduce_arg_all_finalize_f32` のエンコード（バッファ index 0〜2・
+/// スカラー index 3〜4・単一スレッド起動）。
+fn encode_arg_all_finalize_dispatch(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    partial_key_buf: &MetalIndexBuffer,
+    partial_idx_buf: &MetalIndexBuffer,
+    out_buf: &MetalIndexBuffer,
+    num_chunks: u32,
+    mode: u32,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: `encode_sum_all_finalize_dispatch` と同じ契約。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(partial_key_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(partial_idx_buf.raw()), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 2);
+    }
+
+    // SAFETY: `encode_sum_all_finalize_dispatch` と同じ契約。型・
+    // バイト数・index は `shaders/reduce.metal::
+    // reduce_arg_all_finalize_f32` の `constant uint&` 宣言
+    // （index 3〜4）と一致させている。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&num_chunks).cast(),
+            std::mem::size_of::<u32>(),
+            3,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&mode).cast(),
+            std::mem::size_of::<u32>(),
+            4,
+        );
+    }
+
+    // 単一スレッド（`shaders/reduce.metal::reduce_arg_all_finalize_f32`
+    // の契約。`gid != 0` は早期 return）。
+    let threads_per_tg = MTLSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let threadgroups = MTLSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// `reduce_arg_axis_f32` のエンコード（バッファ index 0〜1・スカラー
+/// index 2〜5・ディスパッチ）。`shaders/reduce.metal::
+/// reduce_arg_axis_f32` のバッファ宣言と一致させる
+/// （`encode_sum_axis_dispatch` と同型）。
+#[allow(clippy::too_many_arguments)]
+fn encode_arg_axis_dispatch(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    x_buf: &MetalBuffer,
+    out_buf: &MetalIndexBuffer,
+    lanes: u32,
+    axis_len: u32,
+    inner: u32,
+    mode: u32,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: `encode_sum_axis_dispatch` と同じ契約。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(x_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
+    }
+
+    // SAFETY: `encode_sum_axis_dispatch` と同じ契約。型・バイト数・
+    // index は `shaders/reduce.metal::reduce_arg_axis_f32` の
+    // `constant uint&` 宣言（index 2〜5）と一致させている。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&lanes).cast(),
+            std::mem::size_of::<u32>(),
+            2,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&axis_len).cast(),
+            std::mem::size_of::<u32>(),
+            3,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&inner).cast(),
+            std::mem::size_of::<u32>(),
+            4,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&mode).cast(),
+            std::mem::size_of::<u32>(),
+            5,
+        );
+    }
+
+    let threads_per_tg = MTLSize {
+        width: REDUCE_THREADGROUP_WIDTH,
+        height: 1,
+        depth: 1,
+    };
+    let groups = (lanes as usize).div_ceil(REDUCE_THREADGROUP_WIDTH);
+    let threadgroups = MTLSize {
+        width: groups,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +773,8 @@ mod tests {
         assert!(REDUCE_MSL_SRC.contains("kernel void reduce_sum_all_chunk_f32("));
         assert!(REDUCE_MSL_SRC.contains("kernel void reduce_sum_all_finalize_f32("));
         assert!(REDUCE_MSL_SRC.contains("kernel void reduce_sum_axis_f32("));
+        assert!(REDUCE_MSL_SRC.contains("kernel void reduce_arg_all_chunk_f32("));
+        assert!(REDUCE_MSL_SRC.contains("kernel void reduce_arg_all_finalize_f32("));
+        assert!(REDUCE_MSL_SRC.contains("kernel void reduce_arg_axis_f32("));
     }
 }
