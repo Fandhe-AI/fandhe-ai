@@ -699,9 +699,13 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
 
 `fandhe-ai-onnx-interop` は `[dependencies]` に `fandhe-ai-tensor-core` のみを
 持ち、facade（`fandhe-ai`）は現時点で `fandhe-ai-onnx-interop` に依存しない
-（facade からの ONNX import／export・safetensors save／load のラッパーは
-未実装のまま段階 0。`crates/facade/tests/api_surface.rs` の否定ガードで
-機械固定）。よって 3 節のトポロジカル順は次のとおり更新される。
+（本節は §13 執筆時点〈#2013〉のスナップショット。facade → onnx-interop
+の通常依存結線は #2017（ONNX import）・safetensors 再エクスポートは
+#2019 でそれぞれ完了済みであり、safetensors save／load のラッパー自体は
+「未提供」ではなくなっている。詳細は `docs/facade-onnx-import-exposure-
+decision.md` §12・`docs/facade-safetensors-exposure-decision.md` §11 を
+参照。`crates/facade/tests/api_surface.rs` の承認済み依存形状ガードは
+不変）。よって 3 節のトポロジカル順は次のとおり更新される。
 
 ```
 ① fandhe-ai-tensor-core

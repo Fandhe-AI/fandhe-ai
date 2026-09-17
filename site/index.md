@@ -13,7 +13,7 @@ autodiff・演算グラフ／カーネル融合機構・計算カーネル・バ
 |---|---|
 | `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`Device` → バックエンドの結線）・compat 公開面（`compat::array`／`compat::Sequential`）・`optim`・デバイス常駐更新経路を提供します |
 | `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal` | 内部クレート。直接利用はサポート対象外です |
-| `onnx-interop`（公開名 `fandhe-ai-onnx-interop`。次回リリースから crates.io 公開対象） | 相互運用（ONNX／safetensors）を担う内部クレート。`fandhe-ai` からの再エクスポートは未提供 |
+| `onnx-interop`（公開名 `fandhe-ai-onnx-interop`。次回リリースから crates.io 公開対象） | 相互運用（ONNX／safetensors）を担う内部クレート。ONNX import（`interop::onnx`）・safetensors save／load（`interop::safetensors`）は `fandhe-ai` から再エクスポート済み。ONNX export は未提供 |
 | `guardrail`・`self-repair`・`bench-harness` | 自己修復ループ・ベンチ計測を担う非公開の内部クレート |
 
 `fandhe-ai-tensor-core`／`fandhe-ai-autodiff`／`fandhe-ai-backend-*` の型・

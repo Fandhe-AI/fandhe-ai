@@ -11,6 +11,11 @@
 //! - [`st_load`]: safetensors パース → `tensor-core::Tensor<f32>` へのマッピング
 //!   （TASK-7.1a・#73・REQ-7）。PyTorch で保存した重みファイルのロード経路を提供する。
 //!   キー不足時は [`st_load::LoadError::MissingKeys`] で報告する。
+//!   [`st_load::LoadError`]・[`st_load::load_safetensors_f32`]・
+//!   [`st_load::load_safetensors_f32_from_bytes`]・[`st_load::require_keys`]
+//!   は `fandhe-ai::interop::safetensors` として facade から再エクスポート
+//!   済み（イシュー #2019。`docs/facade-safetensors-exposure-decision.md`
+//!   §11）。
 //! - `require_keys`（非公開。TASK-7.1b・イシュー #74）は safetensors ロード結果の
 //!   キーマップに対する期待キー集合の充足検査を提供する。キー不足を無言 skip せず
 //!   型付きエラー（[`LoadError`]）で報告する（v1 PoC-6 詰まりポイント #2 対策。詳細は
@@ -53,6 +58,10 @@
 //!   書き出し（TASK-7.1c・#197・REQ-7）。[`st_load`] と対称の契約（暗黙アダプタを
 //!   設けない・dtype は F32 のみ）を持つ保存経路。親イシュー #196 の
 //!   「save→load ラウンドトリップで bit 一致」の基盤となる。
+//!   [`st_save::SaveError`]・[`st_save::save_safetensors_f32`]・
+//!   [`st_save::save_safetensors_f32_to_bytes`] も [`st_load`] と同じく
+//!   `fandhe-ai::interop::safetensors` として facade から再エクスポート
+//!   済み（イシュー #2019）。
 //!
 //! `require_keys` モジュールは非公開（`mod`）とし、型・関数のみ `pub use` で
 //! クレートルートへ再エクスポートする。モジュールを `pub mod` にすると

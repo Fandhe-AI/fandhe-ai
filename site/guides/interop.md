@@ -4,16 +4,18 @@
 
 **ONNX import／export は `fandhe_ai::interop::onnx`（`OnnxModel`／
 `OnnxValue`／`OnnxError`・`OnnxModel::{from_bytes, from_path, run,
-to_bytes, to_path}`・`OnnxExportOptions`）として `fandhe-ai` から公開
-されています。** export は import 済みモデルの roundtrip export に限定
-されます（`compat::Sequential`／`nn` から ONNX グラフへの書き出しは
-未対応）。safetensors save／load は現時点で公開されていません
+to_bytes, to_path}`・`OnnxExportOptions`）として、safetensors save／load
+は `fandhe_ai::interop::safetensors`（`LoadError`／`SaveError`／
+`load_safetensors_f32`／`load_safetensors_f32_from_bytes`／
+`require_keys`／`save_safetensors_f32`／`save_safetensors_f32_to_bytes`）
+として、いずれも `fandhe-ai` から公開されています。** export は
+import 済みモデルの roundtrip export に限定されます（`compat::Sequential`
+／`nn` から ONNX グラフへの書き出しは未対応）
 （`onnx-interop` クレート。公開名 `fandhe-ai-onnx-interop`。依存解決の
 ための公開であり直接利用はサポート対象外）。`fandhe-ai` が唯一の
 サポートされる公開 API 面であるという原則（[API Reference](/api/)参照）
 に従うと、`onnx-interop` を直接 `use` する経路はサポート対象外の内部
-利用にあたります。safetensors を利用者向けに公開する入口の新設は本ページ
-のスコープ外です。
+利用にあたります。
 
 ### ONNX import の最小コード例
 
@@ -47,8 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `half` クレートへ直接依存する必要があります。数値契約は
 「`abs_err/(|ref|+1e-6) <= 1e-3`」という ONNX 固有の判定式であり、
 [数値一致契約](/guides/numerical-parity/)のバックエンド間統一複合判定とは
-別指標です。以下は残りの設計解説です（safetensors 部分は動くコード例を
-用意していません）。
+別指標です。以下は残りの設計解説です。
 
 ### ONNX export の最小コード例
 
@@ -76,6 +77,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - allowlist（`interp` 対応 22 op・既定 domain）外のノードを含む
   モデルは、`from_bytes` では構築できても `to_bytes`／`to_path` の
   時点で `OnnxError::UnsupportedOp` により拒否されます。
+
+### safetensors の最小コード例
+
+`compat::Sequential::state_dict`／`load_state_dict`（`docs/compat-
+callbacks-design.md`）と組み合わせて、モデルの重みをファイルへ保存・
+復元できます。
+
+```rust
+use fandhe_ai::compat::Sequential;
+use fandhe_ai::interop::safetensors::{load_safetensors_f32, save_safetensors_f32};
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = Sequential::new().add_linear(4, 8, /* seed = */ 1)?;
+    let path = Path::new("weights.safetensors");
+    save_safetensors_f32(path, &model.state_dict())?;
+
+    let mut restored = Sequential::new().add_linear(4, 8, /* seed = */ 2)?;
+    restored.load_state_dict(load_safetensors_f32(path)?)?;
+    Ok(())
+}
+```
+
+保存 → 読込は bit 完全一致を保証し、`load_state_dict` は不足キー・
+形状不一致を型付き `Err` で fail-closed に拒否します（strict・
+two-pass アトミック契約。既存 `Sequential` の shape が保存前と異なる
+場合はパラメータが一切変更されません）。
 
 ## safetensors: ワイヤフォーマット処理のみ
 
