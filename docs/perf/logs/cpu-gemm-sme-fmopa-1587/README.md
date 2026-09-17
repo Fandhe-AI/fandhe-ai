@@ -30,7 +30,11 @@
   のみ是正済み。判定規則は不変）
 - `aggregate_r4.md` — R4（16 格子点 × 5 run）の集計結果
 - `load_gate_r4.log` — R4 の負荷ゲート記録（5/5 通過）
-- `sme_r4_grid_run{1..5}.log` — R4 各 run の生ログ
+- `sme_r4_grid_run{1..5}.log` — R4 各 run の抽出ログ（`variant=`／`test `／`SME ` 行）。
+  PR #2016 の是正後の `orchestrate_m4max.sh` は未加工出力を
+  `sme_r4_grid_run{1..5}.raw.log` へ併せて保存し、計測プロセスの非ゼロ終了・
+  抽出行 0 件を非ゼロ終了で伝播する（本ディレクトリの実測は是正前の
+  スクリプトで取得したため `.raw.log` は存在しない）
 - `on-arm.patch` — after 腕の差分（main `a1c50f61` に対し
   `SME_PRODUCTION_ENABLED` のみ `false` → `true` へ反転。計測専用
   worktree の変更で main へはコミットしない）
