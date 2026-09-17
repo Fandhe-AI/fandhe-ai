@@ -309,14 +309,89 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
 
 ## 9. 対象外事項
 
-- **GPU backward カーネルの結線**: 既存 backward カーネルは CUDA にしか
-  存在しない（`CudaRmsNorm::run_rmsnorm_f32_train`〈rstd 保存〉＋
-  `run_rmsnorm_bwd_f32`。CPU／Metal は forward のみ）。VJP は autodiff
-  ホスト側（`grad.rs`）で 3 バックエンド共通に実装したため、CUDA 既存
-  RMSNorm backward カーネルへの接続（`Op::RmsNorm` への rstd 保存拡張が
-  必要）・LayerNorm backward カーネルの新設はいずれも対象外
+- **GPU backward カーネルの結線**: **CUDA は #1950 で実装済み**（§10 参照。
+  既存の学習ループ専用 API（`CudaRmsNorm::run_rmsnorm_f32_train`〈rstd
+  保存〉＋`run_rmsnorm_bwd_f32`。#596／#597）は無変更のまま残し、
+  `BackendOps::rmsnorm_backward`／`layer_norm_backward`〈autodiff の
+  `grad::vjp` から一般的に呼ばれる新設エントリ〉専用に独立した
+  recompute-in-backward カーネルを新設する設計とした）。**Metal は #1953
+  のスコープのまま対象外**（本イシュー時点では forward のみ。VJP は
+  autodiff ホスト側 `grad.rs` のホスト参照実装へフォールバックする）
 - **多次元 `normalized_shape`**: 最終軸限定（§1）
 - **`Sequential::add_rms_norm`／`add_layer_norm`**: #1618 のスコープ
+
+## 10. 実装記録（#1950。CUDA backward）
+
+- forward（`Op::RmsNorm`／`Op::LayerNorm` の tape 記録・forward カーネル・
+  `rstd`／`mean` の非保存契約）は無変更のまま維持（`git diff` で
+  `kernels_rmsnorm.rs`／`rmsnorm.rs`／`kernels_layer_norm.rs`／
+  `layer_norm.rs` に差分がないことで担保）。
+- `fandhe_ai_tensor_core::BackendOps` へ非破壊拡張の default メソッド
+  `rmsnorm_backward`／`layer_norm_backward`（既定 `Unsupported`）を追加。
+  `fandhe_ai_autodiff::grad::vjp` の `Op::RmsNorm`／`Op::LayerNorm` 分岐は
+  これらを優先し、`Unsupported` のときのみ既存のホスト参照実装
+  （`rmsnorm_vjp_rows`／`layer_norm_vjp_rows`）へフォールバックする
+  （`Op::MseLoss` 分岐と同型のフォールバック規律。それ以外のエラーは伝播
+  しバックエンド戻り値の shape も検証する）。CPU・Metal はこの default を
+  オーバーライドしないため引き続きホスト VJP（`rmsnorm_vjp_rows`／
+  `layer_norm_vjp_rows`）へフォールバックする経路自体は維持される。
+  **ただし「既存の挙動が bit 完全一致で不変」ではない**: 本 PR（#1995
+  codex-review P1 是正）は host／CUDA 間の縮約順序不一致を解消するため
+  `rmsnorm_vjp_rows`／`layer_norm_vjp_rows` 自体の `dot`／`sum_dxhat`
+  （符号付き項の行内総和）を先頭からの単純逐次和から GPU の butterfly
+  縮約順序（`eval::warp_reduce_f64`）へ変更しており、この変更はオーバー
+  ライドしない CPU・Metal 経路にもそのまま適用される。相殺入力
+  （`dy = [1e20, 1.0, -1e20, 0.0, ...]`）では従来 `dx[1] == 1.0` だった
+  結果が是正後は `dx[1] == 0.96875` になる（§10 の回帰テスト参照）ため、
+  CPU・Metal の数値結果は本 PR により変わりうる。
+- CUDA 実装は新設ファイル `crates/backend-cuda/src/{kernels_norm_backward,
+  norm_backward}.rs`（`CudaNormBackward`）＋`context_cache::
+  cached_norm_backward`＋`ops.rs::CudaBackendOps` オーバーライド 2 件。
+  dx カーネル（1 CTA = 1 warp = 1 行。`double` アキュムレータ・
+  `__shfl_xor_sync` butterfly reduction で行内統計を再計算）と dw／db
+  カーネル（列方向 grid-stride・行を `r=0..rows` の順に逐次走査し
+  `float` で確定した積を `double` へ昇格して蓄積。
+  `.claude/rules/coding-rust.md` の長軸縮約契約）の 2 段構成。
+
+  **行内の符号付き項の縮約（PR #1995 codex-review P1 是正）**: dx カーネル
+  内の `dot`（RMSNorm）・`sum_dxhat`／`dot`（LayerNorm）は符号付き項の
+  行内総和であり相殺を起こしうる。当初実装はホスト参照実装
+  （`rmsnorm_vjp_rows`／`layer_norm_vjp_rows`）側がこれらを単純な先頭
+  からの逐次和で計算していたため、極端な相殺入力（例:
+  `dy = [1e20, 1.0, -1e20, 0.0, ...]`）では CUDA 側の butterfly 縮約
+  （32 レーンストライド分担 + offset 16→1）と host 側の逐次和とで
+  ペアリング順序が異なり、`dx` が REQ-2 統一複合判定（相対誤差 1e-3
+  未満 または 絶対誤差 1e-5 未満）を外れる場合があった。§9「縮約順序
+  の是正（PR #1671 codex-review P1 指摘）」が forward の `mean`／`var`
+  （`row_ln_stats`）に適用した「ホスト側を GPU の butterfly 縮約順序
+  （`eval::warp_reduce_f64`）へ合わせる」方針を本 backward VJP の
+  `dot`／`sum_dxhat` へも横展開し是正した（`crates/autodiff/src/
+  eval.rs::warp_reduce_f64` を `pub(crate)` 化し `grad.rs` から再利用。
+  CUDA カーネル自体は無変更）。是正後は `dot`／`sum_dxhat` について
+  host と CUDA が同一の縮約順序を計算するため、相殺入力を含む単体
+  テスト（`crates/autodiff/src/grad.rs::tests::
+  rmsnorm_grad_dot_reduction_matches_gpu_butterfly_order_on_cancelling_input`／
+  `layer_norm_grad_sum_dxhat_reduction_matches_gpu_butterfly_order_on_cancelling_input`。
+  Linux 実行可能）で厳密な期待値と bit 一致することを確認済み。
+  ただし RMSNorm の二乗和（`rstd` 導出。`row_rms_stats` と CUDA の
+  `acc`）は符号なし項のみで相殺が生じないため引き続き対象外（単純
+  逐次和のまま）であり、これに起因する `rstd` の丸め誤差が `dx` へ
+  伝播するため、dx は全体として bit 一致を主張せず REQ-2 統一複合判定
+  で判定する（LayerNorm の `mean`／`var` は §9 の是正により forward
+  時点で butterfly 縮約済みのため対象外）。
+- 正しさ検証: `crates/tensor-core/src/backend_ops.rs`
+  （`norm_backward_default_is_unsupported`）・`crates/autodiff/src/
+  grad.rs`（`NormBackwardMockOps` によるモックテスト 8 件。優先呼び出し・
+  フォールバック・shape 不正拒否・エラー伝播の 4 分岐 ×2 演算）・
+  `crates/backend-cuda/src/{kernels_norm_backward,norm_backward}.rs`
+  （静的検査・`validate_norm_backward_launch` 単体テスト）・
+  `crates/backend-cuda/tests/norm_backward_parity.rs`（環境適応スモーク・
+  実機必須の形状網羅〈`#[ignore]`〉）・`crates/facade/tests/
+  norm_backend_parity.rs`（CUDA backward の facade 横断 `#[ignore]`
+  テスト 2 件）。facade 新規公開面なし。
+- **GB10 実機実測は未実施のまま `docs/perf/logs/cuda-norm-backward-1950/`
+  へ申し送り**（本エージェント実行環境に CUDA 実機への到達手段がない
+  ため。環境適応スモーク・Linux 実行可能な単体テストはすべて green）。
 - **CPU NEON ベクトル化**（LayerNorm）: `rmsnorm_row_neon` と同型の
   `float64x2_t` 二乗和・分散計算の SIMD 化は後続の性能課題
 - **CUDA persistent grid・occupancy 予算に基づく grid 最適化**: §5「CUDA」

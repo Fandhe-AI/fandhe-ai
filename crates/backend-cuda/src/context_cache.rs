@@ -508,6 +508,22 @@ pub(crate) fn cached_layer_norm(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::norm_backward::
+/// CudaNormBackward`] スイートをプロセス内キャッシュから取得する
+/// （イシュー #1950。キーは [`ContextKey`]。`cached_layer_norm` と
+/// 同型）。`ops::CudaBackendOps::rmsnorm_backward`／`layer_norm_backward`
+/// の唯一の呼び出し先。
+pub(crate) fn cached_norm_backward(
+    device: &CudaDevice,
+) -> Result<Arc<crate::norm_backward::CudaNormBackward>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::norm_backward::CudaNormBackward>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::norm_backward::CudaNormBackward::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`crate::log_softmax_backward::
 /// CudaLogSoftmaxBackward`] スイートをプロセス内キャッシュから取得する
 /// （イシュー #1949。キーは [`ContextKey`]。`cached_layer_norm` と
