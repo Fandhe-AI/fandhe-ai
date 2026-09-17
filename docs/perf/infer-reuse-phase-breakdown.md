@@ -196,3 +196,123 @@ design.md` §9）。その効果を CUDA 実機で計測する A/B・bit 同一�
 方式へ、本ファイル §3 が定義する `infer --mode reuse`／`infer --phases`
 の計測プロトコルを拡張したもの）が担当する。本エージェント実行環境に
 GB10 実機がないため未実測のまま記入欄を残す。
+
+## 10. v0.9.0 ピン再計測（Apple M4 Max・2026-09-18。イシュー #1981）
+
+### 10.1 目的・条件
+
+registry `fandhe-ai =0.9.0`（`scripts/bench/framework-compare/` の
+承認済みピン）にビルドした `bench-fandhe --task infer --phases` を
+Apple M4 Max で cpu／metal × fresh／reuse の 4 セル・5 プロセス独立
+起動で再計測した。事前登録規則・生ログ・env_info は
+`docs/perf/logs/train-infer-phases-0.9.0-1980-1981/`（README 参照。
+train 分と同一の run・同一 JSONL を共有する）。**採否判定を伴わない
+記録**（tolerance・判定規則・本番定数は変更しない）。DGX Spark GB10
+側は別セッションで未実測のため、両実機が受け入れ条件の #1981 は本節
+だけでは close しない。v0.9.0 には #1688（`DeviceParamStore::
+predict_device_chain` の実装）・#1580／#1911（同機構の facade
+`predict_resident` への結線・Metal 実機 ADOPT 確定。`docs/perf/
+metal-infer-chain-single-sync.md`）が含まれており、§4/§5 の v0.6.0
+実測より metal reuse が改善している可能性がある点に留意する
+（本節では原因帰属の判定は行わない）。
+
+### 10.2 内訳表（5 run 中央値・min–max・iter_total 比）
+
+`docs/perf/logs/train-infer-phases-0.9.0-1980-1981/m4max/aggregate.md`
+からの転記。単位は µs。
+
+#### infer_phases / cpu / fresh
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| predict | 184.9 | 158.1–220.2 | 99.7% |
+| host_copy | 0.0 | 0.0–0.1 | 0.0% |
+| checksum | 0.4 | 0.3–0.4 | 0.2% |
+| iter_total | 185.5 | 158.6–220.9 | 100.0% |
+
+トップ 3: predict（99.7%・184.9 µs）・checksum（0.2%・0.4 µs）・
+host_copy（0.0%・0.0 µs）。フェーズ和／合計: 99.9%（差分は計測区間外
+の固定費）。
+
+#### infer_phases / cpu / reuse
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| predict_resident | 175.3 | 163.9–199.5 | 99.6% |
+| host_copy | 0.0 | 0.0–0.0 | 0.0% |
+| checksum | 0.3 | 0.3–0.3 | 0.2% |
+| iter_total | 176.0 | 164.5–200.1 | 100.0% |
+
+トップ 3: predict_resident（99.6%・175.3 µs）・checksum（0.2%・
+0.3 µs）・host_copy（0.0%・0.0 µs）。フェーズ和／合計: 99.8%
+（差分は計測区間外の固定費）。
+
+#### infer_phases / metal / fresh
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| leaf_register | 0.1 | 0.1–0.1 | 0.0% |
+| forward | 431.6 | 311.9–507.6 | 80.2% |
+| to_tensor | 110.2 | 88.9–115.4 | 20.5% |
+| host_copy | 0.2 | 0.2–0.2 | 0.0% |
+| checksum | 0.4 | 0.3–0.4 | 0.1% |
+| iter_total | 538.2 | 398.5–634.0 | 100.0% |
+
+トップ 3: forward（80.2%・431.6 µs）・to_tensor（20.5%・110.2 µs）・
+checksum（0.1%・0.4 µs）。フェーズ和／合計: 100.8%（差分は計測区間外
+の固定費。個別フェーズの 5 run 中央値の和が合計フェーズの中央値を
+上回る統計上の事象で、aggregate.md の値をそのまま転記する）。
+
+#### infer_phases / metal / reuse
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| predict_resident | 365.2 | 353.6–369.3 | 99.8% |
+| host_copy | 0.2 | 0.2–0.2 | 0.1% |
+| checksum | 0.4 | 0.4–0.4 | 0.1% |
+| iter_total | 366.1 | 354.4–370.0 | 100.0% |
+
+トップ 3: predict_resident（99.8%・365.2 µs）・checksum（0.1%・
+0.4 µs）・host_copy（0.1%・0.2 µs）。フェーズ和／合計: 99.9%
+（差分は計測区間外の固定費）。
+
+### 10.3 所見
+
+- cpu は fresh／reuse とも `predict`／`predict_resident` がほぼ
+  iter_total を占め（99.6〜99.7%）、他区間は無視できる規模
+- metal fresh は `forward`（80.2%）が支配的で `to_tensor`（20.5%。
+  `Var::to_tensor()` の実体化・Metal 側 readback を含む）が次点。
+  v0.6.0 実測（§5「forward 81.0%・to_tensor 18.8%」）とほぼ同じ比率
+- **metal reuse（365.2 µs）は cpu reuse（175.3 µs）の約 2.1 倍**。
+  `predict_resident` 単独区間（99.8%）でこれ以上分解できない
+  （§6「分離不能な内訳」）。size=64 という小形状では GPU 起動固定費
+  が相対的に支配的になっていると推定される（推定であり本計測では
+  検証していない）
+- metal reuse（365.2 µs）は v0.6.0 実測（§5「718.9 µs」）よりおよそ
+  半分に改善している。v0.9.0 には #1688（実装）・#1580／#1911（Metal
+  推論単一同期化。`predict_resident` chain 経路。実機 ADOPT 確定）が
+  含まれるため、この改善は同機構に起因する可能性があるが、本節では
+  before/after A/B を取っていないため原因帰属の確定判定はしない
+
+### 10.4 施策の起票案（列挙のみ。起票はしていない。新規 issue 化は
+ユーザー承認が必要）
+
+- metal reuse の GPU 起動固定費が支配的という推定を検証する
+  マイクロベンチ（`predict_resident` 内部の同期回数・encode 回数の
+  診断カウンタ。`docs/perf/metal-infer-chain-single-sync.md` が近縁の
+  診断手法を持つ）
+- metal fresh の `to_tensor`（110.2 µs・20.5%）削減余地の確認
+  （`docs/perf/logs/metal-readout-legacy-regression-four-arm-diag.md`
+  が readback 経路の診断を扱う既存記録）
+- backward 側と同様、infer でも診断計装パッチによる内部内訳取得の
+  要否確認（本節の限界と同じ制約）
+- cpu／metal 双方で size を変えたスイープ（size=64 固定の本計測では
+  小形状固定費と GEMM 本体コストの分離ができない）
+
+### 10.5 限界
+
+- registry `fandhe-ai =0.9.0`（cargo を起動しない事前ビルド済み
+  バイナリ）を使うため、`predict_resident`／`forward` 内部の
+  GEMM／非 GEMM 内訳・診断計装は取得不能。本計測では未取得
+- DGX Spark GB10 側は別セッションで未実測。#1981 は両実機が受け入れ
+  条件のため、本節だけでは close しない
