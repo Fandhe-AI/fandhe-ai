@@ -540,6 +540,14 @@ pub mod memory;
 pub mod mse;
 #[cfg(target_os = "macos")]
 pub mod nll;
+// LayerNorm／RMSNorm backward カーネルの起動 API（イシュー #1953・親
+// #1947。`layer_norm.rs`／`batch_norm.rs` と同じ「カーネル起動は macOS
+// 限定・ホストモデルは Linux 実行可能」の 2 ファイル構成。forward
+// カーネル・tape 記録は一切変更しない recompute-in-backward 方式
+// 〈CUDA 側 #1950 と同型〉）。
+#[cfg(target_os = "macos")]
+pub mod norm_backward;
+pub mod norm_backward_model;
 #[cfg(target_os = "macos")]
 pub mod ops;
 pub mod pad;
@@ -736,6 +744,8 @@ pub use memory::MetalMemory;
 pub use mse::MetalMse;
 #[cfg(target_os = "macos")]
 pub use nll::{MetalNll, NllLayout};
+#[cfg(target_os = "macos")]
+pub use norm_backward::MetalNormBackward;
 #[cfg(target_os = "macos")]
 pub use ops::MetalBackendOps;
 #[cfg(target_os = "macos")]
