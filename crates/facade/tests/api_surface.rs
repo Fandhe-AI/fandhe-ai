@@ -1208,6 +1208,220 @@ fn facade_does_not_reexport_cast_ops() {
     );
 }
 
+/// `fandhe_ai::{Scalar, ScalarDType, TypedOps}`（イシュー #1939・
+/// `docs/compat-api-scope.md` §5 経路 2 承認）が facade から到達可能で
+/// あること・`Tape::typed_ops_f64`／`_f16`／`_bf16` が実際に CPU
+/// バックエンドで `Some` を返し、返った `&dyn TypedOps<T>` を通じて
+/// 演算が実行できることを固定する（コンパイル時裏付け＋実行時検証。
+/// `cast_types_are_reachable_via_facade` と同型）。`half::f16`／
+/// `half::bf16` は facade が再エクスポートしないため、利用者は
+/// `fandhe_ai_tensor_core`（本テストクレートの通常依存）経由で直接
+/// 名指しする。`ScalarDType` は `#[non_exhaustive]` のためワイルドカード
+/// 腕で網羅する。
+#[test]
+fn typed_ops_types_are_reachable_via_facade() {
+    // `Scalar` を型パラメータ境界として名指しできることの固定
+    // （object safety は問わない・`TypedOps<T: Scalar>` の `T` 側）。
+    fn _assert_scalar<T: fandhe_ai::Scalar>() {}
+    let _ = _assert_scalar::<f32>;
+
+    let tape = fandhe_ai::tape();
+
+    // f64: TypedOps<f64> が Some を返し、add の結果がホスト f64 計算値と
+    // bit 完全一致すること（tolerance を導入しない）。
+    let ops_f64: Option<&dyn fandhe_ai::TypedOps<f64>> = tape.typed_ops_f64();
+    let ops_f64 = ops_f64.expect("CPU backend は TypedOps<f64> に対応するはず（#1697）");
+    let a64 = fandhe_ai::Tensor::<f64>::new(vec![1.0, 2.0, 3.0], &[3])
+        .expect("test fixture: shape とデータ長は一致させている");
+    let b64 = fandhe_ai::Tensor::<f64>::new(vec![10.0, 20.0, 30.0], &[3])
+        .expect("test fixture: shape とデータ長は一致させている");
+    let sum64 = ops_f64
+        .add(&a64, &b64)
+        .expect("CPU TypedOps<f64>::add は Ok のはず");
+    assert_eq!(
+        sum64.host_slice().into_owned(),
+        vec![11.0, 22.0, 33.0],
+        "f64 add はホスト f64 計算値と bit 完全一致するはず"
+    );
+
+    // f16／bf16: fandhe_ai_tensor_core 経由で直接型を名指しし、relu を
+    // 1 演算実行して Ok と厳密に表現可能な値の一致を確認する。
+    let ops_f16: Option<&dyn fandhe_ai::TypedOps<fandhe_ai_tensor_core::f16>> =
+        tape.typed_ops_f16();
+    let ops_f16 = ops_f16.expect("CPU backend は TypedOps<f16> に対応するはず（#1698）");
+    let neg_and_pos = fandhe_ai::Tensor::<fandhe_ai_tensor_core::f16>::new(
+        vec![
+            fandhe_ai_tensor_core::f16::from_f32(-1.0),
+            fandhe_ai_tensor_core::f16::from_f32(2.0),
+        ],
+        &[2],
+    )
+    .expect("test fixture: shape とデータ長は一致させている");
+    let relu16 = ops_f16
+        .relu(&neg_and_pos)
+        .expect("CPU TypedOps<f16>::relu は Ok のはず");
+    assert_eq!(
+        relu16.host_slice().into_owned(),
+        vec![
+            fandhe_ai_tensor_core::f16::from_f32(0.0),
+            fandhe_ai_tensor_core::f16::from_f32(2.0)
+        ],
+        "f16 relu はホスト参照実装と一致するはず"
+    );
+
+    let ops_bf16: Option<&dyn fandhe_ai::TypedOps<fandhe_ai_tensor_core::bf16>> =
+        tape.typed_ops_bf16();
+    let ops_bf16 = ops_bf16.expect("CPU backend は TypedOps<bf16> に対応するはず（#1699）");
+    let neg_and_pos_bf16 = fandhe_ai::Tensor::<fandhe_ai_tensor_core::bf16>::new(
+        vec![
+            fandhe_ai_tensor_core::bf16::from_f32(-1.0),
+            fandhe_ai_tensor_core::bf16::from_f32(2.0),
+        ],
+        &[2],
+    )
+    .expect("test fixture: shape とデータ長は一致させている");
+    let relu_bf16 = ops_bf16
+        .relu(&neg_and_pos_bf16)
+        .expect("CPU TypedOps<bf16>::relu は Ok のはず");
+    assert_eq!(
+        relu_bf16.host_slice().into_owned(),
+        vec![
+            fandhe_ai_tensor_core::bf16::from_f32(0.0),
+            fandhe_ai_tensor_core::bf16::from_f32(2.0)
+        ],
+        "bf16 relu はホスト参照実装と一致するはず"
+    );
+
+    // ScalarDType（#[non_exhaustive]）をワイルドカード腕付きで網羅
+    // できることの固定（`cast_types_are_reachable_via_facade` の
+    // `CastDType` 網羅と同型）。
+    let dtype: fandhe_ai::ScalarDType = fandhe_ai::ScalarDType::F64;
+    let _label = match dtype {
+        fandhe_ai::ScalarDType::F32 => "f32",
+        fandhe_ai::ScalarDType::F64 => "f64",
+        fandhe_ai::ScalarDType::F16 => "f16",
+        fandhe_ai::ScalarDType::Bf16 => "bf16",
+        _ => "unknown",
+    };
+}
+
+/// `fandhe_ai::Tape::typed_ops_f64`／`_f16`／`_bf16`（イシュー #1939）が
+/// facade の公開面（`pub fn`）としてソース上に存在することを固定する
+/// （`facade_exposes_available_devices_and_tape_transfer` と同型の
+/// ソース走査。`typed_ops_types_are_reachable_via_facade` のコンパイル
+/// 時裏付けを補完する）。
+#[test]
+fn facade_exposes_typed_ops_accessors_on_tape() {
+    let lib_rs = facade_crate_root().join("src/lib.rs");
+    let content = read_to_string_or_panic(&lib_rs);
+    for needle in [
+        "pub use fandhe_ai_tensor_core::{Scalar, ScalarDType, TypedOps};",
+        "pub fn typed_ops_f64(&self) -> Option<&dyn TypedOps<f64>>",
+        "pub fn typed_ops_f16(&self) -> Option<&dyn TypedOps<f16>>",
+        "pub fn typed_ops_bf16(&self) -> Option<&dyn TypedOps<bf16>>",
+    ] {
+        assert!(
+            content.contains(needle),
+            "crates/facade/src/lib.rs に `{needle}` が見つからない（#1939）"
+        );
+    }
+}
+
+/// `crates/facade/src/` の `pub use` が `half`（`half::f16`／
+/// `half::bf16` を含む）を再エクスポートしていないことを固定する
+/// （承認事項「facade で `half` を再エクスポートしない」。イシュー
+/// #1939・`facade_does_not_reexport_cast_ops` と同型の走査）。識別子
+/// 境界で判定し、`ScalarDType::F16`／`Bf16` 等の大文字始まりの
+/// variant 名は誤検知しない（`half::` プレフィックス・裸の `f16`／
+/// `bf16` トークンのみを対象とする）。
+#[test]
+fn facade_does_not_reexport_half() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            if trimmed.contains("half::") {
+                offending.push(format!("{}: `{trimmed}` が half:: を含む", path.display()));
+                continue;
+            }
+            // 裸の `f16`／`bf16` トークン（識別子境界判定。`ScalarDType`
+            // 等の大文字始まり variant とは別トークンのため誤検知しない）。
+            for token in ["f16", "bf16"] {
+                let mut search_from = 0usize;
+                while let Some(pos) = trimmed[search_from..].find(token) {
+                    let abs = search_from + pos;
+                    let before_ok = trimmed[..abs]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+                    let after_idx = abs + token.len();
+                    let after_ok = trimmed[after_idx..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+                    if before_ok && after_ok {
+                        offending.push(format!(
+                            "{}: `{trimmed}` が裸の `{token}` トークンを含む",
+                            path.display()
+                        ));
+                    }
+                    search_from = abs + token.len();
+                }
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が half（f16／bf16）を再エクスポートしている\
+         （承認事項違反。イシュー #1939）: {offending:?}"
+    );
+}
+
+/// `crates/facade/Cargo.toml` の依存セクションに `half` への直接依存が
+/// 追加されていないことを固定する（承認事項「facade で `half` を
+/// 再エクスポートしない」の裏付け。`half` は `fandhe-ai-tensor-core`
+/// 経由の推移的依存のままで足りる。イシュー #1939）。
+#[test]
+fn facade_cargo_toml_does_not_depend_on_half() {
+    let cargo_toml_path = facade_crate_root().join("Cargo.toml");
+    let content = read_to_string_or_panic(&cargo_toml_path);
+    let mut current_section = String::new();
+    let mut offending = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let code_part = trimmed
+            .split_once('#')
+            .map(|(a, _)| a)
+            .unwrap_or(trimmed)
+            .trim();
+        if code_part.starts_with('[') && code_part.ends_with(']') {
+            current_section = code_part.to_string();
+            continue;
+        }
+        if !is_relevant_dependency_section(&current_section) || code_part.is_empty() {
+            continue;
+        }
+        let Some((key, _value)) = code_part.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_matches('"');
+        if key == "half" {
+            offending.push(format!(
+                "`{current_section}` に依存 `half` を検出: `{trimmed}`"
+            ));
+        }
+    }
+    assert!(
+        offending.is_empty(),
+        "crates/facade/Cargo.toml が half へ直接依存している\
+         （承認事項違反。イシュー #1939）: {offending:?}"
+    );
+}
+
 /// `fandhe_ai::available_devices`（イシュー #1614）が `pub fn` として、
 /// `fandhe_ai::Tape::device`／`Tape::transfer` が facade の公開面に
 /// 存在することを固定する（`facade_exposes_pool_release_api_and_pool_
