@@ -1110,3 +1110,72 @@ legacy フォールバック（§13.6 で fail-closed に実装済み）を維�
 - v0.8.0 タグ時点の非到達根拠: `docs/perf/logs/
   metal-gemm-candle-gate-0.8.0-1490/attribution.md`
 - split-K 本番結線の設計判断: `docs/backend-metal-splitk-decision.md`
+
+## 19. 2026-09-17 追補: 正式系列 `fandhe-ai =0.9.0` 再計測（イシュー #1967）
+
+### 19.1 位置づけ・プロトコル
+
+- v0.9.0 が 2026-09-17 に crates.io へ公開され（`release-all.yml` run 35136585936）、
+  framework-compare の承認ピンが `fandhe-ai =0.9.0` へ更新された。本追補は、この正式系列
+  （registry 解決・path patch なし）で Metal GEMM N=1024/2048/4096 reuse の candle 比
+  ゲート（旧 #1037）を Apple M4 Max で再計測した記録。**計測実施日は UTC 2026-09-16
+  （JST では 2026-09-17。本節見出しの日付は v0.9.0 公開日〈JST〉であり計測実施日そのもの
+  ではない）**
+- **本追補でいう「正式値」（系列 B）は `m4max-series-b/RULE.txt` に定めるスコアボード規則
+  （同一 run 内の最速相手比〈verdict〉を主とする）上の正式系列を指す。本計測は §2／§16 の
+  専用ゲートツール（`run_gemm_gate_metal.sh`・5 回計測中央値・専有ゲート・ADOPT/REJECT
+  判定プロトコル付き）ではなく、`run_all.sh` 相当の一般 framework-compare 実行（M4 Max
+  再計測スクリプト `m4max-run-090.sh`）から算出した記録であり、候補判定（candle 比ゲートの
+  達成判定）とは別物である**。2 系列で計測した:
+  - **系列 B（正式値）**: run 開始前に load1 < 8.0 のゲートを課し、5/5 run が通過して完走した
+    （`docs/perf/logs/framework-compare-0.9.0-remeasure/m4max-series-b/gate.log`・`RULE.txt`）
+  - **系列 A（参考値）**: 共有負荷下（他セッション並走・load1 8.46〜28.05）で 5 run
+  - いずれも n=5 の 5 run 中央値ではあるが、§2／§16 の `run_gemm_gate_metal.sh`（専有ゲート・
+    `compare_gemm_gate.py` の ADOPT/REJECT 判定式）を経由していないため、§16.7 の「正式系列」
+    ゲート判定表そのものは本追補では更新しない
+- 生データ・実行ログ: `docs/perf/logs/framework-compare-0.9.0-remeasure/m4max-series-{a,b}/`
+- コード変更なし
+
+### 19.2 実測結果
+
+系列 B（load1 < 8.0 ゲート付き・5 run 中央値。正式値）:
+
+| N | fandhe-ai reuse 中央値（n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s（fandhe） | 判定（参考） |
+|---|---|---|---|---|---|
+| 1024 | 3.054542 ms | 2.080459 ms | 0.681 | 703.0 | 未達 |
+| 2048 | 9.907938 ms | 7.349250 ms | 0.742 | 1734.0 | 未達 |
+| 4096 | 46.563875 ms | 27.596896 ms | 0.593 | 2951.6 | 未達 |
+
+系列 A（共有負荷下・5 run 中央値。参考値）:
+
+| N | fandhe-ai reuse 中央値（n=5） | candle fresh 中央値（n=5） | candle/fandhe | GFLOP/s（fandhe） | 判定（参考） |
+|---|---|---|---|---|---|
+| 1024 | 2.902396 ms | 2.142583 ms | 0.738 | 739.9 | 未達 |
+| 2048 | 10.050166 ms | 9.913104 ms | 0.986 | 1709.4 | 未達 |
+| 4096 | 48.056187 ms | 23.815145 ms | 0.496 | 2860.0 | 未達 |
+
+出典: `docs/perf/logs/framework-compare-0.9.0-remeasure/m4max-series-b/results-m4max-0.9.0-median5.jsonl`・
+`m4max-series-a/results-m4max-0.9.0-median5.jsonl`（fandhe-ai reuse は `task=gemm device=metal
+mode=reuse` 行、candle fresh は `framework=candle task=gemm device=metal mode=fresh` 行）。
+
+- 全 6 セル（両系列×3 形状）とも `parity_fail_count=0`（fandhe-ai・candle いずれも。判定不能なし）
+- A/B 間で verdict の反転はない（両系列とも 3 形状すべて未達）。参考: N=256/512（gate 対象形状外）
+  も両系列とも未達（系列 B: 0.926／0.723、系列 A: 0.813／0.707）
+
+### 19.3 §16.4 との比較
+
+§16.4 の正式値（5 回計測中央値・専有ゲート付き ADOPT/REJECT プロトコル。`0.8.0-1490`）は
+N=1024 0.743・N=2048 1.002（**唯一の達成**）・N=4096 0.634。本追補（系列 B）は N=1024
+0.681・N=2048 0.742・N=4096 0.593 で、**N=2048 が §16.4 の「達成」から「未達」へ転じている**。
+§16.4 自体が「run 間分散が大きく専有環境での再計測なしに再現性を確定できない」（§18.7）と
+記録済みの形状であり、本追補も §2／§16 の専用ゲートツール（専有ゲート・ADOPT/REJECT 判定式）
+を経由していないため、この符号反転が計測ノイズかコード変更に起因するかは本追補単独では
+確定できない。正式系列 `0.9.0` での §16 相当のゲート確定判定（`run_gemm_gate_metal.sh` 経由）
+は後続イシューへ引き継ぐ。
+
+### 19.4 総合
+
+**参考記録: 正式系列 `fandhe-ai =0.9.0` の一般 framework-compare 実行（系列 B・正式値）では
+N=1024/2048/4096 いずれも未達（0.681／0.742／0.593 倍）。ただし §2／§16 の専用ゲートツール
+（専有ゲート・ADOPT/REJECT 判定式）を経由していないため、§16.7 の「正式系列」ゲート判定表
+自体は更新しない。**
