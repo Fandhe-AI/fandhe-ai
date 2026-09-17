@@ -1,0 +1,5 @@
+round1 gate=pass load1=6.83 waited_s=30 at=2026-09-17T16:36:16Z
+round2 gate=pass load1=6.36 waited_s=0 at=2026-09-17T16:36:22Z
+round3 gate=pass load1=6.17 waited_s=0 at=2026-09-17T16:36:28Z
+round4 gate=pass load1=5.92 waited_s=0 at=2026-09-17T16:36:33Z
+round5 gate=pass load1=6.86 waited_s=0 at=2026-09-17T16:36:39Z

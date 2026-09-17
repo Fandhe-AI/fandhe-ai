@@ -1,0 +1,26 @@
+# 実機（Apple Silicon）実測記録（イシュー #1978。親 #1977・設計 #1587）。
+#
+# - チップ: Apple M4 Max
+# - macOS バージョン: Darwin 25.6.0
+# - before 腕: main（HEAD a1c50f61）
+# - after 腕: 計測専用 worktree（`on-arm.patch`。main a1c50f61 に対し
+#   `SME_PRODUCTION_ENABLED` のみ `false` → `true` へ反転。main へは
+#   コミットしない）
+# - R4 実行日時（UTC）: 2026-09-17T16:35:17Z〜16:35:18Z（各 run 開始）
+# - R1／R2 実行日時（UTC）: 2026-09-17T16:36:16Z〜16:36:39Z（各 round 開始）
+# - R4 負荷ゲート: 5/5 run 通過（load1 7.03 < 8.0・waited_s=0。全 run 同一値）
+# - R1／R2 負荷ゲート: 5/5 round 通過（load1 5.92〜6.86 < 8.0・waited_s は
+#   round1 のみ 30 秒・以降 0 秒）
+# - 総合判定: undetermined（§5.4.4）。初版は ADOPT と記録したが、PR #2016
+#   レビュー指摘により train size=64 を到達セルへ再分類（L1 d_weight GEMM
+#   784×256×64 が `sme_shape_eligible` を満たす。§5.4.2）して訂正した
+# - R4 判定: ADOPT 候補あり（§5.4.1）。現行しきい値の境界点
+#   `(min(m,n)=256, k=64)` は 5/5 run 一貫ではない
+# - R1 判定: 到達セル（gemm cpu 512／1024／2048 × fresh／reuse）は
+#   6/6 セルとも ADOPT 候補（5 round 中央値 0.5725〜0.7378・run 内比
+#   5/5 とも <=1.00）。到達セル train size=64 は fresh が ADOPT 候補・
+#   reuse は round 1・5 が 1.0244／1.0248 で ADOPT 候補条件不成立
+#   （総合 undetermined の根拠）。非到達セル（infer size=64 × fresh／reuse）
+#   に 5/5 一貫の後退なし
+# - R2 判定: 全 10 セル checksum 完全一致
+# - GB10（DGX Spark GB10）: RULE.txt により本セッションの対象外（SME 非対応）

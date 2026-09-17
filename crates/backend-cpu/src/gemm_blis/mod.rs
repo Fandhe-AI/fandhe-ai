@@ -6556,4 +6556,42 @@ mod tests {
             }
         }
     }
+
+    /// R4 正式格子版（イシュー #1978。#1587 事前登録規則 R4 の逐語:
+    /// `min(m,n)∈{64,128,256,512}`・`k∈{32,64,128,256}` の 16 格子点）。
+    /// [`sme_vs_neon_ab_shape_sweep`] は参考計測用の 7 点固定で R4 の格子と
+    /// 一致しないため、正式 5 プロセス起動（`docs/perf/logs/
+    /// cpu-gemm-sme-fmopa-1587/orchestrate_m4max.sh`）向けに分離する。
+    /// 形状は正方（`m = n`）とし、計測方式・出力形式は上記と同一にして
+    /// 集計スクリプト（同ディレクトリ `aggregate.py`）が両者を同じ正規表現で
+    /// 読めるようにする。本番定数（`SME_PRODUCTION_ENABLED`・`SME_MIN_*`）は
+    /// 参照しない（`GemmDriverVariant` を直接指定する診断経路）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "実機（M4 Max。SME 対応環境限定）での R4 正式格子 A/B 計測専用（#1978。 \
+                cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+                sme_vs_neon_ab_r4_grid --nocapture）"]
+    fn sme_vs_neon_ab_r4_grid() {
+        if microkernel::SmeKernel::try_new().is_none() {
+            eprintln!("SME 非対応環境のためスキップ");
+            return;
+        }
+        for &mn in &[64usize, 128, 256, 512] {
+            for &k in &[32usize, 64, 128, 256] {
+                let (m, n) = (mn, mn);
+                let a = xorshift32_vec(0x1234_abcd ^ (m as u32), m * k);
+                let b = xorshift32_vec(0x5678_ef01 ^ (n as u32), k * n);
+
+                let candidates: Vec<(GemmDriverVariant, BlockSizes)> = vec![
+                    (GemmDriverVariant::TwoDDynamic, default_blocks()),
+                    (GemmDriverVariant::TwoDDynamicSme, default_blocks()),
+                ];
+                let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 10);
+                let labels = ["NEON(TwoDDynamic)", "SME(TwoDDynamicSme)"];
+                for (label, gflops) in labels.iter().zip(gflops) {
+                    println!("variant={label} size=({m},{n},{k}) median_gflops={gflops:.3}");
+                }
+            }
+        }
+    }
 }

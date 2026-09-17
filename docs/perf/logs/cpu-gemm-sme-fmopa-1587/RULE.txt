@@ -1,0 +1,6 @@
+# 事前宣言（結果が出る前に固定。2026-09-17T16:32:14Z。一次ソースは issue #1587 の事前登録コメントで、本ファイルはそれを緩めない運用規則のみを足す）
+- R4: sme_vs_neon_ab_r4_grid（16 格子点・正方 m=n）を 5 プロセス独立起動。格子点ごとに SME/NEON の median_gflops 比が 5/5 run で >= 1.0 のとき「SME>=NEON」とする。しきい値以上の全格子点が SME>=NEON となる極小の (min(m,n), k) を採用候補とする（aggregate.py の機械判定）。
+- R1／R2: scripts/bench/framework-compare/run_ab_sme_cpu.sh（before=main・after=SME_PRODUCTION_ENABLED のみ true の計測専用 worktree）。gemm cpu N=512／1024／2048 × fresh／reuse（SME 到達セル）と train／infer × fresh／reuse（size=64。SME 非到達セル）を 5 round・round 単位で起動順反転。到達セルは 5 round 中央値 ratio<=1.00 かつ 5/5 round 一貫（全 round <=1.00）で ADOPT 候補、非到達セルは 5/5 round 一貫の後退（全 round >1.00）のみ REJECT 材料。checksum 完全一致必須（compare_gemm_ab.py --require-checksum-exact）。
+- 総合: R4 に採用候補があり、R1 の到達セルがすべて ADOPT 候補、非到達セルに REJECT 材料がなく、R2 が全セル一致のとき ADOPT。到達セルに 5/5 一貫の後退が 1 つでもあれば REJECT。それ以外は undetermined。いずれの場合も SME_PRODUCTION_ENABLED は切り替えない（#1979）。
+- 負荷: 各 run／round 開始前に load1 < 8.0 を最大 30 分待つ。5/5 通過のみ「load ゲート付き系列」として正式、不通過を含む場合は参考扱いと明記する。run の差し替え・追加起動はしない。
+- GB10 は SME 非対応のため本セッション（M4 Max）の対象外。
