@@ -17,11 +17,19 @@ metal-gemm-thread-elements-ab-1694/aggregate.py` と同じ方針・
 2. bit 同一（run 内）: 各 run・各 N・各 arm の trial 0 出力（`checksum`／
    `bit_identical` 行）が base と一致すること。1 セルでも
    `bit_identical=false` なら当該 arm は比の値によらず全 N で REJECT。
+   bit 証跡（`bit_identical` 行）は checksum が有限値／NaN／inf の
+   いずれであっても欠落なくパースする（fail-closed。数値異常を伴う
+   `bit_identical=false` 行を読み捨てて素通りさせない）。あるセルの
+   bit 証跡が対象 run 全件（`REQUIRED_RUNS`）に揃っていない場合、
+   比の値がどれほど改善方向でも確定判定（ADOPT／REJECT）を出さず
+   undetermined とする（bit 証跡ゼロ件で ADOPT が出ることを防ぐ）。
 3. 指標: 同一 run 内の `head_over_base_kernel_gpu`（arm 中央値 / base
    中央値）。N・arm ごとに 5 run の中央値を採用する。
-4. N 別判定（arm ごと）: 5 run 中央値 `<= 1.00` かつ 5/5 run が `< 1.00`
-   で符号一貫 -> `ADOPT-as-opt-in-candidate`／中央値 `> 1.00` かつ 5/5
-   run が `> 1.00` -> `REJECT`／それ以外（符号反転）-> `undetermined`。
+4. N 別判定（arm ごと）: bit 証跡が対象 run 全件で `true` に揃っており
+   （規則 2）、かつ 5 run 中央値 `<= 1.00` かつ 5/5 run が `< 1.00` で
+   符号一貫 -> `ADOPT-as-opt-in-candidate`／中央値 `> 1.00` かつ 5/5
+   run が `> 1.00` -> `REJECT`／それ以外（符号反転・bit 証跡不足）
+   -> `undetermined`。
 5. XOR の帰属（参考区分・判定は緩めない）: `L0-P0-S1`／`L0-P0-S2` は
    base 比に加えて対照 `L0-P0-S0` 比も併記する。
 6. 総合: いずれの判定でも本番既定（`tile::COOP_LOAD_CONFIG`・
@@ -54,9 +62,16 @@ RUN_FILE_RE = re.compile(r"^kernel_gpu_run(?P<run>[1-5])\.log$")
 RATIO_RE = re.compile(
     r"^N=(?P<n>\d+) arm=(?P<arm>\S+) head_over_base_kernel_gpu=(?P<ratio>[0-9.eE+-]+)$"
 )
+# checksum の値表現（数値本体）は有限値（`[0-9.eE+-]+`）に加え NaN／inf／-inf
+# も受理する（大文字小文字を問わない）。BIT_RE がこれらの表記を弾くと、
+# 数値異常を伴う `bit_identical=false` 行がパースされずに黙って読み捨てられ、
+# 規則 2 の fail-closed 契約（bit 不一致の検出漏れ）を破ってしまうため
+# （codex-review 指摘の是正）。
+CHECKSUM_VALUE_RE = r"[+-]?(?:[0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?|nan|inf)"
 BIT_RE = re.compile(
-    r"^N=(?P<n>\d+) arm=(?P<arm>\S+) checksum=(?P<checksum>[0-9.eE+-]+)"
-    r"(?: bit_identical=(?P<bit_identical>true|false))?$"
+    r"^N=(?P<n>\d+) arm=(?P<arm>\S+) checksum=(?P<checksum>" + CHECKSUM_VALUE_RE + r")"
+    r"(?: bit_identical=(?P<bit_identical>true|false))?$",
+    re.IGNORECASE,
 )
 
 
@@ -106,17 +121,30 @@ def parse_log(path: Path) -> tuple[dict[tuple[int, str], float], dict[tuple[int,
     return ratios, bits
 
 
-def judge(n_runs_available: int, median_ratio: float, per_run_ratios: list[float]) -> str:
-    """規則 1・4・7 を 1 セル（N, arm）へ適用する。
+def judge(
+    n_runs_available: int,
+    median_ratio: float,
+    per_run_ratios: list[float],
+    bit_evidence_complete: bool = True,
+) -> str:
+    """規則 1・2・4・7 を 1 セル（N, arm）へ適用する。
 
     5 run（`REQUIRED_RUNS`）が揃い、かつそのセルの ratio が 5 件すべて
     出揃っていなければ確定判定（ADOPT-as-opt-in-candidate／REJECT）を出さず
     undetermined とする（規則 1 の是正: 1 run のみの結果で ADOPT を出さない）。
+    さらに `bit_evidence_complete` が False（当該セルの bit 証跡が対象 run
+    全件に揃っていない。証跡ゼロ件を含む）の場合も、比の値によらず
+    undetermined とする（規則 2 の是正: 正しさが未検証のまま性能判定だけで
+    ADOPT を出さない。呼び出し元は `arm_bit_mismatch` による REJECT 判定を
+    本関数呼び出しより優先するため、ここでの undetermined は「不一致が
+    確定した」わけではなく「一致の確認が取れていない」ことを意味する）。
     """
     if n_runs_available < REQUIRED_RUNS:
         return f"undetermined（run 数不足: {n_runs_available}/{REQUIRED_RUNS}）"
     if len(per_run_ratios) < REQUIRED_RUNS:
         return f"undetermined（当該セルの計測が {len(per_run_ratios)}/{REQUIRED_RUNS} 件のみ）"
+    if not bit_evidence_complete:
+        return f"undetermined（bit 証跡が {REQUIRED_RUNS} run 全件に揃っていない）"
     if median_ratio <= 1.00 and all(r < 1.00 for r in per_run_ratios):
         return "ADOPT-as-opt-in-candidate"
     if median_ratio > 1.00 and all(r > 1.00 for r in per_run_ratios):
@@ -212,13 +240,21 @@ def main() -> int:
             else:
                 bit_display = f"false 含む（{len(bits_by_run)}/{n_runs_available}）"
 
+            # 規則 2 の是正: 証跡が「不一致」（false を含む）でなくても、
+            # 対象 run 全件（REQUIRED_RUNS）に揃っていなければ「一致の
+            # 確認が取れた」とは言えない。証跡ゼロ件（bit_display=N/A）は
+            # 当然この条件を満たさない。
+            bit_evidence_complete = (
+                len(bits_by_run) >= REQUIRED_RUNS and all(bits_by_run.values())
+            )
+
             if arm_bit_mismatch[arm]:
                 # 規則 3: 当該 arm のいずれかの N で bit 不一致が確定したため、
                 # このセル自身の bit_identical 値に関わらず全 N を REJECT とする。
                 verdict = "REJECT（bit 不一致・同一 arm の他 N で検出）"
             else:
                 median = statistics.median(ratios) if ratios else float("nan")
-                verdict = judge(n_runs_available, median, ratios)
+                verdict = judge(n_runs_available, median, ratios, bit_evidence_complete)
 
             median_str = f"{statistics.median(ratios):.6f}" if ratios else "-"
             ratios_str = ", ".join(f"{r:.6f}" for r in ratios) if ratios else "-"
@@ -291,8 +327,22 @@ def run_self_test() -> int:
     assert judge(1, 0.8, [0.8]).startswith("undetermined（run 数不足")
     # 5 run 揃っていても当該セル自身の計測が 5 件未満なら undetermined とする。
     assert judge(5, 0.8, [0.8, 0.8, 0.8]).startswith("undetermined（当該セルの計測が")
+    # 規則 2 の是正: 比が 5/5 run とも改善方向でも、bit 証跡が対象 run 全件に
+    # 揃っていない（`bit_evidence_complete=False`）場合は ADOPT を出さない
+    # （bit 証跡ゼロ件でも ADOPT-as-opt-in-candidate になっていた不具合の
+    # 直接的な回帰テスト）。
+    assert judge(5, 0.9, [0.8, 0.85, 0.9, 0.95, 0.99], bit_evidence_complete=False) == (
+        "undetermined（bit 証跡が 5 run 全件に揃っていない）"
+    )
+    # 逆に bit 証跡が揃っていれば（既定 `True`）従来どおり ADOPT を出す。
+    assert judge(5, 0.9, [0.8, 0.85, 0.9, 0.95, 0.99], bit_evidence_complete=True) == (
+        "ADOPT-as-opt-in-candidate"
+    )
 
-    # parse_log の行パーサ。
+    # parse_log の行パーサ。checksum が NaN／inf（大文字小文字を問わない）
+    # であっても bit_identical 行を読み捨てず正しくパースできることを検証する
+    # （BIT_RE が数値異常を伴う bit_identical=false 行を弾いていた不具合の
+    # 直接的な回帰テスト）。
     sample = (
         "N=1024 arm=L0-P4-S0 checksum=1.234560\n"
         "N=1024 arm=L0-P0-S1 checksum=1.234560 bit_identical=true\n"
@@ -301,6 +351,9 @@ def run_self_test() -> int:
         "kernel_gpu_median_ms=1.0 q1=0.9 q3=1.1\n"
         "N=1024 arm=L0-P0-S1 head_over_base_kernel_gpu=0.987654\n"
         "N=2048 arm=L0-P8-S1 head_over_base_kernel_gpu=1.234567\n"
+        "N=4096 arm=L0-P0-S1 checksum=NaN bit_identical=false\n"
+        "N=4096 arm=L0-P0-S2 checksum=inf bit_identical=false\n"
+        "N=4096 arm=L0-P8-S1 checksum=-inf bit_identical=true\n"
     )
     tmp = Path("/tmp") / "smem_swizzle_aggregate_self_test.log"
     tmp.write_text(sample, encoding="utf-8")
@@ -311,6 +364,9 @@ def run_self_test() -> int:
         assert bits[(1024, "L0-P4-S0")] is True
         assert bits[(1024, "L0-P0-S1")] is True
         assert bits[(1024, "L0-P0-S2")] is False
+        assert bits[(4096, "L0-P0-S1")] is False
+        assert bits[(4096, "L0-P0-S2")] is False
+        assert bits[(4096, "L0-P8-S1")] is True
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -396,6 +452,38 @@ def run_self_test() -> int:
         assert "undetermined" in row, row
     finally:
         shutil.rmtree(work3)
+
+    # (4) 規則 2 の是正の結合テスト: 5 run すべてで比が改善方向（5/5 run
+    # < 1.00）でも、bit 証跡（`bit_identical` 行）が一部 run で欠落して
+    # いる（対象 run 全件に揃っていない）場合は ADOPT-as-opt-in-candidate
+    # を出さず undetermined とする（bit 証跡ゼロ件でも比だけで ADOPT が
+    # 出ていた不具合の直接的な回帰テスト。本テストでは 5 run 中 2 run で
+    # bit_identical 行自体を省略し、証跡「不一致」ではなく「証跡不足」の
+    # ケースを再現する）。
+    work4 = Path(tempfile.mkdtemp(prefix="smem_swizzle_main_bitgap_"))
+    try:
+        for run_no in range(1, 6):
+            body_lines = [f"N=1024 arm=L0-P0-S1 head_over_base_kernel_gpu=0.9"]
+            # run1〜3 のみ bit_identical 行を出力し、run4・run5 は
+            # （実ログでカーネル自体は動いたが bit 一致検査が何らかの理由で
+            # 出力されなかった状況を模して）checksum 行ごと省略する。
+            if run_no <= 3:
+                body_lines.insert(
+                    0, "N=1024 arm=L0-P0-S1 checksum=1.0 bit_identical=true"
+                )
+            (work4 / f"kernel_gpu_run{run_no}.log").write_text(
+                "\n".join(body_lines) + "\n", encoding="utf-8"
+            )
+        sys.argv = ["aggregate.py", "--log-dir", str(work4)]
+        rc = main()
+        assert rc == 0
+        md = (work4 / "aggregate.md").read_text(encoding="utf-8")
+        row = next(line for line in md.splitlines() if line.startswith("| 1024 | L0-P0-S1 |"))
+        assert "ADOPT" not in row, row
+        assert "undetermined" in row, row
+        assert "3/5" in row, row  # bit_display が証跡件数（3/5）を示すこと
+    finally:
+        shutil.rmtree(work4)
 
     print("self-test OK")
     return 0
