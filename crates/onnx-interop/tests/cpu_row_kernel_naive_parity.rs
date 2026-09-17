@@ -1,18 +1,18 @@
 //! `fandhe_ai_backend_cpu::{softmax, rmsnorm}` と `onnx-interop` 素朴実装の数値一致
 //! 検証（イシュー #607 受入基準 3）。
 //!
-//! **素朴実装側のコードは変更しない**（`onnx_interop::ops::softmax`／
-//! `onnx_interop::ops::layer_normalization` はそのまま）。判定式・許容
+//! **素朴実装側のコードは変更しない**（`fandhe_ai_onnx_interop::ops::softmax`／
+//! `fandhe_ai_onnx_interop::ops::layer_normalization` はそのまま）。判定式・許容
 //! 誤差は `fandhe_ai_backend_cpu::parity`（REQ-2 統一複合判定）を唯一の参照とし
 //! 再定義しない（`.claude/rules/coding-rust.md`）。
 //!
 //! ## softmax
 //! `fandhe_ai_backend_cpu::softmax::run_softmax_f32`（行方向 2 次元入口）と
-//! `onnx_interop::ops::softmax`（`axis` 指定の N 次元入口。`axis = -1`）を
+//! `fandhe_ai_onnx_interop::ops::softmax`（`axis` 指定の N 次元入口。`axis = -1`）を
 //! 突き合わせる。
 //!
 //! ## RMSNorm と LayerNorm の等価条件
-//! `onnx_interop::ops::layer_normalization` は平均減算（`(X - mean) /
+//! `fandhe_ai_onnx_interop::ops::layer_normalization` は平均減算（`(X - mean) /
 //! sqrt(var + eps) * scale + bias`）を含むため、一般入力では RMSNorm
 //! （`X * rsqrt(mean(X^2) + eps) * w`）と数学的に一致しない。
 //! **行平均 0 に正規化した入力**を使うと、その行の分散 `var =
@@ -25,8 +25,8 @@ use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_backend_cpu::parity::assert_parity;
 use fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32;
 use fandhe_ai_backend_cpu::softmax::run_softmax_f32;
+use fandhe_ai_onnx_interop::ops::{LayerNormAttrs, layer_normalization, softmax};
 use fandhe_ai_tensor_core::Tensor;
-use onnx_interop::ops::{LayerNormAttrs, layer_normalization, softmax};
 
 #[test]
 fn cpu_softmax_matches_onnx_naive_softmax_2d() {
@@ -42,7 +42,7 @@ fn cpu_softmax_matches_onnx_naive_softmax_2d() {
     let expected_slice = expected.as_slice().unwrap();
 
     assert_parity(
-        "fandhe_ai_backend_cpu::softmax vs onnx_interop::ops::softmax (2D, axis=-1)",
+        "fandhe_ai_backend_cpu::softmax vs fandhe_ai_onnx_interop::ops::softmax (2D, axis=-1)",
         &actual,
         expected_slice,
     );
@@ -64,7 +64,7 @@ fn cpu_softmax_matches_onnx_naive_softmax_3d() {
     let expected_slice = expected.as_slice().unwrap();
 
     assert_parity(
-        "fandhe_ai_backend_cpu::softmax vs onnx_interop::ops::softmax (3D, axis=-1)",
+        "fandhe_ai_backend_cpu::softmax vs fandhe_ai_onnx_interop::ops::softmax (3D, axis=-1)",
         &actual,
         expected_slice,
     );
@@ -106,7 +106,7 @@ fn cpu_rmsnorm_matches_onnx_layer_norm_under_zero_mean_equivalence() {
     let expected_slice = expected.as_slice().unwrap();
 
     assert_parity(
-        "fandhe_ai_backend_cpu::rmsnorm vs onnx_interop::ops::layer_normalization (zero-mean equivalence)",
+        "fandhe_ai_backend_cpu::rmsnorm vs fandhe_ai_onnx_interop::ops::layer_normalization (zero-mean equivalence)",
         &actual,
         expected_slice,
     );

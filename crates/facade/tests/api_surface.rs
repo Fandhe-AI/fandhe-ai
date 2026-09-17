@@ -942,25 +942,29 @@ fn facade_does_not_expose_rng_internal_types() {
     );
 }
 
-/// facade（crates.io 公開クレート `fandhe-ai`）が非公開クレート
-/// `onnx-interop`（`publish = false`。#1775・
-/// `docs/facade-onnx-export-exposure-decision.md`）へ通常依存を持たない
-/// ことを固定する。
+/// facade（crates.io 公開クレート `fandhe-ai`）が
+/// `onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963 で crates.io
+/// 公開対象へ追加済み・`docs/facade-onnx-export-exposure-decision.md`）へ
+/// 通常依存を持たないことを固定する。
 ///
-/// `docs/crates-io-publishing-order.md` §6 は「公開 6 クレートの
-/// `[dependencies]` に非公開クレートが現れない」ことを実測確認済みの
-/// 前提としているが、CI は `cargo publish --dry-run` を実行しないため、
-/// 誰かが `[dependencies]` へ `onnx-interop = { path = "../onnx-interop" }`
-/// を追加しても通常の `cargo build`／`cargo test` は成功してしまい、
-/// 壊れるのは次回リリース（`release-all.yml`）実行時になる。本テストは
-/// この盲点を CI 時点の失敗へ前倒しする（ホストクレート `Cargo.toml`
-/// のみを対象とする固定パス走査で、外部入力を受け取らない。
-/// `.claude/rules/security.md` A08）。
+/// `docs/crates-io-publishing-order.md` §6 は「公開クレートの
+/// `[dependencies]` に facade ラッパー未承認のクレートが現れない」ことを
+/// 実測確認済みの前提としているが、CI は `cargo publish --dry-run` を
+/// 実行しないため、誰かが `[dependencies]` へ
+/// `fandhe-ai-onnx-interop = { path = "../onnx-interop" }` を追加しても
+/// 通常の `cargo build`／`cargo test` は成功してしまい、意図しない公開
+/// 面の拡張が気付かれにくい。本テストはこの盲点を CI 時点の検出へ前倒し
+/// する（ホストクレート `Cargo.toml` のみを対象とする固定パス走査で、
+/// 外部入力を受け取らない。`.claude/rules/security.md` A08）。
 ///
-/// **段階 0 の間の負のガードである**: `onnx-interop` の crates.io 公開
-/// 承認（`docs/facade-onnx-import-exposure-decision.md` §6.1）とラッパー
-/// API 実装 issue（`docs/facade-onnx-export-exposure-decision.md` §6）
-/// が完了したら、本テストは削除ではなく「承認済み依存形状
+/// **facade ラッパー未実装の間の負のガードである**: `onnx-interop` の
+/// crates.io 公開自体はユーザー承認済み・公開準備完了（#1963）だが、
+/// facade からの ONNX import／export・safetensors save／load の
+/// ラッパー API 実装（`docs/facade-onnx-import-exposure-decision.md`
+/// §6.1・`docs/facade-onnx-export-exposure-decision.md` §6・
+/// `docs/facade-safetensors-exposure-decision.md` §6）は別途ユーザー
+/// 承認が必要な段階 0 のまま未完了のため、本テストは維持する。ラッパー
+/// 実装 issue が完了したら、本テストは削除ではなく「承認済み依存形状
 /// （`version = "=x.y.z"` 併記等）の検査」へ差し替える。
 ///
 /// `[dev-dependencies]` は対象外（公開クレートの `Cargo.toml` に残っても
@@ -1071,9 +1075,9 @@ fn facade_does_not_depend_on_unpublished_onnx_interop() {
     );
     assert!(
         offending.is_empty(),
-        "facade（crates.io 公開クレート）が非公開クレート onnx-interop へ\
-         通常依存している（docs/crates-io-publishing-order.md §6 違反。\
-         cargo publish が次回リリースで壊れる）: {offending:?}"
+        "facade（crates.io 公開クレート）が facade ラッパー未承認の\
+         onnx-interop へ通常依存している（意図しない公開面拡張の検出。\
+         `docs/facade-onnx-export-exposure-decision.md` 参照）: {offending:?}"
     );
 }
 
@@ -1150,7 +1154,8 @@ fn facade_sources_do_not_reference_onnx_interop() {
     assert!(
         offending.is_empty(),
         "facade の src/ が onnx-interop を参照している\
-         （facade は非公開クレートへ依存しない設計。#1775）: {offending:?}"
+         （facade は facade ラッパー未承認のクレートへ依存しない設計。\
+         #1775）: {offending:?}"
     );
 }
 

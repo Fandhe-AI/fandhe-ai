@@ -1,10 +1,36 @@
 [package]
-name = "onnx-interop"
-description = "ONNX / safetensors 相互運用（REQ-7）"
+# crates.io 公開名（イシュー #1963 でユーザー承認済み。
+# `docs/crates-io-naming-decision.md`）。ディレクトリ名 `crates/onnx-interop`
+# は変更しない。lib 名は Rust 識別子化された `fandhe_ai_onnx_interop`。
+name = "fandhe-ai-onnx-interop"
+# crates.io 公開向け説明文（英語。イシュー #1963）。内部向け旧説明:
+# 「ONNX / safetensors 相互運用（REQ-7）」
+description = "ONNX and safetensors interoperability (hand-written prost decoding, graph interpreter, export) for a from-scratch Rust AI/ML library"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+# crates.io 公開メタデータ（イシュー #1963）。`workspace.package.repository`
+# （ルート Cargo.toml）を参照する。
+repository.workspace = true
+# crates.io の本クレートページに表示される readme（イシュー #1963）。
+# 「fandhe-ai 経由での利用が唯一のサポート面・本クレートへの直接依存は
+# サポート対象外」を明示する per-crate 方式を採用（`crates/facade/Cargo.toml`
+# の同コメント参照）。
+readme = "README.md"
+# crates.io 公開対象 7 クレート目（イシュー #1963・docs/crates-io-publishing-order.md
+# §6）。ルート `[workspace.package]` の `publish = false`（docs-site 等の非公開
+# クレート向け既定）を明示的に上書きし、本クレートを公開可能にする。
+# 本 issue（#1963）はリポジトリ側の公開準備のみを行うもので、実際の
+# `cargo publish`（`release-all.yml`）は次回リリースサイクルでユーザーが
+# 実行する（facade からの ONNX／safetensors 再エクスポートは未提供のまま。
+# `docs/facade-onnx-import-exposure-decision.md` 等。段階 0 は継続）。
+publish = true
+# crates.io 検索・カテゴリページ向けメタデータ（イシュー #1963）。keywords は
+# crates.io 制約（最大 5 個・各 20 文字以内英数字とハイフン）を満たす。
+# categories は crates.io の有効スラッグ（https://crates.io/api/v1/categories
+# で実測確認済み）のみを使う。
+keywords = ["onnx", "safetensors", "machine-learning", "interop", "tensor"]
+categories = ["science", "parser-implementations", "encoding"]
 
 [dependencies]
 # ワイヤフォーマット処理のみに使用し、テンソルへのマッピングは自作する（REQ-7・deps-policy.md）。
@@ -19,7 +45,11 @@ prost.workspace = true
 # （Add/Mul/Div/Mod/Sqrt/Constant。TASK-7.3a）・MVP 形状操作オペ（Cast/Reshape/Squeeze/
 # Transpose。TASK-7.3b）が入出力とする `Tensor<f32>`・stride ベース view API を利用するために
 # 必要。
-fandhe-ai-tensor-core = { path = "../tensor-core" }
+# `version` 併記の理由は `crates/autodiff/Cargo.toml` の同依存コメントを参照
+# （crates.io 公開クレート間 path 依存の公開要件。イシュー #881 で確定した方針を
+# 7 クレート目〈#1963〉へ適用。`docs/crates-io-publishing-order.md`。workspace
+# 公開バージョンと完全一致させる）。
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
 # 数値型区分の許容依存（deps-policy.md）。workspace には既に固定済みで
 # `tensor-core`/`backend-cpu` 等が使用中のため新規追加ではない。`onnx-interop` では
 # `Cast(to=FLOAT16)`（イシュー #274）が `half::f16` を直接生成するために必要。
@@ -42,6 +72,11 @@ fandhe-ai-autodiff = { path = "../autodiff" }
 # #198: 学習データの決定的シード生成（`bench_harness::rng::Xorshift64Star`）
 # に使う。`crates/autodiff/tests/nn_train_convergence.rs` と同一の先例
 # （dev-dependency 経由の再利用のみで新規外部依存の追加ではない）。
+# `version` を付けない理由（イシュー #881 で確定した dev-dependencies 方針。
+# `docs/crates-io-publishing-order.md`）: `cargo publish` は
+# dev-dependencies から path のみの依存を自動 strip するため、公開物には
+# 一切残らない。`bench-harness` 自体は非公開クレート（`publish = false`
+# 継承）のため version 併記もできない。
 bench-harness = { path = "../bench-harness" }
 # TASK-12.1d（#164）: `autodiff::Tape::new(ops)` の破壊的変更（ops 必須
 # 化）に伴い、`tests/st_checkpoint.rs` が学習ループで使う `Tape` の

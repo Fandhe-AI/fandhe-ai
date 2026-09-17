@@ -28,8 +28,8 @@
 
 use std::path::Path;
 
+use fandhe_ai_onnx_interop::ops::{shape, unsqueeze};
 use fandhe_ai_tensor_core::Tensor;
-use onnx_interop::ops::{shape, unsqueeze};
 use serde::Deserialize;
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/onnx-reference");
@@ -66,8 +66,8 @@ fn dynamic_bounds_slice_via_ops(x: &Tensor<f32>) -> Tensor<f32> {
 
     // Gather(dims_tensor, indices=[0], axis=0, indices_shape=[]): スカラーインデックス
     // により rank 0（スカラー形状）へ縮退する（ONNX Gather-13 の rank 縮退規則）。
-    let batch_scalar =
-        onnx_interop::ops::gather(&dims_tensor, &[0], &[], 0).expect("gather(batch) 失敗");
+    let batch_scalar = fandhe_ai_onnx_interop::ops::gather(&dims_tensor, &[0], &[], 0)
+        .expect("gather(batch) 失敗");
     assert!(
         batch_scalar.shape().is_empty(),
         "スカラーインデックスの Gather は rank 0 へ縮退するはず: {:?}",
@@ -82,7 +82,7 @@ fn dynamic_bounds_slice_via_ops(x: &Tensor<f32>) -> Tensor<f32> {
     // Concat([batch_1d, four_1d], axis=0): ends = [batch, 4] を構築する。
     let four_1d = Tensor::<f32>::new(vec![4.0], &[1]).unwrap();
     let ends_tensor =
-        onnx_interop::ops::concat(&[&batch_1d, &four_1d], 0).expect("concat(ends) 失敗");
+        fandhe_ai_onnx_interop::ops::concat(&[&batch_1d, &four_1d], 0).expect("concat(ends) 失敗");
     assert_eq!(ends_tensor.shape(), &[2]);
 
     // f32 -> i64 へ戻す（Slice の実行時パラメータは decode 層解決後の &[i64] を想定する
@@ -91,9 +91,9 @@ fn dynamic_bounds_slice_via_ops(x: &Tensor<f32>) -> Tensor<f32> {
     let four_i64 = ends_tensor.get(&[1]).unwrap().round() as i64;
     assert_eq!(four_i64, 4);
 
-    onnx_interop::ops::slice(
+    fandhe_ai_onnx_interop::ops::slice(
         x,
-        &onnx_interop::ops::SliceParams {
+        &fandhe_ai_onnx_interop::ops::SliceParams {
             starts: &[0, 0],
             ends: &[batch_i64, four_i64],
             axes: Some(&[0, 1]),

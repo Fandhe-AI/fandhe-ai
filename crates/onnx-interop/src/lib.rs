@@ -35,13 +35,13 @@
 //!   全経路突合は `tests/onnx_interp.rs`（TASK-7.2b・#78）が担う（safetensors 経路の
 //!   同種突合は `tests/st_poc_v2_6_match.rs`・#75）。[`onnx::export`] は逆方向
 //!   （内部グラフ表現 `onnx::graph::Graph` -> `GraphProto`／`ModelProto`）の
-//!   構造的な組み立てを担う（イシュー #1772）。`onnx-interop` は crates.io 非公開
-//!   クレートであり、`onnx::export` は本クレート内部 API のみで facade からの
-//!   参照・再エクスポートは行わない（facade 公開の要否は #1775 が判断済み:
-//!   方針としては公開を推奨するが、facade は crates.io 公開クレートのため
-//!   `onnx-interop` 自体の crates.io 公開というユーザー承認未取得の別個の
-//!   前提が要り、それまでは非公開のまま段階 0。close はしない。
-//!   `docs/facade-onnx-export-exposure-decision.md`）。
+//!   構造的な組み立てを担う（イシュー #1772）。`onnx-interop`（公開名
+//!   `fandhe-ai-onnx-interop`）は crates.io 公開対象クレート（イシュー #1963
+//!   で公開準備完了・ユーザー承認済み）だが、`onnx::export` は本クレート
+//!   内部 API のみで facade からの参照・再エクスポートは行わない（facade
+//!   公開の要否は #1775 が判断済み: 方針としては公開を推奨するが、facade
+//!   ラッパー実装自体は別途ユーザー承認が必要な段階 0 のまま。close は
+//!   しない。`docs/facade-onnx-export-exposure-decision.md`）。
 //! - [`st_save`]: `tensor-core::Tensor<f32>` → safetensors ワイヤフォーマットへの
 //!   書き出し（TASK-7.1c・#197・REQ-7）。[`st_load`] と対称の契約（暗黙アダプタを
 //!   設けない・dtype は F32 のみ）を持つ保存経路。親イシュー #196 の
@@ -49,8 +49,8 @@
 //!
 //! `require_keys` モジュールは非公開（`mod`）とし、型・関数のみ `pub use` で
 //! クレートルートへ再エクスポートする。モジュールを `pub mod` にすると
-//! `onnx_interop::require_keys` がモジュール（型名前空間）と関数（値名前空間）の
-//! 同名で並存し、`use onnx_interop::require_keys;` が両方を意図せずインポートして
+//! `fandhe_ai_onnx_interop::require_keys` がモジュール（型名前空間）と関数（値名前空間）の
+//! 同名で並存し、`use fandhe_ai_onnx_interop::require_keys;` が両方を意図せずインポートして
 //! 読み手（Claude を含む）を混乱させるため（イシュー #74 レビュー指摘）。
 //!
 //! `require_keys::LoadError`（クレートルートへ [`LoadError`] として再エクスポート）と

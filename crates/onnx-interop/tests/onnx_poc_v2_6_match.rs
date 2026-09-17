@@ -4,7 +4,7 @@
 //! `tests/st_poc_v2_6_match.rs`（#75）は safetensors 経路の同種突合を担う。本ファイルは
 //! **ONNX 経路**を担い、`docs/spec/03-poc/poc-v2-6-interop/code/fixtures/model.onnx` の
 //! 重み（fc1/fc2/fc3 の weight/bias）を用いて同じ MLP（`2->8->8->1`、ReLU x2 + Sigmoid）を
-//! `onnx_interop::ops::{gemm, relu, sigmoid}` で再現する。
+//! `fandhe_ai_onnx_interop::ops::{gemm, relu, sigmoid}` で再現する。
 //!
 //! ONNX proto デコード層（#77 TASK-7.2a）は本イシュー着手時点で main 未マージのため、
 //! `model.onnx` の initializer をテストコードで直接デコードせず、一回きりのオフライン
@@ -28,8 +28,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use fandhe_ai_onnx_interop::ops::{GemmAttrs, gemm, relu, sigmoid};
 use fandhe_ai_tensor_core::Tensor;
-use onnx_interop::ops::{GemmAttrs, gemm, relu, sigmoid};
 use serde::Deserialize;
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/onnx-reference");

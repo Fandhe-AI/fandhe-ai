@@ -12,9 +12,11 @@
 //! `decode_tensor` の dtype 網羅往復、(c) エラーパス、(d) 出力の決定性、を
 //! 単体レベルで確認する。
 
-use onnx_interop::onnx::export::{ExportError, ExportOptions, build_model_proto, encode_tensor};
-use onnx_interop::onnx::graph::{RawTensor, build_graph};
-use onnx_interop::onnx::proto::{GraphProto, ModelProto, OperatorSetIdProto};
+use fandhe_ai_onnx_interop::onnx::export::{
+    ExportError, ExportOptions, build_model_proto, encode_tensor,
+};
+use fandhe_ai_onnx_interop::onnx::graph::{RawTensor, build_graph};
+use fandhe_ai_onnx_interop::onnx::proto::{GraphProto, ModelProto, OperatorSetIdProto};
 use prost::Message;
 use std::path::PathBuf;
 

@@ -39,15 +39,15 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use fandhe_ai_tensor_core::Tensor;
-use onnx_interop::onnx::export::{
+use fandhe_ai_onnx_interop::onnx::export::{
     ExportError, ExportOptions, SUPPORTED_OP_TYPES, build_model_proto, encode_tensor,
 };
-use onnx_interop::onnx::graph::{Graph, RawTensor, build_graph};
-use onnx_interop::onnx::interp::{Value, run};
-use onnx_interop::onnx::proto::{
+use fandhe_ai_onnx_interop::onnx::graph::{Graph, RawTensor, build_graph};
+use fandhe_ai_onnx_interop::onnx::interp::{Value, run};
+use fandhe_ai_onnx_interop::onnx::proto::{
     AttributeProto, GraphProto, ModelProto, NodeProto, OperatorSetIdProto, ValueInfoProto,
 };
+use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
 use serde::Deserialize;
 
@@ -555,8 +555,8 @@ fn slice_repro_onnx_exported_model_is_a_fixed_point_of_export() {
 
 #[test]
 fn typed_data_initializer_roundtrips_to_raw_data_bit_exact() {
-    use onnx_interop::onnx::proto::TensorProto;
-    use onnx_interop::onnx::proto::data_type;
+    use fandhe_ai_onnx_interop::onnx::proto::TensorProto;
+    use fandhe_ai_onnx_interop::onnx::proto::data_type;
 
     // 手組み `ModelProto`: `float_data`（NaN・-0.0・非正規化数込み）ベースの F32
     // initializer と `int64_data` ベースの I64 initializer（未使用でも

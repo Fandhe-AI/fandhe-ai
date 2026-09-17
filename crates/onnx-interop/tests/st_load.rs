@@ -10,10 +10,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use fandhe_ai_tensor_core::Tensor;
-use onnx_interop::st_load::{
+use fandhe_ai_onnx_interop::st_load::{
     LoadError, load_safetensors_f32, load_safetensors_f32_from_bytes, require_keys,
 };
+use fandhe_ai_tensor_core::Tensor;
 use safetensors::Dtype;
 use safetensors::tensor::{TensorView, serialize};
 use serde::Deserialize;

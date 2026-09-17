@@ -59,12 +59,12 @@ dependencies = [
  "fandhe-ai-backend-cpu",
  "fandhe-ai-backend-cuda",
  "fandhe-ai-backend-metal",
+ "fandhe-ai-onnx-interop",
  "fandhe-ai-tensor-core",
  "half",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
- "onnx-interop",
  "serde",
  "serde_json",
 ]
@@ -333,6 +333,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fandhe-ai-onnx-interop"
+version = "0.9.0"
+dependencies = [
+ "bench-harness",
+ "fandhe-ai-autodiff",
+ "fandhe-ai-backend-cpu",
+ "fandhe-ai-tensor-core",
+ "half",
+ "prost",
+ "safetensors",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fandhe-ai-tensor-core"
 version = "0.9.0"
 dependencies = [
@@ -554,21 +569,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "onnx-interop"
-version = "0.9.0"
-dependencies = [
- "bench-harness",
- "fandhe-ai-autodiff",
- "fandhe-ai-backend-cpu",
- "fandhe-ai-tensor-core",
- "half",
- "prost",
- "safetensors",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "oorandom"

@@ -13,15 +13,15 @@
 
 use std::collections::HashMap;
 
-use fandhe_ai_tensor_core::Tensor;
-use onnx_interop::onnx::export::{
+use fandhe_ai_onnx_interop::onnx::export::{
     ConstantAttr, ExportError, ExportNode, ExportOp, ExportOptions, SUPPORTED_OP_TYPES,
     build_model_proto, to_node_proto,
 };
-use onnx_interop::onnx::graph::{Graph, RawTensor, build_graph};
-use onnx_interop::onnx::interp::{self, Value};
-use onnx_interop::onnx::proto::{AttributeProto, ModelProto, attribute_type};
-use onnx_interop::ops::{self, GemmAttrs, LayerNormAttrs};
+use fandhe_ai_onnx_interop::onnx::graph::{Graph, RawTensor, build_graph};
+use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
+use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, ModelProto, attribute_type};
+use fandhe_ai_onnx_interop::ops::{self, GemmAttrs, LayerNormAttrs};
+use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
 
 // ---- テストユーティリティ ----
@@ -845,7 +845,7 @@ fn slice_requires_ends_input_and_rejects_missing_or_empty() {
 
 #[test]
 fn build_model_proto_rejects_unsupported_op_type() {
-    use onnx_interop::onnx::proto::NodeProto;
+    use fandhe_ai_onnx_interop::onnx::proto::NodeProto;
 
     let graph = Graph {
         nodes: vec![NodeProto {
@@ -873,7 +873,7 @@ fn build_model_proto_rejects_unsupported_op_type() {
 
 #[test]
 fn build_model_proto_rejects_non_default_domain() {
-    use onnx_interop::onnx::proto::NodeProto;
+    use fandhe_ai_onnx_interop::onnx::proto::NodeProto;
 
     let graph = Graph {
         nodes: vec![NodeProto {
@@ -949,8 +949,8 @@ fn supported_op_types_are_all_reachable_in_interp_dispatch_table() {
     // 確認する（各 `compute_*` は入力・属性欠落で先に失敗するため、
     // `UnsupportedOp` にならないことが「ディスパッチ表に存在する」ことの
     // 間接証拠になる）。
-    use onnx_interop::onnx::interp::InterpError;
-    use onnx_interop::onnx::proto::NodeProto;
+    use fandhe_ai_onnx_interop::onnx::interp::InterpError;
+    use fandhe_ai_onnx_interop::onnx::proto::NodeProto;
 
     for op_type in SUPPORTED_OP_TYPES {
         let node = NodeProto {
