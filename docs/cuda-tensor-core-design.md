@@ -192,7 +192,7 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 
 #### Stage 1 GB10 実測（2026-09-18・イシュー #1976）
 
-TMA ロード経路の Stage 1（64×64 pipeline・`shared::cta`）設計が gb10 実機で検証完了。詳細は `docs/backend-cuda-tma-gemm-load-design.md` §10.7 を参照。要点は以下のとおり:
+TMA ロード経路の Stage 1（64×64 pipeline・`shared::cta`）設計が gb10 実機で検証完了。詳細は `docs/backend-cuda-tma-gemm-load-design.md` §10.8 を参照。要点は以下のとおり:
 
 - **ゲート A（bit 一致）**: 6 テスト・意味論プローブ 3 件が全て pass。B64 swizzle 仮説は全 7 形状で cp.async 版と一致確認。
 - **ゲート B（parity 非後退）**: 36 テスト 0 FAIL。既知外の失敗なし。

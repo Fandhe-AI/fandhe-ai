@@ -92,7 +92,7 @@
 - **ゲート D（本番ディスパッチ非後退）**: 結線後の同一 HEAD base/after を framework-compare gemm cuda で比較し、checksum 完全一致・非後退を確認する。
 - **no-go 条件**: ゲート A の不一致が 1 件でもある場合、またはゲート C で後退する形状が 1 件でもある場合は REJECT とし、opt-in 実装のみを維持する（既存の #1358 Stream-K・#1347 persistent 版と同じ判断様式）。
 - **実機到達性**: 本 issue の実装セッションは DGX Spark GB10 実機への到達手段を持たない（`docs/real-hardware-verification-env.md` の到達可否と同型の制約）。上記ゲートの実測は後続実装 issue（承認後起票）が到達可能な環境で行う。
-- **#1976 の適用結果**: 実測済み（§10.7）。ベンチ列は実装済み・プローブ 3 件と tensor map キャッシュは未実装のまま。
+- **#1976 の適用結果**: 実測済み（§10.8）。ベンチ列は実装済み・プローブ 3 件と tensor map キャッシュは未実装のまま。
 
 ## 7. リスクと安全側判断
 
@@ -182,7 +182,12 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 2. **`TP_TMA_SMEM_ALIGN` を `128` から `1024` へ修正**: `B64` swizzle 仮説（`chunk ^ ((row>>1)&3)`）はハードウェアが smem **絶対**アドレスのビット [7,9) を [4,6) へ XOR するという前提に立ち、各段の A タイル先頭アドレスが 512 バイト整列でなければ成立しない。`__align__(128)` はそれより緩い制約（128 バイト整列）しか保証しないため、`1024` バイト整列＋`TP_TMA_A_BOX_BYTES` が 512 の倍数であることの const assert を追加し、整列崩れによる `B64` 仮説の誤帰属（#1976 の意味論プローブが「仮説不成立」と誤記録するリスク）を防いだ。
 3. **`#[allow(clippy::too_many_arguments)]` の撤去**（§5 承認事項・計画 R7 で新規追加を明示的に禁止していた）: `launch_tiled_pipeline_tma_f32` の `m`/`n`/`k` を `dims: (u32, u32, u32)` へまとめ、引数 6 個（clippy 既定閾値 7 以下）に収めた。
 
-### 10.7 GB10 実機実測（イシュー #1976・2026-09-18）
+### 10.7 フォローアップ是正（イシュー #2038。PR #2027 security-auditor P3 2 件）
+
+1. **`encode_tensor_map_2d_f32` の `# SAFETY`／`// SAFETY:` コメントの根拠帰属を訂正**: サイズ整合・行ストライド整列の根拠を誤って `_sync_guard`（`SyncOnDrop`。ストリーム順序の保証のみを担う）へ帰属させていたのを、実際の根拠である呼び出し元 `launch_tiled_pipeline_tma_f32` の `validate_gemm_dims`／`tiled_pipeline_alignment_ok` へ訂正した（コメントのみ・コード挙動不変・`unsafe` 増減なし）。
+2. **記述子ラベル生成を `tma_descriptor_label` 関数へ切り出し**: `compile_tiled_pipeline_tma_variant` 内の `match swizzle { ... }` を private 関数へ切り出し、単体テスト `compile_descriptor_labels_differ_per_swizzle_arm` がその実装関数を直接呼ぶよう変更した（従来はテスト内でロジックを複製しており、実装側のラベルが変わっても検出できなかった）。
+
+### 10.8 GB10 実機実測（イシュー #1976・2026-09-18）
 
 実機環境・実測日時・実施内容を記録する。数値は `docs/perf/logs/cuda-tma-stage1-1975/aggregate.md` を正とし、以下は要約。
 
