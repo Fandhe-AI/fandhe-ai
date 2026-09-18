@@ -4,9 +4,10 @@
 //! 親 #2034・設計 `docs/facade-onnx-export-exposure-decision.md` §15）。
 //!
 //! 本モジュール自体は非公開クレート `onnx-interop` の内部限定であり、
-//! facade（`fandhe_ai`）へは再エクスポートしない（facade 結線は #2037）。
-//! 呼び出し元は本クレートの統合テスト・将来の facade
-//! `OnnxModel::from_sequential`（#2037 が対象）を想定する。
+//! facade（`fandhe_ai`）へは再エクスポートしない。facade
+//! `OnnxModel::from_sequential`（イシュー #2037・`crates/facade/src/
+//! interop/onnx.rs`）が [`graph_from_layers`] を薄く委譲して呼ぶ。
+//! 呼び出し元は本クレートの統合テストと上記 facade メソッド。
 //!
 //! ## 対応層（初期範囲）
 //!
@@ -96,8 +97,9 @@ use super::export_ops::{ExportNode, ExportOp};
 use super::graph::{Graph, RawTensor};
 use crate::ops::GemmAttrs;
 
-/// graph input の固定名（`"input"`）。#2037 の facade 公開契約が参照する
-/// 定数（モジュール冒頭ドキュメント「名前規約」参照）。
+/// graph input の固定名（`"input"`）。facade `OnnxModel::from_sequential`
+/// の公開契約（イシュー #2037）が参照する定数（モジュール冒頭
+/// ドキュメント「名前規約」参照）。
 pub const GRAPH_INPUT_NAME: &str = "input";
 /// graph output の固定名（`"output"`）。同上。
 pub const GRAPH_OUTPUT_NAME: &str = "output";
@@ -335,8 +337,9 @@ pub fn export_parts_from_layers(layers: &[Box<dyn Module>]) -> Result<NnExportPa
 /// へ渡せる [`Graph`] へ組み立てる（`ExportNode` -> `NodeProto` の変換
 /// 〈`super::export_ops::to_node_proto`〉を含む）。
 ///
-/// 呼び出し元は本クレートの統合テスト・#2037（facade
-/// `OnnxModel::from_sequential`）。`build_model_proto` は `Graph.nodes`
+/// 呼び出し元は本クレートの統合テストと facade
+/// `OnnxModel::from_sequential`（イシュー #2037）。`build_model_proto` は
+/// `Graph.nodes`
 /// （`NodeProto` 列）に対して `export_ops::check_exportable` の allowlist
 /// 検査を再度行うため、本関数はその前段で `ExportNode` -> `NodeProto`
 /// の変換のみを担う。

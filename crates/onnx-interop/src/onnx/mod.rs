@@ -12,7 +12,9 @@
 //!   `NodeProto`。イシュー #1773）。`export` から `pub use` で再エクスポートする。
 //! - `export_nn`: `fandhe_ai_autodiff::nn::Module` の層列（`Linear`／`ReLU`
 //!   限定）から `export` が受け取れる `Graph` を組み立てる橋渡し
-//!   （イシュー #2036。本クレート内部限定・facade 未接続）。
+//!   （イシュー #2036。本モジュール自体は本クレート内部限定のまま
+//!   facade へ再エクスポートしないが、facade
+//!   `OnnxModel::from_sequential`〈イシュー #2037〉が薄く委譲して呼ぶ）。
 //!
 //! 8 オペ実装は #79（`crate::ops`）、PoC 数値突合テストは #80
 //! （`tests/onnx_poc_v2_6_match.rs`・`tests/onnx_slice_dynamic_bounds.rs`）で追加済み。

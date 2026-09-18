@@ -83,6 +83,8 @@ import 側 doc の案 A〜E（`docs/facade-onnx-import-exposure-decision.md` 4 �
 
 この二層は #1628（DDP。除外事項への従属で Won't 相当）とは性質が異なる: DDP は制度的な足かせが理由だが、ONNX export 公開は制度的な足かせではなく、単に crates.io 公開という別個の承認手続きが未完了という状態にすぎない（import 側 doc 5 節と同じ整理）。
 
+**追記（#1963／#2017／#2018／#2036／#2037）**: ブロッカーだった `onnx-interop` の crates.io 公開承認は #1963 で取得済み・`OnnxModel::to_bytes`／`to_path`（roundtrip export）は #2018 で・`Sequential`／`nn` -> `ExportNode` 橋渡しは #2036 で・facade 公開面 `OnnxModel::from_sequential` は #2037 で実装済み（§17）。本節の「現状」記述は #2018 時点のスナップショットとして保持し、以降の実装状況は §14／§16／§17 を参照する。
+
 ## 6. 再開条件・起票候補（承認後。本 PR では起票しない）
 
 `onnx-interop` の crates.io 公開承認取得後、以下を承認済みの範囲で起票する（`.claude/rules/out-of-scope-tracking.md` に従い、ユーザー承認を得たうえで起票する）:
@@ -516,8 +518,8 @@ Linear／ReLU の 2 種へ縮小して承認（Sigmoid は別 issue）・項 3
 | 項 1（配置 (b)・`onnx-interop → autodiff` 通常依存化） | **実施**（2026-09-18 ユーザー承認済み。§15.7） | issue #2036 本文の第 1 作業項目・workspace 内 path 依存の追加のため `deps-policy.md` の外部承認フロー対象外（§15.2 の再導出根拠 1〜5 のとおり）。実装当初は承認前だったため PR 本文にその旨を明記していたが、その後 §15.7 の承認記録により解消 |
 | 項 2（対応層の初期範囲。2026-09-18 に Linear／ReLU の 2 種へ縮小して承認済み。§15.7） | **実施**（承認範囲と一致） | `Module` に `as_sigmoid` フックが無く Sigmoid の判別手段が無いため、承認時点で issue コメント記載の代替「Linear／ReLU の 2 種へ縮小」が適用された。実装は当初からこの縮小範囲で行っており不一致なし |
 | 項 5（Sigmoid の数値契約） | 対象外（**保留**。未承認ではなく別 issue へ持ち越し） | 項 5 自体は承認／不承認いずれも確定しておらず保留中のため、Sigmoid は本 issue の初期範囲に含めない |
-| 項 3（facade 公開面 `OnnxModel::from_sequential`） | 対象外（#2037） | 本 issue は facade 未接続限定 |
-| 項 4（`OnnxError::UnsupportedLayer` 新設） | **実施**（variant 名は同一。2026-09-18 ユーザー承認済み。§15.7） | `ExportError` への追加は onnx-interop 内部の型付きエラーであり、facade `OnnxError` の variant 追加（§15.7 項 4 本来の対象）ではない。facade 側の `OnnxError::UnsupportedLayer` 新設自体は §15.7 で承認済みだが、実装（facade への variant 追加）は facade 未接続の本 issue の対象外のため #2037 へ引き継ぐ |
+| 項 3（facade 公開面 `OnnxModel::from_sequential`） | 対象外（**#2037 で実施済み。§17**） | 本 issue は facade 未接続限定 |
+| 項 4（`OnnxError::UnsupportedLayer` 新設） | onnx-interop 側 `ExportError` は**実施**（variant 名は同一。2026-09-18 ユーザー承認済み。§15.7）・facade 側 `OnnxError` は**#2037 で実施済み（§17）** | `ExportError` への追加は onnx-interop 内部の型付きエラーであり、facade `OnnxError` の variant 追加（§15.7 項 4 本来の対象）ではない。facade 側の `OnnxError::UnsupportedLayer` 新設自体は §15.7 で承認済みだが、実装（facade への variant 追加）は facade 未接続の本 issue の対象外のため #2037 へ引き継いだ |
 
 ### 16.2 実装内容
 
@@ -563,3 +565,100 @@ Linear／ReLU の 2 種へ縮小して承認（Sigmoid は別 issue）・項 3
 - 7 パッケージ一括 `cargo publish --dry-run --locked`（`env.
   RELEASE_CRATES` と同一順序）: 全 7 件成功。
 - 新規 `unsafe`: 0 件。
+
+## 17. 追補（イシュー #2037）: facade `OnnxModel::from_sequential` 実装完了
+
+§16.1 で #2037 へ引き継いだ項 3（facade 公開面）・項 4 の facade 側
+variant 追加を実装した。§15.7 の承認事項に基づき、新規公開面は
+`OnnxModel::from_sequential` の 1 メソッドのみに限定する。
+
+### 17.1 実装内容
+
+- `crates/facade/src/compat/sequential.rs`: `pub(crate) fn layers(&self)
+  -> &[Box<dyn Module>]`（`self.inner.layers()` への 1 行委譲）を追加。
+  `compat::Sequential` の他フィールドと同じく非公開のまま――`interop::
+  onnx::OnnxModel::from_sequential` 専用の内部アクセサであり、facade の
+  公開面（`api_surface.rs` の走査対象）を増やさない。
+- `crates/facade/src/interop/onnx.rs`:
+  - `OnnxModel::from_sequential(model: &Sequential) -> Result<Self,
+    OnnxError>` を追加。`fandhe_ai_onnx_interop::onnx::export_nn::
+    graph_from_layers(model.layers())` への 1 段委譲のみ（`map_export_
+    error` によるエラー写像込み）。
+  - `OnnxError::UnsupportedLayer { index: usize, layer_kind: String }`
+    を新設（§15.7 承認事項 4。`ExportError::UnsupportedLayer` の
+    `layer_kind: &'static str` を `String` へ変換して保持する以外は
+    情報を落とさない写像）。
+  - `map_export_error` に `ExportError::UnsupportedLayer` の腕を追加。
+    `EmptyModel`／`InvalidLayerParameter`／`DuplicateTensorName` は
+    既存 fallback（`InvalidModel { message }`）のまま――承認済みの新規
+    variant は `UnsupportedLayer` の 1 件のみで、それ以外を facade の
+    型付きエラーへ追加で個別化しない。
+  - モジュール doc に「`Sequential` からの export（イシュー #2037・
+    親 #2034）」節を新設し、対応層限定（Linear／ReLU のみ）・名前規約・
+    `Graph` を直接保持する設計（encode→decode の正規化を挟まない）・
+    bit 完全一致契約の前提を明記。
+- `crates/facade/tests/api_surface.rs`: `ALLOWED_PUB_ITEMS` を 9→10 件
+  （`from_sequential` 追加）・`FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS` を
+  6→10 件（`export_nn`／`ExportNode`／`NnExportParts`／`nn::Module` を
+  追加。`onnx-interop` の内部橋渡し型・`autodiff` の内部 `Module` 型が
+  `from_sequential` のシグネチャへ漏れ出ていないことを機械検査する）へ
+  拡張。正例（`approved_onnx_surface_yields_no_offenses`）・負例
+  （新設 `unapproved_onnx_export_pub_items_remain_flagged`。承認外の
+  追加 `pub fn from_layers` と `from_sequential` への内部型混入の両方が
+  検出されることを確認）・到達性テスト（新設
+  `onnx_export_from_sequential_is_reachable_via_facade`）を追加。
+- `crates/facade/tests/interop_onnx_export_sequential.rs`（新規）:
+  `fandhe_ai` と `std` のみ import する facade 単独テスト 10 件。
+  学習済み MLP・ブロックタイル境界（KC=256）を跨ぐ大形状の roundtrip
+  が `Sequential::predict` と bit 完全一致（`to_bits()` 比較）すること・
+  `to_bytes` の決定性／不動点・`Graph` 直接保持と `from_bytes` 経由の
+  等価性・fail-closed（空モデル・Sigmoid／Conv2d 混入・対応層の後の
+  非対応層・存在しない親ディレクトリへの `to_path`・誤った feed 名）を
+  検証。
+- `crates/facade/tests/interop_onnx_internal_parity.rs`: 群 C を追加
+  （2 件）。`compat::Sequential::layers()` が `pub(crate)` のため、
+  facade とは独立に `fandhe_ai_autodiff::nn::{Linear, Sequential as
+  NnSequential}` を同一アーキテクチャで構築し `state_dict()` で
+  上書きする方式（`build_internal_mlp_matching`）で、facade
+  `from_sequential(&m).to_bytes()` と内部クレート直接呼び出し
+  （`graph_from_layers` → `build_model_proto` → `encode_model`）が
+  バイト完全一致することを検証。加えて、`decode_model` で復号した
+  initializer 名集合が `state_dict()` のキー集合と一致し、各
+  `raw_data` が `state_dict` の値と bit 完全一致・`dims` が shape と
+  一致することも直接検証。
+
+### 17.2 スコープ外（本 issue に含めない）
+
+- Sigmoid 対応（§15.7 項 5 保留のまま）。
+- `fandhe_ai::nn`（`nn::Sequential`／RNN 等）からの直接 export・
+  `DeviceParamStore`（常駐パラメータ）からの export。
+- `value_info`／`TypeProto` 出力・Softmax／LayerNorm／GELU／Conv 等の
+  対応拡大。
+- CUDA／Metal 実機での確認（書き出しはホスト側で数値経路非依存のため
+  対象外。§16 の import／export いずれも同様の整理）。
+
+### 17.3 検証結果
+
+- `cargo build -p fandhe-ai`・`cargo build -p fandhe-ai-onnx-interop`:
+  成功。
+- `cargo test -p fandhe-ai --test api_surface`: 61 件 pass。
+- `cargo test -p fandhe-ai --test interop_onnx_export_sequential`:
+  10 件 pass。
+- `cargo test -p fandhe-ai --test interop_onnx_internal_parity`:
+  13 件 pass（新規 2 件込み）。
+- `cargo test -p fandhe-ai`：全件 pass（既存テストの非後退確認込み）。
+- `cargo test -p fandhe-ai-onnx-interop`: 全件 pass（既存テストの非
+  後退確認込み）。
+- `cargo fmt --all --check`: 差分なし。
+- `cargo clippy --workspace --all-targets --all-features -- -D
+  warnings`: green。
+- `git diff --exit-code origin/main -- Cargo.toml Cargo.lock deny.toml
+  crates/*/Cargo.toml`: 差分ゼロ（依存追加なし）。
+- 新規 `unsafe`: 0 件（`git grep -n "unsafe" -- crates/facade/src/
+  interop crates/facade/src/compat/sequential.rs` が該当なし）。
+- publish 契約: 7 パッケージ一括 `cargo publish --dry-run --locked`
+  （`RELEASE_CRATES` と同一順序）は registry 版
+  `fandhe-ai-onnx-interop =0.9.0` に本 issue の `export_nn` 変更が
+  含まれないため単一クレート `cargo publish --dry-run -p fandhe-ai`
+  は失敗しうる（#2017／#2018 と同型の既知事象。
+  `docs/crates-io-publishing-order.md` §8.1）。ブロッカーではない。

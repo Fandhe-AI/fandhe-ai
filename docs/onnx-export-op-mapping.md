@@ -200,8 +200,9 @@ op マッピング表自体（§2）は変更しない。
   という 2 通りの独立な手動 forward と bit 完全一致で突き合わせて検証する
   （前提: GEMM 出力に厳密な `±0.0` が現れない入力。`export_nn.rs` モジュール
   冒頭ドキュメント参照）。
-- **facade 未接続**: 本モジュール自体（`export_parts_from_layers`／
+- **facade 結線**: 本モジュール自体（`export_parts_from_layers`／
   `graph_from_layers`／`NnExportParts`）は非公開クレート `onnx-interop`
-  の内部限定であり facade へは再エクスポートしない。facade
-  `OnnxModel::from_sequential(&Sequential)`（§15.7 承認事項 3）は #2037 が
-  対象。
+  の内部限定のまま facade へは再エクスポートしない。facade
+  `OnnxModel::from_sequential(&Sequential)`（§15.7 承認事項 3）は
+  イシュー #2037 で `graph_from_layers` への薄い委譲として実装済み
+  （`docs/facade-onnx-export-exposure-decision.md` §17）。
