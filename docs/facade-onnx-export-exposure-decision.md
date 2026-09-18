@@ -116,7 +116,7 @@ import 側 doc の案 A〜E（`docs/facade-onnx-import-exposure-decision.md` 4 �
 
 1. `onnx-interop` の crates.io 公開そのもの（命名・`publish = true`・`RELEASE_CRATES` 追加を含む一式。import 側 #1652 の承認事項 1 と同一事項）。
 2. 上記 1 が承認された場合の、facade ラッパー API 形状（案 B）の確定（export 側の `OnnxModel::to_bytes`／`to_path` 形状を含む）。
-3. `Sequential`／`nn` -> `ExportNode` 橋渡しの配置（3.2 の (b) を推奨するが最終確定は未了）。**§15（#2035）で配置・対応層の初期範囲・facade 公開面 1 件を設計記録として確定し、承認事項を §15.7 へ再整理した（未承認のまま）**。
+3. `Sequential`／`nn` -> `ExportNode` 橋渡しの配置（3.2 の (b) を推奨するが最終確定は未了）。**§15（#2035）で配置・対応層の初期範囲・facade 公開面 1 件を設計記録として確定し、承認事項を §15.7 へ再整理した（#2035 起票時点の記述。2026-09-18 に §15.7 項 1〜4 が承認済みへ更新済み・項 5 のみ保留。§15.7 参照）**。
 
 ## 11. 出典一覧
 
@@ -509,7 +509,7 @@ Linear／ReLU の 2 種へ縮小して承認（Sigmoid は別 issue）・項 3
 | 項 1（配置 (b)・`onnx-interop → autodiff` 通常依存化） | **実施**（2026-09-18 ユーザー承認済み。§15.7） | issue #2036 本文の第 1 作業項目・workspace 内 path 依存の追加のため `deps-policy.md` の外部承認フロー対象外（§15.2 の再導出根拠 1〜5 のとおり）。実装当初は承認前だったため PR 本文にその旨を明記していたが、その後 §15.7 の承認記録により解消 |
 | 項 2／項 5（Sigmoid 対応・数値契約） | **対象外** | `Module` に `as_sigmoid` フックが無く（項 5 も未承認）判別手段が無いため。issue コメント記載の代替「Linear／ReLU の 2 種へ縮小」を適用 |
 | 項 3（facade 公開面 `OnnxModel::from_sequential`） | 対象外（#2037） | 本 issue は facade 未接続限定 |
-| 項 4（`OnnxError::UnsupportedLayer` 新設） | **実施**（variant 名は同一） | `ExportError` への追加は onnx-interop 内部の型付きエラーであり、facade `OnnxError` の variant 追加（§15.7 項 4 本来の対象）ではない。facade 側の `OnnxError::UnsupportedLayer` 新設可否は #2037 が対象のまま未承認 |
+| 項 4（`OnnxError::UnsupportedLayer` 新設） | **実施**（variant 名は同一。2026-09-18 ユーザー承認済み。§15.7） | `ExportError` への追加は onnx-interop 内部の型付きエラーであり、facade `OnnxError` の variant 追加（§15.7 項 4 本来の対象）ではない。facade 側の `OnnxError::UnsupportedLayer` 新設自体は §15.7 で承認済みだが、実装（facade への variant 追加）は facade 未接続の本 issue の対象外のため #2037 へ引き継ぐ |
 
 ### 16.2 実装内容
 
