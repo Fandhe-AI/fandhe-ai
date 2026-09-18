@@ -96,6 +96,8 @@ python3 scoreboard/gen_1988.py --m4 $R/m4max-series-b/results-m4max-0.9.0-median
 
 - `aggregate.py`: `parity_fail_count` の欠損・null・負数・非整数を `or 0` で成功扱いにせず、入力不正として集計を停止する
   （`--self-test` に拒否ケース 4 件を追加。収録ログでの `aggregate.md` 出力は byte 同一）。
+- `aggregate.py`: 派生 JSONL へ採用する対象セルは 5 run 完備を必須とし、1〜4 run のセルがあれば出力せず停止する
+  （`--self-test` に 4 run の拒否ケースを追加。収録ログでの派生 JSONL 2 本は byte 同一）。
 - `orchestrate_gb10.sh`: 3 バイナリの再ビルド失敗時は計測開始前に停止する（本実測では 3 本とも rc=0。`gb10/build.log`）。
   いずれも本実測の結果・判定には影響しない（計測後の是正であり、規則の変更ではない）。
 

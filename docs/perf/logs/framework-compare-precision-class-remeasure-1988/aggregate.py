@@ -158,6 +158,16 @@ def render(runs, gate, cells, ratios):
     return '\n'.join(L) + '\n'
 
 
+def require_complete(cells, keys):
+    """派生 JSONL へ採用する対象セルは 5 run 完備を必須にする（RULE.txt「5/5 run」・5 回計測の中央値）。
+    1〜4 run のセルの中央値行を採用すると、その行の parity_fail_count が 0 なら gen_1988.py が有効セルとして
+    順位へ算入してしまうため、不足時は出力せず停止する（codex-review 指摘・PR #2047）。"""
+    short = [(k, len(cells.get(k, []))) for k in keys if len(cells.get(k, [])) != 5]
+    if short:
+        raise ValueError('5 run 完備でないセルがあるため派生 JSONL を出力しない: ' +
+                         ', '.join(f'{k[0]} {k[2]} N={k[3]} ({n} run)' for k, n in short))
+
+
 def write_derived(base, out, picks):
     with open(base) as f:
         lines = [l for l in f.read().splitlines() if l.strip()]
@@ -206,6 +216,14 @@ def self_test():
         os.remove(os.path.join(td, 'run5', 'results.jsonl'))
         _, _, cells4, _ = aggregate(td)
         assert verdict(cells4[TARGET_BURN[0]]) == '残存'
+        # 5 run 完備でないセルは派生 JSONL へ採用しない（停止）
+        try:
+            require_complete(cells4, TARGET_BURN)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('4 run のセルを派生 JSONL へ採用した')
+        require_complete(cells, TARGET_BURN + [TARGET_PY])
         base = os.path.join(td, 'base.jsonl')
         with open(base, 'w') as w:
             w.write(json.dumps({'framework': 'x'}) + '\n')
@@ -233,11 +251,13 @@ def main():
         w.write(md)
     print(md)
     if a.base_gb and a.out_gb:
-        picks = [pick_median(cells[k]) for k in TARGET_BURN if cells[k]]
+        require_complete(cells, TARGET_BURN)
+        picks = [pick_median(cells[k]) for k in TARGET_BURN]
         write_derived(a.base_gb, a.out_gb, picks)
         print(f'wrote {a.out_gb} (+{len(picks)} rows)')
     if a.base_py and a.out_py:
-        picks = [pick_median(cells[TARGET_PY])] if cells[TARGET_PY] else []
+        require_complete(cells, [TARGET_PY])
+        picks = [pick_median(cells[TARGET_PY])]
         write_derived(a.base_py, a.out_py, picks)
         print(f'wrote {a.out_py} (+{len(picks)} rows)')
 
