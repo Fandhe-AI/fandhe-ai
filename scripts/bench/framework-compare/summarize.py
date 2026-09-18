@@ -1436,11 +1436,20 @@ def _parity_reason(row):
 
 
 def _tf32_element_check_note(row, preason):
-    """(a-tf32) 節「要素単位検証」列の表示文字列（イシュー #1987）。
+    """(a-tf32) 節「要素単位検証」列の表示文字列（イシュー #1987・#2046）。
 
     `preason`（呼び出し元が計算済みの `_parity_reason(row)` の結果。
     二重計算を避けるため引数で受け取る）が `None` でなければ "無効"
     （理由自体は `preason` としてフレームワーク列側に別途表示済み）。
+
+    `preason is None` は `parity_status(row) in {"ok", "unverified"}`
+    のいずれかを意味する（`_parity_reason` は "fail" のときのみ非
+    `None` を返す）。本フィールド追加〈イシュー #970〉前の旧形式
+    JSONL（parity 6 キー欠損）は "unverified" となり、要素単位検証を
+    一度も受けていないため、これを "ok" と表示すると実施されていない
+    検証を成功として表示する契約不整合になる（codex-review 指摘）。
+    `parity_status` を明示的に再判定し "未検証（旧形式）" と区別する。
+
     `None`（`parity_status == "ok"`）のときは既定 "ok" だが、
     `framework == "burn"` かつ `tf32 is True` かつ
     `parity_scaled_abs_rescued > 0` の行のみ、精度クラス TF32
@@ -1450,6 +1459,8 @@ def _tf32_element_check_note(row, preason):
     """
     if preason is not None:
         return "無効"
+    if parity_status(row) == "unverified":
+        return "未検証（旧形式）"
     if row.get("framework") != "burn" or row.get("tf32") is not True:
         return "ok"
     rescued = row.get("parity_scaled_abs_rescued")

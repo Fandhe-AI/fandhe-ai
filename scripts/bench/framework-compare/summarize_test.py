@@ -853,6 +853,25 @@ class SectionRenderingTests(unittest.TestCase):
         self.assertIn("burn（無効: 要素誤差超過", tf32_section)
         self.assertIn("| 無効 |", tf32_section)
 
+    def test_tf32_section_unverified_legacy_row_is_not_shown_as_ok(self):
+        # PR #2046 codex-review 指摘（P2）: parity 6 キーが欠損した旧形式
+        # の TF32 GEMM 行（#970 の本フィールド追加前）は
+        # `parity_status(row) == "unverified"` であり、要素単位検証を一度
+        # も受けていない。これを「ok」と表示すると実施されていない検証を
+        # 成功として表示する契約不整合になるため、「未検証（旧形式）」
+        # と明示的に区別して表示する。
+        row = dict(
+            _base_row(framework="burn", device="cuda", size=256),
+            tf32=True,
+            gflops=123.0,
+        )
+        self.assertEqual(summarize.parity_status(row), "unverified")
+        lines, *_ = summarize.section("dummy.jsonl", [row])
+        tf32_section = "\n".join(lines).split("### (a-tf32)")[1].split("### (b)")[0]
+        self.assertIn("| 256 | burn |", tf32_section)
+        self.assertIn("未検証（旧形式）", tf32_section)
+        self.assertNotIn("| ok |", tf32_section)
+
     def test_fandhe_tf32_row_rescued_is_fail(self):
         # イシュー #1987: `tf32` の有無に関わらず fandhe-ai 側は
         # `rescued>0` を "fail" へ倒す（承認スコープ (b-2) の consumer 側
