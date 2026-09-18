@@ -43,8 +43,18 @@ def pick_median(rows):
     return rs[len(rs) // 2] if len(rs) % 2 else rs[len(rs) // 2 - 1]
 
 
+def fail_count(r):
+    """parity_fail_count を非負整数として厳格に読む。欠損・null・負数・非整数は入力不正として例外にする
+    （`or 0` で欠損を成功扱いにすると、検証値のない行が 5 行そろうだけで「解消」になり RULE.txt の
+    「5/5 run で parity_fail_count == 0」の証拠にならないため。codex-review 指摘・PR #2047）。"""
+    v = r.get('parity_fail_count')
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise ValueError(f'parity_fail_count が非負整数ではない: {v!r} ({r.get("framework")} {r.get("device")} N={r.get("size")})')
+    return v
+
+
 def verdict(rows):
-    fails = [int(r.get('parity_fail_count') or 0) for _, r, _ in rows]
+    fails = [fail_count(r) for _, r, _ in rows]
     if len(rows) == 5 and all(f == 0 for f in fails):
         return '解消'
     return '残存'
@@ -109,7 +119,7 @@ def render(runs, gate, cells, ratios):
         name = f'{fw} {dev} gemm N={n}'
         pick = pick_median(rows) if rows else None
         for i, r, _ in rows:
-            L.append(f'| {name} | {i} | {int(r.get("parity_fail_count") or 0):,} | {int(r.get("parity_scaled_abs_rescued") or 0):,} | '
+            L.append(f'| {name} | {i} | {fail_count(r):,} | {int(r.get("parity_scaled_abs_rescued") or 0):,} | '
                      f'{fmt_bound(float(r.get("parity_scaled_abs_bound") or 0))} | {r["median_s"]:.6f} | {"採用" if pick and pick[0] == i else ""} |')
         v = verdict(rows)
         det_r = len({int(r.get('parity_scaled_abs_rescued') or 0) for _, r, _ in rows}) == 1 if rows else False
@@ -122,7 +132,7 @@ def render(runs, gate, cells, ratios):
             note = (f'rescued 期待値 {EXPECTED_RESCUED[n]:,} と{"一致" if resc == EXPECTED_RESCUED[n] else "相違"}・'
                     f'bound は 0.9.0 記録の {ratio:.1f} 倍')
         elif fw == 'pytorch' and rows:
-            fails = sorted({int(r.get('parity_fail_count') or 0) for _, r, _ in rows})
+            fails = sorted({fail_count(r) for _, r, _ in rows})
             note = f'fail_count={fails}（T1 現状維持: spec REQ-2 (b-1) 上正当な判定不能・係数不変）'
         summary.append((name, v, len(rows), det_r and det_b, pick[0] if pick else None, note))
     L.append('')
@@ -181,6 +191,17 @@ def self_test():
         assert abs(statistics.median(ratios[(1024, 'burn')]) - 0.4) < 1e-12
         md = render(runs, gate, cells, ratios)
         assert '**解消**' in md and '**残存**' in md and '一致' in md and '8192.0 倍' in md
+        # parity_fail_count 欠損・null・負数は入力不正として停止する（成功扱いにしない）
+        for bad in ({'framework': 'burn', 'task': 'gemm', 'device': 'cuda', 'size': 256, 'mode': 'fresh', 'median_s': 0.1},
+                    {'framework': 'burn', 'task': 'gemm', 'device': 'cuda', 'size': 256, 'mode': 'fresh', 'median_s': 0.1, 'parity_fail_count': None},
+                    {'framework': 'burn', 'task': 'gemm', 'device': 'cuda', 'size': 256, 'mode': 'fresh', 'median_s': 0.1, 'parity_fail_count': -1},
+                    {'framework': 'burn', 'task': 'gemm', 'device': 'cuda', 'size': 256, 'mode': 'fresh', 'median_s': 0.1, 'parity_fail_count': 'x'}):
+            try:
+                verdict([(1, bad, '')] * 5)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f'欠損・不正な parity_fail_count を受理した: {bad}')
         # 4 run しかないセルは残存
         os.remove(os.path.join(td, 'run5', 'results.jsonl'))
         _, _, cells4, _ = aggregate(td)

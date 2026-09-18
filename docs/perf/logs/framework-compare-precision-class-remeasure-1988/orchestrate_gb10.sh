@@ -30,9 +30,11 @@ echo "-- build 3 binaries ($(date -u +%FT%TZ))"
 # （run_all_cuda.sh の build と同じフラグ。bench-fandhe は registry ピン =0.9.0 のまま patch なし）。
 ls -l --time-style=full-iso target/release/bench-burn target/release/bench-candle target/release/bench-fandhe > "${LOGD}/build.log" 2>&1
 echo "precision_class refs in bench-burn/src/main.rs: $(grep -c precision_class bench-burn/src/main.rs)" >> "${LOGD}/build.log"
-cargo build --release -p bench-fandhe >> "${LOGD}/build.log" 2>&1; echo "build bench-fandhe rc=$?"
-cargo build --release -p bench-candle --no-default-features --features cuda >> "${LOGD}/build.log" 2>&1; echo "build bench-candle rc=$?"
-cargo build --release -p bench-burn --no-default-features --features cuda >> "${LOGD}/build.log" 2>&1; echo "build bench-burn rc=$?"
+# ビルド失敗時は古いバイナリ（target 保持）で計測して rev_stamp と食い違うのを防ぐため、計測開始前に停止する
+# （codex-review 指摘・PR #2047。本実測では 3 本とも rc=0。build.log 参照）。
+cargo build --release -p bench-fandhe >> "${LOGD}/build.log" 2>&1 || { echo "build bench-fandhe rc=$? -> 計測を停止"; exit 1; }; echo "build bench-fandhe rc=0"
+cargo build --release -p bench-candle --no-default-features --features cuda >> "${LOGD}/build.log" 2>&1 || { echo "build bench-candle rc=$? -> 計測を停止"; exit 1; }; echo "build bench-candle rc=0"
+cargo build --release -p bench-burn --no-default-features --features cuda >> "${LOGD}/build.log" 2>&1 || { echo "build bench-burn rc=$? -> 計測を停止"; exit 1; }; echo "build bench-burn rc=0"
 ls -l --time-style=full-iso target/release/bench-burn target/release/bench-candle target/release/bench-fandhe >> "${LOGD}/build.log" 2>&1
 grep -E 'fandhe-ai v' <(cargo tree -p bench-fandhe --depth 1 2>/dev/null) | head -2 >> "${LOGD}/build.log"
 "${PY}" -c "import torch;print('torch', torch.__version__, 'threads', torch.get_num_threads())" >> "${LOGD}/build.log" 2>&1
