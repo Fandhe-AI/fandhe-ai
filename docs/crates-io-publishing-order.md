@@ -804,11 +804,11 @@ interop` を `fandhe-ai-backend-metal` の後・`fandhe-ai` の前に置いて
 
 `onnx::export_nn`（`nn::Module` の層列から `ExportNode` 列＋initializer を
 組み立てる橋渡し。`docs/facade-onnx-export-exposure-decision.md` §15.7
-承認事項 1「onnx-interop → autodiff 通常依存化」。実装当初は issue 本文
-の作業項目に基づき着手したのみで親 #2034 への明示コメント承認は未確認
-だったが、**2026-09-18 に親 #2034 へユーザー承認コメントが投稿され項
-1〜4 承認・項 5 保留で確定した**〈https://github.com/Fandhe-AI/fandhe-ai/issues/2034#issuecomment-5726738002〉。
-以下は本節作成当初の記述を追認する形で維持する）を受け、`crates/onnx-interop/
+承認事項 1「onnx-interop → autodiff 通常依存化」。**2026-09-18 に親
+#2034 へユーザー承認コメントが投稿され項 1〜4 承認・項 5 保留で確定
+した**〈https://github.com/Fandhe-AI/fandhe-ai/issues/2034#issuecomment-5726738002〉。
+実装自体は issue #2036 本文の作業項目に基づき承認確定前に着手したが、
+承認範囲（項 1）と一致するため変更は不要だった）を受け、`crates/onnx-interop/
 Cargo.toml` の `[dependencies]` へ `fandhe-ai-autodiff = { version =
 "=0.9.0", .. }` を追加した（1 節の方針どおり `path` + `version` 併記）。
 旧来 `[dev-dependencies]`（`tests/st_checkpoint.rs` 用。version 非併記）
