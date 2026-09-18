@@ -1,0 +1,35 @@
+-rwxrwxr-x 2 fandhe fandhe 27088072 2026-09-18 10:34:51.203834080 +0900 target/release/bench-burn
+-rwxrwxr-x 2 fandhe fandhe 58107424 2026-09-18 10:34:15.680671422 +0900 target/release/bench-candle
+-rwxrwxr-x 2 fandhe fandhe  5407448 2026-09-18 10:33:15.937395998 +0900 target/release/bench-fandhe
+precision_class refs in bench-burn/src/main.rs: 16
+   Compiling bench-common v0.1.0 (<home>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-common)
+   Compiling bench-fandhe v0.1.0 (<home>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-fandhe)
+    Finished `release` profile [optimized] target(s) in 1.17s
+   Compiling bench-candle v0.1.0 (<home>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-candle)
+    Finished `release` profile [optimized] target(s) in 0.86s
+   Compiling bench-burn v0.1.0 (<home>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-burn)
+    Finished `release` profile [optimized] target(s) in 18.28s
+-rwxrwxr-x 2 fandhe fandhe 27088464 2026-09-18 23:10:21.762358205 +0900 target/release/bench-burn
+-rwxrwxr-x 2 fandhe fandhe 58107296 2026-09-18 23:10:03.483313187 +0900 target/release/bench-candle
+-rwxrwxr-x 2 fandhe fandhe  5407632 2026-09-18 23:10:02.594310998 +0900 target/release/bench-fandhe
+└── fandhe-ai v0.9.0
+torch 2.14.0+cu130 threads 20
+fill_11111111_200704.npy
+fill_22222222_2560.npy
+fill_a11ce_1048576.npy
+fill_a11ce_16777216.npy
+fill_a11ce_262144.npy
+fill_a11ce_4194304.npy
+fill_a11ce_65536.npy
+fill_b0b_1048576.npy
+fill_b0b_16777216.npy
+fill_b0b_262144.npy
+fill_b0b_4194304.npy
+fill_b0b_65536.npy
+fill_da7a0001_50176.npy
+fill_da7a0002_640.npy
+ref_1024.npy
+ref_2048.npy
+ref_256.npy
+ref_4096.npy
+ref_512.npy

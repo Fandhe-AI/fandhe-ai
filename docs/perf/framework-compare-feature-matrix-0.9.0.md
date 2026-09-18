@@ -89,8 +89,12 @@ $ git diff --stat v0.9.0..HEAD -- crates
 本イシューの受入基準 3（スコアボード生成スクリプトの対応表節を更新し再公開する）
 について:
 
-- スコアボード生成スクリプトの実体は本リポジトリ内に存在しない
-  （`git ls-files | grep -i scoreboard` 等で未検出）。
+- スコアボード生成スクリプトの実体は本イシュー時点では本リポジトリ内に存在しなかった
+  （`git ls-files | grep -i scoreboard` 等で未検出）。**追記（#1988・2026-09-18）**: その後
+  `docs/perf/logs/framework-compare-0.9.0-remeasure/scoreboard/`（`gen_090.py`・`body_090.html`・
+  `style.css`）として収納され、#1988 で派生 `docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py`
+  から再生成・新規 Artifact として再公開した（URL は同ディレクトリ README）。本節の残りの記述は
+  本イシュー（#1938）時点の事実として残す。
 - 0.9.0 スコアボード Artifact は本実装セッションのアカウントから
   `Artifact` action=list（scope=all）で確認したところ一件も見つからず、
   読み取り・再公開のいずれも実行できない（private 既定のまま他セッションが
