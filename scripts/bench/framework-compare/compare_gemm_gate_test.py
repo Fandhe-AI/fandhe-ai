@@ -41,12 +41,15 @@ def _row(
     scaled_abs_bound=_DEFAULT_SCALED_ABS_BOUND,
     scaled_abs_rescued=0,
     legacy=False,
+    tf32=False,
 ):
     """`framework`／`size`／`mode` の 1 レコードを合成する（イシュー
     #1250: `bench-common::Record::to_json_line` が 6 キーを同一ブロックで
     emit する現行仕様〈`lib.rs:353-372`〉に合わせ、新契約 2 キーを既定で
     含める）。`legacy=True` を渡すと新 2 キーを含めない旧形式 4 キーの
-    行を合成する（#1247 以前の JSONL 再現用）。
+    行を合成する（#1247 以前の JSONL 再現用）。`tf32=True`（イシュー #1987）
+    は `Record.tf32` と同じ「キー欠損 = false」規約に合わせ、`True` の
+    ときのみ `"tf32"` キーを付与する。
     """
     total = size * size
     row = {
@@ -65,6 +68,8 @@ def _row(
     if not legacy:
         row["parity_scaled_abs_bound"] = scaled_abs_bound
         row["parity_scaled_abs_rescued"] = scaled_abs_rescued
+    if tf32:
+        row["tf32"] = True
     return row
 
 
@@ -424,6 +429,85 @@ class ScaledAbsContractTest(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["achieved"])
         self.assertNotIn("fandhe_fresh_median_s", result)
+
+
+class PrecisionClassTest(unittest.TestCase):
+    """比較対象の精度クラス（イシュー #1987・承認出典 #1989）導入後の
+    burn cuda 行の取り扱いを検証する。本モジュールの判定式自体（`_parity_check`）
+    は変更していないため、これらのテストは「burn 行が構造的に本ゲートへ
+    影響しないこと」「`_parity_check` は framework パラメータに依らず
+    汎用に動くこと」を固定する。
+    """
+
+    def test_burn_tf32_rescued_row_is_excluded_from_gate(self):
+        # burn cuda 行（`tf32=True`・第 3 項救済済み）を混ぜても、
+        # `_matching_rows` は `framework` の完全一致でしか拾わないため
+        # candle 5 件の判定（fandhe-ai vs candle）は一切変わらない
+        # （`_matching_rows` の `tf32` 除外フィルタはこの経路では発火すら
+        # しない——burn は framework が既に不一致のため）。
+        fandhe_rows = [_row("fandhe-ai", 2048, "reuse", 0.010) for _ in range(5)]
+        candle_rows = [_row("candle", 2048, "fresh", 0.020) for _ in range(5)]
+        burn_rows = [
+            _row(
+                "burn",
+                2048,
+                "fresh",
+                0.030,
+                tf32=True,
+                scaled_abs_bound=1.5625e-2,
+                scaled_abs_rescued=681407,
+            )
+            for _ in range(5)
+        ]
+
+        baseline = compare_gemm_gate.evaluate_size(fandhe_rows + candle_rows, 2048)
+        with_burn = compare_gemm_gate.evaluate_size(
+            fandhe_rows + candle_rows + burn_rows, 2048
+        )
+
+        self.assertEqual(baseline["status"], "ok")
+        self.assertTrue(baseline["achieved"])
+        self.assertEqual(with_burn, baseline)
+
+    def test_fandhe_tf32_row_rescued_is_still_undeterminable(self):
+        # `framework == "fandhe-ai"` は `tf32` の有無に関わらず
+        # `rescued > 0` を判定不能へ倒す（承認スコープ (b-2) は比較対象側
+        # 限定。fandhe-ai は全経路 `verify_strict` のため構造的に
+        # `rescued` は常に 0 のはず）。
+        row = _row(
+            "fandhe-ai",
+            2048,
+            "reuse",
+            0.010,
+            tf32=True,
+            scaled_abs_rescued=1,
+        )
+        ok, reason, info = compare_gemm_gate._parity_check(row, 2048, "fandhe-ai")
+        self.assertFalse(ok)
+        self.assertIn("verify_strict", reason)
+        self.assertEqual(info["rescued"], 1)
+
+    def test_burn_tf32_row_new_bound_scale_passes_consistency_check(self):
+        # burn cuda 行は `PrecisionClass::Tf32`（`u=2^-11`）で計算した
+        # bound を持つため、既定の `F32_UNIT_ROUNDOFF`（`u=2^-24`）想定より
+        # 大きな値になりうる（#1984 の真値突合で実測された水準
+        # `1.5625e-2` を転記）。`_parity_check` は判定式を再計算しない
+        # ため、bound の絶対値の大小に関わらず整合検査・fail_count のみで
+        # 判定できることを確認する。
+        row = _row(
+            "burn",
+            2048,
+            "fresh",
+            0.030,
+            tf32=True,
+            scaled_abs_bound=1.5625e-2,
+            scaled_abs_rescued=681407,
+        )
+        ok, reason, info = compare_gemm_gate._parity_check(row, 2048, "burn")
+        self.assertTrue(ok, reason)
+        self.assertIsNone(reason)
+        self.assertEqual(info["rescued"], 681407)
+        self.assertEqual(info["bound"], 1.5625e-2)
 
 
 class LoadRowsTfz32Test(unittest.TestCase):

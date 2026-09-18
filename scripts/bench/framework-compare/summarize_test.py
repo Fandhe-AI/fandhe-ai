@@ -809,6 +809,65 @@ class SectionRenderingTests(unittest.TestCase):
         self.assertNotIn("150.0", fp32_section)
         self.assertNotIn("200.0", fp32_section)
 
+    def test_tf32_section_burn_rescued_row_is_ok_with_precision_note(self):
+        # イシュー #1987: burn cuda 行（fail_count=0・`PrecisionClass::Tf32`
+        # 〈u=2^-11〉で計算された bound・rescued>0）は `parity_status ==
+        # "ok"` のまま、「要素単位検証」列に精度クラスの救済注記が付く。
+        row = dict(
+            _with_parity(
+                _base_row(framework="burn", device="cuda", size=256), total=256 * 256
+            ),
+            tf32=True,
+            parity_scaled_abs_bound=1.5625e-2,
+            parity_scaled_abs_rescued=10538,
+        )
+        self.assertEqual(summarize.parity_status(row), "ok")
+        lines, *_ = summarize.section("dummy.jsonl", [row])
+        tf32_section = "\n".join(lines).split("### (a-tf32)")[1].split("### (b)")[0]
+        self.assertIn("| 256 | burn |", tf32_section)
+        self.assertIn("ok（精度クラス TF32〈u=2^-11〉救済 10538 要素）", tf32_section)
+
+    def test_tf32_section_burn_legacy_shape_row_is_invalid(self):
+        # #1987 マージ前（0.9.0 正式再計測）に記録された burn cuda 行
+        # （`PrecisionClass::F32` 相当の `u=2^-24` で計算された小さい
+        # bound・救済されず fail_count>0）は引き続き「無効」表示のまま
+        # （実測 JSONL の値を転記。`docs/perf/logs/framework-compare-cuda-
+        # tf32-sweep-1983/results-cuda-0.9.0-2026-09-18.jsonl` N=256 行）。
+        row = dict(
+            _with_parity(
+                _base_row(framework="burn", device="cuda", size=256),
+                total=256 * 256,
+                fail_count=10538,
+                max_abs_err=1e-3,
+                max_rel_err=1e-2,
+            ),
+            tf32=True,
+            parity_scaled_abs_bound=1.907255e-6,
+            parity_scaled_abs_rescued=0,
+        )
+        self.assertEqual(summarize.parity_status(row), "fail")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_ = summarize.section("dummy.jsonl", [row])
+        tf32_section = "\n".join(lines).split("### (a-tf32)")[1].split("### (b)")[0]
+        self.assertIn("burn（無効: 要素誤差超過", tf32_section)
+        self.assertIn("| 無効 |", tf32_section)
+
+    def test_fandhe_tf32_row_rescued_is_fail(self):
+        # イシュー #1987: `tf32` の有無に関わらず fandhe-ai 側は
+        # `rescued>0` を "fail" へ倒す（承認スコープ (b-2) の consumer 側
+        # 固定。`parity_status` は既存の framework 分岐を維持するのみで
+        # 精度クラス自体には依存しない）。
+        row = dict(
+            _with_parity(
+                _base_row(framework="fandhe-ai", device="cuda", size=256), total=256 * 256
+            ),
+            tf32=True,
+            parity_scaled_abs_bound=1.5625e-2,
+            parity_scaled_abs_rescued=1,
+        )
+        self.assertEqual(summarize.parity_status(row), "fail")
+
     def test_ok_row_not_marked_invalid(self):
         rows = [_with_parity(_base_row())]
         lines, has_checksum_mismatch, has_parity_failure, _, _, _, _, _, _ = summarize.section(
