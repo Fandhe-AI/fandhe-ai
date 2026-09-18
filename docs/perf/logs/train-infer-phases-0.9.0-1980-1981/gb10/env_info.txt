@@ -1,0 +1,27 @@
+# 実機（DGX Spark GB10）実測記録（イシュー #1980／#1981。GB10 分）。
+#
+# - hostname: masked
+# - 実機: NVIDIA GB10（DGX Spark）。GPU driver 580.173.02・
+#   compute capability 12.1（sm_121）・CUDA 13.0
+#   （nvcc `cuda_13.0.r13.0/compiler.36424714_0`）
+# - OS: Ubuntu 24.04.4 LTS aarch64（kernel 6.17.0-1031-nvidia）
+# - CPU: nproc=20（registry 既定。GB10 affinity 機構〈`crate::gb10_affinity`〉
+#   は既定 OFF・`RAYON_NUM_THREADS` 無指定）
+# - toolchain: rustc 1.97.0（2d8144b78 2026-07-07）・cargo 1.97.0
+# - バイナリ: registry `fandhe-ai =0.9.0`（`scripts/bench/
+#   framework-compare/target/release/bench-fandhe`。ノード上で 2026-09-18
+#   に再ビルドした事前ビルド済みバイナリ・path patch なし。計測中は cargo を
+#   起動していない）
+# - 転送元コミット（rev-stamp）: 536c56a8（origin/main）
+# - 事前登録規則: `gb10/RULE.txt`（2026-09-18T01:33:53Z に固定）
+# - 実行日時（UTC）: 系列開始 2026-09-18T01:36:32Z・各 run 開始
+#   01:38:02Z（run1）／01:38:34Z（run2）／01:39:07Z（run3）／
+#   01:39:40Z（run4）／01:39:42Z（run5）・系列終了 01:39:42Z 以降
+# - 負荷ゲート（load1 < 1.0 かつ GPU utilization 0%）: 5/5 run 通過
+#   （run1 load1=0.61・waited_s=90／run2 0.43・30／run3 0.29・30／
+#   run4 0.17・30／run5 0.16・0。gpu_util はいずれも 0）。
+#   compute_apps=2（常駐 2 プロセス。停止せず存在を記録のみ）。
+#   専有ゲート付き系列として正式
+# - run1〜5.err: いずれも空（失敗なし）
+# - 対象: cpu／cuda × train／infer × fresh／reuse の 8 セル
+# - Apple M4 Max 分は `../m4max/env_info.txt`（2026-09-17 実測）

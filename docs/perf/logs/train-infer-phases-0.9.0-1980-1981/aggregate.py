@@ -5,8 +5,11 @@
 （プロセス内 80 iters の中央値）を取り、5 run 間の中央値・最小・最大と、
 合計フェーズ（train は `step_total`・infer は `iter_total`）に対する比を
 出力する。残差トップ 3 は合計フェーズを除いた比の降順上位 3 件。
-python3 標準ライブラリのみ。使い方: aggregate.py <dir> > aggregate.md
+python3 標準ライブラリのみ。使い方: aggregate.py <dir> [--devices cpu,metal] [--machine "Apple M4 Max"] > aggregate.md
+（`--devices` 既定は Mac 分の cpu,metal。GB10 分は `--devices cpu,cuda --machine "DGX Spark GB10"`。
+既定引数での出力は #2021 収録の m4max/aggregate.md と byte 同一）
 """
+import argparse
 import json
 import statistics
 import sys
@@ -18,16 +21,27 @@ TOTAL = {"train_phases": "step_total", "infer_phases": "iter_total"}
 # orchestrate は個々の実行失敗を記録して続行するため、観測された行だけから
 # セル集合を作ると全 run で欠落したセル（例: metal 全滅）を静かに除いた表が
 # 出てしまう。期待集合を明示し、run ごとの欠落を fail-closed に検出する。
-EXPECTED_CELLS = sorted(
-    (dev, task, mode)
-    for dev in ("cpu", "metal")
-    for task in ("train_phases", "infer_phases")
-    for mode in ("fresh", "reuse")
-)
+def expected_cells(devices):
+    return sorted(
+        (dev, task, mode)
+        for dev in devices
+        for task in ("train_phases", "infer_phases")
+        for mode in ("fresh", "reuse")
+    )
 
 
 def main() -> int:
-    d = Path(sys.argv[1])
+    ap = argparse.ArgumentParser()
+    ap.add_argument("dir")
+    ap.add_argument("--devices", default="cpu,metal", help="期待するデバイス集合（カンマ区切り。既定 cpu,metal）")
+    ap.add_argument("--machine", default="Apple M4 Max", help="見出しに書く実機名")
+    args = ap.parse_args()
+    devices = [x for x in args.devices.split(",") if x]
+    if not devices:
+        print("error: --devices が空", file=sys.stderr)
+        return 1
+    EXPECTED_CELLS = expected_cells(devices)
+    d = Path(args.dir)
     files = [d / f"run{i}.jsonl" for i in range(1, 6)]
     missing = [f.name for f in files if not f.exists()]
     if missing:
@@ -75,7 +89,7 @@ def main() -> int:
                 print(f"error: {name} と {ref_name} で {c} のフェーズ集合が不一致 {diff}", file=sys.stderr)
                 return 1
     cells = EXPECTED_CELLS
-    print("# train／infer `--phases` 5 run 中央値（registry `fandhe-ai =0.9.0`・Apple M4 Max）\n")
+    print(f"# train／infer `--phases` 5 run 中央値（registry `fandhe-ai =0.9.0`・{args.machine}）\n")
     for cell in cells:
         dev, task, mode = cell
         phases = sorted((k for k in vals if k[:3] == cell), key=lambda k: order[k])
