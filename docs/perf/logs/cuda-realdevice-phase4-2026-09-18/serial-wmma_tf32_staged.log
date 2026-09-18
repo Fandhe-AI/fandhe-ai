@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/gemm_wmma_tf32_staged.rs (<home>/work/target-fandhe-ai/release/deps/gemm_wmma_tf32_staged-183040f79e4624e4)
+
+running 1 test
+test wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.00s
+

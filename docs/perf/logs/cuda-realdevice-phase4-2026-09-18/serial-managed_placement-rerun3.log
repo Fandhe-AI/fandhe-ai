@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/managed_placement_real_device.rs (<home>/work/target-fandhe-ai/release/deps/managed_placement_real_device-fabfb717e64b1965)
+
+running 1 test
+test managed_placement_does_not_leak_on_real_hardware ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 3.12s
+

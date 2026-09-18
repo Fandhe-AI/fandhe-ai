@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_cuda-a14a0084143ccb4e)
+
+running 1 test
+test init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm ... === CudaGemm::new module_cache LRU cold/warm（イシュー #1024）===
+  1st CudaGemm::new (LRU cold; 9 kernels NVRTC-compiled): median=198.929 ms  q1=198.929 ms  q3=198.929 ms
+  2nd CudaGemm::new (LRU warm; module_cache hit for every kernel): median=0.061 ms  q1=0.061 ms  q3=0.061 ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1101 filtered out; finished in 0.41s
+

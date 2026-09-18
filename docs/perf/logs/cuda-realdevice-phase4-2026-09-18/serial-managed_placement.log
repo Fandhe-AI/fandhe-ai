@@ -1,0 +1,18 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/managed_placement_real_device.rs (<home>/work/target-fandhe-ai/release/deps/managed_placement_real_device-fabfb717e64b1965)
+
+running 1 test
+test managed_placement_does_not_leak_on_real_hardware ... 
+thread 'managed_placement_does_not_leak_on_real_hardware' (3626336) panicked at crates/backend-cuda/tests/managed_placement_real_device.rs:344:5:
+managed placement should not leak across repeated alloc/free rounds: leaked=45703168 bytes
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    managed_placement_does_not_leak_on_real_hardware
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 2.40s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test managed_placement_real_device`
