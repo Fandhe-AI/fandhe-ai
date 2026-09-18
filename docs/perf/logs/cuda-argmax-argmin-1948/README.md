@@ -1,5 +1,7 @@
 # CUDA argmax／argmin 実機実測 申し送り（イシュー #1948）
 
+> **2026-09-18 DGX Spark GB10 で実測済み**（5/5 pass。下記「実測結果（記入欄）」参照）。以下の申し送り文は PR 時点の記録としてそのまま残す。
+
 本エージェント実行環境に DGX Spark GB10 等の CUDA 実機への到達手段がないため、
 `crates/backend-cuda/tests/reduce_parity.rs` に追加した `#[ignore]` テスト群
 （`argmax_and_argmin_*`）は未実行のまま本 PR をマージする。実機セッションで
@@ -42,4 +44,23 @@ make test-ignored-cuda  # 対象リポジトリの Makefile に定義があれ�
 
 ## 実測結果（記入欄）
 
-未実施。
+**2026-09-18（UTC 01:47Z）DGX Spark GB10 で実測済み**（転送元 origin/main `536c56a8`。
+環境は `env_info.txt`〈`hostname: masked`〉。ログは `reduce_parity-argm.log`〈ユーザー名・
+絶対パスは `<home>` へ置換済み〉）。
+
+```sh
+cargo test -p fandhe-ai-backend-cuda --release --test reduce_parity -- --ignored --nocapture argm
+```
+
+| テスト | 結果 |
+|---|---|
+| `argmax_and_argmin_match_cpu_reference_on_real_device` | ok |
+| `argmax_and_argmin_nan_and_infinity_semantics_match_cpu_on_real_device` | ok |
+| `argmax_and_argmin_match_cpu_reference_for_transposed_view_on_real_device` | ok |
+| `argmax_and_argmin_empty_reduction_semantics_match_cpu_on_real_device` | ok |
+| `argmax_and_argmin_are_run_to_run_deterministic_on_real_device` | ok |
+
+`test result: ok. 5 passed; 0 failed`（0.41 s）。事前登録判定規則はすべて充足
+（添字完全一致・空縮約エラー文言一致・3 回実行の bit 同一）。同日の全 `#[ignore]`
+群実行（`docs/perf/logs/cuda-realdevice-phase4-2026-09-18/README.md`）でも本 5 件は
+並列実行のまま ok（by-name 新規 ok として記録）。是正・閾値変更なし。

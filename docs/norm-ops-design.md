@@ -406,6 +406,14 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
 - **GB10 実機実測は未実施のまま `docs/perf/logs/cuda-norm-backward-1950/`
   へ申し送り**（本エージェント実行環境に CUDA 実機への到達手段がない
   ため。環境適応スモーク・Linux 実行可能な単体テストはすべて green）。
+  → **2026-09-18 DGX Spark GB10 で実測済み**（転送元 `536c56a8`。
+  `norm_backward_parity` 5/5 pass〈形状網羅・0 要素契約・数値安定性／決定性・
+  相殺入力の縮約順序回帰検出〉・facade `norm_backend_parity` `cuda_` 4/4 pass・
+  非後退確認〈`rmsnorm_backward_parity` 2・`rmsnorm_parity` 3・`layer_norm_parity` 4〉
+  9/9 pass。事前登録規則 1〜3 充足・tolerance／baseline 不変。
+  `docs/perf/logs/cuda-norm-backward-1950/README.md`「記入欄」。同日の全 `#[ignore]`
+  群〈330 pass／12 FAIL。本イシュー対象外の FAIL は是正せず記録のみ〉は
+  `docs/perf/logs/cuda-realdevice-phase4-2026-09-18/README.md`）。
 - **CPU NEON ベクトル化**（LayerNorm）: `rmsnorm_row_neon` と同型の
   `float64x2_t` 二乗和・分散計算の SIMD 化は後続の性能課題
 - **CUDA persistent grid・occupancy 予算に基づく grid 最適化**: §5「CUDA」

@@ -1,0 +1,13 @@
+hostname: masked
+gpu: NVIDIA GB10
+driver: 580.173.02
+cuda: 13.0 (Build cuda_13.0.r13.0/compiler.36424714_0)
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+kernel: Linux 6.17.0-1031-nvidia aarch64 (Ubuntu 24.04.4 LTS)
+cpu: nproc=20
+date: 2026-09-18 (UTC。個別テスト 01:47:40Z〜01:47:48Z・全群 01:47:48Z〜02:04:36Z・直列再実行 02:06:21Z〜02:06:25Z)
+source_sha: 536c56a821ed6679f4cfea3234ae40d40f24cd3e
+load_before（uptime は実機ローカル時刻。UTC+9）: 10:47:40 up 21 days, 22:14,  8 users,  load average: 1.09, 2.27, 1.61
+load_after: 11:04:36 up 21 days, 22:31,  8 users,  load average: 1.15, 1.19, 1.35
+gpu_util: 0 %（専有。常駐プロセス 2 つはアイドルのまま停止せず）

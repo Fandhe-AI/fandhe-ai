@@ -1,5 +1,7 @@
 # RMSNorm／LayerNorm backward の CUDA カーネル（イシュー #1950）実機実測申し送り
 
+> **2026-09-18 DGX Spark GB10 で実測済み**（18/18 pass。下記「記入欄」参照）。以下の申し送り文は PR 時点の記録としてそのまま残す。
+
 本エージェント実行環境には DGX Spark GB10（またはその他 CUDA 実機）への到達手段がないため、
 `crates/backend-cuda/tests/norm_backward_parity.rs` の `#[ignore]` テストは未実行のまま
 本ディレクトリへ申し送る。Linux（CUDA 非搭載）で実行可能な範囲（環境適応スモーク・
@@ -39,7 +41,20 @@ cargo test -p fandhe-ai-backend-cuda --release --test layer_norm_parity -- --ign
 
 ## 記入欄
 
-- 実行日時:（未実測）
-- GB10 実機コミット sha:（未実測）
-- 判定結果:（未実測）
-- 備考:（未実測）
+- 実行日時: 2026-09-18 01:47:40Z〜01:47:48Z（UTC）。DGX Spark GB10（`env_info.txt`。`hostname: masked`）
+- GB10 実機コミット sha: origin/main `536c56a8`（`536c56a821ed6679f4cfea3234ae40d40f24cd3e`）
+- 判定結果: **規則 1〜3 すべて充足**（全 18 テスト pass・0 fail）
+
+| ログ | コマンド | 結果 |
+|---|---|---|
+| `norm_backward_parity.log` | `cargo test -p fandhe-ai-backend-cuda --release --test norm_backward_parity -- --ignored --nocapture` | 5 pass／0 fail（`rmsnorm_backward_matches_cpu_across_shapes`・`layer_norm_backward_matches_cpu_across_shapes`・`norm_backward_zero_element_contract`・`norm_backward_numerical_stability_and_determinism`・`norm_backward_cancelling_input_detects_reduction_order_regression`。0.74 s）。規則 1 充足 |
+| `facade-norm_backend_parity.log` | `cargo test -p fandhe-ai --release --test norm_backend_parity -- --ignored --nocapture cuda_` | 4 pass／0 fail（`cuda_rms_norm_backward_matches_cpu`・`cuda_layer_norm_backward_matches_cpu`・forward 2 件。0.61 s）。規則 2 充足 |
+| `rmsnorm_backward_parity.log` | `cargo test -p fandhe-ai-backend-cuda --release --test rmsnorm_backward_parity -- --ignored --nocapture` | 2 pass／0 fail（4.39 s）。規則 3（非後退確認） |
+| `rmsnorm_parity.log` | `cargo test -p fandhe-ai-backend-cuda --release --test rmsnorm_parity -- --ignored --nocapture` | 3 pass／0 fail（0.41 s）。規則 3 |
+| `layer_norm_parity.log` | `cargo test -p fandhe-ai-backend-cuda --release --test layer_norm_parity -- --ignored --nocapture` | 4 pass／0 fail（0.27 s）。規則 3 |
+
+- 備考: ログ内のユーザー名・絶対パスは `<home>` へ置換済み。tolerance／baseline は
+  変更していない（規則 4）。性能 A/B は未実施（規則 5。任意のため対象外のまま）。
+  同日の全 `#[ignore]` 群実行（`docs/perf/logs/cuda-realdevice-phase4-2026-09-18/README.md`。
+  330 pass／12 FAIL）でも `norm_backward_parity` の 5 件は並列実行のまま ok（by-name
+  新規 ok）。FAIL 12 件は本イシューの対象外で是正せず記録のみ
