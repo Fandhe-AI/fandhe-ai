@@ -6229,10 +6229,13 @@ mod tma_tiled_pipeline {
         ///
         /// ホスト側形状検証・context 一致検証は
         /// [`Self::launch_tiled_pipeline_persistent_f32`] と同一の理由・
-        /// 同一の手順。`k == 0` は `num_k_tiles == 0` となりカーネル内で
-        /// 自動的に no-op（`acc` はゼロのまま guarded store される）ため
-        /// 早期 return しない（既存 cp.async 版 `launch_tiled_pipeline_f32`
-        /// と同じ扱い）。
+        /// 同一の手順。**`k == 0` は早期 return する**（`m == 0 || n == 0`
+        /// の直後。既存 cp.async 版〈`num_k_tiles == 0` がカーネル内で
+        /// そのまま no-op になる〉とは異なり、TMA 版はテンソルマップ構築
+        /// 時に `global_cols`/`global_rows`（K 由来次元）へ `0` を渡せない
+        /// ため〈`TmaBoxSpec::validate` の fail-closed ゼロ次元拒否〉、
+        /// `c_dev` を明示的に `memset_zeros` して「+0.0 を store する」
+        /// 契約をホスト側で代替する）。
         ///
         /// テンソルマップは起動ごとに `encode_tensor_map_2d_f32` で新規
         /// 生成する（tensor map キャッシュは本 issue のスコープ外。設計
@@ -6241,17 +6244,19 @@ mod tma_tiled_pipeline {
         ///
         /// **公開面ゲート**: [`Self::launch_tiled_pipeline_persistent_f32`]
         /// と同じ `internal-diagnostics` feature（既定 off）でゲートする。
-        #[allow(clippy::too_many_arguments)]
+        ///
+        /// `dims` に `(m, n, k)` をまとめて渡す（引数 7 個以下に収め
+        /// `#[allow(clippy::too_many_arguments)]` を新規に付けない設計。
+        /// `.claude/rules/coding-rust.md`）。
         pub fn launch_tiled_pipeline_tma_f32(
             &self,
             func: &TmaTiledPipelineFunction,
             a_dev: &GuardedSlice<f32>,
             b_dev: &GuardedSlice<f32>,
             c_dev: &mut GuardedSlice<f32>,
-            m: u32,
-            n: u32,
-            k: u32,
+            dims: (u32, u32, u32),
         ) -> Result<(), CudaError> {
+            let (m, n, k) = dims;
             let self_context_ptr = Arc::as_ptr(self.stream.context()) as usize;
             if func.context_ptr != self_context_ptr {
                 return Err(CudaError::TiledPipelineContextMismatch {
@@ -6290,6 +6295,21 @@ mod tma_tiled_pipeline {
             validate_output_len(c_dev.as_raw().len(), m, n)?;
             if m == 0 || n == 0 {
                 return Ok(());
+            }
+            // `k == 0`: `num_k_tiles == 0` となりテンソルマップを構築
+            // する要素次元（`global_cols`/`global_rows` の一方が 0）を
+            // `cuTensorMapEncodeTiled` に渡せなくなる（`TmaBoxSpec::
+            // validate` がゼロ次元を fail-closed 拒否するため）ため、
+            // `TP_TMA_TILE_CORE` の「カーネル内 no-op（acc はゼロのまま
+            // guarded store）」契約をホスト側で代替する（`run_tiled_
+            // pipeline_persistent_f32` の `k == 0` 早期 return と同型の
+            // 「+0.0 を store する」意味論。`c_dev` はこの時点でゼロ初期化
+            // されている保証がないため明示的に memset する）。
+            if k == 0 {
+                return self.with_driver_call(|| {
+                    self.stream.memset_zeros(c_dev.as_raw_mut())?;
+                    Ok(())
+                });
             }
 
             let swizzle_mode = match func.swizzle {
@@ -6376,9 +6396,12 @@ mod tma_tiled_pipeline {
         /// `unsafe` は導入しない。
         ///
         /// ホスト側形状検証・`m == 0 || n == 0` の no-op 契約は
-        /// [`Self::run_tiled_pipeline_persistent_f32`] と同一。`k == 0`
-        /// は `launch_tiled_pipeline_tma_f32` ドキュメンテーションコメント
-        /// のとおりカーネル内 no-op へ委ねる（早期 return しない）。
+        /// [`Self::run_tiled_pipeline_persistent_f32`] と同一。**`k == 0`
+        /// も早期 return する**（[`Self::launch_tiled_pipeline_tma_f32`]
+        /// ドキュメンテーションコメント「`k == 0` は早期 return する」
+        /// 節参照。テンソルマップ構築の前提〈ゼロ以外の次元〉と一致させ、
+        /// 長さ 0 の `upload_f32`／`encode_tensor_map_2d_f32` 呼び出し自体
+        /// を避ける）。
         ///
         /// **公開面ゲート**: [`Self::launch_tiled_pipeline_tma_f32`] と
         /// 同じ `internal-diagnostics` feature（既定 off）でゲートする。
@@ -6404,10 +6427,13 @@ mod tma_tiled_pipeline {
             if m == 0 || n == 0 {
                 return Ok(Vec::new());
             }
+            if k == 0 {
+                return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
+            }
 
             let (a_dev, b_dev) = self.upload_f32(a, b)?;
             let mut c_dev = self.alloc_output_f32(m, n)?;
-            self.launch_tiled_pipeline_tma_f32(func, &a_dev, &b_dev, &mut c_dev, m, n, k)?;
+            self.launch_tiled_pipeline_tma_f32(func, &a_dev, &b_dev, &mut c_dev, (m, n, k))?;
             self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))
         }
     }

@@ -99,17 +99,18 @@ fn tiled_pipeline_tma_none_matches_pipeline_bit_exact() {
             &c_ref,
         );
 
-        // `k == 0` の no-op 契約（`m/n` が 0 の場合は別途早期 return する
-        // ため対象外）。TMA 版 `run_tiled_pipeline_tma_f32` は
-        // `launch_tiled_pipeline_tma_f32` ドキュメンテーションコメント
-        // どおりカーネル内 no-op（`num_k_tiles == 0`）へ委ねる。
+        // `k == 0` は `tiled_pipeline_tma_k_zero_produces_all_zero_output`
+        // が別途検証する（`run_tiled_pipeline_tma_f32` はホスト側で早期
+        // return する契約。`tma_bit_exact_shapes` は k>0 の形状のみ）。
     }
 }
 
 /// `k == 0` の出力が全ゼロであることを検証する（設計計画 Step 3 (e)。
-/// `run_tiled_pipeline_tma_f32` はホスト側で早期 return せず、カーネル
-/// 内で `num_k_tiles == 0` として `acc` がゼロのまま guarded store される
-/// 契約。`kernels_tiled_pipeline.rs::TP_TMA_TILE_CORE` 参照）。
+/// `run_tiled_pipeline_tma_f32`／`launch_tiled_pipeline_tma_f32` は
+/// `m == 0 || n == 0` の直後で `k == 0` を早期 return し、`c_dev` を
+/// 明示的にゼロ化する契約〈テンソルマップ構築がゼロ次元を扱えないため。
+/// `gemm.rs::tma_tiled_pipeline::CudaGemm::launch_tiled_pipeline_tma_f32`
+/// ドキュメンテーションコメント参照〉。
 #[test]
 #[ignore = "CUDA 実機（compute capability 9.0 以降、TMA 対応）必須"]
 fn tiled_pipeline_tma_k_zero_produces_all_zero_output() {

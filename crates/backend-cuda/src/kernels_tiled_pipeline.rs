@@ -1201,10 +1201,23 @@ pub const TP_TMA_A_BOX_BYTES: u32 = TP_BM * TP_BK * 4;
 pub const TP_TMA_B_BOX_BYTES: u32 = TP_BK * TP_BN * 4;
 /// 1 ステージあたりの mbarrier `expect_tx`（A+B 合計転送予定バイト数）。
 pub const TP_TMA_EXPECT_TX_BYTES: u32 = TP_TMA_A_BOX_BYTES + TP_TMA_B_BOX_BYTES;
-/// TMA box の smem 側整列（バイト）。`CUtensorMap`（driver API 側）が
-/// 要求する整列の実測値（`tests/tma_probe_real_device.rs` の既存
-/// プローブが `__align__(128)` で実行成功済み）を踏襲する。
-pub const TP_TMA_SMEM_ALIGN: u32 = 128;
+/// TMA box の smem 側整列（バイト）。`tests/tma_probe_real_device.rs`
+/// の既存プローブは `CUtensorMap` の ABI 整列要件として
+/// `__align__(128)` で実行成功済みだが、それは **各段（stage）の A タイル
+/// 先頭アドレスが `128` の倍数であること**しか保証しない。`B64`
+/// swizzle 仮説（`TP_TMA_A_AT` マクロの `chunk ^ ((row>>1)&3)`）は
+/// ハードウェアが smem **絶対**アドレスのビット [7,9) を [4,6) へ XOR
+/// する（64B swizzle atom 内の並べ替え）という前提に立っており、この
+/// 仮説が成立するには各段の A タイル先頭アドレスのビット [4,9) が
+/// すべてゼロ（＝ 512 バイト整列）でなければならない
+/// （`TP_TMA_A_BOX_BYTES`＝4096B の下で `__align__(128)` は 128 バイト
+/// 整列しか保証しないため、512 バイト整列より緩い制約になり得る）。
+/// よって `128` ではなく `1024`（512 の倍数）を採用し、下記 const assert
+/// （`TP_TMA_A_BOX_BYTES` が 512 の倍数であること）と合わせて各段が
+/// 512 バイト境界に確実に整列することを機械保証する（`None` 腕は恒等
+/// アクセスのためこの整列に依存しないが、`B64` 腕の仮説検証を整列崩れ
+/// による誤帰属から守るため両腕とも同じ整列で確保する）。
+pub const TP_TMA_SMEM_ALIGN: u32 = 1024;
 /// mbarrier ポーリングの上限回数（`tests/tma_probe_real_device.rs::
 /// TMA_POLL_LIMIT` と同値。実測チューニング値ではなくハング防止の
 /// 安全マージン。本ファイル冒頭コメント「REQ-8」節と同じ fail-closed
@@ -1223,6 +1236,16 @@ const _: () = assert!(
 const _: () = assert!(
     TP_BN * 4 > 64,
     "B box's inner (N) row must exceed one 64B swizzle atom, which is why B stays swizzle=None"
+);
+// `TP_TMA_SMEM_ALIGN` ドキュメンテーションコメント「B64 swizzle 仮説の
+// 整列前提」参照: 各段の A タイルが `TP_TMA_SMEM_ALIGN`（1024B）境界に
+// 整列していれば、段内オフセット（`TP_TMA_A_BOX_BYTES` の倍数）も
+// 512B 整列でなければ次段が 512B 境界からずれる。ここで
+// `TP_TMA_A_BOX_BYTES` 自体が 512 の倍数であることを機械検証する。
+const _: () = assert!(
+    TP_TMA_A_BOX_BYTES.is_multiple_of(512),
+    "TP_TMA_A_BOX_BYTES must be a multiple of 512 bytes for the B64 swizzle hypothesis's \
+     512-byte stage alignment assumption to hold across all TP_STAGES"
 );
 // 全 TP_STAGES（最大 [`TP_MAX_STAGES`]）を密レイアウト（パディングなし）
 // で確保しても、既存カーネル群が共有する per-block 48KiB 予算を超過
