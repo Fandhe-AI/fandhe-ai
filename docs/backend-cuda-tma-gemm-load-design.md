@@ -171,5 +171,12 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 ### 10.5 検証状態
 
-- Linux で実行可能な検査は全て green: `cargo fmt --all --check`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`（新規警告ゼロ）・`cargo test -p fandhe-ai-backend-cuda --all-features`（1042 件 pass・新規 `#[ignore]` 5 件・環境適応スモーク 1 件 pass）・`cargo build -p fandhe-ai-backend-cuda`（feature なし。新規警告ゼロ）。
+- CI ゲート（`.claude/rules/coding-rust.md` が要求する `cargo clippy --workspace --all-targets --all-features -- -D warnings`）は green（新規警告ゼロ）。`cargo fmt --all --check`・`cargo check --workspace --all-features`・`cargo test -p fandhe-ai-backend-cuda --all-features`（1042 件 pass・新規 `#[ignore]` 5 件・環境適応スモーク 1 件 pass）も green。
+- **`internal-diagnostics` feature なしの `cargo build`／`cargo clippy` は dead-code 警告が 14 件増える**（`TP_TMA_*` 定数・`TmaSwizzleA`・`render_tma_defines`／`render_tma_source`・`TILED_PIPELINE_TMA_F32_SOURCE_{NONE,B64}`・`tiled_pipeline_tma_f32_source`）。これは新規に持ち込んだ欠陥ではなく、同ファイル内の既存 opt-in カーネル群（`TP_KERNEL_PERSISTENT_PREFIX`・`tiled_pipeline_persistent_f32_source`・`tiled_pipeline_streamk_f32_source` 等。`compile_tiled_pipeline_persistent_variant` 等の呼び出し元自体が `internal-diagnostics` 限定のため feature なしでは呼び手が存在しない）が既に持つのと同種・同数量級の dead-code である（`git stash` 比較で確認: feature なし clippy はベースライン 62 件 → 本実装後 76 件）。計画 §3.1 の対処案（`#[cfg(any(test, feature = "internal-diagnostics"))]` でカーネルソース関数自体をゲートする案）は、他の兄弟カーネル族との一貫性を優先しあえて適用しなかった（実装判断・§10.4 のスコープ縮小とは別軸）。**実際の CI 品質ゲートは `--all-features` 付きのため、この dead-code は CI を破壊しない**。
 - GB10 実機での `#[ignore]` テスト実行・意味論プローブ・純カーネル時間実測は **未実施のまま #1976 へ引き継ぐ**（`docs/perf/logs/cuda-tma-stage1-1975/README.md` にランブックを整備済み）。
+
+### 10.6 レビュー是正（PR 内自己レビューでの指摘 3 件。コミット `82c02615`）
+
+1. **`k == 0` の fail-closed バグ**: `TmaBoxSpec::validate` がゼロ次元を拒否するため、当初実装の `run_tiled_pipeline_tma_f32`／`launch_tiled_pipeline_tma_f32` は `k == 0` で `InvalidShape` を返していた（§3.3 の「`k == 0` はカーネル内 no-op へ委ねる」という当初記述が誤りだった）。`m == 0 || n == 0` の直後に `k == 0` の早期 return を追加（`launch_` は `c_dev` を明示 `memset_zeros`・`run_` は全ゼロ `Vec` を返す）。
+2. **`TP_TMA_SMEM_ALIGN` を `128` から `1024` へ修正**: `B64` swizzle 仮説（`chunk ^ ((row>>1)&3)`）はハードウェアが smem **絶対**アドレスのビット [7,9) を [4,6) へ XOR するという前提に立ち、各段の A タイル先頭アドレスが 512 バイト整列でなければ成立しない。`__align__(128)` はそれより緩い制約（128 バイト整列）しか保証しないため、`1024` バイト整列＋`TP_TMA_A_BOX_BYTES` が 512 の倍数であることの const assert を追加し、整列崩れによる `B64` 仮説の誤帰属（#1976 の意味論プローブが「仮説不成立」と誤記録するリスク）を防いだ。
+3. **`#[allow(clippy::too_many_arguments)]` の撤去**（§5 承認事項・計画 R7 で新規追加を明示的に禁止していた）: `launch_tiled_pipeline_tma_f32` の `m`/`n`/`k` を `dims: (u32, u32, u32)` へまとめ、引数 6 個（clippy 既定閾値 7 以下）に収めた。
