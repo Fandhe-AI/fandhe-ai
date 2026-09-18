@@ -92,6 +92,7 @@
 - **ゲート D（本番ディスパッチ非後退）**: 結線後の同一 HEAD base/after を framework-compare gemm cuda で比較し、checksum 完全一致・非後退を確認する。
 - **no-go 条件**: ゲート A の不一致が 1 件でもある場合、またはゲート C で後退する形状が 1 件でもある場合は REJECT とし、opt-in 実装のみを維持する（既存の #1358 Stream-K・#1347 persistent 版と同じ判断様式）。
 - **実機到達性**: 本 issue の実装セッションは DGX Spark GB10 実機への到達手段を持たない（`docs/real-hardware-verification-env.md` の到達可否と同型の制約）。上記ゲートの実測は後続実装 issue（承認後起票）が到達可能な環境で行う。
+- **#1976 の適用結果**: 実測済み（§10.8）。ベンチ列は実装済み・プローブ 3 件と tensor map キャッシュは未実装のまま。
 
 ## 7. リスクと安全側判断
 
@@ -185,3 +186,54 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 1. **`encode_tensor_map_2d_f32` の `# SAFETY`／`// SAFETY:` コメントの根拠帰属を訂正**: サイズ整合・行ストライド整列の根拠を誤って `_sync_guard`（`SyncOnDrop`。ストリーム順序の保証のみを担う）へ帰属させていたのを、実際の根拠である呼び出し元 `launch_tiled_pipeline_tma_f32` の `validate_gemm_dims`／`tiled_pipeline_alignment_ok` へ訂正した（コメントのみ・コード挙動不変・`unsafe` 増減なし）。
 2. **記述子ラベル生成を `tma_descriptor_label` 関数へ切り出し**: `compile_tiled_pipeline_tma_variant` 内の `match swizzle { ... }` を private 関数へ切り出し、単体テスト `compile_descriptor_labels_differ_per_swizzle_arm` がその実装関数を直接呼ぶよう変更した（従来はテスト内でロジックを複製しており、実装側のラベルが変わっても検出できなかった）。
+
+### 10.8 GB10 実機実測（イシュー #1976・2026-09-18）
+
+実機環境・実測日時・実施内容を記録する。数値は `docs/perf/logs/cuda-tma-stage1-1975/aggregate.md` を正とし、以下は要約。
+
+**環境**: DGX Spark GB10（driver 580.173.02・compute capability 12.1・CUDA 13.0。転送元 commit 59ecafe9）
+
+**ゲート A（数値契約：bit 一致）**:
+- `tiled_pipeline_tma_none_matches_pipeline_bit_exact` ✓
+- `tiled_pipeline_tma_k_zero_produces_all_zero_output` ✓
+- `tiled_pipeline_tma_none_repeated_launch_is_deterministic` ✓
+- `tiled_pipeline_tma_none_matches_pipeline_with_pretransposed_host_input` ✓
+- `tiled_pipeline_tma_b64_matches_pipeline_or_records_hypothesis_gap` ✓（B64 swizzle 仮説は全 7 形状で cp.async pipeline 版と bit 同一。mismatched_shapes: empty）
+- `tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact` ✓（事前 encode + launch_prepared の bit 一致）
+- 意味論プローブ 3 件（NVRTC compile probe・execution probe cta・execution probe cluster） ✓
+
+**ゲート B（parity 非後退）**:
+- 6 バイナリ（parity_nonregression・cpu_cuda_parity 2・cpu_cuda_tiled_pipeline_parity 18・gemm_transposed_parity 5・transpose_parity 4・gemm_tiled 6）計 36 テスト
+- 結果: 0 FAIL（既知外の FAIL なし） ✓
+
+**ゲート C（純カーネル時間・GPU-only 計測。5 run 中央値）**:
+
+| サイズ | tma_none 腕（符号一貫） | B64 腕（符号一貫） | 対本番 128×64 |
+|--------|---|---|---|
+| 256 | 0.9857（後退。5/5） | 0.9627（後退。5/5） | none: 1.4613・b64: 1.4223 |
+| 512 | 1.0755（5/5） | 1.0175（**4/5**。run5 が 0.9971 で中央値と逆側） | none: 1.1057・b64: 1.0481 |
+| 1024 | 1.1024（5/5） | 1.0569（5/5） | none: 1.0486・b64: 1.0053 |
+| 2048 | 1.0942（5/5） | 1.0538（5/5） | none: 0.9810・b64: 0.9394 |
+| 4096 | 1.2067（5/5） | 1.0726（**4/5**。run3 が 0.9509 で中央値と逆側） | none: 0.9282・b64: 0.8320 |
+
+符号一貫は `aggregate.md` の「符号一貫」列の転記（none 腕は全 size 5/5・B64 腕は N=512／4096 が 4/5）。判定は RULE.txt どおり中央値で行い、4/5 の 2 形状は REJECT 判定に影響しない（併記のみ）。
+
+**判定**: 両腕とも N=256 で中央値 < 1.00。§6 の no-go 条件「ゲート C で後退する形状が 1 件でもある場合は REJECT」により **REJECT**。本番結線なし・`select_tiled_f32_kernel`／`CudaGemm::new` 不変。
+
+**事実の併記（判定に影響させない）**:
+- N≥512 では同タイル（64×64）の cp.async 版に対し改善（7.6〜20.7%）
+- 本番選択構成（128×64）に対しては N=2048/4096 で下回る
+- N=256 差 0.027 TFLOPS（1.3%）の絶対値
+
+**追加実装**（§10.1〜§10.6 で後述していたもの）:
+- ベンチ列 `tma_none_gpu_only_tflops`／`tma_b64_gpu_only_tflops` を `crates/backend-cuda/examples/gemm_tiled_pipeline_bench.rs` へ追加実装済み
+- tensor map 事前 encode API（`prepare_tiled_pipeline_tma_maps`／`launch_tiled_pipeline_tma_f32_prepared`）を `internal-diagnostics` 限定で追加実装済み（本番非到達）
+
+**未実装（申し送り）**:
+- 意味論プローブ 3 件（要素座標・部分 OOB・smem 配置ダンプ）
+- tensor map キャッシュ
+- ベンチ example の拡張（§10.4 当初計画の遺項）
+
+**再評価の仮説（ユーザー承認待ち・新規 issue 起票なし）**:
+- N≥512 限定の形状条件
+- 128×64 タイルへの TMA 適用（Stage 2）

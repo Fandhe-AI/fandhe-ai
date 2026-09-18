@@ -1,0 +1,61 @@
+事前登録判定規則（イシュー #1976・TMA Stage 1 の GB10 実測）
+登録日時: 2026-09-18（UTC）。実測開始前に本ファイルをコミットし、結果が出た後に緩和しない。
+
+対象: DGX Spark GB10（driver 580.173.02・compute_cap 12.1・CUDA 13.0）。
+対象コード: ブランチ test/1976-tma-stage1-gb10 の HEAD（.rev-stamp と env_info.txt に記録）。
+     本番既定経路（select_tiled_f32_kernel／CudaGemm::new）は本ブランチでも不変。
+     TMA 経路は internal-diagnostics feature 限定の opt-in（#1975・PR #2027）。
+
+ゲート A（数値契約・必須）: docs/backend-cuda-tma-gemm-load-design.md §6 逐語
+  「実機 bit 一致（cp.async 版 vs TMA 版。N=256〜4096・端あり形状を含む・NN／NT／TN／TT の 4 転置パターン）」
+  実行: cargo test -p fandhe-ai-backend-cuda --release --test cpu_cuda_tiled_pipeline_tma_parity --all-features -- --ignored --nocapture
+  判定:
+  - None 腕: tiled_pipeline_tma_none_matches_pipeline_bit_exact／..._k_zero_produces_all_zero_output／
+    ..._none_repeated_launch_is_deterministic／..._none_matches_pipeline_with_pretransposed_host_input の 4 件が全て ok であること（必須）。
+    1 件でも FAILED なら総合判定は REJECT（§6 no-go 条件「ゲート A の不一致が 1 件でもある場合」）。
+  - B64 腕: tiled_pipeline_tma_b64_matches_pipeline_or_records_hypothesis_gap の mismatched_shapes が空なら仮説成立、
+    非空なら仮説不成立として記録のみ（ランブック README「B64 swizzle 仮説（記録のみ）」。REJECT には数えない）。
+    B64 腕はゲート C の候補腕になるのは仮説成立の場合に限る。
+  - ゲート C の前提（必須）: tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact（事前 encode＋launch_prepared の
+    ベンチ計測経路が一括 API と bit 同一）が ok であること。FAILED ならゲート C は無効（undetermined）。
+  - 意味論プローブ: cargo test -p fandhe-ai-backend-cuda --release --test tma_probe_real_device --all-features -- --ignored --nocapture
+    は記録のみ（判定に含めない）。
+
+ゲート B（parity 非後退・必須）: §6 逐語「既存 parity テストが、既知の無関係な fail を除き 0 fail のまま」
+  実行（各 1 回・--release --all-features -- --ignored --nocapture）:
+    parity_nonregression／cpu_cuda_parity／cpu_cuda_tiled_pipeline_parity／gemm_transposed_parity／transpose_parity／gemm_tiled
+  判定: 上記 6 バイナリで FAILED が 0 件。既知の無関係 fail は #2031（転送元 536c56a8・2026-09-18・
+    docs/perf/logs/cuda-realdevice-phase4-2026-09-18/README.md の既知 FAIL 一覧）に名前があるものに限り除外し、名前を記録する。
+    TMA 経路は本番非結線のため、ゲート B は機構上「変更前と同一バイナリ」の再確認である。
+
+ゲート C（純カーネル時間・必須）: §6 逐語
+  「GPU-only 計測による 5 回中央値比較。採用条件は『N≥1024 のいずれかの形状で 1.05 倍以上の改善』かつ『全計測形状で 1.00 倍未満（後退）がないこと』」
+  実行: cargo run -p fandhe-ai-backend-cuda --release --all-features --example gemm_tiled_pipeline_bench
+        を 5 回、独立プロセスで起動（gateC_run{1..5}.log）。各起動前に /proc/loadavg と nvidia-smi utilization を記録。
+  対象形状: example 既定の size=256/512/1024/2048/4096（全て 4 の倍数・正方）。
+  主判定の分母: 同一 64×64 タイル・同一 stage 数の cp.async 版 pipeline3_gpu_only_tflops（設計 doc §6「cp.async 版 vs TMA 版」）。
+  主判定の分子: tma_none_gpu_only_tflops（None 腕）。比率列 tma_none_over_pipeline3_gpu_only の 5 run 中央値で判定。
+  B64 腕（tma_b64_over_pipeline3_gpu_only）はゲート A で仮説成立の場合のみ候補腕。不成立なら参考記録。
+  参考列（判定に使わない）: 本番選択構成 128×64（N≥1024 かつ K≥1024 で選択。#1344）に対する tma_*_over_pipeline128x64_gpu_only。
+  判定（候補腕ごと）:
+  - ADOPT 候補: size∈{1024,2048,4096} のいずれかで中央値 ≥ 1.05、かつ size∈{256,512,1024,2048,4096} の全てで中央値 ≥ 1.00。
+  - REJECT: いずれかの size で中央値 < 1.00（§6 no-go 条件「ゲート C で後退する形状が 1 件でもある場合」）。
+  - undetermined: 上記いずれでもない（全形状 1.00〜1.05 未満）。または 5 run のいずれかで列が skipped。
+  補足: 5 run 中の符号不一致（中央値と反対側の run）が 2 run 以上ある size は「5/5 一貫ではない」と併記する（判定は中央値で行う）。
+
+ゲート D（本番ディスパッチ非後退）: 本 issue では対象外。
+  理由: ゲート D は「結線後の同一 HEAD base/after を framework-compare gemm cuda で比較」（§6）であり、
+  select_tiled_f32_kernel への結線は #1976 で行わない（ユーザー指示: ADOPT でも結線 PR の起票案を issue コメントに記録するのみ）。
+  ゲート D は結線 PR の受け入れ条件として実施する。
+
+総合判定の語彙（ゲート D 未実施のため素の ADOPT は使わない）:
+  - 「ADOPT（結線候補。ゲート D は結線 PR で実施）」: ゲート A の None 腕 4 件 ok・ゲート B 0 fail・ゲート C で ADOPT 候補の腕が 1 つ以上。
+  - 「REJECT」: ゲート A の None 腕に FAILED、またはゲート C で候補腕が全て REJECT。
+  - 「undetermined」: 上記以外（ゲート C undetermined・専有ゲート不通過・列 skipped 等）。
+  - ゲート B に既知外の FAILED があれば、ゲート C の結果に関わらず「undetermined（ゲート B 要調査）」とし是正しない。
+
+専有ゲート: 各 run 起動前に load1 < 1.0 かつ nvidia-smi utilization.gpu 0% を確認（#1980 GB10 分と同一）。
+  不通過の run は record_only として集計から除外せず「不通過」を併記する（規則の事後緩和ではなく記録）。
+
+保存物（本ディレクトリ）: RULE.txt・ignored_tests.log・probe.log・gateB_*.log・gateC_run{1..5}.log・load_gate.log・
+  aggregate.py（python3 標準ライブラリのみ・--self-test）・aggregate.md・env_info.txt（内部ホスト名・ユーザー名・絶対パスは <home> 等へマスク）。

@@ -1,0 +1,11 @@
+date_utc=2026-09-18T05:06:03Z
+rev_stamp=59ecafe9ac42b4a4b83b194fb64626ee0a2d0c84
+uname=Linux 6.17.0-1031-nvidia aarch64
+rustc=rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo=cargo 1.97.0 (c980f4866 2026-06-30)
+nvcc=Build cuda_13.0.r13.0/compiler.36424714_0
+name, driver_version, compute_cap
+NVIDIA GB10, 580.173.02, 12.1
+cargo_target_dir=<home>/work/target-fandhe-ai
+tree=<home>/work/rust-ai-library-run
+load_gate=load1<1.0 && gpu_util==0 (see load_gate.log)

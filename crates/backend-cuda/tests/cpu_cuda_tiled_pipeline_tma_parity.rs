@@ -118,6 +118,69 @@ fn tiled_pipeline_tma_none_matches_pipeline_bit_exact() {
     }
 }
 
+/// [`tma_bit_exact_shapes`] の全形状で、一括 API
+/// `CudaGemm::launch_tiled_pipeline_tma_f32`（毎起動でテンソルマップを
+/// 内部 encode する）と、イシュー #1976 で追加した分離 API
+/// `CudaGemm::prepare_tiled_pipeline_tma_maps` +
+/// `CudaGemm::launch_tiled_pipeline_tma_f32_prepared`（事前 encode 済み
+/// テンソルマップを使い回す）の出力が bit 同一であることを検証する
+/// （`launch_tiled_pipeline_tma_f32` は分離 API への委譲として実装され
+/// ているため挙動は完全に同一のはずだが、委譲の正しさを実機で直接
+/// 検証する。`m == 0 || n == 0`／`k == 0` の早期 return 経路〈`NoOp`／
+/// `ZeroK`〉も [`tma_bit_exact_shapes`] の端数形状群と
+/// [`tiled_pipeline_tma_k_zero_produces_all_zero_output`] がそれぞれ
+/// 別途カバーするためここでは通常経路〈`Ready`〉のみ確認する）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 9.0 以降、TMA 対応）必須"]
+fn tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+    let func = CudaGemm::compile_tiled_pipeline_tma_variant(&device, TmaSwizzleA::None)
+        .expect("compile_tiled_pipeline_tma_variant(None) must succeed on a TMA-capable runner");
+
+    for (seed, (m, n, k)) in tma_bit_exact_shapes().into_iter().enumerate() {
+        let mut rng = bench_harness::rng::Xorshift64Star::new(seed as u64 + 1001);
+        let a = rng.fill_vec((m as usize) * (k as usize));
+        let b = rng.fill_vec((k as usize) * (n as usize));
+
+        // 一括 API（毎起動で encode）。
+        let c_one_shot = gemm
+            .run_tiled_pipeline_tma_f32(&func, &a, &b, m, n, k)
+            .unwrap_or_else(|e| {
+                panic!("run_tiled_pipeline_tma_f32(None) must succeed for m={m},n={n},k={k}: {e}")
+            });
+
+        // 分離 API（事前 encode 1 回 + 起動）。
+        let (a_dev, b_dev) = gemm
+            .upload_f32(&a, &b)
+            .unwrap_or_else(|e| panic!("upload_f32 must succeed for m={m},n={n},k={k}: {e}"));
+        let mut c_dev = gemm
+            .alloc_output_f32(m, n)
+            .unwrap_or_else(|e| panic!("alloc_output_f32 must succeed for m={m},n={n},k={k}: {e}"));
+        let maps = gemm
+            .prepare_tiled_pipeline_tma_maps(&func, &a_dev, &b_dev, (m, n, k))
+            .unwrap_or_else(|e| {
+                panic!("prepare_tiled_pipeline_tma_maps must succeed for m={m},n={n},k={k}: {e}")
+            });
+        gemm.launch_tiled_pipeline_tma_f32_prepared(&func, &maps, &mut c_dev)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "launch_tiled_pipeline_tma_f32_prepared must succeed for m={m},n={n},k={k}: \
+                     {e}"
+                )
+            });
+        let c_prepared = gemm
+            .download_f32(&c_dev)
+            .unwrap_or_else(|e| panic!("download_f32 must succeed for m={m},n={n},k={k}: {e}"));
+
+        assert!(
+            bits_eq(&c_prepared, &c_one_shot),
+            "一括 API と分離 API（prepare + launch_prepared）の出力が bit 同一ではありません \
+             (m={m}, n={n}, k={k})"
+        );
+    }
+}
+
 /// `k == 0` の出力が全ゼロであることを検証する（設計計画 Step 3 (e)。
 /// `run_tiled_pipeline_tma_f32`／`launch_tiled_pipeline_tma_f32` は
 /// `m == 0 || n == 0` の直後で `k == 0` を早期 return し、`c_dev` を
