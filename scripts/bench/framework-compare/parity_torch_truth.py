@@ -24,7 +24,10 @@ fail 要素の座標・値を残さない（Rust 側 `bench-common::parity::dump
 `ABSOLUTE_RESCUE_THRESHOLD`／`PARITY_SCALED_ABS_COEFF`・`bench-common::parity`・
 `bench_py.py`・`compare_gemm_gate.py` はいずれも不変。本スクリプトは机上計算
 の診断専用ツールであり、係数変更はイシュー #1985 の記録を受けたユーザー
-承認事項として別途扱う）。
+承認事項として別途扱う）。現行複合判定の 4 定数（`PARITY_REL_TOL`／
+`PARITY_ABS_TOL`／`PARITY_SCALED_ABS_COEFF`／`F32_UNIT_ROUNDOFF`）は本ファイルへ
+複製せず、正本 `bench-common/src/parity.rs` から import 時に読み取る（読めなければ
+fail-closed に停止。`--out` は `.json` 必須で、Markdown は同名 `.md` に書く）。
 
 ## 参照実装の再現方法（bench_py.py 準拠）
 
@@ -64,6 +67,7 @@ import json
 import math
 import os
 import platform
+import re
 import struct
 import sys
 import time
@@ -86,13 +90,54 @@ _TRUTH_SPEC.loader.exec_module(parity_dump_truth)
 SEED_A = parity_dump_truth.SEED_A
 SEED_B = parity_dump_truth.SEED_B
 
-# 複合判定の定数（`bench-common/src/parity.rs::PARITY_REL_TOL`／`PARITY_ABS_TOL`／
-# `PARITY_SCALED_ABS_COEFF`／`F32_UNIT_ROUNDOFF` と同値。正は本体側であり
-# ここでは再現のためだけに再定義する。変更はユーザー承認必須）。
-PARITY_REL_TOL = 1e-3
-PARITY_ABS_TOL = 1e-5
-PARITY_SCALED_ABS_COEFF = 0.5
-F32_UNIT_ROUNDOFF = 2.0**-24
+# 複合判定の定数は正本 `bench-common/src/parity.rs`（ハーネス側の複合判定。
+# `PARITY_REL_TOL`／`PARITY_ABS_TOL`／`PARITY_SCALED_ABS_COEFF`／`F32_UNIT_ROUNDOFF`）
+# から import 時に読み取る。値を本ファイルへ複製しない（閾値の分散定義禁止。
+# codex-review 指摘・PR #2032 P1。`parity_baseline_impact.py::_extract_f64_const`
+# と同じ抽出方式）。宣言が見つからない・数値化できない・ファイルを読めない場合は
+# fail-closed に例外を送出し、古い値で「現行契約」を名乗る出力を作らない。
+_BENCH_COMMON_PARITY_PATH = os.path.join(_HERE, "bench-common", "src", "parity.rs")
+
+
+def _extract_f64_const(source: str, name: str) -> float:
+    """`pub const <name>: f64 = <value>;` 形式の宣言から数値を取り出す。
+
+    `<value>` は数値リテラル（`1e-3`・`0.5`）か `a / b` 形の除算 1 段
+    （`1.0 / 16_777_216.0`）のみを受け付け、それ以外は fail-closed に拒否する
+    （`eval` は使わない）。数値中の `_` 区切りは Rust 仕様どおり無視する。
+    """
+    match = re.search(rf"pub const {re.escape(name)}: f64 = ([^;]+);", source)
+    if match is None:
+        raise ValueError(f"parity.rs に `pub const {name}: f64 = ...;` の宣言が見つからない（宣言スタイルが変わった可能性）")
+    expr = match.group(1).strip()
+    parts = [p.strip().replace("_", "") for p in expr.split("/")]
+    if len(parts) > 2 or any(not p for p in parts):
+        raise ValueError(f"parity.rs::{name} の値 {expr!r} は数値リテラルか `a / b` 形のみ受け付ける")
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError as exc:
+        raise ValueError(f"parity.rs::{name} の値 {expr!r} を数値化できない") from exc
+    return nums[0] if len(nums) == 1 else nums[0] / nums[1]
+
+
+def load_parity_consts(path: str = _BENCH_COMMON_PARITY_PATH) -> dict[str, float]:
+    """正本 `bench-common/src/parity.rs` から複合判定の 4 定数を読み取る（fail-closed）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            source = f.read()
+    except OSError as err:
+        raise ValueError(f"bench-common/src/parity.rs を読めない（{path}）: {err}。パスがずれていないか確認すること") from err
+    return {
+        name: _extract_f64_const(source, name)
+        for name in ("PARITY_REL_TOL", "PARITY_ABS_TOL", "PARITY_SCALED_ABS_COEFF", "F32_UNIT_ROUNDOFF")
+    }
+
+
+_PARITY_CONSTS = load_parity_consts()
+PARITY_REL_TOL = _PARITY_CONSTS["PARITY_REL_TOL"]
+PARITY_ABS_TOL = _PARITY_CONSTS["PARITY_ABS_TOL"]
+PARITY_SCALED_ABS_COEFF = _PARITY_CONSTS["PARITY_SCALED_ABS_COEFF"]
+F32_UNIT_ROUNDOFF = _PARITY_CONSTS["F32_UNIT_ROUNDOFF"]
 
 # 救済可否表の候補（イシュー #1985 受け入れ条件。現行係数 c=0.5 を含む）。
 TABLE_COEFFS = (0.5, 1.0, 1.5)
@@ -457,9 +502,9 @@ def run(n: int, device: str, out_path: str, max_fails: int | None) -> int:
         "timing_s": {"fill_vec": t_fill, "torch_mm": t_mm, "reference": t_ref},
         "env": env_info(torch),
     }
+    md_path = markdown_path_for(out_path)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    md_path = os.path.splitext(out_path)[0] + ".md"
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(render_markdown(result))
         f.write("\n")
@@ -467,6 +512,22 @@ def run(n: int, device: str, out_path: str, max_fails: int | None) -> int:
     # bench_py.py の参照と真の FMA 参照の bit 不一致は事実として記録するが
     # 終了コードは成功（診断結果の生成自体は完了しているため）。
     return 0
+
+
+def markdown_path_for(out_path: str) -> str:
+    """JSON 出力先 `out_path`（`.json` 必須）に対する Markdown 出力先を返す。
+
+    `--out result.md` のように JSON 側が `.md` だと Markdown が JSON を上書きして
+    fail_indices 等の詳細が失われるため、`.json` 以外は fail-closed に拒否する
+    （codex-review 指摘・PR #2032 P2）。
+    """
+    root, ext = os.path.splitext(out_path)
+    if ext.lower() != ".json":
+        raise ValueError(f"--out は `.json` で終わるパスを指定する（受領: {out_path!r}）")
+    md_path = root + ".md"
+    if os.path.abspath(md_path) == os.path.abspath(out_path):
+        raise ValueError(f"JSON と Markdown の出力先が衝突する: {out_path!r}")
+    return md_path
 
 
 def self_test() -> int:
@@ -516,6 +577,29 @@ def self_test() -> int:
     # 救済表の形（K 形は √K 形より緩い・c 単調）。
     tb = [scaled_abs_bound(4096, s_a, s_b, c, m) for c in TABLE_COEFFS for m in TABLE_K_MODES]
     check("bound 単調性（c 昇順・K > √K）", tb[0] < tb[2] < tb[4] and tb[1] < tb[3] < tb[5] and tb[0] > tb[1])
+
+    # (3b) 閾値は正本 parity.rs から読めている（値の複製はしない。ここでは抽出器の
+    # 形式検査と、`u` が f32 の単位丸めとして自然な範囲にあることのみ確認する）。
+    check("_extract_f64_const: 除算形 `1.0 / 16_777_216.0`", _extract_f64_const("pub const X: f64 = 1.0 / 16_777_216.0;", "X") == 2.0**-24)
+    check("_extract_f64_const: リテラル形 `1e-3`", _extract_f64_const("pub const Y: f64 = 1e-3;", "Y") == 1e-3)
+    for bad in ("pub const Z: f64 = 1.0 / 2.0 / 3.0;", "pub const Z: f64 = 1.0 * 2.0;", "pub const Q: f64 = 1.0;"):
+        try:
+            _extract_f64_const(bad, "Z")
+            check(f"_extract_f64_const: 拒否 {bad!r}", False)
+        except ValueError:
+            check(f"_extract_f64_const: 拒否 {bad!r}", True)
+    consts = load_parity_consts()
+    check("parity.rs から 4 定数を読み取れる", set(consts) == {"PARITY_REL_TOL", "PARITY_ABS_TOL", "PARITY_SCALED_ABS_COEFF", "F32_UNIT_ROUNDOFF"} and all(v > 0 for v in consts.values()))
+    check("F32_UNIT_ROUNDOFF は 2 の冪", math.log2(consts["F32_UNIT_ROUNDOFF"]).is_integer())
+
+    # (3c) 出力先の衝突を拒否する。
+    check("markdown_path_for(.json) → .md", markdown_path_for("x/result.json").endswith("result.md"))
+    for bad_out in ("x/result.md", "x/result", "x/result.txt"):
+        try:
+            markdown_path_for(bad_out)
+            check(f"markdown_path_for 拒否 {bad_out!r}", False)
+        except ValueError:
+            check(f"markdown_path_for 拒否 {bad_out!r}", True)
 
     torch = _import_torch()
     if torch is None:
@@ -579,6 +663,11 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if not os.path.isdir(out_dir):
         print("ERROR: --out の親ディレクトリが存在しない", file=sys.stderr)
+        return 2
+    try:
+        markdown_path_for(args.out)
+    except ValueError as err:
+        print(f"ERROR: {err}", file=sys.stderr)
         return 2
     return run(args.n, args.device, args.out, args.max_fails)
 
