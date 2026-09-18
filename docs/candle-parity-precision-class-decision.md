@@ -1,10 +1,26 @@
-# 比較対象の精度クラスと PyTorch cpu N=4096 fail 要素の扱いの設計判断（draft）
+# 比較対象の精度クラスと PyTorch cpu N=4096 fail 要素の扱いの設計判断（確定版・2026-09-18 ユーザー承認）
 
-> **本文書は draft（未承認）である。採否・適用スコープ・係数値・PyTorch 扱い方の 4 点はイシュー #1989 でのユーザー承認後に確定版化する。コード変更なし。**
+> **本文書は確定版である（イシュー #1989 承認記録コメント・2026-09-18T07:29Z）。**
+> 採否・適用スコープ・PyTorch 扱い方・spec 提案の起票可否の 4 点は §8 のとおりユーザー承認済み
+> （精度クラス案 P: 採用〈burn cuda の `tf32: true` 行のみ `u = 2^-11`〉／適用スコープ:
+> framework-compare ハーネス限定・`tf32: true` 行のみ／PyTorch cpu N=4096 の 1 要素: T1〈現状維持〉／
+> spec 起票: (b) 形式で可 → 起票済み Fandhe-AI/fandhe-ai-spec#70）。
+> §2〜§7・§9 の分析節は draft 時点（イシュー #1986）の内容をそのまま保持し、確定に伴う追記は
+> 「**確定（2026-09-18）**」の見出しで区別する。
+>
+> 本確定版化（docs のみの変更）にあたっても `PARITY_REL_TOL`（1e-3）・`PARITY_ABS_TOL`（1e-5）・
+> `PARITY_SCALED_ABS_COEFF`（0.5）・`F32_UNIT_ROUNDOFF`（2^-24）の 4 定数・本体判定式
+> （`compare`／`assert_parity`／`ParityBaseline`）・`docs/spec/`（正本 submodule）は一切変更して
+> いない。承認済み契約のハーネスへの実装は #1987（burn 精度クラス結線）→ #1988（GB10 再計測）
+> が扱う。
 
 ## 1. 位置づけ
 
-イシューツリー ルート #1966（Phase 5）→ 親 #1982（判定不能 6 セル）→ #1983 → #1984 → #1985 → **本イシュー #1986** → #1989（ユーザー承認）→ #1987（実装）→ #1988（再計測）。
+イシューツリー ルート #1966（Phase 5）→ 親 #1982（判定不能 6 セル）→ #1983 → #1984 → #1985 → 本イシュー #1986 → **#1989（ユーザー承認・spec 提案起票。2026-09-18 完了）** → #1987（実装）→ #1988（再計測）。
+
+**確定（2026-09-18）**: #1989 でユーザー承認が完了し、精度クラス案 P を (b) 形式で
+Fandhe-AI/fandhe-ai-spec#70（https://github.com/Fandhe-AI/fandhe-ai-spec/issues/70）として
+起票済み。実装は #1987（着手可能）→ #1988（GB10 再計測）へ引き継ぐ。詳細は §7・§8 を参照。
 
 前作は #1239（`docs/candle-parity-tolerance-contract-decision.md` 確定版。2026-09-08 ユーザー承認。イシューツリー #1234（旧ルート）→ Phase 1 親 #1236 配下）であり、本文書はその続編として位置づける。
 
@@ -93,7 +109,7 @@ framework-compare 0.9.0 系列（2026-09-18 registry ピン）で、スコアボ
 | T2（c=1.0 化） | 全体 | 全数救済維持（bound は c に単調増加。c=0.5 の救済は c=1.0 でも保持） | 救済 | 0 fail 不変（ただし許容範囲 2 倍化により将来の後退を見逃すリスク） | 必要（係数再承認） | `PARITY_SCALED_ABS_COEFF=1.0`・テスト定数・`bench_py.py` の係数リテラル | 低（回帰見逃しリスク） |
 | T3（√K 化） | N/A | √K 救済率は 98% 台（全数救済不可能） | fail のまま | 0 fail 不変 | 必要（形式再承認） | 判定式変更・テスト複数箇所 | 非推奨 |
 
-## 5. 推奨案（未承認）
+## 5. 推奨案（draft 時点の提案。§8 で P＋T1 を承認）
 
 ### 精度クラス導入（案 P）を推奨候補
 
@@ -136,18 +152,31 @@ framework-compare 0.9.0 系列（2026-09-18 registry ピン）で、スコアボ
 - 2026-09-12 (b-2) で承認済みの `u=2^-24`・`c=0.5`・線形 K を c=1.0 へ改定するため、spec への反映（人間承認）が前提
 - 既存 (b-2) の係数改定として (b) 形式で別途起票（本 draft では起票しない）
 
-## 8. ユーザー承認記録（承認待ち）
+**確定（2026-09-18）**: #1989 で承認事項 4「spec 提案の起票可否」が **(b) 形式で可**と承認され、
+案 P（burn cuda の `tf32: true` 行のみ `u = 2^-11`・framework-compare ハーネス限定・`c=0.5`／線形
+K／既存 2 条件／tolerance 4 定数／本体判定式は不変）を REQ-2 の 2026-09-12 追記への項 5〈(b-3)〉
+追加提案として **Fandhe-AI/fandhe-ai-spec#70**
+（https://github.com/Fandhe-AI/fandhe-ai-spec/issues/70）へ起票済み（前例 #1241 → spec#64 と
+同型）。T1（PyTorch cpu N=4096 の扱い）は spec 変更不要のため提案には含めず、スコープ境界として
+明記した。案 T2（係数 c=1.0）は不採用（§8 参照）のため spec 提案は行わない。
 
-| 項目 | 案 | 決定 | 記録 |
-|------|------|------|------|
-| 精度クラス導入の採否 | P vs P′ | 承認待ち | |
-| burn TF32 行への適用 | u=2^-11 機械的事実の受け入れ | 承認待ち | |
-| PyTorch cpu N=4096 の扱い | T1（現状維持） vs T2（c=1.0） | 承認待ち | |
-| spec 側提案の起票可否 | P: 必要（(b) 形式）/ T1: 不要 / T2: 必要 | 承認待ち（P または T2 選択時） | |
+## 8. ユーザー承認記録（#1989・2026-09-18 承認済み）
 
-### 承認記録ブロック（決定後に記入）
+draft 時点で #1989 へ委ねた 4 点は、#1989 の承認記録コメント（2026-09-18T07:29:09Z）で次のとおり
+確定した。
 
-（承認待ち）本文書の §8 承認記録は #1989 でのユーザー判断を受けて記入予定
+| # | 承認待ち事項（draft 時点） | 承認内容（2026-09-18） |
+|---|---|---|
+| 1 | 精度クラス導入の採否（P vs P′） | **P を採用**（burn cuda の `tf32: true` 行のみ単位丸め `u = 2^-11` を適用する） |
+| 2 | burn TF32 行への適用（u=2^-11 の機械的事実の受け入れ） | **承認**（#1984 の真値突合〈fma_bit_match 100%・参照側が真値に近い 100%・全 N で母集団全数救済〉を根拠として受け入れる） |
+| 3 | 適用スコープ | **framework-compare ハーネス限定・`tf32: true` 行のみ**。fandhe-ai 行・本体判定式（`compare`／`assert_parity`／`ParityBaseline`）・tolerance 4 定数は不変 |
+| 4 | PyTorch cpu N=4096 の扱い（T1 vs T2 vs T3） | **T1（現状維持）**。spec REQ-2 (b-1) 上正当な「判定不能」として扱い、係数 `c` は変更しない（T2／T3 は不採用） |
+| 5 | spec 側提案の起票可否 | **(b) 形式で可**（案 P のみ。T1 は spec 変更不要のため対象外）→ Fandhe-AI/fandhe-ai-spec#70（https://github.com/Fandhe-AI/fandhe-ai-spec/issues/70）として起票済み |
+
+出典: https://github.com/Fandhe-AI/fandhe-ai/issues/1989 （承認依頼コメント
+2026-09-18T06:07:02Z・承認記録コメント 2026-09-18T07:29:09Z・spec 起票記録コメント
+2026-09-18T07:33:48Z）。承認内容に基づく実装は #1987（着手可能）→ #1988（GB10 再計測）へ
+引き継ぐ。
 
 ## 9. Phase 2 の反映範囲
 
@@ -167,12 +196,26 @@ framework-compare 0.9.0 系列（2026-09-18 registry ピン）で、スコアボ
 - T1（現状維持）: 修正なし（記録のみ）
 - T2（c=1.0）: `PARITY_SCALED_ABS_COEFF=1.0` に変更・テスト境界値更新に加え、PyTorch 計測経路 `docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py::parity`（`bound = 0.5 * (2.0 ** -24) * n * sa * sb` と係数 `0.5` を直接定義）の係数更新（または共通定数の参照化）も反映範囲に含める。Rust 側定数の変更だけでは PyTorch の bound は変わらず、目的の 1 要素は救済されない。GB10 / M4 Max での framework-compare 再計測
 
+**確定（2026-09-18）**: §8 の承認により T1（現状維持）が確定したため、#1988 の PyTorch 側対応は
+「修正なし（記録のみ）」に固定される。#1987 は burn 精度クラス実装（案 P）で着手可能。#1988 は
+#1987 完了後に burn cuda 5 セルの判定不能解消・PyTorch cpu N=4096 の判定不能記録維持を GB10 で
+再計測し、スコアボード（`docs/perf/framework-compare-feature-matrix-0.9.0.md` 系列）を再生成する。
+
 ## 10. 未変更事項の確認
+
+本決定記録の作成（draft・イシュー #1986）および確定版化（イシュー #1989）のいずれにおいても、
+以下は一切変更していない:
+
+```
+$ git diff --stat origin/main -- crates/ scripts/ .github/ docs/spec/
+(出力なし)
+```
 
 本候補すべてで不変：
 
 - `PARITY_REL_TOL=1e-3`（`RELATIVE_TOLERANCE` 机上検証テスト不変）。出典：`scripts/bench/framework-compare/bench-common/src/parity.rs` (line 56)
 - `PARITY_ABS_TOL=1e-5`（`ABSOLUTE_RESCUE_THRESHOLD` 机上検証テスト不変）。出典：同ファイル (line 61)
+- `PARITY_SCALED_ABS_COEFF=0.5`・`F32_UNIT_ROUNDOFF=2^-24`。出典：同ファイル (line 84・90)
 - 本体判定式（`crates/backend-cpu/src/parity.rs::compare` ほか）及び `ParityBaseline`
 - `docs/spec/04-requirements.md` REQ-2 の定義（2026-09-12 追記 (b-1)/(b-2) 不変）
 
@@ -183,3 +226,4 @@ framework-compare 0.9.0 系列（2026-09-18 registry ピン）で、スコアボ
 - 実測データ：`docs/perf/logs/parity-torch-cpu-truth-1985/`（#1985 の PyTorch cpu N=4096 真値突合）
 - 判定式出典：`scripts/bench/framework-compare/bench-common/src/parity.rs::ScaledAbsTolerance`・`PARITY_SCALED_ABS_COEFF` (line 84)・`F32_UNIT_ROUNDOFF` (line 90)
 - spec 参考：`docs/spec/04-requirements.md` REQ-2 節（2026-09-12 追記 (b-1)・(b-2)）
+- spec 提案：Fandhe-AI/fandhe-ai-spec#70（https://github.com/Fandhe-AI/fandhe-ai-spec/issues/70。#1989 承認事項 5 に基づく (b) 形式提案）
