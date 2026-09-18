@@ -3,9 +3,8 @@
 本ディレクトリは、TMA（`cp.async.bulk.tensor`）ロード経路 Stage 1
 （64×64 pipeline・`shared::cta`。`crates/backend-cuda/src/kernels_tiled_
 pipeline.rs`「TMA」節・`crates/backend-cuda/src/gemm.rs::
-tma_tiled_pipeline` モジュール）の GB10 実機検証（イシュー #1976）向け
-ランブックである。本 issue（#1975）の実装セッションには DGX Spark GB10
-実機への到達手段がなく、実測は未実施のまま本 README のみを整備した。
+tma_tiled_pipeline` モジュール）の GB10 実機検証（イシュー #1976）を記録
+する。実測は 2026-09-18 に完了済み。
 
 設計の正は `docs/backend-cuda-tma-gemm-load-design.md` §6（事前登録
 ゲート）・§10（実装記録。#1975 で追記）を参照する。本 README は本節と
@@ -61,12 +60,12 @@ cargo test -p fandhe-ai-backend-cuda --test tma_probe_real_device \
   仮説成立、非空なら不成立として記録する（CI 失敗にしない）。不成立の
   場合、`ignored_tests.log` の出力（不一致形状一覧）を
   `docs/backend-cuda-tma-gemm-load-design.md` §10 へ転記する。
-- **性能（参考。ベンチ example 未実装のため本 issue では計測しない）**:
-  ゲート C（純カーネル時間・N=1024/2048/4096 の 5 回計測中央値）・
-  ゲート D（本番ディスパッチ非後退）は、`examples/gemm_tiled_pipeline_
-  persistent_bench.rs` への `--tma off|none|b64` 列追加（設計計画
-  Step 6・本 issue では未実施）が前提のため、#1976 以降で改めて整備
-  する。
+- **性能（#1976 実測済み）**: ゲート C（純カーネル時間・N=256〜4096 の
+  5 回計測中央値）は `aggregate.md` に記録済み。ベンチ列（
+  `tma_none_gpu_only_tflops`／`tma_b64_gpu_only_tflops`）を
+  `crates/backend-cuda/examples/gemm_tiled_pipeline_bench.rs` へ追加
+  実装済み。ゲート D（本番ディスパッチ非後退）は結線対象外のため
+  省略。
 
 ## 未実施事項（#1975 のスコープ縮小。詳細は設計 doc §10）
 

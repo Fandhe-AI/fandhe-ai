@@ -190,6 +190,14 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
   - cluster・cta のいずれも全 arch でコンパイルまたは実行が失敗、かつ上記一次トリアージで全失敗理由が (a) opcode／arch 非対応と判定できた場合のみ: 起票不要。(b) プローブ自体のバグに起因する失敗が一件でも含まれる場合は「起票不要」と確定せず、プローブ修正・再実行後に再判定する。
 - 実機実行手順は `docs/real-hardware-verification-env.md`（接続情報・実ホスト名は同ドキュメントの `*.local.md` 参照方式に従い本節には記載しない）。
 
+#### Stage 1 GB10 実測（2026-09-18・イシュー #1976）
+
+TMA ロード経路の Stage 1（64×64 pipeline・`shared::cta`）設計が gb10 実機で検証完了。詳細は `docs/backend-cuda-tma-gemm-load-design.md` §10.7 を参照。要点は以下のとおり:
+
+- **ゲート A（bit 一致）**: 6 テスト・意味論プローブ 3 件が全て pass。B64 swizzle 仮説は全 7 形状で cp.async 版と一致確認。
+- **ゲート B（parity 非後退）**: 36 テスト 0 FAIL。既知外の失敗なし。
+- **ゲート C（純カーネル時間）**: N=256 で後退（0.9857/0.9627）を観測。§6 の no-go 条件「ゲート C で後退する形状が 1 件でもある」に該当し **REJECT** 確定。本番結線なし。
+
 ## 13. setmaxnreg プローブ結果（#484）
 
 - **位置づけ**: 親イシュー #480（Phase A: GEMM 最適化の前提確定・実機プローブ）の A-4。`setmaxnreg.inc/dec.sync.aligned.u32`（warp specialization レジスタ再配分。producer/consumer warp 間でレジスタ予算を非対称配分する PTX 命令）が sm_121（DGX Spark GB10）+ NVRTC（CUDA 13.0 系）で受理・実行可能かを確定させ、後続 B-3（タイル拡大時のレジスタ予算設計）の設計自由度の上限を明らかにする spike。
