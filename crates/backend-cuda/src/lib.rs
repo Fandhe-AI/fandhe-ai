@@ -613,8 +613,13 @@ pub use gemm::{StreamKPlan, StreamKTiledPipelineFunction};
 // モード選択パラメータ）も同じゲートで公開する。**本番既定経路
 // （`CudaGemm::new`）は本節の型を一切生成しない**
 // （`gemm.rs::tma_tiled_pipeline` モジュールコメント参照）。
+// `TmaTiledPipelineMaps`／`CudaGemm::prepare_tiled_pipeline_tma_maps`／
+// `CudaGemm::launch_tiled_pipeline_tma_f32_prepared`（イシュー #1976）は
+// テンソルマップの事前 encode と起動を分離する API で、ゲート C（純
+// カーネル時間）の計測区間統一が目的（`encode_tensor_map_2d_f32` の
+// driver 接触コストを計測ループの外へ出す）。同じゲートで公開する。
 #[cfg(feature = "internal-diagnostics")]
-pub use gemm::TmaTiledPipelineFunction;
+pub use gemm::{TmaTiledPipelineFunction, TmaTiledPipelineMaps};
 pub use gemm_auto::{
     CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
     TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,

@@ -6217,6 +6217,53 @@ mod tma_tiled_pipeline {
         swizzle: TmaSwizzleA,
     }
 
+    /// [`TmaTiledPipelineMaps`] が保持する準備結果の種別。`m == 0 ||
+    /// n == 0`（カーネル起動自体が no-op）・`k == 0`（テンソルマップの
+    /// ゼロ次元は `cuTensorMapEncodeTiled` へ渡せないため構築不能）は
+    /// テンソルマップを生成しない特別扱いが要る（既存
+    /// [`CudaGemm::launch_tiled_pipeline_tma_f32`] の早期 return 契約と
+    /// 同じ分岐。分岐先は [`CudaGemm::launch_tiled_pipeline_tma_f32_
+    /// prepared`] 側で解釈する）。
+    enum TmaTiledPipelineMapsKind {
+        /// `m == 0 || n == 0`: 起動時に `c_dev` へ一切書き込まない
+        /// （既存契約と同一。要素数 0 のため無害）。
+        NoOp,
+        /// `k == 0`: 起動時に `c_dev` を明示的に `memset_zeros` する
+        /// （既存契約「+0.0 を store する」の代替。既存ドキュメンテーション
+        /// コメント参照）。
+        ZeroK,
+        /// 通常経路: 事前 encode 済みのテンソルマップ。`CUtensorMap` は
+        /// 128 バイトの opaque 配列（`a_map`/`b_map` の 2 個で 256 バイト）
+        /// のため、`NoOp`/`ZeroK`（0 バイト）との enum サイズ差を
+        /// clippy（`large_enum_variant`）が指摘する。`Box` で間接化し、
+        /// `#[allow]` を使わずに解消する。
+        Ready(Box<(TensorMapArg, TensorMapArg)>),
+    }
+
+    /// [`CudaGemm::prepare_tiled_pipeline_tma_maps`] が返す準備結果
+    /// （イシュー #1976 ゲート C「純カーネル時間」計測区間の統一が目的。
+    /// `encode_tensor_map_2d_f32` はストリーム順序上の待機・`SyncOnDrop`
+    /// によるイベント記録を伴う driver 接触を行うため、これを計測
+    /// ループの外〈本構造体を構築する 1 回のみ〉へ切り出し、計測
+    /// ループ内は [`CudaGemm::launch_tiled_pipeline_tma_f32_prepared`]
+    /// のカーネル起動のみにする）。**本番既定経路（`CudaGemm::new`）は
+    /// 本型を一切生成しない**（`TmaTiledPipelineFunction` と同じ
+    /// `internal-diagnostics` feature 限定・opt-in API）。
+    ///
+    /// `a_dev`/`b_dev` を借用（`'a` ライフタイム）で保持することで、
+    /// テンソルマップが指す先のデバイスバッファが
+    /// [`CudaGemm::launch_tiled_pipeline_tma_f32_prepared`] 呼び出しの
+    /// 間ずっと生存することを型で保証する（マップが指すアドレスが
+    /// 解放済みバッファを指す use-after-free をコンパイル時に防ぐ）。
+    pub struct TmaTiledPipelineMaps<'a> {
+        kind: TmaTiledPipelineMapsKind,
+        a_dev: &'a GuardedSlice<f32>,
+        b_dev: &'a GuardedSlice<f32>,
+        dims: (u32, u32, u32),
+        context_ptr: usize,
+        swizzle: TmaSwizzleA,
+    }
+
     /// `swizzle` 腕ごとに一意な `CudaKernelDescriptor` ラベルを返す
     /// （[`crate::module_cache::load_function_cached`] のキャッシュキーの
     /// 一部として使われるため、腕ごとに異なる文字列を返す契約が必須。
@@ -6286,62 +6333,64 @@ mod tma_tiled_pipeline {
             })
         }
 
-        /// デバイス常駐済みの A/B/C バッファに対して TMA 版カーネルを
-        /// 起動し、完了を待たずに投入する（[`Self::
-        /// launch_tiled_pipeline_persistent_f32`] と同じ「GPU 実行のみ」
-        /// 区間の非同期投入契約〈#1013〉）。
+        /// TMA 版カーネル起動に先立ち、テンソルマップ（`CUtensorMap`）を
+        /// 事前 encode する（イシュー #1976 ゲート C「純カーネル時間」の
+        /// 計測区間統一が目的。`encode_tensor_map_2d_f32` はストリーム
+        /// 順序上の待機・`SyncOnDrop` によるイベント記録を伴う driver
+        /// 接触を行うため、これを [`Self::launch_tiled_pipeline_tma_f32_
+        /// prepared`] の計測対象区間から切り出す）。
         ///
         /// ホスト側形状検証・context 一致検証は
         /// [`Self::launch_tiled_pipeline_persistent_f32`] と同一の理由・
-        /// 同一の手順。**`k == 0` は早期 return する**（`m == 0 || n == 0`
+        /// 同一の手順（`c_dev` は未確定のため `validate_output_len` は
+        /// ここでは行わず、[`Self::launch_tiled_pipeline_tma_f32_
+        /// prepared`] 側で `c_dev` を受け取った時点で検証する）。
+        ///
+        /// **`k == 0` はテンソルマップを構築しない**（`m == 0 || n == 0`
         /// の直後。既存 cp.async 版〈`num_k_tiles == 0` がカーネル内で
         /// そのまま no-op になる〉とは異なり、TMA 版はテンソルマップ構築
         /// 時に `global_cols`/`global_rows`（K 由来次元）へ `0` を渡せない
         /// ため〈`TmaBoxSpec::validate` の fail-closed ゼロ次元拒否〉、
+        /// [`TmaTiledPipelineMapsKind::ZeroK`] として保持し、起動時
+        /// （[`Self::launch_tiled_pipeline_tma_f32_prepared`]）に
         /// `c_dev` を明示的に `memset_zeros` して「+0.0 を store する」
-        /// 契約をホスト側で代替する）。
-        ///
-        /// テンソルマップは起動ごとに `encode_tensor_map_2d_f32` で新規
-        /// 生成する（tensor map キャッシュは本 issue のスコープ外。設計
-        /// doc §4.4・§8「スコープ外・申し送り」参照。GPU-only 区間の
-        /// 計測ではホスト側 encode 費用は含まれない点に注意）。
+        /// 契約を代替する）。
         ///
         /// **公開面ゲート**: [`Self::launch_tiled_pipeline_persistent_f32`]
         /// と同じ `internal-diagnostics` feature（既定 off）でゲートする。
+        /// **本番既定経路（`CudaGemm::new`）は本メソッドを一切呼ばない**。
         ///
         /// `dims` に `(m, n, k)` をまとめて渡す（引数 7 個以下に収め
         /// `#[allow(clippy::too_many_arguments)]` を新規に付けない設計。
         /// `.claude/rules/coding-rust.md`）。
-        pub fn launch_tiled_pipeline_tma_f32(
+        pub fn prepare_tiled_pipeline_tma_maps<'a>(
             &self,
             func: &TmaTiledPipelineFunction,
-            a_dev: &GuardedSlice<f32>,
-            b_dev: &GuardedSlice<f32>,
-            c_dev: &mut GuardedSlice<f32>,
+            a_dev: &'a GuardedSlice<f32>,
+            b_dev: &'a GuardedSlice<f32>,
             dims: (u32, u32, u32),
-        ) -> Result<(), CudaError> {
+        ) -> Result<TmaTiledPipelineMaps<'a>, CudaError> {
             let (m, n, k) = dims;
             let self_context_ptr = Arc::as_ptr(self.stream.context()) as usize;
             if func.context_ptr != self_context_ptr {
                 return Err(CudaError::TiledPipelineContextMismatch {
                     detail: "TmaTiledPipelineFunction was compiled against a different \
                              CudaContext (different CudaDevice/GPU) than this CudaGemm \
-                             instance's stream; refusing to launch across mismatched CUDA \
-                             contexts"
+                             instance's stream; refusing to prepare tensor maps across \
+                             mismatched CUDA contexts"
                         .to_string(),
                 });
             }
             for (name, buf_context_ptr) in [
                 ("a_dev", Arc::as_ptr(a_dev.as_raw().context()) as usize),
                 ("b_dev", Arc::as_ptr(b_dev.as_raw().context()) as usize),
-                ("c_dev", Arc::as_ptr(c_dev.as_raw().context()) as usize),
             ] {
                 if buf_context_ptr != self_context_ptr {
                     return Err(CudaError::TiledPipelineContextMismatch {
                         detail: format!(
                             "{name} was allocated on a different CudaContext (different \
                              CudaDevice/GPU) than this CudaGemm instance's stream; refusing \
-                             to launch across mismatched CUDA contexts"
+                             to prepare tensor maps across mismatched CUDA contexts"
                         ),
                     });
                 }
@@ -6356,9 +6405,15 @@ mod tma_tiled_pipeline {
                     ),
                 });
             }
-            validate_output_len(c_dev.as_raw().len(), m, n)?;
             if m == 0 || n == 0 {
-                return Ok(());
+                return Ok(TmaTiledPipelineMaps {
+                    kind: TmaTiledPipelineMapsKind::NoOp,
+                    a_dev,
+                    b_dev,
+                    dims,
+                    context_ptr: self_context_ptr,
+                    swizzle: func.swizzle,
+                });
             }
             // `k == 0`: `num_k_tiles == 0` となりテンソルマップを構築
             // する要素次元（`global_cols`/`global_rows` の一方が 0）を
@@ -6367,12 +6422,17 @@ mod tma_tiled_pipeline {
             // `TP_TMA_TILE_CORE` の「カーネル内 no-op（acc はゼロのまま
             // guarded store）」契約をホスト側で代替する（`run_tiled_
             // pipeline_persistent_f32` の `k == 0` 早期 return と同型の
-            // 「+0.0 を store する」意味論。`c_dev` はこの時点でゼロ初期化
-            // されている保証がないため明示的に memset する）。
+            // 「+0.0 を store する」意味論。実際の memset は
+            // `launch_tiled_pipeline_tma_f32_prepared` 側で `c_dev` を
+            // 受け取った時点で行う）。
             if k == 0 {
-                return self.with_driver_call(|| {
-                    self.stream.memset_zeros(c_dev.as_raw_mut())?;
-                    Ok(())
+                return Ok(TmaTiledPipelineMaps {
+                    kind: TmaTiledPipelineMapsKind::ZeroK,
+                    a_dev,
+                    b_dev,
+                    dims,
+                    context_ptr: self_context_ptr,
+                    swizzle: func.swizzle,
                 });
             }
 
@@ -6384,31 +6444,21 @@ mod tma_tiled_pipeline {
                 // 実機検証はイシュー #1976）。
                 TmaSwizzleA::B64 => CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
             };
-            let grid_dim = (
-                n.div_ceil(kernels_tiled_pipeline::TP_BN),
-                m.div_ceil(kernels_tiled_pipeline::TP_BM),
-                1,
-            );
-            let cfg = LaunchConfig {
-                grid_dim,
-                block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
             // codex-review P0 是正（PR #2027）: `encode_tensor_map_2d_f32`
             // は FFI 呼び出しに加えてストリーム順序上の待機・
             // `SyncOnDrop` によるイベント記録も伴う driver 接触を行うため
             // （cudarc 0.19.8 の `device_ptr` 実装）、この呼び出しをカーネル
-            // 起動と同じ `with_driver_call` 排他区間の内側へ移した。
-            // 以前は a_map／b_map の構築が `with_driver_call` の外で
-            // 行われており、`self.ordinal` が Poisoned／Retiring な状態でも
-            // `begin_driver_call` の拒否より先に driver へ接触してしまい
-            // （invalidate の in-flight ドレイン対象にも計上されない）、
-            // `run_f32_kernel` 等の他エントリと同じ fail-closed 保護契約
-            // （このファイル冒頭「`context_cache::begin_driver_call` の
-            // capture 排他検査」節参照）に反していた。
-            self.with_driver_call(|| {
+            // 起動と同じ `with_driver_call` 排他区間の内側へ移した（この
+            // 意図は本メソッドでも維持する。以前は a_map／b_map の構築が
+            // `with_driver_call` の外で行われており、`self.ordinal` が
+            // Poisoned／Retiring な状態でも `begin_driver_call` の拒否より
+            // 先に driver へ接触してしまい〈invalidate の in-flight
+            // ドレイン対象にも計上されない〉、`run_f32_kernel` 等の他
+            // エントリと同じ fail-closed 保護契約〈このファイル冒頭
+            // 「`context_cache::begin_driver_call` の capture 排他検査」節
+            // 参照〉に反していた）。
+            let (a_map, b_map) = self.with_driver_call(|| {
                 let a_map = encode_tensor_map_2d_f32(
                     &self.stream,
                     a_dev.as_raw(),
@@ -6434,34 +6484,157 @@ mod tma_tiled_pipeline {
                         swizzle: CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
                     },
                 )?;
+                Ok((a_map, b_map))
+            })?;
 
-                // SAFETY: `run_tiled_pipeline_persistent_f32`（`gemm.rs`）と
-                // 同一の根拠。カーネル引数（a_map/b_map・a_dev/b_dev/c_dev・
-                // m_i/n_i/k_i）は上記で検証済みの m/n/k と 1:1 対応し、
-                // カーネル内の手動境界チェック（プロローグのタイル起点ガード・
-                // steady state のタイムアウト付きポーリング・エピローグの
-                // guarded store。`kernels_tiled_pipeline.rs::TP_TMA_TILE_CORE`
-                // ドキュメンテーションコメント「不変条件」参照）と合わせて
-                // OOB 読み書きが起きない根拠とする。`a_map`/`b_map` は
-                // `launch_builder` の safe `.arg(&...)` 経由で渡す（`raw`
-                // launch へフォールバックしない。設計 doc §2「調査で確定した
-                // 事実」参照: `PushKernelArg<&T: DeviceRepr>` はポインタを
-                // push するだけで、プローブの raw `kernel_params` と同一表現）。
-                unsafe {
-                    self.stream
-                        .launch_builder(&func.func)
-                        .arg(&a_map)
-                        .arg(&b_map)
-                        .arg(a_dev.as_raw())
-                        .arg(b_dev.as_raw())
-                        .arg(c_dev.as_raw_mut())
-                        .arg(&m_i)
-                        .arg(&n_i)
-                        .arg(&k_i)
-                        .launch(cfg)?;
-                }
-                Ok(())
+            Ok(TmaTiledPipelineMaps {
+                kind: TmaTiledPipelineMapsKind::Ready(Box::new((a_map, b_map))),
+                a_dev,
+                b_dev,
+                dims,
+                context_ptr: self_context_ptr,
+                swizzle: func.swizzle,
             })
+        }
+
+        /// [`Self::prepare_tiled_pipeline_tma_maps`] が返した事前 encode
+        /// 済みテンソルマップを使って TMA 版カーネルを起動し、完了を
+        /// 待たずに投入する（[`Self::launch_tiled_pipeline_persistent_f32`]
+        /// と同じ「GPU 実行のみ」区間の非同期投入契約〈#1013〉）。
+        /// イシュー #1976 ゲート C の主目的である「純カーネル時間の複数回
+        /// 計測」では、`prepare_tiled_pipeline_tma_maps` を計測ループの
+        /// 外で 1 回呼び、本メソッドのみを計測ループ内で繰り返し呼ぶ
+        /// （`encode_tensor_map_2d_f32` の driver 接触コストが計測対象へ
+        /// 混入しない）。
+        ///
+        /// `func`／`maps` が同一の `prepare_tiled_pipeline_tma_maps`
+        /// 呼び出し由来であることを `context_ptr`／`swizzle` の一致で
+        /// fail-closed に検証する（食い違った `func` と `maps` の組合せで
+        /// 起動すると、カーネル側が期待する swizzle と実際のテンソル
+        /// マップの swizzle が食い違い、誤った物理配置を読む）。
+        ///
+        /// **公開面ゲート**: [`Self::launch_tiled_pipeline_persistent_f32`]
+        /// と同じ `internal-diagnostics` feature（既定 off）でゲートする。
+        /// **本番既定経路（`CudaGemm::new`）は本メソッドを一切呼ばない**。
+        pub fn launch_tiled_pipeline_tma_f32_prepared(
+            &self,
+            func: &TmaTiledPipelineFunction,
+            maps: &TmaTiledPipelineMaps<'_>,
+            c_dev: &mut GuardedSlice<f32>,
+        ) -> Result<(), CudaError> {
+            let self_context_ptr = Arc::as_ptr(self.stream.context()) as usize;
+            if func.context_ptr != self_context_ptr || maps.context_ptr != self_context_ptr {
+                return Err(CudaError::TiledPipelineContextMismatch {
+                    detail: "TmaTiledPipelineFunction and/or TmaTiledPipelineMaps were \
+                             prepared against a different CudaContext (different \
+                             CudaDevice/GPU) than this CudaGemm instance's stream; refusing \
+                             to launch across mismatched CUDA contexts"
+                        .to_string(),
+                });
+            }
+            if func.swizzle != maps.swizzle {
+                return Err(CudaError::TiledPipelineContextMismatch {
+                    detail: format!(
+                        "TmaTiledPipelineFunction (swizzle={:?}) does not match the swizzle \
+                         mode (swizzle={:?}) that TmaTiledPipelineMaps was prepared with; \
+                         refusing to launch a mismatched func/maps pair",
+                        func.swizzle, maps.swizzle
+                    ),
+                });
+            }
+            let c_context_ptr = Arc::as_ptr(c_dev.as_raw().context()) as usize;
+            if c_context_ptr != self_context_ptr {
+                return Err(CudaError::TiledPipelineContextMismatch {
+                    detail: "c_dev was allocated on a different CudaContext (different \
+                             CudaDevice/GPU) than this CudaGemm instance's stream; refusing \
+                             to launch across mismatched CUDA contexts"
+                        .to_string(),
+                });
+            }
+            let (m, n, k) = maps.dims;
+            validate_output_len(c_dev.as_raw().len(), m, n)?;
+
+            match &maps.kind {
+                TmaTiledPipelineMapsKind::NoOp => Ok(()),
+                TmaTiledPipelineMapsKind::ZeroK => self.with_driver_call(|| {
+                    self.stream.memset_zeros(c_dev.as_raw_mut())?;
+                    Ok(())
+                }),
+                TmaTiledPipelineMapsKind::Ready(maps_box) => {
+                    let (a_map, b_map) = maps_box.as_ref();
+                    let grid_dim = (
+                        n.div_ceil(kernels_tiled_pipeline::TP_BN),
+                        m.div_ceil(kernels_tiled_pipeline::TP_BM),
+                        1,
+                    );
+                    let cfg = LaunchConfig {
+                        grid_dim,
+                        block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+                    // SAFETY: `run_tiled_pipeline_persistent_f32`（`gemm.rs`）と
+                    // 同一の根拠。カーネル引数（a_map/b_map・a_dev/b_dev/c_dev・
+                    // m_i/n_i/k_i）は `prepare_tiled_pipeline_tma_maps` で検証済みの
+                    // m/n/k と 1:1 対応し、カーネル内の手動境界チェック
+                    // （プロローグのタイル起点ガード・steady state のタイムアウト付き
+                    // ポーリング・エピローグの guarded store。
+                    // `kernels_tiled_pipeline.rs::TP_TMA_TILE_CORE` ドキュメンテーション
+                    // コメント「不変条件」参照）と合わせて OOB 読み書きが起きない根拠と
+                    // する。`a_map`/`b_map` は `launch_builder` の safe `.arg(&...)`
+                    // 経由で渡す（`raw` launch へフォールバックしない。設計 doc §2
+                    // 「調査で確定した事実」参照: `PushKernelArg<&T: DeviceRepr>` は
+                    // ポインタを push するだけで、プローブの raw `kernel_params` と
+                    // 同一表現）。
+                    self.with_driver_call(|| {
+                        unsafe {
+                            self.stream
+                                .launch_builder(&func.func)
+                                .arg(a_map)
+                                .arg(b_map)
+                                .arg(maps.a_dev.as_raw())
+                                .arg(maps.b_dev.as_raw())
+                                .arg(c_dev.as_raw_mut())
+                                .arg(&m_i)
+                                .arg(&n_i)
+                                .arg(&k_i)
+                                .launch(cfg)?;
+                        }
+                        Ok(())
+                    })
+                }
+            }
+        }
+
+        /// デバイス常駐済みの A/B/C バッファに対して TMA 版カーネルを
+        /// 起動し、完了を待たずに投入する（[`Self::
+        /// launch_tiled_pipeline_persistent_f32`] と同じ「GPU 実行のみ」
+        /// 区間の非同期投入契約〈#1013〉）。[`Self::
+        /// prepare_tiled_pipeline_tma_maps`]・[`Self::
+        /// launch_tiled_pipeline_tma_f32_prepared`] への薄い委譲
+        /// （テンソルマップを毎呼び出しで新規 encode する。挙動は分離前と
+        /// 完全に同一——`tests/cpu_cuda_tiled_pipeline_tma_parity.rs` の
+        /// 既存テストがこの等価性を検証する）。呼び出しを跨いでテンソル
+        /// マップを再利用したい場合（イシュー #1976 ゲート C の純カーネル
+        /// 時間計測等）は、上記 2 メソッドを直接呼ぶ。
+        ///
+        /// **公開面ゲート**: [`Self::launch_tiled_pipeline_persistent_f32`]
+        /// と同じ `internal-diagnostics` feature（既定 off）でゲートする。
+        ///
+        /// `dims` に `(m, n, k)` をまとめて渡す（引数 7 個以下に収め
+        /// `#[allow(clippy::too_many_arguments)]` を新規に付けない設計。
+        /// `.claude/rules/coding-rust.md`）。
+        pub fn launch_tiled_pipeline_tma_f32(
+            &self,
+            func: &TmaTiledPipelineFunction,
+            a_dev: &GuardedSlice<f32>,
+            b_dev: &GuardedSlice<f32>,
+            c_dev: &mut GuardedSlice<f32>,
+            dims: (u32, u32, u32),
+        ) -> Result<(), CudaError> {
+            let maps = self.prepare_tiled_pipeline_tma_maps(func, a_dev, b_dev, dims)?;
+            self.launch_tiled_pipeline_tma_f32_prepared(func, &maps, c_dev)
         }
 
         /// ホストスライス入出力の TMA 版カーネル実行
@@ -6620,7 +6793,7 @@ mod tma_tiled_pipeline {
 }
 
 #[cfg(feature = "internal-diagnostics")]
-pub use tma_tiled_pipeline::TmaTiledPipelineFunction;
+pub use tma_tiled_pipeline::{TmaTiledPipelineFunction, TmaTiledPipelineMaps};
 
 /// `block_dim` に対し `m`/`n` を切り上げ（`div_ceil`）で包含するグリッド
 /// 次元を構築する。末尾ブロックが `m`/`n` を超える分はカーネル内の手動

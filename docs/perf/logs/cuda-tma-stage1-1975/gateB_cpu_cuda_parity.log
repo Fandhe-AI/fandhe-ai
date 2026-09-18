@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/cpu_cuda_parity.rs (<home>/work/target-fandhe-ai/release/deps/cpu_cuda_parity-51a3e8e64ffbf01c)
+
+running 2 tests
+test naive_f32_k4096_stress_poc_v2_5 ... ok
+test naive_f32_matches_reference_across_shapes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.67s
+

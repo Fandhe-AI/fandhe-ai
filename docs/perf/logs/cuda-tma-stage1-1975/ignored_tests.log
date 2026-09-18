@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/cpu_cuda_tiled_pipeline_tma_parity.rs (<home>/work/target-fandhe-ai/release/deps/cpu_cuda_tiled_pipeline_tma_parity-fcc969184c55623f)
+
+running 6 tests
+test tiled_pipeline_tma_k_zero_produces_all_zero_output ... ok
+test tiled_pipeline_tma_none_matches_pipeline_with_pretransposed_host_input ... ok
+test tiled_pipeline_tma_none_repeated_launch_is_deterministic ... ok
+B64 swizzle 仮説（kernels_tiled_pipeline.rs::tma_swizzled_chunk_a 相当）は 全 7 形状で cp.async pipeline 版と bit 同一でした
+test tiled_pipeline_tma_b64_matches_pipeline_or_records_hypothesis_gap ... ok
+test tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact ... ok
+test tiled_pipeline_tma_none_matches_pipeline_bit_exact ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.73s
+
