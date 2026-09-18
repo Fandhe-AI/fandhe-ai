@@ -1,0 +1,13 @@
+[ok] fill_vec_f32 == Fraction 再現（2048 要素 bit 一致）
+[ok] fill_vec_f32 値域 [-0.5, 0.5)
+[ok] N=8 bench_py 方式参照（純 Python）== 厳密 FMA 再現（bit 一致） mismatch=0
+[ok] bound(4096, c=0.5, K) ≈ 3.05e-5 bound=2.974482e-05
+[ok] rel 2e-3 → fail
+[ok] rel 5e-4 → legacy pass
+[ok] abs 2.5e-5 ≤ bound 3e-5 → scaled 救済
+[ok] NaN → fail
+[ok] bound 単調性（c 昇順・K > √K）
+[ok] N=8 torch 参照 == 純 Python 参照（bit 一致）
+[ok] N=8 torch f64 mm ≈ Fraction 厳密真値（|diff| ≤ 1e-14） worst=0.000e+00
+[ok] N=8 torch f32 mm の複合判定が実行できる fail_count=0
+self-test: green

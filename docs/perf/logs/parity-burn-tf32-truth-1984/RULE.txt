@@ -1,0 +1,6 @@
+# 事前宣言（結果が出る前に固定。2026-09-18T01:48:35Z。イシュー #1984。判定・tolerance・判定式は変更しない）
+- 対象: burn cuda gemm fresh N=256／512／1024／2048／4096（registry ピン fandhe-ai =0.9.0 の framework-compare。bench-burn は --no-default-features --features cuda・0.9.0 再計測と同じ）。
+- ダンプ: FRAMEWORK_COMPARE_PARITY_DUMP は N<=1024 は 200000（全 fail 要素・PARITY_DUMP_SUMMARY の truncated=false を確認）、N=2048／4096 は 4096（行優先先頭 4096 件のサンプル。母集団推定とは書かない）。verify は 40 call 呼ばれるため、突合には call=39（最終計測 call）の行のみを使う。call 間で fail_count が変動した場合はその事実を summary-N.txt から所見として記録する（parity_dump_truth.py／parity_tolerance_candidates.py の重複 idx 不一致検出で非 0 終了した場合も同様）。
+- 突合: parity_dump_truth.py --n N（Fraction 厳密真値・f32 FMA 参照の bit 再現）と parity_tolerance_candidates.py --n N --dump … --extra-eps 'tf32u2^-11=0.00048828125' --extra-c 0.5（u=2^-11・c=0.5・線形 K／√K の救済数）。
+- 記録する事実: (a) N ごとの fail 要素分布（ダンプ件数・row 範囲）、(b) |actual−truth| と |ref−truth| の分布、(c) u=2^-11・c=0.5 の線形 K／√K での救済数（線形 K は JSONL の parity_max_abs_err と bound=K/16384 の比較で全数救済かどうかも併記）。
+- 採否判定はしない（#1986 以降はユーザー承認事項）。

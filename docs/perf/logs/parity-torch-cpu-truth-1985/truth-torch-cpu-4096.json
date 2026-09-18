@@ -1,0 +1,103 @@
+{
+  "issue": 1985,
+  "n": 4096,
+  "device": "cpu",
+  "scale_a": 0.5,
+  "scale_b": 0.4999999403953552,
+  "u": 5.960464477539063e-08,
+  "stats": {
+    "parity_total": 16777216,
+    "parity_fail_count": 1,
+    "parity_max_abs_err": 8.96453857421875e-05,
+    "parity_max_rel_err": 1.6855753818455357,
+    "parity_scaled_abs_bound": 3.0517574487021193e-05,
+    "parity_scaled_abs_rescued": 643
+  },
+  "fail_indices": [
+    343838
+  ],
+  "fails": [
+    {
+      "idx": 343838,
+      "row": 83,
+      "col": 3870,
+      "actual": -0.013254702091217041,
+      "actual_bits": "0xbc592a40",
+      "ref": -0.013220971450209618,
+      "ref_bits": "0xbc589cc6",
+      "ref_fma_exact": -0.013220971450209618,
+      "ref_fma_exact_bits": "0xbc589cc6",
+      "ref_fma_bit_match": true,
+      "exact_truth": -0.013250688471138972,
+      "exact_truth_fraction": "-1864868614407/140737488355328",
+      "f64_seq": -0.013250688471138972,
+      "abs_actual_minus_truth": 4.01362007806938e-06,
+      "abs_ref_minus_truth": 2.971702092935402e-05,
+      "abs_ref_minus_actual": 3.37306410074234e-05,
+      "rel": 0.002544805667852341,
+      "max_abs_partial": 9.652750015258789,
+      "sqrtK_ulp_max_partial": 6.103515625e-05,
+      "closer_to_truth": "actual",
+      "pass_under_numpy_style_ref": false,
+      "pass_under_exact_fma_ref": false,
+      "rescue_table": [
+        {
+          "c": 0.5,
+          "k_mode": "K",
+          "bound": 3.0517574487021193e-05,
+          "rescued": false,
+          "is_current_contract": true
+        },
+        {
+          "c": 0.5,
+          "k_mode": "sqrtK",
+          "bound": 4.7683710135970614e-07,
+          "rescued": false,
+          "is_current_contract": false
+        },
+        {
+          "c": 1.0,
+          "k_mode": "K",
+          "bound": 6.1035148974042386e-05,
+          "rescued": true,
+          "is_current_contract": false
+        },
+        {
+          "c": 1.0,
+          "k_mode": "sqrtK",
+          "bound": 9.536742027194123e-07,
+          "rescued": false,
+          "is_current_contract": false
+        },
+        {
+          "c": 1.5,
+          "k_mode": "K",
+          "bound": 9.155272346106358e-05,
+          "rescued": true,
+          "is_current_contract": false
+        },
+        {
+          "c": 1.5,
+          "k_mode": "sqrtK",
+          "bound": 1.4305113040791184e-06,
+          "rescued": false,
+          "is_current_contract": false
+        }
+      ]
+    }
+  ],
+  "fail_analysis_truncated": false,
+  "timing_s": {
+    "fill_vec": 10.254941940307617,
+    "torch_mm": 0.17042851448059082,
+    "reference": 43.584473848342896
+  },
+  "env": {
+    "python": "3.12.3",
+    "platform": "Linux 6.17.0-1031-nvidia aarch64",
+    "timestamp_utc": "2026-09-18T02:10:20Z",
+    "torch": "2.14.0+cu130",
+    "torch_num_threads": 20,
+    "torch_parallel_info": "ATen/Parallel:\n\tat::get_num_threads() : 20\n\tat::get_num_interop_threads() : 20\nOpenMP 201511 (a.k.a. OpenMP 4.5)\n\tomp_get_max_threads() : 20\nIntel(R) MKL-DNN v3.12.0 (Git Hash 80afa71049cd69a3df32adcccb623b12cd7baa22)\nstd::thread::hardware_concurrency() : 20\nEnvironment variables:\n\tOMP_NUM_THREADS : [not set]\nATen parallel backend: OpenMP\n"
+  }
+}
