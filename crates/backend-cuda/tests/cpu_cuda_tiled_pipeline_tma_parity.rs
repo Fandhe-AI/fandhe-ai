@@ -29,6 +29,19 @@
 
 use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, TmaSwizzleA};
 
+/// `Vec<f32>` の bit 完全一致を `to_bits()` 比較で判定する（codex-review
+/// P2 是正・PR #2027）。`f32` の `PartialEq`（`assert_eq!`／`!=` が使う
+/// 比較演算子）は `+0.0 == -0.0` を真とし、bit パターンの差を見逃す
+/// ため、本ファイルが主張する「出力 bit 同一」契約の検証には
+/// `to_bits()`（符号ビット込みの厳密な bit パターン比較。NaN の bit
+/// パターンも区別する）を使う。
+fn bits_eq(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
 /// タイル倍数形状・端数形状（cp.async 版と同じ整列条件〈`n % 4 == 0 &&
 /// k % 4 == 0`〉を満たしつつブロックタイル・K タイル非倍数）を含む
 /// （`tests/cpu_cuda_tiled_pipeline_persistent_parity.rs::
@@ -82,8 +95,8 @@ fn tiled_pipeline_tma_none_matches_pipeline_bit_exact() {
                 panic!("run_tiled_pipeline_tma_f32(None) must succeed for m={m},n={n},k={k}: {e}")
             });
 
-        assert_eq!(
-            c_tma, c_pipeline,
+        assert!(
+            bits_eq(&c_tma, &c_pipeline),
             "TMA 版（None swizzle）と cp.async pipeline 版の出力が bit 同一ではありません \
              (m={m}, n={n}, k={k})"
         );
@@ -151,8 +164,8 @@ fn tiled_pipeline_tma_none_repeated_launch_is_deterministic() {
         .run_tiled_pipeline_tma_f32(&func, &a, &b, m, n, k)
         .expect("second run_tiled_pipeline_tma_f32(None) call must succeed");
 
-    assert_eq!(
-        first, second,
+    assert!(
+        bits_eq(&first, &second),
         "TMA 版（None swizzle）の連続 2 回起動（同一ハンドル・同一入力）は同一出力になるはず"
     );
 }
@@ -191,8 +204,8 @@ fn tiled_pipeline_tma_none_matches_pipeline_with_pretransposed_host_input() {
         .run_tiled_pipeline_tma_f32(&func, &a, &b, m, n, k)
         .expect("run_tiled_pipeline_tma_f32(None) must succeed for the pretransposed-input shape");
 
-    assert_eq!(
-        c_tma, c_pipeline,
+    assert!(
+        bits_eq(&c_tma, &c_pipeline),
         "事前転置済みホスト入力を NN として渡した場合の TMA 版・cp.async pipeline 版の \
          出力が bit 同一ではありません"
     );
@@ -228,7 +241,7 @@ fn tiled_pipeline_tma_b64_matches_pipeline_or_records_hypothesis_gap() {
                 panic!("run_tiled_pipeline_tma_f32(B64) must succeed for m={m},n={n},k={k}: {e}")
             });
 
-        if c_tma != c_pipeline {
+        if !bits_eq(&c_tma, &c_pipeline) {
             mismatched_shapes.push((m, n, k));
         }
     }
@@ -313,8 +326,8 @@ fn tiled_pipeline_tma_parity_smoke_env_adaptive() {
             "CudaGemm::run_tiled_pipeline_tma_f32(None) must succeed on a TMA-capable test \
              runner",
         );
-    assert_eq!(
-        c_tma, c_pipeline,
+    assert!(
+        bits_eq(&c_tma, &c_pipeline),
         "smoke 128x64x64: TMA 版（None swizzle）と cp.async pipeline 版の出力が bit 同一では \
          ありません"
     );

@@ -6134,6 +6134,19 @@ mod tma_tiled_pipeline {
         let element_strides: [u32; 2] = [1, 1];
 
         let (global_ptr, _sync_guard) = global_dev.device_ptr(stream);
+        // SAFETY: 関数 doc comment（上記 `# SAFETY` 節）の根拠をこの
+        // 呼び出しへ適用する。`tensor_map.0` は直前で確保したスタック上の
+        // `CUtensorMap`（`cuTensorMapEncodeTiled` が全フィールドを書く
+        // 契約の書き込み先）。`global_ptr` は `spec.validate()` 済みの
+        // `spec`（ゼロ次元を fail-closed 拒否済み）から導出した
+        // `global_dev` の device pointer で、`_sync_guard`（`SyncOnDrop`。
+        // この unsafe 呼び出しが完了するまで同じスコープに生存させる）が
+        // 有効な間は `global_dev` の指すデバイスメモリ領域
+        // （要素数 `global_dim`／`global_strides` と整合するサイズ）が
+        // 生存・整列済みであることを保証する。`global_dim`／
+        // `global_strides`／`box_dim`／`element_strides` はいずれも
+        // 直前でスタック上に構築した配列で、この FFI 呼び出しの間だけ
+        // 生存すれば足りる。
         unsafe {
             sys::cuTensorMapEncodeTiled(
                 &mut tensor_map.0 as *mut CUtensorMap,
@@ -6320,32 +6333,6 @@ mod tma_tiled_pipeline {
                 // 実機検証はイシュー #1976）。
                 TmaSwizzleA::B64 => CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
             };
-            let a_map = encode_tensor_map_2d_f32(
-                &self.stream,
-                a_dev.as_raw(),
-                &TmaBoxSpec {
-                    global_rows: m,
-                    global_cols: k,
-                    box_rows: kernels_tiled_pipeline::TP_BM,
-                    box_cols: kernels_tiled_pipeline::TP_BK,
-                    swizzle: swizzle_mode,
-                },
-            )?;
-            let b_map = encode_tensor_map_2d_f32(
-                &self.stream,
-                b_dev.as_raw(),
-                &TmaBoxSpec {
-                    global_rows: k,
-                    global_cols: n,
-                    box_rows: kernels_tiled_pipeline::TP_BK,
-                    box_cols: kernels_tiled_pipeline::TP_BN,
-                    // B は swizzle 対象外に固定する
-                    // （`kernels_tiled_pipeline.rs`「swizzle」節。B box の
-                    // 内側次元が 64B swizzle アトムを跨ぐため）。
-                    swizzle: CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
-                },
-            )?;
-
             let grid_dim = (
                 n.div_ceil(kernels_tiled_pipeline::TP_BN),
                 m.div_ceil(kernels_tiled_pipeline::TP_BM),
@@ -6358,19 +6345,57 @@ mod tma_tiled_pipeline {
             };
             let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-            // SAFETY: `run_tiled_pipeline_persistent_f32`（`gemm.rs`）と
-            // 同一の根拠。カーネル引数（a_map/b_map・a_dev/b_dev/c_dev・
-            // m_i/n_i/k_i）は上記で検証済みの m/n/k と 1:1 対応し、
-            // カーネル内の手動境界チェック（プロローグのタイル起点ガード・
-            // steady state のタイムアウト付きポーリング・エピローグの
-            // guarded store。`kernels_tiled_pipeline.rs::TP_TMA_TILE_CORE`
-            // ドキュメンテーションコメント「不変条件」参照）と合わせて
-            // OOB 読み書きが起きない根拠とする。`a_map`/`b_map` は
-            // `launch_builder` の safe `.arg(&...)` 経由で渡す（`raw`
-            // launch へフォールバックしない。設計 doc §2「調査で確定した
-            // 事実」参照: `PushKernelArg<&T: DeviceRepr>` はポインタを
-            // push するだけで、プローブの raw `kernel_params` と同一表現）。
+            // codex-review P0 是正（PR #2027）: `encode_tensor_map_2d_f32`
+            // は FFI 呼び出しに加えてストリーム順序上の待機・
+            // `SyncOnDrop` によるイベント記録も伴う driver 接触を行うため
+            // （cudarc 0.19.8 の `device_ptr` 実装）、この呼び出しをカーネル
+            // 起動と同じ `with_driver_call` 排他区間の内側へ移した。
+            // 以前は a_map／b_map の構築が `with_driver_call` の外で
+            // 行われており、`self.ordinal` が Poisoned／Retiring な状態でも
+            // `begin_driver_call` の拒否より先に driver へ接触してしまい
+            // （invalidate の in-flight ドレイン対象にも計上されない）、
+            // `run_f32_kernel` 等の他エントリと同じ fail-closed 保護契約
+            // （このファイル冒頭「`context_cache::begin_driver_call` の
+            // capture 排他検査」節参照）に反していた。
             self.with_driver_call(|| {
+                let a_map = encode_tensor_map_2d_f32(
+                    &self.stream,
+                    a_dev.as_raw(),
+                    &TmaBoxSpec {
+                        global_rows: m,
+                        global_cols: k,
+                        box_rows: kernels_tiled_pipeline::TP_BM,
+                        box_cols: kernels_tiled_pipeline::TP_BK,
+                        swizzle: swizzle_mode,
+                    },
+                )?;
+                let b_map = encode_tensor_map_2d_f32(
+                    &self.stream,
+                    b_dev.as_raw(),
+                    &TmaBoxSpec {
+                        global_rows: k,
+                        global_cols: n,
+                        box_rows: kernels_tiled_pipeline::TP_BK,
+                        box_cols: kernels_tiled_pipeline::TP_BN,
+                        // B は swizzle 対象外に固定する
+                        // （`kernels_tiled_pipeline.rs`「swizzle」節。B box の
+                        // 内側次元が 64B swizzle アトムを跨ぐため）。
+                        swizzle: CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+                    },
+                )?;
+
+                // SAFETY: `run_tiled_pipeline_persistent_f32`（`gemm.rs`）と
+                // 同一の根拠。カーネル引数（a_map/b_map・a_dev/b_dev/c_dev・
+                // m_i/n_i/k_i）は上記で検証済みの m/n/k と 1:1 対応し、
+                // カーネル内の手動境界チェック（プロローグのタイル起点ガード・
+                // steady state のタイムアウト付きポーリング・エピローグの
+                // guarded store。`kernels_tiled_pipeline.rs::TP_TMA_TILE_CORE`
+                // ドキュメンテーションコメント「不変条件」参照）と合わせて
+                // OOB 読み書きが起きない根拠とする。`a_map`/`b_map` は
+                // `launch_builder` の safe `.arg(&...)` 経由で渡す（`raw`
+                // launch へフォールバックしない。設計 doc §2「調査で確定した
+                // 事実」参照: `PushKernelArg<&T: DeviceRepr>` はポインタを
+                // push するだけで、プローブの raw `kernel_params` と同一表現）。
                 unsafe {
                     self.stream
                         .launch_builder(&func.func)
