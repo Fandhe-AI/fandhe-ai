@@ -45,10 +45,18 @@
 //! `tests/tensor_core_real_device.rs`・`kernels_mma.rs` と同じ規約に従う:
 //! 両テストとも `#[ignore]` 分離（DGX Spark GB10 等 sm_121 実機必須）で、
 //! CUDA デバイス・NVRTC が利用できない環境では `.expect` により失敗を
-//! 顕在化させる（silent green を許さない）。本ファイルのカーネルソース・
-//! `cuTensorMapEncodeTiled` 呼び出しパラメータは実機コンパイル・実行を
-//! 一度も通過していない（`kernels_mma.rs` 冒頭コメント「検証状態」と同じ
-//! 位置づけ。実機での最初の実行が構文・パラメータ検証を兼ねる）。
+//! 顕在化させる（silent green を許さない）。**#1574 の GB10 実機実測で
+//! `tma_nvrtc_compile_probe`／`tma_execution_probe`／
+//! `tma_execution_probe_cta` は実行成功を確認済み**であり、本ファイル
+//! 冒頭コメントが以前述べていた「実機コンパイル・実行を一度も通過して
+//! いない」という記述は陳腐化している（`docs/backend-cuda-tma-gemm-load-design.md`
+//! §9 の申し送りを受け、イシュー #1975 で本文を是正した）。本プローブの
+//! `CUtensorMap` typedef・座標系（要素座標・内側次元先行）・OOB fill・
+//! swizzle 契約は、`crate::kernels_tiled_pipeline`「TMA」節（Stage 1・
+//! 64×64 pipeline・shared::cta の opt-in 実装）の設計前提として踏襲
+//! している。Stage 1 本体の実機実測・意味論プローブ（座標系・部分 OOB
+//! box・`B64` swizzle の smem 物理配置観測）は後続イシュー #1976 へ
+//! 引き継ぐ。
 //!
 //! ## 依存・A03 対応
 //!

@@ -6017,6 +6017,536 @@ impl CudaGemm {
     }
 }
 
+// =====================================================================
+// TMA（cp.async.bulk.tensor）ロード経路 Stage 1（イシュー #1975・設計
+// docs/backend-cuda-tma-gemm-load-design.md）。全項目 `internal-diagnostics`
+// feature 限定の opt-in API（既定ビルドの公開 API 面には一切現れない。
+// [`compile_tiled_pipeline_persistent_variant`] と同じ公開面ゲート方針。
+// `kernels_tiled_pipeline.rs`「TMA」節と対）。
+// =====================================================================
+#[cfg(feature = "internal-diagnostics")]
+mod tma_tiled_pipeline {
+    use std::ffi::c_void;
+    use std::sync::Arc;
+
+    use cudarc::driver::sys::{
+        self, CUtensorMap, CUtensorMapDataType, CUtensorMapFloatOOBfill, CUtensorMapInterleave,
+        CUtensorMapL2promotion, CUtensorMapSwizzle,
+    };
+    use cudarc::driver::{CudaFunction, CudaStream, DevicePtr, LaunchConfig, PushKernelArg};
+
+    use crate::device::CudaDevice;
+    use crate::error::CudaError;
+    use crate::kernels_tiled_pipeline::{self, TmaSwizzleA};
+    use crate::memory::GuardedSlice;
+    use crate::module_cache::load_function_cached;
+    use crate::nvrtc::CompiledDims;
+
+    use super::{
+        CudaGemm, tiled_pipeline_alignment_ok, validate_gemm_dims, validate_output_len,
+        validate_tiled_pipeline_k_bound,
+    };
+
+    /// `cuTensorMapEncodeTiled`（driver API）が書き込む `CUtensorMap` の
+    /// `DeviceRepr` ラッパー（カーネル引数として渡すための newtype。
+    /// `tests/tma_probe_real_device.rs::TensorMapArg` と同一パターン）。
+    #[repr(transparent)]
+    pub(super) struct TensorMapArg(pub(super) CUtensorMap);
+
+    // SAFETY: `DeviceRepr` はマーカートレイトで、`CUtensorMap` は
+    // `#[repr(C)]`（`cuda-13000` feature。cudarc-0.19.8 実測値。
+    // `tests/tma_probe_real_device.rs` 冒頭コメント参照）の POD 型。
+    // driver が書き込む不透明な `opaque: [u64; 16]` を Rust 側で解釈する
+    // ことはなく、そのままカーネル引数としてバイト列を渡すのみ。
+    unsafe impl cudarc::driver::DeviceRepr for TensorMapArg {}
+
+    /// [`encode_tensor_map_2d_f32`] へ渡す 2D テンソル記述（内部専用）。
+    /// `global_rows`/`global_cols` はテンソル要素次元（行主導）、
+    /// `box_rows`/`box_cols` は 1 回の TMA 転送で扱うタイルの要素次元。
+    /// `crate::kernels_tiled_pipeline`「TMA」節の座標系（要素座標・
+    /// 内側次元先行）と対応させ、`globalDim`/`boxDim` はいずれも
+    /// `[cols, rows]`（内側＝列方向が第 0 要素）の順で構築する。
+    struct TmaBoxSpec {
+        global_rows: u32,
+        global_cols: u32,
+        box_rows: u32,
+        box_cols: u32,
+        swizzle: CUtensorMapSwizzle,
+    }
+
+    impl TmaBoxSpec {
+        /// ゼロ次元（`global_rows`/`global_cols`/`box_rows`/`box_cols`
+        /// のいずれかが 0）を拒否する（`cuTensorMapEncodeTiled` 自身が
+        /// ゼロ次元を受理しないため、事前に型付きエラーで fail-closed
+        /// 拒否する。呼び出し元は `m == 0 || n == 0 || k == 0` を
+        /// 別途早期 return 済みのため、通常経路では発火しない防御的
+        /// 検査）。
+        fn validate(&self) -> Result<(), CudaError> {
+            if self.global_rows == 0
+                || self.global_cols == 0
+                || self.box_rows == 0
+                || self.box_cols == 0
+            {
+                return Err(CudaError::InvalidShape {
+                    detail: format!(
+                        "TmaBoxSpec must not have a zero dimension: global=({}, {}) box=({}, {})",
+                        self.global_rows, self.global_cols, self.box_rows, self.box_cols
+                    ),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    /// `global_dev`（row-major・f32・`global_cols` 行ストライド要素数）に
+    /// 対する `TmaBoxSpec` の `CUtensorMap` を `stream` 上で生成する
+    /// （REQ-8・A03: テンソルマップは本関数の検証済み `spec` からのみ
+    /// 生成し、外部入力文字列は一切連結しない）。
+    ///
+    /// OOB fill は常に `NONE`（`cp.async` 版のゼロ充填と対応する契約。
+    /// `NAN_REQUEST_ZERO_FMA` は NaN を書くため bit 同一契約と両立しない。
+    /// 設計 doc §2「調査で確定した事実」参照）。interleave／L2 promotion
+    /// は `NONE`（既存プローブと同じ最小構成）。
+    ///
+    /// # SAFETY
+    ///
+    /// `cuTensorMapEncodeTiled` は driver API の FFI 呼び出し。
+    /// - `tensor_map`: スタック上の `CUtensorMap`（書き込み先。関数内で
+    ///   全フィールドを埋める契約）。
+    /// - `globalAddress`: `global_dev` の device pointer
+    ///   （`DevicePtr::device_ptr` 経由。`SyncOnDrop` ガードは encode
+    ///   呼び出し完了までスコープに保持する。`tests/tma_probe_real_device.rs`
+    ///   の既存プローブと同一の取得パターン）。
+    /// - `globalDim`/`globalStrides`/`boxDim`/`elementStrides`: すべて
+    ///   スタック上の配列で FFI 呼び出しの間だけ生存すればよい。
+    fn encode_tensor_map_2d_f32(
+        stream: &CudaStream,
+        global_dev: &cudarc::driver::CudaSlice<f32>,
+        spec: &TmaBoxSpec,
+    ) -> Result<TensorMapArg, CudaError> {
+        spec.validate()?;
+
+        let mut tensor_map = TensorMapArg(CUtensorMap { opaque: [0u64; 16] });
+        let global_dim: [u64; 2] = [spec.global_cols as u64, spec.global_rows as u64];
+        let global_strides: [u64; 1] =
+            [(spec.global_cols as u64) * (std::mem::size_of::<f32>() as u64)];
+        let box_dim: [u32; 2] = [spec.box_cols, spec.box_rows];
+        let element_strides: [u32; 2] = [1, 1];
+
+        let (global_ptr, _sync_guard) = global_dev.device_ptr(stream);
+        // SAFETY: 関数 doc comment（上記 `# SAFETY` 節）の根拠をこの
+        // 呼び出しへ適用する。`tensor_map.0` は直前で確保したスタック上の
+        // `CUtensorMap`（`cuTensorMapEncodeTiled` が全フィールドを書く
+        // 契約の書き込み先）。`global_ptr` は `spec.validate()` 済みの
+        // `spec`（ゼロ次元を fail-closed 拒否済み）から導出した
+        // `global_dev` の device pointer で、`_sync_guard`（`SyncOnDrop`。
+        // この unsafe 呼び出しが完了するまで同じスコープに生存させる）が
+        // 有効な間は `global_dev` の指すデバイスメモリ領域
+        // （要素数 `global_dim`／`global_strides` と整合するサイズ）が
+        // 生存・整列済みであることを保証する。`global_dim`／
+        // `global_strides`／`box_dim`／`element_strides` はいずれも
+        // 直前でスタック上に構築した配列で、この FFI 呼び出しの間だけ
+        // 生存すれば足りる。
+        unsafe {
+            sys::cuTensorMapEncodeTiled(
+                &mut tensor_map.0 as *mut CUtensorMap,
+                CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
+                2,
+                global_ptr as *mut c_void,
+                global_dim.as_ptr(),
+                global_strides.as_ptr(),
+                box_dim.as_ptr(),
+                element_strides.as_ptr(),
+                CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+                spec.swizzle,
+                CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
+            )
+        }
+        .result()?;
+        Ok(tensor_map)
+    }
+
+    /// [`CudaGemm::compile_tiled_pipeline_tma_variant`] が返す、コンパイル
+    /// 済み TMA 版カーネル（[`kernels_tiled_pipeline::gemm_tiled_pipeline_
+    /// tma_f32`] 相当）のハンドル。`swizzle` はコンパイル時に埋め込んだ
+    /// `TP_TMA_SWZ_A_MODE`（[`TmaSwizzleA`]）を保持し、テンソルマップ
+    /// 生成時の `CUtensorMapSwizzle` 選択と一致させる（マップ側と
+    /// カーネル側の swizzle 設定が食い違うと、カーネルが誤った物理配置を
+    /// 読むため）。
+    pub struct TmaTiledPipelineFunction {
+        func: CudaFunction,
+        context_ptr: usize,
+        swizzle: TmaSwizzleA,
+    }
+
+    impl CudaGemm {
+        /// TMA 版カーネル（[`kernels_tiled_pipeline::tiled_pipeline_tma_
+        /// f32_source`]）を `device` 上でコンパイルする（既定
+        /// [`kernels_tiled_pipeline::TP_DEFAULT_STAGES`] 段数固定。任意
+        /// 段数が必要な場合は将来 `_with_stages` 版を追加する想定。本
+        /// issue のスコープでは既定段数のみ提供する）。
+        ///
+        /// compute capability 9.0 未満（TMA 命令の前提。sm_90/sm_121 等）
+        /// の場合は `CudaError::TiledPipelineUnavailable` を返す
+        /// （fail-closed。NVRTC 自体は失敗しない環境があり得るため、
+        /// 実行前に明示的に拒否する）。
+        ///
+        /// **公開面ゲート**: `compile_tiled_pipeline_persistent_variant` と
+        /// 同じ `internal-diagnostics` feature（既定 off）でゲートする。
+        pub fn compile_tiled_pipeline_tma_variant(
+            device: &CudaDevice,
+            swizzle: TmaSwizzleA,
+        ) -> Result<TmaTiledPipelineFunction, CudaError> {
+            let (major, _minor) = device.compute_capability();
+            if major < 9 {
+                return Err(CudaError::TiledPipelineUnavailable {
+                    detail: format!(
+                        "TMA (cp.async.bulk.tensor) requires compute capability >= 9.0; this \
+                         device reports {major}.{minor} (arch={arch})",
+                        minor = device.compute_capability().1,
+                        arch = device.arch()
+                    ),
+                });
+            }
+
+            let source = kernels_tiled_pipeline::tiled_pipeline_tma_f32_source(swizzle);
+            let descriptor_label = match swizzle {
+                TmaSwizzleA::None => "tiled_pipeline_f32_tma_variant_none",
+                TmaSwizzleA::B64 => "tiled_pipeline_f32_tma_variant_b64",
+            };
+            let descriptor = crate::nvrtc::CudaKernelDescriptor::new_with_compiled_dims(
+                descriptor_label,
+                fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+                kernels_tiled_pipeline::TP_BM,
+                kernels_tiled_pipeline::TP_BN,
+                kernels_tiled_pipeline::TP_BK,
+                kernels_tiled_pipeline::TP_DEFAULT_STAGES,
+                fandhe_ai_tensor_core::dispatch::DType::F32,
+                CompiledDims::DYNAMIC_ALL,
+            )?;
+            let func =
+                load_function_cached(device, descriptor, source, "gemm_tiled_pipeline_tma_f32")?;
+            let context_ptr = Arc::as_ptr(device.context()) as usize;
+            Ok(TmaTiledPipelineFunction {
+                func,
+                context_ptr,
+                swizzle,
+            })
+        }
+
+        /// デバイス常駐済みの A/B/C バッファに対して TMA 版カーネルを
+        /// 起動し、完了を待たずに投入する（[`Self::
+        /// launch_tiled_pipeline_persistent_f32`] と同じ「GPU 実行のみ」
+        /// 区間の非同期投入契約〈#1013〉）。
+        ///
+        /// ホスト側形状検証・context 一致検証は
+        /// [`Self::launch_tiled_pipeline_persistent_f32`] と同一の理由・
+        /// 同一の手順。**`k == 0` は早期 return する**（`m == 0 || n == 0`
+        /// の直後。既存 cp.async 版〈`num_k_tiles == 0` がカーネル内で
+        /// そのまま no-op になる〉とは異なり、TMA 版はテンソルマップ構築
+        /// 時に `global_cols`/`global_rows`（K 由来次元）へ `0` を渡せない
+        /// ため〈`TmaBoxSpec::validate` の fail-closed ゼロ次元拒否〉、
+        /// `c_dev` を明示的に `memset_zeros` して「+0.0 を store する」
+        /// 契約をホスト側で代替する）。
+        ///
+        /// テンソルマップは起動ごとに `encode_tensor_map_2d_f32` で新規
+        /// 生成する（tensor map キャッシュは本 issue のスコープ外。設計
+        /// doc §4.4・§8「スコープ外・申し送り」参照。GPU-only 区間の
+        /// 計測ではホスト側 encode 費用は含まれない点に注意）。
+        ///
+        /// **公開面ゲート**: [`Self::launch_tiled_pipeline_persistent_f32`]
+        /// と同じ `internal-diagnostics` feature（既定 off）でゲートする。
+        ///
+        /// `dims` に `(m, n, k)` をまとめて渡す（引数 7 個以下に収め
+        /// `#[allow(clippy::too_many_arguments)]` を新規に付けない設計。
+        /// `.claude/rules/coding-rust.md`）。
+        pub fn launch_tiled_pipeline_tma_f32(
+            &self,
+            func: &TmaTiledPipelineFunction,
+            a_dev: &GuardedSlice<f32>,
+            b_dev: &GuardedSlice<f32>,
+            c_dev: &mut GuardedSlice<f32>,
+            dims: (u32, u32, u32),
+        ) -> Result<(), CudaError> {
+            let (m, n, k) = dims;
+            let self_context_ptr = Arc::as_ptr(self.stream.context()) as usize;
+            if func.context_ptr != self_context_ptr {
+                return Err(CudaError::TiledPipelineContextMismatch {
+                    detail: "TmaTiledPipelineFunction was compiled against a different \
+                             CudaContext (different CudaDevice/GPU) than this CudaGemm \
+                             instance's stream; refusing to launch across mismatched CUDA \
+                             contexts"
+                        .to_string(),
+                });
+            }
+            for (name, buf_context_ptr) in [
+                ("a_dev", Arc::as_ptr(a_dev.as_raw().context()) as usize),
+                ("b_dev", Arc::as_ptr(b_dev.as_raw().context()) as usize),
+                ("c_dev", Arc::as_ptr(c_dev.as_raw().context()) as usize),
+            ] {
+                if buf_context_ptr != self_context_ptr {
+                    return Err(CudaError::TiledPipelineContextMismatch {
+                        detail: format!(
+                            "{name} was allocated on a different CudaContext (different \
+                             CudaDevice/GPU) than this CudaGemm instance's stream; refusing \
+                             to launch across mismatched CUDA contexts"
+                        ),
+                    });
+                }
+            }
+            validate_gemm_dims(a_dev.as_raw().len(), b_dev.as_raw().len(), m, n, k)?;
+            validate_tiled_pipeline_k_bound(k)?;
+            if !tiled_pipeline_alignment_ok(n, k) {
+                return Err(CudaError::InvalidShape {
+                    detail: format!(
+                        "TMA tiled pipeline kernel requires n % 4 == 0 && k % 4 == 0 (matches \
+                         the existing cp.async alignment contract): n={n}, k={k}"
+                    ),
+                });
+            }
+            validate_output_len(c_dev.as_raw().len(), m, n)?;
+            if m == 0 || n == 0 {
+                return Ok(());
+            }
+            // `k == 0`: `num_k_tiles == 0` となりテンソルマップを構築
+            // する要素次元（`global_cols`/`global_rows` の一方が 0）を
+            // `cuTensorMapEncodeTiled` に渡せなくなる（`TmaBoxSpec::
+            // validate` がゼロ次元を fail-closed 拒否するため）ため、
+            // `TP_TMA_TILE_CORE` の「カーネル内 no-op（acc はゼロのまま
+            // guarded store）」契約をホスト側で代替する（`run_tiled_
+            // pipeline_persistent_f32` の `k == 0` 早期 return と同型の
+            // 「+0.0 を store する」意味論。`c_dev` はこの時点でゼロ初期化
+            // されている保証がないため明示的に memset する）。
+            if k == 0 {
+                return self.with_driver_call(|| {
+                    self.stream.memset_zeros(c_dev.as_raw_mut())?;
+                    Ok(())
+                });
+            }
+
+            let swizzle_mode = match func.swizzle {
+                TmaSwizzleA::None => CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+                // R4「ハードウェア swizzle モードへの置換」。読み出し側の
+                // `TP_TMA_A_AT` マクロ（`B64` 分岐）の物理配置仮説と
+                // 対応させる（`kernels_tiled_pipeline.rs`「swizzle」節参照。
+                // 実機検証はイシュー #1976）。
+                TmaSwizzleA::B64 => CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
+            };
+            let grid_dim = (
+                n.div_ceil(kernels_tiled_pipeline::TP_BN),
+                m.div_ceil(kernels_tiled_pipeline::TP_BM),
+                1,
+            );
+            let cfg = LaunchConfig {
+                grid_dim,
+                block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+            // codex-review P0 是正（PR #2027）: `encode_tensor_map_2d_f32`
+            // は FFI 呼び出しに加えてストリーム順序上の待機・
+            // `SyncOnDrop` によるイベント記録も伴う driver 接触を行うため
+            // （cudarc 0.19.8 の `device_ptr` 実装）、この呼び出しをカーネル
+            // 起動と同じ `with_driver_call` 排他区間の内側へ移した。
+            // 以前は a_map／b_map の構築が `with_driver_call` の外で
+            // 行われており、`self.ordinal` が Poisoned／Retiring な状態でも
+            // `begin_driver_call` の拒否より先に driver へ接触してしまい
+            // （invalidate の in-flight ドレイン対象にも計上されない）、
+            // `run_f32_kernel` 等の他エントリと同じ fail-closed 保護契約
+            // （このファイル冒頭「`context_cache::begin_driver_call` の
+            // capture 排他検査」節参照）に反していた。
+            self.with_driver_call(|| {
+                let a_map = encode_tensor_map_2d_f32(
+                    &self.stream,
+                    a_dev.as_raw(),
+                    &TmaBoxSpec {
+                        global_rows: m,
+                        global_cols: k,
+                        box_rows: kernels_tiled_pipeline::TP_BM,
+                        box_cols: kernels_tiled_pipeline::TP_BK,
+                        swizzle: swizzle_mode,
+                    },
+                )?;
+                let b_map = encode_tensor_map_2d_f32(
+                    &self.stream,
+                    b_dev.as_raw(),
+                    &TmaBoxSpec {
+                        global_rows: k,
+                        global_cols: n,
+                        box_rows: kernels_tiled_pipeline::TP_BK,
+                        box_cols: kernels_tiled_pipeline::TP_BN,
+                        // B は swizzle 対象外に固定する
+                        // （`kernels_tiled_pipeline.rs`「swizzle」節。B box の
+                        // 内側次元が 64B swizzle アトムを跨ぐため）。
+                        swizzle: CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+                    },
+                )?;
+
+                // SAFETY: `run_tiled_pipeline_persistent_f32`（`gemm.rs`）と
+                // 同一の根拠。カーネル引数（a_map/b_map・a_dev/b_dev/c_dev・
+                // m_i/n_i/k_i）は上記で検証済みの m/n/k と 1:1 対応し、
+                // カーネル内の手動境界チェック（プロローグのタイル起点ガード・
+                // steady state のタイムアウト付きポーリング・エピローグの
+                // guarded store。`kernels_tiled_pipeline.rs::TP_TMA_TILE_CORE`
+                // ドキュメンテーションコメント「不変条件」参照）と合わせて
+                // OOB 読み書きが起きない根拠とする。`a_map`/`b_map` は
+                // `launch_builder` の safe `.arg(&...)` 経由で渡す（`raw`
+                // launch へフォールバックしない。設計 doc §2「調査で確定した
+                // 事実」参照: `PushKernelArg<&T: DeviceRepr>` はポインタを
+                // push するだけで、プローブの raw `kernel_params` と同一表現）。
+                unsafe {
+                    self.stream
+                        .launch_builder(&func.func)
+                        .arg(&a_map)
+                        .arg(&b_map)
+                        .arg(a_dev.as_raw())
+                        .arg(b_dev.as_raw())
+                        .arg(c_dev.as_raw_mut())
+                        .arg(&m_i)
+                        .arg(&n_i)
+                        .arg(&k_i)
+                        .launch(cfg)?;
+                }
+                Ok(())
+            })
+        }
+
+        /// ホストスライス入出力の TMA 版カーネル実行
+        /// （[`Self::run_tiled_pipeline_persistent_f32`] の TMA 版）。
+        /// [`Self::upload_f32`]・[`Self::alloc_output_f32`]・
+        /// [`Self::launch_tiled_pipeline_tma_f32`]・
+        /// `crate::memory::readback` を組み合わせた便宜 API で、新規
+        /// `unsafe` は導入しない。
+        ///
+        /// ホスト側形状検証・`m == 0 || n == 0` の no-op 契約は
+        /// [`Self::run_tiled_pipeline_persistent_f32`] と同一。**`k == 0`
+        /// も早期 return する**（[`Self::launch_tiled_pipeline_tma_f32`]
+        /// ドキュメンテーションコメント「`k == 0` は早期 return する」
+        /// 節参照。テンソルマップ構築の前提〈ゼロ以外の次元〉と一致させ、
+        /// 長さ 0 の `upload_f32`／`encode_tensor_map_2d_f32` 呼び出し自体
+        /// を避ける）。
+        ///
+        /// **公開面ゲート**: [`Self::launch_tiled_pipeline_tma_f32`] と
+        /// 同じ `internal-diagnostics` feature（既定 off）でゲートする。
+        pub fn run_tiled_pipeline_tma_f32(
+            &self,
+            func: &TmaTiledPipelineFunction,
+            a: &[f32],
+            b: &[f32],
+            m: u32,
+            n: u32,
+            k: u32,
+        ) -> Result<Vec<f32>, CudaError> {
+            validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+            validate_tiled_pipeline_k_bound(k)?;
+            if !tiled_pipeline_alignment_ok(n, k) {
+                return Err(CudaError::InvalidShape {
+                    detail: format!(
+                        "TMA tiled pipeline kernel requires n % 4 == 0 && k % 4 == 0 (matches \
+                         the existing cp.async alignment contract): n={n}, k={k}"
+                    ),
+                });
+            }
+            if m == 0 || n == 0 {
+                return Ok(Vec::new());
+            }
+            if k == 0 {
+                return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
+            }
+
+            let (a_dev, b_dev) = self.upload_f32(a, b)?;
+            let mut c_dev = self.alloc_output_f32(m, n)?;
+            self.launch_tiled_pipeline_tma_f32(func, &a_dev, &b_dev, &mut c_dev, (m, n, k))?;
+            self.with_driver_call(|| crate::memory::readback(&self.stream, c_dev.as_raw()))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// `CUtensorMap`（`DeviceRepr` 経由でカーネル引数として渡す型）の
+        /// サイズ・整列が `tests/tma_probe_real_device.rs` の手書き
+        /// typedef（`__align__(128) { unsigned long long opaque[16] }`）と
+        /// 一致することを検査する（ABI ズレの機械的検出。`gemm.rs` 冒頭の
+        /// GPU 非依存単体テスト群と同じ位置づけ）。
+        #[test]
+        fn tensor_map_arg_size_and_align_match_kernel_typedef() {
+            assert_eq!(
+                std::mem::size_of::<TensorMapArg>(),
+                128,
+                "CUtensorMap (opaque: [u64; 16]) は 128 バイトのはずです"
+            );
+            assert_eq!(
+                std::mem::align_of::<TensorMapArg>(),
+                128,
+                "CUtensorMap の整列は __align__(128) と一致するはずです"
+            );
+        }
+
+        /// [`TmaBoxSpec::validate`] がゼロ次元を拒否することを検査する。
+        #[test]
+        fn tma_box_spec_rejects_zero_dimension() {
+            for spec in [
+                TmaBoxSpec {
+                    global_rows: 0,
+                    global_cols: 64,
+                    box_rows: 64,
+                    box_cols: 16,
+                    swizzle: CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+                },
+                TmaBoxSpec {
+                    global_rows: 64,
+                    global_cols: 0,
+                    box_rows: 64,
+                    box_cols: 16,
+                    swizzle: CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+                },
+                TmaBoxSpec {
+                    global_rows: 64,
+                    global_cols: 64,
+                    box_rows: 0,
+                    box_cols: 16,
+                    swizzle: CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+                },
+                TmaBoxSpec {
+                    global_rows: 64,
+                    global_cols: 64,
+                    box_rows: 64,
+                    box_cols: 0,
+                    swizzle: CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+                },
+            ] {
+                assert!(matches!(
+                    spec.validate(),
+                    Err(CudaError::InvalidShape { .. })
+                ));
+            }
+        }
+
+        /// A/B のテンソルマップ記述子ラベルが腕（`None`／`B64`）ごとに
+        /// 異なることを検査する（モジュールキャッシュ衝突回避。設計 doc
+        /// §3.3 参照）。
+        #[test]
+        fn compile_descriptor_labels_differ_per_swizzle_arm() {
+            let none_label = match TmaSwizzleA::None {
+                TmaSwizzleA::None => "tiled_pipeline_f32_tma_variant_none",
+                TmaSwizzleA::B64 => "tiled_pipeline_f32_tma_variant_b64",
+            };
+            let b64_label = match TmaSwizzleA::B64 {
+                TmaSwizzleA::None => "tiled_pipeline_f32_tma_variant_none",
+                TmaSwizzleA::B64 => "tiled_pipeline_f32_tma_variant_b64",
+            };
+            assert_ne!(none_label, b64_label);
+        }
+    }
+}
+
+#[cfg(feature = "internal-diagnostics")]
+pub use tma_tiled_pipeline::TmaTiledPipelineFunction;
+
 /// `block_dim` に対し `m`/`n` を切り上げ（`div_ceil`）で包含するグリッド
 /// 次元を構築する。末尾ブロックが `m`/`n` を超える分はカーネル内の手動
 /// 境界チェック（REQ-8）に委ねる契約（`kernels.rs` 参照）。

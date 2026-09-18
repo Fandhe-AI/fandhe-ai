@@ -1139,6 +1139,494 @@ pub fn tiled_pipeline_streamk_f32_source_with_stages(stages: u32) -> Result<Stri
     Ok(render_streamk_source(stages))
 }
 
+// =====================================================================
+// TMA（cp.async.bulk.tensor）ロード経路 Stage 1（64×64・shared::cta。
+// イシュー #1975・設計 docs/backend-cuda-tma-gemm-load-design.md）
+// =====================================================================
+//
+// 本節は [`TP_TILE_CORE`]（既存 cp.async 版）のロード段
+// （`LOAD_A_STAGE`/`LOAD_B_STAGE`）だけを TMA へ置き換えた派生カーネル
+// を生成する。K 内積の `fmaf` 蓄積順序・エピローグの guarded store は
+// [`TP_TILE_CORE`] と同一の文（`TP_TMA_TILE_CORE` 内に複製）であり、
+// A の読み出しのみ `TP_TMA_A_AT` マクロ経由（`None`：恒等・`B64`：
+// 仮説段階の XOR swizzle 置換）で間接化する。**本番既定経路
+// （[`crate::gemm::CudaGemm::new`]／`select_tiled_f32_kernel`）は本節の
+// カーネルを一切生成しない**（`internal-diagnostics` feature 限定の
+// opt-in API 〈`crate::gemm::CudaGemm::compile_tiled_pipeline_tma_variant`〉
+// からのみコンパイルされる）。
+//
+// # 座標系（要素座標・内側次元先行）
+//
+// TMA の `cp.async.bulk.tensor.2d` 命令へ渡す座標はタイル添字ではなく
+// **テンソル要素座標**であり、`{coord0, coord1}` の `coord0` が
+// `globalDim`/`boxDim` の第 0 要素（内側＝メモリ連続方向）に対応する
+// （設計 doc §2「実装の前提」・`tests/tma_probe_real_device.rs` の既存
+// プローブと同じ規約）。A（`[m, k]` 行主導）は `globalDim = [k, m]`・
+// `boxDim = [TP_BK, TP_BM]` で座標 `{k 位置, m 位置} = {t*TP_BK,
+// block_row0}`。B（`[k, n]` 行主導）は `globalDim = [n, k]`・
+// `boxDim = [TP_BN, TP_BK]` で座標 `{n 位置, k 位置} = {block_col0,
+// t*TP_BK}`。ホスト側の `TmaBoxSpec` 構築（`gemm.rs`）はこの規約と
+// 1:1 対応する。
+//
+// # swizzle（R4。仮説段階・実機未検証）
+//
+// [`TmaSwizzleA`] は `None`（正しさ確認用の fail-safe ベースライン。
+// smem 密レイアウトのため A 読み出しで 2-way バンク衝突が生じうるが
+// TMA ロード機構そのものの数値検証は本腕だけで成立する）と `B64`
+// （64B swizzle アトム内の 16B チャンクを行番号で XOR 置換する仮説式
+// `swz = chunk ^ ((row >> 1) & 3)`。物理列 `= swz*4 + (kk % 4)`。
+// 設計 doc §3.1 の仮説をそのまま実装したもので、smem 物理配置が本当に
+// この式どおりかは GB10 実機観測（イシュー #1976）でのみ確定する）の
+// 2 値のみを Stage 1 の対象とする。B（`bs_tile`）は行幅 256B（=
+// `TP_BN*4`）が 64B swizzle アトムを跨ぐため swizzle 対象外（常に
+// `None` 相当の恒等アクセス）に固定する。
+//
+// # 部分和・数値契約
+//
+// TMA ロードは cp.async と異なりチャンク単位ではなくボックス単位で
+// 境界外を扱う（ディスクリプタの OOB fill=NONE。ボックスが `m`/`n`
+// 境界をまたぐ端数タイルでのゼロ充填意味論は GB10 実機で未検証のまま
+// イシュー #1976 へ申し送る。設計 doc §4.3・§8）。K 方向のタイル分割
+// （`num_k_tiles`）自体は `TP_TILE_CORE` と同一のホスト検証
+// （`n % 4 == 0 && k % 4 == 0`。`crate::gemm::tiled_pipeline_alignment_ok`
+// を流用）に従うため、K 内積の蓄積順序・`fmaf` 契約は不変（
+// `.claude/rules/coding-rust.md` の FMA 契約統一節に抵触しない）。
+
+/// A タイル（`TP_BM x TP_BK`）1 box あたりの転送バイト数（`TP_BM*TP_BK*4`。
+/// 密レイアウト・パディングなし。既存 `TP_A_PAD` 付き cp.async 版とは
+/// smem レイアウトが異なる点に注意）。
+pub const TP_TMA_A_BOX_BYTES: u32 = TP_BM * TP_BK * 4;
+/// B タイル（`TP_BK x TP_BN`）1 box あたりの転送バイト数
+/// （`TP_BK*TP_BN*4`）。
+pub const TP_TMA_B_BOX_BYTES: u32 = TP_BK * TP_BN * 4;
+/// 1 ステージあたりの mbarrier `expect_tx`（A+B 合計転送予定バイト数）。
+pub const TP_TMA_EXPECT_TX_BYTES: u32 = TP_TMA_A_BOX_BYTES + TP_TMA_B_BOX_BYTES;
+/// TMA box の smem 側整列（バイト）。`tests/tma_probe_real_device.rs`
+/// の既存プローブは `CUtensorMap` の ABI 整列要件として
+/// `__align__(128)` で実行成功済みだが、それは **各段（stage）の A タイル
+/// 先頭アドレスが `128` の倍数であること**しか保証しない。`B64`
+/// swizzle 仮説（`TP_TMA_A_AT` マクロの `chunk ^ ((row>>1)&3)`）は
+/// ハードウェアが smem **絶対**アドレスのビット [7,9) を [4,6) へ XOR
+/// する（64B swizzle atom 内の並べ替え）という前提に立っており、この
+/// 仮説が成立するには各段の A タイル先頭アドレスのビット [4,9) が
+/// すべてゼロ（＝ 512 バイト整列）でなければならない
+/// （`TP_TMA_A_BOX_BYTES`＝4096B の下で `__align__(128)` は 128 バイト
+/// 整列しか保証しないため、512 バイト整列より緩い制約になり得る）。
+/// よって `128` ではなく `1024`（512 の倍数）を採用し、下記 const assert
+/// （`TP_TMA_A_BOX_BYTES` が 512 の倍数であること）と合わせて各段が
+/// 512 バイト境界に確実に整列することを機械保証する（`None` 腕は恒等
+/// アクセスのためこの整列に依存しないが、`B64` 腕の仮説検証を整列崩れ
+/// による誤帰属から守るため両腕とも同じ整列で確保する）。
+pub const TP_TMA_SMEM_ALIGN: u32 = 1024;
+/// mbarrier ポーリングの上限回数（`tests/tma_probe_real_device.rs::
+/// TMA_POLL_LIMIT` と同値。実測チューニング値ではなくハング防止の
+/// 安全マージン。本ファイル冒頭コメント「REQ-8」節と同じ fail-closed
+/// 方針: 上限到達時はタイムアウトとして NaN センチネルへ切り替える）。
+pub const TP_TMA_POLL_LIMIT: u32 = 1_000_000;
+
+// コンパイル時契約検査。A box の内側次元（K 方向）バイト幅が 64B
+// swizzle アトムぴったり（B64 swizzle の前提。1 行 = 1 アトム）である
+// こと・B box の内側次元（N 方向）バイト幅が 64B swizzle アトムを跨ぐ
+// （B は swizzle 対象外に固定する根拠）ことを機械検証する。
+const _: () = assert!(
+    TP_BK * 4 == 64,
+    "TP_TMA B64 swizzle hypothesis assumes the A box's inner (K) row is exactly one 64B \
+     swizzle atom (TP_BK * 4 == 64)"
+);
+const _: () = assert!(
+    TP_BN * 4 > 64,
+    "B box's inner (N) row must exceed one 64B swizzle atom, which is why B stays swizzle=None"
+);
+// `TP_TMA_SMEM_ALIGN` ドキュメンテーションコメント「B64 swizzle 仮説の
+// 整列前提」参照: 各段の A タイルが `TP_TMA_SMEM_ALIGN`（1024B）境界に
+// 整列していれば、段内オフセット（`TP_TMA_A_BOX_BYTES` の倍数）も
+// 512B 整列でなければ次段が 512B 境界からずれる。ここで
+// `TP_TMA_A_BOX_BYTES` 自体が 512 の倍数であることを機械検証する。
+const _: () = assert!(
+    TP_TMA_A_BOX_BYTES.is_multiple_of(512),
+    "TP_TMA_A_BOX_BYTES must be a multiple of 512 bytes for the B64 swizzle hypothesis's \
+     512-byte stage alignment assumption to hold across all TP_STAGES"
+);
+// 全 TP_STAGES（最大 [`TP_MAX_STAGES`]）を密レイアウト（パディングなし）
+// で確保しても、既存カーネル群が共有する per-block 48KiB 予算を超過
+// しないことを検証する（[`TP_SMEM_BYTES_PER_STAGE`] の const assert と
+// 同型）。
+const _: () = assert!(
+    (TP_TMA_A_BOX_BYTES + TP_TMA_B_BOX_BYTES) * TP_MAX_STAGES
+        <= crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES,
+    "kernels_tiled_pipeline TMA static shared memory (at TP_MAX_STAGES) exceeds the 48KiB \
+     per-block limit shared by every compute capability"
+);
+
+/// A タイルの swizzle モード（設計 doc §3.2。B は常に swizzle 対象外）。
+/// `internal-diagnostics` feature 限定 opt-in API のパラメータとしての
+/// み露出する（本番既定経路は非到達）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TmaSwizzleA {
+    /// 恒等アクセス（正しさ確認用の fail-safe ベースライン）。
+    None,
+    /// 64B swizzle アトム内 16B チャンクの XOR 置換（仮説段階。本節冒頭
+    /// コメント「swizzle」参照）。
+    B64,
+}
+
+impl TmaSwizzleA {
+    /// カーネルソースへ埋め込む `#define TP_TMA_SWZ_A_MODE` の値
+    /// （`0`＝`None`・`1`＝`B64`）。
+    fn mode_bit(self) -> u32 {
+        match self {
+            TmaSwizzleA::None => 0,
+            TmaSwizzleA::B64 => 1,
+        }
+    }
+}
+
+/// [`TmaSwizzleA::B64`] の smem 物理配置仮説をホスト側で再現する逐語
+/// モデル（本節冒頭コメント「swizzle」参照。カーネル側 `TP_TMA_A_AT`
+/// マクロの `TP_TMA_SWZ_A_MODE == 1` 分岐と同一の整数演算）。
+/// `row` は共有メモリタイル内の行添字（`0..TP_BM`）、`kk` は K 方向添字
+/// （`0..TP_BK`）。戻り値は物理列添字（`0..TP_BK`）。
+///
+/// `tests/tma_probe_real_device.rs` の意味論プローブ（イシュー #1976）が
+/// 実機の smem ダンプと突き合わせる際に使う想定の関数（本 issue の
+/// スコープでは未実装。設計 doc §8「スコープ外・申し送り」参照）。
+///
+/// 現時点ではクレート内部の単体テスト（本ファイル `mod tests`）からのみ
+/// 参照するため `#[cfg(test)]` 限定とする。#1976 で外部プローブ
+/// （`tests/` 配下の integration test）から参照する際は `pub` へ戻し
+/// `lib.rs` から re-export する（`#[cfg(test)]` は crate 内部限定で
+/// integration test からは到達できないため）。
+#[cfg(test)]
+pub fn tma_swizzled_chunk_a(row: u32, kk: u32) -> u32 {
+    let chunk = kk / 4;
+    let swz = chunk ^ ((row >> 1) & 3);
+    swz * 4 + (kk % 4)
+}
+
+/// [`render_tma_source`] 用の TMA 固有 `#define` 群
+/// （[`render_defines`] が生成する共通定義に続けて連結する）。
+fn render_tma_defines(swizzle: TmaSwizzleA) -> String {
+    format!(
+        "#define TP_TMA_A_BOX_BYTES {a_box}\n\
+         #define TP_TMA_B_BOX_BYTES {b_box}\n\
+         #define TP_TMA_EXPECT_TX_BYTES {expect_tx}\n\
+         #define TP_TMA_SMEM_ALIGN {align}\n\
+         #define TP_TMA_POLL_LIMIT {poll_limit}u\n\
+         #define TP_TMA_SWZ_A_MODE {swz_mode}\n\
+         \n",
+        a_box = TP_TMA_A_BOX_BYTES,
+        b_box = TP_TMA_B_BOX_BYTES,
+        expect_tx = TP_TMA_EXPECT_TX_BYTES,
+        align = TP_TMA_SMEM_ALIGN,
+        poll_limit = TP_TMA_POLL_LIMIT,
+        swz_mode = swizzle.mode_bit(),
+    )
+}
+
+/// TMA 版カーネルソース全文を生成する（[`render_source`] の TMA 版）。
+pub fn render_tma_source(stages: u32, swizzle: TmaSwizzleA) -> String {
+    format!(
+        "{defines}{tma_defines}{helper}{prefix}{core}{suffix}",
+        defines = render_defines(stages),
+        tma_defines = render_tma_defines(swizzle),
+        helper = TP_TMA_HELPER,
+        prefix = TP_TMA_PREFIX,
+        core = TP_TMA_TILE_CORE,
+        suffix = TP_TMA_SUFFIX,
+    )
+}
+
+/// TMA 版・`CUtensorMap` 手書き typedef・A 読み出しマクロ
+/// （`TP_TMA_SWZ_A_MODE` により恒等／XOR 置換を切り替える）。
+///
+/// `typedef` は `cudarc::driver::sys::CUtensorMap`（`cuda-13000`
+/// feature。`opaque: [u64; 16]`・`#[repr(align(128))]`）と同一バイト
+/// レイアウトの手書き代替であり、`tests/tma_probe_real_device.rs::
+/// TMA_PROBE_KERNEL_CTA` 冒頭の typedef と同一（NVRTC は `cuda.h` を
+/// 同梱しないため代替が必要という同じ理由。当該ファイルのコメント
+/// 参照）。
+const TP_TMA_HELPER: &str = r#"
+typedef struct __align__(128) {
+    unsigned long long opaque[16];
+} CUtensorMap;
+
+#if TP_TMA_SWZ_A_MODE == 1
+// 仮説段階（本ファイル「swizzle」節参照）。実機検証はイシュー #1976。
+#define TP_TMA_A_AT(stage, row, kk) \
+    as_tile[stage][row][((((kk) / 4) ^ (((row) >> 1) & 3)) * 4 + ((kk) % 4))]
+#else
+#define TP_TMA_A_AT(stage, row, kk) as_tile[stage][row][kk]
+#endif
+
+"#;
+
+/// TMA 版カーネルの関数シグネチャ・共有メモリ宣言・`blockIdx` 由来の
+/// `block_row0`/`block_col0` 計算（[`TP_NON_PERSISTENT_PREFIX`] の TMA
+/// 版）。`a_map`/`b_map` は `cuTensorMapEncodeTiled`（`gemm.rs::
+/// encode_tensor_map_2d_f32`）が検証済み `m`/`n`/`k` からのみ生成する
+/// （REQ-8・A03。設計 doc §7）。`a`/`b`（生ポインタ）はカーネル内で
+/// 読まないが、cudarc のバッファ使用追跡を既存 cp.async 版と同じに保つ
+/// ため引数に残す。
+const TP_TMA_PREFIX: &str = r#"extern "C" __global__ void gemm_tiled_pipeline_tma_f32(
+    const __grid_constant__ CUtensorMap a_map,
+    const __grid_constant__ CUtensorMap b_map,
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m, int n, int k)
+{
+    __shared__ __align__(TP_TMA_SMEM_ALIGN) float as_tile[TP_STAGES][TP_BM][TP_BK];
+    __shared__ __align__(TP_TMA_SMEM_ALIGN) float bs_tile[TP_STAGES][TP_BK][TP_BN];
+    __shared__ __align__(8) unsigned long long full[TP_STAGES];
+    __shared__ unsigned timed_out;
+
+    int block_row0 = blockIdx.y * TP_BM;
+    int block_col0 = blockIdx.x * TP_BN;
+
+"#;
+
+/// TMA 版タイル内計算本体（[`TP_TILE_CORE`] のロード段のみを TMA へ
+/// 置換したもの）。
+///
+/// # プロローグ・steady state の不変条件
+///
+/// - `mbarrier.init` は全 `TP_STAGES` 分を thread 0 が行う（未使用の
+///   ステージが残っても mbarrier 自体の初期化は無害）。
+/// - プロローグは `s < num_k_tiles` の場合のみ `arrive.expect_tx` +
+///   TMA ロードを発行する。`compute_stage = t % TP_STAGES`（`t <
+///   num_k_tiles`）が参照するステージは必ずこの条件で発行済みの
+///   ステージのみである（`num_k_tiles < TP_STAGES - 1` のとき、未発行
+///   ステージは steady state ループでも一切参照されない — `t` の
+///   取りうる範囲が `num_k_tiles` 未満のため）。よって「発行されて
+///   いないステージを待つ」経路は構造的に発生しない。
+/// - grid は `ceil(m/TP_BM) x ceil(n/TP_BN)` で起動するため
+///   `block_row0 < m`・`block_col0 < n` は常に成立する（`m == 0 ||
+///   n == 0` はホスト側 [`crate::gemm::CudaGemm::run_tiled_pipeline_tma_f32`]
+///   が起動前に早期 return する）。`kt < k` は `s < num_k_tiles`
+///   から導かれる。これらのガードは REQ-8 の fail-closed 方針として
+///   明示的に残す（設計 doc §3.1 点 1「タイル起点ガード」）。
+/// - **timed_out のスティッキー化**: mbarrier ポーリングが
+///   [`TP_TMA_POLL_LIMIT`] 回で完了しなかった場合 `timed_out` を立て、
+///   以後の待機・発行を全てスキップする（毎イテレーション上限まで
+///   ポーリングし続ける無期限相当のハングを防ぐ。本ファイル冒頭
+///   コメント「REQ-8」節）。`timed_out` はブロック共有変数で
+///   `__syncthreads()` を挟んで全スレッドが同じ値を見るため、
+///   分岐自体はブロック一様（発散しない）。
+/// - **WAR 安全性**: 「wait → `__syncthreads()` → 計算 →
+///   `__syncthreads()` → 次段発行」の順序により、thread 0 が次段の
+///   TMA ロードで `as_tile[load_stage]`/`bs_tile[load_stage]` を
+///   上書きする前に、全スレッドが同じ物理バッファ（`compute_stage ==
+///   load_stage` となる `STAGES` 反復前の読み取り）を読み終えている
+///   ことを保証する（[`TP_TILE_CORE`] の cp.async 版と同じ論証の
+///   TMA 版）。
+const TP_TMA_TILE_CORE: &str = r#"    int tid = threadIdx.x;
+    int tx = tid % TP_THREADS_X;
+    int ty = tid / TP_THREADS_X;
+
+    int thread_row0 = block_row0 + ty * TP_THREAD_M;
+    int thread_col0 = block_col0 + tx * TP_THREAD_N;
+
+    float acc[TP_THREAD_M][TP_THREAD_N] = {};
+
+    int num_k_tiles = (k > 0) ? (k - 1) / TP_BK + 1 : 0;
+
+    unsigned long long a_map_addr = (unsigned long long)&a_map;
+    unsigned long long b_map_addr = (unsigned long long)&b_map;
+
+    #define TP_TMA_BAR_ADDR(s) ((unsigned)__cvta_generic_to_shared(&full[s]))
+
+    if (tid == 0) {
+        for (int s = 0; s < TP_STAGES; ++s) {
+            unsigned bar_addr = TP_TMA_BAR_ADDR(s);
+            asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;\n" :: "r"(bar_addr));
+        }
+        asm volatile("fence.proxy.async.shared::cta;\n");
+        timed_out = 0u;
+
+        // REQ-8: タイル起点ガード（本ファイル冒頭コメント「不変条件」
+        // 節）。プロローグは STAGES-1 段先行発行する（TP_TILE_CORE の
+        // cp.async 版と同じ「1 イテレーション＝必ず 1 発行」不変条件の
+        // TMA 版）。
+        for (int s = 0; s < TP_STAGES - 1; ++s) {
+            if (s < num_k_tiles) {
+                unsigned bar_addr = TP_TMA_BAR_ADDR(s);
+                int kt = s * TP_BK;
+                if (block_row0 < m && block_col0 < n && kt < k) {
+                    asm volatile(
+                        "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n"
+                        :: "r"(bar_addr), "r"((int)TP_TMA_EXPECT_TX_BYTES));
+                    unsigned as_addr =
+                        (unsigned)__cvta_generic_to_shared(&as_tile[s][0][0]);
+                    asm volatile(
+                        "cp.async.bulk.tensor.2d.shared::cta.global."
+                        "mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n"
+                        :: "r"(as_addr), "l"(a_map_addr), "r"(kt), "r"(block_row0),
+                           "r"(bar_addr)
+                        : "memory");
+                    unsigned bs_addr =
+                        (unsigned)__cvta_generic_to_shared(&bs_tile[s][0][0]);
+                    asm volatile(
+                        "cp.async.bulk.tensor.2d.shared::cta.global."
+                        "mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n"
+                        :: "r"(bs_addr), "l"(b_map_addr), "r"(block_col0), "r"(kt),
+                           "r"(bar_addr)
+                        : "memory");
+                }
+            }
+        }
+    }
+    __syncthreads();
+
+    for (int t = 0; t < num_k_tiles; ++t) {
+        int compute_stage = t % TP_STAGES;
+        unsigned phase = (unsigned)((t / TP_STAGES) & 1);
+
+        if (tid == 0 && !timed_out) {
+            unsigned bar_addr = TP_TMA_BAR_ADDR(compute_stage);
+            unsigned complete = 0;
+            unsigned poll_count = 0;
+            while (!complete && poll_count < TP_TMA_POLL_LIMIT) {
+                asm volatile(
+                    "{\n"
+                    ".reg .pred p;\n"
+                    "mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+                    "selp.u32 %0, 1, 0, p;\n"
+                    "}\n"
+                    : "=r"(complete)
+                    : "r"(bar_addr), "r"(phase));
+                poll_count++;
+            }
+            if (!complete) {
+                timed_out = 1u;
+            }
+            asm volatile("fence.proxy.async.shared::cta;\n");
+        }
+        __syncthreads();
+
+        if (!timed_out) {
+#pragma unroll
+            for (int kk = 0; kk < TP_BK; ++kk) {
+                float a_reg[TP_THREAD_M];
+#pragma unroll
+                for (int i = 0; i < TP_THREAD_M; ++i) {
+                    a_reg[i] = TP_TMA_A_AT(compute_stage, ty * TP_THREAD_M + i, kk);
+                }
+                float b_reg[TP_THREAD_N];
+#pragma unroll
+                for (int j = 0; j < TP_THREAD_N; ++j) {
+                    b_reg[j] = bs_tile[compute_stage][kk][tx * TP_THREAD_N + j];
+                }
+#pragma unroll
+                for (int i = 0; i < TP_THREAD_M; ++i) {
+#pragma unroll
+                    for (int j = 0; j < TP_THREAD_N; ++j) {
+                        acc[i][j] = fmaf(a_reg[i], b_reg[j], acc[i][j]);
+                    }
+                }
+            }
+        }
+
+        __syncthreads();
+
+        int next_tile = t + TP_STAGES - 1;
+        if (tid == 0 && !timed_out && next_tile < num_k_tiles) {
+            int load_stage = next_tile % TP_STAGES;
+            unsigned bar_addr = TP_TMA_BAR_ADDR(load_stage);
+            int kt = next_tile * TP_BK;
+            asm volatile(
+                "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n"
+                :: "r"(bar_addr), "r"((int)TP_TMA_EXPECT_TX_BYTES));
+            unsigned as_addr = (unsigned)__cvta_generic_to_shared(&as_tile[load_stage][0][0]);
+            asm volatile(
+                "cp.async.bulk.tensor.2d.shared::cta.global."
+                "mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n"
+                :: "r"(as_addr), "l"(a_map_addr), "r"(kt), "r"(block_row0), "r"(bar_addr)
+                : "memory");
+            unsigned bs_addr = (unsigned)__cvta_generic_to_shared(&bs_tile[load_stage][0][0]);
+            asm volatile(
+                "cp.async.bulk.tensor.2d.shared::cta.global."
+                "mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n"
+                :: "r"(bs_addr), "l"(b_map_addr), "r"(block_col0), "r"(kt), "r"(bar_addr)
+                : "memory");
+        }
+    }
+
+    #undef TP_TMA_BAR_ADDR
+
+    // REQ-8: エピローグの guarded store。timed_out の場合は NaN
+    // センチネル（tests/tma_probe_real_device.rs と同じ union 方式・
+    // bit パターン 0x7fc00000）を書き、bit 一致テストで「未完了」を
+    // 確実に検出させる（`.claude/rules/coding-rust.md`「カーネル実装の
+    // 境界検査」）。
+#pragma unroll
+    for (int i = 0; i < TP_THREAD_M; ++i) {
+#pragma unroll
+        for (int j = 0; j < TP_THREAD_N; ++j) {
+            int r = thread_row0 + i;
+            int cc = thread_col0 + j;
+            if (r < m && cc < n) {
+                if (timed_out) {
+                    union {
+                        unsigned u;
+                        float f;
+                    } nan_bits;
+                    nan_bits.u = 0x7fc00000u;
+                    c[(size_t)r * n + cc] = nan_bits.f;
+                } else {
+                    c[(size_t)r * n + cc] = acc[i][j];
+                }
+            }
+        }
+    }
+"#;
+
+/// TMA 版カーネル関数の閉じ括弧。
+const TP_TMA_SUFFIX: &str = "}\n";
+
+/// 本番結線が既定でコンパイルする [`TP_DEFAULT_STAGES`] 固定・`None`／
+/// `B64` swizzle 各 1 本の TMA 版カーネルソース（`internal-diagnostics`
+/// feature 限定 opt-in API 〈`crate::gemm::CudaGemm::
+/// compile_tiled_pipeline_tma_variant`〉からのみ呼ばれる。`new` 自体は
+/// 本番既定経路のためコンパイルしない）。
+pub fn tiled_pipeline_tma_f32_source(swizzle: TmaSwizzleA) -> &'static str {
+    match swizzle {
+        TmaSwizzleA::None => &TILED_PIPELINE_TMA_F32_SOURCE_NONE,
+        TmaSwizzleA::B64 => &TILED_PIPELINE_TMA_F32_SOURCE_B64,
+    }
+}
+
+static TILED_PIPELINE_TMA_F32_SOURCE_NONE: LazyLock<String> =
+    LazyLock::new(|| render_tma_source(TP_DEFAULT_STAGES, TmaSwizzleA::None));
+static TILED_PIPELINE_TMA_F32_SOURCE_B64: LazyLock<String> =
+    LazyLock::new(|| render_tma_source(TP_DEFAULT_STAGES, TmaSwizzleA::B64));
+
+/// 任意のステージ数（[`TP_MIN_STAGES`]..=[`TP_MAX_STAGES`]）の TMA 版
+/// カーネルソースをオンデマンド生成する（[`tiled_pipeline_persistent_
+/// f32_source_with_stages`] と同じ範囲検証）。
+///
+/// 本 issue のスコープでは `crate::gemm::CudaGemm::
+/// compile_tiled_pipeline_tma_variant`（本番結線前提の opt-in API）は
+/// 既定 [`TP_DEFAULT_STAGES`] 固定の [`tiled_pipeline_tma_f32_source`]
+/// のみを呼ぶ（persistent／Stream-K 版のように段数を可変にするベンチ
+/// example は未実装。設計 doc §8「スコープ外・申し送り」参照）ため、
+/// 現時点ではクレート内部の単体テストからのみ参照する
+/// （`#[cfg(test)]` 限定。将来の段数比較 example 追加時に `pub` へ戻す）。
+#[cfg(test)]
+pub fn tiled_pipeline_tma_f32_source_with_stages(
+    stages: u32,
+    swizzle: TmaSwizzleA,
+) -> Result<String, CudaError> {
+    if !(TP_MIN_STAGES..=TP_MAX_STAGES).contains(&stages) {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "tiled_pipeline_tma_f32_source_with_stages stages ({stages}) must lie within \
+                 [{TP_MIN_STAGES}, {TP_MAX_STAGES}]"
+            ),
+        });
+    }
+    Ok(render_tma_source(stages, swizzle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1731,5 +2219,203 @@ mod tests {
             "TP_SK_FIXUP_KERNEL のリテラルが TP_SK_FIXUP_BLOCK_THREADS（{TP_SK_FIXUP_BLOCK_THREADS}）\
              と一致しません"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // TMA（イシュー #1975）
+    // -------------------------------------------------------------------
+
+    /// TMA 版ソース（`None`／`B64` 両腕）が mbarrier/cp.async.bulk.tensor
+    /// 命令列・`fmaf(` を含むことを検査する。
+    #[test]
+    fn tma_source_contains_expected_tma_instructions() {
+        for swizzle in [TmaSwizzleA::None, TmaSwizzleA::B64] {
+            let source = tiled_pipeline_tma_f32_source(swizzle);
+            for needle in [
+                "mbarrier.init.shared::cta.b64",
+                "mbarrier.arrive.expect_tx.shared::cta.b64",
+                // 隣接文字列リテラル 2 個に分割しているため（本ファイルの
+                // `cp.async.bulk.tensor.2d.shared::cta.global.` +
+                // `mbarrier::complete_tx::bytes ...` 表記。C の隣接文字列
+                // 連結はカーネルコンパイル時にのみ有効で、この Rust
+                // テストが見る生テキストには改行・インデントが残る）、
+                // 前半のみを検査対象とする。
+                "cp.async.bulk.tensor.2d.shared::cta.global.",
+                "mbarrier::complete_tx::bytes",
+                "mbarrier.try_wait.parity.shared::cta.b64",
+                "fence.proxy.async.shared::cta",
+                "fmaf(",
+            ] {
+                assert!(
+                    source.contains(needle),
+                    "tiled_pipeline_tma_f32_source({swizzle:?}) が `{needle}` を含みません"
+                );
+            }
+        }
+    }
+
+    /// TMA 版ソースが cp.async（16 バイト単位ロード）系命令を一切含まない
+    /// こと（ロード段の完全置換・決定性。設計 doc §3.1）を検査する。
+    #[test]
+    fn tma_source_does_not_contain_cp_async_load_instructions() {
+        for swizzle in [TmaSwizzleA::None, TmaSwizzleA::B64] {
+            let source = tiled_pipeline_tma_f32_source(swizzle);
+            for needle in [
+                "cp.async.cg.shared.global",
+                "cp.async.commit_group",
+                "cp.async.wait_group",
+                "atomicAdd",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "tiled_pipeline_tma_f32_source({swizzle:?}) が `{needle}` を含んでは \
+                     いけません（ロード段の完全置換・決定性）"
+                );
+            }
+        }
+    }
+
+    /// REQ-8: エピローグ guarded store・タイル起点ガード
+    /// （`s < num_k_tiles` に加え `block_row0 < m && block_col0 < n`）・
+    /// 座標が要素座標式（`t * TP_BK`／`block_row0`／`block_col0`）である
+    /// ことを検査する。
+    #[test]
+    fn tma_source_retains_req8_bounds_checks() {
+        let source = tiled_pipeline_tma_f32_source(TmaSwizzleA::None);
+        assert!(
+            source.contains("if (r < m && cc < n) {"),
+            "エピローグ guarded store が見当たりません"
+        );
+        assert!(
+            source.contains("if (block_row0 < m && block_col0 < n && kt < k) {"),
+            "プロローグのタイル起点ガードが見当たりません"
+        );
+        assert!(
+            source.contains("int kt = s * TP_BK;"),
+            "K 方向の要素座標算出（プロローグ）が見当たりません"
+        );
+        assert!(
+            source.contains("int kt = next_tile * TP_BK;"),
+            "K 方向の要素座標算出（steady state）が見当たりません"
+        );
+        assert_eq!(
+            source.matches("extern \"C\" __global__ void").count(),
+            1,
+            "TMA 版ソースは単一関数のみを含むはずです"
+        );
+    }
+
+    /// `#define` として埋め込む TMA 定数群（`TP_TMA_A_BOX_BYTES` 等）が
+    /// Rust 側定数とドリフトしていないことを検査する。
+    #[test]
+    fn tma_defines_match_rust_constants() {
+        for swizzle in [TmaSwizzleA::None, TmaSwizzleA::B64] {
+            let source = tiled_pipeline_tma_f32_source(swizzle);
+            for (name, value) in [
+                ("TP_TMA_A_BOX_BYTES", TP_TMA_A_BOX_BYTES),
+                ("TP_TMA_B_BOX_BYTES", TP_TMA_B_BOX_BYTES),
+                ("TP_TMA_EXPECT_TX_BYTES", TP_TMA_EXPECT_TX_BYTES),
+                ("TP_TMA_SMEM_ALIGN", TP_TMA_SMEM_ALIGN),
+            ] {
+                let needle = format!("#define {name} {value}\n");
+                assert!(
+                    source.contains(&needle),
+                    "tiled_pipeline_tma_f32_source({swizzle:?}) の `#define {name}` が \
+                     Rust 側定数（{value}）とドリフトしています"
+                );
+            }
+            let swz_needle = format!("#define TP_TMA_SWZ_A_MODE {}\n", swizzle.mode_bit());
+            assert!(
+                source.contains(&swz_needle),
+                "tiled_pipeline_tma_f32_source({swizzle:?}) の `#define TP_TMA_SWZ_A_MODE` が \
+                 期待値（{}）とドリフトしています",
+                swizzle.mode_bit()
+            );
+        }
+    }
+
+    /// `None` 腕は `TP_TMA_A_AT` が恒等アクセスへ展開されることをソース
+    /// テキストで確認する（`B64` 腕との判別。R4）。
+    #[test]
+    fn tma_source_none_swizzle_uses_identity_access_macro() {
+        let source = tiled_pipeline_tma_f32_source(TmaSwizzleA::None);
+        assert!(
+            source.contains("#define TP_TMA_A_AT(stage, row, kk) as_tile[stage][row][kk]"),
+            "None 腕は恒等アクセスマクロを使うはずです"
+        );
+    }
+
+    /// `tma_swizzled_chunk_a`（ホスト側モデル）がカーネル側 `TP_TMA_A_AT`
+    /// の `B64` 分岐と同一の整数演算（`chunk ^ ((row>>1)&3)` →
+    /// `swz*4+(kk%4)`）を実装していることを、カーネルソース文字列の
+    /// リテラル一致で検査する（ドリフト検出）。
+    #[test]
+    fn tma_source_b64_swizzle_macro_matches_host_model_formula() {
+        let source = tiled_pipeline_tma_f32_source(TmaSwizzleA::B64);
+        assert!(
+            source.contains(
+                "as_tile[stage][row][((((kk) / 4) ^ (((row) >> 1) & 3)) * 4 + ((kk) % 4))]"
+            ),
+            "B64 腕のマクロ本文がホスト側モデル（`tma_swizzled_chunk_a`）の式と \
+             ドリフトしています"
+        );
+    }
+
+    /// [`tma_swizzled_chunk_a`] が `TP_BK`（16）の範囲で行内全単射
+    /// （bijection。各行内で列添字 0..16 が重複なく現れる）であることを
+    /// 検査する（B64 仮説が読み出しの整合性を壊さないことの最低限の
+    /// 機械検証。物理配置そのものの正しさは実機検証〈イシュー #1976〉に
+    /// 依存する）。
+    #[test]
+    fn tma_swizzled_chunk_a_is_bijective_per_row() {
+        for row in 0..TP_BM {
+            let mut seen = [false; TP_BK as usize];
+            for kk in 0..TP_BK {
+                let phys = tma_swizzled_chunk_a(row, kk);
+                assert!(
+                    phys < TP_BK,
+                    "tma_swizzled_chunk_a(row={row}, kk={kk}) が範囲外（{phys}）です"
+                );
+                assert!(
+                    !seen[phys as usize],
+                    "tma_swizzled_chunk_a(row={row}, ..) が列 {phys} を複数回返しました \
+                     （全単射性が壊れています）"
+                );
+                seen[phys as usize] = true;
+            }
+        }
+    }
+
+    /// `tiled_pipeline_tma_f32_source_with_stages` の範囲検証
+    /// （[`TP_MIN_STAGES`]..=[`TP_MAX_STAGES`] 外を拒否する）を検査する。
+    #[test]
+    fn tiled_pipeline_tma_f32_source_with_stages_rejects_out_of_range() {
+        assert!(matches!(
+            tiled_pipeline_tma_f32_source_with_stages(TP_MIN_STAGES - 1, TmaSwizzleA::None),
+            Err(CudaError::InvalidKernelConfig { .. })
+        ));
+        assert!(matches!(
+            tiled_pipeline_tma_f32_source_with_stages(TP_MAX_STAGES + 1, TmaSwizzleA::None),
+            Err(CudaError::InvalidKernelConfig { .. })
+        ));
+        assert!(
+            tiled_pipeline_tma_f32_source_with_stages(TP_DEFAULT_STAGES, TmaSwizzleA::B64).is_ok()
+        );
+    }
+
+    /// TMA 版ソースの波括弧数が均衡していることを検査する（既存
+    /// persistent／Stream-K 版と同種の構文健全性チェック）。
+    #[test]
+    fn tma_source_braces_are_balanced() {
+        for swizzle in [TmaSwizzleA::None, TmaSwizzleA::B64] {
+            let source = tiled_pipeline_tma_f32_source(swizzle);
+            let open = source.matches('{').count();
+            let close = source.matches('}').count();
+            assert_eq!(
+                open, close,
+                "tiled_pipeline_tma_f32_source({swizzle:?}) の波括弧数が不均衡です \
+                 (open={open}, close={close})"
+            );
+        }
     }
 }
