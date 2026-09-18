@@ -60,6 +60,7 @@ size∈{256,512,1024,2048,4096} の 5 run 中央値（主判定列
 
 from __future__ import annotations
 
+import math
 import argparse
 import re
 import statistics
@@ -139,10 +140,19 @@ def parse_gate_c_log(path: Path, warnings: list[str]) -> dict[int, dict[str, obj
                 entry[key] = SKIPPED
                 continue
             try:
-                entry[key] = float(value)
+                parsed = float(value)
             except ValueError:
                 entry[key] = INVALID
                 warnings.append(f"{path.name}:{lineno}: key={key} の値 {value!r} が数値でも skipped でもない")
+                continue
+            if not math.isfinite(parsed):
+                # `nan`／`inf`／`1e999`（overflow で inf）は float() が受理してしまうが、
+                # 本スクリプトの契約（有限小数のみを正常値とし、不正値が 1 件でもあれば
+                # undetermined）に反するため INVALID として扱う（PR #2041 codex-review P2）。
+                entry[key] = INVALID
+                warnings.append(f"{path.name}:{lineno}: key={key} の値 {value!r} が非有限値（nan／inf）")
+                continue
+            entry[key] = parsed
         if size_val is None:
             continue
         if size_val in result:
@@ -484,6 +494,22 @@ def run_self_test() -> int:
         assert any("garbage" in msg for msg in w)
     finally:
         shutil.rmtree(tmp_dir)
+
+    # --- parse_gate_c_log: 非有限値（nan／inf／overflow）は INVALID として拒否する ---
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "gateC_run1.log"
+        p.write_text(
+            "size=256 pipeline3_gpu_only_tflops=nan tma_none_over_pipeline3_gpu_only=inf\n"
+            "size=512 tma_none_over_pipeline3_gpu_only=1e999 tma_b64_over_pipeline3_gpu_only=-inf\n",
+            encoding="utf-8",
+        )
+        w: list[str] = []
+        parsed = parse_gate_c_log(p, w)
+        assert parsed[256]["pipeline3_gpu_only_tflops"] == INVALID
+        assert parsed[256]["tma_none_over_pipeline3_gpu_only"] == INVALID
+        assert parsed[512]["tma_none_over_pipeline3_gpu_only"] == INVALID
+        assert parsed[512]["tma_b64_over_pipeline3_gpu_only"] == INVALID
+        assert len(w) == 4, w
 
     # --- judge_arm: ADOPT 候補（5 size 全て >=1.00・N>=1024 のいずれかで >=1.05） ---
     def make_run(size_ratios: dict[int, float]) -> dict[int, dict[str, object]]:
