@@ -1,0 +1,5 @@
+# 事前宣言（結果が出る前に固定。2026-09-18T01:48:35Z。イシュー #1985。判定・tolerance・判定式は変更しない）
+- 対象: PyTorch cpu N=4096 gemm（0.9.0 系列で fail_count=1・max_abs 8.96e-5・bound 3.05e-5・rescued 643）。同一ノードの venv（torch 2.14.0+cu130・CPU 既定スレッド数）で parity_torch_truth.py --n 4096 --device cpu を 1 回実行し、fail 要素の (row,col)・PyTorch 値・f32 FMA 参照値・Fraction 厳密真値を記録する。
+- fail 要素が 1 件でない（0 件・複数件）場合も是正・再試行せず、その事実を記録する。
+- 救済可否表: c ∈ {0.5, 1.0, 1.5} × {線形 K, √K}（u=2^-24・S_A／S_B は bench-common/parity.rs と同じ）。
+- 採否判定はしない。「spec 上正当な判定不能として現状維持」を第一候補として併記する（issue 本文どおり）。

@@ -1,0 +1,28 @@
+イシュー #1984: burn cuda（TF32 経路）GEMM parity fail 要素の f64 厳密真値突合・u=2^-11 第 3 項の机上救済確認
+実行環境記録（内部ホスト名・ユーザー名・絶対パスは含めない）
+
+## ノード側（ダンプ取得。DGX Spark GB10 実機）
+
+- hostname: masked
+- gpu: NVIDIA GB10, driver 580.173.02
+- cuda: Build cuda_13.0.r13.0/compiler.36424714_0
+- os: Ubuntu 24.04.4 LTS aarch64 kernel 6.17.0-1031-nvidia
+- cpu: nproc=20
+- rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+- cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+- python: Python 3.12.3
+- 転送元コミット: 536c56a8（main）
+- bench-burn: `scripts/bench/framework-compare/`（registry ピン `fandhe-ai =0.9.0`・`burn =0.21.0`）をノード上で
+  `--no-default-features --features cuda` で再ビルド（0.9.0 正式再計測 #1967 と同じ構成）
+- 実行（起動引数は要点の再構成）: `FRAMEWORK_COMPARE_PARITY_DUMP=200000`（N=256／512／1024）／`=4096`（N=2048／4096）で
+  `bench-burn --task gemm --device cuda --mode fresh --size N`。verify は 40 call 呼ばれるため突合には call=39 の行のみ使用
+- ダンプ取得 UTC: 2026-09-18T02:06:25Z〜02:09:09Z
+- uptime_before: load average 0.25, 0.85, 1.21（専有）
+- uptime_after:  load average 0.95, 0.92, 1.17
+
+## Mac 側（机上突合。GPU 不使用）
+
+- python3: Python 3.14.6（Homebrew）
+- 作業ツリー HEAD: 536c56a8（コミット前）
+- `parity_dump_truth.py`／`parity_tolerance_candidates.py`（`--extra-eps`／`--extra-c` 拡張は §9・PR 済み）は本イシューで変更していない
+- 実行 UTC: 2026-09-18T02:18Z〜（truth 5 本・candidates 5 本を逐次実行）

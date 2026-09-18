@@ -320,3 +320,17 @@ python3 parity_tolerance_candidates.py --n 4096 \
   本セッションのスコープ外のまま Mac／GB10 セッションへ申し送る
 - **#1986（精度クラス設計判断）は対象外**: `bench-common::parity` への
   「比較対象の精度クラス」導入案の整理は本拡張の対象外（別 issue）
+
+### 9.4 実測記録（2026-09-18 GB10 実測済み。事実のみ・採否判定なし）
+
+- **#1984**（`docs/perf/logs/parity-burn-tf32-truth-1984/`）: burn cuda N=256〜4096 の
+  fail 要素は全 N で参照（f32 FMA）が真値に近い側 100%（|ref−exact| 1e-7〜1e-5 級・
+  |actual−exact| 1e-5〜5e-3 級。fma_bit_match 100%）。u=2^-11・c=0.5 の線形 K 形は
+  JSONL の `parity_max_abs_err`（1.58e-3〜7.12e-3）< bound（`K/16384`＝1.56e-2〜0.25）
+  により母集団で全数救済・√K 形は N≤1024 母集団で 98.2〜98.4%（N=2048／4096 は
+  先頭 4096 件サンプルで 98.2%／98.0%）
+- **#1985**（`docs/perf/logs/parity-torch-cpu-truth-1985/`）: PyTorch cpu N=4096 の
+  fail 1 要素（idx=343838）は真値に近いのが PyTorch 側（4.0e-6 対 ref 3.0e-5）・
+  |ref−actual| 3.37e-5 は現行 bound（c=0.5・線形 K）3.05e-5 の 1.105 倍で c=1.0 線形 K
+  なら救済・√K 形は c=1.5 でも fail（issue 本文の「c≈1.5 必要」見積りとは相違）。
+  「spec 上正当な判定不能として現状維持」を第一候補として併記

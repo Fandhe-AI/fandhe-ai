@@ -1,0 +1,3 @@
+# n=4096 device=cpu fail_count=1 max_abs=8.964539e-05 bound=3.051757e-05 rescued=643 (fill 10.3s / mm 0.2s / ref 43.6s)
+  idx=343838 row=83 col=3870 actual=-1.325470209e-02 ref=-1.322097145e-02 truth=-1.325068847e-02 |actual-truth|=4.014e-06 |ref-truth|=2.972e-05 ref_fma_bit_match=True closer=actual
+wrote truth-torch-cpu-4096.json / truth-torch-cpu-4096.md

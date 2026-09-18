@@ -1,0 +1,20 @@
+イシュー #1985: PyTorch cpu N=4096 GEMM parity fail 1 要素の f64 厳密真値突合・c／K 形の机上救済可否
+実行環境記録（内部ホスト名・ユーザー名・絶対パスは含めない）
+
+## ノード側（DGX Spark GB10 実機。GPU 不使用・CPU のみ）
+
+- hostname: masked
+- os: Ubuntu 24.04.4 LTS aarch64 kernel 6.17.0-1031-nvidia
+- cpu: nproc=20（Grace CPU）
+- python: Python 3.12.3（venv）
+- torch: 2.14.0+cu130（`--device cpu`。`torch.get_num_threads()=20`・`OMP_NUM_THREADS` 未設定＝既定スレッド数・ATen parallel backend OpenMP・oneDNN v3.12.0）
+- 転送元コミット: 536c56a8（main。`scripts/bench/framework-compare/parity_torch_truth.py` は未コミットの作業ツリー版を転送）
+- 実行: `python3 parity_torch_truth.py --self-test`（rc=0・`self-test.log`）→ `python3 parity_torch_truth.py --n 4096 --device cpu --out truth-torch-cpu-4096.json`（1 回。`run.log`）
+- 実行 UTC: 2026-09-18T02:09:09Z〜02:10:21Z（JSON の timestamp_utc 2026-09-18T02:10:20Z）
+- 所要: fill_vec 10.3 s／torch mm 0.2 s／参照実装 43.6 s
+- uptime_before: load average 0.95, 0.92, 1.17
+- uptime_after:  load average 4.78, 2.25, 1.62（20 スレッド参照実装の直後）
+
+## Mac 側
+
+- `parity_torch_truth.py --self-test`: rc=0・green（torch 不在のため torch 経路は skip）。Python 3.14.6（Homebrew）
