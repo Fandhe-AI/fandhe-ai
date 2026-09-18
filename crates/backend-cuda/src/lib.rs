@@ -603,11 +603,25 @@ pub use gemm::PersistentTiledPipelineFunction;
 // StreamKTiledPipelineFunction` ドキュメンテーションコメント参照）。
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm::{StreamKPlan, StreamKTiledPipelineFunction};
+// `TmaTiledPipelineFunction`／`CudaGemm::compile_tiled_pipeline_tma_variant`／
+// `CudaGemm::launch_tiled_pipeline_tma_f32`／`CudaGemm::
+// run_tiled_pipeline_tma_f32` は TMA（cp.async.bulk.tensor）ロード経路
+// Stage 1（イシュー #1975・設計 docs/backend-cuda-tma-gemm-load-design.md）
+// のベンチ・実機自己検証専用の常駐 API。`PersistentTiledPipelineFunction`・
+// `StreamKTiledPipelineFunction` と同じ判断パターンで `internal-diagnostics`
+// feature（既定 off）でゲートする。`TmaSwizzleA`（A タイルの swizzle
+// モード選択パラメータ）も同じゲートで公開する。**本番既定経路
+// （`CudaGemm::new`）は本節の型を一切生成しない**
+// （`gemm.rs::tma_tiled_pipeline` モジュールコメント参照）。
+#[cfg(feature = "internal-diagnostics")]
+pub use gemm::TmaTiledPipelineFunction;
 pub use gemm_auto::{
     CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
     TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,
     enumerate_tile_candidates_for_device, select_tile_config, select_tile_config_for_device,
 };
+#[cfg(feature = "internal-diagnostics")]
+pub use kernels_tiled_pipeline::TmaSwizzleA;
 // `F16MatrixUnitImpl`（`CudaGemmAuto::run_f16` の内部ディスパッチ実装選択を
 // 表す列挙型）・`CudaGemmAuto::f16_matrix_unit_impl`（その診断アクセサ）は
 // 「診断・テスト用」「利用者向け切替 API ではない」という意図を持つ内部

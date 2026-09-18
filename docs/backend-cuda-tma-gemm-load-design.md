@@ -132,3 +132,44 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 - `crates/backend-cuda/tests/tma_probe_real_device.rs` 冒頭コメントの「本ファイルのカーネルソース・`cuTensorMapEncodeTiled` 呼び出しパラメータは実機コンパイル・実行を一度も通過していない」という記述は、#1574 の実測（本文書 §1・§8）により陳腐化している。本 issue は docs-only 方針のためこのコメントの是正（実装ファイルへの変更）は行わず、後続実装 issue（B-13 相当）でのコメント更新に引き継ぐ。
 - 本文書の swizzle モード選定・smem 収支見積り（§4.2・F6）は机上導出・実測前の仮説であり、実機値で置き換わるまでは確定事項として扱わない。
+
+## 10. 実装記録（イシュー #1975。段階的承認の C 案〈`internal-diagnostics` 限定・本番非結線・PR 内 security-auditor 監査・tolerance／baseline／依存不変・GB10 検証は #1976〉に基づく Stage 1 opt-in 実装）
+
+以下は本 issue で実装した内容と、時間制約により実装計画から縮小したスコープを記録する。
+
+### 10.1 実装ファイル・シンボル
+
+- `crates/backend-cuda/src/kernels_tiled_pipeline.rs`（追記のみ。既存 `TP_TILE_CORE` 等の断片は無変更）: `TP_TMA_A_BOX_BYTES`／`TP_TMA_B_BOX_BYTES`／`TP_TMA_EXPECT_TX_BYTES`／`TP_TMA_SMEM_ALIGN`／`TP_TMA_POLL_LIMIT`（Rust 定数＋const assert 群）・`TmaSwizzleA`（`None`／`B64` の 2 値 enum）・`render_tma_defines`／`render_tma_source`・`TP_TMA_HELPER`（`CUtensorMap` typedef・`TP_TMA_A_AT` マクロ）・`TP_TMA_PREFIX`／`TP_TMA_TILE_CORE`／`TP_TMA_SUFFIX`（カーネル本体）・`tiled_pipeline_tma_f32_source`（本番結線相当の既定段数固定アクセサ。`pub fn`・無条件コンパイル）・`tma_swizzled_chunk_a`（B64 仮説のホストモデル。**`#[cfg(test)]` 限定**）・`tiled_pipeline_tma_f32_source_with_stages`（**`#[cfg(test)]` 限定**。§10.4 参照）。静的テスト 9 件（`mod tests` 内。GPU 非依存・通常 CI で実行）。
+- `crates/backend-cuda/src/gemm.rs`: `#[cfg(feature = "internal-diagnostics")] mod tma_tiled_pipeline { ... }`（`TensorMapArg`〈`DeviceRepr` newtype〉・`TmaBoxSpec`＋`encode_tensor_map_2d_f32`〈`cuTensorMapEncodeTiled` FFI 呼び出し〉・`TmaTiledPipelineFunction`・`CudaGemm::compile_tiled_pipeline_tma_variant`／`launch_tiled_pipeline_tma_f32`／`run_tiled_pipeline_tma_f32`）。GPU 非依存単体テスト 3 件。
+- `crates/backend-cuda/src/lib.rs`: `#[cfg(feature = "internal-diagnostics")] pub use gemm::TmaTiledPipelineFunction;`・`#[cfg(feature = "internal-diagnostics")] pub use kernels_tiled_pipeline::TmaSwizzleA;`（`PersistentTiledPipelineFunction`・`StreamKTiledPipelineFunction` と同一の公開面ゲート方針）。
+- `crates/backend-cuda/tests/cpu_cuda_tiled_pipeline_tma_parity.rs`（新規）: `#[ignore]` 実機テスト 5 件（`None` 腕の bit 一致・k=0 no-op・決定性・事前転置入力・`B64` 腕の仮説検証〈不一致を記録するのみで CI 失敗にしない〉）＋環境適応スモーク 1 件（`#[ignore]` なし・通常 CI で実行・CUDA/NVRTC/CC9.0 未満は早期 return）。
+- `crates/backend-cuda/Cargo.toml`: `[[test]] name = "cpu_cuda_tiled_pipeline_tma_parity"`・`required-features = ["internal-diagnostics"]`（既存の persistent／Stream-K 版と同一パターン）。
+- `crates/backend-cuda/tests/tma_probe_real_device.rs`: 冒頭コメントの「実機コンパイル・実行を一度も通過していない」という陳腐化した記述を、#1574 実測済みの事実（§1・§8）へ是正。§9 の申し送りを解消。
+
+### 10.2 座標系・swizzle・REQ-8
+
+- 座標系は**要素座標・内側次元先行**（計画 §2 の調査どおり）: A は `globalDim=[k,m]`・`boxDim=[TP_BK,TP_BM]`・座標 `{t*TP_BK, block_row0}`、B は `globalDim=[n,k]`・`boxDim=[TP_BN,TP_BK]`・座標 `{block_col0, t*TP_BK}`。
+- swizzle は `None`（恒等アクセス。正しさ確認用の fail-safe ベースライン）・`B64`（`chunk ^ ((row>>1)&3)` の仮説式。物理列 `= swz*4 + (kk%4)`）の 2 値をパラメータ化した。B（`bs_tile`）は行幅 256B が 64B swizzle アトムを跨ぐため常に `None` 相当（swizzle 対象外）に固定する。
+- REQ-8: プロローグは `s < num_k_tiles`（タイル境界）に加え `block_row0 < m && block_col0 < n && kt < k`（タイル起点ガード）を発行前に検査する。エピローグは既存 `if (r < m && cc < n)` の guarded store を不変維持し、mbarrier ポーリングが `TP_TMA_POLL_LIMIT` 回で完了しなかった場合は `timed_out` フラグをスティッキーに立てて以後の待機・発行をスキップし（無期限ハング防止）、エピローグで NaN センチネル（0x7fc00000）を書く（`tests/tma_probe_real_device.rs` と同じ fail-closed 方式。bit 一致テストで確実に検出される）。
+- 本番結線（`select_tiled_f32_kernel`／`CudaGemm::new`）は本節のカーネルを一切参照しない（`internal-diagnostics` feature 限定・opt-in API のみ）。既存の固定ハッシュテスト（`EXPECTED_NON_PERSISTENT_FRAGMENTS_FNV1A64` 等）は無変更のまま green（本番ソース不変の機械的証拠）。
+
+### 10.3 新規 `unsafe` の一覧（PR 内 security-auditor 監査対象。承認済みスコープ内）
+
+1. `unsafe impl cudarc::driver::DeviceRepr for TensorMapArg {}`（`crates/backend-cuda/src/gemm.rs::tma_tiled_pipeline`）。
+2. `sys::cuTensorMapEncodeTiled(...)` の FFI 呼び出し（`encode_tensor_map_2d_f32`）。
+3. `self.stream.launch_builder(&func.func)...launch(cfg)` の safe `launch_builder` 経路（`unsafe` ブロックは既存カーネル群と同一パターン。raw `cuLaunchKernel(Ex)` へは到達しない — 計画 §3.3 が「低リスク」と見込んだ safe `launch_builder().arg(&wrapper)` 経路をそのまま採用できた）。
+
+`cuFuncSetAttribute`（動的 smem）・`mem::zeroed`（`CUtensorMap { opaque: [0u64; 16] }` の明示ゼロ初期化で代替）は使わない。
+
+### 10.4 計画からのスコープ縮小（時間制約による）
+
+- **意味論プローブ 3 件**（要素座標の非ゼロ確認・部分 OOB box の fill 意味論・`B64` swizzle の smem 物理配置ダンプ）は未実装。`tma_swizzled_chunk_a` を `#[cfg(test)]` 限定に留めた（外部プローブから参照するには `pub` へ戻し `lib.rs` から re-export する作業が必要。#1976 へ引き継ぐ）。
+- **`tiled_pipeline_tma_f32_source_with_stages`**（任意段数）は実装したが、`compile_tiled_pipeline_tma_variant` は既定 `TP_DEFAULT_STAGES` 固定のみを呼ぶ（persistent／Stream-K 版のような段数比較ベンチ example を追加しなかったため、`_with_stages` を本番結線から呼ぶ経路が存在しない）。`#[cfg(test)]` 限定として dead-code を回避した。
+- **ベンチ example への `--tma off|none|b64` 列追加**（計画 Step 6）は未実施。
+- **tensor map のキャッシュ**（計画 §3.3 の「起動ごとにエンコード」からの改善候補）は未実装のまま。`launch_tiled_pipeline_tma_f32` は毎起動 `encode_tensor_map_2d_f32` を呼ぶ（GPU-only 区間の計測ではホスト側 encode 費用は含まれない）。
+- **転置パターン（NT/TN/TT）**: 計画 §3.5 のとおり、事前転置済みホスト入力を NN として渡すケース 1 形状のみを検証する（`tiled_pipeline_tma_none_matches_pipeline_with_pretransposed_host_input`）。API レベルで転置を扱う専用入口は追加していない。
+
+### 10.5 検証状態
+
+- Linux で実行可能な検査は全て green: `cargo fmt --all --check`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`（新規警告ゼロ）・`cargo test -p fandhe-ai-backend-cuda --all-features`（1042 件 pass・新規 `#[ignore]` 5 件・環境適応スモーク 1 件 pass）・`cargo build -p fandhe-ai-backend-cuda`（feature なし。新規警告ゼロ）。
+- GB10 実機での `#[ignore]` テスト実行・意味論プローブ・純カーネル時間実測は **未実施のまま #1976 へ引き継ぐ**（`docs/perf/logs/cuda-tma-stage1-1975/README.md` にランブックを整備済み）。
