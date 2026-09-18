@@ -484,3 +484,64 @@ tolerance／baseline は一切変更しない。
 >    に適用し、bit 完全一致は Linear／ReLU 限定と明記）
 >
 > 未承認の間は後続実装（#2036 等）の該当部分には着手しません。
+
+## 16. 追補（イシュー #2036）: `onnx::export_nn` 実装完了（facade 未接続）
+
+**§15.7 承認事項 5 項はいずれも本追補時点で正式承認は未確認**
+（親 #2034・ルート #2033 にコメント 0 件・§15.10 の承認依頼コメントも
+未投稿のまま）。issue #2036 本文の作業項目指示に基づき安全側の範囲へ
+縮小して実装した。PR 説明欄にこの旨を明示的にフラグ済み。
+
+### 16.1 実施した範囲・縮小した範囲
+
+| §15.7 項 | 扱い | 理由 |
+|---|---|---|
+| 項 1（配置 (b)・`onnx-interop → autodiff` 通常依存化） | **実施** | issue #2036 本文の第 1 作業項目・workspace 内 path 依存の追加のため `deps-policy.md` の外部承認フロー対象外（§15.2 の再導出根拠 1〜5 のとおり）。正式承認未確認の旨は PR 本文に明記 |
+| 項 2／項 5（Sigmoid 対応・数値契約） | **対象外** | `Module` に `as_sigmoid` フックが無く（項 5 も未承認）判別手段が無いため。issue コメント記載の代替「Linear／ReLU の 2 種へ縮小」を適用 |
+| 項 3（facade 公開面 `OnnxModel::from_sequential`） | 対象外（#2037） | 本 issue は facade 未接続限定 |
+| 項 4（`OnnxError::UnsupportedLayer` 新設） | **実施**（variant 名は同一） | `ExportError` への追加は onnx-interop 内部の型付きエラーであり、facade `OnnxError` の variant 追加（§15.7 項 4 本来の対象）ではない。facade 側の `OnnxError::UnsupportedLayer` 新設可否は #2037 が対象のまま未承認 |
+
+### 16.2 実装内容
+
+- `crates/onnx-interop/Cargo.toml`: `[dependencies]` へ `fandhe-ai-autodiff
+  = { path = "../autodiff", version = "=0.9.0" }` を追加し、旧
+  `[dev-dependencies]` の同名 version 非併記エントリを削除（統合依存は
+  dev としても有効）。`docs/crates-io-publishing-order.md` §13.5 に
+  依存グラフ更新・実測記録を追記。
+- `crates/onnx-interop/src/onnx/export_nn.rs`（新規）: `export_parts_
+  from_layers`／`graph_from_layers`（`&[Box<dyn Module>] -> Graph`）。
+  `Linear -> ExportOp::Gemm`（`alpha=beta=1.0`・転置なし）・
+  `Relu -> ExportOp::Relu` の 2 種のみ対応。命名規約・検証順序・
+  `autodiff` API バージョン制約の詳細は `docs/onnx-export-op-mapping.md`
+  §7 を参照。
+- `crates/onnx-interop/src/onnx/export.rs`: `ExportError` へ
+  `EmptyModel`／`UnsupportedLayer { index, layer_kind }`／
+  `InvalidLayerParameter { index, reason }`／
+  `DuplicateTensorName { name }` の 4 variant を追加（`#[non_exhaustive]`
+  のため非破壊）。
+- `crates/onnx-interop/tests/onnx_export_nn.rs`（新規）: 2 層 MLP
+  （`Linear -> Relu -> Linear`。小形状・CPU BLIS ブロックタイル境界
+  〈KC=256〉を跨ぐ大形状の 2 パターン）の export → `interp::run` 出力を
+  `Module::forward_host`（tape 不要経路）・`Module::forward`（tape 経路）
+  という独立な 2 通りの手動 forward と bit 完全一致で検証。契約テスト
+  （initializer 名・属性常時書き出し・決定性）・fail-closed テスト
+  （空層列・未対応層・末尾未対応層での部分グラフ非返却）を含む計 10 件、
+  いずれも pass。
+
+### 16.3 検証結果
+
+- `cargo test -p fandhe-ai-onnx-interop`: 全テスト pass（新規 10 件込み）。
+- `cargo test -p fandhe-ai --test api_surface`: pass（facade 公開面は
+  無変更）。
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`:
+  green（`-p` スコープ単独実行時に現れる `backend-cuda` の dead-code
+  警告は dev-dependency 経由の feature unification による HEAD 既存の
+  環境依存アーティファクトで、本 issue 変更前の HEAD でも同一に再現する
+  ことを確認済み・workspace 全体実行では発生しない）。
+- `git diff --exit-code origin/main -- crates/facade crates/autodiff
+  Cargo.toml Cargo.lock deny.toml`: 差分ゼロ（無変更確認）。
+- `cargo tree -p fandhe-ai-onnx-interop --edges normal`:
+  `fandhe-ai-autodiff` が normal 辺として現れ循環なし。
+- 7 パッケージ一括 `cargo publish --dry-run --locked`（`env.
+  RELEASE_CRATES` と同一順序）: 全 7 件成功。
+- 新規 `unsafe`: 0 件。

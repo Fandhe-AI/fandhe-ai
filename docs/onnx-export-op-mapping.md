@@ -98,9 +98,11 @@ import 側（`decode_tensor`）がエラーメッセージにしか使わない�
 
 - autodiff `Op`／`Tape`／`Sequential` -> `ExportOp` の橋渡し（#1653。橋渡しの
   配置候補は `docs/facade-onnx-export-exposure-decision.md` §3.2。#2018 の
-  対象外のまま残る）。本モジュール自体（`ExportOp`／`ExportNode`）の
-  facade 再エクスポートは対象外のまま（`OnnxModel::to_bytes`／`to_path`
-  という薄いラッパー経由の間接実行のみ。#1775 が判断済み・#2018 で実装）
+  対象外だったが #2036 で `onnx::export_nn`〈本クレート内部限定・facade
+  未接続〉として実装済み。§7 参照）。本モジュール自体（`ExportOp`／
+  `ExportNode`）の facade 再エクスポートは対象外のまま（`OnnxModel::
+  to_bytes`／`to_path` という薄いラッパー経由の間接実行のみ。#1775 が
+  判断済み・#2018 で実装）
 - `value_info`／`TypeProto` 非出力による外部ツール（`onnx.checker`）妥当性
   （#1772 既知事項）
 - opset<13 の attr 形（`Squeeze`/`Unsqueeze` の `axes` 属性）での export・
@@ -152,3 +154,54 @@ ONNX_INTEROP_TRANSFORMER_ONNX=<path> \
 （tolerance は導入も変更もしていない）。本モジュール自体への facade 新規
 公開面はなし（#2018 の facade 公開面は `OnnxModel::to_bytes`／`to_path`・
 `OnnxExportOptions` の 3 件のみで、`ExportOp`／`ExportNode` 等は含まない）。
+
+## 7. `nn::Module` 層列 -> `ExportOp`／`Graph` の橋渡し（`export_nn`。#2036）
+
+`docs/facade-onnx-export-exposure-decision.md` §15 の設計確定を受け、
+`onnx::export_nn` モジュール（`crates/onnx-interop/src/onnx/export_nn.rs`）
+が `fandhe_ai_autodiff::nn::Module` の層列（`&[Box<dyn Module>]`）から
+[`export_parts_from_layers`]／[`graph_from_layers`] で本クレートの
+`Graph`（本ファイル §1〜§6 が担う `build_model_proto` の入力形）を組み立てる。
+本モジュールは `super::export`／`super::export_ops` の**利用者**であり
+（`ExportOp::Gemm`／`ExportOp::Relu` を構築して `to_node_proto` へ渡す）、
+op マッピング表自体（§2）は変更しない。
+
+- **対応層（初期範囲）**: `Module::as_linear()` が `Some` の層 →
+  `ExportOp::Gemm(GemmAttrs { alpha: 1.0, beta: 1.0, trans_a: false,
+  trans_b: false })`（weight `[in, out]` のまま・転置しない）。
+  `Module::as_relu()` が `true` の層 → `ExportOp::Relu`。それ以外は
+  `ExportError::UnsupportedLayer { index, layer_kind }` で fail-closed に
+  拒否する（`layer_kind` は `as_conv2d`／`as_conv1d`／`as_layer_norm`／
+  `as_rms_norm`／`as_batch_norm1d`／`as_batch_norm2d`／`as_embedding`／
+  `as_multihead_attention` の 8 フックで判別できる範囲のみ具体名を報告し、
+  それ以外は `"unknown"`）。Sigmoid は §15.7 承認事項 2／5（`Module` へ
+  `as_sigmoid` フックを新設）が未承認のため本 issue では対象外
+  （issue コメントが示す代替「Linear／ReLU の 2 種へ縮小」を適用）。
+- **`autodiff` バージョン制約**: `crates/onnx-interop/Cargo.toml` の
+  `fandhe-ai-autodiff = { version = "=0.9.0", .. }`（通常依存。§15.7
+  承認事項 1「onnx-interop → autodiff 通常依存化」を適用済み）により、
+  `cargo publish --dry-run` は registry の `fandhe-ai-autodiff =0.9.0`
+  でビルド検証する。本モジュールが使う `autodiff` API（`nn::Module` の
+  上記フック群・`nn::Linear::weight`／`bias`）はいずれも `v0.9.0` に
+  存在することを確認済み（`is_pooling`〈#1957 で追加〉は意図的に使わない）。
+- **名前規約**: graph input `"input"`／output `"output"`・中間テンソル
+  `layer{i}_out`・ノード名 `layer{i}`・initializer 名 `{i}.weight`／
+  `{i}.bias`（`nn::Sequential::named_parameters()`／`state_dict()` の
+  `"{index}.{name}"` 契約と同一形式）。
+- **検証順序**: `ExportNode`／`RawTensor` を 1 つも構築する前に全層を
+  検証する（空層列 → `ExportError::EmptyModel`・shape 不整合 →
+  `ExportError::InvalidLayerParameter`・テンソル名重複 →
+  `ExportError::DuplicateTensorName`。いずれも本 issue で `ExportError`
+  へ追加した variant）。
+- **正しさの検証**: `crates/onnx-interop/tests/onnx_export_nn.rs` が
+  2 層 MLP（`Linear -> Relu -> Linear`。ブロックタイル境界〈KC=256〉を
+  跨ぐ大形状を含む）の export → `interp::run` 出力を、
+  `Module::forward_host`（tape 不要経路）・`Module::forward`（tape 経路）
+  という 2 通りの独立な手動 forward と bit 完全一致で突き合わせて検証する
+  （前提: GEMM 出力に厳密な `±0.0` が現れない入力。`export_nn.rs` モジュール
+  冒頭ドキュメント参照）。
+- **facade 未接続**: 本モジュール自体（`export_parts_from_layers`／
+  `graph_from_layers`／`NnExportParts`）は非公開クレート `onnx-interop`
+  の内部限定であり facade へは再エクスポートしない。facade
+  `OnnxModel::from_sequential(&Sequential)`（§15.7 承認事項 3）は #2037 が
+  対象。
