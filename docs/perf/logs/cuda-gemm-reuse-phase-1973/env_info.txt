@@ -1,21 +1,34 @@
 イシュー #1973 実機計測環境情報（DGX Spark GB10。実ホスト名は含めない。
 `docs/real-hardware-verification-env.md` §3〜4 準拠）。
 
-【本 PR 時点では未実測。以下は記入欄】
-
-計測日:
-転送元コミット（sha）:
+hostname: masked
+計測日（UTC）: 2026-09-18T01:39:45Z 〜 2026-09-18T01:44:29Z（orchestrate.sh 一括実行）
+転送元コミット（sha）: 536c56a8（main。rsync 方式・`docs/real-hardware-verification-env.md` §3〜4）
 registry ピン確認: cargo tree -p bench-fandhe --depth 1 の fandhe-ai 行が
-  `fandhe-ai v0.9.0` であることを確認:
+  `fandhe-ai v0.9.0` であることを確認: 確認済み（Layer A の JSONL `version` も "0.9.0"）
 
+gpu: NVIDIA GB10, driver 580.173.02（nvidia-smi。計測後の末尾追記では load average 1.49 まで上昇しているが計測区間中の GPU 利用率は 0% のまま）
 $ nvidia-smi --query-gpu=name,driver_version,utilization.gpu --format=csv
-（計測前後で 0% を確認。競合プロセスなし）
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %
+（計測前後とも 0%。GPU 競合プロセスなし。専有環境。常駐プロセス 2 個あり〈実名は記載しない・停止せず〉）
+計測前 load average（1 分）: 約 0.2〜0.6
 
 $ nvcc --version
+Build cuda_13.0.r13.0/compiler.36424714_0
+
+os: Ubuntu 24.04.4 LTS aarch64 kernel 6.17.0-1031-nvidia
+cpu: nproc=20
 
 $ rustc -V
+rustc 1.97.0 (2d8144b78 2026-07-07)
 
 $ cargo -V
+cargo 1.97.0 (c980f4866 2026-06-30)
 
 orchestrate.sh 末尾で自動追記される uptime／nvidia-smi 出力は本ファイルの
 下部へ追記される（手動転記不要）。
+計測終了時刻（UTC）: 2026-09-18T01:44:29Z
+ 10:44:29 up 21 days, 22:11,  8 users,  load average: 1.49, 1.87, 1.27
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %

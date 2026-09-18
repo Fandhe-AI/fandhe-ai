@@ -1,0 +1,10 @@
+-- run 1/N=2048 --
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"cuda","size":2048,"median_s":0.004188209,"q1_s":0.004175314,"q3_s":0.004222205,"gflops":4101.961,"checksum":-6016.775802,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":3.623962e-5,"parity_max_rel_err":2.811288e-1,"parity_scaled_abs_bound":1.525878e-5,"parity_scaled_abs_rescued":2}
+-- run 2/N=2048 --
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"cuda","size":2048,"median_s":0.004206873,"q1_s":0.004202713,"q3_s":0.004214301,"gflops":4083.762,"checksum":-6016.775802,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":3.623962e-5,"parity_max_rel_err":2.811288e-1,"parity_scaled_abs_bound":1.525878e-5,"parity_scaled_abs_rescued":2}
+-- run 3/N=2048 --
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"cuda","size":2048,"median_s":0.004222009,"q1_s":0.004215033,"q3_s":0.004241685,"gflops":4069.122,"checksum":-6016.775802,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":3.623962e-5,"parity_max_rel_err":2.811288e-1,"parity_scaled_abs_bound":1.525878e-5,"parity_scaled_abs_rescued":2}
+-- run 4/N=2048 --
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"cuda","size":2048,"median_s":0.004214489,"q1_s":0.004205634,"q3_s":0.004220545,"gflops":4076.382,"checksum":-6016.775802,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":3.623962e-5,"parity_max_rel_err":2.811288e-1,"parity_scaled_abs_bound":1.525878e-5,"parity_scaled_abs_rescued":2}
+-- run 5/N=2048 --
+{"framework":"candle","version":"0.11.0","task":"gemm","device":"cuda","size":2048,"median_s":0.004389647,"q1_s":0.004381299,"q3_s":0.004409676,"gflops":3913.725,"checksum":-6016.775802,"warmup":20,"iters":20,"mode":"fresh","parity_total":4194304,"parity_fail_count":0,"parity_max_abs_err":3.623962e-5,"parity_max_rel_err":2.811288e-1,"parity_scaled_abs_bound":1.525878e-5,"parity_scaled_abs_rescued":2}
