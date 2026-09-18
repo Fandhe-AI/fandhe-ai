@@ -928,6 +928,17 @@ impl Sequential {
         self.inner.load_state_dict(state)
     }
 
+    /// `self.inner`（`nn::Sequential`）が保持する層列への読み取り専用
+    /// アクセサ（イシュー #2037）。`crate::interop::onnx::OnnxModel::
+    /// from_sequential` 専用の内部委譲入口であり `pub(crate)` に留める
+    /// （公開面ではない。§15.5「薄い分解層」。`Sequential::layers` の
+    /// ような `pub fn` を新設しない——`docs/compat-api-scope.md` §1 の
+    /// 対象レイヤー集合限定・`api_surface.rs` の allowlist 契約を
+    /// 増やさないため）。
+    pub(crate) fn layers(&self) -> &[Box<dyn Module>] {
+        self.inner.layers()
+    }
+
     /// optimizer（[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]／
     /// [`crate::optim::Adam::step`]）
     /// が返した更新後テンソル列を

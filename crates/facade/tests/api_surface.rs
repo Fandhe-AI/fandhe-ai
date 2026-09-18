@@ -1548,8 +1548,8 @@ fn facade_sources_reference_onnx_interop_only_in_interop_module() {
 /// `pub enum`／`pub fn`／`pub trait`／`pub type`／`pub const`／
 /// `pub static`／`pub mod`）が存在しないかを走査する。承認範囲は
 /// `interop::onnx::{OnnxModel, OnnxValue, OnnxError, OnnxExportOptions}`
-/// と `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path}` の 9
-/// 件のみ（イシュー #2017・#2018）。
+/// と `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path,
+/// from_sequential}` の 10 件のみ（イシュー #2017・#2018・#2037）。
 ///
 /// `interop_module_exposes_only_approved_onnx_surface` の従来実装は
 /// 期待する 6 文字列が「存在すること」の contains 検査のみで、
@@ -1577,7 +1577,7 @@ fn facade_sources_reference_onnx_interop_only_in_interop_module() {
 /// （`ModelProto` 等）の露出を見逃していた（codex-review 指摘 P2・
 /// #2024。本関数へ統合し単一の走査でシグネチャ全体を検査する）。
 fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
-    const ALLOWED_PUB_ITEMS: [(&str, &str); 9] = [
+    const ALLOWED_PUB_ITEMS: [(&str, &str); 10] = [
         ("struct", "OnnxModel"),
         ("enum", "OnnxValue"),
         ("enum", "OnnxError"),
@@ -1587,18 +1587,23 @@ fn scan_unapproved_onnx_pub_items(original: &str) -> Vec<String> {
         ("fn", "run"),
         ("fn", "to_bytes"),
         ("fn", "to_path"),
+        ("fn", "from_sequential"),
     ];
     const SCANNED_KINDS: [&str; 9] = [
         "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
     ];
     const QUALIFIER_KEYWORDS: [&str; 3] = ["async", "unsafe", "extern"];
-    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 6] = [
+    const FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS: [&str; 10] = [
         "ModelProto",
         "NodeProto",
         "prost::",
         "onnx::graph::Graph",
         "ExportError",
         "onnx::export::",
+        "export_nn",
+        "ExportNode",
+        "NnExportParts",
+        "nn::Module",
     ];
 
     let cleaned = strip_comments_and_literals(original);
@@ -1899,12 +1904,12 @@ impl OnnxModel {
     );
 }
 
-/// `scan_unapproved_onnx_pub_items` が承認範囲 9 件（`OnnxModel`／
+/// `scan_unapproved_onnx_pub_items` が承認範囲 10 件（`OnnxModel`／
 /// `OnnxValue`／`OnnxError`／`OnnxExportOptions` の型定義 4 件と
-/// `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path}` の
-/// メソッド 5 件）をすべて含む合成ソースに対してオフェンス 0 件を返す
-/// ことを確認する（空虚 pass 防止。承認範囲の拡張〈#2018〉自体が正しく
-/// 反映されていることの正例テスト）。
+/// `OnnxModel::{from_bytes, from_path, run, to_bytes, to_path,
+/// from_sequential}` のメソッド 6 件）をすべて含む合成ソースに対して
+/// オフェンス 0 件を返すことを確認する（空虚 pass 防止。承認範囲の
+/// 拡張〈#2018・#2037〉自体が正しく反映されていることの正例テスト）。
 #[test]
 fn approved_onnx_surface_yields_no_offenses() {
     let synthetic = r#"
@@ -1932,6 +1937,10 @@ impl OnnxModel {
     pub fn to_path(&self, path: &str, options: &OnnxExportOptions) -> Result<(), OnnxError> {
         unimplemented!()
     }
+
+    pub fn from_sequential(model: &Sequential) -> Result<Self, OnnxError> {
+        unimplemented!()
+    }
 }
 
 pub enum OnnxValue {
@@ -1950,8 +1959,53 @@ pub struct OnnxExportOptions {
     let offenses = scan_unapproved_onnx_pub_items(synthetic);
     assert!(
         offenses.is_empty(),
-        "承認範囲 9 件のみの合成ソースでオフェンスが検出された（空虚 pass 防止\
+        "承認範囲 10 件のみの合成ソースでオフェンスが検出された（空虚 pass 防止\
          テストの前提が崩れている）: {offenses:?}"
+    );
+}
+
+/// `scan_unapproved_onnx_pub_items` が承認範囲外の追加 `pub fn`
+/// （`from_layers`）と、`from_sequential` の引数型・戻り値型に内部型
+/// （`&[Box<dyn fandhe_ai_autodiff::nn::Module>]`／`ExportError`）が
+/// 紛れ込んだ場合の両方を検出することを確認する（イシュー #2037・
+/// 承認外追加の機械拒否）。
+#[test]
+fn unapproved_onnx_export_pub_items_remain_flagged() {
+    let synthetic = r#"
+pub struct OnnxModel {
+    graph: (),
+}
+
+impl OnnxModel {
+    pub fn from_layers(layers: &[Box<dyn fandhe_ai_autodiff::nn::Module>]) -> Result<Self, ExportError> {
+        unimplemented!()
+    }
+
+    pub fn from_sequential(
+        layers: &[Box<dyn fandhe_ai_autodiff::nn::Module>],
+    ) -> Result<Self, ExportError> {
+        unimplemented!()
+    }
+}
+"#;
+    let offenses = scan_unapproved_onnx_pub_items(synthetic);
+    assert!(
+        offenses.iter().any(|o| o.contains("from_layers")),
+        "承認範囲外の `pub fn from_layers` が検出されなかった: {offenses:?}"
+    );
+    assert!(
+        offenses
+            .iter()
+            .any(|o| o.contains("from_sequential") && o.contains("nn::Module")),
+        "`from_sequential` の引数型に内部型 `nn::Module` が含まれる違反が\
+         検出されなかった: {offenses:?}"
+    );
+    assert!(
+        offenses
+            .iter()
+            .any(|o| o.contains("from_sequential") && o.contains("ExportError")),
+        "`from_sequential` の戻り値型に内部型 `ExportError` が含まれる違反が\
+         検出されなかった: {offenses:?}"
     );
 }
 
@@ -2023,6 +2077,10 @@ fn interop_module_exposes_only_approved_onnx_surface() {
             "onnx::graph::Graph",
             "ExportError",
             "onnx::export::",
+            "export_nn",
+            "ExportNode",
+            "NnExportParts",
+            "nn::Module",
         ] {
             if line.contains(forbidden) {
                 leaked_internal_types.push(format!("`{trimmed}` が {forbidden} を含む"));
@@ -2046,6 +2104,7 @@ fn interop_module_exposes_only_approved_onnx_surface() {
         "pub fn run",
         "pub fn to_bytes",
         "pub fn to_path",
+        "pub fn from_sequential",
     ] {
         assert!(
             onnx_rs_content.contains(expected),
@@ -2082,6 +2141,7 @@ fn onnx_import_types_are_reachable_via_facade() {
         OnnxError::UnsupportedOp { .. } => "unsupported_op",
         OnnxError::MissingFeed { .. } => "missing_feed",
         OnnxError::UnknownFeed { .. } => "unknown_feed",
+        OnnxError::UnsupportedLayer { .. } => "unsupported_layer",
         OnnxError::InvalidModel { .. } => "invalid_model",
         OnnxError::Execution { .. } => "execution",
         _ => "unknown",
@@ -2123,6 +2183,28 @@ fn onnx_export_types_are_reachable_via_facade() {
     ) -> Result<(), OnnxError> {
         m.to_path(path, o)
     }
+}
+
+/// `fandhe_ai::interop::onnx::OnnxModel::from_sequential` が facade から
+/// 到達可能であること（型シグネチャの静的固定）・空の `Sequential`
+/// （層 0 個）が `OnnxError::InvalidModel` で拒否されることを固定する
+/// （イシュー #2037。`onnx_export_types_are_reachable_via_facade` と
+/// 同型）。
+#[test]
+fn onnx_export_from_sequential_is_reachable_via_facade() {
+    use fandhe_ai::compat::Sequential;
+    use fandhe_ai::interop::onnx::{OnnxError, OnnxModel};
+
+    fn _sig(m: &Sequential) -> Result<OnnxModel, OnnxError> {
+        OnnxModel::from_sequential(m)
+    }
+
+    let empty = Sequential::new();
+    let err = OnnxModel::from_sequential(&empty).unwrap_err();
+    assert!(
+        matches!(err, OnnxError::InvalidModel { .. }),
+        "空の Sequential は OnnxError::InvalidModel で拒否されるはず: {err:?}"
+    );
 }
 
 /// `src/interop/safetensors.rs`（イシュー #2019）専用の固定パス。

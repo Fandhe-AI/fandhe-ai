@@ -4,13 +4,15 @@
 
 **ONNX import／export は `fandhe_ai::interop::onnx`（`OnnxModel`／
 `OnnxValue`／`OnnxError`・`OnnxModel::{from_bytes, from_path, run,
-to_bytes, to_path}`・`OnnxExportOptions`）として、safetensors save／load
-は `fandhe_ai::interop::safetensors`（`LoadError`／`SaveError`／
-`load_safetensors_f32`／`load_safetensors_f32_from_bytes`／
-`require_keys`／`save_safetensors_f32`／`save_safetensors_f32_to_bytes`）
-として、いずれも `fandhe-ai` から公開されています。** export は
-import 済みモデルの roundtrip export に限定されます（`compat::Sequential`
-／`nn` から ONNX グラフへの書き出しは未対応）
+to_bytes, to_path, from_sequential}`・`OnnxExportOptions`）として、
+safetensors save／load は `fandhe_ai::interop::safetensors`
+（`LoadError`／`SaveError`／`load_safetensors_f32`／
+`load_safetensors_f32_from_bytes`／`require_keys`／
+`save_safetensors_f32`／`save_safetensors_f32_to_bytes`）として、
+いずれも `fandhe-ai` から公開されています。** import 済みモデルの
+roundtrip export に加え、学習済み `compat::Sequential`（対応層は
+`Linear`／`ReLU` 限定）から直接 ONNX へ書き出すこともできます
+（`OnnxModel::from_sequential`）
 （`onnx-interop` クレート。公開名 `fandhe-ai-onnx-interop`。依存解決の
 ための公開であり直接利用はサポート対象外）。`fandhe-ai` が唯一の
 サポートされる公開 API 面であるという原則（[API Reference](/api/)参照）
@@ -77,6 +79,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - allowlist（`interp` 対応 22 op・既定 domain）外のノードを含む
   モデルは、`from_bytes` では構築できても `to_bytes`／`to_path` の
   時点で `OnnxError::UnsupportedOp` により拒否されます。
+
+### `Sequential` からの export の最小コード例
+
+学習済みの `compat::Sequential` を直接 ONNX へ書き出せます
+（`torch.onnx.export` 相当）。
+
+```rust
+use fandhe_ai::compat::Sequential;
+use fandhe_ai::interop::onnx::{OnnxExportOptions, OnnxModel, OnnxValue};
+use std::collections::HashMap;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = Sequential::new()
+        .add_linear(4, 8, 0x1111)?
+        .add_relu()
+        .add_linear(8, 2, 0x2222)?;
+
+    let onnx = OnnxModel::from_sequential(&model)?;
+    onnx.to_path("model.onnx", &OnnxExportOptions::default())?;
+
+    // 書き出したモデルを読み込んで実行すると、`model.predict(&x)`
+    // と bit 完全一致する（feed 名は常に "input"・出力名は "output"）。
+    let reimported = OnnxModel::from_path("model.onnx")?;
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "input".to_string(),
+        OnnxValue::F32(fandhe_ai::Tensor::<f32>::new(vec![0.0; 4], &[1, 4])?),
+    );
+    let _outputs = reimported.run(feeds)?;
+    Ok(())
+}
+```
+
+以下の点に注意してください:
+
+- **対応層は `Linear`／`ReLU` の 2 種のみ**です。Sigmoid・Tanh・Conv2d
+  等の非対応層を 1 つでも含む場合、`Graph` を一切構築せず
+  `OnnxError::UnsupportedLayer { index, layer_kind }` を返します
+  （部分的なモデルは返りません）。
+- 空の `Sequential`（層 0 個）は `OnnxError::InvalidModel` で拒否され
+  ます。
+- `value_info` は常に空で書き出されます（前節と同じ制約）。
+- 書き出しはホスト CPU 実行のみで `BackendOps`／`Device` を経由しません。
+- ReLU 入力に NaN が現れず、GEMM 出力に厳密な `±0.0` が現れない場合、
+  roundtrip 後の `run` 出力は `model.predict(&x)` と bit 完全一致します。
 
 ### safetensors の最小コード例
 

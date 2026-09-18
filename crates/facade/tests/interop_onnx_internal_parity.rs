@@ -13,9 +13,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use fandhe_ai::Tensor;
+use fandhe_ai::compat::Sequential;
 use fandhe_ai::interop::onnx::{OnnxError, OnnxExportOptions, OnnxModel, OnnxValue};
 
+use fandhe_ai_autodiff::nn::{Linear, Module, Sequential as NnSequential};
 use fandhe_ai_onnx_interop::onnx::export::{ExportOptions, build_model_proto};
+use fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers;
 use fandhe_ai_onnx_interop::onnx::graph::build_graph;
 use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
 use fandhe_ai_onnx_interop::onnx::proto::{
@@ -507,4 +510,158 @@ fn non_default_options_match_internal_export_options_byte_exact() {
         facade_bytes, internal_bytes,
         "非既定 options での facade to_bytes と内部クレート直接呼び出しがバイト不一致"
     );
+}
+
+// --- 群 C: `OnnxModel::from_sequential`（イシュー #2037）の内部クレート
+// 直接呼び出しとの突合 ---
+//
+// `compat::Sequential::layers()` は `pub(crate)` のため facade 外から
+// 層列を取得できない。代わりに `fandhe_ai_autodiff::nn::{Linear,
+// Sequential as NnSequential}` を facade とは独立に同一アーキテクチャで
+// 構築し、facade 側の `state_dict()`（公開 API）でパラメータを上書き
+// （`load_state_dict`）することで、数値的に同一の層列を内部クレート側
+// でも用意する。`export_nn::graph_from_layers`（内部クレート直接呼び
+// 出し）→ `build_model_proto` → `encode_model` の結果が facade
+// `from_sequential(&m).to_bytes()` とバイト完全一致することを検証する。
+
+fn build_facade_mlp(
+    d_in: usize,
+    d_hidden: usize,
+    d_out: usize,
+    seed1: u64,
+    seed2: u64,
+) -> Sequential {
+    Sequential::new()
+        .add_linear(d_in, d_hidden, seed1)
+        .expect("test fixture: 層 1 の構築に失敗")
+        .add_relu()
+        .add_linear(d_hidden, d_out, seed2)
+        .expect("test fixture: 層 2 の構築に失敗")
+}
+
+/// facade `Sequential` と同じアーキテクチャ（`Linear(d_in,d_hidden)→
+/// ReLU→Linear(d_hidden,d_out)`）を内部クレート
+/// `fandhe_ai_autodiff::nn::Sequential` として独立に構築し、facade 側の
+/// `state_dict()` で重みを上書きする（初期化時の乱数値は使い捨てで
+/// `load_state_dict` により数値的に facade と同一の層列へ置き換わる
+/// ため、上書き前の seed 自体は任意）。
+fn build_internal_mlp_matching(
+    state: HashMap<String, Tensor<f32>>,
+    d_in: usize,
+    d_hidden: usize,
+    d_out: usize,
+) -> NnSequential {
+    let mut inner = NnSequential::new();
+    inner.push(Box::new(
+        Linear::new(d_in, d_hidden, true, 0x0bad_0001).expect("test fixture: Linear 1 構築失敗"),
+    ));
+    inner.push(Box::new(fandhe_ai_autodiff::nn::activation::Relu));
+    inner.push(Box::new(
+        Linear::new(d_hidden, d_out, true, 0x0bad_0002).expect("test fixture: Linear 2 構築失敗"),
+    ));
+    inner
+        .load_state_dict(state)
+        .expect("test fixture: load_state_dict 成功");
+    inner
+}
+
+/// facade `from_sequential(&m).to_bytes()` と、内部クレート直接呼び出し
+/// （独立構築した `NnSequential` + `state_dict` 上書き経由の
+/// `graph_from_layers` → `build_model_proto` → `encode_model`）がバイト
+/// 完全一致することを確認する（イシュー #2037・薄いラッパー原則の裏付
+/// け）。
+#[test]
+fn from_sequential_to_bytes_matches_internal_direct_call_byte_exact() {
+    const D_IN: usize = 4;
+    const D_HIDDEN: usize = 6;
+    const D_OUT: usize = 3;
+
+    let model = build_facade_mlp(D_IN, D_HIDDEN, D_OUT, 0x2037_c001, 0x2037_c002);
+
+    let facade_bytes = OnnxModel::from_sequential(&model)
+        .expect("from_sequential 成功")
+        .to_bytes(&OnnxExportOptions::default())
+        .expect("to_bytes 成功");
+
+    let inner = build_internal_mlp_matching(model.state_dict(), D_IN, D_HIDDEN, D_OUT);
+    let internal_graph = graph_from_layers(inner.layers()).expect("graph_from_layers 成功");
+    let internal_proto = build_model_proto(&internal_graph, &ExportOptions::default())
+        .expect("build_model_proto 成功");
+    let internal_bytes = proto::encode_model(&internal_proto);
+
+    assert_eq!(
+        facade_bytes, internal_bytes,
+        "facade from_sequential(&m).to_bytes() と内部クレート直接呼び出しがバイト不一致"
+    );
+}
+
+/// 復号した `facade` の initializer 名集合が `state_dict()` のキー集合と
+/// 一致し、各 `raw_data` が `state_dict` の値と bit 完全一致・`dims` が
+/// shape と一致することを確認する（イシュー #2037）。
+#[test]
+fn from_sequential_to_bytes_initializers_match_state_dict_bit_exact() {
+    const D_IN: usize = 3;
+    const D_HIDDEN: usize = 5;
+    const D_OUT: usize = 2;
+
+    let model = build_facade_mlp(D_IN, D_HIDDEN, D_OUT, 0x2037_d001, 0x2037_d002);
+    let state = model.state_dict();
+
+    let bytes = OnnxModel::from_sequential(&model)
+        .expect("from_sequential 成功")
+        .to_bytes(&OnnxExportOptions::default())
+        .expect("to_bytes 成功");
+    let decoded = proto::decode_model(&bytes).expect("decode_model 成功");
+    let graph = decoded.graph.expect("graph が存在するはず");
+
+    let initializer_names: std::collections::BTreeSet<&str> =
+        graph.initializer.iter().map(|t| t.name.as_str()).collect();
+    let state_dict_names: std::collections::BTreeSet<&str> =
+        state.keys().map(|s| s.as_str()).collect();
+    assert_eq!(
+        initializer_names, state_dict_names,
+        "initializer 名集合が state_dict のキー集合と一致しない"
+    );
+
+    for tensor in &graph.initializer {
+        let expected = &state[&tensor.name];
+        let expected_dims: Vec<i64> = expected
+            .shape()
+            .iter()
+            .map(|&d| i64::try_from(d).unwrap())
+            .collect();
+        assert_eq!(
+            tensor.dims, expected_dims,
+            "initializer '{}' の dims が shape と一致しない",
+            tensor.name
+        );
+        let decoded_values: Vec<f32> = tensor
+            .raw_data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        let expected_values = expected
+            .as_slice()
+            .expect("test fixture: contiguous のはず");
+        assert_eq!(
+            decoded_values.len(),
+            expected_values.len(),
+            "initializer '{}' の要素数が一致しない",
+            tensor.name
+        );
+        for (i, (a, b)) in decoded_values
+            .iter()
+            .zip(expected_values.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "initializer '{}' の index={i} で bit 不一致",
+                tensor.name
+            );
+        }
+    }
 }
