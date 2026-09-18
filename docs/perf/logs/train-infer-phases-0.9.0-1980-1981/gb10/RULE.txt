@@ -1,0 +1,6 @@
+# 事前宣言（結果が出る前に固定。2026-09-18T01:33:53Z。Mac 分 m4max/RULE.txt の GB10 版）
+- 1 run = 8 セル（cpu／cuda × train／infer × fresh／reuse）を 1 JSONL へ出力し、5 run（run1〜run5）を取得する。差し替え・追加起動はしない。
+- 各 run 開始前に「load1 < 1.0 かつ GPU utilization 0%」を 30 秒間隔・最大 30 分待つ（専有機のため Mac 分より厳しいゲート）。5 run 全通過のみ「専有ゲート付き系列」として正式、1 run でも不通過（timeout／unavailable）なら参考扱いと明記する。常駐サービス（compute-apps に出る 2 プロセス）は停止せず、その存在は記録のみ。
+- 表の値は各 run の JSONL top-level median_s の 5 run 間中央値。残差トップ 3 は合計フェーズ（step_total／iter_total）に対する比の降順上位 3 件（Mac 分と同じ aggregate.py。--devices cpu,cuda）。
+- 採否判定を伴わない記録（フェーズ表・施策案の列挙のみ）。backward 内部の GEMM／非 GEMM 内訳は診断計装パッチが必要なため registry =0.9.0 系列の対象外。
+- bench-fandhe は registry ピン =0.9.0 の事前ビルド済みバイナリ（本セッションでノード上で再ビルド。転送元コミットは env_info.txt の rev-stamp）。cargo は計測中に起動しない。

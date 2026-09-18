@@ -197,7 +197,7 @@ design.md` §9）。その効果を CUDA 実機で計測する A/B・bit 同一�
 の計測プロトコルを拡張したもの）が担当する。本エージェント実行環境に
 GB10 実機がないため未実測のまま記入欄を残す。
 
-## 10. v0.9.0 ピン再計測（Apple M4 Max・2026-09-18。イシュー #1981）
+## 10. v0.9.0 ピン再計測（Apple M4 Max・DGX Spark GB10・2026-09-18。イシュー #1981）
 
 ### 10.1 目的・条件
 
@@ -208,8 +208,9 @@ Apple M4 Max で cpu／metal × fresh／reuse の 4 セル・5 プロセス独�
 `docs/perf/logs/train-infer-phases-0.9.0-1980-1981/`（README 参照。
 train 分と同一の run・同一 JSONL を共有する）。**採否判定を伴わない
 記録**（tolerance・判定規則・本番定数は変更しない）。DGX Spark GB10
-側は別セッションで未実測のため、両実機が受け入れ条件の #1981 は本節
-だけでは close しない。v0.9.0 には #1688（`DeviceParamStore::
+側は 2026-09-18 に別セッションで実測済み（§10.6。専有ゲート 5/5
+通過）で、両実機が揃った。§10.2〜§10.4 は Mac 分（数値・文言は GB10
+実測後も変更していない。§10.5 は GB10 項のみ更新）。v0.9.0 には #1688（`DeviceParamStore::
 predict_device_chain` の実装）・#1580／#1911（同機構の facade
 `predict_resident` への結線・Metal 実機 ADOPT 確定。`docs/perf/
 metal-infer-chain-single-sync.md`）が含まれており、§4/§5 の v0.6.0
@@ -314,5 +315,138 @@ checksum（0.1%・0.4 µs）。フェーズ和／合計: 100.8%（差分は各�
 - registry `fandhe-ai =0.9.0`（cargo を起動しない事前ビルド済み
   バイナリ）を使うため、`predict_resident`／`forward` 内部の
   GEMM／非 GEMM 内訳・診断計装は取得不能。本計測では未取得
-- DGX Spark GB10 側は別セッションで未実測。#1981 は両実機が受け入れ
-  条件のため、本節だけでは close しない
+- DGX Spark GB10 側は §10.6 で実測済み（2026-09-18）。両実機の
+  フェーズ表が揃い、#1981 の受け入れ条件「両実機 5 run 中央値の
+  フェーズ表」は本節で充足する
+
+### 10.6 DGX Spark GB10 分（2026-09-18。専有ゲート付き系列）
+
+#### 10.6.1 条件
+
+train 分（`docs/perf/train-step-phase-breakdown.md` §17.6.1）と同一
+の run・同一 JSONL を共有する。要点: NVIDIA GB10（driver 580.173.02・
+sm_121・CUDA 13.0・Ubuntu 24.04.4 aarch64・rustc 1.97.0）・registry
+`fandhe-ai =0.9.0` をノード上で再ビルドした事前ビルド済みバイナリ
+（path patch なし・計測中 cargo 非起動・転送元コミット `536c56a8`）・
+cpu／cuda × fresh／reuse の 4 セル・5 プロセス独立起動・負荷ゲート
+「load1 < 1.0 かつ GPU utilization 0%」5/5 通過（常駐 2 プロセスは
+停止せず記録のみ）・`run{1..5}.err` 全 5 本 0 バイト・事前登録規則
+`gb10/RULE.txt`（2026-09-18T01:33:53Z 固定）。`gb10/aggregate.md` は
+`aggregate.py --devices cpu,cuda --machine "DGX Spark GB10"` の再生成
+で byte 同一を確認済み。**採否判定を伴わない記録**。§7 の記入欄は
+v0.6.0 当時の未実測記録としてそのまま残す（本節は v0.9.0 の実測）。
+
+#### 10.6.2 内訳表（5 run 中央値・min–max・iter_total 比）
+
+`docs/perf/logs/train-infer-phases-0.9.0-1980-1981/gb10/aggregate.md`
+からの転記。単位は µs。
+
+##### infer_phases / cpu / fresh（GB10）
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| predict | 176.3 | 167.1–184.6 | 99.5% |
+| host_copy | 0.1 | 0.1–0.2 | 0.1% |
+| checksum | 0.3 | 0.3–0.5 | 0.2% |
+| iter_total | 177.1 | 167.8–186.1 | 100.0% |
+
+トップ 3: predict（99.5%・176.3 µs）・checksum（0.2%・0.3 µs）・
+host_copy（0.1%・0.1 µs）。フェーズ和／合計: 99.8%（差分は各フェーズ
+中央値の非加法性を含み、固定費は未測定）。
+
+##### infer_phases / cpu / reuse（GB10）
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| predict_resident | 195.0 | 167.6–195.6 | 99.5% |
+| host_copy | 0.2 | 0.1–0.2 | 0.1% |
+| checksum | 0.3 | 0.3–0.3 | 0.2% |
+| iter_total | 196.0 | 168.2–196.2 | 100.0% |
+
+トップ 3: predict_resident（99.5%・195.0 µs）・checksum（0.2%・
+0.3 µs）・host_copy（0.1%・0.2 µs）。フェーズ和／合計: 99.7%
+（差分は各フェーズ中央値の非加法性を含み、固定費は未測定）。
+
+##### infer_phases / cuda / fresh（GB10）
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| leaf_register | 0.2 | 0.2–0.3 | 0.2% |
+| forward | 138.1 | 133.0–139.4 | 87.2% |
+| to_tensor | 19.0 | 18.7–19.3 | 12.0% |
+| host_copy | 0.1 | 0.1–0.1 | 0.1% |
+| checksum | 0.6 | 0.6–0.8 | 0.4% |
+| iter_total | 158.4 | 153.0–160.0 | 100.0% |
+
+トップ 3: forward（87.2%・138.1 µs）・to_tensor（12.0%・19.0 µs）・
+checksum（0.4%・0.6 µs）。フェーズ和／合計: 99.9%（差分は各フェーズ
+中央値の非加法性を含み、固定費は未測定）。
+
+##### infer_phases / cuda / reuse（GB10）
+
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| predict_resident | 98.8 | 97.9–99.1 | 98.9% |
+| host_copy | 0.1 | 0.1–0.1 | 0.1% |
+| checksum | 0.8 | 0.8–0.9 | 0.8% |
+| iter_total | 100.0 | 99.0–100.1 | 100.0% |
+
+トップ 3: predict_resident（98.9%・98.8 µs）・checksum（0.8%・
+0.8 µs）・host_copy（0.1%・0.1 µs）。フェーズ和／合計: 99.8%
+（差分は各フェーズ中央値の非加法性を含み、固定費は未測定）。
+
+#### 10.6.3 所見（数値から言えることのみ）
+
+- cpu は fresh／reuse とも `predict`／`predict_resident` が iter_total
+  の 99.5% を占め、他区間は無視できる規模（Mac 分 §10.3 と同じ構成）
+- **cpu reuse（196.0 µs）は cpu fresh（177.1 µs）より遅い**
+  （+18.9 µs。reuse の min は 168.2 µs で fresh の min〈167.8 µs〉
+  付近まで下がる run がある）。Mac 分（reuse 176.0 対 fresh 185.5 で reuse
+  が速い）とは方向が逆
+- cuda fresh は `forward`（87.2%・138.1 µs）が支配的で `to_tensor`
+  （12.0%・19.0 µs。`Var::to_tensor()` の実体化・D2H readback を含む）
+  が次点。Mac metal fresh（forward 80.2%・to_tensor 20.5%）より
+  `to_tensor` の比重が小さい
+- **cuda reuse（100.0 µs）は cpu reuse（196.0 µs）の約 0.51 倍で
+  GPU 側が速い**。Mac 分（metal reuse が cpu reuse の約 2.1 倍）とは
+  逆の関係で、`predict_resident` 単独区間（98.9%）でこれ以上分解
+  できない点は同じ（§6「分離不能な内訳」）。size=64 という小形状で
+  GPU 起動固定費がどの程度を占めるかは本計測では検証していない
+- cuda fresh→reuse は 158.4→100.0 µs（−58.4 µs）で、fresh の
+  `forward`＋`to_tensor`（157.1 µs）が reuse の `predict_resident`
+  （98.8 µs）へ置き換わる差にほぼ一致する
+- v0.9.0 には #1688（`DeviceParamStore::predict_device_chain`）・
+  #1689／#1905（同機構の CUDA 実機 A/B。`docs/perf/
+  infer-chain-single-sync-cuda-ab.md`。ADOPT）が含まれるが、本節は
+  before/after A/B を取っていないため原因帰属の判定はしない。#1981
+  の出典スコアボード（リポジトリ外 Artifact。最速相手比）は本節では
+  参照・検証していない
+
+#### 10.6.4 施策の起票案（列挙のみ。起票はしていない。新規 issue 化は
+ユーザー承認が必要）
+
+- infer でも診断計装パッチによる `predict`／`predict_resident`／
+  `forward` 内部の内訳取得の要否確認（§10.4 第 3 項と重複。GB10
+  でも同様に未取得）
+- cpu／cuda 双方で size を変えたスイープ（§10.4 第 4 項と重複。
+  size=64 固定では小形状固定費と GEMM 本体コストの分離ができない）
+- cpu reuse が fresh より遅い点（+18.9 µs・Mac とは逆方向）の原因
+  切り分け（新規。`Sequential::predict_resident` の CPU 経路
+  〈`docs/perf/cpu-infer-predict-profile.md`（#1218）が fresh 側の
+  近縁記録〉と `predict` の差分。run 間の min–max 幅〈167.6〜
+  195.6 µs〉が大きいため負荷変動の寄与も未分離）
+- cuda fresh の `to_tensor`（19.0 µs・12.0%）削減余地の確認（§10.4
+  第 2 項の cuda 版。`docs/perf/cuda-host-view-staging-readout.md`
+  〈#1336／#1478〉が D2H readback 経路の既存記録）
+- metal 固有の GPU 起動固定費検証（§10.4 第 1 項）は GB10 では
+  cuda reuse が cpu reuse より速いため同じ形では該当しない
+
+#### 10.6.5 限界
+
+- `predict_resident`／`forward` 内部の内訳は Mac 分と同じく未取得
+  （registry ビルド）
+- 常駐 2 プロセス（`compute_apps=2`）を停止していないため完全な
+  専有ではない（gpu_util は各 run 開始時 0%。RULE.txt は存在の記録
+  のみと事前宣言）
+- §7（v0.6.0 当時の GB10 記入欄）は未実測のまま残す。本節は v0.9.0
+  の実測であり §4／§5 の v0.6.0 Mac 実測と同一条件の比較ではない

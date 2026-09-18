@@ -1,0 +1,11 @@
+run1 gate=pass load1=0.61 gpu_util=0 compute_apps=2 waited_s=90 at=2026-09-18T01:38:02Z
+run1 end_load1=0.61 end_gpu_util=4
+run2 gate=pass load1=0.43 gpu_util=0 compute_apps=2 waited_s=30 at=2026-09-18T01:38:34Z
+run2 end_load1=0.47 end_gpu_util=3
+run3 gate=pass load1=0.29 gpu_util=0 compute_apps=2 waited_s=30 at=2026-09-18T01:39:07Z
+run3 end_load1=0.29 end_gpu_util=3
+run4 gate=pass load1=0.17 gpu_util=0 compute_apps=2 waited_s=30 at=2026-09-18T01:39:40Z
+run4 end_load1=0.16 end_gpu_util=0
+run5 gate=pass load1=0.16 gpu_util=0 compute_apps=2 waited_s=0 at=2026-09-18T01:39:42Z
+run5 end_load1=0.23 end_gpu_util=0
+series done
