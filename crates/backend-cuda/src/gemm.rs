@@ -6110,13 +6110,42 @@ mod tma_tiled_pipeline {
     ///
     /// # SAFETY
     ///
-    /// `cuTensorMapEncodeTiled` は driver API の FFI 呼び出し。
+    /// `cuTensorMapEncodeTiled` は driver API の FFI 呼び出し。呼び出し元
+    /// （[`CudaGemm::launch_tiled_pipeline_tma_f32`]）が満たす事前条件を
+    /// 前提とする（イシュー #2038 是正: 以前は下記のうち (1)(2) の根拠を
+    /// 誤って `_sync_guard` へ帰属させていたが、`_sync_guard` は
+    /// ストリーム順序の保証のみでサイズ・整列には無関係）:
     /// - `tensor_map`: スタック上の `CUtensorMap`（書き込み先。関数内で
     ///   全フィールドを埋める契約）。
     /// - `globalAddress`: `global_dev` の device pointer
-    ///   （`DevicePtr::device_ptr` 経由。`SyncOnDrop` ガードは encode
-    ///   呼び出し完了までスコープに保持する。`tests/tma_probe_real_device.rs`
+    ///   （`DevicePtr::device_ptr` 経由。`tests/tma_probe_real_device.rs`
     ///   の既存プローブと同一の取得パターン）。
+    ///   1. **サイズ整合**（`globalDim`/`globalStrides` が `global_dev` の
+    ///      要素数と整合すること）は呼び出し元が同一の `CudaSlice`
+    ///      （`a_dev.as_raw()`／`b_dev.as_raw()`）に対し `validate_gemm_dims`
+    ///      を先行実行して `a_len == m*k`・`b_len == k*n` を保証済みで
+    ///      あることに由来する（A spec の `(global_rows=m, global_cols=k)`・
+    ///      B spec の `(global_rows=k, global_cols=n)` がそれぞれ対応）。
+    ///   2. **行ストライド整列**（16 バイト整列。TMA の要求）は呼び出し元
+    ///      が同じく先行実行する `tiled_pipeline_alignment_ok(n, k)`
+    ///      （`n % 4 == 0 && k % 4 == 0`）により
+    ///      `global_strides = global_cols * 4` バイトが 16 の倍数となる
+    ///      ことに由来する。
+    ///   3. **先頭ポインタ整列**は `GuardedSlice::as_raw()` が割当全体の
+    ///      `CudaSlice`（`cuMemAlloc` 由来・256 バイト以上整列。
+    ///      `tiled_pipeline_offset_aligned` の doc 参照）を返し、本関数は
+    ///      オフセット付きビューを一切受け取らないことに由来する。
+    /// - `global_dev: &CudaSlice<f32>` という共有借用そのものが、この
+    ///   FFI 呼び出しの間 `global_dev` の指すデバイスメモリ領域が生存する
+    ///   ことを保証する。
+    /// - `_sync_guard`（`SyncOnDrop`。`device_ptr` の戻り値）はストリーム
+    ///   順序の保証（未完了 write の待機・完了後の read イベント記録）
+    ///   のみを担い、encode 呼び出しが完了するまで同じスコープに保持する
+    ///   （サイズ・整列とは無関係。cudarc 0.19.8
+    ///   `CudaSlice::device_ptr` 実装参照）。
+    /// - `spec.validate()`（ゼロ次元の fail-closed 拒否）は
+    ///   `cuTensorMapEncodeTiled` がゼロ次元を受理しないことへの防御で
+    ///   あり、上記 1〜3 のサイズ・整列根拠とは別の契約。
     /// - `globalDim`/`globalStrides`/`boxDim`/`elementStrides`: すべて
     ///   スタック上の配列で FFI 呼び出しの間だけ生存すればよい。
     fn encode_tensor_map_2d_f32(
@@ -6135,18 +6164,26 @@ mod tma_tiled_pipeline {
 
         let (global_ptr, _sync_guard) = global_dev.device_ptr(stream);
         // SAFETY: 関数 doc comment（上記 `# SAFETY` 節）の根拠をこの
-        // 呼び出しへ適用する。`tensor_map.0` は直前で確保したスタック上の
-        // `CUtensorMap`（`cuTensorMapEncodeTiled` が全フィールドを書く
-        // 契約の書き込み先）。`global_ptr` は `spec.validate()` 済みの
-        // `spec`（ゼロ次元を fail-closed 拒否済み）から導出した
-        // `global_dev` の device pointer で、`_sync_guard`（`SyncOnDrop`。
-        // この unsafe 呼び出しが完了するまで同じスコープに生存させる）が
-        // 有効な間は `global_dev` の指すデバイスメモリ領域
-        // （要素数 `global_dim`／`global_strides` と整合するサイズ）が
-        // 生存・整列済みであることを保証する。`global_dim`／
-        // `global_strides`／`box_dim`／`element_strides` はいずれも
-        // 直前でスタック上に構築した配列で、この FFI 呼び出しの間だけ
-        // 生存すれば足りる。
+        // 呼び出しへ適用する（イシュー #2038 是正: 根拠の帰属を出所ごとに
+        // 分離。以前は下記の要素すべてを `_sync_guard` へ誤帰属していた）。
+        // `tensor_map.0` は直前で確保したスタック上の `CUtensorMap`
+        // （`cuTensorMapEncodeTiled` が全フィールドを書く契約の書き込み
+        // 先）。`global_ptr` は `global_dev` の device pointer で、
+        // `global_dim`／`global_strides` との整合（サイズ）は呼び出し元
+        // `launch_tiled_pipeline_tma_f32` が先行実行する
+        // `validate_gemm_dims` に、16 バイト行ストライド整列は同じく
+        // 呼び出し元が先行実行する `tiled_pipeline_alignment_ok(n, k)` に、
+        // 先頭ポインタ整列は `GuardedSlice::as_raw()` が返す割当全体の
+        // `CudaSlice`（オフセットビューではない）にそれぞれ由来する
+        // （関数 doc `# SAFETY` 節の 1〜3 参照）。`global_dev: &CudaSlice<f32>`
+        // という共有借用自体がこの呼び出しの間の生存を保証し、
+        // `_sync_guard`（`SyncOnDrop`。この unsafe 呼び出しが完了するまで
+        // 同じスコープに生存させる）はストリーム順序のみを担う。
+        // `spec.validate()` 済みの `spec` はゼロ次元を fail-closed 拒否済み
+        // （`cuTensorMapEncodeTiled` 自身がゼロ次元を受理しないための防御。
+        // サイズ・整列根拠ではない）。`global_dim`／`global_strides`／
+        // `box_dim`／`element_strides` はいずれも直前でスタック上に構築
+        // した配列で、この FFI 呼び出しの間だけ生存すれば足りる。
         unsafe {
             sys::cuTensorMapEncodeTiled(
                 &mut tensor_map.0 as *mut CUtensorMap,
@@ -6180,6 +6217,23 @@ mod tma_tiled_pipeline {
         swizzle: TmaSwizzleA,
     }
 
+    /// `swizzle` 腕ごとに一意な `CudaKernelDescriptor` ラベルを返す
+    /// （[`crate::module_cache::load_function_cached`] のキャッシュキーの
+    /// 一部として使われるため、腕ごとに異なる文字列を返す契約が必須。
+    /// 同一ラベルを 2 腕に割り当てるとモジュールキャッシュが衝突し、
+    /// 片方の腕が誤って他方のコンパイル済みカーネルを再利用してしまう）。
+    /// `match` を網羅にしているのは、[`TmaSwizzleA`] へ新規 variant を
+    /// 追加した際にラベル未定義のままコンパイルが通ってしまう事故を
+    /// コンパイルエラーで検出するため（イシュー #2038。文字列リテラル
+    /// 自体は [`CudaGemm::compile_tiled_pipeline_tma_variant`] の既存
+    /// 挙動から変更しない）。
+    fn tma_descriptor_label(swizzle: TmaSwizzleA) -> &'static str {
+        match swizzle {
+            TmaSwizzleA::None => "tiled_pipeline_f32_tma_variant_none",
+            TmaSwizzleA::B64 => "tiled_pipeline_f32_tma_variant_b64",
+        }
+    }
+
     impl CudaGemm {
         /// TMA 版カーネル（[`kernels_tiled_pipeline::tiled_pipeline_tma_
         /// f32_source`]）を `device` 上でコンパイルする（既定
@@ -6211,10 +6265,7 @@ mod tma_tiled_pipeline {
             }
 
             let source = kernels_tiled_pipeline::tiled_pipeline_tma_f32_source(swizzle);
-            let descriptor_label = match swizzle {
-                TmaSwizzleA::None => "tiled_pipeline_f32_tma_variant_none",
-                TmaSwizzleA::B64 => "tiled_pipeline_f32_tma_variant_b64",
-            };
+            let descriptor_label = tma_descriptor_label(swizzle);
             let descriptor = crate::nvrtc::CudaKernelDescriptor::new_with_compiled_dims(
                 descriptor_label,
                 fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
@@ -6526,20 +6577,44 @@ mod tma_tiled_pipeline {
             }
         }
 
-        /// A/B のテンソルマップ記述子ラベルが腕（`None`／`B64`）ごとに
-        /// 異なることを検査する（モジュールキャッシュ衝突回避。設計 doc
-        /// §3.3 参照）。
+        /// [`tma_descriptor_label`]（[`CudaGemm::compile_tiled_pipeline_tma_
+        /// variant`] が実際に呼ぶ実装関数）が腕（`None`／`B64`）ごとに
+        /// 異なるラベルを返すことを検査する（`load_function_cached` の
+        /// モジュールキャッシュ衝突回避。テスト内でラベル生成ロジックを
+        /// 複製せず実装関数を直接呼ぶことで、実装側のラベルが変わった
+        /// 際にこのテストが確実に追従する）。既存の固定文字列との一致・
+        /// 空文字でないことも合わせて検査し、意図しない改名による
+        /// モジュールキャッシュ不整合のドリフトを検出する（イシュー
+        /// #2038）。
         #[test]
         fn compile_descriptor_labels_differ_per_swizzle_arm() {
-            let none_label = match TmaSwizzleA::None {
-                TmaSwizzleA::None => "tiled_pipeline_f32_tma_variant_none",
-                TmaSwizzleA::B64 => "tiled_pipeline_f32_tma_variant_b64",
-            };
-            let b64_label = match TmaSwizzleA::B64 {
-                TmaSwizzleA::None => "tiled_pipeline_f32_tma_variant_none",
-                TmaSwizzleA::B64 => "tiled_pipeline_f32_tma_variant_b64",
-            };
-            assert_ne!(none_label, b64_label);
+            let labels: Vec<(TmaSwizzleA, &'static str)> = [TmaSwizzleA::None, TmaSwizzleA::B64]
+                .into_iter()
+                .map(|swizzle| (swizzle, tma_descriptor_label(swizzle)))
+                .collect();
+
+            for (_, label) in &labels {
+                assert!(!label.is_empty());
+            }
+
+            for i in 0..labels.len() {
+                for j in (i + 1)..labels.len() {
+                    assert_ne!(
+                        labels[i].1, labels[j].1,
+                        "swizzle {:?} と {:?} のラベルが衝突している",
+                        labels[i].0, labels[j].0
+                    );
+                }
+            }
+
+            assert_eq!(
+                tma_descriptor_label(TmaSwizzleA::None),
+                "tiled_pipeline_f32_tma_variant_none"
+            );
+            assert_eq!(
+                tma_descriptor_label(TmaSwizzleA::B64),
+                "tiled_pipeline_f32_tma_variant_b64"
+            );
         }
     }
 }
