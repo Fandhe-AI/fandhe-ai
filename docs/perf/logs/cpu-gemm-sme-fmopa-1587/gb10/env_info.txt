@@ -1,0 +1,17 @@
+date_utc=2026-09-18T23:55:00Z
+rev_stamp_before=b127e9f25804661e30626d8c45da8aafc72ea836
+rev_stamp_after=b127e9f25804661e30626d8c45da8aafc72ea836+on-arm.patch
+uname=Linux 6.17.0-1031-nvidia aarch64
+rustc=rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo=cargo 1.97.0 (c980f4866 2026-06-30)
+cpu_model=ARM Cortex-X925 (0xd87) ×10 + Cortex-A725 ×10（lscpu の先頭ソケット表示は X925・nproc=20。DGX Spark GB10 Grace CPU。/proc/cpuinfo Features に sme／smef32f32 なし）
+nproc=20
+rayon_num_threads=unset
+tree_before=<home>/work/rust-ai-library-run
+tree_after=<home>/work/rust-ai-library-1978-after
+outer_gate=load1<1.0 && gpu_util==0 (load_gate_outer.log)
+rev_stamp_note=b127e9f2 は main 176f27e7 に RULE-gb10.txt のみを追加したブランチ HEAD（crates／scripts は main と同一。fp-before.txt が Mac 側 git ls-files 一覧の sha256 と全 1422 ファイル一致）
+patch_sha256=ca493a098c14269615b285a79c70f43f4b6f74e42d2c8ca178eed2d2be721cff (on-arm.patch。after 腕の唯一の差分)
+outer_gate=pass（attempt=1 load1=0.26 gpu_util=0。build 開始前に取得）
+inner_gate=run_ab_sme_cpu.sh 固定 8.0・5/5 round pass（load1 4.43〜7.88）。ただし round1〜2 の load1 は直前の bench-fandhe 2 腕ビルド（20 スレッド）の残留を含む
+run_id=1978-gb10

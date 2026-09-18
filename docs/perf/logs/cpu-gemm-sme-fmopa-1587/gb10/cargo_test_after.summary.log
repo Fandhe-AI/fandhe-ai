@@ -1,0 +1,6 @@
+# cargo test -p fandhe-ai-backend-cpu --release（after 腕・非 #[ignore]）の要約。全文は 79 KB のため収納せず、test result 行・FAILED 行・panic 行のみ抜粋。
+     Running unittests src/lib.rs (<home>/work/target-1978-after/release/deps/fandhe_ai_backend_cpu-<hash>)
+test gemm_blis::tests::sme_production_enabled_is_false_pending_measurement ... FAILED
+thread 'gemm_blis::tests::sme_production_enabled_is_false_pending_measurement' (440089) panicked at crates/backend-cpu/src/gemm_blis/mod.rs:5045:9:
+test result: FAILED. 637 passed; 1 failed; 32 ignored; 0 measured; 0 filtered out; finished in 0.30s
+RT rc=101

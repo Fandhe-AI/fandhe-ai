@@ -1,0 +1,53 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.4
+   Compiling zerocopy v0.8.56
+   Compiling getrandom v0.3.4
+   Compiling libm v0.2.16
+   Compiling autocfg v1.5.1
+   Compiling crossbeam-utils v0.8.22
+   Compiling serde_core v1.0.229
+   Compiling crossbeam-epoch v0.9.20
+   Compiling zmij v1.0.23
+   Compiling anyhow v1.0.104
+   Compiling crossbeam-deque v0.8.7
+   Compiling serde v1.0.229
+   Compiling either v1.18.0
+   Compiling rayon-core v1.13.0
+   Compiling serde_json v1.0.151
+   Compiling allocator-api2 v0.2.21
+   Compiling itoa v1.0.18
+   Compiling cudarc v0.19.8
+   Compiling itertools v0.13.0
+   Compiling memchr v2.8.3
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling libloading v0.9.0
+   Compiling fandhe-ai-backend-cpu v0.9.0 (<home>/work/rust-ai-library-1978-after/crates/backend-cpu)
+   Compiling bytes v1.12.1
+   Compiling bench-common v0.1.0 (<home>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-common)
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling rand_core v0.9.5
+   Compiling rayon v1.12.0
+   Compiling hashbrown v0.16.1
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.56
+   Compiling prost-derive v0.14.4
+   Compiling prost v0.14.4
+   Compiling safetensors v0.7.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.9.0 (<home>/work/rust-ai-library-1978-after/crates/tensor-core)
+   Compiling fandhe-ai-autodiff v0.9.0 (<home>/work/rust-ai-library-1978-after/crates/autodiff)
+   Compiling fandhe-ai-backend-cuda v0.9.0 (<home>/work/rust-ai-library-1978-after/crates/backend-cuda)
+   Compiling fandhe-ai-onnx-interop v0.9.0 (<home>/work/rust-ai-library-1978-after/crates/onnx-interop)
+   Compiling fandhe-ai v0.9.0 (<home>/work/rust-ai-library-1978-after/crates/facade)
+   Compiling bench-fandhe v0.1.0 (<home>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-fandhe)
+    Finished `release` profile [optimized] target(s) in 10.50s
