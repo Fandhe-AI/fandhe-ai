@@ -7,6 +7,7 @@ ROOT="${HOME}/work/rust-ai-library-run"; FC="${ROOT}/scripts/bench/framework-com
 PY="${HOME}/work/.venv-bench/bin/python"
 LOGD="${HOME}/work/gb10-1988"; mkdir -p "${LOGD}"
 SHA="$(cat "${ROOT}/.rev-stamp")"
+[[ -n "${SHA}" ]] || { echo "ERROR: .rev-stamp が空（転送後に書き込むこと）"; exit 1; }
 echo "start $(date -u +%FT%TZ) sha=${SHA}"
 uptime > "${LOGD}/uptime_before.txt"
 
@@ -24,8 +25,13 @@ gate() { # 専有ゲート: load1 < 1.0 かつ gpu_util 0%。最大 20 回・30 
 }
 
 cd "${FC}"
-echo "-- build bench-burn ($(date -u +%FT%TZ))"
-ls -l --time-style=full-iso target/release/bench-burn > "${LOGD}/build.log" 2>&1
+echo "-- build 3 binaries ($(date -u +%FT%TZ))"
+# #2046 は bench-common を変更しているため、同一 run 内比に使う 3 バイナリを同じツリーから再ビルドする
+# （run_all_cuda.sh の build と同じフラグ。bench-fandhe は registry ピン =0.9.0 のまま patch なし）。
+ls -l --time-style=full-iso target/release/bench-burn target/release/bench-candle target/release/bench-fandhe > "${LOGD}/build.log" 2>&1
+echo "precision_class refs in bench-burn/src/main.rs: $(grep -c precision_class bench-burn/src/main.rs)" >> "${LOGD}/build.log"
+cargo build --release -p bench-fandhe >> "${LOGD}/build.log" 2>&1; echo "build bench-fandhe rc=$?"
+cargo build --release -p bench-candle --no-default-features --features cuda >> "${LOGD}/build.log" 2>&1; echo "build bench-candle rc=$?"
 cargo build --release -p bench-burn --no-default-features --features cuda >> "${LOGD}/build.log" 2>&1; echo "build bench-burn rc=$?"
 ls -l --time-style=full-iso target/release/bench-burn target/release/bench-candle target/release/bench-fandhe >> "${LOGD}/build.log" 2>&1
 grep -E 'fandhe-ai v' <(cargo tree -p bench-fandhe --depth 1 2>/dev/null) | head -2 >> "${LOGD}/build.log"
