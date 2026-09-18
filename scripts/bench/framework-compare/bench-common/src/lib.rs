@@ -10,7 +10,8 @@ use std::time::Duration;
 pub mod parity;
 pub use parity::{
     F32_UNIT_ROUNDOFF, GemmReference, PARITY_ABS_TOL, PARITY_REL_TOL, PARITY_SCALED_ABS_COEFF,
-    ParityDumpConfig, ParityStats, ScaledAbsTolerance, compare_elementwise, gemm_element_count,
+    ParityDumpConfig, ParityStats, PrecisionClass, ScaledAbsTolerance, TF32_UNIT_ROUNDOFF,
+    compare_elementwise, gemm_element_count,
 };
 
 /// Typed error for the shared bench utilities. Bench binaries propagate this
@@ -267,6 +268,12 @@ pub struct Record<'a> {
     /// 保たれる）。summarize.py の目標達成ゲートは既定でこのフィールドが
     /// `true` の行を除外する（fail-open 防止。FP32 目標値との混同を防ぐ。
     /// `docs/cuda-tf32-optin-api-decision.md` 参照）。
+    ///
+    /// burn（cuda 行のみ）は本フラグと同じ判定（`bench-burn::main::
+    /// precision_class`）で [`parity::PrecisionClass`] を選び、
+    /// `parity_scaled_abs_bound`（第 3 救済項）の単位丸め `u` を
+    /// `TF32_UNIT_ROUNDOFF`（`2^-11`）へ切り替える（イシュー #1987・
+    /// 承認出典 #1989）。
     pub tf32: bool,
     /// `--managed`（イシュー #1353）。CUDA managed memory（`cuMemAllocManaged`
     /// 経由の `DeviceBuffer` 配置。`fandhe_ai::set_cuda_managed_memory_enabled`）

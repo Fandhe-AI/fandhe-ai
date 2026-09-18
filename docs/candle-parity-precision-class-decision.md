@@ -226,4 +226,47 @@ $ git diff --stat origin/main -- crates/ scripts/ .github/ docs/spec/
 - 実測データ：`docs/perf/logs/parity-torch-cpu-truth-1985/`（#1985 の PyTorch cpu N=4096 真値突合）
 - 判定式出典：`scripts/bench/framework-compare/bench-common/src/parity.rs::ScaledAbsTolerance`・`PARITY_SCALED_ABS_COEFF` (line 84)・`F32_UNIT_ROUNDOFF` (line 90)
 - spec 参考：`docs/spec/04-requirements.md` REQ-2 節（2026-09-12 追記 (b-1)・(b-2)）
+- 実装記録：§12（イシュー #1987）
+
+## 12. 実装記録（#1987）
+
+§8 で承認された案 P（burn cuda 行のみ `u=2^-11`）・T1（PyTorch cpu N=4096 現状維持）を実装した。
+コード変更は `scripts/bench/framework-compare/` 配下（本体クレート・`docs/spec/` は不変）。
+
+**追加 API**（`scripts/bench/framework-compare/bench-common/src/parity.rs`）:
+- `TF32_UNIT_ROUNDOFF: f64 = 2^-11`（TF32 仮数 10 bit の unit roundoff）
+- `PrecisionClass`（閉じた `enum`。`F32`〈既定〉／`Tf32`。`unit_roundoff()`）
+- `ScaledAbsTolerance::precision: PrecisionClass`（新規フィールド。既定は `F32` のため導入前と
+  bit 同一）・`ScaledAbsTolerance::with_precision`・`GemmReference::with_precision`
+- `lib.rs` の `pub use` に `PrecisionClass`／`TF32_UNIT_ROUNDOFF` を追加
+
+**bench-burn 結線**（`scripts/bench/framework-compare/bench-burn/src/main.rs`）:
+- `precision_class(device: &str) -> PrecisionClass`（`"cuda"` のみ `Tf32`）を新設し、
+  `run_gemm` が `GemmReference::compute(..)?.with_precision(precision_class(&cli.device))` として
+  `verify` 呼び出しより前に供給する
+- `run_gemm`/`run_train`/`run_infer` の `Record.tf32` を `precision_class(&cli.device) ==
+  PrecisionClass::Tf32` へ統一（JSONL ラベルと `u` 選択のドリフト防止）
+
+**fandhe-ai 側は構造的に非到達**: `GemmReference::verify_strict`（`bench-fandhe::run_gemm` 専用）
+は `ScaledAbsTolerance::NONE` 固定のため `with_precision` の影響を受けない
+（`bench-common::parity::tests::verify_strict_ignores_precision_class` で固定）。
+
+**python 側**: `compare_gemm_gate.py::_parity_check`／`summarize.py::parity_status` の判定式・
+6 キー契約は不変のまま、docstring へ精度クラスの注記を追加した。burn 行は `_matching_rows`
+（`compare_gemm_gate.py`）の `framework` 完全一致検査で構造的に本ゲート非対象のため、burn cuda 行
+の bound が大きくなっても既存ゲート判定（fandhe-ai vs candle）へは影響しない
+（`compare_gemm_gate_test.py::PrecisionClassTest::test_burn_tf32_rescued_row_is_excluded_from_gate`
+で固定）。`summarize.py` の (a-tf32) 節に「要素単位検証」列を追加し、burn 行が精度クラス救済で
+`ok` になった場合のみ注記を表示する（`_tf32_element_check_note`）。
+
+**§9 が示唆した「既存 `gemm_cpu_parity_zero_fail_without_scaled_rescue` への burn 検証追加」は
+不実施**: bench-fandhe のテストは burn CUDA バイナリを Linux CI で実行できない（burn cuda feature
+は CUDA toolkit 実機を要する）ため、bench-common 側の bit 固定テスト
+（`tf32_unit_roundoff_pinned`／`tf32_bound_formula_pinned`／
+`burn_tf32_elements_from_1984_dump_pass_only_under_tf32_class`（#1984 の実測ダンプ値を転記）／
+`verify_strict_ignores_precision_class`）へ置き換えた。
+
+**未実施（後続イシューへ引き継ぎ）**: burn cuda 5 セルの GB10 再計測・スコアボード再生成（#1988）。
+spec 提案 Fandhe-AI/fandhe-ai-spec#70 は本 PR 時点で未マージ（(b) 形式の先行実装。#1247/#1250 と
+同型）。
 - spec 提案：Fandhe-AI/fandhe-ai-spec#70（https://github.com/Fandhe-AI/fandhe-ai-spec/issues/70。#1989 承認事項 5 に基づく (b) 形式提案）

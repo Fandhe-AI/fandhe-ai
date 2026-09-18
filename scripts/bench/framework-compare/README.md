@@ -786,6 +786,39 @@ contract-decision.md` §8（イシュー #1241 承認記録・2026-09-08）で�
   remeasurement.md` §14。**CPU は #1262 で実測完了**: 確定判定〈未達・0.950 倍〉へ遷移。
   `docs/perf/cpu-gemm-candle-gate-remeasurement.md` §19）
 
+#### 精度クラス（イシュー #1987・承認出典 #1989）
+
+上記の第 3 救済項は当初 `F32_UNIT_ROUNDOFF`（`u=2^-24`。f32 の unit roundoff）1 種のみを前提と
+していたが、burn 0.21 の CUDA バックエンドが常時 TF32（仮数部 10 bit・`u=2^-11`）で計算するため、
+`u=2^-24` の bound では burn cuda 行の丸め誤差フロア（イシュー #1984 の真値突合で実測: 中央値
+4.0e-4〜1.6e-3）を説明できず、framework-compare 0.9.0 正式再計測（イシュー #1983）で burn cuda
+gemm fresh N=256〜4096 の 5 セルが「判定不能」のまま残っていた。`docs/candle-parity-precision-
+class-decision.md`（2026-09-18 ユーザー承認・イシュー #1989）が確定した案 P を実装した:
+
+- **`bench-common::parity::PrecisionClass`**（閉じた `enum`。任意 `f64` を外部から直接与えられる
+  注入面にしないため。security.md A08）: `F32`（既定・`u=2^-24`）／`Tf32`
+  （`TF32_UNIT_ROUNDOFF = 2^-11`）。`ScaledAbsTolerance::precision` フィールドが判定式の `u` を
+  選ぶ（`bound = c・u・K・S_A・S_B` の `u` を `precision.unit_roundoff()` から取得する以外、判定式
+  自体は変更しない）
+- **適用スコープ（ハーネス限定・burn cuda 行のみ）**: `bench-burn::main::precision_class(device)`
+  が `device == "cuda"` のときのみ `PrecisionClass::Tf32` を返し、`run_gemm` が
+  `GemmReference::compute(..)?.with_precision(precision_class(&cli.device))` として
+  `GemmReference::verify` 呼び出しより前に供給する。JSONL の `"tf32"` ラベルも同じ式
+  （`precision_class(device) == PrecisionClass::Tf32`）から導出するため、ラベルと `u` 選択が
+  ドリフトしない。**`bench-candle --tf32` 行・PyTorch・fandhe-ai（`verify_strict` 経路）は
+  対象外のまま `u=2^-24`**（`GemmReference::verify_strict` は `ScaledAbsTolerance::NONE` 固定の
+  ため精度クラスが構造的に到達しない）
+- **PyTorch cpu N=4096 の扱い（T1・現状維持）**: `docs/perf/logs/parity-torch-cpu-truth-1985/` の
+  真値突合で「spec 上正当な判定不能」と確認済みのため、本イシューでは係数 `c` 等を変更しない
+- **未変更事項**: `PARITY_REL_TOL`/`PARITY_ABS_TOL`/`PARITY_SCALED_ABS_COEFF`/`F32_UNIT_ROUNDOFF`
+  の 4 定数・判定式・本体 `crates/backend-cpu/src/parity.rs::compare`/`crates/backend-cuda/tests/
+  common/parity_baseline.rs::ParityBaseline`・`docs/spec/`（正本 submodule）はすべて不変
+- **spec 提案**: 本項目は spec REQ-2 (b-2)「`u = 2^-24` 逐語固定」へ抵触するため、(b) 形式の spec
+  提案（Fandhe-AI/fandhe-ai-spec#70。#1247/#1250 と同型で spec マージ前の先行実装）が前提。実装
+  時点で spec 側は未マージのまま
+- **GB10 再計測**: 本イシューでは実装のみ行い、burn cuda 5 セルの実測再確認・スコアボード再生成は
+  別イシュー（#1988）へ引き継ぐ
+
 ### `--tf32`（イシュー #1042。CUDA TF32 Tensor Core opt-in 比較）
 
 `backend-cuda` の GEMM 公開経路（`fandhe-ai::gemm`）は既定で FP32 厳密（`run_tiled_f32`）だが、
@@ -823,7 +856,13 @@ opt-in で WMMA TF32 Tensor Core 経路（`run_wmma_tf32`）へ切り替えら�
   するためそのまま計測失敗として記録され、FP32 へ黙示フォールバックしない
 - **`bench-burn`**: `--tf32` は受理せず常に `MEASURE_ERROR` で fail-fast する。burn の CUDA
   バックエンドは FP32 厳密経路自体を持たないため、フラグに opt-in／opt-out の意味を持たせられ
-  ない（既存の burn GEMM 計測が実質的に常に TF32 相当であることの明記）
+  ない（既存の burn GEMM 計測が実質的に常に TF32 相当であることの明記）。**イシュー #1987**（承認
+  出典 #1989）: `bench-burn::main::precision_class` が `--device cuda` の行のみ
+  `bench-common::parity::PrecisionClass::Tf32`（単位丸め `u=2^-11`）を
+  `GemmReference::with_precision` へ供給し、要素単位検証の第 3 救済項がこの精度クラスで評価される
+  （`JSONL` の `"tf32":true` ラベルと同じ式で導出するためドリフトしない）。CPU／Metal は
+  `PrecisionClass::F32`（既定・`u=2^-24`）のまま不変。candle・PyTorch・fandhe-ai（`verify_strict`
+  経路）も引き続き `u=2^-24`（`PrecisionClass::F32`）のまま——**変更されるのは burn cuda 行のみ**
 - **JSONL**: `--tf32` で計測した行は `"tf32":true` を emit する（既定は emit しないキー欠損 =
   `false` の互換規約。`bench_common::Record::tf32`）
 - **`summarize.py`**: `--tf32` 行は目標達成ゲート（`--target`）・(a) GEMM 節の checksum 相互突合・

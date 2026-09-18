@@ -65,6 +65,28 @@ fn readout<B: Backend, const D: usize>(
         .map_err(|e| format!("MEASURE_ERROR: into_data to_vec failed: {e:?}").into())
 }
 
+/// 比較対象（burn）が計測に用いる数値精度のクラス（イシュー #1987・
+/// 承認出典 #1989・`docs/candle-parity-precision-class-decision.md` §8）。
+///
+/// burn 0.21 の CUDA バックエンドは常時 TF32（`validate_unsupported_flags`
+/// のコメント参照）で計算するため、cuda 行のみ `PrecisionClass::Tf32`
+/// （単位丸め `u = 2^-11`）を返す。CPU/Metal は FP32 厳密経路のため
+/// `PrecisionClass::F32`（既定・`u = 2^-24`）のまま。
+///
+/// JSONL の `tf32` ラベル（`Record.tf32`）と第 3 救済項の単位丸め `u`
+/// 選択を**この 1 箇所からのみ**導出することで、両者のドリフト（片方だけ
+/// 更新し忘れる事故）を構造的に防ぐ（`docs/candle-parity-precision-class-decision.md`
+/// §9 のデータ依存順序に関する指摘への対応）。`run_gemm` は
+/// `GemmReference::verify` が呼ばれる**より前**にこの精度クラスを
+/// `GemmReference::with_precision` へ供給する。
+fn precision_class(device: &str) -> PrecisionClass {
+    if device == "cuda" {
+        PrecisionClass::Tf32
+    } else {
+        PrecisionClass::F32
+    }
+}
+
 fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::error::Error>> {
     let n = cli.size;
     // イシュー #970 codex-review 指摘（PR #978・P1）: `n * n`（要素数）を
@@ -76,7 +98,10 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
     let b_host = Xorshift64Star::new(SEED_B).fill_vec(len);
     // イシュー #970: 参照 GEMM は `tensor2` に渡す前の host Vec の clone から
     // 計算する（本体の FMA 契約と同じ参照。計測窓の外・warmup 前に 1 回だけ）。
-    let reference = GemmReference::compute(n, &a_host, &b_host)?;
+    // イシュー #1987: cuda 行は TF32 精度クラス（`u=2^-11`）を第 3 救済項へ
+    // 供給する（`reference.verify` が呼ばれるより前に確定させる）。
+    let reference =
+        GemmReference::compute(n, &a_host, &b_host)?.with_precision(precision_class(&cli.device));
     let a = tensor2::<B>(a_host, [n, n], dev);
     let b = tensor2::<B>(b_host, [n, n], dev);
     let mut cs = 0.0;
@@ -140,7 +165,7 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         // device が cuda の行は `tf32: true` として記録する（CPU/Metal は
         // 引き続き `false`）。`summarize.py` はこれを見て TF32 専用行を
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
-        tf32: cli.device == "cuda",
+        tf32: precision_class(&cli.device) == PrecisionClass::Tf32,
         managed: cli.managed,
         pinned_h2d: cli.pinned_h2d,
         device_checksum: false,
@@ -261,7 +286,7 @@ fn run_train<B: AutodiffBackend>(
         // device が cuda の行は `tf32: true` として記録する（CPU/Metal は
         // 引き続き `false`）。`summarize.py` はこれを見て TF32 専用行を
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
-        tf32: cli.device == "cuda",
+        tf32: precision_class(&cli.device) == PrecisionClass::Tf32,
         managed: cli.managed,
         pinned_h2d: cli.pinned_h2d,
         device_checksum: false,
@@ -315,7 +340,7 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         // device が cuda の行は `tf32: true` として記録する（CPU/Metal は
         // 引き続き `false`）。`summarize.py` はこれを見て TF32 専用行を
         // FP32 checksum 集合・`--target burn` 性能ゲートから除外する。
-        tf32: cli.device == "cuda",
+        tf32: precision_class(&cli.device) == PrecisionClass::Tf32,
         managed: cli.managed,
         pinned_h2d: cli.pinned_h2d,
         device_checksum: false,
@@ -496,6 +521,38 @@ mod tests {
     #[test]
     fn tf32_flag_absent_passes_the_guard() {
         assert!(validate_unsupported_flags(&base_cli(false)).is_ok());
+    }
+
+    /// イシュー #1987: `precision_class` は device 文字列 `"cuda"` のみを
+    /// `PrecisionClass::Tf32` へ写像する（burn 0.21 の CUDA バックエンドが
+    /// 常時 TF32 であることの反映）。`"cpu"`／`"metal"`／未知の文字列は
+    /// すべて `PrecisionClass::F32`（既定）のまま。
+    #[test]
+    fn precision_class_maps_only_cuda_to_tf32() {
+        assert_eq!(precision_class("cuda"), PrecisionClass::Tf32);
+        assert_eq!(precision_class("cpu"), PrecisionClass::F32);
+        assert_eq!(precision_class("metal"), PrecisionClass::F32);
+        assert_eq!(precision_class("unknown-device"), PrecisionClass::F32);
+    }
+
+    /// JSONL の `tf32` ラベル（`Record.tf32`）は `precision_class` と同じ
+    /// 式（`precision_class(device) == PrecisionClass::Tf32`）で導出する
+    /// ため、両者は常に一致する（ドリフト防止の直接確認。`run_gemm`／
+    /// `run_train`／`run_infer` いずれも同一式を使う）。
+    #[test]
+    fn tf32_label_matches_precision_class() {
+        for device in ["cuda", "cpu", "metal", "unknown-device"] {
+            let cli = Cli {
+                device: device.to_string(),
+                ..base_cli(false)
+            };
+            let label = precision_class(&cli.device) == PrecisionClass::Tf32;
+            assert_eq!(
+                label,
+                precision_class(device) == PrecisionClass::Tf32,
+                "device={device}"
+            );
+        }
     }
 
     /// イシュー #1353: `--managed` は fandhe-ai 固有の CUDA managed memory

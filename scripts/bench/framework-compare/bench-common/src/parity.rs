@@ -89,15 +89,71 @@ pub const PARITY_SCALED_ABS_COEFF: f64 = 0.5;
 /// 避けてここから導出する。
 pub const F32_UNIT_ROUNDOFF: f64 = 1.0 / 16_777_216.0;
 
-/// [`PARITY_SCALED_ABS_COEFF`]・[`F32_UNIT_ROUNDOFF`] による第 3 救済項
-/// （スケール付き絶対誤差。候補 A-1）の適用パラメータ。
+/// TF32 Tensor Core（仮数部 10 bit）の unit roundoff（`2^-11`）。
+///
+/// **イシュー #1987（承認出典: イシュー #1989・2026-09-18 承認記録コメント・
+/// `docs/candle-parity-precision-class-decision.md` §8）で導入した第 2 の
+/// 精度クラス**。burn 0.21 の CUDA バックエンドは常時 TF32
+/// （`bench-burn::validate_unsupported_flags` のコメント参照）で計算する
+/// ため、[`F32_UNIT_ROUNDOFF`]（`2^-24`）を前提とした第 3 救済項では
+/// burn cuda 行の丸め誤差フロア（#1984 の実測突合で中央値 4.0e-4〜1.6e-3）を
+/// 説明できない。#1984 の真値突合（`docs/perf/logs/parity-burn-tf32-truth-1984/`）
+/// は `u = 2^-11` を用いた線形 K 形 bound で burn cuda の fail 要素が
+/// 母集団全数救済されることを確認済み。
+///
+/// [`PrecisionClass::Tf32`] が本定数を [`ScaledAbsTolerance::bound`] へ
+/// 供給する。**適用スコープは burn cuda 行に限定**（`bench-burn::main::
+/// precision_class`）し、candle・PyTorch・fandhe-ai（`verify_strict` 経路）
+/// は引き続き [`F32_UNIT_ROUNDOFF`]（`PrecisionClass::F32`）のまま不変。
+///
+/// 本定数は spec `docs/spec/04-requirements.md` REQ-2 (b-2) の
+/// `u = 2^-24` 逐語固定へ抵触するため、(b) 形式の spec 提案
+/// （Fandhe-AI/fandhe-ai-spec#70。本 PR 時点で未マージ）が前提。
+/// spec マージ前の実装は #1247／#1250（spec#64 提案中に先行実装した前例）
+/// と同型。**変更はユーザー承認必須**（[`PARITY_SCALED_ABS_COEFF`] と同じ
+/// 方針。`.claude/rules/coding-rust.md`・`.claude/rules/security.md` A08）。
+pub const TF32_UNIT_ROUNDOFF: f64 = 1.0 / 2048.0;
+
+/// 比較対象（candle／burn／PyTorch）側が採用した数値精度のクラス
+/// （イシュー #1987・#1989。`ScaledAbsTolerance::bound` の単位丸め `u` を
+/// 選択する）。
+///
+/// 閉じた `enum`（`#[non_exhaustive]` を付けない）にしている理由:
+/// 任意の `f64` を外部から直接受け取れる形にすると、第 3 救済項の bound を
+/// 際限なく緩められる注入面になる（A08。`.claude/rules/security.md`）。
+/// `unit_roundoff()` が返す値は本モジュールの承認済み定数
+/// （[`F32_UNIT_ROUNDOFF`]／[`TF32_UNIT_ROUNDOFF`]）のいずれかに限られる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrecisionClass {
+    /// f32 厳密経路（fandhe-ai・candle・PyTorch。unit roundoff `2^-24`）。
+    /// 既定値（[`ScaledAbsTolerance::NONE`]／`from_inputs` の既定精度クラス
+    /// と一致させ、本 enum 導入前の挙動を不変に保つ）。
+    #[default]
+    F32,
+    /// TF32 Tensor Core 経路（burn cuda 限定。unit roundoff `2^-11`）。
+    Tf32,
+}
+
+impl PrecisionClass {
+    /// このクラスに対応する単位丸め `u`（[`ScaledAbsTolerance::bound`] が
+    /// 使う）。
+    pub const fn unit_roundoff(self) -> f64 {
+        match self {
+            Self::F32 => F32_UNIT_ROUNDOFF,
+            Self::Tf32 => TF32_UNIT_ROUNDOFF,
+        }
+    }
+}
+
+/// [`PARITY_SCALED_ABS_COEFF`]・単位丸め `u`（[`PrecisionClass`]）による
+/// 第 3 救済項（スケール付き絶対誤差。候補 A-1）の適用パラメータ。
 ///
 /// `bound = c・u・K・S_A・S_B`（`c`=[`PARITY_SCALED_ABS_COEFF`]・
-/// `u`=[`F32_UNIT_ROUNDOFF`]・`K`=内積長・`S_A`/`S_B`=入力行列 A/B の
+/// `u`=`precision.unit_roundoff()`・`K`=内積長・`S_A`/`S_B`=入力行列 A/B の
 /// 絶対値の全体最大）。要素の複合判定 `pass ⇔ rel < PARITY_REL_TOL ∨
 /// diff < PARITY_ABS_TOL ∨ diff <= bound` へ [`element_error`] が OR 追加
 /// する（`docs/candle-parity-tolerance-contract-decision.md` §8「承認内容」
-/// 2 行目と同一式）。
+/// 2 行目と同一式。`u` の精度クラス化はイシュー #1987・#1989）。
 ///
 /// [`NONE`](Self::NONE)（`bound() == 0.0`）を渡すと第 3 項が事実上
 /// 無効化され、既存 2 条件のみの判定（レガシー同値）になる
@@ -114,6 +170,9 @@ pub struct ScaledAbsTolerance {
     /// 入力行列 B の絶対値の全体最大（`max|B|`）。`scale_a` と同じ
     /// センチネル運用。
     pub scale_b: f64,
+    /// 単位丸め `u` を選ぶ精度クラス（イシュー #1987）。既定は
+    /// [`PrecisionClass::F32`]（本フィールド導入前の挙動と bit 同一）。
+    pub precision: PrecisionClass,
 }
 
 impl ScaledAbsTolerance {
@@ -124,10 +183,14 @@ impl ScaledAbsTolerance {
         k: 0,
         scale_a: 0.0,
         scale_b: 0.0,
+        precision: PrecisionClass::F32,
     };
 
     /// GEMM 入力 `a`・`b`（flat・行優先。長さは呼び出し元
     /// [`GemmReference::compute`] が検証済み）から `S_A`・`S_B` を導出する。
+    /// 精度クラスは既定（[`PrecisionClass::F32`]）のまま返すため、TF32
+    /// 精度クラスが必要な呼び出し元は [`with_precision`](Self::with_precision)
+    /// で明示的に切り替える。
     ///
     /// `f64::max` は NaN を含む片側を暗黙に捨てる（`x.max(NaN) == x`）ため、
     /// [`worst_f64`] と同じ回避策で非有限要素を検出したら `f64::INFINITY`
@@ -140,7 +203,16 @@ impl ScaledAbsTolerance {
             k,
             scale_a: max_abs_f64(a),
             scale_b: max_abs_f64(b),
+            precision: PrecisionClass::F32,
         }
+    }
+
+    /// 精度クラスを差し替えた同値のコピーを返す（`k`／`scale_a`／
+    /// `scale_b` は不変。イシュー #1987。`bench-burn::main::precision_class`
+    /// が cuda 行のみ `Tf32` を渡す）。
+    pub const fn with_precision(mut self, precision: PrecisionClass) -> Self {
+        self.precision = precision;
+        self
     }
 
     /// スケール付き絶対誤差の許容量 `c・u・K・S_A・S_B` を返す。
@@ -155,7 +227,7 @@ impl ScaledAbsTolerance {
             return 0.0;
         }
         let bound = PARITY_SCALED_ABS_COEFF
-            * F32_UNIT_ROUNDOFF
+            * self.precision.unit_roundoff()
             * (self.k as f64)
             * self.scale_a
             * self.scale_b;
@@ -702,6 +774,21 @@ impl GemmReference {
         self.tol
     }
 
+    /// `self.tol` の精度クラス（[`PrecisionClass`]）のみを差し替える
+    /// （`k`／`scale_a`／`scale_b` は不変。イシュー #1987）。
+    ///
+    /// `bench-burn::main::run_gemm` が cuda 行限定で
+    /// `GemmReference::compute(..)?.with_precision(PrecisionClass::Tf32)`
+    /// として使う。[`verify`](Self::verify)（`self.tol` 経由の救済適用）が
+    /// この精度クラスを反映する一方、[`verify_strict`](Self::verify_strict)
+    /// は `ScaledAbsTolerance::NONE` 固定のため本メソッドの影響を受けない
+    /// （fandhe-ai 自身の検証には精度クラスが構造的に到達しない設計。
+    /// `verify_strict` のドキュメント参照）。
+    pub fn with_precision(mut self, precision: PrecisionClass) -> Self {
+        self.tol = self.tol.with_precision(precision);
+        self
+    }
+
     /// テスト用ビルダー: `dump` 設定を差し替えた同値のコピーを返す
     /// （env 非依存にダンプ経路をユニットテストするため。イシュー #1183）。
     #[cfg(test)]
@@ -1037,6 +1124,7 @@ mod tests {
             k: 2048,
             scale_a: 0.5,
             scale_b: 0.5,
+            precision: PrecisionClass::F32,
         };
         assert_eq!(tol_2048.bound(), 2f64.powi(-16)); // 1.52587890625e-5
 
@@ -1044,6 +1132,7 @@ mod tests {
             k: 512,
             scale_a: 0.5,
             scale_b: 0.5,
+            precision: PrecisionClass::F32,
         };
         assert_eq!(tol_512.bound(), 2f64.powi(-18)); // 3.814697265625e-6
 
@@ -1051,6 +1140,7 @@ mod tests {
             k: 4096,
             scale_a: 0.5,
             scale_b: 0.5,
+            precision: PrecisionClass::F32,
         };
         assert_eq!(tol_4096.bound(), 2f64.powi(-15));
     }
@@ -1072,6 +1162,7 @@ mod tests {
             k: 2048,
             scale_a: 0.5,
             scale_b: 0.5,
+            precision: PrecisionClass::F32,
         };
         assert_eq!(tol.bound(), bound);
 
@@ -1105,6 +1196,7 @@ mod tests {
             k: 2048,
             scale_a: f64::NAN,
             scale_b: 0.5,
+            precision: PrecisionClass::F32,
         };
         assert_eq!(nan_scale.bound(), 0.0);
 
@@ -1112,6 +1204,7 @@ mod tests {
             k: 2048,
             scale_a: f64::INFINITY,
             scale_b: 0.5,
+            precision: PrecisionClass::F32,
         };
         assert_eq!(inf_scale.bound(), 0.0);
 
@@ -1178,6 +1271,7 @@ mod tests {
             k: 512,
             scale_a: 0.5,
             scale_b: 0.5,
+            precision: PrecisionClass::F32,
         };
         assert!(tol.bound() < PARITY_ABS_TOL);
 
@@ -1207,6 +1301,7 @@ mod tests {
             k: 2048,
             scale_a: 0.5,
             scale_b: 0.5,
+            precision: PrecisionClass::F32,
         };
         let stats2 = compare_elementwise(&actual, &reference, &big_tol).expect("compare");
         assert_eq!(stats2.fail_count, 1);
@@ -1233,6 +1328,7 @@ mod tests {
             k: k_for_bound,
             scale_a: 1.0,
             scale_b: 1.0,
+            precision: PrecisionClass::F32,
         };
         assert!((tol.bound() - bound).abs() / bound < 1e-9);
 
@@ -1654,5 +1750,193 @@ mod tests {
         rest[..end].trim().parse::<f64>().unwrap_or_else(|err| {
             panic!("本体 parity.rs の `{name}` 宣言値を f64 として解釈できない: {err}")
         })
+    }
+
+    // --- 精度クラス（イシュー #1987・承認出典 #1989）------------------
+
+    /// [`TF32_UNIT_ROUNDOFF`]・[`PrecisionClass`] の定数・既定値をピン止め
+    /// する（変更はユーザー承認必須。[`scaled_abs_constants_pinned`] と
+    /// 同じ方針）。
+    #[test]
+    fn tf32_unit_roundoff_pinned() {
+        assert_eq!(TF32_UNIT_ROUNDOFF, 2f64.powi(-11));
+        assert_eq!(PrecisionClass::F32.unit_roundoff(), F32_UNIT_ROUNDOFF);
+        assert_eq!(PrecisionClass::Tf32.unit_roundoff(), TF32_UNIT_ROUNDOFF);
+        assert_eq!(PrecisionClass::default(), PrecisionClass::F32);
+        // 導入前の挙動不変性: 4 既存定数は変更しない。
+        assert_eq!(PARITY_REL_TOL, 1e-3);
+        assert_eq!(PARITY_ABS_TOL, 1e-5);
+        assert_eq!(PARITY_SCALED_ABS_COEFF, 0.5);
+        assert_eq!(F32_UNIT_ROUNDOFF, (f32::EPSILON as f64) / 2.0);
+    }
+
+    /// `u = 2^-11` は `u = 2^-24` のちょうど `2^13 = 8192` 倍
+    /// （`bound` は `u` に線形のため同じ倍率になる）。実ベンチ入力
+    /// （N=256・`crate::SEED_A`/`crate::SEED_B`）由来の `ScaledAbsTolerance`
+    /// で確認する。
+    ///
+    /// 注: `docs/perf/logs/framework-compare-cuda-tf32-sweep-1983/
+    /// results-cuda-0.9.0-2026-09-18.jsonl` の N=256 burn cuda 行
+    /// （`parity_scaled_abs_bound=1.907255e-6`）は #1987（本実装）
+    /// マージ前の実測であり `PrecisionClass::F32`（`u=2^-24`）で計算された
+    /// 値のため、本テストの TF32 bound（`1.562424e-2`）とは一致しない
+    /// （実測 JSONL 値との桁整合確認は見送り、倍率不変条件のみを固定する）。
+    #[test]
+    fn tf32_bound_is_exactly_8192x_f32_bound() {
+        let n = 256usize;
+        let a = crate::Xorshift64Star::new(crate::SEED_A).fill_vec(n * n);
+        let b = crate::Xorshift64Star::new(crate::SEED_B).fill_vec(n * n);
+        let tol_f32 = ScaledAbsTolerance::from_inputs(n, &a, &b);
+        let tol_tf32 = tol_f32.with_precision(PrecisionClass::Tf32);
+
+        assert_eq!(tol_tf32.bound(), tol_f32.bound() * 8192.0);
+        assert!(tol_tf32.bound() > 0.0);
+    }
+
+    /// `bound = c・u・K・S_A・S_B`（`c=0.5`・`S_A=S_B=0.5`）を
+    /// `PrecisionClass::Tf32` でも直接ピン止めする
+    /// （[`scaled_abs_bound_formula_pinned`] の TF32 版。
+    /// `bound = K・2^-14`: `c・u・S_A・S_B = 0.5・2^-11・0.5・0.5 = 2^-14`）。
+    #[test]
+    fn tf32_bound_formula_pinned() {
+        for (k, expected) in [
+            (512usize, 2f64.powi(-5)),  // 2^9 * 2^-14
+            (2048usize, 2f64.powi(-3)), // 2^11 * 2^-14
+            (4096usize, 2f64.powi(-2)), // 2^12 * 2^-14
+        ] {
+            let tol = ScaledAbsTolerance {
+                k,
+                scale_a: 0.5,
+                scale_b: 0.5,
+                precision: PrecisionClass::Tf32,
+            };
+            assert_eq!(tol.bound(), expected, "k={k}");
+        }
+    }
+
+    /// `PrecisionClass::Tf32` でも非有限スケールは fail-closed に `0.0`
+    /// へ倒れる（[`scaled_abs_bound_is_fail_closed_on_nonfinite_scale`] の
+    /// TF32 版）。
+    #[test]
+    fn tf32_bound_is_fail_closed_on_nonfinite_scale() {
+        let nan_scale = ScaledAbsTolerance {
+            k: 2048,
+            scale_a: f64::NAN,
+            scale_b: 0.5,
+            precision: PrecisionClass::Tf32,
+        };
+        assert_eq!(nan_scale.bound(), 0.0);
+
+        let inf_scale = ScaledAbsTolerance {
+            k: 2048,
+            scale_a: f64::INFINITY,
+            scale_b: 0.5,
+            precision: PrecisionClass::Tf32,
+        };
+        assert_eq!(inf_scale.bound(), 0.0);
+    }
+
+    /// `docs/perf/logs/parity-burn-tf32-truth-1984/parity-dump-burn-cuda-256.txt`
+    /// （call=39・N=256）の fail 要素を bit パターンで転記し、実ベンチ入力
+    /// （`crate::SEED_A`/`crate::SEED_B`・N=256）由来の `ScaledAbsTolerance`
+    /// に `PrecisionClass::Tf32` を適用したときのみ救済されることを固定
+    /// する（承認済み契約〈案 P〉の主目的の直接確認。イシュー #1987）。
+    #[test]
+    fn burn_tf32_elements_from_1984_dump_pass_only_under_tf32_class() {
+        let n = 256usize;
+        let a = crate::Xorshift64Star::new(crate::SEED_A).fill_vec(n * n);
+        let b = crate::Xorshift64Star::new(crate::SEED_B).fill_vec(n * n);
+        let tol_f32 = ScaledAbsTolerance::from_inputs(n, &a, &b);
+        let tol_tf32 = tol_f32.with_precision(PrecisionClass::Tf32);
+
+        // (ref_bits, actual_bits) の 4 要素（idx=1/12/13/17。上記ダンプの
+        // 先頭 4 行から転記）。
+        let candidates: [(u32, u32); 4] = [
+            (0x3e5a554b, 0x3e5aa7c6), // idx=1
+            (0xbea4dc6a, 0xbea517b5), // idx=12
+            (0x3d5b3b74, 0x3d5bb9d4), // idx=13
+            (0x3f4ff412, 0x3f503e62), // idx=17
+        ];
+        let refs: Vec<f32> = candidates.iter().map(|&(r, _)| f32::from_bits(r)).collect();
+        let actuals: Vec<f32> = candidates.iter().map(|&(_, a)| f32::from_bits(a)).collect();
+
+        // `PrecisionClass::Tf32` では 0 fail・4 要素救済。
+        let tf32_stats = compare_elementwise(&actuals, &refs, &tol_tf32).expect("compare");
+        assert_eq!(tf32_stats.fail_count, 0);
+        assert_eq!(tf32_stats.scaled_abs_rescued, 4);
+
+        // 既定の `PrecisionClass::F32`（`u=2^-24`）では引き続き fail する
+        // （burn cuda の丸め誤差水準は f32 の第 3 項では説明できないため。
+        // イシュー #1984 の真値突合が示した動機の直接確認）。
+        let f32_stats = compare_elementwise(&actuals, &refs, &tol_f32).expect("compare");
+        assert_eq!(f32_stats.fail_count, 4);
+        assert_eq!(f32_stats.scaled_abs_rescued, 0);
+
+        // `NONE`（既存 2 条件のみ）でも fail のまま（既存契約は不変）。
+        let legacy =
+            compare_elementwise(&actuals, &refs, &ScaledAbsTolerance::NONE).expect("compare");
+        assert_eq!(legacy.fail_count, 4);
+    }
+
+    /// `verify_strict`（fandhe-ai 自身の検証。`bench-fandhe::run_gemm` 専用）
+    /// は `ScaledAbsTolerance::NONE` 固定のため、`GemmReference::with_precision`
+    /// を呼んでいても影響を受けない（精度クラスが構造的に到達しない設計の
+    /// 直接確認。イシュー #1987）。
+    ///
+    /// `docs/perf/logs/parity-burn-tf32-truth-1984/parity-dump-burn-cuda-256.txt`
+    /// の idx=1（`ref_bits=0x3e5a554b`・`actual_bits=0x3e5aa7c6`）は、
+    /// `GemmReference::compute(256, a, b)`（`crate::SEED_A`/`crate::SEED_B`）
+    /// の同じ FMA 参照実装が生成した値と bit 完全一致する（bench-burn が
+    /// 同一シード・同一参照実装を使うため。§冒頭「参照実装の選択」参照）。
+    /// これを利用し、既存 2 条件では fail・TF32 第 3 項では rescue される
+    /// 実測ペアを `GemmReference::verify`／`verify_strict` へ直接通す。
+    #[test]
+    fn verify_strict_ignores_precision_class() {
+        let n = 256usize;
+        let a = crate::Xorshift64Star::new(crate::SEED_A).fill_vec(n * n);
+        let b = crate::Xorshift64Star::new(crate::SEED_B).fill_vec(n * n);
+        let reference = GemmReference::compute(n, &a, &b)
+            .expect("compute")
+            .with_precision(PrecisionClass::Tf32);
+
+        // idx=1 の参照値が実測ダンプの `ref_bits` と bit 完全一致すること
+        // を先に確認する（前提の直接検証。不一致なら本テストの以降の
+        // 主張は成立しない）。
+        assert_eq!(
+            reference.as_slice()[1].to_bits(),
+            0x3e5a554b,
+            "GemmReference の参照実装が #1984 ダンプの ref と乖離している"
+        );
+
+        let mut out = reference.as_slice().to_vec();
+        out[1] = f32::from_bits(0x3e5aa7c6); // #1984 ダンプの actual（burn cuda 実測値）。
+
+        // `verify`（`self.tol` 経由。TF32 精度クラスが効く）は救済される。
+        let via_verify = reference.verify(&out).expect("verify");
+        assert_eq!(via_verify.fail_count, 0);
+        assert_eq!(via_verify.scaled_abs_rescued, 1);
+
+        // `verify_strict` は救済されず fail のまま。
+        let via_strict = reference.verify_strict(&out).expect("verify_strict");
+        assert_eq!(via_strict.fail_count, 1);
+        assert_eq!(via_strict.scaled_abs_rescued, 0);
+        assert_eq!(via_strict.scaled_abs_bound, 0.0);
+    }
+
+    /// [`ScaledAbsTolerance::with_precision`] は `k`／`scale_a`／`scale_b`
+    /// を変えない。
+    #[test]
+    fn with_precision_does_not_change_scales() {
+        let tol = ScaledAbsTolerance {
+            k: 2048,
+            scale_a: 0.5,
+            scale_b: 0.5,
+            precision: PrecisionClass::F32,
+        };
+        let tf32 = tol.with_precision(PrecisionClass::Tf32);
+        assert_eq!(tf32.k, tol.k);
+        assert_eq!(tf32.scale_a, tol.scale_a);
+        assert_eq!(tf32.scale_b, tol.scale_b);
+        assert_eq!(tf32.precision, PrecisionClass::Tf32);
     }
 }

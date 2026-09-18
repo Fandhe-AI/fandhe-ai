@@ -66,6 +66,9 @@ candle は reuse 非対応のため fresh 固定）の `median_s` を run 間中
   でスキップし黙って無視しない。
 - `--tf32` 行（イシュー #1042）は本ゲートの対象外として除外する（FP32
   目標値との混同を防ぐ。summarize.py の目標達成ゲートと同じ既定）。
+  burn（cuda 常時 TF32・イシュー #1987）は framework が本ゲートの比較対象
+  （fandhe-ai／candle）と一致しないため `--tf32` 除外を経由するまでもなく
+  `_matching_rows` の `framework` 完全一致検査だけで構造的に非対象。
 - 複数ファイル指定時はファイルごとに独立集計する（`summarize.py` と同じ
   「ファイルをまたいだ突合は環境混同になるため行わない」方針）。
 """
@@ -363,6 +366,19 @@ def _parity_check(r, size, framework):
         契約の目的そのもの）。
       - `fail_count > 0` は framework を問わず判定不能（(b-1)「比較対象
         側 fail は判定不能」を維持。救済後もなお fail する要素がある）。
+
+    比較対象の精度クラス（イシュー #1987・承認出典 #1989）: burn cuda
+    行の `parity_scaled_abs_bound` は `bench-common::parity::PrecisionClass::
+    Tf32`（単位丸め `u=2^-11`）で計算されうる（fandhe-ai 行は
+    `verify_strict` のため構造的に到達しない・candle 行は引き続き
+    `PrecisionClass::F32`〈`u=2^-24`〉のまま）。本関数は判定式そのものを
+    再計算しないため（上記「本ツールは判定式そのものを再計算せず」参照）、
+    `bound` の絶対値がどの精度クラス由来かによらず本関数の検証ロジック
+    （整合検査・`fail_count`／`rescued` の値域検査）は不変。ただし burn
+    行は `--tf32`（`_matching_rows` の `framework` 完全一致検査）により
+    そもそも本ゲートの比較対象（fandhe-ai／candle）には一致せず、
+    `framework=="fandhe-ai" and rescued>0` 判定不能規則は tf32 の有無に
+    関わらず不変。
     """
     info = {"contract": None, "bound": None, "rescued": None}
     keys = (

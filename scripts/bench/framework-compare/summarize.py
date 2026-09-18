@@ -1289,6 +1289,13 @@ def parity_status(row):
       その場合も fail-closed で "fail" とする）。
     - "ok": 4 フィールドすべてが妥当な数値・整数値・値域で、`parity_total`
       が `size * size` と完全一致し、`parity_fail_count == 0`。
+
+    比較対象の精度クラス（イシュー #1987・承認出典 #1989）: burn `tf32:
+    true` 行の `parity_scaled_abs_bound` は `bench-common::parity::
+    PrecisionClass::Tf32`（`u=2^-11`）で計算されうる（fandhe-ai 行は
+    `verify_strict` のため構造的に対象外・candle 行は `PrecisionClass::F32`
+    のまま）。本関数は `compare_gemm_gate.py::_parity_check` と同じ判定式
+    レプリカを維持するのみで `u` の再計算はしない。
     """
     parity_keys = (
         "parity_fail_count",
@@ -1426,6 +1433,40 @@ def _parity_reason(row):
         rescued_str = str(rescued) if _is_plain_number(rescued) else "?"
         reason += f", rescued={rescued_str}, bound={bound_str}"
     return reason
+
+
+def _tf32_element_check_note(row, preason):
+    """(a-tf32) 節「要素単位検証」列の表示文字列（イシュー #1987・#2046）。
+
+    `preason`（呼び出し元が計算済みの `_parity_reason(row)` の結果。
+    二重計算を避けるため引数で受け取る）が `None` でなければ "無効"
+    （理由自体は `preason` としてフレームワーク列側に別途表示済み）。
+
+    `preason is None` は `parity_status(row) in {"ok", "unverified"}`
+    のいずれかを意味する（`_parity_reason` は "fail" のときのみ非
+    `None` を返す）。本フィールド追加〈イシュー #970〉前の旧形式
+    JSONL（parity 6 キー欠損）は "unverified" となり、要素単位検証を
+    一度も受けていないため、これを "ok" と表示すると実施されていない
+    検証を成功として表示する契約不整合になる（codex-review 指摘）。
+    `parity_status` を明示的に再判定し "未検証（旧形式）" と区別する。
+
+    `None`（`parity_status == "ok"`）のときは既定 "ok" だが、
+    `framework == "burn"` かつ `tf32 is True` かつ
+    `parity_scaled_abs_rescued > 0` の行のみ、精度クラス TF32
+    （`u=2^-11`）で救済されたことを注記する（判定式の再計算はせず表示の
+    みを行う。`rescued` は外部 JSONL 由来のため `_is_plain_number`／
+    `_non_integral` で再検証してから表示する。security.md A03）。
+    """
+    if preason is not None:
+        return "無効"
+    if parity_status(row) == "unverified":
+        return "未検証（旧形式）"
+    if row.get("framework") != "burn" or row.get("tf32") is not True:
+        return "ok"
+    rescued = row.get("parity_scaled_abs_rescued")
+    if not _is_plain_number(rescued) or _non_integral(rescued) or rescued <= 0:
+        return "ok"
+    return f"ok（精度クラス TF32〈u=2^-11〉救済 {int(rescued)} 要素）"
 
 
 def _row_key(r):
@@ -3078,6 +3119,12 @@ def section(path, rows):
         lines.append(
             "### (a-tf32) GEMM TF32（--tf32 opt-in。REQ-2 統一複合判定。CUDA Tensor Core reduced precision）\n"
         )
+        lines.append(
+            "burn cuda 行（`tf32:true`）の要素単位検証は "
+            "`bench-common::parity::PrecisionClass::Tf32`（単位丸め `u=2^-11`）で"
+            "第 3 救済項を評価する（fandhe-ai 行は全経路 `verify_strict` のため対象外。"
+            "イシュー #1987・承認出典 #1989・`docs/candle-parity-precision-class-decision.md`）。\n"
+        )
         tf32_devices = sorted(
             {r["device"] for r in tf32_rows if r["device"] in DEVICE_ORDER},
             key=DEVICE_ORDER.index,
@@ -3091,24 +3138,25 @@ def section(path, rows):
                 }
             )
             lines.append(f"#### {DEVICE_LABEL[device]}\n")
-            lines.append("| N | フレームワーク | 中央値 | Q1 | Q3 | GFLOP/s |")
-            lines.append("| --- | --- | --- | --- | --- | --- |")
+            lines.append("| N | フレームワーク | 中央値 | Q1 | Q3 | GFLOP/s | 要素単位検証 |")
+            lines.append("| --- | --- | --- | --- | --- | --- | --- |")
             for n in sizes:
                 for fw in FRAMEWORKS:
                     r = get(rows, fw, "gemm", device, n, tf32=True)
                     if r:
                         preason = _parity_reason(r)
+                        element_check = _tf32_element_check_note(r, preason)
                         if preason is not None:
                             fw_col = f"{fw}（無効: {preason}）"
                             lines.append(
-                                f"| {n} | {fw_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | - |"
+                                f"| {n} | {fw_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | - | {element_check} |"
                             )
                         else:
                             lines.append(
-                                f"| {n} | {fw} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {r['gflops']:.1f} |"
+                                f"| {n} | {fw} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {r['gflops']:.1f} | {element_check} |"
                             )
                     else:
-                        lines.append(f"| {n} | {fw} | 計測不可 | - | - | - |")
+                        lines.append(f"| {n} | {fw} | 計測不可 | - | - | - | - |")
             lines.append("")
 
     lines.append(
