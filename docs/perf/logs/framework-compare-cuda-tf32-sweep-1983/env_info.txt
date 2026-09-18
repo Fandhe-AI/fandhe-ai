@@ -1,0 +1,16 @@
+hostname: masked
+machine: DGX Spark GB10（専有 1 セッション。GPU util 0% 開始・常駐 2 プロセスあり〈実名は記録しない〉）
+gpu: NVIDIA GB10, driver 580.173.02, compute capability 12.1
+cuda: Build cuda_13.0.r13.0/compiler.36424714_0
+os: Ubuntu 24.04.4 LTS aarch64 kernel 6.17.0-1031-nvidia
+cpu: nproc=20
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+python: Python 3.12.3
+torch(venv): 2.14.0+cu130（本 run では未使用。参考）
+source commit（転送元・main）: 536c56a8
+registry pin: fandhe-ai =0.9.0 / candle-core =0.11.0 / burn =0.21.0
+build flags: bench-fandhe（既定）／bench-candle・bench-burn は --no-default-features --features cuda
+measured (UTC): 2026-09-18T01:44:29Z 〜 2026-09-18T01:46:30Z
+  ※ uptime_before_run_all.txt／uptime_after_run_all.txt の時刻はホストローカル時刻（UTC+9。10:44:29／10:46:30）
+load average (1min): 開始 1.49 → 終了 3.13（uptime_before_run_all.txt／uptime_after_run_all.txt）

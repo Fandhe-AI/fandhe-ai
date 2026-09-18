@@ -169,3 +169,17 @@ precision::CudaGemmPrecision` を `bool`（TF32 単発の 2 値）から 3 モ�
   実機への到達手段がなく、`gemm_tf32_cuda_smoke`（`#[ignore]`）・
   `run_all_cuda.sh` の (a-tf32) 実数値取得は未実施のまま GB10 セッションへ
   申し送る（数値を捏造しない）。
+  - **2026-09-18 GB10 実測済み（(a-tf32) のみ）**: `run_all_cuda.sh`
+    （(a-tf32) スイープ込み・registry ピン `fandhe-ai =0.9.0`・転送元
+    コミット `536c56a8`・専有 1 セッション）を GB10 で実行し、成果物を
+    `docs/perf/logs/framework-compare-cuda-tf32-sweep-1983/` へ収納した。
+    (a-tf32) 節に N=256〜4096 の全 5 形状で fandhe-ai（`--tf32`）・candle
+    （`--tf32`）・burn（`tf32:true`）の 3 行が並ぶことを確認（受け入れ条件
+    充足）。全 112 セル完走・`skipped-cuda.log` 0 行。fandhe-ai `--tf32`
+    行は `verify_strict`（救済項なし・`bound=0`）により全形状
+    `fail_count > 0` の「無効」表示となるが、これは上記「要素単位検証は
+    不変」のとおり想定内の記録事項（tolerance・baseline・判定式は不変）。
+    burn 行の `fail_count`／`rescued` は 0.9.0 正式再計測
+    （`docs/perf/logs/framework-compare-0.9.0-remeasure/gb10/`）の burn 行と
+    全 5 形状で一致。単発 run・採否判定なし・正式系列は置き換えない。
+    `gemm_tf32_cuda_smoke`（`#[ignore]`）の GB10 実行は引き続き未実施。

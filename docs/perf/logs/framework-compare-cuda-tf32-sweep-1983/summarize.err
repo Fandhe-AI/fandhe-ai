@@ -1,0 +1,30 @@
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=256/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=10538/65536, max_abs=1.581e-03, max_rel=1.554e+00, rescued=0, bound=1.907e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=512/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=42361/262144, max_abs=2.343e-03, max_rel=1.972e+00, rescued=0, bound=3.815e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=1024/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=169929/1048576, max_abs=3.643e-03, max_rel=1.965e+00, rescued=0, bound=7.629e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=2048/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=681407/4194304, max_abs=4.941e-03, max_rel=1.987e+00, rescued=47, bound=1.526e-05 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=4096/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=2728488/16777216, max_abs=7.117e-03, max_rel=1.997e+00, rescued=562, bound=3.052e-05 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: fandhe-ai/cuda/size=256/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=10538/65536, max_abs=1.581e-03, max_rel=1.554e+00, rescued=0, bound=0.000e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: fandhe-ai/cuda/size=512/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=42361/262144, max_abs=2.343e-03, max_rel=1.972e+00, rescued=0, bound=0.000e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: fandhe-ai/cuda/size=1024/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=169929/1048576, max_abs=3.643e-03, max_rel=1.965e+00, rescued=0, bound=0.000e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: fandhe-ai/cuda/size=2048/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=681454/4194304, max_abs=4.941e-03, max_rel=1.987e+00, rescued=0, bound=0.000e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: fandhe-ai/cuda/size=4096/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=2729050/16777216, max_abs=7.117e-03, max_rel=1.997e+00, rescued=0, bound=0.000e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=256/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=10522/65536, max_abs=1.582e-03, max_rel=1.554e+00, rescued=0, bound=1.907e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=512/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=42387/262144, max_abs=2.340e-03, max_rel=1.970e+00, rescued=0, bound=3.815e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=1024/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=169971/1048576, max_abs=3.650e-03, max_rel=1.951e+00, rescued=0, bound=7.629e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=2048/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=681418/4194304, max_abs=4.930e-03, max_rel=1.984e+00, rescued=33, bound=1.526e-05 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=4096/fresh の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=2726683/16777216, max_abs=7.167e-03, max_rel=2.000e+00, rescued=646, bound=3.052e-05 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=256/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=10538/65536, max_abs=1.581e-03, max_rel=1.554e+00, rescued=0, bound=1.907e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=512/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=42361/262144, max_abs=2.343e-03, max_rel=1.972e+00, rescued=0, bound=3.815e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=1024/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=169929/1048576, max_abs=3.643e-03, max_rel=1.965e+00, rescued=0, bound=7.629e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=2048/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=681407/4194304, max_abs=4.941e-03, max_rel=1.987e+00, rescued=47, bound=1.526e-05 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: burn/cuda/size=4096/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=2728488/16777216, max_abs=7.117e-03, max_rel=1.997e+00, rescued=562, bound=3.052e-05 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: fandhe-ai/cuda/size=256/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=10538/65536, max_abs=1.581e-03, max_rel=1.554e+00, rescued=0, bound=0.000e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: fandhe-ai/cuda/size=512/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=42361/262144, max_abs=2.343e-03, max_rel=1.972e+00, rescued=0, bound=0.000e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: fandhe-ai/cuda/size=1024/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=169929/1048576, max_abs=3.643e-03, max_rel=1.965e+00, rescued=0, bound=0.000e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: fandhe-ai/cuda/size=2048/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=681454/4194304, max_abs=4.941e-03, max_rel=1.987e+00, rescued=0, bound=0.000e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: fandhe-ai/cuda/size=4096/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=2729050/16777216, max_abs=7.117e-03, max_rel=1.997e+00, rescued=0, bound=0.000e+00 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=256/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=10522/65536, max_abs=1.582e-03, max_rel=1.554e+00, rescued=0, bound=1.907e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=512/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=42387/262144, max_abs=2.340e-03, max_rel=1.970e+00, rescued=0, bound=3.815e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=1024/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=169971/1048576, max_abs=3.650e-03, max_rel=1.951e+00, rescued=0, bound=7.629e-06 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=2048/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=681418/4194304, max_abs=4.930e-03, max_rel=1.984e+00, rescued=33, bound=1.526e-05 — 無効データとして表示
+warning: results/raw/results-cuda.jsonl: candle/cuda/size=4096/fresh (tf32) の gemm 要素単位検証が閾値超過 — 要素誤差超過 fail=2726683/16777216, max_abs=7.167e-03, max_rel=2.000e+00, rescued=646, bound=3.052e-05 — 無効データとして表示
