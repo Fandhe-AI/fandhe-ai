@@ -83,15 +83,15 @@ def aggregate(logs):
     for k in TARGET_BURN + [TARGET_PY]:
         rows = [(i, idx[k][0], idx[k][1]) for i, idx in runs if k in idx]
         cells[k] = rows
-    # 同一 run 内比
+    # 同一 run 内比（run 番号を保持し、比較行が欠損した run は None で位置を残す。codex-review 指摘・PR #2047）
     ratios = {}
     for n in SIZES:
         for i, idx in runs:
             me = idx.get(('fandhe-ai', 'gemm', 'cuda', n, 'reuse'))
             for fw in ('candle', 'burn'):
                 o = idx.get((fw, 'gemm', 'cuda', n, 'fresh'))
-                if me and o and me[0]['median_s']:
-                    ratios.setdefault((n, fw), []).append(o[0]['median_s'] / me[0]['median_s'])
+                val = (o[0]['median_s'] / me[0]['median_s']) if (me and o and me[0]['median_s']) else None
+                ratios.setdefault((n, fw), {})[i] = val
     return runs, gate, cells, ratios
 
 
@@ -149,9 +149,10 @@ def render(runs, gate, cells, ratios):
     L.append('|---|---|---|---|---|---|---|---|')
     for n in SIZES:
         for fw in ('candle', 'burn'):
-            rs = ratios.get((n, fw), [])
-            cellsr = ' | '.join(f'{x:.4f}' for x in rs) + ' | ' * (5 - len(rs))
-            med = f'{statistics.median(rs):.4f}' if rs else '-'
+            byrun = ratios.get((n, fw), {})
+            cellsr = ' | '.join(f'{byrun[i]:.4f}' if byrun.get(i) is not None else '' for i in range(1, 6))
+            vals = [v for v in byrun.values() if v is not None]
+            med = f'{statistics.median(vals):.4f}（{len(vals)} run）' if len(vals) not in (0, 5) else (f'{statistics.median(vals):.4f}' if vals else '-')
             L.append(f'| {n} | {fw} | {cellsr} | {med} |')
     L.append('')
     L.append('採用 run の行を 0.9.0 本体 JSONL の末尾へ追記した派生ファイルが gen_1988.py の --gb／--gb-py 入力である（RULE.txt）。')
@@ -198,7 +199,18 @@ def self_test():
         assert all(verdict(cells[k]) == '解消' for k in TARGET_BURN)
         assert verdict(cells[TARGET_PY]) == '残存'
         assert pick_median(cells[TARGET_BURN[0]])[0] == 3, pick_median(cells[TARGET_BURN[0]])[0]
-        assert abs(statistics.median(ratios[(1024, 'burn')]) - 0.4) < 1e-12
+        assert abs(statistics.median(ratios[(1024, 'burn')].values()) - 0.4) < 1e-12
+        # run2 の candle 行が欠損しても run3〜5 の比率が run2 の列へ左詰めされない
+        idx2 = dict(runs[1][1]); del idx2[('candle', 'gemm', 'cuda', 1024, 'fresh')]
+        runs2 = [runs[0], (2, idx2)] + runs[2:]
+        _r = {}
+        for n in SIZES:
+            for i, idx in runs2:
+                me = idx.get(('fandhe-ai', 'gemm', 'cuda', n, 'reuse')); o = idx.get(('candle', 'gemm', 'cuda', n, 'fresh'))
+                _r.setdefault((n, 'candle'), {})[i] = (o[0]['median_s'] / me[0]['median_s']) if (me and o) else None
+        md2 = render(runs2, gate, cells, _r)
+        row = [l for l in md2.splitlines() if l.startswith('| 1024 | candle |')][0]
+        assert row.split('|')[4].strip() == '' and row.split('|')[5].strip() == '0.5000', row
         md = render(runs, gate, cells, ratios)
         assert '**解消**' in md and '**残存**' in md and '一致' in md and '8192.0 倍' in md
         # parity_fail_count 欠損・null・負数は入力不正として停止する（成功扱いにしない）
