@@ -29,8 +29,15 @@
 - スコアボード集計: 判定対象 27 行のうち 勝ち 5・僅差 2・負け 20 は不変で、**判定不能セル 6 → 1**。
   burn が有効化した影響で GB10 CUDA GEMM N=1024／2048 は 2 位 → 3 位（burn が candle より速い）、
   N=4096 は 1 位のまま「最速他 FW ÷ fandhe-ai」が candle 比 1.36× → burn 比 1.03×（`scoreboard/gen_1988.out`）。
-  この比は 2026-09-16 セッションの fandhe-ai 行と 2026-09-18 セッションの burn 行の比であり、本セッション内の
-  同一 run 内比（`aggregate.md`。N=4096 burn 中央値 1.0145・N=2048 0.4811 等）と符号は全 5 形状で一致した。
+  この比は 2026-09-16 セッションの fandhe-ai 行と 2026-09-18 セッションの burn 行の比（セッション混在）である。
+  RULE.txt の要求どおり本セッション内の同一 run 内比（`aggregate.md`）と突き合わせると、各 N で最速相手
+  （candle／burn の小さい側）の中央値は 256 candle 0.8374／512 candle 0.4330／1024 candle 0.4066／2048 burn 0.4811／
+  4096 burn 1.0145 で、5 形状とも「<1／>1」の側がスコアボード比（0.83／0.43／0.41／0.48／1.03）と一致し、
+  符号が異なるセルは無かった。
+- 差し替え対象の限定: fandhe-ai／candle／burn の非対象行は 0.9.0 本体 JSONL のまま。Python FW 行はリポジトリ収録の
+  `results-dgx-py-0.8.0.jsonl`（2026-09-12 別セッション）を基底とし PyTorch cpu N=4096 のみ差し替えた
+  （0.9.0 版 Artifact が用いた Python FW の実ファイルは未収録・元 Artifact も読めないため、他の Python FW セルが
+  0.9.0 版と同値かは未検証。parity 値は決定的に一致する）。
 
 ## 公開 URL
 
@@ -43,6 +50,7 @@
 | パス | 内容 |
 |---|---|
 | `RULE.txt` | 事前登録判定規則（計測前にコミット） |
+| （注） | RULE.txt の保存物一覧のうちノード側の計測ログ（build.log・load_gate.log・run{1..5}・env_info.txt・uptime）は `gb10/` 配下へ収納した（規則の変更ではない） |
 | `orchestrate_gb10.sh` | ノード側オーケストレーション（3 バイナリ再ビルド → 専有ゲート付き 5 run） |
 | `gb10/build.log` | 再ビルド記録（bench-burn の mtime 更新・`precision_class` 参照数・`fandhe-ai v0.9.0` ピン・torch 版） |
 | `gb10/load_gate.log`・`uptime_before.txt`／`uptime_after.txt` | 専有ゲート履歴・負荷 |
