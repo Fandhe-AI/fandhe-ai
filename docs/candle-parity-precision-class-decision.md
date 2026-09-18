@@ -75,7 +75,7 @@ framework-compare 0.9.0 系列（2026-09-18 registry ピン）で、スコアボ
 #### 案 T2：係数 c を 1.0 へ変更
 
 - 現行 `c=0.5` を `c=1.0`（係数を 2 倍）へ変更すると、PyTorch 1 要素も救済される
-- **代償**: burn の線形 K 全数救済（c=0.5）の根拠を失う可能性〈candle 側の 2 要素が c=1.0 で救済されるかは本 dump から確認できない〉・c=0.5 で承認済みの前作 #1241 の再承認が必要
+- **代償**: `bound = c·u·K·S_A·S_B` は他条件が同じなら c に単調増加するため、c=0.5 で救済済みの要素（burn 線形 K 全数救済・candle 2 要素）は c=1.0 でも必ず救済される（既存救済は失われない）。実際の懸念は許容範囲が 2 倍に広がることによる**回帰の見逃し**（fandhe-ai 側で将来生じうる真の後退を救済してしまう）であり、c=0.5 で承認済みの前作 #1241 の再承認が必要
 - spec 再改定必要（係数変更）
 
 #### 案 T3：√K 形へ変更
@@ -90,7 +90,7 @@ framework-compare 0.9.0 系列（2026-09-18 registry ピン）で、スコアボ
 | P（精度クラス） | burn cuda TF32 のみ `u=2^-11` | 全数救済（客観的根拠: JSONL bound 内） | 非対応（fandhe-ai 判定不変） | 0 fail 不変 | **必要**（(b-2) は `u = 2^-24` を逐語で固定。`tf32: true` 行の `u=2^-11` は (b) 形式の spec 提案〈#1989 承認後〉が前提） | `ScaledAbsTolerance` に精度クラス選択 | 高 |
 | P′ | 不変 | 判定不能維持 | 判定不能維持 | 0 fail 不変 | 不要 | なし | 参考（保守性の観点で変化なし） |
 | T1（PyTorch 現状維持） | N/A | P/P′ に従属 | 判定不能維持 | 0 fail 不変 | 不要 | なし（P または P′ に従属） | 高（spec 定義の踏襲） |
-| T2（c=1.0 化） | 全体 | burn 線形 K 救済の根拠再検査が必要〈c=0.5 では実測データで確認済み・c=1.0 での影響は未確認〉 | 救済 | 0 fail 不変 | 必要（係数再承認） | `PARITY_SCALED_ABS_COEFF=1.0`・テスト定数 | 低（後退リスク） |
+| T2（c=1.0 化） | 全体 | 全数救済維持（bound は c に単調増加。c=0.5 の救済は c=1.0 でも保持） | 救済 | 0 fail 不変（ただし許容範囲 2 倍化により将来の後退を見逃すリスク） | 必要（係数再承認） | `PARITY_SCALED_ABS_COEFF=1.0`・テスト定数・`bench_py.py` の係数リテラル | 低（回帰見逃しリスク） |
 | T3（√K 化） | N/A | √K 救済率は 98% 台（全数救済不可能） | fail のまま | 0 fail 不変 | 必要（形式再承認） | 判定式変更・テスト複数箇所 | 非推奨 |
 
 ## 5. 推奨案（未承認）
@@ -109,8 +109,8 @@ framework-compare 0.9.0 系列（2026-09-18 registry ピン）で、スコアボ
 - **推奨として併記**
 
 #### 参考：T2（係数 c=1.0）
-- PyTorch 1 要素の救済は可能だが、burn の全数救済根拠（c=0.5 実測データ）が c=1.0 での再検証を要する
-- candle 2 要素の救済可否（N=2048 ダンプから未確認）も含めた再検査が必要
+- PyTorch 1 要素の救済は可能。bound は c に単調増加するため burn 全数救済・candle 2 要素の既存救済は c=1.0 でも維持される（再検証は不要）
+- 代償は許容範囲の 2 倍化であり、fandhe-ai 側で将来生じうる真の後退（c=0.5 では fail になる差）を救済して見逃す回帰検出力の低下
 - **事実として記録**: 実測では線形 K 形 c=1.0 で救済されるが、これだけで係数変更を決定するには裏付けが限定的
 
 #### 非推奨：T3（√K 化）
@@ -153,19 +153,19 @@ framework-compare 0.9.0 系列（2026-09-18 registry ピン）で、スコアボ
 
 ### #1987：burn TF32 精度クラス実装（案 P 採用時）
 
-**修正対象ファイル**: `scripts/bench/framework-compare/bench-common/src/parity.rs`
+**修正対象ファイル**: `scripts/bench/framework-compare/bench-common/src/parity.rs`・`scripts/bench/framework-compare/bench-burn/src/main.rs`
 
 - `ScaledAbsTolerance` に精度クラス選択フィールド（例: `precision_class: PrecisionClass` enum〈`f32`／`tf32`〉）を追加
   - または、より簡潔に `u: f64` フィールドで直接 unit roundoff を受け取る設計
-- `GemmReference::verify_with_sink_and_tol` が JSONL から `tf32: true` を読み取り、当該セルの判定時に分岐
-- `bench-burn` の `run_gemm` エントリから `tf32` フラグをハーネスへ供給する結線
+- 精度クラスは判定処理より**前**に渡す。既存 `bench-burn::run_gemm` は `reference.verify(&out)` で判定した後に `Record`（`tf32: cli.device == "cuda"`）を構築して JSONL へ出力するため、判定内部で JSONL の `tf32` を読む設計はデータ依存順序が逆になる
+- `bench-burn/src/main.rs`（`run_gemm` および `Record` を構築する他 2 経路）で `cli.device` から決まる精度クラスを `verify`（または `compute`／`verify_with_sink_and_tol`）の引数として事前に供給し、JSONL の `tf32` 列は従来どおり記録専用に保つ
 - テスト: 既存 `gemm_cpu_parity_zero_fail_without_scaled_rescue`（fandhe-ai 0 fail 不変検証）に burn TF32 全数救済検証を追加
 
 ### #1988：PyTorch および framework-compare 再計測（案 T1 または T2）
 
 **修正対象ファイル**:
 - T1（現状維持）: 修正なし（記録のみ）
-- T2（c=1.0）: `PARITY_SCALED_ABS_COEFF=1.0` に変更・テスト境界値更新・GB10 / M4 Max での framework-compare 再計測
+- T2（c=1.0）: `PARITY_SCALED_ABS_COEFF=1.0` に変更・テスト境界値更新に加え、PyTorch 計測経路 `docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py::parity`（`bound = 0.5 * (2.0 ** -24) * n * sa * sb` と係数 `0.5` を直接定義）の係数更新（または共通定数の参照化）も反映範囲に含める。Rust 側定数の変更だけでは PyTorch の bound は変わらず、目的の 1 要素は救済されない。GB10 / M4 Max での framework-compare 再計測
 
 ## 10. 未変更事項の確認
 
