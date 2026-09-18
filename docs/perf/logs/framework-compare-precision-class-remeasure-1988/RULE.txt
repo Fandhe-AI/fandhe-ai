@@ -1,0 +1,47 @@
+事前登録判定規則（イシュー #1988・精度クラス〈#1989 承認・#1987／PR #2046 実装〉反映後の GB10 再計測）
+登録日時: 2026-09-18（UTC）。実測開始前に本ファイルをコミットし、結果が出た後に緩和しない。
+
+対象: DGX Spark GB10（driver 580.173.02・compute_cap 12.1・CUDA 13.0）。
+対象コード: ブランチ test/1988-gb10-precision-class-remeasure（main a5977614 = #2046 マージ後を含む）。
+  framework-compare は registry ピン fandhe-ai =0.9.0・candle-core =0.11.0・burn =0.21.0（不変）。
+  bench-burn は #2046 の精度クラス結線（cuda → PrecisionClass::Tf32・u=2^-11）を含むバイナリへ再ビルドする
+  （bench-burn の mtime 更新を build.log に記録。再ビルドを怠ると値は変わらない）。
+  bench_py.py（PyTorch）は不変（係数 0.5・u=2^-24 リテラル。T1 現状維持の承認どおり）。
+  tolerance 4 定数・判定式・本体 compare／assert_parity／ParityBaseline・BASELINES は不変。
+
+対象 6 セル（0.9.0 スコアボードで「判定不能」だったセル）:
+  burn cuda gemm fresh N=256／512／1024／2048／4096（5 セル）・PyTorch cpu gemm fresh N=4096（1 セル）。
+
+計測: 5 run・独立プロセス起動（run{1..5}/）。各 run は次を同一プロセス列で実行する:
+  bench-fandhe gemm cuda N=256〜4096 × {reuse, fresh}・bench-candle gemm cuda N=256〜4096 fresh・
+  bench-burn gemm cuda N=256〜4096 fresh・bench_py.py --framework pytorch --task gemm --device cpu --size 4096。
+  fandhe-ai／candle 行は「同一 run 内比」の参考記録のためだけに回す（後述）。
+  専有ゲート: 各 run 起動前に load1 < 1.0 かつ nvidia-smi utilization.gpu 0%（#1976／#1980 GB10 分と同一）。
+  不通過の run は除外せず「不通過」を併記する（規則の事後緩和ではなく記録）。
+
+セル判定（結果が出る前に固定・中間なし）:
+  - 「解消」: 5/5 run で parity_fail_count == 0。
+  - 「残存」: 1 run でも parity_fail_count > 0。理由を記録する。
+  - PyTorch cpu N=4096 の期待値は「残存」（#1989 承認 T1: spec REQ-2 (b-1) 上正当な判定不能・係数不変）。
+    fail 要素数が 1 でなくても是正・再試行せず記録のみ。
+  - burn 5 セルの parity_scaled_abs_rescued・parity_scaled_abs_bound が 5 run で同値か（決定性）は記録項目であり
+    合否条件にしない。検算用の期待値（docs/candle-parity-precision-class-decision.md §3 の机上計算）:
+    rescued 10538／42361／169929／681454／2729050・bound は 0.9.0 記録の 2048 倍。相違があっても是正せず記録する。
+
+スコアボードへ載せる行の選び方: 各セル 5 run のうち median_s が中央値の run の行
+  （median_rounds.py と同じ規則。偶数なら小さい側）。差し替えるのは対象 6 セルのみ。
+  fandhe-ai／candle 行と他の全セルは 0.9.0 正式値（docs/perf/logs/framework-compare-0.9.0-remeasure/）のまま
+  （Python FW 行が 2026-09-12 値の混在である前例と同じ扱い）。
+  セッション混在の注意: burn 行だけ本セッション値へ差し替えるため、スコアボードの「最速他 FW ÷ fandhe-ai」比は
+  0.9.0 セッションの fandhe-ai 行と本セッションの burn 行の比になる。本セッション内の同一 run 内比
+  （fandhe-ai reuse／candle fresh／burn fresh）を aggregate.md に参考記録し、両者の符号が異なるセルを明示する。
+  判定（勝敗・順位）はスコアボード生成器 gen_1988.py（gen_090.py の派生）の既存規則で機械的に決める。
+
+スコアボード非後退: gen_1988.py を 0.9.0 の元入力で実行した HTML が、gen_090.py の出力と本文改修部分
+  （固定文言・△ の title 出し分け）以外で byte 同一であることを diff で確認する。
+
+保存物（本ディレクトリ）: RULE.txt・orchestrate_gb10.sh・build.log・load_gate.log・run{1..5}/{results.jsonl, py.jsonl, err.log}・
+  uptime_before.txt／uptime_after.txt・aggregate.py（python3 標準ライブラリのみ・--self-test）・aggregate.md・
+  results-dgx-0.9.0-precision-class.jsonl（0.9.0 本体 + burn 5 行追記）・results-dgx-py-precision-class.jsonl
+  （0.9.0 流用 py + PyTorch cpu 4096 行追記）・scoreboard/（gen_1988.py・body_1988.html）・
+  env_info.txt（内部ホスト名・ユーザー名・絶対パスは <home> 等へマスク）。

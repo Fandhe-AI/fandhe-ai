@@ -199,7 +199,7 @@ draft 時点で #1989 へ委ねた 4 点は、#1989 の承認記録コメント�
 **確定（2026-09-18）**: §8 の承認により T1（現状維持）が確定したため、#1988 の PyTorch 側対応は
 「修正なし（記録のみ）」に固定される。#1987 は burn 精度クラス実装（案 P）で着手可能。#1988 は
 #1987 完了後に burn cuda 5 セルの判定不能解消・PyTorch cpu N=4096 の判定不能記録維持を GB10 で
-再計測し、スコアボード（`docs/perf/framework-compare-feature-matrix-0.9.0.md` 系列）を再生成する。
+再計測し、スコアボード（生成器の実体は `docs/perf/logs/framework-compare-0.9.0-remeasure/scoreboard/gen_090.py`。#1988 ではその派生 `docs/perf/logs/framework-compare-precision-class-remeasure-1988/scoreboard/gen_1988.py`）を再生成する（実測記録は §13）。
 
 ## 10. 未変更事項の確認
 
@@ -270,3 +270,22 @@ $ git diff --stat origin/main -- crates/ scripts/ .github/ docs/spec/
 spec 提案 Fandhe-AI/fandhe-ai-spec#70 は本 PR 時点で未マージ（(b) 形式の先行実装。#1247/#1250 と
 同型）。
 - spec 提案：Fandhe-AI/fandhe-ai-spec#70（https://github.com/Fandhe-AI/fandhe-ai-spec/issues/70。#1989 承認事項 5 に基づく (b) 形式提案）
+
+## 13. GB10 実測記録（#1988・2026-09-18）
+
+記録先: `docs/perf/logs/framework-compare-precision-class-remeasure-1988/`（`RULE.txt` 事前登録・5 run
+独立起動・専有ゲート 5/5 通過・計測失敗なし）。§12 の実装を含むツリー（rev は同ディレクトリ
+`gb10/env_info.txt`）から bench-fandhe／bench-candle／bench-burn を再ビルドし、registry ピン
+`fandhe-ai =0.9.0` のまま計測した。
+
+| セル | 判定 | 実測 |
+|---|---|---|
+| burn cuda gemm N=256／512／1024／2048／4096 | **解消** | 5/5 run とも `parity_fail_count = 0`。rescued 10,538／42,361／169,929／681,454／2,729,050（5 run 同値・§3 の机上計算と全数一致）・bound は §3 の値と一致（0.9.0 記録の 2^13 倍） |
+| PyTorch cpu gemm N=4096 | **残存** | 5/5 run とも `parity_fail_count = 1`・rescued 643（#1985 と同一）。§8 承認 T1 のとおり spec REQ-2 (b-1) 上正当な判定不能として現状維持（係数不変） |
+
+スコアボードは `gen_090.py` の派生 `scoreboard/gen_1988.py`（判定規則不変・`--body` と burn `tf32:true`
+行の △ title 出し分けのみ追加。0.9.0 元入力で byte 同一を確認）で再生成し、新規 Artifact
+https://claude.ai/artifact/AJrFcmiMxNVrXLDLaPG2vu として公開した（0.9.0 版 Artifact は別セッション所有で
+in-place 更新不可）。判定不能セルは 6 → 1。burn が有効化した副次効果として GB10 CUDA GEMM N=1024／2048 の
+順位が 2 位 → 3 位・N=4096 の「最速他 FW ÷ fandhe-ai」が 1.36×（candle）→ 1.03×（burn）へ変わった
+（勝ち 5・僅差 2・負け 20 の集計は不変）。tolerance 4 定数・判定式・本体判定・`bench_py.py` は不変。
