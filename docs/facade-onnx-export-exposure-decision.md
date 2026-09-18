@@ -229,7 +229,7 @@ allowlist 外 op の fail-closed 拒否〈手組み protobuf〉）と
 | F5 | `Module` trait の閉集合フック: `as_linear`／`as_linear_mut`（`Option<&Linear>`）・`as_relu`（`bool`）。`as_sigmoid`／`as_tanh` は存在しない | `crates/autodiff/src/nn/module.rs:156,162,274` |
 | F6 | `nn::Linear` の `weight` は `[in_features, out_features]`（`x.matmul(w)` 慣習・転置は持たない）、`bias` は `Some` なら `[out_features]`。`weight()`／`bias()` は `pub` | `crates/autodiff/src/nn/linear.rs:20-31,139,143` |
 | F7 | 数値経路（Linear）: interp `ops::gemm` は `acc: f32 = 0.0` から `p` 昇順に `a[i,p].mul_add(b[p,j], acc)` → `alpha * acc`（+ `beta * c`）。`predict` 側 CPU BLIS GEMM（`gemm_naive`）も同じ `p` 昇順 `mul_add` 連鎖で bit 完全一致契約・出力は `zeroed_output` でゼロ初期化。`alpha = beta = 1.0` 固定なら両者は同一演算列 | `crates/onnx-interop/src/ops/gemm.rs:86-104`・`crates/backend-cpu/src/gemm.rs:230-250`（`gemm_naive`）・`crates/backend-cpu/src/ops.rs:207-224`（`zeroed_output`） |
-| F8 | 数値経路（ReLU）: `predict` は `x.max(0.0)`（NaN→0.0）、interp `Relu` は `nan_propagating_max` で NaN 伝播。**NaN 入力でのみ結果が異なる** | `crates/backend-cpu/src/elementwise.rs:121-132`・`crates/onnx-interop/src/ops/activation.rs:31-42` |
+| F8 | 数値経路（ReLU）: `predict` は `x.max(0.0)`（NaN→0.0）、interp `Relu` は `nan_propagating_max` で NaN 伝播。**ReLU への入力が NaN のときにのみ結果が異なる**。ここでの「NaN 入力」はモデル入力テンソルの値そのものが NaN な場合に限らず、有限のモデル入力から途中の演算（例: `f32::MAX` 級の重みによる `mul_add` の overflow で `inf` が生じ、後続層で `0.0 * inf` 等により NaN へ転化する）を経て ReLU への入力が NaN になる場合も含む（反例は §15.6 参照） | `crates/backend-cpu/src/elementwise.rs:121-132`・`crates/onnx-interop/src/ops/activation.rs:31-42` |
 | F9 | 数値経路（Sigmoid）: `predict`（`eval::sigmoid`）は `x >= 0.0` で 2 分岐する数値安定形、interp `sigmoid` は全域 `1/(1+exp(-x))`。**負入力で丸めが異なりうるため bit 完全一致は保証できない** | `crates/autodiff/src/eval.rs:415-427`・`crates/onnx-interop/src/ops/activation.rs:46-48` |
 | F10 | `build_model_proto` は graph input／output を名前のみの `ValueInfoProto` で出力し `value_info` は常に空。`OnnxModel::run` は入力を名前で束縛する。`OnnxError` は `#[non_exhaustive]` | `crates/onnx-interop/src/onnx/export.rs:351-369`・`crates/facade/src/interop/onnx.rs:115-118,242-250` |
 | F11 | facade 公開面ガード: `api_surface.rs` の `ALLOWED_PUB_ITEMS`（9 件）・`FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS`（6 件）・正例テスト `approved_onnx_surface_yields_no_offenses`・実ファイル検査 `interop_module_exposes_only_approved_onnx_surface` | `crates/facade/tests/api_surface.rs:1580,1595,1909,1967` |
@@ -378,9 +378,21 @@ interop_only_in_interop_module` ガード維持のため実装は
 tolerance／baseline は一切変更しない。
 
 - **`Linear`／`ReLU` のみで構成されるモデル**: export → `from_bytes` →
-  `run` の出力が `Sequential::predict`（CPU）と**bit 完全一致**（有限値
-  入力。根拠 F7）。NaN を含む場合は ReLU の NaN 意味論差（F8）により
-  一致を主張しない。
+  `run` の出力が `Sequential::predict`（CPU）と**bit 完全一致**（根拠
+  F7）。ただし一致が成り立つのは「グラフ中のいずれの ReLU 入力にも
+  NaN が現れない」場合に限る。この条件はモデル入力テンソルが有限値
+  であることだけでは保証されない（F8）。反例: bias なし
+  `Linear(w=f32::MAX)` → `Linear(w=0.0)` → `ReLU` に有限入力 `2.0` を
+  与えると、1 層目の `mul_add` で `f32::MAX * 2.0` が overflow して
+  `inf` になり、2 層目で `0.0 * inf` が NaN を生む（両経路とも F7 の
+  同一 `mul_add` 連鎖を辿るため中間値自体は一致する）。この NaN が
+  ReLU へ入ると `predict` は `0.0`（NaN→0.0 の飽和）を返す一方 interp
+  は NaN をそのまま伝播するため、最終出力が一致しなくなる。したがって
+  bit 完全一致の主張は「モデル入力が有限値」ではなく「グラフ全体を
+  通じて ReLU 入力に NaN が発生しない」ことを前提とする（overflow に
+  よる NaN の混入を含む）。NaN が入力に含まれる場合、または上記のよう
+  な中間 overflow で NaN が発生しうる場合は、ReLU の NaN 意味論差
+  （F8）により一致を主張しない。
 - **`Sigmoid` を含むモデル**: F9 により bit 完全一致は保証できない。
   選択肢: (α) REQ-2 既存の統一複合判定（相対 1e-3 未満 または 絶対
   1e-5 未満。定数不変）で検証し bit 一致は Linear／ReLU 限定とする、
