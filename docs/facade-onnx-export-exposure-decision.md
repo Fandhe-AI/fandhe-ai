@@ -406,7 +406,15 @@ tolerance／baseline は一切変更しない。
 - export はホスト実行のみで `BackendOps`／`Device` 非経由（§3.3・§7 (d)
   を継承。REQ-12 と無衝突）。
 
-### 15.7 承認事項（列挙のみ・未承認）
+### 15.7 承認事項
+
+**2026-09-18 ユーザー承認済み**（親 #2034 コメント
+〈https://github.com/Fandhe-AI/fandhe-ai/issues/2034#issuecomment-5726738002〉）:
+項 1（配置 (b)＋onnx-interop → autodiff 通常依存化）承認・項 2 は
+Linear／ReLU の 2 種へ縮小して承認（Sigmoid は別 issue）・項 3
+（`OnnxModel::from_sequential`）承認（facade 結線は #2037）・項 4
+（`OnnxError::UnsupportedLayer` 新設）承認・項 5（Sigmoid 数値契約）は
+保留。以下は起票時点の原文（承認範囲の記録として保持）。
 
 1. **配置**: §3.2 (b)。付随して `fandhe-ai-onnx-interop` の
    `[dependencies]` へ `fandhe-ai-autodiff`（path＋`version = "=x.y.z"`
@@ -466,9 +474,9 @@ tolerance／baseline は一切変更しない。
   と無衝突であること、`ExportNode`／`ExportOp`／prost 型を facade
   公開シグネチャへ出さないことを §15.5 に明記済み。
 
-### 15.10 承認依頼コメント文案
+### 15.10 承認依頼コメント文案（起票時点。実投稿・承認結果は §15.7 参照）
 
-親 #2034 へ以下を投稿する（要点。実投稿は本 issue のスコープに含む）:
+親 #2034 へ以下を投稿した（要点）:
 
 > イシュー #2035 で `Sequential`／`nn` -> `ExportNode` 橋渡しの設計を
 > 確定しました（`docs/facade-onnx-export-exposure-decision.md` §15）。
@@ -487,16 +495,18 @@ tolerance／baseline は一切変更しない。
 
 ## 16. 追補（イシュー #2036）: `onnx::export_nn` 実装完了（facade 未接続）
 
-**§15.7 承認事項 5 項はいずれも本追補時点で正式承認は未確認**
-（親 #2034・ルート #2033 にコメント 0 件・§15.10 の承認依頼コメントも
-未投稿のまま）。issue #2036 本文の作業項目指示に基づき安全側の範囲へ
-縮小して実装した。PR 説明欄にこの旨を明示的にフラグ済み。
+**§15.7 承認事項は 2026-09-18 に親 #2034 へユーザー承認コメントが
+投稿され、項 1〜4 承認・項 5 保留で確定した**
+（https://github.com/Fandhe-AI/fandhe-ai/issues/2034#issuecomment-5726738002）。
+本追補時点（実装当初）では承認前だったため、issue #2036 本文の作業
+項目指示に基づき安全側の範囲（Linear／ReLU の 2 種）へ縮小して実装
+した。承認後の範囲もこの縮小版（項 2）と一致するため実装内容は不変。
 
 ### 16.1 実施した範囲・縮小した範囲
 
 | §15.7 項 | 扱い | 理由 |
 |---|---|---|
-| 項 1（配置 (b)・`onnx-interop → autodiff` 通常依存化） | **実施** | issue #2036 本文の第 1 作業項目・workspace 内 path 依存の追加のため `deps-policy.md` の外部承認フロー対象外（§15.2 の再導出根拠 1〜5 のとおり）。正式承認未確認の旨は PR 本文に明記 |
+| 項 1（配置 (b)・`onnx-interop → autodiff` 通常依存化） | **実施**（2026-09-18 ユーザー承認済み。§15.7） | issue #2036 本文の第 1 作業項目・workspace 内 path 依存の追加のため `deps-policy.md` の外部承認フロー対象外（§15.2 の再導出根拠 1〜5 のとおり）。実装当初は承認前だったため PR 本文にその旨を明記していたが、その後 §15.7 の承認記録により解消 |
 | 項 2／項 5（Sigmoid 対応・数値契約） | **対象外** | `Module` に `as_sigmoid` フックが無く（項 5 も未承認）判別手段が無いため。issue コメント記載の代替「Linear／ReLU の 2 種へ縮小」を適用 |
 | 項 3（facade 公開面 `OnnxModel::from_sequential`） | 対象外（#2037） | 本 issue は facade 未接続限定 |
 | 項 4（`OnnxError::UnsupportedLayer` 新設） | **実施**（variant 名は同一） | `ExportError` への追加は onnx-interop 内部の型付きエラーであり、facade `OnnxError` の variant 追加（§15.7 項 4 本来の対象）ではない。facade 側の `OnnxError::UnsupportedLayer` 新設可否は #2037 が対象のまま未承認 |

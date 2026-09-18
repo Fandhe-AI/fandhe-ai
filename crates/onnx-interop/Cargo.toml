@@ -62,11 +62,9 @@ half.workspace = true
 # （`Linear::weight`/`bias`・`as_linear`/`as_relu` 等の閉集合ダウンキャスト
 # フック）を走査して `ExportNode` 列を組み立てるために dev-dependency から
 # 通常依存へ昇格する（#2035 §15.7 承認事項 1「onnx-interop → autodiff 通常
-# 依存化」。issue 本文の作業項目として実施するが、親 #2034 のコメントに
-# 明示の承認記録は無く、#2035 §15.2 が「非公開クレート間のため承認不要」
-# という旧根拠が publish 化〈#1963〉で陳腐化したと訂正している。本変更が
-# workspace 内 path 依存の追加であり外部依存の新規追加ではない点は他の
-# path 依存と同じだが、正式なユーザー承認確認は本 PR の説明欄で明示する）。
+# 依存化」。2026-09-18 に親 #2034 へユーザー承認コメントを投稿済み
+# 〈https://github.com/Fandhe-AI/fandhe-ai/issues/2034#issuecomment-5726738002〉。
+# 本変更は workspace 内 path 依存の追加であり外部依存の新規追加ではない）。
 # `version` 併記は `fandhe-ai-tensor-core` と同じ理由（crates.io 公開クレート
 # 間 path 依存の公開要件。`docs/crates-io-publishing-order.md`）。
 fandhe-ai-autodiff = { path = "../autodiff", version = "=0.9.0" }
