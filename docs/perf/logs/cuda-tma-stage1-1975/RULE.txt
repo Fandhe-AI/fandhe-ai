@@ -16,6 +16,8 @@
   - B64 腕: tiled_pipeline_tma_b64_matches_pipeline_or_records_hypothesis_gap の mismatched_shapes が空なら仮説成立、
     非空なら仮説不成立として記録のみ（ランブック README「B64 swizzle 仮説（記録のみ）」。REJECT には数えない）。
     B64 腕はゲート C の候補腕になるのは仮説成立の場合に限る。
+  - ゲート C の前提（必須）: tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact（事前 encode＋launch_prepared の
+    ベンチ計測経路が一括 API と bit 同一）が ok であること。FAILED ならゲート C は無効（undetermined）。
   - 意味論プローブ: cargo test -p fandhe-ai-backend-cuda --release --test tma_probe_real_device --all-features -- --ignored --nocapture
     は記録のみ（判定に含めない）。
 
