@@ -23,9 +23,11 @@ readme = "README.md"
 # 本 issue（#1963）はリポジトリ側の公開準備のみを行うもので、実際の
 # `cargo publish`（`release-all.yml`）は次回リリースサイクルでユーザーが
 # 実行する。facade からの ONNX import は `fandhe-ai::interop::onnx`
-# として #2017 で公開済み。ONNX export・safetensors 再エクスポートは
-# 引き続き未提供のまま（`docs/facade-onnx-export-exposure-decision.md`・
-# `docs/facade-safetensors-exposure-decision.md`。段階 0 は継続）。
+# として #2017、ONNX export（import 済みモデルの roundtrip 限定）は
+# #2018、safetensors save/load は #2019 でそれぞれ公開済み。`nn::Module`
+# 列からの export（`onnx::export_nn`）は #2036 で本クレート内部に実装
+# 済みだが facade へは未接続（`docs/facade-onnx-export-exposure-decision.md`
+# §15。facade 接続は #2037）。
 publish = true
 # crates.io 検索・カテゴリページ向けメタデータ（イシュー #1963）。keywords は
 # crates.io 制約（最大 5 個・各 20 文字以内英数字とハイフン）を満たす。
@@ -56,6 +58,16 @@ fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.9.0" }
 # `tensor-core`/`backend-cpu` 等が使用中のため新規追加ではない。`onnx-interop` では
 # `Cast(to=FLOAT16)`（イシュー #274）が `half::f16` を直接生成するために必要。
 half.workspace = true
+# `onnx::export_nn`（イシュー #2036）が `fandhe_ai_autodiff::nn::Module`
+# （`Linear::weight`/`bias`・`as_linear`/`as_relu` 等の閉集合ダウンキャスト
+# フック）を走査して `ExportNode` 列を組み立てるために dev-dependency から
+# 通常依存へ昇格する（#2035 §15.7 承認事項 1「onnx-interop → autodiff 通常
+# 依存化」。2026-09-18 に親 #2034 へユーザー承認コメントを投稿済み
+# 〈https://github.com/Fandhe-AI/fandhe-ai/issues/2034#issuecomment-5726738002〉。
+# 本変更は workspace 内 path 依存の追加であり外部依存の新規追加ではない）。
+# `version` 併記は `fandhe-ai-tensor-core` と同じ理由（crates.io 公開クレート
+# 間 path 依存の公開要件。`docs/crates-io-publishing-order.md`）。
+fandhe-ai-autodiff = { path = "../autodiff", version = "=0.9.0" }
 
 [dev-dependencies]
 # 参照値 JSON（`tests/fixtures/pytorch-reference/st_reference.json`・
@@ -66,11 +78,9 @@ serde.workspace = true
 serde_json.workspace = true
 # #198: `tests/st_checkpoint.rs` が学習途中状態のチェックポイント検証
 # （`autodiff::nn::Linear`/`Tape`/`autodiff::optim::Sgd` を経由した学習
-# ループ）に使う。ユーザー承認不要（外部依存の新規追加ではない。workspace
-# member 間の path 依存であり、`crates/autodiff/Cargo.toml` の
-# bench-harness dev-dependency と同種の判断。deps-policy.md のユーザー
-# 承認フロー対象外）。
-fandhe-ai-autodiff = { path = "../autodiff" }
+# ループ）に使う `fandhe-ai-autodiff` は、#2036 で `[dependencies]`
+# （通常依存。上記参照）へ昇格したためここでの二重宣言はしない
+# （通常依存は dev-dependency としても有効）。
 # #198: 学習データの決定的シード生成（`bench_harness::rng::Xorshift64Star`）
 # に使う。`crates/autodiff/tests/nn_train_convergence.rs` と同一の先例
 # （dev-dependency 経由の再利用のみで新規外部依存の追加ではない）。

@@ -800,8 +800,60 @@ interop` を `fandhe-ai-backend-metal` の後・`fandhe-ai` の前に置いて
 の差分を 13 節が正として扱う方針のまま不変（依存グラフの追加差分は
 本節が正）。
 
+### 13.5 追補（イシュー #2036・2026-09-18）: `fandhe-ai-onnx-interop` が `fandhe-ai-autodiff` へ依存するようになった
+
+`onnx::export_nn`（`nn::Module` の層列から `ExportNode` 列＋initializer を
+組み立てる橋渡し。`docs/facade-onnx-export-exposure-decision.md` §15.7
+承認事項 1「onnx-interop → autodiff 通常依存化」。**2026-09-18 に親
+#2034 へユーザー承認コメントが投稿され項 1〜4 承認・項 5 保留で確定
+した**〈https://github.com/Fandhe-AI/fandhe-ai/issues/2034#issuecomment-5726738002〉。
+実装自体は issue #2036 本文の作業項目に基づき承認確定前に着手したが、
+承認範囲（項 1）と一致するため変更は不要だった）を受け、`crates/onnx-interop/
+Cargo.toml` の `[dependencies]` へ `fandhe-ai-autodiff = { version =
+"=0.9.0", .. }` を追加した（1 節の方針どおり `path` + `version` 併記）。
+旧来 `[dev-dependencies]`（`tests/st_checkpoint.rs` 用。version 非併記）
+にあった同名エントリは通常依存へ統合され二重宣言を解消した。
+
+依存グラフの更新（13.4 の図に対する差分。②′ が ② の一部
+〈`fandhe-ai-autodiff`〉にも依存するようになった点のみ）:
+
+```
+① fandhe-ai-tensor-core
+       │
+       ├──▶ ②  fandhe-ai-autodiff / fandhe-ai-backend-cpu /
+       │        fandhe-ai-backend-cuda / fandhe-ai-backend-metal
+       │
+       ├──▶ ②′ fandhe-ai-onnx-interop（② の fandhe-ai-autodiff にも依存）
+       │
+       └──▶ ③ fandhe-ai（① 〜 ②′ すべてに依存）
+```
+
+`env.RELEASE_CRATES` の公開順序（`fandhe-ai-tensor-core` →
+`fandhe-ai-autodiff` → … → `fandhe-ai-onnx-interop` → `fandhe-ai`）は
+元々 `fandhe-ai-autodiff` を `fandhe-ai-onnx-interop` より先に置いていた
+ため、本追補による公開順序自体への影響はない。1・4 節「内部依存
+`version` 併記箇所」は 10 → **11 箇所**へ増える
+（`fandhe-ai-onnx-interop` の `[dependencies].fandhe-ai-autodiff`）。
+2 節「`[dev-dependencies]` の公開クレート間依存」の一覧から
+`onnx-interop → fandhe-ai-autodiff` の行が通常依存へ移動して消える
+（`onnx-interop → fandhe-ai-backend-cpu`〈`tests/st_checkpoint.rs` 用〉・
+`onnx-interop ⇄ bench-harness` は不変のまま残る）。
+
+**検証記録（実測。2026-09-18）**: `cargo tree -p fandhe-ai-onnx-interop
+--edges normal` で `fandhe-ai-autodiff` が normal 辺として現れ循環が
+無いことを確認、`Cargo.lock` は無変更（`git diff --exit-code Cargo.lock`
+差分ゼロ）、7 パッケージ一括 `cargo publish --dry-run --locked`（§13.3 と
+同一順序）が全 7 件成功することを確認した。`cargo deny --locked check
+advisories bans licenses sources`・`scripts/check-forbidden-deps.sh
+lock-all` も green。
+
 ## 変更履歴
 
+- 2026-09-18（#2036）: `fandhe-ai-onnx-interop` の `[dependencies]` へ
+  `fandhe-ai-autodiff`（`version = "=0.9.0"` 併記）を追加し、
+  `onnx::export_nn`（`nn::Module` 層列 -> `ExportNode`／`Graph`。facade
+  未接続）を実装した。13.5 節に依存グラフの更新を記録した（`env.
+  RELEASE_CRATES` の公開順序自体への影響なし）。
 - 2026-09-17（#2017）: `fandhe-ai`（facade）の `[dependencies]` へ
   `fandhe-ai-onnx-interop`（`version = "=0.9.0"` 併記）を追加し、ONNX
   import（`fandhe_ai::interop::onnx::{OnnxModel, OnnxValue, OnnxError}`）

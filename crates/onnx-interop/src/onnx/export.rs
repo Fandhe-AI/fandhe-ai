@@ -27,6 +27,11 @@
 //!   モジュール自体は非公開クレート `onnx-interop` 内に留まる（facade は
 //!   `crates/facade/src/interop/onnx.rs` の `pub use` で本モジュールの型
 //!   を再エクスポートしない）。
+//! - `fandhe_ai_autodiff::nn::Module` の層列から `Graph`（本モジュールの
+//!   `build_model_proto` が受け取れる形）を組み立てる橋渡しは、当初
+//!   本モジュールのスコープ外としていたが、#2036 で `super::export_nn`
+//!   （本クレート内部限定。facade 未接続）として実装済み（`docs/facade-
+//!   onnx-export-exposure-decision.md` §15・§16）。
 //!
 //! ## `value_info` を常に空にする契約
 //!
@@ -111,6 +116,27 @@ pub enum ExportError {
         op_type: &'static str,
         index: usize,
     },
+    /// `onnx::export_nn::export_parts_from_layers`（イシュー #2036）が
+    /// 空の層列（`layers.is_empty()`）を渡された。
+    EmptyModel,
+    /// `onnx::export_nn`（#2036）が `fandhe_ai_autodiff::nn::Module` の
+    /// 層列を走査した際、`as_linear`／`as_relu` のいずれにも該当しない
+    /// 層に遭遇した（fail-closed 拒否。§3.1「未対応層は型付き `Err`」）。
+    /// `layer_kind` は判別可能な範囲（`as_conv2d` 等の既存ダウンキャスト
+    /// フック 8 種）でのみ具体名を報告し、それ以外は `"unknown"`。
+    UnsupportedLayer {
+        index: usize,
+        layer_kind: &'static str,
+    },
+    /// `onnx::export_nn`（#2036）が `Linear::weight`／`bias` の shape を
+    /// 検証した際の不整合（weight が rank 2 でない・bias が rank 1 でない・
+    /// `bias.len() != weight.shape()[1]`・shape 次元が `i64` へ収まらない等）。
+    InvalidLayerParameter { index: usize, reason: String },
+    /// `onnx::export_nn`（#2036）が構築するテンソル名（graph input／output・
+    /// 中間テンソル名・initializer 名）が重複した。現行の命名規約
+    /// （`layer{i}`／`layer{i}_out`／`{i}.weight`／`{i}.bias`）では構造上
+    /// 発生し得ないが、設計要件として fail-closed に検査する（§3.1）。
+    DuplicateTensorName { name: String },
 }
 
 impl fmt::Display for ExportError {
@@ -167,6 +193,19 @@ impl fmt::Display for ExportError {
                 f,
                 "必須入力が空（node={node_name}・op_type={op_type}）: index={index}"
             ),
+            ExportError::EmptyModel => {
+                write!(f, "export 対象の層列が空（`nn::Module` が 0 件）")
+            }
+            ExportError::UnsupportedLayer { index, layer_kind } => write!(
+                f,
+                "export 未対応の層（index={index}）: layer_kind={layer_kind}"
+            ),
+            ExportError::InvalidLayerParameter { index, reason } => {
+                write!(f, "層パラメータが不正（index={index}）: {reason}")
+            }
+            ExportError::DuplicateTensorName { name } => {
+                write!(f, "テンソル名の重複: {name}")
+            }
         }
     }
 }

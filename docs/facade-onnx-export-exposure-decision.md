@@ -6,7 +6,7 @@
 
 基準コミット: `e3b4953b`（2026-09-14）。`file_path:line` は同コミット時点のもの。後続の変更で行番号がずれる可能性があるため、参照する際は当該コミット、または近傍のコミットで再確認すること。
 
-**結論（先に記す）**: #1652 の設計判断（`docs/facade-onnx-import-exposure-decision.md` §6.2）が「#1775 は『公開しない』という結論ではないため close しない・publish 承認が得られるまで blocked として扱う」と読み替え済みであり、本判断はこれをそのまま踏襲する。facade（`fandhe_ai`）への公開面追加コードは一切書かない（前提となる `onnx-interop` の crates.io 公開が未承認のため）。
+**結論（先に記す）**: #1652 の設計判断（`docs/facade-onnx-import-exposure-decision.md` §6.2）が「#1775 は『公開しない』という結論ではないため close しない・publish 承認が得られるまで blocked として扱う」と読み替え済みであり、本判断はこれをそのまま踏襲する。facade（`fandhe_ai`）への公開面追加コードは一切書かない（前提となる `onnx-interop` の crates.io 公開が未承認のため）。**（#1775 起票時点の記述。その後 publish は #1963〈2026-09-17〉で承認・export の facade 公開自体は #2018〈§14〉で完了・`Sequential`／`nn` -> `ExportNode` 橋渡しの承認は §15.7〈2026-09-18・項 1〜4 承認・項 5 保留〉参照）**
 
 ## 1. 背景
 
@@ -116,7 +116,7 @@ import 側 doc の案 A〜E（`docs/facade-onnx-import-exposure-decision.md` 4 �
 
 1. `onnx-interop` の crates.io 公開そのもの（命名・`publish = true`・`RELEASE_CRATES` 追加を含む一式。import 側 #1652 の承認事項 1 と同一事項）。
 2. 上記 1 が承認された場合の、facade ラッパー API 形状（案 B）の確定（export 側の `OnnxModel::to_bytes`／`to_path` 形状を含む）。
-3. `Sequential`／`nn` -> `ExportNode` 橋渡しの配置（3.2 の (b) を推奨するが最終確定は未了）。**§15（#2035）で配置・対応層の初期範囲・facade 公開面 1 件を設計記録として確定し、承認事項を §15.7 へ再整理した（未承認のまま）**。
+3. `Sequential`／`nn` -> `ExportNode` 橋渡しの配置（3.2 の (b) を推奨するが最終確定は未了）。**§15（#2035）で配置・対応層の初期範囲・facade 公開面 1 件を設計記録として確定し、承認事項を §15.7 へ再整理した（#2035 起票時点の記述。2026-09-18 に §15.7 項 1〜4 が承認済みへ更新済み・項 5 のみ保留。§15.7 参照）**。
 
 ## 11. 出典一覧
 
@@ -134,9 +134,13 @@ import 側 doc の案 A〜E（`docs/facade-onnx-import-exposure-decision.md` 4 �
 公開メタデータ整備）は #1963 自身が完了させた。
 
 §10 承認事項 2・3（facade ラッパー API 形状・`Sequential`／`nn` ->
-`ExportNode` 橋渡しの配置）は未承認のまま残り、facade 公開面は段階 0 を
-継続する（唯一のコード変更である `crates/facade/tests/api_surface.rs` の
-段階 0 固定 guard テスト 2 件は無変更）。
+`ExportNode` 橋渡しの配置）は本追補（#1963）時点では未承認のまま残り、
+facade 公開面は段階 0 を継続する（唯一のコード変更である
+`crates/facade/tests/api_surface.rs` の段階 0 固定 guard テスト 2 件は
+無変更）。**（#1963 時点の記述。承認事項 2〈facade ラッパー API 形状〉
+は #2018〈§14〉の実装で `OnnxModel::to_bytes`／`to_path` 形状として
+確定・承認事項 3〈橋渡しの配置〉は §15.7〈2026-09-18・項 1〜4 承認・
+項 5 保留〉で解消済み）**
 
 ## 13. 追補（イシュー #2017・2026-09-17）: import 側の facade 公開に伴う事実更新
 
@@ -406,7 +410,15 @@ tolerance／baseline は一切変更しない。
 - export はホスト実行のみで `BackendOps`／`Device` 非経由（§3.3・§7 (d)
   を継承。REQ-12 と無衝突）。
 
-### 15.7 承認事項（列挙のみ・未承認）
+### 15.7 承認事項
+
+**2026-09-18 ユーザー承認済み**（親 #2034 コメント
+〈https://github.com/Fandhe-AI/fandhe-ai/issues/2034#issuecomment-5726738002〉）:
+項 1（配置 (b)＋onnx-interop → autodiff 通常依存化）承認・項 2 は
+Linear／ReLU の 2 種へ縮小して承認（Sigmoid は別 issue）・項 3
+（`OnnxModel::from_sequential`）承認（facade 結線は #2037）・項 4
+（`OnnxError::UnsupportedLayer` 新設）承認・項 5（Sigmoid 数値契約）は
+保留。以下は起票時点の原文（承認範囲の記録として保持）。
 
 1. **配置**: §3.2 (b)。付随して `fandhe-ai-onnx-interop` の
    `[dependencies]` へ `fandhe-ai-autodiff`（path＋`version = "=x.y.z"`
@@ -466,9 +478,9 @@ tolerance／baseline は一切変更しない。
   と無衝突であること、`ExportNode`／`ExportOp`／prost 型を facade
   公開シグネチャへ出さないことを §15.5 に明記済み。
 
-### 15.10 承認依頼コメント文案
+### 15.10 承認依頼コメント文案（起票時点。実投稿・承認結果は §15.7 参照）
 
-親 #2034 へ以下を投稿する（要点。実投稿は本 issue のスコープに含む）:
+親 #2034 へ以下を投稿した（要点）:
 
 > イシュー #2035 で `Sequential`／`nn` -> `ExportNode` 橋渡しの設計を
 > 確定しました（`docs/facade-onnx-export-exposure-decision.md` §15）。
@@ -484,3 +496,70 @@ tolerance／baseline は一切変更しない。
 >    に適用し、bit 完全一致は Linear／ReLU 限定と明記）
 >
 > 未承認の間は後続実装（#2036 等）の該当部分には着手しません。
+
+（上記は起票時点の投稿文。承認結果は §15.7・§16 参照: 2026-09-18 に
+項 1〜4 承認・項 5 保留で確定した。）
+
+## 16. 追補（イシュー #2036）: `onnx::export_nn` 実装完了（facade 未接続）
+
+**§15.7 承認事項は 2026-09-18 に親 #2034 へユーザー承認コメントが
+投稿され、項 1〜4 承認・項 5 保留で確定した**
+（https://github.com/Fandhe-AI/fandhe-ai/issues/2034#issuecomment-5726738002）。
+本追補時点（実装当初）では承認前だったため、issue #2036 本文の作業
+項目指示に基づき安全側の範囲（Linear／ReLU の 2 種）へ縮小して実装
+した。承認後の範囲もこの縮小版（項 2）と一致するため実装内容は不変。
+
+### 16.1 実施した範囲・縮小した範囲
+
+| §15.7 項 | 扱い | 理由 |
+|---|---|---|
+| 項 1（配置 (b)・`onnx-interop → autodiff` 通常依存化） | **実施**（2026-09-18 ユーザー承認済み。§15.7） | issue #2036 本文の第 1 作業項目・workspace 内 path 依存の追加のため `deps-policy.md` の外部承認フロー対象外（§15.2 の再導出根拠 1〜5 のとおり）。実装当初は承認前だったため PR 本文にその旨を明記していたが、その後 §15.7 の承認記録により解消 |
+| 項 2（対応層の初期範囲。2026-09-18 に Linear／ReLU の 2 種へ縮小して承認済み。§15.7） | **実施**（承認範囲と一致） | `Module` に `as_sigmoid` フックが無く Sigmoid の判別手段が無いため、承認時点で issue コメント記載の代替「Linear／ReLU の 2 種へ縮小」が適用された。実装は当初からこの縮小範囲で行っており不一致なし |
+| 項 5（Sigmoid の数値契約） | 対象外（**保留**。未承認ではなく別 issue へ持ち越し） | 項 5 自体は承認／不承認いずれも確定しておらず保留中のため、Sigmoid は本 issue の初期範囲に含めない |
+| 項 3（facade 公開面 `OnnxModel::from_sequential`） | 対象外（#2037） | 本 issue は facade 未接続限定 |
+| 項 4（`OnnxError::UnsupportedLayer` 新設） | **実施**（variant 名は同一。2026-09-18 ユーザー承認済み。§15.7） | `ExportError` への追加は onnx-interop 内部の型付きエラーであり、facade `OnnxError` の variant 追加（§15.7 項 4 本来の対象）ではない。facade 側の `OnnxError::UnsupportedLayer` 新設自体は §15.7 で承認済みだが、実装（facade への variant 追加）は facade 未接続の本 issue の対象外のため #2037 へ引き継ぐ |
+
+### 16.2 実装内容
+
+- `crates/onnx-interop/Cargo.toml`: `[dependencies]` へ `fandhe-ai-autodiff
+  = { path = "../autodiff", version = "=0.9.0" }` を追加し、旧
+  `[dev-dependencies]` の同名 version 非併記エントリを削除（統合依存は
+  dev としても有効）。`docs/crates-io-publishing-order.md` §13.5 に
+  依存グラフ更新・実測記録を追記。
+- `crates/onnx-interop/src/onnx/export_nn.rs`（新規）: `export_parts_
+  from_layers`／`graph_from_layers`（`&[Box<dyn Module>] -> Graph`）。
+  `Linear -> ExportOp::Gemm`（`alpha=beta=1.0`・転置なし）・
+  `Relu -> ExportOp::Relu` の 2 種のみ対応。命名規約・検証順序・
+  `autodiff` API バージョン制約の詳細は `docs/onnx-export-op-mapping.md`
+  §7 を参照。
+- `crates/onnx-interop/src/onnx/export.rs`: `ExportError` へ
+  `EmptyModel`／`UnsupportedLayer { index, layer_kind }`／
+  `InvalidLayerParameter { index, reason }`／
+  `DuplicateTensorName { name }` の 4 variant を追加（`#[non_exhaustive]`
+  のため非破壊）。
+- `crates/onnx-interop/tests/onnx_export_nn.rs`（新規）: 2 層 MLP
+  （`Linear -> Relu -> Linear`。小形状・CPU BLIS ブロックタイル境界
+  〈KC=256〉を跨ぐ大形状の 2 パターン）の export → `interp::run` 出力を
+  `Module::forward_host`（tape 不要経路）・`Module::forward`（tape 経路）
+  という独立な 2 通りの手動 forward と bit 完全一致で検証。契約テスト
+  （initializer 名・属性常時書き出し・決定性）・fail-closed テスト
+  （空層列・未対応層・末尾未対応層での部分グラフ非返却）を含む計 10 件、
+  いずれも pass。
+
+### 16.3 検証結果
+
+- `cargo test -p fandhe-ai-onnx-interop`: 全テスト pass（新規 10 件込み）。
+- `cargo test -p fandhe-ai --test api_surface`: pass（facade 公開面は
+  無変更）。
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`:
+  green（`-p` スコープ単独実行時に現れる `backend-cuda` の dead-code
+  警告は dev-dependency 経由の feature unification による HEAD 既存の
+  環境依存アーティファクトで、本 issue 変更前の HEAD でも同一に再現する
+  ことを確認済み・workspace 全体実行では発生しない）。
+- `git diff --exit-code origin/main -- crates/facade crates/autodiff
+  Cargo.toml Cargo.lock deny.toml`: 差分ゼロ（無変更確認）。
+- `cargo tree -p fandhe-ai-onnx-interop --edges normal`:
+  `fandhe-ai-autodiff` が normal 辺として現れ循環なし。
+- 7 パッケージ一括 `cargo publish --dry-run --locked`（`env.
+  RELEASE_CRATES` と同一順序）: 全 7 件成功。
+- 新規 `unsafe`: 0 件。

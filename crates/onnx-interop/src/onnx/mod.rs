@@ -10,6 +10,9 @@
 //!   `check_exportable` を経由してから組み立てる。
 //! - `export_ops`: `interp` が対応する 22 op の逆マッピング（`ExportOp` ->
 //!   `NodeProto`。イシュー #1773）。`export` から `pub use` で再エクスポートする。
+//! - `export_nn`: `fandhe_ai_autodiff::nn::Module` の層列（`Linear`／`ReLU`
+//!   限定）から `export` が受け取れる `Graph` を組み立てる橋渡し
+//!   （イシュー #2036。本クレート内部限定・facade 未接続）。
 //!
 //! 8 オペ実装は #79（`crate::ops`）、PoC 数値突合テストは #80
 //! （`tests/onnx_poc_v2_6_match.rs`・`tests/onnx_slice_dynamic_bounds.rs`）で追加済み。
@@ -17,6 +20,7 @@
 //! 冒頭コメント参照）。
 
 pub mod export;
+pub mod export_nn;
 pub mod export_ops;
 pub mod graph;
 pub mod interp;
