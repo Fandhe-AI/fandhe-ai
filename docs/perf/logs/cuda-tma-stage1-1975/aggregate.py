@@ -73,7 +73,7 @@ REQUIRED_RUNS = 5
 
 RUN_FILE_RE = re.compile(r"^gateC_run(?P<run>[1-5])\.log$")
 LOAD_GATE_LINE_RE = re.compile(
-    r"^run=(?P<run>\d+)\s+load1=(?P<load1>[0-9.]+)\s+gpu_util=(?P<gpu_util>\d+)\s+(?P<status>pass|fail)$"
+    r"^run=(?P<run>\d+)(?:\s+attempt=(?P<attempt>\d+))?\s+load1=(?P<load1>[0-9.]+)\s+gpu_util=(?P<gpu_util>\d+)\s+(?P<status>pass|fail|wait)$"
 )
 
 # 値のトークン化に用いる sentinel（float ではなく明示的な文字列で区別する。
@@ -154,7 +154,10 @@ def parse_gate_c_log(path: Path, warnings: list[str]) -> dict[int, dict[str, obj
 
 
 def parse_load_gate(path: Path) -> list[dict[str, object]]:
-    """`load_gate.log`（`run=N load1=X gpu_util=Y pass|fail`）を解析する。"""
+    """`load_gate.log`（`run=N [attempt=K] load1=X gpu_util=Y pass|fail|wait`）を解析する。
+
+    オーケストレーション（gb10 スクリプト）は不通過の試行を `wait` として同じ形式で残すため、
+    `attempt` と `wait` も受理して全試行を併記する。"""
     rows: list[dict[str, object]] = []
     if not path.exists():
         return rows
@@ -168,6 +171,7 @@ def parse_load_gate(path: Path) -> list[dict[str, object]]:
         rows.append(
             {
                 "run": int(m.group("run")),
+                "attempt": int(m.group("attempt")) if m.group("attempt") else 1,
                 "load1": float(m.group("load1")),
                 "gpu_util": int(m.group("gpu_util")),
                 "status": m.group("status"),
@@ -315,10 +319,12 @@ def build_report(
     load_gate_rows = parse_load_gate(log_dir / "load_gate.log")
     if load_gate_rows:
         lines.append("## 専有ゲート（load_gate.log）\n")
-        lines.append("| run | load1 | gpu_util | 判定 |")
-        lines.append("|---|---:|---:|---|")
-        for row in sorted(load_gate_rows, key=lambda r: r["run"]):
-            lines.append(f"| {row['run']} | {row['load1']} | {row['gpu_util']} | {row['status']} |")
+        lines.append("| run | attempt | load1 | gpu_util | 判定 |")
+        lines.append("|---|---:|---:|---:|---|")
+        for row in sorted(load_gate_rows, key=lambda r: (r["run"], r["attempt"])):
+            lines.append(
+                f"| {row['run']} | {row['attempt']} | {row['load1']} | {row['gpu_util']} | {row['status']} |"
+            )
         lines.append("")
     else:
         lines.append("専有ゲート: `load_gate.log` が見つからないため記録なし（任意入力）。\n")

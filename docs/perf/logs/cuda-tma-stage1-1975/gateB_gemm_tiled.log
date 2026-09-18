@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/gemm_tiled.rs (<home>/work/target-fandhe-ai/release/deps/gemm_tiled-6b2196f28c624515)
+
+running 6 tests
+test tiled_f32_matches_cpu_reference_k_stress ... ok
+test tiled_f16_runs_and_returns_expected_shape ... ok
+test tiled_f32_zero_k_returns_all_zero ... ok
+test tiled_f32_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_f32_matches_cpu_reference_across_shapes ... ok
+[#1203 diag] naive: samples=[0.123158407, 0.124812268, 0.123518695, 0.123082087, 0.125041628]s median=0.123519s q1=0.123158s q3=0.124812s
+[#1203 diag] tiled: samples=[0.039793737, 0.039740026, 0.039680361, 0.038692839, 0.03757898]s median=0.039680s q1=0.038693s q3=0.039740s
+[#1203 diag] speedup=3.112842x (naive_median=0.123519s, tiled_median=0.039680s)
+test tiled_f32_outperforms_naive_at_4096 ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.62s
+
