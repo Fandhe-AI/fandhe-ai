@@ -219,11 +219,13 @@ fn measure_tiled_pipeline_gpu_only(
 /// H2D/D2H と出力バッファ確保は計測区間外）を使い、GPU-only 列同士の
 /// 比較が「転送有無の違い」を含まないようにする（モジュールコメント
 /// 「計測区間の統一」参照）。テンソルマップ生成（`encode_tensor_map_2d_
-/// f32`。ホスト側 driver 接触を伴う）は `launch_tiled_pipeline_tma_f32`
-/// 内部で毎起動ごとに行われる仕様（tensor map キャッシュは #1975 の
-/// スコープ外。設計 doc §4.4・§8）のため、計測ループの中に含まれる
-/// （転送込み区間との比較には使わず、GPU-only 列同士の比較にのみ使う
-/// 前提で許容する）。
+/// f32`。ホスト側 driver 接触・ストリーム待機を伴う）は
+/// `CudaGemm::prepare_tiled_pipeline_tma_maps` で計測ループの**外**に
+/// 1 回だけ行い、ループ内は `launch_tiled_pipeline_tma_f32_prepared` の
+/// カーネル起動＋`synchronize` のみとする（cp.async 版の GPU-only 列と
+/// 同じく「起動＋同期」だけを測る。事前 encode の bit 同一性は
+/// `tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact` で担保。
+/// tensor map キャッシュ自体は #1975／#1976 のスコープ外のまま）。
 fn measure_tiled_pipeline_tma_gpu_only(
     gemm: &CudaGemm,
     func: &TmaTiledPipelineFunction,
