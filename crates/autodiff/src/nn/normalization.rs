@@ -194,7 +194,7 @@ pub struct GroupNorm {
 impl GroupNorm {
     /// `groups == 0` は構築不可能な引数として計算前に拒否する
     /// （`Linear::new` の `in_features == 0` 拒否と同型）。`eps` は
-    /// [`validate_eps`] で有限かつ非負であることを検証する。
+    /// `validate_eps` で有限かつ非負であることを検証する。
     /// `num_channels` との整合性（`num_channels % groups == 0`）は
     /// 入力 shape が定まる forward 時（[`Self::forward`]）に検査する
     /// （層自体は `num_channels` を保持しないため）。
@@ -244,7 +244,7 @@ pub struct InstanceNorm {
 }
 
 impl InstanceNorm {
-    /// `eps` は [`validate_eps`] で有限かつ非負であることを検証する。
+    /// `eps` は `validate_eps` で有限かつ非負であることを検証する。
     /// `GroupNorm::new` と異なり `groups` を構築時に持たない——入力の
     /// `shape[1]`（チャネル数）から forward 時に導出するため。
     pub fn new(eps: f32) -> Result<Self, AutodiffError> {
@@ -265,7 +265,7 @@ impl InstanceNorm {
     /// InstanceNorm が「各チャネルを独立に正規化する」という定義上、
     /// 空間軸 0 個〈`[N,C]`〉では GroupNorm との違いが意味をなさない
     /// ため）。`num_channels == 0` の場合は入力を恒等（`contiguous`
-    /// コピー）で返す（`groups = 0` を [`group_norm_layout`] へ渡すと
+    /// コピー）で返す（`groups = 0` を `group_norm_layout` へ渡すと
     /// 構築時 `groups == 0` 検査〈ユーザー入力起因のエラー〉と混同する
     /// ため、入力 shape 由来の空テンソルはここで個別に短絡させる）。
     pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
