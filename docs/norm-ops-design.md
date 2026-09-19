@@ -454,7 +454,7 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
   `add_instance_norm`）は同 §5 の承認（経路 1 または経路 2）が未取得の
   ため実施していない。
 - **正しさ検証**: `crates/autodiff/src/nn/normalization.rs` の単体
-  テスト 21 件（構築時検査・shape 検査・手計算値突合・`groups=1` の
+  テスト 19 件（構築時検査・shape 検査・手計算値突合・`groups=1` の
   `layer_norm` との bit 一致・`groups=channels` の `InstanceNorm` との
   bit 一致・0 要素契約・中央差分による `dx` 検証・`Module::forward`／
   `forward_host` の一致）・`crates/facade/tests/
