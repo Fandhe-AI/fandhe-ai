@@ -593,7 +593,7 @@ impl TypedOps<f64> for CudaBackendOps {
         self.elementwise_binary_f64(a, b, |t, a_s, b_s| t.run_mul(a_s, b_s))
     }
 
-    /// `relu`。[`Self::unary_f64`] への委譲。
+    /// `relu`。内部ヘルパー `unary_f64` への委譲。
     fn relu(&self, a: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
         self.unary_f64(a, |t, a_s| t.run_relu(a_s))
     }
@@ -608,7 +608,7 @@ impl TypedOps<f64> for CudaBackendOps {
         self.unary_f64(a, |t, a_s| t.run_tanh(a_s))
     }
 
-    /// 全軸・単一軸 `sum`。[`Self::reduce_dispatch_f64`] への委譲。
+    /// 全軸・単一軸 `sum`。内部ヘルパー `reduce_dispatch_f64` への委譲。
     fn sum(&self, a: &Tensor<f64>, dim: Option<usize>) -> Result<Tensor<f64>, BackendError> {
         self.reduce_dispatch_f64(a, dim, ReduceKindF64::Sum)
     }

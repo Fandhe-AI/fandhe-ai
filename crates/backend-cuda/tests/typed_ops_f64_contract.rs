@@ -4,14 +4,19 @@
 //! カーネル実装へ差し替わった（旧: 8 演算すべて driver 非接触の
 //! `Unsupported`）。本ファイルは新しい契約——
 //! (a) shape 不整合は driver に一切触れる前に `ShapeMismatch` を返す、
-//! (b) 有効な shape でも driver 不在環境（本 CI）では
+//! (b) 有効な shape での呼び出しは、driver 不在環境では
 //! `BackendError::CudaUnavailable`（`KernelLaunchFailed` にはならない。
 //! shape 検証を通過した呼び出しが最初に触れる driver 呼び出しは
 //! `context_cache::cached_typed_f64` 取得であり、これは
-//! `CudaUnavailable` へ写像される）を返す——を検証する。GPU・CUDA
-//! driver を一切必要とせず常時 CI 実行可能である（`typed_ops_f16_parity.rs`
-//! の非 `#[ignore]` 部分と同型の構成）。実機での数値正しさは
-//! `typed_ops_f64_parity.rs` の `#[ignore]` テストへ引き継ぐ。
+//! `CudaUnavailable` へ写像される）を返し、driver 搭載環境（実機）では
+//! `Ok` を返す——を検証する。**CUDA driver の有無を前提にしない**
+//! 環境適応（env-adaptive）スモークとして構成し、GPU・CUDA driver の
+//! 有無いずれでも常時 CI 実行可能である（`gather_scatter_parity.rs::
+//! gather_scatter_parity_smoke_env_adaptive` と同じ Ok/CudaUnavailable
+//! 分岐パターン。driver 実在環境でこの契約テストが `Unsupported`
+//! 等の意図しないエラーで落ちないことを保証する。実機での数値正しさ
+//! そのものは `typed_ops_f64_parity.rs` の `#[ignore]` テストへ
+//! 引き継ぐ）。
 
 use fandhe_ai_backend_cuda::CudaBackendOps;
 use fandhe_ai_tensor_core::device::BackendError;
@@ -67,11 +72,14 @@ fn sum_max_reject_out_of_range_dim_before_touching_driver() {
     assert!(matches!(max_err, BackendError::ShapeMismatch(_)));
 }
 
-/// 有効な shape の 8 演算すべてが、driver 不在環境（本 CI）では
-/// `CudaUnavailable` を返す（`Unsupported`／`KernelLaunchFailed` には
-/// ならない。`typed_ops_f64()` accessor 経由）。
+/// 有効な shape の 8 演算すべてが、driver 不在環境では
+/// `CudaUnavailable`（`Unsupported`／`KernelLaunchFailed` にはならない）
+/// を、driver 搭載環境（実機）では `Ok` を返す（`typed_ops_f64()`
+/// accessor 経由）。CUDA driver の有無を前提にしない env-adaptive
+/// 分岐（Cursor Bugbot・codex-review 指摘: CUDA 実在環境で本テストが
+/// 誤って fail していた点の是正）。
 #[test]
-fn all_eight_ops_return_cuda_unavailable_via_accessor_in_ci() {
+fn all_eight_ops_succeed_or_return_cuda_unavailable_env_adaptive() {
     let ops = CudaBackendOps::new(0);
     let typed = BackendOps::typed_ops_f64(&ops).expect("typed_ops_f64 must be Some");
     let a = zeros(&[2, 2]);
@@ -87,20 +95,39 @@ fn all_eight_ops_return_cuda_unavailable_via_accessor_in_ci() {
         ("sum", typed.sum(&a, None).map(|_| ())),
         ("max", typed.max(&a, None).map(|_| ())),
     ] {
-        assert!(
-            matches!(result, Err(BackendError::CudaUnavailable(_))),
-            "{name} は CudaUnavailable を返すはず: {result:?}"
-        );
+        match result {
+            Ok(()) => {
+                // driver 搭載環境（実機）: 数値正しさは
+                // `typed_ops_f64_parity.rs` の `#[ignore]` テストが
+                // 検証する。本テストは `Ok` で返ること（意図しない
+                // エラーで落ちないこと）のみを確認する。
+            }
+            Err(BackendError::CudaUnavailable(msg)) => {
+                assert!(
+                    !msg.is_empty(),
+                    "{name}: error detail message must not be empty"
+                );
+            }
+            Err(other) => panic!(
+                "{name} は Ok または CudaUnavailable を返すはず（driver 有無に依らず \
+                 Unsupported/KernelLaunchFailed 等の他エラーにはならない）: {other:?}"
+            ),
+        }
     }
 }
 
-/// `TypedOps::<f64>::gemm` を直接呼んだ場合も同様に `CudaUnavailable`
+/// `TypedOps::<f64>::gemm` を直接呼んだ場合も同様に env-adaptive
 /// （trait メソッドとして呼べることの型検査を兼ねる）。
 #[test]
-fn gemm_direct_trait_call_returns_cuda_unavailable_in_ci() {
+fn gemm_direct_trait_call_succeeds_or_returns_cuda_unavailable_env_adaptive() {
     let ops = CudaBackendOps::new(0);
     let a = zeros(&[2, 2]);
     let b = zeros(&[2, 2]);
-    let err = TypedOps::<f64>::gemm(&ops, &a, &b).unwrap_err();
-    assert!(matches!(err, BackendError::CudaUnavailable(_)));
+    match TypedOps::<f64>::gemm(&ops, &a, &b) {
+        Ok(_) => {}
+        Err(BackendError::CudaUnavailable(_)) => {}
+        Err(other) => {
+            panic!("expected Ok or CudaUnavailable regardless of driver presence, got: {other:?}")
+        }
+    }
 }
