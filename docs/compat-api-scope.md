@@ -743,6 +743,11 @@ Pooling を含む Sequential のデバイス常駐経路（`init_device_param_st
 `api_surface.rs` の既存機械検査で非破壊を確認）。新規公開型は追加して
 いない。実装記録は `docs/pooling-ops-design.md` §16 を参照。
 
+**#2061（`Var` の dtype 多重化）の設計記録は
+`docs/autodiff-var-dtype-multiplexing-design.md` として完了した。**
+コード変更なし。facade 公開面拡張は本イシューでは不承認のまま段階 0 を
+維持し、再開には本節の範囲拡張手続き（経路 1 または経路 2）を要する。
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |
