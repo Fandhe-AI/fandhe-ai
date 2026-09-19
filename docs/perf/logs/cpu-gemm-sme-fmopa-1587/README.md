@@ -18,6 +18,16 @@
   GB10 側は RULE.txt が明記するとおり本セッションの対象外（SME 非
   対応）。`SME_PRODUCTION_ENABLED` の本番切替・しきい値確定は
   #1979 のユーザー承認事項として未実施のまま。
+- **GB10（DGX Spark GB10・Grace CPU）側の「既存経路の非後退確認」は
+  2026-09-18（UTC）に `gb10/` で実施済み**（イシュー #1978 残。事前登録
+  `gb10/RULE-gb10.txt`）。R0（`sme_report()` が両腕とも
+  `kernel_enabled: false`）成立・R2-GB10（10 セル checksum 完全一致）
+  成立・RT は after 腕で定数ドリフトガード
+  `sme_production_enabled_is_false_pending_measurement` の 1 件のみ FAIL
+  （637 pass）・R1-GB10 は gemm cpu 1024/reuse が 5/5 round 一貫の後退
+  （1.0195〜1.0554・中央値 1.0363）。事前登録規則により総合判定は
+  **「GB10 非後退確認: 後退あり」**（是正・緩和なし。原因帰属は未検証。
+  `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.5）。
 
 ## ディレクトリ構成
 
@@ -39,6 +49,16 @@
   `SME_PRODUCTION_ENABLED` のみ `false` → `true` へ反転。計測専用
   worktree の変更で main へはコミットしない）
 - `env_info.txt` — 実行環境・時刻の記録（内部ホスト名は含めない）
+- `gb10/` — GB10 側の非後退確認（イシュー #1978 残・2026-09-18 UTC）。
+  `RULE-gb10.txt`（事前登録）・`orchestrate_gb10.sh`（ノード上で実行。
+  after ツリーの複製と `on-arm.patch` 適用・指紋採取・外側専有ゲート・
+  R0 プローブ・RT・R1/R2 を一括実行）・`sme-probe-{Cargo.toml,main.rs}`
+  （R0 用の使い捨てプローブ crate。ツリー外に配置し `fandhe-ai-backend-cpu`
+  を path 依存）・`sme_report.txt`・`cargo_test_after.summary.log`・
+  `load_gate_outer.log`・`gate_constant.txt`・`patch_sha256.txt`・
+  `fp-before.txt`／`fp-diff.txt`・`rev-stamp-verification.md`・`env_info.txt`・
+  `run_ab.log`／`orchestrate.log`・`r1r2/`（Mac 側と同じ構成。LABEL は
+  `1978-gb10`）。絶対パスは `<home>` へマスク済み・内部ホスト名は含めない
 - `r1r2/` — R1（framework-compare gemm／train／infer cpu）・R2
   （checksum）の実測一式
   - `compare-{gemm,train,infer}-1978-cpu.md` — before/after 比較表（是正前の

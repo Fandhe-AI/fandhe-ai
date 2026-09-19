@@ -1,0 +1,50 @@
+# 事前登録判定規則（イシュー #1978 残・GB10 側「既存経路の非後退確認」）
+# 登録日時: 2026-09-19（UTC）。実測開始前に本ファイルをコミットし、結果が出た後に緩和しない。
+# 親規則: 同ディレクトリ上位の RULE.txt（2026-09-17 固定・Apple M4 Max 限定）。本ファイルはそれを変更せず、
+# RULE.txt が「対象外」とした GB10 側の範囲だけを新規に事前登録する。M4 Max の総合判定（undetermined）は本実測で変更しない。
+
+対象実機: DGX Spark GB10（Grace CPU・Linux aarch64。/proc/cpuinfo の Features に sme／smef32f32 なし）。
+対象コード:
+  before 腕 = main（Mac 側 HEAD 176f27e7。.rev-stamp に記録）
+  after  腕 = 同一コミットに on-arm.patch（`SME_PRODUCTION_ENABLED` のみ false → true。sha256 を env_info に記録）を適用した別ツリー
+  両ツリーの指紋（git ls-files 一覧に対する sha256sum）差分が crates/backend-cpu/src/gemm_blis/mod.rs の 1 ファイルのみであることを記録する。
+
+R0（前提・必須）: after 腕・before 腕の両方で `fandhe_ai_backend_cpu::sme_report()` が
+  `SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }` を返すこと（fail-closed 検出）。
+  kernel_enabled が true なら想定外（Grace は SME 非対応）として計測を中止し記録のみ。
+  よって本実測の 10 セル（gemm cpu 512／1024／2048 × fresh／reuse・train／infer size=64 × fresh／reuse）は
+  **すべて SME 非到達セル**である（train size=64 の L1 d_weight GEMM は形状条件を満たすが kernel_enabled=false で非到達）。
+
+RT（既存テスト群・必須）: after 腕ツリーで `cargo test -p fandhe-ai-backend-cpu --release`（非 #[ignore]）が全 pass。
+  FAIL があっても是正せず名前を記録し、総合判定を「後退あり相当（要調査）」とする。
+
+R1-GB10（非後退・判定）: scripts/bench/framework-compare/run_ab_sme_cpu.sh（LABEL=1978-gb10・AB_DEVICE=cpu・5 round・
+  round 単位で起動順反転・内側 load ゲートはスクリプト固定の 8.0）。
+  判定は RULE.txt の非到達セル規則をそのまま適用: 「5/5 round 一貫の後退（全 round ratio > 1.00）」のみ後退（REJECT 材料）。
+  中央値 > 1.00 だが 5/5 一貫でないセルは「後退の証拠なし（ノイズ帯）」として記録し、値を併記する。
+  ADOPT 候補判定（到達セル用）は本実測に存在しない。
+
+R2-GB10（checksum・必須）: 全 10 セルで before／after の checksum 完全一致（compare_gemm_ab.py --require-checksum-exact）。
+  1 セルでも不一致なら「後退あり（bit 同一フォールバック不成立）」。
+
+専有ゲート（外側・記録）: 実測開始前に load1 < 1.0 かつ nvidia-smi utilization.gpu 0% を最大 20 回・30 秒間隔で待つ（#1988 と同一）。
+  不通過なら実行はするが「参考」と明記する。内側ゲート（8.0）は run_ab_sme_cpu.sh の記録をそのまま採用する。
+
+総合判定の語彙:
+  - 「GB10 非後退確認: pass」= R0 成立・RT 全 pass・R1-GB10 に 5/5 一貫の後退セルなし・R2-GB10 全一致。
+  - 「GB10 非後退確認: 後退あり」= R1-GB10 に 5/5 一貫の後退セルが 1 つでもある、または R2-GB10 に不一致がある。
+  - 「undetermined」= R0 不成立・計測失敗（skipped ログ非空）・round 欠損など上記いずれにも当てはまらない場合。
+  いずれの場合も `SME_PRODUCTION_ENABLED` は切り替えない（#1979 のユーザー承認事項）。
+  #1979 受け入れ条件「非 SME 環境で bit 同一のフォールバック」の証拠には R0＋R2-GB10 を用いる。
+
+保存物（本ディレクトリ gb10/）: RULE-gb10.txt・sme_report.txt・cargo_test_after.log（要約）・load_gate_outer.log・
+  results-{before,after}-1978-gb10-cpu-{gemm,train,infer}.jsonl・compare-{gemm,train,infer}-1978-cpu-1978-gb10.md／.err・
+  load-gate／uptime／compare-exit／skipped ログ・sha／tree ログ・rev-stamp-verification.md・env_info.txt
+  （内部ホスト名・ユーザー名・絶対パスは <home> 等へマスク。バイナリはコミットしない）。
+
+# 追記（2026-09-19 UTC・PR #2048 codex-review 指摘。上記本文は変更しない）:
+#   R2-GB10 の checksum は gemm／infer の全要素和・train の最終 loss を小数点以下 6 桁へ丸めた値
+#   （bench-common::Record::to_json_line）であり、要素間の相殺・丸めで異なる出力でも一致しうる。
+#   したがって「#1979 受け入れ条件の証拠には R0＋R2-GB10 を用いる」は「checksum 一致の確認」までであり、
+#   bit 同一性（全出力の to_bits() 比較または生バイト列のハッシュ比較）は本規則の範囲では未確認とする。
+#   判定語彙・しきい値は変更しない（緩和ではなく、規則が実証できる範囲の限定）。

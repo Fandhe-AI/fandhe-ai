@@ -1,0 +1,10 @@
+[package]
+name = "sme-probe-1978"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+fandhe-ai-backend-cpu = { path = "TREE_PLACEHOLDER/crates/backend-cpu" }

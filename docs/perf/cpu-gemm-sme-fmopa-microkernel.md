@@ -446,7 +446,89 @@ train 64/fresh も ADOPT 候補条件を満たすため、SME の性能効果自
 64→32 に下げる一方 `SME_MIN_M/N` を 256→512 に上げる組）が R4 の
 実測から導かれる候補になる。本番切替の可否・しきい値の確定値は
 #1979 のユーザー承認事項へ申し送る（§5.3 参照。GB10 側の非後退確認
-の要否も含む）。
+は §5.5 で実施済み）。
+
+### 5.5 GB10 側の非後退確認（DGX Spark GB10・イシュー #1978 残。2026-09-18 UTC）
+
+§5.3 が「両実機で完了」の条件として残していた GB10 側を、RULE.txt を
+変更せず新規の事前登録規則 `docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/RULE-gb10.txt`
+（計測前にコミット）で実施した。Grace CPU は SME 非対応のため、本節の
+目的は「`SME_PRODUCTION_ENABLED=true` にした after 腕が非 SME 環境で
+fail-closed に NEON へフォールバックし（R0）、ハーネスの checksum が
+一致し（R2-GB10）、非後退であること（R1-GB10）」の確認に限られる。
+R2-GB10 が比較する checksum は gemm／infer の全要素和・train の最終
+loss を小数点以下 6 桁へ丸めた値（`bench-common::Record::to_json_line`）
+であり、要素間の相殺や丸めで異なる出力でも一致しうるため、**#1979
+受け入れ条件「非 SME 環境で bit 同一のフォールバック」の実証には
+ならない**（bit 同一性は全出力の `to_bits()` 比較または生バイト列の
+ハッシュ比較が必要。本節は未実施。PR #2048 codex-review 指摘）。Apple M4 Max の総合判定（§5.4.4 undetermined）は本節で
+変更しない。
+
+- **腕**: before = main `176f27e7`（`.rev-stamp` は RULE-gb10.txt のみ追加した
+  `b127e9f2`）、after = 同一ツリーに `on-arm.patch`（sha256
+  `ca493a09…`）を適用。ツリー指紋の差分は `gemm_blis/mod.rs` の 1 ファイル
+  のみ・before 指紋は Mac 側 `git ls-files` 一覧の sha256 と全 1422 ファイル
+  一致（`gb10/rev-stamp-verification.md`）。
+- **専有ゲート**: 外側（load1 < 1.0 かつ gpu_util 0%）は build 前に
+  attempt=1 で通過（load1 0.26）。内側（`run_ab_sme_cpu.sh` 固定 8.0）は
+  5/5 round 通過（load1 4.43〜7.88）だが、round 1〜2 の load1 は直前の
+  bench-fandhe 2 腕ビルド（20 スレッド）の残留を含む（`uptime-*.log` の
+  round 2 は 8.34）。
+- **R0**: `sme_report()` は before／after とも
+  `SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }`
+  （`/proc/cpuinfo` Features に `sme`／`smef32f32` なし）。よって 10 セル
+  すべてが SME 非到達。
+- **RT（既存テスト群・after 腕 `cargo test -p fandhe-ai-backend-cpu --release`）**:
+  637 pass・1 FAIL・32 ignored。FAIL は
+  `gemm_blis::tests::sme_production_enabled_is_false_pending_measurement`
+  （`SME_PRODUCTION_ENABLED` が `false` であることそのものを検証する定数
+  ドリフトガード。after 腕は定数を反転した計測専用ツリーのため構造的に
+  FAIL する）。RULE-gb10.txt は「FAIL があれば名前を記録し後退あり相当
+  （要調査）」と定めており、要調査の結果はこのガード 1 件で、数値経路の
+  FAIL は 0 件。規則は緩和しない（ガード除外を事前登録しなかったのは
+  規則側の不備として記録）。
+- **R1-GB10（`run_ab_sme_cpu.sh 1978-gb10`・5 round・起動順反転・checksum
+  完全一致必須）**: 中央値比（after/before）と 5 round 内比・5/5 一貫の
+  後退判定は次のとおり（`gb10/r1r2/compare-*-1978-cpu-1978-gb10.md`）。
+
+  | セル | 中央値比 | run 内比（5 round） | 5/5 一貫の後退 |
+  |---|---|---|---|
+  | gemm 512/fresh | 1.0223 | 0.9367, 0.9948, 2.0070, 0.9880, 1.0223 | いいえ（round 3 に before spread > 1.5× の外れ値） |
+  | gemm 512/reuse | 1.0176 | 1.1115, 1.0048, 1.1221, 0.9922, 0.9447 | いいえ |
+  | gemm 1024/fresh | 0.9967 | 0.8942, 0.9863, 1.0437, 1.0500, 0.8139 | いいえ |
+  | **gemm 1024/reuse** | **1.0363** | **1.0554, 1.0195, 1.0246, 1.0326, 1.0363** | **はい** |
+  | gemm 2048/fresh | 0.9841 | 1.0234, 1.0247, 0.9332, 0.9371, 0.9686 | いいえ |
+  | gemm 2048/reuse | 0.8968 | 0.8968, 0.9870, 0.9937, 1.0000, 0.7655 | いいえ |
+  | train 64/fresh | 0.8897 | 0.8815, 0.8342, 0.9486, 0.8526, 0.8897 | いいえ |
+  | train 64/reuse | 0.9346 | 0.8021, 0.8925, 1.0509, 1.0783, 0.9586 | いいえ |
+  | infer 64/fresh | 1.0132 | 0.9427, 1.0132, 1.1313, 1.0241, 0.9477 | いいえ |
+  | infer 64/reuse | 1.0606 | 1.0528, 1.0434, 1.0606, 1.0998, 0.8800 | いいえ |
+
+- **R2-GB10**: 全 10 セル checksum 完全一致（`skipped-*.log` は空・
+  `compare-exit` は gemm 3／train 0／infer 3＝いずれも判定結果コード）。
+- **総合判定（RULE-gb10.txt の語彙）: 「GB10 非後退確認: 後退あり」**。
+  根拠は gemm cpu 1024/reuse の 5/5 round 一貫の後退（1.0195〜1.0554）。
+  R0・R2-GB10 は成立しているが、上記のとおり checksum 一致は bit 同一の
+  証拠にならないため、#1979 受け入れ条件「非 SME 環境で bit 同一の
+  フォールバック」は **checksum 一致を確認・bit 同一性は未確認** として
+  #1979 へ申し送る。是正・規則の事後緩和はしない。
+- **原因帰属（未検証の仮説として記録・判定には用いない）**: after 腕が
+  before 腕と異なるのは `dispatch_two_d_dynamic` の
+  `SME_PRODUCTION_ENABLED && sme_shape_eligible(..) && SmeKernel::try_new()`
+  評価が short-circuit せずに `sme_report()`（OS フラグは `OnceLock`
+  キャッシュ）まで到達する点のみで、1024/reuse だけが 5/5 一貫となる
+  機構は本実測から特定できない。同じ後退方向でない他セル（1024/fresh
+  0.9967・2048/reuse 0.8968）と round 内の大きな揺れ（512/fresh の 2.007）
+  は共有負荷ノイズと整合するが、5/5 一貫という事実は規則どおり後退
+  として扱う。分離には SME 検出コールの有無だけを変えた腕（`try_new`
+  を呼ばない after′）のプロセス分離計測が必要で、本 issue の範囲外。
+- **#1979 への申し送り**: `SME_PRODUCTION_ENABLED=true` へ切り替える場合、
+  GB10 側は本節の後退 1 セルを前提に再計測（または `sme_report()` の
+  結果で `SME_PRODUCTION_ENABLED` 経路をプロセス起動時に一度だけ閉じる
+  構成の検討）が必要。加えて「非 SME 環境で bit 同一のフォールバック」は
+  本節では checksum 一致までしか確認していないため、before／after 両腕の
+  全出力 `to_bits()` 比較（または生バイト列ハッシュ）を GB10 で別途取る
+  必要がある。
 
 ## 6. セキュリティ考慮（OWASP Top 10）
 

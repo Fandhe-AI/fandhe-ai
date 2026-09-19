@@ -1,0 +1,3 @@
+before: sme_report=SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }
+after: sme_report=SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }
+cpuinfo_tokens: sve sve2 
