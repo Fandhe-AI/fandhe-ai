@@ -21,9 +21,10 @@ use fandhe_ai_tensor_core::{
     InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams,
     ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
     adaptive_pool2d_out_shape, batch_norm_layout, broadcast_shape, concat_out_shape,
-    conv2d_out_shape, gather_out_shape, gemm_out_shape, interpolate_out_shape_for_mode,
-    matmul_out_shape, one_hot_out_shape, pad_out_shape, pool2d_out_shape, reduce_out_shape,
-    require_same_shape, row_norm_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    conv2d_out_shape, flatten_out_shape, gather_out_shape, gemm_out_shape,
+    interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape, pad_out_shape,
+    pool2d_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -2876,45 +2877,14 @@ impl<'t> Var<'t> {
     ///
     /// 非 contiguous な入力に対する制約は `reshape` と同じ。
     pub fn flatten(&self, start_dim: usize, end_dim: usize) -> Result<Var<'t>, AutodiffError> {
-        let in_shape = self.shape();
-        let rank = in_shape.len();
-        if rank == 0 {
-            if start_dim == 0 && end_dim == 0 {
-                return self.reshape(&[1]);
-            }
-            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
-                axis: end_dim,
-                rank,
-            }));
-        }
-        if end_dim >= rank {
-            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
-                axis: end_dim,
-                rank,
-            }));
-        }
-        if start_dim > end_dim {
-            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
-                axis: start_dim,
-                rank,
-            }));
-        }
-        // 潰す軸区間の部分積は `checked_mul` で計算する（`reshape`／
-        // `broadcast_to` と同じ自前実装。ゼロ長軸を含む形状〈例:
-        // shape=[0, usize::MAX, 2]〉でも debug panic・release ラップを
-        // 起こさないための境界検査。REQ-8 趣旨の境界検査 A03 対策）。
-        let flattened = match in_shape[start_dim..=end_dim]
-            .iter()
-            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
-        {
-            Some(n) => n,
-            None => {
-                return Err(AutodiffError::Shape(ShapeError::ElementCountOverflow));
-            }
-        };
-        let mut out_shape: Vec<usize> = in_shape[..start_dim].to_vec();
-        out_shape.push(flattened);
-        out_shape.extend_from_slice(&in_shape[end_dim + 1..]);
+        // shape 検査・出力 shape の確定は `tensor-core::flatten_out_shape`
+        // へ委譲する（イシュー #2065 でインライン実装を切り出し）。
+        // `nn::Flatten::forward_host`（tape 不要経路。`compat::Sequential::
+        // predict` が使う）も同じ関数を呼ぶことで、2 経路間の判定基準が
+        // 食い違う「判定迂回経路」を作らない（`Softmax::forward_host` が
+        // `reduce_out_shape` を tape 経路と共有する既存パターンの踏襲。
+        // `.claude/rules/security.md` A08）。
+        let out_shape = flatten_out_shape(&self.shape(), start_dim, end_dim)?;
         self.reshape(&out_shape)
     }
 

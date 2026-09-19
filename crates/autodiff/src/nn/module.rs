@@ -33,6 +33,7 @@ use crate::nn::batch_norm::{
 };
 use crate::nn::conv::{Conv1d, Conv2d};
 use crate::nn::embedding::Embedding;
+use crate::nn::flatten::Flatten;
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::nn::pooling::{
@@ -42,8 +43,8 @@ use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, ShapeError, Tensor, adaptive_pool2d_out_shape, batch_norm_layout,
-    broadcast_shape, gemm_out_shape, pool2d_out_shape, reduce_out_shape, require_same_shape,
-    row_norm_layout,
+    broadcast_shape, flatten_out_shape, gemm_out_shape, pool2d_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout,
 };
 
 /// [`Module::named_parameters`] の実装が、子 `Module`（`Linear` 等）を
@@ -93,10 +94,10 @@ pub trait Module {
     /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
     /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
     /// ない）とする。既定は [`BackendError::Unsupported`] を返す
-    /// fail-safe（本クレート内 15 実装〈`Linear`・`Relu`・`Sigmoid`・
+    /// fail-safe（本クレート内 16 実装〈`Linear`・`Relu`・`Sigmoid`・
     /// `Tanh`・`RmsNorm`・`LayerNorm`・`Softmax`・`LogSoftmax`・`Gelu`・
     /// `GeluTanh`・`Softplus`・`Silu`・`Hardswish`・`LeakyRelu`・`Elu`
-    /// （イシュー #1714）〉はいずれも
+    /// （イシュー #1714）・`Flatten`（イシュー #2065）〉はいずれも
     /// このデフォルトを
     /// オーバーライドする。呼び出し元
     /// が独自の `Module` 実装をこの経路で使う場合、`Unsupported` を
@@ -826,6 +827,33 @@ impl Module for Softplus {
             },
             input,
         )
+    }
+}
+
+/// `Flatten::forward` への委譲（イシュー #2065）。`start_dim`／
+/// `end_dim` の範囲検査は `Var::flatten` → `tensor-core::
+/// flatten_out_shape` が行うため（fallible）、`?` で伝播するだけの
+/// `Relu` と違い戻り値をそのまま返す。
+impl Module for Flatten {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Flatten::forward(self, input)
+    }
+
+    /// `Var::flatten`（`var.rs`）と**同一の共有関数**
+    /// （[`flatten_out_shape`]）を `tape` 不要経路で呼ぶことで、
+    /// 判定基準が食い違う「判定迂回経路」を作らない（`Softmax::
+    /// forward_host` が [`reduce_out_shape`] を共有する既存パターンの
+    /// 踏襲。`.claude/rules/security.md` A08）。`ops` は算術を一切
+    /// 行わない view 演算のため未使用（`_ops`）。`Tensor::reshape` が
+    /// 返す `ShapeError` は `impl From<ShapeError> for AutodiffError`
+    /// で `?` により自動変換される。
+    fn forward_host(
+        &self,
+        _ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let out_shape = flatten_out_shape(input.shape(), self.start_dim(), self.end_dim())?;
+        Ok(input.reshape(&out_shape)?)
     }
 }
 

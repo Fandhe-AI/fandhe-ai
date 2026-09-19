@@ -84,7 +84,15 @@
 //! 追加し、`fandhe_ai_facade::compat::sequential::Sequential` の学習
 //! 経路（`bind`／`trainable_parameters`／`apply_parameters` 等）へ
 //! 接続した（`docs/compat-api-scope.md` §5 手続き・親 #1645 コメントで
-//! ユーザー承認済み）。
+//! ユーザー承認済み）。イシュー #2065（親 #2059）で [`Flatten`]（`flatten`
+//! モジュール）を追加した。`Var::flatten`（#1597）を薄くラップする
+//! のみで新規 `Op`／`BackendOps`／VJP は追加しない。同イシューで
+//! `fandhe_ai_facade::compat::sequential::Sequential` に
+//! `add_softmax`／`add_log_softmax`／`add_gelu`／`add_gelu_tanh`／
+//! `add_softplus`／`add_flatten` の 6 `pub fn` を追加した（`Softmax`／
+//! `LogSoftmax`／`Gelu`／`GeluTanh`／`Softplus` 自体は `nn::activation`
+//! に既存実装済み。`docs/compat-api-scope.md` §5「適用記録（経路2。
+//! イシュー #2065）」参照）。
 
 mod attention;
 mod batch_norm;
@@ -92,6 +100,7 @@ mod container;
 mod conv;
 mod dropout;
 mod embedding;
+mod flatten;
 mod init;
 mod linear;
 mod module;
@@ -111,6 +120,7 @@ pub use container::{ModuleList, Sequential};
 pub use conv::{Conv1d, Conv1dVars, Conv2d, Conv2dVars};
 pub use dropout::Dropout;
 pub use embedding::{Embedding, EmbeddingVars};
+pub use flatten::Flatten;
 pub use linear::{Linear, LinearVars, linear_forward_low_precision};
 pub use module::Module;
 pub use norm::{

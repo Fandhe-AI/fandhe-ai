@@ -329,6 +329,147 @@ pub fn reduce_out_shape(shape: &[usize], dim: Option<usize>) -> Result<Vec<usize
     }
 }
 
+/// `flatten`（`Var::flatten`・`nn::Flatten`。イシュー #2065）の出力
+/// shape を検査・計算する。
+///
+/// PyTorch `torch.flatten(input, start_dim, end_dim)` と同じ規約で
+/// `[start_dim, end_dim]`（両端含む）の連続軸を 1 軸へ潰す。
+/// `Var::flatten`（`crates/autodiff/src/var.rs`）のインライン実装
+/// （イシュー #2065 以前）をそのまま切り出したもので、判定基準は
+/// 変更しない——`Var::flatten`（tape 経路）と新設
+/// `nn::Flatten::forward_host`（tape 不要経路。`compat::Sequential::
+/// predict` が使う）の両方から本関数を呼ぶことで、2 経路間の
+/// 判定基準が食い違う「判定迂回経路」を作らない（`Softmax::
+/// forward_host` が [`reduce_out_shape`] を tape 経路と共有する
+/// 既存パターンの踏襲。`.claude/rules/security.md` A08）。
+///
+/// - `shape` が rank 0（スカラー）の場合: `start_dim == 0 &&
+///   end_dim == 0` のみ許容し出力 shape `[1]` を返す（PyTorch の
+///   `torch.flatten` がスカラーを 1 要素ベクトルへ変換する挙動に
+///   揃える）。それ以外は `ShapeError::AxisOutOfRange { axis: end_dim,
+///   rank: 0 }` を返す。
+/// - `end_dim >= rank` の場合 `ShapeError::AxisOutOfRange`。
+/// - `start_dim > end_dim` の場合 `ShapeError::AxisOutOfRange`
+///   （`axis: start_dim`）。
+/// - 潰す軸区間 `shape[start_dim..=end_dim]` の部分積は
+///   `checked_mul` で計算し、オーバーフロー時（ゼロ長軸を含む形状
+///   でも debug panic・release ラップを起こさないための境界検査。
+///   REQ-8 趣旨の境界検査。`.claude/rules/coding-rust.md`）
+///   `ShapeError::ElementCountOverflow` を返す。
+/// - 出力 shape は `shape[..start_dim]` ++ `[flattened]` ++
+///   `shape[end_dim + 1..]`。
+pub fn flatten_out_shape(
+    shape: &[usize],
+    start_dim: usize,
+    end_dim: usize,
+) -> Result<Vec<usize>, ShapeError> {
+    let rank = shape.len();
+    if rank == 0 {
+        if start_dim == 0 && end_dim == 0 {
+            return Ok(vec![1]);
+        }
+        return Err(ShapeError::AxisOutOfRange {
+            axis: end_dim,
+            rank,
+        });
+    }
+    if end_dim >= rank {
+        return Err(ShapeError::AxisOutOfRange {
+            axis: end_dim,
+            rank,
+        });
+    }
+    if start_dim > end_dim {
+        return Err(ShapeError::AxisOutOfRange {
+            axis: start_dim,
+            rank,
+        });
+    }
+    let flattened = match shape[start_dim..=end_dim]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+    {
+        Some(n) => n,
+        None => return Err(ShapeError::ElementCountOverflow),
+    };
+    let mut out_shape: Vec<usize> = shape[..start_dim].to_vec();
+    out_shape.push(flattened);
+    out_shape.extend_from_slice(&shape[end_dim + 1..]);
+    Ok(out_shape)
+}
+
+#[cfg(test)]
+mod flatten_out_shape_tests {
+    use super::*;
+
+    #[test]
+    fn rank0_start_end_zero_wraps_to_singleton() {
+        assert_eq!(flatten_out_shape(&[], 0, 0).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn rank0_nonzero_dims_are_rejected() {
+        assert!(matches!(
+            flatten_out_shape(&[], 0, 1),
+            Err(ShapeError::AxisOutOfRange { axis: 1, rank: 0 })
+        ));
+    }
+
+    #[test]
+    fn full_flatten_collapses_all_axes() {
+        assert_eq!(flatten_out_shape(&[2, 3, 4], 0, 2).unwrap(), vec![24]);
+    }
+
+    #[test]
+    fn partial_flatten_preserves_untouched_axes() {
+        // PyTorch `torch.flatten(x, 1, 2)` 相当: [N, C, H, W] → [N, C*H, W]
+        assert_eq!(
+            flatten_out_shape(&[2, 3, 4, 5], 1, 2).unwrap(),
+            vec![2, 12, 5]
+        );
+    }
+
+    #[test]
+    fn single_axis_range_is_identity() {
+        assert_eq!(flatten_out_shape(&[2, 3, 4], 1, 1).unwrap(), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn end_dim_out_of_range_is_rejected() {
+        assert!(matches!(
+            flatten_out_shape(&[2, 3], 0, 5),
+            Err(ShapeError::AxisOutOfRange { axis: 5, rank: 2 })
+        ));
+    }
+
+    #[test]
+    fn start_dim_greater_than_end_dim_is_rejected() {
+        assert!(matches!(
+            flatten_out_shape(&[2, 3, 4], 2, 0),
+            Err(ShapeError::AxisOutOfRange { axis: 2, rank: 3 })
+        ));
+    }
+
+    #[test]
+    fn element_count_overflow_is_rejected() {
+        assert!(matches!(
+            flatten_out_shape(&[usize::MAX, 2], 0, 1),
+            Err(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn zero_length_axis_in_range_yields_zero_without_panic() {
+        // ゼロ長軸を含む区間の部分積は 0（`checked_mul` はオーバーフロー
+        // しない）。REQ-8 趣旨の境界検査が panic・ラップを起こさないこと
+        // の確認。
+        assert_eq!(
+            flatten_out_shape(&[0, usize::MAX, 2], 0, 1).unwrap(),
+            vec![0, 2]
+        );
+    }
+}
+
 /// `cat`（`Var::cat`。イシュー #1598）の出力 shape を検査・計算する。
 ///
 /// `shapes` は連結対象の各テンソルの shape（空リストは呼び出し元
