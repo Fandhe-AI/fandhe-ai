@@ -10,8 +10,11 @@
 //! LeakyRelu/Elu/Dropout・Conv2d/Conv1d〈#1770〉・LayerNorm/RmsNorm/
 //! BatchNorm1d/BatchNorm2d/Embedding/MultiheadAttention〈#1760〉・
 //! MaxPool2d/MaxPool1d/AvgPool2d/AvgPool1d/AdaptiveAvgPool2d/
-//! AdaptiveAvgPool1d〈#1957〉。GELU／Softplus は #1713、同手続きを
-//! 経ずに追加しない）。`Dropout` は本クレート内実装で
+//! AdaptiveAvgPool1d〈#1957〉・Softmax/LogSoftmax・
+//! GELU（誤差関数版・tanh 近似版）/Softplus・Flatten〈#2065 で
+//! `add_softmax`／`add_log_softmax`／`add_gelu`／`add_gelu_tanh`／
+//! `add_softplus`／`add_flatten` として追加済み〉）。`Dropout` は
+//! 本クレート内実装で
 //! 唯一 `set_training`／`training`（イシュー #1758）を実際に保持する
 //! 層のため、`Sequential::set_training` の伝播がここで初めて実挙動差
 //! を生む（`nn::Dropout` モジュール doc 参照）。
@@ -99,11 +102,14 @@ use crate::{
     AutodiffError, BackendError, DeviceParamStore, Gradients, LinearVars, ResidentLeaf, Tape,
     Tensor, Var,
 };
-use fandhe_ai_autodiff::nn::activation::{Elu, Hardswish, LeakyRelu, Relu, Sigmoid, Silu, Tanh};
+use fandhe_ai_autodiff::nn::activation::{
+    Elu, Gelu, GeluTanh, Hardswish, LeakyRelu, LogSoftmax, Relu, Sigmoid, Silu, Softmax, Softplus,
+    Tanh,
+};
 use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, BatchNorm1d, BatchNorm2d,
     BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Dropout, Embedding, EmbeddingVars,
-    LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module, MultiheadAttention,
+    Flatten, LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module, MultiheadAttention,
     MultiheadAttentionVars, RmsNorm, RmsNormVars, Sequential as NnSequential,
     linear_forward_low_precision,
 };
@@ -220,6 +226,64 @@ impl Sequential {
     /// と同様融合対象外。
     pub fn add_elu(mut self, alpha: f32) -> Self {
         self.inner.push(Box::new(Elu::new(alpha)));
+        self
+    }
+
+    /// Softmax 層を追加する（`nn::activation::Softmax`。イシュー
+    /// #2065）。`dim`（softmax を適用する軸）の範囲検査は構築時では
+    /// なく forward 時（`Var::softmax` 内部）に行われるため
+    /// （`Softmax::new` 自体が infallible）、[`Sequential::add_relu`]
+    /// と同型の遅延検査契約として `Result` を返さず `Self` を返す。
+    pub fn add_softmax(mut self, dim: usize) -> Self {
+        self.inner.push(Box::new(Softmax::new(dim)));
+        self
+    }
+
+    /// LogSoftmax 層を追加する（`nn::activation::LogSoftmax`。イシュー
+    /// #2065）。[`Sequential::add_softmax`] と同じ遅延検査契約。
+    pub fn add_log_softmax(mut self, dim: usize) -> Self {
+        self.inner.push(Box::new(LogSoftmax::new(dim)));
+        self
+    }
+
+    /// GELU（誤差関数版）層を追加する（`nn::activation::Gelu`。
+    /// イシュー #2065）。ユニット構造体のため構築時検査は無い。
+    pub fn add_gelu(mut self) -> Self {
+        self.inner.push(Box::new(Gelu));
+        self
+    }
+
+    /// GELU（tanh 近似版）層を追加する（`nn::activation::GeluTanh`。
+    /// イシュー #2065）。[`Sequential::add_gelu`] と同型。
+    pub fn add_gelu_tanh(mut self) -> Self {
+        self.inner.push(Box::new(GeluTanh));
+        self
+    }
+
+    /// Softplus 層を追加する（`nn::activation::Softplus`。イシュー
+    /// #2065）。`Softplus::new` が構築時に `beta`／`threshold` の
+    /// 有限性・符号を検査し `Result` を返すため（`nn/activation.rs`
+    /// 参照）、本メソッドも [`Sequential::add_dropout`]／
+    /// [`Sequential::add_layer_norm`] と同型で
+    /// `Result<Self, AutodiffError>` を返す。PyTorch `nn.Softplus` の
+    /// 既定値は `beta=1.0`・`threshold=20.0`（`Softplus::default`）。
+    pub fn add_softplus(mut self, beta: f32, threshold: f32) -> Result<Self, AutodiffError> {
+        let layer = Softplus::new(beta, threshold)?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
+    /// Flatten 層を追加する（`nn::Flatten`。イシュー #2065）。
+    /// `[start_dim, end_dim]`（両端含む）の連続軸を 1 軸へ潰す
+    /// （`Var::flatten` への委譲。PyTorch `torch.flatten(start_dim,
+    /// end_dim)` と同じ規約・負インデックスの糖衣構文は提供しない）。
+    /// 典型例: CNN（`Conv2d`／pooling）の `[N, C, H, W]` 出力を
+    /// `add_flatten(1, 3)` で `[N, C*H*W]` へ潰し `add_linear` へ渡す。
+    /// shape 不整合は構築時ではなく forward 時に `AutodiffError::Shape`
+    /// として現れるため、[`Sequential::add_softmax`] と同型の遅延検査
+    /// 契約として `Result` を返さず `Self` を返す。
+    pub fn add_flatten(mut self, start_dim: usize, end_dim: usize) -> Self {
+        self.inner.push(Box::new(Flatten::new(start_dim, end_dim)));
         self
     }
 
