@@ -9,11 +9,25 @@ W="${HOME}/work"
 BEFORE="${W}/rust-ai-library-run"
 PRIME="${W}/rust-ai-library-2053-prime"
 AFTER="${W}/rust-ai-library-2053-after"
-LOGD="${W}/gb10-2053"; mkdir -p "${LOGD}"
+LOGD="${W}/gb10-2053"
 GB10D="docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10"
+FC="${BEFORE}/scripts/bench/framework-compare"
+LABELS=(2053-p1 2053-p2)
+# 再実行防止（fail-closed・書き込み前）: 既存の出力ディレクトリ・両 LABEL の JSONL／compare 記録が 1 つでもあれば
+# 何も書かずに停止する（RULE-attribution.txt: 系列の差し替え・上書き禁止。run_ab_sme_cpu.sh の内側検査より先に判定）。
+if [[ -e "${LOGD}" ]]; then echo "ERROR: ${LOGD} が既に存在する（前回の記録を上書きしない）-> 停止"; exit 1; fi
+for lb in "${LABELS[@]}"; do
+  if compgen -G "${FC}/results/raw/*${lb}*" > /dev/null || compgen -G "${FC}/compare-*-${lb}.*" > /dev/null; then
+    echo "ERROR: LABEL ${lb} の既存記録が ${FC} にある -> 停止"; exit 1
+  fi
+done
 SHA="$(cat "${BEFORE}/.rev-stamp")"
 [[ -n "${SHA}" ]] || { echo "ERROR: .rev-stamp が空"; exit 1; }
-[[ -f "${W}/filelist-2053-gb10.txt" ]] || { echo "ERROR: ${W}/filelist-2053-gb10.txt が無い"; exit 1; }
+FILELIST="${W}/filelist-2053-gb10.txt"
+[[ -f "${FILELIST}" ]] || { echo "ERROR: ${FILELIST} が無い"; exit 1; }
+NLIST=$(wc -l < "${FILELIST}")
+[[ "${NLIST}" -gt 100 ]] || { echo "ERROR: ${FILELIST} の行数が少なすぎる (${NLIST})"; exit 1; }
+mkdir -p "${LOGD}"
 echo "start $(date -u +%FT%TZ) sha=${SHA}"
 uptime > "${LOGD}/uptime_before.txt"
 
@@ -51,11 +65,17 @@ prepare_arm "${AFTER}" "docs/perf/logs/cpu-gemm-sme-fmopa-1587/on-arm.patch" aft
 } > "${LOGD}/gate_constant.txt"; cat "${LOGD}/gate_constant.txt"
 
 # ツリー指紋（3 腕。各パッチ腕と before の差分は mod.rs の 1 件のみ。不一致なら計測前に中止）
+# 一覧の全ファイルを取得できたことを腕ごとに検査する（sha256sum の失敗・stderr・行数不一致のいずれでも中止）
 for t in before prime after; do
   T="${BEFORE}"; [[ "${t}" == prime ]] && T="${PRIME}"; [[ "${t}" == after ]] && T="${AFTER}"
-  ( cd "${T}" && tr '\n' '\0' < "${W}/filelist-2053-gb10.txt" | xargs -0 sha256sum ) > "${LOGD}/fp-${t}.txt" 2>/dev/null
+  if ! ( cd "${T}" && tr '\n' '\0' < "${FILELIST}" | xargs -0 sha256sum ) > "${LOGD}/fp-${t}.txt" 2> "${LOGD}/fp-${t}.err"; then
+    echo "ERROR: ${t} の指紋取得に失敗 -> 中止"; head "${LOGD}/fp-${t}.err"; exit 1
+  fi
+  [[ -s "${LOGD}/fp-${t}.err" ]] && { echo "ERROR: ${t} の指紋取得で stderr 出力あり -> 中止"; head "${LOGD}/fp-${t}.err"; exit 1; }
+  NFP=$(wc -l < "${LOGD}/fp-${t}.txt")
+  [[ "${NFP}" -eq "${NLIST}" ]] || { echo "ERROR: ${t} の指紋行数 ${NFP} が一覧 ${NLIST} と不一致 -> 中止"; exit 1; }
+  rm -f "${LOGD}/fp-${t}.err"
 done
-[[ $(wc -l < "${LOGD}/fp-before.txt") -gt 100 ]] || { echo "ERROR: 指紋の行数が少なすぎる"; exit 1; }
 for t in prime after; do
   diff "${LOGD}/fp-before.txt" "${LOGD}/fp-${t}.txt" > "${LOGD}/fp-diff-${t}.txt"
   NCH=$(grep -cE "^[<>]" "${LOGD}/fp-diff-${t}.txt"); NMOD=$(grep -cE "^[<>].*crates/backend-cpu/src/gemm_blis/mod\.rs$" "${LOGD}/fp-diff-${t}.txt")
@@ -82,10 +102,9 @@ run_pair() { # $1=LABEL $2=AB_BEFORE ツリー $3=AB_AFTER ツリー $4=組名
   local label=$1 bt=$2 at=$3 name=$4
   echo "-- A/B ${name} (${label}) $(date -u +%FT%TZ)"
   gate "${name}" || true
-  ( cd "${BEFORE}/scripts/bench/framework-compare" && \
+  ( cd "${FC}" && \
     AB_BEFORE_FACADE_PATH="${bt}/crates/facade" AB_AFTER_FACADE_PATH="${at}/crates/facade" AB_DEVICE=cpu \
     bash run_ab_sme_cpu.sh "${label}" ) > "${LOGD}/run_ab-${name}.log" 2>&1; echo "run_ab ${name} rc=$?" | tee -a "${LOGD}/run_ab-${name}.log"
-  local FC="${BEFORE}/scripts/bench/framework-compare"
   mkdir -p "${LOGD}/r1r2-${name}"
   cp "${FC}"/results/raw/*"${label}"* "${LOGD}/r1r2-${name}/" 2>/dev/null
   rm -f "${LOGD}/r1r2-${name}"/bench-fandhe-*
