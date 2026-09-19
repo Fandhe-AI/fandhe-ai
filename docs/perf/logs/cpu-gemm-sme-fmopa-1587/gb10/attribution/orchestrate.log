@@ -1,0 +1,61 @@
+start 2026-09-19T02:35:05Z sha=ac3e0639fedf7ba9e5621174530d108f139595da
+-- prepare prime tree (2026-09-19T02:35:05Z)
+-- prepare after tree (2026-09-19T02:35:05Z)
+before: 3085:const SME_PRODUCTION_ENABLED: bool = false;
+before: 993:    if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
+prime: 3085:const SME_PRODUCTION_ENABLED: bool = true;
+prime: 993:    if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
+after: 3085:const SME_PRODUCTION_ENABLED: bool = true;
+after: 993:    if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
+fp diff before..prime: changed_lines=2 mod_lines=2
+fp diff before..after: changed_lines=2 mod_lines=2
+start attempt=1 load1=0.22 gpu_util=0 pass
+-- R0 sme_report (2026-09-19T02:35:06Z)
+before: sme_report=SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }
+prime: sme_report=SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }
+after: sme_report=SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }
+-- A/B p1 (2053-p1) 2026-09-19T02:35:26Z
+p1 attempt=2 load1=0.80 gpu_util=0 pass
+run_ab p1 rc=0
+== p1 gemm
+| size/mode | before median | after median | after/before | checksum | 判定 | run 内比（5 run） | 符号一貫（全 run >1.00） |
+|---|---|---|---|---|---|---|---|
+| 512/fresh | 1.603 ms (min 959.2 us / max 1.815 ms) | 1.629 ms (min 1.434 ms / max 1.839 ms) | 1.0160 | 完全一致 | 後退（判定注意: before spread > 1.5x・負荷ノイズの疑い） | 1.7297, 0.8976, 1.1470, 0.8557, 1.0154 | いいえ |
+| 512/reuse | 2.442 ms (min 2.302 ms / max 2.612 ms) | 2.451 ms (min 2.236 ms / max 2.560 ms) | 1.0035 | 完全一致 | 後退 | 0.9713, 0.9800, 1.0035, 1.0003, 0.9730 | いいえ |
+| 1024/fresh | 4.548 ms (min 4.163 ms / max 4.811 ms) | 4.506 ms (min 3.745 ms / max 4.662 ms) | 0.9908 | 完全一致 | 非後退 | 0.9262, 0.9691, 0.8996, 1.0062, 1.0226 | いいえ |
+| 1024/reuse | 5.609 ms (min 5.559 ms / max 5.769 ms) | 5.705 ms (min 5.521 ms / max 5.773 ms) | 1.0171 | 完全一致 | 後退 | 0.9907, 1.0035, 0.9570, 1.0251, 1.0292 | いいえ |
+| 2048/fresh | 17.158 ms (min 16.652 ms / max 17.419 ms) | 17.225 ms (min 16.447 ms / max 17.746 ms) | 1.0039 | 完全一致 | 後退 | 1.0011, 0.9776, 0.9514, 1.0344, 1.0430 | いいえ |
+| 2048/reuse | 27.497 ms (min 22.926 ms / max 27.788 ms) | 26.657 ms (min 26.384 ms / max 28.082 ms) | 0.9695 | 完全一致 | 非後退 | 1.0005, 1.1628, 0.9656, 1.0905, 0.9495 | いいえ |
+== p1 train
+| size/mode | before median | after median | after/before | checksum | 判定 | run 内比（5 run） | 符号一貫（全 run >1.00） |
+|---|---|---|---|---|---|---|---|
+| 64/fresh | 1.053 ms (min 1.045 ms / max 1.078 ms) | 1.063 ms (min 1.037 ms / max 1.122 ms) | 1.0102 | 完全一致 | 後退 | 0.9808, 0.9792, 1.0173, 1.0720, 1.0310 | いいえ |
+| 64/reuse | 1.058 ms (min 962.5 us / max 1.131 ms) | 986.7 us (min 927.8 us / max 1.070 ms) | 0.9328 | 完全一致 | 非後退 | 0.9725, 0.8331, 1.1121, 0.8771, 0.9501 | いいえ |
+== p1 infer
+| size/mode | before median | after median | after/before | checksum | 判定 | run 内比（5 run） | 符号一貫（全 run >1.00） |
+|---|---|---|---|---|---|---|---|
+| 64/fresh | 177.0 us (min 165.9 us / max 192.2 us) | 177.5 us (min 167.5 us / max 189.4 us) | 1.0032 | 完全一致 | 後退 | 1.0411, 0.8848, 1.0032, 1.0098, 1.1321 | いいえ |
+| 64/reuse | 179.9 us (min 175.0 us / max 193.7 us) | 180.3 us (min 177.8 us / max 189.9 us) | 1.0024 | 完全一致 | 後退 | 1.0648, 0.9309, 0.9763, 0.9997, 1.0164 | いいえ |
+-- A/B p2 (2053-p2) 2026-09-19T02:37:08Z
+p2 attempt=4 load1=0.85 gpu_util=0 pass
+run_ab p2 rc=0
+== p2 gemm
+| size/mode | before median | after median | after/before | checksum | 判定 | run 内比（5 run） | 符号一貫（全 run >1.00） |
+|---|---|---|---|---|---|---|---|
+| 512/fresh | 1.570 ms (min 1.481 ms / max 1.807 ms) | 1.600 ms (min 1.510 ms / max 1.714 ms) | 1.0197 | 完全一致 | 後退 | 0.9392, 1.0270, 1.1572, 0.8938, 1.0197 | いいえ |
+| 512/reuse | 2.344 ms (min 2.232 ms / max 2.528 ms) | 2.514 ms (min 2.394 ms / max 2.660 ms) | 1.0724 | 完全一致 | 後退 | 1.1077, 1.1330, 1.1191, 1.1110, 0.9470 | いいえ |
+| 1024/fresh | 4.772 ms (min 4.173 ms / max 4.960 ms) | 4.474 ms (min 4.038 ms / max 4.761 ms) | 0.9375 | 完全一致 | 非後退 | 0.9678, 0.9976, 0.9914, 0.9611, 0.9021 | いいえ |
+| 1024/reuse | 5.646 ms (min 5.538 ms / max 5.833 ms) | 5.669 ms (min 5.567 ms / max 5.836 ms) | 1.0041 | 完全一致 | 後退 | 1.0532, 1.0355, 0.9669, 1.0020, 0.9719 | いいえ |
+| 2048/fresh | 17.294 ms (min 16.608 ms / max 17.891 ms) | 16.308 ms (min 15.783 ms / max 16.634 ms) | 0.9430 | 完全一致 | 非後退 | 0.9115, 0.9503, 0.9474, 0.9248, 0.9823 | いいえ |
+| 2048/reuse | 27.148 ms (min 22.109 ms / max 27.954 ms) | 26.206 ms (min 20.567 ms / max 27.562 ms) | 0.9653 | 完全一致 | 非後退 | 0.7856, 0.9539, 0.9918, 0.9653, 1.0518 | いいえ |
+== p2 train
+| size/mode | before median | after median | after/before | checksum | 判定 | run 内比（5 run） | 符号一貫（全 run >1.00） |
+|---|---|---|---|---|---|---|---|
+| 64/fresh | 1.033 ms (min 1.011 ms / max 1.118 ms) | 1.002 ms (min 945.3 us / max 1.069 ms) | 0.9698 | 完全一致 | 非後退 | 0.8965, 0.9585, 0.9148, 1.0579, 0.9987 | いいえ |
+| 64/reuse | 1.041 ms (min 972.9 us / max 1.067 ms) | 1.081 ms (min 993.1 us / max 1.113 ms) | 1.0388 | 完全一致 | 後退 | 1.1114, 0.9541, 1.0218, 1.0569, 1.0501 | いいえ |
+== p2 infer
+| size/mode | before median | after median | after/before | checksum | 判定 | run 内比（5 run） | 符号一貫（全 run >1.00） |
+|---|---|---|---|---|---|---|---|
+| 64/fresh | 169.6 us (min 160.9 us / max 192.7 us) | 180.4 us (min 170.8 us / max 187.4 us) | 1.0638 | 完全一致 | 後退 | 1.0350, 1.0977, 1.1213, 0.9311, 0.9722 | いいえ |
+| 64/reuse | 194.2 us (min 177.0 us / max 197.4 us) | 186.7 us (min 179.3 us / max 200.4 us) | 0.9613 | 完全一致 | 非後退 | 1.0133, 0.9692, 0.9165, 1.1325, 0.9456 | いいえ |
+done. 2026-09-19T02:39:49Z

@@ -1,0 +1,12 @@
+warning: associated function `try_new` is never used
+   --> <home>/work/rust-ai-library-2053-prime/crates/backend-cpu/src/gemm_blis/microkernel.rs:775:19
+    |
+767 | impl SmeKernel {
+    | -------------- associated function in this implementation
+...
+775 |     pub(crate) fn try_new() -> Option<Self> {
+    |                   ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+sme_report=SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }
