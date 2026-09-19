@@ -1,0 +1,3 @@
+bench-fandhe v0.1.0 (<home>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-fandhe)
+├── bench-common v0.1.0 (<home>/work/rust-ai-library-run/scripts/bench/framework-compare/bench-common)
+└── fandhe-ai v0.9.0 (<home>/work/rust-ai-library-2053-prime/crates/facade)

@@ -1,0 +1,6 @@
+before: 3085:const SME_PRODUCTION_ENABLED: bool = false;
+before: 993:    if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
+prime: 3085:const SME_PRODUCTION_ENABLED: bool = true;
+prime: 993:    if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
+after: 3085:const SME_PRODUCTION_ENABLED: bool = true;
+after: 993:    if let Some(kernel) = microkernel::Avx512Kernel::try_new() {

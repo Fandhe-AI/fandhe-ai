@@ -35,6 +35,14 @@
   （gemm512／1024／2048・train・infer）すべて一致・RR（after 2 回目）も
   一致。総合判定 **「bit 同一: 成立」**（同 doc §5.6。
   `SME_PRODUCTION_ENABLED=false` は不変）。
+- **GB10 側の 1024/reuse 後退の帰属切り分けは 2026-09-19（UTC）に
+  `gb10/attribution/` で実施済み**（イシュー #2053。事前登録
+  `gb10/RULE-attribution.txt`〈#2052〉）。before／after′／after の 3 腕・
+  2 組 A/B（各 5 round）で、1024/reuse は組 1（before vs after′）1.0171・
+  組 2（after′ vs after）1.0041 といずれも 5/5 一貫でなく、判定は
+  (c)「未分離（ノイズ帯）。#1978 残の 5/5 一貫は再現せず」。checksum 全一致・
+  `SME_PRODUCTION_ENABLED=false` は不変。詳細は
+  `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.7
 
 ## ディレクトリ構成
 
@@ -102,7 +110,19 @@
   after′／after〉のツリー準備・指紋差分 assert・外側専有ゲート〈記録のみ〉・
   R0 3 腕・`run_ab_sme_cpu.sh` 2 組〈LABEL `2053-p1`／`2053-p2`〉。
   既存 `orchestrate_gb10.sh` は不変。実測と `attribution/` への収録は
-  #2053）
+  #2053）・
+  `attribution/`（#2053 の実測成果物・2026-09-19 UTC・main `ac3e0639`。
+  `orchestrate.log`・`sme_report.txt`・`sme_probe_{before,prime,after}.log`・
+  `gate_constant.txt`〈2 行目は grep 不備で AVX-512 経路の行を拾っている。
+  SME 経路の差分は `fp-diff-*.txt` で担保〉・`patch_sha256.txt`・
+  `patch_apply_{prime,after}.log`・`fp-{before,prime,after}.txt`／
+  `fp-diff-{prime,after}.txt`・`load_gate_outer.log`・`run_ab-p{1,2}.log`・
+  `r1r2-p{1,2}/`〈LABEL `2053-p1`／`2053-p2`。compare-*.md／.err・JSONL・
+  build .err・load-gate・uptime・compare-exit・skipped・sha・tree〉・
+  `uptime_{before,after}.txt`・`env_info.txt`・`fp-mac.txt`／`rev-stamp-verification.md`〈Mac 側 `git archive` 展開の指紋と GB10 before 指紋の突合記録〉。判定は RULE-attribution.txt
+  の **(c) 未分離（ノイズ帯）**——2 組 × 6 セルに 5/5 一貫の後退なし・
+  checksum 全一致。bench-fandhe バイナリは除外・絶対パスは `<home>` へ
+  マスク済み・内部ホスト名は含めない）
 - `r1r2/` — R1（framework-compare gemm／train／infer cpu）・R2
   （checksum）の実測一式
   - `compare-{gemm,train,infer}-1978-cpu.md` — before/after 比較表（是正前の

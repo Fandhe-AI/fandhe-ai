@@ -521,7 +521,9 @@ loss を小数点以下 6 桁へ丸めた値（`bench-common::Record::to_json_li
   0.9967・2048/reuse 0.8968）と round 内の大きな揺れ（512/fresh の 2.007）
   は共有負荷ノイズと整合するが、5/5 一貫という事実は規則どおり後退
   として扱う。分離には SME 検出コールの有無だけを変えた腕（`try_new`
-  を呼ばない after′）のプロセス分離計測が必要で、本 issue の範囲外。
+  を呼ばない after′）のプロセス分離計測が必要で、本 issue の範囲外
+  （→ §5.7 で実施済み。事前登録規則 (c)「未分離（ノイズ帯）。#1978 残の
+  5/5 一貫は再現せず」）。
 - **#1979 への申し送り**: `SME_PRODUCTION_ENABLED=true` へ切り替える場合、
   GB10 側は本節の後退 1 セルを前提に再計測（または `sme_report()` の
   結果で `SME_PRODUCTION_ENABLED` 経路をプロセス起動時に一度だけ閉じる
@@ -577,6 +579,73 @@ train size=64〈reuse・L1 d_weight 784×256×64 が `sme_shape_eligible`
   `RAYON_NUM_THREADS` 未設定（`gb10/bitdump/env_info.txt`。絶対パスは
   `<home>` へマスク・内部ホスト名は含めない）。両腕とも release ビルドは
   約 10 秒（`*_raw.summary.log` の `Finished` 行）・テスト本体は約 0.4 秒。
+
+### 5.7 GB10 側の 1024/reuse 後退の帰属切り分け（DGX Spark GB10・イシュー #2051／#2052／#2053。2026-09-19 UTC）
+
+§5.5 が「未検証の仮説」として残した gemm cpu 1024/reuse の 5/5 一貫
+後退（1.0363）の原因を、`SmeKernel::try_new()` 到達の有無だけを変えた
+第 3 の腕 after′ を挟む 2 組のプロセス分離 A/B で切り分けた。判定規則は
+実測前にコミットした `gb10/RULE-attribution.txt`（#2052・PR #2056）。
+成果物は `docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/attribution/`。
+
+- **腕**: before = main `ac3e0639`（`SME_PRODUCTION_ENABLED=false`）、
+  after′ = 同ツリー + `gb10/on-arm-prime.patch`（sha256 `024d4fe2…`。
+  定数を `true` にしたうえで `dispatch_two_d_dynamic` の
+  `SmeKernel::try_new()` を `None::<SmeKernel>` へ置換）、after = 同ツリー
+  + `on-arm.patch`（sha256 `ca493a09…`。#1978 残・#2050 と同一）。
+  各パッチ腕と before のツリー指紋差分は `gemm_blis/mod.rs` の 1 件のみ
+  （`fp-diff-{prime,after}.txt`。オーケストレーションが実測前に assert）。
+  before 指紋は Mac 側 `git archive` 展開の sha256 と全 5,598 ファイル一致
+  （`attribution/fp-mac.txt`・`rev-stamp-verification.md`）。
+- **専有ゲート（記録）**: 外側 load1 < 1.0 かつ gpu_util 0% を開始時
+  attempt=1・組 1 attempt=2・組 2 attempt=4 で通過（`load_gate_outer.log`）。
+- **R0**: 3 腕とも `SmeReport { os_flag: false, svl_bytes: None,
+  kernel_enabled: false }`（`sme_report.txt`）。
+- **A/B**（`run_ab_sme_cpu.sh`・5 round・起動順反転・内側 load ゲート
+  8.0・両組とも rc=0・skipped 0 行・全セル checksum 完全一致）:
+
+  | 組 | セル | after/before 中央値比 | round 内比（5 round） | 5/5 一貫 |
+  |---|---|---|---|---|
+  | 組 1 before vs after′ | 512/fresh | 1.0160（before spread > 1.5x） | 1.7297, 0.8976, 1.1470, 0.8557, 1.0154 | いいえ |
+  | 〃 | 512/reuse | 1.0035 | 0.9713, 0.9800, 1.0035, 1.0003, 0.9730 | いいえ |
+  | 〃 | 1024/fresh | 0.9908 | 0.9262, 0.9691, 0.8996, 1.0062, 1.0226 | いいえ |
+  | 〃 | **1024/reuse** | 1.0171 | 0.9907, 1.0035, 0.9570, 1.0251, 1.0292 | いいえ |
+  | 〃 | 2048/fresh | 1.0039 | 1.0011, 0.9776, 0.9514, 1.0344, 1.0430 | いいえ |
+  | 〃 | 2048/reuse | 0.9695 | 1.0005, 1.1628, 0.9656, 1.0905, 0.9495 | いいえ |
+  | 組 2 after′ vs after | 512/fresh | 1.0197 | 0.9392, 1.0270, 1.1572, 0.8938, 1.0197 | いいえ |
+  | 〃 | 512/reuse | 1.0724 | 1.1077, 1.1330, 1.1191, 1.1110, 0.9470 | いいえ（4/5） |
+  | 〃 | 1024/fresh | 0.9375 | 0.9678, 0.9976, 0.9914, 0.9611, 0.9021 | いいえ |
+  | 〃 | **1024/reuse** | 1.0041 | 1.0532, 1.0355, 0.9669, 1.0020, 0.9719 | いいえ |
+  | 〃 | 2048/fresh | 0.9430 | 0.9115, 0.9503, 0.9474, 0.9248, 0.9823 | いいえ |
+  | 〃 | 2048/reuse | 0.9653 | 0.7856, 0.9539, 0.9918, 0.9653, 1.0518 | いいえ |
+
+  参考（判定に用いない）: train size=64 fresh／reuse は組 1 で
+  1.0102／0.9328・組 2 で 0.9698／1.0388、infer size=64 fresh／reuse は
+  組 1 で 1.0032／1.0024・組 2 で 1.0638／0.9613。いずれも 5/5 一貫でない。
+- **帰属判定（RULE-attribution.txt の 3 分岐。事後緩和なし）**: 組 1 の
+  1024/reuse は 5/5 一貫の後退でない（(b) 不成立）・組 2 の 1024/reuse も
+  5/5 一貫でない（(a) 不成立）ため、**(c)「未分離（ノイズ帯）。#1978 残の
+  5/5 一貫は再現せず」**。対象 12 セル（2 組 × 6）に 5/5 一貫の後退セルは
+  1 つもなく、組 2 の 512/reuse（4/5・中央値 1.0724）が最も後退方向に
+  寄るが規則上は「証拠なし」。
+- **解釈（判定ではない）**: 専有ゲート通過後の計測でも #1978 残の
+  5/5 一貫（§5.5・共有負荷なし・attempt=1 通過）が再現しなかったため、
+  §5.5 の後退 1 セルは `try_new` 到達コスト・定数切替のコード配置差の
+  いずれにも帰属できない。§5.5 の総合判定「後退あり」は規則どおり不変
+  （本節は §5.5 を書き換えない）。#1979 で `SME_PRODUCTION_ENABLED=true`
+  へ切り替える際に GB10 側で要求される再計測は §5.5 の申し送りのまま
+  だが、本節の結果は「同一条件で再測定すれば後退は 5/5 一貫では
+  出ない」ことを示す 1 系列の証拠として併記する。§5.5 が列挙した
+  `sme_report()` でプロセス起動時に経路を閉じる構成は、本節の証拠からは
+  必要性を導けない（対策案の列挙は (a) 成立時のみ・本節では不要）。
+  是正・`SME_PRODUCTION_ENABLED` の切替・新規 issue の起票は行わない。
+- 環境: Linux 6.17.0-1031-nvidia aarch64・rustc 1.97.0・nproc 20・
+  `RAYON_NUM_THREADS` 未設定（`gb10/attribution/env_info.txt`。
+  `cpu_model` 行はノード上の `lscpu` 出力形式の相違で空。絶対パスは
+  `<home>` へマスク・内部ホスト名は含めない）。`gate_constant.txt` の
+  2 行目（`let Some(kernel) = ` の先頭一致）は AVX-512 経路の 993 行目を
+  拾っており SME 経路の記録ではない（スクリプトの grep 不備。SME 経路の
+  差分は `fp-diff-*.txt` と `patch_apply_*.log` で担保）。
 
 ## 6. セキュリティ考慮（OWASP Top 10）
 

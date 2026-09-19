@@ -1,0 +1,2 @@
+024d4fe244a8479e28f3c2422a73fe9490763d9ec3647d6eadf699a44d02cb89  <home>/work/rust-ai-library-run/docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/on-arm-prime.patch
+ca493a098c14269615b285a79c70f43f4b6f74e42d2c8ca178eed2d2be721cff  <home>/work/rust-ai-library-run/docs/perf/logs/cpu-gemm-sme-fmopa-1587/on-arm.patch

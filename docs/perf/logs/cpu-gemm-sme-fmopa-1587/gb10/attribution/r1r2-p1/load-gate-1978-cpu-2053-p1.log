@@ -1,0 +1,6 @@
+threshold=8.0 rule_threshold=8.0 series=official
+round1 gate=pass threshold=8.0 load1=1.09 waited_s=0 at=2026-09-19T02:36:20Z
+round2 gate=pass threshold=8.0 load1=1.08 waited_s=0 at=2026-09-19T02:36:30Z
+round3 gate=pass threshold=8.0 load1=3.29 waited_s=0 at=2026-09-19T02:36:40Z
+round4 gate=pass threshold=8.0 load1=4.34 waited_s=0 at=2026-09-19T02:36:49Z
+round5 gate=pass threshold=8.0 load1=3.82 waited_s=0 at=2026-09-19T02:36:58Z
