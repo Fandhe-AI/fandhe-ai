@@ -454,9 +454,14 @@ train 64/fresh も ADOPT 候補条件を満たすため、SME の性能効果自
 変更せず新規の事前登録規則 `docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/RULE-gb10.txt`
 （計測前にコミット）で実施した。Grace CPU は SME 非対応のため、本節の
 目的は「`SME_PRODUCTION_ENABLED=true` にした after 腕が非 SME 環境で
-fail-closed に NEON へフォールバックし、bit 同一かつ非後退であること」
-の確認に限られる（#1979 受け入れ条件「非 SME 環境で bit 同一のフォール
-バック」の証拠）。Apple M4 Max の総合判定（§5.4.4 undetermined）は本節で
+fail-closed に NEON へフォールバックし（R0）、ハーネスの checksum が
+一致し（R2-GB10）、非後退であること（R1-GB10）」の確認に限られる。
+R2-GB10 が比較する checksum は gemm／infer の全要素和・train の最終
+loss を小数点以下 6 桁へ丸めた値（`bench-common::Record::to_json_line`）
+であり、要素間の相殺や丸めで異なる出力でも一致しうるため、**#1979
+受け入れ条件「非 SME 環境で bit 同一のフォールバック」の実証には
+ならない**（bit 同一性は全出力の `to_bits()` 比較または生バイト列の
+ハッシュ比較が必要。本節は未実施。PR #2048 codex-review 指摘）。Apple M4 Max の総合判定（§5.4.4 undetermined）は本節で
 変更しない。
 
 - **腕**: before = main `176f27e7`（`.rev-stamp` は RULE-gb10.txt のみ追加した
@@ -503,8 +508,10 @@ fail-closed に NEON へフォールバックし、bit 同一かつ非後退で�
   `compare-exit` は gemm 3／train 0／infer 3＝いずれも判定結果コード）。
 - **総合判定（RULE-gb10.txt の語彙）: 「GB10 非後退確認: 後退あり」**。
   根拠は gemm cpu 1024/reuse の 5/5 round 一貫の後退（1.0195〜1.0554）。
-  R0・R2-GB10 は成立しているため「非 SME 環境で bit 同一のフォール
-  バック」自体は成立している。是正・規則の事後緩和はしない。
+  R0・R2-GB10 は成立しているが、上記のとおり checksum 一致は bit 同一の
+  証拠にならないため、#1979 受け入れ条件「非 SME 環境で bit 同一の
+  フォールバック」は **checksum 一致を確認・bit 同一性は未確認** として
+  #1979 へ申し送る。是正・規則の事後緩和はしない。
 - **原因帰属（未検証の仮説として記録・判定には用いない）**: after 腕が
   before 腕と異なるのは `dispatch_two_d_dynamic` の
   `SME_PRODUCTION_ENABLED && sme_shape_eligible(..) && SmeKernel::try_new()`
@@ -518,7 +525,10 @@ fail-closed に NEON へフォールバックし、bit 同一かつ非後退で�
 - **#1979 への申し送り**: `SME_PRODUCTION_ENABLED=true` へ切り替える場合、
   GB10 側は本節の後退 1 セルを前提に再計測（または `sme_report()` の
   結果で `SME_PRODUCTION_ENABLED` 経路をプロセス起動時に一度だけ閉じる
-  構成の検討）が必要。
+  構成の検討）が必要。加えて「非 SME 環境で bit 同一のフォールバック」は
+  本節では checksum 一致までしか確認していないため、before／after 両腕の
+  全出力 `to_bits()` 比較（または生バイト列ハッシュ）を GB10 で別途取る
+  必要がある。
 
 ## 6. セキュリティ考慮（OWASP Top 10）
 

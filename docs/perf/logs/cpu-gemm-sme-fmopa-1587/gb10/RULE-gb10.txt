@@ -41,3 +41,10 @@ R2-GB10（checksum・必須）: 全 10 セルで before／after の checksum 完
   results-{before,after}-1978-gb10-cpu-{gemm,train,infer}.jsonl・compare-{gemm,train,infer}-1978-cpu-1978-gb10.md／.err・
   load-gate／uptime／compare-exit／skipped ログ・sha／tree ログ・rev-stamp-verification.md・env_info.txt
   （内部ホスト名・ユーザー名・絶対パスは <home> 等へマスク。バイナリはコミットしない）。
+
+# 追記（2026-09-19 UTC・PR #2048 codex-review 指摘。上記本文は変更しない）:
+#   R2-GB10 の checksum は gemm／infer の全要素和・train の最終 loss を小数点以下 6 桁へ丸めた値
+#   （bench-common::Record::to_json_line）であり、要素間の相殺・丸めで異なる出力でも一致しうる。
+#   したがって「#1979 受け入れ条件の証拠には R0＋R2-GB10 を用いる」は「checksum 一致の確認」までであり、
+#   bit 同一性（全出力の to_bits() 比較または生バイト列のハッシュ比較）は本規則の範囲では未確認とする。
+#   判定語彙・しきい値は変更しない（緩和ではなく、規則が実証できる範囲の限定）。
