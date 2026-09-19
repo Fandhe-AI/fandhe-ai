@@ -59,6 +59,15 @@
   `fp-before.txt`／`fp-diff.txt`・`rev-stamp-verification.md`・`env_info.txt`・
   `run_ab.log`／`orchestrate.log`・`r1r2/`（Mac 側と同じ構成。LABEL は
   `1978-gb10`）。絶対パスは `<home>` へマスク済み・内部ホスト名は含めない
+  `run_bitdump.sh`（イシュー #2049 新設。`SME_PRODUCTION_ENABLED`
+  on/off の before/after 2 ツリー間で `cpu_sme_gate_bit_dump.rs::
+  dump_cpu_sme_gate_bits`〈gemm512/1024/2048・train size=64（reuse・
+  L1 d_weight のみ到達）・infer size=64（非到達対照）〉の出力を
+  `diff`／`sha256sum` で bit 完全一致確認する診断スクリプト。
+  `--dry-run` 対応。実測本体は本イシューのスコープ外のため未実施）・
+  `bitdump/`（`run_bitdump.sh` の出力先。`*_bits.txt`／`summary.txt`
+  等の dump 本体はコミット対象外——`.gitignore` は設けず本ファイルと
+  `run_bitdump.sh` 冒頭コメントの明記のみで管理する）
 - `r1r2/` — R1（framework-compare gemm／train／infer cpu）・R2
   （checksum）の実測一式
   - `compare-{gemm,train,infer}-1978-cpu.md` — before/after 比較表（是正前の
