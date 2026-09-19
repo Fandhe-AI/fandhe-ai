@@ -84,7 +84,19 @@
 //! 追加し、`fandhe_ai_facade::compat::sequential::Sequential` の学習
 //! 経路（`bind`／`trainable_parameters`／`apply_parameters` 等）へ
 //! 接続した（`docs/compat-api-scope.md` §5 手続き・親 #1645 コメントで
-//! ユーザー承認済み）。
+//! ユーザー承認済み）。イシュー #2066（親 #2058）で [`GroupNorm`]／
+//! [`InstanceNorm`]（`normalization` モジュール）を追加した。既存の
+//! 最終軸限定 [`LayerNorm`]（`norm` モジュール）を「軸削減 reshape →
+//! `layer_norm`（affine なし）→ 逆 reshape」で呼ぶ合成のみで新規
+//! `Op`／`BackendOps`／VJP は追加しない（`normalization.rs` モジュール
+//! doc「軸削減公式」参照）。PyTorch 既定と異なり **affine（学習可能な
+//! per-channel `weight`／`bias`）を持たない**（`normalization.rs`
+//! モジュール doc「affine 非対応」節参照。`.claude/rules/
+//! coding-rust.md` の勾配長軸縮約契約との抵触を避けるため）。`Module`
+//! trait への統合（`as_group_norm`／`as_instance_norm`）はあるが、
+//! `docs/compat-api-scope.md` §5 の facade 公開面拡張承認が未取得の
+//! ため `compat::Sequential::add_group_norm`／`add_instance_norm` は
+//! 追加していない。
 
 mod attention;
 mod batch_norm;
@@ -96,6 +108,7 @@ mod init;
 mod linear;
 mod module;
 mod norm;
+mod normalization;
 mod pooling;
 mod rnn;
 
@@ -115,6 +128,9 @@ pub use linear::{Linear, LinearVars, linear_forward_low_precision};
 pub use module::Module;
 pub use norm::{
     LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, RMS_NORM_DEFAULT_EPS, RmsNorm, RmsNormVars,
+};
+pub use normalization::{
+    GROUP_NORM_DEFAULT_EPS, GroupNorm, INSTANCE_NORM_DEFAULT_EPS, InstanceNorm,
 };
 pub use pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
