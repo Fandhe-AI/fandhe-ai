@@ -419,3 +419,49 @@ Tier 1 として列挙済みのため §5 の範囲拡張手続きは不要（�
 - **CUDA persistent grid・occupancy 予算に基づく grid 最適化**: §5「CUDA」
   節参照。単純な `grid_dim = rows` マッピングのみを実装
 - **CUDA 実機実測**: §8 参照
+
+## 11. GroupNorm／InstanceNorm 実装記録（#2066）
+
+イシュー #2066（親 #2058）で `nn::GroupNorm`／`nn::InstanceNorm`
+（`crates/autodiff/src/nn/normalization.rs`）を実装した。
+
+- **軸削減公式**: 入力 `x: [N, C, *S]`（チャネル軸は dim 1。
+  `batch_norm_layout` と同じレイアウト契約）を
+  `[N*groups, (C/groups)*|S|]` へ reshape し、既存の最終軸限定
+  `Var::layer_norm(None, None, eps)`（本 doc §1〜§10）をそのまま適用
+  してから元の shape へ戻す。`c = g*cg + j`（`cg = C/groups`）とすると
+  `index(n,c,s) = (n*groups+g)*hidden + (j*spatial_numel+s)` が
+  `C = groups*cg` の代入のみで恒等的に成立するため、転置を一切伴わない
+  純粋な relabel として実装できる（`Var::einsum` と同型の「既存演算の
+  合成のみ・新規 `Op`／`BackendOps` を追加しない」方針）。`InstanceNorm`
+  は `groups = C` とした `GroupNorm` に等しい（PyTorch の既知の等価
+  関係）。
+- **affine 非対応（本イシューのスコープ判断）**: PyTorch の
+  `nn.GroupNorm`（既定 `affine=True`）／`nn.InstanceNorm1d/2d`（既定
+  `affine=False`）と異なり、本実装はいずれも学習可能な per-channel
+  `weight`／`bias` を持たない。理由は、affine を持たせると
+  per-channel パラメータへの勾配縮約が `[N,C,*S]` → `[1,C,1,...]` への
+  broadcast reduce になり、これは rank-2 `[m,n]→[n]/[1,n]` 限定の
+  `f64` 縮約経路（`grad::reduce_bias_grad`）に乗らず、汎用
+  `reduce_to_shape`（純 `f32` 逐次和）にしか乗らないため。
+  `.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64` 相当」
+  契約への抵触を避けるため、affine 対応は別イシューのスコープとして
+  見送った。
+- **facade 公開**: `Module` trait への統合（`as_group_norm`／
+  `as_instance_norm`）は行ったが、`docs/compat-api-scope.md` の
+  Tier 1／Tier 2 列挙に GroupNorm／InstanceNorm の行がなく、facade
+  公開面拡張（`compat::Sequential::add_group_norm`／
+  `add_instance_norm`）は同 §5 の承認（経路 1 または経路 2）が未取得の
+  ため実施していない。
+- **正しさ検証**: `crates/autodiff/src/nn/normalization.rs` の単体
+  テスト 19 件（構築時検査・shape 検査・手計算値突合・`groups=1` の
+  `layer_norm` との bit 一致・`groups=channels` の `InstanceNorm` との
+  bit 一致・0 要素契約・中央差分による `dx` 検証・`Module::forward`／
+  `forward_host` の一致）・`crates/facade/tests/
+  group_instance_norm_backend_parity.rs`（CPU 上の `CpuBackendOps` vs
+  `NaiveOps` の REQ-2 統一複合判定）。
+- **CUDA／Metal 実機 parity は未実測のまま
+  `docs/perf/logs/group-instance-norm-2066/` へ申し送り**（本エージェント
+  実行環境に CUDA／Metal 実機への到達手段がないため。専用カーネルは
+  追加していないため既存 `layer_norm` カーネルの正しさに全面的に依存
+  する構造上、リグレッションのリスクは低いと考えられるが実測は未実施）。

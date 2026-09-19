@@ -235,6 +235,24 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | Module の train／eval | #1617（#1758 で `nn::Module` trait 契約〈`set_training`／`training`。既定 no-op／`true`。無状態モジュールはオーバーライドせず、モードの正はコンテナ〈`compat::Sequential`〉が保持するフラグとする契約〉と `named_parameters`〈`Vec<(String, &Tensor<f32>)>`。struct フィールド名／accessor 名ベースの命名契約・`Linear`／`RmsNorm`／`LayerNorm`／`MultiheadAttention`／`Rnn`／`Lstm`／`Gru` で実装〉を実装済み。`compat::Sequential` に `set_training`／`train`／`eval`／`training`／`named_parameters`〈index 接頭辞契約。`trainable_parameters()` と同一順序〉を追加（facade 新規 `pub fn` 5 件）。新規 `Op`／`BackendOps`／VJP／GPU カーネルはいずれも該当なし〈数値経路 bit 完全一致。CUDA／Metal 実機 parity は数値経路非依存のため対象外〉。`predict`／`forward_host` とモード〈Dropout 等の `training=False` 意味論〉の整合は #1603 で確定済み（コンテナの `training` フラグを尊重する方式。§1.2「Dropout」行参照）。コンテナ再構成は #1759 で実装済み: `fandhe_ai_autodiff::nn::container::{ModuleList, Sequential}`（PyTorch `nn.ModuleList`／`nn.Sequential` 相当。`Module` trait を非公開のため facade からは再エクスポートしない）を新設し、`compat::Sequential` の層保持・Linear→ReLU 融合先読み走査（forward）・`set_training`／`training`／`named_parameters` の本体を移設。`compat::Sequential` は `inner: nn::Sequential` を持つ薄いラッパーへ再構成（`forward` は `self.inner.forward(&tape.0, input)` へ 1 行委譲・`set_training`／`training`／`named_parameters` も `self.inner` へ委譲）。公開シグネチャ・数値挙動は不変（既存テスト 30 件 bit 完全一致確認済み）・facade 新規公開面なし。ネストしたコンテナ内 `Linear` は compat の学習契約〈`bind`／`trainable_parameters`／`apply_parameters`・デバイス常駐経路〉に到達しない制限が残るが、facade は `ModuleList`／`nn::Sequential` を構築する経路自体を公開していないため到達不能（`container.rs` モジュール doc「ネストの限界」参照）） |
 | Keras 風 `Sequential` の層追加と `compile()`／`fit()`／`evaluate()`／callbacks の最小版 | #1618（#1761 で `compile()`／`fit()`／`evaluate()` 最小版実装済み。`compat::{Loss, Optimizer, FitConfig, History, FitTarget}`・`Sequential::{compile, is_compiled, fit, evaluate}`。既存公開 API〈`Sequential::bind`／`fandhe_ai::optim`／`fandhe_ai::data::DataLoader`／`Var::mse_loss`／`cross_entropy_loss`〉の合成のみで新規 `Op`／`BackendOps`／VJP なし・CPU `tape()` 固定。正しさは手動学習ループとのパラメータ・loss 系列 bit 完全一致で検証（統合テスト `crates/facade/tests/compat_sequential_fit.rs`）。#1763 で callbacks（`EarlyStopping`／`ModelCheckpoint`）・`validation_data`・LR スケジューラ連携を実装済み（`compat::{Callback, EarlyStopping, ModelCheckpoint, LrSchedule, Monitor, MonitorMode}`・`Sequential::fit_with_callbacks`・`fandhe_ai::optim::{Sgd, AdamW, Adam}::set_lr` 新設。新規 `Op`／`BackendOps`／VJP なし・正しさは手動ループとの bit 完全一致で検証（統合テスト `crates/facade/tests/compat_sequential_callbacks.rs`）。設計判断は `docs/compat-callbacks-design.md`。metrics・`DataLoader` 直接入力は引き続き対象外）。**#1760 で `Sequential::add_*` の対象レイヤーを Conv2d／Conv1d〈#1770〉に加え LayerNorm／RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／MultiheadAttention へ拡張**（詳細は本表の各該当行。§5「適用記録」参照） |
 
+**GroupNorm／InstanceNorm（#2066・親 #2058）**: 上記「LayerNorm／
+RMSNorm／BatchNorm」行と異なり、GroupNorm／InstanceNorm は本 Tier 1
+表（1 節）にも Tier 2（1.3 節）にも個別の行を持たない。それでも
+`nn::GroupNorm`／`nn::InstanceNorm`（`crates/autodiff/src/nn/
+normalization.rs`）を実装済みである——既存の最終軸限定 `Var::
+layer_norm`（affine なし）を「軸削減 reshape → `layer_norm` → 逆
+reshape」で呼ぶ合成のみで新規 `Op`／`BackendOps` を追加しないため、
+本文書 §5 の範囲拡張手続き（新規カーネル・新規演算の追加）の対象外
+と判断した。**PyTorch 既定と異なり affine（学習可能な per-channel
+`weight`／`bias`）を持たない**（`docs/norm-ops-design.md` §11「affine
+非対応」参照。`.claude/rules/coding-rust.md` の勾配長軸縮約契約との
+抵触を避けるため別イシューへ見送り）。`Module` trait への統合
+（`as_group_norm`／`as_instance_norm`）は行ったが、**facade 公開面
+拡張（`compat::Sequential::add_group_norm`／`add_instance_norm`）は
+本文書 §5 の承認（経路 1 または経路 2）が未取得のため実施していない**
+——facade からは到達できないまま内部クレート限定で残る。詳細は
+`docs/norm-ops-design.md` §11。
+
 ### 1.3 Tier 2（長尾。対象範囲・未実装）
 
 REQ-9 2026-09-12 追記（`04-requirements.md:232`）の列挙を、実装リポ

@@ -36,6 +36,7 @@ use crate::nn::embedding::Embedding;
 use crate::nn::flatten::Flatten;
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
+use crate::nn::normalization::{GroupNorm, InstanceNorm, group_norm_forward_host};
 use crate::nn::pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
 };
@@ -231,6 +232,28 @@ pub trait Module {
 
     /// [`Module::as_batch_norm2d`] の可変版。
     fn as_batch_norm2d_mut(&mut self) -> Option<&mut BatchNorm2d> {
+        None
+    }
+
+    /// [`Module::as_layer_norm`] と同型の明示フック（イシュー #2066）。
+    /// `GroupNorm` 層向け。既定 `None`。
+    fn as_group_norm(&self) -> Option<&GroupNorm> {
+        None
+    }
+
+    /// [`Module::as_group_norm`] の可変版。
+    fn as_group_norm_mut(&mut self) -> Option<&mut GroupNorm> {
+        None
+    }
+
+    /// [`Module::as_layer_norm`] と同型の明示フック（イシュー #2066）。
+    /// `InstanceNorm` 層向け。既定 `None`。
+    fn as_instance_norm(&self) -> Option<&InstanceNorm> {
+        None
+    }
+
+    /// [`Module::as_instance_norm`] の可変版。
+    fn as_instance_norm_mut(&mut self) -> Option<&mut InstanceNorm> {
         None
     }
 
@@ -1289,6 +1312,98 @@ impl Module for LayerNorm {
             )));
         }
         Ok(value)
+    }
+}
+
+/// `GroupNorm::forward(input)` への委譲（イシュー #2066）。学習可能
+/// パラメータを持たない（`normalization.rs` モジュール doc「affine
+/// 非対応」節）ため `named_parameters`／`set_parameter` は既定
+/// （空／`Err`）のままオーバーライドしない。
+impl Module for GroupNorm {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        GroupNorm::forward(self, input)
+    }
+
+    /// イシュー #2066: `as_linear` と同型の明示フック。`compat::
+    /// Sequential` 側の `add_group_norm` 等（facade 統合。`docs/
+    /// compat-api-scope.md` §5 の承認待ち）が実装された際に `GroupNorm`
+    /// 層を認識するための入口として用意するが、本イシュー時点では
+    /// `crates/facade` を変更しておらず未結線。
+    fn as_group_norm(&self) -> Option<&GroupNorm> {
+        Some(self)
+    }
+
+    /// [`Module::as_group_norm`] の可変版。
+    fn as_group_norm_mut(&mut self) -> Option<&mut GroupNorm> {
+        Some(self)
+    }
+
+    /// `GroupNorm::forward`（`Var` 経由）と同じディスパッチ規律を
+    /// `tape` 不要経路で再現する（`RmsNorm::forward_host` と同じ理由。
+    /// 本体は `normalization::group_norm_forward_host` に委譲する
+    /// ——`Var::layer_norm`／`forward_host` 双方が同じ判定規律を共有
+    /// するのと同型）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        group_norm_forward_host(
+            ops,
+            input,
+            self.groups(),
+            self.eps(),
+            "GroupNorm::forward_host",
+        )
+    }
+}
+
+/// `InstanceNorm::forward(input)` への委譲（イシュー #2066）。
+/// `GroupNorm` と同じく学習可能パラメータを持たない。
+impl Module for InstanceNorm {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        InstanceNorm::forward(self, input)
+    }
+
+    /// イシュー #2066: `as_linear` と同型の明示フック。`compat::
+    /// Sequential` 側の `add_instance_norm` 等（facade 統合。`docs/
+    /// compat-api-scope.md` §5 の承認待ち）が実装された際に
+    /// `InstanceNorm` 層を認識するための入口として用意するが、本イシュー
+    /// 時点では `crates/facade` を変更しておらず未結線。
+    fn as_instance_norm(&self) -> Option<&InstanceNorm> {
+        Some(self)
+    }
+
+    /// [`Module::as_instance_norm`] の可変版。
+    fn as_instance_norm_mut(&mut self) -> Option<&mut InstanceNorm> {
+        Some(self)
+    }
+
+    /// `InstanceNorm::forward`（`Var` 経由）と同じディスパッチ規律を
+    /// `tape` 不要経路で再現する。`num_channels == 0`（`Var::forward`
+    /// の恒等短絡と同じ入力）の場合は `input.contiguous()`
+    /// （`Tensor::contiguous()` は infallible）を返す。rank < 3 の
+    /// 検査は `group_norm_forward_host` → `group_norm_layout` の
+    /// `rank < 2` 検査より厳しいため、ここで明示的に先に行う
+    /// （`InstanceNorm::forward` と同じ検査順序）。
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let shape = input.shape();
+        let rank = shape.len();
+        if rank < 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: rank,
+            }));
+        }
+        let c = shape[1];
+        if c == 0 {
+            return Ok(input.contiguous());
+        }
+        group_norm_forward_host(ops, input, c, self.eps(), "InstanceNorm::forward_host")
     }
 }
 
