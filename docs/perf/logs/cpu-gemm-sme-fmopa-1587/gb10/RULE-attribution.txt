@@ -1,0 +1,46 @@
+# 事前登録判定規則（イシュー #2052／#2053・親 #2051: gemm cpu 1024/reuse 5/5 一貫後退の帰属切り分け）
+# 登録日時: 2026-09-19（UTC。本ファイルを追加したコミットの時刻。main 404910e1 時点・実測開始前）。結果が出た後に緩和しない。
+# 親規則: 同ディレクトリの RULE-gb10.txt（#1978 残）。本ファイルはそれを変更せず、§5.5「原因帰属（未検証の仮説）」を
+# 検証するための 3 腕プロセス分離 A/B の判定だけを新規に事前登録する。#1978 の総合判定「後退あり」は本実測で変更しない。
+# 実行スクリプト: 同ディレクトリの orchestrate_attribution_gb10.sh（既存の orchestrate_gb10.sh〈2 腕〉は変更しない）。
+
+対象実機: DGX Spark GB10（Grace CPU・SME 非対応。RULE-gb10.txt と同一）。
+腕（3 ツリー。いずれも main 404910e1 を基点。各パッチ腕と before の指紋差分が crates/backend-cpu/src/gemm_blis/mod.rs の
+  1 ファイルのみであることをオーケストレーション側で実測前に assert する〈不一致なら中止〉）:
+  before = main（SME_PRODUCTION_ENABLED=false）
+  after′ = gb10/on-arm-prime.patch（SME_PRODUCTION_ENABLED=true・ソース上は `sme_shape_eligible` を評価する形のまま
+           `SmeKernel::try_new()` を `None::<SmeKernel>` に置換し呼び出さない。`let Some(_) = None` は定数 false のため
+           最適化で条件式全体〈`sme_shape_eligible` 呼び出し込み〉が除去されうる点は帰属解釈の前提として記録する。`try_new` の dead_code 警告 1 件が出るのは想定内〈release ビルドは
+           `-D warnings` でないため中止条件にしない〉。sha256 を patch_sha256.txt に記録）
+  after  = on-arm.patch（SME_PRODUCTION_ENABLED=true・#1978 残・#2050 と同一。sha256 を patch_sha256.txt に記録）
+
+R0（前提・必須）: 3 腕とも `sme_report()` が `SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }`。
+  不成立なら中止・記録のみ（undetermined）。
+
+A/B（2 組・各 5 round・run_ab_sme_cpu.sh・AB_DEVICE=cpu・round 単位で起動順反転・内側 load ゲート 8.0・LABEL は新規 2 本。
+  既存 JSONL があれば run_ab_sme_cpu.sh が fail-closed 停止する）:
+  組 1: before（AB_BEFORE）vs after′（AB_AFTER）  LABEL=2053-p1
+  組 2: after′（AB_BEFORE）vs after（AB_AFTER）   LABEL=2053-p2
+  対象セル: gemm cpu 512／1024／2048 × fresh／reuse の 6 セル。train／infer は実行するが判定に用いない（参考）。
+  「後退」の定義は RULE-gb10.txt と同一: 5/5 round 一貫（全 round ratio > 1.00）のみ。中央値 > 1.00 でも 5/5 でなければ「証拠なし」。
+  checksum: 2 組 × 全セル（train／infer 含む）で完全一致必須（1 セルでも不一致なら undetermined として記録）。
+  RT（cargo test）は要求しない（after′／after ではドリフトガード `sme_production_enabled_is_false_pending_measurement` が
+  構造的に FAIL するため。#1978 残で規則側の不備として記録済み）。
+  組 1 または組 2 の run_ab rc が 0 でない（ビルド失敗・fail-closed 停止・round 未完走）場合は undetermined として記録する。
+
+帰属判定（結果が出る前に固定。イシュー #2052 本文の 3 分岐と同一。(a)(b) は排他。順に評価し最初に該当したもの）:
+  (b) 組 1 で 1024/reuse が 5/5 一貫の後退（組 2 の結果を問わない）      → 「`try_new` 以外（定数切替に伴うコード配置差等）または未分離」
+  (a) 組 1 の対象 6 セルに 5/5 一貫の後退セルなし かつ 組 2 で 1024/reuse が 5/5 一貫の後退
+                                                                              → 「`SmeKernel::try_new()` 到達コストへ帰属」
+  (c) 上記いずれでもない（両組とも 5/5 一貫でない等）                      → 「未分離（ノイズ帯）。#1978 残の 5/5 一貫は再現せず」
+  組 2 の 1024/reuse 以外のセルで 5/5 一貫の後退が出た場合は判定に用いず、値を併記して記録する
+  （組 1 の他セルは (a) の前提条件として用いる）。
+  いずれの場合も是正・`SME_PRODUCTION_ENABLED` の切替・新規 issue の起票は行わない（対策案は列挙のみ）。
+
+専有ゲート（外側・記録）: RULE-gb10.txt と同一（load1 < 1.0 かつ gpu_util 0%・最大 20 回・30 秒間隔）。
+  不通過なら実行はするが「参考」と明記（判定は行うが結論に「参考」を付す）。
+
+保存物（gb10/attribution/）: sme_report.txt・sme_probe_{before,prime,after}.log・fp-{before,prime,after}.txt／fp-diff-{prime,after}.txt・
+  gate_constant.txt・patch_sha256.txt・patch_apply_{prime,after}.log・load_gate_outer.log・run_ab-p{1,2}.log・
+  r1r2-p{1,2}/（compare-*.md／.err・JSONL・load-gate・uptime・compare-exit・skipped・sha・tree）・uptime_{before,after}.txt・
+  env_info.txt（<home> マスク・内部ホスト名なし・bench-fandhe バイナリはコミットしない）。

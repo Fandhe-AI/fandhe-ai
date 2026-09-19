@@ -87,7 +87,22 @@
   `env_info.txt`。`*_bits.txt`／`*_raw.log` の dump 本体〈各約 269 MB〉は
   コミット対象外——`.gitignore` は設けず本ファイルと `run_bitdump.sh`
   冒頭コメントの明記のみで管理する。絶対パスは `<home>` へマスク済み・
-  内部ホスト名は含めない）
+  内部ホスト名は含めない）・
+  `on-arm-prime.patch`（イシュー #2052 新設。after′ 腕の差分。
+  `on-arm.patch` の定数反転に加え `dispatch_two_d_dynamic` の
+  `SmeKernel::try_new()` 呼び出しを `None::<SmeKernel>` へ置換して
+  常に NEON へ落とす診断専用パッチ。main へ `patch -p1 --forward` で
+  適用可・差分は `mod.rs` の 1 ファイルに閉じる・`try_new` の dead_code
+  警告 1 件は想定内。本番コードへは適用しない）・
+  `RULE-attribution.txt`（イシュー #2052 の事前登録規則。#1978 残 §5.5
+  の gemm cpu 1024/reuse 5/5 一貫後退の帰属判定〈(a) `try_new` 到達コスト
+  ／(b) `try_new` 以外または未分離／(c) 未分離〉・対象 6 セル・checksum
+  完全一致必須・RT 不要を実測前に固定）・
+  `orchestrate_attribution_gb10.sh`（ノード上で実行。3 腕〈before／
+  after′／after〉のツリー準備・指紋差分 assert・外側専有ゲート〈記録のみ〉・
+  R0 3 腕・`run_ab_sme_cpu.sh` 2 組〈LABEL `2053-p1`／`2053-p2`〉。
+  既存 `orchestrate_gb10.sh` は不変。実測と `attribution/` への収録は
+  #2053）
 - `r1r2/` — R1（framework-compare gemm／train／infer cpu）・R2
   （checksum）の実測一式
   - `compare-{gemm,train,infer}-1978-cpu.md` — before/after 比較表（是正前の
