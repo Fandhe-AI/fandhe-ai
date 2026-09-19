@@ -528,7 +528,55 @@ loss を小数点以下 6 桁へ丸めた値（`bench-common::Record::to_json_li
   構成の検討）が必要。加えて「非 SME 環境で bit 同一のフォールバック」は
   本節では checksum 一致までしか確認していないため、before／after 両腕の
   全出力 `to_bits()` 比較（または生バイト列ハッシュ）を GB10 で別途取る
-  必要がある。
+  必要がある（→ §5.6 で実施済み・「bit 同一: 成立」）。
+
+### 5.6 GB10 側の全出力 bit 同一実証（DGX Spark GB10・イシュー #2050。2026-09-19 UTC）
+
+§5.5 が checksum 一致までしか確認していなかった「非 SME 環境で bit 同一の
+フォールバック」を、#2049 で追加した `crates/facade/tests/
+cpu_sme_gate_bit_dump.rs::dump_cpu_sme_gate_bits`（gemm 512/1024/2048・
+train size=64〈reuse・L1 d_weight 784×256×64 が `sme_shape_eligible`
+到達形状〉・infer size=64〈非到達対照〉の全出力を `to_bits()` で 1 要素
+1 行印字）と `gb10/run_bitdump.sh` で直接検証した。判定規則は実測開始前に
+コミットした `gb10/RULE-bitdump.txt`（登録 2026-09-19T01:30:03Z・
+コミット `1f36ee11`。実測開始 01:34:08Z）。オーケストレーションは
+`gb10/orchestrate_bitdump_gb10.sh`・成果物は `gb10/bitdump/`（dump 本体
+`*_bits.txt`／`*_raw.log`〈各約 269 MB〉は収録しない）。
+
+- **腕**: before = main `82160b47` 相当（ブランチ tip `daffdd14`。main との
+  差は `gb10/` 配下の docs のみで `git diff --stat main..tip -- crates` は空）
+  ・`SME_PRODUCTION_ENABLED=false`。after = 同一ツリーに `on-arm.patch`
+  （sha256 `ca493a09…721cff`。`gb10/bitdump/patch_sha256.txt`）を適用し
+  `SME_PRODUCTION_ENABLED=true`。ツリー指紋差分は
+  `crates/backend-cpu/src/gemm_blis/mod.rs` の 1 件のみ
+  （`gb10/bitdump/fp-diff.txt`。テストファイルは両ツリーに存在するため
+  `run_bitdump.sh` のコピー手順は発火せず）。
+- **専有ゲート**: attempt=1 で load1 0.43・gpu_util 0% の通過（記録のみ。
+  `load_gate_outer.log`）。
+- **R0（前提）**: 成立。両腕とも
+  `SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }`
+  （`gb10/bitdump/sme_report.txt`）。
+- **RB（bit 同一・判定）**: **成立**。before／after とも期待行数 6,726,847
+  行に一致（`line_counts.txt`）・全体 sha256 `b8c399e9…a694af` が一致・
+  `cmp`／`diff` の差分 0 バイト・0 行（`bitdump_cmp.txt`／
+  `bitdump_diff.txt` とも空）。ラベル別（`summary.txt`）も gemm512
+  （262,144 行）・gemm1024（1,048,576 行）・gemm2048（4,194,304 行）・
+  train（1,221,183 行）・infer（640 行）の 5 ラベルすべて一致。
+  `run_bitdump.sh` は exit 0（規則の対応表で「成立」）。
+- **RR（再現性・記録）**: after 腕の 2 回目も行数 6,726,847・sha256
+  `b8c399e9…a694af` で 1 回目と一致（`rerun_after_sha256.txt`。
+  run-to-run 決定的）。
+- **総合判定: 「bit 同一: 成立」**。非 SME 環境（GB10）では
+  `SME_PRODUCTION_ENABLED` の on/off にかかわらず、SME 到達形状を含む
+  全出力（GEMM 出力・3 step 分の loss／勾配／更新後パラメータ・推論出力）
+  が bit 完全一致する。§5.5 の #1979 申し送り「bit 同一性は未確認」は
+  本節で解消。`SME_PRODUCTION_ENABLED=false` は不変（切替は #1979 の
+  ユーザー承認事項）。§5.5 の性能後退 1 セル（gemm cpu 1024/reuse）の
+  原因帰属は本節の対象外で #2051（#2052／#2053）へ引き継ぐ。
+- 環境: Linux 6.17.0-1031-nvidia aarch64・rustc 1.97.0・nproc 20・
+  `RAYON_NUM_THREADS` 未設定（`gb10/bitdump/env_info.txt`。絶対パスは
+  `<home>` へマスク・内部ホスト名は含めない）。両腕とも release ビルドは
+  約 10 秒（`*_raw.summary.log` の `Finished` 行）・テスト本体は約 0.4 秒。
 
 ## 6. セキュリティ考慮（OWASP Top 10）
 

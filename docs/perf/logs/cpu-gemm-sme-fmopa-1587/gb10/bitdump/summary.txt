@@ -1,0 +1,27 @@
+# cpu_sme_gate_bit_dump ラベル別要約（イシュー #2049）
+
+## gemm512
+- before: lines=262144 sha256=b880a43157b35ab9005c41b9336a10295216f67bcd760592ebd79bad5b4ee37b
+- after:  lines=262144 sha256=b880a43157b35ab9005c41b9336a10295216f67bcd760592ebd79bad5b4ee37b
+- 判定: 一致
+
+## gemm1024
+- before: lines=1048576 sha256=572848217cb090e5964d7a20f02fed12b31ca405275c349f9d9cc85d774ae89f
+- after:  lines=1048576 sha256=572848217cb090e5964d7a20f02fed12b31ca405275c349f9d9cc85d774ae89f
+- 判定: 一致
+
+## gemm2048
+- before: lines=4194304 sha256=1ef819db54a3867c922731c3ba7d717d9520edea588007ee708f2a083c7366fb
+- after:  lines=4194304 sha256=1ef819db54a3867c922731c3ba7d717d9520edea588007ee708f2a083c7366fb
+- 判定: 一致
+
+## train.
+- before: lines=1221183 sha256=e022a8ae6cdf06dc00cd87fb29588231f783d3527f6528bb0ea18dc1adcf8d14
+- after:  lines=1221183 sha256=e022a8ae6cdf06dc00cd87fb29588231f783d3527f6528bb0ea18dc1adcf8d14
+- 判定: 一致
+
+## infer
+- before: lines=640 sha256=772ae198d36bad47e1b4f8faf39075914890adddb43e5aae54cdfc3eab878339
+- after:  lines=640 sha256=772ae198d36bad47e1b4f8faf39075914890adddb43e5aae54cdfc3eab878339
+- 判定: 一致
+

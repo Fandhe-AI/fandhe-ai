@@ -28,6 +28,13 @@
   （1.0195〜1.0554・中央値 1.0363）。事前登録規則により総合判定は
   **「GB10 非後退確認: 後退あり」**（是正・緩和なし。原因帰属は未検証。
   `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.5）。
+- **GB10 側の「非 SME 環境で bit 同一のフォールバック」の全出力 bit 同一
+  実証は 2026-09-19（UTC）に `gb10/bitdump/` で実施済み**（イシュー #2050。
+  事前登録 `gb10/RULE-bitdump.txt`）。R0 成立・RB は before／after とも
+  6,726,847 行・全体 sha256 一致・`cmp`／`diff` 差分 0・5 ラベル
+  （gemm512／1024／2048・train・infer）すべて一致・RR（after 2 回目）も
+  一致。総合判定 **「bit 同一: 成立」**（同 doc §5.6。
+  `SME_PRODUCTION_ENABLED=false` は不変）。
 
 ## ディレクトリ構成
 
@@ -64,10 +71,23 @@
   dump_cpu_sme_gate_bits`〈gemm512/1024/2048・train size=64（reuse・
   L1 d_weight のみ到達）・infer size=64（非到達対照）〉の出力を
   `diff`／`sha256sum` で bit 完全一致確認する診断スクリプト。
-  `--dry-run` 対応。実測本体は本イシューのスコープ外のため未実施）・
-  `bitdump/`（`run_bitdump.sh` の出力先。`*_bits.txt`／`summary.txt`
-  等の dump 本体はコミット対象外——`.gitignore` は設けず本ファイルと
-  `run_bitdump.sh` 冒頭コメントの明記のみで管理する）
+  `--dry-run` 対応。実測は #2050 で実施）・
+  `RULE-bitdump.txt`（イシュー #2050 の事前登録規則。R0／RB／RR と
+  `run_bitdump.sh` の exit code 対応を実測前に固定）・
+  `orchestrate_bitdump_gb10.sh`（ノード上で実行。after ツリー複製と
+  `on-arm.patch` 適用・指紋差分が `mod.rs` 1 件であることの assert・
+  外側専有ゲート〈記録のみ〉・R0 プローブ・`run_bitdump.sh`・after 再実行）・
+  `bitdump/`（#2050 の実測成果物。`orchestrate.log`・`run_bitdump.log`・
+  `sme_report.txt`・`sme_probe_{before,after}.log`・`gate_constant.txt`・
+  `patch_sha256.txt`・`patch_apply.log`・`fp-{before,after}.txt`／
+  `fp-diff.txt`・`load_gate_outer.log`・`line_counts.txt`・`summary.txt`
+  〈ラベル別行数・sha256〉・`bitdump_cmp.txt`／`bitdump_diff.txt`〈とも空〉・
+  `rerun_after_sha256.txt`・`{before,after,after_rerun}_raw.summary.log`
+  〈`^out\[` 行を除いた cargo 出力〉・`uptime_{before,after}.txt`・
+  `env_info.txt`。`*_bits.txt`／`*_raw.log` の dump 本体〈各約 269 MB〉は
+  コミット対象外——`.gitignore` は設けず本ファイルと `run_bitdump.sh`
+  冒頭コメントの明記のみで管理する。絶対パスは `<home>` へマスク済み・
+  内部ホスト名は含めない）
 - `r1r2/` — R1（framework-compare gemm／train／infer cpu）・R2
   （checksum）の実測一式
   - `compare-{gemm,train,infer}-1978-cpu.md` — before/after 比較表（是正前の
