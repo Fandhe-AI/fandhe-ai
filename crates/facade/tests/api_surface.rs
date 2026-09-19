@@ -3351,3 +3351,137 @@ fn compat_sequential_does_not_expose_rnn_add_methods() {
          （承認スコープ〈#1955〉は Sequential への追加を認めていない）: {offenses:?}"
     );
 }
+
+/// `crates/facade/src/` の `pub use` が `CreateGraphResult`（子テープ
+/// 方式の高階微分結果型。イシュー #1942／#1943 で内部クレート
+/// `fandhe_ai_autodiff` に実装済み）を再エクスポートしていないことを
+/// 固定する（`docs/autodiff-higher-order-grad-decision.md` §10 承認
+/// 事項 5「facade 公開面への高階 API 追加」はイシュー #2063 時点で
+/// リポジトリ所有者の明示的な承認コメントが確認できず未承認のまま
+/// 対象外。`facade_does_not_reexport_custom_function` と同型の走査）。
+#[test]
+fn facade_does_not_reexport_create_graph_result() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            if trimmed.contains("CreateGraphResult") {
+                offending.push(format!(
+                    "{}: `{trimmed}` が CreateGraphResult を含む",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が CreateGraphResult を再エクスポートしている\
+         （承認事項 5 は未承認のまま対象外という設計判断に違反）: {offending:?}"
+    );
+}
+
+/// facade 独自の `struct Tape`（`crates/facade/src/lib.rs`）が
+/// `Tape::backward_create_graph` への委譲メソッドを持たないことを
+/// 固定する（`Tape::var_no_grad` の前例と同じ「委譲メソッドを追加
+/// しない限り facade から到達不能」という設計を、委譲メソッド自体が
+/// 生えていないことで直接検査する）。承認事項 5 の承認を得て委譲
+/// メソッドを追加する際は本テストを正ガードへ更新する。
+#[test]
+fn facade_tape_does_not_expose_backward_create_graph_method() {
+    let lib_rs = facade_crate_root().join("src/lib.rs");
+    let content = read_to_string_or_panic(&lib_rs);
+    assert!(
+        !contains_pub_fn_declaration(&content, "backward_create_graph"),
+        "facade 独自の Tape に `pub fn backward_create_graph(...)` 宣言\
+         （ジェネリクス・lifetime 付き `pub fn backward_create_graph<'c>(`\
+         を含む）が見つかった（承認事項 5 未承認のまま到達可能に\
+         してしまっている）"
+    );
+}
+
+/// `pub fn <name>` 宣言（`pub fn <name>(` に加え、ジェネリクス・
+/// lifetime 付き `pub fn <name><'a>(` のような宣言も含む）の検出。
+/// `contains_pub_fn_custom_declaration`（`CustomFunction` 用・イシュー
+/// #1946）と同型のアルゴリズムを関数名パラメータ化したもの。
+/// `<name>` の直後に任意個の空白、続けて任意で `<...>`（ジェネリクス・
+/// lifetime パラメータ節。ネストする `<>` を素朴にカウントして対応
+/// する）、さらに任意個の空白を挟んで `(` が現れる形を宣言とみなす
+/// （`pub fn <name>_foo(` のような無関係な識別子への誤検出は、
+/// `<name>` 直後が英数字／`_` の場合を除外することで避ける）。
+fn contains_pub_fn_declaration(content: &str, name: &str) -> bool {
+    let needle = format!("pub fn {name}");
+    let bytes = content.as_bytes();
+    let mut search_start = 0usize;
+    while let Some(rel_idx) = content[search_start..].find(needle.as_str()) {
+        let idx = search_start + rel_idx;
+        let after = idx + needle.len();
+        search_start = after;
+        // `<name>` の直後が識別子構成文字（英数字／`_`）なら
+        // `<name>_foo` 等の無関係な関数名なので除外する。
+        if bytes
+            .get(after)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        {
+            continue;
+        }
+        let mut pos = after;
+        // 任意個の空白（改行含む）をスキップする。
+        while bytes.get(pos).is_some_and(|b| b.is_ascii_whitespace()) {
+            pos += 1;
+        }
+        // 任意で `<...>`（ジェネリクス／lifetime 節）をスキップする。
+        // ネストする `<>`（例: `<T: Foo<Bar>>`）にも対応するため
+        // 深さカウンタで対応する `>` まで読み飛ばす。
+        if bytes.get(pos) == Some(&b'<') {
+            let mut depth = 0i32;
+            while let Some(b) = bytes.get(pos) {
+                match b {
+                    b'<' => depth += 1,
+                    b'>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            pos += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                pos += 1;
+            }
+            if depth != 0 {
+                // 対応する `>` が見つからないまま終端した場合は
+                // 宣言として確定できないので次の occurrence を探す。
+                continue;
+            }
+        }
+        // 任意個の空白をスキップし、`(` が続けば宣言とみなす。
+        while bytes.get(pos).is_some_and(|b| b.is_ascii_whitespace()) {
+            pos += 1;
+        }
+        if bytes.get(pos) == Some(&b'(') {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn contains_pub_fn_declaration_detects_variants() {
+    assert!(contains_pub_fn_declaration("pub fn foo(", "foo"));
+    assert!(contains_pub_fn_declaration("pub fn foo<'t>(", "foo"));
+    assert!(contains_pub_fn_declaration(
+        "pub fn foo<'t, T: Bar<Baz>>(",
+        "foo"
+    ));
+    assert!(contains_pub_fn_declaration("pub fn foo  (\n", "foo"));
+    assert!(!contains_pub_fn_declaration("pub fn foo_bar(", "foo"));
+    assert!(!contains_pub_fn_declaration(
+        "// pub fn foo_baz(\nfn other() {}",
+        "foo"
+    ));
+    assert!(!contains_pub_fn_declaration("let foo = 1;", "foo"));
+}
