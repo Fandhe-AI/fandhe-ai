@@ -116,6 +116,26 @@ fn all_eight_ops_succeed_or_return_cuda_unavailable_env_adaptive() {
     }
 }
 
+/// `gemm` の起動グリッド（`grid_dim.y = m.div_ceil(16)`）が CUDA の
+/// grid y/z 上限（65,535）を超える形状（`m=1,048,576, n=k=1`）は、
+/// H2D 転送・デバイスメモリ確保（driver 呼び出し）に一切触れる前に
+/// 明示的な形状エラーで拒否される（codex-review 指摘・PR #2204。
+/// `crate::typed_f64::validate_gemm_grid_bounds`）。CUDA driver の有無に
+/// 依らず常時 CI 実行可能（`ShapeMismatch`／`ShapeMismatch` 以外の
+/// shape 系検証と同じく driver 不在環境でも成立する）。
+#[test]
+fn gemm_rejects_grid_dim_y_overflow_before_touching_driver() {
+    let ops = CudaBackendOps::new(0);
+    // grid_dim.y = 1_048_576.div_ceil(16) = 65_536 > 65_535（1 超過）。
+    let a = zeros(&[1_048_576, 1]);
+    let b = zeros(&[1, 1]);
+    let err = TypedOps::<f64>::gemm(&ops, &a, &b).unwrap_err();
+    assert!(
+        matches!(err, BackendError::Unsupported(_)),
+        "expected BackendError::Unsupported for grid_dim.y overflow, got: {err:?}"
+    );
+}
+
 /// `TypedOps::<f64>::gemm` を直接呼んだ場合も同様に env-adaptive
 /// （trait メソッドとして呼べることの型検査を兼ねる）。
 #[test]

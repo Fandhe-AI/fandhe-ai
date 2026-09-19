@@ -80,6 +80,33 @@ fn gemm_launch_config(m: u32, n: u32) -> LaunchConfig {
     }
 }
 
+/// CUDA のグリッド次元 y/z 上限（全 compute capability 共通。
+/// `gemm_mma.rs::MAX_GRID_DIM_Y` 等と同じ値）。
+const TYPED_F64_GEMM_MAX_GRID_DIM_Y: u32 = 65_535;
+
+/// [`gemm_launch_config`] の `grid_dim.y`（`m.div_ceil(TYPED_F64_GEMM_BLOCK_DIM.1)`）
+/// が CUDA の grid y/z 上限（65,535）を超えないことを、H2D 転送・デバイス
+/// メモリ確保より前に検証する（codex-review 指摘・PR #2204。`kernels_mma.rs::
+/// CompiledMmaKernel::validate_grid_bounds` 等の既存 GEMM 経路と同型の
+/// fail-closed 契約）。`TYPED_F64_GEMM_BLOCK_DIM.1`（#2060 時点で 16）単位で
+/// `m` は `65_535 * 16 = 1_048_560` まで対応する。この上限は性能最適化
+/// 対象外の素朴カーネル（本モジュール冒頭の「方針」節参照）に対する
+/// スコープ制限であり、超過形状はグリッド一次元化・行分割ではなく
+/// 明示的な形状エラーとして拒否する（`m=1,048,576, n=k=1` 等）。
+fn validate_gemm_grid_bounds(m: u32) -> Result<(), BackendError> {
+    let grid_y = m.div_ceil(TYPED_F64_GEMM_BLOCK_DIM.1);
+    if grid_y > TYPED_F64_GEMM_MAX_GRID_DIM_Y {
+        return Err(BackendError::Unsupported(format!(
+            "TypedOps<f64>::gemm: grid_dim.y (m.div_ceil({})={grid_y}) exceeds CUDA's \
+             {TYPED_F64_GEMM_MAX_GRID_DIM_Y} limit for grid dimensions y/z; m={m} is too large \
+             for this naive (非最適化) カーネル（max supported m = {}）",
+            TYPED_F64_GEMM_BLOCK_DIM.1,
+            TYPED_F64_GEMM_MAX_GRID_DIM_Y as u64 * TYPED_F64_GEMM_BLOCK_DIM.1 as u64,
+        )));
+    }
+    Ok(())
+}
+
 /// 全軸縮約 1 段目の起動ブロック数を決定する
 /// （`reduce.rs::reduce_num_blocks` と同一契約）。
 fn reduce_num_blocks(numel: u32) -> u32 {
@@ -187,6 +214,11 @@ impl CudaTypedF64 {
     /// 同一手順）。`m == 0 || n == 0` は空、`k == 0` は全 0 出力を
     /// カーネル起動なしで返す（`gemm.rs::run_f32_kernel` と同じ
     /// 0 バイト確保回避の理由）。
+    ///
+    /// `m` の上限は呼び出し元（`TypedOps::<f64>::gemm`）が
+    /// `validate_gemm_grid_bounds` で事前検証する契約（本メソッド単体は
+    /// 検証を持たない内部ヘルパーのため、`TypedOps` 経由以外の直接呼び出し
+    /// は呼び出し元が同等の検証を担う）。
     pub fn run_gemm(
         &self,
         a: &[f64],
@@ -539,9 +571,11 @@ enum ReduceKindF64 {
 
 impl TypedOps<f64> for CudaBackendOps {
     /// `CudaTypedF64::run_gemm` への薄いパススルー。driver に触れる前に
-    /// `gemm_out_shape`（`tensor-core`）で shape 検証・`u32` 変換を行う
+    /// `gemm_out_shape`（`tensor-core`）で shape 検証・`u32` 変換を行い、
+    /// `validate_gemm_grid_bounds`（本モジュール内 private 関数）で起動
+    /// グリッドの CUDA 上限超過も転送・確保前に明示拒否する
     /// （`typed_f16.rs::TypedOps::<f16>::gemm` と同型の「driver 呼び出し
-    /// 前に事前検証」契約）。
+    /// 前に事前検証」契約。codex-review 指摘・PR #2204）。
     fn gemm(&self, a: &Tensor<f64>, b: &Tensor<f64>) -> Result<Tensor<f64>, BackendError> {
         let out_shape =
             gemm_out_shape(a.shape(), b.shape()).map_err(BackendError::ShapeMismatch)?;
@@ -555,6 +589,7 @@ impl TypedOps<f64> for CudaBackendOps {
         let n = u32::try_from(b.shape()[1]).map_err(|_| {
             BackendError::KernelLaunchFailed("gemm: n exceeds u32 range".to_string())
         })?;
+        validate_gemm_grid_bounds(m)?;
 
         let a_owned = a.contiguous();
         let b_owned = b.contiguous();
