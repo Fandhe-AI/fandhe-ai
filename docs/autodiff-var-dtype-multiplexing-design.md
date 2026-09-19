@@ -100,7 +100,7 @@
 
 `Op::for_each_input`（`crates/autodiff/src/tape.rs:1445`）の全 70 variant を §7 の基準で分類する。
 
-### 合成可能（21 variant）
+### 合成可能（22 variant）
 
 | Op | 根拠 |
 |---|---|
@@ -125,8 +125,9 @@
 | `Scatter` | 同上（`tape.rs:1494`） |
 | `Where` | 算術を伴わないマスク選択（`tape.rs:1480`） |
 | `MaskedFill` | 同上（`tape.rs:1484`） |
+| `Pad` | narrow 基盤流用 VJP（forward の pad・VJP の narrow ともに算術を伴わない view／copy 演算。§7 の判定基準に照らし合成可能側へ分類。`grad.rs:1678` の `Op::Narrow` forward と同一の `narrow` 呼び出し連鎖） |
 
-`TypedOps<T>` は現状これら 8 演算のみを提供し、view／index 系（`Reshape`／`Transpose`／`Permute`／`BroadcastTo`／`Narrow`／`Concat`／`Contiguous`／`Gather`／`Scatter`／`Where`／`MaskedFill`）は対応するカーネルを持たない。これらを dtype 多重化するには `BackendOps`／facade の非破壊拡張（§9 の承認事項 2）が必要になる。
+`TypedOps<T>` は現状これら 8 演算のみを提供し、view／index 系（`Reshape`／`Transpose`／`Permute`／`BroadcastTo`／`Narrow`／`Pad`／`Concat`／`Contiguous`／`Gather`／`Scatter`／`Where`／`MaskedFill`）は対応するカーネルを持たない。これらを dtype 多重化するには `BackendOps`／facade の非破壊拡張（§9 の承認事項 2）が必要になる。
 
 ### dtype 特化（24 variant）
 
@@ -157,7 +158,7 @@
 | `AvgPool2d` | `f64` 相当縮約契約（`docs/pooling-ops-design.md`） |
 | `AdaptiveAvgPool2d` | 同上 |
 
-### その他（対象外。25 variant）
+### その他（対象外。24 variant）
 
 | Op | 根拠 |
 |---|---|
@@ -179,7 +180,6 @@
 | `GruCell` | 同上 |
 | `Embedding` | 索引ベース VJP（gather／scatter_add への合成だが `weight` は整数 id 経由。`tape.rs:1495`） |
 | `Interpolate` | 索引ベース VJP（scatter_add 経由。`tape.rs:1499`） |
-| `Pad` | narrow 基盤流用 VJP（算術を含まないが専用 Op として独立。`tape.rs:1500`） |
 | `MaxPool2d` | 索引ベース VJP（先勝ちタイ規則。`tape.rs:1521`） |
 | `Dropout` | マスク再利用契約（グローバル RNG 消費順序。`tape.rs:1489`） |
 | `ScalarUnary` | `ScalarUnaryOp` dispatch 機構自体が `Tensor<f32>` 固定の `eval::scalar` へフォールバックする設計（`docs/scalar-op-dispatch-design.md`） |
@@ -187,13 +187,15 @@
 | `Sort` | ビットニックソート方式（64bit 合成キー。dtype 非依存の再設計が必要） |
 | `Topk` | 同上 |
 
-3 区分の内訳は 21（合成可能）＋ 24（dtype 特化）＋ 25（その他）＝ 70 variant で、§2 が数え上げた `Op` enum の総 variant 数と一致する。
+3 区分の内訳は 22（合成可能）＋ 24（dtype 特化）＋ 24（その他）＝ 70 variant で、§2 が数え上げた `Op` enum の総 variant 数と一致する。
 
 ## 9. facade API 契約案（未承認のまま列挙）
 
 案 C を前提にした将来の facade 公開面の**案**を列挙する（承認されるまで実装しない）。
 
-- 既存 `Op::LinearAct::compute_dtype` パターンを他の Op（Conv2d・MultiheadAttention 等）へ拡張する際の facade 到達経路は、`docs/autodiff-low-precision-linear-design.md` §3 と同型（`fandhe_ai_autodiff::nn::<module>` の自由関数。`Var`／`LinearVars` への `pub fn` 追加は避ける）を標準パターンとする案
+- 既存 `Op::LinearAct::compute_dtype` パターンを他の Op（Conv2d・MultiheadAttention 等）へ拡張する際の**内部入口**（facade 非再エクスポート）は、`docs/autodiff-low-precision-linear-design.md` §3 と同型（`fandhe_ai_autodiff::nn::<module>` の自由関数。`Var`／`LinearVars` への `pub fn` 追加は避ける）を標準パターンとする案。ただし §3 の `linear_forward_low_precision` 自体が「facade 非再エクスポート」と明記されているとおり、この自由関数追加だけでは facade 利用者から到達できない（内部入口にとどまる）
+  - facade 利用者から到達可能にするには、内部入口とは別に**facade 公開入口**（ラッパー関数の追加、または `compat` 経由の再エクスポート）を個別に用意する必要がある。既存の AMP（`docs/autodiff-low-precision-linear-design.md` §7）は `compat::Sequential::compile_with_amp` という facade 到達可能なラッパーを別途設けており、これが公開入口の前例である
+  - この facade 公開入口の追加自体は §10 承認事項 3（`Var`／`LinearVars` 等への facade 新規公開面の追加）の対象であり、案 C 拡張時の個別イシューで都度承認を得る
 - §8「合成可能」区分の Op（view／index 系）を dtype 多重化するために `BackendOps`／`TypedOps<T>` を拡張する場合の facade 到達経路は、既存の `Tape::typed_ops_f64/_f16/_bf16` と同型の狭い accessor を追加する案（autograd 非経由）
 - 仮に案 A（`Var<T>` フル一般化）を将来採用する場合の facade 案: `fandhe_ai::Var` を `Var<T = f32>` のデフォルト型パラメータ付きに変更する案（ソース互換性は保てる可能性があるが、`dyn` 化・trait object 経由の既存コードとの互換性は個別検証が必要。ABI・semver への影響は別途 crates.io 版数運用の判断を要する）
 
