@@ -44,8 +44,13 @@ make test-ignored-metal   # 同上（Metal 側）
   `GroupNorm`／`InstanceNorm` 自体は算術を追加しないため、既存 `layer_norm`
   カーネルの CUDA／Metal 実装が満たす契約（`docs/norm-ops-design.md`）がそのまま
   引き継がれる。
-- FAIL が生じた場合は**是正せず記録のみ**とする（本 PR の受け入れ条件は
-  Linux 実行可能テストの green のみであり、実機実測は申し送り事項）。
+- 本 PR の受け入れ条件は Linux 実行可能テストの green のみであり、実機実測
+  自体は未実施のまま後続セッションへ申し送る。ただし実機実測を実行した結果
+  FAIL（REQ-2 統一複合判定に反する数値不一致）が判明した場合は、それを
+  是正対象から除外してよいという意味ではない。CUDA／Metal の `layer_norm`
+  実装（`docs/norm-ops-design.md`）が満たす既存の数値契約はそのまま引き継がれる
+  前提であり、FAIL が生じた場合は原因調査・是正を行ったうえで本ファイルへ
+  結果を追記すること。
 
 ## 実測結果（記入欄）
 
