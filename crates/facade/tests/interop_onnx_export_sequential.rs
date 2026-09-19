@@ -365,3 +365,31 @@ fn run_with_wrong_feed_name_returns_missing_feed() {
         other => panic!("MissingFeed を期待したが {other:?}"),
     }
 }
+
+/// e-7. `Softmax`／`Flatten`（イシュー #2065）を含む `Sequential` も
+///      `layer_kind == "unknown"` の `OnnxError::UnsupportedLayer` で
+///      拒否される（`onnx-interop::onnx::export_nn::layer_kind_name` の
+///      catch-all 分岐。`Sigmoid`／`Tanh` と同型・onnx-interop 側の
+///      コード変更なしの回帰ガード。`docs/onnx-export-op-mapping.md`
+///      §「対象外事項」参照）。
+#[test]
+fn sequential_with_softmax_and_flatten_is_rejected_with_unsupported_layer() {
+    let model = Sequential::new()
+        .add_linear(2, 2, 0x2065_1111)
+        .expect("test fixture: 層構築に失敗")
+        .add_relu()
+        .add_flatten(1, 1)
+        .add_softmax(1);
+
+    let err = OnnxModel::from_sequential(&model).unwrap_err();
+    match err {
+        OnnxError::UnsupportedLayer { index, layer_kind } => {
+            assert_eq!(index, 2, "Flatten は index=2（Linear,ReLU の次）のはず");
+            assert_eq!(
+                layer_kind, "unknown",
+                "Flatten は判別フック非対応のため unknown のはず"
+            );
+        }
+        other => panic!("UnsupportedLayer を期待したが {other:?}"),
+    }
+}
