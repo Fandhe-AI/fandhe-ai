@@ -100,7 +100,7 @@
 
 `Op::for_each_input`（`crates/autodiff/src/tape.rs:1445`）の全 70 variant を §7 の基準で分類する。
 
-### 合成可能（22 variant）
+### 合成可能（20 variant）
 
 | Op | 根拠 |
 |---|---|
@@ -121,15 +121,15 @@
 | `Narrow` | 同上 |
 | `Contiguous` | 同上 |
 | `Concat` | 同上（`tape.rs:1631`） |
-| `Gather` | 索引ベースの copy 演算（`tape.rs:1493`） |
-| `Scatter` | 同上（`tape.rs:1494`） |
 | `Where` | 算術を伴わないマスク選択（`tape.rs:1480`） |
 | `MaskedFill` | 同上（`tape.rs:1484`） |
 | `Pad` | narrow 基盤流用 VJP（forward の pad・VJP の narrow ともに算術を伴わない view／copy 演算。§7 の判定基準に照らし合成可能側へ分類。`grad.rs:1678` の `Op::Narrow` forward と同一の `narrow` 呼び出し連鎖） |
 
-`TypedOps<T>` は現状これら 8 演算のみを提供し、view／index 系（`Reshape`／`Transpose`／`Permute`／`BroadcastTo`／`Narrow`／`Pad`／`Concat`／`Contiguous`／`Gather`／`Scatter`／`Where`／`MaskedFill`）は対応するカーネルを持たない。これらを dtype 多重化するには `BackendOps`／facade の非破壊拡張（§9 の承認事項 2）が必要になる。
+`TypedOps<T>` は現状これら 8 演算のみを提供し、view／index 系（`Reshape`／`Transpose`／`Permute`／`BroadcastTo`／`Narrow`／`Pad`／`Concat`／`Contiguous`／`Where`／`MaskedFill`）は対応するカーネルを持たない。これらを dtype 多重化するには `BackendOps`／facade の非破壊拡張（§9 の承認事項 2）が必要になる。
 
-### dtype 特化（24 variant）
+**`Gather`／`Scatter` は合成可能から除外し dtype 特化（下表）へ分類する（codex-review 指摘。2026-09-19 是正）**: forward 単体（重複 index を含まない `Overwrite`／単純 gather）は算術を伴わない index-based copy だが、`Op::Gather` の VJP は重複 index の勾配を `Op::Scatter { reduce: ScatterReduce::Add }` で集約し（`grad.rs:1690-1727`）、`Op::Scatter` 自体も `reduce: ScatterReduce::Add` モードを持つ（`grad.rs:1763-1849`）。`ScatterReduce::Add` は `BackendOps::scatter`（`crates/tensor-core/src/backend_ops.rs:511-537`）が規定する「出力位置ごとに `f64` アキュムレータを `input[pos] as f64` で初期化し、走査順（row-major）に `acc += src[p] as f64` を適用したうえで走査完了後に 1 回だけ dtype へ downcast する」という決定的集約契約に従う必要があり、単純な copy／目的 dtype への add 置換ではこの契約を維持できない。よって `Gather`／`Scatter` は他の `f64` 縮約契約を持つ Op（`RmsNorm`／`LayerNorm`／`Conv2d` 等）と同じ理由で dtype 特化側に属する。
+
+### dtype 特化（26 variant）
 
 | Op | 根拠 |
 |---|---|
@@ -157,6 +157,8 @@
 | `KlDivLoss` | 融合カーネル（`tape.rs:376`） |
 | `AvgPool2d` | `f64` 相当縮約契約（`docs/pooling-ops-design.md`） |
 | `AdaptiveAvgPool2d` | 同上 |
+| `Gather` | forward 単体は index-based copy だが、VJP（重複 index の勾配集約）が `Op::Scatter { reduce: Add }` を経由するため §8 冒頭の除外説明のとおり `f64` 縮約契約を要する（`grad.rs:1690-1727`） |
+| `Scatter` | `reduce: ScatterReduce::Add` モードが `BackendOps::scatter` の `f64` アキュムレータ・row-major 逐次加算契約（`backend_ops.rs:511-537`）に従う。`Overwrite` モード自体は単純代入だが、同一 `Op` variant が Add モードを持つため dtype 特化側に分類する |
 
 ### その他（対象外。24 variant）
 
@@ -187,7 +189,7 @@
 | `Sort` | ビットニックソート方式（64bit 合成キー。dtype 非依存の再設計が必要） |
 | `Topk` | 同上 |
 
-3 区分の内訳は 22（合成可能）＋ 24（dtype 特化）＋ 24（その他）＝ 70 variant で、§2 が数え上げた `Op` enum の総 variant 数と一致する。
+3 区分の内訳は 20（合成可能）＋ 26（dtype 特化）＋ 24（その他）＝ 70 variant で、§2 が数え上げた `Op` enum の総 variant 数と一致する。
 
 ## 9. facade API 契約案（未承認のまま列挙）
 
