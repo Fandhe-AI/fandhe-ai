@@ -1,0 +1,39 @@
+# 事前登録判定規則（イシュー #2050: GB10 での SME ゲート ON/OFF 全出力 bit 同一の実証）
+# 登録日時: 2026-09-19T01:30:03Z（main 82160b47 時点・実測開始前）。結果が出た後に緩和しない。
+# 親規則: 同ディレクトリの RULE-gb10.txt（#1978 残）。同末尾追記のとおり R2-GB10 の checksum 一致は bit 同一の証拠に
+# ならないため、本ファイルは #1979 受け入れ条件「非 SME 環境で bit 同一のフォールバック」の証拠となる判定だけを新規に事前登録する。
+# #1978 の総合判定「後退あり」・R1-GB10 の結果は本実測で変更しない。
+
+対象実機: DGX Spark GB10（Grace CPU・Linux aarch64・SME 非対応。RULE-gb10.txt と同一）。
+腕（2 ツリー。指紋差分〈git ls-files 一覧に対する sha256sum〉が crates/backend-cpu/src/gemm_blis/mod.rs の 1 ファイルのみ〉:
+  before = main 82160b47effc8d90555154f338361643d90acc42（SME_PRODUCTION_ENABLED=false）
+  after  = 同一コミットに on-arm.patch（SME_PRODUCTION_ENABLED のみ false → true。sha256 を env_info に記録）を適用
+  テストファイル crates/facade/tests/cpu_sme_gate_bit_dump.rs は #2049（PR #2054）が main へマージ済みのため両ツリーに存在し、
+  run_bitdump.sh のコピー手順は発火しない。指紋差分は mod.rs の 1 件のみであることをオーケストレーション側で実測前に assert する。
+
+R0（前提・必須）: 両腕で `sme_report()` が `SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }`。
+  不成立なら中止・記録のみ（undetermined）。
+
+RB（bit 同一・判定）: run_bitdump.sh（cargo test -p fandhe-ai --release --test cpu_sme_gate_bit_dump -- --ignored --exact dump_cpu_sme_gate_bits）
+  を両腕で 1 回ずつ実行し、`^out\[` 行を抽出する。
+  - 行数: before・after とも期待行数 6,726,847（gemm512 262,144・gemm1024 1,048,576・gemm2048 4,194,304・train 1,221,183・infer 640）
+    に一致すること。不一致は「判定不能（行数不一致）」として記録し bit 同一とは判定しない。
+  - 一致: 全体 sha256 が一致し cmp／diff の差分が 0 バイト・0 行 → 「bit 同一: 成立」。
+  - 不一致: 1 バイトでも差 → 「bit 同一: 不成立」。ラベル別 sha256 でどのラベルが不一致かを記録し、是正はしない。
+  到達ラベル（gemm512／gemm1024／gemm2048／train）が非到達対照（infer）と同じく一致することが #1979 の証拠となる。
+  SME 非対応環境では after 腕でも `SmeKernel::try_new()` が None を返し NEON 経路へ落ちる（構造上の期待）が、期待に頼らず実測結果のみで判定する。
+
+RR（再現性・記録）: after 腕のみ 2 回目を実行し 1 回目と sha256 が一致することを記録する（run-to-run 決定性。判定には用いない）。
+
+専有ゲート（外側・記録）: RULE-gb10.txt と同一（load1 < 1.0 かつ gpu_util 0%・最大 20 回・30 秒間隔）。bit 同一性は負荷に依存しないため
+  不通過でも実行し「参考」表記のみ。
+
+総合判定の語彙: 「bit 同一: 成立」／「bit 同一: 不成立」／「undetermined」（R0 不成立・行数不一致・テスト失敗）。
+  run_bitdump.sh の exit code との対応（事前固定）: 0 → 成立／1 かつ bitdump_cmp.txt に差分あり → 不成立／
+  1 かつビルド・テスト失敗（NG 行なし） → undetermined／2（行数不一致） → undetermined／3（diff と cmp の不整合） → undetermined。
+  いずれの場合も `SME_PRODUCTION_ENABLED` は切り替えない（#1979 のユーザー承認事項）。
+
+保存物（gb10/bitdump/）: RULE-bitdump.txt（本ファイルは gb10/ 直下）・sme_report.txt・fp-{before,after}.txt／fp-diff.txt・patch_sha256.txt・
+  load_gate_outer.log・line_counts.txt・summary.txt（ラベル別行数・sha256）・sha256_{before,after}.txt・bitdump_cmp.txt／bitdump_diff.txt（先頭のみ）・
+  rerun_after_sha256.txt・{before,after}_raw.log（`^out\[` 行を除いた要約）・env_info.txt（<home> マスク・内部ホスト名なし）。
+  {before,after}_bits.txt（各約 250 MB）はコミットしない。

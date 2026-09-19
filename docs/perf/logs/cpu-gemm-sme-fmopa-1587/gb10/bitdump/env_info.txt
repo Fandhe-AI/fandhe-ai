@@ -1,0 +1,12 @@
+date_utc=2026-09-19T01:34:51Z
+rev_stamp_before=daffdd14e1326c07517848597b4e3439d0c3be6e
+rev_stamp_after=daffdd14e1326c07517848597b4e3439d0c3be6e+on-arm.patch
+uname=Linux 6.17.0-1031-nvidia aarch64
+rustc=rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo=cargo 1.97.0 (c980f4866 2026-06-30)
+cpu_model=
+nproc=20
+rayon_num_threads=unset
+tree_before=<home>/work/rust-ai-library-run
+tree_after=<home>/work/rust-ai-library-2050-after
+outer_gate=load1<1.0 && gpu_util==0 (load_gate_outer.log。記録のみ)
