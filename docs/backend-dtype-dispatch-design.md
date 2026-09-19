@@ -506,3 +506,84 @@ typed_ops_types_are_reachable_via_facade`）で、CPU バックエンドにお�
 `typed_ops_*` 実測は本実装エージェント実行環境に到達手段がなく未実施
 （各バックエンドの `TypedOps<T>` 実装自体は §12〜§14 で個別に検証・
 申し送り済み）。
+
+## 17. 実装記録（#2060・CUDA `TypedOps<f64>` のネイティブカーネル化）
+
+§8「スコープ外・引き継ぎ」の「**f64 GPU カーネル（CUDA SIMT）**:
+性能目的がないため優先度は低いが、#1650 で `Unsupported` から始める
+既定実装は含めてよい」という引き継ぎ事項を実施した。#1703 時点の
+「driver 非接触・全演算 `Unsupported`」実装
+（`crates/backend-cuda/src/typed_f64.rs`）を、素朴な CUDA C カーネル
+（`crates/backend-cuda/src/kernels_typed_f64.rs`。NVRTC 文字列埋め込み・
+12 定数）による実装へ差し替えた。
+
+### 17.1 数値契約: bit 完全一致／REQ-2 統一複合判定の使い分け
+
+CPU 参照実装（`crates/backend-cpu/src/typed_f64.rs`）を意味論の正とし、
+累積順序が構造的に一致する演算は bit 完全一致を、構造的に異なる演算は
+REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を
+適用する（判断根拠は `kernels_typed_f64.rs` モジュール doc 参照）。
+
+- **bit 完全一致**: `gemm`（`fma(double,double,double)` を縮約軸 `p`
+  昇順で累積。CPU `f64::mul_add` の逐次累積順序と同一構造）・`add`／
+  `mul`／`relu`（順序非依存の純粋算術）・軸指定 `sum`／`max`
+  （1 スレッド＝1 出力要素で縮約軸を昇順逐次累積。CPU
+  `axis_reduce_f64` と同一構造）
+- **REQ-2 統一複合判定**: `exp`／`tanh`（デバイス側 libm と CPU libm
+  の丸め差）・全軸縮約 `sum`／`max`（GPU 2 段 warp シャッフル木縮約 対
+  CPU `CHUNK=4096` チャンク分割という構造差）
+
+### 17.2 メモリ確保方式
+
+`crate::pool::CudaAllocator`（サイズクラス別プール。イシュー #1020）は
+現状 f32／f16 のみ対応しており、f64 に性能目標がないため拡張しない。
+出力バッファは `self.stream.alloc_zeros::<f64>(numel)`（安全な zero
+初期化。`reduce.rs::run_sum_all_f32` の `partial` バッファ確保と同じ
+判断）で直接確保する。
+
+### 17.3 対象ファイル
+
+- 新規: `crates/backend-cuda/src/kernels_typed_f64.rs`（12 カーネル
+  ソース定数・静的検査テスト 8 件）
+- 全面書き換え: `crates/backend-cuda/src/typed_f64.rs`（`CudaTypedF64`
+  構造体・`run_gemm`／`run_add`／`run_mul`／`run_relu`／`run_exp`／
+  `run_tanh`／`run_sum_all`／`run_max_all`／`run_sum_axis`／
+  `run_max_axis` の 10 メソッド・`impl TypedOps<f64> for
+  CudaBackendOps`）
+- 追加: `crates/backend-cuda/src/context_cache.rs::cached_typed_f64`
+  （`cached_reduce` と同型のプロセス内キャッシュ）
+- 可視性緩和: `crates/backend-cuda/src/ops.rs::map_reduce_error` を
+  `fn` → `pub(crate) fn`（`device_handle_raw`／`with_driver_call`
+  〈#1703〉と同型の非破壊変更。挙動は不変）
+- 書き換え: `crates/backend-cuda/tests/typed_ops_f64_contract.rs`
+  （旧契約「8 演算すべて `Unsupported`」→ 新契約「shape 不整合は
+  driver 到達前に `ShapeMismatch`・有効な shape でも driver 不在
+  環境〈CI〉では `CudaUnavailable`」）
+- 新規: `crates/backend-cuda/tests/typed_ops_f64_parity.rs`
+  （(a) 実機非依存の accessor・shape 検証テスト（非 `#[ignore]`）・
+  (b) GB10 実機 `#[ignore]` テスト 3 件〈gemm bit 完全一致・
+  elementwise/reduction 突合・空縮約／境界形状〉）
+
+`git diff --stat` で `crates/backend-cuda` 以外のクレート（`tensor-core`・
+`backend-cpu`・`facade` 等）に変更がないことを確認済み（f32 実装本体
+〈`elementwise.rs`／`reduce.rs`／`gemm.rs`／`kernels.rs`／
+`kernels_elementwise.rs`／`kernels_reduce.rs`〉も無変更）。
+
+### 17.4 検証
+
+- `cargo build --workspace`・`cargo clippy --workspace --all-targets
+  --all-features -- -D warnings`・`cargo test --workspace
+  --all-features` はいずれも green（GPU 非依存部分。CI・Linux で完結）
+- 新規契約テスト（`typed_ops_f64_contract.rs` 6 件）・単体テスト
+  （`typed_f64.rs`／`kernels_typed_f64.rs` 内 `#[cfg(test)]` 計 21 件）
+  は非 `#[ignore]` かつ全 pass
+- GB10 実機での `#[ignore]` テスト実行は本実装セッションの実行環境に
+  CUDA 実機への到達手段がないため未実施。実行コマンド・保存すべき
+  ログ・事前登録判定規則は `docs/perf/logs/cuda-typed-ops-f64-2060/
+  README.md` を参照（GB10 セッションへ申し送り）
+
+### 17.5 スコープ外
+
+CUDA `double` 専用の性能最適化（BLIS packing・warp 最適化・split-K
+等）・bf16／Metal・`Var`／`Tape`／VJP への dtype 多重化・facade 公開面
+への昇格は対象外（§8「性能目的がないため優先度は低い」の方針を維持）。

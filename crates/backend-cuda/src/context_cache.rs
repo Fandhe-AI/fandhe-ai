@@ -589,6 +589,22 @@ pub(crate) fn cached_reduce(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::typed_f64::CudaTypedF64`]
+/// スイート（`TypedOps<f64>` の 8 演算・12 カーネル）をプロセス内
+/// キャッシュから取得する（イシュー #2060。キーは [`ContextKey`]。
+/// `cached_reduce` と同型）。`typed_f64::CudaBackendOps` の
+/// `TypedOps<f64>` 実装の唯一の呼び出し先。
+pub(crate) fn cached_typed_f64(
+    device: &CudaDevice,
+) -> Result<Arc<crate::typed_f64::CudaTypedF64>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::typed_f64::CudaTypedF64>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::typed_f64::CudaTypedF64::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`crate::arg_reduce::
 /// CudaArgReduce`] スイートをプロセス内キャッシュから取得する（イシュー
 /// #1948。キーは [`ContextKey`]。`cached_reduce` と同型。`sum`／`max`／

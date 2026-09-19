@@ -510,6 +510,12 @@ mod transpose;
 // コメント・`docs/backend-dtype-dispatch-design.md` §5／§12 参照）。
 mod typed_bf16;
 mod typed_f16;
+// イシュー #2060: `TypedOps<f64>` の CUDA ネイティブカーネル実装
+// （`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`）。
+// `kernels.rs`／`kernels_elementwise.rs`／`kernels_reduce.rs` と同じ
+// 「起動 API（`typed_f64.rs`）／NVRTC カーネル文字列
+// （`kernels_typed_f64.rs`）」の責務分離。
+mod kernels_typed_f64;
 mod typed_f64;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
