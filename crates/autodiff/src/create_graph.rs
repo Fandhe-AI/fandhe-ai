@@ -52,7 +52,13 @@
 //! **対象スコープ（設計 doc §8。`Op::supports_create_graph` が判定する
 //! 対象）**: `Leaf`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`・`Sigmoid`・
 //! `Sum`・`Mean`・`Reshape`・`BroadcastTo`・`MatMul`（rank 2 × rank 2
-//! 限定。#1943）の 12 variant のみ。それ以外の追跡対象 Op・rank≥3 の
+//! 限定。#1943）の 12 variant に加え、イシュー #2062 で
+//! `ScalarUnary`（`Gelu`・`GeluTanh` を除く）・`ScalarBinary`（既知 13
+//! variant すべて）・`Transpose`・`Permute`・`Narrow`・`Concat`・
+//! `Contiguous`・`Where` を拡張済み（[`scalar_unary_replayable`]／
+//! [`scalar_binary_replayable`] 参照）。`MaskedFill`・`Gather`・
+//! `Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss` は引き続き対象外
+//! （後続イシューへ引き継ぐ）。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
 //! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
@@ -82,12 +88,74 @@
 //! （本ファイル冒頭の既存契約節）を取っており、この整理はその範囲内
 //! に収まる（tolerance／baseline は無変更）。
 
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarUnaryOp, Tensor};
 
 use crate::backward::Gradients;
 use crate::error::AutodiffError;
 use crate::tape::{NodeId, Op, Tape, TapeId, TapeNode, materialize_fallible};
 use crate::var::Var;
+
+/// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
+/// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
+/// への薄い委譲で全 variant 対応）とは異なり、[`build_cgrads`] の VJP
+/// 合成は variant ごとに手書きのため、ここで対応済み variant のみを
+/// 許可する。`ScalarUnaryOp::Gelu`（誤差関数版）は導関数が `erf` を要し
+/// `Var` 演算の合成だけでは再現できないため対象外
+/// （`docs/autodiff-higher-order-grad-decision.md` §15）。`GeluTanh` は
+/// 本イシューのスコープでは見送り（`.claude/rules/out-of-scope-
+/// tracking.md` で追跡）。`ScalarUnaryOp` は `tensor-core` 側で
+/// `#[non_exhaustive]` のため、末尾のワイルドカードは未知 variant を
+/// 安全側の `false` へ倒す（`tape.rs::supports_create_graph` doc
+/// 「例外」参照）。
+pub(crate) fn scalar_unary_replayable(op: ScalarUnaryOp) -> bool {
+    matches!(
+        op,
+        ScalarUnaryOp::Neg
+            | ScalarUnaryOp::Abs
+            | ScalarUnaryOp::Sqrt
+            | ScalarUnaryOp::Log
+            | ScalarUnaryOp::Log2
+            | ScalarUnaryOp::Log10
+            | ScalarUnaryOp::Sin
+            | ScalarUnaryOp::Cos
+            | ScalarUnaryOp::Tan
+            | ScalarUnaryOp::Relu
+            | ScalarUnaryOp::Exp
+            | ScalarUnaryOp::Tanh
+            | ScalarUnaryOp::Sigmoid
+            | ScalarUnaryOp::Silu
+            | ScalarUnaryOp::Hardswish
+            | ScalarUnaryOp::LeakyRelu { .. }
+            | ScalarUnaryOp::Elu { .. }
+            | ScalarUnaryOp::Softplus { .. }
+            | ScalarUnaryOp::Clamp { .. }
+            | ScalarUnaryOp::PowScalar { .. }
+    )
+}
+
+/// [`Op::supports_create_graph`] が `Op::ScalarBinary` へ委譲する判定
+/// （イシュー #2062）。既知 13 variant はすべて `Var` 演算で VJP を
+/// 合成できるため `true`（[`build_cgrads`] の `Op::ScalarBinary` 腕
+/// 参照）。`ScalarBinaryOp` も `#[non_exhaustive]` のため末尾ワイルド
+/// カードは未知 variant を `false` へ倒す。
+pub(crate) fn scalar_binary_replayable(op: ScalarBinaryOp) -> bool {
+    matches!(
+        op,
+        ScalarBinaryOp::Add
+            | ScalarBinaryOp::Sub
+            | ScalarBinaryOp::Mul
+            | ScalarBinaryOp::Div
+            | ScalarBinaryOp::Pow
+            | ScalarBinaryOp::Maximum
+            | ScalarBinaryOp::Minimum
+            | ScalarBinaryOp::Gt
+            | ScalarBinaryOp::Ge
+            | ScalarBinaryOp::Lt
+            | ScalarBinaryOp::Le
+            | ScalarBinaryOp::Eq
+            | ScalarBinaryOp::Ne
+    )
+}
 
 /// [`Tape::backward_create_graph`] の戻り値。1 階勾配
 /// （[`Self::first_order`]。既存 `backward_impl` の無変更な結果）に
@@ -490,6 +558,38 @@ fn replay_op<'c>(
         Op::Mean { input, dim } => get_mirror(mirror, input)?.mean(dim),
         Op::Reshape { input } => get_mirror(mirror, input)?.contiguous()?.reshape(shape),
         Op::BroadcastTo { input } => get_mirror(mirror, input)?.broadcast_to(shape),
+        // `Var::scalar_unary`／`scalar_binary`（`pub(crate)`。同一
+        // crate 内のため呼べる）は forward 数式そのものを内包している
+        // ため、対応済み variant（`scalar_unary_replayable`／
+        // `scalar_binary_replayable` が事前検査済み）であれば variant
+        // ごとの分岐なしに再生できる（イシュー #2062）。
+        Op::ScalarUnary { op: sop, input } => get_mirror(mirror, input)?.scalar_unary(sop),
+        Op::ScalarBinary { op: sop, a, b } => {
+            get_mirror(mirror, a)?.scalar_binary(&get_mirror(mirror, b)?, sop)
+        }
+        Op::Transpose { input, dim0, dim1 } => get_mirror(mirror, input)?.transpose(dim0, dim1),
+        Op::Permute { input, perm } => get_mirror(mirror, input)?.permute(&perm),
+        Op::Narrow {
+            input,
+            dim,
+            start,
+            len,
+        } => get_mirror(mirror, input)?.narrow(dim, start, len),
+        Op::Concat { inputs, dim } => {
+            let mirrored: Result<Vec<Var<'c>>, AutodiffError> =
+                inputs.iter().map(|&id| get_mirror(mirror, id)).collect();
+            Var::cat(&mirrored?, dim)
+        }
+        Op::Contiguous { input } => get_mirror(mirror, input)?.contiguous(),
+        // `cond` は forward 時点（`Var::where_cond`）で `a`／`b` と
+        // 同じ `out_shape` へ broadcast 済みの f32 マスク（`c != 0.0`
+        // 判定契約。`Op::Where` doc 参照）として `Op` へ焼き込まれて
+        // いるため、`Tensor<bool>`（`c != 0.0`）へ変換してそのまま
+        // `Var::where_cond` へ渡せる（追加の broadcast は不要）。
+        Op::Where { cond, a, b } => {
+            let cond_bool = f32_mask_to_bool(&cond)?;
+            Var::where_cond(&cond_bool, &get_mirror(mirror, a)?, &get_mirror(mirror, b)?)
+        }
         _ => Err(AutodiffError::Backward(
             "create_graph: replay_op: supports_create_graph() が true の未対応 Op（内部契約違反）"
                 .into(),
@@ -652,6 +752,305 @@ fn build_cgrads<'c>(
                 let input_shape = parent_nodes[input.0].shape.clone();
                 let da = reduce_to(child, &g, &input_shape)?;
                 accumulate(&parent_nodes, &mut cgrads, input, da)?;
+            }
+            Op::Transpose { input, dim0, dim1 } => {
+                // 対合性（`transpose` を 2 回適用すると恒等）を使い、
+                // 同じ軸で upstream を transpose するだけで閉じる
+                // （`grad.rs::Op::Transpose` の VJP と同じ規約）。
+                let da = g.transpose(dim0, dim1)?;
+                accumulate(&parent_nodes, &mut cgrads, input, da)?;
+            }
+            Op::Permute { input, perm } => {
+                // `grad.rs::inverse_permutation`（イシュー #2062 で
+                // `pub(crate)` 化）を再利用し、逆置換の数式を二重管理
+                // しない。
+                let inv = crate::grad::inverse_permutation(&perm);
+                let da = g.permute(&inv)?;
+                accumulate(&parent_nodes, &mut cgrads, input, da)?;
+            }
+            Op::Narrow {
+                input,
+                dim,
+                start,
+                len,
+            } => {
+                // 「Split（Narrow）の VJP は Concat」の原則（`grad.rs::
+                // Op::Narrow` の VJP と同型）。選択されなかった前後の
+                // 区間を zero 定数で埋め、`Var::cat` で連結する。
+                let input_shape = parent_nodes[input.0].shape.clone();
+                let before_len = start;
+                let after_len = input_shape[dim] - start - len;
+                let mut pieces: Vec<Var<'c>> = Vec::with_capacity(3);
+                if before_len > 0 {
+                    let mut before_shape = input_shape.clone();
+                    before_shape[dim] = before_len;
+                    pieces.push(child.var_no_grad(&Tensor::zeros(&before_shape)?));
+                }
+                pieces.push(g);
+                if after_len > 0 {
+                    let mut after_shape = input_shape.clone();
+                    after_shape[dim] = after_len;
+                    pieces.push(child.var_no_grad(&Tensor::zeros(&after_shape)?));
+                }
+                let da = if pieces.len() == 1 {
+                    g
+                } else {
+                    Var::cat(&pieces, dim)?
+                };
+                accumulate(&parent_nodes, &mut cgrads, input, da)?;
+            }
+            Op::Concat { inputs, dim } => {
+                // 「Concat の VJP は Split（Narrow）」の原則（`grad.rs::
+                // Op::Concat` の VJP と同型）。同一 `NodeId` の重複
+                // （`cat(&[x, x])`）は `accumulate` が合算する。
+                let mut off = 0usize;
+                for input in inputs {
+                    let len = parent_nodes[input.0].shape[dim];
+                    let da = g.narrow(dim, off, len)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, da)?;
+                    off += len;
+                }
+            }
+            Op::Contiguous { input } => {
+                // 恒等（`grad.rs::Op::Contiguous` の VJP と同型）。
+                accumulate(&parent_nodes, &mut cgrads, input, g)?;
+            }
+            Op::Where { cond, a, b } => {
+                // `grad.rs::where_vjp` と同型: `cond` の真偽で `g` を
+                // 通すか 0 にするかを選択し、`a`／`b` 元 shape へ縮約
+                // する（`reduce_to`。`Op::Mul` 等と同じ broadcast 逆
+                // 演算）。
+                let a_shape = parent_nodes[a.0].shape.clone();
+                let b_shape = parent_nodes[b.0].shape.clone();
+                let mask = f32_mask_to_bool(&cond)?;
+                let zeros = child.var_no_grad(&Tensor::zeros(&g.shape())?);
+                let ga = Var::where_cond(&mask, &g, &zeros)?;
+                let gb = Var::where_cond(&mask, &zeros, &g)?;
+                let da = reduce_to(child, &ga, &a_shape)?;
+                let db = reduce_to(child, &gb, &b_shape)?;
+                accumulate(&parent_nodes, &mut cgrads, a, da)?;
+                accumulate(&parent_nodes, &mut cgrads, b, db)?;
+            }
+            Op::ScalarUnary { op: sop, input } => {
+                let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?.clone();
+                let x_m = get_mirror(mirror, input)?;
+                let one = child.var_no_grad(&Tensor::scalar(1.0f32));
+                let da = match sop {
+                    ScalarUnaryOp::Neg => g.neg()?,
+                    ScalarUnaryOp::Abs => {
+                        let pos = mask_from_pred(&x_val, |v| v > 0.0)?;
+                        let neg = mask_from_pred(&x_val, |v| v < 0.0)?;
+                        let zeros = child.var_no_grad(&Tensor::zeros(&g.shape())?);
+                        let neg_branch = Var::where_cond(&neg, &g.neg()?, &zeros)?;
+                        Var::where_cond(&pos, &g, &neg_branch)?
+                    }
+                    ScalarUnaryOp::Sqrt => {
+                        let y_c = get_mirror(mirror, id)?;
+                        let half = child.var_no_grad(&Tensor::scalar(0.5f32));
+                        let factor = half.div(&y_c)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Log => {
+                        let factor = one.div(&x_m)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Log2 => {
+                        let ln2 = child.var_no_grad(&Tensor::scalar(std::f32::consts::LN_2));
+                        let factor = one.div(&x_m.mul(&ln2)?)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Log10 => {
+                        let ln10 = child.var_no_grad(&Tensor::scalar(std::f32::consts::LN_10));
+                        let factor = one.div(&x_m.mul(&ln10)?)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Sin => {
+                        let factor = x_m.cos()?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Cos => {
+                        let factor = x_m.sin()?.neg()?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Tan => {
+                        let c = x_m.cos()?;
+                        let factor = one.div(&c.mul(&c)?)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Relu => {
+                        let mask = positive_mask(&x_val)?;
+                        let zeros = child.var_no_grad(&Tensor::zeros(&g.shape())?);
+                        Var::where_cond(&mask, &g, &zeros)?
+                    }
+                    ScalarUnaryOp::Exp => {
+                        let out_c = get_mirror(mirror, id)?;
+                        g.mul(&out_c)?
+                    }
+                    ScalarUnaryOp::Tanh => {
+                        let out_c = get_mirror(mirror, id)?;
+                        let onec = child.var_no_grad(&Tensor::full(&out_c.shape(), 1.0f32)?);
+                        let sq = out_c.mul(&out_c)?;
+                        let factor = onec.sub(&sq)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Sigmoid => {
+                        let out_c = get_mirror(mirror, id)?;
+                        let onec = child.var_no_grad(&Tensor::full(&out_c.shape(), 1.0f32)?);
+                        let comp = onec.sub(&out_c)?;
+                        let factor = out_c.mul(&comp)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Silu => {
+                        let s = x_m.sigmoid();
+                        let onec = child.var_no_grad(&Tensor::full(&x_m.shape(), 1.0f32)?);
+                        let one_minus_s = onec.sub(&s)?;
+                        let term = x_m.mul(&one_minus_s)?;
+                        let inner = onec.add(&term)?;
+                        let factor = s.mul(&inner)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Hardswish => {
+                        let lo = mask_from_pred(&x_val, |v| v <= -3.0)?;
+                        let hi = mask_from_pred(&x_val, |v| v >= 3.0)?;
+                        let two = child.var_no_grad(&Tensor::scalar(2.0f32));
+                        let three = child.var_no_grad(&Tensor::scalar(3.0f32));
+                        let six = child.var_no_grad(&Tensor::scalar(6.0f32));
+                        let mid = x_m.mul(&two)?.add(&three)?.div(&six)?;
+                        let onec = child.var_no_grad(&Tensor::full(&x_m.shape(), 1.0f32)?);
+                        let hi_branch = Var::where_cond(&hi, &onec, &mid)?;
+                        let zeros = child.var_no_grad(&Tensor::zeros(&x_m.shape())?);
+                        let factor = Var::where_cond(&lo, &zeros, &hi_branch)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::LeakyRelu { negative_slope } => {
+                        let mask = mask_from_pred(&x_val, |v| v >= 0.0)?;
+                        let slope = child.var_no_grad(&Tensor::scalar(negative_slope));
+                        let else_branch = g.mul(&slope)?;
+                        Var::where_cond(&mask, &g, &else_branch)?
+                    }
+                    ScalarUnaryOp::Elu { alpha } => {
+                        let mask = mask_from_pred(&x_val, |v| v > 0.0)?;
+                        let alpha_c = child.var_no_grad(&Tensor::scalar(alpha));
+                        let factor = x_m.exp().mul(&alpha_c)?;
+                        let else_branch = g.mul(&factor)?;
+                        Var::where_cond(&mask, &g, &else_branch)?
+                    }
+                    ScalarUnaryOp::Softplus { beta, threshold } => {
+                        let mask = mask_from_pred(&x_val, |v| v * beta > threshold)?;
+                        let beta_c = child.var_no_grad(&Tensor::scalar(beta));
+                        let factor = x_m.mul(&beta_c)?.sigmoid();
+                        let else_branch = g.mul(&factor)?;
+                        Var::where_cond(&mask, &g, &else_branch)?
+                    }
+                    ScalarUnaryOp::Clamp { min, max } => {
+                        let mask = mask_from_pred(&x_val, |v| {
+                            !(v.is_nan() || min > max || v < min || v > max)
+                        })?;
+                        let zeros = child.var_no_grad(&Tensor::zeros(&g.shape())?);
+                        Var::where_cond(&mask, &g, &zeros)?
+                    }
+                    ScalarUnaryOp::PowScalar { exponent } => {
+                        if exponent == 0.0 {
+                            child.var_no_grad(&Tensor::zeros(&g.shape())?)
+                        } else {
+                            let exp_c = child.var_no_grad(&Tensor::scalar(exponent));
+                            let factor = x_m
+                                .scalar_unary(ScalarUnaryOp::PowScalar {
+                                    exponent: exponent - 1.0,
+                                })?
+                                .mul(&exp_c)?;
+                            g.mul(&factor)?
+                        }
+                    }
+                    _ => {
+                        return Err(AutodiffError::Backward(format!(
+                            "create_graph: build_cgrads: 未対応の ScalarUnaryOp {sop:?}\
+                             （内部契約違反。scalar_unary_replayable との判定不整合）"
+                        )));
+                    }
+                };
+                accumulate(&parent_nodes, &mut cgrads, input, da)?;
+            }
+            Op::ScalarBinary { op: sop, a, b } => {
+                let a_shape = parent_nodes[a.0].shape.clone();
+                let b_shape = parent_nodes[b.0].shape.clone();
+                if sop.is_comparison() {
+                    // 比較演算は区分定数で両入力の勾配が恒等的にゼロ
+                    // （`grad.rs::Op::ScalarBinary` の比較演算分岐と
+                    // 同型。`0 * upstream` を経由せず直接ゼロ定数を
+                    // 返し `inf`／`NaN` 汚染を避ける）。
+                    let da = child.var_no_grad(&Tensor::zeros(&a_shape)?);
+                    let db = child.var_no_grad(&Tensor::zeros(&b_shape)?);
+                    accumulate(&parent_nodes, &mut cgrads, a, da)?;
+                    accumulate(&parent_nodes, &mut cgrads, b, db)?;
+                } else {
+                    let out_shape = parent_nodes[id.0].shape.clone();
+                    let a_m = get_mirror(mirror, a)?;
+                    let b_m = get_mirror(mirror, b)?;
+                    let a_bc = a_m.broadcast_to(&out_shape)?;
+                    let b_bc = b_m.broadcast_to(&out_shape)?;
+                    let (da_full, db_full) = match sop {
+                        ScalarBinaryOp::Add => (g, g),
+                        ScalarBinaryOp::Sub => (g, g.neg()?),
+                        ScalarBinaryOp::Mul => (g.mul(&b_bc)?, g.mul(&a_bc)?),
+                        ScalarBinaryOp::Div => {
+                            let one = child.var_no_grad(&Tensor::scalar(1.0f32));
+                            let factor_a = one.div(&b_bc)?;
+                            let factor_b = a_bc.div(&b_bc)?.div(&b_bc)?.neg()?;
+                            (g.mul(&factor_a)?, g.mul(&factor_b)?)
+                        }
+                        ScalarBinaryOp::Pow => {
+                            let a_val = materialize_fallible(&parent_nodes, parent_ops, a)?;
+                            let b_val = materialize_fallible(&parent_nodes, parent_ops, b)?;
+                            let (a_bc_val, b_bc_val) =
+                                a_val.broadcast_with(b_val).map_err(AutodiffError::Shape)?;
+                            let mask_b0 = mask_from_pred(&b_bc_val, |v| v == 0.0)?;
+                            let mask_a0 = mask_from_pred(&a_bc_val, |v| v == 0.0)?;
+                            let zeros = child.var_no_grad(&Tensor::zeros(&out_shape)?);
+                            let out_c = get_mirror(mirror, id)?;
+                            let one = child.var_no_grad(&Tensor::scalar(1.0f32));
+                            let b_minus_one = b_bc.sub(&one)?;
+                            let a_pow = a_bc.pow(&b_minus_one)?;
+                            let da_factor = Var::where_cond(&mask_b0, &zeros, &b_bc.mul(&a_pow)?)?;
+                            let db_factor =
+                                Var::where_cond(&mask_a0, &zeros, &out_c.mul(&a_bc.log()?)?)?;
+                            (g.mul(&da_factor)?, g.mul(&db_factor)?)
+                        }
+                        ScalarBinaryOp::Maximum | ScalarBinaryOp::Minimum => {
+                            let a_val = materialize_fallible(&parent_nodes, parent_ops, a)?;
+                            let b_val = materialize_fallible(&parent_nodes, parent_ops, b)?;
+                            let (a_bc_val, b_bc_val) =
+                                a_val.broadcast_with(b_val).map_err(AutodiffError::Shape)?;
+                            let a_favored = matches!(sop, ScalarBinaryOp::Maximum);
+                            let mask_a_wins = pairwise_mask(&a_bc_val, &b_bc_val, |x, y| {
+                                !(x.is_nan() || y.is_nan()) && if a_favored { x > y } else { x < y }
+                            })?;
+                            let mask_b_wins = pairwise_mask(&a_bc_val, &b_bc_val, |x, y| {
+                                !(x.is_nan() || y.is_nan()) && if a_favored { x < y } else { x > y }
+                            })?;
+                            let mask_tie = pairwise_mask(&a_bc_val, &b_bc_val, |x, y| {
+                                !(x.is_nan() || y.is_nan()) && x == y
+                            })?;
+                            let zeros = child.var_no_grad(&Tensor::zeros(&out_shape)?);
+                            let half = child.var_no_grad(&Tensor::scalar(0.5f32));
+                            let half_g = g.mul(&half)?;
+                            let tie_branch = Var::where_cond(&mask_tie, &half_g, &zeros)?;
+                            let da = Var::where_cond(&mask_a_wins, &g, &tie_branch)?;
+                            let db = Var::where_cond(&mask_b_wins, &g, &tie_branch)?;
+                            (da, db)
+                        }
+                        _ => {
+                            return Err(AutodiffError::Backward(format!(
+                                "create_graph: build_cgrads: 未対応の ScalarBinaryOp {sop:?}\
+                                 （内部契約違反。scalar_binary_replayable との判定不整合）"
+                            )));
+                        }
+                    };
+                    let da = reduce_bias_grad_var(child, &da_full, &a_shape)?;
+                    let db = reduce_bias_grad_var(child, &db_full, &b_shape)?;
+                    accumulate(&parent_nodes, &mut cgrads, a, da)?;
+                    accumulate(&parent_nodes, &mut cgrads, b, db)?;
+                }
             }
             _ => {
                 return Err(AutodiffError::Backward(
@@ -851,10 +1250,110 @@ fn reduce_bias_grad_var<'c>(
 /// 不成立——`grad.rs::elementwise_mul_mask` が `Op::Relu` に適用する
 /// 規約と同じ）。
 fn positive_mask(t: &Tensor<f32>) -> Result<Tensor<bool>, AutodiffError> {
+    mask_from_pred(t, |v| v > 0.0)
+}
+
+/// `t`（親テープ側の実測値）の各要素へ述語 `pred` を適用した
+/// `Tensor<bool>` を構築する（[`positive_mask`] の一般化。イシュー
+/// #2062。`ScalarUnaryOp` の区分定数な導関数——`Abs`・`LeakyRelu`・
+/// `Elu`・`Softplus`・`Clamp`・`Hardswish`——が使う host マスク構築の
+/// 単一情報源）。
+fn mask_from_pred(
+    t: &Tensor<f32>,
+    pred: impl Fn(f32) -> bool,
+) -> Result<Tensor<bool>, AutodiffError> {
     let contiguous = t.contiguous();
     let data: Vec<bool> = contiguous
         .as_slice()
-        .map(|s| s.iter().map(|&v| v > 0.0).collect())
+        .map(|s| s.iter().map(|&v| pred(v)).collect())
         .unwrap_or_default();
     Tensor::new(data, contiguous.shape()).map_err(AutodiffError::from)
+}
+
+/// broadcast 後の 2 テンソル（同一 shape）へ 2 項述語 `pred` を適用した
+/// `Tensor<bool>` を構築する（[`mask_from_pred`] の 2 項版。
+/// `ScalarBinaryOp::Pow`（`a == 0`／`b == 0` ガード）・`Maximum`／
+/// `Minimum`（勝ち／タイ／`NaN` 判定）が使う。`a`／`b` は呼び出し元が
+/// 既に同一 shape へ broadcast 済みであること（`Tensor::broadcast_
+/// with` の戻り値等）。
+fn pairwise_mask(
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    pred: impl Fn(f32, f32) -> bool,
+) -> Result<Tensor<bool>, AutodiffError> {
+    let a_c = a.contiguous();
+    let b_c = b.contiguous();
+    let data: Vec<bool> = match (a_c.as_slice(), b_c.as_slice()) {
+        (Some(sa), Some(sb)) => sa
+            .iter()
+            .zip(sb.iter())
+            .map(|(&x, &y)| pred(x, y))
+            .collect(),
+        _ => Vec::new(),
+    };
+    Tensor::new(data, a_c.shape()).map_err(AutodiffError::from)
+}
+
+/// [`Op::Where`] が `Op` payload に保持する `cond`（forward 時点で
+/// `out_shape` へ broadcast 済みの f32 マスク。`c != 0.0` 判定契約。
+/// `tape.rs::Op::Where` doc 参照）を `Var::where_cond` が要求する
+/// `Tensor<bool>` へ変換する（イシュー #2062）。
+fn f32_mask_to_bool(cond: &Tensor<f32>) -> Result<Tensor<bool>, AutodiffError> {
+    mask_from_pred(cond, |v| v != 0.0)
+}
+
+#[cfg(test)]
+mod contiguous_tests {
+    use super::*;
+
+    /// `Op::Contiguous`（`Var::contiguous`）の create_graph 対応
+    /// （イシュー #2062）。`Var::contiguous` は `pub(crate)` のため
+    /// `crates/autodiff/tests/create_graph.rs`（別クレート扱いの統合
+    /// テスト）から直接呼べず、本クレート内部の単体テストで検証する。
+    ///
+    /// `x: [2, 2]` を permute（非 contiguous view）してから
+    /// `contiguous()` を挟み `sum(y * y)` を取る。`Op::Permute` と同じ
+    /// 添字並べ替えのため、二次形式全体としては `sum(x * x)` と数値上
+    /// 同値になる——`finite_diff_hessian` 相当の独立クロスチェックは
+    /// 統合テスト側の `hessian_permute_quadratic_matches_finite_
+    /// difference` が既に担っており、本テストは「`Op::Contiguous` の
+    /// replay／VJP が恒等として正しく機能する」ことを対角 Hessian が
+    /// `2` になることで確認する（`Tape::backward` 経由の 1 階勾配とも
+    /// 突合する）。
+    #[test]
+    fn contiguous_replay_and_vjp_are_identity() {
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let child = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let x = tape.var(&Tensor::new(vec![1.0f32, -2.0, 0.5, 3.0], &[2, 2]).unwrap());
+        let y = x.permute(&[1, 0]).unwrap().contiguous().unwrap();
+        let loss = y.mul(&y).unwrap().sum(None).unwrap();
+
+        let cg = tape
+            .backward_create_graph(&loss, &child)
+            .expect("backward_create_graph に失敗（Op::Contiguous は対象）");
+        let gx = cg
+            .grad(&x)
+            .expect("grad: クロステープ検査は通るはず")
+            .expect("x は loss に到達するはず（1 階勾配）");
+
+        // 1 階勾配が `Tape::backward`（既存経路）と一致すること
+        // （`d/dx sum(permute(x)^2) = 2x`）。
+        let expected = cg.first_order().get(&x).unwrap().unwrap();
+        assert_eq!(gx.to_tensor().as_slice(), expected.as_slice());
+
+        // 二階微分（対角 Hessian = 2）。
+        let cx = cg.child_var(&x).unwrap().unwrap();
+        let row0 = child
+            .backward(
+                &gx.narrow(0, 0, 1)
+                    .unwrap()
+                    .narrow(1, 0, 1)
+                    .unwrap()
+                    .sum(None)
+                    .unwrap(),
+            )
+            .unwrap();
+        let d2 = row0.get(&cx).unwrap().unwrap();
+        assert_eq!(d2.get(&[0, 0]).unwrap(), 2.0);
+    }
 }

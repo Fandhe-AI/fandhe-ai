@@ -656,18 +656,21 @@ fn create_graph_treats_no_grad_leaf_as_constant() {
 // --- fail-closed 契約 ----------------------------------------------------
 
 // `Op::MatMul`（rank 2 × rank 2）は #1943 で対応済み・#1943.5 以下参照。
-// 本テストは代わりに `Var::sub`（`Op::ScalarBinary`。設計 doc §8
-// 「対象」区分に残る未実装 Op）を未対応 Op の代表として使う。入口検査
-// 7（`validate_ancestors`）が `build_mirror`／`build_cgrads` より前に
+// `Var::sub`（`Op::ScalarBinary { op: Sub, .. }`）はイシュー #2062 で
+// 対応済みになったため、本テストは代わりに `Var::gelu`（誤差関数版
+// GELU。`ScalarUnaryOp::Gelu`）を未対応 Op の代表として使う——導関数
+// `Φ(x) + x·φ(x)` が `erf` を要し `Var` 演算の合成だけでは再現できない
+// ため `scalar_unary_replayable` が引き続き `false` を返す
+// （`docs/autodiff-higher-order-grad-decision.md` §15）。入口検査 7
+// （`validate_ancestors`）が `build_mirror`／`build_cgrads` より前に
 // 判定するため、拒否時に `child` が一切書き込まれない（空のまま）こと
 // も併せて固定する。
 #[test]
-fn create_graph_rejects_unsupported_op_sub() {
+fn create_graph_rejects_unsupported_op_gelu() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
-    let a = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
-    let b = tape.var(&t(vec![0.5, 0.5, 0.5], &[3]));
-    let loss = a.sub(&b).unwrap().sum(None).unwrap();
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let loss = x.gelu().unwrap().sum(None).unwrap();
 
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
@@ -1632,4 +1635,304 @@ fn create_graph_nested_build_mirror_replays_matmul_fp32_strict() {
         mirror_value.as_slice(),
         expected.as_slice()
     );
+}
+
+// =========================================================================
+// イシュー #2062: 高階微分（create_graph）対象 Op の残り追加実装。
+// `Op::supports_create_graph()` を `ScalarUnary`（`Gelu`／`GeluTanh` を
+// 除く）・`ScalarBinary`（既知 13 variant）・`Transpose`・`Permute`・
+// `Narrow`・`Concat`・`Contiguous`・`Where` へ拡張した分の受け入れ
+// テスト。既存パターン（`finite_diff_hessian` との独立クロスチェック）
+// をそのまま踏襲する。線形演算（`Transpose`／`Permute`／`Narrow`／
+// `Concat`／`Contiguous`）は単体では Hessian が恒等的に 0 になるため、
+// `Mul` による二次形式と合成してから検証する（kink を避けるテスト点を
+// 選ぶ）。
+// =========================================================================
+
+// --- ScalarBinary: Sub（二次形式との合成で非ゼロ Hessian を検証） ------
+
+fn build_sub_quadratic<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let c = tape.var_no_grad(&t(vec![0.3, -0.7, 1.1], &[3]));
+    let y = x.sub(&c)?;
+    y.mul(&y)?.sum(None)
+}
+
+#[test]
+fn hessian_sub_quadratic_matches_finite_difference_and_closed_form() {
+    // loss = sum((x - c)^2) => d^2/dx_i^2 = 2, 非対角は 0。
+    let x0 = [1.0f32, -2.0, 0.5];
+    let numeric = finite_diff_hessian(build_sub_quadratic, &x0, &[3], 1e-3);
+    let analytic = analytic_hessian(build_sub_quadratic, &x0, &[3]);
+    assert_hessian_close(&analytic, &numeric);
+    for i in 0..3 {
+        assert!(
+            common::req2_close(analytic[i][i], 2.0),
+            "diag[{i}]: analytic={} expected=2.0",
+            analytic[i][i]
+        );
+    }
+}
+
+// --- ScalarBinary: Div（両入力とも追跡対象。0 除算・特異点を避ける） ---
+
+fn build_div<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    // `x / (x + c)`（分母も `x` に依存する非線形式。`x` のみの単純な
+    // 定数除算だと 2 階微分が恒等的に 0 になり、`x` の子テープ上の
+    // 写しへ 2 階勾配が到達しない〈`Gradients::get` が正しく `None`
+    // を返す〉ため `analytic_hessian` の `expect` が失敗する）。
+    let c = tape.var_no_grad(&t(vec![3.0, 4.0, 2.5], &[3]));
+    let denom = x.add(&c)?;
+    x.div(&denom)?.sum(None)
+}
+
+#[test]
+fn hessian_div_matches_finite_difference() {
+    let x0 = [1.0f32, -2.0, 0.5];
+    let numeric = finite_diff_hessian(build_div, &x0, &[3], 1e-3);
+    let analytic = analytic_hessian(build_div, &x0, &[3]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+// --- ScalarBinary: Pow（Var ^ Var。定義域を正に保つ） -------------------
+
+fn build_pow<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let exponent = tape.var_no_grad(&t(vec![2.5, 3.0, 1.7], &[3]));
+    x.pow(&exponent)?.sum(None)
+}
+
+#[test]
+fn hessian_pow_matches_finite_difference() {
+    let x0 = [1.2f32, 2.3, 0.8];
+    let numeric = finite_diff_hessian(build_pow, &x0, &[3], 1e-3);
+    let analytic = analytic_hessian(build_pow, &x0, &[3]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+// --- ScalarBinary: 比較演算（区分定数。両勾配とも恒等的にゼロ） --------
+
+#[test]
+fn create_graph_comparison_op_grad_is_always_zero() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let threshold = tape.var(&t(vec![1.5, 1.5, 1.5], &[3]));
+    let loss = x.gt(&threshold).unwrap().sum(None).unwrap();
+
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .expect("backward_create_graph に失敗（Op::ScalarBinary::Gt は対象）");
+    let gx = cg
+        .grad(&x)
+        .expect("grad: クロステープ検査は通るはず")
+        .expect("x は loss に到達するはず");
+    let data = gx.to_tensor();
+    for &v in data.contiguous().as_slice().unwrap() {
+        assert_eq!(v, 0.0, "比較演算の勾配は恒等的に 0 のはず");
+    }
+}
+
+// --- ScalarUnary: 滑らかな合成（Sqrt・Log・Sin・Silu） ------------------
+
+fn build_sqrt_log_sin<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.sqrt()?.add(&x.log()?)?.add(&x.sin()?)?.sum(None)
+}
+
+#[test]
+fn hessian_sqrt_log_sin_matches_finite_difference() {
+    let x0 = [1.2f32, 2.5, 0.7];
+    let numeric = finite_diff_hessian(build_sqrt_log_sin, &x0, &[3], 1e-3);
+    let analytic = analytic_hessian(build_sqrt_log_sin, &x0, &[3]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+fn build_silu<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.silu()?.sum(None)
+}
+
+#[test]
+fn hessian_silu_matches_finite_difference() {
+    let x0 = [0.6f32, -1.3, 2.1];
+    let numeric = finite_diff_hessian(build_silu, &x0, &[3], 1e-3);
+    let analytic = analytic_hessian(build_silu, &x0, &[3]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+// --- ScalarUnary: 区分定数（kink を避けたテスト点） ---------------------
+
+fn build_abs_leaky_clamp<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    // `abs`／`leaky_relu`／`clamp` はいずれもテスト点の近傍で区分
+    // *線形*（2 階微分が恒等的に 0）のため、`x.mul(x)` の二次項を
+    // 加えて genuine な曲率を持たせる（さもないと `x` の子テープ上の
+    // 写しへ 2 階勾配が到達せず `analytic_hessian` の `expect` が
+    // 失敗する。`build_div` と同じ理由）。
+    x.abs()?
+        .add(&x.leaky_relu(0.1)?)?
+        .add(&x.clamp(-1.0, 1.0)?)?
+        .add(&x.mul(x)?)?
+        .sum(None)
+}
+
+#[test]
+fn hessian_abs_leaky_relu_clamp_matches_finite_difference() {
+    // kink（`abs` の 0・`clamp` の境界 ±1.0）から離れたテスト点。
+    let x0 = [1.7f32, -0.6, 0.3];
+    let numeric = finite_diff_hessian(build_abs_leaky_clamp, &x0, &[3], 1e-3);
+    let analytic = analytic_hessian(build_abs_leaky_clamp, &x0, &[3]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+fn build_elu_softplus<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.elu(1.3)?.add(&x.softplus(1.0, 20.0)?)?.sum(None)
+}
+
+#[test]
+fn hessian_elu_softplus_matches_finite_difference() {
+    let x0 = [0.9f32, -1.4, 2.2];
+    let numeric = finite_diff_hessian(build_elu_softplus, &x0, &[3], 1e-3);
+    let analytic = analytic_hessian(build_elu_softplus, &x0, &[3]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+// --- 構造系 Op（線形。`Mul` の二次形式と合成して非ゼロ Hessian を検証） -
+
+fn build_transpose_quadratic<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    // x: [2, 2] -> y = x^T -> sum(y * y) は sum(x * x) と同値だが
+    // `Op::Transpose` の replay／VJP を経由させる。
+    let y = x.transpose(0, 1)?;
+    y.mul(&y)?.sum(None)
+}
+
+#[test]
+fn hessian_transpose_quadratic_matches_finite_difference() {
+    let x0 = [1.0f32, -2.0, 0.5, 3.0];
+    let numeric = finite_diff_hessian(build_transpose_quadratic, &x0, &[2, 2], 1e-3);
+    let analytic = analytic_hessian(build_transpose_quadratic, &x0, &[2, 2]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+fn build_permute_quadratic<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let y = x.permute(&[2, 0, 1])?;
+    y.mul(&y)?.sum(None)
+}
+
+#[test]
+fn hessian_permute_quadratic_matches_finite_difference() {
+    let x0 = [1.0f32, -2.0, 0.5, 3.0, -1.5, 0.2, 0.7, -0.4];
+    let numeric = finite_diff_hessian(build_permute_quadratic, &x0, &[2, 2, 2], 1e-3);
+    let analytic = analytic_hessian(build_permute_quadratic, &x0, &[2, 2, 2]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+fn build_narrow_quadratic<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    // 前後どちらにも非空区間が残る narrow（`Var::cat` の 3 分割経路）。
+    let y = x.narrow(0, 1, 2)?;
+    y.mul(&y)?.sum(None)
+}
+
+#[test]
+fn hessian_narrow_quadratic_matches_finite_difference() {
+    let x0 = [1.0f32, -2.0, 0.5, 3.0, -1.1];
+    let numeric = finite_diff_hessian(build_narrow_quadratic, &x0, &[5], 1e-3);
+    let analytic = analytic_hessian(build_narrow_quadratic, &x0, &[5]);
+    assert_hessian_close(&analytic, &numeric);
+    // narrow の外側（index 0・4）は loss に無関係なので Hessian の
+    // 対応する行・列は 0 のまま。
+    for j in [0usize, 4] {
+        for i in 0..5 {
+            assert!(
+                analytic[j][i].abs() < 1e-4,
+                "narrow 対象外の行 {j} が非ゼロ"
+            );
+            assert!(
+                analytic[i][j].abs() < 1e-4,
+                "narrow 対象外の列 {j} が非ゼロ"
+            );
+        }
+    }
+}
+
+fn build_concat_quadratic<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let a = x.narrow(0, 0, 2)?;
+    let b = x.narrow(0, 2, 2)?;
+    // `a` を 2 回連結する（同一 NodeId の重複寄与を `accumulate` が
+    // 合算する経路も検証する）。
+    let y = Var::cat(&[a, b, a], 0)?;
+    y.mul(&y)?.sum(None)
+}
+
+#[test]
+fn hessian_concat_quadratic_matches_finite_difference() {
+    let x0 = [1.0f32, -2.0, 0.5, 3.0];
+    let numeric = finite_diff_hessian(build_concat_quadratic, &x0, &[4], 1e-3);
+    let analytic = analytic_hessian(build_concat_quadratic, &x0, &[4]);
+    assert_hessian_close(&analytic, &numeric);
+    // `a`（index 0・1）は 2 回（direct + 重複連結）寄与するため
+    // 対角成分は `b`（index 2・3。1 回のみ）の 2 倍になる。
+    assert!(
+        common::req2_close(analytic[0][0], 2.0 * analytic[2][2]),
+        "重複連結の寄与が合算されていない: a={} b={}",
+        analytic[0][0],
+        analytic[2][2]
+    );
+}
+
+// `Op::Contiguous`（`Var::contiguous`）は `pub(crate)` のため本統合
+// テスト（別クレート扱い）からは直接呼べない。単体テスト
+// （`crates/autodiff/src/create_graph.rs` 内の `#[cfg(test)] mod
+// tests`）で検証する。
+
+// --- Where（`Var::where_cond`。マスクは固定定数——境界依存にしない） ---
+
+fn build_where<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let cond = Tensor::new(vec![true, false, true], &[3]).expect("mask fixture");
+    let y2 = x.mul(x)?;
+    let y3 = x.mul(x)?.mul(x)?;
+    // cond の真偽は forward 値に依存しない固定マスクのため、`cond`
+    // 自体を微分パスに含めない（`Var::where_cond` の `cond` 引数は
+    // `Tensor<bool>` で追跡対象外）。
+    let _ = tape;
+    Var::where_cond(&cond, &y2, &y3)?.sum(None)
+}
+
+#[test]
+fn hessian_where_matches_finite_difference() {
+    let x0 = [1.3f32, -0.7, 2.1];
+    let numeric = finite_diff_hessian(build_where, &x0, &[3], 1e-3);
+    let analytic = analytic_hessian(build_where, &x0, &[3]);
+    assert_hessian_close(&analytic, &numeric);
+    // index 0・2（cond == true）は y2 = x^2 の Hessian（対角 2）、
+    // index 1（cond == false）は y3 = x^3 の Hessian（対角 6x）。
+    assert!(common::req2_close(analytic[0][0], 2.0));
+    assert!(common::req2_close(analytic[2][2], 2.0));
+    assert!(common::req2_close(analytic[1][1], 6.0 * x0[1] as f64));
+}
+
+// --- MaskedFill・Gather・Scatter・Pad・MseLoss・CrossEntropyLoss は
+//     イシュー #2062 のスコープ外（`Op::supports_create_graph()` は
+//     引き続き `false`）。fail-closed のまま残ることを固定する。
+
+#[test]
+fn create_graph_rejects_unsupported_op_masked_fill() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, -2.0, 3.0], &[3]));
+    let mask = Tensor::new(vec![true, false, true], &[3]).expect("mask fixture");
+    let loss = x.masked_fill(&mask, 0.0).unwrap().sum(None).unwrap();
+
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
+}
+
+#[test]
+fn create_graph_rejects_unsupported_op_gather() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let index = fandhe_ai_tensor_core::Tensor::<i32>::new(vec![0, 0, 1], &[3]).expect("index");
+    let loss = x.gather(0, &index).unwrap().sum(None).unwrap();
+
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
 }

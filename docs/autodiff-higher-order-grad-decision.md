@@ -399,4 +399,70 @@ codex-review（PR #2003）の指摘を受けて是正した。
   カーネルは追加していない。実機実測は未実施のまま Mac／GB10
   セッションへ申し送る（§14 の既存申し送りと同一）。
 
+## 15. 実装記録（イシュー #2062・§8「対象」区分の残り Op 拡張）
+
+`Op::supports_create_graph()`（`tape.rs`）が判定する対象を、#1942・
+#1943 で実装済みの 12 variant から以下へ拡張した。数値方式・doc の
+出典は `crates/autodiff/src/create_graph.rs`（`scalar_unary_
+replayable`／`scalar_binary_replayable`・`replay_op`／`build_cgrads`
+の各腕コメント）を正とし、本節では要点のみ記す。
+
+- **`Transpose`・`Permute`・`Narrow`・`Concat`・`Contiguous`・`Where`**:
+  無条件で対象。`replay_op` は既存 `Var` の公開メソッド
+  （`transpose`／`permute`／`narrow`／`Var::cat`／`contiguous`／
+  `Var::where_cond`）へ薄く委譲する。`build_cgrads` は 1 階 VJP
+  （`grad.rs`）と同型の構成（対合性・Split⟷Concat 双対性・恒等・
+  `grad.rs::inverse_permutation` の再利用〈`pub(crate)` 化〉）。
+- **`ScalarBinary`（既知 13 variant）**: `scalar_binary_replayable` が
+  すべて `true` を返す。`replay_op` は `Var::scalar_binary`
+  （`pub(crate)`。同一 crate のため呼べる）への委譲で variant 分岐が
+  不要。`build_cgrads` は 1 階 VJP（`eval::scalar::binary_partials`）の
+  式をそのまま `Var` 演算へ写す（`Sub`／`Mul`／`Div`／`Pow`〈`a==0`／
+  `b==0` ガードは host マスク〉／`Maximum`／`Minimum`〈勝ち／タイ／
+  `NaN` の 3 分類 host マスク〉／比較 6 種〈直接ゼロ定数。`0 * upstream`
+  を経由せず `inf`／`NaN` 汚染を避ける〉）。broadcast 縮約は
+  `reduce_bias_grad_var`（1 階の `reduce_bias_grad` と同一の bias
+  パターン判定）を使う。
+- **`ScalarUnary`（`Gelu`・`GeluTanh` を除く既知 variant）**:
+  `scalar_unary_replayable` が `Neg`・`Abs`・`Sqrt`・`Log`／`Log2`／
+  `Log10`・`Sin`／`Cos`／`Tan`・`Relu`／`Exp`／`Tanh`／`Sigmoid`
+  （既存）・`Silu`・`Hardswish`・`LeakyRelu`・`Elu`・`Softplus`・
+  `Clamp`・`PowScalar` を `true` にする。滑らかな variant は写し
+  （`x_m`／`y_m`）から `Var` 演算で係数を合成し（`eval::scalar::
+  unary_grad_factor` の式の順序を踏襲）、区分定数な variant（`Abs`・
+  `LeakyRelu`・`Elu`・`Softplus`・`Clamp`・`Hardswish`）は host マスク
+  （`mask_from_pred`）＋`Var::where_cond` で選択する（`vjp_elementwise_
+  mul` のゲート付き乗算と異なり、素の `g.mul(&0/1 定数)` は `inf * 0 =
+  NaN` を生みうるため使わない）。`Gelu`（誤差関数版）は導関数が `erf`
+  を要し `Var` 演算の合成だけでは再現できないため対象外のまま
+  （`.claude/rules/deps-policy.md` により `erf` crate 依存は追加不可）。
+  `GeluTanh` は式の複雑さから本イシューでは見送り、`false` のまま残す
+  （後続イシューへ引き継ぐ）。`PowScalar` は `Var` 側に公開 API がなく
+  （スカラー指数版は CUDA／Metal カーネル未実装のため `Var::pow` は
+  Var×Var 限定）現状は到達不能だが、`Op::ScalarUnary { op:
+  PowScalar { .. }, .. }` が将来公開されたときに備え実装だけ済ませて
+  ある。
+- **`Op::Pad`／`Op::MaskedFill`／`Op::Gather`／`Op::Scatter`／
+  `Op::MseLoss`／`Op::CrossEntropyLoss`**: 本イシューのスコープ外の
+  まま残す（`supports_create_graph` は `false`）。`Pad`／`MaskedFill`
+  は置換定数 `value` を `Op` payload が保持しないため、子テープでの
+  forward 再生に `value: f32` フィールド追加が必要（設計は Plan 段階
+  で確定済みだが本イシューの実装時間の都合で見送った）。`Gather`／
+  `Scatter` は索引付き scatter_add／scatter の子テープ再生、
+  `MseLoss`／`CrossEntropyLoss` は損失関数の閉形式 VJP 合成が必要で、
+  いずれも後続イシューへ引き継ぐ（`.claude/rules/
+  out-of-scope-tracking.md`）。
+- **既知の不整合（スコープ外・記録のみ）**: 子テープの `Op::
+  BroadcastTo` 腕は `reduce_to`（f32 逐次和）のままだが、1 階
+  `grad.rs::Op::BroadcastTo` は codex-review P1 是正で `reduce_bias_
+  grad` へ変更済み（2026-09-12）。bias パターン（`[m,n]` → `[1,n]`
+  の明示 broadcast）で子テープと 1 階が数値的に乖離しうる。本イシュー
+  では触れず、別イシュー化を PR 側で提案する。
+- **CUDA／Metal 実機実測**: 新規カーネルは追加していない（既存
+  `Var` 演算の合成のみ）ため機構上 REQ-2 非後退。実機実測は Mac／GB10
+  セッションで `cargo test -p fandhe-ai-autodiff --test create_graph`
+  を実バックエンド `ops` で再実行する手順として
+  `docs/perf/logs/create-graph-remaining-ops-2062/README.md` へ申し
+  送る。
+
 内部ホスト名・秘密情報は含めない。
