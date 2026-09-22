@@ -180,7 +180,7 @@ dtype の選択は「`Tensor<f16>` を渡す」という**型で決まる入力*
 
 ## 8. スコープ外・引き継ぎ
 
-- **`Var`／`Tape` の dtype 一般化**: `Tape.ops: Box<dyn BackendOps + Send>`（`crates/autodiff/src/tape.rs:775`）は本段階では `f32` のまま不変。dtype ジェネリックな `Var<T>`・VJP・`FusionPlan` の対応は別イシュー。設計判断は `docs/autodiff-var-dtype-multiplexing-design.md`（#2061）で記録済み（`Var<T>` フル一般化は見送り・narrow opt-in パターンを標準化する方針。段階 0）
+- **`Var`／`Tape` の dtype 一般化**: `Tape.ops: Box<dyn BackendOps + Send>`（`crates/autodiff/src/tape.rs:775`）は本段階では `f32` のまま不変。dtype ジェネリックな `Var<T>`・VJP・`FusionPlan` の対応は別イシュー。設計判断は `docs/autodiff-var-dtype-multiplexing-design.md`（#2061）で記録済み（`Var<T>` フル一般化は見送り・narrow opt-in パターンを推奨案として記録。標準化は同 doc §10 承認事項 1 の承認待ち・未確定。段階 0）
 - **AMP（損失スケーリング）連携**: #1625 側の責務
 - **cast（`.to(dtype)`）**: #1613 側の責務（#1750 で実装済み。`docs/tensor-core-cast-design.md`）
 - **`MemoryOps`／`DeviceBuffer<T>` 常駐経路の dtype 多重化**（段階 B）: `linear_forward_device` 系のデバイス常駐チェーンへの dtype 拡張は本設計に含めない
