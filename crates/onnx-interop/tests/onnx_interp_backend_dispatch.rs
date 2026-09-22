@@ -76,6 +76,14 @@ fn attr_i64(name: &str, i: i64) -> AttributeProto {
     }
 }
 
+fn attr_f32(name: &str, f: f32) -> AttributeProto {
+    AttributeProto {
+        name: name.to_string(),
+        f,
+        ..Default::default()
+    }
+}
+
 /// 単一ノードのグラフ（initializer なし。全入力を feed で渡す）。
 fn single_node_graph(n: NodeProto, inputs: &[&str]) -> Graph {
     let outputs = n.output.clone();
@@ -535,6 +543,48 @@ fn run_with_ops_layer_normalization_last_axis_reaches_device() {
         "LayerNormalization: CpuBackendOps::layer_norm vs ops::layer_normalization",
         &actual,
         expected.as_slice().unwrap(),
+    );
+}
+
+#[test]
+fn run_with_ops_layer_normalization_negative_epsilon_stays_on_host() {
+    // 負の epsilon は ONNX 仕様上合法でホスト（`ops::layer_normalization`）
+    // は許容・透過するが、CPU/CUDA/Metal の `validate_layer_norm_launch`
+    // はいずれも起動前 fail-closed 検証で負値を拒否する契約
+    // （各バックエンドの `layer_norm.rs`）。opt-in ON（device 経路）でも
+    // ホストへ委ねてランを中断させない（`interp_device::device_layer_norm`
+    // の必須ガード。cursor(Bugbot) 指摘・PR #2222）。opt-in OFF（`run`）と
+    // 同一結果になることを確認する。
+    let n = node_with_attrs(
+        "LayerNormalization",
+        "n_ln_neg_eps",
+        vec!["x", "scale"],
+        vec!["y"],
+        vec![attr_i64("axis", -1), attr_f32("epsilon", -1e-5)],
+    );
+    let graph = single_node_graph(n, &["x", "scale"]);
+    let ops = RecordingOps::new();
+    let mut feeds_on = HashMap::new();
+    feeds_on.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 4]),
+        feed_f32("scale", vec![1.0, 1.0, 1.0, 1.0], &[4]),
+    ]);
+    let mut feeds_off = HashMap::new();
+    feeds_off.extend([
+        feed_f32("x", vec![1.0, 2.0, 3.0, 4.0], &[1, 4]),
+        feed_f32("scale", vec![1.0, 1.0, 1.0, 1.0], &[4]),
+    ]);
+
+    let (result_on, report) = run_with_ops_report(&graph, feeds_on, &ops)
+        .expect("負の epsilon でも opt-in ON はホストへフォールバックして成功するはず");
+    let result_off = run(&graph, feeds_off).expect("run（opt-in OFF）は成功するはず");
+
+    assert!(ops.calls.borrow().is_empty());
+    assert_eq!(report.host_nodes, vec!["n_ln_neg_eps".to_string()]);
+    assert!(report.device_nodes.is_empty());
+    assert_eq!(
+        as_f32_slice(&result_on["y"]),
+        as_f32_slice(&result_off["y"])
     );
 }
 

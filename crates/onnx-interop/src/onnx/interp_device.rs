@@ -279,6 +279,21 @@ pub(super) fn device_layer_norm(
         // 非有限 epsilon はホストの `OpError::InvalidEpsilon` へ委ねる。
         return Ok(None);
     }
+    if attrs.epsilon < 0.0 {
+        // 負の epsilon は ONNX 仕様上合法でホスト実装（`ops::
+        // layer_normalization`）は許容・透過するが、CPU/CUDA/Metal の
+        // `validate_layer_norm_launch` はいずれも起動前 fail-closed 検証
+        // で負値を `InvalidEps`（→ `BackendError::KernelLaunchFailed`）
+        // として拒否する契約（各バックエンドの `layer_norm.rs`）。
+        // `try_device` は `KernelLaunchFailed` をフォールバック対象
+        // （`Unsupported`／`ShapeMismatch`）に含めないため、ここで拒否
+        // せずに呼び出すと opt-in ON 時のみランが中断し、opt-in OFF
+        // （ホスト実行）では成功するという不整合が生じる
+        // （cursor(Bugbot) 指摘・PR #2222）。ホストが許容する入力は
+        // device 経路の可否に関わらず常に成功させるため、ここで
+        // 明示的にホストへ委ねる。
+        return Ok(None);
+    }
     let rank = x.rank();
     if rank == 0 {
         return Ok(None);
