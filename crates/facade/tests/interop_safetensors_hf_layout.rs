@@ -305,3 +305,75 @@ fn unsupported_dtype_is_typed_error() {
         other => panic!("UnsupportedDtype を期待したが {other:?} だった"),
     }
 }
+
+/// 数値 index 正規化（`split_index_prefix`）で `"1.weight"` と
+/// `"01.weight"` が同じ `(1, "weight")` へ衝突するケースは、無言で
+/// 一方を上書きせず `DuplicateNormalizedKey` で拒否される（REQ-7
+/// 「無言 skip 禁止」・`.claude/rules/security.md` A03/A08。PR #2224
+/// codex-review 指摘の回帰テスト）。
+#[test]
+fn duplicate_normalized_index_prefix_is_rejected_not_silently_overwritten() {
+    let mut pt = HashMap::new();
+    pt.insert(
+        "1.weight".to_string(),
+        Tensor::new(vec![0.0_f32; VOCAB * EMBED_DIM], &[VOCAB, EMBED_DIM]).unwrap(),
+    );
+    pt.insert(
+        "01.weight".to_string(),
+        Tensor::new(vec![1.0_f32; VOCAB * EMBED_DIM], &[VOCAB, EMBED_DIM]).unwrap(),
+    );
+
+    let err = from_pytorch_layout(&pt, &[]).unwrap_err();
+    match err {
+        ConvertError::DuplicateNormalizedKey { normalized, .. } => {
+            assert_eq!(normalized, "1.weight");
+        }
+        other => panic!("DuplicateNormalizedKey を期待したが {other:?} だった"),
+    }
+}
+
+/// `to_pytorch_layout` 内部の `group_by_index`（`from_pytorch_layout` と
+/// 同型の衝突検査）も同じキー正規化衝突を無言上書きせず拒否する。
+#[test]
+fn duplicate_normalized_index_prefix_is_rejected_in_group_by_index_too() {
+    let mut state = HashMap::new();
+    state.insert(
+        "2.weight".to_string(),
+        Tensor::new(vec![0.0_f32; VOCAB * EMBED_DIM], &[VOCAB, EMBED_DIM]).unwrap(),
+    );
+    state.insert(
+        "02.weight".to_string(),
+        Tensor::new(vec![1.0_f32; VOCAB * EMBED_DIM], &[VOCAB, EMBED_DIM]).unwrap(),
+    );
+
+    let err = to_pytorch_layout(&state).unwrap_err();
+    match err {
+        ConvertError::DuplicateNormalizedKey { normalized, .. } => {
+            assert_eq!(normalized, "2.weight");
+        }
+        other => panic!("DuplicateNormalizedKey を期待したが {other:?} だった"),
+    }
+}
+
+/// 非信頼な外部 shape 由来の `embed_dim` が巨大な場合、`3 * embed_dim`
+/// の検証前乗算がオーバーフローしても panic・wrap せず `ShapeOverflow`
+/// で拒否される（`.claude/rules/security.md` A03。PR #2224 codex-review
+/// 指摘の回帰テスト）。
+#[test]
+fn split_in_proj_huge_embed_dim_is_typed_error_not_overflow() {
+    // `e > usize::MAX / 3` を満たす値。shape 検査より前に
+    // `checked_mul` が失敗するため、渡すテンソル自体の shape は
+    // 実際の embed_dim と一致していなくても本検査には影響しない。
+    let huge_embed_dim = usize::MAX / 2;
+    let dummy_weight = Tensor::new(vec![0.0_f32; 1], &[1, 1]).unwrap();
+    let dummy_bias = Tensor::new(vec![0.0_f32; 1], &[1]).unwrap();
+
+    let err = split_in_proj(&dummy_weight, &dummy_bias, huge_embed_dim).unwrap_err();
+    match err {
+        ConvertError::ShapeOverflow { key, embed_dim } => {
+            assert_eq!(key, "self_attn.in_proj_weight");
+            assert_eq!(embed_dim, huge_embed_dim);
+        }
+        other => panic!("ShapeOverflow を期待したが {other:?} だった"),
+    }
+}

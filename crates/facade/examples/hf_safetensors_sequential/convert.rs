@@ -56,6 +56,20 @@ pub enum ConvertError {
     },
     /// `Tensor::new`／`transpose_2d`／`narrow` が返す shape エラー。
     Tensor(ShapeError),
+    /// 数値 index 正規化（[`split_index_prefix`]。`"1.weight"` と
+    /// `"01.weight"` はどちらも `(1, "weight")` に正規化される）で、
+    /// 異なる元キーが同じ `(idx, rest)` へ衝突した。衝突を検知せず
+    /// `HashMap::insert` を素通しすると、走査順（非決定的）に応じて
+    /// 一方のテンソルが無言で上書き・破棄される（REQ-7「無言 skip
+    /// 禁止」・`.claude/rules/security.md` A03/A08）。
+    DuplicateNormalizedKey { key: String, normalized: String },
+    /// `embed_dim`（非信頼な外部 shape 由来）から `3 * embed_dim` 等の
+    /// 検証用の値を計算する際に `usize` 乗算オーバーフローが起きた。
+    /// オーバーフロー前提の値で shape 検査・スライスへ進むと debug
+    /// build では乗算自体が panic し、release build では wrap した
+    /// 小さい値で誤って検査を通過しうる（`.claude/rules/security.md`
+    /// A03「外部フォーマットの長さ・形状の操作前検証」）。
+    ShapeOverflow { key: String, embed_dim: usize },
 }
 
 impl fmt::Display for ConvertError {
@@ -74,6 +88,15 @@ impl fmt::Display for ConvertError {
                 "shape 不一致（key={key}）: expected={expected:?}, actual={actual:?}"
             ),
             ConvertError::Tensor(e) => write!(f, "tensor shape エラー: {e}"),
+            ConvertError::DuplicateNormalizedKey { key, normalized } => write!(
+                f,
+                "数値 index 正規化衝突（key={key}, 正規化後={normalized}）: \
+                 別キーが同じ位置へ既に書き込み済みです"
+            ),
+            ConvertError::ShapeOverflow { key, embed_dim } => write!(
+                f,
+                "shape 検証用の乗算がオーバーフローしました（key={key}, embed_dim={embed_dim}）"
+            ),
         }
     }
 }
@@ -205,19 +228,35 @@ pub fn split_in_proj(
     embed_dim: usize,
 ) -> Result<SplitInProj, ConvertError> {
     let e = embed_dim;
-    check_shape(in_proj_weight, &[3 * e, e], "self_attn.in_proj_weight")?;
-    check_shape(in_proj_bias, &[3 * e], "self_attn.in_proj_bias")?;
+    // 非信頼な外部 shape 由来の `embed_dim` から `3 * e` を検証前に
+    // 算出する（`.claude/rules/security.md` A03「外部フォーマットの
+    // 長さ・形状の操作前検証」）。通常の `*` は debug build で panic・
+    // release build で wrap するため、`checked_mul` で事前検査し
+    // オーバーフロー時は型付きエラーで拒否する。
+    let three_e = e
+        .checked_mul(3)
+        .ok_or_else(|| ConvertError::ShapeOverflow {
+            key: "self_attn.in_proj_weight".to_string(),
+            embed_dim: e,
+        })?;
+    // `2 * e` は `three_e`（`3 * e`）が overflow しないと確認済みの
+    // 値からの減算（`three_e - e`）で求める。`e <= three_e` が保証
+    // されるため、追加の乗算オーバーフロー検査は不要。
+    let two_e = three_e - e;
+
+    check_shape(in_proj_weight, &[three_e, e], "self_attn.in_proj_weight")?;
+    check_shape(in_proj_bias, &[three_e], "self_attn.in_proj_bias")?;
 
     let q_w = in_proj_weight.narrow(0, 0, e)?.transpose_2d()?.contiguous();
     let k_w = in_proj_weight.narrow(0, e, e)?.transpose_2d()?.contiguous();
     let v_w = in_proj_weight
-        .narrow(0, 2 * e, e)?
+        .narrow(0, two_e, e)?
         .transpose_2d()?
         .contiguous();
 
     let q_b = in_proj_bias.narrow(0, 0, e)?.contiguous();
     let k_b = in_proj_bias.narrow(0, e, e)?.contiguous();
-    let v_b = in_proj_bias.narrow(0, 2 * e, e)?.contiguous();
+    let v_b = in_proj_bias.narrow(0, two_e, e)?.contiguous();
 
     Ok((q_w, q_b, k_w, k_b, v_w, v_b))
 }
@@ -345,10 +384,22 @@ pub fn from_pytorch_layout(
     for (key, tensor) in pt {
         match split_index_prefix(key) {
             Some((idx, rest)) => {
-                grouped
+                // REQ-7「無言 skip 禁止」: `insert` の戻り値（旧値）を検査
+                // する。`"1.weight"` と `"01.weight"` は共に `(1, "weight")`
+                // へ正規化されるため、検査を省くと HashMap の走査順に応じて
+                // 一方が無言で上書き・破棄される（`.claude/rules/
+                // security.md` A03/A08）。
+                if grouped
                     .entry(idx)
                     .or_default()
-                    .insert(rest.to_string(), tensor.clone());
+                    .insert(rest.to_string(), tensor.clone())
+                    .is_some()
+                {
+                    return Err(ConvertError::DuplicateNormalizedKey {
+                        key: key.clone(),
+                        normalized: format!("{idx}.{rest}"),
+                    });
+                }
             }
             None => {
                 if extra_allowlist.contains(&key.as_str()) {
@@ -469,10 +520,20 @@ fn group_by_index(
     for (key, tensor) in state {
         let (idx, rest) =
             split_index_prefix(key).ok_or_else(|| ConvertError::UnexpectedKey(key.clone()))?;
-        grouped
+        // REQ-7「無言 skip 禁止」: `from_pytorch_layout` と同じ理由で
+        // `insert` の戻り値を検査し、数値 index 正規化衝突（`"1.weight"`
+        // と `"01.weight"` 等）による無言上書きを拒否する。
+        if grouped
             .entry(idx)
             .or_default()
-            .insert(rest.to_string(), tensor.clone());
+            .insert(rest.to_string(), tensor.clone())
+            .is_some()
+        {
+            return Err(ConvertError::DuplicateNormalizedKey {
+                key: key.clone(),
+                normalized: format!("{idx}.{rest}"),
+            });
+        }
     }
     Ok(grouped)
 }
