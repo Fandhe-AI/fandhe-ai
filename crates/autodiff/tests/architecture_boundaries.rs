@@ -212,25 +212,68 @@ fn extract_trait_body(content: &str, trait_name: &str) -> String {
 }
 
 /// `crates/autodiff/src/custom.rs` の `pub trait CustomFunction: <supertrait
-/// 境界> { ... }` の**ヘッダー行のみ**（`pub trait CustomFunction` から
-/// 開始 `{` の手前まで、メソッド本体を含まない）を抜き出す（イシュー
-/// #2064 §12.5 (b)。codex-review 指摘・PR #2212 その 2: `extract_trait_body`
-/// が返すヘッダー＋メソッド本体全体に対して `contains` 判定すると、
-/// supertrait 境界から `Send`／`Sync`／`'static` を削除しても、同じ文字列
-/// がメソッドシグネチャ側に偶然残っていれば検査を素通りしてしまう。
-/// 必須境界の有無判定はヘッダーのみに限定して行う）。トレイト定義が
-/// 見つからない場合は空文字列を返す（呼び出し側で検出不能を明示的に
-/// fail させるため）。
-fn extract_trait_header(content: &str, trait_name: &str) -> String {
+/// 境界> { ... }` の **supertrait 境界リストのみ**（トレイト名〈および
+/// ジェネリクス `<...>` があればそれも読み飛ばした後〉直後の `:` から、
+/// `where` 節／本体開始 `{` の手前までの区間を `+` 区切りで分割したトー
+/// クン列）を抜き出す（イシュー #2064 §12.5 (b)。codex-review 指摘・
+/// PR #2212 その 3: ヘッダー全体〈`pub trait Name` から開始 `{` 手前まで〉
+/// に対する単純なトークン存在判定では、`pub trait CustomFunction<Send,
+/// Sync, T> where T: 'static` のように `Send`／`Sync` がジェネリクス
+/// 仮引数名・`'static` が where 節側の境界として現れる「偽装」ケースで
+/// も supertrait 自体を削除した検査を素通りできてしまう。本実装は
+/// ジェネリクス区間・where 節を構造的に除外し、実際の supertrait 境界
+/// リストの区間だけを供出源とすることで、この偽装を防ぐ）。
+///
+/// - トレイト名の直後に `<...>`（ジェネリクス仮引数リスト）が続く場合は
+///   `<`/`>` の深さ追跡でバランスよく読み飛ばす
+/// - 続く最初の非空白文字が `:` でなければ supertrait 境界が存在しない
+///   （空の `Vec` を返す。呼び出し側で「必須境界が見つからない」として
+///   fail させるため、黙って全文を対象にしない）
+/// - `:` の後は `where`（キーワード）・開始 `{` のうち先に現れる方の
+///   手前までを境界リスト区間とし、`+` で分割してトリムしたトークン列
+///   を返す
+fn extract_supertrait_bound_tokens(content: &str, trait_name: &str) -> Vec<String> {
     let needle = format!("pub trait {trait_name}");
     let Some(start) = content.find(&needle) else {
-        return String::new();
+        return Vec::new();
     };
-    let after_needle = &content[start..];
-    let Some(brace_offset) = after_needle.find('{') else {
-        return String::new();
+    let mut cursor = start + needle.len();
+    let after_needle = &content[cursor..];
+    let leading_ws = after_needle.len() - after_needle.trim_start().len();
+    if after_needle.trim_start().starts_with('<') {
+        let generics_start = cursor + leading_ws;
+        let mut depth = 0i32;
+        for (i, ch) in content[generics_start..].char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        cursor = generics_start + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let rest_trimmed = content[cursor..].trim_start();
+    let Some(after_colon) = rest_trimmed.strip_prefix(':') else {
+        return Vec::new();
     };
-    content[start..start + brace_offset].to_string()
+    let where_pos = after_colon.find("where");
+    let brace_pos = after_colon.find('{');
+    let end = match (where_pos, brace_pos) {
+        (Some(w), Some(b)) => w.min(b),
+        (Some(w), None) => w,
+        (None, Some(b)) => b,
+        (None, None) => after_colon.len(),
+    };
+    after_colon[..end]
+        .split('+')
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .collect()
 }
 
 /// `text` 中の識別子トークン（`[A-Za-z_][A-Za-z0-9_]*`。ライフタイムは
@@ -289,6 +332,80 @@ fn contains_identifier(haystack: &str, needle: &str) -> bool {
     false
 }
 
+/// `content` を波括弧の深さ 0 の `;` 区切りでステートメント単位に分割し、
+/// 各断片（前後の空白を除去）を返す（`custom_function_trait_signatures_
+/// are_host_tensor_only` 専用。codex-review 指摘・PR #2212 その 3「複数行
+/// または可視性付き alias で禁止型検査を迂回できる」対策）。
+///
+/// `use crate::{A, B as C};` のように波括弧を含む文は、内側の `{`/`}`
+/// で深さが上下する間は `;` があっても分割せず、深さが 0 に戻った後の
+/// `;`（または波括弧そのものの閉じ）で初めて 1 断片として確定する。
+/// これにより複数行にまたがる `use` 文もひと続きの文字列として保持され、
+/// 行単位の `starts_with` 判定では検出できなかった複数行エイリアス
+/// import を後続の `.contains(" as ")` 判定で捕捉できる。
+///
+/// 単純な深さ追跡のみのため文字列リテラル中の `{`/`}`/`;` には非対応
+/// （`custom.rs` に該当パターンが無いことを前提とする。`strip_cfg_test_
+/// items` と同じ簡易実装方針）。
+fn split_top_level_statements(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+    for ch in content.chars() {
+        match ch {
+            '{' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '}' => {
+                depth -= 1;
+                current.push(ch);
+                if depth <= 0 {
+                    let trimmed = current.trim();
+                    if !trimmed.is_empty() {
+                        out.push(trimmed.to_string());
+                    }
+                    current.clear();
+                    depth = 0;
+                }
+            }
+            ';' if depth == 0 => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    out.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        out.push(trimmed.to_string());
+    }
+    out
+}
+
+/// `line` 先頭の可視性修飾（`pub`／`pub(crate)`／`pub(super)`／
+/// `pub(in ...)` 等）を読み飛ばした残りを返す（可視性修飾が無ければ
+/// そのまま `trim_start()` した文字列を返す）。`pub type Tensor = ...;`
+/// のような可視性付き宣言を `type ` 始まりの行と同一視して判定するために
+/// 使う（codex-review 指摘・PR #2212 その 3。旧実装は `type ` 始まりの
+/// 行のみを対象としており `pub type` を取りこぼしていた）。
+fn strip_visibility_prefix(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    let Some(after_pub) = trimmed.strip_prefix("pub") else {
+        return trimmed;
+    };
+    let after_pub = after_pub.trim_start();
+    if let Some(after_paren_open) = after_pub.strip_prefix('(')
+        && let Some(close_rel) = after_paren_open.find(')')
+    {
+        return after_paren_open[close_rel + 1..].trim_start();
+    }
+    after_pub
+}
+
 /// `crates/autodiff/src/custom.rs` の `CustomFunction` trait が
 /// `BackendOps`／`Tape`／`Var`／`Device`／`NodeId`（グラフ構築・デバイス
 /// 結線に関わる型）を一切シグネチャへ含まないことを固定する（イシュー
@@ -326,28 +443,23 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     let custom_rs = autodiff_crate_root().join("src/custom.rs");
     let content = read_to_string_or_panic(&custom_rs);
 
-    let header = extract_trait_header(&content, "CustomFunction");
+    let supertrait_bounds = extract_supertrait_bound_tokens(&content, "CustomFunction");
     assert!(
-        !header.is_empty(),
-        "src/custom.rs から `pub trait CustomFunction` のヘッダーを抽出できなかった\
-         （テスト自体が検査対象を見失っている。ファイル構成が変わっていないか確認）"
+        !supertrait_bounds.is_empty(),
+        "src/custom.rs から `pub trait CustomFunction` の supertrait 境界（`:` から\
+         `where`／`{{` 手前まで）を抽出できなかった（テスト自体が検査対象を見失っている、\
+         または supertrait 境界自体が存在しない。ファイル構成が変わっていないか確認）"
     );
-    for required_bound in ["Send", "Sync"] {
+    for required_bound in ["Send", "Sync", "'static"] {
         assert!(
-            contains_identifier(&header, required_bound),
-            "CustomFunction trait のヘッダーに必須の supertrait 境界 {required_bound} が\
-             見つからない（§12.4「'static 境界により &Tape・Var<'t> を捕捉できない」契約違反）"
+            supertrait_bounds
+                .iter()
+                .any(|bound| bound == required_bound),
+            "CustomFunction trait の supertrait 境界に必須の {required_bound} が\
+             見つからない（ジェネリクス仮引数名・where 節側の同名トークンでは代替できない\
+             構造的判定。§12.4「'static 境界により &Tape・Var<'t> を捕捉できない」契約違反）"
         );
     }
-    // `'static` はアポストロフィを含むライフタイムトークンのため
-    // `contains_identifier`（英数字／`_` の識別子境界判定）はそのまま
-    // 適用できない。ヘッダーのみへ限定済みのため単純な部分文字列一致で
-    // 十分（メソッド本体を含まないので誤検出の余地がない）。
-    assert!(
-        header.contains("'static"),
-        "CustomFunction trait のヘッダーに必須の supertrait 境界 'static が\
-         見つからない（§12.4「'static 境界により &Tape・Var<'t> を捕捉できない」契約違反）"
-    );
 
     let trait_body = extract_trait_body(&content, "CustomFunction");
     assert!(
@@ -414,27 +526,39 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // 対する静的な検査であり、将来 `use ... as` で禁止型を別名 import
     // されると allowlist 側の更新と一緒に通ってしまう。よってファイル
     // 全体を対象に、エイリアス import 自体を禁止する）。
+    //
+    // 文単位（波括弧の深さ 0 の `;` まで）でステートメントを再構成して
+    // から判定する（codex-review 指摘・PR #2212 その 3: 行単位
+    // `trimmed.starts_with("use ")`／`starts_with("type ")` は
+    // `use crate::{\n    BackendOps as Tensor,\n};` のような複数行
+    // 波括弧 import や `pub type Tensor = BackendOps;` のような可視性
+    // 修飾付き宣言を検出できなかった。`split_top_level_statements` は
+    // 波括弧のペアをまたいで `;` まで 1 文として保持するため、複数行
+    // `use` もひと続きの文字列として `.contains(" as ")` 判定できる）。
     let no_comments: String = content
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
-    for line in no_comments.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("use ") {
+    for statement in split_top_level_statements(&no_comments) {
+        if statement.starts_with("use ") {
             assert!(
-                !trimmed.contains(" as "),
+                !statement.contains(" as "),
                 "src/custom.rs の use 文にエイリアス（`use ... as ...`）が含まれている: \
-                 {trimmed}（禁止型を別名で混入させる経路になりうるため、本ファイルでは\
-                 エイリアス import を使わない設計とする）"
+                 {statement}（複数行の波括弧 import を含む。禁止型を別名で混入させる経路に\
+                 なりうるため、本ファイルではエイリアス import を使わない設計とする）"
             );
         }
-        if trimmed.starts_with("type ") {
+        // `pub`／`pub(crate)` 等の可視性修飾を読み飛ばしてから `type ` を
+        // 判定する（旧実装は `type ` 始まりの行しか見ておらず `pub type`
+        // を取りこぼしていた）。
+        let after_visibility = strip_visibility_prefix(&statement);
+        if after_visibility.starts_with("type ") {
             for forbidden in FORBIDDEN_IDENTIFIERS {
                 assert!(
-                    !contains_identifier(trimmed, forbidden),
+                    !contains_identifier(after_visibility, forbidden),
                     "src/custom.rs の type エイリアス宣言が禁止型 {forbidden} を参照している: \
-                     {trimmed}"
+                     {statement}"
                 );
             }
         }
@@ -463,4 +587,45 @@ fn var_rs_does_not_declare_pub_fn_custom() {
         "src/var.rs に pub fn custom 宣言が見つかった\
          （§12.5 (b) 未承認のまま Var 経由の到達口を設けてしまっている）"
     );
+}
+
+/// codex-review 指摘（PR #2212 その 3）が挙げた 2 つのバイパスシナリオ
+/// （ジェネリクス／where 節側の偽装トークン・複数行または可視性付き
+/// alias）を、実際に新実装が検出できることを固定する回帰テスト。
+#[test]
+fn architecture_boundary_bypass_scenarios_are_detected() {
+    // 1) supertrait 自体を削除し、ジェネリクス仮引数名・where 節側に
+    //    Send／Sync／'static を偽装したヘッダーからは境界が抽出されない
+    //    （＝呼び出し側で「必須境界が見つからない」として fail する）。
+    let forged_header =
+        "pub trait CustomFunction<Send, Sync, T> where T: 'static {\n    fn forward(&self);\n}\n";
+    let bounds = extract_supertrait_bound_tokens(forged_header, "CustomFunction");
+    assert!(
+        bounds.is_empty(),
+        "偽装ヘッダーから supertrait 境界が抽出されてしまった: {bounds:?}"
+    );
+
+    // 2) 複数行の波括弧 use エイリアスが 1 ステートメントとして結合され、
+    //    `.contains(" as ")` 判定の対象になる。
+    let forged_use = "use crate::{\n    BackendOps as Tensor,\n};\n";
+    let statements = split_top_level_statements(forged_use);
+    assert_eq!(
+        statements.len(),
+        1,
+        "複数行 use 文が 1 文として結合されていない: {statements:?}"
+    );
+    assert!(statements[0].starts_with("use "));
+    assert!(statements[0].contains(" as "));
+
+    // 3) 可視性修飾付き type alias（`pub type ...`）も `type ` 始まりと
+    //    同一視して検出される。
+    let forged_type = "pub type Tensor = BackendOps;\n";
+    for statement in split_top_level_statements(forged_type) {
+        let after_vis = strip_visibility_prefix(&statement);
+        assert!(
+            after_vis.starts_with("type "),
+            "pub type を検出できていない: {after_vis}"
+        );
+        assert!(contains_identifier(after_vis, "BackendOps"));
+    }
 }
