@@ -600,7 +600,10 @@ impl ConvTranspose2d {
     /// `apply_parameters` の書き戻し先・テスト向け入口）。
     ///
     /// `weight` は rank 4・`weight.shape()[1] == 0`（`out_channels/
-    /// groups` が 0）を拒否する。`out_channels = weight.shape()[1] *
+    /// groups` が 0）と `weight.shape()[0] == 0`（`in_channels` が 0。
+    /// forward の GEMM は `Cin_g = weight.shape()[0] / groups` で
+    /// 縮約するため、ここを弾かないと zero-K GEMM がサイレントに 0 を
+    /// 返す）の両方を拒否する。`out_channels = weight.shape()[1] *
     /// groups`（[`Conv2d::from_parameters`] の `in_channels` 導出と
     /// 対称。`ConvTranspose2d` は weight の軸 0 が `in_channels` 其の
     /// ものであるため `in_channels = weight.shape()[0]`）。
@@ -640,6 +643,12 @@ impl ConvTranspose2d {
         }
 
         let in_channels = weight_shape[0];
+        if in_channels == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "ConvTranspose2d::from_parameters: weight.shape()[0] (in_channels) must be > 0"
+                    .to_string(),
+            ));
+        }
         if !in_channels.is_multiple_of(groups) {
             return Err(AutodiffError::InvalidArgument(format!(
                 "ConvTranspose2d::from_parameters: in_channels ({in_channels}) must be \

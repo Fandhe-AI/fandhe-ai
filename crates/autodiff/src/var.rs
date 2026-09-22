@@ -3233,7 +3233,7 @@ impl<'t> Var<'t> {
     /// （`grad` 内非公開。§15「w_mat・x4・col2im」の段階的合成）→
     /// ⑨戻り shape 検証（`.claude/rules/security.md` A08）→
     /// ⑩`push_eager`（非融合・常実体化。`col2im`／`im2col` の中間
-    /// 結果は保持せず backward で再計算する。[`Op::Conv2d`] と同型）。
+    /// 結果は保持せず backward で再計算する。`Op::Conv2d`（非公開）と同型）。
     #[allow(clippy::too_many_arguments)] // PyTorch `F.conv_transpose2d` の全引数（output_padding 含む）を受理するため（`nn/conv.rs` の allow 方針を踏襲）。
     pub fn conv_transpose2d(
         &self,

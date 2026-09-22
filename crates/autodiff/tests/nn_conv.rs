@@ -571,6 +571,24 @@ fn conv_transpose2d_from_parameters_rejects_wrong_rank() {
 }
 
 #[test]
+fn conv_transpose2d_from_parameters_rejects_in_channels_zero() {
+    // weight.shape()[0] == 0（in_channels = 0）は forward の GEMM が
+    // Cin_g = weight.shape()[0] / groups で縮約するため zero-K GEMM を
+    // サイレントに構築させないよう拒否する（cursor Bugbot 指摘・#2209）。
+    let weight = t(vec![], &[0, 3, 1, 1]);
+    let err = err_of(ConvTranspose2d::from_parameters(
+        weight,
+        None,
+        [1, 1],
+        [0, 0],
+        [0, 0],
+        [1, 1],
+        1,
+    ));
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
 fn conv_transpose2d_from_parameters_rejects_bias_shape_mismatch() {
     let weight = t(vec![0.0; 2 * 3], &[2, 3, 1, 1]);
     let bad_bias = t(vec![0.0; 2], &[2]);
