@@ -10,8 +10,9 @@
 //!
 //! **既定はホスト CPU 実行のみ**（`BackendOps`／`Device` 非経由。
 //! イシュー #2077 導入前と bit 完全に不変）。[`crate::
-//! set_cuda_onnx_gpu_execution_enabled`]／[`crate::
-//! set_metal_onnx_gpu_execution_enabled`] の opt-in（既定 OFF）が有効な
+//! set_cuda_onnx_gpu_execution_enabled`]／`crate::
+//! set_metal_onnx_gpu_execution_enabled`〈macOS 限定 cfg のため非 macOS
+//! ビルドでは存在せずリンク化しない〉の opt-in（既定 OFF）が有効な
 //! 場合のみ、[`OnnxModel::run`] は `BackendOps` 経由の device 実行
 //! （op 単位。`Unsupported`／`ShapeMismatch` はホストへフォールバック・
 //! それ以外のエラーは fail-closed）を試みる（詳細は [`OnnxModel::run`]
@@ -231,7 +232,8 @@ impl OnnxModel {
     /// `Var` ではない）。**既定はホスト CPU 実行のみ**（`BackendOps`／
     /// `Device` 非経由。導入前と bit 完全に不変）。
     /// [`crate::set_cuda_onnx_gpu_execution_enabled`]／
-    /// [`crate::set_metal_onnx_gpu_execution_enabled`]（イシュー #2077）
+    /// `crate::set_metal_onnx_gpu_execution_enabled`（macOS 限定 cfg のため非
+    /// macOS ビルドでは存在せずリンク化しない。イシュー #2077）
     /// の opt-in が有効な場合のみ `BackendOps` 経由の device 実行を試みる
     /// （評価順は CUDA → Metal 固定。両方 ON なら CUDA 優先）。対象 op
     /// （`fandhe_ai_onnx_interop::onnx::interp_device` モジュール冒頭

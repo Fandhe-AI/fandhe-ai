@@ -1044,7 +1044,8 @@ pub fn metal_split_k_gemm_enabled() -> bool {
 /// 存在しない環境では `run` 自体が [`crate::interop::onnx::OnnxError::
 /// Execution`] を返す（ホスト CPU への黙示フォールバックはしない。
 /// fail-closed。OWASP A08）。両フラグ（本関数・
-/// [`set_metal_onnx_gpu_execution_enabled`]）が有効な場合は CUDA を
+/// `set_metal_onnx_gpu_execution_enabled`〈macOS 限定 cfg のため非
+/// macOS ビルドでは存在せずリンク化しない〉）が有効な場合は CUDA を
 /// 優先する（評価順固定）。対象 op・数値契約（REQ-2 統一複合判定）は
 /// `crate::interop::onnx::OnnxModel` のドキュメンテーションコメントを
 /// 正とする。
