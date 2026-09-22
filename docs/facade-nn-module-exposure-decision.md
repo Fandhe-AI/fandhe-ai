@@ -113,10 +113,9 @@ defaulted メソッド（`named_parameters`／`set_parameter`／`state_dict`／`
 - `nn_rnn_module_is_pure_reexport` は rnn 専用の純再エクスポート検査であり、facade 独自 trait を持つ `nn::module`／`nn::container` には適用できない。別途「facade trait の defaulted メソッド集合が承認済み集合と一致する」検査が必要
 - ONNX 走査の `FORBIDDEN_INTERNAL_TYPE_SUBSTRINGS` の `"nn::Module"`〈:1634,2111〉は `src/interop/onnx.rs` 限定の走査のため当面非衝突だが、`fandhe_ai::nn::Module` という新規公開名との混同を避ける命名レビューが必要
 
-**橋渡しの非対称性**（決めていない論点。§10 承認事項 4）: 組み込み層（autodiff `Module` 実装済み型）→ facade trait は facade 内で `tape.0` を渡せるため安全に実装可能。一方、facade 利用者の独自層 → autodiff コンテナ（`compat::Sequential` へ積む等）は `&fandhe_ai_autodiff::Tape → &fandhe_ai::Tape` 方向の変換が必要で、次のいずれかが要る:
-1. `#[repr(transparent)]` ＋ unsafe 参照キャストによる `&fandhe_ai_autodiff::Tape` → `&fandhe_ai::Tape` 変換（新規 `unsafe`＝承認事項）
-2. `var` 系メソッドのみを持つ借用ハンドル型（例: `TapeRef<'t>(pub(crate) &'t fandhe_ai_autodiff::Tape)`）を新設（安全だが第 2 のハンドル型が増える）
-3. 第 1 段では橋渡し自体を対象外とし、facade 側 `nn::Module` 実装層は facade 側 `nn::{ModuleList, Sequential}` の中でのみ完結させる（`compat::Sequential` との相互運用は行わない）
+**橋渡しの非対称性**（決めていない論点。§10 承認事項 4）: 組み込み層（autodiff `Module` 実装済み型）→ facade trait は facade 内で `tape.0` を渡せるため安全に実装可能。一方、facade 利用者の独自層 → autodiff コンテナ（`compat::Sequential` へ積む等）は `&fandhe_ai_autodiff::Tape → &fandhe_ai::Tape` 方向の変換が必要で、次のいずれかが要る（`.claude/rules/coding-rust.md` の unsafe 統制方針〈FFI 境界・CPU SIMD intrinsics 等の必要最小限に限定〉に従い、安全な代替が既にある `#[repr(transparent)]` ＋ unsafe 参照キャスト案は設計候補から除外する）:
+1. `var` 系メソッドのみを持つ借用ハンドル型（例: `TapeRef<'t>(pub(crate) &'t fandhe_ai_autodiff::Tape)`）を新設（安全だが第 2 のハンドル型が増える）
+2. 第 1 段では橋渡し自体を対象外とし、facade 側 `nn::Module` 実装層は facade 側 `nn::{ModuleList, Sequential}` の中でのみ完結させる（`compat::Sequential` との相互運用は行わない）
 
 利用例（擬似コード。実装は行わない）:
 
@@ -162,7 +161,7 @@ impl fandhe_ai::nn::Module for MyBlock {
 1. 案 B の採否（または案 A／D の指名）
 2. facade trait の defaulted メソッド集合（`named_parameters`／`set_parameter`／`state_dict`／`load_state_dict`／`set_training`／`training` の 6 件）と命名契約の踏襲
 3. facade 側 `ModuleList`／`Sequential` の新設可否
-4. 独自層 → autodiff コンテナ橋渡しの方式（§6「橋渡しの非対称性」の 3 択: unsafe 参照キャスト／借用ハンドル型／第 1 段では対象外）
+4. 独自層 → autodiff コンテナ橋渡しの方式（§6「橋渡しの非対称性」の 2 択: 借用ハンドル型／第 1 段では対象外。unsafe 参照キャスト案は unsafe 統制方針により設計候補から除外済み）
 5. #2133 本文の実装形更新
 6. #2134／#2137 への鏡写し要件（facade trait 側への defaulted メソッド追加を伴う場合）
 
