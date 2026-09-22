@@ -996,53 +996,95 @@ impl CustomFunction for LayerNormFn {
             op_err_to_autodiff(OpError::NonContiguousInternal("LayerNormalization"))
         })?;
 
-        let mut dx = vec![0f32; xs.len()];
-        let mut dscale_full = vec![0f32; xs.len()];
-        let mut dbias_full = vec![0f32; xs.len()];
-        for o in 0..outer {
-            let row = &xs[o * inner..(o + 1) * inner];
-            let grow = &gs[o * inner..(o + 1) * inner];
-            // 二乗和は要素を先に f64 へ昇格してから二乗する（正規化統計の契約）。
-            let mean: f64 = row.iter().map(|&v| v as f64).sum::<f64>() / inner as f64;
-            let var: f64 = row
-                .iter()
-                .map(|&v| {
-                    let d = v as f64 - mean;
-                    d * d
-                })
-                .sum::<f64>()
-                / inner as f64;
-            let rstd = 1.0f64 / (var + self.epsilon as f64).sqrt();
+        // 他の CustomFunction 実装（BinaryElemFn／GemmFn／MatMulFn）と同じ
+        // 「requires_grad[i] が false の入力は計算自体を行わない」方針に揃える。
+        // dx は dxhat／mean_dxhat／mean_dxhat_xhat（dscale とは独立の中間値）を要し、
+        // dscale は xhat のみを要するため、必要フラグごとに計算を分岐する。
+        let need_dx = requires_grad[0];
+        let need_dscale = requires_grad[1];
+        let need_dbias = self.has_bias && requires_grad.get(2).copied().unwrap_or(false);
 
-            let xhat: Vec<f64> = row.iter().map(|&v| (v as f64 - mean) * rstd).collect();
-            let dxhat: Vec<f64> = (0..inner)
-                .map(|i| grow[i] as f64 * scale_s[i] as f64)
-                .collect();
-            let mean_dxhat: f64 = dxhat.iter().sum::<f64>() / inner as f64;
-            let mean_dxhat_xhat: f64 = dxhat
-                .iter()
-                .zip(xhat.iter())
-                .map(|(&d, &xh)| d * xh)
-                .sum::<f64>()
-                / inner as f64;
+        let mut dx = if need_dx {
+            vec![0f32; xs.len()]
+        } else {
+            Vec::new()
+        };
+        let mut dscale_full = if need_dscale {
+            vec![0f32; xs.len()]
+        } else {
+            Vec::new()
+        };
+        let mut dbias_full = if need_dbias {
+            vec![0f32; xs.len()]
+        } else {
+            Vec::new()
+        };
 
-            for i in 0..inner {
-                let idx = o * inner + i;
-                dx[idx] = (rstd * (dxhat[i] - mean_dxhat - xhat[i] * mean_dxhat_xhat)) as f32;
-                dscale_full[idx] = grow[i] * xhat[i] as f32;
-                dbias_full[idx] = grow[i];
+        if need_dx || need_dscale || need_dbias {
+            for o in 0..outer {
+                let row = &xs[o * inner..(o + 1) * inner];
+                let grow = &gs[o * inner..(o + 1) * inner];
+                // 二乗和は要素を先に f64 へ昇格してから二乗する（正規化統計の契約）。
+                let mean: f64 = row.iter().map(|&v| v as f64).sum::<f64>() / inner as f64;
+                let var: f64 = row
+                    .iter()
+                    .map(|&v| {
+                        let d = v as f64 - mean;
+                        d * d
+                    })
+                    .sum::<f64>()
+                    / inner as f64;
+                let rstd = 1.0f64 / (var + self.epsilon as f64).sqrt();
+
+                // xhat は dx・dscale の双方が使うため need_dx || need_dscale のときのみ計算する。
+                let xhat: Vec<f64> = if need_dx || need_dscale {
+                    row.iter().map(|&v| (v as f64 - mean) * rstd).collect()
+                } else {
+                    Vec::new()
+                };
+
+                // dxhat・mean_dxhat・mean_dxhat_xhat は dx 専用の中間値。
+                let (mean_dxhat, mean_dxhat_xhat, dxhat) = if need_dx {
+                    let dxhat: Vec<f64> = (0..inner)
+                        .map(|i| grow[i] as f64 * scale_s[i] as f64)
+                        .collect();
+                    let mean_dxhat: f64 = dxhat.iter().sum::<f64>() / inner as f64;
+                    let mean_dxhat_xhat: f64 = dxhat
+                        .iter()
+                        .zip(xhat.iter())
+                        .map(|(&d, &xh)| d * xh)
+                        .sum::<f64>()
+                        / inner as f64;
+                    (mean_dxhat, mean_dxhat_xhat, dxhat)
+                } else {
+                    (0.0, 0.0, Vec::new())
+                };
+
+                for i in 0..inner {
+                    let idx = o * inner + i;
+                    if need_dx {
+                        dx[idx] =
+                            (rstd * (dxhat[i] - mean_dxhat - xhat[i] * mean_dxhat_xhat)) as f32;
+                    }
+                    if need_dscale {
+                        dscale_full[idx] = grow[i] * xhat[i] as f32;
+                    }
+                    if need_dbias {
+                        dbias_full[idx] = grow[i];
+                    }
+                }
             }
         }
 
         let mut out: Vec<Option<Tensor<f32>>> = Vec::with_capacity(inputs.len());
-        if requires_grad[0] {
+        if need_dx {
             out.push(Some(
                 Tensor::new(dx, x.shape()).map_err(AutodiffError::Shape)?,
             ));
         } else {
             out.push(None);
         }
-        if requires_grad[1] {
+        if need_dscale {
             let full = Tensor::new(dscale_full, x.shape()).map_err(AutodiffError::Shape)?;
             let d = reduce_to_shape(&full, scale_t.shape())
                 .map_err(|e| AutodiffError::InvalidArgument(e.to_string()))?;
@@ -1051,7 +1093,7 @@ impl CustomFunction for LayerNormFn {
             out.push(None);
         }
         if self.has_bias {
-            if requires_grad.get(2).copied().unwrap_or(false) {
+            if need_dbias {
                 let full = Tensor::new(dbias_full, x.shape()).map_err(AutodiffError::Shape)?;
                 let d = reduce_to_shape(&full, inputs[2].shape())
                     .map_err(|e| AutodiffError::InvalidArgument(e.to_string()))?;
