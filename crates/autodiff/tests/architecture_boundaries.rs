@@ -162,3 +162,127 @@ fn visit_rs_files(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
         }
     }
 }
+
+/// `crates/autodiff/src/custom.rs` の `pub trait CustomFunction { ... }`
+/// 本体のみを部分文字列として抜き出す（イシュー #2064 §12.5 (b) 第 3 項
+/// 「新規 trait が `BackendOps` 等を引数に取らないことの機械検査」の
+/// 前段）。トレイト定義の開始 `{` から対応する `}` までを中括弧の深さで
+/// 追跡する（`strip_cfg_test_items` と同じ単純な深さ追跡方式。トレイト
+/// 本体は文字列リテラル中に `{`/`}` を含まないため対応不要）。トレイト
+/// 定義が見つからない場合は空文字列を返す（呼び出し側のアサーションで
+/// 検出不能を明示的に fail させるため、黙って全文を返さない）。
+fn extract_trait_body(content: &str, trait_name: &str) -> String {
+    let needle = format!("pub trait {trait_name}");
+    let Some(start) = content.find(&needle) else {
+        return String::new();
+    };
+    let after_needle = &content[start..];
+    let Some(brace_offset) = after_needle.find('{') else {
+        return String::new();
+    };
+    let body_start = start + brace_offset;
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, ch) in content[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(body_start + i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    match end {
+        Some(end) => content[body_start..end].to_string(),
+        None => String::new(),
+    }
+}
+
+/// `content` 中の `needle` が識別子境界で一致しているか判定する
+/// （`needle` の前後が英数字／`_` でなければ独立した識別子とみなす）。
+/// 部分一致（例: `Device` に対する `DeviceAllocator`）を誤検出しない
+/// ための最小限のトークン境界チェック。
+fn contains_identifier(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let mut start = 0usize;
+    while let Some(rel) = haystack[start..].find(needle) {
+        let idx = start + rel;
+        let before_ok =
+            idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric() && bytes[idx - 1] != b'_';
+        let after_idx = idx + needle_bytes.len();
+        let after_ok = after_idx >= bytes.len()
+            || !bytes[after_idx].is_ascii_alphanumeric() && bytes[after_idx] != b'_';
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
+
+/// `crates/autodiff/src/custom.rs` の `CustomFunction` trait が
+/// `BackendOps`／`Tape`／`Var`／`Device`／`NodeId`（グラフ構築・デバイス
+/// 結線に関わる型）を一切シグネチャへ含まないことを固定する（イシュー
+/// #2064 §12.5 (b) 第 3 項）。`docs/autodiff-custom-function-decision.md`
+/// §12.4「契約」が定める「`forward`／`backward` は host `Tensor<f32>`
+/// のみを受け渡す（`BackendOps` 非露出）」「`'static` 境界により `&Tape`・
+/// `Var<'t>` を捕捉できない」という設計の構造的裏付けを、trait 定義
+/// そのものの grep で確認する（実装 `CustomFn`〈`pub(crate)` newtype。
+/// `Arc<dyn CustomFunction>` を保持〉やモジュール doc コメントは走査
+/// 対象に含めない——trait 定義の外側に `Tape` 等の語が現れても本テスト
+/// の関心事ではないため、`extract_trait_body` で trait 本体のみへ絞る）。
+/// trait 本体自身のドキュメンテーションコメント（`///`。§12.4「契約」の
+/// 説明文が `Tape`・`Var` 等の語を含む）はシグネチャではないため、
+/// `//` 行を除去してからシグネチャのみを検査する。
+#[test]
+fn custom_function_trait_signatures_are_host_tensor_only() {
+    let custom_rs = autodiff_crate_root().join("src/custom.rs");
+    let content = read_to_string_or_panic(&custom_rs);
+    let trait_body = extract_trait_body(&content, "CustomFunction");
+    assert!(
+        !trait_body.is_empty(),
+        "src/custom.rs から `pub trait CustomFunction` 本体を抽出できなかった\
+         （テスト自体が検査対象を見失っている。ファイル構成が変わっていないか確認）"
+    );
+    let signatures_only: String = trait_body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for forbidden in ["BackendOps", "Tape", "Var", "Device", "NodeId"] {
+        assert!(
+            !contains_identifier(&signatures_only, forbidden),
+            "CustomFunction trait のシグネチャに {forbidden} が含まれている\
+             （§12.4 の「host Tensor<f32> のみを受け渡す」契約違反の疑い）"
+        );
+    }
+}
+
+/// `crates/autodiff/src/var.rs` に `pub fn custom(`／`pub fn custom<`
+/// 宣言が存在しないことを固定する（イシュー #2064 §12.5 (b) 第 3 項）。
+/// facade は `Var` を型ごと再エクスポートしているため、`Var::custom` が
+/// 生えると `Tape::custom` の facade 転送メソッド不在ガード
+/// （`crates/facade/tests/api_surface.rs::
+/// facade_tape_does_not_expose_custom_forwarding_method`）を経由せずに
+/// 承認 (b) 前の到達経路が生まれてしまう（`docs/autodiff-custom-
+/// function-decision.md` §12.4「入口」の設計根拠）。
+#[test]
+fn var_rs_does_not_declare_pub_fn_custom() {
+    let var_rs = autodiff_crate_root().join("src/var.rs");
+    let content = read_to_string_or_panic(&var_rs);
+    let no_comments: String = content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !no_comments.contains("pub fn custom(") && !no_comments.contains("pub fn custom<"),
+        "src/var.rs に pub fn custom 宣言が見つかった\
+         （§12.5 (b) 未承認のまま Var 経由の到達口を設けてしまっている）"
+    );
+}

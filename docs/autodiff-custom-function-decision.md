@@ -451,3 +451,65 @@ match（`Op::supports_create_graph()`。同 doc §8 の 69 variant 分類は `Op
 書き込む前に型付き `Err(AutodiffError::Backward(_))` を返す（fail-closed）。
 `crates/autodiff/tests/create_graph.rs::create_graph_rejects_unsupported_op_custom`
 で固定した。
+
+## 15. facade 公開の保留記録（イシュー #2064）
+
+イシュー #2064「facade: custom autograd Function の公開面追加」の実装着手時
+（2026-09-22・main HEAD `5d78c638`）に、`gh issue view 2064 --comments`・
+`gh issue view 2059 --comments`（親 issue）を確認したところ、§12.5 (b)
+「facade 公開面（`CustomFunction` 再エクスポート・facade `Tape::custom`
+委譲）」を対象とするリポジトリ所有者の明示的な承認コメントは存在しなかった
+（#2064 のコメントは 2026-09-19T15:45:46Z の「実装保留（ユーザー承認待ち）」
+通知 1 件のみ、親 #2059 はコメント 0 件）。issue が起票されていること自体は
+承認事項の承認にはならない（前例: #2063「facade: 高階微分 API の公開面追加」
+も同様に未承認のまま保留し、PR #2208（`ef415e6d`）で facade／autodiff src を
+一切変更せず否定ガード＋保留記録 doc のみをマージした。同 doc `docs/autodiff-
+higher-order-grad-decision.md` §15 と本節は同型）。
+
+自動運転（承認待ち不可）かつ判断は安全側に倒す方針、`docs/compat-api-scope.md`
+§5（範囲拡張は経路 1／2 の承認必須）、`.claude/rules/security.md`（自己修復に
+よる無断拡大禁止）に基づき、本イシューでは `crates/facade/src/**`・
+`crates/autodiff/src/**` を一切変更せず、次の否定ガード 4 件を追加して
+「facade 未公開」状態を機械固定した:
+
+- `crates/facade/tests/api_surface.rs::facade_does_not_reexport_custom_function`
+  （既存。§12.5 (b) 未承認のまま維持する旨を doc comment へ追記）
+- `crates/facade/tests/api_surface.rs::
+  facade_tape_does_not_expose_custom_forwarding_method`（既存。同上）
+- `crates/facade/tests/api_surface.rs::
+  facade_public_functions_do_not_take_custom_function`（新規。`src/` 全体に
+  `CustomFunction` 識別子が一切現れないことを固定し、`pub use` 行のみを
+  見る既存ガードの死角〈`pub use` を経由しない合成入口〉を塞ぐ）
+- `crates/facade/tests/api_surface.rs::
+  compat_sequential_does_not_expose_custom_add_method`（新規。`Sequential::
+  add_custom` 相当の合成メソッドが生えていないことを固定する）
+- `crates/autodiff/tests/architecture_boundaries.rs::
+  custom_function_trait_signatures_are_host_tensor_only`（新規。§12.5 (b)
+  第 3 項「新規 trait が `BackendOps` 等を引数に取らないことの機械検査」。
+  `CustomFunction` trait 定義本体のみを抽出し `BackendOps`／`Tape`／`Var`／
+  `Device`／`NodeId` を含まないことを固定する）
+- `crates/autodiff/tests/architecture_boundaries.rs::
+  var_rs_does_not_declare_pub_fn_custom`（新規。同項。`src/var.rs` に
+  `pub fn custom` 宣言が無いことを固定し、`Var::custom` という facade
+  再エクスポート経由の別到達口が生えないことを構造的に保証する）
+
+承認取得後に実施する変更範囲（事前提示。#2064 の保留コメント本文と同一）:
+
+- `crates/facade/src/lib.rs`: `pub use fandhe_ai_autodiff::CustomFunction;`
+  （1 行の再エクスポート）・`impl Tape` への `custom` 委譲メソッド 1 件
+  （`self.0.custom(func, inputs)` を返すだけの薄い委譲。`transfer`／
+  `rnn_forward_seq` と同型）
+- `crates/facade/tests/api_surface.rs`: 上記否定ガード 2 件（既存）を削除し
+  正ガードへ差し替え、AC-4 の否定ガード（新規 2 件）は「`CustomFunction` を
+  含む `pub fn` 行は `Tape::custom` 1 件のみ」という形へ更新する
+- `crates/facade/tests/custom_function_facade.rs`: facade 経由の統合テスト
+  新規追加
+- `crates/autodiff/src/custom.rs`・`lib.rs`・`tape.rs`: モジュール doc の
+  「facade 非公開」記述を「facade 公開済み」へ更新（ロジック変更なし）
+- `docs/autodiff-custom-function-decision.md`・`docs/compat-api-scope.md`・
+  `docs/compat-feature-gap.md`・`docs/perf/framework-compare-feature-
+  matrix-0.9.0.md`・`docs/README.md`: 実装記録・適用記録の追記
+- `docs/perf/logs/facade-custom-function-2064/README.md`: CUDA／Metal 実機
+  実測なしの申し送り（常に host 実行のため REQ-2 対象外）
+
+イシューは close せず、承認取得後に別 PR で経路 B（公開実施）を行う。

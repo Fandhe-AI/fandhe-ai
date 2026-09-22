@@ -2961,6 +2961,8 @@ fn fit_types_are_reachable_via_facade_only() {
 /// 再エクスポートしていないことを固定する（`docs/autodiff-custom-
 /// function-decision.md` §12.5 (b)「facade 公開面」は未承認のまま対象外。
 /// `facade_does_not_reexport_cast_ops` と同型の走査）。
+/// **イシュー #2064（2026-09-22）時点でも §12.5 (b) の承認コメントが
+/// 確認できなかったため未承認のまま維持する**（同 doc §15 保留記録）。
 #[test]
 fn facade_does_not_reexport_custom_function() {
     let src_dir = facade_crate_root().join("src");
@@ -2992,7 +2994,9 @@ fn facade_does_not_reexport_custom_function() {
 /// §12.4「入口」〉と同じ「転送メソッドを追加しない限り facade から
 /// 到達不能」という設計を、転送メソッド自体が生えていないことで直接
 /// 検査する）。承認 (b) を得て転送メソッドを追加する際は本テストを
-/// 更新する。
+/// 更新する。**イシュー #2064（2026-09-22）時点でも §12.5 (b) の承認
+/// コメントが確認できなかったため未承認のまま維持する**（同 doc §15
+/// 保留記録）。
 #[test]
 fn facade_tape_does_not_expose_custom_forwarding_method() {
     let lib_rs = facade_crate_root().join("src/lib.rs");
@@ -3002,6 +3006,52 @@ fn facade_tape_does_not_expose_custom_forwarding_method() {
         "facade 独自の Tape に `pub fn custom(...)` 宣言（ジェネリクス・\
          lifetime 付き `pub fn custom<'t>(` を含む）が見つかった\
          （§12.5 (b) 未承認のまま到達可能にしてしまっている）"
+    );
+}
+
+/// `crates/facade/src/` に `CustomFunction` 識別子が一切現れないことを
+/// 固定する（イシュー #2064 AC-4。`facade_does_not_reexport_custom_
+/// function` は `pub use` 行のみを走査するため、CUDA Graph step との
+/// 結線・gradcheck 相当の補助関数等、`pub use` を経由しない別の合成
+/// 入口〈`pub fn foo(f: CustomFunction)` のような新規シグネチャ〉が
+/// 生えても検出できない。本テストは `facade_does_not_expose_pool_
+/// implementation_types` と同型のファイル全文走査で、承認 (b) 前に
+/// そうした合成入口が facade へ混入することを構造的に遮断する）。
+#[test]
+fn facade_public_functions_do_not_take_custom_function() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        if content.contains("CustomFunction") {
+            offending.push(path.display().to_string());
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の src/ に CustomFunction 識別子が現れている\
+         （§12.5 (b) 未承認のまま合成入口を設けてしまっている）: {offending:?}"
+    );
+}
+
+/// `crates/facade/src/compat/` に `Sequential::add_custom` 相当の合成
+/// メソッド（`pub fn add_custom`）が生えていないことを固定する
+/// （イシュー #2064 AC-4。`compat_sequential_does_not_expose_rnn_add_
+/// methods` と同型。`Sequential` 平坦鎖への `CustomFunction` 合成入口を
+/// 承認 (b) 前に設けないことの機械固定）。
+#[test]
+fn compat_sequential_does_not_expose_custom_add_method() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut offending = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        if cleaned.contains("pub fn add_custom") {
+            offending.push(path.display().to_string());
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "src/compat 配下に add_custom が見つかった\
+         （§12.5 (b) 未承認のまま Sequential への合成入口を設けてしまっている）: {offending:?}"
     );
 }
 
