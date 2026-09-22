@@ -1673,7 +1673,7 @@ impl Op {
     /// 合成だけでは再現できない（`Gelu` は `erf` を要し依存追加禁止
     /// 〈`.claude/rules/deps-policy.md`〉、`GeluTanh` は本イシューの
     /// スコープでは見送り。`docs/autodiff-higher-order-grad-decision.md`
-    /// §15 参照）ため `false` のまま残る。それ以外の `ScalarUnaryOp`・
+    /// §16 参照）ため `false` のまま残る。それ以外の `ScalarUnaryOp`・
     /// `ScalarBinaryOp` の既知 variant はすべて `true`。
     ///
     /// 設計 doc §8 の「対象」区分に残る `MaskedFill`・`Gather`・

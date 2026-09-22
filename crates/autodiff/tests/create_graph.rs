@@ -661,7 +661,7 @@ fn create_graph_treats_no_grad_leaf_as_constant() {
 // GELU。`ScalarUnaryOp::Gelu`）を未対応 Op の代表として使う——導関数
 // `Φ(x) + x·φ(x)` が `erf` を要し `Var` 演算の合成だけでは再現できない
 // ため `scalar_unary_replayable` が引き続き `false` を返す
-// （`docs/autodiff-higher-order-grad-decision.md` §15）。入口検査 7
+// （`docs/autodiff-higher-order-grad-decision.md` §16）。入口検査 7
 // （`validate_ancestors`）が `build_mirror`／`build_cgrads` より前に
 // 判定するため、拒否時に `child` が一切書き込まれない（空のまま）こと
 // も併せて固定する。

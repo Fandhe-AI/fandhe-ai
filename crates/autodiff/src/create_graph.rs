@@ -101,7 +101,7 @@ use crate::var::Var;
 /// 合成は variant ごとに手書きのため、ここで対応済み variant のみを
 /// 許可する。`ScalarUnaryOp::Gelu`（誤差関数版）は導関数が `erf` を要し
 /// `Var` 演算の合成だけでは再現できないため対象外
-/// （`docs/autodiff-higher-order-grad-decision.md` §15）。`GeluTanh` は
+/// （`docs/autodiff-higher-order-grad-decision.md` §16）。`GeluTanh` は
 /// 本イシューのスコープでは見送り（`.claude/rules/out-of-scope-
 /// tracking.md` で追跡）。`ScalarUnaryOp` は `tensor-core` 側で
 /// `#[non_exhaustive]` のため、末尾のワイルドカードは未知 variant を

@@ -5,7 +5,7 @@
 イシュー #2062（`Op::supports_create_graph()` を `ScalarUnary`・
 `ScalarBinary`・`Transpose`・`Permute`・`Narrow`・`Concat`・
 `Contiguous`・`Where` へ拡張。設計記録は
-`docs/autodiff-higher-order-grad-decision.md` §15）は、新規カーネルを
+`docs/autodiff-higher-order-grad-decision.md` §16）は、新規カーネルを
 一切追加せず既存の `Var` 公開メソッド（`add`／`mul`／`sub`／`div`／
 `pow`／`where_cond`／`transpose`／`permute`／`narrow`／`cat`／
 `contiguous`／各種 `scalar_unary` 系）の合成のみで実装した。このため
