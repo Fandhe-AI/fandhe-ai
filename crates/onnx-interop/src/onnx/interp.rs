@@ -101,6 +101,17 @@ pub enum InterpError {
         expected: usize,
         actual: usize,
     },
+    /// ノードの宣言入力数が許容範囲 `[min, max]` の外（`Conv` の `X`／`W`
+    /// 必須 2 個 + 任意 `B` 1 個の計 2〜3 個。イシュー #2076 codex-review
+    /// 指摘）。旧実装は先頭 `max` 個だけを読み、余剰入力を無言で無視して
+    /// いたため、`OutputArityMismatch` と対になる fail-closed 検査として
+    /// 新設した（OWASP A03。`.claude/rules/security.md`）。
+    InputArityMismatch {
+        node: String,
+        min: usize,
+        max: usize,
+        actual: usize,
+    },
     /// `graph.outputs` に列挙された名前が実行後の env に存在しない。
     /// `build_graph` が生成可能性を検証済みのため到達しないはずだが、
     /// 防御的に型付きエラーで報告する（`unwrap()` を避けるため。coding-rust.md）。
@@ -163,6 +174,17 @@ impl fmt::Display for InterpError {
                 write!(
                     f,
                     "ノード '{node}': 出力数不一致（期待 {expected}、実際 {actual}）"
+                )
+            }
+            InterpError::InputArityMismatch {
+                node,
+                min,
+                max,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "ノード '{node}': 入力数不一致（期待 {min}〜{max}、実際 {actual}）"
                 )
             }
             InterpError::GraphOutputNotProduced { name } => {
@@ -440,11 +462,28 @@ fn attr_i64_typed(node: &NodeProto, name: &str, default: i64) -> Result<i64, Int
 /// 無言でエラー化せず [`InterpError::InvalidAttribute`] を返す（OWASP A03。
 /// 外部フォーマット由来のバイト列を検証せずに文字列化しない）。同名属性が
 /// 複数宣言されている場合も [`find_attr_unique`] が同様に拒否する。
+///
+/// `r#type == STRING` が確認できても `s` が空バイト列の場合は拒否する
+/// （codex-review P0 指摘。イシュー #2076・PR #2220）。`Conv` の `auto_pad`
+/// は ONNX 仕様上 `"NOTSET"`／`"SAME_UPPER"`／`"SAME_LOWER"`／`"VALID"` の
+/// いずれかの非空列挙値であり、空文字列は有効な値ではない。属性が
+/// **存在して**値が空という状態を「属性が省略された」場合と無言で同一視
+/// すると、`attr_ints_typed` の空 `ints` 拒否（本モジュール既存実装）と
+/// 非対称になり、`check_attr_type` の型検証だけでは塞げない同型の無言
+/// fallback 抜け道になる。属性自体が存在しない場合のみ `default`
+/// （`"NOTSET"`）を適用する。
 fn attr_string(node: &NodeProto, name: &str, default: &str) -> Result<String, InterpError> {
     match find_attr_unique(node, name)? {
         None => Ok(default.to_string()),
         Some(a) => {
             check_attr_type(node, a, attribute_type::STRING, "STRING")?;
+            if a.s.is_empty() {
+                return Err(InterpError::InvalidAttribute {
+                    node: node.name.clone(),
+                    attr: name.to_string(),
+                    reason: "STRING 属性が存在しますが値が空です".to_string(),
+                });
+            }
             String::from_utf8(a.s.clone()).map_err(|e| InterpError::InvalidAttribute {
                 node: node.name.clone(),
                 attr: name.to_string(),
@@ -1020,7 +1059,21 @@ fn compute_layer_normalization(
 /// 送り `ints` を空のまま残す）が、型不一致を「省略」と同一視されて無言で
 /// 既定値へ変更され、別の畳み込み条件で実行されてしまうのを防ぐ
 /// （イシュー #2076 codex-review 指摘。OWASP A03。`.claude/rules/security.md`）。
+///
+/// 入力数は ONNX Conv-13 仕様どおり 2（`X, W`）または 3（`X, W, B`）のみ
+/// 受理する。旧実装は先頭 2 個と `node.input.get(2)` だけを読み、4 個以上の
+/// 入力を無言で無視していた（codex-review P0 指摘。PR #2220）。3 個目が
+/// 空文字列（ONNX の optional input 省略記法。`input_name` と同じ規約）の
+/// 場合はバイアスなしとして扱う。
 fn compute_conv(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+    if node.input.len() < 2 || node.input.len() > 3 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 2,
+            max: 3,
+            actual: node.input.len(),
+        });
+    }
     let x = get_f32(env, node, input_name(node, 0)?)?;
     let w = get_f32(env, node, input_name(node, 1)?)?;
     let b = match node.input.get(2) {
@@ -2002,6 +2055,107 @@ mod tests {
             err,
             InterpError::InvalidAttribute { ref attr, .. } if attr == "strides"
         ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_present_but_empty_auto_pad() {
+        // P0 修正（codex-review 指摘。PR #2220）: `auto_pad` が STRING 型で
+        // 正しく宣言されつつ値が空バイト列という型偽装。空文字列は ONNX
+        // 仕様上有効な列挙値ではないため、属性が省略された場合の `NOTSET`
+        // fallback と無言で同一視してはならない。
+        let n = conv_node_with_attrs(vec![build_attr_string_typed("auto_pad", "")]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "auto_pad"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_accepts_auto_pad_omitted_as_notset() {
+        // 属性自体が存在しない場合（上記の「存在して空」とは異なる）は
+        // 従来どおり `NOTSET` へ fallback する。
+        let n = conv_node_with_attrs(vec![]);
+        assert!(
+            n.attribute
+                .iter()
+                .any(|a| a.name == "auto_pad" && a.s == b"NOTSET")
+        );
+        let n_omitted = node_with_attrs(
+            "Conv",
+            vec!["x", "w"],
+            vec!["y"],
+            n.attribute
+                .into_iter()
+                .filter(|a| a.name != "auto_pad")
+                .collect(),
+        );
+        let result = compute_conv(&conv_feeds(), &n_omitted).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_conv_rejects_four_inputs() {
+        // P0 修正（codex-review 指摘。PR #2220）: 4 個目以降の入力を無言で
+        // 無視せず fail-closed に拒否する。
+        let n = node_with_attrs(
+            "Conv",
+            vec!["x", "w", "b", "extra"],
+            vec!["y"],
+            conv_node_with_attrs(vec![]).attribute,
+        );
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InputArityMismatch {
+                min: 2,
+                max: 3,
+                actual: 4,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_zero_inputs() {
+        let n = node_with_attrs(
+            "Conv",
+            vec![],
+            vec!["y"],
+            conv_node_with_attrs(vec![]).attribute,
+        );
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InputArityMismatch {
+                min: 2,
+                max: 3,
+                actual: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compute_conv_third_input_empty_placeholder_treated_as_no_bias() {
+        // 3 個目の入力が ONNX の optional input 省略記法（空文字列
+        // プレースホルダー）の場合は `node.input.get(2)` が空判定になり、
+        // バイアスなしとして扱う（`input_name` と同じ規約。省略時と同じ
+        // 出力になることを確認する）。
+        let n = node_with_attrs(
+            "Conv",
+            vec!["x", "w", ""],
+            vec!["y"],
+            conv_node_with_attrs(vec![]).attribute,
+        );
+        let result = compute_conv(&conv_feeds(), &n).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
     }
 
     #[test]

@@ -762,6 +762,30 @@ fn conv_omitted_bias_is_accepted() {
     assert_f32_bit_exact(y, &expected);
 }
 
+#[test]
+fn conv_omitted_auto_pad_writes_no_auto_pad_attribute() {
+    // P0 修正の対称性確認（codex-review 指摘。イシュー #2076・PR #2220）:
+    // `ConvAttrs::default()` の `auto_pad: String::new()`（Rust API の
+    // 「未指定」sentinel）を export すると、`auto_pad` 属性自体が
+    // 書き出されないことを直接検証する（`interp::attr_string` が
+    // 「存在して値が空」の STRING を fail-closed に拒否するため、空文字列を
+    // そのまま書き出すと自己 export の往復が壊れる。`conv_omitted_bias_is_
+    // accepted` は往復成功のみを間接検証するため、本テストで export 出力
+    // そのものを直接アサートする）。
+    let node = ExportNode {
+        name: "conv_no_auto_pad".to_string(),
+        op: ExportOp::Conv(ConvAttrs::default()),
+        inputs: vec!["x".to_string(), "w".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+    let proto = to_node_proto(&node).unwrap();
+    assert!(
+        proto.attribute.iter().all(|a| a.name != "auto_pad"),
+        "auto_pad 属性は書き出されないはず（実際: {:?}）",
+        proto.attribute.iter().map(|a| &a.name).collect::<Vec<_>>()
+    );
+}
+
 // ---- 層 A: arity 検査 ----
 
 #[test]

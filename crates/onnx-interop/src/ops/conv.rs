@@ -85,7 +85,20 @@ pub struct ConvAttrs {
     pub dilations: Vec<i64>,
     /// `group`。
     pub group: i64,
-    /// `auto_pad`。空文字列または `"NOTSET"` のみ受理する。
+    /// `auto_pad`。空文字列または `"NOTSET"` のみ受理する。空文字列は本
+    /// プレーン構造体（decode 層に依存しない Rust API）が持つ「未指定」
+    /// sentinel であり、`Default::default()` の既定値でもある（decode 層
+    /// を経由しない直接呼び出し用の受理条件）。ONNX ワイヤ側では意味が
+    /// 異なる: `crates/onnx-interop/src/onnx/interp.rs::attr_string` は
+    /// `auto_pad` 属性が**存在して**値が空バイト列という状態（ONNX 仕様上
+    /// 有効な列挙値ではない）を「属性が省略された」場合と無言で同一視せず
+    /// fail-closed に拒否し、`export_ops.rs::to_node_proto` も値が空なら
+    /// 属性自体を書き出さない（P0 修正・codex-review 指摘。イシュー
+    /// #2076・PR #2220）。`attr_string` の属性欠落時 fallback は
+    /// （空文字列ではなく）既定値 `"NOTSET"` を返すため、ONNX decode 層
+    /// を経由する限り本フィールドが空文字列になることはなく、空文字列は
+    /// decode 層を経由しない直接構築（`ConvAttrs::default()` 等）でのみ
+    /// 生じる。
     pub auto_pad: String,
 }
 

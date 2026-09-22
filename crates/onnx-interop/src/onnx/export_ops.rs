@@ -101,15 +101,18 @@ pub enum ExportOp {
     /// `LayerNormalization(X, Scale, [B])`。属性 `axis`（INT）／`epsilon`（FLOAT）。
     LayerNormalization(LayerNormAttrs),
     /// `Conv(X, W, [B])`（イシュー #2076・親 #2034）。属性
-    /// `auto_pad`（STRING。常に `"NOTSET"`）／`dilations`（INTS）／
-    /// `group`（INT）／`kernel_shape`（INTS）／`pads`（INTS）／
-    /// `strides`（INTS）。`ops::ConvAttrs` を interp 側と共用する
-    /// （`GemmAttrs`／`LayerNormAttrs` と同じ設計）。`dilations`／
-    /// `kernel_shape`／`pads`／`strides` は値が空の場合（ONNX 仕様の
-    /// 「未指定」相当）属性自体を書き出さない（`interp.rs::
-    /// attr_ints_typed` が INTS 型で存在しつつ `ints` が空の属性を
+    /// `auto_pad`（STRING）／`dilations`（INTS）／`group`（INT）／
+    /// `kernel_shape`（INTS）／`pads`（INTS）／`strides`（INTS）。
+    /// `ops::ConvAttrs` を interp 側と共用する（`GemmAttrs`／
+    /// `LayerNormAttrs` と同じ設計）。`dilations`／`kernel_shape`／
+    /// `pads`／`strides`／`auto_pad` はいずれも値が空の場合（ONNX 仕様の
+    /// 「未指定」相当。`auto_pad` は `ConvAttrs::default()` の Rust API
+    /// 既定値）属性自体を書き出さない（`interp.rs::attr_ints_typed`／
+    /// `attr_string` が INTS／STRING 型で存在しつつ値が空の属性を
     /// fail-closed に拒否するため。`Transpose { perm: None }` と同型の
-    /// 「省略で未指定を表す」設計）。
+    /// 「省略で未指定を表す」設計。P0 修正・codex-review 指摘。PR #2220）。
+    /// export したグラフでは `auto_pad` は常に `"NOTSET"`（非空の明示値）
+    /// または省略のいずれかであり、空 STRING が書き出されることはない。
     Conv(ConvAttrs),
 }
 
@@ -605,7 +608,22 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
             // と同じ方針。`interp.rs::compute_conv` は属性欠落時に
             // `.unwrap_or(&[])` で同じ空 `Vec` へ fallback するため往復の
             // 意味論は変わらない）。
-            let mut attribute = vec![attr_string("auto_pad", &attrs.auto_pad)];
+            // `auto_pad`（STRING）も上記 INTS 属性と同じ「値が空なら属性自体を
+            // 省略する」方針を採る（codex-review P0 指摘。イシュー #2076・
+            // PR #2220）。`interp.rs::attr_string` は STRING 型で存在しつつ
+            // `s` が空バイト列の属性を、ONNX 仕様上有効な列挙値
+            // （`"NOTSET"`／`"SAME_UPPER"`／`"SAME_LOWER"`／`"VALID"`）ではない
+            // として fail-closed に拒否するため、`ConvAttrs::default()` の
+            // `auto_pad: String::new()`（欠落相当の Rust API 既定値。
+            // `ops::conv.rs::ConvAttrs` docs 参照）をそのまま空 STRING として
+            // 書き出すと自己 export した往復が失敗する。`compute_conv` は
+            // 属性欠落時に `"NOTSET"` へ fallback するため往復の意味論は
+            // 変わらない。
+            let mut attribute = if attrs.auto_pad.is_empty() {
+                Vec::new()
+            } else {
+                vec![attr_string("auto_pad", &attrs.auto_pad)]
+            };
             if !attrs.dilations.is_empty() {
                 attribute.push(attr_ints("dilations", &attrs.dilations));
             }
