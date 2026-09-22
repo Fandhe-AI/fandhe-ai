@@ -116,3 +116,7 @@
 | cudarc `=0.19.8` `src/nccl/sys/mod.rs:9-13, 1362-1385` | `dynamic-loading` feature 下の NCCL 遅延シンボル解決・`libnccl` dlopen |
 | `Cargo.lock:467-469` | `libloading =0.9.0`（`dynamic-loading` の既存推移的依存） |
 | `docs/backend-abstraction-amd-readiness-decision.md`・`docs/autodiff-custom-function-decision.md`・`docs/autodiff-higher-order-grad-decision.md` | 同型の「実装しない・設計記録のみ」文書構成の precedent |
+
+## 10. 後続 #2074
+
+§2.1「ビルドでの実証は未実施」は #2074（`docs/ddp-grade-up-conditions.md`）で実証済みに更新された（`cargo build`／`cargo test --features cudarc/nccl --locked` が exit 0・実行時プローブで `libnccl present = false`・panic なしを確認）。§6 前提 2「`Device::available()` 未実装」は #1614（`fandhe_ai::available_devices()`）により達成済みであり陳腐化している。分散学習の格上げ条件表（量子化 a〜e 相当）の文案は `docs/ddp-grade-up-conditions.md` §3・§4 を正とし、本 doc の既存本文（基準コミット固定の記録）は書き換えない。
