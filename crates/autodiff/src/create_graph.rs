@@ -832,14 +832,17 @@ fn build_cgrads<'c>(
                 accumulate(&parent_nodes, &mut cgrads, b, db)?;
             }
             Op::ScalarUnary { op: sop, input } => {
-                let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?.clone();
+                // `x_val`（materialize のクローン）・`one`（child.var_no_grad
+                // の leaf ノード）は使う variant でのみ構築する（全 variant
+                // 共通の先頭構築は使わない variant でも子テープへ不要な
+                // ノードを積んでしまうため。review 指摘 2026-09-22）。
                 let x_m = get_mirror(mirror, input)?;
-                let one = child.var_no_grad(&Tensor::scalar(1.0f32));
                 let da = match sop {
                     ScalarUnaryOp::Neg => g.neg()?,
                     ScalarUnaryOp::Abs => {
-                        let pos = mask_from_pred(&x_val, |v| v > 0.0)?;
-                        let neg = mask_from_pred(&x_val, |v| v < 0.0)?;
+                        let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                        let pos = mask_from_pred(x_val, |v| v > 0.0)?;
+                        let neg = mask_from_pred(x_val, |v| v < 0.0)?;
                         let zeros = child.var_no_grad(&Tensor::zeros(&g.shape())?);
                         let neg_branch = Var::where_cond(&neg, &g.neg()?, &zeros)?;
                         Var::where_cond(&pos, &g, &neg_branch)?
@@ -851,15 +854,18 @@ fn build_cgrads<'c>(
                         g.mul(&factor)?
                     }
                     ScalarUnaryOp::Log => {
+                        let one = child.var_no_grad(&Tensor::scalar(1.0f32));
                         let factor = one.div(&x_m)?;
                         g.mul(&factor)?
                     }
                     ScalarUnaryOp::Log2 => {
+                        let one = child.var_no_grad(&Tensor::scalar(1.0f32));
                         let ln2 = child.var_no_grad(&Tensor::scalar(std::f32::consts::LN_2));
                         let factor = one.div(&x_m.mul(&ln2)?)?;
                         g.mul(&factor)?
                     }
                     ScalarUnaryOp::Log10 => {
+                        let one = child.var_no_grad(&Tensor::scalar(1.0f32));
                         let ln10 = child.var_no_grad(&Tensor::scalar(std::f32::consts::LN_10));
                         let factor = one.div(&x_m.mul(&ln10)?)?;
                         g.mul(&factor)?
@@ -873,12 +879,14 @@ fn build_cgrads<'c>(
                         g.mul(&factor)?
                     }
                     ScalarUnaryOp::Tan => {
+                        let one = child.var_no_grad(&Tensor::scalar(1.0f32));
                         let c = x_m.cos()?;
                         let factor = one.div(&c.mul(&c)?)?;
                         g.mul(&factor)?
                     }
                     ScalarUnaryOp::Relu => {
-                        let mask = positive_mask(&x_val)?;
+                        let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                        let mask = positive_mask(x_val)?;
                         let zeros = child.var_no_grad(&Tensor::zeros(&g.shape())?);
                         Var::where_cond(&mask, &g, &zeros)?
                     }
@@ -910,8 +918,9 @@ fn build_cgrads<'c>(
                         g.mul(&factor)?
                     }
                     ScalarUnaryOp::Hardswish => {
-                        let lo = mask_from_pred(&x_val, |v| v <= -3.0)?;
-                        let hi = mask_from_pred(&x_val, |v| v >= 3.0)?;
+                        let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                        let lo = mask_from_pred(x_val, |v| v <= -3.0)?;
+                        let hi = mask_from_pred(x_val, |v| v >= 3.0)?;
                         let two = child.var_no_grad(&Tensor::scalar(2.0f32));
                         let three = child.var_no_grad(&Tensor::scalar(3.0f32));
                         let six = child.var_no_grad(&Tensor::scalar(6.0f32));
@@ -923,27 +932,31 @@ fn build_cgrads<'c>(
                         g.mul(&factor)?
                     }
                     ScalarUnaryOp::LeakyRelu { negative_slope } => {
-                        let mask = mask_from_pred(&x_val, |v| v >= 0.0)?;
+                        let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                        let mask = mask_from_pred(x_val, |v| v >= 0.0)?;
                         let slope = child.var_no_grad(&Tensor::scalar(negative_slope));
                         let else_branch = g.mul(&slope)?;
                         Var::where_cond(&mask, &g, &else_branch)?
                     }
                     ScalarUnaryOp::Elu { alpha } => {
-                        let mask = mask_from_pred(&x_val, |v| v > 0.0)?;
+                        let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                        let mask = mask_from_pred(x_val, |v| v > 0.0)?;
                         let alpha_c = child.var_no_grad(&Tensor::scalar(alpha));
                         let factor = x_m.exp().mul(&alpha_c)?;
                         let else_branch = g.mul(&factor)?;
                         Var::where_cond(&mask, &g, &else_branch)?
                     }
                     ScalarUnaryOp::Softplus { beta, threshold } => {
-                        let mask = mask_from_pred(&x_val, |v| v * beta > threshold)?;
+                        let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                        let mask = mask_from_pred(x_val, |v| v * beta > threshold)?;
                         let beta_c = child.var_no_grad(&Tensor::scalar(beta));
                         let factor = x_m.mul(&beta_c)?.sigmoid();
                         let else_branch = g.mul(&factor)?;
                         Var::where_cond(&mask, &g, &else_branch)?
                     }
                     ScalarUnaryOp::Clamp { min, max } => {
-                        let mask = mask_from_pred(&x_val, |v| {
+                        let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                        let mask = mask_from_pred(x_val, |v| {
                             !(v.is_nan() || min > max || v < min || v > max)
                         })?;
                         let zeros = child.var_no_grad(&Tensor::zeros(&g.shape())?);
@@ -987,19 +1000,31 @@ fn build_cgrads<'c>(
                     let out_shape = parent_nodes[id.0].shape.clone();
                     let a_m = get_mirror(mirror, a)?;
                     let b_m = get_mirror(mirror, b)?;
-                    let a_bc = a_m.broadcast_to(&out_shape)?;
-                    let b_bc = b_m.broadcast_to(&out_shape)?;
+                    // `a_bc`／`b_bc`（child tape 上への broadcast_to view
+                    // ノード）は Add／Sub／Maximum／Minimum では使わない
+                    // ため、使う分岐（Mul／Div／Pow）の内側でのみ構築
+                    // する（review 指摘 2026-09-22。全分岐共通で先頭
+                    // 構築すると使わない分岐のたびに未使用の子テープ
+                    // ノードが 2 つ余分に積まれる）。
                     let (da_full, db_full) = match sop {
                         ScalarBinaryOp::Add => (g, g),
                         ScalarBinaryOp::Sub => (g, g.neg()?),
-                        ScalarBinaryOp::Mul => (g.mul(&b_bc)?, g.mul(&a_bc)?),
+                        ScalarBinaryOp::Mul => {
+                            let a_bc = a_m.broadcast_to(&out_shape)?;
+                            let b_bc = b_m.broadcast_to(&out_shape)?;
+                            (g.mul(&b_bc)?, g.mul(&a_bc)?)
+                        }
                         ScalarBinaryOp::Div => {
+                            let a_bc = a_m.broadcast_to(&out_shape)?;
+                            let b_bc = b_m.broadcast_to(&out_shape)?;
                             let one = child.var_no_grad(&Tensor::scalar(1.0f32));
                             let factor_a = one.div(&b_bc)?;
                             let factor_b = a_bc.div(&b_bc)?.div(&b_bc)?.neg()?;
                             (g.mul(&factor_a)?, g.mul(&factor_b)?)
                         }
                         ScalarBinaryOp::Pow => {
+                            let a_bc = a_m.broadcast_to(&out_shape)?;
+                            let b_bc = b_m.broadcast_to(&out_shape)?;
                             let a_val = materialize_fallible(&parent_nodes, parent_ops, a)?;
                             let b_val = materialize_fallible(&parent_nodes, parent_ops, b)?;
                             let (a_bc_val, b_bc_val) =
@@ -1017,6 +1042,10 @@ fn build_cgrads<'c>(
                             (g.mul(&da_factor)?, g.mul(&db_factor)?)
                         }
                         ScalarBinaryOp::Maximum | ScalarBinaryOp::Minimum => {
+                            // Maximum／Minimum の勾配は mask 選択で `g` を
+                            // 直接使う（`grad.rs` の 1 階側と同型）ため
+                            // `a_bc`／`b_bc`（broadcast_to view ノード）は
+                            // 不要。構築しない。
                             let a_val = materialize_fallible(&parent_nodes, parent_ops, a)?;
                             let b_val = materialize_fallible(&parent_nodes, parent_ops, b)?;
                             let (a_bc_val, b_bc_val) =

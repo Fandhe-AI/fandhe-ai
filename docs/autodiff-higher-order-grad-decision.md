@@ -399,6 +399,44 @@ codex-review（PR #2003）の指摘を受けて是正した。
   カーネルは追加していない。実機実測は未実施のまま Mac／GB10
   セッションへ申し送る（§14 の既存申し送りと同一）。
 
+## 15. facade 公開の保留記録（イシュー #2063）
+
+イシュー #2063「facade: 高階微分 API の公開面追加」の実装着手時
+（2026-09-19・main HEAD `adcf468a`）に、`gh issue view 2063 --comments`・
+`gh issue view 2059 --comments`（親 issue）を確認したところ、§10
+承認事項 5「facade 公開面への高階 API 追加」を対象とするリポジトリ
+所有者の明示的な承認コメントは存在しなかった（#2063 のコメントは
+2026-09-19T13:20Z の「実装保留（ユーザー承認待ち）」通知 1 件のみ、
+親 #2059 はコメント 0 件）。issue が起票されていること自体は
+承認事項 5 の承認にはならない（前例: #1955／#1758／#2017 はいずれも
+明示的な承認コメントが先行してから facade 実装に着手している）。
+
+自動運転（承認待ち不可）かつ判断は安全側に倒す方針、`docs/
+compat-api-scope.md` §5（範囲拡張は経路 1／2 の承認必須）、`.claude/
+rules/security.md`（自己修復による無断拡大禁止）に基づき、本 issue
+では `crates/facade/src/**`・`crates/autodiff/**` を一切変更せず、
+`crates/facade/tests/api_surface.rs` に否定ガード 2 件
+（`facade_does_not_reexport_create_graph_result`・`facade_tape_does_
+not_expose_backward_create_graph_method`）を追加して「facade 未公開」
+状態を機械固定した（`facade_does_not_reexport_custom_function`・
+`facade_tape_does_not_expose_custom_forwarding_method`〈§10 承認事項
+5 と同種の未承認公開面〉と同型の走査）。
+
+承認取得後に実施する変更範囲（事前提示。#2063 コメント本文と同一）:
+
+- `crates/facade/src/lib.rs`: `pub use fandhe_ai_autodiff::
+  CreateGraphResult;`（1 行の再エクスポート）・`impl Tape` への
+  `backward_create_graph` 委譲メソッド 1 件（`&self.0.
+  backward_create_graph(loss, &child.0)` を返すだけの薄い委譲。
+  `transfer`／`rnn_forward_seq` と同型）
+- `crates/autodiff/src/create_graph.rs`: モジュール doc の
+  「facade 非公開」記述を「facade 公開済み」へ更新（ロジック変更なし）
+- `crates/facade/tests/api_surface.rs`: 上記否定ガード 2 件を削除し、
+  ソース走査による正ガード・facade 経由の到達性テストへ差し替え
+- `docs/compat-api-scope.md`・`docs/compat-feature-gap.md`: 実装記録・
+  適用記録の追記
+
+イシューは close せず、承認取得後に別 PR で経路 B（公開実施）を行う。
 ## 16. 実装記録（イシュー #2062・§8「対象」区分の残り Op 拡張）
 
 `Op::supports_create_graph()`（`tape.rs`）が判定する対象を、#1942・
@@ -486,41 +524,3 @@ replayable`／`scalar_binary_replayable`・`replay_op`／`build_cgrads`
 
 内部ホスト名・秘密情報は含めない。
 
-## 15. facade 公開の保留記録（イシュー #2063）
-
-イシュー #2063「facade: 高階微分 API の公開面追加」の実装着手時
-（2026-09-19・main HEAD `adcf468a`）に、`gh issue view 2063 --comments`・
-`gh issue view 2059 --comments`（親 issue）を確認したところ、§10
-承認事項 5「facade 公開面への高階 API 追加」を対象とするリポジトリ
-所有者の明示的な承認コメントは存在しなかった（#2063 のコメントは
-2026-09-19T13:20Z の「実装保留（ユーザー承認待ち）」通知 1 件のみ、
-親 #2059 はコメント 0 件）。issue が起票されていること自体は
-承認事項 5 の承認にはならない（前例: #1955／#1758／#2017 はいずれも
-明示的な承認コメントが先行してから facade 実装に着手している）。
-
-自動運転（承認待ち不可）かつ判断は安全側に倒す方針、`docs/
-compat-api-scope.md` §5（範囲拡張は経路 1／2 の承認必須）、`.claude/
-rules/security.md`（自己修復による無断拡大禁止）に基づき、本 issue
-では `crates/facade/src/**`・`crates/autodiff/**` を一切変更せず、
-`crates/facade/tests/api_surface.rs` に否定ガード 2 件
-（`facade_does_not_reexport_create_graph_result`・`facade_tape_does_
-not_expose_backward_create_graph_method`）を追加して「facade 未公開」
-状態を機械固定した（`facade_does_not_reexport_custom_function`・
-`facade_tape_does_not_expose_custom_forwarding_method`〈§10 承認事項
-5 と同種の未承認公開面〉と同型の走査）。
-
-承認取得後に実施する変更範囲（事前提示。#2063 コメント本文と同一）:
-
-- `crates/facade/src/lib.rs`: `pub use fandhe_ai_autodiff::
-  CreateGraphResult;`（1 行の再エクスポート）・`impl Tape` への
-  `backward_create_graph` 委譲メソッド 1 件（`&self.0.
-  backward_create_graph(loss, &child.0)` を返すだけの薄い委譲。
-  `transfer`／`rnn_forward_seq` と同型）
-- `crates/autodiff/src/create_graph.rs`: モジュール doc の
-  「facade 非公開」記述を「facade 公開済み」へ更新（ロジック変更なし）
-- `crates/facade/tests/api_surface.rs`: 上記否定ガード 2 件を削除し、
-  ソース走査による正ガード・facade 経由の到達性テストへ差し替え
-- `docs/compat-api-scope.md`・`docs/compat-feature-gap.md`: 実装記録・
-  適用記録の追記
-
-イシューは close せず、承認取得後に別 PR で経路 B（公開実施）を行う。
