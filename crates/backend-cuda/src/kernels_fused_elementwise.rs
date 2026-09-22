@@ -48,10 +48,12 @@ pub(crate) const FUSED_EW_FUNCTION_NAME: &str = "fused_ew_f32";
 /// `ops` は呼び出し元（[`crate::fused_elementwise::match_elementwise_plan`]）
 /// が allowlist 検証済みであることを前提とする。未知 variant
 /// （`FusedOpKind` は `#[non_exhaustive]`）が紛れ込んだ場合は `"?"` を
-/// 埋め込みキーとして扱う（そのようなキーで衝突しても構築時に
-/// [`generate_source`] が安全側の空文字列を生成しコンパイルが失敗する
-/// だけであり、実行時に誤った演算へ静かにフォールバックする経路には
-/// ならない。二重防御）。
+/// 埋め込みキーとして扱う（allowlist 検証済みの呼び出し契約のため実運用
+/// では到達しない防御的分岐。到達した場合も [`generate_source`] 側の
+/// 対応する防御的分岐が `float r{i} = 0.0f;` を生成しコンパイル自体は
+/// 成立するため、コンパイル失敗ではなく静かな 0.0 フォールバックにな
+/// る。ただし allowlist 検証済み契約のため実運用では到達せず実害はな
+/// い。二重防御）。
 pub(crate) fn cache_key(ops: &[FusedOpKind], leaf_count: usize) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(ops.len());
     for op in ops {

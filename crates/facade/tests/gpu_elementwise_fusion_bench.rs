@@ -62,8 +62,14 @@ fn apply_gate_from_env(device: Device) {
         #[cfg(target_os = "macos")]
         Device::Metal => {
             fandhe_ai_backend_metal::fused_elementwise::set_gpu_elementwise_fusion_enabled(enabled);
-        }
-        _ => panic!("apply_gate_from_env: 未対応の Device variant"),
+        } // `Device`（`tensor-core::device::Device`）は `Cpu`／`Cuda(_)`／
+          // （macOS 限定の）`Metal` の variant のみを持つ。非 macOS では
+          // `Cpu`／`Cuda(_)` の 2 アームで、macOS では上記 3 アームで既に
+          // 網羅的（exhaustive）であるため、フォールバック `_` アームは
+          // いずれのターゲットでも到達しえず `unreachable_patterns`
+          // warning の原因になる。ワイルドカードは追加せず、`Device` に
+          // 将来 variant が増えた場合は非網羅 match のコンパイルエラーで
+          // 検知させる（安全側）。
     }
 }
 
