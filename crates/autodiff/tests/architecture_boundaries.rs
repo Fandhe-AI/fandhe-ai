@@ -208,6 +208,20 @@ fn strip_comments(content: &str) -> String {
 /// 含む）を読み飛ばしたうえで `keyword` の文字列一致を取り、直後が
 /// 識別子構成文字（英数字／`_`）でないこと（`used`／`typeof` 等の無関係
 /// な識別子ではないこと）を確認してから残りを返す。
+/// `statement` に `#[cfg(test)]` 属性（`cfg`／`(`／`test`／`)` の 4 トー
+/// クンがこの順で連続する箇所）が含まれるかをトークン列で判定する
+/// （codex-review 指摘・PR #2212 その 9）: `statement.contains("cfg(test)")`
+/// は固定文字列一致のため、`#[cfg( test )]`（空白入り）・`#[cfg(test )]`
+/// のような構文的に有効な書き方を見逃す。`strip_keyword_prefix` が
+/// `use`／`type` の判定を固定スペース一致からトークン一致へ置き換えた
+/// のと同じ理由で、こちらもトークン化して判定する。
+fn statement_has_cfg_test_attribute(statement: &str) -> bool {
+    let tokens = tokenize_including_punctuation(statement);
+    tokens
+        .windows(4)
+        .any(|w| w[0] == "cfg" && w[1] == "(" && w[2] == "test" && w[3] == ")")
+}
+
 fn strip_keyword_prefix<'a>(statement: &'a str, keyword: &str) -> Option<&'a str> {
     let trimmed = statement.trim_start();
     let rest = trimmed.strip_prefix(keyword)?;
@@ -799,13 +813,15 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // として現状は迂回できない）——しかしこれは文単位分割の実装詳細に
     // 副次的に依存した保護であり、明示的な意図ではない。将来
     // `split_top_level_statements` や属性の扱いが変わっても壊れない
-    // よう、ステートメント全文に `cfg(test)` が含まれる場合は明示的に
-    // 対象外とする fail-closed ガードを独立して設ける（トップレベル
-    // import をテスト専用の別名 import に差し替え、それを canonical
-    // import として通す迂回を塞ぐ）。
+    // よう、`statement_has_cfg_test_attribute` による明示的な fail-closed
+    // ガードを独立して設ける（トップレベル import をテスト専用の別名
+    // import に差し替え、それを canonical import として通す迂回を塞ぐ）。
+    // 固定文字列 `contains("cfg(test)")` ではなくトークン一致で判定する
+    // （codex-review 指摘・PR #2212 その 9: `#[cfg( test )]` のような
+    // 空白入り・構文的に有効な書き方を固定文字列一致は見逃す）。
     let mut canonical_tensor_import_found = false;
     for statement in split_top_level_statements(&no_comments) {
-        if statement.contains("cfg(test)") {
+        if statement_has_cfg_test_attribute(&statement) {
             continue;
         }
         let after_visibility = strip_visibility_prefix(&statement);
@@ -1100,7 +1116,7 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
         "#[cfg(test)]\nuse fandhe_ai_tensor_core::Tensor;\n\npub type Tensor = BackendOps;\n";
     let mut canonical_found_in_scenario = false;
     for statement in split_top_level_statements(cfg_test_only_import) {
-        if statement.contains("cfg(test)") {
+        if statement_has_cfg_test_attribute(&statement) {
             continue;
         }
         let after_vis = strip_visibility_prefix(&statement);
@@ -1114,5 +1130,22 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
     assert!(
         !canonical_found_in_scenario,
         "#[cfg(test)] 配下の import が誤って canonical import として扱われている"
+    );
+
+    // 14) `statement_has_cfg_test_attribute` は `#[cfg( test )]`（空白
+    //     入り。構文的に有効）も検出する（codex-review 指摘・PR #2212
+    //     その 9: `statement.contains("cfg(test)")` の固定文字列一致は
+    //     `cfg` と `(` の間・`test` と `)` の間に空白を挟むと見逃す）。
+    assert!(
+        statement_has_cfg_test_attribute("#[cfg( test )]\nuse fandhe_ai_tensor_core::Tensor;"),
+        "空白入り #[cfg( test )] 属性を検出できていない"
+    );
+    assert!(
+        statement_has_cfg_test_attribute("#[cfg(test)]\nuse fandhe_ai_tensor_core::Tensor;"),
+        "空白なし #[cfg(test)] 属性を検出できていない（既存挙動の回帰）"
+    );
+    assert!(
+        !statement_has_cfg_test_attribute("use fandhe_ai_tensor_core::Tensor;"),
+        "cfg(test) 属性が無い文を誤って検出している"
     );
 }
