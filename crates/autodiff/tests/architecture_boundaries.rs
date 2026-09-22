@@ -211,6 +211,61 @@ fn extract_trait_body(content: &str, trait_name: &str) -> String {
     }
 }
 
+/// `crates/autodiff/src/custom.rs` の `pub trait CustomFunction: <supertrait
+/// 境界> { ... }` の**ヘッダー行のみ**（`pub trait CustomFunction` から
+/// 開始 `{` の手前まで、メソッド本体を含まない）を抜き出す（イシュー
+/// #2064 §12.5 (b)。codex-review 指摘・PR #2212 その 2: `extract_trait_body`
+/// が返すヘッダー＋メソッド本体全体に対して `contains` 判定すると、
+/// supertrait 境界から `Send`／`Sync`／`'static` を削除しても、同じ文字列
+/// がメソッドシグネチャ側に偶然残っていれば検査を素通りしてしまう。
+/// 必須境界の有無判定はヘッダーのみに限定して行う）。トレイト定義が
+/// 見つからない場合は空文字列を返す（呼び出し側で検出不能を明示的に
+/// fail させるため）。
+fn extract_trait_header(content: &str, trait_name: &str) -> String {
+    let needle = format!("pub trait {trait_name}");
+    let Some(start) = content.find(&needle) else {
+        return String::new();
+    };
+    let after_needle = &content[start..];
+    let Some(brace_offset) = after_needle.find('{') else {
+        return String::new();
+    };
+    content[start..start + brace_offset].to_string()
+}
+
+/// `text` 中の識別子トークン（`[A-Za-z_][A-Za-z0-9_]*`。ライフタイムは
+/// 先頭の `'` を含めて 1 トークンとして扱う。例: `'static`）を出現順に
+/// 列挙する（`custom_function_trait_signatures_are_host_tensor_only`
+/// 専用の allowlist 判定ユーティリティ。codex-review 指摘・PR #2212
+/// その 2「型エイリアス経由の禁止型混入」対策。denylist〈固定識別子の
+/// 文字列検索〉だけでは `use ... as Ops` のような別名を素通りするため、
+/// シグネチャに現れる識別子を allowlist と突き合わせる fail-closed 方式
+/// を追加する）。
+fn extract_identifier_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' || c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            if c == '\'' {
+                i += 1;
+            }
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let token: String = chars[start..i].iter().collect();
+            if token != "'" {
+                tokens.push(token);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    tokens
+}
+
 /// `content` 中の `needle` が識別子境界で一致しているか判定する
 /// （`needle` の前後が英数字／`_` でなければ独立した識別子とみなす）。
 /// 部分一致（例: `Device` に対する `DeviceAllocator`）を誤検出しない
@@ -249,18 +304,51 @@ fn contains_identifier(haystack: &str, needle: &str) -> bool {
 /// 説明文が `Tape`・`Var` 等の語を含む）はシグネチャではないため、
 /// `//` 行を除去してからシグネチャのみを検査する。
 ///
-/// **ヘッダー（supertrait 境界）も検査対象に含める**（codex-review 指摘・
-/// PR #2212）: `extract_trait_body` が返す文字列には `pub trait
-/// CustomFunction: Send + Sync + 'static` のヘッダー行そのものも含まれる
-/// ため、(1) 必須境界 `Send`／`Sync`／`'static` がすべて揃っていること
-/// （§12.4「契約」の `'static` 境界により `&Tape`・`Var<'t>` を捕捉でき
-/// ないという設計的裏付けそのもの）と、(2) ヘッダーに禁止識別子
-/// （`BackendOps` 等）が混入していないことの両方を、本体シグネチャと
-/// 同じループで検査する。
+/// **ヘッダー（supertrait 境界）は専用の `extract_trait_header` で
+/// 独立判定する**（codex-review 指摘・PR #2212 その 1）: ヘッダー＋
+/// メソッド本体全体（`extract_trait_body`）に対する `contains` 判定では、
+/// supertrait から `Send`／`Sync`／`'static` を落としても同じ文字列が
+/// メソッドシグネチャ側に残っていれば検査を素通りしてしまうため、
+/// 必須境界の有無判定はヘッダー行のみに限定する。
+///
+/// **禁止識別子の denylist に加えて allowlist 判定も行う**（codex-review
+/// 指摘・PR #2212 その 2）: 固定識別子の文字列検索（denylist）のみでは
+/// `use ... as Ops` のような型エイリアス経由で禁止型を別名で混入させて
+/// もこのテストで検出できない。import／alias 解決は行わず、シグネチャに
+/// 現れる識別子トークンを現行シグネチャの実際のトークン集合そのもの
+/// （`ALLOWED_SIGNATURE_TOKENS`）と突き合わせる fail-closed 方式で
+/// 補完し、未知の識別子（エイリアス経由の混入を含む）を検出する。
+/// さらに、`use ... as ...`（エイリアス import）・`type ... = <禁止型>;`
+/// （型エイリアスによる禁止型の再エクスポート）が `custom.rs` に
+/// 存在しないことも構造的に固定し、別名混入の経路自体を塞ぐ。
 #[test]
 fn custom_function_trait_signatures_are_host_tensor_only() {
     let custom_rs = autodiff_crate_root().join("src/custom.rs");
     let content = read_to_string_or_panic(&custom_rs);
+
+    let header = extract_trait_header(&content, "CustomFunction");
+    assert!(
+        !header.is_empty(),
+        "src/custom.rs から `pub trait CustomFunction` のヘッダーを抽出できなかった\
+         （テスト自体が検査対象を見失っている。ファイル構成が変わっていないか確認）"
+    );
+    for required_bound in ["Send", "Sync"] {
+        assert!(
+            contains_identifier(&header, required_bound),
+            "CustomFunction trait のヘッダーに必須の supertrait 境界 {required_bound} が\
+             見つからない（§12.4「'static 境界により &Tape・Var<'t> を捕捉できない」契約違反）"
+        );
+    }
+    // `'static` はアポストロフィを含むライフタイムトークンのため
+    // `contains_identifier`（英数字／`_` の識別子境界判定）はそのまま
+    // 適用できない。ヘッダーのみへ限定済みのため単純な部分文字列一致で
+    // 十分（メソッド本体を含まないので誤検出の余地がない）。
+    assert!(
+        header.contains("'static"),
+        "CustomFunction trait のヘッダーに必須の supertrait 境界 'static が\
+         見つからない（§12.4「'static 境界により &Tape・Var<'t> を捕捉できない」契約違反）"
+    );
+
     let trait_body = extract_trait_body(&content, "CustomFunction");
     assert!(
         !trait_body.is_empty(),
@@ -272,24 +360,84 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
-    // ヘッダーの supertrait 境界（`Send + Sync + 'static`）が欠落していない
-    // ことを固定する。`contains_identifier` は `'static` のようにアポスト
-    // ロフィを含む識別子には適さないため、ヘッダー行に対する単純な部分
-    // 文字列一致で判定する（このヘッダーは 1 行に収まる前提。存在しない
-    // 場合は下の `for` ループの前に fail させ、原因を切り分けやすくする）。
-    for required_bound in ["Send", "Sync", "'static"] {
-        assert!(
-            signatures_only.contains(required_bound),
-            "CustomFunction trait のヘッダーに必須の supertrait 境界 {required_bound} が\
-             見つからない（§12.4「'static 境界により &Tape・Var<'t> を捕捉できない」契約違反）"
-        );
-    }
-    for forbidden in ["BackendOps", "Tape", "Var", "Device", "NodeId"] {
+
+    // denylist 判定（既存。defense in depth として allowlist 判定と併用）。
+    const FORBIDDEN_IDENTIFIERS: &[&str] = &["BackendOps", "Tape", "Var", "Device", "NodeId"];
+    for forbidden in FORBIDDEN_IDENTIFIERS {
         assert!(
             !contains_identifier(&signatures_only, forbidden),
             "CustomFunction trait のシグネチャに {forbidden} が含まれている\
              （§12.4 の「host Tensor<f32> のみを受け渡す」契約違反の疑い）"
         );
+    }
+
+    // allowlist 判定: 現行シグネチャの識別子トークン集合そのもの。
+    // シグネチャ変更時は本配列の更新も 1 行差分としてレビュー対象になる。
+    const ALLOWED_SIGNATURE_TOKENS: &[&str] = &[
+        "'static",
+        "AutodiffError",
+        "CustomFunction",
+        "Option",
+        "Result",
+        "Send",
+        "Sync",
+        "Tensor",
+        "Vec",
+        "backward",
+        "bool",
+        "f32",
+        "fn",
+        "forward",
+        "input_shapes",
+        "inputs",
+        "name",
+        "out_value",
+        "output_shape",
+        "pub",
+        "requires_grad",
+        "self",
+        "str",
+        "trait",
+        "upstream",
+        "usize",
+    ];
+    for token in extract_identifier_tokens(&signatures_only) {
+        assert!(
+            ALLOWED_SIGNATURE_TOKENS.contains(&token.as_str()),
+            "CustomFunction trait のシグネチャに allowlist 外の識別子 `{token}` が含まれている\
+             （型エイリアス経由の禁止型混入の疑い。意図的なシグネチャ変更であれば\
+             ALLOWED_SIGNATURE_TOKENS の更新漏れなのでレビューのうえ追加すること）"
+        );
+    }
+
+    // 別名混入の経路自体を構造的に塞ぐ（allowlist 判定は現行シグネチャに
+    // 対する静的な検査であり、将来 `use ... as` で禁止型を別名 import
+    // されると allowlist 側の更新と一緒に通ってしまう。よってファイル
+    // 全体を対象に、エイリアス import 自体を禁止する）。
+    let no_comments: String = content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for line in no_comments.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("use ") {
+            assert!(
+                !trimmed.contains(" as "),
+                "src/custom.rs の use 文にエイリアス（`use ... as ...`）が含まれている: \
+                 {trimmed}（禁止型を別名で混入させる経路になりうるため、本ファイルでは\
+                 エイリアス import を使わない設計とする）"
+            );
+        }
+        if trimmed.starts_with("type ") {
+            for forbidden in FORBIDDEN_IDENTIFIERS {
+                assert!(
+                    !contains_identifier(trimmed, forbidden),
+                    "src/custom.rs の type エイリアス宣言が禁止型 {forbidden} を参照している: \
+                     {trimmed}"
+                );
+            }
+        }
     }
 }
 
