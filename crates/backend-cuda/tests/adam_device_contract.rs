@@ -113,12 +113,21 @@ fn cpu_buffer_mixed_in_rejected_as_device_mismatch() {
 /// 環境では `CudaUnavailable`（`Unsupported` になったら override 結線の
 /// 回帰を意味する）を、driver 搭載環境（実機）では `Ok` を返す
 /// （env-adaptive。`typed_ops_f64_contract.rs` と同じ分岐パターン）。
+///
+/// `CudaBackendOps::memory_ops()` は driver 不在環境では `device_handle()`
+/// が失敗するため `None` を返す fail-safe 契約（`ops.rs::memory_ops` doc
+/// 参照）であり、`adam_step_device` 自体が返す `CudaUnavailable` と同じ
+/// 「driver 不在」を意味する。この PR が追加した当初の実装は
+/// `.expect()` で `memory_ops()` の `None` を握り潰していなかったため、
+/// CUDA driver 非搭載の CI（GitHub ホステッド `ubuntu-latest`）で panic
+/// していた（イシュー #2069 PR #2210 CI 実測）。よって `memory_ops()`
+/// の欠如も env-adaptive 分岐の一部として早期 return する。
 #[test]
 fn valid_shape_coupled_and_decoupled_succeed_or_return_cuda_unavailable_env_adaptive() {
     let ops = CudaBackendOps::new(0);
-    let mem = ops
-        .memory_ops()
-        .expect("CudaBackendOps must implement MemoryOps");
+    let Some(mem) = ops.memory_ops() else {
+        return;
+    };
 
     let init = Tensor::new(vec![1.0f32, -2.0, 0.5, 3.25], &[4]).unwrap();
     let grad = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4], &[4]).unwrap();
@@ -147,15 +156,18 @@ fn valid_shape_coupled_and_decoupled_succeed_or_return_cuda_unavailable_env_adap
 /// `adam_step_device_tracked`（既定委譲）経由も同じ env-adaptive 契約
 /// （CUDA は `DispatchFailureCell` を無視して既定実装へ委譲するのみで
 /// 独自 override を持たないため、`adam_step_device` と同じ結果になる
-/// はず）。
+/// はず）。`memory_ops()` の `None`（driver 不在）を早期 return で扱う
+/// 理由は上記
+/// `valid_shape_coupled_and_decoupled_succeed_or_return_cuda_unavailable_env_adaptive`
+/// のコメントと同じ。
 #[test]
 fn tracked_variant_matches_default_delegation_env_adaptive() {
     use fandhe_ai_tensor_core::DispatchFailureCell;
 
     let ops = CudaBackendOps::new(0);
-    let mem = ops
-        .memory_ops()
-        .expect("CudaBackendOps must implement MemoryOps");
+    let Some(mem) = ops.memory_ops() else {
+        return;
+    };
 
     let init = Tensor::new(vec![1.0f32, -2.0, 0.5, 3.25], &[4]).unwrap();
     let grad = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4], &[4]).unwrap();
