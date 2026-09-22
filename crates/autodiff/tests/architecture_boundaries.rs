@@ -163,13 +163,19 @@ fn visit_rs_files(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     }
 }
 
-/// `crates/autodiff/src/custom.rs` の `pub trait CustomFunction { ... }`
-/// 本体のみを部分文字列として抜き出す（イシュー #2064 §12.5 (b) 第 3 項
-/// 「新規 trait が `BackendOps` 等を引数に取らないことの機械検査」の
-/// 前段）。トレイト定義の開始 `{` から対応する `}` までを中括弧の深さで
-/// 追跡する（`strip_cfg_test_items` と同じ単純な深さ追跡方式。トレイト
-/// 本体は文字列リテラル中に `{`/`}` を含まないため対応不要）。トレイト
-/// 定義が見つからない場合は空文字列を返す（呼び出し側のアサーションで
+/// `crates/autodiff/src/custom.rs` の
+/// `pub trait CustomFunction: <supertrait 境界> { ... }` を、トレイト
+/// 宣言（`pub trait` から続く supertrait 境界のヘッダー部分を含む）から
+/// 閉じ括弧までまるごと部分文字列として抜き出す（イシュー #2064 §12.5
+/// (b) 第 3 項「新規 trait が `BackendOps` 等を引数に取らないことの機械
+/// 検査」の前段）。**ヘッダー（`pub trait Name: Send + Sync + 'static`
+/// の supertrait 境界部分）を検査対象から取りこぼさない**（codex-review
+/// 指摘・PR #2212: 開始 `{` 以降のみを返す旧実装では `Send + Sync +
+/// 'static` 境界の削除も `BackendOps` 等の混入もこのテストで検出できな
+/// かった）。トレイト本体の開始 `{` から対応する `}` までは中括弧の深さ
+/// で追跡する（`strip_cfg_test_items` と同じ単純な深さ追跡方式。トレイ
+/// ト本体は文字列リテラル中に `{`/`}` を含まないため対応不要）。トレイ
+/// ト定義が見つからない場合は空文字列を返す（呼び出し側のアサーションで
 /// 検出不能を明示的に fail させるため、黙って全文を返さない）。
 fn extract_trait_body(content: &str, trait_name: &str) -> String {
     let needle = format!("pub trait {trait_name}");
@@ -197,7 +203,10 @@ fn extract_trait_body(content: &str, trait_name: &str) -> String {
         }
     }
     match end {
-        Some(end) => content[body_start..end].to_string(),
+        // `start`（`pub trait Name` の先頭）から返すことで、開始 `{` の
+        // 手前にある supertrait 境界（`: Send + Sync + 'static` 等の
+        // ヘッダー）を検査対象に含める。
+        Some(end) => content[start..end].to_string(),
         None => String::new(),
     }
 }
@@ -239,6 +248,15 @@ fn contains_identifier(haystack: &str, needle: &str) -> bool {
 /// trait 本体自身のドキュメンテーションコメント（`///`。§12.4「契約」の
 /// 説明文が `Tape`・`Var` 等の語を含む）はシグネチャではないため、
 /// `//` 行を除去してからシグネチャのみを検査する。
+///
+/// **ヘッダー（supertrait 境界）も検査対象に含める**（codex-review 指摘・
+/// PR #2212）: `extract_trait_body` が返す文字列には `pub trait
+/// CustomFunction: Send + Sync + 'static` のヘッダー行そのものも含まれる
+/// ため、(1) 必須境界 `Send`／`Sync`／`'static` がすべて揃っていること
+/// （§12.4「契約」の `'static` 境界により `&Tape`・`Var<'t>` を捕捉でき
+/// ないという設計的裏付けそのもの）と、(2) ヘッダーに禁止識別子
+/// （`BackendOps` 等）が混入していないことの両方を、本体シグネチャと
+/// 同じループで検査する。
 #[test]
 fn custom_function_trait_signatures_are_host_tensor_only() {
     let custom_rs = autodiff_crate_root().join("src/custom.rs");
@@ -254,6 +272,18 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
+    // ヘッダーの supertrait 境界（`Send + Sync + 'static`）が欠落していない
+    // ことを固定する。`contains_identifier` は `'static` のようにアポスト
+    // ロフィを含む識別子には適さないため、ヘッダー行に対する単純な部分
+    // 文字列一致で判定する（このヘッダーは 1 行に収まる前提。存在しない
+    // 場合は下の `for` ループの前に fail させ、原因を切り分けやすくする）。
+    for required_bound in ["Send", "Sync", "'static"] {
+        assert!(
+            signatures_only.contains(required_bound),
+            "CustomFunction trait のヘッダーに必須の supertrait 境界 {required_bound} が\
+             見つからない（§12.4「'static 境界により &Tape・Var<'t> を捕捉できない」契約違反）"
+        );
+    }
     for forbidden in ["BackendOps", "Tape", "Var", "Device", "NodeId"] {
         assert!(
             !contains_identifier(&signatures_only, forbidden),
