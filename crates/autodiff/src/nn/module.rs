@@ -592,6 +592,109 @@ pub trait Module {
         }
         Ok(())
     }
+
+    /// この層が直接内包する子 `Module`（PyTorch `Module.children()` 相当。
+    /// イシュー #2134）の「名前, 参照」列を登録順で返す。
+    ///
+    /// # 命名契約
+    ///
+    /// 名前は [`Module::named_parameters`] が使う接頭辞（`prefixed`
+    /// ヘルパーの第 1 引数）と**完全一致**させる（[`Module::
+    /// named_modules`]・[`nn::summary`](crate::nn::container::summary) が
+    /// 本メソッドから辿るパスと `named_parameters` の平坦名の対応を
+    /// 保つため）。`ModuleList`／`Sequential`（`container.rs`）は
+    /// `"{index}"`、`ModuleDict`（同ファイル）は挿入キー、
+    /// `MultiheadAttention` は `q_proj`／`k_proj`／`v_proj`／
+    /// `out_proj`、`TransformerEncoderLayer` は `self_attn`／`linear1`／
+    /// `linear2`／`norm1`／`norm2` をそれぞれ返す。
+    ///
+    /// `Rnn`／`Lstm`／`Gru` は `RnnCell`／`LstmCell`／`GruCell` が
+    /// `Module` を実装しないため本メソッドを既定（空）のままとする
+    /// （`named_parameters` が使う `"cell."` 接頭辞はサブモジュール
+    /// パスではない。イシュー #2134 のスコープ判断）。
+    ///
+    /// # 既定実装
+    ///
+    /// 葉モジュール（子を持たない層）向けに空 `Vec` を返す。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        Vec::new()
+    }
+
+    /// この層の子孫を深さ優先（子自身 → その子孫の順）で再帰列挙する
+    /// （PyTorch `Module.named_modules()` 相当。イシュー #2134）。
+    ///
+    /// # PyTorch からの逸脱（意図的）
+    ///
+    /// PyTorch の `named_modules()` はルート自身を空文字列 `""` の
+    /// エントリとして先頭に含めるが、**本メソッドはルート自身を
+    /// 含めない**。理由: ルートを含めるには本メソッド内で `self` を
+    /// `&dyn Module` へ強制する必要があり、それには `Self: Sized`
+    /// 境界が要る。`Self: Sized` を付けると本メソッドは vtable から
+    /// 除外され、[`Box<dyn Module>`] 経由の子孫再帰
+    /// （[`Module::children`] が返す `&dyn Module` に対する再帰呼び
+    /// 出し）ができなくなり trait の object safety が壊れる
+    /// （[`crate::nn::container::ModuleDict`]・`Box<dyn Module>` を
+    /// 保持する既存コンテナ全般が本メソッドを呼べなくなる）。
+    /// ルートを含めたい場合は呼び出し側で `(String::new(), self)` を
+    /// 別途 push すること。
+    ///
+    /// パスは `"{parent}.{child}"` で連結する（[`Module::children`]
+    /// の命名契約に従う限り、[`Module::named_parameters`] の平坦名と
+    /// `"{path}.{parameter_name}"` の関係が保たれる）。
+    ///
+    /// # 既定実装
+    ///
+    /// [`Module::children`] を再帰するのみ（オーバーライド不要）。
+    fn named_modules(&self) -> Vec<(String, &dyn Module)> {
+        let mut out = Vec::new();
+        for (name, child) in self.children() {
+            let descendants = child.named_modules();
+            out.push((name.clone(), child));
+            for (descendant_name, descendant) in descendants {
+                out.push((format!("{name}.{descendant_name}"), descendant));
+            }
+        }
+        out
+    }
+
+    /// この層（および子孫を持つ場合はその全体）が公開する学習可能
+    /// パラメータの総要素数（PyTorch `sum(p.numel() for p in
+    /// model.parameters())` 相当。イシュー #2134）。
+    ///
+    /// [`Module::named_parameters`] が公開するもののみを数える
+    /// （`BatchNorm` の running stats 等、`named_parameters` に現れない
+    /// buffer は含まない。PyTorch `parameters()` と同じ扱い）。
+    /// オーバーフロー入力（想定外の巨大モデル）に対しても panic せず
+    /// `usize::MAX` に飽和させる（`.claude/rules/security.md` A03
+    /// fail-closed 方針に合わせ、DoS 目的の panic を避ける）。
+    ///
+    /// # 既定実装
+    ///
+    /// [`Module::named_parameters`] の各テンソルの `numel()` を
+    /// `saturating_add` で合計する（オーバーライド不要）。
+    fn parameter_count(&self) -> usize {
+        self.named_parameters()
+            .into_iter()
+            .fold(0usize, |acc, (_, tensor)| {
+                acc.saturating_add(tensor.numel())
+            })
+    }
+
+    /// この層の実装型名（[`nn::summary`](crate::nn::container::summary)
+    /// が表示用に使う。イシュー #2134）。
+    ///
+    /// `std::any::type_name::<Self>()` をそのまま返す。標準ライブラリは
+    /// この出力形式の安定性を保証しない（クレートパス付き・ジェネリク
+    /// スパラメータ付きの完全修飾名になりうる）ため、表示用に短縮する
+    /// 加工は呼び出し側（`nn::summary`）の責務とする。
+    ///
+    /// # 既定実装
+    ///
+    /// オーバーライド不要（`?Sized` 対応の `type_name` を使うため
+    /// `dyn Module` 経由でも呼び出し元の具象型へ正しく解決される）。
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 }
 
 /// `Linear::bind(tape)` で当該ステップの葉ノードを登録してから

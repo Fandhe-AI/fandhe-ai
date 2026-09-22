@@ -28,6 +28,24 @@
 //! 再エクスポートしない（`Module` trait 自体が非公開のため使途がなく、
 //! `crates/facade/tests/api_surface.rs` の走査対象を増やさない）。
 //!
+//! イシュー #2134（親 #2131）で追加した [`ModuleDict`]（PyTorch
+//! `nn.ModuleDict` 相当）・[`summary`] 自由関数（PyTorch
+//! `print(model)` 相当の簡易表示）も同じ理由で非公開のままとする。
+//! イシュー本文が挙げる facade 公開面の拡張（`Module::named_modules`／
+//! `Module::parameter_count`・`ModuleDict`・`summary` の再エクスポート）
+//! は、(a) #2134・親 #2131 とも承認コメントが確認できない、(b) facade
+//! が `Module` trait 自体を公開していないため `Box<dyn Module>` を
+//! 受ける `ModuleDict`・`&dyn Module` を受ける `summary` は #2133
+//! （`Module` trait の facade 公開）完了まで意味を成さない、(c) 既存
+//! ガード `nn_mod_declares_only_rnn_submodule`（`crates/facade/tests/
+//! api_surface.rs`）が facade `nn/mod.rs` の公開宣言を `pub mod rnn;`
+//! 1 件へ固定している、という 3 点により本イシューでは実施しない
+//! （`docs/compat-feature-gap.md` 追補・`crates/facade/tests/
+//! api_surface.rs` の否定ガードで固定する）。承認取得後の実施形は
+//! #2133 完了後の `crates/facade/src/nn/mod.rs` 再エクスポート、または
+//! `fandhe_ai_facade::compat::Sequential::parameter_count()`／
+//! `summary()` の薄い委譲のいずれかを想定する（後続 issue で判断）。
+//!
 //! # ネストの限界（既知の制限。解消は行わない）
 //!
 //! `fandhe_ai_facade::compat::sequential::Sequential` の学習契約
@@ -209,6 +227,17 @@ impl Module for ModuleList {
             ))),
         }
     }
+
+    /// [`Module::children`] の実装（イシュー #2134）。名前は
+    /// [`Module::named_parameters`]／[`Module::set_parameter`] が使う
+    /// `"{index}."` 接頭辞契約と一致させる。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        self.modules
+            .iter()
+            .enumerate()
+            .map(|(index, module)| (index.to_string(), module.as_ref()))
+            .collect()
+    }
 }
 
 /// PyTorch `nn.Sequential` 相当の汎用コンテナ: 子 `Module` を
@@ -362,6 +391,313 @@ impl Module for Sequential {
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         self.inner.set_parameter(name, value)
     }
+
+    /// [`Module::children`] の実装（イシュー #2134）。`self.inner`
+    /// （`ModuleList`）へそのまま委譲する。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        self.inner.children()
+    }
+}
+
+/// PyTorch `nn.ModuleDict` 相当: 名前（キー）をインデックスにした子
+/// `Module` の保持器（イシュー #2134・親 #2131）。
+///
+/// # 内部表現に `Vec` を使う理由（`HashMap` ではない）
+///
+/// [`Module::named_parameters`]／[`Module::state_dict`] の列挙順は
+/// 「登録順」という既存契約（[`ModuleList`] と同じ）に依存する呼び
+/// 出し元（`trainable_parameters` の位置対応・state_dict のテスト）が
+/// あるため、`HashMap`（走査順不定）ではなく**挿入順を保持する
+/// `Vec<(String, Box<dyn Module>)>`** をキー付き保持器の実装に使う。
+/// 検索は O(n) 線形走査になるが、層数は高々数十のため実用上十分
+/// （PyTorch `nn.ModuleDict` も内部的に `OrderedDict` で同じ特性を持つ）。
+///
+/// `forward`／`forward_host` は [`ModuleList`] と同じ理由・同じ
+/// variant（`AutodiffError::InvalidArgument`）で拒否する（`ModuleDict`
+/// 自体は演算列を持たない保持器のため）。
+pub struct ModuleDict {
+    /// 挿入順を保持するキー付き保持器（直上「内部表現」節参照）。
+    modules: Vec<(String, Box<dyn Module>)>,
+    /// train／eval モード（[`Module`] trait doc のコンテナ契約。既定
+    /// `true`）。
+    training: bool,
+}
+
+impl Default for ModuleDict {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `ModuleDict` のキー検証（イシュー #2134。`.claude/rules/
+/// security.md` A03 fail-closed 方針）。空文字列と `'.'` を含むキーを
+/// 拒否する: 空文字列は [`Module::named_modules`] のパス連結
+/// （`"{parent}.{child}"`）で意味を持たない空セグメントを生み、`'.'`
+/// を含むキーは [`Module::set_parameter`]（`split_once('.')` で
+/// 先頭セグメントをキーとして取り出す契約）・`named_modules` の
+/// パス解釈を壊す。PyTorch `nn.ModuleDict` も両者を拒否する。
+fn validate_module_dict_key(key: &str) -> Result<(), AutodiffError> {
+    if key.is_empty() {
+        return Err(AutodiffError::InvalidArgument(
+            "ModuleDict: key must not be empty".to_string(),
+        ));
+    }
+    if key.contains('.') {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "ModuleDict: key `{key}` must not contain `.` (reserved for named_modules/\
+             set_parameter path separation)"
+        )));
+    }
+    Ok(())
+}
+
+impl ModuleDict {
+    /// 空の `ModuleDict` を作る。
+    pub fn new() -> Self {
+        ModuleDict {
+            modules: Vec::new(),
+            training: true,
+        }
+    }
+
+    /// `(key, module)` の列から `ModuleDict` を構築する（挿入順を
+    /// 保持。列挙時の順に `insert` するのと同義）。いずれかのキーが
+    /// 不正（空文字列・`'.'` 含み）な場合は `Err`（fail-closed。
+    /// `validate_module_dict_key` 参照）。
+    pub fn from_pairs(pairs: Vec<(String, Box<dyn Module>)>) -> Result<Self, AutodiffError> {
+        let mut dict = ModuleDict::new();
+        for (key, module) in pairs {
+            dict.insert(key, module)?;
+        }
+        Ok(dict)
+    }
+
+    /// `key` の子 `Module` を挿入する。既存の同名キーがあれば新しい
+    /// 値で置換し、置換前の値を返す（挿入順の位置は保たれる。
+    /// PyTorch `nn.ModuleDict.__setitem__` の上書き契約と同じ）。
+    /// `key` が不正（空文字列・`'.'` 含み）な場合は `Err`。
+    pub fn insert(
+        &mut self,
+        key: impl Into<String>,
+        module: Box<dyn Module>,
+    ) -> Result<Option<Box<dyn Module>>, AutodiffError> {
+        let key = key.into();
+        validate_module_dict_key(&key)?;
+        if let Some(slot) = self.modules.iter_mut().find(|(k, _)| *k == key) {
+            Ok(Some(std::mem::replace(&mut slot.1, module)))
+        } else {
+            self.modules.push((key, module));
+            Ok(None)
+        }
+    }
+
+    /// `key` を持つ子 `Module` を削除して返す（無ければ `None`）。
+    pub fn remove(&mut self, key: &str) -> Option<Box<dyn Module>> {
+        let index = self.modules.iter().position(|(k, _)| k == key)?;
+        Some(self.modules.remove(index).1)
+    }
+
+    /// `key` の子 `Module` への参照（無ければ `None`。panic しない）。
+    pub fn get(&self, key: &str) -> Option<&dyn Module> {
+        self.modules
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, m)| m.as_ref())
+    }
+
+    /// [`Self::get`] の可変版。
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut (dyn Module + 'static)> {
+        self.modules
+            .iter_mut()
+            .find(|(k, _)| k == key)
+            .map(|(_, m)| m.as_mut())
+    }
+
+    /// `key` を保持しているか。
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.modules.iter().any(|(k, _)| k == key)
+    }
+
+    /// キー列への走査（挿入順）。
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.modules.iter().map(|(k, _)| k.as_str())
+    }
+
+    /// `(key, &dyn Module)` 列への走査（挿入順）。
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &dyn Module)> {
+        self.modules.iter().map(|(k, m)| (k.as_str(), m.as_ref()))
+    }
+
+    /// [`Self::iter`] の可変版。
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut (dyn Module + 'static))> {
+        self.modules
+            .iter_mut()
+            .map(|(k, m)| (k.as_str(), m.as_mut()))
+    }
+
+    /// 保持している子 `Module` の数。
+    pub fn len(&self) -> usize {
+        self.modules.len()
+    }
+
+    /// 子 `Module` を 1 つも保持していないか。
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty()
+    }
+}
+
+impl Module for ModuleDict {
+    /// `nn.ModuleDict` は forward を持たない（保持器のみ。
+    /// [`ModuleList::forward`] と同じ理由・同じ variant）。
+    fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Err(AutodiffError::InvalidArgument(
+            "ModuleDict has no forward (nn.ModuleDict is a holder, not a callable module)"
+                .to_string(),
+        ))
+    }
+
+    /// [`Self::forward`] と同じ理由・同じ variant で拒否する
+    /// （[`ModuleList::forward_host`] と同型。`Unsupported` の既定に
+    /// 乗せて呼び出し元のフォールバック判定を誤らせないための明示
+    /// オーバーライド）。
+    fn forward_host(
+        &self,
+        _ops: &dyn BackendOps,
+        _input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        Err(AutodiffError::InvalidArgument(
+            "ModuleDict has no forward_host (nn.ModuleDict is a holder, not a callable module)"
+                .to_string(),
+        ))
+    }
+
+    fn set_training(&mut self, training: bool) {
+        self.training = training;
+        for (_, module) in &mut self.modules {
+            module.set_training(training);
+        }
+    }
+
+    fn training(&self) -> bool {
+        self.training
+    }
+
+    /// [`Module::named_parameters`] の実装。`"{key}.{name}"` 接頭辞を
+    /// 挿入順で連結する（[`ModuleList::named_parameters`] と同型）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = Vec::new();
+        for (key, module) in &self.modules {
+            for (name, tensor) in module.named_parameters() {
+                out.push((format!("{key}.{name}"), tensor));
+            }
+        }
+        out
+    }
+
+    /// [`Module::set_parameter`] の実装。`named_parameters` の
+    /// `"{key}.{name}"` 接頭辞契約の逆演算: 先頭の `'.'` までを `key`
+    /// として切り出し `self.get_mut(key)` へ委譲する。区切りなし・
+    /// 未知キーはいずれも `InvalidArgument`（fail-closed。
+    /// `.claude/rules/security.md` A03。[`ModuleList::set_parameter`]
+    /// と同型）。
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        let (key, rest) = name.split_once('.').ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "ModuleDict::set_parameter: no parameter named `{name}` (expected `{{key}}.{{name}}`)"
+            ))
+        })?;
+        match self.get_mut(key) {
+            Some(module) => module.set_parameter(rest, value),
+            None => Err(AutodiffError::InvalidArgument(format!(
+                "ModuleDict::set_parameter: no parameter named `{name}` (no child module with key `{key}`)"
+            ))),
+        }
+    }
+
+    /// [`Module::children`] の実装。名前はキー、順序は挿入順
+    /// （[`Self::iter`] と同じ）。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        self.modules
+            .iter()
+            .map(|(key, module)| (key.clone(), module.as_ref()))
+            .collect()
+    }
+}
+
+/// `nn::summary` が型名の短縮に使う内部ヘルパー（イシュー #2134）。
+///
+/// [`Module::type_name`] が返す `std::any::type_name` の出力は
+/// クレートパス付き（例: `fandhe_ai_autodiff::nn::linear::Linear`）・
+/// ジェネリクス付き（`<` 以降）になりうる。表示用に「最後の `::`
+/// 区切り以降・`<` より前」だけを取り出す（`std::any::type_name` の
+/// 出力形式は標準ライブラリが安定性を保証しないため、あくまで
+/// 表示上のベストエフォートの短縮であり、テストで固定するのは既知の
+/// 具象型〈`Linear`・`Sequential`・`ModuleDict` 等〉に対する経験的な
+/// 出力のみとする）。
+fn short_type_name(full: &str) -> &str {
+    let without_generics = full.split('<').next().unwrap_or(full);
+    without_generics
+        .rsplit("::")
+        .next()
+        .unwrap_or(without_generics)
+}
+
+/// `module`（および子孫を持つ場合はその全体）の構造を人間可読な文字列
+/// へ整形する（PyTorch `print(model)` 相当の簡易表示。イシュー
+/// #2134）。
+///
+/// # 出力形式
+///
+/// 子を持つノードは `"{Type}(\n"` の後に子の行（深さごとに 2 スペース
+/// ずつインデント）を並べ `"{indent}) [params: N]\n"` で閉じる。葉
+/// （子を持たないノード）は `"{indent}({name}): {Type} [params: N]\n"`
+/// （ルートが葉の場合は名前を持たないため `"{Type} [params: N]\n"`）。
+/// 末尾に `"Submodules: {[Module::named_modules] の要素数}\n"`・
+/// `"Total parameters: {[Module::parameter_count]}\n"` を追加する。
+///
+/// 入出力 shape 推定・`extra_repr` 相当（`in_features` 等の属性表示）
+/// は対象外（イシュー本文のスコープ外指定）。型名は
+/// [`Module::type_name`] を [`short_type_name`] で短縮したものを使う。
+pub fn summary(module: &dyn Module) -> String {
+    let mut out = String::new();
+    write_module(&mut out, None, module, 0);
+    out.push_str(&format!("Submodules: {}\n", module.named_modules().len()));
+    out.push_str(&format!("Total parameters: {}\n", module.parameter_count()));
+    out
+}
+
+/// [`summary`] の再帰本体。`name` はこのノードの子としての名前
+/// （ルート呼び出しでは `None`）、`depth` はインデント段数。
+fn write_module(out: &mut String, name: Option<&str>, module: &dyn Module, depth: usize) {
+    let indent = "  ".repeat(depth);
+    let type_name = short_type_name(module.type_name());
+    let children = module.children();
+
+    if children.is_empty() {
+        match name {
+            Some(name) => out.push_str(&format!(
+                "{indent}({name}): {type_name} [params: {}]\n",
+                module.parameter_count()
+            )),
+            None => out.push_str(&format!(
+                "{type_name} [params: {}]\n",
+                module.parameter_count()
+            )),
+        }
+        return;
+    }
+
+    match name {
+        Some(name) => out.push_str(&format!("{indent}({name}): {type_name}(\n")),
+        None => out.push_str(&format!("{type_name}(\n")),
+    }
+    for (child_name, child) in &children {
+        write_module(out, Some(child_name), *child, depth + 1);
+    }
+    out.push_str(&format!(
+        "{indent}) [params: {}]\n",
+        module.parameter_count()
+    ));
 }
 
 #[cfg(test)]
@@ -549,5 +885,161 @@ mod tests {
             list.set_parameter("99.weight", Tensor::new(vec![0.0f32], &[1]).unwrap()),
             Err(AutodiffError::InvalidArgument(_))
         ));
+    }
+
+    // `ModuleDict`（イシュー #2134）の単体テスト。
+
+    #[test]
+    fn module_dict_default_is_empty() {
+        let dict = ModuleDict::default();
+        assert!(dict.is_empty());
+        assert_eq!(dict.len(), 0);
+    }
+
+    #[test]
+    fn module_dict_insert_get_remove_contains_keys_round_trip() {
+        let mut dict = ModuleDict::new();
+        assert!(dict.insert("relu", Box::new(Relu)).unwrap().is_none());
+        assert!(dict.insert("relu2", Box::new(Relu)).unwrap().is_none());
+
+        assert_eq!(dict.len(), 2);
+        assert!(dict.contains_key("relu"));
+        assert!(!dict.contains_key("missing"));
+        assert!(dict.get("relu").is_some());
+        assert!(dict.get_mut("relu2").is_some());
+        assert_eq!(dict.keys().collect::<Vec<_>>(), vec!["relu", "relu2"]);
+
+        let removed = dict.remove("relu");
+        assert!(removed.is_some());
+        assert_eq!(dict.len(), 1);
+        assert!(!dict.contains_key("relu"));
+    }
+
+    #[test]
+    fn module_dict_insert_same_key_replaces_and_returns_old_value_preserving_position() {
+        let mut dict = ModuleDict::new();
+        dict.insert("a", Box::new(Relu)).unwrap();
+        dict.insert("b", Box::new(Relu)).unwrap();
+        let replaced = dict.insert("a", Box::new(Relu)).unwrap();
+        assert!(replaced.is_some(), "同名キーの再 insert は旧値を返すはず");
+        assert_eq!(
+            dict.keys().collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "同名キーの置換で挿入順の位置がずれてはいけない"
+        );
+    }
+
+    #[test]
+    fn module_dict_rejects_empty_and_dotted_keys() {
+        let mut dict = ModuleDict::new();
+        assert!(matches!(
+            dict.insert("", Box::new(Relu)),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            dict.insert("a.b", Box::new(Relu)),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(
+            dict.is_empty(),
+            "拒否された insert で状態が変化してはいけない"
+        );
+    }
+
+    #[test]
+    fn module_dict_from_pairs_rejects_bad_key_without_panicking() {
+        let pairs: Vec<(String, Box<dyn Module>)> = vec![
+            ("ok".to_string(), Box::new(Relu)),
+            ("bad.key".to_string(), Box::new(Relu)),
+        ];
+        match ModuleDict::from_pairs(pairs) {
+            Err(AutodiffError::InvalidArgument(_)) => {}
+            other => panic!("不正キーは InvalidArgument を返すはず: {}", other.is_ok()),
+        }
+    }
+
+    #[test]
+    fn module_dict_named_parameters_uses_key_prefix() {
+        let mut dict = ModuleDict::new();
+        dict.insert("l1", Box::new(Linear::new(4, 8, true, 1).unwrap()))
+            .unwrap();
+        let names: Vec<String> = dict
+            .named_parameters()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, vec!["l1.weight", "l1.bias"]);
+    }
+
+    #[test]
+    fn module_dict_set_parameter_dispatches_by_key_and_rejects_bad_names() {
+        let mut dict = ModuleDict::new();
+        dict.insert("l1", Box::new(Linear::new(4, 8, true, 1).unwrap()))
+            .unwrap();
+
+        let new_weight = Tensor::new(vec![3.0f32; 32], &[4, 8]).unwrap();
+        dict.set_parameter("l1.weight", new_weight).unwrap();
+
+        // 区切りなし。
+        assert!(matches!(
+            dict.set_parameter("weight", Tensor::new(vec![0.0f32], &[1]).unwrap()),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        // 未知キー。
+        assert!(matches!(
+            dict.set_parameter("missing.weight", Tensor::new(vec![0.0f32], &[1]).unwrap()),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn module_dict_state_dict_round_trip() {
+        let mut dict = ModuleDict::new();
+        dict.insert("l1", Box::new(Linear::new(4, 8, true, 1).unwrap()))
+            .unwrap();
+        let before = dict.state_dict();
+        dict.load_state_dict(dict.state_dict()).unwrap();
+        let after = dict.state_dict();
+        for (key, tensor) in &before {
+            assert_eq!(
+                tensor.contiguous().as_slice().unwrap(),
+                after[key].contiguous().as_slice().unwrap(),
+                "key `{key}` が往復後に変化した"
+            );
+        }
+    }
+
+    #[test]
+    fn module_dict_forward_and_forward_host_are_invalid_argument() {
+        use crate::tape::Tape;
+        let dict = ModuleDict::new();
+        let tape = Tape::new();
+        let input_tensor = Tensor::new(vec![1.0f32], &[1]).unwrap();
+        let input = tape.var(&input_tensor);
+        assert!(matches!(
+            dict.forward(&tape, &input),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn module_dict_set_training_propagates_to_children() {
+        use crate::nn::dropout::Dropout;
+        let mut dict = ModuleDict::new();
+        dict.insert("drop", Box::new(Dropout::new(0.5).unwrap()))
+            .unwrap();
+        assert!(dict.training());
+        dict.set_training(false);
+        assert!(!dict.training());
+        assert!(!dict.get("drop").unwrap().training());
+    }
+
+    #[test]
+    fn module_dict_children_returns_key_and_module_in_insertion_order() {
+        let mut dict = ModuleDict::new();
+        dict.insert("a", Box::new(Relu)).unwrap();
+        dict.insert("b", Box::new(Relu)).unwrap();
+        let names: Vec<String> = dict.children().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, vec!["a", "b"]);
     }
 }
