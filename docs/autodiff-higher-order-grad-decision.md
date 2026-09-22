@@ -464,6 +464,25 @@ replayable`／`scalar_binary_replayable`・`replay_op`／`build_cgrads`
   を実バックエンド `ops` で再実行する手順として
   `docs/perf/logs/create-graph-remaining-ops-2062/README.md` へ申し
   送る。
+- **有限差分突合テストの件数（中断復旧・#2062 継続実装）**:
+  `crates/autodiff/tests/create_graph.rs` は 51 件（`Hardswish` の
+  interior／飽和境界の 2 件を追加）。`Hardswish` の 2 階マスク境界
+  （`mask_from_pred` の `<=`／`>=`）を `tensor-core::scalar_op::
+  hardswish_grad` の飽和域境界規約（`x <= -3.0`／`x >= 3.0` で定数
+  勾配・曲率 0）へ一致させる回帰テストを追加した（境界ちょうどは
+  1 階導関数自体が不連続な kink 点のため有限差分突合の対象にできず、
+  解析 Hessian が飽和域〈曲率 0〉を使うことを直接検査する形とした）。
+  `Maximum`／`Minimum`（勝ち／タイ／`NaN` の 3 分類）は `Var::
+  scalar_binary` が `pub(crate)` のため統合テスト（別クレート扱い）
+  から呼べず、`Op::Contiguous` と同じ理由で `crates/autodiff/src/
+  create_graph.rs` 内部の `#[cfg(test)] mod maximum_minimum_tests` へ
+  3 件追加した（勝ち／負け／タイの対角曲率突合 2 件・`NaN` 要素の
+  1 階勾配ゼロと子テープ再構成が `Tape::backward` 経路と bit 一致
+  することの突合 1 件）。`Var` に `maximum`／`minimum` の公開ラッパー
+  は存在しない（`ScalarBinaryOp::Maximum`／`Minimum` を直接公開する
+  メソッドが `var.rs` に未実装のまま）ため、facade はもちろん通常の
+  `Var` API からも到達不能——このギャップの解消は本イシューのスコープ
+  外として別イシューへ引き継ぐ。
 
 内部ホスト名・秘密情報は含めない。
 

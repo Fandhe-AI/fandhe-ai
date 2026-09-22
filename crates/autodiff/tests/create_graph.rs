@@ -1757,6 +1757,52 @@ fn hessian_silu_matches_finite_difference() {
     assert_hessian_close(&analytic, &numeric);
 }
 
+fn build_hardswish<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.hardswish()?.sum(None)
+}
+
+#[test]
+fn hessian_hardswish_interior_matches_finite_difference() {
+    // kink（±3・0 近傍）から離れたテスト点。
+    let x0 = [-2.0f32, 0.5, 2.0];
+    let numeric = finite_diff_hessian(build_hardswish, &x0, &[3], 1e-3);
+    let analytic = analytic_hessian(build_hardswish, &x0, &[3]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+#[test]
+fn hessian_hardswish_saturation_boundary_uses_constant_branch() {
+    // `create_graph.rs::build_cgrads` の `Hardswish` 分岐マスク境界
+    // （`mask_from_pred` の `<=`/`>=`）を `tensor-core::scalar_op::
+    // hardswish_grad` の飽和域境界規約（`x <= -3.0` で勾配 0・
+    // `x >= 3.0` で勾配 1、いずれも定数域で 2 階微分 0）へ一致させる
+    // 回帰テスト（中断作業からの復旧・イシュー #2062。旧 `</>` 判定
+    // だと境界ちょうどが中間式 `(2x+3)/6` の左極限側へ誤って分類され
+    // 曲率 1/3 が漏れ出ていた）。
+    //
+    // 境界ちょうど（`x == ±3.0`）は 1 階導関数自体が不連続な kink 点
+    // のため有限差分突合の対象にできない——本テストは解析 Hessian が
+    // 飽和域（曲率 0）を使っていることを直接検査する。中間域内部
+    // （index 2）は従来どおり closed form（傾き `1/3`）と突合する。
+    let x0 = [3.0f32, -3.0, 0.6];
+    let analytic = analytic_hessian(build_hardswish, &x0, &[3]);
+    assert!(
+        analytic[0][0].abs() < 1e-6,
+        "x=3.0（hi 飽和域境界）で曲率が非ゼロ: {}",
+        analytic[0][0]
+    );
+    assert!(
+        analytic[1][1].abs() < 1e-6,
+        "x=-3.0（lo 飽和域境界）で曲率が非ゼロ: {}",
+        analytic[1][1]
+    );
+    assert!(
+        common::req2_close(analytic[2][2], 1.0 / 3.0),
+        "中間域内部の曲率が (2x+3)/6 の傾き 1/3 と一致しない: {}",
+        analytic[2][2]
+    );
+}
+
 // --- ScalarUnary: 区分定数（kink を避けたテスト点） ---------------------
 
 fn build_abs_leaky_clamp<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {

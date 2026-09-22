@@ -1357,3 +1357,152 @@ mod contiguous_tests {
         assert_eq!(d2.get(&[0, 0]).unwrap(), 2.0);
     }
 }
+
+/// `ScalarBinaryOp::Maximum`／`Minimum`（イシュー #2062）の
+/// `create_graph` 対応を検証する単体テスト。`Var::scalar_binary` は
+/// `pub(crate)` のため `crates/autodiff/tests/create_graph.rs`（別
+/// クレート扱いの統合テスト）から直接呼べず、`contiguous_tests` と
+/// 同じ理由で本クレート内部の単体テストに置く。
+///
+/// `build_cgrads` の Maximum／Minimum 分岐（`pairwise_mask` による
+/// 勝ち／タイ判定。`NaN` はいずれのマスクにも一致せず勾配 0）を、
+/// 「a 勝ち」「b 勝ち」「タイ」の 3 要素を 1 テンソルへ詰めて検証する。
+/// `a = x^2`（曲率 2）・`b` は `x` に依存しない定数（曲率 0）とし、
+/// 要素ごとに `a`/`b` の大小関係を作為的に作る：
+/// - index 0: `a`（`x^2 = 9`）> `b`（`0.2`）→ a 勝ち。曲率は `a` の
+///   曲率 `2` がそのまま伝播する
+/// - index 1: `a`（`x^2 = 0.01`）< `b`（`30.0`）→ b 勝ち。`b` は `x`
+///   非依存のため出力は `x` に無関係——曲率は恒等的に 0
+/// - index 2: `a == b`（`x^2` の値をそのまま `b` の定数へコピーして
+///   タイを固定的に作る）→ タイ分岐（勾配 `0.5` 分割）。`a` 側にのみ
+///   曲率が伝播するため実効曲率は `0.5 * 2 = 1`
+#[cfg(test)]
+mod maximum_minimum_tests {
+    use super::*;
+
+    fn maximum_probe<'t>(tape: &'t Tape, x0: &[f32; 3]) -> (Tape, Var<'t>, Var<'t>) {
+        // a = x^2（曲率 2）。b は x 非依存の定数（曲率 0）で、index ごと
+        // に a 勝ち／b 勝ち／タイを作為的に配置する。
+        let x = tape.var(&Tensor::new(x0.to_vec(), &[3]).unwrap());
+        let a = x.mul(&x).unwrap();
+        let b_data = vec![0.2f32, 30.0, x0[2] * x0[2]];
+        let b = tape.var_no_grad(&Tensor::new(b_data, &[3]).unwrap());
+        let loss = a
+            .scalar_binary(&b, ScalarBinaryOp::Maximum)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let child = Tape::new_with_ops(crate::default_ops::naive_ops());
+        (child, x, loss)
+    }
+
+    #[test]
+    fn hessian_maximum_win_lose_tie_matches_expected_curvature() {
+        let x0 = [3.0f32, 0.1, -2.0];
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let (child, x, loss) = maximum_probe(&tape, &x0);
+
+        let cg = tape
+            .backward_create_graph(&loss, &child)
+            .expect("backward_create_graph に失敗（Op::ScalarBinary::Maximum は対象）");
+        let gx = cg.grad(&x).unwrap().unwrap();
+        let cx = cg.child_var(&x).unwrap().unwrap();
+
+        let mut diag = [0.0f32; 3];
+        for (i, d) in diag.iter_mut().enumerate() {
+            let gi = gx.narrow(0, i, 1).unwrap().sum(None).unwrap();
+            let row = child.backward(&gi).unwrap();
+            let d2 = row.get(&cx).unwrap().unwrap();
+            *d = d2.get(&[i]).unwrap();
+        }
+        assert_eq!(diag[0], 2.0, "index0（a 勝ち）は a=x^2 の曲率 2 のはず");
+        assert_eq!(
+            diag[1], 0.0,
+            "index1（b 勝ち。b は x 非依存）は曲率 0 のはず"
+        );
+        assert_eq!(diag[2], 1.0, "index2（タイ。0.5 分割）は 0.5*2=1 のはず");
+    }
+
+    #[test]
+    fn hessian_minimum_win_lose_tie_matches_expected_curvature() {
+        // Minimum は勝敗の向きが逆になるだけ（`a_favored = false`）。
+        // a 勝ち（Minimum なので a < b）: index0 は a=x^2=0.01 < b=30
+        // → a 勝ち。index1 は a=x^2=9 > b=0.2 → b 勝ち。index2 はタイ。
+        let x0 = [0.1f32, 3.0, -2.0];
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let x = tape.var(&Tensor::new(x0.to_vec(), &[3]).unwrap());
+        let a = x.mul(&x).unwrap();
+        let b_data = vec![30.0f32, 0.2, x0[2] * x0[2]];
+        let b = tape.var_no_grad(&Tensor::new(b_data, &[3]).unwrap());
+        let loss = a
+            .scalar_binary(&b, ScalarBinaryOp::Minimum)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let child = Tape::new_with_ops(crate::default_ops::naive_ops());
+
+        let cg = tape
+            .backward_create_graph(&loss, &child)
+            .expect("backward_create_graph に失敗（Op::ScalarBinary::Minimum は対象）");
+        let gx = cg.grad(&x).unwrap().unwrap();
+        let cx = cg.child_var(&x).unwrap().unwrap();
+
+        let mut diag = [0.0f32; 3];
+        for (i, d) in diag.iter_mut().enumerate() {
+            let gi = gx.narrow(0, i, 1).unwrap().sum(None).unwrap();
+            let row = child.backward(&gi).unwrap();
+            let d2 = row.get(&cx).unwrap().unwrap();
+            *d = d2.get(&[i]).unwrap();
+        }
+        assert_eq!(diag[0], 2.0, "index0（a 勝ち）は a=x^2 の曲率 2 のはず");
+        assert_eq!(
+            diag[1], 0.0,
+            "index1（b 勝ち。b は x 非依存）は曲率 0 のはず"
+        );
+        assert_eq!(diag[2], 1.0, "index2（タイ。0.5 分割）は 0.5*2=1 のはず");
+    }
+
+    #[test]
+    fn maximum_nan_element_grad_is_zero() {
+        // `NaN` を含む要素は `pairwise_mask` のいずれのマスク（勝ち／
+        // タイ）にも一致しない（`!(x.is_nan() || y.is_nan())` ガード）
+        // ため、`Maximum` 自体の両入力への勾配は 0 になる（`eval/
+        // scalar.rs` の 1 階契約 `binary_partials(Maximum, NaN, ..)`
+        // と同型の意味論）。`a` は `x` の恒等写像（`a = x`。曲率 0）と
+        // し、`x^2` 等の曲率を持つ合成にしない——`0 * NaN = NaN`
+        // という IEEE 754 の連鎖律で「a=x^2 のような合成先の勾配が
+        // NaN 汚染される」現象は本テストの検証対象（Maximum 自体の
+        // ゼロ勾配契約）とは別の話のため混同しない。
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let child = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let x = tape.var(&Tensor::new(vec![f32::NAN, 1.0, 2.0], &[3]).unwrap());
+        let b = tape.var_no_grad(&Tensor::new(vec![1.0f32, 2.0, 0.5], &[3]).unwrap());
+        let loss = x
+            .scalar_binary(&b, ScalarBinaryOp::Maximum)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+
+        let cg = tape
+            .backward_create_graph(&loss, &child)
+            .expect("backward_create_graph に失敗");
+        let gx = cg.grad(&x).unwrap().unwrap();
+        let g0 = gx.to_tensor().get(&[0]).expect("shape 範囲内のはず");
+        assert_eq!(g0, 0.0, "NaN 要素の 1 階勾配は 0 のはず");
+
+        // 子テープ上に記録した 1 階勾配（`gx`。`build_cgrads` が
+        // `Var` 演算列として再構成した値）が、既存 1 階経路
+        // （`Tape::backward`。`backward.rs::backward_impl` 無変更）の
+        // 結果である `cg.first_order()` と bit 完全一致することを
+        // 確認する（`contiguous_replay_and_vjp_are_identity` と同型の
+        // 突合方式）。NaN 要素（index0）を含む全要素で一致することが、
+        // `pairwise_mask` の NaN 除外ガードが 1 階側の `eval::scalar::
+        // binary_partials` 契約と矛盾なく再現されていることの根拠になる。
+        let expected = cg.first_order().get(&x).unwrap().unwrap();
+        assert_eq!(
+            gx.to_tensor().as_slice(),
+            expected.as_slice(),
+            "子テープ上の 1 階勾配が既存 Tape::backward 経路と一致しない"
+        );
+    }
+}
