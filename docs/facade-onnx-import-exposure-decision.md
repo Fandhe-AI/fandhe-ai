@@ -406,8 +406,13 @@ CLAUDE.md に「公開準備は完了済み・実 publish は次回リリース�
    `onnx-interop` は含まれず、「#1963 のユーザー承認を受けた 7 クレート
    目で、公開準備は完了済み・実 publish は次回リリースサイクル」との
    記載どおり、実際の `cargo publish` はまだ実行されていない）。
-   crates.io 上に存在しないクレートの API に対して SemVer 上の
-   「破壊的変更」は定義上発生しない（依拠する外部利用者が存在しない）。
+   `curl -H "User-Agent: ..." https://crates.io/api/v1/crates/fandhe-ai-
+   onnx-interop` は HTTP `404`（`crate fandhe-ai-onnx-interop does not
+   exist`）を返すことを 2026-09-22 実測で再確認した（`fandhe-ai-
+   onnx-interop`／`fandhe-ai-interop` 名双方が未登録という 2026-09-14
+   時点の実測〈2 節表〉から変わっていない）。crates.io 上に存在しない
+   クレートの API に対して SemVer 上の「破壊的変更」は定義上発生しない
+   （依拠する外部利用者が存在しない）。
 2. **`facade`（唯一のサポートされる公開 API 面。`docs/compat-api-
    scope.md` §0）の公開 API・payload は本変更で一切変わらない**。
    `OnnxError::SparseInitializerNotSupported { tensor_name, count }` は
