@@ -576,7 +576,7 @@ fn assert_grad_matches_finite_difference(
         }
         let out = bound.run(feeds).unwrap();
         let out_var = match &out[output_name] {
-            AutogradValue::Var(v) => v.clone(),
+            AutogradValue::Var(v) => *v,
             AutogradValue::Const(_) => panic!("Var を期待した"),
         };
         let loss = out_var.sum(None).unwrap();
@@ -590,12 +590,13 @@ fn assert_grad_matches_finite_difference(
     let mut vars = Vec::new();
     for (name, v) in input_names.iter().zip(inputs.iter()) {
         let var = tape.var(v);
-        vars.push(var.clone());
+        // `Var` は `Copy`（clippy::clone_on_copy）。
+        vars.push(var);
         feeds.insert((*name).to_string(), AutogradValue::Var(var));
     }
     let out = bound.run(feeds).unwrap();
     let out_var = match &out[output_name] {
-        AutogradValue::Var(v) => v.clone(),
+        AutogradValue::Var(v) => *v,
         AutogradValue::Const(_) => panic!("Var を期待した"),
     };
     let loss = out_var.sum(None).unwrap();
