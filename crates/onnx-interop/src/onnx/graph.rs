@@ -8,8 +8,20 @@
 //!
 //! `decode_tensor` は要素データの復号より先に dims・要素数・データ長の整合を
 //! 検査する（長さ・形状検証の先行。イシュー #77 の受け入れ要件・`security.md` A03）。
+//!
+//! `sparse_initializer`（onnx.proto3 tag 15）は非対応のため、`build_graph` が
+//! 非空を存在検出のみで fail-closed に拒否する（中身は解釈しない。
+//! `docs/tensor-core-sparse-complex-decision.md`・イシュー #2079）。**この
+//! 検査は非信頼バイト列に対する主対策ではない**（主対策は
+//! `proto::decode_model` が `ModelProto::decode` より前に行う bounded な
+//! 事前走査。`proto.rs` モジュール冒頭コメント「メモリ増幅対策」節）。
+//! ここでの検査は `ModelProto::decode` を直接呼ぶ経路（本クレート内
+//! テスト・将来の呼び出し元）に対する構造体側の多層防御であり、
+//! `SparseTensorProto.values` が `name` のみを宣言した軽量型
+//! （`proto::SparseTensorValueName`）である前提と合わせて、`raw_data` 等の
+//! 完全展開を避ける設計になっている。
 
-use super::proto::{GraphProto, ModelProto, NodeProto, TensorProto};
+use super::proto::{GraphProto, ModelProto, NodeProto, TensorProto, cap_sparse_tensor_diag_name};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -77,6 +89,12 @@ pub enum GraphError {
     /// `Graph.outputs` へ複写され、本モジュールが謳う no-silent-skip 契約
     /// （他の全名前衝突に適用している方針）と矛盾する。
     DuplicateGraphOutputName { tensor_name: String },
+    /// `GraphProto.sparse_initializer`（onnx.proto3 tag 15）が非空。sparse テンソルは
+    /// 非対応（`docs/tensor-core-sparse-complex-decision.md`）のため、無言スキップせず
+    /// fail-closed に拒否する（no-silent-skip 契約・A03／A08。イシュー #2079）。
+    /// `tensor_name` は先頭要素の `values.name`（非信頼入力のため空文字列もありうる）、
+    /// `count` は sparse initializer の総数。
+    SparseInitializerNotSupported { tensor_name: String, count: usize },
 }
 
 impl fmt::Display for GraphError {
@@ -149,6 +167,12 @@ impl fmt::Display for GraphError {
             }
             GraphError::DuplicateGraphOutputName { tensor_name } => {
                 write!(f, "グラフ出力名の重複（tensor={tensor_name}）")
+            }
+            GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+                write!(
+                    f,
+                    "sparse_initializer は非対応（tensor={tensor_name}・count={count}）: sparse テンソルは対象外のため fail-closed に拒否"
+                )
             }
         }
     }
@@ -408,6 +432,27 @@ pub(crate) fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
 /// 「グラフは既に妥当である」前提で実装できるようにする。
 pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
     let g: &GraphProto = model.graph.as_ref().ok_or(GraphError::NoGraph)?;
+
+    // sparse_initializer（tag=15）は非対応。dense initializer の decode より
+    // 前に検査し、中身を一切解釈せず存在だけで fail-closed に拒否する（長さ・
+    // 形状検証を先行させる原則と同じ。no-silent-skip 契約・A03／A08。#2079）。
+    // `tensor_name` は `proto::cap_sparse_tensor_diag_name`（`decode_model`
+    // 側の事前走査と共有する 256 バイト上限）で切り詰める。`values.name` は
+    // 既に prost によって UTF-8 検証済みだが、事前走査（層 1）が報告する
+    // `tensor_name` と本関数（層 2）が報告する `tensor_name` の payload を
+    // 一致させるため同じ上限・同じ切り詰めロジックを適用する
+    // （codex-review P2 是正。2026-09-22。「診断契約の統一」）。
+    if !g.sparse_initializer.is_empty() {
+        let tensor_name = g.sparse_initializer[0]
+            .values
+            .as_ref()
+            .map(|t| cap_sparse_tensor_diag_name(t.name.as_bytes()))
+            .unwrap_or_default();
+        return Err(GraphError::SparseInitializerNotSupported {
+            tensor_name,
+            count: g.sparse_initializer.len(),
+        });
+    }
 
     // `HashMap::insert` は同名キーを後勝ちで無言上書きするため、事前に重複を
     // 検出して拒否する（不正な ONNX モデル。Bugbot 指摘・no-silent-skip 契約）。
