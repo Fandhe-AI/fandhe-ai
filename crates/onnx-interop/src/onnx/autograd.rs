@@ -911,14 +911,30 @@ impl CustomFunction for SoftmaxFn {
             .ok_or_else(|| op_err_to_autodiff(OpError::NonContiguousInternal("Softmax")))?;
 
         let mut dx = vec![0f32; ys.len()];
+        // `outer`／`trailing` は shape の積であり、`axis` 自体のサイズ（`inner`）が
+        // 0 でも 0 にならない（例: shape=[usize::MAX, 0], axis=1 は
+        // outer=usize::MAX・inner=0）。forward（`ops::softmax`）は
+        // `slice.is_empty()` で早期リターンして巨大 outer 反復のハングを防いで
+        // おり（`ops/softmax.rs` の PR #276 Bugbot 指摘コメント参照）、backward
+        // にも同じガードが必要（レビュー指摘: PR #2223 Cursor Bugbot
+        // discussion_r4072661705）。`ys`/`gs` は forward 出力・upstream と同じ
+        // 要素数のため `ys.is_empty()` で判定できる。
+        if ys.is_empty() {
+            let dx_t = Tensor::new(dx, &shape).map_err(AutodiffError::Shape)?;
+            return Ok(vec![Some(dx_t)]);
+        }
         for o in 0..outer {
             for t in 0..trailing {
                 // `sum_axis(g ⊙ y)` は f64 で蓄積する（長軸縮約の一般方針。
-                // `.claude/rules/coding-rust.md`）。
+                // `.claude/rules/coding-rust.md`）。要素積 `g[idx] * y[idx]` は
+                // 規定の丸め契約（要素積は f32 で確定してから f64 へ昇格して
+                // 蓄積する）に従い、まず f32 で積を確定してから f64 へ昇格する
+                // （レビュー指摘: PR #2223 codex-review discussion_r4072652847）。
                 let mut dot: f64 = 0.0;
                 for a in 0..inner {
                     let idx = (o * inner + a) * trailing + t;
-                    dot += (gs[idx] as f64) * (ys[idx] as f64);
+                    let prod = gs[idx] * ys[idx];
+                    dot += prod as f64;
                 }
                 for a in 0..inner {
                     let idx = (o * inner + a) * trailing + t;
@@ -932,8 +948,20 @@ impl CustomFunction for SoftmaxFn {
 }
 
 /// `LayerNormalization(x, scale, bias?)`（trailing `axis..` を正規化集合とする）。
-/// 正規化統計（平均・分散）は `f64` アキュムレータで統一し、二乗和は要素を
-/// 先に `f64` へ昇格してから二乗する（`.claude/rules/coding-rust.md`）。
+///
+/// **正規化統計（平均・分散・逆標準偏差）は forward（[`ops::layer_normalization`]）
+/// と同じ `f32` 演算（`mean = sum * inv_n`・分散の二乗差累積は `f32::mul_add`）を
+/// bit 完全一致で再現する**。forward 自体は `f32` 単一精度で統計を計算する実装
+/// （`ops/layer_norm.rs`。PR #277 で確定・本 PR〈#2078〉のスコープ外）のため、
+/// backward が独自に `f64` で統計を再計算すると forward が実際に計算した関数とは
+/// 異なる関数を微分してしまい丸め差のある入力で `dx`／`dscale` が不正確になる
+/// （レビュー指摘: PR #2223 codex-review discussion_r4072652835）。forward 自体の
+/// 統計を `f64` 契約へ揃える変更は既存関数（`ops/layer_norm.rs`）への影響が
+/// 本 PR のスコープを超えるため採らない。
+///
+/// 一方、`dxhat` の行方向縮約（`mean_dxhat`／`mean_dxhat_xhat`）は「勾配の長軸
+/// 縮約」（`.claude/rules/coding-rust.md`）に該当し、要素積を `f32` で確定して
+/// から `f64` へ昇格して蓄積する契約に従う。
 struct LayerNormFn {
     axis: i64,
     epsilon: f32,
@@ -1021,53 +1049,61 @@ impl CustomFunction for LayerNormFn {
         };
 
         if need_dx || need_dscale || need_dbias {
+            let inv_n = 1.0f32 / inner as f32;
             for o in 0..outer {
                 let row = &xs[o * inner..(o + 1) * inner];
                 let grow = &gs[o * inner..(o + 1) * inner];
-                // 二乗和は要素を先に f64 へ昇格してから二乗する（正規化統計の契約）。
-                let mean: f64 = row.iter().map(|&v| v as f64).sum::<f64>() / inner as f64;
-                let var: f64 = row
-                    .iter()
-                    .map(|&v| {
-                        let d = v as f64 - mean;
-                        d * d
-                    })
-                    .sum::<f64>()
-                    / inner as f64;
-                let rstd = 1.0f64 / (var + self.epsilon as f64).sqrt();
+                // forward（`ops::layer_normalization`）と bit 完全一致する `f32`
+                // 統計再計算（mean = sum * inv_n・分散の二乗差累積は
+                // `f32::mul_add`）。上の struct doc コメント参照。
+                let mean: f32 = row.iter().sum::<f32>() * inv_n;
+                let mut sq_acc = 0f32;
+                for &v in row {
+                    let diff = v - mean;
+                    sq_acc = diff.mul_add(diff, sq_acc);
+                }
+                let var = sq_acc * inv_n;
+                let rstd = 1.0f32 / (var + self.epsilon).sqrt();
 
                 // xhat は dx・dscale の双方が使うため need_dx || need_dscale のときのみ計算する。
-                let xhat: Vec<f64> = if need_dx || need_dscale {
-                    row.iter().map(|&v| (v as f64 - mean) * rstd).collect()
+                // forward の `normalized = (block[i] - mean) * inv_std` と同じ f32 演算。
+                let xhat: Vec<f32> = if need_dx || need_dscale {
+                    row.iter().map(|&v| (v - mean) * rstd).collect()
                 } else {
                     Vec::new()
                 };
 
                 // dxhat・mean_dxhat・mean_dxhat_xhat は dx 専用の中間値。
+                // 要素積（dy・scale／dxhat・xhat）はまず f32 で確定してから f64 の
+                // 縮約アキュムレータへ昇格する（勾配の長軸縮約の丸め契約。
+                // レビュー指摘: PR #2223 codex-review discussion_r4072652847）。
                 let (mean_dxhat, mean_dxhat_xhat, dxhat) = if need_dx {
-                    let dxhat: Vec<f64> = (0..inner)
-                        .map(|i| grow[i] as f64 * scale_s[i] as f64)
-                        .collect();
-                    let mean_dxhat: f64 = dxhat.iter().sum::<f64>() / inner as f64;
+                    let dxhat: Vec<f32> = (0..inner).map(|i| grow[i] * scale_s[i]).collect();
+                    let mean_dxhat: f64 =
+                        dxhat.iter().map(|&d| d as f64).sum::<f64>() / inner as f64;
                     let mean_dxhat_xhat: f64 = dxhat
                         .iter()
                         .zip(xhat.iter())
-                        .map(|(&d, &xh)| d * xh)
+                        .map(|(&d, &xh)| (d * xh) as f64)
                         .sum::<f64>()
                         / inner as f64;
                     (mean_dxhat, mean_dxhat_xhat, dxhat)
                 } else {
                     (0.0, 0.0, Vec::new())
                 };
+                // 縮約結果（f64）は要素ごとの最終合成に使う直前に 1 回だけ f32 へ
+                // downcast する（長軸縮約の「最終書き出しは 1 回だけ downcast」契約）。
+                let mean_dxhat_f32 = mean_dxhat as f32;
+                let mean_dxhat_xhat_f32 = mean_dxhat_xhat as f32;
 
                 for i in 0..inner {
                     let idx = o * inner + i;
                     if need_dx {
                         dx[idx] =
-                            (rstd * (dxhat[i] - mean_dxhat - xhat[i] * mean_dxhat_xhat)) as f32;
+                            rstd * (dxhat[i] - mean_dxhat_f32 - xhat[i] * mean_dxhat_xhat_f32);
                     }
                     if need_dscale {
-                        dscale_full[idx] = grow[i] * xhat[i] as f32;
+                        dscale_full[idx] = grow[i] * xhat[i];
                     }
                     if need_dbias {
                         dbias_full[idx] = grow[i];

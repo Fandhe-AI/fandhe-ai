@@ -538,3 +538,268 @@ fn shape_and_cast_const_paths_work_without_severing_needed_gradients() {
         other => panic!("Cast(F32->F32) は Var のまま透過するはずが {other:?} のような値だった"),
     }
 }
+
+// ================= 有限差分 (FD) 勾配検証 =================
+//
+// `model_onnx_backward_gradient_matches_finite_difference` は Gemm/Relu/Sigmoid
+// 経路のみを経由し、broadcast 縮約を伴う Add/Mul/Div・Sqrt/Erf・batched/broadcast
+// MatMul・任意 axis Softmax・LayerNormalization の dx/dscale/dbias を検証しない
+// （レビュー指摘: PR #2223 codex-review discussion_r4072652855。P2・ブロック対象外
+// だが P1 修正〈数値契約不整合〉の再発防止のため追加する）。
+
+/// 単一ノードグラフに対する汎用 FD 勾配検証ヘルパー。損失は `sum(output)`
+/// （`Var::sum(None)`）とし、`inputs` の各要素を中心差分（`h`）で摂動して
+/// analytic 勾配（`Tape::backward`）と数値勾配を突き合わせる。
+/// `model_onnx_backward_gradient_matches_finite_difference` と同じく FD
+/// 自体の離散化誤差があるため REQ-2 の bit／複合判定ではなく本ヘルパー専用の
+/// 緩い許容誤差（`tol_abs` または `tol_rel`）を用いる。
+fn assert_grad_matches_finite_difference(
+    n: NodeProto,
+    input_names: &[&str],
+    inputs: &[Tensor<f32>],
+    output_name: &str,
+    h: f32,
+    tol_abs: f32,
+    tol_rel: f32,
+) {
+    let graph = single_node_graph(n, input_names.to_vec(), output_name);
+
+    // 損失スカラー（sum(output)）のみを要する forward-only 評価。呼び出しごとに
+    // 新規 Tape を張り直す（`model_onnx_backward_gradient_matches_finite_difference`
+    // の `loss_for_weight` と同じ方式）。
+    let forward_sum = |vals: &[Tensor<f32>]| -> f32 {
+        let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+        let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+        let mut feeds = HashMap::new();
+        for (name, v) in input_names.iter().zip(vals.iter()) {
+            feeds.insert((*name).to_string(), AutogradValue::Var(tape.var(v)));
+        }
+        let out = bound.run(feeds).unwrap();
+        let out_var = match &out[output_name] {
+            AutogradValue::Var(v) => v.clone(),
+            AutogradValue::Const(_) => panic!("Var を期待した"),
+        };
+        let loss = out_var.sum(None).unwrap();
+        loss.value().contiguous().as_slice().unwrap()[0]
+    };
+
+    // analytic 勾配。
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let mut feeds = HashMap::new();
+    let mut vars = Vec::new();
+    for (name, v) in input_names.iter().zip(inputs.iter()) {
+        let var = tape.var(v);
+        vars.push(var.clone());
+        feeds.insert((*name).to_string(), AutogradValue::Var(var));
+    }
+    let out = bound.run(feeds).unwrap();
+    let out_var = match &out[output_name] {
+        AutogradValue::Var(v) => v.clone(),
+        AutogradValue::Const(_) => panic!("Var を期待した"),
+    };
+    let loss = out_var.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+
+    let mut checked = 0;
+    for (idx, input) in inputs.iter().enumerate() {
+        let analytic = grads
+            .get(&vars[idx])
+            .unwrap()
+            .unwrap_or_else(|| panic!("{} への勾配が存在するはず", input_names[idx]))
+            .clone();
+        let analytic = analytic.contiguous();
+        let analytic_slice = analytic.as_slice().unwrap();
+
+        let data = input.contiguous().as_slice().unwrap().to_vec();
+        let shape = input.shape().to_vec();
+        for i in 0..data.len() {
+            let mut plus_vals = inputs.to_vec();
+            let mut plus_data = data.clone();
+            plus_data[i] += h;
+            plus_vals[idx] = f32(plus_data, &shape);
+            let mut minus_vals = inputs.to_vec();
+            let mut minus_data = data.clone();
+            minus_data[i] -= h;
+            minus_vals[idx] = f32(minus_data, &shape);
+
+            let loss_plus = forward_sum(&plus_vals);
+            let loss_minus = forward_sum(&minus_vals);
+            let fd = (loss_plus - loss_minus) / (2.0 * h);
+            let a = analytic_slice[i];
+            let abs_err = (fd - a).abs();
+            let rel_err = abs_err / (a.abs() + 1e-6);
+            assert!(
+                abs_err < tol_abs || rel_err < tol_rel,
+                "{}[{i}] の勾配が FD と乖離: analytic={a} fd={fd} abs_err={abs_err} rel_err={rel_err}",
+                input_names[idx]
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "少なくとも 1 要素を検証したい");
+}
+
+#[test]
+fn softmax_backward_empty_axis_with_huge_sibling_dim_does_not_hang() {
+    // forward 側の `softmax_empty_axis_with_huge_sibling_dim_does_not_hang`
+    // （`ops/softmax.rs`）と対になる backward 側の回帰テスト。`axis` 自体の
+    // サイズ（`inner`）が 0 で兄弟次元（`outer`）が `usize::MAX` の形状は
+    // `checked_numel`（tensor-core）が正規に許容するため、backward にも forward
+    // と同じ早期リターンが必要（レビュー指摘: PR #2223 Cursor Bugbot
+    // discussion_r4072661705）。テスト自体が有限時間で完了すること
+    // （反復ハングしないこと）が本テストの主張。
+    let graph = single_node_graph(
+        node_with_attrs("Softmax", vec!["x"], vec!["y"], vec![attr_i64("axis", 1)]),
+        vec!["x"],
+        "y",
+    );
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let x = tape.var(&f32(Vec::new(), &[usize::MAX, 0]));
+    let out = bound.forward(&x).unwrap();
+    assert_eq!(out.value().shape(), &[usize::MAX, 0]);
+    let loss = out.sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().unwrap();
+    assert_eq!(dx.shape(), &[usize::MAX, 0]);
+}
+
+#[test]
+fn add_backward_gradient_matches_finite_difference_with_broadcast() {
+    assert_grad_matches_finite_difference(
+        node("Add", vec!["a", "b"], vec!["y"]),
+        &["a", "b"],
+        &[
+            f32(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]),
+            f32(vec![10.0, -5.0], &[2]),
+        ],
+        "y",
+        1e-2,
+        5e-2,
+        5e-2,
+    );
+}
+
+#[test]
+fn mul_backward_gradient_matches_finite_difference() {
+    assert_grad_matches_finite_difference(
+        node("Mul", vec!["a", "b"], vec!["y"]),
+        &["a", "b"],
+        &[
+            f32(vec![1.0, 2.0, 3.0], &[3]),
+            f32(vec![4.0, -1.0, 0.5], &[3]),
+        ],
+        "y",
+        1e-2,
+        5e-2,
+        5e-2,
+    );
+}
+
+#[test]
+fn div_backward_gradient_matches_finite_difference() {
+    assert_grad_matches_finite_difference(
+        node("Div", vec!["a", "b"], vec!["y"]),
+        &["a", "b"],
+        &[
+            f32(vec![10.0, 21.0, -33.0], &[3]),
+            f32(vec![2.0, 3.0, -4.0], &[3]),
+        ],
+        "y",
+        1e-2,
+        5e-2,
+        5e-2,
+    );
+}
+
+#[test]
+fn sqrt_backward_gradient_matches_finite_difference() {
+    assert_grad_matches_finite_difference(
+        node("Sqrt", vec!["x"], vec!["y"]),
+        &["x"],
+        &[f32(vec![4.0, 9.0, 2.25], &[3])],
+        "y",
+        1e-2,
+        5e-2,
+        5e-2,
+    );
+}
+
+#[test]
+fn erf_backward_gradient_matches_finite_difference() {
+    assert_grad_matches_finite_difference(
+        node("Erf", vec!["x"], vec!["y"]),
+        &["x"],
+        &[f32(vec![-1.5, 0.3, 0.7, 2.0], &[4])],
+        "y",
+        1e-2,
+        5e-2,
+        5e-2,
+    );
+}
+
+#[test]
+fn matmul_backward_gradient_matches_finite_difference_with_batch_broadcast() {
+    // `a` shape=[2,2,3]（batch=2）・`b` shape=[3,2]（batch 次元なし。broadcast
+    // 経路）で batched／broadcast MatMul backward を検証する。
+    assert_grad_matches_finite_difference(
+        node("MatMul", vec!["a", "b"], vec!["y"]),
+        &["a", "b"],
+        &[
+            f32(
+                vec![
+                    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5,
+                ],
+                &[2, 2, 3],
+            ),
+            f32(vec![1.0, 0.5, -1.0, 2.0, 0.3, -0.7], &[3, 2]),
+        ],
+        "y",
+        1e-2,
+        5e-2,
+        5e-2,
+    );
+}
+
+#[test]
+fn softmax_backward_gradient_matches_finite_difference_on_middle_axis() {
+    // axis=1（中間軸。`inner`>1 の縮約経路を検証する）。
+    assert_grad_matches_finite_difference(
+        node_with_attrs("Softmax", vec!["x"], vec!["y"], vec![attr_i64("axis", 1)]),
+        &["x"],
+        &[f32(
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+            &[2, 3, 2],
+        )],
+        "y",
+        1e-2,
+        5e-2,
+        5e-2,
+    );
+}
+
+#[test]
+fn layer_normalization_backward_gradient_matches_finite_difference() {
+    // dx／dscale／dbias の 3 入力すべてを同時に検証する。
+    assert_grad_matches_finite_difference(
+        node_with_attrs(
+            "LayerNormalization",
+            vec!["x", "scale", "bias"],
+            vec!["y"],
+            vec![attr_i64("axis", -1)],
+        ),
+        &["x", "scale", "bias"],
+        &[
+            f32(vec![1.0, 2.0, 3.0, 4.0, -1.0, 0.5, 2.5, 3.5], &[2, 4]),
+            f32(vec![1.0, 1.1, 0.9, 1.2], &[4]),
+            f32(vec![0.0, 0.1, -0.1, 0.05], &[4]),
+        ],
+        "y",
+        1e-2,
+        5e-2,
+        5e-2,
+    );
+}
