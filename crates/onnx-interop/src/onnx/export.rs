@@ -406,6 +406,9 @@ pub fn build_model_proto(
         output,
         // 契約: 常に空（モジュール冒頭コメント参照）。
         value_info: Vec::new(),
+        // 契約: 常に空（内部 `Graph` は sparse テンソルを保持しない設計のため。
+        // イシュー #2079）。
+        sparse_initializer: Vec::new(),
     };
 
     Ok(ModelProto {

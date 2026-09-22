@@ -21,6 +21,7 @@
 //! TASK-7.3 系 14 オペのディスパッチ結線は #274 で追跡する（`interp` モジュール
 //! 冒頭コメント参照）。
 
+pub mod autograd;
 pub mod export;
 pub mod export_nn;
 pub mod export_ops;
