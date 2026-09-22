@@ -1697,23 +1697,38 @@ impl Op {
     /// （`Tape::backward_create_graph` の唯一の呼び出し元）。
     ///
     /// **対象スコープ（設計 doc §8「対象（初期スコープ）」のうち、
-    /// #1942・#1943 で実装済みのサブセット）**: `Leaf`・`Add`・`Mul`・
-    /// `Relu`・`Exp`・`Tanh`・`Sigmoid`・`Sum`（`dim` 制限なし。単一軸／
-    /// 全軸いずれも VJP を持つ）・`Mean`（同）・`Reshape`・
-    /// `BroadcastTo`・`MatMul`（**rank 2 × rank 2 のみ**。rank≥3 は
+    /// #1942・#1943 で実装済みのサブセット＋イシュー #2062 で拡張した
+    /// サブセット）**: `Leaf`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`・
+    /// `Sigmoid`・`Sum`（`dim` 制限なし。単一軸／全軸いずれも VJP を
+    /// 持つ）・`Mean`（同）・`Reshape`・`BroadcastTo`・`MatMul`
+    /// （**rank 2 × rank 2 のみ**。rank≥3 は
     /// `create_graph.rs::validate_ancestors` が別途 `Err` で事前拒否
     /// する——rank≥3 の 1 階 `matmul_vjp` は `reduce_batch_axes_f64`
     /// 〈`f64` アキュムレータの broadcast 縮約〉を経由するが、子テープ
     /// 側の `reduce_to`〈`Var::narrow`＋`Var::add` の f32 逐次和〉は
     /// これを逐語再現しないため対象外とした。#1943・
     /// `docs/autodiff-higher-order-grad-decision.md` §14）の 12
-    /// variant のみ `true`。設計 doc §8 の「対象」区分に残る
-    /// `ScalarUnary`／`ScalarBinary`・`Transpose`／`Permute`／
-    /// `Narrow`／`Concat`／`Contiguous`／`Where`／`MaskedFill`／
-    /// `Gather`／`Scatter`／`Pad`／`MseLoss`／`CrossEntropyLoss` は
-    /// 引き続き対象外とし、以後のイシューへ引き継ぐ（`false` のまま
-    /// 残す。設計 doc §8「非対象」「保留」区分の Op はすべて構造的に
-    /// 非対象）。
+    /// variant に加え、`Transpose`・`Permute`・`Narrow`・`Concat`・
+    /// `Contiguous`・`Where` は無条件で `true`（#2062）。
+    ///
+    /// `Op::ScalarUnary`／`Op::ScalarBinary` は **payload（`op` フィールド
+    /// の具体的な variant）まで見て判定する**（[`scalar_unary_
+    /// replayable`]／[`scalar_binary_replayable`]。`create_graph.rs`
+    /// 定義）——`ScalarUnaryOp`／`ScalarBinaryOp` は `tensor-core` 側で
+    /// `#[non_exhaustive]` のため、判定を 1 か所に集約することで
+    /// `validate_ancestors`／`build_mirror`／`replay_op`／`build_cgrads`
+    /// の判断が食い違わないようにする。`ScalarUnaryOp::Gelu`（誤差関数
+    /// 版 GELU）・`ScalarUnaryOp::GeluTanh` は、導関数を `Var` 演算の
+    /// 合成だけでは再現できない（`Gelu` は `erf` を要し依存追加禁止
+    /// 〈`.claude/rules/deps-policy.md`〉、`GeluTanh` は本イシューの
+    /// スコープでは見送り。`docs/autodiff-higher-order-grad-decision.md`
+    /// §16 参照）ため `false` のまま残る。それ以外の `ScalarUnaryOp`・
+    /// `ScalarBinaryOp` の既知 variant はすべて `true`。
+    ///
+    /// 設計 doc §8 の「対象」区分に残る `MaskedFill`・`Gather`・
+    /// `Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss` は引き続き対象外
+    /// とし、以後のイシューへ引き継ぐ（`false` のまま残す。設計 doc
+    /// §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
     ///
     /// **網羅 match（ワイルドカードなし）とする理由**: `is_checkpoint_
     /// eligible`／`for_each_input` と同じ——新しい `Op` variant を
@@ -1721,6 +1736,11 @@ impl Op {
     /// 判断させ、判断漏れのまま既定で `false`（安全側だが無言）に
     /// してしまう事故を防ぐ（`.claude/rules/out-of-scope-tracking.md`
     /// の「スコープ外事項を放置しない」精神を型検査で強制する）。
+    /// **例外**: `Op::ScalarUnary`／`Op::ScalarBinary` の内側
+    /// （`#[non_exhaustive]` な `tensor-core` 側 enum に対する match）
+    /// のみ、未知 variant を安全側の `false` へ倒すワイルドカードを
+    /// 置く（`eval::scalar::unary_grad_factor`／`binary_partials` と
+    /// 同じ「crate 境界をまたぐ非網羅 match は許容する」方針）。
     pub(crate) fn supports_create_graph(&self) -> bool {
         match self {
             Op::Leaf
@@ -1734,10 +1754,16 @@ impl Op {
             | Op::Mean { .. }
             | Op::Reshape { .. }
             | Op::BroadcastTo { .. }
-            | Op::MatMul(..) => true,
-            Op::ScalarUnary { .. }
-            | Op::ScalarBinary { .. }
-            | Op::Max { .. }
+            | Op::MatMul(..)
+            | Op::Transpose { .. }
+            | Op::Permute { .. }
+            | Op::Narrow { .. }
+            | Op::Concat { .. }
+            | Op::Contiguous { .. }
+            | Op::Where { .. } => true,
+            Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
+            Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
+            Op::Max { .. }
             | Op::Var { .. }
             | Op::VectorNorm { .. }
             | Op::Std { .. }
@@ -1751,8 +1777,6 @@ impl Op {
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            | Op::Transpose { .. }
-            | Op::Contiguous { .. }
             | Op::RmsNorm { .. }
             | Op::LayerNorm { .. }
             | Op::BatchNorm { .. }
@@ -1770,12 +1794,8 @@ impl Op {
             | Op::SvdS { .. }
             | Op::SvdVh { .. }
             | Op::MatrixNorm { .. }
-            | Op::Permute { .. }
-            | Op::Concat { .. }
-            | Op::Narrow { .. }
             | Op::Softmax { .. }
             | Op::LogSoftmax { .. }
-            | Op::Where { .. }
             | Op::MaskedFill { .. }
             | Op::Dropout { .. }
             | Op::Gather { .. }

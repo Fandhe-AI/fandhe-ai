@@ -4010,7 +4010,12 @@ fn batch_norm_vjp_channels(
 /// identity`）。`Var::permute`（`var.rs`）が push 前に `perm` を
 /// `0..rank` の順列として検査済み（長さ一致・範囲内・重複なし）のため、
 /// 本関数は常に `perm` と同じ長さの妥当な順列を返す（infallible）。
-fn inverse_permutation(perm: &[usize]) -> Vec<usize> {
+///
+/// `pub(crate)`（イシュー #2062）: `create_graph.rs` の `Op::Permute`
+/// VJP（子テープ上の `Var` 演算合成）も同じ逆置換算出を必要とするため、
+/// 数式を二重管理せず本関数へ委譲する（`.claude/rules/
+/// code-comment-style.md`「陳腐化しやすい実装詳細の重複を避ける」）。
+pub(crate) fn inverse_permutation(perm: &[usize]) -> Vec<usize> {
     let mut inv = vec![0usize; perm.len()];
     for (k, &p) in perm.iter().enumerate() {
         inv[p] = k;
