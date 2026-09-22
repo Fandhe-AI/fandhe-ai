@@ -955,6 +955,30 @@ pub(crate) enum Op {
         bias: Option<NodeId>,
         params: Conv2dParams,
     },
+    /// `Var::conv_transpose2d`（PyTorch `nn.ConvTranspose2d`／
+    /// `F.conv_transpose2d` 相当。col2im＋GEMM。イシュー #2067・設計
+    /// `docs/conv-ops-design.md` §15）。`weight`: `[Cin, Cout/groups,
+    /// kH, kW]`（`Op::Conv2d` の `[Cout, Cin/groups, kH, kW]` と先頭 2
+    /// 軸が逆——PyTorch `nn.ConvTranspose2d.weight` のレイアウトを
+    /// 踏襲）。`bias` は `None` を許容する。
+    ///
+    /// `output_padding` は本 variant に保持しない——VJP は
+    /// `nodes[input].shape`／`upstream.shape()` から全 shape を導出
+    /// できるため不要（`Op::OneHot` の `num_classes` 非保持方針と
+    /// 同型）。`Conv2dParams` 自体（`kernel_size`／`stride`／
+    /// `padding`／`dilation`／`groups`）は forward・VJP 双方が
+    /// 「仮想 conv2d」（設計 doc §15）のパラメータとして再利用する。
+    ///
+    /// **常に実体化済み**（`push_eager`）: `Op::Conv2d` と同じ理由
+    /// （非 elementwise・GEMM を含む段階的合成のため融合対象外）。
+    /// `col`（im2col の中間結果）は保持しない——backward で
+    /// `im2col_with_fallback` を再計算する（`Op::Conv2d` と同型）。
+    ConvTranspose2d {
+        input: NodeId,
+        weight: NodeId,
+        bias: Option<NodeId>,
+        params: Conv2dParams,
+    },
     /// `Var::one_hot`（`torch.nn.functional.one_hot`／`tf.one_hot`
     /// 相当。**非微分演算**。イシュー #1755）。`input` は整数クラス id
     /// を f32 値として保持する追跡 `Var`（`Op::Gather`／`Sort`／`Topk`
@@ -1402,6 +1426,12 @@ impl Op {
             // `col` を保持しない設計〈backward 再計算〉のため
             // checkpoint 解放との組合せは対象外のまま）。
             Op::Conv2d { .. } => false,
+            // `Op::ConvTranspose2d`（イシュー #2067）は `Op::Conv2d` と
+            // 同じく eager 実体化演算だが `recompute_value` に再計算
+            // 経路を持たないため非適格（最小・安全側の判断。`col` を
+            // 保持しない設計〈backward 再計算〉のため checkpoint 解放
+            // との組合せは対象外のまま）。
+            Op::ConvTranspose2d { .. } => false,
             // `Op::OneHot`（イシュー #1755）は `Op::Gather`／`Sort` と
             // 同じく eager 実体化演算で `recompute_value` に再計算経路
             // を持たないため解放しない（非微分演算であることとは独立の
@@ -1503,6 +1533,12 @@ impl Op {
             Op::Interpolate { input, .. } => f(*input),
             Op::Pad { input, .. } => f(*input),
             Op::Conv2d {
+                input,
+                weight,
+                bias,
+                ..
+            }
+            | Op::ConvTranspose2d {
                 input,
                 weight,
                 bias,
@@ -1739,6 +1775,7 @@ impl Op {
             | Op::Interpolate { .. }
             | Op::Pad { .. }
             | Op::Conv2d { .. }
+            | Op::ConvTranspose2d { .. }
             | Op::OneHot { .. }
             | Op::MaxPool2d { .. }
             | Op::AvgPool2d { .. }

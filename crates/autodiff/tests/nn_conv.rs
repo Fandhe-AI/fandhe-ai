@@ -21,7 +21,7 @@
 
 mod common;
 
-use fandhe_ai_autodiff::nn::{Conv1d, Conv2d, Module};
+use fandhe_ai_autodiff::nn::{Conv1d, Conv2d, ConvTranspose2d, Module};
 use fandhe_ai_autodiff::{AutodiffError, Tape};
 use fandhe_ai_tensor_core::{BackendError, ShapeError, Tensor};
 
@@ -476,6 +476,302 @@ fn numeric_conv2d_layer_weight_grad(
         let bv = b.map(|bt| tape.var(bt));
         let y = xv
             .conv2d(&wv, bv.as_ref(), stride, padding, dilation, groups)
+            .unwrap();
+        let out = y.to_tensor();
+        dense(&out)
+            .iter()
+            .zip(dense(s).iter())
+            .map(|(&yv, &sv)| yv as f64 * sv as f64)
+            .sum()
+    };
+
+    let shape = w.shape().to_vec();
+    let mut data = dense(w);
+    let mut grad = vec![0f64; data.len()];
+    for i in 0..data.len() {
+        let orig = data[i] as f64;
+        data[i] = (orig + H) as f32;
+        let lp = forward(&t(data.clone(), &shape));
+        data[i] = (orig - H) as f32;
+        let lm = forward(&t(data.clone(), &shape));
+        data[i] = orig as f32;
+        grad[i] = (lp - lm) / (2.0 * H);
+    }
+    grad
+}
+
+// --- 8. `nn::ConvTranspose2d`（イシュー #2067）---
+
+#[test]
+fn conv_transpose2d_new_rejects_in_channels_zero() {
+    let err = err_of(ConvTranspose2d::new(
+        0,
+        4,
+        [3, 3],
+        [1, 1],
+        [0, 0],
+        [0, 0],
+        [1, 1],
+        1,
+        false,
+        0,
+    ));
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn conv_transpose2d_new_rejects_output_padding_ge_stride() {
+    let err = err_of(ConvTranspose2d::new(
+        2,
+        4,
+        [3, 3],
+        [1, 1],
+        [0, 0],
+        [1, 0],
+        [1, 1],
+        1,
+        false,
+        0,
+    ));
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn conv_transpose2d_new_rejects_in_channels_not_divisible_by_groups() {
+    let err = err_of(ConvTranspose2d::new(
+        3,
+        4,
+        [3, 3],
+        [1, 1],
+        [0, 0],
+        [0, 0],
+        [1, 1],
+        2,
+        false,
+        0,
+    ));
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn conv_transpose2d_from_parameters_rejects_wrong_rank() {
+    let err = err_of(ConvTranspose2d::from_parameters(
+        t(vec![0.0; 4], &[2, 2]),
+        None,
+        [1, 1],
+        [0, 0],
+        [0, 0],
+        [1, 1],
+        1,
+    ));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::RankMismatch { .. })
+    ));
+}
+
+#[test]
+fn conv_transpose2d_from_parameters_rejects_bias_shape_mismatch() {
+    let weight = t(vec![0.0; 2 * 3], &[2, 3, 1, 1]);
+    let bad_bias = t(vec![0.0; 2], &[2]);
+    let err = err_of(ConvTranspose2d::from_parameters(
+        weight,
+        Some(bad_bias),
+        [1, 1],
+        [0, 0],
+        [0, 0],
+        [1, 1],
+        1,
+    ));
+    assert!(matches!(
+        err,
+        AutodiffError::Shape(ShapeError::ShapeMismatch { .. })
+    ));
+}
+
+#[test]
+fn conv_transpose2d_new_is_deterministic_and_seed_dependent() {
+    let a = ConvTranspose2d::new(3, 4, [3, 3], [1, 1], [0, 0], [0, 0], [1, 1], 1, true, 7).unwrap();
+    let b = ConvTranspose2d::new(3, 4, [3, 3], [1, 1], [0, 0], [0, 0], [1, 1], 1, true, 7).unwrap();
+    let c = ConvTranspose2d::new(3, 4, [3, 3], [1, 1], [0, 0], [0, 0], [1, 1], 1, true, 8).unwrap();
+
+    assert_eq!(dense(a.weight()), dense(b.weight()));
+    assert_ne!(dense(a.weight()), dense(c.weight()));
+
+    // fan_in = Cout_g * kH * kW = 4 * 3 * 3（`ConvTranspose2d::new` doc
+    // 参照。`Conv2d` の `Cin_g * kH * kW` とは異なる軸を使う）。
+    let fan_in = 4 * 3 * 3;
+    let bound = 1.0f32 / (fan_in as f32).sqrt();
+    for &v in dense(a.weight()).iter() {
+        assert!(v.abs() <= bound, "|{v}| <= {bound}");
+    }
+}
+
+#[test]
+fn conv_transpose2d_new_without_bias_has_no_bias() {
+    let conv =
+        ConvTranspose2d::new(2, 2, [1, 1], [1, 1], [0, 0], [0, 0], [1, 1], 1, false, 1).unwrap();
+    assert!(conv.bias().is_none());
+}
+
+#[test]
+fn conv_transpose2d_vars_forward_matches_var_conv_transpose2d_bit_exact() {
+    let conv =
+        ConvTranspose2d::new(2, 3, [2, 2], [1, 1], [0, 0], [0, 0], [1, 1], 1, true, 3).unwrap();
+    let x = t(
+        (0..2 * 2 * 4 * 4)
+            .map(|i| (i as f32) * 0.01 - 0.2)
+            .collect(),
+        &[2, 2, 4, 4],
+    );
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x);
+    let vars = conv.bind(&tape);
+    let via_vars = vars.forward(&xv).unwrap().to_tensor();
+
+    let wv = tape.var(conv.weight());
+    let bv = conv.bias().map(|b| tape.var(b));
+    let via_direct = xv
+        .conv_transpose2d(&wv, bv.as_ref(), [1, 1], [0, 0], [0, 0], [1, 1], 1)
+        .unwrap()
+        .to_tensor();
+
+    assert_eq!(dense(&via_vars), dense(&via_direct));
+}
+
+#[test]
+fn conv_transpose2d_module_forward_matches_forward_host_bit_exact() {
+    let conv =
+        ConvTranspose2d::new(2, 3, [3, 3], [1, 1], [1, 1], [0, 0], [1, 1], 1, true, 5).unwrap();
+    let x = t(
+        (0..2 * 2 * 5 * 5)
+            .map(|i| (i as f32) * 0.02 - 0.5)
+            .collect(),
+        &[2, 2, 5, 5],
+    );
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x);
+    let via_module = Module::forward(&conv, &tape, &xv).unwrap().to_tensor();
+
+    let ops = common::naive_ops();
+    let via_host = conv.forward_host(&*ops, &x).unwrap();
+
+    assert_eq!(dense(&via_module), dense(&via_host));
+}
+
+#[test]
+fn conv_transpose2d_named_parameters_order_is_weight_then_bias() {
+    let conv =
+        ConvTranspose2d::new(2, 3, [1, 1], [1, 1], [0, 0], [0, 0], [1, 1], 1, true, 1).unwrap();
+    let params = Module::named_parameters(&conv);
+    let names: Vec<&str> = params.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["weight", "bias"]);
+}
+
+#[test]
+fn conv_transpose2d_named_parameters_excludes_bias_when_none() {
+    let conv =
+        ConvTranspose2d::new(2, 3, [1, 1], [1, 1], [0, 0], [0, 0], [1, 1], 1, false, 1).unwrap();
+    let params = Module::named_parameters(&conv);
+    let names: Vec<&str> = params.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["weight"]);
+}
+
+#[test]
+fn conv_transpose2d_set_parameter_rejects_shape_mismatch() {
+    let mut conv =
+        ConvTranspose2d::new(2, 3, [1, 1], [1, 1], [0, 0], [0, 0], [1, 1], 1, true, 1).unwrap();
+    let wrong = t(vec![0.0; 4], &[2, 2]);
+    let err = Module::set_parameter(&mut conv, "weight", wrong).unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)));
+}
+
+#[test]
+fn conv_transpose2d_set_parameter_rejects_unknown_name() {
+    let mut conv =
+        ConvTranspose2d::new(2, 3, [1, 1], [1, 1], [0, 0], [0, 0], [1, 1], 1, true, 1).unwrap();
+    let dummy = conv.weight().clone();
+    let err = Module::set_parameter(&mut conv, "bogus", dummy).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn conv_transpose2d_set_parameter_rejects_bias_when_layer_has_none() {
+    let mut conv =
+        ConvTranspose2d::new(2, 3, [1, 1], [1, 1], [0, 0], [0, 0], [1, 1], 1, false, 1).unwrap();
+    let bias = t(vec![0.0; 3], &[3]);
+    let err = Module::set_parameter(&mut conv, "bias", bias).unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn conv_transpose2d_layer_weight_grad_matches_numeric_grad_with_groups() {
+    let conv =
+        ConvTranspose2d::new(4, 4, [3, 3], [1, 1], [1, 1], [0, 0], [1, 1], 2, true, 11).unwrap();
+    let x = t(
+        (0..4 * 5 * 5).map(|i| (i as f32) * 0.02 - 0.4).collect(),
+        &[1, 4, 5, 5],
+    );
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x);
+    let vars = conv.bind(&tape);
+    let y = vars.forward(&xv).unwrap();
+    let out_shape = y.to_tensor().shape().to_vec();
+    let s = t(
+        (0..out_shape.iter().product::<usize>())
+            .map(|i| ((i % 5) as f32) * 0.1 - 0.2)
+            .collect(),
+        &out_shape,
+    );
+    let sv = tape.var(&s);
+    let loss = y.mul(&sv).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let weight_grad = grads.get(&vars.weight).unwrap().unwrap();
+
+    let numeric = numeric_conv_transpose2d_layer_weight_grad(
+        &x,
+        conv.weight(),
+        conv.bias(),
+        &s,
+        [1, 1],
+        [1, 1],
+        [0, 0],
+        [1, 1],
+        2,
+    );
+    assert_grad_close("weight_grad", dense(weight_grad).as_slice(), &numeric);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn numeric_conv_transpose2d_layer_weight_grad(
+    x: &Tensor<f32>,
+    w: &Tensor<f32>,
+    b: Option<&Tensor<f32>>,
+    s: &Tensor<f32>,
+    stride: [usize; 2],
+    padding: [usize; 2],
+    output_padding: [usize; 2],
+    dilation: [usize; 2],
+    groups: usize,
+) -> Vec<f64> {
+    let forward = |w: &Tensor<f32>| -> f64 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(x);
+        let wv = tape.var(w);
+        let bv = b.map(|bt| tape.var(bt));
+        let y = xv
+            .conv_transpose2d(
+                &wv,
+                bv.as_ref(),
+                stride,
+                padding,
+                output_padding,
+                dilation,
+                groups,
+            )
             .unwrap();
         let out = y.to_tensor();
         dense(&out)

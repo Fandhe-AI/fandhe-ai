@@ -31,7 +31,7 @@ use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
-use crate::nn::conv::{Conv1d, Conv2d};
+use crate::nn::conv::{Conv1d, Conv2d, ConvTranspose2d};
 use crate::nn::embedding::Embedding;
 use crate::nn::flatten::Flatten;
 use crate::nn::linear::Linear;
@@ -186,6 +186,21 @@ pub trait Module {
 
     /// [`Module::as_conv1d`] の可変版。
     fn as_conv1d_mut(&mut self) -> Option<&mut Conv1d> {
+        None
+    }
+
+    /// [`Module::as_linear`] と同型の明示フック（イシュー #2067）。
+    /// `ConvTranspose2d` 層向け。既定 `None`。`compat::Sequential::
+    /// add_conv_transpose2d`（facade 公開面）の接続はユーザー承認待ち
+    /// （`docs/compat-api-scope.md` §5・設計 `docs/conv-ops-design.md`
+    /// §15「承認事項」節）であり、本フック自体は `compat` 層と独立に
+    /// `nn::Sequential`（autodiff 汎用コンテナ）から利用できる。
+    fn as_conv_transpose2d(&self) -> Option<&ConvTranspose2d> {
+        None
+    }
+
+    /// [`Module::as_conv_transpose2d`] の可変版。
+    fn as_conv_transpose2d_mut(&mut self) -> Option<&mut ConvTranspose2d> {
         None
     }
 
@@ -679,6 +694,43 @@ impl Module for Conv2d {
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         Conv2d::forward_host(self, ops, input)
+    }
+}
+
+/// `ConvTranspose2d::bind(tape).forward(input)`（`nn/conv.rs` 参照。
+/// イシュー #2067）。
+impl Module for ConvTranspose2d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn as_conv_transpose2d(&self) -> Option<&ConvTranspose2d> {
+        Some(self)
+    }
+
+    fn as_conv_transpose2d_mut(&mut self) -> Option<&mut ConvTranspose2d> {
+        Some(self)
+    }
+
+    /// 命名契約は `Conv2d` と同型（`weight` → `bias`）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![("weight".to_string(), self.weight())];
+        if let Some(bias) = self.bias() {
+            out.push(("bias".to_string(), bias));
+        }
+        out
+    }
+
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        ConvTranspose2d::set_parameter(self, name, value)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        ConvTranspose2d::forward_host(self, ops, input)
     }
 }
 
