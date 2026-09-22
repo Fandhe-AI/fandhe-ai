@@ -14,7 +14,7 @@
 //!   意味論的な逆マッピングは #1773 のスコープ（`export_ops` モジュール）。
 //!   `build_model_proto` は `export_ops::check_exportable` で
 //!   `graph.nodes`（decode 由来・または #1773 以降に手組みされた `NodeProto`）が
-//!   `interp.rs` 対応 22 op の allowlist（`export_ops::SUPPORTED_OP_TYPES`）・
+//!   `interp.rs` 対応 23 op の allowlist（`export_ops::SUPPORTED_OP_TYPES`）・
 //!   既定 opset（`domain` が空文字列）に収まっているかを fail-closed に検査して
 //!   から組み立てる（詳細対応表は `docs/onnx-export-op-mapping.md`）。
 //! - import -> export -> import の構造一致 roundtrip テスト・未対応 op の
@@ -84,7 +84,7 @@ pub enum ExportError {
         expected_elements: usize,
         actual_elements: usize,
     },
-    /// `op_type` が `export_ops::SUPPORTED_OP_TYPES`（`interp.rs` 対応 22 op）に
+    /// `op_type` が `export_ops::SUPPORTED_OP_TYPES`（`interp.rs` 対応 23 op）に
     /// 含まれない、または `domain` が既定 opset（空文字列）以外
     /// （`export_ops::check_exportable`。イシュー #1773 の層 B）。
     UnsupportedOp {
@@ -363,7 +363,7 @@ pub fn encode_tensor(name: &str, tensor: &RawTensor) -> Result<TensorProto, Expo
 /// パイプライン全体）・将来の codegen。組み立て自体（`graph.nodes` を
 /// `GraphProto.node` へ詰める処理）は機械的な素通しのみで、op_type の意味論
 /// には関与しないが、組み立てに先立ち `export_ops::check_exportable`
-/// （イシュー #1773 の層 B）で `graph.nodes` が `interp.rs` 対応 22 op の
+/// （イシュー #1773 の層 B）で `graph.nodes` が `interp.rs` 対応 23 op の
 /// allowlist・既定 opset（`domain` が空文字列）に収まっているかを fail-closed
 /// に検査する（無言 skip はしない。`security.md` A03）。
 pub fn build_model_proto(

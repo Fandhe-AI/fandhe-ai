@@ -239,46 +239,75 @@ fn empty_sequential_is_rejected_with_invalid_model() {
     );
 }
 
-/// e-2. `Sigmoid`／`Tanh` を含む `Sequential` は `layer_kind == "unknown"`
-///      の `OnnxError::UnsupportedLayer`（該当層の index 付き）で拒否
-///      される。
+/// e-2. `Tanh` を含む `Sequential` は `layer_kind == "unknown"` の
+///      `OnnxError::UnsupportedLayer`（該当層の index 付き）で拒否
+///      される（`Sigmoid` はイシュー #2076 で対応層化したため負例には
+///      `Tanh` を使う。ONNX opset 17 に対応する演算はあるが、
+///      `Module::as_sigmoid`／`as_gelu`／`as_softmax` と同型のフックを
+///      `Tanh` へは追加していない）。
 #[test]
-fn sequential_with_sigmoid_is_rejected_with_unsupported_layer() {
+fn sequential_with_tanh_is_rejected_with_unsupported_layer() {
     let model = Sequential::new()
         .add_linear(2, 2, 0x2037_9999)
         .expect("test fixture: 層構築に失敗")
-        .add_sigmoid();
+        .add_tanh();
 
     let err = OnnxModel::from_sequential(&model).unwrap_err();
     match err {
         OnnxError::UnsupportedLayer { index, layer_kind } => {
-            assert_eq!(index, 1, "Sigmoid は index=1（Linear の次）のはず");
+            assert_eq!(index, 1, "Tanh は index=1（Linear の次）のはず");
             assert_eq!(
                 layer_kind, "unknown",
-                "Sigmoid は判別フック非対応のため unknown のはず"
+                "Tanh は判別フック非対応のため unknown のはず"
             );
         }
         other => panic!("UnsupportedLayer を期待したが {other:?}"),
     }
 }
 
-/// e-3. `Conv2d` を含む `Sequential` は `layer_kind == "Conv2d"` の
-///      `OnnxError::UnsupportedLayer` で拒否される（`as_conv2d` フック
-///      による判別）。
+/// e-3. `Conv1d` を含む `Sequential` は `layer_kind == "Conv1d"` の
+///      `OnnxError::UnsupportedLayer` で拒否される（`as_conv1d` フック
+///      による判別。`Conv2d` はイシュー #2076 で対応層化したため負例
+///      には `Conv1d` を使う）。
 #[test]
-fn sequential_with_conv2d_is_rejected_with_unsupported_layer_conv2d() {
+fn sequential_with_conv1d_is_rejected_with_unsupported_layer_conv1d() {
     let model = Sequential::new()
-        .add_conv2d(1, 2, [3, 3], [1, 1], [0, 0], [1, 1], 1, 0x2037_aaaa)
+        .add_conv1d(1, 2, 3, 1, 0, 1, 1, 0x2037_aaaa)
         .expect("test fixture: 層構築に失敗");
 
     let err = OnnxModel::from_sequential(&model).unwrap_err();
     match err {
         OnnxError::UnsupportedLayer { index, layer_kind } => {
             assert_eq!(index, 0);
-            assert_eq!(layer_kind, "Conv2d");
+            assert_eq!(layer_kind, "Conv1d");
         }
-        other => panic!("UnsupportedLayer(layer_kind=Conv2d) を期待したが {other:?}"),
+        other => panic!("UnsupportedLayer(layer_kind=Conv1d) を期待したが {other:?}"),
     }
+}
+
+/// e-2b. `Sigmoid`（イシュー #2076 で対応層化）を含む `Sequential` は
+///      `from_sequential` が `Ok` を返す到達性テスト（値比較は
+///      `crates/onnx-interop/tests/onnx_export_layers_parity.rs` の
+///      責務。ここでは facade 経由での到達性のみ確認する）。
+#[test]
+fn sequential_with_sigmoid_is_accepted() {
+    let model = Sequential::new()
+        .add_linear(2, 2, 0x2076_1111)
+        .expect("test fixture: 層構築に失敗")
+        .add_sigmoid();
+
+    OnnxModel::from_sequential(&model).expect("Sigmoid を含む Sequential の export は成功するはず");
+}
+
+/// e-3b. `Conv2d`（イシュー #2076 で対応層化）を含む `Sequential` は
+///      `from_sequential` が `Ok` を返す到達性テスト（e-2b と同型）。
+#[test]
+fn sequential_with_conv2d_is_accepted() {
+    let model = Sequential::new()
+        .add_conv2d(1, 2, [3, 3], [1, 1], [0, 0], [1, 1], 1, 0x2076_2222)
+        .expect("test fixture: 層構築に失敗");
+
+    OnnxModel::from_sequential(&model).expect("Conv2d を含む Sequential の export は成功するはず");
 }
 
 /// e-4. 対応層の後に非対応層が続く場合も `Graph` を一切構築せず `Err`
@@ -292,15 +321,12 @@ fn unsupported_layer_after_supported_layers_is_still_rejected() {
         .add_relu()
         .add_linear(4, 2, 0x2037_cccc)
         .expect("test fixture: 層構築に失敗")
-        .add_sigmoid();
+        .add_tanh();
 
     let err = OnnxModel::from_sequential(&model).unwrap_err();
     match err {
         OnnxError::UnsupportedLayer { index, .. } => {
-            assert_eq!(
-                index, 3,
-                "Sigmoid は index=3（Linear,ReLU,Linear の次）のはず"
-            );
+            assert_eq!(index, 3, "Tanh は index=3（Linear,ReLU,Linear の次）のはず");
         }
         other => panic!("UnsupportedLayer を期待したが {other:?}"),
     }

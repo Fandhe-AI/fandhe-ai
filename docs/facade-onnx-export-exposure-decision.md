@@ -662,3 +662,102 @@ variant 追加を実装した。§15.7 の承認事項に基づき、新規公�
   含まれないため単一クレート `cargo publish --dry-run -p fandhe-ai`
   は失敗しうる（#2017／#2018 と同型の既知事象。
   `docs/crates-io-publishing-order.md` §8.1）。ブロッカーではない。
+
+## 18. 追補（イシュー #2076・親 #2034）: ONNX export の対応層拡大（Sigmoid・Softmax・LayerNorm・GELU・Conv2d）
+
+§17.2 でスコープ外とした Sigmoid 対応（§15.7 項 5 保留）・Softmax／
+LayerNorm／GELU／Conv 等の対応拡大を実装した。
+
+### 18.1 実施範囲
+
+- **autodiff（`crates/autodiff`）**: `Module` trait へ `as_sigmoid`
+  （`bool`）・`as_gelu`（`bool`）・`as_softmax`（`Option<&Softmax>`）の
+  3 フックを追加（`as_relu`／`as_linear` と同型の閉集合ダウンキャスト
+  方式。`docs/compat-api-scope.md` §1）。`Sigmoid`／`Gelu`／`Softmax`
+  の `impl Module` へオーバーライドを追加。`Softmax::dim()` を
+  `pub(crate)` から `pub` へ変更（`onnx-interop` が axis を読むため。
+  facade は `nn::activation::Softmax` を再エクスポートしないため facade
+  の公開面は拡張しない）。
+- **onnx-interop（`crates/onnx-interop`）**:
+  - `ops::conv`（新規）: `ConvAttrs`／`conv()`。`fandhe_ai_tensor_core::
+    Conv2dParams::new`／`conv2d_out_shape` を再利用し二重実装しない。
+    直接ループ（`f32::mul_add` 累積・境界検査は `ih`／`iw` の明示範囲
+    検査。REQ-8）。
+  - `onnx::interp::compute_conv`・`attr_string`（STRING 属性読取）を
+    追加し `"Conv"` をディスパッチ表へ結線（22→23 op）。
+  - `onnx::export_ops::ExportOp::Conv`・`attr_string`（STRING 属性
+    書出し）・`SUPPORTED_OP_TYPES` へ `"Conv"` 追加。
+  - `onnx::export_nn::export_parts_from_layers` へ Sigmoid・Softmax・
+    LayerNorm・GELU（`Mul→Erf→Add→Mul→Mul` の 5 ノード合成＋`Constant`
+    3 ノード）・Conv2d の 5 腕を追加（対応層 2→7 種）。
+    `LayerNorm::weight() == None`（`without_affine`）は ONNX `Scale`
+    必須制約により `InvalidLayerParameter` で拒否。`GeluTanh`／
+    `LogSoftmax`／`Tanh` は対応する ONNX 演算が無いため引き続き非対応
+    （`as_gelu`／`as_softmax` をオーバーライドしない）。
+- **facade（`crates/facade`）**: コード変更は `interop/onnx.rs` の
+  モジュール doc 更新のみ（対応層 2→7 種・数値契約の記述更新）。
+  `from_sequential`・`api_surface.rs` の `ALLOWED_PUB_ITEMS`（10 件）は
+  不変（新規公開面なし）。
+
+### 18.2 数値契約（Sigmoid の扱い。§15.7 項 5）
+
+§15.7 項 5（Sigmoid の数値契約）は 2026-09-18 時点で承認保留のまま
+記録されている。本 issue（#2076）は Sigmoid を含む対応層拡大を実施する
+にあたり、推奨案 (α)（既存 tolerance 定数〈`RELATIVE_TOLERANCE`／
+`ABSOLUTE_RESCUE_THRESHOLD`〉を変更せず、REQ-2 統一複合判定を Sigmoid
+込みモデルへそのまま適用し bit 完全一致は Linear／ReLU 限定と明記する
+案）を前提に実装した。tolerance・baseline・interp の `sigmoid` 実装
+（`ops::sigmoid`）はいずれも変更しておらず、「tolerance の単独緩和」
+には該当しない（`.claude/rules/coding-rust.md` の該当規定を参照）。
+項 5 が不承認となった場合の代替 (γ)（Sigmoid の腕・`as_sigmoid` フック
+・関連テストの除去）は、本 issue の diff の中で Sigmoid 関連の変更が
+独立して切り出せる形（`as_sigmoid` フック・`ExportOp::Sigmoid` 腕・
+`sigmoid_layer_parity`／`sequential_with_sigmoid_is_accepted` 等の
+テスト）で構成されている。
+
+### 18.3 スコープ外（引き続き対象外）
+
+- `GeluTanh`（tanh 近似 GELU）・`LogSoftmax`・`Tanh` の export 対応
+  （対応する単一 ONNX 演算が無い、または `as_*` フックを追加する判断が
+  本 issue の範囲外）。
+- Conv2d 対応は Flatten／Pooling を伴わない（Conv 単体または
+  Conv→活性化の構成に限る）。CNN 全体（Flatten・MaxPool・AvgPool 等を
+  含む構成）の export 対応は後続候補。
+- `fandhe_ai::nn`（RNN・TransformerEncoderLayer 等）からの export・
+  `DeviceParamStore`（常駐パラメータ）からの export。
+- CUDA／Metal 実機での確認（export・interp はホスト実行のみで数値経路
+  非依存のため対象外。§16／§17 と同じ整理）。
+
+### 18.4 検証結果
+
+- `cargo build -p fandhe-ai-autodiff -p fandhe-ai-onnx-interop -p
+  fandhe-ai`: 成功。
+- `cargo test -p fandhe-ai-autodiff`: 全件 pass（新規閉集合テスト込み）。
+- `cargo test -p fandhe-ai-onnx-interop`: 全件 pass（`ops::conv`
+  12 件・`onnx_export_nn`／`onnx_export_ops`／`onnx_export_layers_
+  parity`〈新規 13 件〉込み。`SUPPORTED_OP_TYPES.len() == 23` の
+  ドリフト検出テストを含む）。
+- `cargo test -p fandhe-ai --test api_surface`: 65 件 pass（新規公開面
+  なしを確認）。
+- `cargo test -p fandhe-ai --test interop_onnx_export_sequential`:
+  13 件 pass（Tanh／Conv1d への負例差し替え・Sigmoid／Conv2d 到達性
+  テスト追加込み）。
+- `cargo test -p fandhe-ai --test interop_onnx_export_layers_parity`
+  （新規）: 5 件 pass（`fandhe_ai`＋`fandhe_ai_backend_cpu::parity`
+  のみ import・`predict` と `from_sequential(&m).run` の REQ-2 複合
+  判定突合）。
+- `cargo test --workspace --all-features`: 全件 pass（既存テストの
+  非後退確認込み）。
+- `cargo fmt --all --check`: 差分なし。
+- `cargo clippy -p fandhe-ai-autodiff -p fandhe-ai-onnx-interop`:
+  green（`fandhe-ai-backend-cuda` の dead-code 警告は本 issue と無関係
+  の既存環境事象——`bench-harness`〈dev-dependency〉経由で引き込まれる
+  同クレートが、本 worktree 環境では `--all-targets` 付き clippy 時に
+  常に 76 件の dead-code lint を出す。ベース main（本 issue の変更を
+  一切含まない状態）でも同一の 76 件が再現することを stash で確認
+  済みであり、本 issue のコードとは無関係）。
+- `git diff --exit-code origin/main -- Cargo.toml Cargo.lock deny.toml
+  crates/*/Cargo.toml`: 差分ゼロ（依存追加なし）。
+- 新規 `unsafe`: 0 件（`git grep -n "unsafe" -- crates/onnx-interop/src
+  crates/autodiff/src/nn/module.rs crates/autodiff/src/nn/
+  activation.rs crates/facade/src/interop/onnx.rs` が新規ヒットなし）。

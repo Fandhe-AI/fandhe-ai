@@ -8,7 +8,7 @@
 //!   （`graph` の逆方向。イシュー #1772）。`build_model_proto` は `export_ops`
 //!   （内部 op -> `NodeProto` の意味論的マッピング。#1773）の
 //!   `check_exportable` を経由してから組み立てる。
-//! - `export_ops`: `interp` が対応する 22 op の逆マッピング（`ExportOp` ->
+//! - `export_ops`: `interp` が対応する 23 op の逆マッピング（`ExportOp` ->
 //!   `NodeProto`。イシュー #1773）。`export` から `pub use` で再エクスポートする。
 //! - `export_nn`: `fandhe_ai_autodiff::nn::Module` の層列（`Linear`／`ReLU`
 //!   限定）から `export` が受け取れる `Graph` を組み立てる橋渡し

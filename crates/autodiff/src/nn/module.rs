@@ -331,6 +331,33 @@ pub trait Module {
         false
     }
 
+    /// この層が `Sigmoid` かどうか（イシュー #2076・親 #2034。`as_relu`
+    /// と同じ bool フック方式）。`onnx-interop::onnx::export_nn` が
+    /// `Module` の閉集合ダウンキャストフックから `ExportOp::Sigmoid`
+    /// への写像を判別するために使う。既定は `false`
+    /// （`Sigmoid` のみオーバーライドする）。
+    fn as_sigmoid(&self) -> bool {
+        false
+    }
+
+    /// この層が `Gelu`（erf 版）かどうか（イシュー #2076）。`as_relu` と
+    /// 同じ bool フック方式。`GeluTanh` はオーバーライドしない（ONNX
+    /// opset 17 に tanh 近似 GELU に対応する演算が無いため export 非対応
+    /// のまま）。既定は `false`。
+    fn as_gelu(&self) -> bool {
+        false
+    }
+
+    /// この層が `Softmax` かどうか（イシュー #2076）。`as_linear` と同型
+    /// の明示フック（`Option<&Softmax>`）。`onnx-interop::onnx::
+    /// export_nn` が `Softmax::dim()`（`pub`。`nn/activation.rs`）を
+    /// 読んで `ExportOp::Softmax { axis }` を組み立てるために使う。
+    /// `LogSoftmax` はオーバーライドしない（ONNX に対応する単一演算が
+    /// 無いため export 非対応のまま）。既定は `None`。
+    fn as_softmax(&self) -> Option<&Softmax> {
+        None
+    }
+
     /// この層が Pooling（[`MaxPool2d`]／[`MaxPool1d`]／[`AvgPool2d`]／
     /// [`AvgPool1d`]／[`AdaptiveAvgPool2d`]／[`AdaptiveAvgPool1d`]）
     /// かどうか（イシュー #1957）。`as_relu` と同じ bool フック方式
@@ -828,6 +855,10 @@ impl Module for Sigmoid {
     ) -> Result<Tensor<f32>, AutodiffError> {
         Ok(eval::sigmoid(input))
     }
+
+    fn as_sigmoid(&self) -> bool {
+        true
+    }
 }
 
 /// `Tanh::forward` への委譲。`Relu` の実装と同じ理由で `tape` は
@@ -872,6 +903,10 @@ impl Module for Gelu {
             fandhe_ai_tensor_core::ScalarUnaryOp::Gelu,
             input,
         )
+    }
+
+    fn as_gelu(&self) -> bool {
+        true
     }
 }
 
@@ -1703,6 +1738,10 @@ impl Module for Softmax {
             )));
         }
         Ok(value)
+    }
+
+    fn as_softmax(&self) -> Option<&Softmax> {
+        Some(self)
     }
 }
 

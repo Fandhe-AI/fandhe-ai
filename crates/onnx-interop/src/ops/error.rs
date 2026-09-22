@@ -132,6 +132,22 @@ pub enum OpError {
     /// はこの 2 ケースを区別せず `None` を返すため 1 variant で両方を表す
     /// （メッセージも両ケースを明示する）。
     IntegerDivisionFailed { op: &'static str },
+
+    /// `Conv`（イシュー #2076・`conv.rs`）の属性が ONNX 仕様上・本クレートの
+    /// 対応範囲上不正だった（`auto_pad` が `NOTSET` 以外・`pads` の長さ不一致
+    /// または非対称・`kernel_shape` が重み shape と不一致・`strides`／
+    /// `dilations` の長さ不一致・`group` が `i64` 範囲外または 0 等）。属性は
+    /// 外部モデル由来の入力のため計算前に検証する（OWASP A03。
+    /// `.claude/rules/security.md`）。`reason` に具体的な検証失敗理由を含める。
+    InvalidConvAttribute { reason: String },
+
+    /// `Conv` が [`fandhe_ai_tensor_core::Conv2dParams::new`]
+    /// （`kernel_size`／`stride`／`dilation`／`groups` の 0・`2·padding` の
+    /// `usize` オーバーフロー検査）から返した [`fandhe_ai_tensor_core::
+    /// BackendError`] をそのまま文字列化して透過する（`BackendError` は
+    /// 本クレートの依存関係外〈`tensor-core` のみ・`OpError` は独立した
+    /// エラー型〉のため `From` 実装ではなく明示変換で運ぶ）。
+    ConvParamsInvalid { reason: String },
 }
 
 impl fmt::Display for OpError {
@@ -221,6 +237,12 @@ impl fmt::Display for OpError {
                     f,
                     "{op}: i64 division failed (division by zero or i64::MIN / -1 overflow)"
                 )
+            }
+            OpError::InvalidConvAttribute { reason } => {
+                write!(f, "Conv: invalid attribute ({reason})")
+            }
+            OpError::ConvParamsInvalid { reason } => {
+                write!(f, "Conv: invalid Conv2dParams ({reason})")
             }
         }
     }
