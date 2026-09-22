@@ -167,9 +167,58 @@ fn find_spec(dir: &str) -> &'static ZooModel {
         .unwrap_or_else(|| panic!("ZOO_MODELS に {dir} が無い（テスト定義側の不整合）"))
 }
 
+/// 読み込みを許容するファイルサイズ上限（1 GiB）。
+///
+/// `examples/model_zoo_probe.rs::MAX_READ_BYTES` と同値。理由も同じ
+/// （A03。細工・破損した巨大 fixture を検証前に丸ごと読み込むとメモリ枯渇に
+/// つながる）。tests と examples はコードを共有できないため定数・関数とも
+/// 重複させている。
+const MAX_READ_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// サイズ上限を検査してからファイル全体を読み込む
+/// （`examples/model_zoo_probe.rs::read_file_bounded` と同型。TOCTOU 回避のため
+/// `metadata` 取得と読み込みを同一 `File` ハンドルに対して行い、事前の `len`
+/// 検査に加えて `take(max_bytes + 1)` による実読込量検査も行う fail-closed
+/// 二重防御。上限は呼び出し元でテスト可能にするため引数化している）。
+fn read_file_bounded_with_limit(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("ファイルオープン失敗: {} ({e})", path.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("メタデータ取得失敗: {} ({e})", path.display()))?;
+    let len = metadata.len();
+    if len > max_bytes {
+        return Err(format!(
+            "ファイルサイズ上限超過: {} ({len} bytes > {max_bytes} bytes)",
+            path.display()
+        ));
+    }
+
+    let mut buf = Vec::new();
+    let read_len = file
+        .take(max_bytes + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("読み込み失敗: {} ({e})", path.display()))?;
+    if read_len as u64 > max_bytes {
+        return Err(format!(
+            "ファイルサイズ上限超過（読み込み時検査）: {} (> {max_bytes} bytes)",
+            path.display()
+        ));
+    }
+    Ok(buf)
+}
+
+/// `MAX_READ_BYTES` 固定版（`load_model`・`load_tensor_pb` から呼ばれる本番経路）。
+/// 失敗はこのファイルの既存スタイル（`panic!`）に合わせる。
+fn read_file_bounded(path: &Path) -> Vec<u8> {
+    read_file_bounded_with_limit(path, MAX_READ_BYTES)
+        .unwrap_or_else(|e| panic!("fixture 読み込み失敗（上限付きローダー）: {e}"))
+}
+
 fn load_model(onnx_path: &Path) -> proto::ModelProto {
-    let bytes = std::fs::read(onnx_path)
-        .unwrap_or_else(|e| panic!("fixture 読み込み失敗 {}: {e}", onnx_path.display()));
+    let bytes = read_file_bounded(onnx_path);
     proto::decode_model(&bytes)
         .unwrap_or_else(|e| panic!("decode 失敗 {}: {e}", onnx_path.display()))
 }
@@ -181,8 +230,7 @@ fn load_model(onnx_path: &Path) -> proto::ModelProto {
 /// `checked_mul`・`raw_data` のバイト長完全一致を先に検査してから数値へ変換）
 /// を鏡写しにする（A03・no-silent-skip 契約）。
 fn load_tensor_pb(path: &Path) -> (String, Tensor<f32>) {
-    let bytes =
-        std::fs::read(path).unwrap_or_else(|e| panic!("pb 読み込み失敗 {}: {e}", path.display()));
+    let bytes = read_file_bounded(path);
     let t = TensorProto::decode(bytes.as_slice())
         .unwrap_or_else(|e| panic!("TensorProto decode 失敗 {}: {e}", path.display()));
     assert_eq!(
@@ -439,4 +487,40 @@ fn mobilenetv2_12_matches_expectation() {
 #[ignore = "Model Zoo 非コミット fixture・tests/fixtures/model-zoo/README.md 参照"]
 fn resnet50_v1_12_matches_expectation() {
     run_tier_b("resnet50-v1-12");
+}
+
+// --- 上限付きローダーの単体テスト（codex-review P0 指摘対応・PR #2225 sibling） ---
+
+/// `read_file_bounded_with_limit` が上限超過を fail-closed で拒否し、上限
+/// ちょうどは許容することを検証する（`tempfile` は許容依存外のため
+/// `std::env::temp_dir()` 配下に自前で一時ファイルを作る。プロセス ID を
+/// ファイル名へ含めて並行実行時の衝突を避ける）。
+///
+/// `take(max_bytes + 1)` による読み込み時検査（2 段目のガード）はファイルの
+/// `len()` と実読込量が食い違うレース条件下でしか単独では踏めないため、本
+/// テストでは `metadata().len()` 事前検査（1 段目）のみを対象にする。
+#[test]
+fn read_file_bounded_rejects_oversized_file() {
+    let path = std::env::temp_dir().join(format!(
+        "model_zoo_parity_bounded_{}_{}",
+        std::process::id(),
+        "rejects_oversized"
+    ));
+    let content = b"0123456789";
+    std::fs::write(&path, content).expect("一時ファイル書き込み失敗");
+
+    let too_small = read_file_bounded_with_limit(&path, (content.len() - 1) as u64);
+    let exact = read_file_bounded_with_limit(&path, content.len() as u64);
+
+    let _ = std::fs::remove_file(&path);
+
+    assert!(
+        too_small.is_err(),
+        "上限を 1 バイト下回る指定で許容してしまった: {too_small:?}"
+    );
+    assert_eq!(
+        exact.expect("上限ちょうどの指定は許容されるはず"),
+        content.to_vec(),
+        "上限ちょうどの指定で内容が変化した"
+    );
 }
