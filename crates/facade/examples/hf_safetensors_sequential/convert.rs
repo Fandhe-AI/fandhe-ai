@@ -135,6 +135,56 @@ fn check_shape(tensor: &Tensor<f32>, expected: &[usize], key: &str) -> Result<()
     }
 }
 
+/// `tensor` の rank（次元数）が `expected_rank` と一致することを検査
+/// する。`shape()[i]` による index アクセスより必ず先に呼ぶ
+/// （codex-review 指摘 P0・PR #2224。rank 不足の入力〈例えば 0 次元
+/// scalar〉に対する index out of bounds panic を防ぐ。
+/// `.claude/rules/security.md` A03「外部フォーマットは長さ・shape を
+/// 操作前に検証する」）。
+fn check_rank(tensor: &Tensor<f32>, expected_rank: usize, key: &str) -> Result<(), ConvertError> {
+    if tensor.shape().len() == expected_rank {
+        Ok(())
+    } else {
+        Err(ConvertError::ShapeMismatch {
+            key: format!("{key}（rank）"),
+            expected: vec![expected_rank],
+            actual: vec![tensor.shape().len()],
+        })
+    }
+}
+
+/// 2 次元 tensor の shape を検証する。`expected` の各軸は `Some(n)`
+/// （その軸は `n` と一致することを要求）または `None`（rank のみ検査
+/// し、値は検査しない——呼び出し時点でまだ値が定まっていない軸。
+/// 例えば PyTorch `linear1.weight [F, E]` の `F`〈feed-forward 次元〉は
+/// この tensor 自身の shape から初めて定まるため、既知の軸
+/// 〈入力次元 = embed_dim〉のみを検証する）で指定する。
+///
+/// 転置・narrow より必ず先に呼ぶ（`.claude/rules/security.md` A03）。
+/// rank を検査してから既知の軸を検査するため、rank 不足の入力に対する
+/// `shape()[axis]` panic は起きない。
+fn check_shape_2d(
+    tensor: &Tensor<f32>,
+    expected: [Option<usize>; 2],
+    key: &str,
+) -> Result<(), ConvertError> {
+    check_rank(tensor, 2, key)?;
+    let shape = tensor.shape();
+    for (axis, exp) in expected.into_iter().enumerate() {
+        let Some(exp) = exp else { continue };
+        if shape[axis] != exp {
+            let mut expected_full = shape.to_vec();
+            expected_full[axis] = exp;
+            return Err(ConvertError::ShapeMismatch {
+                key: key.to_string(),
+                expected: expected_full,
+                actual: shape.to_vec(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// `"{idx}.{rest}"` キーを `(idx, rest)` へ分解する。`idx` が数字でない
 /// キー（HF チェックポイントの LM head 等、`Sequential` の位置 index
 /// 接頭辞を持たない余剰テンソル）は `None` を返す（呼び出し側が
@@ -175,7 +225,27 @@ fn pack_in_proj(
         check_shape(t, &[e], key)?;
     }
 
-    let mut weight_data = Vec::with_capacity(3 * e * e);
+    // `split_in_proj`（逆方向変換）と対称の checked arithmetic
+    // （codex-review 指摘 P2・PR #2224）。上記 `check_shape` で
+    // 各射影が `[e, e]`／`[e]` と確認済みとはいえ、`3 * e * e`・
+    // `3 * e` という shape 由来の容量計算自体は独立した乗算であり、
+    // 通常の `*` は debug build で panic・release build で wrap する。
+    // `checked_mul` で事前検査し、オーバーフロー時は型付きエラーで
+    // 拒否する（`.claude/rules/security.md` A03）。
+    let three_e = e
+        .checked_mul(3)
+        .ok_or_else(|| ConvertError::ShapeOverflow {
+            key: "q_proj.weight".to_string(),
+            embed_dim: e,
+        })?;
+    let three_e_sq = three_e
+        .checked_mul(e)
+        .ok_or_else(|| ConvertError::ShapeOverflow {
+            key: "q_proj.weight".to_string(),
+            embed_dim: e,
+        })?;
+
+    let mut weight_data = Vec::with_capacity(three_e_sq);
     for w in [q_w, k_w, v_w] {
         // fandhe `Linear.weight` は `[in, out]`。PyTorch `in_proj_weight`
         // の各ブロックは `[out, in]` のため、pack 前に転置する
@@ -186,9 +256,9 @@ fn pack_in_proj(
             .expect("contiguous() 直後は as_slice() が必ず Some");
         weight_data.extend_from_slice(slice);
     }
-    let in_proj_weight = Tensor::new(weight_data, &[3 * e, e])?;
+    let in_proj_weight = Tensor::new(weight_data, &[three_e, e])?;
 
-    let mut bias_data = Vec::with_capacity(3 * e);
+    let mut bias_data = Vec::with_capacity(three_e);
     for b in [q_b, k_b, v_b] {
         let cont = b.contiguous();
         let slice = cont
@@ -196,7 +266,7 @@ fn pack_in_proj(
             .expect("contiguous() 直後は as_slice() が必ず Some");
         bias_data.extend_from_slice(slice);
     }
-    let in_proj_bias = Tensor::new(bias_data, &[3 * e])?;
+    let in_proj_bias = Tensor::new(bias_data, &[three_e])?;
 
     Ok((in_proj_weight, in_proj_bias))
 }
@@ -318,6 +388,12 @@ pub fn to_pytorch_layout(
                 let k_b = take(&sub, "self_attn.k_proj.bias")?;
                 let v_w = take(&sub, "self_attn.v_proj.weight")?;
                 let v_b = take(&sub, "self_attn.v_proj.bias")?;
+                // `shape()[0]` の index アクセスより先に rank を検査する
+                // （codex-review 指摘 P2・PR #2224。`q_w` が rank 不足
+                // 〈例えば scalar〉の場合の index out of bounds panic を
+                // 防ぐ。`from_pytorch_layout` 側の rank 検査と対称の
+                // fail-closed 方針）。
+                check_rank(q_w, 2, "self_attn.q_proj.weight")?;
                 let embed_dim = q_w.shape()[0];
 
                 let (in_proj_weight, in_proj_bias) =
@@ -418,6 +494,11 @@ pub fn from_pytorch_layout(
         match kind {
             LayerKind::Embedding => {
                 let w = take(&sub, "weight")?;
+                // 転置は行わないが、非信頼な外部 shape を無検査で
+                // そのまま流用しない（codex-review 指摘 P0・PR #2224）。
+                // `compat::Sequential::add_embedding` が要求する
+                // `Embedding.weight` は `[vocab, embed_dim]` の rank 2。
+                check_rank(w, 2, "weight")?;
                 out.insert(format!("{idx}.weight"), w.clone());
             }
             LayerKind::TransformerEncoder => {
@@ -451,8 +532,22 @@ pub fn from_pytorch_layout(
                 out.insert(format!("{idx}.self_attn.v_proj.weight"), v_w);
                 out.insert(format!("{idx}.self_attn.v_proj.bias"), v_b);
 
+                // 以下、shape 検証を転置より必ず先に行う（codex-review
+                // 指摘 P0・PR #2224。`.claude/rules/security.md` A03・
+                // 本モジュール doc §「REQ-7 契約」3.）。`self_attn.
+                // out_proj.*`・`norm{1,2}.*` は `embed_dim`（`split_in_proj`
+                // が既に検証済みの値）と一致することを、`linear{1,2}.*`
+                // は feed-forward 次元 `F`（`linear1.weight` 自身の shape
+                // から定まる）を linear1/linear2/bias 間で整合検証して
+                // から転置する。
                 let out_proj_w = take(&sub, "self_attn.out_proj.weight")?;
                 let out_proj_b = take(&sub, "self_attn.out_proj.bias")?;
+                check_shape(
+                    out_proj_w,
+                    &[embed_dim, embed_dim],
+                    "self_attn.out_proj.weight",
+                )?;
+                check_shape(out_proj_b, &[embed_dim], "self_attn.out_proj.bias")?;
                 out.insert(
                     format!("{idx}.self_attn.out_proj.weight"),
                     out_proj_w.transpose_2d()?.contiguous(),
@@ -468,23 +563,44 @@ pub fn from_pytorch_layout(
                 .into_iter()
                 .collect();
 
-                for (rest, transpose) in [
-                    ("linear1.weight", true),
-                    ("linear1.bias", false),
-                    ("linear2.weight", true),
-                    ("linear2.bias", false),
-                    ("norm1.weight", false),
-                    ("norm1.bias", false),
-                    ("norm2.weight", false),
-                    ("norm2.bias", false),
-                ] {
+                // PyTorch `nn.Linear.weight` 慣習は `[out_features,
+                // in_features]`。`linear1.weight` は `[F, embed_dim]`
+                // （`F` はこの checkpoint 固有の feed-forward 次元で、
+                // 他のどのテンソルからも事前には分からない）。rank と
+                // 既知の軸（`embed_dim`）のみを検証してから `F` を得る。
+                let linear1_w = take(&sub, "linear1.weight")?;
+                check_shape_2d(linear1_w, [None, Some(embed_dim)], "linear1.weight")?;
+                let feed_forward = linear1_w.shape()[0];
+                out.insert(
+                    format!("{idx}.linear1.weight"),
+                    linear1_w.transpose_2d()?.contiguous(),
+                );
+                known_keys.insert("linear1.weight");
+
+                let linear1_b = take(&sub, "linear1.bias")?;
+                check_shape(linear1_b, &[feed_forward], "linear1.bias")?;
+                out.insert(format!("{idx}.linear1.bias"), linear1_b.clone());
+                known_keys.insert("linear1.bias");
+
+                // `linear2.weight` は `[embed_dim, F]`。`linear1.weight`
+                // が確定した `F` との整合をここで検証してから転置する。
+                let linear2_w = take(&sub, "linear2.weight")?;
+                check_shape(linear2_w, &[embed_dim, feed_forward], "linear2.weight")?;
+                out.insert(
+                    format!("{idx}.linear2.weight"),
+                    linear2_w.transpose_2d()?.contiguous(),
+                );
+                known_keys.insert("linear2.weight");
+
+                let linear2_b = take(&sub, "linear2.bias")?;
+                check_shape(linear2_b, &[embed_dim], "linear2.bias")?;
+                out.insert(format!("{idx}.linear2.bias"), linear2_b.clone());
+                known_keys.insert("linear2.bias");
+
+                for rest in ["norm1.weight", "norm1.bias", "norm2.weight", "norm2.bias"] {
                     let t = take(&sub, rest)?;
-                    let converted = if transpose {
-                        t.transpose_2d()?.contiguous()
-                    } else {
-                        t.clone()
-                    };
-                    out.insert(format!("{idx}.{rest}"), converted);
+                    check_shape(t, &[embed_dim], rest)?;
+                    out.insert(format!("{idx}.{rest}"), t.clone());
                     known_keys.insert(rest);
                 }
 
