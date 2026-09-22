@@ -21,10 +21,10 @@ use fandhe_ai_tensor_core::{
     InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams,
     ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, ShapeError, Tensor, VectorNormOrd,
     adaptive_pool2d_out_shape, batch_norm_layout, broadcast_shape, concat_out_shape,
-    conv2d_out_shape, flatten_out_shape, gather_out_shape, gemm_out_shape,
-    interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape, pad_out_shape,
-    pool2d_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    conv_transpose2d_out_shape, conv2d_out_shape, flatten_out_shape, gather_out_shape,
+    gemm_out_shape, interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape,
+    pad_out_shape, pool2d_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -32,10 +32,11 @@ use crate::eval;
 use crate::grad::{
     ArgExtremum, adaptive_avg_pool2d_with_fallback, argext_with_fallback, avg_pool2d_with_fallback,
     batch_norm_infer_with_fallback, batch_norm_train_with_fallback, cast_from_f32_with_fallback,
-    concat_with_fallback, conv2d_with_fallback, gather_with_fallback, interpolate_with_fallback,
-    max_pool2d_with_fallback, min_with_fallback, one_hot_with_fallback, pad_with_fallback,
-    scalar_binary_with_fallback, scalar_unary_with_fallback, scatter_with_fallback,
-    sort_with_fallback, topk_with_fallback, unique_with_fallback,
+    concat_with_fallback, conv_transpose2d_with_fallback, conv2d_with_fallback,
+    gather_with_fallback, interpolate_with_fallback, max_pool2d_with_fallback, min_with_fallback,
+    one_hot_with_fallback, pad_with_fallback, scalar_binary_with_fallback,
+    scalar_unary_with_fallback, scatter_with_fallback, sort_with_fallback, topk_with_fallback,
+    unique_with_fallback,
 };
 use crate::tape::{NodeId, Op, Tape, materialize_fallible, materialize_non_fallible};
 
@@ -3191,6 +3192,131 @@ impl<'t> Var<'t> {
         }
         let id = self.tape.push_eager(
             Op::Conv2d {
+                input: self.id,
+                weight: weight.id,
+                bias: bias.map(|b| b.id),
+                params,
+            },
+            value_out,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// 2 次元転置畳み込み（`torch.nn.functional.conv_transpose2d`／
+    /// `nn.ConvTranspose2d` 相当。NCHW 固定。イシュー #2067・設計
+    /// `docs/conv-ops-design.md` §15）。`self`（`input`）: `[N, Cin,
+    /// H, W]`・`weight`: `[Cin, Cout/groups, kH, kW]`（PyTorch
+    /// `nn.ConvTranspose2d.weight` のレイアウト。[`Self::conv2d`] の
+    /// `[Cout, Cin/groups, kH, kW]` と先頭 2 軸が逆な点に注意）・
+    /// `bias`: `Some` なら `[Cout]`。
+    ///
+    /// **意図的な PyTorch 非互換**: `output_padding[i] < stride[i]`
+    /// を要求する（PyTorch は `output_padding < max(stride,
+    /// dilation)` まで許容）。3 バックエンド共通の `BackendOps::
+    /// col2im` override 契約（`P` 軸＝`conv_out_len(Hout)·
+    /// conv_out_len(Wout)`）と、`op >= stride` では
+    /// `conv_out_len(Hout) ≠ H` になり不整合を起こすため
+    /// （[`fandhe_ai_tensor_core::conv_transpose_out_len`] doc 参照。
+    /// 緩和は `col2im` の `P` 軸契約を `conv_out_len` から切り離す
+    /// 拡張が必要でスコープ外）。
+    ///
+    /// 検査順序: ①`check_same_tape` → ②weight rank 4 検査 →
+    /// ③`weight.shape()[2..4]` から `kernel_size` を導出し
+    /// [`Conv2dParams::new`]（`stride == 0` はここで拒否される。
+    /// `output_padding` 検査より先に置くことで `stride=0` 入力が
+    /// `output_padding` 起因の誤ったエラーで拒否されるのを防ぐ）→
+    /// ④`output_padding[i] < stride[i]`（`AutodiffError::
+    /// InvalidArgument`）→ ⑤[`conv_transpose2d_out_shape`] で
+    /// `out_shape` を確定（rank・チャンネル整合・空間軸 `H`／`W = 0`
+    /// 拒否・`op < s` ゲート込み）→ ⑥bias shape 検査 → ⑦`self`／
+    /// `weight`／`bias` を実体化 → ⑧`conv_transpose2d_with_fallback`
+    /// （`grad` 内非公開。§15「w_mat・x4・col2im」の段階的合成）→
+    /// ⑨戻り shape 検証（`.claude/rules/security.md` A08）→
+    /// ⑩`push_eager`（非融合・常実体化。`col2im`／`im2col` の中間
+    /// 結果は保持せず backward で再計算する。`Op::Conv2d`（非公開）と同型）。
+    #[allow(clippy::too_many_arguments)] // PyTorch `F.conv_transpose2d` の全引数（output_padding 含む）を受理するため（`nn/conv.rs` の allow 方針を踏襲）。
+    pub fn conv_transpose2d(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        stride: [usize; 2],
+        padding: [usize; 2],
+        output_padding: [usize; 2],
+        dilation: [usize; 2],
+        groups: usize,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(weight)?;
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+
+        let weight_shape = weight.shape();
+        if weight_shape.len() != 4 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 4,
+                actual: weight_shape.len(),
+            }));
+        }
+        let kernel_size = [weight_shape[2], weight_shape[3]];
+        let params = Conv2dParams::new(kernel_size, stride, padding, dilation, groups)
+            .map_err(AutodiffError::Backend)?;
+        if output_padding[0] >= stride[0] || output_padding[1] >= stride[1] {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Var::conv_transpose2d: output_padding ({output_padding:?}) must be < stride \
+                 ({stride:?}) on each axis (col2im の P 軸契約による意図的な PyTorch 非互換。\
+                 設計 docs/conv-ops-design.md §15)"
+            )));
+        }
+
+        let in_shape = self.shape();
+        let out_shape =
+            conv_transpose2d_out_shape(&in_shape, &weight_shape, &params, output_padding)
+                .map_err(AutodiffError::Shape)?;
+        if let Some(b) = bias {
+            let bias_shape = b.shape();
+            let cout = out_shape[1];
+            if bias_shape != [cout] {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: bias_shape,
+                    rhs: vec![cout],
+                }));
+            }
+        }
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let weight_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), weight.id)?.clone()
+        };
+        let bias_val = match bias {
+            Some(b) => {
+                let nodes = self.tape.nodes.borrow();
+                Some(materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone())
+            }
+            None => None,
+        };
+
+        let value_out = conv_transpose2d_with_fallback(
+            self.tape.ops(),
+            &input_val,
+            &weight_val,
+            bias_val.as_ref(),
+            &params,
+            &out_shape,
+        )?;
+        if value_out.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value_out.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::ConvTranspose2d {
                 input: self.id,
                 weight: weight.id,
                 bias: bias.map(|b| b.id),
