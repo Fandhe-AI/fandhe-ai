@@ -331,7 +331,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 |---|---|---|---|---|
 | 単一 GPU 選択（`device='cuda:0'`） | `tf.device` | あり（`Device::Cuda(ordinal)`） | - | - |
 | `.to(device)`（テンソル転送） | `tf.identity` with device | なし（`tape_for` でバックエンドごと `Tape` を切替える設計。テンソル単体を明示転送する API はない） | `Tensor`/`Var` のデバイス間コピー API | M |
-| 複数 GPU・`DataParallel`/`DDP` | `tf.distribute.MirroredStrategy` | なし | 勾配 all-reduce・パラメータ複製の設計（ネットワーク層から必要）。設計: `docs/facade-multi-gpu-ddp-decision.md`（#1628） | XL |
+| 複数 GPU・`DataParallel`/`DDP` | `tf.distribute.MirroredStrategy` | なし | 勾配 all-reduce・パラメータ複製の設計（ネットワーク層から必要）。設計: `docs/facade-multi-gpu-ddp-decision.md`（#1628）。格上げ条件表案: `docs/ddp-grade-up-conditions.md`（#2074） | XL |
 | デバイス自動列挙（`torch.cuda.device_count()`） | `tf.config.list_physical_devices` | なし（`docs/public-api-design.md` §4.1 未決事項として明記） | `Device::available()` 相当の列挙 API | S〜M |
 
 ### 2.14 データ
