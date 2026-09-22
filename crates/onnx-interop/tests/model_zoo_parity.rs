@@ -238,10 +238,17 @@ fn assert_req7(actual: &Tensor<f32>, expected: &Tensor<f32>) {
     let mut max_rel_err = 0.0f32;
     for (&a, &e) in actual_slice.iter().zip(expected_slice.iter()) {
         let rel_err = (a - e).abs() / (e.abs() + 1e-6);
-        if rel_err > max_rel_err {
-            max_rel_err = rel_err;
+        // rel_err が NaN になる（a・e のいずれかが NaN、または同符号の無限大同士等）
+        // 場合、`rel_err > 1e-3` は false 判定になり fail_count に計上されない。
+        // fail-closed（REQ-7）のため、非有限な rel_err は無条件で fail 扱いにする。
+        if rel_err.is_finite() {
+            if rel_err > max_rel_err {
+                max_rel_err = rel_err;
+            }
+        } else {
+            max_rel_err = f32::INFINITY;
         }
-        if rel_err > 1e-3 {
+        if !rel_err.is_finite() || rel_err > 1e-3 {
             fail_count += 1;
         }
     }

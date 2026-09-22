@@ -67,16 +67,15 @@ sha256sum "$ONNX_INTEROP_MODEL_ZOO_DIR"/<name>/<name>.onnx   # 下表の .onnx s
 
 | モデル | Model Zoo パス | ライセンス | tar.gz LFS oid（sha256） | `.onnx` sha256 |
 |---|---|---|---|---|
-| `squeezenet1.0-12` | `validated/vision/classification/squeezenet/model/squeezenet1.0-12` | Apache-2.0 | `8a2dcc5a…0cb917`（詳細は取得後に自前で再計算し本 README を更新すること） | `dec81a86…992bd` |
-| `mobilenetv2-12` | `validated/vision/classification/mobilenet/model/mobilenetv2-12` | Apache-2.0 | `5f83b422…37762d` | `c0c3f76d…32ad5` |
-| `resnet50-v1-12` | `validated/vision/classification/resnet/model/resnet50-v1-12` | Apache-2.0 | `9391137c…599ea` | `3f03fdef…d1526` |
+| `squeezenet1.0-12` | `validated/vision/classification/squeezenet/model/squeezenet1.0-12` | Apache-2.0 | `8a2dcc5a8f2b8c314b96b6484703a72882c796faa4eaf0de1b913fc0765cb917`（5,151,210 B） | `dec81a8684617770b3cf13fadc1d92565d1d453d23935fc6388b792d99c992bd` |
+| `mobilenetv2-12` | `validated/vision/classification/mobilenet/model/mobilenetv2-12` | Apache-2.0 | `5f83b422708a708b592a5fd56d84710038511789df3ae510b84123930c37762d`（13,498,787 B） | `c0c3f76d93fa3fd6580652a45618618a220fced18babf65774ed169de0432ad5` |
+| `resnet50-v1-12` | `validated/vision/classification/resnet/model/resnet50-v1-12` | Apache-2.0 | `9391137cfc8fbec372d7a1e59e272d67550dab72d93cf7c7d6256782262599ea`（96,559,469 B） | `3f03fdef724b22947eed826f1eef1dc5c34151bb4c37d634f1db89dfa2dd1526` |
 
-上記 tier B の oid／sha256 は計画立案時（Plan フェーズ）に記録された値であり、
-本 PR の実装時点では実ファイルのダウンロード検証を行っていない（103 MB の
-resnet50-v1-12 を含み容量都合で本セッションでは再取得しなかった）。**tier B
-の `#[ignore]` テストを初めて実行する開発者は、取得したファイルの sha256 を
-必ず自分で再計算し、この表と食い違えば実測値でこの README を更新すること**
-（fail-closed。上記省略記法 `…` の値をそのまま信頼しない）。
+上記 tier B の oid／sha256 は 2026-09-22 に実ファイルをダウンロードし
+`sha256sum` で実測した値（イシュー #2081 PR #2225 codex-review 指摘対応）。
+`#[ignore]` テストを実行する開発者は、取得したファイルの sha256 が本表と
+一致することを確認すること（不一致の場合は取得元・commit SHA を再確認し、
+fail-closed で扱う）。
 
 グラフ構造の実測値（計画立案時点。Plan フェーズで `build_graph` まで到達
 確認済み。`run` はいずれも HEAD で `UnsupportedOp("Conv")`）:
