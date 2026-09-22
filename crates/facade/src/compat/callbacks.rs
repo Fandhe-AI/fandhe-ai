@@ -429,10 +429,10 @@ impl ModelCheckpoint {
         self
     }
 
-    /// スナップショット更新時（`Self::observe` が in-memory `state` を
-    /// 書き換えた時）に safetensors ファイルへも書き出す（ビルダー・
-    /// FS には一切触れない infallible 操作。実際の I/O は
-    /// [`Self::observe`] 呼び出し時のみ発生する。モジュール冒頭 doc
+    /// スナップショット更新時（内部の `observe` メソッドが in-memory
+    /// `state` を書き換えた時）に safetensors ファイルへも書き出す
+    /// （ビルダー・FS には一切触れない infallible 操作。実際の I/O は
+    /// `observe` 呼び出し時のみ発生する。モジュール冒頭 doc
     /// 「`ModelCheckpoint` のファイル保存」節）。
     ///
     /// 未指定（既定）の場合は従来どおり in-memory のみで動作する。
