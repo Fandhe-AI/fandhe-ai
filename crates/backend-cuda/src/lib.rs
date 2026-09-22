@@ -373,8 +373,13 @@ mod init_cost_diag_tests;
 // 分解する診断テスト。`context_cache`・`launch_tiled_f32_pooled` へ
 // 到達する必要があるため `gemm_reuse_phase_diag_tests` と同じ理由で
 // クレートルートの兄弟モジュールとして配置する。
+// イシュー #2069: `CudaBackendOps::adam_step_device` の in-place Adam・
+// AdamW 常駐 step カーネル起動 API（`sgd.rs`／`kernels_sgd.rs` と同じ
+// 「起動 API／NVRTC カーネル文字列」の 2 ファイル構成）。
+mod adam;
 mod huber;
 mod kernels;
+mod kernels_adam;
 mod kernels_batch_norm;
 mod kernels_bce;
 mod kernels_elementwise;

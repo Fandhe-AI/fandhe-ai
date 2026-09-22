@@ -1045,6 +1045,92 @@ pub(crate) fn vjp(
             }
             contributions
         }
+        // `Var::conv_transpose2d`（col2im＋GEMM。イシュー #2067・設計
+        // `docs/conv-ops-design.md` §15）。`weight`: `[Cin, Cout_g,
+        // kH, kW]`（`Op::Conv2d` と先頭 2 軸が逆）。`col` を保持しない
+        // ため `im2col`（上流 `g` に対して）を再計算する（`Op::Conv2d`
+        // VJP と同型の再計算方針）。
+        //
+        // 「VJP は conv2d forward へ帰着する（転置畳み込みの随伴が
+        // 通常畳み込みそのもの）」という設計 doc §15 の核心関係:
+        // d_input = gemm_batched_fp32_strict(w_mat, im2col(g))
+        //   （＝ `Var::conv2d(g, weight, None, …)` の forward と同じ
+        //   im2col＋GEMM 合成。**`conv2d_with_fallback` は直接呼ばない**
+        //   ——`ops.conv2d` override フックと非 strict `gemm_batched`
+        //   を経由してしまうと「VJP は TF32 opt-in に追従しない」
+        //   方針〈`matmul`／`Op::Conv2d` と同じ〉を破るため）。
+        Op::ConvTranspose2d {
+            input,
+            weight,
+            bias,
+            params,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let weight_val = materialize_fallible(nodes, ops, weight)?;
+            let input_shape = input_val.shape().to_vec();
+            let weight_shape = weight_val.shape().to_vec();
+
+            let groups = params.groups();
+            let cin = input_shape[1];
+            let cin_g = cin / groups.max(1);
+
+            let g_c = upstream.contiguous();
+            let g_shape = g_c.shape().to_vec();
+            let n_batch = g_shape[0];
+            let hout = g_shape[2];
+            let wout = g_shape[3];
+            let p = hout
+                .checked_mul(wout)
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+
+            let im2col_shape = fandhe_ai_tensor_core::im2col_out_shape(&g_shape, &params)
+                .map_err(AutodiffError::Shape)?;
+            let col_g = im2col_with_fallback(ops, &g_c, &params, &im2col_shape)?;
+            let k_g = im2col_shape[2];
+
+            // d_input（＝ conv2d(g, weight) forward）: gemm_batched_
+            //   fp32_strict(w_mat, col_g).reshape([N, Cin, H, W])。
+            let w_mat = weight_val
+                .contiguous()
+                .reshape(&[groups, cin_g, k_g])
+                .map_err(AutodiffError::Shape)?;
+            let d_input_mat = ops
+                .gemm_batched_fp32_strict(&w_mat, &col_g)
+                .map_err(AutodiffError::Backend)?;
+            let d_input = d_input_mat
+                .reshape(&input_shape)
+                .map_err(AutodiffError::Shape)?;
+
+            // d_weight: gemm_batched_fp32_strict(x4, col_gᵀ)
+            //   -> [N, G, Cin_g, K_g] -> N 軸を f64 で縮約
+            //   -> [Cin, Cout_g, kH, kW] へ reshape。
+            let x4 = input_val
+                .contiguous()
+                .reshape(&[n_batch, groups, cin_g, input_shape[2] * input_shape[3]])
+                .map_err(AutodiffError::Shape)?;
+            let col_g_t = transpose_last2(&col_g);
+            let dw_full = ops
+                .gemm_batched_fp32_strict(&x4, &col_g_t)
+                .map_err(AutodiffError::Backend)?;
+            let dw = reduce_batch_axes_f64(&dw_full, &[groups, cin_g, k_g])?;
+            let d_weight = dw.reshape(&weight_shape).map_err(AutodiffError::Shape)?;
+
+            let mut contributions = vec![(input, d_input), (weight, d_weight)];
+            if let Some(bias_id) = bias {
+                // d_bias[c] = Σ_{n, oh, ow} upstream[n, c, oh, ow]
+                //   （`Op::Conv2d` の d_bias と同一契約。f64 逐次和）。
+                let cout_usize = nodes[bias_id.0].shape[0];
+                let permuted = g_c.permute(&[0, 2, 3, 1]).map_err(AutodiffError::Shape)?;
+                let rows = permuted
+                    .contiguous()
+                    .reshape(&[n_batch * p, cout_usize])
+                    .map_err(AutodiffError::Shape)?;
+                let bias_data = eval::reduce_bias_grad_rows(&rows);
+                let d_bias = build_tensor(bias_data, &nodes[bias_id.0].shape);
+                contributions.push((bias_id, d_bias));
+            }
+            contributions
+        }
         // view ノード（イシュー #1047・親 #1043「カーネル融合・autodiff
         // 実行モデルの強化」）。`Reshape`/`Transpose` は逆写像も同じ演算
         // 族（reshape は「元の shape へ戻す」・transpose は対合）で
@@ -2569,6 +2655,92 @@ pub(crate) fn col2im_with_fallback(
         }
         Err(BackendError::Unsupported(_)) => Ok(eval::col2im(d_col, input_shape, params)),
         Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
+/// [`Op::ConvTranspose2d`] の forward（`Var::conv_transpose2d`）が使う
+/// 段階的合成ヘルパー（イシュー #2067・設計 `docs/conv-ops-design.md`
+/// §15）。
+///
+/// 「転置畳み込みは通常畳み込みの随伴」という関係（設計 doc §15）に
+/// 基づき、`weight` を「仮想 conv2d」の重み `[Cout_conv = Cin,
+/// Cin_conv/G = Cout_g, kH, kW]` とみなして GEMM＋col2im で計算する:
+///
+/// ```text
+/// w_mat = weight.reshape([G, Cin_g, K_g])            // K_g = Cout_g·kH·kW
+/// x4    = input.reshape([N, G, Cin_g, H·W])
+/// d_col = ops.gemm_batched(transpose_last2(w_mat), x4)  // [N, G, K_g, H·W]（常にバックエンド）
+/// out   = col2im_with_fallback(ops, d_col, out_shape, params)
+/// out  += bias.reshape([1, Cout, 1, 1])                 // ops.add
+/// ```
+///
+/// **`col2im_with_fallback` の `input_shape` 引数には「転置畳み込みの
+/// 出力 shape」（`out_shape`）を渡す**——`col2im` の "input" は仮想
+/// conv2d の入力（＝転置畳み込みの出力）を指すため、`Var::conv2d` の
+/// `conv2d_with_fallback` に慣れた読み手ほど誤読しやすい（設計 doc
+/// §15 実装ステップ 3 のコメント指示）。
+///
+/// GEMM は常に `ops.gemm_batched`（[`conv2d_with_fallback`] と同じく
+/// ホストフォールバックなし。forward は CUDA TF32 opt-in に追従する）。
+/// `ops.col2im` は `Unsupported` のときのみ `eval::col2im` へ
+/// フォールバックする（判定迂回経路を作らない）。
+pub(crate) fn conv_transpose2d_with_fallback(
+    ops: &dyn BackendOps,
+    input: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    bias: Option<&Tensor<f32>>,
+    params: &fandhe_ai_tensor_core::Conv2dParams,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    let in_shape = input.shape().to_vec();
+    let weight_shape = weight.shape().to_vec();
+    let groups = params.groups();
+    let cin = in_shape[1];
+    let cin_g = cin / groups.max(1);
+    let cout_g = weight_shape[1];
+    let cout = out_shape[1];
+    let k_g = cout_g
+        .checked_mul(weight_shape[2])
+        .and_then(|v| v.checked_mul(weight_shape[3]))
+        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+    let hw = in_shape[2]
+        .checked_mul(in_shape[3])
+        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+
+    let w_mat = weight
+        .contiguous()
+        .reshape(&[groups, cin_g, k_g])
+        .map_err(AutodiffError::Shape)?;
+    let x4 = input
+        .contiguous()
+        .reshape(&[in_shape[0], groups, cin_g, hw])
+        .map_err(AutodiffError::Shape)?;
+    let w_mat_t = transpose_last2(&w_mat);
+    let d_col = ops
+        .gemm_batched(&w_mat_t, &x4)
+        .map_err(AutodiffError::Backend)?;
+    let out_no_bias = col2im_with_fallback(ops, &d_col, out_shape, params)?;
+
+    match bias {
+        Some(b) => {
+            let bias_reshaped = b
+                .contiguous()
+                .reshape(&[1, cout, 1, 1])
+                .map_err(AutodiffError::Shape)?;
+            let out = ops
+                .add(&out_no_bias, &bias_reshaped)
+                .map_err(AutodiffError::Backend)?;
+            if out.shape() != out_shape {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    ShapeError::ShapeMismatch {
+                        lhs: out.shape().to_vec(),
+                        rhs: out_shape.to_vec(),
+                    },
+                )));
+            }
+            Ok(out)
+        }
+        None => Ok(out_no_bias),
     }
 }
 
@@ -11026,6 +11198,129 @@ release ビルドでも検知できるよう `assert!` を使う）"
             "d_bias は f64 逐次和（1.0）のはずで f32 逐次和（0.0）ではない"
         );
     }
+
+    /// イシュー #2067「(a) `conv_transpose2d(x, w, None)` の値 ≡
+    /// `Op::Conv2d` VJP の d_input（上流＝`x`・weight 同一）」の主
+    /// テスト（設計「検証方法」§6.1）。`NaiveOps` 上では `gemm_batched`／
+    /// `gemm_batched_fp32_strict` が既定合成同士で数値上区別できない
+    /// ため、本テストは「転置畳み込みは通常畳み込みの随伴」という
+    /// 構造の正しさ（同じ入力から同じ値が出ること）を固定する。CPU
+    /// バックエンドでの override 経由の bit 一致は
+    /// `crates/facade/tests/conv_transpose2d_backend_parity.rs` で
+    /// 追加検証する。
+    #[test]
+    fn conv_transpose2d_forward_matches_conv2d_vjp_d_input() {
+        let params =
+            fandhe_ai_tensor_core::Conv2dParams::new([2, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        // x: [1,1,2,2]（Op::Conv2d の upstream として使う）。
+        let x = t(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]);
+        let w = t(&[1.0, 0.0, 0.0, 1.0], &[1, 1, 2, 2]);
+
+        // (1) Op::Conv2d の VJP で d_input を求める（upstream = x）。
+        //     入力 shape は conv2d(input=[1,1,3,3], w) の出力が [1,1,2,2]
+        //     になるよう [1,1,3,3] を使う（d_input の shape は input と
+        //     同じ [1,1,3,3] になる）。
+        let conv2d_input_shape = [1usize, 1, 3, 3];
+        let conv2d_input = t(&[0.0; 9], &conv2d_input_shape);
+        let conv2d_out_value = t(&[0.0; 4], &[1, 1, 2, 2]);
+        let nodes = vec![leaf_node(conv2d_input), leaf_node(w.clone())];
+        let op = Op::Conv2d {
+            input: NodeId(0),
+            weight: NodeId(1),
+            bias: None,
+            params: params.clone(),
+        };
+        let grads = vjp(
+            &op,
+            &conv2d_out_value,
+            &x,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+        let d_input = grads
+            .iter()
+            .find(|(id, _)| *id == NodeId(0))
+            .map(|(_, g)| g.clone())
+            .expect("input が contributions に含まれるはず");
+        assert_eq!(d_input.shape(), &conv2d_input_shape);
+
+        // (2) Var::conv_transpose2d(x, w, None) と同じ合成を直接呼ぶ
+        //     （転置畳み込みの forward は「upstream=x とした conv2d の
+        //     d_input」と定義上一致する）。
+        let out_shape = fandhe_ai_tensor_core::conv_transpose2d_out_shape(
+            x.shape(),
+            w.shape(),
+            &params,
+            [0, 0],
+        )
+        .unwrap();
+        assert_eq!(out_shape, conv2d_input_shape.to_vec());
+        let ct_out =
+            conv_transpose2d_with_fallback(&test_ops(), &x, &w, None, &params, &out_shape).unwrap();
+        assert_eq!(dense_vec(&ct_out), dense_vec(&d_input));
+    }
+
+    /// イシュー #2067「(b) `Op::ConvTranspose2d` VJP の d_input（上流＝
+    /// `g`）≡ `Var::conv2d(g, w, None, …)` の forward 値」の主テスト。
+    #[test]
+    fn conv_transpose2d_vjp_d_input_matches_conv2d_forward() {
+        let params =
+            fandhe_ai_tensor_core::Conv2dParams::new([2, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        // ConvTranspose2d: input [1,1,2,2] -> output [1,1,3,3]。
+        let x = t(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]);
+        let w = t(&[1.0, 0.0, 0.0, 1.0], &[1, 1, 2, 2]);
+        let out_shape = fandhe_ai_tensor_core::conv_transpose2d_out_shape(
+            x.shape(),
+            w.shape(),
+            &params,
+            [0, 0],
+        )
+        .unwrap();
+        // 上流勾配 g（ConvTranspose2d の出力 shape と同じ [1,1,3,3]）。
+        let g = t(&[1.0, 0.5, -1.0, 2.0, 0.0, 1.0, -2.0, 0.5, 3.0], &out_shape);
+
+        let nodes = vec![leaf_node(x.clone()), leaf_node(w.clone())];
+        let out_value = t(
+            vec![0.0f32; out_shape.iter().product()].as_slice(),
+            &out_shape,
+        );
+        let op = Op::ConvTranspose2d {
+            input: NodeId(0),
+            weight: NodeId(1),
+            bias: None,
+            params: params.clone(),
+        };
+        let grads = vjp(
+            &op,
+            &out_value,
+            &g,
+            &nodes,
+            &test_ops(),
+            None,
+            TapeId::for_test(0),
+            0,
+        )
+        .unwrap();
+        let d_input = grads
+            .iter()
+            .find(|(id, _)| *id == NodeId(0))
+            .map(|(_, gr)| gr.clone())
+            .expect("input が contributions に含まれるはず");
+
+        // Var::conv2d(g, w, None, …) の forward（conv2d_with_fallback）
+        // と一致するはず。
+        let conv2d_out_shape_ =
+            fandhe_ai_tensor_core::conv2d_out_shape(g.shape(), w.shape(), &params).unwrap();
+        let conv2d_fwd =
+            conv2d_with_fallback(&test_ops(), &g, &w, None, &params, &conv2d_out_shape_).unwrap();
+        assert_eq!(d_input.shape(), conv2d_fwd.shape());
+        assert_eq!(dense_vec(&d_input), dense_vec(&conv2d_fwd));
+    }
+
     // イシュー #1834 codex-review P1 是正の回帰テスト（2 件）。
 
     #[test]

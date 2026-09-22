@@ -31,7 +31,7 @@ use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
-use crate::nn::conv::{Conv1d, Conv2d};
+use crate::nn::conv::{Conv1d, Conv2d, ConvTranspose2d};
 use crate::nn::embedding::Embedding;
 use crate::nn::flatten::Flatten;
 use crate::nn::linear::Linear;
@@ -40,6 +40,7 @@ use crate::nn::normalization::{GroupNorm, InstanceNorm, group_norm_forward_host}
 use crate::nn::pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
 };
+use crate::nn::transformer_encoder_layer::TransformerEncoderLayer;
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
@@ -189,6 +190,21 @@ pub trait Module {
         None
     }
 
+    /// [`Module::as_linear`] と同型の明示フック（イシュー #2067）。
+    /// `ConvTranspose2d` 層向け。既定 `None`。`compat::Sequential::
+    /// add_conv_transpose2d`（facade 公開面）の接続はユーザー承認待ち
+    /// （`docs/compat-api-scope.md` §5・設計 `docs/conv-ops-design.md`
+    /// §15「承認事項」節）であり、本フック自体は `compat` 層と独立に
+    /// `nn::Sequential`（autodiff 汎用コンテナ）から利用できる。
+    fn as_conv_transpose2d(&self) -> Option<&ConvTranspose2d> {
+        None
+    }
+
+    /// [`Module::as_conv_transpose2d`] の可変版。
+    fn as_conv_transpose2d_mut(&mut self) -> Option<&mut ConvTranspose2d> {
+        None
+    }
+
     /// [`Module::as_linear`] と同型の明示フック（イシュー #1760・親
     /// #1618）。`compat::Sequential` の学習経路（`bind`／
     /// `trainable_parameters`／`apply_parameters` 等）が `LayerNorm` 層
@@ -281,6 +297,22 @@ pub trait Module {
 
     /// [`Module::as_multihead_attention`] の可変版。
     fn as_multihead_attention_mut(&mut self) -> Option<&mut MultiheadAttention> {
+        None
+    }
+
+    /// [`Module::as_layer_norm`] と同型の明示フック（イシュー #2068・
+    /// 親 #2059）。`TransformerEncoderLayer`（self-attention → residual
+    /// → LayerNorm → FFN → residual → LayerNorm の合成。
+    /// `nn/transformer_encoder_layer.rs` モジュール doc 参照）向け。
+    /// `compat::Sequential` の学習経路（`bind`／`trainable_vars`／
+    /// `trainable_grads`／常駐ガード）が本層を認識するために使う。
+    /// 既定 `None`。
+    fn as_transformer_encoder_layer(&self) -> Option<&TransformerEncoderLayer> {
+        None
+    }
+
+    /// [`Module::as_transformer_encoder_layer`] の可変版。
+    fn as_transformer_encoder_layer_mut(&mut self) -> Option<&mut TransformerEncoderLayer> {
         None
     }
 
@@ -679,6 +711,43 @@ impl Module for Conv2d {
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         Conv2d::forward_host(self, ops, input)
+    }
+}
+
+/// `ConvTranspose2d::bind(tape).forward(input)`（`nn/conv.rs` 参照。
+/// イシュー #2067）。
+impl Module for ConvTranspose2d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn as_conv_transpose2d(&self) -> Option<&ConvTranspose2d> {
+        Some(self)
+    }
+
+    fn as_conv_transpose2d_mut(&mut self) -> Option<&mut ConvTranspose2d> {
+        Some(self)
+    }
+
+    /// 命名契約は `Conv2d` と同型（`weight` → `bias`）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![("weight".to_string(), self.weight())];
+        if let Some(bias) = self.bias() {
+            out.push(("bias".to_string(), bias));
+        }
+        out
+    }
+
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        ConvTranspose2d::set_parameter(self, name, value)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        ConvTranspose2d::forward_host(self, ops, input)
     }
 }
 

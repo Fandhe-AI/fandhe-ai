@@ -587,13 +587,15 @@ d_input スキップは `docs/autodiff-nograd-leaf-dinput-skip-decision.md`
 issue で追跡。本 doc では起票しない）
 
 直接畳み込み／implicit GEMM／Winograd／FFT カーネル・depthwise
-（`groups = Cin`）専用カーネル・conv3d・ConvTranspose1d／2d（col2im
-再利用前提）・channels_last・`padding_mode ≠ zeros`・
-`padding='same'`／`'valid'` 文字列・GPU backward 専用カーネル（d_bias
-の GPU 縮約含む）・デバイス常駐推論チェーン（`linear_forward_device`
-相当）・ONNX `Conv` export／import マッピング・CPU im2col／col2im 並列化・
+（`groups = Cin`）専用カーネル・conv3d・ConvTranspose1d（col2im 再利用
+前提。`ConvTranspose2d` は #2067 で実装済み・§15 参照）・
+channels_last・`padding_mode ≠ zeros`・`padding='same'`／`'valid'`
+文字列・GPU backward 専用カーネル（d_bias の GPU 縮約含む）・デバイス
+常駐推論チェーン（`linear_forward_device` 相当）・ONNX `Conv`／
+`ConvTranspose` export／import マッピング・CPU im2col／col2im 並列化・
 `gemm_bias_act` epilogue 融合の Conv 適用・framework-compare への Conv
-ベンチ追加・`compat::Sequential::add_conv*` の実装判断（#1645）。
+ベンチ追加・`compat::Sequential::add_conv*`／`add_conv_transpose2d` の
+実装判断（#1645・#2067）。
 
 ## 12. 承認事項（#1642 着手前の前提）
 
@@ -1290,3 +1292,56 @@ CUDA 節）。
 是正（reduction カーネル側の `INFINITY` 定義の置換）はコード変更であり本記録の
 対象外（ユーザー判断へ回す）。総合分析は
 `docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md` §2a・§3.1。
+
+### #2067（`Var::conv_transpose2d`・`Op::ConvTranspose2d`・`nn::ConvTranspose2d`）
+
+`nn.ConvTranspose2d`／`F.conv_transpose2d` 相当の転置畳み込みを、既存
+Conv2d 基盤（`im2col`／`col2im`／`gemm_batched`）の流用で実装した
+（本 doc §11 の「ConvTranspose1d／2d（col2im 再利用前提）」対象外から
+2d を実装対象へ格上げ。GPU ネイティブカーネルは対象外のまま）。
+
+- **数式・随伴関係**: 転置畳み込み `x → y` は、`y` を入力・weight を
+  conv 重みとみなした「仮想 conv2d」（`Conv2dParams` は同一。kernel /
+  stride / padding / dilation / groups を共有し `output_padding` の
+  みは仮想 conv2d 側に存在しない）の随伴（d_input）として定義した。
+  forward は `d_col = gemm_batched(transpose_last2(w_mat), x4)` →
+  `col2im`、VJP の d_input は `gemm_batched_fp32_strict(w_mat,
+  im2col(g))`（＝ `Var::conv2d(g, weight, None, …)` の forward と同じ
+  合成）に帰着する。
+- **`Op::ConvTranspose2d { input, weight, bias, params }`**
+  （`crates/autodiff/src/tape.rs`）: `weight` は `[Cin, Cout/groups,
+  kH, kW]`（`Op::Conv2d` と先頭 2 軸が逆。PyTorch
+  `nn.ConvTranspose2d.weight` 準拠）。`output_padding` は保持しない
+  （`nodes[input].shape`／`upstream.shape()` から導出可能）。`Op::Conv2d`
+  と同じく非融合・`push_eager`・`is_checkpoint_eligible = false`。
+- **`tensor-core`**: `ops_shape::{conv_transpose_out_len,
+  conv_transpose2d_out_shape}`（`crates/tensor-core/src/ops_shape.rs`）。
+  PyTorch 式 `(in−1)·s − 2p + d(k−1) + op + 1` を実装する。
+- **`autodiff`**: `grad::conv_transpose2d_with_fallback`（forward。
+  `grad.rs`）・`Op::ConvTranspose2d` の VJP（d_input／d_weight／
+  d_bias。`grad.rs`）・`Var::conv_transpose2d`（`var.rs`）・
+  `nn::ConvTranspose2d`／`ConvTranspose2dVars`（`nn/conv.rs`）・
+  `Module::as_conv_transpose2d`／`_mut` フック（`nn/module.rs`）。
+- **意図的な PyTorch 非互換**: `output_padding[i] < stride[i]` を要求
+  する（PyTorch は `output_padding < max(stride, dilation)` まで許容）。
+  3 バックエンド共通の `BackendOps::col2im` override 契約
+  （`P` 軸＝`conv_out_len(Hout)·conv_out_len(Wout)`）が `op < s` を
+  前提にしており、緩和には col2im の `P` 軸契約を `conv_out_len` から
+  切り離す拡張が必要（スコープ外。§11 参照）。
+- **CPU bit 一致の実測根拠**: `CpuBackendOps::gemm_batched`
+  override（`crates/backend-cpu/src/ops.rs`）は既定合成実装と
+  bit 同一（doc comment に明記済み）・`gemm_fp32_strict`／
+  `gemm_batched_fp32_strict` は CPU では override されず既定
+  `self.gemm` に委譲するため、CPU 上で「転置畳み込み forward」と
+  「`Op::Conv2d` VJP の d_input」・「`Op::ConvTranspose2d` VJP の
+  d_input」と「`Var::conv2d` forward」がそれぞれ bit 一致することを
+  `crates/facade/tests/conv_transpose2d_backend_parity.rs`（
+  `CpuBackendOps` 経由）・`crates/autodiff/src/grad.rs` unit test
+  （`NaiveOps` 経由の構造検証）で固定した。
+- **承認待ち（facade 公開面拡張）**: `compat::Sequential::
+  add_conv_transpose2d` は `docs/compat-api-scope.md` §1.3 の Tier 2
+  表に含まれないため未実装（本 issue では追加しない。§11 参照）。
+- **実機未実測**: CUDA（DGX Spark GB10）・Metal（Apple Silicon）の
+  `#[ignore]` parity テストは本環境（実機非到達）では未実行のまま
+  出荷し、`docs/perf/logs/conv-transpose2d-2067/README.md` へ実行
+  コマンドを申し送る。
