@@ -143,13 +143,17 @@ facade 新規公開面 7 件（`crates/facade/src/model.rs`。`crates/facade/tes
 
 `load` は `resolve_model_file` が開いた `File` ハンドルから `read_to_end` で全バイトを無条件に `Vec` へ確保していた。`model.safetensors` は非信頼な外部フォーマット入力（利用者が手動配置するが、共有キャッシュディレクトリ経由で他プロセス・他ユーザーが書き込める場合もある）であり、サイズ検証なしの無制限確保は巨大ファイルによるメモリ枯渇（OWASP A03。AGENTS.md「外部フォーマットのパース検証（P0）」長さ事前検証要件）を招く（codex-review 指摘・PR #2226・P0）。
 
-**対策**: `crates/facade/src/model.rs` に固定サイズ上限 `MAX_MODEL_FILE_BYTES`（8 GiB）を導入し、二段構えで検証する。
+**対策**: `crates/facade/src/model.rs` に固定サイズ上限 `MAX_MODEL_FILE_BYTES`（当初 8 GiB。後述の再指摘を受け 1 GiB へ改定）を導入し、二段構えで検証する。
 
 1. `resolve_model_file` の手順 4（fstat によるハンドル識別子照合）の直後に `open_meta.len()` を `MAX_MODEL_FILE_BYTES` と比較し、上回れば読み取りへ進む前に `ModelError::TooLarge` で拒否する。
 2. `load` 側は fstat 完了後にファイルが差し替え・追記されて増大する TOCTOU にも備え、`std::io::Read::take(MAX_MODEL_FILE_BYTES + 1)` で読み取り自体を上限バイト数超で打ち切り、実際に読めたバイト数が上限を超えていれば同じく `ModelError::TooLarge` で拒否する（ちょうど上限バイト数で打ち切ると超過を検出できないため `+ 1` バイト分だけ多く読む）。事前確保サイズは実測ファイルサイズ（上限未満なら実測値）を用い、`Vec::try_reserve` で割り当て失敗を panic ではなく型付きエラーへ変換する。
 
-両検証は private 純関数 `enforce_size_limit(name, version, len, max) -> Result<(), ModelError>` に集約し、`crates/facade/src/model.rs` の単体テストで境界値（`len == max` は許可・`len == max + 1` は拒否）・`Display` 出力・定数の非退化を検証する（8 GiB 実ファイルの生成は非現実的なため、統合テストではなく上記純関数の単体テストで検証する）。
+両検証は private 純関数 `enforce_size_limit(name, version, len, max) -> Result<(), ModelError>` に集約し、`crates/facade/src/model.rs` の単体テストで境界値（`len == max` は許可・`len == max + 1` は拒否）・`Display` 出力・定数の非退化を検証する（1 GiB 実ファイルの生成は非現実的なため、統合テストではなく上記純関数の単体テストで検証する）。
 
-**8 GiB を選定した理由**: 本レジストリが対象とする F32 のみの `compat::Sequential` 向けローカル重み（数百 MB〜数 GB 級を想定）に対して十分な余裕を持たせつつ、攻撃者が用意した巨大ファイルによる無制限確保を防ぐための固定安全域として選定した。`crates/facade/src/interop/safetensors.rs`・`onnx.rs` はより汎用的な入口（他の呼び出し元からも使われる）のため上限値の決定を「値の決定にはユーザー承認が要る」としてスコープ外のまま維持しているが、本モジュールの `load` は単一の読み取り専用ローカルレジストリ入口に閉じており、固定の安全域値を導入すること自体は AGENTS.md の長さ事前検証要件を満たすための実装判断であり、依存追加・ガードレール閾値・テスト許容誤差の変更（`.claude/rules/*.md` のユーザー承認必須事項）のいずれにも該当しない。より大きなモデルを扱う必要が生じた場合の値の見直しは別途ユーザー承認を経る。
+**8 GiB を選定した理由（初回・撤回済み）**: 本レジストリが対象とする F32 のみの `compat::Sequential` 向けローカル重み（数百 MB〜数 GB 級を想定）に対して十分な余裕を持たせつつ、攻撃者が用意した巨大ファイルによる無制限確保を防ぐための固定安全域として選定した。
+
+**1 GiB への改定（2026-09-22 追記・PR #2226 codex-review 再指摘・P0）**: 8 GiB は「攻撃者が用意した通常サイズのファイルだけで一般的な実行環境（GitHub ホステッド runner の既定 7 GiB RAM・開発者のノート PC 等）の OOM を引き起こせる」水準であり、AGENTS.md の長さ事前検証要件が求める「実質的な OOM 防止」を満たさないとの再指摘を受けた。加えて `load_safetensors_f32_from_bytes`（`crates/onnx-interop/src/st_load.rs`）は読み込んだ `Vec<u8>`（ファイルサイズ相当）と、デコード後の `Tensor<f32>` 群（safetensors の F32 データ部とほぼ同サイズ）を `bytes` の drop まで同時に保持するため、ピークメモリはおおよそ**ファイルサイズの 2 倍**になる。想定する最低限のホスト RAM を 4 GiB、単一モデルロードに許容する割合をその半分（2 GiB）とし、ピーク倍率 2 で割った `2 GiB ÷ 2 = 1 GiB` をファイルサイズ上限とした。本レジストリが対象とする F32 のみのローカル重み（数百 MB 級を主に想定。1 GiB 超のモデルは対象外）に対しては引き続き十分な余裕を持つ。mmap／ストリーミング解析への変更は、許容依存 9 区分に mmap 相当のクレート（`libc`／`memmap2` 等）が無く、かつ `load_safetensors_f32_from_bytes` 側もデコード後にテンソル全量を保持する構造のためピークメモリの根本削減にはならないことから、本 PR のスコープでは採用しなかった（実装を要する場合は別途ユーザー承認・別イシューで追跡）。
+
+`crates/facade/src/interop/safetensors.rs`・`onnx.rs` はより汎用的な入口（他の呼び出し元からも使われる）のため上限値の決定を「値の決定にはユーザー承認が要る」としてスコープ外のまま維持しているが、本モジュールの `load` は単一の読み取り専用ローカルレジストリ入口に閉じており、固定の安全域値を導入・改定すること自体は AGENTS.md の長さ事前検証要件を満たすための実装判断であり、依存追加・ガードレール閾値・テスト許容誤差の変更（`.claude/rules/*.md` のユーザー承認必須事項）のいずれにも該当しない。将来より大きなモデルを扱う必要が生じた場合の値の見直しは別途ユーザー承認を経る。
 
 `ModelError` は `#[non_exhaustive]` のため `TooLarge { name, version, len, max }` variant の追加は非破壊。`crates/facade/tests/api_surface.rs::model_types_are_reachable_via_facade` の `match` にも明示 arm を追加した。
