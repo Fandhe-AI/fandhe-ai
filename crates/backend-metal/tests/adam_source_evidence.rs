@@ -1,5 +1,5 @@
 //! イシュー #2070: `shaders/adam.metal` に REQ-8 境界検査・FP 縮約禁止
-//! （`#pragma METAL fp contract(off)`）・意図した FMA 使用（`fma(`）・
+//! （`#pragma clang fp contract(off)`）・意図した FMA 使用（`fma(`）・
 //! 正確丸め平方根（`precise::sqrt`）が実在することを機械検査する証跡
 //! テスト（`mse_source_evidence.rs` と同型）。
 //!
@@ -56,7 +56,7 @@ fn adam_metal_source_has_bound_check() {
     );
 }
 
-/// FP 縮約禁止契約: `#pragma METAL fp contract(off)` が `kernel void
+/// FP 縮約禁止契約: `#pragma clang fp contract(off)` が `kernel void
 /// adam_step_f32` より前（ファイルスコープ）に出現することをロックする
 /// （MSL 仕様: 既定 `fast`、`MTLMathMode::Safe` でも縮約は `on` 止まり。
 /// `coding-rust.md` の FMA 契約統一を守るための明示的無効化）。
@@ -64,14 +64,14 @@ fn adam_metal_source_has_bound_check() {
 fn adam_metal_source_disables_fp_contract_before_kernel() {
     let stripped = strip_line_comments(ADAM_METAL_SOURCE);
     let pragma_pos = stripped
-        .find("#pragma METAL fp contract(off)")
-        .expect("`#pragma METAL fp contract(off)` が見つかりません");
+        .find("#pragma clang fp contract(off)")
+        .expect("`#pragma clang fp contract(off)` が見つかりません");
     let kernel_pos = stripped
         .find("kernel void adam_step_f32")
         .expect("`kernel void adam_step_f32` が見つかりません");
     assert!(
         pragma_pos < kernel_pos,
-        "`#pragma METAL fp contract(off)` は `adam_step_f32` の定義より前になければなりません"
+        "`#pragma clang fp contract(off)` は `adam_step_f32` の定義より前になければなりません"
     );
 }
 

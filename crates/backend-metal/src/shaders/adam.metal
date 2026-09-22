@@ -27,7 +27,7 @@
 // 2 箇所（`m`／`v` の指数移動平均更新。下記 `fma(` 呼び出し）以外を
 // コンパイラが暗黙に FMA 縮約してしまうと CPU と丸めが変わりうる
 // （`p * decay_factor` の直後の減算が典型例）。よって本ファイル冒頭で
-// `#pragma METAL fp contract(off)`（ファイルスコープ）を明示し、CUDA
+// `#pragma clang fp contract(off)`（ファイルスコープ）を明示し、CUDA
 // 側の非縮約 intrinsic（`__fmul_rn` 等）方針の Metal 対応とする。
 //
 // # 分岐構造の一致
@@ -52,7 +52,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-#pragma METAL fp contract(off)
+#pragma clang fp contract(off)
 
 kernel void adam_step_f32(
     device float* param [[buffer(0)]],

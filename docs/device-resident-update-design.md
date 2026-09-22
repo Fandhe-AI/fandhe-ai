@@ -2125,7 +2125,7 @@ MSL ネイティブカーネルでオーバーライドした（イシュー #20
 - **FP 縮約禁止契約**: MSL 既定の FP 縮約モード `fast`（文をまたぐ
   FMA 縮約許可。`MTLMathMode::Safe`〈`pipeline::compile_options`〉でも
   縮約は `on`〈同一文内のみ〉止まりで `off` にはならない）に対し、
-  `shaders/adam.metal` 冒頭で `#pragma METAL fp contract(off)`
+  `shaders/adam.metal` 冒頭で `#pragma clang fp contract(off)`
   （ファイルスコープ）を明示することで、CPU 参照実装が明示的に
   `f32::mul_add` を使う 3 箇所（`g_eff` の coupled weight decay 分岐・
   `m`／`v` 指数移動平均更新）以外をコンパイラが暗黙に FMA 縮約しない
@@ -2143,7 +2143,7 @@ MSL ネイティブカーネルでオーバーライドした（イシュー #20
   adam_device_contract.rs`（`adam_model::validate_adam_step_shapes`／
   `adam_kernel_flags` の shape・分岐フラグ検証）・`crates/
   backend-metal/tests/adam_source_evidence.rs`（MSL ソースの
-  `#pragma METAL fp contract(off)` 順序・`fma(`／`precise::sqrt(`
+  `#pragma clang fp contract(off)` 順序・`fma(`／`precise::sqrt(`
   実在・`ops.rs` 側の override 結線の文字列証跡）・`adam_model.rs` 内
   unit test（`adam_step_host_model` と `CpuBackendOps::
   adam_step_device` の 100 step bit 完全一致——カーネルへ写像した演算
