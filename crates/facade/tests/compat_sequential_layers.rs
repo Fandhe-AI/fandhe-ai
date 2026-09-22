@@ -12,6 +12,10 @@
 //! - 全種混在モデルで `trainable_parameters()` の shape 列 ==
 //!   `named_parameters()`・`bind().trainable_vars()`／
 //!   `trainable_grads()` の件数一致。
+//! - `TransformerEncoderLayer` 単体でも同様に `bind().trainable_vars()`
+//!   ／`trainable_grads()` の件数が `trainable_parameters()`（16 件）
+//!   と一致する（レビュー指摘の回帰ガード。`self.encoders` を収集し
+//!   忘れると 0 件になり黙って学習されない罠を防ぐ）。
 //! - SGD 学習ループで loss 減少。
 //! - `apply_parameters`: shape 保存更新が `predict` に反映・
 //!   BatchNorm の running stats／`training` が in-place 更新後も保持
@@ -269,6 +273,40 @@ fn transformer_encoder_predict_matches_forward_bit_exact() {
 
     assert_eq!(predicted.shape(), &[2, 3, 4]);
     assert_eq!(dense_vec(&predicted), dense_vec(&forwarded));
+}
+
+#[test]
+fn transformer_encoder_bind_trainable_vars_and_grads_count_matches_trainable_parameters() {
+    // レビュー指摘の回帰ガード: `SequentialVars::trainable_vars`／
+    // `trainable_grads` が `self.encoders`（`TransformerEncoderLayer`）
+    // を収集していないと `bound.trainable_vars().len()` が 0 になり、
+    // `trainable_parameters()`（`named_parameters` への汎用委譲。16
+    // パラメータ = self_attn.q/k/v/out〈weight+bias〉8 + linear1/linear2
+    // 〈weight+bias〉4 + norm1/norm2〈weight+bias〉4）と件数が食い違う。
+    let model = Sequential::new()
+        .add_transformer_encoder(4, 2, 8, SEED1)
+        .unwrap();
+    let x = tensor(
+        (0..2 * 3 * 4).map(|i| (i as f32) * 0.03 - 0.4).collect(),
+        &[2, 3, 4],
+    );
+    let target = tensor(vec![0.0f32; 2 * 3 * 4], &[2, 3, 4]);
+
+    let param_count = model.trainable_parameters().len();
+    assert_eq!(param_count, 16);
+
+    let tape = fandhe_ai::tape();
+    let bound = model.bind(&tape);
+    let xv = tape.var(&x);
+    let tv = tape.var(&target);
+    let pred = bound.forward(&tape, &xv).unwrap();
+    let loss = pred.mse_loss(&tv).unwrap();
+
+    assert_eq!(bound.trainable_vars().len(), param_count);
+
+    let grads = tape.backward(&loss).unwrap();
+    let grad_refs = bound.trainable_grads(&grads).unwrap();
+    assert_eq!(grad_refs.len(), param_count);
 }
 
 // --- 全種混在モデル（Embedding→LayerNorm→RmsNorm→BatchNorm1d→

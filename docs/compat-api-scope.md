@@ -633,7 +633,17 @@ encoder` の 1 件のみ（目視確認）。新規公開型は追加してい�
 `FeedForwardActivation` は内部クレート `fandhe_ai_autodiff` の新規
 `pub` 型で、facade へは再エクスポートしていない——`add_multihead_
 attention`〈#1760〉と同様、`compat::Sequential::add_*` 経由のみで
-到達する構成）。`apply_parameters` は 6 層種別〈#1760〉と同じ
+到達する構成）。**コードレビューで、`SequentialVars::trainable_vars`／
+`trainable_grads`（`bind` 後の学習経路。`trainable_parameters`／
+`apply_parameters` とは別メソッド）が `self.encoders` を収集しておらず
+`TransformerEncoderLayer` を含むモデルが標準的な学習ループ
+（`bind → forward → tape.backward → trainable_grads → optim.step`）で
+一切学習されない穴が指摘され、他層と同じ順序契約
+（`named_parameters` と同じ self_attn.q/k/v/out → linear1 → linear2 →
+norm1 → norm2 の weight→bias 順）で 16 `Var`／勾配を収集する分岐を
+両メソッドへ追加して是正済み**（`crates/facade/tests/compat_
+sequential_layers.rs::transformer_encoder_bind_trainable_vars_and_
+grads_count_matches_trainable_parameters`）。`apply_parameters` は 6 層種別〈#1760〉と同じ
 `Module::set_parameter` による in-place 更新方式（`Linear`／`Conv2d`／
 `Conv1d` の `Rebuilt` 方式とは異なる）。デバイス常駐経路
 （`init_device_param_store`／`forward_resident`／`predict_resident`）

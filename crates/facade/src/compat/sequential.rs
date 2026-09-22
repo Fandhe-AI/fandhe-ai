@@ -1875,6 +1875,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut batch_norms = self.batch_norms.iter();
         let mut embeddings = self.embeddings.iter();
         let mut mhas = self.mhas.iter();
+        let mut encoders = self.encoders.iter();
         for layer in self.model.inner.layers() {
             if layer.as_linear().is_some() {
                 if let Some(vars) = linears.next() {
@@ -1941,6 +1942,50 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 }
                 out.push(&vars.out.weight);
                 if let Some(b) = &vars.out.bias {
+                    out.push(b);
+                }
+            } else if layer.as_transformer_encoder_layer().is_some()
+                && let Some(vars) = encoders.next()
+            {
+                // `named_parameters`（`self_attn` → `linear1` →
+                // `linear2` → `norm1` → `norm2` の順。
+                // `crates/autodiff/src/nn/transformer_encoder_layer.rs`
+                // の同メソッド doc「命名契約」）と同じ順序で 16 個の
+                // `Var` を push する。
+                out.push(&vars.self_attn.q.weight);
+                if let Some(b) = &vars.self_attn.q.bias {
+                    out.push(b);
+                }
+                out.push(&vars.self_attn.k.weight);
+                if let Some(b) = &vars.self_attn.k.bias {
+                    out.push(b);
+                }
+                out.push(&vars.self_attn.v.weight);
+                if let Some(b) = &vars.self_attn.v.bias {
+                    out.push(b);
+                }
+                out.push(&vars.self_attn.out.weight);
+                if let Some(b) = &vars.self_attn.out.bias {
+                    out.push(b);
+                }
+                out.push(&vars.linear1.weight);
+                if let Some(b) = &vars.linear1.bias {
+                    out.push(b);
+                }
+                out.push(&vars.linear2.weight);
+                if let Some(b) = &vars.linear2.bias {
+                    out.push(b);
+                }
+                if let Some(w) = &vars.norm1.weight {
+                    out.push(w);
+                }
+                if let Some(b) = &vars.norm1.bias {
+                    out.push(b);
+                }
+                if let Some(w) = &vars.norm2.weight {
+                    out.push(w);
+                }
+                if let Some(b) = &vars.norm2.bias {
                     out.push(b);
                 }
             }
@@ -2019,6 +2064,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut batch_norms = self.batch_norms.iter();
         let mut embeddings = self.embeddings.iter();
         let mut mhas = self.mhas.iter();
+        let mut encoders = self.encoders.iter();
         for layer in self.model.inner.layers() {
             if layer.as_linear().is_some() {
                 if let Some(vars) = linears.next() {
@@ -2055,6 +2101,60 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 push_weight_bias(&mut out, grads, &vars.k.weight, vars.k.bias.as_ref())?;
                 push_weight_bias(&mut out, grads, &vars.v.weight, vars.v.bias.as_ref())?;
                 push_weight_bias(&mut out, grads, &vars.out.weight, vars.out.bias.as_ref())?;
+            } else if layer.as_transformer_encoder_layer().is_some()
+                && let Some(vars) = encoders.next()
+            {
+                // `trainable_vars` と同一順序契約
+                // （`self_attn.q/k/v/out` → `linear1` → `linear2` →
+                // `norm1` → `norm2`）。
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.self_attn.q.weight,
+                    vars.self_attn.q.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.self_attn.k.weight,
+                    vars.self_attn.k.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.self_attn.v.weight,
+                    vars.self_attn.v.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.self_attn.out.weight,
+                    vars.self_attn.out.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.linear1.weight,
+                    vars.linear1.bias.as_ref(),
+                )?;
+                push_weight_bias(
+                    &mut out,
+                    grads,
+                    &vars.linear2.weight,
+                    vars.linear2.bias.as_ref(),
+                )?;
+                push_opt_weight_bias(
+                    &mut out,
+                    grads,
+                    vars.norm1.weight.as_ref(),
+                    vars.norm1.bias.as_ref(),
+                )?;
+                push_opt_weight_bias(
+                    &mut out,
+                    grads,
+                    vars.norm2.weight.as_ref(),
+                    vars.norm2.bias.as_ref(),
+                )?;
             }
         }
         Ok(out)
