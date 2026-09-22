@@ -7,7 +7,7 @@
 //! # `Device::Metal` を扱わない理由（`gather_scatter_model`／
 //! `constant_pad_model` 等の既存 `*_model.rs` と同じ制約）
 //!
-//! [`fandhe_ai_tensor_core::device::Device::Metal`] variant 自体が
+//! `fandhe_ai_tensor_core::device::Device::Metal` variant 自体が
 //! `#[cfg(target_os = "macos")]` で条件コンパイルされているため
 //! （`device.rs` 参照）、本モジュールは Linux でもコンパイルが通る
 //! 必要上 `Device::Metal` に一切触れない。デバイス一致検査
