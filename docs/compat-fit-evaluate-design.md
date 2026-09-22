@@ -20,11 +20,13 @@ optimizer・`fandhe_ai::data::DataLoader`・`Var::mse_loss`／
 `cross_entropy_loss`）の合成のみで実装した（REQ-9「薄いラッパーに
 徹する」）。
 
-対象外: metrics（accuracy 等）・`DataLoader` を直接受ける `fit`
-入口・BCE／Huber 等の追加 `Loss` variant・デバイス常駐学習
-（`DeviceParamStore`）・GPU `Tape` 指定・AMP・gradient clipping。
-callbacks・`validation_data`・LR スケジューラ連携は #1763 で実装済み
-（`docs/compat-callbacks-design.md`）。上記の残りはいずれも #1763 以降へ
+対象外: `DataLoader` を直接受ける `fit` 入口・BCE／Huber 等の追加
+`Loss` variant・デバイス常駐学習（`DeviceParamStore`）・GPU `Tape`
+指定・AMP・gradient clipping。callbacks・`validation_data`・LR
+スケジューラ連携は #1763 で実装済み（`docs/compat-callbacks-design.md`）。
+metrics（accuracy・precision・recall・F1・confusion matrix）は
+`Sequential::fit_with_metrics`（イシュー #2072・親 #2059）で実装済み
+（`docs/compat-metrics-design.md`）。上記の残りはいずれも #1763 以降へ
 引き継ぐ。
 
 ## 2. 公開 API
@@ -127,7 +129,8 @@ Keras `fit` の既定 `shuffle=True` とは異なり、`DataLoaderConfig::new`
 
 3.1 冒頭の「目的・スコープ」節を参照。callbacks・`validation_data`・
 LR スケジューラ連携は #1763 で実装済み（`docs/compat-callbacks-design.md`）。
-metrics・`DataLoader` 直接入力は引き続き対象外のまま。
+metrics は #2072 で実装済み（`docs/compat-metrics-design.md`）。
+`DataLoader` 直接入力は引き続き対象外のまま。
 
 ## 4. 正しさの検証
 

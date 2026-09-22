@@ -16,8 +16,11 @@
 //! `validation_data` は [`Sequential::fit_with_callbacks`]（イシュー
 //! #1763・親 #1618・`super::callbacks`）で実装済み。[`Sequential::fit`]
 //! は引き続き既存契約のまま（`fit_with_callbacks(x, y, config, None,
-//! &mut [])` への委譲）。metrics・`DataLoader` を直接受ける `fit` 入口は
-//! 対象外のまま（`docs/compat-callbacks-design.md` §8 参照）。
+//! &mut [])` への委譲）。分類 metrics（accuracy・precision・recall・
+//! F1・confusion matrix）は [`Sequential::fit_with_metrics`]（イシュー
+//! #2072・親 #2059・`super::metrics`）で実装済み。`DataLoader` を直接
+//! 受ける `fit` 入口は対象外のまま（`docs/compat-callbacks-design.md`
+//! §8 参照）。
 
 use crate::optim::{
     Adam, AdamConfig, AdamW, AdamWConfig, GradScaler, GradScalerConfig, Sgd, SgdConfig,
@@ -29,6 +32,7 @@ use fandhe_ai_tensor_core::ScalarDType;
 use fandhe_ai_tensor_core::data::{DataLoader, DataLoaderConfig, TensorDataset};
 
 use super::callbacks::Callback;
+use super::metrics::{ConfusionAccumulator, Metrics, MetricsResult};
 
 use super::sequential::Sequential;
 
@@ -216,6 +220,13 @@ impl FitConfig {
 /// [`super::callbacks::LrSchedule`] が存在しない場合は `compile()` 時に
 /// 設定した学習率が epoch を通じて一定のまま記録される）。
 ///
+/// `val_metrics[i]`（イシュー #2072）は [`Sequential::fit_with_metrics`]
+/// の `metrics` 引数が非空かつ `validation` が `Some` の場合のみ epoch
+/// `i` 末の検証 metrics（[`MetricsResult`]。`val_loss` と同じ
+/// validation バッチ列から算出）で埋まる。`metrics` が空、または
+/// `validation = None`（[`Sequential::fit`]／`fit_with_callbacks` を
+/// 含む）の場合は空のまま（`Vec::new()`）。
+///
 /// いずれの `Vec` も `i` は `fit_with_callbacks` 呼び出し内のローカル
 /// epoch 番号（0-indexed。`super::callbacks` モジュール doc「epoch
 /// 番号の数え方」節が定義する callback 側の通算 epoch 番号とは別物）。
@@ -225,6 +236,7 @@ pub struct History {
     pub loss: Vec<f32>,
     pub val_loss: Vec<f32>,
     pub lr: Vec<f32>,
+    pub val_metrics: Vec<MetricsResult>,
 }
 
 /// `fit()`／`evaluate()` の target 要素型（sealed。[`crate::CastElement`]
@@ -246,6 +258,32 @@ pub trait FitTarget: Element + private::Sealed {
         pred: &crate::Var<'t>,
         target_batch: &Tensor<Self>,
     ) -> Result<crate::Var<'t>, AutodiffError>;
+
+    /// `fit_with_metrics`（イシュー #2072）の metrics は分類（クラス
+    /// 添字 target）でのみ定義される指標のため、`T = f32`
+    /// （[`Loss::Mse`]）での呼び出しを演算列に入る前に拒否する型
+    /// ゲート。`i32`（[`Loss::CrossEntropy`]）は既定（`Ok(())`）のまま
+    /// 許可、`f32` のみ上書きして拒否する（sealed のため実装追加は
+    /// 非破壊）。戻り値自体に意味はなく成否のみを表す。
+    #[doc(hidden)]
+    fn require_metrics_support() -> Result<(), AutodiffError> {
+        Ok(())
+    }
+
+    /// `target_batch` をクラス添字 `Tensor<i32>` として参照できるなら
+    /// `Some` を返す（`i32` 実装のみ上書き。`Self = i32` のときは
+    /// `Tensor<Self> = Tensor<i32>` のため型変換なしでそのまま返せる）。
+    /// [`Self::require_metrics_support`] が `Ok` を返す呼び出し経路
+    /// （`run_evaluate_with_metrics`）でのみ使い、`None` は「呼び出し元
+    /// の事前検査が抜けている」ことを示す防御的分岐として扱う
+    /// （`.claude/rules/coding-rust.md` 本番経路 panic 禁止のため
+    /// `unwrap`／`expect` ではなく `Option` のまま返し、呼び出し元が
+    /// `InvalidArgument` へ写像する）。
+    #[doc(hidden)]
+    fn as_class_targets(target_batch: &Tensor<Self>) -> Option<&Tensor<i32>> {
+        let _ = target_batch;
+        None
+    }
 }
 
 mod private {
@@ -273,6 +311,14 @@ impl FitTarget for f32 {
             )),
         }
     }
+
+    fn require_metrics_support() -> Result<(), AutodiffError> {
+        Err(AutodiffError::InvalidArgument(
+            "Sequential::fit_with_metrics: metrics は Loss::CrossEntropy（Tensor<i32> \
+             target）でのみ計算できる（Tensor<f32> target が渡された）"
+                .to_string(),
+        ))
+    }
 }
 
 impl FitTarget for i32 {
@@ -290,6 +336,10 @@ impl FitTarget for i32 {
                     .to_string(),
             )),
         }
+    }
+
+    fn as_class_targets(target_batch: &Tensor<i32>) -> Option<&Tensor<i32>> {
+        Some(target_batch)
     }
 }
 
@@ -513,7 +563,7 @@ impl Sequential {
         y: &Tensor<T>,
         config: FitConfig,
     ) -> Result<History, AutodiffError> {
-        self.fit_with_callbacks_named("fit", x, y, config, None, &mut [])
+        self.fit_with_callbacks_named("fit", x, y, config, None, &mut [], &[])
     }
 
     /// [`Self::fit`] の拡張版（イシュー #1763・親 #1618）:
@@ -601,9 +651,83 @@ impl Sequential {
         validation: Option<(&Tensor<f32>, &Tensor<T>)>,
         callbacks: &mut [Callback],
     ) -> Result<History, AutodiffError> {
-        self.fit_with_callbacks_named("fit_with_callbacks", x, y, config, validation, callbacks)
+        self.fit_with_callbacks_named(
+            "fit_with_callbacks",
+            x,
+            y,
+            config,
+            validation,
+            callbacks,
+            &[],
+        )
     }
 
+    /// [`Self::fit_with_callbacks`] の拡張版（イシュー #2072・親
+    /// #2059）: `metrics`（[`super::metrics::Metrics`] の集合）を追加で
+    /// 受け取り、`validation` が `Some` の場合のみ epoch 末に
+    /// [`super::metrics::MetricsResult`] を計算して
+    /// [`History::val_metrics`] へ積む。`metrics = &[]` のとき
+    /// [`Self::fit_with_callbacks`] と完全に同一の演算列・戻り値になる
+    /// （`fit_with_metrics_empty_matches_fit_with_callbacks_bit_exact`
+    /// で検証）。
+    ///
+    /// metrics 計算は validation フェーズ（[`Self::evaluate`] と同じ
+    /// eval モード）でのみ行うため、学習の演算列（`bind → forward →
+    /// T::loss_for → backward → trainable_grads → optimizer.step →
+    /// apply_parameters`）・`history.loss`／`lr` は
+    /// [`Self::fit_with_callbacks`] と bit 完全一致する。
+    ///
+    /// [`super::callbacks::Callback::ModelCheckpoint`]／
+    /// [`super::callbacks::Callback::EarlyStopping`]／
+    /// [`super::callbacks::Callback::LrSchedule`] は
+    /// [`super::callbacks::Monitor::ValMetric`] で metrics を監視
+    /// できる（`MonitorMode` の既定は `Min` のまま——accuracy 等を
+    /// 監視する場合は呼び出し側が `.mode(MonitorMode::Max)` を明示する
+    /// 必要がある。自動推定はしない）。
+    ///
+    /// # エラー
+    ///
+    /// [`Self::fit_with_callbacks`] の既存エラー契約に加え:
+    /// - `!metrics.is_empty() && validation.is_none()` →
+    ///   `InvalidArgument`（metrics は validation set 上で定義される
+    ///   指標のため）
+    /// - `callbacks` のいずれかが `Monitor::ValMetric(m)` を監視し、
+    ///   `m` が `metrics` に含まれない、または `m ==
+    ///   Metrics::ConfusionMatrix`（非スカラーのため監視値として
+    ///   定義できない）の場合 → `InvalidArgument`（callback が黙って
+    ///   スキップされる穴を防ぐ）
+    /// - `metrics` が非空かつ `T = f32`（[`Loss::Mse`]）の場合 →
+    ///   `InvalidArgument`（metrics は分類 target（`Tensor<i32>`）
+    ///   でのみ定義される）
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_with_metrics<T: FitTarget>(
+        &mut self,
+        x: &Tensor<f32>,
+        y: &Tensor<T>,
+        config: FitConfig,
+        validation: Option<(&Tensor<f32>, &Tensor<T>)>,
+        callbacks: &mut [Callback],
+        metrics: &[Metrics],
+    ) -> Result<History, AutodiffError> {
+        self.fit_with_callbacks_named(
+            "fit_with_metrics",
+            x,
+            y,
+            config,
+            validation,
+            callbacks,
+            metrics,
+        )
+    }
+
+    /// `method`（呼び出し元の公開メソッド名。[`Self::fit`]／
+    /// [`Self::fit_with_callbacks`]／[`Self::fit_with_metrics`] の
+    /// いずれか）を渡し、エラーメッセージが実際に呼ばれた公開メソッド
+    /// 名を名乗るようにする（イシュー #1763 PR #1883 レビュー指摘の
+    /// 是正を踏襲）。`metrics` はイシュー #2072 で追加した引数——
+    /// [`Self::fit`]／[`Self::fit_with_callbacks`] は `&[]` で委譲する
+    /// ため、両者の演算列・戻り値は本引数追加の前後で変化しない。
+    #[allow(clippy::too_many_arguments)]
     fn fit_with_callbacks_named<T: FitTarget>(
         &mut self,
         method: &'static str,
@@ -612,6 +736,7 @@ impl Sequential {
         config: FitConfig,
         validation: Option<(&Tensor<f32>, &Tensor<T>)>,
         callbacks: &mut [Callback],
+        metrics: &[Metrics],
     ) -> Result<History, AutodiffError> {
         // (1) 未 compile 検査・compiled の一時取り出し（借用衝突回避。
         // `run_fit` 内で `bind`〈&self 借用〉と `self.compiled`〈&mut
@@ -634,8 +759,51 @@ impl Sequential {
             self.compiled = Some(compiled);
             return Err(AutodiffError::InvalidArgument(format!(
                 "Sequential::{method}: callback {offending:?} は \
-                 Monitor::ValLoss を監視するが validation が None"
+                 Monitor::ValLoss または Monitor::ValMetric を監視するが \
+                 validation が None"
             )));
+        }
+        // (2.1) metrics（イシュー #2072）: validation set 上でのみ定義
+        // される指標のため、metrics 非空かつ validation が None なら
+        // 拒否する。
+        if !metrics.is_empty() && validation.is_none() {
+            self.compiled = Some(compiled);
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::{method}: metrics が非空だが validation が None\
+                 （metrics は validation set 上で定義される指標のため）"
+            )));
+        }
+        // (2.2) callbacks が Monitor::ValMetric(m) を監視する場合、
+        // `m` が `metrics` に含まれる（`value_at` が黙って `None` を
+        // 返し callback がスキップされる穴を防ぐ）・非スカラー
+        // （`Metrics::ConfusionMatrix`）でないことを検査する。
+        for cb in callbacks.iter() {
+            if let Some(super::callbacks::Monitor::ValMetric(m)) = cb.monitor() {
+                if m == Metrics::ConfusionMatrix {
+                    self.compiled = Some(compiled);
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Sequential::{method}: callback {cb:?} は \
+                         Monitor::ValMetric(Metrics::ConfusionMatrix)（非スカラー）を \
+                         監視できない"
+                    )));
+                }
+                if !metrics.contains(&m) {
+                    self.compiled = Some(compiled);
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Sequential::{method}: callback {cb:?} は Monitor::ValMetric({m:?}) を \
+                         監視するが、{m:?} が metrics 引数に含まれない"
+                    )));
+                }
+            }
+        }
+        // (2.3) metrics（イシュー #2072）は分類 target（`Tensor<i32>`）
+        // でのみ定義される。`T = f32`（`Loss::Mse`）での呼び出しを
+        // 演算列に入る前に拒否する。
+        if !metrics.is_empty()
+            && let Err(e) = T::require_metrics_support()
+        {
+            self.compiled = Some(compiled);
+            return Err(e);
         }
 
         // (2.5) EarlyStopping はこの fit 呼び出しの開始時に必ずリセット
@@ -651,7 +819,16 @@ impl Sequential {
         let prev_training = self.training();
         self.set_training(true);
 
-        let result = self.run_fit(method, &mut compiled, x, y, config, validation, callbacks);
+        let result = self.run_fit(
+            method,
+            &mut compiled,
+            x,
+            y,
+            config,
+            validation,
+            callbacks,
+            metrics,
+        );
 
         // (4) モード復元・compiled の書き戻し（結果を問わず必ず行う。
         // fail-closed: 失敗した fit の後もモデルを「未 compile」状態へ
@@ -661,13 +838,14 @@ impl Sequential {
         result
     }
 
-    /// [`Self::fit_with_callbacks`] の本体（compiled を取り出し済みの
-    /// 状態で呼ばれる。`&mut self` と `compiled: &mut Compiled` を
-    /// 独立した借用として受け取ることで、`self.bind(&tape)`〈`&self`〉
-    /// と `compiled.optimizer.step`〈`&mut compiled`〉を同時に生かせる）。
-    /// `method`（呼び出し元の公開メソッド名。イシュー #1763 PR #1883
-    /// レビュー指摘の是正）を追加したことで引数が 8 個になった
-    /// （既存の 7 引数構成を維持したまま追加したため。呼び出し元は
+    /// [`Self::fit_with_callbacks`]／[`Self::fit_with_metrics`] の本体
+    /// （compiled を取り出し済みの状態で呼ばれる。`&mut self` と
+    /// `compiled: &mut Compiled` を独立した借用として受け取ることで、
+    /// `self.bind(&tape)`〈`&self`〉と `compiled.optimizer.step`〈`&mut
+    /// compiled`〉を同時に生かせる）。`method`（呼び出し元の公開
+    /// メソッド名。イシュー #1763 PR #1883 レビュー指摘の是正）・
+    /// `metrics`（イシュー #2072）を追加したことで引数が 9 個になった
+    /// （既存の 8 引数構成を維持したまま追加したため。呼び出し元は
     /// [`Self::fit_with_callbacks_named`] の 1 箇所のみで、これ以上
     /// 引数が増える見込みも薄いため構造体化はせず許容する）。
     #[allow(clippy::too_many_arguments)]
@@ -680,6 +858,7 @@ impl Sequential {
         config: FitConfig,
         validation: Option<(&Tensor<f32>, &Tensor<T>)>,
         callbacks: &mut [Callback],
+        metrics: &[Metrics],
     ) -> Result<History, AutodiffError> {
         let to_invalid_arg = |e: fandhe_ai_tensor_core::data::DataError| {
             AutodiffError::InvalidArgument(format!("Sequential::{method}: {e}"))
@@ -729,7 +908,25 @@ impl Sequential {
                 config.epochs
             ))
         })?;
-        let mut history = History { loss, val_loss, lr };
+        // `val_metrics` は `validation.is_some() && !metrics.is_empty()`
+        // のときのみ epochs 分確保する（`History::val_metrics` doc
+        // 参照）。
+        let mut val_metrics = Vec::new();
+        if validation.is_some() && !metrics.is_empty() {
+            val_metrics.try_reserve_exact(config.epochs).map_err(|e| {
+                AutodiffError::InvalidArgument(format!(
+                    "Sequential::{method}: History.val_metrics 用の確保に失敗した \
+                     (epochs={}): {e}",
+                    config.epochs
+                ))
+            })?;
+        }
+        let mut history = History {
+            loss,
+            val_loss,
+            lr,
+            val_metrics,
+        };
 
         // 本体は `'epochs_block` ラベル付きブロックへ包み、`?` による
         // 早期 return を `break 'epochs_block Err(..)` に置き換える
@@ -893,19 +1090,26 @@ impl Sequential {
                 history.loss.push((weighted_sum / count as f64) as f32);
 
                 // (3) validation（[`Self::fit_with_callbacks`] doc「1 epoch
-                // の処理順序」節）。
+                // の処理順序」節。metrics 計算はイシュー #2072・
+                // `run_evaluate_with_metrics` doc 参照）。
                 if let Some((x_val, y_val)) = validation {
                     self.set_training(false);
-                    let v = self.run_evaluate::<T>(
+                    let v = self.run_evaluate_with_metrics::<T>(
                         x_val,
                         y_val,
                         config.batch_size,
                         compiled.loss,
+                        metrics,
                         method,
                     );
                     self.set_training(true);
                     match v {
-                        Ok(v) => history.val_loss.push(v),
+                        Ok((loss_v, metrics_v)) => {
+                            history.val_loss.push(loss_v);
+                            if let Some(m) = metrics_v {
+                                history.val_metrics.push(m);
+                            }
+                        }
                         Err(e) => break 'epochs_block Err(e),
                     }
                 }
@@ -1003,24 +1207,35 @@ impl Sequential {
 
         let prev_training = self.training();
         self.set_training(false);
-        let result = self.run_evaluate::<T>(x, y, batch_size, loss, "evaluate");
+        let result = self
+            .run_evaluate_with_metrics::<T>(x, y, batch_size, loss, &[], "evaluate")
+            .map(|(loss_v, _metrics_v)| loss_v);
         self.set_training(prev_training);
         result
     }
 
     /// `method` には呼び出し元の公開メソッド名（`"evaluate"`、または
     /// [`Self::fit_with_callbacks_named`] の validation フェーズ経由
-    /// なら `"fit"`／`"fit_with_callbacks"`）を渡し、エラーメッセージが
-    /// 実際に呼ばれた公開メソッド名を名乗るようにする（イシュー #1763
-    /// PR #1883 レビュー指摘の是正）。
-    fn run_evaluate<T: FitTarget>(
+    /// なら `"fit"`／`"fit_with_callbacks"`／`"fit_with_metrics"`）を
+    /// 渡し、エラーメッセージが実際に呼ばれた公開メソッド名を名乗る
+    /// ようにする（イシュー #1763 PR #1883 レビュー指摘の是正）。
+    ///
+    /// `metrics`（イシュー #2072）が空の場合、loss の演算列
+    /// （`forward → T::loss_for → to_tensor().get(&[])`）は本引数追加
+    /// 前と完全に同一（bit 一致契約）。非空の場合のみ、同じ `pred`
+    /// （forward 出力。`cross_entropy_loss` は融合対象外のため既に
+    /// 実体化済み）に対して `pred.argmax(Some(1))`（非微分・[`crate::
+    /// Var::argmax`] 契約）を追加で計算し
+    /// [`super::metrics::ConfusionAccumulator`] へ蓄積する。
+    fn run_evaluate_with_metrics<T: FitTarget>(
         &self,
         x: &Tensor<f32>,
         y: &Tensor<T>,
         batch_size: usize,
         loss: Loss,
+        metrics: &[Metrics],
         method: &str,
-    ) -> Result<f32, AutodiffError> {
+    ) -> Result<(f32, Option<MetricsResult>), AutodiffError> {
         let to_invalid_arg = |e: fandhe_ai_tensor_core::data::DataError| {
             AutodiffError::InvalidArgument(format!("Sequential::{method}: {e}"))
         };
@@ -1031,6 +1246,7 @@ impl Sequential {
 
         let mut weighted_sum = 0.0f64;
         let mut count = 0usize;
+        let mut accumulator: Option<ConfusionAccumulator> = None;
 
         for batch in &loader {
             let (x_batch, y_batch) = batch.map_err(|e| {
@@ -1050,6 +1266,38 @@ impl Sequential {
             })?;
             weighted_sum += loss_scalar as f64 * n_batch as f64;
             count += n_batch;
+
+            if !metrics.is_empty() {
+                let target_batch = T::as_class_targets(&y_batch).ok_or_else(|| {
+                    AutodiffError::InvalidArgument(format!(
+                        "Sequential::{method}: metrics は Loss::CrossEntropy（Tensor<i32> \
+                         target）でのみ計算できる"
+                    ))
+                })?;
+                // `Var::shape` は `pub(crate)`（autodiff クレート内限定）
+                // のため facade からは到達できず、`to_tensor()`
+                // （公開 API）で実体化した `Tensor<f32>` 経由で shape を
+                // 読む（`loss_var` 計算で `pred` は既に実体化済みのため
+                // 追加の演算コストはメモリコピー相当のみ）。
+                let pred_tensor = pred.to_tensor();
+                let pred_shape = pred_tensor.shape();
+                if pred_shape.len() != 2 {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Sequential::{method}: metrics には pred（logits）が rank 2 [N, C] \
+                         である必要がある (実際は {pred_shape:?})"
+                    )));
+                }
+                let num_classes = pred_shape[1];
+                let pred_classes = pred.argmax(Some(1))?;
+                match accumulator.as_mut() {
+                    Some(acc) => acc.observe(&pred_classes, target_batch)?,
+                    None => {
+                        let mut acc = ConfusionAccumulator::new(num_classes)?;
+                        acc.observe(&pred_classes, target_batch)?;
+                        accumulator = Some(acc);
+                    }
+                }
+            }
         }
 
         if count == 0 {
@@ -1057,6 +1305,11 @@ impl Sequential {
                 "Sequential::{method}: 処理されたサンプルが 0 件"
             )));
         }
-        Ok((weighted_sum / count as f64) as f32)
+        let avg_loss = (weighted_sum / count as f64) as f32;
+        let metrics_result = match accumulator {
+            Some(acc) => Some(acc.finish(metrics)?),
+            None => None,
+        };
+        Ok((avg_loss, metrics_result))
     }
 }
