@@ -5,7 +5,8 @@
 最小版」行のうち、`docs/compat-fit-evaluate-design.md`（#1761）が対象外
 としていた callbacks（`EarlyStopping`／`ModelCheckpoint`）・
 `validation_data`・LR スケジューラ連携を実装した。metrics（accuracy 等）
-は引き続き対象外（§8）。
+は `Sequential::fit_with_metrics`（イシュー #2072・親 #2059）で実装済み
+（`docs/compat-metrics-design.md`）。§8 の当該記述もあわせて更新した。
 
 ## 1. 目的・スコープ
 
@@ -333,7 +334,9 @@ facade 経由到達性を固定した。`fandhe_ai::optim`（`optim.rs`）は純
 - `ModelCheckpoint` のファイル保存（safetensors。facade 公開自体は
   #2019 で完了済み〈`fandhe_ai::interop::safetensors`〉だが、
   `ModelCheckpoint` からの結線は未実装のまま）
-- metrics（accuracy 等）・`Monitor` の metrics 拡張
+- metrics（accuracy 等）・`Monitor` の metrics 拡張は
+  `Sequential::fit_with_metrics`（イシュー #2072・親 #2059）で実装済み
+  （`docs/compat-metrics-design.md`）
 - `DataLoader` を直接受ける `fit` 入口・追加 `Loss` variant・
   デバイス常駐学習（`DeviceParamStore`）／GPU `Tape`／AMP／gradient
   clipping との結線
