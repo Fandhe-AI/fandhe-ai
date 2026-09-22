@@ -112,6 +112,7 @@ use crate::interop::safetensors::SaveError;
 use crate::optim::{LrScheduler, ReduceLrOnPlateau};
 use crate::{AutodiffError, Tensor};
 
+use super::metrics::Metrics;
 use super::sequential::Sequential;
 use super::training::History;
 
@@ -125,28 +126,48 @@ pub enum Monitor {
     /// `fit_with_callbacks` 呼び出しでは使えない
     /// （`AutodiffError::InvalidArgument`）。
     ValLoss,
+    /// 検証 metrics（[`History::val_metrics`]。イシュー #2072）。
+    /// `validation` が `None`、または内包する [`Metrics`] が
+    /// `Sequential::fit_with_metrics` に渡した `metrics` スライスに
+    /// 含まれない場合は `AutodiffError::InvalidArgument`
+    /// （`training.rs` 事前検査節）。[`Metrics::ConfusionMatrix`]
+    /// （非スカラー）を内包する場合も同様に拒否する——値が定義
+    /// できない監視対象を黙ってスキップしない。`MonitorMode` の既定
+    /// は `Min`（loss 系向け）のままのため、accuracy 等（大きいほど
+    /// 良い指標）を監視する場合は呼び出し側が
+    /// `.mode(MonitorMode::Max)` を明示する必要がある（自動推定は
+    /// しない）。
+    ValMetric(Metrics),
 }
 
 impl Monitor {
     /// `history` からこの `Monitor` が指す fit ローカル epoch
-    /// `epoch_local`（0 始まり。`History::loss`／`val_loss` の添字と
-    /// 同じ）の値を取り出す。呼び出し時点では
-    /// [`Sequential::fit_with_callbacks`] の事前検査
-    /// （`ValLoss` かつ `validation.is_none()` を早期 `Err` する）を
-    /// 通過済みのため、`ValLoss` でも `history.val_loss` は必ず
-    /// 非空だが、境界外アクセスを避けるため `Option` で返す
-    /// （呼び出し元は `epoch_local` が push 済みの添字である契約を
-    /// 守る）。
+    /// `epoch_local`（0 始まり。`History::loss`／`val_loss`／
+    /// `val_metrics` の添字と同じ）の値を取り出す。呼び出し時点では
+    /// [`Sequential::fit_with_callbacks`]／`fit_with_metrics` の事前
+    /// 検査（`ValLoss`／`ValMetric` かつ `validation.is_none()` を
+    /// 早期 `Err` する。`ValMetric` は要求 `metrics` との整合も検査
+    /// 済み）を通過済みのため必ず非空だが、境界外アクセスを避ける
+    /// ため `Option` で返す（呼び出し元は `epoch_local` が push 済みの
+    /// 添字である契約を守る）。
     fn value_at(self, history: &History, epoch_local: usize) -> Option<f32> {
         match self {
             Monitor::Loss => history.loss.get(epoch_local).copied(),
             Monitor::ValLoss => history.val_loss.get(epoch_local).copied(),
+            Monitor::ValMetric(m) => history.val_metrics.get(epoch_local).and_then(|r| match m {
+                Metrics::Accuracy => r.accuracy,
+                Metrics::Precision => r.precision,
+                Metrics::Recall => r.recall,
+                Metrics::F1 => r.f1,
+                Metrics::ConfusionMatrix => None,
+            }),
         }
     }
 
-    /// `validation` 引数が必須かどうか（[`Monitor::ValLoss`] のみ）。
+    /// `validation` 引数が必須かどうか（[`Monitor::ValLoss`]／
+    /// [`Monitor::ValMetric`]）。
     fn requires_validation(self) -> bool {
-        matches!(self, Monitor::ValLoss)
+        matches!(self, Monitor::ValLoss | Monitor::ValMetric(_))
     }
 }
 
@@ -663,6 +684,20 @@ impl Callback {
             Callback::LrSchedule(ls) => ls.requires_validation(),
         }
     }
+
+    /// このコールバックが監視する [`Monitor`]（`LrSchedule::PerEpoch`
+    /// のみ監視指標を持たず `None`）。`training.rs` の事前検査
+    /// （`ValMetric(m)` の `m` が要求 `metrics` に含まれるか・非スカラー
+    /// でないかの検査。イシュー #2072）専用の読み取り専用アクセサ
+    /// （同一モジュール内のため各 variant の非公開 `monitor` フィールド
+    /// へ直接アクセスする）。
+    pub(super) fn monitor(&self) -> Option<Monitor> {
+        match self {
+            Callback::EarlyStopping(es) => Some(es.monitor),
+            Callback::ModelCheckpoint(mc) => Some(mc.monitor),
+            Callback::LrSchedule(ls) => ls.monitor(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -674,6 +709,7 @@ mod tests {
             loss,
             val_loss,
             lr: Vec::new(),
+            val_metrics: Vec::new(),
         }
     }
 

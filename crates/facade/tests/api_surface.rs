@@ -2961,6 +2961,68 @@ fn fit_types_are_reachable_via_facade_only() {
         .expect("test fixture: set_lr(0.05) は有効値のはず");
 }
 
+/// metrics（accuracy・precision・recall・F1・confusion matrix。イシュー
+/// #2072・親 #2059）: 公開面（`Metrics`・`MetricsResult`・
+/// `Sequential::fit_with_metrics`・`Monitor::ValMetric`）が facade のみ
+/// import で構築・到達可能であることを固定する（`fit_types_are_
+/// reachable_via_facade_only` と同型）。
+#[test]
+fn metrics_types_are_reachable_via_facade_only() {
+    use fandhe_ai::compat::{
+        FitConfig, Loss, Metrics, MetricsResult, Monitor, Optimizer, Sequential,
+    };
+    use fandhe_ai::{Tensor, optim::SgdConfig};
+
+    let _accuracy = Metrics::Accuracy;
+    let _precision = Metrics::Precision;
+    let _recall = Metrics::Recall;
+    let _f1 = Metrics::F1;
+    let _confusion = Metrics::ConfusionMatrix;
+
+    let _monitor_val_metric = Monitor::ValMetric(Metrics::Accuracy);
+
+    // `MetricsResult` は `#[non_exhaustive]` のため struct literal では
+    // 構築できない（想定構築経路は `MetricsResult::compute` のみ）。
+    // 型自体が facade のみ import で参照可能であることを固定する。
+    fn assert_is_metrics_result_type(_m: &MetricsResult) {}
+    let _ = assert_is_metrics_result_type;
+
+    let logits = Tensor::<f32>::new(vec![0.1, 0.9, 0.8, 0.2], &[2, 2])
+        .expect("test fixture: shape とデータ長は事前に一致させている");
+    let target = Tensor::<i32>::new(vec![1, 0], &[2])
+        .expect("test fixture: shape とデータ長は事前に一致させている");
+    let result = MetricsResult::compute(&[Metrics::Accuracy], &logits, &target)
+        .expect("test fixture: compute は成功するはず");
+    assert_eq!(result.accuracy, Some(1.0));
+
+    // `Sequential::fit_with_metrics` が facade のみ import で到達可能
+    // であることを固定する（`metrics = &[]` は既存 `fit_with_callbacks`
+    // と同一の演算列になる契約——`compat_sequential_metrics.rs::
+    // fit_with_metrics_empty_matches_fit_with_callbacks_bit_exact` で
+    // 検証済み）。
+    let mut model = Sequential::new()
+        .add_linear(2, 2, 0x1234)
+        .expect("test fixture: add_linear は成功するはず");
+    model
+        .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .expect("test fixture: compile は成功するはず");
+    let x = Tensor::<f32>::new(vec![0.1, 0.2, 0.3, 0.4], &[2, 2])
+        .expect("test fixture: shape とデータ長は事前に一致させている");
+    let y = Tensor::<i32>::new(vec![0, 1], &[2])
+        .expect("test fixture: shape とデータ長は事前に一致させている");
+    let history = model
+        .fit_with_metrics(
+            &x,
+            &y,
+            FitConfig::new(1, 2),
+            Some((&x, &y)),
+            &mut [],
+            &[Metrics::Accuracy],
+        )
+        .expect("test fixture: fit_with_metrics は成功するはず");
+    assert_eq!(history.val_metrics.len(), 1);
+}
+
 /// `crates/facade/src/` の `pub use` が `CustomFunction`（ユーザー定義
 /// forward／backward プラグイン機構。イシュー #1946・案 B）を
 /// 再エクスポートしていないことを固定する（`docs/autodiff-custom-

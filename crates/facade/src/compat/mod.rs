@@ -53,15 +53,20 @@
 //! （[`crate::compat::EarlyStopping`]／[`crate::compat::ModelCheckpoint`]／
 //! LR スケジューラ連携）・`validation_data` は
 //! [`crate::compat::Sequential::fit_with_callbacks`]（イシュー #1763・
-//! 親 #1618・`callbacks` モジュール）で実装済み。metrics・
-//! `DataLoader` を直接受ける `fit` 入口は対象外のまま。
+//! 親 #1618・`callbacks` モジュール）で実装済み。分類 metrics
+//! （accuracy・precision・recall・F1・confusion matrix）は
+//! [`crate::compat::Sequential::fit_with_metrics`]（イシュー #2072・
+//! 親 #2059・`metrics` モジュール）で実装済み。`DataLoader` を直接
+//! 受ける `fit` 入口は対象外のまま。
 
 mod array;
 mod callbacks;
+mod metrics;
 mod sequential;
 mod training;
 
 pub use array::{ArrayData, array};
 pub use callbacks::{Callback, EarlyStopping, LrSchedule, ModelCheckpoint, Monitor, MonitorMode};
+pub use metrics::{Metrics, MetricsResult};
 pub use sequential::{Sequential, SequentialVars};
 pub use training::{AmpConfig, AmpDType, FitConfig, FitTarget, History, Loss, Optimizer};
