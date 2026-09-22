@@ -2937,7 +2937,12 @@ fn fit_types_are_reachable_via_facade_only() {
     let checkpoint = ModelCheckpoint::new()
         .monitor(Monitor::Loss)
         .mode(MonitorMode::Min)
-        .save_best_only(true);
+        .save_best_only(true)
+        // `to_file`（イシュー #2073）が facade のみ import で到達
+        // 可能であることの固定点。ビルダーは FS に触れないため
+        // 一時ディレクトリは不要（`callbacks.rs::ModelCheckpoint::
+        // to_file` doc 参照）。
+        .to_file("fandhe-ai-2073-unused.safetensors");
     assert_eq!(checkpoint.best_value(), None);
     let _cb_checkpoint = Callback::ModelCheckpoint(checkpoint);
 

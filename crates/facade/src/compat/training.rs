@@ -545,6 +545,10 @@ impl Sequential {
     ///    callback は必ず処理してから打ち切る）。
     ///    - [`super::callbacks::Callback::ModelCheckpoint`][]: 監視値と
     ///      `self` から `observe`（スナップショット更新）する。
+    ///      [`super::callbacks::ModelCheckpoint::to_file`] でパスを
+    ///      指定していれば、スナップショット更新時に safetensors
+    ///      ファイルへも書き出す（イシュー #2073。失敗した場合は
+    ///      下記「エラー」節参照）。
     ///    - [`super::callbacks::Callback::LrSchedule`]: `advance` して
     ///      内部状態（`Plateau` なら `ReduceLrOnPlateau::step`）を
     ///      進める（optimizer への書き戻しは次 epoch 開始時のみ。
@@ -593,6 +597,11 @@ impl Sequential {
     ///   `restore_best_weights` を（該当すれば）適用したうえで、
     ///   その時点のエラーをそのまま返す（[`Self::fit`] と同じ
     ///   fail-closed 契約: compile 済み状態は維持したまま返す）
+    /// - `ModelCheckpoint::to_file` 指定時にファイル保存が失敗した
+    ///   場合（イシュー #2073）→ `InvalidArgument`。in-memory
+    ///   スナップショット（`best`／`best_epoch`／`state`）の更新自体は
+    ///   取り消さない。上記と同じく `restore_best_weights` を
+    ///   （該当すれば）適用したうえで返す
     pub fn fit_with_callbacks<T: FitTarget>(
         &mut self,
         x: &Tensor<f32>,
@@ -917,8 +926,23 @@ impl Sequential {
                 for cb in callbacks.iter_mut() {
                     match cb {
                         Callback::ModelCheckpoint(mc) => {
-                            if let Some(value) = mc.monitor_value_at(&history, epoch_local) {
-                                mc.observe(value, self);
+                            if let Some(value) = mc.monitor_value_at(&history, epoch_local)
+                                && let Err(e) = mc.observe(value, self)
+                            {
+                                // `to_file` 指定時のファイル保存失敗
+                                // （イシュー #2073）。in-memory 側の
+                                // 更新（`best`／`best_epoch`／`state`）は
+                                // `observe` 内で既に反映済みのまま
+                                // `'epochs_block` を抜けるため、後続の
+                                // `EarlyStopping::restore_best_weights`
+                                // 復元・train／eval モード復元・
+                                // `compiled` 書き戻しは通常どおり実行
+                                // される（`callbacks.rs` モジュール冒頭
+                                // doc「`ModelCheckpoint` のファイル保存」
+                                // 節参照）。
+                                break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                                    "Sequential::{method}: ModelCheckpoint::to_file の保存に失敗した: {e}"
+                                )));
                             }
                         }
                         Callback::LrSchedule(ls) => {

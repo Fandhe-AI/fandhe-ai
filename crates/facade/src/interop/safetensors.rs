@@ -76,11 +76,13 @@
 //!
 //! ## 対象外
 //!
-//! `compat::Sequential`／`compat::callbacks::ModelCheckpoint` にファイル
-//! 保存の薄いラッパーを追加すること（`Sequential::save`／`load` 等）は
-//! 本モジュールのスコープ外（案 A は素の再エクスポートのみ）。
-//! `docs/compat-callbacks-design.md` §8 参照。F32 以外の dtype・入力
-//! サイズ上限の導入・`st_load`／`st_save` 本体ロジックの変更も対象外。
+//! `compat::callbacks::ModelCheckpoint` からの薄いラッパー結線
+//! （[`crate::compat::ModelCheckpoint::to_file`]）は #2073 で実装済み。
+//! `compat::Sequential` へのファイル保存ラッパー（`Sequential::save`／
+//! `load` 等）は引き続き本モジュールのスコープ外（案 A は素の
+//! 再エクスポートのみ）のまま。`docs/compat-callbacks-design.md` §8
+//! 参照。F32 以外の dtype・入力サイズ上限の導入・`st_load`／`st_save`
+//! 本体ロジックの変更も対象外。
 
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。
 // `tests/api_surface.rs::interop_safetensors_reexports_exactly_expected_surface`

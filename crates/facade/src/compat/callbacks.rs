@@ -67,22 +67,48 @@
 //!
 //! # 対象外・切り出し候補
 //!
-//! ユーザー定義 callback（trait object による拡張点）・
-//! `ModelCheckpoint` のファイル保存（safetensors。facade 公開自体は
-//! #2019 で完了済み〈[`crate::interop::safetensors`]〉だが、
-//! `ModelCheckpoint` からの薄いラッパー結線は本 issue のスコープ外の
-//! まま。`docs/facade-safetensors-exposure-decision.md` §11・
-//! `docs/compat-callbacks-design.md` §8）・metrics（accuracy 等）・
-//! `DataLoader` を直接受ける `fit`
+//! ユーザー定義 callback（trait object による拡張点）・metrics
+//! （accuracy 等）・`DataLoader` を直接受ける `fit`
 //! 入口・追加 `Loss` variant・デバイス常駐学習（`DeviceParamStore`）／
 //! GPU `Tape`／AMP／gradient clipping との結線・`TerminateOnNaN` 相当
 //! （現状は [`fandhe_ai_autodiff::nn::optim::ReduceLrOnPlateau::step`]
 //! の非有限拒否で fail-closed に停止する）・OneCycle 等の**バッチ
 //! 単位**スケジューリング（epoch 単位のみ対応）は対象外
 //! （`docs/compat-callbacks-design.md` §8 参照）。
+//!
+//! # `ModelCheckpoint` のファイル保存（イシュー #2073）
+//!
+//! [`ModelCheckpoint::to_file`] でパスを指定すると、in-memory
+//! スナップショット（[`ModelCheckpoint::observe`]）を更新した epoch
+//! ごとに safetensors ファイルへも書き出す（safetensors save 自体は
+//! #2019 で facade 公開済み〈[`crate::interop::safetensors`]〉。
+//! [`crate::interop::safetensors::save_safetensors_f32`] への薄い
+//! 結線のみを追加する。REQ-9「互換 API 層は自作コアの上の薄い
+//! ラッパーに徹する」）。親ディレクトリが存在しなければ
+//! `std::fs::create_dir_all` で作成し、書き出し自体は
+//! `save_safetensors_f32` の一時ファイル + `rename`（POSIX atomic）に
+//! 委譲するため、途中クラッシュでも正規パスには完全なファイルか
+//! 元のファイルのいずれかのみが存在する。保存に失敗しても in-memory
+//! スナップショット（`best`／`best_epoch`／`state`）の更新自体は
+//! 取り消さない——[`Sequential::fit_with_callbacks`] 側が
+//! `AutodiffError::InvalidArgument` として fit 全体を打ち切る
+//! （`training.rs` の `'epochs_block` 契約に従い、打ち切り後も
+//! [`EarlyStopping::restore_best_weights`] の復元・モード復元・
+//! `compiled` 書き戻しは通常どおり実行される）。
+//!
+//! `to_file` を指定しない場合の挙動は変更しない（既定 `None` で
+//! ファイル I/O は一切発生しない）。`ModelCheckpoint::restore_best_weights`
+//! 相当のビルダー・safetensors metadata（best 値・epoch）の埋め込みは
+//! 本イシューのスコープ外のまま切り出し候補として残す
+//! （`docs/compat-callbacks-design.md` §8）。復元フローは
+//! [`EarlyStopping::restore_best_weights`] との併用、または
+//! [`crate::interop::safetensors::load_safetensors_f32`] →
+//! [`Sequential::load_state_dict`] を呼び出し側が組み合わせて行う。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
+use crate::interop::safetensors::SaveError;
 use crate::optim::{LrScheduler, ReduceLrOnPlateau};
 use crate::{AutodiffError, Tensor};
 
@@ -326,8 +352,9 @@ impl EarlyStopping {
 
 /// 監視指標が改善したとき（既定）またはすべての epoch 末に、モデルの
 /// `state_dict()` スナップショットを保持する callback（Keras
-/// `ModelCheckpoint` 相当のうち in-memory 版。ファイル保存は対象外
-/// （モジュール冒頭 doc「対象外・切り出し候補」節）。
+/// `ModelCheckpoint` 相当。in-memory スナップショット（`state`）に加え、
+/// [`Self::to_file`] でパスを指定すればファイル保存も行う
+/// （モジュール冒頭 doc「`ModelCheckpoint` のファイル保存」節）。
 ///
 /// [`EarlyStopping`] と異なり、状態（`best`／`best_epoch`／`state`）は
 /// 複数回の [`Sequential::fit_with_callbacks`] 呼び出しをまたいで
@@ -341,11 +368,13 @@ pub struct ModelCheckpoint {
     best_epoch: Option<usize>,
     epoch_count: usize,
     state: Option<HashMap<String, Tensor<f32>>>,
+    file_path: Option<PathBuf>,
 }
 
 impl ModelCheckpoint {
     /// 既定値: `monitor` = [`Monitor::ValLoss`]・`mode` =
-    /// [`MonitorMode::Min`]・`save_best_only` = `true`。
+    /// [`MonitorMode::Min`]・`save_best_only` = `true`・ファイル保存
+    /// なし（`to_file` 未指定）。
     pub fn new() -> Self {
         ModelCheckpoint {
             monitor: Monitor::ValLoss,
@@ -355,6 +384,7 @@ impl ModelCheckpoint {
             best_epoch: None,
             epoch_count: 0,
             state: None,
+            file_path: None,
         }
     }
 
@@ -375,6 +405,18 @@ impl ModelCheckpoint {
     /// （結果として最終 epoch のものが残る）。
     pub fn save_best_only(mut self, on: bool) -> Self {
         self.save_best_only = on;
+        self
+    }
+
+    /// スナップショット更新時（`Self::observe` が in-memory `state` を
+    /// 書き換えた時）に safetensors ファイルへも書き出す（ビルダー・
+    /// FS には一切触れない infallible 操作。実際の I/O は
+    /// [`Self::observe`] 呼び出し時のみ発生する。モジュール冒頭 doc
+    /// 「`ModelCheckpoint` のファイル保存」節）。
+    ///
+    /// 未指定（既定）の場合は従来どおり in-memory のみで動作する。
+    pub fn to_file(mut self, path: impl AsRef<Path>) -> Self {
+        self.file_path = Some(path.as_ref().to_path_buf());
         self
     }
 
@@ -413,18 +455,48 @@ impl ModelCheckpoint {
 
     /// epoch 末に 1 回呼ぶ。`value` は `self.monitor` が指す指標値、
     /// `model` はスナップショット取得元。
-    pub(super) fn observe(&mut self, value: f32, model: &Sequential) {
+    ///
+    /// `Self::to_file` でパスを指定していれば、in-memory `state` を
+    /// 更新した場合に限り safetensors ファイルへも書き出す
+    /// （`state` を更新しない呼び出しでは I/O を発生させない）。
+    /// 保存失敗時も `best`／`best_epoch`／`state`（in-memory 側）の
+    /// 更新は取り消さない——呼び出し元（`training.rs::run_fit`）が
+    /// `Err` を `AutodiffError` へ写像して fit 全体を打ち切る
+    /// （モジュール冒頭 doc「`ModelCheckpoint` のファイル保存」節）。
+    pub(super) fn observe(&mut self, value: f32, model: &Sequential) -> Result<(), SaveError> {
         let best_so_far = self.best.unwrap_or(self.mode.initial_best());
         let improved = self.mode.is_improvement(value, best_so_far, 0.0);
         if improved {
             self.best = Some(value);
             self.best_epoch = Some(self.epoch_count);
         }
+        let mut persist_result = Ok(());
         if improved || !self.save_best_only {
-            self.state = Some(model.state_dict());
+            let state = model.state_dict();
+            if let Some(path) = &self.file_path {
+                persist_result = persist(path, &state);
+            }
+            self.state = Some(state);
         }
         self.epoch_count += 1;
+        persist_result
     }
+}
+
+/// [`ModelCheckpoint::observe`] のファイル保存本体（private）。
+///
+/// 親ディレクトリが存在しなければ作成してから
+/// [`crate::interop::safetensors::save_safetensors_f32`] へ委譲する
+/// （一時ファイル + `rename` による atomic 上書きは委譲先の契約
+/// そのまま。`path.parent()` が空文字列（裸のファイル名。カレント
+/// ディレクトリ相対）の場合は `create_dir_all` をスキップする）。
+fn persist(path: &Path, state: &HashMap<String, Tensor<f32>>) -> Result<(), SaveError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(SaveError::Io)?;
+    }
+    crate::interop::safetensors::save_safetensors_f32(path, state)
 }
 
 impl Default for ModelCheckpoint {
@@ -761,9 +833,12 @@ mod tests {
     fn model_checkpoint_epoch_counter_persists_across_observe_calls() {
         let mut mc = ModelCheckpoint::new().monitor(Monitor::Loss);
         let model = Sequential::new();
-        mc.observe(2.0, &model);
-        mc.observe(1.0, &model); // 改善
-        mc.observe(1.5, &model); // 非改善
+        mc.observe(2.0, &model)
+            .expect("in-memory のみでは失敗しない");
+        mc.observe(1.0, &model)
+            .expect("in-memory のみでは失敗しない"); // 改善
+        mc.observe(1.5, &model)
+            .expect("in-memory のみでは失敗しない"); // 非改善
         assert_eq!(mc.best_value(), Some(1.0));
         assert_eq!(mc.best_epoch(), Some(1));
     }
@@ -774,8 +849,10 @@ mod tests {
             .monitor(Monitor::Loss)
             .save_best_only(false);
         let model = Sequential::new();
-        mc.observe(1.0, &model);
-        mc.observe(2.0, &model); // 非改善でもスナップショットは更新される
+        mc.observe(1.0, &model)
+            .expect("in-memory のみでは失敗しない");
+        mc.observe(2.0, &model)
+            .expect("in-memory のみでは失敗しない"); // 非改善でもスナップショットは更新される
         assert!(mc.best_state_dict().is_some());
         assert_eq!(mc.best_value(), Some(1.0), "best 値自体は改善時のみ更新");
     }
@@ -788,7 +865,8 @@ mod tests {
         // 残ってしまい最初の観測が絶対に改善にならないバグを生む）。
         let mut mc = ModelCheckpoint::new().mode(MonitorMode::Max);
         let model = Sequential::new();
-        mc.observe(-1.0, &model);
+        mc.observe(-1.0, &model)
+            .expect("in-memory のみでは失敗しない");
         assert_eq!(mc.best_value(), Some(-1.0));
     }
 
