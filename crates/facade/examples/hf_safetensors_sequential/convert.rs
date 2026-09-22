@@ -396,6 +396,17 @@ pub fn to_pytorch_layout(
                 check_rank(q_w, 2, "self_attn.q_proj.weight")?;
                 let embed_dim = q_w.shape()[0];
 
+                let mut known_keys: std::collections::HashSet<&str> = [
+                    "self_attn.q_proj.weight",
+                    "self_attn.q_proj.bias",
+                    "self_attn.k_proj.weight",
+                    "self_attn.k_proj.bias",
+                    "self_attn.v_proj.weight",
+                    "self_attn.v_proj.bias",
+                ]
+                .into_iter()
+                .collect();
+
                 let (in_proj_weight, in_proj_bias) =
                     pack_in_proj(q_w, k_w, v_w, q_b, k_b, v_b, embed_dim)?;
                 out.insert(format!("{idx}.self_attn.in_proj_weight"), in_proj_weight);
@@ -408,6 +419,8 @@ pub fn to_pytorch_layout(
                     out_proj_w.transpose_2d()?.contiguous(),
                 );
                 out.insert(format!("{idx}.self_attn.out_proj.bias"), out_proj_b.clone());
+                known_keys.insert("self_attn.out_proj.weight");
+                known_keys.insert("self_attn.out_proj.bias");
 
                 for (rest, transpose) in [
                     ("linear1.weight", true),
@@ -426,6 +439,27 @@ pub fn to_pytorch_layout(
                         t.clone()
                     };
                     out.insert(format!("{idx}.{rest}"), converted);
+                    known_keys.insert(rest);
+                }
+
+                // REQ-7「無言 skip 禁止」（codex-review 指摘 P2・PR #2224）:
+                // `detect_layer_kind` は代表キー（`self_attn.q_proj.weight`
+                // の有無）のみで層種別を判定するため、上記の既知キー集合
+                // 以外に `sub` が余剰キーを持っていても `take()` は無視
+                // したまま通過してしまう。`TransformerEncoder` に将来
+                // パラメータが追加された場合や、入力が誤って余剰キーを
+                // 含む場合に、そのテンソルが無言で drop されるのを防ぐ
+                // ため、`from_pytorch_layout` 側の未消費キー検査
+                // （本ファイル該当箇所）と対称に、ここでも明示検査し
+                // `ConvertError::UnexpectedKey` で拒否する。
+                let mut unexpected: Vec<&str> = sub
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|k| !known_keys.contains(k))
+                    .collect();
+                unexpected.sort_unstable();
+                if let Some(rest) = unexpected.first() {
+                    return Err(ConvertError::UnexpectedKey(format!("{idx}.{rest}")));
                 }
             }
         }
