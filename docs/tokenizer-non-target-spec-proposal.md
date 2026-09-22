@@ -43,9 +43,13 @@ spec リポへ貼る本文（§4）では行番号ドリフトを避け「該当
 - コード内・ドキュメント内の grep（本 doc 実施分。#1962 §2.2 と同一クエリを HEAD 上で再実行）:
   ```
   $ grep -rniE 'tokeniz|トークナイザ|BPE' crates/ site/ README.md docs/spec/*.md
+  ```
+  このクエリは `-i`（大文字小文字無視）の効果で `crates/backend-cuda/src/gemm_auto.rs`・`crates/backend-cuda/src/nvrtc.rs` の変数名 `bpe`（bytes per element の略。GEMM タイル計算で使う既存コード、2026-08-16 マージ済み・#2086 とは無関係）に `BPE` パターンが誤ヒットし、実際には約 40 件の出力になる（「出力なし・0 件」は誤り）。誤ヒットを避けるため `tokeniz`・`トークナイザ` のみで再実行すると:
+  ```
+  $ grep -rniE 'tokeniz|トークナイザ' crates/ site/ README.md docs/spec/*.md
   （出力なし。0 件）
   ```
-  `crates/`・`site/`・`README.md`・`docs/spec/*.md` のいずれにも tokenizer を指す語が現れない。
+  こちらは 0 件であり、`crates/`・`site/`・`README.md`・`docs/spec/*.md` のいずれにも tokenizer を指す語（`bpe` 変数名の誤ヒットを除く）は現れない。
 - `Var::embedding` の入力契約（`crates/autodiff/src/var.rs:4396`）は `index: &Tensor<i32>` であり、トークン id 化はこの境界の外側（呼び出し元）で完結している:
   ```rust
   pub fn embedding(
