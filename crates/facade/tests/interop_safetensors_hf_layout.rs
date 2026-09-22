@@ -28,7 +28,7 @@
 #[path = "../examples/hf_safetensors_sequential/convert.rs"]
 mod convert;
 
-use convert::{ConvertError, from_pytorch_layout, split_in_proj, to_pytorch_layout};
+use convert::{ConvertError, TempDirGuard, from_pytorch_layout, split_in_proj, to_pytorch_layout};
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::interop::safetensors::{
@@ -60,15 +60,6 @@ fn synthetic_pytorch_checkpoint() -> (HashMap<String, Tensor<f32>>, Sequential) 
     let lm_head = Tensor::new(vec![0.1_f32; VOCAB * EMBED_DIM], &[VOCAB, EMBED_DIM]).unwrap();
     pt.insert("lm_head.weight".to_string(), lm_head);
     (pt, model)
-}
-
-fn temp_dir_for(test_name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "fandhe-ai-hf-safetensors-hf-layout-{}-{test_name}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 fn assert_tensor_bit_exact(a: &Tensor<f32>, b: &Tensor<f32>, label: &str) {
@@ -122,8 +113,8 @@ fn raw_safetensors_bytes(dtype: &str, shape: &[usize], data: &[u8]) -> Vec<u8> {
 #[test]
 fn hf_layout_roundtrip_restores_sequential_bit_exact() {
     let (pt, source_model) = synthetic_pytorch_checkpoint();
-    let dir = temp_dir_for("roundtrip");
-    let path = dir.join("model.safetensors");
+    let temp_dir_guard = TempDirGuard::create("hf-layout-roundtrip").unwrap();
+    let path = temp_dir_guard.checkpoint_path();
     save_safetensors_f32(&path, &pt).unwrap();
 
     let loaded = load_safetensors_f32(&path).unwrap();

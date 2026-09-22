@@ -44,91 +44,6 @@ fn build_model(seed: u64) -> Result<Sequential, Box<dyn std::error::Error>> {
     Ok(model)
 }
 
-/// 予測不能な一時ディレクトリを排他生成する RAII ガード
-/// （codex-review 指摘 P0・PR #2224。`.claude/rules/security.md` A03
-/// 「パストラバーサル・symlink 脱出禁止」）。
-///
-/// 旧実装は PID のみを埋め込んだ固定名（`fandhe-ai-hf-safetensors-
-/// example-<pid>`）を共有一時ディレクトリ（`/tmp` 等・マルチユーザー
-/// 環境では他ユーザーも書き込み可能）上に構築していた。攻撃者が
-/// プロセス起動前にそのパスへ symlink を先置きすれば、`create_dir_all`
-/// はそれを辿って追従してしまい、後続の `save_safetensors_f32` が
-/// symlink の指す先（任意の場所）へ書き込む——固定名の `model.safetensors`
-/// と合わせて、任意ファイル上書きにつながる経路だった。加えて
-/// `create_dir_all(..).ok()` はエラーを握り潰していたため、作成に
-/// 失敗しても気付かず後続の I/O が別の不可解なエラーで落ちていた。
-///
-/// 本実装は次の 2 点で対処する:
-/// 1. **予測不能化**: PID に加えて `RandomState`（libstd 標準の
-///    HashDoS 対策用ランダムシード。生成のたびに OS エントロピー由来の
-///    新しい鍵を持つ）から得た 128 bit をディレクトリ名に埋め込み、
-///    攻撃者が事前に symlink を仕込めるパスを実質的に無くす（追加
-///    依存なしで乱数を得るための標準的な手法。`.claude/rules/
-///    deps-policy.md` によりランダム生成専用クレートの新規追加は
-///    ユーザー承認が必要なため採らない）。
-/// 2. **排他生成**: `std::fs::create_dir`（`mkdir(2)`。symlink を辿らず、
-///    対象パスに既存のファイル・symlink があれば追従せず
-///    `AlreadyExists` で失敗する。TOCTOU の窓を作らない）で作成し、
-///    名前衝突（`AlreadyExists`）時のみ新しい乱数で限られた回数まで
-///    再試行、それ以外のエラーは呼び出し元へ伝播する（無言 drop
-///    禁止）。`Drop` でディレクトリごと削除するため、`main` が
-///    途中で `?` により早期リターンしてもリークしない。
-struct TempDirGuard {
-    path: std::path::PathBuf,
-}
-
-impl TempDirGuard {
-    /// 最大 8 回まで乱数語を変えて再試行する（衝突確率は無視できる
-    /// ほど小さいが、万一の衝突でも無限ループにしない fail-closed
-    /// 方針）。
-    fn create() -> std::io::Result<Self> {
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
-
-        let base = std::env::temp_dir();
-        let mut last_err: Option<std::io::Error> = None;
-        for _ in 0..8 {
-            // `RandomState::new()` は呼ぶたびに OS エントロピー由来の
-            // 新しい鍵を持つハッシュ器を作る。空入力に対する
-            // `finish()` はその鍵から決まる値であり、攻撃者から見て
-            // 予測不能な 64 bit として利用できる（暗号学的乱数ではない
-            // が、本用途はパス予測不能化であり十分）。2 回呼んで
-            // 128 bit 相当にする。
-            let word_a = RandomState::new().build_hasher().finish();
-            let word_b = RandomState::new().build_hasher().finish();
-            let candidate = base.join(format!(
-                "fandhe-ai-hf-safetensors-example-{}-{word_a:016x}{word_b:016x}",
-                std::process::id()
-            ));
-            match std::fs::create_dir(&candidate) {
-                Ok(()) => return Ok(Self { path: candidate }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    last_err = Some(e);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            std::io::Error::other("一時ディレクトリの作成に失敗しました（再試行上限到達）")
-        }))
-    }
-
-    /// 生成済みディレクトリ配下のチェックポイントパス。
-    fn checkpoint_path(&self) -> std::path::PathBuf {
-        self.path.join("model.safetensors")
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        // 削除失敗（他プロセスが中身を開いている等）は example の
-        // 主目的（復元検証）に影響しないため無視するが、生成
-        // そのものの失敗はここには来ない（`create` が Result で
-        // 呼び出し元へ伝播済み）。
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
 fn ids_tensor(ids: &[[i32; SEQ_LEN]; BATCH]) -> Tensor<f32> {
     let mut data = Vec::with_capacity(BATCH * SEQ_LEN);
     for row in ids {
@@ -164,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lm_head = fandhe_ai::rand(&[VOCAB, EMBED_DIM])?; // PyTorch 慣習 [out, in]
     pt_layout.insert("lm_head.weight".to_string(), lm_head.clone());
 
-    let temp_dir_guard = TempDirGuard::create()?;
+    let temp_dir_guard = convert::TempDirGuard::create("example")?;
     let checkpoint_path = temp_dir_guard.checkpoint_path();
     save_safetensors_f32(&checkpoint_path, &pt_layout)?;
 
