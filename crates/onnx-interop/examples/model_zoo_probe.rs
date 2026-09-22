@@ -192,14 +192,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("run 結果に output '{output_graph_name}' が無い"))?;
             match value {
                 Value::F32(actual) => {
-                    let actual_slice = actual.as_slice().ok_or("actual as_slice 失敗")?;
-                    let expected_slice =
-                        expected_tensor.as_slice().ok_or("expected as_slice 失敗")?;
                     // shape・非有限値・閾値超過はすべて Err で返す（`assert_req7`
                     // 〈tests/model_zoo_parity.rs〉と同じ fail-closed 判定を
                     // 切り出したもの。表示のみで `Ok(())` を返して REQ-7 判定を
-                    // 素通りさせない）。
-                    let max_rel_err = check_req7(actual_slice, expected_slice)?;
+                    // 素通りさせない）。shape は要素数（slice 長）一致だけでは
+                    // 検出できない不一致（例: 期待 [1, 10] に対し実出力 [10]）を
+                    // 見逃さないよう、slice 化する前に Tensor の shape 自体を
+                    // 比較する（P2 指摘・Bugbot Low 指摘対応）。
+                    let max_rel_err = check_req7(actual, &expected_tensor)?;
                     println!("run: Ok, max_rel_err={max_rel_err}");
                 }
                 // F32 以外の出力は REQ-7 判定不能のため Err（成功終了扱いにしない）。
@@ -222,17 +222,25 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// テスト側は `panic!` で失敗を示すが、本 example はプロセス終了コードへ
 /// 反映するため `Result` で返す）。
 ///
-/// 要素数不一致（shape 不一致相当）・非有限な `rel_err`（NaN・inf 入力を含む）・
-/// 閾値超過はすべて `Err` として扱い、表示のみで `Ok` に丸めない（REQ-7・P2
-/// 指摘対応）。
-fn check_req7(actual: &[f32], expected: &[f32]) -> Result<f32, String> {
-    if actual.len() != expected.len() {
+/// shape 不一致（rank・各軸長を含む完全一致）・非有限な `rel_err`（NaN・inf
+/// 入力を含む）・閾値超過はすべて `Err` として扱い、表示のみで `Ok` に丸めない
+/// （REQ-7・P2 指摘対応）。
+///
+/// `actual.shape() == expected.shape()` を slice 化より先に検査する。要素数
+/// （slice 長）のみの比較では、rank や各軸長が異なるが総要素数が一致する
+/// 誤出力（例: 期待 `[1, 10]` に対し実出力 `[10]`、または ONNX Model Zoo の
+/// 参照出力に典型的な `[1, 1000, 1, 1]` のような rank を持つ出力で軸が入れ替わる
+/// 誤出力）を見逃す（codex-review P2・Cursor Bugbot Low 指摘対応）。
+fn check_req7(actual: &Tensor<f32>, expected: &Tensor<f32>) -> Result<f32, String> {
+    if actual.shape() != expected.shape() {
         return Err(format!(
-            "shape 不一致（要素数）: actual_len={} expected_len={}",
-            actual.len(),
-            expected.len()
+            "shape 不一致: actual={:?} expected={:?}",
+            actual.shape(),
+            expected.shape()
         ));
     }
+    let actual = actual.as_slice().ok_or("actual as_slice 失敗")?;
+    let expected = expected.as_slice().ok_or("expected as_slice 失敗")?;
     let mut fail_count = 0usize;
     let mut max_rel_err = 0.0f32;
     for (&a, &e) in actual.iter().zip(expected.iter()) {
