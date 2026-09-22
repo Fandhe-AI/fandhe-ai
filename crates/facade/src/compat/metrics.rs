@@ -249,14 +249,14 @@ impl ConfusionAccumulator {
         let mut fn_ = vec![0f64; c];
         let mut correct = 0f64;
         for row in 0..c {
-            for col in 0..c {
+            for (col, fp_col) in fp.iter_mut().enumerate() {
                 let count = self.counts[row * c + col] as f64;
                 if row == col {
                     tp[row] += count;
                     correct += count;
                 } else {
                     fn_[row] += count;
-                    fp[col] += count;
+                    *fp_col += count;
                 }
             }
         }
