@@ -328,6 +328,80 @@ fn to_file_save_failure_propagates_as_invalid_argument_and_restores_mode() {
 }
 
 // =====================================================================
+// 5b. 一時的な保存失敗は best／best_epoch／state をロールバックし、
+//     次回 fit_with_callbacks 呼び出しで再試行できる（イシュー #2073
+//     codex-review 指摘: 保存失敗後も best を前進させたままだと
+//     save_best_only(true) 下で以後その値を上回らない限り再保存が
+//     試行されない）
+// =====================================================================
+
+#[test]
+fn to_file_save_failure_rolls_back_best_and_retries_on_next_fit_call() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let dir = temp_dir_for("save-failure-retry");
+    // 親ディレクトリ位置に通常ファイルを置き `create_dir_all` を失敗
+    // させる（1 回目の呼び出し用の障害物）。
+    let blocking_file = dir.join("not-a-dir");
+    std::fs::write(&blocking_file, b"not a directory").unwrap();
+    let path = blocking_file.join("ckpt.safetensors");
+
+    let mut model = build_model();
+    model
+        .compile(
+            Optimizer::Sgd(fandhe_ai::optim::SgdConfig::new(0.05)),
+            Loss::Mse,
+        )
+        .unwrap();
+    let mut callbacks = [Callback::ModelCheckpoint(
+        ModelCheckpoint::new().monitor(Monitor::Loss).to_file(&path),
+    )];
+
+    // 1 回目: 保存失敗 → InvalidArgument。best／best_epoch／state は
+    // 一切コミットされていないはず（ロールバック契約）。
+    let err = model
+        .fit_with_callbacks(&x, &y, FitConfig::new(1, N), None, &mut callbacks)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    let Callback::ModelCheckpoint(mc) = &callbacks[0] else {
+        unreachable!("callbacks[0] is always ModelCheckpoint in this test");
+    };
+    assert_eq!(
+        mc.best_value(),
+        None,
+        "保存失敗後も best が前進していてはならない（ロールバック契約）"
+    );
+    assert!(mc.best_state_dict().is_none());
+
+    // 障害物を取り除き、以後は正常に保存できるようにする。
+    std::fs::remove_file(&blocking_file).unwrap();
+
+    // 2 回目: 同じ mc（fit 呼び出しをまたいで状態継続）で再度 fit する。
+    // best がロールバックされ None のままなので、今回観測する損失値は
+    // 必ず「改善」と判定され、再保存が試行される契約。
+    model
+        .fit_with_callbacks(&x, &y, FitConfig::new(1, N), None, &mut callbacks)
+        .unwrap_or_else(|e| panic!("障害物除去後の 2 回目 fit は成功するはず: {e}"));
+    let Callback::ModelCheckpoint(mc) = &callbacks[0] else {
+        unreachable!("callbacks[0] is always ModelCheckpoint in this test");
+    };
+    assert!(
+        mc.best_value().is_some(),
+        "障害物除去後は再保存が試行され best が前進するはず"
+    );
+    assert!(path.is_file(), "2 回目の fit でファイルが作成されるはず");
+
+    let restored = load_safetensors_f32(&path)
+        .unwrap_or_else(|e| panic!("保存済みファイルの読み戻しに失敗: {e}"));
+    let best_state = mc
+        .best_state_dict()
+        .expect("2 回目の fit で state が更新されているはず");
+    assert!(
+        state_dict_bit_exact(&restored, best_state),
+        "ファイルから読み戻した state_dict が in-memory best_state_dict と bit 一致しない"
+    );
+}
+
+// =====================================================================
 // 6. to_file を付けても in-memory 挙動は変わらない（History・最終
 //    パラメータが to_file あり／なしで bit 一致）
 // =====================================================================

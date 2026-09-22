@@ -88,13 +88,22 @@
 //! `std::fs::create_dir_all` で作成し、書き出し自体は
 //! `save_safetensors_f32` の一時ファイル + `rename`（POSIX atomic）に
 //! 委譲するため、途中クラッシュでも正規パスには完全なファイルか
-//! 元のファイルのいずれかのみが存在する。保存に失敗しても in-memory
-//! スナップショット（`best`／`best_epoch`／`state`）の更新自体は
-//! 取り消さない——[`Sequential::fit_with_callbacks`] 側が
-//! `AutodiffError::InvalidArgument` として fit 全体を打ち切る
+//! 元のファイルのいずれかのみが存在する。**永続化に成功した場合に
+//! 限り** in-memory スナップショット（`best`／`best_epoch`／`state`）
+//! を前進させる——保存に失敗した場合は改善前の値へロールバックし、
+//! その epoch の更新はコミットしない（[`ModelCheckpoint::observe`]
+//! 節参照）。ロールバックしない設計だと、`save_best_only(true)` 下で
+//! 一時的な保存失敗（権限不足・ディスク障害等）が解消した後も、
+//! 以後の監視値が失敗した best を上回らない限り再保存が試行され
+//! なくなってしまう。[`Sequential::fit_with_callbacks`] 側は保存
+//! 失敗を `AutodiffError::InvalidArgument` として fit 全体を打ち切る
 //! （`training.rs` の `'epochs_block` 契約に従い、打ち切り後も
 //! [`EarlyStopping::restore_best_weights`] の復元・モード復元・
-//! `compiled` 書き戻しは通常どおり実行される）。
+//! `compiled` 書き戻しは通常どおり実行される）。次回以降の
+//! `fit_with_callbacks` 呼び出し（`ModelCheckpoint` は fit 呼び出しを
+//! またいで状態を継続する）で同一または改善した監視値が観測されれば、
+//! ロールバック済みの `best` を基準に改善判定が再び成立し、再保存が
+//! 試行される。
 //!
 //! `to_file` を指定しない場合の挙動は変更しない（既定 `None` で
 //! ファイル I/O は一切発生しない）。`ModelCheckpoint::restore_best_weights`
@@ -478,26 +487,41 @@ impl ModelCheckpoint {
     /// `model` はスナップショット取得元。
     ///
     /// `Self::to_file` でパスを指定していれば、in-memory `state` を
-    /// 更新した場合に限り safetensors ファイルへも書き出す
+    /// 更新する場合に限り safetensors ファイルへも書き出す
     /// （`state` を更新しない呼び出しでは I/O を発生させない）。
-    /// 保存失敗時も `best`／`best_epoch`／`state`（in-memory 側）の
-    /// 更新は取り消さない——呼び出し元（`training.rs::run_fit`）が
-    /// `Err` を `AutodiffError` へ写像して fit 全体を打ち切る
+    /// **`to_file` 指定時は永続化に成功した場合に限り `best`／
+    /// `best_epoch`／`state` を前進させる**——保存が失敗した場合は
+    /// これらの更新をコミットせず、改善前の値のまま据え置く
     /// （モジュール冒頭 doc「`ModelCheckpoint` のファイル保存」節）。
+    /// これにより、一時的な保存失敗が解消した後の次回 `observe`
+    /// 呼び出しでも、ロールバックされた `best` を基準に改善判定が
+    /// 成立し、再保存が試行される（保存失敗した値をそのまま `best`
+    /// として確定してしまうと、以後それを上回る値しか再保存の
+    /// トリガーにならず、恒久的に再試行されなくなる）。`to_file`
+    /// 未指定（`file_path` が `None`）の場合は永続化自体が発生しない
+    /// ため常に成功扱いとなり、従来どおり改善時に即座にコミットする。
+    /// 呼び出し元（`training.rs::run_fit`）は `Err` を
+    /// `AutodiffError` へ写像して fit 全体を打ち切る。
     pub(super) fn observe(&mut self, value: f32, model: &Sequential) -> Result<(), SaveError> {
         let best_so_far = self.best.unwrap_or(self.mode.initial_best());
         let improved = self.mode.is_improvement(value, best_so_far, 0.0);
-        if improved {
-            self.best = Some(value);
-            self.best_epoch = Some(self.epoch_count);
-        }
         let mut persist_result = Ok(());
         if improved || !self.save_best_only {
             let state = model.state_dict();
             if let Some(path) = &self.file_path {
                 persist_result = persist(path, &state);
             }
-            self.state = Some(state);
+            // 永続化に成功した場合（`file_path` 未設定で persist_result が
+            // 常に `Ok` のままの場合を含む）のみ in-memory 側をコミットする。
+            // 失敗時は `best`／`best_epoch`／`state` を書き換えないまま
+            // 据え置き、次回 observe での再試行を可能にする（doc 節参照）。
+            if persist_result.is_ok() {
+                if improved {
+                    self.best = Some(value);
+                    self.best_epoch = Some(self.epoch_count);
+                }
+                self.state = Some(state);
+            }
         }
         self.epoch_count += 1;
         persist_result

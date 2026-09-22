@@ -651,9 +651,13 @@ impl Sequential {
     ///   fail-closed 契約: compile 済み状態は維持したまま返す）
     /// - `ModelCheckpoint::to_file` 指定時にファイル保存が失敗した
     ///   場合（イシュー #2073）→ `InvalidArgument`。in-memory
-    ///   スナップショット（`best`／`best_epoch`／`state`）の更新自体は
-    ///   取り消さない。上記と同じく `restore_best_weights` を
-    ///   （該当すれば）適用したうえで返す
+    ///   スナップショット（`best`／`best_epoch`／`state`）は永続化に
+    ///   成功した場合のみ前進させる契約のため、保存失敗した epoch の
+    ///   更新はコミットされず改善前の値のまま据え置かれる
+    ///   （`ModelCheckpoint::observe` 節参照。一時的な保存失敗が
+    ///   解消した次回以降の `fit_with_callbacks` 呼び出しで再試行
+    ///   できる）。上記と同じく `restore_best_weights` を（該当すれば）
+    ///   適用したうえで返す
     pub fn fit_with_callbacks<T: FitTarget>(
         &mut self,
         x: &Tensor<f32>,
@@ -1136,16 +1140,20 @@ impl Sequential {
                                 && let Err(e) = mc.observe(value, self)
                             {
                                 // `to_file` 指定時のファイル保存失敗
-                                // （イシュー #2073）。in-memory 側の
-                                // 更新（`best`／`best_epoch`／`state`）は
-                                // `observe` 内で既に反映済みのまま
-                                // `'epochs_block` を抜けるため、後続の
-                                // `EarlyStopping::restore_best_weights`
-                                // 復元・train／eval モード復元・
-                                // `compiled` 書き戻しは通常どおり実行
-                                // される（`callbacks.rs` モジュール冒頭
-                                // doc「`ModelCheckpoint` のファイル保存」
-                                // 節参照）。
+                                // （イシュー #2073）。`observe` は永続化
+                                // に成功した場合のみ in-memory 側
+                                // （`best`／`best_epoch`／`state`）を
+                                // 前進させる契約のため、この epoch の
+                                // 更新はコミットされず改善前の値のまま
+                                // 据え置かれた状態で `'epochs_block` を
+                                // 抜ける（次回以降の
+                                // `fit_with_callbacks` 呼び出しで再試行
+                                // できる）。後続の `EarlyStopping::
+                                // restore_best_weights` 復元・train／
+                                // eval モード復元・`compiled` 書き戻しは
+                                // 通常どおり実行される（`callbacks.rs`
+                                // モジュール冒頭 doc「`ModelCheckpoint`
+                                // のファイル保存」節参照）。
                                 break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
                                     "Sequential::{method}: ModelCheckpoint::to_file の保存に失敗した: {e}"
                                 )));
