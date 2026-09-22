@@ -187,21 +187,23 @@ fn pack_in_proj(
 /// 分割前に shape を検証する（`.claude/rules/coding-rust.md`
 /// 「カーネル実装の境界検査」と同じ fail-closed 方針を host 側の
 /// スライスにも適用し、index panic を起こさない）。
+/// [`split_in_proj`] の戻り値型（`(q_w, q_b, k_w, k_b, v_w, v_b)`）。
+/// clippy `type_complexity` 回避のための型定義切り出し（`.claude/rules/
+/// coding-rust.md`「コード品質」: `#[allow]` の安易な追加で黙らせない）。
+pub type SplitInProj = (
+    Tensor<f32>,
+    Tensor<f32>,
+    Tensor<f32>,
+    Tensor<f32>,
+    Tensor<f32>,
+    Tensor<f32>,
+);
+
 pub fn split_in_proj(
     in_proj_weight: &Tensor<f32>,
     in_proj_bias: &Tensor<f32>,
     embed_dim: usize,
-) -> Result<
-    (
-        Tensor<f32>,
-        Tensor<f32>,
-        Tensor<f32>,
-        Tensor<f32>,
-        Tensor<f32>,
-        Tensor<f32>,
-    ),
-    ConvertError,
-> {
+) -> Result<SplitInProj, ConvertError> {
     let e = embed_dim;
     check_shape(in_proj_weight, &[3 * e, e], "self_attn.in_proj_weight")?;
     check_shape(in_proj_bias, &[3 * e], "self_attn.in_proj_bias")?;
@@ -328,10 +330,15 @@ pub fn to_pytorch_layout(
 /// # 戻り値
 /// `(sequential_state_dict, extra_tensors)`。前者を
 /// `Sequential::load_state_dict` へそのまま渡せる。
+/// [`from_pytorch_layout`] の戻り値型（`(sequential_state_dict,
+/// extra_tensors)`）。clippy `type_complexity` 回避のための型定義切り出し
+/// （[`SplitInProj`] と同方針）。
+pub type FromPytorchLayoutResult = (HashMap<String, Tensor<f32>>, HashMap<String, Tensor<f32>>);
+
 pub fn from_pytorch_layout(
     pt: &HashMap<String, Tensor<f32>>,
     extra_allowlist: &[&str],
-) -> Result<(HashMap<String, Tensor<f32>>, HashMap<String, Tensor<f32>>), ConvertError> {
+) -> Result<FromPytorchLayoutResult, ConvertError> {
     let mut grouped: BTreeMap<usize, HashMap<String, Tensor<f32>>> = BTreeMap::new();
     let mut extra = HashMap::new();
 
