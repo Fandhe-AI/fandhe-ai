@@ -286,3 +286,14 @@ facade は `prost` へ直接依存せず（Cargo.toml に追加していない�
   整合検査〉のみで運用）。
 - `OnnxModel::input_names` 等の追加アクセサ・`OnnxValue` の
   `#[non_exhaustive]` 化（承認文言に無いため見送り）。
+
+## 13. 追補（イシュー #2077・2026-09-22）: `BackendOps` 経由の GPU 実行 opt-in
+
+12.6(a) の「`BackendOps`／`Device` 非経由（GPU 実行にはならない）」は
+**opt-in（既定 OFF）で解除済み**。`OnnxModel::run` は既定ではこの節の
+記述どおり不変（bit 完全一致）のままだが、`fandhe_ai::
+set_cuda_onnx_gpu_execution_enabled`／`set_metal_onnx_gpu_execution_enabled`
+（プロセスワイド・既定 `false`）を明示的に有効化した場合のみ `BackendOps`
+経由の device 実行を試みる。設計判断・op 別結線表・parity 契約・承認事項の
+詳細は `docs/onnx-gpu-execution-decision.md` を正とする（本節は追補ポイン
+タのみ）。
