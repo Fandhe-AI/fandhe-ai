@@ -959,14 +959,17 @@ impl CustomFunction for SoftmaxFn {
 /// `LayerNormalization(x, scale, bias?)`（trailing `axis..` を正規化集合とする）。
 ///
 /// **正規化統計（平均・分散・逆標準偏差）は forward（[`ops::layer_normalization`]）
-/// と同じ `f32` 演算（`mean = sum * inv_n`・分散の二乗差累積は `f32::mul_add`）を
-/// bit 完全一致で再現する**。forward 自体は `f32` 単一精度で統計を計算する実装
-/// （`ops/layer_norm.rs`。PR #277 で確定・本 PR〈#2078〉のスコープ外）のため、
-/// backward が独自に `f64` で統計を再計算すると forward が実際に計算した関数とは
-/// 異なる関数を微分してしまい丸め差のある入力で `dx`／`dscale` が不正確になる
-/// （レビュー指摘: PR #2223 codex-review discussion_r4072652835）。forward 自体の
-/// 統計を `f64` 契約へ揃える変更は既存関数（`ops/layer_norm.rs`）への影響が
-/// 本 PR のスコープを超えるため採らない。
+/// と同じ `f64` アキュムレータ契約で再計算する**（`.claude/rules/coding-rust.md`
+/// の正規化統計契約。二乗和は要素を先に `f64` へ昇格してから二乗する）。forward
+/// 自体も本 PR〈#2078〉で同じ f64 統計契約へ統一済み（`ops/layer_norm.rs`。
+/// PR #2223 codex-review 再指摘 discussion_r4072652847 系: backward だけ f32
+/// bit-match を優先すると forward 自体が正規化統計の f64 契約
+/// 〈`.claude/rules/coding-rust.md`〉に違反したままになり
+/// `docs/onnx-autograd-decision.md` §3.1 の設計記録〈f64 契約〉とも不整合が
+/// 残るため、forward・backward 双方を f64 統計へ揃える方を採った）。
+/// 両者とも同じ f64 演算で統計を再計算するため、backward は forward が実際に
+/// 計算した統計と一致した値を微分する（丸め差のある「別の関数」を微分する
+/// リスクを構造的に回避）。
 ///
 /// 一方、`dxhat` の行方向縮約（`mean_dxhat`／`mean_dxhat_xhat`）は「勾配の長軸
 /// 縮約」（`.claude/rules/coding-rust.md`）に該当し、要素積を `f32` で確定して
@@ -1063,24 +1066,27 @@ impl CustomFunction for LayerNormFn {
         };
 
         if need_dx || need_dscale || need_dbias {
-            let inv_n = 1.0f32 / inner as f32;
+            let inv_n = 1.0f64 / inner as f64;
             for o in 0..outer {
                 let row = &xs[o * inner..(o + 1) * inner];
                 let grow = &gs[o * inner..(o + 1) * inner];
-                // forward（`ops::layer_normalization`）と bit 完全一致する `f32`
-                // 統計再計算（mean = sum * inv_n・分散の二乗差累積は
-                // `f32::mul_add`）。上の struct doc コメント参照。
-                let mean: f32 = row.iter().sum::<f32>() * inv_n;
-                let mut sq_acc = 0f32;
+                // forward（`ops::layer_normalization`）と同じ `f64` 統計契約で
+                // 再計算する（mean = sum * inv_n・分散の二乗差累積は要素を先に
+                // f64 へ昇格してから二乗）。上の struct doc コメント参照。
+                let mean_f64: f64 = row.iter().map(|&v| v as f64).sum::<f64>() * inv_n;
+                let mut sq_acc = 0f64;
                 for &v in row {
-                    let diff = v - mean;
+                    let diff = v as f64 - mean_f64;
                     sq_acc = diff.mul_add(diff, sq_acc);
                 }
-                let var = sq_acc * inv_n;
-                let rstd = 1.0f32 / (var + self.epsilon).sqrt();
+                let var_f64 = sq_acc * inv_n;
+                let rstd_f64 = 1.0f64 / (var_f64 + self.epsilon as f64).sqrt();
+                let mean = mean_f64 as f32;
+                let rstd = rstd_f64 as f32;
 
                 // xhat は dx・dscale の双方が使うため need_dx || need_dscale のときのみ計算する。
-                // forward の `normalized = (block[i] - mean) * inv_std` と同じ f32 演算。
+                // forward の `normalized = (block[i] - mean) * inv_std` と同じ、統計値
+                // downcast 後の f32 演算。
                 let xhat: Vec<f32> = if need_dx || need_dscale {
                     row.iter().map(|&v| (v - mean) * rstd).collect()
                 } else {

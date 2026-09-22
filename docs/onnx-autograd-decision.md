@@ -48,7 +48,11 @@ backward は解析的勾配を手書きし、REQ-2 の統一複合判定（相�
   （`.claude/rules/coding-rust.md` の長軸縮約契約）。
 - `LayerNormalization`: 平均・分散は `f64` アキュムレータ・二乗和は要素を先に
   `f64` へ昇格してから二乗する（同契約）。`dx`／`dscale`／`dbias` の解析式は
-  標準的な LayerNorm VJP。
+  標準的な LayerNorm VJP。**forward（`ops::layer_normalization`）自体もこの
+  f64 統計契約へ統一済み**（PR #2223 codex-review 再指摘。backward のみ f32
+  bit-match で揃える案は「forward 自体が f64 契約〈`.claude/rules/
+  coding-rust.md`〉に違反したまま残る」ため採らず、forward・backward 双方を
+  f64 統計へ揃える形で本節の記述と実装を一致させた）。
 
 ### 3.2 非勾配経路（`Const` 専用。3 op）
 

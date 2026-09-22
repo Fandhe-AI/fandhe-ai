@@ -55,6 +55,11 @@ impl Default for LayerNormAttrs {
 /// - `scale`／`bias` は正規化集合の shape（`x.shape()[axis..]`）へ
 ///   [`Tensor::broadcast_to`] でブロードキャストする（不可の場合 [`OpError::Shape`]）。
 ///   `bias` を省略した場合はバイアス項なし（`+ 0`）として扱う。
+/// - 正規化統計（平均・分散）は `f64` アキュムレータで計算し、統計値の書き出し
+///   でのみ 1 回 `f32` へ downcast する（`.claude/rules/coding-rust.md` の
+///   正規化統計契約。イシュー #2078・PR #2223 codex-review 再指摘を受け、
+///   `crate::onnx::autograd::LayerNormFn::backward` の統計再計算と同一契約へ
+///   統一した。正規化本体の乗加算（`mul_add`）は従来どおり `f32`）。
 pub fn layer_normalization(
     x: &Tensor<f32>,
     scale: &Tensor<f32>,
@@ -114,23 +119,31 @@ pub fn layer_normalization(
         .ok_or(OpError::NonContiguousInternal("LayerNormalization(X)"))?;
 
     let mut out = vec![0f32; outer_size * inner_size];
-    let inv_n = 1.0 / inner_size as f32;
+    let inv_n = 1.0 / inner_size as f64;
     for o in 0..outer_size {
         let block = &x_slice[o * inner_size..(o + 1) * inner_size];
 
-        // 平均: 単純総和（`Gemm` の内積累積と異なり乗算を伴わないため `mul_add` 対象外）。
-        let mean = block.iter().sum::<f32>() * inv_n;
+        // 正規化統計（平均・分散）は `f64` アキュムレータで統一する
+        // （`.claude/rules/coding-rust.md` の正規化統計契約。イシュー #2078・
+        // PR #2223 codex-review 指摘 discussion_r4072652847 系の再指摘を受け、
+        // `crates/onnx-interop/src/onnx/autograd.rs::LayerNormFn::backward`
+        // と同じ f64 統計契約へ本関数〈forward〉も揃える。二乗和は要素を
+        // 先に f64 へ昇格してから二乗する）。統計値の書き出しのみ 1 回
+        // `f32` へ downcast し、正規化本体（`normalized = (x - mean) * inv_std`
+        // の `mul_add` 合成）は従来どおり `f32` のまま行う（matmul 系 FMA 契約
+        // とは独立の軸のため不変）。
+        let mean_f64: f64 = block.iter().map(|&v| v as f64).sum::<f64>() * inv_n;
 
-        // 母分散（除数 = inner_size・ddof=0）。二乗差の累積は `Gemm` の内積累積と同じ
-        // 乗算加算パターンのため、丸め方針統一（FMA 契約。`coding-rust.md`）に従い
-        // `f32::mul_add` を用いる。
-        let mut sq_acc = 0f32;
+        let mut sq_acc = 0f64;
         for &v in block {
-            let diff = v - mean;
+            let diff = v as f64 - mean_f64;
             sq_acc = diff.mul_add(diff, sq_acc);
         }
-        let var = sq_acc * inv_n;
-        let inv_std = 1.0 / (var + attrs.epsilon).sqrt();
+        let var_f64 = sq_acc * inv_n;
+        let inv_std_f64 = 1.0 / (var_f64 + attrs.epsilon as f64).sqrt();
+
+        let mean = mean_f64 as f32;
+        let inv_std = inv_std_f64 as f32;
 
         let out_block = &mut out[o * inner_size..(o + 1) * inner_size];
         for i in 0..inner_size {
