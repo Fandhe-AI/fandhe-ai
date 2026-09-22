@@ -1,8 +1,9 @@
 # Adam／AdamW 常駐 step（`BackendOps::adam_step_device`）GPU 実装の
 実機ランブック（イシュー #1959）
 
-**CUDA カーネルはイシュー #2069 で実装済み。実測記録は
-`docs/perf/logs/adam-device-step-cuda-2069/`（本ディレクトリではなく
+**CUDA カーネルはイシュー #2069・Metal カーネルはイシュー #2070 で
+それぞれ実装済み。実測記録は `docs/perf/logs/adam-device-step-cuda-2069/`・
+`docs/perf/logs/adam-device-step-metal-2070/`（本ディレクトリではなく
 そちら）を参照。以下は本イシュー #1959 時点（CUDA／Metal とも未実装）の
 記録として残す。**
 
