@@ -37,11 +37,21 @@ fn strip_line_comments(src: &str) -> String {
 }
 
 /// REQ-8: `adam_step_f32` が手動境界チェック `if (idx < numel)` を
-/// 維持していることをロックする。
+/// 維持していることをロックする。コメント行除去
+/// （`strip_line_comments`）後・カーネル本体（`kernel void
+/// adam_step_f32` 以降）に限定して検査することで、ヘッダコメント中の
+/// 同一文言の言及（本ファイル冒頭の説明コメント）だけで誤って
+/// 成功しないようにする（境界チェック本体を削除する回帰を確実に
+/// 検知するため）。
 #[test]
 fn adam_metal_source_has_bound_check() {
+    let stripped = strip_line_comments(ADAM_METAL_SOURCE);
+    let kernel_pos = stripped
+        .find("kernel void adam_step_f32")
+        .expect("`kernel void adam_step_f32` が見つかりません");
+    let kernel_body = &stripped[kernel_pos..];
     assert!(
-        ADAM_METAL_SOURCE.contains("if (idx < numel)"),
+        kernel_body.contains("if (idx < numel)"),
         "adam_step_f32 の手動境界チェック `if (idx < numel)` が見つかりません"
     );
 }
@@ -68,11 +78,19 @@ fn adam_metal_source_disables_fp_contract_before_kernel() {
 /// CPU 参照実装が明示的に `f32::mul_add` を使う 2 箇所（`m`／`v` の
 /// 指数移動平均更新）に対応する `fma(` 呼び出しが 3 箇所以上あることを
 /// ロックする（`g_eff` の coupled weight decay 分岐 + `m`／`v` 更新の
-/// 3 箇所。ヘッダコメント中の `fma` 言及を数えないよう厳密一致は
-/// 要求しない）。
+/// 3 箇所）。コメント行除去（`strip_line_comments`）後・カーネル本体
+/// （`kernel void adam_step_f32` 以降）に限定して数えることで、ヘッダ
+/// コメント中の `fma` 言及（本ファイル冒頭の説明コメント）を実呼び出し
+/// として誤カウントしないようにする（実呼び出しが 1 個欠けても
+/// ヘッダコメント分でしきい値 3 を満たしてしまう回帰を防ぐため）。
 #[test]
 fn adam_metal_source_uses_fma_at_least_three_times() {
-    let count = ADAM_METAL_SOURCE.matches("fma(").count();
+    let stripped = strip_line_comments(ADAM_METAL_SOURCE);
+    let kernel_pos = stripped
+        .find("kernel void adam_step_f32")
+        .expect("`kernel void adam_step_f32` が見つかりません");
+    let kernel_body = &stripped[kernel_pos..];
+    let count = kernel_body.matches("fma(").count();
     assert!(count >= 3, "fma( の出現数が想定より少ない: count={count}");
 }
 
