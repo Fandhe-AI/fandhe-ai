@@ -1952,6 +1952,140 @@ impl BackendOps for CudaBackendOps {
         })
     }
 
+    /// Adam・AdamW の 1 パラメータ分の更新を in-place で実行する
+    /// （イシュー #2069・`docs/device-resident-update-design.md`
+    /// 「Adam／AdamW の常駐 step 結線」節）。`context_cache::cached_adam`
+    /// （`ordinal` キーのプロセス内 NVRTC コンパイル済みカーネル
+    /// キャッシュ）を経由するため、学習ループの 2 回目以降のステップは
+    /// 再コンパイルを支払わない。検証順序は `sgd_step_device` と同一に
+    /// 揃える（device → shape → generation 収集 → `cached_adam` 構築 →
+    /// downcast → `numel == 0` 早期 return → storage 取得 → 起動）。
+    fn adam_step_device(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        m: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        config: &fandhe_ai_tensor_core::AdamStepConfig,
+    ) -> Result<(), BackendError> {
+        if param.device() != Device::Cuda(self.ordinal)
+            || grad.device() != Device::Cuda(self.ordinal)
+            || m.device() != Device::Cuda(self.ordinal)
+            || v.device() != Device::Cuda(self.ordinal)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if param.shape() != grad.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: grad.shape().to_vec(),
+            }));
+        }
+        if param.shape() != m.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: m.shape().to_vec(),
+            }));
+        }
+        if param.shape() != v.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: v.shape().to_vec(),
+            }));
+        }
+
+        // `#[non_exhaustive]` の `AdamStepKind` は将来 variant が増えうる
+        // ため、driver 接触前に fail-closed で拒否する（`backend-cpu::
+        // ops::adam_step_device` と同じ「どの要素も更新前」契約。
+        // `.claude/rules/security.md` A08）。
+        let use_coupled_wd = match config.kind {
+            fandhe_ai_tensor_core::AdamStepKind::Coupled => config.weight_decay != 0.0,
+            fandhe_ai_tensor_core::AdamStepKind::Decoupled => false,
+            _ => {
+                return Err(BackendError::Unsupported(
+                    "adam_step_device: unknown AdamStepKind variant".into(),
+                ));
+            }
+        };
+        let decoupled = matches!(config.kind, fandhe_ai_tensor_core::AdamStepKind::Decoupled);
+
+        // `sgd_step_device` と同じ理由（イシュー #1013 設計文書 §9
+        // item 7）: `param`／`grad`／`m`／`v` は学習ループを跨いで生存する
+        // デバイス常駐バッファであり、ハンドルを可変借用する前にこの
+        // 時点の世代を収集しておく。
+        let resource_generations: Vec<u64> = std::iter::once(param.generation())
+            .chain(std::iter::once(grad.generation()))
+            .chain(std::iter::once(m.generation()))
+            .chain(std::iter::once(v.generation()))
+            .collect();
+
+        let adam = self.with_driver_call(&resource_generations, map_cuda_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_adam(&device)
+        })?;
+
+        let grad_handle = grad
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        // `sgd_step_device` と同じ「空バッファは storage: None」契約の
+        // ため、numel == 0 はカーネル起動前に早期 return する。
+        let numel = param.numel();
+        if numel == 0 {
+            return Ok(());
+        }
+        let Some(grad_storage) = grad_handle.storage.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "adam_step_device: grad buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let grad_arg = grad_storage.as_arg();
+
+        let m_handle = m
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(m_storage) = m_handle.storage.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "adam_step_device: m buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let m_arg = m_storage.as_arg_mut();
+
+        let v_handle = v
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(v_storage) = v_handle.storage.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "adam_step_device: v buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let v_arg = v_storage.as_arg_mut();
+
+        let param_handle = param
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(param_storage) = param_handle.storage.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "adam_step_device: param buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let param_arg = param_storage.as_arg_mut();
+
+        let kernel_params = crate::adam::AdamKernelParams {
+            beta1: config.beta1,
+            beta2: config.beta2,
+            eps: config.eps,
+            weight_decay: config.weight_decay,
+            decay_factor: config.decay_factor,
+            step_size: config.step_size,
+            bias_correction2_sqrt: config.bias_correction2_sqrt,
+            decoupled,
+            use_coupled_wd,
+        };
+        self.with_driver_call(&resource_generations, map_cuda_error, || {
+            adam.run(param_arg, grad_arg, m_arg, v_arg, &kernel_params)
+        })
+    }
+
     /// 学習 step の update 区間（[`Self::sgd_step_device_tracked`]）を
     /// CUDA Graph で capture・再利用できるかを判定する（イシュー #1349・
     /// `docs/backend-cuda-graph-step-capture-design.md` §4.4）。
@@ -7089,6 +7223,44 @@ mod tests {
         assert!(
             matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
             "poison 済み ordinal では sgd_step_device は cached_sgd 構築より前に             拒否されるはず: {result:?}"
+        );
+    }
+
+    #[test]
+    fn adam_step_device_rejects_on_poisoned_ordinal_before_device_handle_is_attempted() {
+        use fandhe_ai_tensor_core::AdamStepConfig;
+        use fandhe_ai_tensor_core::AdamStepKind;
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let mut param =
+            DeviceBuffer::<f32>::new(Device::Cuda(ordinal), vec![4], Box::new(EmptyHandle));
+        let grad = DeviceBuffer::<f32>::new(Device::Cuda(ordinal), vec![4], Box::new(EmptyHandle));
+        let mut m = DeviceBuffer::<f32>::new(Device::Cuda(ordinal), vec![4], Box::new(EmptyHandle));
+        let mut v = DeviceBuffer::<f32>::new(Device::Cuda(ordinal), vec![4], Box::new(EmptyHandle));
+        let config = AdamStepConfig {
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.0,
+            decay_factor: 1.0,
+            step_size: 0.001,
+            bias_correction2_sqrt: 1.0,
+            kind: AdamStepKind::Coupled,
+        };
+
+        // poison 検査（`cached_adam` 構築の `with_driver_call`）は
+        // device/shape の事前検証・`AdamStepKind` 分岐評価の後・実際の
+        // バッファ downcast より前に走る（`ops.rs::adam_step_device`
+        // 参照。`sgd_step_device` 版と同型の検証）。
+        let result = cuda.adam_step_device(&mut param, &grad, &mut m, &mut v, &config);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では adam_step_device は cached_adam 構築より前に \
+             拒否されるはず: {result:?}"
         );
     }
 

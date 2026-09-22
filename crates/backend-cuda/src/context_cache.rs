@@ -41,7 +41,8 @@
 //!
 //! `cached_device` は `ordinal`（`usize`）を、それ以外の `cached_gemm`／
 //! `cached_elementwise`／`cached_rmsnorm`／`cached_softmax`／`cached_sgd`／
-//! `cached_allocator` は [`ContextKey`]（ordinal + `CudaContext` の同一性。
+//! `cached_adam`／`cached_allocator` は [`ContextKey`]（ordinal +
+//! `CudaContext` の同一性。
 //! 理由は [`ContextKey`] のドキュメントコメント参照）をキーとする。
 //! `ops::CudaBackendOps` は演算メソッドごとに `Self::device_handle()`
 //! （`cached_device` 経由）を毎回取得し直し、呼び出し終了時にローカル
@@ -52,7 +53,7 @@
 //! 再度支払わない）を成立させるための意図した設計である。
 //!
 //! ## eternal 組（`cached_device`／`cached_gemm`／`cached_elementwise`／
-//! `cached_rmsnorm`／`cached_softmax`／`cached_sgd`）
+//! `cached_rmsnorm`／`cached_softmax`／`cached_sgd`／`cached_adam`）
 //!
 //! `HashMap<K, Arc<Mutex<Option<Arc<T>>>>>`（外側はエントリ登録専用の
 //! 短命ロック、内側はキー単位の single-flight ロック。[`get_or_build`]
@@ -424,6 +425,21 @@ pub(crate) fn cached_sgd(device: &CudaDevice) -> Result<Arc<crate::sgd::CudaSgd>
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ContextKey::from_device(device), || {
         crate::sgd::CudaSgd::new(device)
+    })
+}
+
+/// `device` の `CudaContext` に対応する [`crate::adam::CudaAdam`] スイート
+/// をプロセス内キャッシュから取得する（イシュー #2069。キーは
+/// [`ContextKey`]。`cached_sgd` と同じ理由・同じ構成）。
+/// `ops::CudaBackendOps::adam_step_device` の唯一の呼び出し先。デバイス
+/// 常駐パラメータ更新は学習ループの毎ステップ呼ばれるため、NVRTC
+/// 再コンパイルを避けるキャッシュの効果が `cached_gemm`／
+/// `cached_elementwise` 以上に重要（`cached_sgd` コメント参照）。
+pub(crate) fn cached_adam(device: &CudaDevice) -> Result<Arc<crate::adam::CudaAdam>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::adam::CudaAdam>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::adam::CudaAdam::new(device)
     })
 }
 
