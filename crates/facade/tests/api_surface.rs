@@ -3157,14 +3157,36 @@ fn tokenize_including_punctuation(text: &str) -> Vec<String> {
 /// `content`（コメント除去済み想定）に `pub fn <fn_name>(` または
 /// `pub fn <fn_name><`（ジェネリクス付き）宣言が存在するかをトークン列
 /// の連続一致で判定する。`pub`・`fn`・`fn_name` の間の空白量（改行を
-/// 含む）に影響されない。`pub(crate) fn ...` のようなスコープ付き
-/// 可視性は「独立した `pub` トークンの直後に `fn` トークンが続かない」
-/// ため一致しない。
+/// 含む）に影響されない。`pub`・`fn` の間に `unsafe`／`const`／`async`
+/// 修飾子（0 個以上・任意順の繰り返し）が挟まる宣言も検出する
+/// （`unapproved_onnx_pub_fn_with_qualifiers_is_flagged` が既に固定
+/// している `pub async fn`／`pub unsafe fn` の扱いに合わせる）。
+/// `pub(crate) fn ...` のようなスコープ付き可視性は「独立した `pub`
+/// トークンの直後に修飾子または `fn` トークンが続かない」ため一致しない。
+/// `crates/autodiff/tests/architecture_boundaries.rs` の同名ユーティリ
+/// ティと同型（クレートをまたぐ integration test 間でヘルパーを共有
+/// できないため個別実装）。
 fn declares_pub_fn(content: &str, fn_name: &str) -> bool {
     let tokens = tokenize_including_punctuation(content);
-    tokens
-        .windows(4)
-        .any(|w| w[0] == "pub" && w[1] == "fn" && w[2] == fn_name && (w[3] == "(" || w[3] == "<"))
+    for (i, token) in tokens.iter().enumerate() {
+        if token != "pub" {
+            continue;
+        }
+        let mut j = i + 1;
+        while matches!(
+            tokens.get(j).map(String::as_str),
+            Some("unsafe" | "const" | "async")
+        ) {
+            j += 1;
+        }
+        if tokens.get(j).map(String::as_str) == Some("fn")
+            && tokens.get(j + 1).map(String::as_str) == Some(fn_name)
+            && matches!(tokens.get(j + 2).map(String::as_str), Some("(") | Some("<"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[test]
@@ -3186,6 +3208,14 @@ fn declares_pub_fn_detects_newline_separated_declaration() {
         "add_custom"
     ));
     assert!(!declares_pub_fn("let add_custom = 1;", "add_custom"));
+    assert!(declares_pub_fn(
+        "pub unsafe fn add_custom(&self) {}",
+        "add_custom"
+    ));
+    assert!(declares_pub_fn(
+        "pub const fn add_custom() {}",
+        "add_custom"
+    ));
 }
 
 /// `pub fn custom` 宣言（`pub fn custom(` に加え、`Tape::custom` 本体

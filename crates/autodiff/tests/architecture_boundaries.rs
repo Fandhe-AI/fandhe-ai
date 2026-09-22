@@ -425,16 +425,37 @@ fn tokenize_including_punctuation(text: &str) -> Vec<String> {
 /// `content`（コメント除去済み想定）に `pub fn <fn_name>(` または
 /// `pub fn <fn_name><`（ジェネリクス付き）宣言が存在するかをトークン列
 /// の連続一致で判定する。`pub`・`fn`・`fn_name` の間の空白量（改行を
-/// 含む）に影響されない。`pub(crate) fn ...` のようなスコープ付き
-/// 可視性は「独立した `pub` トークンの直後に `fn` トークンが続かない」
-/// ため一致しない（`pub` の直後に `(` が来る）——本関数の検査対象は
-/// あくまで無条件 `pub fn` 宣言のみで、旧実装（固定文字列一致）と同じ
-/// 可視性スコープの扱いを保つ。
+/// 含む）に影響されない。`pub`・`fn` の間に `unsafe`／`const`／`async`
+/// 修飾子（0 個以上・任意順の繰り返し）が挟まる宣言も検出する
+/// （`crates/facade/tests/api_surface.rs::
+/// unapproved_onnx_pub_fn_with_qualifiers_is_flagged` が既に固定して
+/// いる `pub async fn`／`pub unsafe fn` の扱いに合わせる）。
+/// `pub(crate) fn ...` のようなスコープ付き可視性は「独立した `pub`
+/// トークンの直後に修飾子または `fn` トークンが続かない」ため一致しない
+/// （`pub` の直後に `(` が来る）——本関数の検査対象はあくまで無条件
+/// `pub fn` 宣言のみで、旧実装（固定文字列一致）と同じ可視性スコープの
+/// 扱いを保つ。
 fn declares_pub_fn(content: &str, fn_name: &str) -> bool {
     let tokens = tokenize_including_punctuation(content);
-    tokens
-        .windows(4)
-        .any(|w| w[0] == "pub" && w[1] == "fn" && w[2] == fn_name && (w[3] == "(" || w[3] == "<"))
+    for (i, token) in tokens.iter().enumerate() {
+        if token != "pub" {
+            continue;
+        }
+        let mut j = i + 1;
+        while matches!(
+            tokens.get(j).map(String::as_str),
+            Some("unsafe" | "const" | "async")
+        ) {
+            j += 1;
+        }
+        if tokens.get(j).map(String::as_str) == Some("fn")
+            && tokens.get(j + 1).map(String::as_str) == Some(fn_name)
+            && matches!(tokens.get(j + 2).map(String::as_str), Some("(") | Some("<"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// `line` 先頭の可視性修飾（`pub`／`pub(crate)`／`pub(super)`／
@@ -636,39 +657,61 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
                 );
             }
         }
-        // ローカル型定義による同名別型の混入を遮断する（codex-review
-        // 指摘・PR #2212 その 5）: `ALLOWED_SIGNATURE_TOKENS` は名前
-        // ベースの許可のため、`use ... as ...` によるエイリアスを禁止
-        // しても `pub struct Tensor(BackendOps);` のように custom.rs
-        // 内で `Tensor` という名前の別型を直接定義されると、シグネチャ
-        // 上は allowlist を素通りしたまま実質的に禁止型（`BackendOps`）
-        // を混入できてしまう。`struct Tensor`／`enum Tensor` のローカル
-        // 定義自体を禁止する。
-        for kind in ["struct", "enum"] {
-            let prefix = format!("{kind} Tensor");
-            if let Some(after) = after_visibility.strip_prefix(prefix.as_str()) {
-                let is_exact_name = after
-                    .chars()
-                    .next()
-                    .map(|c| !c.is_ascii_alphanumeric() && c != '_')
-                    .unwrap_or(true);
-                assert!(
-                    !is_exact_name,
-                    "src/custom.rs に Tensor という名前のローカル型定義が見つかった: \
-                     {statement}（tensor_core::Tensor と同名の別型でラップして禁止型を\
-                     混入させる経路になりうるため、本ファイルでは定義しない設計とする）"
-                );
-            }
-        }
     }
-    // シグネチャの `Tensor` トークンが指す型を一意に固定する。上記の
-    // ローカル型定義禁止・alias import 禁止と合わせて、`custom.rs` の
-    // スコープに存在する `Tensor` は tensor-core クレートの非エイリアス
-    // import のみであることを構造的に保証する。
+
+    // ローカル型定義による同名別型の混入を遮断する（codex-review 指摘・
+    // PR #2212 その 5）: `ALLOWED_SIGNATURE_TOKENS` は名前ベースの許可
+    // のため、`use ... as ...` によるエイリアスを禁止しても
+    // `pub struct Tensor(BackendOps);` のように custom.rs 内で `Tensor`
+    // という名前の別型を直接定義されると、シグネチャ上は allowlist を
+    // 素通りしたまま実質的に禁止型（`BackendOps`）を混入できてしまう。
+    // `strip_prefix` によるステートメント先頭一致（旧実装）は
+    // `#[derive(Debug)]` 等の属性行や `struct`／`Tensor` 間の改行がある
+    // と検出漏れになるため、コメント除去済みの全文をトークン化し
+    // `struct`／`enum` トークンの直後に `Tensor` トークンが続く箇所を
+    // 走査する（空白・改行・属性行の位置に依存しない）。
+    let all_tokens = tokenize_including_punctuation(&no_comments);
+    let local_tensor_type_declared = all_tokens
+        .windows(2)
+        .any(|w| (w[0] == "struct" || w[0] == "enum") && w[1] == "Tensor");
     assert!(
-        content.contains("use fandhe_ai_tensor_core::Tensor;"),
-        "src/custom.rs に `use fandhe_ai_tensor_core::Tensor;`（非エイリアス import）が\
-         見つからない（シグネチャの Tensor トークンが指す型を一意に固定できない）"
+        !local_tensor_type_declared,
+        "src/custom.rs に Tensor という名前のローカル型定義（struct／enum）が見つかった\
+         （tensor_core::Tensor と同名の別型でラップして禁止型を混入させる経路になりうる\
+         ため、本ファイルでは定義しない設計とする）"
+    );
+
+    // シグネチャの `Tensor` トークンが指す型を一意に固定する（import 元
+    // の完全パス検査。codex-review 指摘・PR #2212 その 5）: `Tensor` を
+    // import する `use` 文が 1 つ以上あり、そのすべてが
+    // `fandhe_ai_tensor_core::Tensor` という完全パスと一致することを
+    // 検査する（`crate::Tensor` や別クレートの同名型を経由した再
+    // エクスポートでは一致しない）。`content.contains(...)` による固定
+    // 文字列一致（旧実装）はコメントアウトされた `// use ...` 行でも
+    // 満たせてしまうため、コメント除去済みの `no_comments` を対象に
+    // トークン化して判定する。
+    let mut canonical_tensor_import_found = false;
+    for statement in split_top_level_statements(&no_comments) {
+        let after_visibility = strip_visibility_prefix(&statement);
+        let Some(use_body) = after_visibility.strip_prefix("use ") else {
+            continue;
+        };
+        let use_tokens = extract_identifier_tokens(use_body);
+        if use_tokens.last().map(String::as_str) != Some("Tensor") {
+            continue;
+        }
+        assert_eq!(
+            use_tokens,
+            vec!["fandhe_ai_tensor_core".to_string(), "Tensor".to_string()],
+            "src/custom.rs の use 文が Tensor を import しているが完全パスが\
+             fandhe_ai_tensor_core::Tensor と一致しない: {statement}"
+        );
+        canonical_tensor_import_found = true;
+    }
+    assert!(
+        canonical_tensor_import_found,
+        "src/custom.rs に fandhe_ai_tensor_core::Tensor の import が見つからない\
+         （シグネチャの Tensor トークンが指す型を一意に固定できない）"
     );
 }
 
@@ -823,17 +866,51 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
         !declares_pub_fn("pub(crate) fn custom(&self) {}", "custom"),
         "pub(crate) fn custom はスコープ付き可視性のため対象外（旧実装と同じ扱い）"
     );
+    assert!(
+        declares_pub_fn("pub unsafe fn custom(&self) {}", "custom"),
+        "pub unsafe fn custom 宣言を検出できていない"
+    );
+    assert!(
+        declares_pub_fn("pub const fn custom() {}", "custom"),
+        "pub const fn custom 宣言を検出できていない"
+    );
 
     // 8) 同名別型によるシグネチャ混入（codex-review 指摘・PR #2212
-    //    その 5）: `struct Tensor(BackendOps);` のようなローカル定義は
-    //    `struct Tensor` プレフィックス一致で検出される想定の前提確認。
-    let forged_wrapper = "pub struct Tensor(BackendOps);\n";
-    for statement in split_top_level_statements(forged_wrapper) {
-        let after_vis = strip_visibility_prefix(&statement);
+    //    その 5）: `struct Tensor(BackendOps);` のようなローカル定義を
+    //    トークン列の連続一致で検出できることの確認。ステートメント
+    //    先頭一致（`strip_prefix`）では見逃す属性行（`#[derive(...)]`）
+    //    付き・`struct`/`Tensor` 間に改行を挟んだケースも対象にする。
+    for forged_wrapper in [
+        "pub struct Tensor(BackendOps);\n",
+        "#[derive(Debug)]\npub struct Tensor(BackendOps);\n",
+        "pub struct\nTensor(BackendOps);\n",
+        "enum Tensor { Wrapped(BackendOps) }\n",
+    ] {
+        let tokens = tokenize_including_punctuation(forged_wrapper);
         assert!(
-            after_vis.starts_with("struct Tensor"),
-            "ローカル Tensor 型定義の検出前提（struct Tensor プレフィックス）が崩れている: \
-             {after_vis}"
+            tokens
+                .windows(2)
+                .any(|w| (w[0] == "struct" || w[0] == "enum") && w[1] == "Tensor"),
+            "ローカル Tensor 型定義をトークン列で検出できていない: {forged_wrapper}"
+        );
+    }
+
+    // 9) import 元の完全パス検査（codex-review 指摘・PR #2212 その 5）:
+    //    `Tensor` を import する use 文の完全パスが
+    //    `fandhe_ai_tensor_core::Tensor` と異なる場合（別クレート・
+    //    再エクスポート経由）はトークン列が一致しないことの確認。
+    let forged_other_crate_import = "use some_other_crate::Tensor;\n";
+    for statement in split_top_level_statements(forged_other_crate_import) {
+        let after_vis = strip_visibility_prefix(&statement);
+        let use_body = after_vis
+            .strip_prefix("use ")
+            .expect("use 文の前提が崩れている");
+        let use_tokens = extract_identifier_tokens(use_body);
+        assert_ne!(
+            use_tokens,
+            vec!["fandhe_ai_tensor_core".to_string(), "Tensor".to_string()],
+            "別クレート由来の Tensor import が誤って正規 import と一致してしまっている: \
+             {use_body}"
         );
     }
 }
