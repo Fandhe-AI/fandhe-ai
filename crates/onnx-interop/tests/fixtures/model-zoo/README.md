@@ -44,7 +44,7 @@ tar.gz 自体〈26,741 B〉はコミットせず展開後のファイルのみ�
     `InterpError::UnsupportedOp("Conv")`（`Conv` は未対応 op。追跡先はイシュー
     #2199。ただし #2199 の受け入れ条件は pads／strides／dilations のみで
     `auto_pad`〈本モデルが使う `SAME_UPPER`〉には触れていないため、`auto_pad`
-    対応は別途追跡が必要 — `docs/onnx-model-zoo-parity.md` §7 参照）
+    対応は別途追跡が必要 — `docs/onnx-model-zoo-parity.md` §5 参照）
 
 ## tier B（非コミット。`ONNX_INTEROP_MODEL_ZOO_DIR` 経由の `#[ignore]` テスト）
 

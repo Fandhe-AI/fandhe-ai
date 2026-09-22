@@ -123,8 +123,8 @@ fail-closed な期待値表である。
 - **sibling（#2199／#2200／#2186 等）が先にマージされた場合**: そちらの
   PR 側で対象モデルの `run` が先へ進んだ時点（＝別の `UnsupportedOp` で
   止まる、または成功する）で `RunExpectation` を更新する義務を負う
-- **本 issue の PR が後にマージされる場合**: 実装ステップ（§4 実装計画。
-  実際の作業は git 履歴を参照）の再プローブ（`cargo run -p
+- **本 issue の PR が後にマージされる場合**: マージ直前（実際の作業は
+  git 履歴を参照）の再プローブ（`cargo run -p
   fandhe-ai-onnx-interop --example model_zoo_probe -- <モデルディレクトリ>`）
   で HEAD の実際の挙動を確認してから期待値表を確定する
 - **中間状態の扱い**: 例えば #2199 が `auto_pad` 非対応のままマージ

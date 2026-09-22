@@ -14,7 +14,7 @@
 //! 選定モデル（mnist-12・squeezenet1.0-12・mobilenetv2-12・resnet50-v1-12）は
 //! いずれも `Conv`（未対応 op。追跡先はイシュー #2199。`auto_pad`／group
 //! conv は #2199 の受け入れ条件に含まれず別途追跡が必要 —
-//! `docs/onnx-model-zoo-parity.md` §7）で `run` が止まるため、HEAD 時点では
+//! `docs/onnx-model-zoo-parity.md` §5）で `run` が止まるため、HEAD 時点では
 //! 1 件も end-to-end 実行できない。本ファイルの成果は「ハーネス・被覆台帳・
 //! fail-closed な期待値表」であり、未対応 op が実装され `run` が先へ進んだ
 //! 場合は該当エントリの [`RunExpectation`] を更新する
