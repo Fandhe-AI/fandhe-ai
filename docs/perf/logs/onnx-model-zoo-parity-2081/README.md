@@ -25,16 +25,19 @@ ONNX import モデルを GPU 経由で実行する場合の実機 parity は別 
 経由で実行する組み合わせ検証は、#2077 が実機実測を終え、かつ Model Zoo
 モデルが要求する `Conv` 等が実装された後に再検討する）。
 
-## tier B（squeezenet1.0-12・mobilenetv2-12・resnet50-v1-12）の未検証 sha256
+## tier B（squeezenet1.0-12・mobilenetv2-12・resnet50-v1-12）の sha256 検証状況
 
 `crates/onnx-interop/tests/fixtures/model-zoo/README.md` の tier B 節に
-記録した tar.gz LFS oid／`.onnx` sha256 は計画立案時点の値であり、本
-実装セッションでは実ファイルのダウンロード再検証を行っていない
-（103 MB の resnet50-v1-12 を含み容量都合で見送った）。tier B の
-`#[ignore]` テストを初めて実行する開発者は、取得したファイルの sha256 を
-必ず自分で再計算し、記録値と食い違えば同 README を実測値で更新すること
-（fail-closed。該当箇所は `crates/onnx-interop/tests/fixtures/model-zoo/
-README.md` に明記済み）。
+記録した tar.gz LFS oid／`.onnx` sha256 は、2026-09-22 に 3 モデルの
+tar.gz（squeezenet1.0-12・mobilenetv2-12・resnet50-v1-12。103 MB の
+resnet50-v1-12 を含む）を実際にダウンロードし `sha256sum` で実測した値で
+あり、展開後の `.onnx` の sha256 と合わせて同 README の表と完全一致した
+（byte 長〈5,151,210 B／13,498,787 B／96,559,469 B〉も記録値と一致）。**正本
+は `crates/onnx-interop/tests/fixtures/model-zoo/README.md` の表であり、本
+README には値を重複記載しない。** tier B の `#[ignore]` テストを実行する
+開発者は、取得したファイルの sha256 が同表と一致することを引き続き
+必ず自分で再計算・確認すること（fail-closed。不一致の場合は取得元・commit
+SHA を再確認する）。
 
 ## tier C: bertsquad-12 の取得・棚卸し未実施
 
