@@ -40,7 +40,7 @@
 //! 1. **主対策（`decode_model` 経由の非信頼入力）**: [`decode_model`] は
 //!    `ModelProto::decode` を呼ぶ**前**に、`prost::encoding` の公開
 //!    プリミティブ（`decode_key`/`decode_varint`/`skip_field`）だけを使う
-//!    bounded なワイヤスキャン（[`prescan_sparse_initializer`]）で
+//!    bounded なワイヤスキャン（`prescan_sparse_initializer`（非公開関数））で
 //!    `sparse_initializer`（tag=15）の存在有無だけを検出し、検出時は
 //!    `ModelProto` を一切構築せず [`DecodeModelError::
 //!    SparseInitializerNotSupported`] で fail-closed に拒否する。
@@ -265,7 +265,7 @@ pub mod attribute_type {
 /// `decode_model` のエラー型（イシュー #2079 codex-review 是正）。
 ///
 /// `prost::DecodeError`（壊れたバイト列）に加え、`ModelProto::decode` を
-/// 呼ぶ**前**の bounded 事前走査（[`prescan_sparse_initializer`]）が
+/// 呼ぶ**前**の bounded 事前走査（`prescan_sparse_initializer`（非公開関数））が
 /// `GraphProto.sparse_initializer` の存在を検出した専用分岐を持つ。
 /// この分岐は `graph::build_graph` の `GraphError::
 /// SparseInitializerNotSupported` と同一の診断情報（`tensor_name`・
@@ -306,7 +306,7 @@ impl std::error::Error for DecodeModelError {}
 ///
 /// **`sparse_initializer` の早期 fail-closed 拒否（イシュー #2079
 /// codex-review 是正）**: `ModelProto::decode` を呼ぶ前に
-/// [`prescan_sparse_initializer`] で `GraphProto.sparse_initializer`
+/// `prescan_sparse_initializer`（非公開関数） で `GraphProto.sparse_initializer`
 /// （tag=15）の存在だけを bounded に検出する。検出時は `ModelProto` を
 /// 一切構築せず [`DecodeModelError::SparseInitializerNotSupported`] を
 /// 返す（本モジュール冒頭コメント「メモリ増幅対策」節参照）。
