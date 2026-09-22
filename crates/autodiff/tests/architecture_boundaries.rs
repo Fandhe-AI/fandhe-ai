@@ -148,6 +148,79 @@ fn strip_cfg_test_items(content: &str) -> String {
     out
 }
 
+/// `content` から行コメント（`//`）とブロックコメント（`/* ... */`。
+/// ネスト対応）を空白へ置換して取り除いた文字列を返す（codex-review
+/// 指摘・PR #2212 その 6）: `extract_trait_body`／
+/// `extract_supertrait_bound_tokens` が `content.find("pub trait
+/// CustomFunction")` で最初の一致を採用するため、実定義より前にブロック
+/// コメントで偽の `pub trait CustomFunction { ... }` を置かれると、
+/// コメント除去前の走査ではその偽定義を境界検査の対象として抜き出して
+/// しまう（実定義の検査を素通りできる）。行コメント（`//` 始まりの行）
+/// のみを除去する旧来の `no_comments` 相当の処理ではブロックコメントに
+/// 対応できないため、本関数は両方を対象にする。文字列リテラル中の
+/// `//`／`/*` は非対応（`strip_top_level_statements` と同じ簡易実装
+/// 方針。`custom.rs` に該当パターンが無いことを前提とする）。
+fn strip_comments(content: &str) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0usize;
+    while i < len {
+        let c = chars[i];
+        if c == '/' && i + 1 < len && chars[i + 1] == '/' {
+            while i < len && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && i + 1 < len && chars[i + 1] == '*' {
+            let mut depth = 1i32;
+            i += 2;
+            while i < len && depth > 0 {
+                if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
+                    depth += 1;
+                    i += 2;
+                } else if i + 1 < len && chars[i] == '*' && chars[i + 1] == '/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    if chars[i] == '\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// ステートメント（またはその可視性修飾除去後の残り）の先頭が識別子
+/// トークンとして `keyword`（`"use"`／`"type"`）と一致するかを判定し、
+/// 一致すればキーワード以降の残り文字列（前後の空白は trim 済み）を
+/// 返す（codex-review 指摘・PR #2212 その 7）: `starts_with("use ")`／
+/// `starts_with("type ")` は半角スペース 1 個固定の文字列一致のため、
+/// `use\ncrate::...`／`type\nTensor = ...` のように改行を挟んだ有効な
+/// Rust 記法を見逃す。本関数は `trim_start()` で任意の空白（改行・タブ
+/// 含む）を読み飛ばしたうえで `keyword` の文字列一致を取り、直後が
+/// 識別子構成文字（英数字／`_`）でないこと（`used`／`typeof` 等の無関係
+/// な識別子ではないこと）を確認してから残りを返す。
+fn strip_keyword_prefix<'a>(statement: &'a str, keyword: &str) -> Option<&'a str> {
+    let trimmed = statement.trim_start();
+    let rest = trimmed.strip_prefix(keyword)?;
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some(rest.trim_start())
+}
+
 fn visit_rs_files(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -177,6 +250,13 @@ fn visit_rs_files(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
 /// ト本体は文字列リテラル中に `{`/`}` を含まないため対応不要）。トレイ
 /// ト定義が見つからない場合は空文字列を返す（呼び出し側のアサーションで
 /// 検出不能を明示的に fail させるため、黙って全文を返さない）。
+///
+/// **`content` は呼び出し側で `strip_comments` 済みであることを前提と
+/// する**（codex-review 指摘・PR #2212 その 6）: コメント除去前の生
+/// テキストに対して `content.find(&needle)` で最初の一致を採用すると、
+/// 実定義より前にブロックコメントで偽の `pub trait CustomFunction { ...
+/// }` を置かれた場合にその偽定義を抜き出してしまい、境界検査（denylist・
+/// allowlist・supertrait 境界）を素通りできてしまう。
 fn extract_trait_body(content: &str, trait_name: &str) -> String {
     let needle = format!("pub trait {trait_name}");
     let Some(start) = content.find(&needle) else {
@@ -232,6 +312,11 @@ fn extract_trait_body(content: &str, trait_name: &str) -> String {
 /// - `:` の後は `where`（キーワード）・開始 `{` のうち先に現れる方の
 ///   手前までを境界リスト区間とし、`+` で分割してトリムしたトークン列
 ///   を返す
+///
+/// **`content` は呼び出し側で `strip_comments` 済みであることを前提と
+/// する**（`extract_trait_body` と同じ理由。codex-review 指摘・PR #2212
+/// その 6: コメント除去前の生テキストではブロックコメント中の偽ヘッダー
+/// を最初の一致として抜き出してしまう）。
 fn extract_supertrait_bound_tokens(content: &str, trait_name: &str) -> Vec<String> {
     let needle = format!("pub trait {trait_name}");
     let Some(start) = content.find(&needle) else {
@@ -514,8 +599,14 @@ fn strip_visibility_prefix(line: &str) -> &str {
 fn custom_function_trait_signatures_are_host_tensor_only() {
     let custom_rs = autodiff_crate_root().join("src/custom.rs");
     let content = read_to_string_or_panic(&custom_rs);
+    // 行コメント・ブロックコメント（ネスト対応）を除去した全文（`content`
+    // 中の位置に依存する走査は以降すべてこの `no_comments` を対象にする。
+    // codex-review 指摘・PR #2212 その 6: ブロックコメント中の偽トレイト
+    // 定義を `extract_trait_body`／`extract_supertrait_bound_tokens` が
+    // 誤って最初の一致として抜き出す迂回を塞ぐ）。
+    let no_comments = strip_comments(&content);
 
-    let supertrait_bounds = extract_supertrait_bound_tokens(&content, "CustomFunction");
+    let supertrait_bounds = extract_supertrait_bound_tokens(&no_comments, "CustomFunction");
     assert!(
         !supertrait_bounds.is_empty(),
         "src/custom.rs から `pub trait CustomFunction` の supertrait 境界（`:` から\
@@ -533,17 +624,15 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
         );
     }
 
-    let trait_body = extract_trait_body(&content, "CustomFunction");
+    let trait_body = extract_trait_body(&no_comments, "CustomFunction");
     assert!(
         !trait_body.is_empty(),
         "src/custom.rs から `pub trait CustomFunction` 本体を抽出できなかった\
          （テスト自体が検査対象を見失っている。ファイル構成が変わっていないか確認）"
     );
-    let signatures_only: String = trait_body
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // `trait_body` は `no_comments`（コメント除去済み）から抽出済みのため
+    // 行単位の `//` 再フィルタは不要。
+    let signatures_only: String = trait_body;
 
     // denylist 判定（既存。defense in depth として allowlist 判定と併用）。
     const FORBIDDEN_IDENTIFIERS: &[&str] = &["BackendOps", "Tape", "Var", "Device", "NodeId"];
@@ -626,14 +715,15 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // トークナイザは英数字／`_`／先頭の `'` のみを識別子境界とするため、
     // 空白種別（スペース・タブ・改行）やコメント区切り文字（`/*`・`*/`）
     // の違いに影響されない）。
-    let no_comments: String = content
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    //
+    // `use ` 判定は固定スペース 1 個の `starts_with` ではなく
+    // `strip_keyword_prefix`（トークン境界での識別子一致）を使う
+    // （codex-review 指摘・PR #2212 その 7: `use\ncrate::{...}` のように
+    // `use` の直後に改行が来る有効な Rust 記法を `starts_with("use ")`
+    // は見逃す）。
     for statement in split_top_level_statements(&no_comments) {
         let after_visibility = strip_visibility_prefix(&statement);
-        if after_visibility.starts_with("use ") {
+        if strip_keyword_prefix(after_visibility, "use").is_some() {
             let has_as_token = extract_identifier_tokens(after_visibility)
                 .iter()
                 .any(|token| token == "as");
@@ -645,10 +735,11 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
                  import を使わない設計とする）"
             );
         }
-        // `pub`／`pub(crate)` 等の可視性修飾を読み飛ばしてから `type ` を
+        // `pub`／`pub(crate)` 等の可視性修飾を読み飛ばしてから `type` を
         // 判定する（旧実装は `type ` 始まりの行しか見ておらず `pub type`
-        // を取りこぼしていた）。
-        if after_visibility.starts_with("type ") {
+        // を取りこぼしていた。さらに `strip_keyword_prefix` により
+        // `type\nTensor = ...` のような改行を挟んだ宣言も見逃さない）。
+        if strip_keyword_prefix(after_visibility, "type").is_some() {
             for forbidden in FORBIDDEN_IDENTIFIERS {
                 assert!(
                     !contains_identifier(after_visibility, forbidden),
@@ -668,17 +759,26 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // `strip_prefix` によるステートメント先頭一致（旧実装）は
     // `#[derive(Debug)]` 等の属性行や `struct`／`Tensor` 間の改行がある
     // と検出漏れになるため、コメント除去済みの全文をトークン化し
-    // `struct`／`enum` トークンの直後に `Tensor` トークンが続く箇所を
-    // 走査する（空白・改行・属性行の位置に依存しない）。
+    // `struct`／`enum`／`type` トークンの直後に `Tensor` トークンが続く
+    // 箇所を走査する（空白・改行・属性行の位置に依存しない）。
+    //
+    // `type` も対象に含める（codex-review 指摘・PR #2212 その 8）:
+    // 直前の type エイリアス検査（上記ループ内）は右辺が
+    // `FORBIDDEN_IDENTIFIERS` の固定 denylist に一致する場合のみ拒否
+    // するため、`type Tensor = SomeOtherType;` のように denylist に
+    // 載っていない任意の型へすり替える宣言を見逃す。`Tensor` という
+    // 名前のローカル型エイリアス自体を構造的に禁止すれば、右辺の型が
+    // 何であっても（denylist の有無に関係なく）「シグネチャの `Tensor`
+    // は必ず canonical import 由来」という不変条件を保てる。
     let all_tokens = tokenize_including_punctuation(&no_comments);
     let local_tensor_type_declared = all_tokens
         .windows(2)
-        .any(|w| (w[0] == "struct" || w[0] == "enum") && w[1] == "Tensor");
+        .any(|w| (w[0] == "struct" || w[0] == "enum" || w[0] == "type") && w[1] == "Tensor");
     assert!(
         !local_tensor_type_declared,
-        "src/custom.rs に Tensor という名前のローカル型定義（struct／enum）が見つかった\
-         （tensor_core::Tensor と同名の別型でラップして禁止型を混入させる経路になりうる\
-         ため、本ファイルでは定義しない設計とする）"
+        "src/custom.rs に Tensor という名前のローカル型定義（struct／enum／type エイリアス）\
+         が見つかった（tensor_core::Tensor と同名の別型でラップして禁止型を混入させる経路に\
+         なりうるため、本ファイルでは定義しない設計とする）"
     );
 
     // シグネチャの `Tensor` トークンが指す型を一意に固定する（import 元
@@ -690,10 +790,26 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // 文字列一致（旧実装）はコメントアウトされた `// use ...` 行でも
     // 満たせてしまうため、コメント除去済みの `no_comments` を対象に
     // トークン化して判定する。
+    //
+    // `#[cfg(test)]` 配下の import は canonical import として認めない
+    // （codex-review 指摘・PR #2212 その 8）: `split_top_level_statements`
+    // は属性とその直後のアイテムを 1 ステートメントとして結合するため
+    // `#[cfg(test)]\nuse fandhe_ai_tensor_core::Tensor;` は属性文字列が
+    // 先頭に残り `strip_keyword_prefix` の `use` 一致に失敗する（結果
+    // として現状は迂回できない）——しかしこれは文単位分割の実装詳細に
+    // 副次的に依存した保護であり、明示的な意図ではない。将来
+    // `split_top_level_statements` や属性の扱いが変わっても壊れない
+    // よう、ステートメント全文に `cfg(test)` が含まれる場合は明示的に
+    // 対象外とする fail-closed ガードを独立して設ける（トップレベル
+    // import をテスト専用の別名 import に差し替え、それを canonical
+    // import として通す迂回を塞ぐ）。
     let mut canonical_tensor_import_found = false;
     for statement in split_top_level_statements(&no_comments) {
+        if statement.contains("cfg(test)") {
+            continue;
+        }
         let after_visibility = strip_visibility_prefix(&statement);
-        let Some(use_body) = after_visibility.strip_prefix("use ") else {
+        let Some(use_body) = strip_keyword_prefix(after_visibility, "use") else {
             continue;
         };
         let use_tokens = extract_identifier_tokens(use_body);
@@ -913,4 +1029,90 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
              {use_body}"
         );
     }
+
+    // 10) `strip_keyword_prefix` は `use`／`type` の直後に改行が来る
+    //     有効な Rust 記法も検出する（codex-review 指摘・PR #2212
+    //     その 7: `starts_with("use ")`／`starts_with("type ")` は
+    //     半角スペース 1 個固定のため `use\ncrate::...`・
+    //     `type\nTensor = ...` を見逃していた）。
+    assert_eq!(
+        strip_keyword_prefix("use\ncrate::BackendOps as Tensor;", "use"),
+        Some("crate::BackendOps as Tensor;")
+    );
+    assert_eq!(
+        strip_keyword_prefix("type\nTensor = BackendOps;", "type"),
+        Some("Tensor = BackendOps;")
+    );
+    // `used`／`typeof` のような無関係な識別子には一致しない。
+    assert_eq!(strip_keyword_prefix("used_value = 1;", "use"), None);
+    assert_eq!(strip_keyword_prefix("typeof_value = 1;", "type"), None);
+
+    // 11) `strip_comments` はブロックコメント（ネスト対応）を除去する
+    //     ため、実定義より前に置かれた偽トレイト定義（ブロックコメント
+    //     内）は `extract_trait_body`／`extract_supertrait_bound_tokens`
+    //     の走査対象から外れる（codex-review 指摘・PR #2212 その 6）。
+    let forged_comment_then_real = "/* pub trait CustomFunction { fn evil(&self); } */\n\
+         pub trait CustomFunction: Send + Sync + 'static {\n    fn forward(&self);\n}\n";
+    let cleaned = strip_comments(forged_comment_then_real);
+    assert!(
+        !cleaned.contains("evil"),
+        "ブロックコメント内の偽トレイト定義が除去されていない: {cleaned}"
+    );
+    let bounds = extract_supertrait_bound_tokens(&cleaned, "CustomFunction");
+    assert!(
+        bounds.iter().any(|b| b == "Send")
+            && bounds.iter().any(|b| b == "Sync")
+            && bounds.iter().any(|b| b == "'static"),
+        "ブロックコメント除去後は実定義の supertrait 境界を正しく抽出できるはず: {bounds:?}"
+    );
+    let body = extract_trait_body(&cleaned, "CustomFunction");
+    assert!(
+        !body.contains("evil") && body.contains("forward"),
+        "抽出したトレイト本体が実定義（forward のみ）ではなく偽定義（evil）を含んでいる: {body}"
+    );
+
+    // 12) `type Tensor = <denylist 外の型>;` のようなローカル型エイリアス
+    //     も、右辺が denylist に一致しなくても構造的に検出される
+    //     （codex-review 指摘・PR #2212 その 8: 旧実装は右辺の
+    //     `FORBIDDEN_IDENTIFIERS` 一致のみを拒否しており、denylist に
+    //     載っていない任意の型へのすり替えを見逃していた）。
+    for forged_type_alias in [
+        "type Tensor = SomeUnlistedType;\n",
+        "pub type Tensor = SomeUnlistedType;\n",
+        "type\nTensor = SomeUnlistedType;\n",
+    ] {
+        let tokens = tokenize_including_punctuation(forged_type_alias);
+        assert!(
+            tokens
+                .windows(2)
+                .any(|w| (w[0] == "struct" || w[0] == "enum" || w[0] == "type") && w[1] == "Tensor"),
+            "denylist 外の型へすり替える type Tensor エイリアスを検出できていない: \
+             {forged_type_alias}"
+        );
+    }
+
+    // 13) `#[cfg(test)]` 配下の `use fandhe_ai_tensor_core::Tensor;` は
+    //     canonical import 判定から除外される（codex-review 指摘・
+    //     PR #2212 その 8: トップレベル import を非 canonical な別名へ
+    //     差し替えつつ、テスト専用スコープの正規 import だけで判定を
+    //     通過させる迂回を塞ぐ）。
+    let cfg_test_only_import =
+        "#[cfg(test)]\nuse fandhe_ai_tensor_core::Tensor;\n\npub type Tensor = BackendOps;\n";
+    let mut canonical_found_in_scenario = false;
+    for statement in split_top_level_statements(cfg_test_only_import) {
+        if statement.contains("cfg(test)") {
+            continue;
+        }
+        let after_vis = strip_visibility_prefix(&statement);
+        if let Some(use_body) = strip_keyword_prefix(after_vis, "use") {
+            let use_tokens = extract_identifier_tokens(use_body);
+            if use_tokens == vec!["fandhe_ai_tensor_core".to_string(), "Tensor".to_string()] {
+                canonical_found_in_scenario = true;
+            }
+        }
+    }
+    assert!(
+        !canonical_found_in_scenario,
+        "#[cfg(test)] 配下の import が誤って canonical import として扱われている"
+    );
 }

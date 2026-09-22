@@ -3063,10 +3063,21 @@ fn facade_does_not_reexport_custom_function() {
 fn facade_tape_does_not_expose_custom_forwarding_method() {
     let lib_rs = facade_crate_root().join("src/lib.rs");
     let content = read_to_string_or_panic(&lib_rs);
+    // コメント・文字列・char リテラルを除去してから `declares_pub_fn`
+    // （トークン列の連続一致で `pub`・`fn`・関数名の間の空白量に影響
+    // されず、`unsafe`／`const`／`async` 修飾子の挿入にも対応する）で
+    // 判定する（codex-review 指摘・PR #2212: 旧実装
+    // `contains_pub_fn_custom_declaration` は固定文字列 `"pub fn custom"`
+    // の部分一致のため `pub async fn custom`／`pub unsafe fn custom` の
+    // ような修飾子挿入で否定ガードを迂回できた。`compat_sequential_does_
+    // not_expose_custom_add_method` と同じ前処理＋判定の組み合わせに
+    // 揃える）。
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
     assert!(
-        !contains_pub_fn_custom_declaration(&content),
+        !declares_pub_fn(&cleaned, "custom"),
         "facade 独自の Tape に `pub fn custom(...)` 宣言（ジェネリクス・\
-         lifetime 付き `pub fn custom<'t>(` を含む）が見つかった\
+         lifetime 付き `pub fn custom<'t>(`・`unsafe`／`const`／`async` \
+         修飾子付きを含む）が見つかった\
          （§12.5 (b) 未承認のまま到達可能にしてしまっている）"
     );
 }
@@ -3216,86 +3227,6 @@ fn declares_pub_fn_detects_newline_separated_declaration() {
         "pub const fn add_custom() {}",
         "add_custom"
     ));
-}
-
-/// `pub fn custom` 宣言（`pub fn custom(` に加え、`Tape::custom` 本体
-/// と同型の `pub fn custom<'t>(` のようなジェネリクス／lifetime 付き
-/// 宣言も含む）の検出。`pub fn custom` の直後に任意個の空白、続けて
-/// 任意で `<...>`（ジェネリクス・lifetime パラメータ節。ネストする
-/// `<>` を素朴にカウントして対応する）、さらに任意個の空白を挟んで
-/// `(` が現れる形を宣言とみなす（`pub fn custom_foo(` のような無関係
-/// な識別子への誤検出は、`custom` 直後が英数字／`_` の場合を除外する
-/// ことで避ける）。
-fn contains_pub_fn_custom_declaration(content: &str) -> bool {
-    const NEEDLE: &str = "pub fn custom";
-    let bytes = content.as_bytes();
-    let mut search_start = 0usize;
-    while let Some(rel_idx) = content[search_start..].find(NEEDLE) {
-        let idx = search_start + rel_idx;
-        let after = idx + NEEDLE.len();
-        search_start = after;
-        // `custom` の直後が識別子構成文字（英数字／`_`）なら
-        // `custom_foo` 等の無関係な関数名なので除外する。
-        if bytes
-            .get(after)
-            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
-        {
-            continue;
-        }
-        let mut pos = after;
-        // 任意個の空白（改行含む）をスキップする。
-        while bytes.get(pos).is_some_and(|b| b.is_ascii_whitespace()) {
-            pos += 1;
-        }
-        // 任意で `<...>`（ジェネリクス／lifetime 節）をスキップする。
-        // ネストする `<>`（例: `<T: Foo<Bar>>`）にも対応するため
-        // 深さカウンタで対応する `>` まで読み飛ばす。
-        if bytes.get(pos) == Some(&b'<') {
-            let mut depth = 0i32;
-            while let Some(b) = bytes.get(pos) {
-                match b {
-                    b'<' => depth += 1,
-                    b'>' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            pos += 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                pos += 1;
-            }
-            if depth != 0 {
-                // 対応する `>` が見つからないまま終端した場合は
-                // 宣言として確定できないので次の occurrence を探す。
-                continue;
-            }
-        }
-        // 任意個の空白をスキップし、`(` が続けば宣言とみなす。
-        while bytes.get(pos).is_some_and(|b| b.is_ascii_whitespace()) {
-            pos += 1;
-        }
-        if bytes.get(pos) == Some(&b'(') {
-            return true;
-        }
-    }
-    false
-}
-
-#[test]
-fn contains_pub_fn_custom_declaration_detects_variants() {
-    assert!(contains_pub_fn_custom_declaration("pub fn custom("));
-    assert!(contains_pub_fn_custom_declaration("pub fn custom<'t>("));
-    assert!(contains_pub_fn_custom_declaration(
-        "pub fn custom<'t, T: Foo<Bar>>("
-    ));
-    assert!(contains_pub_fn_custom_declaration("pub fn custom  (\n"));
-    assert!(!contains_pub_fn_custom_declaration("pub fn custom_foo("));
-    assert!(!contains_pub_fn_custom_declaration(
-        "// pub fn custom_bar(\nfn other() {}"
-    ));
-    assert!(!contains_pub_fn_custom_declaration("let custom = 1;"));
 }
 
 /// AMP 統合（イシュー #1961。`compat::Sequential::compile_with_amp`）の
@@ -3618,8 +3549,6 @@ fn facade_tape_does_not_expose_backward_create_graph_method() {
 
 /// `pub fn <name>` 宣言（`pub fn <name>(` に加え、ジェネリクス・
 /// lifetime 付き `pub fn <name><'a>(` のような宣言も含む）の検出。
-/// `contains_pub_fn_custom_declaration`（`CustomFunction` 用・イシュー
-/// #1946）と同型のアルゴリズムを関数名パラメータ化したもの。
 /// `<name>` の直後に任意個の空白、続けて任意で `<...>`（ジェネリクス・
 /// lifetime パラメータ節。ネストする `<>` を素朴にカウントして対応
 /// する）、さらに任意個の空白を挟んで `(` が現れる形を宣言とみなす
