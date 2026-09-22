@@ -509,7 +509,7 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 
 **#1627（量子化）の設計記録は `docs/backend-int8-quantization-decision.md` として完了した。** 除外事項の格上げ条件（a〜e）充足と Phase 4 新 REQ 承認まで段階 0・blocked のまま close しない。コード変更なし（`crates/**`・依存・tolerance／baseline は不変）。issue 上の承認コメント（`unsafe asm!`〈SME〉・`BackendOps` trait 拡張・facade 公開面拡張の技術的許可）は実装着手前の先取り記録であり、正本 spec の除外事項ゲート自体を解除するものではないと整理した（同 doc §0.1）。
 
-**#1628 の設計記録は `docs/facade-multi-gpu-ddp-decision.md` として完了した。**
+**#1628 の設計記録は `docs/facade-multi-gpu-ddp-decision.md` として完了した。** #2074 で格上げ条件表の (b) 形式提案文案と nccl リンク契約の実測を `docs/ddp-grade-up-conditions.md` に記録。ゲート（設計記録のみ・依存追加なし）は不変。
 
 **#1633（sparse／complex テンソルの非対応の明文化）の設計記録は `docs/tensor-core-sparse-complex-decision.md` として完了した。** 量子化／DDP と異なり除外事項「分散学習・量子化の網羅対応」には従属しない（sparse／complex は REQ-9 の「引き続き対象外」列挙にのみ現れ、格上げ条件表を持つ Won't 項目ではない）。コード変更なし。再開には本節の範囲拡張手続き（経路 1 または経路 2）を要する（同 doc §3・§9）。
 
