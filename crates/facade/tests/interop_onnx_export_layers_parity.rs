@@ -105,9 +105,7 @@ fn conv2d_model_parity() {
         .expect("test fixture: add_conv2d に失敗")
         .add_relu();
     let input = Tensor::<f32>::new(
-        (0..(1 * 2 * 5 * 5))
-            .map(|i| (i as f32) * 0.05 - 1.0)
-            .collect(),
+        (0..(2 * 5 * 5)).map(|i| (i as f32) * 0.05 - 1.0).collect(),
         &[1, 2, 5, 5],
     )
     .unwrap();
