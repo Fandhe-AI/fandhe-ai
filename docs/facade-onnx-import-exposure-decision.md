@@ -287,7 +287,211 @@ facade は `prost` へ直接依存せず（Cargo.toml に追加していない�
 - `OnnxModel::input_names` 等の追加アクセサ・`OnnxValue` の
   `#[non_exhaustive]` 化（承認文言に無いため見送り）。
 
-## 13. 追補（イシュー #2077・2026-09-22）: `BackendOps` 経由の GPU 実行 opt-in
+## 13. 追補（イシュー #2079）: `sparse_initializer` の fail-closed 拒否
+
+### 13.1 背景
+
+`GraphProto` は `sparse_initializer`（onnx.proto3 tag 15）を宣言していな
+かったため、`prost::Message::decode` がワイヤフォーマット仕様どおり
+未宣言フィールドを無言スキップしていた。sparse initializer だけを持つ
+テンソルは「最初から存在しない」ものとして扱われ、モデルはエラーなしで
+構築されてしまう非対称があった
+（`docs/tensor-core-sparse-complex-decision.md` §2 の記録事実・§9(a)
+の引き継ぎ候補）。sparse テンソル自体は引き続き対象外（REQ-9）であり、
+本追補は **存在検出のみ**（無言スキップの解消）を扱う。
+
+### 13.2 変更内容
+
+- `crates/onnx-interop/src/onnx/proto.rs`: `SparseTensorProto`（検出専用
+  部分実装。`values`／`indices`／`dims` を宣言するが中身は解釈しない）を
+  新設し、`GraphProto.sparse_initializer`（tag=15）を追加。本モジュールが
+  宣言するメッセージ数は 7 から 8 になった。
+- `crates/onnx-interop/src/onnx/graph.rs`: `GraphError::
+  SparseInitializerNotSupported { tensor_name, count }` を新設。
+  `build_graph` が `NoGraph` 検査の直後・dense initializer decode の前に
+  非空検査を挿入し、`tensor_name` は先頭要素の `values.name`（非信頼入力
+  のため空文字列もありうる）、`count` は総数を報告する。
+- `crates/onnx-interop/src/onnx/export.rs`: `build_model_proto` は
+  `sparse_initializer` を常に空のまま書き出す（内部 `Graph` は sparse を
+  保持しない設計のため。`value_info` と同じ契約パターン）。
+
+### 13.3 facade 公開面（`OnnxError` variant 9 → の追加。承認事項）
+
+- `OnnxError::SparseInitializerNotSupported { tensor_name: String, count:
+  usize }` を追加した（イシュー #2079 の受け入れ条件が variant 名まで
+  明示していたため、それを根拠に実装した。前例: `UnsupportedLayer`
+  〈#2037 承認事項 4〉と同じ扱い）。`OnnxError` は `#[non_exhaustive]`
+  のため SemVer 非破壊。
+- `map_graph_error`（`crates/facade/src/interop/onnx.rs`）に
+  `GraphError::SparseInitializerNotSupported` → `OnnxError::
+  SparseInitializerNotSupported` の明示 arm を追加した（`other =>` の
+  `InvalidModel` 吸収へ落とさない。11.1 節の `UnsupportedDataType` と
+  同じ判断）。
+- 依存追加・新規 `unsafe`・spec 提案はいずれもなし。
+
+### 13.4 追補（2026-09-22・codex-review 是正）: メモリ増幅対策
+
+PR #2221 の codex-review（P0）指摘: §13.2 の `SparseTensorProto` が
+`values`／`indices` を `TensorProto` 全体（`raw_data`・packed
+`float_data`/`int64_data` を含む）として宣言していたため、`decode_model`
+が §13.2 の非空検査に到達する**前**に非信頼入力の sparse payload を
+構造体へ完全展開してしまい、巨大な payload によるメモリ枯渇（DoS）を
+招く余地があった。是正内容:
+
+- `decode_model`（`crates/onnx-interop/src/onnx/proto.rs`）は
+  `ModelProto::decode` を呼ぶ**前**に、`prost::encoding` の公開
+  プリミティブだけを使う bounded なワイヤスキャン
+  （`prescan_sparse_initializer`）で `sparse_initializer`（tag=15）の
+  存在だけを検出し、検出時は `ModelProto` を一切構築せず新設の
+  `DecodeModelError::SparseInitializerNotSupported { tensor_name, count }`
+  で拒否する（主対策）。
+- `SparseTensorProto.values` は `TensorProto` 全体ではなく `name`
+  （tag=8）のみを宣言した軽量型 `SparseTensorValueName` に縮小した。
+  `indices`／`dims` はフィールド自体を削除し、prost の自動フィールド
+  スキップに委ねる。これにより `ModelProto::decode` を直接呼ぶ経路
+  （本クレート内テスト等）でも `raw_data` 等が展開されない
+  （構造体側の多層防御。§13.2 の `build_graph` 検査自体は不変）。
+- `crates/facade/src/interop/onnx.rs`: `decode_model` のエラー型変更
+  （`prost::DecodeError` → `DecodeModelError`）に伴い `map_decode_error`
+  を新設し、`DecodeModelError::SparseInitializerNotSupported` を
+  §13.3 と同じ `OnnxError::SparseInitializerNotSupported` へ写像する
+  （facade の公開面・payload は変更なし）。
+- 受け入れ判定（`tensor_name`／`count`）・`OnnxError` の公開面・
+  依存追加・新規 `unsafe`・spec 提案はいずれも変更なし。
+
+### 13.4 検査位置が `build_graph` 単一である理由
+
+`from_path`／`from_bytes` はいずれも `decode_model → build_graph` を
+経由するため、`build_graph` に 1 か所だけ検査を置けば両入口とも自動的に
+拒否される（facade 側に検証を複製・迂回しない契約。`crates/facade/src/
+interop/onnx.rs` モジュール doc 参照）。
+
+### 13.5 fixture の出自
+
+`crates/onnx-interop/tests/fixtures/sparse_initializer.onnx`（95 bytes）
+は本リポで合成したフィクスチャであり、他の `docs/spec` 由来 fixture と
+異なる（`tests/fixtures/README.md` に例外として明記）。`values.name=
+"w_sparse"`・sparse initializer 1 件・dense 双子となる `Relu` ノード 1 件
+を含む。生成方法・sha256 は同 README 参照。
+
+### 13.6 テスト
+
+内部クレート（`onnx_decode.rs`）に 6 テスト（存在検出・dense 併存・
+`values=None` の fallback・対照〈sparse を除いた双子が成功〉・手書き
+ワイヤバイト列での非循環検証・fixture ファイル経由）、export 側に 1
+テスト（`sparse_initializer` が常に空で export される契約の固定）、
+facade（`interop_onnx_import.rs`）に 4 テスト（`from_path`／`from_bytes`
+経由の拒否・`Display` の tensor 名含有・`#[non_exhaustive]` ワイルドカード
+`match` への追加）、facade-internal parity（`interop_onnx_internal_parity.
+rs`）に 1 テスト（内部 `GraphError` と facade `OnnxError` の payload 一致）
+を追加した。
+
+### 13.5 追補（PR #2221 codex-review P1 是正）: `onnx-interop::decode_model`
+の戻り値型変更と互換性方針の関係
+
+**指摘**: §13.4 の是正で `crates/onnx-interop/src/onnx/proto.rs::
+decode_model` の戻り値型を `Result<ModelProto, prost::DecodeError>` から
+`Result<ModelProto, DecodeModelError>` へ変更し、`GraphProto` へ
+`sparse_initializer` フィールドを追加し、`GraphError`／`OnnxError` に
+新 variant を追加した。AGENTS.md「公開 API 設計（P1/P2）」は「破壊的
+変更・内部表現の公開 API への漏出は P1」と定めており、`onnx-interop` は
+CLAUDE.md に「公開準備は完了済み・実 publish は次回リリースサイクル」と
+記載された crates.io 公開予定クレートであるため、この戻り値型変更が
+互換性方針違反にあたらないかの検討が必要との指摘。
+
+**判断: 変更を維持する（撤回しない）。互換性方針違反ではない**。理由:
+
+1. **`onnx-interop` は本 PR 時点で crates.io に一度も publish されて
+   いない**（CLAUDE.md「crates.io 公開済みは 6 クレート」の列挙に
+   `onnx-interop` は含まれず、「#1963 のユーザー承認を受けた 7 クレート
+   目で、公開準備は完了済み・実 publish は次回リリースサイクル」との
+   記載どおり、実際の `cargo publish` はまだ実行されていない）。
+   `curl -H "User-Agent: ..." https://crates.io/api/v1/crates/fandhe-ai-
+   onnx-interop` は HTTP `404`（`crate fandhe-ai-onnx-interop does not
+   exist`）を返すことを 2026-09-22 実測で再確認した（`fandhe-ai-
+   onnx-interop`／`fandhe-ai-interop` 名双方が未登録という 2026-09-14
+   時点の実測〈2 節表〉から変わっていない）。crates.io 上に存在しない
+   クレートの API に対して SemVer 上の「破壊的変更」は定義上発生しない
+   （依拠する外部利用者が存在しない）。
+2. **`facade`（唯一のサポートされる公開 API 面。`docs/compat-api-
+   scope.md` §0）の公開 API・payload は本変更で一切変わらない**。
+   `OnnxError::SparseInitializerNotSupported { tensor_name, count }` は
+   §13.3（`d884fe41`）の時点で既に追加済みで、§13.4（本追補対象コミット）
+   は `map_decode_error` という新設の**内部**関数を経由して同じ
+   `OnnxError` variant・同じ payload へ写像するのみ（13.4 節末尾に記載
+   済み）。facade 利用者（実際の外部利用者が想定される唯一の面）から
+   観測できる挙動・型は変更前後で同一である。
+3. `decode_model`（`onnx-interop` の `pub fn`）は Rust の可視性としては
+   `pub` だが、`docs/compat-api-scope.md` §0 の整理（「技術的に `pub`
+   であることと、利用者向けにサポートされる公開面であることは区別
+   する」）と同じ考え方に立てば、facade を経由しない `tensor-core`／
+   `autodiff`／`backend-*` の `pub` API と同様、`onnx-interop` の
+   `pub` API も unpublished の間は互換性維持の対象外として扱える。
+   本追補はこの整理を `onnx-interop`（unpublished 期間限定）へ明示的に
+   適用する記録である。
+4. **是正の目的は non-published 期間中に発見された DoS 脆弱性
+   （§13.4 冒頭の codex-review P0 指摘）の是正**であり、変更を撤回して
+   `prost::DecodeError` のみを返す旧シグネチャへ戻すと、`decode_model`
+   の呼び出し元が「事前走査で拒否されたのか」「ワイヤ形式が壊れて
+   いるのか」を区別できなくなり、facade 側の診断品質（`tensor_name`・
+   `count` を含む `OnnxError::SparseInitializerNotSupported`）を保てない。
+   撤回は同 P0 是正の価値を損なうため採用しない。
+
+**今後の運用**: `onnx-interop` が実際に crates.io へ initial publish
+された後は、本節の「unpublished のため互換性方針の対象外」という
+理由づけは失効する。initial publish 以降の `decode_model` 等
+`onnx-interop` の `pub` API 変更は、AGENTS.md の破壊的変更 P1 判定を
+通常どおり適用する（本節はその適用除外を initial publish 以前に
+限定する）。
+
+### 13.6 追補（PR #2221 codex-review P2 是正）: `tensor_name` の
+protobuf 後勝ちマージ・256 バイト上限の両経路統一
+
+**指摘**: §13.4 の事前走査（`scan_sparse_tensor_bytes_for_values_name`・
+`scan_tensor_bytes_for_name`）は `values`（tag=1）・`name`（tag=8）の
+**最初の出現**を見つけた時点で即座に `return` していた。しかし protobuf
+のワイヤフォーマット仕様では、同一メッセージ内で singular field
+（`values`・`name` はいずれも singular）が複数回出現した場合は
+**後勝ち**でマージされる（`prost::Message::merge` の実装）。このため、
+悪意ある・不正な形式の入力で `sparse_initializer` 内に `values`／`name`
+が複数回出現すると、`decode_model`（事前走査。層 1）が報告する
+`tensor_name` と `ModelProto::decode` を直接呼ぶ経路（層 2。§13.4 末尾
+参照）が `build_graph` へ渡す `tensor_name` とが食い違いうる。加えて、
+事前走査は診断名を 256 バイトで切り詰めていたが、`build_graph` 側
+（`g.sparse_initializer[0].values.name`）には同じ上限が無く、両経路の
+診断 payload の契約が非対称だった。
+
+**是正内容**:
+
+- `scan_sparse_tensor_bytes_for_values_name`／`scan_tensor_bytes_for_name`
+  （`crates/onnx-interop/src/onnx/proto.rs`）を、最初の出現で `return`
+  するのではなく**全出現を走査し最後の出現を採用する**よう変更した
+  （protobuf の後勝ちマージ規則に一致させる）。ある出現にフィールドが
+  存在しない場合は以前の出現で得た値を保持する（マージ時にフィールド
+  不在の出現が既存値を消すことはないため）。「出現順で最初の要素」
+  判定（`GraphProto.sparse_initializer` は `repeated` フィールドのため
+  Vec 要素そのものはマージされない。13.4 節・Cursor Bugbot 是正）は
+  不変。
+- 新設の `pub(crate) const SPARSE_TENSOR_NAME_DIAG_CAP: usize = 256` と
+  `pub(crate) fn cap_sparse_tensor_diag_name(bytes: &[u8]) -> String`
+  （`crates/onnx-interop/src/onnx/proto.rs`）へ 256 バイト切り詰め
+  ロジックを一本化し、事前走査側（`scan_tensor_bytes_for_name`）と
+  `graph::build_graph`（`crates/onnx-interop/src/onnx/graph.rs`。
+  `values.name.as_bytes()` へ適用）の両方がこの共通ヘルパを経由する
+  ことで、両経路の `tensor_name` payload を一致させた（診断契約の
+  統一）。
+- `crates/onnx-interop/tests/onnx_decode.rs` に 2 テストを追加した:
+  `decode_model_sparse_tensor_name_follows_protobuf_last_wins_merge_on_duplicate_values_field`
+  （同一 `SparseTensorProto` 内で `values` が複数回出現するケースで
+  後勝ちが適用され、かつ `decode_model` と `ModelProto::decode` 直接
+  呼び出しの結果が一致することを確認）・
+  `decode_model_and_build_graph_agree_on_256_byte_diag_name_cap_for_long_name`
+  （300 バイトの名前で `decode_model`（層 1）と `build_graph`（層 2）が
+  同じ 256 バイト上限で切り詰め、`tensor_name` が一致することを確認）。
+- 受け入れ判定（`tensor_name`／`count`）・`OnnxError`／`GraphError` の
+  公開面・依存追加・新規 `unsafe`・spec 提案はいずれも変更なし。
+
+## 14. 追補（イシュー #2077・2026-09-22）: `BackendOps` 経由の GPU 実行 opt-in
 
 12.6(a) の「`BackendOps`／`Device` 非経由（GPU 実行にはならない）」は
 **opt-in（既定 OFF）で解除済み**。`OnnxModel::run` は既定ではこの節の
