@@ -89,6 +89,7 @@ docs/
     ├── inference-forward-fixed-cost-design.md # 推論 forward の固定費削減（tape 不要経路・活性化デバイス常駐チェーン）の設計・bit-exactness 契約・実測記録（#1028）
     ├── int8-quant-grade-up-verification-plan.md # INT8／FP8 量子化 GEMM の格上げ条件 (b)〜(e)（正本 spec `docs/spec/04-requirements.md:360-361`）の検証計画。sm_121 MMA 発行可否プローブ設計・Transformer 複合 WL 実機ベースラインの残ギャップ・量子化専用数値許容基準の判定式骨子（閾値は実測前の空欄）・依存追加なし設計の確認項目・spec (b) 形式提案の未起票文案を集約。コード変更なし・`docs/backend-int8-quantization-decision.md`（#1627）の段階 0 判断は不変（イシュー #2075）
     ├── kernel-fusion.md     # TASK-12.2b カーネル融合の適用範囲・限界（複合WLで融合を性能目標の前提にしない。#168）
+    ├── kv-cache-design.md   # KV キャッシュの設計確定（既存 Var 演算〈cat／narrow／detach・project／split_heads／sdpa_compose〉の合成のみ。新規 Op／BackendOps／依存なし。ホスト保持〈デバイス常駐は K-3 へ切り分け〉。コード変更なし。イシュー #2083）
     ├── license-matrix.md    # 許容依存 8 区分のライセンス可否表（TASK-1.3）
     ├── matmul-vjp-zero-copy-decision.md # matmul VJP の転置ゼロコピー化（`eval::matmul` の stride 対応）・CPU BLIS／CUDA／Metal gemm 結線を別イシューへ引き継ぐスコープ判断・実測記入欄（#1043 ツリー・#1046）
     ├── model-download-design.md # リモートモデル取得（URL ダウンロード）の設計記録のみ・コード変更なし・依存追加なし（HTTP クライアント依存は未承認）。HTTP クライアント候補比較・依存配置案・技術仕様案・OWASP セキュリティ設計・承認事項 4 件・承認後の実装手順を記録。親 #2082（`docs/model-distribution-design.md`）・兄弟 #2087（`ModelRegistry`）はいずれも未マージの前方参照。イシュー #2088
