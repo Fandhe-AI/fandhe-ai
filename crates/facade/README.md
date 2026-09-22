@@ -80,6 +80,23 @@ ONNX import（`fandhe_ai::interop::onnx::OnnxModel`）も利用できます
 （詳細は `docs/facade-onnx-import-exposure-decision.md` 参照）。ONNX
 export への再エクスポートは引き続き未提供です。
 
+### ローカルモデルレジストリ
+
+`fandhe_ai::model::ModelRegistry` は `$HOME/.fandhe-ai/models/<name>/<version>/model.safetensors`
+（Windows は `$USERPROFILE`）というレイアウトを規定し、名前・バージョン
+指定での同期ロードを提供します（配置自体は利用者が行う読み取り専用の
+レジストリです）。
+
+```rust,no_run
+use fandhe_ai::model::ModelRegistry;
+
+let registry = ModelRegistry::new().unwrap();
+let state_dict = registry.load("mlp", "v1").unwrap();
+for (name, versions) in registry.available_models() {
+    println!("{name}: {versions:?}");
+}
+```
+
 ## ドキュメント・リポジトリ
 
 利用者向けドキュメントサイト（GitHub Pages）: https://fandhe-ai.github.io/fandhe-ai/（Getting Started / Guides / Examples / API Reference）。API リファレンスは https://docs.rs/fandhe-ai

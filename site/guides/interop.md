@@ -152,6 +152,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 two-pass アトミック契約。既存 `Sequential` の shape が保存前と異なる
 場合はパラメータが一切変更されません）。
 
+### ローカルモデルレジストリ
+
+`fandhe_ai::model::ModelRegistry` は `$HOME/.fandhe-ai/models/<name>/<version>/model.safetensors`
+（Windows は `$USERPROFILE`）というレイアウトを規定し、名前・バージョン
+指定での同期ロードを提供します。配置は利用者が手動で行い、
+`ModelRegistry` はディレクトリの作成・削除を一切行わない読み取り専用
+のレジストリです。
+
+```rust,no_run
+use fandhe_ai::model::ModelRegistry;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = ModelRegistry::new()?;
+    let state_dict = registry.load("mlp", "v1")?;
+    for (name, versions) in registry.available_models() {
+        println!("{name}: {versions:?}");
+    }
+    Ok(())
+}
+```
+
 ## safetensors: ワイヤフォーマット処理のみ
 
 `safetensors` クレートは**ワイヤフォーマットの読み書きのみ**に使い、
