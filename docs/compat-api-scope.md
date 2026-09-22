@@ -812,9 +812,11 @@ facade_only` で機械固定）。`evaluate_with_metrics`・第 3 の公開型�
 維持し、再開には本節の範囲拡張手続き（経路 1 または経路 2）を要する。
 
 **適用記録（イシュー #2076・親 #2034）**: `nn::Module` trait へ
-`as_sigmoid`／`as_gelu`（`bool`）・`as_softmax`（`Option<&Softmax>`）の
-3 フックを追加した（`as_relu`／`as_linear` と同型の閉集合ダウンキャスト
-方式。§1 の閉集合方針の維持）。**本 3 フックは `compat::Sequential`
+`as_gelu`（`bool`）・`as_softmax`（`Option<&Softmax>`）の
+2 フックを追加した（`as_relu`／`as_linear` と同型の閉集合ダウンキャスト
+方式。§1 の閉集合方針の維持）。`Sigmoid` は §15.7 項 5（数値契約）が
+承認保留のため `as_sigmoid` フックは追加していない（代替 (γ)。承認が
+得られ次第、別 PR で結線する）。**本 2 フックは `compat::Sequential`
 （`bind`／`trainable_parameters`／`apply_parameters` 等の学習経路）から
 は使われない**——用途は `onnx-interop::onnx::export_nn`
 （非公開クレート内部限定。`docs/onnx-export-op-mapping.md` §7）が

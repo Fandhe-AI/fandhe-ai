@@ -331,15 +331,6 @@ pub trait Module {
         false
     }
 
-    /// この層が `Sigmoid` かどうか（イシュー #2076・親 #2034。`as_relu`
-    /// と同じ bool フック方式）。`onnx-interop::onnx::export_nn` が
-    /// `Module` の閉集合ダウンキャストフックから `ExportOp::Sigmoid`
-    /// への写像を判別するために使う。既定は `false`
-    /// （`Sigmoid` のみオーバーライドする）。
-    fn as_sigmoid(&self) -> bool {
-        false
-    }
-
     /// この層が `Gelu`（erf 版）かどうか（イシュー #2076）。`as_relu` と
     /// 同じ bool フック方式。`GeluTanh` はオーバーライドしない（ONNX
     /// opset 17 に tanh 近似 GELU に対応する演算が無いため export 非対応
@@ -854,10 +845,6 @@ impl Module for Sigmoid {
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         Ok(eval::sigmoid(input))
-    }
-
-    fn as_sigmoid(&self) -> bool {
-        true
     }
 }
 

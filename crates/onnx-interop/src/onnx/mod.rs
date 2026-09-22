@@ -26,4 +26,8 @@ pub mod export_nn;
 pub mod export_ops;
 pub mod graph;
 pub mod interp;
+// `interp` から呼ばれる `BackendOps` 経由の device 実行ヘルパ（非公開。
+// イシュー #2077）。`interp::run_with_ops` の内部実装詳細であり facade
+// 公開面には出さない。
+mod interp_device;
 pub mod proto;

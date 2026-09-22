@@ -51,16 +51,11 @@ fn assert_export_parity(context: &str, model: &Sequential, input: &Tensor<f32>) 
     assert_parity(context, &flat(&actual), &flat(&expected));
 }
 
-#[test]
-fn sigmoid_model_parity() {
-    let model = Sequential::new()
-        .add_linear(4, 6, 0x2076_f001)
-        .expect("test fixture: add_linear に失敗")
-        .add_sigmoid();
-    let input =
-        Tensor::<f32>::new((0..12).map(|i| (i as f32) * 0.1 - 0.6).collect(), &[3, 4]).unwrap();
-    assert_export_parity("Linear -> Sigmoid", &model, &input);
-}
+// `Sigmoid` は `docs/facade-onnx-export-exposure-decision.md` §15.7
+// 項 5（数値契約）が承認保留のため export 対応範囲から除外している
+// （`sigmoid_model_parity` は追加しない。拒否側の回帰は
+// `crates/facade/tests/interop_onnx_export_sequential.rs::
+// sequential_with_sigmoid_is_rejected_with_unsupported_layer` が担う）。
 
 #[test]
 fn softmax_model_parity() {

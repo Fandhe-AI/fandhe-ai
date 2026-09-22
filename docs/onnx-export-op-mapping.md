@@ -168,12 +168,13 @@ ONNX_INTEROP_TRANSFORMER_ONNX=<path> \
 （`ExportOp::Gemm`／`ExportOp::Relu` を構築して `to_node_proto` へ渡す）、
 op マッピング表自体（§2）は変更しない。
 
-- **対応層（イシュー #2076・親 #2034 で Sigmoid・Softmax・LayerNorm・
-  GELU（erf 版）・Conv2d へ拡大）**: `Module::as_linear()` が `Some` →
+- **対応層（イシュー #2076・親 #2034 で Softmax・LayerNorm・
+  GELU（erf 版）・Conv2d へ拡大。`Sigmoid` は §15.7 項 5〈数値契約〉が
+  承認保留のため対象外のまま——`Module::as_sigmoid` フックは追加して
+  いない）**: `Module::as_linear()` が `Some` →
   `ExportOp::Gemm(GemmAttrs { alpha: 1.0, beta: 1.0, trans_a: false,
   trans_b: false })`（weight `[in, out]` のまま・転置しない）。
-  `Module::as_relu()` が `true` → `ExportOp::Relu`。`Module::as_sigmoid()`
-  が `true` → `ExportOp::Sigmoid`。`Module::as_softmax()` が `Some` →
+  `Module::as_relu()` が `true` → `ExportOp::Relu`。`Module::as_softmax()` が `Some` →
   `ExportOp::Softmax { axis: dim as i64 }`（`Softmax::dim()`。`pub` へ
   変更済み）。`Module::as_layer_norm()` が `Some` → `ExportOp::
   LayerNormalization(LayerNormAttrs { axis: -1, epsilon: eps() })`
@@ -200,7 +201,7 @@ op マッピング表自体（§2）は変更しない。
   の失敗は既知の非ブロッカーであり、7 パッケージ一括 dry-run
   （`docs/crates-io-publishing-order.md` §8.1）はローカル解決（同一
   workspace 内の未公開バージョンを解決する）で成立する。本 issue で
-  追加した `Module::as_sigmoid`／`as_gelu`／`as_softmax` は crates.io
+  追加した `Module::as_gelu`／`as_softmax` は crates.io
   未公開の新 API のため単一クレート dry-run では解決できないが、上記
   整理により issue のブロッカーにはならない。
 - **名前規約**: graph input `"input"`／output `"output"`・中間テンソル

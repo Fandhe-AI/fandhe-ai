@@ -11,8 +11,9 @@ safetensors save／load は `fandhe_ai::interop::safetensors`
 `save_safetensors_f32`／`save_safetensors_f32_to_bytes`）として、
 いずれも `fandhe-ai` から公開されています。** import 済みモデルの
 roundtrip export に加え、学習済み `compat::Sequential`（対応層は
-`Linear`／`ReLU`／`Sigmoid`／`Softmax`／`LayerNorm`／`GELU`〈erf 版〉／
-`Conv2d` の 7 種）から直接 ONNX へ書き出すこともできます
+`Linear`／`ReLU`／`Softmax`／`LayerNorm`／`GELU`〈erf 版〉／
+`Conv2d` の 6 種。`Sigmoid` は数値契約が承認保留のため対象外）から
+直接 ONNX へ書き出すこともできます
 （`OnnxModel::from_sequential`）
 （`onnx-interop` クレート。公開名 `fandhe-ai-onnx-interop`。依存解決の
 ための公開であり直接利用はサポート対象外）。`fandhe-ai` が唯一の
@@ -115,8 +116,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 以下の点に注意してください:
 
-- **対応層は `Linear`／`ReLU`／`Sigmoid`／`Softmax`／`LayerNorm`／
-  `GELU`（erf 版）／`Conv2d` の 7 種**です（Tanh・GeluTanh・
+- **対応層は `Linear`／`ReLU`／`Softmax`／`LayerNorm`／
+  `GELU`（erf 版）／`Conv2d` の 6 種**です（`Sigmoid`・Tanh・GeluTanh・
   LogSoftmax・Conv1d 等の非対応層を 1 つでも含む場合、`Graph` を
   一切構築せず `OnnxError::UnsupportedLayer { index, layer_kind }`
   を返します。部分的なモデルは返りません）。`LayerNorm` は
@@ -130,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - 書き出しはホスト CPU 実行のみで `BackendOps`／`Device` を経由しません。
 - `Linear`／`ReLU` のみのモデルは、ReLU 入力に NaN が現れず GEMM 出力に
   厳密な `±0.0` が現れない場合、roundtrip 後の `run` 出力は
-  `model.predict(&x)` と bit 完全一致します。Sigmoid・Softmax・
+  `model.predict(&x)` と bit 完全一致します。Softmax・
   LayerNorm・GELU・Conv2d を含むモデルは、結合順序・実装経路の違いに
   より REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5
   未満）で一致します。

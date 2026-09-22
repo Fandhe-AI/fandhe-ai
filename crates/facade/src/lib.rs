@@ -1029,3 +1029,47 @@ pub fn set_metal_split_k_gemm_enabled(enabled: bool) {
 pub fn metal_split_k_gemm_enabled() -> bool {
     fandhe_ai_backend_metal::split_k_runtime::split_k_enabled()
 }
+
+/// [`crate::interop::onnx::OnnxModel::run`] の GPU 実行（CUDA）を opt-in
+/// で有効化・無効化する（イシュー #2077。`docs/onnx-gpu-execution-
+/// decision.md`）。
+///
+/// `crate::interop::onnx` の `pub(crate)` 状態への薄い委譲（composition
+/// root。[`set_cuda_tf32_gemm_enabled`] と同型）。**既定は無効
+/// （`false`）**——無効時の `OnnxModel::run` の経路・出力は本イシュー
+/// 導入前と bit 完全に不変。有効化すると、以降の全スレッドの
+/// `OnnxModel::run` 呼び出しが `fandhe_ai_backend_cuda::CudaBackendOps`
+/// （ordinal 0 固定）経由の device 実行を試みる（プロセスワイド。
+/// `Device` 単位の切替 API は設けない）。CUDA driver 不在・ordinal 0 が
+/// 存在しない環境では `run` 自体が [`crate::interop::onnx::OnnxError::
+/// Execution`] を返す（ホスト CPU への黙示フォールバックはしない。
+/// fail-closed。OWASP A08）。両フラグ（本関数・
+/// `set_metal_onnx_gpu_execution_enabled`〈macOS 限定 cfg のため非
+/// macOS ビルドでは存在せずリンク化しない〉）が有効な場合は CUDA を
+/// 優先する（評価順固定）。対象 op・数値契約（REQ-2 統一複合判定）は
+/// `crate::interop::onnx::OnnxModel` のドキュメンテーションコメントを
+/// 正とする。
+pub fn set_cuda_onnx_gpu_execution_enabled(enabled: bool) {
+    crate::interop::onnx::set_cuda_onnx_gpu_execution_enabled(enabled);
+}
+
+/// [`set_cuda_onnx_gpu_execution_enabled`] で設定した現在の opt-in 状態を
+/// 返す（既定 `false`）。
+pub fn cuda_onnx_gpu_execution_enabled() -> bool {
+    crate::interop::onnx::cuda_onnx_gpu_execution_enabled()
+}
+
+/// [`set_cuda_onnx_gpu_execution_enabled`] の Metal 版（macOS 限定。
+/// イシュー #2077）。既定・fail-closed 方針は同一で、有効化すると
+/// `fandhe_ai_backend_metal::MetalBackendOps` 経由の device 実行を試みる。
+#[cfg(target_os = "macos")]
+pub fn set_metal_onnx_gpu_execution_enabled(enabled: bool) {
+    crate::interop::onnx::set_metal_onnx_gpu_execution_enabled(enabled);
+}
+
+/// [`set_metal_onnx_gpu_execution_enabled`] で設定した現在の opt-in 状態を
+/// 返す（既定 `false`。macOS 限定）。
+#[cfg(target_os = "macos")]
+pub fn metal_onnx_gpu_execution_enabled() -> bool {
+    crate::interop::onnx::metal_onnx_gpu_execution_enabled()
+}

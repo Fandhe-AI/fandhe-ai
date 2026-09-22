@@ -663,17 +663,18 @@ variant 追加を実装した。§15.7 の承認事項に基づき、新規公�
   は失敗しうる（#2017／#2018 と同型の既知事象。
   `docs/crates-io-publishing-order.md` §8.1）。ブロッカーではない。
 
-## 18. 追補（イシュー #2076・親 #2034）: ONNX export の対応層拡大（Sigmoid・Softmax・LayerNorm・GELU・Conv2d）
+## 18. 追補（イシュー #2076・親 #2034）: ONNX export の対応層拡大（Softmax・LayerNorm・GELU・Conv2d）
 
-§17.2 でスコープ外とした Sigmoid 対応（§15.7 項 5 保留）・Softmax／
-LayerNorm／GELU／Conv 等の対応拡大を実装した。
+§17.2 でスコープ外とした Softmax／LayerNorm／GELU／Conv 等の対応拡大を
+実装した。Sigmoid 対応（§15.7 項 5 保留）は 18.2 のとおり代替 (γ) を
+採用し、本 issue の対象からは除外した。
 
 ### 18.1 実施範囲
 
-- **autodiff（`crates/autodiff`）**: `Module` trait へ `as_sigmoid`
-  （`bool`）・`as_gelu`（`bool`）・`as_softmax`（`Option<&Softmax>`）の
-  3 フックを追加（`as_relu`／`as_linear` と同型の閉集合ダウンキャスト
-  方式。`docs/compat-api-scope.md` §1）。`Sigmoid`／`Gelu`／`Softmax`
+- **autodiff（`crates/autodiff`）**: `Module` trait へ
+  `as_gelu`（`bool`）・`as_softmax`（`Option<&Softmax>`）の
+  2 フックを追加（`as_relu`／`as_linear` と同型の閉集合ダウンキャスト
+  方式。`docs/compat-api-scope.md` §1）。`Gelu`／`Softmax`
   の `impl Module` へオーバーライドを追加。`Softmax::dim()` を
   `pub(crate)` から `pub` へ変更（`onnx-interop` が axis を読むため。
   facade は `nn::activation::Softmax` を再エクスポートしないため facade
@@ -687,33 +688,42 @@ LayerNorm／GELU／Conv 等の対応拡大を実装した。
     追加し `"Conv"` をディスパッチ表へ結線（22→23 op）。
   - `onnx::export_ops::ExportOp::Conv`・`attr_string`（STRING 属性
     書出し）・`SUPPORTED_OP_TYPES` へ `"Conv"` 追加。
-  - `onnx::export_nn::export_parts_from_layers` へ Sigmoid・Softmax・
+  - `onnx::export_nn::export_parts_from_layers` へ Softmax・
     LayerNorm・GELU（`Mul→Erf→Add→Mul→Mul` の 5 ノード合成＋`Constant`
-    3 ノード）・Conv2d の 5 腕を追加（対応層 2→7 種）。
+    3 ノード）・Conv2d の 4 腕を追加（対応層 2→6 種。Sigmoid は 18.2 の
+    とおり除外）。
     `LayerNorm::weight() == None`（`without_affine`）は ONNX `Scale`
     必須制約により `InvalidLayerParameter` で拒否。`GeluTanh`／
     `LogSoftmax`／`Tanh` は対応する ONNX 演算が無いため引き続き非対応
     （`as_gelu`／`as_softmax` をオーバーライドしない）。
 - **facade（`crates/facade`）**: コード変更は `interop/onnx.rs` の
-  モジュール doc 更新のみ（対応層 2→7 種・数値契約の記述更新）。
+  モジュール doc 更新のみ（対応層 2→6 種・数値契約の記述更新）。
   `from_sequential`・`api_surface.rs` の `ALLOWED_PUB_ITEMS`（10 件）は
   不変（新規公開面なし）。
 
-### 18.2 数値契約（Sigmoid の扱い。§15.7 項 5）
+### 18.2 数値契約（Sigmoid の扱い。§15.7 項 5）: 代替 (γ) を採用し除外
 
-§15.7 項 5（Sigmoid の数値契約）は 2026-09-18 時点で承認保留のまま
-記録されている。本 issue（#2076）は Sigmoid を含む対応層拡大を実施する
-にあたり、推奨案 (α)（既存 tolerance 定数〈`RELATIVE_TOLERANCE`／
-`ABSOLUTE_RESCUE_THRESHOLD`〉を変更せず、REQ-2 統一複合判定を Sigmoid
-込みモデルへそのまま適用し bit 完全一致は Linear／ReLU 限定と明記する
-案）を前提に実装した。tolerance・baseline・interp の `sigmoid` 実装
-（`ops::sigmoid`）はいずれも変更しておらず、「tolerance の単独緩和」
-には該当しない（`.claude/rules/coding-rust.md` の該当規定を参照）。
-項 5 が不承認となった場合の代替 (γ)（Sigmoid の腕・`as_sigmoid` フック
-・関連テストの除去）は、本 issue の diff の中で Sigmoid 関連の変更が
-独立して切り出せる形（`as_sigmoid` フック・`ExportOp::Sigmoid` 腕・
-`sigmoid_layer_parity`／`sequential_with_sigmoid_is_accepted` 等の
-テスト）で構成されている。
+§15.7 項 5（Sigmoid の数値契約）は承認保留のまま記録されている。当初
+本 issue の実装は推奨案 (α)（既存 tolerance 定数を変更せず REQ-2 統一
+複合判定を Sigmoid 込みモデルへそのまま適用する案）を前提に
+`as_sigmoid` フック・`export_nn` の Sigmoid 腕・関連テストを実装して
+いたが、push 後の codex-review（P1）が「承認保留中の数値契約を承認
+記録なしで実装へ進めている」との指摘で CI をブロックした。この指摘は
+妥当であり、項 5 の承認は本 issue（自動運転での修正対応）の権限では
+取得できないため、**代替 (γ)（Sigmoid の腕・`as_sigmoid` フック・
+関連テストの除去）を採用し、Sigmoid を本 issue の対応範囲から除外
+した**。除去内容は当初の実装記録どおり分離可能な形（`as_sigmoid`
+フック・`ExportOp::Sigmoid` 腕・`sigmoid_layer_parity` テスト）で
+構成されていたため、機械的に切り離せた。除去後は `Sigmoid` を含む
+`Sequential`／単層モデルの export は
+`ExportError::UnsupportedLayer { layer_kind: "unknown" }` で
+fail-closed に拒否される（回帰は
+`crates/onnx-interop/tests/onnx_export_layers_parity.rs::
+sigmoid_is_rejected_as_unsupported`・`crates/facade/tests/
+interop_onnx_export_sequential.rs::
+sequential_with_sigmoid_is_rejected_with_unsupported_layer` で固定）。
+項 5 が承認された場合は、別 issue で `as_sigmoid` フックと
+`export_nn` の Sigmoid 腕を再結線する。
 
 ### 18.3 スコープ外（引き続き対象外）
 
@@ -761,3 +771,49 @@ LayerNorm／GELU／Conv 等の対応拡大を実装した。
 - 新規 `unsafe`: 0 件（`git grep -n "unsafe" -- crates/onnx-interop/src
   crates/autodiff/src/nn/module.rs crates/autodiff/src/nn/
   activation.rs crates/facade/src/interop/onnx.rs` が新規ヒットなし）。
+
+### 18.5 追記（PR #2220・codex-review P1 対応・Sigmoid 除外後の再検証）
+
+18.4 は Sigmoid を含んでいた当初実装時点の記録。18.2 のとおり代替 (γ)
+を採用し Sigmoid 関連コードを除去した後、以下を再検証した:
+
+- `cargo build -p fandhe-ai-autodiff -p fandhe-ai-onnx-interop -p
+  fandhe-ai`: 成功。
+- `cargo test -p fandhe-ai-autodiff`: 全件 pass。
+- `cargo test -p fandhe-ai-onnx-interop`: 全件 pass（`onnx_export_
+  layers_parity` 13 件——`sigmoid_layer_parity` を除去し
+  `sigmoid_is_rejected_as_unsupported` を追加したため件数は不変。
+  `onnx_export_nn` 10 件・`onnx_export_ops` 36 件・lib 単体 202 件を
+  含む。`SUPPORTED_OP_TYPES.len() == 23` は不変——`ExportOp::Sigmoid`
+  自体は `onnx::export_ops`／`onnx::interp` の対称 op 集合〈#1773 以来
+  の既存機能〉であり本除外の対象外）。
+- `cargo test -p fandhe-ai --test api_surface`: 66 件 pass（新規公開面
+  なしを確認）。
+- `cargo test -p fandhe-ai --test interop_onnx_export_sequential`:
+  13 件 pass（`sequential_with_sigmoid_is_accepted` を
+  `sequential_with_sigmoid_is_rejected_with_unsupported_layer` へ
+  置換したため件数は不変）。
+- `cargo test -p fandhe-ai --test interop_onnx_export_layers_parity`:
+  4 件 pass（`sigmoid_model_parity` を除去。5→4 件）。
+- `cargo fmt --all`: 差分なし。
+- `cargo clippy -p fandhe-ai-autodiff -p fandhe-ai-onnx-interop -p
+  fandhe-ai --all-targets`: green（`fandhe-ai-backend-cuda` の
+  dead-code 警告は 18.4 と同じ既存環境事象で無関係）。
+- 削除・修正したファイル: `crates/autodiff/src/nn/module.rs`
+  （`as_sigmoid` フック・`Sigmoid` の override 除去）・
+  `crates/onnx-interop/src/onnx/export_nn.rs`（Sigmoid 腕・doc 更新）・
+  `crates/onnx-interop/tests/onnx_export_layers_parity.rs`
+  （`sigmoid_layer_parity` 除去・`composite_conv_relu_then_flatten_
+  free_linear_head` の `Sigmoid` を `Relu` へ差し替え・
+  `sigmoid_is_rejected_as_unsupported` 追加）・
+  `crates/facade/tests/interop_onnx_export_sequential.rs`
+  （`sequential_with_sigmoid_is_accepted` を拒否テストへ置換）・
+  `crates/facade/tests/interop_onnx_export_layers_parity.rs`
+  （`sigmoid_model_parity` 除去）・`crates/facade/src/interop/onnx.rs`・
+  `docs/onnx-export-op-mapping.md`・`docs/compat-api-scope.md`・
+  `site/guides/interop.md`・`docs/README.md`（doc の対応層カウント
+  7→6 種への訂正）。
+- ONNX export の対応層は最終的に **6 種**（`Linear`／`ReLU`／
+  `Softmax`／`LayerNorm`／`GELU`／`Conv2d`）で確定。`Sigmoid` は
+  §15.7 項 5 の承認が得られ次第、別 issue で `as_sigmoid` フックと
+  `export_nn` の Sigmoid 腕を再結線する。

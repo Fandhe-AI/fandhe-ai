@@ -241,9 +241,8 @@ fn empty_sequential_is_rejected_with_invalid_model() {
 
 /// e-2. `Tanh` を含む `Sequential` は `layer_kind == "unknown"` の
 ///      `OnnxError::UnsupportedLayer`（該当層の index 付き）で拒否
-///      される（`Sigmoid` はイシュー #2076 で対応層化したため負例には
-///      `Tanh` を使う。ONNX opset 17 に対応する演算はあるが、
-///      `Module::as_sigmoid`／`as_gelu`／`as_softmax` と同型のフックを
+///      される。ONNX opset 17 に対応する演算はあるが、
+///      `Module::as_gelu`／`as_softmax` と同型のフックを
 ///      `Tanh` へは追加していない）。
 #[test]
 fn sequential_with_tanh_is_rejected_with_unsupported_layer() {
@@ -285,18 +284,32 @@ fn sequential_with_conv1d_is_rejected_with_unsupported_layer_conv1d() {
     }
 }
 
-/// e-2b. `Sigmoid`（イシュー #2076 で対応層化）を含む `Sequential` は
-///      `from_sequential` が `Ok` を返す到達性テスト（値比較は
-///      `crates/onnx-interop/tests/onnx_export_layers_parity.rs` の
-///      責務。ここでは facade 経由での到達性のみ確認する）。
+/// e-2b. `Sigmoid` を含む `Sequential` は `layer_kind == "unknown"` の
+///      `OnnxError::UnsupportedLayer` で拒否される（`Tanh` と同型。
+///      `docs/facade-onnx-export-exposure-decision.md` §15.7 項 5
+///      〈数値契約〉が承認保留のため、本 issue（#2076）では
+///      `Module::as_sigmoid` フックを追加していない。承認が得られ
+///      次第、別 PR で結線する。onnx-interop 側の到達性テストは
+///      `crates/onnx-interop/tests/onnx_export_layers_parity.rs::
+///      sigmoid_is_rejected_as_unsupported`）。
 #[test]
-fn sequential_with_sigmoid_is_accepted() {
+fn sequential_with_sigmoid_is_rejected_with_unsupported_layer() {
     let model = Sequential::new()
         .add_linear(2, 2, 0x2076_1111)
         .expect("test fixture: 層構築に失敗")
         .add_sigmoid();
 
-    OnnxModel::from_sequential(&model).expect("Sigmoid を含む Sequential の export は成功するはず");
+    let err = OnnxModel::from_sequential(&model).unwrap_err();
+    match err {
+        OnnxError::UnsupportedLayer { index, layer_kind } => {
+            assert_eq!(index, 1, "Sigmoid は index=1（Linear の次）のはず");
+            assert_eq!(
+                layer_kind, "unknown",
+                "Sigmoid は判別フック非対応のため unknown のはず"
+            );
+        }
+        other => panic!("UnsupportedLayer を期待したが {other:?}"),
+    }
 }
 
 /// e-3b. `Conv2d`（イシュー #2076 で対応層化）を含む `Sequential` は

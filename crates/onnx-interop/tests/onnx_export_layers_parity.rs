@@ -1,9 +1,11 @@
 //! `onnx::export_nn` の対応層拡大（イシュー #2076・親 #2034）の parity
 //! テスト。`onnx_export_nn.rs`（Linear／ReLU の bit 完全一致契約）とは
-//! 別ファイルに分離する（本ファイルは Sigmoid・Softmax・LayerNorm・
+//! 別ファイルに分離する（本ファイルは Softmax・LayerNorm・
 //! GELU・Conv2d を含む REQ-2 統一複合判定〈相対誤差 1e-3 未満 または
 //! 絶対誤差 1e-5 未満〉のテストのみを扱う。`export_nn.rs` モジュール
-//! 冒頭「bit 一致契約の前提」節参照）。
+//! 冒頭「bit 一致契約の前提」節参照）。`Sigmoid` は §15.7 項 5 が
+//! 承認保留のため export 対応範囲外（`sigmoid_is_rejected_as_unsupported`
+//! 参照）。
 //!
 //! 各テストは export → encode → decode → import → `interp::run` の
 //! roundtrip 出力を、`nn::Module::forward_host`（tape 不要経路）による
@@ -111,15 +113,12 @@ fn assert_layers_parity(context: &str, layers: &[Box<dyn Module>], input: &Tenso
 }
 
 // ---- 単層 parity ----
-
-#[test]
-fn sigmoid_layer_parity() {
-    let mut rng = Xorshift64Star::new(0x2076_0001);
-    let l1 = linear_from_rng(&mut rng, 4, 6, true);
-    let layers: Vec<Box<dyn Module>> = vec![Box::new(l1), Box::new(Sigmoid)];
-    let input = input_tensor(&mut rng, &[3, 4]);
-    assert_layers_parity("Linear -> Sigmoid", &layers, &input);
-}
+//
+// `Sigmoid` は `docs/facade-onnx-export-exposure-decision.md` §15.7 項 5
+// （数値契約）が承認保留のため export 対応範囲から除外している
+// （`export_nn.rs` モジュール冒頭「対応層」節参照）。`sigmoid_layer_parity`
+// は追加せず、代わりに末尾の `sigmoid_is_rejected_as_unsupported` で
+// fail-closed に拒否されることを確認する。
 
 #[test]
 fn softmax_layer_parity() {
@@ -201,9 +200,9 @@ fn composite_conv_relu_then_flatten_free_linear_head() {
     let mut rng = Xorshift64Star::new(0x2076_0009);
     let conv = Conv2d::new(2, 4, [3, 3], [1, 1], [1, 1], [1, 1], 1, true, 0x2076_0009)
         .expect("Conv2d::new は成功するはず");
-    let layers: Vec<Box<dyn Module>> = vec![Box::new(conv), Box::new(Sigmoid)];
+    let layers: Vec<Box<dyn Module>> = vec![Box::new(conv), Box::new(Relu)];
     let input = input_tensor(&mut rng, &[1, 2, 5, 5]);
-    assert_layers_parity("Conv2d -> Sigmoid", &layers, &input);
+    assert_layers_parity("Conv2d -> Relu", &layers, &input);
 }
 
 // ---- fail-closed テスト ----
@@ -220,6 +219,26 @@ fn layer_norm_without_affine_is_rejected() {
     assert!(
         matches!(err, ExportError::InvalidLayerParameter { index: 0, .. }),
         "予期しないエラー種別: {err:?}"
+    );
+}
+
+#[test]
+fn sigmoid_is_rejected_as_unsupported() {
+    // `Sigmoid` は `docs/facade-onnx-export-exposure-decision.md` §15.7
+    // 項 5（数値契約）が承認保留のため `Module::as_sigmoid` フックを
+    // 追加していない。`export_nn.rs` の対応 6 種いずれにも該当しないため
+    // fail-closed に拒否される（承認が得られ次第、別 PR で結線する）。
+    let layers: Vec<Box<dyn Module>> = vec![Box::new(Sigmoid)];
+    let err = export_nn::export_parts_from_layers(&layers).expect_err("Sigmoid は未対応のはず");
+    assert!(
+        matches!(
+            err,
+            ExportError::UnsupportedLayer {
+                index: 0,
+                layer_kind: "unknown",
+            }
+        ),
+        "予期しないエラー: {err:?}"
     );
 }
 

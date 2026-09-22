@@ -48,10 +48,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use fandhe_ai_tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor};
 use half::f16;
 
 use super::graph::{Graph, GraphError, RawTensor};
+use super::interp_device;
 use super::proto::{AttributeProto, NodeProto, attribute_type};
 use crate::ops::{self, ConstantValue, ConvAttrs, GemmAttrs, LayerNormAttrs, OpError, SliceParams};
 
@@ -123,6 +124,13 @@ pub enum InterpError {
         attr: String,
         reason: String,
     },
+    /// `run_with_ops`（イシュー #2077）の device 実行経路で発生した、
+    /// `BackendError::Unsupported`／`BackendError::ShapeMismatch` 以外の
+    /// 実行時エラー（driver 不在・カーネル起動失敗・デバイスメモリ確保
+    /// 失敗等）。`interp_device::try_device` が発生源。`Unsupported`／
+    /// `ShapeMismatch` はホスト実装へフォールバックするため本 variant に
+    /// はならない（GPU 故障を隠蔽しない fail-closed 方針。OWASP A08）。
+    Backend { node: String, message: String },
 }
 
 impl fmt::Display for InterpError {
@@ -165,6 +173,9 @@ impl fmt::Display for InterpError {
             InterpError::Graph(e) => write!(f, "{e}"),
             InterpError::InvalidAttribute { node, attr, reason } => {
                 write!(f, "ノード '{node}': 属性 '{attr}' が不正です（{reason}）")
+            }
+            InterpError::Backend { node, message } => {
+                write!(f, "ノード '{node}': device 実行エラー: {message}")
             }
         }
     }
@@ -443,7 +454,11 @@ fn attr_string(node: &NodeProto, name: &str, default: &str) -> Result<String, In
     }
 }
 
-fn compute_gemm(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_gemm(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let a = get_f32(env, node, input_name(node, 0)?)?;
     let b = get_f32(env, node, input_name(node, 1)?)?;
     let c = match node.input.get(2) {
@@ -456,17 +471,44 @@ fn compute_gemm(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value,
         trans_a: attr_i64(node, "transA", 0) != 0,
         trans_b: attr_i64(node, "transB", 0) != 0,
     };
-    Ok(Value::F32(ops::gemm(a, b, c, &attrs)?))
+    // opt-in ON（`dev_ops` が `Some`）のときのみ device 経路を試みる。
+    // `Ok(None)`（未対応 shape・`Unsupported`）はホスト実装へそのまま
+    // フォールバックし、opt-in OFF（`dev_ops` が `None`）時の経路・出力は
+    // 一切変更しない（イシュー #2077 実装計画 §3.2）。
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_gemm(&node.name, ops, a, b, c, &attrs)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::gemm(a, b, c, &attrs)?), false))
 }
 
-fn compute_relu(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_relu(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
-    Ok(Value::F32(ops::relu(x)?))
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_relu(&node.name, ops, x)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::relu(x)?), false))
 }
 
-fn compute_sigmoid(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_sigmoid(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
-    Ok(Value::F32(ops::sigmoid(x)?))
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_sigmoid(&node.name, ops, x)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::sigmoid(x)?), false))
 }
 
 fn compute_shape(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
@@ -680,12 +722,23 @@ fn get_f16<'a>(
 /// 組み合わせであり、`Cast` を明示的に経由させる既存方針（`compute_cast` 冒頭
 /// コメント）に合わせて暗黙変換せず [`InterpError::TypeMismatch`] で拒否する
 /// （no-silent-skip 契約）。
-fn compute_add(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_add(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let a = get_value(env, node, input_name(node, 0)?)?;
     let b = get_value(env, node, input_name(node, 1)?)?;
     match (a, b) {
-        (Value::F32(a), Value::F32(b)) => Ok(Value::F32(ops::add(a, b)?)),
-        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(ops::add_i64(a, b)?)),
+        (Value::F32(a), Value::F32(b)) => {
+            if let Some(ops) = dev_ops
+                && let Some(out) = interp_device::device_add(&node.name, ops, a, b)?
+            {
+                return Ok((Value::F32(out), true));
+            }
+            Ok((Value::F32(ops::add(a, b)?), false))
+        }
+        (Value::I64(a), Value::I64(b)) => Ok((Value::I64(ops::add_i64(a, b)?), false)),
         _ => Err(InterpError::TypeMismatch {
             node: node.name.clone(),
             expected: "f32 or i64 (matching pair)",
@@ -693,12 +746,23 @@ fn compute_add(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, 
     }
 }
 
-fn compute_mul(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_mul(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let a = get_value(env, node, input_name(node, 0)?)?;
     let b = get_value(env, node, input_name(node, 1)?)?;
     match (a, b) {
-        (Value::F32(a), Value::F32(b)) => Ok(Value::F32(ops::mul(a, b)?)),
-        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(ops::mul_i64(a, b)?)),
+        (Value::F32(a), Value::F32(b)) => {
+            if let Some(ops) = dev_ops
+                && let Some(out) = interp_device::device_mul(&node.name, ops, a, b)?
+            {
+                return Ok((Value::F32(out), true));
+            }
+            Ok((Value::F32(ops::mul(a, b)?), false))
+        }
+        (Value::I64(a), Value::I64(b)) => Ok((Value::I64(ops::mul_i64(a, b)?), false)),
         _ => Err(InterpError::TypeMismatch {
             node: node.name.clone(),
             expected: "f32 or i64 (matching pair)",
@@ -706,12 +770,23 @@ fn compute_mul(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, 
     }
 }
 
-fn compute_div(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_div(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let a = get_value(env, node, input_name(node, 0)?)?;
     let b = get_value(env, node, input_name(node, 1)?)?;
     match (a, b) {
-        (Value::F32(a), Value::F32(b)) => Ok(Value::F32(ops::div(a, b)?)),
-        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(ops::div_i64(a, b)?)),
+        (Value::F32(a), Value::F32(b)) => {
+            if let Some(ops) = dev_ops
+                && let Some(out) = interp_device::device_div(&node.name, ops, a, b)?
+            {
+                return Ok((Value::F32(out), true));
+            }
+            Ok((Value::F32(ops::div(a, b)?), false))
+        }
+        (Value::I64(a), Value::I64(b)) => Ok((Value::I64(ops::div_i64(a, b)?), false)),
         _ => Err(InterpError::TypeMismatch {
             node: node.name.clone(),
             expected: "f32 or i64 (matching pair)",
@@ -733,9 +808,18 @@ fn compute_mod(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, 
     }
 }
 
-fn compute_sqrt(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_sqrt(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
-    Ok(Value::F32(ops::sqrt(x)?))
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_sqrt(&node.name, ops, x)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::sqrt(x)?), false))
 }
 
 /// `Constant(value|value_float|value_floats|value_int|value_ints) -> y`。
@@ -857,16 +941,34 @@ fn compute_transpose(env: &HashMap<String, Value>, node: &NodeProto) -> Result<V
 
 // ---- TASK-7.3c: Attention 系オペ（イシュー #274 結線）----
 
-fn compute_matmul(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_matmul(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let a = get_f32(env, node, input_name(node, 0)?)?;
     let b = get_f32(env, node, input_name(node, 1)?)?;
-    Ok(Value::F32(ops::matmul(a, b)?))
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_matmul(&node.name, ops, a, b)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::matmul(a, b)?), false))
 }
 
-fn compute_softmax(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_softmax(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
     let axis = attr_i64(node, "axis", -1);
-    Ok(Value::F32(ops::softmax(x, axis)?))
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_softmax(&node.name, ops, x, axis)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::softmax(x, axis)?), false))
 }
 
 fn compute_erf(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
@@ -879,7 +981,8 @@ fn compute_erf(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, 
 fn compute_layer_normalization(
     env: &HashMap<String, Value>,
     node: &NodeProto,
-) -> Result<Value, InterpError> {
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
     let scale = get_f32(env, node, input_name(node, 1)?)?;
     let bias = match node.input.get(2) {
@@ -890,9 +993,16 @@ fn compute_layer_normalization(
         axis: attr_i64(node, "axis", -1),
         epsilon: attr_f32(node, "epsilon", 1e-5),
     };
-    Ok(Value::F32(ops::layer_normalization(
-        x, scale, bias, &attrs,
-    )?))
+    if let Some(ops) = dev_ops
+        && let Some(out) =
+            interp_device::device_layer_norm(&node.name, ops, x, scale, bias, &attrs)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((
+        Value::F32(ops::layer_normalization(x, scale, bias, &attrs)?),
+        false,
+    ))
 }
 
 /// `Conv(X, W, [B])`（イシュー #2076・親 #2034。`ops::conv` の結線）。
@@ -944,22 +1054,34 @@ fn require_single_output(node: &NodeProto) -> Result<&str, InterpError> {
     Ok(node.output[0].as_str())
 }
 
-/// `Graph`（`build_graph` が構築したトポロジカル順検証済みグラフ）を実行する。
+/// `run_with_ops_report` が返す、ノードごとの実行経路の可観測点
+/// （イシュー #2077）。テスト・診断専用の内部クレート限定型であり facade
+/// へは公開しない（`docs/onnx-gpu-execution-decision.md` §3.1 「dispatcher
+/// の配置」承認事項 2 参照）。
+#[derive(Debug, Clone, Default)]
+pub struct DispatchReport {
+    /// device（`BackendOps`）実行に到達したノード名。
+    pub device_nodes: Vec<String>,
+    /// ホスト実装（`ops::*`）で実行されたノード名（`dev_ops` が `None`
+    /// の場合は全ノードがここに入る）。
+    pub host_nodes: Vec<String>,
+}
+
+/// `run`／`run_with_ops`／`run_with_ops_report` の共通実装。`dev_ops` が
+/// `Some` の場合のみ f32 系ノード（`MatMul`／`Gemm`／`Add`／`Mul`／`Div`／
+/// `Sqrt`／`Relu`／`Sigmoid`／`Softmax`／`LayerNormalization`）で device
+/// 経路を試みる（`interp_device` モジュール冒頭コメント参照）。`report` が
+/// `Some` の場合のみノードごとの実行経路を記録する（`run`／`run_with_ops`
+/// は記録コストを払わない）。
 ///
-/// 呼び出し元は `onnx-interop` 利用者（将来の `fandhe_ai_onnx_interop::run_model` 等の
-/// 上位 API・TASK-7.4）。`feeds` は `graph.inputs` のうち initializer を持たない
-/// 入力に対応する実行時の値（feeds 検証は以下の順序で行う。no-silent-skip 契約）:
-///
-/// 1. `graph.inputs` のうち initializer を持たない入力に feed が無ければ
-///    [`InterpError::MissingFeed`]
-/// 2. `graph.inputs`（および initializer 名）に属さない feed 名は
-///    [`InterpError::UnknownFeed`] で拒否
-///
-/// initializer と同名の feed が渡された場合（pre-IR-4 パターン）は feed が
-/// initializer を上書きする（ONNX 仕様のデフォルト値セマンティクス）。
-pub fn run(
+/// `dev_ops` が `None` の場合、各 `compute_*` は device 分岐へ一切入らず
+/// 既存コードをそのまま実行するため、本関数の出力は `dev_ops` 追加前の
+/// `run` と bit 完全に不変である（イシュー #2077 実装計画 §3.6 契約 (a)）。
+fn run_impl(
     graph: &Graph,
     feeds: HashMap<String, Value>,
+    dev_ops: Option<&dyn BackendOps>,
+    mut report: Option<&mut DispatchReport>,
 ) -> Result<HashMap<String, Value>, InterpError> {
     for input in &graph.inputs {
         if !graph.initializers.contains_key(input) && !feeds.contains_key(input) {
@@ -987,32 +1109,46 @@ pub fn run(
     }
 
     for node in &graph.nodes {
-        let out_value = match node.op_type.as_str() {
-            "Gemm" => compute_gemm(&env, node)?,
-            "Relu" => compute_relu(&env, node)?,
-            "Sigmoid" => compute_sigmoid(&env, node)?,
-            "Shape" => compute_shape(&env, node)?,
-            "Gather" => compute_gather(&env, node)?,
-            "Unsqueeze" => compute_unsqueeze(&env, node)?,
-            "Concat" => compute_concat(&env, node)?,
-            "Slice" => compute_slice(&env, node)?,
-            "Add" => compute_add(&env, node)?,
-            "Mul" => compute_mul(&env, node)?,
-            "Div" => compute_div(&env, node)?,
-            "Mod" => compute_mod(&env, node)?,
-            "Sqrt" => compute_sqrt(&env, node)?,
-            "Constant" => compute_constant(node)?,
-            "Cast" => compute_cast(&env, node)?,
-            "Reshape" => compute_reshape(&env, node)?,
-            "Squeeze" => compute_squeeze(&env, node)?,
-            "Transpose" => compute_transpose(&env, node)?,
-            "MatMul" => compute_matmul(&env, node)?,
-            "Softmax" => compute_softmax(&env, node)?,
-            "Erf" => compute_erf(&env, node)?,
-            "LayerNormalization" => compute_layer_normalization(&env, node)?,
-            "Conv" => compute_conv(&env, node)?,
+        // `used_device` は各 `compute_*` が実際に device 経路（`interp_
+        // device::device_*` が `Ok(Some(_))` を返した場合）を採用したかを
+        // 正確に表す（device 結線対象外の op は常に `false` で揃える。
+        // 推測・近似ではなく `compute_*` の戻り値そのものから得る）。
+        // `Conv`（イシュー #2076）は device 実行の対象外（#2077／#2222 の
+        // 結線範囲は `interp_device` モジュール冒頭コメント参照）のため
+        // 常にホスト実装（`ops::conv`）で実行し `false` を報告する。
+        let (out_value, used_device) = match node.op_type.as_str() {
+            "Gemm" => compute_gemm(&env, node, dev_ops)?,
+            "Relu" => compute_relu(&env, node, dev_ops)?,
+            "Sigmoid" => compute_sigmoid(&env, node, dev_ops)?,
+            "Shape" => (compute_shape(&env, node)?, false),
+            "Gather" => (compute_gather(&env, node)?, false),
+            "Unsqueeze" => (compute_unsqueeze(&env, node)?, false),
+            "Concat" => (compute_concat(&env, node)?, false),
+            "Slice" => (compute_slice(&env, node)?, false),
+            "Add" => compute_add(&env, node, dev_ops)?,
+            "Mul" => compute_mul(&env, node, dev_ops)?,
+            "Div" => compute_div(&env, node, dev_ops)?,
+            "Mod" => (compute_mod(&env, node)?, false),
+            "Sqrt" => compute_sqrt(&env, node, dev_ops)?,
+            "Constant" => (compute_constant(node)?, false),
+            "Cast" => (compute_cast(&env, node)?, false),
+            "Reshape" => (compute_reshape(&env, node)?, false),
+            "Squeeze" => (compute_squeeze(&env, node)?, false),
+            "Transpose" => (compute_transpose(&env, node)?, false),
+            "MatMul" => compute_matmul(&env, node, dev_ops)?,
+            "Softmax" => compute_softmax(&env, node, dev_ops)?,
+            "Erf" => (compute_erf(&env, node)?, false),
+            "LayerNormalization" => compute_layer_normalization(&env, node, dev_ops)?,
+            "Conv" => (compute_conv(&env, node)?, false),
             other => return Err(InterpError::UnsupportedOp(other.to_string())),
         };
+        if let Some(r) = report.as_deref_mut() {
+            if used_device {
+                r.device_nodes.push(node.name.clone());
+            } else {
+                r.host_nodes.push(node.name.clone());
+            }
+        }
         let output_name = require_single_output(node)?.to_string();
         env.insert(output_name, out_value);
     }
@@ -1026,6 +1162,61 @@ pub fn run(
         result.insert(name.clone(), v);
     }
     Ok(result)
+}
+
+/// `Graph`（`build_graph` が構築したトポロジカル順検証済みグラフ）をホスト
+/// CPU 実装（`ops::*`）のみで実行する。
+///
+/// 呼び出し元は `onnx-interop` 利用者（`fandhe_ai::interop::onnx::OnnxModel::
+/// run` の opt-in OFF 経路〈既定〉・facade 経由の GPU 実行 opt-in が無効な
+/// 場合。TASK-7.4）。`feeds` は `graph.inputs` のうち initializer を持たない
+/// 入力に対応する実行時の値（feeds 検証は以下の順序で行う。no-silent-skip 契約）:
+///
+/// 1. `graph.inputs` のうち initializer を持たない入力に feed が無ければ
+///    [`InterpError::MissingFeed`]
+/// 2. `graph.inputs`（および initializer 名）に属さない feed 名は
+///    [`InterpError::UnknownFeed`] で拒否
+///
+/// initializer と同名の feed が渡された場合（pre-IR-4 パターン）は feed が
+/// initializer を上書きする（ONNX 仕様のデフォルト値セマンティクス）。
+pub fn run(
+    graph: &Graph,
+    feeds: HashMap<String, Value>,
+) -> Result<HashMap<String, Value>, InterpError> {
+    run_impl(graph, feeds, None, None)
+}
+
+/// [`run`] と同じグラフ実行だが、`ops`（CPU／CUDA／Metal いずれの
+/// `BackendOps` 実装でもよい）経由の device 実行を試みる（イシュー
+/// #2077。`fandhe_ai::set_cuda_onnx_gpu_execution_enabled` 等の facade
+/// opt-in から到達する）。
+///
+/// 対象 op（`interp_device` モジュール冒頭コメント参照）の f32 経路のみ
+/// device を試み、`BackendError::Unsupported`／`ShapeMismatch` はホスト
+/// 実装（`ops::*`）へフォールバックする。それ以外のバックエンドエラーは
+/// [`InterpError::Backend`] として伝播する（黙示フォールバックしない。
+/// OWASP A08）。非 f32 経路・形状操作系（`Shape`／`Gather`／`Unsqueeze`／
+/// `Concat`／`Slice`／`Cast`／`Reshape`／`Squeeze`／`Transpose`／
+/// `Constant`）・`Mod`／`Erf` は常にホスト実行のまま（`run` と同一実装）。
+pub fn run_with_ops(
+    graph: &Graph,
+    feeds: HashMap<String, Value>,
+    ops: &dyn BackendOps,
+) -> Result<HashMap<String, Value>, InterpError> {
+    run_impl(graph, feeds, Some(ops), None)
+}
+
+/// [`run_with_ops`] と同じだが、ノードごとの実行経路（[`DispatchReport`]）
+/// も返す（テスト・診断専用。`ops-interop` の内部クレート限定 API であり
+/// facade へは公開しない）。
+pub fn run_with_ops_report(
+    graph: &Graph,
+    feeds: HashMap<String, Value>,
+    ops: &dyn BackendOps,
+) -> Result<(HashMap<String, Value>, DispatchReport), InterpError> {
+    let mut report = DispatchReport::default();
+    let result = run_impl(graph, feeds, Some(ops), Some(&mut report))?;
+    Ok((result, report))
 }
 
 #[cfg(test)]
