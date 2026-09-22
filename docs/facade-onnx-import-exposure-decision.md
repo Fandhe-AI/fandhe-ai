@@ -443,6 +443,54 @@ CLAUDE.md に「公開準備は完了済み・実 publish は次回リリース�
 `onnx-interop` の `pub` API 変更は、AGENTS.md の破壊的変更 P1 判定を
 通常どおり適用する（本節はその適用除外を initial publish 以前に
 限定する）。
+
+### 13.6 追補（PR #2221 codex-review P2 是正）: `tensor_name` の
+protobuf 後勝ちマージ・256 バイト上限の両経路統一
+
+**指摘**: §13.4 の事前走査（`scan_sparse_tensor_bytes_for_values_name`・
+`scan_tensor_bytes_for_name`）は `values`（tag=1）・`name`（tag=8）の
+**最初の出現**を見つけた時点で即座に `return` していた。しかし protobuf
+のワイヤフォーマット仕様では、同一メッセージ内で singular field
+（`values`・`name` はいずれも singular）が複数回出現した場合は
+**後勝ち**でマージされる（`prost::Message::merge` の実装）。このため、
+悪意ある・不正な形式の入力で `sparse_initializer` 内に `values`／`name`
+が複数回出現すると、`decode_model`（事前走査。層 1）が報告する
+`tensor_name` と `ModelProto::decode` を直接呼ぶ経路（層 2。§13.4 末尾
+参照）が `build_graph` へ渡す `tensor_name` とが食い違いうる。加えて、
+事前走査は診断名を 256 バイトで切り詰めていたが、`build_graph` 側
+（`g.sparse_initializer[0].values.name`）には同じ上限が無く、両経路の
+診断 payload の契約が非対称だった。
+
+**是正内容**:
+
+- `scan_sparse_tensor_bytes_for_values_name`／`scan_tensor_bytes_for_name`
+  （`crates/onnx-interop/src/onnx/proto.rs`）を、最初の出現で `return`
+  するのではなく**全出現を走査し最後の出現を採用する**よう変更した
+  （protobuf の後勝ちマージ規則に一致させる）。ある出現にフィールドが
+  存在しない場合は以前の出現で得た値を保持する（マージ時にフィールド
+  不在の出現が既存値を消すことはないため）。「出現順で最初の要素」
+  判定（`GraphProto.sparse_initializer` は `repeated` フィールドのため
+  Vec 要素そのものはマージされない。13.4 節・Cursor Bugbot 是正）は
+  不変。
+- 新設の `pub(crate) const SPARSE_TENSOR_NAME_DIAG_CAP: usize = 256` と
+  `pub(crate) fn cap_sparse_tensor_diag_name(bytes: &[u8]) -> String`
+  （`crates/onnx-interop/src/onnx/proto.rs`）へ 256 バイト切り詰め
+  ロジックを一本化し、事前走査側（`scan_tensor_bytes_for_name`）と
+  `graph::build_graph`（`crates/onnx-interop/src/onnx/graph.rs`。
+  `values.name.as_bytes()` へ適用）の両方がこの共通ヘルパを経由する
+  ことで、両経路の `tensor_name` payload を一致させた（診断契約の
+  統一）。
+- `crates/onnx-interop/tests/onnx_decode.rs` に 2 テストを追加した:
+  `decode_model_sparse_tensor_name_follows_protobuf_last_wins_merge_on_duplicate_values_field`
+  （同一 `SparseTensorProto` 内で `values` が複数回出現するケースで
+  後勝ちが適用され、かつ `decode_model` と `ModelProto::decode` 直接
+  呼び出しの結果が一致することを確認）・
+  `decode_model_and_build_graph_agree_on_256_byte_diag_name_cap_for_long_name`
+  （300 バイトの名前で `decode_model`（層 1）と `build_graph`（層 2）が
+  同じ 256 バイト上限で切り詰め、`tensor_name` が一致することを確認）。
+- 受け入れ判定（`tensor_name`／`count`）・`OnnxError`／`GraphError` の
+  公開面・依存追加・新規 `unsafe`・spec 提案はいずれも変更なし。
+
 ## 14. 追補（イシュー #2077・2026-09-22）: `BackendOps` 経由の GPU 実行 opt-in
 
 12.6(a) の「`BackendOps`／`Device` 非経由（GPU 実行にはならない）」は

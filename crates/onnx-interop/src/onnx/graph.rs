@@ -21,7 +21,7 @@
 //! （`proto::SparseTensorValueName`）である前提と合わせて、`raw_data` 等の
 //! 完全展開を避ける設計になっている。
 
-use super::proto::{GraphProto, ModelProto, NodeProto, TensorProto};
+use super::proto::{GraphProto, ModelProto, NodeProto, TensorProto, cap_sparse_tensor_diag_name};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -436,11 +436,17 @@ pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
     // sparse_initializer（tag=15）は非対応。dense initializer の decode より
     // 前に検査し、中身を一切解釈せず存在だけで fail-closed に拒否する（長さ・
     // 形状検証を先行させる原則と同じ。no-silent-skip 契約・A03／A08。#2079）。
+    // `tensor_name` は `proto::cap_sparse_tensor_diag_name`（`decode_model`
+    // 側の事前走査と共有する 256 バイト上限）で切り詰める。`values.name` は
+    // 既に prost によって UTF-8 検証済みだが、事前走査（層 1）が報告する
+    // `tensor_name` と本関数（層 2）が報告する `tensor_name` の payload を
+    // 一致させるため同じ上限・同じ切り詰めロジックを適用する
+    // （codex-review P2 是正。2026-09-22。「診断契約の統一」）。
     if !g.sparse_initializer.is_empty() {
         let tensor_name = g.sparse_initializer[0]
             .values
             .as_ref()
-            .map(|t| t.name.clone())
+            .map(|t| cap_sparse_tensor_diag_name(t.name.as_bytes()))
             .unwrap_or_default();
         return Err(GraphError::SparseInitializerNotSupported {
             tensor_name,

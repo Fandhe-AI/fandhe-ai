@@ -1347,6 +1347,165 @@ fn decode_model_first_sparse_name_is_empty_when_first_element_has_no_name_even_i
     }
 }
 
+/// 同一 `SparseTensorProto` 内で `values`（singular message field。tag=1）
+/// が複数回出現した場合、protobuf の後勝ちマージ規則により最後の出現の
+/// `name` が採用されることを確認する（codex-review P2 是正）。
+/// `prescan_sparse_initializer`（`decode_model` 経由）が報告する
+/// `tensor_name` と、`ModelProto::decode`（層 2・構造体側の decode）が
+/// 実際に decode した `SparseTensorProto.values.name` が一致することで、
+/// 両経路の診断 payload の整合を確認する。
+#[test]
+fn decode_model_sparse_tensor_name_follows_protobuf_last_wins_merge_on_duplicate_values_field() {
+    // values（tag=1）の 1 回目の出現: name = "first"。
+    let mut values_1 = vec![0x42u8, b"first".len() as u8];
+    values_1.extend_from_slice(b"first");
+    let mut sparse_bytes = vec![0x0au8, values_1.len() as u8];
+    sparse_bytes.extend_from_slice(&values_1);
+
+    // values（tag=1）の 2 回目の出現（同一 SparseTensorProto 内）:
+    // name = "second"。protobuf の後勝ちマージにより最終的な
+    // `values.name` は "second" になるはず。
+    let mut values_2 = vec![0x42u8, b"second".len() as u8];
+    values_2.extend_from_slice(b"second");
+    sparse_bytes.push(0x0au8);
+    sparse_bytes.push(values_2.len() as u8);
+    sparse_bytes.extend_from_slice(&values_2);
+
+    let mut graph_bytes = vec![0x7au8, sparse_bytes.len() as u8];
+    graph_bytes.extend_from_slice(&sparse_bytes);
+
+    let mut model_bytes = vec![0x3au8, graph_bytes.len() as u8];
+    model_bytes.extend_from_slice(&graph_bytes);
+
+    // 層 1（`decode_model` の事前走査）が報告する tensor_name。
+    let err = fandhe_ai_onnx_interop::onnx::proto::decode_model(&model_bytes)
+        .expect_err("decode_model が拒否するはず");
+    let prescan_tensor_name = match err {
+        fandhe_ai_onnx_interop::onnx::proto::DecodeModelError::SparseInitializerNotSupported {
+            tensor_name,
+            count,
+        } => {
+            assert_eq!(count, 1, "SparseTensorProto の出現は 1 件のみ");
+            tensor_name
+        }
+        other => panic!("DecodeModelError::SparseInitializerNotSupported を期待したが {other:?}"),
+    };
+    assert_eq!(
+        prescan_tensor_name, "second",
+        "同一 SparseTensorProto 内で values が複数回出現した場合は後勝ちで \
+         最後の出現の name を採用するはず"
+    );
+
+    // 層 2（`ModelProto::decode` を直接呼ぶ経路。本クレート内テスト等）が
+    // 実際に decode する `values.name` と一致することを確認する
+    // （両経路の診断 payload の整合）。
+    let decoded = ModelProto::decode(model_bytes.as_slice())
+        .expect("prost の通常 decode は非空フィールドの重複出現を許容するはず");
+    let graph = decoded.graph.expect("graph は必須");
+    assert_eq!(graph.sparse_initializer.len(), 1);
+    let decoded_name = graph.sparse_initializer[0]
+        .values
+        .as_ref()
+        .map(|v| v.name.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        decoded_name, prescan_tensor_name,
+        "prescan_sparse_initializer の tensor_name は ModelProto::decode 本体の \
+         decode 結果と一致するはず"
+    );
+}
+
+/// `values.name` が 256 バイトの診断名上限を超える場合、事前走査
+/// （`decode_model` 経由。層 1）と `build_graph`（`ModelProto::decode` を
+/// 直接呼ぶ経路。層 2）の両方が同じ `SPARSE_TENSOR_NAME_DIAG_CAP` で
+/// 切り詰め、`tensor_name` payload が一致することを確認する
+/// （codex-review P2 是正。2026-09-22。「診断契約の統一」の直接証明）。
+#[test]
+fn decode_model_and_build_graph_agree_on_256_byte_diag_name_cap_for_long_name() {
+    // 300 バイトの ASCII 名（256 バイト上限を確実に超える）。
+    let long_name: Vec<u8> = (0..300).map(|i| b'a' + (i % 26) as u8).collect();
+    assert_eq!(long_name.len(), 300);
+
+    let mut values_bytes = vec![0x42u8];
+    encode_varint_len(&mut values_bytes, long_name.len());
+    values_bytes.extend_from_slice(&long_name);
+
+    let mut sparse_bytes = vec![0x0au8];
+    encode_varint_len(&mut sparse_bytes, values_bytes.len());
+    sparse_bytes.extend_from_slice(&values_bytes);
+
+    let mut graph_bytes = vec![0x7au8];
+    encode_varint_len(&mut graph_bytes, sparse_bytes.len());
+    graph_bytes.extend_from_slice(&sparse_bytes);
+
+    let mut model_bytes = vec![0x3au8];
+    encode_varint_len(&mut model_bytes, graph_bytes.len());
+    model_bytes.extend_from_slice(&graph_bytes);
+
+    // 層 1: decode_model（事前走査）の tensor_name。
+    let err = fandhe_ai_onnx_interop::onnx::proto::decode_model(&model_bytes)
+        .expect_err("decode_model が拒否するはず");
+    let prescan_tensor_name = match err {
+        fandhe_ai_onnx_interop::onnx::proto::DecodeModelError::SparseInitializerNotSupported {
+            tensor_name,
+            count,
+        } => {
+            assert_eq!(count, 1);
+            tensor_name
+        }
+        other => panic!("DecodeModelError::SparseInitializerNotSupported を期待したが {other:?}"),
+    };
+    assert_eq!(
+        prescan_tensor_name.len(),
+        256,
+        "256 バイト上限で切り詰められるはず"
+    );
+
+    // 層 2: ModelProto::decode を直接呼び build_graph へ通す経路の
+    // tensor_name（build_graph 自身が同じ上限で切り詰める）。
+    let decoded = ModelProto::decode(model_bytes.as_slice())
+        .expect("300 バイトの name フィールドは通常 decode では制限されない");
+    let build_err =
+        build_graph(&decoded).expect_err("sparse_initializer は build_graph でも拒否されるはず");
+    let build_tensor_name = match build_err {
+        GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+            assert_eq!(count, 1);
+            tensor_name
+        }
+        other => panic!("GraphError::SparseInitializerNotSupported を期待したが {other:?}"),
+    };
+    assert_eq!(
+        build_tensor_name.len(),
+        256,
+        "build_graph 側も同じ 256 バイト上限で切り詰めるはず"
+    );
+
+    assert_eq!(
+        prescan_tensor_name, build_tensor_name,
+        "decode_model（層 1）と build_graph（層 2）の tensor_name payload は \
+         一致するはず（診断契約の統一）"
+    );
+}
+
+/// `bytes` へ protobuf varint 形式の長さを追記するテストヘルパ（本テスト
+/// ファイル内の 300 バイト級の length-delimited フィールド構築に使う。
+/// 既存の `sparse_1.len() as u8` 直書きパターンは 128 バイト以上の長さを
+/// 正しく符号化できない〈varint の継続ビットが必要〉ため、このヘルパで
+/// 汎用化する）。
+fn encode_varint_len(bytes: &mut Vec<u8>, mut len: usize) {
+    loop {
+        let mut byte = (len & 0x7f) as u8;
+        len >>= 7;
+        if len != 0 {
+            byte |= 0x80;
+        }
+        bytes.push(byte);
+        if len == 0 {
+            break;
+        }
+    }
+}
+
 /// 事前走査中に不正な形式（length-delimited フィールドの長さがバッファ
 /// 終端を超える）に遭遇した場合、`prescan_sparse_initializer` は判定を
 /// 確定させず `ModelProto::decode` 本体へ委ねる（本体が同じ不正入力を

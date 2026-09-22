@@ -339,8 +339,14 @@ pub fn decode_model(bytes: &[u8]) -> Result<ModelProto, DecodeModelError> {
 /// 最初の要素の `values.name`（tag=1 の中の tag=8）だけを同じく bounded
 /// に読み取り、`TensorProto` の他フィールド（`raw_data` 等）へは一切
 /// 踏み込まない（`values` 自体が存在しない・`name` が無い場合は空文字列。
-/// `graph::build_graph` の既存挙動と同じ fallback）。診断用途のため
-/// 名前は 256 バイトで切り詰める。**「最初の要素」判定は「名前を読み取れた
+/// `graph::build_graph` の既存挙動と同じ fallback）。名前は
+/// [`SPARSE_TENSOR_NAME_DIAG_CAP`]（`graph::build_graph` と共有する上限）
+/// バイトで切り詰める（[`cap_sparse_tensor_diag_name`] 経由。診断契約の
+/// 統一。codex-review P2 是正・2026-09-22）。値が同一メッセージ内に
+/// 複数回出現した場合は protobuf の後勝ちマージ規則に従い最後の出現を
+/// 採用する（`scan_sparse_tensor_bytes_for_values_name`／
+/// `scan_tensor_bytes_for_name` のドキュメンテーションコメント参照）。
+/// **「最初の要素」判定は「名前を読み取れた
 /// 最初の要素」ではなく「出現順で最初の要素」**（`graph::build_graph` の
 /// `g.sparse_initializer[0]` と同じ意味）であるため、最初の要素に
 /// `values.name` が無い場合は空文字列のまま確定し、2 番目以降の要素へは
@@ -414,44 +420,96 @@ fn scan_graph_bytes_for_sparse_initializer(
 /// `SparseTensorProto` 直下を走査し `values`（tag=1）の中身を取り出して
 /// `scan_tensor_bytes_for_name` へ渡す。`indices`（tag=2）・`dims`（tag=3）
 /// には踏み込まない（`SparseTensorValueName` のコメント参照）。
+///
+/// **最後の出現を採用する理由（codex-review P2 是正。2026-09-22）**:
+/// protobuf のワイヤフォーマット仕様上、`values`（singular message field。
+/// tag=1）が同一 `SparseTensorProto` 内に複数回出現した場合は「後勝ち」
+/// でマージされる（`prost::Message::merge` の singular message field
+/// 実装は出現ごとに既存値へ再帰マージし、内部の singular scalar field
+/// は最後に decode した値で上書きされる）。最初の出現だけを見て即座に
+/// `return` すると、`ModelProto::decode` を直接呼ぶ経路（`build_graph`
+/// が `SparseTensorProto::decode` 由来の値を読む経路。本モジュール冒頭
+/// コメント「メモリ増幅対策」節の層 2）が報告する `tensor_name` と、
+/// この事前走査（層 1・`decode_model` 経由）が報告する `tensor_name` が
+/// 複数回出現の悪意ある／不正な入力で食い違いうる（codex-review 指摘）。
+/// 全出現を走査し最後の出現の結果を採用することで、両経路の診断
+/// payload を一致させる。
 fn scan_sparse_tensor_bytes_for_values_name(bytes: &[u8]) -> Option<String> {
     let mut buf: &[u8] = bytes;
+    let mut last: Option<String> = None;
     while buf.has_remaining() {
         let (tag, wire_type) = decode_key(&mut buf).ok()?;
         match wire_type {
             WireType::LengthDelimited => {
                 let field_bytes = take_length_delimited(&mut buf)?;
                 if tag == 1 {
-                    return scan_tensor_bytes_for_name(field_bytes);
+                    // 後勝ちマージ: この出現に `name` が無ければ（内側
+                    // `Option` が `None`）以前の出現で得た `last` を保持
+                    // する（protobuf は出現ごとにメッセージをマージする
+                    // だけで、フィールド不在の出現が既存値を消すことは
+                    // ない）。
+                    if let Some(name) = scan_tensor_bytes_for_name(field_bytes)? {
+                        last = Some(name);
+                    }
                 }
             }
             _ => skip_field(wire_type, tag, &mut buf, DecodeContext::default()).ok()?,
         }
     }
-    None
+    last
+}
+
+/// `sparse_initializer` の診断用テンソル名に適用する共通の長さ上限
+/// （バイト単位。UTF-8 文字境界は考慮しない）。事前走査（本モジュール
+/// `scan_tensor_bytes_for_name`。層 1・`decode_model` 経由）と
+/// `graph::build_graph`（層 2・`ModelProto::decode` を直接呼ぶ経路が
+/// 読む `values.name`）の両方がこの定数・[`cap_sparse_tensor_diag_name`]
+/// を経由することで、両経路が報告する `tensor_name` payload を一致させる
+/// （codex-review P2 是正。2026-09-22。「診断契約の統一」）。
+pub(crate) const SPARSE_TENSOR_NAME_DIAG_CAP: usize = 256;
+
+/// `sparse_initializer` の診断名（`values.name`）を
+/// [`SPARSE_TENSOR_NAME_DIAG_CAP`] バイトへ切り詰める。`String::
+/// from_utf8_lossy` を経由するため、切り詰め位置が UTF-8 文字境界を跨いだ
+/// 場合は置換文字（U+FFFD）になる（事前走査側の元実装と同じ挙動）。
+/// `graph::build_graph` は既に UTF-8 検証済みの `String`（`values.name.
+/// as_bytes()`）を渡し、事前走査側は非信頼入力の生バイト列をそのまま
+/// 渡す。いずれも入力が同一バイト列であれば出力が一致する（上記
+/// ドキュメンテーションコメント参照）。
+pub(crate) fn cap_sparse_tensor_diag_name(bytes: &[u8]) -> String {
+    let cap = bytes.len().min(SPARSE_TENSOR_NAME_DIAG_CAP);
+    String::from_utf8_lossy(&bytes[..cap]).into_owned()
 }
 
 /// `TensorProto` 直下を走査し `name`（tag=8）だけを取り出す。`raw_data`
 /// （tag=9）・packed `float_data`/`int64_data`（tag=4/7）・`dims`（tag=1）・
 /// `data_type`（tag=2）には一切踏み込まない（該当タグは `skip_field` で
 /// 読み飛ばすのみ。メモリ増幅対策の核心部分）。
-fn scan_tensor_bytes_for_name(bytes: &[u8]) -> Option<String> {
-    const NAME_CAP: usize = 256;
+///
+/// `name`（singular string field）が同一メッセージ内に複数回出現した
+/// 場合、protobuf は後勝ちでマージする（`scan_sparse_tensor_bytes_for_
+/// values_name` のドキュメンテーションコメント参照）。本関数は
+/// **`Option<Option<String>>` を返さず全出現を走査して最後の出現を
+/// 採用する**ことで同じ後勝ち規則に従う（最初の出現で即 `return` しない）。
+/// 走査自体が不正入力（バッファ終端超過等）で失敗した場合のみ `None` を
+/// 早期に返す（`?` 演算子。`prescan_sparse_initializer` の判定不能
+/// フォールバック契約は不変）。
+fn scan_tensor_bytes_for_name(bytes: &[u8]) -> Option<Option<String>> {
     let mut buf: &[u8] = bytes;
+    let mut last: Option<String> = None;
     while buf.has_remaining() {
         let (tag, wire_type) = decode_key(&mut buf).ok()?;
         match wire_type {
             WireType::LengthDelimited => {
                 let field_bytes = take_length_delimited(&mut buf)?;
                 if tag == 8 {
-                    let cap = field_bytes.len().min(NAME_CAP);
-                    return Some(String::from_utf8_lossy(&field_bytes[..cap]).into_owned());
+                    last = Some(cap_sparse_tensor_diag_name(field_bytes));
                 }
             }
             _ => skip_field(wire_type, tag, &mut buf, DecodeContext::default()).ok()?,
         }
     }
-    None
+    Some(last)
 }
 
 /// length-delimited フィールドの中身を、残りバッファ長と照合したうえで
