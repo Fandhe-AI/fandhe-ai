@@ -386,6 +386,57 @@ fn split_top_level_statements(content: &str) -> Vec<String> {
     out
 }
 
+/// `text` を「識別子トークン」と「区切り文字（1 文字）」に分解した
+/// トークン列へ変換する（空白は読み飛ばす）。`declares_pub_fn` 専用の
+/// ユーティリティ。`extract_identifier_tokens`（識別子のみを抽出する
+/// 既存関数）と異なり `(`／`<` などの区切り文字もトークンとして残す
+/// ことで、`pub`・`fn`・関数名の間に改行やコメント除去後の空白を挟んだ
+/// 有効な Rust 記法を、固定文字列一致ではなくトークン列の連続一致で
+/// 検出できるようにする（codex-review 指摘・PR #2212 その 5:
+/// `contains("pub fn custom(")`／`contains("pub fn custom<")` の固定
+/// 文字列一致は `pub\nfn custom(` のような改行を挟んだ宣言を見逃す）。
+fn tokenize_including_punctuation(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == '\'' || c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            if c == '\'' {
+                i += 1;
+            }
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            tokens.push(chars[start..i].iter().collect());
+        } else {
+            tokens.push(c.to_string());
+            i += 1;
+        }
+    }
+    tokens
+}
+
+/// `content`（コメント除去済み想定）に `pub fn <fn_name>(` または
+/// `pub fn <fn_name><`（ジェネリクス付き）宣言が存在するかをトークン列
+/// の連続一致で判定する。`pub`・`fn`・`fn_name` の間の空白量（改行を
+/// 含む）に影響されない。`pub(crate) fn ...` のようなスコープ付き
+/// 可視性は「独立した `pub` トークンの直後に `fn` トークンが続かない」
+/// ため一致しない（`pub` の直後に `(` が来る）——本関数の検査対象は
+/// あくまで無条件 `pub fn` 宣言のみで、旧実装（固定文字列一致）と同じ
+/// 可視性スコープの扱いを保つ。
+fn declares_pub_fn(content: &str, fn_name: &str) -> bool {
+    let tokens = tokenize_including_punctuation(content);
+    tokens
+        .windows(4)
+        .any(|w| w[0] == "pub" && w[1] == "fn" && w[2] == fn_name && (w[3] == "(" || w[3] == "<"))
+}
+
 /// `line` 先頭の可視性修飾（`pub`／`pub(crate)`／`pub(super)`／
 /// `pub(in ...)` 等）を読み飛ばした残りを返す（可視性修飾が無ければ
 /// そのまま `trim_start()` した文字列を返す）。`pub type Tensor = ...;`
@@ -585,7 +636,40 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
                 );
             }
         }
+        // ローカル型定義による同名別型の混入を遮断する（codex-review
+        // 指摘・PR #2212 その 5）: `ALLOWED_SIGNATURE_TOKENS` は名前
+        // ベースの許可のため、`use ... as ...` によるエイリアスを禁止
+        // しても `pub struct Tensor(BackendOps);` のように custom.rs
+        // 内で `Tensor` という名前の別型を直接定義されると、シグネチャ
+        // 上は allowlist を素通りしたまま実質的に禁止型（`BackendOps`）
+        // を混入できてしまう。`struct Tensor`／`enum Tensor` のローカル
+        // 定義自体を禁止する。
+        for kind in ["struct", "enum"] {
+            let prefix = format!("{kind} Tensor");
+            if let Some(after) = after_visibility.strip_prefix(prefix.as_str()) {
+                let is_exact_name = after
+                    .chars()
+                    .next()
+                    .map(|c| !c.is_ascii_alphanumeric() && c != '_')
+                    .unwrap_or(true);
+                assert!(
+                    !is_exact_name,
+                    "src/custom.rs に Tensor という名前のローカル型定義が見つかった: \
+                     {statement}（tensor_core::Tensor と同名の別型でラップして禁止型を\
+                     混入させる経路になりうるため、本ファイルでは定義しない設計とする）"
+                );
+            }
+        }
     }
+    // シグネチャの `Tensor` トークンが指す型を一意に固定する。上記の
+    // ローカル型定義禁止・alias import 禁止と合わせて、`custom.rs` の
+    // スコープに存在する `Tensor` は tensor-core クレートの非エイリアス
+    // import のみであることを構造的に保証する。
+    assert!(
+        content.contains("use fandhe_ai_tensor_core::Tensor;"),
+        "src/custom.rs に `use fandhe_ai_tensor_core::Tensor;`（非エイリアス import）が\
+         見つからない（シグネチャの Tensor トークンが指す型を一意に固定できない）"
+    );
 }
 
 /// `crates/autodiff/src/var.rs` に `pub fn custom(`／`pub fn custom<`
@@ -606,9 +690,10 @@ fn var_rs_does_not_declare_pub_fn_custom() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        !no_comments.contains("pub fn custom(") && !no_comments.contains("pub fn custom<"),
+        !declares_pub_fn(&no_comments, "custom"),
         "src/var.rs に pub fn custom 宣言が見つかった\
-         （§12.5 (b) 未承認のまま Var 経由の到達口を設けてしまっている）"
+         （§12.5 (b) 未承認のまま Var 経由の到達口を設けてしまっている。`pub`・`fn`・\
+         `custom` の間に改行を挟んだ宣言もトークン列で検出する）"
     );
 }
 
@@ -717,5 +802,38 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
                 "可視性修飾付き alias import の as トークンを検出できていない: {after_vis}"
             );
         }
+    }
+
+    // 7) 改行を挟んだ `pub fn custom(` 宣言（codex-review 指摘・
+    //    PR #2212 その 5）: 固定文字列一致 `contains("pub fn custom(")`
+    //    は見逃すが、`declares_pub_fn` はトークン列の連続一致で検出する。
+    assert!(
+        declares_pub_fn("pub\nfn custom(&self) {}", "custom"),
+        "改行を挟んだ pub fn custom( 宣言を検出できていない"
+    );
+    assert!(
+        declares_pub_fn("pub\n    fn\ncustom<'t>(&self) {}", "custom"),
+        "改行を挟んだジェネリクス付き pub fn custom< 宣言を検出できていない"
+    );
+    assert!(
+        !declares_pub_fn("pub fn custom_foo(&self) {}", "custom"),
+        "custom_foo のような無関係な関数名を誤検出してはならない"
+    );
+    assert!(
+        !declares_pub_fn("pub(crate) fn custom(&self) {}", "custom"),
+        "pub(crate) fn custom はスコープ付き可視性のため対象外（旧実装と同じ扱い）"
+    );
+
+    // 8) 同名別型によるシグネチャ混入（codex-review 指摘・PR #2212
+    //    その 5）: `struct Tensor(BackendOps);` のようなローカル定義は
+    //    `struct Tensor` プレフィックス一致で検出される想定の前提確認。
+    let forged_wrapper = "pub struct Tensor(BackendOps);\n";
+    for statement in split_top_level_statements(forged_wrapper) {
+        let after_vis = strip_visibility_prefix(&statement);
+        assert!(
+            after_vis.starts_with("struct Tensor"),
+            "ローカル Tensor 型定義の検出前提（struct Tensor プレフィックス）が崩れている: \
+             {after_vis}"
+        );
     }
 }

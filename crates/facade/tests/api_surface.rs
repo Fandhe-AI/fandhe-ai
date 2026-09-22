@@ -3106,7 +3106,7 @@ fn compat_sequential_does_not_expose_custom_add_method() {
     let mut offending = Vec::new();
     visit_rs_files(&compat_dir, &mut |path, content| {
         let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-        if cleaned.contains("pub fn add_custom") {
+        if declares_pub_fn(&cleaned, "add_custom") {
             offending.push(path.display().to_string());
         }
     });
@@ -3115,6 +3115,77 @@ fn compat_sequential_does_not_expose_custom_add_method() {
         "src/compat 配下に add_custom が見つかった\
          （§12.5 (b) 未承認のまま Sequential への合成入口を設けてしまっている）: {offending:?}"
     );
+}
+
+/// `text` を「識別子トークン」と「区切り文字（1 文字）」に分解した
+/// トークン列へ変換する（空白は読み飛ばす）。`declares_pub_fn` 専用の
+/// ユーティリティ。`(`／`<` などの区切り文字もトークンとして残すことで、
+/// `pub`・`fn`・関数名の間に改行を挟んだ有効な Rust 記法を、固定文字列
+/// 一致ではなくトークン列の連続一致で検出できるようにする（codex-review
+/// 指摘・PR #2212 その 5: `cleaned.contains("pub fn add_custom")` の
+/// 固定文字列一致は `pub\nfn add_custom(` のような改行を挟んだ宣言を
+/// 見逃す）。`crates/autodiff/tests/architecture_boundaries.rs` の同名
+/// ユーティリティと同型（クレートをまたぐ integration test 間でヘルパー
+/// を共有できないため個別実装）。
+fn tokenize_including_punctuation(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == '\'' || c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            if c == '\'' {
+                i += 1;
+            }
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            tokens.push(chars[start..i].iter().collect());
+        } else {
+            tokens.push(c.to_string());
+            i += 1;
+        }
+    }
+    tokens
+}
+
+/// `content`（コメント除去済み想定）に `pub fn <fn_name>(` または
+/// `pub fn <fn_name><`（ジェネリクス付き）宣言が存在するかをトークン列
+/// の連続一致で判定する。`pub`・`fn`・`fn_name` の間の空白量（改行を
+/// 含む）に影響されない。`pub(crate) fn ...` のようなスコープ付き
+/// 可視性は「独立した `pub` トークンの直後に `fn` トークンが続かない」
+/// ため一致しない。
+fn declares_pub_fn(content: &str, fn_name: &str) -> bool {
+    let tokens = tokenize_including_punctuation(content);
+    tokens
+        .windows(4)
+        .any(|w| w[0] == "pub" && w[1] == "fn" && w[2] == fn_name && (w[3] == "(" || w[3] == "<"))
+}
+
+#[test]
+fn declares_pub_fn_detects_newline_separated_declaration() {
+    assert!(declares_pub_fn(
+        "pub\nfn add_custom(&self) {}",
+        "add_custom"
+    ));
+    assert!(declares_pub_fn(
+        "pub\n    fn\nadd_custom<T>(&self) {}",
+        "add_custom"
+    ));
+    assert!(!declares_pub_fn(
+        "pub fn add_custom_foo(&self) {}",
+        "add_custom"
+    ));
+    assert!(!declares_pub_fn(
+        "pub(crate) fn add_custom(&self) {}",
+        "add_custom"
+    ));
+    assert!(!declares_pub_fn("let add_custom = 1;", "add_custom"));
 }
 
 /// `pub fn custom` 宣言（`pub fn custom(` に加え、`Tape::custom` 本体
