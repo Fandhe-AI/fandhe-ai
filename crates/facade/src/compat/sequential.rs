@@ -112,7 +112,8 @@ use fandhe_ai_autodiff::nn::{
     FeedForwardActivation, Flatten, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear,
     MaxPool1d, MaxPool2d, Module, MultiheadAttention, MultiheadAttentionVars, RmsNorm, RmsNormVars,
     Sequential as NnSequential, TransformerEncoderLayer, TransformerEncoderLayerVars,
-    linear_forward_low_precision,
+    conv2d_forward_low_precision, linear_forward_low_precision,
+    multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
@@ -1660,15 +1661,19 @@ impl<'m, 't> SequentialVars<'m, 't> {
     }
 
     /// [`Self::forward`] の内部実装。`low_precision` が `Some(dtype)` の
-    /// とき、`Linear` 層（epilogue 融合有無を問わず）のみ
-    /// `linear_forward_low_precision`（イシュー #1960。f32 master
-    /// weight・backward は常に f32）へ切り替える（イシュー #1961・
-    /// `docs/autodiff-low-precision-linear-design.md` §7「facade
-    /// 統合（#1961）」）。`Linear` 以外の層（活性化・`Conv2d`／
-    /// `Conv1d`／`LayerNorm` 等）は `low_precision` の値に関わらず常に
-    /// f32 のまま——`linear_forward_low_precision` 自体が `Linear` 層の
-    /// forward 計算のみを対象とする opt-in 経路であり、他層への
-    /// 拡張は本イシューのスコープ外（実装計画 §8「スコープ外」）。
+    /// とき、`Linear`（epilogue 融合有無を問わず）・`Conv2d`・
+    /// `MultiheadAttention` 層を、それぞれ `linear_forward_low_precision`
+    /// （イシュー #1960）・`conv2d_forward_low_precision`・
+    /// `multihead_attention_forward_low_precision`（いずれもイシュー
+    /// #2071。f32 master weight・backward は常に f32）へ切り替える
+    /// （イシュー #1961・#2071・`docs/autodiff-low-precision-linear-
+    /// design.md` §7「facade 統合（#1961）」・§8「Conv2d・
+    /// MultiheadAttention 拡張（#2071）」）。それ以外の層（活性化・
+    /// `Conv1d`／`LayerNorm`／`TransformerEncoderLayer` 等）は
+    /// `low_precision` の値に関わらず常に f32 のまま——各低精度自由関数
+    /// 自体が対応する層 1 種の forward 計算のみを対象とする opt-in
+    /// 経路であり、他層への拡張は本イシューのスコープ外（`docs/
+    /// autodiff-low-precision-linear-design.md` §8「スコープ外」）。
     /// `low_precision = None` のときは本メソッドが行う分岐は
     /// `fuse_relu` の判定を含め [`Self::forward`] 移設前の実装と完全に
     /// 同一の演算列・戻り値になる（bit 同一契約。`compat::Sequential::
@@ -1753,7 +1758,10 @@ impl<'m, 't> SequentialVars<'m, 't> {
                             .to_string(),
                     )
                 })?;
-                current = vars.forward(&current)?;
+                current = match low_precision {
+                    Some(dtype) => conv2d_forward_low_precision(vars, &current, dtype)?,
+                    None => vars.forward(&current)?,
+                };
                 i += 1;
             } else if layer.as_conv1d().is_some() {
                 let vars = conv1ds.next().ok_or_else(|| {
@@ -1830,7 +1838,12 @@ impl<'m, 't> SequentialVars<'m, 't> {
                             .to_string(),
                     )
                 })?;
-                current = vars.forward(&current, &current, &current, None, false)?;
+                current = match low_precision {
+                    Some(dtype) => multihead_attention_forward_low_precision(
+                        vars, &current, &current, &current, None, false, dtype,
+                    )?,
+                    None => vars.forward(&current, &current, &current, None, false)?,
+                };
                 i += 1;
             } else if layer.as_transformer_encoder_layer().is_some() {
                 // self-attention 固定（mask なし・非 causal。
