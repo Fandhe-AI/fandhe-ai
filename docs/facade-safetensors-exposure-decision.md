@@ -165,11 +165,13 @@ facade への `safetensors` 直接依存追加なし（`onnx-interop` 経由の
   合わせた save→load→load_state_dict の往復例をモジュール doc の
   doctest として整備済み
 
-### 11.3 スコープ外（不変）
+### 11.3 スコープ外（不変・#2073 で一部解消）
 
-`compat::Sequential`／`compat::callbacks::ModelCheckpoint` へのファイル
-保存の薄いラッパー（`Sequential::save`／`load` 等）は案 A の範囲外
-（素の再エクスポートのみ）のまま次点の切り出し候補として記録する
-（`docs/compat-callbacks-design.md` §8）。F32 以外の dtype・入力サイズ
-上限の導入・`st_load`／`st_save` 本体ロジックの変更・ONNX export（#2018）
-も引き続き対象外。
+`compat::callbacks::ModelCheckpoint` からの薄いラッパー結線
+（`ModelCheckpoint::to_file`）は **#2073 で実装済み**（親 #2059。
+`docs/compat-callbacks-design.md` §4.3・§9）。`compat::Sequential`
+へのファイル保存ラッパー（`Sequential::save`／`load` 等）は引き続き
+案 A の範囲外（素の再エクスポートのみ）のまま次点の切り出し候補として
+記録する（`docs/compat-callbacks-design.md` §8）。F32 以外の dtype・
+入力サイズ上限の導入・`st_load`／`st_save` 本体ロジックの変更・ONNX
+export（#2018）も引き続き対象外。

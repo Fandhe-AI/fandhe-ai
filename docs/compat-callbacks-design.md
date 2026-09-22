@@ -79,6 +79,7 @@ impl ModelCheckpoint {
     pub fn monitor(self, m: Monitor) -> Self;
     pub fn mode(self, m: MonitorMode) -> Self;
     pub fn save_best_only(self, on: bool) -> Self;
+    pub fn to_file(self, path: impl AsRef<Path>) -> Self;         // イシュー #2073。既定は未指定（in-memory のみ）
     pub fn best_state_dict(&self) -> Option<&HashMap<String, Tensor<f32>>>;
     pub fn take_best_state_dict(&mut self) -> Option<HashMap<String, Tensor<f32>>>;
     pub fn best_value(&self) -> Option<f32>;
@@ -138,17 +139,44 @@ fit_types_are_reachable_via_facade_only` が `assert_eq!` で固定）で
 `best_state_dict()` 等を読める（Keras の callback オブジェクト参照と
 同じ設計）。
 
-### 4.3 `ModelCheckpoint` はファイルへ書かない（in-memory スナップショットのみ）
+### 4.3 `ModelCheckpoint` のファイル保存対応（#2073）
 
 safetensors save／load 自体は **#2019 で facade 公開済み**
 （`fandhe_ai::interop::safetensors`。`docs/facade-safetensors-exposure-
-decision.md` §11）だが、`ModelCheckpoint` からそれを呼ぶ薄いラッパー
-結線自体は本 issue（#1763）のスコープ外のまま維持する（in-memory
-スナップショット限定の設計は変更しない。ファイル保存版は引き続き
-切り出し候補〈§8〉）。永続化はユーザーが `best_state_dict()`／
-`take_best_state_dict()` で取り出した `HashMap<String, Tensor<f32>>`
-を自前で扱い、復元は既存の `Sequential::load_state_dict`（アトミック。
-イシュー #1752）で行う。ファイル保存版は切り出し候補（§8）。
+decision.md` §11）。当初（#1763）は `ModelCheckpoint` からそれを呼ぶ
+薄いラッパー結線を対象外としていたが、**#2073 で
+`ModelCheckpoint::to_file(path)` を追加し結線した**。
+
+- `to_file` はビルダー（FS に触れない infallible 操作）。パス未指定
+  （既定）なら従来どおり in-memory スナップショットのみで動作する
+  （挙動不変）
+- 実際の I/O は `observe`（`pub(super)`。epoch 末に呼ばれる）が
+  in-memory `state` を更新した場合に限り発生する。親ディレクトリが
+  存在しなければ `std::fs::create_dir_all` で作成してから
+  `save_safetensors_f32`（一時ファイル + `rename` による atomic
+  上書き）へ委譲する
+- 保存失敗時も in-memory 側（`best`／`best_epoch`／`state`）の更新は
+  取り消さない。`observe` は `Result<(), SaveError>` を返し、呼び出し元
+  （`training.rs::run_fit`）が `AutodiffError::InvalidArgument` へ
+  写像して `fit_with_callbacks` 全体を打ち切る（`'epochs_block`
+  契約に従い、打ち切り後も `EarlyStopping::restore_best_weights` の
+  復元・モード復元・`compiled` 書き戻しは通常どおり実行される）
+- **`AutodiffError` に I/O variant を追加しない判断**: 本質的には
+  I/O エラーだが、内部クレート `autodiff` の enum 拡張を避け
+  REQ-9「facade は自作コアの上の薄いラッパーに徹する」を優先し、
+  既存の `DataError → InvalidArgument` 写像前例に倣った。`SaveError`
+  （safetensors 側の型）は compat の公開シグネチャには一切現れない
+- **`restore_best_weights` 結線の解釈**: `ModelCheckpoint` 自身へ
+  復元ビルダーを追加すると facade 新規 `pub fn` が 2 件になり
+  本イシューの承認範囲（1 件）を超えるため、既存
+  `EarlyStopping::restore_best_weights(true)` との併用を「復元
+  フロー」と定義した。同一 `Monitor`・`min_delta = 0.0`・単一 fit
+  呼び出しの条件下では両 callback の best epoch が一致するため、
+  fit 終了後の `state_dict()` とファイル内容が bit 一致する
+  （統合テストで固定。条件が異なる場合は一致を保証しない）。
+  `ModelCheckpoint::restore_best_weights` ビルダー・safetensors
+  metadata（best 値・epoch）の埋め込みは引き続き切り出し候補
+  （§8）
 
 ### 4.4 改善判定と NaN 契約（`best: Option<f32>`）
 
@@ -316,24 +344,40 @@ facade 経由到達性を固定した。`fandhe_ai::optim`（`optim.rs`）は純
   `validation` なしは早期 `InvalidArgument`。`History` の `Vec` は
   `try_reserve_exact` で capacity overflow panic を回避
   （`val_loss`／`lr` も `loss` と同じ方式）。本番経路に `unwrap`／
-  `expect` を置いていない
+  `expect` を置いていない。**`ModelCheckpoint::to_file`（#2073）**:
+  保存先パスは呼び出し側がプロセス内で渡す引数であり、シェル展開・
+  外部文字列の連結は行わない（`Path::parent()`／`join` は
+  `save_safetensors_f32` と同じ扱い）。`create_dir_all` は要件どおりの
+  意図した挙動であり、パス正規化・allowlist・シンボリックリンク検査は
+  本イシューのスコープ外（導入するなら別途承認）。読み戻しは既存
+  `load_safetensors_f32` の検証経路（ヘッダ・dtype・データ長・shape
+  検査）を迂回しない。エラーメッセージにはユーザーが渡したパスのみを
+  含め、環境変数や内部状態は出力しない
 - **A08 ソフトウェア・データ整合性**: パラメータ復元は既存のアトミック
   `load_state_dict`（two-pass・ロールバック）のみを経由し、部分適用
   状態を残さない。`fit_with_callbacks` 失敗時も `compiled` を必ず
-  書き戻しモデルを「未 compile」状態へ落とさない（既存契約踏襲）
+  書き戻しモデルを「未 compile」状態へ落とさない（既存契約踏襲）。
+  **`ModelCheckpoint::to_file`（#2073）**: 書き出しは
+  `save_safetensors_f32` の一時ファイル + `rename`（atomic）で途中
+  クラッシュ時も正規パスに壊れたファイルを残さない。復元は既存の
+  アトミック `load_state_dict` のみを経由し部分適用状態を残さない。
+  保存失敗時も `EarlyStopping` 復元・モード復元・`compiled` 書き戻しの
+  既存 fail-closed 契約を維持する（`break 'epochs_block`）
 - **A06 脆弱コンポーネント**: 依存クレートの追加・更新なし
-- **A04／設計**: ファイル I/O・シェル呼び出し・ネットワークを一切
-  導入しない（`ModelCheckpoint` は in-memory）。`unsafe` なし。
-  REQ-12 に抵触する引数なし・`api_surface.rs` の既存 guard（compat
-  pub fn が生 `fandhe_ai_autodiff::Tape` を取らない・`onnx-interop`
-  非依存）を維持
+- **A04／設計**: シェル呼び出し・ネットワークを一切導入しない。
+  `unsafe` なし。REQ-12 に抵触する引数なし・`api_surface.rs` の既存
+  guard（compat pub fn が生 `fandhe_ai_autodiff::Tape` を取らない・
+  `onnx-interop` 非依存）を維持。**`ModelCheckpoint::to_file`
+  （#2073）でファイル I/O を導入した**が、新規公開面は `to_file`
+  1 件のみで、`SaveError`・内部クレート型を compat の公開シグネチャへ
+  露出しない
 
 ## 8. 対象外・切り出し候補
 
 - ユーザー定義 callback（trait object による拡張点）
-- `ModelCheckpoint` のファイル保存（safetensors。facade 公開自体は
-  #2019 で完了済み〈`fandhe_ai::interop::safetensors`〉だが、
-  `ModelCheckpoint` からの結線は未実装のまま）
+- `ModelCheckpoint::restore_best_weights` 相当のビルダー・safetensors
+  metadata（best 値・epoch）の埋め込み（`ModelCheckpoint` のファイル
+  保存結線自体は #2073 で完了済み。§4.3 参照）
 - metrics（accuracy 等）・`Monitor` の metrics 拡張は
   `Sequential::fit_with_metrics`（イシュー #2072・親 #2059）で実装済み
   （`docs/compat-metrics-design.md`）
@@ -347,3 +391,34 @@ facade 経由到達性を固定した。`fandhe_ai::optim`（`optim.rs`）は純
 
 これらは自動運転モードでの実装のため Issue 未起票のまま記録する
 （`.claude/rules/out-of-scope-tracking.md`）。
+
+## 9. 追補（#2073）実装記録
+
+`ModelCheckpoint::to_file`（safetensors ファイル保存の薄い結線。
+親 #2059・`phase:1`）を実装した。設計判断の詳細は §4.3・§7 に統合
+済みのため、ここでは実装記録の要点のみを記す。
+
+- `crates/facade/src/compat/callbacks.rs`: `ModelCheckpoint` に
+  `file_path: Option<PathBuf>` を追加し `to_file` ビルダーを新設。
+  `observe`（`pub(super)`）を `Result<(), SaveError>` 化し、
+  in-memory `state` 更新時のみ private `persist`（親ディレクトリ
+  作成 + `save_safetensors_f32` 委譲）を呼ぶ
+- `crates/facade/src/compat/training.rs::run_fit`: `Callback::
+  ModelCheckpoint` 腕で `observe` の `Err` を
+  `AutodiffError::InvalidArgument` へ写像し `break 'epochs_block`
+  （既存 `LrSchedule::advance` エラー写像と同型）
+- `crates/facade/tests/api_surface.rs::
+  fit_types_are_reachable_via_facade_only` に `.to_file(..)` を
+  追加（facade 新規 `pub fn` 1 件の固定点）
+- 統合テスト `crates/facade/tests/compat_sequential_checkpoint_file.rs`
+  （CPU・Linux 実行）: best スナップショットの自動保存・読み戻し
+  bit 一致・`save_best_only(false)` の最終 epoch 保持・
+  `load_state_dict` 経由の predict bit 一致・
+  `EarlyStopping::restore_best_weights` 併用時の bit 一致・保存失敗
+  時のエラー伝播（`compiled`・train／eval モード維持）・`to_file`
+  有無での in-memory 挙動不変・fit をまたぐ best 継続契約を検証。
+  CUDA／Metal 実機での device forward parity は `#[ignore]` 分離のまま
+  未実測（`docs/perf/logs/model-checkpoint-file-2073/README.md` へ
+  申し送り）
+- 依存クレート・`unsafe`・tolerance／baseline・`docs/spec/` の変更は
+  なし
