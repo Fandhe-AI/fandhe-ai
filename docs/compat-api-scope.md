@@ -325,7 +325,10 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ
   等のサービング基盤も同 doc §6 で非目標として整理済み。spec の
   「引き続き対象外」列挙への追記は spec 提案候補（未起票）として同 doc
-  §9 に記録した
+  §9 に記録し、トークナイザ分の (b) 形式文案は
+  `docs/tokenizer-non-target-spec-proposal.md`（#2086）で確定した
+  （未起票。起票・spec 反映後に本 bullet を「引き続き対象外」側へ移す
+  作業は §5 経路 1 の後続）
 - **KV キャッシュ（自己回帰デコード用）**: 上記トークナイザとは対照的に
   「未定義」残余のうち §5 経路 2（ユーザー承認＋issue 起票）の起票案が
   ある項目として `docs/facade-inference-serving-scope-decision.md` §9 に
@@ -514,7 +517,7 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 
 **#1633（sparse／complex テンソルの非対応の明文化）の設計記録は `docs/tensor-core-sparse-complex-decision.md` として完了した。** 量子化／DDP と異なり除外事項「分散学習・量子化の網羅対応」には従属しない（sparse／complex は REQ-9 の「引き続き対象外」列挙にのみ現れ、格上げ条件表を持つ Won't 項目ではない）。コード変更なし。再開には本節の範囲拡張手続き（経路 1 または経路 2）を要する（同 doc §3・§9）。
 
-**#1962（推論・サービング〈KV キャッシュ・トークナイザ・グラフ最適化区分 B〉のスコープ・段階）の設計記録は `docs/facade-inference-serving-scope-decision.md` として完了した。** コード変更なし。トークナイザ・サービング基盤（paged attention・連続バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ）は実装リポ側の設計判断による非目標（2 節に独立 bullet として記録・spec 提案は未起票）。KV キャッシュ（自己回帰デコード用）は「未定義」残余のうち本節経路 2 の起票案あり（同 doc §9 の K-1／K-2。ユーザー承認前）。グラフ最適化区分 B（`docs/autodiff-graph-optimization-scope-decision.md`）は段階 0 を維持しつつ HEAD 時点のゲート状況を更新し、B-1（GPU `run_fused` elementwise allowlist）のみ起票案（同 doc §9 の G-1）として記録した。
+**#1962（推論・サービング〈KV キャッシュ・トークナイザ・グラフ最適化区分 B〉のスコープ・段階）の設計記録は `docs/facade-inference-serving-scope-decision.md` として完了した。** コード変更なし。トークナイザ・サービング基盤（paged attention・連続バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ）は実装リポ側の設計判断による非目標（2 節に独立 bullet として記録・spec 提案は未起票）。KV キャッシュ（自己回帰デコード用）は「未定義」残余のうち本節経路 2 の起票案あり（同 doc §9 の K-1／K-2。ユーザー承認前）。グラフ最適化区分 B（`docs/autodiff-graph-optimization-scope-decision.md`）は段階 0 を維持しつつ HEAD 時点のゲート状況を更新し、B-1（GPU `run_fused` elementwise allowlist）のみ起票案（同 doc §9 の G-1）として記録した。#2086 でトークナイザ非目標の spec (b) 形式提案文案を `docs/tokenizer-non-target-spec-proposal.md` に記録（未起票）。
 
 **適用記録（経路 2。イシュー #1955）**: RNN／LSTM／GRU（内部クレート実装は #1647 で完了済み）の facade 公開可否・公開形（`compat::Sequential::add_*` を設けるか／独立モジュールとして純再エクスポートするか）を issue コメントで 2026-09-17 にユーザー承認（「選択肢 C」: `Sequential::add_rnn`／`add_lstm`／`add_gru` は追加しない・`fandhe_ai::nn::rnn` として素の再エクスポートで公開する）。新規公開面は `pub mod nn`（`nn::rnn` の 8 型純再エクスポート）と `Tape` の委譲メソッド 3 件（`rnn_forward_seq`／`lstm_forward_seq`／`gru_forward_seq`）のみ。**委譲メソッドを追加した回避不能な理由**: `Rnn::forward_seq` 等は第 1 引数に生の `fandhe_ai_autodiff::Tape` を取るが、facade の `Tape` newtype（内部フィールドは `pub(crate)`）はこれを取り出す手段を持たないため、`&self.0` を渡すだけの薄い委譲を追加しない限り「facade のみの import で `forward_seq` に到達できる」という受入基準自体が構造的に満たせない（`Tape::step_device_param_store`〈#935〉・`Tape::backward_device_param_store`〈#1022〉と同型・同じ理由の前例）。新規 `Op`／`BackendOps`／VJP は追加していない（内部クレート `fandhe_ai_autodiff::nn::rnn` の実装は #1647 のまま不変）。`crates/facade/tests/api_surface.rs` に固定ガード 5 件（再エクスポート識別子の完全一致・純再エクスポート検査・`nn/mod.rs` の宣言限定・facade 経由到達の実行時固定・`compat::Sequential` への `add_rnn`／`add_lstm`／`add_gru` 非存在の否定ガード）を追加した。
 
