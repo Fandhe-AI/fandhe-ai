@@ -106,6 +106,24 @@ fn add_multihead_attention_rejects_indivisible_heads() {
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }
 
+#[test]
+fn add_transformer_encoder_rejects_indivisible_heads() {
+    let err = Sequential::new()
+        .add_transformer_encoder(6, 4, 8, SEED1)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
+#[test]
+fn add_transformer_encoder_rejects_zero_dim_feedforward() {
+    let err = Sequential::new()
+        .add_transformer_encoder(4, 2, 0, SEED1)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+}
+
 // --- predict と forward の bit 完全一致（層ごと単体） ---
 
 #[test]
@@ -219,6 +237,25 @@ fn embedding_predict_matches_forward_bit_exact() {
 fn multihead_attention_predict_matches_forward_bit_exact() {
     let model = Sequential::new()
         .add_multihead_attention(4, 2, SEED1)
+        .unwrap();
+    let x = tensor(
+        (0..2 * 3 * 4).map(|i| (i as f32) * 0.03 - 0.4).collect(),
+        &[2, 3, 4],
+    );
+
+    let predicted = model.predict(&x).unwrap();
+    let tape = fandhe_ai::tape();
+    let xv = tape.var(&x);
+    let forwarded = model.forward(&tape, &xv).unwrap().to_tensor();
+
+    assert_eq!(predicted.shape(), &[2, 3, 4]);
+    assert_eq!(dense_vec(&predicted), dense_vec(&forwarded));
+}
+
+#[test]
+fn transformer_encoder_predict_matches_forward_bit_exact() {
+    let model = Sequential::new()
+        .add_transformer_encoder(4, 2, 8, SEED1)
         .unwrap();
     let x = tensor(
         (0..2 * 3 * 4).map(|i| (i as f32) * 0.03 - 0.4).collect(),
