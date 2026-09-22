@@ -117,7 +117,7 @@
 | `Reshape` | 算術を伴わない view 演算 |
 | `Transpose` | 同上 |
 | `Permute` | 同上（`tape.rs:1470`） |
-| `BroadcastTo` | 同上 |
+| `BroadcastTo` | forward は算術を伴わない view 演算だが、VJP（`grad.rs:1583`）は `reduce_bias_grad` を経由し、`[1, n]` 型の行方向縮約パターンでは f64 アキュムレータ（`eval::reduce_bias_grad_rows`）、それ以外は f32 逐次和（`reduce_to_shape`）という**形状別の数値契約**を持つ（`Op::Add` の暗黙 broadcast 縮約〈`tape.rs` 232〜233 行目〉と同一契約。`coding-rust.md` の bias 縮約 f64 統一方針が定める分岐と同型）。この縮約は `Sum`（本表・dtype 汎用の `TypedOps::sum`）と同種の演算であり、dtype 多重化時も同じ形状別分岐を `TypedOps<T>` 側の縮約プリミティブで再現すれば合成可能側に留められるため、「算術を伴わない」を根拠にせず縮約契約の保存を根拠として合成可能側に分類する（codex-review 指摘・2026-09-22 是正） |
 | `Narrow` | 同上 |
 | `Contiguous` | 同上 |
 | `Concat` | 同上（`tape.rs:1631`） |
