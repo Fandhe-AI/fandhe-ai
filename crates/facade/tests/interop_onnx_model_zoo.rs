@@ -15,14 +15,20 @@
 //!
 //! ## HEAD 時点の期待値（green parity ではない）
 //!
-//! `mnist-12` は `Conv`（未対応 op。追跡先はイシュー #2199。`auto_pad` は
-//! #2199 の受け入れ条件に含まれず別途追跡が必要）で `run` が止まるため、
-//! HEAD では `OnnxModel::run` が `OnnxError::UnsupportedOp { op_type: "Conv" }`
-//! を返すことを固定する。合わせて同一入力で内部クレート `interp::run` も
-//! `InterpError::UnsupportedOp("Conv")` を返すことを検証し、facade が独自の
-//! 迂回経路（例えば内部エラーを握りつぶして別の結果を返す等）を持たないこと
-//! を確認する。未対応 op が実装され `run` が先へ進んだ場合は、facade 出力と
-//! 内部クレート出力の bit 同一検査へ切り替える
+//! `Conv` 自体はイシュー #2076 で実装済みだが、`mnist-12` の Conv ノードが
+//! 使う `auto_pad="SAME_UPPER"` 属性は未対応（`NOTSET`〈または省略〉のみ
+//! 対応。追跡先はイシュー #2199。`docs/onnx-model-zoo-parity.md` §5・§6）。
+//! そのため `run` は属性検証（`InterpError::Op(OpError::InvalidConvAttribute)`）
+//! で止まる。HEAD では `OnnxModel::run` が `OnnxError::Execution` を、その
+//! `message` に `auto_pad` を含む形で返すことを固定する
+//! （facade の ONNX エラー写像は `OpError::InvalidConvAttribute` を専用
+//! variant へ写像せず `OnnxError::Execution` に丸めるため。
+//! `crates/facade/src/interop/onnx.rs` の写像 `other =>` 分岐）。合わせて
+//! 同一入力で内部クレート `interp::run` も
+//! `InterpError::Op(OpError::InvalidConvAttribute)` を返すことを検証し、
+//! facade が独自の迂回経路（例えば内部エラーを握りつぶして別の結果を返す等）
+//! を持たないことを確認する。`auto_pad` が実装され `run` が先へ進んだ場合は、
+//! facade 出力と内部クレート出力の bit 同一検査へ切り替える
 //! （`docs/onnx-model-zoo-parity.md` §6・`tests/interop_onnx_internal_parity.rs`
 //! と同型の判定）。
 
@@ -35,6 +41,7 @@ use fandhe_ai::interop::onnx::{OnnxError, OnnxModel, OnnxValue};
 use fandhe_ai_onnx_interop::onnx::graph::build_graph;
 use fandhe_ai_onnx_interop::onnx::interp::{self, InterpError, Value};
 use fandhe_ai_onnx_interop::onnx::proto;
+use fandhe_ai_onnx_interop::ops::OpError;
 
 fn model_zoo_fixture(rel: &str) -> PathBuf {
     PathBuf::from(concat!(
@@ -52,7 +59,7 @@ fn synthetic_mnist_input() -> Vec<f32> {
 }
 
 #[test]
-fn mnist12_facade_and_internal_agree_on_unsupported_conv() {
+fn mnist12_facade_and_internal_agree_on_unsupported_conv_auto_pad() {
     // facade 経由。
     let facade_model =
         OnnxModel::from_path(model_zoo_fixture("mnist-12/mnist-12.onnx")).expect("from_path 成功");
@@ -65,16 +72,19 @@ fn mnist12_facade_and_internal_agree_on_unsupported_conv() {
     let facade_result = facade_model.run(facade_feeds);
     let facade_err = match facade_result {
         Ok(_) => panic!(
-            "facade run が成功した（OnnxError::UnsupportedOp を期待）。Conv が実装された \
+            "facade run が成功した（OnnxError::Execution を期待）。auto_pad が実装された \
              場合は本テストを bit 同一検査へ更新すること（docs/onnx-model-zoo-parity.md §6）"
         ),
         Err(e) => e,
     };
     match &facade_err {
-        OnnxError::UnsupportedOp { op_type } => {
-            assert_eq!(op_type, "Conv", "facade: 未対応 op が Conv 以外");
+        OnnxError::Execution { message } => {
+            assert!(
+                message.contains("auto_pad") && message.contains("SAME_UPPER"),
+                "facade: Execution メッセージに auto_pad/SAME_UPPER を含まない: {message}"
+            );
         }
-        other => panic!("facade: OnnxError::UnsupportedOp を期待したが {other:?}"),
+        other => panic!("facade: OnnxError::Execution を期待したが {other:?}"),
     }
 
     // 内部クレート直接呼び出し（迂回経路の不在を確認する対照実験）。
@@ -90,13 +100,17 @@ fn mnist12_facade_and_internal_agree_on_unsupported_conv() {
     );
     let internal_result = interp::run(&internal_graph, internal_feeds);
     let internal_err = match internal_result {
-        Ok(_) => panic!("internal run が成功した（InterpError::UnsupportedOp を期待）"),
+        Ok(_) => panic!("internal run が成功した（InvalidConvAttribute を期待）"),
         Err(e) => e,
     };
     match internal_err {
-        InterpError::UnsupportedOp(op) => {
-            assert_eq!(op, "Conv", "internal: 未対応 op が Conv 以外");
+        InterpError::Op(OpError::InvalidConvAttribute { ref reason }) => {
+            assert!(
+                reason.contains("auto_pad") && reason.contains("SAME_UPPER"),
+                "internal: InvalidConvAttribute の reason に auto_pad/SAME_UPPER を \
+                 含まない: {reason}"
+            );
         }
-        other => panic!("internal: UnsupportedOp を期待したが {other}"),
+        other => panic!("internal: InvalidConvAttribute を期待したが {other}"),
     }
 }

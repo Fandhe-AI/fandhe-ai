@@ -22,6 +22,7 @@ mod arith;
 mod cast;
 mod concat;
 mod constant;
+mod conv;
 mod error;
 mod gather;
 mod gemm;
@@ -40,6 +41,7 @@ pub use cast::{
 };
 pub use concat::concat;
 pub use constant::{ConstantValue, constant};
+pub use conv::{ConvAttrs, conv};
 pub use error::OpError;
 pub use gather::gather;
 pub use gemm::{GemmAttrs, gemm};

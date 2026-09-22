@@ -14,8 +14,11 @@ facade `fandhe_ai::interop::onnx::OnnxModel` は、これまで自前生成 fixt
 
 **本 issue 実装時点（HEAD）の結論: 選定モデルは 1 件も end-to-end
 実行できない。** 対象モデル（`mnist-12`・`squeezenet1.0-12`・
-`mobilenetv2-12`・`resnet50-v1-12`）はいずれも `Conv`（未対応 op。追跡先
-イシュー #2199）で `run` が止まる。よって本 issue の成果物は「ハーネス・
+`mobilenetv2-12`・`resnet50-v1-12`）はいずれも `Conv` で `run` が止まる
+（`Conv` 自体はイシュー #2076 で実装済み。`mnist-12` は同 issue マージ後、
+未対応の `auto_pad` 属性で止まる。tier B 3 件は #2076 反映前の再プローブ
+結果のまま未更新 — `crates/onnx-interop/tests/fixtures/model-zoo/README.md`
+参照。追跡先イシュー #2199）。よって本 issue の成果物は「ハーネス・
 コミット済み基準データ・被覆台帳・fail-closed な期待値表」であり、
 green parity（全要素一致の実測）ではない。未対応 op が実装され `run` が
 先へ進んだ場合の反転手順は §6 に記す。
@@ -104,7 +107,7 @@ tolerance 自体は変更せず、必要なら spec リポへの提案（ユー�
 
 | op | 対応状況（HEAD） | 追跡先 |
 |---|---|---|
-| `Conv` | 未対応（pads／strides／dilations 対応予定） | #2199（`auto_pad`〈`mnist-12` が使う `SAME_UPPER`〉は受け入れ条件に含まれず別追跡が必要） |
+| `Conv` | 対応済み（#2076）。`auto_pad`〈`mnist-12` が使う `SAME_UPPER`〉・group conv・pads／strides／dilations の一部組合せは未対応 | #2199（`auto_pad` は受け入れ条件に含まれず別追跡が必要） |
 | `MaxPool` | 未対応 | #2199 |
 | `BatchNormalization` | 未対応 | #2200 |
 | `Flatten` | 未対応 | #2200 |

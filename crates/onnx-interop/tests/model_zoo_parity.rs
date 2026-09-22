@@ -11,14 +11,15 @@
 //!
 //! ## HEAD 時点の位置づけ（green parity ではない）
 //!
-//! 選定モデル（mnist-12・squeezenet1.0-12・mobilenetv2-12・resnet50-v1-12）は
-//! いずれも `Conv`（未対応 op。追跡先はイシュー #2199。`auto_pad`／group
-//! conv は #2199 の受け入れ条件に含まれず別途追跡が必要 —
-//! `docs/onnx-model-zoo-parity.md` §5）で `run` が止まるため、HEAD 時点では
-//! 1 件も end-to-end 実行できない。本ファイルの成果は「ハーネス・被覆台帳・
-//! fail-closed な期待値表」であり、未対応 op が実装され `run` が先へ進んだ
-//! 場合は該当エントリの [`RunExpectation`] を更新する
-//! （`docs/onnx-model-zoo-parity.md` §6 の期待値反転手順）。
+//! `Conv` 自体はイシュー #2076 で実装済みだが、`auto_pad`（`NOTSET` 以外。
+//! group conv 等も含む）は未対応のまま（追跡先はイシュー #2199。
+//! `docs/onnx-model-zoo-parity.md` §5）。tier A（`mnist-12`）はこの
+//! `auto_pad` 属性検証（`InterpError::Op(OpError::InvalidConvAttribute)`）で
+//! `run` が止まるため、HEAD 時点でも 1 件も end-to-end 実行できない。
+//! 本ファイルの成果は「ハーネス・被覆台帳・fail-closed な期待値表」であり、
+//! 未対応属性が実装され `run` が先へ進んだ場合は該当エントリの
+//! [`RunExpectation`] を更新する（`docs/onnx-model-zoo-parity.md` §6 の
+//! 期待値反転手順）。
 //!
 //! ## 判定式についての注記（REQ-2 との混同禁止）
 //!
@@ -35,6 +36,7 @@ use std::path::{Path, PathBuf};
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{InterpError, Value, run};
 use fandhe_ai_onnx_interop::onnx::proto::{self, TensorProto, data_type};
+use fandhe_ai_onnx_interop::ops::OpError;
 use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
 
@@ -51,6 +53,14 @@ enum RunExpectation {
     /// （`is_err()` のような緩い判定は行わない。catch-all variant は設けない。
     /// `docs/onnx-model-zoo-parity.md` §6）。
     UnsupportedOp(&'static str),
+    /// `InterpError::Op(OpError::InvalidConvAttribute { reason })` を要求する
+    /// 中間状態 variant（イシュー #2076 で `Conv` 自体は実装されたが
+    /// `auto_pad` 属性〈`NOTSET` 以外〉は未対応のまま）。
+    /// `docs/onnx-model-zoo-parity.md` §6「中間状態の扱い」が定める
+    /// 「`is_err()` のような緩い判定へ逃げず、当該エラーの variant／メッセージを
+    /// 完全一致で期待する新しい `RunExpectation` variant を追加する」に従い、
+    /// `reason` を固定 fixture（`mnist-12`）に対して決定的な文字列で完全一致検査する。
+    InvalidConvAttribute { reason: &'static str },
 }
 
 /// Model Zoo モデル 1 件の期待値レコード。
@@ -86,7 +96,13 @@ const ZOO_MODELS: &[ZooModel] = &[
             ("Relu", 2),
             ("Reshape", 2),
         ],
-        expectation: RunExpectation::UnsupportedOp("Conv"),
+        // `Conv` 自体はイシュー #2076 で実装済み。mnist-12 の Conv ノードは
+        // `auto_pad="SAME_UPPER"` を使うが本クレートは `NOTSET`（または省略）
+        // のみ対応するため、その属性検証で止まる（`crates/onnx-interop/src/
+        // ops/conv.rs` の `auto_pad` 検証。`docs/onnx-model-zoo-parity.md` §6）。
+        expectation: RunExpectation::InvalidConvAttribute {
+            reason: "Conv: `auto_pad` は \"NOTSET\"（または省略）のみ対応する（実際 \"SAME_UPPER\"）",
+        },
     },
     ZooModel {
         dir: "squeezenet1.0-12",
@@ -104,6 +120,13 @@ const ZOO_MODELS: &[ZooModel] = &[
             ("Relu", 26),
             ("Softmax", 1),
         ],
+        // tier B（`ONNX_INTEROP_MODEL_ZOO_DIR` 未設定のためローカル再プローブ
+        // 不可。`#[ignore]` かつ env 未設定時は早期 return するので CI は
+        // 割れないが、イシュー #2076 で `Conv` が実装された今 `UnsupportedOp
+        // ("Conv")` は陳腐化している可能性がある。次に `ONNX_INTEROP_MODEL_ZOO_DIR`
+        // を設定して実行する際は `model_zoo_probe` で再プローブし、この
+        // `expectation` を実際の挙動へ更新すること。§6「sibling が先にマージ
+        // された場合」の運用と同じ）。
         expectation: RunExpectation::UnsupportedOp("Conv"),
     },
     ZooModel {
@@ -126,6 +149,7 @@ const ZOO_MODELS: &[ZooModel] = &[
             ("Shape", 1),
             ("Unsqueeze", 1),
         ],
+        // tier B・要再プローブ（`squeezenet1.0-12` エントリの注記を参照）。
         expectation: RunExpectation::UnsupportedOp("Conv"),
     },
     ZooModel {
@@ -145,6 +169,7 @@ const ZOO_MODELS: &[ZooModel] = &[
             ("MaxPool", 1),
             ("Relu", 49),
         ],
+        // tier B・要再プローブ（`squeezenet1.0-12` エントリの注記を参照）。
         expectation: RunExpectation::UnsupportedOp("Conv"),
     },
 ];
@@ -395,6 +420,32 @@ fn run_and_check(graph: &Graph, dir: &Path, spec: &ZooModel) {
                 }
                 other => panic!(
                     "{}: UnsupportedOp({expected_op}) を期待したが別エラー: {other}",
+                    spec.dir
+                ),
+            }
+        }
+        RunExpectation::InvalidConvAttribute {
+            reason: expected_reason,
+        } => {
+            let err = result.expect_err(&format!(
+                "{}: run が成功した（InvalidConvAttribute を期待）",
+                spec.dir
+            ));
+            match err {
+                InterpError::Op(OpError::InvalidConvAttribute {
+                    reason: actual_reason,
+                }) => {
+                    assert_eq!(
+                        actual_reason, expected_reason,
+                        "{}: InvalidConvAttribute の reason が期待と不一致（catch-all に \
+                         せず RunExpectation を更新すること。docs/onnx-model-zoo-parity.md \
+                         §6）",
+                        spec.dir
+                    );
+                }
+                other => panic!(
+                    "{}: InvalidConvAttribute（reason={expected_reason:?}）を期待したが \
+                     別エラー: {other}",
                     spec.dir
                 ),
             }

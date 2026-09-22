@@ -1,14 +1,15 @@
 //! 内部 op（Rust ネイティブの属性表現）から `NodeProto`（op_type・属性）への
 //! 逆マッピング（イシュー #1773。`onnx::export` の層 A）。
 //!
-//! `onnx::interp` が `NodeProto` から読む 22 op（`interp.rs` の `run` ディスパッチ表）と
-//! 対称になるよう、[`ExportOp`] は同じ 22 op を Rust ネイティブの属性表現（`interp.rs`
-//! の `attr_f32`／`attr_i64`／`attr_i64s`／`attr_i64_required` が読む値と同じ型）として
-//! 保持する。属性は **常に全て書き出す**（既定値であっても省略しない。省略すると
-//! 「属性欠落＝既定値」という対称性テストが空虚に pass してしまうため。唯一の例外は
-//! [`ExportOp::Transpose`] の `perm`: 省略時の意味論が入力 rank に依存する
-//! （`interp.rs::compute_transpose` -> `ops::transpose(t, None)` が rank 依存の軸反転を
-//! 適用する）ため、`None` を静的な既定値で埋めずそのまま省略する）。
+//! `onnx::interp` が `NodeProto` から読む 23 op（`interp.rs` の `run` ディスパッチ表。
+//! `Conv` はイシュー #2076 で追加）と対称になるよう、[`ExportOp`] は同じ 23 op を
+//! Rust ネイティブの属性表現（`interp.rs` の `attr_f32`／`attr_i64`／`attr_i64s`／
+//! `attr_i64_required`／`attr_string` が読む値と同じ型）として保持する。属性は
+//! **常に全て書き出す**（既定値であっても省略しない。省略すると「属性欠落＝既定値」
+//! という対称性テストが空虚に pass してしまうため。唯一の例外は [`ExportOp::Transpose`]
+//! の `perm`: 省略時の意味論が入力 rank に依存する（`interp.rs::compute_transpose` ->
+//! `ops::transpose(t, None)` が rank 依存の軸反転を適用する）ため、`None` を静的な
+//! 既定値で埋めずそのまま省略する）。
 //!
 //! autodiff の `Op`／`Tape` から本モジュールの `ExportOp` への橋渡し
 //! （`compat::Sequential`／`nn` -> `ExportNode`）は、#2018 の対象外のまま
@@ -22,7 +23,7 @@
 use super::export::{ExportError, encode_tensor};
 use super::graph::{Graph, RawTensor};
 use super::proto::{AttributeProto, NodeProto, attribute_type};
-use crate::ops::{GemmAttrs, LayerNormAttrs};
+use crate::ops::{ConvAttrs, GemmAttrs, LayerNormAttrs};
 
 /// `Constant` の排他属性群（ONNX Constant-13 仕様。`interp.rs::compute_constant` の
 /// 逆方向）。1 属性のみを書き出す（複数指定は許容しない設計。呼び出し元が
@@ -43,7 +44,7 @@ pub enum ConstantAttr {
     Ints(Vec<i64>),
 }
 
-/// `interp.rs` が対応する 22 op を Rust ネイティブの属性表現として保持する。
+/// `interp.rs` が対応する 23 op を Rust ネイティブの属性表現として保持する。
 /// 入力・出力の名前列は [`ExportNode`] 側が持つ（`ExportOp` 自体は op_type と
 /// 属性のみの責務）。
 #[derive(Debug, Clone)]
@@ -99,6 +100,20 @@ pub enum ExportOp {
     Constant(ConstantAttr),
     /// `LayerNormalization(X, Scale, [B])`。属性 `axis`（INT）／`epsilon`（FLOAT）。
     LayerNormalization(LayerNormAttrs),
+    /// `Conv(X, W, [B])`（イシュー #2076・親 #2034）。属性
+    /// `auto_pad`（STRING）／`dilations`（INTS）／`group`（INT）／
+    /// `kernel_shape`（INTS）／`pads`（INTS）／`strides`（INTS）。
+    /// `ops::ConvAttrs` を interp 側と共用する（`GemmAttrs`／
+    /// `LayerNormAttrs` と同じ設計）。`dilations`／`kernel_shape`／
+    /// `pads`／`strides`／`auto_pad` はいずれも値が空の場合（ONNX 仕様の
+    /// 「未指定」相当。`auto_pad` は `ConvAttrs::default()` の Rust API
+    /// 既定値）属性自体を書き出さない（`interp.rs::attr_ints_typed`／
+    /// `attr_string` が INTS／STRING 型で存在しつつ値が空の属性を
+    /// fail-closed に拒否するため。`Transpose { perm: None }` と同型の
+    /// 「省略で未指定を表す」設計。P0 修正・codex-review 指摘。PR #2220）。
+    /// export したグラフでは `auto_pad` は常に `"NOTSET"`（非空の明示値）
+    /// または省略のいずれかであり、空 STRING が書き出されることはない。
+    Conv(ConvAttrs),
 }
 
 impl ExportOp {
@@ -127,6 +142,7 @@ impl ExportOp {
             ExportOp::Cast { .. } => "Cast",
             ExportOp::Constant(_) => "Constant",
             ExportOp::LayerNormalization(_) => "LayerNormalization",
+            ExportOp::Conv(_) => "Conv",
         }
     }
 }
@@ -143,7 +159,7 @@ pub struct ExportNode {
     pub outputs: Vec<String>,
 }
 
-/// `interp.rs` が対応する 22 op の `op_type` 一覧（[`ExportOp::op_type`] が返す
+/// `interp.rs` が対応する 23 op の `op_type` 一覧（[`ExportOp::op_type`] が返す
 /// 値の集合と同一）。`check_exportable` の allowlist として使う。両者のドリフトは
 /// `#[cfg(test)]` のドリフト検出テストで固定する。
 pub const SUPPORTED_OP_TYPES: &[&str] = &[
@@ -169,6 +185,7 @@ pub const SUPPORTED_OP_TYPES: &[&str] = &[
     "Cast",
     "Constant",
     "LayerNormalization",
+    "Conv",
 ];
 
 fn attr_float(name: &str, value: f32) -> AttributeProto {
@@ -220,6 +237,22 @@ fn attr_floats(name: &str, values: &[f32]) -> AttributeProto {
         floats: values.to_vec(),
         ints: Vec::new(),
         r#type: attribute_type::FLOATS,
+    }
+}
+
+/// STRING 属性（`Conv` の `auto_pad`。イシュー #2076）を組み立てる。
+/// `AttributeProto.s: Vec<u8>` へ UTF-8 バイト列として書き込む
+/// （`interp.rs::attr_string` の逆方向）。
+fn attr_string(name: &str, value: &str) -> AttributeProto {
+    AttributeProto {
+        name: name.to_string(),
+        f: 0.0,
+        i: 0,
+        s: value.as_bytes().to_vec(),
+        t: None,
+        floats: Vec::new(),
+        ints: Vec::new(),
+        r#type: attribute_type::STRING,
     }
 }
 
@@ -316,7 +349,7 @@ fn build_node(
         op_type: op_type.to_string(),
         attribute,
         // 既定 opset（"" = ai.onnx）限定。`check_exportable` が受理する domain と
-        // 揃える（本モジュールは既定 opset の 22 op のみ書き出す）。
+        // 揃える（本モジュールは既定 opset の 23 op のみ書き出す）。
         domain: String::new(),
     }
 }
@@ -554,6 +587,57 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
                     attr_float("epsilon", attrs.epsilon),
                 ],
             ))
+        }
+        ExportOp::Conv(attrs) => {
+            check_arity(
+                &node.name,
+                op_type,
+                &node.inputs,
+                &node.outputs,
+                2,
+                3,
+                false,
+            )?;
+            // `dilations`／`kernel_shape`／`pads`／`strides`（INTS）は ONNX
+            // 仕様上省略可（`ops::ConvAttrs` docs 参照。空 `Vec` は「未指定」
+            // を表す）。`interp.rs::attr_ints_typed` は INTS 型で存在しつつ
+            // `ints` が空の属性を「型偽装による無言 fallback」と区別できず
+            // fail-closed に拒否するため（イシュー #2076 codex-review 指摘。
+            // `attr_ints_typed` 関数 doc 参照）、値が空の場合は属性自体を
+            // 省略して「未指定」を表す（`Transpose { perm }` の `None` 分岐
+            // と同じ方針。`interp.rs::compute_conv` は属性欠落時に
+            // `.unwrap_or(&[])` で同じ空 `Vec` へ fallback するため往復の
+            // 意味論は変わらない）。
+            // `auto_pad`（STRING）も上記 INTS 属性と同じ「値が空なら属性自体を
+            // 省略する」方針を採る（codex-review P0 指摘。イシュー #2076・
+            // PR #2220）。`interp.rs::attr_string` は STRING 型で存在しつつ
+            // `s` が空バイト列の属性を、ONNX 仕様上有効な列挙値
+            // （`"NOTSET"`／`"SAME_UPPER"`／`"SAME_LOWER"`／`"VALID"`）ではない
+            // として fail-closed に拒否するため、`ConvAttrs::default()` の
+            // `auto_pad: String::new()`（欠落相当の Rust API 既定値。
+            // `ops::conv.rs::ConvAttrs` docs 参照）をそのまま空 STRING として
+            // 書き出すと自己 export した往復が失敗する。`compute_conv` は
+            // 属性欠落時に `"NOTSET"` へ fallback するため往復の意味論は
+            // 変わらない。
+            let mut attribute = if attrs.auto_pad.is_empty() {
+                Vec::new()
+            } else {
+                vec![attr_string("auto_pad", &attrs.auto_pad)]
+            };
+            if !attrs.dilations.is_empty() {
+                attribute.push(attr_ints("dilations", &attrs.dilations));
+            }
+            attribute.push(attr_int("group", attrs.group));
+            if !attrs.kernel_shape.is_empty() {
+                attribute.push(attr_ints("kernel_shape", &attrs.kernel_shape));
+            }
+            if !attrs.pads.is_empty() {
+                attribute.push(attr_ints("pads", &attrs.pads));
+            }
+            if !attrs.strides.is_empty() {
+                attribute.push(attr_ints("strides", &attrs.strides));
+            }
+            Ok(build_node(node, op_type, attribute))
         }
     }
 }

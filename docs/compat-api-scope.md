@@ -815,6 +815,21 @@ facade_only` で機械固定）。`evaluate_with_metrics`・第 3 の公開型�
 コード変更なし。facade 公開面拡張は本イシューでは不承認のまま段階 0 を
 維持し、再開には本節の範囲拡張手続き（経路 1 または経路 2）を要する。
 
+**適用記録（イシュー #2076・親 #2034）**: `nn::Module` trait へ
+`as_gelu`（`bool`）・`as_softmax`（`Option<&Softmax>`）の
+2 フックを追加した（`as_relu`／`as_linear` と同型の閉集合ダウンキャスト
+方式。§1 の閉集合方針の維持）。`Sigmoid` は §15.7 項 5（数値契約）が
+承認保留のため `as_sigmoid` フックは追加していない（代替 (γ)。承認が
+得られ次第、別 PR で結線する）。**本 2 フックは `compat::Sequential`
+（`bind`／`trainable_parameters`／`apply_parameters` 等の学習経路）から
+は使われない**——用途は `onnx-interop::onnx::export_nn`
+（非公開クレート内部限定。`docs/onnx-export-op-mapping.md` §7）が
+ONNX export 対応層を判別するためのみであり、facade 新規公開面はない
+（`Softmax::dim()` を `pub(crate)` から `pub` へ変更したが、facade は
+`nn::activation::Softmax` を再エクスポートしないため facade の公開面
+拡張には該当しない）。詳細・数値契約は
+`docs/facade-onnx-export-exposure-decision.md` §18 を参照。
+
 **適用記録（経路 2。イシュー #2073・親 #2059）**: `compat::callbacks::
 ModelCheckpoint` へのファイル保存機構（safetensors）の結線を、親
 #2059（`phase:1`）の受入基準に明記された当該メソッドとして実装した。
