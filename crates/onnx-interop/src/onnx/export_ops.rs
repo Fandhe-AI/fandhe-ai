@@ -104,7 +104,12 @@ pub enum ExportOp {
     /// `auto_pad`（STRING。常に `"NOTSET"`）／`dilations`（INTS）／
     /// `group`（INT）／`kernel_shape`（INTS）／`pads`（INTS）／
     /// `strides`（INTS）。`ops::ConvAttrs` を interp 側と共用する
-    /// （`GemmAttrs`／`LayerNormAttrs` と同じ設計）。
+    /// （`GemmAttrs`／`LayerNormAttrs` と同じ設計）。`dilations`／
+    /// `kernel_shape`／`pads`／`strides` は値が空の場合（ONNX 仕様の
+    /// 「未指定」相当）属性自体を書き出さない（`interp.rs::
+    /// attr_ints_typed` が INTS 型で存在しつつ `ints` が空の属性を
+    /// fail-closed に拒否するため。`Transpose { perm: None }` と同型の
+    /// 「省略で未指定を表す」設計）。
     Conv(ConvAttrs),
 }
 
@@ -590,14 +595,30 @@ pub fn to_node_proto(node: &ExportNode) -> Result<NodeProto, ExportError> {
                 3,
                 false,
             )?;
-            let attribute = vec![
-                attr_string("auto_pad", &attrs.auto_pad),
-                attr_ints("dilations", &attrs.dilations),
-                attr_int("group", attrs.group),
-                attr_ints("kernel_shape", &attrs.kernel_shape),
-                attr_ints("pads", &attrs.pads),
-                attr_ints("strides", &attrs.strides),
-            ];
+            // `dilations`／`kernel_shape`／`pads`／`strides`（INTS）は ONNX
+            // 仕様上省略可（`ops::ConvAttrs` docs 参照。空 `Vec` は「未指定」
+            // を表す）。`interp.rs::attr_ints_typed` は INTS 型で存在しつつ
+            // `ints` が空の属性を「型偽装による無言 fallback」と区別できず
+            // fail-closed に拒否するため（イシュー #2076 codex-review 指摘。
+            // `attr_ints_typed` 関数 doc 参照）、値が空の場合は属性自体を
+            // 省略して「未指定」を表す（`Transpose { perm }` の `None` 分岐
+            // と同じ方針。`interp.rs::compute_conv` は属性欠落時に
+            // `.unwrap_or(&[])` で同じ空 `Vec` へ fallback するため往復の
+            // 意味論は変わらない）。
+            let mut attribute = vec![attr_string("auto_pad", &attrs.auto_pad)];
+            if !attrs.dilations.is_empty() {
+                attribute.push(attr_ints("dilations", &attrs.dilations));
+            }
+            attribute.push(attr_int("group", attrs.group));
+            if !attrs.kernel_shape.is_empty() {
+                attribute.push(attr_ints("kernel_shape", &attrs.kernel_shape));
+            }
+            if !attrs.pads.is_empty() {
+                attribute.push(attr_ints("pads", &attrs.pads));
+            }
+            if !attrs.strides.is_empty() {
+                attribute.push(attr_ints("strides", &attrs.strides));
+            }
             Ok(build_node(node, op_type, attribute))
         }
     }
