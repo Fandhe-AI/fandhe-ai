@@ -32,6 +32,34 @@ use fandhe_ai_onnx_interop::onnx::proto::{self, TensorProto, data_type};
 use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
 
+/// 読み込みを許容するファイルサイズ上限（1 GiB）。
+///
+/// `.onnx`／`input_0.pb`／`output_0.pb` は本 example の引数で指定される外部
+/// ファイルであり、prost の decode（`TensorProto::decode`／`decode_model`）は
+/// 長さ区切りフィールドの分だけ確保してからパースする。細工・破損した巨大
+/// ファイルを検証前に丸ごと `std::fs::read` するとメモリ枯渇につながるため
+/// （A03。`security.md`・`docs/facade-onnx-import-exposure-decision.md` と
+/// 同じ脅威モデル）、読み込み前に `std::fs::metadata` でサイズを検査してから
+/// 読み込む（fail-closed）。Model Zoo の実モデル（resnet50-v1-12 で
+/// 約 100MB）は十分下回る値として 1 GiB を採用した。
+const MAX_READ_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// サイズ上限を検査してからファイル全体を読み込む（A03 対策の共通経路）。
+/// `.onnx`・`input_0.pb`・`output_0.pb` の 3 箇所すべてがこの関数を経由する。
+fn read_file_bounded(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("メタデータ取得失敗: {} ({e})", path.display()))?;
+    let len = metadata.len();
+    if len > MAX_READ_BYTES {
+        return Err(format!(
+            "ファイルサイズ上限超過: {} ({len} bytes > {MAX_READ_BYTES} bytes)",
+            path.display()
+        )
+        .into());
+    }
+    Ok(std::fs::read(path)?)
+}
+
 /// 引数で受け取ったモデルディレクトリから `<basename>.onnx` を探す。
 /// Model Zoo tar.gz 展開形式（`<name>/<name>.onnx`）を前提に、ディレクトリ名
 /// と同じ basename を優先し、無ければディレクトリ直下の唯一の `.onnx` を使う。
@@ -116,7 +144,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let onnx_path = locate_onnx_file(&dir)?;
-    let bytes = std::fs::read(&onnx_path)?;
+    let bytes = read_file_bounded(&onnx_path)?;
     let model = proto::decode_model(&bytes)?;
     let graph = build_graph(&model)?;
 
@@ -148,8 +176,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let (_input_name, input_tensor) = decode_f32_tensor_pb(&std::fs::read(&input_path)?)?;
-    let (_output_name, expected_tensor) = decode_f32_tensor_pb(&std::fs::read(&output_path)?)?;
+    let (_input_name, input_tensor) = decode_f32_tensor_pb(&read_file_bounded(&input_path)?)?;
+    let (_output_name, expected_tensor) = decode_f32_tensor_pb(&read_file_bounded(&output_path)?)?;
 
     let input_graph_name = graph.inputs.first().cloned().ok_or("graph.inputs が空")?;
     let output_graph_name = graph.outputs.first().cloned().ok_or("graph.outputs が空")?;
@@ -158,32 +186,77 @@ fn main() -> Result<(), Box<dyn Error>> {
     feeds.insert(input_graph_name, Value::F32(input_tensor));
 
     match interp::run(&graph, feeds) {
-        Ok(result) => match &result[&output_graph_name] {
-            Value::F32(actual) => {
-                let actual_slice = actual.as_slice().ok_or("actual as_slice 失敗")?;
-                let expected_slice = expected_tensor.as_slice().ok_or("expected as_slice 失敗")?;
-                if actual_slice.len() != expected_slice.len() {
-                    println!(
-                        "shape 不一致: actual_len={} expected_len={}",
-                        actual_slice.len(),
-                        expected_slice.len()
-                    );
-                    return Ok(());
+        Ok(result) => {
+            let value = result
+                .get(&output_graph_name)
+                .ok_or_else(|| format!("run 結果に output '{output_graph_name}' が無い"))?;
+            match value {
+                Value::F32(actual) => {
+                    let actual_slice = actual.as_slice().ok_or("actual as_slice 失敗")?;
+                    let expected_slice =
+                        expected_tensor.as_slice().ok_or("expected as_slice 失敗")?;
+                    // shape・非有限値・閾値超過はすべて Err で返す（`assert_req7`
+                    // 〈tests/model_zoo_parity.rs〉と同じ fail-closed 判定を
+                    // 切り出したもの。表示のみで `Ok(())` を返して REQ-7 判定を
+                    // 素通りさせない）。
+                    let max_rel_err = check_req7(actual_slice, expected_slice)?;
+                    println!("run: Ok, max_rel_err={max_rel_err}");
                 }
-                let mut max_rel_err = 0.0f32;
-                for (&a, &e) in actual_slice.iter().zip(expected_slice.iter()) {
-                    let rel_err = (a - e).abs() / (e.abs() + 1e-6);
-                    if rel_err > max_rel_err {
-                        max_rel_err = rel_err;
-                    }
-                }
-                println!("run: Ok, max_rel_err={max_rel_err}");
+                // F32 以外の出力は REQ-7 判定不能のため Err（成功終了扱いにしない）。
+                other => return Err(format!("run: Ok だが F32 以外の出力: {other:?}").into()),
             }
-            other => println!("run: Ok だが F32 以外の出力: {other:?}"),
-        },
+        }
+        // UnsupportedOp は本 example の想定内の到達点（tests/model_zoo_parity.rs
+        // の `RunExpectation::UnsupportedOp` と同じ調査結果）であり Err にしない。
         Err(InterpError::UnsupportedOp(op)) => println!("run: UnsupportedOp({op:?})"),
-        Err(e) => println!("run: Err({e})"),
+        // それ以外の実行エラーは表示のみで `Ok(())` を返さず Err として伝播する
+        // （非 0 終了コードへ反映。P2 指摘: 実行エラーが成功終了扱いになっていた）。
+        Err(e) => return Err(format!("run: Err({e})").into()),
     }
 
     Ok(())
+}
+
+/// REQ-7 事前固定式（`abs_err / (|ref| + 1e-6) <= 1e-3`）で全要素を fail-closed
+/// 判定する（`tests/model_zoo_parity.rs::assert_req7` と同型の判定ロジック。
+/// テスト側は `panic!` で失敗を示すが、本 example はプロセス終了コードへ
+/// 反映するため `Result` で返す）。
+///
+/// 要素数不一致（shape 不一致相当）・非有限な `rel_err`（NaN・inf 入力を含む）・
+/// 閾値超過はすべて `Err` として扱い、表示のみで `Ok` に丸めない（REQ-7・P2
+/// 指摘対応）。
+fn check_req7(actual: &[f32], expected: &[f32]) -> Result<f32, String> {
+    if actual.len() != expected.len() {
+        return Err(format!(
+            "shape 不一致（要素数）: actual_len={} expected_len={}",
+            actual.len(),
+            expected.len()
+        ));
+    }
+    let mut fail_count = 0usize;
+    let mut max_rel_err = 0.0f32;
+    for (&a, &e) in actual.iter().zip(expected.iter()) {
+        let rel_err = (a - e).abs() / (e.abs() + 1e-6);
+        // rel_err が非有限（NaN・inf）になる場合、`rel_err > 1e-3` は false 判定
+        // になり見逃されうる。fail-closed のため非有限は無条件で fail 扱いにし、
+        // max_rel_err も INFINITY として表示に反映する（テスト側 assert_req7 と
+        // 同じ扱い）。
+        if rel_err.is_finite() {
+            if rel_err > max_rel_err {
+                max_rel_err = rel_err;
+            }
+        } else {
+            max_rel_err = f32::INFINITY;
+        }
+        if !rel_err.is_finite() || rel_err > 1e-3 {
+            fail_count += 1;
+        }
+    }
+    if fail_count > 0 {
+        Err(format!(
+            "REQ-7 判定式 fail: fail_count={fail_count} max_rel_err={max_rel_err}"
+        ))
+    } else {
+        Ok(max_rel_err)
+    }
 }
