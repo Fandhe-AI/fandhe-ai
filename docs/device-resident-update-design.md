@@ -2058,3 +2058,38 @@ in-place 実行する経路を追加した。
   `Tape::param_grads_to_host` で読み出し、ホスト `Adam::step`／
   `AdamW::step` の結果と bit 完全一致で突合。状態種別ガードの拒否系も
   検証）。CUDA／Metal 実機実測は対象外（未実装のため）。
+
+### #2069 追補: CUDA カーネル実装
+
+`CudaBackendOps::adam_step_device` の trait 既定 `Unsupported` を、
+NVRTC ネイティブカーネルでオーバーライドした（イシュー #2069）。
+
+- **ファイル構成**: `crates/backend-cuda/src/{adam.rs, kernels_adam.rs}`
+  （起動 API／NVRTC カーネル文字列の 2 ファイル構成。`sgd.rs`／
+  `kernels_sgd.rs` と同型）・`context_cache::cached_adam`（`ContextKey`
+  〈ordinal + `CudaContext` 同一性〉キーのプロセス内 NVRTC
+  コンパイル済みカーネルキャッシュ。`cached_sgd` と同型）。Issue 本文が挙げていた `adam_step.rs` という
+  単一ファイル名は採用しなかった（既存 SGD 構成との一貫性を優先。
+  PR 本文に明記）。
+- **非縮約 intrinsic 契約**: NVRTC 既定 `--fmad=true` の下で CPU 参照
+  実装（`f32::mul_add` を使う `m`／`v` 更新の 2 箇所のみ `fmaf` を使う）
+  と演算列を一致させるため、それ以外の四則演算は
+  `__fmul_rn`／`__fadd_rn`／`__fsub_rn`／`__fdiv_rn`（IEEE 754
+  round-to-nearest-even 非縮約 intrinsic）で書く。`sqrtf` は既定
+  `--prec-sqrt=true`（IEEE 正確丸め）のまま使う（`rsqrtf`／
+  `__fdividef` 等の近似 intrinsic は使わない。イシュー #1105／#1893 の
+  教訓を踏襲）。詳細は `kernels_adam.rs` 冒頭コメントを正とする。
+- **検証順序**: `ops.rs::CudaBackendOps::adam_step_device` は
+  `sgd_step_device` と同一の検証順序（device → shape → `AdamStepKind`
+  分岐評価 → generation 収集 → `cached_adam` 構築 → downcast →
+  `numel == 0` 早期 return → storage 取得 → 起動）を踏襲する。
+- **CUDA Graph capture 対象外は不変**: Adam は本追補でも capture
+  対象に含めない（上記「CUDA Graph capture 対象外」節のまま）。
+- **検証**: Linux で実行可能な `crates/backend-cuda/tests/
+  adam_device_contract.rs`（device／shape 不一致の driver 非接触拒否・
+  有効呼び出しの env-adaptive スモーク）・`kernels_adam.rs`／`adam.rs`
+  内 unit test（カーネルソースの丸め契約後退検出・`validate_adam_len`
+  境界）に加え、GB10 実機 `#[ignore]` テスト
+  `crates/backend-cuda/tests/adam_device_real_device.rs`
+  （`docs/perf/logs/adam-device-step-cuda-2069/README.md` の事前登録
+  判定規則に従う。実測は本イシュー時点で未実施のまま申し送り）。
