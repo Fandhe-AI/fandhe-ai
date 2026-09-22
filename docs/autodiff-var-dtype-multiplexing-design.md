@@ -88,7 +88,9 @@
 
 判定質問（§8 の分類で使う唯一の基準）:
 
-> **この Op の forward と VJP（`grad.rs`）は、`TypedOps<T>` の 8 演算（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`）と、算術を伴わない copy／index 系演算（reshape・transpose・permute・broadcast・narrow・concat・pad・gather・scatter・where・masked_fill）の組合せだけで dtype 非依存に表現できるか。**
+> **この Op の forward と VJP（`grad.rs`）は、`TypedOps<T>` の 8 演算（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`。およびこれらと同型で dtype ごとの数値方式再設計を要しない要素演算の追加〈`min` 等。§10 承認事項 2 の対象〉）と、算術を伴わない copy／index 系演算（reshape・transpose・permute・broadcast〈forward のみ。VJP の縮約は §8 表の `BroadcastTo` 行〉・narrow・concat・pad・where・masked_fill、および `ScatterReduce::Overwrite` 限定の gather／scatter）の組合せだけで dtype 非依存に表現できるか。**
+>
+> gather／scatter は無条件には「算術を伴わない」側に含めない: `ScatterReduce::Add` は `BackendOps::scatter` の `f64` アキュムレータによる決定的集約契約を伴い、`Op::Gather` の VJP はその `Add` モードで重複 index の勾配を集約するため、いずれも dtype 特化側である（§8 の `Gather`／`Scatter` 注記）。
 
 - 「はい」→ **合成可能**（`TypedOps<T>` を拡張すれば dtype 多重化できる可能性がある区分）
 - 「いいえ、ただし dtype ごとの数値方式再設計（`f64` 縮約契約・融合カーネル等）を要する」→ **dtype 特化**
@@ -113,7 +115,7 @@
 | `MatMul` | `TypedOps::gemm` に直接対応（`tape.rs:96`） |
 | `Sum` | `TypedOps::sum`（`dim: Option<usize>` 込み）に直接対応（`tape.rs:158`） |
 | `Max` | `TypedOps::max` に直接対応（`tape.rs:159`）。VJP（`grad::extremum_first_match_vjp`）は forward 記録値との `==` 比較のみで dtype 非依存に表現できる |
-| `Min` | `Max` と対称・同一 VJP ヘルパーを共有（`tape.rs:216`） |
+| `Min` | `Max` と対称・同一 VJP ヘルパー（`grad::extremum_first_match_vjp`）を共有（`tape.rs:216`）。ただし現行 `TypedOps<T>` の 8 演算は `max` のみで `min`・符号反転・減算を持たないため、forward は現行集合では構成できない。`max` と同型の要素演算 `TypedOps::min` の追加（§10 承認事項 2 の非破壊拡張。数値方式の再設計は不要）を前提として合成可能側に分類する（codex-review 指摘・2026-09-22 是正） |
 | `Reshape` | 算術を伴わない view 演算 |
 | `Transpose` | 同上 |
 | `Permute` | 同上（`tape.rs:1470`） |
@@ -125,7 +127,7 @@
 | `MaskedFill` | 同上（`tape.rs:1484`） |
 | `Pad` | narrow 基盤流用 VJP（forward の pad・VJP の narrow ともに算術を伴わない view／copy 演算。§7 の判定基準に照らし合成可能側へ分類。`grad.rs:1678` の `Op::Narrow` forward と同一の `narrow` 呼び出し連鎖） |
 
-`TypedOps<T>` は現状これら 8 演算のみを提供し、view／index 系（`Reshape`／`Transpose`／`Permute`／`BroadcastTo`／`Narrow`／`Pad`／`Concat`／`Contiguous`／`Where`／`MaskedFill`）は対応するカーネルを持たない。これらを dtype 多重化するには `BackendOps`／facade の非破壊拡張（§9 の承認事項 2）が必要になる。
+`TypedOps<T>` は現状これら 8 演算のみを提供し、view／index 系（`Reshape`／`Transpose`／`Permute`／`BroadcastTo`／`Narrow`／`Pad`／`Concat`／`Contiguous`／`Where`／`MaskedFill`）は対応するカーネルを持たない。これらを dtype 多重化するには `BackendOps`／facade の非破壊拡張（§10 の承認事項 2）が必要になる。
 
 **`Gather`／`Scatter` は合成可能から除外し dtype 特化（下表）へ分類する（codex-review 指摘。2026-09-19 是正）**: forward 単体（重複 index を含まない `Overwrite`／単純 gather）は算術を伴わない index-based copy だが、`Op::Gather` の VJP は重複 index の勾配を `Op::Scatter { reduce: ScatterReduce::Add }` で集約し（`grad.rs:1690-1727`）、`Op::Scatter` 自体も `reduce: ScatterReduce::Add` モードを持つ（`grad.rs:1763-1849`）。`ScatterReduce::Add` は `BackendOps::scatter`（`crates/tensor-core/src/backend_ops.rs:511-537`）が規定する「出力位置ごとに `f64` アキュムレータを `input[pos] as f64` で初期化し、走査順（row-major）に `acc += src[p] as f64` を適用したうえで走査完了後に 1 回だけ dtype へ downcast する」という決定的集約契約に従う必要があり、単純な copy／目的 dtype への add 置換ではこの契約を維持できない。よって `Gather`／`Scatter` は他の `f64` 縮約契約を持つ Op（`RmsNorm`／`LayerNorm`／`Conv2d` 等）と同じ理由で dtype 特化側に属する。
 
