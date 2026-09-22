@@ -522,48 +522,50 @@ mod tests {
     }
 
     // 回帰テスト（codex-review P0 指摘。PR #2220）: 非信頼な ONNX 属性
-    // `pads` から `i64::MAX` 近傍の値を受理しても、座標計算
-    // （`oh * sh + khi * dh - ph`）が debug build で panic せず・release
-    // build で誤った範囲判定にもならないことを検査する。
+    // `pads`／`strides` から巨大な値を受理しても、`Conv2dParams::new`／
+    // `conv2d_out_shape`（`conv_out_len`）の事前検査を通過してしまう
+    // 境界値では、座標計算（旧実装の `oh * sh + khi * dh - ph`）が
+    // debug build で panic しうることを固定値で検証する。
     //
-    // `pads[0] = i64::MAX` は `usize` へ変換すると usize::MAX と同じ
-    // 桁数（64bit）になり、`2 * padding` は `Conv2dParams::new` の
-    // オーバーフロー検査を通過しうる境界値（`checked_mul` で拒否される
-    // 場合は `ConvParamsInvalid` を返す）。本テストは「パディングが
-    // 巨大でも panic せず、通常の Err または（対称パディングが `H` を
-    // 超えるため常にゼロパディング領域＝出力全ゼロの）Ok のいずれかで
-    // 完走する」ことのみを検査し、`unwrap()` を使わず両分岐を許容する
-    // （境界検査の網羅性そのものは他の `*_rejected` テストが担保する）。
+    // 数値の選定根拠（`x: [1,1,3,3]`・`w: [1,1,2,2]`・
+    // `pads = [2^62; 4]`・`strides = [i64::MAX; 2]`・`dilations = [1,1]`）:
+    // - `p = 2^62` は `2 * padding = 2^63` が `usize`（64bit）の
+    //   `checked_mul` を通過する（`Conv2dParams::new` は拒否しない）。
+    // - `conv_out_len(in_len=3, k=2, s=i64::MAX, p=2^62, d=1)`:
+    //   `numerator = (3 + 2*2^62) - (1*1) - 1 = 2^63 + 1`、
+    //   `hout = numerator / (2^63 - 1) + 1 = 1 + 1 = 2`（`wout` も同じ）。
+    //   出力要素数 `1*1*2*2=4` は `checked_numel_for` を通過する。
+    // - 旧実装で `oh=1, khi=1` に到達すると
+    //   `oh*sh + khi*dh = (2^63-1) + 1 = 2^63` を `as i64` すると
+    //   ビット再解釈で `i64::MIN` になり、続く `- ph as i64`
+    //   （`ph = 2^62`）が `i64::MIN - 2^62` で i64 の下限を突き抜けて
+    //   debug build で subtract-overflow panic する。
+    // - 本 PR の `checked_mul`／`checked_add`／`checked_sub` 連鎖は
+    //   `unpadded = 2^63`・`unpadded.checked_sub(ph) = 2^62` を返し、
+    //   `2^62 >= h(=3)` のため範囲外として `continue`（ゼロパディング
+    //   扱い）する。したがって修正後は panic せず、全入力位置が
+    //   パディング領域内になるため出力は全ゼロの `Ok` を返す
+    //   （`W`／`B` はゼロ初期化のため `acc` も 0 のまま）。
     #[test]
-    fn huge_pads_do_not_panic_on_coordinate_computation() {
+    fn huge_pads_and_strides_no_longer_panic_and_yield_zero_output() {
         let x = Tensor::<f32>::zeros(&[1, 1, 3, 3]).unwrap();
         let w = Tensor::<f32>::zeros(&[1, 1, 2, 2]).unwrap();
-        let half_max = i64::MAX / 2;
+        let huge_pad = 1i64 << 62;
         let attrs = ConvAttrs {
-            pads: vec![half_max, half_max, half_max, half_max],
-            strides: vec![1, 1],
-            dilations: vec![1, 1],
-            ..ConvAttrs::default()
-        };
-        // panic しないことそのものが検査対象（`std::panic::catch_unwind`
-        // ではなく通常呼び出しで十分——テストランナーが panic を検出する）。
-        let _ = conv(&x, &w, None, &attrs);
-    }
-
-    // 上記に加え、`strides`／`dilations` 側も `i64::MAX` 近傍を受理した
-    // 場合に同じ座標計算経路（`oh * sh`／`khi * dh`）で panic しないこと
-    // を検査する（`conv_out_len` の `dk` オーバーフロー検査を通過する
-    // よう `kernel_shape` を `1x1` にして `khi`／`kwi` が常に 0 になる
-    // 形状を選び、`strides` 側の巨大値のみを単独で踏む）。
-    #[test]
-    fn huge_strides_do_not_panic_on_coordinate_computation() {
-        let x = Tensor::<f32>::zeros(&[1, 1, 3, 3]).unwrap();
-        let w = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
-        let attrs = ConvAttrs {
+            pads: vec![huge_pad, huge_pad, huge_pad, huge_pad],
             strides: vec![i64::MAX, i64::MAX],
             dilations: vec![1, 1],
             ..ConvAttrs::default()
         };
-        let _ = conv(&x, &w, None, &attrs);
+        let out = conv(&x, &w, None, &attrs).expect(
+            "巨大な pads/strides は範囲外として fail-closed に continue し、panic せず Ok を返す",
+        );
+        assert_eq!(out.shape(), &[1, 1, 2, 2]);
+        let out_c = out.contiguous();
+        let out_slice = out_c.as_slice().unwrap();
+        assert!(
+            out_slice.iter().all(|&v| v == 0.0),
+            "全入力位置がパディング領域内のため出力は全ゼロのはず: {out_slice:?}"
+        );
     }
 }
