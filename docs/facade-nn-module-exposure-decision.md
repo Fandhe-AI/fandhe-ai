@@ -87,7 +87,7 @@ PyTorch の `nn.Module` サブクラス相当（ユーザー定義層）を faca
 (b) **open trait の後方互換規則**（内部 `autodiff::nn::Module` は既にこの運用。`module.rs:93-100`）:
 - **defaulted メソッド追加＝非破壊**（既存 `impl Module` を壊さない。`forward_host` 追加時〈#1028／#1760〉に確立済み）
 - **required メソッド追加・既存シグネチャ変更・supertrait 追加＝破壊的変更**（semver major。crates.io 公開済み `fandhe-ai-autodiff =0.9.0` では不可）
-- 内部型を返す defaulted フック（`as_linear` 等）は利用者がオーバーライドしても内部型 `Linear` 等を構築できないため、契約上「オーバーライド禁止・内部専用」と明記する（facade trait 側にこれらを持ち込まないことの根拠にもなる。§5 案 B）
+- 内部型を返す defaulted フック（`as_linear` 等）は、`fandhe-ai-autodiff` の `Module` trait 自体としては open trait のままであり、外部実装者が型システム上オーバーライドすることを妨げない（型システムで強制される禁止契約ではない）。ただし戻り値の内部型（`Linear` 等）は外部クレートから構築できないため、外部実装者が意味のある値を返すオーバーライドを書くことは実用上できない。本 doc がこれらのフックを facade trait 側へ持ち込まない根拠は、autodiff 側へ新たな禁止契約を課すことではなく、あくまで REQ-12（`BackendOps`・生 `Tape`・内部型の facade 非露出）適合のみである（§5 案 B）
 
 (c) `fandhe-ai-autodiff 0.9.0` 自体も crates.io 公開済みのため、autodiff 側 `Module` trait のシグネチャ変更（例: `forward` の tape 引数差し替え）は選択肢から除外する。
 
@@ -106,7 +106,7 @@ PyTorch の `nn.Module` サブクラス相当（ユーザー定義層）を faca
 
 配置は `crates/facade/src/nn/{module.rs, container.rs}` 相当（既存 `crates/facade/src/nn/rnn.rs` と並列）。名前衝突なし（`compat::Sequential`〈`crate::compat::sequential`〉と `nn::Sequential`〈`crate::nn::container`〉はパスが異なる。内部クレート `fandhe_ai_autodiff::nn::Sequential` と `fandhe_ai_facade::compat::Sequential` が既にパスで区別されているのと同型。`container.rs:18-23`）。
 
-defaulted メソッド（`named_parameters`／`set_parameter`／`state_dict`／`load_state_dict`／`set_training`／`training`）は autodiff 側と同じ意味論・同じ fail-closed 検証（`set_parameter` は未知キー・shape 不一致で型付き `Err`、`load_state_dict` は two-pass アトミック方式）を鏡写しにする方針とする。
+defaulted メソッド（`named_parameters`／`set_parameter`／`state_dict`／`load_state_dict`／`set_training`／`training`）は autodiff 側と同じ意味論・同じ fail-closed 検証（`set_parameter` は未知キー・shape 不一致で型付き `Err`、`load_state_dict` は strict two-pass ＋ ベストエフォート・ロールバック方式――パス 1 で全キーを検証してから適用し、パス 2 の途中失敗時は既に適用済みのキーを逆順で元の値へ戻す。ロールバック自体が失敗した場合（外部実装が状態を持つ・非決定的挙動を返す等）は完全な原子性を構造的には保証しない。`module.rs:452-510` のドキュメンテーションコメントが正）を鏡写しにする方針とする。
 
 `api_surface.rs` への波及（#2133 で必要になる見込み）:
 - `nn_mod_declares_only_rnn_submodule`〈:3323〉の期待集合を `["rnn"]` → `["rnn", "module", "container"]`（または同等の構成）へ更新
