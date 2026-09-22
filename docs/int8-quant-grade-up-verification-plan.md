@@ -41,7 +41,8 @@ HEAD 時点の再確認コマンドと結果:
 
 ```
 grep -rn "s8\b\|int8\|m16n8k32\|f8f6f4" crates/ | grep -v compute_121
-# => ヒット 0 件（量子化関連の記述なし）
+# => backend-metal/src/tile.rs の `bytes8`（padding 変数名の偶然一致）4 件のみ。
+#    量子化関連ヒット 0 件
 
 grep -rn "mma.sync.aligned" crates/backend-cuda/src
 # => kernels_mma_tf32.rs（TF32 tensor core）・kernels_mma_tf32x3.rs（split-single 3x TF32）・
