@@ -224,8 +224,9 @@ pub use low_precision::linear_forward_low_precision;
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     BatchedMatmulPlan, adaptive_pool2d_out_shape, adaptive_window, batch_norm_layout,
-    batched_matmul_plan, concat_out_shape, conv_out_len, conv2d_out_shape, elementwise_out_shape,
-    flatten_out_shape, gather_out_shape, gemm_out_shape, im2col_out_shape, interpolate_out_shape,
+    batched_matmul_plan, concat_out_shape, conv_out_len, conv_transpose_out_len,
+    conv_transpose2d_out_shape, conv2d_out_shape, elementwise_out_shape, flatten_out_shape,
+    gather_out_shape, gemm_out_shape, im2col_out_shape, interpolate_out_shape,
     interpolate_out_shape_for_mode, matmul_out_shape, one_hot_out_shape, pad_out_shape,
     pool_out_len, pool2d_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
     row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,

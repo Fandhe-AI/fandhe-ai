@@ -1382,6 +1382,245 @@ pub fn im2col_out_shape(
     Ok(out_shape)
 }
 
+/// ConvTranspose2d（`Var::conv_transpose2d`。イシュー #2067・設計
+/// `docs/conv-ops-design.md` §15）の出力空間長を計算する（PyTorch
+/// `ConvUtils.h::_conv_input_size` と同式）:
+///
+/// ```text
+/// conv_transpose_out_len(in, k, s, p, d, op)
+///   = (in − 1)·s − 2p + d·(k − 1) + op + 1
+/// ```
+///
+/// 「転置畳み込みは通常畳み込みの随伴」という関係（設計 doc §15）から、
+/// `in`（転置畳み込みの入力長）を通常畳み込みの `out_len` とみなした
+/// 逆写像になっている。[`conv_out_len`] とは意図的に別関数として定義
+/// する（畳み込み方向が逆＝検査規則が異なるため）。
+///
+/// - `s == 0` または `k == 0` は [`ShapeError::ElementCountOverflow`]。
+/// - **`output_padding >= stride`（各軸独立）は
+///   [`ShapeError::ShapeMismatch`] で拒否する**（`lhs = [op]`・
+///   `rhs = [s]`）。PyTorch は `output_padding < max(stride, dilation)`
+///   まで許容するが、本実装は `col2im`（`BackendOps::col2im`。3
+///   バックエンド共通の override 契約）の `P` 軸（`conv_out_len(Hout)
+///   · conv_out_len(Wout)`）と forward の im2col 出力の `P` 軸
+///   （`H·W`）を一致させる必要があり、`op < s` を満たさないと
+///   `conv_out_len(Hout) ≠ H` になり不整合を起こす（`col2im` の `P`
+///   軸契約を `conv_out_len` から切り離す拡張は未実装。意図的な
+///   PyTorch 非互換。設計 doc §15「非互換」節・スコープ外追跡）。
+/// - `(in − 1)`・`(in − 1)·s`・`d·(k − 1)`・`+ op`・`+ 1` の `usize`
+///   オーバーフローは `checked_mul`／`checked_add` で
+///   [`ShapeError::ElementCountOverflow`] を返す。
+/// - `2p` の減算（`checked_sub`）が `None` または結果が `0` 以下
+///   （`Hout` は 1 以上を要求。PyTorch も出力長 0 以下を拒否する）に
+///   なる場合は [`ShapeError::ShapeMismatch`]（`lhs`＝減算前の値・
+///   `rhs`＝`2p`）を返す。
+pub fn conv_transpose_out_len(
+    in_len: usize,
+    k: usize,
+    s: usize,
+    p: usize,
+    d: usize,
+    op: usize,
+) -> Result<usize, ShapeError> {
+    if s == 0 || k == 0 {
+        return Err(ShapeError::ElementCountOverflow);
+    }
+    if op >= s {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![op],
+            rhs: vec![s],
+        });
+    }
+    let in_minus_1 = in_len
+        .checked_sub(1)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let base = in_minus_1
+        .checked_mul(s)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let k_minus_1 = k - 1;
+    let dk = d
+        .checked_mul(k_minus_1)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    let two_p = p.checked_mul(2).ok_or(ShapeError::ElementCountOverflow)?;
+    let unpadded = base
+        .checked_add(dk)
+        .and_then(|v| v.checked_add(op))
+        .and_then(|v| v.checked_add(1))
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    match unpadded.checked_sub(two_p) {
+        Some(hout) if hout >= 1 => Ok(hout),
+        _ => Err(ShapeError::ShapeMismatch {
+            lhs: vec![unpadded],
+            rhs: vec![two_p],
+        }),
+    }
+}
+
+/// ConvTranspose2d の出力 shape を検査・計算する（イシュー #2067・
+/// 設計 `docs/conv-ops-design.md` §15）。
+///
+/// `input_shape: [N, Cin, H, W]`・`weight_shape: [Cin, Cout/groups,
+/// kH, kW]`（PyTorch `nn.ConvTranspose2d.weight` と同じレイアウト。
+/// `Conv2d` の `[Cout, Cin/groups, kH, kW]` と先頭 2 軸が逆）。
+///
+/// 検査順序: rank（input／weight とも 4）→ `Cin % groups == 0` →
+/// `weight_shape[0] == Cin` → `Cout_g = weight_shape[1] >= 1` →
+/// `Cout = Cout_g · groups`（checked）→ 空間軸 `H`／`W == 0` 拒否
+/// （`N == 0` は受理）→ 各軸 [`conv_transpose_out_len`]（`op < s`
+/// ゲート込み）→ 出力要素数積オーバーフロー
+/// （`checked_numel_for::<f32>`）。
+pub fn conv_transpose2d_out_shape(
+    input_shape: &[usize],
+    weight_shape: &[usize],
+    params: &Conv2dParams,
+    output_padding: [usize; 2],
+) -> Result<Vec<usize>, ShapeError> {
+    if input_shape.len() != 4 {
+        return Err(ShapeError::RankMismatch {
+            expected: 4,
+            actual: input_shape.len(),
+        });
+    }
+    if weight_shape.len() != 4 {
+        return Err(ShapeError::RankMismatch {
+            expected: 4,
+            actual: weight_shape.len(),
+        });
+    }
+    let (n, cin, h, w) = (
+        input_shape[0],
+        input_shape[1],
+        input_shape[2],
+        input_shape[3],
+    );
+    let (weight_cin, cout_g, kh, kw) = (
+        weight_shape[0],
+        weight_shape[1],
+        weight_shape[2],
+        weight_shape[3],
+    );
+    let groups = params.groups();
+    if !cin.is_multiple_of(groups) {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cin],
+            rhs: vec![groups],
+        });
+    }
+    if weight_cin != cin {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![weight_cin],
+            rhs: vec![cin],
+        });
+    }
+    if cout_g == 0 {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![cout_g],
+            rhs: vec![1],
+        });
+    }
+    let cout = cout_g
+        .checked_mul(groups)
+        .ok_or(ShapeError::ElementCountOverflow)?;
+    if h == 0 || w == 0 {
+        return Err(ShapeError::ShapeMismatch {
+            lhs: vec![h, w],
+            rhs: vec![1, 1],
+        });
+    }
+    let [sh, sw] = params.stride();
+    let [ph, pw] = params.padding();
+    let [dh, dw] = params.dilation();
+    let [oph, opw] = output_padding;
+    let hout = conv_transpose_out_len(h, kh, sh, ph, dh, oph)?;
+    let wout = conv_transpose_out_len(w, kw, sw, pw, dw, opw)?;
+    let out_shape = vec![n, cout, hout, wout];
+    checked_numel_for::<f32>(&out_shape)?;
+    Ok(out_shape)
+}
+
+#[cfg(test)]
+mod conv_transpose2d_out_shape_tests {
+    use super::*;
+    use crate::backend_ops::Conv2dParams;
+
+    fn params(k: [usize; 2], s: [usize; 2], p: [usize; 2], d: [usize; 2]) -> Conv2dParams {
+        Conv2dParams::new(k, s, p, d, 1).unwrap()
+    }
+
+    #[test]
+    fn matches_pytorch_formula_examples() {
+        // H=4, k=3, s=2, p=1, op=1, d=1 -> (4-1)*2 - 2 + 2 + 1 + 1 = 8
+        assert_eq!(conv_transpose_out_len(4, 3, 2, 1, 1, 1).unwrap(), 8);
+        // s=1, p=0, op=0 -> in + k - 1
+        assert_eq!(conv_transpose_out_len(4, 3, 1, 0, 1, 0).unwrap(), 6);
+        // d=2, k=3, s=1, p=0, op=0 -> (in-1) + d*(k-1) + 1 = in + 2*d
+        assert_eq!(conv_transpose_out_len(4, 3, 1, 0, 2, 0).unwrap(), 8);
+    }
+
+    #[test]
+    fn rejects_output_padding_ge_stride() {
+        let err = conv_transpose_out_len(4, 3, 2, 1, 1, 2).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+        let err = conv_transpose_out_len(4, 3, 1, 0, 1, 1).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn rejects_non_positive_hout_from_large_padding() {
+        // in=1,k=1,s=1,p=10,op=0,d=1: unpadded=1, two_p=20 -> underflow
+        let err = conv_transpose_out_len(1, 1, 1, 10, 1, 0).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn rejects_zero_stride_or_kernel() {
+        assert!(matches!(
+            conv_transpose_out_len(4, 3, 0, 1, 1, 0).unwrap_err(),
+            ShapeError::ElementCountOverflow
+        ));
+        assert!(matches!(
+            conv_transpose_out_len(4, 0, 1, 1, 1, 0).unwrap_err(),
+            ShapeError::ElementCountOverflow
+        ));
+    }
+
+    #[test]
+    fn out_shape_rejects_weight_cin_mismatch() {
+        let p = params([2, 2], [2, 2], [0, 0], [1, 1]);
+        let err = conv_transpose2d_out_shape(&[1, 3, 4, 4], &[4, 2, 2, 2], &p, [0, 0]).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn out_shape_rejects_cin_not_divisible_by_groups() {
+        let p = Conv2dParams::new([2, 2], [2, 2], [0, 0], [1, 1], 2).unwrap();
+        let err = conv_transpose2d_out_shape(&[1, 3, 4, 4], &[3, 1, 2, 2], &p, [0, 0]).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn out_shape_rejects_zero_spatial_dims() {
+        let p = params([2, 2], [1, 1], [0, 0], [1, 1]);
+        let err = conv_transpose2d_out_shape(&[1, 2, 0, 4], &[2, 2, 2, 2], &p, [0, 0]).unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn out_shape_accepts_n_zero() {
+        let p = params([2, 2], [2, 2], [0, 0], [1, 1]);
+        let out = conv_transpose2d_out_shape(&[0, 2, 4, 4], &[2, 3, 2, 2], &p, [0, 0]).unwrap();
+        assert_eq!(out, vec![0, 3, 8, 8]);
+    }
+
+    #[test]
+    fn out_shape_groups_computes_correct_shape() {
+        // groups=2: Cin=4, weight [4, 2, 2, 2] (Cout_g=2) -> Cout=4
+        let p = Conv2dParams::new([2, 2], [2, 2], [0, 0], [1, 1], 2).unwrap();
+        let out = conv_transpose2d_out_shape(&[1, 4, 4, 4], &[4, 2, 2, 2], &p, [0, 0]).unwrap();
+        assert_eq!(out, vec![1, 4, 8, 8]);
+    }
+}
+
 /// Pooling（`MaxPool2d`／`AvgPool2d`）の出力空間長を計算する
 /// （イシュー #1728・設計 `docs/pooling-ops-design.md` §4）:
 ///

@@ -130,7 +130,7 @@ pub use batch_norm::{
     BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,
 };
 pub use container::{ModuleList, Sequential};
-pub use conv::{Conv1d, Conv1dVars, Conv2d, Conv2dVars};
+pub use conv::{Conv1d, Conv1dVars, Conv2d, Conv2dVars, ConvTranspose2d, ConvTranspose2dVars};
 pub use dropout::Dropout;
 pub use embedding::{Embedding, EmbeddingVars};
 pub use flatten::Flatten;
