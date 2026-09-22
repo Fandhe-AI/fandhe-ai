@@ -469,8 +469,14 @@ higher-order-grad-decision.md` §15 と本節は同型）。
 自動運転（承認待ち不可）かつ判断は安全側に倒す方針、`docs/compat-api-scope.md`
 §5（範囲拡張は経路 1／2 の承認必須）、`.claude/rules/security.md`（自己修復に
 よる無断拡大禁止）に基づき、本イシューでは `crates/facade/src/**`・
-`crates/autodiff/src/**` を一切変更せず、次の否定ガード 4 件を追加して
-「facade 未公開」状態を機械固定した:
+`crates/autodiff/src/**` を一切変更せず、次の否定ガード 4 件（新規 4 件。
+うち AC-4〈高度な合成用 Op の非露出〉分は `crates/facade/tests/api_surface.rs`
+の新規 2 件）を追加して「facade 未公開」状態を機械固定した。#2064 の
+2026-09-19T15:45:46Z コメント本文は AC-4 分を「3 件」と記載しているが、
+実装した新規ガードは下記のとおり AC-4 分 2 件・§12.5 (b) 第 3 項分 2 件の
+計 4 件であり、本節（実装記録）の件数を正とする（コメント本文側の件数表記の
+誤りはロジックに影響しないため本 PR では修正しない。GitHub コメントは
+投稿後に本文編集していない）:
 
 - `crates/facade/tests/api_surface.rs::facade_does_not_reexport_custom_function`
   （既存。§12.5 (b) 未承認のまま維持する旨を doc comment へ追記）
@@ -493,7 +499,9 @@ higher-order-grad-decision.md` §15 と本節は同型）。
   `pub fn custom` 宣言が無いことを固定し、`Var::custom` という facade
   再エクスポート経由の別到達口が生えないことを構造的に保証する）
 
-承認取得後に実施する変更範囲（事前提示。#2064 の保留コメント本文と同一）:
+承認取得後に実施する変更範囲（事前提示。#2064 の保留コメント本文と同旨。
+ただし AC-4 の否定ガード件数は上記の実装記録どおり 2 件が正で、保留コメント
+本文中の「3 件」という表記はその後の実装で確定した数と一致していない）:
 
 - `crates/facade/src/lib.rs`: `pub use fandhe_ai_autodiff::CustomFunction;`
   （1 行の再エクスポート）・`impl Tape` への `custom` 委譲メソッド 1 件
