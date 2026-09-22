@@ -241,7 +241,10 @@
 //! 済むようにした（診断: `docs/perf/device-resident-update-bench.md`。
 //! ホスト実体化（`memory.rs::download_inner`／`zero_fill`）が唯一の
 //! 同期点となる）。`batch_state` モジュールが cfg 非依存の純粋ロジック
-//! （ラベル記録・自動 flush 上限・失敗伝播）を担う。
+//! （ラベル記録・自動 flush 上限・失敗伝播）を担う。イシュー #2070:
+//! `adam.rs::MetalAdam::run` も `sgd.rs::MetalSgd::run` と同じく
+//! `encode` 直結・`ops::MetalBackendOps::adam_step_device_tracked` で
+//! `DispatchFailureCell` を同一ロック区間で登録する。
 
 // `context.rs::MetalContext::encode`／`flush`／`synchronize`
 // （イシュー #1017）のうち `objc2-metal` の型に触れない部分（ラベル
@@ -647,6 +650,18 @@ pub mod pipeline;
 pub(crate) mod pool;
 #[cfg(target_os = "macos")]
 pub mod rmsnorm;
+// イシュー #2070: デバイス上パラメータ更新（Adam・AdamW in-place）の
+// 起動 API。`sgd` と同じ構成（`objc2` 系 FFI に触れるため macOS 限定）。
+#[cfg(target_os = "macos")]
+pub(crate) mod adam;
+// `adam`（上記）の GPU 非依存な純関数群（shape 検証・`AdamStepKind`
+// 分岐フラグ導出・カーネルのホストモデル）。`unique_model`・
+// `gather_scatter_model` と同じ設計判断で `cfg(target_os = "macos")` を
+// 付けず、Linux（本実装環境・CI）でも単体テストが回る。`pub` は外部
+// テスト（`tests/adam_device_contract.rs`）からの到達のため
+// （`adam_model.rs` モジュール doc「`Device::Metal` を扱わない理由」
+// 参照）。
+pub mod adam_model;
 #[cfg(target_os = "macos")]
 pub(crate) mod sgd;
 // `pad`／`tile` と同じ設計判断: `objc2` 系 FFI に触れないため

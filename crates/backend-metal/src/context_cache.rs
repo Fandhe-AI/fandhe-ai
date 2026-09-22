@@ -71,6 +71,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarOpKind, ScalarUnaryOp};
 
+use crate::adam::MetalAdam;
 use crate::batch_norm::MetalBatchNorm;
 use crate::constant_pad::MetalConstantPad;
 use crate::context::MetalContext;
@@ -109,6 +110,7 @@ fn on_poison(detail: String) -> MetalError {
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<MetalContext>();
+    assert_send_sync::<MetalAdam>();
     assert_send_sync::<MetalGemm>();
     assert_send_sync::<MetalElementwise>();
     assert_send_sync::<MetalRmsNorm>();
@@ -225,6 +227,18 @@ pub(crate) fn cached_sgd(ctx: &Arc<MetalContext>) -> Result<Arc<MetalSgd>, Metal
     static CACHE: OnceLock<Mutex<Option<Arc<MetalSgd>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || MetalSgd::new(ctx))
+}
+
+/// [`MetalAdam`] スイートをプロセス内キャッシュから取得する（イシュー
+/// #2070）。`ops::MetalBackendOps::adam_step_device_impl` の唯一の
+/// 呼び出し先。デバイス常駐パラメータ更新は学習ループの毎ステップ
+/// 呼ばれるため、MSL 再コンパイルを避けるキャッシュの効果が他スイート
+/// 以上に重要（`cached_sgd` と同じ理由。`docs/device-resident-update-
+/// design.md` §3.3d「Cross-tape 契約」）。
+pub(crate) fn cached_adam(ctx: &Arc<MetalContext>) -> Result<Arc<MetalAdam>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<MetalAdam>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || MetalAdam::new(ctx))
 }
 
 /// [`crate::mse::MetalMse`] スイートをプロセス内キャッシュから取得する
