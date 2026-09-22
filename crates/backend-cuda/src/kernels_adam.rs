@@ -120,8 +120,7 @@ extern "C" __global__ void adam_step_f32(
         float m_new = fmaf(beta1, m[idx], t1);
 
         float one_minus_beta2 = __fsub_rn(1.0f, beta2);
-        float g_eff_sq = __fmul_rn(g_eff, g_eff);
-        float t2 = __fmul_rn(one_minus_beta2, g_eff_sq);
+        float t2 = __fmul_rn(__fmul_rn(one_minus_beta2, g_eff), g_eff);
         float v_new = fmaf(beta2, v[idx], t2);
 
         m[idx] = m_new;

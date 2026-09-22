@@ -1955,8 +1955,9 @@ impl BackendOps for CudaBackendOps {
     /// Adam・AdamW の 1 パラメータ分の更新を in-place で実行する
     /// （イシュー #2069・`docs/device-resident-update-design.md`
     /// 「Adam／AdamW の常駐 step 結線」節）。`context_cache::cached_adam`
-    /// （`ordinal` キーのプロセス内 NVRTC コンパイル済みカーネル
-    /// キャッシュ）を経由するため、学習ループの 2 回目以降のステップは
+    /// （`context_cache::ContextKey`〈ordinal + `CudaContext` 同一性〉
+    /// キーのプロセス内 NVRTC コンパイル済みカーネルキャッシュ）を
+    /// 経由するため、学習ループの 2 回目以降のステップは
     /// 再コンパイルを支払わない。検証順序は `sgd_step_device` と同一に
     /// 揃える（device → shape → generation 収集 → `cached_adam` 構築 →
     /// downcast → `numel == 0` 早期 return → storage 取得 → 起動）。
@@ -2013,11 +2014,12 @@ impl BackendOps for CudaBackendOps {
         // item 7）: `param`／`grad`／`m`／`v` は学習ループを跨いで生存する
         // デバイス常駐バッファであり、ハンドルを可変借用する前にこの
         // 時点の世代を収集しておく。
-        let resource_generations: Vec<u64> = std::iter::once(param.generation())
-            .chain(std::iter::once(grad.generation()))
-            .chain(std::iter::once(m.generation()))
-            .chain(std::iter::once(v.generation()))
-            .collect();
+        let resource_generations: Vec<u64> = vec![
+            param.generation(),
+            grad.generation(),
+            m.generation(),
+            v.generation(),
+        ];
 
         let adam = self.with_driver_call(&resource_generations, map_cuda_error, || {
             let device = self.device_handle_raw()?;

@@ -2066,9 +2066,9 @@ NVRTC ネイティブカーネルでオーバーライドした（イシュー #
 
 - **ファイル構成**: `crates/backend-cuda/src/{adam.rs, kernels_adam.rs}`
   （起動 API／NVRTC カーネル文字列の 2 ファイル構成。`sgd.rs`／
-  `kernels_sgd.rs` と同型）・`context_cache::cached_adam`（`ordinal`
-  キーのプロセス内 NVRTC コンパイル済みカーネルキャッシュ。
-  `cached_sgd` と同型）。Issue 本文が挙げていた `adam_step.rs` という
+  `kernels_sgd.rs` と同型）・`context_cache::cached_adam`（`ContextKey`
+  〈ordinal + `CudaContext` 同一性〉キーのプロセス内 NVRTC
+  コンパイル済みカーネルキャッシュ。`cached_sgd` と同型）。Issue 本文が挙げていた `adam_step.rs` という
   単一ファイル名は採用しなかった（既存 SGD 構成との一貫性を優先。
   PR 本文に明記）。
 - **非縮約 intrinsic 契約**: NVRTC 既定 `--fmad=true` の下で CPU 参照
