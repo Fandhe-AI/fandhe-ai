@@ -52,7 +52,7 @@ use fandhe_ai_tensor_core::{ShapeError, Tensor};
 use half::f16;
 
 use super::graph::{Graph, GraphError, RawTensor};
-use super::proto::NodeProto;
+use super::proto::{AttributeProto, NodeProto, attribute_type};
 use crate::ops::{self, ConstantValue, ConvAttrs, GemmAttrs, LayerNormAttrs, OpError, SliceParams};
 
 /// 実行時に env（変数束縛）へ格納される値。ONNX の `TensorProto.data_type` の
@@ -325,20 +325,121 @@ fn attr_i64s<'a>(node: &'a NodeProto, name: &str) -> Option<&'a [i64]> {
         .map(|a| a.ints.as_slice())
 }
 
+/// `name` に一致する属性をちょうど 1 件だけ取得する（`Conv` 属性の型検証系
+/// 関数が共用する。イシュー #2076 codex-review 指摘）。同名属性が複数宣言され
+/// ている場合、どちらを採用すべきかは ONNX 仕様上一意に決まらないため、無言で
+/// 先頭／末尾いずれかを採用せず [`InterpError::InvalidAttribute`] で fail-closed
+/// に拒否する（OWASP A03。外部フォーマット由来の曖昧な入力を検証せずに通さない）。
+fn find_attr_unique<'a>(
+    node: &'a NodeProto,
+    name: &str,
+) -> Result<Option<&'a AttributeProto>, InterpError> {
+    let mut matches = node.attribute.iter().filter(|a| a.name == name);
+    let first = matches.next();
+    if matches.next().is_some() {
+        return Err(InterpError::InvalidAttribute {
+            node: node.name.clone(),
+            attr: name.to_string(),
+            reason: "同名属性が複数宣言されています".to_string(),
+        });
+    }
+    Ok(first)
+}
+
+/// `attr.r#type`（`AttributeProto.AttributeType`。`onnx/proto.rs::attribute_type`）
+/// が `expected` と一致することを検証する（`Conv` 属性の型検証系関数が共用。
+/// イシュー #2076 codex-review 指摘）。
+///
+/// `AttributeProto` は `f`／`i`／`s`／`ints` 等のフィールドを protobuf の
+/// oneof 相当として持つが、prost 生成コードでは実体は常に全フィールドを
+/// 持つ構造体であり、未設定フィールドは型のゼロ値（`0`／`""`／`Vec::new()`）
+/// になる。このため `r#type` を確認せず特定フィールドだけを読むと、本来
+/// 別の型であるべき属性（例: 本来 INTS であるべき `kernel_shape` を STRING
+/// 型として送り `ints` を空のまま残す）が「省略された」場合と区別できず、
+/// 無言で ONNX 既定値へ fallback してしまう（OWASP A03。外部 ONNX モデルは
+/// 非信頼な入力）。
+fn check_attr_type(
+    node: &NodeProto,
+    attr: &AttributeProto,
+    expected: i32,
+    expected_name: &str,
+) -> Result<(), InterpError> {
+    if attr.r#type != expected {
+        return Err(InterpError::InvalidAttribute {
+            node: node.name.clone(),
+            attr: attr.name.clone(),
+            reason: format!(
+                "AttributeType が {expected_name} ({expected}) ではありません（実際の値: {actual}）",
+                actual = attr.r#type
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// `Conv` の `kernel_shape`／`strides`／`pads`／`dilations`（INTS 型属性）を読む。
+/// 属性が省略されていれば `None` を返し（呼び出し側 `compute_conv` が ONNX
+/// 既定値へ fallback する）、存在する場合は `r#type == INTS` であることを
+/// [`check_attr_type`] で検証してから `ints` を返す。`attr_i64s`（他オペ用の
+/// 無検証版）との違いは、型不一致を「省略」と同一視せず fail-closed に拒否する
+/// 点（イシュー #2076 codex-review 指摘。P0: 型偽装した不正 ONNX モデルの
+/// 属性が無言で別の畳み込み条件〈既定値〉へ変更される問題への対処）。
+///
+/// `r#type == INTS` が確認できても `ints` が空の場合は拒否する（本来の
+/// INTS 属性が空リストで存在する ONNX モデルは想定されず、`export_ops.rs`
+/// も非空の値のみ書き出す。空 `ints` を許すと `.unwrap_or(&[])` 経由で
+/// 「省略」時と同じ既定値 fallback に合流してしまい、`r#type` 検証だけでは
+/// 塞げない同型の無言 fallback 抜け道になる）。
+fn attr_ints_typed<'a>(node: &'a NodeProto, name: &str) -> Result<Option<&'a [i64]>, InterpError> {
+    match find_attr_unique(node, name)? {
+        None => Ok(None),
+        Some(a) => {
+            check_attr_type(node, a, attribute_type::INTS, "INTS")?;
+            if a.ints.is_empty() {
+                return Err(InterpError::InvalidAttribute {
+                    node: node.name.clone(),
+                    attr: name.to_string(),
+                    reason: "INTS 属性が存在しますが要素が空です".to_string(),
+                });
+            }
+            Ok(Some(a.ints.as_slice()))
+        }
+    }
+}
+
+/// `Conv` の `group`（INT 型属性）を読む。属性が省略されていれば `default`
+/// を返し、存在する場合は `r#type == INT` であることを検証してから `i` を
+/// 返す（`attr_ints_typed` と同型の型検証。イシュー #2076 codex-review 指摘）。
+fn attr_i64_typed(node: &NodeProto, name: &str, default: i64) -> Result<i64, InterpError> {
+    match find_attr_unique(node, name)? {
+        None => Ok(default),
+        Some(a) => {
+            check_attr_type(node, a, attribute_type::INT, "INT")?;
+            Ok(a.i)
+        }
+    }
+}
+
 /// STRING 属性（`AttributeProto.s: Vec<u8>`。`Conv` の `auto_pad`。
 /// イシュー #2076）を読む。属性が無ければ `default` をそのまま返す
 /// （ONNX 仕様の既定値セマンティクス。`attr_f32`／`attr_i64` と同型）。
-/// バイト列が UTF-8 として不正な場合は無言でエラー化せず
-/// [`InterpError::InvalidAttribute`] を返す（OWASP A03。外部フォーマット
-/// 由来のバイト列を検証せずに文字列化しない）。
+/// 存在する場合は `r#type == STRING` であることを検証してから UTF-8 として
+/// 復号する（`check_attr_type` 参照。型が異なる場合に空の `s` を「省略」と
+/// 同一視して既定値へ fallback しない）。バイト列が UTF-8 として不正な場合も
+/// 無言でエラー化せず [`InterpError::InvalidAttribute`] を返す（OWASP A03。
+/// 外部フォーマット由来のバイト列を検証せずに文字列化しない）。同名属性が
+/// 複数宣言されている場合も [`find_attr_unique`] が同様に拒否する。
 fn attr_string(node: &NodeProto, name: &str, default: &str) -> Result<String, InterpError> {
-    match node.attribute.iter().find(|a| a.name == name) {
+    match find_attr_unique(node, name)? {
         None => Ok(default.to_string()),
-        Some(a) => String::from_utf8(a.s.clone()).map_err(|e| InterpError::InvalidAttribute {
-            node: node.name.clone(),
-            attr: name.to_string(),
-            reason: format!("UTF-8 として不正なバイト列 ({e})"),
-        }),
+        Some(a) => {
+            check_attr_type(node, a, attribute_type::STRING, "STRING")?;
+            String::from_utf8(a.s.clone()).map_err(|e| InterpError::InvalidAttribute {
+                node: node.name.clone(),
+                attr: name.to_string(),
+                reason: format!("UTF-8 として不正なバイト列 ({e})"),
+            })
+        }
     }
 }
 
@@ -799,8 +900,16 @@ fn compute_layer_normalization(
 /// 冒頭コメント）に従い export したグラフでは常に存在するが、本関数は
 /// interp 単体でも呼べるよう ONNX 仕様の既定値（`strides`／`dilations`
 /// 省略時 `[1,1]`・`pads` 省略時 `[0,0,0,0]`・`group` 省略時 `1`・
-/// `auto_pad` 省略時 `"NOTSET"`）へ fallback する（`attr_i64s`／
-/// `attr_string` が `None`／属性欠落を透過的に扱う）。
+/// `auto_pad` 省略時 `"NOTSET"`）へ fallback する（`attr_ints_typed`／
+/// `attr_i64_typed`／`attr_string` が `None`／属性欠落を透過的に扱う）。
+///
+/// `kernel_shape`／`strides`／`pads`／`dilations`（INTS）・`group`（INT）・
+/// `auto_pad`（STRING）はいずれも `AttributeProto.r#type` を期待型と照合する
+/// 型検証版のヘルパーで読む（`attr_i64s`／`attr_i64` の無検証版は使わない）。
+/// 型を偽装した不正な ONNX モデル（例: `kernel_shape` を STRING 型として
+/// 送り `ints` を空のまま残す）が、型不一致を「省略」と同一視されて無言で
+/// 既定値へ変更され、別の畳み込み条件で実行されてしまうのを防ぐ
+/// （イシュー #2076 codex-review 指摘。OWASP A03。`.claude/rules/security.md`）。
 fn compute_conv(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
     let w = get_f32(env, node, input_name(node, 1)?)?;
@@ -809,11 +918,13 @@ fn compute_conv(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value,
         _ => None,
     };
     let attrs = ConvAttrs {
-        kernel_shape: attr_i64s(node, "kernel_shape").unwrap_or(&[]).to_vec(),
-        strides: attr_i64s(node, "strides").unwrap_or(&[]).to_vec(),
-        pads: attr_i64s(node, "pads").unwrap_or(&[]).to_vec(),
-        dilations: attr_i64s(node, "dilations").unwrap_or(&[]).to_vec(),
-        group: attr_i64(node, "group", 1),
+        kernel_shape: attr_ints_typed(node, "kernel_shape")?
+            .unwrap_or(&[])
+            .to_vec(),
+        strides: attr_ints_typed(node, "strides")?.unwrap_or(&[]).to_vec(),
+        pads: attr_ints_typed(node, "pads")?.unwrap_or(&[]).to_vec(),
+        dilations: attr_ints_typed(node, "dilations")?.unwrap_or(&[]).to_vec(),
+        group: attr_i64_typed(node, "group", 1)?,
         auto_pad: attr_string(node, "auto_pad", "NOTSET")?,
     };
     Ok(Value::F32(ops::conv(x, w, b, &attrs)?))
@@ -966,6 +1077,56 @@ mod tests {
             f,
             ..Default::default()
         }
+    }
+
+    /// `r#type` を明示的に `INTS` へ設定した属性を組み立てる（`Conv` の
+    /// `kernel_shape`／`strides`／`pads`／`dilations` 用。`build_attr_i64s`
+    /// は意図的に `r#type` を設定しない他オペ用ビルダーのため、型検証を
+    /// 経由する `attr_ints_typed` のテストには使えない）。
+    fn build_attr_ints_typed(name: &str, ints: Vec<i64>) -> super::super::proto::AttributeProto {
+        super::super::proto::AttributeProto {
+            name: name.to_string(),
+            ints,
+            r#type: super::super::proto::attribute_type::INTS,
+            ..Default::default()
+        }
+    }
+
+    /// `r#type` を明示的に `INT` へ設定した属性を組み立てる（`Conv` の
+    /// `group` 用）。
+    fn build_attr_i64_typed(name: &str, i: i64) -> super::super::proto::AttributeProto {
+        super::super::proto::AttributeProto {
+            name: name.to_string(),
+            i,
+            r#type: super::super::proto::attribute_type::INT,
+            ..Default::default()
+        }
+    }
+
+    /// `r#type` を明示的に `STRING` へ設定した属性を組み立てる（`Conv` の
+    /// `auto_pad` 用）。
+    fn build_attr_string_typed(name: &str, s: &str) -> super::super::proto::AttributeProto {
+        super::super::proto::AttributeProto {
+            name: name.to_string(),
+            s: s.as_bytes().to_vec(),
+            r#type: super::super::proto::attribute_type::STRING,
+            ..Default::default()
+        }
+    }
+
+    /// `Conv` の全属性を（型検証込みで）正しく設定したノードを組み立てる。
+    fn conv_node_with_attrs(extra: Vec<super::super::proto::AttributeProto>) -> NodeProto {
+        let mut attrs = vec![
+            build_attr_ints_typed("kernel_shape", vec![1, 1]),
+            build_attr_ints_typed("strides", vec![1, 1]),
+            build_attr_ints_typed("pads", vec![0, 0, 0, 0]),
+            build_attr_ints_typed("dilations", vec![1, 1]),
+            build_attr_i64_typed("group", 1),
+            build_attr_string_typed("auto_pad", "NOTSET"),
+        ];
+        attrs.retain(|a| !extra.iter().any(|e| e.name == a.name));
+        attrs.extend(extra);
+        node_with_attrs("Conv", vec!["x", "w"], vec!["y"], attrs)
     }
 
     fn empty_graph(nodes: Vec<NodeProto>, inputs: Vec<&str>, outputs: Vec<&str>) -> Graph {
@@ -1525,5 +1686,142 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// `run_end_to_end_conv` の feed（`X: [1,1,2,2]`・`W: [1,1,1,1]`。
+    /// `kernel_shape=[1,1]`・`stride=1`・`pad=0` の恒等写像に近い最小構成）
+    /// を組み立てる（型検証を通過する正常系の固定に使う）。
+    fn conv_feeds() -> StdHashMap<String, Value> {
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]).unwrap()),
+        );
+        feeds.insert(
+            "w".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![2.0], &[1, 1, 1, 1]).unwrap()),
+        );
+        feeds
+    }
+
+    #[test]
+    fn run_end_to_end_conv_accepts_correctly_typed_attrs() {
+        // すべての Conv 属性が期待型（INTS／INT／STRING）で宣言されている
+        // 正常系（`export_ops.rs` が実際に export する形と同じ）。
+        let n = conv_node_with_attrs(vec![]);
+        let g = empty_graph(vec![n], vec!["x", "w"], vec!["y"]);
+        let result = run(&g, conv_feeds()).unwrap();
+        match &result["y"] {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_conv_rejects_kernel_shape_with_mismatched_attribute_type() {
+        // P0（イシュー #2076 codex-review 指摘）: `kernel_shape` を INTS では
+        // なく STRING 型として送る型偽装。`ints` は空のままだが、これを
+        // 「省略された」場合と同一視して既定値へ fallback してはならない。
+        let n = conv_node_with_attrs(vec![build_attr_string_typed("kernel_shape", "")]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "kernel_shape"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_strides_with_mismatched_attribute_type() {
+        let n = conv_node_with_attrs(vec![build_attr_string_typed("strides", "")]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "strides"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_pads_with_mismatched_attribute_type() {
+        let n = conv_node_with_attrs(vec![build_attr_string_typed("pads", "")]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "pads"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_dilations_with_mismatched_attribute_type() {
+        let n = conv_node_with_attrs(vec![build_attr_string_typed("dilations", "")]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "dilations"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_group_with_mismatched_attribute_type() {
+        // `group`（本来 INT）を INTS 型として送る型偽装。
+        let n = conv_node_with_attrs(vec![build_attr_ints_typed("group", vec![1])]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "group"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_auto_pad_with_mismatched_attribute_type() {
+        // `auto_pad`（本来 STRING）を INT 型として送る型偽装。`s` は空の
+        // ままだが、空文字列 `""` を UTF-8 として妥当に復号できてしまうため
+        // 型検証がなければ無言で通過してしまう（codex-review 指摘の core）。
+        let n = conv_node_with_attrs(vec![build_attr_i64_typed("auto_pad", 0)]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "auto_pad"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_duplicate_attribute() {
+        // 同名属性の複数宣言はどちらを採用すべきか ONNX 仕様上一意に決まら
+        // ないため、無言で先頭／末尾を採用せず fail-closed に拒否する。
+        let mut n = conv_node_with_attrs(vec![]);
+        n.attribute
+            .push(build_attr_ints_typed("kernel_shape", vec![3, 3]));
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "kernel_shape"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_present_but_empty_ints_attribute() {
+        // `r#type == INTS` を正しく宣言しつつ `ints` を空のまま残す型偽装。
+        // `check_attr_type` だけでは通過してしまい `.unwrap_or(&[])` 経由で
+        // 「省略された」場合と同じ既定値 fallback に合流するため、空リストは
+        // 型検証と別に明示的に拒否する（advisor 指摘。P0 の「期待フィールド
+        // が空」という不正表現に対応）。
+        let n = conv_node_with_attrs(vec![build_attr_ints_typed("strides", vec![])]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "strides"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_falls_back_to_defaults_when_attrs_omitted() {
+        // 属性が丸ごと省略されている場合（型検証の対象外）は従来どおり
+        // ONNX 仕様の既定値へ fallback する。
+        let n = node("Conv", vec!["x", "w"], vec!["y"]);
+        let result = compute_conv(&conv_feeds(), &n).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
     }
 }
