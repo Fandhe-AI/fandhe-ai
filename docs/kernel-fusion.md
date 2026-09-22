@@ -370,7 +370,14 @@ fusion-graph-design.md` §1・§6.2「transpose 混在連鎖のメタデータ�
   （`.claude/rules/out-of-scope-tracking.md`）。CUDA 側の `run_fused`
   （融合 IR 実行。§2.1）自体は本イシューのスコープ外のまま
   （`tensor_core::backend_ops::BackendOps::run_fused` デフォルト実装
-  ＝`Unsupported` を継続使用）。
+  ＝`Unsupported` を継続使用）。**#2085 追記**: CUDA・Metal 双方の
+  `run_fused` へ elementwise allowlist（`Input`／`Add`／`Mul`／`Relu`／
+  `Exp`／`Tanh`。CPU 融合カーネルと同一 allowlist）の opt-in 融合カーネル
+  （実行時ソース生成・既定 OFF）を実装した。詳細・実機実測の申し送りは
+  `docs/autodiff-graph-optimization-scope-decision.md`「#2085 追補」・
+  `docs/perf/gpu-elementwise-fusion-b1.md` を参照（上記段落が言及する
+  #599 時点の記述・Metal elementwise 未実装という記述は当時の事実
+  として書き換えない）。
 - **f16 対応**: `BackendOps`・`NodeMeta.dtype` とも現状 f32 固定であり、
   f16 融合カーネルの型設計は未着手（`docs/fusion-graph-design.md`
   §6.2「f16 対応」）。

@@ -822,6 +822,59 @@ pub(crate) fn cached_scalar_binary_kernel(
     Ok(Some(func))
 }
 
+/// [`cached_fused_elementwise_kernel`] のプロセス内キャッシュ上限
+/// （区分 B-1・イシュー #2085 実装計画 §2.5）。融合プランごとに個別
+/// コンパイルされるカーネルは `cached_scalar_unary_kernel` 等の固定
+/// kind 数とは異なり理論上無制限に異なるキーを生成しうるため、
+/// エントリ数の上限を設けメモリ・NVRTC コンパイル時間の際限ない増大を
+/// 防ぐ（OWASP A04・`.claude/rules/security.md`）。実測に基づく
+/// チューニング値ではなく安全側の初期値（`kernels_fused_elementwise
+/// .rs::FUSED_EW_BLOCK_DIM` 等と同様、将来ベンチで見直す余地あり）。
+const FUSED_ELEMENTWISE_CACHE_CAP: usize = 256;
+
+/// `device` の `CudaContext` に対応する、GPU `run_fused` の elementwise
+/// allowlist 融合カーネル（[`crate::fused_elementwise::ElementwiseProgram`]
+/// 単位で動的生成・コンパイルされる。区分 B-1・イシュー #2085）の
+/// コンパイル済みハンドルをプロセス内キャッシュから取得する。
+///
+/// `cached_scalar_unary_kernel`／`cached_scalar_binary_kernel` と同型の
+/// `(ContextKey, キー文字列)` キー方式だが、キーは固定の kind 名では
+/// なく [`crate::kernels_fused_elementwise::cache_key`] が融合プランの
+/// op 列から都度導出する正準文字列（`String`）である。**上限到達時は
+/// 新規コンパイルを行わず `Ok(None)` を返す**（呼び出し元
+/// `ops::CudaBackendOps::run_fused` の融合分岐は `BackendError::
+/// Unsupported` へ変換し per-op フォールバックへ委ねる。fail-closed。
+/// 実装計画 §2.5「キャッシュ上限」）。上限チェックと登録の間に
+/// レースがあっても（`get_or_build` の 2 階層ロックとは別の外側
+/// チェックのため）エントリ数が上限をわずかに超えうるが、これは
+/// メモリ増大を軽減するソフトな上限であり、`SingleFlightCache` 自体の
+/// 単一飛行契約（同一キーへの並行呼び出しが構築を二重実行しない）を
+/// 破らない。
+pub(crate) fn cached_fused_elementwise_kernel(
+    device: &CudaDevice,
+    key: &str,
+    source: &str,
+    function_name: &'static str,
+) -> Result<Option<Arc<CudaFunction>>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<(ContextKey, String), CudaFunction>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache_key = (ContextKey::from_device(device), key.to_string());
+    {
+        let guard = lock_cache(cache)?;
+        if !guard.contains_key(&cache_key) && guard.len() >= FUSED_ELEMENTWISE_CACHE_CAP {
+            return Ok(None);
+        }
+    }
+    let func = get_or_build(cache, cache_key, || {
+        let ptx = compile_ptx(source, device.arch())?;
+        Ok(device
+            .context()
+            .load_module(ptx)?
+            .load_function(function_name)?)
+    })?;
+    Ok(Some(func))
+}
+
 /// `device` の `CudaContext` に対応する [`crate::gemm_mma_tf32x3::
 /// CudaMmaTf32x3Gemm`]（3×TF32 split-single 法 GEMM。イシュー #1355。
 /// キーは [`ContextKey`]。`cached_gemm` 冒頭コメント参照）を

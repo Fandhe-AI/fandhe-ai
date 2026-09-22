@@ -377,12 +377,16 @@ mod init_cost_diag_tests;
 // AdamW 常駐 step カーネル起動 API（`sgd.rs`／`kernels_sgd.rs` と同じ
 // 「起動 API／NVRTC カーネル文字列」の 2 ファイル構成）。
 mod adam;
+pub mod fused_elementwise;
+#[doc(hidden)]
+pub mod fused_elementwise_model;
 mod huber;
 mod kernels;
 mod kernels_adam;
 mod kernels_batch_norm;
 mod kernels_bce;
 mod kernels_elementwise;
+mod kernels_fused_elementwise;
 mod kernels_huber;
 mod kernels_kl_div;
 mod kernels_layer_norm;

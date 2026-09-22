@@ -525,6 +525,57 @@ pub(crate) fn cached_scalar_binary_pipeline(
     Ok(Some(built))
 }
 
+/// [`cached_fused_elementwise_pipeline`] のプロセス内キャッシュ上限
+/// （区分 B-1・イシュー #2085。CUDA 側 `context_cache::
+/// FUSED_ELEMENTWISE_CACHE_CAP` と同一値・同一理由）。
+const FUSED_ELEMENTWISE_CACHE_CAP: usize = 256;
+
+/// `ctx` のデバイス上で、GPU `run_fused` の elementwise allowlist 融合
+/// カーネル（[`crate::fused_elementwise::ElementwiseProgram`] 単位で
+/// 動的生成・コンパイルされる。区分 B-1・イシュー #2085）のコンパイル
+/// 済みパイプラインをプロセス内キャッシュから取得する。
+///
+/// `cached_scalar_unary_pipeline`／`cached_scalar_binary_pipeline` と
+/// 異なり `get_or_build_keyed`（`K: Copy` 制約）を使わない——本関数の
+/// キー（[`crate::fused_elementwise_source::cache_key`] が融合
+/// プランの op 列から都度導出する `String`）は `Copy` ではないため。
+/// 代わりに `Mutex<HashMap<String, _>>` を直接操作し、CUDA 側
+/// `context_cache::cached_fused_elementwise_kernel` と同じ**キャッシュ
+/// 上限**（[`FUSED_ELEMENTWISE_CACHE_CAP`]。上限到達時は新規コンパイル
+/// を行わず `Ok(None)`。呼び出し元 `ops::MetalBackendOps::run_fused` の
+/// 融合分岐が `BackendError::Unsupported` へ変換し per-op フォールバック
+/// へ委ねる。fail-closed。OWASP A04・`.claude/rules/security.md`）を
+/// 課す。関数名は固定リテラル（`FUSED_EW_FUNCTION_NAME`）のため
+/// `cached_scalar_unary_pipeline` と異なり `Box::leak` は不要。
+pub(crate) fn cached_fused_elementwise_pipeline(
+    ctx: &Arc<MetalContext>,
+    key: &str,
+    source: &str,
+    function_name: &'static str,
+) -> Result<Option<objc2::rc::Retained<MtlPipeline>>, MetalError> {
+    static CACHE: OnceLock<Mutex<HashMap<String, objc2::rc::Retained<MtlPipeline>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    {
+        let guard = cache
+            .lock()
+            .map_err(|e| on_poison(format!("fused elementwise pipeline cache poisoned: {e}")))?;
+        if let Some(existing) = guard.get(key) {
+            return Ok(Some(existing.clone()));
+        }
+        if guard.len() >= FUSED_ELEMENTWISE_CACHE_CAP {
+            return Ok(None);
+        }
+    }
+    let library = pipeline::compile_source(ctx.device(), source)?;
+    let built = pipeline::make_pipeline(ctx.device(), &library, function_name)?;
+    let mut guard = cache
+        .lock()
+        .map_err(|e| on_poison(format!("fused elementwise pipeline cache poisoned: {e}")))?;
+    Ok(Some(guard.entry(key.to_string()).or_insert(built).clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
