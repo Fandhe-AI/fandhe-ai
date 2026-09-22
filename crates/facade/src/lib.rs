@@ -43,6 +43,14 @@
 //!    `BackendOps` 注入経路を新設しないため REQ-12 と矛盾しない
 //!    （詳細は [`nn::rnn`] モジュール doc）。
 //!
+//! 6. **model 公開面**（[`model`]。イシュー #2087・親 #2082）:
+//!    ホームディレクトリ配下のキャッシュディレクトリを基盤とする
+//!    ローカル限定モデルレジストリ [`model::ModelRegistry`] を提供
+//!    する。ホスト側のパス管理と [`interop::safetensors`] への委譲
+//!    のみで完結し `BackendOps` 注入経路を新設しないため REQ-12 と
+//!    矛盾しない（詳細は [`model`] モジュール doc・`docs/facade-
+//!    model-registry-decision.md` 参照）。
+//!
 //! # 公開面の設計（REQ-12: 任意 `BackendOps` 注入の公開 API を設けない）
 //!
 //! 利用者向けに公開するのは [`Device`] 識別子を受け取る 2 関数
@@ -134,6 +142,15 @@ pub mod nn;
 /// （`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-
 /// safetensors-exposure-decision.md`）。
 pub mod interop;
+
+/// 6. **model 公開面**（[`model`]。イシュー #2087・親 #2082）: ホーム
+///    ディレクトリ配下のキャッシュディレクトリを基盤とするローカル
+///    限定モデルレジストリ [`model::ModelRegistry`] を提供する。
+///    ホスト側のパス管理と [`interop::safetensors`] への委譲のみで
+///    完結し `BackendOps` 注入経路を新設しないため REQ-12 と矛盾しない
+///    （詳細は [`model`] モジュール doc・
+///    `docs/facade-model-registry-decision.md` 参照）。
+pub mod model;
 
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
