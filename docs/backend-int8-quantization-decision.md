@@ -94,6 +94,8 @@ grep -rn "s8\b\|int8\|m16n8k32\|f8f6f4" crates/ | grep -v "compute_121"
 3. (c) 向け: Transformer 複合 WL 実機ベースライン（既存の親 #154 系列の記入）。
 4. a〜e 充足後: Phase 4 要件見直しで新 REQ（REQ-15 候補・Could）を spec 側へ提案（`docs/spec-proposal-fp8-int8-quant-gemm.md` を更新して再提出）→ 承認後に実装 issue（G-16 量子化キャスト／G-17 量子化 GEMM 相当）を起票。
 
+(b)〜(e) の段階別検証計画（プローブ設計・ベンチ残ギャップ・判定式骨子・設計確認項目・spec 提案文案の集約）は `docs/int8-quant-grade-up-verification-plan.md`（#2075）を参照。
+
 ## 4. 契約整理（守るべき既存契約）
 
 - **正本 spec の除外事項「分散学習・量子化の網羅対応」**（Won't・条件付き。格上げ条件表あり。`docs/spec/04-requirements.md:356-364`）。
