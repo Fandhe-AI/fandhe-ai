@@ -954,6 +954,19 @@ pub(crate) enum Op {
         weight: NodeId,
         bias: Option<NodeId>,
         params: Conv2dParams,
+        /// forward の計算精度（イシュー #2071。`Op::LinearAct::
+        /// compute_dtype` と同型の記録専用フィールド）。既定は
+        /// `Var::conv2d` が記録する `ScalarDType::F32`（GEMM が f32。
+        /// 挙動不変）。`Var::conv2d_low_precision`（`nn::conv::
+        /// conv2d_forward_low_precision` の唯一の呼び出し元）のみが
+        /// `F16`／`Bf16` を記録する opt-in 経路。`Op::Conv2d` は
+        /// `is_checkpoint_eligible() == false`（常に実体化済み）かつ
+        /// `supports_create_graph() == false`（二階微分 replay 対象外）
+        /// のため、本フィールドは checkpoint 解放判定・create_graph
+        /// replay のいずれにも影響しない——`grad::vjp` の `Op::Conv2d`
+        /// 分岐も本フィールドを見ず常に f32 backward を行う
+        /// （`compute_dtype` は forward 経路の記録専用）。
+        compute_dtype: ScalarDType,
     },
     /// `Var::conv_transpose2d`（PyTorch `nn.ConvTranspose2d`／
     /// `F.conv_transpose2d` 相当。col2im＋GEMM。イシュー #2067・設計
@@ -1943,6 +1956,27 @@ pub(crate) struct TapeNode {
     /// `false`（既存の `Var::matmul`〈`Op::MatMul` 通常版〉・他の全
     /// Op variant は checkpoint 解放判定に影響しない）。
     pub(crate) fp32_strict: bool,
+    /// **低精度 forward 契約フラグ（イシュー #2071）**:
+    /// [`crate::var::Var::matmul_low_precision`]（`TypedOps<f16/bf16>`
+    /// 経由で forward 値を計算した `Op::MatMul` ノード）にのみ `true`
+    /// を立てる。`fp32_strict` と同じ理由（`Op::MatMul` variant 自体は
+    /// forward 精度の情報を持たない）で、このノード単位のフラグが
+    /// 「低精度で計算された」事実を 2 箇所へ伝える:
+    ///
+    /// 1. [`release_checkpoint_region`]（`fp32_strict` と同列で解放対象
+    ///    から除外。解放して非低精度な `matmul_forward`〈`ops.gemm`〉で
+    ///    再計算すると forward 値が静かに f32 精度へ後退してしまう）。
+    /// 2. [`crate::create_graph::validate_ancestors`]（低精度ノードを
+    ///    子テープへ replay しようとすると、`replay_op` は精度情報を
+    ///    持たない通常 `Var::matmul`／`matmul_fp32_strict` のいずれかへ
+    ///    静かにフォールバックしてしまう——`.claude/rules/security.md`
+    ///    A04 の fail-closed 方針に反するため、本フラグが立つノードは
+    ///    祖先に含まれた時点で無条件 `Err` とする）。
+    ///
+    /// 既定は `false`。`fp32_strict` と両立しない（`matmul_fp32_strict`
+    /// と `matmul_low_precision` は別メソッドのため同一ノードで両方
+    /// `true` になることはない）。
+    pub(crate) low_precision: bool,
 }
 
 /// 演算を記録する Wengert list。`Var`（`var.rs`）上の演算のみがここに
@@ -2636,6 +2670,7 @@ impl Tape {
             // （`push_eager` 自体は通常版・厳密版の呼び出し元を区別
             // しない）。
             fp32_strict: false,
+            low_precision: false,
         });
         id
     }
@@ -2658,6 +2693,7 @@ impl Tape {
             recompute_failed: std::cell::Cell::new(false),
             requires_grad,
             fp32_strict: false,
+            low_precision: false,
         });
         id
     }
@@ -2690,6 +2726,7 @@ impl Tape {
             // 本 issue のスコープ外。
             requires_grad: true,
             fp32_strict: false,
+            low_precision: false,
         });
         id
     }
@@ -2729,6 +2766,7 @@ impl Tape {
             recompute_failed: std::cell::Cell::new(false),
             requires_grad,
             fp32_strict: false,
+            low_precision: false,
         });
         id
     }
@@ -2818,6 +2856,7 @@ impl Tape {
             recompute_failed: std::cell::Cell::new(false),
             requires_grad,
             fp32_strict: false,
+            low_precision: false,
         });
         (id, at_limit)
     }
@@ -3087,7 +3126,7 @@ fn build_lazy_plan(
 /// infallible` がこのノードを再計算する経路へは一切到達しない。
 fn release_checkpoint_region(nodes: &mut [TapeNode], lo: usize, output: usize) {
     for node in nodes.iter_mut().take(output).skip(lo) {
-        if node.op.is_checkpoint_eligible() && !node.fp32_strict {
+        if node.op.is_checkpoint_eligible() && !node.fp32_strict && !node.low_precision {
             node.value.take();
             node.recompute = true;
         }

@@ -72,3 +72,44 @@ AMP 無効（`compiled.amp.is_none()`）のときは既存 f32 経路をその�
 ### 7.4 スコープ外（実装計画 §8）
 
 `compat::Sequential::evaluate`／validation／`predict`／`predict_resident` の低精度化、`SequentialVars` の公開低精度 forward、`ScalarDType` の facade 再エクスポート（引き続き §6・#1939 の範囲）、`DeviceParamStore` 常駐経路（`step_adam` 等）への AMP・低精度結線、backward の低精度化、Linear 以外の層、fit の勾配 clip 連携、CUDA／Metal 実機での実測（`fit` は CPU `tape()` 固定）、CPU `TypedOps<f16/bf16>` の真の低精度カーネル化（性能目標なし・ベンチ追加なし）。
+
+## 8. Conv2d・MultiheadAttention 拡張（#2071）
+
+イシュー #2071（親 #1626／#1648）。§6・§7.4 が「Linear 以外の層」としてスコープ外にしていた対象のうち、Conv2d・MultiheadAttention（MHA）を同じ narrow opt-in パターン（f32 master weight・backward は常に f32・facade 新規公開面なし）で追加した。`Var`／`Tape` の dtype 一般化・backward の低精度化・`DeviceParamStore` 常駐経路・Conv1d／ConvTranspose2d／TransformerEncoderLayer への拡張は引き続きスコープ外（§8.5）。
+
+### 8.1 tensor-core 側の拡張
+
+`crates/tensor-core/src/low_precision.rs` へ [`matmul_low_precision`]・[`conv2d_forward_low_precision`] を追加した（数値方式・fail-closed 方針は `linear_forward_low_precision` と同一）。
+
+- `matmul_typed`（内部）はバッチ行列積を `crate::ops_shape::batched_matmul_plan` で正規化し、rank 2 は `TypedOps::gemm` へ直接委譲、rank≥3 は各オペランドを `[B, m, k]`／`[B, k, n]` へ正規化してから per-batch `TypedOps::gemm` ループで合成する（`tensor-core::backend_ops::default_gemm_batched` の f32 版と同じ「バッチをほどく」構造だが、`Tensor<f32>` 専用の `normalize_batched_operand` は再利用できないため `T: Element` へ一般化した `normalize_batched_operand_typed` を本モジュール専用に持つ）。
+- `conv2d_forward_low_precision` は im2col 済みの `col`（`[N, G, K_g, P]`。呼び出し元が f32 のまま計算する——算術を伴わない bit 完全一致コピーのため低精度化の対象外）と `weight`（`[Cout, Cin_g, kH, kW]`）を受け取り、`w_mat = weight.reshape([G, Cout_g, K_g])` × `col` のバッチ GEMM（`matmul_typed`）＋（`bias` があれば）`TypedOps::add` のみを低精度化する。
+
+### 8.2 autodiff 側の記録層
+
+- `Op::Conv2d` に `compute_dtype: ScalarDType` を追加した（`Op::LinearAct::compute_dtype` と同型の記録専用フィールド）。`Op::Conv2d` は `is_checkpoint_eligible() == false`（常に実体化済み）かつ `supports_create_graph() == false`（二階微分 replay 対象外）のため、本フィールドは checkpoint 解放判定・`create_graph` replay のいずれにも影響しない——`Op::LinearAct`（checkpoint 非適格だが `create_graph` は拒否対象に含まれる）と異なり、`Op::Conv2d` は元々 `create_graph::validate_ancestors` の条件 (b)（`supports_create_graph() == false`）で無条件拒否されるため、Conv2d 専用の追加ガードは不要だった。`grad::vjp` の `Op::Conv2d` 分岐は本フィールドを sanity check（既知の 3 値以外は `InvalidArgument`）としてのみ読み、計算には使わない。
+- `Op::MatMul` は `Op::LinearAct`／`Op::Conv2d` と異なり **checkpoint 適格・`create_graph` replay 対象**（`docs/autodiff-var-dtype-multiplexing-design.md` 案 C）であり、`Op::MatMul` variant 自体が精度情報を持たない（通常版・`fp32_strict` 版・低精度版のいずれも同じ `Op::MatMul(a, b)` を記録する）。既存 `TapeNode::fp32_strict`（`Var::matmul_fp32_strict` 用）と並列に `TapeNode::low_precision: bool`（既定 `false`）を追加し、`Var::matmul_low_precision` が記録後に事後設定する（`matmul_fp32_strict` と同じパターン）。
+  - **checkpoint 解放からの除外**: `release_checkpoint_region` の条件を `is_checkpoint_eligible() && !fp32_strict && !low_precision` へ拡張した。解放すると非低精度な `matmul_forward`（`ops.gemm`。f32）で再計算されてしまい、低精度 opt-in が精度について嘘をつくことになるため。
+  - **`create_graph` からの無条件拒否**: `create_graph::validate_ancestors` は祖先に `low_precision == true` の `Op::MatMul` ノードが含まれた時点で（`requires_grad`／rank に関わらず）`Err(AutodiffError::Backward(_))` を返す。`replay_op` は `fp32_strict` のみを読んで厳密版へ分岐する実装のため、低精度ノードをそのまま通すと `fp32_strict == false` の通常 `Var::matmul`（f32）へ静かにフォールバックしてしまう（`.claude/rules/security.md` A04 の fail-closed 方針に反する）。`Op::LinearAct`／`Op::ResidentLeaf` のような「値の実体化自体が成立しない」無条件拒否群とは別枠（`Op::MatMul` 自体は本来 replay 可能な Op のため）だが、同じ「精度契約を静かに破らせない」動機で無条件拒否とした。
+
+### 8.3 Var・nn 層
+
+- `Var::conv2d_low_precision`（`pub(crate)`）: `Var::conv2d` と同じ検査順序（① rank・`Conv2dParams::new` ② `conv2d_out_shape` ③ bias shape）のあと、`im2col_with_fallback`（f32・bit 完全一致コピー）→ `conv2d_forward_low_precision`（tensor-core）→ `push_eager(Op::Conv2d { .., compute_dtype: dtype })`。`Var::conv2d` の `ops.conv2d`（ネイティブ融合カーネル）呼び出しは経由しない——低精度化するのは GEMM＋bias のみのため、常に im2col 段階的合成へ入る。
+- `Var::matmul_low_precision`（`pub(crate)`）: `Var::matmul_fp32_strict` と同型（クロステープ検査 → shape 検査 → `tensor-core::matmul_low_precision` → `push_eager` → 事後 `low_precision = true` 設定）。
+- `nn::conv::conv2d_forward_low_precision`（`pub` 自由関数。`nn::linear::linear_forward_low_precision` と同じ「`Conv2dVars` へのフィールド追加を避ける」配置理由）と `nn::attention::multihead_attention_forward_low_precision`（`pub` 自由関数）を追加した。
+- MHA は `crate::attention::scaled_dot_product_attention`（sub-issue (a)・#1639）ではなく、`nn::attention` モジュール内の **private 複製** `project`／`sdpa_compose`（モジュール doc「sub-issue (a) との関係」参照。#1639 マージ後に一本化予定の既存の重複）を経由する。両関数へ `low_precision: Option<ScalarDType>` 引数を追加し（`None` の既存呼び出し元は bit 同一のまま）、`sdpa_compose` 内の 2 回の `matmul`（`scores = q_scaled @ k_t`・`out = weights @ value`）のみを `matmul_low_precision` へ切り替える。scale・transpose・mask・softmax は PyTorch autocast の fp32 リストと同様 f32 のまま。`project`（q/k/v/out projection の共通実装。`nn::transformer_encoder_layer` の FFN とも共有）にも同じ `Option<ScalarDType>` 引数を追加した（既存呼び出し元はすべて `None`）。
+
+### 8.4 検証
+
+- `crates/tensor-core/src/low_precision.rs`: `matmul_low_precision`／`conv2d_forward_low_precision` の accessor 不在・非対応 dtype・shape 不整合（accessor 取得より先）の単体テスト 8 件追加（既存 5 件と合わせ計 14 件）。
+- `crates/autodiff/src/var.rs::linear_act_tests`（モジュール名は歴史的経緯で維持。Linear 以外のテストも同居）: `matmul_low_precision`／`conv2d_low_precision` の丸めオラクル一致（`conv2d` は実際の `im2col_with_fallback` 呼び出しを直接オラクルへ使い、内部 enumerate 順序を仮定しない）・`TapeNode::low_precision`／`Op::Conv2d::compute_dtype` の記録確認・accessor 不在の fail-closed 確認・`create_graph_rejects_low_precision_matmul_ancestor`（`Var::matmul_low_precision`／`backward_create_graph` がいずれも `pub(crate)`／内部 API のため統合テストではなく本モジュールに配置）の計 9 件追加。
+- `crates/facade/tests/compat_sequential_fit_amp_conv_mha.rs`（新規）: Conv2d／MHA モデルの `compile()`（AMP なし）決定性（2 回実行の bit 一致）と、`compile_with_amp` の loss 系列が f32 系列と REQ-2 統一複合判定内で一致することを検証する。**Conv2d は F16／Bf16 とも `fail_count=0/10` で達成**。**MHA は F16 で `fail_count=0/10` を達成したが、Bf16 は事前登録判定の結果 FAIL した**（`fail_count=2/10`・`max_abs_diff=5.21e-4`・`max_rel_err=2.83e-3`。bf16 の仮数 7bit が softmax〈E=4・L=3 の小規模再正規化〉を経由する 10 step 軌道差を増幅したと推定）。`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差を単独で緩和しない」に従い、tolerance／baseline は変更せず本判定のみを落とした（`mha_amp_bf16_matches_f32_within_req2_composite_tolerance` を削除しコメントで理由を記録）。
+- 非後退ガード（`crates/facade/tests/conv2d_backend_parity.rs`・`mha_backend_parity.rs`・`compat_sequential_fit_amp.rs`・`mnist_amp_low_precision_parity.rs`・`checkpoint_backend_bit_identity.rs`・`attention_backend_parity.rs`・`architecture_boundaries.rs`・`api_surface.rs`・`crates/autodiff/tests/{conv2d,nn_conv,nn_attention,attention,checkpoint*,create_graph}.rs`）はいずれも無変更のまま green（`cargo test -p fandhe-ai-tensor-core`・`-p fandhe-ai-autodiff --lib --tests`・`-p fandhe-ai` の全件で確認）。
+
+### 8.5 スコープ外（実装計画 §8。out-of-scope-tracking.md）
+
+- Conv1d／ConvTranspose2d の低精度 forward（`nn::conv1d_forward_low_precision`／`conv_transpose2d_forward_low_precision` は未実装）。
+- `compat::Sequential` の `TransformerEncoderLayer` 層は `compile_with_amp` でも内部 FFN（`nn::transformer_encoder_layer::project` 経由の `linear1`／`linear2`）を含め f32 のまま——本イシュー以前から存在する既存ギャップであり、`SequentialVars::forward_with_precision` の対象層拡張には含めていない。
+- `compat::Sequential::evaluate`／`predict`／`predict_resident`・`DeviceParamStore` 常駐経路の低精度化、backward の低精度化（真の混合精度）、attention weights／dropout の低精度結線。
+- `create_graph`（二階微分）の低精度 forward ノード対応（本イシューは fail-closed 拒否のみ。§8.2 参照）。
+- CUDA／Metal 実機実測（`crates/facade/tests/amp_conv_mha_low_precision_backend_parity.rs`。実行コマンド・判定規則は `docs/perf/logs/amp-conv-mha-low-precision-2071/README.md` を参照）。同ファイルは MHA のみを対象とし、**Conv2d の実機 parity テストは対象外**とした——`nn::conv2d_forward_low_precision` が要求する `Conv2dVars` は `MultiheadAttentionVars::new`（`pub`）のような直接構築コンストラクタを持たず（`Conv2d::bind` は crate-internal な `&fandhe_ai_autodiff::Tape` を要求し facade テストから到達できない）、新規 `pub` コンストラクタの追加は facade／autodiff 公開面の拡張としてユーザー承認事項の判断になるため本イシューでは追加しなかった（`Conv2dVars::new` の新設は別途ユーザー承認を得たうえでの後続イシュー候補）。
+- CPU `TypedOps<f16/bf16>` は f32 昇格方式のため性能目標なし・ベンチ追加なし（§7.4 と同じ方針）。

@@ -39,18 +39,33 @@
 //! # スコープ外
 //!
 //! `Var`／`Tape` の dtype 一般化・backward の低精度化・`DeviceParamStore`
-//! 常駐経路・Linear 以外の層・facade 公開面の拡張は対象外（`docs/
+//! 常駐経路・facade 公開面の拡張は対象外（`docs/
 //! autodiff-low-precision-linear-design.md` 参照）。
+//!
+//! # Conv2d・MatMul（attention）への拡張（イシュー #2071）
+//!
+//! [`matmul_low_precision`]・[`conv2d_forward_low_precision`] は上記
+//! Linear 限定の方式を横展開したもの。数値方式・fail-closed 方針は
+//! Linear 版と同一（低精度へ丸め → `TypedOps<T>` の演算 → f32 へ 1 回
+//! 昇格。accessor 不在は `Unsupported`、対応外 dtype は
+//! `InvalidArgument`）。`matmul_low_precision` はバッチ行列積
+//! （`crate::ops_shape::batched_matmul_plan` で正規化。rank 2 は
+//! `TypedOps::gemm` へ直接委譲・rank≥3 は per-batch ループで合成する
+//! 点も `tensor-core::backend_ops::default_gemm_batched` と同型）。
+//! `conv2d_forward_low_precision` は im2col 済みの `col`
+//! （算術を伴わない bit 完全一致コピーのため f32 のまま呼び出し元
+//! 〈`fandhe_ai_autodiff::var::Var::conv2d_low_precision`〉が計算する）
+//! を受け取り、GEMM＋bias 加算のみを低精度化する。
 
 use half::{bf16, f16};
 
 use crate::backend_ops::{Activation, BackendOps};
 use crate::broadcast::broadcast_shape;
 use crate::device::BackendError;
-use crate::element::ScalarDType;
+use crate::element::{Element, ScalarDType};
 use crate::error::ShapeError;
-use crate::ops_shape::gemm_out_shape;
-use crate::tensor::Tensor;
+use crate::ops_shape::{batched_matmul_plan, gemm_out_shape};
+use crate::tensor::{Tensor, checked_numel, checked_numel_for};
 use crate::typed_ops::TypedOps;
 
 /// `f16`／`bf16` を低精度 Linear forward の対象型として封印する
@@ -222,6 +237,340 @@ pub fn linear_forward_low_precision(
     }
 }
 
+/// [`default_gemm_batched`](crate::backend_ops)（f32 専用）の低精度版
+/// 正規化ヘルパー。`operand`（`[..., rows, cols]`。先頭バッチ軸は
+/// `out_batch_shape` へ broadcast 可能）を `[flat_len, rows, cols]` の
+/// contiguous 3 次元へ正規化する。`normalize_batched_operand`
+/// （`backend_ops.rs`）と同じ正規化規則を `T: Element` へ一般化した
+/// もの（`Tensor<f32>` 専用の同関数は再利用できないため本モジュール
+/// 専用に持つ。二重管理を避けるため規則のみ揃える）。
+fn normalize_batched_operand_typed<T: Element>(
+    operand: &Tensor<T>,
+    out_batch_shape: &[usize],
+    rows: usize,
+    cols: usize,
+) -> Result<Tensor<T>, BackendError> {
+    let operand_rank = operand.shape().len();
+    if operand_rank < 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: operand_rank,
+        }));
+    }
+    let operand_batch_shape = operand.shape()[..operand_rank - 2].to_vec();
+    let operand_tail = operand.shape()[operand_rank - 2..].to_vec();
+    if operand_tail != [rows, cols] {
+        return Err(BackendError::ShapeMismatch(ShapeError::MatmulDimMismatch {
+            lhs: operand.shape().to_vec(),
+            rhs: vec![rows, cols],
+        }));
+    }
+
+    // `checked_numel`／`checked_numel_for::<T>` は `tensor.rs::
+    // default_gemm_batched` 前段と同じ overflow-safe な検査
+    // （`usize` 積オーバーフロー・`Vec` allocation 上限〈`isize::MAX`
+    // バイト〉）を、低精度要素サイズ（`f16`/`bf16` は 2 バイト）で行う
+    // （`.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
+    let flat_len = checked_numel(out_batch_shape).map_err(BackendError::ShapeMismatch)?;
+    let mut full_shape = Vec::with_capacity(out_batch_shape.len() + 2);
+    full_shape.extend_from_slice(out_batch_shape);
+    full_shape.push(rows);
+    full_shape.push(cols);
+    checked_numel_for::<T>(&full_shape).map_err(BackendError::ShapeMismatch)?;
+
+    let normalized = if operand_batch_shape == out_batch_shape {
+        operand.contiguous()
+    } else {
+        operand
+            .broadcast_to(&full_shape)
+            .map_err(BackendError::ShapeMismatch)?
+            .contiguous()
+    };
+    let flat_shape = [flat_len, rows, cols];
+    normalized
+        .reshape(&flat_shape)
+        .map_err(BackendError::ShapeMismatch)
+}
+
+/// `TypedOps<T>` を型消去せずに直接呼ぶバッチ行列積本体（`T` が
+/// 確定した後のジェネリック実装。[`matmul_low_precision`] が
+/// `ScalarDType` から `T` を選び本関数へディスパッチする）。
+///
+/// rank 2 同士（`plan.batch_shape()` が空）は `TypedOps::gemm` へ直接
+/// 委譲する（`tensor-core::backend_ops::default_gemm_batched` と同じ
+/// 「バッチをほどく正規化・ループを経由しない」構造保証）。rank≥3 は
+/// 各オペランドを `[B, m, k]`／`[B, k, n]` へ正規化してから per-batch
+/// `TypedOps::gemm` ループで合成する。
+fn matmul_typed<T: LowPrecisionScalar>(
+    ops: &dyn TypedOps<T>,
+    lhs: &Tensor<T>,
+    rhs: &Tensor<T>,
+) -> Result<Tensor<T>, BackendError> {
+    let plan =
+        batched_matmul_plan(lhs.shape(), rhs.shape()).map_err(BackendError::ShapeMismatch)?;
+
+    if plan.batch_shape().is_empty() {
+        return TypedOps::gemm(ops, lhs, rhs);
+    }
+
+    let m = plan.m();
+    let k = plan.k();
+    let n = plan.n();
+    let batch_len: usize = plan.batch_shape().iter().product();
+
+    // 出力全体（`batch_shape ++ [m, n]`）の要素数・バイトサイズを
+    // バッファ確保より前に検証する（`default_gemm_batched` と同じ
+    // 順序。`.claude/rules/coding-rust.md`）。
+    let total = checked_numel_for::<T>(&plan.out_shape()).map_err(BackendError::ShapeMismatch)?;
+    if total == 0 {
+        return Tensor::new(Vec::new(), &plan.out_shape()).map_err(BackendError::ShapeMismatch);
+    }
+
+    let lhs_norm = normalize_batched_operand_typed(lhs, plan.batch_shape(), m, k)?;
+    let rhs_norm = normalize_batched_operand_typed(rhs, plan.batch_shape(), k, n)?;
+
+    let mut out_data: Vec<T> = Vec::with_capacity(total);
+    for i in 0..batch_len {
+        let lhs_i = lhs_norm
+            .narrow(0, i, 1)
+            .and_then(|t| t.reshape(&[m, k]))
+            .map_err(BackendError::ShapeMismatch)?;
+        let rhs_i = rhs_norm
+            .narrow(0, i, 1)
+            .and_then(|t| t.reshape(&[k, n]))
+            .map_err(BackendError::ShapeMismatch)?;
+        let out_i = TypedOps::gemm(ops, &lhs_i, &rhs_i)?;
+        // `TypedOps::gemm` は shape `[m, n]` の新規確保テンソルを返す
+        // 契約（f32 版 `BackendOps::gemm` と同型）であり常に contiguous
+        // のため `as_slice` は必ず `Some` を返す。`None`（契約違反）は
+        // fail-closed で拒否する（`default_gemm_batched` と同型）。
+        let out_slice = out_i.as_slice().ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "low_precision::matmul_typed: per-batch gemm returned a non-contiguous tensor \
+                 (contract violation)"
+                    .into(),
+            )
+        })?;
+        out_data.extend_from_slice(out_slice);
+    }
+
+    Tensor::new(out_data, &plan.out_shape()).map_err(BackendError::ShapeMismatch)
+}
+
+/// バッチ行列積の opt-in 低精度 forward（イシュー #2071）。
+///
+/// `lhs`／`rhs`（f32 のホスト常駐テンソル。rank≥2・NumPy 互換バッチ
+/// broadcast）を `dtype`（[`ScalarDType::F16`]／[`ScalarDType::Bf16`]
+/// のみ）で指定した低精度へ丸めて `TypedOps<T>::gemm`（バッチは
+/// per-batch ループで合成）を計算し、結果を f32 へ昇格して返す。
+/// `fandhe_ai_autodiff::var::Var::matmul_low_precision`（`crate::
+/// attention` の低精度 SDPA・`nn::attention` の低精度 MHA が経由する）
+/// の唯一の呼び出し元。
+///
+/// shape 検査（`batched_matmul_plan`）を accessor 取得より先に行う。
+/// `ops.typed_ops_f16()`／`typed_ops_bf16()` が `None`（バックエンド
+/// 未実装）の場合は [`BackendError::Unsupported`] を返す（f32 への
+/// フォールバックはしない。モジュール doc「fail-closed 方針」参照）。
+pub fn matmul_low_precision(
+    ops: &dyn BackendOps,
+    dtype: ScalarDType,
+    lhs: &Tensor<f32>,
+    rhs: &Tensor<f32>,
+) -> Result<Tensor<f32>, BackendError> {
+    batched_matmul_plan(lhs.shape(), rhs.shape()).map_err(BackendError::ShapeMismatch)?;
+    match dtype {
+        ScalarDType::F16 => {
+            let typed = ops.typed_ops_f16().ok_or_else(|| {
+                BackendError::Unsupported(
+                    "matmul_low_precision: typed_ops_f16 unavailable on this backend".into(),
+                )
+            })?;
+            let lhs_t = downcast::<f16>(lhs)?;
+            let rhs_t = downcast::<f16>(rhs)?;
+            let out = matmul_typed(typed, &lhs_t, &rhs_t)?;
+            upcast::<f16>(&out)
+        }
+        ScalarDType::Bf16 => {
+            let typed = ops.typed_ops_bf16().ok_or_else(|| {
+                BackendError::Unsupported(
+                    "matmul_low_precision: typed_ops_bf16 unavailable on this backend".into(),
+                )
+            })?;
+            let lhs_t = downcast::<bf16>(lhs)?;
+            let rhs_t = downcast::<bf16>(rhs)?;
+            let out = matmul_typed(typed, &lhs_t, &rhs_t)?;
+            upcast::<bf16>(&out)
+        }
+        other => Err(BackendError::InvalidArgument(format!(
+            "matmul_low_precision: unsupported dtype ({other:?}); only F16/Bf16 are accepted"
+        ))),
+    }
+}
+
+/// Conv2d の opt-in 低精度 forward（イシュー #2071）。
+///
+/// `col`（im2col 済み。`[N, G, K_g, P]`。呼び出し元
+/// 〈`fandhe_ai_autodiff::var::Var::conv2d_low_precision`〉が f32 の
+/// まま im2col を計算する——算術を伴わない bit 完全一致コピーのため
+/// 低精度化の対象外）・`weight`（`[Cout, Cin_g, kH, kW]`）・`bias`
+/// （`Some` なら `[Cout]`）を `dtype` で指定した低精度へ丸めて
+/// バッチ GEMM（`matmul_typed`）＋（`bias` があれば）`TypedOps::add`
+/// を計算し、`out_shape` へ reshape してから f32 へ 1 回昇格して返す。
+/// `fandhe_ai_autodiff::var::Var::conv2d_low_precision` の唯一の
+/// 呼び出し元。
+///
+/// # 検査順序
+///
+/// ①`col`／`weight` の rank・`groups`（`col.shape()[1]`）・
+/// `Cout % groups`・`K_g` 一致・`out_shape` の要素数一致・`bias`
+/// `[Cout]` 一致（いずれも accessor 取得より先）→ ②accessor 取得
+/// （`None` は [`BackendError::Unsupported`]）→ ③降格 → ④
+/// `matmul_typed`（`[N, G, Cout_g, P]`）→ ⑤`out_shape` へ reshape →
+/// ⑥bias 加算（`TypedOps::add`。結果 shape が `out_shape` と一致する
+/// ことを検証）→ ⑦昇格。
+#[allow(clippy::too_many_arguments)] // linear_forward_low_precision と同じ理由（im2col 済み col・weight・bias・out_shape をすべて明示する必要がある）。
+pub fn conv2d_forward_low_precision(
+    ops: &dyn BackendOps,
+    dtype: ScalarDType,
+    col: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    bias: Option<&Tensor<f32>>,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, BackendError> {
+    let col_shape = col.shape();
+    if col_shape.len() != 4 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 4,
+            actual: col_shape.len(),
+        }));
+    }
+    let weight_shape = weight.shape();
+    if weight_shape.len() != 4 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 4,
+            actual: weight_shape.len(),
+        }));
+    }
+    let n = col_shape[0];
+    let groups = col_shape[1];
+    let k_g = col_shape[2];
+    let p = col_shape[3];
+    let cout = weight_shape[0];
+    if groups == 0 || !cout.is_multiple_of(groups) {
+        return Err(BackendError::InvalidArgument(format!(
+            "conv2d_forward_low_precision: out_channels ({cout}) must be divisible by groups \
+             ({groups})"
+        )));
+    }
+    let cout_g = cout / groups;
+    let weight_k_g = weight_shape[1]
+        .checked_mul(weight_shape[2])
+        .and_then(|v| v.checked_mul(weight_shape[3]))
+        .ok_or(ShapeError::ElementCountOverflow)
+        .map_err(BackendError::ShapeMismatch)?;
+    if weight_k_g != k_g {
+        return Err(BackendError::ShapeMismatch(ShapeError::MatmulDimMismatch {
+            lhs: vec![groups, k_g],
+            rhs: vec![groups, weight_k_g],
+        }));
+    }
+    let expected_out_numel = n
+        .checked_mul(cout)
+        .and_then(|v| v.checked_mul(p))
+        .ok_or(ShapeError::ElementCountOverflow)
+        .map_err(BackendError::ShapeMismatch)?;
+    let out_numel = checked_numel_for::<f32>(out_shape).map_err(BackendError::ShapeMismatch)?;
+    if out_numel != expected_out_numel {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: out_shape.to_vec(),
+            rhs: vec![n, cout, p],
+        }));
+    }
+    if let Some(b) = bias
+        && b.shape() != [cout]
+    {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: b.shape().to_vec(),
+            rhs: vec![cout],
+        }));
+    }
+
+    match dtype {
+        ScalarDType::F16 => {
+            let typed = ops.typed_ops_f16().ok_or_else(|| {
+                BackendError::Unsupported(
+                    "conv2d_forward_low_precision: typed_ops_f16 unavailable on this backend"
+                        .into(),
+                )
+            })?;
+            conv2d_forward_typed(typed, col, weight, bias, groups, cout_g, k_g, out_shape)
+        }
+        ScalarDType::Bf16 => {
+            let typed = ops.typed_ops_bf16().ok_or_else(|| {
+                BackendError::Unsupported(
+                    "conv2d_forward_low_precision: typed_ops_bf16 unavailable on this backend"
+                        .into(),
+                )
+            })?;
+            conv2d_forward_typed(typed, col, weight, bias, groups, cout_g, k_g, out_shape)
+        }
+        other => Err(BackendError::InvalidArgument(format!(
+            "conv2d_forward_low_precision: unsupported dtype ({other:?}); only F16/Bf16 are \
+             accepted"
+        ))),
+    }
+}
+
+/// [`conv2d_forward_low_precision`] の `T` 確定後の本体。
+#[allow(clippy::too_many_arguments)]
+fn conv2d_forward_typed<T: LowPrecisionScalar>(
+    ops: &dyn TypedOps<T>,
+    col: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    bias: Option<&Tensor<f32>>,
+    groups: usize,
+    cout_g: usize,
+    k_g: usize,
+    out_shape: &[usize],
+) -> Result<Tensor<f32>, BackendError> {
+    let col_t = downcast::<T>(col)?;
+    let w_mat = weight
+        .contiguous()
+        .reshape(&[groups, cout_g, k_g])
+        .map_err(BackendError::ShapeMismatch)?;
+    let w_mat_t = downcast::<T>(&w_mat)?;
+    // `w_mat_t` `[G, Cout_g, K_g]` × `col_t` `[N, G, K_g, P]` の
+    // per-group バッチ GEMM。`batched_matmul_plan` が両者を NumPy
+    // 互換 broadcast し `[N, G, Cout_g, P]`（要素数は `out_shape` と
+    // 同一）を返す（`grad::conv2d_with_fallback` の f32
+    // `ops.gemm_batched` 呼び出しと同じ broadcast 規則）。
+    let out_mat = matmul_typed(ops, &w_mat_t, &col_t)?;
+    let cout = groups * cout_g;
+    let out_no_bias = out_mat
+        .reshape(out_shape)
+        .map_err(BackendError::ShapeMismatch)?;
+
+    let out_t = match bias {
+        Some(b) => {
+            let bias_reshaped = b
+                .contiguous()
+                .reshape(&[1, cout, 1, 1])
+                .map_err(BackendError::ShapeMismatch)?;
+            let bias_t = downcast::<T>(&bias_reshaped)?;
+            let out_biased = TypedOps::add(ops, &out_no_bias, &bias_t)?;
+            if out_biased.shape() != out_shape {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: out_biased.shape().to_vec(),
+                    rhs: out_shape.to_vec(),
+                }));
+            }
+            out_biased
+        }
+        None => out_no_bias,
+    };
+    upcast::<T>(&out_t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +697,126 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    // --- matmul_low_precision（イシュー #2071） ---
+
+    #[test]
+    fn matmul_low_precision_f16_accessor_none_returns_unsupported() {
+        let ops = NoTypedOpsBackend;
+        let a = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let b = t(&[1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let err = matmul_low_precision(&ops, ScalarDType::F16, &a, &b).unwrap_err();
+        assert!(matches!(err, BackendError::Unsupported(_)));
+    }
+
+    #[test]
+    fn matmul_low_precision_f32_dtype_is_rejected_as_invalid_argument() {
+        let ops = NoTypedOpsBackend;
+        let a = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let b = t(&[1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let err = matmul_low_precision(&ops, ScalarDType::F32, &a, &b).unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn matmul_low_precision_shape_mismatch_is_rejected_before_accessor_lookup() {
+        let ops = NoTypedOpsBackend;
+        // rank 3 バッチ・K 不一致（[2,1,3] x [2,2,4] は K=3 vs K=2）。
+        let a = t(&[1.0; 6], &[2, 1, 3]);
+        let b = t(&[1.0; 16], &[2, 2, 4]);
+        let err = matmul_low_precision(&ops, ScalarDType::F16, &a, &b).unwrap_err();
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    // --- conv2d_forward_low_precision（イシュー #2071） ---
+
+    #[test]
+    fn conv2d_low_precision_accessor_none_returns_unsupported() {
+        let ops = NoTypedOpsBackend;
+        // col: [N=1, G=1, K_g=4, P=1]・weight: [Cout=1, Cin_g=1, kH=2, kW=2]（K_g = 1*2*2 = 4）。
+        let col = t(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4, 1]);
+        let weight = t(&[1.0, 1.0, 1.0, 1.0], &[1, 1, 2, 2]);
+        let err = conv2d_forward_low_precision(
+            &ops,
+            ScalarDType::F16,
+            &col,
+            &weight,
+            None,
+            &[1, 1, 1, 1],
+        )
+        .unwrap_err();
+        assert!(matches!(err, BackendError::Unsupported(_)));
+    }
+
+    #[test]
+    fn conv2d_low_precision_k_g_mismatch_is_rejected_before_accessor_lookup() {
+        let ops = NoTypedOpsBackend;
+        // K_g = col.shape()[2] = 3 だが weight は Cin_g*kH*kW = 1*2*2 = 4 で不一致。
+        let col = t(&[1.0, 2.0, 3.0], &[1, 1, 3, 1]);
+        let weight = t(&[1.0, 1.0, 1.0, 1.0], &[1, 1, 2, 2]);
+        let err = conv2d_forward_low_precision(
+            &ops,
+            ScalarDType::F16,
+            &col,
+            &weight,
+            None,
+            &[1, 1, 1, 1],
+        )
+        .unwrap_err();
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    #[test]
+    fn conv2d_low_precision_out_channels_not_divisible_by_groups_is_rejected() {
+        let ops = NoTypedOpsBackend;
+        // groups = col.shape()[1] = 2 だが cout = weight.shape()[0] = 3（3 % 2 != 0）。
+        let col = t(&[1.0; 8], &[1, 2, 4, 1]);
+        let weight = t(&[1.0; 12], &[3, 1, 2, 2]);
+        let err = conv2d_forward_low_precision(
+            &ops,
+            ScalarDType::F16,
+            &col,
+            &weight,
+            None,
+            &[1, 3, 1, 1],
+        )
+        .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn conv2d_low_precision_bias_shape_mismatch_is_rejected_before_accessor_lookup() {
+        let ops = NoTypedOpsBackend;
+        let col = t(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4, 1]);
+        let weight = t(&[1.0, 1.0, 1.0, 1.0], &[1, 1, 2, 2]);
+        let bias = t(&[0.0, 0.0], &[2]);
+        let err = conv2d_forward_low_precision(
+            &ops,
+            ScalarDType::F16,
+            &col,
+            &weight,
+            Some(&bias),
+            &[1, 1, 1, 1],
+        )
+        .unwrap_err();
+        assert!(matches!(err, BackendError::ShapeMismatch(_)));
+    }
+
+    #[test]
+    fn conv2d_low_precision_f32_dtype_is_rejected_as_invalid_argument() {
+        let ops = NoTypedOpsBackend;
+        let col = t(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4, 1]);
+        let weight = t(&[1.0, 1.0, 1.0, 1.0], &[1, 1, 2, 2]);
+        let err = conv2d_forward_low_precision(
+            &ops,
+            ScalarDType::F32,
+            &col,
+            &weight,
+            None,
+            &[1, 1, 1, 1],
+        )
+        .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)));
     }
 }
