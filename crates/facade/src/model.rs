@@ -65,12 +65,19 @@
 //! 2. 葉パスを canonicalize し正規化済みキャッシュルート配下である
 //!    ことを多層防御として再確認する（この canonicalize 自体は検査時点
 //!    のスナップショットであり単独では TOCTOU を閉じない）。
-//! 3. 葉を [`open_leaf_no_follow`] で開く。Linux／macOS は
-//!    `O_NOFOLLOW`（最終コンポーネントのシンボリックリンク追跡を
-//!    カーネルレベルで拒否）と `O_NONBLOCK`（FIFO への差し替えで
-//!    `open` が無期限ブロックするのを防ぐ。通常ファイルには無効）を
-//!    生の flag 値で付与する。それ以外の OS はプレーンな `open` に
-//!    フォールバックする。
+//! 3. 葉を `open_leaf_no_follow` で開く。Linux／macOS は `O_NOFOLLOW`
+//!    （最終コンポーネントのシンボリックリンク追跡をカーネルレベルで
+//!    拒否）と `O_NONBLOCK`（FIFO への差し替えで `open` が無期限
+//!    ブロックするのを防ぐ。通常ファイルには無効）を生の flag 値で
+//!    付与する。それ以外の OS（Windows 等）は同等の no-follow 実装を
+//!    持たないため、安全性を仮定せず **fail-closed でオープン自体を
+//!    拒否**する（`ErrorKind::Unsupported` を返し `ModelError::Io` へ
+//!    丸める）。キャッシュディレクトリ解決（`USERPROFILE`）自体は
+//!    Windows でも動作するが、`resolve_model_file` を経由する `load`
+//!    は常に失敗し（`ModelError::Io`）、`available_models` は各
+//!    バージョンの存在確認に `resolve_model_file(..).is_ok()` を使う
+//!    ため、失敗を伝播せず対象バージョンを一覧から除外する（結果的に
+//!    Windows では常に空の一覧を返す。エラーにはならない）。
 //! 4. 開いたハンドルの `fstat`（[`std::fs::File::metadata`]）で
 //!    `is_file()` を再確認したうえで、Unix では手順 1 で取得した
 //!    `symlink_metadata` の `(dev, ino)` と一致することを検証する
@@ -143,9 +150,20 @@ mod open_flags {
 /// 3 参照）。Linux／macOS は `O_NOFOLLOW`（最終コンポーネントの
 /// シンボリックリンクを拒否）・`O_NONBLOCK`（FIFO への差し替えによる
 /// 無期限ブロックを防ぐ。通常ファイルの読み取りには影響しない）を
-/// 付与する。それ以外の OS はプレーンな `File::open` にフォールバック
-/// する（対応する生 flag 値を持たないため。呼び出し元の fstat 識別子
-/// 一致検査は OS に依らず TOCTOU を捕捉する）。
+/// 付与する。
+///
+/// それ以外の OS（Windows 等）向けの安全な no-follow 実装は未導入
+/// （codex-review 指摘・PR #2226。許容依存 9 区分に `libc`／
+/// `windows-sys` の直接依存が無いため、`FILE_FLAG_OPEN_REPARSE_POINT`
+/// 相当の生 flag 値を安全に組み立てる手段が確立していない）。
+/// フォールバックとして無防備な `File::open` を使うと、呼び出し元の
+/// 識別子一致検査（`dev`／`ino`）が `#[cfg(unix)]` 限定で Windows では
+/// 実施されないため、検査〜open 間の差し替え（TOCTOU）をキャッシュ
+/// ルート外のファイル読み取りへ悪用できてしまう。代わりに
+/// **fail-closed で `ErrorKind::Unsupported` を返しオープン自体を
+/// 拒否**する（呼び出し元は [`ModelError::Io`] へ丸める）。安全な
+/// Windows 実装（`file_index`／`volume_serial_number` によるハンドル
+/// 識別子照合を含む）の追加はスコープ外として別イシューで追跡する。
 fn open_leaf_no_follow(leaf: &Path) -> std::io::Result<File> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -157,7 +175,13 @@ fn open_leaf_no_follow(leaf: &Path) -> std::io::Result<File> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        File::open(leaf)
+        let _ = leaf;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "このプラットフォームでは葉ファイルのシンボリックリンク追跡なし \
+             オープンを実装していないため、TOCTOU 対策として fail-closed で \
+             オープンを拒否します（Linux／macOS のみ対応）",
+        ))
     }
 }
 
@@ -243,6 +267,17 @@ fn default_cache_dir_from(home: Option<OsString>) -> Option<PathBuf> {
     home.map(|h| PathBuf::from(h).join(".fandhe-ai").join("models"))
 }
 
+/// 環境変数から読み取った値が空文字列の場合は「未設定」として扱う
+/// （`HOME=""` ／ `USERPROFILE=""` を有効なホームパスとして受理すると
+/// `PathBuf::from("")` はカレントディレクトリ相対の空パスになり、
+/// [`default_cache_dir_from`] が `.fandhe-ai/models`
+/// というカレントディレクトリ相対のキャッシュルートを構築してしまう
+/// ため。本来は [`ModelError::CacheDirUnavailable`] になるべき
+/// （Cursor Bugbot 指摘・PR #2226）。
+fn non_empty_os_string(value: Option<OsString>) -> Option<OsString> {
+    value.filter(|v| !v.is_empty())
+}
+
 /// `HOME`／`USERPROFILE` のどちらを優先するかを OS 別に決める純関数
 /// （環境変数の読み取り自体は [`ModelRegistry::new`] 側で行い、本関数は
 /// 選択ロジックのみを環境非依存の単体テストで検証できるように切り出した。
@@ -253,11 +288,20 @@ fn default_cache_dir_from(home: Option<OsString>) -> Option<PathBuf> {
 /// ルート `$USERPROFILE/.fandhe-ai/models` と一致させる。codex-review
 /// 指摘・PR #2226。`HOME` は両 OS で設定されうるため単純な `HOME`
 /// 優先だと Windows で乖離する）。それ以外の OS は `HOME` を優先する。
+///
+/// 空文字列の値は [`non_empty_os_string`] で「未設定」に正規化した
+/// うえで優先順位判定する（Cursor Bugbot 指摘・PR #2226。呼び出し元
+/// [`ModelRegistry::new`] 側でフィルタせず本関数側で行うのは、判定
+/// ロジックと正規化を分離すると将来どちらかだけが更新され再発しうる
+/// ため）。例えば `HOME=""`・`USERPROFILE="/x"` の非 Windows では
+/// `HOME` を空文字列のまま優先せず `USERPROFILE` へフォールバックする。
 fn select_home_var(
     is_windows: bool,
     home: Option<OsString>,
     userprofile: Option<OsString>,
 ) -> Option<OsString> {
+    let home = non_empty_os_string(home);
+    let userprofile = non_empty_os_string(userprofile);
     if is_windows {
         userprofile.or(home)
     } else {
@@ -410,7 +454,7 @@ impl ModelRegistry {
     /// [`ModelError::NotFound`] に丸める。権限エラー等それ以外の
     /// I/O 失敗は [`ModelError::Io`]。開いた同一ハンドルから読み
     /// 取ったバイト列を
-    /// [`load_safetensors_f32_from_bytes`](crate::interop::safetensors::load_safetensors_f32_from_bytes)
+    /// [`load_safetensors_f32_from_bytes`]
     /// （`crate::interop::safetensors`。#2019）へ委譲する（パスで
     /// 再度 open し直すと `resolve_model_file` が閉じた TOCTOU 窓が
     /// 復活するため、ハンドルの使い回しは必須。#2019）。転置・
@@ -573,5 +617,53 @@ mod tests {
     fn select_home_var_none_when_both_unset() {
         assert_eq!(select_home_var(true, None, None), None);
         assert_eq!(select_home_var(false, None, None), None);
+    }
+
+    #[test]
+    fn non_empty_os_string_filters_empty_value() {
+        // 空文字列は「未設定」として扱う（Cursor Bugbot 指摘・PR #2226。
+        // `HOME=""` をそのまま受理すると `PathBuf::from("")` がカレント
+        // ディレクトリ相対のキャッシュルートを構築してしまう）。
+        assert_eq!(non_empty_os_string(Some(OsString::from(""))), None);
+    }
+
+    #[test]
+    fn non_empty_os_string_keeps_non_empty_value() {
+        let value = Some(OsString::from("/home/x"));
+        assert_eq!(non_empty_os_string(value.clone()), value);
+    }
+
+    #[test]
+    fn non_empty_os_string_none_stays_none() {
+        assert_eq!(non_empty_os_string(None), None);
+    }
+
+    #[test]
+    fn select_home_var_none_when_both_empty_strings() {
+        // 空文字列の HOME／USERPROFILE を有効値扱いすると
+        // `default_cache_dir_from` が cwd 相対パスを構築してしまう
+        // 回帰の直接検証（Cursor Bugbot 指摘・PR #2226）。フィルタは
+        // `select_home_var` 内部で行われるため、ここで直接呼び出して
+        // 検証する（`ModelRegistry::new` の内部ロジックを再現するの
+        // ではなく、実際に呼ばれる関数そのものを検証する）。
+        let empty = || Some(OsString::from(""));
+        assert_eq!(select_home_var(true, empty(), empty()), None);
+        assert_eq!(select_home_var(false, empty(), empty()), None);
+        assert!(default_cache_dir_from(select_home_var(true, empty(), empty())).is_none());
+    }
+
+    #[test]
+    fn select_home_var_falls_back_when_preferred_is_empty_string() {
+        // 空文字列は「未設定」として扱われ、もう一方の値へフォールバック
+        // する（`or` の優先順位ロジック自体は不変）。
+        let value = Some(OsString::from("/x"));
+        assert_eq!(
+            select_home_var(false, Some(OsString::from("")), value.clone()),
+            value
+        );
+        assert_eq!(
+            select_home_var(true, value.clone(), Some(OsString::from(""))),
+            value
+        );
     }
 }

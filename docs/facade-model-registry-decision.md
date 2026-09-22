@@ -99,10 +99,30 @@ facade 新規公開面 7 件（`crates/facade/src/model.rs`。`crates/facade/tes
 1. `<root>/<name>`・`<name>/<version>`・葉ファイルの各段を [`std::fs::symlink_metadata`]（リンクを辿らない no-follow 検査）で検査し、いずれかがシンボリックリンク、または期待する型（ディレクトリ／通常ファイル）でなければ `NotFound` に丸める（`available_models` 側は `DirEntry::file_type()`（no-follow）で `name` 段を同様に検査する）。
 2. 葉パスを `Path::canonicalize` し、キャッシュルートの canonicalize 結果配下であることを多層防御として再確認する（多段リンク・パス正規化差異対策）。
 
-**採用しなかった対策**: `O_NOFOLLOW` での no-follow open（lstat→open 間の TOCTOU を完全に閉じる）には `libc` クレートの直接依存が要るが、`libc` は許容依存 9 区分（`deps-policy.md`）に含まれずユーザー承認なしに追加できない。本対策は std のみで構成し、lstat 検査後・実際の open までの間の TOCTOU（差し替えレース）は残る。想定脅威はレジストリ内に事前配置された悪意あるシンボリックリンクであり、実行時の差し替えレースは対象外とする。
+**本節時点（2026-09-22 初版）で採用しなかった対策・その後の撤回**: 当初は「`O_NOFOLLOW` での no-follow open（lstat→open 間の TOCTOU を完全に閉じる）には `libc` クレートの直接依存が要る」と判断し、std のみで構成して lstat 検査後・実際の open までの間の TOCTOU（差し替えレース）を対象外としていた。**この判断は同一 PR 内で撤回済み**（詳細は §13）: `libc` を追加せずとも `std::os::unix::fs::OpenOptionsExt::custom_flags` へ生の flag 値を渡すことで `O_NOFOLLOW`／`O_NONBLOCK` を実現でき、TOCTOU を実体識別子（`dev`／`ino`）照合で閉じられることが判明したため。
 
 **ルート自体がシンボリックリンクの場合は許容する**（`load_succeeds_when_root_itself_is_a_symlink` で固定）。拒否対象はレジストリ内部からの脱出のみであり、`with_cache_dir` に渡すルート自体の間接参照は妨げない。
 
 **Windows の既定ルート解決順序も同時に是正した**（P2・同 PR 指摘）: `ModelRegistry::new` は Windows では `USERPROFILE` を `HOME` より優先する（`cfg(windows)`）。従来は両 OS で `HOME` を先に見ており、公開ドキュメントが規定する Windows 既定ルート（`$USERPROFILE/.fandhe-ai/models`）と実装が乖離しうる欠陥だった。
 
 固定テストは `crates/facade/tests/model_registry.rs` の `load_rejects_symlinked_leaf_file_escaping_root`・`load_rejects_symlinked_version_dir_escaping_root`・`load_rejects_symlinked_name_dir_escaping_root`・`available_models_excludes_all_symlink_escape_variants`（いずれも `#[cfg(unix)]`）・`load_succeeds_when_root_itself_is_a_symlink`（過剰拒否でないことの確認）。
+
+## 13. TOCTOU（lstat〜open 間の差し替えレース）対策への切替（2026-09-22 追記・PR #2226 codex-review 指摘・P0／P2）
+
+§12 は「lstat 検査後・実際の open までの TOCTOU は `libc` 直接依存が要るため対象外」としていたが、この判断は誤りだったため撤回し、以下へ差し替えた。`libc` を追加せずとも `std::os::unix::fs::OpenOptionsExt::custom_flags` に生の `open(2)` flag 値（`O_NOFOLLOW`・`O_NONBLOCK`。カーネル UAPI ヘッダ由来の固定値。`crates/facade/src/model.rs` の `open_flags` モジュール参照）を直接渡せば、`libc` クレートなしで no-follow open が実現できる。
+
+**Linux／macOS の対策（実装済み）**:
+
+1. 葉ファイルを `symlink_metadata`（no-follow）で検査し、`is_file() == true` を明示要求する（`!is_dir()` ではなく。FIFO・Unix ソケット・デバイスファイル等の非通常ファイルも拒否）。
+2. 葉パスを canonicalize しキャッシュルート配下であることを多層防御として再確認する（§12 のスナップショット検査。単独では TOCTOU を閉じない）。
+3. 葉を `open_leaf_no_follow`（private 関数）で開く。`O_NOFOLLOW`（シンボリックリンクへの差し替えをカーネルレベルで拒否。ELOOP で検出）・`O_NONBLOCK`（FIFO への差し替えによる `open` の無期限ブロックを防ぐ）を付与する。
+4. 開いたハンドルの `fstat`（`File::metadata`）で `is_file()` を再確認したうえで、手順 1 の `symlink_metadata`（lstat）と `(dev, ino)` が一致することを検証する（「検査と open のハンドル一体化」）。手順 1〜3 の間に `name`／`version`／葉のいずれかが差し替えられても、開かれた実体の識別子は検査時点のものと一致しないため確実に検出できる（パスの再解決ではなく実体の同一性判定のため、中間ディレクトリの差し替えも同じ仕組みで捕捉する）。
+5. 以降は同じ `File` ハンドルから読み取ったバイト列を `load_safetensors_f32_from_bytes` へ渡す（パスで再度 open すると手順 3〜4 で閉じた TOCTOU 窓が復活するため、ハンドルの使い回しは必須）。
+
+**Linux／macOS 以外（Windows 等）の扱い（P0・2026-09-22 是正）**: 当初案は「対応する生 flag 値を持たないためプレーンな `File::open` にフォールバックし、`(dev, ino)` 照合は `#[cfg(unix)]` 限定で省略する」としていたが、これは公開ドキュメント（本 doc §3・crate doc）が明示的に Windows 配置（`$USERPROFILE/.fandhe-ai/models`）をサポートすると謳っているにもかかわらず、Windows では symlink_metadata 完了後〜`File::open` 前の TOCTOU 窓が無防備に残る欠陥だった（codex-review 指摘・PR #2226・P0）。許容依存 9 区分に `libc`／`windows-sys` が無く、Windows 向けの安全な no-follow open（`file_index`／`volume_serial_number` によるハンドル識別子照合を含む）を本 PR のスコープで確立できなかったため、**フォールバックではなく fail-closed 拒否**へ是正した: `open_leaf_no_follow` は Linux／macOS 以外では `ErrorKind::Unsupported` を返し、`resolve_model_file` はこれを `ModelError::Io` として伝播する。
+
+この伝播の呼び出し元ごとの帰結は次のとおり: `load` は常に `Err(ModelError::Io(..))` を返す（Windows では成功しない）。`available_models` は各バージョンの存在確認を `resolve_model_file(&name, &version).is_ok()` の真偽値でのみ行い、エラー内容を伝播しないため、Windows では該当バージョンが静かに一覧から除外され、結果として常に空の一覧を返す（エラーにはならない）。キャッシュディレクトリ解決自体（`USERPROFILE` 優先。§12）は Windows でも従来どおり動作する。安全な Windows 実装の追加はスコープ外として別イシューで追跡する（本 doc 更新時点では未起票。実装対象外の追跡規約 `out-of-scope-tracking.md` に従いユーザー承認を経て追跡する）。
+
+**対象外として残る経路（不変）**: レジストリ内に事前配置されたハードリンク（攻撃者が任意タイミングで作成できるのは同一ファイルシステム上の既存ファイルへのリンクのみであり、所有者・権限チェックを伴わない本レジストリの脅威モデル外）。
+
+固定テストは §12 記載分に加え、`crates/facade/tests/model_registry.rs` の `load_rejects_non_regular_leaf_unix_socket`・`load_rejects_leaf_replaced_with_symlink_after_initial_write`（Unix ソケットの葉拒否・差し替え後の葉拒否。いずれも `#[cfg(unix)]`）、および `crates/facade/src/model.rs` の単体テスト（`non_empty_os_string_*`・`select_home_var_none_when_both_empty_strings`・`select_home_var_falls_back_when_preferred_is_empty_string`。空文字列 HOME／USERPROFILE の扱い。Cursor Bugbot 指摘・PR #2226）を追加した。
