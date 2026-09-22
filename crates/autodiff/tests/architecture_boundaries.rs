@@ -534,25 +534,48 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // 波括弧 import や `pub type Tensor = BackendOps;` のような可視性
     // 修飾付き宣言を検出できなかった。`split_top_level_statements` は
     // 波括弧のペアをまたいで `;` まで 1 文として保持するため、複数行
-    // `use` もひと続きの文字列として `.contains(" as ")` 判定できる）。
+    // `use` もひと続きの文字列として判定できる）。
+    //
+    // `use` 文自体の判定は `strip_visibility_prefix` を先に適用する
+    // （codex-review 指摘・PR #2212 その 4／Bugbot 指摘: 旧実装は
+    // `statement.starts_with("use ")` のみを見ており、`pub use`・
+    // `pub(crate) use` のような可視性修飾付き use 文を素通りしていた。
+    // `type ` 判定と同じ「可視性修飾を読み飛ばしてから判定する」方針に
+    // 揃える）。
+    //
+    // alias 検出は `.contains(" as ")` の固定文字列一致ではなく、
+    // `extract_identifier_tokens` によるトークン化を用いる
+    // （codex-review 指摘・PR #2212 その 4: タブ区切り
+    // `BackendOps\tas\tTensor` や `BackendOps as/* alias */Tensor`
+    // のようにコメントが `as` 直後へ隙間なく挟まるケースは、前後に
+    // 半角スペースを要求する `" as "` 一致では見逃す。`as` は Rust の
+    // 予約語で識別子として現れないため、トークン列に独立した `as`
+    // トークンが 1 つでも含まれていれば alias import とみなせる。
+    // トークナイザは英数字／`_`／先頭の `'` のみを識別子境界とするため、
+    // 空白種別（スペース・タブ・改行）やコメント区切り文字（`/*`・`*/`）
+    // の違いに影響されない）。
     let no_comments: String = content
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
     for statement in split_top_level_statements(&no_comments) {
-        if statement.starts_with("use ") {
+        let after_visibility = strip_visibility_prefix(&statement);
+        if after_visibility.starts_with("use ") {
+            let has_as_token = extract_identifier_tokens(after_visibility)
+                .iter()
+                .any(|token| token == "as");
             assert!(
-                !statement.contains(" as "),
+                !has_as_token,
                 "src/custom.rs の use 文にエイリアス（`use ... as ...`）が含まれている: \
-                 {statement}（複数行の波括弧 import を含む。禁止型を別名で混入させる経路に\
-                 なりうるため、本ファイルではエイリアス import を使わない設計とする）"
+                 {statement}（複数行の波括弧 import・可視性修飾・タブ区切り・コメント挟み込み\
+                 を含む。禁止型を別名で混入させる経路になりうるため、本ファイルではエイリアス\
+                 import を使わない設計とする）"
             );
         }
         // `pub`／`pub(crate)` 等の可視性修飾を読み飛ばしてから `type ` を
         // 判定する（旧実装は `type ` 始まりの行しか見ておらず `pub type`
         // を取りこぼしていた）。
-        let after_visibility = strip_visibility_prefix(&statement);
         if after_visibility.starts_with("type ") {
             for forbidden in FORBIDDEN_IDENTIFIERS {
                 assert!(
@@ -589,9 +612,11 @@ fn var_rs_does_not_declare_pub_fn_custom() {
     );
 }
 
-/// codex-review 指摘（PR #2212 その 3）が挙げた 2 つのバイパスシナリオ
-/// （ジェネリクス／where 節側の偽装トークン・複数行または可視性付き
-/// alias）を、実際に新実装が検出できることを固定する回帰テスト。
+/// codex-review 指摘（PR #2212 その 3・その 4）・Bugbot 指摘（PR #2212）
+/// が挙げたバイパスシナリオ（ジェネリクス／where 節側の偽装トークン・
+/// 複数行または可視性付き alias・タブ区切りやコメント挟み込みの alias・
+/// `pub use`／`pub(crate) use` 等の可視性修飾付き alias import）を、
+/// 実際に新実装が検出できることを固定する回帰テスト。
 #[test]
 fn architecture_boundary_bypass_scenarios_are_detected() {
     // 1) supertrait 自体を削除し、ジェネリクス仮引数名・where 節側に
@@ -606,7 +631,7 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
     );
 
     // 2) 複数行の波括弧 use エイリアスが 1 ステートメントとして結合され、
-    //    `.contains(" as ")` 判定の対象になる。
+    //    トークン化した識別子列に `as` トークンが含まれる。
     let forged_use = "use crate::{\n    BackendOps as Tensor,\n};\n";
     let statements = split_top_level_statements(forged_use);
     assert_eq!(
@@ -615,7 +640,11 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
         "複数行 use 文が 1 文として結合されていない: {statements:?}"
     );
     assert!(statements[0].starts_with("use "));
-    assert!(statements[0].contains(" as "));
+    assert!(
+        extract_identifier_tokens(&statements[0])
+            .iter()
+            .any(|token| token == "as")
+    );
 
     // 3) 可視性修飾付き type alias（`pub type ...`）も `type ` 始まりと
     //    同一視して検出される。
@@ -627,5 +656,66 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
             "pub type を検出できていない: {after_vis}"
         );
         assert!(contains_identifier(after_vis, "BackendOps"));
+    }
+
+    // 4) タブ区切り alias（codex-review 指摘・PR #2212 その 4）:
+    //    `" as "`（前後半角スペース固定）の文字列一致では見逃すが、
+    //    トークン化すれば `as` が独立した識別子として抽出される。
+    let forged_use_tab = "use crate::BackendOps\tas\tTensor;\n";
+    for statement in split_top_level_statements(forged_use_tab) {
+        let after_vis = strip_visibility_prefix(&statement);
+        assert!(after_vis.starts_with("use "));
+        assert!(
+            !after_vis.contains(" as "),
+            "このシナリオは前後スペース固定の文字列一致では検出できないことの前提確認"
+        );
+        assert!(
+            extract_identifier_tokens(after_vis)
+                .iter()
+                .any(|token| token == "as"),
+            "タブ区切り alias の as トークンを検出できていない: {after_vis}"
+        );
+    }
+
+    // 5) コメント挟み込み alias（codex-review 指摘・PR #2212 その 4）:
+    //    `as` の直後に空白なしでブロックコメントが続くと `" as "` 一致
+    //    では見逃すが、トークン化すれば影響されない。
+    let forged_use_comment = "use crate::BackendOps as/* alias */Tensor;\n";
+    for statement in split_top_level_statements(forged_use_comment) {
+        let after_vis = strip_visibility_prefix(&statement);
+        assert!(after_vis.starts_with("use "));
+        assert!(
+            !after_vis.contains(" as "),
+            "このシナリオは前後スペース固定の文字列一致では検出できないことの前提確認"
+        );
+        assert!(
+            extract_identifier_tokens(after_vis)
+                .iter()
+                .any(|token| token == "as"),
+            "コメント挟み込み alias の as トークンを検出できていない: {after_vis}"
+        );
+    }
+
+    // 6) 可視性修飾付き alias import（Bugbot 指摘。`pub use`・
+    //    `pub(crate) use` は旧実装の `statement.starts_with("use ")`
+    //    判定を素通りしていた）。`strip_visibility_prefix` を先に適用
+    //    すればどちらも `use ` 始まりとして検出対象になる。
+    for forged_pub_use in [
+        "pub use crate::BackendOps as Tensor;\n",
+        "pub(crate) use crate::BackendOps as Tensor;\n",
+    ] {
+        for statement in split_top_level_statements(forged_pub_use) {
+            let after_vis = strip_visibility_prefix(&statement);
+            assert!(
+                after_vis.starts_with("use "),
+                "可視性修飾付き use 文を検出できていない: {statement} -> {after_vis}"
+            );
+            assert!(
+                extract_identifier_tokens(after_vis)
+                    .iter()
+                    .any(|token| token == "as"),
+                "可視性修飾付き alias import の as トークンを検出できていない: {after_vis}"
+            );
+        }
     }
 }
