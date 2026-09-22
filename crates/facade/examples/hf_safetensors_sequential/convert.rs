@@ -365,6 +365,23 @@ pub fn from_pytorch_layout(
             LayerKind::TransformerEncoder => {
                 let in_proj_weight = take(&sub, "self_attn.in_proj_weight")?;
                 let in_proj_bias = take(&sub, "self_attn.in_proj_bias")?;
+                // shape 検証（rank 検査）を `shape()[1]` の index より先に行う
+                // （`.claude/rules/security.md` A03「境界検査を省略しない」・
+                // 本モジュール doc §「REQ-7 契約」3.）。rank 不足の入力
+                // （例 shape `[24]`）で `shape()[1]` が index out of bounds
+                // panic するのを防ぐ。embed_dim 自体の妥当性（`3 * e` 行数と
+                // 一致するか等）は後続の [`split_in_proj`] 内 `check_shape` が
+                // 検査する。
+                if in_proj_weight.shape().len() != 2 {
+                    // embed_dim 未確定のため expected は rank（次元数）のみを
+                    // 示す（`[3*E, E]` の `E` は shape 検査後にしか分から
+                    // ない）。
+                    return Err(ConvertError::ShapeMismatch {
+                        key: format!("{idx}.self_attn.in_proj_weight（rank）"),
+                        expected: vec![2],
+                        actual: vec![in_proj_weight.shape().len()],
+                    });
+                }
                 let embed_dim = in_proj_weight.shape()[1];
 
                 let (q_w, q_b, k_w, k_b, v_w, v_b) =
@@ -384,6 +401,15 @@ pub fn from_pytorch_layout(
                 );
                 out.insert(format!("{idx}.self_attn.out_proj.bias"), out_proj_b.clone());
 
+                let mut known_keys: std::collections::HashSet<&str> = [
+                    "self_attn.in_proj_weight",
+                    "self_attn.in_proj_bias",
+                    "self_attn.out_proj.weight",
+                    "self_attn.out_proj.bias",
+                ]
+                .into_iter()
+                .collect();
+
                 for (rest, transpose) in [
                     ("linear1.weight", true),
                     ("linear1.bias", false),
@@ -401,6 +427,22 @@ pub fn from_pytorch_layout(
                         t.clone()
                     };
                     out.insert(format!("{idx}.{rest}"), converted);
+                    known_keys.insert(rest);
+                }
+
+                // REQ-7「無言 skip 禁止」: 上記の既知キー集合を take() で
+                // 消費した後、`sub` に未消費キーが残っていれば
+                // `{idx}.self_attn.` 等のプレフィックスを持つ「未知の」
+                // 余剰キーが無言で drop されていたことになる。ここで明示
+                // 検査し [`ConvertError::UnexpectedKey`] で拒否する。
+                let mut unexpected: Vec<&str> = sub
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|k| !known_keys.contains(k))
+                    .collect();
+                unexpected.sort_unstable();
+                if let Some(rest) = unexpected.first() {
+                    return Err(ConvertError::UnexpectedKey(format!("{idx}.{rest}")));
                 }
             }
         }

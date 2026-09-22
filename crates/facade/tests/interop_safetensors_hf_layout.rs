@@ -210,6 +210,55 @@ fn in_proj_shape_mismatch_is_typed_error() {
     }
 }
 
+/// `{idx}.self_attn.` プレフィックスを持つ「未知の」余剰キー（例:
+/// `1.self_attn.extra_buffer`）は `unexpected_key_is_rejected_not_dropped`
+/// がカバーするプレフィックスなしキー（`position_ids`）とは別経路
+/// （`split_index_prefix` で `Some((idx, rest))` になるため
+/// `extra_allowlist` 判定を経由せず `{idx}.` グループへ入る）を通る。
+/// 既知の 12 キーを消費した後、`sub` に本キーが未消費で残っていれば
+/// 無言 drop されず `UnexpectedKey` で拒否される（REQ-7「無言 skip
+/// 禁止」。コードレビュー指摘の回帰テスト）。
+#[test]
+fn unexpected_prefixed_key_within_layer_is_rejected_not_dropped() {
+    let (mut pt, _model) = synthetic_pytorch_checkpoint();
+    pt.insert(
+        "1.self_attn.extra_buffer".to_string(),
+        Tensor::new(vec![0.0_f32], &[1]).unwrap(),
+    );
+
+    let err = from_pytorch_layout(&pt, &["lm_head.weight"]).unwrap_err();
+    match err {
+        ConvertError::UnexpectedKey(key) => {
+            assert_eq!(key, "1.self_attn.extra_buffer");
+        }
+        other => panic!("UnexpectedKey を期待したが {other:?} だった"),
+    }
+}
+
+/// `in_proj_weight` が rank-1（例 shape `[24]`）等、`shape()[1]` の
+/// index が範囲外になる不正 shape の場合でも `from_pytorch_layout` は
+/// panic せず型付き `Err` を返す（`.claude/rules/security.md` A03
+/// 「境界検査を省略しない」。コードレビュー指摘の回帰テスト:
+/// 修正前は `embed_dim = in_proj_weight.shape()[1]` が shape 検証より
+/// 先に実行され `index out of bounds` で panic していた）。
+#[test]
+fn in_proj_rank1_weight_is_typed_error_not_panic() {
+    let (mut pt, _model) = synthetic_pytorch_checkpoint();
+    pt.insert(
+        "1.self_attn.in_proj_weight".to_string(),
+        Tensor::new(vec![0.0_f32; 3 * EMBED_DIM], &[3 * EMBED_DIM]).unwrap(),
+    );
+
+    let err = from_pytorch_layout(&pt, &["lm_head.weight"]).unwrap_err();
+    match err {
+        ConvertError::ShapeMismatch { key, actual, .. } => {
+            assert_eq!(key, "1.self_attn.in_proj_weight（rank）");
+            assert_eq!(actual, vec![1]);
+        }
+        other => panic!("ShapeMismatch を期待したが {other:?} だった"),
+    }
+}
+
 /// `lm_head.weight`（`Sequential` の位置 index 接頭辞を持たない余剰
 /// テンソル）が `from_pytorch_layout` の 2 つ目の戻り値（`extra`）へ
 /// 分離され、1 つ目の戻り値（`Sequential` 側キー集合）には混入しない。
