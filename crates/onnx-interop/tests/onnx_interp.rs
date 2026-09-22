@@ -154,6 +154,7 @@ fn minimal_model_with_node(node: NodeProto, inputs: Vec<&str>, outputs: Vec<&str
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![node],
             name: "g".to_string(),
             initializer: vec![],
@@ -319,6 +320,7 @@ fn run_feed_overrides_initializer_pre_ir4_pattern() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![node],
             name: "g".to_string(),
             initializer: vec![init],

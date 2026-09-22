@@ -28,7 +28,9 @@
 //! 参照）。未対応 `op_type` は無言 skip せず [`OnnxError::UnsupportedOp`]
 //! で fail-closed に拒否する（no-silent-skip 契約。`.claude/rules/
 //! security.md` A03）。`run` の `feeds` は ONNX の pre-IR-4 セマンティクス
-//! どおり同名 initializer を上書きする。
+//! どおり同名 initializer を上書きする。`GraphProto.sparse_initializer` が
+//! 非空の場合も同じ契約に従い [`OnnxError::SparseInitializerNotSupported`]
+//! で拒否する（sparse テンソルは非対応。イシュー #2079）。
 //!
 //! [`OnnxValue::F16`] は `half::f16` を素通しする。facade は `half` を
 //! 再エクスポートしないため、`half::f16` を名指しして扱うには利用者側が
@@ -104,7 +106,12 @@
 //! 行わない。入力総バイト数・要素数の明示上限は導入していない
 //! （`build_graph` の長さ整合検査がバイト長を初期入力長で抑える。値の
 //! 決定にユーザー承認が要るため本 issue のスコープ外。
-//! `docs/facade-onnx-import-exposure-decision.md` §6.3 参照）。
+//! `docs/facade-onnx-import-exposure-decision.md` §6.3 参照）。`from_bytes`
+//! は `onnx::proto::decode_model` の bounded 事前走査（イシュー #2079
+//! codex-review 是正。`proto.rs` モジュール冒頭コメント「メモリ増幅対策」
+//! 節）による `sparse_initializer` の早期 fail-closed 拒否を
+//! `map_decode_error`（非公開関数）でそのまま [`OnnxError::SparseInitializerNotSupported`]
+//! へ写像する（`build_graph` 側の同名エラーと同じ payload）。
 
 use std::collections::HashMap;
 use std::fmt;
@@ -117,7 +124,7 @@ use fandhe_ai_onnx_interop::onnx::graph::{Graph, GraphError, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{
     InterpError, Value as InterpValue, run as interp_run, run_with_ops as interp_run_with_ops,
 };
-use fandhe_ai_onnx_interop::onnx::proto::{decode_model, encode_model};
+use fandhe_ai_onnx_interop::onnx::proto::{DecodeModelError, decode_model, encode_model};
 use fandhe_ai_tensor_core::f16;
 
 use crate::Device;
@@ -194,9 +201,7 @@ impl OnnxModel {
     /// protobuf デコード（[`OnnxError::Decode`]）→ 内部グラフ構築
     /// （形状・トポロジ検証。該当する `OnnxError` variant）の順で検証する。
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, OnnxError> {
-        let model = decode_model(bytes).map_err(|e| OnnxError::Decode {
-            message: e.to_string(),
-        })?;
+        let model = decode_model(bytes).map_err(map_decode_error)?;
         let graph = build_graph(&model).map_err(map_graph_error)?;
         Ok(Self { graph })
     }
@@ -400,6 +405,10 @@ pub enum OnnxError {
     /// decode 経由〈`InterpError::Graph(GraphError::UnknownDataType)`〉の
     /// 両方をこの variant へ写像する）。
     UnsupportedDataType { tensor_name: String, data_type: i32 },
+    /// `GraphProto.sparse_initializer` が非空（`GraphError::
+    /// SparseInitializerNotSupported`）。sparse テンソルは非対応のため
+    /// fail-closed に拒否する（イシュー #2079）。
+    SparseInitializerNotSupported { tensor_name: String, count: usize },
     /// 未対応の `op_type`（`InterpError::UnsupportedOp`。import 実行時）、
     /// または export 時の allowlist 外 op（`ExportError::UnsupportedOp`。
     /// `op_type` が既定 domain 以外の場合は `"{domain}::{op_type}"`
@@ -441,6 +450,10 @@ impl fmt::Display for OnnxError {
                 f,
                 "未対応の ONNX data_type（tensor={tensor_name}）: {data_type}"
             ),
+            OnnxError::SparseInitializerNotSupported { tensor_name, count } => write!(
+                f,
+                "未対応の ONNX sparse_initializer（tensor={tensor_name}・count={count}）: sparse テンソルは非対応"
+            ),
             OnnxError::UnsupportedOp { op_type } => write!(f, "未対応の ONNX op_type: {op_type}"),
             OnnxError::MissingFeed { input } => {
                 write!(f, "グラフ入力 '{input}' に対応する feed がありません")
@@ -469,6 +482,24 @@ impl std::error::Error for OnnxError {
     }
 }
 
+/// `DecodeModelError` → `OnnxError` 写像（`decode_model` のエラー経路。
+/// イシュー #2079 codex-review 是正）。`sparse_initializer` の bounded
+/// 事前走査による早期拒否（[`DecodeModelError::SparseInitializerNotSupported`]）
+/// を `map_graph_error` の同名分岐と同じ payload で `OnnxError::
+/// SparseInitializerNotSupported` へ写像することで、拒否が
+/// `decode_model` 側・`build_graph` 側のどちらで起きても facade 利用者
+/// から見た結果が同一になるようにする。
+fn map_decode_error(e: DecodeModelError) -> OnnxError {
+    match e {
+        DecodeModelError::Wire(err) => OnnxError::Decode {
+            message: err.to_string(),
+        },
+        DecodeModelError::SparseInitializerNotSupported { tensor_name, count } => {
+            OnnxError::SparseInitializerNotSupported { tensor_name, count }
+        }
+    }
+}
+
 /// `GraphError` → `OnnxError` 写像（モデル構築時のエラー経路）。
 fn map_graph_error(e: GraphError) -> OnnxError {
     match e {
@@ -479,6 +510,9 @@ fn map_graph_error(e: GraphError) -> OnnxError {
             tensor_name,
             data_type,
         },
+        GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+            OnnxError::SparseInitializerNotSupported { tensor_name, count }
+        }
         other => OnnxError::InvalidModel {
             message: other.to_string(),
         },

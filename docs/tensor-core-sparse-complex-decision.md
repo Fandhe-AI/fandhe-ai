@@ -127,3 +127,19 @@ spec REQ-9 の 2026-09-12 追記は、互換 API 層の対象範囲を PyTorch�
 | `.claude/rules/coding-rust.md` | REQ-1 完全自作コア・REQ-2 バックエンド構成（数値一致複合判定・FMA 契約）・REQ-8 カーネル境界検査 |
 | `.claude/rules/security.md`「A03」節 | 無言 skip 禁止の一般原則（ONNX proto.rs コメントが引用） |
 | `.claude/rules/out-of-scope-tracking.md` | 対象外事項の Issue 追跡規約 |
+
+## 13. 追補（イシュー #2079・2026-09-22）: §9(a) の引き継ぎは解消済み
+
+§9(a)・§11 に記録した「ONNX `sparse_initializer` 無言スキップの
+fail-closed 化」の引き継ぎ候補は、イシュー #2079 で実装済みである。
+`GraphProto` に `sparse_initializer`（tag=15。検出専用の
+`SparseTensorProto`）を宣言し、`graph::build_graph` が非空を
+`GraphError::SparseInitializerNotSupported` で fail-closed に拒否する
+ように是正した（facade 側は `OnnxError::SparseInitializerNotSupported`
+へ写像。詳細は `docs/facade-onnx-import-exposure-decision.md` §13）。
+
+§2 の「本 issue では是正せず §7 の引き継ぎ候補として記録するのみ」と
+いう記述、および §9(a)・§11 の引き継ぎ候補としての記載自体は、当時の
+事実の記録として変更しない。sparse テンソルの実装（COO 形式の
+`values`／`indices` の解釈）自体は本追補後も引き続きスコープ外（REQ-9）
+のままである。

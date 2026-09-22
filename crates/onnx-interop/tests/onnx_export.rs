@@ -49,6 +49,7 @@ fn roundtrip_via_build_graph(name: &str, tensor: &RawTensor) -> RawTensor {
             input: vec![],
             output: vec![],
             value_info: vec![],
+            sparse_initializer: vec![],
         }),
         opset_import: Vec::new(),
     };
@@ -346,5 +347,23 @@ fn build_model_proto_value_info_is_always_empty() {
             .value_info
             .is_empty(),
         "value_info は常に空という契約（Graph が型／形状情報を保持しないため）"
+    );
+}
+
+#[test]
+fn build_model_proto_emits_empty_sparse_initializer() {
+    // 契約: 常に空（内部 `Graph` は sparse テンソルを保持しない設計のため。
+    // イシュー #2079）。
+    let model = load_model("model.onnx");
+    let graph = build_graph(&model).expect("build_graph は成功するはず");
+    let exported =
+        build_model_proto(&graph, &ExportOptions::default()).expect("export は成功するはず");
+    assert!(
+        exported
+            .graph
+            .expect("graph はあるはず")
+            .sparse_initializer
+            .is_empty(),
+        "sparse_initializer は常に空という契約"
     );
 }

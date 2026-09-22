@@ -34,6 +34,30 @@ TASK-7.2a（イシュー #77）向けに `docs/spec`（正本 submodule）の
     `const_gather_idx` shape=[1] data=[0]
   - input=`["x"]`、output=`["output"]`
 
+## `sparse_initializer.onnx`（95 bytes）
+
+`docs/spec` の PoC 由来ではなく、本リポで合成したフィクスチャである（冒頭の
+出自説明の例外）。イシュー #2079（ONNX `sparse_initializer` の fail-closed
+拒否）向けに `proto::encode_model` で生成した。
+
+- sha256: `bb6ad2eaa294cb75f498f2d02116faae9e1ea407b13d8600762f274bb3353967`
+- 構造:
+  - `ir_version=8`・`producer_name="fandhe-ai-test"`・graph 名 `g`
+  - node（1）: `["relu"]`（`op_type="Relu"`・`input=["x"]`・`output=["y"]`）
+  - input=`["x"]`、output=`["y"]`
+  - `initializer` は空（dense initializer なし）
+  - `sparse_initializer`（1）: `values.name="w_sparse"`（`data_type=FLOAT`・
+    `dims=[1]`・`float_data=[1.0]`）・`indices`（`data_type=INT64`・
+    `dims=[1]`・`int64_data=[0]`）・`dims=[2]`
+- 用途: `graph::build_graph`（内部クレート）・facade `OnnxModel::from_path`／
+  `from_bytes` が `sparse_initializer` の非空を検出して
+  `GraphError::SparseInitializerNotSupported`／
+  `OnnxError::SparseInitializerNotSupported` を返すことを確認する
+  （`tensor_name="w_sparse"`・`count=1`）。生成方法: `proto::encode_model` を
+  呼ぶ一時的なテスト（リポにはコミットしていない）で書き出し、`xxd` で
+  `sparse_initializer`（tag=15 → ワイヤ上のタグバイト `0x7a`）の出現を
+  目視確認した。
+
 ## `transformer.onnx`（コミットしない）
 
 12MB 超のバイナリのためリポジトリにコミットしない（`docs/spec` の
