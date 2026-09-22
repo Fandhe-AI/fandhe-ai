@@ -46,8 +46,23 @@ const MAX_READ_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// サイズ上限を検査してからファイル全体を読み込む（A03 対策の共通経路）。
 /// `.onnx`・`input_0.pb`・`output_0.pb` の 3 箇所すべてがこの関数を経由する。
+///
+/// `std::fs::metadata(path)` でサイズ検査した後に `std::fs::read(path)` で
+/// パスを再度開くと、両呼び出しの間にファイル（または symlink 先）を
+/// 差し替えられて上限検査を迂回される TOCTOU が生じる（codex-review 指摘・
+/// PR #2225）。検査対象と読み込み対象を同一の `File` ハンドルに固定するため、
+/// 一度だけ `open` し、そのハンドルに対して `metadata` 取得と
+/// `MAX_READ_BYTES + 1` バイトまでの読み込みを行う。実読込量が上限を
+/// 超えた場合は fail-closed で拒否する（`len` 事前検査と実読込量検査の
+/// 二重防御。事前の `len` が小さくても読み込み中にファイルが伸長される
+/// 可能性への保険を兼ねる）。
 fn read_file_bounded(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
-    let metadata = std::fs::metadata(path)
+    use std::io::Read;
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("ファイルオープン失敗: {} ({e})", path.display()))?;
+    let metadata = file
+        .metadata()
         .map_err(|e| format!("メタデータ取得失敗: {} ({e})", path.display()))?;
     let len = metadata.len();
     if len > MAX_READ_BYTES {
@@ -57,7 +72,21 @@ fn read_file_bounded(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
         )
         .into());
     }
-    Ok(std::fs::read(path)?)
+
+    // 上限を 1 バイトでも超えたら検出できるよう MAX_READ_BYTES + 1 まで読む。
+    let mut buf = Vec::new();
+    let read_len = file
+        .take(MAX_READ_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("読み込み失敗: {} ({e})", path.display()))?;
+    if read_len as u64 > MAX_READ_BYTES {
+        return Err(format!(
+            "ファイルサイズ上限超過（読み込み時検査）: {} (> {MAX_READ_BYTES} bytes)",
+            path.display()
+        )
+        .into());
+    }
+    Ok(buf)
 }
 
 /// 引数で受け取ったモデルディレクトリから `<basename>.onnx` を探す。
