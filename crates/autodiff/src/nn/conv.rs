@@ -20,7 +20,8 @@
 //! 追加しない）。
 
 use fandhe_ai_tensor_core::{
-    BackendOps, Conv2dParams, ShapeError, Tensor, conv_transpose2d_out_shape, conv2d_out_shape,
+    BackendOps, Conv2dParams, ScalarDType, ShapeError, Tensor, conv_transpose2d_out_shape,
+    conv2d_out_shape,
 };
 
 use crate::error::AutodiffError;
@@ -454,6 +455,28 @@ impl<'t> Conv2dVars<'t> {
             self.groups,
         )
     }
+}
+
+/// [`Conv2dVars::forward`] の opt-in 低精度版（イシュー #2071・親
+/// #1626／#1648）。`nn::linear::linear_forward_low_precision` と同じ
+/// 配置理由（`Conv2dVars` へフィールドを追加しない自由関数。`pub
+/// weight`／`pub bias` を持つ struct のため破壊的変更を避ける）。
+/// `Var::conv2d_low_precision` への薄い委譲であり、追加の shape 検査は
+/// `Var::conv2d_low_precision` 自身に任せる。
+pub fn conv2d_forward_low_precision<'t>(
+    vars: &Conv2dVars<'t>,
+    input: &Var<'t>,
+    dtype: ScalarDType,
+) -> Result<Var<'t>, AutodiffError> {
+    input.conv2d_low_precision(
+        &vars.weight,
+        vars.bias.as_ref(),
+        vars.stride,
+        vars.padding,
+        vars.dilation,
+        vars.groups,
+        dtype,
+    )
 }
 
 /// ConvTranspose2d 層のパラメータ本体（イシュー #2067）。`weight` は

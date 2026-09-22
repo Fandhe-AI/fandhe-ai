@@ -3196,9 +3196,177 @@ impl<'t> Var<'t> {
                 weight: weight.id,
                 bias: bias.map(|b| b.id),
                 params,
+                compute_dtype: fandhe_ai_tensor_core::ScalarDType::F32,
             },
             value_out,
         );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// [`Self::conv2d`] の opt-in 低精度版（イシュー #2071・親 #1626／
+    /// #1648・`docs/autodiff-low-precision-linear-design.md` §8）。
+    /// `fandhe_ai_tensor_core::conv2d_forward_low_precision`
+    /// （`TypedOps<f16>`／`TypedOps<bf16>` 経由）へ GEMM＋bias 加算の
+    /// 計算のみを委譲する opt-in 経路。`nn::conv::
+    /// conv2d_forward_low_precision`（自由関数。`Conv2dVars` へ
+    /// フィールドを追加しない配置。`nn::linear::
+    /// linear_forward_low_precision` と同型）の唯一の呼び出し元。
+    ///
+    /// **im2col は f32 のまま**: `grad::im2col_with_fallback` は
+    /// 算術を伴わない bit 完全一致コピー（`col` の各要素は `input` の
+    /// 値をそのまま並べ替えるのみ）のため低精度化の対象外——低精度化
+    /// するのは `TypedOps<T>` 側の GEMM（`col` × `weight`）と bias
+    /// 加算のみ（[`fandhe_ai_tensor_core::conv2d_forward_low_precision`]
+    /// doc 参照）。
+    ///
+    /// **`weight`／`bias`（f32 master 値）・backward は [`Self::
+    /// conv2d`] と完全に同一**: `Op::Conv2d` は
+    /// `is_checkpoint_eligible() == false`（常に実体化済み）かつ
+    /// `supports_create_graph() == false`（二階微分 replay 対象外）
+    /// のため、`TapeNode::low_precision`／`create_graph::
+    /// validate_ancestors` の対象外（[`Self::matmul_low_precision`]
+    /// と異なり `Op::MatMul` の checkpoint／replay 経路を持たない）。
+    /// `grad::vjp` の `Op::Conv2d` 分岐は `compute_dtype` を読まず
+    /// 常に f32 backward を行う。
+    #[allow(clippy::too_many_arguments)] // Var::conv2d と同じ理由（PyTorch nn.Conv2d の全引数＋dtype を受理する必要があるため）。
+    pub(crate) fn conv2d_low_precision(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+        groups: usize,
+        dtype: fandhe_ai_tensor_core::ScalarDType,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(weight)?;
+        if let Some(b) = bias {
+            self.check_same_tape(b)?;
+        }
+
+        let weight_shape = weight.shape();
+        if weight_shape.len() != 4 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 4,
+                actual: weight_shape.len(),
+            }));
+        }
+        let kernel_size = [weight_shape[2], weight_shape[3]];
+        let params = Conv2dParams::new(kernel_size, stride, padding, dilation, groups)
+            .map_err(AutodiffError::Backend)?;
+
+        let in_shape = self.shape();
+        let out_shape =
+            conv2d_out_shape(&in_shape, &weight_shape, &params).map_err(AutodiffError::Shape)?;
+        if let Some(b) = bias {
+            let bias_shape = b.shape();
+            let cout = weight_shape[0];
+            if bias_shape != [cout] {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: bias_shape,
+                    rhs: vec![cout],
+                }));
+            }
+        }
+
+        let input_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone()
+        };
+        let weight_val = {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), weight.id)?.clone()
+        };
+        let bias_val = match bias {
+            Some(b) => {
+                let nodes = self.tape.nodes.borrow();
+                Some(materialize_fallible(&nodes, self.tape.ops(), b.id)?.clone())
+            }
+            None => None,
+        };
+
+        let im2col_shape = fandhe_ai_tensor_core::im2col_out_shape(&in_shape, &params)
+            .map_err(AutodiffError::Shape)?;
+        let col =
+            crate::grad::im2col_with_fallback(self.tape.ops(), &input_val, &params, &im2col_shape)?;
+
+        let value_out = fandhe_ai_tensor_core::conv2d_forward_low_precision(
+            self.tape.ops(),
+            dtype,
+            &col,
+            &weight_val,
+            bias_val.as_ref(),
+            &out_shape,
+        )
+        .map_err(AutodiffError::Backend)?;
+        if value_out.shape() != out_shape {
+            return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch {
+                    lhs: value_out.shape().to_vec(),
+                    rhs: out_shape,
+                },
+            )));
+        }
+        let id = self.tape.push_eager(
+            Op::Conv2d {
+                input: self.id,
+                weight: weight.id,
+                bias: bias.map(|b| b.id),
+                params,
+                compute_dtype: dtype,
+            },
+            value_out,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// [`Self::matmul`] の opt-in 低精度版（イシュー #2071・親 #1626／
+    /// #1648）。`fandhe_ai_tensor_core::matmul_low_precision`
+    /// （`TypedOps<f16>`／`TypedOps<bf16>` 経由。rank 2 は
+    /// `TypedOps::gemm` 直接委譲・rank≥3 は per-batch ループ）へ
+    /// forward 値計算のみを委譲する opt-in 経路。`crate::attention`
+    /// の低精度 SDPA・`nn::attention` の低精度 MultiheadAttention が
+    /// 経由する。
+    ///
+    /// **checkpoint／create_graph からの除外（`TapeNode::
+    /// low_precision`）**: `Op::MatMul` は既定で `is_checkpoint_
+    /// eligible() == true`（activation checkpointing が解放し
+    /// `matmul_forward`〈`ops.gemm`。常に f32〉で再計算してよい対象）
+    /// かつ `supports_create_graph() == true`（`create_graph` が子
+    /// テープへ replay できる対象）だが、いずれも「精度情報を持たない
+    /// `Op::MatMul(a, b)` のみから forward を再現する」ため、低精度
+    /// ノードをそのまま通すと静かに f32 精度へフォールバックしてしまう
+    /// （fail-closed 方針違反。`.claude/rules/security.md` A04）。
+    /// `matmul_fp32_strict` が `TapeNode::fp32_strict` で checkpoint
+    /// 除外するのと同型のノード単位フラグ（`TapeNode::low_precision`）
+    /// を立てることで、①解放対象から除外（`release_checkpoint_
+    /// region`）②`create_graph::validate_ancestors` が祖先に含まれた
+    /// 時点で無条件拒否、の 2 経路とも fail-closed に塞ぐ
+    /// （`create_graph.rs` 側の拒否分岐 doc 参照）。
+    pub(crate) fn matmul_low_precision(
+        &self,
+        other: &Var<'t>,
+        dtype: fandhe_ai_tensor_core::ScalarDType,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.check_same_tape(other)?;
+        let lhs_shape = self.shape();
+        let rhs_shape = other.shape();
+        matmul_out_shape(&lhs_shape, &rhs_shape)?;
+        let (lhs_val, rhs_val) = {
+            let nodes = self.tape.nodes.borrow();
+            let lhs_val = materialize_fallible(&nodes, self.tape.ops(), self.id)?.clone();
+            let rhs_val = materialize_fallible(&nodes, self.tape.ops(), other.id)?.clone();
+            (lhs_val, rhs_val)
+        };
+        let value =
+            fandhe_ai_tensor_core::matmul_low_precision(self.tape.ops(), dtype, &lhs_val, &rhs_val)
+                .map_err(AutodiffError::Backend)?;
+        let id = self.tape.push_eager(Op::MatMul(self.id, other.id), value);
+        // `TapeNode::low_precision` を立てる（`matmul_fp32_strict` と
+        // 同じ事後設定パターン。`push_eager` 自体は通常版・厳密版・
+        // 低精度版の呼び出し元を区別しないため、戻り値ノードへ限定して
+        // ここで設定する）。
+        self.tape.nodes.borrow_mut()[id.0].low_precision = true;
         Ok(Var::from_raw(self.tape, id))
     }
 
@@ -6162,6 +6330,246 @@ mod linear_act_tests {
             &[0.1f32, 0.2],
             "d_weight は x の f32 master 値（丸め前）と bit 完全一致するはず"
         );
+    }
+
+    // --- Var::matmul_low_precision（イシュー #2071） ---
+
+    /// `matmul_low_precision`（F16）の forward が `TypedOps<f16>::gemm`
+    /// の丸め契約（`downcast → gemm → upcast`）と bit 完全一致すること
+    /// を検証する。
+    #[test]
+    fn matmul_low_precision_f16_forward_matches_rounding_oracle() {
+        let tape = Tape::new_with_ops(Box::new(ComputingLowPrecisionBackendOps));
+        let a_data = Tensor::new(vec![0.1f32, 0.2, -0.3, 0.4], &[2, 2]).unwrap();
+        let b_data = Tensor::new(vec![0.3f32, 0.7, -0.5, 0.6], &[2, 2]).unwrap();
+        let a = tape.var(&a_data);
+        let b = tape.var(&b_data);
+
+        let out = a
+            .matmul_low_precision(&b, fandhe_ai_tensor_core::ScalarDType::F16)
+            .expect("f16 matmul は mock TypedOps<f16> で成功するはず");
+
+        let a_f16 = round_f16(&a_data);
+        let b_f16 = round_f16(&b_data);
+        let y = round_f16(&ComputingLowPrecisionBackendOps::gemm_f32(
+            &upcast_f16(&a_f16),
+            &upcast_f16(&b_f16),
+        ));
+        let expected = upcast_f16(&y);
+
+        assert_eq!(
+            out.value().as_slice().unwrap(),
+            expected.as_slice().unwrap(),
+            "matmul_low_precision(F16) の forward は TypedOps<f16>::gemm の \
+             丸め契約と bit 完全一致するはず"
+        );
+    }
+
+    /// `matmul_low_precision` が記録する `Op::MatMul` ノードへ
+    /// `TapeNode::low_precision = true` を立てることを検証する
+    /// （`release_checkpoint_region`／`create_graph::validate_ancestors`
+    /// が読む fail-closed フラグ。`Var::matmul_fp32_strict` の
+    /// `fp32_strict` 事後設定と同型）。通常版 `Var::matmul` は
+    /// 既定 `false` のまま不変であることも合わせて確認する。
+    #[test]
+    fn matmul_low_precision_sets_node_flag() {
+        let tape = Tape::new_with_ops(Box::new(ComputingLowPrecisionBackendOps));
+        let a_data = Tensor::new(vec![1.0f32, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+        let a = tape.var(&a_data);
+        let b = tape.var(&a_data);
+
+        let low = a
+            .matmul_low_precision(&b, fandhe_ai_tensor_core::ScalarDType::F16)
+            .unwrap();
+        assert!(
+            tape.nodes.borrow()[low.id.0].low_precision,
+            "matmul_low_precision が記録したノードは low_precision == true のはず"
+        );
+
+        let normal = a.matmul(&b).unwrap();
+        assert!(
+            !tape.nodes.borrow()[normal.id.0].low_precision,
+            "通常版 Var::matmul のノードは low_precision == false のままのはず"
+        );
+    }
+
+    /// accessor 不在（`Tape::new()` の既定 backend）では
+    /// `matmul_low_precision` が f32 へ静かにフォールバックせず
+    /// `BackendError::Unsupported` を返すことを検証する（fail-closed
+    /// 方針。`linear_act_low_precision_without_typed_ops_returns_
+    /// unsupported` と同型）。
+    #[test]
+    fn matmul_low_precision_without_typed_ops_returns_unsupported() {
+        let tape = Tape::new();
+        let a_data = Tensor::new(vec![1.0f32, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+        let a = tape.var(&a_data);
+        let b = tape.var(&a_data);
+        let err = a
+            .matmul_low_precision(&b, fandhe_ai_tensor_core::ScalarDType::F16)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::Unsupported(_))
+        ));
+    }
+
+    // --- Var::conv2d_low_precision（イシュー #2071） ---
+
+    /// `conv2d_low_precision`（F16・groups=1・bias あり）の forward が
+    /// 「im2col（f32・bit 完全一致コピー）→ 低精度 GEMM＋bias」の手順を
+    /// 直接組み立てたオラクルと bit 完全一致することを検証する。
+    #[test]
+    fn conv2d_low_precision_f16_forward_matches_rounding_oracle() {
+        let tape = Tape::new_with_ops(Box::new(ComputingLowPrecisionBackendOps));
+        // input: [N=1, Cin=1, H=2, W=2]・weight: [Cout=1, Cin=1, kH=2, kW=2]
+        // （kernel がちょうど入力全体を覆う 1x1 出力の単純ケース）。
+        let input_data = Tensor::new(vec![0.1f32, 0.2, -0.3, 0.4], &[1, 1, 2, 2]).unwrap();
+        let weight_data = Tensor::new(vec![0.3f32, 0.7, -0.5, 0.6], &[1, 1, 2, 2]).unwrap();
+        let bias_data = Tensor::new(vec![0.05f32], &[1]).unwrap();
+        let input = tape.var(&input_data);
+        let weight = tape.var(&weight_data);
+        let bias = tape.var(&bias_data);
+
+        let out = input
+            .conv2d_low_precision(
+                &weight,
+                Some(&bias),
+                [1, 1],
+                [0, 0],
+                [1, 1],
+                1,
+                fandhe_ai_tensor_core::ScalarDType::F16,
+            )
+            .expect("f16 conv2d は mock TypedOps<f16> で成功するはず");
+
+        // オラクル: `col`（im2col 済み・f32・丸めなし）は実際の
+        // `im2col_with_fallback`（`Var::conv2d_low_precision` 自身が
+        // 呼ぶのと同じ関数）で求める——要素の並び順を手で仮定しない
+        // ことで、im2col 実装内部の enumerate 順序に依存しないオラクル
+        // にする。`w_mat` の reshape（`[groups, Cout_g, K_g]`）も本番
+        // 経路（`conv2d_forward_typed`）と同一の呼び出しにする。
+        let params =
+            fandhe_ai_tensor_core::Conv2dParams::new([2, 2], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        let im2col_shape =
+            fandhe_ai_tensor_core::im2col_out_shape(input_data.shape(), &params).unwrap();
+        let col_f32 =
+            crate::grad::im2col_with_fallback(tape.ops(), &input_data, &params, &im2col_shape)
+                .unwrap();
+        let w_mat_f32 = weight_data.contiguous().reshape(&[1, 1, 4]).unwrap();
+        let col_f16 = round_f16(&col_f32);
+        let w_f16 = round_f16(&w_mat_f32.reshape(&[1, 4]).unwrap());
+        let y = round_f16(&ComputingLowPrecisionBackendOps::gemm_f32(
+            &upcast_f16(&w_f16),
+            &upcast_f16(&col_f16.reshape(&[4, 1]).unwrap()),
+        ));
+        let bias_f16 = round_f16(&bias_data);
+        let y = round_f16(&ComputingLowPrecisionBackendOps::add_f32(
+            &upcast_f16(&y),
+            &upcast_f16(&bias_f16),
+        ));
+        let expected = upcast_f16(&y);
+
+        assert_eq!(
+            out.value().as_slice().unwrap(),
+            expected.as_slice().unwrap(),
+            "conv2d_low_precision(F16) の forward は im2col(f32)＋低精度 \
+             GEMM＋bias の丸め契約と bit 完全一致するはず"
+        );
+    }
+
+    /// `conv2d_low_precision` が記録する `Op::Conv2d` ノードの
+    /// `compute_dtype` を検証する（通常版 `Var::conv2d` は
+    /// `ScalarDType::F32` のまま不変）。
+    #[test]
+    fn conv2d_low_precision_records_compute_dtype() {
+        let tape = Tape::new_with_ops(Box::new(ComputingLowPrecisionBackendOps));
+        let input_data = Tensor::new(vec![0.1f32, 0.2, -0.3, 0.4], &[1, 1, 2, 2]).unwrap();
+        let weight_data = Tensor::new(vec![0.3f32, 0.7, -0.5, 0.6], &[1, 1, 2, 2]).unwrap();
+        let input = tape.var(&input_data);
+        let weight = tape.var(&weight_data);
+
+        let low = input
+            .conv2d_low_precision(
+                &weight,
+                None,
+                [1, 1],
+                [0, 0],
+                [1, 1],
+                1,
+                fandhe_ai_tensor_core::ScalarDType::Bf16,
+            )
+            .unwrap();
+        match &tape.nodes.borrow()[low.id.0].op {
+            crate::tape::Op::Conv2d { compute_dtype, .. } => {
+                assert_eq!(*compute_dtype, fandhe_ai_tensor_core::ScalarDType::Bf16);
+            }
+            other => panic!("Op::Conv2d を期待したが {other:?} だった"),
+        }
+
+        let normal = input
+            .conv2d(&weight, None, [1, 1], [0, 0], [1, 1], 1)
+            .unwrap();
+        match &tape.nodes.borrow()[normal.id.0].op {
+            crate::tape::Op::Conv2d { compute_dtype, .. } => {
+                assert_eq!(*compute_dtype, fandhe_ai_tensor_core::ScalarDType::F32);
+            }
+            other => panic!("Op::Conv2d を期待したが {other:?} だった"),
+        }
+    }
+
+    /// accessor 不在（`Tape::new()`）では `conv2d_low_precision` が
+    /// `BackendError::Unsupported` を返すことを検証する（fail-closed）。
+    #[test]
+    fn conv2d_low_precision_without_typed_ops_returns_unsupported() {
+        let tape = Tape::new();
+        let input_data = Tensor::new(vec![0.1f32, 0.2, -0.3, 0.4], &[1, 1, 2, 2]).unwrap();
+        let weight_data = Tensor::new(vec![0.3f32, 0.7, -0.5, 0.6], &[1, 1, 2, 2]).unwrap();
+        let input = tape.var(&input_data);
+        let weight = tape.var(&weight_data);
+        let err = input
+            .conv2d_low_precision(
+                &weight,
+                None,
+                [1, 1],
+                [0, 0],
+                [1, 1],
+                1,
+                fandhe_ai_tensor_core::ScalarDType::F16,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AutodiffError::Backend(BackendError::Unsupported(_))
+        ));
+    }
+
+    // --- create_graph との相互作用（イシュー #2071） ---
+
+    /// `Var::matmul_low_precision`（`TapeNode::low_precision`）が記録
+    /// したノードは、`Op::MatMul` variant 自体が精度情報を持たない
+    /// ため `create_graph` へ子テープ replay させると静かに f32 精度へ
+    /// フォールバックしてしまう。`create_graph::validate_ancestors` が
+    /// 祖先に含まれた時点で無条件拒否することを確認する（`crates/
+    /// autodiff/tests/create_graph.rs` の `create_graph_rejects_
+    /// fused_linear_act`／`create_graph_rejects_rank3_matmul` と同型の
+    /// fail-closed 契約テスト。`Var::matmul_low_precision` が
+    /// `pub(crate)` のため統合テストではなく本モジュールに置く）。
+    #[test]
+    fn create_graph_rejects_low_precision_matmul_ancestor() {
+        let tape = Tape::new_with_ops(Box::new(ComputingLowPrecisionBackendOps));
+        let child = Tape::new_with_ops(Box::new(ComputingLowPrecisionBackendOps));
+        let a_data = Tensor::new(vec![1.0f32, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+        let a = tape.var(&a_data);
+        let b = tape.var(&a_data);
+        let loss = a
+            .matmul_low_precision(&b, fandhe_ai_tensor_core::ScalarDType::F16)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+
+        let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+        assert!(matches!(err, AutodiffError::Backward(_)));
+        assert!(child.is_empty());
     }
 }
 
