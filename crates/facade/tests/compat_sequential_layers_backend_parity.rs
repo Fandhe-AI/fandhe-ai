@@ -1,6 +1,7 @@
 //! `compat::Sequential::add_layer_norm`／`add_rms_norm`／
 //! `add_batch_norm1d`／`add_batch_norm2d`／`add_embedding`／
-//! `add_multihead_attention`（イシュー #1760・親 #1618）の CUDA／Metal
+//! `add_multihead_attention`（イシュー #1760・親 #1618）・
+//! `add_transformer_encoder`（イシュー #2068・親 #2059）の CUDA／Metal
 //! parity テスト（`nn_conv_backend_parity.rs` と同型）。
 //!
 //! CPU 側の正しさ検証（`predict`／`forward` bit 完全一致・手動合成との
@@ -8,13 +9,15 @@
 //! が Linux 実行可能な形で既に担う。本ファイルは新規カーネルを一切
 //! 追加していない構成（LayerNorm／RmsNorm／BatchNorm／Embedding／
 //! MultiheadAttention の各バックエンドカーネルは既存 issue で実装
-//! 済み。`docs/compat-api-scope.md` §1.2 該当行参照）を前提に、
+//! 済み。`TransformerEncoderLayer` はそれらの合成のみで新規 `Op` を
+//! 追加しない。`docs/compat-api-scope.md` §1.2 該当行参照）を前提に、
 //! `compat::Sequential` 経由で組んだモデルの forward が CPU と
 //! `assert_parity`（REQ-2 統一複合判定）で一致することのみを確認する。
 //!
 //! 実機実測は本エージェントの実行環境に CUDA／Metal 実機への到達
 //! 手段がないため未実施のまま Mac／GB10 セッションへ申し送る
-//! （`docs/compat-api-scope.md` §1.2「#1760」追記・PR 本文に明記）。
+//! （`docs/compat-api-scope.md` §1.2「#1760」「#2068」追記・PR 本文に
+//! 明記）。
 
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::{Device, Tensor};
@@ -114,6 +117,35 @@ fn run_multihead_attention_parity(device: Device) {
     );
 }
 
+/// `add_transformer_encoder`（イシュー #2068・親 #2059）の parity。
+/// `run_multihead_attention_parity` と同じ `[B, L, E] = [2, 3, 4]`
+/// 入力形状を使う（`self_attn` の rank 契約を共有するため）。新規
+/// カーネルは追加していない構成（`TransformerEncoderLayer::forward`
+/// は既存の `MultiheadAttention`／`Linear`／`LayerNorm`／`relu` の
+/// 合成のみ）を前提に、CPU と対象デバイスの forward 一致のみ確認する。
+fn run_transformer_encoder_parity(device: Device) {
+    let model = Sequential::new()
+        .add_transformer_encoder(4, 2, 8, SEED2)
+        .unwrap();
+    let x = tensor(
+        (0..2 * 3 * 4).map(|i| (i as f32) * 0.03 - 0.4).collect(),
+        &[2, 3, 4],
+    );
+
+    let cpu_out = model.predict(&x).unwrap();
+
+    let tape = fandhe_ai::tape_for(device)
+        .expect("実機必須（本テストは #[ignore]。実行時は事前に到達確認する）");
+    let xv = tape.var(&x);
+    let device_out = model.forward(&tape, &xv).unwrap().to_tensor();
+
+    assert_parity(
+        "compat::Sequential(add_transformer_encoder) device vs CPU",
+        &dense(&device_out),
+        &dense(&cpu_out),
+    );
+}
+
 // --- CUDA（本エージェント実行環境に実機なし。GB10 セッションへ申し送り） ---
 
 #[test]
@@ -133,6 +165,13 @@ fn cuda_batch_norm2d_matches_cpu() {
 #[ignore = "CUDA 実機必須"]
 fn cuda_multihead_attention_matches_cpu() {
     run_multihead_attention_parity(Device::Cuda(0));
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。実行は #2068 の申し送り先（GB10 セッション）\
+            へ引き継ぐ"]
+fn cuda_transformer_encoder_matches_cpu() {
+    run_transformer_encoder_parity(Device::Cuda(0));
 }
 
 // --- Metal（本エージェント実行環境に実機なし。Mac セッションへ申し送り） ---
@@ -157,4 +196,12 @@ fn metal_batch_norm2d_matches_cpu() {
 #[ignore = "Metal 実機必須"]
 fn metal_multihead_attention_matches_cpu() {
     run_multihead_attention_parity(Device::Metal);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須。実行は #2068 の申し送り先（Mac セッション）へ \
+            引き継ぐ"]
+fn metal_transformer_encoder_matches_cpu() {
+    run_transformer_encoder_parity(Device::Metal);
 }

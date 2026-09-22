@@ -40,6 +40,7 @@ use crate::nn::normalization::{GroupNorm, InstanceNorm, group_norm_forward_host}
 use crate::nn::pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d,
 };
+use crate::nn::transformer_encoder_layer::TransformerEncoderLayer;
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{
@@ -296,6 +297,22 @@ pub trait Module {
 
     /// [`Module::as_multihead_attention`] の可変版。
     fn as_multihead_attention_mut(&mut self) -> Option<&mut MultiheadAttention> {
+        None
+    }
+
+    /// [`Module::as_layer_norm`] と同型の明示フック（イシュー #2068・
+    /// 親 #2059）。`TransformerEncoderLayer`（self-attention → residual
+    /// → LayerNorm → FFN → residual → LayerNorm の合成。
+    /// `nn/transformer_encoder_layer.rs` モジュール doc 参照）向け。
+    /// `compat::Sequential` の学習経路（`bind`／`trainable_vars`／
+    /// `trainable_grads`／常駐ガード）が本層を認識するために使う。
+    /// 既定 `None`。
+    fn as_transformer_encoder_layer(&self) -> Option<&TransformerEncoderLayer> {
+        None
+    }
+
+    /// [`Module::as_transformer_encoder_layer`] の可変版。
+    fn as_transformer_encoder_layer_mut(&mut self) -> Option<&mut TransformerEncoderLayer> {
         None
     }
 
