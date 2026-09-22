@@ -804,3 +804,61 @@ fn layer_normalization_backward_gradient_matches_finite_difference() {
         5e-2,
     );
 }
+
+#[test]
+fn softmax_backward_large_upstream_grad_does_not_overflow() {
+    // `SoftmaxFn::backward`（`onnx::autograd`）の回帰テスト: 軸縮約した
+    // `dot`（f64）を乗算・減算の前に `f32` へ downcast すると、有限の
+    // `f32` 入力上流勾配でも `dx` が `Inf` へ overflow しうる
+    // （`autodiff::grad::softmax_vjp_along_large_upstream_grad_does_not_
+    // overflow` と同じ懸念・同じ入力値。レビュー指摘: PR #2223 Cursor
+    // Bugbot discussion_r4072661711）。`x = [0, ln(3)]` は
+    // `Softmax(x) = [0.25, 0.75]` と厳密に一致するため、`y=[0.25,0.75]`・
+    // `g=[3e38,-3e38]` で `dot=-1.5e38` となり `g[0]-dot=4.5e38` が
+    // `f32::MAX`（約 3.4e38）を超える早期 downcast バグを再現する。
+    let graph = single_node_graph(
+        node_with_attrs("Softmax", vec!["x"], vec!["y"], vec![attr_i64("axis", 1)]),
+        vec!["x"],
+        "y",
+    );
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let bound = BoundGraph::bind(&graph, &tape, &BindOptions::default()).unwrap();
+    let x = tape.var(&f32(vec![0.0, 3.0f32.ln()], &[1, 2]));
+    let feeds = HashMap::from([("x".to_string(), AutogradValue::Var(x))]);
+    let out = bound.run(feeds).unwrap();
+    let y = match &out["y"] {
+        AutogradValue::Var(v) => *v,
+        AutogradValue::Const(_) => panic!("Var を期待した"),
+    };
+    let y_slice = y.value().contiguous().as_slice().unwrap().to_vec();
+    assert!(
+        (y_slice[0] - 0.25).abs() < 1e-6 && (y_slice[1] - 0.75).abs() < 1e-6,
+        "y={y_slice:?}（期待値 [0.25, 0.75] 近傍）"
+    );
+
+    // `loss = sum(y ⊙ g)` は `d(loss)/dy_i = g_i` を厳密に成立させるため、
+    // 上流勾配を `g` に固定できる（`assert_grad_matches_finite_difference`
+    // の loss 構成と同型）。
+    let g = tape.var_no_grad(&f32(vec![3e38, -3e38], &[1, 2]));
+    let loss = y.mul(&g).unwrap().sum(None).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let dx = grads.get(&x).unwrap().unwrap();
+    let dx = dx.contiguous();
+    let dx_slice = dx.as_slice().unwrap();
+    for (i, v) in dx_slice.iter().enumerate() {
+        assert!(
+            v.is_finite(),
+            "dx[{i}] = {v} は有限であるべき（overflow 回帰。PR #2223 Cursor Bugbot discussion_r4072661711）"
+        );
+    }
+    assert!(
+        (dx_slice[0] - 1.125e38).abs() < 1e33,
+        "dx[0] = {}（期待値 1.125e38 近傍）",
+        dx_slice[0]
+    );
+    assert!(
+        (dx_slice[1] + 1.125e38).abs() < 1e33,
+        "dx[1] = {}（期待値 -1.125e38 近傍）",
+        dx_slice[1]
+    );
+}

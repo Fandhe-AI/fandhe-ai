@@ -936,9 +936,18 @@ impl CustomFunction for SoftmaxFn {
                     let prod = gs[idx] * ys[idx];
                     dot += prod as f64;
                 }
+                // `dot`（f64）を乗算前に `f32` へ downcast すると、
+                // `y * (g - dot)` が有限の `f32` 入力でも overflow しうる
+                // （`grad::softmax_vjp_along` と同じ懸念。レビュー指摘:
+                // PR #2223 Cursor Bugbot discussion_r4072661711）。
+                // `autodiff::grad::softmax_vjp_along` と同じ f64 契約
+                // （`.claude/rules/coding-rust.md`）に従い、`g` からの
+                // 減算・`y` との最終乗算まで f64 で保持し、最終書き出しで
+                // のみ `f32` へ downcast する。
                 for a in 0..inner {
                     let idx = (o * inner + a) * trailing + t;
-                    dx[idx] = ys[idx] * (gs[idx] - dot as f32);
+                    let d = (ys[idx] as f64) * (gs[idx] as f64 - dot);
+                    dx[idx] = d as f32;
                 }
             }
         }
@@ -961,7 +970,12 @@ impl CustomFunction for SoftmaxFn {
 ///
 /// 一方、`dxhat` の行方向縮約（`mean_dxhat`／`mean_dxhat_xhat`）は「勾配の長軸
 /// 縮約」（`.claude/rules/coding-rust.md`）に該当し、要素積を `f32` で確定して
-/// から `f64` へ昇格して蓄積する契約に従う。
+/// から `f64` へ昇格して蓄積する契約に従う。縮約結果を使う `dx` の最終合成
+/// （`rstd * (dxhat − mean_dxhat − xhat ⊙ mean_dxhat_xhat)`）も
+/// `autodiff::grad::softmax_vjp_along` と同じ f64 契約に従い、`f32` への
+/// downcast は最終書き出しの 1 回のみに限る（早期 downcast は有限の `f32`
+/// 入力でも overflow しうる。レビュー指摘: PR #2223 Cursor Bugbot
+/// discussion_r4072661711）。
 struct LayerNormFn {
     axis: i64,
     epsilon: f32,
@@ -1091,16 +1105,22 @@ impl CustomFunction for LayerNormFn {
                 } else {
                     (0.0, 0.0, Vec::new())
                 };
-                // 縮約結果（f64）は要素ごとの最終合成に使う直前に 1 回だけ f32 へ
-                // downcast する（長軸縮約の「最終書き出しは 1 回だけ downcast」契約）。
-                let mean_dxhat_f32 = mean_dxhat as f32;
-                let mean_dxhat_xhat_f32 = mean_dxhat_xhat as f32;
+                // 縮約結果（f64）を要素ごとの最終合成の前に `f32` へ downcast
+                // すると、`rstd * (dxhat - mean_dxhat - xhat * mean_dxhat_xhat)`
+                // が有限の `f32` 入力でも overflow しうる（`SoftmaxFn::backward`
+                // と同じ懸念。レビュー指摘: PR #2223 Cursor Bugbot
+                // discussion_r4072661711）。`autodiff::grad::softmax_vjp_along`
+                // と同じ f64 契約（`.claude/rules/coding-rust.md`）に従い、
+                // `dxhat`・`xhat`・`rstd`（bit 完全一致契約の統計値そのものは
+                // 不変。乗算のためだけに f64 へ widen する）との合成まで f64 で
+                // 保持し、最終書き出しで 1 回だけ `f32` へ downcast する。
 
                 for i in 0..inner {
                     let idx = o * inner + i;
                     if need_dx {
-                        dx[idx] =
-                            rstd * (dxhat[i] - mean_dxhat_f32 - xhat[i] * mean_dxhat_xhat_f32);
+                        let d = (rstd as f64)
+                            * (dxhat[i] as f64 - mean_dxhat - (xhat[i] as f64) * mean_dxhat_xhat);
+                        dx[idx] = d as f32;
                     }
                     if need_dscale {
                         dscale_full[idx] = grow[i] * xhat[i];
