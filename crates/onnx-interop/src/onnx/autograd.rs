@@ -86,6 +86,13 @@ pub enum AutogradError {
     MissingFeed { input: String },
     /// `run` に渡された feed 名がグラフ入力にも initializer にも属さない。
     UnknownFeed { name: String },
+    /// [`BindOptions::with_trainable`] に渡された名前が、グラフの F32
+    /// initializer 集合に存在しない（typo・非 F32 initializer 名の指定を含む）。
+    /// `bind` はこの検証を fail-closed で行う: 黙って無視すると全パラメータが
+    /// `var_no_grad` のまま `bind` が成功し `params()` が空になり、fine-tuning が
+    /// 無言で何も更新しない状態になりうるため（レビュー指摘: PR #2223
+    /// codex-review discussion）。
+    UnknownTrainable { name: String },
 }
 
 impl fmt::Display for AutogradError {
@@ -117,6 +124,12 @@ impl fmt::Display for AutogradError {
                 write!(
                     f,
                     "feed '{name}' はグラフ入力にも initializer にも属しません"
+                )
+            }
+            AutogradError::UnknownTrainable { name } => {
+                write!(
+                    f,
+                    "BindOptions::with_trainable に指定された '{name}' は F32 initializer に存在しません（typo または非 F32 initializer 名の可能性があります）"
                 )
             }
         }
@@ -213,6 +226,22 @@ impl<'g, 't> BoundGraph<'g, 't> {
         tape: &'t Tape,
         options: &BindOptions,
     ) -> Result<Self, AutogradError> {
+        // `trainable` に指定された名前は F32 initializer 集合の部分集合でなければ
+        // ならない（fail-closed 検証。未知名・非 F32 initializer 名を黙って無視
+        // すると、全パラメータが `var_no_grad` のまま `bind` が成功し `params()`
+        // が空になり、fine-tuning が無言で何も更新しない状態になりうるため）。
+        if let Some(trainable) = &options.trainable {
+            for name in trainable {
+                let is_f32_initializer = graph
+                    .initializers
+                    .get(name)
+                    .is_some_and(|raw| matches!(raw, RawTensor::F32 { .. }));
+                if !is_f32_initializer {
+                    return Err(AutogradError::UnknownTrainable { name: name.clone() });
+                }
+            }
+        }
+
         let mut init = HashMap::with_capacity(graph.initializers.len());
         let mut params = HashMap::new();
         for (name, raw) in &graph.initializers {
@@ -1066,20 +1095,24 @@ impl CustomFunction for LayerNormFn {
         };
 
         if need_dx || need_dscale || need_dbias {
-            let inv_n = 1.0f64 / inner as f64;
+            let n_f64 = inner as f64;
             for o in 0..outer {
                 let row = &xs[o * inner..(o + 1) * inner];
                 let grow = &gs[o * inner..(o + 1) * inner];
                 // forward（`ops::layer_normalization`）と同じ `f64` 統計契約で
-                // 再計算する（mean = sum * inv_n・分散の二乗差累積は要素を先に
+                // 再計算する（mean = sum / n・分散の二乗差累積は要素を先に
                 // f64 へ昇格してから二乗）。上の struct doc コメント参照。
-                let mean_f64: f64 = row.iter().map(|&v| v as f64).sum::<f64>() * inv_n;
+                // `sum * (1/n)` ではなく `sum / n` の直接除算を使う（レビュー
+                // 指摘: Cursor Bugbot。丸められた逆数を乗じると mean が
+                // 厳密には `sum / n` と一致しない場合があり、本来 mean が
+                // 一様行で厳密一致するはずの契約が崩れるため）。
+                let mean_f64: f64 = row.iter().map(|&v| v as f64).sum::<f64>() / n_f64;
                 let mut sq_acc = 0f64;
                 for &v in row {
                     let diff = v as f64 - mean_f64;
                     sq_acc = diff.mul_add(diff, sq_acc);
                 }
-                let var_f64 = sq_acc * inv_n;
+                let var_f64 = sq_acc / n_f64;
                 let rstd_f64 = 1.0f64 / (var_f64 + self.epsilon as f64).sqrt();
                 let mean = mean_f64 as f32;
                 let rstd = rstd_f64 as f32;

@@ -457,6 +457,24 @@ fn unknown_feed_is_rejected() {
     assert!(matches!(err, AutogradError::UnknownFeed { .. }));
 }
 
+/// `BindOptions::with_trainable` に typo（存在しない initializer 名）を渡すと
+/// `bind` が fail-closed で拒否することを確認する（レビュー指摘: PR #2223
+/// codex-review discussion）。黙って無視すると全パラメータが `var_no_grad` の
+/// まま `bind` が成功し `params()` が空になり、fine-tuning が無言で何も
+/// 更新しない状態になりうるため、`bind` の時点で検出する必要がある。
+#[test]
+fn unknown_trainable_name_is_rejected() {
+    let graph = load_model_onnx_graph();
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
+    let mut trainable = HashSet::new();
+    trainable.insert("fc1.wieght".to_string()); // typo（正しくは fc1.weight）
+    let err = match BoundGraph::bind(&graph, &tape, &BindOptions::with_trainable(trainable)) {
+        Ok(_) => panic!("typo の trainable 名は拒否されるはず"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, AutogradError::UnknownTrainable { ref name } if name == "fc1.wieght"));
+}
+
 #[test]
 fn cross_tape_var_is_rejected() {
     let graph = load_model_onnx_graph();

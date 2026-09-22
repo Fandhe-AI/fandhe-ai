@@ -119,7 +119,7 @@ pub fn layer_normalization(
         .ok_or(OpError::NonContiguousInternal("LayerNormalization(X)"))?;
 
     let mut out = vec![0f32; outer_size * inner_size];
-    let inv_n = 1.0 / inner_size as f64;
+    let n_f64 = inner_size as f64;
     for o in 0..outer_size {
         let block = &x_slice[o * inner_size..(o + 1) * inner_size];
 
@@ -131,15 +131,18 @@ pub fn layer_normalization(
         // 先に f64 へ昇格してから二乗する）。統計値の書き出しのみ 1 回
         // `f32` へ downcast し、正規化本体（`normalized = (x - mean) * inv_std`
         // の `mul_add` 合成）は従来どおり `f32` のまま行う（matmul 系 FMA 契約
-        // とは独立の軸のため不変）。
-        let mean_f64: f64 = block.iter().map(|&v| v as f64).sum::<f64>() * inv_n;
+        // とは独立の軸のため不変）。`sum * (1/n)` ではなく `sum / n` の直接除算を
+        // 使う（レビュー指摘: Cursor Bugbot。丸められた逆数を乗じると mean が
+        // 厳密には `sum / n` と一致しない場合があり、backward 側の再計算
+        // （同じ `n_f64` 直接除算）との統計値一致契約が崩れるため）。
+        let mean_f64: f64 = block.iter().map(|&v| v as f64).sum::<f64>() / n_f64;
 
         let mut sq_acc = 0f64;
         for &v in block {
             let diff = v as f64 - mean_f64;
             sq_acc = diff.mul_add(diff, sq_acc);
         }
-        let var_f64 = sq_acc * inv_n;
+        let var_f64 = sq_acc / n_f64;
         let inv_std_f64 = 1.0 / (var_f64 + attrs.epsilon as f64).sqrt();
 
         let mean = mean_f64 as f32;
