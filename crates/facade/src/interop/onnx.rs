@@ -3,11 +3,21 @@
 //!
 //! `fandhe_ai_onnx_interop`（内部クレート。crates.io 公開名
 //! `fandhe-ai-onnx-interop`）の `onnx::proto::decode_model` →
-//! `onnx::graph::build_graph` → `onnx::interp::run` を 1 つの薄い型
-//! [`OnnxModel`] に束ねる。**推論専用・ホスト CPU 実行のみ**であり
-//! `BackendOps`／`Device` を経由しない（GPU 実行にはならない）。
+//! `onnx::graph::build_graph` → `onnx::interp::run`／`run_with_ops` を
+//! 1 つの薄い型 [`OnnxModel`] に束ねる。**推論専用**であり
 //! **autograd 未接続**（入出力は [`crate::Tensor`] であり `Var` ではない。
 //! 勾配は取れない）。
+//!
+//! **既定はホスト CPU 実行のみ**（`BackendOps`／`Device` 非経由。
+//! イシュー #2077 導入前と bit 完全に不変）。[`crate::
+//! set_cuda_onnx_gpu_execution_enabled`]／`crate::
+//! set_metal_onnx_gpu_execution_enabled`〈macOS 限定 cfg のため非 macOS
+//! ビルドでは存在せずリンク化しない〉の opt-in（既定 OFF）が有効な
+//! 場合のみ、[`OnnxModel::run`] は `BackendOps` 経由の device 実行
+//! （op 単位。`Unsupported`／`ShapeMismatch` はホストへフォールバック・
+//! それ以外のエラーは fail-closed）を試みる（詳細は [`OnnxModel::run`]
+//! のドキュメンテーションコメント・`docs/onnx-gpu-execution-decision.md`
+//! を参照）。
 //!
 //! 数値契約は REQ-7 判定式（`abs_err/(|ref|+1e-6) <= 1e-3`。
 //! `crates/onnx-interop/tests/onnx_poc_v2_6_match.rs` 系と同一）であり、
@@ -99,16 +109,76 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use fandhe_ai_onnx_interop::onnx::export::{ExportError, ExportOptions, build_model_proto};
 use fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers;
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, GraphError, build_graph};
-use fandhe_ai_onnx_interop::onnx::interp::{InterpError, Value as InterpValue, run as interp_run};
+use fandhe_ai_onnx_interop::onnx::interp::{
+    InterpError, Value as InterpValue, run as interp_run, run_with_ops as interp_run_with_ops,
+};
 use fandhe_ai_onnx_interop::onnx::proto::{decode_model, encode_model};
 use fandhe_ai_tensor_core::f16;
 
+use crate::Device;
 use crate::Tensor;
 use crate::compat::Sequential;
+
+/// [`set_cuda_onnx_gpu_execution_enabled`]（`crate::lib` の薄い公開
+/// ラッパー経由）が読み書きする opt-in 状態（イシュー #2077）。既定
+/// `false`（ホスト CPU 実行のみ・bit 不変）。プロセスワイドの
+/// `AtomicBool`（`SeqCst`）で、既存の `set_cuda_tf32_gemm_enabled` 等と
+/// 同型（`crate::lib` の opt-in 群コメント参照）。`pub(crate)` のため
+/// `crates/facade/tests/api_surface.rs::scan_unapproved_onnx_pub_items`
+/// の allowlist 変更は不要。
+pub(crate) static CUDA_ONNX_GPU_EXEC: AtomicBool = AtomicBool::new(false);
+
+/// Metal 版の opt-in 状態（macOS 限定。`crate::Device::Metal` と同じ cfg
+/// 境界）。
+#[cfg(target_os = "macos")]
+pub(crate) static METAL_ONNX_GPU_EXEC: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_cuda_onnx_gpu_execution_enabled(enabled: bool) {
+    CUDA_ONNX_GPU_EXEC.store(enabled, Ordering::SeqCst);
+}
+
+pub(crate) fn cuda_onnx_gpu_execution_enabled() -> bool {
+    CUDA_ONNX_GPU_EXEC.load(Ordering::SeqCst)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn set_metal_onnx_gpu_execution_enabled(enabled: bool) {
+    METAL_ONNX_GPU_EXEC.store(enabled, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn metal_onnx_gpu_execution_enabled() -> bool {
+    METAL_ONNX_GPU_EXEC.load(Ordering::SeqCst)
+}
+
+/// [`OnnxModel::run`] の Metal 分岐専用ヘルパ。`Device::Metal` variant
+/// 自体が `#[cfg(target_os = "macos")]` 限定のため、cfg 境界を `run` 本体
+/// から本関数へ隠蔽する（非 macOS ビルドでは opt-in フラグの値に関わらず
+/// 常に `Ok(None)` = ホストへ）。opt-in が有効なのに driver 不在等で
+/// `resolve_ops` が失敗した場合は fail-closed に `Err` を返す（ホストへの
+/// 黙示フォールバックはしない）。
+#[cfg(target_os = "macos")]
+fn resolve_metal_ops_if_enabled()
+-> Result<Option<Box<dyn fandhe_ai_tensor_core::BackendOps + Send>>, OnnxError> {
+    if !metal_onnx_gpu_execution_enabled() {
+        return Ok(None);
+    }
+    let ops = crate::resolve_ops(Device::Metal).map_err(|e| OnnxError::Execution {
+        message: e.to_string(),
+    })?;
+    Ok(Some(ops))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resolve_metal_ops_if_enabled()
+-> Result<Option<Box<dyn fandhe_ai_tensor_core::BackendOps + Send>>, OnnxError> {
+    Ok(None)
+}
 
 /// 読み込み済み ONNX モデル（内部的にはトポロジカル順検証済みの
 /// `Graph` を保持する。フィールドは private——`fandhe_ai_onnx_interop`
@@ -158,8 +228,21 @@ impl OnnxModel {
     /// グラフを実行する。`feeds` はグラフ入力名 → 値の対応（未対応の
     /// initializer 上書きを含む pre-IR-4 セマンティクス）。
     ///
-    /// 推論専用・ホスト CPU 実行のみ（`BackendOps`／`Device` 非経由）・
-    /// autograd 未接続（戻り値は [`crate::Tensor`] であり `Var` ではない）。
+    /// 推論専用・autograd 未接続（戻り値は [`crate::Tensor`] であり
+    /// `Var` ではない）。**既定はホスト CPU 実行のみ**（`BackendOps`／
+    /// `Device` 非経由。導入前と bit 完全に不変）。
+    /// [`crate::set_cuda_onnx_gpu_execution_enabled`]／
+    /// `crate::set_metal_onnx_gpu_execution_enabled`（macOS 限定 cfg のため非
+    /// macOS ビルドでは存在せずリンク化しない。イシュー #2077）
+    /// の opt-in が有効な場合のみ `BackendOps` 経由の device 実行を試みる
+    /// （評価順は CUDA → Metal 固定。両方 ON なら CUDA 優先）。対象 op
+    /// （`fandhe_ai_onnx_interop::onnx::interp_device` モジュール冒頭
+    /// コメント参照）の f32 経路のみ device へ到達し、`Unsupported`／
+    /// `ShapeMismatch` はホストへフォールバックする。device・driver 不在
+    /// や範囲外 ordinal（CUDA ordinal は 0 固定）はこの `run` 呼び出し
+    /// 自体を [`OnnxError::Execution`] として fail-closed に拒否する
+    /// （ホストへの黙示フォールバックはしない。OWASP A08。`docs/
+    /// onnx-gpu-execution-decision.md` §3.4）。
     pub fn run(
         &self,
         feeds: HashMap<String, OnnxValue>,
@@ -168,7 +251,19 @@ impl OnnxModel {
             .into_iter()
             .map(|(k, v)| (k, onnx_value_to_interp(v)))
             .collect();
-        let outputs = interp_run(&self.graph, interp_feeds).map_err(map_interp_error)?;
+
+        let outputs = if cuda_onnx_gpu_execution_enabled() {
+            let ops = crate::resolve_ops(Device::Cuda(0)).map_err(|e| OnnxError::Execution {
+                message: e.to_string(),
+            })?;
+            interp_run_with_ops(&self.graph, interp_feeds, ops.as_ref())
+                .map_err(map_interp_error)?
+        } else if let Some(ops) = resolve_metal_ops_if_enabled()? {
+            interp_run_with_ops(&self.graph, interp_feeds, ops.as_ref())
+                .map_err(map_interp_error)?
+        } else {
+            interp_run(&self.graph, interp_feeds).map_err(map_interp_error)?
+        };
         Ok(outputs
             .into_iter()
             .map(|(k, v)| (k, interp_value_to_onnx(v)))
