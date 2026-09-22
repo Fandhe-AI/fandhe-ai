@@ -43,7 +43,21 @@
 //!    bounded なワイヤスキャン（`prescan_sparse_initializer`（非公開関数））で
 //!    `sparse_initializer`（tag=15）の存在有無だけを検出し、検出時は
 //!    `ModelProto` を一切構築せず [`DecodeModelError::
-//!    SparseInitializerNotSupported`] で fail-closed に拒否する。
+//!    SparseInitializerNotSupported`] で fail-closed に拒否する。**この
+//!    「検出済み」判定は、同じ走査中に検出**後**（同一 graph 内・別 graph
+//!    出現・`ModelProto` 直下のいずれでも）不正な形式に遭遇した場合でも
+//!    確定して優先される**（2026-09-22 codex-review P0 是正）: 一度でも
+//!    `sparse_initializer` を検出したら `ModelProto::decode` へは一切
+//!    フォールバックしない。フォールバックすると、`ModelProto::decode` が
+//!    同じ不正入力を独立に検証して最終的に拒否するとしても、拒否が確定
+//!    する**前**に構造体側（下記層 2）の `SparseTensorValueName.name` が
+//!    上限なく構造体へ展開されてしまい、巨大な `values.name` を持つ
+//!    sparse_initializer の直後に不正フィールドを置くだけで層 2 の
+//!    縮小策を迂回した巨大確保（DoS）を誘発できたため（詳細は
+//!    `prescan_sparse_initializer` のドキュメンテーションコメント）。
+//!    走査未検出のまま不正な形式に遭遇した場合（「判定不能」）は従来どおり
+//!    `ModelProto::decode` へフォールバックする（同じ地点で同じ不正入力を
+//!    独立に検証し拒否するため安全）。
 //! 2. **構造体側の縮小（`ModelProto::decode` を直接呼ぶ経路への多層防御）**:
 //!    `SparseTensorProto.values` は `TensorProto` 全体ではなく `name`
 //!    （tag=8）のみを宣言した [`SparseTensorValueName`] として decode する。
@@ -309,12 +323,36 @@ impl std::error::Error for DecodeModelError {}
 /// `prescan_sparse_initializer`（非公開関数） で `GraphProto.sparse_initializer`
 /// （tag=15）の存在だけを bounded に検出する。検出時は `ModelProto` を
 /// 一切構築せず [`DecodeModelError::SparseInitializerNotSupported`] を
-/// 返す（本モジュール冒頭コメント「メモリ増幅対策」節参照）。
+/// 返す（本モジュール冒頭コメント「メモリ増幅対策」節参照）。**検出は
+/// 走査中の後続の不正な形式より優先される**（`PrescanOutcome::Found` は
+/// 同じ走査が後で `PrescanOutcome::Indeterminate` になっても上書きされない。
+/// `prescan_sparse_initializer` のドキュメンテーションコメント参照。
+/// 2026-09-22 codex-review P0 是正）。
 pub fn decode_model(bytes: &[u8]) -> Result<ModelProto, DecodeModelError> {
-    if let Some((tensor_name, count)) = prescan_sparse_initializer(bytes) {
+    if let PrescanOutcome::Found { tensor_name, count } = prescan_sparse_initializer(bytes) {
         return Err(DecodeModelError::SparseInitializerNotSupported { tensor_name, count });
     }
     ModelProto::decode(bytes).map_err(DecodeModelError::Wire)
+}
+
+/// [`prescan_sparse_initializer`] の三値判定結果（2026-09-22 codex-review
+/// P0 是正。旧実装は `Option<(String, usize)>` で「検出」と「未検出／
+/// 判定不能」の 2 値しか表現できず、「検出**後**に走査が不正な形式へ
+/// 遭遇した」場合に検出結果ごと `None`（判定不能）へ握りつぶされていた）。
+enum PrescanOutcome {
+    /// 走査全体が正常に完了し、`sparse_initializer` は 1 件も出現しなかった。
+    NotFound,
+    /// `sparse_initializer`（tag=15）を 1 件以上検出した。走査がこの後
+    /// 不正な形式に遭遇したかどうかに関わらず、検出という事実は確定する
+    /// （`count` は少なくともこの件数が存在したことの下界。走査が
+    /// 途中で打ち切られた場合、実際の総数はこれ以上かもしれない）。
+    Found { tensor_name: String, count: usize },
+    /// `sparse_initializer` を 1 件も検出しないまま、走査自体が不正な形式
+    /// （バッファ終端超過・未対応 wire type 等）で継続不能になった。
+    /// 「なし」と断定できないため `decode_model` は `ModelProto::decode`
+    /// へフォールバックする（本モジュール冒頭コメント「メモリ増幅対策」
+    /// 節参照）。
+    Indeterminate,
 }
 
 /// `ModelProto::decode` より前に `GraphProto.sparse_initializer`（tag=15）
@@ -331,20 +369,43 @@ pub fn decode_model(bytes: &[u8]) -> Result<ModelProto, DecodeModelError> {
 /// 合算する（1 回の出現だけを見ると分割された悪意ある入力を見逃す）。
 ///
 /// 各 length-delimited フィールドの長さは残りバッファ長と必ず照合する
-/// （超過は即座に不正入力と判定）。走査中に不正な形式（バッファ終端超過・
-/// 未対応 wire type 等）に遭遇した場合、この関数自身は判定を確定させず
-/// `None` を返す（sparse_initializer 「なし」ではなく「判定不能」の
-/// 意味だが、後続の `ModelProto::decode` が同じ不正入力を独立に検証し
-/// 拒否するため、`decode_model` 全体としては安全側に倒れる）。検出時は
-/// 最初の要素の `values.name`（tag=1 の中の tag=8）だけを同じく bounded
-/// に読み取り、`TensorProto` の他フィールド（`raw_data` 等）へは一切
-/// 踏み込まない（`values` 自体が存在しない・`name` が無い場合は空文字列。
-/// `graph::build_graph` の既存挙動と同じ fallback）。名前は
-/// [`SPARSE_TENSOR_NAME_DIAG_CAP`]（`graph::build_graph` と共有する上限）
-/// バイトで切り詰める（[`cap_sparse_tensor_diag_name`] 経由。診断契約の
-/// 統一。codex-review P2 是正・2026-09-22）。値が同一メッセージ内に
-/// 複数回出現した場合は protobuf の後勝ちマージ規則に従い最後の出現を
-/// 採用する（`scan_sparse_tensor_bytes_for_values_name`／
+/// （超過は即座に不正入力と判定）。
+///
+/// **検出後に走査自体が不正な形式へ遭遇した場合の扱い（2026-09-22
+/// codex-review P0 是正）**: `count`（この時点までに検出した
+/// `sparse_initializer` の件数）・`first_name`（最初の要素の診断名）は
+/// 呼び出し元の `&mut` 変数へ都度書き込まれるため、走査ループが
+/// 不正な形式（バッファ終端超過・未対応 wire type 等）に遭遇して早期
+/// 終了した後も値は保持されている。この関数は走査終了後に必ず
+/// `count > 0` を最優先でチェックし、`count > 0` であれば走査の成否に
+/// 関わらず [`PrescanOutcome::Found`] を返す（走査が正常終了したか
+/// 不正な形式で打ち切られたかは区別しない。**一度でも tag=15 を検出した
+/// 走査は `ModelProto::decode` へ絶対にフォールバックしない**という
+/// 不変条件を守るため）。旧実装は走査失敗を `?` でそのまま関数全体の
+/// 早期リターンへ伝播させており、検出済みの `count`／`first_name` を
+/// 呼び出し元へ返さずに握りつぶしていた。これにより「sparse_initializer
+/// を検出したが直後の走査で不正な形式に遭遇した」入力が「sparse
+/// なし」と同一視されて `decode_model` が `ModelProto::decode` へ
+/// フォールバックし、巨大な `values.name`（`SparseTensorValueName.name`
+/// は構造体側では長さ上限なしで decode される。本モジュール冒頭コメント
+/// 「メモリ増幅対策」節の層 2 参照）を持つ sparse_initializer の直後に
+/// 不正フィールドを配置するだけで層 2 の縮小策を迂回でき、拒否が確定する
+/// **前**に巨大確保が発生していた（codex-review 指摘）。
+/// `count == 0` のまま走査が不正な形式に遭遇した場合のみ
+/// [`PrescanOutcome::Indeterminate`] を返し、`decode_model` は従来どおり
+/// `ModelProto::decode` が同じ不正入力を独立に検証し拒否することに委ねる
+/// （`decode_model` 全体としては安全側に倒れる）。
+///
+/// 検出時（`count > 0`）の `tensor_name` は、最初の要素の `values.name`
+/// （tag=1 の中の tag=8）だけを同じく bounded に読み取ったもの（`TensorProto`
+/// の他フィールド（`raw_data` 等）へは一切踏み込まない。`values` 自体が
+/// 存在しない・`name` が無い場合は空文字列。`graph::build_graph` の既存
+/// 挙動と同じ fallback）。名前は [`SPARSE_TENSOR_NAME_DIAG_CAP`]
+/// （`graph::build_graph` と共有する上限）バイトで切り詰める
+/// （[`cap_sparse_tensor_diag_name`] 経由。診断契約の統一。codex-review
+/// P2 是正・2026-09-22）。値が同一メッセージ内に複数回出現した場合は
+/// protobuf の後勝ちマージ規則に従い最後の出現を採用する
+/// （`scan_sparse_tensor_bytes_for_values_name`／
 /// `scan_tensor_bytes_for_name` のドキュメンテーションコメント参照）。
 /// **「最初の要素」判定は「名前を読み取れた
 /// 最初の要素」ではなく「出現順で最初の要素」**（`graph::build_graph` の
@@ -352,32 +413,49 @@ pub fn decode_model(bytes: &[u8]) -> Result<ModelProto, DecodeModelError> {
 /// `values.name` が無い場合は空文字列のまま確定し、2 番目以降の要素へは
 /// 名前を探しに行かない（探索を続けると `build_graph` 側の
 /// `tensor_name` と食い違いうる。Cursor Bugbot 指摘・#2079 是正）。
-fn prescan_sparse_initializer(bytes: &[u8]) -> Option<(String, usize)> {
+fn prescan_sparse_initializer(bytes: &[u8]) -> PrescanOutcome {
     let mut buf: &[u8] = bytes;
     let mut count = 0usize;
     let mut first_name: Option<String> = None;
     let mut first_recorded = false;
-    while buf.has_remaining() {
-        let (tag, wire_type) = decode_key(&mut buf).ok()?;
-        match wire_type {
-            WireType::LengthDelimited => {
-                let field_bytes = take_length_delimited(&mut buf)?;
-                if tag == 7 {
-                    scan_graph_bytes_for_sparse_initializer(
-                        field_bytes,
-                        &mut count,
-                        &mut first_name,
-                        &mut first_recorded,
-                    )?;
+    // 走査ループ全体を `Option<()>` のクロージャへ閉じ込め、`?` による
+    // 早期離脱を「関数全体の早期リターン」ではなく「このクロージャの
+    // 早期リターン」に限定する。こうすることで、離脱後も `count`・
+    // `first_name`（いずれも `&mut` 経由でクロージャ外の変数を直接
+    // 更新している）の値がそのまま呼び出し元スコープに残る。
+    let scan_completed = (|| -> Option<()> {
+        while buf.has_remaining() {
+            let (tag, wire_type) = decode_key(&mut buf).ok()?;
+            match wire_type {
+                WireType::LengthDelimited => {
+                    let field_bytes = take_length_delimited(&mut buf)?;
+                    if tag == 7 {
+                        scan_graph_bytes_for_sparse_initializer(
+                            field_bytes,
+                            &mut count,
+                            &mut first_name,
+                            &mut first_recorded,
+                        )?;
+                    }
                 }
+                _ => skip_field(wire_type, tag, &mut buf, DecodeContext::default()).ok()?,
             }
-            _ => skip_field(wire_type, tag, &mut buf, DecodeContext::default()).ok()?,
         }
-    }
+        Some(())
+    })()
+    .is_some();
+
     if count > 0 {
-        Some((first_name.unwrap_or_default(), count))
+        // 検出は走査の成否より優先する（上記ドキュメンテーションコメント
+        // 「検出後に走査自体が不正な形式へ遭遇した場合の扱い」参照）。
+        PrescanOutcome::Found {
+            tensor_name: first_name.unwrap_or_default(),
+            count,
+        }
+    } else if scan_completed {
+        PrescanOutcome::NotFound
     } else {
-        None
+        PrescanOutcome::Indeterminate
     }
 }
 
@@ -492,8 +570,15 @@ pub(crate) fn cap_sparse_tensor_diag_name(bytes: &[u8]) -> String {
 /// **`Option<Option<String>>` を返さず全出現を走査して最後の出現を
 /// 採用する**ことで同じ後勝ち規則に従う（最初の出現で即 `return` しない）。
 /// 走査自体が不正入力（バッファ終端超過等）で失敗した場合のみ `None` を
-/// 早期に返す（`?` 演算子。`prescan_sparse_initializer` の判定不能
-/// フォールバック契約は不変）。
+/// 早期に返す（`?` 演算子）。この失敗は呼び出し元
+/// `scan_sparse_tensor_bytes_for_values_name` の `?` でさらに伝播するが、
+/// その時点で `scan_graph_bytes_for_sparse_initializer` は既に `count` を
+/// 加算済み（`*count += 1` の**後**にこの呼び出し系列へ入る）であり、
+/// `*first_name` へは単純代入（`?` 非使用）で結果が書き込まれるため、
+/// この失敗は診断名が空文字列になるだけで `prescan_sparse_initializer` の
+/// `PrescanOutcome::Found` 判定（`count > 0`）には影響しない（2026-09-22
+/// codex-review P0 是正の対象範囲外。`PrescanOutcome` のドキュメンテーション
+/// コメント参照）。
 fn scan_tensor_bytes_for_name(bytes: &[u8]) -> Option<Option<String>> {
     let mut buf: &[u8] = bytes;
     let mut last: Option<String> = None;
@@ -514,9 +599,10 @@ fn scan_tensor_bytes_for_name(bytes: &[u8]) -> Option<Option<String>> {
 
 /// length-delimited フィールドの中身を、残りバッファ長と照合したうえで
 /// 取り出す（`buf` はその分だけ前進する）。長さがバッファ終端を超える
-/// 場合は不正入力として `None`（呼び出し元は判定を `ModelProto::decode`
-/// 本体に委ねる。`prescan_sparse_initializer` のドキュメンテーション
-/// コメント参照）。
+/// 場合は不正入力として `None`（呼び出し元の走査は打ち切られる。
+/// `prescan_sparse_initializer` は打ち切り時点までに検出済みの `count`
+/// を優先し、`count == 0` のときだけ `ModelProto::decode` 本体へ判定を
+/// 委ねる。`PrescanOutcome` のドキュメンテーションコメント参照）。
 fn take_length_delimited<'b>(buf: &mut &'b [u8]) -> Option<&'b [u8]> {
     let len = decode_varint(buf).ok()?;
     let len = usize::try_from(len).ok()?;
