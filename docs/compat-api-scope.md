@@ -331,7 +331,8 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   ある項目として `docs/facade-inference-serving-scope-decision.md` §9 に
   記録した（K-1／K-2。既存 `Var` 演算の合成のみで新規 `Op`／`BackendOps`／
   依存を要しない設計。ユーザー承認前のため Tier 1／Tier 2 表への行追加は
-  行わない）
+  行わない）。K-1 の設計自体は `docs/kv-cache-design.md`（#2083）として
+  確定した（コード変更なし・K-1 実装着手自体は引き続き未承認）
 - **`amax`/`max` 縮約 API**（PyTorch `torch.amax` 相当）: 縮約 API 自体は
   Tier 1（1.2 節・#1601）で対象範囲となった。`crates/autodiff/src/grad.rs`
   の `max_vjp` は同値タイ発生時「最初に現れる最大要素 1 箇所のみ」へ
@@ -834,6 +835,15 @@ fn` 1 件」の制約と両立しないため本イシューのスコープ外�
 fit_types_are_reachable_via_facade_only` のビルダー連鎖へ `.to_file(..)`
 を追加して固定した。詳細は `docs/compat-callbacks-design.md` §4.3・§9
 を参照。
+
+**#2083 の設計記録は `docs/kv-cache-design.md` として完了した。**
+コード変更なし。KV キャッシュ（K-1）は既存 `Var` 演算（`cat`／
+`narrow`／`detach`・`nn/attention.rs` の `project`／`split_heads`／
+`sdpa_compose`）の合成のみで実装可能と確定し、キャッシュはホスト
+`Tensor<f32>` 保持（`TapeNode::value` がホスト `Tensor<f32>` である
+現行構造のため）、デバイス常駐化は K-3（段階 0）へ切り分けた。
+facade 公開面拡張（K-2）を含め、実装着手（本節 §5 経路 2）は
+引き続き未承認のまま（同 doc §6）。
 
 ## 6. 出典一覧
 
