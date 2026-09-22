@@ -22,7 +22,12 @@
 //! 等、本クレートが現時点で使わない再帰的メッセージは意図的に定義しない。`AttributeProto`
 //! の `g` / `graphs`（If/Loop/Scan のサブグラフ属性）も同様に #78 のスコープ外として
 //! 意図的に未定義とする。#78（インタープリタ基盤）・#79（8 オペ実装）で必要になった
-//! 時点で拡張する。
+//! 時点で拡張する。**例外**: `GraphProto.sparse_initializer`（tag=15。
+//! `SparseTensorProto`）は中身を一切使わないが、無言スキップに委ねると
+//! sparse initializer だけが「最初から存在しない」ものとして扱われ
+//! no-silent-skip 契約に反するため、**存在検出のためだけに意図的に宣言する**
+//! （`graph::build_graph` が非空を fail-closed 拒否する。イシュー #2079）。
+//! この例外により本モジュールが宣言するメッセージ数は 7 から 8 になった。
 //!
 //! フィールド番号の出典: `onnx==1.22.0` 同梱の `onnx/onnx.proto` を実際に読み、
 //! 該当 6 メッセージのフィールド番号を転記した（PoC-v2-6 で実ファイル
@@ -86,6 +91,40 @@ pub struct GraphProto {
     /// （理由は `onnx::export` モジュールのドキュメンテーションコメント参照）。
     #[prost(message, repeated, tag = "13")]
     pub value_info: Vec<ValueInfoProto>,
+    /// sparse 形式の initializer。本クレートは sparse テンソルを非対応
+    /// （`docs/tensor-core-sparse-complex-decision.md`）とし、dense
+    /// initializer と異なり中身は一切解釈しない。decode 方向: 非空であれば
+    /// `graph::build_graph` が `GraphError::SparseInitializerNotSupported` で
+    /// fail-closed に拒否する（存在検出のみの意図的な宣言。他の未使用
+    /// フィールドのように無言スキップに委ねると sparse initializer だけが
+    /// 「最初から存在しない」ものとして扱われ no-silent-skip 契約〈A03／A08〉
+    /// に反するため。イシュー #2079）。export 方向（`onnx::export`）は常に
+    /// 空のまま書き出す（内部 `Graph` は sparse を保持しない設計のため）。
+    #[prost(message, repeated, tag = "15")]
+    pub sparse_initializer: Vec<SparseTensorProto>,
+}
+
+/// sparse 形式テンソル（COO 形式: `values`・`indices`・`dims`）。
+///
+/// 本クレートでは **検出専用**（`GraphProto.sparse_initializer` の非空検査の
+/// ためだけに宣言する）。`values`／`indices` の中身は一切 decode・解釈しない
+/// （sparse テンソルの実装自体はスコープ外。`docs/tensor-core-sparse-complex-decision.md`
+/// REQ-9）。フィールド番号の出典は `onnx==1.22.0` 同梱の `onnx/onnx.proto`
+/// （`SparseTensorProto{ values: TensorProto tag=1, indices: TensorProto
+/// tag=2, dims: repeated int64 tag=3 }`）。イシュー #2079。
+#[derive(Clone, PartialEq, Message)]
+pub struct SparseTensorProto {
+    /// 非ゼロ要素の値（`TensorProto`）。`graph::build_graph` はこのフィールド
+    /// 自体は decode するが中身は読まず、`values.name` をエラー診断用の
+    /// テンソル名として使うのみ。
+    #[prost(message, optional, tag = "1")]
+    pub values: Option<TensorProto>,
+    /// 非ゼロ要素の COO インデックス（`TensorProto`）。本クレートは読まない。
+    #[prost(message, optional, tag = "2")]
+    pub indices: Option<TensorProto>,
+    /// sparse テンソル全体の形状。本クレートは読まない。
+    #[prost(int64, repeated, tag = "3")]
+    pub dims: Vec<i64>,
 }
 
 /// 演算グラフの 1 ノード（1 オペレータ呼び出し）。
@@ -221,6 +260,7 @@ mod tests {
                 input: Vec::new(),
                 output: Vec::new(),
                 value_info: Vec::new(),
+                sparse_initializer: Vec::new(),
             }),
             opset_import: vec![OperatorSetIdProto {
                 domain: String::new(),

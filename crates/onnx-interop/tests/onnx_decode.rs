@@ -7,7 +7,8 @@
 
 use fandhe_ai_onnx_interop::onnx::graph::{GraphError, RawTensor, build_graph};
 use fandhe_ai_onnx_interop::onnx::proto::{
-    AttributeProto, GraphProto, ModelProto, NodeProto, TensorProto, ValueInfoProto,
+    AttributeProto, GraphProto, ModelProto, NodeProto, SparseTensorProto, TensorProto,
+    ValueInfoProto,
 };
 use prost::Message;
 use std::path::PathBuf;
@@ -163,6 +164,7 @@ fn model_with_single_initializer(t: TensorProto) -> ModelProto {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![],
             name: "g".to_string(),
             initializer: vec![t],
@@ -505,6 +507,7 @@ fn duplicate_initializer_name_is_rejected_not_silently_overwritten() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![],
             name: "g".to_string(),
             initializer: vec![t1, t2],
@@ -531,6 +534,7 @@ fn non_topological_node_order_is_rejected() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["phantom".to_string()],
                 output: vec!["y".to_string()],
@@ -573,6 +577,7 @@ fn unknown_graph_output_is_rejected() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["y".to_string()],
@@ -610,6 +615,7 @@ fn duplicate_node_output_name_is_rejected() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![
                 NodeProto {
                     input: vec!["x".to_string()],
@@ -668,6 +674,7 @@ fn node_output_shadowing_initializer_name_is_rejected() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["w".to_string()],
@@ -711,6 +718,7 @@ fn duplicate_graph_input_name_is_rejected_not_silently_absorbed() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["y".to_string()],
@@ -755,6 +763,7 @@ fn duplicate_graph_output_name_is_rejected_not_silently_absorbed() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["y".to_string()],
@@ -806,6 +815,7 @@ fn graph_input_name_matching_initializer_name_is_accepted() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["y".to_string()],
@@ -837,6 +847,7 @@ fn optional_empty_string_input_is_not_treated_as_missing() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string(), String::new()],
                 output: vec!["y".to_string()],
@@ -870,6 +881,7 @@ fn node_with_multiple_optional_empty_outputs_is_accepted() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![NodeProto {
                 input: vec!["x".to_string()],
                 output: vec!["y".to_string(), String::new(), String::new()],
@@ -903,6 +915,7 @@ fn two_nodes_with_empty_trailing_output_are_both_accepted() {
         producer_name: "test".to_string(),
         graph: Some(GraphProto {
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
             node: vec![
                 NodeProto {
                     input: vec!["x".to_string()],
@@ -944,6 +957,239 @@ fn model_without_graph_is_rejected() {
     };
     let err = build_graph(&model).expect_err("graph 欠落は拒否されるはず");
     assert_eq!(err, GraphError::NoGraph);
+}
+
+// --- sparse_initializer の fail-closed 拒否（イシュー #2079） ---
+//
+// sparse テンソルは非対応（`docs/tensor-core-sparse-complex-decision.md`）。
+// `prost::Message::decode` は未宣言フィールドを無言スキップするため、
+// `sparse_initializer` だけが「最初から存在しない」ものとして扱われると
+// no-silent-skip 契約（A03／A08）に反する。以下は存在検出のみで拒否される
+// ことを確認する（中身の解釈はしない）。
+
+fn dense_initializer_tensor(name: &str) -> TensorProto {
+    TensorProto {
+        dims: vec![1],
+        data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
+        float_data: vec![1.0],
+        int64_data: vec![],
+        name: name.to_string(),
+        raw_data: vec![],
+    }
+}
+
+fn sparse_tensor_with_values_name(name: &str) -> SparseTensorProto {
+    SparseTensorProto {
+        values: Some(TensorProto {
+            dims: vec![1],
+            data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
+            float_data: vec![1.0],
+            int64_data: vec![],
+            name: name.to_string(),
+            raw_data: vec![],
+        }),
+        indices: Some(TensorProto {
+            dims: vec![1],
+            data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::INT64,
+            float_data: vec![],
+            int64_data: vec![0],
+            name: String::new(),
+            raw_data: vec![],
+        }),
+        dims: vec![2],
+    }
+}
+
+#[test]
+fn sparse_initializer_is_rejected_not_silently_skipped() {
+    let model = ModelProto {
+        opset_import: Vec::new(),
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![],
+            name: "g".to_string(),
+            initializer: vec![],
+            input: vec![],
+            output: vec![],
+            value_info: vec![],
+            sparse_initializer: vec![sparse_tensor_with_values_name("w_sparse")],
+        }),
+    };
+    let err = build_graph(&model).expect_err("sparse_initializer の非空は拒否されるはず");
+    match err {
+        GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+            assert_eq!(tensor_name, "w_sparse");
+            assert_eq!(count, 1);
+        }
+        other => panic!("SparseInitializerNotSupported を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn sparse_initializer_alongside_dense_initializer_is_rejected() {
+    let model = ModelProto {
+        opset_import: Vec::new(),
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![],
+            name: "g".to_string(),
+            initializer: vec![dense_initializer_tensor("dense_w")],
+            input: vec![],
+            output: vec![],
+            value_info: vec![],
+            sparse_initializer: vec![
+                sparse_tensor_with_values_name("w_sparse_1"),
+                sparse_tensor_with_values_name("w_sparse_2"),
+            ],
+        }),
+    };
+    let err = build_graph(&model)
+        .expect_err("dense initializer が併存していても sparse_initializer は拒否されるはず");
+    match err {
+        GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+            assert_eq!(tensor_name, "w_sparse_1");
+            assert_eq!(count, 2);
+        }
+        other => panic!("SparseInitializerNotSupported を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn sparse_initializer_with_empty_values_name_is_still_rejected() {
+    // `values` が `None`（非信頼入力）でも tensor_name は空文字列に fallback
+    // し、拒否そのものは変わらないことを確認する。
+    let sparse = SparseTensorProto {
+        values: None,
+        indices: None,
+        dims: vec![],
+    };
+    let model = ModelProto {
+        opset_import: Vec::new(),
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![],
+            name: "g".to_string(),
+            initializer: vec![],
+            input: vec![],
+            output: vec![],
+            value_info: vec![],
+            sparse_initializer: vec![sparse],
+        }),
+    };
+    let err =
+        build_graph(&model).expect_err("values が None でも sparse_initializer は拒否されるはず");
+    match err {
+        GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+            assert_eq!(tensor_name, "");
+            assert_eq!(count, 1);
+        }
+        other => panic!("SparseInitializerNotSupported を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn dense_twin_of_sparse_fixture_is_accepted() {
+    // 対照テスト: fixture と同構造で sparse_initializer だけを空にしたモデルは
+    // 成功する（sparse が拒否の唯一の原因であることの証明）。
+    let relu = NodeProto {
+        input: vec!["x".to_string()],
+        output: vec!["y".to_string()],
+        name: "relu".to_string(),
+        op_type: "Relu".to_string(),
+        attribute: vec![],
+        domain: String::new(),
+    };
+    let model = ModelProto {
+        opset_import: Vec::new(),
+        ir_version: 8,
+        producer_name: "fandhe-ai-test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![relu],
+            name: "g".to_string(),
+            initializer: vec![],
+            input: vec![ValueInfoProto {
+                name: "x".to_string(),
+            }],
+            output: vec![ValueInfoProto {
+                name: "y".to_string(),
+            }],
+            value_info: vec![],
+            sparse_initializer: vec![],
+        }),
+    };
+    let graph = build_graph(&model).expect("sparse_initializer が空なら成功するはず");
+    assert_eq!(graph.inputs, vec!["x".to_string()]);
+    assert_eq!(graph.outputs, vec!["y".to_string()]);
+}
+
+#[test]
+fn raw_wire_bytes_with_graph_field_15_are_detected_as_sparse_initializer() {
+    // 自前エンコーダ（`proto::encode_model`）を介さず、手書きの protobuf ワイヤ
+    // バイト列を直接 decode する非循環検証。`GraphProto.sparse_initializer`
+    // （field 15 → tag byte 0x7a）が外部バイト列から正しく読まれることの証明。
+    //
+    // ワイヤ構成（すべて length-delimited: tag = (field_no << 3) | 2）:
+    //   ModelProto.graph            field  7 -> tag 0x3a
+    //     GraphProto.sparse_initializer field 15 -> tag 0x7a
+    //       SparseTensorProto.values field  1 -> tag 0x0a
+    //         TensorProto.name      field  8 -> tag 0x42
+    let tensor_name = b"probe_sparse";
+    // TensorProto.name (field 8, tag 0x42) + varint length + bytes
+    let mut tensor_proto_bytes = vec![0x42u8, tensor_name.len() as u8];
+    tensor_proto_bytes.extend_from_slice(tensor_name);
+
+    // SparseTensorProto.values (field 1, tag 0x0a) + varint length + TensorProto bytes
+    let mut sparse_bytes = vec![0x0au8, tensor_proto_bytes.len() as u8];
+    sparse_bytes.extend_from_slice(&tensor_proto_bytes);
+
+    // GraphProto.sparse_initializer (field 15, tag 0x7a) + varint length + SparseTensorProto bytes
+    let mut graph_bytes = vec![0x7au8, sparse_bytes.len() as u8];
+    graph_bytes.extend_from_slice(&sparse_bytes);
+
+    // ModelProto.graph (field 7, tag 0x3a) + varint length + GraphProto bytes
+    let mut model_bytes = vec![0x3au8, graph_bytes.len() as u8];
+    model_bytes.extend_from_slice(&graph_bytes);
+
+    let model = ModelProto::decode(model_bytes.as_slice())
+        .expect("手書きワイヤバイト列の decode に成功するはず");
+    let graph = model
+        .graph
+        .as_ref()
+        .expect("graph フィールドが decode されているはず");
+    assert_eq!(graph.sparse_initializer.len(), 1);
+    assert_eq!(
+        graph.sparse_initializer[0]
+            .values
+            .as_ref()
+            .map(|t| t.name.as_str()),
+        Some("probe_sparse")
+    );
+
+    let err =
+        build_graph(&model).expect_err("手書きワイヤ由来の sparse_initializer も拒否されるはず");
+    match err {
+        GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+            assert_eq!(tensor_name, "probe_sparse");
+            assert_eq!(count, 1);
+        }
+        other => panic!("SparseInitializerNotSupported を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn sparse_initializer_fixture_file_is_rejected() {
+    let model = load_model("sparse_initializer.onnx");
+    let err = build_graph(&model).expect_err("fixture の sparse_initializer は拒否されるはず");
+    match err {
+        GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+            assert_eq!(tensor_name, "w_sparse");
+            assert_eq!(count, 1);
+        }
+        other => panic!("SparseInitializerNotSupported を期待したが {other:?}"),
+    }
 }
 
 #[test]

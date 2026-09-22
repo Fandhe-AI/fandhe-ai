@@ -160,6 +160,7 @@ fn to_model_proto_bypassing_check(graph: &Graph, options: &ExportOptions) -> Mod
             input,
             output,
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
         }),
         opset_import: vec![OperatorSetIdProto {
             domain: options.opset_domain.clone(),
@@ -607,6 +608,7 @@ fn typed_data_initializer_roundtrips_to_raw_data_bit_exact() {
                 name: "y".to_string(),
             }],
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
         }),
         opset_import: vec![OperatorSetIdProto {
             domain: String::new(),
@@ -868,6 +870,7 @@ fn model_with_supported_op_in_custom_domain_is_rejected_at_export() {
                 name: "y".to_string(),
             }],
             value_info: Vec::new(),
+            sparse_initializer: Vec::new(),
         }),
         opset_import: vec![OperatorSetIdProto {
             domain: String::new(),

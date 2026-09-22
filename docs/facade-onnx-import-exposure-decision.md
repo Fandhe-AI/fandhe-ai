@@ -286,3 +286,72 @@ facade は `prost` へ直接依存せず（Cargo.toml に追加していない�
   整合検査〉のみで運用）。
 - `OnnxModel::input_names` 等の追加アクセサ・`OnnxValue` の
   `#[non_exhaustive]` 化（承認文言に無いため見送り）。
+
+## 13. 追補（イシュー #2079）: `sparse_initializer` の fail-closed 拒否
+
+### 13.1 背景
+
+`GraphProto` は `sparse_initializer`（onnx.proto3 tag 15）を宣言していな
+かったため、`prost::Message::decode` がワイヤフォーマット仕様どおり
+未宣言フィールドを無言スキップしていた。sparse initializer だけを持つ
+テンソルは「最初から存在しない」ものとして扱われ、モデルはエラーなしで
+構築されてしまう非対称があった
+（`docs/tensor-core-sparse-complex-decision.md` §2 の記録事実・§9(a)
+の引き継ぎ候補）。sparse テンソル自体は引き続き対象外（REQ-9）であり、
+本追補は **存在検出のみ**（無言スキップの解消）を扱う。
+
+### 13.2 変更内容
+
+- `crates/onnx-interop/src/onnx/proto.rs`: `SparseTensorProto`（検出専用
+  部分実装。`values`／`indices`／`dims` を宣言するが中身は解釈しない）を
+  新設し、`GraphProto.sparse_initializer`（tag=15）を追加。本モジュールが
+  宣言するメッセージ数は 7 から 8 になった。
+- `crates/onnx-interop/src/onnx/graph.rs`: `GraphError::
+  SparseInitializerNotSupported { tensor_name, count }` を新設。
+  `build_graph` が `NoGraph` 検査の直後・dense initializer decode の前に
+  非空検査を挿入し、`tensor_name` は先頭要素の `values.name`（非信頼入力
+  のため空文字列もありうる）、`count` は総数を報告する。
+- `crates/onnx-interop/src/onnx/export.rs`: `build_model_proto` は
+  `sparse_initializer` を常に空のまま書き出す（内部 `Graph` は sparse を
+  保持しない設計のため。`value_info` と同じ契約パターン）。
+
+### 13.3 facade 公開面（`OnnxError` variant 9 → の追加。承認事項）
+
+- `OnnxError::SparseInitializerNotSupported { tensor_name: String, count:
+  usize }` を追加した（イシュー #2079 の受け入れ条件が variant 名まで
+  明示していたため、それを根拠に実装した。前例: `UnsupportedLayer`
+  〈#2037 承認事項 4〉と同じ扱い）。`OnnxError` は `#[non_exhaustive]`
+  のため SemVer 非破壊。
+- `map_graph_error`（`crates/facade/src/interop/onnx.rs`）に
+  `GraphError::SparseInitializerNotSupported` → `OnnxError::
+  SparseInitializerNotSupported` の明示 arm を追加した（`other =>` の
+  `InvalidModel` 吸収へ落とさない。11.1 節の `UnsupportedDataType` と
+  同じ判断）。
+- 依存追加・新規 `unsafe`・spec 提案はいずれもなし。
+
+### 13.4 検査位置が `build_graph` 単一である理由
+
+`from_path`／`from_bytes` はいずれも `decode_model → build_graph` を
+経由するため、`build_graph` に 1 か所だけ検査を置けば両入口とも自動的に
+拒否される（facade 側に検証を複製・迂回しない契約。`crates/facade/src/
+interop/onnx.rs` モジュール doc 参照）。
+
+### 13.5 fixture の出自
+
+`crates/onnx-interop/tests/fixtures/sparse_initializer.onnx`（95 bytes）
+は本リポで合成したフィクスチャであり、他の `docs/spec` 由来 fixture と
+異なる（`tests/fixtures/README.md` に例外として明記）。`values.name=
+"w_sparse"`・sparse initializer 1 件・dense 双子となる `Relu` ノード 1 件
+を含む。生成方法・sha256 は同 README 参照。
+
+### 13.6 テスト
+
+内部クレート（`onnx_decode.rs`）に 6 テスト（存在検出・dense 併存・
+`values=None` の fallback・対照〈sparse を除いた双子が成功〉・手書き
+ワイヤバイト列での非循環検証・fixture ファイル経由）、export 側に 1
+テスト（`sparse_initializer` が常に空で export される契約の固定）、
+facade（`interop_onnx_import.rs`）に 4 テスト（`from_path`／`from_bytes`
+経由の拒否・`Display` の tensor 名含有・`#[non_exhaustive]` ワイルドカード
+`match` への追加）、facade-internal parity（`interop_onnx_internal_parity.
+rs`）に 1 テスト（内部 `GraphError` と facade `OnnxError` の payload 一致）
+を追加した。

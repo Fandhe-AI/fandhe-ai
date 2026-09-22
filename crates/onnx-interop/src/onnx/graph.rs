@@ -8,6 +8,10 @@
 //!
 //! `decode_tensor` は要素データの復号より先に dims・要素数・データ長の整合を
 //! 検査する（長さ・形状検証の先行。イシュー #77 の受け入れ要件・`security.md` A03）。
+//!
+//! `sparse_initializer`（onnx.proto3 tag 15）は非対応のため、`build_graph` が
+//! 非空を存在検出のみで fail-closed に拒否する（中身は解釈しない。
+//! `docs/tensor-core-sparse-complex-decision.md`・イシュー #2079）。
 
 use super::proto::{GraphProto, ModelProto, NodeProto, TensorProto};
 use std::collections::{HashMap, HashSet};
@@ -77,6 +81,12 @@ pub enum GraphError {
     /// `Graph.outputs` へ複写され、本モジュールが謳う no-silent-skip 契約
     /// （他の全名前衝突に適用している方針）と矛盾する。
     DuplicateGraphOutputName { tensor_name: String },
+    /// `GraphProto.sparse_initializer`（onnx.proto3 tag 15）が非空。sparse テンソルは
+    /// 非対応（`docs/tensor-core-sparse-complex-decision.md`）のため、無言スキップせず
+    /// fail-closed に拒否する（no-silent-skip 契約・A03／A08。イシュー #2079）。
+    /// `tensor_name` は先頭要素の `values.name`（非信頼入力のため空文字列もありうる）、
+    /// `count` は sparse initializer の総数。
+    SparseInitializerNotSupported { tensor_name: String, count: usize },
 }
 
 impl fmt::Display for GraphError {
@@ -149,6 +159,12 @@ impl fmt::Display for GraphError {
             }
             GraphError::DuplicateGraphOutputName { tensor_name } => {
                 write!(f, "グラフ出力名の重複（tensor={tensor_name}）")
+            }
+            GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+                write!(
+                    f,
+                    "sparse_initializer は非対応（tensor={tensor_name}・count={count}）: sparse テンソルは対象外のため fail-closed に拒否"
+                )
             }
         }
     }
@@ -408,6 +424,21 @@ pub(crate) fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
 /// 「グラフは既に妥当である」前提で実装できるようにする。
 pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
     let g: &GraphProto = model.graph.as_ref().ok_or(GraphError::NoGraph)?;
+
+    // sparse_initializer（tag=15）は非対応。dense initializer の decode より
+    // 前に検査し、中身を一切解釈せず存在だけで fail-closed に拒否する（長さ・
+    // 形状検証を先行させる原則と同じ。no-silent-skip 契約・A03／A08。#2079）。
+    if !g.sparse_initializer.is_empty() {
+        let tensor_name = g.sparse_initializer[0]
+            .values
+            .as_ref()
+            .map(|t| t.name.clone())
+            .unwrap_or_default();
+        return Err(GraphError::SparseInitializerNotSupported {
+            tensor_name,
+            count: g.sparse_initializer.len(),
+        });
+    }
 
     // `HashMap::insert` は同名キーを後勝ちで無言上書きするため、事前に重複を
     // 検出して拒否する（不正な ONNX モデル。Bugbot 指摘・no-silent-skip 契約）。

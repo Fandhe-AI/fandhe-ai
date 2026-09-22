@@ -18,7 +18,9 @@
 //! 参照）。未対応 `op_type` は無言 skip せず [`OnnxError::UnsupportedOp`]
 //! で fail-closed に拒否する（no-silent-skip 契約。`.claude/rules/
 //! security.md` A03）。`run` の `feeds` は ONNX の pre-IR-4 セマンティクス
-//! どおり同名 initializer を上書きする。
+//! どおり同名 initializer を上書きする。`GraphProto.sparse_initializer` が
+//! 非空の場合も同じ契約に従い [`OnnxError::SparseInitializerNotSupported`]
+//! で拒否する（sparse テンソルは非対応。イシュー #2079）。
 //!
 //! [`OnnxValue::F16`] は `half::f16` を素通しする。facade は `half` を
 //! 再エクスポートしないため、`half::f16` を名指しして扱うには利用者側が
@@ -305,6 +307,10 @@ pub enum OnnxError {
     /// decode 経由〈`InterpError::Graph(GraphError::UnknownDataType)`〉の
     /// 両方をこの variant へ写像する）。
     UnsupportedDataType { tensor_name: String, data_type: i32 },
+    /// `GraphProto.sparse_initializer` が非空（`GraphError::
+    /// SparseInitializerNotSupported`）。sparse テンソルは非対応のため
+    /// fail-closed に拒否する（イシュー #2079）。
+    SparseInitializerNotSupported { tensor_name: String, count: usize },
     /// 未対応の `op_type`（`InterpError::UnsupportedOp`。import 実行時）、
     /// または export 時の allowlist 外 op（`ExportError::UnsupportedOp`。
     /// `op_type` が既定 domain 以外の場合は `"{domain}::{op_type}"`
@@ -346,6 +352,10 @@ impl fmt::Display for OnnxError {
                 f,
                 "未対応の ONNX data_type（tensor={tensor_name}）: {data_type}"
             ),
+            OnnxError::SparseInitializerNotSupported { tensor_name, count } => write!(
+                f,
+                "未対応の ONNX sparse_initializer（tensor={tensor_name}・count={count}）: sparse テンソルは非対応"
+            ),
             OnnxError::UnsupportedOp { op_type } => write!(f, "未対応の ONNX op_type: {op_type}"),
             OnnxError::MissingFeed { input } => {
                 write!(f, "グラフ入力 '{input}' に対応する feed がありません")
@@ -384,6 +394,9 @@ fn map_graph_error(e: GraphError) -> OnnxError {
             tensor_name,
             data_type,
         },
+        GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+            OnnxError::SparseInitializerNotSupported { tensor_name, count }
+        }
         other => OnnxError::InvalidModel {
             message: other.to_string(),
         },
