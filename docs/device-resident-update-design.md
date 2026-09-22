@@ -2093,3 +2093,67 @@ NVRTC ネイティブカーネルでオーバーライドした（イシュー #
   `crates/backend-cuda/tests/adam_device_real_device.rs`
   （`docs/perf/logs/adam-device-step-cuda-2069/README.md` の事前登録
   判定規則に従う。実測は本イシュー時点で未実施のまま申し送り）。
+
+### #2070 追補: Metal カーネル実装
+
+`MetalBackendOps::adam_step_device` の trait 既定 `Unsupported` を、
+MSL ネイティブカーネルでオーバーライドした（イシュー #2070）。
+
+- **ファイル構成**: `crates/backend-metal/src/{adam.rs,
+  shaders/adam.metal}`（起動 API／MSL カーネルソースの 2 ファイル
+  構成。`sgd.rs`／`shaders/sgd.metal` と同型）・`crates/backend-metal/
+  src/adam_model.rs`（新規。GPU 非依存な shape 検証・`AdamStepKind`
+  分岐フラグ導出・カーネル逐語ホストモデル。`objc2` 系 FFI に触れない
+  ため `cfg(target_os = "macos")` を付けず Linux でも単体テストが
+  回る。`unique_model`／`gather_scatter_model` と同じ設計判断）・
+  `context_cache::cached_adam`（プロセス内 MSL コンパイル済みパイプ
+  ラインキャッシュ。`cached_sgd` と同型）。Issue 本文が挙げていた
+  `adam_step.rs`／`shaders/adam_step.metal` という名前は採用せず、
+  既存 SGD 構成（`sgd.rs`／`sgd.metal`）・CUDA 側 #2069（`adam.rs`）
+  との一貫性を優先して `adam.rs`／`adam.metal` を採用した（PR 本文に
+  明記）。
+- **`Device::Metal` を扱わない役割分担**: `Device::Metal` variant 自体
+  が `cfg(target_os = "macos")` 限定のため、`adam_model.rs`（Linux でも
+  コンパイルする必要がある）は device 一致検査を持たない。device 検査
+  は macOS 限定の `ops.rs::MetalBackendOps::adam_step_device_impl`
+  （`sgd_step_device_impl` と同じ「device → shape → `AdamStepKind`
+  分岐評価 → `cached_adam` 構築 → downcast → `numel == 0` 早期 return
+  → 起動」の検証順序）が担う。`adam_model.rs` は shape 検証
+  （`validate_adam_step_shapes`）・`AdamStepKind` 分岐フラグ導出
+  （`adam_kernel_flags`）・カーネル逐語ホストモデル
+  （`adam_step_host_model`）のみを提供する。
+- **FP 縮約禁止契約**: MSL 既定の FP 縮約モード `fast`（文をまたぐ
+  FMA 縮約許可。`MTLMathMode::Safe`〈`pipeline::compile_options`〉でも
+  縮約は `on`〈同一文内のみ〉止まりで `off` にはならない）に対し、
+  `shaders/adam.metal` 冒頭で `#pragma METAL fp contract(off)`
+  （ファイルスコープ）を明示することで、CPU 参照実装が明示的に
+  `f32::mul_add` を使う 3 箇所（`g_eff` の coupled weight decay 分岐・
+  `m`／`v` 指数移動平均更新）以外をコンパイラが暗黙に FMA 縮約しない
+  ようにする（CUDA 側の非縮約 intrinsic 方針の Metal 対応）。`sqrt` は
+  `precise::sqrt`（正確丸め）を明示し、`rsqrt`／`fast::` 等の近似
+  intrinsic は使わない（`elementwise.metal`／`bce.metal` の
+  `precise::exp` と同じ「コンパイルオプションだけに委ねない」方針。
+  イシュー #1105／#1893 の教訓の Metal 対応）。
+- **同期契約**: `sgd.rs::MetalSgd::run`（イシュー #1017）と同一。
+  `token: None`（`adam_step_device` 経由）では `encode` 直後に
+  `ctx.synchronize()` まで行う同期契約、`token: Some`
+  （`adam_step_device_tracked` 経由）では `encode` と同一ロック区間で
+  バッチへ登録し待たない非同期契約。
+- **検証**: Linux で実行可能な `crates/backend-metal/tests/
+  adam_device_contract.rs`（`adam_model::validate_adam_step_shapes`／
+  `adam_kernel_flags` の shape・分岐フラグ検証）・`crates/
+  backend-metal/tests/adam_source_evidence.rs`（MSL ソースの
+  `#pragma METAL fp contract(off)` 順序・`fma(`／`precise::sqrt(`
+  実在・`ops.rs` 側の override 結線の文字列証跡）・`adam_model.rs` 内
+  unit test（`adam_step_host_model` と `CpuBackendOps::
+  adam_step_device` の 100 step bit 完全一致——カーネルへ写像した演算
+  列が CPU 参照実装と等価であることを実機なしでロック）に加え、
+  Apple Silicon 実機 `#[ignore]` テスト `crates/backend-metal/tests/
+  adam_device_parity.rs`（`docs/perf/logs/adam-device-step-
+  metal-2070/README.md` の事前登録判定規則に従う。実測は本イシュー
+  時点で未実施のまま申し送り）。
+- **対象外**: RMSprop・Adagrad の常駐 step、facade 経路
+  （`Tape::step_device_param_store_adam`／`_adamw` on Metal）の
+  end-to-end `#[ignore]` テストは本イシューでは対応しない
+  （`out-of-scope-tracking.md` 対象。ユーザー承認を得て別 Issue で
+  追跡する）。

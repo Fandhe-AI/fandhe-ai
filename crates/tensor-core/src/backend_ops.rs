@@ -984,12 +984,11 @@ pub trait BackendOps {
     ///
     /// # デフォルト実装（非破壊拡張）
     /// 既定は常に [`BackendError::Unsupported`] を返す fail-closed
-    /// （`sgd_step_device` と同方針。設計文書 §3.2 改訂）。CPU・CUDA は
-    /// このデフォルトを実カーネルでオーバーライドする（CUDA はイシュー
-    /// #2069。`crates/backend-cuda/src/adam.rs`／`kernels_adam.rs`）。
-    /// Metal は本イシュー時点では未実装のままこのデフォルトを維持する
-    /// （`out-of-scope-tracking.md` 対象。引き継ぎはユーザー承認を得て
-    /// 別 Issue で追跡する）。
+    /// （`sgd_step_device` と同方針。設計文書 §3.2 改訂）。CPU・CUDA・
+    /// Metal はこのデフォルトを実カーネルでオーバーライドする（CUDA は
+    /// イシュー #2069。`crates/backend-cuda/src/adam.rs`／
+    /// `kernels_adam.rs`。Metal はイシュー #2070。`crates/
+    /// backend-metal/src/adam.rs`／`shaders/adam.metal`）。
     ///
     /// # エラー
     /// - `param`／`m`／`v` のいずれかがこのバックエンドのハンドル型へ
