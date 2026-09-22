@@ -31,9 +31,32 @@
 //! 範囲外を参照しうる `ih`／`iw` は明示的な範囲検査（`0 <= ih < H`）で
 //! ゼロパディングとして扱い、`unsafe` な無検査アクセスは行わない。
 
-use fandhe_ai_tensor_core::{Conv2dParams, Tensor, conv2d_out_shape};
+use fandhe_ai_tensor_core::{Conv2dParams, ShapeError, Tensor, conv2d_out_shape};
 
 use super::error::OpError;
+
+/// 出力バッファ長 `n * cout * hout * wout` を `checked_mul` の連鎖で検査する。
+///
+/// [`conv2d_out_shape`] は `checked_numel_for`（`n`・`cout`・`hout`・`wout` の
+/// 順の `try_fold` による `checked_mul` 連鎖）で同じ積を既に検査済みだが、
+/// `conv` 本体（本ファイル）はその結果を信頼して素の `*` で再計算しており、
+/// 呼び出し元の変更で検査済みの積と実際に確保するバッファ長の計算式が
+/// 将来ズレた場合に debug build の overflow panic／release build の
+/// wraparound（巨大 shape に対して小さいバッファを確保してしまう境界外
+/// 書き込みの引き金）へ再び倒れうる。`matmul.rs::checked_matmul_element_
+/// counts`（PR #276 Bugbot 指摘）と同じ「アロケーション直前でも再検査する」
+/// 方針に従い、確保の直前でも独立に検査する（codex-review P0 指摘。PR #2220）。
+fn checked_conv_out_buffer_len(
+    n: usize,
+    cout: usize,
+    hout: usize,
+    wout: usize,
+) -> Result<usize, OpError> {
+    n.checked_mul(cout)
+        .and_then(|v| v.checked_mul(hout))
+        .and_then(|v| v.checked_mul(wout))
+        .ok_or(OpError::Shape(ShapeError::ElementCountOverflow))
+}
 
 /// `Conv` の属性。ONNX Conv-13 仕様の `auto_pad`／`dilations`／`group`／
 /// `kernel_shape`／`pads`／`strides`（`AttributeProto` から後続の decode 層
@@ -266,7 +289,8 @@ pub fn conv(
     let [ph, pw] = pads;
     let [dh, dw] = dilations;
 
-    let mut out = vec![0f32; n * cout * hout * wout];
+    let out_buf_len = checked_conv_out_buffer_len(n, cout, hout, wout)?;
+    let mut out = vec![0f32; out_buf_len];
     for ni in 0..n {
         for co in 0..cout {
             let g = co / cout_g;
@@ -567,5 +591,28 @@ mod tests {
             out_slice.iter().all(|&v| v == 0.0),
             "全入力位置がパディング領域内のため出力は全ゼロのはず: {out_slice:?}"
         );
+    }
+
+    // 回帰テスト（codex-review P0 指摘。PR #2220 review id 5280248934）:
+    // `n * cout * hout * wout`（バッファ長）の左結合の中間積（`n * cout`）が
+    // オーバーフローする一方、後段の次元（`hout`／`wout`）が 0 のため最終積は
+    // 0 になる境界値で、`checked_conv_out_buffer_len` が `checked_mul` 連鎖の
+    // 途中（`n * cout` の時点）でオーバーフローを検出し `OpError::Shape(
+    // ElementCountOverflow)` を返すことを確認する（最終積 0 を理由に見逃さない）。
+    #[test]
+    fn conv_out_buffer_len_overflow_detected_even_when_trailing_dim_is_zero() {
+        let n = usize::MAX;
+        let cout = 2usize;
+        // n * cout はオーバーフローするが、hout=0（最終積は 0 になりうる形）。
+        let err = checked_conv_out_buffer_len(n, cout, 0, 5).unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn conv_out_buffer_len_normal_shape_ok() {
+        assert_eq!(checked_conv_out_buffer_len(1, 3, 4, 4).unwrap(), 48);
     }
 }
