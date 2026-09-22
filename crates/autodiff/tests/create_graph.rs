@@ -1708,6 +1708,70 @@ fn hessian_pow_matches_finite_difference() {
     assert_hessian_close(&analytic, &numeric);
 }
 
+/// 底 `a`（行 0）・指数 `b`（行 1）の両方を追跡対象にした `a^b`
+/// （`x` shape `[2, 2]`。`Var::narrow` で行ごとに分離）。`a` に `0.0`
+/// を含めることで `create_graph.rs::build_cgrads` の
+/// `ScalarBinaryOp::Pow` db 枝（`a_bc.log()`。`a==0` で forward 値が
+/// `-inf`）を通す。`b` は `2.0`／`3.0`（0 でない正整数）のため
+/// `a^b` 自体は `a==0` を含め全域で滑らか（多項式）——有限差分と
+/// 突合可能な形状を保ちつつ、Hessian（child tape の再 backward）が
+/// `where_cond` の不選択枝〈`log(0)=-inf`〉を通っても `NaN` を出さない
+/// ことを検査する（review 指摘 2026-09-22。修正前は `0 * (1/a) =
+/// 0 * inf = NaN` が db 成分へ混入していた）。
+fn build_pow_zero_base<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let a = x.narrow(0, 0, 1)?;
+    let b = x.narrow(0, 1, 1)?;
+    a.pow(&b)?.sum(None)
+}
+
+#[test]
+fn hessian_pow_db_zero_base_matches_finite_difference() {
+    // 行 0 = a = [0.0, 0.0]、行 1 = b = [2.0, 3.0]（flat: [a0, a1, b0, b1]）。
+    let x0 = [0.0f32, 0.0, 2.0, 3.0];
+    let numeric = finite_diff_hessian(build_pow_zero_base, &x0, &[2, 2], 1e-3);
+    let analytic = analytic_hessian(build_pow_zero_base, &x0, &[2, 2]);
+
+    // 主目的の回帰検査: 修正前は db 枝の `where_cond` 逆伝播が
+    // `0 * (1/a) = 0 * inf = NaN` を生み、Hessian 全体が NaN に汚染
+    // されていた。まず全要素が有限であることを検査する。
+    for row in &analytic {
+        for &v in row {
+            assert!(
+                v.is_finite(),
+                "Hessian に NaN／inf が混入（a==0 の log 安全化漏れ疑い）: {row:?}"
+            );
+        }
+    }
+
+    // 混合偏微分 d²(a^b)/da db（(j,i) = (2,0)・(3,1)。それぞれ a0-b0・
+    // a1-b1 の組）は中央差分だと `a` を負側へまたぐ必要があり、
+    // `db = y * ln(a)`（`eval::scalar::binary_partials`）の参照実装側が
+    // `ln(負数) = NaN` を返す（`a^b` 自体は integer 指数のため負の `a`
+    // でも実数値を持つが、`ln(a)` を経由する db の勾配公式は `a > 0`
+    // でのみ定義される数学的な境界制約であり、本 PR が是正した
+    // create_graph 側のバグとは無関係）。実測でも修正後の analytic は
+    // 有限（0）だが中央差分の numeric[2][0]／numeric[3][1] は NaN に
+    // なることを確認済みのため、この 2 要素のみ「解析値が 0 である
+    // こと」を直接検査し、他の要素は通常どおり中央差分と突合する。
+    let domain_boundary_pairs = [(2usize, 0usize), (3usize, 1usize)];
+    for (j, row_a) in analytic.iter().enumerate() {
+        for (i, &a) in row_a.iter().enumerate() {
+            if domain_boundary_pairs.contains(&(j, i)) {
+                assert_eq!(
+                    a, 0.0,
+                    "db 境界点（a==0）の解析 Hessian[{j}][{i}] は 0 のはず: {a}"
+                );
+                continue;
+            }
+            let n = numeric[j][i];
+            assert!(
+                common::req2_close(a, n),
+                "hessian mismatch at [{j}][{i}]: analytic={a} numeric={n}"
+            );
+        }
+    }
+}
+
 // --- ScalarBinary: 比較演算（区分定数。両勾配とも恒等的にゼロ） --------
 
 #[test]

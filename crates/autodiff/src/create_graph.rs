@@ -1035,10 +1035,35 @@ fn build_cgrads<'c>(
                             let out_c = get_mirror(mirror, id)?;
                             let one = child.var_no_grad(&Tensor::scalar(1.0f32));
                             let b_minus_one = b_bc.sub(&one)?;
-                            let a_pow = a_bc.pow(&b_minus_one)?;
+                            // `a_pow`（da 用）・`log(a)`（db 用）はいずれも
+                            // `where_cond` で選ばれない側の枝として構築
+                            // されるが、値自体は forward で即座に評価
+                            // される（child tape は実値を持つ imperative
+                            // グラフのため）。a==0 のとき `a^(負の指数)`
+                            // ／`log(a)` は inf／-inf になり、この枝を
+                            // Hessian（child tape を再度 backward する
+                            // 経路）で微分すると、局所勾配が `1/a` 等の
+                            // 発散値になる。`where_cond` の逆伝播は不選択
+                            // 枝へ厳密に 0 を流すが、その 0 が発散した局所
+                            // 勾配と掛け合わさり `0 * inf = NaN` へ汚染
+                            // される（review 指摘 2026-09-22。db 側の
+                            // `a_bc.log()` で顕在化。da 側の `a_bc.pow
+                            // (b_minus_one)` も `a==0 ∧ b==0` で同型の
+                            // 危険〈`0^(-1)` 等〉を持つため同じ安全化を
+                            // 適用する）。危険になりうる入力を選択前に
+                            // 安全値（`log(1)=0`／`1^e=1`）へ置換して
+                            // から `log`／`pow` を取ることで、当該枝の
+                            // 局所勾配自体を有限に保つ（最終的な forward
+                            // 値は `where_cond` の選択で変わらない）。
+                            let safe_a_for_pow = Var::where_cond(&mask_b0, &one, &a_bc)?;
+                            let safe_a_for_log = Var::where_cond(&mask_a0, &one, &a_bc)?;
+                            let a_pow = safe_a_for_pow.pow(&b_minus_one)?;
                             let da_factor = Var::where_cond(&mask_b0, &zeros, &b_bc.mul(&a_pow)?)?;
-                            let db_factor =
-                                Var::where_cond(&mask_a0, &zeros, &out_c.mul(&a_bc.log()?)?)?;
+                            let db_factor = Var::where_cond(
+                                &mask_a0,
+                                &zeros,
+                                &out_c.mul(&safe_a_for_log.log()?)?,
+                            )?;
                             (g.mul(&da_factor)?, g.mul(&db_factor)?)
                         }
                         ScalarBinaryOp::Maximum | ScalarBinaryOp::Minimum => {
