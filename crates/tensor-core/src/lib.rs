@@ -220,7 +220,9 @@ pub use fusion::{
     MAX_FUSED_SEGMENT_NODES, RowFusionMeta,
 };
 pub use interpolate::{BilinearCoord, bilinear_blend, bilinear_scale, bilinear_src_coord};
-pub use low_precision::linear_forward_low_precision;
+pub use low_precision::{
+    conv2d_forward_low_precision, linear_forward_low_precision, matmul_low_precision,
+};
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     BatchedMatmulPlan, adaptive_pool2d_out_shape, adaptive_window, batch_norm_layout,

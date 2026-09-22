@@ -969,7 +969,25 @@ pub(crate) fn vjp(
             weight,
             bias,
             params,
+            // VJP は forward の計算精度を見ない（backward は常に f32。
+            // `compute_dtype` doc 参照。イシュー #2071）。ここで束縛
+            // するのは、記録された dtype が既知の 3 値
+            // （F32／F16／Bf16）のいずれでもない場合を fail-closed で
+            // 検知する sanity check（下記）に使うため
+            // （`Op::LinearAct` 分岐が診断メッセージへ含める先例と
+            // 同じ「記録専用フィールドを読む正当な理由」）。
+            compute_dtype,
         } => {
+            if !matches!(
+                compute_dtype,
+                fandhe_ai_tensor_core::ScalarDType::F32
+                    | fandhe_ai_tensor_core::ScalarDType::F16
+                    | fandhe_ai_tensor_core::ScalarDType::Bf16
+            ) {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "grad::vjp: Op::Conv2d has an unrecognized compute_dtype ({compute_dtype:?})"
+                )));
+            }
             let input_val = materialize_fallible(nodes, ops, input)?;
             let weight_val = materialize_fallible(nodes, ops, weight)?;
             let input_shape = input_val.shape().to_vec();
@@ -8215,6 +8233,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             recompute_failed: std::cell::Cell::new(false),
             requires_grad: true,
             fp32_strict: false,
+            low_precision: false,
         }
     }
 
@@ -10521,6 +10540,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
                 recompute_failed: std::cell::Cell::new(false),
                 requires_grad: true,
                 fp32_strict: false,
+                low_precision: false,
             };
             vec![
                 leaf_node(x.clone()),
@@ -11165,6 +11185,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             weight: NodeId(1),
             bias: Some(NodeId(2)),
             params,
+            compute_dtype: fandhe_ai_tensor_core::ScalarDType::F32,
         };
         let grads = vjp(
             &op,
@@ -11229,6 +11250,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             weight: NodeId(1),
             bias: None,
             params: params.clone(),
+            compute_dtype: fandhe_ai_tensor_core::ScalarDType::F32,
         };
         let grads = vjp(
             &op,
@@ -11476,6 +11498,7 @@ release ビルドでも検知できるよう `assert!` を使う）"
             recompute_failed: std::cell::Cell::new(false),
             requires_grad: true,
             fp32_strict: false,
+            low_precision: false,
         };
         let nodes = vec![node];
         let op = Op::Interpolate {
