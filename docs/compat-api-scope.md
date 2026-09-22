@@ -848,6 +848,21 @@ fit_types_are_reachable_via_facade_only` のビルダー連鎖へ `.to_file(..)`
 facade 公開面拡張（K-2）を含め、実装着手（本節 §5 経路 2）は
 引き続き未承認のまま（同 doc §6）。
 
+**#2132（`nn::Module`／`ModuleList` の facade 公開可否）の設計記録は
+`docs/facade-nn-module-exposure-decision.md` として完了した。** コード
+変更なし。素の再エクスポート（`pub use fandhe_ai_autodiff::nn::{Module,
+ModuleList}`）は `Module::forward` が生の `fandhe_ai_autodiff::Tape` を
+引数に取るため、facade のみに依存する利用者は `impl Module` を書けず
+「ユーザー定義層」という目的自体を満たさないと確認した（同 doc §1.3）。
+`dyn Module` の object safety は `ModuleList { modules: Vec<Box<dyn
+Module>>, .. }` の実装で既に実証済み（同 doc §3）。sealed 化は利用者
+実装という目的と矛盾するため `Module` は open trait のまま・defaulted
+メソッド追加のみ非破壊という既存運用を確認（同 doc §4）。facade 側の
+薄い `Module` trait と `ModuleList`／`Sequential` コンテナを新設する
+案 B を推奨候補として記録したが、facade 公開面の拡張自体は本節経路 2
+の承認待ち（段階 0 継続）。#2133（実装）が想定していた素の再エクスポート
+形は本判断により再確定が必要（同 doc §8）。
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |
