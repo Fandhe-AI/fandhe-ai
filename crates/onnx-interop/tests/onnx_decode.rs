@@ -7,8 +7,8 @@
 
 use fandhe_ai_onnx_interop::onnx::graph::{GraphError, RawTensor, build_graph};
 use fandhe_ai_onnx_interop::onnx::proto::{
-    AttributeProto, GraphProto, ModelProto, NodeProto, SparseTensorProto, TensorProto,
-    ValueInfoProto,
+    AttributeProto, GraphProto, ModelProto, NodeProto, SparseTensorProto, SparseTensorValueName,
+    TensorProto, ValueInfoProto,
 };
 use prost::Message;
 use std::path::PathBuf;
@@ -979,24 +979,15 @@ fn dense_initializer_tensor(name: &str) -> TensorProto {
 }
 
 fn sparse_tensor_with_values_name(name: &str) -> SparseTensorProto {
+    // `SparseTensorProto.values` は `name`（tag=8）のみを宣言した軽量型
+    // `SparseTensorValueName` として decode する（メモリ増幅対策。
+    // イシュー #2079 codex-review 是正。`proto.rs` モジュール冒頭コメント
+    // 「メモリ増幅対策」節参照）。`indices`／`dims` は構造体自体を宣言
+    // しなくなったため、ここでの構築対象からも除いた。
     SparseTensorProto {
-        values: Some(TensorProto {
-            dims: vec![1],
-            data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::FLOAT,
-            float_data: vec![1.0],
-            int64_data: vec![],
+        values: Some(SparseTensorValueName {
             name: name.to_string(),
-            raw_data: vec![],
         }),
-        indices: Some(TensorProto {
-            dims: vec![1],
-            data_type: fandhe_ai_onnx_interop::onnx::proto::data_type::INT64,
-            float_data: vec![],
-            int64_data: vec![0],
-            name: String::new(),
-            raw_data: vec![],
-        }),
-        dims: vec![2],
     }
 }
 
@@ -1060,11 +1051,7 @@ fn sparse_initializer_alongside_dense_initializer_is_rejected() {
 fn sparse_initializer_with_empty_values_name_is_still_rejected() {
     // `values` が `None`（非信頼入力）でも tensor_name は空文字列に fallback
     // し、拒否そのものは変わらないことを確認する。
-    let sparse = SparseTensorProto {
-        values: None,
-        indices: None,
-        dims: vec![],
-    };
+    let sparse = SparseTensorProto { values: None };
     let model = ModelProto {
         opset_import: Vec::new(),
         ir_version: 8,
@@ -1176,6 +1163,168 @@ fn raw_wire_bytes_with_graph_field_15_are_detected_as_sparse_initializer() {
             assert_eq!(count, 1);
         }
         other => panic!("SparseInitializerNotSupported を期待したが {other:?}"),
+    }
+}
+
+/// `decode_model` の bounded 事前走査（主対策。イシュー #2079 codex-review
+/// 是正）が、`ModelProto::decode` を呼ぶ**前**に同じワイヤバイト列から
+/// 同じ payload（tensor_name・count）を検出することを確認する
+/// （`raw_wire_bytes_with_graph_field_15_are_detected_as_sparse_initializer`
+/// の構造体側検証と対になる、`decode_model` 側の直接検証）。
+#[test]
+fn decode_model_rejects_raw_wire_bytes_with_graph_field_15_before_full_decode() {
+    let tensor_name = b"probe_sparse";
+    let mut tensor_proto_bytes = vec![0x42u8, tensor_name.len() as u8];
+    tensor_proto_bytes.extend_from_slice(tensor_name);
+
+    let mut sparse_bytes = vec![0x0au8, tensor_proto_bytes.len() as u8];
+    sparse_bytes.extend_from_slice(&tensor_proto_bytes);
+
+    let mut graph_bytes = vec![0x7au8, sparse_bytes.len() as u8];
+    graph_bytes.extend_from_slice(&sparse_bytes);
+
+    let mut model_bytes = vec![0x3au8, graph_bytes.len() as u8];
+    model_bytes.extend_from_slice(&graph_bytes);
+
+    let err = fandhe_ai_onnx_interop::onnx::proto::decode_model(&model_bytes)
+        .expect_err("decode_model が sparse_initializer を拒否するはず");
+    match err {
+        fandhe_ai_onnx_interop::onnx::proto::DecodeModelError::SparseInitializerNotSupported {
+            tensor_name,
+            count,
+        } => {
+            assert_eq!(tensor_name, "probe_sparse");
+            assert_eq!(count, 1);
+        }
+        other => panic!("DecodeModelError::SparseInitializerNotSupported を期待したが {other:?}"),
+    }
+}
+
+/// メモリ増幅対策の回帰固定（イシュー #2079 codex-review 指摘の本題）:
+/// `sparse_initializer` の `values`（`TensorProto`）に巨大な `raw_data`
+/// （tag=9・数 MiB）を持たせても、`decode_model` は bounded 事前走査が
+/// `sparse_initializer`（tag=15）の存在を検出した時点で即座に拒否し、
+/// `raw_data` の中身を一切構造体へ展開しない。修正前の実装（`raw_data`
+/// を含む `TensorProto` 全体を `Vec<SparseTensorProto>` へ decode してから
+/// `build_graph` が非空検査で拒否する経路）でも最終的には拒否されるが、
+/// 拒否の**前**に `raw_data` 相当量のメモリ確保が発生していた（DoS）。
+/// 本テストは拒否そのもの（payload の正しさ）を固定する回帰テストであり、
+/// 「確保が起きないこと」自体は本テストでは直接測定できないが、
+/// `SparseTensorProto`/`SparseTensorValueName` が `raw_data`（tag=9）を
+/// 宣言していないことと合わせて、`prescan_sparse_initializer` が
+/// `ModelProto::decode` より前に短絡することを保証する。
+#[test]
+fn decode_model_rejects_sparse_initializer_with_large_raw_data_payload_without_hanging() {
+    const RAW_DATA_LEN: usize = 4 * 1024 * 1024; // 4 MiB
+
+    let tensor_name = b"probe_large";
+    let mut tensor_proto_bytes = vec![0x42u8, tensor_name.len() as u8];
+    tensor_proto_bytes.extend_from_slice(tensor_name);
+    // TensorProto.raw_data (field 9, tag 0x4a) + varint 長 + 4 MiB のダミーバイト列。
+    // 4 MiB は 1 バイト varint 長では表現できないため 3 バイト varint で符号化する
+    // （プロトコル的には妥当な符号化。decode_model がここへ踏み込まないことの
+    // 検証が目的であり、値の中身は全て 0 で問題ない）。
+    tensor_proto_bytes.push(0x4au8);
+    encode_varint_into(RAW_DATA_LEN as u64, &mut tensor_proto_bytes);
+    tensor_proto_bytes.extend(vec![0u8; RAW_DATA_LEN]);
+
+    let mut sparse_bytes = vec![0x0au8];
+    encode_varint_into(tensor_proto_bytes.len() as u64, &mut sparse_bytes);
+    sparse_bytes.extend_from_slice(&tensor_proto_bytes);
+
+    let mut graph_bytes = vec![0x7au8];
+    encode_varint_into(sparse_bytes.len() as u64, &mut graph_bytes);
+    graph_bytes.extend_from_slice(&sparse_bytes);
+
+    let mut model_bytes = vec![0x3au8];
+    encode_varint_into(graph_bytes.len() as u64, &mut model_bytes);
+    model_bytes.extend_from_slice(&graph_bytes);
+
+    let err = fandhe_ai_onnx_interop::onnx::proto::decode_model(&model_bytes)
+        .expect_err("decode_model が巨大 raw_data 付き sparse_initializer を拒否するはず");
+    match err {
+        fandhe_ai_onnx_interop::onnx::proto::DecodeModelError::SparseInitializerNotSupported {
+            tensor_name,
+            count,
+        } => {
+            assert_eq!(tensor_name, "probe_large");
+            assert_eq!(count, 1);
+        }
+        other => panic!("DecodeModelError::SparseInitializerNotSupported を期待したが {other:?}"),
+    }
+}
+
+/// protobuf の非 repeated メッセージフィールドは複数回出現するとマージされる
+/// 仕様のため、`prescan_sparse_initializer` は `graph`（tag=7）の全出現を
+/// 走査して `sparse_initializer` の出現数を合算する必要がある（1 回の
+/// 出現だけを見ると分割された入力を見逃す）。本テストは `ModelProto` 直下に
+/// `graph` フィールドを 2 回出現させ、1 個目に sparse を 1 件、2 個目に
+/// sparse を 1 件持たせて count が 2 に合算されることを確認する。
+#[test]
+fn decode_model_sums_sparse_initializer_count_across_multiple_graph_occurrences() {
+    fn sparse_initializer_field(name: &[u8]) -> Vec<u8> {
+        let mut tensor_proto_bytes = vec![0x42u8, name.len() as u8];
+        tensor_proto_bytes.extend_from_slice(name);
+        let mut sparse_bytes = vec![0x0au8, tensor_proto_bytes.len() as u8];
+        sparse_bytes.extend_from_slice(&tensor_proto_bytes);
+        let mut field = vec![0x7au8, sparse_bytes.len() as u8];
+        field.extend_from_slice(&sparse_bytes);
+        field
+    }
+
+    let graph_chunk_1 = sparse_initializer_field(b"first");
+    let graph_chunk_2 = sparse_initializer_field(b"second");
+
+    let mut model_bytes = vec![0x3au8, graph_chunk_1.len() as u8];
+    model_bytes.extend_from_slice(&graph_chunk_1);
+    model_bytes.push(0x3au8);
+    model_bytes.push(graph_chunk_2.len() as u8);
+    model_bytes.extend_from_slice(&graph_chunk_2);
+
+    let err = fandhe_ai_onnx_interop::onnx::proto::decode_model(&model_bytes)
+        .expect_err("decode_model が拒否するはず");
+    match err {
+        fandhe_ai_onnx_interop::onnx::proto::DecodeModelError::SparseInitializerNotSupported {
+            tensor_name,
+            count,
+        } => {
+            // 最初の出現（"first"）の name を診断用に採用しつつ、2 出現分を合算する。
+            assert_eq!(tensor_name, "first");
+            assert_eq!(count, 2);
+        }
+        other => panic!("DecodeModelError::SparseInitializerNotSupported を期待したが {other:?}"),
+    }
+}
+
+/// 事前走査中に不正な形式（length-delimited フィールドの長さがバッファ
+/// 終端を超える）に遭遇した場合、`prescan_sparse_initializer` は判定を
+/// 確定させず `ModelProto::decode` 本体へ委ねる（本体が同じ不正入力を
+/// 独立に検証し `DecodeModelError::Wire` で拒否する）ことを確認する。
+#[test]
+fn decode_model_falls_back_to_wire_decode_error_on_malformed_length_delimiter() {
+    // tag=7（graph, LengthDelimited）を宣言しつつ、実際のバッファ長を超える
+    // 長さ（0xff）を主張する不正なバイト列。
+    let malformed = [0x3au8, 0xffu8, 0x01u8];
+    let err = fandhe_ai_onnx_interop::onnx::proto::decode_model(&malformed)
+        .expect_err("壊れたバイト列を decode_model が受理してしまった");
+    match err {
+        fandhe_ai_onnx_interop::onnx::proto::DecodeModelError::Wire(_) => {}
+        other => panic!("DecodeModelError::Wire を期待したが {other:?}"),
+    }
+}
+
+/// varint を可変長（1〜10 バイト）で書き出す最小ヘルパー（LEB128）。
+/// 上記の大サイズ payload テスト用に、既存の「1 バイト決め打ち」の
+/// 手書きワイヤ構築ヘルパーでは表現できない長さを符号化するために使う。
+fn encode_varint_into(mut value: u64, out: &mut Vec<u8>) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 0x80);
     }
 }
 

@@ -96,7 +96,12 @@
 //! 行わない。入力総バイト数・要素数の明示上限は導入していない
 //! （`build_graph` の長さ整合検査がバイト長を初期入力長で抑える。値の
 //! 決定にユーザー承認が要るため本 issue のスコープ外。
-//! `docs/facade-onnx-import-exposure-decision.md` §6.3 参照）。
+//! `docs/facade-onnx-import-exposure-decision.md` §6.3 参照）。`from_bytes`
+//! は `onnx::proto::decode_model` の bounded 事前走査（イシュー #2079
+//! codex-review 是正。`proto.rs` モジュール冒頭コメント「メモリ増幅対策」
+//! 節）による `sparse_initializer` の早期 fail-closed 拒否を
+//! [`map_decode_error`] でそのまま [`OnnxError::SparseInitializerNotSupported`]
+//! へ写像する（`build_graph` 側の同名エラーと同じ payload）。
 
 use std::collections::HashMap;
 use std::fmt;
@@ -106,7 +111,7 @@ use fandhe_ai_onnx_interop::onnx::export::{ExportError, ExportOptions, build_mod
 use fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers;
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, GraphError, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{InterpError, Value as InterpValue, run as interp_run};
-use fandhe_ai_onnx_interop::onnx::proto::{decode_model, encode_model};
+use fandhe_ai_onnx_interop::onnx::proto::{DecodeModelError, decode_model, encode_model};
 use fandhe_ai_tensor_core::f16;
 
 use crate::Tensor;
@@ -126,9 +131,7 @@ impl OnnxModel {
     /// protobuf デコード（[`OnnxError::Decode`]）→ 内部グラフ構築
     /// （形状・トポロジ検証。該当する `OnnxError` variant）の順で検証する。
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, OnnxError> {
-        let model = decode_model(bytes).map_err(|e| OnnxError::Decode {
-            message: e.to_string(),
-        })?;
+        let model = decode_model(bytes).map_err(map_decode_error)?;
         let graph = build_graph(&model).map_err(map_graph_error)?;
         Ok(Self { graph })
     }
@@ -380,6 +383,24 @@ impl std::error::Error for OnnxError {
         match self {
             OnnxError::Io(e) => Some(e),
             _ => None,
+        }
+    }
+}
+
+/// `DecodeModelError` → `OnnxError` 写像（`decode_model` のエラー経路。
+/// イシュー #2079 codex-review 是正）。`sparse_initializer` の bounded
+/// 事前走査による早期拒否（[`DecodeModelError::SparseInitializerNotSupported`]）
+/// を `map_graph_error` の同名分岐と同じ payload で `OnnxError::
+/// SparseInitializerNotSupported` へ写像することで、拒否が
+/// `decode_model` 側・`build_graph` 側のどちらで起きても facade 利用者
+/// から見た結果が同一になるようにする。
+fn map_decode_error(e: DecodeModelError) -> OnnxError {
+    match e {
+        DecodeModelError::Wire(err) => OnnxError::Decode {
+            message: err.to_string(),
+        },
+        DecodeModelError::SparseInitializerNotSupported { tensor_name, count } => {
+            OnnxError::SparseInitializerNotSupported { tensor_name, count }
         }
     }
 }

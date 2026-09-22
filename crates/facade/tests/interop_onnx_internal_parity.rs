@@ -298,28 +298,19 @@ fn synthetic_model_with_negative_dim_is_rejected_as_invalid_model_via_facade() {
 
 #[test]
 fn synthetic_model_with_sparse_initializer_matches_internal_error_payload_via_facade() {
-    // 内部クレートの `GraphError::SparseInitializerNotSupported` と facade の
-    // `OnnxError::SparseInitializerNotSupported` が同一バイト列に対して
-    // 同じ payload（tensor_name／count）を返すことを固定する（イシュー
-    // #2079）。
+    // 内部クレートの `DecodeModelError::SparseInitializerNotSupported`
+    // （`decode_model` の bounded 事前走査。主対策）・`GraphError::
+    // SparseInitializerNotSupported`（`ModelProto::decode` 直接呼び出し +
+    // `build_graph`。構造体側の多層防御）・facade の `OnnxError::
+    // SparseInitializerNotSupported` が同一バイト列に対して同じ
+    // payload（tensor_name／count）を返すことを固定する（イシュー #2079。
+    // `values` は `name`（tag=8）のみを宣言した軽量型
+    // `SparseTensorValueName` として構築する。メモリ増幅対策の詳細は
+    // `proto.rs` モジュール冒頭コメント「メモリ増幅対策」節参照）。
     let sparse = fandhe_ai_onnx_interop::onnx::proto::SparseTensorProto {
-        values: Some(TensorProto {
+        values: Some(fandhe_ai_onnx_interop::onnx::proto::SparseTensorValueName {
             name: "w_sparse".to_string(),
-            data_type: data_type::FLOAT,
-            dims: vec![1],
-            float_data: vec![1.0],
-            int64_data: vec![],
-            raw_data: vec![],
         }),
-        indices: Some(TensorProto {
-            name: String::new(),
-            data_type: data_type::INT64,
-            dims: vec![1],
-            float_data: vec![],
-            int64_data: vec![0],
-            raw_data: vec![],
-        }),
-        dims: vec![2],
     };
     let model = ModelProto {
         opset_import: Vec::new(),
@@ -337,17 +328,24 @@ fn synthetic_model_with_sparse_initializer_matches_internal_error_payload_via_fa
     };
     let bytes = proto::encode_model(&model);
 
-    // 内部クレート直接呼び出し。
-    let internal_model = proto::decode_model(&bytes).expect("decode は成功するはず");
-    let internal_err = build_graph(&internal_model)
-        .expect_err("内部クレートでも sparse_initializer は拒否されるはず");
-    let (internal_tensor_name, internal_count) = match internal_err {
-        fandhe_ai_onnx_interop::onnx::graph::GraphError::SparseInitializerNotSupported {
+    // 内部クレート直接呼び出し（主対策）: `decode_model` 自体が
+    // `ModelProto::decode` を呼ぶ前に bounded 事前走査で拒否する。
+    let decode_err =
+        proto::decode_model(&bytes).expect_err("decode_model が sparse_initializer を拒否するはず");
+    let (decode_tensor_name, decode_count) = match decode_err {
+        fandhe_ai_onnx_interop::onnx::proto::DecodeModelError::SparseInitializerNotSupported {
             tensor_name,
             count,
         } => (tensor_name, count),
-        other => panic!("GraphError::SparseInitializerNotSupported を期待したが {other:?}"),
+        other => panic!("DecodeModelError::SparseInitializerNotSupported を期待したが {other:?}"),
     };
+
+    // `ModelProto::decode` を直接呼ぶ経路（構造体側の多層防御）の parity は
+    // `crates/onnx-interop/tests/onnx_decode.rs::
+    // raw_wire_bytes_with_graph_field_15_are_detected_as_sparse_initializer`
+    // が固定する（facade は `prost` へ直接依存しないため本ファイルでは
+    // `prost::Message::decode` トレイトメソッドを直接呼べない。モジュール
+    // 冒頭コメント「非信頼入力の扱い」節参照）。
 
     // facade 経由。
     let facade_err = OnnxModel::from_bytes(&bytes).unwrap_err();
@@ -356,8 +354,8 @@ fn synthetic_model_with_sparse_initializer_matches_internal_error_payload_via_fa
         other => panic!("OnnxError::SparseInitializerNotSupported を期待したが {other:?}"),
     };
 
-    assert_eq!(internal_tensor_name, facade_tensor_name);
-    assert_eq!(internal_count, facade_count);
+    assert_eq!(decode_tensor_name, facade_tensor_name);
+    assert_eq!(decode_count, facade_count);
     assert_eq!(facade_tensor_name, "w_sparse");
     assert_eq!(facade_count, 1);
 }

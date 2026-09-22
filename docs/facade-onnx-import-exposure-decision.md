@@ -329,6 +329,36 @@ facade は `prost` へ直接依存せず（Cargo.toml に追加していない�
   同じ判断）。
 - 依存追加・新規 `unsafe`・spec 提案はいずれもなし。
 
+### 13.4 追補（2026-09-22・codex-review 是正）: メモリ増幅対策
+
+PR #2221 の codex-review（P0）指摘: §13.2 の `SparseTensorProto` が
+`values`／`indices` を `TensorProto` 全体（`raw_data`・packed
+`float_data`/`int64_data` を含む）として宣言していたため、`decode_model`
+が §13.2 の非空検査に到達する**前**に非信頼入力の sparse payload を
+構造体へ完全展開してしまい、巨大な payload によるメモリ枯渇（DoS）を
+招く余地があった。是正内容:
+
+- `decode_model`（`crates/onnx-interop/src/onnx/proto.rs`）は
+  `ModelProto::decode` を呼ぶ**前**に、`prost::encoding` の公開
+  プリミティブだけを使う bounded なワイヤスキャン
+  （`prescan_sparse_initializer`）で `sparse_initializer`（tag=15）の
+  存在だけを検出し、検出時は `ModelProto` を一切構築せず新設の
+  `DecodeModelError::SparseInitializerNotSupported { tensor_name, count }`
+  で拒否する（主対策）。
+- `SparseTensorProto.values` は `TensorProto` 全体ではなく `name`
+  （tag=8）のみを宣言した軽量型 `SparseTensorValueName` に縮小した。
+  `indices`／`dims` はフィールド自体を削除し、prost の自動フィールド
+  スキップに委ねる。これにより `ModelProto::decode` を直接呼ぶ経路
+  （本クレート内テスト等）でも `raw_data` 等が展開されない
+  （構造体側の多層防御。§13.2 の `build_graph` 検査自体は不変）。
+- `crates/facade/src/interop/onnx.rs`: `decode_model` のエラー型変更
+  （`prost::DecodeError` → `DecodeModelError`）に伴い `map_decode_error`
+  を新設し、`DecodeModelError::SparseInitializerNotSupported` を
+  §13.3 と同じ `OnnxError::SparseInitializerNotSupported` へ写像する
+  （facade の公開面・payload は変更なし）。
+- 受け入れ判定（`tensor_name`／`count`）・`OnnxError` の公開面・
+  依存追加・新規 `unsafe`・spec 提案はいずれも変更なし。
+
 ### 13.4 検査位置が `build_graph` 単一である理由
 
 `from_path`／`from_bytes` はいずれも `decode_model → build_graph` を

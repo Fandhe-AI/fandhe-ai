@@ -11,7 +11,15 @@
 //!
 //! `sparse_initializer`（onnx.proto3 tag 15）は非対応のため、`build_graph` が
 //! 非空を存在検出のみで fail-closed に拒否する（中身は解釈しない。
-//! `docs/tensor-core-sparse-complex-decision.md`・イシュー #2079）。
+//! `docs/tensor-core-sparse-complex-decision.md`・イシュー #2079）。**この
+//! 検査は非信頼バイト列に対する主対策ではない**（主対策は
+//! `proto::decode_model` が `ModelProto::decode` より前に行う bounded な
+//! 事前走査。`proto.rs` モジュール冒頭コメント「メモリ増幅対策」節）。
+//! ここでの検査は `ModelProto::decode` を直接呼ぶ経路（本クレート内
+//! テスト・将来の呼び出し元）に対する構造体側の多層防御であり、
+//! `SparseTensorProto.values` が `name` のみを宣言した軽量型
+//! （`proto::SparseTensorValueName`）である前提と合わせて、`raw_data` 等の
+//! 完全展開を避ける設計になっている。
 
 use super::proto::{GraphProto, ModelProto, NodeProto, TensorProto};
 use std::collections::{HashMap, HashSet};
