@@ -1472,7 +1472,13 @@ enum ArgKind {
 /// 〈サイズ上限超過〉を別 variant で区別し、後者のみホスト
 /// フォールバックへ流す）。`reduce::CudaReduce`（`sum`／`max`／`min`）
 /// 側はこの variant を生成しないため、本関数で扱っても安全。
-fn map_reduce_error(err: CudaError) -> BackendError {
+///
+/// イシュー #2060 で `pub(crate)` へ緩和した（`crate::typed_f64` の
+/// `TypedOps<f64>::sum`／`max` 実装が `reduce::reduce_axis_layout`
+/// （dtype 非依存）と組み合わせて同じエラー写像を再利用するため。
+/// `device_handle_raw`／`with_driver_call`〈イシュー #1703〉と同型の
+/// 可視性緩和）。
+pub(crate) fn map_reduce_error(err: CudaError) -> BackendError {
     match err {
         CudaError::EmptyReduction { op } => {
             BackendError::KernelLaunchFailed(format!("empty reduction for op \"{op}\""))
