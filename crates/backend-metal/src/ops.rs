@@ -1238,6 +1238,106 @@ impl MetalBackendOps {
         .map_err(map_metal_error)
     }
 
+    /// [`BackendOps::adam_step_device`]／
+    /// [`BackendOps::adam_step_device_tracked`] 共通の検証・ディスパッチ
+    /// 本体（イシュー #2070。`sgd_step_device_impl` と同じ二重化回避
+    /// パターン）。検証順序は `sgd_step_device_impl` に揃える（device →
+    /// shape → `AdamStepKind` 分岐評価 → `cached_adam` 構築 → downcast →
+    /// `numel == 0` 早期 return → 起動）。
+    ///
+    /// device 一致検査（`Device::Metal` 比較）は本メソッド（macOS 限定
+    /// の `ops.rs`）の責務とする。`crate::adam_model` は
+    /// `Device::Metal` variant 自体が `cfg(target_os = "macos")` 限定の
+    /// ため device 検査を持たず、shape 検証・`AdamStepKind` 分岐フラグ
+    /// 導出のみを担う（`adam_model.rs` モジュール doc 参照）。
+    fn adam_step_device_impl(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        m: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        config: &fandhe_ai_tensor_core::AdamStepConfig,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<(), BackendError> {
+        if param.device() != Device::Metal
+            || grad.device() != Device::Metal
+            || m.device() != Device::Metal
+            || v.device() != Device::Metal
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        crate::adam_model::validate_adam_step_shapes(
+            param.shape(),
+            grad.shape(),
+            m.shape(),
+            v.shape(),
+        )
+        .map_err(BackendError::ShapeMismatch)?;
+
+        // `#[non_exhaustive]` の `AdamStepKind` は将来 variant が増えうる
+        // ため、driver（Metal コンテキスト）接触前に fail-closed で拒否
+        // する（`backend-cpu::ops::adam_step_device`／`backend-cuda::
+        // ops::adam_step_device` と同じ「どの要素も更新前」契約）。
+        let flags = crate::adam_model::adam_kernel_flags(config.kind, config.weight_decay)?;
+
+        let numel = param.numel();
+        if numel == 0 {
+            return Ok(());
+        }
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let adam = context_cache::cached_adam(&ctx).map_err(map_metal_error)?;
+
+        let grad_handle = grad
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(grad_metal_buf) = grad_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "adam_step_device: grad buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let m_handle = m
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(m_metal_buf) = m_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "adam_step_device: m buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let v_handle = v
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(v_metal_buf) = v_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "adam_step_device: v buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let param_handle = param
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(param_metal_buf) = param_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "adam_step_device: param buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let kernel_params = crate::adam::AdamKernelParams::from_config(config, flags);
+        adam.run(
+            &ctx,
+            param_metal_buf,
+            grad_metal_buf,
+            m_metal_buf,
+            v_metal_buf,
+            numel,
+            &kernel_params,
+            token,
+        )
+        .map_err(map_metal_error)
+    }
+
     /// [`Self::linear_forward_device`]／[`Self::
     /// linear_forward_device_tracked`] の共有本体（`gemm_fp32_strict_
     /// into_impl` と同じ二重化回避パターン）。`token` は
@@ -1506,6 +1606,53 @@ impl BackendOps for MetalBackendOps {
         token: &DispatchFailureCell,
     ) -> Result<(), BackendError> {
         self.sgd_step_device_impl(param, grad, velocity, config, Some(token))
+    }
+
+    /// Adam・AdamW の 1 パラメータ分の更新を in-place で実行する
+    /// （イシュー #2070・`docs/device-resident-update-design.md`
+    /// 「Adam／AdamW の常駐 step 結線」節の追補）。`context_cache::
+    /// cached_adam`（プロセス内 MSL コンパイル済みパイプラインキャッシュ）
+    /// を経由するため、学習ループの 2 回目以降のステップは再コンパイル
+    /// を支払わない。
+    ///
+    /// 実体は `adam_step_device_impl`（`token: None`）。
+    /// [`BackendOps::adam_step_device_tracked`] のオーバーライド
+    /// （下記）とロジックを共有する（`sgd_step_device`／
+    /// `sgd_step_device_tracked` と同じ二重化回避パターン）が、
+    /// `token: None` を受けた `adam.rs::MetalAdam::run` が `encode` 直後
+    /// に `ctx.synchronize()` まで行うため、本メソッドは**同期契約**
+    /// （復帰時点で GPU 実行の完了・成否を返す）を保つ。バッチ化された
+    /// 非同期契約は `adam_step_device_tracked` 限定。
+    fn adam_step_device(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        m: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        config: &fandhe_ai_tensor_core::AdamStepConfig,
+    ) -> Result<(), BackendError> {
+        self.adam_step_device_impl(param, grad, m, v, config, None)
+    }
+
+    /// [`BackendOps::adam_step_device_tracked`] の Metal オーバーライド
+    /// （イシュー #2070・`docs/backend-metal-command-batching-design.md`
+    /// §3.7 と同型）。`token` を `adam_step_device_impl` → `adam.rs::
+    /// MetalAdam::run` → `context.rs::MetalContext::encode` へそのまま
+    /// 渡し、encode と同一ロック区間でバッチへ登録させる。`token` が
+    /// `Some` のため `MetalAdam::run` は `encode` 後に待たず、遅延実行
+    /// （バッチ化）される非同期契約となる（`adam_step_device` との違いは
+    /// 同メソッド doc 参照）。`fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore::step_adam`／`step_adamw` が呼び出し元となる。
+    fn adam_step_device_tracked(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        m: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        config: &fandhe_ai_tensor_core::AdamStepConfig,
+        token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.adam_step_device_impl(param, grad, m, v, config, Some(token))
     }
 
     /// GEMM 本体（f32）。片側のみが転置 view（NT: `b` が転置・TN: `a` が

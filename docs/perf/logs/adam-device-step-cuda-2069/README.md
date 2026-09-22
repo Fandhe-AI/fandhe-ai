@@ -10,8 +10,8 @@ adam_step_device(_tracked)` override）を実装した。本ディレクトリ�
 〈DGX Spark GB10 等〉に到達できないため、実測は未実施のまま申し送る**。
 `out-of-scope-tracking.md` 対象）。
 
-Metal 側は引き続き未実装のまま
-（`docs/perf/logs/adam-device-step-1959/README.md` 参照）。
+Metal 側はイシュー #2070 で実装済み。実測記録は
+`docs/perf/logs/adam-device-step-metal-2070/` を参照。
 
 ## 現状（本イシュー #2069 時点）
 
