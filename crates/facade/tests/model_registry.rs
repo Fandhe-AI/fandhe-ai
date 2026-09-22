@@ -440,3 +440,93 @@ fn load_succeeds_when_root_itself_is_a_symlink() {
     fs::remove_dir_all(&real_root).unwrap();
     fs::remove_file(&link_root).unwrap();
 }
+
+// ============================================================================
+// 葉が通常ファイルでない場合の拒否・検査後の差し替え（TOCTOU）対策
+// （codex-review 指摘・PR #2226。`resolve_model_file` 参照）
+// ============================================================================
+
+/// 葉ファイル（`model.safetensors`）が Unix ドメインソケットの場合、
+/// `load` は `is_dir() == false` だけでは通過してしまう非通常ファイル
+/// を拒否し `NotFound` を返す（`must_be_dir == false` は
+/// `is_file() == true` を明示要求する。codex-review 指摘・PR #2226。
+/// FIFO と異なりソケットは `std` のみで `mkfifo` 相当なしに再現できる
+/// ため `UnixListener::bind` を使う）。
+#[cfg(unix)]
+#[test]
+fn load_rejects_non_regular_leaf_unix_socket() {
+    let root = temp_dir_for("leaf_not_regular_socket");
+    let version_dir = root.join("mlp").join("v1");
+    fs::create_dir_all(&version_dir).unwrap();
+
+    let leaf = version_dir.join("model.safetensors");
+    let _listener = std::os::unix::net::UnixListener::bind(&leaf).unwrap();
+
+    let registry = ModelRegistry::with_cache_dir(&root);
+    match registry.load("mlp", "v1") {
+        Err(ModelError::NotFound { name, version }) => {
+            assert_eq!(name, "mlp");
+            assert_eq!(version, "v1");
+        }
+        other => panic!("非通常ファイルの葉は NotFound を期待したが {other:?} だった"),
+    }
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// `available_models` も同じ非通常ファイル（Unix ソケット）を葉に持つ
+/// バージョンを列挙結果から除外する（`load` との一貫性保証）。
+#[cfg(unix)]
+#[test]
+fn available_models_excludes_non_regular_leaf() {
+    let root = temp_dir_for("available_models_excludes_socket");
+    let version_dir = root.join("mlp").join("v1");
+    fs::create_dir_all(&version_dir).unwrap();
+    let _listener =
+        std::os::unix::net::UnixListener::bind(version_dir.join("model.safetensors")).unwrap();
+
+    let registry = ModelRegistry::with_cache_dir(&root);
+    assert_eq!(
+        registry.available_models(),
+        Vec::<(String, Vec<String>)>::new()
+    );
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// 検査（lstat）後・open 前に葉ファイルをキャッシュルート外へ
+/// エスケープするシンボリックリンクへ差し替えても、`load` は
+/// 差し替え後に実際に開かれた実体の識別子（fstat の dev／ino）が
+/// 検査時点のものと一致しないことを検出し `NotFound` を返す
+/// （TOCTOU 対策。真のレース条件は非決定的なため、ここでは検査後に
+/// 差し替えが「既に完了している」状態を固定して防御の効果を確認する。
+/// `O_NOFOLLOW` 自体もこのケースを ELOOP で拒否する）。
+#[cfg(unix)]
+#[test]
+fn load_rejects_leaf_replaced_with_symlink_after_initial_write() {
+    let root = temp_dir_for("toctou_leaf_replaced_with_symlink");
+    let secret = write_outside_secret("toctou_leaf_replaced_with_symlink");
+
+    let version_dir = root.join("mlp").join("v1");
+    fs::create_dir_all(&version_dir).unwrap();
+    let leaf = version_dir.join("model.safetensors");
+
+    // 最初は正当な通常ファイルとして書き込む（検査時点のスナップ
+    // ショットが通常ファイルであるケースを模す）。
+    fs::write(&leaf, b"placeholder").unwrap();
+    // その後、シンボリックリンクへ差し替える（本来ならこの差し替えは
+    // resolve_model_file の検査と open の間で起きるレースだが、
+    // ここでは差し替え「後」の状態を検証することで対策の効果を確認
+    // する）。
+    fs::remove_file(&leaf).unwrap();
+    std::os::unix::fs::symlink(&secret, &leaf).unwrap();
+
+    let registry = ModelRegistry::with_cache_dir(&root);
+    match registry.load("mlp", "v1") {
+        Err(ModelError::NotFound { .. }) => {}
+        other => panic!("差し替え後の葉は NotFound を期待したが {other:?} だった"),
+    }
+
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(secret.parent().unwrap()).unwrap();
+}

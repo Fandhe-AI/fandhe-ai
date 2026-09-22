@@ -49,16 +49,46 @@
 //! リンク経由のキャッシュルート脱出（`<root>/<name>`・`<version>`・
 //! `model.safetensors` のいずれかがリンクである場合）を防げない
 //! （codex-review 指摘・PR #2226）。`load`・`available_models` は
-//! ともに内部の `resolve_model_file` を経由し、(1) `name`・
-//! `version`・葉ファイルの各段を [`std::fs::symlink_metadata`]
-//! （リンクを辿らない）で検査してシンボリックリンクを拒否したうえで、
-//! (2) 葉パスを canonicalize し正規化済みキャッシュルート配下である
-//! ことを多層防御として再確認する。lstat 検査後・`load_safetensors_f32`
-//! での実際の open までの間の TOCTOU（差し替えレース）は残る
-//! （`O_NOFOLLOW` での no-follow open には許容依存 9 区分
-//! （`deps-policy.md`）に無い `libc` 直接依存が要るため採用しない。
-//! 想定脅威はレジストリ内に事前配置された悪意あるリンクであり、
-//! 実行時の差し替えレースは対象外とする）。
+//! ともに内部の `resolve_model_file` を経由し、次の多層防御で
+//! シンボリックリンク経由の脱出・検査後の差し替え（TOCTOU）・非通常
+//! ファイル（FIFO・ソケット・デバイス等）の受理をすべて防ぐ（同じく
+//! codex-review 指摘・PR #2226。当初案は「検査後の open までの TOCTOU
+//! は許容依存 9 区分に無い `libc` 直接依存が要るため対象外」としていた
+//! が、`libc` クレートを追加せずとも `std::os::unix::fs::OpenOptionsExt`
+//! （`custom_flags`）で `O_NOFOLLOW`／`O_NONBLOCK` の生値を渡せるため、
+//! この判断は撤回し下記の対策へ差し替えた）:
+//!
+//! 1. `name`・`version`・葉ファイルの各段を [`std::fs::symlink_metadata`]
+//!    （リンクを辿らない）で検査し、シンボリックリンクを拒否する。葉は
+//!    `is_dir() == false` ではなく **`is_file() == true`** を明示要求し、
+//!    FIFO・Unix ソケット・デバイスファイル等を拒否する。
+//! 2. 葉パスを canonicalize し正規化済みキャッシュルート配下である
+//!    ことを多層防御として再確認する（この canonicalize 自体は検査時点
+//!    のスナップショットであり単独では TOCTOU を閉じない）。
+//! 3. 葉を [`open_leaf_no_follow`] で開く。Linux／macOS は
+//!    `O_NOFOLLOW`（最終コンポーネントのシンボリックリンク追跡を
+//!    カーネルレベルで拒否）と `O_NONBLOCK`（FIFO への差し替えで
+//!    `open` が無期限ブロックするのを防ぐ。通常ファイルには無効）を
+//!    生の flag 値で付与する。それ以外の OS はプレーンな `open` に
+//!    フォールバックする。
+//! 4. 開いたハンドルの `fstat`（[`std::fs::File::metadata`]）で
+//!    `is_file()` を再確認したうえで、Unix では手順 1 で取得した
+//!    `symlink_metadata` の `(dev, ino)` と一致することを検証する
+//!    （「検査と open のハンドル一体化」）。手順 1〜3 の間に
+//!    `name`／`version`／葉のいずれかを別ファイルへ差し替えられても、
+//!    差し替え後に実際に開かれたファイルの実体識別子（デバイス番号＋
+//!    inode 番号）は検査時点のものと一致しないため、この不一致で
+//!    確実に検出できる（パスの再解決ではなく実体の同一性で判定するため、
+//!    中間ディレクトリの差し替えも同じ仕組みで捕捉する）。
+//! 5. 以降は同じ [`std::fs::File`] ハンドルからバイト列を読み取り
+//!    [`load_safetensors_f32_from_bytes`](crate::interop::safetensors::load_safetensors_f32_from_bytes)
+//!    へ渡す（パスを使って再度 open し直すと手順 3〜4 で閉じた TOCTOU
+//!    窓が復活するため、ハンドルの使い回しは必須）。
+//!
+//! 対象外として残る経路: レジストリ内に事前配置されたハードリンク
+//! （攻撃者が任意タイミングで作成できるのは同一ファイルシステム上の
+//! 既存ファイルへのリンクのみであり、所有者・権限チェックを伴わない
+//! 本レジストリの脅威モデル外）。
 //!
 //! # 対象外
 //!
@@ -71,13 +101,65 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::Tensor;
-use crate::interop::safetensors::{LoadError, load_safetensors_f32};
+use crate::interop::safetensors::{LoadError, load_safetensors_f32_from_bytes};
 
 /// レイアウト規定上のファイル名（モジュール doc 参照）。
 const MODEL_FILE_NAME: &str = "model.safetensors";
+
+/// `open_leaf_no_follow` が付与する生の `open(2)` flag 値（Linux／macOS
+/// のみ。許容依存 9 区分に `libc` が無いため、カーネル UAPI ヘッダ
+/// 由来の固定値を直接埋め込む。`std::os::unix::fs::OpenOptionsExt::
+/// custom_flags` はこの生値をそのまま `open` システムコールへ渡す）。
+#[cfg(target_os = "linux")]
+mod open_flags {
+    /// `include/uapi/asm-generic/fcntl.h`（x86_64・aarch64 Linux 共通。
+    /// alpha／parisc／sparc／mips 等の非対応アーキテクチャは本リポジトリの
+    /// 対象外）。
+    pub(crate) const O_NONBLOCK: i32 = 0o4_000;
+    pub(crate) const O_NOFOLLOW: i32 = 0o400_000;
+    /// `include/uapi/asm-generic/errno.h`。`O_NOFOLLOW` がシンボリック
+    /// リンクを検出した際に `open(2)` が返す errno（ELOOP）。
+    /// `std::io::ErrorKind::FilesystemLoop` は本リポジトリの pin toolchain
+    /// （`rust-toolchain.toml`）でも `#![feature(io_error_more)]` 相当の
+    /// unstable のため使えず、`raw_os_error()` の生値で判定する。
+    pub(crate) const ELOOP: i32 = 40;
+}
+#[cfg(target_os = "macos")]
+mod open_flags {
+    /// `<sys/fcntl.h>`（Darwin／macOS）。
+    pub(crate) const O_NONBLOCK: i32 = 0x0004;
+    pub(crate) const O_NOFOLLOW: i32 = 0x0100;
+    /// `<sys/errno.h>`（Darwin／macOS）の ELOOP。上記 Linux 側コメント参照。
+    pub(crate) const ELOOP: i32 = 62;
+}
+
+/// 葉ファイル（`model.safetensors`）をシンボリックリンク追跡なし・
+/// 非ブロッキングで開く（モジュール doc「非信頼入力の扱い」節の手順
+/// 3 参照）。Linux／macOS は `O_NOFOLLOW`（最終コンポーネントの
+/// シンボリックリンクを拒否）・`O_NONBLOCK`（FIFO への差し替えによる
+/// 無期限ブロックを防ぐ。通常ファイルの読み取りには影響しない）を
+/// 付与する。それ以外の OS はプレーンな `File::open` にフォールバック
+/// する（対応する生 flag 値を持たないため。呼び出し元の fstat 識別子
+/// 一致検査は OS に依らず TOCTOU を捕捉する）。
+fn open_leaf_no_follow(leaf: &Path) -> std::io::Result<File> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(open_flags::O_NOFOLLOW | open_flags::O_NONBLOCK)
+            .open(leaf)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        File::open(leaf)
+    }
+}
 
 /// ローカルモデルレジストリの失敗を表す型付きエラー。`#[non_exhaustive]`:
 /// 将来のフィールド追加（例: 改竄検知失敗）を非破壊にするため。
@@ -161,6 +243,28 @@ fn default_cache_dir_from(home: Option<OsString>) -> Option<PathBuf> {
     home.map(|h| PathBuf::from(h).join(".fandhe-ai").join("models"))
 }
 
+/// `HOME`／`USERPROFILE` のどちらを優先するかを OS 別に決める純関数
+/// （環境変数の読み取り自体は [`ModelRegistry::new`] 側で行い、本関数は
+/// 選択ロジックのみを環境非依存の単体テストで検証できるように切り出した。
+/// `is_windows` を引数化しているのも同じ理由で、CI が Linux 環境でも
+/// Windows 分岐をテストできるようにするため）。
+///
+/// Windows は `USERPROFILE` を優先する（公開ドキュメント規定の既定
+/// ルート `$USERPROFILE/.fandhe-ai/models` と一致させる。codex-review
+/// 指摘・PR #2226。`HOME` は両 OS で設定されうるため単純な `HOME`
+/// 優先だと Windows で乖離する）。それ以外の OS は `HOME` を優先する。
+fn select_home_var(
+    is_windows: bool,
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+) -> Option<OsString> {
+    if is_windows {
+        userprofile.or(home)
+    } else {
+        home.or(userprofile)
+    }
+}
+
 /// ホームディレクトリ配下のキャッシュディレクトリを基盤とする
 /// **ローカル限定**のモデルレジストリ。ディレクトリレイアウトは
 /// モジュール doc の規定を参照。本レジストリはディレクトリの作成・
@@ -176,15 +280,10 @@ impl ModelRegistry {
     /// （読み取り専用のレジストリ）。`HOME`／`USERPROFILE` のいずれも
     /// 未設定な場合は [`ModelError::CacheDirUnavailable`] を返す。
     pub fn new() -> Result<Self, ModelError> {
-        // Windows は `USERPROFILE` を優先する（公開ドキュメント規定の
-        // 既定ルート `$USERPROFILE/.fandhe-ai/models` と一致させる。
-        // codex-review 指摘・PR #2226。`HOME` が両 OS で設定されうる
-        // ため単純な `HOME` 優先だと Windows で乖離する）。
-        #[cfg(windows)]
-        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
-        #[cfg(not(windows))]
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-        let root = default_cache_dir_from(home).ok_or(ModelError::CacheDirUnavailable)?;
+        let home = std::env::var_os("HOME");
+        let userprofile = std::env::var_os("USERPROFILE");
+        let selected = select_home_var(cfg!(windows), home, userprofile);
+        let root = default_cache_dir_from(selected).ok_or(ModelError::CacheDirUnavailable)?;
         Ok(Self { root })
     }
 
@@ -202,26 +301,17 @@ impl ModelRegistry {
     }
 
     /// `<cache_dir>/<name>/<version>/model.safetensors` をシンボリック
-    /// リンク経由のキャッシュルート脱出を許さずに解決する（OWASP
-    /// A03。codex-review 指摘・PR #2226。モジュール doc「非信頼入力の
-    /// 扱い」節参照）。`load`・[`available_models`](Self::available_models)
-    /// の両方が同一のこの関数を経由するため、列挙結果は必ず `load`
-    /// が受理するパスのみを含む。
-    ///
-    /// 1. `name`・`version` を `validate_component` でファイル
-    ///    システムへ触れる前に検証する。
-    /// 2. `<root>/<name>`・`<name>/<version>`・葉ファイルの各段を
-    ///    [`std::fs::symlink_metadata`]（リンクを辿らない）で検査し、
-    ///    いずれかがシンボリックリンク、または期待する型
-    ///    （ディレクトリ／通常ファイル）でなければ
-    ///    [`ModelError::NotFound`] に丸める。
-    /// 3. 葉パスを [`Path::canonicalize`] し、キャッシュルートの
-    ///    canonicalize 結果配下であることを多層防御として再確認する
-    ///    （多段リンク・パス正規化差異対策）。
+    /// リンク経由のキャッシュルート脱出・TOCTOU・非通常ファイルの
+    /// 受理を許さずに解決し、開いた [`File`] ハンドルを返す（OWASP
+    /// A03。codex-review 指摘・PR #2226。手順の詳細はモジュール doc
+    /// 「非信頼入力の扱い」節を参照）。`load`・
+    /// [`available_models`](Self::available_models) の両方が同一の
+    /// この関数を経由するため、列挙結果は必ず `load` が受理するパス
+    /// のみを含む。
     ///
     /// 権限エラー等それ以外の I/O 失敗は [`ModelError::Io`] として
     /// 伝える。
-    fn resolve_model_file(&self, name: &str, version: &str) -> Result<PathBuf, ModelError> {
+    fn resolve_model_file(&self, name: &str, version: &str) -> Result<File, ModelError> {
         validate_component("name", name)?;
         validate_component("version", version)?;
 
@@ -240,51 +330,101 @@ impl ModelRegistry {
         let version_dir = name_dir.join(version);
         let leaf = version_dir.join(MODEL_FILE_NAME);
 
-        for (component, must_be_dir) in [(&name_dir, true), (&version_dir, true), (&leaf, false)] {
+        // 中間ディレクトリ（name・version）: シンボリックリンク拒否＋
+        // ディレクトリ型必須。
+        for component in [&name_dir, &version_dir] {
             let meta = match std::fs::symlink_metadata(component) {
                 Ok(m) => m,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found()),
                 Err(e) => return Err(ModelError::Io(e)),
             };
             let file_type = meta.file_type();
-            // シンボリックリンクは中間ディレクトリ・葉ファイルの
-            // いずれでも拒否する（キャッシュルート脱出対策）。
-            if file_type.is_symlink() {
-                return Err(not_found());
-            }
-            if must_be_dir != file_type.is_dir() {
+            if file_type.is_symlink() || !file_type.is_dir() {
                 return Err(not_found());
             }
         }
 
+        // 葉ファイル: シンボリックリンク拒否＋**通常ファイルであることを
+        // 明示要求**（`!is_dir()` ではなく `is_file()`。FIFO・Unix
+        // ソケット・デバイスファイル等は通常ファイルではないため拒否
+        // される。codex-review 指摘・PR #2226）。`leaf_meta` は手順 4
+        // の識別子一致検査で使うため保持する。
+        let leaf_meta = match std::fs::symlink_metadata(&leaf) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found()),
+            Err(e) => return Err(ModelError::Io(e)),
+        };
+        if leaf_meta.file_type().is_symlink() || !leaf_meta.is_file() {
+            return Err(not_found());
+        }
+
         // 多層防御: canonicalize 後も正規化済みルート配下であることを
-        // 確認する。
+        // 確認する（この時点はまだ検査のスナップショットであり単独では
+        // TOCTOU を閉じない。手順 3〜4 で最終的に閉じる）。
         let canonical_leaf = leaf.canonicalize().map_err(ModelError::Io)?;
         if !canonical_leaf.starts_with(&canonical_root) {
             return Err(not_found());
         }
-        Ok(canonical_leaf)
+
+        // シンボリックリンク追跡なし・非ブロッキングで葉を開く
+        // （`open_leaf_no_follow`）。ELOOP（O_NOFOLLOW がシンボリック
+        // リンクへ差し替えられた葉を検出した場合）は
+        // `ErrorKind::FilesystemLoop` として報告される。
+        let file = match open_leaf_no_follow(&leaf) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found()),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Err(e) if e.raw_os_error() == Some(open_flags::ELOOP) => return Err(not_found()),
+            Err(e) => return Err(ModelError::Io(e)),
+        };
+
+        // 検査と open のハンドル一体化: 開いたハンドルの fstat が
+        // 通常ファイルであること、かつ Unix では手順 2 で lstat した
+        // 葉と同一の実体（デバイス番号＋inode 番号）であることを
+        // 確認する。手順 2〜ここまでの間に name／version／葉のいずれか
+        // が別ファイルへ差し替えられていた場合、開かれた実体の識別子は
+        // 検査時点のものと一致しないためここで確実に検出できる
+        // （TOCTOU 対策。モジュール doc「非信頼入力の扱い」節参照）。
+        let open_meta = file.metadata().map_err(ModelError::Io)?;
+        if !open_meta.is_file() {
+            return Err(not_found());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if open_meta.dev() != leaf_meta.dev() || open_meta.ino() != leaf_meta.ino() {
+                return Err(not_found());
+            }
+        }
+
+        Ok(file)
     }
 
     /// `<cache_dir>/<name>/<version>/model.safetensors` を同期ロードし、
     /// state dict（キー = テンソル名）を返す。
     ///
-    /// パス解決は `resolve_model_file`（シンボリックリンク経由の
-    /// キャッシュルート脱出対策。モジュール doc「非信頼入力の扱い」
-    /// 節参照）に委譲する。存在しない、通常ファイルでない、または
-    /// キャッシュルート脱出と判定された場合は [`ModelError::NotFound`]
-    /// に丸める。権限エラー等それ以外の I/O 失敗は [`ModelError::Io`]。
-    /// 解決したパスは [`load_safetensors_f32`]（`crate::interop::safetensors`。
-    /// #2019）へ委譲する。転置・キーリネーム等の暗黙アダプタは一切
-    /// 行わない（REQ-7 契約は `interop::safetensors` に一元化済みで
-    /// ロジックを複製しない）。
+    /// パス解決・オープンは `resolve_model_file`（シンボリックリンク
+    /// 経由のキャッシュルート脱出・TOCTOU・非通常ファイル対策。
+    /// モジュール doc「非信頼入力の扱い」節参照）に委譲する。存在
+    /// しない、通常ファイルでない、または脱出と判定された場合は
+    /// [`ModelError::NotFound`] に丸める。権限エラー等それ以外の
+    /// I/O 失敗は [`ModelError::Io`]。開いた同一ハンドルから読み
+    /// 取ったバイト列を
+    /// [`load_safetensors_f32_from_bytes`](crate::interop::safetensors::load_safetensors_f32_from_bytes)
+    /// （`crate::interop::safetensors`。#2019）へ委譲する（パスで
+    /// 再度 open し直すと `resolve_model_file` が閉じた TOCTOU 窓が
+    /// 復活するため、ハンドルの使い回しは必須。#2019）。転置・
+    /// キーリネーム等の暗黙アダプタは一切行わない（REQ-7 契約は
+    /// `interop::safetensors` に一元化済みでロジックを複製しない）。
     pub fn load(
         &self,
         name: &str,
         version: &str,
     ) -> Result<HashMap<String, Tensor<f32>>, ModelError> {
-        let path = self.resolve_model_file(name, version)?;
-        load_safetensors_f32(&path).map_err(ModelError::Load)
+        let mut file = self.resolve_model_file(name, version)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(ModelError::Io)?;
+        load_safetensors_f32_from_bytes(&bytes).map_err(ModelError::Load)
     }
 
     /// キャッシュルート配下に存在するモデルを列挙する。ルートが
@@ -397,5 +537,41 @@ mod tests {
     #[test]
     fn default_cache_dir_from_none_is_none() {
         assert!(default_cache_dir_from(None).is_none());
+    }
+
+    #[test]
+    fn select_home_var_prefers_userprofile_on_windows() {
+        let home = Some(OsString::from("/home/x"));
+        let userprofile = Some(OsString::from(r"C:\Users\x"));
+        assert_eq!(
+            select_home_var(true, home.clone(), userprofile.clone()),
+            userprofile
+        );
+        // Windows でも `USERPROFILE` 未設定なら `HOME` へフォールバックする。
+        assert_eq!(
+            select_home_var(true, home, None),
+            Some(OsString::from("/home/x"))
+        );
+    }
+
+    #[test]
+    fn select_home_var_prefers_home_on_non_windows() {
+        let home = Some(OsString::from("/home/x"));
+        let userprofile = Some(OsString::from(r"C:\Users\x"));
+        assert_eq!(
+            select_home_var(false, home.clone(), userprofile.clone()),
+            home
+        );
+        // 非 Windows でも `HOME` 未設定なら `USERPROFILE` へフォールバックする。
+        assert_eq!(
+            select_home_var(false, None, userprofile.clone()),
+            userprofile
+        );
+    }
+
+    #[test]
+    fn select_home_var_none_when_both_unset() {
+        assert_eq!(select_home_var(true, None, None), None);
+        assert_eq!(select_home_var(false, None, None), None);
     }
 }
