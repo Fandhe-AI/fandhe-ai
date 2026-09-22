@@ -142,7 +142,8 @@ fn parse_pads(values: &[i64]) -> Result<[usize; 2], OpError> {
 /// `Conv(X, W, [B])` を計算する。
 ///
 /// 検証順序: `auto_pad` → `X`／`W` の rank（4）→ `strides`／`dilations`／
-/// `pads` の属性検査（[`parse_pair`]／[`parse_pads`]）→ `kernel_shape`
+/// `pads` の属性検査（`parse_pair`／`parse_pads`。本モジュール内 private
+/// 関数のため intra-doc link ではなくコードスパンで参照する）→ `kernel_shape`
 /// 一致検査（指定されている場合）→ `group` の `i64 -> usize` 変換 →
 /// [`Conv2dParams::new`]（0・オーバーフロー検査）→ [`conv2d_out_shape`]
 /// （`Cin`／`Cout`／`groups` 整合・出力要素数検査）→ `B` の rank／長さ
@@ -278,18 +279,45 @@ pub fn conv(
                         // ゼロパディングとして扱い、`ih`／`iw` を明示的に
                         // `[0, h)`／`[0, w_in)` へ範囲検査してからのみ
                         // `x_slice` を読む（無検査アクセスをしない）。
+                        //
+                        // `strides`／`dilations`／`pads` は非信頼な ONNX
+                        // 属性から `usize::MAX` 近傍まで受理されうる
+                        // （`Conv2dParams::new` は非ゼロ・`2·padding` の
+                        // オーバーフローのみ拒否し、stride／dilation の
+                        // 上限は課さない）。このため `oh * sh + khi * dh`
+                        // を無検査の `usize` 乗算・加算で計算してから
+                        // `i64` へ `as` キャストすると、結果が `i64::MAX`
+                        // を超える場合にキャストが負値へ折り返し、続く
+                        // `- ph as i64` が debug build で panic、release
+                        // build で誤った範囲判定になる（`.claude/rules/
+                        // security.md` A03「外部入力の検証」）。
+                        // `checked_mul`／`checked_add`／`checked_sub` の
+                        // 連鎖で `usize` のまま検査し、表現不能（乗算・
+                        // 加算オーバーフロー、または `ph`／`pw` 減算で
+                        // 負になる＝パディング領域）な座標は範囲外として
+                        // fail-closed に `continue`（ゼロパディング相当）
+                        // する。符号付き整数への変換・`as` キャストは
+                        // 一切行わない。
                         for khi in 0..kh {
-                            let ih_signed = (oh * sh + khi * dh) as i64 - ph as i64;
-                            if ih_signed < 0 || ih_signed as usize >= h {
-                                continue;
-                            }
-                            let ih = ih_signed as usize;
+                            let ih = match oh
+                                .checked_mul(sh)
+                                .and_then(|a| khi.checked_mul(dh).map(|b| (a, b)))
+                                .and_then(|(a, b)| a.checked_add(b))
+                                .and_then(|unpadded| unpadded.checked_sub(ph))
+                            {
+                                Some(v) if v < h => v,
+                                _ => continue,
+                            };
                             for kwi in 0..kw {
-                                let iw_signed = (ow * sw + kwi * dw) as i64 - pw as i64;
-                                if iw_signed < 0 || iw_signed as usize >= w_in {
-                                    continue;
-                                }
-                                let iw = iw_signed as usize;
+                                let iw = match ow
+                                    .checked_mul(sw)
+                                    .and_then(|a| kwi.checked_mul(dw).map(|b| (a, b)))
+                                    .and_then(|(a, b)| a.checked_add(b))
+                                    .and_then(|unpadded| unpadded.checked_sub(pw))
+                                {
+                                    Some(v) if v < w_in => v,
+                                    _ => continue,
+                                };
                                 let x_idx = ((ni * cin_total + cin) * h + ih) * w_in + iw;
                                 let w_idx = ((co * cin_g + cg) * kh + khi) * kw + kwi;
                                 let x_val = *x_slice
@@ -491,5 +519,51 @@ mod tests {
         let bias = Tensor::<f32>::zeros(&[3]).unwrap();
         let err = conv(&x, &w, Some(&bias), &ConvAttrs::default()).unwrap_err();
         assert!(matches!(err, OpError::LengthMismatch { op: "Conv", .. }));
+    }
+
+    // 回帰テスト（codex-review P0 指摘。PR #2220）: 非信頼な ONNX 属性
+    // `pads` から `i64::MAX` 近傍の値を受理しても、座標計算
+    // （`oh * sh + khi * dh - ph`）が debug build で panic せず・release
+    // build で誤った範囲判定にもならないことを検査する。
+    //
+    // `pads[0] = i64::MAX` は `usize` へ変換すると usize::MAX と同じ
+    // 桁数（64bit）になり、`2 * padding` は `Conv2dParams::new` の
+    // オーバーフロー検査を通過しうる境界値（`checked_mul` で拒否される
+    // 場合は `ConvParamsInvalid` を返す）。本テストは「パディングが
+    // 巨大でも panic せず、通常の Err または（対称パディングが `H` を
+    // 超えるため常にゼロパディング領域＝出力全ゼロの）Ok のいずれかで
+    // 完走する」ことのみを検査し、`unwrap()` を使わず両分岐を許容する
+    // （境界検査の網羅性そのものは他の `*_rejected` テストが担保する）。
+    #[test]
+    fn huge_pads_do_not_panic_on_coordinate_computation() {
+        let x = Tensor::<f32>::zeros(&[1, 1, 3, 3]).unwrap();
+        let w = Tensor::<f32>::zeros(&[1, 1, 2, 2]).unwrap();
+        let half_max = i64::MAX / 2;
+        let attrs = ConvAttrs {
+            pads: vec![half_max, half_max, half_max, half_max],
+            strides: vec![1, 1],
+            dilations: vec![1, 1],
+            ..ConvAttrs::default()
+        };
+        // panic しないことそのものが検査対象（`std::panic::catch_unwind`
+        // ではなく通常呼び出しで十分——テストランナーが panic を検出する）。
+        let _ = conv(&x, &w, None, &attrs);
+    }
+
+    // 上記に加え、`strides`／`dilations` 側も `i64::MAX` 近傍を受理した
+    // 場合に同じ座標計算経路（`oh * sh`／`khi * dh`）で panic しないこと
+    // を検査する（`conv_out_len` の `dk` オーバーフロー検査を通過する
+    // よう `kernel_shape` を `1x1` にして `khi`／`kwi` が常に 0 になる
+    // 形状を選び、`strides` 側の巨大値のみを単独で踏む）。
+    #[test]
+    fn huge_strides_do_not_panic_on_coordinate_computation() {
+        let x = Tensor::<f32>::zeros(&[1, 1, 3, 3]).unwrap();
+        let w = Tensor::<f32>::zeros(&[1, 1, 1, 1]).unwrap();
+        let attrs = ConvAttrs {
+            strides: vec![i64::MAX, i64::MAX],
+            dilations: vec![1, 1],
+            ..ConvAttrs::default()
+        };
+        let _ = conv(&x, &w, None, &attrs);
     }
 }

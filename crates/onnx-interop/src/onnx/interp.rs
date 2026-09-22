@@ -115,8 +115,9 @@ pub enum InterpError {
     Graph(GraphError),
     /// STRING 属性（`Conv` の `auto_pad`。イシュー #2076）が UTF-8 として不正
     /// だった。`AttributeProto.s: Vec<u8>` は任意バイト列を許容するため、
-    /// 文字列属性を読む側（[`attr_string`]）で明示的に検証する（OWASP A03。
-    /// `.claude/rules/security.md`）。
+    /// 文字列属性を読む側（`attr_string`。本モジュール内 private 関数のため
+    /// intra-doc link ではなくコードスパンで参照する）で明示的に検証する
+    /// （OWASP A03。`.claude/rules/security.md`）。
     InvalidAttribute {
         node: String,
         attr: String,
