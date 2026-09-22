@@ -881,6 +881,34 @@ fn release_cached_memory_and_pool_stats_are_reachable_via_facade() {
     assert_eq!(a, b, "test fixture: PoolStats は値として比較できるはず");
 }
 
+/// `fandhe_ai::set_cuda_onnx_gpu_execution_enabled`／
+/// `fandhe_ai::cuda_onnx_gpu_execution_enabled`（イシュー #2077）が
+/// facade クレート root から到達可能であることのコンパイル時固定
+/// （数値検証・実行時分岐は `tests/interop_onnx_gpu_execution_optin.rs`
+/// が担う。本テストはプロセスグローバルフラグを変更しないよう、往復後
+/// 必ず既定 `false` へ戻す）。
+#[test]
+fn cuda_onnx_gpu_execution_optin_is_reachable_via_facade() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original = fandhe_ai::cuda_onnx_gpu_execution_enabled();
+    fandhe_ai::set_cuda_onnx_gpu_execution_enabled(true);
+    assert!(fandhe_ai::cuda_onnx_gpu_execution_enabled());
+    fandhe_ai::set_cuda_onnx_gpu_execution_enabled(original);
+}
+
+/// Metal 版（macOS 限定）の同型固定。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_onnx_gpu_execution_optin_is_reachable_via_facade() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original = fandhe_ai::metal_onnx_gpu_execution_enabled();
+    fandhe_ai::set_metal_onnx_gpu_execution_enabled(true);
+    assert!(fandhe_ai::metal_onnx_gpu_execution_enabled());
+    fandhe_ai::set_metal_onnx_gpu_execution_enabled(original);
+}
+
 /// `fandhe_ai::manual_seed`（イシュー #1724）が facade から呼び出し可能な
 /// `pub fn` として型検査できることを固定する（コンパイル時裏付け）。
 /// グローバル RNG 状態を実際に変更するため、他テストとの競合を避ける
