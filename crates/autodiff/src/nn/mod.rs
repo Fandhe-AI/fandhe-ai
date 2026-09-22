@@ -134,12 +134,17 @@ pub mod activation;
 pub mod loss;
 pub mod optim;
 
-pub use attention::{MultiheadAttention, MultiheadAttentionVars};
+pub use attention::{
+    MultiheadAttention, MultiheadAttentionVars, multihead_attention_forward_low_precision,
+};
 pub use batch_norm::{
     BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,
 };
 pub use container::{ModuleList, Sequential};
-pub use conv::{Conv1d, Conv1dVars, Conv2d, Conv2dVars, ConvTranspose2d, ConvTranspose2dVars};
+pub use conv::{
+    Conv1d, Conv1dVars, Conv2d, Conv2dVars, ConvTranspose2d, ConvTranspose2dVars,
+    conv2d_forward_low_precision,
+};
 pub use dropout::Dropout;
 pub use embedding::{Embedding, EmbeddingVars};
 pub use flatten::Flatten;
