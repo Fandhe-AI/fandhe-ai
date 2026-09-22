@@ -340,11 +340,17 @@ pub fn decode_model(bytes: &[u8]) -> Result<ModelProto, DecodeModelError> {
 /// に読み取り、`TensorProto` の他フィールド（`raw_data` 等）へは一切
 /// 踏み込まない（`values` 自体が存在しない・`name` が無い場合は空文字列。
 /// `graph::build_graph` の既存挙動と同じ fallback）。診断用途のため
-/// 名前は 256 バイトで切り詰める。
+/// 名前は 256 バイトで切り詰める。**「最初の要素」判定は「名前を読み取れた
+/// 最初の要素」ではなく「出現順で最初の要素」**（`graph::build_graph` の
+/// `g.sparse_initializer[0]` と同じ意味）であるため、最初の要素に
+/// `values.name` が無い場合は空文字列のまま確定し、2 番目以降の要素へは
+/// 名前を探しに行かない（探索を続けると `build_graph` 側の
+/// `tensor_name` と食い違いうる。Cursor Bugbot 指摘・#2079 是正）。
 fn prescan_sparse_initializer(bytes: &[u8]) -> Option<(String, usize)> {
     let mut buf: &[u8] = bytes;
     let mut count = 0usize;
     let mut first_name: Option<String> = None;
+    let mut first_recorded = false;
     while buf.has_remaining() {
         let (tag, wire_type) = decode_key(&mut buf).ok()?;
         match wire_type {
@@ -355,6 +361,7 @@ fn prescan_sparse_initializer(bytes: &[u8]) -> Option<(String, usize)> {
                         field_bytes,
                         &mut count,
                         &mut first_name,
+                        &mut first_recorded,
                     )?;
                 }
             }
@@ -370,13 +377,19 @@ fn prescan_sparse_initializer(bytes: &[u8]) -> Option<(String, usize)> {
 
 /// `prescan_sparse_initializer` から呼ばれる。`GraphProto` 直下（ネストした
 /// メッセージへは再帰しない）を走査し、`sparse_initializer`（tag=15）の
-/// 出現ごとに `count` を加算し、最初の出現からのみ `values.name` を
-/// `first_name` へ格納する（既に格納済みなら以降の出現では読み取らない。
-/// 診断情報は最初の 1 件で十分なため）。
+/// 出現ごとに `count` を加算し、出現順で最初の 1 件からのみ `values.name`
+/// を `first_name` へ格納する。`first_recorded`（`first_name` とは別の
+/// bool）で「最初の要素を既に処理したか」を追跡する
+/// （`first_name.is_none()` だけで判定すると、最初の要素に名前が
+/// 無かった場合に「未処理」と誤認して 2 番目以降の要素まで探しに行って
+/// しまい、`graph::build_graph` の `g.sparse_initializer[0]` 基準の
+/// `tensor_name`〈最初の要素が無名なら空文字列〉と食い違う。Cursor
+/// Bugbot 指摘・#2079 是正）。
 fn scan_graph_bytes_for_sparse_initializer(
     bytes: &[u8],
     count: &mut usize,
     first_name: &mut Option<String>,
+    first_recorded: &mut bool,
 ) -> Option<()> {
     let mut buf: &[u8] = bytes;
     while buf.has_remaining() {
@@ -386,7 +399,8 @@ fn scan_graph_bytes_for_sparse_initializer(
                 let field_bytes = take_length_delimited(&mut buf)?;
                 if tag == 15 {
                     *count += 1;
-                    if first_name.is_none() {
+                    if !*first_recorded {
+                        *first_recorded = true;
                         *first_name = scan_sparse_tensor_bytes_for_values_name(field_bytes);
                     }
                 }

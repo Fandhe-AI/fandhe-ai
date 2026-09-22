@@ -385,3 +385,56 @@ facade（`interop_onnx_import.rs`）に 4 テスト（`from_path`／`from_bytes`
 `match` への追加）、facade-internal parity（`interop_onnx_internal_parity.
 rs`）に 1 テスト（内部 `GraphError` と facade `OnnxError` の payload 一致）
 を追加した。
+
+### 13.5 追補（PR #2221 codex-review P1 是正）: `onnx-interop::decode_model`
+の戻り値型変更と互換性方針の関係
+
+**指摘**: §13.4 の是正で `crates/onnx-interop/src/onnx/proto.rs::
+decode_model` の戻り値型を `Result<ModelProto, prost::DecodeError>` から
+`Result<ModelProto, DecodeModelError>` へ変更し、`GraphProto` へ
+`sparse_initializer` フィールドを追加し、`GraphError`／`OnnxError` に
+新 variant を追加した。AGENTS.md「公開 API 設計（P1/P2）」は「破壊的
+変更・内部表現の公開 API への漏出は P1」と定めており、`onnx-interop` は
+CLAUDE.md に「公開準備は完了済み・実 publish は次回リリースサイクル」と
+記載された crates.io 公開予定クレートであるため、この戻り値型変更が
+互換性方針違反にあたらないかの検討が必要との指摘。
+
+**判断: 変更を維持する（撤回しない）。互換性方針違反ではない**。理由:
+
+1. **`onnx-interop` は本 PR 時点で crates.io に一度も publish されて
+   いない**（CLAUDE.md「crates.io 公開済みは 6 クレート」の列挙に
+   `onnx-interop` は含まれず、「#1963 のユーザー承認を受けた 7 クレート
+   目で、公開準備は完了済み・実 publish は次回リリースサイクル」との
+   記載どおり、実際の `cargo publish` はまだ実行されていない）。
+   crates.io 上に存在しないクレートの API に対して SemVer 上の
+   「破壊的変更」は定義上発生しない（依拠する外部利用者が存在しない）。
+2. **`facade`（唯一のサポートされる公開 API 面。`docs/compat-api-
+   scope.md` §0）の公開 API・payload は本変更で一切変わらない**。
+   `OnnxError::SparseInitializerNotSupported { tensor_name, count }` は
+   §13.3（`d884fe41`）の時点で既に追加済みで、§13.4（本追補対象コミット）
+   は `map_decode_error` という新設の**内部**関数を経由して同じ
+   `OnnxError` variant・同じ payload へ写像するのみ（13.4 節末尾に記載
+   済み）。facade 利用者（実際の外部利用者が想定される唯一の面）から
+   観測できる挙動・型は変更前後で同一である。
+3. `decode_model`（`onnx-interop` の `pub fn`）は Rust の可視性としては
+   `pub` だが、`docs/compat-api-scope.md` §0 の整理（「技術的に `pub`
+   であることと、利用者向けにサポートされる公開面であることは区別
+   する」）と同じ考え方に立てば、facade を経由しない `tensor-core`／
+   `autodiff`／`backend-*` の `pub` API と同様、`onnx-interop` の
+   `pub` API も unpublished の間は互換性維持の対象外として扱える。
+   本追補はこの整理を `onnx-interop`（unpublished 期間限定）へ明示的に
+   適用する記録である。
+4. **是正の目的は non-published 期間中に発見された DoS 脆弱性
+   （§13.4 冒頭の codex-review P0 指摘）の是正**であり、変更を撤回して
+   `prost::DecodeError` のみを返す旧シグネチャへ戻すと、`decode_model`
+   の呼び出し元が「事前走査で拒否されたのか」「ワイヤ形式が壊れて
+   いるのか」を区別できなくなり、facade 側の診断品質（`tensor_name`・
+   `count` を含む `OnnxError::SparseInitializerNotSupported`）を保てない。
+   撤回は同 P0 是正の価値を損なうため採用しない。
+
+**今後の運用**: `onnx-interop` が実際に crates.io へ initial publish
+された後は、本節の「unpublished のため互換性方針の対象外」という
+理由づけは失効する。initial publish 以降の `decode_model` 等
+`onnx-interop` の `pub` API 変更は、AGENTS.md の破壊的変更 P1 判定を
+通常どおり適用する（本節はその適用除外を initial publish 以前に
+限定する）。

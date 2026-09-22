@@ -100,7 +100,7 @@
 //! は `onnx::proto::decode_model` の bounded 事前走査（イシュー #2079
 //! codex-review 是正。`proto.rs` モジュール冒頭コメント「メモリ増幅対策」
 //! 節）による `sparse_initializer` の早期 fail-closed 拒否を
-//! [`map_decode_error`] でそのまま [`OnnxError::SparseInitializerNotSupported`]
+//! `map_decode_error`（非公開関数）でそのまま [`OnnxError::SparseInitializerNotSupported`]
 //! へ写像する（`build_graph` 側の同名エラーと同じ payload）。
 
 use std::collections::HashMap;

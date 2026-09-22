@@ -1296,6 +1296,57 @@ fn decode_model_sums_sparse_initializer_count_across_multiple_graph_occurrences(
     }
 }
 
+/// `prescan_sparse_initializer` の「最初の要素」判定は出現順で最初の
+/// `sparse_initializer` 要素を指し、`graph::build_graph` の
+/// `g.sparse_initializer[0]` と同じ意味でなければならない（Cursor Bugbot
+/// 指摘・#2079 是正）。最初の要素に `values.name` が無い場合、2 番目以降の
+/// 要素まで名前を探しに行かず、空文字列のまま確定することを確認する
+/// （探索を続けると `build_graph` 経由の `tensor_name`〈常に先頭要素・
+/// 無名なら空文字列〉と食い違う）。
+#[test]
+fn decode_model_first_sparse_name_is_empty_when_first_element_has_no_name_even_if_later_has_one() {
+    // 1 個目: values は存在するが name（tag=8）を持たない（TensorProto 側の
+    // 他フィールドも省略した最小構成）。
+    let sparse_1_values = vec![]; // 空の TensorProto（name フィールドなし）
+    let mut sparse_1 = vec![0x0au8, sparse_1_values.len() as u8];
+    sparse_1.extend_from_slice(&sparse_1_values);
+    let mut graph_chunk_1 = vec![0x7au8, sparse_1.len() as u8];
+    graph_chunk_1.extend_from_slice(&sparse_1);
+
+    // 2 個目: values.name = "second"。
+    let name = b"second";
+    let mut sparse_2_values = vec![0x42u8, name.len() as u8];
+    sparse_2_values.extend_from_slice(name);
+    let mut sparse_2 = vec![0x0au8, sparse_2_values.len() as u8];
+    sparse_2.extend_from_slice(&sparse_2_values);
+    let mut graph_chunk_2 = vec![0x7au8, sparse_2.len() as u8];
+    graph_chunk_2.extend_from_slice(&sparse_2);
+
+    // 両方を同一 graph（tag=7）出現内に並べて置く（GraphProto 直下の
+    // sparse_initializer は repeated フィールドのため出現順が保たれる）。
+    let mut graph_bytes = graph_chunk_1;
+    graph_bytes.extend_from_slice(&graph_chunk_2);
+
+    let mut model_bytes = vec![0x3au8, graph_bytes.len() as u8];
+    model_bytes.extend_from_slice(&graph_bytes);
+
+    let err = fandhe_ai_onnx_interop::onnx::proto::decode_model(&model_bytes)
+        .expect_err("decode_model が拒否するはず");
+    match err {
+        fandhe_ai_onnx_interop::onnx::proto::DecodeModelError::SparseInitializerNotSupported {
+            tensor_name,
+            count,
+        } => {
+            // 最初の要素に名前が無いため、2 個目の "second" を採用せず
+            // 空文字列のまま確定する（build_graph の g.sparse_initializer[0]
+            // 基準と同じ挙動）。
+            assert_eq!(tensor_name, "");
+            assert_eq!(count, 2);
+        }
+        other => panic!("DecodeModelError::SparseInitializerNotSupported を期待したが {other:?}"),
+    }
+}
+
 /// 事前走査中に不正な形式（length-delimited フィールドの長さがバッファ
 /// 終端を超える）に遭遇した場合、`prescan_sparse_initializer` は判定を
 /// 確定させず `ModelProto::decode` 本体へ委ねる（本体が同じ不正入力を
