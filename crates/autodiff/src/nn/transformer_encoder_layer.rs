@@ -73,6 +73,12 @@ fn validate_layer_parameters(
     let d_model = self_attn.embed_dim();
 
     let l1_shape = linear1.weight().shape();
+    if l1_shape.len() != 2 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: l1_shape.len(),
+        }));
+    }
     if l1_shape[0] != d_model {
         return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
             lhs: l1_shape.to_vec(),
@@ -111,7 +117,7 @@ fn validate_layer_parameters(
     Ok((d_model, dim_feedforward))
 }
 
-/// [`validate_layer_parameters`] の `*Vars`（テープ登録済み）版。加えて
+/// `validate_layer_parameters` の `*Vars`（テープ登録済み）版。加えて
 /// 5 子層すべてが同一 `Tape` に属することを検査する
 /// （`Var::check_same_tape`）。
 fn validate_layer_vars<'t>(
@@ -139,7 +145,13 @@ fn validate_layer_vars<'t>(
     let d_model = self_attn.embed_dim();
 
     let l1_shape = linear1.weight.shape();
-    if l1_shape.first().copied() != Some(d_model) {
+    if l1_shape.len() != 2 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: l1_shape.len(),
+        }));
+    }
+    if l1_shape[0] != d_model {
         return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
             lhs: l1_shape,
             rhs: vec![d_model, 0],
@@ -255,7 +267,7 @@ impl TransformerEncoderLayer {
     /// 明示的な 5 子層から構築する（テスト・safetensors 等の外部由来
     /// パラメータロード経路向けの入口。[`MultiheadAttention::
     /// from_parameters`] と同じ位置づけ）。子層間の横断整合性
-    /// （[`validate_layer_parameters`]）を検証する。
+    /// （`validate_layer_parameters`）を検証する。
     pub fn from_parameters(
         self_attn: MultiheadAttention,
         linear1: Linear,
@@ -367,7 +379,7 @@ impl<'t> TransformerEncoderLayerVars<'t> {
     /// `LinearVars`／`MultiheadAttentionVars`／`LayerNormVars` 5 個から
     /// 直接構築する。[`TransformerEncoderLayer::bind`] を経由しない
     /// 到達経路（facade 横断 parity テスト向け）のため、`bind` が
-    /// 省略していた不変条件の検証（[`validate_layer_vars`]。子層間の
+    /// 省略していた不変条件の検証（`validate_layer_vars`。子層間の
     /// shape 整合・同一 `Tape`）をここで行う。
     pub fn new(
         self_attn: MultiheadAttentionVars<'t>,
@@ -642,6 +654,53 @@ mod tests {
         .unwrap();
         assert_eq!(layer.d_model(), D_MODEL);
         assert_eq!(layer.dim_feedforward(), DIM_FF);
+    }
+
+    /// `TransformerEncoderLayerVars::new`（公開 `Result` コンストラクタ）
+    /// は `linear1.weight` の rank を検証してから軸へアクセスすべきで
+    /// あり、rank-1／rank-0／rank-3 のいずれを渡しても panic せず
+    /// `Err` を返す必要がある（codex-review／Cursor Bugbot 指摘。PR #2211）。
+    #[test]
+    fn new_vars_rejects_non_rank2_linear1_weight() {
+        for bad_shape in [vec![D_MODEL], vec![], vec![D_MODEL, DIM_FF, 1]] {
+            let tape = Tape::new();
+            let self_attn = MultiheadAttention::new(D_MODEL, NUM_HEADS, true, 1)
+                .unwrap()
+                .bind(&tape);
+            let bad_weight =
+                Tensor::new(vec![0.0f32; bad_shape.iter().product()], &bad_shape).unwrap();
+            let linear1 = LinearVars {
+                weight: tape.var(&bad_weight),
+                bias: None,
+            };
+            let linear2 = Linear::new(DIM_FF, D_MODEL, true, 3).unwrap().bind(&tape);
+            let norm1 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS)
+                .unwrap()
+                .bind(&tape);
+            let norm2 = LayerNorm::new(D_MODEL, LAYER_NORM_DEFAULT_EPS)
+                .unwrap()
+                .bind(&tape);
+            let result = TransformerEncoderLayerVars::new(
+                self_attn,
+                linear1,
+                linear2,
+                norm1,
+                norm2,
+                FeedForwardActivation::Relu,
+            );
+            match result {
+                Err(AutodiffError::Shape(ShapeError::RankMismatch { expected, actual })) => {
+                    assert_eq!(expected, 2);
+                    assert_eq!(actual, bad_shape.len());
+                }
+                Err(other) => {
+                    panic!("RankMismatch を期待したが別の Err（shape={bad_shape:?}）: {other:?}")
+                }
+                Ok(_) => {
+                    panic!("rank != 2 の linear1.weight は Err を返すはず（shape={bad_shape:?}）")
+                }
+            }
+        }
     }
 
     #[test]
