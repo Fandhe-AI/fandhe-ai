@@ -1,7 +1,7 @@
 //! ローカルモデルレジストリ公開面（イシュー #2087・親 #2082）。
 //!
 //! 利用者がホームディレクトリ配下に手動配置したプリトレイン重みを、
-//! 名前・バージョンで一元管理し同期ロードする入口 [`ModelRegistry`] を
+//! 名前・バージョンで一元管理し同期ロードする入口 `ModelRegistry` を
 //! 提供する。数値経路（`Op`／`BackendOps`／VJP／カーネル）には一切
 //! 触れず、ホスト側のパス管理と既存の
 //! [`crate::interop::safetensors::load_safetensors_f32`]（#2019）への
@@ -22,7 +22,7 @@
 //! ```
 //!
 //! 配置は利用者（または将来のダウンロード側。#2088 リモート取得。本
-//! イシューのスコープ外）が行う。[`ModelRegistry`] はディレクトリの
+//! イシューのスコープ外）が行う。`ModelRegistry` はディレクトリの
 //! 作成・削除を一切行わない**読み取り専用**のレジストリである。
 //!
 //! # `load` の戻り値型（受入条件からの逸脱・承認事項）
@@ -39,11 +39,26 @@
 //!
 //! `name`・`version` は利用者から渡される非信頼入力であり、パス
 //! トラバーサル（`..`・絶対パス区切り混入等）を防ぐため
-//! [`validate_component`] が許可文字集合（`[A-Za-z0-9._-]+`・先頭 `.`
+//! `validate_component` が許可文字集合（`[A-Za-z0-9._-]+`・先頭 `.`
 //! 不可）でファイルシステムへ触れる前に fail-closed 検証する。
 //! safetensors ファイル自体の検証（ヘッダ・dtype・shape）は
 //! `crate::interop::safetensors` に一元化されており本モジュールは
 //! 複製・迂回しない。
+//!
+//! 文字集合検証だけでは、レジストリ配下に事前配置されたシンボリック
+//! リンク経由のキャッシュルート脱出（`<root>/<name>`・`<version>`・
+//! `model.safetensors` のいずれかがリンクである場合）を防げない
+//! （codex-review 指摘・PR #2226）。`load`・`available_models` は
+//! ともに内部の `resolve_model_file` を経由し、(1) `name`・
+//! `version`・葉ファイルの各段を [`std::fs::symlink_metadata`]
+//! （リンクを辿らない）で検査してシンボリックリンクを拒否したうえで、
+//! (2) 葉パスを canonicalize し正規化済みキャッシュルート配下である
+//! ことを多層防御として再確認する。lstat 検査後・`load_safetensors_f32`
+//! での実際の open までの間の TOCTOU（差し替えレース）は残る
+//! （`O_NOFOLLOW` での no-follow open には許容依存 9 区分
+//! （`deps-policy.md`）に無い `libc` 直接依存が要るため採用しない。
+//! 想定脅威はレジストリ内に事前配置された悪意あるリンクであり、
+//! 実行時の差し替えレースは対象外とする）。
 //!
 //! # 対象外
 //!
@@ -161,6 +176,13 @@ impl ModelRegistry {
     /// （読み取り専用のレジストリ）。`HOME`／`USERPROFILE` のいずれも
     /// 未設定な場合は [`ModelError::CacheDirUnavailable`] を返す。
     pub fn new() -> Result<Self, ModelError> {
+        // Windows は `USERPROFILE` を優先する（公開ドキュメント規定の
+        // 既定ルート `$USERPROFILE/.fandhe-ai/models` と一致させる。
+        // codex-review 指摘・PR #2226。`HOME` が両 OS で設定されうる
+        // ため単純な `HOME` 優先だと Windows で乖離する）。
+        #[cfg(windows)]
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+        #[cfg(not(windows))]
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
         let root = default_cache_dir_from(home).ok_or(ModelError::CacheDirUnavailable)?;
         Ok(Self { root })
@@ -179,47 +201,89 @@ impl ModelRegistry {
         &self.root
     }
 
+    /// `<cache_dir>/<name>/<version>/model.safetensors` をシンボリック
+    /// リンク経由のキャッシュルート脱出を許さずに解決する（OWASP
+    /// A03。codex-review 指摘・PR #2226。モジュール doc「非信頼入力の
+    /// 扱い」節参照）。`load`・[`available_models`](Self::available_models)
+    /// の両方が同一のこの関数を経由するため、列挙結果は必ず `load`
+    /// が受理するパスのみを含む。
+    ///
+    /// 1. `name`・`version` を `validate_component` でファイル
+    ///    システムへ触れる前に検証する。
+    /// 2. `<root>/<name>`・`<name>/<version>`・葉ファイルの各段を
+    ///    [`std::fs::symlink_metadata`]（リンクを辿らない）で検査し、
+    ///    いずれかがシンボリックリンク、または期待する型
+    ///    （ディレクトリ／通常ファイル）でなければ
+    ///    [`ModelError::NotFound`] に丸める。
+    /// 3. 葉パスを [`Path::canonicalize`] し、キャッシュルートの
+    ///    canonicalize 結果配下であることを多層防御として再確認する
+    ///    （多段リンク・パス正規化差異対策）。
+    ///
+    /// 権限エラー等それ以外の I/O 失敗は [`ModelError::Io`] として
+    /// 伝える。
+    fn resolve_model_file(&self, name: &str, version: &str) -> Result<PathBuf, ModelError> {
+        validate_component("name", name)?;
+        validate_component("version", version)?;
+
+        let not_found = || ModelError::NotFound {
+            name: name.to_string(),
+            version: version.to_string(),
+        };
+
+        let canonical_root = match self.root.canonicalize() {
+            Ok(p) => p,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found()),
+            Err(e) => return Err(ModelError::Io(e)),
+        };
+
+        let name_dir = self.root.join(name);
+        let version_dir = name_dir.join(version);
+        let leaf = version_dir.join(MODEL_FILE_NAME);
+
+        for (component, must_be_dir) in [(&name_dir, true), (&version_dir, true), (&leaf, false)] {
+            let meta = match std::fs::symlink_metadata(component) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found()),
+                Err(e) => return Err(ModelError::Io(e)),
+            };
+            let file_type = meta.file_type();
+            // シンボリックリンクは中間ディレクトリ・葉ファイルの
+            // いずれでも拒否する（キャッシュルート脱出対策）。
+            if file_type.is_symlink() {
+                return Err(not_found());
+            }
+            if must_be_dir != file_type.is_dir() {
+                return Err(not_found());
+            }
+        }
+
+        // 多層防御: canonicalize 後も正規化済みルート配下であることを
+        // 確認する。
+        let canonical_leaf = leaf.canonicalize().map_err(ModelError::Io)?;
+        if !canonical_leaf.starts_with(&canonical_root) {
+            return Err(not_found());
+        }
+        Ok(canonical_leaf)
+    }
+
     /// `<cache_dir>/<name>/<version>/model.safetensors` を同期ロードし、
     /// state dict（キー = テンソル名）を返す。
     ///
-    /// 1. `name`・`version` を [`validate_component`] でファイル
-    ///    システムへ触れる前に検証する（失敗は
-    ///    [`ModelError::InvalidComponent`]）。
-    /// 2. パスの存在確認（`std::fs::metadata`）。存在しない、または
-    ///    通常ファイルでない場合は [`ModelError::NotFound`]。権限
-    ///    エラー等それ以外の I/O 失敗は [`ModelError::Io`]。
-    /// 3. [`load_safetensors_f32`]（`crate::interop::safetensors`。
-    ///    #2019）へ委譲する。転置・キーリネーム等の暗黙アダプタは
-    ///    一切行わない（REQ-7 契約は `interop::safetensors` に一元化
-    ///    済みでロジックを複製しない）。
+    /// パス解決は `resolve_model_file`（シンボリックリンク経由の
+    /// キャッシュルート脱出対策。モジュール doc「非信頼入力の扱い」
+    /// 節参照）に委譲する。存在しない、通常ファイルでない、または
+    /// キャッシュルート脱出と判定された場合は [`ModelError::NotFound`]
+    /// に丸める。権限エラー等それ以外の I/O 失敗は [`ModelError::Io`]。
+    /// 解決したパスは [`load_safetensors_f32`]（`crate::interop::safetensors`。
+    /// #2019）へ委譲する。転置・キーリネーム等の暗黙アダプタは一切
+    /// 行わない（REQ-7 契約は `interop::safetensors` に一元化済みで
+    /// ロジックを複製しない）。
     pub fn load(
         &self,
         name: &str,
         version: &str,
     ) -> Result<HashMap<String, Tensor<f32>>, ModelError> {
-        validate_component("name", name)?;
-        validate_component("version", version)?;
-        let path = self.root.join(name).join(version).join(MODEL_FILE_NAME);
-        match std::fs::metadata(&path) {
-            // 通常ファイルとして存在する場合のみロードへ進む。
-            Ok(meta) if meta.is_file() => {}
-            // 存在しない、またはディレクトリ等の非ファイルは
-            // 「モデルが見つからない」として丸める。
-            Ok(_) => {
-                return Err(ModelError::NotFound {
-                    name: name.to_string(),
-                    version: version.to_string(),
-                });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ModelError::NotFound {
-                    name: name.to_string(),
-                    version: version.to_string(),
-                });
-            }
-            // 権限エラー等それ以外の I/O 失敗はそのまま伝える。
-            Err(e) => return Err(ModelError::Io(e)),
-        }
+        let path = self.resolve_model_file(name, version)?;
         load_safetensors_f32(&path).map_err(ModelError::Load)
     }
 
@@ -229,12 +293,14 @@ impl ModelRegistry {
     /// [`load`](Self::load) 側の I/O エラー区別とは異なる扱い）。
     ///
     /// 列挙規則:
-    /// - ルート直下の**ディレクトリ**で名前が
-    ///   [`validate_component`] を通るものを `name` 候補とする
+    /// - ルート直下の**ディレクトリ**（[`std::fs::DirEntry::file_type`]
+    ///   はリンクを辿らないため、シンボリックリンクは対象外）で名前が
+    ///   `validate_component` を通るものを `name` 候補とする
     ///   （ファイル・検証不合格名はスキップ）
     /// - `name` 直下のディレクトリで名前が検証を通り、かつ
-    ///   `model.safetensors` が通常ファイルとして存在するものだけを
-    ///   `version` として列挙する
+    ///   `resolve_model_file` が受理するものだけを `version` として
+    ///   列挙する（`load` が受理するパスのみを列挙する一貫性保証。
+    ///   モジュール doc「非信頼入力の扱い」節参照）
     /// - version が 1 件もない `name` は結果に含めない
     /// - `name`・`versions` とも文字列昇順ソート（決定的出力）
     /// - ディレクトリ名は UTF-8 変換できるもののみ対象
@@ -251,10 +317,16 @@ impl ModelRegistry {
             if validate_component("name", &name).is_err() {
                 continue;
             }
-            let name_dir = entry.path();
-            if !name_dir.is_dir() {
+            // `file_type()` はリンクを辿らない（`Path::is_dir` は辿る
+            // ため使わない）。シンボリックリンクの `name` ディレクトリは
+            // 列挙対象外とする。
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
                 continue;
             }
+            let name_dir = entry.path();
             let Ok(version_entries) = std::fs::read_dir(&name_dir) else {
                 continue;
             };
@@ -266,7 +338,7 @@ impl ModelRegistry {
                 if validate_component("version", &version).is_err() {
                     continue;
                 }
-                if version_entry.path().join(MODEL_FILE_NAME).is_file() {
+                if self.resolve_model_file(&name, &version).is_ok() {
                     versions.push(version);
                 }
             }

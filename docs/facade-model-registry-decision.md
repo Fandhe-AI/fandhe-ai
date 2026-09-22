@@ -63,7 +63,9 @@ facade 新規公開面 7 件（`crates/facade/src/model.rs`。`crates/facade/tes
 
 検証は `load`・`available_models` の両方が同一の private 関数 `validate_component` を使う（allowlist 方式・fail-closed）。`load` は `name`・`version` をファイルシステムへ触れる前に検証してから存在確認へ進む（`crates/facade/tests/model_registry.rs::invalid_components_are_rejected_before_fs_access` が固定）。
 
-`with_cache_dir` に渡されたルート自体は利用者の所有物として検証しない（相対パス可。正規化はしない）。シンボリックリンクは `is_file()`／`read_dir` の既定挙動どおり追従する（利用者自身のキャッシュディレクトリ配下のみを対象とするため、追従の拒否は行わない）。
+`with_cache_dir` に渡されたルート自体は利用者の所有物として検証しない（相対パス可。正規化はしない。ルート自体がシンボリックリンクであることは許容する。§12 参照）。
+
+**2026-09-22 追記（PR #2226 codex-review 指摘・P0）**: レジストリ内部（`<root>/<name>`・`<name>/<version>`・葉ファイル `model.safetensors`）にシンボリックリンクが事前配置された場合の扱いは、当初「`is_file()`／`read_dir` の既定挙動どおり追従する」としていたが、これはキャッシュルート脱出（OWASP A03）を許してしまう欠陥だったため撤回した。現在の契約・実装は §12 を参照。
 
 ## 8. safetensors 検証との関係
 
@@ -87,3 +89,20 @@ facade 新規公開面 7 件（`crates/facade/src/model.rs`。`crates/facade/tes
 - `crates/facade/src/interop/safetensors.rs`（委譲先・REQ-7 契約）
 - `crates/facade/tests/model_registry.rs`・`crates/facade/tests/api_surface.rs`（受入テスト・公開面の機械固定）
 - `docs/facade-safetensors-exposure-decision.md`・`docs/compat-api-scope.md`（既存の公開範囲決定記録）
+
+## 12. シンボリックリンク経由のキャッシュルート脱出対策（2026-09-22 追記・PR #2226 codex-review 指摘・P0）
+
+§7 で策定した文字集合検証（`validate_component`）だけでは、レジストリ内部にシンボリックリンクを事前配置された場合のキャッシュルート脱出（OWASP A03）を防げない。`<root>/<name>`・`<name>/<version>`・葉ファイル `model.safetensors` のいずれかがシンボリックリンクであれば、`std::fs::metadata`（追従する）・`load_safetensors_f32` 経由でキャッシュルート外の任意 safetensors ファイルを読み込めてしまう。
+
+**対策方針**: `load`・`available_models` の両方が内部の private 関数 `resolve_model_file` を経由する（列挙結果は必ず `load` が受理するパスのみを含む一貫性保証）。
+
+1. `<root>/<name>`・`<name>/<version>`・葉ファイルの各段を [`std::fs::symlink_metadata`]（リンクを辿らない no-follow 検査）で検査し、いずれかがシンボリックリンク、または期待する型（ディレクトリ／通常ファイル）でなければ `NotFound` に丸める（`available_models` 側は `DirEntry::file_type()`（no-follow）で `name` 段を同様に検査する）。
+2. 葉パスを `Path::canonicalize` し、キャッシュルートの canonicalize 結果配下であることを多層防御として再確認する（多段リンク・パス正規化差異対策）。
+
+**採用しなかった対策**: `O_NOFOLLOW` での no-follow open（lstat→open 間の TOCTOU を完全に閉じる）には `libc` クレートの直接依存が要るが、`libc` は許容依存 9 区分（`deps-policy.md`）に含まれずユーザー承認なしに追加できない。本対策は std のみで構成し、lstat 検査後・実際の open までの間の TOCTOU（差し替えレース）は残る。想定脅威はレジストリ内に事前配置された悪意あるシンボリックリンクであり、実行時の差し替えレースは対象外とする。
+
+**ルート自体がシンボリックリンクの場合は許容する**（`load_succeeds_when_root_itself_is_a_symlink` で固定）。拒否対象はレジストリ内部からの脱出のみであり、`with_cache_dir` に渡すルート自体の間接参照は妨げない。
+
+**Windows の既定ルート解決順序も同時に是正した**（P2・同 PR 指摘）: `ModelRegistry::new` は Windows では `USERPROFILE` を `HOME` より優先する（`cfg(windows)`）。従来は両 OS で `HOME` を先に見ており、公開ドキュメントが規定する Windows 既定ルート（`$USERPROFILE/.fandhe-ai/models`）と実装が乖離しうる欠陥だった。
+
+固定テストは `crates/facade/tests/model_registry.rs` の `load_rejects_symlinked_leaf_file_escaping_root`・`load_rejects_symlinked_version_dir_escaping_root`・`load_rejects_symlinked_name_dir_escaping_root`・`available_models_excludes_all_symlink_escape_variants`（いずれも `#[cfg(unix)]`）・`load_succeeds_when_root_itself_is_a_symlink`（過剰拒否でないことの確認）。
