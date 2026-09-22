@@ -465,12 +465,20 @@ impl<'t> TransformerEncoderLayerVars<'t> {
         // ②FFN: [B, L, E] -> [B*L, E] -> linear1 -> activation ->
         // linear2 -> [B, L, E]（`attention::project` を再利用。
         // モジュール doc・`attention.rs::project` doc 参照）。
-        let hidden = project(&x1, &self.linear1, b, l, e, self.dim_feedforward)?;
+        let hidden = project(&x1, &self.linear1, b, l, e, self.dim_feedforward, None)?;
         let activated = match self.activation {
             FeedForwardActivation::Relu => hidden.relu(),
             FeedForwardActivation::Gelu => hidden.gelu()?,
         };
-        let ffn_out = project(&activated, &self.linear2, b, l, self.dim_feedforward, e)?;
+        let ffn_out = project(
+            &activated,
+            &self.linear2,
+            b,
+            l,
+            self.dim_feedforward,
+            e,
+            None,
+        )?;
 
         // ③residual + norm2。
         self.norm2.forward(&x1.add(&ffn_out)?)
@@ -795,9 +803,9 @@ mod tests {
         let bound = layer.bind(&tape);
         let attn = bound.self_attn.forward(&x, &x, &x, None, false).unwrap();
         let x1 = bound.norm1.forward(&x.add(&attn).unwrap()).unwrap();
-        let hidden = project(&x1, &bound.linear1, 2, 3, D_MODEL, DIM_FF).unwrap();
+        let hidden = project(&x1, &bound.linear1, 2, 3, D_MODEL, DIM_FF, None).unwrap();
         let activated = hidden.relu();
-        let ffn_out = project(&activated, &bound.linear2, 2, 3, DIM_FF, D_MODEL).unwrap();
+        let ffn_out = project(&activated, &bound.linear2, 2, 3, DIM_FF, D_MODEL, None).unwrap();
         let manual = bound.norm2.forward(&x1.add(&ffn_out).unwrap()).unwrap();
 
         assert_eq!(

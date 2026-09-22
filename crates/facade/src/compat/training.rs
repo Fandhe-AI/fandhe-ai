@@ -427,10 +427,12 @@ impl Sequential {
     /// （`crate::optim` モジュール doc「AMP（GradScaler）を使う場合」
     /// 節・`docs/autodiff-low-precision-linear-design.md` §7 参照）:
     ///
-    /// 1. `Linear` 層 forward を `amp.compute_dtype`（f32 master weight・
-    ///    backward は常に f32）で計算する（`Linear` 以外の層は f32 の
-    ///    まま。`crate::compat::SequentialVars::forward_with_precision`
-    ///    doc 参照）
+    /// 1. `Linear`・`Conv2d`・`MultiheadAttention` 層 forward を
+    ///    `amp.compute_dtype`（f32 master weight・backward は常に f32）
+    ///    で計算する（イシュー #2071 で `Conv2d`／`MultiheadAttention`
+    ///    へ拡張済み。それ以外の層〈`Conv1d`／`LayerNorm`／
+    ///    `TransformerEncoderLayer` 等〉は f32 のまま。`crate::compat::
+    ///    SequentialVars::forward_with_precision` doc 参照）
     /// 2. **scale 前**の素の loss を `History::loss` へ記録する（非有限
     ///    でも overflow を可視化するためそのまま記録する）
     /// 3. `scale_loss → backward → unscale`（非有限検出込み）

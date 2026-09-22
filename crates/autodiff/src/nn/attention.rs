@@ -51,13 +51,13 @@
 //! （イシュー #1760・親 #1618 で `compat::Sequential::add_multihead_attention`
 //! として結線済み）。
 
-use fandhe_ai_tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{Activation, ScalarDType, ShapeError, Tensor};
 
 use crate::error::AutodiffError;
 use crate::nn::init::{
     ATTN_K_SEED_SALT, ATTN_OUT_SEED_SALT, ATTN_Q_SEED_SALT, ATTN_V_SEED_SALT, derive_seed,
 };
-use crate::nn::linear::{Linear, LinearVars};
+use crate::nn::linear::{Linear, LinearVars, linear_forward_low_precision};
 use crate::nn::module::{Module, prefixed, strip_child_prefix};
 use crate::tape::Tape;
 use crate::var::Var;
@@ -513,16 +513,18 @@ impl<'t> MultiheadAttentionVars<'t> {
         // `dh` は常に 1 以上の整数（0 除算・`1/sqrt(0)` は生じない）。
         let dh = e / h;
 
-        let q_proj = project(query, &self.q, b, l, e, e)?;
-        let k_proj = project(key, &self.k, b, s, e, e)?;
-        let v_proj = project(value, &self.v, b, s, e, e)?;
+        let q_proj = project(query, &self.q, b, l, e, e, None)?;
+        let k_proj = project(key, &self.k, b, s, e, e, None)?;
+        let v_proj = project(value, &self.v, b, s, e, e, None)?;
 
         let q_heads = split_heads(&q_proj, b, l, h, dh)?;
         let k_heads = split_heads(&k_proj, b, s, h, dh)?;
         let v_heads = split_heads(&v_proj, b, s, h, dh)?;
 
         let scale = 1.0f32 / (dh as f32).sqrt();
-        let attn_out = sdpa_compose(&q_heads, &k_heads, &v_heads, attn_mask, is_causal, scale)?;
+        let attn_out = sdpa_compose(
+            &q_heads, &k_heads, &v_heads, attn_mask, is_causal, scale, None,
+        )?;
 
         // head 結合: [B, H, L, Dh] -> permute -> [B, L, H, Dh] ->
         // contiguous（permute 後は必ず非 contiguous になるため無条件）
@@ -532,8 +534,108 @@ impl<'t> MultiheadAttentionVars<'t> {
             .contiguous()?
             .reshape(&[b, l, e])?;
 
-        project(&merged, &self.out, b, l, e, e)
+        project(&merged, &self.out, b, l, e, e, None)
     }
+}
+
+/// [`MultiheadAttentionVars::forward`] の opt-in 低精度版（イシュー
+/// #2071・親 #1626／#1648）。q/k/v/out の 4 projection と SDPA 本体の
+/// 2 回の matmul（`sdpa_compose` 内）を `dtype`（[`ScalarDType::F16`]／
+/// [`ScalarDType::Bf16`]）で計算する（scale・transpose・mask・softmax
+/// は PyTorch autocast の fp32 リストと同様 f32 のまま）。shape 検査・
+/// 処理順序は [`MultiheadAttentionVars::forward`] と完全に同一
+/// （`project`／`sdpa_compose` へ `Some(dtype)` を渡すのみの差分）。
+///
+/// **`MultiheadAttentionVars` へメソッドとして追加しない理由**:
+/// `nn::linear::linear_forward_low_precision`・`nn::conv::
+/// conv2d_forward_low_precision` と同じ理由（`pub q`／`k`／`v`／`out`
+/// フィールドを持つ struct への破壊的変更を避けるため自由関数として
+/// 配置する）。
+pub fn multihead_attention_forward_low_precision<'t>(
+    vars: &MultiheadAttentionVars<'t>,
+    query: &Var<'t>,
+    key: &Var<'t>,
+    value: &Var<'t>,
+    attn_mask: Option<&Tensor<bool>>,
+    is_causal: bool,
+    dtype: ScalarDType,
+) -> Result<Var<'t>, AutodiffError> {
+    query.check_same_tape(&vars.q.weight)?;
+    query.check_same_tape(key)?;
+    query.check_same_tape(value)?;
+
+    let q_shape = query.shape();
+    let k_shape = key.shape();
+    let v_shape = value.shape();
+    if q_shape.len() != 3 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 3,
+            actual: q_shape.len(),
+        }));
+    }
+    if k_shape.len() != 3 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 3,
+            actual: k_shape.len(),
+        }));
+    }
+    if v_shape.len() != 3 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 3,
+            actual: v_shape.len(),
+        }));
+    }
+
+    let e = vars.embed_dim;
+    let (b, l) = (q_shape[0], q_shape[1]);
+    if q_shape[2] != e {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: q_shape.clone(),
+            rhs: vec![b, l, e],
+        }));
+    }
+    if k_shape[0] != b || k_shape[2] != e {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: k_shape.clone(),
+            rhs: vec![b, k_shape[1], e],
+        }));
+    }
+    if v_shape != k_shape {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: v_shape.clone(),
+            rhs: k_shape.clone(),
+        }));
+    }
+    let s = k_shape[1];
+
+    let h = vars.num_heads;
+    let dh = e / h;
+
+    let q_proj = project(query, &vars.q, b, l, e, e, Some(dtype))?;
+    let k_proj = project(key, &vars.k, b, s, e, e, Some(dtype))?;
+    let v_proj = project(value, &vars.v, b, s, e, e, Some(dtype))?;
+
+    let q_heads = split_heads(&q_proj, b, l, h, dh)?;
+    let k_heads = split_heads(&k_proj, b, s, h, dh)?;
+    let v_heads = split_heads(&v_proj, b, s, h, dh)?;
+
+    let scale = 1.0f32 / (dh as f32).sqrt();
+    let attn_out = sdpa_compose(
+        &q_heads,
+        &k_heads,
+        &v_heads,
+        attn_mask,
+        is_causal,
+        scale,
+        Some(dtype),
+    )?;
+
+    let merged = attn_out
+        .permute(&[0, 2, 1, 3])?
+        .contiguous()?
+        .reshape(&[b, l, e])?;
+
+    project(&merged, &vars.out, b, l, e, e, Some(dtype))
 }
 
 /// q/k/v/out projection の共通実装:
@@ -565,6 +667,11 @@ impl<'t> MultiheadAttentionVars<'t> {
 /// （`out_features`）を独立に指定できる必要がある（単一の `e` を両方に
 /// 使うと非正方 `proj` で `y.reshape(&[b, len, e])` が要素数不一致に
 /// なる）。
+/// `low_precision`（イシュー #2071）: `Some(dtype)` のとき `proj.forward`
+/// （f32）の代わりに `nn::linear::linear_forward_low_precision`
+/// （`TypedOps<f16/bf16>` 経由）へ委譲する。`None`（既定の呼び出し元は
+/// すべて `None`）のときは従来どおり `proj.forward` を呼ぶため、
+/// 既存呼び出し元は bit 同一のまま不変。
 pub(crate) fn project<'t>(
     x: &Var<'t>,
     proj: &LinearVars<'t>,
@@ -572,6 +679,7 @@ pub(crate) fn project<'t>(
     len: usize,
     in_features: usize,
     out_features: usize,
+    low_precision: Option<ScalarDType>,
 ) -> Result<Var<'t>, AutodiffError> {
     let bl = b.checked_mul(len).ok_or_else(|| {
         AutodiffError::InvalidArgument(format!(
@@ -585,7 +693,10 @@ pub(crate) fn project<'t>(
         }
         Err(other) => return Err(other),
     };
-    let y = proj.forward(&x_flat)?;
+    let y = match low_precision {
+        Some(dtype) => linear_forward_low_precision(proj, &x_flat, Activation::None, dtype)?,
+        None => proj.forward(&x_flat)?,
+    };
     y.reshape(&[b, len, out_features])
 }
 
@@ -698,6 +809,11 @@ fn negate_broadcast_mask(
 /// （`MultiheadAttentionVars::forward`）が `1/sqrt(head_dim)` として
 /// 確定済みの値を渡す（`head_dim >= 1` を構築時に保証済みのため常に
 /// 有限・正）。
+/// `low_precision`（イシュー #2071）: `Some(dtype)` のとき 2 回の
+/// `matmul`（`scores = q_scaled @ k_t`・`out = weights @ value`）を
+/// `Var::matmul_low_precision` へ切り替える。scale・transpose・mask・
+/// softmax は PyTorch autocast の fp32 リスト（softmax）と同様 f32 の
+/// まま（`None` の既存呼び出し元は bit 同一のまま不変）。
 fn sdpa_compose<'t>(
     query: &Var<'t>,
     key: &Var<'t>,
@@ -705,6 +821,7 @@ fn sdpa_compose<'t>(
     attn_mask: Option<&Tensor<bool>>,
     is_causal: bool,
     scale: f32,
+    low_precision: Option<ScalarDType>,
 ) -> Result<Var<'t>, AutodiffError> {
     query.check_same_tape(key)?;
     query.check_same_tape(value)?;
@@ -734,8 +851,12 @@ fn sdpa_compose<'t>(
     let k_t = key.transpose(k_rank - 2, k_rank - 1)?;
 
     // `[..., L, E] @ [..., E, S] -> [..., L, S]`。E 不一致・バッチ
-    // broadcast 不能は `Var::matmul`（`matmul_out_shape`）が検査済み。
-    let scores = q_scaled.matmul(&k_t)?;
+    // broadcast 不能は `Var::matmul`／`matmul_low_precision`
+    // （`matmul_out_shape`）が検査済み。
+    let scores = match low_precision {
+        Some(dtype) => q_scaled.matmul_low_precision(&k_t, dtype)?,
+        None => q_scaled.matmul(&k_t)?,
+    };
     let scores_shape = scores.shape();
     let rank = scores_shape.len();
     let l = scores_shape[rank - 2];
@@ -785,10 +906,14 @@ fn sdpa_compose<'t>(
     let weights = scores.softmax(rank - 1)?;
 
     // `[..., L, S] @ [..., S, Dh] -> [..., L, Dh]`。S 不一致
-    // （`key[-2] != value[-2]`）はここで `Var::matmul` が検査する
-    // （`split_heads` が q/k/v とも同じ `s` から head 分割するため本
-    // モジュール内では実際には発生しない）。
-    weights.matmul(value)
+    // （`key[-2] != value[-2]`）はここで `Var::matmul`／
+    // `matmul_low_precision` が検査する（`split_heads` が q/k/v とも
+    // 同じ `s` から head 分割するため本モジュール内では実際には発生
+    // しない）。
+    match low_precision {
+        Some(dtype) => weights.matmul_low_precision(value, dtype),
+        None => weights.matmul(value),
+    }
 }
 
 /// self-attention（`q = k = v = input`・mask なし・非 causal）として
@@ -943,7 +1068,7 @@ mod tests {
         let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
         let (qv, kv, vv) = (tape.var(&q), tape.var(&k), tape.var(&v));
 
-        let err = sdpa_compose(&qv, &kv, &vv, Some(&mask), false, 0.5).unwrap_err();
+        let err = sdpa_compose(&qv, &kv, &vv, Some(&mask), false, 0.5, None).unwrap_err();
         assert!(
             matches!(err, AutodiffError::Shape(_)),
             "broadcast 不能な attn_mask は L==0 でも Shape エラーになるべき（実際: {err:?}）"
@@ -966,7 +1091,7 @@ mod tests {
         let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
         let (qv, kv, vv) = (tape.var(&q), tape.var(&k), tape.var(&v));
 
-        let out = sdpa_compose(&qv, &kv, &vv, Some(&mask), false, 0.5).unwrap();
+        let out = sdpa_compose(&qv, &kv, &vv, Some(&mask), false, 0.5, None).unwrap();
         assert_eq!(out.shape(), &[2, 0, 4]);
     }
 

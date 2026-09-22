@@ -347,6 +347,24 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
                     id.0
                 )));
             }
+            // 低精度 forward ノード（`Var::matmul_low_precision`。
+            // `TapeNode::low_precision`。イシュー #2071）は無条件で
+            // 拒否する。`Op::MatMul` variant 自体は精度情報を持たない
+            // ため、`replay_op`（`fp32_strict` のみを読む）へそのまま
+            // 通すと `fp32_strict == false` の低精度ノードは通常版
+            // `Var::matmul`（`ops.gemm`。f32）へ静かにフォールバック
+            // してしまう——opt-in が精度について嘘をつかないための
+            // fail-closed 方針（`.claude/rules/security.md` A04。
+            // `crate::low_precision` モジュール doc と同じ理由）。
+            if parent_nodes[id.0].low_precision {
+                return Err(AutodiffError::Backward(format!(
+                    "create_graph: 低精度 forward の MatMul（NodeId({}))は非対応（\
+                     Var::matmul_low_precision はテープへ精度情報を保持しないため \
+                     子テープへ replay すると静かに f32 精度へフォールバックする。\
+                     イシュー #2071）",
+                    id.0
+                )));
+            }
         }
     }
     Ok(())
