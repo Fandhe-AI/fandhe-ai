@@ -121,14 +121,14 @@
 - **K-2「feat(facade): KV キャッシュの facade 到達経路と生成ループ例（greedy／top-k）」** — 前提: K-1。facade 公開面拡張の承認事項を明記
 - **K-3（将来候補・段階 0）「perf: デバイス常駐 KV キャッシュ」** — 事前登録判定規則が前提。B-3（forward capture）の `d_input`／loss 常駐化ゲート充足後に再評価
 - **G-1「feat(backend): GPU `run_fused` の elementwise allowlist 実装（区分 B-1）」** — `docs/autodiff-graph-optimization-scope-decision.md` §8 の草案を継承し、事前登録判定規則・§10 承認事項 (2)(4) を付記
-- **spec 提案候補「REQ-9『引き続き対象外』へトークナイザ・サービング基盤を明記」** — `Fandhe-AI/fandhe-ai-spec` 側への提案案（`docs/spec/` は編集しない・未起票）
+- **spec 提案候補「REQ-9『引き続き対象外』へトークナイザ・サービング基盤を明記」** — `Fandhe-AI/fandhe-ai-spec` 側への提案案（`docs/spec/` は編集しない・未起票）。→ トークナイザ部分の文案は `docs/tokenizer-non-target-spec-proposal.md`（#2086）に記録（未起票）。サービング基盤は同 doc §6 で別候補として分離
 
 ## 10. 承認事項（実装着手の前提。本 issue 時点ではいずれも未取得）
 
 1. KV キャッシュの実装着手（`docs/compat-api-scope.md` §5 経路 2。K-1 起票の可否。設計自体は `docs/kv-cache-design.md`〈#2083〉で確定済みだが本項目の承認は別途必要）
 2. KV キャッシュの facade 公開面拡張（K-2 起票の可否）
 3. B-1（GPU `run_fused` elementwise allowlist）の実装着手・`BackendOps` 拡張（`docs/autodiff-graph-optimization-scope-decision.md` §10 (2)(4) と同一の承認事項）
-4. トークナイザを「引き続き対象外」へ明記する spec 提案の実起票（経路 1）
+4. トークナイザを「引き続き対象外」へ明記する spec 提案の実起票（経路 1）。文案は #2086（`docs/tokenizer-non-target-spec-proposal.md`）で確定済み・起票自体は引き続き未承認
 5. K-1／K-2／G-1 の個別 issue 起票そのもの
 
 ## 11. スコープ外
@@ -151,3 +151,7 @@
 - `docs/perf/logs/elementwise-vjp-backend-ops-1583/`（B-1 起票案の判定規則の先例）
 - `crates/autodiff/src/attention.rs`・`crates/autodiff/src/nn/attention.rs`・`crates/autodiff/src/var.rs`・`crates/autodiff/src/tape.rs`・`crates/backend-cuda/src/ops.rs`・`crates/facade/src/lib.rs`
 - `.claude/rules/deps-policy.md`・`.claude/rules/coding-rust.md`・`.claude/rules/security.md`
+
+## 13. 後続 #2086
+
+イシュー #2086「トークナイザ非目標の spec 明記提案（(b) 形式・実装しない）」は、本 doc §5.2／§6 が確定した「トークナイザは非目標（案 D）」判定を変更せず、spec 正本（`docs/spec/04-requirements.md`）へ明記するための (b) 形式提案文案を `docs/tokenizer-non-target-spec-proposal.md` に確定した（未起票。実起票は §10 承認事項 4 のまま未取得）。追記先は REQ-9「引き続き対象外」列挙（`docs/spec/04-requirements.md:233`）であることを同 doc で再確認済み。本 doc §1〜§12 の既存本文は不変。

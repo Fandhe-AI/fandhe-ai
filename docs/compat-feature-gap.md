@@ -357,7 +357,7 @@ ONNX opset の一部演算がホスト参照実装として存在する（`crate
 | 量子化（int8 等） | `tf.lite` 量子化 | なし | 量子化 dtype・演算対応（2.12 節の dtype 拡張が前提） | XL |
 | 乱数シード固定（`manual_seed`） | `tf.random.set_seed` | 部分（`Linear::new(.., seed: u64)` など個別 API にシード引数はあるが、グローバル RNG 状態を握る `manual_seed` 相当はない） | グローバル RNG 契約の設計（Dropout 等 今後追加する確率的演算との整合が前提） | M |
 | KV キャッシュ（`past_key_values` 相当） | `TFCache` 相当（`transformers` 経由） | なし（設計判断: `docs/facade-inference-serving-scope-decision.md` §6。「実装する」〈既存 `Var` 演算の合成のみで新規 `Op`／`BackendOps`／依存なし。§5 経路 2 承認待ちの起票案 K-1／K-2〉。設計確定は `docs/kv-cache-design.md`〈#2083〉） | `nn::MultiheadAttention` に射影済み K/V の入出力口を追加（`docs/facade-inference-serving-scope-decision.md` §9） | M |
-| トークナイザ（BPE 等） | Hugging Face `tokenizers`／`tf.text`／`keras_nlp` | なし（設計判断: `docs/facade-inference-serving-scope-decision.md` §6。「非目標」〈PyTorch／TensorFlow 本体も同梱しない・許容依存区分外・自作は非信頼入力パース面を増やす〉） | — | — |
+| トークナイザ（BPE 等） | Hugging Face `tokenizers`／`tf.text`／`keras_nlp` | なし（設計判断: `docs/facade-inference-serving-scope-decision.md` §6。「非目標」〈PyTorch／TensorFlow 本体も同梱しない・許容依存区分外・自作は非信頼入力パース面を増やす〉。spec 提案文案: `docs/tokenizer-non-target-spec-proposal.md`〈#2086・未起票〉） | — | — |
 
 ---
 
