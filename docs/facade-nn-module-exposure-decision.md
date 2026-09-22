@@ -86,10 +86,10 @@ PyTorch の `nn.Module` サブクラス相当（ユーザー定義層）を faca
 
 (b) **open trait の後方互換規則**（内部 `autodiff::nn::Module` は既にこの運用。`module.rs:93-100`）:
 - **defaulted メソッド追加＝非破壊**（既存 `impl Module` を壊さない。`forward_host` 追加時〈#1028／#1760〉に確立済み）
-- **required メソッド追加・既存シグネチャ変更・supertrait 追加＝破壊的変更**（semver major。crates.io 公開済み `fandhe-ai-autodiff =0.9.0` では不可）
+- **required メソッド追加・既存シグネチャ変更・supertrait 追加は semver 破壊的変更である**。ただし `docs/compat-api-scope.md` §0（「`facade` が唯一のサポートされる公開 API 面であり `tensor-core`／`autodiff`／`backend-*` は内部クレート、これらを `facade` を経由せず直接利用することはサポート対象外」）の境界の下では、内部クレートの破壊的変更が一律不可という前提自体が成り立たない。先例として `Tape::new()`／`impl Default for Tape`（引数なし版）の削除という内部クレートの破壊的変更が、同じ REQ-9 2026-08-08 追記（内部クレート＝非サポート宣言）を根拠に許容されている（`docs/public-api-design.md:585`「この破壊は REQ-9 の 2026-08-08 追記…を根拠に許容するが、`!`／`BREAKING CHANGE:` 告知は省略しない」・`docs/fusion-graph-design.md` §1）。したがって本 doc が `Module` の required method 追加・既存シグネチャ変更を選択肢から外すのは crates.io 公開済みという事実そのものではなく、次の実質的な理由による: (i) `Tape::new()` の破壊時点では facade `Tape` newtype 経由が唯一の到達経路であり内部クレート直接利用が事実上存在しない構成だったのに対し、`fandhe-ai-autodiff` は crates.io 公開クレートとして誰でも `Cargo.toml` に直接追加でき `impl Module for Foo` を書ける（サポート対象外と宣言されていても技術的な破壊の影響範囲がゼロとは言い切れない）。(ii) 本イシューの契約（§1.1）が「`nn::Module` 実装本体の変更と required method の新規追加はスコープ外」と明記しており、autodiff 側 trait 自体の改修は #2132 のスコープ外である。(iii) 案 B は autodiff 側 trait を一切変更せずに REQ-12 を満たせるため、autodiff 側改修の当否そのものを判断する必要がない——この「変更不要で目的を達成できる」という関係が本 doc の推奨の実質的な決め手であり、破壊的変更が「不可能」だからではない
 - 内部型を返す defaulted フック（`as_linear` 等）は、`fandhe-ai-autodiff` の `Module` trait 自体としては open trait のままであり、外部実装者が型システム上オーバーライドすることを妨げない（型システムで強制される禁止契約ではない）。ただし戻り値の内部型（`Linear` 等）は外部クレートから構築できないため、外部実装者が意味のある値を返すオーバーライドを書くことは実用上できない。本 doc がこれらのフックを facade trait 側へ持ち込まない根拠は、autodiff 側へ新たな禁止契約を課すことではなく、あくまで REQ-12（`BackendOps`・生 `Tape`・内部型の facade 非露出）適合のみである（§5 案 B）
 
-(c) `fandhe-ai-autodiff 0.9.0` 自体も crates.io 公開済みのため、autodiff 側 `Module` trait のシグネチャ変更（例: `forward` の tape 引数差し替え）は選択肢から除外する。
+(c) autodiff 側 `Module` trait のシグネチャ変更（例: `forward` の tape 引数を facade 互換の型へ差し替える）は §5 の案 E として比較したうえで、(b) に述べた実質的な理由——本イシューのスコープ契約（§1.1）が autodiff 側 trait 本体の変更を対象外としていること、および案 B が同変更なしで目的を達成できること——により選択肢から除外する。「crates.io 公開済みだから一律不可」という理由づけはしない（内部クレートの破壊的変更自体は `docs/compat-api-scope.md` §0 の境界の下で先例があり禁止されていない）。autodiff 側 trait 改修の当否そのものは本 doc のスコープ外の判断であり、必要になれば改めて別イシューでユーザー承認を得て検討する。
 
 ## 5. 公開形の案比較
 
@@ -101,6 +101,7 @@ PyTorch の `nn.Module` サブクラス相当（ユーザー定義層）を faca
 | **B: facade 側 trait ＋ facade 側コンテナ**（推奨） | `fandhe_ai::nn::Module { fn forward<'t>(&self, tape: &'t fandhe_ai::Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError>; }` を required とし、`named_parameters`／`set_parameter`／`state_dict`／`load_state_dict`／`set_training`／`training` を autodiff 側と同一意味論・同一命名の defaulted メソッドとして持つ薄い trait。`forward_host`・`as_*`・`as_relu`・`is_pooling` は載せない。`fandhe_ai::nn::{ModuleList, Sequential}` は `Box<dyn fandhe_ai::nn::Module>` を保持する facade 側の薄いコンテナ | (1) 成立（facade `Tape::var` と `Var` 演算だけで独自層を書ける）。(2)(3) 適合（内部型非露出）。(4) 適合（facade への追加のみ）。(5)(6)(7) は §6 で詳述 → **推奨候補** |
 | **C: 案 A ＋ 生 `Tape` の再エクスポート／型エイリアス** | `pub type Tape = fandhe_ai_autodiff::Tape;` 等 | `Tape::new_with_ops` 等が到達可能になり REQ-12 違反・`facade_does_not_reexport_tape_or_backend_ops` 否定ガードと衝突 → **不採用** |
 | **D: 段階 0 継続** | 非公開のまま | 親 #2131 の目的（ユーザー定義層）が未達のまま。比較基準線として記載 |
+| **E: autodiff 側 `Module::forward` のシグネチャを facade 互換型へ改修** | `fandhe_ai_autodiff::nn::Module::forward` の `tape: &'t Tape` 引数を facade からも構築できる型（例: 抽象化した trait 境界・facade 側 newtype を autodiff が受け取れる形への逆依存）へ差し替え、`pub use` する | (1) 成立しうる（facade はそのまま素の再エクスポートで目的を達成できる可能性がある）。(2)(3) は改修内容次第。(4) は required シグネチャ変更のため semver 破壊的変更——ただし `docs/compat-api-scope.md` §0 の内部クレート境界の下で `Tape::new()` 破壊の先例（`docs/public-api-design.md:585`）があり「crates.io 公開済みだから一律不可」ではない。(7) 不要。**不採用の実質的理由**: (i) 本イシューの契約（§1.1）が `nn::Module` 実装本体の変更をスコープ外と明記しており、本 doc の決定範囲を超える。(ii) `autodiff` は `facade` に依存できない（依存方向の逆転は crate 分割の前提に反する）ため、facade 側の型を autodiff 側 trait のシグネチャへ直接持ち込むことはできず、実現には autodiff 側に facade 非依存の抽象境界（trait／ハンドル型）を新設する追加設計が要る。(iii) 案 B はこの改修なしで同じ目的を達成できるため、コスト・スコープ・影響範囲（autodiff 直接利用者・他の内部クレート呼び出し箇所すべて）の観点で劣後する → **不採用（内部抽象改修コストが見合わないため。「不可能」ではなく「案 B より高コストでスコープ外」）** |
 
 ## 6. 推奨案（案 B）の詳細
 
