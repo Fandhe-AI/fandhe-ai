@@ -117,7 +117,7 @@
 
 ## 9. 引き継ぎ（起票草案。本 issue では起票しない・すべてユーザー承認待ち）
 
-- **K-1「feat(autodiff): MultiheadAttention の KV キャッシュ付き forward（最小版）」** — 前提: `docs/compat-api-scope.md` §5 経路 2 承認。内容: `KvCache` 値型（host `Tensor<f32>` 保持 or detached `Var` 保持）・decode 用 `forward_with_cache` 相当 API・§2.1 の causal 意味論の落とし穴を吸収（decode では `is_causal=false` を強制）・全系列再計算との一致テスト（CPU bit 一致／GPU REQ-2 判定を事前登録）・新規 `Op`／`BackendOps`／依存なし・`nn/attention.rs::sdpa_compose` の複製（§2.1）を `crate::attention::scaled_dot_product_attention` 呼び出しへ置き換える前提整理を含む
+- **K-1「feat(autodiff): MultiheadAttention の KV キャッシュ付き forward（最小版）」** — 前提: `docs/compat-api-scope.md` §5 経路 2 承認。内容: `KvCache` 値型（host `Tensor<f32>` 保持 or detached `Var` 保持）・decode 用 `forward_with_cache` 相当 API・§2.1 の causal 意味論の落とし穴を吸収（decode では `is_causal=false` を強制）・全系列再計算との一致テスト（CPU bit 一致／GPU REQ-2 判定を事前登録）・新規 `Op`／`BackendOps`／依存なし・`nn/attention.rs::sdpa_compose` の複製（§2.1）を `crate::attention::scaled_dot_product_attention` 呼び出しへ置き換える前提整理を含む。**設計は `docs/kv-cache-design.md`（#2083）で確定済み**（ホスト `Tensor<f32>` 保持を採用・デバイス常駐は K-3 へ切り分け）。承認状態は同 doc §6 を正とする
 - **K-2「feat(facade): KV キャッシュの facade 到達経路と生成ループ例（greedy／top-k）」** — 前提: K-1。facade 公開面拡張の承認事項を明記
 - **K-3（将来候補・段階 0）「perf: デバイス常駐 KV キャッシュ」** — 事前登録判定規則が前提。B-3（forward capture）の `d_input`／loss 常駐化ゲート充足後に再評価
 - **G-1「feat(backend): GPU `run_fused` の elementwise allowlist 実装（区分 B-1）」** — `docs/autodiff-graph-optimization-scope-decision.md` §8 の草案を継承し、事前登録判定規則・§10 承認事項 (2)(4) を付記
@@ -125,7 +125,7 @@
 
 ## 10. 承認事項（実装着手の前提。本 issue 時点ではいずれも未取得）
 
-1. KV キャッシュの実装着手（`docs/compat-api-scope.md` §5 経路 2。K-1 起票の可否）
+1. KV キャッシュの実装着手（`docs/compat-api-scope.md` §5 経路 2。K-1 起票の可否。設計自体は `docs/kv-cache-design.md`〈#2083〉で確定済みだが本項目の承認は別途必要）
 2. KV キャッシュの facade 公開面拡張（K-2 起票の可否）
 3. B-1（GPU `run_fused` elementwise allowlist）の実装着手・`BackendOps` 拡張（`docs/autodiff-graph-optimization-scope-decision.md` §10 (2)(4) と同一の承認事項）
 4. トークナイザを「引き続き対象外」へ明記する spec 提案の実起票（経路 1）
