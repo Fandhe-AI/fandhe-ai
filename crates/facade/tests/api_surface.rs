@@ -3779,6 +3779,7 @@ fn model_types_are_reachable_via_facade() {
             fandhe_ai::model::ModelError::CacheDirUnavailable => "cache_dir_unavailable",
             fandhe_ai::model::ModelError::InvalidComponent { .. } => "invalid_component",
             fandhe_ai::model::ModelError::NotFound { .. } => "not_found",
+            fandhe_ai::model::ModelError::TooLarge { .. } => "too_large",
             fandhe_ai::model::ModelError::Load(_) => "load",
             fandhe_ai::model::ModelError::Io(_) => "io",
             _ => "unknown",

@@ -12,7 +12,10 @@
 //!
 //! ```text
 //! <cache_dir>/                      既定 $HOME/.fandhe-ai/models
-//!                                    （Windows は $USERPROFILE。
+//!                                    （Windows のキャッシュルート解決は
+//!                                    $USERPROFILE。ただし `load`／
+//!                                    `available_models` は Windows で
+//!                                    fail-closed 非対応。
 //!                                    [`ModelRegistry::new`] 参照）
 //!   <name>/                         `[A-Za-z0-9._-]+`（先頭 '.' 不可）
 //!     <version>/                    同上。semver 等の記法は解釈しない
@@ -51,7 +54,8 @@
 //! （codex-review 指摘・PR #2226）。`load`・`available_models` は
 //! ともに内部の `resolve_model_file` を経由し、次の多層防御で
 //! シンボリックリンク経由の脱出・検査後の差し替え（TOCTOU）・非通常
-//! ファイル（FIFO・ソケット・デバイス等）の受理をすべて防ぐ（同じく
+//! ファイル（FIFO・ソケット・デバイス等）の受理・上限なしのメモリ
+//! 確保（手順 5〜6）をすべて防ぐ（同じく
 //! codex-review 指摘・PR #2226。当初案は「検査後の open までの TOCTOU
 //! は許容依存 9 区分に無い `libc` 直接依存が要るため対象外」としていた
 //! が、`libc` クレートを追加せずとも `std::os::unix::fs::OpenOptionsExt`
@@ -87,23 +91,55 @@
 //!    inode 番号）は検査時点のものと一致しないため、この不一致で
 //!    確実に検出できる（パスの再解決ではなく実体の同一性で判定するため、
 //!    中間ディレクトリの差し替えも同じ仕組みで捕捉する）。
-//! 5. 以降は同じ [`std::fs::File`] ハンドルからバイト列を読み取り
+//! 5. 開いたハンドルの `fstat` で取得済みのファイルサイズ
+//!    （`std::fs::Metadata::len`）を `MAX_MODEL_FILE_BYTES` と比較し、
+//!    上回る場合は読み取りに入る前に `ModelError::TooLarge` で拒否する
+//!    （`model.safetensors` は非信頼な外部フォーマット入力であり、
+//!    サイズ検証なしに丸ごと `Vec` へ確保するとメモリ枯渇を招く。
+//!    codex-review 指摘・PR #2226・P0。AGENTS.md「外部フォーマットの
+//!    パース検証（P0）」長さ事前検証要件）。
+//! 6. 以降は同じ [`std::fs::File`] ハンドルからバイト列を読み取る
+//!    （パスを使って再度 open し直すと手順 3〜4 で閉じた TOCTOU 窓が
+//!    復活するため、ハンドルの使い回しは必須）。手順 5 の fstat 後に
+//!    ファイルが差し替え・追記されて増大する TOCTOU にも備え、
+//!    `load` 側は `std::io::Read::take` で `MAX_MODEL_FILE_BYTES + 1`
+//!    バイトを上限に読み取り、実際に読めたバイト数が
+//!    `MAX_MODEL_FILE_BYTES` を超えていれば同じく
+//!    `ModelError::TooLarge` で拒否する（許容量ちょうどで打ち切る
+//!    と超過を検出できないため `+ 1` バイト分だけ多く読む）。読み
+//!    取ったバイト列は
 //!    [`load_safetensors_f32_from_bytes`](crate::interop::safetensors::load_safetensors_f32_from_bytes)
-//!    へ渡す（パスを使って再度 open し直すと手順 3〜4 で閉じた TOCTOU
-//!    窓が復活するため、ハンドルの使い回しは必須）。
+//!    へ渡す。
 //!
 //! 対象外として残る経路: レジストリ内に事前配置されたハードリンク
 //! （攻撃者が任意タイミングで作成できるのは同一ファイルシステム上の
 //! 既存ファイルへのリンクのみであり、所有者・権限チェックを伴わない
 //! 本レジストリの脅威モデル外）。
 //!
+//! # Windows 対応状況
+//!
+//! 公開ドキュメントとの整合（codex-review 指摘・PR #2226・P1）。
+//!
+//! [`crate::model::ModelRegistry::new`] のキャッシュルート解決
+//! （`$USERPROFILE` 優先）自体は Windows でも動作するが、
+//! [`crate::model::ModelRegistry::load`]・
+//! [`crate::model::ModelRegistry::available_models`] が経由する `resolve_model_file`
+//! の葉オープン（`open_leaf_no_follow`）は Linux／macOS 限定実装のため、
+//! Windows では常に失敗する（`load` は必ず `Err`、`available_models`
+//! は常に空の一覧を返す。上記「非信頼入力の扱い」節・
+//! `open_leaf_no_follow` のドキュメント参照）。安全な Windows 実装
+//! （`file_index`／
+//! `volume_serial_number` によるハンドル識別子照合を含む）の追加は
+//! スコープ外として別イシューで追跡する（詳細は
+//! `docs/facade-model-registry-decision.md`）。
+//!
 //! # 対象外
 //!
 //! リモート取得・HF hub 連携（#2088）、`docs/model-distribution-
 //! design.md` の作成（親 #2082 の成果物）、version 記法の解釈
 //! （semver・hash 等）・最新版解決、`compat::Sequential` への直結
-//! ラッパー（`Sequential::from_registry` 等）、非 F32 dtype、ファイル
-//! サイズ上限・改竄検知（値の決定にはユーザー承認が要るため）。
+//! ラッパー（`Sequential::from_registry` 等）、非 F32 dtype、改竄検知、
+//! Windows 向け安全な no-follow オープン実装。
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -117,6 +153,18 @@ use crate::interop::safetensors::{LoadError, load_safetensors_f32_from_bytes};
 
 /// レイアウト規定上のファイル名（モジュール doc 参照）。
 const MODEL_FILE_NAME: &str = "model.safetensors";
+
+/// `model.safetensors` を読み込む際のファイルサイズ上限（バイト数）。
+/// 8 GiB。`model.safetensors` は非信頼な外部フォーマット入力であり、
+/// 上限なしに `read_to_end` で丸ごと `Vec` へ確保するとメモリ枯渇を
+/// 招く（codex-review 指摘・PR #2226・P0）。この値は本レジストリが
+/// 対象とする F32 のみの `compat::Sequential` 向けローカル重み
+/// （数百 MB〜数 GB 級を想定）に対して十分な余裕を持たせつつ、
+/// 攻撃者が用意した巨大ファイルによる無制限確保を防ぐための固定
+/// 安全域として選定した（`docs/facade-model-registry-decision.md`
+/// 参照）。将来より大きなモデルを扱う必要が生じた場合の値の見直しは
+/// 別途ユーザー承認を経る。
+const MAX_MODEL_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// `open_leaf_no_follow` が付与する生の `open(2)` flag 値（Linux／macOS
 /// のみ。許容依存 9 区分に `libc` が無いため、カーネル UAPI ヘッダ
@@ -200,6 +248,17 @@ pub enum ModelError {
     /// `<cache_dir>/<name>/<version>/model.safetensors` が通常ファイル
     /// として存在しない。
     NotFound { name: String, version: String },
+    /// `model.safetensors` のファイルサイズが固定上限（内部定数
+    /// `MAX_MODEL_FILE_BYTES`）を超過している（メモリ枯渇対策。
+    /// モジュール doc「非信頼入力の扱い」節手順 5〜6 参照）。`len` は
+    /// 検出時点で判明していた実際のバイト数（`fstat` 実測値、または
+    /// TOCTOU 検出時は `max + 1` 超）、`max` はその固定上限値。
+    TooLarge {
+        name: String,
+        version: String,
+        len: u64,
+        max: u64,
+    },
     /// safetensors デコード失敗（`crate::interop::safetensors::LoadError`
     /// を連鎖。ヘッダ不整合・未対応 dtype・shape 不整合等）。
     Load(LoadError),
@@ -225,6 +284,15 @@ impl fmt::Display for ModelError {
                     "モデルが見つかりません（name={name}・version={version}）"
                 )
             }
+            ModelError::TooLarge {
+                name,
+                version,
+                len,
+                max,
+            } => write!(
+                f,
+                "モデルファイルが上限を超えています（name={name}・version={version}・{len} バイト > 上限 {max} バイト）"
+            ),
             ModelError::Load(e) => write!(f, "モデルのロードに失敗しました: {e}"),
             ModelError::Io(e) => write!(f, "モデルレジストリの I/O に失敗しました: {e}"),
         }
@@ -257,6 +325,23 @@ fn validate_component(kind: &'static str, value: &str) -> Result<(), ModelError>
             kind,
             value: value.to_string(),
         })
+    }
+}
+
+/// `len` が `max` を超えていないか検査する純関数（環境非依存の単体
+/// テストを可能にするため `resolve_model_file`・[`ModelRegistry::load`]
+/// 双方の判定ロジックを切り出した。モジュール doc「非信頼入力の扱い」
+/// 節手順 5〜6・[`MAX_MODEL_FILE_BYTES`] 参照）。
+fn enforce_size_limit(name: &str, version: &str, len: u64, max: u64) -> Result<(), ModelError> {
+    if len > max {
+        Err(ModelError::TooLarge {
+            name: name.to_string(),
+            version: version.to_string(),
+            len,
+            max,
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -323,6 +408,12 @@ impl ModelRegistry {
     /// [`ModelRegistry`] を構築する。ディレクトリは作成しない
     /// （読み取り専用のレジストリ）。`HOME`／`USERPROFILE` のいずれも
     /// 未設定な場合は [`ModelError::CacheDirUnavailable`] を返す。
+    ///
+    /// **Windows での対応状況**: 本関数によるキャッシュルート解決
+    /// 自体は Windows でも動作するが、[`load`](Self::load)・
+    /// [`available_models`](Self::available_models) は Windows では
+    /// 常に失敗（もしくは空の一覧）を返す fail-closed 非対応である
+    /// （モジュール doc「Windows 対応状況」節参照）。
     pub fn new() -> Result<Self, ModelError> {
         let home = std::env::var_os("HOME");
         let userprofile = std::env::var_os("USERPROFILE");
@@ -441,6 +532,14 @@ impl ModelRegistry {
             }
         }
 
+        // ファイルサイズ上限検査（モジュール doc「非信頼入力の扱い」節
+        // 手順 5。メモリ枯渇対策・codex-review 指摘・PR #2226・P0）。
+        // 開いたハンドルの fstat 実測値で判定するため、手順 1〜4 の
+        // 検査対象と同一の実体（TOCTOU 対策で確認済み）のサイズを見る。
+        // ここを通過しても手順 6（`load` 側の `take` 二段構え）が
+        // fstat 後の追記・差し替えによる増大を別途検出する。
+        enforce_size_limit(name, version, open_meta.len(), MAX_MODEL_FILE_BYTES)?;
+
         Ok(file)
     }
 
@@ -466,8 +565,29 @@ impl ModelRegistry {
         version: &str,
     ) -> Result<HashMap<String, Tensor<f32>>, ModelError> {
         let mut file = self.resolve_model_file(name, version)?;
+        // `resolve_model_file` の fstat 時点では `MAX_MODEL_FILE_BYTES`
+        // 以内であることを確認済みだが、その後ファイルが差し替え・
+        // 追記されて増大する TOCTOU に備え、読み取り自体も
+        // `MAX_MODEL_FILE_BYTES + 1` バイトで打ち切る（モジュール doc
+        // 「非信頼入力の扱い」節手順 6。ちょうど上限バイト数で打ち切る
+        // と超過を検出できないため `+ 1` 分だけ多く読む）。
+        let limit = MAX_MODEL_FILE_BYTES.saturating_add(1);
+        // 事前確保サイズは実測ファイルサイズ（`limit` 未満なら実測値、
+        // 以上なら `limit`）を使う。`limit`（8 GiB + 1）を毎回丸ごと
+        // 事前確保すると小さい正規ファイルの読み込みでも無駄に大きな
+        // 割り当てが発生するため、実測値を優先しつつ `try_reserve` で
+        // 割り当て失敗を panic ではなく型付きエラーへ変換する。
+        let observed_len = file.metadata().map_err(ModelError::Io)?.len();
+        let capacity_hint = usize::try_from(observed_len.min(limit)).unwrap_or(usize::MAX);
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(ModelError::Io)?;
+        bytes
+            .try_reserve(capacity_hint)
+            .map_err(|e| ModelError::Io(std::io::Error::other(e)))?;
+        file.by_ref()
+            .take(limit)
+            .read_to_end(&mut bytes)
+            .map_err(ModelError::Io)?;
+        enforce_size_limit(name, version, bytes.len() as u64, MAX_MODEL_FILE_BYTES)?;
         load_safetensors_f32_from_bytes(&bytes).map_err(ModelError::Load)
     }
 
@@ -540,6 +660,39 @@ impl ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enforce_size_limit_accepts_within_bound() {
+        assert!(enforce_size_limit("mlp", "v1", 0, 100).is_ok());
+        assert!(enforce_size_limit("mlp", "v1", 100, 100).is_ok());
+    }
+
+    #[test]
+    fn enforce_size_limit_rejects_over_bound() {
+        let err = enforce_size_limit("mlp", "v1", 101, 100).unwrap_err();
+        match err {
+            ModelError::TooLarge {
+                name,
+                version,
+                len,
+                max,
+            } => {
+                assert_eq!(name, "mlp");
+                assert_eq!(version, "v1");
+                assert_eq!(len, 101);
+                assert_eq!(max, 100);
+            }
+            other => panic!("ModelError::TooLarge を期待したが {other:?} だった"),
+        }
+    }
+
+    #[test]
+    fn too_large_error_display_includes_sizes() {
+        let err = enforce_size_limit("mlp", "v1", 101, 100).unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("101"), "rendered={rendered:?}");
+        assert!(rendered.contains("100"), "rendered={rendered:?}");
+    }
 
     #[test]
     fn validate_component_accepts_ascii_allowlist() {

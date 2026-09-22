@@ -126,3 +126,30 @@ facade 新規公開面 7 件（`crates/facade/src/model.rs`。`crates/facade/tes
 **対象外として残る経路（不変）**: レジストリ内に事前配置されたハードリンク（攻撃者が任意タイミングで作成できるのは同一ファイルシステム上の既存ファイルへのリンクのみであり、所有者・権限チェックを伴わない本レジストリの脅威モデル外）。
 
 固定テストは §12 記載分に加え、`crates/facade/tests/model_registry.rs` の `load_rejects_non_regular_leaf_unix_socket`・`load_rejects_leaf_replaced_with_symlink_after_initial_write`（Unix ソケットの葉拒否・差し替え後の葉拒否。いずれも `#[cfg(unix)]`）、および `crates/facade/src/model.rs` の単体テスト（`non_empty_os_string_*`・`select_home_var_none_when_both_empty_strings`・`select_home_var_falls_back_when_preferred_is_empty_string`。空文字列 HOME／USERPROFILE の扱い。Cursor Bugbot 指摘・PR #2226）を追加した。
+
+## 14. 公開説明と Windows 非対応実態の整合（2026-09-22 追記・PR #2226 codex-review 指摘・P1）
+
+§13 で Windows の `load`／`available_models` を fail-closed 拒否へ是正したが、公開説明（`site/guides/interop.md` の「ローカルモデルレジストリ」節）と crate doc（`crates/facade/src/model.rs` のモジュール doc・`ModelRegistry::new` doc）が依然「Windows は `$USERPROFILE`」とだけ記載し、`load`／`available_models` が常に失敗する実態に触れていなかった（codex-review 指摘・PR #2226・P1）。
+
+**是正内容**: `ModelRegistry::new`（キャッシュルート解決）は Windows でも動作するが、`load`・`available_models` は現時点で fail-closed 非対応であることを明記する形へ、次の 3 箇所を更新した。
+
+1. `crates/facade/src/model.rs` モジュール doc: レイアウト規定ブロックの Windows 注記に「`load`／`available_models` は fail-closed 非対応」を追記し、独立した「Windows 対応状況」節を新設して §13 の帰結（`load` は常に `Err`、`available_models` は常に空の一覧）を crate doc 側にも明記した。
+2. `ModelRegistry::new` のドキュメンテーションコメント: 「本関数によるキャッシュルート解決自体は Windows でも動作するが、`load`・`available_models` は fail-closed 非対応」という注記を追加した。
+3. `site/guides/interop.md`「ローカルモデルレジストリ」節: 同内容の注記を追加した。
+
+安全な Windows 実装（`file_index`／`volume_serial_number` によるハンドル識別子照合を含む）の追加は引き続きスコープ外（§13 に同じ）。
+
+## 15. `model.safetensors` のファイルサイズ上限導入（2026-09-22 追記・PR #2226 codex-review 指摘・P0）
+
+`load` は `resolve_model_file` が開いた `File` ハンドルから `read_to_end` で全バイトを無条件に `Vec` へ確保していた。`model.safetensors` は非信頼な外部フォーマット入力（利用者が手動配置するが、共有キャッシュディレクトリ経由で他プロセス・他ユーザーが書き込める場合もある）であり、サイズ検証なしの無制限確保は巨大ファイルによるメモリ枯渇（OWASP A03。AGENTS.md「外部フォーマットのパース検証（P0）」長さ事前検証要件）を招く（codex-review 指摘・PR #2226・P0）。
+
+**対策**: `crates/facade/src/model.rs` に固定サイズ上限 `MAX_MODEL_FILE_BYTES`（8 GiB）を導入し、二段構えで検証する。
+
+1. `resolve_model_file` の手順 4（fstat によるハンドル識別子照合）の直後に `open_meta.len()` を `MAX_MODEL_FILE_BYTES` と比較し、上回れば読み取りへ進む前に `ModelError::TooLarge` で拒否する。
+2. `load` 側は fstat 完了後にファイルが差し替え・追記されて増大する TOCTOU にも備え、`std::io::Read::take(MAX_MODEL_FILE_BYTES + 1)` で読み取り自体を上限バイト数超で打ち切り、実際に読めたバイト数が上限を超えていれば同じく `ModelError::TooLarge` で拒否する（ちょうど上限バイト数で打ち切ると超過を検出できないため `+ 1` バイト分だけ多く読む）。事前確保サイズは実測ファイルサイズ（上限未満なら実測値）を用い、`Vec::try_reserve` で割り当て失敗を panic ではなく型付きエラーへ変換する。
+
+両検証は private 純関数 `enforce_size_limit(name, version, len, max) -> Result<(), ModelError>` に集約し、`crates/facade/src/model.rs` の単体テストで境界値（`len == max` は許可・`len == max + 1` は拒否）・`Display` 出力・定数の非退化を検証する（8 GiB 実ファイルの生成は非現実的なため、統合テストではなく上記純関数の単体テストで検証する）。
+
+**8 GiB を選定した理由**: 本レジストリが対象とする F32 のみの `compat::Sequential` 向けローカル重み（数百 MB〜数 GB 級を想定）に対して十分な余裕を持たせつつ、攻撃者が用意した巨大ファイルによる無制限確保を防ぐための固定安全域として選定した。`crates/facade/src/interop/safetensors.rs`・`onnx.rs` はより汎用的な入口（他の呼び出し元からも使われる）のため上限値の決定を「値の決定にはユーザー承認が要る」としてスコープ外のまま維持しているが、本モジュールの `load` は単一の読み取り専用ローカルレジストリ入口に閉じており、固定の安全域値を導入すること自体は AGENTS.md の長さ事前検証要件を満たすための実装判断であり、依存追加・ガードレール閾値・テスト許容誤差の変更（`.claude/rules/*.md` のユーザー承認必須事項）のいずれにも該当しない。より大きなモデルを扱う必要が生じた場合の値の見直しは別途ユーザー承認を経る。
+
+`ModelError` は `#[non_exhaustive]` のため `TooLarge { name, version, len, max }` variant の追加は非破壊。`crates/facade/tests/api_surface.rs::model_types_are_reachable_via_facade` の `match` にも明示 arm を追加した。
