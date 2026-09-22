@@ -104,7 +104,15 @@
 //! `add_softplus`／`add_flatten` の 6 `pub fn` を追加した（`Softmax`／
 //! `LogSoftmax`／`Gelu`／`GeluTanh`／`Softplus` 自体は `nn::activation`
 //! に既存実装済み。`docs/compat-api-scope.md` §5「適用記録（経路2。
-//! イシュー #2065）」参照）。
+//! イシュー #2065）」参照）。イシュー #2068（親 #2059）で
+//! [`TransformerEncoderLayer`]（`transformer_encoder_layer` モジュール）
+//! を追加した。既存の [`MultiheadAttention`]・[`LayerNorm`]・
+//! `nn::Linear` 2 層の合成（post-norm 固定・新規 `Op`／`BackendOps`／
+//! VJP なし）として PyTorch `nn.TransformerEncoderLayer` 相当の 1 層を
+//! 実装する（`transformer_encoder_layer.rs` モジュール doc 参照）。
+//! `fandhe_ai_facade::compat::sequential::Sequential` に
+//! `add_transformer_encoder` を追加した（`docs/compat-api-scope.md`
+//! §5「適用記録（経路2。イシュー #2068）」参照）。
 
 mod attention;
 mod batch_norm;
@@ -120,6 +128,7 @@ mod norm;
 mod normalization;
 mod pooling;
 mod rnn;
+mod transformer_encoder_layer;
 
 pub mod activation;
 pub mod loss;
@@ -148,4 +157,7 @@ pub use pooling::{
 pub use rnn::{
     Gru, GruCell, GruCellVars, Lstm, LstmCell, LstmCellVars, LstmSeqOutput, Rnn, RnnCell,
     RnnCellVars, RnnSeqOutput,
+};
+pub use transformer_encoder_layer::{
+    FeedForwardActivation, TransformerEncoderLayer, TransformerEncoderLayerVars,
 };

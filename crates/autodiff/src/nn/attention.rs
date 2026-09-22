@@ -513,9 +513,9 @@ impl<'t> MultiheadAttentionVars<'t> {
         // `dh` は常に 1 以上の整数（0 除算・`1/sqrt(0)` は生じない）。
         let dh = e / h;
 
-        let q_proj = project(query, &self.q, b, l, e)?;
-        let k_proj = project(key, &self.k, b, s, e)?;
-        let v_proj = project(value, &self.v, b, s, e)?;
+        let q_proj = project(query, &self.q, b, l, e, e)?;
+        let k_proj = project(key, &self.k, b, s, e, e)?;
+        let v_proj = project(value, &self.v, b, s, e, e)?;
 
         let q_heads = split_heads(&q_proj, b, l, h, dh)?;
         let k_heads = split_heads(&k_proj, b, s, h, dh)?;
@@ -532,7 +532,7 @@ impl<'t> MultiheadAttentionVars<'t> {
             .contiguous()?
             .reshape(&[b, l, e])?;
 
-        project(&merged, &self.out, b, l, e)
+        project(&merged, &self.out, b, l, e, e)
     }
 }
 
@@ -547,27 +547,46 @@ impl<'t> MultiheadAttentionVars<'t> {
 /// （実装計画 D5。`Var::value()`／`is_contiguous()` を直接見て分岐する
 /// より、reshape 自体の結果で判定する方が `RefCell` 借用の取り回しが
 /// 単純かつ確実に安全）。
-fn project<'t>(
+///
+/// `pub(crate)` である理由（イシュー #2068）: `LinearVars::forward` は
+/// rank 2 入力を要求する（`gemm_out_shape` の厳密検査）ため、
+/// rank 3（`[B, Len, E]`）を扱う `nn` 層は同じ「flatten → forward →
+/// unflatten」パターンを必要とする。`nn::transformer_encoder_layer`
+/// の FFN 部分（`linear1`／`linear2`）が本関数を再利用する
+/// （重複実装しない。`code-comment-style.md`「何を書かないか」）。
+///
+/// `in_features`／`out_features` を分離した理由（イシュー #2068）:
+/// 本モジュール（`MultiheadAttention`）の呼び出し元は q/k/v/out の
+/// 4 層すべてが正方 `[E, E]`（`validate_embed_heads` が構築時に検証
+/// 済み）のため `in_features == out_features == e` で不変だが、
+/// `nn::transformer_encoder_layer` の FFN 第 1 層（`d_model ->
+/// dim_feedforward`）／第 2 層（`dim_feedforward -> d_model`）は非正方
+/// のため、入力側の reshape（`in_features`）と出力側の reshape
+/// （`out_features`）を独立に指定できる必要がある（単一の `e` を両方に
+/// 使うと非正方 `proj` で `y.reshape(&[b, len, e])` が要素数不一致に
+/// なる）。
+pub(crate) fn project<'t>(
     x: &Var<'t>,
     proj: &LinearVars<'t>,
     b: usize,
     len: usize,
-    e: usize,
+    in_features: usize,
+    out_features: usize,
 ) -> Result<Var<'t>, AutodiffError> {
     let bl = b.checked_mul(len).ok_or_else(|| {
         AutodiffError::InvalidArgument(format!(
             "MultiheadAttention: batch({b}) * seq_len({len}) overflowed usize"
         ))
     })?;
-    let x_flat = match x.reshape(&[bl, e]) {
+    let x_flat = match x.reshape(&[bl, in_features]) {
         Ok(flat) => flat,
         Err(AutodiffError::Shape(ShapeError::NonContiguousReshape)) => {
-            x.contiguous()?.reshape(&[bl, e])?
+            x.contiguous()?.reshape(&[bl, in_features])?
         }
         Err(other) => return Err(other),
     };
     let y = proj.forward(&x_flat)?;
-    y.reshape(&[b, len, e])
+    y.reshape(&[b, len, out_features])
 }
 
 /// head 分割: `[B, Len, E] -> reshape -> [B, Len, H, Dh] -> permute ->

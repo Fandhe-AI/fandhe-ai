@@ -109,8 +109,9 @@ use fandhe_ai_autodiff::nn::activation::{
 use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AvgPool1d, AvgPool2d, BatchNorm1d, BatchNorm2d,
     BatchNormVars, Conv1d, Conv1dVars, Conv2d, Conv2dVars, Dropout, Embedding, EmbeddingVars,
-    Flatten, LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module, MultiheadAttention,
-    MultiheadAttentionVars, RmsNorm, RmsNormVars, Sequential as NnSequential,
+    FeedForwardActivation, Flatten, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear,
+    MaxPool1d, MaxPool2d, Module, MultiheadAttention, MultiheadAttentionVars, RmsNorm, RmsNormVars,
+    Sequential as NnSequential, TransformerEncoderLayer, TransformerEncoderLayerVars,
     linear_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
@@ -475,6 +476,37 @@ impl Sequential {
         Ok(self)
     }
 
+    /// TransformerEncoderLayer 層を追加する
+    /// （`nn::TransformerEncoderLayer`。イシュー #2068・親 #2059）。
+    /// self-attention（`q = k = v = current`・mask なし・非 causal）→
+    /// residual → LayerNorm → FFN（`relu` 活性化固定）→ residual →
+    /// LayerNorm の post-norm 合成（PyTorch `nn.TransformerEncoderLayer`
+    /// の既定 `norm_first=False`・`activation="relu"` と揃える）。
+    /// Dropout は結線しない（PyTorch 既定 `dropout=0.1` を省略。
+    /// `nn/transformer_encoder_layer.rs` モジュール doc「対象外」参照）。
+    /// `eps` は `nn::LAYER_NORM_DEFAULT_EPS`（PyTorch `nn.LayerNorm`
+    /// 既定）固定。bias あり既定（`add_multihead_attention` と同様）。
+    /// `d_model % num_heads != 0`・`dim_feedforward == 0` は
+    /// `TransformerEncoderLayer::new` が拒否する。
+    pub fn add_transformer_encoder(
+        mut self,
+        d_model: usize,
+        num_heads: usize,
+        dim_feedforward: usize,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let layer = TransformerEncoderLayer::new(
+            d_model,
+            num_heads,
+            dim_feedforward,
+            FeedForwardActivation::Relu,
+            LAYER_NORM_DEFAULT_EPS,
+            seed,
+        )?;
+        self.inner.push(Box::new(layer));
+        Ok(self)
+    }
+
     /// 2 次元 MaxPool 層を追加する（`nn::MaxPool2d`。イシュー #1957・
     /// 親 #1618。2026-09-17 ユーザー承認〈選択肢 A・6 メソッド一括
     /// 追加〉）。`ceil_mode=false` 固定（`MaxPool2d::new` doc 参照）。
@@ -815,6 +847,13 @@ impl Sequential {
             .filter_map(|layer| layer.as_multihead_attention())
             .map(|mha| mha.bind(&tape.0))
             .collect();
+        let encoders = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_transformer_encoder_layer())
+            .map(|enc| enc.bind(&tape.0))
+            .collect();
         SequentialVars {
             model: self,
             linears,
@@ -825,6 +864,7 @@ impl Sequential {
             batch_norms,
             embeddings,
             mhas,
+            encoders,
         }
     }
 
@@ -891,6 +931,7 @@ impl Sequential {
                 || layer.as_batch_norm2d().is_some()
                 || layer.as_embedding().is_some()
                 || layer.as_multihead_attention().is_some()
+                || layer.as_transformer_encoder_layer().is_some()
                 || layer.is_pooling()
         })
     }
@@ -1593,6 +1634,11 @@ pub struct SequentialVars<'m, 't> {
     batch_norms: Vec<BatchNormVars<'t, 'm>>,
     embeddings: Vec<EmbeddingVars<'t>>,
     mhas: Vec<MultiheadAttentionVars<'t>>,
+    /// `TransformerEncoderLayer` 層（イシュー #2068）を層順で収集する。
+    /// `TransformerEncoderLayerVars<'t>` は `mhas` 同様 `Var<'t>` のみを
+    /// 保持し `'m` を借用しない（`nn::transformer_encoder_layer::
+    /// TransformerEncoderLayerVars` の定義参照）。
+    encoders: Vec<TransformerEncoderLayerVars<'t>>,
 }
 
 impl<'m, 't> SequentialVars<'m, 't> {
@@ -1671,6 +1717,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut batch_norms = self.batch_norms.iter();
         let mut embeddings = self.embeddings.iter();
         let mut mhas = self.mhas.iter();
+        let mut encoders = self.encoders.iter();
         let layers = self.model.inner.layers();
         let mut i = 0;
         while i < layers.len() {
@@ -1784,6 +1831,20 @@ impl<'m, 't> SequentialVars<'m, 't> {
                     )
                 })?;
                 current = vars.forward(&current, &current, &current, None, false)?;
+                i += 1;
+            } else if layer.as_transformer_encoder_layer().is_some() {
+                // self-attention 固定（mask なし・非 causal。
+                // `nn/transformer_encoder_layer.rs` モジュール doc・
+                // `Sequential::add_transformer_encoder` doc 参照）。
+                let vars = encoders.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み TransformerEncoderLayerVars が \
+                         model.layers の TransformerEncoderLayer 層数より少ない（bind/forward \
+                         間の TransformerEncoderLayer 層数対応が崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current, None, false)?;
                 i += 1;
             } else {
                 // 活性化層は `nn::Module::forward` へ委譲する（`&fandhe_ai_autodiff::Tape`

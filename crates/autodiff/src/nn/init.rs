@@ -166,6 +166,21 @@ pub(crate) const ATTN_K_SEED_SALT: u64 = 5;
 pub(crate) const ATTN_V_SEED_SALT: u64 = 6;
 pub(crate) const ATTN_OUT_SEED_SALT: u64 = 7;
 
+/// `nn::transformer_encoder_layer`（イシュー #2068）が単一の呼び出し
+/// シードから self-attention・FFN 第 1 層・FFN 第 2 層の 3 系統を独立に
+/// 導出するためのソルト。既存の `WEIGHT_SEED_SALT`〜`ATTN_OUT_SEED_SALT`
+/// （0..=7）と衝突しない値（8..=10）を割り当てる。`ENC_ATTN_SEED_SALT`
+/// で導出したシードは `MultiheadAttention::new` へさらに渡され、
+/// そちら側で `ATTN_Q_SEED_SALT`〜`ATTN_OUT_SEED_SALT` を再適用する
+/// （`ATTN_Q_SEED_SALT` 等と同じ「2 段の `derive_seed` 合成」構造）。
+pub(crate) const ENC_ATTN_SEED_SALT: u64 = 8;
+/// `nn::transformer_encoder_layer` の FFN 第 1 層（`linear1`）導出用
+/// ソルト（上記参照）。
+pub(crate) const ENC_LINEAR1_SEED_SALT: u64 = 9;
+/// `nn::transformer_encoder_layer` の FFN 第 2 層（`linear2`）導出用
+/// ソルト（上記参照）。
+pub(crate) const ENC_LINEAR2_SEED_SALT: u64 = 10;
+
 pub(crate) fn derive_seed(seed: u64, salt: u64) -> u64 {
     let mut z = seed.wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
