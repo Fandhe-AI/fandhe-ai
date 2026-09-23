@@ -982,6 +982,18 @@ impl Module for MultiheadAttention {
             "MultiheadAttention::set_parameter: no parameter named `{name}`"
         )))
     }
+
+    /// [`Module::children`] の実装（イシュー #2134）。順序・名前は
+    /// [`Self::named_parameters`] の接頭辞契約（`q_proj`→`k_proj`→
+    /// `v_proj`→`out_proj`）と一致させる。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        vec![
+            ("q_proj".to_string(), &self.q_proj as &dyn Module),
+            ("k_proj".to_string(), &self.k_proj as &dyn Module),
+            ("v_proj".to_string(), &self.v_proj as &dyn Module),
+            ("out_proj".to_string(), &self.out_proj as &dyn Module),
+        ]
+    }
 }
 
 #[cfg(test)]

@@ -112,7 +112,19 @@
 //! 実装する（`transformer_encoder_layer.rs` モジュール doc 参照）。
 //! `fandhe_ai_facade::compat::sequential::Sequential` に
 //! `add_transformer_encoder` を追加した（`docs/compat-api-scope.md`
-//! §5「適用記録（経路2。イシュー #2068）」参照）。
+//! §5「適用記録（経路2。イシュー #2068）」参照）。イシュー #2134
+//! （親 #2131）で [`Module`] trait に `children`／`named_modules`／
+//! `parameter_count`／`type_name`（PyTorch `Module.children()`／
+//! `named_modules()`／`sum(p.numel() for p in model.parameters())`
+//! 相当）の defaulted メソッド 4 件を追加し、`ModuleList`・
+//! `Sequential`・`MultiheadAttention`・`TransformerEncoderLayer` に
+//! `children` をオーバーライドした。新規コンテナ [`container::
+//! ModuleDict`]（PyTorch `nn.ModuleDict` 相当）・自由関数
+//! [`container::summary`]（`print(model)` 相当の簡易表示）を
+//! `container` モジュールへ追加した。いずれも数値経路（`Op`／
+//! `BackendOps`／VJP）を追加しない CPU ホスト側の introspection
+//! 機構であり、facade へは再エクスポートしない（`container.rs`
+//! モジュール doc「facade への非公開」節参照）。
 
 mod attention;
 mod batch_norm;
@@ -140,7 +152,7 @@ pub use attention::{
 pub use batch_norm::{
     BATCH_NORM_DEFAULT_EPS, BATCH_NORM_DEFAULT_MOMENTUM, BatchNorm1d, BatchNorm2d, BatchNormVars,
 };
-pub use container::{ModuleList, Sequential};
+pub use container::{ModuleDict, ModuleList, Sequential, summary};
 pub use conv::{
     Conv1d, Conv1dVars, Conv2d, Conv2dVars, ConvTranspose2d, ConvTranspose2dVars,
     conv2d_forward_low_precision,
