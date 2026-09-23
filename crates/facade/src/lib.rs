@@ -1091,28 +1091,61 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
     crate::interop::onnx::metal_onnx_gpu_execution_enabled()
 }
 
-/// `Var::custom`（custom function 抽象。イシュー #2064 §12.5 (b)）の facade
-/// 未公開状態を、`crates/autodiff/tests/architecture_boundaries.rs` の
-/// ソース文字列走査（heuristics）とは独立に、**コンパイラそのもの**で
-/// 固定するための非公開足場（`docs/autodiff-custom-function-decision.md`
-/// 「否定ガードの多層防御」節参照）。
+/// `Tape::custom`（ユーザー定義 forward／backward 抽象。イシュー #2064
+/// §12.5 (b)）が facade の公開面から到達不能であることを、
+/// `crates/autodiff/tests/architecture_boundaries.rs`・`crates/facade/
+/// tests/api_surface.rs` のソース文字列走査（heuristics）とは独立に、
+/// **コンパイラそのもの**で固定するための非公開足場
+/// （`docs/autodiff-custom-function-decision.md` 「否定ガードの多層防御」
+/// 節参照）。
 ///
-/// ソース走査ガードは「facade のソースが `custom`／`add_custom` を
-/// 宣言・再エクスポートしていないか」を字句レベルで検査するため、
-/// 走査ロジック自体の見落とし（trait impl 経由・alias 経由・別名
-/// import 経由等の迂回）に弱い。一方、本モジュールの `compile_fail`
-/// doctest は「facade の**全 `pub mod`（ネスト含む）を glob import した
-/// 状態**で `Var` に `.custom(...)`／`Var::custom(...)`／
-/// `.add_custom(...)` を呼ぼうとするとコンパイルできない（E0599:
-/// メソッド・関連関数が見つからない）」ことを rustc の名前解決に直接
-/// 検証させる。trait impl 経由の公開・型 alias 経由の公開・再エクス
-/// ポート経由の公開のいずれであっても、facade の公開面（`pub mod`。
-/// `nn::rnn`／`interop::onnx`／`interop::safetensors` のようなネストした
-/// パスを含む）を実際に glob import したスコープでメソッドが解決でき
-/// なければ検出できるため、ソース走査より迂回耐性が高い（**本命
-/// ガード**）。ソース走査（`architecture_boundaries.rs`・
-/// `api_surface.rs`）は変更差分の早期発見・保守性向上を目的とした
-/// **多層防御の 1 層**という位置づけに変わる。
+/// # 方針転換の経緯（2026-09。PR #2212 codex-review 指摘）
+///
+/// 旧実装は `custom`／`add_custom` を実際に呼び出す 3 本の
+/// ```` ```compile_fail,E0599 ```` doctest ブロックだった。しかし
+/// **stable rustdoc（実測 rustc 1.98.1）は `compile_fail,EXXXX` の
+/// エラーコードを一切照合しない**（`E0599` を無関係な `E0308` へ書き
+/// 換えても doctest は合格した。実測に基づく事実）。この特性下では、
+/// facade の公開面へ引数付きシグネチャで `custom`／`add_custom` が
+/// 漏れ出しても `.custom()` の呼び出しは「引数の個数が違う」
+/// （E0061）・「モジュールが見つからない」（E0432）・「glob の衝突で
+/// 名前が曖昧」（E0659）等、`E0599` 以外の何らかのエラーで**依然として
+/// コンパイルに失敗する**ため、`compile_fail`（エラーコード不問）は
+/// 空合格してしまい、部分公開を検出できない。
+///
+/// そこで本足場は「失敗するはずの例を用意する」方式から「**成功する
+/// はずの正のプローブを 1 つ用意し、それが実際にコンパイルできること**
+/// を固定する」方式へ転換した。原理: facade の全 `pub mod`（ネスト含む）
+/// を glob import したスコープに、ローカルにのみ存在する
+/// `__FandheHoldProbe` トレイト（`custom`／`add_custom` という名前の
+/// メソッドを持つ）を用意し、`Var`／`Tape`／`compat::Sequential` へ実装
+/// したうえで、各型に対しメソッド形・型パス形の両方で呼び出す。facade
+/// 側にこれと同名の実体（trait 経由の公開・inherent メソッドとしての
+/// 転送メソッド追加のいずれであっても）が漏れ出すと、
+/// - 別の trait が同名メソッドを提供する形の漏れ → 呼び出しが
+///   複数のトレイト実装のどちらを指すか一意に定まらず曖昧になり、
+///   エラーコードに依存せず必ずコンパイルが失敗する
+/// - facade 独自の inherent メソッドとして漏れる形の漏れ（`Tape::custom`
+///   への転送メソッド追加。§12.4「入口」参照）→ inherent メソッドが
+///   優先解決され、戻り値の型がプローブの期待型と一致せず型不一致で
+///   必ずコンパイルが失敗する
+/// のいずれかとなり、**特定のエラーコードに依存せず**部分公開を
+/// fail-closed に検出できる。1 ブロックにまとめても検出できるため、
+/// 旧実装が抱えていた「3 種の禁止呼び出しを独立ブロックへ分割する
+/// 必要性」（部分公開の見逃し防止）はこの転換によって解消された。
+///
+/// **本プローブ単独の既知の限界**: `&Var`（`Var` そのものではなく
+/// その参照型）に対する 2 段目の autoref を経由した trait 実装、および
+/// facade 型が内部型への `Deref` を実装した場合のフィールドアクセス
+/// 経由の到達は、本プローブの呼び出し形（メソッド形・型パス形の
+/// いずれも `Var`／`Tape`／`compat::Sequential` 自体に対する呼び出し）
+/// だけでは拾いきれない可能性がある。この限界は、[`crates/facade/
+/// tests/api_surface.rs::workspace_declares_custom_fn_only_on_tape`]
+/// （workspace 全体を対象に `fn custom`／`fn add_custom` の**定義元**を
+/// インベントリする多層防御）が、facade からの到達可能性とは独立に
+/// 「そもそも `crates/autodiff/src/tape.rs`（`Tape::custom`）以外の
+/// どこにも `custom`／`add_custom` を定義させない」という定義元側の
+/// 制約で補完する。
 ///
 /// glob import する `pub mod` 集合（下記 doctest 内の `use` 一覧）と
 /// 本クレートの実際の `pub mod` 宣言（ネスト含めて `src/` 全体を再帰
@@ -1120,89 +1153,24 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// api_surface.rs::custom_function_hold_doctest_globs_all_pub_modules`
 /// が機械的に固定する（`collect_public_module_paths` が `lib.rs` の
 /// `pub mod` 宣言から解決先ファイルを再帰的にたどり `nn::rnn` 等の
-/// ネストしたパスも含めた集合を得たうえで、`compile_fail` ブロックごとに
-/// `use fandhe_ai::<mod>::*;` の集合と突き合わせる。ブロック数が 3 で
-/// あることも固定する）。加えて `crates/facade/tests/api_surface.
-/// rs::facade_source_declares_no_custom_fn_in_any_context` が、可視性
+/// ネストしたパスも含めた集合を得たうえで doctest 内の `use
+/// fandhe_ai::<mod>::*;` の集合と突き合わせる）。加えて本ブロックの
+/// フェンス・本文が固定文言からドリフトしていないことは同ファイルの
+/// `custom_function_hold_doctest_probe_body_matches_fixed_contract`
+/// が固定する。`crates/facade/tests/api_surface.
+/// rs::facade_source_declares_no_custom_fn_in_any_context` は、可視性
 /// キーワード・宣言文脈（inherent impl・trait impl・trait 定義・自由
 /// 関数のいずれか）を問わず facade 全ソースに `fn custom`／
-/// `fn add_custom` 宣言が存在しないことを固定する（codex-review 指摘・
-/// PR #2212: 旧ドリフト検査は `lib.rs` 直下の `pub mod` しか見ておらず、
-/// 旧否定ガードは `pub fn` 形の宣言しか検査していなかったため、ネスト
-/// した新設モジュールに生える trait 経由の合成入口を見逃していた）。
+/// `fn add_custom` 宣言が存在しないことを固定する（本 doctest 内の
+/// トレイト・関数宣言は `///` コメントの中身のため、コメント除去後の
+/// トークン走査には現れず誤検出しない）。
 ///
-/// (b) がユーザー承認され `Var::custom` を facade から公開する日が
+/// (b) がユーザー承認され `Tape::custom` を facade から公開する日が
 /// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
 /// 対応する否定ガードと同時に外す）。
 ///
-/// # 失敗する例（`compile_fail,E0599`）: 全 `pub mod` glob import 済みの
-/// スコープでも `custom`／`add_custom` は解決できない
-///
-/// 禁止呼び出し 3 種（メソッド形 `.custom(...)`・関連関数形
-/// `Var::custom(...)`・`.add_custom(...)`）は**それぞれ独立した**
-/// `compile_fail` ブロックで検証する。rustdoc はブロック全体が失敗
-/// すれば合格と判定するため、3 種を 1 ブロックへまとめると、そのうち
-/// 1 種だけが公開されても残りが未公開である限り合格してしまい、部分
-/// 公開を fail-closed に検出できない（codex-review 指摘・PR #2212）。
-/// 共通の import・足場は各ブロックへ複製する（`api_surface.rs` の
-/// ドリフト検査もブロック単位で glob 集合を突き合わせる）。
-///
-/// ```compile_fail,E0599
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// let t = fandhe_ai::tape();
-/// let x = t.var(&Tensor::zeros(&[2, 2]).unwrap());
-/// let _ = x.custom();
-/// ```
-///
-/// ```compile_fail,E0599
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// let t = fandhe_ai::tape();
-/// let x = t.var(&Tensor::zeros(&[2, 2]).unwrap());
-/// let _ = Var::custom(&x);
-/// ```
-///
-/// ```compile_fail,E0599
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// let t = fandhe_ai::tape();
-/// let x = t.var(&Tensor::zeros(&[2, 2]).unwrap());
-/// let _ = x.add_custom();
-/// ```
-///
-/// # 足場の妥当性証明（禁止呼び出しを除けばコンパイル・実行できる）
-///
-/// 上の例が失敗する原因が「メソッドが存在しないこと」のみであり、
-/// 足場（`use` 一覧・`Tape`／`Var`／`Tensor` の構築手順）自体が壊れて
-/// いないことを、禁止呼び出しを除いた同じ足場で確認する。
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
 ///
 /// ```
 /// use fandhe_ai::*;
@@ -1216,9 +1184,60 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
 ///
-/// let t = fandhe_ai::tape();
-/// let x = t.var(&Tensor::zeros(&[2, 2]).unwrap());
-/// let _ = x.to_tensor();
+/// struct __FandheHoldMarker;
+///
+/// trait __FandheHoldProbe {
+///     fn custom(&self) -> __FandheHoldMarker;
+///     fn add_custom(&self) -> __FandheHoldMarker;
+/// }
+///
+/// impl<'t> __FandheHoldProbe for fandhe_ai::Var<'t> {
+///     fn custom(&self) -> __FandheHoldMarker {
+///         __FandheHoldMarker
+///     }
+///     fn add_custom(&self) -> __FandheHoldMarker {
+///         __FandheHoldMarker
+///     }
+/// }
+///
+/// impl __FandheHoldProbe for fandhe_ai::Tape {
+///     fn custom(&self) -> __FandheHoldMarker {
+///         __FandheHoldMarker
+///     }
+///     fn add_custom(&self) -> __FandheHoldMarker {
+///         __FandheHoldMarker
+///     }
+/// }
+///
+/// impl __FandheHoldProbe for fandhe_ai::compat::Sequential {
+///     fn custom(&self) -> __FandheHoldMarker {
+///         __FandheHoldMarker
+///     }
+///     fn add_custom(&self) -> __FandheHoldMarker {
+///         __FandheHoldMarker
+///     }
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheHoldMarker = fandhe_ai::Var::custom(x);
+///     let _: __FandheHoldMarker = x.custom();
+///     let _: __FandheHoldMarker = fandhe_ai::Var::add_custom(x);
+///     let _: __FandheHoldMarker = x.add_custom();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheHoldMarker = fandhe_ai::Tape::custom(x);
+///     let _: __FandheHoldMarker = x.custom();
+///     let _: __FandheHoldMarker = fandhe_ai::Tape::add_custom(x);
+///     let _: __FandheHoldMarker = x.add_custom();
+/// }
+///
+/// fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheHoldMarker = fandhe_ai::compat::Sequential::custom(x);
+///     let _: __FandheHoldMarker = x.custom();
+///     let _: __FandheHoldMarker = fandhe_ai::compat::Sequential::add_custom(x);
+///     let _: __FandheHoldMarker = x.add_custom();
+/// }
 /// ```
 #[cfg(doctest)]
 #[allow(dead_code)]

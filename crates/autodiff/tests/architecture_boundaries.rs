@@ -397,9 +397,21 @@ fn normalize_source(content: &str) -> String {
                 // 含め閉じクォートまで読み進める。中身はソーステキスト
                 // 上に `{`／`}` という文字がそのまま現れうる
                 // （`'\u{7b}'` 等）ため空白化し、[`var_impl_block_bodies`]
-                // の中括弧深さ追跡を誤らせない。
+                // の中括弧深さ追跡を誤らせない。バックスラッシュ直後の
+                // 1 文字（エスケープ本体の先頭）は、それが `'\''` の
+                // `\'` のように閉じクォートと同じ文字であっても判定せず
+                // 無条件に消費する。これをしないと `'\''` の 2 文字目の
+                // `'` を閉じクォートと誤認識し、直後の実際の閉じ
+                // クォートから再同期してしまう（`('\'','"')` の `"` を
+                // 文字列リテラル開始と誤認識する不具合）。
                 out.push('\'');
-                let mut j = i + 1;
+                let mut j = i + 1; // バックスラッシュの位置
+                out.push(' ');
+                j += 1;
+                if j < len {
+                    out.push(' '); // エスケープ本体の先頭 1 文字（無条件消費）
+                    j += 1;
+                }
                 while j < len && chars[j] != '\'' {
                     out.push(' ');
                     j += 1;
@@ -2573,6 +2585,49 @@ fn normalize_source_handles_all_literal_forms() {
     let with_ident_c = "let abc = 1; let d = 2;";
     let normalized = normalize_source(with_ident_c);
     assert_eq!(normalized, with_ident_c);
+}
+
+/// [`normalize_source`] のエスケープされた閉じクォート
+/// （`'\''`。バックスラッシュ＋シングルクォートで単一引用符を表す char
+/// リテラル）の後続トークン復元を、本番経路（`normalize_source` →
+/// `tokenize_including_punctuation` → `var_impl_block_bodies_with_aliases_
+/// and_kind`）で固定する回帰テスト。旧実装はエスケープ本体の先頭 1 文字
+/// （`\'` の `'`）を閉じクォートと誤認識し、後続の実際の閉じクォートから
+/// 再同期していたため、`('\'','"')` のようなタプルリテラル直後の `"` を
+/// 文字列リテラルの開始と誤認識して後続コード（`impl CustomExt for Var
+/// { fn custom(&self) {} }` 等）を丸ごと呑み込み、否定ガードの検出漏れを
+/// 招いていた。`b'\''`（バイト char 版）も同型の迂回経路として併せて
+/// 固定する。
+#[test]
+fn normalize_source_recovers_tokens_after_escaped_quote_char_literal() {
+    let forged_via_char_literal = "const Q: (char, char) = ('\\'','\"'); \
+         impl CustomExt for Var { fn custom(&self) {} } const S: &str = \"\";";
+    let normalized = normalize_source(forged_via_char_literal);
+    let tokens = tokenize_including_punctuation(&normalized);
+    let bodies = var_impl_block_bodies_with_aliases_and_kind(&tokens, &[]);
+    assert!(
+        bodies
+            .iter()
+            .any(|(body, _is_trait_impl)| tokens_declare_fn(body, "custom")),
+        "`'\\''`（エスケープされた閉じクォート）直後の `('\\'','\"')` の `\"` を\
+         文字列リテラル開始と誤認識し、後続の impl CustomExt ブロック内の\
+         fn custom を検出できなかった: normalized={normalized:?}, bodies={bodies:?}"
+    );
+
+    // バイト char 版（`b'\''`）も同型の迂回経路として固定する。
+    let forged_via_byte_char_literal = "const Q: (u8, char) = (b'\\'','\"'); \
+         impl CustomExt for Var { fn custom(&self) {} } const S: &str = \"\";";
+    let normalized_byte = normalize_source(forged_via_byte_char_literal);
+    let tokens_byte = tokenize_including_punctuation(&normalized_byte);
+    let bodies_byte = var_impl_block_bodies_with_aliases_and_kind(&tokens_byte, &[]);
+    assert!(
+        bodies_byte
+            .iter()
+            .any(|(body, _is_trait_impl)| tokens_declare_fn(body, "custom")),
+        "`b'\\''`（エスケープされた閉じクォートを含むバイト char リテラル）\
+         直後の後続コードを誤って呑み込み、fn custom の検出を見逃した: \
+         normalized={normalized_byte:?}, bodies={bodies_byte:?}"
+    );
 }
 
 /// codex-review 指摘（PR #2212 その 3・その 4）・Bugbot 指摘（PR #2212）
