@@ -30,6 +30,25 @@
 //!
 //! `kernels_elementwise.rs` と同じ `if (idx < numel)` 手動境界チェックを
 //! 維持する（性能下限達成を理由に省略しない）。
+//!
+//! `idx`／`numel` はいずれも `unsigned int` で計算する
+//! （`kernels_elementwise.rs` の `int` 版とは異なる）。1 スレッド = 1
+//! 要素のグリッドは `div_ceil` で切り上げるため、末尾ブロックの `idx`
+//! 最大値は `numel` そのものではなく、ブロック境界での切り上げ分を
+//! 加えた値（最大で `numel + EW_BLOCK_DIM` 弱）まで達しうる。`numel`
+//! はホスト側 `validate_elementwise_len` で `i32::MAX` に収まることの
+//! みを検証しており、この切り上げ分は考慮しない。したがって `numel`
+//! が `i32::MAX` 近傍のとき `idx` を `int` で計算すると `i32::MAX` を
+//! 超えて符号付きオーバーフロー（2 の補数表現での負値化）し、`idx <
+//! numel` の境界チェックを負の `idx` が誤って通過して `l{i}[idx]`／
+//! `out[idx]` が範囲外アクセスになる（codex-review P0 指摘・PR
+//! #2232）。`blockIdx.x`／`blockDim.x`／`threadIdx.x` はいずれも CUDA
+//! 組み込みの `unsigned int` であり、`idx` を `unsigned int` で受ける
+//! ことで実際に生成されうる最大値（`UINT_MAX` を大きく下回る）まで
+//! 正しい非負値のまま扱える。`numel` 側も `unsigned int` 宣言に揃え、
+//! 符号付き／符号無し比較の警告混入を避ける（ホスト側は `numel <=
+//! i32::MAX` の非負値を渡すため、`i32` のビットパターンをそのまま
+//! `unsigned int` として読んでも値は変わらず引数 ABI に影響しない）。
 
 use fandhe_ai_tensor_core::FusedOpKind;
 
@@ -96,7 +115,10 @@ pub(crate) fn generate_source(ops: &[FusedOpKind], leaf_count: usize) -> String 
     for i in 0..leaf_count {
         params.push_str(&format!("const float* __restrict__ l{i}, "));
     }
-    params.push_str("float* __restrict__ out, int numel");
+    // `unsigned int`（モジュール冒頭「REQ-8」参照。`i32::MAX` 近傍の
+    // `numel` でブロック切り上げ分の `idx` が符号付きオーバーフローし
+    // 境界チェックを迂回するのを防ぐ）。
+    params.push_str("float* __restrict__ out, unsigned int numel");
 
     let mut body = String::new();
     for (i, op) in ops.iter().enumerate() {
@@ -124,8 +146,8 @@ pub(crate) fn generate_source(ops: &[FusedOpKind], leaf_count: usize) -> String 
     let output_index = ops.len() - 1;
 
     format!(
-        "extern \"C\" __global__ void {FUSED_EW_FUNCTION_NAME}({params})\n{{\n    int idx = \
-         blockIdx.x * blockDim.x + threadIdx.x;\n    if (idx < numel) {{\n{body}        \
+        "extern \"C\" __global__ void {FUSED_EW_FUNCTION_NAME}({params})\n{{\n    unsigned int \
+         idx = blockIdx.x * blockDim.x + threadIdx.x;\n    if (idx < numel) {{\n{body}        \
          out[idx] = r{output_index};\n    }}\n}}\n"
     )
 }
@@ -226,5 +248,26 @@ mod tests {
     #[test]
     fn generated_source_empty_ops_returns_empty_string() {
         assert_eq!(generate_source(&[], 0), "");
+    }
+
+    /// REQ-8・codex-review P0 是正（PR #2232）の回帰テスト: `idx`／
+    /// `numel` はいずれも `unsigned int` で宣言し、`numel` が
+    /// `i32::MAX` 近傍でブロック切り上げ分の `idx` が符号付き
+    /// オーバーフローして境界チェックを迂回しないことをソース証跡で
+    /// 検証する。
+    #[test]
+    fn generated_source_uses_unsigned_int_for_idx_and_numel() {
+        let src = generate_source(&sample_ops(), 2);
+        assert!(
+            src.contains("unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;"),
+            "idx は unsigned int で宣言する必要がある: {src}"
+        );
+        assert!(
+            src.contains("out, unsigned int numel"),
+            "numel パラメータは unsigned int で宣言する必要がある: {src}"
+        );
+        // `int idx`／`int numel`（符号付き）の宣言が残っていないこと。
+        assert!(!src.contains("    int idx ="));
+        assert!(!src.contains(", int numel"));
     }
 }

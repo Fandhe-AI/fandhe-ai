@@ -539,41 +539,62 @@ const FUSED_ELEMENTWISE_CACHE_CAP: usize = 256;
 /// 異なり `get_or_build_keyed`（`K: Copy` 制約）を使わない——本関数の
 /// キー（[`crate::fused_elementwise_source::cache_key`] が融合
 /// プランの op 列から都度導出する `String`）は `Copy` ではないため。
-/// 代わりに `Mutex<HashMap<String, _>>` を直接操作し、CUDA 側
-/// `context_cache::cached_fused_elementwise_kernel` と同じ**キャッシュ
-/// 上限**（[`FUSED_ELEMENTWISE_CACHE_CAP`]。上限到達時は新規コンパイル
-/// を行わず `Ok(None)`。呼び出し元 `ops::MetalBackendOps::run_fused` の
-/// 融合分岐が `BackendError::Unsupported` へ変換し per-op フォールバック
-/// へ委ねる。fail-closed。OWASP A04・`.claude/rules/security.md`）を
-/// 課す。関数名は固定リテラル（`FUSED_EW_FUNCTION_NAME`）のため
+/// 代わりに `Mutex<HashMap<String, Arc<Mutex<Option<_>>>>>`（CUDA 側
+/// `context_cache::cached_fused_elementwise_kernel` の `SingleFlightCache`
+/// と同型のキー単位 2 階層ロック）を直接操作し、同じ**キャッシュ上限**
+/// （[`FUSED_ELEMENTWISE_CACHE_CAP`]。上限到達時は新規コンパイルを行わ
+/// ず `Ok(None)`。呼び出し元 `ops::MetalBackendOps::run_fused` の融合
+/// 分岐が `BackendError::Unsupported` へ変換し per-op フォールバックへ
+/// 委ねる。fail-closed。OWASP A04・`.claude/rules/security.md`）を課す。
+/// 関数名は固定リテラル（`FUSED_EW_FUNCTION_NAME`）のため
 /// `cached_scalar_unary_pipeline` と異なり `Box::leak` は不要。
+///
+/// 上限チェックとスロット予約（外側 `HashMap` へのキー登録）は同一の
+/// 外側ロック区間内で原子的に行う（codex-review P2 是正・PR #2232。
+/// 旧実装は「チェック → 解放 → 別ロックで登録」の 2 段構成だったため、
+/// チェックと登録の間に異なるキーへの並行呼び出しが割り込むと、複数の
+/// 呼び出しが同時に「上限未満」を観測してそれぞれ新規エントリを登録
+/// でき、並行呼び出し数に応じて上限を任意に超過しうる欠陥があった。
+/// CUDA 側 `cached_fused_elementwise_kernel` と同じ是正）。コンパイル
+/// （`pipeline::compile_source`／`make_pipeline`）自体はキー単位の内側
+/// ロックを保持したまま行うため、同一キーへの並行呼び出しは 2 回目
+/// 以降が内側ロックの取得で待機し構築を二重実行しない（副次的に、旧
+/// 実装が許容していた同一キーの冗長構築も解消される）。
 pub(crate) fn cached_fused_elementwise_pipeline(
     ctx: &Arc<MetalContext>,
     key: &str,
     source: &str,
     function_name: &'static str,
 ) -> Result<Option<objc2::rc::Retained<MtlPipeline>>, MetalError> {
-    static CACHE: OnceLock<Mutex<HashMap<String, objc2::rc::Retained<MtlPipeline>>>> =
-        OnceLock::new();
+    static CACHE: OnceLock<
+        Mutex<HashMap<String, Arc<Mutex<Option<objc2::rc::Retained<MtlPipeline>>>>>>,
+    > = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
-    {
-        let guard = cache
+    let slot = {
+        let mut guard = cache
             .lock()
             .map_err(|e| on_poison(format!("fused elementwise pipeline cache poisoned: {e}")))?;
-        if let Some(existing) = guard.get(key) {
-            return Ok(Some(existing.clone()));
-        }
-        if guard.len() >= FUSED_ELEMENTWISE_CACHE_CAP {
+        if !guard.contains_key(key) && guard.len() >= FUSED_ELEMENTWISE_CACHE_CAP {
             return Ok(None);
         }
+        Arc::clone(
+            guard
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(None))),
+        )
+    };
+
+    let mut slot_guard = slot
+        .lock()
+        .map_err(|e| on_poison(format!("fused elementwise pipeline cache poisoned: {e}")))?;
+    if let Some(existing) = slot_guard.as_ref() {
+        return Ok(Some(existing.clone()));
     }
     let library = pipeline::compile_source(ctx.device(), source)?;
     let built = pipeline::make_pipeline(ctx.device(), &library, function_name)?;
-    let mut guard = cache
-        .lock()
-        .map_err(|e| on_poison(format!("fused elementwise pipeline cache poisoned: {e}")))?;
-    Ok(Some(guard.entry(key.to_string()).or_insert(built).clone()))
+    *slot_guard = Some(built.clone());
+    Ok(Some(built))
 }
 
 #[cfg(test)]

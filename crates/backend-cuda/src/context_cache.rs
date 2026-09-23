@@ -844,12 +844,22 @@ const FUSED_ELEMENTWISE_CACHE_CAP: usize = 256;
 /// 新規コンパイルを行わず `Ok(None)` を返す**（呼び出し元
 /// `ops::CudaBackendOps::run_fused` の融合分岐は `BackendError::
 /// Unsupported` へ変換し per-op フォールバックへ委ねる。fail-closed。
-/// 実装計画 §2.5「キャッシュ上限」）。上限チェックと登録の間に
-/// レースがあっても（`get_or_build` の 2 階層ロックとは別の外側
-/// チェックのため）エントリ数が上限をわずかに超えうるが、これは
-/// メモリ増大を軽減するソフトな上限であり、`SingleFlightCache` 自体の
-/// 単一飛行契約（同一キーへの並行呼び出しが構築を二重実行しない）を
-/// 破らない。
+/// 実装計画 §2.5「キャッシュ上限」）。
+///
+/// 上限チェックと枠確保（`HashMap` へのキー登録）は同一の外側ロック
+/// 区間内で原子的に行う（codex-review P2 是正・PR #2232。以前の実装は
+/// 「チェック → guard 解放 → `get_or_build` が再度ロックして登録」の
+/// 2 段構成だったため、チェックと登録の間に異なるキーへの並行呼び出し
+/// が割り込むと、複数の呼び出しが同時に「上限未満」を観測してそれぞれ
+/// 新規エントリを登録でき、並行呼び出し数に応じて上限を任意に超過し
+/// うる欠陥があった〈OWASP A04〉）。本関数は `get_or_build` を呼ばず、
+/// 同型の 2 階層ロック手続き（外側: キー単位ロックの取得・登録専用の
+/// 短命ロック／内側: キー単位ロックで構築区間を直列化）を、上限チェック
+/// を外側ロックの臨界区間へ含めた形でインライン実装する。これにより
+/// 「上限未満の確認」と「エントリ登録（＝枠確保）」が単一の `Mutex`
+/// 取得の間で完結し、他呼び出しの割り込みを許さない。`SingleFlightCache`
+/// 自体の単一飛行契約（同一キーへの並行呼び出しが構築を二重実行しない）
+/// は内側のキー単位ロックにより従来どおり維持する。
 pub(crate) fn cached_fused_elementwise_kernel(
     device: &CudaDevice,
     key: &str,
@@ -859,20 +869,32 @@ pub(crate) fn cached_fused_elementwise_kernel(
     static CACHE: OnceLock<SingleFlightCache<(ContextKey, String), CudaFunction>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let cache_key = (ContextKey::from_device(device), key.to_string());
-    {
-        let guard = lock_cache(cache)?;
+
+    let slot = {
+        let mut guard = lock_cache(cache)?;
         if !guard.contains_key(&cache_key) && guard.len() >= FUSED_ELEMENTWISE_CACHE_CAP {
             return Ok(None);
         }
+        Arc::clone(
+            guard
+                .entry(cache_key)
+                .or_insert_with(|| Arc::new(Mutex::new(None))),
+        )
+    };
+
+    let mut slot_guard = lock_cache(&slot)?;
+    if let Some(existing) = slot_guard.as_ref() {
+        return Ok(Some(Arc::clone(existing)));
     }
-    let func = get_or_build(cache, cache_key, || {
-        let ptx = compile_ptx(source, device.arch())?;
-        Ok(device
+    let ptx = compile_ptx(source, device.arch())?;
+    let built = Arc::new(
+        device
             .context()
             .load_module(ptx)?
-            .load_function(function_name)?)
-    })?;
-    Ok(Some(func))
+            .load_function(function_name)?,
+    );
+    *slot_guard = Some(Arc::clone(&built));
+    Ok(Some(built))
 }
 
 /// `device` の `CudaContext` に対応する [`crate::gemm_mma_tf32x3::
