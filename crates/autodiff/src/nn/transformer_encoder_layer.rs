@@ -549,6 +549,19 @@ impl Module for TransformerEncoderLayer {
             "TransformerEncoderLayer::set_parameter: no parameter named `{name}`"
         )))
     }
+
+    /// [`Module::children`] の実装（イシュー #2134）。順序・名前は
+    /// [`Self::named_parameters`] の接頭辞契約（`self_attn`→
+    /// `linear1`→`linear2`→`norm1`→`norm2`）と一致させる。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        vec![
+            ("self_attn".to_string(), &self.self_attn as &dyn Module),
+            ("linear1".to_string(), &self.linear1 as &dyn Module),
+            ("linear2".to_string(), &self.linear2 as &dyn Module),
+            ("norm1".to_string(), &self.norm1 as &dyn Module),
+            ("norm2".to_string(), &self.norm2 as &dyn Module),
+        ]
+    }
 }
 
 #[cfg(test)]
