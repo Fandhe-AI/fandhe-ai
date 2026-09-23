@@ -3454,7 +3454,11 @@ fn nn_mod_rs_path() -> std::path::PathBuf {
 /// `src/nn/rnn.rs` の `pub use` 行から `{...}` 内の識別子を抽出し、
 /// 昇格元公開面（`fandhe_ai_autodiff::nn`）と完全一致（過不足とも
 /// fail）することを固定する（`data_module_reexports_exactly_expected_
-/// surface` と同型の検査）。
+/// surface` と同型の検査）。**#2133 の保留（`docs/facade-nn-module-
+/// exposure-decision.md` §12）も本テストが担う**: 期待集合に `Module`
+/// を含めていないため、`src/nn/rnn.rs` の `pub use` 行へ `Module` を
+/// 追加すると本テストが fail する。承認後に案 B（facade 独自 trait）を
+/// 実装する際は期待集合を正ガードへ更新する。
 #[test]
 fn nn_rnn_module_reexports_exactly_expected_surface() {
     let path = nn_rnn_rs_path();
@@ -3538,7 +3542,12 @@ fn nn_rnn_module_is_pure_reexport() {
 }
 
 /// `src/nn/mod.rs` の公開宣言が `pub mod rnn;` の 1 件のみであること
-/// を固定する（将来の無断拡大を fail-closed に検出する）。
+/// を固定する（将来の無断拡大を fail-closed に検出する）。**#2133 の
+/// 保留（`docs/facade-nn-module-exposure-decision.md` §12）も本テストが
+/// 担う**: 案 B 採用時に想定する `nn::module`／`nn::container` 新設
+/// （`pub mod module;`／`pub mod container;`）はこの完全一致検査に
+/// より現時点では fail する。承認後に案 B を実装する際は期待集合
+/// （`["rnn", "module", "container"]` 等）へ更新する。
 #[test]
 fn nn_mod_declares_only_rnn_submodule() {
     let path = nn_mod_rs_path();
@@ -4423,39 +4432,44 @@ fn scan_top_level_pub_mods_rejects_unmodelable_mod_forms() {
     }
 }
 
-/// `src/lib.rs` の `struct VarCustomHoldDoctestGuard;` 宣言に**直接**付いた
+/// `src/lib.rs` の `struct <struct_name>;` 宣言に**直接**付いた
 /// ドキュメンテーションコメント（`///` の連続。空行・非 `///` 行で途切れた
 /// 時点で走査を止める）を、直前の `#[allow(dead_code)]`・
 /// `#[cfg(doctest)]` の並びを検証したうえで抽出する（[`custom_function_
-/// hold_doctest_probe_body_matches_fixed_contract`] 専用）。`#[path]`
-/// 付き `pub mod` の非公開扱い除外（`scan_top_level_pub_mods`）と同種の
-/// 「モデル化できない構造は解決せず fail-closed に拒否する」方針で、
-/// `#[cfg(doctest)]` が直前に見つからない・`struct VarCustomHoldDoctestGuard;`
-/// 宣言自体が見つからない場合は panic する（doc コメントの取り違えに
-/// よる drift 検査の無力化を防ぐ）。返り値は `///` 接頭辞（と直後の
-/// 1 個のスペース。rustdoc の正規化と同じ規約）を除去した行の列。
-fn extract_var_custom_hold_doctest_guard_doc(content: &str) -> Vec<String> {
+/// hold_doctest_probe_body_matches_fixed_contract`]・[`nn_module_hold_
+/// doctest_probe_body_matches_fixed_contract`] 共用。元は
+/// `VarCustomHoldDoctestGuard` 専用の固定名関数だったが、#2133 で
+/// `NnModuleHoldDoctestGuard` にも同じ抽出が必要になったため `struct_name`
+/// 引数版へ最小限リファクタした。挙動は `struct_name` に `"VarCustomHold
+/// DoctestGuard"` を渡した場合と不変）。`#[path]` 付き `pub mod` の非公開
+/// 扱い除外（`scan_top_level_pub_mods`）と同種の「モデル化できない構造は
+/// 解決せず fail-closed に拒否する」方針で、`#[cfg(doctest)]` が直前に
+/// 見つからない・`struct <struct_name>;` 宣言自体が見つからない場合は
+/// panic する（doc コメントの取り違えによる drift 検査の無力化を防ぐ）。
+/// 返り値は `///` 接頭辞（と直後の 1 個のスペース。rustdoc の正規化と同じ
+/// 規約）を除去した行の列。
+fn extract_hold_doctest_guard_doc(content: &str, struct_name: &str) -> Vec<String> {
     let lines: Vec<&str> = content.lines().collect();
+    let target = format!("struct {struct_name};");
     let struct_idx = lines
         .iter()
-        .position(|l| l.trim() == "struct VarCustomHoldDoctestGuard;")
-        .expect(
-            "src/lib.rs に `struct VarCustomHoldDoctestGuard;` 宣言が見つからない\
-             （否定ガードの本命足場自体が削除・改名された可能性がある）",
-        );
-    assert!(
-        struct_idx >= 2,
-        "struct VarCustomHoldDoctestGuard; の直前に属性 2 行分の余地がない"
-    );
+        .position(|l| l.trim() == target)
+        .unwrap_or_else(|| {
+            panic!(
+                "src/lib.rs に `{target}` 宣言が見つからない\
+             （否定ガードの本命足場自体が削除・改名された可能性がある）"
+            )
+        });
+    assert!(struct_idx >= 2, "{target} の直前に属性 2 行分の余地がない");
     assert_eq!(
         lines[struct_idx - 1].trim(),
         "#[allow(dead_code)]",
-        "struct VarCustomHoldDoctestGuard; の直前が `#[allow(dead_code)]` ではない"
+        "{target} の直前が `#[allow(dead_code)]` ではない"
     );
     assert_eq!(
         lines[struct_idx - 2].trim(),
         "#[cfg(doctest)]",
-        "struct VarCustomHoldDoctestGuard; の直前が `#[cfg(doctest)]` ではない\
+        "{target} の直前が `#[cfg(doctest)]` ではない\
          （本足場が `cfg(doctest)` 外で有効化され、通常ビルドを壊しうる）"
     );
 
@@ -4474,13 +4488,12 @@ fn extract_var_custom_hold_doctest_guard_doc(content: &str) -> Vec<String> {
     doc_lines.reverse();
     assert!(
         !doc_lines.is_empty(),
-        "struct VarCustomHoldDoctestGuard; に直接付いた `///` doc コメントが\
-         見つからない"
+        "{target} に直接付いた `///` doc コメントが見つからない"
     );
     doc_lines
 }
 
-/// `doc_lines`（[`extract_var_custom_hold_doctest_guard_doc`] の戻り値）
+/// `doc_lines`（[`extract_hold_doctest_guard_doc`] の戻り値）
 /// から、厳密に裸の ```` ``` ```` フェンス（`ignore`／`no_run`／
 /// `compile_fail` 等の修飾を一切伴わない）で区切られた doctest ブロックを
 /// **ちょうど 1 つ**抽出し、その本文行（フェンス自体を含まない）を返す。
@@ -4575,7 +4588,7 @@ fn split_glob_imports_and_probe_body(
 fn custom_function_hold_doctest_globs_all_pub_modules() {
     let content = read_to_string_or_panic(&lib_rs_path());
     let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_var_custom_hold_doctest_guard_doc(&content);
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarCustomHoldDoctestGuard");
     let block = extract_single_bare_fenced_doctest_block(&doc_lines);
     let (globbed, _body) = split_glob_imports_and_probe_body(&block);
     assert!(
@@ -4604,7 +4617,7 @@ fn custom_function_hold_doctest_globs_all_pub_modules() {
 #[test]
 fn custom_function_hold_doctest_probe_body_matches_fixed_contract() {
     let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_var_custom_hold_doctest_guard_doc(&content);
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "VarCustomHoldDoctestGuard");
     let block = extract_single_bare_fenced_doctest_block(&doc_lines);
     let (_globbed, body) = split_glob_imports_and_probe_body(&block);
     let actual = body.join("\n");
@@ -4678,6 +4691,308 @@ fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheHoldMarker = fandhe_ai::compat::Sequential::add_custom(x);\n\
 \x20\x20\x20\x20let _: __FandheHoldMarker = x.add_custom();\n\
 }";
+
+// =====================================================================
+// #2133（親 #2132・#2131）の facade 公開保留固定（`NnModuleHoldDoctestGuard`）。
+// `VarCustomHoldDoctestGuard` 系（上記 2 テスト・HOLD_PROBE_BODY）と同型の
+// 正のプローブ 1 ブロック方式のドリフト検査。承認未取得の経緯・多層防御の
+// 位置づけは `docs/facade-nn-module-exposure-decision.md` §12 参照。
+// =====================================================================
+
+/// [`custom_function_hold_doctest_globs_all_pub_modules`] の
+/// `NnModuleHoldDoctestGuard` 版。`crates/facade/src/lib.rs` の
+/// `NnModuleHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob
+/// import するネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod`
+/// 宣言集合が一致することを固定する。
+#[test]
+fn nn_module_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "NnModuleHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "NnModuleHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`custom_function_hold_doctest_probe_body_matches_fixed_contract`] の
+/// `NnModuleHoldDoctestGuard` 版。doctest ブロックの glob 以外の本文
+/// （ローカル `__fandhe_nn_hold_probe` モジュール定義・`use` ・`__probe`
+/// 関数）が固定文言 [`NN_MODULE_HOLD_PROBE_BODY`] と 1 行たりとも違わず
+/// 一致することを固定する（`# ` 隠し行・プローブの削除・別名への
+/// シャドーイング等で正のプローブを骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn nn_module_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "NnModuleHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, NN_MODULE_HOLD_PROBE_BODY,
+        "NnModuleHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 NN_MODULE_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_nn_hold_probe モジュール・__probe 関数）の\
+         削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`nn_module_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の `NnModuleHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import
+/// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
+/// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
+const NN_MODULE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_nn_hold_probe {\n\
+\x20\x20\x20\x20pub trait Module {}\n\
+\x20\x20\x20\x20pub struct ModuleList;\n\
+}\n\
+use __fandhe_nn_hold_probe::*;\n\
+\n\
+fn __probe(_: &dyn Module, _: ModuleList, _: &Sequential) {}";
+
+/// facade src の全 `pub use` 文（`pub(..) use` は対象外）から
+/// [`collect_pub_use_leaves`] で葉（ソース側・rename 前）を集め、葉が
+/// `Module`／`ModuleList` である行、または葉が `Sequential` かつパスに
+/// `fandhe_ai_autodiff`／`nn` を含む行を違反とする（#2133 Step 2-1）。
+/// `compat/mod.rs` の `pub use sequential::{Sequential, SequentialVars};`
+/// （パスに `fandhe_ai_autodiff`／`nn` を含まない）は正当な既存形のため
+/// 許容する。別名（`as Layer` 等）の前のソース側の葉で判定するため、
+/// `pub use fandhe_ai_autodiff::nn::Module as Layer;` のような別名
+/// 再エクスポートも検出する。
+#[test]
+fn facade_does_not_reexport_nn_module_or_containers() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let mut i = 0usize;
+        while i < tokens.len() {
+            if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let mut end = i + 2;
+                while end < tokens.len() && tokens[end] != ";" {
+                    end += 1;
+                }
+                let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+                let leaves = collect_pub_use_leaves(path_tokens);
+                let path_contains_nn_autodiff = path_tokens
+                    .iter()
+                    .any(|t| t == "fandhe_ai_autodiff" || t == "nn");
+                for leaf in leaves {
+                    let offense = match leaf.as_str() {
+                        "Module" | "ModuleList" => true,
+                        "Sequential" => path_contains_nn_autodiff,
+                        _ => false,
+                    };
+                    if offense {
+                        offending.push(format!("{}: leaf={leaf}", path.display()));
+                    }
+                }
+                i = (end + 1).min(tokens.len());
+                continue;
+            }
+            i += 1;
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の pub use が nn::Module／ModuleList／nn 系 Sequential を\
+         再エクスポートしている（#2133 未承認のまま対象外という設計判断に\
+         違反）: {offending:?}"
+    );
+}
+
+/// [`facade_does_not_reexport_nn_module_or_containers`] の自己テスト
+/// （正例・負例の合成入力）。
+#[test]
+fn facade_does_not_reexport_nn_module_or_containers_detects_each_category() {
+    fn offenses(content: &str) -> Vec<String> {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let mut offending = Vec::new();
+        let mut i = 0usize;
+        while i < tokens.len() {
+            if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let mut end = i + 2;
+                while end < tokens.len() && tokens[end] != ";" {
+                    end += 1;
+                }
+                let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+                let leaves = collect_pub_use_leaves(path_tokens);
+                let path_contains_nn_autodiff = path_tokens
+                    .iter()
+                    .any(|t| t == "fandhe_ai_autodiff" || t == "nn");
+                for leaf in leaves {
+                    let offense = match leaf.as_str() {
+                        "Module" | "ModuleList" => true,
+                        "Sequential" => path_contains_nn_autodiff,
+                        _ => false,
+                    };
+                    if offense {
+                        offending.push(format!("leaf={leaf}"));
+                    }
+                }
+                i = (end + 1).min(tokens.len());
+                continue;
+            }
+            i += 1;
+        }
+        offending
+    }
+
+    // 正例。
+    assert!(!offenses("pub use fandhe_ai_autodiff::nn::Module;").is_empty());
+    assert!(!offenses("pub use fandhe_ai_autodiff::nn::{Module as Layer};").is_empty());
+    assert!(!offenses("pub use fandhe_ai_autodiff::nn::{self as n, ModuleList};").is_empty());
+    assert!(!offenses("pub use fandhe_ai_autodiff::nn::Sequential;").is_empty());
+
+    // 負例: `compat::Sequential`（パスに fandhe_ai_autodiff／nn を含まない）。
+    assert!(offenses("pub use sequential::{Sequential, SequentialVars};").is_empty());
+    // 負例: 非 pub。
+    assert!(offenses("use fandhe_ai_autodiff::nn::Module;").is_empty());
+}
+
+/// facade src に facade 独自の `trait Module`／`struct ModuleList`／
+/// `enum`／`type` 版・`struct Sequential`（`src/compat/sequential.rs` 以外）
+/// の宣言が可視性を問わず存在しないことを固定する（#2133 Step 2-2。
+/// `declares_fn_named` と同型のトークン走査で `trait`／`struct`／`enum`／
+/// `type` トークンの直後の識別子を見る）。`use fandhe_ai_autodiff::nn::
+/// {..., Module, ...}`（非公開 import）・`Box<dyn Module>`（型参照）・
+/// `compat/sequential.rs` 自身の `pub struct Sequential` は正当な既存形
+/// のため許容する。
+#[test]
+fn facade_declares_no_nn_module_items() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_nn_module_item_declarations(content, path) {
+            offending.push(offense);
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade src に nn::Module／ModuleList 相当の独自宣言が見つかった\
+         （#2133 未承認のまま対象外という設計判断に違反）: {offending:?}"
+    );
+}
+
+/// `content`（`path` 由来）を走査し、`trait`／`struct`／`enum`／`type`
+/// トークンの直後に `Module`／`ModuleList` が続く宣言、または `Sequential`
+/// が続く宣言（`path` のファイル名が `compat/sequential.rs` 以外）を
+/// 検出して違反文字列の列を返す（[`facade_declares_no_nn_module_items`]・
+/// その自己テスト共用）。
+fn scan_nn_module_item_declarations(content: &str, path: &Path) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let is_compat_sequential = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .ends_with("compat/sequential.rs");
+    let mut offending = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        if !matches!(token.as_str(), "trait" | "struct" | "enum" | "type") {
+            continue;
+        }
+        let Some(name) = tokens.get(i + 1).map(String::as_str) else {
+            continue;
+        };
+        let offense = match name {
+            "Module" | "ModuleList" => true,
+            "Sequential" => !is_compat_sequential,
+            _ => false,
+        };
+        if offense {
+            offending.push(format!("{}: `{token} {name}`", path.display()));
+        }
+    }
+    offending
+}
+
+/// [`facade_declares_no_nn_module_items`]（[`scan_nn_module_item_
+/// declarations`]）の自己テスト（正例・負例の合成入力）。
+#[test]
+fn facade_declares_no_nn_module_items_detects_each_category() {
+    let other = Path::new("src/nn/module.rs");
+    let compat_seq = Path::new("src/compat/sequential.rs");
+
+    // 正例。
+    assert!(!scan_nn_module_item_declarations("pub trait Module {}", other).is_empty());
+    assert!(!scan_nn_module_item_declarations("pub struct ModuleList;", other).is_empty());
+    assert!(
+        !scan_nn_module_item_declarations("pub type Layer = u8; pub struct ModuleList;", other)
+            .is_empty()
+    );
+    assert!(!scan_nn_module_item_declarations("pub struct Sequential;", other).is_empty());
+
+    // 負例: 非公開 import・型参照。
+    assert!(
+        scan_nn_module_item_declarations(
+            "use fandhe_ai_autodiff::nn::{Linear, Module, ReLU};",
+            other
+        )
+        .is_empty()
+    );
+    assert!(
+        scan_nn_module_item_declarations(
+            "pub(crate) fn layers(&self) -> &[Box<dyn Module>] {}",
+            other
+        )
+        .is_empty()
+    );
+    // 負例: compat/sequential.rs 自身の Sequential 宣言。
+    assert!(scan_nn_module_item_declarations("pub struct Sequential {}", compat_seq).is_empty());
+    // 負例: コメント・文字列リテラル中。
+    assert!(scan_nn_module_item_declarations("// pub trait Module {}", other).is_empty());
+}
+
+/// `src/compat` 配下に `add_module`／`add_boxed`／`push_module` の
+/// `pub fn` 宣言が存在しないことを固定する（#2133 Step 2-3。
+/// `compat_sequential_does_not_expose_rnn_add_methods` と同型。
+/// `docs/facade-nn-module-exposure-decision.md` §9 で `add_module` は
+/// スコープ外と明記済み）。
+#[test]
+fn compat_sequential_does_not_expose_module_add_methods() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let forbidden = ["add_module", "add_boxed", "push_module"];
+    let mut offenses = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        for name in forbidden {
+            if contains_pub_fn_declaration(content, name) {
+                offenses.push(format!("{}: pub fn {name}", path.display()));
+            }
+        }
+    });
+    assert!(
+        offenses.is_empty(),
+        "src/compat 配下に add_module／add_boxed／push_module が見つかった\
+         （承認スコープ〈#2133〉は Sequential への追加を認めていない）: {offenses:?}"
+    );
+}
+
+/// [`compat_sequential_does_not_expose_module_add_methods`] の自己テスト。
+#[test]
+fn compat_sequential_does_not_expose_module_add_methods_detects_offense() {
+    assert!(contains_pub_fn_declaration(
+        "pub fn add_module(&mut self, m: impl Module + 'static) {}",
+        "add_module"
+    ));
+    assert!(!contains_pub_fn_declaration(
+        "pub fn add_linear(&mut self, l: Linear) {}",
+        "add_module"
+    ));
+}
 
 /// facade（crates.io 公開クレート `fandhe-ai`）の `Cargo.toml` が
 /// `doctest = false` を持たないことを固定する（イシュー #2064 PR #2212
@@ -5259,7 +5574,13 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
 /// する」迂回経路の兆候として fail-closed に拒否する。`pub(crate) use`
 /// は `tokens[i]=="pub" && tokens[i+1]=="use"` の完全一致でしか反応
 /// しないため対象外——`pub(crate) use hidden::ext;` は `tokens[i+1]`
-/// が `(` になり葉として集計されない）。
+/// が `(` になり葉として集計されない）。**#2133 の保留（`docs/facade-nn-
+/// module-exposure-decision.md` §12）の補完層も担う**: `Module`・
+/// `ModuleList` は大文字始まりのため本テストの検出対象外（`facade_does_
+/// not_reexport_nn_module_or_containers` が #2133 本来の検出を担う）。
+/// 本テストは小文字葉 `nn` の別名モジュール再エクスポート（`pub use
+/// fandhe_ai_autodiff::nn as ad_nn;`。`Module` 系に限らない一般形）を
+/// 引き続き捕捉する。
 #[test]
 fn facade_pub_use_leaves_are_not_modules() {
     let src_dir = facade_crate_root().join("src");
