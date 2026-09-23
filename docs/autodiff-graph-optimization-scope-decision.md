@@ -209,3 +209,58 @@ Metal `run_fused` は本 doc 記録時点（`1a1bcd5a`）から不変で B-1〜B
 勾配のデバイス直接計算（#1555／#1559／#1908）が充足済みだが、`d_input`・
 loss のデバイス常駐化は未充足。同 doc は B-1 のみを「実装する」（起票案
 G-1）として引き継いだ。区分 A（実装済み）・区分 C（非目標）は不変。
+
+## #2085 追補
+
+B-1（GPU `run_fused` の elementwise allowlist。5 節）を実装した（イシュー
+#2085）。CUDA（`crates/backend-cuda/src/fused_elementwise.rs`・
+`kernels_fused_elementwise.rs`）・Metal（`crates/backend-metal/src/
+fused_elementwise.rs`・`fused_elementwise_source.rs`）とも、CPU
+`backend-cpu::fused_elementwise` と同一の allowlist（`Input`／`Add`／
+`Mul`／`Relu`／`Exp`／`Tanh`）を対象に実行時カーネル生成（NVRTC／MSL）で
+単一パス実行する経路を追加し、既存の `run_fused` オーバーライド
+（canonical RMSNorm・softmax 判定）の後段へ結線した。
+
+- **既定 OFF・opt-in ゲート**: `backend-cuda::fused_elementwise::
+  set_gpu_elementwise_fusion_enabled`／`backend-metal::fused_elementwise::
+  set_gpu_elementwise_fusion_enabled`（各クレート内 `pub`）。`facade` への
+  再公開は行っていない（公開面拡張は別途ユーザー承認が必要）。ゲート
+  OFF 時は本 PR 導入前と挙動不変（atomic load 1 回を除き bit 同一）。
+- **なぜ受け入れ条件の「`Relu`・`Exp`・`Tanh`・`Sigmoid` 等」に
+  `Sigmoid` を含めていないか**: `Sigmoid` は F1（上表）が定める
+  `Op::is_lazy_elementwise` の対象外（`push_eager`）であり、
+  `tensor-core::fusion::detect` が `Sigmoid` を含む融合プランをそもそも
+  生成しない。GPU allowlist に `Sigmoid` を加えても到達不能な dead
+  code になるため、CPU 側 allowlist（F3）と対称に据え置いた。
+  `Sigmoid` を融合対象にするには `is_lazy_elementwise` と CPU F3
+  allowlist の拡張が前提になり、これは本 doc が既に区分 B-2 として
+  スコープ外に置いている変更（下記）と同一である。
+- **本 PR のユーザー承認事項**: (1) `facade` への opt-in ゲート再公開
+  （未実施。公開面拡張のため別途承認が必要）、(2) ADOPT 判定時の
+  既定 ON 化（未実施。実測待ち）、(3) 新規 `unsafe` 4 か所
+  （`backend-cuda/src/elementwise.rs::launch_nary` 1 か所・
+  `backend-metal/src/elementwise.rs::encode_nary_dispatch` 3 か所。
+  いずれも `run_binary`／`encode_binary_dispatch` と同一の FFI 境界
+  パターンの踏襲で SAFETY コメント付き。`security.md`「unsafe」節の
+  レビュー対象）。依存追加・spec 提案の投稿は本 PR には該当しない。
+- **数値契約**: 融合カーネルは同一バックエンドの per-op 経路・CPU
+  融合カーネルと bit 完全一致を目標とする。CUDA は `Add`／`Mul` を
+  非縮約 intrinsic（`__fadd_rn`／`__fmul_rn`）で生成し FMA 縮約を
+  遮断する。Metal は `MathMode::Safe`（既存コンパイルオプション）の
+  下で `+`／`*` が correctly rounded・非縮約であることに依拠し、
+  リポジトリ内に検証済み用例のない `#pragma METAL fp contract(off)`
+  は追加していない。
+- **検証**: Linux で実行可能な範囲（allowlist 判定・ゲート・ソース
+  生成・ホスト逐語モデル対 CPU 融合カーネルの bit 一致・facade 経由の
+  forward／backward 勾配 bit 完全一致）はテスト済み。CUDA／Metal 実機
+  （同一バックエンド per-op 経路との bit 完全一致・CPU との REQ-2
+  複合判定・A/B 性能計測）は本エージェント実行環境に実機への到達手段
+  がなく未実測のまま申し送り（`docs/perf/gpu-elementwise-fusion-b1.md`・
+  `docs/perf/logs/gpu-elementwise-fusion-2085/README.md` 参照）。
+- **キャッシュ上限**: 融合プランごとに動的コンパイルされるカーネルの
+  プロセス内キャッシュに上限（256 エントリ）を設け、上限到達時は
+  `Unsupported` へ fail-closed に倒し per-op フォールバックへ委ねる
+  （`crates/backend-cuda/src/context_cache.rs`・`crates/backend-metal/
+  src/context_cache.rs` の融合カーネルキャッシュ実装）。
+- B-2 以降（XLA 相当のクロス演算融合・`Sigmoid` 等 allowlist 拡張）は
+  引き続き対象外のまま。

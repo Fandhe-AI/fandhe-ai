@@ -525,6 +525,163 @@ pub(crate) fn cached_scalar_binary_pipeline(
     Ok(Some(built))
 }
 
+/// [`cached_fused_elementwise_pipeline`] のプロセス内キャッシュ上限
+/// （区分 B-1・イシュー #2085。CUDA 側 `context_cache::
+/// FUSED_ELEMENTWISE_CACHE_CAP` と同一値・同一理由）。
+const FUSED_ELEMENTWISE_CACHE_CAP: usize = 256;
+
+/// `ctx` のデバイス上で、GPU `run_fused` の elementwise allowlist 融合
+/// カーネル（[`crate::fused_elementwise::ElementwiseProgram`] 単位で
+/// 動的生成・コンパイルされる。区分 B-1・イシュー #2085）のコンパイル
+/// 済みパイプラインをプロセス内キャッシュから取得する。
+///
+/// `cached_scalar_unary_pipeline`／`cached_scalar_binary_pipeline` と
+/// 異なり `get_or_build_keyed`（`K: Copy` 制約）を使わない——本関数の
+/// キー（[`crate::fused_elementwise_source::cache_key`] が融合
+/// プランの op 列から都度導出する `String`）は `Copy` ではないため。
+/// 代わりに `Mutex<HashMap<String, Arc<Mutex<Option<_>>>>>`（CUDA 側
+/// `context_cache::cached_fused_elementwise_kernel` の `SingleFlightCache`
+/// と同型のキー単位 2 階層ロック）を直接操作し、同じ**キャッシュ上限**
+/// （[`FUSED_ELEMENTWISE_CACHE_CAP`]。上限到達時は新規コンパイルを行わ
+/// ず `Ok(None)`。呼び出し元 `ops::MetalBackendOps::run_fused` の融合
+/// 分岐が `BackendError::Unsupported` へ変換し per-op フォールバックへ
+/// 委ねる。fail-closed。OWASP A04・`.claude/rules/security.md`）を課す。
+/// 関数名は固定リテラル（`FUSED_EW_FUNCTION_NAME`）のため
+/// `cached_scalar_unary_pipeline` と異なり `Box::leak` は不要。
+///
+/// 上限チェックとスロット予約（外側 `HashMap` へのキー登録）は同一の
+/// 外側ロック区間内で原子的に行う（codex-review P2 是正・PR #2232。
+/// 旧実装は「チェック → 解放 → 別ロックで登録」の 2 段構成だったため、
+/// チェックと登録の間に異なるキーへの並行呼び出しが割り込むと、複数の
+/// 呼び出しが同時に「上限未満」を観測してそれぞれ新規エントリを登録
+/// でき、並行呼び出し数に応じて上限を任意に超過しうる欠陥があった。
+/// CUDA 側 `cached_fused_elementwise_kernel` と同じ是正）。コンパイル
+/// （`pipeline::compile_source`／`make_pipeline`）自体はキー単位の内側
+/// ロックを保持したまま行うため、同一キーへの並行呼び出しは 2 回目
+/// 以降が内側ロックの取得で待機し構築を二重実行しない（副次的に、旧
+/// 実装が許容していた同一キーの冗長構築も解消される）。
+///
+/// コンパイル失敗時はスロットの登録自体を取り消す（codex-review P2 是正・
+/// PR #2232。CUDA 側 `context_cache::cached_fused_elementwise_kernel` と
+/// 同じ是正）。以前の実装は空スロットを外側 `HashMap` へ登録した後に
+/// `pipeline::compile_source`／`make_pipeline` を呼んでいたが、いずれかが
+/// 失敗しても登録済みスロットを削除しなかったため、一時的なコンパイル
+/// 失敗が累積すると `guard.len()` が [`FUSED_ELEMENTWISE_CACHE_CAP`] へ
+/// 達し、以後の正常な融合プランまで恒久的に `Ok(None)`（呼び出し元
+/// フォールバック）へ落ちる欠陥があった。本関数は構築に失敗した場合、
+/// 他スレッドが同じキーで構築に成功していない（スロットが `None` の
+/// まま）ことを確認したうえでエントリを削除し、次回呼び出しが枠を
+/// 再利用して再試行できるようにする。
+pub(crate) fn cached_fused_elementwise_pipeline(
+    ctx: &Arc<MetalContext>,
+    key: &str,
+    source: &str,
+    function_name: &'static str,
+) -> Result<Option<objc2::rc::Retained<MtlPipeline>>, MetalError> {
+    static CACHE: OnceLock<
+        Mutex<HashMap<String, Arc<Mutex<Option<objc2::rc::Retained<MtlPipeline>>>>>>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let slot = {
+        let mut guard = cache
+            .lock()
+            .map_err(|e| on_poison(format!("fused elementwise pipeline cache poisoned: {e}")))?;
+        if !guard.contains_key(key) && guard.len() >= FUSED_ELEMENTWISE_CACHE_CAP {
+            return Ok(None);
+        }
+        Arc::clone(
+            guard
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(None))),
+        )
+    };
+
+    let mut slot_guard = slot
+        .lock()
+        .map_err(|e| on_poison(format!("fused elementwise pipeline cache poisoned: {e}")))?;
+    if let Some(existing) = slot_guard.as_ref() {
+        return Ok(Some(existing.clone()));
+    }
+    let build_result: Result<objc2::rc::Retained<MtlPipeline>, MetalError> = (|| {
+        let library = pipeline::compile_source(ctx.device(), source)?;
+        pipeline::make_pipeline(ctx.device(), &library, function_name)
+    })();
+    match build_result {
+        Ok(built) => {
+            *slot_guard = Some(built.clone());
+            Ok(Some(built))
+        }
+        Err(err) => {
+            // コンパイル失敗（`compile_source`／`make_pipeline` のいずれか）
+            // 時は、枠だけ確保して中身が空のまま残るスロットが
+            // `FUSED_ELEMENTWISE_CACHE_CAP` の枠を恒久的に消費するのを
+            // 防ぐため、外側 `HashMap` からエントリ自体を取り消す
+            // （codex-review 指摘・PR #2232。本関数内のロック順序は常に
+            // 外側 → 内側のため、内側 `slot_guard` を保持したまま外側
+            // ロックを取ると逆順になり他呼び出しの通常経路とデッドロック
+            // しうる。よって一旦内側ロックを解放してから外側ロックを
+            // 取得する。
+            //
+            // 内側ロックの再取得は非ブロッキングの `try_lock` に限定する
+            // （Cursor Bugbot 指摘・PR #2232。CUDA 側
+            // `context_cache::cached_fused_elementwise_kernel` と同じ
+            // 是正）。当初の実装はここで `slot.lock()`（ブロッキング）を
+            // 呼んでいたが、外側 `guard` を保持したまま内側ロックの獲得
+            // を待つ構成のため、同じキーで並行 retry が既にコンパイル中
+            // （内側ロックを保持）だと、そのコンパイルが終わるまで外側
+            // ロック全体が占有され、無関係な別キーの lookup まで停止して
+            // しまう。`try_lock` が失敗する（＝他スレッドが構築中）場合は
+            // 削除を見送る。そのスレッドがのちに失敗すれば、そのスレッド
+            // 自身のクリーンアップが同じ経路で削除を再試行するため安全側
+            // に倒れる。`try_lock` が成功した場合は内側ロックを保持した
+            // まま「まだ未構築のまま」を確認し、確認と削除の間に他
+            // スレッドの成功した書き込みが割り込む TOCTOU を排除する
+            // （内側ロックを保持したまま `guard.remove` まで行うため、
+            // 確認後に他スレッドが割り込んで書き込む余地がない）。
+            drop(slot_guard);
+            if let Ok(mut guard) = cache.lock()
+                && guard
+                    .get(key)
+                    .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
+                && let Ok(inner_guard) = slot.try_lock()
+                && inner_guard.is_none()
+                // 待機中の同一キー retry を孤立スロットへ追い出さない
+                // （codex-review 指摘・PR #2232。CUDA 側 `context_cache
+                // .rs::cached_fused_elementwise_kernel` の同名コメント
+                // 参照。両クレート同一の是正）。`try_lock` + `is_none()`
+                // だけでは、`slot_guard` 解放から本節の外側ロック再取得
+                // までの短い区間に、既に `slot` の `Arc` clone を持って
+                // `lock_cache(&slot)`（ブロッキング）で待機していた
+                // 別スレッドの retry が先に内側ロックへ滑り込む競合を
+                // 排除できない。その retry は削除後の孤立 `slot` 上で
+                // ビルドし直し、成功しても以後の呼び出しから観測できず
+                // single-flight 契約が崩れる。外側 `cache` ロックを
+                // 保持している間は新規 clone が発生し得ないため、
+                // `Arc::strong_count(&slot) <= 2`（マップの 1 参照＋
+                // このスレッドのローカル `slot` 変数の 1 参照）であれば
+                // 他に待機者がいないと判定できる。それを超える場合は
+                // 削除を見送る（待機 retry 自身が後で構築に失敗すれば、
+                // そのスレッドが同じ経路で削除を再試行する）。
+                //
+                // 残存する安全側の縮退（CUDA 側 `context_cache.rs::
+                // cached_fused_elementwise_kernel` の同名コメント参照）:
+                // 並行する複数の失敗がほぼ同時にこの判定へ到達すると
+                // 互いを「待機 retry あり」と誤認して双方が削除を
+                // 見送りうる。エントリは `None` のまま残り次回同一
+                // キー呼び出しで再利用できる（孤立はしない）が、
+                // 恒久的に失敗し続けるキーでは枠を 1 個分消費し続ける
+                // 狭い窓が生じうる。孤立（single-flight 契約破り）を
+                // 防ぐための許容される trade-off。
+                && Arc::strong_count(&slot) <= 2
+            {
+                guard.remove(key);
+            }
+            Err(err)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

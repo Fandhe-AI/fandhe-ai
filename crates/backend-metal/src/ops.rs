@@ -40,7 +40,7 @@ use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
-    DispatchFailureCell, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
+    DType, DispatchFailureCell, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
     InterpolateMode, KlDivTarget, LayerNormBackwardOutput, LstmPointwiseOutput, MatrixNormOrd,
     MseReduction, Pool2dParams, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
     ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, adaptive_pool2d_out_shape,
@@ -53,6 +53,10 @@ use crate::context::MetalContext;
 use crate::context_cache;
 use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
+use crate::fused_elementwise::{
+    ElementwiseProgram, gpu_elementwise_fusion_enabled, match_elementwise_plan,
+};
+use crate::fused_elementwise_source::{self, FUSED_EW_FUNCTION_NAME};
 use crate::gather_scatter_model::{GS_MAX_RANK, validate_index_range, validate_shapes_fit_u32};
 use crate::layout::{self, MatrixLayout};
 use crate::memory::{MetalBufferHandle, MetalMemory, map_metal_error};
@@ -4829,10 +4833,20 @@ impl BackendOps for MetalBackendOps {
         if let Some(hidden) = row_kernel::match_softmax_plan(plan) {
             return self.run_fused_softmax(plan, leaves, hidden);
         }
+        // 区分 B-1（イシュー #2085）: GPU elementwise allowlist 融合。
+        // ゲートは**デバイスアクセス前**に判定する（`fused_elementwise.rs`
+        // モジュール冒頭「opt-in ゲート」の契約）。
+        if gpu_elementwise_fusion_enabled()
+            && let Some(program) = match_elementwise_plan(plan)
+        {
+            return self.run_fused_elementwise_allowlist(plan, leaves, program);
+        }
         Err(BackendError::Unsupported(
             "MetalBackendOps::run_fused: プランが canonical RMSNorm（x * rsqrt(sum(x^2))）／\
-             softmax（exp(x-max(x))/sum）のいずれの形状にも一致しないため融合カーネルへ\
-             ルーティングできない（#604 スコープ。呼び出し元の per-op フォールバックに委ねる）"
+             softmax（exp(x-max(x))/sum）・opt-in 有効時の elementwise allowlist 形状\
+             （区分 B-1・#2085）のいずれの形状にも一致しないため融合カーネルへ\
+             ルーティングできない（#604／#2085 スコープ。呼び出し元の per-op フォールバックに \
+             委ねる）"
                 .into(),
         ))
     }
@@ -5079,6 +5093,98 @@ impl MetalBackendOps {
             .run_softmax_f32(&ctx, x_slice, rows, hidden)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, plan.output_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`BackendOps::run_fused`] の GPU elementwise allowlist 融合経路
+    /// （区分 B-1・イシュー #2085）。`run_fused_rmsnorm`／
+    /// `run_fused_softmax` と同じ起動前 fail-closed 検証パターン
+    /// （dtype F32 限定・leaf 数一致・leaf shape 恒等・contiguous）を
+    /// 踏襲し、実行時 MSL ソース生成
+    /// （`fused_elementwise_source::generate_source`）→
+    /// `context_cache::cached_fused_elementwise_pipeline` によるキャッシュ
+    /// 済みコンパイル → `elementwise::run_fused_nary`（ディスパッチ）
+    /// の順で実行する。CUDA 側 `CudaBackendOps::
+    /// run_fused_elementwise_allowlist` と同型の構成（`compile_program`
+    /// 相当の処理は本メソッド内にインライン化。`fused_elementwise.rs`
+    /// モジュール冒頭「役割分担」コメント参照）。
+    fn run_fused_elementwise_allowlist(
+        &self,
+        plan: &FusionPlan,
+        leaves: &[&Tensor<f32>],
+        program: ElementwiseProgram,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if plan.dtype() != DType::F32 {
+            return Err(BackendError::Unsupported(format!(
+                "MetalBackendOps::run_fused: unsupported dtype {:?} (GPU elementwise allowlist \
+                 fusion kernel supports F32 only)",
+                plan.dtype()
+            )));
+        }
+        if leaves.len() != program.leaf_count {
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected: program.leaf_count,
+                    actual: leaves.len(),
+                },
+            ));
+        }
+        let output_shape = plan.output_shape();
+        let mut leaf_slices: Vec<Tensor<f32>> = Vec::with_capacity(leaves.len());
+        for leaf in leaves {
+            if leaf.shape() != output_shape {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: output_shape.to_vec(),
+                    rhs: leaf.shape().to_vec(),
+                }));
+            }
+            // `leaf.contiguous()` は非連続 Tensor（broadcast 由来等）に対し
+            // 内部で `Vec::with_capacity(numel)` を確保する。numel が usize に
+            // 収まっても必要バイト数が isize::MAX を超えると capacity overflow
+            // で panic しうるため（本番経路 panic 禁止規約違反）、`contiguous()`
+            // 呼び出し前に `checked_bytes_for::<f32>` で確保可能性を検証する
+            // （CUDA 側 `CudaBackendOps::run_fused_elementwise_allowlist` と
+            // 同型の修正。codex-review 指摘 PRRT_kwDOTuUCJc6lE7o4。イシュー
+            // #2085）。
+            checked_bytes_for::<f32>(leaf.shape()).map_err(BackendError::ShapeMismatch)?;
+            leaf_slices.push(leaf.contiguous());
+        }
+        let mut slices: Vec<&[f32]> = Vec::with_capacity(leaf_slices.len());
+        for (i, owned) in leaf_slices.iter().enumerate() {
+            let s = owned.as_slice().ok_or_else(|| {
+                BackendError::Unsupported(format!(
+                    "MetalBackendOps::run_fused: leaf {i} is non-contiguous after \
+                     contiguous() (unexpected; detect_fusion should already route \
+                     non-contiguous chains to the non-fused fallback)"
+                ))
+            })?;
+            slices.push(s);
+        }
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let key = fused_elementwise_source::cache_key(&program.ops, program.leaf_count);
+        let source = fused_elementwise_source::generate_source(&program.ops, program.leaf_count);
+        let pipeline = context_cache::cached_fused_elementwise_pipeline(
+            &ctx,
+            &key,
+            &source,
+            FUSED_EW_FUNCTION_NAME,
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let Some(pipeline) = pipeline else {
+            // キャッシュ上限到達（`context_cache::
+            // cached_fused_elementwise_pipeline` が `Ok(None)`）。
+            // fail-closed に `Unsupported` へ変換し、呼び出し元の per-op
+            // フォールバックへ委ねる。
+            return Err(BackendError::Unsupported(
+                "MetalBackendOps::run_fused: fused elementwise kernel cache capacity reached \
+                 (falling back to per-op execution)"
+                    .into(),
+            ));
+        };
+
+        let data = crate::elementwise::run_fused_nary(&ctx, &pipeline, &slices)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(data, output_shape).map_err(BackendError::ShapeMismatch)
     }
 }
 

@@ -693,6 +693,18 @@ pub(crate) mod row_kernel;
 // 単体テストが回るようにしてある（`scalar_op_source.rs` モジュール冒頭
 // 「cfg 方針」参照）。
 pub(crate) mod scalar_op_source;
+// GPU `run_fused` の elementwise allowlist 融合（区分 B-1・イシュー
+// #2085）。opt-in ゲート（`AtomicBool`）・allowlist 判定
+// （`match_elementwise_plan`／`ElementwiseProgram`）は `objc2` 系 FFI に
+// 触れないため、`row_kernel`／`scalar_op_source` と同じ設計判断で
+// `cfg(target_os = "macos")` を付けず Linux（本実装環境・CI）でも単体
+// テストが回るようにしてある（`fused_elementwise.rs` モジュール冒頭
+// 参照）。パイプライン取得・カーネル起動自体（`objc2` 系 FFI）は
+// `ops.rs`（macOS 限定）へ配置する。`pub`: 外部テスト
+// （`tests/fused_elementwise_parity.rs`）からゲート操作 API へ到達する
+// ため（`adam_model.rs` 等と同じ理由）。
+pub mod fused_elementwise;
+pub(crate) mod fused_elementwise_source;
 #[cfg(target_os = "macos")]
 pub mod softmax;
 // `gemm_simdgroup_tiled` のソーステキスト特殊化経路（イシュー #1288。
