@@ -271,18 +271,25 @@ impl Module for ModuleList {
     }
 
     /// 子が 1 つでも `true` を返せば `true`（[`Module::requires_grad`]
-    /// の複合層契約どおり。子が 1 つも無い空 `ModuleList` は `false`
-    /// を返す——`any` の空列に対する自然な既定であり、パラメータを
-    /// 持たない複合層は凍結状態を持たないという契約とも整合する）。
+    /// の複合層契約どおり）。子が 1 つも無い空 `ModuleList` は `true`
+    /// を返す（`any` の空列に対する数学的な既定は `false` だが、
+    /// [`Module::requires_grad`] 既定実装 doc の「既定 `true`。パラメータ
+    /// を持たない層は状態を保持しないため `freeze()` 後も `true` の
+    /// まま」契約に合わせる——`ModuleList` 自体もパラメータを持たない
+    /// 空コンテナのときは同じ契約に従うべきであり、素の `any` の空列
+    /// 既定 `false` を採用すると、空の `ModuleList`／`Sequential` だけ
+    /// 「常に凍結扱い」という他の無状態層と矛盾する挙動になる）。
     ///
     /// # 是正記録（P1・#2234 レビュー指摘）
     ///
-    /// 旧実装は `all`（全子が `true` の場合のみ `true`）だったが、
-    /// 上記 doc の公開契約（「子が 1 つでも `true` なら `true`」）と
-    /// 逆であり、一部凍結・一部解凍の `ModuleList`／`Sequential` が
-    /// 誤って `false` を返す不具合だった。
+    /// 旧実装は `all`（全子が `true` の場合のみ `true`。空列は `true`）
+    /// だったが、上記 doc の公開契約（「子が 1 つでも `true` なら
+    /// `true`」）と逆であり、一部凍結・一部解凍の `ModuleList`／
+    /// `Sequential` が誤って `false` を返す不具合だった。`any` へ修正
+    /// する際、空列既定は `Module::requires_grad` の無状態層契約を
+    /// 保つため `all` と同じ `true` のまま変更していない。
     fn requires_grad(&self) -> bool {
-        self.modules.iter().any(|m| m.requires_grad())
+        self.modules.is_empty() || self.modules.iter().any(|m| m.requires_grad())
     }
 
     fn as_module_list(&self) -> Option<&ModuleList> {
@@ -771,13 +778,14 @@ mod tests {
         assert!(!list.requires_grad());
     }
 
-    /// 空 `ModuleList` は `false`（`any` の空列に対する自然な既定。
-    /// パラメータを持たない複合層は凍結状態を持たないという契約とも
-    /// 整合する）。
+    /// 空 `ModuleList` は `true`（素の `any` の空列既定は `false` だが、
+    /// [`Module::requires_grad`] の「パラメータを持たない層は既定
+    /// `true` のまま」契約に合わせて `true` を返す。`ModuleList::
+    /// requires_grad` doc 参照）。
     #[test]
-    fn module_list_requires_grad_is_false_for_empty_list() {
+    fn module_list_requires_grad_is_true_for_empty_list() {
         let list = ModuleList::new();
-        assert!(!list.requires_grad());
+        assert!(list.requires_grad());
     }
 
     /// P1 是正・#2234 レビュー指摘: 入れ子 `ModuleList` が混在状態
