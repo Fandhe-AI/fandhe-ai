@@ -716,6 +716,233 @@ pub trait Module {
         }
         Ok(())
     }
+
+    /// この層が直接内包する子 `Module`（PyTorch `Module.children()` 相当。
+    /// イシュー #2134）の「名前, 参照」列を登録順で返す。
+    ///
+    /// # 命名契約
+    ///
+    /// 名前は [`Module::named_parameters`] が使う接頭辞（`prefixed`
+    /// ヘルパーの第 1 引数）と**完全一致**させる（[`Module::
+    /// named_modules`]・[`nn::summary`](crate::nn::container::summary) が
+    /// 本メソッドから辿るパスと `named_parameters` の平坦名の対応を
+    /// 保つため）。`ModuleList`／`Sequential`（`container.rs`）は
+    /// `"{index}"`、`ModuleDict`（同ファイル）は挿入キー、
+    /// `MultiheadAttention` は `q_proj`／`k_proj`／`v_proj`／
+    /// `out_proj`、`TransformerEncoderLayer` は `self_attn`／`linear1`／
+    /// `linear2`／`norm1`／`norm2` をそれぞれ返す。
+    ///
+    /// `Rnn`／`Lstm`／`Gru` は `RnnCell`／`LstmCell`／`GruCell` が
+    /// `Module` を実装しないため本メソッドを既定（空）のままとする
+    /// （`named_parameters` が使う `"cell."` 接頭辞はサブモジュール
+    /// パスではない。イシュー #2134 のスコープ判断）。
+    ///
+    /// # 既定実装
+    ///
+    /// 葉モジュール（子を持たない層）向けに空 `Vec` を返す。
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        Vec::new()
+    }
+
+    /// この層の子孫を深さ優先（子自身 → その子孫の順）で再帰列挙する
+    /// （PyTorch `Module.named_modules()` 相当。イシュー #2134）。
+    ///
+    /// # PyTorch からの逸脱（意図的）
+    ///
+    /// PyTorch の `named_modules()` はルート自身を空文字列 `""` の
+    /// エントリとして先頭に含めるが、**本メソッドはルート自身を
+    /// 含めない**。理由: ルートを含めるには本メソッド内で `self` を
+    /// `&dyn Module` へ強制する必要があり、それには `Self: Sized`
+    /// 境界が要る。`Self: Sized` を付けると本メソッドは vtable から
+    /// 除外され、[`Box<dyn Module>`] 経由の子孫再帰
+    /// （[`Module::children`] が返す `&dyn Module` に対する再帰呼び
+    /// 出し）ができなくなり trait の object safety が壊れる
+    /// （[`crate::nn::container::ModuleDict`]・`Box<dyn Module>` を
+    /// 保持する既存コンテナ全般が本メソッドを呼べなくなる）。
+    /// ルートを含めたい場合は呼び出し側で `(String::new(), self)` を
+    /// 別途 push すること。
+    ///
+    /// パスは `"{parent}.{child}"` で連結する（[`Module::children`]
+    /// の命名契約に従う限り、[`Module::named_parameters`] の平坦名と
+    /// `"{path}.{parameter_name}"` の関係が保たれる）。
+    ///
+    /// # 循環・重複ノードの扱い（イシュー #2134 codex-review 指摘。
+    /// PR #2231）
+    ///
+    /// [`Module::children`] は trait object を返す性質上、実装者が
+    /// 自身（`self`）や既に列挙済みの `Module` を任意に返せる
+    /// （例: 手書きの循環参照構造）。本メソッドはノードの同一性を
+    /// **`(データポインタ, 型名)` の組**（`type_name` は
+    /// [`Module::type_name`]。`&dyn Module` の vtable を除いた実体
+    /// アドレスとセットで比較する）で判定し、2 種類の追跡を組み合わせて
+    /// 安全に打ち切る:
+    ///
+    /// 1. **祖先限定の循環検出**（常時・無条件）: ルートから現在ノード
+    ///    までの経路（祖先）上のキーのみをスタックで保持し、経路上に
+    ///    既出のノードへは再帰しない。循環構造でも panic
+    ///    （stack overflow）せず有限の結果を返す（`.claude/rules/
+    ///    security.md` A03・本番経路 panic 禁止の方針に合わせる）。
+    /// 2. **グローバルな共有オブジェクト dedup**（ゼロサイズ型を除く）:
+    ///    経路をまたいだ訪問済み集合も保持し、同じ `Module` が複数の
+    ///    親から共有される場合は最初に到達した経路でのみ列挙する
+    ///    （PyTorch `named_modules()` の memo と同じ契約）。ただし
+    ///    `std::mem::size_of_val` でゼロサイズ（ZST。`Relu`・`Gelu`
+    ///    等フィールドを持たない活性化層）と判定できる子はこの
+    ///    グローバル dedup の対象から除外する。理由: ZST を `Box` へ
+    ///    格納すると、実際には異なるインスタンスであっても複数
+    ///    インスタンスがアロケータの well-known dangling address
+    ///    （`align_of::<T>()` 相当の非 null 定数）を共有しうるため、
+    ///    同じ型どうしなら `(ポインタ, 型名)` キーでも「同一オブジェクト
+    ///    の共有」と「たまたまアドレスが一致した別インスタンス」を
+    ///    区別できない。`Sequential` に同種の ZST 活性化層を複数積んだ
+    ///    場合にグローバル dedup を適用すると後続レイヤーが誤って
+    ///    欠落するため、ZST は祖先限定の循環検出（1.）のみで保護し、
+    ///    常に列挙対象に含める。
+    ///
+    /// **型名を同一性キーに含める理由（イシュー #2134 codex-review／
+    /// Bugbot 指摘・PR #2231 是正）**: データポインタ単独をキーにすると
+    /// 上記 ZST 問題に加え、`MultiheadAttention { q_proj: Linear, ... }`
+    /// のような複合 `Module`（子の最初のフィールドがルート構造体の
+    /// 先頭に配置されうる）で、ルート自身のデータポインタと最初の子
+    /// フィールドのデータポインタが**異なる型でありながら数値としては
+    /// 一致**しうる（Rust のフィールドレイアウトは既定で最適化のため
+    /// 順序保証がないが、先頭フィールドがオフセット 0 に来る配置は
+    /// 珍しくない）。この場合、ポインタ単独の祖先チェックだと最初の子
+    /// （型が異なる別オブジェクト）を「ルート自身の既出」と誤判定して
+    /// 打ち切ってしまい、その子孫ごと丸ごと欠落する（`MultiheadAttention`
+    /// の `q_proj` や `TransformerEncoderLayer` の `self_attn` で実測
+    /// 再現。`crates/autodiff/tests/nn_module_introspection.rs` の
+    /// `named_modules_and_summary_do_not_drop_offset_zero_first_child`
+    /// 参照）。[`Module::type_name`] を組み合わせたキーにすれば、
+    /// アドレスが一致してもルート（`MultiheadAttention`）と子
+    /// （`Linear`）の型名が異なるため誤判定されない。
+    ///
+    /// # 既定実装
+    ///
+    /// [`Module::children`] を再帰するのみ（オーバーライド不要）。
+    fn named_modules(&self) -> Vec<(String, &dyn Module)> {
+        let mut out = Vec::new();
+        // `self` はここでは `&Self`（`Self: ?Sized` として扱われる。
+        // `named_modules` が dyn 安全であり続けるための制約は
+        // 上記コメント・`children` の doc を参照）であり、`&dyn
+        // Module` へ強制（unsizing coercion）することはできない
+        // （`Self: Sized` を要求し object safety を壊すため）。
+        // だが参照から生ポインタへの変換（`&Self -> *const Self`）は
+        // 強制を伴わないため常に可能であり、続く `*const Self ->
+        // *const ()` キャストで vtable を落としたデータアドレスだけを
+        // 取り出せる。`self.type_name()` と組にした `NodeKey` で
+        // ルート自身の同一性を、`children()` が返す `&dyn Module`
+        // （同じくキー化できる）と比較する（上記「循環・重複ノードの
+        // 扱い」節・型名を同一性キーに含める理由の節参照）。
+        let root_key: NodeKey = (self as *const Self as *const (), self.type_name());
+        // 祖先限定の循環検出用スタック（常時・全ノード対象。上記
+        // 「循環・重複ノードの扱い」節 1.）。
+        let mut ancestors: Vec<NodeKey> = vec![root_key];
+        // グローバルな共有オブジェクト dedup 用集合（ゼロサイズ型を
+        // 除く。同節 2.）。ルート自身は `named_modules` の戻り値には
+        // 含めないため事前登録しない（`children()` が返す非 ZST の子が
+        // ルートと同一キーを持つことは、同じ型かつ同じアドレスの場合
+        // のみで、それは `child` が `self` 自身を返す自己参照であり
+        // `ancestors` 側で捕捉される）。
+        let mut visited: HashSet<NodeKey> = HashSet::new();
+        for (name, child) in self.children() {
+            collect_named_modules(name, child, &mut ancestors, &mut visited, &mut out);
+        }
+        out
+    }
+
+    /// この層（および子孫を持つ場合はその全体）が公開する学習可能
+    /// パラメータの総要素数（PyTorch `sum(p.numel() for p in
+    /// model.parameters())` 相当。イシュー #2134）。
+    ///
+    /// [`Module::named_parameters`] が公開するもののみを数える
+    /// （`BatchNorm` の running stats 等、`named_parameters` に現れない
+    /// buffer は含まない。PyTorch `parameters()` と同じ扱い）。
+    /// オーバーフロー入力（想定外の巨大モデル）に対しても panic せず
+    /// `usize::MAX` に飽和させる（`.claude/rules/security.md` A03
+    /// fail-closed 方針に合わせ、DoS 目的の panic を避ける）。
+    ///
+    /// # 既定実装
+    ///
+    /// [`Module::named_parameters`] の各テンソルの `numel()` を
+    /// `saturating_add` で合計する（オーバーライド不要）。
+    fn parameter_count(&self) -> usize {
+        self.named_parameters()
+            .into_iter()
+            .fold(0usize, |acc, (_, tensor)| {
+                acc.saturating_add(tensor.numel())
+            })
+    }
+
+    /// この層の実装型名（[`nn::summary`](crate::nn::container::summary)
+    /// が表示用に使う。イシュー #2134）。
+    ///
+    /// `std::any::type_name::<Self>()` をそのまま返す。標準ライブラリは
+    /// この出力形式の安定性を保証しない（クレートパス付き・ジェネリク
+    /// スパラメータ付きの完全修飾名になりうる）ため、表示用に短縮する
+    /// 加工は呼び出し側（`nn::summary`）の責務とする。
+    ///
+    /// # 既定実装
+    ///
+    /// オーバーライド不要（`?Sized` 対応の `type_name` を使うため
+    /// `dyn Module` 経由でも呼び出し元の具象型へ正しく解決される）。
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+}
+
+/// [`Module::named_modules`]・[`crate::nn::container::summary`] が
+/// 共有するノード同一性キー（イシュー #2134。データポインタ単独では
+/// 誤判定しうるため型名を組み合わせる是正は codex-review／Bugbot
+/// 指摘・PR #2231）。「`&dyn Module` の vtable を除いた実体データ
+/// アドレス」と「[`Module::type_name`]」の組。詳細は
+/// [`Module::named_modules`] の「型名を同一性キーに含める理由」節
+/// 参照。
+pub(crate) type NodeKey = (*const (), &'static str);
+
+/// [`Module::named_modules`] の再帰本体（イシュー #2134。ZST・
+/// offset-0 誤判定是正は codex-review／Bugbot 指摘・PR #2231）。
+///
+/// `child`（`&dyn Module`。データポインタが一意に取れるため `self`
+/// とは異なり object safety の制約を受けない）を [`NodeKey`] へ写像
+/// し、次の 2 段階で判定する（[`Module::named_modules`] の
+/// 「循環・重複ノードの扱い」節参照）:
+///
+/// 1. `ancestors`（現在の再帰経路上の [`NodeKey`] のスタック）に
+///    既出なら真の循環として黙って打ち切る（ZST か否かに関わらず
+///    常時適用）。
+/// 2. `child` がゼロサイズ型（`size_of_val(child) == 0`）でなければ、
+///    経路をまたぐ `visited` 集合にも登録を試み、既登録（＝別経路で
+///    共有済みのオブジェクト）なら打ち切る。ZST はこの段を素通りし
+///    常に列挙・再帰対象になる（複数インスタンスがアロケータの
+///    dangling address を共有し「既出」と誤判定されるのを防ぐ）。
+fn collect_named_modules<'a>(
+    name: String,
+    child: &'a dyn Module,
+    ancestors: &mut Vec<NodeKey>,
+    visited: &mut HashSet<NodeKey>,
+    out: &mut Vec<(String, &'a dyn Module)>,
+) {
+    let key: NodeKey = (child as *const dyn Module as *const (), child.type_name());
+    if ancestors.contains(&key) {
+        return;
+    }
+    let is_zst = std::mem::size_of_val(child) == 0;
+    if !is_zst && !visited.insert(key) {
+        return;
+    }
+    out.push((name.clone(), child));
+    ancestors.push(key);
+    for (descendant_name, descendant) in child.children() {
+        collect_named_modules(
+            format!("{name}.{descendant_name}"),
+            descendant,
+            ancestors,
+            visited,
+            out,
+        );
+    }
+    ancestors.pop();
 }
 
 /// `Linear::bind(tape)` で当該ステップの葉ノードを登録してから

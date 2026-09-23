@@ -5668,3 +5668,92 @@ fn facade_pub_use_leaves_are_not_modules_detects_unapproved_lowercase_leaf() {
         "allowlist 内の葉が誤って違反として検出された: {approved:?}"
     );
 }
+
+/// `line` 中に `ident` が識別子単位（前後が `is_ident_char` でない
+/// 位置）で現れるかを検査する（イシュー #2134「否定ガード」節。
+/// `contains` の部分一致だと `summary` のような一般語が別識別子の
+/// 部分文字列として誤検出しうるため、トークン境界で判定する）。
+fn line_contains_identifier(line: &str, ident: &str) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    let ident_chars: Vec<char> = ident.chars().collect();
+    let ident_len = ident_chars.len();
+    if ident_len == 0 || chars.len() < ident_len {
+        return false;
+    }
+    for start in 0..=(chars.len() - ident_len) {
+        if chars[start..start + ident_len] != ident_chars[..] {
+            continue;
+        }
+        let before_ok = start == 0 || !is_ident_char(chars[start - 1]);
+        let after_idx = start + ident_len;
+        let after_ok = after_idx >= chars.len() || !is_ident_char(chars[after_idx]);
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// `crates/facade/src/**` の `pub use` 行に `ModuleDict`／`summary`
+/// （`fandhe_ai_autodiff::nn::container` に イシュー #2134 で追加した
+/// 内部クレート限定の新規公開面）が識別子単位で現れないことを固定
+/// する（`facade_does_not_reexport_create_graph_result` と同型の否定
+/// ガード）。
+///
+/// # 背景（実装計画 §2.1）
+///
+/// イシュー #2134・親 #2131 とも承認コメントが確認できないうえ、
+/// facade は `Module` trait 自体を公開していないため
+/// `Box<dyn Module>` を受ける `ModuleDict`・`&dyn Module` を受ける
+/// `summary` は #2133（`Module` trait の facade 公開）完了まで facade
+/// からは意味を成さない。本 PR では `crates/facade/src/**` を変更
+/// しないため、本テストは「未公開」という現状を fail-closed に固定
+/// するもの。承認取得後の実施形（#2133 完了後の再エクスポート等）を
+/// 追加する際は本テストを更新すること。
+#[test]
+fn facade_does_not_reexport_module_dict_or_summary() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            for ident in ["ModuleDict", "summary"] {
+                if line_contains_identifier(trimmed, ident) {
+                    offending.push(format!(
+                        "{}: `{trimmed}` が `{ident}` を識別子単位で含む",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が ModuleDict／summary（イシュー #2134 の内部クレート限定\
+         新規公開面）を再エクスポートしている（承認未取得のまま対象外という\
+         設計判断に違反）: {offending:?}"
+    );
+}
+
+/// `crates/facade/src/compat/sequential.rs` に
+/// `parameter_count`／`summary`／`named_modules` の `pub fn` が存在
+/// しないことを固定する（イシュー #2134 実装計画 §2.1「代替として
+/// facade 側には『未公開』状態を固定する否定ガードを追加する」）。
+/// 承認取得後にこれらの薄い委譲 `pub fn` を追加する際は、本テストを
+/// 正ガード（存在することを検査するテスト）へ更新すること。
+#[test]
+fn compat_sequential_has_no_introspection_methods() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    for name in ["parameter_count", "summary", "named_modules"] {
+        assert!(
+            !contains_pub_fn_declaration(&content, name),
+            "crates/facade/src/compat/sequential.rs に `pub fn {name}(...)` \
+             が見つかった（イシュー #2134 は facade 公開面拡張を未承認のまま\
+             対象外としている設計判断に違反）"
+        );
+    }
+}
