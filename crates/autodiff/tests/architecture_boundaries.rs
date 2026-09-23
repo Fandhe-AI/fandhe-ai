@@ -1006,7 +1006,33 @@ fn tokens_declare_pub_fn(tokens: &[String], fn_name: &str) -> bool {
 /// 減らす）。ジェネリクスの有無に依らずこの単一ループがヘッダー全体
 /// （`<...>`・型パス・`for`・`where` 節）を走査するため、事前スキップ
 /// ループは不要になった。
+///
+/// [`var_impl_block_bodies_with_aliases`] の `extra_var_aliases` を空
+/// スライスで呼ぶ薄いラッパー（既存の呼び出し元・回帰テストの互換性を
+/// 保つため。alias 判定が不要な合成入力のテストはこちらを使い続ける）。
 fn var_impl_block_bodies(tokens: &[String]) -> Vec<Vec<String>> {
+    var_impl_block_bodies_with_aliases(tokens, &[])
+}
+
+/// [`var_impl_block_bodies`] の本体（codex-review P1 指摘・PR #2212 その
+/// 続き。イシュー #2064）: ヘッダー判定は文字どおりの `Var` トークンの
+/// 有無のみを見ていたため、同一クレート内の別ファイルで `use crate::Var
+/// as V; impl V<'_> { pub fn custom(...) {} }` のように import alias を
+/// 経由すると、`header_has_var` が false のまま否定ガード
+/// （`autodiff_src_does_not_declare_pub_fn_custom_on_var`）を素通りできて
+/// しまっていた。本関数は呼び出し元が同一ファイルから事前に収集した
+/// `Var` の alias 名集合（[`find_var_alias_declarations`]。`use ... Var as
+/// X`／`type X = Var...;` を検出する）を `extra_var_aliases` として受け取り、
+/// ヘッダー走査中に `Var` そのものだけでなくこれらの alias 名のいずれかが
+/// 独立したトークンとして現れた場合も impl 対象を `Var` とみなす。
+/// alias 解決自体は行わず、同一ファイル内で検出済みの alias 名との文字列
+/// 一致のみで判定する（`autodiff_src_does_not_alias_var` が alias 宣言
+/// 自体を fail-closed に拒否するため、alias 経由の impl も両テストの
+/// 組み合わせで検出できる）。
+fn var_impl_block_bodies_with_aliases(
+    tokens: &[String],
+    extra_var_aliases: &[String],
+) -> Vec<Vec<String>> {
     let mut bodies = Vec::new();
     let mut i = 0usize;
     while i < tokens.len() {
@@ -1057,7 +1083,9 @@ fn var_impl_block_bodies(tokens: &[String]) -> Vec<Vec<String>> {
                 }
                 "{" => brace_depth += 1,
                 "}" => brace_depth = (brace_depth - 1).max(0),
-                "Var" => header_has_var = true,
+                other if other == "Var" || extra_var_aliases.iter().any(|alias| alias == other) => {
+                    header_has_var = true;
+                }
                 _ => {}
             }
             j += 1;
@@ -1503,11 +1531,19 @@ fn autodiff_src_does_not_declare_pub_fn_custom_on_var() {
         // PR #2212 その 12・第 2 ラウンド指摘 1）。
         let normalized = normalize_source(content);
         let tokens = tokenize_including_punctuation(&normalized);
-        for body in var_impl_block_bodies(&tokens) {
+        // 同一ファイル内で `use ... Var as X;`／`type X = Var...;` により
+        // 宣言された alias 名を先に収集し、ヘッダー判定（`header_has_var`）
+        // に加える（codex-review P1 指摘・PR #2212 その続き。イシュー
+        // #2064: 文字どおりの `Var` トークンのみを見るヘッダー判定では
+        // `use crate::Var as V; impl V { pub fn custom() {} }` のような
+        // alias 経由の宣言を見逃す。`autodiff_src_does_not_alias_var` が
+        // alias 宣言自体を fail-closed に拒否するのと合わせた二重の対策）。
+        let var_aliases = find_var_alias_declarations(&normalized);
+        for body in var_impl_block_bodies_with_aliases(&tokens, &var_aliases) {
             for fn_name in ["custom", "add_custom"] {
                 if tokens_declare_pub_fn(&body, fn_name) {
                     violations.push(format!(
-                        "{}: impl Var に pub fn {fn_name} 宣言",
+                        "{}: impl Var（または alias {var_aliases:?}）に pub fn {fn_name} 宣言",
                         path.display()
                     ));
                 }
@@ -1519,8 +1555,8 @@ fn autodiff_src_does_not_declare_pub_fn_custom_on_var() {
         "crates/autodiff/src 配下の impl Var ブロックに未承認の pub fn custom／\
          add_custom 宣言が見つかった（§12.5 (b) 未承認のまま Var 経由の到達口を\
          設けてしまっている。`pub`・`fn`・関数名の間に改行・ブロックコメントを\
-         挟んだ宣言も、`src/var.rs` 以外のファイルに書かれた impl ブロックも\
-         検出する）: {violations:?}"
+         挟んだ宣言も、`src/var.rs` 以外のファイルに書かれた impl ブロックも、\
+         同一ファイル内の import alias 経由の宣言も検出する）: {violations:?}"
     );
 }
 
@@ -1744,6 +1780,228 @@ fn var_impl_block_bodies_detects_declaration_in_other_module_file() {
             .any(|body| tokens_declare_pub_fn(body, "custom")),
         "raw 文字列・char・ライフタイム混在ケースで\
          pub fn custom の検出を見逃した: {bodies:?}"
+    );
+}
+
+/// `use_body`（`use` キーワード除去後・`;` 除去済みの残り。例:
+/// `crate::Var as V`・`crate::{Tape, Var as V}`）を走査し、`Var` に対する
+/// alias（`as` の直前が独立した `Var` トークンである場合の `as` 直後の
+/// 識別子）をすべて収集して返す（[`find_var_alias_declarations`] 専用。
+/// codex-review P1 指摘・PR #2212 その続き。イシュー #2064）。
+///
+/// `use` ツリーの波括弧グループ（`{...}`。任意の深さでネスト可）は
+/// [`extract_identifier_tokens`] が `{`／`}`／`,`／`::` を単純に読み飛ばす
+/// ため、波括弧のネスト構造を明示的に解体しなくても "Var" と "as" が
+/// トークン列上で隣接していれば検出できる——alias 対象の解決に必要なのは
+/// パスの前方一致ではなく「`Var` という名前の直後に `as` が続くか」のみで
+/// あり、`crate::{Var as V, Tape}` も `crate::{Foo::{Var as V}}` も
+/// 同じトークン列パターン（`… "Var" "as" "V" …`）に落ちるため、
+/// パス・ネスト構造を問わず一様に扱える（要求「path 不問」）。
+/// `use crate::Var;`（alias なし）・`use crate::Variance as V;`（`Var` とは
+/// 異なる識別子）はいずれも "Var" の直後に "as" が来ないため誤検出しない。
+fn find_var_aliases_in_use_body(use_body: &str) -> Vec<String> {
+    let tokens = extract_identifier_tokens(use_body);
+    let mut aliases = Vec::new();
+    for i in 0..tokens.len() {
+        if tokens[i] == "Var"
+            && tokens.get(i + 1).map(String::as_str) == Some("as")
+            && let Some(alias) = tokens.get(i + 2)
+        {
+            aliases.push(alias.clone());
+        }
+    }
+    aliases
+}
+
+/// `rest`（`type` キーワード除去後の残り。例: `V = Var;`・
+/// `V<'a> = Var<'a>;`）が `Var`（またはそのジェネリクス適用形）を指す
+/// type alias 宣言であれば、alias 名（`type` の直後の識別子）を返す
+/// （[`find_var_alias_declarations`] 専用）。
+///
+/// alias 名の直後に続きうる generic parameter リスト（`<...>`）は
+/// [`var_impl_block_bodies_with_aliases`] と同じ山括弧の深さ追跡で読み
+/// 飛ばす——`type V<T = Foo> = Var<T>;` のようにデフォルト型引数の中に
+/// `=` が現れても、山括弧の深さが 0 に戻るまではその `=` を type alias
+/// 本体の代入演算子とみなさない。
+fn type_alias_target_is_var(rest: &str) -> Option<String> {
+    let tokens = tokenize_including_punctuation(rest);
+    let alias_name = tokens.first()?.clone();
+    let mut i = 1usize;
+    let mut angle_depth = 0i32;
+    while i < tokens.len() {
+        match tokens[i].as_str() {
+            "<" => angle_depth += 1,
+            ">" => angle_depth = (angle_depth - 1).max(0),
+            "=" if angle_depth == 0 => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    if tokens.get(i).map(String::as_str) != Some("=") {
+        return None;
+    }
+    if tokens.get(i + 1).map(String::as_str) == Some("Var") {
+        Some(alias_name)
+    } else {
+        None
+    }
+}
+
+/// `content`（[`normalize_source`] 済みの入力を想定）中に宣言された
+/// `Var` 型への alias 名をすべて収集して返す（`autodiff_src_does_not_
+/// alias_var`・[`var_impl_block_bodies_with_aliases`] の呼び出し元専用。
+/// codex-review P1 指摘・PR #2212 その続き。イシュー #2064 §「`var_impl_
+/// block_bodies` は impl ヘッダに文字どおり `Var` トークンがある場合だけ
+/// 本体を検査する。同一クレート内の別ファイルで `use crate::Var as V;`
+/// のように import alias を使うと否定ガードをすり抜ける」）。
+///
+/// 検出対象:
+/// - `use ... Var as X;`（`crate::`／`super::`／`self::`／`crate::var::Var`
+///   等パス不問。`use crate::{Var as X, …}` のような波括弧グループ内の
+///   `Var as X` も対象——[`find_var_aliases_in_use_body`] 参照）
+/// - `type X = Var...;`／`type X<...> = Var...;`
+/// - `pub use ... Var as X;`（`strip_visibility_prefix` で可視性修飾を
+///   読み飛ばしてから判定するため、`pub`／`pub(crate)` 等いずれも対象）
+///
+/// ネストした `mod x { ... }` の内部も再帰的に走査する
+/// （[`split_top_level_statements`] は `mod` ブロックを波括弧ごと 1
+/// ステートメントとして返すため、`mod` キーワード除去後の残りから本体
+/// `{...}` を切り出して再帰する）。
+fn find_var_alias_declarations(content: &str) -> Vec<String> {
+    let mut aliases = Vec::new();
+    for statement in split_top_level_statements(content) {
+        let after_attributes = strip_leading_attributes(&statement);
+        let after_visibility = strip_visibility_prefix(after_attributes);
+        if let Some(use_body) = strip_keyword_prefix(after_visibility, "use") {
+            aliases.extend(find_var_aliases_in_use_body(use_body));
+        } else if let Some(type_rest) = strip_keyword_prefix(after_visibility, "type") {
+            if let Some(alias) = type_alias_target_is_var(type_rest) {
+                aliases.push(alias);
+            }
+        } else if let Some(mod_rest) = strip_keyword_prefix(after_visibility, "mod")
+            && let (Some(brace_start), Some(brace_end)) = (mod_rest.find('{'), mod_rest.rfind('}'))
+            && brace_end > brace_start
+        {
+            aliases.extend(find_var_alias_declarations(
+                &mod_rest[brace_start + 1..brace_end],
+            ));
+        }
+    }
+    aliases
+}
+
+/// `crates/autodiff/src/` 配下のいずれの `.rs` ファイルにも `Var` 型への
+/// alias（`use ... Var as X`／`type X = Var...;`。可視性修飾・`mod` 内
+/// ネスト・波括弧グループ import を含む）が存在しないことを固定する
+/// （codex-review P1 指摘・PR #2212 その続き。イシュー #2064）。
+///
+/// [`autodiff_src_does_not_declare_pub_fn_custom_on_var`] の否定ガード
+/// （文字どおりの `Var` トークンのみを見る）は、alias 経由で `impl V { pub
+/// fn custom() {} }` のように書かれた宣言を取りこぼす死角を持つ。alias
+/// import 自体を src 全体で fail-closed に禁止することで、この死角を
+/// 構造的に塞ぐ（[`var_impl_block_bodies_with_aliases`] による同一
+/// ファイル内 alias 名の考慮と合わせた二重の対策）。
+#[test]
+fn autodiff_src_does_not_alias_var() {
+    let src_dir = autodiff_crate_root().join("src");
+    let mut violations: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let normalized = normalize_source(content);
+        for alias in find_var_alias_declarations(&normalized) {
+            violations.push(format!("{}: Var の alias `{alias}`", path.display()));
+        }
+    });
+    assert!(
+        violations.is_empty(),
+        "crates/autodiff/src 配下に Var 型への import alias／type alias が見つかった\
+         （否定ガード `autodiff_src_does_not_declare_pub_fn_custom_on_var` の alias 経由\
+         迂回を防ぐため、本ファイルでは Var の alias を作らない設計とする）: {violations:?}"
+    );
+}
+
+/// [`find_var_alias_declarations`] の単体テスト（合成入力）。
+/// `use crate::Var as V;`・`use crate::{Tape, Var as V};`・
+/// `type V = Var;`・`mod inner { use super::Var as W; }` を alias として
+/// 検出し、`use crate::Var;`（alias なし）・`use crate::Variance as V;`
+/// （`Var` とは異なる識別子）はいずれも検出しないことを固定する。
+#[test]
+fn find_var_alias_declarations_detects_use_and_type_aliases() {
+    let simple_use_alias = normalize_source("use crate::Var as V;");
+    assert_eq!(
+        find_var_alias_declarations(&simple_use_alias),
+        vec!["V".to_string()],
+        "use crate::Var as V; の alias V を検出できていない"
+    );
+
+    let grouped_use_alias = normalize_source("use crate::{Tape, Var as V};");
+    assert_eq!(
+        find_var_alias_declarations(&grouped_use_alias),
+        vec!["V".to_string()],
+        "use crate::{{Tape, Var as V}}; の alias V を検出できていない"
+    );
+
+    let type_alias = normalize_source("type V = Var;");
+    assert_eq!(
+        find_var_alias_declarations(&type_alias),
+        vec!["V".to_string()],
+        "type V = Var; の alias V を検出できていない"
+    );
+
+    let nested_mod_alias = normalize_source("mod inner { use super::Var as W; }");
+    assert_eq!(
+        find_var_alias_declarations(&nested_mod_alias),
+        vec!["W".to_string()],
+        "mod inner {{ use super::Var as W; }} の alias W を検出できていない"
+    );
+
+    let no_alias = normalize_source("use crate::Var;");
+    assert!(
+        find_var_alias_declarations(&no_alias).is_empty(),
+        "alias を伴わない use crate::Var; を誤って alias 宣言として検出した"
+    );
+
+    let different_type = normalize_source("use crate::Variance as V;");
+    assert!(
+        find_var_alias_declarations(&different_type).is_empty(),
+        "Var とは異なる識別子 Variance の alias 宣言を誤って Var の alias として検出した"
+    );
+}
+
+/// [`var_impl_block_bodies_with_aliases`] が、同一ファイル内で検出済みの
+/// `Var` alias 名（[`find_var_alias_declarations`] の出力）をヘッダー
+/// 判定に使うことで、`use crate::Var as V; impl V<'_> { pub fn custom()
+/// {} }` のように alias 経由で書かれた impl ブロックも検出できることを
+/// 固定する（codex-review P1 指摘・PR #2212 その続き。イシュー #2064）。
+#[test]
+fn var_impl_block_bodies_with_aliases_detects_impl_via_use_alias() {
+    let forged_alias_impl = "use crate::Var as V; impl V<'_> { pub fn custom() {} }";
+    let normalized = normalize_source(forged_alias_impl);
+    let aliases = find_var_alias_declarations(&normalized);
+    assert_eq!(
+        aliases,
+        vec!["V".to_string()],
+        "use crate::Var as V; から alias V を検出できていない"
+    );
+
+    let tokens = tokenize_including_punctuation(&normalized);
+    let bodies = var_impl_block_bodies_with_aliases(&tokens, &aliases);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "alias V 経由の impl V {{ pub fn custom() {{}} }} を検出できていない: {bodies:?}"
+    );
+
+    // 対照実験: alias 名を渡さない従来版（`var_impl_block_bodies`）では
+    // ヘッダーに文字どおりの `Var` トークンが無いため検出できない
+    // （alias 未考慮の死角が実在することの裏付け）。
+    let bodies_without_aliases = var_impl_block_bodies(&tokens);
+    assert!(
+        !bodies_without_aliases
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "alias 名を考慮しない従来版が検出できてしまっている（回帰テストの前提が崩れている）: \
+         {bodies_without_aliases:?}"
     );
 }
 
