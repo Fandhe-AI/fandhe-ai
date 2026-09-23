@@ -5575,13 +5575,12 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
 /// は `tokens[i]=="pub" && tokens[i+1]=="use"` の完全一致でしか反応
 /// しないため対象外——`pub(crate) use hidden::ext;` は `tokens[i+1]`
 /// が `(` になり葉として集計されない）。**#2133 の保留（`docs/facade-nn-
-/// module-exposure-decision.md` §12）の補完層も担う**: `nn`／`Module`／
-/// `ModuleList` 自体は本テストの走査対象ではあるが、`nn`／`Module` は
-/// 大文字始まりでない小文字葉としては現れない（`Module`・`ModuleList`
-/// は大文字始まりのため対象外）。`facade_does_not_reexport_nn_module_
-/// or_containers` が #2133 本来の検出を担い、本テストは `pub use
-/// fandhe_ai_autodiff::nn as ad_nn;` のような別名でのモジュール
-/// 再エクスポート（`Module` 系に限らない一般形）を引き続き捕捉する。
+/// module-exposure-decision.md` §12）の補完層も担う**: `Module`・
+/// `ModuleList` は大文字始まりのため本テストの検出対象外（`facade_does_
+/// not_reexport_nn_module_or_containers` が #2133 本来の検出を担う）。
+/// 本テストは小文字葉 `nn` の別名モジュール再エクスポート（`pub use
+/// fandhe_ai_autodiff::nn as ad_nn;`。`Module` 系に限らない一般形）を
+/// 引き続き捕捉する。
 #[test]
 fn facade_pub_use_leaves_are_not_modules() {
     let src_dir = facade_crate_root().join("src");
