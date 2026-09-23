@@ -20,7 +20,7 @@ use fandhe_ai_onnx_interop::onnx::export::{
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, RawTensor, build_graph};
 use fandhe_ai_onnx_interop::onnx::interp::{self, Value};
 use fandhe_ai_onnx_interop::onnx::proto::{AttributeProto, ModelProto, attribute_type};
-use fandhe_ai_onnx_interop::ops::{self, GemmAttrs, LayerNormAttrs};
+use fandhe_ai_onnx_interop::ops::{self, ConvAttrs, GemmAttrs, LayerNormAttrs};
 use fandhe_ai_tensor_core::Tensor;
 use prost::Message;
 
@@ -680,6 +680,112 @@ fn layer_normalization_omitted_bias_is_accepted() {
     assert_f32_bit_exact(y, &expected);
 }
 
+#[test]
+fn conv_exports_all_attributes_and_matches_direct_call() {
+    // イシュー #2076・親 #2034: `Conv` の属性は常時書き出す
+    // （モジュール冒頭コメントの規約）。`auto_pad` は STRING 属性として
+    // 書き出す（`attr_string`。他属性は INT／INTS）。
+    let attrs = ConvAttrs {
+        kernel_shape: vec![2, 2],
+        strides: vec![1, 1],
+        pads: vec![0, 0, 0, 0],
+        dilations: vec![1, 1],
+        group: 1,
+        auto_pad: "NOTSET".to_string(),
+    };
+    let node = ExportNode {
+        name: "conv1".to_string(),
+        op: ExportOp::Conv(attrs.clone()),
+        inputs: vec!["x".to_string(), "w".to_string(), "b".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+    let x = raw_f32(
+        &[1, 1, 3, 3],
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+    );
+    let w = raw_f32(&[1, 1, 2, 2], &[1.0, 0.0, 0.0, 1.0]);
+    let b = raw_f32(&[1], &[10.0]);
+
+    let proto = to_node_proto(&node).unwrap();
+    assert_eq!(proto.attribute.len(), 6, "6 属性すべてを常時書き出すはず");
+    let auto_pad_attr = proto
+        .attribute
+        .iter()
+        .find(|a| a.name == "auto_pad")
+        .unwrap();
+    assert_eq!(auto_pad_attr.r#type, attribute_type::STRING);
+    assert_eq!(auto_pad_attr.s, b"NOTSET".to_vec());
+    let group_attr = proto.attribute.iter().find(|a| a.name == "group").unwrap();
+    assert_eq!(group_attr.i, 1);
+    let kernel_shape_attr = proto
+        .attribute
+        .iter()
+        .find(|a| a.name == "kernel_shape")
+        .unwrap();
+    assert_eq!(kernel_shape_attr.ints, vec![2, 2]);
+
+    let result = run_exported_node(node, vec![("x", x), ("w", w), ("b", b)]);
+    let y = expect_f32(&result, "y");
+    let expected = ops::conv(
+        &tensor_f32(
+            &[1, 1, 3, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+        ),
+        &tensor_f32(&[1, 1, 2, 2], &[1.0, 0.0, 0.0, 1.0]),
+        Some(&tensor_f32(&[1], &[10.0])),
+        &attrs,
+    )
+    .unwrap();
+    assert_f32_bit_exact(y, &expected);
+}
+
+#[test]
+fn conv_omitted_bias_is_accepted() {
+    let attrs = ConvAttrs::default();
+    let node = ExportNode {
+        name: "conv_no_bias".to_string(),
+        op: ExportOp::Conv(attrs.clone()),
+        inputs: vec!["x".to_string(), "w".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+    let x = raw_f32(&[1, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0]);
+    let w = raw_f32(&[1, 1, 1, 1], &[2.0]);
+    let result = run_exported_node(node, vec![("x", x), ("w", w)]);
+    let y = expect_f32(&result, "y");
+    let expected = ops::conv(
+        &tensor_f32(&[1, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0]),
+        &tensor_f32(&[1, 1, 1, 1], &[2.0]),
+        None,
+        &attrs,
+    )
+    .unwrap();
+    assert_f32_bit_exact(y, &expected);
+}
+
+#[test]
+fn conv_omitted_auto_pad_writes_no_auto_pad_attribute() {
+    // P0 修正の対称性確認（codex-review 指摘。イシュー #2076・PR #2220）:
+    // `ConvAttrs::default()` の `auto_pad: String::new()`（Rust API の
+    // 「未指定」sentinel）を export すると、`auto_pad` 属性自体が
+    // 書き出されないことを直接検証する（`interp::attr_string` が
+    // 「存在して値が空」の STRING を fail-closed に拒否するため、空文字列を
+    // そのまま書き出すと自己 export の往復が壊れる。`conv_omitted_bias_is_
+    // accepted` は往復成功のみを間接検証するため、本テストで export 出力
+    // そのものを直接アサートする）。
+    let node = ExportNode {
+        name: "conv_no_auto_pad".to_string(),
+        op: ExportOp::Conv(ConvAttrs::default()),
+        inputs: vec!["x".to_string(), "w".to_string()],
+        outputs: vec!["y".to_string()],
+    };
+    let proto = to_node_proto(&node).unwrap();
+    assert!(
+        proto.attribute.iter().all(|a| a.name != "auto_pad"),
+        "auto_pad 属性は書き出されないはず（実際: {:?}）",
+        proto.attribute.iter().map(|a| &a.name).collect::<Vec<_>>()
+    );
+}
+
 // ---- 層 A: arity 検査 ----
 
 #[test]
@@ -851,8 +957,11 @@ fn build_model_proto_rejects_unsupported_op_type() {
         nodes: vec![NodeProto {
             input: vec!["x".to_string()],
             output: vec!["y".to_string()],
-            name: "conv1".to_string(),
-            op_type: "Conv".to_string(),
+            name: "flatten1".to_string(),
+            // `Flatten` は本クレート未対応のまま（`Conv` はイシュー
+            // #2076 で対応済みのため負例に使えなくなった。`docs/onnx-
+            // export-op-mapping.md` §7「Conv2d 対応 ≠ CNN 対応」参照）。
+            op_type: "Flatten".to_string(),
             attribute: Vec::new(),
             domain: String::new(),
         }],
@@ -867,7 +976,7 @@ fn build_model_proto_rejects_unsupported_op_type() {
         ExportError::UnsupportedOp {
             op_type,
             ..
-        } if op_type == "Conv"
+        } if op_type == "Flatten"
     ));
 }
 
@@ -898,10 +1007,11 @@ fn build_model_proto_rejects_non_default_domain() {
 
 #[test]
 fn export_op_variants_all_have_op_type_in_supported_list() {
-    // `ExportOp` の全 22 variant を 1 個ずつ構築し、`op_type()` が
+    // `ExportOp` の全 23 variant を 1 個ずつ構築し、`op_type()` が
     // `SUPPORTED_OP_TYPES` に含まれること・集合サイズが一致することを固定する
     // （drift 検出。variant 追加時はこの一覧・`op_type()`・`to_node_proto` の
-    // 網羅 match 双方の更新がコンパイルエラーで強制される）。
+    // 網羅 match 双方の更新がコンパイルエラーで強制される。`Conv` はイシュー
+    // #2076・親 #2034 で追加）。
     let sample: Vec<ExportOp> = vec![
         ExportOp::Gemm(GemmAttrs::default()),
         ExportOp::MatMul,
@@ -925,9 +1035,10 @@ fn export_op_variants_all_have_op_type_in_supported_list() {
         ExportOp::Cast { to: 1 },
         ExportOp::Constant(ConstantAttr::Int(0)),
         ExportOp::LayerNormalization(LayerNormAttrs::default()),
+        ExportOp::Conv(ConvAttrs::default()),
     ];
-    assert_eq!(sample.len(), 22, "interp.rs 対応 22 op と揃うはず");
-    assert_eq!(SUPPORTED_OP_TYPES.len(), 22);
+    assert_eq!(sample.len(), 23, "interp.rs 対応 23 op と揃うはず");
+    assert_eq!(SUPPORTED_OP_TYPES.len(), 23);
     for op in &sample {
         assert!(
             SUPPORTED_OP_TYPES.contains(&op.op_type()),
@@ -935,11 +1046,11 @@ fn export_op_variants_all_have_op_type_in_supported_list() {
             op.op_type()
         );
     }
-    // 重複なし（22 variant すべてが異なる op_type を持つ）ことも確認する。
+    // 重複なし（23 variant すべてが異なる op_type を持つ）ことも確認する。
     let mut op_types: Vec<&str> = sample.iter().map(ExportOp::op_type).collect();
     op_types.sort_unstable();
     op_types.dedup();
-    assert_eq!(op_types.len(), 22);
+    assert_eq!(op_types.len(), 23);
 }
 
 #[test]

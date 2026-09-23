@@ -231,6 +231,51 @@ fn run_rejects_unknown_feed_name() {
     );
 }
 
+/// `GraphProto.sparse_initializer` が非空の fixture
+/// （`crates/onnx-interop/tests/fixtures/sparse_initializer.onnx`。イシュー
+/// #2079）を `from_path` で読み込むと、sparse テンソルは非対応のため
+/// `OnnxError::SparseInitializerNotSupported` で fail-closed に拒否される
+/// ことを確認する。
+#[test]
+fn from_path_rejects_sparse_initializer_fixture() {
+    let err = OnnxModel::from_path(onnx_interop_fixture("sparse_initializer.onnx")).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            OnnxError::SparseInitializerNotSupported { tensor_name, count }
+                if tensor_name == "w_sparse" && *count == 1
+        ),
+        "OnnxError::SparseInitializerNotSupported（tensor_name=w_sparse・count=1）を期待したが {err:?}"
+    );
+}
+
+/// `from_bytes` 経路でも同じ fixture が同じ理由で拒否されることを確認する
+/// （`from_path`／`from_bytes` いずれも同一の `build_graph` を経由するため
+/// 拒否箇所が単一であることの裏付け）。
+#[test]
+fn from_bytes_rejects_sparse_initializer_fixture() {
+    let bytes = std::fs::read(onnx_interop_fixture("sparse_initializer.onnx")).unwrap();
+    let err = OnnxModel::from_bytes(&bytes).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            OnnxError::SparseInitializerNotSupported { tensor_name, count }
+                if tensor_name == "w_sparse" && *count == 1
+        ),
+        "OnnxError::SparseInitializerNotSupported（tensor_name=w_sparse・count=1）を期待したが {err:?}"
+    );
+}
+
+#[test]
+fn sparse_initializer_error_display_names_tensor() {
+    let err = OnnxModel::from_path(onnx_interop_fixture("sparse_initializer.onnx")).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("w_sparse"),
+        "エラーメッセージに tensor 名が含まれるはず: {message}"
+    );
+}
+
 /// `OnnxError` が `#[non_exhaustive]` のため、ワイルドカード腕を用いた
 /// `match` が facade 単独でコンパイルできること（名指し可能性）を
 /// コンパイル時に固定する。
@@ -241,6 +286,7 @@ fn onnx_error_is_matchable_via_facade_only() {
             OnnxError::Io(_) => "io",
             OnnxError::Decode { .. } => "decode",
             OnnxError::UnsupportedDataType { .. } => "unsupported_data_type",
+            OnnxError::SparseInitializerNotSupported { .. } => "sparse_initializer_not_supported",
             OnnxError::UnsupportedOp { .. } => "unsupported_op",
             OnnxError::MissingFeed { .. } => "missing_feed",
             OnnxError::UnknownFeed { .. } => "unknown_feed",
@@ -251,4 +297,8 @@ fn onnx_error_is_matchable_via_facade_only() {
     }
     let err = OnnxModel::from_bytes(&[0x08u8, 0xffu8]).unwrap_err();
     assert_eq!(classify(&err), "decode");
+
+    let sparse_err =
+        OnnxModel::from_path(onnx_interop_fixture("sparse_initializer.onnx")).unwrap_err();
+    assert_eq!(classify(&sparse_err), "sparse_initializer_not_supported");
 }

@@ -11,7 +11,9 @@ safetensors save／load は `fandhe_ai::interop::safetensors`
 `save_safetensors_f32`／`save_safetensors_f32_to_bytes`）として、
 いずれも `fandhe-ai` から公開されています。** import 済みモデルの
 roundtrip export に加え、学習済み `compat::Sequential`（対応層は
-`Linear`／`ReLU` 限定）から直接 ONNX へ書き出すこともできます
+`Linear`／`ReLU`／`Softmax`／`LayerNorm`／`GELU`〈erf 版〉／
+`Conv2d` の 6 種。`Sigmoid` は数値契約が承認保留のため対象外）から
+直接 ONNX へ書き出すこともできます
 （`OnnxModel::from_sequential`）
 （`onnx-interop` クレート。公開名 `fandhe-ai-onnx-interop`。依存解決の
 ための公開であり直接利用はサポート対象外）。`fandhe-ai` が唯一の
@@ -76,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   `producer_name`／グラフ名は保持されない**ため、export 結果には
   options の値が書き出されます。元モデルの opset と合わせる責任は
   利用者側にあります。
-- allowlist（`interp` 対応 22 op・既定 domain）外のノードを含む
+- allowlist（`interp` 対応 23 op・既定 domain）外のノードを含む
   モデルは、`from_bytes` では構築できても `to_bytes`／`to_path` の
   時点で `OnnxError::UnsupportedOp` により拒否されます。
 
@@ -114,16 +116,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 以下の点に注意してください:
 
-- **対応層は `Linear`／`ReLU` の 2 種のみ**です。Sigmoid・Tanh・Conv2d
-  等の非対応層を 1 つでも含む場合、`Graph` を一切構築せず
-  `OnnxError::UnsupportedLayer { index, layer_kind }` を返します
-  （部分的なモデルは返りません）。
+- **対応層は `Linear`／`ReLU`／`Softmax`／`LayerNorm`／
+  `GELU`（erf 版）／`Conv2d` の 6 種**です（`Sigmoid`・Tanh・GeluTanh・
+  LogSoftmax・Conv1d 等の非対応層を 1 つでも含む場合、`Graph` を
+  一切構築せず `OnnxError::UnsupportedLayer { index, layer_kind }`
+  を返します。部分的なモデルは返りません）。`LayerNorm` は
+  `elementwise_affine=true`（既定）構成のみ対応します（ONNX
+  `LayerNormalization` の `Scale` 必須制約のため）。`Conv2d` は単体
+  または `Conv2d` → 活性化の構成に限ります（`Flatten`／Pooling は
+  非対応のため、CNN 全体の export はできません）。
 - 空の `Sequential`（層 0 個）は `OnnxError::InvalidModel` で拒否され
   ます。
 - `value_info` は常に空で書き出されます（前節と同じ制約）。
 - 書き出しはホスト CPU 実行のみで `BackendOps`／`Device` を経由しません。
-- ReLU 入力に NaN が現れず、GEMM 出力に厳密な `±0.0` が現れない場合、
-  roundtrip 後の `run` 出力は `model.predict(&x)` と bit 完全一致します。
+- `Linear`／`ReLU` のみのモデルは、ReLU 入力に NaN が現れず GEMM 出力に
+  厳密な `±0.0` が現れない場合、roundtrip 後の `run` 出力は
+  `model.predict(&x)` と bit 完全一致します。Softmax・
+  LayerNorm・GELU・Conv2d を含むモデルは、結合順序・実装経路の違いに
+  より REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5
+  未満）で一致します。
 
 ### safetensors の最小コード例
 
@@ -151,6 +162,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 形状不一致を型付き `Err` で fail-closed に拒否します（strict・
 two-pass アトミック契約。既存 `Sequential` の shape が保存前と異なる
 場合はパラメータが一切変更されません）。
+
+### ローカルモデルレジストリ
+
+`fandhe_ai::model::ModelRegistry` は `$HOME/.fandhe-ai/models/<name>/<version>/model.safetensors`
+（Windows は `$USERPROFILE`）というレイアウトを規定し、名前・バージョン
+指定での同期ロードを提供します。配置は利用者が手動で行い、
+`ModelRegistry` はディレクトリの作成・削除を一切行わない読み取り専用
+のレジストリです。
+
+> **Windows・非対応アーキテクチャでの対応状況**: キャッシュルートの
+> 解決（`$USERPROFILE` 配下）自体は Windows でも動作しますが、
+> `load`・`available_models` はシンボリックリンク経由の脱出対策
+> （no-follow オープン）が Linux（x86_64／aarch64）・macOS 限定実装の
+> ため、Windows および上記以外のアーキテクチャでは現時点で常に失敗
+> （`load` はエラー、`available_models` は常に空の一覧）します。
+> 安全な Windows 実装はスコープ外です。Issue は未起票で、
+> `out-of-scope-tracking.md` の規約に従いユーザー承認後に別イシューで
+> 追跡します。
+
+```rust,no_run
+use fandhe_ai::model::ModelRegistry;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = ModelRegistry::new()?;
+    let state_dict = registry.load("mlp", "v1")?;
+    for (name, versions) in registry.available_models() {
+        println!("{name}: {versions:?}");
+    }
+    Ok(())
+}
+```
 
 ## safetensors: ワイヤフォーマット処理のみ
 

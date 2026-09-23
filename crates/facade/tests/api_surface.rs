@@ -881,6 +881,34 @@ fn release_cached_memory_and_pool_stats_are_reachable_via_facade() {
     assert_eq!(a, b, "test fixture: PoolStats は値として比較できるはず");
 }
 
+/// `fandhe_ai::set_cuda_onnx_gpu_execution_enabled`／
+/// `fandhe_ai::cuda_onnx_gpu_execution_enabled`（イシュー #2077）が
+/// facade クレート root から到達可能であることのコンパイル時固定
+/// （数値検証・実行時分岐は `tests/interop_onnx_gpu_execution_optin.rs`
+/// が担う。本テストはプロセスグローバルフラグを変更しないよう、往復後
+/// 必ず既定 `false` へ戻す）。
+#[test]
+fn cuda_onnx_gpu_execution_optin_is_reachable_via_facade() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original = fandhe_ai::cuda_onnx_gpu_execution_enabled();
+    fandhe_ai::set_cuda_onnx_gpu_execution_enabled(true);
+    assert!(fandhe_ai::cuda_onnx_gpu_execution_enabled());
+    fandhe_ai::set_cuda_onnx_gpu_execution_enabled(original);
+}
+
+/// Metal 版（macOS 限定）の同型固定。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_onnx_gpu_execution_optin_is_reachable_via_facade() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original = fandhe_ai::metal_onnx_gpu_execution_enabled();
+    fandhe_ai::set_metal_onnx_gpu_execution_enabled(true);
+    assert!(fandhe_ai::metal_onnx_gpu_execution_enabled());
+    fandhe_ai::set_metal_onnx_gpu_execution_enabled(original);
+}
+
 /// `fandhe_ai::manual_seed`（イシュー #1724）が facade から呼び出し可能な
 /// `pub fn` として型検査できることを固定する（コンパイル時裏付け）。
 /// グローバル RNG 状態を実際に変更するため、他テストとの競合を避ける
@@ -2937,7 +2965,12 @@ fn fit_types_are_reachable_via_facade_only() {
     let checkpoint = ModelCheckpoint::new()
         .monitor(Monitor::Loss)
         .mode(MonitorMode::Min)
-        .save_best_only(true);
+        .save_best_only(true)
+        // `to_file`（イシュー #2073）が facade のみ import で到達
+        // 可能であることの固定点。ビルダーは FS に触れないため
+        // 一時ディレクトリは不要（`callbacks.rs::ModelCheckpoint::
+        // to_file` doc 参照）。
+        .to_file("fandhe-ai-2073-unused.safetensors");
     assert_eq!(checkpoint.best_value(), None);
     let _cb_checkpoint = Callback::ModelCheckpoint(checkpoint);
 
@@ -3678,4 +3711,210 @@ fn contains_pub_fn_declaration_detects_variants() {
         "foo"
     ));
     assert!(!contains_pub_fn_declaration("let foo = 1;", "foo"));
+}
+
+// ============================================================================
+// model 公開面の機械検査（イシュー #2087・親 #2082）
+// ============================================================================
+
+/// `src/model.rs` に承認範囲外の公開アイテムが存在しないかを走査する。
+/// 承認範囲は `model::{ModelRegistry, ModelError}` と
+/// `ModelRegistry::{new, with_cache_dir, cache_dir, load,
+/// available_models}` の 7 件のみ（PR 本文「承認事項」節。
+/// `scan_unapproved_onnx_pub_items` と同型の独自許可リストを持つ
+/// 兄弟関数として実装する。既存 onnx 用関数は並列 PR の競合面拡大を
+/// 避けるため byte 単位で不変のまま触らない）。
+fn scan_unapproved_model_pub_items(original: &str) -> Vec<String> {
+    const ALLOWED_PUB_ITEMS: [(&str, &str); 7] = [
+        ("struct", "ModelRegistry"),
+        ("enum", "ModelError"),
+        ("fn", "new"),
+        ("fn", "with_cache_dir"),
+        ("fn", "cache_dir"),
+        ("fn", "load"),
+        ("fn", "available_models"),
+    ];
+    const SCANNED_KINDS: [&str; 9] = [
+        "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
+    ];
+    const QUALIFIER_KEYWORDS: [&str; 3] = ["async", "unsafe", "extern"];
+    const FORBIDDEN_SIGNATURE_SUBSTRINGS: [&str; 3] = ["BackendOps", "Tape", "onnx_interop"];
+
+    let cleaned = strip_comments_and_literals(original);
+    let len = cleaned.len();
+    let mut offenses = Vec::new();
+    let mut i = 0usize;
+    while i < len {
+        if !is_ident_start(cleaned[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut j = i + 1;
+        while j < len && is_ident_char(cleaned[j]) {
+            j += 1;
+        }
+        let word: String = cleaned[start..j].iter().collect();
+        if word != "pub" {
+            i = j;
+            continue;
+        }
+        let mut k = j;
+        while k < len && cleaned[k].is_whitespace() {
+            k += 1;
+        }
+        if k < len && cleaned[k] == '(' {
+            // `pub(crate)`／`pub(super)` 等。crate 外非公開のためスキップ。
+            let mut depth = 1i32;
+            k += 1;
+            while k < len && depth > 0 {
+                match cleaned[k] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        loop {
+            if !(k < len && is_ident_start(cleaned[k])) {
+                break;
+            }
+            let qs = k;
+            let mut qe = k + 1;
+            while qe < len && is_ident_char(cleaned[qe]) {
+                qe += 1;
+            }
+            let candidate: String = cleaned[qs..qe].iter().collect();
+            if !QUALIFIER_KEYWORDS.contains(&candidate.as_str()) {
+                break;
+            }
+            k = qe;
+            while k < len && cleaned[k].is_whitespace() {
+                k += 1;
+            }
+        }
+        if !(k < len && is_ident_start(cleaned[k])) {
+            i = j;
+            continue;
+        }
+        let ks = k;
+        let mut ke = k + 1;
+        while ke < len && is_ident_char(cleaned[ke]) {
+            ke += 1;
+        }
+        let kind: String = cleaned[ks..ke].iter().collect();
+        if !SCANNED_KINDS.contains(&kind.as_str()) {
+            i = j;
+            continue;
+        }
+        if kind == "use" {
+            offenses.push(format!(
+                "line {}: `pub use` は model.rs で承認されていない再エクスポート",
+                line_at(&cleaned, start)
+            ));
+            i = j;
+            continue;
+        }
+        let mut m = ke;
+        while m < len && cleaned[m].is_whitespace() {
+            m += 1;
+        }
+        if m < len && is_ident_start(cleaned[m]) {
+            let ns = m;
+            let mut ne = m + 1;
+            while ne < len && is_ident_char(cleaned[ne]) {
+                ne += 1;
+            }
+            let name: String = cleaned[ns..ne].iter().collect();
+            let approved = ALLOWED_PUB_ITEMS
+                .iter()
+                .any(|(k2, n2)| *k2 == kind.as_str() && *n2 == name.as_str());
+            if !approved {
+                offenses.push(format!(
+                    "line {}: `pub {kind} {name}` は model.rs で承認範囲外の公開アイテム",
+                    line_at(&cleaned, start)
+                ));
+            }
+            if kind == "fn" {
+                let mut p = ne;
+                while p < len && cleaned[p] != '(' && cleaned[p] != '{' && cleaned[p] != ';' {
+                    p += 1;
+                }
+                if p < len && cleaned[p] == '(' {
+                    let mut depth = 1i32;
+                    p += 1;
+                    while p < len && depth > 0 {
+                        match cleaned[p] {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        p += 1;
+                    }
+                }
+                while p < len && cleaned[p] != '{' && cleaned[p] != ';' {
+                    p += 1;
+                }
+                let signature: String = cleaned[start..p.min(len)].iter().collect();
+                for forbidden in FORBIDDEN_SIGNATURE_SUBSTRINGS {
+                    if signature.contains(forbidden) {
+                        offenses.push(format!(
+                            "line {}: `pub fn {name}` のシグネチャが禁止文字列 `{forbidden}` を含む",
+                            line_at(&cleaned, start)
+                        ));
+                    }
+                }
+            }
+        }
+        i = j;
+    }
+    offenses
+}
+
+fn model_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/model.rs")
+}
+
+#[test]
+fn model_module_exposes_only_approved_surface() {
+    let content = read_to_string_or_panic(&model_rs_path());
+    let offenses = scan_unapproved_model_pub_items(&content);
+    assert!(
+        offenses.is_empty(),
+        "src/model.rs に承認範囲外の公開アイテムが見つかった: {offenses:?}"
+    );
+}
+
+/// `scan_unapproved_model_pub_items` が合成入力で承認範囲外の
+/// `pub fn` を検出できることの自己テスト。
+#[test]
+fn scan_unapproved_model_pub_items_detects_offense() {
+    let synthetic = "pub struct ModelRegistry;\npub fn rogue_method() {}\n";
+    let offenses = scan_unapproved_model_pub_items(synthetic);
+    assert_eq!(offenses.len(), 1, "offenses={offenses:?}");
+    assert!(offenses[0].contains("rogue_method"));
+}
+
+/// [`fandhe_ai::model::{ModelRegistry, ModelError}`] が facade から
+/// 到達可能であることをコンパイル時に固定する。`ModelError` は
+/// `#[non_exhaustive]` のためワイルドカード腕を持つ `match` で
+/// variant を網羅できることも併せて確認する。
+#[test]
+fn model_types_are_reachable_via_facade() {
+    fn _assert_reachable(_registry: fandhe_ai::model::ModelRegistry) {}
+
+    fn _assert_error_matchable(e: &fandhe_ai::model::ModelError) -> &'static str {
+        match e {
+            fandhe_ai::model::ModelError::CacheDirUnavailable => "cache_dir_unavailable",
+            fandhe_ai::model::ModelError::InvalidComponent { .. } => "invalid_component",
+            fandhe_ai::model::ModelError::NotFound { .. } => "not_found",
+            fandhe_ai::model::ModelError::TooLarge { .. } => "too_large",
+            fandhe_ai::model::ModelError::Load(_) => "load",
+            fandhe_ai::model::ModelError::Io(_) => "io",
+            _ => "unknown",
+        }
+    }
 }

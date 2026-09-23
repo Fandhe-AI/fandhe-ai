@@ -8,7 +8,7 @@
 //!   （`graph` の逆方向。イシュー #1772）。`build_model_proto` は `export_ops`
 //!   （内部 op -> `NodeProto` の意味論的マッピング。#1773）の
 //!   `check_exportable` を経由してから組み立てる。
-//! - `export_ops`: `interp` が対応する 22 op の逆マッピング（`ExportOp` ->
+//! - `export_ops`: `interp` が対応する 23 op の逆マッピング（`ExportOp` ->
 //!   `NodeProto`。イシュー #1773）。`export` から `pub use` で再エクスポートする。
 //! - `export_nn`: `fandhe_ai_autodiff::nn::Module` の層列（`Linear`／`ReLU`
 //!   限定）から `export` が受け取れる `Graph` を組み立てる橋渡し
@@ -21,9 +21,14 @@
 //! TASK-7.3 系 14 オペのディスパッチ結線は #274 で追跡する（`interp` モジュール
 //! 冒頭コメント参照）。
 
+pub mod autograd;
 pub mod export;
 pub mod export_nn;
 pub mod export_ops;
 pub mod graph;
 pub mod interp;
+// `interp` から呼ばれる `BackendOps` 経由の device 実行ヘルパ（非公開。
+// イシュー #2077）。`interp::run_with_ops` の内部実装詳細であり facade
+// 公開面には出さない。
+mod interp_device;
 pub mod proto;

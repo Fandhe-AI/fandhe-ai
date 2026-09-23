@@ -288,9 +288,14 @@ impl Softmax {
     }
 
     /// `nn/module.rs::Module::forward_host` の `Softmax` 実装が `dim` を
-    /// 読み出すためのクレート内アクセサ（`dim` フィールド自体は
-    /// カプセル化のため非公開のまま）。
-    pub(crate) fn dim(&self) -> usize {
+    /// 読み出すためのアクセサ（`dim` フィールド自体はカプセル化のため
+    /// 非公開のまま）。イシュー #2076（親 #2034）で `onnx-interop::
+    /// onnx::export_nn` が `Module::as_softmax` 経由で取得した
+    /// `&Softmax` から `ExportOp::Softmax { axis }` の `axis` を組み立て
+    /// るために公開へ変更した（`crate` 外の別クレートから呼ばれるため
+    /// `pub(crate)` では届かない）。facade は `nn::activation::Softmax`
+    /// を再エクスポートしないため、本変更は facade の公開面を拡張しない。
+    pub fn dim(&self) -> usize {
         self.dim
     }
 }

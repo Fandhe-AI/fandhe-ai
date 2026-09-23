@@ -165,11 +165,26 @@ facade への `safetensors` 直接依存追加なし（`onnx-interop` 経由の
   合わせた save→load→load_state_dict の往復例をモジュール doc の
   doctest として整備済み
 
-### 11.3 スコープ外（不変）
+### 11.3 スコープ外（不変・#2073 で一部解消）
 
-`compat::Sequential`／`compat::callbacks::ModelCheckpoint` へのファイル
-保存の薄いラッパー（`Sequential::save`／`load` 等）は案 A の範囲外
-（素の再エクスポートのみ）のまま次点の切り出し候補として記録する
-（`docs/compat-callbacks-design.md` §8）。F32 以外の dtype・入力サイズ
-上限の導入・`st_load`／`st_save` 本体ロジックの変更・ONNX export（#2018）
-も引き続き対象外。
+`compat::callbacks::ModelCheckpoint` からの薄いラッパー結線
+（`ModelCheckpoint::to_file`）は **#2073 で実装済み**（親 #2059。
+`docs/compat-callbacks-design.md` §4.3・§9）。`compat::Sequential`
+へのファイル保存ラッパー（`Sequential::save`／`load` 等）は引き続き
+案 A の範囲外（素の再エクスポートのみ）のまま次点の切り出し候補として
+記録する（`docs/compat-callbacks-design.md` §8）。F32 以外の dtype・
+入力サイズ上限の導入・`st_load`／`st_save` 本体ロジックの変更・ONNX
+export（#2018）も引き続き対象外。
+
+## 12. 追補（#2080）: HF レイアウト復元ガイドの整備
+
+本 issue で確定した公開面（案 A・素の再エクスポート・F32 限定）は
+不変のまま、「Hugging Face（PyTorch）由来の safetensors を
+`compat::Sequential` へ復元する」ハウツーを
+`docs/huggingface-safetensors-interop-guide.md` として新設した
+（イシュー #2080・親 #2059）。呼び出し側が明示的に行う変換
+（`crates/facade/examples/hf_safetensors_sequential/convert.rs`）と
+統合テスト（`crates/facade/tests/interop_safetensors_hf_layout.rs`）を
+伴う。本モジュール（`crates/facade/src/interop/safetensors.rs`）自体・
+`api_surface.rs` の allowlist 契約・公開 7 アイテムはいずれも変更して
+いない。

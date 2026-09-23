@@ -29,6 +29,13 @@ readme = "README.md"
 # 済みだが facade へは未接続（`docs/facade-onnx-export-exposure-decision.md`
 # §15。facade 接続は #2037）。
 publish = true
+# ONNX Model Zoo（onnx/models）由来の第三者バイナリ fixture（イシュー #2081）を
+# crates.io パッケージへ同梱しない。`cargo publish` はテストを実行しないため
+# 公開自体は阻害されないが、`tests/fixtures/model-zoo/` は mnist-12 だけでも
+# 26 KB 超の非公開向けバイナリであり、パッケージサイズへ不要に混入させない
+# 判断（`crates/facade/tests/interop_onnx_import.rs` 冒頭コメントが既に前提と
+# している「facade テストは workspace 外 fixture を参照する」設計と同じ考え方）。
+exclude = ["tests/fixtures/model-zoo/"]
 # crates.io 検索・カテゴリページ向けメタデータ（イシュー #1963）。keywords は
 # crates.io 制約（最大 5 個・各 20 文字以内英数字とハイフン）を満たす。
 # categories は crates.io の有効スラッグ（https://crates.io/api/v1/categories

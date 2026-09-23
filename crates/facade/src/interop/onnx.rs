@@ -3,22 +3,34 @@
 //!
 //! `fandhe_ai_onnx_interop`（内部クレート。crates.io 公開名
 //! `fandhe-ai-onnx-interop`）の `onnx::proto::decode_model` →
-//! `onnx::graph::build_graph` → `onnx::interp::run` を 1 つの薄い型
-//! [`OnnxModel`] に束ねる。**推論専用・ホスト CPU 実行のみ**であり
-//! `BackendOps`／`Device` を経由しない（GPU 実行にはならない）。
+//! `onnx::graph::build_graph` → `onnx::interp::run`／`run_with_ops` を
+//! 1 つの薄い型 [`OnnxModel`] に束ねる。**推論専用**であり
 //! **autograd 未接続**（入出力は [`crate::Tensor`] であり `Var` ではない。
 //! 勾配は取れない）。
+//!
+//! **既定はホスト CPU 実行のみ**（`BackendOps`／`Device` 非経由。
+//! イシュー #2077 導入前と bit 完全に不変）。[`crate::
+//! set_cuda_onnx_gpu_execution_enabled`]／`crate::
+//! set_metal_onnx_gpu_execution_enabled`〈macOS 限定 cfg のため非 macOS
+//! ビルドでは存在せずリンク化しない〉の opt-in（既定 OFF）が有効な
+//! 場合のみ、[`OnnxModel::run`] は `BackendOps` 経由の device 実行
+//! （op 単位。`Unsupported`／`ShapeMismatch` はホストへフォールバック・
+//! それ以外のエラーは fail-closed）を試みる（詳細は [`OnnxModel::run`]
+//! のドキュメンテーションコメント・`docs/onnx-gpu-execution-decision.md`
+//! を参照）。
 //!
 //! 数値契約は REQ-7 判定式（`abs_err/(|ref|+1e-6) <= 1e-3`。
 //! `crates/onnx-interop/tests/onnx_poc_v2_6_match.rs` 系と同一）であり、
 //! `.claude/rules/coding-rust.md` の REQ-2 統一複合判定（バックエンド間
 //! 数値一致）とは別指標である（両者を混同しない）。
 //!
-//! 対応 op は 22 種（`fandhe_ai_onnx_interop::onnx::interp` 冒頭コメント
+//! 対応 op は 23 種（`fandhe_ai_onnx_interop::onnx::interp` 冒頭コメント
 //! 参照）。未対応 `op_type` は無言 skip せず [`OnnxError::UnsupportedOp`]
 //! で fail-closed に拒否する（no-silent-skip 契約。`.claude/rules/
 //! security.md` A03）。`run` の `feeds` は ONNX の pre-IR-4 セマンティクス
-//! どおり同名 initializer を上書きする。
+//! どおり同名 initializer を上書きする。`GraphProto.sparse_initializer` が
+//! 非空の場合も同じ契約に従い [`OnnxError::SparseInitializerNotSupported`]
+//! で拒否する（sparse テンソルは非対応。イシュー #2079）。
 //!
 //! [`OnnxValue::F16`] は `half::f16` を素通しする。facade は `half` を
 //! 再エクスポートしないため、`half::f16` を名指しして扱うには利用者側が
@@ -50,7 +62,7 @@
 //!   `to_path` で export できるのは import 済みモデル（`OnnxModel`）の
 //!   みで、学習済み `Sequential`／`nn` から直接 `OnnxModel` を構築する
 //!   経路は [`OnnxModel::from_sequential`]（次節・#2037）を使う
-//! - allowlist（`interp` 対応 22 op・既定 domain）外のノードを含む
+//! - allowlist（`interp` 対応 23 op・既定 domain）外のノードを含む
 //!   モデルは `from_bytes` では構築できても **export 時に**
 //!   [`OnnxError::UnsupportedOp`] により fail-closed に拒否する（無言
 //!   skip しない）
@@ -65,9 +77,13 @@
 //! による正規化を挟まず直接 [`OnnxModel`] が保持する。以下を doc として
 //! 明記する:
 //!
-//! - **対応層は `Linear`／`ReLU` の 2 種のみ**（Sigmoid・Tanh・Conv2d・
-//!   LayerNorm 等は非対応）。1 つでも非対応層を含む場合は `Graph` を
-//!   一切構築せず [`OnnxError::UnsupportedLayer`] で fail-closed に
+//! - **対応層は `Linear`／`ReLU`／`Softmax`／`LayerNorm`／
+//!   `GELU`（erf 版）／`Conv2d` の 6 種**（イシュー #2076・親 #2034 で
+//!   `Linear`／`ReLU` の 2 種から拡大。`Sigmoid` は数値契約
+//!   〈`docs/facade-onnx-export-exposure-decision.md` §15.7 項 5〉が
+//!   承認保留のため対象外のまま。Tanh・GeluTanh・LogSoftmax・
+//!   Conv1d 等は引き続き非対応）。1 つでも非対応層を含む場合は `Graph`
+//!   を一切構築せず [`OnnxError::UnsupportedLayer`] で fail-closed に
 //!   拒否する（部分的に構築されたモデルを返さない）
 //! - graph input 名は常に `"input"`・output 名は常に `"output"`
 //!   （最終層の出力）。initializer 名は `{i}.weight`／`{i}.bias`
@@ -77,11 +93,14 @@
 //! - `value_info` は常に空（前節と同じ制約）
 //! - ホスト CPU 実行のみ・`BackendOps`／`Device` 非経由（学習済み
 //!   パラメータの値をそのままコピーするのみで算術を行わない）
-//! - bit 完全一致契約: `from_sequential(&m).to_bytes(opts)` →
-//!   `from_bytes` → `run` の出力は、`Linear→ReLU` 入力に NaN が現れず
-//!   GEMM 出力に厳密な `±0.0` が現れない限り `m.predict(&x)` と bit
-//!   完全一致する（`export_nn` モジュール doc「bit 一致契約の前提」
-//!   参照）
+//! - 数値契約: `Linear`／`ReLU` のみのモデルは、`from_sequential(&m)
+//!   .to_bytes(opts)` → `from_bytes` → `run` の出力が `Linear→ReLU`
+//!   入力に NaN が現れず GEMM 出力に厳密な `±0.0` が現れない限り
+//!   `m.predict(&x)` と bit 完全一致する（`export_nn` モジュール doc
+//!   「bit 一致契約の前提」参照）。Softmax・LayerNorm・GELU・
+//!   Conv2d を含むモデルは結合順序・実装経路が異なるため REQ-2 統一
+//!   複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で検証する
+//!   （`crates/facade/tests/interop_onnx_export_layers_parity.rs`）
 //!
 //! ## 非信頼入力の扱い
 //!
@@ -94,21 +113,86 @@
 //! 行わない。入力総バイト数・要素数の明示上限は導入していない
 //! （`build_graph` の長さ整合検査がバイト長を初期入力長で抑える。値の
 //! 決定にユーザー承認が要るため本 issue のスコープ外。
-//! `docs/facade-onnx-import-exposure-decision.md` §6.3 参照）。
+//! `docs/facade-onnx-import-exposure-decision.md` §6.3 参照）。`from_bytes`
+//! は `onnx::proto::decode_model` の bounded 事前走査（イシュー #2079
+//! codex-review 是正。`proto.rs` モジュール冒頭コメント「メモリ増幅対策」
+//! 節）による `sparse_initializer` の早期 fail-closed 拒否を
+//! `map_decode_error`（非公開関数）でそのまま [`OnnxError::SparseInitializerNotSupported`]
+//! へ写像する（`build_graph` 側の同名エラーと同じ payload）。
 
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use fandhe_ai_onnx_interop::onnx::export::{ExportError, ExportOptions, build_model_proto};
 use fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers;
 use fandhe_ai_onnx_interop::onnx::graph::{Graph, GraphError, build_graph};
-use fandhe_ai_onnx_interop::onnx::interp::{InterpError, Value as InterpValue, run as interp_run};
-use fandhe_ai_onnx_interop::onnx::proto::{decode_model, encode_model};
+use fandhe_ai_onnx_interop::onnx::interp::{
+    InterpError, Value as InterpValue, run as interp_run, run_with_ops as interp_run_with_ops,
+};
+use fandhe_ai_onnx_interop::onnx::proto::{DecodeModelError, decode_model, encode_model};
 use fandhe_ai_tensor_core::f16;
 
+use crate::Device;
 use crate::Tensor;
 use crate::compat::Sequential;
+
+/// [`set_cuda_onnx_gpu_execution_enabled`]（`crate::lib` の薄い公開
+/// ラッパー経由）が読み書きする opt-in 状態（イシュー #2077）。既定
+/// `false`（ホスト CPU 実行のみ・bit 不変）。プロセスワイドの
+/// `AtomicBool`（`SeqCst`）で、既存の `set_cuda_tf32_gemm_enabled` 等と
+/// 同型（`crate::lib` の opt-in 群コメント参照）。`pub(crate)` のため
+/// `crates/facade/tests/api_surface.rs::scan_unapproved_onnx_pub_items`
+/// の allowlist 変更は不要。
+pub(crate) static CUDA_ONNX_GPU_EXEC: AtomicBool = AtomicBool::new(false);
+
+/// Metal 版の opt-in 状態（macOS 限定。`crate::Device::Metal` と同じ cfg
+/// 境界）。
+#[cfg(target_os = "macos")]
+pub(crate) static METAL_ONNX_GPU_EXEC: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_cuda_onnx_gpu_execution_enabled(enabled: bool) {
+    CUDA_ONNX_GPU_EXEC.store(enabled, Ordering::SeqCst);
+}
+
+pub(crate) fn cuda_onnx_gpu_execution_enabled() -> bool {
+    CUDA_ONNX_GPU_EXEC.load(Ordering::SeqCst)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn set_metal_onnx_gpu_execution_enabled(enabled: bool) {
+    METAL_ONNX_GPU_EXEC.store(enabled, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn metal_onnx_gpu_execution_enabled() -> bool {
+    METAL_ONNX_GPU_EXEC.load(Ordering::SeqCst)
+}
+
+/// [`OnnxModel::run`] の Metal 分岐専用ヘルパ。`Device::Metal` variant
+/// 自体が `#[cfg(target_os = "macos")]` 限定のため、cfg 境界を `run` 本体
+/// から本関数へ隠蔽する（非 macOS ビルドでは opt-in フラグの値に関わらず
+/// 常に `Ok(None)` = ホストへ）。opt-in が有効なのに driver 不在等で
+/// `resolve_ops` が失敗した場合は fail-closed に `Err` を返す（ホストへの
+/// 黙示フォールバックはしない）。
+#[cfg(target_os = "macos")]
+fn resolve_metal_ops_if_enabled()
+-> Result<Option<Box<dyn fandhe_ai_tensor_core::BackendOps + Send>>, OnnxError> {
+    if !metal_onnx_gpu_execution_enabled() {
+        return Ok(None);
+    }
+    let ops = crate::resolve_ops(Device::Metal).map_err(|e| OnnxError::Execution {
+        message: e.to_string(),
+    })?;
+    Ok(Some(ops))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resolve_metal_ops_if_enabled()
+-> Result<Option<Box<dyn fandhe_ai_tensor_core::BackendOps + Send>>, OnnxError> {
+    Ok(None)
+}
 
 /// 読み込み済み ONNX モデル（内部的にはトポロジカル順検証済みの
 /// `Graph` を保持する。フィールドは private——`fandhe_ai_onnx_interop`
@@ -124,9 +208,7 @@ impl OnnxModel {
     /// protobuf デコード（[`OnnxError::Decode`]）→ 内部グラフ構築
     /// （形状・トポロジ検証。該当する `OnnxError` variant）の順で検証する。
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, OnnxError> {
-        let model = decode_model(bytes).map_err(|e| OnnxError::Decode {
-            message: e.to_string(),
-        })?;
+        let model = decode_model(bytes).map_err(map_decode_error)?;
         let graph = build_graph(&model).map_err(map_graph_error)?;
         Ok(Self { graph })
     }
@@ -144,9 +226,14 @@ impl OnnxModel {
     /// export」節参照）。
     ///
     /// `fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers` への
-    /// 1 段委譲のみ（薄いラッパー原則）。対応層は `Linear`／`ReLU` の
-    /// 2 種のみで、それ以外（Sigmoid・Tanh・Conv2d 等）を 1 つでも
-    /// 含む場合は [`Graph`] を一切構築せず
+    /// 1 段委譲のみ（薄いラッパー原則）。対応層は `Linear`／`ReLU`／
+    /// `Softmax`／`LayerNorm`／`GELU`（erf 版）／`Conv2d` の
+    /// 6 種（イシュー #2076・親 #2034 で拡大。`Sigmoid` は §15.7 項 5
+    /// が承認保留のため対象外。`Linear`／`ReLU` のみの
+    /// モデルは `predict` と bit 完全一致、それ以外を含むモデルは
+    /// REQ-2 統一複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5
+    /// 未満〉で検証する）。それ以外の層（Tanh・GeluTanh・LogSoftmax・
+    /// Conv1d 等）を 1 つでも含む場合は [`Graph`] を一切構築せず
     /// [`OnnxError::UnsupportedLayer`] を返す（全層事前検証・
     /// fail-closed。`security.md` A08）。空の `Sequential` は
     /// [`OnnxError::InvalidModel`] で拒否される。
@@ -158,8 +245,21 @@ impl OnnxModel {
     /// グラフを実行する。`feeds` はグラフ入力名 → 値の対応（未対応の
     /// initializer 上書きを含む pre-IR-4 セマンティクス）。
     ///
-    /// 推論専用・ホスト CPU 実行のみ（`BackendOps`／`Device` 非経由）・
-    /// autograd 未接続（戻り値は [`crate::Tensor`] であり `Var` ではない）。
+    /// 推論専用・autograd 未接続（戻り値は [`crate::Tensor`] であり
+    /// `Var` ではない）。**既定はホスト CPU 実行のみ**（`BackendOps`／
+    /// `Device` 非経由。導入前と bit 完全に不変）。
+    /// [`crate::set_cuda_onnx_gpu_execution_enabled`]／
+    /// `crate::set_metal_onnx_gpu_execution_enabled`（macOS 限定 cfg のため非
+    /// macOS ビルドでは存在せずリンク化しない。イシュー #2077）
+    /// の opt-in が有効な場合のみ `BackendOps` 経由の device 実行を試みる
+    /// （評価順は CUDA → Metal 固定。両方 ON なら CUDA 優先）。対象 op
+    /// （`fandhe_ai_onnx_interop::onnx::interp_device` モジュール冒頭
+    /// コメント参照）の f32 経路のみ device へ到達し、`Unsupported`／
+    /// `ShapeMismatch` はホストへフォールバックする。device・driver 不在
+    /// や範囲外 ordinal（CUDA ordinal は 0 固定）はこの `run` 呼び出し
+    /// 自体を [`OnnxError::Execution`] として fail-closed に拒否する
+    /// （ホストへの黙示フォールバックはしない。OWASP A08。`docs/
+    /// onnx-gpu-execution-decision.md` §3.4）。
     pub fn run(
         &self,
         feeds: HashMap<String, OnnxValue>,
@@ -168,7 +268,19 @@ impl OnnxModel {
             .into_iter()
             .map(|(k, v)| (k, onnx_value_to_interp(v)))
             .collect();
-        let outputs = interp_run(&self.graph, interp_feeds).map_err(map_interp_error)?;
+
+        let outputs = if cuda_onnx_gpu_execution_enabled() {
+            let ops = crate::resolve_ops(Device::Cuda(0)).map_err(|e| OnnxError::Execution {
+                message: e.to_string(),
+            })?;
+            interp_run_with_ops(&self.graph, interp_feeds, ops.as_ref())
+                .map_err(map_interp_error)?
+        } else if let Some(ops) = resolve_metal_ops_if_enabled()? {
+            interp_run_with_ops(&self.graph, interp_feeds, ops.as_ref())
+                .map_err(map_interp_error)?
+        } else {
+            interp_run(&self.graph, interp_feeds).map_err(map_interp_error)?
+        };
         Ok(outputs
             .into_iter()
             .map(|(k, v)| (k, interp_value_to_onnx(v)))
@@ -305,6 +417,10 @@ pub enum OnnxError {
     /// decode 経由〈`InterpError::Graph(GraphError::UnknownDataType)`〉の
     /// 両方をこの variant へ写像する）。
     UnsupportedDataType { tensor_name: String, data_type: i32 },
+    /// `GraphProto.sparse_initializer` が非空（`GraphError::
+    /// SparseInitializerNotSupported`）。sparse テンソルは非対応のため
+    /// fail-closed に拒否する（イシュー #2079）。
+    SparseInitializerNotSupported { tensor_name: String, count: usize },
     /// 未対応の `op_type`（`InterpError::UnsupportedOp`。import 実行時）、
     /// または export 時の allowlist 外 op（`ExportError::UnsupportedOp`。
     /// `op_type` が既定 domain 以外の場合は `"{domain}::{op_type}"`
@@ -346,6 +462,10 @@ impl fmt::Display for OnnxError {
                 f,
                 "未対応の ONNX data_type（tensor={tensor_name}）: {data_type}"
             ),
+            OnnxError::SparseInitializerNotSupported { tensor_name, count } => write!(
+                f,
+                "未対応の ONNX sparse_initializer（tensor={tensor_name}・count={count}）: sparse テンソルは非対応"
+            ),
             OnnxError::UnsupportedOp { op_type } => write!(f, "未対応の ONNX op_type: {op_type}"),
             OnnxError::MissingFeed { input } => {
                 write!(f, "グラフ入力 '{input}' に対応する feed がありません")
@@ -374,6 +494,24 @@ impl std::error::Error for OnnxError {
     }
 }
 
+/// `DecodeModelError` → `OnnxError` 写像（`decode_model` のエラー経路。
+/// イシュー #2079 codex-review 是正）。`sparse_initializer` の bounded
+/// 事前走査による早期拒否（[`DecodeModelError::SparseInitializerNotSupported`]）
+/// を `map_graph_error` の同名分岐と同じ payload で `OnnxError::
+/// SparseInitializerNotSupported` へ写像することで、拒否が
+/// `decode_model` 側・`build_graph` 側のどちらで起きても facade 利用者
+/// から見た結果が同一になるようにする。
+fn map_decode_error(e: DecodeModelError) -> OnnxError {
+    match e {
+        DecodeModelError::Wire(err) => OnnxError::Decode {
+            message: err.to_string(),
+        },
+        DecodeModelError::SparseInitializerNotSupported { tensor_name, count } => {
+            OnnxError::SparseInitializerNotSupported { tensor_name, count }
+        }
+    }
+}
+
 /// `GraphError` → `OnnxError` 写像（モデル構築時のエラー経路）。
 fn map_graph_error(e: GraphError) -> OnnxError {
     match e {
@@ -384,6 +522,9 @@ fn map_graph_error(e: GraphError) -> OnnxError {
             tensor_name,
             data_type,
         },
+        GraphError::SparseInitializerNotSupported { tensor_name, count } => {
+            OnnxError::SparseInitializerNotSupported { tensor_name, count }
+        }
         other => OnnxError::InvalidModel {
             message: other.to_string(),
         },

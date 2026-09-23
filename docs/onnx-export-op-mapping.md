@@ -14,7 +14,7 @@ decision.md` §14）。
 
 ## 0. スコープ境界
 
-- 本 issue の対象は「`interp.rs` が読む 22 op の逆方向（内部 op -> `NodeProto`）」
+- 本 issue の対象は「`interp.rs` が読む 23 op の逆方向（内部 op -> `NodeProto`）」
   のみ。autodiff `Op`／`Tape` -> `ExportOp` の橋渡し（`compat::Sequential`／
   `nn` -> `ExportNode`）は #1653 のスコープのまま対象外（#2018 でも実装しない）。
   facade 公開可否自体は #1775 が判断済みで、#2018 で
@@ -67,9 +67,11 @@ decision.md` §14）。
 | Cast | 3 | input | to: INT（1/7/9/10 のみ。export 側は値検査しない） | `compute_cast` |
 | Constant | 3 | なし | value〈TENSOR〉／value_float〈FLOAT〉／value_floats〈FLOATS〉／value_int〈INT〉／value_ints〈INTS〉のいずれか 1 つ | `compute_constant` |
 | LayerNormalization | 3 | X, Scale, [B] | axis: INT=-1 / epsilon: FLOAT=1e-5 | `compute_layer_normalization` |
+| Conv | 3 | X, W, [B] | auto_pad: STRING="NOTSET" / dilations: INTS=[1,1] / group: INT=1 / kernel_shape: INTS（`W.shape()[2..4]`） / pads: INTS=[0,0,0,0] / strides: INTS=[1,1] | `compute_conv` |
 
 Tier 1（必須・受入条件）・Tier 2（`slice_repro.onnx` fixture roundtrip に必要）・
-Tier 3（推奨・全実装済み）。22 op すべて実装済み（削減なし）。
+Tier 3（推奨・全実装済み）。23 op すべて実装済み（削減なし。`Conv` はイシュー
+#2076・親 #2034 で追加）。
 
 ## 3. `Constant` の `value`（TENSOR）契約
 
@@ -166,24 +168,42 @@ ONNX_INTEROP_TRANSFORMER_ONNX=<path> \
 （`ExportOp::Gemm`／`ExportOp::Relu` を構築して `to_node_proto` へ渡す）、
 op マッピング表自体（§2）は変更しない。
 
-- **対応層（初期範囲）**: `Module::as_linear()` が `Some` の層 →
+- **対応層（イシュー #2076・親 #2034 で Softmax・LayerNorm・
+  GELU（erf 版）・Conv2d へ拡大。`Sigmoid` は §15.7 項 5〈数値契約〉が
+  承認保留のため対象外のまま——`Module::as_sigmoid` フックは追加して
+  いない）**: `Module::as_linear()` が `Some` →
   `ExportOp::Gemm(GemmAttrs { alpha: 1.0, beta: 1.0, trans_a: false,
   trans_b: false })`（weight `[in, out]` のまま・転置しない）。
-  `Module::as_relu()` が `true` の層 → `ExportOp::Relu`。それ以外は
-  `ExportError::UnsupportedLayer { index, layer_kind }` で fail-closed に
-  拒否する（`layer_kind` は `as_conv2d`／`as_conv1d`／`as_layer_norm`／
-  `as_rms_norm`／`as_batch_norm1d`／`as_batch_norm2d`／`as_embedding`／
-  `as_multihead_attention` の 8 フックで判別できる範囲のみ具体名を報告し、
-  それ以外は `"unknown"`）。Sigmoid は §15.7 承認事項 2／5（`Module` へ
-  `as_sigmoid` フックを新設）が未承認のため本 issue では対象外
-  （issue コメントが示す代替「Linear／ReLU の 2 種へ縮小」を適用）。
-- **`autodiff` バージョン制約**: `crates/onnx-interop/Cargo.toml` の
-  `fandhe-ai-autodiff = { version = "=0.9.0", .. }`（通常依存。§15.7
-  承認事項 1「onnx-interop → autodiff 通常依存化」を適用済み）により、
-  `cargo publish --dry-run` は registry の `fandhe-ai-autodiff =0.9.0`
-  でビルド検証する。本モジュールが使う `autodiff` API（`nn::Module` の
-  上記フック群・`nn::Linear::weight`／`bias`）はいずれも `v0.9.0` に
-  存在することを確認済み（`is_pooling`〈#1957 で追加〉は意図的に使わない）。
+  `Module::as_relu()` が `true` → `ExportOp::Relu`。`Module::as_softmax()` が `Some` →
+  `ExportOp::Softmax { axis: dim as i64 }`（`Softmax::dim()`。`pub` へ
+  変更済み）。`Module::as_layer_norm()` が `Some` → `ExportOp::
+  LayerNormalization(LayerNormAttrs { axis: -1, epsilon: eps() })`
+  （`weight() == None`〈`without_affine`〉は ONNX `LayerNormalization` の
+  `Scale` 必須制約により `ExportError::InvalidLayerParameter` で拒否）。
+  `Module::as_gelu()` が `true` → `Mul(x, 1/√2) -> Erf -> Add(1.0) ->
+  Mul(x, ·) -> Mul(0.5)` の 5 演算ノード（+ `Constant` 3 ノード。ONNX に
+  GELU 単体演算が opset 17 に無いための合成。`GeluTanh` は対象外）。
+  `Module::as_conv2d()` が `Some` → `ExportOp::Conv(ConvAttrs)`
+  （`kernel_shape = weight.shape()[2..4]`／`strides`／`dilations`／
+  `group`／`pads = [ph, pw, ph, pw]`〈対称〉／`auto_pad = "NOTSET"`）。
+  それ以外は `ExportError::UnsupportedLayer { index, layer_kind }` で
+  fail-closed に拒否する（`layer_kind` は既存 8 フック〈`as_conv2d` は
+  対応層化したため報告対象から除く・`as_conv1d`／`as_rms_norm`／
+  `as_batch_norm1d`／`as_batch_norm2d`／`as_embedding`／
+  `as_multihead_attention`〉で判別できる範囲のみ具体名を報告し、
+  それ以外は `"unknown"`）。
+- **`autodiff` API バージョン制約について**: `crates/onnx-interop/
+  Cargo.toml` の `fandhe-ai-autodiff = { version = "=0.9.0", .. }`
+  （通常依存。§15.7 承認事項 1 を適用済み）は単一クレート
+  `cargo publish --dry-run` 時に registry の `fandhe-ai-autodiff
+  =0.9.0` でビルド検証するが、`docs/facade-onnx-export-exposure-
+  decision.md` §15.2 項 5・§17.3 が整理するとおり単一クレート dry-run
+  の失敗は既知の非ブロッカーであり、7 パッケージ一括 dry-run
+  （`docs/crates-io-publishing-order.md` §8.1）はローカル解決（同一
+  workspace 内の未公開バージョンを解決する）で成立する。本 issue で
+  追加した `Module::as_gelu`／`as_softmax` は crates.io
+  未公開の新 API のため単一クレート dry-run では解決できないが、上記
+  整理により issue のブロッカーにはならない。
 - **名前規約**: graph input `"input"`／output `"output"`・中間テンソル
   `layer{i}_out`・ノード名 `layer{i}`・initializer 名 `{i}.weight`／
   `{i}.bias`（`nn::Sequential::named_parameters()`／`state_dict()` の

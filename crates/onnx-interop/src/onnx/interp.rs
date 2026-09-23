@@ -11,8 +11,9 @@
 //! productize。TASK-7.2 の 8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／
 //! `Unsqueeze`／`Concat`／`Slice`）に加え、TASK-7.3 系 14 オペ（`Add`／`Mul`／`Div`／
 //! `Mod`／`Sqrt`／`Constant`／`Cast`／`Reshape`／`Squeeze`／`Transpose`／`MatMul`／
-//! `Softmax`／`Erf`／`LayerNormalization`）をイシュー #274 で結線した（全 22 オペが
-//! グラフ実行から到達可能。未対応 `op_type` は引き続き [`InterpError::UnsupportedOp`]
+//! `Softmax`／`Erf`／`LayerNormalization`）をイシュー #274 で結線した。イシュー
+//! #2076（親 #2034）で `Conv`（2 次元畳み込み）を追加し、全 23 オペがグラフ実行
+//! から到達可能（未対応 `op_type` は引き続き [`InterpError::UnsupportedOp`]
 //! で fail-closed に拒否し、無言 skip はしない）。
 //!
 //! ## 実行時値モデルと dtype の扱いについて
@@ -47,12 +48,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use fandhe_ai_tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{BackendOps, ShapeError, Tensor};
 use half::f16;
 
 use super::graph::{Graph, GraphError, RawTensor};
-use super::proto::NodeProto;
-use crate::ops::{self, ConstantValue, GemmAttrs, LayerNormAttrs, OpError, SliceParams};
+use super::interp_device;
+use super::proto::{AttributeProto, NodeProto, attribute_type};
+use crate::ops::{self, ConstantValue, ConvAttrs, GemmAttrs, LayerNormAttrs, OpError, SliceParams};
 
 /// 実行時に env（変数束縛）へ格納される値。ONNX の `TensorProto.data_type` の
 /// うち本クレートが対応する 4 種類（`FLOAT`／`INT64`／`BOOL`／`FLOAT16`）に対応する
@@ -99,6 +101,17 @@ pub enum InterpError {
         expected: usize,
         actual: usize,
     },
+    /// ノードの宣言入力数が許容範囲 `[min, max]` の外（`Conv` の `X`／`W`
+    /// 必須 2 個 + 任意 `B` 1 個の計 2〜3 個。イシュー #2076 codex-review
+    /// 指摘）。旧実装は先頭 `max` 個だけを読み、余剰入力を無言で無視して
+    /// いたため、`OutputArityMismatch` と対になる fail-closed 検査として
+    /// 新設した（OWASP A03。`.claude/rules/security.md`）。
+    InputArityMismatch {
+        node: String,
+        min: usize,
+        max: usize,
+        actual: usize,
+    },
     /// `graph.outputs` に列挙された名前が実行後の env に存在しない。
     /// `build_graph` が生成可能性を検証済みのため到達しないはずだが、
     /// 防御的に型付きエラーで報告する（`unwrap()` を避けるため。coding-rust.md）。
@@ -112,6 +125,23 @@ pub enum InterpError {
     /// `Constant` の `value`（TENSOR 型）属性が保持する `TensorProto` の復号エラー。
     /// `onnx::graph::decode_tensor` をそのまま透過する。
     Graph(GraphError),
+    /// STRING 属性（`Conv` の `auto_pad`。イシュー #2076）が UTF-8 として不正
+    /// だった。`AttributeProto.s: Vec<u8>` は任意バイト列を許容するため、
+    /// 文字列属性を読む側（`attr_string`。本モジュール内 private 関数のため
+    /// intra-doc link ではなくコードスパンで参照する）で明示的に検証する
+    /// （OWASP A03。`.claude/rules/security.md`）。
+    InvalidAttribute {
+        node: String,
+        attr: String,
+        reason: String,
+    },
+    /// `run_with_ops`（イシュー #2077）の device 実行経路で発生した、
+    /// `BackendError::Unsupported`／`BackendError::ShapeMismatch` 以外の
+    /// 実行時エラー（driver 不在・カーネル起動失敗・デバイスメモリ確保
+    /// 失敗等）。`interp_device::try_device` が発生源。`Unsupported`／
+    /// `ShapeMismatch` はホスト実装へフォールバックするため本 variant に
+    /// はならない（GPU 故障を隠蔽しない fail-closed 方針。OWASP A08）。
+    Backend { node: String, message: String },
 }
 
 impl fmt::Display for InterpError {
@@ -146,12 +176,29 @@ impl fmt::Display for InterpError {
                     "ノード '{node}': 出力数不一致（期待 {expected}、実際 {actual}）"
                 )
             }
+            InterpError::InputArityMismatch {
+                node,
+                min,
+                max,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "ノード '{node}': 入力数不一致（期待 {min}〜{max}、実際 {actual}）"
+                )
+            }
             InterpError::GraphOutputNotProduced { name } => {
                 write!(f, "グラフ出力 '{name}' が実行結果に存在しません")
             }
             InterpError::Op(e) => write!(f, "{e}"),
             InterpError::Shape(e) => write!(f, "{e}"),
             InterpError::Graph(e) => write!(f, "{e}"),
+            InterpError::InvalidAttribute { node, attr, reason } => {
+                write!(f, "ノード '{node}': 属性 '{attr}' が不正です（{reason}）")
+            }
+            InterpError::Backend { node, message } => {
+                write!(f, "ノード '{node}': device 実行エラー: {message}")
+            }
         }
     }
 }
@@ -311,7 +358,146 @@ fn attr_i64s<'a>(node: &'a NodeProto, name: &str) -> Option<&'a [i64]> {
         .map(|a| a.ints.as_slice())
 }
 
-fn compute_gemm(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+/// `name` に一致する属性をちょうど 1 件だけ取得する（`Conv` 属性の型検証系
+/// 関数が共用する。イシュー #2076 codex-review 指摘）。同名属性が複数宣言され
+/// ている場合、どちらを採用すべきかは ONNX 仕様上一意に決まらないため、無言で
+/// 先頭／末尾いずれかを採用せず [`InterpError::InvalidAttribute`] で fail-closed
+/// に拒否する（OWASP A03。外部フォーマット由来の曖昧な入力を検証せずに通さない）。
+fn find_attr_unique<'a>(
+    node: &'a NodeProto,
+    name: &str,
+) -> Result<Option<&'a AttributeProto>, InterpError> {
+    let mut matches = node.attribute.iter().filter(|a| a.name == name);
+    let first = matches.next();
+    if matches.next().is_some() {
+        return Err(InterpError::InvalidAttribute {
+            node: node.name.clone(),
+            attr: name.to_string(),
+            reason: "同名属性が複数宣言されています".to_string(),
+        });
+    }
+    Ok(first)
+}
+
+/// `attr.r#type`（`AttributeProto.AttributeType`。`onnx/proto.rs::attribute_type`）
+/// が `expected` と一致することを検証する（`Conv` 属性の型検証系関数が共用。
+/// イシュー #2076 codex-review 指摘）。
+///
+/// `AttributeProto` は `f`／`i`／`s`／`ints` 等のフィールドを protobuf の
+/// oneof 相当として持つが、prost 生成コードでは実体は常に全フィールドを
+/// 持つ構造体であり、未設定フィールドは型のゼロ値（`0`／`""`／`Vec::new()`）
+/// になる。このため `r#type` を確認せず特定フィールドだけを読むと、本来
+/// 別の型であるべき属性（例: 本来 INTS であるべき `kernel_shape` を STRING
+/// 型として送り `ints` を空のまま残す）が「省略された」場合と区別できず、
+/// 無言で ONNX 既定値へ fallback してしまう（OWASP A03。外部 ONNX モデルは
+/// 非信頼な入力）。
+fn check_attr_type(
+    node: &NodeProto,
+    attr: &AttributeProto,
+    expected: i32,
+    expected_name: &str,
+) -> Result<(), InterpError> {
+    if attr.r#type != expected {
+        return Err(InterpError::InvalidAttribute {
+            node: node.name.clone(),
+            attr: attr.name.clone(),
+            reason: format!(
+                "AttributeType が {expected_name} ({expected}) ではありません（実際の値: {actual}）",
+                actual = attr.r#type
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// `Conv` の `kernel_shape`／`strides`／`pads`／`dilations`（INTS 型属性）を読む。
+/// 属性が省略されていれば `None` を返し（呼び出し側 `compute_conv` が ONNX
+/// 既定値へ fallback する）、存在する場合は `r#type == INTS` であることを
+/// [`check_attr_type`] で検証してから `ints` を返す。`attr_i64s`（他オペ用の
+/// 無検証版）との違いは、型不一致を「省略」と同一視せず fail-closed に拒否する
+/// 点（イシュー #2076 codex-review 指摘。P0: 型偽装した不正 ONNX モデルの
+/// 属性が無言で別の畳み込み条件〈既定値〉へ変更される問題への対処）。
+///
+/// `r#type == INTS` が確認できても `ints` が空の場合は拒否する（本来の
+/// INTS 属性が空リストで存在する ONNX モデルは想定されず、`export_ops.rs`
+/// も非空の値のみ書き出す。空 `ints` を許すと `.unwrap_or(&[])` 経由で
+/// 「省略」時と同じ既定値 fallback に合流してしまい、`r#type` 検証だけでは
+/// 塞げない同型の無言 fallback 抜け道になる）。
+fn attr_ints_typed<'a>(node: &'a NodeProto, name: &str) -> Result<Option<&'a [i64]>, InterpError> {
+    match find_attr_unique(node, name)? {
+        None => Ok(None),
+        Some(a) => {
+            check_attr_type(node, a, attribute_type::INTS, "INTS")?;
+            if a.ints.is_empty() {
+                return Err(InterpError::InvalidAttribute {
+                    node: node.name.clone(),
+                    attr: name.to_string(),
+                    reason: "INTS 属性が存在しますが要素が空です".to_string(),
+                });
+            }
+            Ok(Some(a.ints.as_slice()))
+        }
+    }
+}
+
+/// `Conv` の `group`（INT 型属性）を読む。属性が省略されていれば `default`
+/// を返し、存在する場合は `r#type == INT` であることを検証してから `i` を
+/// 返す（`attr_ints_typed` と同型の型検証。イシュー #2076 codex-review 指摘）。
+fn attr_i64_typed(node: &NodeProto, name: &str, default: i64) -> Result<i64, InterpError> {
+    match find_attr_unique(node, name)? {
+        None => Ok(default),
+        Some(a) => {
+            check_attr_type(node, a, attribute_type::INT, "INT")?;
+            Ok(a.i)
+        }
+    }
+}
+
+/// STRING 属性（`AttributeProto.s: Vec<u8>`。`Conv` の `auto_pad`。
+/// イシュー #2076）を読む。属性が無ければ `default` をそのまま返す
+/// （ONNX 仕様の既定値セマンティクス。`attr_f32`／`attr_i64` と同型）。
+/// 存在する場合は `r#type == STRING` であることを検証してから UTF-8 として
+/// 復号する（`check_attr_type` 参照。型が異なる場合に空の `s` を「省略」と
+/// 同一視して既定値へ fallback しない）。バイト列が UTF-8 として不正な場合も
+/// 無言でエラー化せず [`InterpError::InvalidAttribute`] を返す（OWASP A03。
+/// 外部フォーマット由来のバイト列を検証せずに文字列化しない）。同名属性が
+/// 複数宣言されている場合も [`find_attr_unique`] が同様に拒否する。
+///
+/// `r#type == STRING` が確認できても `s` が空バイト列の場合は拒否する
+/// （codex-review P0 指摘。イシュー #2076・PR #2220）。`Conv` の `auto_pad`
+/// は ONNX 仕様上 `"NOTSET"`／`"SAME_UPPER"`／`"SAME_LOWER"`／`"VALID"` の
+/// いずれかの非空列挙値であり、空文字列は有効な値ではない。属性が
+/// **存在して**値が空という状態を「属性が省略された」場合と無言で同一視
+/// すると、`attr_ints_typed` の空 `ints` 拒否（本モジュール既存実装）と
+/// 非対称になり、`check_attr_type` の型検証だけでは塞げない同型の無言
+/// fallback 抜け道になる。属性自体が存在しない場合のみ `default`
+/// （`"NOTSET"`）を適用する。
+fn attr_string(node: &NodeProto, name: &str, default: &str) -> Result<String, InterpError> {
+    match find_attr_unique(node, name)? {
+        None => Ok(default.to_string()),
+        Some(a) => {
+            check_attr_type(node, a, attribute_type::STRING, "STRING")?;
+            if a.s.is_empty() {
+                return Err(InterpError::InvalidAttribute {
+                    node: node.name.clone(),
+                    attr: name.to_string(),
+                    reason: "STRING 属性が存在しますが値が空です".to_string(),
+                });
+            }
+            String::from_utf8(a.s.clone()).map_err(|e| InterpError::InvalidAttribute {
+                node: node.name.clone(),
+                attr: name.to_string(),
+                reason: format!("UTF-8 として不正なバイト列 ({e})"),
+            })
+        }
+    }
+}
+
+fn compute_gemm(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let a = get_f32(env, node, input_name(node, 0)?)?;
     let b = get_f32(env, node, input_name(node, 1)?)?;
     let c = match node.input.get(2) {
@@ -324,17 +510,44 @@ fn compute_gemm(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value,
         trans_a: attr_i64(node, "transA", 0) != 0,
         trans_b: attr_i64(node, "transB", 0) != 0,
     };
-    Ok(Value::F32(ops::gemm(a, b, c, &attrs)?))
+    // opt-in ON（`dev_ops` が `Some`）のときのみ device 経路を試みる。
+    // `Ok(None)`（未対応 shape・`Unsupported`）はホスト実装へそのまま
+    // フォールバックし、opt-in OFF（`dev_ops` が `None`）時の経路・出力は
+    // 一切変更しない（イシュー #2077 実装計画 §3.2）。
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_gemm(&node.name, ops, a, b, c, &attrs)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::gemm(a, b, c, &attrs)?), false))
 }
 
-fn compute_relu(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_relu(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
-    Ok(Value::F32(ops::relu(x)?))
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_relu(&node.name, ops, x)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::relu(x)?), false))
 }
 
-fn compute_sigmoid(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_sigmoid(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
-    Ok(Value::F32(ops::sigmoid(x)?))
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_sigmoid(&node.name, ops, x)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::sigmoid(x)?), false))
 }
 
 fn compute_shape(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
@@ -548,12 +761,23 @@ fn get_f16<'a>(
 /// 組み合わせであり、`Cast` を明示的に経由させる既存方針（`compute_cast` 冒頭
 /// コメント）に合わせて暗黙変換せず [`InterpError::TypeMismatch`] で拒否する
 /// （no-silent-skip 契約）。
-fn compute_add(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_add(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let a = get_value(env, node, input_name(node, 0)?)?;
     let b = get_value(env, node, input_name(node, 1)?)?;
     match (a, b) {
-        (Value::F32(a), Value::F32(b)) => Ok(Value::F32(ops::add(a, b)?)),
-        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(ops::add_i64(a, b)?)),
+        (Value::F32(a), Value::F32(b)) => {
+            if let Some(ops) = dev_ops
+                && let Some(out) = interp_device::device_add(&node.name, ops, a, b)?
+            {
+                return Ok((Value::F32(out), true));
+            }
+            Ok((Value::F32(ops::add(a, b)?), false))
+        }
+        (Value::I64(a), Value::I64(b)) => Ok((Value::I64(ops::add_i64(a, b)?), false)),
         _ => Err(InterpError::TypeMismatch {
             node: node.name.clone(),
             expected: "f32 or i64 (matching pair)",
@@ -561,12 +785,23 @@ fn compute_add(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, 
     }
 }
 
-fn compute_mul(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_mul(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let a = get_value(env, node, input_name(node, 0)?)?;
     let b = get_value(env, node, input_name(node, 1)?)?;
     match (a, b) {
-        (Value::F32(a), Value::F32(b)) => Ok(Value::F32(ops::mul(a, b)?)),
-        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(ops::mul_i64(a, b)?)),
+        (Value::F32(a), Value::F32(b)) => {
+            if let Some(ops) = dev_ops
+                && let Some(out) = interp_device::device_mul(&node.name, ops, a, b)?
+            {
+                return Ok((Value::F32(out), true));
+            }
+            Ok((Value::F32(ops::mul(a, b)?), false))
+        }
+        (Value::I64(a), Value::I64(b)) => Ok((Value::I64(ops::mul_i64(a, b)?), false)),
         _ => Err(InterpError::TypeMismatch {
             node: node.name.clone(),
             expected: "f32 or i64 (matching pair)",
@@ -574,12 +809,23 @@ fn compute_mul(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, 
     }
 }
 
-fn compute_div(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_div(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let a = get_value(env, node, input_name(node, 0)?)?;
     let b = get_value(env, node, input_name(node, 1)?)?;
     match (a, b) {
-        (Value::F32(a), Value::F32(b)) => Ok(Value::F32(ops::div(a, b)?)),
-        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(ops::div_i64(a, b)?)),
+        (Value::F32(a), Value::F32(b)) => {
+            if let Some(ops) = dev_ops
+                && let Some(out) = interp_device::device_div(&node.name, ops, a, b)?
+            {
+                return Ok((Value::F32(out), true));
+            }
+            Ok((Value::F32(ops::div(a, b)?), false))
+        }
+        (Value::I64(a), Value::I64(b)) => Ok((Value::I64(ops::div_i64(a, b)?), false)),
         _ => Err(InterpError::TypeMismatch {
             node: node.name.clone(),
             expected: "f32 or i64 (matching pair)",
@@ -601,9 +847,18 @@ fn compute_mod(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, 
     }
 }
 
-fn compute_sqrt(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_sqrt(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
-    Ok(Value::F32(ops::sqrt(x)?))
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_sqrt(&node.name, ops, x)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::sqrt(x)?), false))
 }
 
 /// `Constant(value|value_float|value_floats|value_int|value_ints) -> y`。
@@ -725,16 +980,34 @@ fn compute_transpose(env: &HashMap<String, Value>, node: &NodeProto) -> Result<V
 
 // ---- TASK-7.3c: Attention 系オペ（イシュー #274 結線）----
 
-fn compute_matmul(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_matmul(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let a = get_f32(env, node, input_name(node, 0)?)?;
     let b = get_f32(env, node, input_name(node, 1)?)?;
-    Ok(Value::F32(ops::matmul(a, b)?))
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_matmul(&node.name, ops, a, b)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::matmul(a, b)?), false))
 }
 
-fn compute_softmax(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+fn compute_softmax(
+    env: &HashMap<String, Value>,
+    node: &NodeProto,
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
     let axis = attr_i64(node, "axis", -1);
-    Ok(Value::F32(ops::softmax(x, axis)?))
+    if let Some(ops) = dev_ops
+        && let Some(out) = interp_device::device_softmax(&node.name, ops, x, axis)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((Value::F32(ops::softmax(x, axis)?), false))
 }
 
 fn compute_erf(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
@@ -747,7 +1020,8 @@ fn compute_erf(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, 
 fn compute_layer_normalization(
     env: &HashMap<String, Value>,
     node: &NodeProto,
-) -> Result<Value, InterpError> {
+    dev_ops: Option<&dyn BackendOps>,
+) -> Result<(Value, bool), InterpError> {
     let x = get_f32(env, node, input_name(node, 0)?)?;
     let scale = get_f32(env, node, input_name(node, 1)?)?;
     let bias = match node.input.get(2) {
@@ -758,9 +1032,65 @@ fn compute_layer_normalization(
         axis: attr_i64(node, "axis", -1),
         epsilon: attr_f32(node, "epsilon", 1e-5),
     };
-    Ok(Value::F32(ops::layer_normalization(
-        x, scale, bias, &attrs,
-    )?))
+    if let Some(ops) = dev_ops
+        && let Some(out) =
+            interp_device::device_layer_norm(&node.name, ops, x, scale, bias, &attrs)?
+    {
+        return Ok((Value::F32(out), true));
+    }
+    Ok((
+        Value::F32(ops::layer_normalization(x, scale, bias, &attrs)?),
+        false,
+    ))
+}
+
+/// `Conv(X, W, [B])`（イシュー #2076・親 #2034。`ops::conv` の結線）。
+/// 属性は「常に全て書き出す」export 側規約（`export_ops.rs` モジュール
+/// 冒頭コメント）に従い export したグラフでは常に存在するが、本関数は
+/// interp 単体でも呼べるよう ONNX 仕様の既定値（`strides`／`dilations`
+/// 省略時 `[1,1]`・`pads` 省略時 `[0,0,0,0]`・`group` 省略時 `1`・
+/// `auto_pad` 省略時 `"NOTSET"`）へ fallback する（`attr_ints_typed`／
+/// `attr_i64_typed`／`attr_string` が `None`／属性欠落を透過的に扱う）。
+///
+/// `kernel_shape`／`strides`／`pads`／`dilations`（INTS）・`group`（INT）・
+/// `auto_pad`（STRING）はいずれも `AttributeProto.r#type` を期待型と照合する
+/// 型検証版のヘルパーで読む（`attr_i64s`／`attr_i64` の無検証版は使わない）。
+/// 型を偽装した不正な ONNX モデル（例: `kernel_shape` を STRING 型として
+/// 送り `ints` を空のまま残す）が、型不一致を「省略」と同一視されて無言で
+/// 既定値へ変更され、別の畳み込み条件で実行されてしまうのを防ぐ
+/// （イシュー #2076 codex-review 指摘。OWASP A03。`.claude/rules/security.md`）。
+///
+/// 入力数は ONNX Conv-13 仕様どおり 2（`X, W`）または 3（`X, W, B`）のみ
+/// 受理する。旧実装は先頭 2 個と `node.input.get(2)` だけを読み、4 個以上の
+/// 入力を無言で無視していた（codex-review P0 指摘。PR #2220）。3 個目が
+/// 空文字列（ONNX の optional input 省略記法。`input_name` と同じ規約）の
+/// 場合はバイアスなしとして扱う。
+fn compute_conv(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
+    if node.input.len() < 2 || node.input.len() > 3 {
+        return Err(InterpError::InputArityMismatch {
+            node: node.name.clone(),
+            min: 2,
+            max: 3,
+            actual: node.input.len(),
+        });
+    }
+    let x = get_f32(env, node, input_name(node, 0)?)?;
+    let w = get_f32(env, node, input_name(node, 1)?)?;
+    let b = match node.input.get(2) {
+        Some(name) if !name.is_empty() => Some(get_f32(env, node, name)?),
+        _ => None,
+    };
+    let attrs = ConvAttrs {
+        kernel_shape: attr_ints_typed(node, "kernel_shape")?
+            .unwrap_or(&[])
+            .to_vec(),
+        strides: attr_ints_typed(node, "strides")?.unwrap_or(&[]).to_vec(),
+        pads: attr_ints_typed(node, "pads")?.unwrap_or(&[]).to_vec(),
+        dilations: attr_ints_typed(node, "dilations")?.unwrap_or(&[]).to_vec(),
+        group: attr_i64_typed(node, "group", 1)?,
+        auto_pad: attr_string(node, "auto_pad", "NOTSET")?,
+    };
+    Ok(Value::F32(ops::conv(x, w, b, &attrs)?))
 }
 
 /// `node.output` が単一出力であることを検査し、その名前を返す（本モジュールが実装する
@@ -777,22 +1107,34 @@ fn require_single_output(node: &NodeProto) -> Result<&str, InterpError> {
     Ok(node.output[0].as_str())
 }
 
-/// `Graph`（`build_graph` が構築したトポロジカル順検証済みグラフ）を実行する。
+/// `run_with_ops_report` が返す、ノードごとの実行経路の可観測点
+/// （イシュー #2077）。テスト・診断専用の内部クレート限定型であり facade
+/// へは公開しない（`docs/onnx-gpu-execution-decision.md` §3.1 「dispatcher
+/// の配置」承認事項 2 参照）。
+#[derive(Debug, Clone, Default)]
+pub struct DispatchReport {
+    /// device（`BackendOps`）実行に到達したノード名。
+    pub device_nodes: Vec<String>,
+    /// ホスト実装（`ops::*`）で実行されたノード名（`dev_ops` が `None`
+    /// の場合は全ノードがここに入る）。
+    pub host_nodes: Vec<String>,
+}
+
+/// `run`／`run_with_ops`／`run_with_ops_report` の共通実装。`dev_ops` が
+/// `Some` の場合のみ f32 系ノード（`MatMul`／`Gemm`／`Add`／`Mul`／`Div`／
+/// `Sqrt`／`Relu`／`Sigmoid`／`Softmax`／`LayerNormalization`）で device
+/// 経路を試みる（`interp_device` モジュール冒頭コメント参照）。`report` が
+/// `Some` の場合のみノードごとの実行経路を記録する（`run`／`run_with_ops`
+/// は記録コストを払わない）。
 ///
-/// 呼び出し元は `onnx-interop` 利用者（将来の `fandhe_ai_onnx_interop::run_model` 等の
-/// 上位 API・TASK-7.4）。`feeds` は `graph.inputs` のうち initializer を持たない
-/// 入力に対応する実行時の値（feeds 検証は以下の順序で行う。no-silent-skip 契約）:
-///
-/// 1. `graph.inputs` のうち initializer を持たない入力に feed が無ければ
-///    [`InterpError::MissingFeed`]
-/// 2. `graph.inputs`（および initializer 名）に属さない feed 名は
-///    [`InterpError::UnknownFeed`] で拒否
-///
-/// initializer と同名の feed が渡された場合（pre-IR-4 パターン）は feed が
-/// initializer を上書きする（ONNX 仕様のデフォルト値セマンティクス）。
-pub fn run(
+/// `dev_ops` が `None` の場合、各 `compute_*` は device 分岐へ一切入らず
+/// 既存コードをそのまま実行するため、本関数の出力は `dev_ops` 追加前の
+/// `run` と bit 完全に不変である（イシュー #2077 実装計画 §3.6 契約 (a)）。
+fn run_impl(
     graph: &Graph,
     feeds: HashMap<String, Value>,
+    dev_ops: Option<&dyn BackendOps>,
+    mut report: Option<&mut DispatchReport>,
 ) -> Result<HashMap<String, Value>, InterpError> {
     for input in &graph.inputs {
         if !graph.initializers.contains_key(input) && !feeds.contains_key(input) {
@@ -820,31 +1162,46 @@ pub fn run(
     }
 
     for node in &graph.nodes {
-        let out_value = match node.op_type.as_str() {
-            "Gemm" => compute_gemm(&env, node)?,
-            "Relu" => compute_relu(&env, node)?,
-            "Sigmoid" => compute_sigmoid(&env, node)?,
-            "Shape" => compute_shape(&env, node)?,
-            "Gather" => compute_gather(&env, node)?,
-            "Unsqueeze" => compute_unsqueeze(&env, node)?,
-            "Concat" => compute_concat(&env, node)?,
-            "Slice" => compute_slice(&env, node)?,
-            "Add" => compute_add(&env, node)?,
-            "Mul" => compute_mul(&env, node)?,
-            "Div" => compute_div(&env, node)?,
-            "Mod" => compute_mod(&env, node)?,
-            "Sqrt" => compute_sqrt(&env, node)?,
-            "Constant" => compute_constant(node)?,
-            "Cast" => compute_cast(&env, node)?,
-            "Reshape" => compute_reshape(&env, node)?,
-            "Squeeze" => compute_squeeze(&env, node)?,
-            "Transpose" => compute_transpose(&env, node)?,
-            "MatMul" => compute_matmul(&env, node)?,
-            "Softmax" => compute_softmax(&env, node)?,
-            "Erf" => compute_erf(&env, node)?,
-            "LayerNormalization" => compute_layer_normalization(&env, node)?,
+        // `used_device` は各 `compute_*` が実際に device 経路（`interp_
+        // device::device_*` が `Ok(Some(_))` を返した場合）を採用したかを
+        // 正確に表す（device 結線対象外の op は常に `false` で揃える。
+        // 推測・近似ではなく `compute_*` の戻り値そのものから得る）。
+        // `Conv`（イシュー #2076）は device 実行の対象外（#2077／#2222 の
+        // 結線範囲は `interp_device` モジュール冒頭コメント参照）のため
+        // 常にホスト実装（`ops::conv`）で実行し `false` を報告する。
+        let (out_value, used_device) = match node.op_type.as_str() {
+            "Gemm" => compute_gemm(&env, node, dev_ops)?,
+            "Relu" => compute_relu(&env, node, dev_ops)?,
+            "Sigmoid" => compute_sigmoid(&env, node, dev_ops)?,
+            "Shape" => (compute_shape(&env, node)?, false),
+            "Gather" => (compute_gather(&env, node)?, false),
+            "Unsqueeze" => (compute_unsqueeze(&env, node)?, false),
+            "Concat" => (compute_concat(&env, node)?, false),
+            "Slice" => (compute_slice(&env, node)?, false),
+            "Add" => compute_add(&env, node, dev_ops)?,
+            "Mul" => compute_mul(&env, node, dev_ops)?,
+            "Div" => compute_div(&env, node, dev_ops)?,
+            "Mod" => (compute_mod(&env, node)?, false),
+            "Sqrt" => compute_sqrt(&env, node, dev_ops)?,
+            "Constant" => (compute_constant(node)?, false),
+            "Cast" => (compute_cast(&env, node)?, false),
+            "Reshape" => (compute_reshape(&env, node)?, false),
+            "Squeeze" => (compute_squeeze(&env, node)?, false),
+            "Transpose" => (compute_transpose(&env, node)?, false),
+            "MatMul" => compute_matmul(&env, node, dev_ops)?,
+            "Softmax" => compute_softmax(&env, node, dev_ops)?,
+            "Erf" => (compute_erf(&env, node)?, false),
+            "LayerNormalization" => compute_layer_normalization(&env, node, dev_ops)?,
+            "Conv" => (compute_conv(&env, node)?, false),
             other => return Err(InterpError::UnsupportedOp(other.to_string())),
         };
+        if let Some(r) = report.as_deref_mut() {
+            if used_device {
+                r.device_nodes.push(node.name.clone());
+            } else {
+                r.host_nodes.push(node.name.clone());
+            }
+        }
         let output_name = require_single_output(node)?.to_string();
         env.insert(output_name, out_value);
     }
@@ -858,6 +1215,61 @@ pub fn run(
         result.insert(name.clone(), v);
     }
     Ok(result)
+}
+
+/// `Graph`（`build_graph` が構築したトポロジカル順検証済みグラフ）をホスト
+/// CPU 実装（`ops::*`）のみで実行する。
+///
+/// 呼び出し元は `onnx-interop` 利用者（`fandhe_ai::interop::onnx::OnnxModel::
+/// run` の opt-in OFF 経路〈既定〉・facade 経由の GPU 実行 opt-in が無効な
+/// 場合。TASK-7.4）。`feeds` は `graph.inputs` のうち initializer を持たない
+/// 入力に対応する実行時の値（feeds 検証は以下の順序で行う。no-silent-skip 契約）:
+///
+/// 1. `graph.inputs` のうち initializer を持たない入力に feed が無ければ
+///    [`InterpError::MissingFeed`]
+/// 2. `graph.inputs`（および initializer 名）に属さない feed 名は
+///    [`InterpError::UnknownFeed`] で拒否
+///
+/// initializer と同名の feed が渡された場合（pre-IR-4 パターン）は feed が
+/// initializer を上書きする（ONNX 仕様のデフォルト値セマンティクス）。
+pub fn run(
+    graph: &Graph,
+    feeds: HashMap<String, Value>,
+) -> Result<HashMap<String, Value>, InterpError> {
+    run_impl(graph, feeds, None, None)
+}
+
+/// [`run`] と同じグラフ実行だが、`ops`（CPU／CUDA／Metal いずれの
+/// `BackendOps` 実装でもよい）経由の device 実行を試みる（イシュー
+/// #2077。`fandhe_ai::set_cuda_onnx_gpu_execution_enabled` 等の facade
+/// opt-in から到達する）。
+///
+/// 対象 op（`interp_device` モジュール冒頭コメント参照）の f32 経路のみ
+/// device を試み、`BackendError::Unsupported`／`ShapeMismatch` はホスト
+/// 実装（`ops::*`）へフォールバックする。それ以外のバックエンドエラーは
+/// [`InterpError::Backend`] として伝播する（黙示フォールバックしない。
+/// OWASP A08）。非 f32 経路・形状操作系（`Shape`／`Gather`／`Unsqueeze`／
+/// `Concat`／`Slice`／`Cast`／`Reshape`／`Squeeze`／`Transpose`／
+/// `Constant`）・`Mod`／`Erf` は常にホスト実行のまま（`run` と同一実装）。
+pub fn run_with_ops(
+    graph: &Graph,
+    feeds: HashMap<String, Value>,
+    ops: &dyn BackendOps,
+) -> Result<HashMap<String, Value>, InterpError> {
+    run_impl(graph, feeds, Some(ops), None)
+}
+
+/// [`run_with_ops`] と同じだが、ノードごとの実行経路（[`DispatchReport`]）
+/// も返す（テスト・診断専用。`ops-interop` の内部クレート限定 API であり
+/// facade へは公開しない）。
+pub fn run_with_ops_report(
+    graph: &Graph,
+    feeds: HashMap<String, Value>,
+    ops: &dyn BackendOps,
+) -> Result<(HashMap<String, Value>, DispatchReport), InterpError> {
+    let mut report = DispatchReport::default();
+    let result = run_impl(graph, feeds, Some(ops), Some(&mut report))?;
+    Ok((result, report))
 }
 
 #[cfg(test)]
@@ -909,6 +1321,56 @@ mod tests {
             f,
             ..Default::default()
         }
+    }
+
+    /// `r#type` を明示的に `INTS` へ設定した属性を組み立てる（`Conv` の
+    /// `kernel_shape`／`strides`／`pads`／`dilations` 用。`build_attr_i64s`
+    /// は意図的に `r#type` を設定しない他オペ用ビルダーのため、型検証を
+    /// 経由する `attr_ints_typed` のテストには使えない）。
+    fn build_attr_ints_typed(name: &str, ints: Vec<i64>) -> super::super::proto::AttributeProto {
+        super::super::proto::AttributeProto {
+            name: name.to_string(),
+            ints,
+            r#type: super::super::proto::attribute_type::INTS,
+            ..Default::default()
+        }
+    }
+
+    /// `r#type` を明示的に `INT` へ設定した属性を組み立てる（`Conv` の
+    /// `group` 用）。
+    fn build_attr_i64_typed(name: &str, i: i64) -> super::super::proto::AttributeProto {
+        super::super::proto::AttributeProto {
+            name: name.to_string(),
+            i,
+            r#type: super::super::proto::attribute_type::INT,
+            ..Default::default()
+        }
+    }
+
+    /// `r#type` を明示的に `STRING` へ設定した属性を組み立てる（`Conv` の
+    /// `auto_pad` 用）。
+    fn build_attr_string_typed(name: &str, s: &str) -> super::super::proto::AttributeProto {
+        super::super::proto::AttributeProto {
+            name: name.to_string(),
+            s: s.as_bytes().to_vec(),
+            r#type: super::super::proto::attribute_type::STRING,
+            ..Default::default()
+        }
+    }
+
+    /// `Conv` の全属性を（型検証込みで）正しく設定したノードを組み立てる。
+    fn conv_node_with_attrs(extra: Vec<super::super::proto::AttributeProto>) -> NodeProto {
+        let mut attrs = vec![
+            build_attr_ints_typed("kernel_shape", vec![1, 1]),
+            build_attr_ints_typed("strides", vec![1, 1]),
+            build_attr_ints_typed("pads", vec![0, 0, 0, 0]),
+            build_attr_ints_typed("dilations", vec![1, 1]),
+            build_attr_i64_typed("group", 1),
+            build_attr_string_typed("auto_pad", "NOTSET"),
+        ];
+        attrs.retain(|a| !extra.iter().any(|e| e.name == a.name));
+        attrs.extend(extra);
+        node_with_attrs("Conv", vec!["x", "w"], vec!["y"], attrs)
     }
 
     fn empty_graph(nodes: Vec<NodeProto>, inputs: Vec<&str>, outputs: Vec<&str>) -> Graph {
@@ -1468,5 +1930,243 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// `run_end_to_end_conv` の feed（`X: [1,1,2,2]`・`W: [1,1,1,1]`。
+    /// `kernel_shape=[1,1]`・`stride=1`・`pad=0` の恒等写像に近い最小構成）
+    /// を組み立てる（型検証を通過する正常系の固定に使う）。
+    fn conv_feeds() -> StdHashMap<String, Value> {
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "x".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]).unwrap()),
+        );
+        feeds.insert(
+            "w".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![2.0], &[1, 1, 1, 1]).unwrap()),
+        );
+        feeds
+    }
+
+    #[test]
+    fn run_end_to_end_conv_accepts_correctly_typed_attrs() {
+        // すべての Conv 属性が期待型（INTS／INT／STRING）で宣言されている
+        // 正常系（`export_ops.rs` が実際に export する形と同じ）。
+        let n = conv_node_with_attrs(vec![]);
+        let g = empty_graph(vec![n], vec!["x", "w"], vec!["y"]);
+        let result = run(&g, conv_feeds()).unwrap();
+        match &result["y"] {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_conv_rejects_kernel_shape_with_mismatched_attribute_type() {
+        // P0（イシュー #2076 codex-review 指摘）: `kernel_shape` を INTS では
+        // なく STRING 型として送る型偽装。`ints` は空のままだが、これを
+        // 「省略された」場合と同一視して既定値へ fallback してはならない。
+        let n = conv_node_with_attrs(vec![build_attr_string_typed("kernel_shape", "")]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "kernel_shape"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_strides_with_mismatched_attribute_type() {
+        let n = conv_node_with_attrs(vec![build_attr_string_typed("strides", "")]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "strides"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_pads_with_mismatched_attribute_type() {
+        let n = conv_node_with_attrs(vec![build_attr_string_typed("pads", "")]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "pads"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_dilations_with_mismatched_attribute_type() {
+        let n = conv_node_with_attrs(vec![build_attr_string_typed("dilations", "")]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "dilations"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_group_with_mismatched_attribute_type() {
+        // `group`（本来 INT）を INTS 型として送る型偽装。
+        let n = conv_node_with_attrs(vec![build_attr_ints_typed("group", vec![1])]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "group"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_auto_pad_with_mismatched_attribute_type() {
+        // `auto_pad`（本来 STRING）を INT 型として送る型偽装。`s` は空の
+        // ままだが、空文字列 `""` を UTF-8 として妥当に復号できてしまうため
+        // 型検証がなければ無言で通過してしまう（codex-review 指摘の core）。
+        let n = conv_node_with_attrs(vec![build_attr_i64_typed("auto_pad", 0)]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "auto_pad"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_duplicate_attribute() {
+        // 同名属性の複数宣言はどちらを採用すべきか ONNX 仕様上一意に決まら
+        // ないため、無言で先頭／末尾を採用せず fail-closed に拒否する。
+        let mut n = conv_node_with_attrs(vec![]);
+        n.attribute
+            .push(build_attr_ints_typed("kernel_shape", vec![3, 3]));
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "kernel_shape"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_present_but_empty_ints_attribute() {
+        // `r#type == INTS` を正しく宣言しつつ `ints` を空のまま残す型偽装。
+        // `check_attr_type` だけでは通過してしまい `.unwrap_or(&[])` 経由で
+        // 「省略された」場合と同じ既定値 fallback に合流するため、空リストは
+        // 型検証と別に明示的に拒否する（advisor 指摘。P0 の「期待フィールド
+        // が空」という不正表現に対応）。
+        let n = conv_node_with_attrs(vec![build_attr_ints_typed("strides", vec![])]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "strides"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_present_but_empty_auto_pad() {
+        // P0 修正（codex-review 指摘。PR #2220）: `auto_pad` が STRING 型で
+        // 正しく宣言されつつ値が空バイト列という型偽装。空文字列は ONNX
+        // 仕様上有効な列挙値ではないため、属性が省略された場合の `NOTSET`
+        // fallback と無言で同一視してはならない。
+        let n = conv_node_with_attrs(vec![build_attr_string_typed("auto_pad", "")]);
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InvalidAttribute { ref attr, .. } if attr == "auto_pad"
+        ));
+    }
+
+    #[test]
+    fn compute_conv_accepts_auto_pad_omitted_as_notset() {
+        // 属性自体が存在しない場合（上記の「存在して空」とは異なる）は
+        // 従来どおり `NOTSET` へ fallback する。
+        let n = conv_node_with_attrs(vec![]);
+        assert!(
+            n.attribute
+                .iter()
+                .any(|a| a.name == "auto_pad" && a.s == b"NOTSET")
+        );
+        let n_omitted = node_with_attrs(
+            "Conv",
+            vec!["x", "w"],
+            vec!["y"],
+            n.attribute
+                .into_iter()
+                .filter(|a| a.name != "auto_pad")
+                .collect(),
+        );
+        let result = compute_conv(&conv_feeds(), &n_omitted).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_conv_rejects_four_inputs() {
+        // P0 修正（codex-review 指摘。PR #2220）: 4 個目以降の入力を無言で
+        // 無視せず fail-closed に拒否する。
+        let n = node_with_attrs(
+            "Conv",
+            vec!["x", "w", "b", "extra"],
+            vec!["y"],
+            conv_node_with_attrs(vec![]).attribute,
+        );
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InputArityMismatch {
+                min: 2,
+                max: 3,
+                actual: 4,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compute_conv_rejects_zero_inputs() {
+        let n = node_with_attrs(
+            "Conv",
+            vec![],
+            vec!["y"],
+            conv_node_with_attrs(vec![]).attribute,
+        );
+        let err = compute_conv(&conv_feeds(), &n).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::InputArityMismatch {
+                min: 2,
+                max: 3,
+                actual: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compute_conv_third_input_empty_placeholder_treated_as_no_bias() {
+        // 3 個目の入力が ONNX の optional input 省略記法（空文字列
+        // プレースホルダー）の場合は `node.input.get(2)` が空判定になり、
+        // バイアスなしとして扱う（`input_name` と同じ規約。省略時と同じ
+        // 出力になることを確認する）。
+        let n = node_with_attrs(
+            "Conv",
+            vec!["x", "w", ""],
+            vec!["y"],
+            conv_node_with_attrs(vec![]).attribute,
+        );
+        let result = compute_conv(&conv_feeds(), &n).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
+    }
+
+    #[test]
+    fn compute_conv_falls_back_to_defaults_when_attrs_omitted() {
+        // 属性が丸ごと省略されている場合（型検証の対象外）は従来どおり
+        // ONNX 仕様の既定値へ fallback する。
+        let n = node("Conv", vec!["x", "w"], vec!["y"]);
+        let result = compute_conv(&conv_feeds(), &n).unwrap();
+        match result {
+            Value::F32(t) => assert_eq!(t.as_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]),
+            _ => panic!("Value::F32 を期待"),
+        }
     }
 }

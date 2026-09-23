@@ -232,9 +232,9 @@ REQ-9 2026-09-12 追記（`04-requirements.md:231`）の列挙を、
 | cast | #1613（#1750 で dtype 変換基盤と CPU cast を実装済み: `CastDType`／`CastElement`〈sealed trait・`f32`／`f64`／`i32`／`i64`／`bool` の 5 型〉・`BackendOps::cast_ops` capability accessor・`CastOps`〈8 方向・既定 `Unsupported`〉・ホスト参照実装〈`tensor_core::cast::{cast_from_f32, cast_to_f32}`〉・CPU 実装〈`backend-cpu::cast`。ホスト参照実装への委譲〉・`Var::cast`／`Var::to_f32`／`Tape::var_from`。出力が非 f32 の cast は非微分・detached〈`Var::argmax`／`unique` と同型〉・facade は `CastDType`／`CastElement` の再エクスポートのみ〈`CastOps` は非公開のまま〉。設計・数値契約は `docs/tensor-core-cast-design.md`。#1751 で CUDA〈8 方向〉・Metal〈f64 2 方向を除く 6 方向。MSL `double` 非対応〉のネイティブカーネルを実装済み・facade 新規公開面なし・CUDA／Metal 実機実測は未実施のまま Mac／GB10 セッションへ申し送り → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・CUDA〈GB10〉は引き続き未実測 → CUDA〈GB10〉も 2026-09-16 に実測済み（pass。`docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md`）） |
 | デバイス転送と列挙 | #1614（実装済み: `fandhe_ai::available_devices()`〈3 バックエンドの `DeviceProvider` を束ねた列挙入口。`Device::Cpu` → `Device::Cuda(0..n)` 昇順 → `Device::Metal`〈macOS のみ〉の決定的順序。`DeviceProvider`／`DeviceInfo`／`enumerate_all` は再エクスポートせず `Device` 識別子のみを返す〉・`Var::device`／`Var::to`〈同一デバイスなら恒等・不一致なら新設 `AutodiffError::DeviceMismatch { requested, actual }`〉・`Var::to_tape`〈別 `Tape` への値転送。同一 tape は恒等・それ以外は `materialize_fallible` 経由で実体化した値〈bit 完全一致・算術なし〉を新しい葉として登録し `requires_grad` を引き継ぐ・勾配はテープをまたがない・checkpoint 解放済み poison ノードは `Err` で fail-closed〉・facade `Tape::device`／`Tape::transfer`〈`Var::to_tape` の唯一の facade 到達経路〉。`Tensor` 側は独立の転送 API を設けず `tape_for(device)?.var(&t)` と等価という設計上の非対応として確定。新規 `Op`／`BackendOps`／VJP は追加していない。設計・実装記録は `docs/facade-device-transfer-enumeration-design.md`。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り → Metal〈M4 Max〉は 2026-09-16 に実測済み（pass。`docs/perf/logs/metal-realdevice-phase2-2026-09-16/README.md`）・CUDA〈GB10〉は引き続き未実測 → CUDA〈GB10〉も 2026-09-16 に実測済み（pass。`docs/perf/logs/cuda-realdevice-phase2-2026-09-16/README.md`）） |
 | Dataset／DataLoader | #1615（実装済み: `data::Dataset`／`data::TensorDataset<T>`〈map-style。異種 dtype／複数列は 2/3 要素タプル impl で表現し同一シャッフル順を保証〉・`data::DataLoader`／`data::DataLoaderConfig`〈batch_size／shuffle／drop_last〉・`data::Batches`〈`ExactSizeIterator`〉・`data::DataError`。`crates/tensor-core/src/data.rs`（`rng`／`creation` と同じホスト側完結レイヤー。`Op`／`BackendOps`／`Var`／VJP を一切経由しない）。シャッフルは Fisher–Yates＋`rng::with_global_rng` の rejection sampling（`manual_seed` 契約下で決定的）。facade は `fandhe_ai::data::{Batches, DataError, DataLoader, DataLoaderConfig, Dataset, TensorDataset}` の純再エクスポートのみ（`crates/facade/src/data.rs`）。設計・受入基準テンプレート読み替えは `docs/dataset-dataloader-design.md`） |
-| state_dict／safetensors | #1616（#1752 で state_dict 部分を実装済み: `nn::Module` trait に `set_parameter`〈defaulted・既定 `Err`。`Linear`／`RmsNorm`／`LayerNorm`／`MultiheadAttention`／`Rnn`／`Lstm`／`Gru`／`ModuleList`／`Sequential` で実装〉・`state_dict`／`load_state_dict`〈defaulted。`HashMap<String, Tensor<f32>>`。strict・two-pass アトミック〈パス 1 でキー集合完全一致・shape 完全一致を検証してから、全通過後のパス 2 で書き戻す。`compat::Sequential::apply_parameters` の #294／#426 と同型の不変条件〉〉を追加。`compat::Sequential::state_dict`／`load_state_dict` へ 1 行委譲する facade 新規公開面 2 件〈`docs/compat-api-scope.md` §5 経路 2。親 #1616 の 2026-09-12 ユーザー承認済み〉。新規 `Op`／`BackendOps`／VJP はいずれも該当なし〈数値経路を変更しない機構のため bit 完全一致契約。CUDA／Metal 実機 parity は数値経路非依存のため対象外〉。#1754 で `Tensor` の `Debug`／`Display`〈打ち切り付きの値プレビュー。`docs/public-api-design.md` §7 の `Tape: Debug` 公開契約越しの DoS 耐性を含む。軸ごとの打ち切りのみでは高階小軸長形状〈例 `shape=[2;20]`〉を打ち切れない穴・極端な rank でのスタックオーバーフローをコードレビュー指摘で発見し、総出力要素数のグローバル予算・rank 上限ガードを追加是正済み〈`tensor-core::tensor_fmt` モジュール doc 参照〉〉実装済み〈`tensor-core::tensor_fmt`。facade 新規公開面なし〉。**#2019 で safetensors save／load を実装済みへ更新**（案 A・素の再エクスポート。`fandhe_ai::interop::safetensors::{LoadError, SaveError, load_safetensors_f32, load_safetensors_f32_from_bytes, require_keys, save_safetensors_f32, save_safetensors_f32_to_bytes}`。`fandhe_ai_onnx_interop::st_load`／`st_save` からの純再エクスポート・ロジック複製なし・facade への `safetensors` 直接依存追加なし。`compat::Sequential::state_dict`／`load_state_dict` との bit 完全一致往復・不足キー／dtype 不一致／形状不一致の fail-closed 拒否を統合テストで検証済み。`ModelCheckpoint` からのファイル保存結線は引き続き対象外。詳細は `docs/facade-safetensors-exposure-decision.md` §11） |
+| state_dict／safetensors | #1616（#1752 で state_dict 部分を実装済み: `nn::Module` trait に `set_parameter`〈defaulted・既定 `Err`。`Linear`／`RmsNorm`／`LayerNorm`／`MultiheadAttention`／`Rnn`／`Lstm`／`Gru`／`ModuleList`／`Sequential` で実装〉・`state_dict`／`load_state_dict`〈defaulted。`HashMap<String, Tensor<f32>>`。strict・two-pass アトミック〈パス 1 でキー集合完全一致・shape 完全一致を検証してから、全通過後のパス 2 で書き戻す。`compat::Sequential::apply_parameters` の #294／#426 と同型の不変条件〉〉を追加。`compat::Sequential::state_dict`／`load_state_dict` へ 1 行委譲する facade 新規公開面 2 件〈`docs/compat-api-scope.md` §5 経路 2。親 #1616 の 2026-09-12 ユーザー承認済み〉。新規 `Op`／`BackendOps`／VJP はいずれも該当なし〈数値経路を変更しない機構のため bit 完全一致契約。CUDA／Metal 実機 parity は数値経路非依存のため対象外〉。#1754 で `Tensor` の `Debug`／`Display`〈打ち切り付きの値プレビュー。`docs/public-api-design.md` §7 の `Tape: Debug` 公開契約越しの DoS 耐性を含む。軸ごとの打ち切りのみでは高階小軸長形状〈例 `shape=[2;20]`〉を打ち切れない穴・極端な rank でのスタックオーバーフローをコードレビュー指摘で発見し、総出力要素数のグローバル予算・rank 上限ガードを追加是正済み〈`tensor-core::tensor_fmt` モジュール doc 参照〉〉実装済み〈`tensor-core::tensor_fmt`。facade 新規公開面なし〉。**#2019 で safetensors save／load を実装済みへ更新**（案 A・素の再エクスポート。`fandhe_ai::interop::safetensors::{LoadError, SaveError, load_safetensors_f32, load_safetensors_f32_from_bytes, require_keys, save_safetensors_f32, save_safetensors_f32_to_bytes}`。`fandhe_ai_onnx_interop::st_load`／`st_save` からの純再エクスポート・ロジック複製なし・facade への `safetensors` 直接依存追加なし。`compat::Sequential::state_dict`／`load_state_dict` との bit 完全一致往復・不足キー／dtype 不一致／形状不一致の fail-closed 拒否を統合テストで検証済み。`ModelCheckpoint` からのファイル保存結線は引き続き対象外。詳細は `docs/facade-safetensors-exposure-decision.md` §11）。**#2087 でローカルモデルレジストリ `fandhe_ai::model::ModelRegistry` を実装済み**（詳細は `docs/facade-model-registry-decision.md`） |
 | Module の train／eval | #1617（#1758 で `nn::Module` trait 契約〈`set_training`／`training`。既定 no-op／`true`。無状態モジュールはオーバーライドせず、モードの正はコンテナ〈`compat::Sequential`〉が保持するフラグとする契約〉と `named_parameters`〈`Vec<(String, &Tensor<f32>)>`。struct フィールド名／accessor 名ベースの命名契約・`Linear`／`RmsNorm`／`LayerNorm`／`MultiheadAttention`／`Rnn`／`Lstm`／`Gru` で実装〉を実装済み。`compat::Sequential` に `set_training`／`train`／`eval`／`training`／`named_parameters`〈index 接頭辞契約。`trainable_parameters()` と同一順序〉を追加（facade 新規 `pub fn` 5 件）。新規 `Op`／`BackendOps`／VJP／GPU カーネルはいずれも該当なし〈数値経路 bit 完全一致。CUDA／Metal 実機 parity は数値経路非依存のため対象外〉。`predict`／`forward_host` とモード〈Dropout 等の `training=False` 意味論〉の整合は #1603 で確定済み（コンテナの `training` フラグを尊重する方式。§1.2「Dropout」行参照）。コンテナ再構成は #1759 で実装済み: `fandhe_ai_autodiff::nn::container::{ModuleList, Sequential}`（PyTorch `nn.ModuleList`／`nn.Sequential` 相当。`Module` trait を非公開のため facade からは再エクスポートしない）を新設し、`compat::Sequential` の層保持・Linear→ReLU 融合先読み走査（forward）・`set_training`／`training`／`named_parameters` の本体を移設。`compat::Sequential` は `inner: nn::Sequential` を持つ薄いラッパーへ再構成（`forward` は `self.inner.forward(&tape.0, input)` へ 1 行委譲・`set_training`／`training`／`named_parameters` も `self.inner` へ委譲）。公開シグネチャ・数値挙動は不変（既存テスト 30 件 bit 完全一致確認済み）・facade 新規公開面なし。ネストしたコンテナ内 `Linear` は compat の学習契約〈`bind`／`trainable_parameters`／`apply_parameters`・デバイス常駐経路〉に到達しない制限が残るが、facade は `ModuleList`／`nn::Sequential` を構築する経路自体を公開していないため到達不能（`container.rs` モジュール doc「ネストの限界」参照）） |
-| Keras 風 `Sequential` の層追加と `compile()`／`fit()`／`evaluate()`／callbacks の最小版 | #1618（#1761 で `compile()`／`fit()`／`evaluate()` 最小版実装済み。`compat::{Loss, Optimizer, FitConfig, History, FitTarget}`・`Sequential::{compile, is_compiled, fit, evaluate}`。既存公開 API〈`Sequential::bind`／`fandhe_ai::optim`／`fandhe_ai::data::DataLoader`／`Var::mse_loss`／`cross_entropy_loss`〉の合成のみで新規 `Op`／`BackendOps`／VJP なし・CPU `tape()` 固定。正しさは手動学習ループとのパラメータ・loss 系列 bit 完全一致で検証（統合テスト `crates/facade/tests/compat_sequential_fit.rs`）。#1763 で callbacks（`EarlyStopping`／`ModelCheckpoint`）・`validation_data`・LR スケジューラ連携を実装済み（`compat::{Callback, EarlyStopping, ModelCheckpoint, LrSchedule, Monitor, MonitorMode}`・`Sequential::fit_with_callbacks`・`fandhe_ai::optim::{Sgd, AdamW, Adam}::set_lr` 新設。新規 `Op`／`BackendOps`／VJP なし・正しさは手動ループとの bit 完全一致で検証（統合テスト `crates/facade/tests/compat_sequential_callbacks.rs`）。設計判断は `docs/compat-callbacks-design.md`。`DataLoader` 直接入力は引き続き対象外）。**#1760 で `Sequential::add_*` の対象レイヤーを Conv2d／Conv1d〈#1770〉に加え LayerNorm／RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／MultiheadAttention へ拡張**（詳細は本表の各該当行。§5「適用記録」参照）。**#2072 で分類 metrics（accuracy・precision・recall・F1・confusion matrix）を実装済み**（`compat::{Metrics, MetricsResult}`・`Sequential::fit_with_metrics`・`Monitor::ValMetric`。設計判断は `docs/compat-metrics-design.md`。§5「適用記録（経路 2。イシュー #2072）」参照） |
+| Keras 風 `Sequential` の層追加と `compile()`／`fit()`／`evaluate()`／callbacks の最小版 | #1618（#1761 で `compile()`／`fit()`／`evaluate()` 最小版実装済み。`compat::{Loss, Optimizer, FitConfig, History, FitTarget}`・`Sequential::{compile, is_compiled, fit, evaluate}`。既存公開 API〈`Sequential::bind`／`fandhe_ai::optim`／`fandhe_ai::data::DataLoader`／`Var::mse_loss`／`cross_entropy_loss`〉の合成のみで新規 `Op`／`BackendOps`／VJP なし・CPU `tape()` 固定。正しさは手動学習ループとのパラメータ・loss 系列 bit 完全一致で検証（統合テスト `crates/facade/tests/compat_sequential_fit.rs`）。#1763 で callbacks（`EarlyStopping`／`ModelCheckpoint`）・`validation_data`・LR スケジューラ連携を実装済み（`compat::{Callback, EarlyStopping, ModelCheckpoint, LrSchedule, Monitor, MonitorMode}`・`Sequential::fit_with_callbacks`・`fandhe_ai::optim::{Sgd, AdamW, Adam}::set_lr` 新設。新規 `Op`／`BackendOps`／VJP なし・正しさは手動ループとの bit 完全一致で検証（統合テスト `crates/facade/tests/compat_sequential_callbacks.rs`）。設計判断は `docs/compat-callbacks-design.md`。`DataLoader` 直接入力は引き続き対象外）。**#2073 で `ModelCheckpoint::to_file`（safetensors ファイル保存の薄い結線）を実装済み**（facade 新規 `pub fn` 1 件。§5「適用記録（経路 2。イシュー #2073）」参照）。**#1760 で `Sequential::add_*` の対象レイヤーを Conv2d／Conv1d〈#1770〉に加え LayerNorm／RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／MultiheadAttention へ拡張**（詳細は本表の各該当行。§5「適用記録」参照）。**#2072 で分類 metrics（accuracy・precision・recall・F1・confusion matrix）を実装済み**（`compat::{Metrics, MetricsResult}`・`Sequential::fit_with_metrics`・`Monitor::ValMetric`。設計判断は `docs/compat-metrics-design.md`。§5「適用記録（経路 2。イシュー #2072）」参照） |
 
 **GroupNorm／InstanceNorm（#2066・親 #2058）**: 上記「LayerNorm／
 RMSNorm／BatchNorm」行と異なり、GroupNorm／InstanceNorm は本 Tier 1
@@ -325,13 +325,17 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ
   等のサービング基盤も同 doc §6 で非目標として整理済み。spec の
   「引き続き対象外」列挙への追記は spec 提案候補（未起票）として同 doc
-  §9 に記録した
+  §9 に記録し、トークナイザ分の (b) 形式文案は
+  `docs/tokenizer-non-target-spec-proposal.md`（#2086）で確定した
+  （未起票。起票・spec 反映後に本 bullet を「引き続き対象外」側へ移す
+  作業は §5 経路 1 の後続）
 - **KV キャッシュ（自己回帰デコード用）**: 上記トークナイザとは対照的に
   「未定義」残余のうち §5 経路 2（ユーザー承認＋issue 起票）の起票案が
   ある項目として `docs/facade-inference-serving-scope-decision.md` §9 に
   記録した（K-1／K-2。既存 `Var` 演算の合成のみで新規 `Op`／`BackendOps`／
   依存を要しない設計。ユーザー承認前のため Tier 1／Tier 2 表への行追加は
-  行わない）
+  行わない）。K-1 の設計自体は `docs/kv-cache-design.md`（#2083）として
+  確定した（コード変更なし・K-1 実装着手自体は引き続き未承認）
 - **`amax`/`max` 縮約 API**（PyTorch `torch.amax` 相当）: 縮約 API 自体は
   Tier 1（1.2 節・#1601）で対象範囲となった。`crates/autodiff/src/grad.rs`
   の `max_vjp` は同値タイ発生時「最初に現れる最大要素 1 箇所のみ」へ
@@ -513,7 +517,7 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 
 **#1633（sparse／complex テンソルの非対応の明文化）の設計記録は `docs/tensor-core-sparse-complex-decision.md` として完了した。** 量子化／DDP と異なり除外事項「分散学習・量子化の網羅対応」には従属しない（sparse／complex は REQ-9 の「引き続き対象外」列挙にのみ現れ、格上げ条件表を持つ Won't 項目ではない）。コード変更なし。再開には本節の範囲拡張手続き（経路 1 または経路 2）を要する（同 doc §3・§9）。
 
-**#1962（推論・サービング〈KV キャッシュ・トークナイザ・グラフ最適化区分 B〉のスコープ・段階）の設計記録は `docs/facade-inference-serving-scope-decision.md` として完了した。** コード変更なし。トークナイザ・サービング基盤（paged attention・連続バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ）は実装リポ側の設計判断による非目標（2 節に独立 bullet として記録・spec 提案は未起票）。KV キャッシュ（自己回帰デコード用）は「未定義」残余のうち本節経路 2 の起票案あり（同 doc §9 の K-1／K-2。ユーザー承認前）。グラフ最適化区分 B（`docs/autodiff-graph-optimization-scope-decision.md`）は段階 0 を維持しつつ HEAD 時点のゲート状況を更新し、B-1（GPU `run_fused` elementwise allowlist）のみ起票案（同 doc §9 の G-1）として記録した。
+**#1962（推論・サービング〈KV キャッシュ・トークナイザ・グラフ最適化区分 B〉のスコープ・段階）の設計記録は `docs/facade-inference-serving-scope-decision.md` として完了した。** コード変更なし。トークナイザ・サービング基盤（paged attention・連続バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ）は実装リポ側の設計判断による非目標（2 節に独立 bullet として記録・spec 提案は未起票）。KV キャッシュ（自己回帰デコード用）は「未定義」残余のうち本節経路 2 の起票案あり（同 doc §9 の K-1／K-2。ユーザー承認前）。グラフ最適化区分 B（`docs/autodiff-graph-optimization-scope-decision.md`）は段階 0 を維持しつつ HEAD 時点のゲート状況を更新し、B-1（GPU `run_fused` elementwise allowlist）のみ起票案（同 doc §9 の G-1）として記録した。#2086 でトークナイザ非目標の spec (b) 形式提案文案を `docs/tokenizer-non-target-spec-proposal.md` に記録（未起票）。
 
 **適用記録（経路 2。イシュー #1955）**: RNN／LSTM／GRU（内部クレート実装は #1647 で完了済み）の facade 公開可否・公開形（`compat::Sequential::add_*` を設けるか／独立モジュールとして純再エクスポートするか）を issue コメントで 2026-09-17 にユーザー承認（「選択肢 C」: `Sequential::add_rnn`／`add_lstm`／`add_gru` は追加しない・`fandhe_ai::nn::rnn` として素の再エクスポートで公開する）。新規公開面は `pub mod nn`（`nn::rnn` の 8 型純再エクスポート）と `Tape` の委譲メソッド 3 件（`rnn_forward_seq`／`lstm_forward_seq`／`gru_forward_seq`）のみ。**委譲メソッドを追加した回避不能な理由**: `Rnn::forward_seq` 等は第 1 引数に生の `fandhe_ai_autodiff::Tape` を取るが、facade の `Tape` newtype（内部フィールドは `pub(crate)`）はこれを取り出す手段を持たないため、`&self.0` を渡すだけの薄い委譲を追加しない限り「facade のみの import で `forward_seq` に到達できる」という受入基準自体が構造的に満たせない（`Tape::step_device_param_store`〈#935〉・`Tape::backward_device_param_store`〈#1022〉と同型・同じ理由の前例）。新規 `Op`／`BackendOps`／VJP は追加していない（内部クレート `fandhe_ai_autodiff::nn::rnn` の実装は #1647 のまま不変）。`crates/facade/tests/api_surface.rs` に固定ガード 5 件（再エクスポート識別子の完全一致・純再エクスポート検査・`nn/mod.rs` の宣言限定・facade 経由到達の実行時固定・`compat::Sequential` への `add_rnn`／`add_lstm`／`add_gru` 非存在の否定ガード）を追加した。
 
@@ -810,6 +814,69 @@ facade_only` で機械固定）。`evaluate_with_metrics`・第 3 の公開型�
 `docs/autodiff-var-dtype-multiplexing-design.md` として完了した。**
 コード変更なし。facade 公開面拡張は本イシューでは不承認のまま段階 0 を
 維持し、再開には本節の範囲拡張手続き（経路 1 または経路 2）を要する。
+
+**適用記録（イシュー #2076・親 #2034）**: `nn::Module` trait へ
+`as_gelu`（`bool`）・`as_softmax`（`Option<&Softmax>`）の
+2 フックを追加した（`as_relu`／`as_linear` と同型の閉集合ダウンキャスト
+方式。§1 の閉集合方針の維持）。`Sigmoid` は §15.7 項 5（数値契約）が
+承認保留のため `as_sigmoid` フックは追加していない（代替 (γ)。承認が
+得られ次第、別 PR で結線する）。**本 2 フックは `compat::Sequential`
+（`bind`／`trainable_parameters`／`apply_parameters` 等の学習経路）から
+は使われない**——用途は `onnx-interop::onnx::export_nn`
+（非公開クレート内部限定。`docs/onnx-export-op-mapping.md` §7）が
+ONNX export 対応層を判別するためのみであり、facade 新規公開面はない
+（`Softmax::dim()` を `pub(crate)` から `pub` へ変更したが、facade は
+`nn::activation::Softmax` を再エクスポートしないため facade の公開面
+拡張には該当しない）。詳細・数値契約は
+`docs/facade-onnx-export-exposure-decision.md` §18 を参照。
+
+**適用記録（経路 2。イシュー #2073・親 #2059）**: `compat::callbacks::
+ModelCheckpoint` へのファイル保存機構（safetensors）の結線を、親
+#2059（`phase:1`）の受入基準に明記された当該メソッドとして実装した。
+新規公開面は `ModelCheckpoint::to_file(path: impl AsRef<Path>) -> Self`
+（infallible ビルダー。FS には触れず、実際の I/O は
+`ModelCheckpoint::observe`〈`pub(super)`〉呼び出し時のみ発生する）の
+1 件のみ。safetensors save 自体は #2019 で facade 公開済み
+（`fandhe_ai::interop::safetensors::save_safetensors_f32`）であり、
+本イシューはその薄い結線（親ディレクトリ作成 + 委譲）のみを追加する
+（REQ-9）。エラー型は内部クレート `autodiff::AutodiffError` へ
+`InvalidArgument` として写像し（`DataError → InvalidArgument` の
+既存前例に倣う。`AutodiffError` 自体に I/O variant は追加しない）、
+`SaveError`（safetensors 側の型）は compat の公開シグネチャには
+一切現れない。`ModelCheckpoint::restore_best_weights` 相当のビルダー・
+safetensors metadata（best 値・epoch）の埋め込みは「facade 新規 `pub
+fn` 1 件」の制約と両立しないため本イシューのスコープ外のまま切り出し
+候補として記録する（`docs/compat-callbacks-design.md` §8）。復元
+フローは既存 `EarlyStopping::restore_best_weights` との併用、または
+`load_safetensors_f32` → `Sequential::load_state_dict` の組み合わせで
+行う。`crates/facade/tests/api_surface.rs::
+fit_types_are_reachable_via_facade_only` のビルダー連鎖へ `.to_file(..)`
+を追加して固定した。詳細は `docs/compat-callbacks-design.md` §4.3・§9
+を参照。
+
+**#2083 の設計記録は `docs/kv-cache-design.md` として完了した。**
+コード変更なし。KV キャッシュ（K-1）は既存 `Var` 演算（`cat`／
+`narrow`／`detach`・`nn/attention.rs` の `project`／`split_heads`／
+`sdpa_compose`）の合成のみで実装可能と確定し、キャッシュはホスト
+`Tensor<f32>` 保持（`TapeNode::value` がホスト `Tensor<f32>` である
+現行構造のため）、デバイス常駐化は K-3（段階 0）へ切り分けた。
+facade 公開面拡張（K-2）を含め、実装着手（本節 §5 経路 2）は
+引き続き未承認のまま（同 doc §6）。
+
+**#2132（`nn::Module`／`ModuleList` の facade 公開可否）の設計記録は
+`docs/facade-nn-module-exposure-decision.md` として完了した。** コード
+変更なし。素の再エクスポート（`pub use fandhe_ai_autodiff::nn::{Module,
+ModuleList}`）は `Module::forward` が生の `fandhe_ai_autodiff::Tape` を
+引数に取るため、facade のみに依存する利用者は `impl Module` を書けず
+「ユーザー定義層」という目的自体を満たさないと確認した（同 doc §1.3）。
+`dyn Module` の object safety は `ModuleList { modules: Vec<Box<dyn
+Module>>, .. }` の実装で既に実証済み（同 doc §3）。sealed 化は利用者
+実装という目的と矛盾するため `Module` は open trait のまま・defaulted
+メソッド追加のみ非破壊という既存運用を確認（同 doc §4）。facade 側の
+薄い `Module` trait と `ModuleList`／`Sequential` コンテナを新設する
+案 B を推奨候補として記録したが、facade 公開面の拡張自体は本節経路 2
+の承認待ち（段階 0 継続）。#2133（実装）が想定していた素の再エクスポート
+形は本判断により再確定が必要（同 doc §8）。
 
 ## 6. 出典一覧
 
