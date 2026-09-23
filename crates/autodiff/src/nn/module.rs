@@ -31,6 +31,7 @@ use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
+use crate::nn::container::{ModuleDict, ModuleList};
 use crate::nn::conv::{Conv1d, Conv2d, ConvTranspose2d};
 use crate::nn::embedding::Embedding;
 use crate::nn::flatten::Flatten;
@@ -163,6 +164,52 @@ pub trait Module {
     /// [`Module::as_linear`] の可変版。`compat::Sequential::apply_parameters`
     /// が optimizer 更新後の `Tensor<f32>` を層へ書き戻す入口として使う。
     fn as_linear_mut(&mut self) -> Option<&mut Linear> {
+        None
+    }
+
+    /// [`Module::as_linear`] と同型の明示フック（イシュー #2137 レビュー
+    /// 是正）。`ModuleList::set_requires_grad`（`nn/container.rs`）が
+    /// 失敗時ロールバックのため、子が入れ子コンテナかどうかを判定して
+    /// 再帰的な状態スナップショットを取るのに使う。`ModuleList` 自身に
+    /// 加え `Sequential`（内部 `ModuleList` を保持）もオーバーライドし
+    /// `Some(&self.inner)` を返す（`Sequential` は `ModuleList` の薄い
+    /// ラッパーであり、混在状態は `inner` 側に存在するため）。
+    /// `ModuleDict` は本フックではなく別フック [`Module::
+    /// as_module_dict`]（同型・別 downcast 先。第 2 ラウンドのレビュー
+    /// 是正・#2234）をオーバーライドする（`ModuleList` と `ModuleDict`
+    /// は別の内部表現を持つ別コンテナ型のため）。上記いずれにも該当
+    /// しない全層は既定 `None`（末端層として扱われ、単一 bool
+    /// スナップショットで復元可能という前提に従う）。
+    fn as_module_list(&self) -> Option<&ModuleList> {
+        None
+    }
+
+    /// [`Module::as_module_list`] の可変版。ロールバック時の復元
+    /// （子の状態を書き戻す）に使う。
+    fn as_module_list_mut(&mut self) -> Option<&mut ModuleList> {
+        None
+    }
+
+    /// [`Module::as_module_list`] と同型の明示フック（イシュー #2137
+    /// レビュー是正 PR #2234。review thread `PRRT_kwDOTuUCJc6lE8Gg`／
+    /// cursor\[bot\] `PRRT_kwDOTuUCJc6lE80z`）。`ModuleDict::
+    /// set_requires_grad`（`nn/container.rs`）のロールバックが
+    /// `ModuleList` と同じ再帰的スナップショット方式（`nn/
+    /// container.rs::snapshot_requires_grad`／`restore_requires_grad`）を
+    /// 使うために必要。`ModuleList`（`as_module_list`）と `ModuleDict`
+    /// は別のコンテナ型（`Vec<Box<dyn Module>>` と挿入順キー付き
+    /// `Vec<(String, Box<dyn Module>)>`）のため、判定フックも分離する
+    /// （どちらか一方だけを見るとネストした片方のコンテナが「末端層」
+    /// と誤判定され、混在状態がロールバックで破壊される）。`ModuleDict`
+    /// 自身がオーバーライドし `Some(&self)` を返す。それ以外の全層は
+    /// 既定 `None`。
+    fn as_module_dict(&self) -> Option<&ModuleDict> {
+        None
+    }
+
+    /// [`Module::as_module_dict`] の可変版。ロールバック時の復元
+    /// （子の状態を書き戻す）に使う。
+    fn as_module_dict_mut(&mut self) -> Option<&mut ModuleDict> {
         None
     }
 
@@ -390,6 +437,93 @@ pub trait Module {
     /// （無状態モジュールは保持しない・モード依存層は必ずオーバーライド
     /// する）に従う。
     fn training(&self) -> bool {
+        true
+    }
+
+    /// 層別 `requires_grad` 凍結（PyTorch `module.requires_grad_(bool)`
+    /// 相当。イシュー #2137・`docs/autodiff-nograd-leaf-dinput-skip-
+    /// decision.md`「実装記録（#2137）」）。この層が保持する全パラメータ
+    /// 葉について、以後の [`Module::forward`]（内部で `Linear::bind`
+    /// 等・`Tape::var`／`var_no_grad` 相当の葉登録を経由する）が
+    /// `requires_grad` をどちらで登録するかを切り替える。
+    ///
+    /// # 反映タイミング（次の bind／forward から）
+    ///
+    /// フラグは層側（`struct` フィールド）に保持する状態であり、
+    /// **次に `bind`（葉ノードを新規登録する呼び出し）した時点から**
+    /// 反映される。すでに `Tape` へ登録済みの `Var`（過去の `bind`
+    /// 呼び出しが返したもの）は、登録時点のフラグのまま不変
+    /// （`TapeNode::requires_grad` は葉登録時に確定し事後変更されない。
+    /// `tape.rs` の `push_leaf` 参照）。`Tape::reset` 後に保持される
+    /// 葉プレフィックス（`Tape::leaf`）の葉も同様に登録時のフラグを
+    /// 保持し、フラグ変更後の再 bind から新しい値が反映される。
+    ///
+    /// # `training`／`set_training` とは独立の軸
+    ///
+    /// `freeze()`／`set_requires_grad(false)` は
+    /// [`Module::training`]／[`Module::set_training`] を変更しない。
+    /// `BatchNorm` 系の running statistics は、凍結後も training モード
+    /// のままなら引き続き更新される（PyTorch と同じ挙動。学習を完全に
+    /// 止めたい場合は呼び出し元が別途 `set_training(false)` を呼ぶ）。
+    ///
+    /// # `state_dict`／`load_state_dict` とは独立
+    ///
+    /// フラグは [`Module::state_dict`]／[`Module::load_state_dict`] の
+    /// 対象外（両者はテンソル値のみを扱う）。[`Module::set_parameter`]・
+    /// `load_state_dict` でパラメータを差し替えてもフラグは保持される。
+    ///
+    /// # 粒度
+    ///
+    /// per-layer（層内の `weight`／`bias` 等の全パラメータ葉をまとめて
+    /// 切り替える）。名前指定の per-parameter 粒度は本イシューの対象外
+    /// （`Module::named_parameters` の命名契約とは独立の機構）。
+    ///
+    /// # 既定実装（fail-closed。`.claude/rules/security.md` A08）
+    ///
+    /// [`Module::named_parameters`] が空なら何もせず `Ok(())`
+    /// （パラメータを持たない層は状態を保持する必要がないため）。
+    /// パラメータを持つのに本メソッドをオーバーライドしていない外部
+    /// `Module` 実装（`fandhe-ai-autodiff` は crates.io 公開クレートの
+    /// ため、非破壊拡張＝デフォルトメソッド追加として本イシューを実装
+    /// する。外部実装者が本メソッドを未実装のまま残すケースがある）に
+    /// 対しては `Err(AutodiffError::InvalidArgument)` を返す。
+    /// 「`named_parameters` だけをオーバーライドしたつもりで `freeze()`
+    /// を呼んだら実際には学習が継続していた」という静かな事故
+    /// （A08 ソフトウェア・データ整合性）を防ぐための意図的な設計であり、
+    /// `set_training` と同型の no-op 既定は採らない（実装計画
+    /// §2.1「設計」参照）。[`Module::named_parameters`] をオーバーライド
+    /// する本クレート内の全層は、対で本メソッドもオーバーライドする
+    /// （2.3 節の表。`ModuleList`／`Sequential`／`ModuleDict`（P1 是正・
+    /// #2234 レビュー指摘）は子へ伝播する）。
+    fn set_requires_grad(&mut self, _requires_grad: bool) -> Result<(), AutodiffError> {
+        let param_count = self.named_parameters().len();
+        if param_count == 0 {
+            Ok(())
+        } else {
+            Err(AutodiffError::InvalidArgument(format!(
+                "Module::set_requires_grad: this Module has {param_count} named parameter(s) \
+                 but does not override set_requires_grad (fail-closed default; freezing would \
+                 silently be a no-op)"
+            )))
+        }
+    }
+
+    /// [`Module::set_requires_grad`]`(false)` の別名（PyTorch
+    /// `module.requires_grad_(False)`／Keras `layer.trainable = False`
+    /// 相当。転移学習で backbone を固定する典型呼び出し）。
+    fn freeze(&mut self) -> Result<(), AutodiffError> {
+        self.set_requires_grad(false)
+    }
+
+    /// この層が現在追跡対象かどうか。**既定 `true`**（[`Module::
+    /// training`] と同じ契約: パラメータを持たない層は状態を保持
+    /// しないため `freeze()` 後も `true` のままとなる。パラメータを
+    /// 持つ層は [`Module::set_requires_grad`] と対でオーバーライド
+    /// する）。複合層（子を内包する層）の既定伝播は「子が 1 つでも
+    /// `true` を返せば `true`」（`MultiheadAttention`・
+    /// `TransformerEncoderLayer` 等。子はいずれも private フィールドの
+    /// ため実際には常に揃った値を返す）。
+    fn requires_grad(&self) -> bool {
         true
     }
 
@@ -870,6 +1004,19 @@ impl Module for Linear {
         Linear::set_parameter(self, name, value)
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。層内の
+    /// `requires_grad` フィールドを更新するのみ（既存テープ上の登録済み
+    /// `Var` には影響しない。次の `bind` から反映される契約は
+    /// `Module::set_requires_grad` doc 参照）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Linear::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        Linear::requires_grad(self)
+    }
+
     /// [`Module::forward`]（`Linear::bind(tape).forward(input)`。
     /// `LinearVars::forward` が `input.matmul(&weight)` → `.add(&bias)`
     /// と非融合合成する）と **同一の演算列**（`ops.gemm` → `ops.add`）を
@@ -950,6 +1097,17 @@ impl Module for Conv2d {
         Conv2d::set_parameter(self, name, value)
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Conv2d::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        Conv2d::requires_grad(self)
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -987,6 +1145,17 @@ impl Module for ConvTranspose2d {
         ConvTranspose2d::set_parameter(self, name, value)
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        ConvTranspose2d::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        ConvTranspose2d::requires_grad(self)
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -1022,6 +1191,17 @@ impl Module for Conv1d {
 
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         Conv1d::set_parameter(self, name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Conv1d::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        Conv1d::requires_grad(self)
     }
 
     fn forward_host(
@@ -1514,6 +1694,17 @@ impl Module for RmsNorm {
         RmsNorm::set_parameter(self, name, value)
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        RmsNorm::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        RmsNorm::requires_grad(self)
+    }
+
     /// `Var::rms_norm`（`var.rs`）と同じディスパッチ規律を `tape` 不要
     /// 経路（`ops` を直接受け取る）で再現する: `row_norm_layout` で
     /// `hidden` を導出し `weight` の shape を検査してから `ops.rmsnorm`
@@ -1590,6 +1781,17 @@ impl Module for LayerNorm {
     /// （`nn/norm.rs`）へ委譲する（イシュー #1752）。
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         LayerNorm::set_parameter(self, name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        LayerNorm::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        LayerNorm::requires_grad(self)
     }
 
     fn forward_host(
@@ -1841,6 +2043,17 @@ impl Module for BatchNorm1d {
         self.core.set_parameter(name, value)
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。`core`
+    /// （`weight`／`bias`。running stats・`training` は不変）へ委譲する。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        self.core.set_requires_grad(requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        self.core.requires_grad()
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -1893,6 +2106,17 @@ impl Module for BatchNorm2d {
     /// 同じ委譲先。
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         self.core.set_parameter(name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。
+    /// `BatchNorm1d` と同じ理由・同じ委譲先）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        self.core.set_requires_grad(requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        self.core.requires_grad()
     }
 
     fn forward_host(
@@ -2033,6 +2257,17 @@ impl Module for Embedding {
     /// （`nn/embedding.rs`）へ委譲する。
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         Embedding::set_parameter(self, name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。`Linear` と
+    /// 同型）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Embedding::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        Embedding::requires_grad(self)
     }
 }
 

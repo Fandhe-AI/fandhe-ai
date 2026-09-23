@@ -45,6 +45,9 @@ fn validate_eps(eps: f32, who: &str) -> Result<(), AutodiffError> {
 pub struct RmsNorm {
     weight: Option<Tensor<f32>>,
     eps: f32,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
+    /// と同型）。既定 `true`。
+    requires_grad: bool,
 }
 
 impl RmsNorm {
@@ -56,6 +59,7 @@ impl RmsNorm {
         Ok(Self {
             weight: Some(weight),
             eps,
+            requires_grad: true,
         })
     }
 
@@ -65,7 +69,11 @@ impl RmsNorm {
     /// ここでは検証対象がない）。
     pub fn without_affine(eps: f32) -> Result<Self, AutodiffError> {
         validate_eps(eps, "RmsNorm::without_affine")?;
-        Ok(Self { weight: None, eps })
+        Ok(Self {
+            weight: None,
+            eps,
+            requires_grad: true,
+        })
     }
 
     /// 明示的な `weight` から構築する（safetensors ロード等向けの入口。
@@ -83,6 +91,7 @@ impl RmsNorm {
         Ok(Self {
             weight: Some(weight),
             eps,
+            requires_grad: true,
         })
     }
 
@@ -98,6 +107,21 @@ impl RmsNorm {
     /// `validate_eps` で有限かつ非負であることを検証済み。
     pub fn eps(&self) -> f32 {
         self.eps
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`RmsNorm` 実装。
+    /// `module.rs` 参照）の本体（イシュー #2137）。`weight` を持たない
+    /// 構成（`without_affine`）でもフラグ自体は保持する（`Module::
+    /// requires_grad` の既定契約と対称に、`named_parameters` が空でも
+    /// 状態は無害に更新できる）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（`RmsNorm` 実装）の
+    /// 本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// [`crate::nn::module::Module::set_parameter`]（`RmsNorm` 実装。
@@ -132,7 +156,10 @@ impl RmsNorm {
     /// （`Linear::bind` と同じ理由。`Tape::var` 経由のため返る `Var` は
     /// この `tape` に属する）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> RmsNormVars<'t> {
-        let weight = self.weight.as_ref().map(|w| tape.var(w));
+        let weight = self
+            .weight
+            .as_ref()
+            .map(|w| tape.var_with_requires_grad(w, self.requires_grad));
         RmsNormVars {
             weight,
             eps: self.eps,
@@ -170,6 +197,9 @@ pub struct LayerNorm {
     weight: Option<Tensor<f32>>,
     bias: Option<Tensor<f32>>,
     eps: f32,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
+    /// と同型）。既定 `true`。
+    requires_grad: bool,
 }
 
 impl LayerNorm {
@@ -183,6 +213,7 @@ impl LayerNorm {
             weight: Some(weight),
             bias: Some(bias),
             eps,
+            requires_grad: true,
         })
     }
 
@@ -194,6 +225,7 @@ impl LayerNorm {
             weight: None,
             bias: None,
             eps,
+            requires_grad: true,
         })
     }
 
@@ -230,7 +262,12 @@ impl LayerNorm {
                 rhs: b.shape().to_vec(),
             }));
         }
-        Ok(Self { weight, bias, eps })
+        Ok(Self {
+            weight,
+            bias,
+            eps,
+            requires_grad: true,
+        })
     }
 
     /// `weight` パラメータ（`elementwise_affine=false`／
@@ -254,6 +291,19 @@ impl LayerNorm {
     /// 有限かつ非負であることを検証済み。
     pub fn eps(&self) -> f32 {
         self.eps
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`LayerNorm`
+    /// 実装。`module.rs` 参照）の本体（イシュー #2137。`RmsNorm` と
+    /// 同型）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（`LayerNorm` 実装）
+    /// の本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// [`crate::nn::module::Module::set_parameter`]（`LayerNorm` 実装。
@@ -294,8 +344,14 @@ impl LayerNorm {
     /// このステップの `tape` へ `weight`／`bias`（あれば）を葉ノードと
     /// して登録し、`forward` を呼べる `LayerNormVars` を返す。
     pub fn bind<'t>(&self, tape: &'t Tape) -> LayerNormVars<'t> {
-        let weight = self.weight.as_ref().map(|w| tape.var(w));
-        let bias = self.bias.as_ref().map(|b| tape.var(b));
+        let weight = self
+            .weight
+            .as_ref()
+            .map(|w| tape.var_with_requires_grad(w, self.requires_grad));
+        let bias = self
+            .bias
+            .as_ref()
+            .map(|b| tape.var_with_requires_grad(b, self.requires_grad));
         LayerNormVars {
             weight,
             bias,

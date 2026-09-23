@@ -28,6 +28,12 @@ use crate::var::Var;
 pub struct Linear {
     weight: Tensor<f32>,
     bias: Option<Tensor<f32>>,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。
+    /// `Module::set_requires_grad`／`freeze` の実体）。`bind` が
+    /// `weight`／`bias` を葉登録する際にこの値を渡す。既定 `true`
+    /// （全コンストラクタで初期化。`nn/module.rs`「反映タイミング」
+    /// 節参照）。
+    requires_grad: bool,
 }
 
 impl Linear {
@@ -74,7 +80,11 @@ impl Linear {
         } else {
             None
         };
-        Ok(Linear { weight, bias })
+        Ok(Linear {
+            weight,
+            bias,
+            requires_grad: true,
+        })
     }
 
     /// 明示的な重み・バイアスから構築する（テスト・将来の safetensors
@@ -123,7 +133,11 @@ impl Linear {
                 }));
             }
         }
-        Ok(Linear { weight, bias })
+        Ok(Linear {
+            weight,
+            bias,
+            requires_grad: true,
+        })
     }
 
     /// このステップの `tape` へ `weight`/`bias` を葉ノードとして登録し、
@@ -131,8 +145,11 @@ impl Linear {
     /// 経由するため、返る `Var` はこの `tape` に属する（クロステープ
     /// 検査の対象になる）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> LinearVars<'t> {
-        let weight = tape.var(&self.weight);
-        let bias = self.bias.as_ref().map(|b| tape.var(b));
+        let weight = tape.var_with_requires_grad(&self.weight, self.requires_grad);
+        let bias = self
+            .bias
+            .as_ref()
+            .map(|b| tape.var_with_requires_grad(b, self.requires_grad));
         LinearVars { weight, bias }
     }
 
@@ -142,6 +159,19 @@ impl Linear {
 
     pub fn bias(&self) -> Option<&Tensor<f32>> {
         self.bias.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`Linear` 実装。
+    /// `module.rs` 参照）の本体。`weight`／`bias` の両方を一括で切り替
+    /// える（per-layer 粒度。イシュー #2137）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（`Linear` 実装）の
+    /// 本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// [`crate::nn::module::Module::set_parameter`]（`Linear` 実装。
@@ -483,6 +513,7 @@ mod tests {
         let linear = Linear {
             weight,
             bias: Some(bad_bias),
+            requires_grad: true,
         };
         let input = Tensor::new(vec![0.0_f32; 2 * 4], &[2, 4]).unwrap();
 

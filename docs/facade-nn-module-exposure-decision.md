@@ -145,7 +145,7 @@ impl fandhe_ai::nn::Module for MyBlock {
 ## 8. 兄弟 issue との整合
 
 - **#2133（実装）**: 想定形（素の `pub use`）は§1.3 の構造制約により再確定が必要。本 doc の承認結果（案 B の採否・橋渡し方式）を前提として実装形を決め直す
-- **#2134／#2137**: 「`named_modules`／`parameter_count`／`ModuleDict`／`summary`」「`freeze`／`set_requires_grad`」を autodiff trait へ defaulted 追加し facade `nn/mod.rs` で再エクスポートする計画は、案 B 採用時には「autodiff trait への defaulted 追加」＋「facade trait 側 defaulted メソッドへの鏡写し追加」の 2 段構成へ読み替えが必要
+- **#2134／#2137**: 「`named_modules`／`parameter_count`／`ModuleDict`／`summary`」「`freeze`／`set_requires_grad`」を autodiff trait へ defaulted 追加し facade `nn/mod.rs` で再エクスポートする計画は、案 B 採用時には「autodiff trait への defaulted 追加」＋「facade trait 側 defaulted メソッドへの鏡写し追加」の 2 段構成へ読み替えが必要。**#2137 は前段（autodiff trait への defaulted 追加。`Module::freeze`／`set_requires_grad`／`requires_grad`）のみ実装済み**（`crates/autodiff/src/nn/module.rs`。`docs/autodiff-nograd-leaf-dinput-skip-decision.md`「実装記録（#2137）」参照）。facade 側鏡写しは本 doc §10 の承認（項目 1・2・6）待ちのまま未実施
 - **#2140**（`nn::init` 純再エクスポート）: `Module` trait に依存しない独立の再エクスポートのため非衝突
 - **#2138／#2139**（hooks）: `Var`／`Tape` レベルで独立のため非衝突
 
