@@ -534,6 +534,28 @@ custom_function_hold_doctest_globs_all_pub_modules` が固定する。
 上記ドリフト検査はブロック単位で glob 集合を突き合わせ、ブロック数が
 3 であることも固定する（1 ブロックへの再統合を拒否）。
 
+**glob 対象・ドリフト検査・否定ガードの再帰化（PR #2212 P1 是正・追加ラウンド）**:
+上記ドリフト検査（`custom_function_hold_doctest_globs_all_pub_modules`）は
+当初 `src/lib.rs` 直下の `pub mod` 宣言しか見ておらず、`nn::rnn`・
+`interop::onnx`・`interop::safetensors` のようなネストした公開面（かつ
+将来 `compat::extensions` のような新設モジュールが追加された場合）に
+生える trait 経由の合成入口を見逃しうる指摘を受けた。`crates/facade/
+tests/api_surface.rs::collect_public_module_paths`（トークン列を
+`scan_top_level_pub_mods` で再帰走査し、`pub mod name;` は解決先ファイル
+〈`<dir>/<name>.rs` または `<dir>/<name>/mod.rs`〉へ辿り、インライン
+`pub mod name { ... }` は本体トークン列を直接再帰する。非 `pub` な
+`mod`・`fn`/`impl` 等のブレース内部は到達不能として丸ごと読み飛ばす）
+へ置き換え、3 つの `compile_fail` doctest ブロックと足場成功版すべてに
+`use fandhe_ai::nn::rnn::*;`・`use fandhe_ai::interop::onnx::*;`・
+`use fandhe_ai::interop::safetensors::*;` を追加した。あわせて、
+`pub fn custom`／`pub fn add_custom` の宣言のみを検査していた既存の
+2 否定ガード（`facade_tape_does_not_expose_custom_forwarding_method`・
+`compat_sequential_does_not_expose_custom_add_method`）を補完する形で、
+`facade_source_declares_no_custom_fn_in_any_context`（`declares_fn_named`。
+可視性キーワード・宣言文脈〈inherent impl・trait impl・trait 定義・
+自由関数のいずれか〉を問わず facade 全ソースの `fn custom`／
+`fn add_custom` 宣言を検出する）を追加した。
+
 承認取得後に実施する変更範囲（事前提示。#2064 の保留コメント本文と同旨。
 ただし AC-4 の否定ガード件数は上記の実装記録どおり 2 件が正で、保留コメント
 本文中の「3 件」という表記はその後の実装で確定した数と一致していない）:

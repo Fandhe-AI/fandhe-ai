@@ -1101,24 +1101,35 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// 宣言・再エクスポートしていないか」を字句レベルで検査するため、
 /// 走査ロジック自体の見落とし（trait impl 経由・alias 経由・別名
 /// import 経由等の迂回）に弱い。一方、本モジュールの `compile_fail`
-/// doctest は「facade の**全 `pub mod` を glob import した状態**で
-/// `Var` に `.custom(...)`／`Var::custom(...)`／`.add_custom(...)` を
-/// 呼ぼうとするとコンパイルできない（E0599: メソッド・関連関数が
-/// 見つからない）」ことを rustc の名前解決に直接検証させる。trait impl
-/// 経由の公開・型 alias 経由の公開・再エクスポート経由の公開のいずれで
-/// あっても、facade の公開面（`pub mod`）を実際に glob import した
-/// スコープでメソッドが解決できなければ検出できるため、ソース走査より
-/// 迂回耐性が高い（**本命ガード**）。ソース走査（`architecture_
-/// boundaries.rs`・`api_surface.rs`）は変更差分の早期発見・保守性向上
-/// を目的とした**多層防御の 1 層**という位置づけに変わる。
+/// doctest は「facade の**全 `pub mod`（ネスト含む）を glob import した
+/// 状態**で `Var` に `.custom(...)`／`Var::custom(...)`／
+/// `.add_custom(...)` を呼ぼうとするとコンパイルできない（E0599:
+/// メソッド・関連関数が見つからない）」ことを rustc の名前解決に直接
+/// 検証させる。trait impl 経由の公開・型 alias 経由の公開・再エクス
+/// ポート経由の公開のいずれであっても、facade の公開面（`pub mod`。
+/// `nn::rnn`／`interop::onnx`／`interop::safetensors` のようなネストした
+/// パスを含む）を実際に glob import したスコープでメソッドが解決でき
+/// なければ検出できるため、ソース走査より迂回耐性が高い（**本命
+/// ガード**）。ソース走査（`architecture_boundaries.rs`・
+/// `api_surface.rs`）は変更差分の早期発見・保守性向上を目的とした
+/// **多層防御の 1 層**という位置づけに変わる。
 ///
 /// glob import する `pub mod` 集合（下記 doctest 内の `use` 一覧）と
-/// 本クレートの実際の `pub mod` 宣言（本ファイル冒頭付近）がドリフト
-/// しないことは `crates/facade/tests/api_surface.rs::
-/// custom_function_hold_doctest_globs_all_pub_modules` が機械的に固定
-/// する（本ファイルを読み込み、`compile_fail` ブロックごとに `use
-/// fandhe_ai::<mod>::*;` の集合と `pub mod <mod>;` 宣言の集合を突き
-/// 合わせる。ブロック数が 3 であることも固定する）。
+/// 本クレートの実際の `pub mod` 宣言（ネスト含めて `src/` 全体を再帰
+/// 走査した集合）がドリフトしないことは `crates/facade/tests/
+/// api_surface.rs::custom_function_hold_doctest_globs_all_pub_modules`
+/// が機械的に固定する（`collect_public_module_paths` が `lib.rs` の
+/// `pub mod` 宣言から解決先ファイルを再帰的にたどり `nn::rnn` 等の
+/// ネストしたパスも含めた集合を得たうえで、`compile_fail` ブロックごとに
+/// `use fandhe_ai::<mod>::*;` の集合と突き合わせる。ブロック数が 3 で
+/// あることも固定する）。加えて `crates/facade/tests/api_surface.
+/// rs::facade_source_declares_no_custom_fn_in_any_context` が、可視性
+/// キーワード・宣言文脈（inherent impl・trait impl・trait 定義・自由
+/// 関数のいずれか）を問わず facade 全ソースに `fn custom`／
+/// `fn add_custom` 宣言が存在しないことを固定する（codex-review 指摘・
+/// PR #2212: 旧ドリフト検査は `lib.rs` 直下の `pub mod` しか見ておらず、
+/// 旧否定ガードは `pub fn` 形の宣言しか検査していなかったため、ネスト
+/// した新設モジュールに生える trait 経由の合成入口を見逃していた）。
 ///
 /// (b) がユーザー承認され `Var::custom` を facade から公開する日が
 /// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
@@ -1142,7 +1153,10 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
 ///
 /// let t = fandhe_ai::tape();
@@ -1156,7 +1170,10 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
 ///
 /// let t = fandhe_ai::tape();
@@ -1170,7 +1187,10 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
 ///
 /// let t = fandhe_ai::tape();
@@ -1190,7 +1210,10 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// use fandhe_ai::optim::*;
 /// use fandhe_ai::data::*;
 /// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
 /// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
 ///
 /// let t = fandhe_ai::tape();

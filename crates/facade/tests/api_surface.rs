@@ -3161,6 +3161,82 @@ fn compat_sequential_does_not_expose_custom_add_method() {
     );
 }
 
+/// `content`（生の Rust ソース文字列。内部で `strip_comments_and_
+/// literals` を適用する）に、可視性キーワード・修飾子・宣言文脈
+/// （inherent impl／trait impl／trait 定義／自由関数のいずれか）を問わず
+/// `fn <fn_name>(` または `fn <fn_name><`（ジェネリクス付き）の宣言が
+/// 存在するかを判定する（[`facade_source_declares_no_custom_fn_in_any_
+/// context`] 専用）。`declares_pub_fn` は `pub` トークンを起点に走査する
+/// ため、`trait CustomExt { fn custom(&self); }` のような可視性キー
+/// ワードを伴わない trait メソッド宣言（trait 自体が `pub` であれば
+/// 実装型を通じて外部から呼び出せる）を見逃す。本関数は `fn` トークン
+/// そのものを起点にするためこの迂回を検出できる（codex-review 指摘・
+/// PR #2212: `crates/facade/src/compat/` に `extensions` のような新設
+/// モジュールを追加し、そこに `CustomExt` trait と `impl CustomExt for
+/// Var { fn custom(&self) {} }` を生やす迂回に対する多層防御）。
+fn declares_fn_named(content: &str, fn_name: &str) -> bool {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (i, token) in tokens.iter().enumerate() {
+        if token == "fn"
+            && tokens.get(i + 1).map(String::as_str) == Some(fn_name)
+            && matches!(tokens.get(i + 2).map(String::as_str), Some("(") | Some("<"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn declares_fn_named_detects_trait_method_and_ignores_comments_and_strings() {
+    assert!(declares_fn_named(
+        "pub trait CustomExt { fn custom(&self); }",
+        "custom"
+    ));
+    assert!(declares_fn_named(
+        "impl CustomExt for Var { fn custom(&self) {} }",
+        "custom"
+    ));
+    assert!(declares_fn_named(
+        "trait AddCustomExt { fn add_custom<T>(&self, v: T); }",
+        "add_custom"
+    ));
+    assert!(!declares_fn_named("// fn custom(&self) {}", "custom"));
+    assert!(!declares_fn_named("let s = \"fn custom(\";", "custom"));
+    assert!(!declares_fn_named("fn custom_extra(&self) {}", "custom"));
+}
+
+/// facade 全ソース（`crates/facade/src/` 配下の全 `.rs`）に `fn custom`／
+/// `fn add_custom` の宣言が可視性・宣言文脈（inherent impl・trait impl・
+/// trait 定義・自由関数のいずれか）を問わず一切現れないことを固定する
+/// （codex-review 指摘・PR #2212）。`facade_tape_does_not_expose_custom_
+/// forwarding_method`（`lib.rs` の `pub fn custom` のみ）・
+/// `compat_sequential_does_not_expose_custom_add_method`（`src/compat/`
+/// 配下の `pub fn add_custom` のみ）はいずれも `pub fn` 形の宣言しか
+/// 検査しないため、可視性キーワードを伴わない trait メソッド宣言経由の
+/// 合成入口（例: `compat::extensions::CustomExt` のような新設モジュール
+/// に生える `.custom()`）を見逃す。本テストは `declares_fn_named` により
+/// `fn` トークンそのものを起点に facade 全体を走査し、上記 2 テストを
+/// 補完する多層防御の 1 層とする。
+#[test]
+fn facade_source_declares_no_custom_fn_in_any_context() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for fn_name in ["custom", "add_custom"] {
+            if declares_fn_named(content, fn_name) {
+                offending.push(format!("{}: `fn {fn_name}` 宣言", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の src/ に `fn custom`／`fn add_custom` 宣言が可視性・文脈を問わず\
+         見つかった（§12.5 (b) 未承認のまま合成入口を設けてしまっている）: {offending:?}"
+    );
+}
+
 /// `text` を「識別子トークン」と「区切り文字（1 文字）」に分解した
 /// トークン列へ変換する（空白は読み飛ばす）。`declares_pub_fn` 専用の
 /// ユーティリティ。`(`／`<` などの区切り文字もトークンとして残すことで、
@@ -3923,20 +3999,270 @@ fn lib_rs_path() -> std::path::PathBuf {
     facade_crate_root().join("src/lib.rs")
 }
 
-/// `src/lib.rs` 直下の `pub mod <name>;` 宣言（行頭が `pub mod ` で始まり
-/// `;` で終わる行のみを対象とする簡易パーサ）の名前集合を返す
-/// （[`custom_function_hold_doctest_globs_all_pub_modules`] 専用）。
-fn declared_pub_mod_names(content: &str) -> std::collections::BTreeSet<String> {
-    let mut names = std::collections::BTreeSet::new();
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("pub mod ")
-            && let Some(name) = rest.strip_suffix(';')
-        {
-            names.insert(name.trim().to_string());
+/// `tokens[after_name_idx..]`（mod 名の直後の位置）から `;`（外部
+/// ファイル参照の終端）または対応する `{ ... }`（インライン本体）を
+/// 読み飛ばし、読み飛ばした直後の index を返す（[`scan_top_level_pub_
+/// mods`] の private mod・`#[path]` 除外分岐の共通処理）。ブレース対応は
+/// 単純な深さカウント（コメント・文字列は呼び出し元で除去済み前提）。
+fn skip_mod_declaration_body(tokens: &[String], after_name_idx: usize) -> usize {
+    match tokens.get(after_name_idx).map(String::as_str) {
+        Some(";") => after_name_idx + 1,
+        Some("{") => {
+            let mut depth = 1i32;
+            let mut k = after_name_idx + 1;
+            while k < tokens.len() && depth > 0 {
+                match tokens[k].as_str() {
+                    "{" => depth += 1,
+                    "}" => depth -= 1,
+                    _ => {}
+                }
+                k += 1;
+            }
+            k
+        }
+        // 文法上あり得ない形（構文エラー）。呼び出し元のループを無限に
+        // 停止させないよう 1 トークンだけ進める。
+        _ => after_name_idx,
+    }
+}
+
+/// 渡されたトークン列（コメント・文字列除去済み・単一モジュールスコープ
+/// 相当）の**直下**にある `pub mod <name>;`／`pub mod <name> { ... }` を
+/// 収集する（[`collect_public_module_paths_recursive`] の下請け）。
+///
+/// - `pub(crate) mod`／`pub(in ...) mod` は `pub` トークンの直後が `mod`
+///   ではなく `(` になるため一致しない（`declares_pub_fn` と同型の判別）。
+/// - 非 `pub` な `mod name { ... }`（private）はブレース対応だけ取って
+///   中身を丸ごと読み飛ばし、内部の宣言は一切収集しない（外部から
+///   到達不能なため。合成入力テスト `collect_public_module_paths_
+///   recursive_ignores_private_mod_subtree` 参照）。
+/// - `#[path = "..."]` 属性付きの `pub mod` も同様に非公開扱いとして
+///   除外する（属性値の文字列リテラルは呼び出し元の `strip_comments_
+///   and_literals` で既に空白化されており実際の解決先ファイルを
+///   本関数だけでは特定できないため。facade は `#[path]` を使わない
+///   契約であり、この分岐は現状のソースでは到達しない防御的処理）。
+/// - `fn`／`impl`／`struct` 等、mod 以外のブレース構造は対応する `}` まで
+///   丸ごと読み飛ばす（内部の `mod` 宣言は外部から到達不能）。
+fn scan_top_level_pub_mods(tokens: &[String]) -> Vec<(String, Option<Vec<String>>)> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        // `#[ ... ]` 属性: 対応する `]` まで読み取り、`path` 識別子を
+        // 含み、かつ直後が `mod` または `pub mod` であれば非公開扱いで
+        // 除外する（属性自体はここで読み飛ばすのみで收集しない）。
+        if tokens[i] == "#" && tokens.get(i + 1).map(String::as_str) == Some("[") {
+            let mut depth = 1i32;
+            let mut j = i + 2;
+            while j < tokens.len() && depth > 0 {
+                match tokens[j].as_str() {
+                    "[" => depth += 1,
+                    "]" => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            let has_path = tokens[i..j].iter().any(|t| t == "path");
+            let next_is_pub_mod = tokens.get(j).map(String::as_str) == Some("mod")
+                || (tokens.get(j).map(String::as_str) == Some("pub")
+                    && tokens.get(j + 1).map(String::as_str) == Some("mod"));
+            if has_path && next_is_pub_mod {
+                // 属性直後の `pub`（あれば）・`mod`・名前・本体を丸ごと
+                // 読み飛ばして非公開扱いにする。
+                let mod_idx = if tokens.get(j).map(String::as_str) == Some("pub") {
+                    j + 1
+                } else {
+                    j
+                };
+                let name_idx = mod_idx + 1;
+                i = skip_mod_declaration_body(tokens, name_idx + 1);
+                continue;
+            }
+            i = j;
+            continue;
+        }
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("mod") {
+            let name_idx = i + 2;
+            if let Some(name) = tokens.get(name_idx) {
+                match tokens.get(name_idx + 1).map(String::as_str) {
+                    Some(";") => {
+                        out.push((name.clone(), None));
+                        i = name_idx + 2;
+                        continue;
+                    }
+                    Some("{") => {
+                        let body_start = name_idx + 2;
+                        let end_after_brace = skip_mod_declaration_body(tokens, name_idx + 1);
+                        let body_end = end_after_brace - 1; // 対応する `}` の index
+                        out.push((name.clone(), Some(tokens[body_start..body_end].to_vec())));
+                        i = end_after_brace;
+                        continue;
+                    }
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if tokens[i] == "mod" {
+            // 到達するのは private mod のみ（`pub mod` は上の分岐で
+            // 既に消費済み）。中身は収集せず読み飛ばす。
+            let name_idx = i + 1;
+            i = skip_mod_declaration_body(tokens, name_idx + 1);
+            continue;
+        }
+        if tokens[i] == "{" {
+            // mod 以外のブレース構造（fn 本体・impl・trait・struct 等）は
+            // 対応する `}` まで丸ごと読み飛ばす。
+            let mut depth = 1i32;
+            let mut k = i + 1;
+            while k < tokens.len() && depth > 0 {
+                match tokens[k].as_str() {
+                    "{" => depth += 1,
+                    "}" => depth -= 1,
+                    _ => {}
+                }
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `dir` から `pub mod <name>;` の解決先ファイル（`<dir>/<name>.rs` また
+/// は `<dir>/<name>/mod.rs`。Rust 2018 モジュール解決規約）を読み込み、
+/// 内容と子モジュール探索用ディレクトリ（`<dir>/<name>/`）を返す。
+/// 存在しない場合は fail-closed に panic する（`pub mod` 宣言と実ファイル
+/// のドリフトを黙って見逃さない）。
+fn resolve_external_pub_mod_file(dir: &Path, name: &str) -> (String, std::path::PathBuf) {
+    let as_file = dir.join(format!("{name}.rs"));
+    if as_file.is_file() {
+        return (read_to_string_or_panic(&as_file), dir.join(name));
+    }
+    let as_mod_dir_file = dir.join(name).join("mod.rs");
+    if as_mod_dir_file.is_file() {
+        return (read_to_string_or_panic(&as_mod_dir_file), dir.join(name));
+    }
+    panic!(
+        "resolve_external_pub_mod_file: `pub mod {name};` の解決先ファイルが\
+         見つからない（{} も {} も存在しない）",
+        as_file.display(),
+        as_mod_dir_file.display()
+    );
+}
+
+/// [`scan_top_level_pub_mods`] を再帰的に適用し、`tokens`（`dir` 直下の
+/// あるファイル、または `prefix` が指すインライン `pub mod` 本体）から
+/// 到達可能な全 `pub mod` パス（ドット区切りではなく `::` 区切り。例:
+/// `nn::rnn`）を `out` へ収集する（[`collect_public_module_paths`] の
+/// 下請け）。
+fn collect_public_module_paths_recursive(
+    tokens: &[String],
+    dir: &Path,
+    prefix: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    for (name, body) in scan_top_level_pub_mods(tokens) {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}::{name}")
+        };
+        out.insert(path.clone());
+        match body {
+            Some(inner_tokens) => {
+                collect_public_module_paths_recursive(&inner_tokens, dir, &path, out);
+            }
+            None => {
+                let (content, child_dir) = resolve_external_pub_mod_file(dir, &name);
+                let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+                let child_tokens = tokenize_including_punctuation(&cleaned);
+                collect_public_module_paths_recursive(&child_tokens, &child_dir, &path, out);
+            }
         }
     }
-    names
+}
+
+/// facade の `src/lib.rs` から到達可能な全 `pub mod` パス（ネスト含む。
+/// 例: `nn::rnn`・`interop::onnx`・`interop::safetensors`）を再帰的に
+/// 収集する（[`custom_function_hold_doctest_globs_all_pub_modules`]
+/// 専用。codex-review 指摘・PR #2212: 旧実装 `declared_pub_mod_names` は
+/// `lib.rs` 直下の `pub mod` 宣言しか見ておらず、`nn::rnn`／
+/// `interop::onnx`／`interop::safetensors` のようなネストした公開面に
+/// 生えた合成入口〈例: `compat::extensions::CustomExt` のような trait
+/// 経由の `.custom()`〉を doctest のドリフト検査が見逃していた）。
+fn collect_public_module_paths(src_dir: &Path) -> std::collections::BTreeSet<String> {
+    let lib_rs = src_dir.join("lib.rs");
+    let content = read_to_string_or_panic(&lib_rs);
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut out = std::collections::BTreeSet::new();
+    collect_public_module_paths_recursive(&tokens, src_dir, "", &mut out);
+    out
+}
+
+/// [`collect_public_module_paths_recursive`] が、インライン `pub mod`
+/// 本体を再帰収集しつつ、private mod（`mod`／`pub(crate) mod`）配下の
+/// `pub mod`・fn 本体内の `pub mod` を到達不能として除外することを
+/// 固定する合成入力テスト（codex-review 指摘・PR #2212 対応の中核）。
+#[test]
+fn collect_public_module_paths_recursive_ignores_private_mod_subtree() {
+    let src = r#"
+        pub mod a {
+            pub mod extensions {
+                pub trait CustomExt {}
+            }
+            mod hidden {
+                pub mod x {}
+            }
+        }
+        pub(crate) mod c {}
+        mod d;
+        fn f() {
+            pub mod not_reachable {}
+        }
+    "#;
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut out = std::collections::BTreeSet::new();
+    collect_public_module_paths_recursive(&tokens, Path::new("/nonexistent"), "", &mut out);
+    let expected: std::collections::BTreeSet<String> = ["a", "a::extensions"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    assert_eq!(
+        out, expected,
+        "private mod・fn 本体内の pub mod が誤って公開パスとして収集された、\
+         またはインライン pub mod の再帰収集に脱落がある"
+    );
+}
+
+/// [`scan_top_level_pub_mods`] が `#[path]` 属性付き `pub mod` を非公開
+/// 扱いで除外することを固定する（属性値の文字列リテラルは呼び出し元の
+/// 前処理で空白化済みのため、実ファイルを特定できず安全側に倒す）。
+#[test]
+fn scan_top_level_pub_mods_excludes_path_attribute_mod() {
+    let src = r#"
+        #[path = "custom_location.rs"]
+        pub mod weird;
+        pub mod normal;
+    "#;
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let names: Vec<String> = scan_top_level_pub_mods(&tokens)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["normal".to_string()],
+        "#[path] 属性付き pub mod が除外されずに収集された"
+    );
 }
 
 /// `src/lib.rs` 内の `VarCustomHoldDoctestGuard`（`Var::custom` 未
@@ -3987,7 +4313,7 @@ fn doctest_compile_fail_block_globs(content: &str) -> Vec<std::collections::BTre
 #[test]
 fn custom_function_hold_doctest_globs_all_pub_modules() {
     let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = declared_pub_mod_names(&content);
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
     let blocks = doctest_compile_fail_block_globs(&content);
     assert!(
         !declared.is_empty(),
