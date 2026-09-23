@@ -495,8 +495,9 @@ higher-order-grad-decision.md` §15 と本節は同型）。
   `CustomFunction` trait 定義本体のみを抽出し `BackendOps`／`Tape`／`Var`／
   `Device`／`NodeId` を含まないことを固定する）
 - `crates/autodiff/tests/architecture_boundaries.rs::
-  var_rs_does_not_declare_pub_fn_custom`（新規。同項。`src/var.rs` に
-  `pub fn custom` 宣言が無いことを固定し、`Var::custom` という facade
+  autodiff_src_does_not_declare_pub_fn_custom_on_var`（新規。同項。`crates/autodiff/src` 配下の
+  全ファイルを走査し `Var` の impl ブロックに `pub fn custom`／
+  `add_custom` 宣言が無いことを固定し、`Var::custom` という facade
   再エクスポート経由の別到達口が生えないことを構造的に保証する）
 
 承認取得後に実施する変更範囲（事前提示。#2064 の保留コメント本文と同旨。
