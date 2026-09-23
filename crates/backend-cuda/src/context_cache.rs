@@ -924,22 +924,32 @@ pub(crate) fn cached_fused_elementwise_kernel(
             // 外側 → 内側（[`get_or_build`] と同型）のため、内側
             // `slot_guard` を保持したまま外側ロックを取ると逆順になり
             // 他呼び出しの通常経路とデッドロックしうる。よって一旦内側
-            // ロックを解放してから外側ロックを取得し、削除直前に内側
-            // ロックを再取得して「まだ未構築のまま」であることを確認した
-            // 上で削除する（この間に他スレッドが同じキーで構築に成功して
-            // いれば、削除せずそのエントリを温存する）。
+            // ロックを解放してから外側ロックを取得する。
+            //
+            // 内側ロックの再取得は非ブロッキングの `try_lock` に限定する
+            // （Cursor Bugbot 指摘・PR #2232）。当初の実装はここで
+            // `lock_cache(&slot)`（ブロッキング）を呼んでいたが、外側
+            // `guard` を保持したまま内側ロックの獲得を待つ構成のため、
+            // 同じキーで並行 retry が既にコンパイル中（内側ロックを
+            // 保持）だと、そのコンパイルが終わるまで外側ロック全体が
+            // 占有され、無関係な別キーの lookup まで停止してしまう。
+            // `try_lock` が失敗する（＝他スレッドが構築中）場合は削除を
+            // 見送る。そのスレッドがのちに失敗すれば、そのスレッド自身の
+            // クリーンアップが同じ経路で削除を再試行するため安全側に
+            // 倒れる。`try_lock` が成功した場合は内側ロックを保持した
+            // まま「まだ未構築のまま」を確認し、確認と削除の間に他
+            // スレッドの成功した書き込みが割り込む TOCTOU を排除する
+            // （内側ロックを保持したまま `guard.remove` まで行うため、
+            // 確認後に他スレッドが割り込んで書き込む余地がない）。
             drop(slot_guard);
             if let Ok(mut guard) = lock_cache(cache)
                 && guard
                     .get(&cache_key)
                     .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
+                && let Ok(inner_guard) = slot.try_lock()
+                && inner_guard.is_none()
             {
-                let still_unbuilt = lock_cache(&slot)
-                    .map(|inner| inner.is_none())
-                    .unwrap_or(false);
-                if still_unbuilt {
-                    guard.remove(&cache_key);
-                }
+                guard.remove(&cache_key);
             }
             Err(err)
         }

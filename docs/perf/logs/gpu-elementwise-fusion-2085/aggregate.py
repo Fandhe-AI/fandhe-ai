@@ -16,6 +16,7 @@ bench・out・grad 記録がすべて過不足なく揃っていることを検�
 （#1583 aggregate.py の教訓をそのまま踏襲）。
 """
 import io
+import math
 import re
 import sys
 import statistics
@@ -165,9 +166,18 @@ def main(logdir, n_runs=5, out_stream=None):
         grad_ok = _ok(before_dump, "grad") and _ok(after_dump, "grad") and (
             before_dump["grad"].get(k, [None])[0] == after_dump["grad"].get(k, [None])[0]
         )
-        if not (out_ok and grad_ok):
+        # 事前登録規則（ADOPT 必須条件）は「全セルで ratio(after/before)
+        # <= 1.00」。out/grad checksum 不一致だけでなく、性能回帰
+        # （ratio>1.00）・非有限値（bmed<=0 由来の nan・inf 等）も
+        # all_ok を False にする（codex-review P2 是正・PR #2232。
+        # 以前は checksum 不一致でしか all_ok が False にならず、
+        # ratio>1.00 のセルがあっても終了コード 0 になり、後続の実測・
+        # 自動化が終了コードを判定に使うと性能回帰を見逃す欠陥が
+        # あった）。
+        ratio_ok = math.isfinite(ratio) and ratio <= 1.00
+        if not (out_ok and grad_ok and ratio_ok):
             all_ok = False
-        over = " <=1.00" if ratio <= 1.00 else " >1.00"
+        over = " <=1.00" if ratio_ok else " >1.00"
         print(
             f"{k[0]:20s} {k[1]:9d} {bmed:14.9f} {amed:14.9f} {ratio:8.4f} "
             f"{'OK' if out_ok else 'MISMATCH':>8s} {'OK' if grad_ok else 'MISMATCH':>8s}{over}",
@@ -215,19 +225,19 @@ def self_test():
         _write_fixture_logs(d, ratio_over_one=True)
         buf = io.StringIO()
         result = main(d, 5, out_stream=buf)
-        # ratio>1.00 は「集計自体は成立する（missing なし・grad_ok）」が、
-        # 呼び出し元（人間）が判定規則に従い REJECT と判断する材料になる
-        # 行を出力する契約であり、集計スクリプト自体は False を返さない
-        # （集計失敗〈missing／件数不一致〉とは意味が異なるため）。
-        if not result:
-            print("self-test NG: ratio>1.00 フィクスチャで集計自体が失敗した", file=sys.stderr)
+        # ratio>1.00（事前登録規則の ADOPT 必須条件違反）は missing 検証
+        # とは別種の失敗だが、終了コードで自動化が回帰を検出できるよう
+        # 集計スクリプト自体が False（終了コード非 0）を返す契約に是正
+        # 済み（codex-review P2 是正・PR #2232）。
+        if result:
+            print("self-test NG: ratio>1.00 フィクスチャで判定が True になった", file=sys.stderr)
             print(buf.getvalue(), file=sys.stderr)
             ok = False
         elif " >1.00" not in buf.getvalue():
             print("self-test NG: ratio>1.00 の行が出力に含まれない", file=sys.stderr)
             ok = False
         else:
-            print("self-test OK: ratio>1.00 セルが出力に現れる")
+            print("self-test OK: ratio>1.00 セルは fail 判定かつ出力に現れる")
 
     with tempfile.TemporaryDirectory() as d:
         _write_fixture_logs(d)
