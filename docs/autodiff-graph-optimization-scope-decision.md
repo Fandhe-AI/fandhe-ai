@@ -224,9 +224,25 @@ fused_elementwise.rs`・`fused_elementwise_source.rs`）とも、CPU
 - **既定 OFF・opt-in ゲート**: `backend-cuda::fused_elementwise::
   set_gpu_elementwise_fusion_enabled`／`backend-metal::fused_elementwise::
   set_gpu_elementwise_fusion_enabled`（各クレート内 `pub`）。`facade` への
-  再公開は行っていない（実装計画 §9 承認事項 (1)。公開面拡張は別途
-  ユーザー承認が必要）。ゲート OFF 時は本 PR 導入前と挙動不変
-  （atomic load 1 回を除き bit 同一）。
+  再公開は行っていない（公開面拡張は別途ユーザー承認が必要）。ゲート
+  OFF 時は本 PR 導入前と挙動不変（atomic load 1 回を除き bit 同一）。
+- **なぜ受け入れ条件の「`Relu`・`Exp`・`Tanh`・`Sigmoid` 等」に
+  `Sigmoid` を含めていないか**: `Sigmoid` は F1（上表）が定める
+  `Op::is_lazy_elementwise` の対象外（`push_eager`）であり、
+  `tensor-core::fusion::detect` が `Sigmoid` を含む融合プランをそもそも
+  生成しない。GPU allowlist に `Sigmoid` を加えても到達不能な dead
+  code になるため、CPU 側 allowlist（F3）と対称に据え置いた。
+  `Sigmoid` を融合対象にするには `is_lazy_elementwise` と CPU F3
+  allowlist の拡張が前提になり、これは本 doc が既に区分 B-2 として
+  スコープ外に置いている変更（下記）と同一である。
+- **本 PR のユーザー承認事項**: (1) `facade` への opt-in ゲート再公開
+  （未実施。公開面拡張のため別途承認が必要）、(2) ADOPT 判定時の
+  既定 ON 化（未実施。実測待ち）、(3) 新規 `unsafe` 4 か所
+  （`backend-cuda/src/elementwise.rs::launch_nary` 1 か所・
+  `backend-metal/src/elementwise.rs::encode_nary_dispatch` 3 か所。
+  いずれも `run_binary`／`encode_binary_dispatch` と同一の FFI 境界
+  パターンの踏襲で SAFETY コメント付き。`security.md`「unsafe」節の
+  レビュー対象）。依存追加・spec 提案の投稿は本 PR には該当しない。
 - **数値契約**: 融合カーネルは同一バックエンドの per-op 経路・CPU
   融合カーネルと bit 完全一致を目標とする。CUDA は `Add`／`Mul` を
   非縮約 intrinsic（`__fadd_rn`／`__fmul_rn`）で生成し FMA 縮約を
@@ -244,6 +260,7 @@ fused_elementwise.rs`・`fused_elementwise_source.rs`）とも、CPU
 - **キャッシュ上限**: 融合プランごとに動的コンパイルされるカーネルの
   プロセス内キャッシュに上限（256 エントリ）を設け、上限到達時は
   `Unsupported` へ fail-closed に倒し per-op フォールバックへ委ねる
-  （実装計画 §2.5）。
+  （`crates/backend-cuda/src/context_cache.rs`・`crates/backend-metal/
+  src/context_cache.rs` の融合カーネルキャッシュ実装）。
 - B-2 以降（XLA 相当のクロス演算融合・`Sigmoid` 等 allowlist 拡張）は
   引き続き対象外のまま。

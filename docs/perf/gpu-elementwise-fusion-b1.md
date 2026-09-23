@@ -99,3 +99,12 @@ ADOPT／REJECT を判定し、本節を更新する。
 - 区分 B-2 以降（`Sigmoid` 等 allowlist 拡張・XLA 相当のクロス演算
   融合）。
 - CUDA／Metal 実機での A/B 計測・parity 検証（本 doc「実測結果」節）。
+
+## ユーザー承認事項（本 PR。`docs/autodiff-graph-optimization-scope-decision.md`「#2085 追補」参照）
+
+- `facade` への opt-in ゲート再公開（未実施）。
+- ADOPT 判定時の既定 ON 化（未実施。実測待ち）。
+- 新規 `unsafe` 4 か所（`backend-cuda/src/elementwise.rs::launch_nary` 1
+  か所・`backend-metal/src/elementwise.rs::encode_nary_dispatch` 3 か所。
+  既存 FFI 境界パターン〈`run_binary`／`encode_binary_dispatch`〉の踏襲
+  で SAFETY コメント付き）。
