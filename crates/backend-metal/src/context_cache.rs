@@ -646,6 +646,34 @@ pub(crate) fn cached_fused_elementwise_pipeline(
                     .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
                 && let Ok(inner_guard) = slot.try_lock()
                 && inner_guard.is_none()
+                // 待機中の同一キー retry を孤立スロットへ追い出さない
+                // （codex-review 指摘・PR #2232。CUDA 側 `context_cache
+                // .rs::cached_fused_elementwise_kernel` の同名コメント
+                // 参照。両クレート同一の是正）。`try_lock` + `is_none()`
+                // だけでは、`slot_guard` 解放から本節の外側ロック再取得
+                // までの短い区間に、既に `slot` の `Arc` clone を持って
+                // `lock_cache(&slot)`（ブロッキング）で待機していた
+                // 別スレッドの retry が先に内側ロックへ滑り込む競合を
+                // 排除できない。その retry は削除後の孤立 `slot` 上で
+                // ビルドし直し、成功しても以後の呼び出しから観測できず
+                // single-flight 契約が崩れる。外側 `cache` ロックを
+                // 保持している間は新規 clone が発生し得ないため、
+                // `Arc::strong_count(&slot) <= 2`（マップの 1 参照＋
+                // このスレッドのローカル `slot` 変数の 1 参照）であれば
+                // 他に待機者がいないと判定できる。それを超える場合は
+                // 削除を見送る（待機 retry 自身が後で構築に失敗すれば、
+                // そのスレッドが同じ経路で削除を再試行する）。
+                //
+                // 残存する安全側の縮退（CUDA 側 `context_cache.rs::
+                // cached_fused_elementwise_kernel` の同名コメント参照）:
+                // 並行する複数の失敗がほぼ同時にこの判定へ到達すると
+                // 互いを「待機 retry あり」と誤認して双方が削除を
+                // 見送りうる。エントリは `None` のまま残り次回同一
+                // キー呼び出しで再利用できる（孤立はしない）が、
+                // 恒久的に失敗し続けるキーでは枠を 1 個分消費し続ける
+                // 狭い窓が生じうる。孤立（single-flight 契約破り）を
+                // 防ぐための許容される trade-off。
+                && Arc::strong_count(&slot) <= 2
             {
                 guard.remove(key);
             }
