@@ -192,7 +192,7 @@ pub trait Module {
 
     /// [`Module::as_module_list`] と同型の明示フック（イシュー #2137
     /// レビュー是正 PR #2234。review thread `PRRT_kwDOTuUCJc6lE8Gg`／
-    /// cursor[bot] `PRRT_kwDOTuUCJc6lE80z`）。`ModuleDict::
+    /// cursor\[bot\] `PRRT_kwDOTuUCJc6lE80z`）。`ModuleDict::
     /// set_requires_grad`（`nn/container.rs`）のロールバックが
     /// `ModuleList` と同じ再帰的スナップショット方式（`nn/
     /// container.rs::snapshot_requires_grad`／`restore_requires_grad`）を

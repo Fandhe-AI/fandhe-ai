@@ -249,7 +249,7 @@ impl Module for ModuleList {
     /// 子が入れ子の `ModuleList`／`Sequential`（[`Module::
     /// as_module_list`] が `Some` を返す）または `ModuleDict`
     /// （[`Module::as_module_dict`] が `Some` を返す。第 2 ラウンドの
-    /// レビュー是正・cursor[bot] `PRRT_kwDOTuUCJc6lE80z`）である場合、
+    /// レビュー是正・cursor\[bot\] `PRRT_kwDOTuUCJc6lE80z`）である場合、
     /// その子は内部に混在状態（一部凍結・一部解凍）を持ちうる。単純に
     /// 集約 bool 1 つをスナップショットして `set_requires_grad(bool)` で
     /// 復元すると、復元時に子の全孫へ同一値が強制され混在状態を破壊
@@ -403,7 +403,7 @@ enum RequiresGradSnapshot {
     /// `Some` を返す）の子 1 体ごとのスナップショット（層順）。
     Nested(Vec<RequiresGradSnapshot>),
     /// 入れ子 `ModuleDict`（[`Module::as_module_dict`] が `Some` を返す。
-    /// P1 是正・#2234 レビュー指摘 `PRRT_kwDOTuUCJc6lE8Gg`／cursor[bot]
+    /// P1 是正・#2234 レビュー指摘 `PRRT_kwDOTuUCJc6lE8Gg`／cursor\[bot\]
     /// `PRRT_kwDOTuUCJc6lE80z`）の子 1 体ごとのスナップショット（挿入
     /// 順。`ModuleDict::keys`／`iter` と同じ順序）。`ModuleList` の
     /// `Nested` と別 variant にする理由は `restore_requires_grad` 側で
@@ -447,6 +447,11 @@ fn snapshot_requires_grad(module: &dyn Module) -> RequiresGradSnapshot {
 /// 一致しない場合は fail-closed で `InvalidArgument` を返す（通常の
 /// ロールバック経路では構造が変わらないため起こらないはずだが、想定外の
 /// 構成変化を静かに無視しないため検査する）。
+///
+/// `Nested`／`NestedDict` は `?` による早期 return を使わず、子の 1 つが
+/// 復元に失敗しても**必ず残り全ての子を処理してから**集約エラーを返す
+/// （P1 是正・codex-review 指摘 `PRRT_kwDOTuUCJc6lFh9N`。詳細は
+/// [`collect_restore_errors`] doc 参照）。
 fn restore_requires_grad(
     module: &mut dyn Module,
     snapshot: &RequiresGradSnapshot,
@@ -456,15 +461,8 @@ fn restore_requires_grad(
             // `0..=index`（失敗した子自身を含むロールバック範囲。P1
             // 是正・#2234 レビュー指摘 `PRRT_kwDOTuUCJc6lE8Gn`）により、
             // ここで復元しようとしている子は「もともと失敗した
-            // `set_requires_grad` 呼び出しの当事者」でありうる。その
-            // ような子は次のいずれかである:
-            // (a) 状態を一切変更せず常に `Err` を返す「半端実装」
-            //     （`FailingSetRequiresGradModule` と同型）——`Err` を
-            //     返すが状態は変わらない
-            // (b) 複数内部パラメータを順に変更してから失敗する複合層
-            //     （`PartiallyMutatingFailingModule` と同型）——`Err` を
-            //     返しつつも `value` への書き換え自体は完了している
-            //     ことがある
+            // `set_requires_grad` 呼び出しの当事者」でありうる。
+            //
             // 呼び出し**前**に「すでに一致しているか」を見て早期 `Ok`
             // にする最適化は行わない（`Module` は外部実装可能で
             // `requires_grad()` が既定 `true` のまま・`set_requires_grad`
@@ -472,22 +470,29 @@ fn restore_requires_grad(
             // 場合スナップショット `Leaf(true)` と実際の呼び出し前の値
             // `true` が一致していても、実際に `set_requires_grad(*value)`
             // を呼ばなければ復元されない）。したがって常に
-            // `set_requires_grad` を実際に呼び、それが `Err` を返した
-            // 場合に限り「呼び出し後の観測可能な状態
-            // （`requires_grad()`）が `value` と一致するか」で復元成功
-            // を判定する（fail-closed を保ちつつ、(a)(b) のように復元
-            // 自体は完了しているのに `Err` を理由に以降のロールバックを
-            // 打ち切ってしまう誤検知を避ける）。
-            match module.set_requires_grad(*value) {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    if module.requires_grad() == *value {
-                        Ok(())
-                    } else {
-                        Err(err)
-                    }
-                }
-            }
+            // `set_requires_grad` を実際に呼ぶ。
+            //
+            // `Err` を返した場合は、その `Err` をそのまま伝播する
+            // （P1 是正・codex-review 指摘 `PRRT_kwDOTuUCJc6lFaVh`）。
+            // 旧実装は「呼び出し後の `requires_grad()`（集約 bool）が
+            // `value` と一致するか」で復元成功を判定していたが、`Leaf`
+            // はこの関数の再帰から見た粒度であり、`Module` は外部実装
+            // 可能で内部に複数の独立した子状態を持つ「複合 Module」
+            // でありうる（`as_module_list`／`as_module_dict` を実装せず
+            // `Leaf` 扱いされる不透明な実装）。そのような実装の
+            // `requires_grad()` が例えば「子のいずれかが `true` なら
+            // `true`」という集約契約を持つ場合、一部の子だけ `value` へ
+            // 書き換えに成功し残りは失敗した部分適用状態でも、集約結果が
+            // たまたま `value` と一致してしまい「復元成功」と誤判定
+            // （false positive）しうる。`Leaf` のスナップショットには
+            // 集約 bool 1 つしか無く、これ以上の粒度で内部状態を検証
+            // する手段が無い（`Module::children` は `&dyn` のみで
+            // `_mut` を持たず、複合実装が `as_module_list_mut`／
+            // `as_module_dict_mut` を実装しない限り再帰スナップショット
+            // 化できない）ため、検証不能な場合は fail-closed に「`Err`
+            // をそのまま呼び出し元へ返す」を採用し、集約値の一致を
+            // 復元成功の根拠にしない。
+            module.set_requires_grad(*value)
         }
         RequiresGradSnapshot::Nested(children) => match module.as_module_list_mut() {
             Some(list) => {
@@ -499,10 +504,13 @@ fn restore_requires_grad(
                         list.modules.len()
                     )));
                 }
-                for (m, s) in list.modules.iter_mut().zip(children.iter()) {
-                    restore_requires_grad(m.as_mut(), s)?;
-                }
-                Ok(())
+                // `?` による即時伝播は使わない（P1 是正・codex-review 指摘
+                // `PRRT_kwDOTuUCJc6lFh9N`）。最初の子の復元が `Err` を返した
+                // 時点で打ち切ると、残りの兄弟（1 度も `restore_requires_grad`
+                // が呼ばれない）が部分適用状態のまま放置され、fail-closed
+                // 契約（失敗した子自身も含め全子を元へ戻す）を破る。全子を
+                // 必ず 1 回ずつ処理してから、集約したエラーの有無で結果を返す。
+                collect_restore_errors(list.modules.iter_mut().zip(children.iter()))
             }
             None => Err(AutodiffError::InvalidArgument(
                 "restore_requires_grad: snapshot is Nested but the module is no longer a \
@@ -520,10 +528,9 @@ fn restore_requires_grad(
                         dict.modules.len()
                     )));
                 }
-                for ((_, m), s) in dict.modules.iter_mut().zip(children.iter()) {
-                    restore_requires_grad(m.as_mut(), s)?;
-                }
-                Ok(())
+                // 同上（`Nested` 分岐のコメント参照）。`ModuleDict` 側も同じ
+                // fail-closed 契約を守るため全子を処理してからエラーを集約する。
+                collect_restore_errors(dict.modules.iter_mut().map(|(_, m)| m).zip(children.iter()))
             }
             None => Err(AutodiffError::InvalidArgument(
                 "restore_requires_grad: snapshot is NestedDict but the module is no longer a \
@@ -531,6 +538,36 @@ fn restore_requires_grad(
                     .to_string(),
             )),
         },
+    }
+}
+
+/// `restore_requires_grad` の `Nested`／`NestedDict` 分岐が共有する集約
+/// ロジック（P1 是正・codex-review 指摘 `PRRT_kwDOTuUCJc6lFh9N`）: 子を
+/// 1 体ずつ `restore_requires_grad` へ委譲し、`Err` が出ても即座に伝播
+/// せず**必ず残り全ての子も処理してから**、失敗した子すべてを集約した
+/// 単一の `InvalidArgument` を返す（fail-closed。個々の子の復元失敗が
+/// 兄弟の復元機会を奪わないことを保証する。集約メッセージの形式は
+/// `ModuleList::set_requires_grad`／`ModuleDict::set_requires_grad` の
+/// ロールバック失敗集約〈`"module {index} ({err})"` を `", "` で連結〉と
+/// 揃える）。
+fn collect_restore_errors<'a, I>(children: I) -> Result<(), AutodiffError>
+where
+    I: Iterator<Item = (&'a mut Box<dyn Module>, &'a RequiresGradSnapshot)>,
+{
+    let mut failures: Vec<String> = Vec::new();
+    for (index, (m, s)) in children.enumerate() {
+        if let Err(err) = restore_requires_grad(m.as_mut(), s) {
+            failures.push(format!("child {index} ({err})"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(AutodiffError::InvalidArgument(format!(
+            "restore_requires_grad: failed to restore {} of the child module(s): {}",
+            failures.len(),
+            failures.join(", ")
+        )))
     }
 }
 
@@ -941,7 +978,7 @@ impl Module for ModuleDict {
     }
 
     /// [`Module::set_requires_grad`] の実装（P1 是正・#2234 レビュー
-    /// 指摘 `PRRT_kwDOTuUCJc6lE8Gg`／cursor[bot] `PRRT_kwDOTuUCJc6lE80z`。
+    /// 指摘 `PRRT_kwDOTuUCJc6lE8Gg`／cursor\[bot\] `PRRT_kwDOTuUCJc6lE80z`。
     /// イシュー #2137）。`ModuleList::set_requires_grad` と同じ伝播・
     /// 集約・ロールバック処理（`snapshot_requires_grad`／
     /// `restore_requires_grad`）を再利用する: 挿入順に全子 `Module` へ
@@ -1365,7 +1402,7 @@ mod tests {
 
     /// `ModuleList::set_requires_grad`／`ModuleDict::set_requires_grad`
     /// ロールバック範囲の回帰テスト用モジュール（P1 是正・#2234
-    /// レビュー指摘 `PRRT_kwDOTuUCJc6lE8Gn`／cursor[bot]
+    /// レビュー指摘 `PRRT_kwDOTuUCJc6lE8Gn`／cursor\[bot\]
     /// `PRRT_kwDOTuUCJc6lE80z` の「複数内部パラメータを順に変更する
     /// カスタム複合層で部分適用状態が残る」再現）。`set_requires_grad`
     /// は要求された値へ**先に自身の内部状態を書き換えてから** `Err`
@@ -1397,6 +1434,56 @@ mod tests {
 
         fn requires_grad(&self) -> bool {
             self.state
+        }
+    }
+
+    /// `restore_requires_grad` の `Leaf` 分岐の false positive 回帰
+    /// テスト用モジュール（P1 是正・codex-review 指摘
+    /// `PRRT_kwDOTuUCJc6lFaVh`）: `as_module_list`／`as_module_dict` を
+    /// 実装せず `Leaf` 扱いされる不透明な「複合 Module」を模擬する。
+    /// 内部に独立した 2 つのフラグ（`a`／`b`）を持ち、公開する
+    /// `requires_grad()` は「どちらかが `true` なら `true`」という
+    /// 集約 bool のみ（`ModuleList::requires_grad` の `any` 契約と同種）。
+    /// 順方向（`false` への設定）は両フラグを正しく更新して成功するが、
+    /// 復元方向（`true` への設定＝ロールバック経路）は `a` だけ書き換え
+    /// `b` を放置したまま `Err` を返す——`a || b` が偶然 desired value
+    /// （`true`）と一致してしまうため、旧実装の「呼び出し後の集約
+    /// `requires_grad()` が一致するか」判定では `b` が未復元のまま
+    /// 「復元成功」と誤判定されていた（false positive）。
+    struct AggregateLeafPartialRestoreFailure {
+        param: Tensor<f32>,
+        a: bool,
+        b: bool,
+    }
+
+    impl Module for AggregateLeafPartialRestoreFailure {
+        fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            unreachable!("本テストでは forward は呼ばれない")
+        }
+
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("param".to_string(), &self.param)]
+        }
+
+        fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+            if requires_grad {
+                // 復元呼び出し（ロールバックで `true` へ戻す）を模擬:
+                // `a` だけ書き換えて `b` を放置したまま失敗する。
+                self.a = true;
+                Err(AutodiffError::InvalidArgument(
+                    "AggregateLeafPartialRestoreFailure: 復元時は意図的に失敗する".to_string(),
+                ))
+            } else {
+                // 順方向の適用（`false` への設定）は両フラグとも正しく
+                // 更新して成功する。
+                self.a = false;
+                self.b = false;
+                Ok(())
+            }
+        }
+
+        fn requires_grad(&self) -> bool {
+            self.a || self.b
         }
     }
 
@@ -1603,6 +1690,46 @@ mod tests {
         );
     }
 
+    /// P1 是正回帰テスト（codex-review 指摘 `PRRT_kwDOTuUCJc6lFaVh`）:
+    /// `restore_requires_grad` の `Leaf` 分岐は「呼び出し後の集約
+    /// `requires_grad()` が desired value と一致するか」を復元成功の
+    /// 根拠にしてはならない。`AggregateLeafPartialRestoreFailure`
+    /// （`a || b` の集約のみを公開する複合 Leaf）で、復元呼び出しが
+    /// `a` だけ書き換えて `b` を放置したまま `Err` を返しても、`a || b`
+    /// が偶然 desired value と一致するため、旧実装は「復元成功」と
+    /// 誤判定していた（`b` は実際には復元されていない）。是正後は
+    /// `Err` をそのまま伝播し、外側のロールバック失敗として報告
+    /// されなければならない。
+    #[test]
+    fn module_list_set_requires_grad_rollback_leaf_with_aggregate_requires_grad_reports_partial_restore_failure()
+     {
+        let mut list = ModuleList::new();
+        list.push(Box::new(AggregateLeafPartialRestoreFailure {
+            param: Tensor::new(vec![1.0f32], &[1]).unwrap(),
+            a: true,
+            b: true,
+        }));
+        list.push(Box::new(FailingSetRequiresGradModule {
+            param: Tensor::new(vec![1.0f32], &[1]).unwrap(),
+        }));
+
+        let err = list
+            .set_requires_grad(false)
+            .expect_err("子 1 の既定 set_requires_grad 失敗で Err のはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        let message = err.to_string();
+        assert!(
+            message.contains("rollback also failed for"),
+            "子 0（AggregateLeafPartialRestoreFailure）の復元呼び出し \
+             自体が `Err` を返した以上、集約 `requires_grad()`（`a || \
+             b`）がたまたま desired value と一致していても復元失敗と \
+             して報告されなければならない（旧実装は集約値の一致だけで \
+             復元成功と誤判定していた false positive の再現・是正 \
+             確認）: {message}"
+        );
+    }
+
     /// `advisor` レビュー指摘の回帰テスト: `restore_requires_grad` の
     /// `Leaf` 分岐が「呼び出し前にすでに `requires_grad()` の戻り値が
     /// スナップショット値と一致しているか」を見て `set_requires_grad`
@@ -1799,7 +1926,7 @@ mod tests {
     }
 
     // `ModuleDict::set_requires_grad`／`requires_grad`（P1 是正・#2234
-    // レビュー指摘 `PRRT_kwDOTuUCJc6lE8Gg`／cursor[bot]
+    // レビュー指摘 `PRRT_kwDOTuUCJc6lE8Gg`／cursor\[bot\]
     // `PRRT_kwDOTuUCJc6lE80z`: `ModuleList`／`Sequential` には実装した
     // 凍結操作が同じ公開 `Module` である `ModuleDict` に未実装で
     // `freeze()` が `InvalidArgument` を返していた不具合の是正確認）。
@@ -1897,7 +2024,7 @@ mod tests {
         );
     }
 
-    /// P1 是正回帰テスト（cursor[bot] 指摘 `PRRT_kwDOTuUCJc6lE80z`:
+    /// P1 是正回帰テスト（cursor\[bot\] 指摘 `PRRT_kwDOTuUCJc6lE80z`:
     /// 「`as_module_list` が dict を leaf 扱いしロールバックで混在状態を
     /// 保持できない」の再現・是正確認）: 親 `ModuleList` に入れ子の
     /// `ModuleDict`（混在状態）を持たせ、外側の `set_requires_grad` が
@@ -1953,7 +2080,7 @@ mod tests {
         assert!(outer.get(0).unwrap().as_module_list().is_none());
     }
 
-    /// 上記の逆方向（cursor[bot] 指摘のネスト方向カバレッジ）: 親
+    /// 上記の逆方向（cursor\[bot\] 指摘のネスト方向カバレッジ）: 親
     /// `ModuleDict` に入れ子の `ModuleList`（混在状態）を持たせた場合も
     /// 同様にロールバックが混在状態を保つこと。
     #[test]
