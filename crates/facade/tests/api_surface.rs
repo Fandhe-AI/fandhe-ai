@@ -3165,12 +3165,51 @@ fn tokenize_including_punctuation(text: &str) -> Vec<String> {
     tokens
 }
 
+/// `tokens[j..]` の先頭から連続する `fn` 宣言の修飾子トークン
+/// （`unsafe`／`const`／`async`／`extern` およびその ABI 文字列リテラル。
+/// 任意順・0 個以上の繰り返し）を読み飛ばし、修飾子列の直後の index を
+/// 返す（codex-review 指摘・PR #2212 その 11）: 旧実装は `unsafe`／
+/// `const`／`async` の 3 種のみを読み飛ばしており `pub extern "C" fn
+/// custom` のような ABI 指定付き宣言を見逃していた（`extern` トークンが
+/// `fn` 直前の位置に来るため `tokens.get(j) == Some("fn")` の一致に
+/// 失敗し `declares_pub_fn` が false を返す）。`extern` は ABI 文字列
+/// リテラル（`"C"` 等）を伴う場合と伴わない場合の両方が有効な Rust
+/// 記法であるため、`extern` の直後にトークン化された文字列リテラル
+/// （`"` 開始トークンから対応する `"` 終了トークンまで）が続けばそれも
+/// まとめて読み飛ばす。`crates/autodiff/tests/architecture_boundaries.
+/// rs` の同名ユーティリティと同型（クレートをまたぐ integration test
+/// 間でヘルパーを共有できないため個別実装）。
+fn skip_fn_declaration_qualifiers(tokens: &[String], mut j: usize) -> usize {
+    loop {
+        match tokens.get(j).map(String::as_str) {
+            Some("unsafe" | "const" | "async") => {
+                j += 1;
+            }
+            Some("extern") => {
+                j += 1;
+                if tokens.get(j).map(String::as_str) == Some("\"") {
+                    j += 1;
+                    while let Some(tok) = tokens.get(j) {
+                        j += 1;
+                        if tok == "\"" {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    j
+}
+
 /// `content`（コメント除去済み想定）に `pub fn <fn_name>(` または
 /// `pub fn <fn_name><`（ジェネリクス付き）宣言が存在するかをトークン列
 /// の連続一致で判定する。`pub`・`fn`・`fn_name` の間の空白量（改行を
-/// 含む）に影響されない。`pub`・`fn` の間に `unsafe`／`const`／`async`
-/// 修飾子（0 個以上・任意順の繰り返し）が挟まる宣言も検出する
-/// （`unapproved_onnx_pub_fn_with_qualifiers_is_flagged` が既に固定
+/// 含む）に影響されない。`pub`・`fn` の間に `unsafe`／`const`／`async`／
+/// `extern`（ABI 文字列リテラル付き含む）修飾子（0 個以上・任意順の
+/// 繰り返し）が挟まる宣言も検出する（`skip_fn_declaration_qualifiers`。
+/// `unapproved_onnx_pub_fn_with_qualifiers_is_flagged` が既に固定
 /// している `pub async fn`／`pub unsafe fn` の扱いに合わせる）。
 /// `pub(crate) fn ...` のようなスコープ付き可視性は「独立した `pub`
 /// トークンの直後に修飾子または `fn` トークンが続かない」ため一致しない。
@@ -3183,13 +3222,7 @@ fn declares_pub_fn(content: &str, fn_name: &str) -> bool {
         if token != "pub" {
             continue;
         }
-        let mut j = i + 1;
-        while matches!(
-            tokens.get(j).map(String::as_str),
-            Some("unsafe" | "const" | "async")
-        ) {
-            j += 1;
-        }
+        let j = skip_fn_declaration_qualifiers(&tokens, i + 1);
         if tokens.get(j).map(String::as_str) == Some("fn")
             && tokens.get(j + 1).map(String::as_str) == Some(fn_name)
             && matches!(tokens.get(j + 2).map(String::as_str), Some("(") | Some("<"))
@@ -3225,6 +3258,25 @@ fn declares_pub_fn_detects_newline_separated_declaration() {
     ));
     assert!(declares_pub_fn(
         "pub const fn add_custom() {}",
+        "add_custom"
+    ));
+}
+
+/// [`declares_pub_fn`] が `extern`（ABI 文字列リテラル付き・なし双方）を
+/// 挟んだ宣言も検出することを固定する回帰テスト（codex-review 指摘・
+/// PR #2212 その 11）。
+#[test]
+fn declares_pub_fn_detects_extern_qualified_declaration() {
+    assert!(declares_pub_fn(
+        "pub extern \"C\" fn add_custom() {}",
+        "add_custom"
+    ));
+    assert!(declares_pub_fn(
+        "pub unsafe extern \"C\" fn add_custom() {}",
+        "add_custom"
+    ));
+    assert!(declares_pub_fn(
+        "pub extern fn add_custom() {}",
         "add_custom"
     ));
 }

@@ -160,6 +160,17 @@ fn strip_cfg_test_items(content: &str) -> String {
 /// 対応できないため、本関数は両方を対象にする。文字列リテラル中の
 /// `//`／`/*` は非対応（`strip_top_level_statements` と同じ簡易実装
 /// 方針。`custom.rs` に該当パターンが無いことを前提とする）。
+///
+/// **ブロックコメントは前後に半角スペース 1 個を挿入してから除去する**
+/// （codex-review 指摘・PR #2212 その 10）: 旧実装はコメント本体を単に
+/// 読み飛ばすだけだったため `use crate::BackendOps/**/as Send;` のような
+/// 隣接トークンが `BackendOpsas` へ連結し、後段のトークナイザ
+/// （`tokenize_including_punctuation`／`extract_identifier_tokens`）が
+/// 1 個の識別子として誤認識して `as` エイリアス検出・`use`／`type`
+/// キーワード判定（`strip_keyword_prefix`）をすり抜けさせてしまう。
+/// スペース挿入によりコメント除去後もトークン境界を保つ。行コメントは
+/// 常に行末（`\n` の直前）で終わるため、既存の「`\n` を保持したまま
+/// スキップする」実装のままでもトークン連結は起きない。
 fn strip_comments(content: &str) -> String {
     let chars: Vec<char> = content.chars().collect();
     let len = chars.len();
@@ -174,6 +185,7 @@ fn strip_comments(content: &str) -> String {
             continue;
         }
         if c == '/' && i + 1 < len && chars[i + 1] == '*' {
+            out.push(' ');
             let mut depth = 1i32;
             i += 2;
             while i < len && depth > 0 {
@@ -190,6 +202,7 @@ fn strip_comments(content: &str) -> String {
                     i += 1;
                 }
             }
+            out.push(' ');
             continue;
         }
         out.push(c);
@@ -521,12 +534,49 @@ fn tokenize_including_punctuation(text: &str) -> Vec<String> {
     tokens
 }
 
+/// `tokens[j..]` の先頭から連続する `fn` 宣言の修飾子トークン
+/// （`unsafe`／`const`／`async`／`extern` およびその ABI 文字列リテラル。
+/// 任意順・0 個以上の繰り返し）を読み飛ばし、修飾子列の直後の index を
+/// 返す（codex-review 指摘・PR #2212 その 11）: 旧実装は `unsafe`／
+/// `const`／`async` の 3 種のみを読み飛ばしており `pub extern "C" fn
+/// custom` のような ABI 指定付き宣言を見逃していた（`extern` トークンが
+/// `fn` 直前の位置に来るため `tokens.get(j) == Some("fn")` の一致に
+/// 失敗し `declares_pub_fn` が false を返す）。`extern` は ABI 文字列
+/// リテラル（`"C"` 等）を伴う場合と伴わない場合の両方が有効な Rust
+/// 記法であるため、`extern` の直後にトークン化された文字列リテラル
+/// （`"` 開始トークンから対応する `"` 終了トークンまで）が続けばそれも
+/// まとめて読み飛ばす。
+fn skip_fn_declaration_qualifiers(tokens: &[String], mut j: usize) -> usize {
+    loop {
+        match tokens.get(j).map(String::as_str) {
+            Some("unsafe" | "const" | "async") => {
+                j += 1;
+            }
+            Some("extern") => {
+                j += 1;
+                if tokens.get(j).map(String::as_str) == Some("\"") {
+                    j += 1;
+                    while let Some(tok) = tokens.get(j) {
+                        j += 1;
+                        if tok == "\"" {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    j
+}
+
 /// `content`（コメント除去済み想定）に `pub fn <fn_name>(` または
 /// `pub fn <fn_name><`（ジェネリクス付き）宣言が存在するかをトークン列
 /// の連続一致で判定する。`pub`・`fn`・`fn_name` の間の空白量（改行を
-/// 含む）に影響されない。`pub`・`fn` の間に `unsafe`／`const`／`async`
-/// 修飾子（0 個以上・任意順の繰り返し）が挟まる宣言も検出する
-/// （`crates/facade/tests/api_surface.rs::
+/// 含む）に影響されない。`pub`・`fn` の間に `unsafe`／`const`／`async`／
+/// `extern`（ABI 文字列リテラル付き含む）修飾子（0 個以上・任意順の
+/// 繰り返し）が挟まる宣言も検出する（`skip_fn_declaration_qualifiers`。
+/// `crates/facade/tests/api_surface.rs::
 /// unapproved_onnx_pub_fn_with_qualifiers_is_flagged` が既に固定して
 /// いる `pub async fn`／`pub unsafe fn` の扱いに合わせる）。
 /// `pub(crate) fn ...` のようなスコープ付き可視性は「独立した `pub`
@@ -540,13 +590,7 @@ fn declares_pub_fn(content: &str, fn_name: &str) -> bool {
         if token != "pub" {
             continue;
         }
-        let mut j = i + 1;
-        while matches!(
-            tokens.get(j).map(String::as_str),
-            Some("unsafe" | "const" | "async")
-        ) {
-            j += 1;
-        }
+        let j = skip_fn_declaration_qualifiers(&tokens, i + 1);
         if tokens.get(j).map(String::as_str) == Some("fn")
             && tokens.get(j + 1).map(String::as_str) == Some(fn_name)
             && matches!(tokens.get(j + 2).map(String::as_str), Some("(") | Some("<"))
@@ -575,6 +619,52 @@ fn strip_visibility_prefix(line: &str) -> &str {
         return after_paren_open[close_rel + 1..].trim_start();
     }
     after_pub
+}
+
+/// `statement` 先頭に連続する外部属性（`#[...]`。`#[derive(Debug)]`・
+/// `#[allow(unused_imports)]` 等）を、`[`／`]` の深さ追跡（ネスト対応。
+/// `#[cfg(feature = "x")]` のような属性内の文字列リテラル中の `[`／`]`
+/// は非対応——`custom.rs` に該当パターンが無いことを前提とする単純な
+/// 実装方針は `split_top_level_statements` と同じ）で読み飛ばし、
+/// 属性の後に残る item 本体（可視性修飾・`use`／`type` キーワード等）
+/// の先頭を返す（codex-review 指摘・PR #2212 その 13）:
+/// `split_top_level_statements` は属性とその直後の item を 1 ステート
+/// メントとして結合するため、`#[allow(unused_imports)] use crate::
+/// BackendOps as Ops;` のように外部属性が先頭に付くと、後続の
+/// `strip_visibility_prefix`／`strip_keyword_prefix` が期待する
+/// 「可視性修飾または `use`／`type` キーワードで始まる」という前提が
+/// 崩れ、alias 検出・type エイリアス検査の両ループを素通りしてしまう。
+fn strip_leading_attributes(statement: &str) -> &str {
+    let mut rest = statement.trim_start();
+    while let Some(after_hash) = rest.strip_prefix('#') {
+        let after_hash = after_hash.trim_start();
+        let Some(after_bracket) = after_hash.strip_prefix('[') else {
+            break;
+        };
+        let mut depth = 1i32;
+        let mut end = None;
+        for (idx, ch) in after_bracket.char_indices() {
+            match ch {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(idx);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            // 対応する `]` が見つからない不正な属性は読み飛ばさず、
+            // そのまま残りをキーワード判定へ渡す（fail-closed: 判定に
+            // 失敗させて検出漏れを起こすより、後続処理へ委ねる）。
+            break;
+        };
+        rest = after_bracket[end + 1..].trim_start();
+    }
+    rest
 }
 
 /// `crates/autodiff/src/custom.rs` の `CustomFunction` trait が
@@ -736,7 +826,8 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // `use` の直後に改行が来る有効な Rust 記法を `starts_with("use ")`
     // は見逃す）。
     for statement in split_top_level_statements(&no_comments) {
-        let after_visibility = strip_visibility_prefix(&statement);
+        let after_attributes = strip_leading_attributes(&statement);
+        let after_visibility = strip_visibility_prefix(after_attributes);
         if strip_keyword_prefix(after_visibility, "use").is_some() {
             let has_as_token = extract_identifier_tokens(after_visibility)
                 .iter()
@@ -824,7 +915,8 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
         if statement_has_cfg_test_attribute(&statement) {
             continue;
         }
-        let after_visibility = strip_visibility_prefix(&statement);
+        let after_attributes = strip_leading_attributes(&statement);
+        let after_visibility = strip_visibility_prefix(after_attributes);
         let Some(use_body) = strip_keyword_prefix(after_visibility, "use") else {
             continue;
         };
@@ -859,16 +951,31 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
 fn var_rs_does_not_declare_pub_fn_custom() {
     let var_rs = autodiff_crate_root().join("src/var.rs");
     let content = read_to_string_or_panic(&var_rs);
-    let no_comments: String = content
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // 行コメント（`//`）のみを除去する旧実装は `pub/* separator */ fn
+    // custom` のようなブロックコメントを挟んだ宣言を素通りさせていた
+    // （codex-review 指摘・PR #2212 その 12）。`strip_comments`
+    // （行・ブロック両対応、トークン境界を保つ）を使う。
+    let no_comments = strip_comments(&content);
     assert!(
         !declares_pub_fn(&no_comments, "custom"),
         "src/var.rs に pub fn custom 宣言が見つかった\
          （§12.5 (b) 未承認のまま Var 経由の到達口を設けてしまっている。`pub`・`fn`・\
-         `custom` の間に改行を挟んだ宣言もトークン列で検出する）"
+         `custom` の間に改行・ブロックコメントを挟んだ宣言もトークン列で検出する）"
+    );
+}
+
+/// [`var_rs_does_not_declare_pub_fn_custom`] のブロックコメント経由の
+/// バイパス（codex-review 指摘・PR #2212 その 12）を、実際に
+/// `strip_comments` + `declares_pub_fn` の組み合わせで検出できることを
+/// 固定する回帰テスト。`src/var.rs` 本体を変更せずに検証するため、
+/// 同じパターンの合成入力に対して直接アサートする。
+#[test]
+fn declares_pub_fn_detects_declaration_split_by_block_comment() {
+    let forged = "pub/* separator */fn custom(&self) {}";
+    let no_comments = strip_comments(forged);
+    assert!(
+        declares_pub_fn(&no_comments, "custom"),
+        "ブロックコメントで pub と fn を分断した宣言を検出できていない: {no_comments}"
     );
 }
 
@@ -1005,6 +1112,22 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
     assert!(
         declares_pub_fn("pub const fn custom() {}", "custom"),
         "pub const fn custom 宣言を検出できていない"
+    );
+    // 7b) `extern`（ABI 文字列リテラル付き・なし双方）を挟んだ宣言
+    //     （codex-review 指摘・PR #2212 その 11）: 旧実装は `unsafe`／
+    //     `const`／`async` の 3 種のみ読み飛ばすため、`extern` トークン
+    //     が `fn` 直前に残り一致に失敗していた。
+    assert!(
+        declares_pub_fn("pub extern \"C\" fn custom() {}", "custom"),
+        "ABI 文字列リテラル付き pub extern \"C\" fn custom 宣言を検出できていない"
+    );
+    assert!(
+        declares_pub_fn("pub unsafe extern \"C\" fn custom() {}", "custom"),
+        "pub unsafe extern \"C\" fn custom（修飾子併記）宣言を検出できていない"
+    );
+    assert!(
+        declares_pub_fn("pub extern fn custom() {}", "custom"),
+        "ABI 文字列リテラルなし pub extern fn custom 宣言を検出できていない"
     );
 
     // 8) 同名別型によるシグネチャ混入（codex-review 指摘・PR #2212
@@ -1147,5 +1270,66 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
     assert!(
         !statement_has_cfg_test_attribute("use fandhe_ai_tensor_core::Tensor;"),
         "cfg(test) 属性が無い文を誤って検出している"
+    );
+
+    // 15) 外部属性（`#[allow(unused_imports)]` 等）が先頭に付いた
+    //     `use`／`type` 宣言も alias 検出・type エイリアス検査の対象に
+    //     なる（codex-review 指摘・PR #2212 その 13）: `split_top_level_
+    //     statements` は属性と後続 item を 1 ステートメントに結合する
+    //     ため、`strip_leading_attributes` で属性を読み飛ばしてから
+    //     `strip_visibility_prefix`／`strip_keyword_prefix` を適用しない
+    //     と、属性文字列が先頭に残ったままキーワード一致に失敗し検査を
+    //     素通りしてしまう。
+    let forged_attr_use = "#[allow(unused_imports)]\nuse crate::BackendOps as Ops;\n";
+    let mut alias_detected_via_attr = false;
+    for statement in split_top_level_statements(forged_attr_use) {
+        let after_attributes = strip_leading_attributes(&statement);
+        let after_visibility = strip_visibility_prefix(after_attributes);
+        if strip_keyword_prefix(after_visibility, "use").is_some()
+            && extract_identifier_tokens(after_visibility)
+                .iter()
+                .any(|token| token == "as")
+        {
+            alias_detected_via_attr = true;
+        }
+    }
+    assert!(
+        alias_detected_via_attr,
+        "外部属性付き use 文の alias（as トークン）を検出できていない: {forged_attr_use}"
+    );
+
+    let forged_attr_type = "#[allow(dead_code)]\npub type Tensor = BackendOps;\n";
+    let mut type_detected_via_attr = false;
+    for statement in split_top_level_statements(forged_attr_type) {
+        let after_attributes = strip_leading_attributes(&statement);
+        let after_visibility = strip_visibility_prefix(after_attributes);
+        if strip_keyword_prefix(after_visibility, "type").is_some()
+            && contains_identifier(after_visibility, "BackendOps")
+        {
+            type_detected_via_attr = true;
+        }
+    }
+    assert!(
+        type_detected_via_attr,
+        "外部属性付き pub type 宣言の禁止型参照を検出できていない: {forged_attr_type}"
+    );
+
+    // 複数属性・複数行属性も読み飛ばせる（ネスト括弧・改行を含む）。
+    let forged_multi_attr = "#[allow(unused_imports)]\n#[cfg_attr(test, allow(dead_code))]\nuse crate::BackendOps as Ops;\n";
+    let mut alias_detected_via_multi_attr = false;
+    for statement in split_top_level_statements(forged_multi_attr) {
+        let after_attributes = strip_leading_attributes(&statement);
+        let after_visibility = strip_visibility_prefix(after_attributes);
+        if strip_keyword_prefix(after_visibility, "use").is_some()
+            && extract_identifier_tokens(after_visibility)
+                .iter()
+                .any(|token| token == "as")
+        {
+            alias_detected_via_multi_attr = true;
+        }
+    }
+    assert!(
+        alias_detected_via_multi_attr,
+        "複数行・複数個の外部属性を読み飛ばせていない: {forged_multi_attr}"
     );
 }
