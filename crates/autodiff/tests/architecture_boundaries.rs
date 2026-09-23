@@ -211,6 +211,131 @@ fn strip_comments(content: &str) -> String {
     out
 }
 
+/// `content`（`strip_comments` 済み想定）中の文字列リテラル（`"..."`）
+/// および char リテラル（`'x'`／`'"'`／`'\\''`／`'\u{XXXX}'` 等）の
+/// **内容のみ**を空白へ置換し、開始・終了のクォート文字自体は保持
+/// する（ライフタイム `'a` 等の閉じクォートを伴わないトークンは対象外
+/// でそのまま残す）。文字列側のエスケープシーケンス（`\"`／`\\` 等）は
+/// バックスラッシュの直後の 1 文字をまとめて消費し文字列終端と誤認
+/// しない（raw 文字列リテラル `r"..."`／`r#"..."#` は非対応。
+/// `custom.rs` および `crates/autodiff/src` 配下に該当パターンが無い
+/// ことを前提とする `strip_comments` と同じ簡易実装方針）。
+///
+/// [`var_impl_block_bodies`] の中括弧深さ追跡はトークン列上の `{`／`}`
+/// のみを見て文字列・char リテラルの中身を特別扱いしないため、次の
+/// 2 通りのバイパス（いずれも PR #2212 追加 P1 の是正時に自己レビューで
+/// 判明）が成立しうる:
+///
+/// 1. `impl Var { fn helper() { let _ = "}"; } pub fn custom(&self) {}
+///    }` のように**文字列**リテラル内に `}` を含むと、リテラル内の
+///    `}` を実際の中括弧として誤カウントして impl 本体の終端を実際
+///    より手前で確定してしまい、本体末尾の `pub fn custom` を本体の
+///    外へ追い出して検出をすり抜けさせる。
+/// 2. `impl Var { fn h() -> char { '}' } pub fn custom(&self) {} }`
+///    のように**char** リテラル `'}'` がトークン化後に単独の `}`
+///    トークンとして現れる場合も同様に中括弧カウントを狂わせる。
+///    `'"'` の場合は下の `"` 検査に「文字列の開始」と誤認識され、
+///    離れた場所の次の `"` までを丸ごと空白化してしまう。
+///
+/// 本関数は両リテラルの中身を空白化することでこれらを塞ぐ。開始・
+/// 終了のクォート文字自体は残すため、`skip_fn_declaration_qualifiers`
+/// の ABI 文字列リテラル判定（`extern "C"` のクォートをトークンとして
+/// 検出する処理）とは整合したまま保たれる。
+///
+/// **対象外（本関数では扱わない・報告のみ）**: `strip_comments` は
+/// `content` に対して本関数より前段で適用される前提のため、文字列
+/// リテラル内の `//`／`/*` を実コメントの開始と誤認して行末までを
+/// 読み飛ばしてしまう既存の限界（`impl Var { fn s() -> &str { "//" }
+/// pub fn custom(&self) {} }` 等）はそのまま残る。これは
+/// `strip_comments` を利用する本ファイルの全テストに共通する既知の
+/// 簡易実装方針であり、単一パスの本格的な字句解析器を要する別軸の
+/// 改善であるため本 P1 修正の対象外とする。
+fn strip_string_literal_contents(content: &str) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0usize;
+    while i < len {
+        let c = chars[i];
+        if c == '\'' {
+            // 文字リテラル（`'"'`／`'\\''`／`'\u{XXXX}'` 等）とライフタイム
+            // （`'a` 等・閉じクォートを伴わない）を判別する（PR #2212
+            // 追加 P1 の是正時に自己レビューで判明）: 判別せず `'` を
+            // 無視すると、
+            // `'"'` のような「文字列引用符 1 文字を表す char リテラル」
+            // が下の `"` 検査に「文字列の開始」と誤認識され、以降で偶然
+            // 現れる次の `"` までを丸ごと文字列扱いして空白化してしまう
+            // （本来の文字列リテラルではないコードが消えてしまう）。
+            if chars.get(i + 1) == Some(&'\\') {
+                // エスケープシーケンス。`\u{XXXX}` は可変長のため `}` まで
+                // 読み進めてから閉じクォートを消費する。中身（バック
+                // スラッシュ以降・閉じクォート未満のすべての文字）は
+                // 空白へ置換し開始・終了クォートのみ残す——`'\u{7b}'`
+                // のような unicode escape はソーステキスト上に `{`／`}`
+                // という文字がそのまま現れるため、中身を素通しすると
+                // [`var_impl_block_bodies`] の中括弧深さ追跡を実際の
+                // 中括弧と誤って狂わせてしまう（PR #2212 追加 P1 の是正時に自己レビューで判明・PR #2212
+                // 追加 P1）。
+                out.push('\'');
+                let mut j = i + 1;
+                while j < len && chars[j] != '\'' {
+                    out.push(' ');
+                    j += 1;
+                }
+                if j < len {
+                    out.push('\'');
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            if chars.get(i + 2) == Some(&'\'') {
+                // 単純な 1 文字の char リテラル（`'"'`／`'{'`／`'}'` 等）。
+                // 中身の 1 文字を空白へ置換する（`'{'`／`'}'` を素通しする
+                // と、トークン化後に単独の `{`／`}` トークンとして現れ
+                // [`var_impl_block_bodies`] の中括弧深さ追跡を誤らせて
+                // しまう。`'"'` を素通しした場合の文字列開始誤認識と
+                // 同種のバイパスであり、いずれも中身を残す理由がない）。
+                out.push('\'');
+                out.push(' ');
+                out.push('\'');
+                i += 3;
+                continue;
+            }
+            // 閉じクォートが直後に無い ⇒ ライフタイム（`'a` 等）。その
+            // まま素通しし、後続の識別子文字は通常のトークンとして
+            // `tokenize_including_punctuation` に処理させる。
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c != '"' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        out.push('"');
+        i += 1;
+        while i < len {
+            let cur = chars[i];
+            if cur == '\\' && i + 1 < len {
+                out.push(' ');
+                out.push(' ');
+                i += 2;
+                continue;
+            }
+            if cur == '"' {
+                out.push('"');
+                i += 1;
+                break;
+            }
+            out.push(if cur == '\n' { '\n' } else { ' ' });
+            i += 1;
+        }
+    }
+    out
+}
+
 /// `statement` 先頭の属性列（`strip_leading_attributes` と同じ `[`／`]`
 /// の深さ追跡）を走査し、いずれかの属性の**先頭識別子（属性パス名）**が
 /// `cfg`／`cfg_attr` と一致するかを判定する（codex-review 指摘・
@@ -634,12 +759,22 @@ fn skip_fn_declaration_qualifiers(tokens: &[String], mut j: usize) -> usize {
 /// `pub fn` 宣言のみで、旧実装（固定文字列一致）と同じ可視性スコープの
 /// 扱いを保つ。
 fn declares_pub_fn(content: &str, fn_name: &str) -> bool {
-    let tokens = tokenize_including_punctuation(content);
+    tokens_declare_pub_fn(&tokenize_including_punctuation(content), fn_name)
+}
+
+/// [`declares_pub_fn`] の本体（トークン列を直接受け取る版）。
+/// `content` 全体を対象にする [`declares_pub_fn`] とは別に、
+/// [`var_impl_block_bodies`] が抜き出した impl ブロック本体トークン列
+/// （部分スライス）に対しても同じ判定ロジックを適用できるようにする
+/// ため分離した（codex-review 追加 P1 指摘・PR #2212: `Var` への
+/// inherent／trait impl はクレート内の任意ファイルに書けるため、単一
+/// ファイル全体ではなく impl ブロック単位で走査する必要がある）。
+fn tokens_declare_pub_fn(tokens: &[String], fn_name: &str) -> bool {
     for (i, token) in tokens.iter().enumerate() {
         if token != "pub" {
             continue;
         }
-        let j = skip_fn_declaration_qualifiers(&tokens, i + 1);
+        let j = skip_fn_declaration_qualifiers(tokens, i + 1);
         if tokens.get(j).map(String::as_str) == Some("fn")
             && tokens.get(j + 1).map(String::as_str) == Some(fn_name)
             && matches!(tokens.get(j + 2).map(String::as_str), Some("(") | Some("<"))
@@ -648,6 +783,98 @@ fn declares_pub_fn(content: &str, fn_name: &str) -> bool {
         }
     }
     false
+}
+
+/// `tokens`（コメント除去済み想定のファイル全体トークン列）から、
+/// `Var` 型に対する impl ブロック（`impl<...> Var { ... }` の inherent
+/// impl・`impl<...> Trait for Var { ... }` の trait impl の両方を含む）
+/// の本体トークン列をすべて抜き出す（codex-review 追加 P1 指摘・PR
+/// #2212: `var_rs_does_not_declare_pub_fn_custom` は `src/var.rs` のみを
+/// 走査していたため、`Var` への inherent impl を同クレート内の別ファイル
+/// （新規 module 等）に追加すると facade が再エクスポートする `Var` から
+/// 未承認の `Var::custom`／`Var::add_custom` へ到達できる一方、この否定
+/// ガードは通過してしまっていた）。
+///
+/// 判定手順:
+/// 1. `impl` トークンを見つけたら、直後の generic parameter リスト
+///    （`impl<T: Trait<U>> ...` 等）を山括弧の深さ追跡で読み飛ばす。
+///    これにより `impl<T: Trait<Var>> Foo` のような無関係な型パラメータ
+///    境界に現れる `Var` を、impl 対象そのものと誤認しない。
+/// 2. 続くヘッダー（型パス・`for`・`where` 節等）を開始 `{` まで走査し、
+///    独立したトークンとして `Var` が現れるかを記録する（`where` 節中の
+///    `Var` 出現は許容——過剰検出側に倒す fail-closed 方針。本関数は
+///    「否定ガードの検出漏れを防ぐ」ことが目的であり、対象を広げすぎて
+///    body が空振りするだけなら実害はない）。
+/// 3. 開始 `{` から対応する `}` までを中括弧の深さ追跡で本体として
+///    抜き出す（`extract_trait_body` と同じ方式）。**`tokens` は呼び
+///    出し側で `strip_comments` → `strip_string_literal_contents` 済み
+///    の content をトークン化したものであることを前提とする**——
+///    文字列・char リテラル中の `{`/`}` を素通しした生トークン列を
+///    渡すと、リテラル内の中括弧を実際の中括弧として誤カウントして
+///    しまう（理由は [`strip_string_literal_contents`] のドキュメン
+///    テーションコメント参照）。
+/// 4. ヘッダーに `Var` が含まれていた場合のみ本体トークン列を返す。
+fn var_impl_block_bodies(tokens: &[String]) -> Vec<Vec<String>> {
+    let mut bodies = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] != "impl" {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        if tokens.get(j).map(String::as_str) == Some("<") {
+            let mut depth = 0i32;
+            while j < tokens.len() {
+                match tokens[j].as_str() {
+                    "<" => depth += 1,
+                    ">" => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        let mut header_has_var = false;
+        while j < tokens.len() && tokens[j] != "{" {
+            if tokens[j] == "Var" {
+                header_has_var = true;
+            }
+            j += 1;
+        }
+        let Some("{") = tokens.get(j).map(String::as_str) else {
+            // 対応する impl 本体（`{`）が見つからない不正な入力は
+            // これ以上走査を続けられないため打ち切る（fail-closed:
+            // クラッシュや無限ループより安全側の「検査終了」を選ぶ）。
+            break;
+        };
+        let body_start = j + 1;
+        let mut depth = 1i32;
+        let mut k = body_start;
+        while k < tokens.len() && depth > 0 {
+            match tokens[k].as_str() {
+                "{" => depth += 1,
+                "}" => depth -= 1,
+                _ => {}
+            }
+            k += 1;
+        }
+        let body_end = if depth == 0 { k - 1 } else { tokens.len() };
+        if header_has_var {
+            bodies.push(tokens[body_start..body_end].to_vec());
+        }
+        // `body_end + 1`（本体を丸ごと読み飛ばす）にはしない: Rust では
+        // 関数本体の中に別の impl ブロックをネストできる（`impl Other {
+        // fn g() { impl Var { pub fn custom(&self) {} } } }`）ため、
+        // 本体を丸ごとスキップすると内側の `impl Var` を見逃してしまう
+        // （codex-review 追加 P1 指摘・PR #2212）。`body_start` から
+        // 再走査することで、この外側ループ自身がネストした `impl` トー
+        // クンを別途検出する。
+        i = body_start;
+    }
+    bodies
 }
 
 /// `line` 先頭の可視性修飾（`pub`／`pub(crate)`／`pub(super)`／
@@ -1012,32 +1239,72 @@ fn find_canonical_tensor_import(content: &str) -> Result<bool, String> {
     Ok(canonical_found)
 }
 
-/// `crates/autodiff/src/var.rs` に `pub fn custom(`／`pub fn custom<`
-/// 宣言が存在しないことを固定する（イシュー #2064 §12.5 (b) 第 3 項）。
-/// facade は `Var` を型ごと再エクスポートしているため、`Var::custom` が
+/// `crates/autodiff/src` 配下のいずれのファイルにも、`Var` への impl
+/// ブロック（inherent／trait 双方）が `pub fn custom(`／`pub fn custom<`・
+/// `pub fn add_custom(`／`pub fn add_custom<` 宣言を持たないことを固定
+/// する（イシュー #2064 §12.5 (b) 第 3 項）。facade は `Var` を型ごと
+/// 再エクスポートしているため、`Var::custom`（または `add_custom`）が
 /// 生えると `Tape::custom` の facade 転送メソッド不在ガード
 /// （`crates/facade/tests/api_surface.rs::
 /// facade_tape_does_not_expose_custom_forwarding_method`）を経由せずに
 /// 承認 (b) 前の到達経路が生まれてしまう（`docs/autodiff-custom-
 /// function-decision.md` §12.4「入口」の設計根拠）。
+///
+/// **`src/var.rs` のみを走査する旧実装の死角**（codex-review 追加 P1
+/// 指摘・PR #2212）: inherent `impl Var { ... }` は Rust の言語仕様上
+/// 同一クレート内のどのファイルにも書ける（`var.rs` に定義する必要が
+/// ない）。旧実装は `src/var.rs` の内容にしか `declares_pub_fn` を
+/// 適用していなかったため、たとえば新規モジュール（`src/foo.rs`）に
+/// `impl Var { pub fn custom(...) { ... } }` を追加しても本ガードは
+/// 素通りしてしまい、facade 再エクスポート経由で未承認の入口へ到達
+/// 可能になっていた。本実装は `visit_rs_files` で `src/` 全体を再帰
+/// 走査し、各ファイルを `strip_comments` → `strip_string_literal_
+/// contents`（文字列リテラル内の `{`／`}` による中括弧深さ追跡の誤り
+/// を防ぐ）した上で [`var_impl_block_bodies`] により「ヘッダーに
+/// `Var` を含む impl ブロック」の本体のみを抜き出し、その本体トークン
+/// 列に対して [`tokens_declare_pub_fn`] を適用する（`impl Other { pub
+/// fn custom() {} }` のような無関係な型への同名メソッドは検出対象外の
+/// まま。ネストした impl ブロック——関数本体の中に書かれた `impl Var`
+/// 等——も [`var_impl_block_bodies`] が取りこぼさない）。
 #[test]
-fn var_rs_does_not_declare_pub_fn_custom() {
-    let var_rs = autodiff_crate_root().join("src/var.rs");
-    let content = read_to_string_or_panic(&var_rs);
-    // 行コメント（`//`）のみを除去する旧実装は `pub/* separator */ fn
-    // custom` のようなブロックコメントを挟んだ宣言を素通りさせていた
-    // （codex-review 指摘・PR #2212 その 12）。`strip_comments`
-    // （行・ブロック両対応、トークン境界を保つ）を使う。
-    let no_comments = strip_comments(&content);
+fn autodiff_src_does_not_declare_pub_fn_custom_on_var() {
+    let src_dir = autodiff_crate_root().join("src");
+    let mut violations: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        // 行コメント（`//`）のみを除去する旧実装は `pub/* separator */ fn
+        // custom` のようなブロックコメントを挟んだ宣言を素通りさせていた
+        // （codex-review 指摘・PR #2212 その 12）。`strip_comments`
+        // （行・ブロック両対応、トークン境界を保つ）を使う。
+        let no_comments = strip_comments(content);
+        // 文字列リテラル内の `{`／`}` が中括弧深さ追跡を誤らせるバイパス
+        // （codex-review 追加 P1 指摘・PR #2212。`strip_string_literal_
+        // contents` のドキュメンテーションコメント参照）を防ぐため、
+        // `var_impl_block_bodies` へ渡す前に文字列リテラルの中身を
+        // 空白化する。
+        let no_strings = strip_string_literal_contents(&no_comments);
+        let tokens = tokenize_including_punctuation(&no_strings);
+        for body in var_impl_block_bodies(&tokens) {
+            for fn_name in ["custom", "add_custom"] {
+                if tokens_declare_pub_fn(&body, fn_name) {
+                    violations.push(format!(
+                        "{}: impl Var に pub fn {fn_name} 宣言",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    });
     assert!(
-        !declares_pub_fn(&no_comments, "custom"),
-        "src/var.rs に pub fn custom 宣言が見つかった\
-         （§12.5 (b) 未承認のまま Var 経由の到達口を設けてしまっている。`pub`・`fn`・\
-         `custom` の間に改行・ブロックコメントを挟んだ宣言もトークン列で検出する）"
+        violations.is_empty(),
+        "crates/autodiff/src 配下の impl Var ブロックに未承認の pub fn custom／\
+         add_custom 宣言が見つかった（§12.5 (b) 未承認のまま Var 経由の到達口を\
+         設けてしまっている。`pub`・`fn`・関数名の間に改行・ブロックコメントを\
+         挟んだ宣言も、`src/var.rs` 以外のファイルに書かれた impl ブロックも\
+         検出する）: {violations:?}"
     );
 }
 
-/// [`var_rs_does_not_declare_pub_fn_custom`] のブロックコメント経由の
+/// [`autodiff_src_does_not_declare_pub_fn_custom_on_var`] のブロックコメント経由の
 /// バイパス（codex-review 指摘・PR #2212 その 12）を、実際に
 /// `strip_comments` + `declares_pub_fn` の組み合わせで検出できることを
 /// 固定する回帰テスト。`src/var.rs` 本体を変更せずに検証するため、
@@ -1049,6 +1316,154 @@ fn declares_pub_fn_detects_declaration_split_by_block_comment() {
     assert!(
         declares_pub_fn(&no_comments, "custom"),
         "ブロックコメントで pub と fn を分断した宣言を検出できていない: {no_comments}"
+    );
+}
+
+/// [`autodiff_src_does_not_declare_pub_fn_custom_on_var`] が使う
+/// [`var_impl_block_bodies`] が、`src/var.rs` 以外のファイル相当の合成
+/// 入力（同一クレート内の別モジュール・別 impl ブロック）に対しても
+/// 正しく検出・除外できることを固定する回帰テスト（codex-review 追加
+/// P1 指摘・PR #2212: 単一ファイル走査の死角を塞いだことの検証）。
+#[test]
+fn var_impl_block_bodies_detects_declaration_in_other_module_file() {
+    // 1) `src/var.rs` とは別ファイル相当の `mod extra { impl Var { ... } }`
+    //    に書かれた `pub fn custom` を検出できる（ファイル単位ではなく
+    //    impl ブロック単位で走査しているため、module 宣言の有無に依らず
+    //    トークン列上は同じ検出結果になる）。
+    let forged_in_extra_module = "mod extra { impl Var { pub fn custom() {} } }";
+    let tokens = tokenize_including_punctuation(&strip_comments(forged_in_extra_module));
+    let bodies = var_impl_block_bodies(&tokens);
+    assert_eq!(
+        bodies.len(),
+        1,
+        "mod extra 内の impl Var ブロックを 1 件検出できていない: {bodies:?}"
+    );
+    assert!(
+        tokens_declare_pub_fn(&bodies[0], "custom"),
+        "mod extra 内の impl Var {{ pub fn custom() {{}} }} を検出できていない"
+    );
+
+    // 2) generic parameter・ライフタイム付き impl ヘッダー
+    //    （`impl<'a> Var { ... }`）と、修飾子付き宣言（`pub extern "C"
+    //    fn add_custom`）の組み合わせも検出できる。実運用の
+    //    `autodiff_src_does_not_declare_pub_fn_custom_on_var` と同じ
+    //    `strip_comments → strip_string_literal_contents → tokenize`
+    //    パイプラインを通す（PR #2212 追加 P1 の是正時に自己レビューで
+    //    判明: ABI 文字列リテラル `"C"` が `strip_string_literal_
+    //    contents` を経由しても `skip_fn_declaration_qualifiers` の
+    //    判定と整合することを固定する）。
+    let forged_with_lifetime_and_abi = "impl<'a> Var { pub extern \"C\" fn add_custom() {} }";
+    let no_comments = strip_comments(forged_with_lifetime_and_abi);
+    let no_strings = strip_string_literal_contents(&no_comments);
+    let tokens = tokenize_including_punctuation(&no_strings);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert_eq!(
+        bodies.len(),
+        1,
+        "impl<'a> Var ブロックを 1 件検出できていない: {bodies:?}"
+    );
+    assert!(
+        tokens_declare_pub_fn(&bodies[0], "add_custom"),
+        "impl<'a> Var {{ pub extern \"C\" fn add_custom() {{}} }} を検出できていない"
+    );
+
+    // 3) 無関係な型への同名メソッドは誤検出しない（`impl Other { ... }`
+    //    はヘッダーに `Var` トークンを含まないため対象外のまま）。
+    let unrelated_impl = "impl Other { pub fn custom() {} }";
+    let tokens = tokenize_including_punctuation(&strip_comments(unrelated_impl));
+    let bodies = var_impl_block_bodies(&tokens);
+    assert!(
+        bodies.is_empty(),
+        "impl Other への pub fn custom を Var 向けと誤検出した: {bodies:?}"
+    );
+
+    // 4) 関数本体の中にネストされた `impl Var` ブロック（PR #2212 追加
+    //    P1 の是正時に自己レビューで判明。`impl Other { fn g() { impl
+    //    Var { pub fn custom(&self) {} } } }`）
+    //    も見逃さない（本体を丸ごと読み飛ばすと外側 `impl Other` の
+    //    走査終了と同時に内側 `impl Var` も飛ばしてしまうため、
+    //    `var_impl_block_bodies` は本体開始位置から再走査する）。
+    let nested_impl = "impl Other { fn g() { impl Var { pub fn custom(&self) {} } } }";
+    let tokens = tokenize_including_punctuation(&strip_comments(nested_impl));
+    let bodies = var_impl_block_bodies(&tokens);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "関数本体にネストされた impl Var 内の pub fn custom を検出できていない: {bodies:?}"
+    );
+
+    // 5) 文字列リテラル内の `}` による中括弧深さ追跡の誤り（PR #2212
+    //    追加 P1 の是正時に自己レビューで判明）: `strip_string_literal_
+    //    contents` を適用せずに
+    //    `var_impl_block_bodies` へ渡すと、リテラル内の `}` を実際の
+    //    中括弧として誤カウントし、本体末尾の `pub fn custom` を本体の
+    //    外へ追い出してしまう。`strip_string_literal_contents` を通す
+    //    ことで正しく検出できることを固定する。
+    let forged_with_brace_in_string =
+        "impl Var { fn helper() { let _ = \"}\"; } pub fn custom(&self) {} }";
+    let no_comments = strip_comments(forged_with_brace_in_string);
+    let no_strings = strip_string_literal_contents(&no_comments);
+    let tokens = tokenize_including_punctuation(&no_strings);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "文字列リテラル内の }} を実際の中括弧と誤カウントし、\
+         pub fn custom の検出を見逃した: {bodies:?}"
+    );
+    // 対照実験: `strip_string_literal_contents` を適用しない場合は
+    // このバイパスが実際に成立する（誤って検出漏れになる）ことも
+    // 併せて固定し、上記の修正が実際に効いていることを裏付ける。
+    let tokens_without_fix = tokenize_including_punctuation(&no_comments);
+    let bodies_without_fix = var_impl_block_bodies(&tokens_without_fix);
+    assert!(
+        !bodies_without_fix
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "strip_string_literal_contents 抜きでも検出できてしまっている\
+         （回帰テストの前提が崩れている）: {bodies_without_fix:?}"
+    );
+
+    // 6) char リテラル中の `"`（`'"'`）による文字列開始の誤検出
+    //    （PR #2212 追加 P1 の是正時に自己レビューで判明）: char
+    //    リテラルを判別せず `'` を無視すると、1 つめの `'"'` を
+    //    「文字列の開始」と誤認し、離れた場所にある
+    //    2 つめの `'"'` までを丸ごと文字列として空白化してしまい、
+    //    その間に挟まれた `pub fn custom` が消えてしまう。
+    let forged_with_char_literal_quote =
+        "impl Var { fn q() -> char { '\"' } pub fn custom(&self) {} fn r() -> char { '\"' } }";
+    let no_comments = strip_comments(forged_with_char_literal_quote);
+    let no_strings = strip_string_literal_contents(&no_comments);
+    let tokens = tokenize_including_punctuation(&no_strings);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "char リテラル '\"' を文字列の開始と誤認識し、\
+         pub fn custom の検出を見逃した: {bodies:?}"
+    );
+
+    // 7) char リテラル `'}'`（`'{'`）による中括弧深さ追跡の誤り
+    //    （PR #2212 追加 P1 の是正時に自己レビューで判明）: char
+    //    リテラルの中身をそのまま素通しするとトークン化後に単独の
+    //    `}` トークンとして現れ、impl 本体の
+    //    終端を実際より手前で確定してしまい、本体末尾の `pub fn
+    //    custom` を本体の外へ追い出してしまう。
+    let forged_with_char_literal_brace =
+        "impl Var { fn h() -> char { '}' } pub fn custom(&self) {} }";
+    let no_comments = strip_comments(forged_with_char_literal_brace);
+    let no_strings = strip_string_literal_contents(&no_comments);
+    let tokens = tokenize_including_punctuation(&no_strings);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "char リテラル '}}' を実際の中括弧と誤カウントし、\
+         pub fn custom の検出を見逃した: {bodies:?}"
     );
 }
 
