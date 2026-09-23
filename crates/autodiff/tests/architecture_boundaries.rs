@@ -171,6 +171,21 @@ fn strip_cfg_test_items(content: &str) -> String {
 /// スペース挿入によりコメント除去後もトークン境界を保つ。行コメントは
 /// 常に行末（`\n` の直前）で終わるため、既存の「`\n` を保持したまま
 /// スキップする」実装のままでもトークン連結は起きない。
+/// **本関数を単独で境界検査の前処理として使わない**（codex-review 追加
+/// P1 指摘・PR #2212 是正の続き）: 文字列リテラルの中身を関知しない
+/// 単純な文字走査のため、`impl Var { fn s() -> &'static str { "//" } pub
+/// fn custom(&self) {} }` のように文字列リテラルの中身に `//` が含まれ
+/// ると、本関数はそれを実コメントの開始と誤認して**行末までを丸ごと**
+/// 読み飛ばしてしまう（本関数の時点で該当行の残り——`} pub fn
+/// custom(&self) {}` を含む——が既に失われるため、文字列内容を別途
+/// 空白化する後処理を挟んでも手遅れである）。この構造的欠陥（コメント
+/// 検出とリテラル境界検出を別パスに分ける設計そのものの限界）を塞いだ
+/// 単一パスの [`normalize_source`] が現行の唯一の本番経路であり、本関数
+/// （`strip_comments`）はこのバイパスを実演する回帰テスト
+/// （`var_impl_block_bodies_detects_declaration_in_other_module_file` の
+/// 「対照実験」・`architecture_boundary_bypass_scenarios_are_detected` の
+/// 文字列内 `//`／文字列内偽トレイト定義シナリオ）専用の歴史的
+/// ユーティリティとして残す。
 fn strip_comments(content: &str) -> String {
     let chars: Vec<char> = content.chars().collect();
     let len = chars.len();
@@ -211,71 +226,149 @@ fn strip_comments(content: &str) -> String {
     out
 }
 
-/// `content`（`strip_comments` 済み想定）中の文字列リテラル（`"..."`）
-/// および char リテラル（`'x'`／`'"'`／`'\\''`／`'\u{XXXX}'` 等）の
-/// **内容のみ**を空白へ置換し、開始・終了のクォート文字自体は保持
-/// する（ライフタイム `'a` 等の閉じクォートを伴わないトークンは対象外
-/// でそのまま残す）。文字列側のエスケープシーケンス（`\"`／`\\` 等）は
-/// バックスラッシュの直後の 1 文字をまとめて消費し文字列終端と誤認
-/// しない（raw 文字列リテラル `r"..."`／`r#"..."#` は非対応。
-/// `custom.rs` および `crates/autodiff/src` 配下に該当パターンが無い
-/// ことを前提とする `strip_comments` と同じ簡易実装方針）。
+/// 単一パスの字句正規化: コメント（行・ブロック。ネスト対応）と、
+/// 文字列・raw 文字列・バイト文字列・char・ライフタイムを判別した
+/// うえでリテラルの中身のみを空白（改行は `\n` のまま保持）へ置換した
+/// 文字列を返す（codex-review 指摘・PR #2212 是正の続き。第 2 ラウンド
+/// レビュー指摘 1・2）。
 ///
-/// [`var_impl_block_bodies`] の中括弧深さ追跡はトークン列上の `{`／`}`
-/// のみを見て文字列・char リテラルの中身を特別扱いしないため、次の
-/// 2 通りのバイパス（いずれも PR #2212 追加 P1 の是正時に自己レビューで
-/// 判明）が成立しうる:
+/// **本ファイルの全ての境界検査（否定ガード・`extract_trait_body`／
+/// `extract_supertrait_bound_tokens`・canonical import 検査・alias
+/// 検査等）は本関数の出力のみを走査対象とする**——`strip_comments` →
+/// `strip_string_literal_contents` の 2 パス方式は、1 パス目
+/// （`strip_comments`）の時点で文字列リテラル中の `//` を実コメントの
+/// 開始と誤認して行末までを削ってしまうため、2 パス目を後段に挟んでも
+/// 手遅れという構造的欠陥を持つ（`strip_comments` のドキュメンテーション
+/// コメント参照）。さらに、コメント除去より前に `content.find("pub
+/// trait CustomFunction")` 等の部分文字列一致を行う設計では、文字列
+/// リテラルの中身に偽の定義テキストを埋め込んだ場合にそれを実定義より
+/// 先に抜き出してしまう（本関数は文字列内容を空白化するため、この
+/// 偽装テキスト自体が走査対象から消える）。本関数はコメント検出と
+/// リテラル境界検出を単一の走査で行うことで、リテラルの中身が
+/// コメント検出ロジックへ一切渡らないようにし、両方のバイパスを構造的に
+/// 塞ぐ。
 ///
-/// 1. `impl Var { fn helper() { let _ = "}"; } pub fn custom(&self) {}
-///    }` のように**文字列**リテラル内に `}` を含むと、リテラル内の
-///    `}` を実際の中括弧として誤カウントして impl 本体の終端を実際
-///    より手前で確定してしまい、本体末尾の `pub fn custom` を本体の
-///    外へ追い出して検出をすり抜けさせる。
-/// 2. `impl Var { fn h() -> char { '}' } pub fn custom(&self) {} }`
-///    のように**char** リテラル `'}'` がトークン化後に単独の `}`
-///    トークンとして現れる場合も同様に中括弧カウントを狂わせる。
-///    `'"'` の場合は下の `"` 検査に「文字列の開始」と誤認識され、
-///    離れた場所の次の `"` までを丸ごと空白化してしまう。
+/// 対応するリテラル形式:
+/// - 行コメント（`//` から行末まで）・ブロックコメント（`/* ... */`。
+///   ネスト対応）
+/// - 通常文字列（`"..."`。エスケープシーケンス対応。開始・終了の
+///   クォート文字自体は保持する——`skip_fn_declaration_qualifiers` の
+///   ABI 文字列リテラル判定〈`extern "C"` のクォートをトークンとして
+///   検出する処理〉と整合させるため）
+/// - raw 文字列（`r"..."`／`r#"..."#`／`r##"..."##` 等。`#` の個数に
+///   応じて開始・終了区切りをバランスさせる。raw 文字列は仕様上
+///   エスケープ処理を行わないため、中身は単純に空白化する）
+/// - バイト文字列（`b"..."`）・raw バイト文字列（`br"..."`／
+///   `br#"..."#` 等）——`b`／`r` が識別子の途中（例: `for` の `r`）で
+///   はなく独立したリテラル接頭辞として現れる場合のみ対象とする
+///   （直前の文字が識別子構成文字でないことを条件にする）
+/// - char（`'a'`／`'\n'`／`'\''`／`'\u{7b}'` 等）・バイト char（`b'a'`
+///   等）
+/// - ライフタイム（`'a`・`'static` 等。閉じクォートを伴わないため char
+///   と区別してそのまま素通しする）
 ///
-/// 本関数は両リテラルの中身を空白化することでこれらを塞ぐ。開始・
-/// 終了のクォート文字自体は残すため、`skip_fn_declaration_qualifiers`
-/// の ABI 文字列リテラル判定（`extern "C"` のクォートをトークンとして
-/// 検出する処理）とは整合したまま保たれる。
-///
-/// **対象外（本関数では扱わない・報告のみ）**: `strip_comments` は
-/// `content` に対して本関数より前段で適用される前提のため、文字列
-/// リテラル内の `//`／`/*` を実コメントの開始と誤認して行末までを
-/// 読み飛ばしてしまう既存の限界（`impl Var { fn s() -> &str { "//" }
-/// pub fn custom(&self) {} }` 等）はそのまま残る。これは
-/// `strip_comments` を利用する本ファイルの全テストに共通する既知の
-/// 簡易実装方針であり、単一パスの本格的な字句解析器を要する別軸の
-/// 改善であるため本 P1 修正の対象外とする。
-fn strip_string_literal_contents(content: &str) -> String {
+/// トークン境界と行構造（改行位置）を保つため、コメント除去は前後に
+/// 半角スペース 1 個を挿入する（`strip_comments` の既存方針を踏襲。
+/// 隣接トークンの意図しない連結を防ぐ）。
+fn normalize_source(content: &str) -> String {
+    fn is_ident_continue(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_'
+    }
+
+    // `chars[start..]` から連続する `#` の個数を数え、その直後が `"`
+    // であれば `Some(個数)` を返す（raw 文字列の開始判定用）。
+    fn raw_hash_run(chars: &[char], start: usize) -> Option<usize> {
+        let mut j = start;
+        while chars.get(j) == Some(&'#') {
+            j += 1;
+        }
+        if chars.get(j) == Some(&'"') {
+            Some(j - start)
+        } else {
+            None
+        }
+    }
+
     let chars: Vec<char> = content.chars().collect();
     let len = chars.len();
     let mut out = String::with_capacity(len);
     let mut i = 0usize;
     while i < len {
         let c = chars[i];
+        let prev_is_ident = i > 0 && is_ident_continue(chars[i - 1]);
+
+        // 行コメント。
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            while i < len && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // ブロックコメント（ネスト対応）。
+        if c == '/' && chars.get(i + 1) == Some(&'*') {
+            out.push(' ');
+            i += 2;
+            let mut depth = 1i32;
+            while i < len && depth > 0 {
+                if chars.get(i) == Some(&'/') && chars.get(i + 1) == Some(&'*') {
+                    depth += 1;
+                    i += 2;
+                } else if chars.get(i) == Some(&'*') && chars.get(i + 1) == Some(&'/') {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    if chars[i] == '\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+            out.push(' ');
+            continue;
+        }
+
+        // リテラル接頭辞（`b`／`r`／`br`）は、直前が識別子構成文字で
+        // ない（＝独立した新しいトークンの先頭である）場合のみ判定
+        // する。`for`・`return` の `r` のように識別子の一部である場合は
+        // 対象外（`prev_is_ident` 判定に加え、`raw_hash_run` が直後に
+        // `"` を伴わない通常の識別子継続文字を見た時点で `None` を返す
+        // ため、いずれの条件でも誤爆しない）。
+        if !prev_is_ident {
+            // raw バイト文字列（`br"..."`／`br#"..."#` 等）。
+            if c == 'b'
+                && chars.get(i + 1) == Some(&'r')
+                && let Some(hashes) = raw_hash_run(&chars, i + 2)
+            {
+                i = emit_raw_literal(&chars, &mut out, i, 2 + hashes, hashes);
+                continue;
+            }
+            // raw 文字列（`r"..."`／`r#"..."#` 等）。
+            if c == 'r'
+                && let Some(hashes) = raw_hash_run(&chars, i + 1)
+            {
+                i = emit_raw_literal(&chars, &mut out, i, 1 + hashes, hashes);
+                continue;
+            }
+            // バイト文字列（`b"..."`）・バイト char（`b'...'`）: `b` は
+            // そのまま出力し、直後の通常文字列／char 処理へフォール
+            // スルーする（次のループ反復で下の `"`／`'` 分岐に入る）。
+            if c == 'b' && matches!(chars.get(i + 1), Some('"') | Some('\'')) {
+                out.push('b');
+                i += 1;
+                continue;
+            }
+        }
+
+        // char リテラル（`'"'`／`'\\''`／`'\u{XXXX}'` 等）とライフタイム
+        // （`'a` 等・閉じクォートを伴わない）の判別
+        // （`strip_string_literal_contents` から継承した判定ロジック）。
         if c == '\'' {
-            // 文字リテラル（`'"'`／`'\\''`／`'\u{XXXX}'` 等）とライフタイム
-            // （`'a` 等・閉じクォートを伴わない）を判別する（PR #2212
-            // 追加 P1 の是正時に自己レビューで判明）: 判別せず `'` を
-            // 無視すると、
-            // `'"'` のような「文字列引用符 1 文字を表す char リテラル」
-            // が下の `"` 検査に「文字列の開始」と誤認識され、以降で偶然
-            // 現れる次の `"` までを丸ごと文字列扱いして空白化してしまう
-            // （本来の文字列リテラルではないコードが消えてしまう）。
             if chars.get(i + 1) == Some(&'\\') {
-                // エスケープシーケンス。`\u{XXXX}` は可変長のため `}` まで
-                // 読み進めてから閉じクォートを消費する。中身（バック
-                // スラッシュ以降・閉じクォート未満のすべての文字）は
-                // 空白へ置換し開始・終了クォートのみ残す——`'\u{7b}'`
-                // のような unicode escape はソーステキスト上に `{`／`}`
-                // という文字がそのまま現れるため、中身を素通しすると
-                // [`var_impl_block_bodies`] の中括弧深さ追跡を実際の
-                // 中括弧と誤って狂わせてしまう（PR #2212 追加 P1 の是正時に自己レビューで判明・PR #2212
-                // 追加 P1）。
+                // エスケープシーケンス。`\u{XXXX}` は可変長のため `}` を
+                // 含め閉じクォートまで読み進める。中身はソーステキスト
+                // 上に `{`／`}` という文字がそのまま現れうる
+                // （`'\u{7b}'` 等）ため空白化し、[`var_impl_block_bodies`]
+                // の中括弧深さ追跡を誤らせない。
                 out.push('\'');
                 let mut j = i + 1;
                 while j < len && chars[j] != '\'' {
@@ -291,49 +384,87 @@ fn strip_string_literal_contents(content: &str) -> String {
             }
             if chars.get(i + 2) == Some(&'\'') {
                 // 単純な 1 文字の char リテラル（`'"'`／`'{'`／`'}'` 等）。
-                // 中身の 1 文字を空白へ置換する（`'{'`／`'}'` を素通しする
-                // と、トークン化後に単独の `{`／`}` トークンとして現れ
-                // [`var_impl_block_bodies`] の中括弧深さ追跡を誤らせて
-                // しまう。`'"'` を素通しした場合の文字列開始誤認識と
-                // 同種のバイパスであり、いずれも中身を残す理由がない）。
                 out.push('\'');
                 out.push(' ');
                 out.push('\'');
                 i += 3;
                 continue;
             }
-            // 閉じクォートが直後に無い ⇒ ライフタイム（`'a` 等）。その
-            // まま素通しし、後続の識別子文字は通常のトークンとして
-            // `tokenize_including_punctuation` に処理させる。
+            // 閉じクォートが直後に無い ⇒ ライフタイム（`'a`／`'static`
+            // 等）。そのまま素通しする。
             out.push(c);
             i += 1;
             continue;
         }
-        if c != '"' {
-            out.push(c);
+
+        // 通常の文字列リテラル。`//`／`/*` を含む中身も、この分岐に
+        // 入った時点で閉じクォートまで一気に消費するため、上のコメント
+        // 判定へ渡ることはない（2 パス方式の構造的欠陥を単一パス化で
+        // 塞ぐ本関数の核心）。
+        if c == '"' {
+            out.push('"');
             i += 1;
-            continue;
-        }
-        out.push('"');
-        i += 1;
-        while i < len {
-            let cur = chars[i];
-            if cur == '\\' && i + 1 < len {
-                out.push(' ');
-                out.push(' ');
-                i += 2;
-                continue;
-            }
-            if cur == '"' {
-                out.push('"');
+            while i < len {
+                let cur = chars[i];
+                if cur == '\\' && i + 1 < len {
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                    continue;
+                }
+                if cur == '"' {
+                    out.push('"');
+                    i += 1;
+                    break;
+                }
+                out.push(if cur == '\n' { '\n' } else { ' ' });
                 i += 1;
-                break;
             }
-            out.push(if cur == '\n' { '\n' } else { ' ' });
-            i += 1;
+            continue;
         }
+
+        out.push(c);
+        i += 1;
     }
+
     out
+}
+
+/// [`normalize_source`] の raw 文字列（`r"..."`／`r#"..."#`／
+/// `br"..."`／`br#"..."#` 等）処理を切り出したヘルパー。`start` は
+/// 接頭辞の先頭（`b`／`r` のいずれか）の位置、`prefix_len` は `b`／
+/// `r`／`#`（`hashes` 個）を含む開始区切り全体の長さ（開始 `"` 手前
+/// まで）、`hashes` は開始区切りに含まれる `#` の個数（終端 `"` の
+/// 直後に同数の `#` が続く箇所を終端とみなす。仕様どおり raw 文字列は
+/// エスケープ処理を行わない）。開始・終了の区切り文字列（`b`／`r`／
+/// `#`／`"`）はそのまま出力へコピーし、内容のみを空白（改行は `\n` の
+/// まま保持）へ置換する。戻り値は処理後の走査位置（呼び出し元の `i`
+/// に代入する）。
+fn emit_raw_literal(
+    chars: &[char],
+    out: &mut String,
+    start: usize,
+    prefix_len: usize,
+    hashes: usize,
+) -> usize {
+    let len = chars.len();
+    let quote_pos = start + prefix_len;
+    for &ch in &chars[start..=quote_pos] {
+        out.push(ch);
+    }
+    let mut i = quote_pos + 1;
+    while i < len {
+        if chars[i] == '"' && chars[i + 1..].iter().take(hashes).all(|&c| c == '#') {
+            out.push('"');
+            for _ in 0..hashes {
+                out.push('#');
+            }
+            return i + 1 + hashes;
+        }
+        out.push(if chars[i] == '\n' { '\n' } else { ' ' });
+        i += 1;
+    }
+    i
 }
 
 /// `statement` 先頭の属性列（`strip_leading_attributes` と同じ `[`／`]`
@@ -807,13 +938,25 @@ fn tokens_declare_pub_fn(tokens: &[String], fn_name: &str) -> bool {
 ///    body が空振りするだけなら実害はない）。
 /// 3. 開始 `{` から対応する `}` までを中括弧の深さ追跡で本体として
 ///    抜き出す（`extract_trait_body` と同じ方式）。**`tokens` は呼び
-///    出し側で `strip_comments` → `strip_string_literal_contents` 済み
-///    の content をトークン化したものであることを前提とする**——
-///    文字列・char リテラル中の `{`/`}` を素通しした生トークン列を
-///    渡すと、リテラル内の中括弧を実際の中括弧として誤カウントして
-///    しまう（理由は [`strip_string_literal_contents`] のドキュメン
-///    テーションコメント参照）。
+///    出し側で [`normalize_source`] 済みの content をトークン化した
+///    ものであることを前提とする**——文字列・char リテラル中の
+///    `{`/`}` を素通しした生トークン列を渡すと、リテラル内の中括弧を
+///    実際の中括弧として誤カウントしてしまう（理由は
+///    [`normalize_source`] のドキュメンテーションコメント参照）。
 /// 4. ヘッダーに `Var` が含まれていた場合のみ本体トークン列を返す。
+///
+/// **ヘッダー走査中の `<...>`／`[...]`／`(...)` の深さ追跡**（Bugbot
+/// 指摘・PR #2212 第 2 ラウンド）: 手順 2 のヘッダー走査は「最初に現れ
+/// た `{` を本体開始」とみなす単純な実装だったため、`impl<const N:
+/// usize> Var where [(); { N }]: Sized { pub fn custom() {} }` のように
+/// where 節内の const ジェネリクス式（`[(); { N }]`）が `{`／`}` を
+/// 含むと、その `{` を本体開始と誤認してヘッダー走査を早期終了して
+/// しまい、実際の本体（`pub fn custom` を含む）を取りこぼす。本実装は
+/// ヘッダー走査中も `<`／`[`／`(` の深さを個別に追跡し、いずれも深さ 0
+/// の位置で現れた最初の `{` のみを本体開始として扱う。深さが 0 でない
+/// 間に現れる `{`／`}`（`[(); { N }]` 内の const ブロック等）は単に
+/// 読み飛ばす（対応する `[`／`]` の深さで囲まれている限り、内部の
+/// `{`／`}` 自体を追跡する必要はない）。
 fn var_impl_block_bodies(tokens: &[String]) -> Vec<Vec<String>> {
     let mut bodies = Vec::new();
     let mut i = 0usize;
@@ -838,9 +981,31 @@ fn var_impl_block_bodies(tokens: &[String]) -> Vec<Vec<String>> {
             }
         }
         let mut header_has_var = false;
-        while j < tokens.len() && tokens[j] != "{" {
-            if tokens[j] == "Var" {
-                header_has_var = true;
+        let mut angle_depth = 0i32;
+        let mut bracket_depth = 0i32;
+        let mut paren_depth = 0i32;
+        while j < tokens.len() {
+            match tokens[j].as_str() {
+                // `>` は `saturating_sub` では 0 未満に飽和しない
+                // （`i32::saturating_sub` は型の最小値方向にのみ飽和する
+                // ため、`0i32.saturating_sub(1)` は `-1` になる）。where 節
+                // に現れる `->`（戻り値型矢印。トークナイザは `-`／`>` の
+                // 2 トークンに分解する）や比較演算子由来の対応しない `>`
+                // で `angle_depth` が負に振れると、以降ずっと `angle_
+                // depth == 0` の条件を満たせなくなり、実際の本体開始
+                // `{` を永久に見失ってしまう（自己レビューで判明）。
+                // `(depth - 1).max(0)` で 0 未満に飽和させることで、
+                // 対応しない `>` を無害化しつつ、正しく対応する `<...>`
+                // の深さ追跡は従来どおり機能する。
+                "<" => angle_depth += 1,
+                ">" => angle_depth = (angle_depth - 1).max(0),
+                "[" => bracket_depth += 1,
+                "]" => bracket_depth = (bracket_depth - 1).max(0),
+                "(" => paren_depth += 1,
+                ")" => paren_depth = (paren_depth - 1).max(0),
+                "{" if angle_depth == 0 && bracket_depth == 0 && paren_depth == 0 => break,
+                "Var" => header_has_var = true,
+                _ => {}
             }
             j += 1;
         }
@@ -979,14 +1144,18 @@ fn strip_leading_attributes(statement: &str) -> &str {
 fn custom_function_trait_signatures_are_host_tensor_only() {
     let custom_rs = autodiff_crate_root().join("src/custom.rs");
     let content = read_to_string_or_panic(&custom_rs);
-    // 行コメント・ブロックコメント（ネスト対応）を除去した全文（`content`
-    // 中の位置に依存する走査は以降すべてこの `no_comments` を対象にする。
-    // codex-review 指摘・PR #2212 その 6: ブロックコメント中の偽トレイト
-    // 定義を `extract_trait_body`／`extract_supertrait_bound_tokens` が
-    // 誤って最初の一致として抜き出す迂回を塞ぐ）。
-    let no_comments = strip_comments(&content);
+    // コメント（行・ブロック。ネスト対応）と文字列・char リテラルの
+    // 中身を単一パスで正規化した全文（`content` 中の位置に依存する
+    // 走査は以降すべてこの `normalized` を対象にする。codex-review
+    // 指摘・PR #2212 その 6・第 2 ラウンド指摘 1・2: ブロックコメント
+    // 中や文字列リテラル中の偽トレイト定義を `extract_trait_body`／
+    // `extract_supertrait_bound_tokens` が誤って最初の一致として抜き
+    // 出す迂回、および文字列リテラル中の `//` が実コメントの開始と
+    // 誤認され後続コードが失われる迂回を、単一パスの [`normalize_
+    // source`] で構造的に塞ぐ）。
+    let normalized = normalize_source(&content);
 
-    let supertrait_bounds = extract_supertrait_bound_tokens(&no_comments, "CustomFunction");
+    let supertrait_bounds = extract_supertrait_bound_tokens(&normalized, "CustomFunction");
     assert!(
         !supertrait_bounds.is_empty(),
         "src/custom.rs から `pub trait CustomFunction` の supertrait 境界（`:` から\
@@ -1004,13 +1173,13 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
         );
     }
 
-    let trait_body = extract_trait_body(&no_comments, "CustomFunction");
+    let trait_body = extract_trait_body(&normalized, "CustomFunction");
     assert!(
         !trait_body.is_empty(),
         "src/custom.rs から `pub trait CustomFunction` 本体を抽出できなかった\
          （テスト自体が検査対象を見失っている。ファイル構成が変わっていないか確認）"
     );
-    // `trait_body` は `no_comments`（コメント除去済み）から抽出済みのため
+    // `trait_body` は `normalized`（正規化済み）から抽出済みのため
     // 行単位の `//` 再フィルタは不要。
     let signatures_only: String = trait_body;
 
@@ -1101,7 +1270,7 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // （codex-review 指摘・PR #2212 その 7: `use\ncrate::{...}` のように
     // `use` の直後に改行が来る有効な Rust 記法を `starts_with("use ")`
     // は見逃す）。
-    for statement in split_top_level_statements(&no_comments) {
+    for statement in split_top_level_statements(&normalized) {
         let after_attributes = strip_leading_attributes(&statement);
         let after_visibility = strip_visibility_prefix(after_attributes);
         if strip_keyword_prefix(after_visibility, "use").is_some() {
@@ -1151,7 +1320,7 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // 名前のローカル型エイリアス自体を構造的に禁止すれば、右辺の型が
     // 何であっても（denylist の有無に関係なく）「シグネチャの `Tensor`
     // は必ず canonical import 由来」という不変条件を保てる。
-    let all_tokens = tokenize_including_punctuation(&no_comments);
+    let all_tokens = tokenize_including_punctuation(&normalized);
     let local_tensor_type_declared = all_tokens
         .windows(2)
         .any(|w| (w[0] == "struct" || w[0] == "enum" || w[0] == "type") && w[1] == "Tensor");
@@ -1171,7 +1340,7 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // `find_canonical_tensor_import` に切り出し、回帰テスト
     // （`architecture_boundary_bypass_scenarios_are_detected`）から
     // 任意の合成入力に対しても同じ経路で検証できるようにする。
-    match find_canonical_tensor_import(&no_comments) {
+    match find_canonical_tensor_import(&normalized) {
         Ok(true) => {}
         Ok(false) => panic!(
             "src/custom.rs に fandhe_ai_tensor_core::Tensor の import が見つからない\
@@ -1258,31 +1427,29 @@ fn find_canonical_tensor_import(content: &str) -> Result<bool, String> {
 /// `impl Var { pub fn custom(...) { ... } }` を追加しても本ガードは
 /// 素通りしてしまい、facade 再エクスポート経由で未承認の入口へ到達
 /// 可能になっていた。本実装は `visit_rs_files` で `src/` 全体を再帰
-/// 走査し、各ファイルを `strip_comments` → `strip_string_literal_
-/// contents`（文字列リテラル内の `{`／`}` による中括弧深さ追跡の誤り
-/// を防ぐ）した上で [`var_impl_block_bodies`] により「ヘッダーに
-/// `Var` を含む impl ブロック」の本体のみを抜き出し、その本体トークン
-/// 列に対して [`tokens_declare_pub_fn`] を適用する（`impl Other { pub
-/// fn custom() {} }` のような無関係な型への同名メソッドは検出対象外の
-/// まま。ネストした impl ブロック——関数本体の中に書かれた `impl Var`
-/// 等——も [`var_impl_block_bodies`] が取りこぼさない）。
+/// 走査し、各ファイルを [`normalize_source`]（コメント除去・文字列／
+/// char リテラル内容の空白化を単一パスで行う。旧 `strip_comments` →
+/// `strip_string_literal_contents` の 2 パス方式は、1 パス目の時点で
+/// 文字列リテラル中の `//` を実コメントと誤認して後続コードごと削って
+/// しまう構造的欠陥を持つため使わない）した上で [`var_impl_block_
+/// bodies`] により「ヘッダーに `Var` を含む impl ブロック」の本体のみを
+/// 抜き出し、その本体トークン列に対して [`tokens_declare_pub_fn`] を
+/// 適用する（`impl Other { pub fn custom() {} }` のような無関係な型への
+/// 同名メソッドは検出対象外のまま。ネストした impl ブロック——関数本体
+/// の中に書かれた `impl Var` 等——も [`var_impl_block_bodies`] が
+/// 取りこぼさない）。
 #[test]
 fn autodiff_src_does_not_declare_pub_fn_custom_on_var() {
     let src_dir = autodiff_crate_root().join("src");
     let mut violations: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
-        // 行コメント（`//`）のみを除去する旧実装は `pub/* separator */ fn
-        // custom` のようなブロックコメントを挟んだ宣言を素通りさせていた
-        // （codex-review 指摘・PR #2212 その 12）。`strip_comments`
-        // （行・ブロック両対応、トークン境界を保つ）を使う。
-        let no_comments = strip_comments(content);
-        // 文字列リテラル内の `{`／`}` が中括弧深さ追跡を誤らせるバイパス
-        // （codex-review 追加 P1 指摘・PR #2212。`strip_string_literal_
-        // contents` のドキュメンテーションコメント参照）を防ぐため、
-        // `var_impl_block_bodies` へ渡す前に文字列リテラルの中身を
-        // 空白化する。
-        let no_strings = strip_string_literal_contents(&no_comments);
-        let tokens = tokenize_including_punctuation(&no_strings);
+        // 単一パスの正規化（コメント除去・文字列／char リテラル中身の
+        // 空白化。`pub/* separator */ fn custom` のようなブロックコメント
+        // を挟んだ宣言、`"//"` を含む文字列リテラル、文字列・char リテ
+        // ラル内の `{`／`}` のいずれも構造的に扱える。codex-review 指摘・
+        // PR #2212 その 12・第 2 ラウンド指摘 1）。
+        let normalized = normalize_source(content);
+        let tokens = tokenize_including_punctuation(&normalized);
         for body in var_impl_block_bodies(&tokens) {
             for fn_name in ["custom", "add_custom"] {
                 if tokens_declare_pub_fn(&body, fn_name) {
@@ -1306,16 +1473,17 @@ fn autodiff_src_does_not_declare_pub_fn_custom_on_var() {
 
 /// [`autodiff_src_does_not_declare_pub_fn_custom_on_var`] のブロックコメント経由の
 /// バイパス（codex-review 指摘・PR #2212 その 12）を、実際に
-/// `strip_comments` + `declares_pub_fn` の組み合わせで検出できることを
-/// 固定する回帰テスト。`src/var.rs` 本体を変更せずに検証するため、
-/// 同じパターンの合成入力に対して直接アサートする。
+/// [`normalize_source`] + `declares_pub_fn` の組み合わせ（本番経路と
+/// 同一のパイプライン）で検出できることを固定する回帰テスト。
+/// `src/var.rs` 本体を変更せずに検証するため、同じパターンの合成入力に
+/// 対して直接アサートする。
 #[test]
 fn declares_pub_fn_detects_declaration_split_by_block_comment() {
     let forged = "pub/* separator */fn custom(&self) {}";
-    let no_comments = strip_comments(forged);
+    let normalized = normalize_source(forged);
     assert!(
-        declares_pub_fn(&no_comments, "custom"),
-        "ブロックコメントで pub と fn を分断した宣言を検出できていない: {no_comments}"
+        declares_pub_fn(&normalized, "custom"),
+        "ブロックコメントで pub と fn を分断した宣言を検出できていない: {normalized}"
     );
 }
 
@@ -1331,7 +1499,7 @@ fn var_impl_block_bodies_detects_declaration_in_other_module_file() {
     //    impl ブロック単位で走査しているため、module 宣言の有無に依らず
     //    トークン列上は同じ検出結果になる）。
     let forged_in_extra_module = "mod extra { impl Var { pub fn custom() {} } }";
-    let tokens = tokenize_including_punctuation(&strip_comments(forged_in_extra_module));
+    let tokens = tokenize_including_punctuation(&normalize_source(forged_in_extra_module));
     let bodies = var_impl_block_bodies(&tokens);
     assert_eq!(
         bodies.len(),
@@ -1347,15 +1515,13 @@ fn var_impl_block_bodies_detects_declaration_in_other_module_file() {
     //    （`impl<'a> Var { ... }`）と、修飾子付き宣言（`pub extern "C"
     //    fn add_custom`）の組み合わせも検出できる。実運用の
     //    `autodiff_src_does_not_declare_pub_fn_custom_on_var` と同じ
-    //    `strip_comments → strip_string_literal_contents → tokenize`
-    //    パイプラインを通す（PR #2212 追加 P1 の是正時に自己レビューで
-    //    判明: ABI 文字列リテラル `"C"` が `strip_string_literal_
-    //    contents` を経由しても `skip_fn_declaration_qualifiers` の
-    //    判定と整合することを固定する）。
+    //    `normalize_source → tokenize` パイプラインを通す（PR #2212
+    //    追加 P1 の是正時に自己レビューで判明: ABI 文字列リテラル `"C"`
+    //    が正規化を経由しても `skip_fn_declaration_qualifiers` の判定と
+    //    整合することを固定する）。
     let forged_with_lifetime_and_abi = "impl<'a> Var { pub extern \"C\" fn add_custom() {} }";
-    let no_comments = strip_comments(forged_with_lifetime_and_abi);
-    let no_strings = strip_string_literal_contents(&no_comments);
-    let tokens = tokenize_including_punctuation(&no_strings);
+    let normalized = normalize_source(forged_with_lifetime_and_abi);
+    let tokens = tokenize_including_punctuation(&normalized);
     let bodies = var_impl_block_bodies(&tokens);
     assert_eq!(
         bodies.len(),
@@ -1370,7 +1536,7 @@ fn var_impl_block_bodies_detects_declaration_in_other_module_file() {
     // 3) 無関係な型への同名メソッドは誤検出しない（`impl Other { ... }`
     //    はヘッダーに `Var` トークンを含まないため対象外のまま）。
     let unrelated_impl = "impl Other { pub fn custom() {} }";
-    let tokens = tokenize_including_punctuation(&strip_comments(unrelated_impl));
+    let tokens = tokenize_including_punctuation(&normalize_source(unrelated_impl));
     let bodies = var_impl_block_bodies(&tokens);
     assert!(
         bodies.is_empty(),
@@ -1384,7 +1550,7 @@ fn var_impl_block_bodies_detects_declaration_in_other_module_file() {
     //    走査終了と同時に内側 `impl Var` も飛ばしてしまうため、
     //    `var_impl_block_bodies` は本体開始位置から再走査する）。
     let nested_impl = "impl Other { fn g() { impl Var { pub fn custom(&self) {} } } }";
-    let tokens = tokenize_including_punctuation(&strip_comments(nested_impl));
+    let tokens = tokenize_including_punctuation(&normalize_source(nested_impl));
     let bodies = var_impl_block_bodies(&tokens);
     assert!(
         bodies
@@ -1394,17 +1560,16 @@ fn var_impl_block_bodies_detects_declaration_in_other_module_file() {
     );
 
     // 5) 文字列リテラル内の `}` による中括弧深さ追跡の誤り（PR #2212
-    //    追加 P1 の是正時に自己レビューで判明）: `strip_string_literal_
-    //    contents` を適用せずに
-    //    `var_impl_block_bodies` へ渡すと、リテラル内の `}` を実際の
-    //    中括弧として誤カウントし、本体末尾の `pub fn custom` を本体の
-    //    外へ追い出してしまう。`strip_string_literal_contents` を通す
-    //    ことで正しく検出できることを固定する。
+    //    追加 P1 の是正時に自己レビューで判明）: 文字列リテラルの中身を
+    //    空白化せずに `var_impl_block_bodies` へ渡すと、リテラル内の
+    //    `}` を実際の中括弧として誤カウントし、本体末尾の `pub fn
+    //    custom` を本体の外へ追い出してしまう。[`normalize_source`]
+    //    （文字列リテラルの中身を空白化する）を通すことで正しく検出
+    //    できることを固定する。
     let forged_with_brace_in_string =
         "impl Var { fn helper() { let _ = \"}\"; } pub fn custom(&self) {} }";
-    let no_comments = strip_comments(forged_with_brace_in_string);
-    let no_strings = strip_string_literal_contents(&no_comments);
-    let tokens = tokenize_including_punctuation(&no_strings);
+    let normalized = normalize_source(forged_with_brace_in_string);
+    let tokens = tokenize_including_punctuation(&normalized);
     let bodies = var_impl_block_bodies(&tokens);
     assert!(
         bodies
@@ -1413,16 +1578,18 @@ fn var_impl_block_bodies_detects_declaration_in_other_module_file() {
         "文字列リテラル内の }} を実際の中括弧と誤カウントし、\
          pub fn custom の検出を見逃した: {bodies:?}"
     );
-    // 対照実験: `strip_string_literal_contents` を適用しない場合は
-    // このバイパスが実際に成立する（誤って検出漏れになる）ことも
-    // 併せて固定し、上記の修正が実際に効いていることを裏付ける。
-    let tokens_without_fix = tokenize_including_punctuation(&no_comments);
+    // 対照実験（歴史的バイパスの実演）: 文字列リテラルの中身を関知しない
+    // `strip_comments` 単独（コメント除去のみ）では、このバイパスが実際に
+    // 成立する（誤って検出漏れになる）ことも併せて固定し、上記の
+    // `normalize_source` による修正が実際に効いていることを裏付ける。
+    let comments_only = strip_comments(forged_with_brace_in_string);
+    let tokens_without_fix = tokenize_including_punctuation(&comments_only);
     let bodies_without_fix = var_impl_block_bodies(&tokens_without_fix);
     assert!(
         !bodies_without_fix
             .iter()
             .any(|body| tokens_declare_pub_fn(body, "custom")),
-        "strip_string_literal_contents 抜きでも検出できてしまっている\
+        "コメント除去のみ（文字列リテラルの中身を空白化しない）でも検出できてしまっている\
          （回帰テストの前提が崩れている）: {bodies_without_fix:?}"
     );
 
@@ -1434,9 +1601,8 @@ fn var_impl_block_bodies_detects_declaration_in_other_module_file() {
     //    その間に挟まれた `pub fn custom` が消えてしまう。
     let forged_with_char_literal_quote =
         "impl Var { fn q() -> char { '\"' } pub fn custom(&self) {} fn r() -> char { '\"' } }";
-    let no_comments = strip_comments(forged_with_char_literal_quote);
-    let no_strings = strip_string_literal_contents(&no_comments);
-    let tokens = tokenize_including_punctuation(&no_strings);
+    let normalized = normalize_source(forged_with_char_literal_quote);
+    let tokens = tokenize_including_punctuation(&normalized);
     let bodies = var_impl_block_bodies(&tokens);
     assert!(
         bodies
@@ -1454,15 +1620,202 @@ fn var_impl_block_bodies_detects_declaration_in_other_module_file() {
     //    custom` を本体の外へ追い出してしまう。
     let forged_with_char_literal_brace =
         "impl Var { fn h() -> char { '}' } pub fn custom(&self) {} }";
-    let no_comments = strip_comments(forged_with_char_literal_brace);
-    let no_strings = strip_string_literal_contents(&no_comments);
-    let tokens = tokenize_including_punctuation(&no_strings);
+    let normalized = normalize_source(forged_with_char_literal_brace);
+    let tokens = tokenize_including_punctuation(&normalized);
     let bodies = var_impl_block_bodies(&tokens);
     assert!(
         bodies
             .iter()
             .any(|body| tokens_declare_pub_fn(body, "custom")),
         "char リテラル '}}' を実際の中括弧と誤カウントし、\
+         pub fn custom の検出を見逃した: {bodies:?}"
+    );
+
+    // 8) 文字列リテラルの中身に `//` を含む場合（第 2 ラウンド codex-review
+    //    指摘 1）: `strip_comments` 単独では `"//"` を実コメントの開始と
+    //    誤認し、行末（`} }`。この合成入力は 1 行）までを丸ごと削って
+    //    しまうため、`pub fn custom` の宣言自体が消えて検出漏れになる。
+    //    `strip_string_literal_contents` を後段に挟んでも、`strip_comments`
+    //    の時点で既に失われた `pub fn custom(&self) {} }` は復元できない
+    //    （2 パス方式の構造的欠陥）。[`normalize_source`] は文字列リテラル
+    //    に入った時点で閉じクォートまで一気に消費するため、内部の `//`
+    //    が行コメント判定へ渡ることがなく、後続の `pub fn custom` を
+    //    正しく検出できる。
+    let forged_with_line_comment_marker_in_string =
+        "impl Var { fn s() -> &'static str { \"//\" } pub fn custom(&self) {} }";
+    let normalized = normalize_source(forged_with_line_comment_marker_in_string);
+    let tokens = tokenize_including_punctuation(&normalized);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "文字列リテラル中の \"//\" を実コメントと誤認し、\
+         pub fn custom の検出を見逃した: {bodies:?}"
+    );
+    // 対照実験（歴史的バイパスの実演）: `strip_comments` 単独では
+    // `"//"` 以降（`} pub fn custom(&self) {} }` を含む）が行末まで
+    // 丸ごと削られ、impl 本体の閉じ括弧が失われた不完全な入力になる
+    // ため、`pub fn custom` は検出できない（誤って検出漏れになる）。
+    let comments_only = strip_comments(forged_with_line_comment_marker_in_string);
+    assert!(
+        !comments_only.contains("pub fn custom"),
+        "strip_comments 単独では文字列内の \"//\" 以降が削られないはずがない\
+         （回帰テストの前提が崩れている）: {comments_only:?}"
+    );
+    let tokens_without_fix = tokenize_including_punctuation(&comments_only);
+    let bodies_without_fix = var_impl_block_bodies(&tokens_without_fix);
+    assert!(
+        !bodies_without_fix
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "strip_comments 単独でも検出できてしまっている（回帰テストの前提が崩れている）: \
+         {bodies_without_fix:?}"
+    );
+
+    // 9) raw 文字列（`"`／`//` を含む）・char `'"'`・ライフタイム
+    //    `'static` が混在するケース（第 2 ラウンド codex-review 指摘 1
+    //    が要求する追加ケース）。外側の raw 文字列は `#` 2 個
+    //    （`r##"..."##`）でこのテストソース自身を記述し、内側（解析対象
+    //    の合成入力）に `#` 1 個の raw 文字列（`r#"has "quotes" and //
+    //    not a comment"#`）・char リテラル `'"'`・ライフタイム `'static`
+    //    を埋め込む。いずれも `pub fn custom` の検出を妨げないことを
+    //    固定する。
+    let forged_raw_string_mix = r##"impl Var { fn s() -> &'static str { r#"has "quotes" and // not a comment"# } fn q() -> char { '"' } pub fn custom(&self) {} }"##;
+    let normalized = normalize_source(forged_raw_string_mix);
+    let tokens = tokenize_including_punctuation(&normalized);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "raw 文字列・char・ライフタイム混在ケースで\
+         pub fn custom の検出を見逃した: {bodies:?}"
+    );
+}
+
+/// [`var_impl_block_bodies`] のヘッダー走査が、where 節内の const
+/// ジェネリクス式（`[(); { N }]` のような、`[`／`]` の中に `{`／`}` を
+/// 含む構造）を正しく読み飛ばし、実際の impl 本体を取りこぼさないことを
+/// 固定する回帰テスト（Bugbot 指摘・PR #2212 第 2 ラウンド指摘 3）:
+/// 旧実装は「最初に現れた `{` を本体開始」とみなす単純な走査だったため、
+/// where 節内の const ブロックが持つ `{` を本体開始と誤認してヘッダー
+/// 走査を早期終了し、本来の本体末尾にある `pub fn custom` を見逃して
+/// いた。
+#[test]
+fn var_impl_block_bodies_handles_where_clause_const_generic_block() {
+    let forged_where_const_block =
+        "impl<const N: usize> Var where [(); { N }]: Sized { pub fn custom() {} }";
+    let normalized = normalize_source(forged_where_const_block);
+    let tokens = tokenize_including_punctuation(&normalized);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert_eq!(
+        bodies.len(),
+        1,
+        "where 節内に const ジェネリクス式（[(); {{ N }}]）を持つ impl Var ブロックを\
+         1 件検出できていない: {bodies:?}"
+    );
+    assert!(
+        tokens_declare_pub_fn(&bodies[0], "custom"),
+        "where 節内の const ブロックの {{ を本体開始と誤認し、\
+         pub fn custom の検出を見逃した: {bodies:?}"
+    );
+
+    // 同様に `(...)`（括弧）の深さもヘッダー走査中に追跡する必要がある
+    // ことの確認: where 節に関数ポインタ型の引数リスト（`(...)`）を含む
+    // ケースでも本体開始 `{` を正しく特定できる。
+    let forged_where_fn_pointer_bound =
+        "impl Var where fn(usize) -> usize: Sized { pub fn custom() {} }";
+    let normalized = normalize_source(forged_where_fn_pointer_bound);
+    let tokens = tokenize_including_punctuation(&normalized);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert_eq!(
+        bodies.len(),
+        1,
+        "where 節内に関数ポインタ型境界を持つ impl Var ブロックを 1 件検出できていない: \
+         {bodies:?}"
+    );
+    assert!(
+        tokens_declare_pub_fn(&bodies[0], "custom"),
+        "where 節内の関数ポインタ型境界の括弧を誤って扱い、\
+         pub fn custom の検出を見逃した: {bodies:?}"
+    );
+}
+
+/// [`normalize_source`] 自体の単体テスト（`var_impl_block_bodies` 等の
+/// 本番パイプライン経由の固定に加え、正規化そのものの性質を直接固定
+/// する。第 2 ラウンド codex-review 指摘 1）。
+#[test]
+fn normalize_source_handles_all_literal_forms() {
+    // 行コメント・ブロックコメント（ネスト対応）は空白へ置換される。
+    let with_comments = "let a = 1; // trailing\n/* outer /* inner */ still comment */let b = 2;";
+    let normalized = normalize_source(with_comments);
+    assert!(!normalized.contains("trailing"));
+    assert!(!normalized.contains("still comment"));
+    assert!(normalized.contains("let a = 1;"));
+    assert!(normalized.contains("let b = 2;"));
+
+    // 通常文字列: エスケープシーケンスを含んでいても閉じクォートを
+    // 正しく検出し、中身は空白化されるが開始・終了のクォートは残る。
+    let with_string = r#"let s = "a\"b // not a comment"; let t = 1;"#;
+    let normalized = normalize_source(with_string);
+    assert!(normalized.contains("let t = 1;"));
+    assert!(!normalized.contains("not a comment"));
+    // クォート自体は保持される（`skip_fn_declaration_qualifiers` の
+    // ABI 文字列リテラル判定との整合のため）。
+    let quote_count = normalized.chars().filter(|&c| c == '"').count();
+    assert_eq!(
+        quote_count, 2,
+        "開始・終了のクォートが保持されていない: {normalized:?}"
+    );
+
+    // raw 文字列（`#` の個数が異なる場合も終端を正しく判定する）。
+    let with_raw_string =
+        r###"let s = r##"contains "one hash" -> "# still inside"##; let t = 2;"###;
+    let normalized = normalize_source(with_raw_string);
+    assert!(normalized.contains("let t = 2;"));
+    assert!(!normalized.contains("still inside"));
+
+    // バイト文字列・バイト char。
+    let with_byte_literals = r#"let b = b"raw // bytes"; let c = b'\n'; let d = 1;"#;
+    let normalized = normalize_source(with_byte_literals);
+    assert!(normalized.contains("let d = 1;"));
+    assert!(!normalized.contains("raw // bytes"));
+
+    // raw バイト文字列。
+    let with_raw_byte_string = r##"let b = br#"raw "// bytes"#; let d = 1;"##;
+    let normalized = normalize_source(with_raw_byte_string);
+    assert!(normalized.contains("let d = 1;"));
+    assert!(!normalized.contains("bytes"));
+
+    // char リテラルと識別子途中の `r`／`b`（`for`／`bar` 等）を混同
+    // しない: raw 文字列・バイト文字列の接頭辞判定は「直前が識別子構成
+    // 文字でない」場合に限る。
+    let with_ident_r_and_b = "for bar in 0..1 { let r = 1; let b = 2; }";
+    let normalized = normalize_source(with_ident_r_and_b);
+    assert_eq!(normalized, with_ident_r_and_b);
+
+    // ライフタイムと char リテラルの判別。
+    let with_lifetime_and_char =
+        "fn f<'a>(c: char) -> &'a str { if c == '\\'' { \"q\" } else { \"n\" } }";
+    let normalized = normalize_source(with_lifetime_and_char);
+    assert!(
+        normalized.contains("'a"),
+        "ライフタイムが保持されていない: {normalized:?}"
+    );
+
+    // unicode escape char リテラル（`'\u{7b}'` は `{` を表す）の中身が
+    // 空白化され、実際の中括弧深さ追跡を誤らせないことを確認する。
+    let with_unicode_escape_char =
+        "impl Var { fn h() -> char { '\\u{7b}' } pub fn custom(&self) {} }";
+    let normalized = normalize_source(with_unicode_escape_char);
+    let tokens = tokenize_including_punctuation(&normalized);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "unicode escape char リテラル中の {{ を実際の中括弧と誤カウントし、\
          pub fn custom の検出を見逃した: {bodies:?}"
     );
 }
@@ -1674,28 +2027,68 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
     assert_eq!(strip_keyword_prefix("used_value = 1;", "use"), None);
     assert_eq!(strip_keyword_prefix("typeof_value = 1;", "type"), None);
 
-    // 11) `strip_comments` はブロックコメント（ネスト対応）を除去する
+    // 11) [`normalize_source`] はブロックコメント（ネスト対応）を除去する
     //     ため、実定義より前に置かれた偽トレイト定義（ブロックコメント
     //     内）は `extract_trait_body`／`extract_supertrait_bound_tokens`
     //     の走査対象から外れる（codex-review 指摘・PR #2212 その 6）。
     let forged_comment_then_real = "/* pub trait CustomFunction { fn evil(&self); } */\n\
          pub trait CustomFunction: Send + Sync + 'static {\n    fn forward(&self);\n}\n";
-    let cleaned = strip_comments(forged_comment_then_real);
+    let normalized = normalize_source(forged_comment_then_real);
     assert!(
-        !cleaned.contains("evil"),
-        "ブロックコメント内の偽トレイト定義が除去されていない: {cleaned}"
+        !normalized.contains("evil"),
+        "ブロックコメント内の偽トレイト定義が除去されていない: {normalized}"
     );
-    let bounds = extract_supertrait_bound_tokens(&cleaned, "CustomFunction");
+    let bounds = extract_supertrait_bound_tokens(&normalized, "CustomFunction");
     assert!(
         bounds.iter().any(|b| b == "Send")
             && bounds.iter().any(|b| b == "Sync")
             && bounds.iter().any(|b| b == "'static"),
         "ブロックコメント除去後は実定義の supertrait 境界を正しく抽出できるはず: {bounds:?}"
     );
-    let body = extract_trait_body(&cleaned, "CustomFunction");
+    let body = extract_trait_body(&normalized, "CustomFunction");
     assert!(
         !body.contains("evil") && body.contains("forward"),
         "抽出したトレイト本体が実定義（forward のみ）ではなく偽定義（evil）を含んでいる: {body}"
+    );
+
+    // 11b) 第 2 ラウンド codex-review 指摘 2: 文字列リテラルの中身に
+    //      偽トレイト定義（`pub trait CustomFunction { ... }` というテキ
+    //      スト）を埋め込み、実定義より前に置いた場合。`strip_comments`
+    //      はコメントしか除去しないため文字列の中身はそのまま残り、
+    //      `extract_trait_body`／`extract_supertrait_bound_tokens` の
+    //      `content.find("pub trait CustomFunction")` が文字列内の偽定義
+    //      を最初の一致として抜き出してしまう（denylist・allowlist・
+    //      supertrait 境界の検査を偽定義に対して行い、実定義の検査を
+    //      素通りできてしまう）。[`normalize_source`] は文字列リテラル
+    //      の中身を空白化するため、この偽装テキスト自体が走査対象から
+    //      消え、実定義のみが抽出される。
+    let forged_fake_trait_in_string = "const S: &str = \"pub trait CustomFunction { fn evil(&self); }\";\n\
+         pub trait CustomFunction: Send + Sync + 'static {\n    fn forward(&self);\n}\n";
+    let normalized = normalize_source(forged_fake_trait_in_string);
+    let bounds = extract_supertrait_bound_tokens(&normalized, "CustomFunction");
+    assert!(
+        bounds.iter().any(|b| b == "Send")
+            && bounds.iter().any(|b| b == "Sync")
+            && bounds.iter().any(|b| b == "'static"),
+        "文字列リテラル内の偽トレイト定義を実定義と誤って抽出している（境界抽出が空か\
+         偽定義由来のはず）: {bounds:?}"
+    );
+    let body = extract_trait_body(&normalized, "CustomFunction");
+    assert!(
+        !body.contains("evil") && body.contains("forward"),
+        "抽出したトレイト本体が実定義（forward のみ）ではなく文字列内の偽定義（evil）を\
+         含んでいる: {body}"
+    );
+    // 対照実験（歴史的バイパスの実演）: コメント除去のみでは文字列の
+    // 中身が保持されたままのため、`content.find` は文字列内の偽定義を
+    // 最初の一致として拾ってしまう。
+    let comments_only = strip_comments(forged_fake_trait_in_string);
+    let bounds_without_fix = extract_supertrait_bound_tokens(&comments_only, "CustomFunction");
+    assert!(
+        bounds_without_fix.is_empty(),
+        "strip_comments 単独では文字列内の偽定義（supertrait 境界を持たない）が\
+         最初の一致として抽出され、境界抽出は空になるはず（回帰テストの前提が崩れている）: \
+         {bounds_without_fix:?}"
     );
 
     // 12) `type Tensor = <denylist 外の型>;` のようなローカル型エイリアス
