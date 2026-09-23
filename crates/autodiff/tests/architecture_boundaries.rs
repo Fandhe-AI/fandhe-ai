@@ -211,6 +211,69 @@ fn strip_comments(content: &str) -> String {
     out
 }
 
+/// `statement` 先頭の属性列（`strip_leading_attributes` と同じ `[`／`]`
+/// の深さ追跡）を走査し、いずれかの属性の**先頭識別子（属性パス名）**が
+/// `cfg`／`cfg_attr` と一致するかを判定する（codex-review 指摘・
+/// PR #2212 その 15）。
+///
+/// 旧実装 `statement_has_cfg_test_attribute` はステートメント全体を
+/// トークン化し `cfg`・`(`・`test`・`)` という並びが**任意の位置**に
+/// 現れるかで判定していたため、次の 2 通りの迂回を許していた:
+///
+/// 1. `#[cfg(any())]`（常に無効・実質デッドコードの条件）が付いた
+///    canonical import は `cfg(test)` という並びを含まないため
+///    「条件付き属性なし」と判定され、canonical import として素通り
+///    してしまう。
+/// 2. `#[cfg_attr(any(), cfg(test))]` のように、属性の**引数内**に
+///    `cfg(test)` というトークン列が現れるだけの `cfg_attr` 属性まで
+///    「`#[cfg(test)]` 属性が付いている」と誤判定し、当該 import 文を
+///    まるごと検証対象から外してしまう（本来の目的は「テスト専用
+///    import を canonical 判定から除外する」ことだが、これにより
+///    パス不一致の検証自体を迂回できていた）。
+///
+/// 本関数は属性ごとに `[` 直後の**先頭識別子のみ**（`cfg(...)` の
+/// `cfg`、`cfg_attr(...)` の `cfg_attr`）を見るため、上記いずれの
+/// 迂回も塞ぐ。判定は「`cfg`／`cfg_attr` が付いているか否か」のみで
+/// あり、`cfg(test)` のような特定条件への一致は問わない（条件付き
+/// Tensor import はテスト専用スコープに限らずすべて拒否する設計。
+/// `find_canonical_tensor_import` のドキュメントコメント参照）。
+fn statement_has_conditional_attribute(statement: &str) -> bool {
+    let mut rest = statement.trim_start();
+    while let Some(after_hash) = rest.strip_prefix('#') {
+        let after_hash = after_hash.trim_start();
+        let Some(after_bracket) = after_hash.strip_prefix('[') else {
+            break;
+        };
+        let mut depth = 1i32;
+        let mut end = None;
+        for (idx, ch) in after_bracket.char_indices() {
+            match ch {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(idx);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            // `strip_leading_attributes` と同じ fail-closed 方針:
+            // 対応する `]` が無い不正な属性は読み飛ばさず走査を打ち切る。
+            break;
+        };
+        let attr_body = &after_bracket[..end];
+        let attr_name = extract_identifier_tokens(attr_body).into_iter().next();
+        if matches!(attr_name.as_deref(), Some("cfg") | Some("cfg_attr")) {
+            return true;
+        }
+        rest = after_bracket[end + 1..].trim_start();
+    }
+    false
+}
+
 /// ステートメント（またはその可視性修飾除去後の残り）の先頭が識別子
 /// トークンとして `keyword`（`"use"`／`"type"`）と一致するかを判定し、
 /// 一致すればキーワード以降の残り文字列（前後の空白は trim 済み）を
@@ -221,20 +284,6 @@ fn strip_comments(content: &str) -> String {
 /// 含む）を読み飛ばしたうえで `keyword` の文字列一致を取り、直後が
 /// 識別子構成文字（英数字／`_`）でないこと（`used`／`typeof` 等の無関係
 /// な識別子ではないこと）を確認してから残りを返す。
-/// `statement` に `#[cfg(test)]` 属性（`cfg`／`(`／`test`／`)` の 4 トー
-/// クンがこの順で連続する箇所）が含まれるかをトークン列で判定する
-/// （codex-review 指摘・PR #2212 その 9）: `statement.contains("cfg(test)")`
-/// は固定文字列一致のため、`#[cfg( test )]`（空白入り）・`#[cfg(test )]`
-/// のような構文的に有効な書き方を見逃す。`strip_keyword_prefix` が
-/// `use`／`type` の判定を固定スペース一致からトークン一致へ置き換えた
-/// のと同じ理由で、こちらもトークン化して判定する。
-fn statement_has_cfg_test_attribute(statement: &str) -> bool {
-    let tokens = tokenize_including_punctuation(statement);
-    tokens
-        .windows(4)
-        .any(|w| w[0] == "cfg" && w[1] == "(" && w[2] == "test" && w[3] == ")")
-}
-
 fn strip_keyword_prefix<'a>(statement: &'a str, keyword: &str) -> Option<&'a str> {
     let trimmed = statement.trim_start();
     let rest = trimmed.strip_prefix(keyword)?;
@@ -891,30 +940,51 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
     // import する `use` 文が 1 つ以上あり、そのすべてが
     // `fandhe_ai_tensor_core::Tensor` という完全パスと一致することを
     // 検査する（`crate::Tensor` や別クレートの同名型を経由した再
-    // エクスポートでは一致しない）。`content.contains(...)` による固定
-    // 文字列一致（旧実装）はコメントアウトされた `// use ...` 行でも
-    // 満たせてしまうため、コメント除去済みの `no_comments` を対象に
-    // トークン化して判定する。
-    //
-    // `#[cfg(test)]` 配下の import は canonical import として認めない
-    // （codex-review 指摘・PR #2212 その 8）: `split_top_level_statements`
-    // は属性とその直後のアイテムを 1 ステートメントとして結合するため
-    // `#[cfg(test)]\nuse fandhe_ai_tensor_core::Tensor;` は属性文字列が
-    // 先頭に残り `strip_keyword_prefix` の `use` 一致に失敗する（結果
-    // として現状は迂回できない）——しかしこれは文単位分割の実装詳細に
-    // 副次的に依存した保護であり、明示的な意図ではない。将来
-    // `split_top_level_statements` や属性の扱いが変わっても壊れない
-    // よう、`statement_has_cfg_test_attribute` による明示的な fail-closed
-    // ガードを独立して設ける（トップレベル import をテスト専用の別名
-    // import に差し替え、それを canonical import として通す迂回を塞ぐ）。
-    // 固定文字列 `contains("cfg(test)")` ではなくトークン一致で判定する
-    // （codex-review 指摘・PR #2212 その 9: `#[cfg( test )]` のような
-    // 空白入り・構文的に有効な書き方を固定文字列一致は見逃す）。
-    let mut canonical_tensor_import_found = false;
-    for statement in split_top_level_statements(&no_comments) {
-        if statement_has_cfg_test_attribute(&statement) {
-            continue;
-        }
+    // エクスポートでは一致しない）。判定ロジックは
+    // `find_canonical_tensor_import` に切り出し、回帰テスト
+    // （`architecture_boundary_bypass_scenarios_are_detected`）から
+    // 任意の合成入力に対しても同じ経路で検証できるようにする。
+    match find_canonical_tensor_import(&no_comments) {
+        Ok(true) => {}
+        Ok(false) => panic!(
+            "src/custom.rs に fandhe_ai_tensor_core::Tensor の import が見つからない\
+             （シグネチャの Tensor トークンが指す型を一意に固定できない）"
+        ),
+        Err(message) => panic!("src/custom.rs: {message}"),
+    }
+}
+
+/// `content` のトップレベル `use` 文を走査し、`Tensor` を import する
+/// 文がすべて無条件（`cfg`／`cfg_attr` 属性が付いていない）かつ
+/// `fandhe_ai_tensor_core::Tensor` という完全パスと一致することを検査
+/// する（`custom_function_trait_signatures_are_host_tensor_only` と、
+/// その迂回シナリオ回帰テスト `architecture_boundary_bypass_scenarios_
+/// are_detected` の双方から呼ぶ共通ロジック）。
+///
+/// - 条件付き Tensor import（`cfg`／`cfg_attr` のいずれかが付いた
+///   `use ... Tensor;`）が 1 つでも見つかった場合は `Err` を返す
+///   （codex-review 指摘・PR #2212 その 15）: パスが
+///   `fandhe_ai_tensor_core::Tensor` と一致していても拒否する。旧実装は
+///   「`#[cfg(test)]` 配下の import だけを canonical 判定から除外する」
+///   という設計だったが、`statement_has_cfg_test_attribute` の判定単位
+///   （ステートメント全体のトークン列に `cfg(test)` という並びが**任意の
+///   位置**に現れるか）では (1) 常に無効な `#[cfg(any())]` が付いた
+///   canonical import を素通しし、(2) `#[cfg_attr(any(), cfg(test))]`
+///   のように属性の**引数内**に `cfg(test)` を含むだけの別属性まで
+///   「cfg(test) 属性付き」と誤判定してパス不一致の検証ごと迂回できて
+///   いた。本関数は「トップレベルの Tensor import には `cfg`／
+///   `cfg_attr` のいずれの属性も一切許さない」という、より単純で
+///   構文的に検証可能な不変条件へ置き換える（テスト専用 import が
+///   必要な場合は `#[cfg(test)] mod` 内に置く前提。`mod` ブロックは
+///   `split_top_level_statements` が 1 ステートメントとして丸ごと
+///   グループ化し、`strip_keyword_prefix(_, "use")` が `mod` 始まりの
+///   文には一致しないため、この検査の走査対象に元から入らない）。
+/// - 無条件かつ完全パス不一致の import が見つかった場合も `Err` を返す。
+/// - 無条件かつ完全パス一致の import が 1 つ以上見つかれば `Ok(true)`、
+///   1 つも見つからなければ `Ok(false)` を返す。
+fn find_canonical_tensor_import(content: &str) -> Result<bool, String> {
+    let mut canonical_found = false;
+    for statement in split_top_level_statements(content) {
         let after_attributes = strip_leading_attributes(&statement);
         let after_visibility = strip_visibility_prefix(after_attributes);
         let Some(use_body) = strip_keyword_prefix(after_visibility, "use") else {
@@ -924,19 +994,22 @@ fn custom_function_trait_signatures_are_host_tensor_only() {
         if use_tokens.last().map(String::as_str) != Some("Tensor") {
             continue;
         }
-        assert_eq!(
-            use_tokens,
-            vec!["fandhe_ai_tensor_core".to_string(), "Tensor".to_string()],
-            "src/custom.rs の use 文が Tensor を import しているが完全パスが\
-             fandhe_ai_tensor_core::Tensor と一致しない: {statement}"
-        );
-        canonical_tensor_import_found = true;
+        if statement_has_conditional_attribute(&statement) {
+            return Err(format!(
+                "Tensor を import する use 文に cfg／cfg_attr 等の条件付き属性が付いている\
+                 （トップレベルの Tensor import は無条件でなければならない。テスト専用\
+                 import が必要な場合は #[cfg(test)] mod 内に置くこと）: {statement}"
+            ));
+        }
+        if use_tokens != vec!["fandhe_ai_tensor_core".to_string(), "Tensor".to_string()] {
+            return Err(format!(
+                "use 文が Tensor を import しているが完全パスが fandhe_ai_tensor_core::Tensor\
+                 と一致しない: {statement}"
+            ));
+        }
+        canonical_found = true;
     }
-    assert!(
-        canonical_tensor_import_found,
-        "src/custom.rs に fandhe_ai_tensor_core::Tensor の import が見つからない\
-         （シグネチャの Tensor トークンが指す型を一意に固定できない）"
-    );
+    Ok(canonical_found)
 }
 
 /// `crates/autodiff/src/var.rs` に `pub fn custom(`／`pub fn custom<`
@@ -1234,42 +1307,86 @@ fn architecture_boundary_bypass_scenarios_are_detected() {
     //     canonical import 判定から除外される（codex-review 指摘・
     //     PR #2212 その 8: トップレベル import を非 canonical な別名へ
     //     差し替えつつ、テスト専用スコープの正規 import だけで判定を
-    //     通過させる迂回を塞ぐ）。
+    //     通過させる迂回を塞ぐ）。パスは canonical だが `#[cfg(test)]`
+    //     という条件付き属性が付いているため `find_canonical_tensor_
+    //     import` は `Err` を返す（新設計: 条件付き Tensor import は
+    //     パスの正誤に関わらずすべて拒否する。旧実装は「無条件の別名
+    //     import が無ければ canonical 扱いしない」という消極的な保護
+    //     だったが、新設計では条件付き import の存在自体を積極的に
+    //     エラーとして報告する）。
     let cfg_test_only_import =
         "#[cfg(test)]\nuse fandhe_ai_tensor_core::Tensor;\n\npub type Tensor = BackendOps;\n";
-    let mut canonical_found_in_scenario = false;
-    for statement in split_top_level_statements(cfg_test_only_import) {
-        if statement_has_cfg_test_attribute(&statement) {
-            continue;
-        }
-        let after_vis = strip_visibility_prefix(&statement);
-        if let Some(use_body) = strip_keyword_prefix(after_vis, "use") {
-            let use_tokens = extract_identifier_tokens(use_body);
-            if use_tokens == vec!["fandhe_ai_tensor_core".to_string(), "Tensor".to_string()] {
-                canonical_found_in_scenario = true;
-            }
-        }
-    }
     assert!(
-        !canonical_found_in_scenario,
-        "#[cfg(test)] 配下の import が誤って canonical import として扱われている"
+        find_canonical_tensor_import(cfg_test_only_import).is_err(),
+        "#[cfg(test)] 配下の canonical import が誤って許容されている"
     );
 
-    // 14) `statement_has_cfg_test_attribute` は `#[cfg( test )]`（空白
-    //     入り。構文的に有効）も検出する（codex-review 指摘・PR #2212
-    //     その 9: `statement.contains("cfg(test)")` の固定文字列一致は
-    //     `cfg` と `(` の間・`test` と `)` の間に空白を挟むと見逃す）。
+    // 14) codex-review 追加指摘（PR #2212 その 15）が挙げたバイパス
+    //     シナリオを検出できることを固定する: 旧実装
+    //     `statement_has_cfg_test_attribute` はステートメント全体の
+    //     トークン列に `cfg`・`(`・`test`・`)` の並びが**任意の位置**に
+    //     現れるかで判定していたため、(a) 常に無効な `#[cfg(any())]`
+    //     が付いた canonical import を誤って通過させ、(b)
+    //     `#[cfg_attr(any(), cfg(test))]` のように属性の**引数内**に
+    //     `cfg(test)` を含むだけの別属性まで「cfg(test) 属性付き」と
+    //     誤判定してパス不一致の検証ごと迂回できていた。
+    //     `statement_has_conditional_attribute` は属性の先頭識別子
+    //     （属性パス名）のみで `cfg`／`cfg_attr` 判定するため、
+    //     いずれも検出できる。
     assert!(
-        statement_has_cfg_test_attribute("#[cfg( test )]\nuse fandhe_ai_tensor_core::Tensor;"),
+        statement_has_conditional_attribute("#[cfg(any())]\nuse fandhe_ai_tensor_core::Tensor;"),
+        "常に無効な #[cfg(any())] 属性を検出できていない（(a) の迂回シナリオ）"
+    );
+    assert!(
+        statement_has_conditional_attribute(
+            "#[cfg_attr(any(), cfg(test))]\nuse other_crate::Tensor;"
+        ),
+        "cfg_attr 属性の引数内に cfg(test) を含むだけの別属性を誤って見逃している\
+         （(b) の迂回シナリオ）"
+    );
+    assert!(
+        statement_has_conditional_attribute("#[cfg( test )]\nuse fandhe_ai_tensor_core::Tensor;"),
         "空白入り #[cfg( test )] 属性を検出できていない"
     );
     assert!(
-        statement_has_cfg_test_attribute("#[cfg(test)]\nuse fandhe_ai_tensor_core::Tensor;"),
-        "空白なし #[cfg(test)] 属性を検出できていない（既存挙動の回帰）"
+        !statement_has_conditional_attribute("use fandhe_ai_tensor_core::Tensor;"),
+        "条件付き属性が無い文を誤って検出している"
     );
     assert!(
-        !statement_has_cfg_test_attribute("use fandhe_ai_tensor_core::Tensor;"),
-        "cfg(test) 属性が無い文を誤って検出している"
+        !statement_has_conditional_attribute(
+            "#[allow(unused_imports)]\nuse fandhe_ai_tensor_core::Tensor;"
+        ),
+        "cfg／cfg_attr 以外の属性（allow）を誤って条件付きと判定している"
+    );
+
+    // 上記 (a)・(b) を実際に `find_canonical_tensor_import` へ通した
+    // 統合シナリオ: 常に無効な `#[cfg(any())]` が付いた「パスは正しい」
+    // canonical import と、`#[cfg_attr(any(), cfg(test))]` が付いた
+    // 「パスが異なる」import を両方トップレベルに置いても、どちらも
+    // 条件付き属性の時点で拒否され、非正規型がシグネチャへ入るのを
+    // 検出できずに素通りすることはない。
+    let forged_conditional_scenario = "#[cfg(any())]\n\
+         use fandhe_ai_tensor_core::Tensor;\n\n\
+         #[cfg_attr(any(), cfg(test))]\n\
+         use other_crate::Tensor;\n";
+    assert!(
+        find_canonical_tensor_import(forged_conditional_scenario).is_err(),
+        "条件付き属性付きの Tensor import（canonical パスであっても）が誤って\
+         許容されている: {forged_conditional_scenario}"
+    );
+
+    // 無条件の canonical import のみが存在する通常ケースは引き続き
+    // `Ok(true)` を返す（今回の変更による既存の正常経路への回帰が
+    // ないことの確認）。
+    assert_eq!(
+        find_canonical_tensor_import("use fandhe_ai_tensor_core::Tensor;\n"),
+        Ok(true),
+        "無条件の canonical import が誤って拒否されている"
+    );
+    assert_eq!(
+        find_canonical_tensor_import("use crate::BackendOps;\n"),
+        Ok(false),
+        "Tensor を import しない場合は canonical import 不在（Ok(false)）を返すはず"
     );
 
     // 15) 外部属性（`#[allow(unused_imports)]` 等）が先頭に付いた
