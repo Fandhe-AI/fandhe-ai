@@ -451,3 +451,283 @@ match（`Op::supports_create_graph()`。同 doc §8 の 69 variant 分類は `Op
 書き込む前に型付き `Err(AutodiffError::Backward(_))` を返す（fail-closed）。
 `crates/autodiff/tests/create_graph.rs::create_graph_rejects_unsupported_op_custom`
 で固定した。
+
+## 15. facade 公開の保留記録（イシュー #2064）
+
+イシュー #2064「facade: custom autograd Function の公開面追加」の実装着手時
+（2026-09-22・main HEAD `5d78c638`）に、`gh issue view 2064 --comments`・
+`gh issue view 2059 --comments`（親 issue）を確認したところ、§12.5 (b)
+「facade 公開面（`CustomFunction` 再エクスポート・facade `Tape::custom`
+委譲）」を対象とするリポジトリ所有者の明示的な承認コメントは存在しなかった
+（#2064 のコメントは 2026-09-19T15:45:46Z の「実装保留（ユーザー承認待ち）」
+通知 1 件のみ、親 #2059 はコメント 0 件）。issue が起票されていること自体は
+承認事項の承認にはならない（前例: #2063「facade: 高階微分 API の公開面追加」
+も同様に未承認のまま保留し、PR #2208（`ef415e6d`）で facade／autodiff src を
+一切変更せず否定ガード＋保留記録 doc のみをマージした。同 doc `docs/autodiff-
+higher-order-grad-decision.md` §15 と本節は同型）。
+
+自動運転（承認待ち不可）かつ判断は安全側に倒す方針、`docs/compat-api-scope.md`
+§5（範囲拡張は経路 1／2 の承認必須）、`.claude/rules/security.md`（自己修復に
+よる無断拡大禁止）に基づき、本イシューでは `crates/facade/src/**`・
+`crates/autodiff/src/**` を一切変更せず、次の否定ガード 4 件（新規 4 件。
+うち AC-4〈高度な合成用 Op の非露出〉分は `crates/facade/tests/api_surface.rs`
+の新規 2 件）を追加して「facade 未公開」状態を機械固定した。#2064 の
+2026-09-19T15:45:46Z コメント本文は AC-4 分を「3 件」と記載しているが、
+実装した新規ガードは下記のとおり AC-4 分 2 件・§12.5 (b) 第 3 項分 2 件の
+計 4 件であり、本節（実装記録）の件数を正とする（コメント本文側の件数表記の
+誤りはロジックに影響しないため本 PR では修正しない。GitHub コメントは
+投稿後に本文編集していない）:
+
+- `crates/facade/tests/api_surface.rs::facade_does_not_reexport_custom_function`
+  （既存。§12.5 (b) 未承認のまま維持する旨を doc comment へ追記）
+- `crates/facade/tests/api_surface.rs::
+  facade_tape_does_not_expose_custom_forwarding_method`（既存。同上）
+- `crates/facade/tests/api_surface.rs::
+  facade_public_functions_do_not_take_custom_function`（新規。`src/` 全体に
+  `CustomFunction` 識別子が一切現れないことを固定し、`pub use` 行のみを
+  見る既存ガードの死角〈`pub use` を経由しない合成入口〉を塞ぐ）
+- `crates/facade/tests/api_surface.rs::
+  compat_sequential_does_not_expose_custom_add_method`（新規。`Sequential::
+  add_custom` 相当の合成メソッドが生えていないことを固定する）
+- `crates/autodiff/tests/architecture_boundaries.rs::
+  custom_function_trait_signatures_are_host_tensor_only`（新規。§12.5 (b)
+  第 3 項「新規 trait が `BackendOps` 等を引数に取らないことの機械検査」。
+  `CustomFunction` trait 定義本体のみを抽出し `BackendOps`／`Tape`／`Var`／
+  `Device`／`NodeId` を含まないことを固定する）
+- `crates/autodiff/tests/architecture_boundaries.rs::
+  autodiff_src_does_not_declare_pub_fn_custom_on_var`（新規。同項。`crates/autodiff/src` 配下の
+  全ファイルを走査し `Var` の impl ブロックに `pub fn custom`／
+  `add_custom` 宣言が無いことを固定し、`Var::custom` という facade
+  再エクスポート経由の別到達口が生えないことを構造的に保証する）
+
+**ソース文字列走査ガードの多層防御化（PR #2212。codex-review／Bugbot 指摘の
+複数ラウンドを経て確定）**: `autodiff_src_does_not_declare_pub_fn_custom_on_var`
+系のソース走査（heuristics）は、`Var` への trait impl（`impl Trait for Var { fn
+custom(&self) {} }`。トレイトのメソッドは可視性修飾子を書かずに宣言でき
+トレイト自体の可視性がそのまま公開 API として機能する）・`Var` の import
+alias／type alias（`use ... Var as V`・`type X = crate::Var;` のようなパス
+修飾形・`use path::Var::{self as V}` の `self` 再エクスポート形）・alias
+宣言が `mod` 以外のブロックスコープ（`fn`／`impl`／`trait` 本体等）に
+隠れているケースなど、複数ラウンドの指摘に応じて検出範囲を段階的に拡張して
+きた（`crates/autodiff/tests/architecture_boundaries.rs::
+var_impl_block_bodies_with_aliases_and_kind`／`type_alias_target_is_var`／
+`find_var_aliases_in_use_body`／`find_var_alias_declarations` の各 doc
+コメント参照）。この種の字句レベルの走査は性質上「新しい迂回手口が
+指摘される→検出ロジックを拡張する」というレビュー往復から完全には
+逃れられないため、**`crates/facade/src/lib.rs` に `compile_fail,E0599`
+doctest（`VarCustomHoldDoctestGuard`。facade の全 `pub mod` を glob
+import したスコープで `Var::custom`／`.custom(...)`／`.add_custom(...)`
+を呼ぼうとするとコンパイルできないことを rustc の名前解決そのもので
+固定する）を追加し、これを本命ガードと位置づけた**。ソース走査は
+「変更差分の早期発見・迂回経路の類型化」を担う多層防御の 1 層という
+位置づけへ変わり、doctest 側は trait impl 経由・alias 経由・
+再エクスポート経由のいずれであっても実際に facade の公開面を
+glob import した状態で失敗することを機械的に保証するため、走査ロジック
+の見落としに対する耐性が高い。doctest が glob import する `pub mod`
+集合と `src/lib.rs` の実宣言集合のドリフトは
+`crates/facade/tests/api_surface.rs::
+custom_function_hold_doctest_globs_all_pub_modules` が固定する。
+禁止呼び出し 3 種（`.custom(...)`・`Var::custom(...)`・`.add_custom(...)`）
+は**それぞれ独立した `compile_fail` ブロック**で検証する。rustdoc は
+ブロック全体が失敗すれば合格と判定するため、1 ブロックへまとめると
+1 種だけの部分公開を検出できない（codex-review 指摘・PR #2212）。
+上記ドリフト検査はブロック単位で glob 集合を突き合わせ、ブロック数が
+3 であることも固定する（1 ブロックへの再統合を拒否）。
+
+**glob 対象・ドリフト検査・否定ガードの再帰化（PR #2212 P1 是正・追加ラウンド）**:
+上記ドリフト検査（`custom_function_hold_doctest_globs_all_pub_modules`）は
+当初 `src/lib.rs` 直下の `pub mod` 宣言しか見ておらず、`nn::rnn`・
+`interop::onnx`・`interop::safetensors` のようなネストした公開面（かつ
+将来 `compat::extensions` のような新設モジュールが追加された場合）に
+生える trait 経由の合成入口を見逃しうる指摘を受けた。`crates/facade/
+tests/api_surface.rs::collect_public_module_paths`（トークン列を
+`scan_top_level_pub_mods` で再帰走査し、`pub mod name;` は解決先ファイル
+〈`<dir>/<name>.rs` または `<dir>/<name>/mod.rs`〉へ辿り、インライン
+`pub mod name { ... }` は本体トークン列を直接再帰する。非 `pub` な
+`mod`・`fn`/`impl` 等のブレース内部は到達不能として丸ごと読み飛ばす）
+へ置き換え、3 つの `compile_fail` doctest ブロックと足場成功版すべてに
+`use fandhe_ai::nn::rnn::*;`・`use fandhe_ai::interop::onnx::*;`・
+`use fandhe_ai::interop::safetensors::*;` を追加した。あわせて、
+`pub fn custom`／`pub fn add_custom` の宣言のみを検査していた既存の
+2 否定ガード（`facade_tape_does_not_expose_custom_forwarding_method`・
+`compat_sequential_does_not_expose_custom_add_method`）を補完する形で、
+`facade_source_declares_no_custom_fn_in_any_context`（`declares_fn_named`。
+可視性キーワード・宣言文脈〈inherent impl・trait impl・trait 定義・
+自由関数のいずれか〉を問わず facade 全ソースの `fn custom`／
+`fn add_custom` 宣言を検出する）を追加した。
+
+承認取得後に実施する変更範囲（事前提示。#2064 の保留コメント本文と同旨。
+ただし AC-4 の否定ガード件数は上記の実装記録どおり 2 件が正で、保留コメント
+本文中の「3 件」という表記はその後の実装で確定した数と一致していない）:
+
+- `crates/facade/src/lib.rs`: `pub use fandhe_ai_autodiff::CustomFunction;`
+  （1 行の再エクスポート）・`impl Tape` への `custom` 委譲メソッド 1 件
+  （`self.0.custom(func, inputs)` を返すだけの薄い委譲。`transfer`／
+  `rnn_forward_seq` と同型）
+- `crates/facade/tests/api_surface.rs`: 上記否定ガード 2 件（既存）を削除し
+  正ガードへ差し替え、AC-4 の否定ガード（新規 2 件）は「`CustomFunction` を
+  含む `pub fn` 行は `Tape::custom` 1 件のみ」という形へ更新する
+- `crates/facade/tests/custom_function_facade.rs`: facade 経由の統合テスト
+  新規追加
+- `crates/autodiff/src/custom.rs`・`lib.rs`・`tape.rs`: モジュール doc の
+  「facade 非公開」記述を「facade 公開済み」へ更新（ロジック変更なし）
+- `docs/autodiff-custom-function-decision.md`・`docs/compat-api-scope.md`・
+  `docs/compat-feature-gap.md`・`docs/perf/framework-compare-feature-
+  matrix-0.9.0.md`・`docs/README.md`: 実装記録・適用記録の追記
+- `docs/perf/logs/facade-custom-function-2064/README.md`: CUDA／Metal 実機
+  実測なしの申し送り（常に host 実行のため REQ-2 対象外）
+
+イシューは close せず、承認取得後に別 PR で経路 B（公開実施）を行う。
+
+## 否定ガードの方針転換（PR #2212 レビュー収束ラウンド。2026-09）
+
+上記「ソース文字列走査ガードの多層防御化」節で `VarCustomHoldDoctestGuard`
+の本命ガードとして採用した `compile_fail,E0599` doctest 3 ブロックは、
+複数ラウンドの codex-review／Bugbot 指摘を経て、以下の理由により**正の
+プローブ 1 ブロック方式へ転換した**。
+
+### 転換理由: stable rustdoc は `compile_fail,EXXXX` のエラーコードを照合しない
+
+本 PR で実測した事実（rustc 1.98.1・stable channel）として、
+`compile_fail,E0599` の `E0599` 部分を無関係なエラーコード（`E0308` 等）へ
+書き換えても doctest は合格した。つまり **rustdoc の `compile_fail` 判定は
+「何らかのエラーでコンパイルが失敗したか」しか見ておらず、付記した
+エラーコードは一切検証されない**。この特性下では、facade の公開面へ
+引数付きシグネチャで `custom`／`add_custom` が漏れ出しても、
+`.custom(...)` の呼び出しは「引数の個数が違う」（E0061）・「モジュールが
+見つからない」（E0432）・「glob の衝突で名前が曖昧」（E0659）等、
+想定していた `E0599`（メソッドが存在しない）以外の何らかのエラーで
+依然としてコンパイルに失敗するため、`compile_fail`（エラーコード不問）は
+**空合格**してしまい、部分公開を検出できない。旧実装の「禁止呼び出し
+3 種を独立ブロックへ分割する」対策（部分公開の見逃し防止）は、この
+盲点そのものは解消しない。
+
+### 転換後: 正のプローブ 1 ブロック方式
+
+`VarCustomHoldDoctestGuard` の doc を、失敗するはずの例を並べる方式から
+「**成功するはずの正のプローブを 1 つ用意し、それが実際にコンパイル
+できることを固定する**」方式へ転換した。facade の全 `pub mod`（ネスト
+含む）を glob import したスコープに、ローカルにのみ存在する
+`__FandheHoldProbe` トレイト（`custom`／`add_custom` という名前のメソッド
+を持つ）を定義し、`Var`／`Tape`／`compat::Sequential` へ実装したうえで、
+各型に対しメソッド形・型パス形の両方で呼び出す。facade 側にこれと
+同名の実体（trait 経由の公開・facade 独自の inherent メソッドとしての
+転送メソッド追加のいずれであっても）が漏れ出すと、
+
+- 別の trait が同名メソッドを提供する形の漏れ → 呼び出しが複数のトレイト
+  実装のどちらを指すか一意に定まらず曖昧になり（E0034）、エラーコードに
+  依存せず必ずコンパイルが失敗する
+- facade 独自の inherent メソッドとして漏れる形の漏れ（`Tape::custom` への
+  転送メソッド追加）→ inherent メソッドが優先解決され、戻り値の型が
+  プローブの期待型と一致せず型不一致（E0308）で必ずコンパイルが失敗する
+
+のいずれかとなり、**特定のエラーコードに依存せず**部分公開を
+fail-closed に検出できる。1 ブロックにまとめても検出できるため、旧実装が
+抱えていた「3 種の禁止呼び出しを独立ブロックへ分割する必要性」は解消
+された。ドリフト検査（`crates/facade/tests/api_surface.rs::
+custom_function_hold_doctest_globs_all_pub_modules`・`custom_function_
+hold_doctest_probe_body_matches_fixed_contract`）は、glob import 集合の
+一致に加え、doctest ブロック本文（glob 以外）が固定文言 `HOLD_PROBE_BODY`
+と 1 行単位で完全一致することを要求し、`# ` 隠し行・プローブの削除・
+別名へのシャドーイング等での骨抜き改変を拒否する。フェンスが厳密に
+裸の ```` ``` ```` であること（`ignore`／`no_run`／`compile_fail` 等の
+修飾を拒否）・doc 直前に `#[cfg(doctest)]` があること・`Cargo.toml` に
+`doctest = false` が無いことも、それぞれ独立したテストで固定した。
+
+### workspace 全体の定義元インベントリ（正のプローブの限界を補完する多層防御）
+
+正のプローブは「facade の公開面（`pub mod` として glob できる範囲）から
+到達可能か」しか検証できない。`&Var`（参照型）に対する 2 段目の autoref
+を経由した trait 実装、facade 型が内部型への `Deref` を実装した場合の
+フィールドアクセス経由の到達等は、本プローブの呼び出し形だけでは
+拾いきれない可能性がある。また、facade の外（`onnx-interop`・
+`backend-*`・`tensor-core` 等）に `custom`／`add_custom` を持つ trait impl
+が新設され、facade がそれを glob できる形で将来公開してしまった場合、
+それが起きる**前**に検出したい。
+
+そこで `crates/facade/tests/api_surface.rs::
+workspace_declares_custom_fn_only_on_tape` を新設した。`crates/*/src/`
+（非公開クレート `docs-site`・`bench-harness`・`guardrail`・`self-repair`
+を含む全メンバー）を再帰走査し、コメント・リテラルを除去したトークン列
+上で `fn`／（`custom`｜`add_custom`｜raw identifier 形）の宣言を、
+可視性・宣言文脈（inherent impl・trait impl・trait 定義〈デフォルト
+メソッド含む〉・blanket impl・自由関数・マクロ本体内のいずれか）を
+問わず数え上げ、その集合が `crates/autodiff/src/tape.rs`（`Tape::custom`。
+本節冒頭の §12.4「入口」節参照）の 1 件のみであることを固定する。これは
+「facade からの到達可能性」ではなく「そもそもの**定義元**」を制約する
+検査であり、正のプローブが原理的に拾えない到達経路（Deref・2 段目
+autoref 等）に対しても、定義元自体が workspace に 1 箇所しか無いことで
+安全側に倒す。
+
+### ソース走査ガードのモデル化前提を崩す構造の fail-closed 拒否
+
+`facade_source_declares_no_custom_fn_in_any_context`・`workspace_declares_
+custom_fn_only_on_tape` 等のソース走査ガードは、いずれも「コメント・
+文字列リテラルを除去したソーステキストのトークン走査」という前提の
+上に成り立つ。この前提を崩す構造（`#[path]` によるファイル分割の隠蔽・
+`cfg`／`cfg_attr` によるビルド構成依存の公開面・`include!`／
+`macro_rules!` によるテキスト非静的な展開・raw identifier・glob
+再エクスポート・`self` リーフ再エクスポート）が facade src・`pub mod`
+宣言に混入すると、上記ガード群がソースを正しく読めなくなる（codex
+P2 指摘・PR #2212: `#[path = "..."] pub mod extensions;` のような
+インライン `pub mod` 配下の `#[path]` 属性付き子モジュールを
+`scan_top_level_pub_mods`／`collect_public_module_paths` が「非公開扱いで
+除外」していたため、そこから公開された extension trait をドリフト検査が
+拾えていなかった）。
+
+本 PR ではこの「黙って除外する」旧方針そのものを「**モデル化できない
+構造は解決せず fail-closed に拒否する**」方針へ転換した:
+
+- `scan_top_level_pub_mods`: `#[path]`（`cfg_attr(.., path = ..)` 経由の
+  間接形を含む）・`#[cfg(...)]`／`#[cfg_attr(...)]` が付いた `pub mod`・
+  raw identifier 形（`pub mod r#ext;`）等、モデル化できない `pub mod` 形を
+  検出すると panic する（`scan_top_level_pub_mods_rejects_unmodelable_
+  mod_forms` が固定）。私有な `mod`（`pub` を伴わない）への `cfg` は対象外
+  （中身は最初から到達不能なため）。
+- `crates/facade/tests/api_surface.rs::
+  facade_source_uses_only_modelable_structures`: facade src 全体を対象に、
+  同種の構造（属性内の `path` 識別子・`cfg`／`cfg_attr` が付いた `pub use`／
+  `pub mod`・`include!`〈`include_str!`／`include_bytes!` は対象外〉・
+  `macro_rules!` 定義・`extern crate`・raw identifier・`pub use` の glob
+  （`*`）・`pub use` の `self` リーフ）の混入を独立に禁止する。
+
+### 小文字始まりの `pub use` 葉の allowlist 化
+
+`pub use fandhe_ai_autodiff::nn as ad_nn;` のような「モジュールを別名で
+再エクスポートする」迂回経路は、facade の命名規約（型は UpperCamelCase・
+関数は snake_case で公開する）に照らすと**小文字始まりの葉として現れる**
+ことに着目し、`crates/facade/tests/api_surface.rs::
+facade_pub_use_leaves_are_not_modules` を新設した。`collect_pub_use_leaves`
+が `pub use` の use tree（`{}` ネスト・`as`・`self`・`*`・先頭 `::` を含む）
+を展開し、各終端エントリの**ソース側**の最終パスセグメント（`as` による
+ローカル別名は無視する）を集める。小文字始まりの葉は「関数の再
+エクスポートである」契約とし、既知の allowlist（`LOWERCASE_PUB_USE_LEAF_
+ALLOWLIST`。2026-09 時点で `array`・`load_safetensors_f32`・
+`load_safetensors_f32_from_bytes`・`require_keys`・`save_safetensors_f32`・
+`save_safetensors_f32_to_bytes`・`clip_grad_norm`・`clip_grad_value`・
+`global_grad_norm`・`has_non_finite`・`scale_grads`・`scale_loss`・
+`unscale_grads` の 13 件）と完全一致しない小文字葉を fail-closed に拒否
+する。`pub(crate) use` 等スコープ付き可視性は対象外（`tokens[i]=="pub"
+&& tokens[i+1]=="use"` の完全一致でしか反応しないため）。
+
+型名前空間プローブ（allowlist 各エントリについて、同名のモジュール・型が
+再エクスポートされていれば型名の衝突〈E0255〉でビルド失敗させる方式）は
+本 PR では**採用していない**。実装・検証コストに対し、上記の
+`collect_pub_use_leaves` ベースの allowlist 検査が既に同種の迂回（モジュール
+の別名再エクスポート）を検出できているため（負の検証で確認済み）、追加の
+複雑さを持ち込む価値がないと判断した。
+
+### 残るリスク（既知の限界）
+
+| リスク | 対応する多層防御 | 未対応部分 |
+|--------|------------------|-----------|
+| facade の `pub mod` を glob import したスコープで `.custom()`／`.add_custom()` を直接呼べてしまう trait 経由の公開・inherent メソッドとしての転送 | 正のプローブ（`VarCustomHoldDoctestGuard`。E0034／E0308 で fail-closed） | `&Var` への 2 段目 autoref・`Deref` 経由の到達は理論上拾いきれない可能性がある |
+| 上記の理論上の限界 | `workspace_declares_custom_fn_only_on_tape`（定義元インベントリ。workspace 全体で `fn custom`／`fn add_custom` の定義箇所を 1 件に制約） | facade 外のクレートで `custom`／`add_custom` という名前**以外**のメソッド名を使って同等の機構を実装する迂回（ガードの検出対象を「名前」で固定している以上、原理的な限界として残る） |
+| `#[path]`・`cfg` 等でソース走査の前提（トークン走査可能なテキスト）が崩れる構造 | `scan_top_level_pub_mods` の fail-closed panic・`facade_source_uses_only_modelable_structures` | workspace 全体（`crates/*/src/`）には同種の fail-closed 拒否をまだ適用していない（facade 直下限定。`workspace_declares_custom_fn_only_on_tape` 自体は `#[path]`／`cfg` 混入時にトークン走査が誤った箇所を数える可能性が残るが、facade 側の限定チェックとは独立の多層であるため、facade 側の防御が破られない限り実害は生じない） |
+| モジュールの別名再エクスポート経由の迂回 | `facade_pub_use_leaves_are_not_modules`（小文字葉 allowlist） | `pub use` 経由以外の再エクスポート形（`pub` フィールドを持つ tuple struct 経由の型公開等）は対象外だが、`custom`／`add_custom` という関数名の到達可能性とは別の軸のため本イシューの脅威モデル外 |
+| `#[macro_export]` によるマクロ生成アイテム | （該当なし） | 2026-09 時点で workspace 全体に `#[macro_export]` は 0 件（`grep -rn "macro_export" crates/*/src` で実測確認済み）。将来導入された場合は本表の再検討が必要 |
+
+上記の残存リスクはいずれも、単独では facade の公開面を突破できない
+（複数の多層防御を同時に迂回する必要がある）ため、REQ-12「任意
+`BackendOps` 実装を注入できる公開 API を設けない」という本イシューの
+脅威モデルに照らし許容可能と判断した。

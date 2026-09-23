@@ -481,7 +481,17 @@ fn strip_comments_and_literals(src: &str) -> Vec<char> {
         // char リテラル（'x'／'\n' 等）とライフタイム注記（'a 等）の判別。
         if c == '\'' {
             if i + 1 < len && chars[i + 1] == '\\' {
+                // バックスラッシュ直後の 1 文字（エスケープ本体の先頭。
+                // `\'`／`\\`／`\n`／`\u` 等）は、それが `'\''` の `\'` の
+                // ように閉じクォートと同じ文字であっても判定せず無条件に
+                // 1 文字消費する。これをしないと `'\''` の 2 文字目の `'`
+                // を閉じクォートと誤認識し、直後の実際の閉じクォートから
+                // 再同期してしまう（例: `('\'','"')` の `"` を文字列
+                // リテラル開始と誤認識し後続コードを丸ごと呑み込む）。
                 let mut k = i + 2;
+                if k < len {
+                    k += 1;
+                }
                 while k < len && chars[k] != '\'' {
                     k += 1;
                 }
@@ -3056,6 +3066,8 @@ fn metrics_types_are_reachable_via_facade_only() {
 /// 再エクスポートしていないことを固定する（`docs/autodiff-custom-
 /// function-decision.md` §12.5 (b)「facade 公開面」は未承認のまま対象外。
 /// `facade_does_not_reexport_cast_ops` と同型の走査）。
+/// **イシュー #2064（2026-09-22）時点でも §12.5 (b) の承認コメントが
+/// 確認できなかったため未承認のまま維持する**（同 doc §15 保留記録）。
 #[test]
 fn facade_does_not_reexport_custom_function() {
     let src_dir = facade_crate_root().join("src");
@@ -3087,78 +3099,99 @@ fn facade_does_not_reexport_custom_function() {
 /// §12.4「入口」〉と同じ「転送メソッドを追加しない限り facade から
 /// 到達不能」という設計を、転送メソッド自体が生えていないことで直接
 /// 検査する）。承認 (b) を得て転送メソッドを追加する際は本テストを
-/// 更新する。
+/// 更新する。**イシュー #2064（2026-09-22）時点でも §12.5 (b) の承認
+/// コメントが確認できなかったため未承認のまま維持する**（同 doc §15
+/// 保留記録）。
 #[test]
 fn facade_tape_does_not_expose_custom_forwarding_method() {
     let lib_rs = facade_crate_root().join("src/lib.rs");
     let content = read_to_string_or_panic(&lib_rs);
+    // コメント・文字列・char リテラルを除去してから `declares_pub_fn`
+    // （トークン列の連続一致で `pub`・`fn`・関数名の間の空白量に影響
+    // されず、`unsafe`／`const`／`async` 修飾子の挿入にも対応する）で
+    // 判定する（codex-review 指摘・PR #2212: 旧実装
+    // `contains_pub_fn_custom_declaration` は固定文字列 `"pub fn custom"`
+    // の部分一致のため `pub async fn custom`／`pub unsafe fn custom` の
+    // ような修飾子挿入で否定ガードを迂回できた。`compat_sequential_does_
+    // not_expose_custom_add_method` と同じ前処理＋判定の組み合わせに
+    // 揃える）。
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
     assert!(
-        !contains_pub_fn_custom_declaration(&content),
+        !declares_pub_fn(&cleaned, "custom"),
         "facade 独自の Tape に `pub fn custom(...)` 宣言（ジェネリクス・\
-         lifetime 付き `pub fn custom<'t>(` を含む）が見つかった\
+         lifetime 付き `pub fn custom<'t>(`・`unsafe`／`const`／`async` \
+         修飾子付きを含む）が見つかった\
          （§12.5 (b) 未承認のまま到達可能にしてしまっている）"
     );
 }
 
-/// `pub fn custom` 宣言（`pub fn custom(` に加え、`Tape::custom` 本体
-/// と同型の `pub fn custom<'t>(` のようなジェネリクス／lifetime 付き
-/// 宣言も含む）の検出。`pub fn custom` の直後に任意個の空白、続けて
-/// 任意で `<...>`（ジェネリクス・lifetime パラメータ節。ネストする
-/// `<>` を素朴にカウントして対応する）、さらに任意個の空白を挟んで
-/// `(` が現れる形を宣言とみなす（`pub fn custom_foo(` のような無関係
-/// な識別子への誤検出は、`custom` 直後が英数字／`_` の場合を除外する
-/// ことで避ける）。
-fn contains_pub_fn_custom_declaration(content: &str) -> bool {
-    const NEEDLE: &str = "pub fn custom";
-    let bytes = content.as_bytes();
-    let mut search_start = 0usize;
-    while let Some(rel_idx) = content[search_start..].find(NEEDLE) {
-        let idx = search_start + rel_idx;
-        let after = idx + NEEDLE.len();
-        search_start = after;
-        // `custom` の直後が識別子構成文字（英数字／`_`）なら
-        // `custom_foo` 等の無関係な関数名なので除外する。
-        if bytes
-            .get(after)
-            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+/// `crates/facade/src/` に `CustomFunction` 識別子が一切現れないことを
+/// 固定する（イシュー #2064 AC-4。`facade_does_not_reexport_custom_
+/// function` は `pub use` 行のみを走査するため、CUDA Graph step との
+/// 結線・gradcheck 相当の補助関数等、`pub use` を経由しない別の合成
+/// 入口〈`pub fn foo(f: CustomFunction)` のような新規シグネチャ〉が
+/// 生えても検出できない。本テストは `facade_does_not_expose_pool_
+/// implementation_types` と同型のファイル全文走査で、承認 (b) 前に
+/// そうした合成入口が facade へ混入することを構造的に遮断する）。
+#[test]
+fn facade_public_functions_do_not_take_custom_function() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        if content.contains("CustomFunction") {
+            offending.push(path.display().to_string());
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の src/ に CustomFunction 識別子が現れている\
+         （§12.5 (b) 未承認のまま合成入口を設けてしまっている）: {offending:?}"
+    );
+}
+
+/// `crates/facade/src/compat/` に `Sequential::add_custom` 相当の合成
+/// メソッド（`pub fn add_custom`）が生えていないことを固定する
+/// （イシュー #2064 AC-4。`compat_sequential_does_not_expose_rnn_add_
+/// methods` と同型。`Sequential` 平坦鎖への `CustomFunction` 合成入口を
+/// 承認 (b) 前に設けないことの機械固定）。
+#[test]
+fn compat_sequential_does_not_expose_custom_add_method() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut offending = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        if declares_pub_fn(&cleaned, "add_custom") {
+            offending.push(path.display().to_string());
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "src/compat 配下に add_custom が見つかった\
+         （§12.5 (b) 未承認のまま Sequential への合成入口を設けてしまっている）: {offending:?}"
+    );
+}
+
+/// `content`（生の Rust ソース文字列。内部で `strip_comments_and_
+/// literals` を適用する）に、可視性キーワード・修飾子・宣言文脈
+/// （inherent impl／trait impl／trait 定義／自由関数のいずれか）を問わず
+/// `fn <fn_name>(` または `fn <fn_name><`（ジェネリクス付き）の宣言が
+/// 存在するかを判定する（[`facade_source_declares_no_custom_fn_in_any_
+/// context`] 専用）。`declares_pub_fn` は `pub` トークンを起点に走査する
+/// ため、`trait CustomExt { fn custom(&self); }` のような可視性キー
+/// ワードを伴わない trait メソッド宣言（trait 自体が `pub` であれば
+/// 実装型を通じて外部から呼び出せる）を見逃す。本関数は `fn` トークン
+/// そのものを起点にするためこの迂回を検出できる（codex-review 指摘・
+/// PR #2212: `crates/facade/src/compat/` に `extensions` のような新設
+/// モジュールを追加し、そこに `CustomExt` trait と `impl CustomExt for
+/// Var { fn custom(&self) {} }` を生やす迂回に対する多層防御）。
+fn declares_fn_named(content: &str, fn_name: &str) -> bool {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (i, token) in tokens.iter().enumerate() {
+        if token == "fn"
+            && tokens.get(i + 1).map(String::as_str) == Some(fn_name)
+            && matches!(tokens.get(i + 2).map(String::as_str), Some("(") | Some("<"))
         {
-            continue;
-        }
-        let mut pos = after;
-        // 任意個の空白（改行含む）をスキップする。
-        while bytes.get(pos).is_some_and(|b| b.is_ascii_whitespace()) {
-            pos += 1;
-        }
-        // 任意で `<...>`（ジェネリクス／lifetime 節）をスキップする。
-        // ネストする `<>`（例: `<T: Foo<Bar>>`）にも対応するため
-        // 深さカウンタで対応する `>` まで読み飛ばす。
-        if bytes.get(pos) == Some(&b'<') {
-            let mut depth = 0i32;
-            while let Some(b) = bytes.get(pos) {
-                match b {
-                    b'<' => depth += 1,
-                    b'>' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            pos += 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                pos += 1;
-            }
-            if depth != 0 {
-                // 対応する `>` が見つからないまま終端した場合は
-                // 宣言として確定できないので次の occurrence を探す。
-                continue;
-            }
-        }
-        // 任意個の空白をスキップし、`(` が続けば宣言とみなす。
-        while bytes.get(pos).is_some_and(|b| b.is_ascii_whitespace()) {
-            pos += 1;
-        }
-        if bytes.get(pos) == Some(&b'(') {
             return true;
         }
     }
@@ -3166,18 +3199,205 @@ fn contains_pub_fn_custom_declaration(content: &str) -> bool {
 }
 
 #[test]
-fn contains_pub_fn_custom_declaration_detects_variants() {
-    assert!(contains_pub_fn_custom_declaration("pub fn custom("));
-    assert!(contains_pub_fn_custom_declaration("pub fn custom<'t>("));
-    assert!(contains_pub_fn_custom_declaration(
-        "pub fn custom<'t, T: Foo<Bar>>("
+fn declares_fn_named_detects_trait_method_and_ignores_comments_and_strings() {
+    assert!(declares_fn_named(
+        "pub trait CustomExt { fn custom(&self); }",
+        "custom"
     ));
-    assert!(contains_pub_fn_custom_declaration("pub fn custom  (\n"));
-    assert!(!contains_pub_fn_custom_declaration("pub fn custom_foo("));
-    assert!(!contains_pub_fn_custom_declaration(
-        "// pub fn custom_bar(\nfn other() {}"
+    assert!(declares_fn_named(
+        "impl CustomExt for Var { fn custom(&self) {} }",
+        "custom"
     ));
-    assert!(!contains_pub_fn_custom_declaration("let custom = 1;"));
+    assert!(declares_fn_named(
+        "trait AddCustomExt { fn add_custom<T>(&self, v: T); }",
+        "add_custom"
+    ));
+    assert!(!declares_fn_named("// fn custom(&self) {}", "custom"));
+    assert!(!declares_fn_named("let s = \"fn custom(\";", "custom"));
+    assert!(!declares_fn_named("fn custom_extra(&self) {}", "custom"));
+}
+
+/// facade 全ソース（`crates/facade/src/` 配下の全 `.rs`）に `fn custom`／
+/// `fn add_custom` の宣言が可視性・宣言文脈（inherent impl・trait impl・
+/// trait 定義・自由関数のいずれか）を問わず一切現れないことを固定する
+/// （codex-review 指摘・PR #2212）。`facade_tape_does_not_expose_custom_
+/// forwarding_method`（`lib.rs` の `pub fn custom` のみ）・
+/// `compat_sequential_does_not_expose_custom_add_method`（`src/compat/`
+/// 配下の `pub fn add_custom` のみ）はいずれも `pub fn` 形の宣言しか
+/// 検査しないため、可視性キーワードを伴わない trait メソッド宣言経由の
+/// 合成入口（例: `compat::extensions::CustomExt` のような新設モジュール
+/// に生える `.custom()`）を見逃す。本テストは `declares_fn_named` により
+/// `fn` トークンそのものを起点に facade 全体を走査し、上記 2 テストを
+/// 補完する多層防御の 1 層とする。
+#[test]
+fn facade_source_declares_no_custom_fn_in_any_context() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for fn_name in ["custom", "add_custom"] {
+            if declares_fn_named(content, fn_name) {
+                offending.push(format!("{}: `fn {fn_name}` 宣言", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の src/ に `fn custom`／`fn add_custom` 宣言が可視性・文脈を問わず\
+         見つかった（§12.5 (b) 未承認のまま合成入口を設けてしまっている）: {offending:?}"
+    );
+}
+
+/// `text` を「識別子トークン」と「区切り文字（1 文字）」に分解した
+/// トークン列へ変換する（空白は読み飛ばす）。`declares_pub_fn` 専用の
+/// ユーティリティ。`(`／`<` などの区切り文字もトークンとして残すことで、
+/// `pub`・`fn`・関数名の間に改行を挟んだ有効な Rust 記法を、固定文字列
+/// 一致ではなくトークン列の連続一致で検出できるようにする（codex-review
+/// 指摘・PR #2212 その 5: `cleaned.contains("pub fn add_custom")` の
+/// 固定文字列一致は `pub\nfn add_custom(` のような改行を挟んだ宣言を
+/// 見逃す）。`crates/autodiff/tests/architecture_boundaries.rs` の同名
+/// ユーティリティと同型（クレートをまたぐ integration test 間でヘルパー
+/// を共有できないため個別実装）。
+fn tokenize_including_punctuation(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == '\'' || c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            if c == '\'' {
+                i += 1;
+            }
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            tokens.push(chars[start..i].iter().collect());
+        } else {
+            tokens.push(c.to_string());
+            i += 1;
+        }
+    }
+    tokens
+}
+
+/// `tokens[j..]` の先頭から連続する `fn` 宣言の修飾子トークン
+/// （`unsafe`／`const`／`async`／`extern` およびその ABI 文字列リテラル。
+/// 任意順・0 個以上の繰り返し）を読み飛ばし、修飾子列の直後の index を
+/// 返す（codex-review 指摘・PR #2212 その 11）: 旧実装は `unsafe`／
+/// `const`／`async` の 3 種のみを読み飛ばしており `pub extern "C" fn
+/// custom` のような ABI 指定付き宣言を見逃していた（`extern` トークンが
+/// `fn` 直前の位置に来るため `tokens.get(j) == Some("fn")` の一致に
+/// 失敗し `declares_pub_fn` が false を返す）。`extern` は ABI 文字列
+/// リテラル（`"C"` 等）を伴う場合と伴わない場合の両方が有効な Rust
+/// 記法であるため、`extern` の直後にトークン化された文字列リテラル
+/// （`"` 開始トークンから対応する `"` 終了トークンまで）が続けばそれも
+/// まとめて読み飛ばす。`crates/autodiff/tests/architecture_boundaries.
+/// rs` の同名ユーティリティと同型（クレートをまたぐ integration test
+/// 間でヘルパーを共有できないため個別実装）。
+fn skip_fn_declaration_qualifiers(tokens: &[String], mut j: usize) -> usize {
+    loop {
+        match tokens.get(j).map(String::as_str) {
+            Some("unsafe" | "const" | "async") => {
+                j += 1;
+            }
+            Some("extern") => {
+                j += 1;
+                if tokens.get(j).map(String::as_str) == Some("\"") {
+                    j += 1;
+                    while let Some(tok) = tokens.get(j) {
+                        j += 1;
+                        if tok == "\"" {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    j
+}
+
+/// `content`（コメント除去済み想定）に `pub fn <fn_name>(` または
+/// `pub fn <fn_name><`（ジェネリクス付き）宣言が存在するかをトークン列
+/// の連続一致で判定する。`pub`・`fn`・`fn_name` の間の空白量（改行を
+/// 含む）に影響されない。`pub`・`fn` の間に `unsafe`／`const`／`async`／
+/// `extern`（ABI 文字列リテラル付き含む）修飾子（0 個以上・任意順の
+/// 繰り返し）が挟まる宣言も検出する（`skip_fn_declaration_qualifiers`。
+/// `unapproved_onnx_pub_fn_with_qualifiers_is_flagged` が既に固定
+/// している `pub async fn`／`pub unsafe fn` の扱いに合わせる）。
+/// `pub(crate) fn ...` のようなスコープ付き可視性は「独立した `pub`
+/// トークンの直後に修飾子または `fn` トークンが続かない」ため一致しない。
+/// `crates/autodiff/tests/architecture_boundaries.rs` の同名ユーティリ
+/// ティと同型（クレートをまたぐ integration test 間でヘルパーを共有
+/// できないため個別実装）。
+fn declares_pub_fn(content: &str, fn_name: &str) -> bool {
+    let tokens = tokenize_including_punctuation(content);
+    for (i, token) in tokens.iter().enumerate() {
+        if token != "pub" {
+            continue;
+        }
+        let j = skip_fn_declaration_qualifiers(&tokens, i + 1);
+        if tokens.get(j).map(String::as_str) == Some("fn")
+            && tokens.get(j + 1).map(String::as_str) == Some(fn_name)
+            && matches!(tokens.get(j + 2).map(String::as_str), Some("(") | Some("<"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn declares_pub_fn_detects_newline_separated_declaration() {
+    assert!(declares_pub_fn(
+        "pub\nfn add_custom(&self) {}",
+        "add_custom"
+    ));
+    assert!(declares_pub_fn(
+        "pub\n    fn\nadd_custom<T>(&self) {}",
+        "add_custom"
+    ));
+    assert!(!declares_pub_fn(
+        "pub fn add_custom_foo(&self) {}",
+        "add_custom"
+    ));
+    assert!(!declares_pub_fn(
+        "pub(crate) fn add_custom(&self) {}",
+        "add_custom"
+    ));
+    assert!(!declares_pub_fn("let add_custom = 1;", "add_custom"));
+    assert!(declares_pub_fn(
+        "pub unsafe fn add_custom(&self) {}",
+        "add_custom"
+    ));
+    assert!(declares_pub_fn(
+        "pub const fn add_custom() {}",
+        "add_custom"
+    ));
+}
+
+/// [`declares_pub_fn`] が `extern`（ABI 文字列リテラル付き・なし双方）を
+/// 挟んだ宣言も検出することを固定する回帰テスト（codex-review 指摘・
+/// PR #2212 その 11）。
+#[test]
+fn declares_pub_fn_detects_extern_qualified_declaration() {
+    assert!(declares_pub_fn(
+        "pub extern \"C\" fn add_custom() {}",
+        "add_custom"
+    ));
+    assert!(declares_pub_fn(
+        "pub unsafe extern \"C\" fn add_custom() {}",
+        "add_custom"
+    ));
+    assert!(declares_pub_fn(
+        "pub extern fn add_custom() {}",
+        "add_custom"
+    ));
 }
 
 /// AMP 統合（イシュー #1961。`compat::Sequential::compile_with_amp`）の
@@ -3500,8 +3720,6 @@ fn facade_tape_does_not_expose_backward_create_graph_method() {
 
 /// `pub fn <name>` 宣言（`pub fn <name>(` に加え、ジェネリクス・
 /// lifetime 付き `pub fn <name><'a>(` のような宣言も含む）の検出。
-/// `contains_pub_fn_custom_declaration`（`CustomFunction` 用・イシュー
-/// #1946）と同型のアルゴリズムを関数名パラメータ化したもの。
 /// `<name>` の直後に任意個の空白、続けて任意で `<...>`（ジェネリクス・
 /// lifetime パラメータ節。ネストする `<>` を素朴にカウントして対応
 /// する）、さらに任意個の空白を挟んで `(` が現れる形を宣言とみなす
@@ -3579,4 +3797,1553 @@ fn contains_pub_fn_declaration_detects_variants() {
         "foo"
     ));
     assert!(!contains_pub_fn_declaration("let foo = 1;", "foo"));
+}
+
+// ============================================================================
+// model 公開面の機械検査（イシュー #2087・親 #2082）
+// ============================================================================
+
+/// `src/model.rs` に承認範囲外の公開アイテムが存在しないかを走査する。
+/// 承認範囲は `model::{ModelRegistry, ModelError}` と
+/// `ModelRegistry::{new, with_cache_dir, cache_dir, load,
+/// available_models}` の 7 件のみ（PR 本文「承認事項」節。
+/// `scan_unapproved_onnx_pub_items` と同型の独自許可リストを持つ
+/// 兄弟関数として実装する。既存 onnx 用関数は並列 PR の競合面拡大を
+/// 避けるため byte 単位で不変のまま触らない）。
+fn scan_unapproved_model_pub_items(original: &str) -> Vec<String> {
+    const ALLOWED_PUB_ITEMS: [(&str, &str); 7] = [
+        ("struct", "ModelRegistry"),
+        ("enum", "ModelError"),
+        ("fn", "new"),
+        ("fn", "with_cache_dir"),
+        ("fn", "cache_dir"),
+        ("fn", "load"),
+        ("fn", "available_models"),
+    ];
+    const SCANNED_KINDS: [&str; 9] = [
+        "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
+    ];
+    const QUALIFIER_KEYWORDS: [&str; 3] = ["async", "unsafe", "extern"];
+    const FORBIDDEN_SIGNATURE_SUBSTRINGS: [&str; 3] = ["BackendOps", "Tape", "onnx_interop"];
+
+    let cleaned = strip_comments_and_literals(original);
+    let len = cleaned.len();
+    let mut offenses = Vec::new();
+    let mut i = 0usize;
+    while i < len {
+        if !is_ident_start(cleaned[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut j = i + 1;
+        while j < len && is_ident_char(cleaned[j]) {
+            j += 1;
+        }
+        let word: String = cleaned[start..j].iter().collect();
+        if word != "pub" {
+            i = j;
+            continue;
+        }
+        let mut k = j;
+        while k < len && cleaned[k].is_whitespace() {
+            k += 1;
+        }
+        if k < len && cleaned[k] == '(' {
+            // `pub(crate)`／`pub(super)` 等。crate 外非公開のためスキップ。
+            let mut depth = 1i32;
+            k += 1;
+            while k < len && depth > 0 {
+                match cleaned[k] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        loop {
+            if !(k < len && is_ident_start(cleaned[k])) {
+                break;
+            }
+            let qs = k;
+            let mut qe = k + 1;
+            while qe < len && is_ident_char(cleaned[qe]) {
+                qe += 1;
+            }
+            let candidate: String = cleaned[qs..qe].iter().collect();
+            if !QUALIFIER_KEYWORDS.contains(&candidate.as_str()) {
+                break;
+            }
+            k = qe;
+            while k < len && cleaned[k].is_whitespace() {
+                k += 1;
+            }
+        }
+        if !(k < len && is_ident_start(cleaned[k])) {
+            i = j;
+            continue;
+        }
+        let ks = k;
+        let mut ke = k + 1;
+        while ke < len && is_ident_char(cleaned[ke]) {
+            ke += 1;
+        }
+        let kind: String = cleaned[ks..ke].iter().collect();
+        if !SCANNED_KINDS.contains(&kind.as_str()) {
+            i = j;
+            continue;
+        }
+        if kind == "use" {
+            offenses.push(format!(
+                "line {}: `pub use` は model.rs で承認されていない再エクスポート",
+                line_at(&cleaned, start)
+            ));
+            i = j;
+            continue;
+        }
+        let mut m = ke;
+        while m < len && cleaned[m].is_whitespace() {
+            m += 1;
+        }
+        if m < len && is_ident_start(cleaned[m]) {
+            let ns = m;
+            let mut ne = m + 1;
+            while ne < len && is_ident_char(cleaned[ne]) {
+                ne += 1;
+            }
+            let name: String = cleaned[ns..ne].iter().collect();
+            let approved = ALLOWED_PUB_ITEMS
+                .iter()
+                .any(|(k2, n2)| *k2 == kind.as_str() && *n2 == name.as_str());
+            if !approved {
+                offenses.push(format!(
+                    "line {}: `pub {kind} {name}` は model.rs で承認範囲外の公開アイテム",
+                    line_at(&cleaned, start)
+                ));
+            }
+            if kind == "fn" {
+                let mut p = ne;
+                while p < len && cleaned[p] != '(' && cleaned[p] != '{' && cleaned[p] != ';' {
+                    p += 1;
+                }
+                if p < len && cleaned[p] == '(' {
+                    let mut depth = 1i32;
+                    p += 1;
+                    while p < len && depth > 0 {
+                        match cleaned[p] {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        p += 1;
+                    }
+                }
+                while p < len && cleaned[p] != '{' && cleaned[p] != ';' {
+                    p += 1;
+                }
+                let signature: String = cleaned[start..p.min(len)].iter().collect();
+                for forbidden in FORBIDDEN_SIGNATURE_SUBSTRINGS {
+                    if signature.contains(forbidden) {
+                        offenses.push(format!(
+                            "line {}: `pub fn {name}` のシグネチャが禁止文字列 `{forbidden}` を含む",
+                            line_at(&cleaned, start)
+                        ));
+                    }
+                }
+            }
+        }
+        i = j;
+    }
+    offenses
+}
+
+fn model_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/model.rs")
+}
+
+#[test]
+fn model_module_exposes_only_approved_surface() {
+    let content = read_to_string_or_panic(&model_rs_path());
+    let offenses = scan_unapproved_model_pub_items(&content);
+    assert!(
+        offenses.is_empty(),
+        "src/model.rs に承認範囲外の公開アイテムが見つかった: {offenses:?}"
+    );
+}
+
+/// `scan_unapproved_model_pub_items` が合成入力で承認範囲外の
+/// `pub fn` を検出できることの自己テスト。
+#[test]
+fn scan_unapproved_model_pub_items_detects_offense() {
+    let synthetic = "pub struct ModelRegistry;\npub fn rogue_method() {}\n";
+    let offenses = scan_unapproved_model_pub_items(synthetic);
+    assert_eq!(offenses.len(), 1, "offenses={offenses:?}");
+    assert!(offenses[0].contains("rogue_method"));
+}
+
+/// [`fandhe_ai::model::{ModelRegistry, ModelError}`] が facade から
+/// 到達可能であることをコンパイル時に固定する。`ModelError` は
+/// `#[non_exhaustive]` のためワイルドカード腕を持つ `match` で
+/// variant を網羅できることも併せて確認する。
+#[test]
+fn model_types_are_reachable_via_facade() {
+    fn _assert_reachable(_registry: fandhe_ai::model::ModelRegistry) {}
+
+    fn _assert_error_matchable(e: &fandhe_ai::model::ModelError) -> &'static str {
+        match e {
+            fandhe_ai::model::ModelError::CacheDirUnavailable => "cache_dir_unavailable",
+            fandhe_ai::model::ModelError::InvalidComponent { .. } => "invalid_component",
+            fandhe_ai::model::ModelError::NotFound { .. } => "not_found",
+            fandhe_ai::model::ModelError::TooLarge { .. } => "too_large",
+            fandhe_ai::model::ModelError::Load(_) => "load",
+            fandhe_ai::model::ModelError::Io(_) => "io",
+            _ => "unknown",
+        }
+    }
+}
+
+fn lib_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/lib.rs")
+}
+
+/// `tokens[after_name_idx..]`（mod 名の直後の位置）から `;`（外部
+/// ファイル参照の終端）または対応する `{ ... }`（インライン本体）を
+/// 読み飛ばし、読み飛ばした直後の index を返す（[`scan_top_level_pub_
+/// mods`] の private mod・`#[path]` 除外分岐の共通処理）。ブレース対応は
+/// 単純な深さカウント（コメント・文字列は呼び出し元で除去済み前提）。
+fn skip_mod_declaration_body(tokens: &[String], after_name_idx: usize) -> usize {
+    match tokens.get(after_name_idx).map(String::as_str) {
+        Some(";") => after_name_idx + 1,
+        Some("{") => {
+            let mut depth = 1i32;
+            let mut k = after_name_idx + 1;
+            while k < tokens.len() && depth > 0 {
+                match tokens[k].as_str() {
+                    "{" => depth += 1,
+                    "}" => depth -= 1,
+                    _ => {}
+                }
+                k += 1;
+            }
+            k
+        }
+        // 文法上あり得ない形（構文エラー）。呼び出し元のループを無限に
+        // 停止させないよう 1 トークンだけ進める。
+        _ => after_name_idx,
+    }
+}
+
+/// 渡されたトークン列（コメント・文字列除去済み・単一モジュールスコープ
+/// 相当）の**直下**にある `pub mod <name>;`／`pub mod <name> { ... }` を
+/// 収集する（[`collect_public_module_paths_recursive`] の下請け）。
+///
+/// - `pub(crate) mod`／`pub(super) mod`／`pub(self) mod`／`pub(in ...) mod`
+///   は `pub` トークンの直後が `mod` ではなく `(` になるため一致しない
+///   （`declares_pub_fn` と同型の判別）。
+/// - 非 `pub` な `mod name { ... }`（private。`#[cfg(...)]` が付いていても
+///   同様）はブレース対応だけ取って中身を丸ごと読み飛ばし、内部の宣言は
+///   一切収集しない（外部から到達不能なため。合成入力テスト
+///   `collect_public_module_paths_recursive_ignores_private_mod_subtree`
+///   参照）。
+/// - **モデル化できない `pub mod` 形は黙って除外せず fail-closed に
+///   panic する**（codex P2 指摘・PR #2212 その 2: `#[path]` 属性付き
+///   `pub mod` を「非公開扱いで除外」する旧実装は、そこから公開された
+///   拡張が glob import 走査から静かに落ちる盲点だった）。対象は次の
+///   3 種:
+///   1. 属性ブロック（複数スタックも走査。`cfg_attr(.., path = ..)` の
+///      ような間接形も含む）に `path` 識別子が現れ、属性列の直後が
+///      `pub mod` であるもの（属性値の文字列リテラルは呼び出し元の
+///      `strip_comments_and_literals` で既に空白化されており実際の
+///      解決先ファイルを本関数だけでは特定できないため）。
+///   2. 属性ブロックに `cfg`／`cfg_attr` 識別子が現れ、属性列の直後が
+///      `pub mod` であるもの（cfg 条件次第で公開面がビルド構成ごとに
+///      変わり、単一のビルド構成しか見ない本走査では機械的に判定
+///      できないため）。**私有な `mod`（`pub` を伴わない）に付いた
+///      `cfg` は対象外**（内部が最初から到達不能であることは cfg の
+///      有無に関わらず変わらない）。
+///   3. `pub mod <name>` の直後が `;`／`{` のいずれでもないもの
+///      （raw identifier `pub mod r#ext;`・ジェネリクス構文の混入等。
+///      識別子として認識できない場合も同様）。
+/// - `fn`／`impl`／`struct` 等、mod 以外のブレース構造は対応する `}` まで
+///   丸ごと読み飛ばす（内部の `mod` 宣言は外部から到達不能）。
+fn scan_top_level_pub_mods(tokens: &[String]) -> Vec<(String, Option<Vec<String>>)> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        // `#[ ... ]` 属性: 連続してスタックしうる（例: `#[cfg(test)]`
+        // ＋ `#[allow(dead_code)]`）ため、対応する属性ブロックをすべて
+        // 読み進めたうえで、その属性列のいずれかが `path`／`cfg`／
+        // `cfg_attr` 識別子を含み、かつ属性列の直後が `pub mod` である
+        // 場合に fail-closed panic する（上記ドキュメンテーションコメント
+        // 参照）。
+        if tokens[i] == "#" && tokens.get(i + 1).map(String::as_str) == Some("[") {
+            let attrs_start = i;
+            let mut j = i;
+            let mut has_path = false;
+            let mut has_cfg = false;
+            while tokens.get(j).map(String::as_str) == Some("#")
+                && tokens.get(j + 1).map(String::as_str) == Some("[")
+            {
+                let mut depth = 1i32;
+                let mut k = j + 2;
+                while k < tokens.len() && depth > 0 {
+                    match tokens[k].as_str() {
+                        "[" => depth += 1,
+                        "]" => depth -= 1,
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                if tokens[j..k].iter().any(|t| t == "path") {
+                    has_path = true;
+                }
+                if tokens[j..k].iter().any(|t| t == "cfg" || t == "cfg_attr") {
+                    has_cfg = true;
+                }
+                j = k;
+            }
+            let next_is_pub_mod = tokens.get(j).map(String::as_str) == Some("pub")
+                && tokens.get(j + 1).map(String::as_str) == Some("mod");
+            if next_is_pub_mod {
+                assert!(
+                    !has_path,
+                    "scan_top_level_pub_mods: `#[path = ...]`（`cfg_attr` 内の \
+                     path を含む間接形も含む）が付いた `pub mod` はモデル化\
+                     できない（属性値の文字列リテラルは前処理で空白化済みの\
+                     ため実際の解決先ファイルを特定できない。facade は \
+                     #[path] を使わない契約であり、これが現れること自体が\
+                     想定外の構造）: tokens[{attrs_start}..{j}]={:?}",
+                    &tokens[attrs_start..j]
+                );
+                assert!(
+                    !has_cfg,
+                    "scan_top_level_pub_mods: `#[cfg(...)]`／`#[cfg_attr(...)]` \
+                     が付いた `pub mod` はモデル化できない（cfg 条件次第で \
+                     公開面がビルド構成ごとに変わり、本走査は単一のビルド \
+                     構成しか見ていないため機械的に判定できない）: \
+                     tokens[{attrs_start}..{j}]={:?}",
+                    &tokens[attrs_start..j]
+                );
+            }
+            i = j;
+            continue;
+        }
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("mod") {
+            let name_idx = i + 2;
+            let name = tokens.get(name_idx).unwrap_or_else(|| {
+                panic!(
+                    "scan_top_level_pub_mods: `pub mod` の直後にモジュール名が\
+                     見つからない（ファイル末尾で構文が打ち切られている等、\
+                     モデル化できない構造）"
+                )
+            });
+            assert!(
+                name.chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_'),
+                "scan_top_level_pub_mods: `pub mod` の直後が識別子ではない\
+                 （モデル化できない構造）: {name:?}"
+            );
+            match tokens.get(name_idx + 1).map(String::as_str) {
+                Some(";") => {
+                    out.push((name.clone(), None));
+                    i = name_idx + 2;
+                    continue;
+                }
+                Some("{") => {
+                    let body_start = name_idx + 2;
+                    let end_after_brace = skip_mod_declaration_body(tokens, name_idx + 1);
+                    let body_end = end_after_brace - 1; // 対応する `}` の index
+                    out.push((name.clone(), Some(tokens[body_start..body_end].to_vec())));
+                    i = end_after_brace;
+                    continue;
+                }
+                other => {
+                    panic!(
+                        "scan_top_level_pub_mods: `pub mod {name}` の直後が `;`／\
+                         `{{` のいずれでもない（raw identifier 形\
+                         〈`pub mod r#{name}`〉・ジェネリクス構文の混入等、\
+                         モデル化できない形。直後のトークン: {other:?}）"
+                    );
+                }
+            }
+        }
+        if tokens[i] == "mod" {
+            // 到達するのは private mod のみ（`pub mod` は上の分岐で
+            // 既に消費済み）。中身は収集せず読み飛ばす。
+            let name_idx = i + 1;
+            i = skip_mod_declaration_body(tokens, name_idx + 1);
+            continue;
+        }
+        if tokens[i] == "{" {
+            // mod 以外のブレース構造（fn 本体・impl・trait・struct 等）は
+            // 対応する `}` まで丸ごと読み飛ばす。
+            let mut depth = 1i32;
+            let mut k = i + 1;
+            while k < tokens.len() && depth > 0 {
+                match tokens[k].as_str() {
+                    "{" => depth += 1,
+                    "}" => depth -= 1,
+                    _ => {}
+                }
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `dir` から `pub mod <name>;` の解決先ファイル（`<dir>/<name>.rs` また
+/// は `<dir>/<name>/mod.rs`。Rust 2018 モジュール解決規約）を読み込み、
+/// 内容と子モジュール探索用ディレクトリ（`<dir>/<name>/`）を返す。
+/// 存在しない場合は fail-closed に panic する（`pub mod` 宣言と実ファイル
+/// のドリフトを黙って見逃さない）。
+fn resolve_external_pub_mod_file(dir: &Path, name: &str) -> (String, std::path::PathBuf) {
+    let as_file = dir.join(format!("{name}.rs"));
+    if as_file.is_file() {
+        return (read_to_string_or_panic(&as_file), dir.join(name));
+    }
+    let as_mod_dir_file = dir.join(name).join("mod.rs");
+    if as_mod_dir_file.is_file() {
+        return (read_to_string_or_panic(&as_mod_dir_file), dir.join(name));
+    }
+    panic!(
+        "resolve_external_pub_mod_file: `pub mod {name};` の解決先ファイルが\
+         見つからない（{} も {} も存在しない）",
+        as_file.display(),
+        as_mod_dir_file.display()
+    );
+}
+
+/// [`scan_top_level_pub_mods`] を再帰的に適用し、`tokens`（`dir` 直下の
+/// あるファイル、または `prefix` が指すインライン `pub mod` 本体）から
+/// 到達可能な全 `pub mod` パス（ドット区切りではなく `::` 区切り。例:
+/// `nn::rnn`）を `out` へ収集する（[`collect_public_module_paths`] の
+/// 下請け）。
+fn collect_public_module_paths_recursive(
+    tokens: &[String],
+    dir: &Path,
+    prefix: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    for (name, body) in scan_top_level_pub_mods(tokens) {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}::{name}")
+        };
+        out.insert(path.clone());
+        match body {
+            Some(inner_tokens) => {
+                // インライン `pub mod <name> { ... }` 本体内の子 `pub mod
+                // child;` は Rust 2018 の解決規約で `<dir>/<name>/child.rs`
+                // （または `<dir>/<name>/child/mod.rs`）に置かれるため、
+                // 子ディレクトリを `<dir>/<name>` へ進めてから再帰する
+                // （親の `dir` のまま再帰すると `<dir>/child.rs` を誤って
+                // 解決する。Cursor Bugbot 指摘・PR #2212）。
+                collect_public_module_paths_recursive(&inner_tokens, &dir.join(&name), &path, out);
+            }
+            None => {
+                let (content, child_dir) = resolve_external_pub_mod_file(dir, &name);
+                let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+                let child_tokens = tokenize_including_punctuation(&cleaned);
+                collect_public_module_paths_recursive(&child_tokens, &child_dir, &path, out);
+            }
+        }
+    }
+}
+
+/// facade の `src/lib.rs` から到達可能な全 `pub mod` パス（ネスト含む。
+/// 例: `nn::rnn`・`interop::onnx`・`interop::safetensors`）を再帰的に
+/// 収集する（[`custom_function_hold_doctest_globs_all_pub_modules`]
+/// 専用。codex-review 指摘・PR #2212: 旧実装 `declared_pub_mod_names` は
+/// `lib.rs` 直下の `pub mod` 宣言しか見ておらず、`nn::rnn`／
+/// `interop::onnx`／`interop::safetensors` のようなネストした公開面に
+/// 生えた合成入口〈例: `compat::extensions::CustomExt` のような trait
+/// 経由の `.custom()`〉を doctest のドリフト検査が見逃していた）。
+fn collect_public_module_paths(src_dir: &Path) -> std::collections::BTreeSet<String> {
+    let lib_rs = src_dir.join("lib.rs");
+    let content = read_to_string_or_panic(&lib_rs);
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut out = std::collections::BTreeSet::new();
+    collect_public_module_paths_recursive(&tokens, src_dir, "", &mut out);
+    out
+}
+
+/// [`collect_public_module_paths_recursive`] が、インライン `pub mod`
+/// 本体を再帰収集しつつ、private mod（`mod`／`pub(crate) mod`／
+/// `pub(super) mod`／`pub(self) mod`／`pub(in crate::a) mod`）配下の
+/// `pub mod`・fn 本体内の `pub mod` を到達不能として除外することを
+/// 固定する合成入力テスト（codex-review 指摘・PR #2212 対応の中核）。
+#[test]
+fn collect_public_module_paths_recursive_ignores_private_mod_subtree() {
+    let src = r#"
+        pub mod a {
+            pub mod extensions {
+                pub trait CustomExt {}
+            }
+            mod hidden {
+                pub mod x {}
+            }
+        }
+        pub(crate) mod c {}
+        pub(super) mod sup {}
+        pub(self) mod slf {}
+        pub(in crate::a) mod scoped {}
+        mod d;
+        fn f() {
+            pub mod not_reachable {}
+        }
+    "#;
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut out = std::collections::BTreeSet::new();
+    collect_public_module_paths_recursive(&tokens, Path::new("/nonexistent"), "", &mut out);
+    let expected: std::collections::BTreeSet<String> = ["a", "a::extensions"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    assert_eq!(
+        out, expected,
+        "private mod（scoped pub〈pub(crate)／pub(super)／pub(self)／\
+         pub(in ...)〉を含む）・fn 本体内の pub mod が誤って公開パスとして\
+         収集された、またはインライン pub mod の再帰収集に脱落がある"
+    );
+}
+
+/// インライン `pub mod outer { pub mod child; }` の `child` が
+/// `<dir>/outer/child.rs`（Rust 2018 規約）から解決され、その中の
+/// `pub mod` まで再帰収集されることを固定する（Cursor Bugbot 指摘・
+/// PR #2212: 親の `dir` のまま再帰すると `<dir>/child.rs` を誤って
+/// 解決していた）。一時ディレクトリに実ファイルを置いて検証する。
+#[test]
+fn collect_public_module_paths_recursive_resolves_file_child_of_inline_mod() {
+    let root = std::env::temp_dir().join(format!(
+        "fandhe-ai-api-surface-inline-mod-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("outer")).expect("一時ディレクトリを作成できない");
+    std::fs::write(
+        root.join("outer").join("child.rs"),
+        "pub mod grandchild {}\n",
+    )
+    .expect("child.rs を書き込めない");
+    // 誤った解決先（`<dir>/child.rs`）には別内容を置き、誤解決なら
+    // 収集結果が変わる（`wrong` が混入する）ようにする。
+    std::fs::write(root.join("child.rs"), "pub mod wrong {}\n").expect("child.rs を書き込めない");
+
+    let tokens = tokenize_including_punctuation("pub mod outer { pub mod child; }");
+    let mut out = std::collections::BTreeSet::new();
+    collect_public_module_paths_recursive(&tokens, &root, "", &mut out);
+    let _ = std::fs::remove_dir_all(&root);
+
+    let expected: std::collections::BTreeSet<String> =
+        ["outer", "outer::child", "outer::child::grandchild"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+    assert_eq!(
+        out, expected,
+        "インライン pub mod 配下のファイル子モジュールを <dir>/<outer>/child.rs から解決できていない"
+    );
+}
+
+/// `src`（コメント・リテラル除去は呼び出し元が事前に済ませた生の
+/// トークン列）から `scan_top_level_pub_mods` を呼び、panic したかどうか
+/// を [`std::panic::catch_unwind`] で観測する（[`scan_top_level_pub_mods_
+/// rejects_unmodelable_mod_forms`] 専用）。標準の panic hook が標準エラー
+/// へ出力するメッセージは各テストケースの意図した panic であり異常では
+/// ないため、走査中は一時的に hook を無効化する。
+fn scan_top_level_pub_mods_panics(src: &str) -> bool {
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(|| {
+        scan_top_level_pub_mods(&tokens);
+    });
+    std::panic::set_hook(previous_hook);
+    result.is_err()
+}
+
+/// [`scan_top_level_pub_mods`] が、モデル化できない `pub mod` 形
+/// （`#[path]`・`cfg_attr(.., path = ..)` 経由の間接 path・`#[cfg(...)]`／
+/// `#[cfg_attr(...)]` が付いた `pub mod`・raw identifier 形）を黙って
+/// 除外せず fail-closed に panic することを固定する（codex P2 指摘・
+/// PR #2212 その 2 への対応。旧テスト `scan_top_level_pub_mods_excludes_
+/// path_attribute_mod`——`#[path]` 付き `pub mod` を「非公開扱いで
+/// 除外」される前提を固定していた——を置き換える）。負例
+/// （`#[cfg(test)] mod tests {}`〈private mod への cfg は対象外〉・
+/// `#[allow(dead_code)] pub mod ok {}`〈cfg 系でも path でもない属性〉）
+/// は panic しないことも併せて固定する。
+#[test]
+fn scan_top_level_pub_mods_rejects_unmodelable_mod_forms() {
+    let panicking_cases: &[&str] = &[
+        // 1) 直接の `#[path = "..."]`。
+        r#"#[path = "custom_location.rs"] pub mod weird;"#,
+        // 2) `cfg_attr(.., path = ..)` 経由の間接 path。
+        r#"#[cfg_attr(target_os = "macos", path = "mac.rs")] pub mod weird;"#,
+        // 3) `#[cfg(...)]` が付いた `pub mod`。
+        r#"#[cfg(feature = "x")] pub mod gated;"#,
+        // 4) `#[cfg_attr(...)]`（path キーなし）が付いた `pub mod`。
+        r#"#[cfg_attr(test, allow(dead_code))] pub mod gated2;"#,
+        // 5) raw identifier 形。
+        "pub mod r#ext;",
+        // 6) 属性が複数スタックし、そのうち 1 つに cfg が含まれる場合。
+        r#"#[allow(dead_code)] #[cfg(test)] pub mod stacked;"#,
+    ];
+    for src in panicking_cases {
+        assert!(
+            scan_top_level_pub_mods_panics(src),
+            "モデル化できない pub mod 形が panic せず黙って通過した: {src:?}"
+        );
+    }
+
+    let non_panicking_cases: &[&str] = &[
+        // private mod への cfg は対象外（中身は最初から到達不能）。
+        "#[cfg(test)] mod tests {}",
+        // path でも cfg 系でもない属性は無関係。
+        "#[allow(dead_code)] pub mod ok {}",
+        // 属性なしの通常形。
+        "pub mod plain;",
+    ];
+    for src in non_panicking_cases {
+        assert!(
+            !scan_top_level_pub_mods_panics(src),
+            "モデル化可能な pub mod 形が誤って panic した: {src:?}"
+        );
+    }
+}
+
+/// `src/lib.rs` の `struct VarCustomHoldDoctestGuard;` 宣言に**直接**付いた
+/// ドキュメンテーションコメント（`///` の連続。空行・非 `///` 行で途切れた
+/// 時点で走査を止める）を、直前の `#[allow(dead_code)]`・
+/// `#[cfg(doctest)]` の並びを検証したうえで抽出する（[`custom_function_
+/// hold_doctest_probe_body_matches_fixed_contract`] 専用）。`#[path]`
+/// 付き `pub mod` の非公開扱い除外（`scan_top_level_pub_mods`）と同種の
+/// 「モデル化できない構造は解決せず fail-closed に拒否する」方針で、
+/// `#[cfg(doctest)]` が直前に見つからない・`struct VarCustomHoldDoctestGuard;`
+/// 宣言自体が見つからない場合は panic する（doc コメントの取り違えに
+/// よる drift 検査の無力化を防ぐ）。返り値は `///` 接頭辞（と直後の
+/// 1 個のスペース。rustdoc の正規化と同じ規約）を除去した行の列。
+fn extract_var_custom_hold_doctest_guard_doc(content: &str) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let struct_idx = lines
+        .iter()
+        .position(|l| l.trim() == "struct VarCustomHoldDoctestGuard;")
+        .expect(
+            "src/lib.rs に `struct VarCustomHoldDoctestGuard;` 宣言が見つからない\
+             （否定ガードの本命足場自体が削除・改名された可能性がある）",
+        );
+    assert!(
+        struct_idx >= 2,
+        "struct VarCustomHoldDoctestGuard; の直前に属性 2 行分の余地がない"
+    );
+    assert_eq!(
+        lines[struct_idx - 1].trim(),
+        "#[allow(dead_code)]",
+        "struct VarCustomHoldDoctestGuard; の直前が `#[allow(dead_code)]` ではない"
+    );
+    assert_eq!(
+        lines[struct_idx - 2].trim(),
+        "#[cfg(doctest)]",
+        "struct VarCustomHoldDoctestGuard; の直前が `#[cfg(doctest)]` ではない\
+         （本足場が `cfg(doctest)` 外で有効化され、通常ビルドを壊しうる）"
+    );
+
+    let mut doc_lines: Vec<String> = Vec::new();
+    let mut i = struct_idx - 2; // `#[cfg(doctest)]` 行の index
+    while i > 0 && lines[i - 1].trim_start().starts_with("///") {
+        i -= 1;
+        let raw = lines[i].trim_start();
+        let rest = raw.strip_prefix("///").unwrap_or(raw);
+        let rest = rest.strip_prefix(' ').unwrap_or(rest);
+        doc_lines.push(rest.to_string());
+    }
+    // 上のループは `#[cfg(doctest)]` の直前から**上へ**遡って収集する
+    // ため、収集順は文書の末尾行から先頭行への逆順になっている。
+    // 元の文書順（先頭 → 末尾）へ戻す。
+    doc_lines.reverse();
+    assert!(
+        !doc_lines.is_empty(),
+        "struct VarCustomHoldDoctestGuard; に直接付いた `///` doc コメントが\
+         見つからない"
+    );
+    doc_lines
+}
+
+/// `doc_lines`（[`extract_var_custom_hold_doctest_guard_doc`] の戻り値）
+/// から、厳密に裸の ```` ``` ```` フェンス（`ignore`／`no_run`／
+/// `compile_fail` 等の修飾を一切伴わない）で区切られた doctest ブロックを
+/// **ちょうど 1 つ**抽出し、その本文行（フェンス自体を含まない）を返す。
+/// フェンス開始行が裸の ```` ``` ```` でない場合・ブロック数が 1 で
+/// ない場合・フェンスが閉じられていない場合は fail-closed に panic する
+/// （codex-review 指摘・PR #2212: stable rustdoc は `compile_fail,EXXXX`
+/// のエラーコードを照合しないため、`compile_fail` への回帰・`ignore`
+/// 等での doctest 無効化を機械的に拒否する）。
+fn extract_single_bare_fenced_doctest_block(doc_lines: &[String]) -> Vec<String> {
+    let mut blocks: Vec<Vec<String>> = Vec::new();
+    let mut current: Option<Vec<String>> = None;
+    for line in doc_lines {
+        let trimmed = line.trim_end();
+        if let Some(body) = current.as_mut() {
+            if trimmed == "```" {
+                blocks.push(std::mem::take(body));
+                current = None;
+            } else {
+                body.push(line.clone());
+            }
+            continue;
+        }
+        // フェンス候補行の判定は「先頭の連続バッククォート数がちょうど
+        // 3」の場合に限る。本 doc コメントの地の文（このコメント自体
+        // 含む）は旧実装の説明で ```` ```compile_fail,E0599 ```` の
+        // ような 4 連続バッククォート（本規約の quad-fence 引用記法。
+        // 3 連続を含む文字列をインライン引用する際に使う）を使うため、
+        // 先頭 3 連続だけで判定すると地の文を誤ってフェンス開始と
+        // 誤検出する（自己レビューで判明）。
+        let leading_backticks = trimmed
+            .trim_start()
+            .chars()
+            .take_while(|&c| c == '`')
+            .count();
+        if leading_backticks == 3 {
+            assert_eq!(
+                trimmed.trim_start(),
+                "```",
+                "VarCustomHoldDoctestGuard のフェンス開始行が裸の ``` ではない\
+                 （`ignore`／`no_run`／`compile_fail` 等の修飾が付いている。\
+                 stable rustdoc はエラーコードを照合しないため compile_fail への\
+                 回帰は空合格を招く）: {trimmed:?}"
+            );
+            current = Some(Vec::new());
+        }
+    }
+    assert!(
+        current.is_none(),
+        "VarCustomHoldDoctestGuard の doctest フェンスが閉じられていない"
+    );
+    assert_eq!(
+        blocks.len(),
+        1,
+        "VarCustomHoldDoctestGuard の doctest ブロック数が 1 ではない\
+         （正のプローブ 1 ブロック方式からの逸脱）: {}",
+        blocks.len()
+    );
+    blocks.into_iter().next().unwrap_or_default()
+}
+
+/// `block_lines`（doctest ブロック本文）を、`use fandhe_ai::<mod>::*;`
+/// 形（ネストした `pub mod` の glob import。クレートルート自体の
+/// `use fandhe_ai::*;` は対象外）の集合と、それ以外の本文行に分離する
+/// （[`custom_function_hold_doctest_globs_all_pub_modules`]・
+/// [`custom_function_hold_doctest_probe_body_matches_fixed_contract`]
+/// 共用）。
+fn split_glob_imports_and_probe_body(
+    block_lines: &[String],
+) -> (std::collections::BTreeSet<String>, Vec<String>) {
+    let mut globs = std::collections::BTreeSet::new();
+    let mut body = Vec::new();
+    for line in block_lines {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("use fandhe_ai::")
+            && let Some(path) = rest.strip_suffix("::*;")
+            && !path.is_empty()
+        {
+            globs.insert(path.to_string());
+            continue;
+        }
+        body.push(line.clone());
+    }
+    (globs, body)
+}
+
+/// `VarCustomHoldDoctestGuard` の唯一の doctest ブロックが glob import
+/// するネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言
+/// 集合が一致することを固定する（doctest 本文と `pub mod` 宣言の
+/// ドリフト防止。新しい `pub mod` を facade へ追加した際、doctest 側の
+/// `use` 一覧の更新を機械的に強制する）。
+#[test]
+fn custom_function_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_var_custom_hold_doctest_guard_doc(&content);
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "VarCustomHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`custom_function_hold_doctest_globs_all_pub_modules`] が glob import
+/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
+/// **glob 以外の本文**（`__FandheHoldProbe` トレイト定義・`Var`／`Tape`／
+/// `compat::Sequential` への実装・`__probe_*` 関数群）が固定文言
+/// [`HOLD_PROBE_BODY`] と 1 行たりとも違わず一致することを固定する
+/// （codex-review 指摘・PR #2212: rustdoc の `# ` 隠し行・プローブの
+/// 削除・別名へのシャドーイング等で正のプローブを骨抜きにする改変を
+/// 機械的に拒否する。glob 集合のドリフト検査だけでは本文の改変・
+/// 削除を検出できないため、両テストは互いに独立した防御層を成す）。
+#[test]
+fn custom_function_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_var_custom_hold_doctest_guard_doc(&content);
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, HOLD_PROBE_BODY,
+        "VarCustomHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 HOLD_PROBE_BODY からドリフトしている。正のプローブ\
+         （__FandheHoldProbe トレイト・各型への実装・__probe_* 関数）の\
+         削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`custom_function_hold_doctest_probe_body_matches_fixed_contract`] が
+/// 要求する固定文言。`crates/facade/src/lib.rs` の `VarCustomHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import
+/// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
+/// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
+const HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+struct __FandheHoldMarker;\n\
+\n\
+trait __FandheHoldProbe {\n\
+\x20\x20\x20\x20fn custom(&self) -> __FandheHoldMarker;\n\
+\x20\x20\x20\x20fn add_custom(&self) -> __FandheHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn custom(&self) -> __FandheHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_custom(&self) -> __FandheHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn custom(&self) -> __FandheHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_custom(&self) -> __FandheHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheHoldProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn custom(&self) -> __FandheHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_custom(&self) -> __FandheHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = fandhe_ai::Var::custom(x);\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = x.custom();\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = fandhe_ai::Var::add_custom(x);\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = x.add_custom();\n\
+}\n\
+\n\
+fn __probe_tape(x: &fandhe_ai::Tape) {\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = fandhe_ai::Tape::custom(x);\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = x.custom();\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = fandhe_ai::Tape::add_custom(x);\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = x.add_custom();\n\
+}\n\
+\n\
+fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = fandhe_ai::compat::Sequential::custom(x);\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = x.custom();\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = fandhe_ai::compat::Sequential::add_custom(x);\n\
+\x20\x20\x20\x20let _: __FandheHoldMarker = x.add_custom();\n\
+}";
+
+/// facade（crates.io 公開クレート `fandhe-ai`）の `Cargo.toml` が
+/// `doctest = false` を持たないことを固定する（イシュー #2064 PR #2212
+/// codex-review 指摘への対応: `[lib] doctest = false` を設定されると
+/// `VarCustomHoldDoctestGuard` の正のプローブ doctest が `cargo test`
+/// で一切実行されなくなり、本命ガードが静かに無力化される）。
+#[test]
+fn facade_cargo_toml_keeps_doctests_enabled() {
+    let cargo_toml = read_to_string_or_panic(&facade_crate_root().join("Cargo.toml"));
+    for line in cargo_toml.lines() {
+        let trimmed = line.trim();
+        let code_part = trimmed.split_once('#').map(|(a, _)| a).unwrap_or(trimmed);
+        let normalized: String = code_part.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_ne!(
+            normalized, "doctest=false",
+            "crates/facade/Cargo.toml が `doctest = false` を設定しており、\
+             VarCustomHoldDoctestGuard の正のプローブ doctest が実行されなく\
+             なっている（本命ガードの無力化）"
+        );
+    }
+}
+
+/// `tokens[idx]`（`"fn"` トークンであることは呼び出し元が保証する）の
+/// 直後に、通常形（`fn <target>(`／`fn <target><`）または raw
+/// identifier 形（`fn r # <target>(`／`fn r # <target><`。トークナイザ
+/// が `r#custom` を `"r"`・`"#"`・`"custom"` の 3 トークンへ分解する
+/// ため個別に判定する）で `target` という名前の宣言が続くかを判定する
+/// （[`count_fn_declarations_by_name`] 専用）。可視性・宣言文脈
+/// （inherent impl・trait impl・trait 定義〈デフォルトメソッド含む〉・
+/// blanket impl・自由関数・マクロ本体内のいずれか）は問わない——`fn`
+/// トークンの直後の位置だけで判定するため、`fn` より前に付く修飾子
+/// （`pub`／`pub(crate)`／`unsafe`／`const`／`async`／`extern "C"` 等）
+/// は本判定に一切影響しない（`fn(i32)` のような関数ポインタ型も、直後が
+/// `target` という識別子ではなく `(` のため自然に除外される）。
+fn fn_declaration_target_name_matches(tokens: &[String], idx: usize, target: &str) -> bool {
+    debug_assert_eq!(tokens.get(idx).map(String::as_str), Some("fn"));
+    // raw identifier 形（`fn r#custom(`）。
+    if tokens.get(idx + 1).map(String::as_str) == Some("r")
+        && tokens.get(idx + 2).map(String::as_str) == Some("#")
+        && tokens.get(idx + 3).map(String::as_str) == Some(target)
+        && matches!(
+            tokens.get(idx + 4).map(String::as_str),
+            Some("(") | Some("<")
+        )
+    {
+        return true;
+    }
+    // 通常形（`fn custom(`）。
+    tokens.get(idx + 1).map(String::as_str) == Some(target)
+        && matches!(
+            tokens.get(idx + 2).map(String::as_str),
+            Some("(") | Some("<")
+        )
+}
+
+/// `tokens`（コメント・リテラル除去済みソースのトークン列）中に現れる
+/// `fn <target_name>` 宣言の総数を数える（[`workspace_declares_custom_
+/// fn_only_on_tape`] 専用。可視性・宣言文脈を問わず数え上げる契約は
+/// [`fn_declaration_target_name_matches`] のドキュメンテーションコメント
+/// 参照）。
+fn count_fn_declarations_by_name(tokens: &[String], target_name: &str) -> usize {
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(i, token)| {
+            token.as_str() == "fn" && fn_declaration_target_name_matches(tokens, *i, target_name)
+        })
+        .count()
+}
+
+/// [`fn_declaration_target_name_matches`]／[`count_fn_declarations_by_name`]
+/// が、可視性・宣言文脈（trait のデフォルトメソッド・blanket impl・
+/// 参照型への impl・raw identifier・extern ABI 修飾子付き）を問わず
+/// `fn custom`／`fn add_custom` 宣言を検出し、コメント・文字列・raw
+/// 文字列中の同型テキストは検出しないことを固定する合成入力テスト
+/// （[`workspace_declares_custom_fn_only_on_tape`] の検出ロジック自体の
+/// 自己テスト）。
+#[test]
+fn count_fn_declarations_by_name_detects_all_declaration_contexts() {
+    let positive_cases_custom: &[&str] = &[
+        // trait のデフォルトメソッド＋空 impl。
+        "pub trait Ext { fn custom(&self) -> u8 { 0 } } impl Ext for Var {}",
+        // blanket impl。
+        "impl<T> Ext for T { fn custom(&self) {} }",
+        // 参照型・ライフタイム省略への impl。
+        "impl Ext for &Var<'_> { fn custom(&self) {} }",
+        // raw identifier。
+        "impl Var { fn r#custom() {} }",
+        // extern ABI 修飾子付き（`fn` トークン直後の判定には無関係だが、
+        // `fn` より前の修飾子が判定を妨げないことも併せて確認する）。
+        "impl Var { pub extern \"C\" fn custom() {} }",
+        // マクロ本体内。
+        "macro_rules! m { () => { fn custom(&self) {} } }",
+    ];
+    for src in positive_cases_custom {
+        let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        assert_eq!(
+            count_fn_declarations_by_name(&tokens, "custom"),
+            1,
+            "src={src:?} tokens={tokens:?}"
+        );
+    }
+
+    let positive_cases_add_custom: &[&str] = &[
+        "trait Ext { fn add_custom<T>(&self, v: T); }",
+        "impl Var { fn r#add_custom() {} }",
+    ];
+    for src in positive_cases_add_custom {
+        let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        assert_eq!(
+            count_fn_declarations_by_name(&tokens, "add_custom"),
+            1,
+            "src={src:?} tokens={tokens:?}"
+        );
+    }
+
+    // 負例: コメント・文字列・raw 文字列中は検出しない。関数ポインタ型
+    // （`fn(...)`）・別名関数（`custom_extra`）も検出しない。
+    let negative_cases: &[&str] = &[
+        "// fn custom(&self) {}",
+        "let s = \"fn custom(\";",
+        "let r = r#\"fn custom(\"#;",
+        "fn custom_extra(&self) {}",
+        "type F = fn(u8) -> u8;",
+        "#[cfg(test)] mod tests { fn helper() {} }",
+    ];
+    for src in negative_cases {
+        let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        assert_eq!(
+            count_fn_declarations_by_name(&tokens, "custom"),
+            0,
+            "src={src:?} tokens={tokens:?}"
+        );
+    }
+}
+
+/// `crates/` 直下の各クレート（非公開クレート `docs-site`・
+/// `bench-harness`・`guardrail`・`self-repair` を含む全メンバー）を
+/// 走査し、その `crate_dir/src/` 配下の相対パスを返す（`crates/<name>`
+/// 自体は含まない）。
+fn workspace_crates_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/<crate>/ の親ディレクトリ（crates/）が取得できない")
+        .to_path_buf()
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、コメント・リテラルを
+/// 除去したトークン列上で `fn`／（`custom`｜`add_custom`｜raw identifier
+/// 形）の宣言が、可視性・宣言文脈（inherent impl・trait impl・trait
+/// 定義〈デフォルトメソッド含む〉・blanket impl・自由関数・マクロ本体
+/// 内のいずれか）を問わず現れる箇所を全て数え上げ、その集合が
+/// `crates/autodiff/src/tape.rs`（`Tape::custom`。イシュー #1946 案 B）
+/// の 1 件のみであることを固定する（workspace 全体の定義元インベント
+/// リ。イシュー #2064 PR #2212 codex-review 指摘〈P2〉への対応: facade
+/// のソース走査・`VarCustomHoldDoctestGuard` の正のプローブはいずれも
+/// 「facade から到達可能か」しか見ないため、facade の外
+/// （`onnx-interop`・`backend-*`・`tensor-core` 等）に `custom`／
+/// `add_custom` を持つ trait impl が新設され、facade がそれを glob
+/// できる形で将来公開してしまった場合に備え、そもそもの定義元を先に
+/// 塞ぐ多層防御の最内層とする）。
+#[test]
+fn workspace_declares_custom_fn_only_on_tape() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in ["custom", "add_custom"] {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> =
+        [("autodiff/src/tape.rs::custom".to_string(), 1usize)]
+            .into_iter()
+            .collect();
+
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の `fn custom`／`fn add_custom` 宣言\
+         集合が `crates/autodiff/src/tape.rs::custom`（1 件）のみという\
+         期待と一致しない（過不足いずれも fail-closed に検出する。新たな\
+         定義元が見つかった場合、それが承認済みの §12.5 (b) 実装なのか\
+         迂回経路の混入なのかを確認すること）: {found:?}"
+    );
+}
+
+/// `content`（facade src の 1 ファイル）を走査し、本ファイルのソース
+/// 走査ガード群がモデル化できない構造（[`facade_source_uses_only_
+/// modelable_structures`] 専用）を全て列挙する。違反時は個別のオフェンス
+/// 文字列を返す（空なら違反なし）。検出対象:
+/// - `#[..]`／`#![..]` 内の `path` 識別子（`#[path]`。走査ロジックが
+///   実ファイルを特定できない構造）
+/// - `#[cfg(...)]`／`#[cfg_attr(...)]` が付いた `pub use`／`pub mod`
+///   （複数属性スタックも許容。cfg 条件次第で公開面がビルド構成ごとに
+///   変わり、単一のビルド構成しか見ない本走査では機械的に判定できない）
+/// - `include!`（`include_str!`／`include_bytes!` は対象外。ファイル
+///   内容を静的にインライン展開し、ソース走査が見ているテキストと
+///   実際にコンパイルされる内容が乖離しうる）
+/// - `macro_rules!` 定義（マクロ展開後の実際のアイテムをソース走査が
+///   静的に把握できない）
+/// - `extern crate`（2018 edition 以降では通常不要な明示的クレート
+///   参照で、想定外の別名 import 経路になりうる）
+/// - raw identifier（`r#ident`。`declares_fn_named` 等は raw identifier
+///   を正規化して検出するが、本走査対象の構造検査自体は raw identifier
+///   の使用そのものを許さない契約とする——facade src には raw
+///   identifier を要する識別子〈予約語衝突〉が存在しないため）
+/// - `pub use ...::*`（glob 再エクスポート。再エクスポートされる識別子
+///   集合が静的に列挙できなくなる）
+/// - `pub use` の葉が `self`（`pub use foo::{self, bar};` 等。モジュール
+///   自体を別名で再エクスポートする形で、[`collect_pub_use_leaves`] の
+///   葉 allowlist 検査の対象外になってしまう）
+fn scan_facade_unmodelable_structures(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offenses = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        // 属性ブロック（`#[...]`／`#![...]`）。
+        if tokens[i] == "#" {
+            let mut open_idx = i + 1;
+            if tokens.get(open_idx).map(String::as_str) == Some("!") {
+                open_idx += 1;
+            }
+            if tokens.get(open_idx).map(String::as_str) == Some("[") {
+                let attr_start = i;
+                let mut depth = 1i32;
+                let mut m = open_idx + 1;
+                while m < tokens.len() && depth > 0 {
+                    match tokens[m].as_str() {
+                        "[" => depth += 1,
+                        "]" => depth -= 1,
+                        _ => {}
+                    }
+                    m += 1;
+                }
+                if tokens[attr_start..m].iter().any(|t| t == "path") {
+                    offenses.push(format!(
+                        "attribute contains `path` identifier: {:?}",
+                        &tokens[attr_start..m]
+                    ));
+                }
+                if tokens[attr_start..m]
+                    .iter()
+                    .any(|t| t == "cfg" || t == "cfg_attr")
+                {
+                    // 属性列直後（複数スタックも許容）が `pub use`／
+                    // `pub mod` であれば違反。
+                    let mut after = m;
+                    loop {
+                        if tokens.get(after).map(String::as_str) != Some("#") {
+                            break;
+                        }
+                        let mut next_open = after + 1;
+                        if tokens.get(next_open).map(String::as_str) == Some("!") {
+                            next_open += 1;
+                        }
+                        if tokens.get(next_open).map(String::as_str) != Some("[") {
+                            break;
+                        }
+                        let mut d2 = 1i32;
+                        let mut kk = next_open + 1;
+                        while kk < tokens.len() && d2 > 0 {
+                            match tokens[kk].as_str() {
+                                "[" => d2 += 1,
+                                "]" => d2 -= 1,
+                                _ => {}
+                            }
+                            kk += 1;
+                        }
+                        after = kk;
+                    }
+                    let gated_pub_use_or_mod = tokens.get(after).map(String::as_str) == Some("pub")
+                        && matches!(
+                            tokens.get(after + 1).map(String::as_str),
+                            Some("use") | Some("mod")
+                        );
+                    if gated_pub_use_or_mod {
+                        offenses.push(format!(
+                            "cfg/cfg_attr gates pub use/pub mod: {:?}",
+                            &tokens[attr_start..m]
+                        ));
+                    }
+                }
+                i = m;
+                continue;
+            }
+        }
+        if tokens[i] == "include" && tokens.get(i + 1).map(String::as_str) == Some("!") {
+            offenses.push("include! macro invocation".to_string());
+        }
+        if tokens[i] == "macro_rules" && tokens.get(i + 1).map(String::as_str) == Some("!") {
+            offenses.push("macro_rules! definition".to_string());
+        }
+        if tokens[i] == "extern" && tokens.get(i + 1).map(String::as_str) == Some("crate") {
+            offenses.push("extern crate declaration".to_string());
+        }
+        if tokens[i] == "r"
+            && tokens.get(i + 1).map(String::as_str) == Some("#")
+            && tokens
+                .get(i + 2)
+                .and_then(|t| t.chars().next())
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            offenses.push(format!("raw identifier r#{}", tokens[i + 2]));
+        }
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            // use tree の内部に `;` は現れないため、次の `;` までを
+            // この文のスパンとみなす。
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let span_end = (end + 1).min(tokens.len());
+            let span = &tokens[i..span_end];
+            if span.iter().any(|t| t == "*") {
+                offenses.push(format!("pub use に glob（`*`）を含む: {span:?}"));
+            }
+            if span.iter().any(|t| t == "self") {
+                offenses.push(format!("pub use に `self` リーフを含む: {span:?}"));
+            }
+            i = span_end;
+            continue;
+        }
+        i += 1;
+    }
+    offenses
+}
+
+/// facade src 全体が [`scan_facade_unmodelable_structures`] の違反を
+/// 一切含まないことを固定する（イシュー #2064 codex P2 指摘への対応。
+/// `facade_source_declares_no_custom_fn_in_any_context`・
+/// `workspace_declares_custom_fn_only_on_tape` 等の否定ガードは、いずれも
+/// 「コメント・文字列リテラルを除去したソーステキストのトークン走査」
+/// という前提の上に成り立つ。この前提を崩す構造（`#[path]` による
+/// ファイル分割の隠蔽・`cfg` によるビルド構成依存の公開面・
+/// `include!`／`macro_rules!` によるテキスト非静的な展開・raw
+/// identifier・glob 再エクスポート・`self` リーフ再エクスポート）が
+/// facade src に混入すると、上記ガード群がソースを正しく読めなくなる
+/// （旧実装が `#[path]` 付き `pub mod` を「黙って除外」していたのと
+/// 同型の盲点。本テストはそれらの構造そのものの混入を未然に禁止する）。
+#[test]
+fn facade_source_uses_only_modelable_structures() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_facade_unmodelable_structures(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の src/ にソース走査ガードがモデル化できない構造が\
+         見つかった: {offending:?}"
+    );
+}
+
+/// [`scan_facade_unmodelable_structures`] の自己テスト（正例・負例の
+/// 合成入力）。
+#[test]
+fn scan_facade_unmodelable_structures_detects_each_category() {
+    let positive_cases: &[&str] = &[
+        r#"#[path = "custom_location.rs"] pub mod weird;"#,
+        r#"#[cfg(test)] pub use foo::Bar;"#,
+        r#"#[cfg_attr(test, allow(dead_code))] pub mod gated;"#,
+        r#"include!("generated.rs");"#,
+        r#"macro_rules! m { () => {}; }"#,
+        r#"extern crate serde;"#,
+        r#"fn f() { let x = r#move; }"#,
+        r#"pub use foo::bar::*;"#,
+        r#"pub use foo::{self, bar};"#,
+    ];
+    for src in positive_cases {
+        let offenses = scan_facade_unmodelable_structures(src);
+        assert!(!offenses.is_empty(), "正例が検出されなかった: {src:?}");
+    }
+
+    let negative_cases: &[&str] = &[
+        // include_str!／include_bytes! は対象外。
+        r#"const X: &str = include_str!("x.txt");"#,
+        r#"const Y: &[u8] = include_bytes!("y.bin");"#,
+        // cfg でも path でもない属性。
+        r#"#[allow(dead_code)] pub mod ok {}"#,
+        // 非公開 mod への cfg（`pub` を伴わない）は対象外。
+        r#"#[cfg(test)] mod tests {}"#,
+        // 通常の pub use（glob・self リーフなし）。
+        r#"pub use foo::{Bar, Baz};"#,
+        // fn 内の通常マクロ呼び出し（`println!`）は対象外。
+        r#"fn f() { println!("x"); }"#,
+        // raw 文字列・日本語コメント中の疑似トークンは無視される。
+        "// r#custom や include!(\"x\") は日本語コメント中の言及\n\
+         let s = r#\"raw include!(\"y\") text\"#;",
+    ];
+    for src in negative_cases {
+        let offenses = scan_facade_unmodelable_structures(src);
+        assert!(
+            offenses.is_empty(),
+            "負例が誤って検出された: {src:?} -> {offenses:?}"
+        );
+    }
+}
+
+/// `path_tokens`（`pub use` の `use` の直後から終端 `;` の手前までの
+/// トークン列。例: `foo::{bar, baz as Qux}`）を use tree として展開し、
+/// 各終端エントリの**ソース側**の最終パスセグメント（`as` による
+/// ローカル別名は無視する。`baz as Qux` の葉は `Qux` ではなく `baz`）を
+/// 集めて返す（[`facade_pub_use_leaves_are_not_modules`] 専用）。`{}`
+/// ネスト・`as`・`self`・先頭 `::`・末尾カンマを扱う。`*`（glob）は
+/// 個別の識別子を持たないため葉として数えない（glob 自体の混入は
+/// [`facade_source_uses_only_modelable_structures`] が別途禁止する）。
+fn collect_pub_use_leaves(path_tokens: &[String]) -> Vec<String> {
+    /// 1 つの use tree ノード（単一パス、または `{ ... }` グループ）を
+    /// `tokens[i..]` から解析し、葉を `out` へ積みながら消費後の index
+    /// を返す（[`collect_pub_use_leaves`] の下請け）。
+    fn parse_tree(tokens: &[String], mut i: usize, out: &mut Vec<String>) -> usize {
+        // 先頭の `::`（絶対パス）を読み飛ばす。
+        if tokens.get(i).map(String::as_str) == Some(":")
+            && tokens.get(i + 1).map(String::as_str) == Some(":")
+        {
+            i += 2;
+        }
+        let mut last_segment: Option<String> = None;
+        loop {
+            match tokens.get(i).map(String::as_str) {
+                Some("{") => {
+                    // グループ: 直前のパス接頭辞（あれば）は葉ではなく
+                    // 単なる修飾子のため捨て、グループ内の各要素を
+                    // 再帰的に展開する。
+                    i += 1;
+                    loop {
+                        match tokens.get(i).map(String::as_str) {
+                            Some("}") => {
+                                i += 1;
+                                break;
+                            }
+                            Some(",") => {
+                                i += 1;
+                            }
+                            None => break,
+                            _ => {
+                                i = parse_tree(tokens, i, out);
+                            }
+                        }
+                    }
+                    return i;
+                }
+                Some("*") => {
+                    // glob: 個別の葉を持たない。
+                    return i + 1;
+                }
+                Some(seg) if seg != "as" && seg != "," && seg != "}" => {
+                    last_segment = Some(seg.to_string());
+                    i += 1;
+                    if tokens.get(i).map(String::as_str) == Some(":")
+                        && tokens.get(i + 1).map(String::as_str) == Some(":")
+                    {
+                        i += 2;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            break;
+        }
+        if tokens.get(i).map(String::as_str) == Some("as") {
+            // ローカル別名: ソース側の最終セグメント（`last_segment`）を
+            // 葉として採用し、別名自体（`tokens[i + 1]`）は無視する。
+            i += 2;
+        }
+        if let Some(seg) = last_segment {
+            out.push(seg);
+        }
+        i
+    }
+
+    let mut i = 0usize;
+    let mut out = Vec::new();
+    while i < path_tokens.len() {
+        match path_tokens.get(i).map(String::as_str) {
+            Some(",") => {
+                i += 1;
+            }
+            None => break,
+            _ => {
+                i = parse_tree(path_tokens, i, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// [`collect_pub_use_leaves`] の合成入力テスト。
+#[test]
+fn collect_pub_use_leaves_expands_nested_groups_and_source_side_renames() {
+    let cases: &[(&str, &[&str])] = &[
+        ("a::{b::{c, D}, e as F, g::*}", &["c", "D", "e"]),
+        ("::fandhe_ai_autodiff as ad", &["fandhe_ai_autodiff"]),
+        ("crate::hidden::ext as Ext", &["ext"]),
+        ("foo::{Bar, Baz}", &["Bar", "Baz"]),
+    ];
+    for (src, expected) in cases {
+        let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let leaves = collect_pub_use_leaves(&tokens);
+        assert_eq!(leaves, expected.to_vec(), "src={src:?} leaves={leaves:?}");
+    }
+}
+
+/// [`facade_pub_use_leaves_are_not_modules`] が要求する、facade src で
+/// 承認済みの小文字始まりの `pub use` 葉（関数の再エクスポート）の
+/// allowlist。facade は型を UpperCamelCase・関数を snake_case で公開する
+/// 既存の命名規約に従うため、小文字始まりの葉は「関数の再エクスポート」
+/// である契約とする。列挙は 2026-09 時点の実際の facade src を走査した
+/// 結果を正とする（`crates/facade/src/data.rs`・`interop/safetensors.rs`・
+/// `optim.rs`・`compat/mod.rs` の各 `pub use`）。
+const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
+    // `compat/mod.rs`（`compat::array`。イシュー #411）。
+    "array",
+    // `interop/safetensors.rs`（イシュー #2019）。
+    "load_safetensors_f32",
+    "load_safetensors_f32_from_bytes",
+    "require_keys",
+    "save_safetensors_f32",
+    "save_safetensors_f32_to_bytes",
+    // `optim.rs`（イシュー #961 ほか。grad clipping／AMP 関数群）。
+    "clip_grad_norm",
+    "clip_grad_value",
+    "global_grad_norm",
+    "has_non_finite",
+    "scale_grads",
+    "scale_loss",
+    "unscale_grads",
+];
+
+/// facade src の全 `pub use` 文（`pub(..) use` はスコープ付き可視性の
+/// ため対象外。`pub` トークン直後が `use` のもののみ対象）を走査し、
+/// 各文の葉（[`collect_pub_use_leaves`]。ソース側・rename 前）のうち
+/// 小文字始まりのものが [`LOWERCASE_PUB_USE_LEAF_ALLOWLIST`] と完全に
+/// 一致することを固定する（イシュー #2064 codex P2 指摘への対応の一環。
+/// 小文字始まりの葉で allowlist にないものは、`pub use fandhe_ai_
+/// autodiff::nn as ad_nn;` のような「モジュールを別名で再エクスポート
+/// する」迂回経路の兆候として fail-closed に拒否する。`pub(crate) use`
+/// は `tokens[i]=="pub" && tokens[i+1]=="use"` の完全一致でしか反応
+/// しないため対象外——`pub(crate) use hidden::ext;` は `tokens[i+1]`
+/// が `(` になり葉として集計されない）。
+#[test]
+fn facade_pub_use_leaves_are_not_modules() {
+    let src_dir = facade_crate_root().join("src");
+    let mut unexpected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    visit_rs_files(&src_dir, &mut |_path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let mut i = 0usize;
+        while i < tokens.len() {
+            if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let mut end = i + 2;
+                while end < tokens.len() && tokens[end] != ";" {
+                    end += 1;
+                }
+                let leaves = collect_pub_use_leaves(&tokens[i + 2..end.min(tokens.len())]);
+                for leaf in leaves {
+                    if leaf.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                        && !LOWERCASE_PUB_USE_LEAF_ALLOWLIST.contains(&leaf.as_str())
+                    {
+                        unexpected.insert(leaf);
+                    }
+                }
+                i = (end + 1).min(tokens.len());
+                continue;
+            }
+            i += 1;
+        }
+    });
+    assert!(
+        unexpected.is_empty(),
+        "facade の pub use に allowlist 外の小文字葉が見つかった\
+         （モジュールの誤再エクスポートの可能性がある）: {unexpected:?}"
+    );
+}
+
+/// [`facade_pub_use_leaves_are_not_modules`] の検出ロジック自体の
+/// 自己テスト（合成入力）。
+#[test]
+fn facade_pub_use_leaves_are_not_modules_detects_unapproved_lowercase_leaf() {
+    fn unexpected_lowercase_leaves(content: &str) -> std::collections::BTreeSet<String> {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let mut unexpected = std::collections::BTreeSet::new();
+        let mut i = 0usize;
+        while i < tokens.len() {
+            if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let mut end = i + 2;
+                while end < tokens.len() && tokens[end] != ";" {
+                    end += 1;
+                }
+                let leaves = collect_pub_use_leaves(&tokens[i + 2..end.min(tokens.len())]);
+                for leaf in leaves {
+                    if leaf.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                        && !LOWERCASE_PUB_USE_LEAF_ALLOWLIST.contains(&leaf.as_str())
+                    {
+                        unexpected.insert(leaf);
+                    }
+                }
+                i = (end + 1).min(tokens.len());
+                continue;
+            }
+            i += 1;
+        }
+        unexpected
+    }
+
+    // 正例: モジュールを別名で再エクスポートする迂回経路。
+    let leaked = unexpected_lowercase_leaves("pub use fandhe_ai_autodiff::nn as ad_nn;");
+    assert!(
+        leaked.contains("nn"),
+        "モジュールの別名再エクスポートが検出されなかった: {leaked:?}"
+    );
+
+    // 負例: `pub(crate) use` は葉として集計されない。
+    let scoped = unexpected_lowercase_leaves("pub(crate) use hidden::ext;");
+    assert!(
+        scoped.is_empty(),
+        "pub(crate) use が誤って葉として集計された: {scoped:?}"
+    );
+
+    // 負例: allowlist 内の既知の関数再エクスポート。
+    let approved = unexpected_lowercase_leaves("pub use array::{ArrayData, array};");
+    assert!(
+        approved.is_empty(),
+        "allowlist 内の葉が誤って違反として検出された: {approved:?}"
+    );
 }
