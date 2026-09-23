@@ -5137,6 +5137,15 @@ impl MetalBackendOps {
                     rhs: leaf.shape().to_vec(),
                 }));
             }
+            // `leaf.contiguous()` は非連続 Tensor（broadcast 由来等）に対し
+            // 内部で `Vec::with_capacity(numel)` を確保する。numel が usize に
+            // 収まっても必要バイト数が isize::MAX を超えると capacity overflow
+            // で panic しうるため（本番経路 panic 禁止規約違反）、`contiguous()`
+            // 呼び出し前に `checked_bytes_for::<f32>` で確保可能性を検証する
+            // （CUDA 側 `CudaBackendOps::run_fused_elementwise_allowlist` と
+            // 同型の修正。codex-review 指摘 PRRT_kwDOTuUCJc6lE7o4。イシュー
+            // #2085）。
+            checked_bytes_for::<f32>(leaf.shape()).map_err(BackendError::ShapeMismatch)?;
             leaf_slices.push(leaf.contiguous());
         }
         let mut slices: Vec<&[f32]> = Vec::with_capacity(leaf_slices.len());
