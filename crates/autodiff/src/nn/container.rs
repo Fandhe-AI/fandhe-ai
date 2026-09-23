@@ -235,26 +235,33 @@ impl Module for ModuleList {
     /// 再帰的な子別スナップショット方式へ変更）。全子 `Module` へ
     /// 層順に伝播する。`Module::load_state_dict`（本ファイル冒頭 doc が
     /// 参照する `module.rs`）と同型の**ベストエフォート・ロールバック**:
-    /// 子の 1 つが `Err` を返した場合、それより前に適用済みの子を逆順に
-    /// 元の状態へ戻す（`freeze()` が途中で失敗しても「一部の層だけ
-    /// 凍結された」状態を残さない意図。`Module::set_requires_grad`
-    /// 既定実装 doc「fail-closed」節参照）。
+    /// 子の 1 つが `Err` を返した場合、それより前に適用済みの子
+    /// **と失敗した子自身**（`0..=index`。逆順。P1 是正・#2234 レビュー
+    /// 指摘 `PRRT_kwDOTuUCJc6lE8Gn`）を元の状態へ戻す（`freeze()` が
+    /// 途中で失敗しても「一部の層だけ凍結された」状態を残さない意図。
+    /// `Module::set_requires_grad` 既定実装 doc「fail-closed」節参照）。
+    /// 個々のロールバックが失敗しても打ち切らず、残りの子のロール
+    /// バックは続行する（1 子が復元不能でも、それより前の適用済みの
+    /// 子まで未復元のまま諦めない）。
     ///
     /// # 入れ子コンテナの混在状態（P1 是正・#2234 レビュー指摘）
     ///
     /// 子が入れ子の `ModuleList`／`Sequential`（[`Module::
-    /// as_module_list`] が `Some` を返す）である場合、その子は内部に
-    /// 混在状態（一部凍結・一部解凍）を持ちうる。単純に集約 bool 1 つを
-    /// スナップショットして `set_requires_grad(bool)` で復元すると、
-    /// 復元時に子の全孫へ同一値が強制され混在状態を破壊してしまう
-    /// （旧実装の fail-closed 契約違反）。このため `snapshot_requires_grad`
-    /// で子孫の bool を末端層単位まで再帰的にスナップショットし、
-    /// `restore_requires_grad` で同じ構造をたどって 1 つずつ復元する
-    /// （`RequiresGradSnapshot::Nested` の子数が実行時の子数と一致しない
-    /// 場合は形状不一致として `InvalidArgument` を返す。ロールバック中に
-    /// 構造が変わることは通常起こらないが、fail-closed のため検査する）。
-    /// ロールバック自体が失敗した場合は、その旨を明示した
-    /// `InvalidArgument` を返す（`load_state_dict` と同じ方針）。
+    /// as_module_list`] が `Some` を返す）または `ModuleDict`
+    /// （[`Module::as_module_dict`] が `Some` を返す。第 2 ラウンドの
+    /// レビュー是正・cursor[bot] `PRRT_kwDOTuUCJc6lE80z`）である場合、
+    /// その子は内部に混在状態（一部凍結・一部解凍）を持ちうる。単純に
+    /// 集約 bool 1 つをスナップショットして `set_requires_grad(bool)` で
+    /// 復元すると、復元時に子の全孫へ同一値が強制され混在状態を破壊
+    /// してしまう（旧実装の fail-closed 契約違反）。このため
+    /// `snapshot_requires_grad` で子孫の bool を末端層単位まで再帰的に
+    /// スナップショットし、`restore_requires_grad` で同じ構造をたどって
+    /// 1 つずつ復元する（`RequiresGradSnapshot::Nested`／`NestedDict` の
+    /// 子数が実行時の子数と一致しない場合は形状不一致として
+    /// `InvalidArgument` を返す。ロールバック中に構造が変わることは
+    /// 通常起こらないが、fail-closed のため検査する）。ロールバック
+    /// 自体が失敗した場合は、その旨を明示した `InvalidArgument` を
+    /// 返す（`load_state_dict` と同じ方針）。
     fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
         // 適用前の状態を層順に再帰的スナップショットとして記録する
         // （ロールバック用）。`Module::requires_grad`（既定 `true`）は
@@ -277,6 +284,15 @@ impl Module for ModuleList {
                 // （一部パラメータだけ切り替わった状態）を残している
                 // おそれがある。`previous[index]`（適用前スナップショット）
                 // で必ず復元し、fail-closed／全体ロールバック契約を守る。
+                //
+                // 1 子のロールバックが失敗しても、そこで打ち切らず
+                // 残りの子（`0..rollback_index`）のロールバックは続行
+                // する（是正。復元不能な子が 1 つあるからといって、
+                // それより前の適用済みの子——是正前の実装が確実に
+                // 復元していた範囲——まで未復元のまま諦めるのは
+                // 「全体ロールバック」契約に反する）。失敗した
+                // ロールバックはすべて集約してエラーメッセージへ含める。
+                let mut rollback_failures: Vec<String> = Vec::new();
                 for rollback_index in (0..=index).rev() {
                     let Some(rollback_module) = self.modules.get_mut(rollback_index) else {
                         continue;
@@ -284,13 +300,16 @@ impl Module for ModuleList {
                     if let Err(rollback_err) =
                         restore_requires_grad(rollback_module.as_mut(), &previous[rollback_index])
                     {
-                        return Err(AutodiffError::InvalidArgument(format!(
-                            "ModuleList::set_requires_grad: failed to apply to module {index} \
-                             ({err}), and rollback of already-applied module {rollback_index} \
-                             also failed ({rollback_err}); the ModuleList may now be left in a \
-                             partially applied state"
-                        )));
+                        rollback_failures.push(format!("module {rollback_index} ({rollback_err})"));
                     }
+                }
+                if !rollback_failures.is_empty() {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "ModuleList::set_requires_grad: failed to apply to module {index} \
+                         ({err}), and rollback also failed for: {}; the ModuleList may now be \
+                         left in a partially applied state",
+                        rollback_failures.join(", ")
+                    )));
                 }
                 return Err(err);
             }
@@ -440,22 +459,25 @@ fn restore_requires_grad(
             // `set_requires_grad` 呼び出しの当事者」でありうる。その
             // ような子は次のいずれかである:
             // (a) 状態を一切変更せず常に `Err` を返す「半端実装」
-            //     （`FailingSetRequiresGradModule` と同型）——観測可能な
-            //     状態はすでに `value` と一致しているため、余計な
-            //     `set_requires_grad` 再呼び出しで復元自体を失敗させる
-            //     必要はない
+            //     （`FailingSetRequiresGradModule` と同型）——`Err` を
+            //     返すが状態は変わらない
             // (b) 複数内部パラメータを順に変更してから失敗する複合層
             //     （`PartiallyMutatingFailingModule` と同型）——`Err` を
             //     返しつつも `value` への書き換え自体は完了している
             //     ことがある
-            // いずれも「呼び出しが `Err` を返したか」ではなく「呼び出し
-            // 後の観測可能な状態（`requires_grad()`）が `value` と一致
-            // するか」で復元成功を判定する（fail-closed を保ちつつ、
-            // 復元自体は完了しているのに `Err` を理由に以降のロール
-            // バックを打ち切ってしまう誤検知を避ける）。
-            if module.requires_grad() == *value {
-                return Ok(());
-            }
+            // 呼び出し**前**に「すでに一致しているか」を見て早期 `Ok`
+            // にする最適化は行わない（`Module` は外部実装可能で
+            // `requires_grad()` が既定 `true` のまま・`set_requires_grad`
+            // だけを正しくオーバーライドする実装もありうるため。この
+            // 場合スナップショット `Leaf(true)` と実際の呼び出し前の値
+            // `true` が一致していても、実際に `set_requires_grad(*value)`
+            // を呼ばなければ復元されない）。したがって常に
+            // `set_requires_grad` を実際に呼び、それが `Err` を返した
+            // 場合に限り「呼び出し後の観測可能な状態
+            // （`requires_grad()`）が `value` と一致するか」で復元成功
+            // を判定する（fail-closed を保ちつつ、(a)(b) のように復元
+            // 自体は完了しているのに `Err` を理由に以降のロールバックを
+            // 打ち切ってしまう誤検知を避ける）。
             match module.set_requires_grad(*value) {
                 Ok(()) => Ok(()),
                 Err(err) => {
@@ -942,6 +964,11 @@ impl Module for ModuleDict {
                 // 適用済みの子（`0..index`）に加え、失敗した子自身
                 // （`index`）も逆順に元の状態へ戻す
                 // （`ModuleList::set_requires_grad` と同じ理由）。
+                //
+                // 1 子のロールバックが失敗しても打ち切らず、残りの子の
+                // ロールバックは続行する（`ModuleList::set_requires_grad`
+                // と同じ是正。理由も同じ）。
+                let mut rollback_failures: Vec<String> = Vec::new();
                 for rollback_index in (0..=index).rev() {
                     let Some((_, rollback_module)) = self.modules.get_mut(rollback_index) else {
                         continue;
@@ -949,13 +976,16 @@ impl Module for ModuleDict {
                     if let Err(rollback_err) =
                         restore_requires_grad(rollback_module.as_mut(), &previous[rollback_index])
                     {
-                        return Err(AutodiffError::InvalidArgument(format!(
-                            "ModuleDict::set_requires_grad: failed to apply to module {index} \
-                             ({err}), and rollback of already-applied module {rollback_index} \
-                             also failed ({rollback_err}); the ModuleDict may now be left in a \
-                             partially applied state"
-                        )));
+                        rollback_failures.push(format!("module {rollback_index} ({rollback_err})"));
                     }
+                }
+                if !rollback_failures.is_empty() {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "ModuleDict::set_requires_grad: failed to apply to module {index} \
+                         ({err}), and rollback also failed for: {}; the ModuleDict may now be \
+                         left in a partially applied state",
+                        rollback_failures.join(", ")
+                    )));
                 }
                 return Err(err);
             }
@@ -1370,6 +1400,42 @@ mod tests {
         }
     }
 
+    /// 外部実装 `Module` の回帰テスト用モジュール（`advisor` レビュー
+    /// 指摘: 「`set_requires_grad` を正しくオーバーライドしつつ
+    /// `requires_grad()` は既定 `true` のまま公開する」実装も `Module`
+    /// が外部実装可能な trait である以上ありうる）。`restore_requires_grad`
+    /// の `Leaf` 分岐が「呼び出し前にすでに一致しているか」を見て
+    /// `set_requires_grad` の呼び出し自体を省略する実装だと、この
+    /// モジュールは `requires_grad()` が常に `true` を返すため
+    /// スナップショットと常に「一致している」ように見え、実際には
+    /// ロールバックが必要でも `set_requires_grad` が一度も呼ばれず
+    /// 凍結状態のまま放置されてしまう（是正前の不具合の再現）。
+    /// `requires_grad()` の戻り値だけでは内部状態を観測できないため、
+    /// `Rc<Cell<bool>>` を共有し、`set_requires_grad` が実際に呼ばれた
+    /// かどうかをテスト側から独立に検証する。
+    struct ExternalModuleReportingDefaultRequiresGrad {
+        param: Tensor<f32>,
+        state: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    impl Module for ExternalModuleReportingDefaultRequiresGrad {
+        fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            unreachable!("本テストでは forward は呼ばれない")
+        }
+
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("param".to_string(), &self.param)]
+        }
+
+        fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+            self.state.set(requires_grad);
+            Ok(())
+        }
+
+        // `requires_grad()` は意図的にオーバーライドしない（既定 `true`
+        // のまま）。
+    }
+
     /// 子が 1 つでも `true` を返せば `true`（[`Module::requires_grad`]
     /// の公開契約どおり。P1 是正・#2234 レビュー指摘: 旧実装は `all`
     /// だったため一部凍結・一部解凍の `ModuleList` が誤って `false` を
@@ -1534,6 +1600,45 @@ mod tests {
             "失敗した子自身（index）の部分適用状態がロールバックされて \
              いない（0..index のみのロールバックだと index 自身が \
              false のまま残る不具合の再現テスト）"
+        );
+    }
+
+    /// `advisor` レビュー指摘の回帰テスト: `restore_requires_grad` の
+    /// `Leaf` 分岐が「呼び出し前にすでに `requires_grad()` の戻り値が
+    /// スナップショット値と一致しているか」を見て `set_requires_grad`
+    /// の呼び出し自体を省略する実装だと、`requires_grad()` を
+    /// オーバーライドせず既定 `true` を返し続ける外部実装
+    /// （`set_requires_grad` 自体は正しく内部状態を更新する）の子が
+    /// ロールバックから漏れる。`Rc<Cell<bool>>` で `set_requires_grad`
+    /// が実際に呼ばれたかどうかを trait の戻り値と独立に検証する。
+    #[test]
+    fn module_list_set_requires_grad_rollback_calls_set_requires_grad_even_when_trait_requires_grad_looks_unchanged()
+     {
+        let state = std::rc::Rc::new(std::cell::Cell::new(true));
+        let mut list = ModuleList::new();
+        list.push(Box::new(ExternalModuleReportingDefaultRequiresGrad {
+            param: Tensor::new(vec![1.0f32], &[1]).unwrap(),
+            state: state.clone(),
+        }));
+        list.push(Box::new(FailingSetRequiresGradModule {
+            param: Tensor::new(vec![1.0f32], &[1]).unwrap(),
+        }));
+
+        let err = list
+            .set_requires_grad(false)
+            .expect_err("子 1 の set_requires_grad 失敗で Err のはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        // 子 0 の set_requires_grad は成功して state=false になった
+        // はずなので、ロールバックが実際に子 0 の set_requires_grad(true)
+        // を呼び直していなければ state は false のまま残る。
+        assert!(
+            state.get(),
+            "requires_grad() が既定 true のまま変化しない外部実装でも、 \
+             ロールバックは set_requires_grad を実際に呼び直して \
+             内部状態を復元しなければならない（呼び出し前の \
+             `requires_grad() == value` チェックだけで早期 Ok にする \
+             実装だと見逃す）"
         );
     }
 

@@ -173,8 +173,12 @@ pub trait Module {
     /// 再帰的な状態スナップショットを取るのに使う。`ModuleList` 自身に
     /// 加え `Sequential`（内部 `ModuleList` を保持）もオーバーライドし
     /// `Some(&self.inner)` を返す（`Sequential` は `ModuleList` の薄い
-    /// ラッパーであり、混在状態は `inner` 側に存在するため）。それ以外の
-    /// 全層は既定 `None`（末端層として扱われ、単一 bool
+    /// ラッパーであり、混在状態は `inner` 側に存在するため）。
+    /// `ModuleDict` は本フックではなく別フック [`Module::
+    /// as_module_dict`]（同型・別 downcast 先。第 2 ラウンドのレビュー
+    /// 是正・#2234）をオーバーライドする（`ModuleList` と `ModuleDict`
+    /// は別の内部表現を持つ別コンテナ型のため）。上記いずれにも該当
+    /// しない全層は既定 `None`（末端層として扱われ、単一 bool
     /// スナップショットで復元可能という前提に従う）。
     fn as_module_list(&self) -> Option<&ModuleList> {
         None
