@@ -2022,6 +2022,7 @@ fn find_var_aliases_in_use_body(use_body: &str) -> Vec<String> {
 /// セグメントを読み、`::` 以外〈`<` によるジェネリクス開始・`;`・入力
 /// 終端等〉に達したら打ち切る）、最終セグメントが `Var` であれば alias
 /// とみなす。パスの先頭が `crate`／`self`／`super` のいずれであっても
+/// 先頭 `::` の絶対パス（`::fandhe_ai_autodiff::Var`）も同様に扱う。
 /// パス自体の妥当性検証は行わず、最終セグメント名のみで判定する
 /// （import alias 解決を行わない他関数群と同じ「名前一致のみ」の方針）。
 fn type_alias_target_is_var(rest: &str) -> Option<String> {
@@ -2044,6 +2045,15 @@ fn type_alias_target_is_var(rest: &str) -> Option<String> {
     // `=` の直後から `::` 区切りのパスセグメント列を読み進め、最終
     // セグメント（`::` の後続が続かない直前のセグメント）を得る。
     let mut j = i + 1;
+    // 絶対パス（`type V = ::fandhe_ai_autodiff::Var;`）の先頭 `::`
+    // （`:` `:` の 2 トークン）を読み飛ばす。読み飛ばさないと先頭の `:` を
+    // セグメントとみなして直後に打ち切り、alias を見逃す（Bugbot 指摘・
+    // PR #2212）。
+    if tokens.get(j).map(String::as_str) == Some(":")
+        && tokens.get(j + 1).map(String::as_str) == Some(":")
+    {
+        j += 2;
+    }
     let mut last_segment: Option<&str> = None;
     while let Some(segment) = tokens.get(j).map(String::as_str) {
         if segment == "::" {
@@ -2232,6 +2242,33 @@ fn find_var_alias_declarations_detects_path_qualified_type_aliases() {
         find_var_alias_declarations(&self_qualified),
         vec!["X".to_string()],
         "type X = self::Var; の alias X を検出できていない"
+    );
+
+    let absolute_path = normalize_source("type X = ::fandhe_ai_autodiff::Var;");
+    assert_eq!(
+        find_var_alias_declarations(&absolute_path),
+        vec!["X".to_string()],
+        "type X = ::fandhe_ai_autodiff::Var; の alias X を検出できていない"
+    );
+
+    let absolute_bare = normalize_source("pub(crate) type X<'a> = ::Var<'a>;");
+    assert_eq!(
+        find_var_alias_declarations(&absolute_bare),
+        vec!["X".to_string()],
+        "type X<'a> = ::Var<'a>; の alias X を検出できていない"
+    );
+
+    // 絶対パス alias 経由の `impl X { pub fn custom }` も alias 対応の
+    // impl 走査で検出されること（alias 禁止ガードと impl 走査の両層）。
+    let absolute_impl =
+        normalize_source("type X = ::fandhe_ai_autodiff::Var;\nimpl X { pub fn custom(&self) {} }");
+    let aliases = find_var_alias_declarations(&absolute_impl);
+    let tokens = tokenize_including_punctuation(&absolute_impl);
+    assert!(
+        var_impl_block_bodies_with_aliases(&tokens, &aliases)
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "絶対パス alias 経由の impl X {{ pub fn custom }} を検出できていない"
     );
 
     // 対照実験: パスの最終セグメントが `Var` 以外なら検出しない
