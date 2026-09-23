@@ -262,6 +262,13 @@ fn strip_comments(content: &str) -> String {
 ///   `br#"..."#` 等）——`b`／`r` が識別子の途中（例: `for` の `r`）で
 ///   はなく独立したリテラル接頭辞として現れる場合のみ対象とする
 ///   （直前の文字が識別子構成文字でないことを条件にする）
+/// - C 文字列（`c"..."`）・raw C 文字列（`cr"..."`／`cr#"..."#` 等。
+///   Bugbot 指摘・PR #2212: 旧実装は `c`／`cr` 接頭辞を認識せず、
+///   `c` を素通しした直後の `r` が識別子継続文字に見えるため
+///   `cr#"..."#` が単一の raw リテラルとして扱われず、内部の `"` が
+///   偽の通常文字列を開いて後続ソースを丸ごと飲み込んでいた。`b`／
+///   `br` と同じ「直前が識別子構成文字でない」境界条件のもとで判定する
+///   （`abc"..."` の `c` のように識別子途中の `c` は対象外）
 /// - char（`'a'`／`'\n'`／`'\''`／`'\u{7b}'` 等）・バイト char（`b'a'`
 ///   等）
 /// - ライフタイム（`'a`・`'static` 等。閉じクォートを伴わないため char
@@ -327,15 +334,28 @@ fn normalize_source(content: &str) -> String {
             continue;
         }
 
-        // リテラル接頭辞（`b`／`r`／`br`）は、直前が識別子構成文字で
-        // ない（＝独立した新しいトークンの先頭である）場合のみ判定
-        // する。`for`・`return` の `r` のように識別子の一部である場合は
-        // 対象外（`prev_is_ident` 判定に加え、`raw_hash_run` が直後に
-        // `"` を伴わない通常の識別子継続文字を見た時点で `None` を返す
-        // ため、いずれの条件でも誤爆しない）。
+        // リテラル接頭辞（`b`／`r`／`br`／`c`／`cr`）は、直前が識別子
+        // 構成文字でない（＝独立した新しいトークンの先頭である）場合
+        // のみ判定する。`for`・`return` の `r` のように識別子の一部で
+        // ある場合は対象外（`prev_is_ident` 判定に加え、`raw_hash_run`
+        // が直後に `"` を伴わない通常の識別子継続文字を見た時点で
+        // `None` を返すため、いずれの条件でも誤爆しない）。
         if !prev_is_ident {
             // raw バイト文字列（`br"..."`／`br#"..."#` 等）。
             if c == 'b'
+                && chars.get(i + 1) == Some(&'r')
+                && let Some(hashes) = raw_hash_run(&chars, i + 2)
+            {
+                i = emit_raw_literal(&chars, &mut out, i, 2 + hashes, hashes);
+                continue;
+            }
+            // raw C 文字列（`cr"..."`／`cr#"..."#` 等。Bugbot 指摘・PR
+            // #2212: `br` と同様の 2 文字接頭辞として、単純な `r` 判定
+            // より先に判定する必要がある——先に `r` 単独判定を行うと
+            // `c` の直後にある `r` を見落として通常の `c"..."` 判定へ
+            // フォールスルーしてしまい、`cr#"..."#` の `#` 以降が
+            // ソースへそのまま漏れる）。
+            if c == 'c'
                 && chars.get(i + 1) == Some(&'r')
                 && let Some(hashes) = raw_hash_run(&chars, i + 2)
             {
@@ -354,6 +374,15 @@ fn normalize_source(content: &str) -> String {
             // スルーする（次のループ反復で下の `"`／`'` 分岐に入る）。
             if c == 'b' && matches!(chars.get(i + 1), Some('"') | Some('\'')) {
                 out.push('b');
+                i += 1;
+                continue;
+            }
+            // C 文字列（`c"..."`）: `c` はそのまま出力し、直後の通常
+            // 文字列処理へフォールスルーする（Rust に `c'...'` という
+            // 単一文字 C 文字リテラル形式は存在しないため char 分岐は
+            // 不要）。
+            if c == 'c' && chars.get(i + 1) == Some(&'"') {
+                out.push('c');
                 i += 1;
                 continue;
             }
@@ -957,6 +986,26 @@ fn tokens_declare_pub_fn(tokens: &[String], fn_name: &str) -> bool {
 /// 間に現れる `{`／`}`（`[(); { N }]` 内の const ブロック等）は単に
 /// 読み飛ばす（対応する `[`／`]` の深さで囲まれている限り、内部の
 /// `{`／`}` 自体を追跡する必要はない）。
+///
+/// **ヘッダー走査中の `{...}`（const ジェネリクス既定値式）の深さ追跡**
+/// （Bugbot 指摘・PR #2212 第 3 ラウンド）: 上記修正後も、ジェネリクス
+/// リストを事前に読み飛ばす別ループ（旧実装）が `<`／`>` トークンのみで
+/// 深さを数えていたため、`impl<const B: bool = { 3 > 2 }, const N:
+/// usize = { 1 }> Var { pub fn custom() {} }` のように const ジェネリ
+/// クス既定値式の中に比較演算子由来の `>`（`3 > 2`）が現れると、その
+/// `>` を誤って山括弧の閉じと数えてジェネリクスリストの途中で走査を
+/// 打ち切ってしまい、残りの `, const N: usize = { 1 }` 部分に含まれる
+/// `{`（第 2 引数の既定値式の開始）を本体開始と誤認してしまう
+/// （実際の本体である `pub fn custom` を取りこぼす）。本実装は事前
+/// スキップ用の別ループを廃止し、単一のヘッダー走査ループへ統合した
+/// うえで `{`／`}` の深さ（`brace_depth`）も追跡する: `brace_depth > 0`
+/// の間は `<`／`>`／`[`／`]`／`(`／`)` を深さ追跡の対象外とし
+/// （ネストした const 式の内部にある構文要素として無視する）、`{` は
+/// 「他のすべての深さが 0」の場合のみ本体開始とみなし、それ以外の
+/// `{` は単に `brace_depth` を 1 増やして読み飛ばす（対応する `}` で
+/// 減らす）。ジェネリクスの有無に依らずこの単一ループがヘッダー全体
+/// （`<...>`・型パス・`for`・`where` 節）を走査するため、事前スキップ
+/// ループは不要になった。
 fn var_impl_block_bodies(tokens: &[String]) -> Vec<Vec<String>> {
     let mut bodies = Vec::new();
     let mut i = 0usize;
@@ -966,24 +1015,11 @@ fn var_impl_block_bodies(tokens: &[String]) -> Vec<Vec<String>> {
             continue;
         }
         let mut j = i + 1;
-        if tokens.get(j).map(String::as_str) == Some("<") {
-            let mut depth = 0i32;
-            while j < tokens.len() {
-                match tokens[j].as_str() {
-                    "<" => depth += 1,
-                    ">" => depth -= 1,
-                    _ => {}
-                }
-                j += 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-        }
         let mut header_has_var = false;
         let mut angle_depth = 0i32;
         let mut bracket_depth = 0i32;
         let mut paren_depth = 0i32;
+        let mut brace_depth = 0i32;
         while j < tokens.len() {
             match tokens[j].as_str() {
                 // `>` は `saturating_sub` では 0 未満に飽和しない
@@ -997,13 +1033,30 @@ fn var_impl_block_bodies(tokens: &[String]) -> Vec<Vec<String>> {
                 // `(depth - 1).max(0)` で 0 未満に飽和させることで、
                 // 対応しない `>` を無害化しつつ、正しく対応する `<...>`
                 // の深さ追跡は従来どおり機能する。
-                "<" => angle_depth += 1,
-                ">" => angle_depth = (angle_depth - 1).max(0),
-                "[" => bracket_depth += 1,
-                "]" => bracket_depth = (bracket_depth - 1).max(0),
-                "(" => paren_depth += 1,
-                ")" => paren_depth = (paren_depth - 1).max(0),
-                "{" if angle_depth == 0 && bracket_depth == 0 && paren_depth == 0 => break,
+                //
+                // `brace_depth > 0`（const ジェネリクス既定値式
+                // `{ 3 > 2 }` 等のネストした中括弧の内側）の間は
+                // `<`／`>`／`[`／`]`／`(`／`)` を一切カウントしない
+                // （ドキュメンテーションコメント「ヘッダー走査中の
+                // `{...}`」節参照）。式の中身に現れる比較演算子由来の
+                // `>` 等を山括弧の閉じと誤認しないようにするための
+                // ガードで、対応する `[`／`]`・`(`／`)` の深さ追跡自体
+                // には影響しない。
+                "<" if brace_depth == 0 => angle_depth += 1,
+                ">" if brace_depth == 0 => angle_depth = (angle_depth - 1).max(0),
+                "[" if brace_depth == 0 => bracket_depth += 1,
+                "]" if brace_depth == 0 => bracket_depth = (bracket_depth - 1).max(0),
+                "(" if brace_depth == 0 => paren_depth += 1,
+                ")" if brace_depth == 0 => paren_depth = (paren_depth - 1).max(0),
+                "{" if angle_depth == 0
+                    && bracket_depth == 0
+                    && paren_depth == 0
+                    && brace_depth == 0 =>
+                {
+                    break;
+                }
+                "{" => brace_depth += 1,
+                "}" => brace_depth = (brace_depth - 1).max(0),
                 "Var" => header_has_var = true,
                 _ => {}
             }
@@ -1742,6 +1795,37 @@ fn var_impl_block_bodies_handles_where_clause_const_generic_block() {
     );
 }
 
+/// [`var_impl_block_bodies`] のヘッダー走査が、const ジェネリクス
+/// パラメータの既定値式に含まれる比較演算子由来の `>`（`{ 3 > 2 }`
+/// 等）を山括弧の閉じと誤認しないことを固定する回帰テスト（Bugbot
+/// 指摘・PR #2212 第 4 ラウンド）: 旧実装はジェネリクスリストを事前に
+/// 読み飛ばす別ループが `<`／`>` トークンのみで深さを数えていたため、
+/// 1 個目の const パラメータの既定値式内の `>` で早期に山括弧の閉じと
+/// 誤認し、走査位置が本来のジェネリクスリスト終端より手前に残ってしまう。
+/// その結果、2 個目の const パラメータの既定値式が持つ `{` を本体開始
+/// と誤認してヘッダー走査を打ち切り、実際の本体（`pub fn custom` を
+/// 含む）を取りこぼす。
+#[test]
+fn var_impl_block_bodies_handles_const_generic_default_value_comparison() {
+    let forged_const_generic_comparison =
+        "impl<const B: bool = { 3 > 2 }, const N: usize = { 1 }> Var { pub fn custom() {} }";
+    let normalized = normalize_source(forged_const_generic_comparison);
+    let tokens = tokenize_including_punctuation(&normalized);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert_eq!(
+        bodies.len(),
+        1,
+        "const ジェネリクス既定値式の比較演算子由来の `>` を含む impl Var ブロックを\
+         1 件検出できていない: {bodies:?}"
+    );
+    assert!(
+        tokens_declare_pub_fn(&bodies[0], "custom"),
+        "const ジェネリクス既定値式内の `>` を山括弧の閉じと誤認し、\
+         2 個目の既定値式の {{ を本体開始と誤認して pub fn custom の検出を\
+         見逃した: {bodies:?}"
+    );
+}
+
 /// [`normalize_source`] 自体の単体テスト（`var_impl_block_bodies` 等の
 /// 本番パイプライン経由の固定に加え、正規化そのものの性質を直接固定
 /// する。第 2 ラウンド codex-review 指摘 1）。
@@ -1818,6 +1902,42 @@ fn normalize_source_handles_all_literal_forms() {
         "unicode escape char リテラル中の {{ を実際の中括弧と誤カウントし、\
          pub fn custom の検出を見逃した: {bodies:?}"
     );
+
+    // C 文字列（`c"..."`）: 中身は通常文字列と同様に空白化されるが
+    // 開始・終了のクォートと `c` 接頭辞は保持される（Bugbot 指摘・
+    // PR #2212 第 4 ラウンド）。
+    let with_c_string = r#"let s = c"raw // not a comment"; let t = 3;"#;
+    let normalized = normalize_source(with_c_string);
+    assert!(normalized.contains("let t = 3;"));
+    assert!(!normalized.contains("not a comment"));
+    assert!(
+        normalized.contains("c\""),
+        "C 文字列の `c` 接頭辞が保持されていない: {normalized:?}"
+    );
+
+    // raw C 文字列（`cr#"..."#`）: 内部に `"`／`//` を含んでいても、
+    // 単一の raw リテラルとして消費され後続のソースを飲み込まない
+    // ことを固定する。旧実装は `c` の直後の `r` を識別子継続とみなし
+    // `cr#"..."#` を認識できず、内部の `"` が偽の通常文字列を開いて
+    // `pub fn custom` を隠していた（Bugbot 指摘・PR #2212 第 4
+    // ラウンド）。
+    let forged_raw_c_string = r####"impl Var { fn s() -> &'static [u8] { cr#"has "quotes" and // not a comment"# } pub fn custom(&self) {} }"####;
+    let normalized = normalize_source(forged_raw_c_string);
+    let tokens = tokenize_including_punctuation(&normalized);
+    let bodies = var_impl_block_bodies(&tokens);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| tokens_declare_pub_fn(body, "custom")),
+        "raw C 文字列（cr#\"...\"#）中の \"／// を実際の文字列・コメント境界と\
+         誤認し、pub fn custom の検出を見逃した: {bodies:?}"
+    );
+
+    // 識別子途中の `c`（`abc"..."` の `c`）は C 文字列の接頭辞と
+    // 誤認しない（`prev_is_ident` 判定の回帰確認）。
+    let with_ident_c = "let abc = 1; let d = 2;";
+    let normalized = normalize_source(with_ident_c);
+    assert_eq!(normalized, with_ident_c);
 }
 
 /// codex-review 指摘（PR #2212 その 3・その 4）・Bugbot 指摘（PR #2212）
