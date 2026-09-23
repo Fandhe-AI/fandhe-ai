@@ -94,17 +94,49 @@ pub fn gpu_elementwise_fusion_enabled() -> bool {
 /// 2. `plan.ops()` の全要素が allowlist に一致すること（1 個でも
 ///    `Sum`／`Max`／`Rsqrt`／`Sub`／`Div`／`Broadcast`・将来の未知
 ///    variant を含めば拒否）。
-/// 3. `plan.ops().count() <= MAX_FUSED_SEGMENT_NODES`（`FusionPlan`
-///    構築時〈`from_segment`／`from_ops`〉に既に保証済みの不変条件だが、
-///    レジスタ配列サイズ・カーネル引数個数の際限ない増大を避ける多層
-///    防御として本関数でも検査する。`.claude/rules/coding-rust.md`
-///    「カーネル実装の境界検査」と同じ考え方をホスト側検証にも適用）。
+/// 3. `plan.ops()` のうち `Input` 葉を除いた演算・縮約ノード数が
+///    `MAX_FUSED_SEGMENT_NODES` 以下であること。`MAX_FUSED_SEGMENT_NODES`
+///    は `detect.rs::detect_fusion` のセグメント構築が数える `included`
+///    （演算・縮約ノードのみ。葉は `included` に入らず境界の外部参照
+///    として別集計される）と同じ意味論の定数であり、`plan.ops()` は
+///    `Input` 葉も含む線形化列であるため `ops.len()` を直接この定数と
+///    比較するのは誤り（codex-review・Cursor Bugbot 指摘・PR #2232。
+///    演算 6 個・葉 7 個の 13-entry プランのように、`FusionPlan`
+///    構築時の制約は満たすが `ops.len()`〈=13〉が定数〈=12〉を超える
+///    有効なプランを誤って拒否し per-op フォールバックへ落ちる欠陥が
+///    あった）。
+/// 4. `plan.leaf_count() <= MAX_FUSED_SEGMENT_NODES + 1`。演算・縮約
+///    ノード数の上限（3.）だけでは葉数自体の際限ない増大を防げない
+///    （`FusionPlan::from_ops` は宣言した `leaf_count` 個の `Input`
+///    エントリが 1 対 1 で存在すること・`ops` 内から重複参照されない
+///    ことのみを検証し、各 `Input` が後続の演算ノードから実際に
+///    参照されることまでは要求しない。したがって `[Input × 30,
+///    Add{0,1}]` のように大半が未使用の `Input` を持つプランも
+///    `from_ops` を通過しうる）。`N` 個の演算ノードからなる 2 分木
+///    （Add／Mul は 2 入力、Relu／Exp／Tanh は 1 入力）が到達しうる
+///    最大葉数は `N + 1`（全ノードが 2 入力の完全 2 分木の場合。
+///    fan-in で同一中間ノードを複数箇所から参照すれば必要な葉は
+///    減る一方で増えることはない）であるため、`MAX_FUSED_SEGMENT_NODES
+///    + 1` は「構造的に到達しうる最大葉数」を上回らない安全な上限
+///    かつ、通常構築される融合プランを一切拒否しない値である
+///    （codex-review・Cursor Bugbot 指摘の対応レビューで追加。
+///    レジスタ配列サイズ・カーネル引数個数〈葉引数 + `out` + `numel`〉
+///    の際限ない増大を避ける多層防御という本検査全体の目的
+///    〈`.claude/rules/coding-rust.md`「カーネル実装の境界検査」と
+///      同じ考え方をホスト側検証にも適用〉はこの葉数チェックが担う）。
 pub(crate) fn match_elementwise_plan(plan: &FusionPlan) -> Option<ElementwiseProgram> {
     if plan.row_fusion().is_some() {
         return None;
     }
     let ops: Vec<FusedOpKind> = plan.ops().collect();
-    if ops.is_empty() || ops.len() > fandhe_ai_tensor_core::MAX_FUSED_SEGMENT_NODES {
+    let segment_node_count = ops
+        .iter()
+        .filter(|op| !matches!(op, FusedOpKind::Input { .. }))
+        .count();
+    if ops.is_empty()
+        || segment_node_count > fandhe_ai_tensor_core::MAX_FUSED_SEGMENT_NODES
+        || plan.leaf_count() > fandhe_ai_tensor_core::MAX_FUSED_SEGMENT_NODES + 1
+    {
         return None;
     }
     if ops.iter().any(|op| {
@@ -314,6 +346,67 @@ mod tests {
             1,
         )
         .expect("valid plan");
+        assert!(match_elementwise_plan(&plan).is_none());
+    }
+
+    /// codex-review・Cursor Bugbot 指摘（PR #2232）の回帰テスト:
+    /// 演算・縮約ノード 6 個（`MAX_FUSED_SEGMENT_NODES` ちょうど半分）
+    /// ＋葉 7 個の 13-entry プラン（`ops.len() == 13 >
+    /// MAX_FUSED_SEGMENT_NODES(=12)` だが `Input` 除外後の演算ノード数
+    /// は `6 <= 12`）は `FusionPlan` 構築時の制約を満たす有効なプラン
+    /// であり、`match_elementwise_plan` は受理しなければならない
+    /// （修正前は `ops.len()` を直接 `MAX_FUSED_SEGMENT_NODES` と比較
+    /// していたため誤って拒否し per-op フォールバックへ落ちていた）。
+    #[test]
+    fn match_elementwise_plan_accepts_wide_plan_with_many_leaves() {
+        let plan = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },  // 0
+                FusedOpKind::Input { leaf_index: 1 },  // 1
+                FusedOpKind::Input { leaf_index: 2 },  // 2
+                FusedOpKind::Input { leaf_index: 3 },  // 3
+                FusedOpKind::Input { leaf_index: 4 },  // 4
+                FusedOpKind::Input { leaf_index: 5 },  // 5
+                FusedOpKind::Input { leaf_index: 6 },  // 6
+                FusedOpKind::Add { lhs: 0, rhs: 1 },   // 7
+                FusedOpKind::Add { lhs: 2, rhs: 3 },   // 8
+                FusedOpKind::Add { lhs: 4, rhs: 5 },   // 9
+                FusedOpKind::Add { lhs: 9, rhs: 6 },   // 10
+                FusedOpKind::Mul { lhs: 7, rhs: 8 },   // 11
+                FusedOpKind::Add { lhs: 11, rhs: 10 }, // 12
+            ],
+            vec![4],
+            fandhe_ai_tensor_core::DType::F32,
+            7,
+        )
+        .expect("valid wide plan");
+        assert_eq!(plan.ops().count(), 13);
+        let program = match_elementwise_plan(&plan).expect("wide plan must be accepted");
+        assert_eq!(program.leaf_count, 7);
+        assert_eq!(program.ops.len(), 13);
+    }
+
+    /// codex-review・Cursor Bugbot 指摘の対応レビューで追加: 演算・縮約
+    /// ノード数の上限だけでは、大半が未使用の `Input` を大量に持つ
+    /// プラン（`FusionPlan::from_ops` は宣言した `leaf_count` の
+    /// `Input` エントリが 1 対 1 で存在することのみを検証し、各 `Input`
+    /// が実際に後続ノードから参照されることまでは要求しない）を拒否
+    /// できない。`match_elementwise_plan` 検証順序 4. の葉数上限
+    /// （`MAX_FUSED_SEGMENT_NODES + 1`）がこの経路を拒否することを
+    /// 確認する。
+    #[test]
+    fn match_elementwise_plan_rejects_excessive_leaf_count() {
+        let leaf_count = fandhe_ai_tensor_core::MAX_FUSED_SEGMENT_NODES + 2;
+        let mut ops: Vec<FusedOpKind> = (0..leaf_count)
+            .map(|leaf_index| FusedOpKind::Input { leaf_index })
+            .collect();
+        // `leaf_count` の `Input` のうち先頭 2 個だけを実際に参照する
+        // （残りは `from_ops` の検証上は合法な「未使用の葉」）。
+        ops.push(FusedOpKind::Add { lhs: 0, rhs: 1 });
+        let plan =
+            FusionPlan::from_ops(ops, vec![4], fandhe_ai_tensor_core::DType::F32, leaf_count)
+                .expect("valid plan with mostly-unused leaves");
+        assert_eq!(plan.leaf_count(), leaf_count);
         assert!(match_elementwise_plan(&plan).is_none());
     }
 }

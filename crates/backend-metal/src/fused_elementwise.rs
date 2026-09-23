@@ -79,12 +79,30 @@ pub fn gpu_elementwise_fusion_enabled() -> bool {
 /// `backend-cuda::fused_elementwise::match_elementwise_plan` と同一
 /// ロジック）。検証順序・根拠は CUDA 側モジュールの同名関数 doc
 /// コメントを参照（独立実装だが判定規則は同一）。
+///
+/// `MAX_FUSED_SEGMENT_NODES` との比較は `plan.ops()`（`Input` 葉を
+/// 含む線形化列）の全長ではなく、`Input` を除いた演算・縮約ノード数
+/// に対して行う（codex-review・Cursor Bugbot 指摘・PR #2232。CUDA 側
+/// `match_elementwise_plan` doc コメントの「検証順序」3. 参照。両
+/// クレート同一の是正）。加えて `plan.leaf_count() <=
+/// MAX_FUSED_SEGMENT_NODES + 1` も検査する（演算・縮約ノード数の上限
+/// だけでは、`FusionPlan::from_ops` が許す「大半が未使用の `Input`
+/// を大量に持つプラン」を拒否できない。カーネル引数数〈葉引数 +
+/// `out` + `numel`〉の際限ない増大を防ぐ多層防御。CUDA 側 doc
+/// コメントの「検証順序」4. 参照）。
 pub(crate) fn match_elementwise_plan(plan: &FusionPlan) -> Option<ElementwiseProgram> {
     if plan.row_fusion().is_some() {
         return None;
     }
     let ops: Vec<FusedOpKind> = plan.ops().collect();
-    if ops.is_empty() || ops.len() > fandhe_ai_tensor_core::MAX_FUSED_SEGMENT_NODES {
+    let segment_node_count = ops
+        .iter()
+        .filter(|op| !matches!(op, FusedOpKind::Input { .. }))
+        .count();
+    if ops.is_empty()
+        || segment_node_count > fandhe_ai_tensor_core::MAX_FUSED_SEGMENT_NODES
+        || plan.leaf_count() > fandhe_ai_tensor_core::MAX_FUSED_SEGMENT_NODES + 1
+    {
         return None;
     }
     if ops.iter().any(|op| {
@@ -247,6 +265,60 @@ mod tests {
             1,
         )
         .expect("valid plan");
+        assert!(match_elementwise_plan(&plan).is_none());
+    }
+
+    /// codex-review・Cursor Bugbot 指摘（PR #2232）の回帰テスト。CUDA 側
+    /// `fused_elementwise::tests::
+    /// match_elementwise_plan_accepts_wide_plan_with_many_leaves` と同型
+    /// のプラン（演算・縮約ノード 6 個・葉 7 個の 13-entry）が誤って
+    /// per-op フォールバックへ落ちないことを検証する。
+    #[test]
+    fn match_elementwise_plan_accepts_wide_plan_with_many_leaves() {
+        let plan = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },  // 0
+                FusedOpKind::Input { leaf_index: 1 },  // 1
+                FusedOpKind::Input { leaf_index: 2 },  // 2
+                FusedOpKind::Input { leaf_index: 3 },  // 3
+                FusedOpKind::Input { leaf_index: 4 },  // 4
+                FusedOpKind::Input { leaf_index: 5 },  // 5
+                FusedOpKind::Input { leaf_index: 6 },  // 6
+                FusedOpKind::Add { lhs: 0, rhs: 1 },   // 7
+                FusedOpKind::Add { lhs: 2, rhs: 3 },   // 8
+                FusedOpKind::Add { lhs: 4, rhs: 5 },   // 9
+                FusedOpKind::Add { lhs: 9, rhs: 6 },   // 10
+                FusedOpKind::Mul { lhs: 7, rhs: 8 },   // 11
+                FusedOpKind::Add { lhs: 11, rhs: 10 }, // 12
+            ],
+            vec![4],
+            fandhe_ai_tensor_core::DType::F32,
+            7,
+        )
+        .expect("valid wide plan");
+        assert_eq!(plan.ops().count(), 13);
+        let program = match_elementwise_plan(&plan).expect("wide plan must be accepted");
+        assert_eq!(program.leaf_count, 7);
+        assert_eq!(program.ops.len(), 13);
+    }
+
+    /// codex-review・Cursor Bugbot 指摘の対応レビューで追加。CUDA 側
+    /// `fused_elementwise::tests::
+    /// match_elementwise_plan_rejects_excessive_leaf_count` と同型:
+    /// 演算・縮約ノード数の上限だけでは拒否できない「大半が未使用の
+    /// `Input` を大量に持つプラン」を、葉数上限（検証順序の doc
+    /// コメント参照）が拒否することを確認する。
+    #[test]
+    fn match_elementwise_plan_rejects_excessive_leaf_count() {
+        let leaf_count = fandhe_ai_tensor_core::MAX_FUSED_SEGMENT_NODES + 2;
+        let mut ops: Vec<FusedOpKind> = (0..leaf_count)
+            .map(|leaf_index| FusedOpKind::Input { leaf_index })
+            .collect();
+        ops.push(FusedOpKind::Add { lhs: 0, rhs: 1 });
+        let plan =
+            FusionPlan::from_ops(ops, vec![4], fandhe_ai_tensor_core::DType::F32, leaf_count)
+                .expect("valid plan with mostly-unused leaves");
+        assert_eq!(plan.leaf_count(), leaf_count);
         assert!(match_elementwise_plan(&plan).is_none());
     }
 }
