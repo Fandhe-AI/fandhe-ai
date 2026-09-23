@@ -177,3 +177,110 @@ impl fandhe_ai::nn::Module for MyBlock {
 - `crates/facade/src/{lib.rs, nn/mod.rs, nn/rnn.rs, compat/sequential.rs}`
 - `crates/facade/tests/api_surface.rs`
 - spec REQ-9／REQ-12（`docs/spec/04-requirements.md`）
+
+## 12. facade 公開の保留記録（イシュー #2133）
+
+イシュー #2133「`nn::Module` trait・`ModuleList` の facade 公開実装」の実装着手時
+（2026-09-23・main HEAD `ea838b71`）に、`gh issue view 2133 --comments`・
+`gh issue view 2132 --comments`（本 doc の対応 issue）・`gh issue view 2131
+--comments`（親 issue）を確認したところ、いずれもコメント 0 件だった。PR #2230
+（#2132 の設計記録 PR）に付いているのは github-actions（codex-review）による
+自動レビューコメントのみで、リポジトリ所有者による §10 承認事項 1〜6 のいずれ
+に対する明示的な承認コメントも存在しない。issue が起票されていること自体は
+承認事項の承認にはならない（前例: #2063「facade: 高階微分 API の公開面追加」・
+#2064「facade: custom autograd Function の公開面追加」も同様に未承認のまま
+保留し、それぞれ PR #2208（`ef415e6d`）・PR #2212（`ea838b71`）で facade／
+autodiff src を一切変更せず否定ガード＋保留記録 doc のみをマージした。同 doc
+`docs/autodiff-higher-order-grad-decision.md` §15・`docs/autodiff-custom-
+function-decision.md` §15 と本節は同型）。
+
+#2133 本文が想定する形（案 A: `pub use fandhe_ai_autodiff::nn::{Module,
+ModuleList}` の素の再エクスポート）は、§1.3・§5 で不採用と判定済みである
+（`Module::forward` が生の `fandhe_ai_autodiff::Tape` を引数に取るため、
+`fandhe-ai` のみに依存する利用者は `impl Module for MyLayer` を書けない）。
+推奨案 B（facade 独自の薄い trait とコンテナの新設）も §10 で未承認のまま
+であるため、案 A・案 B のいずれも実施できない。
+
+自動運転（承認待ち不可）かつ判断は安全側に倒す方針、`docs/compat-api-scope.md`
+§5（範囲拡張は経路 1／2 の承認必須）、`.claude/rules/security.md`（自己修復に
+よる無断拡大禁止）に基づき、本イシューでは `crates/facade/src/**`（`#[cfg(doctest)]`
+限定の非公開足場 1 件を除く）・`crates/autodiff/src/**` を一切変更せず、次の
+否定ガード群を追加・拡充して「facade 未公開」状態を機械固定した:
+
+- `crates/facade/tests/api_surface.rs::
+  facade_does_not_reexport_nn_module_or_containers`（新規）: facade src の
+  全 `pub use` 文の葉（[`collect_pub_use_leaves`]。ソース側・rename 前）を
+  走査し、葉が `Module`／`ModuleList` である行、または葉が `Sequential` かつ
+  パスに `fandhe_ai_autodiff`／`nn` を含む行を違反とする。別名再エクスポート
+  （`as Layer` 等）もソース側の葉で判定するため検出できる。`compat/mod.rs` の
+  `pub use sequential::{Sequential, SequentialVars};`（パスに
+  `fandhe_ai_autodiff`／`nn` を含まない）は正当な既存形として許容する
+- `crates/facade/tests/api_surface.rs::facade_declares_no_nn_module_items`
+  （新規）: facade src に facade 独自の `trait`／`struct`／`enum`／`type`
+  版の `Module`／`ModuleList` 宣言、または `struct Sequential`
+  （`src/compat/sequential.rs` 以外）が可視性を問わず存在しないことを固定
+  する。非公開 `use fandhe_ai_autodiff::nn::{..., Module, ...}`・
+  `Box<dyn Module>` の型参照・`compat/sequential.rs` 自身の
+  `pub struct Sequential` は正当な既存形として許容する
+- `crates/facade/tests/api_surface.rs::
+  compat_sequential_does_not_expose_module_add_methods`（新規）:
+  `src/compat` 配下に `add_module`／`add_boxed`／`push_module` の `pub fn`
+  宣言が存在しないことを固定する（§9 で `add_module` はスコープ外と明記
+  済み）
+- `crates/facade/src/lib.rs::NnModuleHoldDoctestGuard`（新規。
+  `VarCustomHoldDoctestGuard`〈#2064〉と同型の正のプローブ 1 ブロック
+  方式）: facade の全 `pub mod` を glob import したスコープへ、本 doctest
+  内でのみ定義したローカル `__fandhe_nn_hold_probe::{Module, ModuleList}`
+  を導入し、`fn __probe(_: &dyn Module, _: ModuleList, _: &Sequential) {}`
+  を実際に書く。facade がどの経路（別名再エクスポート・trait 定義・
+  `pub type` 別名・`nn::Sequential` の新設等）で `Module`／`ModuleList`／
+  （`compat::Sequential` 以外の）`Sequential` という名前を公開しても、
+  ローカル定義との glob 衝突により名前解決が曖昧になり（E0659 等）、
+  エラーコードに依存せずコンパイルが失敗する。ドリフト検査（glob 対象
+  集合の一致は `nn_module_hold_doctest_globs_all_pub_modules`、本文の固定
+  文言 `NN_MODULE_HOLD_PROBE_BODY` との完全一致は `nn_module_hold_doctest_
+  probe_body_matches_fixed_contract`）は `extract_var_custom_hold_doctest_
+  guard_doc` を struct 名引数版 `extract_hold_doctest_guard_doc(content,
+  struct_name)` へ最小限リファクタしたうえで共用する。既存の呼び出し側は
+  `"VarCustomHoldDoctestGuard"` を渡すだけで挙動は不変であることを
+  `custom_function_hold_doctest_*` の 2 テストが無変更のまま合格し続ける
+  ことで確認済み
+
+上記 3 件のソース走査ガードと doctest 1 件が実際に漏れを検出することは、
+一時的な合成入力（コミットしない）で個別に確認済み: `src/nn/mod.rs` へ
+`pub use fandhe_ai_autodiff::nn::{Module, ModuleList};` を追加すると
+`facade_does_not_reexport_nn_module_or_containers` と `NnModuleHoldDoctestGuard`
+doctest（`ModuleList` の glob 衝突・E0659）の両方が fail する。`src/lib.rs`
+へ `pub use fandhe_ai_autodiff::nn::Module as Layer;`（別名再エクスポート）
+を追加すると `facade_does_not_reexport_nn_module_or_containers` が fail する。
+`src/nn/rnn.rs` へ `pub trait Module {}` を追加すると
+`facade_declares_no_nn_module_items` が fail する。
+
+既存 3 件のガード（`nn_mod_declares_only_rnn_submodule`・`nn_rnn_module_
+reexports_exactly_expected_surface`・`facade_pub_use_leaves_are_not_
+modules`）も #2133 の保留を部分的に担っていることを doc comment へ追記した
+（`nn_mod_declares_only_rnn_submodule` は `nn::module`／`nn::container` の
+無断新設を、`nn_rnn_module_reexports_exactly_expected_surface` は
+`nn/rnn.rs` への `Module` 追加を、`facade_pub_use_leaves_are_not_modules`
+は `nn` の別名モジュール再エクスポート一般形を、それぞれ fail-closed に
+拒否する）。ロジック自体は変更していない。
+
+承認取得後（経路 B）に実施する変更範囲（事前提示）:
+
+- 案 B を採用する場合: `crates/facade/src/nn/{module.rs, container.rs}` を
+  新設し、facade 独自の `nn::Module`（required は `forward(&self, &fandhe_
+  ai::Tape, &Var)`。§10 承認事項 2 の defaulted 6 件を踏襲）と
+  `ModuleList`／`Sequential` を置く
+- `nn_mod_declares_only_rnn_submodule` の期待集合を `["rnn"]` から
+  `["rnn", "module", "container"]`（または同等の構成）へ更新する
+- defaulted メソッド集合（`named_parameters`／`set_parameter`／
+  `state_dict`／`load_state_dict`／`set_training`／`training`）の一致検査を
+  新設する
+- 本 PR の否定ガード 3 件（ソース走査）と `NnModuleHoldDoctestGuard` を
+  外すか、正ガードへ転換する
+- facade だけに依存するユーザー定義層の最小 unit test を追加する
+- 橋渡し方式（借用ハンドル型か、第 1 段では対象外か）は §10 承認事項 4 の
+  承認結果に従う
+- #2134／#2137 の鏡写し要件（§10 承認事項 6）は引き続き承認待ちのまま
+
+イシューは close せず、承認取得後に別 PR で経路 B（公開実施）を行う。
