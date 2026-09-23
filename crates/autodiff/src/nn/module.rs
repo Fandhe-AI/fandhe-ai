@@ -665,13 +665,15 @@ pub trait Module {
     ///
     /// [`Module::children`] は trait object を返す性質上、実装者が
     /// 自身（`self`）や既に列挙済みの `Module` を任意に返せる
-    /// （例: 手書きの循環参照構造）。本メソッドは 2 種類のデータ
-    /// ポインタ（`&dyn Module` の vtable を除いた実体アドレス）追跡を
-    /// 組み合わせて安全に打ち切る:
+    /// （例: 手書きの循環参照構造）。本メソッドはノードの同一性を
+    /// **`(データポインタ, 型名)` の組**（`type_name` は
+    /// [`Module::type_name`]。`&dyn Module` の vtable を除いた実体
+    /// アドレスとセットで比較する）で判定し、2 種類の追跡を組み合わせて
+    /// 安全に打ち切る:
     ///
     /// 1. **祖先限定の循環検出**（常時・無条件）: ルートから現在ノード
-    ///    までの経路（祖先）上のポインタのみをスタックで保持し、経路上
-    ///    に既出のノードへは再帰しない。循環構造でも panic
+    ///    までの経路（祖先）上のキーのみをスタックで保持し、経路上に
+    ///    既出のノードへは再帰しない。循環構造でも panic
     ///    （stack overflow）せず有限の結果を返す（`.claude/rules/
     ///    security.md` A03・本番経路 panic 禁止の方針に合わせる）。
     /// 2. **グローバルな共有オブジェクト dedup**（ゼロサイズ型を除く）:
@@ -680,18 +682,34 @@ pub trait Module {
     ///    （PyTorch `named_modules()` の memo と同じ契約）。ただし
     ///    `std::mem::size_of_val` でゼロサイズ（ZST。`Relu`・`Gelu`
     ///    等フィールドを持たない活性化層）と判定できる子はこの
-    ///    グローバル dedup の対象から除外する（イシュー #2134
-    ///    codex-review／Bugbot 指摘・PR #2231 是正）。理由: ZST を
-    ///    `Box` へ格納すると、実際には異なるインスタンスであっても
-    ///    複数インスタンスがアロケータの well-known dangling address
+    ///    グローバル dedup の対象から除外する。理由: ZST を `Box` へ
+    ///    格納すると、実際には異なるインスタンスであっても複数
+    ///    インスタンスがアロケータの well-known dangling address
     ///    （`align_of::<T>()` 相当の非 null 定数）を共有しうるため、
-    ///    データポインタだけで「同一オブジェクトの共有」と「たまたま
-    ///    アドレスが一致した別インスタンス」を区別できない
-    ///    （型情報を持たない `&dyn Module` からは `TypeId` も取得
-    ///    できないため型込み識別子でも解決しない）。`Sequential` に
-    ///    同種の ZST 活性化層を複数積んだ場合にグローバル dedup を
-    ///    適用すると後続レイヤーが誤って欠落するため、ZST は祖先限定
-    ///    の循環検出（1.）のみで保護し、常に列挙対象に含める。
+    ///    同じ型どうしなら `(ポインタ, 型名)` キーでも「同一オブジェクト
+    ///    の共有」と「たまたまアドレスが一致した別インスタンス」を
+    ///    区別できない。`Sequential` に同種の ZST 活性化層を複数積んだ
+    ///    場合にグローバル dedup を適用すると後続レイヤーが誤って
+    ///    欠落するため、ZST は祖先限定の循環検出（1.）のみで保護し、
+    ///    常に列挙対象に含める。
+    ///
+    /// **型名を同一性キーに含める理由（イシュー #2134 codex-review／
+    /// Bugbot 指摘・PR #2231 是正）**: データポインタ単独をキーにすると
+    /// 上記 ZST 問題に加え、`MultiheadAttention { q_proj: Linear, ... }`
+    /// のような複合 `Module`（子の最初のフィールドがルート構造体の
+    /// 先頭に配置されうる）で、ルート自身のデータポインタと最初の子
+    /// フィールドのデータポインタが**異なる型でありながら数値としては
+    /// 一致**しうる（Rust のフィールドレイアウトは既定で最適化のため
+    /// 順序保証がないが、先頭フィールドがオフセット 0 に来る配置は
+    /// 珍しくない）。この場合、ポインタ単独の祖先チェックだと最初の子
+    /// （型が異なる別オブジェクト）を「ルート自身の既出」と誤判定して
+    /// 打ち切ってしまい、その子孫ごと丸ごと欠落する（`MultiheadAttention`
+    /// の `q_proj` や `TransformerEncoderLayer` の `self_attn` で実測
+    /// 再現。`crates/autodiff/tests/nn_module_introspection.rs` の
+    /// `named_modules_and_summary_do_not_drop_offset_zero_first_child`
+    /// 参照）。[`Module::type_name`] を組み合わせたキーにすれば、
+    /// アドレスが一致してもルート（`MultiheadAttention`）と子
+    /// （`Linear`）の型名が異なるため誤判定されない。
     ///
     /// # 既定実装
     ///
@@ -706,18 +724,21 @@ pub trait Module {
         // だが参照から生ポインタへの変換（`&Self -> *const Self`）は
         // 強制を伴わないため常に可能であり、続く `*const Self ->
         // *const ()` キャストで vtable を落としたデータアドレスだけを
-        // 取り出せる。これでルート自身の同一性を、`children()` が
-        // 返す `&dyn Module`（同じくデータポインタへキャスト可能）と
-        // 比較できるようになる。
+        // 取り出せる。`self.type_name()` と組にした `NodeKey` で
+        // ルート自身の同一性を、`children()` が返す `&dyn Module`
+        // （同じくキー化できる）と比較する（上記「循環・重複ノードの
+        // 扱い」節・型名を同一性キーに含める理由の節参照）。
+        let root_key: NodeKey = (self as *const Self as *const (), self.type_name());
         // 祖先限定の循環検出用スタック（常時・全ノード対象。上記
         // 「循環・重複ノードの扱い」節 1.）。
-        let mut ancestors: Vec<*const ()> = vec![self as *const Self as *const ()];
+        let mut ancestors: Vec<NodeKey> = vec![root_key];
         // グローバルな共有オブジェクト dedup 用集合（ゼロサイズ型を
         // 除く。同節 2.）。ルート自身は `named_modules` の戻り値には
-        // 含めないため事前登録しない（`children()` が返す ZST でない
-        // 子がたまたまルートと同じアドレスを指すことは `&Self` が
-        // 非ゼロサイズである限り起きない）。
-        let mut visited: HashSet<*const ()> = HashSet::new();
+        // 含めないため事前登録しない（`children()` が返す非 ZST の子が
+        // ルートと同一キーを持つことは、同じ型かつ同じアドレスの場合
+        // のみで、それは `child` が `self` 自身を返す自己参照であり
+        // `ancestors` 側で捕捉される）。
+        let mut visited: HashSet<NodeKey> = HashSet::new();
         for (name, child) in self.children() {
             collect_named_modules(name, child, &mut ancestors, &mut visited, &mut out);
         }
@@ -764,15 +785,24 @@ pub trait Module {
     }
 }
 
-/// [`Module::named_modules`] の再帰本体（イシュー #2134。ZST 誤判定
-/// 是正は codex-review／Bugbot 指摘・PR #2231）。
+/// [`Module::named_modules`]・[`crate::nn::container::summary`] が
+/// 共有するノード同一性キー（イシュー #2134。データポインタ単独では
+/// 誤判定しうるため型名を組み合わせる是正は codex-review／Bugbot
+/// 指摘・PR #2231）。「`&dyn Module` の vtable を除いた実体データ
+/// アドレス」と「[`Module::type_name`]」の組。詳細は
+/// [`Module::named_modules`] の「型名を同一性キーに含める理由」節
+/// 参照。
+pub(crate) type NodeKey = (*const (), &'static str);
+
+/// [`Module::named_modules`] の再帰本体（イシュー #2134。ZST・
+/// offset-0 誤判定是正は codex-review／Bugbot 指摘・PR #2231）。
 ///
 /// `child`（`&dyn Module`。データポインタが一意に取れるため `self`
-/// とは異なり object safety の制約を受けない）を次の 2 段階で判定
-/// する（[`Module::named_modules`] の「循環・重複ノードの扱い」節
-/// 参照）:
+/// とは異なり object safety の制約を受けない）を [`NodeKey`] へ写像
+/// し、次の 2 段階で判定する（[`Module::named_modules`] の
+/// 「循環・重複ノードの扱い」節参照）:
 ///
-/// 1. `ancestors`（現在の再帰経路上のデータポインタのスタック）に
+/// 1. `ancestors`（現在の再帰経路上の [`NodeKey`] のスタック）に
 ///    既出なら真の循環として黙って打ち切る（ZST か否かに関わらず
 ///    常時適用）。
 /// 2. `child` がゼロサイズ型（`size_of_val(child) == 0`）でなければ、
@@ -783,20 +813,20 @@ pub trait Module {
 fn collect_named_modules<'a>(
     name: String,
     child: &'a dyn Module,
-    ancestors: &mut Vec<*const ()>,
-    visited: &mut HashSet<*const ()>,
+    ancestors: &mut Vec<NodeKey>,
+    visited: &mut HashSet<NodeKey>,
     out: &mut Vec<(String, &'a dyn Module)>,
 ) {
-    let ptr = child as *const dyn Module as *const ();
-    if ancestors.contains(&ptr) {
+    let key: NodeKey = (child as *const dyn Module as *const (), child.type_name());
+    if ancestors.contains(&key) {
         return;
     }
     let is_zst = std::mem::size_of_val(child) == 0;
-    if !is_zst && !visited.insert(ptr) {
+    if !is_zst && !visited.insert(key) {
         return;
     }
     out.push((name.clone(), child));
-    ancestors.push(ptr);
+    ancestors.push(key);
     for (descendant_name, descendant) in child.children() {
         collect_named_modules(
             format!("{name}.{descendant_name}"),

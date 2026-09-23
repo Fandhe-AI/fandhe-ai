@@ -62,7 +62,7 @@
 use std::collections::HashSet;
 
 use crate::error::AutodiffError;
-use crate::nn::module::Module;
+use crate::nn::module::{Module, NodeKey};
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
@@ -673,19 +673,28 @@ fn short_type_name(full: &str) -> &str {
 /// （`.claude/rules/security.md` A03・本番経路 panic 禁止の方針に
 /// 合わせる）。
 ///
-/// **ZST をグローバル dedup から除外する理由（イシュー #2134
-/// codex-review／Bugbot 指摘・PR #2231 是正）**: 経路をまたぐ訪問済み
-/// 集合を無条件適用すると、ZST（`Relu`・`Gelu` 等）を `Box` へ格納
-/// した際に複数インスタンスがアロケータの well-known dangling
-/// address を共有しうるため、`Sequential` に同種の ZST 活性化層を
-/// 複数積んだ場合に後続レイヤーを「既出」と誤判定して出力から
-/// 欠落させる。ZST は祖先限定の循環検出のみで保護し、グローバル
-/// dedup の対象からは外す（詳細は [`Module::named_modules`] の
-/// 「循環・重複ノードの扱い」節参照）。
+/// **ZST をグローバル dedup から除外する理由・型名を同一性キーに
+/// 含める理由（イシュー #2134 codex-review／Bugbot 指摘・PR #2231
+/// 是正）**: データポインタ単独のグローバル訪問済み集合を無条件適用
+/// すると、ZST（`Relu`・`Gelu` 等）を `Box` へ格納した際に複数
+/// インスタンスがアロケータの well-known dangling address を共有
+/// しうるため、`Sequential` に同種の ZST 活性化層を複数積んだ場合に
+/// 後続レイヤーを「既出」と誤判定して出力から欠落させる。さらに、
+/// データポインタ単独では `MultiheadAttention { q_proj: Linear,
+/// ... }` のような複合 `Module` で、ルート自身と最初の子フィールド
+/// （先頭に配置されうる）のデータポインタが異なる型でありながら
+/// 数値としては一致しうるため、祖先限定の循環検出単独でも最初の子を
+/// 「ルート自身の既出」と誤判定して子孫ごと欠落させる。本関数は
+/// [`Module::named_modules`]（`collect_named_modules`）と同じ
+/// `(データポインタ, 型名)` の組（`crate::nn::module::NodeKey`）を
+/// 同一性キーとして使い、ZST は祖先限定の循環検出のみで保護し
+/// グローバル dedup の対象からは外す（詳細は [`Module::named_modules`]
+/// の「循環・重複ノードの扱い」節参照）。
 pub fn summary(module: &dyn Module) -> String {
     let mut out = String::new();
-    let mut ancestors: Vec<*const ()> = vec![module as *const dyn Module as *const ()];
-    let mut visited: HashSet<*const ()> = HashSet::new();
+    let mut ancestors: Vec<NodeKey> =
+        vec![(module as *const dyn Module as *const (), module.type_name())];
+    let mut visited: HashSet<NodeKey> = HashSet::new();
     write_module(&mut out, None, module, 0, &mut ancestors, &mut visited);
     out.push_str(&format!("Submodules: {}\n", module.named_modules().len()));
     out.push_str(&format!("Total parameters: {}\n", module.parameter_count()));
@@ -702,8 +711,8 @@ fn write_module(
     name: Option<&str>,
     module: &dyn Module,
     depth: usize,
-    ancestors: &mut Vec<*const ()>,
-    visited: &mut HashSet<*const ()>,
+    ancestors: &mut Vec<NodeKey>,
+    visited: &mut HashSet<NodeKey>,
 ) {
     let indent = "  ".repeat(depth);
     let type_name = short_type_name(module.type_name());
@@ -728,15 +737,15 @@ fn write_module(
         None => out.push_str(&format!("{type_name}(\n")),
     }
     for (child_name, child) in &children {
-        let ptr = *child as *const dyn Module as *const ();
-        if ancestors.contains(&ptr) {
+        let key: NodeKey = (*child as *const dyn Module as *const (), child.type_name());
+        if ancestors.contains(&key) {
             continue;
         }
         let is_zst = std::mem::size_of_val(*child) == 0;
-        if !is_zst && !visited.insert(ptr) {
+        if !is_zst && !visited.insert(key) {
             continue;
         }
-        ancestors.push(ptr);
+        ancestors.push(key);
         write_module(out, Some(child_name), *child, depth + 1, ancestors, visited);
         ancestors.pop();
     }

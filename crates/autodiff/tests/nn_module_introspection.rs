@@ -476,6 +476,65 @@ fn named_modules_dedups_shared_child_module_like_pytorch_memo() {
 }
 
 /// 回帰テスト（イシュー #2134 codex-review／Bugbot 指摘・PR #2231）:
+/// `MultiheadAttention { q_proj: Linear, k_proj: Linear, ... }` は
+/// 最初のフィールド `q_proj` がルート構造体の先頭（オフセット 0）に
+/// 配置されうるため、`self as *const Self as *const ()` と
+/// `&self.q_proj as *const dyn Module as *const ()` が異なる型
+/// （`MultiheadAttention` と `Linear`）でありながら数値としては
+/// 一致しうる。ノード同一性をデータポインタ単独で判定すると、これを
+/// 「ルート自身の既出」と誤判定して `q_proj` 以降の子孫が丸ごと
+/// `named_modules` から欠落する。型名込みの識別子（`(ポインタ, 型名)`
+/// の組）で区別できることを固定する。
+#[test]
+fn named_modules_does_not_drop_first_child_that_aliases_root_address() {
+    let mha = MultiheadAttention::new(4, 2, true, 1).unwrap();
+    let names: Vec<String> = mha
+        .named_modules()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(names, vec!["q_proj", "k_proj", "v_proj", "out_proj"]);
+}
+
+/// 上記回帰テストの入れ子版。`TransformerEncoderLayer` は
+/// `MultiheadAttention` をさらに `self_attn` として先頭フィールドに
+/// 持つため、2 段階のオフセット 0 誤判定（ルート→`self_attn`、
+/// `self_attn`→`q_proj`）が連鎖しうる構成で、直接子（5 件）＋
+/// `self_attn` の孫（4 件）の計 9 件が欠落なく列挙されることを固定
+/// する。
+#[test]
+fn named_modules_does_not_drop_nested_offset_zero_descendants() {
+    let layer = TransformerEncoderLayer::new(
+        4,
+        2,
+        8,
+        FeedForwardActivation::Relu,
+        LAYER_NORM_DEFAULT_EPS,
+        7,
+    )
+    .unwrap();
+    let names: Vec<String> = layer
+        .named_modules()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "self_attn",
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.out_proj",
+            "linear1",
+            "linear2",
+            "norm1",
+            "norm2",
+        ]
+    );
+}
+
+/// 回帰テスト（イシュー #2134 codex-review／Bugbot 指摘・PR #2231）:
 /// `Relu` は `struct Relu;`（フィールドなしのゼロサイズ型）のため、
 /// `Box<Relu>` として複数インスタンスを保持すると、アロケータの
 /// well-known dangling address を共有し同一データポインタを持ちうる。
@@ -521,5 +580,21 @@ fn summary_does_not_drop_layers_after_repeated_zst_activation_siblings() {
     let out = summary(&seq);
     let relu_lines = out.matches("Relu [params: 0]").count();
     assert_eq!(relu_lines, 2, "summary 出力: {out}");
+    assert!(out.contains("Submodules: 4\n"), "summary 出力: {out}");
+}
+
+/// `summary` 版のオフセット 0 誤判定回帰テスト（上記
+/// `named_modules_does_not_drop_first_child_that_aliases_root_address`
+/// と同じ根本原因を `write_module` 経由でも固定する）。
+#[test]
+fn summary_does_not_drop_first_child_that_aliases_root_address() {
+    let mha = MultiheadAttention::new(4, 2, true, 1).unwrap();
+    let out = summary(&mha);
+    for expected in ["q_proj", "k_proj", "v_proj", "out_proj"] {
+        assert!(
+            out.contains(&format!("({expected}): Linear")),
+            "summary 出力に {expected} が見つからない: {out}"
+        );
+    }
     assert!(out.contains("Submodules: 4\n"), "summary 出力: {out}");
 }
