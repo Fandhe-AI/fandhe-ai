@@ -657,7 +657,8 @@ fn short_type_name(full: &str) -> &str {
 ///
 /// 入出力 shape 推定・`extra_repr` 相当（`in_features` 等の属性表示）
 /// は対象外（イシュー本文のスコープ外指定）。型名は
-/// [`Module::type_name`] を [`short_type_name`] で短縮したものを使う。
+/// [`Module::type_name`] をモジュール非公開のヘルパー（型パスの最終
+/// セグメントのみを残す縮約）で短縮したものを使う。
 pub fn summary(module: &dyn Module) -> String {
     let mut out = String::new();
     write_module(&mut out, None, module, 0);
