@@ -4176,7 +4176,13 @@ fn collect_public_module_paths_recursive(
         out.insert(path.clone());
         match body {
             Some(inner_tokens) => {
-                collect_public_module_paths_recursive(&inner_tokens, dir, &path, out);
+                // インライン `pub mod <name> { ... }` 本体内の子 `pub mod
+                // child;` は Rust 2018 の解決規約で `<dir>/<name>/child.rs`
+                // （または `<dir>/<name>/child/mod.rs`）に置かれるため、
+                // 子ディレクトリを `<dir>/<name>` へ進めてから再帰する
+                // （親の `dir` のまま再帰すると `<dir>/child.rs` を誤って
+                // 解決する。Cursor Bugbot 指摘・PR #2212）。
+                collect_public_module_paths_recursive(&inner_tokens, &dir.join(&name), &path, out);
             }
             None => {
                 let (content, child_dir) = resolve_external_pub_mod_file(dir, &name);
@@ -4239,6 +4245,44 @@ fn collect_public_module_paths_recursive_ignores_private_mod_subtree() {
         out, expected,
         "private mod・fn 本体内の pub mod が誤って公開パスとして収集された、\
          またはインライン pub mod の再帰収集に脱落がある"
+    );
+}
+
+/// インライン `pub mod outer { pub mod child; }` の `child` が
+/// `<dir>/outer/child.rs`（Rust 2018 規約）から解決され、その中の
+/// `pub mod` まで再帰収集されることを固定する（Cursor Bugbot 指摘・
+/// PR #2212: 親の `dir` のまま再帰すると `<dir>/child.rs` を誤って
+/// 解決していた）。一時ディレクトリに実ファイルを置いて検証する。
+#[test]
+fn collect_public_module_paths_recursive_resolves_file_child_of_inline_mod() {
+    let root = std::env::temp_dir().join(format!(
+        "fandhe-ai-api-surface-inline-mod-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("outer")).expect("一時ディレクトリを作成できない");
+    std::fs::write(
+        root.join("outer").join("child.rs"),
+        "pub mod grandchild {}\n",
+    )
+    .expect("child.rs を書き込めない");
+    // 誤った解決先（`<dir>/child.rs`）には別内容を置き、誤解決なら
+    // 収集結果が変わる（`wrong` が混入する）ようにする。
+    std::fs::write(root.join("child.rs"), "pub mod wrong {}\n").expect("child.rs を書き込めない");
+
+    let tokens = tokenize_including_punctuation("pub mod outer { pub mod child; }");
+    let mut out = std::collections::BTreeSet::new();
+    collect_public_module_paths_recursive(&tokens, &root, "", &mut out);
+    let _ = std::fs::remove_dir_all(&root);
+
+    let expected: std::collections::BTreeSet<String> =
+        ["outer", "outer::child", "outer::child::grandchild"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+    assert_eq!(
+        out, expected,
+        "インライン pub mod 配下のファイル子モジュールを <dir>/<outer>/child.rs から解決できていない"
     );
 }
 
