@@ -474,3 +474,52 @@ fn named_modules_dedups_shared_child_module_like_pytorch_memo() {
     let names: Vec<&str> = modules.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, vec!["a"]);
 }
+
+/// 回帰テスト（イシュー #2134 codex-review／Bugbot 指摘・PR #2231）:
+/// `Relu` は `struct Relu;`（フィールドなしのゼロサイズ型）のため、
+/// `Box<Relu>` として複数インスタンスを保持すると、アロケータの
+/// well-known dangling address を共有し同一データポインタを持ちうる。
+/// `named_modules`／`summary` がこれをグローバルな訪問済み集合で
+/// 「既出」と誤判定すると、`Sequential` に同種 ZST 活性化層を複数積んだ
+/// 場合に 2 個目以降の `Relu`・後続レイヤーが出力から欠落する。本テスト
+/// は同種 ZST を隣接させない配置（`Linear` を挟む）・隣接させる配置
+/// （`Relu` を連続で積む）の両方で全レイヤーが欠落なく列挙されることを
+/// 固定する。
+#[test]
+fn named_modules_does_not_drop_layers_after_repeated_zst_activation_siblings() {
+    let seq = Sequential::new()
+        .add(linear(4, 8, 21))
+        .add(Relu)
+        .add(linear(8, 8, 22))
+        .add(Relu)
+        .add(Relu) // 隣接する同種 ZST（アドレス衝突が最も起きやすい配置）
+        .add(linear(8, 2, 23));
+
+    let names: Vec<String> = seq
+        .named_modules()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["0", "1", "2", "3", "4", "5"],
+        "ZST 活性化層〈Relu〉を複数含む Sequential で後続レイヤーが欠落してはならない"
+    );
+}
+
+/// 上記回帰テストの `summary` 版。同じ配置で `write_module` の再帰も
+/// 全ノードを列挙し、`Submodules` 件数が欠落なく一致することを固定
+/// する。
+#[test]
+fn summary_does_not_drop_layers_after_repeated_zst_activation_siblings() {
+    let seq = Sequential::new()
+        .add(linear(4, 8, 31))
+        .add(Relu)
+        .add(Relu)
+        .add(linear(8, 2, 32));
+
+    let out = summary(&seq);
+    let relu_lines = out.matches("Relu [params: 0]").count();
+    assert_eq!(relu_lines, 2, "summary 出力: {out}");
+    assert!(out.contains("Submodules: 4\n"), "summary 出力: {out}");
+}

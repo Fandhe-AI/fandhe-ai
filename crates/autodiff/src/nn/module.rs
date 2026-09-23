@@ -665,15 +665,33 @@ pub trait Module {
     ///
     /// [`Module::children`] は trait object を返す性質上、実装者が
     /// 自身（`self`）や既に列挙済みの `Module` を任意に返せる
-    /// （例: 手書きの循環参照構造）。本メソッドは `&dyn Module` の
-    /// データポインタ（vtable を除いた実体アドレス）をキーにした
-    /// 訪問済み集合を内部で保持し、ルート自身を最初から登録した
-    /// うえで既出ノードへは再帰しない。これにより PyTorch の
-    /// `named_modules()` と同じ「memo で重複・循環を抑止する」契約を
-    /// 満たし、循環構造に対しても panic（stack overflow）せず有限の
-    /// 結果を返す（`.claude/rules/security.md` A03・本番経路 panic
-    /// 禁止の方針に合わせる）。同じ `Module` が複数の親から共有される
-    /// 場合は、最初に到達した経路でのみ列挙される。
+    /// （例: 手書きの循環参照構造）。本メソッドは 2 種類のデータ
+    /// ポインタ（`&dyn Module` の vtable を除いた実体アドレス）追跡を
+    /// 組み合わせて安全に打ち切る:
+    ///
+    /// 1. **祖先限定の循環検出**（常時・無条件）: ルートから現在ノード
+    ///    までの経路（祖先）上のポインタのみをスタックで保持し、経路上
+    ///    に既出のノードへは再帰しない。循環構造でも panic
+    ///    （stack overflow）せず有限の結果を返す（`.claude/rules/
+    ///    security.md` A03・本番経路 panic 禁止の方針に合わせる）。
+    /// 2. **グローバルな共有オブジェクト dedup**（ゼロサイズ型を除く）:
+    ///    経路をまたいだ訪問済み集合も保持し、同じ `Module` が複数の
+    ///    親から共有される場合は最初に到達した経路でのみ列挙する
+    ///    （PyTorch `named_modules()` の memo と同じ契約）。ただし
+    ///    `std::mem::size_of_val` でゼロサイズ（ZST。`Relu`・`Gelu`
+    ///    等フィールドを持たない活性化層）と判定できる子はこの
+    ///    グローバル dedup の対象から除外する（イシュー #2134
+    ///    codex-review／Bugbot 指摘・PR #2231 是正）。理由: ZST を
+    ///    `Box` へ格納すると、実際には異なるインスタンスであっても
+    ///    複数インスタンスがアロケータの well-known dangling address
+    ///    （`align_of::<T>()` 相当の非 null 定数）を共有しうるため、
+    ///    データポインタだけで「同一オブジェクトの共有」と「たまたま
+    ///    アドレスが一致した別インスタンス」を区別できない
+    ///    （型情報を持たない `&dyn Module` からは `TypeId` も取得
+    ///    できないため型込み識別子でも解決しない）。`Sequential` に
+    ///    同種の ZST 活性化層を複数積んだ場合にグローバル dedup を
+    ///    適用すると後続レイヤーが誤って欠落するため、ZST は祖先限定
+    ///    の循環検出（1.）のみで保護し、常に列挙対象に含める。
     ///
     /// # 既定実装
     ///
@@ -691,10 +709,17 @@ pub trait Module {
         // 取り出せる。これでルート自身の同一性を、`children()` が
         // 返す `&dyn Module`（同じくデータポインタへキャスト可能）と
         // 比較できるようになる。
+        // 祖先限定の循環検出用スタック（常時・全ノード対象。上記
+        // 「循環・重複ノードの扱い」節 1.）。
+        let mut ancestors: Vec<*const ()> = vec![self as *const Self as *const ()];
+        // グローバルな共有オブジェクト dedup 用集合（ゼロサイズ型を
+        // 除く。同節 2.）。ルート自身は `named_modules` の戻り値には
+        // 含めないため事前登録しない（`children()` が返す ZST でない
+        // 子がたまたまルートと同じアドレスを指すことは `&Self` が
+        // 非ゼロサイズである限り起きない）。
         let mut visited: HashSet<*const ()> = HashSet::new();
-        visited.insert(self as *const Self as *const ());
         for (name, child) in self.children() {
-            collect_named_modules(name, child, &mut visited, &mut out);
+            collect_named_modules(name, child, &mut ancestors, &mut visited, &mut out);
         }
         out
     }
@@ -739,34 +764,49 @@ pub trait Module {
     }
 }
 
-/// [`Module::named_modules`] の再帰本体（イシュー #2134 codex-review
-/// 指摘・PR #2231）。
+/// [`Module::named_modules`] の再帰本体（イシュー #2134。ZST 誤判定
+/// 是正は codex-review／Bugbot 指摘・PR #2231）。
 ///
 /// `child`（`&dyn Module`。データポインタが一意に取れるため `self`
-/// とは異なり object safety の制約を受けない）が `visited` に未登録
-/// なら登録して `out` へ push し、その子孫へさらに再帰する。既登録
-/// （＝直前の呼び出しからの経路のどこかで既に列挙済み。`self` 自身を
-/// 含む）なら黙って打ち切る（PyTorch `named_modules()` の memo と
-/// 同じ「重複・循環を抑止する」契約）。
+/// とは異なり object safety の制約を受けない）を次の 2 段階で判定
+/// する（[`Module::named_modules`] の「循環・重複ノードの扱い」節
+/// 参照）:
+///
+/// 1. `ancestors`（現在の再帰経路上のデータポインタのスタック）に
+///    既出なら真の循環として黙って打ち切る（ZST か否かに関わらず
+///    常時適用）。
+/// 2. `child` がゼロサイズ型（`size_of_val(child) == 0`）でなければ、
+///    経路をまたぐ `visited` 集合にも登録を試み、既登録（＝別経路で
+///    共有済みのオブジェクト）なら打ち切る。ZST はこの段を素通りし
+///    常に列挙・再帰対象になる（複数インスタンスがアロケータの
+///    dangling address を共有し「既出」と誤判定されるのを防ぐ）。
 fn collect_named_modules<'a>(
     name: String,
     child: &'a dyn Module,
+    ancestors: &mut Vec<*const ()>,
     visited: &mut HashSet<*const ()>,
     out: &mut Vec<(String, &'a dyn Module)>,
 ) {
     let ptr = child as *const dyn Module as *const ();
-    if !visited.insert(ptr) {
+    if ancestors.contains(&ptr) {
+        return;
+    }
+    let is_zst = std::mem::size_of_val(child) == 0;
+    if !is_zst && !visited.insert(ptr) {
         return;
     }
     out.push((name.clone(), child));
+    ancestors.push(ptr);
     for (descendant_name, descendant) in child.children() {
         collect_named_modules(
             format!("{name}.{descendant_name}"),
             descendant,
+            ancestors,
             visited,
             out,
         );
     }
+    ancestors.pop();
 }
 
 /// `Linear::bind(tape)` で当該ステップの葉ノードを登録してから

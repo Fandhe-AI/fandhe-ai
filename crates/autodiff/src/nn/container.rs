@@ -665,17 +665,28 @@ fn short_type_name(full: &str) -> &str {
 /// # 循環・重複ノードの扱い（イシュー #2134 codex-review 指摘。
 /// PR #2231）
 ///
-/// [`write_module`] は [`Module::named_modules`] と同じ理由
+/// `write_module`（本関数直下の再帰本体）は [`Module::named_modules`] と同じ理由
 /// （`Module::children` の実装者が自身や既出の `Module` を任意に
-/// 返せる）で無限再帰しうる。本関数は [`Module::named_modules`] と
-/// 同じデータポインタベースの訪問済み集合をルートから通しで
-/// 保持し、既出ノードへは再帰しない（`.claude/rules/security.md`
-/// A03・本番経路 panic 禁止の方針に合わせる）。
+/// 返せる）で無限再帰しうる。本関数は [`Module::named_modules`]
+/// （`collect_named_modules`）と同じ 2 段階の判定方式（祖先限定の
+/// 循環検出＋ゼロサイズ型を除くグローバル共有 dedup）を使う
+/// （`.claude/rules/security.md` A03・本番経路 panic 禁止の方針に
+/// 合わせる）。
+///
+/// **ZST をグローバル dedup から除外する理由（イシュー #2134
+/// codex-review／Bugbot 指摘・PR #2231 是正）**: 経路をまたぐ訪問済み
+/// 集合を無条件適用すると、ZST（`Relu`・`Gelu` 等）を `Box` へ格納
+/// した際に複数インスタンスがアロケータの well-known dangling
+/// address を共有しうるため、`Sequential` に同種の ZST 活性化層を
+/// 複数積んだ場合に後続レイヤーを「既出」と誤判定して出力から
+/// 欠落させる。ZST は祖先限定の循環検出のみで保護し、グローバル
+/// dedup の対象からは外す（詳細は [`Module::named_modules`] の
+/// 「循環・重複ノードの扱い」節参照）。
 pub fn summary(module: &dyn Module) -> String {
     let mut out = String::new();
+    let mut ancestors: Vec<*const ()> = vec![module as *const dyn Module as *const ()];
     let mut visited: HashSet<*const ()> = HashSet::new();
-    visited.insert(module as *const dyn Module as *const ());
-    write_module(&mut out, None, module, 0, &mut visited);
+    write_module(&mut out, None, module, 0, &mut ancestors, &mut visited);
     out.push_str(&format!("Submodules: {}\n", module.named_modules().len()));
     out.push_str(&format!("Total parameters: {}\n", module.parameter_count()));
     out
@@ -683,14 +694,15 @@ pub fn summary(module: &dyn Module) -> String {
 
 /// [`summary`] の再帰本体。`name` はこのノードの子としての名前
 /// （ルート呼び出しでは `None`）、`depth` はインデント段数。
-/// `visited` は [`summary`] から通しで渡される訪問済み集合（既出
-/// ノードの再帰打ち切りに使う。上記「循環・重複ノードの扱い」節
-/// 参照）。
+/// `ancestors`／`visited` は [`summary`] から通しで渡される 2 段階の
+/// 判定用状態（既出ノードの再帰打ち切りに使う。上記「循環・重複
+/// ノードの扱い」節参照）。
 fn write_module(
     out: &mut String,
     name: Option<&str>,
     module: &dyn Module,
     depth: usize,
+    ancestors: &mut Vec<*const ()>,
     visited: &mut HashSet<*const ()>,
 ) {
     let indent = "  ".repeat(depth);
@@ -717,9 +729,16 @@ fn write_module(
     }
     for (child_name, child) in &children {
         let ptr = *child as *const dyn Module as *const ();
-        if visited.insert(ptr) {
-            write_module(out, Some(child_name), *child, depth + 1, visited);
+        if ancestors.contains(&ptr) {
+            continue;
         }
+        let is_zst = std::mem::size_of_val(*child) == 0;
+        if !is_zst && !visited.insert(ptr) {
+            continue;
+        }
+        ancestors.push(ptr);
+        write_module(out, Some(child_name), *child, depth + 1, ancestors, visited);
+        ancestors.pop();
     }
     out.push_str(&format!(
         "{indent}) [params: {}]\n",
