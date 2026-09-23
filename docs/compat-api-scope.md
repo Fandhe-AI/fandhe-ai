@@ -878,6 +878,17 @@ Module>>, .. }` の実装で既に実証済み（同 doc §3）。sealed 化は�
 の承認待ち（段階 0 継続）。#2133（実装）が想定していた素の再エクスポート
 形は本判断により再確定が必要（同 doc §8）。
 
+**#2135（`Var` 演算子オーバーロード〈`+`・`*`・`-`〉の facade 公開可否）
+の設計記録は `docs/autodiff-var-operator-overload-design.md` として
+完了した。** コード変更なし。`Var` へのトレイト impl（`Add`／`Mul`／
+`Sub`／`Neg`）は facade が `Var` を再エクスポートしている
+（`crates/facade/src/lib.rs:184`）ため、facade 側のコードを変更せず
+とも facade の公開面を自動的に広げる。本節経路 2 の承認が得られるまで
+#2136（実装）は着手不可（同 doc §12 承認事項 2）。推奨案（`Output =
+Result<Var, AutodiffError>`・borrow／consumed 4 組合せ・既存 inherent
+メソッドへの委譲のみで bit 同一を保証）・スカラー混合の段階 0 判断・
+`Div` の扱いはいずれも承認事項として列挙のみ（同 doc §8・§11・§12）。
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |
