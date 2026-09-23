@@ -860,6 +860,17 @@ const FUSED_ELEMENTWISE_CACHE_CAP: usize = 256;
 /// 取得の間で完結し、他呼び出しの割り込みを許さない。`SingleFlightCache`
 /// 自体の単一飛行契約（同一キーへの並行呼び出しが構築を二重実行しない）
 /// は内側のキー単位ロックにより従来どおり維持する。
+///
+/// コンパイル失敗時はスロットの登録自体を取り消す（codex-review P2 是正・
+/// PR #2232）。以前の実装は空スロットを外側 `HashMap` へ登録した後に
+/// コンパイルしていたが、`compile_ptx`／`load_module`／`load_function`
+/// のいずれかが失敗しても登録済みスロットを削除しなかったため、一時的な
+/// コンパイル失敗（NVRTC の環境依存の失敗等）が累積すると `guard.len()`
+/// が [`FUSED_ELEMENTWISE_CACHE_CAP`] へ達し、以後の正常な融合プランまで
+/// 恒久的に `Ok(None)`（呼び出し元フォールバック）へ落ちる欠陥があった。
+/// 本関数は構築に失敗した場合、他スレッドが同じキーで構築に成功して
+/// いない（スロットが `None` のまま）ことを確認したうえでエントリを
+/// 削除し、次回呼び出しが枠を再利用して再試行できるようにする。
 pub(crate) fn cached_fused_elementwise_kernel(
     device: &CudaDevice,
     key: &str,
@@ -877,7 +888,7 @@ pub(crate) fn cached_fused_elementwise_kernel(
         }
         Arc::clone(
             guard
-                .entry(cache_key)
+                .entry(cache_key.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(None))),
         )
     };
@@ -886,15 +897,53 @@ pub(crate) fn cached_fused_elementwise_kernel(
     if let Some(existing) = slot_guard.as_ref() {
         return Ok(Some(Arc::clone(existing)));
     }
-    let ptx = compile_ptx(source, device.arch())?;
-    let built = Arc::new(
-        device
-            .context()
-            .load_module(ptx)?
-            .load_function(function_name)?,
-    );
-    *slot_guard = Some(Arc::clone(&built));
-    Ok(Some(built))
+    let build_result: Result<Arc<CudaFunction>, CudaError> = (|| {
+        let ptx = compile_ptx(source, device.arch())?;
+        Ok(Arc::new(
+            device
+                .context()
+                .load_module(ptx)?
+                .load_function(function_name)?,
+        ))
+    })();
+    match build_result {
+        Ok(built) => {
+            *slot_guard = Some(Arc::clone(&built));
+            Ok(Some(built))
+        }
+        Err(err) => {
+            // コンパイル失敗（`compile_ptx`／`load_module`／`load_function`
+            // のいずれか）時は、枠だけ確保して中身が空のまま残るスロット
+            // が `FUSED_ELEMENTWISE_CACHE_CAP` の枠を恒久的に消費するのを
+            // 防ぐため、外側 `HashMap` からエントリ自体を取り消す
+            // （codex-review 指摘・PR #2232。以前の実装は失敗時もスロット
+            // を登録済みのまま放置していたため、一時的なコンパイル失敗が
+            // 累積すると `guard.len()` が上限へ達し、以後の正常なプランも
+            // 恒久的に `Ok(None)`〈呼び出し元は `Unsupported` フォール
+            // バック〉へ落ちる欠陥があった）。本関数内のロック順序は常に
+            // 外側 → 内側（[`get_or_build`] と同型）のため、内側
+            // `slot_guard` を保持したまま外側ロックを取ると逆順になり
+            // 他呼び出しの通常経路とデッドロックしうる。よって一旦内側
+            // ロックを解放してから外側ロックを取得し、削除直前に内側
+            // ロックを再取得して「まだ未構築のまま」であることを確認した
+            // 上で削除する（この間に他スレッドが同じキーで構築に成功して
+            // いれば、削除せずそのエントリを温存する）。
+            drop(slot_guard);
+            if let Ok(mut guard) = lock_cache(cache)
+                && guard
+                    .get(&cache_key)
+                    .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
+            {
+                let still_unbuilt = lock_cache(&slot)
+                    .map(|inner| inner.is_none())
+                    .unwrap_or(false);
+                if still_unbuilt {
+                    guard.remove(&cache_key);
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
 /// `device` の `CudaContext` に対応する [`crate::gemm_mma_tf32x3::

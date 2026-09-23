@@ -560,6 +560,18 @@ const FUSED_ELEMENTWISE_CACHE_CAP: usize = 256;
 /// ロックを保持したまま行うため、同一キーへの並行呼び出しは 2 回目
 /// 以降が内側ロックの取得で待機し構築を二重実行しない（副次的に、旧
 /// 実装が許容していた同一キーの冗長構築も解消される）。
+///
+/// コンパイル失敗時はスロットの登録自体を取り消す（codex-review P2 是正・
+/// PR #2232。CUDA 側 `context_cache::cached_fused_elementwise_kernel` と
+/// 同じ是正）。以前の実装は空スロットを外側 `HashMap` へ登録した後に
+/// `pipeline::compile_source`／`make_pipeline` を呼んでいたが、いずれかが
+/// 失敗しても登録済みスロットを削除しなかったため、一時的なコンパイル
+/// 失敗が累積すると `guard.len()` が [`FUSED_ELEMENTWISE_CACHE_CAP`] へ
+/// 達し、以後の正常な融合プランまで恒久的に `Ok(None)`（呼び出し元
+/// フォールバック）へ落ちる欠陥があった。本関数は構築に失敗した場合、
+/// 他スレッドが同じキーで構築に成功していない（スロットが `None` の
+/// まま）ことを確認したうえでエントリを削除し、次回呼び出しが枠を
+/// 再利用して再試行できるようにする。
 pub(crate) fn cached_fused_elementwise_pipeline(
     ctx: &Arc<MetalContext>,
     key: &str,
@@ -591,10 +603,42 @@ pub(crate) fn cached_fused_elementwise_pipeline(
     if let Some(existing) = slot_guard.as_ref() {
         return Ok(Some(existing.clone()));
     }
-    let library = pipeline::compile_source(ctx.device(), source)?;
-    let built = pipeline::make_pipeline(ctx.device(), &library, function_name)?;
-    *slot_guard = Some(built.clone());
-    Ok(Some(built))
+    let build_result: Result<objc2::rc::Retained<MtlPipeline>, MetalError> = (|| {
+        let library = pipeline::compile_source(ctx.device(), source)?;
+        pipeline::make_pipeline(ctx.device(), &library, function_name)
+    })();
+    match build_result {
+        Ok(built) => {
+            *slot_guard = Some(built.clone());
+            Ok(Some(built))
+        }
+        Err(err) => {
+            // コンパイル失敗（`compile_source`／`make_pipeline` のいずれか）
+            // 時は、枠だけ確保して中身が空のまま残るスロットが
+            // `FUSED_ELEMENTWISE_CACHE_CAP` の枠を恒久的に消費するのを
+            // 防ぐため、外側 `HashMap` からエントリ自体を取り消す
+            // （codex-review 指摘・PR #2232。本関数内のロック順序は常に
+            // 外側 → 内側のため、内側 `slot_guard` を保持したまま外側
+            // ロックを取ると逆順になり他呼び出しの通常経路とデッドロック
+            // しうる。よって一旦内側ロックを解放してから外側ロックを取得
+            // し、削除直前に内側ロックを再取得して「まだ未構築のまま」
+            // であることを確認した上で削除する（この間に他スレッドが
+            // 同じキーで構築に成功していれば、削除せずそのエントリを
+            // 温存する）。
+            drop(slot_guard);
+            if let Ok(mut guard) = cache.lock()
+                && guard
+                    .get(key)
+                    .is_some_and(|existing| Arc::ptr_eq(existing, &slot))
+            {
+                let still_unbuilt = slot.lock().map(|inner| inner.is_none()).unwrap_or(false);
+                if still_unbuilt {
+                    guard.remove(key);
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
 #[cfg(test)]
