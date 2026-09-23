@@ -2099,10 +2099,10 @@ fn find_var_alias_declarations(content: &str) -> Vec<String> {
         let after_visibility = strip_visibility_prefix(after_attributes);
         if let Some(use_body) = strip_keyword_prefix(after_visibility, "use") {
             aliases.extend(find_var_aliases_in_use_body(use_body));
-        } else if let Some(type_rest) = strip_keyword_prefix(after_visibility, "type") {
-            if let Some(alias) = type_alias_target_is_var(type_rest) {
-                aliases.push(alias);
-            }
+        } else if let Some(type_rest) = strip_keyword_prefix(after_visibility, "type")
+            && let Some(alias) = type_alias_target_is_var(type_rest)
+        {
+            aliases.push(alias);
         }
         // ブロックスコープ（`fn`／`const`／`static`／`impl`／`trait`／
         // `mod` 等、本体に `{...}` を持つ任意のステートメント）は種類を
