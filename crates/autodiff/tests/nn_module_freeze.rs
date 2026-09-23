@@ -181,8 +181,9 @@ fn sequential_and_module_list_freeze_propagates_to_all_children() {
         .expect("Linear は失敗しない");
     assert!(seq.layers()[0].requires_grad());
     assert!(!seq.layers()[1].requires_grad());
-    // `Sequential::requires_grad`（all）は 1 つでも false なら false。
-    assert!(!seq.requires_grad());
+    // `Sequential::requires_grad`（any。PR #2234 レビュー是正: 公開契約
+    // 「子が 1 つでも true なら true」どおり）は 1 つでも true なら true。
+    assert!(seq.requires_grad());
 
     let mut list = ModuleList::new();
     list.push(Box::new(
