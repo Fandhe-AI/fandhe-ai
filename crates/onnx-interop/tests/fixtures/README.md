@@ -97,3 +97,11 @@ onnx::interp::run` の全経路 end-to-end 推論を実行し、PyTorch 参照�
 スキップする（panic しない）。CI は本リポにコミットされた `model.onnx` /
 `slice_repro.onnx` のテストのみを常時実行する
 （`.claude/rules/ci.md` の実機依存分離と同じ運用）。
+
+## `model-zoo/`（イシュー #2081）
+
+第三者公開モデル（ONNX Model Zoo・`onnx/models`）による import 実証・parity
+検証用 fixture。出自・sha256・ライセンス・取得手順は
+`model-zoo/README.md` を参照する（本節から二重管理しない）。`mnist-12` の
+展開済みファイルのみコミット済み、他 3 モデルは `ONNX_INTEROP_MODEL_ZOO_DIR`
+経由の非コミット fixture。

@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai_autodiff::Tape;
-use fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid};
+use fandhe_ai_autodiff::nn::activation::{Relu, Tanh};
 use fandhe_ai_autodiff::nn::{Linear, Module, RmsNorm, Sequential};
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_onnx_interop::onnx::export::{ExportError, ExportOptions, build_model_proto};
@@ -304,8 +304,10 @@ fn empty_layer_list_is_rejected() {
 
 #[test]
 fn unsupported_layer_is_rejected_with_index_and_unknown_kind() {
-    let layers: Vec<Box<dyn Module>> = vec![Box::new(Relu), Box::new(Sigmoid)];
-    let err = export_nn::export_parts_from_layers(&layers).expect_err("Sigmoid は未対応のはず");
+    // `Tanh` は対応する ONNX 演算が無い層として未対応のまま（`Sigmoid` は
+    // イシュー #2076 で対応層化したため負例に使えなくなった）。
+    let layers: Vec<Box<dyn Module>> = vec![Box::new(Relu), Box::new(Tanh)];
+    let err = export_nn::export_parts_from_layers(&layers).expect_err("Tanh は未対応のはず");
     assert_eq!(
         err,
         ExportError::UnsupportedLayer {
@@ -333,9 +335,9 @@ fn unsupported_layer_reports_known_kind_when_downcast_hook_matches() {
 fn unsupported_layer_after_supported_prefix_does_not_return_partial_graph() {
     let mut weight_rng = Xorshift64Star::new(0x2036_0006);
     let l1 = linear_from_rng(&mut weight_rng, 4, 4, true);
-    let layers: Vec<Box<dyn Module>> = vec![Box::new(l1), Box::new(Relu), Box::new(Sigmoid)];
+    let layers: Vec<Box<dyn Module>> = vec![Box::new(l1), Box::new(Relu), Box::new(Tanh)];
     let err =
-        export_nn::export_parts_from_layers(&layers).expect_err("末尾の Sigmoid で拒否されるはず");
+        export_nn::export_parts_from_layers(&layers).expect_err("末尾の Tanh で拒否されるはず");
     assert_eq!(
         err,
         ExportError::UnsupportedLayer {

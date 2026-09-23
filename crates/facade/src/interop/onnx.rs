@@ -24,7 +24,7 @@
 //! `.claude/rules/coding-rust.md` の REQ-2 統一複合判定（バックエンド間
 //! 数値一致）とは別指標である（両者を混同しない）。
 //!
-//! 対応 op は 22 種（`fandhe_ai_onnx_interop::onnx::interp` 冒頭コメント
+//! 対応 op は 23 種（`fandhe_ai_onnx_interop::onnx::interp` 冒頭コメント
 //! 参照）。未対応 `op_type` は無言 skip せず [`OnnxError::UnsupportedOp`]
 //! で fail-closed に拒否する（no-silent-skip 契約。`.claude/rules/
 //! security.md` A03）。`run` の `feeds` は ONNX の pre-IR-4 セマンティクス
@@ -62,7 +62,7 @@
 //!   `to_path` で export できるのは import 済みモデル（`OnnxModel`）の
 //!   みで、学習済み `Sequential`／`nn` から直接 `OnnxModel` を構築する
 //!   経路は [`OnnxModel::from_sequential`]（次節・#2037）を使う
-//! - allowlist（`interp` 対応 22 op・既定 domain）外のノードを含む
+//! - allowlist（`interp` 対応 23 op・既定 domain）外のノードを含む
 //!   モデルは `from_bytes` では構築できても **export 時に**
 //!   [`OnnxError::UnsupportedOp`] により fail-closed に拒否する（無言
 //!   skip しない）
@@ -77,9 +77,13 @@
 //! による正規化を挟まず直接 [`OnnxModel`] が保持する。以下を doc として
 //! 明記する:
 //!
-//! - **対応層は `Linear`／`ReLU` の 2 種のみ**（Sigmoid・Tanh・Conv2d・
-//!   LayerNorm 等は非対応）。1 つでも非対応層を含む場合は `Graph` を
-//!   一切構築せず [`OnnxError::UnsupportedLayer`] で fail-closed に
+//! - **対応層は `Linear`／`ReLU`／`Softmax`／`LayerNorm`／
+//!   `GELU`（erf 版）／`Conv2d` の 6 種**（イシュー #2076・親 #2034 で
+//!   `Linear`／`ReLU` の 2 種から拡大。`Sigmoid` は数値契約
+//!   〈`docs/facade-onnx-export-exposure-decision.md` §15.7 項 5〉が
+//!   承認保留のため対象外のまま。Tanh・GeluTanh・LogSoftmax・
+//!   Conv1d 等は引き続き非対応）。1 つでも非対応層を含む場合は `Graph`
+//!   を一切構築せず [`OnnxError::UnsupportedLayer`] で fail-closed に
 //!   拒否する（部分的に構築されたモデルを返さない）
 //! - graph input 名は常に `"input"`・output 名は常に `"output"`
 //!   （最終層の出力）。initializer 名は `{i}.weight`／`{i}.bias`
@@ -89,11 +93,14 @@
 //! - `value_info` は常に空（前節と同じ制約）
 //! - ホスト CPU 実行のみ・`BackendOps`／`Device` 非経由（学習済み
 //!   パラメータの値をそのままコピーするのみで算術を行わない）
-//! - bit 完全一致契約: `from_sequential(&m).to_bytes(opts)` →
-//!   `from_bytes` → `run` の出力は、`Linear→ReLU` 入力に NaN が現れず
-//!   GEMM 出力に厳密な `±0.0` が現れない限り `m.predict(&x)` と bit
-//!   完全一致する（`export_nn` モジュール doc「bit 一致契約の前提」
-//!   参照）
+//! - 数値契約: `Linear`／`ReLU` のみのモデルは、`from_sequential(&m)
+//!   .to_bytes(opts)` → `from_bytes` → `run` の出力が `Linear→ReLU`
+//!   入力に NaN が現れず GEMM 出力に厳密な `±0.0` が現れない限り
+//!   `m.predict(&x)` と bit 完全一致する（`export_nn` モジュール doc
+//!   「bit 一致契約の前提」参照）。Softmax・LayerNorm・GELU・
+//!   Conv2d を含むモデルは結合順序・実装経路が異なるため REQ-2 統一
+//!   複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で検証する
+//!   （`crates/facade/tests/interop_onnx_export_layers_parity.rs`）
 //!
 //! ## 非信頼入力の扱い
 //!
@@ -219,9 +226,14 @@ impl OnnxModel {
     /// export」節参照）。
     ///
     /// `fandhe_ai_onnx_interop::onnx::export_nn::graph_from_layers` への
-    /// 1 段委譲のみ（薄いラッパー原則）。対応層は `Linear`／`ReLU` の
-    /// 2 種のみで、それ以外（Sigmoid・Tanh・Conv2d 等）を 1 つでも
-    /// 含む場合は [`Graph`] を一切構築せず
+    /// 1 段委譲のみ（薄いラッパー原則）。対応層は `Linear`／`ReLU`／
+    /// `Softmax`／`LayerNorm`／`GELU`（erf 版）／`Conv2d` の
+    /// 6 種（イシュー #2076・親 #2034 で拡大。`Sigmoid` は §15.7 項 5
+    /// が承認保留のため対象外。`Linear`／`ReLU` のみの
+    /// モデルは `predict` と bit 完全一致、それ以外を含むモデルは
+    /// REQ-2 統一複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5
+    /// 未満〉で検証する）。それ以外の層（Tanh・GeluTanh・LogSoftmax・
+    /// Conv1d 等）を 1 つでも含む場合は [`Graph`] を一切構築せず
     /// [`OnnxError::UnsupportedLayer`] を返す（全層事前検証・
     /// fail-closed。`security.md` A08）。空の `Sequential` は
     /// [`OnnxError::InvalidModel`] で拒否される。
