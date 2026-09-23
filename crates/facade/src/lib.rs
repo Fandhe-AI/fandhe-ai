@@ -1116,8 +1116,9 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// 本クレートの実際の `pub mod` 宣言（本ファイル冒頭付近）がドリフト
 /// しないことは `crates/facade/tests/api_surface.rs::
 /// custom_function_hold_doctest_globs_all_pub_modules` が機械的に固定
-/// する（doctest 本文を [`include_str!`] で読み込み、`use fandhe_ai::
-/// <mod>::*;` の集合と `pub mod <mod>;` 宣言の集合を突き合わせる）。
+/// する（本ファイルを読み込み、`compile_fail` ブロックごとに `use
+/// fandhe_ai::<mod>::*;` の集合と `pub mod <mod>;` 宣言の集合を突き
+/// 合わせる。ブロック数が 3 であることも固定する）。
 ///
 /// (b) がユーザー承認され `Var::custom` を facade から公開する日が
 /// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
@@ -1125,6 +1126,15 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 ///
 /// # 失敗する例（`compile_fail,E0599`）: 全 `pub mod` glob import 済みの
 /// スコープでも `custom`／`add_custom` は解決できない
+///
+/// 禁止呼び出し 3 種（メソッド形 `.custom(...)`・関連関数形
+/// `Var::custom(...)`・`.add_custom(...)`）は**それぞれ独立した**
+/// `compile_fail` ブロックで検証する。rustdoc はブロック全体が失敗
+/// すれば合格と判定するため、3 種を 1 ブロックへまとめると、そのうち
+/// 1 種だけが公開されても残りが未公開である限り合格してしまい、部分
+/// 公開を fail-closed に検出できない（codex-review 指摘・PR #2212）。
+/// 共通の import・足場は各ブロックへ複製する（`api_surface.rs` の
+/// ドリフト検査もブロック単位で glob 集合を突き合わせる）。
 ///
 /// ```compile_fail,E0599
 /// use fandhe_ai::*;
@@ -1138,7 +1148,33 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// let t = fandhe_ai::tape();
 /// let x = t.var(&Tensor::zeros(&[2, 2]).unwrap());
 /// let _ = x.custom();
+/// ```
+///
+/// ```compile_fail,E0599
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::model::*;
+///
+/// let t = fandhe_ai::tape();
+/// let x = t.var(&Tensor::zeros(&[2, 2]).unwrap());
 /// let _ = Var::custom(&x);
+/// ```
+///
+/// ```compile_fail,E0599
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::model::*;
+///
+/// let t = fandhe_ai::tape();
+/// let x = t.var(&Tensor::zeros(&[2, 2]).unwrap());
 /// let _ = x.add_custom();
 /// ```
 ///

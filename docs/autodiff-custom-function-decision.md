@@ -527,6 +527,12 @@ glob import した状態で失敗することを機械的に保証するため�
 集合と `src/lib.rs` の実宣言集合のドリフトは
 `crates/facade/tests/api_surface.rs::
 custom_function_hold_doctest_globs_all_pub_modules` が固定する。
+禁止呼び出し 3 種（`.custom(...)`・`Var::custom(...)`・`.add_custom(...)`）
+は**それぞれ独立した `compile_fail` ブロック**で検証する。rustdoc は
+ブロック全体が失敗すれば合格と判定するため、1 ブロックへまとめると
+1 種だけの部分公開を検出できない（codex-review 指摘・PR #2212）。
+上記ドリフト検査はブロック単位で glob 集合を突き合わせ、ブロック数が
+3 であることも固定する（1 ブロックへの再統合を拒否）。
 
 承認取得後に実施する変更範囲（事前提示。#2064 の保留コメント本文と同旨。
 ただし AC-4 の否定ガード件数は上記の実装記録どおり 2 件が正で、保留コメント

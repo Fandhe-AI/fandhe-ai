@@ -3942,45 +3942,72 @@ fn declared_pub_mod_names(content: &str) -> std::collections::BTreeSet<String> {
 /// `src/lib.rs` 内の `VarCustomHoldDoctestGuard`（`Var::custom` 未
 /// 公開状態を compile_fail doctest でコンパイラ検証する非公開足場。
 /// `docs/autodiff-custom-function-decision.md` 「否定ガードの多層防御」
-/// 節参照）のドキュメンテーションコメントから、`use fandhe_ai::<mod>::*;`
-/// 形の glob import 対象モジュール名集合を抽出する（[`custom_function_
-/// hold_doctest_globs_all_pub_modules`] 専用）。`use fandhe_ai::*;`
-/// （クレートルート自体の glob import。`pub mod` 宣言とは別物）は対象外。
-fn doctest_globbed_module_names(content: &str) -> std::collections::BTreeSet<String> {
-    let mut names = std::collections::BTreeSet::new();
+/// 節参照）のドキュメンテーションコメントから、```` ```compile_fail ````
+/// フェンスで始まる doctest ブロックを順に切り出し、各ブロックが
+/// `use fandhe_ai::<mod>::*;` 形で glob import するモジュール名集合を
+/// ブロックごとに返す（[`custom_function_hold_doctest_globs_all_pub_
+/// modules`] 専用）。`use fandhe_ai::*;`（クレートルート自体の glob
+/// import。`pub mod` 宣言とは別物）は対象外。ブロック単位で返すのは、
+/// 禁止呼び出し 3 種を独立ブロックへ分割した（codex-review 指摘・
+/// PR #2212）ため、ファイル全体で集合を合算すると 1 ブロックの import
+/// 脱落を見逃すから。
+fn doctest_compile_fail_block_globs(content: &str) -> Vec<std::collections::BTreeSet<String>> {
+    let mut blocks = Vec::new();
+    let mut current: Option<std::collections::BTreeSet<String>> = None;
     for line in content.lines() {
         let trimmed = line.trim().trim_start_matches("///").trim();
-        if let Some(rest) = trimmed.strip_prefix("use fandhe_ai::")
+        if trimmed.starts_with("```compile_fail") {
+            current = Some(std::collections::BTreeSet::new());
+            continue;
+        }
+        if trimmed == "```" {
+            if let Some(set) = current.take() {
+                blocks.push(set);
+            }
+            continue;
+        }
+        if let Some(set) = current.as_mut()
+            && let Some(rest) = trimmed.strip_prefix("use fandhe_ai::")
             && let Some(path) = rest.strip_suffix("::*;")
             && !path.is_empty()
         {
-            names.insert(path.to_string());
+            set.insert(path.to_string());
         }
     }
-    names
+    blocks
 }
 
-/// `VarCustomHoldDoctestGuard` の compile_fail doctest が glob
+/// `VarCustomHoldDoctestGuard` の各 compile_fail doctest ブロックが glob
 /// import するモジュール集合と、`src/lib.rs` の実際の `pub mod` 宣言
-/// 集合が一致することを固定する（doctest 本文と `pub mod` 宣言の
-/// ドリフト防止。タスク要求「glob import 一覧が `pub mod` 宣言と
-/// ドリフトしないよう検査する」）。新しい `pub mod` を facade へ追加
-/// した際、doctest 側の `use` 一覧の更新を機械的に強制する。
+/// 集合がブロックごとに一致すること、およびブロック数が禁止呼び出し
+/// 3 種（`.custom`・`Var::custom`・`.add_custom`）と同数であることを
+/// 固定する（doctest 本文と `pub mod` 宣言のドリフト防止。新しい
+/// `pub mod` を facade へ追加した際、doctest 側の `use` 一覧の更新を
+/// 機械的に強制する。ブロック数固定は 1 ブロックへの再統合を拒否する）。
 #[test]
 fn custom_function_hold_doctest_globs_all_pub_modules() {
     let content = read_to_string_or_panic(&lib_rs_path());
     let declared = declared_pub_mod_names(&content);
-    let globbed = doctest_globbed_module_names(&content);
+    let blocks = doctest_compile_fail_block_globs(&content);
     assert!(
         !declared.is_empty(),
         "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
          （テスト自体が検査対象を見失っている可能性がある）"
     );
     assert_eq!(
-        declared, globbed,
-        "VarCustomHoldDoctestGuard の compile_fail doctest が glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
-         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を追加した\
-         場合は doctest 側の use 一覧にも追加すること。"
+        blocks.len(),
+        3,
+        "VarCustomHoldDoctestGuard の compile_fail doctest ブロック数が 3\
+         （.custom / Var::custom / .add_custom を独立検証）ではない: {}",
+        blocks.len()
     );
+    for (idx, globbed) in blocks.iter().enumerate() {
+        assert_eq!(
+            &declared, globbed,
+            "VarCustomHoldDoctestGuard の compile_fail doctest ブロック {idx} が glob \
+             import するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフトして\
+             いる（declared={declared:?}, doctest={globbed:?}）。新しい pub mod を追加した\
+             場合は全ブロックの use 一覧にも追加すること。"
+        );
+    }
 }
