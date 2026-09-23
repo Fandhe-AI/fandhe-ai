@@ -982,6 +982,25 @@ impl Module for MultiheadAttention {
             "MultiheadAttention::set_parameter: no parameter named `{name}`"
         )))
     }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。4 つの
+    /// 子 `Linear`（`q_proj`／`k_proj`／`v_proj`／`out_proj`）すべてへ
+    /// 伝播する。子はいずれも本クレート内の `Linear`（fail-closed 既定
+    /// の対象外）のため実際には常に `Ok` を返すが、`Module` trait の
+    /// 汎用契約に従い `?` で伝播する。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Module::set_requires_grad(&mut self.q_proj, requires_grad)?;
+        Module::set_requires_grad(&mut self.k_proj, requires_grad)?;
+        Module::set_requires_grad(&mut self.v_proj, requires_grad)?;
+        Module::set_requires_grad(&mut self.out_proj, requires_grad)?;
+        Ok(())
+    }
+
+    /// 4 つの子 `Linear` はすべて private フィールドのため常に揃った
+    /// 値を返す（`q_proj` の値を代表として返す）。
+    fn requires_grad(&self) -> bool {
+        Module::requires_grad(&self.q_proj)
+    }
 }
 
 #[cfg(test)]

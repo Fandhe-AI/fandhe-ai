@@ -106,6 +106,12 @@ pub(crate) struct BatchNormCore {
     running_var: RefCell<Tensor<f32>>,
     num_batches_tracked: Cell<u64>,
     training: bool,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
+    /// と同型）。既定 `true`。`weight`／`bias`（affine パラメータ）
+    /// のみに作用し、`running_mean`／`running_var`（buffer）・
+    /// `training` モードとは独立（`Module::set_requires_grad` doc
+    /// 「`training`／`set_training` とは独立の軸」参照）。
+    requires_grad: bool,
 }
 
 impl BatchNormCore {
@@ -142,6 +148,7 @@ impl BatchNormCore {
             running_var: RefCell::new(running_var),
             num_batches_tracked: Cell::new(0),
             training: true,
+            requires_grad: true,
         })
     }
 
@@ -174,6 +181,7 @@ impl BatchNormCore {
             running_var: RefCell::new(running_var),
             num_batches_tracked: Cell::new(0),
             training: true,
+            requires_grad: true,
         })
     }
 
@@ -247,6 +255,7 @@ impl BatchNormCore {
             running_var: RefCell::new(running_var),
             num_batches_tracked: Cell::new(0),
             training: true,
+            requires_grad: true,
         })
     }
 
@@ -308,6 +317,19 @@ impl BatchNormCore {
 
     pub(crate) fn set_training(&mut self, training: bool) {
         self.training = training;
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（`BatchNorm1d`／
+    /// `BatchNorm2d` 実装。`module.rs` 参照）の本体（イシュー #2137）。
+    /// `weight`／`bias`（affine パラメータ）のみに作用し、running
+    /// stats（buffer）・`training` モードは変更しない（構造体 doc
+    /// 「層別 `requires_grad` 凍結フラグ」参照）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// train モードの forward が返すバッチ統計から running stats を
@@ -617,8 +639,16 @@ impl BatchNorm1d {
     /// として登録し、`forward` を呼べる [`BatchNormVars`] を返す。
     /// 受理する入力 rank は rank 2 `[N, C]`／rank 3 `[N, C, L]`（`accepted_ranks`）に限る。
     pub fn bind<'t>(&self, tape: &'t Tape) -> BatchNormVars<'t, '_> {
-        let weight = self.core.weight.as_ref().map(|w| tape.var(w));
-        let bias = self.core.bias.as_ref().map(|b| tape.var(b));
+        let weight = self
+            .core
+            .weight
+            .as_ref()
+            .map(|w| tape.var_with_requires_grad(w, self.core.requires_grad));
+        let bias = self
+            .core
+            .bias
+            .as_ref()
+            .map(|b| tape.var_with_requires_grad(b, self.core.requires_grad));
         BatchNormVars {
             core: &self.core,
             accepted_ranks: BATCH_NORM_1D_RANKS,
@@ -739,8 +769,16 @@ impl BatchNorm2d {
     /// として登録し、`forward` を呼べる [`BatchNormVars`] を返す。
     /// 受理する入力 rank は rank 4 `[N, C, H, W]`（`accepted_ranks`）に限る。
     pub fn bind<'t>(&self, tape: &'t Tape) -> BatchNormVars<'t, '_> {
-        let weight = self.core.weight.as_ref().map(|w| tape.var(w));
-        let bias = self.core.bias.as_ref().map(|b| tape.var(b));
+        let weight = self
+            .core
+            .weight
+            .as_ref()
+            .map(|w| tape.var_with_requires_grad(w, self.core.requires_grad));
+        let bias = self
+            .core
+            .bias
+            .as_ref()
+            .map(|b| tape.var_with_requires_grad(b, self.core.requires_grad));
         BatchNormVars {
             core: &self.core,
             accepted_ranks: BATCH_NORM_2D_RANKS,

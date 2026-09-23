@@ -209,6 +209,54 @@ impl Module for ModuleList {
             ))),
         }
     }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。全子
+    /// `Module` へ層順に伝播する。`Module::load_state_dict`（本ファイル
+    /// 冒頭 doc が参照する `module.rs`）と同型の**ベストエフォート・
+    /// ロールバック**: 子の 1 つが `Err` を返した場合、それより前に
+    /// 適用済みの子を逆順に元の `requires_grad()` へ戻す（`freeze()`
+    /// が途中で失敗しても「一部の層だけ凍結された」状態を残さない
+    /// 意図。`Module::set_requires_grad` 既定実装 doc「fail-closed」節
+    /// 参照）。ロールバック自体が失敗した場合は、その旨を明示した
+    /// `InvalidArgument` を返す（`load_state_dict` と同じ方針）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        // 適用前の値を層順に記録する（ロールバック用）。`Module::
+        // requires_grad`（既定 `true`）は無状態層でも呼べるため、この
+        // スナップショットは全子に対して失敗しない。
+        let previous: Vec<bool> = self.modules.iter().map(|m| m.requires_grad()).collect();
+
+        for (index, module) in self.modules.iter_mut().enumerate() {
+            if let Err(err) = module.set_requires_grad(requires_grad) {
+                // 適用済みの子（`0..index`）を逆順に元の値へ戻す。
+                for rollback_index in (0..index).rev() {
+                    let Some(rollback_module) = self.modules.get_mut(rollback_index) else {
+                        continue;
+                    };
+                    if let Err(rollback_err) =
+                        rollback_module.set_requires_grad(previous[rollback_index])
+                    {
+                        return Err(AutodiffError::InvalidArgument(format!(
+                            "ModuleList::set_requires_grad: failed to apply to module {index} \
+                             ({err}), and rollback of already-applied module {rollback_index} \
+                             also failed ({rollback_err}); the ModuleList may now be left in a \
+                             partially applied state"
+                        )));
+                    }
+                }
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    /// 子が 1 つも `false` を返さなければ `true`（`Module::
+    /// requires_grad` の複合層契約「子が 1 つでも `true` を返せば
+    /// `true`」の否定形。子が 1 つも無い空 `ModuleList` は `true`
+    /// を返す——`Module::requires_grad` 既定と同じ「パラメータを
+    /// 持たなければ凍結状態を持たない」契約に揃える）。
+    fn requires_grad(&self) -> bool {
+        self.modules.iter().all(|m| m.requires_grad())
+    }
 }
 
 /// PyTorch `nn.Sequential` 相当の汎用コンテナ: 子 `Module` を
@@ -361,6 +409,17 @@ impl Module for Sequential {
     /// `self.inner`（`ModuleList`）へそのまま委譲する。
     fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
         self.inner.set_parameter(name, value)
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。
+    /// `self.inner`（`ModuleList`）へそのまま委譲する（ベストエフォート・
+    /// ロールバックも `ModuleList::set_requires_grad` の実装に従う）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        Module::set_requires_grad(&mut self.inner, requires_grad)
+    }
+
+    fn requires_grad(&self) -> bool {
+        Module::requires_grad(&self.inner)
     }
 }
 

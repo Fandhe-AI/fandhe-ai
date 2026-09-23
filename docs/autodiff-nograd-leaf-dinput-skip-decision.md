@@ -194,4 +194,21 @@
 - facade（`crates/facade/src/lib.rs`）: `Tape::var_no_grad` を薄いラッパーとして追加。`Var::detach` は既存 `Var` 再エクスポート経由で新規公開面なし（`docs/compat-api-scope.md` §5 手続き・親 #1612 承認範囲内）。
 - 数値契約: 本機構は算術を一切伴わない（テープのメタ情報のみ）ため、CPU 本番 ops（`fandhe_ai::tape()`）と naive 参照実装（`fandhe_ai_autodiff::Tape::new()`）の勾配が bit 完全一致することをテストで確認した（`crates/facade/tests/no_grad_detach_backend_parity.rs`）。CUDA／Metal 実機での facade parity テストは未実測のまま Mac／GB10 セッションへ申し送り（同テストの `#[ignore]` 群）。
 - テストは `crates/autodiff/tests/no_grad_detach.rs`（naive ops 経由の契約テスト。detach の定数扱い・葉プレフィックス保持・checkpoint poison 時の `Err`・reset 越境の `requires_grad` 保持等）と上記 facade parity テストの 2 ファイル。
-- 対象外（未実装のまま）: `MatMul`／`LinearAct`／`LinearResident` の VJP 内部での d_input GEMM 省略（§9 の perf 起票草案・未起票）・`retain_graph`（複数回 backward の勾配蓄積契約。兄弟 #1749）・PyTorch `torch.no_grad()` コンテキスト相当（既存の型分離方式が担う。§9・`docs/public-api-design.md` §3.1 追補）・`requires_grad_()` によるフラグの事後切替・`Op::ResidentLeaf` の `Gradients::get` 型付きエラー化（既知の縮小点。上記どおり変更なし）。
+- 対象外（未実装のまま）: `MatMul`／`LinearAct`／`LinearResident` の VJP 内部での d_input GEMM 省略（§9 の perf 起票草案・未起票）・`retain_graph`（複数回 backward の勾配蓄積契約。兄弟 #1749）・PyTorch `torch.no_grad()` コンテキスト相当（既存の型分離方式が担う。§9・`docs/public-api-design.md` §3.1 追補）・~~`requires_grad_()` によるフラグの事後切替~~（#2137 で実装。下記「実装記録（#2137）」参照）・`Op::ResidentLeaf` の `Gradients::get` 型付きエラー化（既知の縮小点。上記どおり変更なし）。
+
+## 実装記録（#2137）
+
+本 issue（#2137）で、上記「対象外」に残っていた「`requires_grad_()` によるフラグの事後切替」を、層別 `requires_grad` 凍結（PyTorch `module.requires_grad_(bool)`／`nn.Module.requires_grad_` 相当）として `fandhe_ai_autodiff::nn::Module` へ実装した。
+
+- **配置は `autodiff` 内部クレートのみ**。`fandhe_ai::nn::Module` 自体がまだ存在しない（#2133 OPEN・`docs/facade-nn-module-exposure-decision.md` §10 承認待ち）ため、facade（`crates/facade/src/nn/mod.rs`）への鏡写しは行わない。`crates/facade/tests/api_surface.rs::nn_mod_declares_only_rnn_submodule` は無変更のまま green。
+- `Module` trait（`crates/autodiff/src/nn/module.rs`）へ 3 つの defaulted メソッドを追加した（非破壊拡張。`fandhe-ai-autodiff` は crates.io 公開クレート）:
+  - `set_requires_grad(&mut self, bool) -> Result<(), AutodiffError>`: 既定は fail-closed。`named_parameters()` が空なら `Ok(())`、非空なのにオーバーライドしていなければ `AutodiffError::InvalidArgument`（A08。「凍結したつもりで学習が続く」静かな事故を防ぐ。`set_training` の no-op 既定とは意図的に異なる）。
+  - `freeze(&mut self) -> Result<(), AutodiffError>`: `set_requires_grad(false)` の別名。
+  - `requires_grad(&self) -> bool`: 既定 `true`（`training()` と同じ契約）。
+- `Tape::var_with_requires_grad(tensor, requires_grad)`（`pub(crate)`。`crates/autodiff/src/tape.rs`）を新設し、`Tape::var`／`Tape::var_no_grad` はこの共通ヘルパーを固定値で呼ぶ薄いラッパーへ整理した（挙動・bit 一致は不変）。
+- パラメータを持つ全層（`Linear`・`Conv1d`／`Conv2d`／`ConvTranspose2d`・`RmsNorm`／`LayerNorm`・`BatchNormCore`〈`BatchNorm1d`／`BatchNorm2d` が委譲〉・`Embedding`・`RnnCell`／`LstmCell`／`GruCell`〈`Rnn`／`Lstm`／`Gru` が `cell` へ委譲〉）に private フィールド `requires_grad: bool`（既定 `true`）を追加し、`bind` が `Tape::var` の代わりに `Tape::var_with_requires_grad(.., self.requires_grad)` で葉を登録するよう変更した。`MultiheadAttention`（4 子 `Linear`）・`TransformerEncoderLayer`（5 子層）は全子への伝播として実装した（子はいずれも private フィールドのため `requires_grad()` の読み出しは代表 1 子の値を返す）。
+- `ModuleList`（`crates/autodiff/src/nn/container.rs`）は `Module::load_state_dict`（`module.rs`）と同型の**ベストエフォート・ロールバック**を実装した: 適用前に全子の `requires_grad()` をスナップショットし、途中の子が `Err` を返したら適用済みの子を逆順に元の値へ戻す。`Sequential` は `inner`（`ModuleList`）へそのまま委譲する。
+- **反映タイミング**: フラグは層側に保持する状態であり、次の `bind`（葉ノードを新規登録する呼び出し）から反映される。登録済みの `Var`（`TapeNode::requires_grad` は葉登録時に確定）・`Tape::reset` 後に保持される葉プレフィックスの葉は登録時のフラグを保持する（#1748 §5.5 の「反映タイミング」契約をそのまま踏襲）。
+- **`training`／`state_dict` とは独立の軸**: `freeze()` は `Module::training`／`set_training` を変更しない（`BatchNorm` の running stats は training モードなら引き続き更新される）。フラグは `state_dict`／`load_state_dict` の対象外（テンソル値のみを扱う）。
+- **数値契約**: `requires_grad` は `backward.rs::accumulate` 呼び出し前のゲート判定にのみ使われる純粋なメタデータであり、融合プラン選択・forward 演算列には一切影響しない（`tape.rs::push_eager`／`push_leaf` 参照）。したがって同一バックエンド内で「凍結あり」と「凍結なし」の出力・非凍結パラメータの勾配は bit 完全に一致する。この前提は `crates/autodiff/tests/nn_module_freeze.rs`（naive ops 経由の契約テスト・転移学習 example）と `crates/facade/tests/nn_module_freeze_backend_parity.rs`（CPU 本番 ops〈CI で実行〉・CUDA／Metal〈`#[ignore]`〉の同一バックエンド内 parity）で hard assert 済み。CUDA／Metal 実機は未実測のまま Mac／GB10 セッションへ申し送り。
+- 対象外（承認事項として列挙。実施しない）: facade 新規公開面（`Module::freeze`／`set_requires_grad`／`requires_grad` の facade 鏡写し。#2133 の実装・`docs/facade-nn-module-exposure-decision.md` 案 B 承認が前提）・`compat::Sequential` 側の凍結 API（既存 fit／SGD の位置対応契約・resident 経路との整合を要する再設計）・per-parameter 粒度の凍結。

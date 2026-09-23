@@ -413,6 +413,9 @@ pub struct RnnCell {
     weight_hh: Tensor<f32>,
     bias_ih: Option<Tensor<f32>>,
     bias_hh: Option<Tensor<f32>>,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
+    /// と同型）。既定 `true`。
+    requires_grad: bool,
 }
 
 impl RnnCell {
@@ -432,6 +435,7 @@ impl RnnCell {
             weight_hh,
             bias_ih,
             bias_hh,
+            requires_grad: true,
         })
     }
 
@@ -462,6 +466,7 @@ impl RnnCell {
             weight_hh,
             bias_ih,
             bias_hh,
+            requires_grad: true,
         })
     }
 
@@ -495,6 +500,20 @@ impl RnnCell {
     /// `Some`／`None`）。
     pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
         self.bias_hh.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（このセル
+    /// 実装。`module.rs` 参照）の本体（イシュー #2137。`nn::Linear`
+    /// と同型）。`weight_ih`／`weight_hh`／`bias_ih`／`bias_hh` を
+    /// 一括で切り替える（per-layer 粒度）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（このセル実装）
+    /// の本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// [`crate::nn::module::Module::set_parameter`]（`RnnCell` を
@@ -578,10 +597,16 @@ impl RnnCell {
     /// 別々の葉として登録され `Gradients::get` の勾配和が分裂する）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> RnnCellVars<'t> {
         RnnCellVars {
-            weight_ih: tape.var(&self.weight_ih),
-            weight_hh: tape.var(&self.weight_hh),
-            bias_ih: self.bias_ih.as_ref().map(|b| tape.var(b)),
-            bias_hh: self.bias_hh.as_ref().map(|b| tape.var(b)),
+            weight_ih: tape.var_with_requires_grad(&self.weight_ih, self.requires_grad),
+            weight_hh: tape.var_with_requires_grad(&self.weight_hh, self.requires_grad),
+            bias_ih: self
+                .bias_ih
+                .as_ref()
+                .map(|b| tape.var_with_requires_grad(b, self.requires_grad)),
+            bias_hh: self
+                .bias_hh
+                .as_ref()
+                .map(|b| tape.var_with_requires_grad(b, self.requires_grad)),
         }
     }
 
@@ -771,6 +796,19 @@ impl Module for Rnn {
         }
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。`cell`
+    /// （`RnnCell`／`LstmCell`／`GruCell`）へ委譲する（`named_parameters`
+    /// と同じ「`cell.` 接頭辞の子は 1 つ」構造のため、`ModuleList`／
+    /// `Sequential` のようなロールバック機構は不要）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        self.cell.set_requires_grad(requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        self.cell.requires_grad()
+    }
+
     /// 推論経路（tape 不要。決定 9）。`x: [T,B,D]` → `[T,B,H]`。
     /// [`RnnCell::forward_host`] を T step 分逐次呼び、`h0` はゼロ固定
     /// （`forward_seq` の `h0` 引数は tape 経路限定。決定 6 のスコープは
@@ -808,6 +846,9 @@ pub struct LstmCell {
     weight_hh: Tensor<f32>,
     bias_ih: Option<Tensor<f32>>,
     bias_hh: Option<Tensor<f32>>,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
+    /// と同型）。既定 `true`。
+    requires_grad: bool,
 }
 
 impl LstmCell {
@@ -828,6 +869,7 @@ impl LstmCell {
             weight_hh,
             bias_ih,
             bias_hh,
+            requires_grad: true,
         })
     }
 
@@ -858,6 +900,7 @@ impl LstmCell {
             weight_hh,
             bias_ih,
             bias_hh,
+            requires_grad: true,
         })
     }
 
@@ -892,6 +935,20 @@ impl LstmCell {
     /// `Some`／`None`）。
     pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
         self.bias_hh.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（このセル
+    /// 実装。`module.rs` 参照）の本体（イシュー #2137。`nn::Linear`
+    /// と同型）。`weight_ih`／`weight_hh`／`bias_ih`／`bias_hh` を
+    /// 一括で切り替える（per-layer 粒度）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（このセル実装）
+    /// の本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// [`crate::nn::module::Module::set_parameter`]（`LstmCell` を
@@ -975,10 +1032,16 @@ impl LstmCell {
     /// `Gradients::get` の勾配和が分裂する）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> LstmCellVars<'t> {
         LstmCellVars {
-            weight_ih: tape.var(&self.weight_ih),
-            weight_hh: tape.var(&self.weight_hh),
-            bias_ih: self.bias_ih.as_ref().map(|b| tape.var(b)),
-            bias_hh: self.bias_hh.as_ref().map(|b| tape.var(b)),
+            weight_ih: tape.var_with_requires_grad(&self.weight_ih, self.requires_grad),
+            weight_hh: tape.var_with_requires_grad(&self.weight_hh, self.requires_grad),
+            bias_ih: self
+                .bias_ih
+                .as_ref()
+                .map(|b| tape.var_with_requires_grad(b, self.requires_grad)),
+            bias_hh: self
+                .bias_hh
+                .as_ref()
+                .map(|b| tape.var_with_requires_grad(b, self.requires_grad)),
         }
     }
 
@@ -1171,6 +1234,19 @@ impl Module for Lstm {
         }
     }
 
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。`cell`
+    /// （`RnnCell`／`LstmCell`／`GruCell`）へ委譲する（`named_parameters`
+    /// と同じ「`cell.` 接頭辞の子は 1 つ」構造のため、`ModuleList`／
+    /// `Sequential` のようなロールバック機構は不要）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        self.cell.set_requires_grad(requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        self.cell.requires_grad()
+    }
+
     /// `x: [T,B,D]` → `[T,B,H]`（最終隠れ状態列。`c_n` は tape 不要
     /// 経路では返さない——決定 9 は推論経路の対象を隠れ状態出力のみと
     /// する）。
@@ -1209,6 +1285,9 @@ pub struct GruCell {
     weight_hh: Tensor<f32>,
     bias_ih: Option<Tensor<f32>>,
     bias_hh: Option<Tensor<f32>>,
+    /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
+    /// と同型）。既定 `true`。
+    requires_grad: bool,
 }
 
 impl GruCell {
@@ -1229,6 +1308,7 @@ impl GruCell {
             weight_hh,
             bias_ih,
             bias_hh,
+            requires_grad: true,
         })
     }
 
@@ -1259,6 +1339,7 @@ impl GruCell {
             weight_hh,
             bias_ih,
             bias_hh,
+            requires_grad: true,
         })
     }
 
@@ -1295,6 +1376,20 @@ impl GruCell {
     /// `bias_ih` と常に同時に `Some`／`None`）。
     pub fn bias_hh(&self) -> Option<&Tensor<f32>> {
         self.bias_hh.as_ref()
+    }
+
+    /// [`crate::nn::module::Module::set_requires_grad`]（このセル
+    /// 実装。`module.rs` 参照）の本体（イシュー #2137。`nn::Linear`
+    /// と同型）。`weight_ih`／`weight_hh`／`bias_ih`／`bias_hh` を
+    /// 一括で切り替える（per-layer 粒度）。
+    pub(crate) fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
+    }
+
+    /// [`crate::nn::module::Module::requires_grad`]（このセル実装）
+    /// の本体。
+    pub(crate) fn requires_grad(&self) -> bool {
+        self.requires_grad
     }
 
     /// [`crate::nn::module::Module::set_parameter`]（`GruCell` を
@@ -1378,10 +1473,16 @@ impl GruCell {
     /// `Gradients::get` の勾配和が分裂する）。
     pub fn bind<'t>(&self, tape: &'t Tape) -> GruCellVars<'t> {
         GruCellVars {
-            weight_ih: tape.var(&self.weight_ih),
-            weight_hh: tape.var(&self.weight_hh),
-            bias_ih: self.bias_ih.as_ref().map(|b| tape.var(b)),
-            bias_hh: self.bias_hh.as_ref().map(|b| tape.var(b)),
+            weight_ih: tape.var_with_requires_grad(&self.weight_ih, self.requires_grad),
+            weight_hh: tape.var_with_requires_grad(&self.weight_hh, self.requires_grad),
+            bias_ih: self
+                .bias_ih
+                .as_ref()
+                .map(|b| tape.var_with_requires_grad(b, self.requires_grad)),
+            bias_hh: self
+                .bias_hh
+                .as_ref()
+                .map(|b| tape.var_with_requires_grad(b, self.requires_grad)),
         }
     }
 
@@ -1537,6 +1638,19 @@ impl Module for Gru {
                 "set_parameter: no parameter named `{name}`"
             ))),
         }
+    }
+
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。`cell`
+    /// （`RnnCell`／`LstmCell`／`GruCell`）へ委譲する（`named_parameters`
+    /// と同じ「`cell.` 接頭辞の子は 1 つ」構造のため、`ModuleList`／
+    /// `Sequential` のようなロールバック機構は不要）。
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        self.cell.set_requires_grad(requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        self.cell.requires_grad()
     }
 
     fn forward_host(

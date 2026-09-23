@@ -2147,8 +2147,7 @@ impl Tape {
     /// 勾配追跡なしの葉が必要な場合は [`Tape::var_no_grad`] を使う
     /// （イシュー #1748）。
     pub fn var(&self, tensor: &Tensor<f32>) -> crate::var::Var<'_> {
-        let id = self.push_leaf(tensor.clone(), true);
-        crate::var::Var::from_raw(self, id)
+        self.var_with_requires_grad(tensor, true)
     }
 
     /// 非追跡の `Tensor<f32>` を、`requires_grad == false` の葉ノード
@@ -2172,7 +2171,24 @@ impl Tape {
     /// ——本メソッドは「テープに載せたノードを勾配経路から外す」ため
     /// のものであり、両者は独立の機構である。
     pub fn var_no_grad(&self, tensor: &Tensor<f32>) -> crate::var::Var<'_> {
-        let id = self.push_leaf(tensor.clone(), false);
+        self.var_with_requires_grad(tensor, false)
+    }
+
+    /// [`Tape::var`]／[`Tape::var_no_grad`] を `requires_grad` 引数で
+    /// 統一した内部ヘルパー（イシュー #2137）。層側（`Linear::bind` 等）
+    /// が `Module::set_requires_grad`（`nn/module.rs`）で切り替えた
+    /// per-layer フラグをそのまま葉登録へ渡すために追加した。`Tape::
+    /// var`/`var_no_grad` は既存呼び出し元向けの薄い固定値ラッパーとして
+    /// そのまま残し、本メソッドを経由させる（挙動・bit 一致は不変）。
+    /// `pub(crate)` に留める理由: 外部公開 API（`Tape::var`／
+    /// `var_no_grad`）の 2 択で十分であり、任意 bool を受ける版を公開面
+    /// に増やす必要がないため（`nn` 層の内部実装専用）。
+    pub(crate) fn var_with_requires_grad(
+        &self,
+        tensor: &Tensor<f32>,
+        requires_grad: bool,
+    ) -> crate::var::Var<'_> {
+        let id = self.push_leaf(tensor.clone(), requires_grad);
         crate::var::Var::from_raw(self, id)
     }
 
