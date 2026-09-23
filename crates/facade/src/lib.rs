@@ -1090,3 +1090,77 @@ pub fn set_metal_onnx_gpu_execution_enabled(enabled: bool) {
 pub fn metal_onnx_gpu_execution_enabled() -> bool {
     crate::interop::onnx::metal_onnx_gpu_execution_enabled()
 }
+
+/// `Var::custom`（custom function 抽象。イシュー #2064 §12.5 (b)）の facade
+/// 未公開状態を、`crates/autodiff/tests/architecture_boundaries.rs` の
+/// ソース文字列走査（heuristics）とは独立に、**コンパイラそのもの**で
+/// 固定するための非公開足場（`docs/autodiff-custom-function-decision.md`
+/// 「否定ガードの多層防御」節参照）。
+///
+/// ソース走査ガードは「facade のソースが `custom`／`add_custom` を
+/// 宣言・再エクスポートしていないか」を字句レベルで検査するため、
+/// 走査ロジック自体の見落とし（trait impl 経由・alias 経由・別名
+/// import 経由等の迂回）に弱い。一方、本モジュールの `compile_fail`
+/// doctest は「facade の**全 `pub mod` を glob import した状態**で
+/// `Var` に `.custom(...)`／`Var::custom(...)`／`.add_custom(...)` を
+/// 呼ぼうとするとコンパイルできない（E0599: メソッド・関連関数が
+/// 見つからない）」ことを rustc の名前解決に直接検証させる。trait impl
+/// 経由の公開・型 alias 経由の公開・再エクスポート経由の公開のいずれで
+/// あっても、facade の公開面（`pub mod`）を実際に glob import した
+/// スコープでメソッドが解決できなければ検出できるため、ソース走査より
+/// 迂回耐性が高い（**本命ガード**）。ソース走査（`architecture_
+/// boundaries.rs`・`api_surface.rs`）は変更差分の早期発見・保守性向上
+/// を目的とした**多層防御の 1 層**という位置づけに変わる。
+///
+/// glob import する `pub mod` 集合（下記 doctest 内の `use` 一覧）と
+/// 本クレートの実際の `pub mod` 宣言（本ファイル冒頭付近）がドリフト
+/// しないことは `crates/facade/tests/api_surface.rs::
+/// custom_function_hold_doctest_globs_all_pub_modules` が機械的に固定
+/// する（doctest 本文を [`include_str!`] で読み込み、`use fandhe_ai::
+/// <mod>::*;` の集合と `pub mod <mod>;` 宣言の集合を突き合わせる）。
+///
+/// (b) がユーザー承認され `Var::custom` を facade から公開する日が
+/// 来たら、本モジュール・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードと同時に外す）。
+///
+/// # 失敗する例（`compile_fail,E0599`）: 全 `pub mod` glob import 済みの
+/// スコープでも `custom`／`add_custom` は解決できない
+///
+/// ```compile_fail,E0599
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::model::*;
+///
+/// let t = fandhe_ai::tape();
+/// let x = t.var(&Tensor::zeros(&[2, 2]).unwrap());
+/// let _ = x.custom();
+/// let _ = Var::custom(&x);
+/// let _ = x.add_custom();
+/// ```
+///
+/// # 足場の妥当性証明（禁止呼び出しを除けばコンパイル・実行できる）
+///
+/// 上の例が失敗する原因が「メソッドが存在しないこと」のみであり、
+/// 足場（`use` 一覧・`Tape`／`Var`／`Tensor` の構築手順）自体が壊れて
+/// いないことを、禁止呼び出しを除いた同じ足場で確認する。
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::model::*;
+///
+/// let t = fandhe_ai::tape();
+/// let x = t.var(&Tensor::zeros(&[2, 2]).unwrap());
+/// let _ = x.to_tensor();
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarCustomHoldDoctestGuard;

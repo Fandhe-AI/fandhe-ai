@@ -500,6 +500,34 @@ higher-order-grad-decision.md` §15 と本節は同型）。
   `add_custom` 宣言が無いことを固定し、`Var::custom` という facade
   再エクスポート経由の別到達口が生えないことを構造的に保証する）
 
+**ソース文字列走査ガードの多層防御化（PR #2212。codex-review／Bugbot 指摘の
+複数ラウンドを経て確定）**: `autodiff_src_does_not_declare_pub_fn_custom_on_var`
+系のソース走査（heuristics）は、`Var` への trait impl（`impl Trait for Var { fn
+custom(&self) {} }`。トレイトのメソッドは可視性修飾子を書かずに宣言でき
+トレイト自体の可視性がそのまま公開 API として機能する）・`Var` の import
+alias／type alias（`use ... Var as V`・`type X = crate::Var;` のようなパス
+修飾形・`use path::Var::{self as V}` の `self` 再エクスポート形）・alias
+宣言が `mod` 以外のブロックスコープ（`fn`／`impl`／`trait` 本体等）に
+隠れているケースなど、複数ラウンドの指摘に応じて検出範囲を段階的に拡張して
+きた（`crates/autodiff/tests/architecture_boundaries.rs::
+var_impl_block_bodies_with_aliases_and_kind`／`type_alias_target_is_var`／
+`find_var_aliases_in_use_body`／`find_var_alias_declarations` の各 doc
+コメント参照）。この種の字句レベルの走査は性質上「新しい迂回手口が
+指摘される→検出ロジックを拡張する」というレビュー往復から完全には
+逃れられないため、**`crates/facade/src/lib.rs` に `compile_fail,E0599`
+doctest（`VarCustomHoldDoctestGuard`。facade の全 `pub mod` を glob
+import したスコープで `Var::custom`／`.custom(...)`／`.add_custom(...)`
+を呼ぼうとするとコンパイルできないことを rustc の名前解決そのもので
+固定する）を追加し、これを本命ガードと位置づけた**。ソース走査は
+「変更差分の早期発見・迂回経路の類型化」を担う多層防御の 1 層という
+位置づけへ変わり、doctest 側は trait impl 経由・alias 経由・
+再エクスポート経由のいずれであっても実際に facade の公開面を
+glob import した状態で失敗することを機械的に保証するため、走査ロジック
+の見落としに対する耐性が高い。doctest が glob import する `pub mod`
+集合と `src/lib.rs` の実宣言集合のドリフトは
+`crates/facade/tests/api_surface.rs::
+custom_function_hold_doctest_globs_all_pub_modules` が固定する。
+
 承認取得後に実施する変更範囲（事前提示。#2064 の保留コメント本文と同旨。
 ただし AC-4 の否定ガード件数は上記の実装記録どおり 2 件が正で、保留コメント
 本文中の「3 件」という表記はその後の実装で確定した数と一致していない）:
