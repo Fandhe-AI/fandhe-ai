@@ -351,3 +351,126 @@ fn module_list_children_names_are_index_order() {
     let names: Vec<String> = list.children().into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, vec!["0", "1"]);
 }
+
+// --- 循環参照・共有子の回帰テスト（codex-review 指摘・PR #2231） -------
+//
+// `Module::children` は trait object を返す性質上、実装者が自身
+// （`self`）や既出の `Module` を任意に返せる。`named_modules`／
+// `nn::summary` はデータポインタベースの訪問済み集合で既出ノードへの
+// 再帰を打ち切る（`crates/autodiff/src/nn/module.rs::
+// collect_named_modules`・`crates/autodiff/src/nn/container.rs::
+// write_module` 参照）。ここでは公開 API（本クレートの `Module` は
+// crates.io 公開クレートの一部）経由で外部実装者が循環・共有構造を
+// 作った場合でも panic（stack overflow）せず有限の結果を返すことを
+// 確認する。
+
+use fandhe_ai_autodiff::{Tape, Var};
+
+/// `children()` から自身を返す循環参照 `Module`。
+struct SelfReferencingModule;
+
+impl Module for SelfReferencingModule {
+    fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        unreachable!("本テストでは forward は呼ばれない")
+    }
+
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        vec![("self".to_string(), self)]
+    }
+}
+
+#[test]
+fn named_modules_terminates_on_self_referencing_module() {
+    let m = SelfReferencingModule;
+    // 循環参照があっても panic（stack overflow）せず、ルート自身への
+    // 再帰を打ち切って有限の結果を返す。
+    assert!(m.named_modules().is_empty());
+}
+
+#[test]
+fn summary_terminates_on_self_referencing_module() {
+    let m = SelfReferencingModule;
+    // `summary`（`write_module`）も同じ訪問済み集合を通しで使うため
+    // 無限再帰しない。
+    let out = summary(&m);
+    assert!(out.contains("Submodules: 0\n"));
+}
+
+/// 2 ノードが互いを子として参照する循環（ルート自身の自己参照では
+/// なく、子孫の間接的な循環）を構成するモック。`child` は構築後に
+/// `Cell` 経由で設定する（`Module::children(&self)` は `&self` しか
+/// 受け取れないため）。`edge_name` は「このノードから `child` への
+/// 辺の名前」（`children()` が返すタプルの第 1 要素）であり、この
+/// ノード自身の名前ではない点に注意（[`Module::children`] の命名
+/// 契約どおり、辺は「子への参照」を指す）。
+struct CyclicNode<'a> {
+    edge_name: &'static str,
+    child: std::cell::Cell<Option<&'a dyn Module>>,
+}
+
+impl<'a> Module for CyclicNode<'a> {
+    fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        unreachable!("本テストでは forward は呼ばれない")
+    }
+
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        match self.child.get() {
+            Some(child) => vec![(self.edge_name.to_string(), child)],
+            None => Vec::new(),
+        }
+    }
+}
+
+#[test]
+fn named_modules_terminates_on_indirect_cycle_between_two_modules() {
+    // a --"b"--> b --"a"--> a という循環。
+    let a = CyclicNode {
+        edge_name: "b",
+        child: std::cell::Cell::new(None),
+    };
+    let b = CyclicNode {
+        edge_name: "a",
+        child: std::cell::Cell::new(None),
+    };
+    a.child.set(Some(&b));
+    b.child.set(Some(&a));
+
+    // ルート a から辿ると: a(visited シード) -> 辺"b"で b(未訪問。
+    // 列挙) -> 辺"b.a"で a(既出。打ち切り)。無限再帰せず b のみが
+    // 列挙される。
+    let modules = a.named_modules();
+    let names: Vec<&str> = modules.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["b"]);
+}
+
+/// 2 つの親から同じ子 `Module` を参照する（循環ではなく共有）構成。
+struct SharedChildParent<'a> {
+    a: &'a dyn Module,
+    b: &'a dyn Module,
+}
+
+impl<'a> Module for SharedChildParent<'a> {
+    fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        unreachable!("本テストでは forward は呼ばれない")
+    }
+
+    fn children(&self) -> Vec<(String, &dyn Module)> {
+        vec![("a".to_string(), self.a), ("b".to_string(), self.b)]
+    }
+}
+
+#[test]
+fn named_modules_dedups_shared_child_module_like_pytorch_memo() {
+    let leaf = linear(2, 2, 11);
+    let shared: &dyn Module = &leaf;
+    let parent = SharedChildParent {
+        a: shared,
+        b: shared,
+    };
+
+    // PyTorch の `named_modules()` は memo で重複を抑止する（同じ
+    // 子が複数の親から共有される場合は最初の到達経路でのみ列挙）。
+    let modules = parent.named_modules();
+    let names: Vec<&str> = modules.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["a"]);
+}

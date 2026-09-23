@@ -660,17 +660,41 @@ pub trait Module {
     /// の命名契約に従う限り、[`Module::named_parameters`] の平坦名と
     /// `"{path}.{parameter_name}"` の関係が保たれる）。
     ///
+    /// # 循環・重複ノードの扱い（イシュー #2134 codex-review 指摘。
+    /// PR #2231）
+    ///
+    /// [`Module::children`] は trait object を返す性質上、実装者が
+    /// 自身（`self`）や既に列挙済みの `Module` を任意に返せる
+    /// （例: 手書きの循環参照構造）。本メソッドは `&dyn Module` の
+    /// データポインタ（vtable を除いた実体アドレス）をキーにした
+    /// 訪問済み集合を内部で保持し、ルート自身を最初から登録した
+    /// うえで既出ノードへは再帰しない。これにより PyTorch の
+    /// `named_modules()` と同じ「memo で重複・循環を抑止する」契約を
+    /// 満たし、循環構造に対しても panic（stack overflow）せず有限の
+    /// 結果を返す（`.claude/rules/security.md` A03・本番経路 panic
+    /// 禁止の方針に合わせる）。同じ `Module` が複数の親から共有される
+    /// 場合は、最初に到達した経路でのみ列挙される。
+    ///
     /// # 既定実装
     ///
     /// [`Module::children`] を再帰するのみ（オーバーライド不要）。
     fn named_modules(&self) -> Vec<(String, &dyn Module)> {
         let mut out = Vec::new();
+        // `self` はここでは `&Self`（`Self: ?Sized` として扱われる。
+        // `named_modules` が dyn 安全であり続けるための制約は
+        // 上記コメント・`children` の doc を参照）であり、`&dyn
+        // Module` へ強制（unsizing coercion）することはできない
+        // （`Self: Sized` を要求し object safety を壊すため）。
+        // だが参照から生ポインタへの変換（`&Self -> *const Self`）は
+        // 強制を伴わないため常に可能であり、続く `*const Self ->
+        // *const ()` キャストで vtable を落としたデータアドレスだけを
+        // 取り出せる。これでルート自身の同一性を、`children()` が
+        // 返す `&dyn Module`（同じくデータポインタへキャスト可能）と
+        // 比較できるようになる。
+        let mut visited: HashSet<*const ()> = HashSet::new();
+        visited.insert(self as *const Self as *const ());
         for (name, child) in self.children() {
-            let descendants = child.named_modules();
-            out.push((name.clone(), child));
-            for (descendant_name, descendant) in descendants {
-                out.push((format!("{name}.{descendant_name}"), descendant));
-            }
+            collect_named_modules(name, child, &mut visited, &mut out);
         }
         out
     }
@@ -712,6 +736,36 @@ pub trait Module {
     /// `dyn Module` 経由でも呼び出し元の具象型へ正しく解決される）。
     fn type_name(&self) -> &'static str {
         std::any::type_name::<Self>()
+    }
+}
+
+/// [`Module::named_modules`] の再帰本体（イシュー #2134 codex-review
+/// 指摘・PR #2231）。
+///
+/// `child`（`&dyn Module`。データポインタが一意に取れるため `self`
+/// とは異なり object safety の制約を受けない）が `visited` に未登録
+/// なら登録して `out` へ push し、その子孫へさらに再帰する。既登録
+/// （＝直前の呼び出しからの経路のどこかで既に列挙済み。`self` 自身を
+/// 含む）なら黙って打ち切る（PyTorch `named_modules()` の memo と
+/// 同じ「重複・循環を抑止する」契約）。
+fn collect_named_modules<'a>(
+    name: String,
+    child: &'a dyn Module,
+    visited: &mut HashSet<*const ()>,
+    out: &mut Vec<(String, &'a dyn Module)>,
+) {
+    let ptr = child as *const dyn Module as *const ();
+    if !visited.insert(ptr) {
+        return;
+    }
+    out.push((name.clone(), child));
+    for (descendant_name, descendant) in child.children() {
+        collect_named_modules(
+            format!("{name}.{descendant_name}"),
+            descendant,
+            visited,
+            out,
+        );
     }
 }
 

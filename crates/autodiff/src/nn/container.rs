@@ -59,6 +59,8 @@
 //! `Sequential`（本モジュール）を構築する経路を公開していないため、
 //! この制限は facade 経由では到達不能である。
 
+use std::collections::HashSet;
+
 use crate::error::AutodiffError;
 use crate::nn::module::Module;
 use crate::tape::Tape;
@@ -659,9 +661,21 @@ fn short_type_name(full: &str) -> &str {
 /// は対象外（イシュー本文のスコープ外指定）。型名は
 /// [`Module::type_name`] をモジュール非公開のヘルパー（型パスの最終
 /// セグメントのみを残す縮約）で短縮したものを使う。
+///
+/// # 循環・重複ノードの扱い（イシュー #2134 codex-review 指摘。
+/// PR #2231）
+///
+/// [`write_module`] は [`Module::named_modules`] と同じ理由
+/// （`Module::children` の実装者が自身や既出の `Module` を任意に
+/// 返せる）で無限再帰しうる。本関数は [`Module::named_modules`] と
+/// 同じデータポインタベースの訪問済み集合をルートから通しで
+/// 保持し、既出ノードへは再帰しない（`.claude/rules/security.md`
+/// A03・本番経路 panic 禁止の方針に合わせる）。
 pub fn summary(module: &dyn Module) -> String {
     let mut out = String::new();
-    write_module(&mut out, None, module, 0);
+    let mut visited: HashSet<*const ()> = HashSet::new();
+    visited.insert(module as *const dyn Module as *const ());
+    write_module(&mut out, None, module, 0, &mut visited);
     out.push_str(&format!("Submodules: {}\n", module.named_modules().len()));
     out.push_str(&format!("Total parameters: {}\n", module.parameter_count()));
     out
@@ -669,7 +683,16 @@ pub fn summary(module: &dyn Module) -> String {
 
 /// [`summary`] の再帰本体。`name` はこのノードの子としての名前
 /// （ルート呼び出しでは `None`）、`depth` はインデント段数。
-fn write_module(out: &mut String, name: Option<&str>, module: &dyn Module, depth: usize) {
+/// `visited` は [`summary`] から通しで渡される訪問済み集合（既出
+/// ノードの再帰打ち切りに使う。上記「循環・重複ノードの扱い」節
+/// 参照）。
+fn write_module(
+    out: &mut String,
+    name: Option<&str>,
+    module: &dyn Module,
+    depth: usize,
+    visited: &mut HashSet<*const ()>,
+) {
     let indent = "  ".repeat(depth);
     let type_name = short_type_name(module.type_name());
     let children = module.children();
@@ -693,7 +716,10 @@ fn write_module(out: &mut String, name: Option<&str>, module: &dyn Module, depth
         None => out.push_str(&format!("{type_name}(\n")),
     }
     for (child_name, child) in &children {
-        write_module(out, Some(child_name), *child, depth + 1);
+        let ptr = *child as *const dyn Module as *const ();
+        if visited.insert(ptr) {
+            write_module(out, Some(child_name), *child, depth + 1, visited);
+        }
     }
     out.push_str(&format!(
         "{indent}) [params: {}]\n",
