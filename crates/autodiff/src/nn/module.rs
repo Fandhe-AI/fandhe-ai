@@ -31,7 +31,7 @@ use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
-use crate::nn::container::ModuleList;
+use crate::nn::container::{ModuleDict, ModuleList};
 use crate::nn::conv::{Conv1d, Conv2d, ConvTranspose2d};
 use crate::nn::embedding::Embedding;
 use crate::nn::flatten::Flatten;
@@ -183,6 +183,29 @@ pub trait Module {
     /// [`Module::as_module_list`] の可変版。ロールバック時の復元
     /// （子の状態を書き戻す）に使う。
     fn as_module_list_mut(&mut self) -> Option<&mut ModuleList> {
+        None
+    }
+
+    /// [`Module::as_module_list`] と同型の明示フック（イシュー #2137
+    /// レビュー是正 PR #2234。review thread `PRRT_kwDOTuUCJc6lE8Gg`／
+    /// cursor[bot] `PRRT_kwDOTuUCJc6lE80z`）。`ModuleDict::
+    /// set_requires_grad`（`nn/container.rs`）のロールバックが
+    /// `ModuleList` と同じ再帰的スナップショット方式（`nn/
+    /// container.rs::snapshot_requires_grad`／`restore_requires_grad`）を
+    /// 使うために必要。`ModuleList`（`as_module_list`）と `ModuleDict`
+    /// は別のコンテナ型（`Vec<Box<dyn Module>>` と挿入順キー付き
+    /// `Vec<(String, Box<dyn Module>)>`）のため、判定フックも分離する
+    /// （どちらか一方だけを見るとネストした片方のコンテナが「末端層」
+    /// と誤判定され、混在状態がロールバックで破壊される）。`ModuleDict`
+    /// 自身がオーバーライドし `Some(&self)` を返す。それ以外の全層は
+    /// 既定 `None`。
+    fn as_module_dict(&self) -> Option<&ModuleDict> {
+        None
+    }
+
+    /// [`Module::as_module_dict`] の可変版。ロールバック時の復元
+    /// （子の状態を書き戻す）に使う。
+    fn as_module_dict_mut(&mut self) -> Option<&mut ModuleDict> {
         None
     }
 
@@ -466,7 +489,8 @@ pub trait Module {
     /// `set_training` と同型の no-op 既定は採らない（実装計画
     /// §2.1「設計」参照）。[`Module::named_parameters`] をオーバーライド
     /// する本クレート内の全層は、対で本メソッドもオーバーライドする
-    /// （2.3 節の表。`ModuleList`／`Sequential` は子へ伝播する）。
+    /// （2.3 節の表。`ModuleList`／`Sequential`／`ModuleDict`（P1 是正・
+    /// #2234 レビュー指摘）は子へ伝播する）。
     fn set_requires_grad(&mut self, _requires_grad: bool) -> Result<(), AutodiffError> {
         let param_count = self.named_parameters().len();
         if param_count == 0 {
