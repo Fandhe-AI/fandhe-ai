@@ -210,30 +210,51 @@ impl Module for ModuleList {
         }
     }
 
-    /// [`Module::set_requires_grad`] の実装（イシュー #2137）。全子
-    /// `Module` へ層順に伝播する。`Module::load_state_dict`（本ファイル
-    /// 冒頭 doc が参照する `module.rs`）と同型の**ベストエフォート・
-    /// ロールバック**: 子の 1 つが `Err` を返した場合、それより前に
-    /// 適用済みの子を逆順に元の `requires_grad()` へ戻す（`freeze()`
-    /// が途中で失敗しても「一部の層だけ凍結された」状態を残さない
-    /// 意図。`Module::set_requires_grad` 既定実装 doc「fail-closed」節
-    /// 参照）。ロールバック自体が失敗した場合は、その旨を明示した
+    /// [`Module::set_requires_grad`] の実装（イシュー #2137。レビュー
+    /// 是正 PR #2234: 集約判定を `any` へ修正し、ロールバックを
+    /// 再帰的な子別スナップショット方式へ変更）。全子 `Module` へ
+    /// 層順に伝播する。`Module::load_state_dict`（本ファイル冒頭 doc が
+    /// 参照する `module.rs`）と同型の**ベストエフォート・ロールバック**:
+    /// 子の 1 つが `Err` を返した場合、それより前に適用済みの子を逆順に
+    /// 元の状態へ戻す（`freeze()` が途中で失敗しても「一部の層だけ
+    /// 凍結された」状態を残さない意図。`Module::set_requires_grad`
+    /// 既定実装 doc「fail-closed」節参照）。
+    ///
+    /// # 入れ子コンテナの混在状態（P1 是正・#2234 レビュー指摘）
+    ///
+    /// 子が入れ子の `ModuleList`／`Sequential`（[`Module::
+    /// as_module_list`] が `Some` を返す）である場合、その子は内部に
+    /// 混在状態（一部凍結・一部解凍）を持ちうる。単純に集約 bool 1 つを
+    /// スナップショットして `set_requires_grad(bool)` で復元すると、
+    /// 復元時に子の全孫へ同一値が強制され混在状態を破壊してしまう
+    /// （旧実装の fail-closed 契約違反）。このため `snapshot_requires_grad`
+    /// で子孫の bool を末端層単位まで再帰的にスナップショットし、
+    /// `restore_requires_grad` で同じ構造をたどって 1 つずつ復元する
+    /// （`RequiresGradSnapshot::Nested` の子数が実行時の子数と一致しない
+    /// 場合は形状不一致として `InvalidArgument` を返す。ロールバック中に
+    /// 構造が変わることは通常起こらないが、fail-closed のため検査する）。
+    /// ロールバック自体が失敗した場合は、その旨を明示した
     /// `InvalidArgument` を返す（`load_state_dict` と同じ方針）。
     fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
-        // 適用前の値を層順に記録する（ロールバック用）。`Module::
-        // requires_grad`（既定 `true`）は無状態層でも呼べるため、この
-        // スナップショットは全子に対して失敗しない。
-        let previous: Vec<bool> = self.modules.iter().map(|m| m.requires_grad()).collect();
+        // 適用前の状態を層順に再帰的スナップショットとして記録する
+        // （ロールバック用）。`Module::requires_grad`（既定 `true`）は
+        // 無状態層でも呼べるため、このスナップショットは全子に対して
+        // 失敗しない。
+        let previous: Vec<RequiresGradSnapshot> = self
+            .modules
+            .iter()
+            .map(|m| snapshot_requires_grad(m.as_ref()))
+            .collect();
 
         for (index, module) in self.modules.iter_mut().enumerate() {
             if let Err(err) = module.set_requires_grad(requires_grad) {
-                // 適用済みの子（`0..index`）を逆順に元の値へ戻す。
+                // 適用済みの子（`0..index`）を逆順に元の状態へ戻す。
                 for rollback_index in (0..index).rev() {
                     let Some(rollback_module) = self.modules.get_mut(rollback_index) else {
                         continue;
                     };
                     if let Err(rollback_err) =
-                        rollback_module.set_requires_grad(previous[rollback_index])
+                        restore_requires_grad(rollback_module.as_mut(), &previous[rollback_index])
                     {
                         return Err(AutodiffError::InvalidArgument(format!(
                             "ModuleList::set_requires_grad: failed to apply to module {index} \
@@ -249,13 +270,89 @@ impl Module for ModuleList {
         Ok(())
     }
 
-    /// 子が 1 つも `false` を返さなければ `true`（`Module::
-    /// requires_grad` の複合層契約「子が 1 つでも `true` を返せば
-    /// `true`」の否定形。子が 1 つも無い空 `ModuleList` は `true`
-    /// を返す——`Module::requires_grad` 既定と同じ「パラメータを
-    /// 持たなければ凍結状態を持たない」契約に揃える）。
+    /// 子が 1 つでも `true` を返せば `true`（[`Module::requires_grad`]
+    /// の複合層契約どおり。子が 1 つも無い空 `ModuleList` は `false`
+    /// を返す——`any` の空列に対する自然な既定であり、パラメータを
+    /// 持たない複合層は凍結状態を持たないという契約とも整合する）。
+    ///
+    /// # 是正記録（P1・#2234 レビュー指摘）
+    ///
+    /// 旧実装は `all`（全子が `true` の場合のみ `true`）だったが、
+    /// 上記 doc の公開契約（「子が 1 つでも `true` なら `true`」）と
+    /// 逆であり、一部凍結・一部解凍の `ModuleList`／`Sequential` が
+    /// 誤って `false` を返す不具合だった。
     fn requires_grad(&self) -> bool {
-        self.modules.iter().all(|m| m.requires_grad())
+        self.modules.iter().any(|m| m.requires_grad())
+    }
+
+    fn as_module_list(&self) -> Option<&ModuleList> {
+        Some(self)
+    }
+
+    fn as_module_list_mut(&mut self) -> Option<&mut ModuleList> {
+        Some(self)
+    }
+}
+
+/// [`ModuleList::set_requires_grad`] のロールバック用、子 1 体分の
+/// 再帰的 `requires_grad` スナップショット（P1 是正・#2234 レビュー
+/// 指摘）。末端層（[`Module::as_module_list`] が `None` を返す層）は
+/// 集約 bool 1 つ（`Leaf`）で表現できるが、入れ子コンテナ
+/// （`ModuleList`／`Sequential`）は孫の混在状態を保持するため、孫ごとに
+/// 再帰した `Nested` で表現する。
+enum RequiresGradSnapshot {
+    /// 末端層（非コンテナ）の集約 `requires_grad()` 値。
+    Leaf(bool),
+    /// 入れ子コンテナの子 1 体ごとのスナップショット（層順）。
+    Nested(Vec<RequiresGradSnapshot>),
+}
+
+/// `module` の現在の `requires_grad` 状態を再帰的にスナップショットする
+/// （[`RequiresGradSnapshot`] 参照）。
+fn snapshot_requires_grad(module: &dyn Module) -> RequiresGradSnapshot {
+    match module.as_module_list() {
+        Some(list) => RequiresGradSnapshot::Nested(
+            list.modules
+                .iter()
+                .map(|m| snapshot_requires_grad(m.as_ref()))
+                .collect(),
+        ),
+        None => RequiresGradSnapshot::Leaf(module.requires_grad()),
+    }
+}
+
+/// `snapshot_requires_grad` で取得したスナップショットへ `module` の
+/// 状態を復元する。`Nested` の子数が実行時の子数と一致しない場合は
+/// fail-closed で `InvalidArgument` を返す（通常のロールバック経路では
+/// 構造が変わらないため起こらないはずだが、想定外の構成変化を静かに
+/// 無視しないため検査する）。
+fn restore_requires_grad(
+    module: &mut dyn Module,
+    snapshot: &RequiresGradSnapshot,
+) -> Result<(), AutodiffError> {
+    match snapshot {
+        RequiresGradSnapshot::Leaf(value) => module.set_requires_grad(*value),
+        RequiresGradSnapshot::Nested(children) => match module.as_module_list_mut() {
+            Some(list) => {
+                if list.modules.len() != children.len() {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "restore_requires_grad: snapshot has {} child module(s) but the \
+                         container now has {} (structure changed during rollback)",
+                        children.len(),
+                        list.modules.len()
+                    )));
+                }
+                for (m, s) in list.modules.iter_mut().zip(children.iter()) {
+                    restore_requires_grad(m.as_mut(), s)?;
+                }
+                Ok(())
+            }
+            None => Err(AutodiffError::InvalidArgument(
+                "restore_requires_grad: snapshot is Nested but the module is no longer a \
+                 container (structure changed during rollback)"
+                    .to_string(),
+            )),
+        },
     }
 }
 
@@ -420,6 +517,18 @@ impl Module for Sequential {
 
     fn requires_grad(&self) -> bool {
         Module::requires_grad(&self.inner)
+    }
+
+    /// `self.inner`（`ModuleList`）を返す（P1 是正・#2234 レビュー指摘。
+    /// `ModuleList::as_module_list` doc 参照）。`Sequential` は `inner`
+    /// の薄いラッパーであり、混在状態のスナップショット・ロールバック
+    /// 対象は `inner` 側に存在するため、こちらへそのまま委譲する。
+    fn as_module_list(&self) -> Option<&ModuleList> {
+        Some(&self.inner)
+    }
+
+    fn as_module_list_mut(&mut self) -> Option<&mut ModuleList> {
+        Some(&mut self.inner)
     }
 }
 
@@ -608,5 +717,122 @@ mod tests {
             list.set_parameter("99.weight", Tensor::new(vec![0.0f32], &[1]).unwrap()),
             Err(AutodiffError::InvalidArgument(_))
         ));
+    }
+
+    // `ModuleList::requires_grad`／`set_requires_grad`（イシュー #2137・
+    // PR #2234 レビュー是正）の単体テスト。
+
+    /// [`Module::named_parameters`] を持つが [`Module::set_requires_grad`]
+    /// をオーバーライドしない「半分だけ実装した」`Module`
+    /// （`module.rs` の `HalfImplementedModule` と同型・同意図。ロール
+    /// バック経路を決定的に踏むための失敗注入用。既定実装が常に
+    /// `Err(AutodiffError::InvalidArgument)` を返す）。
+    struct FailingSetRequiresGradModule {
+        param: Tensor<f32>,
+    }
+
+    impl Module for FailingSetRequiresGradModule {
+        fn forward<'t>(&self, _tape: &'t Tape, _input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            unreachable!("本テストでは forward は呼ばれない")
+        }
+
+        fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+            vec![("param".to_string(), &self.param)]
+        }
+
+        // `set_requires_grad` は意図的にオーバーライドしない（既定実装の
+        // まま。常に `AutodiffError::InvalidArgument` を返す）。
+    }
+
+    /// 子が 1 つでも `true` を返せば `true`（[`Module::requires_grad`]
+    /// の公開契約どおり。P1 是正・#2234 レビュー指摘: 旧実装は `all`
+    /// だったため一部凍結・一部解凍の `ModuleList` が誤って `false` を
+    /// 返していた）。
+    #[test]
+    fn module_list_requires_grad_is_any_not_all() {
+        let mut list = ModuleList::new();
+        list.push(Box::new(Linear::new(2, 2, true, 21).unwrap()));
+        list.push(Box::new(Linear::new(2, 2, true, 22).unwrap()));
+
+        // 初期状態は両方 `true`。
+        assert!(list.requires_grad());
+
+        // 片方だけ凍結（混在状態）。「子が 1 つでも `true`」なので
+        // 全体は引き続き `true` のはず（旧 `all` 実装なら誤って
+        // `false` になる）。
+        list.get_mut(0).unwrap().set_requires_grad(false).unwrap();
+        assert!(
+            list.requires_grad(),
+            "一部解凍の ModuleList は any 契約で true を返すはず"
+        );
+
+        // 両方凍結すれば `false`。
+        list.get_mut(1).unwrap().set_requires_grad(false).unwrap();
+        assert!(!list.requires_grad());
+    }
+
+    /// 空 `ModuleList` は `false`（`any` の空列に対する自然な既定。
+    /// パラメータを持たない複合層は凍結状態を持たないという契約とも
+    /// 整合する）。
+    #[test]
+    fn module_list_requires_grad_is_false_for_empty_list() {
+        let list = ModuleList::new();
+        assert!(!list.requires_grad());
+    }
+
+    /// P1 是正・#2234 レビュー指摘: 入れ子 `ModuleList` が混在状態
+    /// （一部凍結・一部解凍）を持つ状態で、外側の `set_requires_grad`
+    /// 呼び出しが途中失敗した場合、ロールバックは混在状態を保ったまま
+    /// 各子ごとに元の値へ復元しなければならない（集約 bool 1 つでの
+    /// 復元は入れ子の孫全員へ同一値を強制し混在状態を破壊してしまう
+    /// ——旧実装の fail-closed 契約違反）。
+    #[test]
+    fn module_list_set_requires_grad_rollback_preserves_nested_mixed_state() {
+        // 子 0: 入れ子 ModuleList（孫 0 は解凍のまま・孫 1 は事前に
+        // 凍結済み——混在状態）。
+        let mut nested = ModuleList::new();
+        nested.push(Box::new(Linear::new(2, 2, true, 31).unwrap()));
+        nested.push(Box::new(Linear::new(2, 2, true, 32).unwrap()));
+        nested.get_mut(1).unwrap().set_requires_grad(false).unwrap();
+
+        let mut outer = ModuleList::new();
+        outer.push(Box::new(nested));
+        // 子 1: 必ず失敗する Module（`set_requires_grad(true)` 適用時に
+        // 子 0〈入れ子 ModuleList〉はすでに適用済みという状況を作る）。
+        outer.push(Box::new(FailingSetRequiresGradModule {
+            param: Tensor::new(vec![1.0f32], &[1]).unwrap(),
+        }));
+
+        let err = outer
+            .set_requires_grad(true)
+            .expect_err("子 1 の既定 set_requires_grad 失敗で Err のはず");
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        // ロールバック後、子 0（入れ子 ModuleList）の孫別の混在状態が
+        // 元どおり復元されているはず（孫 0 = 解凍・孫 1 = 凍結のまま）。
+        let restored_nested = outer
+            .get(0)
+            .unwrap()
+            .as_module_list()
+            .expect("子 0 は ModuleList のはず");
+        assert!(
+            restored_nested
+                .get(0)
+                .unwrap()
+                .as_linear()
+                .unwrap()
+                .requires_grad(),
+            "孫 0 はロールバック前から解凍のままだったはず"
+        );
+        assert!(
+            !restored_nested
+                .get(1)
+                .unwrap()
+                .as_linear()
+                .unwrap()
+                .requires_grad(),
+            "孫 1 はロールバック前から凍結済みだったはず（集約 bool 1 つでの \
+             復元だと解凍されてしまう不具合の再現テスト）"
+        );
     }
 }

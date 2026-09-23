@@ -31,6 +31,7 @@ use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
+use crate::nn::container::ModuleList;
 use crate::nn::conv::{Conv1d, Conv2d, ConvTranspose2d};
 use crate::nn::embedding::Embedding;
 use crate::nn::flatten::Flatten;
@@ -163,6 +164,25 @@ pub trait Module {
     /// [`Module::as_linear`] の可変版。`compat::Sequential::apply_parameters`
     /// が optimizer 更新後の `Tensor<f32>` を層へ書き戻す入口として使う。
     fn as_linear_mut(&mut self) -> Option<&mut Linear> {
+        None
+    }
+
+    /// [`Module::as_linear`] と同型の明示フック（イシュー #2137 レビュー
+    /// 是正）。`ModuleList::set_requires_grad`（`nn/container.rs`）が
+    /// 失敗時ロールバックのため、子が入れ子コンテナかどうかを判定して
+    /// 再帰的な状態スナップショットを取るのに使う。`ModuleList` 自身に
+    /// 加え `Sequential`（内部 `ModuleList` を保持）もオーバーライドし
+    /// `Some(&self.inner)` を返す（`Sequential` は `ModuleList` の薄い
+    /// ラッパーであり、混在状態は `inner` 側に存在するため）。それ以外の
+    /// 全層は既定 `None`（末端層として扱われ、単一 bool
+    /// スナップショットで復元可能という前提に従う）。
+    fn as_module_list(&self) -> Option<&ModuleList> {
+        None
+    }
+
+    /// [`Module::as_module_list`] の可変版。ロールバック時の復元
+    /// （子の状態を書き戻す）に使う。
+    fn as_module_list_mut(&mut self) -> Option<&mut ModuleList> {
         None
     }
 
@@ -460,7 +480,7 @@ pub trait Module {
         }
     }
 
-    /// [`Module::set_requires_grad(false)`] の別名（PyTorch
+    /// [`Module::set_requires_grad`]`(false)` の別名（PyTorch
     /// `module.requires_grad_(False)`／Keras `layer.trainable = False`
     /// 相当。転移学習で backbone を固定する典型呼び出し）。
     fn freeze(&mut self) -> Result<(), AutodiffError> {
