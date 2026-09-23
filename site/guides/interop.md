@@ -160,12 +160,15 @@ two-pass アトミック契約。既存 `Sequential` の shape が保存前と�
 `ModelRegistry` はディレクトリの作成・削除を一切行わない読み取り専用
 のレジストリです。
 
-> **Windows での対応状況**: キャッシュルートの解決（`$USERPROFILE`
-> 配下）自体は Windows でも動作しますが、`load`・`available_models`
-> はシンボリックリンク経由の脱出対策（no-follow オープン）が
-> Linux／macOS 限定実装のため、現時点の Windows では常に失敗
+> **Windows・非対応アーキテクチャでの対応状況**: キャッシュルートの
+> 解決（`$USERPROFILE` 配下）自体は Windows でも動作しますが、
+> `load`・`available_models` はシンボリックリンク経由の脱出対策
+> （no-follow オープン）が Linux（x86_64／aarch64）・macOS 限定実装の
+> ため、Windows および上記以外のアーキテクチャでは現時点で常に失敗
 > （`load` はエラー、`available_models` は常に空の一覧）します。
-> 安全な Windows 実装は別イシューで追跡中です。
+> 安全な Windows 実装はスコープ外です。Issue は未起票で、
+> `out-of-scope-tracking.md` の規約に従いユーザー承認後に別イシューで
+> 追跡します。
 
 ```rust,no_run
 use fandhe_ai::model::ModelRegistry;

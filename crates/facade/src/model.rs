@@ -104,7 +104,10 @@
 //!    一般的な実行環境（GitHub ホステッド runner の既定 7 GiB RAM 等）
 //!    では単一ファイルの 8 GiB 確保自体が実質的な OOM 防止にならない
 //!    という codex-review 再指摘を受け 1 GiB へ引き下げた。値の
-//!    導出根拠は [`MAX_MODEL_FILE_BYTES`] のドキュメントを参照）。
+//!    導出根拠は `MAX_MODEL_FILE_BYTES` のドキュメントを参照。
+//!    private const のため intra-doc link にはせずコードスパンで
+//!    参照する〈rustdoc は非公開項目のリンク先を解決できず
+//!    `--no-deps` ビルドで `broken_intra_doc_links` になるため〉）。
 //! 6. 以降は同じ [`std::fs::File`] ハンドルからバイト列を読み取る
 //!    （パスを使って再度 open し直すと手順 3〜4 で閉じた TOCTOU 窓が
 //!    復活するため、ハンドルの使い回しは必須）。手順 5 の fstat 後に
@@ -390,7 +393,8 @@ fn validate_component(kind: &'static str, value: &str) -> Result<(), ModelError>
 /// `len` が `max` を超えていないか検査する純関数（環境非依存の単体
 /// テストを可能にするため `resolve_model_file`・[`ModelRegistry::load`]
 /// 双方の判定ロジックを切り出した。モジュール doc「非信頼入力の扱い」
-/// 節手順 5〜6・[`MAX_MODEL_FILE_BYTES`] 参照）。
+/// 節手順 5〜6・`MAX_MODEL_FILE_BYTES`〈private const のため
+/// intra-doc link にはせずコードスパンで参照〉参照）。
 fn enforce_size_limit(name: &str, version: &str, len: u64, max: u64) -> Result<(), ModelError> {
     if len > max {
         Err(ModelError::TooLarge {
@@ -505,7 +509,18 @@ impl ModelRegistry {
     ///
     /// 権限エラー等それ以外の I/O 失敗は [`ModelError::Io`] として
     /// 伝える。
-    fn resolve_model_file(&self, name: &str, version: &str) -> Result<File, ModelError> {
+    ///
+    /// サイズ上限は本番経路では常に `MAX_MODEL_FILE_BYTES`
+    /// （[`Self::resolve_model_file`] 経由）だが、`max` を引数化する
+    /// ことで単体テストが実際の 1 GiB ファイルを用意せずに fstat 経路の
+    /// 上限超過拒否を検証できるようにする（`crate::model::tests::
+    /// resolve_model_file_with_limit_rejects_over_bound` 参照）。
+    fn resolve_model_file_with_limit(
+        &self,
+        name: &str,
+        version: &str,
+        max: u64,
+    ) -> Result<File, ModelError> {
         validate_component("name", name)?;
         validate_component("version", version)?;
 
@@ -603,9 +618,15 @@ impl ModelRegistry {
         // 検査対象と同一の実体（TOCTOU 対策で確認済み）のサイズを見る。
         // ここを通過しても手順 6（`load` 側の `take` 二段構え）が
         // fstat 後の追記・差し替えによる増大を別途検出する。
-        enforce_size_limit(name, version, open_meta.len(), MAX_MODEL_FILE_BYTES)?;
+        enforce_size_limit(name, version, open_meta.len(), max)?;
 
         Ok(file)
+    }
+
+    /// [`Self::resolve_model_file_with_limit`] を本番経路の固定上限
+    /// `MAX_MODEL_FILE_BYTES` で呼び出す薄いラッパー。
+    fn resolve_model_file(&self, name: &str, version: &str) -> Result<File, ModelError> {
+        self.resolve_model_file_with_limit(name, version, MAX_MODEL_FILE_BYTES)
     }
 
     /// `<cache_dir>/<name>/<version>/model.safetensors` を同期ロードし、
@@ -629,19 +650,36 @@ impl ModelRegistry {
         name: &str,
         version: &str,
     ) -> Result<HashMap<String, Tensor<f32>>, ModelError> {
-        let mut file = self.resolve_model_file(name, version)?;
-        // `resolve_model_file` の fstat 時点では `MAX_MODEL_FILE_BYTES`
+        self.load_with_limit(name, version, MAX_MODEL_FILE_BYTES)
+    }
+
+    /// [`Self::load`] の本体。サイズ上限 `max` を引数化することで、
+    /// 単体テストが実際の `MAX_MODEL_FILE_BYTES`（1 GiB）ファイルを
+    /// 用意せずに「fstat 通過後の読み取り自体が上限超過を検出する」
+    /// 手順 6 の TOCTOU 対策（`Read::take` 二段構え）を検証できる
+    /// （`#[cfg(test)]` `load_with_limit_rejects_read_exceeding_bound`
+    /// 参照。本番経路は `load` から `MAX_MODEL_FILE_BYTES` 固定で
+    /// 呼ばれる）。
+    fn load_with_limit(
+        &self,
+        name: &str,
+        version: &str,
+        max: u64,
+    ) -> Result<HashMap<String, Tensor<f32>>, ModelError> {
+        let mut file = self.resolve_model_file_with_limit(name, version, max)?;
+        // `resolve_model_file_with_limit` の fstat 時点では `max`
         // 以内であることを確認済みだが、その後ファイルが差し替え・
         // 追記されて増大する TOCTOU に備え、読み取り自体も
-        // `MAX_MODEL_FILE_BYTES + 1` バイトで打ち切る（モジュール doc
-        // 「非信頼入力の扱い」節手順 6。ちょうど上限バイト数で打ち切る
-        // と超過を検出できないため `+ 1` 分だけ多く読む）。
-        let limit = MAX_MODEL_FILE_BYTES.saturating_add(1);
+        // `max + 1` バイトで打ち切る（モジュール doc「非信頼入力の
+        // 扱い」節手順 6。ちょうど上限バイト数で打ち切ると超過を
+        // 検出できないため `+ 1` 分だけ多く読む）。
+        let limit = max.saturating_add(1);
         // 事前確保サイズは実測ファイルサイズ（`limit` 未満なら実測値、
-        // 以上なら `limit`）を使う。`limit`（8 GiB + 1）を毎回丸ごと
-        // 事前確保すると小さい正規ファイルの読み込みでも無駄に大きな
-        // 割り当てが発生するため、実測値を優先しつつ `try_reserve` で
-        // 割り当て失敗を panic ではなく型付きエラーへ変換する。
+        // 以上なら `limit`）を使う。`limit`（本番経路では 1 GiB + 1）
+        // を毎回丸ごと事前確保すると小さい正規ファイルの読み込みでも
+        // 無駄に大きな割り当てが発生するため、実測値を優先しつつ
+        // `try_reserve` で割り当て失敗を panic ではなく型付きエラーへ
+        // 変換する。
         let observed_len = file.metadata().map_err(ModelError::Io)?.len();
         let capacity_hint = usize::try_from(observed_len.min(limit)).unwrap_or(usize::MAX);
         let mut bytes = Vec::new();
@@ -652,7 +690,7 @@ impl ModelRegistry {
             .take(limit)
             .read_to_end(&mut bytes)
             .map_err(ModelError::Io)?;
-        enforce_size_limit(name, version, bytes.len() as u64, MAX_MODEL_FILE_BYTES)?;
+        enforce_size_limit(name, version, bytes.len() as u64, max)?;
         load_safetensors_f32_from_bytes(&bytes).map_err(ModelError::Load)
     }
 
@@ -883,5 +921,101 @@ mod tests {
             select_home_var(true, value.clone(), Some(OsString::from(""))),
             value
         );
+    }
+
+    /// テストごとに衝突しない一時ディレクトリを作る（`crates/facade/
+    /// tests/model_registry.rs::temp_dir_for` と同型。実際の 1 GiB
+    /// ファイルを用意する非現実的な手段は取らず、`resolve_model_file_
+    /// with_limit`／`load_with_limit` の `max` 引数を小さく指定する
+    /// ことで小さな実ファイルのみで上限超過を再現する）。
+    fn temp_dir_for(test_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fandhe-ai-model-registry-unit-{}-{test_name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_leaf(dir: &Path, contents: &[u8]) {
+        let version_dir = dir.join("mlp").join("v1");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(version_dir.join(MODEL_FILE_NAME), contents).unwrap();
+    }
+
+    /// `resolve_model_file_with_limit`（モジュール doc「非信頼入力の
+    /// 扱い」節手順 5・fstat 時点の上限検査）が実ファイル経由で上限
+    /// 超過を fail-closed に拒否することを検証する（PR #2226
+    /// codex-review P0 是正。`enforce_size_limit_rejects_over_bound` は
+    /// 純関数の境界値のみを検証するため、実際の fstat 経路が同じ判定
+    /// へ到達することは別途要検証）。`max` を引数化しているため、
+    /// `MAX_MODEL_FILE_BYTES`〈1 GiB〉相当の実ファイルを用意せずに
+    /// 9 バイトのファイル・上限 8 バイトで同じ経路を再現できる。
+    #[test]
+    fn resolve_model_file_with_limit_rejects_over_bound() {
+        let dir = temp_dir_for("resolve-over-bound");
+        write_leaf(&dir, b"123456789");
+
+        let registry = ModelRegistry::with_cache_dir(dir.clone());
+        let err = registry
+            .resolve_model_file_with_limit("mlp", "v1", 8)
+            .unwrap_err();
+        match err {
+            ModelError::TooLarge {
+                name,
+                version,
+                len,
+                max,
+            } => {
+                assert_eq!(name, "mlp");
+                assert_eq!(version, "v1");
+                assert_eq!(len, 9);
+                assert_eq!(max, 8);
+            }
+            other => panic!("ModelError::TooLarge を期待したが {other:?} だった"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `resolve_model_file_with_limit` は `len == max`（境界値）を
+    /// 許可する（fstat 経路でも `enforce_size_limit_accepts_within_
+    /// bound` と同じ境界を保つことの確認。安全側検証のため意図的に
+    /// safetensors として不正な中身を使い、この後段の
+    /// `load_safetensors_f32_from_bytes` 側のエラーとは切り分ける）。
+    #[test]
+    fn resolve_model_file_with_limit_accepts_at_bound() {
+        let dir = temp_dir_for("resolve-at-bound");
+        write_leaf(&dir, b"12345678");
+
+        let registry = ModelRegistry::with_cache_dir(dir.clone());
+        assert!(
+            registry
+                .resolve_model_file_with_limit("mlp", "v1", 8)
+                .is_ok()
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `load_with_limit`（[`ModelRegistry::load`] 本体）が `max` を
+    /// 引数化した小さな実ファイルで上限超過を fail-closed に拒否する
+    /// ことを、公開 `load` と同じ配線（`resolve_model_file_with_limit`
+    /// → `Read::take` 二段構え）を通して検証する（モジュール doc
+    /// 「非信頼入力の扱い」節手順 5〜6）。
+    #[test]
+    fn load_with_limit_rejects_over_bound() {
+        let dir = temp_dir_for("load-over-bound");
+        write_leaf(&dir, b"123456789");
+
+        let registry = ModelRegistry::with_cache_dir(dir.clone());
+        let err = registry.load_with_limit("mlp", "v1", 8).unwrap_err();
+        assert!(
+            matches!(err, ModelError::TooLarge { len: 9, max: 8, .. }),
+            "ModelError::TooLarge {{ len: 9, max: 8, .. }} を期待したが {err:?} だった"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
