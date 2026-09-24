@@ -14,7 +14,7 @@
 
 - **推論**: 利用者が学習済み重み（`model.safetensors`）を一度取得すれば、以後は再ダウンロードなしにロードできること（ローカルキャッシュ）。
 - **fine-tuning**: HF hub 等で配布されるプリトレイン重みを起点に `compat::Sequential::load_state_dict` へ繋ぎ込めること。facade には既に safetensors save／load（`fandhe_ai::interop::safetensors`。`docs/facade-safetensors-exposure-decision.md`。#2019）と `ModelCheckpoint::to_file`（#2073）があるが、「ホームディレクトリ配下で名前・バージョンごとに重みを一元管理し、同期ロードする」入口がなかった。
-- **配布元の多様性**: 手動配置（ローカルレジストリ）・HTTP(S) URL からの明示ダウンロード・HF hub のリポジトリ形式参照、の 3 系統を想定する。いずれも数値経路（`Op`／`BackendOps`／VJP／カーネル）には一切触れず、ホスト側のファイル I/O と既存 `interop::safetensors` への委譲のみで完結する設計とし、REQ-1（完全自作コア）・REQ-12（利用者向け制御 API の限定）と抵触しない。
+- **配布元の多様性**: 手動配置（ローカルレジストリ。#2087）・HTTP(S) URL からの明示ダウンロード（#2088）・HF hub のリポジトリ形式参照（facade には入れない別クレート。#2243）の 3 系統を想定する。facade（コア）が扱うのは前 2 者の汎用機構のみで、HF hub 固有の URL 変換・API 呼び出しは含まない（§5 参照）。いずれも数値経路（`Op`／`BackendOps`／VJP／カーネル）には一切触れず、ホスト側のファイル I/O と既存 `interop::safetensors` への委譲のみで完結する設計とし、REQ-1（完全自作コア）・REQ-12（利用者向け制御 API の限定）と抵触しない。
 
 根拠: `docs/facade-inference-serving-scope-decision.md`（推論・サービング周辺のスコープ整理。モデル配布はここでは論点化されていないが、KV キャッシュ・トークナイザと同様「既存演算・既存フォーマット処理の合成に留める」方針を踏襲する）。
 
@@ -28,13 +28,15 @@
 
 ```
 <cache_dir>/                      既定 $HOME/.fandhe-ai/models
-                                   （Windows は $USERPROFILE。§12 参照）
+                                   （Windows は $USERPROFILE。ルート解決のみ動作。下記注記参照）
   <name>/                         [A-Za-z0-9._-]+（先頭 '.' 不可）
     <version>/                    同上。semver 等の記法は解釈しない不透明な文字列
       model.safetensors           F32 テンソルのみ・キー = state_dict キー
 ```
 
 `fandhe_ai::model::ModelRegistry::load(name, version)` で同期ロード（`HashMap<String, Tensor<f32>>` を返す。受入条件字面〈単一 `Tensor`〉からの変更理由は同 doc §5）・`available_models()` で一覧取得する読み取り専用レジストリであり、ディレクトリの作成・削除は一切行わない。配置（ダウンロード・手動コピー）は利用者側または §2.2 のリモート取得機構が担う。
+
+**Windows 対応状況（重要）**: `ModelRegistry::new()` によるキャッシュルート解決（`$USERPROFILE/.fandhe-ai/models`）自体は Windows でも動作するが、`load`・`available_models` は **Windows では fail-closed で非対応**である。シンボリックリンク経由のキャッシュルート脱出を安全に防ぐ no-follow オープン実装（`dev`／`ino` 識別子照合）が Linux／macOS 限定で、Windows 向けの安全な実装（`file_index`／`volume_serial_number` 照合）が未確立なため。`load` は Windows では常に `Err(ModelError::Io)` を返し、`available_models` は常に空の一覧を返す（エラーにはならない）。出典: `docs/facade-model-registry-decision.md` §13・§14、`crates/facade/src/model.rs` モジュール doc「Windows 対応状況」節。
 
 ### 2.2 リモート取得・manifest
 
@@ -84,6 +86,7 @@
 - **REQ-1 完全自作コア・許容依存 9 区分**: ローカルレジストリ（#2087）は既存 `interop::safetensors` への委譲のみで新規依存なし。リモート取得（#2088）は新規依存を要するため未承認のまま非実施。HF hub 連携（§5）は #2082 のスコープ外で、別クレート（#2243）側で依存追加の承認申請を行う。
 - **security A03（パストラバーサル）**: `name`／`version` の allowlist 検証（`docs/facade-model-registry-decision.md` §7）・シンボリックリンク経由のキャッシュルート脱出対策（同 doc §12・§13、`docs/model-download-design.md` §6）はいずれもレジストリ・ダウンロード双方の共通契約として確立済み（後者は設計のみで未実装）。
 - **`docs/compat-api-scope.md` §0 サポート境界**: `facade` が唯一のサポートされる公開 API 面。`ModelRegistry` の新規公開面はいずれも `crates/facade/tests/api_surface.rs` の機械固定・ユーザー承認の対象。
+- **プラットフォーム差（Windows）**: `ModelRegistry::new()`（キャッシュルート解決）は Windows でも動作するが、`load`・`available_models` は Windows では fail-closed 非対応（§2.1 注記・`docs/facade-model-registry-decision.md` §13・§14）。リモート取得（#2088）の dirfd 相対書き込み契約も同じ理由で Windows 非対応として設計されている（`docs/model-download-design.md` §6 (c)）。
 
 ## 7. 対象外（本ドキュメントでは確定しない・実施しない事項）
 
