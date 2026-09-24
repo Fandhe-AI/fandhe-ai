@@ -2,16 +2,18 @@
 
 ## 文書の位置づけ
 
-本リポジトリで作業するすべての AI エージェント・開発者、および Codex による PR 自動
-レビュー（`.github/workflows/codex-review.yml` wrapper、イシュー #326）が共通で用いる
-レビュー観点集。Codex のカスタム prompt（`.github/codex/prompts/review.md`、イシュー
-#376）は PR の base コミットの本ファイルを読み、prompt に埋め込まれた P0/P1 基準に
-**加えて**適用する（優先度定義が矛盾する場合は本ファイルを優先する契約。矛盾を作らない
-ため、本ファイルの優先度定義は prompt と同一とする）。
+本リポジトリで作業するすべての AI エージェント・開発者、および ai-review（provider:
+codex）による PR 自動レビュー（`.github/workflows/ai-review.yml` wrapper、イシュー
+#326。旧 `codex-review.yml` から移行）が共通で用いるレビュー観点集。codex のカスタム
+prompt（`.github/ai-review/prompts/review.md`、イシュー #376。旧
+`.github/codex/prompts/review.md` から移植）は PR の base コミットの本ファイルを読み、
+prompt に埋め込まれた P0/P1 基準に**加えて**適用する（優先度定義が矛盾する場合は本
+ファイルを優先する契約。矛盾を作らないため、本ファイルの優先度定義は prompt と同一と
+する）。
 
 二重管理を避けるための役割分担:
 
-- **`.github/codex/prompts/review.md`**: レビュー手順・完了判定（`review_completed`）・
+- **`.github/ai-review/prompts/review.md`**: レビュー手順・完了判定（`review_completed`）・
   プロンプトインジェクション耐性・P0/P1 の禁止事項列挙（機械的 enforcement の正）
 - **本ファイル**: セキュリティ / アーキテクチャ整合 / 再利用・アセット化の 3 観点と
   リポジトリ固有観点の**観点整理の正**。個別基準の詳細は一次情報源
@@ -20,7 +22,7 @@
 
 ## 優先度の定義
 
-`.github/codex/prompts/review.md` と同一。
+`.github/ai-review/prompts/review.md` と同一。
 
 | 優先度 | 意味 | CI ゲート |
 |--------|------|-----------|
@@ -236,7 +238,7 @@
   `.unwrap()` / `.expect()`、panic を境界外へ漏らす経路は P1。エラーは型付きエラーと
   する
 - **CI 規約（P1）**: GitHub ホステッド（`ubuntu-latest`）既定（public 区分。例外は
-  codex-review の codex 実行ジョブのみ）・self-hosted への逆戻りは P1（#457 Phase 1〜3
+  ai-review の codex 実行ジョブのみ）・self-hosted への逆戻りは P1（#457 Phase 1〜3
   完了・移行済み。`runs-on: self-hosted` の出現は `runner-policy` 契約検査〈#472〉でも
   fail する）・larger runner（有料の大型ホステッドランナー）の使用・
   `timeout-minutes` 必須（reusable workflow 呼び出しジョブを除く）・action /

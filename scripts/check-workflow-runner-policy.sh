@@ -21,8 +21,8 @@
 # .py 冒頭のパーサー方針コメントを参照）。
 # 検査方針（許容形リスト = 標準 GitHub ホステッドランナーの安定ラベルの明示 allowlist
 # 〈ALLOWED_RUNNER_VALUES。`-latest` ラベルとバージョン固定ラベルの固定集合〉との
-# 完全一致・runs-on / runner-label / post-feedback-runner-label を対象・codex-review の
-# 例外の扱い）の詳細は .py 冒頭を参照。
+# 完全一致・runs-on / runner-label / runner / post-feedback-runner /
+# post-feedback-runner-label を対象・ai-review の例外の扱い）の詳細は .py 冒頭を参照。
 #
 # 呼び出し元:
 #   - .github/workflows/ci.yml の runner-policy ジョブ（self-test → check の順で呼ぶ）
