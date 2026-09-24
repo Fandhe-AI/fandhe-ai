@@ -909,10 +909,14 @@ Result<Var, AutodiffError>`・borrow／consumed 4 組合せ・既存 inherent
 設計した（同 doc §5.3）が、facade の `nn` は #2133 と同じ理由で未公開
 （`docs/facade-nn-module-exposure-decision.md`）のため、facade へ公開
 するには `nn::Module` 公開（#2133）と本節経路 2 の双方の承認が要る。
-本節経路 2 の承認が得られるまで #2139（実装）は着手不可（同 doc §11
-承認事項 5）だが、facade 公開を伴わない内部クレート `autodiff` 側の
-実装自体は本節の対象外（1 節冒頭）であり、承認前でも着手しうる。型
-シグネチャ（backward hook は `Fn(&Tensor<f32>) -> Result<(),
+本節経路 2 の承認（同 doc §11 承認事項 5）は #2139 着手可否を左右
+する条件の一つに過ぎない。同 doc §11 は設計案（§4・§5）の承認・
+hook と `CustomFunction` の役割分担・callback lifetime・エラー伝播
+規則・受入基準の改訂・facade 公開の 5 項目すべてを「いずれも未実施。
+#2139 着手前にユーザー承認が必要」と明記しており、facade 公開を
+伴わない内部クレート `autodiff` 側の実装であっても、これら 5 項目
+の承認が揃うまで #2139（実装）は着手不可である。型シグネチャ
+（backward hook は `Fn(&Tensor<f32>) -> Result<(),
 AutodiffError> + Send + Sync + 'static`）・保持形（`Arc`）・エラー
 伝播（fail-fast）・`AutodiffError` への variant 追加要否はいずれも
 承認事項として列挙のみ（同 doc §11）。
