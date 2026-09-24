@@ -26,6 +26,16 @@ jobs:
     post-feedback-runner-label: ubuntu-latest
     timeout-minutes: 5
 
+  # ai-review（旧 codex-review）の入力名 `runner` / `post-feedback-runner`
+  # （RUNNER_KEYS 追加分）も許容形なら pass することを検証する。
+  ai-review-runner:
+    runner: ubuntu-latest
+    timeout-minutes: 5
+
+  ai-review-post-feedback-runner:
+    post-feedback-runner: ubuntu-latest
+    timeout-minutes: 5
+
   # 引用キー・コロン前空白は YAML デコード後は同じ mapping key `runs-on` に正規化
   # される（イシュー #472 P1 codex-review 指摘）。値が ubuntu-latest 完全一致で
   # あればこれらの表記でも pass することを検証する。
