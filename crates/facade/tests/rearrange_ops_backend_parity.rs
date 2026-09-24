@@ -7,29 +7,44 @@
 //! `fandhe_ai_autodiff::rearrange_ops::*` を直接 use する（facade の dev
 //! 依存に `fandhe-ai-autodiff` が既に含まれている）。
 //!
-//! - 属性なし: `fandhe_ai::tape()`（`CpuBackendOps`）と
-//!   `fandhe_ai_autodiff::Tape::new()`（`NaiveOps`）で forward・backward
-//!   の出力を突き合わせる。forward は `index_select`／`broadcast_to`
-//!   のいずれも算術を含まない純粋なコピー演算のため bit 完全一致
-//!   （`to_bits()` 比較）を主張する。backward（scatter-add）は
-//!   `flip`／`roll` が bit 一致、`repeat`／`tile` は
-//!   `fandhe_ai_backend_cpu::parity::assert_parity`（REQ-2 統一複合
-//!   判定）で比較する。
-//! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
-//!   "macos")` 限定）／`tape_for(Device::Cuda(0))` で同じ経路を CPU
-//!   tape と比較する。forward は `flip`／`roll`／`repeat`／`tile` の
-//!   全 4 種を bit 完全一致で比較する（PR #2256 codex-review 指摘対応。
-//!   当初は `flip` のみだった）。backward は `flip`／`roll`（各入力
-//!   要素への寄与が常に 1 つのため bit 完全一致。`roll` は同指摘対応で
-//!   追加）に加え、backward の scatter-add 合算順序が GPU 側で自明で
-//!   ない `repeat`／`tile` backward（`fandhe_ai_backend_cpu::parity::
-//!   assert_parity` 比較。README の「期待結果」節と対応）も対象に含む
-//!   （イシュー #2143 レビュー指摘。
-//!   `cpu_repeat_tile_backward_matches_naive_reference_within_tolerance`・
-//!   `cpu_flip_roll_backward_bit_matches_naive_reference` が CPU 側の
-//!   同型カバレッジ）。実機（DGX Spark GB10／Apple Silicon）への到達
-//!   手段が本エージェント実行環境にないため未実施のまま Mac／GB10
-//!   セッションへ申し送る
+//! 本ファイルの契約は `repeat`／`tile`／`flip`／`roll` の 4 演算 ×
+//! {forward, backward} × {CPU vs NaiveOps, CUDA vs CPU, Metal vs CPU}
+//! の全セルを埋めることであり、以下の関数名は網羅表と一対一対応する
+//! （イシュー #2143 レビュー指摘・PR #2256 codex-review 2 巡の指摘は
+//! いずれも「関数名・doc が謳う対象と実際に実行する演算がずれている」
+//! 類型のため、以後の変更ではこの一対一対応を崩さないこと）。
+//!
+//! - 属性なし（`fandhe_ai::tape()`〈`CpuBackendOps`〉と
+//!   `fandhe_ai_autodiff::Tape::new()`〈`NaiveOps`〉の突き合わせ）:
+//!   - forward 全 4 種 bit 完全一致: `cpu_forward_matches_naive_reference`
+//!   - forward `NaN` payload 保存 全 4 種:
+//!     `cpu_forward_preserves_nan_bits`
+//!   - `flip`／`roll` backward bit 完全一致（各入力要素への寄与が
+//!     常に 1 つのため）: `cpu_flip_roll_backward_bit_matches_naive_
+//!     reference`
+//!   - `repeat`／`tile` backward（scatter-add。`fandhe_ai_backend_cpu::
+//!     parity::assert_parity` による REQ-2 統一複合判定）:
+//!     `cpu_repeat_tile_backward_matches_naive_reference_within_
+//!     tolerance`
+//! - `#[ignore]`（`tape_for(Device::Metal)`〈`cfg(target_os =
+//!   "macos")` 限定〉／`tape_for(Device::Cuda(0))` で同じ経路を CPU
+//!   tape と比較）:
+//!   - forward 全 4 種 bit 完全一致:
+//!     `metal_forward_matches_cpu_reference`／
+//!     `cuda_forward_matches_cpu_reference`
+//!   - `flip`／`roll` backward bit 完全一致（CPU 側の同型カバレッジは
+//!     `cpu_flip_roll_backward_bit_matches_naive_reference`）:
+//!     `metal_flip_roll_backward_matches_cpu_reference`／
+//!     `cuda_flip_roll_backward_matches_cpu_reference`
+//!   - `repeat`／`tile` backward（scatter-add 合算順序が GPU 側で自明
+//!     でないため `assert_parity` 比較。README の「期待結果」節と対応。
+//!     CPU 側の同型カバレッジは `cpu_repeat_tile_backward_matches_
+//!     naive_reference_within_tolerance`）:
+//!     `metal_repeat_tile_backward_matches_cpu_reference`／
+//!     `cuda_repeat_tile_backward_matches_cpu_reference`
+//!
+//!   実機（DGX Spark GB10／Apple Silicon）への到達手段が本エージェント
+//!   実行環境にないため未実施のまま Mac／GB10 セッションへ申し送る
 //!   （`docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md`）。
 
 use fandhe_ai::Device;
@@ -98,9 +113,11 @@ fn cpu_forward_matches_naive_reference() {
     );
 }
 
-/// `NaN` payload を含む forward も CPU・NaiveOps 間で bit 一致すること
-/// （コピー演算のため payload も保存される契約。`bool_ops_backend_
-/// parity.rs`・`masked_select_preserves_nan_bits` と同種の確認）。
+/// `NaN` payload を含む forward（`flip`／`roll`／`repeat`／`tile` の
+/// 全 4 種）も CPU・NaiveOps 間で bit 一致すること（コピー演算のため
+/// payload も保存される契約。`bool_ops_backend_parity.rs`・
+/// `masked_select_preserves_nan_bits` と同種の確認。当初は `flip` のみ
+/// だった網羅不足をイシュー #2143 レビュー指摘の類型分析で発見し是正）。
 #[test]
 fn cpu_forward_preserves_nan_bits() {
     let data = f32_fixture_1d();
@@ -113,10 +130,25 @@ fn cpu_forward_preserves_nan_bits() {
         f32_bits(&flip(&x_cpu, &[0]).unwrap().to_tensor()),
         f32_bits(&flip(&x_naive, &[0]).unwrap().to_tensor())
     );
+    assert_eq!(
+        f32_bits(&roll(&x_cpu, &[2], &[0]).unwrap().to_tensor()),
+        f32_bits(&roll(&x_naive, &[2], &[0]).unwrap().to_tensor())
+    );
+    assert_eq!(
+        f32_bits(&repeat(&x_cpu, &[2]).unwrap().to_tensor()),
+        f32_bits(&repeat(&x_naive, &[2]).unwrap().to_tensor())
+    );
+    assert_eq!(
+        f32_bits(&tile(&x_cpu, &[2]).unwrap().to_tensor()),
+        f32_bits(&tile(&x_naive, &[2]).unwrap().to_tensor())
+    );
 }
 
 /// `flip`／`roll` の backward は各入力要素への寄与が常に 1 つのため
-/// bit 完全一致する（CPU と NaiveOps の突き合わせ）。
+/// bit 完全一致する（CPU と NaiveOps の突き合わせ）。両演算を同一
+/// テストで検証する（イシュー #2143 レビュー指摘対応・PR #2256
+/// codex-review 指摘: 関数名・doc が `flip`／`roll` 両方を謳いながら
+/// `roll` backward を実行していなかった）。
 #[test]
 fn cpu_flip_roll_backward_bit_matches_naive_reference() {
     let data = f32_fixture_2x3();
@@ -134,6 +166,24 @@ fn cpu_flip_roll_backward_bit_matches_naive_reference() {
     let x_naive = naive_tape.make_var(&data);
     let w_naive = naive_tape.make_var(&weight);
     let y_naive = flip(&x_naive, &[0, 1]).unwrap();
+    let loss_naive = y_naive.mul(&w_naive).unwrap().sum(None).unwrap();
+    let grads_naive = naive_tape.backward(&loss_naive).unwrap();
+    let dx_naive = grads_naive.get(&x_naive).unwrap().unwrap().clone();
+
+    assert_eq!(f32_bits(&dx_cpu), f32_bits(&dx_naive));
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let w_cpu = cpu_tape.make_var(&weight);
+    let y_cpu = roll(&x_cpu, &[1, -1], &[0, 1]).unwrap();
+    let loss_cpu = y_cpu.mul(&w_cpu).unwrap().sum(None).unwrap();
+    let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+    let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap().clone();
+
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+    let x_naive = naive_tape.make_var(&data);
+    let w_naive = naive_tape.make_var(&weight);
+    let y_naive = roll(&x_naive, &[1, -1], &[0, 1]).unwrap();
     let loss_naive = y_naive.mul(&w_naive).unwrap().sum(None).unwrap();
     let grads_naive = naive_tape.backward(&loss_naive).unwrap();
     let dx_naive = grads_naive.get(&x_naive).unwrap().unwrap().clone();
@@ -272,19 +322,39 @@ fn cuda_forward_matches_cpu_reference() {
     );
 }
 
-/// `roll` backward（scatter-add だが各入力要素への寄与が常に 1 つのため
-/// bit 完全一致する契約。モジュール doc 参照）の CPU／Metal 実機比較
-/// （イシュー #2143 レビュー指摘・PR #2256 codex-review 指摘: `roll`
-/// backward の実機比較テストが欠けていた）。CPU 側の同型カバレッジは
+/// `flip`／`roll` backward（scatter-add だが各入力要素への寄与が常に
+/// 1 つのため bit 完全一致する契約。モジュール doc 参照）の CPU／Metal
+/// 実機比較（イシュー #2143 レビュー指摘・PR #2256 codex-review 指摘:
+/// `roll` backward の実機比較テストが欠けていた。さらに 2 巡目の
+/// codex-review 指摘で `flip` backward の実機比較テストも欠けている
+/// ことが判明したため、CPU 側同様に両演算を同一テストで検証する）。
+/// CPU 側の同型カバレッジは
 /// `cpu_flip_roll_backward_bit_matches_naive_reference`。
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Metal 実機が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照"]
-fn metal_roll_backward_matches_cpu_reference() {
+fn metal_flip_roll_backward_matches_cpu_reference() {
     let data = f32_fixture_2x3();
     let weight = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
     let metal_tape =
         fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let w_cpu = cpu_tape.make_var(&weight);
+    let y_cpu = flip(&x_cpu, &[0, 1]).unwrap();
+    let loss_cpu = y_cpu.mul(&w_cpu).unwrap().sum(None).unwrap();
+    let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+    let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap().clone();
+
+    let x_metal = metal_tape.make_var(&data);
+    let w_metal = metal_tape.make_var(&weight);
+    let y_metal = flip(&x_metal, &[0, 1]).unwrap();
+    let loss_metal = y_metal.mul(&w_metal).unwrap().sum(None).unwrap();
+    let grads_metal = metal_tape.backward(&loss_metal).unwrap();
+    let dx_metal = grads_metal.get(&x_metal).unwrap().unwrap().clone();
+
+    assert_eq!(f32_bits(&dx_cpu), f32_bits(&dx_metal));
 
     let cpu_tape = fandhe_ai::tape();
     let x_cpu = cpu_tape.make_var(&data);
@@ -304,15 +374,33 @@ fn metal_roll_backward_matches_cpu_reference() {
     assert_eq!(f32_bits(&dx_cpu), f32_bits(&dx_metal));
 }
 
-/// `roll` backward の CPU／CUDA 実機（DGX Spark GB10）比較。上記 Metal
-/// 版と対称（イシュー #2143 レビュー指摘・PR #2256 codex-review 指摘）。
+/// `flip`／`roll` backward の CPU／CUDA 実機（DGX Spark GB10）比較。上記
+/// Metal 版と対称（イシュー #2143 レビュー指摘・PR #2256 codex-review
+/// 指摘。2 巡目の指摘で `flip` backward が追加された経緯も同じ）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照"]
-fn cuda_roll_backward_matches_cpu_reference() {
+fn cuda_flip_roll_backward_matches_cpu_reference() {
     let data = f32_fixture_2x3();
     let weight = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
     let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
         .expect("実機が利用可能な前提のテストのため成功するはず");
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let w_cpu = cpu_tape.make_var(&weight);
+    let y_cpu = flip(&x_cpu, &[0, 1]).unwrap();
+    let loss_cpu = y_cpu.mul(&w_cpu).unwrap().sum(None).unwrap();
+    let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+    let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap().clone();
+
+    let x_cuda = cuda_tape.make_var(&data);
+    let w_cuda = cuda_tape.make_var(&weight);
+    let y_cuda = flip(&x_cuda, &[0, 1]).unwrap();
+    let loss_cuda = y_cuda.mul(&w_cuda).unwrap().sum(None).unwrap();
+    let grads_cuda = cuda_tape.backward(&loss_cuda).unwrap();
+    let dx_cuda = grads_cuda.get(&x_cuda).unwrap().unwrap().clone();
+
+    assert_eq!(f32_bits(&dx_cpu), f32_bits(&dx_cuda));
 
     let cpu_tape = fandhe_ai::tape();
     let x_cpu = cpu_tape.make_var(&data);

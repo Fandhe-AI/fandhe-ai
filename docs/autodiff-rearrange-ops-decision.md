@@ -193,6 +193,33 @@ reference_within_tolerance` へ改名して tile backward の突き合わせを
 2 件 → 4 件）。`docs/perf/logs/shape-repeat-tile-flip-roll-2143/
 README.md` も新テスト名に追随済み。
 
+**追記（PR #2256 codex-review 2 巡目の指摘対応。2026-09-24）**:
+1 巡目の是正後も、次の「契約と実際のテスト網羅範囲のずれ」3 件が
+未解消だった（いずれも同じ類型: 関数名・doc コメント・README の
+一覧が実装の網羅範囲とずれている）。網羅表（4 演算 ×
+{forward, backward} × {CPU vs NaiveOps, CUDA vs CPU, Metal vs CPU}）
+を作成し空セルを機械的に洗い出して一括是正した:
+
+1. `cpu_flip_roll_backward_bit_matches_naive_reference` が `roll`
+   backward を実行していなかった → 同関数に `roll` backward
+   （CPU／NaiveOps 突き合わせ）を追加
+2. Metal／CUDA の `#[ignore]` backward テストが `flip` を欠いていた
+   → `cuda_roll_backward_matches_cpu_reference`・
+   `metal_roll_backward_matches_cpu_reference` を
+   `cuda_flip_roll_backward_matches_cpu_reference`・
+   `metal_flip_roll_backward_matches_cpu_reference` へ改名し `flip`
+   backward の比較を追加（CUDA／Metal `#[ignore]` は 4 件のまま
+   〈テスト関数は増減なし、既存 2 件が `flip`／`roll` 両対応へ拡張〉）
+3. `docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md` の
+   未実測対象カウントが「4 テスト」のままだった（実際は forward
+   2 件・`flip`／`roll` backward 2 件・`repeat`／`tile` backward
+   2 件の計 6 件）→ README を実装に合わせて更新
+   （網羅表の一覧を追記）
+
+網羅表で見つかった追加の同型不一致（`cpu_forward_preserves_nan_bits`
+が `flip` の `NaN` payload 保存しか検証していなかった）も同時に是正
+し、`roll`／`repeat`／`tile` の `NaN` payload 保存検証を追加した。
+
 承認取得後の追随（本イシューでは未実施）: `Var::repeat`／`tile`／
 `flip`／`roll` 等の薄い委譲メソッド追加、facade 保留ガード
 （`VarRearrangeOpsHoldDoctestGuard`・対応する否定ガード 4 件）の撤去。

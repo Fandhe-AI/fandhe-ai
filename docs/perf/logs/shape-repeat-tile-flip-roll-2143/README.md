@@ -5,14 +5,17 @@
 `fandhe_ai_autodiff::rearrange_ops`（`repeat`／`tile`／`flip`／`roll`）の
 `crates/facade/tests/rearrange_ops_backend_parity.rs` のうち CUDA
 （`Device::Cuda(0)`）・Metal（`Device::Metal`。`cfg(target_os = "macos")`
-限定）を対象とする 4 テスト（`flip` forward の
-`cuda_forward_matches_cpu_reference`／`metal_forward_matches_cpu_reference`
-に加え、`repeat`／`tile` backward の
+限定）を対象とする**計 6 テスト**（CUDA・Metal 各 3 件で対称。forward
+全 4 種 bit 完全一致の `cuda_forward_matches_cpu_reference`／
+`metal_forward_matches_cpu_reference`、`flip`／`roll` backward bit 完全
+一致の `cuda_flip_roll_backward_matches_cpu_reference`／
+`metal_flip_roll_backward_matches_cpu_reference`、`repeat`／`tile`
+backward の REQ-2 統一複合判定
 `cuda_repeat_tile_backward_matches_cpu_reference`／
-`metal_repeat_tile_backward_matches_cpu_reference`。後者 2 つはイシュー
-#2143 レビュー指摘を受けて追加し、下記「期待結果」節が要求する
-`repeat`／`tile` backward の実機カバレッジを満たす）は `#[ignore]` の
-まま未実測である。
+`metal_repeat_tile_backward_matches_cpu_reference`。`flip`／`roll`
+backward 2 件と `repeat`／`tile` backward 2 件はいずれもイシュー #2143
+レビュー指摘を受けて追加し、下記「期待結果」節が要求するバックエンド
+別の実機カバレッジを満たす）は `#[ignore]` のまま未実測である。
 
 ## 測定コマンド案
 
@@ -50,3 +53,16 @@ GPU の scatter 加算順序次第では厳密な bit 一致にならない可�
 丸めが混入した等）は本 README の「期待結果」を更新し、想定した契約を
 維持できない事実を型付き findings として PR へ記録すること（tolerance
 の単独緩和は行わない。`.claude/rules/coding-rust.md`）。
+
+## 追記（PR #2256 codex-review 2 巡目の指摘対応）
+
+当初の `#[ignore]` テストは `flip`／`roll` backward の実機カバレッジが
+`roll` のみで `flip` を欠いていた（テスト名・doc が両演算を謳いながら
+`flip` backward の実機比較を実行していなかった）。CPU 側の同型テスト
+（`cpu_flip_roll_backward_bit_matches_naive_reference`）と対称になる
+よう、`cuda_roll_backward_matches_cpu_reference`／
+`metal_roll_backward_matches_cpu_reference` を
+`cuda_flip_roll_backward_matches_cpu_reference`／
+`metal_flip_roll_backward_matches_cpu_reference` へ改名し、`flip`
+backward の比較を追加した（テスト数自体は変わらず各 3 件・計 6 件の
+まま）。
