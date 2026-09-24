@@ -1064,7 +1064,8 @@ impl<'t> MultiheadAttentionVars<'t> {
     /// - (a) `cache` が空（prefill）→ `is_causal=true` 相当
     /// - (b) `cache` が非空・`L_new == 1`（通常の decode）→ mask なし
     /// - (c) `cache` が非空・`L_new > 1`（複数トークン追記）→
-    ///   [`offset_allowed_mask`] を `attn_mask` として渡す
+    ///   `offset_allowed_mask`（本モジュール内 private 関数）を
+    ///   `attn_mask` として渡す
     ///
     /// **勾配の扱い**: `cache` は [`Tape::var_no_grad`] で葉として
     /// 登録するため、過去ステップへは勾配が流れない（推論用の

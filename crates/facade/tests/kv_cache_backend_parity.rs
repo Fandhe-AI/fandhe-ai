@@ -253,31 +253,108 @@ fn cpu_prefill_then_decode_matches_full_recompute_on_cpu_backend() {
 
 // --- 実機横断（`#[ignore]`。Metal／CUDA。decode 列を CPU と突合）------
 
-fn decode_sequence_on(device: Device) -> Tensor<f32> {
+/// 実機 decode 列の突合対象一式（cache 内部状態だけでなく、QK/mask/
+/// softmax/V/出力射影を経た attention 最終出力まで含める。旧実装は
+/// `cache.k()` のみを比較しており、出力射影〈`out_proj`〉を含む
+/// attention 本体の実機数値一致を検証していなかった〈codex-review
+/// P2・PR #2240〉）。
+struct DecodeSequenceResult {
+    /// 各 decode ステップの attention 最終出力（`out_proj` 通過後）を
+    /// `[B, TOTAL_LEN, E]` へ手動連結したもの（`cpu_prefill_then_decode_
+    /// matches_full_recompute_on_cpu_backend` の `combined` と同じ
+    /// 連結方式）。
+    combined_output: Vec<f32>,
+    /// prefill＋decode 全ステップ後の cache 内部状態（QK 側の入力）。
+    cache_k: Tensor<f32>,
+    cache_v: Tensor<f32>,
+}
+
+fn decode_sequence_on(device: Device) -> DecodeSequenceResult {
     let x = full_sequence();
     let tape = fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
     let vars = build_vars(&tape);
     let mut cache = KvCache::new();
 
+    let mut outputs: Vec<Vec<f32>> = Vec::new();
+    let mut shapes: Vec<usize> = Vec::new();
+
     let x0 = tape.make_var(&x);
     let x_prefill = x0.narrow(1, 0, PREFILL_LEN).unwrap();
-    let mut last = vars
+    let out_prefill = vars
         .forward_with_cache(&x_prefill, &x_prefill, &x_prefill, &mut cache)
-        .unwrap();
+        .unwrap()
+        .to_tensor();
+    shapes.push(out_prefill.shape()[1]);
+    outputs.push(
+        out_prefill
+            .contiguous()
+            .as_slice()
+            .expect("contiguous")
+            .to_vec(),
+    );
+
     for step in PREFILL_LEN..TOTAL_LEN {
         let xv = tape.make_var(&x);
         let x_t = xv.narrow(1, step, 1).unwrap();
-        last = vars
+        let out_t = vars
             .forward_with_cache(&x_t, &x_t, &x_t, &mut cache)
-            .unwrap();
+            .unwrap()
+            .to_tensor();
+        shapes.push(out_t.shape()[1]);
+        outputs.push(out_t.contiguous().as_slice().expect("contiguous").to_vec());
     }
-    // 最終ステップの出力（decode 経路が実機で最後まで動作したことの
-    // 確認。列全体の突合は cache 内部の連結結果〈`k()`/`v()`〉で行う）。
-    let _ = last;
-    cache
-        .k()
-        .expect("prefill 済みのため cache は非空のはず")
-        .clone()
+
+    // `[B, TOTAL_LEN, E]` へ手動連結する（`cpu_prefill_then_decode_
+    // matches_full_recompute_on_cpu_backend` と同じ考え方。facade
+    // テストは別クレートのためヘルパーを共有できない）。
+    let mut combined_output = vec![0.0f32; B * TOTAL_LEN * E];
+    for bi in 0..B {
+        let mut offset = 0usize;
+        for (chunk, &len) in outputs.iter().zip(shapes.iter()) {
+            for li in 0..len {
+                for ei in 0..E {
+                    let src = (bi * len + li) * E + ei;
+                    let dst = (bi * TOTAL_LEN + offset + li) * E + ei;
+                    combined_output[dst] = chunk[src];
+                }
+            }
+            offset += len;
+        }
+    }
+
+    DecodeSequenceResult {
+        combined_output,
+        cache_k: cache
+            .k()
+            .expect("prefill 済みのため cache は非空のはず")
+            .clone(),
+        cache_v: cache
+            .v()
+            .expect("prefill 済みのため cache は非空のはず")
+            .clone(),
+    }
+}
+
+fn assert_decode_sequence_parity(
+    label: &str,
+    actual: &DecodeSequenceResult,
+    cpu: &DecodeSequenceResult,
+) {
+    assert_parity(
+        &format!("KV キャッシュ decode 列（attention 最終出力）: {label} vs CPU"),
+        &actual.combined_output,
+        &cpu.combined_output,
+    );
+    assert_parity(
+        &format!("KV キャッシュ decode 列（最終 cache.k）: {label} vs CPU"),
+        actual.cache_k.contiguous().as_slice().expect("contiguous"),
+        cpu.cache_k.contiguous().as_slice().expect("contiguous"),
+    );
+    assert_parity(
+        &format!("KV キャッシュ decode 列（最終 cache.v）: {label} vs CPU"),
+        actual.cache_v.contiguous().as_slice().expect("contiguous"),
+        cpu.cache_v.contiguous().as_slice().expect("contiguous"),
+    );
 }
 
 // `Device::Metal` variant 自体が `cfg(target_os = "macos")` 限定
@@ -287,23 +364,15 @@ fn decode_sequence_on(device: Device) -> Tensor<f32> {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn metal_decode_cache_matches_cpu() {
-    let metal_k = decode_sequence_on(Device::Metal);
-    let cpu_k = decode_sequence_on(Device::Cpu);
-    assert_parity(
-        "KV キャッシュ decode 列（最終 cache.k）: Metal vs CPU",
-        metal_k.contiguous().as_slice().expect("contiguous"),
-        cpu_k.contiguous().as_slice().expect("contiguous"),
-    );
+    let metal = decode_sequence_on(Device::Metal);
+    let cpu = decode_sequence_on(Device::Cpu);
+    assert_decode_sequence_parity("Metal", &metal, &cpu);
 }
 
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn cuda_decode_cache_matches_cpu() {
-    let cuda_k = decode_sequence_on(Device::Cuda(0));
-    let cpu_k = decode_sequence_on(Device::Cpu);
-    assert_parity(
-        "KV キャッシュ decode 列（最終 cache.k）: CUDA vs CPU",
-        cuda_k.contiguous().as_slice().expect("contiguous"),
-        cpu_k.contiguous().as_slice().expect("contiguous"),
-    );
+    let cuda = decode_sequence_on(Device::Cuda(0));
+    let cpu = decode_sequence_on(Device::Cpu);
+    assert_decode_sequence_parity("CUDA", &cuda, &cpu);
 }
