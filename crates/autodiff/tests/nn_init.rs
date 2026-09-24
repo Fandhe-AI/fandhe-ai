@@ -280,6 +280,56 @@ fn kaiming_rejects_zero_fan() {
     assert!(matches!(err, AutodiffError::InvalidArgument(_)));
 }
 
+/// PyTorch `kaiming_uniform_(tensor, a=..., nonlinearity='leaky_relu')` と
+/// 同じ意味論で `a` が gain（ひいては bound）を決定することを確認する
+/// （codex-review 指摘。PR #2239）。`nonlinearity` に `LeakyRelu(_)` を
+/// 渡した場合、埋め込まれた負勾配ではなく `a` が採用される。
+#[test]
+fn kaiming_uniform_uses_a_as_leaky_relu_negative_slope() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    manual_seed(43);
+    let shape = [64, 32];
+    let a = 0.2f32;
+    let (fan_in, _fan_out) = init::calculate_fan_in_and_fan_out(&shape).unwrap();
+    // `a` が gain へ反映される契約なので、期待 gain は `a` から直接計算する
+    // （`LeakyRelu` に埋め込む値〈ここでは `0.0`。故意に `a` と不一致にし、
+    // `a` 側が優先されることを検証する〉ではなく `a` が使われる）。
+    let expected_gain = (2.0 / (1.0 + a * a)).sqrt();
+    let expected_std = expected_gain / (fan_in as f32).sqrt();
+    let expected_bound = expected_std * 3f32.sqrt();
+    let t = init::kaiming_uniform(&shape, a, FanMode::FanIn, Nonlinearity::LeakyRelu(0.0)).unwrap();
+    for &v in t.host_slice().iter() {
+        assert!(
+            v.abs() <= expected_bound + 1e-6,
+            "out of bound（a が gain に反映されていない可能性）: {v}"
+        );
+    }
+}
+
+/// `nonlinearity` が `LeakyRelu` 以外（例: `Relu`）の場合、PyTorch と
+/// 同じく `a` は gain 計算に一切影響しない（有限性のみ検証される）こと
+/// を確認する。
+#[test]
+fn kaiming_normal_ignores_a_for_non_leaky_relu_nonlinearity() {
+    let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    manual_seed(44);
+    let shape = [200, 200];
+    let (_fan_in, fan_out) = init::calculate_fan_in_and_fan_out(&shape).unwrap();
+    let expected_gain = init::calculate_gain(Nonlinearity::Relu);
+    let expected_std = expected_gain / (fan_out as f32).sqrt();
+    // a = 5.0（Relu の gain 計算には無関係な値）を渡しても std は変わらない。
+    let t = init::kaiming_normal(&shape, 5.0, FanMode::FanOut, Nonlinearity::Relu).unwrap();
+    let data = t.host_slice();
+    let n = data.len() as f64;
+    let var: f64 = data.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / n;
+    assert!(
+        (var.sqrt() - expected_std as f64).abs() < 0.03,
+        "std mismatch（a が誤って gain に影響した可能性）: {} vs {}",
+        var.sqrt(),
+        expected_std
+    );
+}
+
 // ---------------------------------------------------------------------
 // orthogonal
 // ---------------------------------------------------------------------

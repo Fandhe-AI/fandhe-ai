@@ -324,18 +324,15 @@ pub enum FanMode {
 }
 
 /// PyTorch `nn.init.calculate_gain` 相当。非線形性ごとの推奨 gain 値を
-/// 返す（[`kaiming_uniform`]／[`kaiming_normal`] の `std`／`bound` 計算
-/// に使う）。
+/// 返す（単体で直接呼ぶ場合の他、[`kaiming_uniform`]／
+/// [`kaiming_normal`] は内部の `kaiming_gain` 経由でこれを呼ぶ）。
 ///
 /// `LeakyRelu(negative_slope)` は `negative_slope` を直接使って
 /// `sqrt(2 / (1 + negative_slope²))` を返す。`kaiming_uniform`／
-/// `kaiming_normal` の `a` 引数（PyTorch シグネチャ互換のため残す
-/// パラメータ）は本関数には渡らない——`Nonlinearity::LeakyRelu(slope)`
-/// を明示的に渡した場合は常に `slope` 側が優先される契約であり、
-/// `a` は `LeakyRelu` 以外の kind では PyTorch でも参照されない値の
-/// ため、本設計では `kaiming_*` 側で有限性のみ検証し gain には使わない
-/// （呼び出し元は負勾配を必ず `Nonlinearity::LeakyRelu(slope)` 経由で
-/// 渡す）。
+/// `kaiming_normal` から呼ぶ場合は `a` 引数（PyTorch シグネチャ互換の
+/// `kaiming_uniform_(tensor, a=0, ...)` 相当）が `LeakyRelu` の負勾配
+/// として優先される（`kaiming_gain` の doc 参照）。本関数を直接呼ぶ
+/// 場合は列挙子に埋め込んだ `negative_slope` がそのまま使われる。
 pub fn calculate_gain(nonlinearity: Nonlinearity) -> f32 {
     match nonlinearity {
         Nonlinearity::Linear | Nonlinearity::Conv1d | Nonlinearity::Conv2d => 1.0,
@@ -517,15 +514,37 @@ fn select_fan(shape: &[usize], mode: FanMode) -> Result<usize, AutodiffError> {
     Ok(fan)
 }
 
+/// `kaiming_uniform`／`kaiming_normal` の `a` 引数を PyTorch
+/// `kaiming_uniform_(tensor, a=0, mode='fan_in', nonlinearity='leaky_relu')`
+/// と同じ意味論で gain 計算へ反映する（PyTorch 内部実装は
+/// `gain = calculate_gain(nonlinearity, param=a)` のように `a` を
+/// `calculate_gain` の `param` として渡し、`nonlinearity` が
+/// `'leaky_relu'` のときのみ `param` が負勾配として使われる）。
+///
+/// `nonlinearity` が `Nonlinearity::LeakyRelu(_)` の場合、埋め込まれた
+/// 負勾配ではなく `a` を負勾配として採用する（`a` が唯一の情報源になる
+/// よう `LeakyRelu` に埋め込まれた値は上書きする。呼び出し元が
+/// `LeakyRelu(slope)` と `a` に異なる値を渡した場合の二重定義による
+/// 曖昧さを避けるため）。`LeakyRelu` 以外の `nonlinearity` では `a` は
+/// gain 計算に影響しない（PyTorch でも `nonlinearity != 'leaky_relu'`
+/// のとき `param` は無視される）。以前は `a` を有限性検査にのみ使い
+/// gain 計算から完全に除外していたため、PyTorch から移行する呼び出し元
+/// が `a` を指定しても初期化分散に反映されない互換性の欠落があった
+/// （codex-review 指摘。AGENTS.md「公開 API は PyTorch からの移行
+/// 容易性を保つ」契約）。
+fn kaiming_gain(nonlinearity: Nonlinearity, a: f32) -> f32 {
+    let effective = match nonlinearity {
+        Nonlinearity::LeakyRelu(_) => Nonlinearity::LeakyRelu(a),
+        other => other,
+    };
+    calculate_gain(effective)
+}
+
 /// PyTorch `nn.init.kaiming_uniform_` 相当。
 /// `std = gain / √fan`・`bound = √3·std` の `U(-bound, bound)`。
 ///
-/// `a` は PyTorch シグネチャ互換のため残す引数で、有限性のみ検証する
-/// （実際の負勾配は [`calculate_gain`] の doc のとおり
-/// `Nonlinearity::LeakyRelu(slope)` 経由で渡す）。**`a` は gain の計算に
-/// 一切使われない**ため、`nonlinearity` と矛盾する値（例:
-/// `Nonlinearity::Relu` と `a != 0.0` の組合せ）を渡しても出力は
-/// `nonlinearity` のみで決まり `a` の値には影響されない。
+/// `a`（負勾配。`nonlinearity` が `Nonlinearity::LeakyRelu(_)` のときの
+/// み gain 計算に使う）の意味論は `kaiming_gain` の doc を参照。
 pub fn kaiming_uniform(
     shape: &[usize],
     a: f32,
@@ -538,7 +557,7 @@ pub fn kaiming_uniform(
         ));
     }
     let fan = select_fan(shape, mode)?;
-    let gain = calculate_gain(nonlinearity);
+    let gain = kaiming_gain(nonlinearity, a);
     let std = gain / (fan as f32).sqrt();
     let bound = std * 3f32.sqrt();
     if !bound.is_finite() {
@@ -552,7 +571,8 @@ pub fn kaiming_uniform(
 }
 
 /// PyTorch `nn.init.kaiming_normal_` 相当。`std = gain / √fan` の
-/// `N(0, std²)`。`a` の扱いは [`kaiming_uniform`] と同じ。
+/// `N(0, std²)`。`a` の扱いは [`kaiming_uniform`]（`kaiming_gain` の
+/// doc）と同じ。
 pub fn kaiming_normal(
     shape: &[usize],
     a: f32,
@@ -565,7 +585,7 @@ pub fn kaiming_normal(
         ));
     }
     let fan = select_fan(shape, mode)?;
-    let gain = calculate_gain(nonlinearity);
+    let gain = kaiming_gain(nonlinearity, a);
     let std = gain / (fan as f32).sqrt();
     if !std.is_finite() {
         return Err(invalid_argument(
@@ -579,7 +599,7 @@ pub fn kaiming_normal(
 
 /// PyTorch `nn.init.orthogonal_` 相当。`shape`（rank ≥ 2）を
 /// `[rows, cols]`（`rows = shape[0]`・`cols = Π shape[1..]`）へ平坦化し、
-/// `N(0, 1)` 行列を [`crate::eval::linalg::qr`]（Householder reduced QR。
+/// `N(0, 1)` 行列を `crate::eval::linalg::qr`（Householder reduced QR。
 /// `R` の対角を非負に正規化済み——PyTorch の `q *= sign(diag(r))` と
 /// 等価な一意化）で直交化してから `gain` 倍し `shape` へ書き戻す。
 /// `rows < cols` の場合は PyTorch と同じく転置してから QR を取り、
@@ -617,6 +637,37 @@ pub fn orthogonal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffErr
     let gen_numel = gen_rows.checked_mul(gen_cols).ok_or_else(|| {
         invalid_argument("nn::init::orthogonal: 生成用行列の要素数がオーバーフローします")
     })?;
+    // `crate::eval::linalg::qr` は `Result` を返さず、内部の `Mat`（`f64`
+    // 要素。本ファイル冒頭「数値契約」参照）を `vec![0.0; ..]`／
+    // `Vec::with_capacity`／`.collect()` 等の非 fallible な確保で構築する
+    // （`crates/backend-cpu/src/linalg.rs::qr` も同型の既存実装で、
+    // これらの確保呼び出し自体は `eval::linalg` モジュール共通の設計
+    // 前提——同モジュール冒頭コメント「呼び出し元が shape の整合性を
+    // 保証する契約」——であり本 PR のスコープ外）。`orthogonal` の
+    // `data`（直前の [`fill_normal`]）は `f32` 換算（4 バイト／要素）で
+    // 確保可否を検証済みだが、`qr` 内部は `f64`（8 バイト／要素）の
+    // `Mat` を複数構築するため、`checked_mul` で `usize` オーバーフロー
+    // を回避できていても `gen_numel * size_of::<f64>()` が
+    // `isize::MAX` を超える形状では `Vec::with_capacity` 相当の確保が
+    // capacity overflow で panic しうる（本番経路 panic 禁止。
+    // `.claude/rules/coding-rust.md`。codex-review 指摘）。`qr` 内部の
+    // 個々の作業領域（`mat`／`q_reduced`／`r_reduced` 等）はいずれも
+    // 高々 `gen_rows * gen_cols == gen_numel` 要素に収まるため、同じ
+    // 要素数で `f64` 確保を事前に試み（成功時は即座に解放し、実際の
+    // 確保は `qr` 内部に委ねる）、失敗時は fail-closed に `Err` を返す
+    // ことで panic 経路を防ぐ（実アロケータの状態変化までは保証しない
+    // 「事前検査」であることに留意——真に確保不能な巨大形状を確実に
+    // 弾くのが目的であり、`try_reserve_exact` は capacity overflow・
+    // アロケータ枯渇のいずれも `Err` で報告する。`nn::init::try_alloc`
+    // と同じ手法）。
+    {
+        let mut probe: Vec<f64> = Vec::new();
+        probe.try_reserve_exact(gen_numel).map_err(|_| {
+            invalid_argument(
+                "nn::init::orthogonal: QR 分解の内部作業領域（f64 換算）の確保に失敗しました",
+            )
+        })?;
+    }
     let data = fill_normal(gen_numel, 0.0, 1.0)?;
     let m = Tensor::new(data, &[gen_rows, gen_cols])?;
     let (q, _r) = crate::eval::linalg::qr(&m);
@@ -625,7 +676,8 @@ pub fn orthogonal(shape: &[usize], gain: f32) -> Result<Tensor<f32>, AutodiffErr
     } else {
         q
     };
-    let scaled: Vec<f32> = q.host_slice().iter().map(|&v| v * gain).collect();
+    let mut scaled = try_alloc(q.host_slice().len())?;
+    scaled.extend(q.host_slice().iter().map(|&v| v * gain));
     Tensor::new(scaled, shape).map_err(AutodiffError::from)
 }
 
@@ -645,7 +697,7 @@ const TRUNC_NORMAL_MAX_ATTEMPTS_PER_ELEMENT: usize = 10_000;
 /// `AutodiffError::InvalidArgument` を返す。`std == 0` は `mean` が
 /// `[a, b]` 内であることを検査したうえで [`constant`] にフォールバック
 /// する。受理確率が極端に低い窓（試行上限
-/// [`TRUNC_NORMAL_MAX_ATTEMPTS_PER_ELEMENT`] を要素平均で超過）も
+/// `TRUNC_NORMAL_MAX_ATTEMPTS_PER_ELEMENT` を要素平均で超過）も
 /// `AutodiffError::InvalidArgument` で打ち切る。
 pub fn trunc_normal(
     shape: &[usize],

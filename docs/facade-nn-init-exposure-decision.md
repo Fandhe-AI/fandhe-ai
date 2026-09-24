@@ -69,3 +69,8 @@
 - `docs/compat-api-scope.md` §5（範囲拡張の手続き）
 - `docs/facade-nn-module-exposure-decision.md`（同型の保留パターンの先例）
 - `docs/rng-global-contract-design.md`（グローバル RNG 契約）
+
+## 6. PR #2239 codex-review 是正（2026-09-24）
+
+- **`kaiming_uniform`／`kaiming_normal` の `a` 引数**: 当初実装は `a` を有限性検査にのみ使い gain 計算から除外していたため、PyTorch `kaiming_uniform_(tensor, a=..., nonlinearity='leaky_relu')` と同じ `a` を指定しても初期化分散に反映されず、移行容易性契約（AGENTS.md）に反していた。`kaiming_gain`（`crates/autodiff/src/nn/init.rs`）を新設し、`nonlinearity` が `Nonlinearity::LeakyRelu(_)` の場合は `a` を負勾配として採用するよう修正した（`LeakyRelu` 以外では PyTorch と同じく `a` は無視）。§2.1 の型シグネチャ（`Nonlinearity::LeakyRelu(f32)`・`calculate_gain(Nonlinearity) -> f32`）自体は不変
+- **`orthogonal` の allocation panic**: `crate::eval::linalg::qr` は内部の `Mat`（`f64` 要素）を非 fallible な確保（`vec![0.0; ..]`／`.collect()` 等）で構築するため（`crates/backend-cpu/src/linalg.rs::qr` も同型の既存実装で同じ設計前提。`eval::linalg` モジュール共通の「shape 整合性は呼び出し元契約」という前提であり本 PR のスコープ外）、`checked_mul` で `usize` オーバーフローを回避できていても `f64` 換算（8 バイト／要素）で `isize::MAX` を超える形状では capacity overflow で panic しうる懸念が codex-review で指摘された。`orthogonal`（`crates/autodiff/src/nn/init.rs`）に `qr` 呼び出し直前の事前検査（`Vec<f64>::try_reserve_exact` による f64 換算の確保可否プローブ。失敗時は `AutodiffError::InvalidArgument` で fail-closed）を追加し、末尾の `scaled` 構築も `try_alloc`（`try_reserve_exact` ベース）へ変更した。`eval::linalg::qr` 自体を fallible 化する全面的な改修（`var.rs`／`grad.rs`／`backend-cpu` 側の同型実装まで波及する）は本修正のスコープ外とした
