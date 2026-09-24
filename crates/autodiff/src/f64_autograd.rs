@@ -46,7 +46,7 @@
 //!
 //! すべての値は eager に `f64` のまま計算する（融合・遅延実行は行わ
 //! ない。`FusionPlan` は f32 固定のまま不変）。ブロードキャストの逆
-//! 演算（[`reduce_to_shape_f64`]）はホスト上の `f64` 逐次和（row-major
+//! 演算（`reduce_to_shape_f64`）はホスト上の `f64` 逐次和（row-major
 //! index 順）で実装し、出力 dtype が既に `f64` であるため
 //! `.claude/rules/coding-rust.md` の f64 アキュムレータ契約を自明に
 //! 満たす。勾配の蓄積（fan-out 合流）も [`TapeF64::backward`] 内で
@@ -55,7 +55,7 @@
 //!
 //! # #2196 への申し送り
 //!
-//! [`OpF64`] は `pub(crate)` の非 `#[non_exhaustive]` enum とし、
+//! `OpF64` は `pub(crate)` の非 `#[non_exhaustive]` enum とし、
 //! 後続イシュー #2196（matmul・sum・mean・max・facade への到達）が
 //! variant を追加する前提で本モジュール内の `match` を網羅形にして
 //! いる（variant 追加時にコンパイルエラーで追従漏れを検知できる）。
@@ -304,7 +304,7 @@ impl GradientsF64 {
 }
 
 /// f64 グラフ上の 1 ノードを指す追跡対象値（`crate::var::Var` の f64
-/// 版）。値そのものではなく [`NodeIdF64`] + [`TapeF64`] への共有参照を
+/// 版）。値そのものではなく `NodeIdF64` + [`TapeF64`] への共有参照を
 /// 保持する。`graph`（`'g`）と、その先の f32 [`Tape`]（`'t`）の 2 つの
 /// ライフタイムを別々に持つことで、`TapeF64::var` が返す借用の寿命
 /// （`'g`）と、`TapeF64` 自身が構築時に借用した f32 `Tape` の寿命
@@ -572,17 +572,61 @@ fn reduce_to_shape_f64(
     let g_c = g.contiguous();
     let mut data: Vec<f64> = g_c.host_slice().into_owned();
     let mut cur_shape = g_shape;
+
+    // 空テンソル（`numel == 0`）は縮約すべき要素が存在しないため、
+    // 対象 shape のゼロ勾配として早期に返す（codex-review P1 是正・
+    // PR #2253）。空でない場合、`outer * axis_len * inner` は常に
+    // `data.len()`（縮約前の総要素数。`Tensor::new` で既に確保検査済み
+    // で usize に収まることが保証済み）と一致するため、`outer * inner`
+    // は `data.len()` 以下に収まり overflow しない。しかし空テンソル
+    // では他の軸（今見ている `axis` を含まない軸）が 0 のために総要素数
+    // が 0 になり得る一方、`axis` 自体の縮約対象次元やその他の非ゼロ
+    // 次元は `usize::MAX` 級の値を取り得る（例: shape
+    // `[0, usize::MAX, usize::MAX]`）。この場合 `outer * inner` の通常
+    // 乗算は本番経路 panic 禁止規約（`.claude/rules/coding-rust.md`）に
+    // 違反して debug build で overflow panic し、release build でも
+    // wrap した誤った値で巨大確保・誤走査に進みかねない。したがって
+    // 空テンソルは縮約ループへ入る前に切り離す。
+    if data.is_empty() {
+        return Tensor::zeros(target_shape).map_err(AutodiffError::Shape);
+    }
+
     for axis in 0..cur_shape.len() {
         if padded_target[axis] == 1 && cur_shape[axis] != 1 {
             let outer: usize = cur_shape[..axis].iter().product();
             let axis_len = cur_shape[axis];
             let inner: usize = cur_shape[axis + 1..].iter().product();
-            let mut reduced = vec![0f64; outer * inner];
+            // `data` が空でないことは上記の早期 return により保証済みで、
+            // `outer * axis_len * inner == data.len()`（各軸の積で全要素数
+            // を再構成する構造上の不変条件）が成り立つため、`outer * inner`
+            // は必ず `data.len()` 以下に収まり数学的には overflow しない。
+            // それでも「本番経路 panic 禁止規約」を実装として自明に満たす
+            // ため、想定外の不変条件破れに備えて `checked_mul` で明示的に
+            // 検査し、破れていれば `unreachable!` ではなく型付きエラー
+            // （`ShapeError::ElementCountOverflow`）を返す（codex-review
+            // P1 是正・PR #2253）。
+            let reduced_len = outer
+                .checked_mul(inner)
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let mut reduced = vec![0f64; reduced_len];
             for o in 0..outer {
                 for a in 0..axis_len {
                     for i in 0..inner {
-                        let src = (o * axis_len + a) * inner + i;
-                        reduced[o * inner + i] += data[src];
+                        // `src`／`dst` も同じ不変条件（`outer * axis_len *
+                        // inner == data.len()`）の下で構築される添字であり
+                        // 数学的には `data.len()` を超えないが、同じ理由で
+                        // `checked_mul`／`checked_add` により明示検査する。
+                        let src = o
+                            .checked_mul(axis_len)
+                            .and_then(|v| v.checked_add(a))
+                            .and_then(|v| v.checked_mul(inner))
+                            .and_then(|v| v.checked_add(i))
+                            .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+                        let dst = o
+                            .checked_mul(inner)
+                            .and_then(|v| v.checked_add(i))
+                            .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+                        reduced[dst] += data[src];
                     }
                 }
             }
@@ -653,6 +697,26 @@ mod tests {
 
     fn t(data: Vec<f64>, shape: &[usize]) -> Tensor<f64> {
         Tensor::new(data, shape).expect("test fixture: shape 構築に失敗した")
+    }
+
+    /// codex-review P1 是正の回帰テスト（PR #2253）: 空テンソル（要素数
+    /// 0）だが個々の次元は `usize::MAX` を含む shape
+    /// （`[0, usize::MAX, usize::MAX]`）を `reduce_to_shape_f64` へ渡し
+    /// ても、`outer * inner` の通常乗算 overflow で panic せず・
+    /// wrap による誤確保にも進まず、対象 shape のゼロ勾配を返すことを
+    /// 確認する。`checked_numel`（`crates/tensor-core`）は
+    /// `0 * usize::MAX * usize::MAX` を `Some(0)` として構築を許すため、
+    /// この shape の `Tensor` 自体は正当に構築できる（本テストが再現
+    /// する状況は実在する）。
+    #[test]
+    fn reduce_to_shape_f64_handles_empty_tensor_with_huge_dims_without_overflow() {
+        let g = Tensor::<f64>::new(Vec::new(), &[0, usize::MAX, usize::MAX])
+            .expect("checked_numel は 0 * MAX * MAX を Some(0) とするため構築できるはず");
+        let target_shape = [0usize, 1, 1];
+        let reduced =
+            reduce_to_shape_f64(&g, &target_shape).expect("空テンソルはゼロ勾配へ縮約できるはず");
+        assert_eq!(reduced.shape(), target_shape);
+        assert_eq!(reduced.numel(), 0);
     }
 
     #[test]
