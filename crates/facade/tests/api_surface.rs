@@ -5804,6 +5804,49 @@ fn compat_sequential_has_no_introspection_methods() {
     }
 }
 
+/// KV キャッシュ付き attention（イシュー #2084・親 #2059。設計正本
+/// `docs/kv-cache-design.md` §6 承認事項 2）の facade 公開（K-2。
+/// `add_stateful_attention`・`StatefulAttention` 相当の 2 `pub fn`）は
+/// 未承認のため保留する。`facade_does_not_reexport_module_dict_or_summary`
+/// と同型の否定ガード: facade の src/ に①`fn add_stateful_attention`
+/// 宣言（可視性・宣言文脈を問わず。[`declares_fn_named`] 参照）、②
+/// `KvCache`／`StatefulAttention` を識別子単位で含む `pub use` 行、の
+/// いずれも存在しないことを固定する。承認取得後に薄い委譲 `pub fn`／
+/// 再エクスポートを追加する際は本テストを正ガードへ更新すること。
+#[test]
+fn facade_does_not_expose_kv_cache_stateful_attention() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        if declares_fn_named(content, "add_stateful_attention") {
+            offending.push(format!(
+                "{}: `fn add_stateful_attention` 宣言",
+                path.display()
+            ));
+        }
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("pub use") {
+                continue;
+            }
+            for ident in ["KvCache", "StatefulAttention"] {
+                if line_contains_identifier(trimmed, ident) {
+                    offending.push(format!(
+                        "{}: `{trimmed}` が `{ident}` を識別子単位で含む",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が KV キャッシュ（#2084 の K-2。`add_stateful_attention`／\
+         `KvCache`／`StatefulAttention`）を公開している（`docs/kv-cache-design.md` \
+         §6 承認事項 2 が未取得のまま対象外としている設計判断に違反）: {offending:?}"
+    );
+}
+
 /// `fandhe_ai::Var`（`Var<'t>`・借用 `&Var<'t>`）が算術演算子トレイト
 /// （`Add`／`Sub`／`Mul`／`Div`／各 `*Assign`／`Neg`）を実装していない
 /// ことを固定する（イシュー #2136。実装計画 §3.2）。**`Var op Var`／

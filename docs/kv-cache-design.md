@@ -21,7 +21,9 @@
 K-3（段階 0・将来候補）へ切り分ける。
 
 `docs/compat-api-scope.md` §5 経路 2（ユーザー承認＋issue 起票）の
-承認は、本 doc 単体では**取得済みと主張しない**（§6 承認事項）。
+承認のうち、K-1（本 autodiff 内部実装。§6 承認事項 1）は 2026-09-24 に
+ユーザー承認済み。facade 公開（K-2）・K-3・`sdpa_compose` 置換
+（§6 承認事項 2〜4）は未取得のまま（§6 承認事項）。
 
 ## 1. 背景
 
@@ -241,17 +243,22 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
 案 B' は `Tape` のステップごとの再作成・切り詰め運用と相性が悪い
 ため、案 B（本 doc の推奨）を採る。
 
-## 6. 承認事項（本 doc は承認記録ではない・すべて未取得として列挙）
+## 6. 承認事項
 
-1. K-1 実装着手（#2084。`docs/compat-api-scope.md` §5 経路 2）
+1. **K-1 実装着手（#2084。`docs/compat-api-scope.md` §5 経路 2）**:
+   2026-09-24 にユーザー承認済み。承認範囲は autodiff 内部実装
+   （`crates/autodiff/src/nn/attention.rs` の `KvCache`・
+   `MultiheadAttentionVars::forward_with_cache`・
+   `StatefulAttention`）に限られ、facade 公開（下記 2）は含まない。
 2. facade 公開面拡張（#2084 の `add_stateful_attention`／
-   `StatefulAttention` 相当の 2 `pub fn`・`api_surface.rs`）
-3. K-3（デバイス常駐 KV。段階 0）
-4. `sdpa_compose` 置換の別 issue 起票
+   `StatefulAttention` 相当の 2 `pub fn`・`api_surface.rs`）: **未取得**
+3. K-3（デバイス常駐 KV。段階 0）: **未取得**
+4. `sdpa_compose` 置換の別 issue 起票: **未取得**
 
 これまでの類似イシュー（#2065／#2068）が「ツリーを `autoMerge=true`
 で起動した実行指示」を根拠に進められた前例は、**設計 doc の作成まで**
-にのみ及ぶものであり、上記 1〜4 には及ばない。
+にのみ及ぶものであり、上記 2〜4 には及ばない（1 は上記のとおり別途
+ユーザー承認済み）。
 
 ## 7. スコープ外
 
@@ -289,3 +296,55 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
 - `crates/facade/src/compat/sequential.rs`（MultiheadAttention 層の
   self-attention 固定・`is_causal=false` 呼び出し）
 - `crates/autodiff/src/nn/transformer_encoder_layer.rs`（#2211）
+
+## 9. 実装記録（#2084。K-1 最小版）
+
+§2 の API 案がほぼそのまま確定名称になった。差分・実装時の確認事項を
+記録する。
+
+- **確定名称**: `KvCache`（`crates/autodiff/src/nn/attention.rs`）・
+  `MultiheadAttentionVars::forward_with_cache`・`StatefulAttention`。
+  §2 の案どおり。
+- **`L_new != L_new_kv` の明示拒否を追加**: §2 は `key_new`/`value_new:
+  [B, L_new, E]` とだけ記していたが、実装では `query_new` の系列長
+  （`l_new`）と `key_new`/`value_new` の系列長（`l_new_kv`）が異なる
+  場合を `InvalidArgument` で明示的に拒否する規則を追加した。(a)/(c)
+  の offset mask 規則が self-attention（`L_new == L_new_kv`）を前提と
+  するため（cross-attention 用の非対称追記は最小版の対象外。§7 に
+  同じ理由の記載あり）。
+- **原子的な更新**: §2 の手順⑧（cache 書き戻し）は、全段（shape 検査
+  → 射影 → cat → attention → head 結合 → out 射影）が成功した後に
+  のみ実行する。途中でエラーになった場合、`cache` は呼び出し前の
+  状態のまま変化しない（`crates/autodiff/tests/nn_kv_cache.rs` の
+  エラー経路テスト群で確認）。
+- **`StatefulAttention` は `Module` trait を実装しない**: `Module::
+  forward` は `&self` を取るため `cache` を更新できない。`RefCell` で
+  内部可変にすると「状態を持たない forward」という `Module` の前提を
+  壊すため、あえて実装しない。`compat::Sequential` への結線は行わない
+  （§2「facade 到達経路」の判断を踏襲）。
+- **parity 結果（CPU・観測値）**: `crates/autodiff/tests/nn_kv_cache.rs`
+  の「全系列再計算」対「prefill → decode」突合は `NaiveOps`
+  （`common::req2_close`。REQ-2 統一複合判定）で検証し、規則 (a)
+  （空 cache からの prefill）は `forward(..., None, true)` と bit
+  完全一致することを確認した（同一の `sdpa_compose` 呼び出しへ帰着
+  するため。§3.5 の「事前登録の仮説」のうち bit 一致が成立する経路）。
+  規則 (b)/(c) を含む「全系列再計算」対「prefill+decode」の突合は
+  `crates/facade/tests/kv_cache_backend_parity.rs` で CPU 本番 ops
+  （`CpuBackendOps`）上でも実施し、REQ-2 統一複合判定で一致することを
+  確認した（bit 完全一致は本番 ops 上では未確認——§3.5 が予告した
+  「CPU GEMM の shape 依存ブロッキングパラメータにより不成立の可能性」
+  はこの環境の実測では顕在化しなかったが、恒久的な bit 一致契約とは
+  していない）。
+- **facade 公開（K-2）**: 未承認のため保留。`add_stateful_attention`・
+  `StatefulAttention` 相当の facade `pub fn`／再エクスポートは追加して
+  いない。`crates/facade/tests/api_surface.rs::
+  facade_does_not_expose_kv_cache_stateful_attention` が「未公開」を
+  fail-closed に固定する（§6 承認事項リストは本節追記後も「未取得」の
+  まま変更しない）。
+- **CUDA／Metal 実機**: 未実測。申し送りは
+  `docs/perf/logs/kv-cache-2084/README.md`。
+- **触れなかったもの**: K-3（デバイス常駐・リングバッファ）・
+  `sdpa_compose` の `crate::attention::scaled_dot_product_attention`
+  への置換・`TransformerEncoderLayer` の decode 版・padding 用
+  `attn_mask` との AND 合成。いずれも §6／§7 の記載どおり対象外の
+  ままとした。

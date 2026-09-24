@@ -50,6 +50,38 @@
 //! 認識には専用の [`Module::as_multihead_attention`] フックを使う
 //! （イシュー #1760・親 #1618 で `compat::Sequential::add_multihead_attention`
 //! として結線済み）。
+//!
+//! **KV キャッシュ（イシュー #2084・親 #2059。設計正本
+//! `docs/kv-cache-design.md`）**: [`KvCache`]・
+//! [`MultiheadAttentionVars::forward_with_cache`]・[`StatefulAttention`]
+//! を追加した（K-1 最小版）。新規 `Op`／`BackendOps`／カーネル／依存は
+//! 追加せず、既存 `Var` 演算（[`Var::cat`]・[`Tape::var_no_grad`]・
+//! [`project`]／[`split_heads`]／[`sdpa_compose`]）の合成のみで実装する
+//! （`docs/kv-cache-design.md` §3.1 contract 確認表）。
+//!
+//! - **ホスト保持**: `KvCache` は `Tensor<f32>` としてホスト側に置き、
+//!   `Tape` の外にある（`TapeNode::value` がホスト `OnceCell<Tensor<f32>>`
+//!   である現行構造の制約。`docs/kv-cache-design.md` §0）。decode
+//!   ループでの `Tape` 再作成／`Tape::reset` の影響を受けない。
+//! - **mask 規則**（`is_causal` を引数に持たず内部で決定。decode で
+//!   `is_causal=true` を渡すと top-left aligned `causal_blocked_mask`
+//!   が先頭 key にしか attend しない誤答を返す落とし穴を構造的に塞ぐ）:
+//!   `cache` が空（prefill）→ causal、`cache` 非空・`L_new == 1`
+//!   （通常の decode）→ mask なし、`cache` 非空・`L_new > 1`（複数
+//!   トークン追記）→ [`offset_allowed_mask`] を明示指定。
+//! - **勾配の truncated 意味論**: `cache` は `Tape::var_no_grad` の葉
+//!   として登録するため、過去ステップへは勾配が流れない。現ステップの
+//!   射影パラメータへの勾配は通常どおり流れる。
+//! - **原子的な更新**: 全段が成功した後にのみ `cache` へ書き戻す。
+//!   途中でエラーになった場合、`cache` は変化しない。
+//! - **K-3（デバイス常駐・リングバッファ）／`sdpa_compose` の
+//!   `crate::attention::scaled_dot_product_attention` への置換・
+//!   `TransformerEncoderLayer` の decode 版**はいずれも対象外
+//!   （`docs/kv-cache-design.md` §7 スコープ外・§6 承認事項）。
+//! - **facade 公開（K-2）は未承認のため保留**: `add_stateful_attention`・
+//!   `StatefulAttention` 相当の facade `pub fn`／再エクスポートは
+//!   追加していない（`crates/facade/tests/api_surface.rs` の否定
+//!   ガードで固定。`docs/kv-cache-design.md` §6 承認事項 2）。
 
 use fandhe_ai_tensor_core::{Activation, ScalarDType, ShapeError, Tensor};
 
@@ -916,6 +948,365 @@ fn sdpa_compose<'t>(
     }
 }
 
+/// KV キャッシュ（イシュー #2084・親 #2059。設計正本
+/// `docs/kv-cache-design.md` §2 案 B）: 射影済みの K/V（`[B, S_cached,
+/// E]`・contiguous）をホスト `Tensor<f32>` として保持する値型。
+/// [`MultiheadAttentionVars::forward_with_cache`] が唯一の書き手であり、
+/// `Tape` の外に置くため（`TapeNode::value` はホスト `OnceCell<Tensor<f32>>`。
+/// `docs/kv-cache-design.md` §0）decode ループごとの `Tape` 再作成／
+/// `Tape::reset` の影響を受けない。
+///
+/// **不変条件**: `k`／`v` は常に両方 `Some` か両方 `None`
+/// （[`KvCache::new`]・[`KvCache::clear`] のみが状態を変える公開経路で
+/// あり、外部から任意の `Tensor` を注入するセッターは設けない設計
+/// ——`docs/kv-cache-design.md` §2「値型 `KvCache`」参照）。
+///
+/// **`clone()` は実データをコピーしない**: `Tensor<f32>` は内部
+/// `storage: Arc<Storage<T>>` を `Arc` 共有する値型
+/// （[`Var::to_tensor`] doc 参照）のため、`clone()` は `Arc` の
+/// ポインタ複製のみで済む。
+#[derive(Debug, Clone, Default)]
+pub struct KvCache {
+    k: Option<Tensor<f32>>,
+    v: Option<Tensor<f32>>,
+}
+
+impl KvCache {
+    /// 空キャッシュを作る（[`Default::default`] と同じ）。
+    pub fn new() -> KvCache {
+        KvCache::default()
+    }
+
+    /// キャッシュが空（`k`／`v` とも `None`）かどうか。
+    pub fn is_empty(&self) -> bool {
+        self.k.is_none()
+    }
+
+    /// キャッシュ済みの系列長 `S_cached`（空なら 0）。
+    pub fn seq_len(&self) -> usize {
+        self.k.as_ref().map(|k| k.shape()[1]).unwrap_or(0)
+    }
+
+    /// キャッシュ済みのバッチサイズ `B`（空なら `None`）。
+    pub fn batch(&self) -> Option<usize> {
+        self.k.as_ref().map(|k| k.shape()[0])
+    }
+
+    /// キャッシュ済みの埋め込み次元 `E`（空なら `None`）。
+    pub fn embed_dim(&self) -> Option<usize> {
+        self.k.as_ref().map(|k| k.shape()[2])
+    }
+
+    /// キャッシュを空に戻す（再 prefill 可能な状態へ再初期化）。
+    pub fn clear(&mut self) {
+        self.k = None;
+        self.v = None;
+    }
+
+    /// キャッシュ済み K（`[B, S_cached, E]`）への参照。空なら `None`。
+    pub fn k(&self) -> Option<&Tensor<f32>> {
+        self.k.as_ref()
+    }
+
+    /// キャッシュ済み V（`[B, S_cached, E]`）への参照。空なら `None`。
+    pub fn v(&self) -> Option<&Tensor<f32>> {
+        self.v.as_ref()
+    }
+}
+
+/// (c)（`L_new > 1` かつ cache 非空）の offset causal mask
+/// `[l_new, s_total]` を構築する（`docs/kv-cache-design.md` §2
+/// mask 規則 (c)）: `allowed[i][j] = j <= s_prev + i`（`true` = attend。
+/// PyTorch bool mask 規約——[`sdpa_compose`] が受理する `attn_mask` と
+/// 同じ極性）。[`causal_blocked_mask`] が `blocked[i][j] = j > i` の
+/// 「block」極性（`s_prev == 0` のとき本関数の否定と一致——単体テスト
+/// `offset_allowed_mask_matches_causal_blocked_mask_when_s_prev_is_zero`
+/// で確認）を返すのに対し、本関数は `sdpa_compose` の `attn_mask`
+/// 引数（`true` = attend）へ直接渡せる極性で返す。
+fn offset_allowed_mask(
+    l_new: usize,
+    s_prev: usize,
+    s_total: usize,
+) -> Result<Tensor<bool>, AutodiffError> {
+    let capacity = checked_ls(l_new, s_total)?;
+    let mut data = Vec::with_capacity(capacity);
+    for i in 0..l_new {
+        // `s_prev + i` は `s_total = s_prev + l_new_kv`（呼び出し元が
+        // `checked_add` で検査済み）以下であり `usize` オーバーフロー
+        // しない。
+        let boundary = s_prev + i;
+        for j in 0..s_total {
+            data.push(j <= boundary);
+        }
+    }
+    Tensor::new(data, &[l_new, s_total]).map_err(AutodiffError::Shape)
+}
+
+impl<'t> MultiheadAttentionVars<'t> {
+    /// KV キャッシュ付き forward（K-1 最小版。イシュー #2084・
+    /// `docs/kv-cache-design.md` §2）。新規トークン分の q/k/v のみを
+    /// 受け取り、射影 → `cache` との連結 → attention → `cache`
+    /// 更新の順で処理する。`is_causal`／`attn_mask` 引数は持たない
+    /// （decode で `is_causal=true` を誤って渡す落とし穴——top-left
+    /// aligned `causal_blocked_mask` は `L=1` で先頭 key にしか
+    /// attend しない——を構造的に塞ぐ fail-closed 設計。モジュール doc
+    /// 「KV キャッシュ（#2084）」参照）。
+    ///
+    /// 入力: `query_new: [B, L_new, E]`・`key_new`/`value_new:
+    /// [B, L_new_kv, E]`（self-attention の decode では 3 つとも同じ
+    /// `Var` を渡す）。cross-attention 用途は対象外のため
+    /// `L_new != L_new_kv` は `InvalidArgument` で拒否する（`cache` の
+    /// offset 規則が `query_new` と `key_new` の系列長一致を前提と
+    /// するため。`docs/kv-cache-design.md` §2 の (a)/(c) 規則参照）。
+    ///
+    /// mask 規則（`cache` の状態から内部で決定。`docs/kv-cache-design.md`
+    /// §2）:
+    /// - (a) `cache` が空（prefill）→ `is_causal=true` 相当
+    /// - (b) `cache` が非空・`L_new == 1`（通常の decode）→ mask なし
+    /// - (c) `cache` が非空・`L_new > 1`（複数トークン追記）→
+    ///   `offset_allowed_mask`（本モジュール内 private 関数）を
+    ///   `attn_mask` として渡す
+    ///
+    /// **勾配の扱い**: `cache` は [`Tape::var_no_grad`] で葉として
+    /// 登録するため、過去ステップへは勾配が流れない（推論用の
+    /// truncated 意味論。`docs/kv-cache-design.md` §2）。現ステップの
+    /// 射影パラメータへの勾配は通常の `forward` と同様に流れる。
+    ///
+    /// **原子的な更新**: `cache` への書き戻しは全段が成功した後にのみ
+    /// 行う。途中のいずれかの段でエラーになった場合、`cache` は
+    /// 呼び出し前の状態のまま変化しない（エラー経路の単体テスト
+    /// 群で確認）。
+    ///
+    /// **`Tape` の運用（呼び出し側の責務）**: `Var::cat`
+    /// （`docs/kv-cache-design.md` §3.2）はステップごとに `Op::Concat`
+    /// ノードを積むため、decode ループでは新しい `Tape` を作るか
+    /// `Tape::reset` を使う運用を推奨する。`cache` 自体はホスト
+    /// `Tensor<f32>` として `Tape` の外にあるため、この運用の影響を
+    /// 受けない。
+    ///
+    /// # Errors
+    ///
+    /// `query_new`／`key_new`／`value_new` の rank が 3 でない、
+    /// バッチ次元 `B` が不一致、最終軸が `embed_dim` と不一致、
+    /// `key_new`/`value_new` の shape が食い違う、`cache` が非空で
+    /// `batch`／`embed_dim` が不一致、`L_new != L_new_kv`、`S_prev +
+    /// L_new_kv` が `usize` をオーバーフローする、のいずれかで
+    /// `AutodiffError::Shape`／`InvalidArgument` を返す。テープ不一致は
+    /// `check_same_tape`（`AutodiffError::TapeMismatch`）。
+    pub fn forward_with_cache(
+        &self,
+        query_new: &Var<'t>,
+        key_new: &Var<'t>,
+        value_new: &Var<'t>,
+        cache: &mut KvCache,
+    ) -> Result<Var<'t>, AutodiffError> {
+        query_new.check_same_tape(&self.q.weight)?;
+        query_new.check_same_tape(key_new)?;
+        query_new.check_same_tape(value_new)?;
+
+        let q_shape = query_new.shape();
+        let k_shape = key_new.shape();
+        let v_shape = value_new.shape();
+        if q_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: q_shape.len(),
+            }));
+        }
+        if k_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: k_shape.len(),
+            }));
+        }
+        if v_shape.len() != 3 {
+            return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                expected: 3,
+                actual: v_shape.len(),
+            }));
+        }
+
+        let e = self.embed_dim;
+        let (b, l_new) = (q_shape[0], q_shape[1]);
+        if q_shape[2] != e {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: q_shape.clone(),
+                rhs: vec![b, l_new, e],
+            }));
+        }
+        if k_shape[0] != b || k_shape[2] != e {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: k_shape.clone(),
+                rhs: vec![b, k_shape[1], e],
+            }));
+        }
+        if v_shape != k_shape {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: v_shape.clone(),
+                rhs: k_shape.clone(),
+            }));
+        }
+        let l_new_kv = k_shape[1];
+        // self-attention の追記のみを対象とする（モジュール doc・
+        // `docs/kv-cache-design.md` §2 参照。cross-attention 用の
+        // 非対称なキャッシュ追記は最小版の対象外）。
+        if l_new != l_new_kv {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "MultiheadAttentionVars::forward_with_cache: query_new の系列長 \
+                 ({l_new}) と key_new/value_new の系列長 ({l_new_kv}) は一致する必要がある \
+                 （self-attention 限定。cross-attention は対象外）"
+            )));
+        }
+
+        if !cache.is_empty() {
+            if cache.batch() != Some(b) {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: vec![cache.batch().unwrap_or(0)],
+                    rhs: vec![b],
+                }));
+            }
+            if cache.embed_dim() != Some(e) {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "MultiheadAttentionVars::forward_with_cache: cache の embed_dim \
+                     ({:?}) と入力の embed_dim ({e}) が不一致",
+                    cache.embed_dim()
+                )));
+            }
+        }
+        let s_prev = cache.seq_len();
+        let s_total = s_prev.checked_add(l_new_kv).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "MultiheadAttentionVars::forward_with_cache: s_prev({s_prev}) + \
+                 l_new_kv({l_new_kv}) が usize をオーバーフローした"
+            ))
+        })?;
+
+        let q_proj = project(query_new, &self.q, b, l_new, e, e, None)?;
+        let k_new_proj = project(key_new, &self.k, b, l_new_kv, e, e, None)?;
+        let v_new_proj = project(value_new, &self.v, b, l_new_kv, e, e, None)?;
+
+        // cache が非空なら `var_no_grad` で新規ステップの葉として登録し
+        // 連結する（`docs/kv-cache-design.md` §2 手順③。過去ステップへ
+        // 勾配は流れない — `Tape::var_no_grad` の契約どおり）。
+        let (k_cat, v_cat) = match (cache.k(), cache.v()) {
+            (Some(k_prev), Some(v_prev)) => {
+                let k_prev_var = query_new.tape().var_no_grad(k_prev);
+                let v_prev_var = query_new.tape().var_no_grad(v_prev);
+                (
+                    Var::cat(&[k_prev_var, k_new_proj], 1)?,
+                    Var::cat(&[v_prev_var, v_new_proj], 1)?,
+                )
+            }
+            _ => (k_new_proj, v_new_proj),
+        };
+
+        // `validate_projection_vars`／`validate_embed_heads` が
+        // `e % h == 0` かつ `e > 0`／`h > 0` を構築時に検証済みのため、
+        // `dh` は常に 1 以上の整数（[`MultiheadAttentionVars::forward`]
+        // と同じ導出）。
+        let h = self.num_heads;
+        let dh = e / h;
+        let q_heads = split_heads(&q_proj, b, l_new, h, dh)?;
+        let k_heads = split_heads(&k_cat, b, s_total, h, dh)?;
+        let v_heads = split_heads(&v_cat, b, s_total, h, dh)?;
+
+        let scale = 1.0f32 / (dh as f32).sqrt();
+        let attn_out = if s_prev == 0 {
+            // (a) prefill: 全系列が新規のため causal。
+            sdpa_compose(&q_heads, &k_heads, &v_heads, None, true, scale, None)?
+        } else if l_new == 1 {
+            // (b) 通常の decode: 新規 1 トークンは cache 済み全 key と
+            // 自身に attend してよいため mask 不要。
+            sdpa_compose(&q_heads, &k_heads, &v_heads, None, false, scale, None)?
+        } else {
+            // (c) 複数トークンの追記: offset causal mask を明示指定。
+            let mask = offset_allowed_mask(l_new, s_prev, s_total)?;
+            sdpa_compose(
+                &q_heads,
+                &k_heads,
+                &v_heads,
+                Some(&mask),
+                false,
+                scale,
+                None,
+            )?
+        };
+
+        let merged = attn_out
+            .permute(&[0, 2, 1, 3])?
+            .contiguous()?
+            .reshape(&[b, l_new, e])?;
+        let out = project(&merged, &self.out, b, l_new, e, e, None)?;
+
+        // 全段が成功した後にのみ cache を書き戻す（原子的な更新。
+        // `to_tensor()` は `Arc` 共有のため算術を伴わない bit 完全一致
+        // コピー——`docs/kv-cache-design.md` §2 手順⑧）。
+        cache.k = Some(k_cat.to_tensor());
+        cache.v = Some(v_cat.to_tensor());
+
+        Ok(out)
+    }
+}
+
+/// KV キャッシュを所有する薄い stateful ラッパー（イシュー #2084。
+/// `docs/kv-cache-design.md` §2）。[`MultiheadAttention`]（パラメータ
+/// 本体）と [`KvCache`] を保持し、`forward` は
+/// [`MultiheadAttentionVars::forward_with_cache`] への 1 行委譲に
+/// 徹する。
+///
+/// **`Module` trait は実装しない**: `Module::forward` は `&self` を
+/// 取るため `cache` を更新できない。`RefCell` で内部可変にすると
+/// 「状態を持たない forward」という `Module` の前提を壊すため、
+/// あえて `Module` を実装しない（`compat::Sequential` への結線は
+/// 行わない。`docs/kv-cache-design.md` §2「facade 到達経路」参照）。
+pub struct StatefulAttention {
+    mha: MultiheadAttention,
+    cache: KvCache,
+}
+
+impl StatefulAttention {
+    /// 空キャッシュで構築する。
+    pub fn new(mha: MultiheadAttention) -> StatefulAttention {
+        StatefulAttention {
+            mha,
+            cache: KvCache::new(),
+        }
+    }
+
+    /// self-attention（`q = k = v = x_new`）として
+    /// [`MultiheadAttentionVars::forward_with_cache`] を呼ぶ（1 行
+    /// 委譲）。
+    pub fn forward<'t>(
+        &mut self,
+        tape: &'t Tape,
+        x_new: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.mha
+            .bind(tape)
+            .forward_with_cache(x_new, x_new, x_new, &mut self.cache)
+    }
+
+    /// キャッシュを空に戻す（[`KvCache::clear`] への委譲）。
+    pub fn reset_cache(&mut self) {
+        self.cache.clear();
+    }
+
+    /// 保持しているキャッシュへの参照。
+    pub fn cache(&self) -> &KvCache {
+        &self.cache
+    }
+
+    /// キャッシュ済みの系列長（[`KvCache::seq_len`] への委譲）。
+    pub fn seq_len(&self) -> usize {
+        self.cache.seq_len()
+    }
+
+    /// パラメータ本体への参照。
+    pub fn mha(&self) -> &MultiheadAttention {
+        &self.mha
+    }
+}
+
 /// self-attention（`q = k = v = input`・mask なし・非 causal）として
 /// `Module::forward` を定義する（モジュール doc「`Module` trait との
 /// 関係」参照）。`forward_host`／`as_linear`／`as_relu` はいずれも
@@ -1018,6 +1409,109 @@ impl Module for MultiheadAttention {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- offset_allowed_mask（イシュー #2084 の (c) mask 規則） ---
+
+    #[test]
+    fn offset_allowed_mask_matches_causal_blocked_mask_when_s_prev_is_zero() {
+        // s_prev == 0 のとき、offset_allowed_mask（true=attend）は
+        // causal_blocked_mask（true=block）の否定と一致するはず
+        // （両者とも `j <= i` を境界とする causal 規約。モジュール doc
+        // 参照）。
+        for (l, s) in [(3, 3), (4, 2), (2, 4), (1, 1)] {
+            let allowed = offset_allowed_mask(l, 0, s).unwrap();
+            let blocked = causal_blocked_mask(l, s).unwrap();
+            let allowed_data = allowed.as_slice().unwrap();
+            let blocked_data = blocked.as_slice().unwrap();
+            let negated: Vec<bool> = blocked_data.iter().map(|&b| !b).collect();
+            assert_eq!(allowed_data, negated.as_slice(), "l={l} s={s}");
+        }
+    }
+
+    #[test]
+    fn offset_allowed_mask_with_nonzero_s_prev_shifts_boundary() {
+        // s_prev=2・l_new=2・s_total=4 のとき、行 i の許可境界は
+        // `s_prev + i`（i=0 -> j<=2・i=1 -> j<=3）。
+        let m = offset_allowed_mask(2, 2, 4).unwrap();
+        assert_eq!(m.shape(), &[2, 4]);
+        let data = m.as_slice().unwrap();
+        assert_eq!(
+            data,
+            &[
+                true, true, true, false, // i=0: j<=2
+                true, true, true, true, // i=1: j<=3
+            ]
+        );
+    }
+
+    #[test]
+    fn offset_allowed_mask_never_produces_fully_masked_row() {
+        // `j <= s_prev + i` は `s_prev + i >= 0` である限り `j = 0` を
+        // 常に許可するため、s_total > 0 なら全 masked 行は構造的に
+        // 生じない。`reject_fully_masked_rows` は「true=block」極性を
+        // 期待するため、`offset_allowed_mask`（true=attend）を否定して
+        // から渡す（[`negate_broadcast_mask`] と同じ極性変換）。
+        for s_prev in 0..4 {
+            for l in 1..4 {
+                let s_total = s_prev + l;
+                let allowed = offset_allowed_mask(l, s_prev, s_total).unwrap();
+                let blocked_data: Vec<bool> =
+                    allowed.as_slice().unwrap().iter().map(|&a| !a).collect();
+                let blocked = Tensor::new(blocked_data, &[l, s_total]).unwrap();
+                assert!(
+                    reject_fully_masked_rows(&blocked).is_ok(),
+                    "s_prev={s_prev} l={l}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn offset_allowed_mask_rejects_overflow() {
+        let err = offset_allowed_mask(usize::MAX, 1, usize::MAX).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    // --- KvCache（イシュー #2084） ---
+
+    #[test]
+    fn kv_cache_new_is_empty() {
+        let cache = KvCache::new();
+        assert!(cache.is_empty());
+        assert_eq!(cache.seq_len(), 0);
+        assert_eq!(cache.batch(), None);
+        assert_eq!(cache.embed_dim(), None);
+        assert!(cache.k().is_none());
+        assert!(cache.v().is_none());
+    }
+
+    #[test]
+    fn kv_cache_clear_resets_to_empty() {
+        let mut cache = KvCache::new();
+        cache.k = Some(Tensor::new(vec![0.0f32; 2 * 3 * 4], &[2, 3, 4]).unwrap());
+        cache.v = Some(Tensor::new(vec![0.0f32; 2 * 3 * 4], &[2, 3, 4]).unwrap());
+        assert!(!cache.is_empty());
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.seq_len(), 0);
+    }
+
+    #[test]
+    fn kv_cache_clone_shares_storage() {
+        // `Tensor<f32>` は `Arc<Storage<T>>` を共有する値型のため、
+        // `clone()` 後の as_slice ポインタは呼び出し元の同一 `Arc` を
+        // 指す（実データコピーではないことの間接検証。`Tensor` は
+        // `as_slice` が返す生ポインタを直接比較する API を持たない
+        // ため、値の一致で代替する）。
+        let mut cache = KvCache::new();
+        cache.k = Some(Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[1, 1, 4]).unwrap());
+        cache.v = Some(Tensor::new(vec![5.0f32, 6.0, 7.0, 8.0], &[1, 1, 4]).unwrap());
+        let cloned = cache.clone();
+        assert_eq!(
+            cloned.k().unwrap().as_slice().unwrap(),
+            cache.k().unwrap().as_slice().unwrap()
+        );
+    }
 
     #[test]
     fn causal_blocked_mask_square_is_strict_upper_triangle() {
