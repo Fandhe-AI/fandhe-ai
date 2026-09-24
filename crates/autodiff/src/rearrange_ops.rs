@@ -199,17 +199,39 @@ pub fn repeat<'t>(x: &Var<'t>, repeats: &[usize]) -> Result<Var<'t>, AutodiffErr
         cur = cur.broadcast_to(&padded_shape)?;
     }
 
+    // 各軸の添字ベクタ（`Vec<i32>`）を確保する前に、全軸を通した最終
+    // 出力の総要素数を `checked_mul` で確定させる（codex-review 指摘・
+    // PR #2256。従来は軸ごとに `n * r` のみ検証してから確保していたため、
+    // 後続軸を検査する前に先頭軸だけで数 GB 規模の確保を試み、型付き
+    // `ElementCountOverflow` を返す前に allocation failure で abort し
+    // 得た。`cur.shape()` は broadcast 由来の stride-0 view でも論理
+    // shape を返すため、ここで軸ごとの `n_d * r_d` と全軸積の両方を
+    // 検査してから、後続ループで初めて確保に入る）。
+    let cur_shape = cur.shape();
+    let mut total_out_elems: usize = 1;
+    for (d, &r) in repeats.iter().enumerate() {
+        let n = cur_shape[d];
+        checked_axis_len_as_i32(n)?;
+        let axis_total = n
+            .checked_mul(r)
+            .ok_or(ShapeError::ElementCountOverflow)
+            .map_err(AutodiffError::Shape)?;
+        checked_index_alloc_len(axis_total)?;
+        total_out_elems = total_out_elems
+            .checked_mul(axis_total)
+            .ok_or(ShapeError::ElementCountOverflow)
+            .map_err(AutodiffError::Shape)?;
+    }
+    checked_index_alloc_len(total_out_elems)?;
+
     for (d, &r) in repeats.iter().enumerate() {
         if r == 1 {
             continue;
         }
         let n = cur.shape()[d];
-        checked_axis_len_as_i32(n)?;
-        let total = n
-            .checked_mul(r)
-            .ok_or(ShapeError::ElementCountOverflow)
-            .map_err(AutodiffError::Shape)?;
-        checked_index_alloc_len(total)?;
+        // `n * r` は上記の事前検証ループで既に overflow・確保上限の
+        // 両方を確認済みのため、ここでは再検証せず素の乗算でよい。
+        let total = n * r;
         // `total == 0`（`n == 0` または `r == 0`）のときは `0..total` が
         // 空のため、クロージャ内の `j % n` は評価されず `n == 0` による
         // ゼロ除算は起きない（`Iterator::map` の遅延評価による）。
