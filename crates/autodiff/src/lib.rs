@@ -179,6 +179,13 @@
 //! まま消費しない。設計判断・バックエンド別 dispatch 表は
 //! `f64_autograd` モジュール doc・同 doc §13 を参照）。
 
+//! イシュー #2144（親 #2131）で `tril`／`triu`／`diag`／`trace`／
+//! `outer`／`dot` の 6 種形状・行列演算を [`matrix_ops`] へ追加した。
+//! [`bool_ops`]／[`rearrange_ops`] と同じく非公開の自由関数群（`Var`
+//! への inherent メソッドではない）で、facade 公開は承認待ちのため
+//! 意図的に再エクスポートしない（`docs/autodiff-matrix-ops-decision.md`・
+//! モジュール doc 参照）。
+
 mod attention;
 mod backward;
 pub mod bool_ops;
@@ -192,6 +199,7 @@ mod eval;
 pub mod f64_autograd;
 mod grad;
 mod layout;
+pub mod matrix_ops;
 pub mod nn;
 pub mod optim;
 pub mod rearrange_ops;
