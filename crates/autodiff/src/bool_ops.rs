@@ -63,10 +63,18 @@ fn materialize_pair<'t>(
 /// 手順: ①`check_same_tape`（テープ不一致は `TapeMismatch`）→
 /// ②`broadcast_shape` で出力 shape を先に求める（shape 検証と実行の
 /// 分離。`docs/fusion-graph-design.md` §3.5.1 と同じ設計方針）→
-/// ③層 1 実体化 → ④`scalar_binary_with_fallback`（既存 CPU／CUDA／
+/// ③`checked_bytes_for::<f32>`／`checked_bytes_for::<bool>` で出力
+/// shape の確保前サイズ検査（要素数 1 の `Var` を巨大 shape へ
+/// broadcast した view を渡された場合、下流の `scalar_binary_with_
+/// fallback`／ホスト fallback 実装が `vec!`／`Vec::with_capacity` で
+/// 無検査に確保し `isize::MAX` 超で capacity overflow panic しうる。
+/// `masked_select`／`logical_*` と同じ理由による同型の事前検査。
+/// 本番経路 panic 禁止規約 `.claude/rules/coding-rust.md`。
+/// codex-review P1 指摘の是正・イシュー #2141・PR #2241）→
+/// ④層 1 実体化 → ⑤`scalar_binary_with_fallback`（既存 CPU／CUDA／
 /// Metal 比較カーネルを再利用。`Unsupported` のみホスト参照実装へ
-/// フォールバック）→ ⑤`cast_from_f32_with_fallback::<bool>`（既存
-/// cast カーネルを再利用）→ ⑥戻り値 shape の事後検査。
+/// フォールバック）→ ⑥`cast_from_f32_with_fallback::<bool>`（既存
+/// cast カーネルを再利用）→ ⑦戻り値 shape の事後検査。
 fn compare_bool<'t>(
     a: &Var<'t>,
     b: &Var<'t>,
@@ -74,6 +82,8 @@ fn compare_bool<'t>(
 ) -> Result<Tensor<bool>, AutodiffError> {
     a.check_same_tape(b)?;
     let out_shape = broadcast_shape(&a.shape(), &b.shape()).map_err(AutodiffError::Shape)?;
+    checked_bytes_for::<f32>(&out_shape)?;
+    checked_bytes_for::<bool>(&out_shape)?;
     let (a_val, b_val) = materialize_pair(a, b)?;
     let mask_f32 = scalar_binary_with_fallback(a.tape().ops(), op, &a_val, &b_val, &out_shape)?;
     let mask_bool = cast_from_f32_with_fallback::<bool>(a.tape().ops(), &mask_f32)?;
@@ -586,6 +596,32 @@ mod tests {
 
         let err = masked_select(&x, &mask)
             .expect_err("huge broadcast shape の実体化は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    // --- compare_bool: 巨大 broadcast shape を持つ Var（要素数 1 の
+    // Tensor を broadcast_to で huge shape の view にしてから tape に
+    // 載せたもの）を渡しても、scalar_binary_with_fallback／
+    // cast_from_f32_with_fallback の無検査確保（`vec!`／`Vec::
+    // with_capacity`）へ到達する前に `ElementCountOverflow` で拒否
+    // される（codex-review P1 是正の回帰テスト。イシュー #2141・
+    // PR #2241。ai-review 指摘: compare_bool が broadcast_shape の
+    // 結果を検査せず scalar_binary_with_fallback へ渡していた）。---
+
+    #[test]
+    fn compare_bool_rejects_huge_broadcast_view_var_without_panicking() {
+        let tape = Tape::new();
+        let huge_len = (isize::MAX as usize) / std::mem::size_of::<f32>() + 10;
+        let base = t(vec![1.0], &[1usize]);
+        let huge_view = base.broadcast_to(&[huge_len]).unwrap();
+        let a = tape.var(&huge_view);
+        let b = tape.var(&t(vec![1.0], &[1usize]));
+
+        let err =
+            gt_bool(&a, &b).expect_err("huge broadcast view の実体化は確保前に拒否されるはず");
         assert!(matches!(
             err,
             AutodiffError::Shape(ShapeError::ElementCountOverflow)
