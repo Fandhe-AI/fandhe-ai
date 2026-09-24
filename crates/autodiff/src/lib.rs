@@ -166,6 +166,19 @@
 //! 公開は承認待ちのため意図的に再エクスポートしない（`docs/autodiff-
 //! bool-ops-exposure-decision.md`・モジュール doc 参照）。
 
+//! イシュー #2195（親 #2142「f64 autograd の最小集合」の第 1 段）で
+//! `f32` の `Tape`/`Var` とは完全に独立した f64 専用グラフ
+//! [`f64_autograd::TapeF64`]/[`f64_autograd::VarF64`] を追加した。
+//! elementwise 4 演算（add・mul・div・pow）の forward と VJP・1 step
+//! backward を持つ（`add`/`mul` は `Tape::typed_ops_f64` が `Some`
+//! ならネイティブ実装へ委譲し `None`/`Unsupported` ならホスト参照実装
+//! へフォールバック、`div`/`pow` は常にホスト参照実装）。`Var`
+//! （本ファイル既存の f32 版）へ inherent メソッドは追加せず、facade
+//! も再エクスポートしない内部クレート限定 API（`docs/autodiff-
+//! var-dtype-multiplexing-design.md` §10 の承認事項はいずれも未承認の
+//! まま消費しない。設計判断・バックエンド別 dispatch 表は
+//! `f64_autograd` モジュール doc・同 doc §13 を参照）。
+
 mod attention;
 mod backward;
 pub mod bool_ops;
@@ -176,6 +189,7 @@ mod default_ops;
 mod einsum;
 mod error;
 mod eval;
+pub mod f64_autograd;
 mod grad;
 mod layout;
 pub mod nn;

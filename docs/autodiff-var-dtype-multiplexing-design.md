@@ -232,3 +232,62 @@
 - `.claude/rules/coding-rust.md`「バックエンド構成」節
 - `crates/autodiff/src/var.rs:107`（`Var`）・`crates/autodiff/src/tape.rs:1934`（`Tape`）・`:91`（`Op`）・`:1445`（`for_each_input`）
 - `crates/tensor-core/src/element.rs:123`（`Scalar`）・`typed_ops.rs:33-49`（`TypedOps`）
+
+## 13. 実装記録（イシュー #2195・親 #2142「f64 autograd の最小集合」第 1 段）
+
+イシュー #2195 の本文は「`Var<f64>` 葉ノード」「`Tape::push_leaf` の型
+パラメータ generic 化」「`TypedOps<f64>` 経由の 4 演算」を求めていたが、
+**§10 の承認事項 1〜5 はいずれも未承認のまま**であり（#2061／#2142 の
+コメント・PR #2207 本文のいずれにも承認の記録がない）、イシュー本文の
+要求をそのまま実装すると承認事項 2（`TypedOps` への演算追加。
+`div`／`pow` は現行 8 演算に含まれない）・3（`Var` への facade 新規
+公開面）に抵触する。そのため実装は以下の**読み替え**（安全側）で
+行った:
+
+- §10 のどの承認事項も消費しない形として、f32 の `Var`／`Tape` とは
+  完全に独立した、dtype 混在なしの小さな f64 専用グラフ
+  （`crates/autodiff/src/f64_autograd.rs::TapeF64`／`VarF64`）を新規
+  ファイルのみで追加した。`Var<'t>`／`Tape`／`Op`／`TapeNode`・
+  `grad.rs`・`TypedOps` trait・facade の公開面はいずれも変更していない
+  （`crates/autodiff/tests/architecture_boundaries.rs`・`crates/facade/
+  tests/api_surface.rs` の既存の否定ガード〈`impl ... Var` 走査・facade
+  再エクスポート走査〉が無改変のまま通ることで、本モジュールがこれらの
+  不変条件を壊していないことを機械的に確認した）
+- `add`／`mul` は `Tape::typed_ops_f64()` が `Some` を返せばネイティブ
+  実装（CPU〈#1697〉・CUDA〈#2060〉。いずれも既存実装のまま演算追加
+  なし）へ委譲し、`None`／`Unsupported` ならホスト参照実装へフォール
+  バックする。`div`／`pow` は `TypedOps<f64>` に演算が存在しない
+  （8 演算固定。§10 承認事項 2 は消費しない）ため、バックエンドに
+  依らず常にホスト参照実装で計算する
+- `Var::cast::<f64>()`（既存実装）は変更していない。勾配の切れた
+  detached な `Tensor<f64>` を返す挙動のまま、この cast を経由して
+  `TapeF64::var`／`var_no_grad` へ渡す「勾配の切れた経路」のみで f32
+  グラフから f64 グラフへ渡る契約を、統合テスト
+  （`crates/autodiff/tests/var_f64_leaf_elementwise.rs::
+  cast_to_f64_then_f64_backward_does_not_affect_f32_tape_backward`）で
+  固定した
+
+### バックエンド別 dispatch（実測記録）
+
+| バックエンド | `typed_ops_f64()` | `add`／`mul` | `div`／`pow` |
+|---|---|---|---|
+| CPU（`CpuBackendOps`） | `Some`（#1697） | ネイティブ | ホスト |
+| CUDA（`CudaBackendOps`） | `Some`（#2060） | ネイティブ | ホスト |
+| Metal（`MetalBackendOps`） | `None`（MSL `double` 非対応が恒久的） | ホスト | ホスト |
+
+CPU ネイティブ経路とホスト経路（`RawTape::new()`。`NaiveOps`）の forward
+値・1 step backward 勾配が bit 完全一致することを `crates/facade/tests/
+var_f64_autograd_backend_parity.rs::
+cpu_f64_autograd_forward_and_grad_match_host_reference` で確認した（CI
+実行）。CUDA・Metal の同経路（`#[ignore]` テスト 2 件）は、本エージェント
+実行環境に DGX Spark GB10・Apple Silicon 実機への到達手段がないため
+**未実施のまま**であり、Mac／GB10 実機セッションへ申し送る。
+
+### #2196 への申し送り
+
+`OpF64`（`f64_autograd.rs`）は `pub(crate)` の非 `#[non_exhaustive]`
+enum とし、`match` を網羅形にしてある。後続イシュー #2196（matmul・sum・
+mean・max、facade への到達経路）は `OpF64` へ variant を追加する形で
+本モジュールの上に積み増す想定。`Var<T>` への一般化・facade からの到達
+（§10 承認事項 3・4）は本イシューでは着手せず、必要になった時点で個別
+のユーザー承認を要する。
