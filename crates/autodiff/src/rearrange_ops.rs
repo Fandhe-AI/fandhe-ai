@@ -41,7 +41,13 @@
 //! `repeats`／`reps`／`dims`／`shifts` はバックエンドを呼ぶ前にすべて
 //! 検査する（長さ・軸範囲・重複・`checked_mul` によるオーバーフロー・
 //! `i32` 範囲）。巨大な繰り返し数による添字ベクタの過大確保は、確保前に
-//! 出力要素数を検査して拒否する（本番経路 panic 禁止規約）。
+//! 出力要素数を検査して拒否する（本番経路 panic 禁止規約）。この検査は
+//! `usize` オーバーフローの有無だけでなく、`checked_index_alloc_len` の
+//! 実用上の確保バイト数上限（[`MAX_INDEX_ALLOC_BYTES`]。既定 1 GiB）も
+//! 含む——`isize::MAX` 検査のみでは技術的にオーバーフローしない範囲の
+//! 巨大値（例: shape `[1]` に `repeats=[1_000_000_000]` で 4GB）を
+//! 確保前に拒否できず、`collect()` の実確保失敗による abort を招き
+//! うるため（codex-review 指摘・PR #2256）。
 
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
@@ -59,18 +65,38 @@ fn checked_axis_len_as_i32(n: usize) -> Result<(), AutodiffError> {
         .map_err(|_| AutodiffError::Shape(ShapeError::ElementCountOverflow))
 }
 
+/// 添字ベクタ 1 本あたりに許容する確保バイト数の実用上限（codex-review
+/// 指摘・PR #2256。`scripts/bench/oss-gemm-compare/src/main.rs::
+/// MAX_BUFFER_BYTES`〈コミット 6c653324〉と同じ考え方の踏襲——本クレート
+/// 内・tensor-core 側にも「実用上確保不能なサイズを拒否する」既存の
+/// 汎用定数はなく〈`checked_numel_for`／`bool_ops::checked_bytes_for`
+/// はいずれも `isize::MAX` バイトのみを検査し、本関数の従来実装と同じ
+/// 弱点を持つ〉、本モジュール独自に新設する。`isize::MAX`（64bit では
+/// 約 8 EiB）は `Vec` の allocation 契約上の上限でしかなく、実際に確保
+/// 可能かどうかとは無関係のため、`checked_mul` の overflow 検査だけでは
+/// shape `[1]` に `repeats=[1_000_000_000]`（4GB）のような実用上確保
+/// 不能なサイズを検査（本モジュール doc「境界検査」節）で拒否できない
+/// （`collect()` が実際に確保を試み、失敗すれば `handle_alloc_error` で
+/// プロセスが abort し得る）。1 GiB を暫定値として採用する——将来
+/// 正当な理由があれば見直してよい（ユーザー承認不要。ガードレール閾値・
+/// テスト許容誤差〈`.claude/rules/security.md`〉には該当しない）。
+const MAX_INDEX_ALLOC_BYTES: usize = 1 << 30;
+
 /// 添字ベクタ `Vec<i32>`（長さ `len`）を確保する前のサイズ検査
 /// （`crate::bool_ops::checked_bytes_for` と同型の独立複製。同じ理由
 /// による複製——モジュールをまたいで `pub(crate)` 化するほどの共有価値
 /// がなく、検査対象の型が固定〈`i32`〉のため専用化した）。要素数積の
-/// `usize` オーバーフローに加え、`Vec` の allocation 上限（`isize::MAX`
-/// バイト）に収まるかも検査する。
+/// `usize` オーバーフローに加え、[`MAX_INDEX_ALLOC_BYTES`]（実用上の
+/// 確保上限）に収まるかも検査する。`repeat`／`tile` の巨大 `repeats`
+/// だけでなく `flip`／`roll` も `broadcast_to` の stride-0 view（`n` が
+/// 実体を伴わず巨大になりうる）経由で同じ添字巨大化を起こせるため、
+/// 呼び出し元を問わずこの関数を唯一の確保前チェックポイントとする。
 fn checked_index_alloc_len(len: usize) -> Result<(), AutodiffError> {
     let bytes = len
         .checked_mul(std::mem::size_of::<i32>())
         .ok_or(ShapeError::ElementCountOverflow)
         .map_err(AutodiffError::Shape)?;
-    if bytes > isize::MAX as usize {
+    if bytes > MAX_INDEX_ALLOC_BYTES {
         return Err(AutodiffError::Shape(ShapeError::ElementCountOverflow));
     }
     Ok(())
@@ -679,6 +705,45 @@ mod tests {
         let tape = Tape::new();
         let x = tape.var(&t(vec![1.0; 2], &[2]));
         let err = repeat(&x, &[usize::MAX]).expect_err("巨大な repeats は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    // --- エラー系: 実用上確保不能なサイズ（`MAX_INDEX_ALLOC_BYTES`。
+    // codex-review 指摘・PR #2256）。isize::MAX には収まる（overflow
+    // しない）が実運用では確保不能な規模を、accept 側の実確保を伴わず
+    // 確保前に拒否できることを検証する。accept 側（上限未満での成功）
+    // は数百 MB 規模の確保を CI で走らせることになるため意図的に
+    // テストしない（`crates/backend-cpu/src/ops.rs:2659` の 2 GiB 級
+    // 境界テスト省略と同じ判断）。
+    #[test]
+    fn repeat_rejects_practically_unallocatable_size_without_panicking() {
+        let tape = Tape::new();
+        // shape [1] に repeats=[1_000_000_000] は 4GB（i32 換算）の
+        // 添字ベクタになり、`usize` 積としては overflow しないため
+        // `isize::MAX` 検査のみでは通過してしまっていた（codex-review
+        // 指摘の再現ケースそのもの）。
+        let x = tape.var(&t(vec![1.0], &[1]));
+        let err = repeat(&x, &[1_000_000_000])
+            .expect_err("実用上確保不能な repeats は確保前に拒否されるはず");
+        assert!(matches!(
+            err,
+            AutodiffError::Shape(ShapeError::ElementCountOverflow)
+        ));
+    }
+
+    #[test]
+    fn flip_on_broadcast_view_rejects_practically_unallocatable_size() {
+        let tape = Tape::new();
+        // `broadcast_to` は stride-0 view のため、実体を伴わずに軸長を
+        // 巨大化できる（レビュー指摘の一般化: `repeat`／`tile` の
+        // `repeats` に限らず `flip`／`roll` も同じ `checked_index_
+        // alloc_len` を通るため同じ上限で拒否される）。
+        let x = tape.var(&t(vec![1.0], &[1]));
+        let big = x.broadcast_to(&[1_000_000_000]).unwrap();
+        let err = flip(&big, &[0]).expect_err("broadcast 由来の巨大軸長も確保前に拒否されるはず");
         assert!(matches!(
             err,
             AutodiffError::Shape(ShapeError::ElementCountOverflow)

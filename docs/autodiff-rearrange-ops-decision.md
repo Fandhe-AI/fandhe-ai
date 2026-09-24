@@ -76,9 +76,18 @@ workspace インベントリ（4 テスト）で多層固定している。
 
 **境界検査（REQ-8・`.claude/rules/security.md` A03）**: 軸長・添字値は
 `i32` 範囲内であることを事前検査する（`checked_axis_len_as_i32`）。
-添字ベクタの確保は `checked_mul` によるオーバーフロー検査・`Vec`
-allocation 上限検査（`checked_index_alloc_len`）を確保前に必ず通す
-（`crate::bool_ops::checked_bytes_for` と同型の独立複製）。
+添字ベクタの確保は `checked_mul` によるオーバーフロー検査・確保前
+サイズ検査（`checked_index_alloc_len`）を確保前に必ず通す
+（`crate::bool_ops::checked_bytes_for` と同型の独立複製）。当初は
+`Vec` allocation 契約上の上限（`isize::MAX` バイト）のみを検査して
+いたが、これは技術的にオーバーフローしない範囲の巨大値（例: shape
+`[1]` に `repeats=[1_000_000_000]` で 4GB）を拒否できず、実確保の
+失敗による abort を招きうる指摘（codex-review・PR #2256）を受け、
+実用上の確保バイト数上限 `MAX_INDEX_ALLOC_BYTES`（1 GiB）による検査
+へ強化した。`flip`／`roll`／`repeat`／`tile` いずれも同じ
+`checked_index_alloc_len` を確保前チェックポイントとして通るため、
+`broadcast_to` の stride-0 view 経由で軸長が巨大化するケース（`flip`／
+`roll`）も含め一律にこの上限が適用される。
 
 ### §2.3 CPU 参照実装（`backend-cpu/src/ops.rs`）は追加しない
 
