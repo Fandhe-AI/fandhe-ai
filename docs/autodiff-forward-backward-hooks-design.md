@@ -248,8 +248,9 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
 - `Var::detach` は新しい葉ノードを作る（§2）。hook はノード単位なので、**detach 後のノードへ hook は
   引き継がれない**。元の `Var` に付けた hook は無効にならず、他の経路から勾配が届けば発火する。
 - `requires_grad == false` のノード（detach・`var_no_grad`・`Module::freeze` 後に bind した葉）への
-  backward hook 登録は、fail-closed で `Err(GradientTrackingDisabled)`（新規 variant 案。`#[non_exhaustive]`
-  により追加は非破壊）にする（PyTorch も同様に拒否する）。
+  backward hook 登録は、fail-closed で `Err(GradientTrackingDisabled)`（`crates/autodiff/src/error.rs`
+  に既存の variant〈`Gradients::get` の「構造的に勾配を持ちえない」判定と同じ意味論〉を再利用する。
+  新規 variant の追加ではない）にする（PyTorch も同様に拒否する）。
 - `Op::ResidentLeaf` の勾配はデバイスストアへ書かれ、`grads` 配列を通らない。このため登録は
   fail-closed で `Err` にする。
 
@@ -361,3 +362,152 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
 - `docs/compat-api-scope.md` §5 経路 2（facade 公開の承認プロセス）
 - `docs/facade-nn-module-exposure-decision.md`（`nn::Module` 未公開の経緯）
 - `.claude/rules/coding-rust.md`（REQ-2 複合判定・FMA 契約・f64 長軸縮約契約）
+
+## 13. 実装保留記録（イシュー #2139）
+
+### 13.1 承認状態の確認結果
+
+イシュー #2139「forward・backward hooks 実装」の実装着手時（2026-09-24・
+`origin/main` HEAD `edddfa44`）に、`gh issue view 2139 --comments`・
+`gh issue view 2138 --comments`（本 doc の対応 issue）・`gh issue view 2131
+--comments`（親 issue）・`gh pr view 2238 --comments`（本 doc を追加した PR）
+を確認したところ、いずれもコメント 0 件、または github-actions（codex-review）
+による自動レビューコメントのみだった。issue が起票されていること・本 doc が
+マージされていること自体は §11 の承認事項 1〜5 のいずれの承認にもならない
+（前例: #2063「facade: 高階微分 API の公開面追加」・#2064「facade: custom
+autograd Function の公開面追加」・#2133「facade: `nn::Module` trait・
+`ModuleList` の facade 公開実装」・#2136「facade: `Var` 演算子オーバーロード
+の公開面追加」も同様に未承認のまま保留し、それぞれ PR #2208・#2212・#2233・
+#2247 で facade／autodiff src を一切変更せず否定ガード＋保留記録 doc のみを
+マージした。同 doc `docs/autodiff-higher-order-grad-decision.md` §15・
+`docs/autodiff-custom-function-decision.md` §15・`docs/facade-nn-module-
+exposure-decision.md` §12・`docs/autodiff-var-operator-overload-design.md`
+§14 と本節は同型）。
+
+### 13.2 保留の根拠
+
+- `docs/compat-api-scope.md` §5 の #2138 段落（PR #2238 で codex-review の
+  「承認フローを迂回し得る記述」という指摘を受けて追記済み）に、facade
+  公開を伴わない内部クレート `autodiff` 側の実装であっても、本 doc §11 の
+  承認事項 5 項目がそろうまで #2139 は着手できない旨が明記されている。この
+  ため、「autodiff 側だけ先に実装して facade 公開は後にする」という分割も
+  取れない
+- イシュー本文と本 doc とで、作るべき API が食い違っている。イシュー本文は
+  `Var::register_forward_hook`／`Var::register_backward_hook`（`Fn(&Var)`）を
+  前提にしているが、本 doc §5・§7 は `Tape::register_backward_hook`（
+  `Fn(&Tensor<f32>) -> Result<(), AutodiffError> + Send + Sync + 'static`）と
+  Module ラッパー `nn::ForwardHooked<M>` を推奨している。どちらかを実装
+  すると、人間が判断すべき承認事項 4（#2139 の受入基準の改訂）を先取り
+  することになる
+- `.claude/rules/security.md`（A08 ソフトウェア・データ整合性。自己修復
+  ループが取り込む変更はガードレール判定を必ず経由し、迂回経路を作らない）
+  ・`.claude/rules/out-of-scope-tracking.md`（ユーザー承認なしに勝手に判断
+  を先取りしない）に基づき、自動運転モード（人間への質問・承認待ちが
+  できない）では安全側（実装しない）に倒す
+
+### 13.3 追加したガード
+
+本体実装（`crates/autodiff/src/**`）・facade 公開面（`crates/facade/src/**`
+本番コード）はいずれも変更していない。追加したのは次の 4 層のみ:
+
+1. **doctest 正のプローブ**（`crates/facade/src/lib.rs::
+   VarHooksHoldDoctestGuard`。`VarCustomHoldDoctestGuard`／
+   `NnModuleHoldDoctestGuard`／`VarBoolOpsHoldDoctestGuard` と同型）:
+   facade の全 `pub mod` を glob import したスコープに、(a) ローカル型
+   （`__fandhe_hooks_hold_probe::{HookHandle, ForwardHooked,
+   ForwardHookCtx}`）とモジュール（`hooks`）を導入し実際に使う関数を書く
+   型・モジュール名の衝突プローブ（`NnModuleHoldDoctestGuard` 方式）、
+   (b) `register_forward_hook`／`register_backward_hook`／`register_hook`／
+   `remove_hook`／`remove_backward_hook` の 5 メソッドをトレイト
+   （`__FandheHooksHoldProbe`）として `Var`／`Tape`／`compat::Sequential`
+   に実装し UFCS 形・メソッド呼び出し形の両方で呼ぶメソッド名の衝突
+   プローブ（`VarBoolOpsHoldDoctestGuard` 方式）を併用する
+2. **本文とドリフトの固定**（`crates/facade/tests/api_surface.rs::
+   hooks_hold_doctest_globs_all_pub_modules`・`hooks_hold_doctest_probe_
+   body_matches_fixed_contract`・定数 `HOOKS_HOLD_PROBE_BODY`）: doctest が
+   glob import する `pub mod` 集合と `src/lib.rs` の実宣言集合の一致、
+   および glob 以外の本文が固定文言と 1 行単位で完全一致することを固定
+   する（`# ` の隠し行・プローブの削除・シャドーイングによる骨抜きを
+   拒否する）
+3. **workspace 全体の定義元インベントリ**（`crates/facade/tests/
+   api_surface.rs::workspace_declares_no_hook_registration_fns`）:
+   `crates/*/src/` を再帰走査し、`register_forward_hook`／
+   `register_backward_hook`／`remove_hook`／`remove_backward_hook`（定数
+   `HOOK_REGISTRATION_FN_NAMES`。4 関数名。`remove_backward_hook` は
+   codex-review 指摘・PR #2254・discussion_r4096585898 を受けて追加）の
+   `fn` 宣言が workspace 全体で 0 件であることを固定する。`register_hook`
+   はあえてこの配列から外した（並行する #2182 の DataLoader transform
+   フック等、正当な用途で使われうる汎用名のため）。検出器
+   （`count_fn_declarations_by_name`）が対象 4 関数名を実際に検出できる
+   ことは合成入力の自己テスト
+   `count_fn_declarations_by_name_detects_hook_registration_fn_names` で
+   固定した
+4. **`crates/autodiff/src/` 限定の `register_hook` 否定ガード**（
+   `crates/facade/tests/api_surface.rs::
+   autodiff_declares_no_register_hook_fn`。codex-review 指摘・PR #2254・
+   discussion_r4096728116）: （3）が `register_hook` を workspace 全体
+   走査の対象から一律除外しているため、facade を経由しない autodiff 側の
+   本体実装（`fandhe_ai_autodiff::Tape::register_hook` 等）は doctest 正の
+   プローブ（1）にも（3）にも捕捉されない穴が生じる。`Var`／`Tape`／
+   `nn::Sequential`（実装候補の型）はいずれも `crates/autodiff/src/` 配下
+   に定義されているため、このクレート限定で `register_hook` の `fn` 宣言
+   0 件を別途固定し、この穴を塞ぐ（`crates/autodiff` の外・たとえば #2182
+   の DataLoader transform フックでの同名関数の使用は許容したまま）。
+   検出器が `register_hook` を実際に検出できることは合成入力の自己テスト
+   `count_fn_declarations_by_name_detects_register_hook` で固定した
+
+facade の `Tape`（`pub struct Tape(pub(crate) fandhe_ai_autodiff::Tape)`。
+`crate::lib.rs`）は `Deref` を持たない newtype のため、doctest プローブ
+（1）が検出できるのは facade 側に追加されたメソッドのみである。autodiff
+側の `Tape` に追加された定義は（3）（`register_hook` を除く 4 関数名）と
+（4）（`register_hook` 限定・`crates/autodiff/src/` スコープ）の 2 つの
+走査が分担して捕捉する。
+
+**合成注入による確認結果**（コミットには含めない。一時的な変更で確認後に
+元へ戻した。`git diff crates/autodiff` が空であることを確認済み）:
+
+- `crates/autodiff/src/var.rs::Var::from_raw` の直後に一時的に
+  `pub fn register_backward_hook(&self) {}` を追加すると、facade の `Var`
+  再エクスポート経由で doctest（`fandhe_ai::Var::register_backward_hook`
+  が `__FandheHooksMarker` ではなく `()` を返す型不一致・E0308）と
+  `workspace_declares_no_hook_registration_fns`（`autodiff/src/
+  var.rs::register_backward_hook` を検出）の両方が fail することを確認した
+- `crates/facade/src/lib.rs` の `pub struct Tape(...)` の直後に一時的に
+  `pub struct HookHandle;` を追加すると、doctest がローカル
+  `__fandhe_hooks_hold_probe::HookHandle` との glob 衝突（E0659・ambiguous
+  name）で fail することを確認した
+- `crates/facade/src/lib.rs` の facade `impl Tape` に一時的に
+  `pub fn remove_hook(&self) {}` を追加すると、doctest が
+  `fandhe_ai::Tape::remove_hook` の型不一致（E0308）で fail することを
+  確認した
+
+**既知の限界**: `workspace_declares_no_hook_registration_fns` はソース
+走査ベースのため、`cfg(target_os = "macos")` 等でコンパイル対象外の
+コードに新設された同名関数は Linux CI 上のテキスト走査では検出できない
+（`crates/*/src/` の `.rs` ファイルを対象にトークン走査するため、cfg 自体
+は無視して検出する。これは走査対象の cfg を評価しない設計であり、むしろ
+「cfg 分岐先に隠して混入させる」経路を fail-closed に塞ぐ側に働く）。
+
+### 13.4 承認取得後に実施する変更範囲
+
+§11 の承認事項 5 項目（設計案・`CustomFunction` との役割分担・callback
+lifetime とエラー伝播・#2139 の受入基準改訂・facade 公開〈経路 2〉）が
+すべて承認された後、次を実施する（詳細仕様は §5・§7・§8 を正とする）:
+
+- `crates/autodiff/src/tape.rs`: `hooks: RefCell<HookRegistry>` の追加・
+  `Tape::register_backward_hook`／`Tape::remove_hook` の実装・`reset` での
+  hook 消去
+- `crates/autodiff/src/backward.rs::backward_impl`: `grads[id]` 確定直後・
+  `grad::vjp` 呼び出し前の hook 呼び出し（登録順・最初の `Err` で打ち切り）
+- `crates/autodiff/src/error.rs`: `GradientTrackingDisabled`（既存 variant。
+  §5.6 参照）を fail-closed の backward hook 登録拒否経路で再利用する
+  （新規 variant の追加は不要）
+- `crates/autodiff/src/nn/`: `ForwardHooked<M: Module>`・`ForwardHookCtx`
+  の追加
+- `crates/autodiff/tests/hooks.rs`（新規）: §8 のテスト候補の実装
+- facade: 承認された項目に限り、本節のガードのうち該当部分を撤去し正
+  ガード（facade 経由で到達できること）へ置き換える。承認されていない
+  項目の否定ガードは残す
+
+本 PR のマージで #2139 を一旦閉じ、承認後は新規イシューまたは reopen で
+実装する運用とする（前例: #2064・#2133 と同型）。
