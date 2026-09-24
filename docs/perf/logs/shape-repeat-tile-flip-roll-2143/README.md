@@ -5,7 +5,14 @@
 `fandhe_ai_autodiff::rearrange_ops`（`repeat`／`tile`／`flip`／`roll`）の
 `crates/facade/tests/rearrange_ops_backend_parity.rs` のうち CUDA
 （`Device::Cuda(0)`）・Metal（`Device::Metal`。`cfg(target_os = "macos")`
-限定）を対象とする 2 テストは `#[ignore]` のまま未実測である。
+限定）を対象とする 4 テスト（`flip` forward の
+`cuda_forward_matches_cpu_reference`／`metal_forward_matches_cpu_reference`
+に加え、`repeat`／`tile` backward の
+`cuda_repeat_tile_backward_matches_cpu_reference`／
+`metal_repeat_tile_backward_matches_cpu_reference`。後者 2 つはイシュー
+#2143 レビュー指摘を受けて追加し、下記「期待結果」節が要求する
+`repeat`／`tile` backward の実機カバレッジを満たす）は `#[ignore]` の
+まま未実測である。
 
 ## 測定コマンド案
 
@@ -20,7 +27,7 @@ cargo test -p fandhe-ai --test rearrange_ops_backend_parity -- --ignored --nocap
 CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト
 （`cpu_forward_matches_naive_reference`・`cpu_forward_preserves_nan_bits`・
 `cpu_flip_roll_backward_bit_matches_naive_reference`・
-`cpu_repeat_backward_matches_naive_reference_within_tolerance`）で既に
+`cpu_repeat_tile_backward_matches_naive_reference_within_tolerance`）で既に
 検証済み（green）。
 
 ## 期待結果
@@ -34,8 +41,10 @@ GPU の scatter 加算順序次第では厳密な bit 一致にならない可�
 ——その場合は REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差
 1e-5 未満。`fandhe_ai_backend_cpu::parity::assert_parity`）で比較する
 （`crates/facade/tests/rearrange_ops_backend_parity.rs` の
-`cpu_repeat_backward_matches_naive_reference_within_tolerance` と同じ
-判定方式を CUDA／Metal にも適用する）。
+`cpu_repeat_tile_backward_matches_naive_reference_within_tolerance` と
+同じ判定方式を `cuda_repeat_tile_backward_matches_cpu_reference`／
+`metal_repeat_tile_backward_matches_cpu_reference` として CUDA／Metal
+にも適用する）。
 
 この前提が崩れる場合（`gather` の実装が変わった、デバイス間で想定外の
 丸めが混入した等）は本 README の「期待結果」を更新し、想定した契約を

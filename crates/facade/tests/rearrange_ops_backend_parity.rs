@@ -17,10 +17,15 @@
 //!   判定）で比較する。
 //! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
 //!   "macos")` 限定）／`tape_for(Device::Cuda(0))` で同じ経路を CPU
-//!   tape と比較する。実機（DGX Spark GB10／Apple Silicon）への到達
-//!   手段が本エージェント実行環境にないため未実施のまま Mac／GB10
-//!   セッションへ申し送る（`docs/perf/logs/shape-repeat-tile-flip-roll-2143/
-//!   README.md`）。
+//!   tape と比較する。forward（`flip`）に加え、backward の scatter-add
+//!   合算順序が GPU 側で自明でない `repeat`／`tile` backward
+//!   （`fandhe_ai_backend_cpu::parity::assert_parity` 比較。README の
+//!   「期待結果」節と対応）も対象に含む（イシュー #2143 レビュー指摘。
+//!   `cpu_repeat_tile_backward_matches_naive_reference_within_tolerance`
+//!   が CPU 側の同型カバレッジ）。実機（DGX Spark GB10／Apple Silicon）
+//!   への到達手段が本エージェント実行環境にないため未実施のまま
+//!   Mac／GB10 セッションへ申し送る
+//!   （`docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md`）。
 
 use fandhe_ai::Device;
 use fandhe_ai_autodiff::Var;
@@ -134,8 +139,13 @@ fn cpu_flip_roll_backward_bit_matches_naive_reference() {
 /// `repeat`／`tile` の backward は `r` 個のコピーの勾配を合算する
 /// （scatter-add）。CPU と NaiveOps はいずれもホスト参照実装
 /// （`.claude/rules/coding-rust.md` REQ-2 統一複合判定）で比較する。
+/// `tile` も `repeat` と同じ scatter-add 構造のため同一テストで
+/// 突き合わせる（イシュー #2143 レビュー指摘: 実機側 `#[ignore]`
+/// テスト（`cuda_repeat_tile_backward_matches_cpu_reference`／
+/// `metal_repeat_tile_backward_matches_cpu_reference`）と対称の
+/// カバレッジを CPU 側にも持たせる）。
 #[test]
-fn cpu_repeat_backward_matches_naive_reference_within_tolerance() {
+fn cpu_repeat_tile_backward_matches_naive_reference_within_tolerance() {
     let data = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
     let weight = Tensor::new(vec![1.0, 0.5, -0.25, 2.0, 0.1, -1.0, 3.0, -2.0, 0.7], &[9]).unwrap();
 
@@ -157,6 +167,32 @@ fn cpu_repeat_backward_matches_naive_reference_within_tolerance() {
 
     fandhe_ai_backend_cpu::parity::assert_parity(
         "repeat backward: cpu vs naive",
+        dx_cpu.host_slice().as_ref(),
+        dx_naive.host_slice().as_ref(),
+    );
+
+    let tile_data = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+    let tile_weight =
+        Tensor::new(vec![1.0, 0.5, -0.25, 2.0, 0.1, -1.0, 3.0, -2.0, 0.7], &[9]).unwrap();
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&tile_data);
+    let w_cpu = cpu_tape.make_var(&tile_weight);
+    let y_cpu = tile(&x_cpu, &[3]).unwrap();
+    let loss_cpu = y_cpu.mul(&w_cpu).unwrap().sum(None).unwrap();
+    let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+    let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap().clone();
+
+    let naive_tape = fandhe_ai_autodiff::Tape::new();
+    let x_naive = naive_tape.make_var(&tile_data);
+    let w_naive = naive_tape.make_var(&tile_weight);
+    let y_naive = tile(&x_naive, &[3]).unwrap();
+    let loss_naive = y_naive.mul(&w_naive).unwrap().sum(None).unwrap();
+    let grads_naive = naive_tape.backward(&loss_naive).unwrap();
+    let dx_naive = grads_naive.get(&x_naive).unwrap().unwrap().clone();
+
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "tile backward: cpu vs naive",
         dx_cpu.host_slice().as_ref(),
         dx_naive.host_slice().as_ref(),
     );
@@ -197,5 +233,185 @@ fn cuda_forward_matches_cpu_reference() {
     assert_eq!(
         f32_bits(&flip(&x_cpu, &[0, 1]).unwrap().to_tensor()),
         f32_bits(&flip(&x_cuda, &[0, 1]).unwrap().to_tensor())
+    );
+}
+
+/// `repeat`／`tile` backward（scatter-add）の CPU／実機比較。README
+/// 「期待結果」節が明記する「GPU の scatter 加算順序次第では厳密な bit
+/// 一致にならない可能性があるため REQ-2 統一複合判定で比較する」を
+/// 実測する手段（イシュー #2143 レビュー指摘: 従来の `#[ignore]` テスト
+/// は `flip` の forward のみで repeat／tile backward の実機カバレッジが
+/// 存在しなかった）。CPU 側の同型カバレッジは
+/// `cpu_repeat_tile_backward_matches_naive_reference_within_tolerance`。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照"]
+fn metal_repeat_tile_backward_matches_cpu_reference() {
+    let data = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+    let weight = Tensor::new(vec![1.0, 0.5, -0.25, 2.0, 0.1, -1.0, 3.0, -2.0, 0.7], &[9]).unwrap();
+    let metal_tape =
+        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let w_cpu = cpu_tape.make_var(&weight);
+    let dx_cpu = cpu_tape
+        .backward(
+            &repeat(&x_cpu, &[3])
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap(),
+        )
+        .unwrap()
+        .get(&x_cpu)
+        .unwrap()
+        .unwrap()
+        .clone();
+    let x_metal = metal_tape.make_var(&data);
+    let w_metal = metal_tape.make_var(&weight);
+    let dx_metal = metal_tape
+        .backward(
+            &repeat(&x_metal, &[3])
+                .unwrap()
+                .mul(&w_metal)
+                .unwrap()
+                .sum(None)
+                .unwrap(),
+        )
+        .unwrap()
+        .get(&x_metal)
+        .unwrap()
+        .unwrap()
+        .clone();
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "repeat backward: cpu vs metal",
+        dx_cpu.host_slice().as_ref(),
+        dx_metal.host_slice().as_ref(),
+    );
+
+    let x_cpu = cpu_tape.make_var(&data);
+    let w_cpu = cpu_tape.make_var(&weight);
+    let dx_cpu = cpu_tape
+        .backward(
+            &tile(&x_cpu, &[3])
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap(),
+        )
+        .unwrap()
+        .get(&x_cpu)
+        .unwrap()
+        .unwrap()
+        .clone();
+    let x_metal = metal_tape.make_var(&data);
+    let w_metal = metal_tape.make_var(&weight);
+    let dx_metal = metal_tape
+        .backward(
+            &tile(&x_metal, &[3])
+                .unwrap()
+                .mul(&w_metal)
+                .unwrap()
+                .sum(None)
+                .unwrap(),
+        )
+        .unwrap()
+        .get(&x_metal)
+        .unwrap()
+        .unwrap()
+        .clone();
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "tile backward: cpu vs metal",
+        dx_cpu.host_slice().as_ref(),
+        dx_metal.host_slice().as_ref(),
+    );
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照"]
+fn cuda_repeat_tile_backward_matches_cpu_reference() {
+    let data = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+    let weight = Tensor::new(vec![1.0, 0.5, -0.25, 2.0, 0.1, -1.0, 3.0, -2.0, 0.7], &[9]).unwrap();
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let w_cpu = cpu_tape.make_var(&weight);
+    let dx_cpu = cpu_tape
+        .backward(
+            &repeat(&x_cpu, &[3])
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap(),
+        )
+        .unwrap()
+        .get(&x_cpu)
+        .unwrap()
+        .unwrap()
+        .clone();
+    let x_cuda = cuda_tape.make_var(&data);
+    let w_cuda = cuda_tape.make_var(&weight);
+    let dx_cuda = cuda_tape
+        .backward(
+            &repeat(&x_cuda, &[3])
+                .unwrap()
+                .mul(&w_cuda)
+                .unwrap()
+                .sum(None)
+                .unwrap(),
+        )
+        .unwrap()
+        .get(&x_cuda)
+        .unwrap()
+        .unwrap()
+        .clone();
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "repeat backward: cpu vs cuda",
+        dx_cpu.host_slice().as_ref(),
+        dx_cuda.host_slice().as_ref(),
+    );
+
+    let x_cpu = cpu_tape.make_var(&data);
+    let w_cpu = cpu_tape.make_var(&weight);
+    let dx_cpu = cpu_tape
+        .backward(
+            &tile(&x_cpu, &[3])
+                .unwrap()
+                .mul(&w_cpu)
+                .unwrap()
+                .sum(None)
+                .unwrap(),
+        )
+        .unwrap()
+        .get(&x_cpu)
+        .unwrap()
+        .unwrap()
+        .clone();
+    let x_cuda = cuda_tape.make_var(&data);
+    let w_cuda = cuda_tape.make_var(&weight);
+    let dx_cuda = cuda_tape
+        .backward(
+            &tile(&x_cuda, &[3])
+                .unwrap()
+                .mul(&w_cuda)
+                .unwrap()
+                .sum(None)
+                .unwrap(),
+        )
+        .unwrap()
+        .get(&x_cuda)
+        .unwrap()
+        .unwrap()
+        .clone();
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "tile backward: cpu vs cuda",
+        dx_cpu.host_slice().as_ref(),
+        dx_cuda.host_slice().as_ref(),
     );
 }
