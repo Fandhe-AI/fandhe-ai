@@ -11,8 +11,9 @@ PyTorch 互換の形状演算 4 種（`repeat`／`tile`／`flip`／`roll`）を�
 として実装した（案 C。§3 参照。`bool_ops`〈#2141〉と同じ判断枠組み）。
 `Var` に inherent の `pub fn` は追加していない。新規 `Op`・
 `BackendOps` メソッド・VJP・tape ノードは追加していない——いずれも
-既存の `Var::index_select`（実体は `Var::gather` → `Op::Gather`）と
-`Var::broadcast_to`（`Op::BroadcastTo`）の合成のみで構成した。facade
+既存の `Var::index_select`（実体は `Var::gather` → `Op::Gather`）・
+`Var::broadcast_to`（`Op::BroadcastTo`）・`Var::reshape`（`Op::Reshape`。
+`repeat` の空テンソル最終化のみで使用。§8 参照）の合成のみで構成した。facade
 公開（`Var` への委譲メソッド追加）は承認待ちのまま対象外とし、
 `crates/facade/src/lib.rs::VarRearrangeOpsHoldDoctestGuard`（正の
 プローブ doctest）と `crates/facade/tests/api_surface.rs` のソース走査・

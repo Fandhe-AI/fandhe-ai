@@ -35,8 +35,8 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト
 
 ## 期待結果
 
-forward（`index_select`／`broadcast_to` の合成。いずれも値のコピーのみ
-で算術を含まない）は CPU・CUDA・Metal 間で構造的に bit 完全一致する
+forward（`index_select`／`broadcast_to` と、`repeat` の空テンソル最終化
+のみで使う `reshape` の合成。いずれも値のコピーのみで算術を含まない）は CPU・CUDA・Metal 間で構造的に bit 完全一致する
 はず（`NaN` の payload も含む）。backward（`Op::Gather` の VJP による
 scatter-add）は `flip`／`roll` が各入力要素への寄与 1 つのため bit 一致
 するはずだが、`repeat`／`tile` は `r` 個のコピーの勾配を合算するため
