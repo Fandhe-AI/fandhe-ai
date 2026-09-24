@@ -907,6 +907,17 @@ facade-nn-init-exposure-decision.md` §1）、本イシューの実体は「auto
 facade/src/nn/init.rs` の新設）は §5 経路 2 の承認取得まで実施していない。
 詳細は `docs/facade-nn-init-exposure-decision.md`。
 
+**#2136（`Var` 演算子オーバーロード実装。`Add`／`Mul`／`Sub`）は経路 2 未適用の
+まま承認待ちで保留した。** `crates/autodiff/src/**`・`crates/facade/src/**`
+は変更しない（コード変更なし）。#2136・#2135・親 #2131・設計記録 PR #2237 の
+いずれにも所有者の明示承認コメントが確認できなかった（bot の自動レビューの
+み）。代わりに `crates/facade/tests/api_surface.rs` へ型レベルの正のプローブ
+（`var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold`。
+`static_assertions::assert_not_impl_any!` と同型の曖昧性トリックを手書き）を
+1 件追加し、`Var`／`&Var` が算術演算子トレイトを実装していないことを
+fail-closed に固定した。詳細は
+`docs/autodiff-var-operator-overload-design.md` §14。
+
 ## 6. 出典一覧
 
 | 出典 | 内容 |

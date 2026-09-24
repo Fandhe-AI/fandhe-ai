@@ -1,6 +1,6 @@
 # リモートモデル取得（URL ダウンロード）の設計記録（#2088）
 
-イシュー #2088「feat(facade): リモートモデル取得（URL ダウンロード）の実装（依存追加の承認後）」に対応する。親: #2082（`docs/model-distribution-design.md`）。兄弟: #2087（`crates/facade/src/model.rs`・`ModelRegistry`・`ModelError`）。
+イシュー #2088「feat(facade): リモートモデル取得（URL ダウンロード）の実装（依存追加の承認後）」に対応する。親: #2082（`docs/model-distribution-design.md`。本 doc 作成後に作成済み）。兄弟: #2087（`crates/facade/src/model.rs`・`ModelRegistry`・`ModelError`。マージ済み）。
 
 本ドキュメントは**コード変更を伴わない設計記録**を成果物とする。`Cargo.toml`／`Cargo.lock`／`deny.toml`／`docs/license-matrix.md`／`docs/spec/`（正本 submodule）・`crates/**` はいずれも変更しない。
 
@@ -10,7 +10,9 @@
 
 ## 1. 背景
 
-対応する他フレームワーク機能: `huggingface_hub.hf_hub_download`／`torch.hub.load_state_dict_from_url` 相当。親 #2082 は学習済み重みの配布方式（ローカルレジストリ・リモート取得・HF hub 連携）の設計記録を、兄弟 #2087 は `~/.fandhe-ai/models/<name>/<version>/model.safetensors` レイアウトのローカルレジストリ実装を担う。本 #2088 はその「リモート取得」部分で、HTTP(S) URL・HuggingFace hub から safetensors をダウンロードしてローカルレジストリへキャッシュする機構が対象である。
+対応する他フレームワーク機能: `torch.hub.load_state_dict_from_url`・`tf.keras.utils.get_file` 相当（汎用 URL ダウンロード＋キャッシュ＋ハッシュ検証）。親 #2082 は学習済み重みの配布方式（ローカルレジストリ・リモート取得・HF hub 連携）の設計記録を、兄弟 #2087 は `~/.fandhe-ai/models/<name>/<version>/model.safetensors` レイアウトのローカルレジストリ実装を担う。本 #2088 はその「リモート取得」部分で、**HTTPS URL から safetensors をダウンロードしてローカルレジストリへキャッシュする汎用機構のみ**が対象である（`http`・`file`・`ftp` 等は §6 のとおり拒否。2026-09-24 追記で表記を「HTTP(S)」から「HTTPS」へ統一。詳細は本節末尾の追記参照）。
+
+**2026-09-24 追記（HF hub 連携の分離。ユーザー決定「他ライブラリと同じにする」）**: PyTorch（`torch.hub` はコア／HF 連携は別パッケージ `huggingface_hub`）・TensorFlow-Keras（`tf.keras.utils.get_file` はコア／`tensorflow_hub`・Keras 3 の `hf://` は別パッケージ）と同型に、HuggingFace hub 固有の処理（リポジトリ ID → URL 変換・`resolve` 形式・`ETag`／`X-Linked-Etag`・CDN リダイレクト等）は facade（本 #2088）のスコープに含めない。別クレートとして #2243（#2244〜#2246 に分解済み）で扱う（詳細は `docs/model-distribution-design.md` §5）。本追記より前の本文（§5・§8・§9・§10 の該当箇所）は HF hub を対象に含む記述だったため、本追記に合わせて汎用ダウンロードのみを対象とする記述へ更新した。§2 の実測事実・§11 の前方参照記録は当時の記録のまま変更していない。
 
 「承認未取得時」系統を採用した理由: 本セッションは自動運転モード（ユーザーへの質問・承認待ちが不可）で起動されており、依存追加は `.claude/rules/deps-policy.md`・CLAUDE.md Conventions により必ずユーザー承認を要する事項のため、この場では確定できない。
 
@@ -23,7 +25,7 @@
 | facade の safetensors 公開面（`load_safetensors_f32`／`load_safetensors_f32_from_bytes`／`require_keys`／`save_safetensors_f32`）は `onnx-interop::st_load`／`st_save` の純再エクスポートとして確定済み。REQ-7 契約（暗黙アダプタなし・無言 skip 禁止・F32 限定・決定的出力・一時ファイル + rename）を持つ | `crates/facade/src/interop/safetensors.rs:1-45`・`docs/facade-safetensors-exposure-decision.md` §11 |
 | `crates/facade/tests/api_surface.rs` は facade の公開面・onnx-interop への依存形状（`path = "../onnx-interop"` 承認済み形状のみ）を機械的に固定する。新規 public 型・関数の追加は同テストへの到達性テスト追加とユーザー承認が前提 | `crates/facade/tests/api_surface.rs:974-1304` |
 | `std` のみで実現できる範囲: `std::net::TcpStream` による平文 HTTP は可能だが、HF hub・実用上のモデル配布元は HTTPS 前提のため TLS なしでは要件を満たせない（依存追加が不可避である根拠） | `std::net` API 仕様（外部一般知識） |
-| 親 #2082（`docs/model-distribution-design.md`）・兄弟 #2087（`crates/facade/src/model.rs`）は基準コミット時点で未マージ・PR 未作成 | 本 PR 作成時点の `find`／`git ls-remote`／`gh pr list` 実測（2026-09-23。§4） |
+| 親 #2082（`docs/model-distribution-design.md`）・兄弟 #2087（`crates/facade/src/model.rs`）は基準コミット時点で未マージ・PR 未作成（いずれも本 doc 作成後に作成・マージ済み。§11 追記参照） | 本 PR 作成時点の `find`／`git ls-remote`／`gh pr list` 実測（2026-09-23。§4） |
 
 ## 3. HTTP クライアント候補の比較
 
@@ -58,17 +60,22 @@
 
 ## 5. 技術仕様案（承認後にそのまま実装できる粒度）
 
-- **公開 API**: `ModelRegistry::download(&self, url: &str, name: &str, version: &str) -> Result<(), ModelError>`（イシュー指定シグネチャ）。`&self` か関連関数かは兄弟 #2087 が確定する `ModelRegistry` の形状に追従する。
-- **`ModelError` 拡張方針**: #2087 が定義する想定の `#[non_exhaustive]` enum へ追加バリアント（`Http { status: u16, url: String }`・`Network(io::Error 相当)`・`InvalidUrl`・`InvalidName`・`SizeLimitExceeded`・`StorageFull`・`Permission`・`CacheMetadata`・`Safetensors(LoadError)` 等）を追加する方針とする。#2087 が先にマージされた場合はその実際の定義に従う。
-- **HF hub URL 変換**（要確認。§9 参照）: `https://huggingface.co/<owner>/<repo>` または `<owner>/<repo>` 形式 → `https://huggingface.co/<owner>/<repo>/resolve/<revision>/<file>`（既定 `revision=main`・`file=model.safetensors`）。この URL 形式・LFS ファイルの CDN リダイレクト・`ETag`／`X-Linked-Etag` ヘッダの挙動は外部仕様であり本 PR では未確認のまま「要確認」として記録する。
+- **公開 API**: `ModelRegistry::download(&self, url: &str, name: &str, version: &str) -> Result<(), ModelError>`（イシュー指定シグネチャ）。`url` は呼び出し側が解決済みの直接 HTTPS URL であり（§6 のとおり `http`・`file`・`ftp` 等は fail-closed で拒否。平文 HTTP は許容しない）、HF hub のリポジトリ ID → URL 変換のような特定ハブ固有の解決はここでは行わない（2026-09-24 追記。§1 参照）。`&self` か関連関数かは兄弟 #2087 が確定する `ModelRegistry` の形状に追従する。
+- **呼び出し側が信頼値・進捗シンクを渡す公開面（2026-09-24 追記。PR #2242 codex-review P1）**: 上記のイシュー指定シグネチャだけでは、§6 (A08) が必須とする「呼び出し側が明示する信頼済み `sha256` pin」と、本節「進捗ログ」の進捗コールバックを渡す経路がない。このため次の対を公開面案とする（PyTorch `torch.hub.download_url_to_file(url, dst, hash_prefix=None, progress=True)`・Keras `get_file(..., file_hash=None)` と同じく、信頼値は省略可能な引数として呼び出し側から与える形）:
+  - `ModelRegistry::download_with(&self, url: &str, name: &str, version: &str, options: DownloadOptions<'_>) -> Result<(), ModelError>`: pin・進捗コールバックを受け取る本体。
+  - `DownloadOptions<'a>`: `#[non_exhaustive]` の構造体とし、`DownloadOptions::new()`（既定 = pin なし・進捗なし）と builder メソッド `expected_sha256(Sha256Pin)`・`progress(&'a mut dyn FnMut(DownloadProgress))` で組み立てる（将来のタイムアウト・サイズ上限の上書き追加を非破壊にするため、位置引数を増やさない）。
+  - `Sha256Pin`: `Sha256Pin::from_hex(&str) -> Result<Sha256Pin, ModelError>` で 64 桁の 16 進文字列だけを受理する検証済み値型。形式不正は**ネットワーク接続・キャッシュ参照より前に** `ModelError::InvalidPin` で拒否する（fail-closed）。
+  - `download(&self, url, name, version)` は `download_with(url, name, version, DownloadOptions::new())` と等価の簡易形として残す。この形は pin を持たないため、保証範囲は破損・部分改変の検出（`download.json` 保存値との照合）に限られ、意図的改竄に対する真正性は保証しないことを rustdoc に明記する。
+  - **pin 指定時の検証順序**: (1) 新規取得では一時ファイルの SHA-256 を pin と照合し、不一致なら `ModelError::HashMismatch` で拒否して一時ファイルを削除する（`rename` しない）。(2) 304 応答・既存キャッシュの再利用では、`download.json` の保存値ではなく pin に対して既存 `model.safetensors` を再計算・照合する。不一致なら再利用せず無条件 GET で全量を再取得し、再取得後も pin と一致しなければ `HashMismatch` で拒否する。(3) `download.json` の保存値が pin と異なる場合も、そのキャッシュは再利用しない。
+- **`ModelError` 拡張方針**: #2087 が定義する想定の `#[non_exhaustive]` enum へ追加バリアント（`Http { status: u16, url: String }`・`Network(io::Error 相当)`・`InvalidUrl`・`InvalidName`・`InvalidPin`・`HashMismatch`・`SizeLimitExceeded`・`StorageFull`・`Permission`・`CacheMetadata`・`Safetensors(LoadError)` 等）を追加する方針とする。#2087 が先にマージされた場合はその実際の定義に従う。
 - **キャッシュ有効判定（etag）**: `<name>/<version>/download.json`（`serde_json`。許容区分内）に `url`・`etag`・`content_length`・`sha256`・`fetched_at` を保存する。再取得時は `If-None-Match` 条件付き GET（304 なら再利用）または HEAD の `ETag` 比較を行う。etag 非提供サーバは常に再取得する（安全側）。**304 応答時のローカルキャッシュ再検証（A08 整合性契約）**: 304 応答はリモート側の表現が変化していないことをサーバーが主張するのみであり、ローカルの `model.safetensors` が前回書き込み以降に別プロセス・別ユーザーにより改変・破損していないことは保証しない（キャッシュディレクトリが共有パスになりうる脅威モデルは §6 と同一）。このため 304 応答を無条件の再利用シグナルとして扱ってはならず、公開順序は次のとおりとする: (1) 304 受信時点でまず既存 `model.safetensors` を `download.json` 保存済みの `sha256` に対してストリーミング再計算・比較する、(2) 一致すれば「有効なキャッシュ」と確定し `download.json` の `fetched_at` のみを更新する（更新自体も REQ-7 と同型の一時ファイル + rename で行い、§6 の dirfd 契約に従う）、(3) 不一致であればキャッシュ破損・改変とみなし 304 を信頼せず破棄し、条件付きヘッダを外した無条件 GET で全量を再取得して §5 の新規取得フロー（一時ファイル書き込み → 検証 → §6 dirfd 契約での `model.safetensors`／`download.json` 再作成）をそのまま適用する（早期 return しない）。
 - **書き込み**: 一時ファイル（同一ディレクトリ内）へストリーミング書き込み → 検証成功後に `rename` で `model.safetensors` へ公開する。REQ-7 の `st_save`（一時ファイル + rename）と同型の原子性契約とする。**既存キャッシュへの再公開（2 回目以降の fetch）**: `model.safetensors`／`download.json` が既に存在する場合（キャッシュ更新・§5 の 304 再検証で不一致となり破棄再取得する場合を含む）でも公開は失敗させず atomic replace で上書きする。§6 (b) のとおり `renameat2` の `RENAME_NOREPLACE`（宛先が既存の場合に失敗する意味論）は付与しない。`RENAME_NOREPLACE` を使うと 2 回目以降の fetch がすべて公開失敗するため、本節の原子性契約は「既存有無に関わらず成功する atomic replace」であることをここで確定する。
 - **検証方式の決定点**（doc に両案を記録し推奨のみ書く。確定は承認後の実装イシューで行う）:
-  - (i) 「F32 ロード可能性」: 既存 `load_safetensors_f32_from_bytes` をそのまま流用（新規コードなしだが、REQ-7 の F32 限定契約により bf16／f16 の HF モデルはキャッシュ不可・全量をメモリへ二重に載せる）
+  - (i) 「F32 ロード可能性」: 既存 `load_safetensors_f32_from_bytes` をそのまま流用（新規コードなしだが、REQ-7 の F32 限定契約により bf16／f16 のモデルはキャッシュ不可・全量をメモリへ二重に載せる）
   - (ii) 「フォーマット妥当性」: ヘッダ長（先頭 8 byte）＋ヘッダ JSON パース＋オフセット整合のみ検証（dtype 非依存・ストリーミング可）。facade は `safetensors` クレートへ直接依存できないため、`onnx-interop::st_load` 側へ小さなヘッダ検証関数を追加する必要がある
   - 推奨: (ii)（用途に dtype 制約を持ち込まない）。採否は承認後の実装イシューで確定する
 - **エラー処理**: HTTP 非 2xx（3xx はリダイレクト上限付きで追従）・接続／タイムアウト・`io::ErrorKind::StorageFull`／`PermissionDenied`・`Content-Length` と実受信長の不一致・サイズ上限超過を型付きエラーで返し、本番経路で `unwrap`／`expect` を使わない（`.claude/rules/coding-rust.md`）。
-- **進捗ログ**: `log`／`tracing` も許容区分外のため新規依存を作らない。呼び出し側が渡す `&mut dyn FnMut(DownloadProgress)` コールバック、または `Option<&mut dyn std::io::Write>` シンクに受信バイト数／総バイト数を書く設計とし、既定は無出力とする。
+- **進捗ログ**: `log`／`tracing` も許容区分外のため新規依存を作らない。呼び出し側が `DownloadOptions::progress` で渡す `&mut dyn FnMut(DownloadProgress)` コールバックに受信バイト数／総バイト数を書く設計とし、既定は無出力とする（2026-09-24 追記: 渡し口を `DownloadOptions` に確定。代替案の `Option<&mut dyn std::io::Write>` シンクは不採用）。
 - **スコープ**: 同期・単一接続。並列ダウンロード・resume・認証トークンはイシュー明記のスコープ外（§10）。
 - **タイムアウト・上限の既定値**: 接続／読み取りタイムアウト・最大サイズ・リダイレクト回数を承認後の実装イシューで提案・確定する（本 doc では確定しない）。
 
@@ -79,8 +86,9 @@
 - [ ] **A01／A03（パストラバーサル・インジェクション）**: `name`・`version` はキャッシュディレクトリ配下のパス要素になるため、空文字・`.`／`..`・パス区切り（`/`・`\`）・絶対パス・NUL・制御文字を fail-closed で拒否する allowlist 検証（英数字・`-`・`_`・`.` の限定集合、先頭 `.` 禁止）を行う
 - [ ] **A01／A03（キャッシュ書き込み時のシンボリックリンク脱出防御）**: 上記の文字列検証だけでは、`<name>`／`<version>` ディレクトリ自体が既にキャッシュルート外を指すシンボリックリンクである場合（キャッシュディレクトリは他プロセス・他ユーザーが書き込み可能な共有パスになりうる）、検証済みの一時ファイル・`model.safetensors`・`download.json` をキャッシュルート外の任意ディレクトリへ作成できてしまう。**文字列パスの再解決を前提にした「検査してから rename」方式は、検査（stat／canonicalize）と rename の間に `<name>`／`<version>` またはその親要素をシンボリックリンクへ差し替えられる TOCTOU を構造的に防げない**（最終 rename の直前に宛先パスを再検証しても、その再検証自体が新たな文字列パス解決であり競合窓口になる）。承認後の実装は次のディレクトリハンドル基点の契約とし、書き込み確定まで文字列パスを再解決しない: (a) キャッシュルートから対象パスまでの各パス要素（`<name>`・`<version>` を含む中間ディレクトリ）を、ルートから 1 段ずつ dirfd 相対でオープンする。Linux では `openat2`（`RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH` 相当）を優先し、`openat2` 非搭載の環境（対応カーネルを持たない Linux 含む）では各段を `openat(parent_dirfd, component, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC, ...)` で明示指定してオープンする代替経路を安全な同格手段として認める（`O_NOFOLLOW` でシンボリックリンクを拒否し、`O_DIRECTORY` で「その要素が通常ファイル等でありディレクトリでない」場合もオープン自体を失敗させる。いずれも dirfd 相対操作であり文字列パス再解決を伴わないため、この代替経路は (c) の fail-closed 対象ではない）。以降の一時ファイル作成・`model.safetensors`・`download.json` の作成・書き込み・`renameat`／`renameat2` による公開はすべてこの検証済みディレクトリファイルディスクリプタ（dirfd）相対の操作のみで完結させる。生成した dirfd は次のパス要素をオープンするまで保持し、途中で文字列パスへ戻して再オープンしない。初回ダウンロード等で `<name>`／`<version>` に対応するディレクトリが未作成の場合の手順を明記する: 各段の `openat(parent_dirfd, component, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC, ...)`（または `openat2`）が `ENOENT` を返した時点で、`mkdirat(parent_dirfd, component, 0o755)` によりその 1 段だけをディレクトリとして作成し、作成後に同じ `openat(parent_dirfd, component, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC, ...)` で改めてオープンして dirfd を得る（`std::fs::create_dir_all` 等の文字列パスベースの再帰作成 API は使わない。中間ディレクトリの作成もこの `mkdirat` 相対操作のみで 1 段ずつ行い、文字列パスの一括再帰作成へフォールバックしない。フォールバックすると symlink 追従が復活し、本節が防ごうとしている脱出経路が再発するため）。`mkdirat` が `EEXIST` を返した場合（並行する別プロセス・別スレッドとの作成競合）はエラーとせず、同じ `openat(parent_dirfd, component, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC, ...)` を再試行し、新規作成に成功した場合と同じ経路（オープン成功）へ合流させる。`mkdirat` 後の再オープンがなお失敗する場合（`ENOTDIR`＝該当要素が symlink 等の非ディレクトリへ差し替えられていた、`ELOOP` 等）はエラーとして処理を中断し、その段から先の作成・書き込みへは進まない（fail-closed）。(b) 一時ファイルは検証済み dirfd に対して `openat(..., O_CREAT | O_EXCL | O_NOFOLLOW, ...)` で作成し、最終公開は同じ dirfd を親として `renameat`（`renameat2` が使える環境でも `RENAME_NOREPLACE` は付与しない）で `model.safetensors`／`download.json` へ atomic replace する。§5 の etag／304 検証で再取得した内容を同名の既存ファイルへ上書き公開する経路があるため、`RENAME_NOREPLACE`（既存ファイルがあれば失敗する意味論）は本設計と両立しない。rename の直前に文字列パスを再解決して宛先の型を再確認する手順は行わない（dirfd 相対操作である時点でパス再解決自体が発生しないため TOCTOU 窓口が存在しない）。(c) 上記のいずれの dirfd 相対経路（`openat2`・`O_NOFOLLOW | O_DIRECTORY` 付き `openat`・`renameat`／`renameat2`）も安全に提供できない OS・実行環境（例: Windows。dirfd 相対 API を持たない）では、その環境向けの `download` 実装を fail-closed で非対応（明示エラーを返し書き込みを一切行わない）とし、文字列パス再解決＋事後検査による近似実装で代替しない。(d) 回帰テストとして、`<name>` または `<version>` に該当するディレクトリを事前にキャッシュルート外を指すシンボリックリンクへ差し替えたうえで `download` を呼び出し、キャッシュルート外への書き込みが発生せずエラーになることに加え、検査直後・rename 直前のタイミングでシンボリックリンクへ差し替える競合を模したケースでも同様にキャッシュルート外への書き込みが発生しないことを確認するテストを実装イシューの受け入れ基準に含める。加えて、`<name>`／`<version>` ディレクトリが存在しない初回ダウンロード（`mkdirat` 経路）についても、(i) 通常の新規作成が成功しキャッシュルート配下にのみディレクトリが作られること、(ii) `mkdirat` の `EEXIST`（作成競合）後の再オープンが正しく合流して同じ結果になること、(iii) `mkdirat` 実行前後に対象要素をキャッシュルート外を指すシンボリックリンクへ差し替える競合を模しても、後続の再オープンが `ENOTDIR`／`ELOOP` 等で失敗しキャッシュルート外への書き込みが発生しないこと、を確認するテストを同基準へ含める。**依存の注記**: `std::fs` は dirfd 相対のオープン・rename を表現できない（`OpenOptionsExt::custom_flags` はパスの最終要素のオープンにしか作用せず、中間ディレクトリの dirfd 相対解決には使えない）ため、本方式の実装には `libc` または `rustix` 等 OS 呼び出しラッパーの追加が必要になる見込みである。これは許容依存 9 区分（`.claude/rules/deps-policy.md`）のいずれにも属さないため、HTTP クライアント依存（§7-1）と同じユーザー承認ゲートを要する事項として §7 へ追記する
 - [ ] URL は `https` スキームのみ許可する（`http`・`file`・`ftp` は拒否）。リダイレクト先にも同じ検証を通す
+- [ ] **テスト経路の分離（2026-09-24 追記）**: §8 item 6 のローカル `TcpListener` 平文 HTTP モックは CI 実行可能性のためのテスト専用注入経路であり、本チェックリストの `https` スキーム限定検証を回避・弱体化するものではない。スキーム拒否ロジック自体（`http://` 入力を渡した際に `download` が接続前に拒否すること）は専用の単体テストで検証し、モックを使う転送系テストはスキーム検証を通過済みの内部コンポーネント（transport 層。スキームチェックを含まない）のみを対象とする設計とする
 - [ ] **A05（設定不備）／A02**: TLS 証明書検証を無効化するオプションは設けない
-- [ ] **A08（整合性）**: `Content-Length` 上限・実受信長一致を検証する。任意の `sha256` ピンを指定できるようにし、指定時は不一致で拒否して一時ファイルを削除する。safetensors ヘッダ検証後にのみ `rename` する（検証前のファイルをキャッシュへ置かない）。**304 応答時も無検証で再利用しない**（§5「304 応答時のローカルキャッシュ再検証」参照。`download.json` 保存済み `sha256` によるストリーミング再検証を必須とし、不一致ならキャッシュを破棄して無条件 GET で再取得する）。呼び出し側が `sha256` ピンを指定している場合、304 時の再検証は `download.json` 保存値ではなくそのピンに対して行う（`download.json` 自体が改変対象になりうるため、ピンが与えられているときはピンを優先する。保存値は破損・部分改変の検出用、ピンは呼び出し側が信頼する真の値に対する検証用という役割分担とする）
+- [ ] **A08（整合性）**: `Content-Length` 上限・実受信長一致を検証する。任意の `sha256` ピンを指定できるようにし（公開面は §5 の `download_with`＋`DownloadOptions::expected_sha256(Sha256Pin)`。2026-09-24 追記）、指定時は不一致で拒否して一時ファイルを削除する。ピンの形式不正（64 桁 16 進以外）は接続前に `InvalidPin` で拒否する。safetensors ヘッダ検証後にのみ `rename` する（検証前のファイルをキャッシュへ置かない）。**304 応答時も無検証で再利用しない**（§5「304 応答時のローカルキャッシュ再検証」参照。`download.json` 保存済み `sha256` によるストリーミング再検証を必須とし、不一致ならキャッシュを破棄して無条件 GET で再取得する）。呼び出し側が `sha256` ピンを指定している場合、304 時の再検証は `download.json` 保存値ではなくそのピンに対して行う（`download.json` 自体が改変対象になりうるため、ピンが与えられているときはピンを優先する。保存値は破損・部分改変の検出用、ピンは呼び出し側が信頼する真の値に対する検証用という役割分担とする）
 - [ ] **A06（脆弱コンポーネント）**: 採用候補は `=x.y.z` 完全固定・`cargo deny check advisories bans licenses sources` 通過を採用条件に含める
 - [ ] **A09（ログ）**: 進捗コールバックに URL のクエリ文字列・認証情報を流さない。URL に埋め込まれた資格情報（`user:pass@host` 形式）は拒否する
 - [ ] **A10（SSRF）**: ライブラリ利用者が渡す URL をそのまま接続する性質上、内部ネットワーク宛先の判定・遮断はライブラリの責務としない（責務は呼び出し側）。`https` 限定と資格情報付き URL の拒否のみを担保範囲とすることを明記する
@@ -89,7 +97,7 @@
 ## 7. 承認事項（本イシュー時点ではいずれも未取得）
 
 1. HTTP クライアント（＋ TLS スタック）を許容依存へ新規区分として追加すること（現行の許容依存 9 区分〈`.claude/rules/deps-policy.md`〉に続く第 10 区分相当。配置案（§4）の選択を含む）
-2. facade 公開面の拡張: `ModelRegistry::download`（および進捗コールバック型）の追加と `api_surface.rs` 到達性テストの追加
+2. facade 公開面の拡張: `ModelRegistry::download`・`ModelRegistry::download_with`・`DownloadOptions`・`Sha256Pin`・`DownloadProgress`（§5。2026-09-24 追記で pin・進捗の渡し口を追加）と `ModelError` の追加バリアントの追加、および `api_surface.rs` 到達性テストの追加
 3. `docs/license-matrix.md` への行追加（依存追加とセット。承認前は行を増やさない）
 4. 承認後の実装イシューの起票（`.claude/rules/out-of-scope-tracking.md` により起票自体もユーザー承認が必要なため本 PR では起票しない。§9 に起票草案を記録する）
 5. **キャッシュ書き込みの dirfd 相対操作（§6 シンボリックリンク脱出防御）に必要な OS 呼び出しラッパー（`libc` または `rustix` 等）を許容依存へ新規区分として追加すること**（1 の第 10 区分に続く第 11 区分相当。両者は承認単位が異なるため区分番号を別に確定する）。`std::fs` は dirfd 相対のオープン・rename を提供しないため、§6 の TOCTOU 非構造化契約をそのまま実装するには 1 と同様の依存追加承認が別途必要（HTTP クライアント依存とは別クレート・別ゲート）
@@ -98,17 +106,17 @@
 
 1. `Cargo.toml` `[workspace.dependencies]` へ HTTP クライアント候補（§7-1）・dirfd 相対操作用の OS 呼び出しラッパー（§6・§7-5）を `=x.y.z` 固定で追加（feature は §3 の実測構成どおり）・`Cargo.lock` 更新・`docs/license-matrix.md` 行追加（`cargo tree` 実測付き）・`cargo deny check` 通過確認・`scripts/check-forbidden-deps.sh` 通過確認
 2. `crates/facade/Cargo.toml` へ結線（§4 の配置案に従う）
-3. `crates/facade/src/model.rs`（#2087 成果物）へ `download` と `ModelError` 追加バリアントを実装。`name`／`version` 検証は #2087 の検証関数を再利用する
-4. HF hub URL 変換・`download.json` メタデータ・条件付き GET（304 時は §5 の `sha256` ストリーミング再検証を経てから再利用可否を確定する）・§6 (a) の `mkdirat` 経路を含む dirfd 相対の一時ファイル + rename・サイズ上限・進捗コールバックを実装する
+3. `crates/facade/src/model.rs`（#2087 成果物）へ `download`・`download_with`・`DownloadOptions`・`Sha256Pin` と `ModelError` 追加バリアントを実装。`name`／`version` 検証は #2087 の検証関数を再利用する
+4. `download.json` メタデータ・条件付き GET（304 時は §5 の `sha256` ストリーミング再検証を経てから再利用可否を確定する）・§6 (a) の `mkdirat` 経路を含む dirfd 相対の一時ファイル + rename・サイズ上限・進捗コールバックを実装する（`url` は汎用 HTTPS URL のみ。HF hub URL 変換は含まない。2026-09-24 追記）
 5. `api_surface.rs` に到達性テストと「facade が HTTP クレートの型を公開面に漏らさない」テストを追加する
-6. テスト: ローカル `std::net::TcpListener` による最小 HTTP モック（200／304／404／リダイレクト／`Content-Length` 不一致／サイズ超過）で CI 実行可能にする。実ネットワークを使うテスト・TLS 経路の実接続テストは `#[ignore]` 分離（`.claude/rules/coding-rust.md`）
+6. テスト: ローカル `std::net::TcpListener` による最小 HTTP モック（200／304／404／リダイレクト／`Content-Length` 不一致／サイズ超過／pin 一致・不一致〈新規取得・304 再利用の両経路〉）で CI 実行可能にする。`Sha256Pin::from_hex` の形式不正拒否は接続前に失敗することを単体テストで検証する。実ネットワークを使うテスト・TLS 経路の実接続テストは `#[ignore]` 分離（`.claude/rules/coding-rust.md`）
 7. docs: 本ドキュメントへ実装記録節を追記・`docs/README.md` 注釈更新・`docs/compat-feature-gap.md`／`docs/compat-api-scope.md` の該当行があれば更新する
 
 ## 9. 引き継ぎ（起票草案。本イシューでは起票しない）
 
 - 「feat(facade): `ModelRegistry::download` の実装（HTTP クライアント依存承認後）」— 前提: §7 の 1〜3。内容: §8
 - 必要に応じ「chore(deps): HTTP クライアント依存の追加とライセンス実測」を分離
-- HF hub の `resolve` URL 形式・`ETag`／`X-Linked-Etag`・CDN リダイレクトの外部仕様確認（§5「要確認」印）
+- HF hub 連携（`resolve` URL 形式・`ETag`／`X-Linked-Etag`・CDN リダイレクトの外部仕様確認を含む）は #2088 のスコープ外。別クレートとして #2243（#2244〜#2246）で追跡する（2026-09-24 追記。§1 参照）
 
 ## 10. スコープ外
 
@@ -117,11 +125,20 @@
 - ミラー／プロキシ設定
 - レジストリ manifest の version 記法（#2087 側スコープ）
 - ONNX モデルのダウンロード（safetensors 限定）
+- **HF hub 連携全体**（リポジトリ ID → URL 変換・`resolve` API 呼び出し・LFS／CDN リダイレクト追従等）。facade（本 #2088）には入れず、別クレートとして #2243（#2244〜#2246）で扱う（2026-09-24 ユーザー決定「他ライブラリと同じにする」。詳細は `docs/model-distribution-design.md` §5）
 
 ## 11. 前方参照の扱い
 
 親 #2082（`docs/model-distribution-design.md`）・兄弟 #2087（`crates/facade/src/model.rs`・`ModelRegistry`・`ModelError`）は基準コミット時点で未マージ・PR 未作成（`git ls-remote --heads origin` に `2082`／`2087` を含むブランチなし・`gh pr list --search "2082 OR 2087"` が空・`crates/facade/src/model.rs` はリポジトリ内に存在しないことを 2026-09-23 に実測確認済み）。本ドキュメントは両者の内部構造（メソッドシグネチャ・enum バリアント）を確定事項として書かず、「並行イシュー #2082／#2087 の成果物（本 doc 作成時点で未マージ）。マージ状況により §5・§8 の記述を追従させる」ことを前提とする。
 
+**追記（#2082 作成時点）**: 親 #2082 は `docs/model-distribution-design.md` として作成済み（本 doc §4「facade API 契約案」が本 doc §7 の承認事項のうち依存追加 2 件を要約する）。兄弟 #2087 も実装済み・マージ済み（`crates/facade/src/model.rs`・`ModelRegistry`・`ModelError`）。本節（§11）自体は基準コミット時点の実測記録として不変のまま維持する。
+
+**追記（2026-09-24。HF hub 連携の分離）**: ユーザー決定「他ライブラリと同じにする」（PyTorch `torch.hub`／TensorFlow-Keras `tf.keras.utils.get_file` と同型に、汎用ダウンロードはコア・HF hub 連携は別クレート）に基づき、本 #2088 の対象を汎用 URL ダウンロードのみへ確定し、HF hub 固有の処理（リポジトリ ID → URL 変換・`resolve` API・CDN リダイレクト等）を対象から除外した。既存追跡先だった §9 の「要確認」項目は #2243（#2244〜#2246）へ引き継いだ。本追記に伴い §1・§5・§8・§9・§10 の該当箇所を編集した（本節・§2 の実測事実は編集していない）。詳細・根拠出典は `docs/model-distribution-design.md` §5 を参照。
+
+**追記（2026-09-24。取得元の表記統一と親文書の緩い要約の是正）**: `docs/model-distribution-design.md`（正本ではなく本 doc を子文書として参照するハブ文書）が §6 の `https` スキーム限定契約より緩い「HTTP(S) URL」という表記を使っていた codex-review 指摘を受け、本 doc 自身の §1・§5・§8 でも同じ表記揺れ（「HTTP(S) URL」）があったため「HTTPS URL」へ統一した（§6 のチェックリスト自体は当初から `https` 限定・`http` 拒否と正しく記述されており変更していない）。あわせて §6 に「テスト経路の分離」チェック項目を追加し、§8 item 6 のローカル HTTP モックが本番の `https` 限定契約を回避しないことを明記した。また、`docs/model-distribution-design.md` §2.2 の manifest 要約が本 doc §5・§6 (A08) の「保存済み `sha256` は破損・部分改変検出用、真正性は呼び出し側の信頼済み pin が根拠」という区別を「改竄・破損対策」と一括りにしていた点も是正した（本 doc §5・§6 (A08) 自体の記述は当初から当該区別を正しく持っており変更していない）。
+
+**追記（2026-09-24。信頼済み pin・進捗コールバックの渡し口）**: イシュー指定シグネチャ `download(&self, url, name, version)` のままでは、§6 (A08) が必須とする呼び出し側の信頼済み `sha256` pin と、§5「進捗ログ」の進捗コールバックを渡す経路がなく、セキュリティ契約を実装できないという codex-review 指摘（PR #2242・P1）を受け、§5 に `download_with`＋`DownloadOptions`（`expected_sha256(Sha256Pin)`・`progress`）を公開面案として追加し、pin 指定時の検証順序（新規取得・304 再利用・保存値と pin の不一致）を確定した。同類の点検として、本 doc の他の受け入れ条件（タイムアウト・サイズ上限・リダイレクト回数）は既定値を実装側が持つ設計であり呼び出し側から渡す必要がないことを確認した（将来の上書きは `DownloadOptions` への非破壊追加で行う）。§6 (A08)・§7-2・§8 の手順 3・6 を合わせて更新し、親ハブ文書 `docs/model-distribution-design.md` §2.2・§4 も同じ契約へ揃えた。
+
 ## 12. 出典一覧
 
-`.claude/rules/deps-policy.md`・`.claude/rules/security.md`・`.claude/rules/coding-rust.md`・`docs/license-matrix.md`・`deny.toml`・`crates/facade/src/interop/safetensors.rs`・`crates/facade/tests/api_surface.rs`・`docs/facade-safetensors-exposure-decision.md`・`docs/facade-onnx-import-exposure-decision.md`・イシュー #2082／#2087／#2088。
+`.claude/rules/deps-policy.md`・`.claude/rules/security.md`・`.claude/rules/coding-rust.md`・`docs/license-matrix.md`・`deny.toml`・`crates/facade/src/interop/safetensors.rs`・`crates/facade/tests/api_surface.rs`・`docs/facade-safetensors-exposure-decision.md`・`docs/facade-onnx-import-exposure-decision.md`・イシュー #2082／#2087／#2088。HF hub 連携の追跡先: イシュー #2243（#2244／#2245／#2246）。

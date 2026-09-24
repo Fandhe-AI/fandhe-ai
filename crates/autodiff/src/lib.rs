@@ -158,8 +158,17 @@
 //! function-decision.md` §12.5 (a)）であり、facade（唯一のサポート
 //! 対象公開面）は再エクスポートしない（(b) は未承認のまま対象外）。
 
+//! イシュー #2141（親 #2131）で bool を返す比較 6 種
+//! （`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／`eq_bool`／`ne_bool`）・
+//! logical 3 種（`logical_and`／`logical_or`／`logical_not`）・
+//! `masked_select` を [`bool_ops`] へ追加した。いずれも非微分・tape
+//! 非記録の自由関数（`Var` への inherent メソッドではない）で、facade
+//! 公開は承認待ちのため意図的に再エクスポートしない（`docs/autodiff-
+//! bool-ops-exposure-decision.md`・モジュール doc 参照）。
+
 mod attention;
 mod backward;
+pub mod bool_ops;
 pub mod compat;
 mod create_graph;
 mod custom;

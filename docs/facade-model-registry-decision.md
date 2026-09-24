@@ -73,7 +73,7 @@ facade 新規公開面 7 件（`crates/facade/src/model.rs`。`crates/facade/tes
 
 ## 9. 対象外（Issue 追跡。新規起票はユーザー承認が必要なため本 doc への記載に留める）
 
-- リモート取得・HF hub 連携（#2088 が既存）
+- リモート取得（#2088）・HF hub 連携（facade には入れず別クレート。#2243〈#2244〜#2246〉。2026-09-24 ユーザー決定。**2026-09-24 追記**: 当初は「#2088 が既存」としていたが、HF hub 連携は #2088 のスコープからも分離されたため訂正した。詳細は `docs/model-distribution-design.md` §5）
 - `docs/model-distribution-design.md` の作成（親 #2082 の成果物。本イシューでは作成しない）
 - version 記法の解釈（semver・hash 等）・最新版解決
 - `compat::Sequential` へのレジストリ直結ラッパー（`Sequential::from_registry` 等）
