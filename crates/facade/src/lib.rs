@@ -1297,3 +1297,175 @@ struct VarCustomHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct NnModuleHoldDoctestGuard;
+
+/// イシュー #2141（親 #2131）の facade 公開保留を固定する doctest 足場。
+/// `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（直前の宣言）
+/// と同型の「正のプローブ 1 ブロック方式」を採る:
+/// facade の全 `pub mod` を glob import したスコープに、本ブロック内で
+/// のみ定義したローカルの自由関数群（`__fandhe_bool_hold_probe::
+/// bool_ops::{gt_bool, ge_bool, lt_bool, le_bool, eq_bool, ne_bool,
+/// logical_and, logical_or, logical_not, masked_select}`）とトレイト
+/// （`__FandheBoolHoldProbe`）を導入し、実際に使う関数を書く。facade が
+/// どの経路（`pub use fandhe_ai_autodiff::bool_ops;` のようなモジュール
+/// 再エクスポート・`Var`／`Tensor<bool>` への inherent メソッド追加・
+/// 別名 `pub use`）で `bool_ops` という名前や 10 個の関数名を公開しても、
+/// ローカル定義との glob 衝突（モジュール名の場合）または呼び出し
+/// シグネチャの不一致（inherent メソッドがトレイトメソッドより優先
+/// 解決されるため、引数なしの `x.gt_bool()` 呼び出しが `Var::gt_bool
+/// (&self, other: &Var<'t>)` に解決されて型・引数数エラーになる）で
+/// コンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// bool_ops_hold_doctest_globs_all_pub_modules`・`bool_ops_hold_
+/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
+/// reexport_or_declare_bool_ops`・`workspace_declares_bool_ops_fn_
+/// names_only_in_autodiff_bool_ops`）との多層防御の位置づけは
+/// `docs/autodiff-bool-ops-exposure-decision.md` §6「承認事項」を参照。
+///
+/// 承認（facade 公開・`Var` への委譲メソッド追加）を得た日が来たら、
+/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
+/// 否定ガードと同時に外す）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_bool_hold_probe {
+///     pub mod bool_ops {
+///         pub fn gt_bool() {}
+///         pub fn ge_bool() {}
+///         pub fn lt_bool() {}
+///         pub fn le_bool() {}
+///         pub fn eq_bool() {}
+///         pub fn ne_bool() {}
+///         pub fn logical_and() {}
+///         pub fn logical_or() {}
+///         pub fn logical_not() {}
+///         pub fn masked_select() {}
+///     }
+/// }
+/// use __fandhe_bool_hold_probe::*;
+///
+/// struct __FandheBoolMarker;
+///
+/// trait __FandheBoolHoldProbe {
+///     fn gt_bool(&self) -> __FandheBoolMarker;
+///     fn ge_bool(&self) -> __FandheBoolMarker;
+///     fn lt_bool(&self) -> __FandheBoolMarker;
+///     fn le_bool(&self) -> __FandheBoolMarker;
+///     fn eq_bool(&self) -> __FandheBoolMarker;
+///     fn ne_bool(&self) -> __FandheBoolMarker;
+///     fn logical_and(&self) -> __FandheBoolMarker;
+///     fn logical_or(&self) -> __FandheBoolMarker;
+///     fn logical_not(&self) -> __FandheBoolMarker;
+///     fn masked_select(&self) -> __FandheBoolMarker;
+/// }
+///
+/// impl<'t> __FandheBoolHoldProbe for fandhe_ai::Var<'t> {
+///     fn gt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn ge_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn lt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn le_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn eq_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn ne_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_and(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_or(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_not(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn masked_select(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+/// }
+///
+/// impl __FandheBoolHoldProbe for fandhe_ai::Tensor<bool> {
+///     fn gt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn ge_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn lt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn le_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn eq_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn ne_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_and(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_or(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_not(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn masked_select(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+/// }
+///
+/// impl __FandheBoolHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn gt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn ge_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn lt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn le_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn eq_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn ne_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_and(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_or(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_not(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn masked_select(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+/// }
+///
+/// impl __FandheBoolHoldProbe for fandhe_ai::Tape {
+///     fn gt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn ge_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn lt_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn le_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn eq_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn ne_bool(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_and(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_or(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn logical_not(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+///     fn masked_select(&self) -> __FandheBoolMarker { __FandheBoolMarker }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // `bool_ops::` を経由した経路解決（`use fandhe_ai::*;` が
+///     // 同名モジュールを glob 公開していれば、名前解決自体が
+///     // 曖昧になり E0659 でコンパイル失敗する。バレ識別子の
+///     // 未使用 glob 衝突は rustc が検出しないため、経路として
+///     // 実際に `bool_ops` を解決させる必要がある）。
+///     bool_ops::gt_bool();
+///     bool_ops::ge_bool();
+///     bool_ops::lt_bool();
+///     bool_ops::le_bool();
+///     bool_ops::eq_bool();
+///     bool_ops::ne_bool();
+///     bool_ops::logical_and();
+///     bool_ops::logical_or();
+///     bool_ops::logical_not();
+///     bool_ops::masked_select();
+/// }
+///
+/// fn __probe_var(x: &fandhe_ai::Var<'_>) {
+///     let _: __FandheBoolMarker = fandhe_ai::Var::gt_bool(x);
+///     let _: __FandheBoolMarker = x.gt_bool();
+///     let _: __FandheBoolMarker = fandhe_ai::Var::masked_select(x);
+///     let _: __FandheBoolMarker = x.masked_select();
+/// }
+///
+/// fn __probe_tensor_bool(x: &fandhe_ai::Tensor<bool>) {
+///     let _: __FandheBoolMarker = fandhe_ai::Tensor::logical_and(x);
+///     let _: __FandheBoolMarker = x.logical_and();
+///     let _: __FandheBoolMarker = fandhe_ai::Tensor::logical_not(x);
+///     let _: __FandheBoolMarker = x.logical_not();
+/// }
+///
+/// fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {
+///     let _: __FandheBoolMarker = fandhe_ai::Tensor::gt_bool(x);
+///     let _: __FandheBoolMarker = x.gt_bool();
+/// }
+///
+/// fn __probe_tape(x: &fandhe_ai::Tape) {
+///     let _: __FandheBoolMarker = fandhe_ai::Tape::gt_bool(x);
+///     let _: __FandheBoolMarker = x.gt_bool();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct VarBoolOpsHoldDoctestGuard;
