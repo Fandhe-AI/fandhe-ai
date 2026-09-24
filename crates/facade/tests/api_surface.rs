@@ -46,13 +46,16 @@
 //!
 //! `hooks_hold_doctest_globs_all_pub_modules`・`hooks_hold_doctest_probe_
 //! body_matches_fixed_contract`・`workspace_declares_no_hook_registration_
-//! fns` は `VarHooksHoldDoctestGuard`（`VarBoolOpsHoldDoctestGuard` 系と
-//! 同型の正のプローブ 1 ブロック方式＋workspace 全体のソース走査）で、
+//! fns`・`autodiff_declares_no_register_hook_fn` の 4 テストは
+//! `VarHooksHoldDoctestGuard`（`VarBoolOpsHoldDoctestGuard` 系と同型の
+//! 正のプローブ 1 ブロック方式＋workspace 全体のソース走査＋
+//! `crates/autodiff/src/` 限定の `register_hook` allowlist 化ガード）で、
 //! forward・backward hooks（イシュー #2139。親 #2138・#2131）の facade
 //! 公開保留を固定する。#2139 は設計 doc §11 の承認事項 5 項目がそろう
 //! まで着手不可という設計判断（`docs/autodiff-forward-backward-hooks-
 //! design.md` §13）のため、本体実装（`crates/autodiff/**`）自体を
-//! 含まない保留固定 PR である。
+//! 含まない保留固定 PR である（4 層構成の内訳は同 doc §13.3。
+//! `docs/compat-api-scope.md` §5 に同期する）。
 
 use std::path::Path;
 
@@ -65,11 +68,25 @@ fn read_to_string_or_panic(path: &Path) -> String {
         .unwrap_or_else(|e| panic!("test fixture: {} が読めない: {e}", path.display()))
 }
 
+/// `dir` 配下の `.rs` を再帰走査するテストユーティリティ。走査失敗
+/// （`read_dir` の Err・エントリ列挙中の Err）を黙って握り潰すと、
+/// 本テストファイルの各ガード（「本体未実装を fail-closed に固定する」
+/// 契約。モジュール冒頭コメント参照）が「該当ファイルが 0 件見つかった」
+/// と「走査自体が失敗した」を区別できず、後者を前者と誤認して
+/// `found.is_empty()`／`offending.is_empty()` の判定が意図せず成立し
+/// てしまう（fail-open 化。codex-review 指摘・PR #2254）。そのため
+/// `read_dir` の Err・エントリ列挙中の Err はいずれも `panic!` で
+/// 即座に伝播し、判定対象の走査が不完全なまま成立させない。
 fn visit_rs_files(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("test fixture: {} の read_dir に失敗: {e}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "test fixture: {} 配下のエントリ列挙に失敗: {e}",
+                dir.display()
+            )
+        });
         let path = entry.path();
         if path.is_dir() {
             visit_rs_files(&path, f);
@@ -6878,14 +6895,21 @@ fn workspace_declares_no_hook_registration_fns() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
-    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+    let entries = std::fs::read_dir(&crates_dir).unwrap_or_else(|e| {
         panic!(
-            "workspace crates ディレクトリが読めない: {}",
+            "workspace crates ディレクトリが読めない: {}: {e}",
             crates_dir.display()
-        );
-    };
+        )
+    });
+    // 個別エントリの列挙エラーも `visit_rs_files`（本ファイル関数 doc
+    // 参照）と同じ理由で `flatten()` により握り潰さず、fail-closed に
+    // `panic!` で伝播する（codex-review 指摘・PR #2254）。
     let mut crate_dirs: Vec<std::path::PathBuf> = entries
-        .flatten()
+        .map(|e| {
+            e.unwrap_or_else(|err| {
+                panic!("{} 配下のエントリ列挙に失敗: {err}", crates_dir.display())
+            })
+        })
         .map(|e| e.path())
         .filter(|p| p.is_dir())
         .collect();

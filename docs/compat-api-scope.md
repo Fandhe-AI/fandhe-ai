@@ -968,11 +968,17 @@ AutodiffError> + Send + Sync + 'static`）・保持形（`Arc`）・エラー
 src/**`）・facade 公開面（`crates/facade/src/**` 本番コード）のいずれも
 変更していない（`#[cfg(doctest)]` 限定の非公開足場 1 件を除く）。代わりに
 `crates/facade/src/lib.rs::VarHooksHoldDoctestGuard`（正のプローブ
-doctest）＋`crates/facade/tests/api_surface.rs` の 3 テスト（doctest
-ドリフト検査 2 件・workspace 全体の定義元インベントリ 1 件）で「facade 未
-公開・本体未実装」状態を fail-closed に固定した。詳細な承認状態の確認
-結果・保留の根拠・ガードの構成・承認取得後の実装範囲は
-`docs/autodiff-forward-backward-hooks-design.md` §13。
+doctest）＋`crates/facade/tests/api_surface.rs` の 4 層構成（doctest
+ドリフト検査 2 件・workspace 全体の定義元インベントリ 1 件〈
+`workspace_declares_no_hook_registration_fns`〉・`crates/autodiff/src/`
+限定の `register_hook` allowlist 化ガード 1 件〈
+`autodiff_declares_no_register_hook_fn`。doctest 正のプローブが facade
+経由の到達可能性しか見ないため autodiff 側の本体実装を検出できない穴を
+塞ぐ、workspace 全体インベントリの `register_hook` 意図的除外に対応する
+補完ガード〉）で「facade 未公開・本体未実装」状態を fail-closed に固定
+した。詳細な承認状態の確認結果・保留の根拠・ガードの構成・承認取得後の
+実装範囲は `docs/autodiff-forward-backward-hooks-design.md` §13（4 層構成
+の内訳は同 §13.3）。
 
 ## 6. 出典一覧
 

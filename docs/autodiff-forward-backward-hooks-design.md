@@ -248,8 +248,9 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
 - `Var::detach` は新しい葉ノードを作る（§2）。hook はノード単位なので、**detach 後のノードへ hook は
   引き継がれない**。元の `Var` に付けた hook は無効にならず、他の経路から勾配が届けば発火する。
 - `requires_grad == false` のノード（detach・`var_no_grad`・`Module::freeze` 後に bind した葉）への
-  backward hook 登録は、fail-closed で `Err(GradientTrackingDisabled)`（新規 variant 案。`#[non_exhaustive]`
-  により追加は非破壊）にする（PyTorch も同様に拒否する）。
+  backward hook 登録は、fail-closed で `Err(GradientTrackingDisabled)`（`crates/autodiff/src/error.rs`
+  に既存の variant〈`Gradients::get` の「構造的に勾配を持ちえない」判定と同じ意味論〉を再利用する。
+  新規 variant の追加ではない）にする（PyTorch も同様に拒否する）。
 - `Op::ResidentLeaf` の勾配はデバイスストアへ書かれ、`grads` 配列を通らない。このため登録は
   fail-closed で `Err` にする。
 
@@ -498,7 +499,9 @@ lifetime とエラー伝播・#2139 の受入基準改訂・facade 公開〈経�
   hook 消去
 - `crates/autodiff/src/backward.rs::backward_impl`: `grads[id]` 確定直後・
   `grad::vjp` 呼び出し前の hook 呼び出し（登録順・最初の `Err` で打ち切り）
-- `crates/autodiff/src/error.rs`: `GradientTrackingDisabled` variant の追加
+- `crates/autodiff/src/error.rs`: `GradientTrackingDisabled`（既存 variant。
+  §5.6 参照）を fail-closed の backward hook 登録拒否経路で再利用する
+  （新規 variant の追加は不要）
 - `crates/autodiff/src/nn/`: `ForwardHooked<M: Module>`・`ForwardHookCtx`
   の追加
 - `crates/autodiff/tests/hooks.rs`（新規）: §8 のテスト候補の実装
