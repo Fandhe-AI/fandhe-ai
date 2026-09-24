@@ -1,6 +1,6 @@
 # リモートモデル取得（URL ダウンロード）の設計記録（#2088）
 
-イシュー #2088「feat(facade): リモートモデル取得（URL ダウンロード）の実装（依存追加の承認後）」に対応する。親: #2082（`docs/model-distribution-design.md`）。兄弟: #2087（`crates/facade/src/model.rs`・`ModelRegistry`・`ModelError`）。
+イシュー #2088「feat(facade): リモートモデル取得（URL ダウンロード）の実装（依存追加の承認後）」に対応する。親: #2082（`docs/model-distribution-design.md`。本 doc 作成後に作成済み）。兄弟: #2087（`crates/facade/src/model.rs`・`ModelRegistry`・`ModelError`。マージ済み）。
 
 本ドキュメントは**コード変更を伴わない設計記録**を成果物とする。`Cargo.toml`／`Cargo.lock`／`deny.toml`／`docs/license-matrix.md`／`docs/spec/`（正本 submodule）・`crates/**` はいずれも変更しない。
 
@@ -23,7 +23,7 @@
 | facade の safetensors 公開面（`load_safetensors_f32`／`load_safetensors_f32_from_bytes`／`require_keys`／`save_safetensors_f32`）は `onnx-interop::st_load`／`st_save` の純再エクスポートとして確定済み。REQ-7 契約（暗黙アダプタなし・無言 skip 禁止・F32 限定・決定的出力・一時ファイル + rename）を持つ | `crates/facade/src/interop/safetensors.rs:1-45`・`docs/facade-safetensors-exposure-decision.md` §11 |
 | `crates/facade/tests/api_surface.rs` は facade の公開面・onnx-interop への依存形状（`path = "../onnx-interop"` 承認済み形状のみ）を機械的に固定する。新規 public 型・関数の追加は同テストへの到達性テスト追加とユーザー承認が前提 | `crates/facade/tests/api_surface.rs:974-1304` |
 | `std` のみで実現できる範囲: `std::net::TcpStream` による平文 HTTP は可能だが、HF hub・実用上のモデル配布元は HTTPS 前提のため TLS なしでは要件を満たせない（依存追加が不可避である根拠） | `std::net` API 仕様（外部一般知識） |
-| 親 #2082（`docs/model-distribution-design.md`）・兄弟 #2087（`crates/facade/src/model.rs`）は基準コミット時点で未マージ・PR 未作成 | 本 PR 作成時点の `find`／`git ls-remote`／`gh pr list` 実測（2026-09-23。§4） |
+| 親 #2082（`docs/model-distribution-design.md`）・兄弟 #2087（`crates/facade/src/model.rs`）は基準コミット時点で未マージ・PR 未作成（いずれも本 doc 作成後に作成・マージ済み。§11 追記参照） | 本 PR 作成時点の `find`／`git ls-remote`／`gh pr list` 実測（2026-09-23。§4） |
 
 ## 3. HTTP クライアント候補の比較
 
@@ -121,6 +121,8 @@
 ## 11. 前方参照の扱い
 
 親 #2082（`docs/model-distribution-design.md`）・兄弟 #2087（`crates/facade/src/model.rs`・`ModelRegistry`・`ModelError`）は基準コミット時点で未マージ・PR 未作成（`git ls-remote --heads origin` に `2082`／`2087` を含むブランチなし・`gh pr list --search "2082 OR 2087"` が空・`crates/facade/src/model.rs` はリポジトリ内に存在しないことを 2026-09-23 に実測確認済み）。本ドキュメントは両者の内部構造（メソッドシグネチャ・enum バリアント）を確定事項として書かず、「並行イシュー #2082／#2087 の成果物（本 doc 作成時点で未マージ）。マージ状況により §5・§8 の記述を追従させる」ことを前提とする。
+
+**追記（#2082 作成時点）**: 親 #2082 は `docs/model-distribution-design.md` として作成済み（本 doc §4「facade API 契約案」が本 doc §7 の承認事項のうち依存追加 2 件を要約する）。兄弟 #2087 も実装済み・マージ済み（`crates/facade/src/model.rs`・`ModelRegistry`・`ModelError`）。本節（§11）自体は基準コミット時点の実測記録として不変のまま維持する。
 
 ## 12. 出典一覧
 
