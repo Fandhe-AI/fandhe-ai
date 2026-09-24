@@ -250,7 +250,7 @@ fn try_alloc(len: usize) -> Result<Vec<f32>, AutodiffError> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(len)
-        .map_err(|_| invalid_argument("nn::init: 要素数 {len} の確保に失敗しました"))?;
+        .map_err(|_| invalid_argument(format!("nn::init: 要素数 {len} の確保に失敗しました")))?;
     Ok(values)
 }
 
@@ -522,7 +522,10 @@ fn select_fan(shape: &[usize], mode: FanMode) -> Result<usize, AutodiffError> {
 ///
 /// `a` は PyTorch シグネチャ互換のため残す引数で、有限性のみ検証する
 /// （実際の負勾配は [`calculate_gain`] の doc のとおり
-/// `Nonlinearity::LeakyRelu(slope)` 経由で渡す）。
+/// `Nonlinearity::LeakyRelu(slope)` 経由で渡す）。**`a` は gain の計算に
+/// 一切使われない**ため、`nonlinearity` と矛盾する値（例:
+/// `Nonlinearity::Relu` と `a != 0.0` の組合せ）を渡しても出力は
+/// `nonlinearity` のみで決まり `a` の値には影響されない。
 pub fn kaiming_uniform(
     shape: &[usize],
     a: f32,
