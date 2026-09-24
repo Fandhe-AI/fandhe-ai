@@ -1384,6 +1384,17 @@ fn max_first_match_vjp_f64(
             let outer = checked_product(&in_shape[..axis]).map_err(AutodiffError::Shape)?;
             let axis_len = in_shape[axis];
             let inner = checked_product(&in_shape[axis + 1..]).map_err(AutodiffError::Shape)?;
+            // 出力要素数（`outer * inner`）が 0 なら伝播すべき出力が
+            // 存在しない。`inner == 0` かつ `outer` が巨大（例
+            // `usize::MAX`。axis=1 に沿った `[usize::MAX, 1, 0]` 等）な
+            // shape では、この早期 return が無いと内側 `i` ループが
+            // 0 回で実質何もしないにもかかわらず外側 `o` ループを
+            // `outer` 回逐次走査してしまいハングする。`host_max_f64`
+            // の同型早期 return と挙動を揃える（Cursor Bugbot 指摘是正。
+            // イシュー #2196）。
+            if outer == 0 || inner == 0 {
+                return Tensor::new(grad, &in_shape).map_err(AutodiffError::Shape);
+            }
             for o in 0..outer {
                 for i in 0..inner {
                     let out_idx = o * inner + i;
@@ -1477,6 +1488,35 @@ mod tests {
         let out = host_max_f64(&a, Some(0)).expect("空出力の max は成功するはず");
         assert_eq!(out.shape(), vec![0]);
         assert_eq!(out.numel(), 0);
+    }
+
+    /// Cursor Bugbot 指摘（High Severity。PR #2255・イシュー #2196）の
+    /// 回帰テスト: `max_first_match_vjp_f64` は `forward` 側
+    /// （`host_max_f64`）と異なり `outer` を最外周に置く走査順
+    /// （`o -> i -> a`）のため、`inner == 0` で出力要素数が 0 でも
+    /// `outer` 自体が巨大（`usize::MAX` 級）だと早期 return 無しでは
+    /// 外側 `o` ループを `outer` 回逐次走査して実質ハングする
+    /// （`axis_len` の内側ループは `inner == 0` のため到達しないにも
+    /// 関わらず、である）。`axis=1` に沿った `[usize::MAX, 1, 0]`
+    /// （`outer = usize::MAX`・`axis_len = 1`・`inner = 0`）で
+    /// 即座に空勾配 `[usize::MAX, 1, 0]` を返すことを確認する
+    /// （テスト自体が有限時間で終わることが早期 return の直接的な
+    /// 証拠になる。CI `test-timeout-minutes: 20` がこの回帰を検出する
+    /// 設計）。
+    #[test]
+    fn max_first_match_vjp_f64_skips_huge_outer_scan_when_output_is_empty() {
+        let in_shape = [usize::MAX, 1, 0usize];
+        let input = Tensor::<f64>::new(Vec::new(), &in_shape)
+            .expect("checked_numel は usize::MAX * 1 * 0 を Some(0) とするため構築できるはず");
+        let out_shape = [usize::MAX, 0usize];
+        let out_value = Tensor::<f64>::new(Vec::new(), &out_shape)
+            .expect("out_value は空出力 shape で構築できるはず");
+        let g =
+            Tensor::<f64>::new(Vec::new(), &out_shape).expect("g は空出力 shape で構築できるはず");
+        let grad = max_first_match_vjp_f64(&input, Some(1), &out_value, &g)
+            .expect("空出力の max backward は成功するはず");
+        assert_eq!(grad.shape(), in_shape);
+        assert_eq!(grad.numel(), 0);
     }
 
     /// codex-review 指摘の類型調査（PR #2255・イシュー #2196）:
