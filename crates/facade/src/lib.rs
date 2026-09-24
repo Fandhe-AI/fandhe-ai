@@ -1469,3 +1469,84 @@ struct NnModuleHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct VarBoolOpsHoldDoctestGuard;
+
+/// イシュー #2084（親 #2059。設計正本 `docs/kv-cache-design.md` §6
+/// 承認事項 2・§10）の facade 公開（K-2: `KvCache`／`StatefulAttention`・
+/// `compat::Sequential::add_stateful_attention` 相当）保留を固定する
+/// doctest 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`／
+/// `VarBoolOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ 1
+/// ブロック方式」を採る: facade の全 `pub mod` を glob import したスコープ
+/// に、本ブロック内でのみ定義したローカル `__fandhe_kv_hold_probe::
+/// {KvCache, StatefulAttention, add_stateful_attention}` を導入し、実際に
+/// 使う関数を書く。facade がどの経路（単一行・複数行・ネストした group
+/// での `pub use`・別名エクスポート・facade 独自の `struct`／`type` 宣言・
+/// `compat::Sequential` への inherent メソッド追加）で `KvCache`／
+/// `StatefulAttention`／`add_stateful_attention` という名前を公開しても、
+/// ローカル定義との glob 衝突（型名の場合。E0659 等）または呼び出し
+/// シグネチャの不一致（`compat::Sequential` への inherent メソッドは
+/// トレイトメソッドより優先解決されるため、本プローブの trait 経由呼び出し
+/// が型・引数不一致でコンパイル失敗する）でエラーコードに依存せず
+/// コンパイルが失敗する。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// facade_does_not_expose_kv_cache_stateful_attention`〈直列 1 行走査。
+/// 内側の層として維持〉・`facade_does_not_reexport_or_declare_kv_cache_
+/// items`〈トークン方式。複数行・別名・独自宣言を検出〉・
+/// `workspace_declares_kv_cache_items_only_in_autodiff_attention`〈定義元
+/// インベントリ〉）との多層防御の位置づけ・承認未取得の経緯・承認依頼用
+/// の K-2 事前設計は `docs/kv-cache-design.md` §10「facade 公開（K-2）の
+/// 保留固定と承認依頼用の事前設計」を参照。本 doctest が glob import する
+/// `pub mod` 集合と `src/lib.rs` の実宣言集合のドリフトは
+/// `kv_cache_hold_doctest_globs_all_pub_modules` が、本文（glob 以外）の
+/// 固定文言からのドリフトは `kv_cache_hold_doctest_probe_body_matches_
+/// fixed_contract` が固定する（`extract_hold_doctest_guard_doc`・
+/// [`KV_CACHE_HOLD_PROBE_BODY`] 参照）。
+///
+/// K-2 facade 公開（`docs/kv-cache-design.md` §6 承認事項 2）がユーザー
+/// 承認され実施する日が来たら、本モジュール・本 doctest 自体を削除する
+/// （ソース走査側の対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_kv_hold_probe {
+///     pub struct KvCache;
+///     pub struct StatefulAttention;
+///     pub struct __FandheKvHoldMarker;
+///     pub fn add_stateful_attention() -> __FandheKvHoldMarker {
+///         __FandheKvHoldMarker
+///     }
+/// }
+/// use __fandhe_kv_hold_probe::*;
+///
+/// trait __FandheKvHoldProbe {
+///     fn add_stateful_attention(&self) -> __FandheKvHoldMarker;
+/// }
+///
+/// impl __FandheKvHoldProbe for fandhe_ai::compat::Sequential {
+///     fn add_stateful_attention(&self) -> __FandheKvHoldMarker {
+///         __FandheKvHoldMarker
+///     }
+/// }
+///
+/// fn __probe(_: KvCache, _: StatefulAttention, x: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheKvHoldMarker = add_stateful_attention();
+///     let _: __FandheKvHoldMarker = fandhe_ai::compat::Sequential::add_stateful_attention(x);
+///     let _: __FandheKvHoldMarker = x.add_stateful_attention();
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct KvCacheHoldDoctestGuard;

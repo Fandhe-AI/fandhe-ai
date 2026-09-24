@@ -8,6 +8,20 @@ attention（`MultiheadAttentionVars::forward_with_cache`）の
 `cfg(target_os = "macos")` 限定）を対象とする 2 テストは `#[ignore]` の
 まま未実測である。
 
+## 本エージェント環境で実測できない理由
+
+本エージェント実行環境（x86_64 Linux）は `nvidia-smi -L` で
+NVIDIA GeForce RTX 3060 の存在・`libcuda.so`（driver）の導入を確認
+できるが、NVRTC・CUDA toolkit（`nvcc`）が導入されておらず、CUDA
+backend の NVRTC による実行時 JIT（カーネルコンパイル）が成立しない。
+また、たとえ NVRTC が使えたとしても RTX 3060 は本リポジトリの実機
+（DGX Spark GB10）ではなく、「baseline は実機実測値のみ・人間承認必須」
+（`.claude/rules/coding-rust.md` テスト・ベンチ節）の規約上、代替
+実機として使うことはできない（driver の有無確認のみに使った前例:
+イシュー #2074）。Metal は本環境が Linux のため対象外。上記の測定
+コマンド案・期待結果は GB10（CUDA）・Apple Silicon 実機（Metal）での
+実測にそのまま使える形で残す。
+
 ## 測定コマンド案
 
 ```sh

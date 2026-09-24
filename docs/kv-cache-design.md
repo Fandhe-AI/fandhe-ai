@@ -348,3 +348,83 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
   への置換・`TransformerEncoderLayer` の decode 版・padding 用
   `attn_mask` との AND 合成。いずれも §6／§7 の記載どおり対象外の
   ままとした。
+
+## 10. facade 公開（K-2）の保留固定と承認依頼用の事前設計（#2084）
+
+§6 承認事項 2（facade 公開面拡張）は本節追記後も**未取得のまま**である。
+本節は (a) 保留固定の多層防御構成、(b) 承認後に外すもの、(c) 承認依頼に
+向けた K-2 の事前設計と承認者が判断すべき論点、の 3 つを記録する。
+コード変更は否定ガードの強化のみで、K-2 の実装本体には着手していない。
+
+### 10.1 保留固定の多層構成
+
+既存の 1 行単位ソース走査（`facade_does_not_expose_kv_cache_stateful_
+attention`）だけでは、複数行・ネストした group での `pub use`、facade
+独自の `struct`／`type` 宣言、`compat::Sequential` への inherent
+メソッド追加、facade 外（autodiff 等）での同名宣言の増加、という穴が
+残る。前例（#2064／#2133／#2141・イシュー #2141 の bool_ops 保留）と
+同型の多層防御に揃えた。
+
+| 迂回パターン | 塞ぐ層 |
+|---|---|
+| 単一行／複数行／ネストした group の `pub use`・別名再エクスポート | `crates/facade/src/lib.rs::KvCacheHoldDoctestGuard`（正のプローブ doctest）＋ `facade_does_not_reexport_or_declare_kv_cache_items`（トークン方式） |
+| `pub use fandhe_ai_autodiff::nn::*` 等の glob 再エクスポート | 既存の `facade_source_uses_only_modelable_structures`／`facade_pub_use_leaves_are_not_modules`（facade 全体で拒否済み）＋正のプローブ |
+| facade 内の `struct`／`enum`／`type`／`trait` `KvCache`・`StatefulAttention` の独自宣言 | 正のプローブ＋`facade_does_not_reexport_or_declare_kv_cache_items` |
+| `compat::Sequential` の inherent `add_stateful_attention` | 正のプローブ（inherent メソッドがトレイトメソッドより優先解決されるため型・引数不一致で失敗）＋`facade_does_not_reexport_or_declare_kv_cache_items` |
+| facade の外（autodiff 等）で同名宣言が増える | `workspace_declares_kv_cache_items_only_in_autodiff_attention`（workspace インベントリ） |
+| doctest の無効化（`ignore`／`no_run`／`compile_fail` への書き換え・`# ` 隠し行・プローブの削除） | `extract_single_bare_fenced_doctest_block`（装飾なしのフェンスを 1 つだけ許す）＋`kv_cache_hold_doctest_probe_body_matches_fixed_contract`（本文の固定文言検査） |
+| `pub mod` を追加したのに doctest の glob を更新し忘れる | `kv_cache_hold_doctest_globs_all_pub_modules`（glob 集合の一致検査） |
+
+### 10.2 承認後に外すもの・置き換えるもの
+
+K-2 の承認を得た日が来たら、次を同時に行う（他の保留系〈#2133 等〉と
+同じ手順）:
+
+- `crates/facade/src/lib.rs::KvCacheHoldDoctestGuard`（doctest 足場）を
+  削除する。
+- `facade_does_not_expose_kv_cache_stateful_attention`・
+  `facade_does_not_reexport_or_declare_kv_cache_items`（自己テスト含む）
+  を削除するか、正ガード（実装した公開面が到達可能であることを検査する
+  テスト）へ置き換える。
+- `workspace_declares_kv_cache_items_only_in_autodiff_attention` の
+  期待値マップを、facade 側に増えた宣言（10.3 の形が確定すれば）に
+  合わせて更新する。
+
+### 10.3 承認依頼に向けた K-2 事前設計と、承認者が判断すべき論点
+
+イシュー #2084 の文面は「`add_stateful_attention`・`StatefulAttention`
+相当の 2 `pub fn`」と素朴に書かれているが、実装（§9）を踏まえると
+そのままでは完結せず、承認範囲を広げる判断が必要になる。
+
+**(a) `MultiheadAttention` 自体が facade から未到達**: `StatefulAttention::
+new(mha: MultiheadAttention)`（§2 の API 案どおり）だが、`MultiheadAttention`
+は facade ルートから再エクスポートされていない。到達経路は
+`compat::Sequential::add_multihead_attention`（`crates/facade/src/
+compat/sequential.rs:469`）経由の内部保持のみで、呼び出し側が
+`MultiheadAttention` 値を直接取り出す手段がない
+（`crates/facade/src/compat/sequential.rs:113` の `use`
+〈非公開 import〉により `MultiheadAttention` 型自体はクレート内から
+参照できるが、facade 外の呼び出し側からは到達できない）。したがって
+K-2 は「2 `pub fn` を足すだけ」では
+完結せず、`MultiheadAttention` 自体の公開（コンストラクタ・型）か、
+次元・ヘッド数を直接取る `StatefulAttention` 用の別コンストラクタが
+必要になる。いずれを選ぶにせよ承認範囲は #2084 の文面より広がる。
+
+**(b) `Sequential::add_*` は §9 の判断と矛盾する**: §9「実装記録」は
+「`StatefulAttention` は `Module` trait を実装しない（`&self` の
+forward ではキャッシュを更新できないため）」「`compat::Sequential` へ
+の結線は行わない」と明記した。`add_stateful_attention` を
+`compat::Sequential` へのメソッドとして追加する形は、この判断と
+正面から矛盾する。承認候補は `compat::Sequential` へのメソッドでは
+なく、`crates/facade/src/nn/` 配下の純再エクスポートのサブモジュール
+（`nn::rnn`〈#1955〉と同じ形。`KvCache`・`StatefulAttention` 型と、
+`StatefulAttention::new`／`forward_with_cache` 相当の自由関数または
+inherent メソッドを再エクスポートするだけの薄い層）。イシュー文面の
+「2 `pub fn`」表現は設計 doc（本 doc）より前に書かれたものであり、
+形の確定は承認時にあわせて行う必要がある。
+
+**(c) K-3（デバイス常駐）は別承認のまま**: `TapeNode::value` がホスト
+`Tensor<f32>` である現行構造（§0・§3.2）を変える規模の変更であり、
+K-2 とは独立に別承認が必要（§6 承認事項 3 のまま変更なし）。
+
+本節は記録のみであり、Issue 起票・spec 提案の投稿は行わない。

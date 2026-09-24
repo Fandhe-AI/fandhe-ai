@@ -5813,6 +5813,13 @@ fn compat_sequential_has_no_introspection_methods() {
 /// `KvCache`／`StatefulAttention` を識別子単位で含む `pub use` 行、の
 /// いずれも存在しないことを固定する。承認取得後に薄い委譲 `pub fn`／
 /// 再エクスポートを追加する際は本テストを正ガードへ更新すること。
+///
+/// 本テストは多層防御の最内層（1 行単位の直列走査）であり、`src/lib.rs`
+/// の `KvCacheHoldDoctestGuard`（正のプローブ doctest）・
+/// `facade_does_not_reexport_or_declare_kv_cache_items`（トークン方式。
+/// 複数行・別名・独自宣言を検出）・`workspace_declares_kv_cache_items_
+/// only_in_autodiff_attention`（定義元インベントリ）と多層で保留を
+/// 固定する（`docs/kv-cache-design.md` §10）。
 #[test]
 fn facade_does_not_expose_kv_cache_stateful_attention() {
     let src_dir = facade_crate_root().join("src");
@@ -5844,6 +5851,332 @@ fn facade_does_not_expose_kv_cache_stateful_attention() {
         "facade の公開面が KV キャッシュ（#2084 の K-2。`add_stateful_attention`／\
          `KvCache`／`StatefulAttention`）を公開している（`docs/kv-cache-design.md` \
          §6 承認事項 2 が未取得のまま対象外としている設計判断に違反）: {offending:?}"
+    );
+}
+
+/// `KvCacheHoldDoctestGuard` の唯一の doctest ブロックが glob import する
+/// ネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が
+/// 一致することを固定する（`nn_module_hold_doctest_globs_all_pub_modules`・
+/// `bool_ops_hold_doctest_globs_all_pub_modules` と同型。新しい `pub mod`
+/// を facade へ追加した際、doctest 側の `use` 一覧の更新を機械的に強制
+/// する）。
+#[test]
+fn kv_cache_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "KvCacheHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "KvCacheHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
+         追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// [`kv_cache_hold_doctest_globs_all_pub_modules`] が glob import 集合の
+/// 一致のみを固定するのに対し、本テストは doctest ブロックの **glob
+/// 以外の本文**（`__FandheKvHoldMarker`・`__fandhe_kv_hold_probe` モジュール・
+/// `__FandheKvHoldProbe` トレイト定義・`compat::Sequential` への実装・
+/// `__probe` 関数）が固定文言 [`KV_CACHE_HOLD_PROBE_BODY`] と 1 行たりとも
+/// 違わず一致することを固定する（rustdoc の `# ` 隠し行・プローブの削除・
+/// 別名へのシャドーイング等で正のプローブを骨抜きにする改変を機械的に
+/// 拒否する）。
+#[test]
+fn kv_cache_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "KvCacheHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, KV_CACHE_HOLD_PROBE_BODY,
+        "KvCacheHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 KV_CACHE_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（__fandhe_kv_hold_probe モジュール・__FandheKvHoldProbe\
+         トレイト・__probe 関数）の削除・弱体化・隠し行の混入がないか\
+         確認すること。"
+    );
+}
+
+/// [`kv_cache_hold_doctest_probe_body_matches_fixed_contract`] が要求
+/// する固定文言。`crates/facade/src/lib.rs` の `KvCacheHoldDoctestGuard`
+/// doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import
+/// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致
+/// する必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に
+/// 含む）。
+const KV_CACHE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_kv_hold_probe {\n\
+\x20\x20\x20\x20pub struct KvCache;\n\
+\x20\x20\x20\x20pub struct StatefulAttention;\n\
+\x20\x20\x20\x20pub struct __FandheKvHoldMarker;\n\
+\x20\x20\x20\x20pub fn add_stateful_attention() -> __FandheKvHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheKvHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_kv_hold_probe::*;\n\
+\n\
+trait __FandheKvHoldProbe {\n\
+\x20\x20\x20\x20fn add_stateful_attention(&self) -> __FandheKvHoldMarker;\n\
+}\n\
+\n\
+impl __FandheKvHoldProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn add_stateful_attention(&self) -> __FandheKvHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheKvHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe(_: KvCache, _: StatefulAttention, x: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheKvHoldMarker = add_stateful_attention();\n\
+\x20\x20\x20\x20let _: __FandheKvHoldMarker = fandhe_ai::compat::Sequential::add_stateful_attention(x);\n\
+\x20\x20\x20\x20let _: __FandheKvHoldMarker = x.add_stateful_attention();\n\
+}";
+
+/// [`facade_does_not_reexport_or_declare_kv_cache_items`]・その自己テスト・
+/// [`workspace_declares_kv_cache_items_only_in_autodiff_attention`] が共用
+/// する検出本体。facade src 全体（`crates/facade/src/**`）の `pub use` から
+/// [`collect_pub_use_leaves`] で別名にする前の葉を集め `KvCache`／
+/// `StatefulAttention` を検出し（単一行・複数行・ネストした group・別名も
+/// 検出）、`trait`／`struct`／`enum`／`type` 直後の `KvCache`／
+/// `StatefulAttention` 独自宣言、`add_stateful_attention` の `fn` 宣言
+/// （可視性・宣言文脈を問わない。[`count_fn_declarations_by_name`] と同じ
+/// 検出契約）を違反として返す。
+fn scan_kv_cache_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let leaves = collect_pub_use_leaves(path_tokens);
+            for leaf in leaves {
+                if matches!(leaf.as_str(), "KvCache" | "StatefulAttention") {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && matches!(
+                tokens.get(i + 1).map(String::as_str),
+                Some("KvCache") | Some("StatefulAttention")
+            )
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    let count = count_fn_declarations_by_name(&tokens, "add_stateful_attention");
+    if count > 0 {
+        offending.push(format!("`fn add_stateful_attention` 宣言が {count} 件"));
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に、`KvCache`／
+/// `StatefulAttention` を識別子単位で含む `pub use`（複数行・ネストした
+/// group・別名含む）も、facade 独自の `trait`／`struct`／`enum`／`type`
+/// 宣言も、`add_stateful_attention` の `fn` 宣言も存在しないことを固定
+/// する（`KvCacheHoldDoctestGuard` の正のプローブと多層防御を成す最内層
+/// のソース走査ガード。`facade_does_not_reexport_or_declare_bool_ops` と
+/// 同型。既存の 1 行単位走査
+/// `facade_does_not_expose_kv_cache_stateful_attention` の穴〈複数行
+/// `pub use`・facade 独自宣言〉を塞ぐ）。
+#[test]
+fn facade_does_not_reexport_or_declare_kv_cache_items() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_kv_cache_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が KV キャッシュ（#2084 の K-2。`KvCache`／\
+         `StatefulAttention`／`add_stateful_attention`）を再エクスポート、\
+         独自宣言、または同名の fn を宣言している（`docs/kv-cache-design.md` \
+         §6 承認事項 2 が未取得のまま対象外としている設計判断に違反）: {offending:?}"
+    );
+}
+
+/// [`scan_kv_cache_reexports_and_declarations`]（[`facade_does_not_
+/// reexport_or_declare_kv_cache_items`]）の自己テスト（正例・負例の合成
+/// 入力）。単一行・複数行・別名・独自宣言・fn 宣言の各正例と、コメントや
+/// 文字列リテラル中の出現・非公開 `use` の負例を検証する。
+#[test]
+fn facade_does_not_reexport_or_declare_kv_cache_items_detects_each_category() {
+    // 正例: 単一行 pub use。
+    assert!(
+        !scan_kv_cache_reexports_and_declarations("pub use fandhe_ai_autodiff::nn::KvCache;")
+            .is_empty()
+    );
+    // 正例: 複数行 pub use（複数行グループ再エクスポートの穴）。
+    assert!(
+        !scan_kv_cache_reexports_and_declarations(
+            "pub use fandhe_ai_autodiff::nn::{\n    KvCache,\n};"
+        )
+        .is_empty()
+    );
+    // 正例: ネストした group・別名。
+    assert!(
+        !scan_kv_cache_reexports_and_declarations(
+            "pub use fandhe_ai_autodiff::nn::{attention::{StatefulAttention as SA}};"
+        )
+        .is_empty()
+    );
+    // 正例: facade 独自宣言。
+    assert!(!scan_kv_cache_reexports_and_declarations("pub struct KvCache;").is_empty());
+    assert!(
+        !scan_kv_cache_reexports_and_declarations("pub type StatefulAttention = u8;").is_empty()
+    );
+    // 正例: fn 宣言（可視性を問わない）。
+    assert!(
+        !scan_kv_cache_reexports_and_declarations(
+            "impl Sequential { fn add_stateful_attention(&mut self) {} }"
+        )
+        .is_empty()
+    );
+
+    // 負例: 非公開 import。
+    assert!(
+        scan_kv_cache_reexports_and_declarations("use fandhe_ai_autodiff::nn::KvCache;").is_empty()
+    );
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(
+        scan_kv_cache_reexports_and_declarations(
+            "// pub use fandhe_ai_autodiff::nn::KvCache;\nlet s = \"KvCache\";"
+        )
+        .is_empty()
+    );
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、`forward_with_cache`・
+/// `add_stateful_attention` の `fn` 宣言、`KvCache`／`StatefulAttention`
+/// の `struct` 宣言が `crates/autodiff/src/nn/attention.rs` の 1 ファイル
+/// のみ（各 1 件。`add_stateful_attention` は 0 件）に定義されていること
+/// を固定する（`workspace_declares_bool_ops_fn_names_only_in_autodiff_
+/// bool_ops`・`workspace_declares_custom_fn_only_on_tape` と同型の
+/// workspace 全体インベントリ。facade のソース走査・
+/// `KvCacheHoldDoctestGuard` の正のプローブはいずれも「facade から到達
+/// 可能か」しか見ないため、facade の外に同名の宣言が新設され将来 facade
+/// が glob できる形で公開してしまう場合に備え、そもそもの定義元を先に
+/// 塞ぐ多層防御の最内層とする）。
+#[test]
+fn workspace_declares_kv_cache_items_only_in_autodiff_attention() {
+    let crates_dir = workspace_crates_dir();
+    let mut found_fns: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut found_structs: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+
+    let fn_names = ["forward_with_cache", "add_stateful_attention"];
+    let struct_names = ["KvCache", "StatefulAttention"];
+
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for fn_name in fn_names {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    *found_fns.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+            for (i, token) in tokens.iter().enumerate() {
+                if token != "struct" {
+                    continue;
+                }
+                let Some(name) = tokens.get(i + 1).map(String::as_str) else {
+                    continue;
+                };
+                if struct_names.contains(&name) {
+                    *found_structs
+                        .entry(format!("{rel}::struct {name}"))
+                        .or_insert(0) += 1;
+                }
+            }
+        });
+    }
+
+    let expected_fns: std::collections::BTreeMap<String, usize> = [(
+        "autodiff/src/nn/attention.rs::forward_with_cache".to_string(),
+        1usize,
+    )]
+    .into_iter()
+    .collect();
+    let expected_structs: std::collections::BTreeMap<String, usize> = [
+        (
+            "autodiff/src/nn/attention.rs::struct KvCache".to_string(),
+            1usize,
+        ),
+        (
+            "autodiff/src/nn/attention.rs::struct StatefulAttention".to_string(),
+            1usize,
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    assert_eq!(
+        found_fns, expected_fns,
+        "workspace 全体（crates/*/src/）の forward_with_cache／\
+         add_stateful_attention の fn 宣言集合が期待と一致しない\
+         （add_stateful_attention は 0 件が期待値。過不足いずれも\
+         fail-closed に検出する）: {found_fns:?}"
+    );
+    assert_eq!(
+        found_structs, expected_structs,
+        "workspace 全体（crates/*/src/）の KvCache／StatefulAttention の\
+         struct 宣言集合が `crates/autodiff/src/nn/attention.rs`（各 1 件）\
+         のみという期待と一致しない: {found_structs:?}"
     );
 }
 

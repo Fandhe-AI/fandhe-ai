@@ -344,7 +344,11 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   かつ 2026-09-24 にユーザー承認済み。`docs/kv-cache-design.md` §6
   承認事項 1）。**facade 公開（K-2。`add_stateful_attention`／
   `StatefulAttention` 相当）は未承認のため保留し、
-  `crates/facade/tests/api_surface.rs` の否定ガードで固定した
+  `crates/facade/tests/api_surface.rs` の否定ガード（`facade_does_not_
+  expose_kv_cache_stateful_attention`・`KvCacheHoldDoctestGuard` の
+  正のプローブ・`facade_does_not_reexport_or_declare_kv_cache_items`・
+  `workspace_declares_kv_cache_items_only_in_autodiff_attention` の
+  多層構成。`docs/kv-cache-design.md` §10）で固定した
   （Tier 1／Tier 2 表への行追加は引き続き行わない）
 - **`amax`/`max` 縮約 API**（PyTorch `torch.amax` 相当）: 縮約 API 自体は
   Tier 1（1.2 節・#1601）で対象範囲となった。`crates/autodiff/src/grad.rs`
@@ -872,7 +876,10 @@ fit_types_are_reachable_via_facade_only` のビルダー連鎖へ `.to_file(..)`
 現行構造のため）、デバイス常駐化は K-3（段階 0）へ切り分けた。
 K-1 実装着手（本節 §5 経路 2）は 2026-09-24 にユーザー承認済み・
 #2084 で実装済み。facade 公開面拡張（K-2）は引き続き未承認のまま
-（同 doc §6）。
+（同 doc §6）。#2084 では保留固定を多層防御へ強化し、承認依頼用の
+K-2 事前設計（`MultiheadAttention` 自体が facade 未到達である点・
+`compat::Sequential` へのメソッド追加は §9 の「`Module` 非実装」判断
+と矛盾する点を含む）を記録した（同 doc §10）。
 
 **#2132（`nn::Module`／`ModuleList` の facade 公開可否）の設計記録は
 `docs/facade-nn-module-exposure-decision.md` として完了した。** コード
