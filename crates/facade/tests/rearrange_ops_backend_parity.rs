@@ -17,14 +17,19 @@
 //!   判定）で比較する。
 //! - `#[ignore]`: `tape_for(Device::Metal)`（`cfg(target_os =
 //!   "macos")` 限定）／`tape_for(Device::Cuda(0))` で同じ経路を CPU
-//!   tape と比較する。forward（`flip`）に加え、backward の scatter-add
-//!   合算順序が GPU 側で自明でない `repeat`／`tile` backward
-//!   （`fandhe_ai_backend_cpu::parity::assert_parity` 比較。README の
-//!   「期待結果」節と対応）も対象に含む（イシュー #2143 レビュー指摘。
-//!   `cpu_repeat_tile_backward_matches_naive_reference_within_tolerance`
-//!   が CPU 側の同型カバレッジ）。実機（DGX Spark GB10／Apple Silicon）
-//!   への到達手段が本エージェント実行環境にないため未実施のまま
-//!   Mac／GB10 セッションへ申し送る
+//!   tape と比較する。forward は `flip`／`roll`／`repeat`／`tile` の
+//!   全 4 種を bit 完全一致で比較する（PR #2256 codex-review 指摘対応。
+//!   当初は `flip` のみだった）。backward は `flip`／`roll`（各入力
+//!   要素への寄与が常に 1 つのため bit 完全一致。`roll` は同指摘対応で
+//!   追加）に加え、backward の scatter-add 合算順序が GPU 側で自明で
+//!   ない `repeat`／`tile` backward（`fandhe_ai_backend_cpu::parity::
+//!   assert_parity` 比較。README の「期待結果」節と対応）も対象に含む
+//!   （イシュー #2143 レビュー指摘。
+//!   `cpu_repeat_tile_backward_matches_naive_reference_within_tolerance`・
+//!   `cpu_flip_roll_backward_bit_matches_naive_reference` が CPU 側の
+//!   同型カバレッジ）。実機（DGX Spark GB10／Apple Silicon）への到達
+//!   手段が本エージェント実行環境にないため未実施のまま Mac／GB10
+//!   セッションへ申し送る
 //!   （`docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md`）。
 
 use fandhe_ai::Device;
@@ -203,6 +208,10 @@ fn cpu_repeat_tile_backward_matches_naive_reference_within_tolerance() {
 // 申し送る（`docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md`）。
 // ---------------------------------------------------------------------
 
+/// forward（`flip`／`roll`／`repeat`／`tile` の全 4 種）が CPU と Metal
+/// 実機で bit 完全一致することを確認する（イシュー #2143 レビュー指摘・
+/// PR #2256 codex-review 指摘: 従来は `flip` のみで `roll`／`repeat`／
+/// `tile` の実機 forward 経路が未検証だった）。
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Metal 実機が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照"]
@@ -218,8 +227,23 @@ fn metal_forward_matches_cpu_reference() {
         f32_bits(&flip(&x_cpu, &[0, 1]).unwrap().to_tensor()),
         f32_bits(&flip(&x_metal, &[0, 1]).unwrap().to_tensor())
     );
+    assert_eq!(
+        f32_bits(&roll(&x_cpu, &[1, -1], &[0, 1]).unwrap().to_tensor()),
+        f32_bits(&roll(&x_metal, &[1, -1], &[0, 1]).unwrap().to_tensor())
+    );
+    assert_eq!(
+        f32_bits(&repeat(&x_cpu, &[2, 3]).unwrap().to_tensor()),
+        f32_bits(&repeat(&x_metal, &[2, 3]).unwrap().to_tensor())
+    );
+    assert_eq!(
+        f32_bits(&tile(&x_cpu, &[3]).unwrap().to_tensor()),
+        f32_bits(&tile(&x_metal, &[3]).unwrap().to_tensor())
+    );
 }
 
+/// forward（`flip`／`roll`／`repeat`／`tile` の全 4 種）が CPU と CUDA
+/// 実機（DGX Spark GB10）で bit 完全一致することを確認する（イシュー
+/// #2143 レビュー指摘・PR #2256 codex-review 指摘。上記 Metal 版と対称）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照"]
 fn cuda_forward_matches_cpu_reference() {
@@ -234,6 +258,78 @@ fn cuda_forward_matches_cpu_reference() {
         f32_bits(&flip(&x_cpu, &[0, 1]).unwrap().to_tensor()),
         f32_bits(&flip(&x_cuda, &[0, 1]).unwrap().to_tensor())
     );
+    assert_eq!(
+        f32_bits(&roll(&x_cpu, &[1, -1], &[0, 1]).unwrap().to_tensor()),
+        f32_bits(&roll(&x_cuda, &[1, -1], &[0, 1]).unwrap().to_tensor())
+    );
+    assert_eq!(
+        f32_bits(&repeat(&x_cpu, &[2, 3]).unwrap().to_tensor()),
+        f32_bits(&repeat(&x_cuda, &[2, 3]).unwrap().to_tensor())
+    );
+    assert_eq!(
+        f32_bits(&tile(&x_cpu, &[3]).unwrap().to_tensor()),
+        f32_bits(&tile(&x_cuda, &[3]).unwrap().to_tensor())
+    );
+}
+
+/// `roll` backward（scatter-add だが各入力要素への寄与が常に 1 つのため
+/// bit 完全一致する契約。モジュール doc 参照）の CPU／Metal 実機比較
+/// （イシュー #2143 レビュー指摘・PR #2256 codex-review 指摘: `roll`
+/// backward の実機比較テストが欠けていた）。CPU 側の同型カバレッジは
+/// `cpu_flip_roll_backward_bit_matches_naive_reference`。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照"]
+fn metal_roll_backward_matches_cpu_reference() {
+    let data = f32_fixture_2x3();
+    let weight = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+    let metal_tape =
+        fandhe_ai::tape_for(Device::Metal).expect("実機が利用可能な前提のテストのため成功するはず");
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let w_cpu = cpu_tape.make_var(&weight);
+    let y_cpu = roll(&x_cpu, &[1, -1], &[0, 1]).unwrap();
+    let loss_cpu = y_cpu.mul(&w_cpu).unwrap().sum(None).unwrap();
+    let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+    let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap().clone();
+
+    let x_metal = metal_tape.make_var(&data);
+    let w_metal = metal_tape.make_var(&weight);
+    let y_metal = roll(&x_metal, &[1, -1], &[0, 1]).unwrap();
+    let loss_metal = y_metal.mul(&w_metal).unwrap().sum(None).unwrap();
+    let grads_metal = metal_tape.backward(&loss_metal).unwrap();
+    let dx_metal = grads_metal.get(&x_metal).unwrap().unwrap().clone();
+
+    assert_eq!(f32_bits(&dx_cpu), f32_bits(&dx_metal));
+}
+
+/// `roll` backward の CPU／CUDA 実機（DGX Spark GB10）比較。上記 Metal
+/// 版と対称（イシュー #2143 レビュー指摘・PR #2256 codex-review 指摘）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/shape-repeat-tile-flip-roll-2143/README.md 参照"]
+fn cuda_roll_backward_matches_cpu_reference() {
+    let data = f32_fixture_2x3();
+    let weight = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0))
+        .expect("実機が利用可能な前提のテストのため成功するはず");
+
+    let cpu_tape = fandhe_ai::tape();
+    let x_cpu = cpu_tape.make_var(&data);
+    let w_cpu = cpu_tape.make_var(&weight);
+    let y_cpu = roll(&x_cpu, &[1, -1], &[0, 1]).unwrap();
+    let loss_cpu = y_cpu.mul(&w_cpu).unwrap().sum(None).unwrap();
+    let grads_cpu = cpu_tape.backward(&loss_cpu).unwrap();
+    let dx_cpu = grads_cpu.get(&x_cpu).unwrap().unwrap().clone();
+
+    let x_cuda = cuda_tape.make_var(&data);
+    let w_cuda = cuda_tape.make_var(&weight);
+    let y_cuda = roll(&x_cuda, &[1, -1], &[0, 1]).unwrap();
+    let loss_cuda = y_cuda.mul(&w_cuda).unwrap().sum(None).unwrap();
+    let grads_cuda = cuda_tape.backward(&loss_cuda).unwrap();
+    let dx_cuda = grads_cuda.get(&x_cuda).unwrap().unwrap().clone();
+
+    assert_eq!(f32_bits(&dx_cpu), f32_bits(&dx_cuda));
 }
 
 /// `repeat`／`tile` backward（scatter-add）の CPU／実機比較。README
